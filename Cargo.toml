@@ -1,0 +1,112 @@
+[package]
+name = "riir-infer-core"
+version = "0.1.1"
+edition = "2024"
+license = "MIT"
+# Not published yet — the public opening is owner-gated and rides the
+# fence-gate checklist first (fresh history, sanitized docs, import fence).
+publish = false
+
+# riir-infer-core — the LLM inference substrate: GGUF/safetensors weight
+# loading, the quantization zoo, architecture definitions (gemma / llama /
+# ternary / wall layers, deltanet, transformer, rope), and CPU reference
+# paths. NO cognition, NO training, NO game/chain semantics — upstream of
+# all of them. Consumed by inference engines via path dep; sibling crates
+# resolve at ../katgpt-rs.
+#
+# Feature table mirrors the engine features that gate the code; consumers
+# forward each of their copies: `X = [..., "riir-infer-core/X"]`.
+
+[dependencies]
+katgpt-core = { path = "../katgpt-rs/crates/katgpt-core" }
+# default-features = false: mirrors riir-engine (kog_cpu_fusion off).
+katgpt-transformer = { path = "../katgpt-rs/crates/katgpt-transformer", default-features = false }
+# katgpt-speculative: shared DDTree substrate (dflash.rs et al.).
+katgpt-speculative = { path = "../katgpt-rs/crates/katgpt-speculative" }
+# katgpt-forward: canonical clustered LM head + standard head (transformer/mtp.rs).
+katgpt-forward = { path = "../katgpt-rs/crates/katgpt-forward" }
+# katgpt-quant: canonical TurboQuant — the `crate::turboquant` re-export
+# consumed by the moved model layer (optional, pulled by `turboquant`).
+katgpt-quant = { path = "../katgpt-rs/crates/katgpt-quant", optional = true }
+# katgpt-attn: flashmemory_gqa only (optional; engine keeps its own copy for
+# latent_functor/static_cal_bridge.rs which does NOT move).
+katgpt-attn = { path = "../katgpt-rs/crates/katgpt-attn", optional = true }
+
+half = "2"
+rayon = "1.10"
+anyhow = "1"
+memmap2 = "0.9"
+fastrand = "2"
+bytemuck = { version = "1", features = ["derive"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+thiserror = "2"
+log = "0.4"
+blake3 = "1"
+
+[features]
+# Pure-local gates (no dep forwards).
+rotary_value_embedding = []
+hla = []
+raven = []
+gemma_lora = []
+lora_still = []
+
+# katgpt-core forwards.
+sparse_mlp = ["katgpt-core/sparse_mlp"]
+domain_latent = ["katgpt-core/domain_latent"]
+dllm = ["katgpt-core/dllm"]
+simd_lut_q4k = ["katgpt-core/simd_lut_dequant"]
+causal_validation = ["katgpt-core/adaptive_causal_calibration"]
+deltanet_inference = ["katgpt-core/deltanet_inference"]
+gemma4_inference = ["katgpt-core/gemma4_inference"]
+q2_0_ternary_bridge = ["katgpt-core/ternary_group_scale"]
+ternary_inference = ["katgpt-core/ternary_inference", "q2_0_ternary_bridge"]
+gdn_tree_verify = ["deltanet_inference", "katgpt-core/gdn_tree_verify"]
+hydra_budget = ["katgpt-core/hydra_budget"]
+rim_slots = ["katgpt-core/rim_slots"]
+collapse_aware_thinking = ["katgpt-core/collapse_aware_thinking"]
+belief_drafter = ["katgpt-core/belief_drafter"]
+
+# katgpt-transformer forwards.
+gated_mlp = ["katgpt-transformer/gated_mlp"]
+delta_routing = ["katgpt-transformer/delta_routing"]
+wall_attention = ["katgpt-core/wall_attention", "katgpt-transformer/wall_attention"]
+
+# katgpt-attn / katgpt-quant / katgpt-speculative forwards.
+flashmemory_gqa = ["dep:katgpt-attn", "katgpt-attn/flashmemory_sparse"]
+flashmemory_trained_indexer = ["flashmemory_gqa", "katgpt-attn/trained_indexer"]
+turboquant = ["dep:katgpt-quant", "katgpt-quant/turboquant"]
+weaver_runtime = ["katgpt-speculative/weaver_runtime"]
+
+# Inter-feature composition (mirrors engine; hla_role_transport stays
+# engine-local — the moved gated arms reference no engine types, verified
+# by the T1.4 back-edge check).
+deltanet_ternary_inference = ["deltanet_inference", "q2_0_ternary_bridge"]
+# Bonsai 2 Hadamard-folded ternary runtime (Issue 980 / Plan 600 Phase B).
+# Parses prism.hadamard.* + applies the activation-side rotation. Default-OFF
+# until the GOAT gate passes (G1 token-identity vs the fork, G2 overhead
+# budget, G3 flag-off byte-identity on the old file, G4 alloc-free).
+bonsai2_hadamard = ["deltanet_ternary_inference"]
+forward_profiling = ["deltanet_ternary_inference"]
+gemma4_lora = ["gemma4_inference"]
+hla_role_aware = ["hla"]
+set_diffusion = ["dllm"]
+
+# Issue 879 T1 — the GDN quant-certification harness needs BOTH the deltanet
+# CPU reference (deltanet_inference) and the Q2_0 repack/container
+# (q2_0_ternary_bridge → ternary_group_scale). The file carries a matching
+# #![cfg] (green-zero protection); this row is the reader protection
+# (katgpt-rs .issues/713): a --features selection without the union SKIPS
+# the target loudly instead of compiling it to an empty binary.
+[[test]]
+name = "issue879_gdn_quant_certification"
+required-features = ["deltanet_ternary_inference"]
+
+# Issue 980 / Plan 600 Phase B — synthetic Bonsai-2 loader + rotation tests.
+# #![cfg(feature = "bonsai2_hadamard")] protects the count; this row protects
+# the reader (a --features selection without the union SKIPS loudly instead
+# of printing a green zero).
+[[test]]
+name = "bonsai2_rotation_load"
+required-features = ["bonsai2_hadamard"]
