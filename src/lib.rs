@@ -44,6 +44,14 @@ pub mod quant;
 /// WALL attention (leaf; depends only on `simd`).
 pub mod wall;
 
+/// Wall Attention CONFIGURATION (Issue 019 Phase C.1 de-fork; re-homed
+/// from riir-engine by Plan 610 S5 — the gemma-cluster unlock). A pure
+/// re-export of the canonical `katgpt_types::WallConfig` behind the
+/// `wall_attention` feature; the engine re-exports this module at its
+/// historical `riir_engine::wall_config` path, so every consumer path
+/// (riir-gpu's wall_decode/wall_mla, katgpt config plumbing) is unchanged.
+pub mod wall_config;
+
 /// safetensors weight loading (leaf; depends on `gemma_layer` + `types`).
 pub mod safetensors_loader;
 

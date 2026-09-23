@@ -56,7 +56,7 @@ or checkpoints (this repo ships LOADERS, not weights).
 | katgpt-transformer / katgpt-speculative / katgpt-forward | `../katgpt-rs/crates/*` | non-optional (public upstream; transformer `default-features = false`) |
 | katgpt-quant / katgpt-attn | `../katgpt-rs/crates/*` | optional (`turboquant` / `flashmemory_gqa`) |
 | crates.io: half, rayon, anyhow, memmap2, fastrand, bytemuck, serde, serde_json, thiserror, log, blake3 | crates.io | as pinned in `Cargo.toml` |
-| riir-infer-gpu deps: wgpu, cubecl (`=0.11.0-pre.2`), bytemuck, pollster, rayon, half, papaya, blake3, serde_json (S4b: dflash2 header parsing), metal (macOS, opt-in), cudarc (non-macOS, opt-in) | crates.io | GPU crate only (`crates/riir-infer-gpu/Cargo.toml`); wgpu-msl shader backend on macOS, wgpu-spirv elsewhere; zero `riir-*` deps (fence-gated) |
+| riir-infer-gpu deps: wgpu, cubecl (`=0.11.0-pre.2`), bytemuck, pollster, rayon, half, papaya, blake3, serde_json (S4b: dflash2 header parsing), log + fastrand (S5: gemma2 KV-cache alloc reports + the d2f sampler RNG), metal (macOS, opt-in), cudarc (non-macOS, opt-in) | crates.io | GPU crate only (`crates/riir-infer-gpu/Cargo.toml`); wgpu-msl shader backend on macOS, wgpu-spirv elsewhere; zero `riir-*` deps (fence-gated) |
 | vendored crates.io forks: `vendor/cubecl-runtime-0.11.0-pre.2` (drop-queue policy fix — upstream tracel-ai/cubecl#1359), `vendor/wgpu-hal-30.0.0` (`total_video_memory_bytes()`/`raw_handle()` adapter accessors) | in-repo `vendor/` | `[patch.crates-io]` in the workspace root; byte-identical copies; remove when upstream lands |
 
 Explicitly NOT allowed from any feature combination: any `riir-*` crate

@@ -805,6 +805,148 @@ extern "C" __global__ void gemv_ternary_dp4a_multi_u4(
     }
 }
 
+
+// Plan 611 (Issue 1000 — the owner-greenlit lossy lane) — the SPLIT rung for
+// the underfilled 640-block down/out class: TWO warps per row, each walking
+// HALF the ablock range, partials combined through shared memory in a FIXED
+// order (lower half + upper half). Bench 941's four-way exhaustion left this
+// as the one untried direction: R2 REMOVED warps (-4.4%), PF/U4 raised
+// per-lane memory-level parallelism at constant warp count (both no-ops) —
+// the class is short on RESIDENT warps (5 blocks/SM = 40 of 64), and this
+// rung demands 2x warp slots (the 5,120-row class goes 640 -> 1280 blocks,
+// packing wave 1 to 8 blocks/SM where occupancy allows).
+//
+// LOSSY CLASS: the accumulation order changes (two half-range butterflies
+// summed pairwise instead of one full-range butterfly) — deterministic at
+// every run, but NOT bit-identical to the one-row kernels. The Issue-750-T3
+// lossy-surface gates (per-family retention walk + a new pin class) govern
+// any promotion; `RIIR_GEMV_SPLIT` keeps it default-off until then.
+extern "C" __global__ void gemv_ternary_dp4a_multi_split2(
+    const short* codes0,  const unsigned short* wscale0,  float* out0, int m0,
+    const short* codes1,  const unsigned short* wscale1,  float* out1, int m1,
+    const short* codes2,  const unsigned short* wscale2,  float* out2, int m2,
+    const short* codes3,  const unsigned short* wscale3,  float* out3, int m3,
+    const signed char* act,
+    const float* ascale,
+    int int16_per_row,
+    int groups_per_row,
+    int ablock,
+    int ablocks,
+    int accumulate,
+    int total_rows)
+{
+    // Two warps per row: the warp-PAIR index is the row.
+    const int row  = blockIdx.x * (blockDim.x / 64) + (threadIdx.x / 64);
+    const int lane = threadIdx.x % 32;
+    const int wid  = threadIdx.x >> 5;          // warp id within the block
+    const int w    = wid & 1;                   // warp-in-pair (0: lower half)
+    const bool active = row < total_rows;
+
+    // Segment select (same chain as the multi kernel; `r` ends SEGMENT-LOCAL).
+    // Inactive pairs keep the segment-0 pointers and never dereference (the
+    // walk AND the write are guarded by `active`) — NO early return: the
+    // block-wide __syncthreads() below must be reached by every thread.
+    const short* codes = codes0;
+    const unsigned short* wscale = wscale0;
+    float* out = out0;
+    int r = row;
+    if (active) {
+        if (r >= m0) {
+            if ((r -= m0) >= m1) {
+                if ((r -= m1) >= m2) {
+                    r -= m2;
+                    codes = codes3; wscale = wscale3; out = out3;
+                } else {
+                    codes = codes2; wscale = wscale2; out = out2;
+                }
+            } else {
+                codes = codes1; wscale = wscale1; out = out1;
+            }
+        }
+    } else {
+        r = 0;
+    }
+
+    const int half = (ablocks + 1) >> 1;
+    const int blk0 = w * half;
+    const int blk1 = (w == 0) ? half : ablocks;
+
+    float acc = 0.0f;
+    if (active) {
+        const short* row_codes = codes + (long)r * int16_per_row;
+        const unsigned short* row_scale = wscale + (long)r * groups_per_row;
+        if (ablock == 16) {
+            // Range-clamped copy of gemv_ternary_row's fast path — the
+            // per-block math is VERBATIM; only the loop bounds change
+            // ([blk0, blk1) instead of [0, ablocks)).
+            for (int blk = blk0 + lane; blk < blk1; blk += 32) {
+                const int elem0 = blk << 4;
+                const unsigned int qpair = *(const unsigned int*)(row_codes + (elem0 >> 3));
+                const int4 uv = *(const int4*)(act + elem0);
+                const int q0 = (int)(qpair & 0xffffu);
+                const int q1 = (int)(qpair >> 16);
+                int sumi = 0;
+                {
+                    const int qe = __byte_perm(0x020100FF, 0x020100FF, q0 >> 0);
+                    const int qo = __byte_perm(0x020100FF, 0x020100FF, q0 >> 2);
+                    const int qx = __byte_perm(qe, qo, 0x5140);
+                    const int qy = __byte_perm(qe, qo, 0x7362);
+                    sumi = __dp4a(uv.x, qx, sumi);
+                    sumi = __dp4a(uv.y, qy, sumi);
+                }
+                {
+                    const int qe = __byte_perm(0x020100FF, 0x020100FF, q1 >> 0);
+                    const int qo = __byte_perm(0x020100FF, 0x020100FF, q1 >> 2);
+                    const int qx = __byte_perm(qe, qo, 0x5140);
+                    const int qy = __byte_perm(qe, qo, 0x7362);
+                    sumi = __dp4a(uv.z, qx, sumi);
+                    sumi = __dp4a(uv.w, qy, sumi);
+                }
+                const float ws = f16_bits_to_f32(row_scale[elem0 >> 7]);
+                acc += (float)sumi * ws * ascale[blk];
+            }
+        } else {
+            // Generic path (ablock != 16 — no production call site): the
+            // original j-loop form, range-clamped.
+            for (int blk = blk0 + lane; blk < blk1; blk += 32) {
+                const int elem0 = blk * ablock;
+                const short* q4 = row_codes + (elem0 >> 3);
+                const int* u8   = (const int*)(act + elem0);
+                int sumi = 0;
+                const int inner = ablock >> 3;
+                #pragma unroll
+                for (int j = 0; j < 8; ++j) {
+                    if (j >= inner) break;
+                    const int q = q4[j];
+                    const int u = u8[j * 2 + 0];
+                    const int v = u8[j * 2 + 1];
+                    const int qe = __byte_perm(0x020100FF, 0x020100FF, q >> 0);
+                    const int qo = __byte_perm(0x020100FF, 0x020100FF, q >> 2);
+                    const int qx = __byte_perm(qe, qo, 0x5140);
+                    const int qy = __byte_perm(qe, qo, 0x7362);
+                    sumi = __dp4a(u, qx, sumi);
+                    sumi = __dp4a(v, qy, sumi);
+                }
+                const float ws = f16_bits_to_f32(row_scale[elem0 >> 7]);
+                acc += (float)sumi * ws * ascale[blk];
+            }
+        }
+    }
+
+    // Same warp reduction as every other variant.
+    #pragma unroll
+    for (int off = 16; off > 0; off >>= 1) acc += __shfl_down_sync(0xffffffffu, acc, off);
+
+    __shared__ float partials[16];   // one slot per warp (8 at 256 threads)
+    if (lane == 0) partials[wid] = acc;
+    __syncthreads();
+    if (active && w == 0 && lane == 0) {
+        // FIXED combine order: lower-half partial + upper-half partial.
+        const float total = partials[wid] + partials[wid + 1];
+        if (accumulate) out[r] += total;
+        else            out[r]  = total;
+    }
+}
 // Issue 616 T4 — fused quantize+dp4a kernel with cooperative shared-memory
 // quantization. Takes f32 activations directly; all 256 threads in the block
 // cooperate to quantize the full N-element activation vector into shared
@@ -2450,6 +2592,263 @@ mod tests {
                     acc_max == 0.0,
                     "r2 kernel diverges from r1 (accumulate): segs={segs:?}, max_diff={acc_max:.4e}"
                 );
+            }
+        }
+    }
+
+    /// Plan 611 (Issue 1000 — the owner-greenlit lossy lane) — the split2
+    /// kernel is LOSSY-CLASS (accumulation reorder): the gates are (a)
+    /// run-twice DETERMINISM (exact), and (b) a reorder-class bound vs the
+    /// one-row persistent kernel (max_rel small, not zero — unlike r2/pf/u4
+    /// whose gate was bit-identity). Shapes: both real split-target widths
+    /// (n=17,408 FFN down; n=5,120 GDN out_proj), the straddle mix, and the
+    /// accumulate epilogue.
+    #[test]
+    fn test_multi_gemv_split2_reorder_class_and_determinism() {
+        let Some(_) = cuda_or_skip() else {
+            eprintln!("[skip] no CUDA device");
+            return;
+        };
+
+        let mut handler = TernaryGemmCudaRaw::new().expect("CUDA init");
+        let r1_kernel = handler
+            ._module
+            .load_function("gemv_ternary_dp4a_multi_persistent")
+            .expect("load persistent kernel");
+        let split2_kernel = handler
+            ._module
+            .load_function("gemv_ternary_dp4a_multi_split2")
+            .expect("load split2 kernel");
+
+        // (n, mixes) — n=17408 is the FFN down width, n=5120 the out_proj
+        // width (both split targets); at n=5120 the straddle mix too.
+        let cases: &[(usize, &[&[usize]])] = &[
+            (17_408, &[&[5_120]]),
+            (5_120, &[&[5_120], &[2_560, 2_560], &[1_024, 512, 48, 47]]),
+        ];
+
+        for &(n, mixes) in cases {
+            let mut state: u32 = 0x6D5C0DE;
+            let x: Vec<f32> = (0..n)
+                .map(|_| {
+                    state = state.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+                    ((state >> 16) as f32 / 65535.0 - 0.5) * 2.0
+                })
+                .collect();
+            let ablocks = n.div_ceil(ACTIVATION_BLOCK);
+            let mut act_i8 = vec![0i8; n];
+            let mut ascale = vec![0f32; ablocks];
+            for (blk, ascale_val) in ascale.iter_mut().enumerate() {
+                let s = blk * ACTIVATION_BLOCK;
+                let len = ACTIVATION_BLOCK.min(n - s);
+                let mut absmax = 0f32;
+                for i in 0..len {
+                    absmax = absmax.max(x[s + i].abs());
+                }
+                let d = if absmax > 0.0 { absmax / 127.0 } else { 1.0 };
+                *ascale_val = d;
+                for i in 0..len {
+                    let q = (x[s + i] / d).round().clamp(-128.0, 127.0);
+                    act_i8[s + i] = q as i8;
+                }
+            }
+            let act_dev = handler.stream.clone_htod(&act_i8).expect("upload act");
+            let ascale_dev = handler.stream.clone_htod(&ascale).expect("upload ascale");
+            let int16_per_row = (n / 8) as i32;
+            let groups_per_row = n.div_ceil(WEIGHT_GROUP) as i32;
+            let ablock_i32 = ACTIVATION_BLOCK as i32;
+            let ablocks_i32 = ablocks as i32;
+
+            fn launch(
+                handler: &TernaryGemmCudaRaw,
+                kernel: &cudarc::driver::safe::CudaFunction,
+                wbs: &[&WeightBuffers],
+                m_i32: &[i32; 4],
+                outs: &[cudarc::driver::safe::CudaSlice<f32>; 4],
+                act_dev: &cudarc::driver::safe::CudaSlice<i8>,
+                ascale_dev: &cudarc::driver::safe::CudaSlice<f32>,
+                int16_per_row: i32,
+                groups_per_row: i32,
+                ablock_i32: i32,
+                ablocks_i32: i32,
+                accumulate: i32,
+                total_rows: i32,
+                split2: bool,
+            ) {
+                let grid_x = if split2 {
+                    (total_rows.max(1) as u32).div_ceil(WG_THREADS / 64).max(1)
+                } else {
+                    (total_rows.max(1) as u32).div_ceil(WG_THREADS / 32).max(1)
+                };
+                let cfg = LaunchConfig {
+                    grid_dim: (grid_x, 1, 1),
+                    block_dim: (WG_THREADS, 1, 1),
+                    shared_mem_bytes: 0,
+                };
+                unsafe {
+                    handler
+                        .stream
+                        .launch_builder(kernel)
+                        .arg(&wbs[0].codes_dev)
+                        .arg(&wbs[0].wscale_dev)
+                        .arg(&outs[0])
+                        .arg(&m_i32[0])
+                        .arg(&wbs[1].codes_dev)
+                        .arg(&wbs[1].wscale_dev)
+                        .arg(&outs[1])
+                        .arg(&m_i32[1])
+                        .arg(&wbs[2].codes_dev)
+                        .arg(&wbs[2].wscale_dev)
+                        .arg(&outs[2])
+                        .arg(&m_i32[2])
+                        .arg(&wbs[3].codes_dev)
+                        .arg(&wbs[3].wscale_dev)
+                        .arg(&outs[3])
+                        .arg(&m_i32[3])
+                        .arg(act_dev)
+                        .arg(ascale_dev)
+                        .arg(&int16_per_row)
+                        .arg(&groups_per_row)
+                        .arg(&ablock_i32)
+                        .arg(&ablocks_i32)
+                        .arg(&accumulate)
+                        .arg(&total_rows)
+                        .launch(cfg)
+                        .expect("launch");
+                }
+            }
+
+            for &seg_m in mixes {
+                let mut segs: Vec<usize> = seg_m.to_vec();
+                while segs.len() < 4 {
+                    segs.push(0);
+                }
+                let segs: [usize; 4] = segs.try_into().unwrap();
+                let total_m: usize = segs.iter().sum();
+                let base_idx = handler.weights.len();
+                for &m in &segs {
+                    let w = make_test_weights(m, n);
+                    let _ = handler.upload_weights(&w).expect("upload");
+                }
+                let wbs: Vec<_> = (0..4).map(|i| &handler.weights[base_idx + i]).collect();
+                let m_i32: [i32; 4] = segs.map(|m| m as i32);
+                let total_rows = total_m as i32;
+
+                // ── r1 reference + split2 run-twice (determinism) ──
+                let mk_outs = |handler: &TernaryGemmCudaRaw| -> Vec<_> {
+                    segs.iter()
+                        .map(|&m| handler.stream.alloc_zeros::<f32>(m).expect("alloc"))
+                        .collect()
+                };
+                let outs_r1 = mk_outs(&handler);
+                let outs_s2_a = mk_outs(&handler);
+                let outs_s2_b = mk_outs(&handler);
+                launch(
+                    &handler, &r1_kernel, &wbs, &m_i32,
+                    outs_r1.as_slice().try_into().unwrap(),
+                    &act_dev, &ascale_dev, int16_per_row, groups_per_row,
+                    ablock_i32, ablocks_i32, 0, total_rows, false,
+                );
+                launch(
+                    &handler, &split2_kernel, &wbs, &m_i32,
+                    outs_s2_a.as_slice().try_into().unwrap(),
+                    &act_dev, &ascale_dev, int16_per_row, groups_per_row,
+                    ablock_i32, ablocks_i32, 0, total_rows, true,
+                );
+                launch(
+                    &handler, &split2_kernel, &wbs, &m_i32,
+                    outs_s2_b.as_slice().try_into().unwrap(),
+                    &act_dev, &ascale_dev, int16_per_row, groups_per_row,
+                    ablock_i32, ablocks_i32, 0, total_rows, true,
+                );
+                handler.stream.synchronize().expect("sync");
+
+                let dl = |outs: &Vec<_>, seg: usize| -> Vec<f32> {
+                    let mut v = vec![0f32; segs[seg]];
+                    handler.stream.memcpy_dtoh(&outs[seg], &mut v).expect("dtoh");
+                    v
+                };
+                let mut max_rel = 0.0f64;
+                let mut max_diff = 0.0f32;
+                for seg in 0..4 {
+                    let a = dl(&outs_r1, seg);
+                    let b = dl(&outs_s2_a, seg);
+                    let b2 = dl(&outs_s2_b, seg);
+                    for i in 0..segs[seg] {
+                        assert!(
+                            b[i].to_bits() == b2[i].to_bits(),
+                            "split2 NOT deterministic: segs={segs:?} n={n} seg={seg} row={i}"
+                        );
+                        let diff = (a[i] - b[i]).abs();
+                        max_diff = max_diff.max(diff);
+                        let denom = a[i].abs().max(1.0);
+                        max_rel = max_rel.max((diff / denom) as f64);
+                    }
+                }
+                eprintln!(
+                    "[split2_vs_r1] segs={segs:?} n={n} store: max_diff={max_diff:.4e} max_rel={max_rel:.3e}"
+                );
+                assert!(
+                    max_rel < 1e-4,
+                    "split2 exceeds the reorder-class bound vs r1: segs={segs:?} n={n} max_rel={max_rel:.3e}"
+                );
+
+                // ── Accumulate mode (single-segment, the down/out epilogue) ──
+                // (Merge fixup: the original WIP built `Vec<&CudaSlice>` where
+                // `launch` takes `&[CudaSlice; 4]` — the owned-Vec shape the
+                // r1/split2 section above already uses; slots 1-3 carry m=0
+                // empties, matching m_i32.)
+                if seg_m.len() == 1 {
+                    let mk_prefill_vec = |handler: &TernaryGemmCudaRaw, m: usize| -> Vec<_> {
+                        (0..4)
+                            .map(|i| {
+                                if i == 0 {
+                                    let v: Vec<f32> =
+                                        (0..m).map(|j| ((j % 17) as f32 - 8.0) * 0.5).collect();
+                                    handler.stream.clone_htod(&v).expect("prefill")
+                                } else {
+                                    handler.stream.alloc_zeros::<f32>(0).expect("empty")
+                                }
+                            })
+                            .collect()
+                    };
+                    let acc_r1 = mk_prefill_vec(&handler, segs[0]);
+                    let acc_s2 = mk_prefill_vec(&handler, segs[0]);
+                    launch(
+                        &handler, &r1_kernel, &wbs, &m_i32,
+                        acc_r1.as_slice().try_into().unwrap(),
+                        &act_dev, &ascale_dev, int16_per_row, groups_per_row,
+                        ablock_i32, ablocks_i32, 1, total_rows, false,
+                    );
+                    launch(
+                        &handler, &split2_kernel, &wbs, &m_i32,
+                        acc_s2.as_slice().try_into().unwrap(),
+                        &act_dev, &ascale_dev, int16_per_row, groups_per_row,
+                        ablock_i32, ablocks_i32, 1, total_rows, true,
+                    );
+                    handler.stream.synchronize().expect("sync");
+                    let a: Vec<f32> = {
+                        let mut v = vec![0f32; segs[0]];
+                        handler.stream.memcpy_dtoh(&acc_r1[0], &mut v).expect("dtoh");
+                        v
+                    };
+                    let b: Vec<f32> = {
+                        let mut v = vec![0f32; segs[0]];
+                        handler.stream.memcpy_dtoh(&acc_s2[0], &mut v).expect("dtoh");
+                        v
+                    };
+                    let mut acc_rel = 0.0f64;
+                    for i in 0..segs[0] {
+                        let diff = (a[i] - b[i]).abs();
+                        let denom = a[i].abs().max(1.0);
+                        acc_rel = acc_rel.max((diff / denom) as f64);
+                    }
+                    eprintln!("[split2_vs_r1] segs={segs:?} n={n} accumulate: max_rel={acc_rel:.3e}");
+                    assert!(
+                        acc_rel < 1e-4,
+                        "split2 accumulate exceeds reorder bound: n={n} max_rel={acc_rel:.3e}"
+                    );
+                }
             }
         }
     }

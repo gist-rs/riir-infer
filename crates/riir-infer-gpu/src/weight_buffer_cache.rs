@@ -209,7 +209,10 @@ impl WeightBufferSlot {
     }
 
     /// Get the raw wgpu buffer + byte offset (for compute kernel dispatch).
-    /// Returns None if `extract_buffer` hasn't been called yet.
+    /// Returns None if `extract_buffer` hasn't been called yet, and forever
+    /// under the cuda_backend posture (non-macOS) where extraction is a
+    /// documented no-op — there is no wgpu buffer behind a cudarc handle
+    /// (Issues 949/999).
     #[inline]
     pub fn buffer_ref(&self) -> Option<(&wgpu::Buffer, u64)> {
         self.buffer.as_ref().map(|b| (b, self.offset))
@@ -511,8 +514,21 @@ mod tests {
         let result1 = f32::from_bytes(&bytes);
         assert_eq!(result1, &data1);
 
-        // Extract the buffer (enables fast path).
+        // Extract the buffer (enables fast path). Under the cuda_backend
+        // posture (non-macOS, Issue 949) this is a documented no-op — the
+        // CubeCL resource is CUDA-shaped, there is no wgpu::Buffer behind
+        // the handle — so the fast path stays off and the write below goes
+        // through the create_from_slice slow path. The write + read-back
+        // contract runs on BOTH postures (Issue 999: this assert used to
+        // fail the whole test on the CUDA box before the contract could
+        // execute).
         slot.extract_buffer(&client).unwrap();
+        #[cfg(all(feature = "cuda_backend", not(target_os = "macos")))]
+        assert!(
+            slot.buffer.is_none(),
+            "CUDA posture: extract_buffer is a no-op — the fast path must stay disabled"
+        );
+        #[cfg(any(not(feature = "cuda_backend"), target_os = "macos"))]
         assert!(slot.buffer.is_some());
 
         // Write new data in-place.

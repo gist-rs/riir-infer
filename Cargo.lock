@@ -3022,6 +3022,7 @@ dependencies = [
  "fastrand",
  "half",
  "katgpt-core",
+ "log",
  "metal",
  "papaya",
  "pollster",

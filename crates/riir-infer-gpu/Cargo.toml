@@ -45,6 +45,11 @@ pollster = "0.4"
 rayon = "1.10"
 # DFlash2 checkpoint header parsing (qwen38_dflash2, always-on like its home).
 serde_json = "1"
+# Logging facade (gemma2 KV-cache allocation size reports; the facade is
+# zero-cost without a subscriber — same crate the root package uses).
+log = "0.4"
+# Diffusion sampler RNG (gemma2_d2f lane; version matches the engine gpu crate).
+fastrand = { version = "2", optional = true }
 
 [target.'cfg(target_os = "macos")'.dependencies]
 cubecl = { version = "=0.11.0-pre.2", features = ["wgpu-msl"], optional = true }
@@ -93,10 +98,11 @@ metal_tensor_gemm = ["dep:metal"]
 # vLLM swap_ab trick). Mirrors the engine gpu crate's feature of the
 # same name; implies the CubeCL runtime like it does.
 swap_ab_gemm = ["cubecl_runtime"]
-# Gemma 2 D2F block-causal decode self-conditioning support. Mirrors
-# the engine gpu crate's feature (which also carries the decode-side
-# deps that stay engine-side).
-gemma2_d2f = ["cubecl_runtime"]
+# Gemma 2 D2F block-causal decode (the whole module since S5: mod+tests,
+# not just the SC file). Mirrors the engine gpu crate's feature minus its
+# dllm forward leg chain: needs fastrand (the sampler RNG) + infer-core's
+# dllm-gated Config fields (AttentionMode/NoiseSchedule) directly.
+gemma2_d2f = ["cubecl_runtime", "dep:fastrand", "riir-infer-core/dllm"]
 # Compile the blake3-keyed params-handle cache in (default-off
 # pass-through without it). Mirrors the engine gpu crate's feature.
 params_handle_cache = ["cubecl_runtime"]
@@ -144,12 +150,39 @@ deltanet_recurrence_parallel = []
 # one). Gates hybrid_dispatch's internals.
 deltanet_inference = ["cubecl_runtime", "riir-infer-core/deltanet_inference"]
 
+# ---------------------------------------------------------------------------
+# P3 slice 5 mirrors (the gemma kernel cluster). Each cfg key found in the
+# moved code gets a mirror here + a forward leg on the engine gpu crate's
+# own feature (so enabling it there lights the moved code through the
+# re-exports — the S2 pattern).
+# ---------------------------------------------------------------------------
+# Gemma LoRA inference paths in the gemma2 dispatch (engine-side feature
+# chain swapped for the direct infer-core one).
+gemma_lora = ["riir-infer-core/gemma_lora"]
+# Wall Attention (the gemma2 decode wall gate + WallConfig consumption;
+# WallConfig materializes through infer-core's katgpt-core forward).
+wall_attention = ["riir-infer-core/wall_attention"]
+# Delta-routing Config fields the gemma2 dispatch reads.
+delta_routing = ["riir-infer-core/delta_routing"]
+# Q8_KV inline-dequant KV cache arm (pure gpu-side).
+q8_kv_cache = ["cubecl_runtime"]
+# Gamma-folded decode fusion arm (pure gpu-side).
+gpu_decode_fusion = []
+# CPU lm_head fallback arm (pure gpu-side).
+lm_head_cpu = []
+# GPU-resident training-forward dispatch helpers on the gemma dispatch
+# (generic kernel launches; consumed by the engine-side test suite — the
+# kv_f16_gates "test-only home" precedent for cross-crate test surface).
+gpu_training_resident = ["cubecl_runtime", "gemma_lora"]
+# Gemma4 stack (engine-side gemma4_inference chain swapped for the direct
+# infer-core one).
+gemma4_gpu = ["cubecl_runtime", "riir-infer-core/gemma4_inference"]
+
 # The single-GEMM isolation test is whole-file #![cfg]-gated (macOS + the
 # metal tensor-GEMM stack) and compiles to an empty binary elsewhere; this
 # row is the reader protection (a --features selection without the union
 # SKIPS the target loudly instead of printing a green zero). The
-# target_os half of the gate cannot be expressed here — cfg on target_os
-# is not a required-features concept.
+# target_os half of the gate cannot be expressed here.
 [[test]]
 name = "bench_663_t5_single_gemm_isolation"
 required-features = ["cubecl_runtime", "ternary_gemm_batched", "metal_tensor_gemm"]

@@ -196,6 +196,18 @@ struct GemvMultiPersistent {
     /// halving). Same signature + one-row grid as `function`.
     function_u4: CudaFunction,
     /// `RIIR_GEMV_U4` (default OFF — A/B first).
+
+    /// Plan 611 (Issue 1000 — the owner-greenlit lossy lane) — the SPLIT
+    /// rung: TWO warps per row (K-range halved, smem partials, fixed-order
+    /// combine) for the same underfilled population as r2/pf/u4 (the
+    /// 640-block down/out class, ~648 GB/s vs the 854-class ceiling — the
+    /// one laggard in the Plan-604 T0 attribution). LOSSY-CLASS (accumulation
+    /// reorder — deterministic, NOT bit-identical); the Issue-750-T3 gates
+    /// (bench_954 retention walk + a new pin class) govern any promotion.
+    function_split2: CudaFunction,
+    /// `RIIR_GEMV_SPLIT` (default OFF — A/B first; unset|"0"|"off"|"false"
+    /// disabled, "1"|"on"|"true"|"2" enabled).
+    split2_enabled: bool,
     u4_enabled: bool,
     /// The underfilled threshold: launches whose total row count would map
     /// to ≤ `grid` blocks at the one-row shape (i.e. ≤ occupancy_grid × 8
@@ -861,6 +873,16 @@ impl TernaryDeltanetGpuForwardCudarc {
             Ok(v) => matches!(v.to_ascii_lowercase().as_str(), "1" | "on" | "true"),
             Err(_) => false,
         };
+
+        // Plan 611 (Issue 1000) — the split2 rung's A/B knob (default OFF —
+        // lossy-class until the Issue-750-T3 gates pass).
+        let split2_enabled = match std::env::var("RIIR_GEMV_SPLIT") {
+            Ok(v) => matches!(v.to_ascii_lowercase().as_str(), "1" | "on" | "true" | "2"),
+            Err(_) => false,
+        };
+        let gemv_multi_split2_fn = gemv_module
+            .load_function("gemv_ternary_dp4a_multi_split2")
+            .map_err(|e| CudarcKernelError::Compile(format!("{e}")))?;
         let r2_max_rows = occupancy_grid as usize * (WG_THREADS as usize / 32);
         let gemv_multi_r2_fn = gemv_module
             .load_function("gemv_ternary_dp4a_multi_r2")
@@ -880,6 +902,8 @@ impl TernaryDeltanetGpuForwardCudarc {
             pf_enabled,
             function_u4: gemv_multi_u4_fn,
             u4_enabled,
+            function_split2: gemv_multi_split2_fn,
+            split2_enabled,
             r2_max_rows,
         };
         // Construction-time diagnostic (once per handler) — makes the grid
@@ -894,6 +918,10 @@ impl TernaryDeltanetGpuForwardCudarc {
             if r2_enabled { " (RIIR_GEMV_R2 set)" } else { "" },
             if pf_enabled { " (RIIR_GEMV_PF set)" } else { "" },
             if u4_enabled { " (RIIR_GEMV_U4 set)" } else { "" }
+        );
+        eprintln!(
+            "[plan611] gemv split2: enabled={split2_enabled}{} (lossy-class rung, default OFF)",
+            if split2_enabled { " (RIIR_GEMV_SPLIT set)" } else { "" }
         );
         // Issue 616 T4 — fused quantize+dp4a kernel (same module, second entry).
         let gemv_fused = gemv_module
@@ -5558,8 +5586,17 @@ fn gemv_prequantized_multi(
     let use_pf = gemv_multi.pf_enabled && underfilled;
     let use_r2 = gemv_multi.r2_enabled && underfilled && !use_pf;
     let use_u4 = gemv_multi.u4_enabled && underfilled && !use_pf && !use_r2;
+    // Plan 611 (Issue 1000) — the split2 rung (two warps per row, LOSSY
+    // reorder-class; RIIR_GEMV_SPLIT, default OFF). Lowest precedence: the
+    // negative-apparatus knobs keep theirs.
+    let use_split2 = gemv_multi.split2_enabled && underfilled && !use_pf && !use_r2 && !use_u4;
     let grid_x = if use_r2 {
         ((total_m as u32).div_ceil(2 * (WG_THREADS / 32)))
+            .min(gemv_multi.grid)
+            .max(1)
+    } else if use_split2 {
+        // 4 rows per 256-thread block (2 warps per row) -> grid = ceil(m/4).
+        ((total_m as u32).div_ceil(WG_THREADS / 64))
             .min(gemv_multi.grid)
             .max(1)
     } else {
@@ -5580,6 +5617,8 @@ fn gemv_prequantized_multi(
         &gemv_multi.function_r2
     } else if use_u4 {
         &gemv_multi.function_u4
+    } else if use_split2 {
+        &gemv_multi.function_split2
     } else {
         &gemv_multi.function
     };
