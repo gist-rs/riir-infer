@@ -1,0 +1,73 @@
+#[cfg(std_io)]
+use cubecl_environment::persistence::{Namespace, Store, StoreOptions};
+
+use crate::throughput::{ThroughputKey, ThroughputValue};
+use alloc::string::{String, ToString};
+use alloc::sync::Arc;
+use cubecl_environment::collections::HashMap;
+use cubecl_environment::sync::Mutex;
+
+static GLOBAL_CACHE: Mutex<Option<HashMap<String, Arc<Mutex<ThroughputCache>>>>> = Mutex::new(None);
+
+/// Caches the [`ThroughputValue`] for a given [`ThroughputKey`].
+///
+/// This cache is used to avoid recomputing throughput values for the same key.
+/// Stores on disk when std is available, otherwise stores in memory.
+pub struct ThroughputCache {
+    #[cfg(not(std_io))]
+    cache: HashMap<ThroughputKey, ThroughputValue>,
+    #[cfg(std_io)]
+    cache: Store<ThroughputKey, ThroughputValue>,
+}
+
+impl ThroughputCache {
+    /// Gets or creates a global `ThroughputCache` for the given device name.
+    pub fn get_for_device(name: &str) -> Arc<Mutex<Self>> {
+        let mut cache_map = GLOBAL_CACHE.lock();
+        let cache_map = cache_map.get_or_insert_with(HashMap::new);
+
+        cache_map
+            .entry(name.to_string())
+            .or_insert_with(|| Arc::new(Mutex::new(Self::new(name))))
+            .clone()
+    }
+
+    /// Creates a new `ThroughputCache` with the given name.
+    pub fn new(#[cfg_attr(not(std_io), allow(unused_variables))] name: &str) -> Self {
+        #[cfg(not(std_io))]
+        {
+            ThroughputCache {
+                cache: HashMap::new(),
+            }
+        }
+
+        #[cfg(std_io)]
+        {
+            let namespace = Namespace::scoped("throughput", name);
+
+            Self {
+                cache: Store::new(StoreOptions::new().storage(namespace)),
+            }
+        }
+    }
+
+    /// Inserts a new [`ThroughputValue`] into the cache for the given [`ThroughputKey`].
+    ///
+    /// Throughput measurements are nondeterministic, so a concurrent process (or an
+    /// earlier run) may have recorded a different value for the same key; the cache
+    /// keeps the existing value in that case rather than failing.
+    pub fn insert(&mut self, key: ThroughputKey, value: ThroughputValue) {
+        #[cfg(std_io)]
+        if let Err(err) = self.cache.insert(key, value) {
+            log::warn!("Concurrent throughput measurement, keeping the existing value: {err}");
+        }
+
+        #[cfg(not(std_io))]
+        self.cache.insert(key, value);
+    }
+
+    /// Returns the [`ThroughputValue`] for the given [`ThroughputKey`], if it exists in the cache.
+    pub fn get(&self, key: &ThroughputKey) -> Option<&ThroughputValue> {
+        self.cache.get(key)
+    }
+}

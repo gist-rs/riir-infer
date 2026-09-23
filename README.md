@@ -8,6 +8,8 @@ every engine, game, and application concern.
 
 `riir-infer-core` (repo root):
 
+`riir-infer-gpu` (`crates/riir-infer-gpu`) — the GPU runtime + kernel layer: device context, buffer helpers, pool-poison detector, the CubeCL runtime (Metal/WGSL/SPIR-V via wgpu; CUDA behind `cuda_backend`), and the first kernel family. Optional companion crate — CPU-only consumers never resolve the GPU dep tree.
+
 - **Loaders** — GGUF + safetensors, mmap-backed, BLAKE3-checkable.
 - **Quantization** — the q2k…q8kv GGUF family, q2_0 ternary, PTQ /
   TurboQuant paths.

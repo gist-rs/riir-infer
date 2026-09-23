@@ -110,3 +110,27 @@ required-features = ["deltanet_ternary_inference"]
 [[test]]
 name = "bonsai2_rotation_load"
 required-features = ["bonsai2_hadamard"]
+
+# ─── Workspace ────────────────────────────────────────────────────────
+# The repo is a root-package workspace: riir-infer-core at the root,
+# the GPU kernel layer as a member (it carries the wgpu/cubecl tree,
+# which CPU-only consumers of the core never resolve into their builds).
+[workspace]
+members = ["crates/riir-infer-gpu"]
+
+# Shared dep declarations for members (the fence resolves path deps from
+# each manifest's own directory, so member manifests inherit this instead
+# of spelling the sibling path one level deeper).
+[workspace.dependencies]
+katgpt-core = { path = "../katgpt-rs/crates/katgpt-core" }
+
+# ─── Local patches (crates.io forks) ─────────────────────────────────
+# Byte-identical copies of the patched crates.io sources under vendor/.
+# Remove when upstream lands the fixes:
+#   cubecl-runtime — drop-queue policy fix (upstream tracel-ai/cubecl#1359).
+#   wgpu-hal       — total_video_memory_bytes()/raw_handle() adapter
+#                    accessors (additive API; the VRAM pre-flight probes it).
+
+[patch.crates-io]
+cubecl-runtime = { path = "vendor/cubecl-runtime-0.11.0-pre.2" }
+wgpu-hal = { path = "vendor/wgpu-hal-30.0.0" }

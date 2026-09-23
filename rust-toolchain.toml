@@ -1,35 +1,13 @@
-# Issue 614 T3 — the toolchain floor is a hard dependency requirement, not taste.
+# The toolchain floor is a hard dependency requirement, not taste.
 #
 # `cubecl 0.11.0-pre.2` pulls `cubecl-zspace 0.11.0-pre.2`, which declares
 # `rust-version = "1.95"`. Cargo enforces that at RESOLUTION time, so on an
 # older toolchain every command in this workspace fails — not just the GPU
-# builds:
+# builds. The pin below satisfies the floor and matches the toolchain the
+# development boxes run (stable), so `cargo build` works out of the box.
 #
-#   error: rustc 1.93.0 is not supported by the following package:
-#     cubecl-zspace@0.11.0-pre.2 requires rustc 1.95
-#
-# Without this file `cargo` uses the box default, which is 1.93.0 on both the
-# M3 Max and the 4090 box (`rustup default` output, 2026-08-12) — i.e. the
-# default is BELOW the floor on every machine we build on. The pin is what
-# makes `cargo build` work out of the box instead of requiring every session to
-# remember `cargo +1.95.0`.
-#
-# Why 1.95.0 and not a newer channel: 1.95.0 is the lowest version that
-# satisfies the floor AND is already installed on both boxes (M3: 1.95.0;
-# 4090: 1.95.0-x86_64-pc-windows-msvc + -gnu), so the pin costs no toolchain
-# download anywhere. riir-chain pins 1.97.0 for its own reasons (its hand-pinned
-# clippy/test gate counts); nothing requires the two repos to match, since a
-# newer channel also satisfies this floor.
-#
-# `riir-train` carries the same pin — it builds `riir-gpu` through a path
-# dependency, so it inherits the floor without declaring cubecl 0.11 itself.
-#
-# Raising this is a deliberate act: bump `channel` in its own reviewed commit
-# and fix the new lints there.
-# 2026-09-04: 1.95.0 -> 1.98.1 (owner-directed: `rustup update stable` + "pin to
-# it"). The floor reasoning above is satisfied by any newer channel, and
-# riir-chain/riir-clippy (1.97.0) were bumped to 1.98.1 the same day — the
-# stack is single-toolchain again, now at stable instead of at the floor.
+# Raising this is a deliberate act: bump `channel` in its own reviewed
+# commit and fix the new lints there.
 [toolchain]
 channel = "1.98.1"
 components = ["clippy", "rustfmt"]

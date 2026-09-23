@@ -1,0 +1,9 @@
+# fence_expected.txt — membership pins for fence_gate.py findings.
+#
+# Format:  <repo-relative-path>::<hit-text> :: <reason>
+# LINE-FREE keys (a line number drifts on every edit above it); the hit
+# text is the identity and a `#<n>` ordinal suffix disambiguates exact
+# duplicates. Reds in BOTH directions: an undefended finding fails, and
+# a pin whose finding no longer exists fails.
+#
+# Deliberately EMPTY — this repo has zero sanctioned riir-* references.

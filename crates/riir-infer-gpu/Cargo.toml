@@ -1,0 +1,150 @@
+[package]
+name = "riir-infer-gpu"
+version = "0.1.0"
+edition = "2024"
+license = "MIT"
+description = "GPU runtime + kernel layer for the LLM inference substrate (wgpu/CubeCL)"
+publish = false
+
+# riir-infer-gpu — the GPU half of the inference substrate: device
+# context, buffer helpers, the pool-poison detector, and the CubeCL
+# runtime + first kernel set. Upstream of every engine by design —
+# zero `riir-*` dependencies (enforced by scripts/fence_gate.py in CI).
+#
+# Platform shader backends follow the engine gpu crate this moved from:
+#   macOS -> wgpu-msl, elsewhere -> wgpu-spirv (cubecl, optional behind
+#   the `cubecl_runtime` feature).
+#
+# Vendor forks (workspace root [patch.crates-io], remove when upstream
+# lands the fixes):
+#   cubecl-runtime-0.11.0-pre.2 — drop-queue policy fix
+#     (upstream tracel-ai/cubecl#1359; behavioral).
+#   wgpu-hal-30.0.0 — `total_video_memory_bytes()` / `raw_handle()`
+#     adapter accessors (additive API; the VRAM pre-flight probes it).
+
+[dependencies]
+# The quant zoo (Q4_K / Q8_KV block types + CPU reference GEMV) — the
+# kernels' weight formats ARE these block layouts, so the dep is
+# non-optional even though every current consumer sits behind
+# `cubecl_runtime`. In-repo path dep (the workspace root crate).
+riir-infer-core = { path = "../.." }
+# The ternary weight vocabulary (TernaryGroupWeights bit-planes + the
+# group-scale support the Q2_0_g128 kernels read) — consumed directly,
+# katgpt-rs being the one sanctioned public upstream. Inherited from the
+# workspace table so this manifest never spells the deeper sibling path.
+katgpt-core = { workspace = true }
+wgpu = "30"
+# f16 weight storage (the f16 GEMV/attention/epilogue kernels).
+half = { version = "2", optional = true }
+# Lock-free autotune cache (gemv_autotune; read-mostly fit).
+papaya = { version = "0.2", optional = true }
+# blake3-keyed params-handle cache (params_cache).
+blake3 = { version = "1", optional = true }
+bytemuck = { version = "1", features = ["derive"] }
+pollster = "0.4"
+rayon = "1.10"
+# DFlash2 checkpoint header parsing (qwen38_dflash2, always-on like its home).
+serde_json = "1"
+
+[target.'cfg(target_os = "macos")'.dependencies]
+cubecl = { version = "=0.11.0-pre.2", features = ["wgpu-msl"], optional = true }
+# Raw Metal device access for the metal::tensor matmul2d kernel family,
+# macOS-only behind `metal_tensor_gemm`. Target-scoped so enabling the
+# feature on Windows/Linux hosts is inert instead of pulling
+# core-foundation (which does not compile on Windows MSVC).
+metal = { version = "0.31", optional = true }
+
+[target.'cfg(not(target_os = "macos"))'.dependencies]
+cubecl = { version = "=0.11.0-pre.2", features = ["wgpu-spirv"], optional = true }
+# Raw CUDA dp4a/mma ternary GEMV + GEMM + the whole-prefill cudarc family
+# (nvrtc-compiled kernels). Only `driver` + `nvrtc` are needed. macOS has
+# no CUDA; `cuda-13030` + `fallback-dynamic-loading` match the engine gpu
+# crate's declaration.
+cudarc = { version = "0.19", default-features = false, features = ["std", "driver", "nvrtc", "cuda-13030", "fallback-dynamic-loading"], optional = true }
+
+[features]
+cubecl_runtime = ["dep:cubecl", "dep:half", "dep:papaya", "dep:blake3"]
+cuda_backend = ["cubecl_runtime", "cubecl/cuda"]
+# Ternary bit-plane (Q2_0_g128) GEMV family around the gemv_ternary_cubecl
+# hub (decode path). Mirrors the engine gpu crate's feature MINUS its
+# `riir-engine/deltanet_ternary_inference` forward leg — this crate is
+# upstream of every engine and cannot dep one (the fence); consumers that
+# need the engine-side forward enable that feature themselves.
+ternary_gemv = ["cubecl_runtime", "katgpt-core/ternary_group_scale", "riir-infer-core/deltanet_ternary_inference"]
+# Fused ternary GEMV + in-place ResidualAdd (Issue 616).
+ternary_gemv_residual = ["ternary_gemv"]
+# Batched ternary dequant+GEMM prefill family (Issue 637).
+ternary_gemm_batched = ["ternary_gemv"]
+# simdgroup/cooperative-matrix ternary GEMM (Issue 641).
+ternary_gemm_simdgroup = ["ternary_gemv", "ternary_gemm_batched"]
+# F16 cmma variant of the simdgroup ternary GEMM (Issue 655).
+ternary_gemm_simdgroup_f16 = ["ternary_gemm_simdgroup"]
+# LUT / subset-sum ternary GEMV (Issue 606 T3c path 1).
+ternary_lut_gemv = ["ternary_gemv"]
+# Raw CUDA dp4a/mma ternary GEMV/GEMM + the whole-prefill cudarc family.
+ternary_gemv_cuda_raw = ["ternary_gemv", "dep:cudarc"]
+# The single-plane activation-quant prefill arm (Issue 884 T2a).
+prefill_q8_act = []
+# The fork-config utilization arm; implies the q8 arm (Issue 884 T2b).
+prefill_mmq_v2 = ["prefill_q8_act"]
+# Raw Metal kernel family (metal::tensor / MSL passthrough), macOS-only.
+metal_tensor_gemm = ["dep:metal"]
+# A<->B role-swapped tiled matmul for small-M decode batches (the
+# vLLM swap_ab trick). Mirrors the engine gpu crate's feature of the
+# same name; implies the CubeCL runtime like it does.
+swap_ab_gemm = ["cubecl_runtime"]
+# Gemma 2 D2F block-causal decode self-conditioning support. Mirrors
+# the engine gpu crate's feature (which also carries the decode-side
+# deps that stay engine-side).
+gemma2_d2f = ["cubecl_runtime"]
+# Compile the blake3-keyed params-handle cache in (default-off
+# pass-through without it). Mirrors the engine gpu crate's feature.
+params_handle_cache = ["cubecl_runtime"]
+# Q4_K row-tiled GEMV variant (opt-in until its GOAT gate lands).
+q4k_rowtiled_gemv = ["cubecl_runtime"]
+# Explicit FMA contraction for the GEMV inner loops (CPU default for
+# quality-sensitive decoding remains production behavior).
+gemv_fma_contract = ["cubecl_runtime"]
+# Kernel fold dispatch (opt-in until the >=5% GOAT proof validates).
+fold_dispatch = ["cubecl_runtime"]
+# Q8_KV sink-token guard arm (opt-in).
+q8kv_sink_guard = ["cubecl_runtime"]
+# DeltaNet chunkwise parallel prefill kernels - the chunked conv1d and the
+# delta-rule chunked prefill (Issue 652 / Issue 734 T4). Mirrors the engine
+# gpu crate's feature (which additionally implies ternary_gemv there).
+ternary_deltanet_chunked_prefill = ["cubecl_runtime"]
+# Row-parallel register-blocked recurrence arm (Issue 619) - cfg key for the
+# chunked kernels' row-parallel internals. Mirrors the engine crate's empty
+# feature.
+deltanet_recurrence_rowpar = []
+# Tree-masked batched verify kernels for DeltaNet layers (Issue 721). Mirrors
+# the engine gpu crate's feature (which additionally pulls the
+# speculative-decode dispatch there). The katgpt-core leg supplies the
+# gdn_tree_verify CPU oracle the moved lib tests assert against.
+speculative_tree_verify = ["cubecl_runtime", "katgpt-core/gdn_tree_verify"]
+# Batched attention prefill cfg key (Issue 653) - gates the q8-KV prefill
+# arm's internals alongside ternary_gemm_batched.
+ternary_attention_batched_prefill = []
+# Dual ANE/GPU hybrid prefill (Issue 726). The ANE executor's Metal surface
+# is macOS+aarch64-gated inside the module; on other targets the feature
+# compiles the (platform-independent) eligibility gate only. Pulls the metal
+# dep for the macOS arm.
+ane_prefill = ["dep:metal"]
+# Attention-mass capture tap (diagnostics).
+attn_mass_tap = ["ternary_gemm_batched", "ternary_attention_batched_prefill"]
+# Speculative-decode dispatch cfg key (the tree-verify + draft arms).
+speculative_decode = []
+# CUDA graph capture for the cudarc whole-forward (opt-in; the engine side
+# additionally gates its own graph-replay consumers).
+cuda_graphs_forward = ["ternary_gemv_cuda_raw"]
+# Row-parallel register-blocked recurrence arm (Issue 619 sibling).
+deltanet_recurrence_parallel = []
+# The dense DeltaNet forward surface (mirrors the engine gpu crate's feature
+# of the same name, the engine forward leg swapped for the direct infer-core
+# one). Gates hybrid_dispatch's internals.
+deltanet_inference = ["cubecl_runtime", "riir-infer-core/deltanet_inference"]
+
+[dev-dependencies]
+# Test RNG (qwen38_dflash2_gpu determinism fixtures; version matches the
+# engine gpu crate's).
+fastrand = "2"

@@ -1,0 +1,43 @@
+name: ci
+
+on:
+  push:
+    branches: [main, develop]
+  workflow_dispatch:
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  fence:
+    name: import fence
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: fence gate (path-dep allowlist + foreign-crate imports)
+        run: python3 scripts/fence_gate.py
+
+  cargo:
+    name: check / clippy / test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: checkout the public sibling (path dep)
+        uses: actions/checkout@v4
+        with:
+          repository: katopz/katgpt-rs
+          ref: develop
+          path: katgpt-rs
+      - name: place the sibling at the layout path
+        run: |
+          mkdir -p "${{ github.workspace }}/../katgpt-rs"
+          cp -R "${{ github.workspace }}/katgpt-rs/." \
+                "${{ github.workspace }}/../katgpt-rs/"
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: cargo check (workspace, all features)
+        run: cargo check --workspace --all-features
+      - name: cargo clippy (workspace, all targets)
+        run: cargo clippy --workspace --all-targets -- -D warnings
+      - name: cargo test (workspace)
+        run: cargo test --workspace

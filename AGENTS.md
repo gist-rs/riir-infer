@@ -22,7 +22,7 @@ drift ledger. On any conflict with prose in this file, BOUNDARY.md wins.
 
 The LLM-inference substrate repo. Carved from the riir-ai workspace
 2026-09-22 (the crate moved out name-unchanged — engines re-export it at
-the same paths). Internal record + phase plan: riir-ai Issue 996 /
+the same paths). Internal record + phase plan: riir-ai Issue 998 /
 riir-reflex Issue 008; extraction history: riir-ai Proposal 041. Planned
 (owner-directed, tracked in the issues above): the laya/MSL encoder lane
 and the CLEAN GPU kernel layer join here.
@@ -42,6 +42,8 @@ cargo test --test bonsai2_rotation_load --features bonsai2_hadamard
 ```
 
 Sibling layout: `../katgpt-rs` must exist for every cargo command (path
+
+Workspace layout: a root-package workspace — `riir-infer-core` at the repo root (CPU substrate) + `crates/riir-infer-gpu` (the wgpu/CubeCL GPU layer, its own crate so CPU-only consumers never resolve the GPU dep tree). Vendored crates.io forks under `vendor/` (`[patch.crates-io]` in the root manifest).
 deps). `../riir-ai` consumes this repo (its riir-engine re-exports the
 crate's modules at the same paths).
 
