@@ -1,10 +1,9 @@
 # riir-infer — boundary contract
 
 > The single source of truth for what may live in and depend on this repo.
-> Audited by the `boundary-guard` skill +
-> `../riir-ai/scripts/ci_boundary_contract.sh`
-> (they read this file; findings are contract violations or contract rot).
-> Cross-repo rules LINK to their one canonical home — never copied.
+> Audited by the workspace boundary tooling (it reads this file; findings
+> are contract violations or contract rot). Cross-repo rules LINK to their
+> one canonical home — never copied.
 >
 > Drift ledger — Disposition: `fixable` | `owner-call` | `by-design`.
 > `fixable`/`owner-call` rows REQUIRE an open issue (row ⟺ open issue); a
@@ -25,12 +24,11 @@ needs BELOW the engine:
   kernel layer — device context, buffer helpers, the pool-poison
   detector, the CubeCL runtime, the persistent weight-buffer cache, the
   GPU transpose kernel (+ its WGSL), and the adapter VRAM probe. The
-  kernel-set migration continues upstream (tracked in the carving
-  campaign's issue files).
-- Planned (owner-directed, tracked upstream): the laya/ModernBERT encoder
-  lane (Backend trait, flat-Vec ops, MSL kernels, tokenizers substrate)
-  and the remaining CLEAN GPU kernel families (elementwise/norm/matmul/
-  attention, the ternary gemv/gemm + CUDA raw families).
+  kernel-set migration from the engine's GPU layer is ongoing (tracked
+  in the private workspace campaign that carved this repo).
+- Planned (owner-directed, tracked in the private workspace): the
+  laya/ModernBERT encoder lane, and the remaining SEAM residues of the
+  GPU kernel migration re-homing with their consumers.
 
 **Domain test:** is this **model-based inference substrate** (weights,
 quant, architectures, kernels, loaders — upstream of every engine and game
@@ -44,11 +42,11 @@ or checkpoints (this repo ships LOADERS, not weights).
 
 | Concern | Correct home |
 |---|---|
-| Cognition runtimes / engine orchestration | `../riir-ai` (`riir-engine`) |
-| Training (LoRA SFT, GRPO, optimizers, backprop) | `../riir-train` |
-| Engine-consumed game substrate (KV cache policy beyond loader types, routing) | `../riir-ai` |
-| Modelless decision engine / arena | `../riir-reflex` |
-| Trained checkpoints (.gguf artifacts) | `../riir-train/data` |
+| Cognition runtimes / engine orchestration | the engine layer (private workspace repo) |
+| Training (LoRA SFT, GRPO, optimizers, backprop) | the training repo (private workspace repo) |
+| Engine-consumed game substrate (KV cache policy beyond loader types, routing) | the engine layer (private workspace repo) |
+| Modelless decision engine / arena | the decision-engine repo (private workspace repo) |
+| Trained checkpoints (.gguf artifacts) | the training repo's data tree (private) |
 
 ## May depend on
 
@@ -68,8 +66,9 @@ artifact, any Python dependency.
 
 ## Inherited boundaries (links)
 
-- Dep-direction matrix + CANONICAL rows: `../riir-ai/BOUNDARY.md`
-- Modelless-first mandate: `../katgpt-rs/AGENTS.md`
+- Dep-direction matrix + CANONICAL rows: the engine repo's BOUNDARY.md
+  (private workspace sibling)
+- Modelless-first mandate: the `katgpt-rs` AGENTS.md (public upstream)
 
 ## Drift ledger (target vs actual)
 
