@@ -595,8 +595,8 @@ pub struct BatchedDownloadRequest<'a> {
 /// # Example (the LoRA-Muon 4-buffer download pattern)
 ///
 /// ```no_run
-/// # use riir_gpu::buffer::{BatchedDownloadRequest, DownloadStaging, download_f32_batched_reuse_into};
-/// # use riir_gpu::context::GpuContext;
+/// # use riir_infer_gpu::buffer::{BatchedDownloadRequest, DownloadStaging, download_f32_batched_reuse_into};
+/// # use riir_infer_gpu::context::GpuContext;
 /// # let ctx = GpuContext::new().unwrap();
 /// # let (buf_a, buf_b) = (ctx.device.create_buffer(&wgpu::BufferDescriptor {
 /// #     label: None, size: 64, usage: wgpu::BufferUsages::COPY_SRC, mapped_at_creation: false }),

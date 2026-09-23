@@ -2736,7 +2736,7 @@ pub struct Qwen38VerifyScratch {
 ///    regs/thread (109 regs, 33% occupancy), already 1.3-1.7x SLOWER here.
 /// 6. The fast q-group attention arm (`..._rows_qg`, the T9.11-T9.16 winner at
 ///    long context) — WIDENED by Issue 754 T6 to p <= 64 via grid.z 16-row
-///    slices ([`riir_gpu::SPLITGQA_QG_ROWS_MAX_P`]; bit-identical at
+///    slices (`riir_gpu::SPLITGQA_QG_ROWS_MAX_P`; bit-identical at
 ///    p <= 16, grid.z == 1). See [`Self::verify_use_qg`].
 ///
 /// Widening also worsens a second measured wall: T9.10 pinned the mma arm's

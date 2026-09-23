@@ -144,6 +144,16 @@ deltanet_recurrence_parallel = []
 # one). Gates hybrid_dispatch's internals.
 deltanet_inference = ["cubecl_runtime", "riir-infer-core/deltanet_inference"]
 
+# The single-GEMM isolation test is whole-file #![cfg]-gated (macOS + the
+# metal tensor-GEMM stack) and compiles to an empty binary elsewhere; this
+# row is the reader protection (a --features selection without the union
+# SKIPS the target loudly instead of printing a green zero). The
+# target_os half of the gate cannot be expressed here — cfg on target_os
+# is not a required-features concept.
+[[test]]
+name = "bench_663_t5_single_gemm_isolation"
+required-features = ["cubecl_runtime", "ternary_gemm_batched", "metal_tensor_gemm"]
+
 [dev-dependencies]
 # Test RNG (qwen38_dflash2_gpu determinism fixtures; version matches the
 # engine gpu crate's).

@@ -12,7 +12,7 @@
 //! ## Usage
 //!
 //! ```bash
-//! CARGO_TARGET_DIR=/tmp/p536 cargo test -p riir-gpu \
+//! CARGO_TARGET_DIR=/tmp/p536 cargo test -p riir-infer-gpu \
 //!     --features "cubecl_runtime ternary_gemm_batched metal_tensor_gemm" --release \
 //!     --test bench_663_t5_single_gemm_isolation -- --nocapture --ignored
 //! ```

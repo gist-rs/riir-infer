@@ -165,7 +165,7 @@ pub fn pack_u32_digit_bytes(w: &TernaryGroupWeights) -> Vec<u32> {
 // ── Handle ──────────────────────────────────────────────────────────────────
 
 /// Paired GPU buffers for one telescoped digit-FMA ternary projection
-/// (Plan 563). The GEMV twin of [`riir_gpu::TernaryHandle`] with the weight
+/// (Plan 563). The GEMV twin of `riir_gpu::TernaryHandle` with the weight
 /// payload re-encoded to positional digit bytes.
 #[cfg(feature = "cubecl_runtime")]
 #[derive(Clone)]
@@ -220,7 +220,7 @@ pub(crate) const FMA_ROWS_PER_PLANE: u32 = 8;
 
 /// Row-tiled telescoped digit-FMA ternary GEMV at tile width 8 (Plan 563).
 ///
-/// Mirrors [`riir_gpu`]'s `gemv_ternary_plane_rowtiled8` geometry; the inner
+/// Mirrors `riir_gpu`'s `gemv_ternary_plane_rowtiled8` geometry; the inner
 /// loop is the B96 recipe — see the module docs for the identity, the
 /// exactness/precision contracts, and the group-per-lane ownership rationale.
 #[cfg(feature = "cubecl_runtime")]
