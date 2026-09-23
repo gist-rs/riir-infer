@@ -1,8 +1,11 @@
 name: ci
 
 on:
+  # Main-only (the workspace owner call: Actions spending limit — no CI
+  # fires on `develop` pushes; develop is the working branch, main is the
+  # promote lane the guard runs against).
   push:
-    branches: [main, develop]
+    branches: [main]
   workflow_dispatch:
 
 env:
