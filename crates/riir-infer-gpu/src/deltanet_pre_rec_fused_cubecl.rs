@@ -69,7 +69,10 @@
 #[cfg(feature = "cubecl_runtime")]
 use cubecl::prelude::*;
 
-#[cfg(feature = "cubecl_runtime")]
+#[cfg(all(
+    feature = "cubecl_runtime",
+    any(test, feature = "ternary_gemv", feature = "deltanet_inference")
+))]
 use cubecl::server::Handle;
 
 // ── Runtime toggle (Bench 768 pattern) ──────────────────────────────────
@@ -86,7 +89,7 @@ static FUSED_PRE_REC_INITIALIZED: std::sync::OnceLock<bool> = std::sync::OnceLoc
 static FUSED_PRE_REC_LAUNCHES: std::sync::atomic::AtomicUsize =
     std::sync::atomic::AtomicUsize::new(0);
 
-#[cfg(feature = "cubecl_runtime")]
+#[cfg(feature = "ternary_gemv")]
 fn fused_pre_rec_enabled() -> bool {
     if FUSED_PRE_REC_INITIALIZED
         .set(matches!(
@@ -115,7 +118,7 @@ pub fn set_deltanet_fused_pre_rec(on: bool) {
 }
 
 /// Whether the fused path is currently enabled (crate-internal dispatch check).
-#[cfg(feature = "cubecl_runtime")]
+#[cfg(feature = "ternary_gemv")]
 pub(crate) fn deltanet_fused_pre_rec_enabled() -> bool {
     fused_pre_rec_enabled()
 }
@@ -336,10 +339,16 @@ fn deltanet_pre_rec_fused_f32(
 }
 
 /// Launcher for the fused pre-recurrence chain (Issue 764 T2).
-#[cfg(all(feature = "cubecl_runtime", any(test, feature = "ternary_gemv")))]
+#[cfg(all(
+    feature = "cubecl_runtime",
+    any(test, feature = "ternary_gemv", feature = "deltanet_inference")
+))]
 pub struct DeltanetPreRecFusedCubeCL;
 
-#[cfg(all(feature = "cubecl_runtime", any(test, feature = "ternary_gemv")))]
+#[cfg(all(
+    feature = "cubecl_runtime",
+    any(test, feature = "ternary_gemv", feature = "deltanet_inference")
+))]
 impl DeltanetPreRecFusedCubeCL {
     /// Whether the fused kernel serves this geometry.
     ///
@@ -427,7 +436,11 @@ impl DeltanetPreRecFusedCubeCL {
     }
 }
 
-#[cfg(all(test, feature = "cubecl_runtime"))]
+#[cfg(all(
+    test,
+    feature = "cubecl_runtime",
+    any(feature = "ternary_gemv", feature = "deltanet_inference")
+))]
 mod tests {
     use super::*;
     use crate::cubecl_runtime::{ActiveRuntime, CubeCLContext};
