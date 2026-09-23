@@ -505,6 +505,49 @@ pub use deltanet_pre_rec_fused_cubecl::{
     DeltanetPreRecFusedCubeCL,
 };
 
+// ---------------------------------------------------------------------------
+// P3 slice 5 (the gemma kernel cluster — riir-ai Plan 610 S5). The gemma2
+// CubeCL decode stack + its cluster dependents (llama, d2f, q4k weights,
+// gemma4) + the RoPE/GeGLU + Wall kernel riders. The wall_config hinge:
+// `WallConfig` re-homes to riir-infer-core (this crate consumes it as
+// `riir_infer_core::wall_config::WallConfig` — the one engine-local import
+// that forced gemma2_cubecl STAYS in the T2 audit). gemma2_forward +
+// forward_prefill stay engine-side: their WGSL zoo (`kernels::GpuPipelines`)
+// is shared with training/game consumers and cannot move to this
+// inference-only repo (the audit's "share or split at P3" adjudication —
+// its own slice).
+// ---------------------------------------------------------------------------
+
+// Gemma 2 CubeCL decode stack: GEMV/flash-attention dispatch, KV cache,
+// weight buffers (Plan 106 T2.6 + 087 Phase 4.4-4.7).
+#[cfg(feature = "cubecl_runtime")]
+pub mod gemma2_cubecl;
+// Gemma 2 Q4_K quantized weight upload (Plan 087 Phase 4.8) — wgpu-only,
+// ungated like its engine home.
+pub mod gemma2_q4k_weights;
+// Llama CubeCL decode stack (consumes the gemma2 dispatch machinery).
+#[cfg(feature = "cubecl_runtime")]
+pub mod llama_cubecl;
+// Gemma2 D2F block-causal decode (dllm lane; the feature also turns on
+// fastrand + infer-core's dllm Config fields).
+#[cfg(feature = "gemma2_d2f")]
+pub mod gemma2_d2f;
+// Gemma4 CubeCL stack (partial RoPE / QK-Norm / GeGLU / layer output scale).
+#[cfg(feature = "gemma4_gpu")]
+pub mod gemma4_cubecl;
+// GPU-side RoPE + GeGLU kernels (Plan 106 T2.13) — the gemma decode
+// cluster's positional/activation path.
+#[cfg(feature = "cubecl_runtime")]
+pub mod rope_geglu_cubecl;
+// Wall Attention CubeCL kernels (Plan 173; gated like its engine home).
+#[cfg(all(feature = "wall_attention", feature = "cubecl_runtime"))]
+pub mod wall_cubecl;
+// Shared GPU test helpers (Issue 712 heavy-model gate + page release).
+// COPIED, not moved — the engine gpu crate keeps its own for the staying
+// gemma2_forward tests (test-only infra, the cross-repo duplication class).
+#[cfg(test)]
+mod test_gpu_support;
+
 // The CubeCL whole-forward: decode + prefill over the ternary Bonsai family.
 #[cfg(all(feature = "cubecl_runtime", feature = "ternary_gemv"))]
 pub mod ternary_deltanet_gpu_forward;
