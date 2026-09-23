@@ -560,8 +560,18 @@
         let weights = create_test_weights(&config);
         let decode_config = Gemma2D2fConfig {
             block_size: 4,
-            denoise_steps: 20,          // Plenty of steps.
-            confidence_threshold: 0.01, // Very low threshold → always unmask.
+            denoise_steps: 20, // Plenty of steps.
+            // Issue 1001: with THIS fixture (wte ~ 0.01·N(0,1), all-ones
+            // norms, tied lm_head) the logits are ~N(0, 0.48) and the max
+            // softmax prob over the 256k vocab is ~2.6e-5 — the original
+            // 0.01 could never be cleared on ANY backend (the test was
+            // never recorded green: Bench 030 §5's "verified passing on
+            // GPU-equipped machines" was an unverified claim — the GOAT
+            // machine OOM'd). 1e-6 sits ~26× below the fixture's max
+            // prob, so the accept path fires on step 0 on every healthy
+            // backend; all-NaN logits (max prob folds to exactly 0.0)
+            // still fail the assertion below.
+            confidence_threshold: 1e-6,
             temperature: 1.0,
             sampler: None,
             sc_config: D2fScConfig::default(),
