@@ -4,6 +4,60 @@ Durable records for resolved questions and closed lanes (the noise-reduction
 convention: the record lands here, hash-pinned; open work lives in `.issues/`
 and `.plans/`). Created 2026-09-23 at the first record.
 
+## 2026-09-25 — Issue 004 CLOSED: the sgemm tile ladder — block-fit floors, the narrow single-question win
+
+The `.issues/002` v1 backend ran ONE sgemm instance (64×64×32, 512
+threads) for every GEMM shape. The lane now ships THREE instances —
+`sgemm_narrow` (32×64×64, 512 thr, staging A[32][65]+B[64][65] = 24 960 B),
+`sgemm_wide` (the v1 kernel, renamed) and `sgemm_xwide` (64×128×32,
+1 024 thr, staging A[64][33]+B[32][129] = 24 960 B) — picked per call by
+**BLOCK-FIT on the SM count**, a floor MEASURED on this box, not ported:
+the M3 Metal lane's `m < 256` threshold does NOT transfer to the 128-SM
+4090 (it is subsumed by the block-fit arithmetic on the real population).
+
+**The cliff that sets the floor** (the probe's CUDA arm,
+`sgemm_shape_timing`): at m=106 the narrow instance wins −15.7 % at
+n=2048 — exactly 128 blocks, one per SM — and LOSES +46 % at n=2560 —
+160 blocks: static block scheduling strands 32 SMs at 2× work while 96
+idle after one. Every instance whose grid exceeds the SM count pays that
+straggler tail, so the pick is: narrow iff its grid (× batch) fits one
+wave; xwide iff m≥256 ∧ n≥2048 ∧ its grid fits (the multi-wave zone —
+gate/up at n=5248, 205 blocks — reverts to the proven wide instance:
+readings sat inside the instrument's measured ±8-10 % two-context
+artifact band). Per-output accumulation stays k-ascending in ONE thread
+on every instance, so the ladder is result-identical by construction —
+and measured: 13/16 bench suite-lane rows bit-identical vs the 028 run
+(every single-question suite; the three typed_decisions rows wobble 1
+case in 2000 within that lane's pre-existing `determinism_ok: false`
+variance, on record since the 026 v1 run).
+
+Measured wins: per-shape narrow −13.7..−19.6 % (n=1024/1536/2048, the
+m=4/m=1 head tails −12..−17.5 %); xwide QKV (120 blocks) −6.8..−8.5 %
+across three runs; forward-level A/B on the fixture rows (ABAB,
+single-backend-per-process): english −10.4 % · multilingual −14.1 % ·
+typed −8.4 %. Published row refresh (reflex `.benchmarks/029`): the
+single-question suites −6..−14 % p50, packed suites flat by the
+conservative floor. Kill-switch `LAYA_CUDA_LADDER=0` (wide everywhere —
+the A/B posture, never a silent default).
+
+A launch defect fixed in passing: the v1 form passed the staging
+footprint as DYNAMIC shared memory on top of the kernels' STATIC
+`__shared__` arrays — harmless at wide's 2×16 768 B, but the new
+instances' 2×24 960 B crosses the 48 KB static default and the launch
+dies `CUDA_ERROR_INVALID_VALUE` (caught by the first smoke arm — the
+static-smem constant never reached the launch). All instances now
+launch with dynamic smem 0; the footprint constants live on as
+compile-time bounds.
+
+Gates at the final floors: `cuda_ops_smoke` (with the new boundary arms
+— m=33/255/256, n=65/2047/2048/2080, k=33/63/65, m=321 — every tile
+edge on every instance) · consumer G5 at the cuda posture ·
+`laya_batch_parity` · `packed_forward_equiv` · clippy −D warnings both
+repos. Follow-up rungs stay open: CUDA graphs for per-op dispatch
+overhead; the packed multi-wave zone has NO measured win yet — split-K
+or an occupancy-tuned instance is the open question, not another tile
+size.
+
 ## 2026-09-25 — Issue 003 CLOSED: CUDA flash attention — the packed-path zeros defect fixed + the fused rung
 
 The `.issues/002` v1 posture ran `attention_forward` through the TRAIT
@@ -68,9 +122,11 @@ tile edge) drift 1.2–1.8e-7; sliding (w8@64/w4@37/w16@130) 1.2–1.8e-7;
   consumer repo's refreshed bench.
 
 The bench refresh + the published-numbers correction live in the consumer
-repo (reflex `.issues/027`). Remaining follow-up rungs (open, each
-G5-gated at the cuda posture): tile ladders for the m<64/n≤1024 sgemm
-shapes, CUDA graphs for per-op dispatch overhead.
+repo (reflex `.issues/028` — renumbered from 027 after a same-window
+dual-allocation; the record is reflex HISTORY §2026-09-25 bench 028).
+Remaining follow-up rungs (open, each G5-gated at the cuda posture): the
+sgemm tile ladder (closed same day as `.issues/004`), CUDA graphs for
+per-op dispatch overhead.
 
 Session: 4090-cuda-flash, 2026-09-25
 

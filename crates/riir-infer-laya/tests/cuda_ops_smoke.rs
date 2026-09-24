@@ -71,14 +71,26 @@ fn cuda_ops_match_cpu_op_by_op() {
 
     // GEMM — the stride shapes at forward-like + ragged sizes, including
     // m/n tails past the 64-tile, a k tail past BK 32, and the m=1 head
-    // shapes (the act head's [1, 257]×[257, 129]-class calls).
+    // shapes (the act head's [1, 257]×[257, 129]-class calls). The
+    // `.issues/004` ladder arms ride the same loop: the boundary pair
+    // (255/256 × the wide/xwide n floor pair) + ragged tails against the
+    // NEW tiles — m=33 past narrow's 32-row tile, k=63/65 straddling
+    // narrow's BK 64, n=65 past narrow's 64 cols, n=2080 leaving an xwide
+    // col tail, m=321 an xwide row tail.
     for (mm, k, n) in [
         (25usize, 768usize, 2304usize),
         (7, 64, 33),
         (1, 257, 129),
         (300, 100, 700),
-        (317, 1024, 5248), // the encoder Wi shape at the bench seq
-        (100, 2624, 1024), // the encoder mlp-Wo shape
+        (317, 1024, 5248), // the encoder Wi shape at the bench seq (xwide)
+        (100, 2624, 1024), // the encoder mlp-Wo shape (narrow at m<256)
+        (255, 128, 1024),  // ladder boundary: last narrow m
+        (256, 128, 2047),  // ladder boundary: first wide m, n just under xwide
+        (256, 128, 2048),  // ladder boundary: first xwide (m, n)
+        (33, 65, 65),      // narrow ragged: m tail + k tail + n tail
+        (63, 63, 100),     // narrow single-iter k, odd m
+        (321, 100, 2080),  // xwide ragged: m tail + n tail
+        (260, 33, 4096),   // xwide k tail past BK 32
     ] {
         // Each arm consumes fresh host fixtures → its own pass (the epoch
         // contract; see the module doc).
