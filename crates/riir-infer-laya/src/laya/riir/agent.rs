@@ -470,8 +470,14 @@ impl RiirAgent {
     /// through ONE forward (`.raw/laya/laya/agent.py:267` — "Evaluate typed
     /// questions across state in a single, parallel forward pass"). Ours
     /// packs instead of padding — exact per-sequence attention, no pad
-    /// rows, no attention-mask tensor — so the per-question answers are
-    /// bit-identical to the loop, not "modulo padding".
+    /// rows, no attention-mask tensor. The per-row OUTPUTS are not
+    /// bit-identical to the per-question loop — the batched GEMMs run
+    /// different shapes, so different sgemm instances (reduction orders)
+    /// apply; they agree to the [`Encoder::forward_packed`] drift budget
+    /// (CPU 1e-5 / Metal 1e-4, `tests/packed_forward_equiv`), and the
+    /// answers agree through the rounded envelope plus the raw-bit
+    /// equal-shape gate ([`tests/packed_same_shape_gate`], the head
+    /// pipeline per question IS shape-identical).
     ///
     /// The head runs PER QUESTION on its own exact-size slab, copied
     /// device-side out of the packed residual ([`Backend::copy_at`]) —
