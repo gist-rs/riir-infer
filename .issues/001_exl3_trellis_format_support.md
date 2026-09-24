@@ -172,6 +172,11 @@ is an open design question this issue does not pre-decide.
   build path consumes EXL3 until T7 wires a serving/GPU arm. Named
   promotion trigger in §14.
 - [ ] **T7 — SIMD / GPU arms**, only after T3–T5. Scope unknown at filing.
+  → **T7a (CPU arm) DONE 2026-09-24 (`725a8a5`, record in §15)**: codebook
+  LUT + rayon parallel dequant, bit-identical to the reference,
+  10.6–11.4× measured on the 27B pack. **T7b (GPU arm) REMAINS** — the
+  4090 CUDA/wgpu dequant + engine integration that makes the residency
+  gain a runtime property (also the §14 promotion trigger).
 
 ## 6. The correctness gate has a precondition — measure the comparator first
 
@@ -870,3 +875,38 @@ serving config, vs the f16/q4 GGUF incumbent on the same model + box) —
 at which point promotion re-runs this gate with the runtime numbers and
 the §12.7 era-gate wired into the loader's open path (refuse legacy
 packs loudly at open, not decode).
+
+## 15. T7a record — the CPU fast arm (2026-09-24, 4090 box, `725a8a5`)
+
+**What landed:** `codebook_lut()` (65536-entry f32 tables, memoized from
+`decode_f16` — the codebook is a pure function of the code, so the table IS
+the same math precomputed) + `Exl3Layer::dequantize_f32_parallel()` (rayon
+over DISJOINT row strips per stage; every output element's accumulation
+order is unchanged → **bit-identical** to the scalar reference, pinned by
+`parallel_matches_scalar_bit_identical` across integer-K, half-K (mul1),
+and legacy su/sv spellings, compared via `to_bits` — NaN-payload aware).
+
+**Measured** (release, 16-thread i7-13700K, the 27B pack, real layers,
+parity asserted per class):
+
+| class | weights | scalar | parallel | speedup |
+|---|---:|---:|---:|---:|
+| self_attn.o_proj (K4) | 31.5M | 5.12 s / 6.1 Mw/s | 0.479 s / 65.6 Mw/s | 10.7× |
+| mlp.down_proj (K3) | 89.1M | 14.71 s / 6.1 | 1.336 s / 66.7 | 11.0× |
+| linear_attn.out_proj (K5) | 31.5M | 5.26 s / 6.0 | 0.462 s / 68.1 | 11.4× |
+| mlp.gate_proj (K3) | 89.1M | 13.78 s / 6.5 | 1.299 s / 68.6 | 10.6× |
+| lm_head (K5) | 1.27B | 197 s | 19.42 s / 65.5 | 9.9× |
+
+Full-model parallel extrapolation ≈ **6.7 min** (vs ~70.7 min scalar).
+Box: CPU ~8% load, GPU idle, AC.
+
+**Fixture lesson (worth carrying):** the parity test's first draft fed RAW
+random bytes as the f16 scales — random 16-bit patterns include NaN/Inf,
+which put NaN in BOTH outputs; `NaN != NaN` failed `assert_eq` while the
+parity was never wrong. Float-parity tests compare `to_bits`, never `==`.
+
+**T7b (GPU arm) remains** — the 4090 dequant kernel (CubeCL path lives in
+`crates/riir-infer-gpu`; exllamav3's own CUDA kernels are the reference
+shape) + engine integration; it is also the §14 promotion trigger. The
+~11× CPU arm is the correctness oracle for that kernel: bit-parity
+against the same scalar reference.
