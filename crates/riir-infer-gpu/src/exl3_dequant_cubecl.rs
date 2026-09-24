@@ -361,6 +361,10 @@ pub enum Exl3DequantError {
     LayerTooLarge { in_features: usize, out_features: usize },
     /// GPU readback failed (device lost / sync error).
     Readback(String),
+    /// The stable bench's work floor: a pass finished under 5 ms — launch
+    /// overhead + clock resolution dominate and no timing from this harness
+    /// would be sound. The caller raises `reps` (plan 003 contract 2).
+    TooFastToTime { pass_secs: f64, reps: usize },
 }
 
 impl core::fmt::Display for Exl3DequantError {
@@ -371,11 +375,54 @@ impl core::fmt::Display for Exl3DequantError {
                 "EXL3 layer {in_features}x{out_features} exceeds the GPU kernel's u32 index space"
             ),
             Self::Readback(msg) => write!(f, "EXL3 GPU readback failed: {msg}"),
+            Self::TooFastToTime { pass_secs, reps } => write!(
+                f,
+                "EXL3 bench pass {pass_secs:.3} ms < 5 ms floor at reps={reps} — \
+                 raise reps; below the floor no timing from this harness is sound"
+            ),
         }
     }
 }
 
 impl std::error::Error for Exl3DequantError {}
+
+/// The T7c-1d stable-bench result (plan 003): robust per-pass stats for one
+/// decode arm, the instability verdict, and the cross-method agreement.
+#[derive(Debug, Clone, Copy)]
+pub struct StableBench {
+    /// Decoded weights per pass (`in·out`).
+    pub weights: u64,
+    /// Kernel enqueues per timed pass.
+    pub reps: usize,
+    /// Timed passes sampled (after warmup).
+    pub samples: usize,
+    /// MIN pass time / reps — the peak-attained figure (the headline).
+    pub min_secs: f64,
+    /// Median pass time / reps.
+    pub median_secs: f64,
+    /// p90 pass time / reps.
+    pub p90_secs: f64,
+    /// `(p90 − min)/min` — the within-run spread.
+    pub spread: f64,
+    /// `spread > 0.10` — the run is unstable and publishes NO verdict.
+    pub unstable: bool,
+    /// The independent reps-differential estimate (the T7c-1b method).
+    pub diff_secs: Option<f64>,
+    /// min-of-N and the differential agree within 15% — the soundness
+    /// cross-check (only meaningful when `!unstable`).
+    pub cross_agrees: bool,
+}
+
+impl StableBench {
+    /// Peak-attained throughput, Gw/s (weights / min pass time).
+    pub fn gw_peak(&self) -> f64 {
+        self.weights as f64 / self.min_secs / 1e9
+    }
+    /// Median throughput, Gw/s.
+    pub fn gw_median(&self) -> f64 {
+        self.weights as f64 / self.median_secs / 1e9
+    }
+}
 
 /// Per-run timing breakdown (bench instrumentation for the T7b record).
 #[derive(Debug, Clone, Copy)]
@@ -781,6 +828,102 @@ impl Exl3DequantCubeCL {
                 kernel_secs: Some(kernel.max(0.0)),
             },
         ))
+    }
+
+    /// The T7c-1d STABLE sample (plan 003): one pass of the decode arm =
+    /// `reps` kernel enqueues + ONE trailing readback, timed sync-bracketed.
+    /// No per-chunk readback inside the timed window — the readback cost is
+    /// a constant per pass and the readback itself happens after the clock
+    /// stops... no: it happens BEFORE the clock stops (the sync inside
+    /// read_one is what guarantees the enqueued work completed), so the
+    /// readback cost is INSIDE every pass — the same constant every pass,
+    /// amortized by reps, and the stats below treat the per-pass mean as the
+    /// sample. The differential arm of the cross-check subtracts it.
+    fn decode_pass_secs<R: Runtime>(
+        client: &ComputeClient<R>,
+        layer: &Exl3Layer<'_>,
+        arm: DecodeArm,
+        reps: usize,
+    ) -> Result<f64, Exl3DequantError> {
+        let t0 = std::time::Instant::now();
+        let (_, timing) = Self::decode_only_layer_chunked(client, layer, arm, None, reps)?;
+        let _ = timing;
+        Ok(t0.elapsed().as_secs_f64() / reps.max(1) as f64)
+    }
+
+    /// The T7c-1d STABLE harness (plan 003 — replaces the T7c-1b
+    /// reps-differential-only readout):
+    ///
+    /// - warmup pass first (JIT + allocator);
+    /// - `samples` timed passes, each = `reps` enqueues + one readback;
+    /// - stats: min / median / p90 per pass (×reps-normalized);
+    /// - the ≥5 ms/pass work floor: refuses (`TooFastToTime`) when the MIN
+    ///   pass wall < 5 ms — below that, launch overhead + clock resolution
+    ///   dominate and NO number from this harness is sound (the caller
+    ///   raises `reps`);
+    /// - the 10% instability gate: `(p90 − min)/min > 0.10` ⇒ `unstable`;
+    /// - the cross-method gate: the sampling MIN vs the T7c-1b
+    ///   reps-differential estimate must agree within 15% ⇒ `cross_agrees`
+    ///   (two independent samplings agreeing is the soundness evidence).
+    ///
+    /// The per-kernel isolation a CUDA event would give is NOT reachable in
+    /// cubecl 0.11 (the server's raw `CUstream` is private; its `Fence`
+    /// exposes no elapsed) — sync-bracketed system time is the sound
+    /// primitive here, sound ONLY above the work floor, and the floor is
+    /// enforced, not assumed.
+    pub fn bench_arm_stable<R: Runtime>(
+        client: &ComputeClient<R>,
+        layer: &Exl3Layer<'_>,
+        arm: DecodeArm,
+        reps: usize,
+        samples: usize,
+    ) -> Result<StableBench, Exl3DequantError> {
+        let reps = reps.max(1);
+        let samples = samples.max(5);
+
+        // Warmup (JIT + pool growth) — never sampled.
+        let _ = Self::decode_only_layer_chunked(client, layer, arm, None, reps)?;
+
+        let mut passes = Vec::with_capacity(samples);
+        for _ in 0..samples {
+            passes.push(Self::decode_pass_secs(client, layer, arm, reps)?);
+        }
+        passes.sort_by(|a, b| a.total_cmp(b));
+        let min = passes[0];
+        let median = passes[passes.len() / 2];
+        let p90 = passes[passes.len() * 9 / 10];
+
+        // The ≥5 ms/pass work floor (plan 003 contract 2).
+        let pass_secs = min * f64::from(reps as u32);
+        if pass_secs < 5e-3 {
+            return Err(Exl3DequantError::TooFastToTime {
+                pass_secs,
+                reps,
+            });
+        }
+
+        let spread = if min > 0.0 { (p90 - min) / min } else { f64::INFINITY };
+        let unstable = spread > 0.10;
+
+        // Cross-method: the independent reps-differential estimate.
+        let (_, diff) = Self::decode_only_layer_timed::<R>(client, layer, arm, reps + 1)?;
+        let diff_per = diff.kernel_secs.unwrap_or(f64::INFINITY);
+        let cross_agrees = !unstable
+            && diff_per.is_finite()
+            && ((min - diff_per).abs() / diff_per.max(1e-12) <= 0.15);
+
+        Ok(StableBench {
+            weights: (layer.in_features * layer.out_features) as u64,
+            reps,
+            samples,
+            min_secs: min,
+            median_secs: median,
+            p90_secs: p90,
+            spread,
+            unstable,
+            diff_secs: diff.kernel_secs,
+            cross_agrees,
+        })
     }
 }
 
@@ -1459,5 +1602,98 @@ mod tests {
             "weight-weighted mean: A1 {k1:.1} / A2 {k2:.1} / A3 {k3:.1} Gw/s; A2/A1 {:.2}x",
             k2 / k1.max(1e-9)
         );
+    }
+
+    /// T7c-1d (plan 003): the STABLE harness replacing T7c-1b's noisy
+    /// differential-only readout — sync-bracketed sampling, min/median/p90,
+    /// the ≥5 ms work floor (TooFastToTime), the 10% instability gate, and
+    /// the 15% cross-method agreement gate. Prints the full stable table +
+    /// the per-arm verdicts; NO throughput assert (the §17.2 kill-criterion
+    /// language records bounds, it does not fail the lane). Opt-in via
+    /// `EXL3_PACK_DIR` + a GPU.
+    #[test]
+    #[ignore = "needs a real EXL3 pack on disk (EXL3_PACK_DIR) + a GPU"]
+    fn real_pack_decode_bench_stable() {
+        use riir_infer_core::quant::exl3_pack::Exl3Pack;
+
+        let dir = std::env::var("EXL3_PACK_DIR").unwrap_or_default();
+        if dir.is_empty() {
+            eprintln!("SKIPPED: EXL3_PACK_DIR not set");
+            return;
+        }
+        let pack = Exl3Pack::open(std::path::Path::new(&dir)).unwrap();
+        let ctx = CubeCLContext::new().expect("CubeCL should initialize");
+        let client = ctx.client();
+
+        let classes = [
+            "self_attn.o_proj",
+            "mlp.down_proj",
+            "linear_attn.out_proj",
+            "mlp.gate_proj",
+            "lm_head",
+        ];
+        // Reps scaled so even the smallest class clears the 5 ms/pass floor;
+        // the harness re-refuses with TooFastToTime if a row still lands short
+        // (the caller's signal to raise reps — the error names the floor).
+        const REPS: usize = 64;
+        const SAMPLES: usize = 30;
+
+        eprintln!(
+            "\n=== T7c-1d stable decode bench (REPS={REPS} SAMPLES={SAMPLES}) ==="
+        );
+        eprintln!("| layer | weights | arm | peak Gw/s | median | p90 | spread | cross-agree | verdict |" );
+        eprintln!("|---|---:|---|---:|---:|---:|---:|---|---|");
+
+        for class in classes {
+            let Some(plan) = pack
+                .plans()
+                .iter()
+                .filter(|p| p.key.contains(class))
+                .min_by_key(|p| p.in_features as u64 * p.out_features as u64)
+            else {
+                eprintln!("class {class}: none");
+                continue;
+            };
+            let layer = pack.layer(&plan.key).unwrap();
+
+            // §17.3 gate 1 at bench scope (re-asserted every run): v2 vs v1.
+            let (v1, _) = Exl3DequantCubeCL::decode_only_layer::<ActiveRuntime>(
+                &client, &layer, DecodeArm::V1, 1,
+            )
+            .unwrap();
+            let (v2, _) = Exl3DequantCubeCL::decode_only_layer::<ActiveRuntime>(
+                &client, &layer, DecodeArm::V2, 1,
+            )
+            .unwrap();
+            let bad = v1.iter().zip(&v2).filter(|(a, b)| a.to_bits() != b.to_bits()).count();
+            assert_eq!(bad, 0, "{}: v2 not bit-exact vs v1", plan.key);
+
+            for (name, arm) in [
+                ("A1-v1", DecodeArm::V1),
+                ("A2-v2", DecodeArm::V2),
+                ("A3-noLUT", DecodeArm::V2NoLut),
+            ] {
+                match Exl3DequantCubeCL::bench_arm_stable::<ActiveRuntime>(
+                    &client, &layer, arm, REPS, SAMPLES,
+                ) {
+                    Ok(b) => eprintln!(
+                        "| {} | {} | {name} | {:.1} | {:.1} | {:.1} | {:.1}% | {} | {} |",
+                        plan.key,
+                        b.weights,
+                        b.gw_peak(),
+                        b.gw_median(),
+                        b.weights as f64 / b.p90_secs / 1e9,
+                        b.spread * 100.0,
+                        if b.cross_agrees { "YES" } else { "no" },
+                        if b.unstable { "UNSTABLE" } else { "ok" },
+                    ),
+                    Err(Exl3DequantError::TooFastToTime { pass_secs, reps }) => eprintln!(
+                        "| {} | — | {name} | — | — | — | — | — | REFUSED: pass {pass_secs:.3}ms < 5ms floor at reps={reps} — raise reps |",
+                        plan.key
+                    ),
+                    Err(e) => panic!("bench_arm_stable failed: {e}"),
+                }
+            }
+        }
     }
 }
