@@ -34,6 +34,7 @@
 //! row_logit_floor_ppl <gemma2-f16.gguf> <corpus.txt> [--tokens N] [--seq-len N]
 //!                     [--needle N] [--ctx N] [--tv EPS] [--n-sink N]
 //!                     [--arms base,b8,b6,b6s0,b6n65536,...] [--dump-tokens N]
+//!                     [--decode-floor true]
 //! ```
 //! Arm grammar: `base` (plain softmax) or `b<bits>` followed by optional
 //! `s<n>` (sink count; default `--n-sink`, `s0` = no exemption, T4) and
@@ -133,6 +134,20 @@ struct Seq {
     score_from: usize,
     /// The labeled answer span (needle mode): the m_Y probe's `Y`.
     span: Option<std::ops::Range<usize>>,
+}
+
+/// One arm's running totals (sequence-major loop).
+#[derive(Default)]
+struct ArmAcc {
+    sum_nll: f64,
+    sum_abs: f64,
+    flips: usize,
+    k: usize,
+    exact: usize,
+    fwd: usize,
+    secs: f64,
+    stats: RowLogitFloorStats,
+    probe: Option<AttnSpanProbe>,
 }
 
 /// `b<bits>[s<n>][n<ctx>]` → policy; `base` → none.
@@ -252,7 +267,7 @@ fn main() -> Result<()> {
         eprintln!(
             "usage: row_logit_floor_ppl <gguf> <corpus.txt> [--tokens N] [--seq-len N] \
              [--needle N] [--ctx N] [--tv EPS] [--n-sink N] [--arms base,b8,b6,b6s0] \
-             [--dump-tokens N]"
+             [--dump-tokens N] [--decode-floor true]"
         );
         std::process::exit(2);
     }
@@ -262,6 +277,7 @@ fn main() -> Result<()> {
     let (mut needle, mut needle_ctx) = (0usize, 1536usize);
     let mut arm_specs = "base,b8,b6,b6s0".to_string();
     let mut dump_tokens = 0usize;
+    let mut decode_floor = false;
     let mut i = 3;
     while i < args.len() {
         let v = args.get(i + 1).context("flag needs a value")?;
@@ -274,6 +290,7 @@ fn main() -> Result<()> {
             "--n-sink" => n_sink = v.parse()?,
             "--arms" => arm_specs = v.clone(),
             "--dump-tokens" => dump_tokens = v.parse()?,
+            "--decode-floor" => decode_floor = v.parse()?,
             other => bail!("unknown arg {other}"),
         }
         i += 2;
@@ -346,52 +363,73 @@ fn main() -> Result<()> {
         corpus_path.display()
     );
 
+    // Sequence-major: per sequence, the positions before `floor_from` run
+    // ONCE with the plain softmax (shared by every arm), then each arm runs
+    // the rest under its policy. The forward writes KV at `pos` and reads only
+    // `0..=pos`, so re-running from `floor_from` overwrites exactly the rows
+    // an arm owns and never the shared prefix. `floor_from = 0` (the default,
+    // every row floored) is the arm-independent whole sequence;
+    // `--decode-floor true` floors only the scored rows — the decode-time
+    // low-bit consumer, whose prompt KV is dense.
     let mut ctx = ForwardContext::new(&config);
-    if needle > 0 {
-        ctx.attn_probe = Some(AttnSpanProbe::new(
+    let new_probe = || match needle {
+        0 => None,
+        _ => Some(AttnSpanProbe::new(
             config.n_layer,
             config.n_head,
             config.block_size,
-        ));
-    }
-    let mut probe_lines: Vec<String> = Vec::new();
+        )),
+    };
+    let mut accs: Vec<ArmAcc> = arms
+        .iter()
+        .map(|_| ArmAcc {
+            probe: new_probe(),
+            ..ArmAcc::default()
+        })
+        .collect();
     let mut cache = MultiLayerKVCache::new(&config);
     let mut base_nll: Vec<f64> = Vec::with_capacity(scored);
     let mut base_top: Vec<usize> = Vec::with_capacity(scored);
-    println!(
-        "| arm | ppl | Δppl | mean |ΔNLL| | top-1 flip | seq-exact | mean env TV | floored | mean w (nats) | tok/s |"
-    );
-    println!("|---|---|---|---|---|---|---|---|---|---|");
-    let mut base_ppl = 0.0f64;
-    for arm in &arms {
-        ctx.logit_floor = arm.policy;
-        ctx.logit_floor_stats = RowLogitFloorStats::default();
-        if let Some(p) = ctx.attn_probe.as_mut() {
-            p.reset();
+    let mut prefix_fwd = 0usize;
+    let t_prefix = Instant::now();
+    let mut prefix_secs = 0.0f64;
+    for seq in &seqs {
+        cache.reset();
+        let floor_from = match decode_floor {
+            true => seq.score_from,
+            false => 0,
+        };
+        let tp = Instant::now();
+        ctx.logit_floor = None;
+        ctx.attn_probe = None;
+        for pos in 0..floor_from {
+            model.forward(&mut ctx, &mut cache, seq.tokens[pos], pos, &config);
+            prefix_fwd += 1;
         }
-        let (mut sum_nll, mut sum_abs, mut flips, mut k) = (0.0f64, 0.0f64, 0usize, 0usize);
-        let (mut exact, mut fwd) = (0usize, 0usize);
-        let t = Instant::now();
-        for seq in &seqs {
-            cache.reset();
-            let mut all_right = true;
+        prefix_secs += tp.elapsed().as_secs_f64();
+        for (arm, acc) in arms.iter().zip(accs.iter_mut()) {
+            ctx.logit_floor = arm.policy;
+            std::mem::swap(&mut ctx.logit_floor_stats, &mut acc.stats);
+            std::mem::swap(&mut ctx.attn_probe, &mut acc.probe);
             if let (Some(p), Some(span)) = (ctx.attn_probe.as_mut(), &seq.span) {
                 p.span = span.clone();
             }
-            for pos in 0..seq.tokens.len() - 1 {
+            let t = Instant::now();
+            let mut all_right = true;
+            for pos in floor_from..seq.tokens.len() - 1 {
                 if let Some(p) = ctx.attn_probe.as_mut() {
                     p.armed = seq.span.is_some() && pos >= seq.score_from;
                     p.rows += u64::from(p.armed);
                 }
                 let logits = model.forward(&mut ctx, &mut cache, seq.tokens[pos], pos, &config);
-                fwd += 1;
+                acc.fwd += 1;
                 if pos < seq.score_from {
                     continue;
                 }
                 let target = seq.tokens[pos + 1];
                 let l = nll(logits, target);
                 let top = argmax(logits);
-                sum_nll += l;
+                acc.sum_nll += l;
                 all_right &= top == target;
                 match arm.policy {
                     None => {
@@ -399,19 +437,40 @@ fn main() -> Result<()> {
                         base_top.push(top);
                     }
                     Some(_) => {
-                        sum_abs += (l - base_nll[k]).abs();
-                        flips += usize::from(top != base_top[k]);
+                        acc.sum_abs += (l - base_nll[acc.k]).abs();
+                        acc.flips += usize::from(top != base_top[acc.k]);
                     }
                 }
-                k += 1;
+                acc.k += 1;
             }
-            exact += usize::from(all_right);
+            acc.secs += t.elapsed().as_secs_f64();
+            acc.exact += usize::from(all_right);
+            std::mem::swap(&mut ctx.logit_floor_stats, &mut acc.stats);
+            std::mem::swap(&mut ctx.attn_probe, &mut acc.probe);
         }
-        let secs = t.elapsed().as_secs_f64();
-        let ppl = (sum_nll / k as f64).exp();
-        let seq_exact = 100.0 * exact as f64 / seqs.len() as f64;
-        let st = ctx.logit_floor_stats;
-        if let Some(p) = ctx.attn_probe.as_ref() {
+    }
+    if decode_floor {
+        println!(
+            "# decode-floor: {prefix_fwd} shared dense prefix rows in {:.1}s ({:.2} tok/s); \
+             arms floor the scored rows only | total {:.1}s",
+            prefix_secs,
+            prefix_fwd as f64 / prefix_secs.max(1e-9),
+            t_prefix.elapsed().as_secs_f64()
+        );
+    }
+
+    let mut probe_lines: Vec<String> = Vec::new();
+    println!(
+        "| arm | ppl | Δppl | mean |ΔNLL| | top-1 flip | seq-exact | mean env TV | floored | mean w (nats) | tok/s |"
+    );
+    println!("|---|---|---|---|---|---|---|---|---|---|");
+    let mut base_ppl = 0.0f64;
+    for (arm, acc) in arms.iter().zip(&accs) {
+        let (k, secs, fwd) = (acc.k, acc.secs, acc.fwd);
+        let ppl = (acc.sum_nll / k as f64).exp();
+        let seq_exact = 100.0 * acc.exact as f64 / seqs.len() as f64;
+        let st = acc.stats;
+        if let Some(p) = acc.probe.as_ref() {
             let (l, h, m) = p.top_head();
             let layers: Vec<String> = p.layer_means().iter().map(|m| format!("{m:.3}")).collect();
             probe_lines.push(format!(
@@ -434,8 +493,8 @@ fn main() -> Result<()> {
                 "| {} | {ppl:.4} | {:+.3}% | {:.5} | {:.2}% | {seq_exact:.1}% | {:.4} | {:.3}% | {:.2} | {:.2} |",
                 arm.name,
                 100.0 * (ppl / base_ppl - 1.0),
-                sum_abs / k as f64,
-                100.0 * flips as f64 / k as f64,
+                acc.sum_abs / k as f64,
+                100.0 * acc.flips as f64 / k as f64,
                 st.mean_envelope_tv(),
                 100.0 * st.floored as f64 / st.ctx_keys.max(1) as f64,
                 st.width_sum / st.rows.max(1) as f64,
