@@ -1,7 +1,7 @@
 # Issue 001 — EXL3 (trellis-coded) weight-format support in the quantization zoo
 
-**Status:** OPEN — T1 + T2 + T3 + T4a (real-pack cross-implementation oracle) DONE 2026-09-24; T4b (exllamav3-native oracle) + T5–T7 pending.
-**Owner:** unassigned. **Filed:** 2026-09-24. **T1/T2/T3/T4a executed:** 2026-09-24 (4090 box).
+**Status:** OPEN — T1 + T2 + T3 + T4 (a: cross-impl oracle, b: NATIVE oracle BIT-EXACT) DONE 2026-09-24; T5–T7 pending (T5 needs full packs on our silicon).
+**Owner:** unassigned. **Filed:** 2026-09-24. **T1–T4 executed:** 2026-09-24 (4090 box).
 **Origin:** riir-clippy Research 207 (`.research/207_qwen38_exl3_dgx_spark_distill_verdict.md`),
 lane-intel axis. The corpus half of that verdict is riir-clippy Plan 170 and is
 independent of this issue — neither blocks the other.
@@ -146,11 +146,12 @@ is an open design question this issue does not pre-decide.
   exllamav3's own dequant on the same tensors (torch + CUDA ext build on
   the 4090; the MSVC fix at the pin suggests Windows is supported) and
   compare per-tensor numeric error per §6 (never text equality).
-- [ ] **T4b — exllamav3-native oracle** (see above; env-heavy, next session).
-  (The original T4 line is superseded by T4a ✓ + T4b ☐: T4a validated the
-  real-pack READ via an independent numpy oracle at machine precision; T4b
-  is the exllamav3-own-output comparison, still owed. §6's ban on text-equality
-  gates binds both.)
+- [x] **T4b — exllamav3-native oracle (DONE 2026-09-24; see above).**
+  The env WAS built same-session (torch 2.14+cu130 + the ext JIT under MSVC
+  14.41/nvcc 13.3; one build workaround + one clone-local build-flags patch,
+  both documented in §12.6) and the comparison ran — record in **§12.6**.
+  **VERDICT: BIT-EXACT on a pin-era pack** — and the old-pack discrepancy
+  that almost read as a spec bug resolved as a PACK-ERA mismatch (§12.7).
 - [ ] **T5 — Re-measure §2 on our silicon** (4090 / M3) before any promise about
   residency or throughput enters a plan, a README or a league row. The §2 table
   is n=1 on hardware we do not have.
@@ -621,3 +622,70 @@ ASSUME it — the index.json decides per pack).
 written from the same §10 spec, so a SPEC misreading shared by both would
 pass. The exllamav3-native oracle (T4b) is the remaining independent
 authority — its env cost is recorded above.
+
+### 12.6 T4b record — the exllamav3-native oracle (2026-09-24, 4090 box)
+
+**Env built same-session** (kept at `.raw/exl3-venv`, ~3 GB, gitignored):
+uv venv (py3.12) + torch 2.14.0+cu130 + the clone JIT-built under MSVC
+14.41 (BuildTools 2022) + nvcc 13.3, arch sm_89. Two build findings,
+both recorded for the next Windows build:
+
+1. **MSVC C1060 (heap exhaustion) on `bindings.cpp`** — root cause: the
+   HUGE inherited MSYS environment block; cl.exe fails even single-threaded
+   with it, compiles clean in a minimal env. Workaround: shrink `os.environ`
+   BEFORE `import exllamav3` (`.raw/build_ext_clean_env.py` keeps the
+   recipe) — INCLUDE/LIB must be set explicitly (torch's msvc detection
+   needs more than a bare PATH).
+2. **Clone-local BUILD-FLAGS patch** (`.raw/exllamav3/exllamav3/ext.py`):
+   `/Zc:preprocessor` dropped, `/bigobj` added — build flags only, zero
+   algorithm/kernel source touched; the oracle's math is unmodified.
+
+**Oracle specimen (pin-era):** `Terra3312/GLM-5.3-Flash-EXL3-4bpw-MUL1`
+shard 1, `model.language_model.layers.0.self_attn.o_proj`
+(in=8192, out=4096, K=4, **cb2/mul1**, suh+svh) — range-fetched
+surgically (16.8 MB of a 22-shard pack).
+
+**RESULTS (all four gates green):**
+
+| gate | result |
+|---|---|
+| state words vs their `unpack_trellis` (tile 0,0) | **256/256 exact** |
+| tile(0,0) cb2 values + my tensor-core placement vs their `reconstruct` | **256/256 exact** |
+| FULL w_rot (8192×4096 = 33.5M weights) vs their `reconstruct` | **BIT-EXACT (max_abs = 0.0)**, rel-Frobenius −7.4e-08 |
+| FULL W (Hadamards + suh/svh) vs their `get_weight_tensor` | rel-Frobenius **2.96e-08**, max_abs 1.8e-4 on max\|W\|=0.284 (their fp16 intermediates vs f32 — the expected class) |
+
+**The §10 spec — ring layout, u16-pair transposition, tail-biting windows,
+tensor-core element order, cb2 `__hfma` emulation, Sylvester-128 Hadamards,
+channel scales — is CONFIRMED BIT-EXACT against the reference
+implementation on pin-era data.** T4 is COMPLETE (T4a cross-implementation
++ T4b native oracle). Chain of evidence: Rust ≈ numpy at 3.5e-13 (T4a);
+numpy = native bit-exact (T4b) — Rust ↔ native transitively confirmed.
+
+### 12.7 ⚠ The pack-era finding (a T4b by-product — READ before picking an oracle pack)
+
+The FIRST oracle specimen (`async0x42/Qwen3-8B-exl3_4.0bpw`, created
+**2025-05-10**) FAILED the native comparison: rel-Frobenius 0.184, with my
+cb0-of-verified-words values ABSENT (250/256) from their `reconstruct`
+output — while their own `unpack_trellis` on the same tile agrees with my
+decode 256/256. Diagnosis path (all measured, `.raw/exl3_t4b_diag*.py`):
+no bit-alignment, bit-order, codebook, or window-shift variant of the tile
+bytes reproduces their values — meaning current `reconstruct` reads that
+old pack differently than current `unpack_trellis` does. Git history:
+the pack was made one day after commit `456f14f` ("Fix regression",
+2025-05-09); the format's layout machinery evolved after (tensor-core
+permutation, codebook defaults, packing) with no compat guarantee —
+exllamav3 carries no format version marker, so OLD PACKS SILENTLY DECODE
+WRONG (or at least differently) under current code.
+
+**Consequences:**
+1. For any future oracle or production read: use pin-era packs only; the
+   pack creation date vs the pin is a load-bearing compatibility axis the
+   format does not self-describe. (A candidate detector: compare
+   `unpack_trellis`-consistent words against a small `reconstruct` probe —
+   divergence ⇒ legacy pack, refuse loudly.)
+2. T4a's numpy-vs-Rust agreement on that old pack remains valid (both
+   implementations of the CURRENT spec, self-consistent) — but the T4a
+   fixture is a LEGACY pack; the modern specimen is the authoritative one.
+3. Filed as an upstream curiosity only — turboderp's format, his call;
+   our loader refuses-by-marker already covers the marker dimension, and
+   the era dimension is ours to gate when T5/T6 wire a real loader.
