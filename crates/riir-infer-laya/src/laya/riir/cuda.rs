@@ -49,6 +49,11 @@
 //!   staging rows pad to 16 B multiples (68/132) and each thread's four
 //!   contiguous B-fragment loads collapse to ONE float4 — measured
 //!   −5..−25 % on every wide-served shape, bit-identical results.
+//!   The `.issues/007` rung sits one level up: the wide/xwide slots route
+//!   to `sgemm_wide_reg4`/`sgemm_xwide_reg4` — the SAME tiles and grids at
+//!   half the threads with 4×4 register fragments (16 accumulators, 2 B of
+//!   smem reads per FMA vs 3), lifting the shared-bandwidth roofline
+//!   33 %→ 50 % of fp32 peak; `LAYA_CUDA_REG4=0` holds the 2-acc posture.
 //! - **Attention**: the FUSED flash kernel — ONE dispatch per layer over
 //!   the packed qkv (split → rope → q-scale → scores → sliding window →
 //!   softmax → value mix → head merge in-kernel, the Metal lane's
@@ -124,6 +129,16 @@ const XWIDE_BN: u32 = 128;
 const XWIDE_THREADS: u32 = 1024;
 const XWIDE_SMEM_BYTES: u32 = (64 * 33 + 32 * 132) * 4;
 
+/// The reg4 instances (`.issues/007`): the SAME tiles as wide/xwide at HALF
+/// the threads, warp tile 32×16 (warp grid 2×4 / 2×8), fragment 4 rows ×
+/// 4 cols = 16 accumulators — 4 LDS.32 + 1 LDS.128 per 16 FMAs = 2 B of
+/// smem reads per FMA (the 2-acc instances' 3) → the shared-bandwidth
+/// roofline moves 33 % → 50 %. Same grids as the 2-acc instances, so every
+/// measured ladder property (block-fit cliffs, tails) carries over; smem
+/// footprints are IDENTICAL to wide/xwide (same staging tiles).
+const REG4_WIDE_THREADS: u32 = 256;
+const REG4_XWIDE_THREADS: u32 = 512;
+
 /// The ladder floors — MEASURED ON THIS BOX (the 4090, `.issues/004`;
 /// the `sgemm_shape_timing` CUDA arm, position-balanced pairs + the
 /// `--control` two-context artifact band ±8 %): the pick is BLOCK-FIT —
@@ -173,6 +188,8 @@ const KERNELS: &[&str] = &[
     "sgemm_narrow",
     "sgemm_wide",
     "sgemm_xwide",
+    "sgemm_wide_reg4",
+    "sgemm_xwide_reg4",
     "add",
     "copy_f",
     "add_bias_row",
@@ -538,6 +555,267 @@ extern "C" __global__ void sgemm_xwide(
         if (gc0 + 1u < n) C[(size_t)(gr0 + 8u) * n + gc0 + 1u] = acc5;
         if (gc0 + 2u < n) C[(size_t)(gr0 + 8u) * n + gc0 + 2u] = acc6;
         if (gc0 + 3u < n) C[(size_t)(gr0 + 8u) * n + gc0 + 3u] = acc7;
+    }
+}
+
+// ── the reg4 instances (`.issues/007`): the register-blocking rung ───────
+// SAME tiles / grids as wide + xwide at HALF the threads, fragment 4 rows
+// × 4 cols (16 accumulators): 4 LDS.32 (A) + 1 LDS.128 (B) feed 16 FMAs —
+// 2 B of smem reads per FMA vs the 2-acc instances' 3. The lane measured
+// 25-30 % of fp32 peak with a 33 % shared-bandwidth roofline; this moves
+// the ceiling to 50 %. Per-output accumulation stays k-ascending in ONE
+// thread (the result-identity law is untouched — bit-identical expected).
+// Warp tile 32×16: rows wr*32 + tr + {0,8,16,24} (tr = lane>>2 ∈ 0..7,
+// ×4 row-gens = 32), cols tc..tc+3 stay ONE float4 (the `.issues/006` law,
+// col0 a multiple of 4 → 16 B aligned). Kill-switch `LAYA_CUDA_REG4=0`
+// holds the 2-acc posture (the A/B and bisect switch).
+extern "C" __global__ void sgemm_wide_reg4(
+    const float* __restrict__ a,
+    const float* __restrict__ b,
+    float* __restrict__ c,
+    const unsigned int a_off,
+    const unsigned int b_off,
+    const unsigned int c_off,
+    const unsigned int m,
+    const unsigned int n,
+    const unsigned int k,
+    const unsigned int a_rs,
+    const unsigned int a_cs,
+    const unsigned int b_rs,
+    const unsigned int b_cs,
+    const unsigned int a_bs,
+    const unsigned int b_bs,
+    const unsigned int c_bs)
+{
+    __shared__ float ta[BM * 33];
+    __shared__ float tb[BK * 68];
+
+    const unsigned int m0 = blockIdx.y * BM;
+    const unsigned int n0 = blockIdx.x * BN;
+    const float* A = a + a_off + (size_t)blockIdx.z * a_bs;
+    const float* B = b + b_off + (size_t)blockIdx.z * b_bs;
+    float* C = c + c_off + (size_t)blockIdx.z * c_bs;
+
+    const unsigned int tid = threadIdx.x;   // 0..255
+    // Warp grid 2×4: warp tile 32 rows × 16 cols; thread fragment
+    // 4 rows (tr + 8·g, g 0..3) × 4 cols — 16 accumulators/thread,
+    // 256 threads × 16 = 64×64.
+    const unsigned int warp = tid >> 5;     // 0..7
+    const unsigned int lane = tid & 31u;
+    const unsigned int wr = warp >> 2;      // warp row 0..1 (32 rows each)
+    const unsigned int wc = warp & 3u;      // warp col 0..3 (16 cols each)
+    const unsigned int tr = lane >> 2;      // 0..7
+    const unsigned int tc = (lane & 3u) * 4u;   // 0, 4, 8, 12
+    const unsigned int row0 = wr * 32u + tr;
+    const unsigned int col0 = wc * 16u + tc;
+
+    float acc0 = 0.0f, acc1 = 0.0f, acc2 = 0.0f, acc3 = 0.0f;
+    float acc4 = 0.0f, acc5 = 0.0f, acc6 = 0.0f, acc7 = 0.0f;
+    float acc8 = 0.0f, acc9 = 0.0f, acc10 = 0.0f, acc11 = 0.0f;
+    float acc12 = 0.0f, acc13 = 0.0f, acc14 = 0.0f, acc15 = 0.0f;
+    for (unsigned int t = 0; t < k; t += BK) {
+        __syncthreads();
+        // Stage A [64][32]: 8 elements per thread (2 048 / 256), lanes
+        // along the k column (a_cs is 1 at every call site).
+        #pragma unroll
+        for (unsigned int q = 0; q < 8; ++q) {
+            const unsigned int idx = tid + q * 256u;
+            const unsigned int r = idx >> 5;
+            const unsigned int col = idx & 31u;
+            const unsigned int gr = m0 + r;
+            const unsigned int gc = t + col;
+            ta[r * 33u + col] =
+                (gr < m && gc < k) ? A[(size_t)gr * a_rs + gc * a_cs] : 0.0f;
+        }
+        // Stage B [32][64]: 8 per thread (2 048 / 256), row pad 68.
+        if (b_cs == 1u) {
+            #pragma unroll
+            for (unsigned int q = 0; q < 8; ++q) {
+                const unsigned int idx = tid + q * 256u;
+                const unsigned int kk = idx >> 6;
+                const unsigned int col = idx & 63u;
+                const unsigned int gk = t + kk;
+                const unsigned int gn = n0 + col;
+                tb[kk * 68u + col] =
+                    (gk < k && gn < n) ? B[(size_t)gk * b_rs + gn] : 0.0f;
+            }
+        } else {
+            #pragma unroll
+            for (unsigned int q = 0; q < 8; ++q) {
+                const unsigned int idx = tid + q * 256u;
+                const unsigned int kk = idx & 31u;
+                const unsigned int col = idx >> 5;
+                const unsigned int gk = t + kk;
+                const unsigned int gn = n0 + col;
+                tb[kk * 68u + col] =
+                    (gk < k && gn < n) ? B[(size_t)gn * b_cs + gk * b_rs] : 0.0f;
+            }
+        }
+        __syncthreads();
+        // 4 row-gens × ONE float4 B fragment per k-step.
+        #pragma unroll
+        for (unsigned int kk = 0; kk < BK; ++kk) {
+            const float a0 = ta[row0 * 33u + kk];
+            const float a1 = ta[(row0 + 8u) * 33u + kk];
+            const float a2 = ta[(row0 + 16u) * 33u + kk];
+            const float a3 = ta[(row0 + 24u) * 33u + kk];
+            const float4 bv = *reinterpret_cast<const float4*>(&tb[kk * 68u + col0]);
+            acc0 += a0 * bv.x; acc1 += a0 * bv.y; acc2 += a0 * bv.z; acc3 += a0 * bv.w;
+            acc4 += a1 * bv.x; acc5 += a1 * bv.y; acc6 += a1 * bv.z; acc7 += a1 * bv.w;
+            acc8 += a2 * bv.x; acc9 += a2 * bv.y; acc10 += a2 * bv.z; acc11 += a2 * bv.w;
+            acc12 += a3 * bv.x; acc13 += a3 * bv.y; acc14 += a3 * bv.z; acc15 += a3 * bv.w;
+        }
+    }
+    const unsigned int gr0 = m0 + row0;
+    const unsigned int gc0 = n0 + col0;
+    if (gr0 < m) {
+        if (gc0 + 0u < n) C[(size_t)gr0 * n + gc0 + 0u] = acc0;
+        if (gc0 + 1u < n) C[(size_t)gr0 * n + gc0 + 1u] = acc1;
+        if (gc0 + 2u < n) C[(size_t)gr0 * n + gc0 + 2u] = acc2;
+        if (gc0 + 3u < n) C[(size_t)gr0 * n + gc0 + 3u] = acc3;
+    }
+    if (gr0 + 8u < m) {
+        if (gc0 + 0u < n) C[(size_t)(gr0 + 8u) * n + gc0 + 0u] = acc4;
+        if (gc0 + 1u < n) C[(size_t)(gr0 + 8u) * n + gc0 + 1u] = acc5;
+        if (gc0 + 2u < n) C[(size_t)(gr0 + 8u) * n + gc0 + 2u] = acc6;
+        if (gc0 + 3u < n) C[(size_t)(gr0 + 8u) * n + gc0 + 3u] = acc7;
+    }
+    if (gr0 + 16u < m) {
+        if (gc0 + 0u < n) C[(size_t)(gr0 + 16u) * n + gc0 + 0u] = acc8;
+        if (gc0 + 1u < n) C[(size_t)(gr0 + 16u) * n + gc0 + 1u] = acc9;
+        if (gc0 + 2u < n) C[(size_t)(gr0 + 16u) * n + gc0 + 2u] = acc10;
+        if (gc0 + 3u < n) C[(size_t)(gr0 + 16u) * n + gc0 + 3u] = acc11;
+    }
+    if (gr0 + 24u < m) {
+        if (gc0 + 0u < n) C[(size_t)(gr0 + 24u) * n + gc0 + 0u] = acc12;
+        if (gc0 + 1u < n) C[(size_t)(gr0 + 24u) * n + gc0 + 1u] = acc13;
+        if (gc0 + 2u < n) C[(size_t)(gr0 + 24u) * n + gc0 + 2u] = acc14;
+        if (gc0 + 3u < n) C[(size_t)(gr0 + 24u) * n + gc0 + 3u] = acc15;
+    }
+}
+
+// The xwide reg4 instance: SAME 64×128×32 tile at 512 threads (warp grid
+// 2×8, warp tile 32×16, fragment 4×4). Occupancy 3 blocks/SM = 48 warps
+// (the 1 024-thread xwide caps at 32). Same arg contract.
+extern "C" __global__ void sgemm_xwide_reg4(
+    const float* __restrict__ a,
+    const float* __restrict__ b,
+    float* __restrict__ c,
+    const unsigned int a_off,
+    const unsigned int b_off,
+    const unsigned int c_off,
+    const unsigned int m,
+    const unsigned int n,
+    const unsigned int k,
+    const unsigned int a_rs,
+    const unsigned int a_cs,
+    const unsigned int b_rs,
+    const unsigned int b_cs,
+    const unsigned int a_bs,
+    const unsigned int b_bs,
+    const unsigned int c_bs)
+{
+    __shared__ float ta[64u * 33u];
+    __shared__ float tb[32u * 132u];
+
+    const unsigned int m0 = blockIdx.y * 64u;
+    const unsigned int n0 = blockIdx.x * 128u;
+    const float* A = a + a_off + (size_t)blockIdx.z * a_bs;
+    const float* B = b + b_off + (size_t)blockIdx.z * b_bs;
+    float* C = c + c_off + (size_t)blockIdx.z * c_bs;
+
+    const unsigned int tid = threadIdx.x;   // 0..511
+    // Warp grid 2×8: warp tile 32 rows × 16 cols; fragment 4×4
+    // (512 threads × 16 = 64×128).
+    const unsigned int warp = tid >> 5;     // 0..15
+    const unsigned int lane = tid & 31u;
+    const unsigned int wr = warp >> 3;      // warp row 0..1 (32 rows each)
+    const unsigned int wc = warp & 7u;      // warp col 0..7 (16 cols each)
+    const unsigned int tr = lane >> 2;      // 0..7
+    const unsigned int tc = (lane & 3u) * 4u;   // 0, 4, 8, 12
+    const unsigned int row0 = wr * 32u + tr;
+    const unsigned int col0 = wc * 16u + tc;
+
+    float acc0 = 0.0f, acc1 = 0.0f, acc2 = 0.0f, acc3 = 0.0f;
+    float acc4 = 0.0f, acc5 = 0.0f, acc6 = 0.0f, acc7 = 0.0f;
+    float acc8 = 0.0f, acc9 = 0.0f, acc10 = 0.0f, acc11 = 0.0f;
+    float acc12 = 0.0f, acc13 = 0.0f, acc14 = 0.0f, acc15 = 0.0f;
+    for (unsigned int t = 0; t < k; t += 32u) {
+        __syncthreads();
+        // Stage A [64][32]: 4 elements per thread (2 048 / 512).
+        #pragma unroll
+        for (unsigned int q = 0; q < 4; ++q) {
+            const unsigned int idx = tid + q * 512u;
+            const unsigned int r = idx >> 5;
+            const unsigned int col = idx & 31u;
+            const unsigned int gr = m0 + r;
+            const unsigned int gc = t + col;
+            ta[r * 33u + col] =
+                (gr < m && gc < k) ? A[(size_t)gr * a_rs + gc * a_cs] : 0.0f;
+        }
+        // Stage B [32][128]: 8 per thread (4 096 / 512), row pad 132.
+        if (b_cs == 1u) {
+            #pragma unroll
+            for (unsigned int q = 0; q < 8; ++q) {
+                const unsigned int idx = tid + q * 512u;
+                const unsigned int kk = idx >> 7;
+                const unsigned int col = idx & 127u;
+                const unsigned int gk = t + kk;
+                const unsigned int gn = n0 + col;
+                tb[kk * 132u + col] =
+                    (gk < k && gn < n) ? B[(size_t)gk * b_rs + gn] : 0.0f;
+            }
+        } else {
+            #pragma unroll
+            for (unsigned int q = 0; q < 8; ++q) {
+                const unsigned int idx = tid + q * 512u;
+                const unsigned int kk = idx & 31u;
+                const unsigned int col = idx >> 5;
+                const unsigned int gk = t + kk;
+                const unsigned int gn = n0 + col;
+                tb[kk * 132u + col] =
+                    (gk < k && gn < n) ? B[(size_t)gn * b_cs + gk * b_rs] : 0.0f;
+            }
+        }
+        __syncthreads();
+        #pragma unroll
+        for (unsigned int kk = 0; kk < 32u; ++kk) {
+            const float a0 = ta[row0 * 33u + kk];
+            const float a1 = ta[(row0 + 8u) * 33u + kk];
+            const float a2 = ta[(row0 + 16u) * 33u + kk];
+            const float a3 = ta[(row0 + 24u) * 33u + kk];
+            const float4 bv = *reinterpret_cast<const float4*>(&tb[kk * 132u + col0]);
+            acc0 += a0 * bv.x; acc1 += a0 * bv.y; acc2 += a0 * bv.z; acc3 += a0 * bv.w;
+            acc4 += a1 * bv.x; acc5 += a1 * bv.y; acc6 += a1 * bv.z; acc7 += a1 * bv.w;
+            acc8 += a2 * bv.x; acc9 += a2 * bv.y; acc10 += a2 * bv.z; acc11 += a2 * bv.w;
+            acc12 += a3 * bv.x; acc13 += a3 * bv.y; acc14 += a3 * bv.z; acc15 += a3 * bv.w;
+        }
+    }
+    const unsigned int gr0 = m0 + row0;
+    const unsigned int gc0 = n0 + col0;
+    if (gr0 < m) {
+        if (gc0 + 0u < n) C[(size_t)gr0 * n + gc0 + 0u] = acc0;
+        if (gc0 + 1u < n) C[(size_t)gr0 * n + gc0 + 1u] = acc1;
+        if (gc0 + 2u < n) C[(size_t)gr0 * n + gc0 + 2u] = acc2;
+        if (gc0 + 3u < n) C[(size_t)gr0 * n + gc0 + 3u] = acc3;
+    }
+    if (gr0 + 8u < m) {
+        if (gc0 + 0u < n) C[(size_t)(gr0 + 8u) * n + gc0 + 0u] = acc4;
+        if (gc0 + 1u < n) C[(size_t)(gr0 + 8u) * n + gc0 + 1u] = acc5;
+        if (gc0 + 2u < n) C[(size_t)(gr0 + 8u) * n + gc0 + 2u] = acc6;
+        if (gc0 + 3u < n) C[(size_t)(gr0 + 8u) * n + gc0 + 3u] = acc7;
+    }
+    if (gr0 + 16u < m) {
+        if (gc0 + 0u < n) C[(size_t)(gr0 + 16u) * n + gc0 + 0u] = acc8;
+        if (gc0 + 1u < n) C[(size_t)(gr0 + 16u) * n + gc0 + 1u] = acc9;
+        if (gc0 + 2u < n) C[(size_t)(gr0 + 16u) * n + gc0 + 2u] = acc10;
+        if (gc0 + 3u < n) C[(size_t)(gr0 + 16u) * n + gc0 + 3u] = acc11;
+    }
+    if (gr0 + 24u < m) {
+        if (gc0 + 0u < n) C[(size_t)(gr0 + 24u) * n + gc0 + 0u] = acc12;
+        if (gc0 + 1u < n) C[(size_t)(gr0 + 24u) * n + gc0 + 1u] = acc13;
+        if (gc0 + 2u < n) C[(size_t)(gr0 + 24u) * n + gc0 + 2u] = acc14;
+        if (gc0 + 3u < n) C[(size_t)(gr0 + 24u) * n + gc0 + 3u] = acc15;
     }
 }
 
@@ -1042,6 +1320,11 @@ pub struct Cuda {
     /// WIDE instance — the A/B and bisect posture, never a silent default
     /// (the `LAYA_CUDA_FLASH` contract).
     ladder_disabled: bool,
+    /// Kill-switch (`LAYA_CUDA_REG4=0`): route wide/xwide-class shapes
+    /// through the 2-accumulator instances instead of the `.issues/007`
+    /// register-blocked ones — the A/B and bisect posture, never a silent
+    /// default (the `LAYA_CUDA_LADDER` contract).
+    reg4_disabled: bool,
     /// The per-pass submit/wall instrument (`.issues/005` T1). `None`
     /// outside a pass; set at every `begin_pass`, consumed by the pass's
     /// first `download_into`.
@@ -1094,6 +1377,7 @@ impl Cuda {
             epoch: AtomicU64::new(0),
             flash_disabled: std::env::var("LAYA_CUDA_FLASH").as_deref() == Ok("0"),
             ladder_disabled: std::env::var("LAYA_CUDA_LADDER").as_deref() == Ok("0"),
+            reg4_disabled: std::env::var("LAYA_CUDA_REG4").as_deref() == Ok("0"),
             stats: Mutex::new(None),
             up_ns: AtomicU64::new(0),
             up_bytes: AtomicU64::new(0),
@@ -1245,8 +1529,13 @@ impl Cuda {
         // so narrow serves exactly the shapes whose narrow grid fits one
         // wave (m<256-and-n≤2048 falls out of the arithmetic); xwide serves
         // the big-n projections whose xwide grid still fits. The kill-switch
-        // forces wide everywhere (the A/B posture, no rebuild needed).
+        // forces wide everywhere (the A/B posture, no rebuild needed). The
+        // `.issues/007` reg4 rung: the wide/xwide slots route to the
+        // SAME-tile register-blocked instances (identical grids — every
+        // measured block-fit property carries over); `LAYA_CUDA_REG4=0`
+        // holds the 2-acc posture (the A/B switch).
         let blocks = |bm: u32, bn: u32| n.div_ceil(bn) * m.div_ceil(bm) * batch.max(1);
+        let reg4 = !self.reg4_disabled;
         let (name, bm, bn, threads) = if !self.ladder_disabled
             && blocks(NARROW_BM, NARROW_BN) <= SM_COUNT
         {
@@ -1256,7 +1545,13 @@ impl Cuda {
             && n >= XWIDE_N_MIN
             && blocks(XWIDE_BM, XWIDE_BN) <= SM_COUNT
         {
-            ("sgemm_xwide", XWIDE_BM, XWIDE_BN, XWIDE_THREADS)
+            if reg4 {
+                ("sgemm_xwide_reg4", XWIDE_BM, XWIDE_BN, REG4_XWIDE_THREADS)
+            } else {
+                ("sgemm_xwide", XWIDE_BM, XWIDE_BN, XWIDE_THREADS)
+            }
+        } else if reg4 {
+            ("sgemm_wide_reg4", BM, BN, REG4_WIDE_THREADS)
         } else {
             ("sgemm_wide", BM, BN, SGEMM_THREADS)
         };

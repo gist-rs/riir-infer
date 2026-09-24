@@ -4,6 +4,65 @@ Durable records for resolved questions and closed lanes (the noise-reduction
 convention: the record lands here, hash-pinned; open work lives in `.issues/`
 and `.plans/`). Created 2026-09-23 at the first record.
 
+## 2026-09-25 — Issue 007 CLOSED: the register-blocking sgemm rung — 4×4 fragments, −9..−21 % kernel on every wide/xwide shape
+
+The `.issues/006` follow-up rung ("register blocking / double-buffered
+staging — the instances sit at 25-30 % of fp32 peak") landed as REGISTER
+BLOCKING, and the choice between the two candidates was settled by the
+arithmetic, not taste: after the float4 rung the inner loop is
+**2×LDS.32 (A) + 1×LDS.128 (B) ≈ 6 SM-cycles of shared-memory bandwidth per
+8 FMAs ≈ 2 SM-cycles of FFMA capacity** — a ~33 % shared-bandwidth roofline
+at full occupancy, matching the measured 25-30 %. The lane is BANDWIDTH-
+bound, not latency-bound, so double buffering (a latency repair) buys
+nothing; register blocking raises the ratio.
+
+**The rung**: `sgemm_wide_reg4` + `sgemm_xwide_reg4` — the SAME tiles and
+grids as wide/xwide at HALF the threads (256 / 512), warp tile 32×16 (warp
+grid 2×4 / 2×8), thread fragment **4 rows × 4 cols = 16 accumulators**:
+4 LDS.32 + 1 LDS.128 per 16 FMAs = **2 B of smem reads per FMA (the 2-acc
+instances' 3)** → ceiling 50 %. Same grids mean every measured ladder
+property (block-fit cliffs, straggler tails) carries over untouched; xwide
+additionally rises to 3 blocks/SM = 48 warps (the 1 024-thread instance
+capped at 32). Per-output accumulation stays k-ascending in ONE thread —
+the result-identity law is untouched. Kill-switch `LAYA_CUDA_REG4=0` holds
+the 2-acc posture (the `LAYA_CUDA_LADDER` contract).
+
+**Measured** (`sgemm_shape_timing`, the A/B axis moved to
+`LAYA_CUDA_REG4`; two full runs + `--control`): every wide/xwide-served
+row negative in run 2 — banking77 zone −9.4..−16.1 %, the packed
+multi-wave zone −9.4..−21.4 % (O m=1268 175→151 µs, down 436→345, QKV
+477→387, gate/up 735→637), the m=106/45 n≥2560 rows −10..−22 %. Run-1's
+lone positive (424 QKV +3.5 %) flipped to −9.4 % in run 2 — inside the
+instrument band, which the `--control` arm (SAME-kernel pairs) measured at
+−14.9..+10.1 % on this box this hour (the sibling session's builds — wider
+than the recorded ±8 %, why every row was read against it). Narrow-served
+rows flat on both runs (both postures route narrow — the design's
+consistency check). Live-row median ≈ −12..−13 %, gate was ≥3 %.
+
+Forward level (paired same-binary env-flip, 3 alternating pairs):
+english 13.1→12.4 ms row p50 (−5.3 %), typed 12.9→12.4 (−3.9 %),
+multilingual flat — the dilution is structural: at fixture seqs only the
+n≥2560 projections route wide-class (the rest narrow, unchanged; attention
+and the row kernels untouched).
+
+**Published row refresh** (reflex `.benchmarks/031`, 15 suites PASSED,
+host 4090-windows): every suite ≤ 030's p50 — median −6.2 %, best −9.0 %
+(the packed typed_decisions trio), the short fixed-overhead suites flat.
+Accuracy 14/17 rows BIT-IDENTICAL; the three typed_decisions rows wobble
+3-7 cases in 2000 — that lane's pre-existing `determinism_ok: false`
+variance (false in 026/028/029/030 AND 031, on record since v1).
+
+Gates at the landing: `cuda_ops_smoke` 4/4 (the ladder-boundary + ragged
+arms now route through the reg4 kernels at the default posture) ·
+`packed_forward_equiv` 4/4 · lib 41/41 · consumer G5 at the cuda posture
+2/2 (top-1 1.000000 ×3, prob drift ≤ 3.3e-6 — the lane's own class) ·
+`laya_batch_parity` 1/1 · clippy clean both repos. Remaining upside on
+record: the reg4 instances should now sit near ~40 % of fp32 peak (the
+50 %-ceiling minus overheads), and the NARROW instance (1×4 fragment,
+~20 % ceiling, m<256 single-wave zone) is the next relative laggard — a
+narrow reg4 arm is the recorded follow-up rung, measured before built
+(the `.issues/007` §Open question).
+
 ## 2026-09-25 — Issue 006 CLOSED: the float4 sgemm rung — every instance's B loads collapsed, −7..−17 % on every suite
 
 The `.issues/004` open question ("the packed multi-wave zone has no measured
