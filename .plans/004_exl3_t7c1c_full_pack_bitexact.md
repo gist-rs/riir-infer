@@ -54,8 +54,17 @@ gap.
       503 MiB / 37.5 W, AC, no compute apps); the box's `git fetch` hung
       twice (github unreachable from the box) — synced via a git bundle
       (`develop ^<base>` scp'd to `.raw/`, fetched + ff-merged there), the
-      documented workaround for a fetch-dead box. Whole-pack table +
-      coverage in the issue §17.5 T7c-1c row.
+      documented workaround for a fetch-dead box). Post-run diagnostic
+      (recorded for the next agent): TCP to github.com :22/:443 is UP from
+      the box, direct `ssh -T git@github.com` authenticates fine
+      ("Hi katopz!"), plain git (log/status/merge/bundle-fetch) works —
+      ONLY remote-reaching git (`fetch origin` / `ls-remote origin`)
+      hangs, with and without `GIT_SSH_COMMAND` BatchMode. Suspect:
+      the ssh binary git-for-windows resolves under a non-interactive
+      session prompting on a pipe that never delivers input. Fix belongs
+      to whoever holds an interactive box session: check
+      `git config --show-origin --get core.sshCommand` + which ssh git
+      spawns there. The bundle path is the workaround until then.
 - [x] T3 — commit + push; issue status line updated; plan closed. The
       T7c-2 proceed/pivot/close decision stays the OWNER call.
 - [x] T4 — the M3 Metal bonus run (same gate, second backend): the pack
