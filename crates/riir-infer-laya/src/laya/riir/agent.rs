@@ -112,6 +112,26 @@ enum EncoderStack {
     Ane(super::ane::AneEncoder),
 }
 
+impl EncoderStack {
+    /// Warm the per-op lanes' weights on the backend (Issue 020 T1). The
+    /// ANE variant carries no per-op weights — nothing to place. Without
+    /// the ane feature the enum has ONE variant, so the plain `let` is
+    /// irrefutable and compiles warning-free.
+    fn warm(&self, b: &dyn Backend) {
+        #[cfg(all(target_os = "macos", feature = "laya-riir-ane"))]
+        if let EncoderStack::Local(e) = self {
+            return e.warm(b);
+        }
+        #[cfg(not(all(target_os = "macos", feature = "laya-riir-ane")))]
+        {
+            let EncoderStack::Local(e) = self;
+            e.warm(b);
+        }
+        #[cfg(all(target_os = "macos", feature = "laya-riir-ane"))]
+        let _ = b;
+    }
+}
+
 /// A loaded checkpoint (riir backend): tokenizer + encoder + head +
 /// temperature tables, plus the device backend the forward runs on.
 pub struct RiirAgent {
@@ -248,9 +268,7 @@ impl RiirAgent {
         // own handshake. The ANE lane's encoder carries no per-op weights
         // (the artifact holds them fp16); its head still warms. No-op on
         // the CPU backend.
-        if let EncoderStack::Local(enc) = &enc {
-            enc.warm(backend.as_ref());
-        }
+        enc.warm(backend.as_ref());
         head.warm(backend.as_ref());
 
         let temps = Temperatures::from_config(&agent_cfg);
@@ -281,6 +299,18 @@ impl RiirAgent {
     /// never be mistaken for the other posture.
     pub fn device(&self) -> &'static str {
         self.device_label
+    }
+
+    /// The largest sequence length the ANE lane can serve (its biggest
+    /// manifest bucket) — `None` when this is not the ANE posture. The
+    /// consumer-side gate uses it to name + floor the out-of-bucket skips
+    /// WITHOUT paying a probe forward.
+    #[cfg(all(target_os = "macos", feature = "laya-riir-ane"))]
+    pub fn ane_bucket_max(&self) -> Option<usize> {
+        match &self.enc {
+            EncoderStack::Local(_) => None,
+            EncoderStack::Ane(e) => e.buckets().last().copied(),
+        }
     }
 
     /// Forward one question against `state` — one unpadded sequence, the

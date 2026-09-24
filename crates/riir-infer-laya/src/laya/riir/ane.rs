@@ -325,11 +325,8 @@ impl AneRuntime {
         files.sort_by(|a, b| a.0.cmp(&b.0));
         let total: u64 = files
             .iter()
-            .map(|(p, _)| {
-                std::fs::metadata(p)
-                    .map(|m| m.len())
-                    .unwrap_or_default()
-            })
+            .filter_map(|(_, path)| std::fs::metadata(path).ok())
+            .map(|m| m.len())
             .sum();
         if files.len() != entry.digest_files || total != entry.digest_bytes {
             return Err(LayaError::Runtime(format!(
