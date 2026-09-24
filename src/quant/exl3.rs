@@ -972,4 +972,76 @@ mod tests {
             );
         }
     }
+
+    // ── real-pack oracle (Issue 001 T4a) ─────────────────────────────
+
+    /// Compare the Rust dequant against the independent numpy oracle over
+    /// the REAL async0x42/Qwen3-8B-exl3_4.0bpw `layers.0.self_attn.k_proj`
+    /// bytes (in=4096, out=1024, K=4, cb0, suh+svh). Requires the range-
+    /// fetched fixture at `/tmp/exl3-pack/` + the numpy reference (see
+    /// `.raw/exl3_layer_oracle.py`); skips loudly when absent.
+    ///
+    /// Bar: relative F-norm error < 1e-4 and max-abs < 1e-3·max|W| — the two
+    /// implementations accumulate identical math in different orders, so
+    /// rounding is ~1e-6 while any layout bug (bit order, permutation,
+    /// codebook) lands at O(1).
+    #[test]
+    #[ignore = "requires /tmp/exl3-pack fixture (Issue 001 T4a; .raw/exl3_layer_oracle.py)"]
+    fn real_pack_oracle_k_proj() {
+        let dir = std::env::temp_dir().join("exl3-pack");
+        let trellis = std::fs::read(dir.join("k_proj.trellis.bin"));
+        let (Ok(trellis), Ok(scales)) = (trellis, std::fs::read(dir.join("k_proj.scales.bin")))
+        else {
+            eprintln!("SKIP: fixture absent — fetch per Issue 001 §12.5");
+            return;
+        };
+        let ref_w = match read_npy_f32(&std::fs::read(dir.join("k_proj_ref_w.npy")).unwrap()) {
+            Some(w) => w,
+            None => {
+                eprintln!("SKIP: numpy reference absent");
+                return;
+            }
+        };
+
+        let (in_f, out_f) = (4096usize, 1024usize);
+        assert_eq!(ref_w.len(), in_f * out_f);
+        let (suh, svh) = scales.split_at(in_f * 2);
+        let layer = Exl3Layer::from_raw_parts(
+            &trellis, Some(suh), Some(svh), None, None, None, None, in_f, out_f,
+        )
+        .expect("real pack layer validates");
+        assert_eq!(layer.codebook, Exl3Codebook::Cb0, "this pack predates markers");
+        assert_eq!(layer.k, Exl3K { ka: 4, half: false });
+        let got = layer.dequantize_f32();
+
+        let mut dot = 0.0f64;
+        let (mut n_g, mut n_r, mut max_abs, mut max_w) = (0.0f64, 0.0f64, 0.0f64, 0.0f64);
+        for (g, r) in got.iter().zip(ref_w.iter()) {
+            dot += (*g as f64) * (*r as f64);
+            n_g += (*g as f64) * (*g as f64);
+            n_r += (*r as f64) * (*r as f64);
+            max_abs = max_abs.max((g - r).abs() as f64);
+            max_w = max_w.max(r.abs() as f64);
+        }
+        let rel_frobenius = 1.0 - dot / (n_g.sqrt() * n_r.sqrt());
+        eprintln!(
+            "T4a k_proj: rel-Frobenius={rel_frobenius:.3e} max_abs_err={max_abs:.3e} (max|W|={max_w:.3e})"
+        );
+        assert!(rel_frobenius < 1e-4, "relative Frobenius error {rel_frobenius}");
+        assert!(max_abs < 1e-3 * max_w, "max abs error {max_abs} vs max|W| {max_w}");
+    }
+
+    /// Minimal numpy .npy reader for a flat f32 array (header dict + LE data).
+    fn read_npy_f32(bytes: &[u8]) -> Option<Vec<f32>> {
+        if bytes.len() < 10 || &bytes[..6] != b"\x93NUMPY" {
+            return None;
+        }
+        let hlen = u16::from_le_bytes([bytes[8], bytes[9]]) as usize;
+        let data = &bytes[10 + hlen..];
+        Some(
+            data.chunks_exact(4)
+                .map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]]))
+                .collect(),
+        )
+    }
 }

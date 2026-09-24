@@ -1,7 +1,7 @@
 # Issue 001 — EXL3 (trellis-coded) weight-format support in the quantization zoo
 
-**Status:** OPEN — T1 (format spec) + T2 (seam decision) + T3 (CPU reference) DONE 2026-09-24; T4–T7 pending (T4 needs a real EXL3 pack).
-**Owner:** unassigned. **Filed:** 2026-09-24. **T1/T2/T3 executed:** 2026-09-24 (4090 box).
+**Status:** OPEN — T1 + T2 + T3 + T4a (real-pack cross-implementation oracle) DONE 2026-09-24; T4b (exllamav3-native oracle) + T5–T7 pending.
+**Owner:** unassigned. **Filed:** 2026-09-24. **T1/T2/T3/T4a executed:** 2026-09-24 (4090 box).
 **Origin:** riir-clippy Research 207 (`.research/207_qwen38_exl3_dgx_spark_distill_verdict.md`),
 lane-intel axis. The corpus half of that verdict is riir-clippy Plan 170 and is
 independent of this issue — neither blocks the other.
@@ -140,9 +140,17 @@ is an open design question this issue does not pre-decide.
   orthogonality/symmetry, sign unpack, layer validation (markers/K/dims),
   and a full-dequant cross-composition. clippy `-D warnings` clean at both
   feature postures; 197/186 tests green (feature on/off).
-- [ ] **T4 — Correctness gate against an independent oracle.** Dequantize a
-  real pack and compare against exllamav3's own output for the same tensors.
-  ⛔ **Do NOT use output-text equality as the fidelity gate** — see §6.
+- [x] **T4a — Real-pack validation (DONE 2026-09-24; the cross-implementation
+  oracle half of T4).** Dequantize a real pack and compare — record in
+  **§12.5**. **T4b (REMAINS): the exllamav3-native oracle** — run
+  exllamav3's own dequant on the same tensors (torch + CUDA ext build on
+  the 4090; the MSVC fix at the pin suggests Windows is supported) and
+  compare per-tensor numeric error per §6 (never text equality).
+- [ ] **T4b — exllamav3-native oracle** (see above; env-heavy, next session).
+  (The original T4 line is superseded by T4a ✓ + T4b ☐: T4a validated the
+  real-pack READ via an independent numpy oracle at machine precision; T4b
+  is the exllamav3-own-output comparison, still owed. §6's ban on text-equality
+  gates binds both.)
 - [ ] **T5 — Re-measure §2 on our silicon** (4090 / M3) before any promise about
   residency or throughput enters a plan, a README or a league row. The §2 table
   is n=1 on hardware we do not have.
@@ -256,8 +264,8 @@ the pin, not from prose; each subsection names the file the fact came from.
 | `K.svh` | fp16 | `[out_features]` | one of sv/svh | per-output-channel scale |
 | `K.su` | int16 (packed ±1) | `[in_features/16]` | — | LEGACY packed-sign spelling of suh (bit i of word j = sign of channel 16j+i; `1 − 2·bit`) |
 | `K.sv` | int16 (packed ±1) | `[out_features/16]` | — | legacy spelling of svh |
-| `K.mul1` | int32 marker (1 element) | `[1]` | opt. | selects codebook cb2; content = `0x83DCD12D` as u32-be-int (`codebook_mul1_mult`). REQUIRED for half-integer K. The DEFAULT modern pack (`doc/convert.md -cb`: "mul1 (default)") |
-| `K.mcg` | int32 marker (1 element) | `[1]` | opt. | selects codebook cb1; content = `0xCBAC1FED` (`codebook_mcg_mult`) |
+| `K.mul1` | int32 marker | `[]` (0-dim scalar; 1 elem) | opt. | selects codebook cb2; value = `0x83DCD12D` as u32-be-int (`codebook_mul1_mult`). REQUIRED for half-integer K. The DEFAULT modern pack (`doc/convert.md -cb`: "mul1 (default)") — **real-pack-verified 2026-09-24: Terra3312/GLM-5.3-Flash-EXL3-4bpw-MUL1 carries .mul1 on all 887 groups of shard 1, I32 0-dim, value exactly 0x83DCD12D** |
+| `K.mcg` | int32 marker | `[]` (0-dim) | opt. | selects codebook cb1; value = `0xCBAC1FED` (`codebook_mcg_mult`) |
 | `K.bias` | fp16 | `[out_features]` | opt. | plain bias |
 | `K.scale` | — | — | removed | loader passes `None`; `assert scale is None, "scale is no longer used"` |
 
@@ -579,3 +587,37 @@ quality is terrible" rather than as a layout error.
 clippy `--all-targets -D warnings` clean at BOTH postures. The known-answer
 pins were computed independently (numpy f16 via `uv run --with numpy`, from
 the §10.3 spec ops — `.raw/exl3_pins.py`, kept with the clone).
+
+### 12.5 T4a record — real-pack validation (2026-09-24, 4090 box)
+
+**Oracle fixture:** `async0x42/Qwen3-8B-exl3_4.0bpw` (the smallest dense
+EXL3 pack on HF; Qwen3-8B, single `model.safetensors`, `quantization_config
+= {quant_method: exl3, bits: 4}`). Fetched SURGICALLY — header (100,264 B)
++ one layer's byte ranges via HTTP Range, no 4 GB download:
+`model.layers.0.self_attn.k_proj` (in=4096, out=1024, K=4, **cb0** — this
+2025-05 pack predates markers; 253 groups, all suh+svh fp16 form, no
+su/sv, no markers; lm_head K=6/96-words, 252 layers K=4/64-words).
+
+**Result:** the Rust `Exl3Layer::dequantize_f32` vs the independent numpy
+oracle (`.raw/exl3_layer_oracle.py`, written from §10, no Rust involvement)
+over all 4.19M weights: **relative Frobenius error 3.486e-13, max abs err
+2.68e-7 on max|W| = 0.954** — machine precision; every layout fact in §10
+is CORRECT on real data (bit order, u16-pair transposition, tail-biting
+ring, tensor-core element permutation, cb0 codebook, Sylvester-128
+Hadamard, scale composition). Final-W stats sane for LLM weights
+(mean −1.3e-5, std 0.053). Gate: `cargo test --features exl3 --lib
+real_pack_oracle_k_proj -- --ignored` (env-gated on the fixture at
+`%TEMP%/exl3-pack/`; skips loudly when absent).
+
+**Modern-pack marker validation:** `Terra3312/GLM-5.3-Flash-EXL3-4bpw-MUL1`
+shard-1 header: `.mul1` on **all 887 groups**, `I32` **0-dim scalar**
+(§10.2 corrected: shape `[]`, not `[1]`), and the range-fetched word is
+**exactly `0x83DCD12D`** ✓. All 887 groups carry trellis+suh+svh+mul1
+within the SAME shard — groups are shard-local in this pack (the §11.3
+round-2 question, answered for one pack; the loader should still not
+ASSUME it — the index.json decides per pack).
+
+**What T4a does NOT prove** (honest scope): both implementations were
+written from the same §10 spec, so a SPEC misreading shared by both would
+pass. The exllamav3-native oracle (T4b) is the remaining independent
+authority — its env cost is recorded above.
