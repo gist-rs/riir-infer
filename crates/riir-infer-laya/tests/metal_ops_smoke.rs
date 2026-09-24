@@ -465,8 +465,10 @@ fn metal_fused_attention_matches_cpu_full() {
         let mut om = vec![0f32; seq * d];
         c.attention_forward(
             &qkv,
+            0,
             &cos,
             &sin,
+            0,
             scale,
             seq,
             heads,
@@ -475,11 +477,14 @@ fn metal_fused_attention_matches_cpu_full() {
             None,
             &mut sa,
             &mut oc,
+            0,
         );
         m.attention_forward(
             &qkv,
+            0,
             &cos,
             &sin,
+            0,
             scale,
             seq,
             heads,
@@ -488,6 +493,7 @@ fn metal_fused_attention_matches_cpu_full() {
             None,
             &mut sb,
             &mut om,
+            0,
         );
         report(
             &format!("attn full {seq}x{heads}"),
@@ -529,8 +535,10 @@ fn metal_fused_attention_matches_cpu_sliding() {
         let mut om = vec![0f32; seq * d];
         c.attention_forward(
             &qkv,
+            0,
             &cos,
             &sin,
+            0,
             scale,
             seq,
             heads,
@@ -539,11 +547,14 @@ fn metal_fused_attention_matches_cpu_sliding() {
             Some(&mask),
             &mut sa,
             &mut oc,
+            0,
         );
         m.attention_forward(
             &qkv,
+            0,
             &cos,
             &sin,
+            0,
             scale,
             seq,
             heads,
@@ -552,6 +563,7 @@ fn metal_fused_attention_matches_cpu_sliding() {
             Some(&mask),
             &mut sb,
             &mut om,
+            0,
         );
         report(
             &format!("attn slide {seq}x{heads} w{window}"),

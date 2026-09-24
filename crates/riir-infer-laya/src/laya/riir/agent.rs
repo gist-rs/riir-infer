@@ -102,6 +102,14 @@ fn pass_pool<T>(f: impl FnOnce() -> T) -> T {
     f()
 }
 
+/// The packed-pass kill-switch (`RIIR_LAYA_NO_BATCH=1`, read once): the
+/// per-question loop is the A/B arm and the bisect posture, never a
+/// silent default — only the explicit `1` disables.
+fn batch_disabled() -> bool {
+    static DISABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *DISABLED.get_or_init(|| std::env::var("RIIR_LAYA_NO_BATCH").as_deref() == Ok("1"))
+}
+
 /// The encoder half of the stack: the per-op lanes share the op-stream
 /// [`Encoder`]; the ANE lane swaps in the whole-graph executor. One enum
 /// at ONE seam — `forward_internal`'s match is the only place the two
@@ -346,70 +354,200 @@ impl RiirAgent {
             self.head
                 .forward(self.backend.as_ref(), &mut hidden, q.qtype, &markers)
         })?;
+        let t = self.temps.for_question(q.qtype, markers.len());
+        Ok(Self::make_forward(q, out, ids.len(), markers, t))
+    }
+
+    /// The shared forward tail: head outputs → temperature-scaled probs →
+    /// the [`Forward`] envelope. ONE copy for the per-question path and
+    /// the packed path (bit-identical math either way); the temperature is
+    /// resolved by the caller so this stays a pure associated fn.
+    fn make_forward(
+        q: &InternalQuestion,
+        out: HeadOutput,
+        seq_len: usize,
+        markers: Vec<usize>,
+        t: f64,
+    ) -> Forward {
         let k = markers.len();
-        let t = self.temps.for_question(q.qtype, k);
         let z: Vec<f32> = out.logits.iter().map(|l| l / t as f32).collect();
         let probs = softmax32(&z);
         let confidence = confidence_from_probs(&probs, k);
-        Ok(Forward {
+        Forward {
             logits: out.logits,
             probs,
             confidence,
             act_probabilities: out.act_probabilities,
             temperature_used: t,
             bucket: temp_bucket(q.qtype, k),
-            seq_len: ids.len(),
+            seq_len,
             markers,
-        })
+        }
     }
 
     /// `system_one` over multiple questions (one forward each — the
     /// capture's posture; the reference batches, which is numerically
     /// equivalent modulo padding).
+    ///
+    /// When the backend can pack (the fused Metal kernel, or CPU) and
+    /// `RIIR_LAYA_NO_BATCH=1` is unset, the case's questions run through
+    /// ONE packed encoder pass instead ([`Self::system_one_packed`]) —
+    /// per-question answers are bit-identical, the pass boundaries
+    /// collapse to one per case.
     pub fn system_one(&self, state: &Value, questions: &[(String, Value)]) -> Result<Vec<Answer>> {
+        if questions.is_empty() {
+            return Ok(Vec::new());
+        }
+        if self.packed_eligible() {
+            return self.system_one_packed(state, questions);
+        }
         let mut out = Vec::with_capacity(questions.len());
         for (qid, qdef) in questions {
             let q = to_internal(qdef)?;
             let f = self.forward_internal(state, &q)?;
-            let keys = option_keys(&q)?;
-            let argmax = argmax_of(&f.probs);
-            let act_probability = py_round4(f.act_probabilities[0] as f64);
-            let probabilities = keys
-                .iter()
-                .zip(f.probs.iter())
-                .map(|(k, p)| (k.clone(), py_round4(*p as f64)))
-                .collect();
-            let (choice, score, noul) = match q.t {
-                "choice" => (Some(keys[argmax].clone()), None, None),
-                "score" => {
-                    let exp: f64 = f
-                        .probs
-                        .iter()
-                        .enumerate()
-                        .map(|(i, p)| i as f64 * *p as f64)
-                        .sum();
-                    (None, Some(py_round4(exp)), None)
-                }
-                _ => (None, None, Some(py_round4(f.probs[1] as f64))),
-            };
-            let confidence = if q.t == "noul" {
-                let p1 = f.probs[1] as f64;
-                py_round4(p1.max(1.0 - p1))
-            } else {
-                py_round4(f.confidence)
-            };
-            out.push(Answer {
-                qid: qid.clone(),
-                t: q.t,
-                choice,
-                score,
-                noul,
-                probabilities,
-                confidence,
-                act_probability,
-                temperature_used: f.temperature_used,
-            });
+            out.push(Self::answer_of(qid, &q, f)?);
         }
         Ok(out)
+    }
+
+    /// Can this case run the packed pass? The per-question loop is the
+    /// answer whenever anything is off: the env kill-switch
+    /// (`RIIR_LAYA_NO_BATCH=1` — also the A/B arm), the ANE lane (its
+    /// whole-graph encoder is bucket-shaped, one sequence per call), or a
+    /// backend that cannot execute the packed attention at this head dim.
+    fn packed_eligible(&self) -> bool {
+        if batch_disabled() {
+            return false;
+        }
+        #[cfg(all(target_os = "macos", feature = "laya-riir-ane"))]
+        if matches!(self.enc, EncoderStack::Ane(_)) {
+            return false;
+        }
+        match &self.enc {
+            EncoderStack::Local(e) => self.backend.supports_packed_attention(e.head_dim()),
+            #[cfg(all(target_os = "macos", feature = "laya-riir-ane"))]
+            EncoderStack::Ane(_) => false,
+        }
+    }
+
+    /// The reference's `system_one` shape: all of a case's questions
+    /// through ONE forward (`.raw/laya/laya/agent.py:267` — "Evaluate typed
+    /// questions across state in a single, parallel forward pass"). Ours
+    /// packs instead of padding — exact per-sequence attention, no pad
+    /// rows, no attention-mask tensor — so the per-question answers are
+    /// bit-identical to the loop, not "modulo padding".
+    ///
+    /// The head runs PER QUESTION on its own exact-size slab, copied
+    /// device-side out of the packed residual ([`Backend::copy_at`]) —
+    /// the head's op stream is untouched. Every question's work is
+    /// enqueued inside one pass (one `begin_pass`, one chain epoch), so
+    /// the first head download drains the whole case and the rest find an
+    /// empty pipeline.
+    fn system_one_packed(&self, state: &Value, questions: &[(String, Value)]) -> Result<Vec<Answer>> {
+        // Collate first — the reference's `items` shape: ids + markers per
+        // question, checked before any GPU work.
+        let mut items: Vec<(String, InternalQuestion, Vec<u32>, Vec<usize>)> =
+            Vec::with_capacity(questions.len());
+        let mut seqs = Vec::with_capacity(questions.len());
+        for (qid, qdef) in questions {
+            let q = to_internal(qdef)?;
+            let opts = render_options(&q);
+            let (ids, markers) =
+                build_sequence(&self.tok, state, &q, self.cfg.max_len, self.cfg.head_max_len)?;
+            if opts.is_empty() || markers.len() != opts.len() {
+                return Err(LayaError::Question(format!(
+                    "options exceed the head budget: {} rendered, {} markers survived",
+                    opts.len(),
+                    markers.len()
+                )));
+            }
+            seqs.push(ids.len());
+            items.push((qid.clone(), q, ids, markers));
+        }
+        let total_ids: Vec<u32> = items
+            .iter()
+            .flat_map(|(_, _, ids, _)| ids.iter().copied())
+            .collect();
+        pass_pool(|| -> Result<Vec<Answer>> {
+            self.backend.begin_pass();
+            let hidden = {
+                #[cfg(all(target_os = "macos", feature = "laya-riir-ane"))]
+                match &self.enc {
+                    EncoderStack::Local(e) => {
+                        e.forward_packed(self.backend.as_ref(), &total_ids, &seqs)?
+                    }
+                    EncoderStack::Ane(_) => {
+                        unreachable!("packed_eligible excludes the ANE lane")
+                    }
+                }
+                #[cfg(not(all(target_os = "macos", feature = "laya-riir-ane")))]
+                {
+                    let EncoderStack::Local(e) = &self.enc;
+                    e.forward_packed(self.backend.as_ref(), &total_ids, &seqs)?
+                }
+            };
+            let d = hidden.len() / total_ids.len();
+            let mut out = Vec::with_capacity(items.len());
+            let mut off_rows = 0usize;
+            for (qid, q, ids, markers) in &items {
+                let rows = ids.len();
+                let mut hq = vec![0f32; rows * d];
+                self.backend
+                    .copy_at(&hidden, off_rows * d, &mut hq, 0, rows * d);
+                let head_out = self
+                    .head
+                    .forward(self.backend.as_ref(), &mut hq, q.qtype, markers)?;
+                let t = self.temps.for_question(q.qtype, markers.len());
+                let f = Self::make_forward(q, head_out, rows, markers.clone(), t);
+                out.push(Self::answer_of(qid, q, f)?);
+                off_rows += rows;
+            }
+            Ok(out)
+        })
+    }
+
+    /// The shared answer envelope: a [`Forward`] → the wire [`Answer`].
+    /// ONE copy for the loop and the packed path — the original
+    /// `system_one` body, verbatim (`option_keys` errors propagate, as
+    /// they always did).
+    fn answer_of(qid: &str, q: &InternalQuestion, f: Forward) -> Result<Answer> {
+        let keys = option_keys(q)?;
+        let argmax = argmax_of(&f.probs);
+        let act_probability = py_round4(f.act_probabilities[0] as f64);
+        let probabilities = keys
+            .iter()
+            .zip(f.probs.iter())
+            .map(|(k, p)| (k.clone(), py_round4(*p as f64)))
+            .collect();
+        let (choice, score, noul) = match q.t {
+            "choice" => (Some(keys[argmax].clone()), None, None),
+            "score" => {
+                let exp: f64 = f
+                    .probs
+                    .iter()
+                    .enumerate()
+                    .map(|(i, p)| i as f64 * *p as f64)
+                    .sum();
+                (None, Some(py_round4(exp)), None)
+            }
+            _ => (None, None, Some(py_round4(f.probs[1] as f64))),
+        };
+        let confidence = if q.t == "noul" {
+            let p1 = f.probs[1] as f64;
+            py_round4(p1.max(1.0 - p1))
+        } else {
+            py_round4(f.confidence)
+        };
+        Ok(Answer {
+            qid: qid.to_string(),
+            t: q.t,
+            choice,
+            score,
+            noul,
+            probabilities,
+            confidence,
+            act_probability,
+            temperature_used: f.temperature_used,
+        })
     }
 }

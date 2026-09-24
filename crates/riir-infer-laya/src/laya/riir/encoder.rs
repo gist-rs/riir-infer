@@ -192,7 +192,38 @@ impl Encoder {
     /// are stale until [`Backend::download_into`] syncs; every consumer
     /// below reads it only through backend ops.
     pub fn forward(&self, b: &dyn Backend, input_ids: &[u32]) -> Result<Vec<f32>> {
-        let seq = input_ids.len();
+        self.forward_packed(b, input_ids, std::slice::from_ref(&input_ids.len()))
+    }
+
+    /// The head dimension this encoder dispatches attention at (the agent
+    /// feeds it to [`Backend::supports_packed_attention`]).
+    pub fn head_dim(&self) -> usize {
+        self.cfg.head_dim()
+    }
+
+    /// Packed varlen forward (reflex issue 020 T5): `input_ids` is the
+    /// CONCATENATION of `seqs.len()` sequences with lengths `seqs`
+    /// (`Σ seqs == input_ids.len()`).
+    ///
+    /// Every row-wise op and every GEMM runs ONCE over all `total` rows —
+    /// the batch's GEMMs launch `Σseq` rows per dispatch instead of one
+    /// dispatch per question — while attention is dispatched PER SEQUENCE
+    /// at its packed offset, so each sequence sees exactly the rows,
+    /// positions and windows the single-sequence [`Self::forward`] gave
+    /// it. Per-row results are therefore bit-identical to the sequential
+    /// forwards (the packed-equivalence gate holds that, CPU by
+    /// construction, Metal by offset-bound kernels).
+    ///
+    /// `seqs` with one entry IS [`Self::forward`] (the same code, zeroed
+    /// offsets).
+    pub fn forward_packed(
+        &self,
+        b: &dyn Backend,
+        input_ids: &[u32],
+        seqs: &[usize],
+    ) -> Result<Vec<f32>> {
+        let total = input_ids.len();
+        debug_assert_eq!(seqs.iter().sum::<usize>(), total, "packed seqs sum");
         let d = self.cfg.hidden;
         let hd = self.cfg.head_dim();
         let heads = self.cfg.heads;
@@ -200,11 +231,11 @@ impl Encoder {
         let i_sz = self.cfg.intermediate;
         let eps = self.cfg.eps;
 
-        // Embeddings: host-side token gather (a ~seq·d memcpy off the
+        // Embeddings: host-side token gather (a ~total·d memcpy off the
         // agent-owned table — cheap, and it keeps the vocab-sized table out
         // of the device flow entirely) + LayerNorm (the norm feeds layer 0's
         // attention directly — the layer-0 quirk).
-        let mut gathered = vec![0f32; seq * d];
+        let mut gathered = vec![0f32; total * d];
         for (s, id) in input_ids.iter().enumerate() {
             let row = (*id as usize) * d;
             let Some(src) = self.tok_emb.get(row..row + d) else {
@@ -215,35 +246,40 @@ impl Encoder {
             };
             gathered[s * d..s * d + d].copy_from_slice(src);
         }
-        let mut h = vec![0f32; seq * d];
+        let mut h = vec![0f32; total * d];
         let mut sq = Vec::new();
         b.layer_norm_nobias_into(&gathered, &self.emb_norm, eps, d, &mut sq, &mut h);
 
         let mut sc = Scratch::new();
-        sc.reset(seq * d);
+        sc.reset(total * d);
         let mut rope_full: Option<(Vec<f32>, Vec<f32>)> = None;
         let mut rope_slide: Option<(Vec<f32>, Vec<f32>)> = None;
 
-        // Sliding-window additive mask [seq, seq] — built once, added per
-        // sliding layer. Skipped when the window covers the whole sequence
-        // (the reference's mask-skip: same math, no mask tensor).
+        // Sliding-window additive masks, ONE PER SEQUENCE ([seq, seq] each,
+        // built once, used by every sliding layer) — skipped when the
+        // backend predicates the window in-kernel (the fused dispatch's
+        // own gate, mirrored per sequence: `window < seq − 1`).
         let window = self.cfg.sliding_window();
-        // riir-reflex Issue 020 T2: a backend that predicates the window
-        // in-kernel (the Metal lane's fused attention) consumes no mask
-        // tensor, and building one was a `seq²` allocation plus an
-        // `O(seq · 2·window)` fill discarded on every forward.
-        let mask: Option<Vec<f32>> = if seq > 1 && window < seq - 1 && b.needs_window_mask(hd) {
-            let mut m = vec![f32::MIN; seq * seq];
-            for qi in 0..seq {
-                let lo = qi.saturating_sub(window);
-                let hi = (qi + window).min(seq - 1);
-                for kv in lo..=hi {
-                    m[qi * seq + kv] = 0.0;
-                }
-            }
-            Some(m)
+        let masks: Vec<Option<Vec<f32>>> = if b.needs_window_mask(hd) {
+            seqs.iter()
+                .map(|&seq| {
+                    if seq > 1 && window < seq - 1 {
+                        let mut m = vec![f32::MIN; seq * seq];
+                        for qi in 0..seq {
+                            let lo = qi.saturating_sub(window);
+                            let hi = (qi + window).min(seq - 1);
+                            for kv in lo..=hi {
+                                m[qi * seq + kv] = 0.0;
+                            }
+                        }
+                        Some(m)
+                    } else {
+                        None
+                    }
+                })
+                .collect()
         } else {
-            None
+            Vec::new()
         };
 
         for layer in &self.layers {
@@ -257,49 +293,74 @@ impl Encoder {
                 None => b.copy_into(&h, &mut sc.x),
             }
 
-            // Attention: Wqkv → the backend's fused attention block over the
-            // packed projection (rope + q-scale + score + mask + softmax +
-            // value mix + head merge in ONE op — the op contract and its CPU
-            // op sequence live on the `Backend` trait, the Metal lane's
-            // flash-attention form in [`super::metal`]).
-            sc.qkv.resize(seq * 3 * d, 0.0);
-            b.matmul_w(&sc.x, seq, d, &layer.wqkv, 3 * d, &mut sc.qkv);
+            // Attention: ONE Wqkv GEMM over all packed rows, then the
+            // backend's fused attention block PER SEQUENCE at its packed
+            // offset (rope + q-scale + score + mask + softmax + value mix
+            // + head merge in ONE op per sequence — the sequence sees its
+            // own rows and window exactly as the unbatched forward).
+            sc.qkv.resize(total * 3 * d, 0.0);
+            b.matmul_w(&sc.x, total, d, &layer.wqkv, 3 * d, &mut sc.qkv);
             let rope = if layer.sliding {
-                rope_slide
-                    .get_or_insert_with(|| ops::rope_tables(seq, hd, self.cfg.rope_theta_slide))
+                rope_slide.get_or_insert_with(|| self.rope_tables_for(seqs, hd, self.cfg.rope_theta_slide))
             } else {
-                rope_full.get_or_insert_with(|| ops::rope_tables(seq, hd, self.cfg.rope_theta_full))
+                rope_full.get_or_insert_with(|| self.rope_tables_for(seqs, hd, self.cfg.rope_theta_full))
             };
-            b.attention_forward(
-                &sc.qkv,
-                &rope.0,
-                &rope.1,
-                scale,
-                seq,
-                heads,
-                hd,
-                if layer.sliding { window } else { usize::MAX },
-                if layer.sliding { mask.as_deref() } else { None },
-                &mut sc.attn,
-                &mut sc.merged,
-            );
-            b.matmul_w(&sc.merged, seq, d, &layer.wo, d, &mut sc.attn_out);
+            let mut off = 0usize;
+            for (si, &seq) in seqs.iter().enumerate() {
+                let mask = if layer.sliding {
+                    masks.get(si).and_then(Option::as_deref)
+                } else {
+                    None
+                };
+                b.attention_forward(
+                    &sc.qkv,
+                    off * 3 * d,
+                    &rope.0,
+                    &rope.1,
+                    off,
+                    scale,
+                    seq,
+                    heads,
+                    hd,
+                    if layer.sliding { window } else { usize::MAX },
+                    mask,
+                    &mut sc.attn,
+                    &mut sc.merged,
+                    off * d,
+                );
+                off += seq;
+            }
+            b.matmul_w(&sc.merged, total, d, &layer.wo, d, &mut sc.attn_out);
             let h_len = h.len();
             b.add(&mut h, 0, &sc.attn_out, 0, h_len);
 
-            // MLP: fused Wi → gelu(input) · gate → Wo.
+            // MLP: fused Wi → gelu(input) · gate → Wo — whole packed
+            // buffers, unchanged op order.
             b.layer_norm_nobias_into(&h, &layer.mlp_norm, eps, d, &mut sc.sq, &mut sc.xn);
-            sc.fused.resize(seq * 2 * i_sz, 0.0);
-            b.matmul_w(&sc.xn, seq, d, &layer.wi, 2 * i_sz, &mut sc.fused);
-            sc.act.resize(seq * i_sz, 0.0);
-            b.glu_gelu_gate(&sc.fused, seq, i_sz, &mut sc.act);
-            b.matmul_w(&sc.act, seq, i_sz, &layer.mlp_wo, d, &mut sc.mlp_out);
+            sc.fused.resize(total * 2 * i_sz, 0.0);
+            b.matmul_w(&sc.xn, total, d, &layer.wi, 2 * i_sz, &mut sc.fused);
+            sc.act.resize(total * i_sz, 0.0);
+            b.glu_gelu_gate(&sc.fused, total, i_sz, &mut sc.act);
+            b.matmul_w(&sc.act, total, i_sz, &layer.mlp_wo, d, &mut sc.mlp_out);
             let h_len = h.len();
             b.add(&mut h, 0, &sc.mlp_out, 0, h_len);
         }
 
-        let mut out = vec![0f32; seq * d];
+        let mut out = vec![0f32; total * d];
         b.layer_norm_nobias_into(&h, &self.final_norm, eps, d, &mut sc.sq, &mut out);
         Ok(out)
+    }
+}
+
+impl Encoder {
+    /// The packed forward's rope tables: one `[rows, hd]` pair per theta.
+    /// A single sequence gets the plain [`ops::rope_tables`] (no copy); a
+    /// batch gets the per-row packed concatenation.
+    fn rope_tables_for(&self, seqs: &[usize], hd: usize, theta: f64) -> (Vec<f32>, Vec<f32>) {
+        if seqs.len() == 1 {
+            ops::rope_tables(seqs[0], hd, theta)
+        } else {
+            ops::rope_tables_packed(seqs, hd, theta)
+        }
     }
 }

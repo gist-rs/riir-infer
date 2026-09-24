@@ -735,6 +735,39 @@ pub fn rope_tables(seq: usize, hd: usize, theta: f64) -> (Vec<f32>, Vec<f32>) {
     (cos, sin)
 }
 
+/// Packed multi-sequence rope tables: the sequences' `[seq, hd]` tables
+/// concatenated in order (reflex issue 020 T5). Positions restart per
+/// sequence, and each row is COPIED from a per-length [`rope_tables`] —
+/// never recomputed — so a kernel indexing rows `0..seq` of its slab
+/// reads exactly the values the single-sequence forward gave it
+/// (bit-identical by construction). Distinct lengths are built once per
+/// forward (questions in a case often share a length), cached in call
+/// order; the total build is `distinct · half` `powf` calls.
+#[must_use]
+pub fn rope_tables_packed(seqs: &[usize], hd: usize, theta: f64) -> (Vec<f32>, Vec<f32>) {
+    let total: usize = seqs.iter().sum();
+    let mut cos = vec![0f32; total * hd];
+    let mut sin = vec![0f32; total * hd];
+    let mut built: Vec<(usize, Vec<f32>, Vec<f32>)> = Vec::new();
+    let mut off = 0usize;
+    for &seq in seqs {
+        let cached = built.iter().find(|(len, _, _)| *len == seq);
+        let (c, s) = match cached {
+            Some((_, c, s)) => (c.as_slice(), s.as_slice()),
+            None => {
+                let (c, s) = rope_tables(seq, hd, theta);
+                built.push((seq, c, s));
+                let (_, c, s) = built.last().expect("just pushed");
+                (c.as_slice(), s.as_slice())
+            }
+        };
+        cos[off * hd..(off + seq) * hd].copy_from_slice(c);
+        sin[off * hd..(off + seq) * hd].copy_from_slice(s);
+        off += seq;
+    }
+    (cos, sin)
+}
+
 /// Rotate-half `RoPE` in place on `[heads, seq, hd]` — per element
 /// `o[j] = q1·c − q2·s`, `o[j + half] = q2·c + q1·s` (the cos/sin
 /// duplication at `j + half` makes this the candle port's

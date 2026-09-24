@@ -1701,14 +1701,24 @@ impl Backend for Metal {
     /// qkv (see [`MSL_FLASH`]) — the split/rope/scale/scores/mask/softmax/
     /// value-mix/merge sequence and its seq² scores parent collapse into a
     /// single kernel that walks only each query block's windowed key slice.
-    /// `LAYA_METAL_FLASH=0` falls back to the reference sequence (the
-    /// kill-switch; also the bisect posture for a kernel-shaped divergence).
+    /// The offsets (reflex issue 020 T5's packed forward) bind at dispatch:
+    /// `qkv_off`/`out_off` shift the qkv/out binds, `rope_row` shifts the
+    /// cos/sin binds — the kernel sees an unpadded `[seq, …]` slab with
+    /// local rows either way, so a packed dispatch is the unbatched
+    /// kernel's exact math.
+    /// `LAYA_METAL_FLASH=0` falls back to the reference sequence — which
+    /// cannot bind offsets into a device buffer — so non-zero offsets
+    /// there are a LOUD contract breach (the agent gates packed forwards
+    /// on [`Backend::supports_packed_attention`]; this guard is the
+    /// backstop).
     #[allow(clippy::too_many_arguments)]
     fn attention_forward(
         &self,
         qkv: &[f32],
+        qkv_off: usize,
         rope_cos: &[f32],
         rope_sin: &[f32],
+        rope_row: usize,
         scale: f32,
         seq: usize,
         heads: usize,
@@ -1717,17 +1727,29 @@ impl Backend for Metal {
         mask: Option<&[f32]>,
         scratch: &mut AttnScratch,
         out: &mut [f32],
+        out_off: usize,
     ) {
         if self.flash_disabled || hd != FLASH_HD {
+            if qkv_off != 0 || out_off != 0 || rope_row != 0 {
+                panic!(
+                    "packed attention offsets (qkv {qkv_off}, rope row {rope_row}, out \
+                     {out_off}) reached the reference-sequence fallback — the fallback \
+                     cannot bind offsets into a device buffer; the packed forward \
+                     requires the fused kernel (supports_packed_attention gates it)"
+                );
+            }
             // The reference sequence consumes the mask tensor; the fused
             // kernel predicates on the window (the same allowed set). hd
             // outside the pinned geometry takes the reference path too.
             return self.attention_forward_default(
-                qkv, rope_cos, rope_sin, scale, seq, heads, hd, window, mask, scratch, out,
+                qkv, qkv_off, rope_cos, rope_sin, rope_row, scale, seq, heads, hd, window, mask,
+                scratch, out, out_off,
             );
         }
         let _ = mask; // the window describes the same allowed set
         let qb = self.chain_buf(qkv);
+        // Rope tables: ONE slot per forward (whole packed tables), offset
+        // per sequence at bind — never a per-sequence re-upload.
         let cb = self.chain_buf(rope_cos);
         let sb = self.chain_buf(rope_sin);
         let ob = self.chain_slot_for(out);
@@ -1741,7 +1763,12 @@ impl Backend for Metal {
             .unwrap_or_else(|e| panic!("{e}"));
         self.encode(
             &k.p,
-            &[(&qb, 0), (&cb, 0), (&sb, 0), (&ob, 0)],
+            &[
+                (&qb, (qkv_off * 4) as u64),
+                (&cb, (rope_row * hd * 4) as u64),
+                (&sb, (rope_row * hd * 4) as u64),
+                (&ob, (out_off * 4) as u64),
+            ],
             &[seq as u32, heads as u32, hd as u32, w],
             &[scale],
             MTLSize {
@@ -2086,6 +2113,32 @@ impl Backend for Metal {
             dst.len() as u64,
         )
         .unwrap_or_else(|e| panic!("{e}"));
+    }
+
+    fn copy_at(&self, src: &[f32], src_off: usize, dst: &mut [f32], dst_off: usize, len: usize) {
+        assert!(src.len() >= len + src_off, "copy_at src extent");
+        assert!(dst.len() >= len + dst_off, "copy_at dst extent");
+        let sb = self.chain_buf(src);
+        let db = self.chain_slot_for(dst);
+        self.run_at(
+            "copy",
+            (&db, (dst_off * 4) as u64),
+            (&sb, (src_off * 4) as u64),
+            &[len as u32],
+            &[],
+            len as u64,
+        )
+        .unwrap_or_else(|e| panic!("{e}"));
+        self.debug_writeback(&db, dst);
+    }
+
+    /// The packed forward rides the fused kernel: offsets are dispatch
+    /// binds, never kernel shapes. The reference-sequence fallback cannot
+    /// make that claim (see [`Backend::attention_forward`]'s guard), so
+    /// this answers for the fused path only — the agent falls back to the
+    /// per-question loop when this is false.
+    fn supports_packed_attention(&self, hd: usize) -> bool {
+        !self.flash_disabled && hd == FLASH_HD
     }
 
     fn begin_pass(&self) {

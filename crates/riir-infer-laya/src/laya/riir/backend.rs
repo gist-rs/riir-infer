@@ -92,7 +92,17 @@ pub trait Backend {
     /// The whole attention block, projected QKV in → merged heads out.
     ///
     /// Input `qkv` is the `[seq, 3d]` Wqkv projection (contiguous thirds
-    /// Q/K/V at column offsets 0/d/2d). The op contract — rope BOTH the q
+    /// Q/K/V at column offsets 0/d/2d), taken at element offset `qkv_off`
+    /// — ZERO for the single-sequence forward, the sequence's packed row
+    /// offset under the multi-question forward (`Encoder::forward_packed`,
+    /// reflex issue 020 T5). `rope_row` is the ROW offset into the
+    /// `[rows, hd]` cos/sin tables (the sequence's first packed row); the
+    /// tables are passed WHOLE so a device backend binds one slot per
+    /// forward and offsets it per dispatch. `out_off` is the destination
+    /// row offset into `out` (`[rows, d]`). With one sequence every offset
+    /// is zero and this is the unbatched op exactly.
+    ///
+    /// The op contract — rope BOTH the q
     /// and k thirds in place (q additionally takes the `1/√hd` scale AFTER
     /// the rotate, the encoder's rope-then-scale order), score every head,
     /// mask, softmax, mix the values, merge heads into `out` `[seq, d]` —
@@ -112,8 +122,10 @@ pub trait Backend {
     fn attention_forward(
         &self,
         qkv: &[f32],
+        qkv_off: usize,
         rope_cos: &[f32],
         rope_sin: &[f32],
+        rope_row: usize,
         scale: f32,
         seq: usize,
         heads: usize,
@@ -122,21 +134,29 @@ pub trait Backend {
         mask: Option<&[f32]>,
         scratch: &mut AttnScratch,
         out: &mut [f32],
+        out_off: usize,
     ) {
         self.attention_forward_default(
-            qkv, rope_cos, rope_sin, scale, seq, heads, hd, window, mask, scratch, out,
+            qkv, qkv_off, rope_cos, rope_sin, rope_row, scale, seq, heads, hd, window, mask,
+            scratch, out, out_off,
         )
     }
 
     /// The reference attention op sequence (split → rope → scale → scores →
     /// mask → softmax → value mix → merge). Concrete on the trait so a
-    /// device override can reach it without re-stating the ops.
+    /// device override can reach it without re-stating the ops. Host
+    /// memory only: it slices the parents at the offsets, so a device
+    /// backend whose ops would mis-bind a sliced DEVICE buffer must not
+    /// reach it with non-zero offsets (the Metal fused path binds offsets
+    /// itself; its kill-switch path guards that contract loud).
     #[allow(clippy::too_many_arguments)]
     fn attention_forward_default(
         &self,
         qkv: &[f32],
+        qkv_off: usize,
         rope_cos: &[f32],
         rope_sin: &[f32],
+        rope_row: usize,
         scale: f32,
         seq: usize,
         heads: usize,
@@ -145,11 +165,18 @@ pub trait Backend {
         mask: Option<&[f32]>,
         scratch: &mut AttnScratch,
         out: &mut [f32],
+        out_off: usize,
     ) {
         let d = heads * hd;
         // The mask tensor is authoritative on this lane; `window` only
         // matters to lanes that predicate instead.
         let _ = window;
+        // The slab this call processes: exact per-sequence extents so the
+        // ops' extent asserts stay meaningful under packing.
+        let qkv = &qkv[qkv_off..qkv_off + seq * 3 * d];
+        let out = &mut out[out_off..out_off + seq * d];
+        let cos = &rope_cos[rope_row * hd..(rope_row + seq) * hd];
+        let sin = &rope_sin[rope_row * hd..(rope_row + seq) * hd];
         let AttnScratch {
             q,
             k,
@@ -163,8 +190,8 @@ pub trait Backend {
         self.split_heads(qkv, 3 * d, 0, seq, heads, hd, q);
         self.split_heads(qkv, 3 * d, d, seq, heads, hd, k);
         self.split_heads(qkv, 3 * d, 2 * d, seq, heads, hd, v);
-        self.apply_rope(q, seq, heads, hd, rope_cos, rope_sin);
-        self.apply_rope(k, seq, heads, hd, rope_cos, rope_sin);
+        self.apply_rope(q, seq, heads, hd, cos, sin);
+        self.apply_rope(k, seq, heads, hd, cos, sin);
         self.scale(q, scale);
         scores.resize(heads * seq * seq, 0.0);
         self.matmul_kt_heads(q, k, heads, seq, hd, scores);
@@ -254,6 +281,25 @@ pub trait Backend {
     /// so the copy must run device-side (a host `copy_from_slice` would
     /// read stale bytes — the bug the G5 gate caught at exactly layer 0).
     fn copy_into(&self, src: &[f32], dst: &mut [f32]);
+
+    /// Range copy at element offsets: `dst[dst_off..dst_off+len] =
+    /// src[src_off..src_off+len]`, device-side. The packed forward's slab
+    /// seam (reflex issue 020 T5): each question's head consumes its own
+    /// exact-size hidden, copied out of the packed encoder residual — a
+    /// host slice of a device-current parent would read stale bytes, so
+    /// the copy runs as a dispatch like [`Backend::copy_into`].
+    fn copy_at(&self, src: &[f32], src_off: usize, dst: &mut [f32], dst_off: usize, len: usize);
+
+    /// Can this backend execute the packed multi-sequence attention (the
+    /// `attention_forward` offsets) at head dim `hd`? The agent gates the
+    /// batched `system_one` on this — when false it keeps the
+    /// per-question loop, never a silent mis-read. The CPU lane slices
+    /// host memory (always true); the Metal lane answers for its fused
+    /// kernel only, because its reference-sequence fallback cannot bind
+    /// offsets into a device buffer.
+    fn supports_packed_attention(&self, _hd: usize) -> bool {
+        true
+    }
 
     /// Host-read barrier — the ONE way a forward body reads a device
     /// result. CPU: `out` is `src`'s content (a copy). Metal: sync the
@@ -469,6 +515,12 @@ impl Backend for Cpu {
 
     fn copy_into(&self, src: &[f32], dst: &mut [f32]) {
         dst.copy_from_slice(src);
+    }
+
+    fn copy_at(&self, src: &[f32], src_off: usize, dst: &mut [f32], dst_off: usize, len: usize) {
+        assert!(src.len() >= len + src_off, "copy_at src extent");
+        assert!(dst.len() >= len + dst_off, "copy_at dst extent");
+        dst[dst_off..dst_off + len].copy_from_slice(&src[src_off..src_off + len]);
     }
 
     fn download_into(&self, src: &[f32], out: &mut [f32]) {
