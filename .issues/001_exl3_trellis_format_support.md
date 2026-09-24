@@ -1,7 +1,7 @@
 # Issue 001 — EXL3 (trellis-coded) weight-format support in the quantization zoo
 
-**Status:** OPEN — T1 (format spec read) DONE 2026-09-24; T2–T7 pending.
-**Owner:** unassigned. **Filed:** 2026-09-24. **T1 executed:** 2026-09-24 (4090 box).
+**Status:** OPEN — T1 (format spec) + T2 (seam decision) DONE 2026-09-24; T3–T7 pending.
+**Owner:** unassigned. **Filed:** 2026-09-24. **T1/T2 executed:** 2026-09-24 (4090 box).
 **Origin:** riir-clippy Research 207 (`.research/207_qwen38_exl3_dgx_spark_distill_verdict.md`),
 lane-intel axis. The corpus half of that verdict is riir-clippy Plan 170 and is
 independent of this issue — neither blocks the other.
@@ -115,10 +115,14 @@ is an open design question this issue does not pre-decide.
   → **DONE, record in §10.** ⚠ The T1 wording above cited `doc/exl3.md` —
   that file does NOT exist at the pin (stale citation, corrected in §10.0);
   the spec was read from the implementation + `doc/convert.md`.
-- [ ] **T2 — Decide the loader seam.** Grouped-tensor reader in
+- [x] **T2 — Decide the loader seam.** Grouped-tensor reader in
   `safetensors_loader.rs` vs a typed quant enum shared with `GgmlType`. §4
   states the constraint; the choice is an owner/design call and the reason goes
   in this file, not in a commit message.
+  → **DECIDED 2026-09-24: Option A (safetensors-side grouped reader +
+  `quant/exl3.rs`), NO GgmlType coupling** — Claude-verdict ping-pong round 1
+  REVISE→incorporated, round 2 AGREE. The decision record with the full
+  rationale + four seam conditions: **§11**.
 - [ ] **T3 — CPU reference dequantization** (`src/quant/exl3.rs`), scalar and
   correct before fast. The procedural codebook and the incoherence rotation are
   the two pieces with no analogue in the existing zoo.
@@ -383,3 +387,105 @@ w = w · svh[None, :]                                     # per-output-channel f
   verdict: the GGUF seam stays untouched; the EXL3 reader is a SAFETENSORS-
   side grouped reader; convergence to a shared typed enum remains the open
   design question (T2's actual decision).
+
+## 11. T2 record — the loader-seam decision (2026-09-24, verdict-adjudicated)
+
+**Decision: Option A.** An EXL3 grouped-tensor reader on the safetensors
+path + `src/quant/exl3.rs` as the first safetensors-side quant module,
+holding a typed `Exl3Layer` (trellis + channel scales + markers + K +
+codebook tag). `GgmlType` is untouched. Adjudicated by the Claude verdict
+ping-pong (round 1 REVISE — rationale rewritten + four conditions added;
+round 2 AGREE; every line citation in the round-1 verdict verified against
+the tree before recording).
+
+### 11.1 Why NOT `GgmlType` — the load-bearing rationale
+
+Not a fit argument but a **namespace argument**: `GgmlType` is not a typed
+quant enum, it is a **wire-format ID parser** — its discriminants ARE
+ggml's on-disk numeric type IDs (`F32 = 0`, `BF16 = 30`, `Q2_0 = 42`,
+`PTQ1_0 = 143`), consumed by `from_id(id: u32)` straight off the GGUF
+header. EXL3 has **no ggml type ID** — an arm would mint a discriminant
+inside a numeric namespace upstream ggml allocates. This repo carries the
+burn precedent IN THE ENUM ITSELF: `gguf_loader.rs` documents BF16 having
+been mapped to 29 (= upstream's `IQ1_M`), which "meant no real BF16 GGUF
+could be opened at all", plus a `42 | 142` fork-renumbering arm. Arity
+confirms independently: the enum's whole method surface is
+`block_info() -> (block_bytes, weights_per_block)` + `tensor_bytes(n)` — a
+single-tensor byte calculus an EXL3 arm cannot answer (K comes from
+`trellis.shape[-1]/16`; one layer's data spans 3–7 entries).
+
+### 11.2 Enum convergence — deferred, with ONE valid trigger
+
+The future convergence shape is **wrap, never flatten**: a top-level
+`QuantFormat::{Gguf(GgmlType), Exl3(Exl3Codebook), …}` — flattening would
+destroy the wire-ID property `from_id` and the `42|142` arm depend on.
+
+⚠ **riir-ai Research 360's Universal Quant Router is NOT a trigger for
+loader convergence here** — it adjudicated a KERNEL-layer dispatch over
+*dequantized* formats in riir-ai; it can ship and consume dense fp16
+without either loader in this repo changing a line. Importing it as a
+trigger would carry an adjudication across a boundary it does not govern.
+
+**The single valid trigger: a second safetensors-borne quantized format
+lands in this repo** — at which point `safetensors_loader.rs` has two
+group-scan detectors racing over one metadata map and needs a
+discriminant. That is the only condition that actually forces the question.
+
+**No false binary:** the blessed B29 `enum-dispatch-separate-kernel-per-
+variant` shape is not being deferred — it already lives at the level where
+variance actually exists: `Exl3Codebook::{Cb0, Cb1Mcg, Cb2Mul1}` over the
+three procedural codebooks (§10.3) IS that shape. Declining to put it at a
+level with one arm is not deferring the pattern.
+
+### 11.3 The four seam conditions T3 must honor (verdict round 1, binding)
+
+1. **Lazy by construction — do NOT inherit the loader's eager-dequant
+   contract.** `safetensors_loader.rs` today mmaps and immediately
+   dequantizes BF16 → owned `f32` (`load_tensors_from_shard →
+   BTreeMap<String, Vec<f32>>`). §2 says EXL3's defensible axis is
+   **residency + context ceiling** — an `Exl3Layer` that eagerly expands
+   to dense f32 at load is WORSE than BF16 and forfeits the only axis §2
+   says is real. The struct holds zero-copy views (`&[u8]` over the mmap /
+   borrowed slices) and dequantizes AT USE; T5 cannot measure an axis T2
+   foreclosed.
+2. **Seam split at metadata-vs-format.** Group scan / detection is
+   safetensors-METADATA work (loader side); K-from-shape, marker→codebook
+   resolution, and dequant are FORMAT work (`quant/exl3.rs`). `exl3.rs`
+   consumes the metadata map (e.g. `&BTreeMap<String, TensorMeta>`)
+   rather than EXL3 knowledge growing inside the loader — which requires
+   making `TensorMeta` (currently private, `dtype: String`) visible to
+   the quant module as part of T3's first commit.
+3. **Carry the marker's u32 VALUE, not a `bool`.** §10.2 pins the content
+   (`mul1` = `0x83DCD12D`, `mcg` = `0xCBAC1FED`). Selecting a codebook on
+   name-presence alone decodes an unexpected pack with the wrong codebook
+   — silently numerically wrong, no panic; T4's oracle would be the only
+   catcher. `Exl3Layer` preserves the word so T3 verifies it loudly
+   (mismatch ⇒ refuse the pack).
+4. **`quant/mod.rs` doc line updated** when `exl3.rs` lands — "k-quant
+   formats from the GGML ecosystem" becomes false the moment the first
+   safetensors-side quant joins.
+
+No trait boundary yet — a trait over one implementor is the same one-arm
+mistake as the enum (verdict, non-blocking note).
+
+**Two T3 implementation notes from the round-2 AGREE (non-blocking,
+recorded so they don't live only in the verdict thread):**
+
+- ⚠ **The mmap is a function local** — `load_tensors_from_shard` binds
+  `Mmap::map` inside the function and drops it at return, so nothing can
+  borrow from it across the call boundary. A zero-copy `Exl3Layer<'a>`
+  needs the `Mmap` hoisted to an owner that outlives the layers
+  (loader-owned map handing out borrows, or `Arc<Mmap>` on the layer).
+  The realistic failure mode for condition 1 is not disagreement — it is
+  a borrow-checker fight in hour one resolved by "just copy it", which
+  silently reinstates the eager contract §11.3 refuses.
+- ⚠ **Shard spans:** the loader is per-shard, one EXL3 linear is 3–7
+  entries, and §10.5 puts the n-gram table in a standalone shard. Whether
+  a group's entries are shard-local is a question a REAL pack answers —
+  check in T3 rather than assuming (if groups span shards, more than one
+  mapping stays alive per layer → `Arc<Mmap>`).
+
+Process note carried forward (round 2): a verdict round's outcome is
+written in the commit that FOLLOWS the verdict, never in the file that
+requests it — this §11 record was committed after round 2 returned AGREE,
+which is the ordering to keep.
