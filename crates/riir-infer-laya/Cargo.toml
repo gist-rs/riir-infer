@@ -134,6 +134,14 @@ required-features = ["laya-riir-metal"]
 name = "packed_same_shape_gate"
 required-features = ["laya-riir-metal"]
 
+# The issue-020 T6 host/GPU split probe — measurement-only (#[ignore]d,
+# run explicitly with --ignored), whole-file #![cfg]-gated macOS + metal;
+# the row keeps a feature-less selection skipping loudly instead of
+# printing a green zero.
+[[test]]
+name = "metal_host_gpu_split"
+required-features = ["laya-riir-metal"]
+
 # The packed-forward equivalence gate is whole-file #![cfg]-gated
 # (feature `laya-riir`; its metal arm re-gates on target_os in-source);
 # this row keeps a feature-less selection skipping the target loudly

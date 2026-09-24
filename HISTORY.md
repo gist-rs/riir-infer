@@ -545,3 +545,48 @@ funnel for the stack's primitives remains `katgpt-rs` (its katgpt-core family
 publishes), not this repo.
 
 Session: owner-gates-m2, 1790121600
+
+## 2026-09-25 — Issue 020 T6 CLOSED NEGATIVE: the encoder's host side is 1–1.6% of forward wall (measured before building)
+
+T6 proposed pooling the per-forward allocation churn — ~60 MB of host `Vec`s
+rebuilt every forward (`encoder.rs` `Scratch::new()` + `gathered`/`h`/`out`/
+rope tables) plus every activation device buffer freed by the per-pass chain
+clear (`metal.rs` `begin_pass_impl`). The 09-25 head scratch-pool rung (built,
+measured, moved nothing, reverted — the consumer repo's issue-020 follow-up)
+already said the head is dispatch+GPU bound; this measurement settles the
+encoder's half the same way, and it was taken BEFORE building the pool (the
+discipline the head rung paid for).
+
+Instrument: `crates/riir-infer-laya/tests/metal_host_gpu_split.rs` — a
+`#[ignore]`d, `required-features = ["laya-riir-metal"]`-gated, measurement-only
+probe (`--ignored --nocapture`). It splits one `Encoder::forward_packed` at the
+real english geometry (d 1024, 28 layers, intermediate 2624) into `enq` (the
+wall of the forward alone — the body contains no sync, so that is the whole
+host side: MSL dispatch encoding, the chain uploads + destination slots, the
+host `Vec` churn) and `sync` (`download_into`'s commit + wait — the GPU side).
+The decision rule was recorded in the probe doc before measuring: pooling can
+shrink only part of `enq`; if `enq` is a small fraction of the wall, T6 closes
+NEGATIVE; a host-bound reading under load defers to a quiet box.
+
+Measured 2026-09-25, M3, AC, load 11–12 (falling), 88% RAM free, one sibling
+CPU bench (~6 cores, memory-bandwidth pressure — which inflates BOTH the host
+reading and the GPU's unified-memory reads), no GPU consumers, 9 rounds/shape,
+2 warmups:
+
+- seq188: enq p50 **0.80 ms** (min 0.64) · sync p50 **48.7 ms** (min 36.1) — host share **1.6%**
+- seq512: enq p50 **1.45 ms** (min 1.29) · sync p50 **141.6 ms** (min 132.6) — host share **1.0%**
+- packed2x256: enq p50 **1.37 ms** (min 1.22) · sync p50 **135.2 ms** (min 130.7) — host share **1.0%**
+
+The host reading is load-INFLATED (CPU contention inflates the host, never the
+GPU), so the verdict is robust in the recorded direction: a quiet box only
+shrinks the 1.0–1.6%. Allocation pooling can shrink only part of that share —
+dispatch encoding stays — and cannot move case wall. The per-pass chain clear
+STAYS (its staleness guard is load-bearing: host-authored buffers are rebuilt
+per forward at recycled heap addresses, the Issue-015 class). The probe stays
+as the standing instrument for any future host-side rung claim.
+
+Also landed in the same commit: the `[[test]]` required-features row for the
+new target (the T1.1e repo-birth law — the row keeps a feature-less selection
+skipping loudly instead of printing a green zero).
+
+Session: issue020-t6, 1790323200
