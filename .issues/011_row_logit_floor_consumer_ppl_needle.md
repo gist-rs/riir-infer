@@ -1,6 +1,6 @@
 # Issue 011 — consume katgpt-core `row_logit_floor` on a low-bit attention path: the ppl + needle@64K half of katgpt-rs Issue 882 P2's G1
 
-**Status:** OPEN — filed 2026-09-25 from katgpt-rs Issue 882 P2 (the primitive landed there, katgpt-rs Bench 888; this is its model-bound quality gate). Not started.
+**Status:** OPEN — filed 2026-09-25 from katgpt-rs Issue 882 P2 (the primitive landed there, katgpt-rs Bench 888; this is its model-bound quality gate). T1 LANDED (`8fa6e88`); T2 PASS + T4 CONFIRMED (Bench 003, 2026-09-25, M3); T3 measuring.
 
 ## What exists (katgpt-rs, feature `row_logit_floor`, opt-in)
 
@@ -11,10 +11,10 @@
 
 ## What this issue owns (the gate katgpt-rs cannot run)
 
-- [ ] **T1 — wire the floor + code into one attention path.** Candidates: `riir-infer-laya` `ops::softmax_rows` on the CPU backend, or the decode `attention_forward` default. Feature-gated default-off; width `w = ln(n_ctx/ε)`; `n_sink` from the model's sink convention (the `kv_sink_window` default is 4).
-- [ ] **T2 — ppl Δ within the envelope's prediction.** Use the house gemma-2 fixture (upstream-faithful: Gemma-2 has no QK-norm, and it softcaps attention logits at 50, which bounds the row range the floor sees; Issue 010's contrary claim was refuted). Run 8-bit and 6-bit. Report ppl Δ beside the mean per-row envelope. Bench 888 measured the **context-conditional** TV at ~0.75% (8-bit) and ~3% (6-bit) on synthetic σ=1 rows. Real rows decide whether 6-bit survives.
+- [x] **T1 — wire the floor + code into one attention path.** **LANDED `8fa6e88`** — gemma-2 f16 decode attention (`transformer::attention_floor`, feature `row_logit_floor`) behind `ForwardContext.logit_floor` (`None` ⇒ the plain path, unchanged); fused via katgpt-core `floored_coded_exp_inplace` (katgpt-rs `0adadacdd`, bit-identical to the three-step form). Bin `row_logit_floor_ppl` (ppl mode + `--needle` passkey mode `ed79065`, fixed-width `n65536` arms stand in for the 64K code width). m_Y probe (katgpt-rs 882 P4) rides the needle mode, `dc0e5a9`. Per-row exp-table rebuild NOT hoisted: 26×8×255 ≈ 53K exps/token against ~2.6 GFLOP of matvec, <0.01% — measured-irrelevant, not deferred. Candidates: `riir-infer-laya` `ops::softmax_rows` on the CPU backend, or the decode `attention_forward` default. Feature-gated default-off; width `w = ln(n_ctx/ε)`; `n_sink` from the model's sink convention (the `kv_sink_window` default is 4).
+- [x] **T2 — ppl Δ within the envelope's prediction.** **PASS at 8/6-bit ([Bench 003](../.benchmarks/003_row_logit_floor_ppl_needle.md), gemma-2 f16, 4096 tok):** b8 +0.033% ppl / 0.17% top-1 flips, b6 +0.066% / 0.90%, b4 +0.264% / 4.32%. The floored fraction is flat across bits (3.8%), so the code term dominates. |ΔNLL| is linear in the code step `w/(2^b−2)` (0.084 nats/step); the per-row envelope bounds it at every width. Use the house gemma-2 fixture (upstream-faithful: Gemma-2 has no QK-norm, and it softcaps attention logits at 50, which bounds the row range the floor sees; Issue 010's contrary claim was refuted). Run 8-bit and 6-bit. Report ppl Δ beside the mean per-row envelope. Bench 888 measured the **context-conditional** TV at ~0.75% (8-bit) and ~3% (6-bit) on synthetic σ=1 rows. Real rows decide whether 6-bit survives.
 - [ ] **T3 — needle@64K at 6-bit ≥ baseline − ε.** This is the issue's long-context bar. The floor term grows with n (`A ≤ n·e^{−w}`); the tv-budget width compensates via `ln(n/ε)`, which coarsens the code. Measure that trade-off at 64K.
-- [ ] **T4 — sink exemption A/B on a real model.** Bench 888 G1b pinned the synthetic cost of dropping the exemption: +8.3pp context TV at 6-bit. Confirm on real attention rows with real sinks.
+- [x] **T4 — sink exemption A/B on a real model.** **CONFIRMED (Bench 003):** without the exemption, b6s0 floors 1.58× the keys, |ΔNLL| rises 1.35× and flips 1.49×, while aggregate ppl looks BETTER (+0.044% vs +0.066%, sign cancellation). The exemption is load-bearing, and a ppl-only gate would have promoted the defect. Bench 888 G1b pinned the synthetic cost of dropping the exemption: +8.3pp context TV at 6-bit. Confirm on real attention rows with real sinks.
 
 ## Traps
 
