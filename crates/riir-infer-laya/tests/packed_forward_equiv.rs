@@ -220,6 +220,51 @@ fn packed_forward_matches_sequential_metal() {
     }
 }
 
+/// The CUDA lane (.issues/003): same equivalence at a drift tolerance.
+/// This is the gate class that catches the v1 zeros defect at the
+/// substrate level — the trait-default attention SLICES host memory at
+/// the packed offsets, and under the write-first discipline those host
+/// bytes are stale, so a default-path regression here shows up as a huge
+/// drift (not an argmax flip that tolerance could absorb). Loud skip on
+/// macOS / feature-absent builds.
+#[cfg(all(not(target_os = "macos"), feature = "laya-riir-cuda"))]
+#[test]
+fn packed_forward_matches_sequential_cuda() {
+    use riir_infer_laya::laya::riir::cuda::Cuda;
+
+    let enc = test_encoder();
+    let g = Cuda::new().expect("cuda backend");
+    let seqs = SEQS.to_vec();
+    let total: usize = seqs.iter().sum();
+    let ids = packed_ids(total, 97);
+
+    g.begin_pass();
+    let packed = enc
+        .forward_packed(&g, &ids, &seqs)
+        .expect("packed forward runs");
+    // Download ONCE, before any later begin_pass clears the chain epoch.
+    let mut packed_host = vec![0f32; total * 64];
+    g.download_into(&packed, &mut packed_host);
+
+    for si in 0..seqs.len() {
+        let off: usize = seqs[..si].iter().sum();
+        let seq = seqs[si];
+        g.begin_pass();
+        let single = enc.forward(&g, &ids[off..off + seq]).expect("forward runs");
+        let mut single_host = vec![0f32; seq * 64];
+        g.download_into(&single, &mut single_host);
+        let max_diff = packed_host[off * 64..(off + seq) * 64]
+            .iter()
+            .zip(single_host.iter())
+            .map(|(a, b)| (a - b).abs())
+            .fold(0.0f32, f32::max);
+        assert!(
+            max_diff <= 1e-4,
+            "sequence {si} (len {seq}) drifts {max_diff}"
+        );
+    }
+}
+
 /// The packed path also has to survive a `supports_packed_attention`
 /// answer on both lanes (the agent gates on it).
 #[test]

@@ -301,3 +301,145 @@ fn cuda_ops_match_cpu_op_by_op() {
     assert_eq!(cls, &full[..64], "prefix download diverged");
     println!("prefix download: ok");
 }
+
+/// The fused-attention seam (.issues/003): `attention_forward` equivalence
+/// vs the CPU default op sequence, full attention, ragged + padded tile
+/// sizes (9/37 walk every tile edge; 129 = FBQ·4+1; 1 = the single-key
+/// row) — the metal_ops_smoke mirrors.
+#[test]
+fn cuda_fused_attention_matches_cpu_full() {
+    let _gpu = gpu_lock();
+    let g = Cuda::new().expect("cuda backend");
+    let c = Cpu;
+    let hd = 64usize;
+    for (seq, heads) in [(1usize, 4usize), (9, 4), (37, 4), (64, 2), (129, 2)] {
+        g.begin_pass();
+        let d = heads * hd;
+        let qkv = vec_of(seq * 3 * d);
+        let (cos, sin) = riir_infer_laya::laya::riir::ops::rope_tables(seq, hd, 160_000.0);
+        let scale = (hd as f32).sqrt().recip();
+        let mut sa = riir_infer_laya::laya::riir::backend::AttnScratch::default();
+        let mut sb = riir_infer_laya::laya::riir::backend::AttnScratch::default();
+        let mut oc = vec![0f32; seq * d];
+        let mut og = vec![0f32; seq * d];
+        c.attention_forward(
+            &qkv, 0, &cos, &sin, 0, scale, seq, heads, hd, usize::MAX, None, &mut sa, &mut oc, 0,
+        );
+        g.attention_forward(
+            &qkv, 0, &cos, &sin, 0, scale, seq, heads, hd, usize::MAX, None, &mut sb, &mut og, 0,
+        );
+        report(
+            &format!("attn full {seq}x{heads}"),
+            &oc,
+            &sync_out(&g, &og),
+            1e-3,
+        );
+    }
+}
+
+/// Sliding-window equivalence: the CPU lane consumes the additive mask
+/// tensor, the fused kernel predicates on the window — the SAME allowed
+/// set must come out. Window 8 at seq 64, window 4 ragged at seq 37,
+/// window 16 at seq 130.
+#[test]
+fn cuda_fused_attention_matches_cpu_sliding() {
+    let _gpu = gpu_lock();
+    let g = Cuda::new().expect("cuda backend");
+    let c = Cpu;
+    let hd = 64usize;
+    for (seq, heads, window) in [(64usize, 4usize, 8usize), (37, 4, 4), (130, 2, 16)] {
+        g.begin_pass();
+        let d = heads * hd;
+        let qkv = vec_of(seq * 3 * d);
+        let (cos, sin) = riir_infer_laya::laya::riir::ops::rope_tables(seq, hd, 160_000.0);
+        let scale = (hd as f32).sqrt().recip();
+        // the encoder's mask: [seq, seq], f32::MIN outside the window
+        let mut mask = vec![f32::MIN; seq * seq];
+        for qi in 0..seq {
+            let lo = qi.saturating_sub(window);
+            let hi = (qi + window).min(seq - 1);
+            for kv in lo..=hi {
+                mask[qi * seq + kv] = 0.0;
+            }
+        }
+        let mut sa = riir_infer_laya::laya::riir::backend::AttnScratch::default();
+        let mut sb = riir_infer_laya::laya::riir::backend::AttnScratch::default();
+        let mut oc = vec![0f32; seq * d];
+        let mut og = vec![0f32; seq * d];
+        c.attention_forward(
+            &qkv, 0, &cos, &sin, 0, scale, seq, heads, hd, window, Some(&mask), &mut sa, &mut oc, 0,
+        );
+        g.attention_forward(
+            &qkv, 0, &cos, &sin, 0, scale, seq, heads, hd, window, Some(&mask), &mut sb, &mut og, 0,
+        );
+        report(
+            &format!("attn slide {seq}x{heads} w{window}"),
+            &oc,
+            &sync_out(&g, &og),
+            1e-3,
+        );
+    }
+}
+
+/// The PACKED offsets (.issues/003's founding defect): a two-sequence
+/// packed dispatch (non-zero qkv/rope/out offsets) must equal the same
+/// two sequences dispatched at offset zero — the exact shape the
+/// trait-default path silently fed zeros at v1. Also exercises the
+/// sliding window at a packed offset.
+#[test]
+fn cuda_fused_attention_packed_offsets_match_singles() {
+    let _gpu = gpu_lock();
+    let g = Cuda::new().expect("cuda backend");
+    let c = Cpu;
+    let hd = 64usize;
+    let heads = 2usize;
+    let d = heads * hd;
+    let (s1, s2, window) = (21usize, 33usize, 12usize);
+    let total = s1 + s2;
+    g.begin_pass();
+    let qkv = vec_of(total * 3 * d);
+    let (cos, sin) = riir_infer_laya::laya::riir::ops::rope_tables(total, hd, 160_000.0);
+    let scale = (hd as f32).sqrt().recip();
+    let mut mask1 = vec![f32::MIN; s1 * s1];
+    for qi in 0..s1 {
+        let lo = qi.saturating_sub(window);
+        let hi = (qi + window).min(s1 - 1);
+        for kv in lo..=hi {
+            mask1[qi * s1 + kv] = 0.0;
+        }
+    }
+    let mut mask2 = vec![f32::MIN; s2 * s2];
+    for qi in 0..s2 {
+        let lo = qi.saturating_sub(window);
+        let hi = (qi + window).min(s2 - 1);
+        for kv in lo..=hi {
+            mask2[qi * s2 + kv] = 0.0;
+        }
+    }
+
+    // CPU reference per sequence (the mask-consuming default sequence).
+    let mut oc = vec![0f32; total * d];
+    let mut sa = riir_infer_laya::laya::riir::backend::AttnScratch::default();
+    c.attention_forward(
+        &qkv[..s1 * 3 * d], 0, &cos, &sin, 0, scale, s1, heads, hd, window, Some(&mask1), &mut sa,
+        &mut oc[..s1 * d], 0,
+    );
+    c.attention_forward(
+        &qkv[s1 * 3 * d..], 0, &cos[s1 * hd..], &sin[s1 * hd..], 0, scale, s2, heads, hd, window,
+        Some(&mask2), &mut sa, &mut oc[s1 * d..], 0,
+    );
+
+    // CUDA packed: ONE parent dispatch per sequence at its offsets (the
+    // whole `out` parent every time, offset at bind — the encoder's exact
+    // call shape, so every sequence shares ONE chain slot).
+    let mut og = vec![0f32; total * d];
+    let mut sb = riir_infer_laya::laya::riir::backend::AttnScratch::default();
+    g.attention_forward(
+        &qkv, 0, &cos, &sin, 0, scale, s1, heads, hd, window, Some(&mask1), &mut sb, &mut og, 0,
+    );
+    g.attention_forward(
+        &qkv, s1 * 3 * d, &cos, &sin, s1, scale, s2, heads, hd, window, Some(&mask2), &mut sb,
+        &mut og, s1 * d,
+    );
+    report("attn packed offsets", &oc, &sync_out(&g, &og), 1e-3);
+}

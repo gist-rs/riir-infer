@@ -4,6 +4,76 @@ Durable records for resolved questions and closed lanes (the noise-reduction
 convention: the record lands here, hash-pinned; open work lives in `.issues/`
 and `.plans/`). Created 2026-09-23 at the first record.
 
+## 2026-09-25 — Issue 003 CLOSED: CUDA flash attention — the packed-path zeros defect fixed + the fused rung
+
+The `.issues/002` v1 posture ran `attention_forward` through the TRAIT
+DEFAULT op sequence on CUDA. That default SLICES host memory
+(`&qkv[qkv_off..]`) — correct at offset zero (the slice IS the parent
+the device op wrote → same `(ptr,len)` chain key → hit → device-current)
+and SILENTLY WRONG at non-zero offsets: the packed multi-question
+forward's slice is a NEW key → chain MISS → uploads the host bytes,
+which under the write-first discipline are STALE (the parent was written
+device-side only; the host vec holds its `resize(.., 0.0)` zeros).
+**Every multi-question case's attention ran on zeros at v1.**
+
+The evidence was the published bench, not the code: reflex
+`.benchmarks/026_4090windows_cuda` vs `018_4090windows_run` (CPU, same
+box) — typed_decisions english 0.3575→0.2690, multilingual 0.3490→0.2690,
+typed **0.7445→0.2690** (−47.5 pt), code_fixtures 0.5417→0.2917 (2
+q/case), while every 1-question-per-case suite was byte-identical
+(ag_news 0.9500, banking77 0.4980). The consumer-side G5 passed green
+because its fixture rows are single-question (offset zero — the correct
+path); `laya_batch_parity` (the multi-question gate) had not been run at
+the cuda posture. The 026 close-out's "accuracy byte-identical on every
+lane" claim was wrong for the multi-question suites — corrected in the
+consumer repo's bench doc the same day.
+
+The fix IS the rung: the Metal lane's one-pass online-softmax flash
+kernel (MSL_FLASH, the reflex Issue 020 T10 rung-3 form) ported to CUDA C
+at plain fp32 FMA — ONE dispatch per layer over the packed qkv (split,
+rope, q-scale, scores, sliding window, softmax, value mix, head merge
+in-kernel; the seq² scores parent never exists; **offsets bind at
+dispatch**, so the packed forward is the unbatched kernel's exact math —
+Metal's design, which is why the Metal lane was immune). 256 threads,
+one block per (32-row query block, head); shared staging
+tq[32][65]/tk[64][33]/tv[32][65]/ts[32][33]/tacc[32][65]+mrow/lrow/arow
+= 38 016 B dynamic smem; the online rescale α = expf(m_old − m_new) is
+exactly 1.0f when the max does not move. Kill-switch `LAYA_CUDA_FLASH=0`
+→ the reference sequence, which now PANICS on non-zero offsets (the
+Metal guard — the silent zeros are now a loud breach, and
+`supports_packed_attention` answers false there so the agent takes the
+per-question loop). `needs_window_mask` mirrors the armed path (the
+encoder stops building `[seq,seq]` masks on the fused lane).
+
+Gates green on this box, CUDA 13.3 / driver 610.62, GPU clear of compute
+consumers (GUI apps only — the exempt class):
+- `cuda_ops_smoke` + 3 new arms: fused full (seq 1/9/37/64/129 — every
+tile edge) drift 1.2–1.8e-7; sliding (w8@64/w4@37/w16@130) 1.2–1.8e-7;
+  the PACKED-offsets arm (two sequences at non-zero qkv/rope/out offsets,
+  the encoder's whole-parent call shape) 1.2e-7 — GREEN FIRST RUN.
+- `packed_forward_equiv` gained a CUDA arm (non-macOS,
+  `laya-riir-cuda`-gated) — the gate class that catches the zeros defect
+  at the substrate level; verified it FAILS LOUD under
+  `LAYA_CUDA_FLASH=0` (the fallback's offset guard panics).
+- Consumer-side at `LAYA_DEVICE=cuda`: `laya_batch_parity` — 26+26+36
+  batched multi-question forwards, top-1 1.000000, drift ≤ 5.1e-5
+  (~20× under the 1e-3 gate) — THE gate that would have caught v1; G5
+  parity english 3.3e-6 · typed 1.3e-6 · multilingual 4.7e-6 (the
+  online-softmax restructure's expected class, ~200× under the gate).
+- Latency (fixture rows, short seqs — flash vs `LAYA_CUDA_FLASH=0`):
+  english 17.5→16.2 ms (−7.4%), multilingual 9.0→8.5 (−5.6%), typed
+  17.6→16.6 (−5.7%). The long-seq suites gain far more (the seq² scores
+  traffic ~6×`heads·seq²·4B` per layer never exists, and the windowed
+  key walk cuts attention FLOPs ~2.4× at window 64) — measured in the
+  consumer repo's refreshed bench.
+
+The bench refresh + the published-numbers correction live in the consumer
+repo (reflex `.issues/027`). Remaining follow-up rungs (open, each
+G5-gated at the cuda posture): tile ladders for the m<64/n≤1024 sgemm
+shapes, CUDA graphs for per-op dispatch overhead.
+
+Session: 4090-cuda-flash, 2026-09-25
+
 ## 2026-09-24 — Issue 002 CLOSED: the CUDA backend for the laya lane (the 4090 bench row, 17–60× the CPU posture)
 
 Landed `9b52cb1`/`99f156e`→rebased `e99d767`: the lane's third compute

@@ -36,13 +36,19 @@
 //!   `b_rs=1, b_cs=k`) — the B-tile loader maps consecutive lanes along
 //!   whichever stride is 1, so no device-side transpose cache exists
 //!   (unlike Metal's simdgroup layout constraint, `weight_t_buf`).
-//! - **Attention v1**: the trait DEFAULT op sequence (split → rope →
-//!   scale → batched kt-scores → mask broadcast → softmax → batched value
-//!   mix → merge), every step a device kernel — attention is <6 % of
-//!   forward FLOPs at the pinned geometries (the projections dominate:
-//!   ~217 GFLOP/forward at seq 317), so a fused flash kernel is a measured
-//!   follow-up rung, not the landing gate. `needs_window_mask` stays
-//!   `true` (the default path consumes the mask tensor).
+//! - **Attention**: the FUSED flash kernel — ONE dispatch per layer over
+//!   the packed qkv (split → rope → q-scale → scores → sliding window →
+//!   softmax → value mix → head merge in-kernel, the Metal lane's
+//!   one-pass online-softmax form at plain fp32 FMA; the seq² scores
+//!   parent the reference sequence materializes never exists; offsets
+//!   bind at dispatch so the packed multi-question forward is the
+//!   unbatched kernel's exact math — `.issues/003`, which is also the
+//!   correctness fix: the `.issues/002` v1 trait-default path SLICES host
+//!   memory at the packed offsets and uploads STALE bytes on the
+//!   chain-cache miss, so every multi-question case's attention ran on
+//!   zeros at v1). `LAYA_CUDA_FLASH=0` falls back to the reference op
+//!   sequence (loud on non-zero offsets); `needs_window_mask` answers for
+//!   whichever path is armed.
 //!
 //! Numerics: fp32 throughout; `erff` / `expf` / `sqrtf` are CUDA's precise
 //! device intrinsics (≤2 ulp — the same class as Metal's `precise::exp`
@@ -66,7 +72,7 @@ use std::sync::{Arc, Mutex};
 use cudarc::driver::safe::{CudaContext, CudaFunction, CudaSlice, CudaStream, LaunchConfig};
 use cudarc::driver::PushKernelArg;
 
-use super::backend::Backend;
+use super::backend::{AttnScratch, Backend};
 use crate::laya::LayaError;
 
 /// The sgemm tile: 64×64 output per block, BK 32, 512 threads. Staging =
@@ -85,6 +91,18 @@ const ROW_THREADS: u32 = 256;
 /// Elementwise default block size.
 const EW_THREADS: u32 = 256;
 
+/// The flash-attention geometry (the Metal lane's `MSL_FLASH` contract):
+/// head dim pinned at 64 (asserted host-side), 32 query rows per block,
+/// 256 threads (8 warps — 4 scores/prob rows per warp in the softmax
+/// phase, one warp per accumulator row group).
+const FLASH_HD: u32 = 64;
+const FLASH_BQ: u32 = 32;
+const FLASH_THREADS: u32 = 256;
+/// Dynamic shared staging: tq [32][65] (Q, rope+scale) + tk [64][33] (Kᵀ,
+/// rope) + tv [32][65] (V) + ts [32][33] (scores→probs) + tacc [32][65]
+/// (accumulator) + mrow/lrow/arow [32]×3 — 9 504 floats.
+const FLASH_SMEM_BYTES: u32 = (32 * 65 + 64 * 33 + 32 * 65 + 32 * 33 + 32 * 65 + 3 * 32) * 4;
+
 const KERNELS: &[&str] = &[
     "sgemm",
     "add",
@@ -101,6 +119,7 @@ const KERNELS: &[&str] = &[
     "merge_heads",
     "gather_rows",
     "add_mask_bct",
+    "flash_attn",
 ];
 
 /// The CUDA C source. Self-contained (NVRTC — no host headers). Sizes fit
@@ -466,6 +485,197 @@ extern "C" __global__ void add_mask_bct(
     const unsigned int i = blockIdx.x * blockDim.x + threadIdx.x;
     if (i < len) x[i] += mask[i % mlen];
 }
+
+// ── flash attention ──────────────────────────────────────────────────────
+// The Metal lane's ONE-PASS online-softmax form (MSL_FLASH, the reflex
+// Issue 020 T10 rung-3 shape), ported at plain fp32 FMA: ONE dispatch per
+// layer over the packed qkv — split, rope, q-scale, scores, sliding
+// window, softmax and value mix + head merge in-kernel; the seq² scores
+// parent the reference sequence materializes never exists. 256 threads,
+// ONE block per (32-row query block, head). Offsets (qkv_off / cos_off /
+// out_off) bind at dispatch, so the packed multi-sequence forward is the
+// unbatched kernel's exact math.
+#define FBQ 32u
+#define FQS 65u   // row stride over a 64-wide tile (bank-conflict pad)
+#define FKS 33u   // row stride over a 32-wide tile
+
+__device__ __forceinline__ float warp_fmax(float v)
+{
+    #pragma unroll
+    for (unsigned int o = 16u; o > 0; o >>= 1)
+        v = fmaxf(v, __shfl_xor_sync(0xffffffffu, v, o));
+    return v;
+}
+__device__ __forceinline__ float warp_fsum(float v)
+{
+    #pragma unroll
+    for (unsigned int o = 16u; o > 0; o >>= 1)
+        v += __shfl_xor_sync(0xffffffffu, v, o);
+    return v;
+}
+
+extern "C" __global__ void flash_attn(
+    const float* __restrict__ qkv, const unsigned int qkv_off,
+    const float* __restrict__ cos_t, const unsigned int cos_off,
+    const float* __restrict__ sin_t, const unsigned int sin_off,
+    float* __restrict__ out, const unsigned int out_off,
+    const unsigned int seq, const unsigned int heads, const unsigned int hd,
+    const unsigned int window, const float scale)
+{
+    extern __shared__ float fraw[];
+    float* tq = fraw;                    // [32][65] Q tile, rope+scale applied
+    float* tk = tq + 32u * FQS;          // [64][33] Kᵀ tile, rope applied
+    float* tv = tk + 64u * FKS;          // [32][65] V tile, natural
+    float* ts = tv + 32u * FQS;          // [32][33] scores → probs
+    float* tacc = ts + 32u * FKS;        // [32][65] accumulator
+    float* mrow = tacc + 32u * FQS;      // [32] row max
+    float* lrow = mrow + 32u;            // [32] row sum
+    float* arow = lrow + 32u;            // [32] rescale α
+
+    const unsigned int q0 = blockIdx.x * FBQ;
+    const unsigned int h = blockIdx.y;
+    const unsigned int d = heads * hd;
+    const float* Q = qkv + qkv_off + h * hd;
+    const float* K = qkv + qkv_off + d + h * hd;
+    const float* V = qkv + qkv_off + 2u * d + h * hd;
+    const float* CS = cos_t + cos_off;
+    const float* SN = sin_t + sin_off;
+    float* OUT = out + out_off;
+
+    const unsigned int tid = threadIdx.x;   // 0..255
+    const unsigned int warp = tid >> 5;      // 0..7
+    const unsigned int lane = tid & 31u;
+
+    // Key range [lo, hi): every (q, k) with |q − k| ≤ window for every live
+    // row of this block, clamped to the sequence (window == seq, clamped
+    // host-side, ⇒ lo 0 / hi seq = full attention).
+    const unsigned int last_row = min(q0 + FBQ - 1u, seq - 1u);
+    const unsigned int lo = (q0 > window) ? (q0 - window) : 0u;
+    const unsigned int hi = min(last_row + window + 1u, seq);
+
+    // Stage the Q block once — one rope pair per thread ((r, j) and
+    // (r, j+32)), rotate-half then the 1/√hd scale (the reference's
+    // rope-then-scale order). Rows past seq stage zeros (their outputs are
+    // never stored).
+    for (unsigned int q = 0u; q < 4u; ++q) {
+        const unsigned int idx = tid + q * 256u;
+        const unsigned int r = idx >> 5;
+        const unsigned int j = idx & 31u;
+        const unsigned int row = q0 + r;
+        float qa = 0.0f, qb = 0.0f, c = 0.0f, s = 0.0f;
+        if (row < seq) {
+            qa = Q[(size_t)row * (3u * d) + j];
+            qb = Q[(size_t)row * (3u * d) + 32u + j];
+            c = CS[(size_t)row * hd + j];
+            s = SN[(size_t)row * hd + j];
+        }
+        tq[r * FQS + j] = (qa * c - qb * s) * scale;
+        tq[r * FQS + 32u + j] = (qb * c + qa * s) * scale;
+    }
+    // Accumulator + per-row stats init (α starts at 1 so the first tile's
+    // rescale multiplies zeros by exactly 1 — the MSL form).
+    for (unsigned int i = tid; i < 32u * FQS; i += 256u) tacc[i] = 0.0f;
+    for (unsigned int r = tid; r < FBQ; r += 256u) {
+        mrow[r] = -3.402823466e+38f;
+        lrow[r] = 0.0f;
+        arow[r] = 1.0f;
+    }
+    __syncthreads();
+
+    for (unsigned int t = lo; t < hi; t += FBQ) {
+        const unsigned int wk = min(FBQ, hi - t);   // live keys in this tile
+        // Stage Kᵀ: one rope pair per thread — reads both pair elements
+        // (the partner is outside the staged kt half but the same cache
+        // row), rotates, writes both kt rows.
+        for (unsigned int q = 0u; q < 4u; ++q) {
+            const unsigned int idx = tid + q * 256u;
+            const unsigned int j = idx >> 5;    // rope pair 0..31
+            const unsigned int key = idx & 31u; // tile key 0..31
+            const unsigned int krow = t + key;
+            float ka = 0.0f, kb = 0.0f, c = 0.0f, s = 0.0f;
+            if (krow < hi) {
+                ka = K[(size_t)krow * (3u * d) + j];
+                kb = K[(size_t)krow * (3u * d) + 32u + j];
+                c = CS[(size_t)krow * hd + j];
+                s = SN[(size_t)krow * hd + j];
+            }
+            tk[j * FKS + key] = ka * c - kb * s;
+            tk[(j + 32u) * FKS + key] = kb * c + ka * s;
+        }
+        // V tile [32 key][64 hd], natural layout (no rope).
+        for (unsigned int q = 0u; q < 8u; ++q) {
+            const unsigned int idx = tid + q * 256u;
+            const unsigned int key = idx >> 6;
+            const unsigned int col = idx & 63u;
+            const unsigned int krow = t + key;
+            tv[key * FQS + col] = (krow < hi) ? V[(size_t)krow * (3u * d) + col] : 0.0f;
+        }
+        __syncthreads();
+        // scores[r][c] = Σ_hd tq[r][·]·tk[·][c] — the full 64-dim
+        // contraction, 4 scores per thread.
+        for (unsigned int q = 0u; q < 4u; ++q) {
+            const unsigned int idx = tid + q * 256u;
+            const unsigned int r = idx >> 5;
+            const unsigned int c = idx & 31u;
+            float s = 0.0f;
+            for (unsigned int kk = 0u; kk < 64u; ++kk)
+                s += tq[r * FQS + kk] * tk[kk * FKS + c];
+            ts[r * FKS + c] = s;
+        }
+        __syncthreads();
+        // Online softmax: one warp per row (4 rows per warp), one lane per
+        // key. The block key range is a bounds optimization only — the
+        // per-row predicate |q − k| ≤ window is the mask's allowed set;
+        // padding keys (c ≥ wk) and out-of-window keys take p = 0 (their V
+        // rows staged zero, l skips them). Reads of mrow/lrow precede the
+        // shuffles, which every lane must enter before lane 0's write.
+        #pragma unroll
+        for (unsigned int rr = 0u; rr < 4u; ++rr) {
+            const unsigned int row = warp * 4u + rr;
+            const unsigned int qpos = q0 + row;
+            const unsigned int k = t + lane;
+            const unsigned int dk = (k > qpos) ? (k - qpos) : (qpos - k);
+            const bool live = (lane < wk) && (dk <= window);
+            const float m_old = mrow[row];
+            const float sc = live ? ts[row * FKS + lane] : -3.402823466e+38f;
+            const float m_new = fmaxf(m_old, warp_fmax(sc));
+            const float p = live ? expf(sc - m_new) : 0.0f;
+            const float alpha = expf(m_old - m_new);
+            ts[row * FKS + lane] = p;
+            const float l_new = lrow[row] * alpha + warp_fsum(p);
+            if (lane == 0u) {
+                mrow[row] = m_new;
+                lrow[row] = l_new;
+                arow[row] = alpha;
+            }
+        }
+        __syncthreads();
+        // acc ← diag(α)·acc + P·V over this tile's 32 keys (padding columns
+        // hold p = 0 against V rows staged zero).
+        for (unsigned int q = 0u; q < 8u; ++q) {
+            const unsigned int idx = tid + q * 256u;
+            const unsigned int r = idx >> 6;
+            const unsigned int col = idx & 63u;
+            float acc = tacc[r * FQS + col] * arow[r];
+            for (unsigned int kk = 0u; kk < FBQ; ++kk)
+                acc += ts[r * FKS + kk] * tv[kk * FQS + col];
+            tacc[r * FQS + col] = acc;
+        }
+        __syncthreads();
+    }
+
+    // Drain: per-row 1/l normalize + the merged-heads store [seq, d].
+    for (unsigned int q = 0u; q < 8u; ++q) {
+        const unsigned int idx = tid + q * 256u;
+        const unsigned int r = idx >> 6;
+        const unsigned int col = idx & 63u;
+        const unsigned int row = q0 + r;
+        if (row < seq) {
+            const float inv = 1.0f / lrow[r];
+            OUT[(size_t)row * d + h * hd + col] = tacc[r * FQS + col] * inv;
+        }
+    }
+}
 "#;
 
 fn rt(msg: impl Into<String>) -> LayaError {
@@ -503,6 +713,11 @@ pub struct Cuda {
     chain: Mutex<ChainMap>,
     /// The pass generation (how many `begin_pass` calls have run).
     epoch: AtomicU64,
+    /// Kill-switch (`LAYA_CUDA_FLASH=0`): route `attention_forward` back
+    /// through the reference op sequence instead of the fused kernel —
+    /// the A/B and bisect posture, never a silent default (the Metal
+    /// lane's `LAYA_METAL_FLASH` contract).
+    flash_disabled: bool,
     /// Debug-trace instance id.
     trace_id: usize,
 }
@@ -540,6 +755,7 @@ impl Cuda {
             weights: Mutex::new(WeightMap::new()),
             chain: Mutex::new(ChainMap::new()),
             epoch: AtomicU64::new(0),
+            flash_disabled: std::env::var("LAYA_CUDA_FLASH").as_deref() == Ok("0"),
             trace_id: next_trace_instance(),
         })
     }
@@ -846,10 +1062,95 @@ impl Backend for Cuda {
         );
     }
 
-    // attention_forward: the trait DEFAULT op sequence (split → rope →
-    // scale → scores → mask → softmax → mix → merge) runs entirely
-    // device-side through the ops above — the `.issues/002` v1 posture.
-    // A fused flash kernel is a measured follow-up rung.
+    /// The fused attention block: ONE dispatch per layer over the packed
+    /// qkv (the `flash_attn` kernel — the Metal lane's one-pass
+    /// online-softmax form at plain fp32 FMA). The offsets (reflex issue
+    /// 020 T5's packed forward) bind at dispatch — `qkv_off`/`out_off`
+    /// shift the buffer binds, `rope_row·hd` shifts the cos/sin binds — so
+    /// a packed dispatch is the unbatched kernel's exact math. This is
+    /// also the CORRECTNESS fix for the packed path (.issues/003): the
+    /// trait-default sequence SLICES host memory, and under the
+    /// write-first discipline a non-zero-offset slice is a chain-cache MISS
+    /// that uploads STALE host bytes (the parent was written device-side
+    /// only) — every multi-question case's attention ran on zeros at the
+    /// `.issues/002` v1 posture. `LAYA_CUDA_FLASH=0` falls back to that
+    /// reference sequence, which cannot bind offsets into a device buffer
+    /// — non-zero offsets there are a LOUD contract breach (the agent
+    /// gates packed forwards on [`Backend::supports_packed_attention`];
+    /// this guard is the backstop).
+    #[allow(clippy::too_many_arguments)]
+    fn attention_forward(
+        &self,
+        qkv: &[f32],
+        qkv_off: usize,
+        rope_cos: &[f32],
+        rope_sin: &[f32],
+        rope_row: usize,
+        scale: f32,
+        seq: usize,
+        heads: usize,
+        hd: usize,
+        window: usize,
+        mask: Option<&[f32]>,
+        scratch: &mut AttnScratch,
+        out: &mut [f32],
+        out_off: usize,
+    ) {
+        if self.flash_disabled || hd != FLASH_HD as usize {
+            if qkv_off != 0 || out_off != 0 || rope_row != 0 {
+                panic!(
+                    "packed attention offsets (qkv {qkv_off}, rope row {rope_row}, out \
+                     {out_off}) reached the reference-sequence fallback — the fallback \
+                     cannot bind offsets into a device buffer; the packed forward \
+                     requires the fused kernel (supports_packed_attention gates it)"
+                );
+            }
+            // The reference sequence consumes the mask tensor; the fused
+            // kernel predicates on the window (the same allowed set). hd
+            // outside the pinned geometry takes the reference path too.
+            return self.attention_forward_default(
+                qkv, qkv_off, rope_cos, rope_sin, rope_row, scale, seq, heads, hd, window, mask,
+                scratch, out, out_off,
+            );
+        }
+        let _ = mask; // the window describes the same allowed set
+        assert!(seq >= 1, "flash seq");
+        let qb = self.chain_buf(qkv);
+        // Rope tables: ONE slot per forward (whole packed tables), offset
+        // per sequence at bind — never a per-sequence re-upload.
+        let cb = self.chain_buf(rope_cos);
+        let sb = self.chain_buf(rope_sin);
+        let ob = self.chain_slot_for(out);
+        // window clamped to seq: full attention (usize::MAX) ⇒ lo 0 / hi
+        // seq in-kernel (and no overflow in the key-range arithmetic).
+        let w = window.min(seq) as u32;
+        let f = self.kernel("flash_attn");
+        let cfg = LaunchConfig {
+            grid_dim: ((seq as u32).div_ceil(FLASH_BQ), heads as u32, 1),
+            block_dim: (FLASH_THREADS, 1, 1),
+            shared_mem_bytes: FLASH_SMEM_BYTES,
+        };
+        let rope_off = (rope_row * hd) as u32;
+        unsafe {
+            self.stream
+                .launch_builder(&f)
+                .arg(qb.as_ref())
+                .arg(&(qkv_off as u32))
+                .arg(cb.as_ref())
+                .arg(&rope_off)
+                .arg(sb.as_ref())
+                .arg(&rope_off)
+                .arg(ob.as_ref())
+                .arg(&(out_off as u32))
+                .arg(&(seq as u32))
+                .arg(&(heads as u32))
+                .arg(&(hd as u32))
+                .arg(&w)
+                .arg(&scale)
+                .launch(cfg)
+                .unwrap_or_else(|e| panic!("cuda flash_attn launch: {e}"));
+        }
+    }
 
     fn add(&self, x: &mut [f32], x_off: usize, y: &[f32], y_off: usize, len: usize) {
         assert!(x.len() >= len + x_off, "add x extent");
@@ -1255,6 +1556,26 @@ impl Backend for Cuda {
 
     fn begin_pass(&self) {
         self.begin_pass_impl();
+    }
+
+    /// The packed forward rides the fused kernel: offsets are dispatch
+    /// binds, never kernel shapes. The reference-sequence fallback would
+    /// slice STALE host bytes at a non-zero offset (the `.issues/003`
+    /// zeros defect — it uploads the host slice on the chain-cache miss),
+    /// so this answers for the fused path only and the agent falls back
+    /// to the per-question loop when it is false (the Metal contract).
+    fn supports_packed_attention(&self, hd: usize) -> bool {
+        !self.flash_disabled && hd == FLASH_HD as usize
+    }
+
+    /// The fused kernel predicates on `window`; it consumes no mask tensor.
+    /// The predicate MIRRORS the dispatch's own gate, so a posture that
+    /// falls back to the reference op sequence (`LAYA_CUDA_FLASH=0`, or an
+    /// `hd` outside the pinned geometry) still gets its mask built — and
+    /// the encoder skips the `[seq, seq]` mask build (the seq² host alloc
+    /// + fill per forward) on the fused path.
+    fn needs_window_mask(&self, hd: usize) -> bool {
+        self.flash_disabled || hd != FLASH_HD as usize
     }
 
     fn download_into(&self, src: &[f32], out: &mut [f32]) {
