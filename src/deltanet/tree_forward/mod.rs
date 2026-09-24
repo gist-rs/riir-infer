@@ -42,18 +42,19 @@
 //! internal `1/√dₖ` scale matches riir-ai's `scale = 1/√(key_dim)`.
 
 use katgpt_core::gdn_tree_verify::{
-    GdnLayerParams, GdnTreeVerifier, TreeTopology, build_topology_from_tree_nodes,
-    verify_gdn_tree,
+    GdnLayerParams, GdnTreeVerifier, TreeTopology, build_topology_from_tree_nodes, verify_gdn_tree,
 };
-use katgpt_core::speculative::sampling::{sample_from_distribution, sample_residual_distribution_into};
+use katgpt_core::speculative::sampling::{
+    sample_from_distribution, sample_residual_distribution_into,
+};
 use katgpt_core::speculative::types::{TreeNode, TreePath};
 use katgpt_core::traits::NoPruner;
 use katgpt_core::{Rng, softmax_scaled};
 use katgpt_speculative::dd_tree::TreeBuilder;
 
 use crate::deltanet::forward::{
-    forward_attention_layer, forward_qwen_deltanet, l2_normalize, softplus, HybridCache,
-    HybridForwardScratch,
+    HybridCache, HybridForwardScratch, forward_attention_layer, forward_qwen_deltanet,
+    l2_normalize, softplus,
 };
 use crate::deltanet::weights::{DeltaNetLayerWeights, QwenDeltaNetWeights};
 use crate::dflash::dflash_predict_with;
@@ -96,7 +97,6 @@ fn transpose_state(src: &[f32], dst: &mut [f32], d_k: usize, d_v: usize) {
         }
     }
 }
-
 
 /// Tree-structured forward for one `DeltaNet` (linear recurrent) layer.
 ///
@@ -155,14 +155,12 @@ fn forward_tree_deltanet_layer(
         layer
             .in_proj_z
             .matvec(x_k, &mut z_all[k * z_dim..(k + 1) * z_dim]);
-        layer.in_proj_a.matvec(
-            x_k,
-            &mut a_raw_all[k * n_v_heads..(k + 1) * n_v_heads],
-        );
-        layer.in_proj_b.matvec(
-            x_k,
-            &mut b_raw_all[k * n_v_heads..(k + 1) * n_v_heads],
-        );
+        layer
+            .in_proj_a
+            .matvec(x_k, &mut a_raw_all[k * n_v_heads..(k + 1) * n_v_heads]);
+        layer
+            .in_proj_b
+            .matvec(x_k, &mut b_raw_all[k * n_v_heads..(k + 1) * n_v_heads]);
     }
 
     // ── 2. Compute conv1d output for all T nodes (tree-structured windows) ──
@@ -268,8 +266,7 @@ fn forward_tree_deltanet_layer(
             l2_normalize(&mut k_normed_all[k_off..k_off + key_dim]);
             // V (no expansion needed — V already has n_v_heads heads)
             let v_off = h * (t * val_dim) + orig * val_dim;
-            v_all[v_off..v_off + val_dim]
-                .copy_from_slice(&v_conv[h * val_dim..(h + 1) * val_dim]);
+            v_all[v_off..v_off + val_dim].copy_from_slice(&v_conv[h * val_dim..(h + 1) * val_dim]);
         }
     }
 
@@ -306,8 +303,7 @@ fn forward_tree_deltanet_layer(
         let out_h = verify_gdn_tree(verifier, topo, &params, &s0_transposed, key_dim, val_dim);
 
         // Copy to recurrent_output_all (topo-indexed)
-        recurrent_output_all[h * (t * val_dim)..(h + 1) * (t * val_dim)]
-            .copy_from_slice(&out_h);
+        recurrent_output_all[h * (t * val_dim)..(h + 1) * (t * val_dim)].copy_from_slice(&out_h);
     }
 
     // ── 6. Per-node: RMSNorm + SiLU gate + output projection ──
@@ -342,10 +338,9 @@ fn forward_tree_deltanet_layer(
         }
 
         // Output projection: x[k * n_embd..] = out_proj * recurrent_buf
-        layer.out_proj.matvec(
-            &recurrent_buf,
-            &mut x[k * n_embd..(k + 1) * n_embd],
-        );
+        layer
+            .out_proj
+            .matvec(&recurrent_buf, &mut x[k * n_embd..(k + 1) * n_embd]);
     }
 }
 
@@ -473,7 +468,11 @@ pub fn forward_tree_qwen_deltanet(
     let t = topo.n_nodes;
     let n = config.n_embd;
     let vocab = config.vocab_size;
-    assert_eq!(token_ids.len(), t, "token_ids length must match topology node count");
+    assert_eq!(
+        token_ids.len(),
+        t,
+        "token_ids length must match topology node count"
+    );
 
     // ── Hidden states: [T * n_embd], topo-indexed ──
     let mut x = vec![0.0f32; t * n];
@@ -584,7 +583,11 @@ pub fn forward_tree_qwen_deltanet(
 
     // ── 3. Final RMSNorm (per node) ──
     for k in 0..t {
-        rmsnorm_with_gamma_eps(&mut x[k * n..(k + 1) * n], &weights.final_norm, config.rms_norm_eps);
+        rmsnorm_with_gamma_eps(
+            &mut x[k * n..(k + 1) * n],
+            &weights.final_norm,
+            config.rms_norm_eps,
+        );
     }
 
     // ── 4. LM head (per node) ──
@@ -592,10 +595,9 @@ pub fn forward_tree_qwen_deltanet(
     let mut hidden_copy = vec![0.0f32; n];
     for k in 0..t {
         hidden_copy[..n].copy_from_slice(&x[k * n..(k + 1) * n]);
-        weights.lm_head.matvec(
-            &hidden_copy[..n],
-            &mut logits[k * vocab..(k + 1) * vocab],
-        );
+        weights
+            .lm_head
+            .matvec(&hidden_copy[..n], &mut logits[k * vocab..(k + 1) * vocab]);
     }
 
     logits
@@ -653,14 +655,7 @@ pub fn commit_tree_qwen_deltanet(
     for (i, &token) in accepted_tokens.iter().enumerate() {
         let pos = base_pos + i;
         forward_qwen_deltanet(
-            &mut x,
-            weights,
-            cache,
-            token,
-            pos,
-            config,
-            scratch,
-            rope_freq,
+            &mut x, weights, cache, token, pos, config, scratch, rope_freq,
         );
     }
 }
@@ -691,7 +686,9 @@ fn encode_path_prefix(path: &[usize], up_to_depth: usize) -> TreePath {
     path.iter()
         .take(up_to_depth + 1)
         .enumerate()
-        .fold(TreePath::default(), |acc, (d, &tok)| acc.push(tok as u32, d))
+        .fold(TreePath::default(), |acc, (d, &tok)| {
+            acc.push(tok as u32, d)
+        })
 }
 
 /// Extract candidate verification paths from a `DDTree` (top-3 root branches).
@@ -930,10 +927,7 @@ fn spec_step_deltanet_post_draft(
     let tree_owned: Vec<TreeNode> = tree.to_vec(); // detach from builder (it reuses buffers)
 
     if tree_owned.is_empty() {
-        let fallback = sample_from_distribution(
-            marginals.first().copied().unwrap_or(&[1.0]),
-            rng,
-        );
+        let fallback = sample_from_distribution(marginals.first().copied().unwrap_or(&[1.0]), rng);
         return (vec![fallback], 1);
     }
 
@@ -1004,8 +998,7 @@ fn spec_step_deltanet_post_draft(
 
             // Find the topo node matching this path prefix and use its logits.
             // O(1) HashMap lookup replaces the O(T) linear scan.
-            let Some(&topo_k) = path_to_topo.get(&(depth, current_path_prefix))
-            else {
+            let Some(&topo_k) = path_to_topo.get(&(depth, current_path_prefix)) else {
                 // No matching tree node — can't verify this token
                 all_accepted = false;
                 break;
@@ -1091,7 +1084,6 @@ fn spec_step_deltanet_post_draft(
     let fallback = sample_from_distribution(&probs_buf, rng);
     (vec![fallback], 1)
 }
-
 
 // ── Tests ────────────────────────────────────────────────────────────────────
 //

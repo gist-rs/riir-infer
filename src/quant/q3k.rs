@@ -180,11 +180,7 @@ pub fn quantize_row_q3_k_fixture(src: &[f32], dst: &mut [BlockQ3K]) {
                 // signed code −4..3: q3 = round(x) clamped; hbit carries the
                 // sign class (h=1 → 0..3, h=0 → −4..−1).
                 let c = x.round().clamp(-4.0, 3.0) as i32;
-                let (ql, hi) = if c >= 0 {
-                    (c, true)
-                } else {
-                    (c + 4, false)
-                };
+                let (ql, hi) = if c >= 0 { (c, true) } else { (c + 4, false) };
                 blk.qs[qbase + l] |= ((ql as u8) & 3) << shift;
                 if hi {
                     blk.hmask[hbase + l] |= 1 << hbit;

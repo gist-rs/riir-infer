@@ -31,7 +31,7 @@ use std::path::Path;
 use anyhow::{Context, Result, bail};
 use memmap2::Mmap;
 
-use super::exl3::{detect_exl3_layers, Exl3Layer, Exl3LayerPlan};
+use super::exl3::{Exl3Layer, Exl3LayerPlan, detect_exl3_layers};
 use crate::safetensors_loader::{TensorMeta, parse_safetensors_header};
 
 /// One mapped shard + its parsed header.
@@ -141,7 +141,10 @@ impl Exl3Pack {
             });
             for (tname, tmeta) in meta {
                 if tensors.insert(tname.clone(), (idx, tmeta)).is_some() {
-                    bail!("duplicate tensor '{tname}' across shards in {}", dir.display());
+                    bail!(
+                        "duplicate tensor '{tname}' across shards in {}",
+                        dir.display()
+                    );
                 }
             }
         }
@@ -241,15 +244,17 @@ impl Exl3Pack {
 
     /// Byte accounting by class, from metadata alone (T5's instrument).
     pub fn residency(&self) -> Exl3Residency {
-        let len_of =
-            |name: &str| self.tensors.get(name).map(|(_, m)| m.byte_len() as u64);
+        let len_of = |name: &str| self.tensors.get(name).map(|(_, m)| m.byte_len() as u64);
         let mut member_names = HashSet::new();
         let mut res = Exl3Residency::default();
         for plan in &self.plans {
             res.groups += 1;
             res.group_params += plan.in_features as u64 * plan.out_features as u64;
             res.trellis_bytes += len_of(&plan.trellis.0).unwrap_or(0);
-            for scale in [&plan.suh, &plan.svh, &plan.su, &plan.sv].into_iter().flatten() {
+            for scale in [&plan.suh, &plan.svh, &plan.su, &plan.sv]
+                .into_iter()
+                .flatten()
+            {
                 res.scale_bytes += len_of(&scale.0).unwrap_or(0);
                 member_names.insert(scale.0.clone());
             }
@@ -369,8 +374,8 @@ fn shard_file_names(dir: &Path) -> Result<Vec<String>> {
 
 #[cfg(test)]
 mod tests {
+    use super::super::exl3::{EXL3_MUL1_MARKER, Exl3Codebook, Exl3Layer};
     use super::*;
-    use super::super::exl3::{Exl3Codebook, Exl3Layer, EXL3_MUL1_MARKER};
 
     /// Process-unique temp dir (the fixed-temp-path class — katgpt-rs
     /// Issue 832 — never a shared constant path).
@@ -419,7 +424,11 @@ mod tests {
         let mut rng = fastrand::Rng::with_seed(seed);
         let trellis: Vec<u8> = (0..8192).map(|_| rng.u8(..)).collect();
         let suh = f16_bytes(&(0..128).map(|i| 0.5 + i as f32 / 256.0).collect::<Vec<_>>());
-        let svh = f16_bytes(&(0..128).map(|i| 0.25 + i as f32 / 512.0).collect::<Vec<_>>());
+        let svh = f16_bytes(
+            &(0..128)
+                .map(|i| 0.25 + i as f32 / 512.0)
+                .collect::<Vec<_>>(),
+        );
         (trellis, suh, svh)
     }
 
@@ -442,12 +451,7 @@ mod tests {
                     vec![],
                     EXL3_MUL1_MARKER.to_le_bytes().to_vec(),
                 ),
-                (
-                    "model.norm.weight",
-                    "F16",
-                    vec![64],
-                    f16_bytes(&[0.5; 64]),
-                ),
+                ("model.norm.weight", "F16", vec![64], f16_bytes(&[0.5; 64])),
             ],
         );
         write_shard(
@@ -572,7 +576,10 @@ mod tests {
             ],
         );
         let pack = Exl3Pack::open(&dir).unwrap();
-        assert!(pack.layer_keys().is_empty(), "garbage marker must not decode");
+        assert!(
+            pack.layer_keys().is_empty(),
+            "garbage marker must not decode"
+        );
         let err = pack.layer("l").map(|_| ()).unwrap_err();
         assert!(err.to_string().contains("no EXL3 group"), "got: {err}");
     }
@@ -641,7 +648,9 @@ mod tests {
         // Optional export for the exllamav3-native oracle (EXL3_EXPORT_DIR;
         // `.raw/exl3_t5_oracle.py` consumes these — the §12.7 era-gate
         // applied to whatever pack sits under EXL3_PACK_DIR).
-        let export_dir = std::env::var("EXL3_EXPORT_DIR").ok().map(std::path::PathBuf::from);
+        let export_dir = std::env::var("EXL3_EXPORT_DIR")
+            .ok()
+            .map(std::path::PathBuf::from);
         if let Some(d) = &export_dir {
             let _ = std::fs::create_dir_all(d);
         }
@@ -701,9 +710,13 @@ mod tests {
             }
             eprintln!(
                 "{class}: {} in={} out={} K={}.{} {:.3}s {:.2} Mw/s mean={mean:.5} max|W|={mx:.4} nan={nan}",
-                plan.key, plan.in_features, plan.out_features, plan.k.ka,
+                plan.key,
+                plan.in_features,
+                plan.out_features,
+                plan.k.ka,
                 if plan.k.half { "5" } else { "0" },
-                dt, rate
+                dt,
+                rate
             );
             assert_eq!(nan, 0, "NaN in dequantized {}", plan.key);
         }

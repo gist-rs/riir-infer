@@ -58,7 +58,11 @@ pub fn dequantize_row_q5_k(src: &[BlockQ5K], dst: &mut [f32]) {
         "dst length must be multiple of {QK_K}"
     );
     let nb = n / QK_K;
-    assert!(src.len() >= nb, "src too short: need {nb} blocks, got {}", src.len());
+    assert!(
+        src.len() >= nb,
+        "src too short: need {nb} blocks, got {}",
+        src.len()
+    );
 
     for (i, block) in src.iter().take(nb).enumerate() {
         let d = f32::from(f16::from_bits(block.d));
@@ -136,7 +140,10 @@ mod tests {
         };
         let mut out = vec![1.0_f32; QK_K]; // poison
         dequantize_row_q5_k(&[block], &mut out);
-        assert!(out.iter().all(|&v| v == 0.0), "expected all zeros, got {out:?}");
+        assert!(
+            out.iter().all(|&v| v == 0.0),
+            "expected all zeros, got {out:?}"
+        );
     }
 
     /// Non-zero d + all-15 quants: `d * 1 * 15` per element (min=0). Verifies
@@ -164,6 +171,9 @@ mod tests {
         // just assert all finite + same sign, since the exact value depends on
         // the scale packing for sub-blocks 4-7).
         assert!(out.iter().all(|&v| v.is_finite()));
-        assert!(out.iter().all(|&v| v > 0.0), "expected all positive, got sample {out:?}");
+        assert!(
+            out.iter().all(|&v| v > 0.0),
+            "expected all positive, got sample {out:?}"
+        );
     }
 }

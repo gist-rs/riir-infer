@@ -13,7 +13,7 @@ use crate::types::Config;
 
 pub use katgpt_core::speculative::types::{
     BlockScores, DraftEvent, DraftResult, FlashPrefillConfig, PrefillMode, RejectionReason,
-    TreePath, TreeNode,
+    TreeNode, TreePath,
 };
 pub use katgpt_core::traits::{
     BinaryScreeningPruner, ConstraintPruner, NoPruner, NoScreeningPruner, ScreeningPruner,
@@ -111,9 +111,7 @@ impl SpeculativeContext {
     /// Returns a Vec of borrowed slices for compatibility with existing APIs.
     pub fn marginals_view(&self, vocab_size: usize) -> Vec<&[f32]> {
         let mut out = Vec::with_capacity(self.steps_populated);
-        out.extend(
-            (0..self.steps_populated).map(|step| self.marginal_slice(step, vocab_size)),
-        );
+        out.extend((0..self.steps_populated).map(|step| self.marginal_slice(step, vocab_size)));
         out
     }
 

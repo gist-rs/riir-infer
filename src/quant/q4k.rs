@@ -394,7 +394,7 @@ pub fn gemv_q4_k_row_arithmetic(blocks: &[BlockQ4K], x: &[f32]) -> f32 {
 #[cfg(feature = "simd_lut_q4k")]
 #[inline]
 pub fn gemv_q4_k_row_lut(blocks: &[BlockQ4K], x: &[f32]) -> f32 {
-    use katgpt_core::simd_lut_dequant::{dequant_dot_via_lut, QuantLut, UInt4Lut};
+    use katgpt_core::simd_lut_dequant::{QuantLut, UInt4Lut, dequant_dot_via_lut};
 
     let mut acc = 0.0_f32;
     for (b, block) in blocks.iter().enumerate() {
@@ -425,13 +425,7 @@ pub fn gemv_q4_k_row_lut(blocks: &[BlockQ4K], x: &[f32]) -> f32 {
             // High nibble sub-block 2p+1
             if d_sc1 != 0.0 {
                 let lut1 = UInt4Lut::build(d_sc1, m1_val / d_sc1);
-                acc += dequant_dot_via_lut(
-                    qs_slice,
-                    &lut1,
-                    &x[x_base + 32..x_base + 64],
-                    4,
-                    0x0F,
-                );
+                acc += dequant_dot_via_lut(qs_slice, &lut1, &x[x_base + 32..x_base + 64], 4, 0x0F);
             } else {
                 acc += -m1_val * x[x_base + 32..x_base + 64].iter().sum::<f32>();
             }
@@ -791,8 +785,7 @@ mod tests {
         // a relative tolerance that works for both cases.
         #[cfg(feature = "simd_lut_q4k")]
         {
-            let rel = (via_dispatcher - via_arithmetic).abs()
-                / via_arithmetic.abs().max(1e-10);
+            let rel = (via_dispatcher - via_arithmetic).abs() / via_arithmetic.abs().max(1e-10);
             assert!(rel < 1e-5, "LUT vs arithmetic rel diff {rel} too large");
         }
         #[cfg(not(feature = "simd_lut_q4k"))]
@@ -896,7 +889,11 @@ mod tests {
         let first = gemv_q4_k_row(&blocks, &x);
         for _ in 0..100 {
             let v = gemv_q4_k_row(&blocks, &x);
-            assert_eq!(v.to_bits(), first.to_bits(), "non-deterministic gemv_q4_k_row");
+            assert_eq!(
+                v.to_bits(),
+                first.to_bits(),
+                "non-deterministic gemv_q4_k_row"
+            );
         }
     }
 }

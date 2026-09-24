@@ -483,7 +483,10 @@ fn forward_gemma4_impl<'a, L: LoraApplier>(
                     .copy_from_slice(&layer_cache.value[rs * kvd..rs * kvd + head_len]);
                 scratch.ring_gather_v[head_len..total]
                     .copy_from_slice(&layer_cache.value[..tail_len]);
-                (&scratch.ring_gather_k[..total], &scratch.ring_gather_v[..total])
+                (
+                    &scratch.ring_gather_k[..total],
+                    &scratch.ring_gather_v[..total],
+                )
             }
         } else {
             // sw_cache == 0 (full-size cache): the window runs from t_start to

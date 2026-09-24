@@ -45,7 +45,10 @@ impl LlamaTransformerWeights {
     /// `katgpt-transformer` features that gate the `LayerWeights` fields —
     /// so each arm matches the struct layout by construction (a literal in a
     /// consumer crate cannot know that feature set).
-    pub fn into_generic(self, config: &crate::types::Config) -> crate::transformer::TransformerWeights {
+    pub fn into_generic(
+        self,
+        config: &crate::types::Config,
+    ) -> crate::transformer::TransformerWeights {
         // `from_parts` (katgpt-transformer) owns BOTH literals' optional-field
         // cfg arms — consumer-side literals cannot know the unified feature
         // set (the delta_routing miss at infer-core's default was the second

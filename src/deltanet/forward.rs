@@ -436,8 +436,20 @@ pub fn forward_deltanet_layer(
     // When `repeat_factor > 1`, each k/q head is broadcast to `repeat_factor` v heads.
     // In-place normalize into the pre-allocated `q_normed` / `k_normed` scratch.
     let repeat_factor = n_v_heads / n_k_heads;
-    expand_heads_into(q_slice, n_k_heads, key_dim, repeat_factor, &mut scratch.q_normed);
-    expand_heads_into(k_slice, n_k_heads, key_dim, repeat_factor, &mut scratch.k_normed);
+    expand_heads_into(
+        q_slice,
+        n_k_heads,
+        key_dim,
+        repeat_factor,
+        &mut scratch.q_normed,
+    );
+    expand_heads_into(
+        k_slice,
+        n_k_heads,
+        key_dim,
+        repeat_factor,
+        &mut scratch.k_normed,
+    );
     for h in 0..n_v_heads {
         let off = h * key_dim;
         l2_normalize(&mut scratch.q_normed[off..off + key_dim]);
@@ -593,9 +605,7 @@ pub fn forward_attention_layer(
     // `qwen35.cpp::build_layer_attn` and HuggingFace `Qwen3NextAttention.forward`.
     // The gate is sigmoided and multiplied onto the attention output AFTER
     // softmax-attention, BEFORE the output projection.
-    layer
-        .attn_wq
-        .matvec(&x[..n_embd], &mut scratch.qg_buf);
+    layer.attn_wq.matvec(&x[..n_embd], &mut scratch.qg_buf);
     // Split qg_buf into q_buf and gate_buf (per-head interleaved layout):
     //   qg_buf = [q_h0(hd), gate_h0(hd), q_h1(hd), gate_h1(hd), ...]
     //   → q_buf[h]    = qg_buf[h * 2*hd .. h*2*hd + hd]
@@ -604,8 +614,7 @@ pub fn forward_attention_layer(
         let src = h * 2 * hd;
         let dst = h * hd;
         scratch.q_buf[dst..dst + hd].copy_from_slice(&scratch.qg_buf[src..src + hd]);
-        scratch.gate_buf[dst..dst + hd]
-            .copy_from_slice(&scratch.qg_buf[src + hd..src + 2 * hd]);
+        scratch.gate_buf[dst..dst + hd].copy_from_slice(&scratch.qg_buf[src + hd..src + 2 * hd]);
     }
     layer.attn_wk.matvec(&x[..n_embd], &mut scratch.k_buf);
     layer.attn_wv.matvec(&x[..n_embd], &mut scratch.v_buf);
@@ -703,11 +712,7 @@ pub fn forward_attention_layer(
 #[inline]
 pub fn effective_rotary_dim(config: &Config) -> usize {
     let r = config.rope_dimension_count;
-    if r == 0 {
-        config.head_dim
-    } else {
-        r
-    }
+    if r == 0 { config.head_dim } else { r }
 }
 
 // ---------------------------------------------------------------------------
@@ -840,11 +845,7 @@ impl HybridForwardScratch {
     pub fn new(config: &Config) -> Self {
         let v_dim = config.deltanet_linear_n_value_heads * config.deltanet_linear_head_dim;
         let q_dim = config.n_head * config.head_dim;
-        let rotation_len = config
-            .n_embd
-            .max(v_dim)
-            .max(q_dim)
-            .max(config.mlp_hidden);
+        let rotation_len = config.n_embd.max(v_dim).max(q_dim).max(config.mlp_hidden);
         Self {
             deltanet: DeltaNetLayerScratch::new(config),
             attention: AttentionLayerScratch::new(config),
@@ -948,18 +949,12 @@ pub fn forward_qwen_deltanet<'a>(
         );
 
         // g. SwiGLU MLP
-        layer_weights
-            .gate_proj
-            .matvec(&x[..n], &mut scratch.gate);
-        layer_weights
-            .up_proj
-            .matvec(&x[..n], &mut scratch.up);
+        layer_weights.gate_proj.matvec(&x[..n], &mut scratch.gate);
+        layer_weights.up_proj.matvec(&x[..n], &mut scratch.up);
         swiglu(&mut scratch.hidden, &scratch.gate, &scratch.up);
 
         // h. Down projection
-        layer_weights
-            .down_proj
-            .matvec(&scratch.hidden, &mut x[..n]);
+        layer_weights.down_proj.matvec(&scratch.hidden, &mut x[..n]);
 
         // i. Residual add
         for (xi, r) in x[..n].iter_mut().zip(&scratch.residual[..n]) {
@@ -1085,8 +1080,7 @@ fn batched_mlp(
     eps: f64,
 ) {
     // 1. Save residual.
-    prefill_ctx.mlp_residual[..seq_len * n]
-        .copy_from_slice(&prefill_ctx.hidden[..seq_len * n]);
+    prefill_ctx.mlp_residual[..seq_len * n].copy_from_slice(&prefill_ctx.hidden[..seq_len * n]);
 
     // 2. Batched post_attn_norm RMSNorm (elementwise, per position).
     for p in 0..seq_len {
@@ -1284,15 +1278,21 @@ pub fn prefill_qwen_deltanet_into(
                 rmsnorm_with_gamma_eps(hs, &layer_weights.input_norm, eps);
             }
             // Batched gated-Q / K / V projections — one weight-reuse GEMM each.
-            layer_weights
-                .attn_wq
-                .matmat(&prefill_ctx.hidden[..seq_len * n], &mut prefill_ctx.attn_qg[..seq_len * 2 * q_dim], seq_len);
-            layer_weights
-                .attn_wk
-                .matmat(&prefill_ctx.hidden[..seq_len * n], &mut prefill_ctx.attn_k[..seq_len * kvd], seq_len);
-            layer_weights
-                .attn_wv
-                .matmat(&prefill_ctx.hidden[..seq_len * n], &mut prefill_ctx.attn_v[..seq_len * kvd], seq_len);
+            layer_weights.attn_wq.matmat(
+                &prefill_ctx.hidden[..seq_len * n],
+                &mut prefill_ctx.attn_qg[..seq_len * 2 * q_dim],
+                seq_len,
+            );
+            layer_weights.attn_wk.matmat(
+                &prefill_ctx.hidden[..seq_len * n],
+                &mut prefill_ctx.attn_k[..seq_len * kvd],
+                seq_len,
+            );
+            layer_weights.attn_wv.matmat(
+                &prefill_ctx.hidden[..seq_len * n],
+                &mut prefill_ctx.attn_v[..seq_len * kvd],
+                seq_len,
+            );
             // Split qg → q + gate (interleaved per-head layout, same as
             // `forward_attention_layer` L583-589).
             for p in 0..seq_len {
@@ -1313,11 +1313,19 @@ pub fn prefill_qwen_deltanet_into(
                 let k_off = p * kvd;
                 for h in 0..config.n_head {
                     let off = q_off + h * hd;
-                    rmsnorm_with_gamma_eps(&mut prefill_ctx.attn_q[off..off + hd], &layer_weights.attn_q_norm, eps);
+                    rmsnorm_with_gamma_eps(
+                        &mut prefill_ctx.attn_q[off..off + hd],
+                        &layer_weights.attn_q_norm,
+                        eps,
+                    );
                 }
                 for h in 0..config.n_kv_head {
                     let off = k_off + h * hd;
-                    rmsnorm_with_gamma_eps(&mut prefill_ctx.attn_k[off..off + hd], &layer_weights.attn_k_norm, eps);
+                    rmsnorm_with_gamma_eps(
+                        &mut prefill_ctx.attn_k[off..off + hd],
+                        &layer_weights.attn_k_norm,
+                        eps,
+                    );
                 }
             }
             // Batched partial RoPE (per position — `pos = p`).
@@ -1328,13 +1336,18 @@ pub fn prefill_qwen_deltanet_into(
                     crate::rope::apply_rope_with_freq(
                         &mut prefill_ctx.attn_q[q_off..q_off + q_dim],
                         &mut prefill_ctx.attn_k[k_off..k_off + kvd],
-                        p, hd, rope_freq.as_slice(),
+                        p,
+                        hd,
+                        rope_freq.as_slice(),
                     );
                 } else {
                     crate::rope::apply_partial_rope_with_freq(
                         &mut prefill_ctx.attn_q[q_off..q_off + q_dim],
                         &mut prefill_ctx.attn_k[k_off..k_off + kvd],
-                        p, hd, rotary_dim, rope_freq.as_slice(),
+                        p,
+                        hd,
+                        rotary_dim,
+                        rope_freq.as_slice(),
                     );
                 }
             }
@@ -1366,8 +1379,14 @@ pub fn prefill_qwen_deltanet_into(
                         &kv_cache.value,
                         &mut prefill_ctx.attn_out[out_off..out_off + q_dim],
                         &mut prefill_ctx.head_scores,
-                        config.n_head, config.n_kv_head, kvd, hd, t_n, scale,
-                        0.0, config.block_size,
+                        config.n_head,
+                        config.n_kv_head,
+                        kvd,
+                        hd,
+                        t_n,
+                        scale,
+                        0.0,
+                        config.block_size,
                     );
                 }
             }
@@ -1405,10 +1424,12 @@ pub fn prefill_qwen_deltanet_into(
     // 4. LM head (logits from last position hidden state) — write into the
     // caller-supplied buffer (zero-alloc).
     let last_hidden = &prefill_ctx.hidden[last_off..last_off + n];
-    assert!(logits_out.len() >= v, "logits_out too short: {} < {v}", logits_out.len());
-    weights
-        .lm_head
-        .matvec(last_hidden, &mut logits_out[..v]);
+    assert!(
+        logits_out.len() >= v,
+        "logits_out too short: {} < {v}",
+        logits_out.len()
+    );
+    weights.lm_head.matvec(last_hidden, &mut logits_out[..v]);
 }
 
 // ---------------------------------------------------------------------------
@@ -1504,7 +1525,8 @@ pub fn generate_greedy_qwen_deltanet(
     let first_token = x[..v]
         .iter()
         .enumerate()
-        .max_by(|(_, a), (_, b)| katgpt_core::float_order::cmp_for_max(**a, **b)).map_or(0, |(i, _)| i);
+        .max_by(|(_, a), (_, b)| katgpt_core::float_order::cmp_for_max(**a, **b))
+        .map_or(0, |(i, _)| i);
 
     if first_token == QWEN_DELTANET_EOS {
         return generated;
@@ -1532,7 +1554,8 @@ pub fn generate_greedy_qwen_deltanet(
         let next_token = logits
             .iter()
             .enumerate()
-            .max_by(|(_, a), (_, b)| katgpt_core::float_order::cmp_for_max(**a, **b)).map_or(0, |(i, _)| i);
+            .max_by(|(_, a), (_, b)| katgpt_core::float_order::cmp_for_max(**a, **b))
+            .map_or(0, |(i, _)| i);
 
         if next_token == QWEN_DELTANET_EOS {
             break;
@@ -1625,10 +1648,7 @@ mod tests {
         // state[row,col] = 0.5 + (-0.5) = 0.0
         // output = Σ_c 0.0 * q[c] / sqrt(3) ≈ 0.0
         for (r, val) in step2.iter().enumerate() {
-            assert!(
-                val.abs() < 1e-3,
-                "step2 output[{r}] = {val}, expected ≈0.0"
-            );
+            assert!(val.abs() < 1e-3, "step2 output[{r}] = {val}, expected ≈0.0");
         }
     }
 
@@ -1738,7 +1758,14 @@ mod tests {
         let mut x = vec![0.0f32; n.max(config.vocab_size)];
 
         let logits = forward_qwen_deltanet(
-            &mut x, &weights, &mut cache, 0, 0, &config, &mut scratch, &rope_freq,
+            &mut x,
+            &weights,
+            &mut cache,
+            0,
+            0,
+            &config,
+            &mut scratch,
+            &rope_freq,
         )
         .to_vec();
 
@@ -2289,9 +2316,15 @@ mod tests {
 
         eprintln!("\n==============================================================");
         eprintln!("Issue 597 bench: batched prefill vs sequential decode");
-        eprintln!("config: n_embd={}, mlp_hidden={}, n_layer={}", config.n_embd, config.mlp_hidden, config.n_layer);
+        eprintln!(
+            "config: n_embd={}, mlp_hidden={}, n_layer={}",
+            config.n_embd, config.mlp_hidden, config.n_layer
+        );
         eprintln!("------------------------------------------------------------");
-        eprintln!("{:>8} | {:>14} | {:>15} | {:>8}", "seq_len", "decode ms/tok", "prefill ms/tok", "speedup");
+        eprintln!(
+            "{:>8} | {:>14} | {:>15} | {:>8}",
+            "seq_len", "decode ms/tok", "prefill ms/tok", "speedup"
+        );
         eprintln!("------------------------------------------------------------");
 
         for &seq_len in &[8usize, 16, 32, 64] {
@@ -2303,14 +2336,32 @@ mod tests {
             let mut scratch_dec = HybridForwardScratch::new(&config);
             // Warmup
             for (pos, &tok) in prompt.iter().enumerate() {
-                forward_qwen_deltanet(&mut x, &weights, &mut cache_dec, tok, pos, &config, &mut scratch_dec, &rope_freq);
+                forward_qwen_deltanet(
+                    &mut x,
+                    &weights,
+                    &mut cache_dec,
+                    tok,
+                    pos,
+                    &config,
+                    &mut scratch_dec,
+                    &rope_freq,
+                );
             }
             // Measure
             let mut cache_dec = HybridCache::with_layer_types(&config, &layer_types);
             let mut scratch_dec = HybridForwardScratch::new(&config);
             let t0 = std::time::Instant::now();
             for (pos, &tok) in prompt.iter().enumerate() {
-                forward_qwen_deltanet(&mut x, &weights, &mut cache_dec, tok, pos, &config, &mut scratch_dec, &rope_freq);
+                forward_qwen_deltanet(
+                    &mut x,
+                    &weights,
+                    &mut cache_dec,
+                    tok,
+                    pos,
+                    &config,
+                    &mut scratch_dec,
+                    &rope_freq,
+                );
             }
             let decode_ms = t0.elapsed().as_secs_f64() * 1000.0;
 
@@ -2320,19 +2371,39 @@ mod tests {
             let mut scratch_pf = HybridForwardScratch::new(&config);
             let mut prefill_ctx = PrefillContext::new(&config, seq_len);
             // Warmup
-            prefill_qwen_deltanet_into(&weights, &config, &mut cache_pf, &prompt, &mut scratch_pf, &rope_freq, &mut prefill_ctx, &mut logits);
+            prefill_qwen_deltanet_into(
+                &weights,
+                &config,
+                &mut cache_pf,
+                &prompt,
+                &mut scratch_pf,
+                &rope_freq,
+                &mut prefill_ctx,
+                &mut logits,
+            );
             // Measure
             let mut cache_pf = HybridCache::with_layer_types(&config, &layer_types);
             let mut scratch_pf = HybridForwardScratch::new(&config);
             let mut prefill_ctx = PrefillContext::new(&config, seq_len);
             let t1 = std::time::Instant::now();
-            prefill_qwen_deltanet_into(&weights, &config, &mut cache_pf, &prompt, &mut scratch_pf, &rope_freq, &mut prefill_ctx, &mut logits);
+            prefill_qwen_deltanet_into(
+                &weights,
+                &config,
+                &mut cache_pf,
+                &prompt,
+                &mut scratch_pf,
+                &rope_freq,
+                &mut prefill_ctx,
+                &mut logits,
+            );
             let prefill_ms = t1.elapsed().as_secs_f64() * 1000.0;
 
             let decode_ms_per_tok = decode_ms / seq_len as f64;
             let prefill_ms_per_tok = prefill_ms / seq_len as f64;
             let speedup = decode_ms_per_tok / prefill_ms_per_tok;
-            eprintln!("{seq_len:>8} | {decode_ms_per_tok:>14.1} | {prefill_ms_per_tok:>15.1} | {speedup:>7.2}×");
+            eprintln!(
+                "{seq_len:>8} | {decode_ms_per_tok:>14.1} | {prefill_ms_per_tok:>15.1} | {speedup:>7.2}×"
+            );
         }
         eprintln!("==============================================================\n");
     }
@@ -2523,9 +2594,7 @@ mod tests {
 
             // LM head
             let hidden_copy = x_seq[..n].to_vec();
-            weights
-                .lm_head
-                .matvec(&hidden_copy, &mut x_seq[..v]);
+            weights.lm_head.matvec(&hidden_copy, &mut x_seq[..v]);
         }
         let seq_logits = x_seq[..v].to_vec();
 
@@ -2599,16 +2668,26 @@ mod tests {
         // Seeded fill helper
         let mut seed = 42u64;
         let next = |s: &mut u64| {
-            *s = s.wrapping_mul(6_364_136_223_846_793_005).wrapping_add(1_442_695_040_888_963_407);
+            *s = s
+                .wrapping_mul(6_364_136_223_846_793_005)
+                .wrapping_add(1_442_695_040_888_963_407);
             (*s >> 33) as f32
         };
 
         let mut weights = QwenDeltaNetWeights::zeros(&config);
         let layer = &mut weights.layers[0];
-        for w in layer.attn_wq.dense_data_mut() { *w = next(&mut seed); }
-        for w in layer.attn_wk.dense_data_mut() { *w = next(&mut seed); }
-        for w in layer.attn_wv.dense_data_mut() { *w = next(&mut seed); }
-        for w in layer.attn_wo.dense_data_mut() { *w = next(&mut seed); }
+        for w in layer.attn_wq.dense_data_mut() {
+            *w = next(&mut seed);
+        }
+        for w in layer.attn_wk.dense_data_mut() {
+            *w = next(&mut seed);
+        }
+        for w in layer.attn_wv.dense_data_mut() {
+            *w = next(&mut seed);
+        }
+        for w in layer.attn_wo.dense_data_mut() {
+            *w = next(&mut seed);
+        }
 
         // A variant with q_norm gamma = 2.0 (scale Q 2x after per-head norm)
         let mut layer_scaled = crate::deltanet::weights::DeltaNetLayerWeights {
@@ -2636,17 +2715,36 @@ mod tests {
             x_scaled.fill(1.0);
 
             // Run with q_norm = ones (identity gamma)
-            forward_attention_layer(&mut x_identity, &weights.layers[0], &mut cache_id.kv_cache.layers[0], pos, &config, &rope_freq, &mut scratch_id.attention);
+            forward_attention_layer(
+                &mut x_identity,
+                &weights.layers[0],
+                &mut cache_id.kv_cache.layers[0],
+                pos,
+                &config,
+                &rope_freq,
+                &mut scratch_id.attention,
+            );
 
             // Run with q_norm = twos (scale Q by 2x after norm)
-            forward_attention_layer(&mut x_scaled, &layer_scaled, &mut cache_sc.kv_cache.layers[0], pos, &config, &rope_freq, &mut scratch_sc.attention);
+            forward_attention_layer(
+                &mut x_scaled,
+                &layer_scaled,
+                &mut cache_sc.kv_cache.layers[0],
+                pos,
+                &config,
+                &rope_freq,
+                &mut scratch_sc.attention,
+            );
         }
 
         // QK-norm scales Q per-head by gamma. With gamma=2.0, Q is scaled 2x,
         // which changes attention scores and thus the output. If QK-norm were
         // skipped, both outputs would be identical.
         let differ = x_identity.iter().zip(x_scaled.iter()).any(|(a, b)| a != b);
-        assert!(differ, "QK-norm not applied: identical output despite different q_norm gamma");
+        assert!(
+            differ,
+            "QK-norm not applied: identical output despite different q_norm gamma"
+        );
     }
 
     /// Shallow clone of `DeltaNetLayerWeights` for test scaffolding.

@@ -208,7 +208,9 @@ pub enum Q2oRepackError {
     TooFewBlocks { got: usize, expected: usize },
     #[error("cols ({cols}) is not a multiple of 128")]
     ColsNotMultipleOf128 { cols: usize },
-    #[error("Q2_0 code 3 (+2d) at (row {row}, col {col}) cannot be represented in TernaryGroupWeights")]
+    #[error(
+        "Q2_0 code 3 (+2d) at (row {row}, col {col}) cannot be represented in TernaryGroupWeights"
+    )]
     UnsupportedFourthState { row: usize, col: usize },
 }
 
@@ -360,7 +362,10 @@ mod tests {
         );
         // bits/weight = 34*8/128 = 2.125
         let bpw = compressed_bytes as f64 * 8.0 / Q2_0_BLOCK_SIZE as f64;
-        assert!((bpw - 2.125).abs() < 1e-9, "bits/weight = {bpw}, expected 2.125");
+        assert!(
+            (bpw - 2.125).abs() < 1e-9,
+            "bits/weight = {bpw}, expected 2.125"
+        );
     }
 
     #[test]
@@ -432,12 +437,8 @@ mod tests {
         block.d = f16::from_f32(1.0).to_bits();
         block.qs[0] = 0b11_00_00_00; // weight 3 = code 3
 
-        let err = repack_q2_0_to_ternary_group(
-            std::slice::from_ref(&block),
-            1,
-            Q2_0_BLOCK_SIZE,
-        )
-        .expect_err("code 3 must be rejected");
+        let err = repack_q2_0_to_ternary_group(std::slice::from_ref(&block), 1, Q2_0_BLOCK_SIZE)
+            .expect_err("code 3 must be rejected");
 
         match err {
             Q2oRepackError::UnsupportedFourthState { row, col } => {
@@ -466,9 +467,8 @@ mod tests {
         blocks[3].d = f16::from_f32(0.5).to_bits();
         blocks[3].qs.fill(0b10_10_10_10);
 
-        let tg =
-            repack_q2_0_to_ternary_group(&blocks, 2, 2 * Q2_0_BLOCK_SIZE)
-                .expect("multi-row repack");
+        let tg = repack_q2_0_to_ternary_group(&blocks, 2, 2 * Q2_0_BLOCK_SIZE)
+            .expect("multi-row repack");
 
         assert_eq!(tg.rows, 2);
         assert_eq!(tg.cols, 256);

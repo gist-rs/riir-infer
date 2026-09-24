@@ -99,10 +99,7 @@ pub fn dequantize_row_q2_k(src: &[BlockQ2K], dst: &mut [f32]) {
 /// `q = round((v + ml) / dl)` — the dequant's own inverse.
 pub fn quantize_row_q2_k_fixture(src: &[f32], dst: &mut [BlockQ2K]) {
     let nb = src.len() / QK_K;
-    assert!(
-        src.len() >= nb * QK_K,
-        "src not a multiple of {QK_K}"
-    );
+    assert!(src.len() >= nb * QK_K, "src not a multiple of {QK_K}");
     assert!(dst.len() >= nb, "dst too short for {nb} blocks");
     for i in 0..nb {
         let mut blk = BlockQ2K::zeroed();

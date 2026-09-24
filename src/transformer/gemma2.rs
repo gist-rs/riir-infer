@@ -45,7 +45,20 @@ pub fn forward_gemma2<'a>(
     }
 
     // 2. Layer loop + output head (shared with `forward_gemma2_with_embedding`).
-    forward_gemma2_layers(ctx, weights, cache, pos, config, n, hd, q_dim, kvd, n_kv, &mut NoHook, &mut NoLora);
+    forward_gemma2_layers(
+        ctx,
+        weights,
+        cache,
+        pos,
+        config,
+        n,
+        hd,
+        q_dim,
+        kvd,
+        n_kv,
+        &mut NoHook,
+        &mut NoLora,
+    );
 
     &mut ctx.logits
 }
@@ -123,7 +136,20 @@ pub fn forward_gemma2_with_embedding<'a>(
     }
 
     // 2. Layer loop — identical to forward_gemma2 from here on.
-    forward_gemma2_layers(ctx, weights, cache, pos, config, n, hd, q_dim, kvd, n_kv, &mut NoHook, &mut NoLora);
+    forward_gemma2_layers(
+        ctx,
+        weights,
+        cache,
+        pos,
+        config,
+        n,
+        hd,
+        q_dim,
+        kvd,
+        n_kv,
+        &mut NoHook,
+        &mut NoLora,
+    );
 
     &mut ctx.logits
 }
@@ -166,7 +192,20 @@ pub fn forward_gemma2_with_lora<'a>(
     }
 
     // 2. Layer loop + output head with LoRA deltas.
-    forward_gemma2_layers(ctx, weights, cache, pos, config, n, hd, q_dim, kvd, n_kv, &mut NoHook, lora);
+    forward_gemma2_layers(
+        ctx,
+        weights,
+        cache,
+        pos,
+        config,
+        n,
+        hd,
+        q_dim,
+        kvd,
+        n_kv,
+        &mut NoHook,
+        lora,
+    );
 
     &mut ctx.logits
 }
@@ -242,7 +281,20 @@ pub fn forward_gemma2_with_embedding_lora<'a>(
     }
 
     // 2. Layer loop + output head with LoRA deltas.
-    forward_gemma2_layers(ctx, weights, cache, pos, config, n, hd, q_dim, kvd, n_kv, &mut NoHook, lora);
+    forward_gemma2_layers(
+        ctx,
+        weights,
+        cache,
+        pos,
+        config,
+        n,
+        hd,
+        q_dim,
+        kvd,
+        n_kv,
+        &mut NoHook,
+        lora,
+    );
 
     &mut ctx.logits
 }
@@ -424,12 +476,7 @@ pub fn forward_gemma2_layers<H: PostLayerHook + ?Sized, L: LoraApplier>(
         // Uses the SAME rotate-half convention as Q/K above — NOT katgpt-core's
         // adjacent-pair RopeAction (convention mismatch).
         #[cfg(feature = "rotary_value_embedding")]
-        crate::rope::apply_rope_values(
-            &mut ctx.v,
-            pos,
-            hd,
-            ctx.rope_freq_table.as_slice(),
-        );
+        crate::rope::apply_rope_values(&mut ctx.v, pos, hd, ctx.rope_freq_table.as_slice());
 
         // f. Store K,V in per-layer cache
         let pos_off = pos * kvd;
@@ -699,12 +746,7 @@ pub fn forward_gemma2_block_causal<'a>(
 
             // [RoVE] Rotate V by R_p (Plan 557 T3.B, riir-ai commit cd62e6cd6).
             #[cfg(feature = "rotary_value_embedding")]
-            crate::rope::apply_rope_values(
-                &mut ctx.v,
-                p,
-                hd,
-                ctx.rope_freq_table.as_slice(),
-            );
+            crate::rope::apply_rope_values(&mut ctx.v, p, hd, ctx.rope_freq_table.as_slice());
 
             // Store K, V in per-layer cache
             let pos_off = p * kvd;

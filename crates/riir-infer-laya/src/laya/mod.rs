@@ -110,7 +110,11 @@ impl fmt::Display for LayaError {
             }
             Self::Runtime(s) => write!(f, "laya runtime: {s}"),
             Self::Question(s) => write!(f, "laya question: {s}"),
-            Self::Bucket { checkpoint, seq, max } => write!(
+            Self::Bucket {
+                checkpoint,
+                seq,
+                max,
+            } => write!(
                 f,
                 "laya checkpoint {checkpoint:?}: sequence length {seq} exceeds every \
                  ANE bucket (max {max}) — a coverage limit, never a fallback"

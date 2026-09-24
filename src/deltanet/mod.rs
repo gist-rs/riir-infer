@@ -26,9 +26,9 @@
 
 pub mod forward;
 pub mod reference;
-pub mod weights;
 #[cfg(feature = "gdn_tree_verify")]
 pub mod tree_forward;
+pub mod weights;
 
 // Issue 741 T10 Phase C (2026-08-22): the training family moved to
 // `riir-train-engine::deltanet` — backward / full_backward / layer_backward /
@@ -96,18 +96,18 @@ pub use forward::{
     forward_qwen_deltanet, generate_greedy_qwen_deltanet, prefill_qwen_deltanet,
     prefill_qwen_deltanet_into,
 };
+pub use minimal_activation_cache::{
+    DeltanetMinimalActs, MinimalActivationCache, MinimalLayerActivations,
+};
 pub use reference::{RecurrenceOutput, deltanet_recurrence_prefill, deltanet_recurrence_reference};
-pub use weights::{DeltaNetLayerWeights, Proj, QwenDeltaNetWeights};
-#[cfg(feature = "deltanet_ternary_inference")]
-pub use ternary_weights::{DeltaNetTernaryLayerWeights, QwenDeltaNetTernaryWeights};
 #[cfg(feature = "deltanet_ternary_inference")]
 pub use ternary_forward::{
     forward_qwen_deltanet_ternary, forward_qwen_deltanet_ternary_hidden,
     forward_qwen_deltanet_ternary_with_capture, forward_qwen_deltanet_ternary_with_hook,
 };
-pub use minimal_activation_cache::{
-    DeltanetMinimalActs, MinimalActivationCache, MinimalLayerActivations,
-};
+#[cfg(feature = "deltanet_ternary_inference")]
+pub use ternary_weights::{DeltaNetTernaryLayerWeights, QwenDeltaNetTernaryWeights};
+pub use weights::{DeltaNetLayerWeights, Proj, QwenDeltaNetWeights};
 // The model_backward_recompute root re-export (qwen_deltanet_model_backward_with_recomputation
 // + the 2 recompute_* fns) moved with the module to
 // `riir_train_engine::deltanet` (Issue 741 T10 Phase C).

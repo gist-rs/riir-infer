@@ -120,7 +120,10 @@ pub fn apply_partial_rope_with_freq(
     rotary_dim: usize,
     freq_table: &[f32],
 ) {
-    debug_assert!(rotary_dim <= head_dim, "rotary_dim must not exceed head_dim");
+    debug_assert!(
+        rotary_dim <= head_dim,
+        "rotary_dim must not exceed head_dim"
+    );
     debug_assert!(
         rotary_dim.is_multiple_of(2),
         "rotary_dim must be even (rotate-half convention)"
@@ -165,19 +168,11 @@ pub fn apply_partial_rope_with_freq(
     // leave dims [rotary_dim..head_dim) untouched.
     for h in 0..n_heads_q {
         let off = h * head_dim;
-        apply_rope_heads_precomputed(
-            &mut q[off..off + rotary_dim],
-            cos_table,
-            sin_table,
-        );
+        apply_rope_heads_precomputed(&mut q[off..off + rotary_dim], cos_table, sin_table);
     }
     for h in 0..n_heads_k {
         let off = h * head_dim;
-        apply_rope_heads_precomputed(
-            &mut k[off..off + rotary_dim],
-            cos_table,
-            sin_table,
-        );
+        apply_rope_heads_precomputed(&mut k[off..off + rotary_dim], cos_table, sin_table);
     }
 }
 
@@ -631,7 +626,10 @@ mod tests {
         let out_orig = out.clone();
         apply_inverse_rope_output(&mut out, 0, head_dim, &freq);
         for i in 0..4 {
-            assert!((out[i] - out_orig[i]).abs() < 1e-6, "out[{i}] changed at pos=0");
+            assert!(
+                (out[i] - out_orig[i]).abs() < 1e-6,
+                "out[{i}] changed at pos=0"
+            );
         }
     }
 
@@ -744,10 +742,20 @@ mod tests {
         // but the rotation is the same. Verify head 0 rotated correctly.
         let angle0 = pos as f32 * freq[0]; // freq[0] = 1/theta^0 = 1.0
         let expected_h0_0 = 1.0 * angle0.cos() - 0.0 * angle0.sin();
-        assert!((v[0] - expected_h0_0).abs() < 1e-5, "v[0]={}, expected={}", v[0], expected_h0_0);
+        assert!(
+            (v[0] - expected_h0_0).abs() < 1e-5,
+            "v[0]={}, expected={}",
+            v[0],
+            expected_h0_0
+        );
 
         // head 1 starts with 2.0 — verify it's rotated by the same angle
         let expected_h1_0 = 2.0 * angle0.cos() - 0.0 * angle0.sin();
-        assert!((v[4] - expected_h1_0).abs() < 1e-5, "v[4]={}, expected={}", v[4], expected_h1_0);
+        assert!(
+            (v[4] - expected_h1_0).abs() < 1e-5,
+            "v[4]={}, expected={}",
+            v[4],
+            expected_h1_0
+        );
     }
 }

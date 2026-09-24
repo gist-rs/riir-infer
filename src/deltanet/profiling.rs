@@ -137,7 +137,9 @@ impl ForwardProfiler {
 
         eprintln!("═══════════════════════════════════════════════════════════════");
         eprintln!("  Forward Profiling Breakdown (per token, {n_tok:.0} tokens avg)");
-        eprintln!("  DeltaNet layers/token: {dn_count:.0}  Attention layers/token: {attn_count:.0}");
+        eprintln!(
+            "  DeltaNet layers/token: {dn_count:.0}  Attention layers/token: {attn_count:.0}"
+        );
         eprintln!("═══════════════════════════════════════════════════════════════");
         eprintln!("  {:<30} {:>10} {:>6}", "Component", "ms/token", "%");
         eprintln!("  {sep30:<30} {sep10:>10} {sep6:>6}");
@@ -180,7 +182,10 @@ impl ForwardProfiler {
         row("LM head", per(&self.lm_head));
         eprintln!("  {eq30:<30} {eq10:>10} {eq6:>6}");
         row("TOTAL", total);
-        eprintln!("  Estimated throughput: {:.2} tok/s", 1000.0 / total.max(0.001));
+        eprintln!(
+            "  Estimated throughput: {:.2} tok/s",
+            1000.0 / total.max(0.001)
+        );
         eprintln!("═══════════════════════════════════════════════════════════════");
     }
 }
@@ -189,7 +194,12 @@ impl ForwardProfiler {
 ///
 /// Copy of `ternary_forward::bitlinear` (private in production).
 #[inline(always)]
-fn bitlinear(y: &mut [f32], w: &TernaryGroupWeights, x: &[f32], hook: Option<&dyn TernaryMatvecHook>) {
+fn bitlinear(
+    y: &mut [f32],
+    w: &TernaryGroupWeights,
+    x: &[f32],
+    hook: Option<&dyn TernaryMatvecHook>,
+) {
     if let Some(h) = hook {
         h.matvec(w, &x[..w.cols], &mut y[..w.rows]);
     } else {
@@ -236,8 +246,14 @@ fn profiled_deltanet_layer(
         iph.input_projections(
             &layer.in_proj_qkv,
             &layer.in_proj_z,
-            layer.in_proj_a.as_ternary().expect("profiler fused-hook lane requires ternary in_proj_a"),
-            layer.in_proj_b.as_ternary().expect("profiler fused-hook lane requires ternary in_proj_b"),
+            layer
+                .in_proj_a
+                .as_ternary()
+                .expect("profiler fused-hook lane requires ternary in_proj_a"),
+            layer
+                .in_proj_b
+                .as_ternary()
+                .expect("profiler fused-hook lane requires ternary in_proj_b"),
             x_in,
             &mut scratch.qkv[..qkv_dim],
             &mut scratch.z[..z_dim],
@@ -287,8 +303,20 @@ fn profiled_deltanet_layer(
     // 7-8. Expand + L2 normalize
     let t = Instant::now();
     let repeat_factor = n_v_heads / n_k_heads;
-    expand_heads_into(q_slice, n_k_heads, key_dim, repeat_factor, &mut scratch.q_normed);
-    expand_heads_into(k_slice, n_k_heads, key_dim, repeat_factor, &mut scratch.k_normed);
+    expand_heads_into(
+        q_slice,
+        n_k_heads,
+        key_dim,
+        repeat_factor,
+        &mut scratch.q_normed,
+    );
+    expand_heads_into(
+        k_slice,
+        n_k_heads,
+        key_dim,
+        repeat_factor,
+        &mut scratch.k_normed,
+    );
     for h in 0..n_v_heads {
         let off = h * key_dim;
         l2_normalize(&mut scratch.q_normed[off..off + key_dim]);
@@ -333,7 +361,12 @@ fn profiled_deltanet_layer(
 
     // 11. Output projection
     let t = Instant::now();
-    bitlinear(&mut x[..n_embd], &layer.out_proj, &scratch.recurrent_output, hook);
+    bitlinear(
+        &mut x[..n_embd],
+        &layer.out_proj,
+        &scratch.recurrent_output,
+        hook,
+    );
     ForwardProfiler::record(&mut prof.dn_out_proj, t);
 }
 
@@ -458,7 +491,12 @@ fn profiled_attention_layer(
 
     // 7. Output projection
     let t = Instant::now();
-    bitlinear(&mut x[..n_embd], &layer.attn_wo, &scratch.attn_out[..q_dim], hook);
+    bitlinear(
+        &mut x[..n_embd],
+        &layer.attn_wo,
+        &scratch.attn_out[..q_dim],
+        hook,
+    );
     ForwardProfiler::record(&mut prof.attn_out_proj, t);
 }
 
@@ -550,7 +588,11 @@ pub fn profiled_forward_ternary<'a>(
 
         // f. Post-attention RMSNorm
         let t = Instant::now();
-        rmsnorm_with_gamma_eps(&mut x[..n], &layer_weights.post_attn_norm, config.rms_norm_eps);
+        rmsnorm_with_gamma_eps(
+            &mut x[..n],
+            &layer_weights.post_attn_norm,
+            config.rms_norm_eps,
+        );
         ForwardProfiler::record(&mut prof.post_attn_norm, t);
 
         // g-i. FFN

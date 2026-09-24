@@ -34,7 +34,11 @@ fn nan_free_ordering_matches_the_replaced_idiom() {
             let legacy = a.partial_cmp(&b).unwrap_or(Equal);
             assert_eq!(desc(a, b), legacy.reverse(), "desc({a},{b}) diverged");
             assert_eq!(asc(a, b), legacy, "asc({a},{b}) diverged");
-            assert_eq!(asc_f64(a as f64, b as f64), legacy, "asc_f64({a},{b}) diverged");
+            assert_eq!(
+                asc_f64(a as f64, b as f64),
+                legacy,
+                "asc_f64({a},{b}) diverged"
+            );
         }
     }
 }
@@ -54,8 +58,15 @@ fn nan_heavy_sort_does_not_abort_and_sinks_nan() {
     assert_eq!(n_reals, 10, "17 base - 7 planted NaNs = 10 reals");
     let mut expect: Vec<f32> = xs.iter().copied().filter(|v| !v.is_nan()).collect();
     expect.sort_by(|a, b| b.total_cmp(a)); // NaN-free: legacy is exact here
-    assert_eq!(&xs[..n_reals], &expect[..], "reals must come out fully sorted");
-    assert!(xs[n_reals..].iter().all(|v| v.is_nan()), "NaN must sort last");
+    assert_eq!(
+        &xs[..n_reals],
+        &expect[..],
+        "reals must come out fully sorted"
+    );
+    assert!(
+        xs[n_reals..].iter().all(|v| v.is_nan()),
+        "NaN must sort last"
+    );
 }
 
 /// Ascending sites (nearest-first / cheapest-first) get the same guarantee:

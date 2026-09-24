@@ -27,7 +27,7 @@ use crate::quant::q3k::{BlockQ3K, dequantize_row_q3_k};
 use crate::quant::q4k::{BlockQ4K, dequantize_row_q4_k};
 use crate::quant::q5k::{BlockQ5K, dequantize_row_q5_k};
 use crate::quant::q6k::{BlockQ6K, dequantize_row_q6_k};
-use crate::quant::q8kv::{dequantize_row_q8_0, BlockQ8_0};
+use crate::quant::q8kv::{BlockQ8_0, dequantize_row_q8_0};
 use crate::safetensors_loader::bf16_to_f32;
 #[cfg(feature = "deltanet_inference")]
 use crate::types::DeltaNetLayerType;
@@ -541,7 +541,12 @@ impl GgufFile {
     /// * `row_len` - number of elements per row (the tensor's inner dim)
     ///
     /// Returns the dequantized row as `Vec<f32>` of length `row_len`.
-    pub fn dequant_tensor_row(&self, name: &str, row_idx: usize, row_len: usize) -> Result<Vec<f32>> {
+    pub fn dequant_tensor_row(
+        &self,
+        name: &str,
+        row_idx: usize,
+        row_len: usize,
+    ) -> Result<Vec<f32>> {
         let info = self
             .tensor_map
             .get(name)
@@ -568,8 +573,12 @@ impl GgufFile {
                 let mut out = out;
                 for (i, dst) in out.iter_mut().enumerate().take(row_len) {
                     let off = start + i * 4;
-                    *dst =
-                        f32::from_le_bytes([slice[off], slice[off + 1], slice[off + 2], slice[off + 3]]);
+                    *dst = f32::from_le_bytes([
+                        slice[off],
+                        slice[off + 1],
+                        slice[off + 2],
+                        slice[off + 3],
+                    ]);
                 }
                 Ok(out)
             }
@@ -588,10 +597,9 @@ impl GgufFile {
                 // K-quant Q2_K: 256 weights per 84-byte super-block (Issue 780
                 // U3 wall-1 — the DFlash2 drafter's quant-resident path).
                 let blocks_per_row = row_len / crate::quant::q2k::QK_K;
-                let start_byte =
-                    row_idx * blocks_per_row * std::mem::size_of::<BlockQ2K>();
-                let row_bytes = &slice[start_byte
-                    ..start_byte + blocks_per_row * std::mem::size_of::<BlockQ2K>()];
+                let start_byte = row_idx * blocks_per_row * std::mem::size_of::<BlockQ2K>();
+                let row_bytes = &slice
+                    [start_byte..start_byte + blocks_per_row * std::mem::size_of::<BlockQ2K>()];
                 let row_blocks: &[BlockQ2K] = bytemuck::cast_slice(row_bytes);
                 let mut out = out;
                 dequantize_row_q2_k(row_blocks, &mut out);
@@ -600,10 +608,9 @@ impl GgufFile {
             GgmlType::Q3_K => {
                 // K-quant Q3_K: 256 weights per 110-byte super-block.
                 let blocks_per_row = row_len / crate::quant::q3k::QK_K;
-                let start_byte =
-                    row_idx * blocks_per_row * std::mem::size_of::<BlockQ3K>();
-                let row_bytes = &slice[start_byte
-                    ..start_byte + blocks_per_row * std::mem::size_of::<BlockQ3K>()];
+                let start_byte = row_idx * blocks_per_row * std::mem::size_of::<BlockQ3K>();
+                let row_bytes = &slice
+                    [start_byte..start_byte + blocks_per_row * std::mem::size_of::<BlockQ3K>()];
                 let row_blocks: &[BlockQ3K] = bytemuck::cast_slice(row_bytes);
                 let mut out = out;
                 dequantize_row_q3_k(row_blocks, &mut out);
@@ -806,7 +813,9 @@ impl GgufFile {
                 dequantize_row_q4_0(slice, &mut out)?;
                 Ok(out)
             }
-            other => bail!("tensor '{name}' is {other:?}, expected F16, BF16, F32, Q8_0, Q4_1, Q4_0, Q4_K, Q5_K, Q6_K, Q2_K, Q3_K, or Q2_0 for dequant"),
+            other => bail!(
+                "tensor '{name}' is {other:?}, expected F16, BF16, F32, Q8_0, Q4_1, Q4_0, Q4_K, Q5_K, Q6_K, Q2_K, Q3_K, or Q2_0 for dequant"
+            ),
         }
     }
 
@@ -1038,7 +1047,12 @@ fn dequantize_row_q4_1(slice: &[u8], out: &mut [f32]) -> Result<()> {
             slice.len()
         );
     }
-    for (b, chunk) in slice[..need].as_chunks::<BLOCK_BYTES>().0.iter().enumerate() {
+    for (b, chunk) in slice[..need]
+        .as_chunks::<BLOCK_BYTES>()
+        .0
+        .iter()
+        .enumerate()
+    {
         let d = half::f16::from_bits(u16::from_le_bytes([chunk[0], chunk[1]])).to_f32();
         let m = half::f16::from_bits(u16::from_le_bytes([chunk[2], chunk[3]])).to_f32();
         let qs = &chunk[4..20];
@@ -1075,7 +1089,12 @@ fn dequantize_row_q4_0(slice: &[u8], out: &mut [f32]) -> Result<()> {
             slice.len()
         );
     }
-    for (b, chunk) in slice[..need].as_chunks::<BLOCK_BYTES>().0.iter().enumerate() {
+    for (b, chunk) in slice[..need]
+        .as_chunks::<BLOCK_BYTES>()
+        .0
+        .iter()
+        .enumerate()
+    {
         let d = half::f16::from_bits(u16::from_le_bytes([chunk[0], chunk[1]])).to_f32();
         let qs = &chunk[2..18];
         let base = b * QK;
@@ -1312,10 +1331,14 @@ pub fn load_llama_weights_gguf(
     // Load lm_head. LLaMA 3.2 3B (and other small LLaMA models) use tied
     // embeddings — there is no separate `output.weight` tensor. Fall back to
     // the token embedding weights in that case.
-    let lm_head = if let Ok(w) = gguf.dequant_f16_to_f32("output.weight") { w } else {
-            log::info!("output.weight not found — assuming tied embeddings, using token_embd.weight as lm_head");
-            wte.clone()
-        };
+    let lm_head = if let Ok(w) = gguf.dequant_f16_to_f32("output.weight") {
+        w
+    } else {
+        log::info!(
+            "output.weight not found — assuming tied embeddings, using token_embd.weight as lm_head"
+        );
+        wte.clone()
+    };
 
     let mut layers = Vec::with_capacity(n_layer);
     for i in 0..n_layer {
@@ -1657,7 +1680,7 @@ pub fn load_qwen_deltanet_weights_gguf(
 ) -> Result<(Config, crate::deltanet::weights::QwenDeltaNetWeights)> {
     use crate::deltanet::weights::Proj;
 
-let gguf = GgufFile::open(path)?;
+    let gguf = GgufFile::open(path)?;
 
     // Validate architecture
     let arch = gguf.architecture().unwrap_or("unknown");
@@ -1675,10 +1698,12 @@ let gguf = GgufFile::open(path)?;
     let final_norm = gguf.dequant_f16_to_f32("output_norm.weight")?;
 
     // Check if lm_head is separate or tied
-    let lm_head = if let Some(lm) = gguf.try_dequant_f16_to_f32("output.weight")? { crate::deltanet::weights::Proj::dense(lm, config.vocab_size, config.n_embd) } else {
-            // tied embeddings — clone wte for the lm_head data
-            crate::deltanet::weights::Proj::dense(wte.clone(), config.vocab_size, config.n_embd)
-        };
+    let lm_head = if let Some(lm) = gguf.try_dequant_f16_to_f32("output.weight")? {
+        crate::deltanet::weights::Proj::dense(lm, config.vocab_size, config.n_embd)
+    } else {
+        // tied embeddings — clone wte for the lm_head data
+        crate::deltanet::weights::Proj::dense(wte.clone(), config.vocab_size, config.n_embd)
+    };
 
     // Load per-layer weights
     // Shape dims for `Proj::dense` construction (mirror `zeros`).
@@ -1797,10 +1822,7 @@ let gguf = GgufFile::open(path)?;
 /// GGUF 2D tensor shape is `[ne0=cols, ne1=rows]` (ne0 is the inner/fastest
 /// dimension). The repack is row-major: `rows` rows of `cols/128` blocks.
 #[cfg(feature = "deltanet_ternary_inference")]
-fn load_ternary_proj(
-    gguf: &GgufFile,
-    name: &str,
-) -> Result<katgpt_core::TernaryGroupWeights> {
+fn load_ternary_proj(gguf: &GgufFile, name: &str) -> Result<katgpt_core::TernaryGroupWeights> {
     use crate::quant::ptq1_0::repack_ptq1_0_to_ternary_group;
     use crate::quant::q2_0::repack_q2_0_to_ternary_group;
 
@@ -1847,7 +1869,10 @@ fn load_ternary_proj(
 /// Both-file regression: the old file must keep loading byte-identically
 /// through the ternary arm.
 #[cfg(feature = "deltanet_ternary_inference")]
-fn load_gate_proj(gguf: &GgufFile, name: &str) -> Result<crate::deltanet::ternary_weights::GateProjWeights> {
+fn load_gate_proj(
+    gguf: &GgufFile,
+    name: &str,
+) -> Result<crate::deltanet::ternary_weights::GateProjWeights> {
     use crate::deltanet::ternary_weights::GateProjWeights;
     let info = gguf
         .tensor_info(name)
@@ -2051,7 +2076,10 @@ pub fn load_qwen_deltanet_ternary_weights_gguf(
     // is_foldable_weight posture).
     if rotation.is_some() {
         use crate::deltanet::rotation as r;
-        for name_val in gguf.metadata_array("prism.hadamard.weight_names").unwrap_or(&[]) {
+        for name_val in gguf
+            .metadata_array("prism.hadamard.weight_names")
+            .unwrap_or(&[])
+        {
             let Some(name) = name_val.as_str() else {
                 bail!("prism.hadamard weight name not a string");
             };
@@ -2235,10 +2263,7 @@ fn qwen35_deltanet_config_from_gguf_metadata(
 #[cfg(feature = "gemma4_inference")]
 pub fn load_gemma4_weights_gguf(
     path: &Path,
-) -> Result<(
-    Config,
-    crate::transformer::gemma4::Gemma4TransformerWeights,
-)> {
+) -> Result<(Config, crate::transformer::gemma4::Gemma4TransformerWeights)> {
     let gguf = GgufFile::open(path)?;
 
     // Validate architecture.
@@ -2724,7 +2749,10 @@ mod tests {
 
         assert_eq!(layer_types.len(), 64, "MTP block excluded");
         assert_eq!(
-            layer_types.iter().filter(|&&lt| lt == DeltaNetLayerType::Attention).count(),
+            layer_types
+                .iter()
+                .filter(|&&lt| lt == DeltaNetLayerType::Attention)
+                .count(),
             16,
             "16 full-attention layers (3, 7, ..., 63)"
         );
@@ -2741,9 +2769,8 @@ mod tests {
     #[cfg(feature = "deltanet_inference")]
     fn test_qwen35_real_gguf_nextn_and_config() {
         let path = std::path::PathBuf::from(
-            std::env::var("QWEN38_GGUF").unwrap_or_else(|_| {
-                "F:/models/qwen38-27b-dbirks-Q4_K_M.gguf".to_string()
-            }),
+            std::env::var("QWEN38_GGUF")
+                .unwrap_or_else(|_| "F:/models/qwen38-27b-dbirks-Q4_K_M.gguf".to_string()),
         );
         if !path.exists() {
             eprintln!("SKIP: {} not found", path.display());
@@ -2759,7 +2786,10 @@ mod tests {
         assert_eq!(config.n_layer, 64, "blk.64 (MTP) excluded from main stack");
         assert_eq!(layer_types.len(), 64);
         assert_eq!(
-            layer_types.iter().filter(|&&lt| lt == DeltaNetLayerType::Attention).count(),
+            layer_types
+                .iter()
+                .filter(|&&lt| lt == DeltaNetLayerType::Attention)
+                .count(),
             16
         );
         assert_eq!(layer_types[0], DeltaNetLayerType::DeltaNet);
@@ -2774,7 +2804,10 @@ mod tests {
         assert_eq!(config.head_dim, 256);
         assert_eq!(config.mlp_hidden, 17_408);
         assert_eq!(config.rope_theta, 1e7);
-        assert!(!config.tied_embeddings, "dbirks GGUF has output.weight (untied)");
+        assert!(
+            !config.tied_embeddings,
+            "dbirks GGUF has output.weight (untied)"
+        );
 
         // GDN dims: 16 K-heads x 48 V-heads x 128.
         assert_eq!(config.deltanet_linear_n_heads, 16);
@@ -2910,8 +2943,8 @@ mod tests {
     /// new arm reads the right bytes and dispatches correctly.
     #[test]
     fn test_dequant_q4_k_via_gguf_round_trip() {
-        use bytemuck::Zeroable;
         use crate::quant::q4k::{BlockQ4K, QK_K, dequantize_row_q4_k, quantize_row_q4_k};
+        use bytemuck::Zeroable;
 
         // Source: a single Q4_K super-block (256 elements) with a mix of values
         // that exercises the asymmetric quantization (positive + negative range).
@@ -2958,10 +2991,7 @@ mod tests {
 
         // Write to a temp file and open via GgufFile.
         let temp_dir = std::env::temp_dir();
-        let path = temp_dir.join(format!(
-            "riir_engine_q4k_test_{}.gguf",
-            std::process::id()
-        ));
+        let path = temp_dir.join(format!("riir_engine_q4k_test_{}.gguf", std::process::id()));
         std::fs::write(&path, &buf).expect("write temp GGUF");
 
         let result = (|| -> Result<()> {
@@ -3083,10 +3113,7 @@ mod tests {
         buf.extend_from_slice(block_bytes);
 
         let temp_dir = std::env::temp_dir();
-        let path = temp_dir.join(format!(
-            "riir_engine_q2_0_test_{}.gguf",
-            std::process::id()
-        ));
+        let path = temp_dir.join(format!("riir_engine_q2_0_test_{}.gguf", std::process::id()));
         std::fs::write(&path, &buf).expect("write temp GGUF");
 
         let result = (|| -> Result<()> {
@@ -3096,10 +3123,7 @@ mod tests {
             // The GGUF path and the in-memory reference both call
             // dequantize_row_q2_0 on the same bytes, so they must be bit-identical.
             for (i, (&g, &r)) in got.iter().zip(ref_out.iter()).enumerate() {
-                assert_eq!(
-                    g, r,
-                    "element {i}: GGUF dequant {g} != reference {r}"
-                );
+                assert_eq!(g, r, "element {i}: GGUF dequant {g} != reference {r}");
             }
             // Also exercise `dequant_tensor_row` for a single-row Q2_0 tensor.
             let row = gguf.dequant_tensor_row(name, 0, Q2_0_BLOCK_SIZE)?;

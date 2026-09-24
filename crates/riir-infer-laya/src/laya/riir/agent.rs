@@ -214,7 +214,8 @@ impl RiirAgent {
                     return Err(LayaError::Config {
                         checkpoint: name,
                         detail: "ANE posture selected but no artifact root/ manifest path — \
-                                 call RiirAgent::load_ane".into(),
+                                 call RiirAgent::load_ane"
+                            .into(),
                     });
                 };
                 let enc = super::ane::AneEncoder::from_map(
@@ -272,11 +273,7 @@ impl RiirAgent {
         head.warm(backend.as_ref());
 
         let temps = Temperatures::from_config(&agent_cfg);
-        let device_label = if ane_requested {
-            "ane"
-        } else {
-            backend.name()
-        };
+        let device_label = if ane_requested { "ane" } else { backend.name() };
         Ok(Self {
             tok,
             enc,

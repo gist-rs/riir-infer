@@ -36,8 +36,8 @@
 
 use cubecl::client::ComputeClient;
 
-use riir_infer_gpu::cubecl_runtime::{ActiveRuntime, CubeCLContext};
 use riir_infer_gpu::TernaryHandle;
+use riir_infer_gpu::cubecl_runtime::{ActiveRuntime, CubeCLContext};
 
 /// Reference: scalar CPU ternary GEMM (u32 bit-plane indexing, matches the MSL kernel).
 fn cpu_ternary_gemm(
@@ -114,16 +114,25 @@ fn single_gemm_zerocopy_vs_cpu() {
     // Generate deterministic test weights + input.
     let blocks64 = n.div_ceil(64);
     let groups_per_row = n.div_ceil(128);
-    let pos_bits: Vec<u64> = (0..m * blocks64).map(|i| (i as u64).wrapping_mul(0x123456789ABCDEF0)).collect();
-    let neg_bits: Vec<u64> = (0..m * blocks64).map(|i| (i as u64).wrapping_mul(0xFEDCBA9876543210)).collect();
+    let pos_bits: Vec<u64> = (0..m * blocks64)
+        .map(|i| (i as u64).wrapping_mul(0x123456789ABCDEF0))
+        .collect();
+    let neg_bits: Vec<u64> = (0..m * blocks64)
+        .map(|i| (i as u64).wrapping_mul(0xFEDCBA9876543210))
+        .collect();
     let group_scale: Vec<half::f16> = (0..m * groups_per_row)
         .map(|i| half::f16::from_f32(0.5 + 0.001 * (i as f32)))
         .collect();
-    let input: Vec<f32> = (0..p * n).map(|i| ((i as f32) * 0.01).sin() * 0.1).collect();
+    let input: Vec<f32> = (0..p * n)
+        .map(|i| ((i as f32) * 0.01).sin() * 0.1)
+        .collect();
 
     // CPU reference.
     let cpu_out = cpu_ternary_gemm(&pos_bits, &neg_bits, &group_scale, &input, m, n, p);
-    eprintln!("[isolation] CPU reference: first 8 = {:?}", &cpu_out[..8.min(cpu_out.len())]);
+    eprintln!(
+        "[isolation] CPU reference: first 8 = {:?}",
+        &cpu_out[..8.min(cpu_out.len())]
+    );
 
     // CubeCL setup.
     let ctx = CubeCLContext::new().expect("CubeCL init");
@@ -132,18 +141,14 @@ fn single_gemm_zerocopy_vs_cpu() {
     let _wgpu_queue = ctx.wgpu_queue().expect("wgpu queue");
 
     // Upload weights + input to CubeCL.
-    let weight_handle = TernaryHandle::from_raw(
-        &client,
-        &pos_bits,
-        &neg_bits,
-        &group_scale,
-        m,
-        n,
-    );
+    let weight_handle = TernaryHandle::from_raw(&client, &pos_bits, &neg_bits, &group_scale, m, n);
 
     let input_bytes: Vec<u8> = bytemuck::cast_slice(&input).to_vec();
     let input_handle = client.empty(input_bytes.len());
-    client.write(&input_handle, cubecl::bytes::Bytes::from_bytes_vec(input_bytes));
+    client.write(
+        &input_handle,
+        cubecl::bytes::Bytes::from_bytes_vec(input_bytes),
+    );
 
     // Verify input data landed on GPU.
     pollster::block_on(client.sync()).expect("sync after write");
@@ -156,8 +161,13 @@ fn single_gemm_zerocopy_vs_cpu() {
     );
 
     // Also verify weight data landed on GPU.
-    let pos_check = client.read_one(weight_handle.pos_bits_u32.clone()).expect("read pos");
-    eprintln!("[diag] pos readback: first 16 bytes = {:?}", &pos_check[..16.min(pos_check.len())]);
+    let pos_check = client
+        .read_one(weight_handle.pos_bits_u32.clone())
+        .expect("read pos");
+    eprintln!(
+        "[diag] pos readback: first 16 bytes = {:?}",
+        &pos_check[..16.min(pos_check.len())]
+    );
 
     // Use a DEDICATED Metal buffer for output (not CubeCL pool) to test
     // whether the pool-buffer aliasing is the root cause of the all-zeros bug.
@@ -166,7 +176,7 @@ fn single_gemm_zerocopy_vs_cpu() {
         let dev = guard.as_ref().expect("Metal device");
         let proto = dev.raw_device();
         metal::foreign_types::ForeignTypeRef::from_ptr(
-            (&**proto) as *const _ as *mut metal::MTLDevice
+            (&**proto) as *const _ as *mut metal::MTLDevice,
         )
     };
     let output_bytes = p * m * std::mem::size_of::<f32>();
@@ -174,7 +184,11 @@ fn single_gemm_zerocopy_vs_cpu() {
         output_bytes as u64,
         metal::MTLResourceOptions::StorageModeShared,
     );
-    eprintln!("[diag] dedicated output buffer: {} bytes at ptr {:p}", output_bytes, metal::foreign_types::ForeignType::as_ptr(&dedicated_output));
+    eprintln!(
+        "[diag] dedicated output buffer: {} bytes at ptr {:p}",
+        output_bytes,
+        metal::foreign_types::ForeignType::as_ptr(&dedicated_output)
+    );
 
     // Also create a CubeCL output handle for comparison.
     let _output_handle = client.empty(output_bytes);
@@ -187,15 +201,19 @@ fn single_gemm_zerocopy_vs_cpu() {
         use metal::{MTLResourceUsage, MTLSize};
 
         const NRA: u32 = 64;
-const NRB: u32 = 128;
-const NSG: u32 = 4;
-const NUM_THREADS: u32 = 32 * NSG;
-const TG_MEM: u64 = 32 * 64 * 2;
+        const NRB: u32 = 128;
+        const NSG: u32 = 4;
+        const NUM_THREADS: u32 = 32 * NSG;
+        const TG_MEM: u64 = 32 * 64 * 2;
 
-let queue_ref = unsafe {
+        let queue_ref = unsafe {
             metal::CommandQueueRef::from_ptr(
-                ctx.wgpu_queue().unwrap().as_hal::<wgpu::hal::api::Metal>()
-                    .as_ref().unwrap().as_raw() as *const _ as *mut metal::MTLCommandQueue
+                ctx.wgpu_queue()
+                    .unwrap()
+                    .as_hal::<wgpu::hal::api::Metal>()
+                    .as_ref()
+                    .unwrap()
+                    .as_raw() as *const _ as *mut metal::MTLCommandQueue,
             )
         };
 
@@ -204,7 +222,9 @@ let queue_ref = unsafe {
         let library = metal_device
             .new_library_with_source(msl_source, &metal::CompileOptions::new())
             .expect("MSL compile");
-        let function = library.get_function("gemm_ternary_tensor", None).expect("function");
+        let function = library
+            .get_function("gemm_ternary_tensor", None)
+            .expect("function");
         let pipeline = metal_device
             .new_compute_pipeline_state_with_function(&function)
             .expect("pipeline");
@@ -225,7 +245,11 @@ let queue_ref = unsafe {
             height: (m as u64).div_ceil(NRA as u64),
             depth: 1,
         };
-        let tg = MTLSize { width: NUM_THREADS as u64, height: 1, depth: 1 };
+        let tg = MTLSize {
+            width: NUM_THREADS as u64,
+            height: 1,
+            depth: 1,
+        };
 
         let blocks64_v: u32 = weight_handle.blocks64 as u32;
         let gpr_v: u32 = weight_handle.groups_per_row as u32;
@@ -261,7 +285,10 @@ let queue_ref = unsafe {
         // Read back via Metal (not CubeCL).
         let ptr = dedicated_output.contents() as *const f32;
         let gpu_out: Vec<f32> = unsafe { std::slice::from_raw_parts(ptr, p * m) }.to_vec();
-        eprintln!("[isolation] GPU output (dedicated): first 8 = {:?}", &gpu_out[..8.min(gpu_out.len())]);
+        eprintln!(
+            "[isolation] GPU output (dedicated): first 8 = {:?}",
+            &gpu_out[..8.min(gpu_out.len())]
+        );
 
         // Compare.
         assert_eq!(gpu_out.len(), cpu_out.len(), "output length mismatch");
@@ -287,9 +314,13 @@ let queue_ref = unsafe {
         );
 
         if max_abs < 1.0 {
-            eprintln!("✅ single-GEMM DEDICATED output matches CPU reference (max_abs {max_abs:.4})");
+            eprintln!(
+                "✅ single-GEMM DEDICATED output matches CPU reference (max_abs {max_abs:.4})"
+            );
         } else {
-            eprintln!("❌ single-GEMM DEDICATED output MISMATCHES CPU reference (max_abs {max_abs:.4})");
+            eprintln!(
+                "❌ single-GEMM DEDICATED output MISMATCHES CPU reference (max_abs {max_abs:.4})"
+            );
         }
     }
 }

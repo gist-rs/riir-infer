@@ -36,12 +36,12 @@ pub mod gemma2_lora;
 mod llama;
 // Plan 333 T2.2: ternary-weight forward pass. Same shape as `llama`, with the
 // 7 projections running through the group-scale ternary kernel.
-#[cfg(feature = "ternary_inference")]
-mod ternary;
 mod mtp;
 mod prefill;
 #[cfg(feature = "raven")]
 mod raven;
+#[cfg(feature = "ternary_inference")]
+mod ternary;
 
 pub use attention::attention_head;
 // The sole consumer is `causal_validation::gemma2`, which is itself gated
@@ -89,12 +89,12 @@ pub use gemma2::PostLayerHook;
 #[cfg(all(not(target_arch = "wasm32"), feature = "causal_validation"))]
 pub use gemma2::{NoLora, forward_gemma2_layers};
 pub use llama::{forward_llama, forward_llama_attn_capture, generate_llama};
-#[cfg(feature = "ternary_inference")]
-pub use ternary::{forward_ternary, generate_ternary};
 pub use mtp::{
     MtpProjection, cluster_map_from_embeddings, cluster_map_round_robin, load_mtp_projection,
     project_target_activation, select_topk_indices_into_buf,
 };
+#[cfg(feature = "ternary_inference")]
+pub use ternary::{forward_ternary, generate_ternary};
 // Issue 019 Phase B.3: `select_topk_indices_into` (no `_buf` suffix) is the
 // historical riir-engine name. The canonical katgpt-forward name is
 // `select_topk_indices_into_buf`; the bare-`_into` form is kept as a
@@ -256,25 +256,25 @@ pub(super) unsafe fn load_embed_scale(
 /// Pre-allocated buffers for zero-alloc forward passes.
 /// Create once, reuse across calls.
 pub struct ForwardContext {
-    pub x: Vec<f32>,                  // [n_embd] main activation
-    pub xr: Vec<f32>,                 // [n_embd] residual
-    pub xr2: Vec<f32>,                // [n_embd] residual 2
-    pub q: Vec<f32>,                  // [n_embd] query
-    pub k: Vec<f32>,                  // [kv_dim] key (kv_dim = n_kv_head * head_dim)
-    pub v: Vec<f32>,                  // [kv_dim] value
-    pub attn_out: Vec<f32>,           // [n_embd] attention output
-    pub scores: Vec<f32>,             // [block_size] attention scores (max possible)
+    pub x: Vec<f32>,        // [n_embd] main activation
+    pub xr: Vec<f32>,       // [n_embd] residual
+    pub xr2: Vec<f32>,      // [n_embd] residual 2
+    pub q: Vec<f32>,        // [n_embd] query
+    pub k: Vec<f32>,        // [kv_dim] key (kv_dim = n_kv_head * head_dim)
+    pub v: Vec<f32>,        // [kv_dim] value
+    pub attn_out: Vec<f32>, // [n_embd] attention output
+    pub scores: Vec<f32>,   // [block_size] attention scores (max possible)
     // [n_head * block_size] per-head scores for parallel attention.
     // Issue 741 T10 Phase A: widened `pub` (was pub(crate)) — the relocated
     // riir-train-engine gemma2_train passes it alongside `&ctx.q` in one call
     // (split field borrows; an accessor cannot express that). D4 drift-row
     // reversible.
     pub head_scores: Vec<f32>,
-    pub hidden: Vec<f32>,             // [mlp_hidden] MLP hidden
-    pub gate: Vec<f32>,               // [mlp_hidden] GeGLU gate buffer (Plan 087: Gemma 2)
-    pub up: Vec<f32>,                 // [mlp_hidden] GeGLU up buffer (Plan 087: Gemma 2)
-    pub logits: Vec<f32>,             // [vocab_size] output logits
-    pub hidden_state: Vec<f32>,       // [n_embd] final hidden state (Plan 009 compat)
+    pub hidden: Vec<f32>,       // [mlp_hidden] MLP hidden
+    pub gate: Vec<f32>,         // [mlp_hidden] GeGLU gate buffer (Plan 087: Gemma 2)
+    pub up: Vec<f32>,           // [mlp_hidden] GeGLU up buffer (Plan 087: Gemma 2)
+    pub logits: Vec<f32>,       // [vocab_size] output logits
+    pub hidden_state: Vec<f32>, // [n_embd] final hidden state (Plan 009 compat)
     /// `LoRA` intermediate buffer `[lora_rank]`. Pre-allocated, zero alloc in hot path.
     pub lora_buf: Vec<f32>,
     // Sparse MLP buffers (Plan 022: TwELL-inspired unstructured sparsity)
@@ -283,7 +283,7 @@ pub struct ForwardContext {
     #[cfg(feature = "sparse_mlp")]
     pub active_values: Vec<f32>, // [mlp_hidden] pre-allocated value buffer
     // Paged KV cache: pre-allocated flat buffers for attention computation
-    pub paged_flat_key: Vec<f32>, // [block_size * kv_dim]
+    pub paged_flat_key: Vec<f32>,   // [block_size * kv_dim]
     pub paged_flat_value: Vec<f32>, // [block_size * kv_dim]
     // Raven: pre-allocated query buffer for per-head slot attention
     #[cfg(feature = "raven")]

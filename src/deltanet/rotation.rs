@@ -44,7 +44,7 @@
 //! const-generic `[f32; D]` shape would force per-block copies on the hot
 //! path. The GPU lane carries its own CUDA twin of this kernel.
 
-use anyhow::{bail, Context, Result};
+use anyhow::{Context, Result, bail};
 
 /// Parsed `prism.hadamard.*` metadata + the runtime rotation tables.
 ///
@@ -102,7 +102,10 @@ impl TernaryRotationConfig {
 #[inline]
 pub(crate) fn fwht_block_inplace(x: &mut [f32]) {
     let n = x.len();
-    debug_assert!(n.is_power_of_two(), "FWHT block must be power-of-2, got {n}");
+    debug_assert!(
+        n.is_power_of_two(),
+        "FWHT block must be power-of-2, got {n}"
+    );
     if n <= 1 {
         return;
     }
@@ -275,9 +278,13 @@ pub fn is_known_folded_name(
 /// Bonsai lane). Every unsupported combination is a LOUD error — a rotated
 /// file we cannot honor must never load silently.
 pub fn parse_prism_hadamard(gguf: &GgufFile) -> Result<Option<TernaryRotationConfig>> {
-    let Some(version) = gguf.metadata_u64("prism.hadamard.version") else { return Ok(None) };
+    let Some(version) = gguf.metadata_u64("prism.hadamard.version") else {
+        return Ok(None);
+    };
     if version != 1 {
-        bail!("prism.hadamard.version {version} unsupported (only 1) — refusing to load a folded file we cannot honor");
+        bail!(
+            "prism.hadamard.version {version} unsupported (only 1) — refusing to load a folded file we cannot honor"
+        );
     }
 
     let block_size = gguf
@@ -291,7 +298,9 @@ pub fn parse_prism_hadamard(gguf: &GgufFile) -> Result<Option<TernaryRotationCon
         .metadata_string("prism.hadamard.transform")
         .context("prism.hadamard.transform missing")?;
     if transform != "normalized-sylvester-walsh-hadamard" {
-        bail!("prism.hadamard.transform '{transform}' unsupported (only normalized-sylvester-walsh-hadamard)");
+        bail!(
+            "prism.hadamard.transform '{transform}' unsupported (only normalized-sylvester-walsh-hadamard)"
+        );
     }
 
     let axis = gguf
@@ -367,9 +376,12 @@ pub fn parse_prism_hadamard(gguf: &GgufFile) -> Result<Option<TernaryRotationCon
         for w in &widths_us {
             let mut vec = vec![0i8; *w];
             for (i, slot) in vec.iter_mut().enumerate() {
-                let v = values[off + i]
-                    .as_f64()
-                    .with_context(|| format!("prism.hadamard sign value {:?} not numeric", values[off + i]))?;
+                let v = values[off + i].as_f64().with_context(|| {
+                    format!(
+                        "prism.hadamard sign value {:?} not numeric",
+                        values[off + i]
+                    )
+                })?;
                 anyhow::ensure!(
                     v == 1.0 || v == -1.0,
                     "prism.hadamard sign value {v} not ±1"
@@ -390,10 +402,12 @@ pub fn parse_prism_hadamard(gguf: &GgufFile) -> Result<Option<TernaryRotationCon
         // was derived from.
         let n_v = gguf
             .metadata_u64("qwen35.ssm.time_step_rank")
-            .context("gdn_v_grouped set but qwen35.ssm.time_step_rank missing")? as usize;
+            .context("gdn_v_grouped set but qwen35.ssm.time_step_rank missing")?
+            as usize;
         let n_k = gguf
             .metadata_u64("qwen35.ssm.group_count")
-            .context("gdn_v_grouped set but qwen35.ssm.group_count missing")? as usize;
+            .context("gdn_v_grouped set but qwen35.ssm.group_count missing")?
+            as usize;
         anyhow::ensure!(
             n_k > 0 && n_v.is_multiple_of(n_k),
             "gdn_v_grouped geometry invalid: n_v {n_v} not divisible by n_k {n_k}"
@@ -412,7 +426,9 @@ pub fn parse_prism_hadamard(gguf: &GgufFile) -> Result<Option<TernaryRotationCon
                 .as_str()
                 .with_context(|| format!("prism.hadamard inverse name {name:?} not a string"))?;
             if name != "token_embd.weight" {
-                bail!("prism.hadamard inverse weight '{name}' unsupported (only token_embd.weight)");
+                bail!(
+                    "prism.hadamard inverse weight '{name}' unsupported (only token_embd.weight)"
+                );
             }
             inverse_embedding = true;
         }
@@ -556,22 +572,66 @@ mod tests {
             .collect();
         let n = layer_types.len();
         assert!(is_known_folded_name("output.weight", n, &layer_types));
-        assert!(is_known_folded_name("blk.0.attn_qkv.weight", n, &layer_types));
-        assert!(is_known_folded_name("blk.0.ssm_out.weight", n, &layer_types));
-        assert!(is_known_folded_name("blk.0.attn_gate.weight", n, &layer_types));
+        assert!(is_known_folded_name(
+            "blk.0.attn_qkv.weight",
+            n,
+            &layer_types
+        ));
+        assert!(is_known_folded_name(
+            "blk.0.ssm_out.weight",
+            n,
+            &layer_types
+        ));
+        assert!(is_known_folded_name(
+            "blk.0.attn_gate.weight",
+            n,
+            &layer_types
+        ));
         assert!(is_known_folded_name("blk.3.attn_q.weight", n, &layer_types));
-        assert!(is_known_folded_name("blk.3.attn_output.weight", n, &layer_types));
-        assert!(is_known_folded_name("blk.3.ffn_down.weight", n, &layer_types));
+        assert!(is_known_folded_name(
+            "blk.3.attn_output.weight",
+            n,
+            &layer_types
+        ));
+        assert!(is_known_folded_name(
+            "blk.3.ffn_down.weight",
+            n,
+            &layer_types
+        ));
         // Cross-type refusals: DeltaNet kinds on an attention layer and
         // vice versa.
-        assert!(!is_known_folded_name("blk.3.attn_qkv.weight", n, &layer_types));
-        assert!(!is_known_folded_name("blk.3.ssm_out.weight", n, &layer_types));
-        assert!(!is_known_folded_name("blk.0.attn_q.weight", n, &layer_types));
+        assert!(!is_known_folded_name(
+            "blk.3.attn_qkv.weight",
+            n,
+            &layer_types
+        ));
+        assert!(!is_known_folded_name(
+            "blk.3.ssm_out.weight",
+            n,
+            &layer_types
+        ));
+        assert!(!is_known_folded_name(
+            "blk.0.attn_q.weight",
+            n,
+            &layer_types
+        ));
         // Never-foldable names.
         assert!(!is_known_folded_name("token_embd.weight", n, &layer_types));
-        assert!(!is_known_folded_name("blk.0.ssm_alpha.weight", n, &layer_types));
-        assert!(!is_known_folded_name("blk.0.ssm_beta.weight", n, &layer_types));
-        assert!(!is_known_folded_name("blk.64.ffn_up.weight", n, &layer_types));
+        assert!(!is_known_folded_name(
+            "blk.0.ssm_alpha.weight",
+            n,
+            &layer_types
+        ));
+        assert!(!is_known_folded_name(
+            "blk.0.ssm_beta.weight",
+            n,
+            &layer_types
+        ));
+        assert!(!is_known_folded_name(
+            "blk.64.ffn_up.weight",
+            n,
+            &layer_types
+        ));
         assert!(!is_known_folded_name("blk.0.bogus.weight", n, &layer_types));
     }
 }

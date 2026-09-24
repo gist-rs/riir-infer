@@ -301,7 +301,10 @@ pub fn load_qv_lora(path: &std::path::Path) -> anyhow::Result<QvLora> {
     let mut f = std::fs::File::open(path)?;
     let mut magic = [0u8; 4];
     f.read_exact(&mut magic)?;
-    anyhow::ensure!(&magic == QV_LORA_MAGIC, "bad magic: expected BQVL, got {magic:?}");
+    anyhow::ensure!(
+        &magic == QV_LORA_MAGIC,
+        "bad magic: expected BQVL, got {magic:?}"
+    );
 
     let mut buf4 = [0u8; 4];
     f.read_exact(&mut buf4)?;
@@ -677,7 +680,10 @@ mod tests {
             .map(|(b, a)| b * a)
             .sum::<f32>()
             * scale;
-        assert!((delta_q[0] - manual_dq0).abs() < 1e-6, "delta_q[0] mismatch");
+        assert!(
+            (delta_q[0] - manual_dq0).abs() < 1e-6,
+            "delta_q[0] mismatch"
+        );
     }
 
     #[test]
@@ -707,18 +713,26 @@ mod tests {
         let mut ax_v = vec![0.0; rank];
         let mut dq = vec![0.0; q_dim];
         let mut dv = vec![0.0; v_dim];
-        lora.apply_to_qkv_compact(&norm_x, &mut qkv, k_dim, &mut ax_q, &mut ax_v, &mut dq, &mut dv);
+        lora.apply_to_qkv_compact(
+            &norm_x, &mut qkv, k_dim, &mut ax_q, &mut ax_v, &mut dq, &mut dv,
+        );
 
         // K slice [q_dim..q_dim+k_dim] should be unchanged
         for i in q_dim..q_dim + k_dim {
-            assert!((qkv[i] - qkv_orig[i]).abs() < 1e-10, "K should be unchanged");
+            assert!(
+                (qkv[i] - qkv_orig[i]).abs() < 1e-10,
+                "K should be unchanged"
+            );
         }
 
         // Q and V slices should be perturbed
         let scale = lora.scale();
         for i in 0..q_dim {
             let expected_delta = scale * 0.1 * ax_q.iter().sum::<f32>();
-            assert!((qkv[i] - qkv_orig[i] - expected_delta).abs() < 1e-6, "Q perturbation wrong at {i}");
+            assert!(
+                (qkv[i] - qkv_orig[i] - expected_delta).abs() < 1e-6,
+                "Q perturbation wrong at {i}"
+            );
         }
     }
 
@@ -746,10 +760,8 @@ mod tests {
     fn test_save_load_roundtrip() {
         let mut rng = make_rng();
         let lora = QvLora::new(4, 8, 6, 10, 8.0, &mut rng);
-        let path = std::env::temp_dir().join(format!(
-            "test_qv_lora_roundtrip_{}.bin",
-            std::process::id()
-        ));
+        let path =
+            std::env::temp_dir().join(format!("test_qv_lora_roundtrip_{}.bin", std::process::id()));
         save_qv_lora(&lora, &path).unwrap();
         let loaded = load_qv_lora(&path).unwrap();
         assert_eq!(loaded.rank, lora.rank);
@@ -763,5 +775,4 @@ mod tests {
         assert_eq!(loaded.b_v, lora.b_v);
         let _ = std::fs::remove_file(&path);
     }
-
 }

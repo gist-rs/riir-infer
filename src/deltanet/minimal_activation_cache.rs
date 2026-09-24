@@ -47,7 +47,12 @@ impl DeltanetMinimalActs {
     ///
     /// Returns `(q_head, k_head, v_head)` each of length `head_dim`, for the
     /// given head index `h` in `0..n_v_heads`.
-    pub fn head_qkv(&self, h: usize, n_v_heads: usize, head_dim: usize) -> (&[f32], &[f32], &[f32]) {
+    pub fn head_qkv(
+        &self,
+        h: usize,
+        n_v_heads: usize,
+        head_dim: usize,
+    ) -> (&[f32], &[f32], &[f32]) {
         let hd = head_dim;
         let per_head = n_v_heads * hd;
         let q_start = h * hd;

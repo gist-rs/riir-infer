@@ -41,9 +41,9 @@ use std::ptr::NonNull;
 use std::rc::Rc;
 
 use block2::RcBlock;
+use objc2::AnyThread;
 use objc2::rc::Retained;
 use objc2::runtime::{AnyObject, ProtocolObject};
-use objc2::AnyThread;
 use objc2_core_ml::{
     MLComputePlan, MLDictionaryFeatureProvider, MLFeatureProvider, MLFeatureValue, MLModel,
     MLModelConfiguration, MLModelStructureProgram, MLMultiArray, MLMultiArrayDataType,
@@ -105,10 +105,12 @@ impl AneManifest {
     /// Parse the committed manifest. Loose JSON: only the consumed fields
     /// are read, so the conversion tool can grow the schema freely.
     pub fn load(path: &Path) -> Result<Self> {
-        let text = std::fs::read_to_string(path).map_err(|e| LayaError::Runtime(format!(
-            "ane manifest unreadable at {}: {e}",
-            path.display()
-        )))?;
+        let text = std::fs::read_to_string(path).map_err(|e| {
+            LayaError::Runtime(format!(
+                "ane manifest unreadable at {}: {e}",
+                path.display()
+            ))
+        })?;
         let raw: serde_json::Value = serde_json::from_str(&text)
             .map_err(|e| LayaError::Runtime(format!("ane manifest is not JSON: {e}")))?;
         let arts = raw
@@ -130,10 +132,10 @@ impl AneManifest {
                 .and_then(serde_json::Value::as_str)
                 .ok_or_else(|| missing(key, "digest.digest"))?
                 .to_string();
-            let digest_files = a
-                .pointer("/digest/files")
-                .and_then(serde_json::Value::as_u64)
-                .ok_or_else(|| missing(key, "digest.files"))? as usize;
+            let digest_files =
+                a.pointer("/digest/files")
+                    .and_then(serde_json::Value::as_u64)
+                    .ok_or_else(|| missing(key, "digest.files"))? as usize;
             let digest_bytes = a
                 .pointer("/digest/bytes")
                 .and_then(serde_json::Value::as_u64)
@@ -158,18 +160,18 @@ impl AneManifest {
                 .and_then(serde_json::Value::as_f64)
                 .map(|v| v as f32)
                 .unwrap_or(FP16_NEG_INF_MASK);
-            let ane_ops = a
-                .pointer("/placement/ane_ops")
-                .and_then(serde_json::Value::as_u64)
-                .ok_or_else(|| missing(key, "placement.ane_ops"))? as usize;
-            let device_ops = a
-                .pointer("/placement/device_ops")
-                .and_then(serde_json::Value::as_u64)
-                .ok_or_else(|| missing(key, "placement.device_ops"))? as usize;
-            let transitions = a
-                .pointer("/placement/transitions")
-                .and_then(serde_json::Value::as_u64)
-                .ok_or_else(|| missing(key, "placement.transitions"))? as usize;
+            let ane_ops =
+                a.pointer("/placement/ane_ops")
+                    .and_then(serde_json::Value::as_u64)
+                    .ok_or_else(|| missing(key, "placement.ane_ops"))? as usize;
+            let device_ops =
+                a.pointer("/placement/device_ops")
+                    .and_then(serde_json::Value::as_u64)
+                    .ok_or_else(|| missing(key, "placement.device_ops"))? as usize;
+            let transitions =
+                a.pointer("/placement/transitions")
+                    .and_then(serde_json::Value::as_u64)
+                    .ok_or_else(|| missing(key, "placement.transitions"))? as usize;
             artifacts.insert(
                 key.clone(),
                 AneArtifact {
@@ -262,11 +264,13 @@ impl AneRuntime {
             let config = MLModelConfiguration::new();
             config.setComputeUnits(COMPUTE_UNITS_CPU_AND_NE);
             let model = MLModel::modelWithContentsOfURL_configuration_error(&url, &config)
-                .map_err(|e| LayaError::Runtime(format!(
-                    "ane: Core ML load failed for {}: {}",
-                    compiled.display(),
-                    ns_error_string(&e)
-                )))?;
+                .map_err(|e| {
+                    LayaError::Runtime(format!(
+                        "ane: Core ML load failed for {}: {}",
+                        compiled.display(),
+                        ns_error_string(&e)
+                    ))
+                })?;
 
             let placement = verify_compute_plan(&compiled, &config)?;
             if !placement.passes() {
@@ -365,11 +369,20 @@ impl AneRuntime {
     /// `[1, 1, 1, L]` in, fp16 hidden `[1, L, d]` out (the caller's
     /// buffer). Fixed shapes — an input whose length ≠ the bucket is a
     /// caller bug and asserts.
-    pub fn predict(&self, emb_f16: &[u16], pad_bias_f16: &[u16], out_f16: &mut [u16]) -> Result<()> {
+    pub fn predict(
+        &self,
+        emb_f16: &[u16],
+        pad_bias_f16: &[u16],
+        out_f16: &mut [u16],
+    ) -> Result<()> {
         let l = self.bucket_l;
         let d = self.hidden;
         assert_eq!(emb_f16.len(), l * d, "embeddings buffer must be [1, L, d]");
-        assert_eq!(pad_bias_f16.len(), l, "pad_bias buffer must be [1, 1, 1, L]");
+        assert_eq!(
+            pad_bias_f16.len(),
+            l,
+            "pad_bias buffer must be [1, 1, 1, L]"
+        );
         assert_eq!(out_f16.len(), l * d, "out buffer must be [1, L, d]");
         unsafe {
             // The arrays borrow the caller's buffers (no-copy init, no-op
@@ -404,10 +417,7 @@ impl AneRuntime {
                 .model
                 .predictionFromFeatures_error(ProtocolObject::from_ref(&*features))
                 .map_err(|e| {
-                    LayaError::Runtime(format!(
-                        "ane: prediction failed: {}",
-                        ns_error_string(&e)
-                    ))
+                    LayaError::Runtime(format!("ane: prediction failed: {}", ns_error_string(&e)))
                 })?;
             let name = NSString::from_str(&self.output);
             let val = out.featureValueForName(&name).ok_or_else(|| {
@@ -417,7 +427,10 @@ impl AneRuntime {
                 ))
             })?;
             let arr = val.multiArrayValue().ok_or_else(|| {
-                LayaError::Runtime(format!("ane: output {:?} is not a multi-array", self.output))
+                LayaError::Runtime(format!(
+                    "ane: output {:?} is not a multi-array",
+                    self.output
+                ))
             })?;
             copy_out_f16(&arr, out_f16)?;
             Ok(())
@@ -496,14 +509,16 @@ impl AneEncoder {
             }
         }
         let name = "encoder.embeddings.tok_embeddings.weight";
-        let tok = map
-            .remove(name)
-            .ok_or_else(|| LayaError::Pin {
-                checkpoint: ckpt,
-                file: name.to_string(),
-                detail: "tensor missing from checkpoint".into(),
-            })?;
-        let table_f16: Vec<u16> = tok.data.iter().map(|v| super::weights::f32_to_f16_bits(*v)).collect();
+        let tok = map.remove(name).ok_or_else(|| LayaError::Pin {
+            checkpoint: ckpt,
+            file: name.to_string(),
+            detail: "tensor missing from checkpoint".into(),
+        })?;
+        let table_f16: Vec<u16> = tok
+            .data
+            .iter()
+            .map(|v| super::weights::f32_to_f16_bits(*v))
+            .collect();
         Ok(Self {
             ckpt,
             d: cfg.hidden,
@@ -592,10 +607,11 @@ impl AneEncoder {
 // ── internals ────────────────────────────────────────────────────────────
 
 fn collect_files(root: &Path, dir: &Path, out: &mut Vec<(String, PathBuf)>) -> Result<()> {
-    let entries =
-        std::fs::read_dir(dir).map_err(|e| LayaError::Runtime(format!("ane: readdir {dir:?}: {e}")))?;
+    let entries = std::fs::read_dir(dir)
+        .map_err(|e| LayaError::Runtime(format!("ane: readdir {dir:?}: {e}")))?;
     for e in entries {
-        let e = e.map_err(|err| LayaError::Runtime(format!("ane: readdir entry {dir:?}: {err}")))?;
+        let e =
+            e.map_err(|err| LayaError::Runtime(format!("ane: readdir entry {dir:?}: {err}")))?;
         let p = e.path();
         if p.is_dir() {
             collect_files(root, &p, out)?;
@@ -662,14 +678,12 @@ pub fn ensure_artifacts(ane_root: &Path, base_url: Option<&str>) -> Result<()> {
             .and_then(|()| AneRuntime::verify_digest(&staging, entry))
             .and_then(|()| {
                 let parent = dir.parent().expect("key carries a model dir");
-                std::fs::create_dir_all(parent).map_err(|e| {
-                    LayaError::Runtime(format!("create {}: {e}", parent.display()))
-                })
+                std::fs::create_dir_all(parent)
+                    .map_err(|e| LayaError::Runtime(format!("create {}: {e}", parent.display())))
             })
             .and_then(|()| {
-                std::fs::rename(&staging, &dir).map_err(|e| {
-                    LayaError::Runtime(format!("install {}: {e}", dir.display()))
-                })
+                std::fs::rename(&staging, &dir)
+                    .map_err(|e| LayaError::Runtime(format!("install {}: {e}", dir.display())))
             });
         // A failed fetch installs nothing: the staging subtree goes, then
         // the emptied parents (best-effort — a concurrent fetch of a
@@ -735,11 +749,7 @@ fn compile_cached(artifact_dir: &Path, digest: &str) -> Result<PathBuf> {
     // the final name — two processes racing one digest both compile, one
     // wins the rename, the loser discards (never reads a half-written
     // bundle — the shared-fixed-path lesson, mechanized).
-    let staging = cache_root.join(format!(
-        "staging-{}-{}",
-        key,
-        std::process::id()
-    ));
+    let staging = cache_root.join(format!("staging-{}-{}", key, std::process::id()));
     let _ = std::fs::remove_dir_all(&staging);
     let src = NSURL::fileURLWithPath_isDirectory(
         &NSString::from_str(&artifact_dir.to_string_lossy()),
@@ -861,24 +871,22 @@ fn verify_compute_plan(compiled: &Path, config: &MLModelConfiguration) -> Result
             &NSString::from_str(&compiled.to_string_lossy()),
             true,
         );
-        let handler = RcBlock::new(
-            move |plan: *mut MLComputePlan, err: *mut NSError| {
-                let result = if err.is_null() && !plan.is_null() {
-                    // SAFETY: a non-null MLComputePlan just handed to the
-                    // block by Core ML (autoreleased — retained here).
-                    Ok(Retained::retain_autoreleased(plan.cast::<MLComputePlan>())
-                        .expect("non-null plan"))
+        let handler = RcBlock::new(move |plan: *mut MLComputePlan, err: *mut NSError| {
+            let result = if err.is_null() && !plan.is_null() {
+                // SAFETY: a non-null MLComputePlan just handed to the
+                // block by Core ML (autoreleased — retained here).
+                Ok(Retained::retain_autoreleased(plan.cast::<MLComputePlan>())
+                    .expect("non-null plan"))
+            } else {
+                let msg = if err.is_null() {
+                    "null plan".to_string()
                 } else {
-                    let msg = if err.is_null() {
-                        "null plan".to_string()
-                    } else {
-                        ns_error_string(&*err)
-                    };
-                    Err(msg)
+                    ns_error_string(&*err)
                 };
-                let _ = tx.send(result);
-            },
-        );
+                Err(msg)
+            };
+            let _ = tx.send(result);
+        });
         MLComputePlan::loadContentsOfURL_configuration_completionHandler(&url, config, &handler);
     }
     let plan = rx
@@ -1067,10 +1075,7 @@ mod fetch_tests {
         let base = format!("file://{}", host.display());
         let err = ensure_artifacts(&root, Some(&base)).expect_err("digest gate");
         assert!(err.to_string().contains("digest mismatch"), "got: {err}");
-        assert!(
-            !root.join("en/L8.mlpackage").exists(),
-            "nothing installed"
-        );
+        assert!(!root.join("en/L8.mlpackage").exists(), "nothing installed");
         assert!(
             !root.join(".staging").exists() || {
                 let mut it = std::fs::read_dir(root.join(".staging")).unwrap();

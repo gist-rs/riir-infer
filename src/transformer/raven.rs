@@ -116,9 +116,12 @@ pub fn raven_update(
             keys[offset + d + 2] = keys[offset + d + 2].mul_add(decay, write * new_key[d + 2]);
             keys[offset + d + 3] = keys[offset + d + 3].mul_add(decay, write * new_key[d + 3]);
             values[offset + d] = values[offset + d].mul_add(decay, write * new_value[d]);
-            values[offset + d + 1] = values[offset + d + 1].mul_add(decay, write * new_value[d + 1]);
-            values[offset + d + 2] = values[offset + d + 2].mul_add(decay, write * new_value[d + 2]);
-            values[offset + d + 3] = values[offset + d + 3].mul_add(decay, write * new_value[d + 3]);
+            values[offset + d + 1] =
+                values[offset + d + 1].mul_add(decay, write * new_value[d + 1]);
+            values[offset + d + 2] =
+                values[offset + d + 2].mul_add(decay, write * new_value[d + 2]);
+            values[offset + d + 3] =
+                values[offset + d + 3].mul_add(decay, write * new_value[d + 3]);
         }
         // Handle remaining elements
         for d in (chunks * 4)..kv_dim {
@@ -325,8 +328,20 @@ pub fn forward_raven<'a>(
         #[cfg(feature = "gated_mlp")]
         {
             // SwiGLU: SiLU(W_gate·h) ⊙ W_up·h → W_down·hidden
-            types::matmul(&mut ctx.hidden, &layer_weights.mlp_w1, &ctx.x, config.mlp_hidden, n);
-            types::matmul(&mut ctx.up, &layer_weights.mlp_w_up, &ctx.x, config.mlp_hidden, n);
+            types::matmul(
+                &mut ctx.hidden,
+                &layer_weights.mlp_w1,
+                &ctx.x,
+                config.mlp_hidden,
+                n,
+            );
+            types::matmul(
+                &mut ctx.up,
+                &layer_weights.mlp_w_up,
+                &ctx.x,
+                config.mlp_hidden,
+                n,
+            );
             types::swiglu_inplace(&mut ctx.hidden, &ctx.up);
         }
         #[cfg(not(feature = "gated_mlp"))]

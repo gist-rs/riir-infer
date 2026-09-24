@@ -134,16 +134,8 @@ impl Proj {
                 if *rows == 0 || batch == 0 {
                     return;
                 }
-                debug_assert_eq!(
-                    x.len(),
-                    batch * cols,
-                    "Proj::matmat input shape mismatch"
-                );
-                debug_assert_eq!(
-                    y.len(),
-                    batch * rows,
-                    "Proj::matmat output shape mismatch"
-                );
+                debug_assert_eq!(x.len(), batch * cols, "Proj::matmat input shape mismatch");
+                debug_assert_eq!(y.len(), batch * rows, "Proj::matmat output shape mismatch");
                 katgpt_core::simd::simd_matmul_rows_batched(y, data, x, *rows, *cols, batch);
             }
             #[cfg(feature = "deltanet_ternary_inference")]
@@ -151,8 +143,16 @@ impl Proj {
                 if t.rows == 0 || batch == 0 {
                     return;
                 }
-                debug_assert_eq!(x.len(), batch * t.cols, "Proj::Ternary matmat input mismatch");
-                debug_assert_eq!(y.len(), batch * t.rows, "Proj::Ternary matmat output mismatch");
+                debug_assert_eq!(
+                    x.len(),
+                    batch * t.cols,
+                    "Proj::Ternary matmat input mismatch"
+                );
+                debug_assert_eq!(
+                    y.len(),
+                    batch * t.rows,
+                    "Proj::Ternary matmat output mismatch"
+                );
                 katgpt_core::simd::simd_ternary_group_matmul_batch(t, x, batch, y);
             }
         }

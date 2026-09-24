@@ -36,11 +36,11 @@
 // historical riir-engine name was `select_topk_indices_into` (no `_buf`
 // suffix). A deprecated alias below preserves the old name so any stray
 // downstream caller keeps compiling while it migrates.
-pub use katgpt_forward::{clustered_lm_head, standard_lm_head};
 pub use katgpt_forward::{
     cluster_map_from_embeddings, cluster_map_round_robin, select_topk_indices,
     select_topk_indices_into_buf,
 };
+pub use katgpt_forward::{clustered_lm_head, standard_lm_head};
 
 /// Deprecated alias for [`katgpt_forward::select_topk_indices_into_buf`].
 ///

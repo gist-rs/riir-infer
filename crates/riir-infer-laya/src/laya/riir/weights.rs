@@ -282,7 +282,10 @@ mod tests {
                 assert!(f32_to_f16_bits(f) & 0x03FF != 0 || f32_to_f16_bits(f) & 0x03FF == 0);
             } else {
                 let back = f32_to_f16_bits(f);
-                assert_eq!(back, bits as u16, "roundtrip broke at f16 bits {bits:#06x} ({f})");
+                assert_eq!(
+                    back, bits as u16,
+                    "roundtrip broke at f16 bits {bits:#06x} ({f})"
+                );
             }
             if bits & 0xFFFF == 0xFFFF {
                 break;

@@ -30,11 +30,11 @@
 //! block selection uses the pre-allocated `PerHeadSelection` inside the selector.
 //! No heap allocation occurs during steady-state decode (between block-cache rebuilds).
 
+#[cfg(feature = "flashmemory_trained_indexer")]
+use katgpt_attn::dash_attn::flashmemory_sparse::DualEncoderIndexer;
 use katgpt_attn::dash_attn::flashmemory_sparse::{
     GqaFlashMemoryBlockCache, GqaFlashMemorySelector, PerHeadSelection,
 };
-#[cfg(feature = "flashmemory_trained_indexer")]
-use katgpt_attn::dash_attn::flashmemory_sparse::DualEncoderIndexer;
 use katgpt_core::simd::{fast_sigmoid, simd_dot_f32};
 use katgpt_transformer::KVCache;
 
@@ -177,8 +177,7 @@ pub fn forward_attention_layer_flashmemory<S: GqaBlockSelector>(
         let src = h * 2 * hd;
         let dst = h * hd;
         scratch.q_buf[dst..dst + hd].copy_from_slice(&scratch.qg_buf[src..src + hd]);
-        scratch.gate_buf[dst..dst + hd]
-            .copy_from_slice(&scratch.qg_buf[src + hd..src + 2 * hd]);
+        scratch.gate_buf[dst..dst + hd].copy_from_slice(&scratch.qg_buf[src + hd..src + 2 * hd]);
     }
     layer.attn_wk.matvec(&x[..n_embd], &mut scratch.k_buf);
     layer.attn_wv.matvec(&x[..n_embd], &mut scratch.v_buf);
@@ -380,9 +379,9 @@ pub fn kv_reduction_ratio(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use katgpt_attn::dash_attn::flashmemory_sparse::FlashMemoryConfig;
     use crate::deltanet::weights::{DeltaNetLayerWeights, Proj};
     use crate::types::{Config, DeltaNetLayerType};
+    use katgpt_attn::dash_attn::flashmemory_sparse::FlashMemoryConfig;
 
     /// Build a small GQA config: `n_head=4`, `n_kv_head=2`, `head_dim=8`, `n_embd=32`.
     fn small_gqa_config() -> Config {
@@ -460,12 +459,8 @@ mod tests {
         let mut block_cache =
             GqaFlashMemoryBlockCache::new(config.n_kv_head, config.head_dim, &fm_config, max_seq);
         let max_blocks = max_seq.div_ceil(fm_config.block_size);
-        let mut selector = GqaFlashMemorySelector::new(
-            fm_config,
-            config.n_kv_head,
-            config.head_dim,
-            max_blocks,
-        );
+        let mut selector =
+            GqaFlashMemorySelector::new(fm_config, config.n_kv_head, config.head_dim, max_blocks);
 
         for pos in 0..16 {
             forward_attention_layer_flashmemory(
@@ -525,12 +520,8 @@ mod tests {
         let mut block_cache =
             GqaFlashMemoryBlockCache::new(config.n_kv_head, config.head_dim, &fm_config, seq_len);
         let max_blocks = seq_len.div_ceil(fm_config.block_size);
-        let mut selector = GqaFlashMemorySelector::new(
-            fm_config,
-            config.n_kv_head,
-            config.head_dim,
-            max_blocks,
-        );
+        let mut selector =
+            GqaFlashMemorySelector::new(fm_config, config.n_kv_head, config.head_dim, max_blocks);
 
         for pos in 0..seq_len {
             forward_attention_layer_flashmemory(
@@ -614,7 +605,8 @@ mod tests {
         let n_kv_head = 8;
         let head_dim = 256;
         let seq_len = 128;
-        let mut block_cache = GqaFlashMemoryBlockCache::new(n_kv_head, head_dim, &fm_config, seq_len);
+        let mut block_cache =
+            GqaFlashMemoryBlockCache::new(n_kv_head, head_dim, &fm_config, seq_len);
         let kv_dim = n_kv_head * head_dim;
         let keys = vec![0.01f32; seq_len * kv_dim];
         block_cache.rebuild_from_keys(&keys, seq_len);
@@ -648,7 +640,12 @@ mod tests {
         let rope_freq = RopeFreqTable::new(config.rope_theta, config.head_dim);
         for pos in 0..seq_len {
             crate::deltanet::forward::forward_attention_layer(
-                &mut x_dense, &layer, &mut cache_dense, pos, &config, &rope_freq,
+                &mut x_dense,
+                &layer,
+                &mut cache_dense,
+                pos,
+                &config,
+                &rope_freq,
                 &mut scratch_dense,
             );
         }
@@ -669,23 +666,34 @@ mod tests {
             head_dim,
             n_kv,
             max_blocks,
-            vec![0.0; hidden * head_dim], vec![0.0; hidden],
-            vec![0.0; hidden], 0.0,
-            vec![0.0; hidden * head_dim], vec![0.0; hidden],
-            vec![0.0; hidden], 0.0,
+            vec![0.0; hidden * head_dim],
+            vec![0.0; hidden],
+            vec![0.0; hidden],
+            0.0,
+            vec![0.0; hidden * head_dim],
+            vec![0.0; hidden],
+            vec![0.0; hidden],
+            0.0,
         );
         let mut selector = TrainedIndexerSelector { indexer };
 
         let mut x_sparse = vec![0.5f32; n_embd];
         let mut cache_sparse = KVCache::new(&config);
         let mut scratch_sparse = AttentionLayerScratch::new(&config);
-        let mut block_cache =
-            GqaFlashMemoryBlockCache::new(n_kv, head_dim, &fm_config, seq_len);
+        let mut block_cache = GqaFlashMemoryBlockCache::new(n_kv, head_dim, &fm_config, seq_len);
 
         for pos in 0..seq_len {
             forward_attention_layer_flashmemory(
-                &mut x_sparse, &layer, &mut cache_sparse, pos, &config, &rope_freq,
-                &mut scratch_sparse, &mut block_cache, &mut selector, pos,
+                &mut x_sparse,
+                &layer,
+                &mut cache_sparse,
+                pos,
+                &config,
+                &rope_freq,
+                &mut scratch_sparse,
+                &mut block_cache,
+                &mut selector,
+                pos,
             );
         }
 
@@ -718,10 +726,14 @@ mod tests {
             head_dim,
             n_kv,
             max_blocks,
-            vec![0.1; hidden * head_dim], vec![0.0; hidden],
-            vec![0.1; hidden], 0.0,
-            vec![0.1; hidden * head_dim], vec![0.0; hidden],
-            vec![0.1; hidden], 0.0,
+            vec![0.1; hidden * head_dim],
+            vec![0.0; hidden],
+            vec![0.1; hidden],
+            0.0,
+            vec![0.1; hidden * head_dim],
+            vec![0.0; hidden],
+            vec![0.1; hidden],
+            0.0,
         );
         let bytes = indexer.to_bytes();
 
@@ -732,6 +744,8 @@ mod tests {
 
         // Truncated buffer must be rejected, not panic.
         let short = &bytes[..bytes.len() - 4];
-        assert!(TrainedIndexerSelector::from_ckpt_bytes(short, fm_config, n_kv, max_blocks).is_err());
+        assert!(
+            TrainedIndexerSelector::from_ckpt_bytes(short, fm_config, n_kv, max_blocks).is_err()
+        );
     }
 }

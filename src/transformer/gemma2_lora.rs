@@ -102,7 +102,12 @@ impl GemmaLora {
     /// Helper: apply `adapter` to `output` given `input`, using `buf` as scratch.
     /// Returns early if the adapter is `None`.
     #[inline(always)]
-    fn apply_one(output: &mut [f32], input: &[f32], adapter: Option<&LoraAdapter>, buf: &mut [f32]) {
+    fn apply_one(
+        output: &mut [f32],
+        input: &[f32],
+        adapter: Option<&LoraAdapter>,
+        buf: &mut [f32],
+    ) {
         if let Some(adp) = adapter {
             // Safety: buf is sized to max_rank >= adp.rank at construction.
             let r = adp.rank;
@@ -199,7 +204,11 @@ mod tests {
         let input = vec![0.5; 3];
         lora.next_layer();
         lora.apply_q(&mut output, &input);
-        assert_eq!(output, vec![1.0, 2.0, 3.0], "empty LoRA must not change output");
+        assert_eq!(
+            output,
+            vec![1.0, 2.0, 3.0],
+            "empty LoRA must not change output"
+        );
     }
 
     #[test]
@@ -216,7 +225,11 @@ mod tests {
         let mut output = vec![0.0, 0.0];
         let input = vec![1.0, 1.0];
         lora.apply_q(&mut output, &input);
-        assert_eq!(output, vec![2.0, 2.0], "LoRA delta should be B@(A@input) = [2,2]");
+        assert_eq!(
+            output,
+            vec![2.0, 2.0],
+            "LoRA delta should be B@(A@input) = [2,2]"
+        );
     }
 
     #[test]
@@ -234,7 +247,11 @@ mod tests {
         // Layer 0: Q adapter active
         let mut out0 = vec![0.0];
         lora.apply_q(&mut out0, &[1.0]);
-        assert_eq!(out0, vec![1.0], "layer 0 Q delta = 1.0 * 1.0 * 1.0 * 1.0 = 1.0");
+        assert_eq!(
+            out0,
+            vec![1.0],
+            "layer 0 Q delta = 1.0 * 1.0 * 1.0 * 1.0 = 1.0"
+        );
 
         // Advance to layer 1: no Q adapter
         lora.next_layer();
@@ -252,6 +269,10 @@ mod tests {
             ..GemmaLayerLora::empty()
         }];
         let lora = GemmaLora::new(layers);
-        assert_eq!(lora.buf.len(), 8, "buf must be sized to max rank across adapters");
+        assert_eq!(
+            lora.buf.len(),
+            8,
+            "buf must be sized to max rank across adapters"
+        );
     }
 }

@@ -56,7 +56,11 @@ pub fn dequantize_row_q6_k(src: &[BlockQ6K], dst: &mut [f32]) {
         "dst length must be multiple of {QK_K}"
     );
     let nb = n / QK_K;
-    assert!(src.len() >= nb, "src too short: need {nb} blocks, got {}", src.len());
+    assert!(
+        src.len() >= nb,
+        "src too short: need {nb} blocks, got {}",
+        src.len()
+    );
 
     for (i, block) in src.iter().take(nb).enumerate() {
         let d = f32::from(f16::from_bits(block.d));
@@ -79,11 +83,13 @@ pub fn dequantize_row_q6_k(src: &[BlockQ6K], dst: &mut [f32]) {
                 // q1: ql[l+0] low nibble + qh[l] bits [1:0]
                 let q1 = ((ql[ql_off + l] & 0x0F) | (((qh[qh_off + l]) & 3) << 4)) as i32 - 32;
                 // q2: ql[l+32] low nibble + qh[l] bits [3:2]
-                let q2 = ((ql[ql_off + l + 32] & 0x0F) | (((qh[qh_off + l] >> 2) & 3) << 4)) as i32 - 32;
+                let q2 =
+                    ((ql[ql_off + l + 32] & 0x0F) | (((qh[qh_off + l] >> 2) & 3) << 4)) as i32 - 32;
                 // q3: ql[l+0] high nibble + qh[l] bits [5:4]
                 let q3 = ((ql[ql_off + l] >> 4) | (((qh[qh_off + l] >> 4) & 3) << 4)) as i32 - 32;
                 // q4: ql[l+32] high nibble + qh[l] bits [7:6]
-                let q4 = ((ql[ql_off + l + 32] >> 4) | (((qh[qh_off + l] >> 6) & 3) << 4)) as i32 - 32;
+                let q4 =
+                    ((ql[ql_off + l + 32] >> 4) | (((qh[qh_off + l] >> 6) & 3) << 4)) as i32 - 32;
 
                 dst[out_base + l] = d * sc[sc_off + is] as f32 * q1 as f32;
                 dst[out_base + l + 32] = d * sc[sc_off + is + 2] as f32 * q2 as f32;
@@ -117,7 +123,10 @@ mod tests {
         };
         let mut out = vec![1.0_f32; QK_K];
         dequantize_row_q6_k(&[block], &mut out);
-        assert!(out.iter().all(|&v| v == 0.0), "expected all zeros, got {out:?}");
+        assert!(
+            out.iter().all(|&v| v == 0.0),
+            "expected all zeros, got {out:?}"
+        );
     }
 
     /// d=1, scales=1, all-zero quants → q = 0-32 = -32 for every element, so

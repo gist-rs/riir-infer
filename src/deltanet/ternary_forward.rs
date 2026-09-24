@@ -40,9 +40,9 @@ use super::forward::{
     causal_conv1d_update, effective_rotary_dim, expand_heads_into, gated_deltanet_step_inplace,
     l2_normalize, softplus,
 };
-use katgpt_core::TernaryMatvecHook;
 use super::ternary_weights::{DeltaNetTernaryLayerWeights, QwenDeltaNetTernaryWeights};
 use crate::types::{Config, DeltaNetLayerType, rmsnorm_with_gamma_eps, swiglu};
+use katgpt_core::TernaryMatvecHook;
 use katgpt_core::{
     TernaryFfnHook, TernaryGroupWeights, TernaryInputProjHook, simd_ternary_group_matvec_parallel,
 };
@@ -72,7 +72,12 @@ use crate::deltanet::rotation::{
 /// dispatches a `CubeCL` kernel per call. The CPU path uses rayon-parallel
 /// SIMD bit-plane extraction.
 #[inline(always)]
-fn bitlinear(y: &mut [f32], w: &TernaryGroupWeights, x: &[f32], hook: Option<&dyn TernaryMatvecHook>) {
+fn bitlinear(
+    y: &mut [f32],
+    w: &TernaryGroupWeights,
+    x: &[f32],
+    hook: Option<&dyn TernaryMatvecHook>,
+) {
     if let Some(h) = hook {
         h.matvec(w, &x[..w.cols], &mut y[..w.rows]);
     } else {
@@ -306,7 +311,9 @@ fn forward_deltanet_layer_ternary(
     });
     static SSMOUT_ROT: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     let ssmout_rot = *SSMOUT_ROT.get_or_init(|| {
-        std::env::var("RIIR_B2_SSMOUT_ROT").map(|v| v != "0").unwrap_or(true)
+        std::env::var("RIIR_B2_SSMOUT_ROT")
+            .map(|v| v != "0")
+            .unwrap_or(true)
     });
     if let Some(rot) = rotation {
         let perm_mode = if perm_mode >= 0 {
@@ -337,7 +344,12 @@ fn forward_deltanet_layer_ternary(
             rotate_forward_inplace(&mut scratch.recurrent_output, signs, rot.block_size);
         }
     }
-    bitlinear(&mut x[..n_embd], &layer.out_proj, &scratch.recurrent_output, hook);
+    bitlinear(
+        &mut x[..n_embd],
+        &layer.out_proj,
+        &scratch.recurrent_output,
+        hook,
+    );
 }
 
 /// Forward pass for a single full-attention layer with ternary projections.
@@ -487,7 +499,12 @@ fn forward_attention_layer_ternary(
         let signs = rot.signs_for_width(q_dim_rot);
         rotate_forward_inplace(&mut scratch.attn_out[..q_dim_rot], signs, rot.block_size);
     }
-    bitlinear(&mut x[..n_embd], &layer.attn_wo, &scratch.attn_out[..q_dim], hook);
+    bitlinear(
+        &mut x[..n_embd],
+        &layer.attn_wo,
+        &scratch.attn_out[..q_dim],
+        hook,
+    );
 }
 
 /// Ternary-weight forward pass for Qwen3.5 hybrid DeltaNet/Attention (decode,
@@ -542,7 +559,18 @@ pub fn forward_qwen_deltanet_ternary_with_capture<'a>(
     layer_capture: Option<&mut [Vec<f32>]>,
 ) -> &'a mut [f32] {
     forward_qwen_deltanet_ternary_with_hook(
-        x, weights, cache, token, pos, config, scratch, rope_freq, layer_capture, None, None, None,
+        x,
+        weights,
+        cache,
+        token,
+        pos,
+        config,
+        scratch,
+        rope_freq,
+        layer_capture,
+        None,
+        None,
+        None,
     )
 }
 
@@ -619,7 +647,11 @@ pub fn forward_qwen_deltanet_ternary_with_hook<'a>(
                 config,
                 &mut scratch.deltanet,
                 hook,
-                if rotation.is_some() { None } else { input_proj_hook },
+                if rotation.is_some() {
+                    None
+                } else {
+                    input_proj_hook
+                },
                 rotation,
                 &mut scratch.rotation_buf,
             );
@@ -831,7 +863,8 @@ pub fn generate_greedy_qwen_deltanet_ternary(
     let first_token = x[..v]
         .iter()
         .enumerate()
-        .max_by(|(_, a), (_, b)| katgpt_core::float_order::cmp_for_max(**a, **b)).map_or(0, |(i, _)| i);
+        .max_by(|(_, a), (_, b)| katgpt_core::float_order::cmp_for_max(**a, **b))
+        .map_or(0, |(i, _)| i);
     generated.push(first_token);
 
     // Decode loop
@@ -851,7 +884,8 @@ pub fn generate_greedy_qwen_deltanet_ternary(
         let next_token = x[..v]
             .iter()
             .enumerate()
-            .max_by(|(_, a), (_, b)| katgpt_core::float_order::cmp_for_max(**a, **b)).map_or(0, |(i, _)| i);
+            .max_by(|(_, a), (_, b)| katgpt_core::float_order::cmp_for_max(**a, **b))
+            .map_or(0, |(i, _)| i);
         generated.push(next_token);
     }
 

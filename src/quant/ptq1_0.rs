@@ -462,9 +462,18 @@ mod tests {
             d: 0,
         };
         let err = repack_ptq1_0_to_ternary_group(&[], 2, 128).unwrap_err();
-        assert!(matches!(err, Pq1RepackError::TooFewBlocks { got: 0, expected: 2 }));
+        assert!(matches!(
+            err,
+            Pq1RepackError::TooFewBlocks {
+                got: 0,
+                expected: 2
+            }
+        ));
         let err = repack_ptq1_0_to_ternary_group(&[block], 1, 100).unwrap_err();
-        assert!(matches!(err, Pq1RepackError::ColsNotMultipleOf128 { cols: 100 }));
+        assert!(matches!(
+            err,
+            Pq1RepackError::ColsNotMultipleOf128 { cols: 100 }
+        ));
     }
 
     /// Dequantize dst-length contract.

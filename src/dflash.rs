@@ -461,9 +461,9 @@ pub fn dflash_predict_conditioned(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use katgpt_speculative::dd_tree::{build_dd_tree, extract_best_path};
     use crate::transformer::TransformerWeights;
     use crate::types::{Config, Rng};
+    use katgpt_speculative::dd_tree::{build_dd_tree, extract_best_path};
 
     fn make_draft() -> (TransformerWeights, Config) {
         let config = Config::draft();
@@ -733,7 +733,9 @@ mod tests {
     #[cfg(feature = "weaver_runtime")]
     #[test]
     fn test_dflash_predict_with_weaver_zero_weights_preserves_g1() {
-        use katgpt_speculative::weaver::{WeaverConfig, WeaverCorrector, WeaverScratch, WeaverWeights};
+        use katgpt_speculative::weaver::{
+            WeaverConfig, WeaverCorrector, WeaverScratch, WeaverWeights,
+        };
 
         let (weights, config) = make_draft();
         let n_embd = config.n_embd;

@@ -200,8 +200,20 @@ pub fn forward_prefill<'a>(
             #[cfg(feature = "gated_mlp")]
             {
                 // SwiGLU: SiLU(W_gate·h) ⊙ W_up·h → W_down·hidden
-                crate::types::matmul(&mut ctx.hidden, &layer_weights.mlp_w1, &ctx.x, config.mlp_hidden, n);
-                crate::types::matmul(&mut ctx.up, &layer_weights.mlp_w_up, &ctx.x, config.mlp_hidden, n);
+                crate::types::matmul(
+                    &mut ctx.hidden,
+                    &layer_weights.mlp_w1,
+                    &ctx.x,
+                    config.mlp_hidden,
+                    n,
+                );
+                crate::types::matmul(
+                    &mut ctx.up,
+                    &layer_weights.mlp_w_up,
+                    &ctx.x,
+                    config.mlp_hidden,
+                    n,
+                );
                 crate::types::swiglu_inplace(&mut ctx.hidden, &ctx.up);
             }
             #[cfg(not(feature = "gated_mlp"))]

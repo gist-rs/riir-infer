@@ -24,9 +24,7 @@ use std::io::Write as _;
 use std::path::{Path, PathBuf};
 
 use katgpt_core::TernaryGroupWeights;
-use riir_infer_core::gguf_loader::{
-    load_qwen_deltanet_ternary_weights_gguf, GgufFile,
-};
+use riir_infer_core::gguf_loader::{GgufFile, load_qwen_deltanet_ternary_weights_gguf};
 use riir_infer_core::types::Config;
 
 // ── tiny GGUF writer ────────────────────────────────────────────────────────
@@ -44,9 +42,9 @@ enum Val {
 impl Val {
     fn tag(&self) -> u32 {
         match self {
-            Self::U64(_) => 10, // UINT64
-            Self::F64(_) => 12, // FLOAT64
-            Self::Str(_) => 8,  // STRING
+            Self::U64(_) => 10,                                       // UINT64
+            Self::F64(_) => 12,                                       // FLOAT64
+            Self::Str(_) => 8,                                        // STRING
             Self::ArrU64(_) | Self::ArrF64(_) | Self::ArrStr(_) => 9, // ARRAY
         }
     }
@@ -257,7 +255,10 @@ fn synth_metadata(folded: bool) -> Vec<(String, Val)> {
         ("qwen35.attention.value_length".into(), Val::U64(HEAD_DIM)),
         ("qwen35.feed_forward_length".into(), Val::U64(FFN)),
         ("qwen35.context_length".into(), Val::U64(2048)),
-        ("qwen35.attention.layer_norm_rms_epsilon".into(), Val::F64(1e-6)),
+        (
+            "qwen35.attention.layer_norm_rms_epsilon".into(),
+            Val::F64(1e-6),
+        ),
         ("qwen35.rope.freq_base".into(), Val::F64(10000.0)),
         ("qwen35.ssm.conv_kernel".into(), Val::U64(CONV_K)),
         ("qwen35.ssm.state_size".into(), Val::U64(STATE)),
@@ -267,7 +268,9 @@ fn synth_metadata(folded: bool) -> Vec<(String, Val)> {
     ];
     if folded {
         // sign vector: every folded input width is 1024 here, so ONE width.
-        let signs: Vec<f64> = (0..N_EMBD).map(|i| if i % 3 == 0 { -1.0 } else { 1.0 }).collect();
+        let signs: Vec<f64> = (0..N_EMBD)
+            .map(|i| if i % 3 == 0 { -1.0 } else { 1.0 })
+            .collect();
         let mut names = vec!["output.weight".to_string()];
         for i in 0..N_LAYER {
             if (i + 1) % 4 == 0 {
@@ -289,10 +292,19 @@ fn synth_metadata(folded: bool) -> Vec<(String, Val)> {
             "prism.hadamard.transform".into(),
             Val::Str("normalized-sylvester-walsh-hadamard".into()),
         ));
-        m.push(("prism.hadamard.axis".into(), Val::Str("input-last-dimension".into())));
-        m.push(("prism.hadamard.sign_mode".into(), Val::Str("explicit".into())));
+        m.push((
+            "prism.hadamard.axis".into(),
+            Val::Str("input-last-dimension".into()),
+        ));
+        m.push((
+            "prism.hadamard.sign_mode".into(),
+            Val::Str("explicit".into()),
+        ));
         m.push(("prism.hadamard.weight_names".into(), Val::ArrStr(names)));
-        m.push(("prism.hadamard.sign_widths".into(), Val::ArrU64(vec![N_EMBD])));
+        m.push((
+            "prism.hadamard.sign_widths".into(),
+            Val::ArrU64(vec![N_EMBD]),
+        ));
         m.push(("prism.hadamard.sign_values".into(), Val::ArrF64(signs)));
         m.push((
             "prism.hadamard.inverse_weight_names".into(),
@@ -359,10 +371,30 @@ fn synth_tensors_bonsai2_typed(ternary_id: u32) -> Vec<TensorSpec> {
         ternary(&mut t, &format!("blk.{i}.ffn_down.weight"), FFN, N_EMBD);
 
         if is_attn {
-            ternary(&mut t, &format!("blk.{i}.attn_q.weight"), N_EMBD, N_HEAD * HEAD_DIM * 2);
-            ternary(&mut t, &format!("blk.{i}.attn_k.weight"), N_EMBD, N_KV * HEAD_DIM);
-            ternary(&mut t, &format!("blk.{i}.attn_v.weight"), N_EMBD, N_KV * HEAD_DIM);
-            ternary(&mut t, &format!("blk.{i}.attn_output.weight"), N_HEAD * HEAD_DIM, N_EMBD);
+            ternary(
+                &mut t,
+                &format!("blk.{i}.attn_q.weight"),
+                N_EMBD,
+                N_HEAD * HEAD_DIM * 2,
+            );
+            ternary(
+                &mut t,
+                &format!("blk.{i}.attn_k.weight"),
+                N_EMBD,
+                N_KV * HEAD_DIM,
+            );
+            ternary(
+                &mut t,
+                &format!("blk.{i}.attn_v.weight"),
+                N_EMBD,
+                N_KV * HEAD_DIM,
+            );
+            ternary(
+                &mut t,
+                &format!("blk.{i}.attn_output.weight"),
+                N_HEAD * HEAD_DIM,
+                N_EMBD,
+            );
             for name in [
                 format!("blk.{i}.attn_q_norm.weight"),
                 format!("blk.{i}.attn_k_norm.weight"),
@@ -378,9 +410,24 @@ fn synth_tensors_bonsai2_typed(ternary_id: u32) -> Vec<TensorSpec> {
             let key_dim = N_K * STATE;
             let value_dim = N_V * STATE;
             let conv_dim = key_dim * 2 + value_dim;
-            ternary(&mut t, &format!("blk.{i}.attn_qkv.weight"), N_EMBD, key_dim * 2 + value_dim);
-            ternary(&mut t, &format!("blk.{i}.attn_gate.weight"), N_EMBD, value_dim);
-            ternary(&mut t, &format!("blk.{i}.ssm_out.weight"), value_dim, N_EMBD);
+            ternary(
+                &mut t,
+                &format!("blk.{i}.attn_qkv.weight"),
+                N_EMBD,
+                key_dim * 2 + value_dim,
+            );
+            ternary(
+                &mut t,
+                &format!("blk.{i}.attn_gate.weight"),
+                N_EMBD,
+                value_dim,
+            );
+            ternary(
+                &mut t,
+                &format!("blk.{i}.ssm_out.weight"),
+                value_dim,
+                N_EMBD,
+            );
             // conv1d [d_conv, conv_dim] F32
             t.push(TensorSpec {
                 name: format!("blk.{i}.ssm_conv1d.weight"),
@@ -455,7 +502,12 @@ fn write_tmp(name: &str, bytes: &[u8]) -> PathBuf {
 
 // ── tests ───────────────────────────────────────────────────────────────────
 
-fn load(path: &Path) -> anyhow::Result<(Config, riir_infer_core::deltanet::ternary_weights::QwenDeltaNetTernaryWeights)> {
+fn load(
+    path: &Path,
+) -> anyhow::Result<(
+    Config,
+    riir_infer_core::deltanet::ternary_weights::QwenDeltaNetTernaryWeights,
+)> {
     load_qwen_deltanet_ternary_weights_gguf(path)
 }
 
@@ -490,13 +542,18 @@ fn bonsai2_synthetic_loads_with_rotation_and_dense_gate_projs() {
     assert_eq!(config.deltanet_linear_n_heads, N_K as usize);
     assert_eq!(config.vocab_size, VOCAB as usize);
 
-    let rot = weights.rotation.as_ref().expect("rotation must be Some for a folded file");
+    let rot = weights
+        .rotation
+        .as_ref()
+        .expect("rotation must be Some for a folded file");
     assert_eq!(rot.block_size, 1024);
     assert!(rot.inverse_embedding);
     assert!(rot.gdn_v_grouped);
     assert_eq!(rot.gdn_v_heads, N_V as usize);
     assert_eq!(rot.gdn_k_groups, N_K as usize);
-    let signs = rot.signs_for_width(N_EMBD as usize).expect("sign vector for 1024");
+    let signs = rot
+        .signs_for_width(N_EMBD as usize)
+        .expect("sign vector for 1024");
     assert_eq!(signs.len(), N_EMBD as usize);
     assert_eq!(signs[0], -1);
 
@@ -505,8 +562,14 @@ fn bonsai2_synthetic_loads_with_rotation_and_dense_gate_projs() {
         if l.in_proj_qkv.rows > 0 {
             let GateProjShape(a_rows, a_cols) = GateProjShape::of(&l.in_proj_a);
             assert_eq!((a_rows, a_cols), (N_V as usize, N_EMBD as usize));
-            assert!(matches!(l.in_proj_a, riir_infer_core::deltanet::ternary_weights::GateProjWeights::Dense(..)));
-            assert!(matches!(l.in_proj_b, riir_infer_core::deltanet::ternary_weights::GateProjWeights::Dense(..)));
+            assert!(matches!(
+                l.in_proj_a,
+                riir_infer_core::deltanet::ternary_weights::GateProjWeights::Dense(..)
+            ));
+            assert!(matches!(
+                l.in_proj_b,
+                riir_infer_core::deltanet::ternary_weights::GateProjWeights::Dense(..)
+            ));
         }
     }
     // Attention layers carry empty a/b.
@@ -534,7 +597,10 @@ fn old_file_loads_without_rotation() {
     assert!(weights.rotation.is_none());
     for l in &weights.layers {
         if l.in_proj_qkv.rows > 0 {
-            assert!(matches!(l.in_proj_a, riir_infer_core::deltanet::ternary_weights::GateProjWeights::Ternary(_)));
+            assert!(matches!(
+                l.in_proj_a,
+                riir_infer_core::deltanet::ternary_weights::GateProjWeights::Ternary(_)
+            ));
         }
     }
     assert!(weights.invariants_hold());
@@ -551,13 +617,22 @@ fn forward_rotation_wiring_fires_every_layer() {
 
     let layer_types = weights.layer_types.clone();
     let run = |w: &riir_infer_core::deltanet::ternary_weights::QwenDeltaNetTernaryWeights| {
-        let mut cache = riir_infer_core::deltanet::HybridCache::with_layer_types(&config, &layer_types);
+        let mut cache =
+            riir_infer_core::deltanet::HybridCache::with_layer_types(&config, &layer_types);
         let mut scratch = riir_infer_core::deltanet::HybridForwardScratch::new(&config);
         let rope = riir_infer_core::rope::RopeFreqTable::new(config.rope_theta, config.head_dim);
         let mut x = vec![0.0f32; config.vocab_size.max(config.n_embd)];
         let mut captures = vec![vec![0.0f32; config.n_embd]; config.n_layer];
         riir_infer_core::deltanet::forward_qwen_deltanet_ternary_with_capture(
-            &mut x, w, &mut cache, 7, 0, &config, &mut scratch, &rope, Some(&mut captures),
+            &mut x,
+            w,
+            &mut cache,
+            7,
+            0,
+            &config,
+            &mut scratch,
+            &rope,
+            Some(&mut captures),
         );
         captures
     };
@@ -568,7 +643,10 @@ fn forward_rotation_wiring_fires_every_layer() {
 
     for (i, (r, p)) in rotated.iter().zip(plain.iter()).enumerate() {
         let diff: f32 = r.iter().zip(p.iter()).map(|(a, b)| (a - b).abs()).sum();
-        assert!(diff > 1e-3, "layer {i}: rotation wiring produced no difference (sum |Δ| = {diff})");
+        assert!(
+            diff > 1e-3,
+            "layer {i}: rotation wiring produced no difference (sum |Δ| = {diff})"
+        );
     }
 }
 
@@ -589,7 +667,9 @@ fn folded_matmul_matches_explicit_matrix_reference() {
     let w = &layer.in_proj_qkv; // [key_dim*2+value_dim, n_embd] folded ternary
 
     // Deterministic input.
-    let x: Vec<f32> = (0..N_EMBD as usize).map(|i| ((i * 37 + 11) % 97) as f32 - 48.0).collect();
+    let x: Vec<f32> = (0..N_EMBD as usize)
+        .map(|i| ((i * 37 + 11) % 97) as f32 - 48.0)
+        .collect();
 
     // OUR path: sign → FWHT per block → SIMD ternary matvec.
     let mut x_ours = x.clone();
@@ -716,7 +796,10 @@ fn ptq1_0_synthetic_loads_with_rotation() {
     let (config, weights) = load(&path).expect("load PTQ1_0 folded synthetic");
     let _ = std::fs::remove_file(&path);
 
-    assert!(weights.rotation.is_some(), "rotation metadata is wire-format independent");
+    assert!(
+        weights.rotation.is_some(),
+        "rotation metadata is wire-format independent"
+    );
     assert!(weights.invariants_hold());
     assert_eq!(config.n_layer, N_LAYER as usize);
     // Ternary a/b still the Dense (BF16) escape set — the 143 payload only
@@ -739,7 +822,10 @@ fn ptq1_0_synthetic_loads_with_rotation() {
 #[test]
 fn ptq1_0_and_pq2_0_encodings_run_bit_identically() {
     let run = |ternary_id: u32| {
-        let bytes = build_gguf(&synth_metadata(true), &synth_tensors_bonsai2_typed(ternary_id));
+        let bytes = build_gguf(
+            &synth_metadata(true),
+            &synth_tensors_bonsai2_typed(ternary_id),
+        );
         let path = write_tmp(&format!("riir_b2_eq_{ternary_id}"), &bytes);
         let (config, weights) = load(&path).expect("load");
         let _ = std::fs::remove_file(&path);
@@ -751,7 +837,14 @@ fn ptq1_0_and_pq2_0_encodings_run_bit_identically() {
         let mut x = vec![0.0f32; config.vocab_size.max(config.n_embd)];
         for (pos, tok) in [7usize, 13, 42].iter().enumerate() {
             riir_infer_core::deltanet::forward_qwen_deltanet_ternary(
-                &mut x, &weights, &mut cache, *tok, pos, &config, &mut scratch, &rope,
+                &mut x,
+                &weights,
+                &mut cache,
+                *tok,
+                pos,
+                &config,
+                &mut scratch,
+                &rope,
             );
         }
         x[..config.vocab_size.min(x.len())].to_vec()
