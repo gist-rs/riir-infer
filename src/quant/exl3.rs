@@ -165,10 +165,16 @@ impl Exl3K {
     pub fn from_words_per_tile(words: usize) -> Option<Self> {
         if words.is_multiple_of(16) {
             let ka = words / 16;
-            (1..=8).contains(&ka).then_some(Self { ka: ka as u8, half: false })
+            (1..=8).contains(&ka).then_some(Self {
+                ka: ka as u8,
+                half: false,
+            })
         } else if words % 16 == 8 {
             let ka = (words - 8) / 16;
-            (1..=7).contains(&ka).then_some(Self { ka: ka as u8, half: true })
+            (1..=7).contains(&ka).then_some(Self {
+                ka: ka as u8,
+                half: true,
+            })
         } else {
             None
         }
@@ -347,7 +353,10 @@ pub fn unpack_signs(packed: &[u8]) -> Vec<f16> {
 
 /// Read a fp16 slice from LE bytes.
 fn read_f16_slice(bytes: &[u8]) -> Vec<f16> {
-    bytes.as_chunks::<2>().0.iter()
+    bytes
+        .as_chunks::<2>()
+        .0
+        .iter()
         .map(|c| f16::from_bits(u16::from_le_bytes([c[0], c[1]])))
         .collect()
 }
@@ -414,8 +423,15 @@ impl<'a> Exl3Layer<'a> {
         in_features: usize,
         out_features: usize,
     ) -> Result<Self, Exl3Error> {
-        if in_features == 0 || out_features == 0 || !in_features.is_multiple_of(128) || !out_features.is_multiple_of(128) {
-            return Err(Exl3Error::Not128Divisible { in_dim: in_features, out_dim: out_features });
+        if in_features == 0
+            || out_features == 0
+            || !in_features.is_multiple_of(128)
+            || !out_features.is_multiple_of(128)
+        {
+            return Err(Exl3Error::Not128Divisible {
+                in_dim: in_features,
+                out_dim: out_features,
+            });
         }
         // K from the trellis tile word count. The caller passes the packed
         // trellis bytes; words-per-tile comes from the total length only when
@@ -430,8 +446,11 @@ impl<'a> Exl3Layer<'a> {
             )));
         }
         let words_per_tile = trellis.len() / (tiles * 2);
-        let k = Exl3K::from_words_per_tile(words_per_tile)
-            .ok_or_else(|| Exl3Error::BadShape(format!("words-per-tile {words_per_tile} implies K outside 1..8.5")))?;
+        let k = Exl3K::from_words_per_tile(words_per_tile).ok_or_else(|| {
+            Exl3Error::BadShape(format!(
+                "words-per-tile {words_per_tile} implies K outside 1..8.5"
+            ))
+        })?;
 
         let codebook = Exl3Codebook::from_markers(mcg_word, mul1_word)?;
         if k.half && codebook != Exl3Codebook::Cb2Mul1 {
@@ -441,22 +460,38 @@ impl<'a> Exl3Layer<'a> {
         if let Some(b) = suh
             && b.len() != in_features * 2
         {
-            return Err(Exl3Error::BadTensorLen { name: "suh", expected: in_features * 2, got: b.len() });
+            return Err(Exl3Error::BadTensorLen {
+                name: "suh",
+                expected: in_features * 2,
+                got: b.len(),
+            });
         }
         if let Some(b) = svh
             && b.len() != out_features * 2
         {
-            return Err(Exl3Error::BadTensorLen { name: "svh", expected: out_features * 2, got: b.len() });
+            return Err(Exl3Error::BadTensorLen {
+                name: "svh",
+                expected: out_features * 2,
+                got: b.len(),
+            });
         }
         if let Some(b) = su
             && b.len() != in_features / 16 * 2
         {
-            return Err(Exl3Error::BadTensorLen { name: "su", expected: in_features / 16 * 2, got: b.len() });
+            return Err(Exl3Error::BadTensorLen {
+                name: "su",
+                expected: in_features / 16 * 2,
+                got: b.len(),
+            });
         }
         if let Some(b) = sv
             && b.len() != out_features / 16 * 2
         {
-            return Err(Exl3Error::BadTensorLen { name: "sv", expected: out_features / 16 * 2, got: b.len() });
+            return Err(Exl3Error::BadTensorLen {
+                name: "sv",
+                expected: out_features / 16 * 2,
+                got: b.len(),
+            });
         }
         if suh.is_none() && su.is_none() {
             return Err(Exl3Error::BadShape("neither suh nor su present".into()));
@@ -478,6 +513,40 @@ impl<'a> Exl3Layer<'a> {
             k,
             codebook,
         })
+    }
+
+    /// The raw packed trellis bitstream — the GPU arm's upload source
+    /// (Issue 001 T7b). Byte length is always a whole number of LE u32
+    /// words (words-per-tile is even), so a LE host can view it as `&[u32]`
+    /// with exactly the `ring_bit` word semantics.
+    pub fn trellis_bytes(&self) -> &[u8] {
+        self.trellis
+    }
+
+    /// The `u`-axis (in/input-channel) scales expanded to f32 EXACTLY as
+    /// [`Self::dequantize_f32`] reads them: `suh` fp16 when present, else
+    /// the legacy packed `su` signs (the loader-side precedence). The single
+    /// expansion home — scalar, parallel, and GPU arms all consume this.
+    pub fn suh_f32(&self) -> Vec<f32> {
+        match self.suh {
+            Some(b) => read_f16_slice(b).into_iter().map(f32::from).collect(),
+            None => unpack_signs(self.su.unwrap())
+                .into_iter()
+                .map(f32::from)
+                .collect(),
+        }
+    }
+
+    /// The `v`-axis (out/output-channel) scales expanded to f32 — same
+    /// precedence as [`Self::suh_f32`] (`svh` fp16 over legacy `sv` signs).
+    pub fn svh_f32(&self) -> Vec<f32> {
+        match self.svh {
+            Some(b) => read_f16_slice(b).into_iter().map(f32::from).collect(),
+            None => unpack_signs(self.sv.unwrap())
+                .into_iter()
+                .map(f32::from)
+                .collect(),
+        }
     }
 
     /// Full dequantization: `W[in][out]` row-major (in-major), f32.
@@ -508,14 +577,8 @@ impl<'a> Exl3Layer<'a> {
         // 2. Incoherence: left block-Hadamard, row scales, right block-
         //    Hadamard, column scales.
         let h = sylvester_hadamard_128();
-        let suh: Vec<f32> = match self.suh {
-            Some(b) => read_f16_slice(b).into_iter().map(f32::from).collect(),
-            None => unpack_signs(self.su.unwrap()).into_iter().map(f32::from).collect(),
-        };
-        let svh: Vec<f32> = match self.svh {
-            Some(b) => read_f16_slice(b).into_iter().map(f32::from).collect(),
-            None => unpack_signs(self.sv.unwrap()).into_iter().map(f32::from).collect(),
-        };
+        let suh = self.suh_f32();
+        let svh = self.svh_f32();
 
         // left: y = H·x per (128-block of in, out column)
         let mut tmp = vec![0.0f32; kin * nout];
@@ -601,14 +664,8 @@ impl<'a> Exl3Layer<'a> {
         // blocks), row scales, right block-Hadamard (parallel over rows),
         // column scales — inner loop orders unchanged per element.
         let h = sylvester_hadamard_128();
-        let suh: Vec<f32> = match self.suh {
-            Some(b) => read_f16_slice(b).into_iter().map(f32::from).collect(),
-            None => unpack_signs(self.su.unwrap()).into_iter().map(f32::from).collect(),
-        };
-        let svh: Vec<f32> = match self.svh {
-            Some(b) => read_f16_slice(b).into_iter().map(f32::from).collect(),
-            None => unpack_signs(self.sv.unwrap()).into_iter().map(f32::from).collect(),
-        };
+        let suh = self.suh_f32();
+        let svh = self.svh_f32();
 
         let mut tmp = vec![0.0f32; kin * nout];
         tmp.par_chunks_mut(nout * 128)
@@ -694,10 +751,7 @@ pub(crate) fn detect_exl3_layers(
     meta: &std::collections::BTreeMap<String, TensorMeta>,
     marker_words: &std::collections::BTreeMap<String, u32>,
 ) -> Vec<Exl3LayerPlan> {
-    let mut keys: Vec<&String> = meta
-        .keys()
-        .filter(|k| k.ends_with(".trellis"))
-        .collect();
+    let mut keys: Vec<&String> = meta.keys().filter(|k| k.ends_with(".trellis")).collect();
     keys.sort();
 
     let mut plans = Vec::new();
@@ -724,10 +778,16 @@ pub(crate) fn detect_exl3_layers(
 
         let in_features = in_tiles * 16;
         let out_features = out_tiles * 16;
-        let Some(k) = Exl3K::from_words_per_tile(words) else { continue };
+        let Some(k) = Exl3K::from_words_per_tile(words) else {
+            continue;
+        };
 
-        let mcg_word = sub("mcg").filter(|m| m.dtype == "I32").and_then(|_| marker_words.get(&format!("{base}.mcg")).copied());
-        let mul1_word = sub("mul1").filter(|m| m.dtype == "I32").and_then(|_| marker_words.get(&format!("{base}.mul1")).copied());
+        let mcg_word = sub("mcg")
+            .filter(|m| m.dtype == "I32")
+            .and_then(|_| marker_words.get(&format!("{base}.mcg")).copied());
+        let mul1_word = sub("mul1")
+            .filter(|m| m.dtype == "I32")
+            .and_then(|_| marker_words.get(&format!("{base}.mul1")).copied());
         let Ok(codebook) = Exl3Codebook::from_markers(mcg_word, mul1_word) else {
             continue; // bad marker word — the layer-slice path will refuse loudly
         };
@@ -771,9 +831,21 @@ mod tests {
     #[test]
     fn codebook_pins_match_independent_numpy() {
         for &(code, b0, b1, b2) in PINS {
-            assert_eq!(Exl3Codebook::Cb0.decode_f16(code).to_bits(), b0, "cb0(0x{code:04X})");
-            assert_eq!(Exl3Codebook::Cb1Mcg.decode_f16(code).to_bits(), b1, "cb1(0x{code:04X})");
-            assert_eq!(Exl3Codebook::Cb2Mul1.decode_f16(code).to_bits(), b2, "cb2(0x{code:04X})");
+            assert_eq!(
+                Exl3Codebook::Cb0.decode_f16(code).to_bits(),
+                b0,
+                "cb0(0x{code:04X})"
+            );
+            assert_eq!(
+                Exl3Codebook::Cb1Mcg.decode_f16(code).to_bits(),
+                b1,
+                "cb1(0x{code:04X})"
+            );
+            assert_eq!(
+                Exl3Codebook::Cb2Mul1.decode_f16(code).to_bits(),
+                b2,
+                "cb2(0x{code:04X})"
+            );
         }
     }
 
@@ -789,7 +861,10 @@ mod tests {
                 lo = lo.min(v);
                 hi = hi.max(v);
             }
-            assert!((lo + 3.997).abs() < 0.01 && (hi - 3.997).abs() < 0.01, "{cb:?} range {lo}..{hi}");
+            assert!(
+                (lo + 3.997).abs() < 0.01 && (hi - 3.997).abs() < 0.01,
+                "{cb:?} range {lo}..{hi}"
+            );
         }
         let (mut lo, mut hi) = (f32::INFINITY, f32::NEG_INFINITY);
         for code in 0..=u16::MAX {
@@ -798,7 +873,10 @@ mod tests {
             lo = lo.min(v);
             hi = hi.max(v);
         }
-        assert!((lo + 3.454).abs() < 0.01 && (hi - 3.348).abs() < 0.01, "cb2 range {lo}..{hi}");
+        assert!(
+            (lo + 3.454).abs() < 0.01 && (hi - 3.348).abs() < 0.01,
+            "cb2 range {lo}..{hi}"
+        );
     }
 
     // ── ring reader ──
@@ -855,7 +933,11 @@ mod tests {
             // The window gains exactly the new code bits at the bottom.
             // (Continuity is undefined at i = 0: that window wraps tail-biting.)
             if i > 0 {
-                assert_eq!(w >> d, prev_window & ((1u16 << (16 - d)) - 1), "window continuity at {i}");
+                assert_eq!(
+                    w >> d,
+                    prev_window & ((1u16 << (16 - d)) - 1),
+                    "window continuity at {i}"
+                );
             }
             prev_window = w;
         }
@@ -878,6 +960,34 @@ mod tests {
         let tail = window16(&bytes, ring_bits, ring_bits); // bits [R-16, R)
         let expected = (tail << 2) | (codes[0] & 0b11);
         assert_eq!(w0, expected);
+    }
+
+    /// The GPU decode kernel (T7b) derives each ring position's window end
+    /// from the CLOSED-FORM prefix sum `S(p) = K·(p+1)` (integer) /
+    /// `ka·(p+1) + ⌊(p+1)/2⌋` (half — odd steps carry the +1) instead of the
+    /// sequential accumulation. This test pins the closed form against the
+    /// sequential one for every legal K.
+    #[test]
+    fn closed_form_prefix_matches_sequential() {
+        for ka in 1u8..=8 {
+            for half in [false, true] {
+                if half && ka > 7 {
+                    continue;
+                }
+                let k = Exl3K { ka, half };
+                let mut s = 0usize;
+                for p in 0..256usize {
+                    s += k.bits_for_step(p) as usize;
+                    let pp = p + 1;
+                    let closed = if half {
+                        k.ka as usize * pp + pp / 2
+                    } else {
+                        k.ka as usize * pp
+                    };
+                    assert_eq!(s, closed, "K={ka}.{} p={p}", if half { 5 } else { 0 });
+                }
+            }
+        }
     }
 
     #[test]
@@ -913,7 +1023,11 @@ mod tests {
             s += k.bits_for_step(i) as usize;
             let w = window16(&bytes, s, ring_bits);
             let d = k.bits_for_step(i);
-            assert_eq!(w & ((1u16 << d) - 1), code & ((1 << d) - 1), "half-K code {i}");
+            assert_eq!(
+                w & ((1u16 << d) - 1),
+                code & ((1 << d) - 1),
+                "half-K code {i}"
+            );
         }
     }
 
@@ -1002,25 +1116,77 @@ mod tests {
         let svh = unit_scales(128);
 
         // Good: no markers → Cb0.
-        let layer = Exl3Layer::from_raw_parts(&trellis, Some(&suh), Some(&svh), None, None, None, None, 128, 128).unwrap();
+        let layer = Exl3Layer::from_raw_parts(
+            &trellis,
+            Some(&suh),
+            Some(&svh),
+            None,
+            None,
+            None,
+            None,
+            128,
+            128,
+        )
+        .unwrap();
         assert_eq!(layer.codebook, Exl3Codebook::Cb0);
         assert_eq!(layer.k, k);
 
         // Bad marker word → loud refusal (§11.3 condition 3).
-        let err = Exl3Layer::from_raw_parts(&trellis, Some(&suh), Some(&svh), None, None, Some(0xDEAD_BEEF), None, 128, 128);
+        let err = Exl3Layer::from_raw_parts(
+            &trellis,
+            Some(&suh),
+            Some(&svh),
+            None,
+            None,
+            Some(0xDEAD_BEEF),
+            None,
+            128,
+            128,
+        );
         assert!(matches!(err, Err(Exl3Error::BadMarker { .. })));
 
         // Half-K without mul1 → loud refusal.
         let kh = Exl3K { ka: 2, half: true };
         let trellis_h = vec![0u8; tiles * kh.words_per_tile() * 2];
-        let err = Exl3Layer::from_raw_parts(&trellis_h, Some(&suh), Some(&svh), None, None, None, None, 128, 128);
+        let err = Exl3Layer::from_raw_parts(
+            &trellis_h,
+            Some(&suh),
+            Some(&svh),
+            None,
+            None,
+            None,
+            None,
+            128,
+            128,
+        );
         assert!(matches!(err, Err(Exl3Error::HalfKWithoutMul1 { .. })));
         // With mul1 → ok.
-        let ok = Exl3Layer::from_raw_parts(&trellis_h, Some(&suh), Some(&svh), None, None, None, Some(EXL3_MUL1_MARKER), 128, 128).unwrap();
+        let ok = Exl3Layer::from_raw_parts(
+            &trellis_h,
+            Some(&suh),
+            Some(&svh),
+            None,
+            None,
+            None,
+            Some(EXL3_MUL1_MARKER),
+            128,
+            128,
+        )
+        .unwrap();
         assert_eq!(ok.codebook, Exl3Codebook::Cb2Mul1);
 
         // Non-128-divisible dims → refusal.
-        let bad = Exl3Layer::from_raw_parts(&trellis[..], Some(&suh), Some(&svh), None, None, None, None, 112, 128);
+        let bad = Exl3Layer::from_raw_parts(
+            &trellis[..],
+            Some(&suh),
+            Some(&svh),
+            None,
+            None,
+            None,
+            None,
+            112,
+            128,
+        );
         assert!(matches!(bad, Err(Exl3Error::Not128Divisible { .. })));
     }
 
@@ -1073,11 +1239,11 @@ mod tests {
             let a = layer.dequantize_f32();
             let b = layer.dequantize_f32_parallel();
             // Bit-pattern comparison — TRUE bit identity, NaN-payload aware.
-            let bits_eq = a
-                .iter()
-                .zip(&b)
-                .all(|(x, y)| x.to_bits() == y.to_bits());
-            assert!(bits_eq, "kin={kin} nout={nout} parallel/scalar bit parity broke");
+            let bits_eq = a.iter().zip(&b).all(|(x, y)| x.to_bits() == y.to_bits());
+            assert!(
+                bits_eq,
+                "kin={kin} nout={nout} parallel/scalar bit parity broke"
+            );
         }
         // Legacy sign spelling exercises the unpack_signs path in both arms.
         let k = Exl3K { ka: 3, half: false };
@@ -1132,7 +1298,18 @@ mod tests {
         let suh = mk(kin, 7);
         let svh = mk(nout, 91);
 
-        let layer = Exl3Layer::from_raw_parts(&trellis, Some(&suh), Some(&svh), None, None, None, None, kin, nout).unwrap();
+        let layer = Exl3Layer::from_raw_parts(
+            &trellis,
+            Some(&suh),
+            Some(&svh),
+            None,
+            None,
+            None,
+            None,
+            kin,
+            nout,
+        )
+        .unwrap();
         let got = layer.dequantize_f32();
 
         // Reference: independent composition.
@@ -1143,7 +1320,12 @@ mod tests {
         for a in 0..kin / 16 {
             for c in 0..nout / 16 {
                 let off = (a * (nout / 16) + c) * tile_bytes;
-                decode_tile_rot(&mut tile, &trellis[off..off + tile_bytes], k, Exl3Codebook::Cb0);
+                decode_tile_rot(
+                    &mut tile,
+                    &trellis[off..off + tile_bytes],
+                    k,
+                    Exl3Codebook::Cb0,
+                );
                 for (p, &v) in tile.iter().enumerate() {
                     let (r, co) = ring_pos_to_tile_element(p);
                     w_rot[(a * 16 + r) * nout + c * 16 + co] = v;
@@ -1205,17 +1387,32 @@ mod tests {
             eprintln!("SKIP: fixture absent — fetch per Issue 001 §12.5");
             return;
         };
-        let Some(ref_w) = read_npy_f32(&std::fs::read(dir.join("k_proj_ref_w.npy")).unwrap()) else { eprintln!("SKIP: numpy reference absent");
-                return; };
+        let Some(ref_w) = read_npy_f32(&std::fs::read(dir.join("k_proj_ref_w.npy")).unwrap())
+        else {
+            eprintln!("SKIP: numpy reference absent");
+            return;
+        };
 
         let (in_f, out_f) = (4096usize, 1024usize);
         assert_eq!(ref_w.len(), in_f * out_f);
         let (suh, svh) = scales.split_at(in_f * 2);
         let layer = Exl3Layer::from_raw_parts(
-            &trellis, Some(suh), Some(svh), None, None, None, None, in_f, out_f,
+            &trellis,
+            Some(suh),
+            Some(svh),
+            None,
+            None,
+            None,
+            None,
+            in_f,
+            out_f,
         )
         .expect("real pack layer validates");
-        assert_eq!(layer.codebook, Exl3Codebook::Cb0, "this pack predates markers");
+        assert_eq!(
+            layer.codebook,
+            Exl3Codebook::Cb0,
+            "this pack predates markers"
+        );
         assert_eq!(layer.k, Exl3K { ka: 4, half: false });
         let got = layer.dequantize_f32();
 
@@ -1232,8 +1429,14 @@ mod tests {
         eprintln!(
             "T4a k_proj: rel-Frobenius={rel_frobenius:.3e} max_abs_err={max_abs:.3e} (max|W|={max_w:.3e})"
         );
-        assert!(rel_frobenius < 1e-4, "relative Frobenius error {rel_frobenius}");
-        assert!(max_abs < 1e-3 * max_w, "max abs error {max_abs} vs max|W| {max_w}");
+        assert!(
+            rel_frobenius < 1e-4,
+            "relative Frobenius error {rel_frobenius}"
+        );
+        assert!(
+            max_abs < 1e-3 * max_w,
+            "max abs error {max_abs} vs max|W| {max_w}"
+        );
     }
 
     /// Minimal numpy .npy reader for a flat f32 array (header dict + LE data).
@@ -1244,7 +1447,9 @@ mod tests {
         let hlen = u16::from_le_bytes([bytes[8], bytes[9]]) as usize;
         let data = &bytes[10 + hlen..];
         Some(
-            data.as_chunks::<4>().0.iter()
+            data.as_chunks::<4>()
+                .0
+                .iter()
                 .map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]]))
                 .collect(),
         )

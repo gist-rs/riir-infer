@@ -101,6 +101,12 @@ pub mod epilogue;
 #[cfg(feature = "cubecl_runtime")]
 pub mod params_cache;
 
+// EXL3 (trellis-coded) GPU dequant — Issue 001 T7b. Consumes the core `exl3`
+// reference tables (LUT/Hadamard) + zero-copy layer view as its oracle +
+// upload source; bit-identical to the CPU scalar reference by construction.
+#[cfg(feature = "exl3_gpu")]
+pub mod exl3_dequant_cubecl;
+
 #[cfg(feature = "cubecl_runtime")]
 pub use gemv_autotune::GemvAutotune;
 #[cfg(feature = "cubecl_runtime")]

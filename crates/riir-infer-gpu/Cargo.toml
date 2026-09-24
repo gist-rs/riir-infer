@@ -106,6 +106,10 @@ gemma2_d2f = ["cubecl_runtime", "dep:fastrand", "riir-infer-core/dllm"]
 # Compile the blake3-keyed params-handle cache in (default-off
 # pass-through without it). Mirrors the engine gpu crate's feature.
 params_handle_cache = ["cubecl_runtime"]
+# EXL3 (trellis-coded) GPU dequant kernels (Issue 001 T7b) — the 4090 arm.
+# Consumes the core `exl3` reference (LUT/Hadamard tables, zero-copy layer
+# view, suh/svh expansion helpers) as upload source + bit-parity oracle.
+exl3_gpu = ["cubecl_runtime", "riir-infer-core/exl3"]
 # Q4_K row-tiled GEMV variant (opt-in until its GOAT gate lands).
 q4k_rowtiled_gemv = ["cubecl_runtime"]
 # Explicit FMA contraction for the GEMV inner loops (CPU default for

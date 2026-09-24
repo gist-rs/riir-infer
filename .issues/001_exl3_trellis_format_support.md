@@ -1,6 +1,6 @@
 # Issue 001 — EXL3 (trellis-coded) weight-format support in the quantization zoo
 
-**Status:** OPEN — T1 + T2 + T3 + T4 (a: cross-impl oracle, b: NATIVE oracle BIT-EXACT) DONE 2026-09-24; T5–T7 pending (T5 needs full packs on our silicon).
+**Status:** OPEN — T1–T7 COMPLETE 2026-09-24 (T4b native oracle BIT-EXACT; T7a CPU 10.6-11.4×; T7b GPU 4090 71-87× wall / 4.7-5.8 Gw/s kernel, [Bench 002](../.benchmarks/002_exl3_t7b_gpu_dequant.md)). REMAINING: the §14 promotion trigger — the engine serving arm that consumes `Exl3Pack` end-to-end + the delivered-gain measurement (engine-repo wiring, not format work).
 **Owner:** unassigned. **Filed:** 2026-09-24. **T1–T4 executed:** 2026-09-24 (4090 box).
 **Origin:** riir-clippy Research 207 (`.research/207_qwen38_exl3_dgx_spark_distill_verdict.md`),
 lane-intel axis. The corpus half of that verdict is riir-clippy Plan 170 and is
@@ -171,12 +171,16 @@ is an open design question this issue does not pre-decide.
   gain to be delivered ON the promoted path, and nothing on any default
   build path consumes EXL3 until T7 wires a serving/GPU arm. Named
   promotion trigger in §14.
-- [ ] **T7 — SIMD / GPU arms**, only after T3–T5. Scope unknown at filing.
+- [x] **T7 — SIMD / GPU arms**, only after T3–T5. Scope unknown at filing.
   → **T7a (CPU arm) DONE 2026-09-24 (`725a8a5`, record in §15)**: codebook
   LUT + rayon parallel dequant, bit-identical to the reference,
-  10.6–11.4× measured on the 27B pack. **T7b (GPU arm) REMAINS** — the
-  4090 CUDA/wgpu dequant + engine integration that makes the residency
-  gain a runtime property (also the §14 promotion trigger).
+  10.6–11.4× measured on the 27B pack. **T7b (GPU arm) DONE 2026-09-24
+  (record in §16, [Bench 002](../.benchmarks/002_exl3_t7b_gpu_dequant.md))**:
+  three CubeCL kernels (decode / left-H / right-H, grid-strided,
+  chunk-streamed), decode stage BIT-EXACT + Hadamard stages gated in the
+  FMA-contraction class, **71-87× wall / 4.7-5.8 Gw/s kernel-only** vs the
+  CPU arm on the 4090. The §14 promotion trigger remains (engine serving
+  integration + delivered-gain measurement — engine-repo work).
 
 ## 6. The correctness gate has a precondition — measure the comparator first
 
@@ -910,3 +914,70 @@ parity was never wrong. Float-parity tests compare `to_bits`, never `==`.
 shape) + engine integration; it is also the §14 promotion trigger. The
 ~11× CPU arm is the correctness oracle for that kernel: bit-parity
 against the same scalar reference.
+
+## 16. T7b record — the 4090 GPU arm (2026-09-24, 4090 box)
+
+**What landed** (`crates/riir-infer-gpu/src/exl3_dequant_cubecl.rs`, feature
+`exl3_gpu = ["cubecl_runtime", "riir-infer-core/exl3"]`): three CubeCL
+kernels — `exl3_trellis_decode` (one thread per (tile, ring position),
+closed-form prefix sum, MSB-first window with ring wrap, tensor-core-order
+scatter), `exl3_left_hadamard` (+ fused row scale), `exl3_right_hadamard`
+(+ fused column scale) — grid-strided (≤65535 workgroups: wgpu's
+per-dimension dispatch cap; real layers need up to ~4.9M tile-threads),
+driven by `Exl3DequantCubeCL::dequant_layer_f32` over 128-column chunks
+(VRAM-bounded intermediates, layer-size-independent; lm_head's 5 GB f32
+output never materializes on the GPU at once). Core additions:
+`Exl3Layer::{trellis_bytes, suh_f32, svh_f32}` (the upload surface; the two
+dequant fns now share the scale-expansion helpers — the DRY fold).
+
+**The two-tier oracle** (the §15 aspiration was bit-parity; measured
+reality split it):
+
+1. **Decode stage — BIT-EXACT.** Zero floating-point arithmetic; the CPU's
+   own LUT bytes uploaded verbatim. Pinned synthetically (K3/cb0, K5/mcg,
+   K4.5/mul1) and on the real pack (147456/147456 probe elements on
+   `model.visual.blocks.0.attn.k_proj`).
+2. **Hadamard stages — FMA-contraction class.** Both CubeCL backends
+   contract `a*b+c` (the CUDA lane generates CUDA C++ plain operators under
+   NVRTC's default `-fmad=true`; wgpu contracts identically — same
+   divergence bits on both backends); there is no per-kernel opt-out, and a
+   global `-fmad=false` would de-optimize every FMA-contracted GEMV in the
+   workspace (rejected deliberately). FMA is one-directionally MORE
+   accurate — the same class T4b adjudicated for the reference
+   implementation's own fp16 Hadamard intermediates (§12.6). Gates
+   (scale-aware; ulp counts are meaningless across sign flips of near-zero
+   sums): max |diff|/max|W| ≤ 1e-5, rel-Frobenius ≤ 1e-5. Measured:
+   **rel-Fro 2.59-2.61e-7 on every class** (the FMA signature — uniform,
+   backend-stable), 20-100× under the gates.
+
+**Measured** (the LEAGUE MODEL author pack, release, native CUDA backend;
+full tables + the wgpu lane in [Bench 002](../.benchmarks/002_exl3_t7b_gpu_dequant.md)):
+
+| class | weights | GPU wall | kernel-only | CPU arm (T7a) | wall speedup |
+|---|---:|---:|---:|---:|---:|
+| self_attn.o_proj (K4) | 31.5M | 743 Mw/s | 4749 Mw/s | 66.5 Mw/s | 71.4× |
+| mlp.down_proj (K3) | 89.1M | 538 Mw/s | 4983 Mw/s | 69.0 Mw/s | 72.2× |
+| linear_attn.out_proj (K5) | 31.5M | 701 Mw/s | 4955 Mw/s | 68.5 Mw/s | 72.4× |
+| mlp.gate_proj (K3) | 89.1M | 534 Mw/s | 5051 Mw/s | 67.6 Mw/s | 74.7× |
+| lm_head (K5) | 1.27B | 655 Mw/s | **5848 Mw/s** | 67.4 Mw/s | **86.8×** |
+
+Full-model extrapolation: **~5.5-6.7 s** pure GPU dequant (kernel-only),
+~50-60 s end-to-end with readback, vs the CPU arm's ~6.7 min. Load-time
+dequant is now readback-bound, not compute-bound.
+
+**Fixture lessons paid for** (carried forward): (1) a column-chunk
+readback is `[in × cols]` row-major — scatter per-row into the output,
+never copy contiguously (the first draft produced exactly one correct row
+out of 256); (2) parity harnesses must COUNT and LOCALIZE misses — the
+first-bit-mismatch diagnostic hid a ~100% element miss; (3) the wgpu
+dispatch cap (65535 workgroups/dimension) bites at real layer sizes —
+grid-stride every kernel that maps thread-per-element.
+
+**What T7b does NOT do** (the honest scope line): the §14 promotion
+trigger requires a SERVING arm that consumes `Exl3Pack` end-to-end (weights
+GPU-resident, converted to the engine's dense f16 GEMV path) + the
+delivered-gain measurement (bytes moved per decode step / context headroom
+vs the f16/q4 incumbent). That is engine-repo wiring (riir-ai consumes this
+crate); the kernels, the pack-level driver, and the measured oracle here
+are the substrate it composes. The 16.35 GB pack + the `.raw/exl3-venv`
+oracle env stay on disk for that work.
