@@ -45,6 +45,10 @@
 //!   instance, so the ladder is result-identical by construction; the
 //!   kill-switch `LAYA_CUDA_LADDER=0` routes everything through
 //!   `sgemm_wide` (the A/B and bisect posture, never a silent default).
+//!   The `.issues/006` rung lives in every instance's inner loop: the B
+//!   staging rows pad to 16 B multiples (68/132) and each thread's four
+//!   contiguous B-fragment loads collapse to ONE float4 — measured
+//!   −5..−25 % on every wide-served shape, bit-identical results.
 //! - **Attention**: the FUSED flash kernel — ONE dispatch per layer over
 //!   the packed qkv (split → rope → q-scale → scores → sliding window →
 //!   softmax → value mix → head merge in-kernel, the Metal lane's
@@ -93,30 +97,32 @@ use super::backend::{AttnScratch, Backend};
 use crate::laya::LayaError;
 
 /// The sgemm tile: 64×64 output per block, BK 32, 512 threads. Staging =
-/// A [64][33] + B [32][65] = 4192 floats = 16 768 B — under the 48 KB
+/// A [64][33] + B [32][68] = 4 192 floats = 16 768 B — under the 48 KB
 /// dynamic-smem default (no `cudaFuncAttributeMaxDynamicSharedMemorySize`
-/// opt-in needed).
+/// opt-in needed). The B row pad is 68 (a 16 B multiple) so the inner loop
+/// reads its 4-contiguous B fragment as ONE float4 — the `.issues/006`
+/// rung, measured −5..−25 % on every wide-served shape.
 const BM: u32 = 64;
 const BN: u32 = 64;
 const BK: u32 = 32;
 const SGEMM_THREADS: u32 = 512;
-const SGEMM_SMEM_BYTES: u32 = (BM * 33 + BK * 65) * 4;
+const SGEMM_SMEM_BYTES: u32 = (BM * 33 + BK * 68) * 4;
 
 /// The narrow instance (the `m < WIDE_M_MIN` geometry, `.issues/004`):
 /// 32×64 output per block, BK 64, 512 threads. Staging
-/// A [32][65] + B [64][65] = 6 240 floats = 24 960 B.
+/// A [32][65] + B [64][68] = 6 272 floats = 25 088 B.
 const NARROW_BM: u32 = 32;
 const NARROW_BN: u32 = 64;
 const NARROW_THREADS: u32 = 512;
-const NARROW_SMEM_BYTES: u32 = (32 * 65 + 64 * 65) * 4;
+const NARROW_SMEM_BYTES: u32 = (32 * 65 + 64 * 68) * 4;
 
 /// The xwide instance (the `m ≥ WIDE_M_MIN ∧ n ≥ XWIDE_N_MIN` geometry):
 /// 64×128 output per block, BK 32, 1 024 threads. Staging
-/// A [64][33] + B [32][129] = 6 240 floats = 24 960 B.
+/// A [64][33] + B [32][132] = 6 336 floats = 25 344 B.
 const XWIDE_BM: u32 = 64;
 const XWIDE_BN: u32 = 128;
 const XWIDE_THREADS: u32 = 1024;
-const XWIDE_SMEM_BYTES: u32 = (64 * 33 + 32 * 129) * 4;
+const XWIDE_SMEM_BYTES: u32 = (64 * 33 + 32 * 132) * 4;
 
 /// The ladder floors — MEASURED ON THIS BOX (the 4090, `.issues/004`;
 /// the `sgemm_shape_timing` CUDA arm, position-balanced pairs + the
@@ -204,9 +210,17 @@ const CUDA_SRC: &str = r#"
 // keep the per-output accumulation k-ascending in ONE thread, so the
 // instances are result-identical by construction.
 //
+// The `.issues/006` rung lives in every inner loop: the B staging rows
+// are padded to 16 B multiples (68 / 132 floats) so each thread's FOUR
+// CONTIGUOUS B-fragment loads collapse to ONE float4 — 6 smem loads per
+// 8 FMAs becomes 3 (narrow: 5→2). float4 loads change no arithmetic
+// order, so the result-identity law is untouched; the measured win is
+// −5..−25 % on every wide-served shape (the load-issue bound was the
+// lane's real ceiling, not the straggler tail).
+//
 // One 64×64 tile per block, 512 threads (16 warps in a 4×4 grid); each
 // thread owns a 2×4 output fragment (rows tr / tr+8 inside its warp's
-// 16×16 tile, cols tc..tc+3). Staging: A [64][33] + B [32][65].
+// 16×16 tile, cols tc..tc+3). Staging: A [64][33] + B [32][68].
 // The B loader maps consecutive lanes along whichever B stride is 1, so a
 // row-major [n, k] weight binds DIRECTLY as the [k, n] operand (strides
 // b_rs=1, b_cs=k) with fully coalesced staging — no device transpose.
@@ -229,7 +243,7 @@ extern "C" __global__ void sgemm_wide(
     const unsigned int c_bs)
 {
     __shared__ float ta[BM * 33];
-    __shared__ float tb[BK * 65];
+    __shared__ float tb[BK * 68];
 
     const unsigned int m0 = blockIdx.y * BM;
     const unsigned int n0 = blockIdx.x * BN;
@@ -265,9 +279,10 @@ extern "C" __global__ void sgemm_wide(
             ta[r * 33u + col] =
                 (gr < m && gc < k) ? A[(size_t)gr * a_rs + gc * a_cs] : 0.0f;
         }
-        // Stage B [32][64]: 4 per thread. b_cs==1 (row-major [k][n]):
-        // lanes along n — contiguous. b_rs==1 (kt / W [n,k] bound as
-        // [k,n]): lanes along k — contiguous in the weight's memory.
+        // Stage B [32][64]: 4 per thread, row pad 68 (float4-aligned
+        // reads). b_cs==1 (row-major [k][n]): lanes along n — contiguous.
+        // b_rs==1 (kt / W [n,k] bound as [k,n]): lanes along k —
+        // contiguous in the weight's memory.
         if (b_cs == 1u) {
             for (unsigned int q = 0; q < 4; ++q) {
                 const unsigned int idx = tid + q * 512u;
@@ -275,7 +290,7 @@ extern "C" __global__ void sgemm_wide(
                 const unsigned int col = idx & 63u;
                 const unsigned int gk = t + kk;
                 const unsigned int gn = n0 + col;
-                tb[kk * 65u + col] =
+                tb[kk * 68u + col] =
                     (gk < k && gn < n) ? B[(size_t)gk * b_rs + gn] : 0.0f;
             }
         } else {
@@ -285,21 +300,20 @@ extern "C" __global__ void sgemm_wide(
                 const unsigned int col = idx >> 5;
                 const unsigned int gk = t + kk;
                 const unsigned int gn = n0 + col;
-                tb[kk * 65u + col] =
+                tb[kk * 68u + col] =
                     (gk < k && gn < n) ? B[(size_t)gn * b_cs + gk * b_rs] : 0.0f;
             }
         }
         __syncthreads();
+        // col0 is a multiple of 4 and the row pad is 68 → &tb[kk*68+col0]
+        // is 16 B aligned; the four contiguous B loads are ONE float4.
         #pragma unroll
         for (unsigned int kk = 0; kk < BK; ++kk) {
             const float a0 = ta[row0 * 33u + kk];
             const float a1 = ta[(row0 + 8u) * 33u + kk];
-            const float b0 = tb[kk * 65u + col0];
-            const float b1 = tb[kk * 65u + col0 + 1u];
-            const float b2 = tb[kk * 65u + col0 + 2u];
-            const float b3 = tb[kk * 65u + col0 + 3u];
-            acc0 += a0 * b0; acc1 += a0 * b1; acc2 += a0 * b2; acc3 += a0 * b3;
-            acc4 += a1 * b0; acc5 += a1 * b1; acc6 += a1 * b2; acc7 += a1 * b3;
+            const float4 bv = *reinterpret_cast<const float4*>(&tb[kk * 68u + col0]);
+            acc0 += a0 * bv.x; acc1 += a0 * bv.y; acc2 += a0 * bv.z; acc3 += a0 * bv.w;
+            acc4 += a1 * bv.x; acc5 += a1 * bv.y; acc6 += a1 * bv.z; acc7 += a1 * bv.w;
         }
     }
     const unsigned int gr0 = m0 + row0;
@@ -320,9 +334,11 @@ extern "C" __global__ void sgemm_wide(
 
 // ── sgemm_narrow: the m < WIDE_M_MIN instance (BM 32, BN 64, BK 64) ─────
 // 512 threads (16 warps in a 4×4 grid); warp tile 8×16 — thread fragment
-// 1 row × 4 cols (4 accumulators). Staging A [32][65] + B [64][65] =
-// 6 240 floats = 24 960 B (under the 48 KB static default). Same arg
-// contract as sgemm_wide.
+// 1 row × 4 cols (4 accumulators). Staging A [32][65] + B [64][68] =
+// 6 272 floats = 25 088 B (under the 48 KB static default; the B row pad
+// is 68 so the fragment's four contiguous loads are ONE float4 — the
+// `.issues/006` rung, 5 smem loads / 4 FMAs → 2). Same arg contract as
+// sgemm_wide.
 extern "C" __global__ void sgemm_narrow(
     const float* __restrict__ a,
     const float* __restrict__ b,
@@ -342,7 +358,7 @@ extern "C" __global__ void sgemm_narrow(
     const unsigned int c_bs)
 {
     __shared__ float ta[32u * 65u];
-    __shared__ float tb[64u * 65u];
+    __shared__ float tb[64u * 68u];
 
     const unsigned int m0 = blockIdx.y * 32u;
     const unsigned int n0 = blockIdx.x * 64u;
@@ -374,7 +390,8 @@ extern "C" __global__ void sgemm_narrow(
             ta[r * 65u + col] =
                 (gr < m && gc < k) ? A[(size_t)gr * a_rs + gc * a_cs] : 0.0f;
         }
-        // Stage B [64][64]: 8 per thread (4 096 / 512).
+        // Stage B [64][64]: 8 per thread (4 096 / 512), row pad 68
+        // (float4-aligned reads).
         if (b_cs == 1u) {
             for (unsigned int q = 0; q < 8; ++q) {
                 const unsigned int idx = tid + q * 512u;
@@ -382,7 +399,7 @@ extern "C" __global__ void sgemm_narrow(
                 const unsigned int col = idx & 63u;
                 const unsigned int gk = t + kk;
                 const unsigned int gn = n0 + col;
-                tb[kk * 65u + col] =
+                tb[kk * 68u + col] =
                     (gk < k && gn < n) ? B[(size_t)gk * b_rs + gn] : 0.0f;
             }
         } else {
@@ -392,19 +409,18 @@ extern "C" __global__ void sgemm_narrow(
                 const unsigned int col = idx >> 6;
                 const unsigned int gk = t + kk;
                 const unsigned int gn = n0 + col;
-                tb[kk * 65u + col] =
+                tb[kk * 68u + col] =
                     (gk < k && gn < n) ? B[(size_t)gn * b_cs + gk * b_rs] : 0.0f;
             }
         }
         __syncthreads();
+        // col0 is a multiple of 4 and the row pad is 68 → 16 B aligned;
+        // the four contiguous B loads are ONE float4.
         #pragma unroll 4
         for (unsigned int kk = 0; kk < 64u; ++kk) {
             const float a0 = ta[row0 * 65u + kk];
-            const float b0 = tb[kk * 65u + col0];
-            const float b1 = tb[kk * 65u + col0 + 1u];
-            const float b2 = tb[kk * 65u + col0 + 2u];
-            const float b3 = tb[kk * 65u + col0 + 3u];
-            acc0 += a0 * b0; acc1 += a0 * b1; acc2 += a0 * b2; acc3 += a0 * b3;
+            const float4 bv = *reinterpret_cast<const float4*>(&tb[kk * 68u + col0]);
+            acc0 += a0 * bv.x; acc1 += a0 * bv.y; acc2 += a0 * bv.z; acc3 += a0 * bv.w;
         }
     }
     const unsigned int gr0 = m0 + row0;
@@ -420,8 +436,9 @@ extern "C" __global__ void sgemm_narrow(
 // ── sgemm_xwide: the m ≥ WIDE_M_MIN ∧ n ≥ XWIDE_N_MIN instance ──────────
 // BM 64, BN 128, BK 32; 1 024 threads (32 warps in a 4×8 grid); warp tile
 // 16×16 — thread fragment 2 rows × 4 cols (the wide kernel's shape, 8
-// accumulators). Staging A [64][33] + B [32][129] = 6 240 floats =
-// 24 960 B. Same arg contract as sgemm_wide.
+// accumulators). Staging A [64][33] + B [32][132] = 6 336 floats =
+// 25 344 B (the B row pad 132 is a 16 B multiple — the `.issues/006`
+// float4 rung). Same arg contract as sgemm_wide.
 extern "C" __global__ void sgemm_xwide(
     const float* __restrict__ a,
     const float* __restrict__ b,
@@ -441,7 +458,7 @@ extern "C" __global__ void sgemm_xwide(
     const unsigned int c_bs)
 {
     __shared__ float ta[64u * 33u];
-    __shared__ float tb[32u * 129u];
+    __shared__ float tb[32u * 132u];
 
     const unsigned int m0 = blockIdx.y * 64u;
     const unsigned int n0 = blockIdx.x * 128u;
@@ -473,7 +490,8 @@ extern "C" __global__ void sgemm_xwide(
             ta[r * 33u + col] =
                 (gr < m && gc < k) ? A[(size_t)gr * a_rs + gc * a_cs] : 0.0f;
         }
-        // Stage B [32][128]: 4 per thread (4 096 / 1 024).
+        // Stage B [32][128]: 4 per thread (4 096 / 1 024), row pad 132
+        // (float4-aligned reads).
         if (b_cs == 1u) {
             for (unsigned int q = 0; q < 4; ++q) {
                 const unsigned int idx = tid + q * 1024u;
@@ -481,7 +499,7 @@ extern "C" __global__ void sgemm_xwide(
                 const unsigned int col = idx & 127u;
                 const unsigned int gk = t + kk;
                 const unsigned int gn = n0 + col;
-                tb[kk * 129u + col] =
+                tb[kk * 132u + col] =
                     (gk < k && gn < n) ? B[(size_t)gk * b_rs + gn] : 0.0f;
             }
         } else {
@@ -491,21 +509,20 @@ extern "C" __global__ void sgemm_xwide(
                 const unsigned int col = idx >> 5;
                 const unsigned int gk = t + kk;
                 const unsigned int gn = n0 + col;
-                tb[kk * 129u + col] =
+                tb[kk * 132u + col] =
                     (gk < k && gn < n) ? B[(size_t)gn * b_cs + gk * b_rs] : 0.0f;
             }
         }
         __syncthreads();
+        // col0 is a multiple of 4 and the row pad is 132 → 16 B aligned;
+        // the four contiguous B loads are ONE float4.
         #pragma unroll
         for (unsigned int kk = 0; kk < 32u; ++kk) {
             const float a0 = ta[row0 * 33u + kk];
             const float a1 = ta[(row0 + 8u) * 33u + kk];
-            const float b0 = tb[kk * 129u + col0];
-            const float b1 = tb[kk * 129u + col0 + 1u];
-            const float b2 = tb[kk * 129u + col0 + 2u];
-            const float b3 = tb[kk * 129u + col0 + 3u];
-            acc0 += a0 * b0; acc1 += a0 * b1; acc2 += a0 * b2; acc3 += a0 * b3;
-            acc4 += a1 * b0; acc5 += a1 * b1; acc6 += a1 * b2; acc7 += a1 * b3;
+            const float4 bv = *reinterpret_cast<const float4*>(&tb[kk * 132u + col0]);
+            acc0 += a0 * bv.x; acc1 += a0 * bv.y; acc2 += a0 * bv.z; acc3 += a0 * bv.w;
+            acc4 += a1 * bv.x; acc5 += a1 * bv.y; acc6 += a1 * bv.z; acc7 += a1 * bv.w;
         }
     }
     const unsigned int gr0 = m0 + row0;

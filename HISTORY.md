@@ -4,6 +4,59 @@ Durable records for resolved questions and closed lanes (the noise-reduction
 convention: the record lands here, hash-pinned; open work lives in `.issues/`
 and `.plans/`). Created 2026-09-23 at the first record.
 
+## 2026-09-25 — Issue 006 CLOSED: the float4 sgemm rung — every instance's B loads collapsed, −7..−17 % on every suite
+
+The `.issues/004` open question ("the packed multi-wave zone has no measured
+win — split-K or an occupancy-tuned instance") is closed with the question
+REFRAMED and answered: the zone's problem was never the straggler tail —
+it is LOAD-ISSUE THROUGHPUT. The probe's appended packed-zone population
+(m=424 ≈ 4×106, m=1268 ≈ 4×317) measured the wide instance at **12-16.5
+TFLOP/s = 15-20 % of the 4090's 82.6 fp32 peak** (gate/up at m=1268:
+13.65 GFLOP in 829 µs), 2.5-3× under the cuBLAS-class roofline — and the
+inner loop's own shape explains it: **6 smem loads per 8 FMAs**, with the
+four B-fragment loads CONTIGUOUS in the staging tile.
+
+**The rung**: every instance's B staging row pads to a 16 B multiple
+(wide 65→68, narrow 65→68, xwide 129→132 — col0 is a multiple of 4 at
+every call site, so `&tb[kk*pad + col0]` is float4-aligned BY CONSTRUCTION)
+and the four B loads collapse to ONE `reinterpret_cast<float4>` — 6 loads
+per 8 FMAs becomes 3 (narrow's 1×4 fragment: 5 → 2). float4 loads change
+no arithmetic order, so the instances stay result-identical by construction
+(verified BIT-IDENTICAL on every probe shape, both arms) and every ragged
+edge is staging-side-safe (out-of-range elements stage as 0.0f; stores stay
+guarded per element).
+
+**Measured** (`sgemm_shape_timing`, in-process base/ladder A/B with the
+experiment arm on the would-be-wide slots, two full runs): −10.3..−25.2 %
+on the multi-wave zone rows, −5..−14 % on the single-question wide rows,
+the m=4/m=1 head tails −13..−17 % (those are narrow-served — narrow's own
+float4 win). Landed (both arms new kernels), the absolutes vs the morning
+baseline: gate/up m=1268 839→727 µs (−13 %), QKV m=1268 536→445 (−17 %),
+down m=1268 470→406 (−14 %), m=317 QKV 158→125 (−21 %). Forward level
+(fixture probe, cross-binary same-box same-session): english 15.1→12.9 ms
+row p50 (−14.6 %), multilingual 7.2→6.3 (−12.5 %), typed 15.1→12.8
+(−15.2 %).
+
+**The published row refresh** (reflex `.benchmarks/030`, 15 suites
+PASSED, host 4090-windows): every suite −6.8..−16.7 % p50 — the packed
+suites TOO this time (typed_decisions 109→100/59→55/109→99, banking77
+28→25, code_fixtures 31→28) — the multi-wave zone's first measured win,
+which was the `.issues/004` open question. Accuracy: 13/16 rows
+BIT-IDENTICAL; the three typed_decisions rows wobble 1-4 cases in 2000
+within that lane's pre-existing `determinism_ok: false` variance (false
+in 026, 028, 029 AND 030 — on record since v1, independent of every
+kernel rung).
+
+Gates at the landing: `cuda_ops_smoke` 4/4 (tile-edge + ragged arms on the
+new kernels) · `packed_forward_equiv` 3/3 · lib 41/41 · consumer G5 at the
+cuda posture 2/2 (top-1 1.000000 ×3, drift ≤ 5.1e-5 class) ·
+`laya_batch_parity` 1/1 · clippy clean both repos. No kill-switch added —
+the float4 form IS the wide/narrow/xwide kernels now (same tile geometry,
+same pick, same result chain; `LAYA_CUDA_LADDER=0` still holds the ladder
+A/B posture). Remaining upside on record: the instances still sit at
+~20-24 TFLOP/s ≈ 25-30 % of peak — the next rung (register blocking /
+double-buffered staging) is a bigger redesign, not landed today.
+
 ## 2026-09-25 — Issue 005 CLOSED: CUDA graphs — NEGATIVE, the lane is GPU-bound (submit fully hidden)
 
 The standing follow-up rung (recorded at the close of 002/003/004: "CUDA
