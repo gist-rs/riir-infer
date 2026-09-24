@@ -31,6 +31,12 @@ pub struct RowLogitFloorPolicy {
     pub bits: u8,
     /// Floor TV budget `ε` per row (the width is `ln(n_ctx / ε)`).
     pub tv: f32,
+    /// `None`: per-row width `ln(n_ctx / ε)` from the row's own context.
+    /// `Some(n)`: one FIXED width `ln(n / ε)` for every row — the budget
+    /// then holds for any row with `n_ctx ≤ n`, and a short row pays the
+    /// long-context code step (the Issue 011 T3 proxy: the 64K width on
+    /// real rows).
+    pub width_ctx: Option<usize>,
 }
 
 /// Per-row envelope accounting, summed over rows (heads × layers × tokens).
@@ -120,7 +126,7 @@ pub unsafe fn attention_heads_floored(
     let row = FloorRow {
         codec: LogitCodec::new(policy.bits),
         n_sink: policy.n_sink,
-        width: min_width_for_tv(t_n - policy.n_sink, policy.tv),
+        width: min_width_for_tv(policy.width_ctx.unwrap_or(t_n - policy.n_sink), policy.tv),
         kv_dim,
         hd: head_dim,
         t_n,
@@ -279,6 +285,7 @@ mod tests {
                 n_sink: 4,
                 bits: 8,
                 tv: 1e-3,
+                width_ctx: None,
             };
             let mut floored = vec![0.0f32; n_head * hd];
             let mut s2 = vec![0.0f32; n_head * block];
@@ -328,6 +335,7 @@ mod tests {
             n_sink: 4,
             bits: 6,
             tv: 1e-3,
+            width_ctx: None,
         };
         unsafe {
             attention_heads_parallel(&q, &k, &v, &mut a, &mut s, 1, 1, hd, hd, 3, 1.0, 0.0, block);
