@@ -1,7 +1,9 @@
 # Plan 003 — EXL3 T7c-1d: the sound decode-bench harness (Issue 001 §17.5)
 
-**Status:** IN PROGRESS — 2026-09-24 (M3 session writing; the RUN happens on
-the 4090 via SSH — the Windows box where the pack lives).
+**Status:** CLOSED — 2026-09-25. T1/T2 landed (commit `9989e9f`); T3 ran
+on the 4090 via a SCHEDULED TASK (the detached-SSH reaping lesson) — exit
+0, 520.7 s, 15 rows, 14 under the 10% gate; verdicts recorded in the
+issue's §17.5 T7c-1d row. T4 this commit.
 
 T7c-1b's reps-differential + readback harness proved too noisy at this
 scale (per-chunk readbacks interleave; small decode kernels are
@@ -56,9 +58,9 @@ discloses on every row.
 - [x] T2 — compile + clippy `-D warnings` clean at both postures; the
       M3 Metal lane runs the module suite green (7 passed; the stable
       bench itself is pack-gated and runs on the 4090, T3).
-- [ ] T3 — the RUN on the 4090 (pack under `.raw/packs/qwen38-27b-exl3-4bpw`):
-      5 classes × 3 arms; the table + verdicts (v2/v1 with the §17.2
-      kill-criterion language) recorded in the issue §17.5 T7c-1d row.
-- [ ] T4 — commit + push; close this plan; the T7c-2 gate (proceed /
-      arithmetic-LUT pivot / lane pivot) is the OWNER decision the
-      re-measured numbers feed — not taken here.
+- [x] T3 — the RUN on the 4090 (pack `E:/git/riir-infer/.raw/packs/qwen38-27b-exl3-4bpw`):
+      5 classes × 3 arms complete; full table in the issue §17.5 T7c-1d.
+      A1≈A2 (extraction confirmed dead), A3 = 1.25–1.29× (the LUT gather),
+      wall ≈ 28 Gw/s latency-class. One A1 row UNSTABLE (13.4%, excluded).
+- [x] T4 — commit + push; plan closed. T7c-2's proceed/pivot/close is the
+      OWNER decision the table feeds — deliberately not taken here.
