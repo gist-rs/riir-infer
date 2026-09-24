@@ -4,6 +4,15 @@ Durable records for resolved questions and closed lanes (the noise-reduction
 convention: the record lands here, hash-pinned; open work lives in `.issues/`
 and `.plans/`). Created 2026-09-23 at the first record.
 
+## 2026-09-25 — two silent MiniCPM5 (llama-arch GGUF) defects, found bringing it up as Issue 011's long-context fixture
+
+Both defects produced finite, plausible output that was wrong, and both were settled against a reference implementation (HF `tokenizers` / `transformers` fp32) rather than by reasoning.
+
+- **RoPE pairing — `0b26b9a`.** llama.cpp's converter (`LlamaModel.permute`) stores llama Q/K rows in the interleaved order (GGUF row `2j+s` = HF row `s·hd/2 + j`). This crate's RoPE, CPU and `riir-infer-gpu` alike, is rotate-half, and `load_llama_weights_gguf` never un-permuted. On MiniCPM5-1B, tinyshakespeare BOS+256, riir ppl went **259.93 → 69.0547**, against **69.0547** from HF fp32 on the same ids. Fix: `rope::unpermute_interleaved_rows`, llama loader only (gemma2/qwen2 GGUFs are NEOX and unpermuted).
+- **BPE digit rule — `175f67f`.** `BpeTokenizer` hard-coded Qwen2's one-digit-per-pre-token rule for every GGUF. llama-bpe groups `\p{N}{1,3}`. Text without numbers tokenizes identically, which is why a 1000/1000 tinyshakespeare diff passed. After the fix, 54 271 of 54 271 ids match on number-dense text. How it was isolated: the passkey needle failed 0/2 at base, and HF `transformers` scoring riir's EXACT prompt ids failed on the same digits, so the fault was in the ids and not the forward. Now 2/2, answer ppl 2.81 → 1.21.
+- **Downstream:** every consumer that re-exports this loader or tokenizer inherits both fixes. The riir-train canon cross-arch benches (422/423/424/426/427/605) paired Gemma-2 with this MiniCPM5 forward, so their verdicts are unverified: riir-train Issue 571.
+- **Instrument kept:** `row_logit_floor_ppl --dump-tokens N`. In ppl mode it prints the corpus ids; in needle mode it prints each prompt as `score_from|ids`. It is the diff against a reference that found both defects.
+
 ## 2026-09-25 — Issue 010 CLOSED (REFUTED): Gemma-2 has no QK-norm; the 288-tensor fixture is upstream-faithful
 
 Issue 010 (`95f52fb`) claimed `riir-train/data/gemma-2-2b-it-f16.gguf` was a
