@@ -36,6 +36,7 @@ pub fn bf16_to_f32(bits: u16) -> f32 {
 ///
 /// `pub(crate)` so the quant modules can consume the metadata map without
 /// growing format knowledge inside this loader (Issue 001 §11.3 cond. 2).
+#[derive(Clone, Debug)]
 pub(crate) struct TensorMeta {
     // Read by `quant::exl3::detect_exl3_layers` under the `exl3` feature;
     // unread at the default posture (the module is gated off).
@@ -44,6 +45,17 @@ pub(crate) struct TensorMeta {
     pub(crate) shape: Vec<usize>,
     pub(crate) data_start: usize,
     data_end: usize,
+}
+
+impl TensorMeta {
+    /// Data byte length (`data_end − data_start`). Loader-side accessor so
+    /// pack readers can size slices without seeing the raw offsets.
+    // Read only by `quant::exl3_pack` under the `exl3` feature; unread at
+    // the default posture (same class as `dtype` above).
+    #[allow(dead_code)]
+    pub(crate) fn byte_len(&self) -> usize {
+        self.data_end - self.data_start
+    }
 }
 
 /// Weight name mapping for a single Gemma 2 layer.
@@ -87,7 +99,12 @@ fn layer_weight_names(i: usize) -> LayerWeightNames {
 /// - Bytes 0..8:  u64 LE → N = JSON header length
 /// - Bytes 8..8+N: JSON mapping tensor name → {dtype, shape, `data_offsets`}
 /// - Bytes 8+N..:  raw tensor data
-fn parse_safetensors_header(data: &[u8]) -> Result<(usize, BTreeMap<String, TensorMeta>)> {
+///
+/// `pub(crate)` for the EXL3 pack reader (`quant::exl3_pack`, Issue 001 T5) —
+/// the header parser is the metadata seam; shard mapping stays pack-side.
+pub(crate) fn parse_safetensors_header(
+    data: &[u8],
+) -> Result<(usize, BTreeMap<String, TensorMeta>)> {
     if data.len() < 8 {
         bail!("safetensors file too small: {len} bytes", len = data.len());
     }

@@ -995,13 +995,8 @@ mod tests {
             eprintln!("SKIP: fixture absent — fetch per Issue 001 §12.5");
             return;
         };
-        let ref_w = match read_npy_f32(&std::fs::read(dir.join("k_proj_ref_w.npy")).unwrap()) {
-            Some(w) => w,
-            None => {
-                eprintln!("SKIP: numpy reference absent");
-                return;
-            }
-        };
+        let Some(ref_w) = read_npy_f32(&std::fs::read(dir.join("k_proj_ref_w.npy")).unwrap()) else { eprintln!("SKIP: numpy reference absent");
+                return; };
 
         let (in_f, out_f) = (4096usize, 1024usize);
         assert_eq!(ref_w.len(), in_f * out_f);
@@ -1039,7 +1034,7 @@ mod tests {
         let hlen = u16::from_le_bytes([bytes[8], bytes[9]]) as usize;
         let data = &bytes[10 + hlen..];
         Some(
-            data.chunks_exact(4)
+            data.as_chunks::<4>().0.iter()
                 .map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]]))
                 .collect(),
         )

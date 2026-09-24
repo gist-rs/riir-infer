@@ -7,6 +7,8 @@
 
 #[cfg(feature = "exl3")]
 pub mod exl3;
+#[cfg(feature = "exl3")]
+pub mod exl3_pack;
 pub mod ptq1_0;
 pub mod q2_0;
 pub mod q2k;
