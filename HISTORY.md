@@ -4,6 +4,70 @@ Durable records for resolved questions and closed lanes (the noise-reduction
 convention: the record lands here, hash-pinned; open work lives in `.issues/`
 and `.plans/`). Created 2026-09-23 at the first record.
 
+## 2026-09-25 — Issue 005 CLOSED: CUDA graphs — NEGATIVE, the lane is GPU-bound (submit fully hidden)
+
+The standing follow-up rung (recorded at the close of 002/003/004: "CUDA
+graphs for per-op dispatch overhead") is closed on measurement, with the
+pre-registered go/no-go gate of `.issues/005` §2 answered NO by a DIRECT
+device-timeline reading rather than by the submit/wall ratio alone.
+
+**The instrument (ships, `LAYA_CUDA_STATS=1`)**: `begin_pass` stamps t0 and
+records a timing event at the head of the now-idle stream; the pass's FIRST
+`download_into` (the pipeline-draining sync) records the end event, syncs,
+and prints `submit` (pre-sync − t0: the whole CPU path — host embedding
+gather, H2D uploads, slot `cuMemAlloc`s, every launch call), `wall`
+(post-sync − t0), `gpu` (the device-timeline elapsed between the two events
+— the GPU critical path of the prefix, inter-kernel gaps and alloc-induced
+stalls INCLUDED), plus the submit-path decomposition (upload count/time/
+bytes, alloc count/time, accumulated at the call sites). Zero cost when the
+env is unset — the events are only created under the flag, and the stats-off
+posture re-measured byte-stable (english 15.1 ms / multilingual 7.2 ms row
+p50, identical to the pre-instrumentation readings).
+
+**The measurement** (fixture probe, all three checkpoints, reps=3, GPU
+exclusive — GUI apps only, the owner-call exemption):
+
+| row class | submit | wall | gpu | uploads | allocs |
+|---|---|---|---|---|---|
+| english p50 | 4.6-5.2 ms | 12-15 ms | **= wall ±0.3 %** | 6x ~0.07 ms | 18-25x ~0.2 ms |
+| multilingual p50 | 1.7-2.8 ms | 6.1-7.2 ms | **= wall ±0.1 %** | 6x ~0.04 ms | 19-24x ~0.13 ms |
+| typed p50 | 4.5-6.5 ms | 12.8-15.7 ms | **= wall ±0.3 %** | 6x ~0.08 ms | 19-24x ~0.2 ms |
+| long rows (63-133 ms) | 16-32 ms | 63-133 ms | **= wall** | ≤0.8 ms | ≤1.9 ms (one 6.8 ms malloc hiccup) |
+
+**`gpu == wall` on every row of every checkpoint.** The device timeline
+fills the entire wall: the CPU submit path — all of it, launches, uploads,
+allocs — executes entirely INSIDE the GPU's execution window. The
+pre-registered GO premise ("the CPU path co-determines the wall") is false
+here, and the ratio arm of the rule (multilingual max 0.46 < 0.5, median
+~0.33) concurs. A graph replay would remove CPU work that is already free;
+the remaining win is bounded at GPU-side inter-kernel gap reduction
+(~300 launches × ~0.5-1 µs ≈ 0.15-0.3 ms ≈ 1-2 % of wall) — under the
+lane's measured noise band (the `sgemm_shape_timing` control's ±8-10 %
+two-context artifact band; the ±6 % idle per-round spread) — while the
+signature-keyed arena + pinned-slot + staging-refresh machinery would add
+exactly the stale-replay correctness surface `.issues/003` exists to
+prevent, and per-signature capture costs more than it saves on novel
+shapes (the serving stream's one-shot signatures). The pass TAIL (act head:
+host math between three data-dependent downloads) is unreachable by graphs
+by construction.
+
+Two observations recorded for the future (the reopen triggers, both on the
+instrument, one command away):
+1. **The launch path costs ~15 µs/call** (submit minus gather/upload/alloc
+   over ~300 launches) — expensive per call but FULLY HIDDEN at every
+   current geometry. If the kernels ever get much faster (the ladder rungs
+   compound, or a bigger GPU), the submit path becomes the wall and the
+   ratio flips — re-run the probe before reopening, the number decides.
+2. **Per-pass allocs are ~0.2 ms and uploads ~0.05-0.1 ms** — both already
+   hidden; no slot-pooling or pinned-staging rung is warranted either (the
+   cheaper remedies the issue §3 pre-identified die by the same evidence).
+
+Gates at the close: `cuda_ops_smoke` 4/4 · `packed_forward_equiv` 3/3 · lib
+41/41 · consumer G5 at the cuda posture 2/2 (top-1 1.0, drift ≤ gate) ·
+`laya_batch_parity` 1/1 · clippy clean both repos · stats-off parity rows
+byte-stable. No published number changes (nothing shipped that moves
+them); the instrument is debug-only.
+
 ## 2026-09-25 — Issue 004 CLOSED: the sgemm tile ladder — block-fit floors, the narrow single-question win
 
 The `.issues/002` v1 backend ran ONE sgemm instance (64×64×32, 512

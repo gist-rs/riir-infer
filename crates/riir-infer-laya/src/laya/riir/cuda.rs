@@ -70,15 +70,23 @@
 //! correctness authority — no number from this lane is published before
 //! it is green at this posture.
 //!
-//! Debug: `LAYA_CUDA_TRACE=1` logs every chain-cache miss; the contract
-//! notes of `metal.rs`'s module doc (write-first audit, the weights-cache
-//! agent-lifetime addressing discipline) carry over unchanged.
+//! Debug: `LAYA_CUDA_TRACE=1` logs every chain-cache miss; `LAYA_CUDA_STATS=1`
+//! prints the per-pass submit/wall/gpu decomposition at the first download
+//! (the `.issues/005` T1 instrument — its NEGATIVE verdict is why there is
+//! no graph path: `gpu == wall` on every fixture row, the CPU submit path
+//! is fully hidden, and a replay would only shave inter-kernel gaps). The
+//! contract notes of `metal.rs`'s module doc (write-first audit, the
+//! weights-cache agent-lifetime addressing discipline) carry over
+//! unchanged.
 
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
+use std::time::Instant;
 
-use cudarc::driver::safe::{CudaContext, CudaFunction, CudaSlice, CudaStream, LaunchConfig};
+use cudarc::driver::safe::{
+    CudaContext, CudaEvent, CudaFunction, CudaSlice, CudaStream, LaunchConfig,
+};
 use cudarc::driver::PushKernelArg;
 
 use super::backend::{AttnScratch, Backend};
@@ -962,6 +970,30 @@ fn trace_enabled() -> bool {
     *ON.get_or_init(|| std::env::var("LAYA_CUDA_TRACE").as_deref() == Ok("1"))
 }
 
+/// The per-pass submit/wall instrument (`.issues/005` T1, `LAYA_CUDA_STATS=1`):
+/// `begin_pass` stamps t0 + records a timing event at the head of the pass;
+/// the FIRST `download_into` (the pipeline-draining sync) reports
+/// `submit` = (pre-sync − t0) — the whole CPU path — `wall` = (post-sync −
+/// t0), `gpu` = the device-timeline elapsed between the two events (the
+/// GPU critical path of the prefix, inter-kernel gaps and alloc-induced
+/// stalls included), plus the submit-path decomposition (pageable H2D
+/// upload time/bytes and `cuMemAlloc` slot time, both counted at the call
+/// sites). These four numbers decide the CUDA-graphs go/no-go AND split
+/// the remedy space: `submit ≫ gpu` ⇒ CPU-bound (graphs / fewer calls);
+/// `wall ≈ submit + gpu` ⇒ the paths serialize (the pageable-copy /
+/// malloc stall classes — slot pooling + pinned staging may capture most
+/// of the win without graphs); `gpu ≫ submit` ⇒ GPU-bound (graphs bound
+/// at the inter-kernel gaps, ~1-3 %).
+struct PassStats {
+    t0: Instant,
+    gpu_start: CudaEvent,
+}
+
+fn stats_enabled() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var("LAYA_CUDA_STATS").as_deref() == Ok("1"))
+}
+
 fn next_trace_instance() -> usize {
     static NEXT: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
     NEXT.fetch_add(1, Ordering::Relaxed)
@@ -970,6 +1002,7 @@ fn next_trace_instance() -> usize {
 /// The CUDA backend: one context + stream, the compiled-once kernel set,
 /// the permanent weight cache, and the generation-keyed activation cache.
 pub struct Cuda {
+    ctx: Arc<CudaContext>,
     stream: Arc<CudaStream>,
     kernels: HashMap<&'static str, CudaFunction>,
     /// `(ptr, len)` → device copy for the agent-OWNED weight slices
@@ -992,6 +1025,18 @@ pub struct Cuda {
     /// WIDE instance — the A/B and bisect posture, never a silent default
     /// (the `LAYA_CUDA_FLASH` contract).
     ladder_disabled: bool,
+    /// The per-pass submit/wall instrument (`.issues/005` T1). `None`
+    /// outside a pass; set at every `begin_pass`, consumed by the pass's
+    /// first `download_into`.
+    stats: Mutex<Option<PassStats>>,
+    /// Submit-path decomposition counters, reset at every `begin_pass`
+    /// (Relaxed — single-threaded backend use, visibility via the stats
+    /// print after the draining sync).
+    up_ns: AtomicU64,
+    up_bytes: AtomicU64,
+    up_n: AtomicU64,
+    alloc_ns: AtomicU64,
+    alloc_n: AtomicU64,
     /// Debug-trace instance id.
     trace_id: usize,
 }
@@ -1024,6 +1069,7 @@ impl Cuda {
             kernels.insert(*name, f);
         }
         Ok(Self {
+            ctx,
             stream,
             kernels,
             weights: Mutex::new(WeightMap::new()),
@@ -1031,6 +1077,12 @@ impl Cuda {
             epoch: AtomicU64::new(0),
             flash_disabled: std::env::var("LAYA_CUDA_FLASH").as_deref() == Ok("0"),
             ladder_disabled: std::env::var("LAYA_CUDA_LADDER").as_deref() == Ok("0"),
+            stats: Mutex::new(None),
+            up_ns: AtomicU64::new(0),
+            up_bytes: AtomicU64::new(0),
+            up_n: AtomicU64::new(0),
+            alloc_ns: AtomicU64::new(0),
+            alloc_n: AtomicU64::new(0),
             trace_id: next_trace_instance(),
         })
     }
@@ -1049,13 +1101,24 @@ impl Cuda {
         if let Some(b) = map.get(&key) {
             return Arc::clone(b);
         }
+        let t = Instant::now();
         let b = self
             .stream
             .clone_htod(data)
             .unwrap_or_else(|e| panic!("cuda weight upload: {e}"));
+        self.note_upload(t, data.len());
         let b = Arc::new(b);
         map.insert(key, Arc::clone(&b));
         b
+    }
+
+    /// Accumulate an H2D upload into the pass-stats counters (the
+    /// pageable-copy class — blocking staged copies — is one of the two
+    /// submit-path suspects `.issues/005` T1 splits apart).
+    fn note_upload(&self, t: Instant, len: usize) {
+        self.up_ns.fetch_add(t.elapsed().as_nanos() as u64, Ordering::Relaxed);
+        self.up_bytes.fetch_add(len as u64, Ordering::Relaxed);
+        self.up_n.fetch_add(1, Ordering::Relaxed);
     }
 
     /// Activation / per-forward input: hit within the current epoch → the
@@ -1067,10 +1130,12 @@ impl Cuda {
         if let Some(b) = map.get(&key) {
             return Arc::clone(b);
         }
+        let t = Instant::now();
         let b = self
             .stream
             .clone_htod(data)
             .unwrap_or_else(|e| panic!("cuda chain upload: {e}"));
+        self.note_upload(t, data.len());
         let b = Arc::new(b);
         map.insert(key, Arc::clone(&b));
         if trace_enabled() {
@@ -1093,10 +1158,14 @@ impl Cuda {
         if let Some(b) = map.get(&key) {
             return Arc::clone(b);
         }
+        let t = Instant::now();
         let b = self
             .stream
             .alloc_zeros::<f32>(dst.len().max(1))
             .unwrap_or_else(|e| panic!("cuda slot alloc: {e}"));
+        self.alloc_ns
+            .fetch_add(t.elapsed().as_nanos() as u64, Ordering::Relaxed);
+        self.alloc_n.fetch_add(1, Ordering::Relaxed);
         let b = Arc::new(b);
         map.insert(key, Arc::clone(&b));
         b
@@ -1113,6 +1182,28 @@ impl Cuda {
             .unwrap_or_else(|e| panic!("cuda begin_pass sync: {e}"));
         self.epoch.fetch_add(1, Ordering::Relaxed);
         self.chain.lock().expect("chain cache poison").clear();
+        self.up_ns.store(0, Ordering::Relaxed);
+        self.up_bytes.store(0, Ordering::Relaxed);
+        self.up_n.store(0, Ordering::Relaxed);
+        self.alloc_ns.store(0, Ordering::Relaxed);
+        self.alloc_n.store(0, Ordering::Relaxed);
+        *self.stats.lock().expect("stats poison") = if stats_enabled() {
+            // The GPU-timeline head marker: recorded on the now-idle stream,
+            // so it timestamps the pass's first enqueued kernel, not the tail
+            // of the previous pass. The whole instrument — events included —
+            // lives behind `LAYA_CUDA_STATS=1`; a disabled posture pays zero.
+            let ev = self
+                .ctx
+                .new_event(Some(cudarc::driver::sys::CUevent_flags::CU_EVENT_DEFAULT))
+                .unwrap_or_else(|e| panic!("cuda stats event: {e}"));
+            let _ = ev.record(&self.stream);
+            Some(PassStats {
+                t0: Instant::now(),
+                gpu_start: ev,
+            })
+        } else {
+            None
+        };
     }
 
     /// The batched GEMM dispatch — `uargs` is the Metal lane's table
@@ -1779,10 +1870,12 @@ impl Backend for Cuda {
         assert_eq!(out.len(), rows.len() * d, "gather extent");
         let xb = self.chain_buf(x);
         let u32s: Vec<u32> = rows.iter().map(|&r| r as u32).collect();
+        let t = Instant::now();
         let rb = self
             .stream
             .clone_htod(&u32s)
             .unwrap_or_else(|e| panic!("cuda gather rows upload: {e}"));
+        self.note_upload(t, u32s.len());
         let ob = self.chain_slot_for(out);
         let f = self.kernel("gather_rows");
         let total = out.len() as u32;
@@ -1882,9 +1975,43 @@ impl Backend for Cuda {
 
     fn download_into(&self, src: &[f32], out: &mut [f32]) {
         assert!(src.len() <= out.len(), "download extent");
+        let pre_sync = Instant::now();
+        let pass_stats = self.stats.lock().expect("stats poison").take();
+        let gpu_end = if pass_stats.is_some() {
+            let end = self
+                .ctx
+                .new_event(Some(cudarc::driver::sys::CUevent_flags::CU_EVENT_DEFAULT))
+                .unwrap_or_else(|e| panic!("cuda stats event: {e}"));
+            end.record(&self.stream)
+                .unwrap_or_else(|e| panic!("cuda stats event record: {e}"));
+            Some(end)
+        } else {
+            None
+        };
         self.stream
             .synchronize()
             .unwrap_or_else(|e| panic!("cuda download sync: {e}"));
+        if let Some(st) = pass_stats {
+            let wall = st.t0.elapsed();
+            let submit = pre_sync.duration_since(st.t0);
+            let gpu = gpu_end
+                .as_ref()
+                .and_then(|e| st.gpu_start.elapsed_ms(e).ok())
+                .map(|ms| ms as f64);
+            let up_ns = self.up_ns.load(Ordering::Relaxed) as f64 / 1e6;
+            let up_b = self.up_bytes.load(Ordering::Relaxed);
+            let up_n = self.up_n.load(Ordering::Relaxed);
+            let al_ns = self.alloc_ns.load(Ordering::Relaxed) as f64 / 1e6;
+            let al_n = self.alloc_n.load(Ordering::Relaxed);
+            eprintln!(
+                "[cuda-stats] submit {:>9.3?} wall {:>9.3?} gpu {:>8.3?}ms \
+                 | uploads {up_n}x {up_ns:.3?}ms/{}KiB allocs {al_n}x {al_ns:.3?}ms",
+                submit,
+                wall,
+                gpu.unwrap_or(f64::NAN),
+                up_b / 1024,
+            );
+        }
         let ptr = src.as_ptr() as usize;
         let map = self.chain.lock().expect("chain cache poison");
         // The src may be a PREFIX of the written buffer (the CLS row is the
