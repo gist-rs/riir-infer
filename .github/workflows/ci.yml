@@ -16,7 +16,7 @@ jobs:
     name: import fence
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
       - name: fence gate (path-dep allowlist + foreign-crate imports)
         run: python3 scripts/fence_gate.py
 
@@ -24,9 +24,9 @@ jobs:
     name: check / clippy / test
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
       - name: checkout the public sibling (path dep)
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
         with:
           repository: katopz/katgpt-rs
           ref: develop
