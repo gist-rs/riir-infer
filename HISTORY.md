@@ -632,3 +632,34 @@ on the hot cells), not the f16 MMA; double-buffering is dead with it
 rounding is ~4.9e-4 relative per term (< the 1e-3 G5 gate) but promotion is
 an Issue-750-T3 lossy-surface call — per-family retention, never the
 aggregate.
+
+## 2026-09-25 — f16-B staging REFUTED at kernel level (the roofline probe's own follow-up arm)
+
+The roofline verdict (staging-bound, +63..+134% MMA-only headroom) predicted
+the f16-B lever: halve the B-operand bytes (16 of 24 KB staged per k-tile),
+halve the dominant traffic, ~1.4-1.7x on the hot cells. Measured (the probe
+extended with a `sgemm_hb` arm — `device const half*` B, converted to f32 at
+staging, everything after the staging bit-identical; f16 seed via a
+round-to-nearest-even `f32_to_f16`; plumbing verified against the f32 arm
+within the 2e-2 rounding gate): **flat within ±2% on every cell** — 317x3072x1024
+−1.1%, 1024x3072x1024 +1.9%, 1024x8192x1024 −0.8% (the deep-k cell where the
+model predicted the most). Load 8.9-9.5 (sibling resumed) — irrelevant: both
+arms inflate together and the ratios are the decision axis.
+
+Mechanism, now measured rather than modeled: B (1024x3072 f32 = 12.6 MB, f16
+= 6.3 MB) FITS IN L2 on this GPU (~32 MB), so B's per-m-tile re-reads were
+never DRAM traffic — the binding cost is the L1/threadgroup-issue path
+(TG writes + simdgroup loads + the barriers ordering them), which halving
+bytes does not relieve. Same mechanism as the 09-24 coalescing negative
+("sector waste already absorbed by L2/MLP"), one level deeper.
+
+Consequences: the f16-B BACKEND rung (f16 transposed weight cache + dispatch
++ G5 re-gate + the Issue-750-T3 per-family retention walk) is dead before
+being built — days of lossy-surface work for a measured ±0%. With this, five
+axes are refuted at kernel level (occupancy bk32/bn32, BK=48 barriers,
+coalescing x2, f16-B) and the roofline gap (+63..+134%) is the staging-issue
+path itself, which none of the tried geometries reaches. Narrow's shape is
+the measured local optimum on this hardware/toolchain. Reopen triggers: a
+Metal/toolchain change exposing direct-to-MMA staged layouts, or an L2-
+oversized working set (n > ~4096 changes B's residency class — the packed
+path's n grows with question count, worth re-probing there first).
