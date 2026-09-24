@@ -8,8 +8,12 @@ synthetic v2 gate). T2/T3 done: the 4090 CUDA run PASSED — exit 0,
 555.15 s wall, **573/573 layers / 26,481,917,952 weights / 0 bit
 mismatches** (v2-vs-v1 and v2-vs-CPU), first-ever K6 vision-tower decode
 (168 layers / 480 M w); coverage K3 34 · K4 305 · K5 66 · K6 168 layers,
-all Cb2Mul1; record in the issue §17.5 T7c-1c row + status line (commit
-of the docs close). T7c-2 stays the OWNER call.
+all Cb2Mul1; record in the issue §17.5 T7c-1c row + status line. T4 done
+(same session): the M3 Metal DOUBLE-BACKEND run — the pack copied to the
+M3 (byte-count-verified vs §13's 16,349,968,660 B), the same gate PASSED
+at 183.3 s / 0 mismatches through the wgpu→Metal codegen path; the wall
+gap is a readback-shape note (unified memory vs PCIe), not throughput.
+T7c-2 stays the OWNER call.
 
 T7c-1c (§17.5): "full-pack bit-exact gate (whole pack, 5-class oracle
 shape) for v2 before any GEMV work consumes it" — §17.3 gate 1 at
@@ -54,3 +58,8 @@ gap.
       coverage in the issue §17.5 T7c-1c row.
 - [x] T3 — commit + push; issue status line updated; plan closed. The
       T7c-2 proceed/pivot/close decision stays the OWNER call.
+- [x] T4 — the M3 Metal bonus run (same gate, second backend): the pack
+      copied via `scp` over Tailscale (byte-count-verified), release-mode
+      run under `caffeinate -is` — PASSED, 183.3 s, 0 mismatches, the
+      identical coverage table. Recorded in the issue row (the
+      double-backend closure of §17.3 gate 1).
