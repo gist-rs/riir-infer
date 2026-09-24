@@ -16,6 +16,8 @@ use rayon::prelude::*;
 // gemma4_train / train_shared) relocated to riir-train-engine and consume
 // `attention_heads_parallel` cross-crate from there. D4 drift-row reversible.
 pub mod attention;
+// One decode attention row + the shared probe / floor hooks (Issue 011).
+mod attend;
 // riir-infer Issue 011 T1 — the opt-in consumer of katgpt-core
 // `row_logit_floor` (sink-exempt floor + b-bit code + exp-table softmax).
 #[cfg(feature = "row_logit_floor")]

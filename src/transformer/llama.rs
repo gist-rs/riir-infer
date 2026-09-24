@@ -86,25 +86,24 @@ pub fn forward_llama<'a>(
             );
         }
 
-        // f. Multi-head attention with GQA (no softcapping for LLaMA)
-        let scale = 1.0 / (hd as f32).sqrt();
-        ctx.attn_out[..q_dim].fill(0.0);
-        let t_n = pos + 1;
+        // f. Multi-head attention with GQA (no softcapping for LLaMA), with
+        // the shared m_Y probe / row-logit-floor hooks (riir-infer Issue 011).
         unsafe {
-            attention_heads_parallel(
-                &ctx.q,
+            super::attend::attend_row(
+                ctx,
                 &layer_cache.key,
                 &layer_cache.value,
-                &mut ctx.attn_out,
-                &mut ctx.head_scores,
-                config.n_head,
-                n_kv,
-                kvd,
-                hd,
-                t_n,
-                scale,
-                0.0, // no attention logit softcapping
-                config.block_size,
+                layer_idx,
+                super::attend::AttnShape {
+                    n_head: config.n_head,
+                    n_kv_head: n_kv,
+                    kv_dim: kvd,
+                    head_dim: hd,
+                    t_n: pos + 1,
+                    scale: 1.0 / (hd as f32).sqrt(),
+                    softcap: 0.0, // no attention logit softcapping
+                    block_size: config.block_size,
+                },
             );
         }
 

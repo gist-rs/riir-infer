@@ -1332,19 +1332,15 @@ pub fn forward_gemma2_f16<'a>(
             );
         }
 
-        // f'. katgpt-rs Issue 882 P4: the m_Y probe reads this row's
-        // distribution (the floored one when a floor is set) — armed rows only.
-        #[cfg(feature = "attention_to_answer")]
-        if let Some(probe) = ctx.attn_probe.as_mut().filter(|p| p.armed) {
-            #[cfg(feature = "row_logit_floor")]
-            let floor = ctx.logit_floor;
-            #[cfg(not(feature = "row_logit_floor"))]
-            let floor = None;
-            probe.observe_layer(
-                layer_idx,
-                &ctx.q,
+        // g. Multi-head attention + softcapping (Plan 096: parallel heads),
+        // with the shared m_Y probe / row-logit-floor hooks (Issue 011).
+        unsafe {
+            super::attend::attend_row(
+                ctx,
                 &layer_cache.key,
-                super::attention_probe::ProbeShape {
+                &layer_cache.value,
+                layer_idx,
+                super::attend::AttnShape {
                     n_head: config.n_head,
                     n_kv_head: n_kv,
                     kv_dim: kvd,
@@ -1352,62 +1348,9 @@ pub fn forward_gemma2_f16<'a>(
                     t_n,
                     scale,
                     softcap: config.attn_logit_softcapping,
+                    block_size: config.block_size,
                 },
-                floor,
             );
-        }
-
-        // g. Multi-head attention + softcapping (Plan 096: parallel heads).
-        // riir-infer Issue 011 T1: with `ctx.logit_floor` set, the softmax is
-        // the sink-exempt floored + coded one; `None` is the plain path.
-        let attn_softcap = config.attn_logit_softcapping;
-        ctx.attn_out[..q_dim].fill(0.0);
-        #[cfg(feature = "row_logit_floor")]
-        let floored = match ctx.logit_floor {
-            Some(policy) => {
-                let st = unsafe {
-                    super::attention_floor::attention_heads_floored(
-                        &ctx.q,
-                        &layer_cache.key,
-                        &layer_cache.value,
-                        &mut ctx.attn_out,
-                        &mut ctx.head_scores,
-                        config.n_head,
-                        n_kv,
-                        kvd,
-                        hd,
-                        t_n,
-                        scale,
-                        attn_softcap,
-                        config.block_size,
-                        policy,
-                    )
-                };
-                ctx.logit_floor_stats.add(&st);
-                true
-            }
-            None => false,
-        };
-        #[cfg(not(feature = "row_logit_floor"))]
-        let floored = false;
-        if !floored {
-            unsafe {
-                attention_heads_parallel(
-                    &ctx.q,
-                    &layer_cache.key,
-                    &layer_cache.value,
-                    &mut ctx.attn_out,
-                    &mut ctx.head_scores,
-                    config.n_head,
-                    n_kv,
-                    kvd,
-                    hd,
-                    t_n,
-                    scale,
-                    attn_softcap,
-                    config.block_size,
-                );
-            }
         }
 
         // h. Output projection (f16)

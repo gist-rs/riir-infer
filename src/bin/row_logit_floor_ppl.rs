@@ -15,17 +15,25 @@
 //!   forced); `seq-exact` = the fraction of prompts whose every answer
 //!   token is the argmax, i.e. what greedy decoding would return.
 //!
-//! Gemma-2 facts that matter here: attention logits are tanh-softcapped at
-//! 50 before the softmax (a row's range is ≤ 100 nats); there is no QK-norm
-//! (riir-infer HISTORY.md, Issue 010); the context is 8K with a 4K sliding
-//! window, so a true 64K needle is out of this fixture's reach — the T3
-//! proxy runs the 64K WIDTH (`n65536`) on real rows instead.
+//! Two fixtures, picked by the GGUF's `general.architecture`:
+//!
+//! - **gemma2** (f16 weights): attention logits are tanh-softcapped at 50
+//!   before the softmax (a row's range is ≤ 100 nats); there is no QK-norm
+//!   (riir-infer HISTORY.md, Issue 010); the context is 8K with a 4K sliding
+//!   window, so a true 64K needle is out of its reach — the T3 proxy runs the
+//!   64K WIDTH (`n65536`) on real rows instead.
+//! - **llama** (f32 weights, e.g. MiniCPM5-1B: 131K context, GQA 16/2, no
+//!   softcap): the true long-context needle — `--ctx 65536` puts 64K REAL
+//!   keys under every late row. The tokenizer is the GGUF's BPE.
+//!
+//! `block_size` is capped at the longest sequence, so a 131K-context model
+//! allocates a KV cache for the run, not for its advertised window.
 //!
 //! Usage:
 //! ```text
 //! row_logit_floor_ppl <gemma2-f16.gguf> <corpus.txt> [--tokens N] [--seq-len N]
 //!                     [--needle N] [--ctx N] [--tv EPS] [--n-sink N]
-//!                     [--arms base,b8,b6,b6s0,b6n65536,...]
+//!                     [--arms base,b8,b6,b6s0,b6n65536,...] [--dump-tokens N]
 //! ```
 //! Arm grammar: `base` (plain softmax) or `b<bits>` followed by optional
 //! `s<n>` (sink count; default `--n-sink`, `s0` = no exemption, T4) and
@@ -37,11 +45,80 @@ use std::time::Instant;
 use anyhow::{Context, Result, bail};
 use katgpt_transformer::MultiLayerKVCache;
 
-use riir_infer_core::gguf_loader::{GgufFile, config_from_gguf_metadata, load_gemma2_f16_direct};
-use riir_infer_core::tokenizer::SentencePieceGgufTokenizer;
+use riir_infer_core::gemma_layer::GemmaTransformerWeightsF16;
+use riir_infer_core::gguf_loader::{
+    GgufFile, config_from_gguf_metadata, load_gemma2_f16_direct, load_llama_weights_gguf,
+};
+use riir_infer_core::llama_layer::LlamaTransformerWeights;
+use riir_infer_core::tokenizer::{BpeTokenizer, SentencePieceGgufTokenizer};
 use riir_infer_core::transformer::attention_floor::{RowLogitFloorPolicy, RowLogitFloorStats};
 use riir_infer_core::transformer::attention_probe::AttnSpanProbe;
-use riir_infer_core::transformer::{ForwardContext, forward_gemma2_f16};
+use riir_infer_core::transformer::{ForwardContext, forward_gemma2_f16, forward_llama};
+use riir_infer_core::types::Config;
+
+/// The fixture: one decode forward per architecture.
+enum Model {
+    Gemma2F16(GemmaTransformerWeightsF16),
+    Llama(LlamaTransformerWeights),
+}
+
+impl Model {
+    fn forward<'a>(
+        &self,
+        ctx: &'a mut ForwardContext,
+        cache: &mut MultiLayerKVCache,
+        token: usize,
+        pos: usize,
+        config: &Config,
+    ) -> &'a mut [f32] {
+        match self {
+            Self::Gemma2F16(w) => forward_gemma2_f16(ctx, w, cache, token, pos, config),
+            Self::Llama(w) => forward_llama(ctx, w, cache, token, pos, config),
+        }
+    }
+
+    fn label(&self) -> &'static str {
+        match self {
+            Self::Gemma2F16(_) => "gemma-2 f16",
+            Self::Llama(_) => "llama f32",
+        }
+    }
+}
+
+/// The fixture's tokenizer, erased to the one call this bin makes.
+type Encode = Box<dyn Fn(&str) -> Vec<usize>>;
+
+/// `(config, model, encode, bos)` for the GGUF at `path`.
+fn load(path: &std::path::Path) -> Result<(Config, Model, Encode, usize)> {
+    let gguf = GgufFile::open(path).context("open gguf")?;
+    match gguf.architecture() {
+        Some("gemma2") => {
+            let config = config_from_gguf_metadata(&gguf)?;
+            let tok = SentencePieceGgufTokenizer::from_gguf(&gguf)?;
+            let weights = load_gemma2_f16_direct(&gguf, &config)?;
+            let bos = tok.bos_id();
+            Ok((
+                config,
+                Model::Gemma2F16(weights),
+                Box::new(move |t| tok.encode(t)),
+                bos,
+            ))
+        }
+        Some("llama") => {
+            let tok = BpeTokenizer::from_gguf(&gguf)?;
+            drop(gguf);
+            let (config, weights) = load_llama_weights_gguf(path)?;
+            let bos = tok.bos_id();
+            Ok((
+                config,
+                Model::Llama(weights),
+                Box::new(move |t| tok.encode(t)),
+                bos,
+            ))
+        }
+        other => bail!("unsupported architecture {other:?} (gemma2 | llama)"),
+    }
+}
 
 /// One measured arm.
 struct Arm {
@@ -120,26 +197,26 @@ fn argmax(logits: &[f32]) -> usize {
 
 /// The T3 passkey prompts: `[BOS] intro filler₁ needle filler₂ question answer`.
 fn needle_seqs(
-    tok: &SentencePieceGgufTokenizer,
+    encode: &dyn Fn(&str) -> Vec<usize>,
     bos: usize,
     filler: &[usize],
     n: usize,
     ctx: usize,
 ) -> Result<Vec<Seq>> {
-    let intro = tok.encode(
+    let intro = encode(
         "There is an important pass key hidden inside a lot of irrelevant text. \
          Find it and memorize it.\n\n",
     );
-    let question = tok.encode("\n\nWhat is the pass key? The pass key is");
+    let question = encode("\n\nWhat is the pass key? The pass key is");
     let mut seqs = Vec::with_capacity(n);
     let mut state = 0x9E37_79B9u32;
     for i in 0..n {
         state = state.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
         let key = 10_000 + state % 90_000;
-        let needle = tok.encode(&format!(
+        let needle = encode(&format!(
             "\nThe pass key is {key}. Remember it. {key} is the pass key.\n"
         ));
-        let answer = tok.encode(&format!(" {key}."));
+        let answer = encode(&format!(" {key}."));
         let fixed = 1 + intro.len() + needle.len() + question.len() + answer.len();
         let fill = ctx
             .checked_sub(fixed)
@@ -174,7 +251,8 @@ fn main() -> Result<()> {
     if args.len() < 3 {
         eprintln!(
             "usage: row_logit_floor_ppl <gguf> <corpus.txt> [--tokens N] [--seq-len N] \
-             [--needle N] [--ctx N] [--tv EPS] [--n-sink N] [--arms base,b8,b6,b6s0]"
+             [--needle N] [--ctx N] [--tv EPS] [--n-sink N] [--arms base,b8,b6,b6s0] \
+             [--dump-tokens N]"
         );
         std::process::exit(2);
     }
@@ -183,6 +261,7 @@ fn main() -> Result<()> {
     let (mut n_tokens, mut seq_len, mut tv, mut n_sink) = (2048usize, 1024usize, 1e-3f32, 4usize);
     let (mut needle, mut needle_ctx) = (0usize, 1536usize);
     let mut arm_specs = "base,b8,b6,b6s0".to_string();
+    let mut dump_tokens = 0usize;
     let mut i = 3;
     while i < args.len() {
         let v = args.get(i + 1).context("flag needs a value")?;
@@ -194,6 +273,7 @@ fn main() -> Result<()> {
             "--tv" => tv = v.parse()?,
             "--n-sink" => n_sink = v.parse()?,
             "--arms" => arm_specs = v.clone(),
+            "--dump-tokens" => dump_tokens = v.parse()?,
             other => bail!("unknown arg {other}"),
         }
         i += 2;
@@ -207,20 +287,16 @@ fn main() -> Result<()> {
     }
 
     let t0 = Instant::now();
-    let gguf = GgufFile::open(&gguf_path).context("open gguf")?;
-    if gguf.architecture() != Some("gemma2") {
-        bail!("expected a gemma2 GGUF");
-    }
-    let config = config_from_gguf_metadata(&gguf)?;
-    let tok = SentencePieceGgufTokenizer::from_gguf(&gguf)?;
-    let weights = load_gemma2_f16_direct(&gguf, &config)?;
-    drop(gguf);
-    let bos = *tok
-        .encode_with_bos("")
-        .first()
-        .context("tokenizer has no BOS")?;
+    let (mut config, model, encode, bos) = load(&gguf_path)?;
     let text = std::fs::read_to_string(&corpus_path).context("read corpus")?;
-    let all = tok.encode(&text);
+    let all = encode(&text);
+    if dump_tokens > 0 {
+        // Tokenizer-fidelity check: diff against a reference tokenizer
+        // (e.g. HF `tokenizers`) before trusting a fixture's ppl.
+        let ids: Vec<String> = all.iter().take(dump_tokens).map(usize::to_string).collect();
+        println!("{}", ids.join(","));
+        return Ok(());
+    }
     let seqs: Vec<Seq> = match needle {
         0 => all[..all.len().min(n_tokens)]
             .chunks(seq_len)
@@ -230,7 +306,7 @@ fn main() -> Result<()> {
                 span: None,
             })
             .collect(),
-        n => needle_seqs(&tok, bos, &all, n, needle_ctx)?,
+        n => needle_seqs(&*encode, bos, &all, n, needle_ctx)?,
     };
     let longest = seqs.iter().map(|s| s.tokens.len()).max().unwrap_or(0);
     if longest > config.block_size {
@@ -239,11 +315,16 @@ fn main() -> Result<()> {
             config.block_size
         );
     }
+    // Cap the KV cache / score buffers at what the run needs (a 131K-context
+    // model would otherwise allocate its whole advertised window).
+    config.block_size = longest;
     let scored: usize = seqs.iter().map(|s| s.tokens.len() - 1 - s.score_from).sum();
     println!(
-        "# row_logit_floor_ppl: gemma-2 f16 | layers={} heads={} softcap={} | load {:.1}s",
+        "# row_logit_floor_ppl: {} | layers={} heads={}/{} softcap={} | load {:.1}s",
+        model.label(),
         config.n_layer,
         config.n_head,
+        config.n_kv_head,
         config.attn_logit_softcapping,
         t0.elapsed().as_secs_f32()
     );
@@ -296,14 +377,7 @@ fn main() -> Result<()> {
                     p.armed = seq.span.is_some() && pos >= seq.score_from;
                     p.rows += u64::from(p.armed);
                 }
-                let logits = forward_gemma2_f16(
-                    &mut ctx,
-                    &weights,
-                    &mut cache,
-                    seq.tokens[pos],
-                    pos,
-                    &config,
-                );
+                let logits = model.forward(&mut ctx, &mut cache, seq.tokens[pos], pos, &config);
                 fwd += 1;
                 if pos < seq.score_from {
                     continue;
