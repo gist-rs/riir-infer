@@ -1,7 +1,7 @@
 # Issue 001 — EXL3 (trellis-coded) weight-format support in the quantization zoo
 
-**Status:** OPEN — scoping issue, no implementation committed.
-**Owner:** unassigned. **Filed:** 2026-09-24.
+**Status:** OPEN — T1 (format spec read) DONE 2026-09-24; T2–T7 pending.
+**Owner:** unassigned. **Filed:** 2026-09-24. **T1 executed:** 2026-09-24 (4090 box).
 **Origin:** riir-clippy Research 207 (`.research/207_qwen38_exl3_dgx_spark_distill_verdict.md`),
 lane-intel axis. The corpus half of that verdict is riir-clippy Plan 170 and is
 independent of this issue — neither blocks the other.
@@ -108,10 +108,13 @@ is an open design question this issue does not pre-decide.
 
 ## 5. Tasks
 
-- [ ] **T1 — Format spec read at the pin.** Read `doc/exl3.md` at a pinned
+- [x] **T1 — Format spec read at the pin.** Read `doc/exl3.md` at a pinned
   turboderp-org/exllamav3 commit and record the on-disk layout here: tensor
   naming, the per-layer entry set, bit packing, and exactly which sidecars a
   dequantization needs. Record the pin. Nothing below starts before this.
+  → **DONE, record in §10.** ⚠ The T1 wording above cited `doc/exl3.md` —
+  that file does NOT exist at the pin (stale citation, corrected in §10.0);
+  the spec was read from the implementation + `doc/convert.md`.
 - [ ] **T2 — Decide the loader seam.** Grouped-tensor reader in
   `safetensors_loader.rs` vs a typed quant enum shared with `GgmlType`. §4
   states the constraint; the choice is an owner/design call and the reason goes
@@ -198,3 +201,185 @@ fork (PR #2, fork `master` @ `523ecd3`) → turboderp-org/exllamav3 → QTIP
 repo.** Any fixture is an ORIGINAL minimal reproduction; the reference
 implementation is consulted for the FORMAT, and the format is a fact about
 bytes on disk, not an expression.
+
+## 10. T1 record — the EXL3 on-disk format as read at the pin
+
+Executed 2026-09-24 (4090 box). Everything below is read from the source at
+the pin, not from prose; each subsection names the file the fact came from.
+
+### 10.0 The pin, and one corrected citation
+
+- **Pin:** turboderp-org/exllamav3 @ `6b84a21b6f1e5da3f291b9e1019061f0de788279`
+  (tip at read time, dated 2026-09-20, *"MSVC fix (__builtin_popcount)"*).
+  Clone at `.raw/exllamav3` (kept until T4 — it is the reference oracle and
+  the fixture source; re-verify every quote at the pin).
+- ⚠ `doc/exl3.md` (the path this issue's T1 cited) **does not exist at the
+  pin** — `doc/` carries only `convert.md`, `env_vars.md`, `optimize.md`.
+  The format facts below come from the implementation: `modules/quant/exl3.py`,
+  `modules/quant/exl3_lib/quantize.py`, `exllamav3_ext/quant/pack.cu`,
+  `exllamav3_ext/quant/codebook.cuh`, `exllamav3_ext/quant/exl3_dq.cuh`,
+  `modules/quant/exl3_lib/ngram_codec.py`, `modules/linear.py`, `doc/convert.md`.
+
+### 10.1 Container and detection
+
+- A pack is a **directory of safetensors shards** (standard HF-style layout;
+  `config.json` + shards; the n-gram table ships as a standalone
+  `ngram_embedding.safetensors`). No GGUF involvement.
+- A linear layer at key `K` is EXL3 iff the safetensors metadata carries the
+  group `[{K.sv | K.svh}, {K.su | K.suh}, K.trellis]` (`modules/linear.py`
+  `is_exl3_storage`).
+
+### 10.2 Per-linear tensor set (the dequantization's complete inputs)
+
+| entry | dtype | shape | required | role |
+|---|---|---|---|---|
+| `K.trellis` | int16 (bit-packed codes) | `[in_features/16, out_features/16, 16*K]` | YES | the codes (§10.4) |
+| `K.suh` | fp16 | `[in_features]` | one of su/suh | per-input-channel scale (§10.6) |
+| `K.svh` | fp16 | `[out_features]` | one of sv/svh | per-output-channel scale |
+| `K.su` | int16 (packed ±1) | `[in_features/16]` | — | LEGACY packed-sign spelling of suh (bit i of word j = sign of channel 16j+i; `1 − 2·bit`) |
+| `K.sv` | int16 (packed ±1) | `[out_features/16]` | — | legacy spelling of svh |
+| `K.mul1` | int32 marker (1 element) | `[1]` | opt. | selects codebook cb2; content = `0x83DCD12D` as u32-be-int (`codebook_mul1_mult`). REQUIRED for half-integer K. The DEFAULT modern pack (`doc/convert.md -cb`: "mul1 (default)") |
+| `K.mcg` | int32 marker (1 element) | `[1]` | opt. | selects codebook cb1; content = `0xCBAC1FED` (`codebook_mcg_mult`) |
+| `K.bias` | fp16 | `[out_features]` | opt. | plain bias |
+| `K.scale` | — | — | removed | loader passes `None`; `assert scale is None, "scale is no longer used"` |
+
+**Bitrate is self-described by shape:** `K = trellis.shape[-1] / 16`
+(`LinearEXL3.__init__`), integer or half-integer; a half-integer K
+(= ka + 0.5, alternating ka/ka+1-bit steps, period 16) is legal only with
+`.mul1` present. Per-tensor K ∈ 1..8 (±0.5); the CONVERTER's `-b 3.75`
+style averages are achieved by per-layer allocation, not fractional-word
+tiles (a tile at half-integer K is still a whole number of u16 words:
+`16·K` words).
+
+**No on-disk global scale exists.** The quantizer's global scale search and
+`out_scales` are folded into `suh`/`svh` (see `refit_scales`, §10.6).
+
+### 10.3 The three procedural codebooks (verbatim ops, `codebook.cuh`)
+
+All three map a 16-bit code word `x` (zero-extended to u32) to one fp16
+value. `lop3(a,b,c,0x6a)` = `(a & b) | c`; `half2(x)` reads the u32 as two
+fp16 lanes; the result is the sum of the two lanes (fp16 add).
+
+- **cb0 "3inst"** (no marker): `x = x·89226354 + 64248484 (mod 2³²)`;
+  `x = (x & 0x8fff8fff) | 0x3b603b60`; `v = half16(x[15:0]) + half16(x[31:16])`.
+- **cb1 "mcg"** (`.mcg` marker): `x = x·0xCBAC1FED (mod 2³²)`; same
+  lop3-half2; `v = half16(low) + half16(high)`.
+- **cb2 "mul1"** (`.mul1` marker, the default): `x = x·0x83DCD12D (mod 2³²)`;
+  `s = dp4a(x, 0x01010101, 0x6400)` (byte sum + 0x6400); take `s[15:0]` as
+  an fp16 BIT PATTERN (0x6400..0x67FF = 1024.0..2047.0); `v = fp16(s[15:0]) · (1/147.7) + (−10.39)`
+  (half-precision constants `0x1eee`, `0xc931`).
+
+### 10.4 Trellis tile structure and bit packing
+
+- Weight matrix is quantized **transposed**: `[in_features, out_features]`
+  (`quantize_exl3` docstring: "row major shape (in_features, out_features)").
+- Tiles are **16×16**: tile (a, c) covers in-rows `[16a, 16a+16)` ×
+  out-cols `[16c, 16c+16)`; the 256 weights are ordered row-major with the
+  IN offset as the row (`W4[a,:,c,:].reshape(-1, 256)`).
+- Per tile: **256 codes of K bits each** — the low K bits of each weight's
+  16-bit trellis state — packed MSB-first into `16·K` uint16 words
+  (`pack_trellis_kernel`, `pack.cu`): weight i's code occupies stream bits
+  `[i·K, (i+1)·K)`, first code bit at the TOP of the first word.
+- **Word endianness (main trellis):** the ring is stored so that a
+  **little-endian u32 read of each consecutive u16 PAIR yields the
+  contiguous MSB-first stream** (first code bit = bit 31 of the first u32).
+  Mechanically (`pack.cu`): the packer accumulates native u16s `sp[j]`
+  (MSB-first within each word) and flushes through `SWAP16(x) =
+  __byte_perm(x, 0, 0x1032)` on the u32 pair, which EXCHANGES the two
+  u16 halves' positions while leaving each word's internal bytes native —
+  so on disk the u16 sequence is pairwise-transposed: `[sp1, sp0, sp3,
+  sp2, …]`. Verified by deriving the K=8 case through both kernels
+  (`pack_trellis_kernel` flush + `unpack_trellis_kernel`'s unswapped u32
+  funnel reads agree iff this is the layout): with codes c₀..c₃, the first
+  stored u32 (LE) = `(c₀<<24)|(c₁<<16)|(c₂<<8)|c₃`. ⚠ A u16-at-a-time
+  reader must account for the pair transposition; a u32 reader gets it
+  for free.
+- **Trellis state = a 16-bit sliding window over the code ring, and the ring
+  is TAIL-BITING:** the decoded value of weight i is
+  `codebook(16 stream bits ending at bit (i+1)·K − 1, mod 256·K)` — i.e.
+  the last 16 code-bits cyclically, so the initial states come from the END
+  of each tile's own ring (confirmed three ways: the dq kernels' ring
+  indexing `ptr[i % (bits·8)]` with the `+256·bits` offset; the encoder's
+  "single tail-biting rings" wording; and `ngram_codec.py`'s explicit
+  header, §10.5).
+
+### 10.5 The n-gram embedding special case (PLE models)
+
+Huge hashed n-gram tables (e.g. 320M × 160) are quantized as **160-weight
+tail-biting rings over cb2 only** (`ngram_codec.py`, header verbatim):
+
+> "A packed row is (1 + 10*K) little-endian uint16 words (stored as int16):
+> word 0 holds the fp16 row scale's bit pattern, the remaining words hold
+> the 160*K-bit ring bitstream where stream bits [i*K, (i+1)*K) are the low
+>K bits of position i's code […] where state_i is read as the 16 ring bits
+> ending at stream bit (i+1)*K - 1 (mod 160*K)."
+
+⚠ Note TWO layout differences from the main trellis: (a) word order/endianness —
+little-endian u16s in stream order here vs the pairwise-transposed u32
+stream there (§10.4); (b) **bit order within each word** — LSB-first here
+(`ngram_codec.pack_rows`: stream bit m → word bit m), MSB-first there.
+Plus per-hash-head bias vectors outside the ring.
+
+### 10.6 Incoherence processing (what dequant must apply)
+
+Reference dequant path (`LinearEXL3.get_weight_tensor`), for
+`W_rot = reconstruct(trellis)` in `[in, out]` layout:
+
+```
+w = block_hadamard_left (W_rot, n=128, scale 1/√128)   # per-128 block along in
+w = w · suh[:, None]                                     # per-input-channel fp16 scale
+w = block_hadamard_right (w, n=128, scale 1/√128)       # per-128 block along out
+w = w · svh[None, :]                                     # per-output-channel fp16 scale
+```
+
+- The Hadamard is **Sylvester's construction** recursively (`util/hadamard.py
+  get_hadamard`; Paley fallbacks exist for non-powers-of-2; 128 = pure
+  Sylvester), matrix `H/√128`. Both sides use `had_k = had_n = 128`, so
+  in/out features must be 128-divisible for EXL3 layers (the fused
+  reconstruct kernel asserts it).
+- `suh`/`svh` are **per-channel fp16 SCALES, not just ±1 signs**:
+  `refit_scales` post-quantization REFITS both in the Hessian metric
+  (alternating closed-form: per-output col `c_n = (q_nᵀHw_n)/(q_nᵀHq_n)`,
+  per-input row solves `((QQᵀ)∘H) r = rowsum(Q∘(HW))`); the converter's
+  `out_scales` (default on) folds output scales into `svh`. The packed
+  `su`/`sv` ±1 spellings are the legacy pure-sign era; when present the
+  loader unpacks them to ±1 fp16 and any suh/svh alongside wins.
+- **Full formula:** `W = diag(suh) · (I_{in/128} ⊗ H₁₂₈/√128) · W_rot ·
+  (I_{out/128} ⊗ H₁₂₈/√128) · diag(svh)` (+ optional bias at the linear
+  output). The quantizer applies the exact inverse before encoding
+  (rotation + seed-derived sign flips), per `unrotate_H`.
+
+### 10.7 Layer-class facts that shape a loader (`doc/convert.md`)
+
+- `lm_head` (output layer): integer K 1..8 (default 6). MTP layers: integer
+  K, or 16 = stored unquantized (fp16 tensors, not EXL3). Vision: same rule.
+- The DEFAULT codebook is **mul1** — required by exllamav3's optimized
+  int8-GEMV / CPU-offload paths; a Rust reader should treat cb2 as the
+  common case and cb0/cb1 as compatibility.
+- Every dimension of an EXL3 layer is 16-divisible (tiles), and both
+  in/out are 128-divisible (Hadamards).
+
+### 10.8 What T3 (CPU reference) must implement, minimal set
+
+1. safetensors metadata group scan (detection, §10.1) + K-from-shape.
+2. Trellis unpack: per tile, reconstruct 256 16-bit ring windows from the
+   `16·K` byte-swapped words; per weight `v = codebook(window)` (all three
+   cbs; cb2 first-class).
+3. Half-integer K: alternating ka/ka+1-bit steps (period 16, mask 0xAAAA) —
+   the ring-window arithmetic generalizes; verify against a real pack.
+4. Sylvester-128 Hadamard both sides + suh/svh channel scales (+ su/sv
+   unpack fallback).
+5. The n-gram table path (little-endian rows, per-row fp16 scale) — can be
+   deferred; standalone shard, only PLE models carry it.
+
+### 10.9 Open items carried to T2 (the seam decision)
+
+- The safetensors loader today is BF16-only with a `dtype: String` per
+  tensor (§4 of this issue). EXL3 needs: grouped-tensor reads keyed by the
+  metadata (several entries per linear), K/marker derivation, and a
+  128-divisibility assert — none of which fit `GgmlType` (GGUF's enum), but
+  the dequantized output (fp16 `[in, out]` → engine wants `[out, in]`?) is
+  the same shape every other quant produces post-dequant. Evidence for the
+  verdict: the GGUF seam stays untouched; the EXL3 reader is a SAFETENSORS-
+  side grouped reader; convergence to a shared typed enum remains the open
+  design question (T2's actual decision).
