@@ -915,6 +915,25 @@ shape) + engine integration; it is also the §14 promotion trigger. The
 ~11× CPU arm is the correctness oracle for that kernel: bit-parity
 against the same scalar reference.
 
+## 16.5 The T7b module-orphan repair (2026-09-24, M3 session)
+
+The `3ce2d75` rustfmt sweep accidentally dropped BOTH the
+`pub mod exl3_dequant_cubecl;` declaration (`lib.rs`) and the `exl3_gpu`
+feature row (`Cargo.toml`) — the landed module was ORPHANED at HEAD for
+~1h10m (`af881ac` → this repair): present on disk, compiled to nothing,
+`--list` showed 0 of its tests, the feature unresolvable. An M3 session
+discovered it while landing a parallel T7b attempt (closed TWIN per the
+owner call; the duplicate died in the working tree, its independent
+readings — Metal-lane decode bit-parity + the wgpu-hal
+`fast_math_enabled` FMA-contraction mechanism — both AGREE with this
+record). **Repair:** declaration + feature row restored verbatim from
+`af881ac`; validated on M3 Metal/wgpu-msl — `exl3_dequant_cubecl::tests`
+7 passed / 3 ignored (CUDA-only rows) — the orphaned tests run again.
+Standing guard for the class: a sweep commit touching `lib.rs` or
+`Cargo.toml` must name every deletion against HEAD before landing; and
+"module file exists" is not "module compiles" — the check is
+`cargo test --features exl3_gpu --lib exl3_dequant_cubecl:: --list`.
+
 ## 16. T7b record — the 4090 GPU arm (2026-09-24, 4090 box)
 
 **What landed** (`crates/riir-infer-gpu/src/exl3_dequant_cubecl.rs`, feature
