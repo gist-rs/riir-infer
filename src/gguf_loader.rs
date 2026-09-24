@@ -1226,6 +1226,10 @@ pub fn load_gemma2_f16_direct(gguf: &GgufFile, config: &Config) -> Result<GemmaT
         wte,
         final_norm,
         layers,
+        #[cfg(feature = "delta_routing")]
+        delta_routing_query: (0..config.n_layer).map(|_| vec![0.0; config.n_embd]).collect(),
+        #[cfg(feature = "delta_routing")]
+        delta_routing_norm: (0..config.n_layer).map(|_| vec![1.0; config.n_embd]).collect(),
     })
 }
 
