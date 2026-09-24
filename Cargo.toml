@@ -60,6 +60,15 @@ lora_still = []
 # EXL3 (trellis-coded, QTIP-variant) safetensors-side quant — CPU reference
 # dequantization, opt-in until the Issue-001 T6 GOAT gate (workspace rule).
 exl3 = []
+# vk_calibration (katgpt-rs Issue 883 P0, 2026-09-25): the gemma-2 V/K
+# calibration lane — `transformer::gemma2_calibration` (tapped f16
+# forward, no lm_head) + the `vk_calibration` bin (the offline R²
+# dashboard over a natural-text corpus; measurement-only by the issue's
+# P0 law). Forwards katgpt-core's `fitted_anchor_tables` (the shared
+# 882+883 substrate, katgpt-rs Bench 886). OPT-IN per the
+# no-default-consumer rule — the dashboard is an offline instrument,
+# never a serving path.
+vk_calibration = ["katgpt-core/fitted_anchor_tables"]
 
 # katgpt-core forwards.
 sparse_mlp = ["katgpt-core/sparse_mlp"]
@@ -119,6 +128,15 @@ required-features = ["deltanet_ternary_inference"]
 [[test]]
 name = "bonsai2_rotation_load"
 required-features = ["bonsai2_hadamard"]
+
+# katgpt-rs Issue 883 P0 — the V/K calibration dashboard bin. The module
+# lives behind #[cfg(feature = "vk_calibration")]; this row is the reader
+# protection (the green-zero law): a default build SKIPS the bin loudly
+# instead of compiling it to an empty binary.
+[[bin]]
+name = "vk_calibration"
+path = "src/bin/vk_calibration.rs"
+required-features = ["vk_calibration"]
 
 # ─── Workspace ────────────────────────────────────────────────────────
 # The repo is a root-package workspace: riir-infer-core at the root,

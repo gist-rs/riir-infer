@@ -23,6 +23,12 @@ mod gemma2;
 // (Issue 577). Opt-in via `gemma4_inference` feature.
 #[cfg(feature = "gemma4_inference")]
 pub mod gemma4;
+
+// Issue 883 P0 (katgpt-rs) — the V/K calibration lane: gemma-2 f16
+// forward + taps feeding the shared fitted-anchor-table substrate.
+// Opt-in (`vk_calibration`).
+#[cfg(feature = "vk_calibration")]
+pub mod gemma2_calibration;
 // Plan 320 Phase C1: Gemma 4 LoRA forward wiring (weight-delta application
 // at the 7 matmul insertion points). Feature-gated — opt-in.
 #[cfg(feature = "gemma4_lora")]

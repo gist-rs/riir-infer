@@ -1177,7 +1177,11 @@ pub fn load_gemma2_weights_gguf(path: &Path) -> Result<(Config, GemmaTransformer
 }
 
 /// Build `Config` from GGUF metadata keys for Gemma 2.
-fn config_from_gguf_metadata(gguf: &GgufFile) -> Result<Config> {
+///
+/// `pub` since the vk_calibration bin (Issue 883 P0) builds its config
+/// from the same open [`GgufFile`] it streams f16 tensors from — the
+/// f32 loader path would double-peak past the box's free RAM.
+pub fn config_from_gguf_metadata(gguf: &GgufFile) -> Result<Config> {
     let prefix = "gemma2.";
 
     let context_length = gguf
@@ -1229,6 +1233,7 @@ fn config_from_gguf_metadata(gguf: &GgufFile) -> Result<Config> {
 }
 
 /// GGUF tensor names for a single Gemma 2 layer.
+#[derive(Debug, Clone)]
 struct GgufLayerNames {
     attn_norm: String,
     attn_q: String,
