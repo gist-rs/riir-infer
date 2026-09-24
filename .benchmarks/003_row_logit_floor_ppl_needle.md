@@ -82,5 +82,51 @@ how far a sink can pull `m_r` above the context.
 
 ## T3 — needle
 
-_Measuring. The gemma-2 proxy (6 × 1024-token passkey prompts, fixed 64K
-width) and MiniCPM5-1B at 16K (3 needles, `--decode-floor`) are running._
+### T3a — gemma-2 proxy: the 64K WIDTH on real rows (DONE)
+
+6 passkey prompts × 1024 tokens, a 5-digit key at depth (i + ½)/6 in
+tinyshakespeare filler. Every row is floored, and only the 7 answer tokens
+per prompt are scored (42 in total). `n65536` gives w = 18.00 nats on every
+row, so the 6-bit code step is 0.29 nats, the step a 64K context would pay.
+seq-exact is the fraction of prompts whose every answer token is the argmax,
+i.e. greedy retrieval succeeds. Log: `/tmp/ri011run/t3.log`. It ran
+concurrently with T2, at load 14 → 18.
+
+| arm | answer ppl | Δ | mean \|ΔNLL\| | top-1 flip | seq-exact | floored |
+|---|---|---|---|---|---|---|
+| base | 1.0345 | — | — | — | 6/6 | — |
+| b8n65536 | 1.0347 | +0.018% | 0.00022 | 0.00% | 6/6 | 0.21% |
+| b6n65536 | 1.0360 | +0.140% | 0.00144 | 0.00% | 6/6 | 0.21% |
+| b6s0n65536 | 1.0345 | −0.004% | 0.00062 | 0.00% | 6/6 | 0.33% |
+
+**m_Y (katgpt-rs Issue 882 P4's instrument, first reading):** the
+attention mass on the needle span, from the question + answer rows. It is
+measured on the distribution each arm USED.
+
+| arm | m_Y (26 × 8 heads) | top head |
+|---|---|---|
+| base | 0.1750 | L10H5 0.928 |
+| b8n65536 | 0.1750 | L10H5 0.928 |
+| b6n65536 | 0.1748 | L10H5 0.929 |
+| b6s0n65536 | 0.1757 | L10H5 0.928 |
+
+The per-layer means peak at L8 (0.47), L14/L16 (0.38/0.37), L6 (0.37) and
+L12 (0.35), and are ≈ 0 at L0, L2 and L25.
+
+- **Retrieval holds at the 64K code step.** All four arms get 6/6 with 0
+  flips. The width is not the binding term at 1K: only 0.2–0.3% of keys
+  sit below `m_r − 18`.
+- **The floor does not move answer attention.** m_Y moves ≤ 0.0009 and the
+  retrieval head L10H5 keeps 0.93 of its mass on the needle. This is P2's
+  falsifier, answered negative on this fixture.
+- **n = 42 cannot separate s4 from s0.** There are 0 flips everywhere and
+  the |ΔNLL| ordering inverts (0.00062 vs 0.00144). That is noise at this
+  size, so T4's verdict rests on the T2 table, not here.
+- ⚠ This is a proxy. It exercises the 64K code coarsening on real rows,
+  NOT the 64K attention dilution, where `n·e^{−w}` meets 64K live keys.
+  gemma-2 is 8K with a 4K SWA, so the true T3 needs a long-context
+  fixture.
+
+### T3b — MiniCPM5-1B at 16K (`--decode-floor`)
+
+_Measuring._
