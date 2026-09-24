@@ -152,9 +152,16 @@ is an open design question this issue does not pre-decide.
   both documented in §12.6) and the comparison ran — record in **§12.6**.
   **VERDICT: BIT-EXACT on a pin-era pack** — and the old-pack discrepancy
   that almost read as a spec bug resolved as a PACK-ERA mismatch (§12.7).
-- [ ] **T5 — Re-measure §2 on our silicon** (4090 / M3) before any promise about
-  residency or throughput enters a plan, a README or a league row. The §2 table
+- [x] **T5 — Re-measure §2 on our silicon** (4090 / M3) before any promise
+  about residency or throughput enters a plan, a README or a league row. The §2 table
   is n=1 on hardware we do not have.
+  → **DONE 2026-09-24 (4090 box), record in §13**: loader wiring landed
+  (`Exl3Pack`, `bd93a7b`), the LEAGUE MODEL's own author pack downloaded
+  (16.35 GB, sha256-verified) + 4 more bpw branches measured metadata-only;
+  residency + context-ceiling tables recorded; the §12.7 era-gate applied
+  end-to-end (native oracle: rel-Frobenius ≤1.3e-07 over 5 layer classes
+  incl. lm_head). NO throughput claim licensed (T7's arms are the
+  denominator) — §13.6 states exactly what is and is not established.
 - [ ] **T6 — GOAT gate + feature flag**, per the workspace promotion rule: ship
   behind an opt-in feature, bench the claim, promote only on a measured gain on
   the axis §2 says is real.
@@ -689,3 +696,142 @@ WRONG (or at least differently) under current code.
 3. Filed as an upstream curiosity only — turboderp's format, his call;
    our loader refuses-by-marker already covers the marker dimension, and
    the era dimension is ours to gate when T5/T6 wire a real loader.
+
+## 13. T5 record — §2 re-measured on our silicon (2026-09-24, 4090 box)
+
+**Method:** every residency byte below is measured from REAL pack bytes
+(safetensors headers of actual shards — not arithmetic from config
+geometry); the context ceiling is an arithmetic projection from those
+measured bytes with stated assumptions (§13.3), NOT a served measurement —
+no engine integration exists yet (T7's arms are that integration). Box
+state (the G2 box-state rule): i7-13700K + RTX 4090 24 GiB, CPU ~8% load,
+GPU idle, AC power.
+
+**Specimen:** `turboderp/Qwen3.8-27B-exl3` @ branch `SC_4.00bpw_H5_V6`
+commit `516bf129059031c6da9416768ea6b7a1be00a8fc` — the format AUTHOR's
+own pack of the LEAGUE MODEL (Qwen3.8-27B: 64 layers hidden 5120, vocab
+248320; a HYBRID model — 48/64 layers `linear_attention`, only 16
+full-attention every 4th, 4 KV heads × dim 256; MTP 1 layer; SigLIP-ish
+vision tower). `quantization_config`: exl3 **version 1.4.2**, bits 4.0,
+head_bits 5, mtp_bits 4, vision_bits 6, codebook mul1 — modern defaults
+throughout; branch lastModified 2026-08-27, pin 2026-09-20 → **pin-era**
+(§12.7's gate). Full download 16,349,968,660 B; shard-1 sha256 verified
+against the HF LFS hash (`89403623…e1b79044`). On disk at
+`.raw/packs/qwen38-27b-exl3-4bpw` (gitignored, kept for T6/T7).
+
+### 13.1 The loader (landed `bd93a7b`)
+
+`src/quant/exl3_pack.rs` (feature `exl3`): `Exl3Pack::open` (index.json |
+single-file | `*.safetensors` dir) mmaps all shards, merges the
+name→(shard, meta) table, reads marker words off the maps, detects groups;
+`layer(key)` returns zero-copy `Exl3Layer` borrows (§11.3 cond. 1).
+**Groups span shards in this real pack**: `lm_head.trellis` is in shard 2
+while `lm_head.suh/svh/mul1` are in shard 1 — the §11.3 round-2 open
+question, answered by measurement; the merged-table resolution handles it.
+`residency()` is the byte-accounting instrument; 5 fixture tests
+(synthetic 2-shard pack with a spanning group + legacy su/sv group,
+single-file, garbage-marker refusal, duplicate-tensor refusal) + the
+measurement test. Clippy `-D warnings` clean at BOTH feature postures.
+
+### 13.2 Residency — measured bytes (the §2 axis that is real)
+
+The 4bpw row is exact on-disk measurement of the downloaded pack
+(`Exl3Pack::residency`); the 2.0/3.0/5.0/6.0 rows are metadata-only over
+HTTP-Range header fetches of the same repo's other pack branches
+(`.raw/exl3_bpw_sweep.py`; byte counts are shape-determined, so exact for
+any pack era). dequant-f16 = (quantized + dense params) × 2 B.
+
+| pack | total GiB | achieved bpw | per-layer K | quantized GiB | dense GiB | dequant-f16 GiB |
+|---|---:|---:|---|---:|---:|---:|
+| 2.00bpw | 10.039 | 2.232 | 2.0–6.0 | 6.763 | 3.275 | 51.75 |
+| 3.00bpw | 12.871 | 3.167 | 3.0–6.0 | 9.595 | 3.275 | 51.75 |
+| **SC_4.00_H5_V6** | **15.227** | **4.087** | **3.0–6.0** | **12.601** | **2.626** | **51.95** |
+| 5.00bpw | 18.535 | 5.037 | 4.0–6.0 | 15.259 | 3.275 | 51.75 |
+| 6.00bpw | 21.367 | 5.972 | 4.0–6.0 | 18.091 | 3.275 | 51.75 |
+| (f16 baseline) | — | 16.0 | — | — | — | 51.95 |
+
+Model total ≈ 27.8–28.2 G params (26.02–26.48 G quantized + 1.41–1.76 G
+dense; the SC recipe quantizes MORE tensors than the plain branches —
+dense 2.63 vs 3.28 GiB). The 4bpw pack's measured interior: trellis
+12.586 GiB + scales 14.8 MiB + markers 2.2 KiB + group bias 0.5 MiB;
+573 groups over 3080 tensors. **The f16 model (51.95 GiB) does not fit a
+24 GiB 4090 at all; every EXL3 variant does.** Same-model GGUF q4-class
+would land ~16 GiB (not measured here — no GGUF of this model on box);
+Bonsai-27B PQ2_0 (7.17 GB) is a DIFFERENT model and quant family — size
+context only, never joined (§7).
+
+### 13.3 Context ceiling on the 4090 (24 GiB) — arithmetic projection
+
+KV/token (f16): 16 full-attn layers × 2 × 4 KV-heads × 256 × 2 B =
+**64 KiB/token** — the hybrid architecture's advantage (48 linear-attn
+layers carry a FIXED ~151 MB state (f32, `mamba_ssm_dtype`), not
+per-token KV). Assumptions (stated, not measured): 1.5 GiB engine
+overhead (activations/CUDA graphs) + 0.15 GiB linear-attn state; ceiling
+= (24 − pack − 1.65) GiB ÷ 64 KiB. Model cap `max_position_embeddings` =
+262,144.
+
+| pack | weights GiB | context ceiling (tok) |
+|---|---:|---:|
+| 2.00bpw | 10.04 | ~201,600 |
+| 3.00bpw | 12.87 | ~155,300 |
+| SC_4.00 | 15.23 | ~116,700 |
+| 5.00bpw | 18.54 | ~62,500 |
+| 6.00bpw | 21.37 | ~16,100 |
+| f16 | 51.95 | 0 (does not fit) |
+
+**§2's residency/context direction CONFIRMED on our silicon** (2.0 vs
+4.0 bpw: −5.2 GiB resident → +73% context ceiling, 201k vs 117k tokens);
+the source's magnitudes (its +22 GiB / halved ceiling on 128 GB unified)
+are ITS box's, not ours. q8_0 KV would ~double every ceiling row — an
+engine knob, not a format fact.
+
+### 13.4 CPU reference dequant throughput (the §2 mechanism axis, baseline)
+
+Release, single thread, i7-13700K at ~8% box load: **6.1–6.5 M
+weights/s** across all 5 sampled classes (o_proj 31.5M w in 5.01 s; mlp
+89.1M w in 14.5 s; lm_head 1.27B w in 197 s; scalar O(in·out·128)).
+Extrapolated full-model single-thread dequant ≈ **70 min** — the
+reference posture denominator T7's SIMD/GPU arms replace. Zero NaN, sane
+stats on every sampled layer (mean ~0, max|W| 0.34–1.35).
+
+### 13.5 Era-gate on the full pack (the §12.7 detector, applied)
+
+`.raw/exl3_t5_oracle.py` (T4b's env + machinery) vs the Rust exports on
+THE SAME downloaded pack, 5 classes:
+
+| layer | K | rel-Frobenius | max_abs |
+|---|---|---:|---:|
+| linear_attn.out_proj | 5 | 1.26e-07 | 1.0e-03 |
+| lm_head (1.27B w) | 5 | **0.0** | 2.3e-04 |
+| mlp.down_proj | 3 | 9.7e-08 | 5.4e-04 |
+| mlp.gate_proj | 3 | 1.1e-07 | 1.6e-04 |
+| self_attn.o_proj | 4 | **0.0** | 4.8e-04 |
+
+The fp16-intermediate class T4b documented (their Hadamard+scales in
+fp16 vs our f32); two whole layers agree EXACTLY. **Pin-era confirmed;
+the loader decodes this pack correctly, and the mixed-K recipe (mlp K=3,
+attn 4–5, lm_head K=5) reads end-to-end.**
+
+### 13.6 What T5 licenses — and what it does NOT
+
+**Licensed** (for plans/README/league rows, our box, this model class):
+- Residency: exact measured bytes at 5 bpw points (§13.2).
+- Context ceiling: the §13.3 projection with its stated assumptions.
+- The §2 residency/context DIRECTION on our silicon (lower bpw ⇒ smaller
+  resident ⇒ higher ceiling), n=5-branches + arithmetic.
+
+**NOT licensed:** any decode/prefill throughput or tok/s claim (no
+serving path until T7 — and §2's own data had decode inside sample
+spread); any quality claim (T6's GOAT gate, cf. turboderp's KLD tables
+on the same repo — not read by us, not citable as ours); any
+MTP/acceptance claim (closed negative, §7); the `utilisation forced`
+row (a serving-config artifact of the source's runtime, not a format
+property). GGUF-vs-EXL3 same-model comparisons stay OPEN until a
+qwen3.8-27B GGUF lands on a box (then: same model, same box, both
+formats, our loader — the honest league shape).
+
+**M3 note:** the byte table is silicon-independent; the ceiling table
+recomputes per memory budget (the formula + constants are in §13.3).
+Re-measuring on the M3 means running the same measurement test there —
+not done this session (pack is on the 4090 box; a re-download or copy
+is the cost). The 4090 numbers stand on their own.
