@@ -261,6 +261,41 @@ pub fn decode_tile_rot(dst: &mut [f32], tile_bytes: &[u8], k: Exl3K, cb: Exl3Cod
     }
 }
 
+/// LUT variant of [`decode_tile_rot`] over a memoized codebook table.
+fn decode_tile_rot_lut(dst: &mut [f32], tile_bytes: &[u8], k: Exl3K, lut: &[f32; 65536]) {
+    debug_assert_eq!(dst.len(), 256);
+    let ring_bits = k.stream_bits_per_tile();
+    let mut s = 0usize; // prefix sum S(p)
+    for (p, slot) in dst.iter_mut().enumerate() {
+        s += k.bits_for_step(p) as usize;
+        let w = window16(tile_bytes, s, ring_bits);
+        *slot = lut[w as usize];
+    }
+}
+
+/// The per-codebook f32 decode table (65536 entries), memoized from
+/// [`Exl3Codebook::decode_f16`] — **bit-identical by construction**: the
+/// codebook is a pure function of the 16-bit code, so the table IS the
+/// same math, precomputed (T7's CPU fast arm).
+pub fn codebook_lut(cb: Exl3Codebook) -> &'static [f32; 65536] {
+    use std::sync::OnceLock;
+    static CB0: OnceLock<Box<[f32; 65536]>> = OnceLock::new();
+    static CB1: OnceLock<Box<[f32; 65536]>> = OnceLock::new();
+    static CB2: OnceLock<Box<[f32; 65536]>> = OnceLock::new();
+    let lock = match cb {
+        Exl3Codebook::Cb0 => &CB0,
+        Exl3Codebook::Cb1Mcg => &CB1,
+        Exl3Codebook::Cb2Mul1 => &CB2,
+    };
+    lock.get_or_init(|| {
+        let mut t = vec![0.0f32; 65536];
+        for (c, v) in t.iter_mut().enumerate() {
+            *v = f32::from(cb.decode_f16(c as u16));
+        }
+        t.into_boxed_slice().try_into().unwrap()
+    })
+}
+
 // ── Sylvester-128 Hadamard ───────────────────────────────────────────────
 
 /// The scaled Sylvester-128 Hadamard `H/√128`, built once.
@@ -449,18 +484,20 @@ impl<'a> Exl3Layer<'a> {
     ///
     /// `W = diag(suh) · (I⊗H)·W_rot·(I⊗H) · diag(svh)` with `H = H₁₂₈/√128`
     /// applied per 128-block along each axis. Scalar reference — O(in·out·128).
+    /// Uses the memoized codebook LUT (bit-identical to the spec ops).
     pub fn dequantize_f32(&self) -> Vec<f32> {
         let (kin, nout) = (self.in_features, self.out_features);
         let mut w_rot = vec![0.0f32; kin * nout];
 
         // 1. Trellis decode, placed through the tensor-core element order.
+        let lut = codebook_lut(self.codebook);
         let words = self.k.words_per_tile();
         let tile_bytes = words * 2;
         let mut tile = [0.0f32; 256];
         for a in 0..kin / 16 {
             for c in 0..nout / 16 {
                 let off = (a * (nout / 16) + c) * tile_bytes;
-                decode_tile_rot(&mut tile, &self.trellis[off..off + tile_bytes], self.k, self.codebook);
+                decode_tile_rot_lut(&mut tile, &self.trellis[off..off + tile_bytes], self.k, lut);
                 for (p, &v) in tile.iter().enumerate() {
                     let (r, c_off) = ring_pos_to_tile_element(p);
                     w_rot[(a * 16 + r) * nout + (c * 16 + c_off)] = v;
@@ -520,6 +557,100 @@ impl<'a> Exl3Layer<'a> {
                 out[r * nout + col] *= s;
             }
         }
+        out
+    }
+
+    /// Parallel dequantization (rayon over DISJOINT row strips) — the T7
+    /// CPU fast arm. **Bit-identical to [`Exl3Layer::dequantize_f32`]**:
+    /// every stage parallelizes over row ranges whose outputs are disjoint,
+    /// and each output element's accumulation order is unchanged, so the
+    /// result equals the scalar reference element-for-element (the test
+    /// `parallel_matches_scalar_bit_identical` pins this).
+    pub fn dequantize_f32_parallel(&self) -> Vec<f32> {
+        use rayon::prelude::*;
+        let (kin, nout) = (self.in_features, self.out_features);
+        let mut w_rot = vec![0.0f32; kin * nout];
+
+        // 1. Trellis decode — parallel over 16-row in-strips (each strip is
+        // written only by its own `a` tiles).
+        let lut = codebook_lut(self.codebook);
+        let words = self.k.words_per_tile();
+        let tile_bytes = words * 2;
+        let cols_tiles = nout / 16;
+        w_rot
+            .par_chunks_mut(nout * 16)
+            .enumerate()
+            .for_each(|(a, strip)| {
+                let mut tile = [0.0f32; 256];
+                for c in 0..cols_tiles {
+                    let off = (a * cols_tiles + c) * tile_bytes;
+                    decode_tile_rot_lut(
+                        &mut tile,
+                        &self.trellis[off..off + tile_bytes],
+                        self.k,
+                        lut,
+                    );
+                    for (p, &v) in tile.iter().enumerate() {
+                        let (r, c_off) = ring_pos_to_tile_element(p);
+                        strip[r * nout + c * 16 + c_off] = v;
+                    }
+                }
+            });
+
+        // 2. Incoherence: left block-Hadamard (parallel over 128-row
+        // blocks), row scales, right block-Hadamard (parallel over rows),
+        // column scales — inner loop orders unchanged per element.
+        let h = sylvester_hadamard_128();
+        let suh: Vec<f32> = match self.suh {
+            Some(b) => read_f16_slice(b).into_iter().map(f32::from).collect(),
+            None => unpack_signs(self.su.unwrap()).into_iter().map(f32::from).collect(),
+        };
+        let svh: Vec<f32> = match self.svh {
+            Some(b) => read_f16_slice(b).into_iter().map(f32::from).collect(),
+            None => unpack_signs(self.sv.unwrap()).into_iter().map(f32::from).collect(),
+        };
+
+        let mut tmp = vec![0.0f32; kin * nout];
+        tmp.par_chunks_mut(nout * 128)
+            .enumerate()
+            .for_each(|(ob, block)| {
+                for col in 0..nout {
+                    for r in 0..128 {
+                        let mut acc = 0.0;
+                        for kk in 0..128 {
+                            acc += h[r][kk] * w_rot[(ob * 128 + kk) * nout + col];
+                        }
+                        block[r * nout + col] = acc;
+                    }
+                }
+            });
+        tmp.par_chunks_mut(nout).enumerate().for_each(|(r, row)| {
+            let s = suh[r];
+            for v in row.iter_mut() {
+                *v *= s;
+            }
+        });
+
+        let mut out = vec![0.0f32; kin * nout];
+        out.par_chunks_mut(nout)
+            .enumerate()
+            .for_each(|(row_i, row)| {
+                let src = &tmp[row_i * nout..(row_i + 1) * nout];
+                for cb in 0..nout / 128 {
+                    for c in 0..128 {
+                        let mut acc = 0.0;
+                        for kk in 0..128 {
+                            acc += src[cb * 128 + kk] * h[kk][c];
+                        }
+                        row[cb * 128 + c] = acc;
+                    }
+                }
+            });
+        out.par_chunks_mut(nout).for_each(|row| {
+            for (col, v) in row.iter_mut().enumerate() {
+                *v *= svh[col];
+            }
+        });
         out
     }
 }
@@ -891,6 +1022,85 @@ mod tests {
         // Non-128-divisible dims → refusal.
         let bad = Exl3Layer::from_raw_parts(&trellis[..], Some(&suh), Some(&svh), None, None, None, None, 112, 128);
         assert!(matches!(bad, Err(Exl3Error::Not128Divisible { .. })));
+    }
+
+    #[test]
+    fn parallel_matches_scalar_bit_identical() {
+        // The T7 CPU fast arm's contract: rayon over disjoint row strips
+        // preserves every element's accumulation order → the parallel output
+        // equals the scalar reference ELEMENT-FOR-ELEMENT (no tolerance).
+        // Covers both scale spellings (suh/svh and legacy su/sv) and two K.
+        let mk_rng_bytes = |n: usize, seed: u32| -> Vec<u8> {
+            let mut r = seed;
+            (0..n)
+                .map(|_| {
+                    r = r.wrapping_mul(1_103_515_245).wrapping_add(12_345);
+                    (r >> 24) as u8
+                })
+                .collect()
+        };
+        // Finite random f16 scales (raw random bytes would carry NaN/Inf
+        // bit patterns — legal in the fixture but useless for parity since
+        // NaN != NaN; bit comparison below covers that class anyway).
+        let mk_f16 = |n: usize, seed: u32| -> Vec<u8> {
+            let mut r = seed;
+            (0..n)
+                .flat_map(|i| {
+                    r = r.wrapping_mul(1_103_515_245).wrapping_add(12_345);
+                    let s = 0.25 + (i % 7) as f32 * 0.125 + ((r >> 28) as f32) * 0.01;
+                    f16::from_f32(s).to_bits().to_le_bytes()
+                })
+                .collect()
+        };
+        for &(kin, nout, ka, half) in &[(256usize, 128usize, 4u8, false), (128, 384, 2, true)] {
+            let k = Exl3K { ka, half };
+            let tiles = (kin / 16) * (nout / 16);
+            let trellis = mk_rng_bytes(tiles * k.words_per_tile() * 2, 0xBEEF + ka as u32);
+            let suh = mk_f16(kin, 7);
+            let svh = mk_f16(nout, 91);
+            let layer = Exl3Layer::from_raw_parts(
+                &trellis,
+                Some(&suh),
+                Some(&svh),
+                None,
+                None,
+                None,
+                Some(EXL3_MUL1_MARKER), // half-K needs mul1
+                kin,
+                nout,
+            )
+            .unwrap();
+            let a = layer.dequantize_f32();
+            let b = layer.dequantize_f32_parallel();
+            // Bit-pattern comparison — TRUE bit identity, NaN-payload aware.
+            let bits_eq = a
+                .iter()
+                .zip(&b)
+                .all(|(x, y)| x.to_bits() == y.to_bits());
+            assert!(bits_eq, "kin={kin} nout={nout} parallel/scalar bit parity broke");
+        }
+        // Legacy sign spelling exercises the unpack_signs path in both arms.
+        let k = Exl3K { ka: 3, half: false };
+        let tiles = (128 / 16) * (256 / 16);
+        let trellis = mk_rng_bytes(tiles * k.words_per_tile() * 2, 0xC0FFEE);
+        let layer = Exl3Layer::from_raw_parts(
+            &trellis,
+            None,
+            None,
+            Some(&[0u8; 16]),
+            Some(&[0u8; 32]),
+            None,
+            None,
+            128,
+            256,
+        )
+        .unwrap();
+        let a = layer.dequantize_f32();
+        let b = layer.dequantize_f32_parallel();
+        assert!(
+            a.iter().zip(&b).all(|(x, y)| x.to_bits() == y.to_bits()),
+            "legacy-sign parallel/scalar bit parity broke"
+        );
     }
 
     #[test]

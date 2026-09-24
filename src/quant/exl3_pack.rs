@@ -670,6 +670,19 @@ mod tests {
             mean /= n;
             let rate = n / dt / 1e6;
             measured_mw_per_s.push(rate);
+            // T7 CPU arm: parallel dequant timing + bit-parity spot check
+            // on the smallest sampled class member.
+            let t0p = std::time::Instant::now();
+            let wp = pack.layer(&plan.key).unwrap().dequantize_f32_parallel();
+            let dtp = t0p.elapsed().as_secs_f64().max(1e-9);
+            let rate_p = n / dtp / 1e6;
+            eprintln!(
+                "  parallel: {dtp:.3}s {rate_p:.2} Mw/s ({:.2}x vs scalar)",
+                rate_p / rate
+            );
+            if n <= 40_000_000.0 {
+                assert_eq!(w, wp, "parallel/scalar parity broke on {}", plan.key);
+            }
             if let Some(d) = &export_dir {
                 let safe = class.replace('.', "_");
                 let mut bytes = Vec::with_capacity(w.len() * 4);
