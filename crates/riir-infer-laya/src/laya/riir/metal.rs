@@ -158,11 +158,12 @@ const MAX_ENCODERS_PER_CB: u32 = 1024;
 const MAX_RUN_BUFFERS: usize = 4;
 
 /// flash_attn staging (Q tile [32][65] + Kᵀ tile [64][33] + V tile
-/// [32][65] + scores/probs [32][33] + 64 row-stats floats) and dispatch.
+/// [32][65] + scores/probs [32][33] + 64 row-stats floats + the [32][8]
+/// diag(α) rescale frags of the one-pass softmax) and dispatch.
 /// BQ = 32 query rows per threadgroup; the accumulator [32][64] lives as
 /// one 8×8 frag per simdgroup (1024 threads = 32 simdgroups).
 const FLASH_STAGING_BYTES: u64 =
-    ((32 * 65 + 64 * 33 + 32 * 65 + 32 * 33 + 64) * std::mem::size_of::<f32>()) as u64;
+    ((32 * 65 + 64 * 33 + 32 * 65 + 32 * 33 + 64 + 32 * 8) * std::mem::size_of::<f32>()) as u64;
 const FLASH_THREADS: u64 = 1024;
 /// Query-block rows of the fused attention kernel; hd is pinned to 64
 /// (both shipped checkpoints — the kernel's rope pairing and tile mapping
@@ -645,11 +646,12 @@ kernel void sgemm(
 /// window, softmax and value mix, and the head merge all in-kernel; the
 /// seq² scores parent the reference sequence materializes (and its mask
 /// add + multi-pass softmax + context re-read) never exist. The accumulator
-/// is normalized with the TWO-PASS form: pass 1 walks the key tiles for the
-/// row max only, pass 2 recomputes each tile's scores against the FINAL max
-/// and accumulates exp(s−m)·V — no running-max rescale of the accumulator,
-/// at the cost of a second score MMA and a second K read (the rope partner
-/// reads hit the same cache lines). Sliding-window layers predicate on
+/// is normalized with the ONE-PASS online form (riir-reflex Issue 020 T10
+/// rung 3): each key tile is staged and scored ONCE, the row max / sum
+/// ride in registers, and the accumulator is rescaled by exp(m_old − m_new)
+/// through one diagonal 8×8 MMA per tile. It replaced a two-pass form whose
+/// max-only pass re-staged every K tile (rope included) and re-ran every
+/// score MMA. Sliding-window layers predicate on
 /// `window` — each query block reads only its [q₀−w, q_end+w] key slice —
 /// which is also where the FLOP win lives at seq ≫ window (the english
 /// geometry: window 64, ~2/3 sliding layers); `window == seq` (the host
@@ -680,14 +682,16 @@ kernel void flash_attn(
     // Carved staging: ta Q tile [32][65] (rope+scale applied), tk Kᵀ tile
     // [64][33] ([kt][key], rope applied — both halves of each rope pair
     // live in the tile), tv V tile [32][65] ([key][hd] natural), ts
-    // scores/probs [32][33], st row stats (m in st[0..32], l in
-    // st[32..64]). ta is reused for the accumulator after the key loop;
+    // scores/probs [32][33], st row stats (l in st[32..64] at the drain;
+    // m / l live in registers during the key loop), dg the [32][8]
+    // diag(α) rescale rows. ta is reused for the accumulator after the key loop;
     // the barriers order every reuse.
     threadgroup float* ta = raw;
     threadgroup float* tk = raw + 32u * FTAS;
     threadgroup float* tv = tk + 64u * FTKS;
     threadgroup float* ts = tv + 32u * FTAS;
     threadgroup float* st = ts + 32u * FTKS;
+    threadgroup float* dg = st + 64u;
 
     const uint q0 = gtp.x * FBQ;
     const uint h = gtp.y;
@@ -727,8 +731,18 @@ kernel void flash_attn(
         ta[r * FTAS + 32u + j] = (qb * c + qa * s) * scale;
     }
 
-    // Pass 1 — running row max only.
-    if (lid < 32u) { st[lid] = -3.402823466e+38f; }
+    // ONE pass — online softmax (Issue 020 T10 rung 3). Each tile's
+    // scores are computed ONCE: the row max m and sum l are carried in
+    // registers (simdgroup `sg` owns row sg, so every lane of it holds the
+    // same m / l), and the accumulator is rescaled by α = exp(m_old − m_new)
+    // whenever the max moves. The rescale is ONE 8×8 MMA per tile against
+    // a diagonal frag (dg) — cheaper than the retired max-only pass, which
+    // re-staged every K tile (rope included) and re-ran every score MMA.
+    // α = 1 exactly when the max does not move, and a tile with no live key
+    // for a row leaves m, l and that accumulator row untouched.
+    float m_reg = -3.402823466e+38f;
+    float l_reg = 0.0f;
+    simdgroup_float8x8 acc = simdgroup_float8x8(0.0f);
     for (uint t = lo; t < hi; t += FBQ) {
         const uint wk = min(FBQ, hi - t);   // live keys in this tile
         threadgroup_barrier(mem_flags::mem_threadgroup);
@@ -738,68 +752,6 @@ kernel void flash_attn(
         {
             const uint j = lid >> 5u;    // rope pair index 0..31
             const uint key = lid & 31u;  // tile key 0..31
-            const uint krow = t + key;
-            float ka = 0.0f, kb = 0.0f;
-            float c = 0.0f, s = 0.0f;
-            if (krow < hi) {
-                ka = K[krow * (3u * d) + j];
-                kb = K[krow * (3u * d) + 32u + j];
-                c = cos[krow * FHD + j];
-                s = sin[krow * FHD + j];
-            }
-            tk[j * FTKS + key] = ka * c - kb * s;
-            tk[(j + 32u) * FTKS + key] = kb * c + ka * s;
-        }
-        threadgroup_barrier(mem_flags::mem_threadgroup);
-        // scores frag = Q tile × Kᵀ over the full hd contraction. The
-        // scores tile is [32 rows][32 keys] — only the four key-col groups
-        // (sgc < 4) hold live frags; sgc ≥ 4 must neither compute nor
-        // store (their store would run past the 32-key row into the next
-        // row of the [32][33] buffer).
-        if (sgc < 4u) {
-            simdgroup_float8x8 sf = simdgroup_float8x8(0.0f);
-            for (uint kk = 0u; kk < FHD; kk += 8u) {
-                simdgroup_float8x8 fa, fb;
-                simdgroup_load(fa, ta + sgr * 8u * FTAS + kk, FTAS);
-                simdgroup_load(fb, tk + kk * FTKS + sgc * 8u, FTKS);
-                simdgroup_multiply_accumulate(sf, fa, fb, sf);
-            }
-            simdgroup_store(sf, ts + sgr * 8u * FTKS + sgc * 8u, FTKS);
-        }
-        threadgroup_barrier(mem_flags::mem_threadgroup);
-        // Per-row window predicate: the block key range is only a bounds
-        // optimization — within a tile a key is live for a row only when
-        // |q − k| ≤ window (the reference's mask row; out-of-window keys
-        // are exp(f32::MIN − m) = 0 there, so skipping them is exact).
-        // One simdgroup per row (sg = row), one lane per key: the tile's
-        // [32][32] scores are exactly 32 simdgroups × 32 lanes, so the
-        // row max is one simd_max instead of a 32-key serial loop on 32 of
-        // the 1024 threads (Issue 020 T10). Max is order-independent —
-        // bit-identical to the serial form.
-        {
-            const uint c = lid & 31u;
-            const uint q = q0 + sg;
-            const uint k = t + c;
-            const uint dk = (k > q) ? (k - q) : (q - k);
-            const float v = (c < wk && dk <= window) ? ts[sg * FTKS + c] : -3.402823466e+38f;
-            const float mt = simd_max(v);
-            if (c == 0u) { st[sg] = max(st[sg], mt); }
-        }
-    }
-    if (lid < 32u) { st[32u + lid] = 0.0f; }
-
-    // Pass 2 — recompute each tile against the final max, accumulate
-    // exp(s − m)·V and the per-row l in registers (the same lane owns row
-    // `lane` every tile). ONE accumulator frag per simdgroup: 32 sg as 4
-    // row groups × 8 col groups cover the [32][64] output exactly.
-    float l_reg = 0.0f;
-    simdgroup_float8x8 acc = simdgroup_float8x8(0.0f);
-    for (uint t = lo; t < hi; t += FBQ) {
-        const uint wk = min(FBQ, hi - t);
-        threadgroup_barrier(mem_flags::mem_threadgroup);
-        {
-            const uint j = lid >> 5u;
-            const uint key = lid & 31u;
             const uint krow = t + key;
             float ka = 0.0f, kb = 0.0f;
             float c = 0.0f, s = 0.0f;
@@ -823,6 +775,11 @@ kernel void flash_attn(
                 (krow < hi) ? V[krow * (3u * d) + col] : 0.0f;
         }
         threadgroup_barrier(mem_flags::mem_threadgroup);
+        // scores frag = Q tile × Kᵀ over the full hd contraction. The
+        // scores tile is [32 rows][32 keys] — only the four key-col groups
+        // (sgc < 4) hold live frags; sgc ≥ 4 must neither compute nor
+        // store (their store would run past the 32-key row into the next
+        // row of the [32][33] buffer).
         if (sgc < 4u) {
             simdgroup_float8x8 sf = simdgroup_float8x8(0.0f);
             for (uint kk = 0u; kk < FHD; kk += 8u) {
@@ -834,27 +791,39 @@ kernel void flash_attn(
             simdgroup_store(sf, ts + sgr * 8u * FTKS + sgc * 8u, FTKS);
         }
         threadgroup_barrier(mem_flags::mem_threadgroup);
-        // Same row-per-simdgroup map: each lane exponentiates ONE score and
-        // the row sum is a simd_sum. Every lane of simdgroup `sg` carries
-        // row sg's running l. Padding keys (c ≥ wk) and out-of-window keys
-        // write p = 0 — exact, as before (their V rows are staged zero and
-        // l skips them). Only the l summation ORDER changes (tree vs
-        // serial), inside the G5 drift budget.
+        // One simdgroup per row (sg = row), one lane per key. Per-row
+        // window predicate: the block key range is only a bounds
+        // optimization — within a tile a key is live for a row only when
+        // |q − k| ≤ window (the reference's mask row; out-of-window keys
+        // are exp(f32::MIN − m) = 0 there, so skipping them is exact).
+        // Padding keys (c ≥ wk) and out-of-window keys write p = 0 (their
+        // V rows are staged zero, and l skips them).
         {
             const uint c = lid & 31u;
-            const float m = st[sg];
             const uint q = q0 + sg;
             const uint k = t + c;
             const uint dk = (k > q) ? (k - q) : (q - k);
-            float p = 0.0f;
-            if (c < wk && dk <= window) { p = precise::exp(ts[sg * FTKS + c] - m); }
+            const bool live = c < wk && dk <= window;
+            const float sc = live ? ts[sg * FTKS + c] : -3.402823466e+38f;
+            const float m_new = max(m_reg, simd_max(sc));
+            const float p = live ? precise::exp(sc - m_new) : 0.0f;
+            const float alpha = precise::exp(m_reg - m_new);
             ts[sg * FTKS + c] = p;
-            l_reg += simd_sum(p);
+            l_reg = l_reg * alpha + simd_sum(p);
+            m_reg = m_new;
+            // dg [32 rows][8]: row r carries α_r on its diagonal slot
+            // (r & 7), so rows sgr·8.. form diag(α) for row group sgr.
+            if (c < 8u) { dg[sg * 8u + c] = (c == (sg & 7u)) ? alpha : 0.0f; }
         }
         threadgroup_barrier(mem_flags::mem_threadgroup);
-        // acc += P × V over this tile's 32 keys (padding columns hold
-        // exp(0 − m) against V rows staged zero — contributes exactly 0;
-        // l skips them, so the normalization stays exact).
+        // acc ← diag(α) × acc, then acc += P × V over this tile's 32 keys
+        // (padding columns hold p = 0 against V rows staged zero).
+        {
+            simdgroup_float8x8 fd, sc_acc;
+            simdgroup_load(fd, dg + sgr * 64u, 8u);
+            simdgroup_multiply(sc_acc, fd, acc);
+            acc = sc_acc;
+        }
         for (uint kk = 0u; kk < FBQ; kk += 8u) {
             simdgroup_float8x8 fa, fb;
             simdgroup_load(fa, ts + sgr * 8u * FTKS + kk, FTKS);
