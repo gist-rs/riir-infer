@@ -11,6 +11,13 @@
 
 use rayon::prelude::*;
 
+/// Minimum sequence length before parallelizing attention heads.
+/// Below this, sequential execution avoids thread spawning overhead.
+/// At `t_n<512` each head does <131K ops (~8us) -- rayon spawn cost exceeds savings.
+/// Effectively disables parallel heads for typical decode lengths (<100 tokens).
+/// Shared with the `row_logit_floor` dispatcher so both paths split alike.
+pub(super) const PARALLEL_HEADS_MIN_SEQ: usize = 512;
+
 /// Fused attention head with GQA support: score -> softmax -> weighted value sum.
 /// Avoids separate `softmax()` call and write-back of normalized scores.
 ///
@@ -391,12 +398,6 @@ pub unsafe fn attention_heads_parallel(
     softcap: f32,
     block_size: usize,
 ) {
-    /// Minimum sequence length before parallelizing attention heads.
-    /// Below this, sequential execution avoids thread spawning overhead.
-    /// At `t_n<512` each head does <131K ops (~8us) -- rayon spawn cost exceeds savings.
-    /// Effectively disables parallel heads for typical decode lengths (<100 tokens).
-    const PARALLEL_HEADS_MIN_SEQ: usize = 512;
-
     if t_n < PARALLEL_HEADS_MIN_SEQ || n_head <= 1 {
         // Sequential fallback: reuse head_scores[0..block_size] for all heads
         for h in 0..n_head {

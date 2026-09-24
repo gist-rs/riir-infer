@@ -16,6 +16,10 @@ use rayon::prelude::*;
 // gemma4_train / train_shared) relocated to riir-train-engine and consume
 // `attention_heads_parallel` cross-crate from there. D4 drift-row reversible.
 pub mod attention;
+// riir-infer Issue 011 T1 — the opt-in consumer of katgpt-core
+// `row_logit_floor` (sink-exempt floor + b-bit code + exp-table softmax).
+#[cfg(feature = "row_logit_floor")]
+pub mod attention_floor;
 #[cfg(feature = "dllm")]
 mod dllm;
 mod gemma2;
@@ -332,6 +336,13 @@ pub struct ForwardContext {
     pub rope_freq_table: crate::rope::RopeFreqTable,
     // Pre-allocated CDF buffer for zero-alloc token sampling
     pub cdf_buf: Vec<f32>,
+    /// Row-logit floor policy for the gemma-2 f16 forward (`None` = the
+    /// plain softmax, bit-identical to a build without the feature).
+    #[cfg(feature = "row_logit_floor")]
+    pub logit_floor: Option<attention_floor::RowLogitFloorPolicy>,
+    /// Envelope tally the floored path accumulates (reset by the caller).
+    #[cfg(feature = "row_logit_floor")]
+    pub logit_floor_stats: attention_floor::RowLogitFloorStats,
 }
 
 impl ForwardContext {
@@ -413,6 +424,10 @@ impl ForwardContext {
             delta_qn_buf: vec![0.0; config.n_embd],
             // Pre-allocated CDF buffer for sample_token_into — avoids vocab_size allocation per token
             cdf_buf: vec![0.0; config.vocab_size],
+            #[cfg(feature = "row_logit_floor")]
+            logit_floor: None,
+            #[cfg(feature = "row_logit_floor")]
+            logit_floor_stats: attention_floor::RowLogitFloorStats::default(),
             rope_freq_table: crate::rope::RopeFreqTable::new(config.rope_theta, config.head_dim),
         }
     }

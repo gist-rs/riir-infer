@@ -69,6 +69,14 @@ exl3 = []
 # no-default-consumer rule — the dashboard is an offline instrument,
 # never a serving path.
 vk_calibration = ["katgpt-core/fitted_anchor_tables"]
+# row_logit_floor (riir-infer Issue 011 T1, 2026-09-25): the opt-in consumer
+# of katgpt-core's sink-exempt row-logit floor + b-bit logit code +
+# exp-table softmax (katgpt-rs Issue 882 P2, Bench 888) —
+# `transformer::attention_floor`, selected per call by
+# `ForwardContext::logit_floor` on the gemma-2 f16 forward, + the
+# `row_logit_floor_ppl` bin (the T2/T4 quality gate). OPT-IN: promotion is
+# katgpt-rs-side and waits on T2 + T3.
+row_logit_floor = ["katgpt-core/row_logit_floor"]
 
 # katgpt-core forwards.
 sparse_mlp = ["katgpt-core/sparse_mlp"]
@@ -137,6 +145,11 @@ required-features = ["bonsai2_hadamard"]
 name = "vk_calibration"
 path = "src/bin/vk_calibration.rs"
 required-features = ["vk_calibration"]
+
+[[bin]]
+name = "row_logit_floor_ppl"
+path = "src/bin/row_logit_floor_ppl.rs"
+required-features = ["row_logit_floor"]
 
 # ─── Workspace ────────────────────────────────────────────────────────
 # The repo is a root-package workspace: riir-infer-core at the root,

@@ -1332,25 +1332,57 @@ pub fn forward_gemma2_f16<'a>(
             );
         }
 
-        // g. Multi-head attention + softcapping (Plan 096: parallel heads)
+        // g. Multi-head attention + softcapping (Plan 096: parallel heads).
+        // riir-infer Issue 011 T1: with `ctx.logit_floor` set, the softmax is
+        // the sink-exempt floored + coded one; `None` is the plain path.
         let attn_softcap = config.attn_logit_softcapping;
         ctx.attn_out[..q_dim].fill(0.0);
-        unsafe {
-            attention_heads_parallel(
-                &ctx.q,
-                &layer_cache.key,
-                &layer_cache.value,
-                &mut ctx.attn_out,
-                &mut ctx.head_scores,
-                config.n_head,
-                n_kv,
-                kvd,
-                hd,
-                t_n,
-                scale,
-                attn_softcap,
-                config.block_size,
-            );
+        #[cfg(feature = "row_logit_floor")]
+        let floored = match ctx.logit_floor {
+            Some(policy) => {
+                let st = unsafe {
+                    super::attention_floor::attention_heads_floored(
+                        &ctx.q,
+                        &layer_cache.key,
+                        &layer_cache.value,
+                        &mut ctx.attn_out,
+                        &mut ctx.head_scores,
+                        config.n_head,
+                        n_kv,
+                        kvd,
+                        hd,
+                        t_n,
+                        scale,
+                        attn_softcap,
+                        config.block_size,
+                        policy,
+                    )
+                };
+                ctx.logit_floor_stats.add(&st);
+                true
+            }
+            None => false,
+        };
+        #[cfg(not(feature = "row_logit_floor"))]
+        let floored = false;
+        if !floored {
+            unsafe {
+                attention_heads_parallel(
+                    &ctx.q,
+                    &layer_cache.key,
+                    &layer_cache.value,
+                    &mut ctx.attn_out,
+                    &mut ctx.head_scores,
+                    config.n_head,
+                    n_kv,
+                    kvd,
+                    hd,
+                    t_n,
+                    scale,
+                    attn_softcap,
+                    config.block_size,
+                );
+            }
         }
 
         // h. Output projection (f16)

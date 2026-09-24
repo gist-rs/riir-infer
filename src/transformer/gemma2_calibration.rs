@@ -27,13 +27,14 @@
 //! tables are `StreamingMeanTable` rows — James–Stein shrinkage at
 //! finalize, tail-lump lower-bound coverage, all in the shared substrate.
 
-use anyhow::Context as _;
 use katgpt_core::fitted_anchor_table::StreamingMeanTable;
 
 use super::attention_heads_parallel;
 use super::{ForwardContext, RAYON_MLP_THRESHOLD, RAYON_QKV_THRESHOLD};
-use crate::gemma_layer::{GemmaLayerWeightsF16, GemmaTransformerWeightsF16};
-use crate::gguf_loader::GgufFile;
+// Re-homed to `gguf_loader` (general-purpose; the row-logit-floor bin uses it
+// too). Re-exported so existing import paths keep working.
+pub use crate::gguf_loader::load_gemma2_f16_direct;
+use crate::gemma_layer::GemmaTransformerWeightsF16;
 use crate::types::{self, Config};
 use katgpt_transformer::MultiLayerKVCache;
 
@@ -290,55 +291,4 @@ pub fn forward_gemma2_f16_tapped(
     }
 
     ctx.hidden_state[..n].copy_from_slice(&ctx.x[..n]);
-}
-
-/// Load Gemma-2 f16 weights DIRECTLY from the GGUF's F16 tensors (no f32
-/// intermediate — 5.2 GiB peak instead of 10.4; the standard
-/// `load_gemma2_weights_gguf` f32 path would double-peak past this box's
-/// free RAM beside the 2.6 GiB table set).
-///
-/// F16-type tensors only: a quantized gemma-2 GGUF must go through the
-/// f32 dequant path (not this loader).
-pub fn load_gemma2_f16_direct(gguf: &GgufFile, config: &Config) -> anyhow::Result<GemmaTransformerWeightsF16> {
-    let read_f16 = |name: &str| -> anyhow::Result<Vec<half::f16>> {
-        let slice = gguf
-            .tensor_slice(name)
-            .context(format!("tensor '{name}' data out of bounds"))?;
-        #[cfg(target_endian = "little")]
-        {
-            let bits = bytemuck::cast_slice::<_, u16>(slice);
-            Ok(bits.iter().map(|&b| half::f16::from_bits(b)).collect())
-        }
-        #[cfg(target_endian = "big")]
-        {
-            let _ = slice;
-            anyhow::bail!("big-endian host: use the f32 dequant path");
-        }
-    };
-    let read_norm = |name: &str| -> anyhow::Result<Vec<f32>> { gguf.dequant_f16_to_f32(name) };
-
-    let wte = read_f16("token_embd.weight")?;
-    let final_norm = read_norm("output_norm.weight")?;
-    let mut layers = Vec::with_capacity(config.n_layer);
-    for i in 0..config.n_layer {
-        let f = |suffix: &str| format!("blk.{i}.{suffix}");
-        layers.push(GemmaLayerWeightsF16 {
-            attn_wq: read_f16(&f("attn_q.weight"))?,
-            attn_wk: read_f16(&f("attn_k.weight"))?,
-            attn_wv: read_f16(&f("attn_v.weight"))?,
-            attn_wo: read_f16(&f("attn_output.weight"))?,
-            gate_proj: read_f16(&f("ffn_gate.weight"))?,
-            up_proj: read_f16(&f("ffn_up.weight"))?,
-            down_proj: read_f16(&f("ffn_down.weight"))?,
-            input_norm: read_norm(&f("attn_norm.weight"))?,
-            post_attn_norm: read_norm(&f("post_attention_norm.weight"))?,
-            pre_mlp_norm: read_norm(&f("ffn_norm.weight"))?,
-            post_mlp_norm: read_norm(&f("post_ffw_norm.weight"))?,
-        });
-    }
-    Ok(GemmaTransformerWeightsF16 {
-        wte,
-        final_norm,
-        layers,
-    })
 }
