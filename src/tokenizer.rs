@@ -70,7 +70,10 @@ impl SpecialTokenMatcher {
         let bytes = text.as_bytes();
         for (pos, &b) in bytes.iter().enumerate() {
             let rest = &bytes[pos..];
-            if let Some((tok, id)) = self.by_first[b as usize].iter().find(|(t, _)| rest.starts_with(t)) {
+            if let Some((tok, id)) = self.by_first[b as usize]
+                .iter()
+                .find(|(t, _)| rest.starts_with(t))
+            {
                 return Some((pos, tok.len(), *id));
             }
         }
@@ -284,6 +287,22 @@ pub struct BpeTokenizer {
     /// Special tokens (control + user_defined) that should not be split
     /// by BPE — leftmost-longest matcher.
     special: SpecialTokenMatcher,
+    /// Longest digit run one pre-token may hold (the `\p{N}{1,k}` rule):
+    /// `1` for Qwen2-style pre-tokenizers, `3` for `llama-bpe` (Llama 3,
+    /// MiniCPM5). See [`digit_run_for_pre`].
+    max_digit_run: usize,
+}
+
+/// The digit-run rule of a GGUF `tokenizer.ggml.pre` name. `llama-bpe`
+/// (Llama 3 and its derivatives) groups `\p{N}{1,3}`; Qwen2 and the unknown
+/// default split every digit. A wrong value is silent: text without numbers
+/// tokenizes identically, and every number becomes a sequence the model never
+/// saw (MiniCPM5 `" 42980."` → 5 digit tokens instead of `"429"`+`"80"`).
+fn digit_run_for_pre(pre: &str) -> usize {
+    match pre {
+        "llama-bpe" | "llama3" | "llama-v3" => 3,
+        _ => 1,
+    }
 }
 
 impl BpeTokenizer {
@@ -363,6 +382,8 @@ impl BpeTokenizer {
 
         // ── Special tokens (control=3, user_defined=4) ───────────────
         let special = SpecialTokenMatcher::from_types(&token_types, &id_to_token);
+        let max_digit_run =
+            digit_run_for_pre(gguf.metadata_string("tokenizer.ggml.pre").unwrap_or(""));
 
         Ok(Self {
             vocab,
@@ -374,6 +395,7 @@ impl BpeTokenizer {
             bos_id,
             eos_id,
             special,
+            max_digit_run,
         })
     }
 
@@ -461,7 +483,7 @@ impl BpeTokenizer {
     /// Pre-tokenizes the text using the GPT-2 regex pattern, then applies
     /// BPE merges to each chunk independently.
     fn encode_no_special(&self, text: &str) -> Vec<usize> {
-        let chunks = gpt2_pretokenize(text);
+        let chunks = gpt2_pretokenize(text, self.max_digit_run);
         let mut result = Vec::with_capacity(chunks.len() * 2);
         for chunk in chunks {
             result.extend(self.bpe_encode_chunk(chunk));
@@ -1307,7 +1329,7 @@ impl SentencePieceGgufTokenizer {
 /// ```text
 /// (?i:'s|'t|'re|'ve|'m|'ll|'d)
 /// | [^\r\n\p{L}\p{N}]?\p{L}+
-/// | \p{N}
+/// | \p{N}{1,max_digit_run}
 /// |  ?[^\s\p{L}\p{N}]+[\r\n]*
 /// | \s*[\r\n]+
 /// | \s+(?!\S)
@@ -1315,7 +1337,7 @@ impl SentencePieceGgufTokenizer {
 /// ```
 ///
 /// Rules are tried in order at each position; the first matching rule wins.
-fn gpt2_pretokenize(text: &str) -> Vec<&str> {
+fn gpt2_pretokenize(text: &str, max_digit_run: usize) -> Vec<&str> {
     // Build (byte_offset, char) pairs for O(1) byte-offset lookup.
     let chars: Vec<(usize, char)> = text.char_indices().collect();
     let n = chars.len();
@@ -1326,7 +1348,7 @@ fn gpt2_pretokenize(text: &str) -> Vec<&str> {
 
     while i < n {
         let start_byte = chars[i].0;
-        let end = match_pretoken(&chars, i);
+        let end = match_pretoken(&chars, i, max_digit_run);
         let end_byte = if end < n { chars[end].0 } else { text_len };
         chunks.push(&text[start_byte..end_byte]);
         i = end;
@@ -1340,7 +1362,7 @@ fn gpt2_pretokenize(text: &str) -> Vec<&str> {
 ///
 /// Returns the index into `chars` after the match (i.e. the next unmatched
 /// position). At least one character is always consumed (the fallback case).
-fn match_pretoken(chars: &[(usize, char)], i: usize) -> usize {
+fn match_pretoken(chars: &[(usize, char)], i: usize, max_digit_run: usize) -> usize {
     let n = chars.len();
     let c = chars[i].1;
 
@@ -1386,9 +1408,13 @@ fn match_pretoken(chars: &[(usize, char)], i: usize) -> usize {
         }
     }
 
-    // Rule 3: \p{N} — single number character.
+    // Rule 3: \p{N}{1,max_digit_run} — a bounded run of number characters.
     if c.is_numeric() {
-        return i + 1;
+        let mut j = i + 1;
+        while j < n && j - i < max_digit_run.max(1) && chars[j].1.is_numeric() {
+            j += 1;
+        }
+        return j;
     }
 
     // Rule 4:  ?[^\s\p{L}\p{N}]+[\r\n]*
@@ -1481,7 +1507,13 @@ mod special_token_matcher_tests {
         let types = [3u32, 4, 4, 4, 3, 1, 3];
         let names: Vec<String> = toks.iter().map(|s| s.to_string()).collect();
         let m = SpecialTokenMatcher::from_types(&types, &names);
-        let specials = [("<a>", 0usize), ("<ab>", 1), ("\n\n", 2), ("\n\n\n", 3), ("é!", 4)];
+        let specials = [
+            ("<a>", 0usize),
+            ("<ab>", 1),
+            ("\n\n", 2),
+            ("\n\n\n", 3),
+            ("é!", 4),
+        ];
         for text in [
             "",
             "plain",
@@ -1501,5 +1533,30 @@ mod special_token_matcher_tests {
         let names = vec!["<s>".to_string(), "<s>".to_string()];
         let m = SpecialTokenMatcher::from_types(&[3, 3], &names);
         assert_eq!(m.find_first("a<s>"), Some((1, 3, 1)));
+    }
+}
+
+#[cfg(test)]
+mod digit_run_tests {
+    use super::{digit_run_for_pre, gpt2_pretokenize};
+
+    /// `llama-bpe` groups digits in threes (HF `\p{N}{1,3}`), the space
+    /// before a number is its own pre-token; the Qwen2-style default splits
+    /// every digit. Measured against HF `tokenizers` on MiniCPM5-1B: 54 271 of
+    /// 54 271 ids identical on number-dense text once the rule followed
+    /// `tokenizer.ggml.pre`.
+    #[test]
+    fn digit_runs_follow_the_pre_tokenizer() {
+        assert_eq!(digit_run_for_pre("llama-bpe"), 3);
+        assert_eq!(digit_run_for_pre("qwen2"), 1);
+        assert_eq!(digit_run_for_pre(""), 1);
+        assert_eq!(
+            gpt2_pretokenize("key 42980.", 3),
+            vec!["key", " ", "429", "80", "."]
+        );
+        assert_eq!(
+            gpt2_pretokenize("key 42980.", 1),
+            vec!["key", " ", "4", "2", "9", "8", "0", "."]
+        );
     }
 }
