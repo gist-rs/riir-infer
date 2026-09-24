@@ -20,6 +20,9 @@ pub mod attention;
 // `row_logit_floor` (sink-exempt floor + b-bit code + exp-table softmax).
 #[cfg(feature = "row_logit_floor")]
 pub mod attention_floor;
+// katgpt-rs Issue 882 P4 — the m_Y (attention-to-answer) probe, off the hot path.
+#[cfg(feature = "attention_to_answer")]
+pub mod attention_probe;
 #[cfg(feature = "dllm")]
 mod dllm;
 mod gemma2;
@@ -343,6 +346,9 @@ pub struct ForwardContext {
     /// Envelope tally the floored path accumulates (reset by the caller).
     #[cfg(feature = "row_logit_floor")]
     pub logit_floor_stats: attention_floor::RowLogitFloorStats,
+    /// m_Y probe for the gemma-2 f16 forward (`None` = never probed).
+    #[cfg(feature = "attention_to_answer")]
+    pub attn_probe: Option<attention_probe::AttnSpanProbe>,
 }
 
 impl ForwardContext {
@@ -428,6 +434,8 @@ impl ForwardContext {
             logit_floor: None,
             #[cfg(feature = "row_logit_floor")]
             logit_floor_stats: attention_floor::RowLogitFloorStats::default(),
+            #[cfg(feature = "attention_to_answer")]
+            attn_probe: None,
             rope_freq_table: crate::rope::RopeFreqTable::new(config.rope_theta, config.head_dim),
         }
     }

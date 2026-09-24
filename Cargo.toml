@@ -77,6 +77,12 @@ vk_calibration = ["katgpt-core/fitted_anchor_tables"]
 # `row_logit_floor_ppl` bin (the T2/T4 quality gate). OPT-IN: promotion is
 # katgpt-rs-side and waits on T2 + T3.
 row_logit_floor = ["katgpt-core/row_logit_floor"]
+# attention_to_answer (katgpt-rs Issue 882 P4, 2026-09-25): the m_Y probe —
+# attention mass on a labeled answer span, per (layer, head), read off the
+# gemma-2 f16 forward on ARMED rows only (one extra QK pass there; the
+# attention kernels are untouched). Reproduces the row_logit_floor policy
+# when both are on. Offline instrument, opt-in.
+attention_to_answer = []
 
 # katgpt-core forwards.
 sparse_mlp = ["katgpt-core/sparse_mlp"]
@@ -149,7 +155,7 @@ required-features = ["vk_calibration"]
 [[bin]]
 name = "row_logit_floor_ppl"
 path = "src/bin/row_logit_floor_ppl.rs"
-required-features = ["row_logit_floor"]
+required-features = ["row_logit_floor", "attention_to_answer"]
 
 # ─── Workspace ────────────────────────────────────────────────────────
 # The repo is a root-package workspace: riir-infer-core at the root,

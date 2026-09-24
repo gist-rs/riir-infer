@@ -1332,6 +1332,31 @@ pub fn forward_gemma2_f16<'a>(
             );
         }
 
+        // f'. katgpt-rs Issue 882 P4: the m_Y probe reads this row's
+        // distribution (the floored one when a floor is set) — armed rows only.
+        #[cfg(feature = "attention_to_answer")]
+        if let Some(probe) = ctx.attn_probe.as_mut().filter(|p| p.armed) {
+            #[cfg(feature = "row_logit_floor")]
+            let floor = ctx.logit_floor;
+            #[cfg(not(feature = "row_logit_floor"))]
+            let floor = None;
+            probe.observe_layer(
+                layer_idx,
+                &ctx.q,
+                &layer_cache.key,
+                super::attention_probe::ProbeShape {
+                    n_head: config.n_head,
+                    n_kv_head: n_kv,
+                    kv_dim: kvd,
+                    head_dim: hd,
+                    t_n,
+                    scale,
+                    softcap: config.attn_logit_softcapping,
+                },
+                floor,
+            );
+        }
+
         // g. Multi-head attention + softcapping (Plan 096: parallel heads).
         // riir-infer Issue 011 T1: with `ctx.logit_floor` set, the softmax is
         // the sink-exempt floored + coded one; `None` is the plain path.

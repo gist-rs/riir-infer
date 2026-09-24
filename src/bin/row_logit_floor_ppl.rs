@@ -40,6 +40,7 @@ use katgpt_transformer::MultiLayerKVCache;
 use riir_infer_core::gguf_loader::{GgufFile, config_from_gguf_metadata, load_gemma2_f16_direct};
 use riir_infer_core::tokenizer::SentencePieceGgufTokenizer;
 use riir_infer_core::transformer::attention_floor::{RowLogitFloorPolicy, RowLogitFloorStats};
+use riir_infer_core::transformer::attention_probe::AttnSpanProbe;
 use riir_infer_core::transformer::{ForwardContext, forward_gemma2_f16};
 
 /// One measured arm.
@@ -53,6 +54,8 @@ struct Arm {
 struct Seq {
     tokens: Vec<usize>,
     score_from: usize,
+    /// The labeled answer span (needle mode): the m_Y probe's `Y`.
+    span: Option<std::ops::Range<usize>>,
 }
 
 /// `b<bits>[s<n>][n<ctx>]` → policy; `base` → none.
@@ -151,6 +154,7 @@ fn needle_seqs(
         t.push(bos);
         t.extend_from_slice(&intro);
         t.extend_from_slice(&body[..before]);
+        let span = t.len()..t.len() + needle.len();
         t.extend_from_slice(&needle);
         t.extend_from_slice(&body[before..]);
         t.extend_from_slice(&question);
@@ -159,6 +163,7 @@ fn needle_seqs(
         seqs.push(Seq {
             tokens: t,
             score_from,
+            span: Some(span),
         });
     }
     Ok(seqs)
@@ -222,6 +227,7 @@ fn main() -> Result<()> {
             .map(|c| Seq {
                 tokens: std::iter::once(bos).chain(c.iter().copied()).collect(),
                 score_from: 0,
+                span: None,
             })
             .collect(),
         n => needle_seqs(&tok, bos, &all, n, needle_ctx)?,
@@ -254,6 +260,14 @@ fn main() -> Result<()> {
     );
 
     let mut ctx = ForwardContext::new(&config);
+    if needle > 0 {
+        ctx.attn_probe = Some(AttnSpanProbe::new(
+            config.n_layer,
+            config.n_head,
+            config.block_size,
+        ));
+    }
+    let mut probe_lines: Vec<String> = Vec::new();
     let mut cache = MultiLayerKVCache::new(&config);
     let mut base_nll: Vec<f64> = Vec::with_capacity(scored);
     let mut base_top: Vec<usize> = Vec::with_capacity(scored);
@@ -265,13 +279,23 @@ fn main() -> Result<()> {
     for arm in &arms {
         ctx.logit_floor = arm.policy;
         ctx.logit_floor_stats = RowLogitFloorStats::default();
+        if let Some(p) = ctx.attn_probe.as_mut() {
+            p.reset();
+        }
         let (mut sum_nll, mut sum_abs, mut flips, mut k) = (0.0f64, 0.0f64, 0usize, 0usize);
         let (mut exact, mut fwd) = (0usize, 0usize);
         let t = Instant::now();
         for seq in &seqs {
             cache.reset();
             let mut all_right = true;
+            if let (Some(p), Some(span)) = (ctx.attn_probe.as_mut(), &seq.span) {
+                p.span = span.clone();
+            }
             for pos in 0..seq.tokens.len() - 1 {
+                if let Some(p) = ctx.attn_probe.as_mut() {
+                    p.armed = seq.span.is_some() && pos >= seq.score_from;
+                    p.rows += u64::from(p.armed);
+                }
                 let logits = forward_gemma2_f16(
                     &mut ctx,
                     &weights,
@@ -307,6 +331,16 @@ fn main() -> Result<()> {
         let ppl = (sum_nll / k as f64).exp();
         let seq_exact = 100.0 * exact as f64 / seqs.len() as f64;
         let st = ctx.logit_floor_stats;
+        if let Some(p) = ctx.attn_probe.as_ref() {
+            let (l, h, m) = p.top_head();
+            let layers: Vec<String> = p.layer_means().iter().map(|m| format!("{m:.3}")).collect();
+            probe_lines.push(format!(
+                "| {} | {:.4} | L{l}H{h} {m:.3} | {} |",
+                arm.name,
+                p.m_y(),
+                layers.join(" ")
+            ));
+        }
         match arm.policy {
             None => {
                 base_ppl = ppl;
@@ -327,6 +361,14 @@ fn main() -> Result<()> {
                 st.width_sum / st.rows.max(1) as f64,
                 fwd as f64 / secs
             ),
+        }
+    }
+    if !probe_lines.is_empty() {
+        println!("\n# m_Y — attention mass on the needle span, from the question + answer rows");
+        println!("| arm | m_Y (all heads) | top head | per-layer mean (L0..) |");
+        println!("|---|---|---|---|");
+        for l in &probe_lines {
+            println!("{l}");
         }
     }
     Ok(())
