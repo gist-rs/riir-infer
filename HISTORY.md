@@ -590,3 +590,25 @@ new target (the T1.1e repo-birth law — the row keeps a feature-less selection
 skipping loudly instead of printing a green zero).
 
 Session: issue020-t6, 1790323200
+
+## 2026-09-25 — the narrow sgemm's shape is the measured local optimum (T7 occupancy axis refuted, both arms)
+
+The question a future kernel reader will ask: narrow stages A[32][65] +
+B[64][65] = 24 960 B — one threadgroup per core — why not shrink the staging
+so 2–3 co-reside and hide the staging-load latency? Measured from the
+consumer's `sgemm_shape_timing` probe (reflex `ebe667e`, the record lives in
+its issue-020 T7 section): two challengers behind a temporary
+`LAYA_METAL_SGEMM_VAR` flag — **bk32** (BK 32, same 32×64 tile, 12 544 B → 2
+TGs/core) and **bn32** (32×32 tile, 8 448 B → 3 TGs/core), both keeping the
+k-ascending per-element chain (every row bit-identical to `sgemm`).
+
+bk32 LOST 17–33% on every resolvable cell, growing with k exactly as the
+barrier model predicts (BK 32 doubles the k-loop's two barriers); bn32 lost
+harder (15–45% — the same doubling plus halved B reuse). The 2–3× co-residency
+gain is strictly smaller than the barrier cost. At BK 64 a 2-TG fit would
+break the bank-conflict padding (stride 65) or the 8×8 block structure (BN ≤
+24 idles 4 of 16 simdgroups); wide (BM 64) already lost zero-for-zero in the
+band rung. The variant code never landed — this record and the reflex issue
+carry the negative, the BK=48 precedent.
+
+Session: issue020-occ, 1790323200
