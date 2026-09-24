@@ -1227,6 +1227,32 @@ impl Backend for Cuda {
         }
     }
 
+    fn copy_at(&self, src: &[f32], src_off: usize, dst: &mut [f32], dst_off: usize, len: usize) {
+        assert!(src.len() >= len + src_off, "copy_at src extent");
+        assert!(dst.len() >= len + dst_off, "copy_at dst extent");
+        let sb = self.chain_buf(src);
+        let db = self.chain_slot_for(dst);
+        let f = self.kernel("copy_f");
+        let len = len as u32;
+        let groups = len.div_ceil(EW_THREADS).max(1);
+        let cfg = LaunchConfig {
+            grid_dim: (groups, 1, 1),
+            block_dim: (EW_THREADS, 1, 1),
+            shared_mem_bytes: 0,
+        };
+        unsafe {
+            self.stream
+                .launch_builder(&f)
+                .arg(db.as_ref())
+                .arg(&(dst_off as u32))
+                .arg(sb.as_ref())
+                .arg(&(src_off as u32))
+                .arg(&len)
+                .launch(cfg)
+                .unwrap_or_else(|e| panic!("cuda copy_at launch: {e}"));
+        }
+    }
+
     fn begin_pass(&self) {
         self.begin_pass_impl();
     }
