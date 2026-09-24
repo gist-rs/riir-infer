@@ -426,7 +426,7 @@ impl RiirAgent {
         if questions.is_empty() {
             return Ok(Vec::new());
         }
-        if self.packed_eligible() {
+        if self.packed_eligible(questions.len()) {
             return self.system_one_packed(state, questions);
         }
         let mut out = Vec::with_capacity(questions.len());
@@ -443,8 +443,15 @@ impl RiirAgent {
     /// (`RIIR_LAYA_NO_BATCH=1` — also the A/B arm), the ANE lane (its
     /// whole-graph encoder is bucket-shaped, one sequence per call), or a
     /// backend that cannot execute the packed attention at this head dim.
-    fn packed_eligible(&self) -> bool {
-        if batch_disabled() {
+    ///
+    /// Single-question cases are excluded too (Bench 006 Addendum 7): the
+    /// packed pass's per-case overhead — slab copies + the collate pass —
+    /// has nothing to amortize at n=1, measured 1.045 median B/A p50 on
+    /// the 1-q control suite vs 0.91-0.94 at 5 q/case. The loop path for
+    /// one question IS the packed path's per-sequence math, so the gate
+    /// costs nothing measurable and the multi-q wins keep their arm.
+    fn packed_eligible(&self, question_count: usize) -> bool {
+        if batch_disabled() || question_count < 2 {
             return false;
         }
         #[cfg(all(target_os = "macos", feature = "laya-riir-ane"))]
