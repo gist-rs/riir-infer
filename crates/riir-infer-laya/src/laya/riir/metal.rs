@@ -53,6 +53,12 @@
 //!   the reference op sequence ([`Backend::attention_forward_default`]);
 //!   the CPU lane keeps the identical per-head op order, so its numerics
 //!   are bit-unchanged.
+//!   Opt-in `LAYA_METAL_ROPE_HOIST=1` (reflex issue 020 T10 rung 2) adds
+//!   the `attn_rope` pre-pass: the Q/K rope is derived ONCE per layer into
+//!   a device scratch (the staging would otherwise re-derive it per
+//!   query block × head × key tile), and `flash_attn`'s staging copies
+//!   instead of rotating. Default-off: the in-kernel rope arm is the
+//!   shipped behavior, bit-identical; promotion follows the probe.
 //! - **softmax / LN are row-parallel** — one threadgroup (one simdgroup,
 //!   32 lanes) per row with `simd_max`/`simd_sum` reductions; the v1
 //!   kernels ran one thread per row (32× the GPU idle). Reduction order
@@ -235,6 +241,7 @@ const KERNELS: &[&str] = &[
     "sgemm",
     "sgemm_wide",
     "sgemm_xwide",
+    "attn_rope",
     "flash_attn",
     "add",
     "copy",
@@ -676,6 +683,55 @@ kernel void sgemm(
 }
 "#;
 
+/// The fused attention's rope pre-pass (opt-in, reflex issue 020 T10 rung
+/// 2): derives the rope ONCE per layer for the Q and K thirds of qkv — Q
+/// additionally takes the 1/√hd scale, the reference's rope-then-scale
+/// order — into a packed `[2, seq, d]` scratch (Q front, K back). Without
+/// it `flash_attn`'s staging re-derives every rope pair per (query block ×
+/// head × key tile), ×heads redundant on Q and ×(window coverage) redundant
+/// on K. One thread per rope pair; the per-element expressions are the
+/// staging's own, in the same order, so both arms produce the same f32
+/// bits and the G5 drift is carried by the softmax path alone.
+const MSL_ATTN_ROPE: &str = r#"
+kernel void attn_rope(
+    device const float* qkv [[buffer(0)]],
+    device const float* cos [[buffer(1)]],
+    device const float* sin [[buffer(2)]],
+    device float* rk [[buffer(3)]],
+    constant uint& seq [[buffer(4)]],
+    constant uint& d [[buffer(5)]],
+    constant float& scale [[buffer(6)]],
+    uint gid [[thread_position_in_grid]])
+{
+    const uint pairs_per_row = d / 2u;   // hd = 64: 32 pairs per head
+    const uint row = gid / pairs_per_row;
+    const uint p = gid % pairs_per_row;  // pair index within the row
+    const uint j = p & 31u;              // rope pair index within hd
+    const uint h = p >> 5u;              // head
+    if (row >= seq) { return; }
+    const float c = cos[row * FHD + j];
+    const float s = sin[row * FHD + j];
+    const uint hbase = h * FHD;
+    // Q: rotate + scale (the flash staging's own expression order).
+    {
+        const uint qb = row * (3u * d) + hbase;
+        const float qa = qkv[qb + j];
+        const float qbp = qkv[qb + 32u + j];
+        rk[row * d + hbase + j] = (qa * c - qbp * s) * scale;
+        rk[row * d + hbase + 32u + j] = (qbp * c + qa * s) * scale;
+    }
+    // K: rotate, into the back half of the scratch.
+    {
+        const uint kbase = row * (3u * d) + d + hbase;
+        const float ka = qkv[kbase + j];
+        const float kbp = qkv[kbase + 32u + j];
+        const uint ob = seq * d + row * d + hbase;
+        rk[ob + j] = ka * c - kbp * s;
+        rk[ob + 32u + j] = kbp * c + ka * s;
+    }
+}
+"#;
+
 /// The fused attention kernel (the Metal lane's flash form): ONE dispatch
 /// per layer over the packed qkv — split, rope, q-scale, scores, sliding
 /// window, softmax and value mix, and the head merge all in-kernel; the
@@ -702,15 +758,17 @@ constant uint FTKS = 33u;  // row stride over the Kᵀ tile's 32-wide kt rows
 
 kernel void flash_attn(
     device const float* qkv [[buffer(0)]],
-    device const float* cos [[buffer(1)]],
-    device const float* sin [[buffer(2)]],
-    device float* out [[buffer(3)]],
-    constant uint& seq [[buffer(4)]],
-    constant uint& heads [[buffer(5)]],
-    constant uint& hd [[buffer(6)]],
-    constant uint& window [[buffer(7)]],
-    constant float& scale [[buffer(8)]],
-    threadgroup float* raw [[threadgroup(9)]],
+    device const float* rk [[buffer(1)]],
+    device const float* cos [[buffer(2)]],
+    device const float* sin [[buffer(3)]],
+    device float* out [[buffer(4)]],
+    constant uint& seq [[buffer(5)]],
+    constant uint& heads [[buffer(6)]],
+    constant uint& hd [[buffer(7)]],
+    constant uint& window [[buffer(8)]],
+    constant uint& use_pre [[buffer(9)]],
+    constant float& scale [[buffer(10)]],
+    threadgroup float* raw [[threadgroup(11)]],
     uint2 gtp [[threadgroup_position_in_grid]],
     uint lid [[thread_index_in_threadgroup]])
 {
@@ -747,23 +805,34 @@ kernel void flash_attn(
     const uint hi = min(last_row + window + 1u, seq);
 
     // Stage the Q block once — one rope pair per thread, (r, j) and
-    // (r, j + 32): rotate-half RoPE, then the 1/√hd scale (the reference
-    // sequence's rope-then-scale order). Rows past seq stage zeros (the
-    // ragged block tail; their outputs are never stored).
+    // (r, j + 32). `use_pre` copies the pre-roped, pre-scaled row out of
+    // the attn_rope scratch ([row, d] natural layout); otherwise rotate-
+    // half RoPE here, then the 1/√hd scale (the reference sequence's
+    // rope-then-scale order). Rows past seq stage zeros (the ragged block
+    // tail; their outputs are never stored).
     {
         const uint r = lid >> 5u;
         const uint j = lid & 31u;
         const uint row = q0 + r;
         float qa = 0.0f, qb = 0.0f;
-        float c = 0.0f, s = 0.0f;
-        if (row < seq) {
-            qa = Q[row * (3u * d) + j];
-            qb = Q[row * (3u * d) + 32u + j];
-            c = cos[row * FHD + j];
-            s = sin[row * FHD + j];
+        if (use_pre != 0u) {
+            if (row < seq) {
+                qa = rk[row * d + h * FHD + j];
+                qb = rk[row * d + h * FHD + 32u + j];
+            }
+            ta[r * FTAS + j] = qa;
+            ta[r * FTAS + 32u + j] = qb;
+        } else {
+            float c = 0.0f, s = 0.0f;
+            if (row < seq) {
+                qa = Q[row * (3u * d) + j];
+                qb = Q[row * (3u * d) + 32u + j];
+                c = cos[row * FHD + j];
+                s = sin[row * FHD + j];
+            }
+            ta[r * FTAS + j] = (qa * c - qb * s) * scale;
+            ta[r * FTAS + 32u + j] = (qb * c + qa * s) * scale;
         }
-        ta[r * FTAS + j] = (qa * c - qb * s) * scale;
-        ta[r * FTAS + 32u + j] = (qb * c + qa * s) * scale;
     }
 
     // ONE pass — online softmax (Issue 020 T10 rung 3). Each tile's
@@ -781,10 +850,22 @@ kernel void flash_attn(
     for (uint t = lo; t < hi; t += FBQ) {
         const uint wk = min(FBQ, hi - t);   // live keys in this tile
         threadgroup_barrier(mem_flags::mem_threadgroup);
-        // Stage Kᵀ: one rope pair per thread — (kt j, j+32) × key. Reads
-        // both pair elements (the partner is outside the staged kt half
-        // but the same cache row); rotates, then writes both kt rows.
-        {
+        // Stage Kᵀ: one rope pair per thread — (kt j, j+32) × key. `use_pre`
+        // copies both pair rows out of the attn_rope scratch; otherwise
+        // reads both pair elements (the partner is outside the staged kt
+        // half but the same cache row), rotates, then writes both kt rows.
+        if (use_pre != 0u) {
+            const uint j = lid >> 5u;    // rope pair index 0..31
+            const uint key = lid & 31u;  // tile key 0..31
+            const uint krow = t + key;
+            float ka = 0.0f, kb = 0.0f;
+            if (krow < hi) {
+                ka = rk[seq * d + krow * d + h * FHD + j];
+                kb = rk[seq * d + krow * d + h * FHD + 32u + j];
+            }
+            tk[j * FTKS + key] = ka;
+            tk[(j + 32u) * FTKS + key] = kb;
+        } else {
             const uint j = lid >> 5u;    // rope pair index 0..31
             const uint key = lid & 31u;  // tile key 0..31
             const uint krow = t + key;
@@ -1150,6 +1231,22 @@ pub struct Metal {
     /// through the reference op sequence instead of the fused kernel — the
     /// A/B and bisect posture, never a silent default.
     flash_disabled: bool,
+    /// Opt-in (`LAYA_METAL_ROPE_HOIST=1`, reflex issue 020 T10 rung 2): run
+    /// the `attn_rope` pre-pass before each fused attention and let
+    /// `flash_attn`'s staging copy the pre-roped Q/K instead of re-deriving
+    /// the rope per (query block × head × key tile). Default-off — the
+    /// in-kernel rope arm is the shipped behavior; promotion follows the
+    /// quiet-box probe.
+    rope_hoist: bool,
+    /// The rope-hoist scratch: one packed `[2, seq, d]` device buffer (Q
+    /// front, K back), keyed `(d, capacity in floats)`, grow-only in seq so
+    /// a suite's variable-length questions don't churn allocations.
+    /// Persistent across passes — allocated outside the chain cache, same
+    /// lifetime class as the weight buffers. Content staleness is harmless
+    /// by construction: within a layer, `attn_rope` writes rows `< seq`
+    /// before `flash_attn` reads them (write-first dispatch pair, serial
+    /// GPU ordering), and no later op reads rows ≥ seq.
+    rope_scratch: Mutex<Option<(usize, usize, Buffer)>>,
     /// Debug-trace instance id.
     trace_id: usize,
 }
@@ -1164,7 +1261,7 @@ impl Metal {
         };
         let queue = device.new_command_queue();
         let msl = format!(
-            "{MSL_HEAD}{MSL_SGEMM_NARROW}{MSL_SGEMM_WIDE}{MSL_SGEMM_XWIDE}{MSL_FLASH}{MSL_TAIL}"
+            "{MSL_HEAD}{MSL_SGEMM_NARROW}{MSL_SGEMM_WIDE}{MSL_SGEMM_XWIDE}{MSL_FLASH}{MSL_ATTN_ROPE}{MSL_TAIL}"
         );
         let lib = device
             .new_library_with_source(&msl, &metal::CompileOptions::new())
@@ -1194,6 +1291,8 @@ impl Metal {
                 .and_then(|v| v.parse().ok())
                 .unwrap_or(0),
             flash_disabled: std::env::var("LAYA_METAL_FLASH").as_deref() == Ok("0"),
+            rope_hoist: std::env::var("LAYA_METAL_ROPE_HOIST").as_deref() == Ok("1"),
+            rope_scratch: Mutex::new(None),
             trace_id: next_trace_instance(),
         })
     }
@@ -1299,6 +1398,27 @@ impl Metal {
             (std::mem::size_of::<f32>() * len_f32) as u64,
             RESOURCE_OPTIONS,
         )
+    }
+
+    /// The rope-hoist scratch for a `[2, seq, d]` pre-pass output — reuse
+    /// while `(d, capacity)` covers the request, else allocate with headroom
+    /// (a suite's per-question seq spread must not churn device
+    /// allocations). Dropping a replaced buffer is safe even against
+    /// unwaited commands: Metal command buffers retain their referenced
+    /// objects, and every forward syncs before the next realloc point.
+    fn rope_hoist_buf(&self, seq: usize, d: usize) -> Buffer {
+        let need = 2 * seq * d;
+        let mut g = self.rope_scratch.lock().expect("rope scratch poison");
+        if let Some((cd, cap, b)) = g.as_ref()
+            && *cd == d
+            && *cap >= need
+        {
+            return b.clone();
+        }
+        let cap = need + need / 2;
+        let b = self.scratch(cap);
+        *g = Some((d, cap, b.clone()));
+        b
     }
 
     /// Host-read barrier: commit the open pass buffer, then wait every
@@ -1796,6 +1916,53 @@ impl Backend for Metal {
         // window clamped to seq: full attention ⇒ lo 0 / hi seq in-kernel
         // (and no u32 overflow in the key-range arithmetic).
         let w = window.min(seq) as u32;
+        let d = heads * hd;
+        // Opt-in rope hoist (issue 020 T10 rung 2): derive the Q/K rope ONCE
+        // per layer into the scratch, then flash_attn's staging copies.
+        // Off: the scratch bind is a harmless placeholder (the kernel's
+        // `use_pre` arm is dead) and the staging rotates in place — the
+        // shipped behavior, bit-identical.
+        let use_pre = self.rope_hoist;
+        let rk = if use_pre {
+            self.rope_hoist_buf(seq, d)
+        } else {
+            qb.clone()
+        };
+        if use_pre {
+            let rope_k = self
+                .pipelines
+                .get("attn_rope")
+                .ok_or_else(|| rt("kernel attn_rope missing"))
+                .unwrap_or_else(|e| panic!("{e}"));
+            // One thread per rope pair: seq · d/2 threads, d even at the
+            // pinned hd = 64. Same `run`-shaped grid convention.
+            let pairs = ((seq * d) / 2) as u64;
+            let twidth = rope_k.width.max(1);
+            self.encode(
+                &rope_k.p,
+                &[
+                    (&qb, (qkv_off * 4) as u64),
+                    (&cb, (rope_row * hd * 4) as u64),
+                    (&sb, (rope_row * hd * 4) as u64),
+                    (&rk, 0),
+                ],
+                &[seq as u32, d as u32],
+                &[scale],
+                MTLSize {
+                    width: pairs.div_ceil(twidth).max(1),
+                    height: 1,
+                    depth: 1,
+                },
+                MTLSize {
+                    width: twidth,
+                    height: 1,
+                    depth: 1,
+                },
+                None,
+                true,
+            )
+            .unwrap_or_else(|e| panic!("{e}"));
+        }
         let k = self
             .pipelines
             .get("flash_attn")
@@ -1805,11 +1972,12 @@ impl Backend for Metal {
             &k.p,
             &[
                 (&qb, (qkv_off * 4) as u64),
+                (&rk, 0),
                 (&cb, (rope_row * hd * 4) as u64),
                 (&sb, (rope_row * hd * 4) as u64),
                 (&ob, (out_off * 4) as u64),
             ],
-            &[seq as u32, heads as u32, hd as u32, w],
+            &[seq as u32, heads as u32, hd as u32, w, u32::from(use_pre)],
             &[scale],
             MTLSize {
                 width: u64::from(seq as u32).div_ceil(FLASH_BQ),
@@ -1821,7 +1989,7 @@ impl Backend for Metal {
                 height: 1,
                 depth: 1,
             },
-            Some(&[(9, FLASH_STAGING_BYTES)]),
+            Some(&[(11, FLASH_STAGING_BYTES)]),
             true,
         )
         .unwrap_or_else(|e| panic!("{e}"));
