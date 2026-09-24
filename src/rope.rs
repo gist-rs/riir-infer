@@ -759,3 +759,82 @@ mod tests {
         );
     }
 }
+
+/// Undo llama.cpp's Q/K row permutation for `llama`-architecture GGUFs.
+///
+/// `convert_hf_to_gguf.py` (`LlamaModel.permute`) stores Q/K for the
+/// INTERLEAVED RoPE convention: within each head, GGUF row `2j + s` is HF row
+/// `s·(hd/2) + j`. This crate's RoPE is rotate-half (pairs `i` with
+/// `i + hd/2`, HF's `rotate_half`), so the rows go back to HF order here.
+/// Without it every position `> 0` rotates the wrong dimension pairs — finite,
+/// plausible, and wrong.
+///
+/// `w` is row-major `[n_heads · head_dim, n_in]`.
+pub fn unpermute_interleaved_rows(w: Vec<f32>, n_heads: usize, head_dim: usize) -> Vec<f32> {
+    let rows = n_heads * head_dim;
+    assert!(
+        head_dim.is_multiple_of(2) && rows > 0 && w.len().is_multiple_of(rows),
+        "unpermute_interleaved_rows: shape"
+    );
+    let n_in = w.len() / rows;
+    let half = head_dim / 2;
+    let mut out = vec![0.0f32; w.len()];
+    for h in 0..n_heads {
+        for j in 0..half {
+            for s in 0..2 {
+                let src = (h * head_dim + 2 * j + s) * n_in;
+                let dst = (h * head_dim + s * half + j) * n_in;
+                out[dst..dst + n_in].copy_from_slice(&w[src..src + n_in]);
+            }
+        }
+    }
+    out
+}
+
+#[cfg(test)]
+mod unpermute_tests {
+    use super::unpermute_interleaved_rows;
+
+    /// llama.cpp `LlamaModel.permute`, transcribed: `reshape(n_head, 2,
+    /// hd/2, n_in).swapaxes(1, 2)` — HF row `s·half + j` lands at GGUF row
+    /// `2j + s`.
+    fn permute(w: &[f32], n_heads: usize, hd: usize) -> Vec<f32> {
+        let n_in = w.len() / (n_heads * hd);
+        let half = hd / 2;
+        let mut out = vec![0.0; w.len()];
+        for h in 0..n_heads {
+            for s in 0..2 {
+                for j in 0..half {
+                    let src = (h * hd + s * half + j) * n_in;
+                    let dst = (h * hd + 2 * j + s) * n_in;
+                    out[dst..dst + n_in].copy_from_slice(&w[src..src + n_in]);
+                }
+            }
+        }
+        out
+    }
+
+    /// The direction, pinned on a head where the map is NOT an involution
+    /// (`hd = 6`; at `hd = 4` both directions agree): GGUF rows
+    /// `[0, 3, 1, 4, 2, 5]` go back to HF `[0..6)`.
+    #[test]
+    fn unpermute_restores_hf_row_order() {
+        let gguf: Vec<f32> = [0.0, 3.0, 1.0, 4.0, 2.0, 5.0].to_vec();
+        assert_eq!(
+            unpermute_interleaved_rows(gguf, 1, 6),
+            vec![0.0, 1.0, 2.0, 3.0, 4.0, 5.0]
+        );
+    }
+
+    /// Inverse of the converter's permutation for multi-head, multi-column
+    /// (GQA-shaped) weights.
+    #[test]
+    fn unpermute_inverts_the_converter() {
+        let (n_heads, hd, n_in) = (3, 8, 5);
+        let w: Vec<f32> = (0..n_heads * hd * n_in).map(|i| i as f32).collect();
+        assert_eq!(
+            unpermute_interleaved_rows(permute(&w, n_heads, hd), n_heads, hd),
+            w
+        );
+    }
+}

@@ -1185,7 +1185,10 @@ pub fn load_gemma2_weights_gguf(path: &Path) -> Result<(Config, GemmaTransformer
 ///
 /// F16-type tensors only: a quantized gemma-2 GGUF must go through the
 /// f32 dequant path (not this loader).
-pub fn load_gemma2_f16_direct(gguf: &GgufFile, config: &Config) -> Result<GemmaTransformerWeightsF16> {
+pub fn load_gemma2_f16_direct(
+    gguf: &GgufFile,
+    config: &Config,
+) -> Result<GemmaTransformerWeightsF16> {
     let read_f16 = |name: &str| -> Result<Vec<half::f16>> {
         let slice = gguf
             .tensor_slice(name)
@@ -1227,9 +1230,13 @@ pub fn load_gemma2_f16_direct(gguf: &GgufFile, config: &Config) -> Result<GemmaT
         final_norm,
         layers,
         #[cfg(feature = "delta_routing")]
-        delta_routing_query: (0..config.n_layer).map(|_| vec![0.0; config.n_embd]).collect(),
+        delta_routing_query: (0..config.n_layer)
+            .map(|_| vec![0.0; config.n_embd])
+            .collect(),
         #[cfg(feature = "delta_routing")]
-        delta_routing_norm: (0..config.n_layer).map(|_| vec![1.0; config.n_embd]).collect(),
+        delta_routing_norm: (0..config.n_layer)
+            .map(|_| vec![1.0; config.n_embd])
+            .collect(),
     })
 }
 
@@ -1406,8 +1413,16 @@ pub fn load_llama_weights_gguf(
     for i in 0..n_layer {
         let ln = llama_gguf_layer_names(i);
         let layer = crate::llama_layer::LlamaLayerWeights {
-            attn_wq: gguf.dequant_f16_to_f32(&ln.attn_q)?,
-            attn_wk: gguf.dequant_f16_to_f32(&ln.attn_k)?,
+            attn_wq: crate::rope::unpermute_interleaved_rows(
+                gguf.dequant_f16_to_f32(&ln.attn_q)?,
+                config.n_head,
+                config.head_dim,
+            ),
+            attn_wk: crate::rope::unpermute_interleaved_rows(
+                gguf.dequant_f16_to_f32(&ln.attn_k)?,
+                config.n_kv_head,
+                config.head_dim,
+            ),
             attn_wv: gguf.dequant_f16_to_f32(&ln.attn_v)?,
             attn_wo: gguf.dequant_f16_to_f32(&ln.attn_output)?,
             gate_proj: gguf.dequant_f16_to_f32(&ln.ffn_gate)?,
