@@ -53,4 +53,9 @@ pub mod weights;
 #[cfg(all(target_os = "macos", feature = "laya-riir-metal"))]
 pub mod metal;
 
+/// The Apple Neural Engine whole-graph backend (`laya-riir-ane`, macOS) —
+/// compiles to nothing everywhere else.
+#[cfg(all(target_os = "macos", feature = "laya-riir-ane"))]
+pub mod ane;
+
 pub use agent::RiirAgent;

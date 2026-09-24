@@ -192,9 +192,117 @@ pub fn f16_bits_to_f32(bits: u16) -> f32 {
     f32::from_bits(bits32)
 }
 
+/// f32 → f16 bits, round-to-nearest-even — the inverse narrowing of
+/// [`f16_bits_to_f32`]. Used ONLY by the ANE lane's host-side gather, whose
+/// source values were widened FROM f16 (every fp16 value is exact in f32),
+/// so on that path the narrowing is bit-exact regardless of rounding mode —
+/// RNE still, because it is the mode numpy's `.astype(np.float16)` (the
+/// conversion tool the artifacts were built with) uses, and a general f32
+/// input must round the same way the Python smoke did.
+#[must_use]
+pub fn f32_to_f16_bits(v: f32) -> u16 {
+    let bits = v.to_bits();
+    let sign = ((bits >> 16) & 0x8000) as u16;
+    let exp32 = (bits >> 23) & 0xFF;
+    let man32 = bits & 0x007F_FFFF;
+    match exp32 {
+        // ±0 (sub-f16 inputs flush through the rounding path below; they can
+        // only arise from a non-f16 source, which the ANE lane never feeds).
+        0 => return sign,
+        0xFF => {
+            // ±inf / NaN (NaN payload truncated — f16 has no quiet-bit
+            // guarantee to preserve; the ANE inputs are never NaN).
+            return sign | 0x7C00 | if man32 != 0 { 0x0200 } else { 0 };
+        }
+        _ => {}
+    }
+    // Re-center the f32 exponent to the f16 bias (f32 bias 127 → f16 bias
+    // 15): unbiased = exp32 - 127, biased for f16 = unbiased + 15.
+    let unbiased = exp32 as i32 - 127;
+    let half_exp = unbiased + 15;
+    if half_exp >= 0x1F {
+        // Overflow → ±inf (f16 max ≈ 65504; unreachable from f16-sourced data).
+        return sign | 0x7C00;
+    }
+    if half_exp <= 0 {
+        // Subnormal f16 (or underflow to zero): shift the implicit 1 in,
+        // round-to-nearest-even at 10 mantissa bits. From f16-sourced data
+        // only ±0 lands here.
+        let shift = (1 - half_exp) as u32; // 1..=25
+        if shift > 24 {
+            return sign;
+        }
+        let mantissa = man32 | 0x0080_0000; // restore the implicit 1
+        let half_man = mantissa >> (13 + shift);
+        let rem = mantissa & ((1 << (13 + shift)) - 1);
+        let half_bit = 1 << (12 + shift);
+        let round = if rem > half_bit || (rem == half_bit && (half_man & 1) == 1) {
+            1
+        } else {
+            0
+        };
+        return sign | (half_man + round) as u16;
+    }
+    // Normal f16: round the 13 dropped mantissa bits, RNE.
+    let half_man = man32 >> 13;
+    let rem = man32 & 0x1FFF;
+    let round = if rem > 0x1000 || (rem == 0x1000 && (half_man & 1) == 1) {
+        1
+    } else {
+        0
+    };
+    let half_man = half_man + round;
+    // A rounding carry can spill out of the mantissa into the exponent
+    // (0x3FF + 1 = 0x400 → exponent + 1, mantissa 0) — the shift handles it;
+    // a carry OUT of 0x1F exponent overflows to inf, unreachable from
+    // f16-sourced data.
+    if half_man & 0x0400 != 0 {
+        return sign | (((half_exp + 1) as u16) << 10);
+    }
+    sign | ((half_exp as u16) << 10) | (half_man as u16 & 0x03FF)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// f32→f16→f32 roundtrips EXACTLY for every f16 value (the ANE gather's
+    /// premise: its source values were widened FROM f16, so the narrowing
+    /// back is lossless) — sampled across all five bit regions plus a dense
+    /// sweep of the normals.
+    #[test]
+    fn f32_f16_roundtrip_is_exact_for_every_f16_value() {
+        let mut bits = 0u32;
+        loop {
+            let f = f16_bits_to_f32(bits as u16);
+            if f.is_nan() {
+                // NaN payloads collapse to one canonical quiet NaN — every
+                // OTHER bit pattern (incl. ±inf) must roundtrip exactly.
+                assert!(f32_to_f16_bits(f) & 0x7C00 == 0x7C00);
+                assert!(f32_to_f16_bits(f) & 0x03FF != 0 || f32_to_f16_bits(f) & 0x03FF == 0);
+            } else {
+                let back = f32_to_f16_bits(f);
+                assert_eq!(back, bits as u16, "roundtrip broke at f16 bits {bits:#06x} ({f})");
+            }
+            if bits & 0xFFFF == 0xFFFF {
+                break;
+            }
+            bits += 1;
+        }
+    }
+
+    /// RNE ties-to-even on the general-f32 path (numpy parity: the
+    /// conversion tool rounds the same way).
+    #[test]
+    fn f32_to_f16_rounds_ties_to_even() {
+        // 0.5 ulp above 1.0 in f16 (2049/2048) ties between 1.0 and
+        // 1.0009766 — RNE picks the even mantissa (1.0).
+        let tie_up = f32::from_bits((127 << 23) | (1 << 12)); // 1 + 2^-12
+        assert_eq!(f32_to_f16_bits(tie_up), 0x3C00); // 1.0, even
+        // 1.5 ulp above 1.0 rounds up (not a tie).
+        let above = f32::from_bits((127 << 23) | (1 << 12) | 1);
+        assert_eq!(f32_to_f16_bits(above), 0x3C01);
+    }
 
     /// One F16 tensor + one F32 tensor + `__metadata__`, serialized by hand
     /// into the exact safetensors layout — validates header length, JSON

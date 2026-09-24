@@ -66,6 +66,16 @@ libm = { version = "0.2", optional = true }
 # AT the metal posture after any bump of either dep.
 metal = { version = "0.31", optional = true }
 objc2 = { version = "0.6", optional = true }
+# The Apple Neural Engine backend (`laya-riir-ane`): the whole-graph
+# Core ML executor over the digest-pinned BC1S `.mlpackage` artifacts
+# (reflex Plan 002 P0's offline conversion; the plan gate ran THERE —
+# this runtime re-verifies at load). Same target-scoping rule as metal:
+# inert on every non-macOS host. `block2` is the ObjC block runtime the
+# no-copy input arrays (`initWithDataPointer`), the output reader
+# (`getBytesWithHandler`) and the async `MLComputePlan` loader all need.
+objc2-core-ml = { version = "0.3", optional = true, features = ["block2"] }
+objc2-foundation = { version = "0.3", optional = true }
+block2 = { version = "0.6", optional = true }
 
 [features]
 # The checkpoint lane (substrate + the flat-Vec CPU forward).
@@ -74,6 +84,14 @@ laya-riir = ["dep:serde", "dep:tokenizers", "dep:sha2", "dep:blake3", "dep:gemm"
 # runtime (`LAYA_DEVICE=cpu` opts out); requesting metal without the
 # feature or platform fails LOUD, never a silent CPU fallback.
 laya-riir-metal = ["laya-riir", "dep:metal", "dep:objc2"]
+# The Apple Neural Engine whole-graph backend (macOS-only, opt-in, never
+# wasm32, never a default): the encoder forward executes a digest-pinned
+# BC1S Core ML `.mlpackage` (converted OFFLINE by the consumer repo's
+# `ane_convert.py` — Plan 002 P0), the gather stays host-side fp16, and
+# the existing f32 head consumes the sliced hidden state UNCHANGED. Not
+# in any default set: the artifact tree is local-only (~3 GB) and the
+# lane's parity authority is the consumer-side G5-ANE gate.
+laya-riir-ane = ["laya-riir", "dep:objc2", "dep:objc2-core-ml", "dep:objc2-foundation", "dep:block2"]
 
 # The Metal-vs-CPU op-equivalence gate is whole-file #![cfg]-gated
 # (macOS + the metal feature) and compiles to an empty binary elsewhere;

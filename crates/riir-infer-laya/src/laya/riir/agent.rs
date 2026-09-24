@@ -12,13 +12,14 @@
 //! `LAYA_DEVICE` is HONORED here (`.issues/005`): unset → the build's
 //! default posture (Metal on macOS with `laya-riir-metal` compiled — the
 //! Plan 001 T4 watchability default; CPU elsewhere), explicit `cpu`/`metal`
-//! is honored verbatim, anything else fails loud.
-//! `Cpu` backend (the lane's original posture); `metal` → the MSL backend
-//! ([`super::metal`], feature `laya-riir-metal`, macOS) — fail loud when
-//! the feature or platform is absent, never a silent CPU fallback (the
-//! candle lane's `device_from_env` precedent). The gate law is unchanged:
-//! G5 parity must be green at WHICHEVER posture a number is published
-//! from.
+//! is honored verbatim, `ane` selects the whole-graph Apple Neural Engine
+//! lane (feature `laya-riir-ane`, macOS — Plan 002 P1) and — like `metal`
+//! — fails loud when the feature or platform is absent, never a silent
+//! fallback. Anything else fails loud too (an env typo must never fall
+//! back to CPU — the candle lane's `device_from_env` precedent). The gate
+//! law is unchanged: G5 parity must be green at WHICHEVER posture a number
+//! is published from (for the ANE lane, that is the consumer-side
+//! G5-ANE decision-level gate).
 
 use serde_json::Value;
 
@@ -40,24 +41,31 @@ pub enum DeviceKind {
     Cpu,
     /// The MSL backend (`laya-riir-metal`, macOS).
     Metal,
+    /// The Apple Neural Engine whole-graph lane (`laya-riir-ane`, macOS —
+    /// reflex Plan 002 P1). The encoder runs a Core ML artifact; the head
+    /// stays on the CPU backend.
+    Ane,
 }
 
 impl DeviceKind {
     /// Resolve `LAYA_DEVICE` — unset/empty → [`Self::default_device`]
     /// (Metal when this build SHIPS the Metal backend on macOS, CPU
     /// everywhere else — the measured ~2× forward is the arena
-    /// watchability default, Plan 001 T4), `cpu` → [`DeviceKind::Cpu`]
-    /// (the explicit opt-out), `metal` → [`DeviceKind::Metal`], anything
-    /// else is an error (an env typo must fail loud, never fall back).
+    /// watchability default, Plan 001 T4; ANE is NEVER a default — the
+    /// artifact tree is local-only and the lane is opt-in), `cpu` →
+    /// [`DeviceKind::Cpu`] (the explicit opt-out), `metal` →
+    /// [`DeviceKind::Metal`], `ane` → [`DeviceKind::Ane`], anything else
+    /// is an error (an env typo must fail loud, never fall back).
     pub fn from_env() -> Result<Self> {
         match std::env::var("LAYA_DEVICE").as_deref() {
             Ok("") | Err(_) => Ok(Self::default_device()),
             Ok("cpu") => Ok(Self::Cpu),
             Ok("metal") => Ok(Self::Metal),
+            Ok("ane") => Ok(Self::Ane),
             Ok(other) => Err(LayaError::Config {
                 checkpoint: "riir",
                 detail: format!(
-                    "unknown LAYA_DEVICE {other:?} — expected unset, \"cpu\" or \"metal\""
+                    "unknown LAYA_DEVICE {other:?} — expected unset, \"cpu\", \"metal\" or \"ane\""
                 ),
             }),
         }
@@ -94,13 +102,28 @@ fn pass_pool<T>(f: impl FnOnce() -> T) -> T {
     f()
 }
 
+/// The encoder half of the stack: the per-op lanes share the op-stream
+/// [`Encoder`]; the ANE lane swaps in the whole-graph executor. One enum
+/// at ONE seam — `forward_internal`'s match is the only place the two
+/// shapes meet (the head consumes `[n, d]` f32 either way).
+enum EncoderStack {
+    Local(Encoder),
+    #[cfg(all(target_os = "macos", feature = "laya-riir-ane"))]
+    Ane(super::ane::AneEncoder),
+}
+
 /// A loaded checkpoint (riir backend): tokenizer + encoder + head +
 /// temperature tables, plus the device backend the forward runs on.
 pub struct RiirAgent {
     tok: Tok,
-    enc: Encoder,
+    enc: EncoderStack,
     head: Head,
     backend: Box<dyn Backend>,
+    /// The posture label (`"cpu"` / `"metal"` / `"ane"`) — stored, not
+    /// derived from `backend.name()`, because the ANE posture's HEAD runs
+    /// the CPU backend while the lane label must read `ane` (a timing
+    /// line can never be mistaken for another posture).
+    device_label: &'static str,
     temps: Temperatures,
     cfg: AgentConfig,
     ckpt: &'static str,
@@ -112,46 +135,136 @@ impl RiirAgent {
     /// parsed ONCE and split between encoder and head (weights are removed
     /// from the map, no second copy).
     pub fn load(root: &std::path::Path, ckpt: Checkpoint) -> Result<Self> {
+        Self::load_inner(root, ckpt, None)
+    }
+
+    /// Load one checkpoint for the ANE posture (Plan 002 P1): the encoder
+    /// half executes the digest-pinned Core ML artifacts under `ane_root`
+    /// (verified against `manifest_path`), the gather + head stay host-side.
+    /// Only meaningful when `LAYA_DEVICE=ane` selected the ANE lane; call
+    /// it instead of [`Self::load`] with the same env set.
+    #[cfg(all(target_os = "macos", feature = "laya-riir-ane"))]
+    pub fn load_ane(
+        root: &std::path::Path,
+        ckpt: Checkpoint,
+        ane_root: &std::path::Path,
+        manifest_path: &std::path::Path,
+    ) -> Result<Self> {
+        Self::load_inner(root, ckpt, Some((ane_root, manifest_path)))
+    }
+
+    fn load_inner(
+        root: &std::path::Path,
+        ckpt: Checkpoint,
+        ane: Option<(&std::path::Path, &std::path::Path)>,
+    ) -> Result<Self> {
+        // The explicit ANE constructor owns its posture (no env round-trip:
+        // `load_ane` is the ANE lane, whatever `LAYA_DEVICE` says — an env
+        // value can never silently demote an explicitly requested lane);
+        // the plain constructor resolves the env as before.
+        let device = match ane {
+            Some(_) => DeviceKind::Ane,
+            None => DeviceKind::from_env()?,
+        };
+        #[cfg(all(target_os = "macos", feature = "laya-riir-ane"))]
+        let ane_requested = ane.is_some();
+        #[cfg(not(all(target_os = "macos", feature = "laya-riir-ane")))]
+        let ane_requested = false;
+        if device == DeviceKind::Ane && !ane_requested {
+            return Err(LayaError::Config {
+                checkpoint: ckpt.subfolder(),
+                detail: "the ANE lane needs --features laya-riir-ane on macOS, and an \
+                         explicit RiirAgent::load_ane(root, ckpt, ane_root, manifest) — \
+                         LAYA_DEVICE=ane through the plain constructor is refused \
+                         (fail loud, never a silent fallback)"
+                    .into(),
+            });
+        }
         let dir = ensure_checkpoint(root, ckpt)?;
         let name = ckpt.subfolder();
         let (agent_cfg, enc_cfg) = load_checkpoint_configs(&dir, name)?;
 
         let tok = Tok::from_dir(&dir, name)?;
         let mut raw = super::weights::load(&dir.join("model.safetensors"), name)?;
-        let enc = Encoder::from_map(&mut raw, enc_cfg.clone(), name)?;
-        let head = Head::from_map(&mut raw, name, enc_cfg.hidden, enc_cfg.eps)?;
 
-        let backend: Box<dyn Backend> = match DeviceKind::from_env()? {
-            DeviceKind::Cpu => Box::new(Cpu),
-            #[cfg(all(target_os = "macos", feature = "laya-riir-metal"))]
-            DeviceKind::Metal => Box::new(super::metal::Metal::new()?),
-            #[cfg(not(all(target_os = "macos", feature = "laya-riir-metal")))]
-            DeviceKind::Metal => {
-                return Err(LayaError::Config {
-                    checkpoint: name,
-                    detail: "LAYA_DEVICE=metal needs --features laya-riir-metal on macOS — \
-                             this build has no Metal backend (fail loud, never a silent \
-                             CPU fallback)"
-                        .into(),
-                });
+        let (enc, backend): (EncoderStack, Box<dyn Backend>) = if ane_requested {
+            #[cfg(all(target_os = "macos", feature = "laya-riir-ane"))]
+            {
+                let Some((ane_root, manifest_path)) = ane else {
+                    return Err(LayaError::Config {
+                        checkpoint: name,
+                        detail: "ANE posture selected but no artifact root/ manifest path — \
+                                 call RiirAgent::load_ane".into(),
+                    });
+                };
+                let enc = super::ane::AneEncoder::from_map(
+                    &mut raw,
+                    enc_cfg.clone(),
+                    name,
+                    name,
+                    tok.pad,
+                    ane_root.to_path_buf(),
+                    manifest_path,
+                )?;
+                // The head runs the plain CPU backend (f32, unchanged).
+                (EncoderStack::Ane(enc), Box::new(Cpu))
             }
+            #[cfg(not(all(target_os = "macos", feature = "laya-riir-ane")))]
+            {
+                let _ = ane;
+                unreachable!("ane_requested is only true behind the ane feature")
+            }
+        } else {
+            let enc = Encoder::from_map(&mut raw, enc_cfg.clone(), name)?;
+            let backend: Box<dyn Backend> = match device {
+                DeviceKind::Cpu => Box::new(Cpu),
+                #[cfg(all(target_os = "macos", feature = "laya-riir-metal"))]
+                DeviceKind::Metal => Box::new(super::metal::Metal::new()?),
+                #[cfg(not(all(target_os = "macos", feature = "laya-riir-metal")))]
+                DeviceKind::Metal => {
+                    return Err(LayaError::Config {
+                        checkpoint: name,
+                        detail: "LAYA_DEVICE=metal needs --features laya-riir-metal on macOS — \
+                                 this build has no Metal backend (fail loud, never a silent \
+                                 CPU fallback)"
+                            .into(),
+                    });
+                }
+                DeviceKind::Ane => unreachable!("handled above"),
+            };
+            (EncoderStack::Local(enc), backend)
         };
+        // `raw` still holds the head's tensors (the encoder took its own;
+        // in the ANE posture only the embedding table left the map). The
+        // layer weights are dropped here — the ANE artifact holds them.
+        let head = Head::from_map(&mut raw, name, enc_cfg.hidden, enc_cfg.eps)?;
+        drop(raw);
 
         // riir-reflex Issue 020 T1 — device residency is a LOAD cost, not a
         // first-request cost. Without this the ~0.5 GB of f32 projections
         // (english geometry) upload lazily inside `system_one` #1, which is
         // the call the bench times and the call a served client waits on;
         // the torch reference moves its weights inside `load`, before its
-        // own handshake. No-op on the CPU backend.
-        enc.warm(backend.as_ref());
+        // own handshake. The ANE lane's encoder carries no per-op weights
+        // (the artifact holds them fp16); its head still warms. No-op on
+        // the CPU backend.
+        if let EncoderStack::Local(enc) = &enc {
+            enc.warm(backend.as_ref());
+        }
         head.warm(backend.as_ref());
 
         let temps = Temperatures::from_config(&agent_cfg);
+        let device_label = if ane_requested {
+            "ane"
+        } else {
+            backend.name()
+        };
         Ok(Self {
             tok,
             enc,
             head,
             backend,
+            device_label,
             temps,
             cfg: agent_cfg,
             ckpt: name,
@@ -163,11 +276,11 @@ impl RiirAgent {
         self.ckpt
     }
 
-    /// The backend posture this agent runs (`"cpu"` / `"metal"`) — gate
-    /// lines and timing labels print it so a reading can never be mistaken
-    /// for the other posture.
+    /// The backend posture this agent runs (`"cpu"` / `"metal"` /
+    /// `"ane"`) — gate lines and timing labels print it so a reading can
+    /// never be mistaken for the other posture.
     pub fn device(&self) -> &'static str {
-        self.backend.name()
+        self.device_label
     }
 
     /// Forward one question against `state` — one unpadded sequence, the
@@ -194,10 +307,15 @@ impl RiirAgent {
         // One autoreleasepool per forward: the Metal backend's per-op
         // autoreleased command buffers drain here instead of accumulating
         // on a thread with no Cocoa runloop (a no-op wrapper without the
-        // metal feature — one code path for both postures).
+        // metal feature — one code path for both postures). The ANE lane's
+        // Core ML calls drain their autoreleased temporaries here too.
         let out = pass_pool(|| -> Result<HeadOutput> {
             self.backend.begin_pass();
-            let mut hidden = self.enc.forward(self.backend.as_ref(), &ids)?;
+            let mut hidden = match &self.enc {
+                EncoderStack::Local(e) => e.forward(self.backend.as_ref(), &ids)?,
+                #[cfg(all(target_os = "macos", feature = "laya-riir-ane"))]
+                EncoderStack::Ane(e) => e.forward(&ids)?,
+            };
             self.head
                 .forward(self.backend.as_ref(), &mut hidden, q.qtype, &markers)
         })?;
