@@ -4,6 +4,66 @@ Durable records for resolved questions and closed lanes (the noise-reduction
 convention: the record lands here, hash-pinned; open work lives in `.issues/`
 and `.plans/`). Created 2026-09-23 at the first record.
 
+## 2026-09-25 — Issue 008 CLOSED: the narrow reg4 rung — NEGATIVE, the narrow zone is TLP-bound, not bandwidth-bound
+
+The `.issues/007` open question ("the NARROW instance (1×4 fragment, ~20 %
+ceiling, m<256 single-wave zone) is the next relative laggard — a narrow
+reg4 arm is the recorded follow-up rung") is answered **NO on measurement**,
+and the measurement's real yield is the mechanism: **the narrow zone's
+binding constraint is thread-level parallelism, not shared-memory
+bandwidth** — register blocking, which trades warps for bytes-per-FMA, is
+the wrong currency exactly where the ladder runs 1 block per SM.
+
+**The rung** (built, measured, reverted): `sgemm_narrow_reg4` — the 007
+family 4×4 fragment (16 accumulators, 4 LDS.32 + 1 LDS.128 per 16 FMAs =
+2 B/FMA vs the 2-acc narrow's 5, ceiling 20 %→ 50 % on the 007 roofline
+arithmetic). The fragment-area law forces a 32×16 warp tile; on the narrow
+32×64×BK64 tile that is a 1×4 warp grid = **128 threads** (vs 512). Same
+tiles, same staging footprints, same grid arithmetic — every block-fit
+property carries over; per-output accumulation k-ascending in one thread
+(bit-identical held on EVERY probe shape, both postures, both runs).
+
+**Measured** (`sgemm_shape_timing`, the `LAYA_CUDA_REG4` A/B axis — the
+narrow rows went live for the first time; two full runs, quiet box, GUI-class
+load only): every true narrow-served row regressed **+41..+177 %** —
+106×1024×1024 50→125 µs (+150/+139 %), 106×2624×1024 119→332 µs
+(+178/+171 %), the n=1536/2048 crossover rows +139/+152 %, short-seq
+45×1024×1024 +151/+157 %, the m=4/1 head tails +118/+41 %, act a0 +113 %.
+Ten times outside the ±8-15 % instrument band — no `--control` arm needed to
+adjudicate. The wide/xwide-class rows (n ≥ 2560 at m=106, banking77, the
+packed zone) re-measured the 007 rung at −2.6..−20 % on both runs — the
+consistency check; the one historically noisy row (packed O 424) flipped
++12 %→−12 % between runs exactly as the recorded band predicts.
+
+**The mechanism, read off the kernel's own structure**: the narrow zone's
+grids are ≤ 128 blocks BY CONSTRUCTION (the block-fit pick) — 1 block per SM,
+so the SM's latency hiding is the block's warps and nothing else. The
+k-loop is sync→stage→sync→compute: staging is 48 global loads per thread
+per k-tile (A 16 + B 32 at 128 threads), and with 4 warps the DRAM/L2
+latency of a stage is exposed almost fully — 16 warps (512 threads) at
+least keep 4× the loads in flight and 4× the barrier-arrival slack. The
+2 B/FMA bandwidth win is real but irrelevant: the measured narrow ceiling
+was never the 20 % roofline — at m=106 the 2-acc narrow computes at ~5 %
+of fp32 peak (50 µs for 222 MFLOP), i.e. the zone sits ~4× under its own
+bandwidth ceiling already. Cutting warps scaled the wall time almost
+exactly as TLP arithmetic predicts (512→128 threads ≈ 4× offered parallelism
+→ 2.3-2.8× wall on the load-dominated loop).
+
+**Verdict** (the pre-registered gate's NO-GO path): no partial win, no
+carve-out — every true narrow row lost. `cuda.rs` reverted byte-identical
+to the pre-rung state (the BK48 precedent — only the docs carry the
+negative); the kernel is not kept behind a switch because there is no
+posture in which it wins.
+
+**The follow-up rung this record opens** (replacing the 007 pointer):
+the narrow zone needs LATENCY hidden, not bandwidth saved —
+**double-buffered staging / `cp.async`** (prefetch k-tile t+1's A/B while
+computing t, sm_89's async copy path bypassing registers) is the recorded
+next lever. Note the symmetry with the 007 record: double buffering was
+correctly dismissed for the BANDWIDTH-bound wide zone and is exactly the
+right repair for the LATENCY-bound narrow zone — the two zones' rooflines
+diverge, so their rungs must too.
+
 ## 2026-09-25 — Issue 007 CLOSED: the register-blocking sgemm rung — 4×4 fragments, −9..−21 % kernel on every wide/xwide shape
 
 The `.issues/006` follow-up rung ("register blocking / double-buffered
