@@ -120,9 +120,11 @@ required-features = ["bonsai2_hadamard"]
 # ─── Workspace ────────────────────────────────────────────────────────
 # The repo is a root-package workspace: riir-infer-core at the root,
 # the GPU kernel layer as a member (it carries the wgpu/cubecl tree,
-# which CPU-only consumers of the core never resolve into their builds).
+# which CPU-only consumers of the core never resolve into their builds),
+# and the pinned-checkpoint encoder lane as a member (it carries the
+# tokenizers/gemm tree, which lane-free consumers never resolve).
 [workspace]
-members = ["crates/riir-infer-gpu"]
+members = ["crates/riir-infer-gpu", "crates/riir-infer-laya"]
 
 # Shared dep declarations for members (the fence resolves path deps from
 # each manifest's own directory, so member manifests inherit this instead

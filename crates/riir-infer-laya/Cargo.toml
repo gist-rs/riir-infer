@@ -1,0 +1,85 @@
+[package]
+name = "riir-infer-laya"
+version = "0.1.0"
+edition = "2024"
+license = "MIT"
+description = "Pinned-checkpoint encoder lane: tokenizer/config/weights substrate, flat-Vec CPU forward, and the macOS Metal (MSL) backend"
+publish = false
+
+# riir-infer-laya — the pinned-checkpoint encoder lane: the Python-JSON
+# byte writer (ungated, one DRY home for every consumer), the
+# tokenizer / config / weights (locate -> verify -> download) substrate,
+# the answer envelopes, and the flat-`Vec<f32>` forward with its two
+# compute backends — CPU (`gemm`) and the macOS Metal MSL family — behind
+# the `laya-riir` / `laya-riir-metal` features. Zero `riir-*` dependencies
+# (fence-gated). The public decision-engine serving repo consumes it via a
+# path dep behind the same feature names (one-way edge, boundary contract).
+#
+# Parity law: the lane is a faithful port of a pinned reference — the
+# consumer-side parity gate (frozen fixture corpus + expected capture;
+# top-1 >= 99.9%, prob drift <= 1e-3, per checkpoint) is the standing
+# correctness authority, and NO number from this lane is published before
+# that gate is green at whichever posture (cpu / metal) the number comes
+# from. Where the reference's math is softmax, the port stays softmax; the
+# port mirrors the reference's own temperature clamp rather than "fixing"
+# the checkpoint.
+
+[dependencies]
+# The Python-JSON byte format (parity-critical separators + insertion
+# order): `preserve_order` keeps JSON object keys in literal order — that
+# order IS the option/label order the head scores against.
+serde_json = { version = "1", features = ["preserve_order"] }
+# serde derive for the answer envelope (`Serialize` on the public types).
+serde = { version = "1", features = ["derive"], optional = true }
+# The HF fast-tokenizer implementation — loads the pinned BPE
+# tokenizer.json files directly. **A 1.x attempt was measured NEGATIVE:**
+# the 1.0.0-rc line refuses the pinned english/typed tokenizers at load —
+# their GPT-2-family vocabs genuinely lack 14 ByteLevel byte atoms
+# (`j`, `}`, `~`, ...), which 0.22 tolerates lazily; the 1.x loader
+# validates all 256 up front (and needs an in-memory v1 -> v2 conversion
+# pass besides). Reopen trigger: tokenizers 1.0.0 stable (or an rc
+# relaxing the byte-atom strictness) — re-run the parity gate at both
+# postures then. The 0.22 pin stays on those measured grounds.
+tokenizers = { version = "0.22", optional = true }
+# SHA-256: the WEIGHT pins are SHA-256 (the HF LFS oids) — verification
+# target, not a house-hash choice; blake3 pins the small files.
+sha2 = { version = "0.10", optional = true }
+blake3 = { version = "1", optional = true }
+# The GEMM kernel for the CPU forward: pure Rust. ANY bump re-runs the
+# parity gate at both postures before publishing (bit-parity is verified,
+# never assumed across gemm releases).
+gemm = { version = "0.18", optional = true, features = ["rayon"] }
+# `libm::erff` for the CPU gelu: bit-identical to the erf kernel the
+# reference line called, so the drift budget is spent on op order, not an
+# erf approximation (a general-purpose f64 erf path measured ~1000x over
+# the drift gate). This pin is NUMERICS, not build-sharing.
+libm = { version = "0.2", optional = true }
+
+[target.'cfg(target_os = "macos")'.dependencies]
+# The Apple Metal backend (`laya-riir-metal`): MSL kernels over the same
+# op semantics as the CPU lane, erf transcribed verbatim from the same
+# source the CPU lane's `libm::erff` matches. `objc2` supplies the
+# autoreleasepool every dispatch drains into. macOS-only by construction;
+# target-scoped so enabling the feature on Linux/Windows hosts is inert
+# instead of pulling Apple frameworks that do not compile there (the
+# gpu crate's `metal_tensor_gemm` pattern). The parity gate must be green
+# AT the metal posture after any bump of either dep.
+metal = { version = "0.31", optional = true }
+objc2 = { version = "0.6", optional = true }
+
+[features]
+# The checkpoint lane (substrate + the flat-Vec CPU forward).
+laya-riir = ["dep:serde", "dep:tokenizers", "dep:sha2", "dep:blake3", "dep:gemm", "dep:libm"]
+# The Metal backend of the forward — macOS builds default to it at
+# runtime (`LAYA_DEVICE=cpu` opts out); requesting metal without the
+# feature or platform fails LOUD, never a silent CPU fallback.
+laya-riir-metal = ["laya-riir", "dep:metal", "dep:objc2"]
+
+# The Metal-vs-CPU op-equivalence gate is whole-file #![cfg]-gated
+# (macOS + the metal feature) and compiles to an empty binary elsewhere;
+# this row is the reader protection (a --features selection without the
+# union SKIPS the target loudly instead of printing a green zero). The
+# target_os half of the gate cannot be expressed here.
+[[test]]
+name = "metal_ops_smoke"
+required-features = ["laya-riir-metal"]

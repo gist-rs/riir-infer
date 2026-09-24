@@ -58,8 +58,9 @@ ALLOWED_SIBLING_PREFIX = "../katgpt-rs"
 
 # Foreign workspace crates are forbidden in code positions — the repo is
 # upstream of ALL of them. This repo's OWN crates (riir_infer_core,
-# riir_infer_gpu) are exempt: self-references are the point of the repo.
-FOREIGN_RIIR = r"riir_(?!infer_core\b|infer_gpu\b)[a-z0-9_]+"
+# riir_infer_gpu, riir_infer_laya) are exempt: self-references are the
+# point of the repo.
+FOREIGN_RIIR = r"riir_(?!infer_core\b|infer_gpu\b|infer_laya\b)[a-z0-9_]+"
 RIIR_TOKEN = re.compile(r"\b" + FOREIGN_RIIR)
 USE_RIIR = re.compile(r"\buse\s+" + FOREIGN_RIIR)
 EXTERN_CRATE_RIIR = re.compile(r"\bextern\s+crate\s+" + FOREIGN_RIIR)
