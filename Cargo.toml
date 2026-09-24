@@ -44,6 +44,12 @@ thiserror = "2"
 log = "0.4"
 blake3 = "1"
 
+# SentencePiece tokenizer — Gemma 2/LLaMA text tokenization (Plan 087).
+# Native-only: pulls sentencepiece-sys (C++ via cmake) which cannot compile
+# for wasm32; the tokenizer module below carries the matching gate.
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+sentencepiece = "0.13"
+
 [features]
 # Pure-local gates (no dep forwards).
 rotary_value_embedding = []

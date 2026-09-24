@@ -82,6 +82,11 @@ pub mod dflash;
 /// GGUF weight loading.
 pub mod gguf_loader;
 
+/// SentencePiece/BPE tokenizers for GGUF-embedded vocabularies (native-only;
+/// the sentencepiece-sys C++ backend cannot compile for wasm32).
+#[cfg(not(target_arch = "wasm32"))]
+pub mod tokenizer;
+
 // Upstream re-export the model layer consumes (`crate::turboquant` —
 // transformer/mod.rs + tests). Same gated form as riir-engine's copy;
 // riir-engine keeps its own for its consumers.

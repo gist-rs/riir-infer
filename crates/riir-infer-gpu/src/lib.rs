@@ -551,6 +551,26 @@ mod test_gpu_support;
 // The CubeCL whole-forward: decode + prefill over the ternary Bonsai family.
 #[cfg(all(feature = "cubecl_runtime", feature = "ternary_gemv"))]
 pub mod ternary_deltanet_gpu_forward;
+// Root item surface (mirrors the engine gpu crate's root re-exports, so a
+// retargeted consumer swaps `riir_gpu::` for `riir_infer_gpu::` with no
+// other path changes).
+#[cfg(all(feature = "cubecl_runtime", feature = "ternary_gemv"))]
+pub use ternary_deltanet_gpu_forward::{TernaryDeltanetGpuForward, DequantWteRowCubeCL};
+#[cfg(all(feature = "ternary_gemm_batched", feature = "ternary_gemm_simdgroup"))]
+pub use ternary_deltanet_gpu_forward::set_prefill_use_simdgroup;
+#[cfg(all(
+    feature = "ternary_gemm_batched",
+    feature = "metal_tensor_gemm",
+    target_os = "macos"
+))]
+pub use ternary_deltanet_gpu_forward::set_prefill_use_metal_tensor_zerocopy;
+
+// The speculative-decode drafting family (Issue 665) — modelless CPU-side
+// draft models + the routing half, moved from the engine gpu crate (its
+// gguf_loader edge resolves through riir-infer-core here). The verify/checkpoint
+// dispatch methods remain on TernaryDeltanetGpuForward below.
+#[cfg(feature = "speculative_decode")]
+pub mod speculative_decode;
 
 // The cudarc whole-forward (dp4a GEMV path, CUDA-only).
 #[cfg(all(feature = "ternary_gemv_cuda_raw", not(target_os = "macos")))]
