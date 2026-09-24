@@ -268,6 +268,37 @@ pub trait Backend {
     /// are rebuilt per forward, often at recycled heap addresses). CPU:
     /// no-op. Called once per forward by the agent, before the encoder.
     fn begin_pass(&self);
+
+    /// Does this backend CONSUME the `[seq, seq]` additive sliding-window
+    /// mask at head dim `hd`, or does it predicate the window in-kernel?
+    ///
+    /// riir-reflex Issue 020 T2: the Metal lane's fused attention takes the
+    /// `window` argument and throws the tensor away, yet the encoder built
+    /// it every forward — a `vec![f32::MIN; seq * seq]` plus an
+    /// `O(seq · 2·window)` fill for nothing (402 KB at `seq = 317`). The
+    /// DEFAULT is `true` (consume it) so a new backend is never silently
+    /// starved of a mask it needs; only a backend that predicates says
+    /// otherwise, and it must answer for the SAME `hd` its attention path
+    /// will dispatch at.
+    fn needs_window_mask(&self, _hd: usize) -> bool {
+        true
+    }
+
+    /// Pre-place one agent-owned weight slice on the device.
+    ///
+    /// riir-reflex Issue 020 T1: the device copy is otherwise taken lazily on
+    /// the FIRST forward, which is the one the bench times — ≈ 0.5 GB of
+    /// f32 projections on request #1's critical path, while the torch
+    /// reference moves its weights during `load`, before its own timer
+    /// starts. CPU: no-op (its weights are already where they are used).
+    fn warm_weight(&self, _data: &[f32]) {}
+
+    /// Pre-place one agent-owned PROJECTION weight — the `matmul_w`
+    /// operand, row-major `[n, k]`. Separate from [`Backend::warm_weight`]
+    /// because a device backend may hold it in a DIFFERENT layout than the
+    /// host slice (the Metal lane holds `Wᵀ`, riir-reflex Issue 020 T4), and the shape
+    /// is the thing that cannot be recovered from the slice alone.
+    fn warm_weight_2d(&self, _data: &[f32], _n: usize, _k: usize) {}
 }
 
 /// The attention block's host scratch — the split q/k/v thirds, the score

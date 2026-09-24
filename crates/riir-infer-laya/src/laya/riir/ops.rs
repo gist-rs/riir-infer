@@ -714,9 +714,15 @@ pub fn rope_tables(seq: usize, hd: usize, theta: f64) -> (Vec<f32>, Vec<f32>) {
     let half = hd / 2;
     let mut cos = vec![0f32; seq * hd];
     let mut sin = vec![0f32; seq * hd];
+    // `inv` depends only on `j` — hoisted out of the position loop (reflex
+    // riir-reflex Issue 020 T2). Bit-identical: the same f64 `powf`, the same `as f32`
+    // cast and the same reciprocal, evaluated `half` times instead of
+    // `seq · half` (10 144 → 32 at the english geometry).
+    let invs: Vec<f32> = (0..half)
+        .map(|j| 1.0 / (theta.powf((2 * j) as f64 / hd as f64)) as f32)
+        .collect();
     for pos in 0..seq {
-        for j in 0..half {
-            let inv = 1.0 / (theta.powf((2 * j) as f64 / hd as f64)) as f32;
+        for (j, &inv) in invs.iter().enumerate() {
             let ang = pos as f32 * inv;
             let c = ang.cos();
             let s = ang.sin();

@@ -71,7 +71,8 @@ use std::sync::Mutex;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use metal::{
-    Buffer, CommandBuffer, CommandQueue, ComputePipelineState, Device, MTLResourceOptions, MTLSize,
+    Buffer, CommandBuffer, CommandQueue, ComputeCommandEncoder, ComputePipelineState, Device,
+    MTLResourceOptions, MTLSize,
 };
 use objc2::rc::autoreleasepool;
 
@@ -149,6 +150,12 @@ const XWIDE_THREADS: u64 = 1024;
 /// a pass under Metal's per-buffer encoder ceiling without stalling; the
 /// buffers join the committed list and are waited at the next sync.
 const MAX_ENCODERS_PER_CB: u32 = 1024;
+
+/// Widest operand list any `run` / `run_rows` kernel binds — the stack
+/// array that replaced the per-dispatch `Vec` (riir-reflex Issue 020 T2).
+/// Asserted at every call rather than assumed: a new kernel with a fifth
+/// operand must RED here, never silently truncate its binding.
+const MAX_RUN_BUFFERS: usize = 4;
 
 /// flash_attn staging (Q tile [32][65] + Kᵀ tile [64][33] + V tile
 /// [32][65] + scores/probs [32][33] + 64 row-stats floats) and dispatch.
@@ -1064,7 +1071,23 @@ fn rt(detail: impl std::fmt::Display) -> LayaError {
 /// appended-to by every op, committed at the sync (or the encoder cap).
 struct PendingPass {
     cb: CommandBuffer,
+    /// The ONE compute encoder this command buffer is filling (reflex Issue
+    /// 018 T3). A default `MTLComputeCommandEncoder` is
+    /// `MTLDispatchTypeSerial` — consecutive dispatches inside it already
+    /// run in order with Metal inserting the memory barriers — so the
+    /// previous one-encoder-per-op shape bought identical semantics at
+    /// ~341 create/`endEncoding` pairs per forward. `end_encoding` is
+    /// called exactly once, at commit.
+    enc: ComputeCommandEncoder,
     encodes: u32,
+}
+
+/// A resolved kernel: the pipeline plus its `thread_execution_width`, read
+/// ONCE at init. The width was previously fetched per dispatch — an ObjC
+/// property message on the elementwise hot path (riir-reflex Issue 020 T2).
+struct Kern {
+    p: ComputePipelineState,
+    width: u64,
 }
 
 /// The open pass buffer plus the committed-but-unwaited pipeline flushes.
@@ -1081,7 +1104,7 @@ struct PendingState {
 pub struct Metal {
     device: Device,
     queue: CommandQueue,
-    pipelines: HashMap<&'static str, ComputePipelineState>,
+    pipelines: HashMap<&'static str, Kern>,
     /// `(ptr, len)` → device buffer for the agent-OWNED weight slices
     /// (stable addresses and contents for the agent's lifetime: every
     /// `matmul_w` weight, LN scales, biases, the embedding table).
@@ -1093,6 +1116,17 @@ pub struct Metal {
     /// forward bodies write every activation device-side before reading
     /// it (the write-first audit in the module doc).
     chain: Mutex<HashMap<(usize, usize, u64), Buffer>>,
+    /// Device-resident TRANSPOSED projection weights — `Wᵀ` as row-major
+    /// `[k, n]`, keyed by the ORIGINAL `W` slice's `(ptr, len)`. Permanent,
+    /// first-miss build, never invalidated (same contract as `weights`).
+    ///
+    /// riir-reflex Issue 020 T4: `matmul_w` computes `dst = a @ Wᵀ`, and binding
+    /// `W` row-major `[n, k]` means `b_cs = k` — consecutive staging lanes
+    /// read `k` floats apart (4 KB at `d = 1024`), so every lane of a
+    /// simdgroup touches a different cache line. Holding the transpose
+    /// instead puts the SAME staged values on the kernel's `b_cs == 1`
+    /// branch — the one the activation `matmul` already uses.
+    weights_t: Mutex<HashMap<(usize, usize), Buffer>>,
     /// The pass-scoped command buffer + the committed drain list.
     pending: Mutex<PendingState>,
     /// The sync generation (how many host-read barriers have run).
@@ -1132,13 +1166,15 @@ impl Metal {
             let p = device
                 .new_compute_pipeline_state_with_function(&f)
                 .map_err(|e| rt(format!("pipeline {name}: {e}")))?;
-            pipelines.insert(*name, p);
+            let width = p.thread_execution_width();
+            pipelines.insert(*name, Kern { p, width });
         }
         Ok(Self {
             device,
             queue,
             pipelines,
             weights: Mutex::new(HashMap::new()),
+            weights_t: Mutex::new(HashMap::new()),
             chain: Mutex::new(HashMap::new()),
             pending: Mutex::new(PendingState::default()),
             epoch: AtomicU64::new(0),
@@ -1165,6 +1201,34 @@ impl Metal {
             (data.len() * 4) as u64,
             RESOURCE_OPTIONS,
         )
+    }
+
+    /// Device-resident TRANSPOSE of an agent-owned projection weight:
+    /// `W` is row-major `[n, k]`, the buffer holds `Wᵀ` row-major `[k, n]`.
+    /// Permanent cache keyed by the ORIGINAL slice, first-miss build.
+    ///
+    /// The transpose runs on the host into a temporary that is dropped
+    /// after the upload, so the steady-state host footprint is unchanged
+    /// and the device holds ONE copy per weight (the untransposed form is
+    /// never uploaded for a `matmul_w` operand).
+    fn weight_t_buf(&self, w: &[f32], n: usize, k: usize) -> Buffer {
+        assert_eq!(w.len(), n * k, "weight_t extent");
+        let key = (w.as_ptr() as usize, w.len());
+        let mut map = self.weights_t.lock().expect("weight_t cache poison");
+        if let Some(b) = map.get(&key) {
+            return b.clone();
+        }
+        let mut t = vec![0f32; n * k];
+        // Row-blocked so the READ side is sequential per source row; the
+        // values are copied, never combined, so the result is exact.
+        for (row, src) in w.chunks_exact(k).enumerate() {
+            for (kk, v) in src.iter().enumerate() {
+                t[kk * n + row] = *v;
+            }
+        }
+        let b = self.upload(&t);
+        map.insert(key, b.clone());
+        b
     }
 
     /// Device-resident copy of an agent-owned weight slice — permanent
@@ -1231,6 +1295,7 @@ impl Metal {
     fn sync(&self) {
         let mut st = self.pending.lock().expect("pending cb poison");
         if let Some(pending) = st.open.take() {
+            pending.enc.end_encoding();
             pending.cb.commit();
             st.committed.push(pending.cb);
         }
@@ -1301,13 +1366,16 @@ impl Metal {
         autoreleasepool(|_| {
             let mut st = self.pending.lock().expect("pending cb poison");
             if st.open.is_none() {
+                let cb = self.queue.new_command_buffer().to_owned();
+                let enc = cb.new_compute_command_encoder().to_owned();
                 st.open = Some(PendingPass {
-                    cb: self.queue.new_command_buffer().to_owned(),
+                    cb,
+                    enc,
                     encodes: 0,
                 });
             }
             let pending = st.open.as_mut().expect("just inserted");
-            let enc = pending.cb.new_compute_command_encoder();
+            let enc = &pending.enc;
             enc.set_compute_pipeline_state(p);
             for (i, (b, off)) in buffers.iter().enumerate() {
                 enc.set_buffer(i as u64, Some(b), *off);
@@ -1331,10 +1399,10 @@ impl Metal {
             } else {
                 enc.dispatch_threads(grid, tpg);
             }
-            enc.end_encoding();
             pending.encodes += 1;
             if pending.encodes >= MAX_ENCODERS_PER_CB {
                 let done = st.open.take().expect("checked above");
+                done.enc.end_encoding();
                 done.cb.commit();
                 st.committed.push(done.cb);
             }
@@ -1351,16 +1419,27 @@ impl Metal {
         fargs: &[f32],
         len: u64,
     ) -> Result<()> {
-        let p = self
+        let k = self
             .pipelines
             .get(kernel)
             .ok_or_else(|| rt(format!("kernel {kernel} missing")))?;
-        let width = p.thread_execution_width();
+        let width = k.width;
         let groups = len.div_ceil(width).max(1);
-        let bufs: Vec<(&Buffer, u64)> = buffers.iter().map(|b| (*b, 0)).collect();
+        // Stack-resident operand list — `run` is ~250 of the ~341 dispatches
+        // per forward and every one of them allocated a `Vec` here (reflex
+        // riir-reflex Issue 020 T2). Every elementwise kernel binds ≤ 4 buffers.
+        assert!(
+            buffers.len() <= MAX_RUN_BUFFERS,
+            "run({kernel}): {} operands exceeds MAX_RUN_BUFFERS",
+            buffers.len()
+        );
+        let mut bufs = [(buffers[0], 0u64); MAX_RUN_BUFFERS];
+        for (slot, b) in bufs.iter_mut().zip(buffers) {
+            *slot = (*b, 0);
+        }
         self.encode(
-            p,
-            &bufs,
+            &k.p,
+            &bufs[..buffers.len()],
             uargs,
             fargs,
             MTLSize {
@@ -1390,14 +1469,14 @@ impl Metal {
         fargs: &[f32],
         len: u64,
     ) -> Result<()> {
-        let p = self
+        let k = self
             .pipelines
             .get(kernel)
             .ok_or_else(|| rt(format!("kernel {kernel} missing")))?;
-        let width = p.thread_execution_width();
+        let width = k.width;
         let groups = len.div_ceil(width).max(1);
         self.encode(
-            p,
+            &k.p,
             &[a, b],
             uargs,
             fargs,
@@ -1426,14 +1505,22 @@ impl Metal {
         fargs: &[f32],
         rows: u64,
     ) -> Result<()> {
-        let p = self
+        let k = self
             .pipelines
             .get(kernel)
             .ok_or_else(|| rt(format!("kernel {kernel} missing")))?;
-        let bufs: Vec<(&Buffer, u64)> = buffers.iter().map(|b| (*b, 0)).collect();
+        assert!(
+            buffers.len() <= MAX_RUN_BUFFERS,
+            "run_rows({kernel}): {} operands exceeds MAX_RUN_BUFFERS",
+            buffers.len()
+        );
+        let mut bufs = [(buffers[0], 0u64); MAX_RUN_BUFFERS];
+        for (slot, b) in bufs.iter_mut().zip(buffers) {
+            *slot = (*b, 0);
+        }
         self.encode(
-            p,
-            &bufs,
+            &k.p,
+            &bufs[..buffers.len()],
             uargs,
             fargs,
             MTLSize {
@@ -1483,12 +1570,12 @@ impl Metal {
         } else {
             ("sgemm", 32, 64, NARROW_STAGING_BYTES, NARROW_THREADS)
         };
-        let p = self
+        let k = self
             .pipelines
             .get(name)
             .ok_or_else(|| rt(format!("kernel {name} missing")))?;
         self.encode(
-            p,
+            &k.p,
             &[a, b, out],
             uargs,
             &[],
@@ -1569,7 +1656,12 @@ impl Backend for Metal {
         assert_eq!(w.len(), n * k, "weight extent");
         assert_eq!(dst.len(), m * n, "dst extent");
         let ab = self.chain_buf(a);
-        let wb = self.weight_buf(w);
+        // riir-reflex Issue 020 T4: bind the TRANSPOSE, row-major [k, n], so the
+        // staging takes the kernel's coalesced `b_cs == 1` branch. The
+        // staged tile is the same [K][N] block of the same values either
+        // way — the k-accumulation order is untouched, so the result is
+        // bit-identical to the `b_cs = k` binding.
+        let wb = self.weight_t_buf(w, n, k);
         let ob = self.chain_slot_for(dst);
         self.run_sgemm(
             (&ab, 0),
@@ -1578,8 +1670,8 @@ impl Backend for Metal {
             &[
                 m as u32, n as u32, k as u32, k as u32, // a_rs
                 1,        // a_cs
-                1,        // b_rs — B = Wᵀ, W row-major [n, k]
-                k as u32, // b_cs
+                n as u32, // b_rs — B = Wᵀ held row-major [k, n]
+                1,        // b_cs
                 0,        // batch strides (batch = 1)
                 0, 0,
             ],
@@ -1666,13 +1758,13 @@ impl Backend for Metal {
         // window clamped to seq: full attention ⇒ lo 0 / hi seq in-kernel
         // (and no u32 overflow in the key-range arithmetic).
         let w = window.min(seq) as u32;
-        let p = self
+        let k = self
             .pipelines
             .get("flash_attn")
             .ok_or_else(|| rt("kernel flash_attn missing"))
             .unwrap_or_else(|e| panic!("{e}"));
         self.encode(
-            p,
+            &k.p,
             &[(&qb, 0), (&cb, 0), (&sb, 0), (&ob, 0)],
             &[seq as u32, heads as u32, hd as u32, w],
             &[scale],
@@ -2022,6 +2114,35 @@ impl Backend for Metal {
 
     fn begin_pass(&self) {
         self.begin_pass_impl();
+    }
+
+    /// The fused kernel predicates on `window`; it consumes no mask tensor
+    /// (`attention_forward` is literally `let _ = mask;`). The predicate
+    /// MIRRORS that dispatch's own gate, so a posture that falls back to
+    /// the reference op sequence — `LAYA_METAL_FLASH=0`, or an `hd` outside
+    /// the pinned geometry — still gets its mask built.
+    fn needs_window_mask(&self, hd: usize) -> bool {
+        self.flash_disabled || hd != FLASH_HD
+    }
+
+    /// riir-reflex Issue 020 T1: take the host→device copy at load, not on the
+    /// first forward. `weight_buf` is the permanent agent-lifetime cache
+    /// keyed by `(ptr, len)`; warming it is a first-miss upload made early.
+    fn warm_weight(&self, data: &[f32]) {
+        if data.is_empty() {
+            return;
+        }
+        let _ = self.weight_buf(data);
+    }
+
+    /// Build + upload `Wᵀ` at load. The untransposed form is deliberately
+    /// NOT uploaded: `matmul_w` is the only consumer of these slices, so a
+    /// second device copy would be dead bytes.
+    fn warm_weight_2d(&self, data: &[f32], n: usize, k: usize) {
+        if data.is_empty() {
+            return;
+        }
+        let _ = self.weight_t_buf(data, n, k);
     }
 
     fn download_into(&self, src: &[f32], out: &mut [f32]) {

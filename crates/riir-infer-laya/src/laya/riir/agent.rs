@@ -137,6 +137,15 @@ impl RiirAgent {
             }
         };
 
+        // riir-reflex Issue 020 T1 — device residency is a LOAD cost, not a
+        // first-request cost. Without this the ~0.5 GB of f32 projections
+        // (english geometry) upload lazily inside `system_one` #1, which is
+        // the call the bench times and the call a served client waits on;
+        // the torch reference moves its weights inside `load`, before its
+        // own handshake. No-op on the CPU backend.
+        enc.warm(backend.as_ref());
+        head.warm(backend.as_ref());
+
         let temps = Temperatures::from_config(&agent_cfg);
         Ok(Self {
             tok,

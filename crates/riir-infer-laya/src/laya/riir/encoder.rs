@@ -94,6 +94,35 @@ impl Scratch {
 }
 
 impl Encoder {
+    /// Pre-place every weight slice this forward hands to a backend op on
+    /// the device (riir-reflex Issue 020 T1).
+    ///
+    /// The set is EXACTLY the slices that reach a weight-consuming op —
+    /// `layer_norm_nobias_into`'s `w` and `matmul_w`'s `w`. `tok_emb` is
+    /// deliberately ABSENT: the token gather is host-side (`forward`'s
+    /// embedding loop), so uploading the vocab-sized table would spend
+    /// device memory on bytes no kernel ever binds.
+    pub fn warm(&self, b: &dyn Backend) {
+        let d = self.cfg.hidden;
+        let i_sz = self.cfg.intermediate;
+        b.warm_weight(&self.emb_norm);
+        for layer in &self.layers {
+            if let Some(w) = &layer.attn_norm {
+                b.warm_weight(w);
+            }
+            // Shapes MIRROR `forward`'s own `matmul_w` calls — a warm at
+            // the wrong shape would build a transpose the hot path then
+            // misses on, so these are asserted inside `weight_t_buf`
+            // (`n · k == len`) rather than trusted.
+            b.warm_weight_2d(&layer.wqkv, 3 * d, d);
+            b.warm_weight_2d(&layer.wo, d, d);
+            b.warm_weight_2d(&layer.wi, 2 * i_sz, d);
+            b.warm_weight_2d(&layer.mlp_wo, d, i_sz);
+            b.warm_weight(&layer.mlp_norm);
+        }
+        b.warm_weight(&self.final_norm);
+    }
+
     /// Assemble from a parsed safetensors map (weights are REMOVED — the
     /// map is split between encoder and head with no second copy; the
     /// unused `temperature` tensor is what legitimately remains).
@@ -199,7 +228,11 @@ impl Encoder {
         // sliding layer. Skipped when the window covers the whole sequence
         // (the reference's mask-skip: same math, no mask tensor).
         let window = self.cfg.sliding_window();
-        let mask: Option<Vec<f32>> = if seq > 1 && window < seq - 1 {
+        // riir-reflex Issue 020 T2: a backend that predicates the window
+        // in-kernel (the Metal lane's fused attention) consumes no mask
+        // tensor, and building one was a `seq²` allocation plus an
+        // `O(seq · 2·window)` fill discarded on every forward.
+        let mask: Option<Vec<f32>> = if seq > 1 && window < seq - 1 && b.needs_window_mask(hd) {
             let mut m = vec![f32::MIN; seq * seq];
             for qi in 0..seq {
                 let lo = qi.saturating_sub(window);

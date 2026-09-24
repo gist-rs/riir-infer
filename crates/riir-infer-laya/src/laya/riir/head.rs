@@ -76,6 +76,42 @@ pub struct HeadOutput {
 }
 
 impl Head {
+    /// Pre-place every weight slice this forward hands to a backend op on
+    /// the device (riir-reflex Issue 020 T1) — the `matmul_w` weights, the
+    /// `add_bias_row` biases and the `layer_norm_nobias_into` norms.
+    /// `type_emb` is warmed ROW BY ROW: `forward` passes one of its rows to
+    /// `add_bias_row`, and a row's `(ptr, len)` key differs per `qtype`.
+    pub fn warm(&self, b: &dyn Backend) {
+        let d = self.d;
+        for layer in &self.layers {
+            b.warm_weight(&layer.n1w);
+            b.warm_weight(&layer.n1b);
+            b.warm_weight_2d(&layer.in_proj_w, 3 * d, d);
+            b.warm_weight(&layer.in_proj_b);
+            b.warm_weight_2d(&layer.out_w, d, d);
+            b.warm_weight(&layer.out_b);
+            b.warm_weight(&layer.n2w);
+            b.warm_weight(&layer.n2b);
+            b.warm_weight_2d(&layer.l1w, 4 * d, d);
+            b.warm_weight(&layer.l1b);
+            b.warm_weight_2d(&layer.l2w, d, 4 * d);
+            b.warm_weight(&layer.l2b);
+        }
+        for row in self.type_emb.chunks_exact(self.d) {
+            b.warm_weight(row);
+        }
+        b.warm_weight(&self.s0w);
+        b.warm_weight(&self.s0b);
+        b.warm_weight_2d(&self.s1w, d, d);
+        b.warm_weight(&self.s1b);
+        b.warm_weight_2d(&self.s3w, 1, d);
+        b.warm_weight(&self.s3b);
+        b.warm_weight_2d(&self.a0w, 256, d + 4);
+        b.warm_weight(&self.a0b);
+        b.warm_weight_2d(&self.a2w, 2, 256);
+        b.warm_weight(&self.a2b);
+    }
+
     /// Assemble from a parsed safetensors map (weights are REMOVED — the
     /// encoder consumed its names first).
     pub fn from_map(
