@@ -162,9 +162,15 @@ is an open design question this issue does not pre-decide.
   end-to-end (native oracle: rel-Frobenius ≤1.3e-07 over 5 layer classes
   incl. lm_head). NO throughput claim licensed (T7's arms are the
   denominator) — §13.6 states exactly what is and is not established.
-- [ ] **T6 — GOAT gate + feature flag**, per the workspace promotion rule: ship
+- [x] **T6 — GOAT gate + feature flag**, per the workspace promotion rule: ship
   behind an opt-in feature, bench the claim, promote only on a measured gain on
   the axis §2 says is real.
+  → **DECIDED 2026-09-24 (record in §14)**: G1–G4 evaluated on T3–T5
+  evidence; the residency gain is measured ([Bench 001](../.benchmarks/001_exl3_t5_residency_context.md))
+  and modelless — but the feature **STAYS OPT-IN**: promotion requires the
+  gain to be delivered ON the promoted path, and nothing on any default
+  build path consumes EXL3 until T7 wires a serving/GPU arm. Named
+  promotion trigger in §14.
 - [ ] **T7 — SIMD / GPU arms**, only after T3–T5. Scope unknown at filing.
 
 ## 6. The correctness gate has a precondition — measure the comparator first
@@ -835,3 +841,32 @@ recomputes per memory budget (the formula + constants are in §13.3).
 Re-measuring on the M3 means running the same measurement test there —
 not done this session (pack is on the 4090 box; a re-download or copy
 is the cost). The 4090 numbers stand on their own.
+
+## 14. T6 record — the GOAT gate verdict (2026-09-24)
+
+The workspace promotion rule: opt-in feature → bench the claim → promote to
+default only on a measured, modelless gain on the §2-real axis.
+
+| gate | verdict | evidence |
+|---|---|---|
+| G1 correctness | **PASS** | T3 numpy pins + ring/Hadamard/bijection tests (§12.4); T4a real-pack cross-impl 3.49e-13 (§12.5); T4b native-oracle BIT-EXACT (§12.6); T5 full-pack 5-class oracle ≤1.3e-07 incl. the 1.27B-weight lm_head (§13.5). |
+| G2 gain (residency — the §2-real axis) | **PASS, measured** | [Bench 001](../.benchmarks/001_exl3_t5_residency_context.md): 4.09 achieved bpw vs 16 f16 → 15.23 vs 51.95 GiB (3.4×) on the league model; 5 bpw points measured; context ceiling 0 → ~117k tokens at 4bpw on a 24 GiB box. The gain is arithmetic on the format (modelless — no training, no calibration data of ours). |
+| G3 no-regression | **PASS** | Pure local feature gate (`exl3 = []`, no dep forwards); default build byte-identical in surface (clippy `-D warnings` clean at BOTH postures; 186/201 tests green at flag-off/on). |
+| G4 allocation | **PASS** | Zero-copy by construction (§11.3 cond. 1): mmap'd shards, borrowed slices, `residency()` reads metadata only; `dequantize_f32` allocates only its documented output (at-use materialization). |
+
+**Verdict: STAYS OPT-IN. Default-promotion REFUSED at this gate — not on
+gate failure but on the promotion rule's own wording: the gain must be on
+the path promotion turns on.** Today no default build path (and no engine
+integration) consumes EXL3; promoting now would compile an unconsumed
+reader into every build — surface with zero delivered gain. The reader is
+also era-gated by necessity (§12.7): a default-on surface that happily
+opens LEGACY packs (which decode wrong) is a hazard an opt-in surface
+keeps explicit.
+
+**Promotion trigger (named, one condition):** T7 lands a serving/GPU arm
+that consumes `Exl3Pack` end-to-end AND measures the delivered gain on
+that path (bytes moved per decode step, or context headroom in a real
+serving config, vs the f16/q4 GGUF incumbent on the same model + box) —
+at which point promotion re-runs this gate with the runtime numbers and
+the §12.7 era-gate wired into the loader's open path (refuse legacy
+packs loudly at open, not decode).
