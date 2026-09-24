@@ -76,6 +76,19 @@ pub enum LayaError {
     /// The question could not be served (e.g. options exceed the head
     /// budget — the reference raises the same class).
     Question(String),
+    /// The ANE lane's sequence exceeds every bucket its manifest carries.
+    /// A documented coverage LIMIT, not a compute failure — a consumer that
+    /// has other devices matches this variant to skip the case LOUDLY
+    /// (named + counted) while real failures still propagate; it can never
+    /// be silently absorbed into a CPU fallback (the lane itself refuses).
+    Bucket {
+        /// Which checkpoint.
+        checkpoint: &'static str,
+        /// The refused sequence length.
+        seq: usize,
+        /// The largest bucket carried.
+        max: usize,
+    },
 }
 
 impl fmt::Display for LayaError {
@@ -97,6 +110,11 @@ impl fmt::Display for LayaError {
             }
             Self::Runtime(s) => write!(f, "laya runtime: {s}"),
             Self::Question(s) => write!(f, "laya question: {s}"),
+            Self::Bucket { checkpoint, seq, max } => write!(
+                f,
+                "laya checkpoint {checkpoint:?}: sequence length {seq} exceeds every \
+                 ANE bucket (max {max}) — a coverage limit, never a fallback"
+            ),
         }
     }
 }

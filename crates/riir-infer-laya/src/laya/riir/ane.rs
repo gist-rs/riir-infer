@@ -449,6 +449,8 @@ fn build_pad_bias(n: usize, l: usize, sentinel_f16: u16, buf: &mut [u16]) {
 /// per bucket. [`super::encoder::Encoder`]'s whole-graph counterpart —
 /// same `forward(input_ids) -> [n·d] f32` contract, no per-op backend.
 pub struct AneEncoder {
+    /// Checkpoint name for error rendering (the typed Bucket error).
+    ckpt: &'static str,
     d: usize,
     pad_id: u32,
     table_f16: Vec<u16>,
@@ -503,6 +505,7 @@ impl AneEncoder {
             })?;
         let table_f16: Vec<u16> = tok.data.iter().map(|v| super::weights::f32_to_f16_bits(*v)).collect();
         Ok(Self {
+            ckpt,
             d: cfg.hidden,
             pad_id,
             table_f16,
@@ -538,12 +541,11 @@ impl AneEncoder {
         let d = self.d;
         let buckets = self.buckets();
         let Some(&bucket) = buckets.iter().find(|b| **b >= n) else {
-            return Err(LayaError::Runtime(format!(
-                "ane: sequence length {n} exceeds every bucket this checkpoint's manifest \
-                 carries {:?} — the ANE lane refuses, it does not fall back to CPU \
-                 (no-silent-fallback law)",
-                buckets
-            )));
+            return Err(LayaError::Bucket {
+                checkpoint: self.ckpt,
+                seq: n,
+                max: *buckets.last().unwrap_or(&0),
+            });
         };
         let rt = self.runtime_for(bucket)?;
         let l = rt.bucket_l;
