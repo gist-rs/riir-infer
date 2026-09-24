@@ -623,19 +623,19 @@ impl<'a> Exl3Layer<'a> {
         out
     }
 
-    /// Parallel dequantization (rayon over DISJOINT row strips) — the T7
-    /// CPU fast arm. **Bit-identical to [`Exl3Layer::dequantize_f32`]**:
-    /// every stage parallelizes over row ranges whose outputs are disjoint,
-    /// and each output element's accumulation order is unchanged, so the
-    /// result equals the scalar reference element-for-element (the test
-    /// `parallel_matches_scalar_bit_identical` pins this).
-    pub fn dequantize_f32_parallel(&self) -> Vec<f32> {
+    /// Dequantization stage 1 ALONE: the trellis decode of the rotated
+    /// basis `W_rot[in][out]` (in-major, tensor-core element order) — no
+    /// Hadamards, no scales. This is the bit-exact CPU reference the GPU
+    /// decode kernels are gated against (Issue 001 T7c-1c full-pack gate;
+    /// §17.3 gate 1). Parallel over disjoint 16-row in-strips — every
+    /// output element is produced by exactly one tile (pure LUT read per
+    /// element, no accumulation), so the result is bit-identical to the
+    /// inline decode stage of [`Self::dequantize_f32`] at any thread
+    /// count, and [`Self::dequantize_f32_parallel`] consumes exactly this.
+    pub fn decode_w_rot_f32(&self) -> Vec<f32> {
         use rayon::prelude::*;
         let (kin, nout) = (self.in_features, self.out_features);
         let mut w_rot = vec![0.0f32; kin * nout];
-
-        // 1. Trellis decode — parallel over 16-row in-strips (each strip is
-        // written only by its own `a` tiles).
         let lut = codebook_lut(self.codebook);
         let words = self.k.words_per_tile();
         let tile_bytes = words * 2;
@@ -659,6 +659,19 @@ impl<'a> Exl3Layer<'a> {
                     }
                 }
             });
+        w_rot
+    }
+
+    /// Parallel dequantization (rayon over DISJOINT row strips) — the T7
+    /// CPU fast arm. **Bit-identical to [`Exl3Layer::dequantize_f32`]**:
+    /// every stage parallelizes over row ranges whose outputs are disjoint,
+    /// and each output element's accumulation order is unchanged, so the
+    /// result equals the scalar reference element-for-element (the test
+    /// `parallel_matches_scalar_bit_identical` pins this).
+    pub fn dequantize_f32_parallel(&self) -> Vec<f32> {
+        use rayon::prelude::*;
+        let (kin, nout) = (self.in_features, self.out_features);
+        let w_rot = self.decode_w_rot_f32();
 
         // 2. Incoherence: left block-Hadamard (parallel over 128-row
         // blocks), row scales, right block-Hadamard (parallel over rows),

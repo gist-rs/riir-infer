@@ -1696,4 +1696,162 @@ mod tests {
             }
         }
     }
+
+    /// T7c-1c gate (§17.5): the FULL-PACK bit-exact gate — EVERY layer in
+    /// the real pack, never a sample (§17.3 gate 1 at whole-pack scope).
+    /// Three comparisons per layer: v2-vs-v1 (the literal gate-1 pair),
+    /// v2-vs-CPU and v1-vs-CPU against `decode_w_rot_f32` (the T5 oracle
+    /// reference, decode-only). The synthetic fixtures cover K 2/3/4.5/5 —
+    /// this pack spans K 3.0–6.0, so combinations like K6 and the half-
+    /// integers are exercised HERE for the first time; that coverage gap is
+    /// the reason a whole-pack gate exists. Prints the per-K×codebook
+    /// coverage table (a green run over a shrunken pack proves nothing —
+    /// coverage floors pinned below) and asserts ZERO bit mismatches. Opt-in
+    /// via `EXL3_PACK_DIR` + a GPU (~50 min on the 4090: every layer decoded
+    /// three times).
+    #[test]
+    #[ignore = "needs a real EXL3 pack on disk (EXL3_PACK_DIR) + a GPU + ~1 h"]
+    fn real_pack_v2_bit_exact_full() {
+        use riir_infer_core::quant::exl3_pack::Exl3Pack;
+        use std::collections::BTreeMap;
+
+        let dir = std::env::var("EXL3_PACK_DIR").unwrap_or_default();
+        if dir.is_empty() {
+            eprintln!("SKIPPED: EXL3_PACK_DIR not set");
+            return;
+        }
+        let pack = Exl3Pack::open(std::path::Path::new(&dir)).unwrap();
+        let ctx = CubeCLContext::new().expect("CubeCL should initialize");
+        let client = ctx.client();
+
+        let plans = pack.plans();
+        // Coverage floor (the blindness guard): the T5-measured pack carries
+        // 573 layer groups — a loader regression that detects fewer must RED
+        // here, not print a green zero over an empty population.
+        assert!(
+            plans.len() >= 500,
+            "pack exposes {} layer plans, below the T5-measured 573-group floor — loader regression?",
+            plans.len()
+        );
+
+        let k_of = |k: Exl3K| if k.half { format!("K{}.5", k.ka) } else { format!("K{}", k.ka) };
+        let cb_of = |cb: Exl3Codebook| match cb {
+            Exl3Codebook::Cb0 => "Cb0",
+            Exl3Codebook::Cb1Mcg => "Cb1Mcg",
+            Exl3Codebook::Cb2Mul1 => "Cb2Mul1",
+        };
+        let mut coverage: BTreeMap<String, (usize, u64)> = BTreeMap::new();
+        let mut total_weights = 0u64;
+        let mut bad_layers = 0usize;
+        let mut failures: Vec<String> = Vec::new();
+        let t0 = std::time::Instant::now();
+
+        eprintln!("\n=== T7c-1c full-pack bit-exact gate: {} layers ===", plans.len());
+        for (i, plan) in plans.iter().enumerate() {
+            let layer = pack.layer(&plan.key).unwrap();
+            let n = (layer.in_features as u64) * (layer.out_features as u64);
+            let (v1, _) = Exl3DequantCubeCL::decode_only_layer::<ActiveRuntime>(
+                &client, &layer, DecodeArm::V1, 1,
+            )
+            .unwrap();
+            let (v2, _) = Exl3DequantCubeCL::decode_only_layer::<ActiveRuntime>(
+                &client, &layer, DecodeArm::V2, 1,
+            )
+            .unwrap();
+            let bad_v2v1 = v1.iter().zip(&v2).filter(|(a, b)| a.to_bits() != b.to_bits()).count();
+            drop(v1); // peak host memory: 2 × largest layer (lm_head ⇒ ~10 GiB)
+            let cpu = layer.decode_w_rot_f32();
+            let bad_v2cpu = v2.iter().zip(&cpu).filter(|(a, b)| a.to_bits() != b.to_bits()).count();
+            drop(v2);
+            drop(cpu);
+
+            let entry = coverage
+                .entry(format!("{}|{}", k_of(plan.k), cb_of(plan.codebook)))
+                .or_insert((0usize, 0u64));
+            entry.0 += 1;
+            entry.1 += n;
+            total_weights += n;
+
+            eprintln!(
+                "[{}/{}] {} {} {} {}w v2v1={} v2cpu={}",
+                i + 1,
+                plans.len(),
+                plan.key,
+                k_of(plan.k),
+                cb_of(plan.codebook),
+                n,
+                bad_v2v1,
+                bad_v2cpu
+            );
+            if bad_v2v1 > 0 || bad_v2cpu > 0 {
+                bad_layers += 1;
+                // Re-decode the failing pair only when a failure exists, to
+                // name the first divergent element + bit patterns (the
+                // reproduction datum for a targeted probe).
+                if failures.len() < 20 {
+                    let (v1, _) = Exl3DequantCubeCL::decode_only_layer::<ActiveRuntime>(
+                        &client, &layer, DecodeArm::V1, 1,
+                    )
+                    .unwrap();
+                    let (v2, _) = Exl3DequantCubeCL::decode_only_layer::<ActiveRuntime>(
+                        &client, &layer, DecodeArm::V2, 1,
+                    )
+                    .unwrap();
+                    let cpu = layer.decode_w_rot_f32();
+                    let trip = |what: &str, a: &[f32], b: &[f32]| -> String {
+                        match a.iter().zip(b).position(|(x, y)| x.to_bits() != y.to_bits()) {
+                            Some(idx) => format!(
+                                "{}: first mismatch at elem {idx} (in {}, out {}): {:#x} vs {:#x}",
+                                what,
+                                idx / layer.out_features,
+                                idx % layer.out_features,
+                                a[idx].to_bits(),
+                                b[idx].to_bits()
+                            ),
+                            None => format!("{what}: no mismatch on re-decode (was {} — nondeterministic!)",
+                                if what.contains("v2cpu") { bad_v2cpu } else { bad_v2v1 }),
+                        }
+                    };
+                    failures.push(format!(
+                        "{} {} {} {}w:\n  {}\n  {}",
+                        plan.key,
+                        k_of(plan.k),
+                        cb_of(plan.codebook),
+                        n,
+                        trip("v2-vs-v1", &v2, &v1),
+                        trip("v2-vs-cpu", &v2, &cpu),
+                    ));
+                }
+            }
+        }
+
+        eprintln!("\n=== coverage (K|codebook: layers, weights) ===");
+        for (key, (layers, weights)) in &coverage {
+            eprintln!("  {key}: {layers} layers, {weights} weights");
+        }
+        eprintln!(
+            "total: {} layers, {total_weights} weights, {bad_layers} bad, wall {:.1} s",
+            plans.len(),
+            t0.elapsed().as_secs_f64()
+        );
+
+        // Coverage floors: the T5-measured pack is ~26.0–26.5 G quantized
+        // weights over ≥3 K×codebook classes — a run that saw less did not
+        // measure the pack.
+        assert!(
+            total_weights >= 26_000_000_000,
+            "compared only {total_weights} weights, below the T5-measured ~26 G floor"
+        );
+        assert!(
+            coverage.len() >= 3,
+            "only {} K×codebook classes seen, below the mixed-K recipe floor of 3",
+            coverage.len()
+        );
+        assert!(
+            failures.is_empty(),
+            "v2 decode DIVERGES on {bad_layers}/{} layers:\n{}",
+            plans.len(),
+            failures.join("\n")
+        );
+    }
 }
