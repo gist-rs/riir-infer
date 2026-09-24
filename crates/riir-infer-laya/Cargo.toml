@@ -150,11 +150,18 @@ required-features = ["laya-riir-metal"]
 name = "packed_forward_equiv"
 required-features = ["laya-riir"]
 
-# The CUDA-vs-CPU op-equivalence gate (.issues/002) — the metal_ops_smoke
-# pattern on the non-macOS half: whole-file #![cfg]-gated (not-macOS + the
+# The cuda_ops_smoke pattern — whole-file #![cfg]-gated (not-macOS + the
 # cuda feature), compiles to an empty binary elsewhere; this row is the
 # reader protection (a --features selection without the union SKIPS the
 # target loudly instead of printing a green zero).
 [[test]]
 name = "cuda_ops_smoke"
 required-features = ["laya-riir-cuda"]
+
+# The sgemm MMA-roofline probe (measurement only) — the f16-axis
+# discriminator for the T7 follow-up rungs (reflex issue 020). macOS +
+# metal-gated like the gates above; the row keeps a feature-less selection
+# skipping the target loudly instead of printing a green zero.
+[[example]]
+name = "sgemm_roofline"
+required-features = ["laya-riir-metal"]

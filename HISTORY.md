@@ -612,3 +612,23 @@ band rung. The variant code never landed — this record and the reflex issue
 carry the negative, the BK=48 precedent.
 
 Session: issue020-occ, 1790323200
+
+## 2026-09-25 — the sgemm MMA-roofline probe: the narrow instance is staging-bandwidth-bound (reflex Issue 020 T7 follow-up)
+
+`crates/riir-infer-laya/examples/sgemm_roofline.rs` (new, measurement-only,
+`[[example]]` required-features row per the T1.1e law): the f16-axis
+discriminator. A verbatim copy of the shipped narrow kernel (CPU-drift-checked
+on the ragged cell) against an MMA-only twin — same inner k-chunk, staged
+ONCE, `reps` iterations of the 8-wide chunk with no re-staging and no
+barriers, FLOPs matched by reps = k/64, position-balanced rounds in one
+process. Measured (AC, load 2.4–3.1): 317×3072×1024 — narrow 3.13 TF/s vs
+roofline 5.11 (+63%); 1024×3072×1024 — 4.88 vs 9.21 (+89%); 1024×8192×1024 —
+4.37 vs 10.24 (+134%). The traffic math closes: per k-tile each threadgroup
+stages 24 KB (A 8 + B 16), so cell 3's B re-reads alone are ≈1.6 GB ≈ the
+measured 3.93 ms wall at ~400 GB/s. Verdict: NOT MMA-bound — the f16 lever
+is the B-OPERAND BYTES (halving staging + device reads; predicted ~1.4–1.7×
+on the hot cells), not the f16 MMA; double-buffering is dead with it
+(bandwidth-bound, not latency-bound). Numerics note for the rung: f16 weight
+rounding is ~4.9e-4 relative per term (< the 1e-3 G5 gate) but promotion is
+an Issue-750-T3 lossy-surface call — per-family retention, never the
+aggregate.
