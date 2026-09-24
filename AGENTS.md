@@ -49,6 +49,11 @@ cargo test -p riir-infer-gpu --features exl3_gpu,cuda_backend --lib  # native CU
 cargo check -p riir-infer-laya --features laya-riir
 cargo clippy -p riir-infer-laya --all-targets --features laya-riir-metal -- -D warnings
 cargo test -p riir-infer-laya --features laya-riir-metal --test metal_ops_smoke  # macOS only
+# The CUDA backend (non-macOS; inert on a Mac — no dep pulled). The op-level
+# gate + the consumer-side G5 (at LAYA_DEVICE=cuda) are the parity pair:
+cargo check -p riir-infer-laya --features laya-riir-cuda
+cargo clippy -p riir-infer-laya --all-targets --features laya-riir-cuda -- -D warnings
+cargo test --release -p riir-infer-laya --features laya-riir-cuda --test cuda_ops_smoke
 ```
 
 Sibling layout: `../katgpt-rs` must exist for every cargo command (path
@@ -60,9 +65,10 @@ Workspace layout: a root-package workspace — `riir-infer-core` at the
 repo root (CPU substrate) + `crates/riir-infer-gpu` (the wgpu/CubeCL GPU
 layer, its own crate so CPU-only consumers never resolve the GPU dep
 tree) + `crates/riir-infer-laya` (the encoder lane, its own crate so
-lane-free consumers never resolve the tokenizers/gemm tree). Vendored
-crates.io forks under `vendor/` (`[patch.crates-io]` in the root
-manifest).
+lane-free consumers never resolve the tokenizers/gemm tree — CPU + the
+macOS Metal + the non-macOS CUDA backends, `laya-riir-cuda` since
+riir-infer Issue 002). Vendored crates.io forks under `vendor/`
+(`[patch.crates-io]` in the root manifest).
 
 ## Numbering Discipline
 

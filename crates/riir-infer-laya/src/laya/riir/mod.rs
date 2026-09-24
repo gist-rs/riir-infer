@@ -53,6 +53,12 @@ pub mod weights;
 #[cfg(all(target_os = "macos", feature = "laya-riir-metal"))]
 pub mod metal;
 
+/// The CUDA backend (`laya-riir-cuda`, non-macOS — `.issues/002`) — compiles
+/// to nothing everywhere else (macOS has no CUDA; the dep is target-scoped
+/// so enabling the feature there is inert, never a build failure).
+#[cfg(all(not(target_os = "macos"), feature = "laya-riir-cuda"))]
+pub mod cuda;
+
 /// The Apple Neural Engine whole-graph backend (`laya-riir-ane`, macOS) —
 /// compiles to nothing everywhere else.
 #[cfg(all(target_os = "macos", feature = "laya-riir-ane"))]

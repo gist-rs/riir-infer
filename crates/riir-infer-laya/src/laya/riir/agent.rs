@@ -11,10 +11,12 @@
 //!
 //! `LAYA_DEVICE` is HONORED here (`.issues/005`): unset → the build's
 //! default posture (Metal on macOS with `laya-riir-metal` compiled — the
-//! Plan 001 T4 watchability default; CPU elsewhere), explicit `cpu`/`metal`
-//! is honored verbatim, `ane` selects the whole-graph Apple Neural Engine
-//! lane (feature `laya-riir-ane`, macOS — Plan 002 P1) and — like `metal`
-//! — fails loud when the feature or platform is absent, never a silent
+//! Plan 001 T4 watchability default; CUDA on non-macOS with
+//! `laya-riir-cuda` compiled — the 4090 lane, `.issues/002`; CPU
+//! elsewhere), explicit `cpu`/`metal`/`cuda` is honored verbatim, `ane`
+//! selects the whole-graph Apple Neural Engine lane (feature
+//! `laya-riir-ane`, macOS — Plan 002 P1) and — like `metal`/`cuda` —
+//! fails loud when the feature or platform is absent, never a silent
 //! fallback. Anything else fails loud too (an env typo must never fall
 //! back to CPU — the candle lane's `device_from_env` precedent). The gate
 //! law is unchanged: G5 parity must be green at WHICHEVER posture a number
@@ -41,6 +43,8 @@ pub enum DeviceKind {
     Cpu,
     /// The MSL backend (`laya-riir-metal`, macOS).
     Metal,
+    /// The CUDA backend (`laya-riir-cuda`, non-macOS — `.issues/002`).
+    Cuda,
     /// The Apple Neural Engine whole-graph lane (`laya-riir-ane`, macOS —
     /// reflex Plan 002 P1). The encoder runs a Core ML artifact; the head
     /// stays on the CPU backend.
@@ -49,37 +53,49 @@ pub enum DeviceKind {
 
 impl DeviceKind {
     /// Resolve `LAYA_DEVICE` — unset/empty → [`Self::default_device`]
-    /// (Metal when this build SHIPS the Metal backend on macOS, CPU
-    /// everywhere else — the measured ~2× forward is the arena
-    /// watchability default, Plan 001 T4; ANE is NEVER a default — the
-    /// artifact tree is local-only and the lane is opt-in), `cpu` →
+    /// (Metal when this build SHIPS the Metal backend on macOS, CUDA when
+    /// it ships the CUDA backend elsewhere — the build's own posture;
+    /// CPU when it ships neither; ANE is NEVER a default — the artifact
+    /// tree is local-only and the lane is opt-in), `cpu` →
     /// [`DeviceKind::Cpu`] (the explicit opt-out), `metal` →
-    /// [`DeviceKind::Metal`], `ane` → [`DeviceKind::Ane`], anything else
-    /// is an error (an env typo must fail loud, never fall back).
+    /// [`DeviceKind::Metal`], `cuda` → [`DeviceKind::Cuda`], `ane` →
+    /// [`DeviceKind::Ane`], anything else is an error (an env typo must
+    /// fail loud, never fall back).
     pub fn from_env() -> Result<Self> {
         match std::env::var("LAYA_DEVICE").as_deref() {
             Ok("") | Err(_) => Ok(Self::default_device()),
             Ok("cpu") => Ok(Self::Cpu),
             Ok("metal") => Ok(Self::Metal),
+            Ok("cuda") => Ok(Self::Cuda),
             Ok("ane") => Ok(Self::Ane),
             Ok(other) => Err(LayaError::Config {
                 checkpoint: "riir",
                 detail: format!(
-                    "unknown LAYA_DEVICE {other:?} — expected unset, \"cpu\", \"metal\" or \"ane\""
+                    "unknown LAYA_DEVICE {other:?} — expected unset, \"cpu\", \"metal\", \"cuda\" or \"ane\""
                 ),
             }),
         }
     }
 
-    /// The no-env posture: Metal where the backend is compiled and exists
-    /// (macOS + `laya-riir-metal`), CPU everywhere else. An explicit env
-    /// value is always honored verbatim — only the ABSENT choice defaults.
+    /// The no-env posture: the device this build SHIPS — Metal where the
+    /// Metal backend is compiled and exists (macOS + `laya-riir-metal`),
+    /// CUDA where the CUDA backend is compiled (non-macOS +
+    /// `laya-riir-cuda` — the 4090 lane, `.issues/002`), CPU everywhere
+    /// else. An explicit env value is always honored verbatim — only the
+    /// ABSENT choice defaults.
     pub fn default_device() -> Self {
         #[cfg(all(target_os = "macos", feature = "laya-riir-metal"))]
         {
             Self::Metal
         }
-        #[cfg(not(all(target_os = "macos", feature = "laya-riir-metal")))]
+        #[cfg(all(not(target_os = "macos"), feature = "laya-riir-cuda"))]
+        {
+            Self::Cuda
+        }
+        #[cfg(not(any(
+            all(target_os = "macos", feature = "laya-riir-metal"),
+            all(not(target_os = "macos"), feature = "laya-riir-cuda"),
+        )))]
         {
             Self::Cpu
         }
@@ -256,6 +272,18 @@ impl RiirAgent {
                         detail: "LAYA_DEVICE=metal needs --features laya-riir-metal on macOS — \
                                  this build has no Metal backend (fail loud, never a silent \
                                  CPU fallback)"
+                            .into(),
+                    });
+                }
+                #[cfg(all(not(target_os = "macos"), feature = "laya-riir-cuda"))]
+                DeviceKind::Cuda => Box::new(super::cuda::Cuda::new()?),
+                #[cfg(not(all(not(target_os = "macos"), feature = "laya-riir-cuda")))]
+                DeviceKind::Cuda => {
+                    return Err(LayaError::Config {
+                        checkpoint: name,
+                        detail: "LAYA_DEVICE=cuda needs --features laya-riir-cuda on a \
+                                 non-macOS CUDA host — this build has no CUDA backend (fail \
+                                 loud, never a silent CPU fallback)"
                             .into(),
                     });
                 }

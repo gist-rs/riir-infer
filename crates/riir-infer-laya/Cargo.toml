@@ -3,15 +3,16 @@ name = "riir-infer-laya"
 version = "0.1.0"
 edition = "2024"
 license = "MIT"
-description = "Pinned-checkpoint encoder lane: tokenizer/config/weights substrate, flat-Vec CPU forward, and the macOS Metal (MSL) backend"
+description = "Pinned-checkpoint encoder lane: tokenizer/config/weights substrate, flat-Vec CPU forward, the macOS Metal (MSL) backend, and the non-macOS CUDA backend"
 publish = false
 
 # riir-infer-laya — the pinned-checkpoint encoder lane: the Python-JSON
 # byte writer (ungated, one DRY home for every consumer), the
 # tokenizer / config / weights (locate -> verify -> download) substrate,
-# the answer envelopes, and the flat-`Vec<f32>` forward with its two
-# compute backends — CPU (`gemm`) and the macOS Metal MSL family — behind
-# the `laya-riir` / `laya-riir-metal` features. Zero `riir-*` dependencies
+# the answer envelopes, and the flat-`Vec<f32>` forward with its THREE
+# compute backends — CPU (`gemm`), the macOS Metal MSL family, and the
+# non-macOS CUDA family (`.issues/002`) — behind the `laya-riir` /
+# `laya-riir-metal` / `laya-riir-cuda` features. Zero `riir-*` dependencies
 # (fence-gated). The public decision-engine serving repo consumes it via a
 # path dep behind the same feature names (one-way edge, boundary contract).
 #
@@ -77,6 +78,20 @@ objc2-core-ml = { version = "0.3", optional = true, features = ["block2"] }
 objc2-foundation = { version = "0.3", optional = true }
 block2 = { version = "0.6", optional = true }
 
+# ── non-macOS: the CUDA backend (`laya-riir-cuda`, .issues/002) ──────────
+# cudarc 0.19 with driver + nvrtc ONLY (no cublas, no runtime) — the lane
+# compiles its own CUDA C source to PTX at backend construction
+# (`compile_ptx_with_opts`, arch sm_89 = Ada/4090), the proven pattern of
+# `riir-infer-gpu`'s `gemv_ternary_cuda_raw` / the engine's qwen38 cudarc
+# lane. `cuda-13030` matches the 4090 box's CUDA 13.3 toolkit (nvrtc64_130_0);
+# `fallback-dynamic-loading` tolerates minor version drift on other CUDA
+# 13.x installs. Target-scoped `not(macos)` so enabling the feature on a
+# Mac is inert (no dep pulled, the module compiles to nothing) — the exact
+# posture discipline of `laya-riir-metal` on Linux/Windows. The parity gate
+# must be green AT the cuda posture after any bump of this dep.
+[target.'cfg(not(target_os = "macos"))'.dependencies]
+cudarc = { version = "0.19", default-features = false, features = ["std", "driver", "nvrtc", "cuda-13030", "fallback-dynamic-loading"], optional = true }
+
 [features]
 # The checkpoint lane (substrate + the flat-Vec CPU forward).
 laya-riir = ["dep:serde", "dep:tokenizers", "dep:sha2", "dep:blake3", "dep:gemm", "dep:libm"]
@@ -92,6 +107,11 @@ laya-riir-metal = ["laya-riir", "dep:metal", "dep:objc2"]
 # in any default set: the artifact tree is local-only (~3 GB) and the
 # lane's parity authority is the consumer-side G5-ANE gate.
 laya-riir-ane = ["laya-riir", "dep:objc2", "dep:objc2-core-ml", "dep:objc2-foundation", "dep:block2"]
+# The CUDA backend of the forward (.issues/002) — non-macOS builds that
+# compile it DEFAULT to it at runtime (the Metal precedent: the build's
+# own posture), `LAYA_DEVICE=cpu` opts out; requesting cuda without the
+# feature or platform fails LOUD, never a silent CPU fallback.
+laya-riir-cuda = ["laya-riir", "dep:cudarc"]
 
 # The Metal-vs-CPU op-equivalence gate is whole-file #![cfg]-gated
 # (macOS + the metal feature) and compiles to an empty binary elsewhere;
@@ -109,3 +129,12 @@ required-features = ["laya-riir-metal"]
 [[test]]
 name = "packed_forward_equiv"
 required-features = ["laya-riir"]
+
+# The CUDA-vs-CPU op-equivalence gate (.issues/002) — the metal_ops_smoke
+# pattern on the non-macOS half: whole-file #![cfg]-gated (not-macOS + the
+# cuda feature), compiles to an empty binary elsewhere; this row is the
+# reader protection (a --features selection without the union SKIPS the
+# target loudly instead of printing a green zero).
+[[test]]
+name = "cuda_ops_smoke"
+required-features = ["laya-riir-cuda"]
