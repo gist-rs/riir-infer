@@ -290,13 +290,6 @@ fn main() -> Result<()> {
     let (mut config, model, encode, bos) = load(&gguf_path)?;
     let text = std::fs::read_to_string(&corpus_path).context("read corpus")?;
     let all = encode(&text);
-    if dump_tokens > 0 {
-        // Tokenizer-fidelity check: diff against a reference tokenizer
-        // (e.g. HF `tokenizers`) before trusting a fixture's ppl.
-        let ids: Vec<String> = all.iter().take(dump_tokens).map(usize::to_string).collect();
-        println!("{}", ids.join(","));
-        return Ok(());
-    }
     let seqs: Vec<Seq> = match needle {
         0 => all[..all.len().min(n_tokens)]
             .chunks(seq_len)
@@ -308,6 +301,19 @@ fn main() -> Result<()> {
             .collect(),
         n => needle_seqs(&*encode, bos, &all, n, needle_ctx)?,
     };
+    if dump_tokens > 0 {
+        // Fidelity check against a reference implementation (HF `tokenizers`
+        // / `transformers`) before trusting a fixture: ppl mode prints the
+        // first N corpus ids, needle mode each prompt as `score_from|ids`.
+        let join = |t: &[usize]| t.iter().map(usize::to_string).collect::<Vec<_>>().join(",");
+        match needle {
+            0 => println!("{}", join(&all[..all.len().min(dump_tokens)])),
+            _ => seqs
+                .iter()
+                .for_each(|q| println!("{}|{}", q.score_from, join(&q.tokens))),
+        }
+        return Ok(());
+    }
     let longest = seqs.iter().map(|s| s.tokens.len()).max().unwrap_or(0);
     if longest > config.block_size {
         bail!(
