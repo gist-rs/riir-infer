@@ -1,10 +1,15 @@
 # Plan 004 — EXL3 T7c-1c: the full-pack bit-exact gate (Issue 001 §17.5)
 
-**Status:** IN FLIGHT — 2026-09-25. T1 landed (gate test
+**Status:** CLOSED — 2026-09-25. T1 landed (commit `425e0c5`: gate test
 `real_pack_v2_bit_exact_full` + the core `decode_w_rot_f32` extraction);
 M3 Metal validation green (core 17 passed incl.
 `parallel_matches_scalar_bit_identical`; GPU module 7 passed incl. the
-synthetic v2 gate). T2 = the 4090 CUDA run (scheduled task), pending.
+synthetic v2 gate). T2/T3 done: the 4090 CUDA run PASSED — exit 0,
+555.15 s wall, **573/573 layers / 26,481,917,952 weights / 0 bit
+mismatches** (v2-vs-v1 and v2-vs-CPU), first-ever K6 vision-tower decode
+(168 layers / 480 M w); coverage K3 34 · K4 305 · K5 66 · K6 168 layers,
+all Cb2Mul1; record in the issue §17.5 T7c-1c row + status line (commit
+of the docs close). T7c-2 stays the OWNER call.
 
 T7c-1c (§17.5): "full-pack bit-exact gate (whole pack, 5-class oracle
 shape) for v2 before any GEMV work consumes it" — §17.3 gate 1 at
@@ -39,8 +44,13 @@ gap.
         loader regression REDS instead of printing a green zero; failure
         rows name the first divergent element + bit patterns. M3 Metal:
         core 17 passed, GPU module 7 passed.
-- [ ] T2 — the 4090 CUDA run (pack `E:/git/riir-infer/.raw/packs/qwen38-27b-exl3-4bpw`,
-      SCHEDULED TASK — the detached-SSH reaping lesson): box state
-      recorded, whole-pack table + coverage in the issue §17.5 T7c-1c row.
-- [ ] T3 — commit + push; issue status line updated; plan closed. The
+- [x] T2 — the 4090 CUDA run (pack `E:/git/riir-infer/.raw/packs/qwen38-27b-exl3-4bpw`,
+      SCHEDULED TASK — the detached-SSH reaping lesson): exit 0, 555.15 s,
+      box state agent-measured at launch (idle desktop baseline 20% util /
+      503 MiB / 37.5 W, AC, no compute apps); the box's `git fetch` hung
+      twice (github unreachable from the box) — synced via a git bundle
+      (`develop ^<base>` scp'd to `.raw/`, fetched + ff-merged there), the
+      documented workaround for a fetch-dead box. Whole-pack table +
+      coverage in the issue §17.5 T7c-1c row.
+- [x] T3 — commit + push; issue status line updated; plan closed. The
       T7c-2 proceed/pivot/close decision stays the OWNER call.
