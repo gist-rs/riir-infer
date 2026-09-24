@@ -67,6 +67,11 @@ Release, single thread: **6.1–6.5 M weights/s** (o_proj 31.5M w / 5.01 s;
 mlp 89.1M w / 14.5 s; lm_head 1.27B w / 197 s — scalar O(in·out·128)).
 Full-model single-thread extrapolation ≈ 70 min. Zero NaN; sane stats.
 
+**T7a CPU arm (Issue 001 §15, `725a8a5`):** codebook LUT + rayon over
+disjoint row strips — **bit-identical** to the scalar reference — measures
+**65–69 M weights/s (10.6–11.4×)** across the same classes (lm_head 197 s →
+19.4 s). Full-model parallel extrapolation ≈ 6.7 min.
+
 ## Correctness (era-gate, native oracle on the same pack)
 
 Rust `Exl3Pack::layer().dequantize_f32` vs exllamav3-native
