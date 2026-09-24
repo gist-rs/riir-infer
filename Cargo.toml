@@ -57,6 +57,9 @@ hla = []
 raven = []
 gemma_lora = []
 lora_still = []
+# EXL3 (trellis-coded, QTIP-variant) safetensors-side quant — CPU reference
+# dequantization, opt-in until the Issue-001 T6 GOAT gate (workspace rule).
+exl3 = []
 
 # katgpt-core forwards.
 sparse_mlp = ["katgpt-core/sparse_mlp"]

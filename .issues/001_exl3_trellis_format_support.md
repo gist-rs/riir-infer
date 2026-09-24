@@ -1,7 +1,7 @@
 # Issue 001 — EXL3 (trellis-coded) weight-format support in the quantization zoo
 
-**Status:** OPEN — T1 (format spec) + T2 (seam decision) DONE 2026-09-24; T3–T7 pending.
-**Owner:** unassigned. **Filed:** 2026-09-24. **T1/T2 executed:** 2026-09-24 (4090 box).
+**Status:** OPEN — T1 (format spec) + T2 (seam decision) + T3 (CPU reference) DONE 2026-09-24; T4–T7 pending (T4 needs a real EXL3 pack).
+**Owner:** unassigned. **Filed:** 2026-09-24. **T1/T2/T3 executed:** 2026-09-24 (4090 box).
 **Origin:** riir-clippy Research 207 (`.research/207_qwen38_exl3_dgx_spark_distill_verdict.md`),
 lane-intel axis. The corpus half of that verdict is riir-clippy Plan 170 and is
 independent of this issue — neither blocks the other.
@@ -123,9 +123,23 @@ is an open design question this issue does not pre-decide.
   `quant/exl3.rs`), NO GgmlType coupling** — Claude-verdict ping-pong round 1
   REVISE→incorporated, round 2 AGREE. The decision record with the full
   rationale + four seam conditions: **§11**.
-- [ ] **T3 — CPU reference dequantization** (`src/quant/exl3.rs`), scalar and
+- [x] **T3 — CPU reference dequantization** (`src/quant/exl3.rs`), scalar and
   correct before fast. The procedural codebook and the incoherence rotation are
   the two pieces with no analogue in the existing zoo.
+  → **DONE 2026-09-24** (landed behind the opt-in `exl3` feature, per the
+  workspace promotion rule — T6 decides default-promotion). Record in **§12**:
+  `Exl3Codebook` (all three cbs, exact f16 semantics + one documented
+  `__hfma` emulation caveat), `Exl3K` (integer + half-integer from
+  `trellis.shape[-1]/16`), the tail-biting ring reader in **tensor-core
+  element order** (a T1 addendum the record now carries), Sylvester-128
+  Hadamard, packed-sign unpack, the zero-copy `Exl3Layer<'a>` honoring all
+  four §11.3 conditions, and `detect_exl3_layers` over the safetensors
+  metadata map (`TensorMeta` → `pub(crate)`). 11 tests: independent
+  numpy-computed codebook pins, ring round-trips (int + half-K), tail-biting
+  wrap, tensor-core permutation bijection + spot checks, Hadamard
+  orthogonality/symmetry, sign unpack, layer validation (markers/K/dims),
+  and a full-dequant cross-composition. clippy `-D warnings` clean at both
+  feature postures; 197/186 tests green (feature on/off).
 - [ ] **T4 — Correctness gate against an independent oracle.** Dequantize a
   real pack and compare against exllamav3's own output for the same tensors.
   ⛔ **Do NOT use output-text equality as the fidelity gate** — see §6.
@@ -489,3 +503,79 @@ Process note carried forward (round 2): a verdict round's outcome is
 written in the commit that FOLLOWS the verdict, never in the file that
 requests it — this §11 record was committed after round 2 returned AGREE,
 which is the ordering to keep.
+
+## 12. T3 record — the CPU reference dequantization (2026-09-24)
+
+**Landed:** `src/quant/exl3.rs` behind the opt-in `exl3` feature
+(`Cargo.toml` `exl3 = []`; promotion is T6's call). Supporting edits:
+`TensorMeta` → `pub(crate)` with its `dtype` field now actually READ
+(§11.3 cond. 2 — `quant/mod.rs`'s "GGML ecosystem" doc line updated per
+cond. 4).
+
+### 12.1 One ADDENDUM to §10 discovered during T3 (load-bearing for T4)
+
+⚠ **The trellis ring is stored in TENSOR-CORE ELEMENT ORDER, not
+row-major.** The quantizer pre-permutes tiles into the CUDA encoder's
+layout and — its own comment — "[undoes] permutation on reconstructed
+tiles, but **keep[s] indices in tensor core layout**"
+(`exl3_lib/quantize.py`, the `tensor_core_perm` build). `frac.cu`'s
+header confirms and defines it: for ring position `p = t·8 + j`, the tile
+element is `in_off = (t%4)·2 + (j&1) + 8·((j>>1)&1)`, `out_off =
+(t>>2) + 8·((j>>2)&1)` (`frac_perm`). A decoder that walks the ring in
+row-major order reconstructs a PERMUTED matrix — shapes and stats look
+plausible, every weight is wrong. §10.4 now implies this via the frac.cu
+quote; this section states it explicitly because T4's oracle comparison
+is where a silent permutation bug would otherwise surface as "EXL3
+quality is terrible" rather than as a layout error.
+
+### 12.2 What shipped
+
+- `Exl3Codebook::{Cb0, Cb1Mcg, Cb2Mul1}` — the three procedural codebooks
+  in exact f16 semantics (integer wrapping ops + one fp16 add). The B29
+  enum-dispatch shape lives HERE (§11.2's "no false binary").
+  `from_markers` VERIFIES the raw u32 words and refuses mismatches loudly
+  (§11.3 cond. 3) — never a bool.
+- `Exl3K` — integer + half-integer bitrate, derived from
+  `trellis.shape[-1]/16` (words%16: 0 → int, 8 → half); `bits_for_step`
+  implements `frac_d` (`ka + bit(i mod 16) of 0xAAAA` — even steps short,
+  odd steps long, period 16).
+- Ring reader: LE-u32-read → MSB-first bitstream; 16-bit windows ending
+  at `S(p+1)`, cyclic (tail-biting); placement through
+  `ring_pos_to_tile_element` (§12.1).
+- `sylvester_hadamard_128()` — cached `H/√128`, built by 7 doublings from
+  `[[1]]` (verified against the pin's `hadamard_1.txt` base + Sylvester
+  recursion; orthogonality/symmetry asserted in tests).
+- `Exl3Layer<'a>` — ZERO-COPY byte views (§11.3 cond. 1), validates dims
+  (128-divisible), trellis length, K, markers, half-K⇒mul1;
+  `dequantize_f32()` = trellis decode → left block-Hadamard → row scales
+  → right block-Hadamard → column scales, scalar O(in·out·128).
+- `detect_exl3_layers(&BTreeMap<String, TensorMeta>, &markers)` — the
+  loader-side group scan (dtype-validated: trellis I16, markers I32);
+  `#[allow(dead_code)]` until T4/T5 wire the loader.
+
+### 12.3 Numerics caveats T4 must adjudicate
+
+1. **cb2's `__hfma` emulation**: computed as `f32(h)·f32(inv) + f32(bias)`
+   rounded once to f16 (product exact in f32; two roundings total vs a
+   true fused op's one). cb0/cb1 are bit-portable (single fp16 add). If
+   T4's per-tensor numeric error shows a systematic cb2 offset, this
+   emulation is the first suspect — the fix is a software hfma or f64
+   accumulation for the final rounding.
+2. **The Hadamard convention** (Sylvester from `[[+]]`) is inferred from
+   the pin's data files + recursion; a real pack pins it absolutely.
+3. **Half-integer step direction** (`0xAAAA`: even steps `ka`, odd `ka+1`)
+   follows `frac_d` verbatim; a real half-K pack confirms the tile-word
+   parity derivation end-to-end.
+
+### 12.4 Validation at landing
+
+`cargo test -p riir-infer-core --lib` = 186 green (baseline unchanged);
+`--features exl3 --lib` = 197 green (11 new, non-vacuous by name:
+  codebook_pins_match_independent_numpy, codebooks_finite_and_bounded,
+  ring_roundtrip_integer_k, ring_wraps_tail_biting, half_k_bits_and_words,
+  half_k_roundtrip, ring_perm_is_bijective_and_matches_spec,
+  sylvester_hadamard_128_properties, sign_unpack_matches_bit_order,
+  layer_validates_dims_markers_and_k, dequant_matches_reference_composition).
+clippy `--all-targets -D warnings` clean at BOTH postures. The known-answer
+pins were computed independently (numpy f16 via `uv run --with numpy`, from
+the §10.3 spec ops — `.raw/exl3_pins.py`, kept with the clone).

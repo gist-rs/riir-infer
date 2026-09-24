@@ -1,8 +1,12 @@
 //! Quantization formats for inference weight compression.
 //!
-//! Implements k-quant formats from the GGML ecosystem for reduced memory
-//! bandwidth during GPU decode inference.
+//! GGML-ecosystem k-quants (GGUF side) for reduced memory bandwidth during
+//! GPU decode inference — plus, behind the `exl3` feature, the first
+//! safetensors-side format: EXL3 trellis-coded weights (Issue 001), kept
+//! loader-decoupled from `GgmlType` per the T2 seam decision there.
 
+#[cfg(feature = "exl3")]
+pub mod exl3;
 pub mod ptq1_0;
 pub mod q2_0;
 pub mod q2k;

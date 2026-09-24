@@ -33,11 +33,16 @@ pub fn bf16_to_f32(bits: u16) -> f32 {
 // ---------------------------------------------------------------------------
 
 /// Parsed tensor metadata from safetensors header.
-struct TensorMeta {
+///
+/// `pub(crate)` so the quant modules can consume the metadata map without
+/// growing format knowledge inside this loader (Issue 001 §11.3 cond. 2).
+pub(crate) struct TensorMeta {
+    // Read by `quant::exl3::detect_exl3_layers` under the `exl3` feature;
+    // unread at the default posture (the module is gated off).
     #[allow(dead_code)]
-    dtype: String,
-    shape: Vec<usize>,
-    data_start: usize,
+    pub(crate) dtype: String,
+    pub(crate) shape: Vec<usize>,
+    pub(crate) data_start: usize,
     data_end: usize,
 }
 
