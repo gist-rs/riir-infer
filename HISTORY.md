@@ -4,6 +4,31 @@ Durable records for resolved questions and closed lanes (the noise-reduction
 convention: the record lands here, hash-pinned; open work lives in `.issues/`
 and `.plans/`). Created 2026-09-23 at the first record.
 
+## 2026-09-25 — Issue 010 CLOSED (REFUTED): Gemma-2 has no QK-norm; the 288-tensor fixture is upstream-faithful
+
+Issue 010 (`95f52fb`) claimed `riir-train/data/gemma-2-2b-it-f16.gguf` was a
+mutated conversion: 288 tensors with no `attn_q_norm`/`attn_k_norm`, against a
+supposed llama.cpp standard of 340 (13/layer), and that upstream Gemma-2 applies
+per-head q/k RMSNorm. **That premise is false.** Checked against upstream
+HuggingFace `models/gemma2/modular_gemma2.py`: `Gemma2Attention` defines no
+`q_norm`/`k_norm`, and bounds scores with `attn_logit_softcapping` (tanh, cap 50),
+which this repo's forward already applies (`attention_head_softcap`). Per-head
+QK-norm arrived in Gemma-3, where it replaced softcapping. The 11 tensors/layer
+(attn_norm, q, k, v, o, post_attention_norm, ffn_norm, gate, up, down,
+post_ffw_norm) × 26 + 2 globals = 288 is the standard shape.
+
+- The fixture and forward are upstream-faithful. Option (a), re-converting, was
+  never needed. Nothing pinned to the old artifact needs a re-run.
+- `transformer/gemma4.rs`'s "q/k norm … NEW vs Gemma 2" doc was **correct** and
+  stays.
+- Corrected in the same commit: the `vk_calibration` bin's caveat 1 (doc and the
+  two printed lines) and the `gemma2_calibration.rs` tap-law paragraph. For
+  gemma-2 the pre-RoPE K tap is exactly the cache's K. Issue 883 trap 1's
+  post-QK-norm wrinkle applies to gemma-3/4-class stacks only.
+- Why it happened: a tensor count was compared against a remembered "standard"
+  rather than against the upstream model definition. Check the reference source
+  before filing a fixture-integrity finding.
+
 ## 2026-09-25 — Issue 009 CLOSED: software-pipelined narrow staging — NEGATIVE at the gate, and the probe's tiny-op floor exposed
 
 The `.issues/008` follow-up ("double-buffered staging / cp.async — latency

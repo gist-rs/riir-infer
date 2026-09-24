@@ -12,7 +12,7 @@
 ## What this issue owns (the gate katgpt-rs cannot run)
 
 - [ ] **T1 — wire the floor + code into one attention path.** Candidates: `riir-infer-laya` `ops::softmax_rows` on the CPU backend, or the decode `attention_forward` default. Feature-gated default-off; width `w = ln(n_ctx/ε)`; `n_sink` from the model's sink convention (the `kv_sink_window` default is 4).
-- [ ] **T2 — ppl Δ within the envelope's prediction.** Use the house Bonsai / gemma-2 fixture, with the caveat in Issue 010. Run 8-bit and 6-bit. Report ppl Δ beside the mean per-row envelope. Bench 888 measured the **context-conditional** TV at ~0.75% (8-bit) and ~3% (6-bit) on synthetic σ=1 rows. Real rows decide whether 6-bit survives.
+- [ ] **T2 — ppl Δ within the envelope's prediction.** Use the house gemma-2 fixture (upstream-faithful: Gemma-2 has no QK-norm, and it softcaps attention logits at 50, which bounds the row range the floor sees; Issue 010's contrary claim was refuted). Run 8-bit and 6-bit. Report ppl Δ beside the mean per-row envelope. Bench 888 measured the **context-conditional** TV at ~0.75% (8-bit) and ~3% (6-bit) on synthetic σ=1 rows. Real rows decide whether 6-bit survives.
 - [ ] **T3 — needle@64K at 6-bit ≥ baseline − ε.** This is the issue's long-context bar. The floor term grows with n (`A ≤ n·e^{−w}`); the tv-budget width compensates via `ln(n/ε)`, which coarsens the code. Measure that trade-off at 64K.
 - [ ] **T4 — sink exemption A/B on a real model.** Bench 888 G1b pinned the synthetic cost of dropping the exemption: +8.3pp context TV at 6-bit. Confirm on real attention rows with real sinks.
 

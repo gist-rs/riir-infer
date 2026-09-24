@@ -12,11 +12,10 @@
 //!
 //! **Tap-point law (883 trap 1)**: K is tapped EXACTLY where the cache
 //! path would consume it — after the W_K projection, BEFORE
-//! [`crate::rope::apply_rope_with_freq`]; V after W_V. This artifact's
-//! gemma-2 stack carries NO QK-norm (see the fixture caveat in the bin) so
-//! there is no post-QK-norm wrinkle ON THIS ARTIFACT; the trap re-arms for
-//! any standard llama.cpp gemma-2 conversion (340 tensors, q/k norm
-//! present).
+//! [`crate::rope::apply_rope_with_freq`]; V after W_V. Gemma-2 carries no
+//! QK-norm (upstream-faithful; see the architecture note in the bin), so
+//! there is no post-QK-norm wrinkle for this family. The trap re-arms for
+//! gemma-3/4-class stacks, where q/k norm is present.
 //!
 //! **No lm_head**: the calibration forward stops after the final RMSNorm —
 //! the vocab projection is ~20% of per-token FLOPs and the dashboard never
@@ -316,7 +315,7 @@ pub fn load_gemma2_f16_direct(gguf: &GgufFile, config: &Config) -> anyhow::Resul
             anyhow::bail!("big-endian host: use the f32 dequant path");
         }
     };
-    let read_norm = |name: &str| -> anyhow::Result<Vec<f32>> { Ok(gguf.dequant_f16_to_f32(name)?) };
+    let read_norm = |name: &str| -> anyhow::Result<Vec<f32>> { gguf.dequant_f16_to_f32(name) };
 
     let wte = read_f16("token_embd.weight")?;
     let final_norm = read_norm("output_norm.weight")?;

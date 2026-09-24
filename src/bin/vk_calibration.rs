@@ -15,13 +15,16 @@
 //!
 //! ## Fixture caveats (recorded beside every number this bin prints)
 //!
-//! 1. **This GGUF is a 288-tensor conversion — NO `attn_q_norm`/
-//!    `attn_k_norm` tensors** (llama.cpp's standard gemma-2 conversion
-//!    carries 340; upstream Gemma-2 has QK-norm). The workspace's gemma-2
-//!    stack (loader + forward) is self-consistent on this artifact, and
-//!    V never passes through QK-norm even upstream, but K magnitudes
-//!    differ from upstream gemma-2 — ρ_l(K) and ρ_l(V−K) describe THIS
-//!    artifact. Trap 1 re-arms for any standard 340-tensor conversion.
+//! 1. **Architecture note — Gemma-2 has NO QK-norm, and this GGUF is
+//!    upstream-faithful.** The 288-tensor count (26 layers × 11 + 2) is
+//!    the standard llama.cpp gemma-2 shape; per-head q/k RMSNorm arrived
+//!    in Gemma-3. Gemma-2 bounds attention logits with tanh softcapping
+//!    (`attn_logit_softcapping = 50`) instead. So the pre-RoPE K tap is
+//!    exactly where the cache stores K, with no post-norm wrinkle. Trap 1
+//!    re-arms for gemma-3/4-class fixtures (q/k norm present). An
+//!    earlier version of this caveat claimed the opposite; that was
+//!    refuted against upstream `modular_gemma2.py` (riir-infer HISTORY.md,
+//!    Issue 010).
 //! 2. First-slice corpus size is honest (`--max-tokens`); the issue's
 //!    full spec is 10⁸–10⁹ tokens — the first slice is a reduced-scale
 //!    read with measured coverage, never presented as the full pass.
@@ -112,8 +115,8 @@ fn main() -> Result<()> {
         t0.elapsed().as_secs_f32()
     );
     println!(
-        "# fixture caveat 1: 288-tensor conversion, NO q/k-norm tensors \
-         (llama.cpp standard = 340) — rho(K)/rho(V-K) describe THIS artifact"
+        "# fixture note 1: gemma-2 has no q/k-norm (upstream-faithful, \
+         288 tensors) — the pre-RoPE K tap is the cache's K"
     );
     drop(gguf);
 
@@ -197,7 +200,7 @@ fn main() -> Result<()> {
 
     // ── The dashboard ─────────────────────────────────────────────────
     let mut out = String::new();
-    out.push_str("# Issue 883 P0 — R² dashboard: gemma-2-2b-it-f16.gguf (288-tensor conversion, no q/k-norm — caveat 1)\n\n");
+    out.push_str("# Issue 883 P0 — R² dashboard: gemma-2-2b-it-f16.gguf (upstream-faithful gemma-2: no q/k-norm — note 1)\n\n");
     out.push_str(&format!(
         "slice: {} tokens | top_k={} | seq_len={} | tap: pre-RoPE K, post-W_V V\n\n",
         tokens.len(),
