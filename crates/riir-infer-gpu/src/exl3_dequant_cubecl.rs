@@ -225,6 +225,132 @@ fn exl3_right_hadamard(
 }
 
 // ---------------------------------------------------------------------------
+// T7c v2 decode — word-aligned window extraction (Issue 001 §17.2)
+// ---------------------------------------------------------------------------
+
+/// Word-aligned 16-bit ring window (the v2 extraction, §17.2): MSB-first
+/// window ENDING at ring bit `end` (exclusive) — identical semantics to v1's
+/// per-bit loop, computed as 1–2 u32 loads + shift/mask with
+/// conditional-subtract wrap. `ring_bits` is a multiple of 128 by
+/// construction (`stream_bits_per_tile`), so `start` stays word-aligned-domain
+/// and the only wrap case is `wi_hi == tile_words`.
+#[cube]
+fn window16_fast(trellis: &[u32], tile_base: u32, end: u32, ring_bits: u32, tile_words: u32) -> u32 {
+    // start = end - 16, wrapping once (end in 1..=ring_bits).
+    let start = if end >= 16u32 { end - 16u32 } else { end + ring_bits - 16u32 };
+    let wi = start >> 5;
+    let shift = start & 31u32;
+    let word_lo = trellis[(tile_base + wi) as usize];
+    if shift <= 16u32 {
+        // Window entirely within word_lo: bits [16-shift, 31-shift].
+        (word_lo >> (16u32 - shift)) & 0xFFFFu32
+    } else {
+        // Straddles: low (32-shift) bits of word_lo + top (shift-16) bits of
+        // the NEXT word (wrapping to 0 at the ring end).
+        let mut wi_hi = wi + 1u32;
+        if wi_hi == tile_words {
+            wi_hi = 0u32;
+        }
+        let word_hi = trellis[(tile_base + wi_hi) as usize];
+        ((word_lo << (shift - 16u32)) | (word_hi >> (48u32 - shift))) & 0xFFFFu32
+    }
+}
+
+/// v2 trellis decode — same output contract as [`exl3_trellis_decode`]
+/// (bit-exact; integer-only math + the same LUT), with the word-aligned
+/// window extraction (§17.2 arm A2).
+#[cube(launch_unchecked)]
+fn exl3_trellis_decode_v2(
+    trellis: &[u32],
+    lut: &[f32],
+    w_rot: &mut [f32],
+    c0_tiles: u32,
+    full_out_tiles: u32,
+    chunk_out_tiles: u32,
+    chunk_nout: u32,
+    tile_words: u32,
+    ring_bits: u32,
+    ka: u32,
+    half: u32,
+    total: u32,
+    total_threads: u32,
+) {
+    let stride = total_threads;
+    let mut pos = ABSOLUTE_POS as u32;
+    while pos < total {
+        let local_tile = pos >> 8;
+        let p = pos & 255;
+        let a = local_tile / chunk_out_tiles;
+        let c_local = local_tile % chunk_out_tiles;
+        let c_full = c0_tiles + c_local;
+
+        let pp = p + 1;
+        let s = if half != 0 { ka * pp + pp / 2 } else { ka * pp };
+
+        let tile_base = (a * full_out_tiles + c_full) * tile_words;
+        let w = window16_fast(trellis, tile_base, s, ring_bits, tile_words);
+        let v = lut[w as usize];
+
+        let t = p >> 3;
+        let j = p & 7;
+        let in_off = ((t & 3) * 2) + (j & 1) + 8 * ((j >> 1) & 1);
+        let out_off = (t >> 2) + 8 * ((j >> 2) & 1);
+        let row = a * 16 + in_off;
+        let col = c_local * 16 + out_off;
+        w_rot[(row * chunk_nout + col) as usize] = v;
+
+        pos += stride;
+    }
+}
+
+/// Bench arm A3 (§17.2): v2 extraction with the LUT gather replaced by an
+/// arithmetic function of `w` — isolates the surviving `lut[w]` gather
+/// (1 load/weight). NOT bit-exact vs v1 — bench-only, never a parity path.
+#[cube(launch_unchecked)]
+fn exl3_trellis_decode_v2_nolut(
+    trellis: &[u32],
+    w_rot: &mut [f32],
+    c0_tiles: u32,
+    full_out_tiles: u32,
+    chunk_out_tiles: u32,
+    chunk_nout: u32,
+    tile_words: u32,
+    ring_bits: u32,
+    ka: u32,
+    half: u32,
+    total: u32,
+    total_threads: u32,
+) {
+    let stride = total_threads;
+    let mut pos = ABSOLUTE_POS as u32;
+    while pos < total {
+        let local_tile = pos >> 8;
+        let p = pos & 255;
+        let a = local_tile / chunk_out_tiles;
+        let c_local = local_tile % chunk_out_tiles;
+        let c_full = c0_tiles + c_local;
+
+        let pp = p + 1;
+        let s = if half != 0 { ka * pp + pp / 2 } else { ka * pp };
+
+        let tile_base = (a * full_out_tiles + c_full) * tile_words;
+        let w = window16_fast(trellis, tile_base, s, ring_bits, tile_words);
+        // Consume `w` arithmetically so the trellis loads stay live.
+        let v = w as f32 * (1.0f32 / 65536.0f32);
+
+        let t = p >> 3;
+        let j = p & 7;
+        let in_off = ((t & 3) * 2) + (j & 1) + 8 * ((j >> 1) & 1);
+        let out_off = (t >> 2) + 8 * ((j >> 2) & 1);
+        let row = a * 16 + in_off;
+        let col = c_local * 16 + out_off;
+        w_rot[(row * chunk_nout + col) as usize] = v;
+
+        pos += stride;
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Driver
 // ---------------------------------------------------------------------------
 
@@ -280,6 +406,30 @@ fn trellis_as_u32(bytes: &[u8]) -> std::borrow::Cow<'_, [u32]> {
                 .collect(),
         )
     }
+}
+
+/// Decode-only bench arm selector (§17.2 — the discriminating bench).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum DecodeArm {
+    /// A1 — the T7b v1 kernel (16 per-bit loads + modulos per weight).
+    V1,
+    /// A2 — v2 word-aligned windows (1-2 loads, modulo-free).
+    V2,
+    /// A3 — v2 with the LUT gather replaced arithmetically (isolates the
+    /// gather). NOT bit-exact — bench-only.
+    V2NoLut,
+}
+
+/// Decode-only bench result (§17.2): throughput of ONE decode kernel
+/// over the layer's rotated basis — no Hadamards, no scales.
+#[derive(Debug, Clone, Copy)]
+pub struct DecodeBench {
+    /// Decoded weights (`in·out`).
+    pub weights: u64,
+    /// Single-pass wall (uploads + launches + readback), seconds.
+    pub wall_secs: f64,
+    /// (wall@reps − wall@1)/(reps−1) — cancels upload+readback.
+    pub kernel_secs: Option<f64>,
 }
 
 /// EXL3 GPU dequantization (Issue 001 T7b): trellis decode + block-Hadamard
@@ -455,6 +605,177 @@ impl Exl3DequantCubeCL {
         Ok((
             w,
             Exl3DequantTiming {
+                weights: single.weights,
+                wall_secs: single.wall_secs,
+                kernel_secs: Some(kernel.max(0.0)),
+            },
+        ))
+    }
+
+    /// Decode-only bench (§17.2): runs ONE decode arm over the layer's
+    /// rotated basis (w_rot, [in × out] in-major), chunked over out-columns
+    /// under [`CHUNK_BYTE_BUDGET`]; `reps` re-enqueues each chunk's decode
+    /// kernel (idempotent). Returns the readback w_rot (full for layers that
+    /// fit, else the chunks are read back in order — the Vec is ALWAYS the
+    /// full layer for the arms that produce it; VRAM-bounded, never resident
+    /// beyond one chunk + the trellis/LUT uploads).
+    pub fn decode_only_layer<R: Runtime>(
+        client: &ComputeClient<R>,
+        layer: &Exl3Layer<'_>,
+        arm: DecodeArm,
+        reps: usize,
+    ) -> Result<(Vec<f32>, DecodeBench), Exl3DequantError> {
+        Self::decode_only_layer_chunked(client, layer, arm, None, reps)
+    }
+
+    /// The chunked decode-only seam (see [`Self::decode_only_layer`]).
+    pub fn decode_only_layer_chunked<R: Runtime>(
+        client: &ComputeClient<R>,
+        layer: &Exl3Layer<'_>,
+        arm: DecodeArm,
+        chunk_cols: Option<usize>,
+        reps: usize,
+    ) -> Result<(Vec<f32>, DecodeBench), Exl3DequantError> {
+        let t0 = std::time::Instant::now();
+        let (kin, nout) = (layer.in_features, layer.out_features);
+        if (kin as u64) * (nout as u64) >= u64::from(u32::MAX) {
+            return Err(Exl3DequantError::LayerTooLarge { in_features: kin, out_features: nout });
+        }
+        let chunk = chunk_cols.unwrap_or_else(|| {
+            let by_budget = (CHUNK_BYTE_BUDGET / (kin * 4)).max(128) & !127;
+            by_budget.min(nout)
+        });
+        assert!(chunk.is_multiple_of(128) && chunk >= 128 && chunk <= nout,
+            "chunk_cols must be a 128-multiple in [128, out_features={nout}], got {chunk}");
+
+        let trellis = trellis_as_u32(layer.trellis_bytes());
+        let trellis_h = client.create_from_slice(u32::as_bytes(&trellis));
+        let lut = codebook_lut(layer.codebook);
+        let lut_h = client.create_from_slice(f32::as_bytes(&lut[..]));
+
+        let k = layer.k;
+        let ring_bits = k.stream_bits_per_tile() as u32;
+        let tile_words = ring_bits >> 5;
+        let in_tiles = (kin / 16) as u32;
+        let full_out_tiles = (nout / 16) as u32;
+        let reps = reps.max(1);
+
+        let mut out = vec![0.0f32; kin * nout];
+        for c0 in (0..nout).step_by(chunk) {
+            let cols = chunk.min(nout - c0);
+            let chunk_nout = cols as u32;
+            let chunk_out_tiles = (cols / 16) as u32;
+            let elems = kin * cols;
+            let w_rot_h = client.empty(elems * 4);
+            let decode_total = in_tiles * chunk_out_tiles * 256;
+            let (decode_wg, decode_threads) = stride_grid(decode_total);
+            for _ in 0..reps {
+                unsafe {
+                    match arm {
+                        DecodeArm::V1 => {
+                            exl3_trellis_decode::launch_unchecked::<R>(
+                                client,
+                                CubeCount::Static(decode_wg, 1, 1),
+                                CubeDim::new_1d(EXL3_THREADS),
+                                BufferArg::from_raw_parts(trellis_h.clone(), trellis.len()),
+                                BufferArg::from_raw_parts(lut_h.clone(), lut.len()),
+                                BufferArg::from_raw_parts(w_rot_h.clone(), elems),
+                                (c0 / 16) as u32,
+                                full_out_tiles,
+                                chunk_out_tiles,
+                                chunk_nout,
+                                tile_words,
+                                ring_bits,
+                                k.ka as u32,
+                                u32::from(k.half),
+                                decode_total,
+                                decode_threads,
+                            );
+                        }
+                        DecodeArm::V2 => {
+                            exl3_trellis_decode_v2::launch_unchecked::<R>(
+                                client,
+                                CubeCount::Static(decode_wg, 1, 1),
+                                CubeDim::new_1d(EXL3_THREADS),
+                                BufferArg::from_raw_parts(trellis_h.clone(), trellis.len()),
+                                BufferArg::from_raw_parts(lut_h.clone(), lut.len()),
+                                BufferArg::from_raw_parts(w_rot_h.clone(), elems),
+                                (c0 / 16) as u32,
+                                full_out_tiles,
+                                chunk_out_tiles,
+                                chunk_nout,
+                                tile_words,
+                                ring_bits,
+                                k.ka as u32,
+                                u32::from(k.half),
+                                decode_total,
+                                decode_threads,
+                            );
+                        }
+                        DecodeArm::V2NoLut => {
+                            exl3_trellis_decode_v2_nolut::launch_unchecked::<R>(
+                                client,
+                                CubeCount::Static(decode_wg, 1, 1),
+                                CubeDim::new_1d(EXL3_THREADS),
+                                BufferArg::from_raw_parts(trellis_h.clone(), trellis.len()),
+                                BufferArg::from_raw_parts(w_rot_h.clone(), elems),
+                                (c0 / 16) as u32,
+                                full_out_tiles,
+                                chunk_out_tiles,
+                                chunk_nout,
+                                tile_words,
+                                ring_bits,
+                                k.ka as u32,
+                                u32::from(k.half),
+                                decode_total,
+                                decode_threads,
+                            );
+                        }
+                    }
+                }
+            }
+            let bytes = client
+                .read_one(w_rot_h)
+                .map_err(|e| Exl3DequantError::Readback(format!("{e:?}")))?;
+            let chunk_out = f32::from_bytes(&bytes);
+            assert!(chunk_out.len() >= elems,
+                "readback {} < expected {elems} elements", chunk_out.len());
+            // [in × cols] row-major chunk — scatter per-row (the §16 lesson).
+            for (r, row) in chunk_out[..elems].chunks_exact(cols).enumerate() {
+                out[r * nout + c0..r * nout + c0 + cols].copy_from_slice(row);
+            }
+        }
+
+        let wall = t0.elapsed().as_secs_f64().max(1e-9);
+        Ok((
+            out,
+            DecodeBench { weights: (kin * nout) as u64, wall_secs: wall, kernel_secs: None },
+        ))
+    }
+
+    /// Timed decode-only bench: warmup (JIT) first, then the
+    /// reps-differential kernel-only estimate (cancels uploads + readback),
+    /// the §17.2 Gw/s figure.
+    pub fn decode_only_layer_timed<R: Runtime>(
+        client: &ComputeClient<R>,
+        layer: &Exl3Layer<'_>,
+        arm: DecodeArm,
+        reps: usize,
+    ) -> Result<(Vec<f32>, DecodeBench), Exl3DequantError> {
+        if reps > 1 {
+            // Warmup: pay JIT + first-upload outside the timed pair (the T7b
+            // bench's pattern — without it the differential reads negative).
+            let _ = Self::decode_only_layer_chunked(client, layer, arm, None, 1)?;
+        }
+        let (w, single) = Self::decode_only_layer_chunked(client, layer, arm, None, 1)?;
+        if reps <= 1 {
+            return Ok((w, DecodeBench { weights: single.weights, wall_secs: single.wall_secs, kernel_secs: None }));
+        }
+        let (_, multi) = Self::decode_only_layer_chunked(client, layer, arm, None, reps)?;
+        let kernel = (multi.wall_secs - single.wall_secs) / (reps - 1) as f64;
+        Ok((
+            w,
+            DecodeBench {
                 weights: single.weights,
                 wall_secs: single.wall_secs,
                 kernel_secs: Some(kernel.max(0.0)),
@@ -929,5 +1250,214 @@ mod tests {
             probe_len
         );
         assert_eq!(bad, 0, "{}: decode stage not bit-exact vs the reference tile decoder", plan.key);
+    }
+
+    /// T7c-1a gate (§17.3 gate 1, synthetic half): v2 word-aligned extraction
+    /// is BIT-EXACT vs v1 AND vs the CPU reference tile decoder, across
+    /// integer/half K + codebooks (the always-green arm; the full-pack gate
+    /// is T7c-1c, with the real-pack bench asserting v1-vs-v2 per layer).
+    #[test]
+    fn gpu_decode_v2_bit_exact_vs_v1_and_cpu() {
+        use riir_infer_core::quant::exl3::{decode_tile_rot, ring_pos_to_tile_element};
+
+        for (k, codebook) in [
+            (Exl3K { ka: 3, half: false }, Exl3Codebook::Cb0),
+            (Exl3K { ka: 5, half: false }, Exl3Codebook::Cb1Mcg),
+            (Exl3K { ka: 4, half: true }, Exl3Codebook::Cb2Mul1),
+            (Exl3K { ka: 2, half: false }, Exl3Codebook::Cb0),
+        ] {
+            let (in_f, out_f) = (384usize, 256usize);
+            let synth = SynthLayer::new(in_f, out_f, k, codebook, false, 11);
+
+            // CPU w_rot via the reference tile decoder + placement.
+            let mut cpu = vec![0.0f32; in_f * out_f];
+            let tile_bytes = k.words_per_tile() * 2;
+            let cols_tiles = out_f / 16;
+            let mut tile = [0.0f32; 256];
+            for a in 0..in_f / 16 {
+                for c in 0..cols_tiles {
+                    let off = (a * cols_tiles + c) * tile_bytes;
+                    decode_tile_rot(&mut tile, &synth.trellis[off..off + tile_bytes], k, codebook);
+                    for (p, &v) in tile.iter().enumerate() {
+                        let (r, co) = ring_pos_to_tile_element(p);
+                        cpu[(a * 16 + r) * out_f + c * 16 + co] = v;
+                    }
+                }
+            }
+
+            let ctx = CubeCLContext::new().expect("CubeCL should initialize");
+            let client = ctx.client();
+            let trellis = trellis_as_u32(&synth.trellis);
+            let trellis_h = client.create_from_slice(u32::as_bytes(&trellis));
+            let lut = codebook_lut(codebook);
+            let lut_h = client.create_from_slice(f32::as_bytes(&lut[..]));
+            let elems = in_f * out_f;
+            let total = ((in_f / 16) * (out_f / 16) * 256) as u32;
+            let (n_wg, n_threads) = stride_grid(total);
+
+            let run = |use_v2: bool| -> Vec<f32> {
+                let w_rot_h = client.empty(elems * 4);
+                unsafe {
+                    let args = (
+                        BufferArg::from_raw_parts(trellis_h.clone(), trellis.len()),
+                        BufferArg::from_raw_parts(lut_h.clone(), lut.len()),
+                        BufferArg::from_raw_parts(w_rot_h.clone(), elems),
+                        0u32,
+                        (out_f / 16) as u32,
+                        (out_f / 16) as u32,
+                        out_f as u32,
+                        k.stream_bits_per_tile() as u32 >> 5,
+                        k.stream_bits_per_tile() as u32,
+                        k.ka as u32,
+                        u32::from(k.half),
+                        total,
+                        n_threads,
+                    );
+                    if use_v2 {
+                        exl3_trellis_decode_v2::launch_unchecked::<ActiveRuntime>(
+                            &client,
+                            CubeCount::Static(n_wg, 1, 1),
+                            CubeDim::new_1d(EXL3_THREADS),
+                            args.0,
+                            args.1,
+                            args.2,
+                            args.3,
+                            args.4,
+                            args.5,
+                            args.6,
+                            args.7,
+                            args.8,
+                            args.9,
+                            args.10,
+                            args.11,
+                            args.12,
+                        );
+                    } else {
+                        exl3_trellis_decode::launch_unchecked::<ActiveRuntime>(
+                            &client,
+                            CubeCount::Static(n_wg, 1, 1),
+                            CubeDim::new_1d(EXL3_THREADS),
+                            args.0,
+                            args.1,
+                            args.2,
+                            args.3,
+                            args.4,
+                            args.5,
+                            args.6,
+                            args.7,
+                            args.8,
+                            args.9,
+                            args.10,
+                            args.11,
+                            args.12,
+                        );
+                    }
+                }
+                f32::from_bytes(&client.read_one(w_rot_h).unwrap()).to_vec()
+            };
+
+            let v1 = run(false);
+            let v2 = run(true);
+            let what = format!("K={}.{} cb={codebook:?}", k.ka, if k.half { 5 } else { 0 });
+            let bad_v1v2 = v1.iter().zip(&v2).filter(|(a, b)| a.to_bits() != b.to_bits()).count();
+            assert_eq!(bad_v1v2, 0, "{what}: v2 decode not bit-exact vs v1");
+            let bad_cpu = cpu.iter().zip(&v2).filter(|(a, b)| a.to_bits() != b.to_bits()).count();
+            assert_eq!(bad_cpu, 0, "{what}: v2 decode not bit-exact vs the CPU reference tile decoder");
+        }
+    }
+
+    /// T7c-1b (§17.2): the discriminating decode bench on the REAL pack —
+    /// arms A1 (v1) / A2 (v2) / A3 (v2-no-LUT) over the 5 sample classes,
+    /// Gw/s kernel-only (reps-differential), v2-vs-v1 BIT-EXACT asserted per
+    /// layer (the §17.3 gate-1 shape at bench scope; the FULL-pack gate is
+    /// T7c-1c). NO throughput assert — the kill criterion (§17.2) records a
+    /// bound, it does not fail the lane. Opt-in via `EXL3_PACK_DIR`.
+    #[test]
+    #[ignore = "needs a real EXL3 pack on disk (EXL3_PACK_DIR) + a GPU"]
+    fn real_pack_decode_bench_arms() {
+        use riir_infer_core::quant::exl3_pack::Exl3Pack;
+
+        let dir = std::env::var("EXL3_PACK_DIR").unwrap_or_default();
+        if dir.is_empty() {
+            eprintln!("SKIPPED: EXL3_PACK_DIR not set");
+            return;
+        }
+        let pack = Exl3Pack::open(std::path::Path::new(&dir)).unwrap();
+        let ctx = CubeCLContext::new().expect("CubeCL should initialize");
+        let client = ctx.client();
+
+        let classes = [
+            "self_attn.o_proj",
+            "mlp.down_proj",
+            "linear_attn.out_proj",
+            "mlp.gate_proj",
+            "lm_head",
+        ];
+        const REPS: usize = 8;
+
+        let mut rows: Vec<(&str, u64, f64, f64, f64)> = Vec::new();
+        for class in classes {
+            let Some(plan) = pack
+                .plans()
+                .iter()
+                .filter(|p| p.key.contains(class))
+                .min_by_key(|p| p.in_features as u64 * p.out_features as u64)
+            else {
+                eprintln!("class {class}: none");
+                continue;
+            };
+            let key = plan.key.as_str();
+            let layer = pack.layer(key).unwrap();
+
+            // Interleaved rounds × arms, per-arm BEST kernel_secs (the
+            // Issue-723 best-of convention: GPU clock ramp makes single
+            // pairs oscillate wildly — measured: v1 gate_proj 62.4 → 9.1 Gw/s
+            // between consecutive single-pair runs on a quiet box).
+            const ROUNDS: usize = 5;
+            let arms = [DecodeArm::V1, DecodeArm::V2, DecodeArm::V2NoLut];
+            let mut best = [f64::INFINITY; 3];
+            let mut v1_out: Option<Vec<f32>> = None;
+            let mut v2_out: Option<Vec<f32>> = None;
+            for _ in 0..ROUNDS {
+                for (i, &arm) in arms.iter().enumerate() {
+                    let (w, t) = Exl3DequantCubeCL::decode_only_layer_timed::<ActiveRuntime>(
+                        &client, &layer, arm, REPS,
+                    )
+                    .unwrap();
+                    if let Some(s) = t.kernel_secs {
+                        best[i] = best[i].min(s);
+                    }
+                    match arm {
+                        DecodeArm::V1 => v1_out = Some(w),
+                        DecodeArm::V2 => v2_out = Some(w),
+                        DecodeArm::V2NoLut => {}
+                    }
+                }
+            }
+
+            // §17.3 gate 1 at bench scope: v2 vs v1 BIT-EXACT on this layer.
+            let (v1, v2) = (v1_out.unwrap(), v2_out.unwrap());
+            let bad = v1.iter().zip(&v2).filter(|(a, b)| a.to_bits() != b.to_bits()).count();
+            assert_eq!(bad, 0, "{key}: v2 decode not bit-exact vs v1 on the real pack");
+
+            let weights = (layer.in_features * layer.out_features) as u64;
+            let gw = |secs: f64| weights as f64 / secs / 1e9;
+            rows.push((key, weights, gw(best[0]), gw(best[1]), gw(best[2])));
+        }
+
+        eprintln!("\n=== T7c-1b discriminating decode bench (REPS={REPS}) ===");
+        eprintln!("| layer | weights | A1 v1 Gw/s | A2 v2 Gw/s | A3 v2-noLUT Gw/s | v2/v1 |");
+        eprintln!("|---|---:|---:|---:|---:|---:|");
+        for (key, w, a1, a2, a3) in &rows {
+            eprintln!("| {key} | {w} | {a1:.1} | {a2:.1} | {a3:.1} | {:.2}x |", a2 / a1.max(1e-9));
+        }
+        let total_w: u64 = rows.iter().map(|r| r.1).sum();
+        let k1: f64 = rows.iter().map(|r| r.2 * r.1 as f64).sum::<f64>() / total_w as f64;
+        let k2: f64 = rows.iter().map(|r| r.3 * r.1 as f64).sum::<f64>() / total_w as f64;
+        let k3: f64 = rows.iter().map(|r| r.4 * r.1 as f64).sum::<f64>() / total_w as f64;
+        eprintln!(
+            "weight-weighted mean: A1 {k1:.1} / A2 {k2:.1} / A3 {k3:.1} Gw/s; A2/A1 {:.2}x",
+            k2 / k1.max(1e-9)
+        );
     }
 }

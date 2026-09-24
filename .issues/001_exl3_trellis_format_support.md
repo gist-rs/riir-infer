@@ -1,6 +1,6 @@
 # Issue 001 — EXL3 (trellis-coded) weight-format support in the quantization zoo
 
-**Status:** OPEN — T1–T7 COMPLETE 2026-09-24 (T4b native oracle BIT-EXACT; T7a CPU 10.6-11.4×; T7b GPU 4090 71-87× wall / 4.7-5.8 Gw/s kernel, [Bench 002](../.benchmarks/002_exl3_t7b_gpu_dequant.md)). **T7c ACTIVE (filed 2026-09-24, verdict-adjudicated §17): the fused trellis GEMV — the §14 trigger discharges at GEMV level IN-REPO (structural argument §17.1); engine serving integration remains separately open, not implied-complete.**
+**Status:** OPEN — T1–T7 COMPLETE 2026-09-24 (T4b native oracle BIT-EXACT; T7a CPU 10.6-11.4×; T7b GPU 4090 71-87× wall / 4.7-5.8 Gw/s kernel, [Bench 002](../.benchmarks/002_exl3_t7b_gpu_dequant.md)). **T7c ACTIVE (filed 2026-09-24, verdict-adjudicated §17): the fused trellis GEMV — T7c-1a DONE (v2 bit-exact); T7c-1b DONE with the pre-registered kill criterion FIRED for the extraction class (v2 ≉ better than v1; harness noise documented; §17.5) — T7c-1d (sound CUDA-event harness) is the named next step, BLOCKING T7c-2. The §14 trigger discharges at GEMV level IN-REPO (structural argument §17.1); engine serving integration remains separately open, not implied-complete.**
 **Owner:** unassigned. **Filed:** 2026-09-24. **T1–T4 executed:** 2026-09-24 (4090 box).
 **Origin:** riir-clippy Research 207 (`.research/207_qwen38_exl3_dgx_spark_distill_verdict.md`),
 lane-intel axis. The corpus half of that verdict is riir-clippy Plan 170 and is
@@ -1075,12 +1075,40 @@ RAM, commit-vs-limit, concurrent jobs — multi-session 4090).
 
 ### 17.5 Tasks
 
-- [ ] T7c-1a: v2 extraction kernel (integer-only, word-aligned windows,
-      conditional-subtract wrap) — bit-exact vs v1 pinned by a core unit
-      test on synthetic K3/K5/K4.5 tiles first.
-- [ ] T7c-1b: the discriminating bench (A1/A2/A3) on the real pack's
-      layers (CUDA lane, release), box state recorded; replace the ~17×
-      derivation with the measured numbers.
+- [x] T7c-1a: v2 extraction kernel (integer-only, word-aligned windows,
+      conditional-subtract wrap) — bit-exact vs v1 AND vs the CPU reference
+      tile decoder pinned by `gpu_decode_v2_bit_exact_vs_v1_and_cpu`
+      (K2/K3/K4.5/K5 × Cb0/Cb1Mcg/Cb2Mul1, CUDA, green 2026-09-24) +
+      per-layer bit-exact on the real pack (the bench's built-in gate, green).
+- [x] T7c-1b: the discriminating bench (A1/A2/A3) on the real pack's layers
+      (CUDA lane, release, 4090; box state: ~500 MiB VRAM in use, 20% util
+      idle desktop baseline, no concurrent GPU compute, CPU ~5%, 9.3/31.8
+      GiB RAM, AC power) — **KILL CRITERION FIRED for the extraction class,
+      as pre-registered**: A2 (v2 word-aligned) shows NO reliable win over A1
+      (v1) — the ratio flips run-to-run (1.56×/2.78× → 0.44×/0.51× on the
+      same layers across consecutive runs) and the best-of-5 interleaved
+      rounds cannot separate them. **The modulo mechanism theory is NOT
+      confirmed**: v1's 16 L1-cached loads + modulos cost ≈ the same as v2's
+      branchy 2-load path. Recorded as a BOUND on the extraction approach,
+      not a falsification of fused GEMV (§17.2's own wording). ⚠ The harness
+      itself (reps-differential with per-chunk readback) proved too noisy at
+      this scale — lm_head (5 chunks) produced impossible artifacts (972
+      Gw/s, `inf`) in 2 of 3 runs; single-pair runs oscillated ±3× (gate_proj
+      v1 68.9 → 9.1 Gw/s consecutive). The plausible stable reading across
+      all runs: decode runs ~25-55 Gw/s on the small layers in BOTH arms —
+      **5-10× above the T7b record's 4.7-5.8 Gw/s** (which included the
+      Hadamard passes + different measurement shape), but far below the
+      ~17×-derivation ceiling, and NOT enough headroom to conclude fused
+      GEMV reaches q4k-class decode on its own. The A3 (no-LUT) rows were
+      also inconsistent (fastest on 2 layers, slowest on 2) — no reliable
+      LUT-gather bound either.
+- [ ] T7c-1d (NEW, blocks T7c-2): a SOUND timing harness before any more
+      kernel work — CUDA-event (or criterion) per-kernel timing, not
+      wall-differential with interleaved readbacks; re-measure A1/A2/A3 to
+      stable ±5% before deciding whether the fused GEMV proceeds on v1-
+      style inline decode, needs the LUT decoded arithmetically (an A3-class
+      variant), or the lane pivots (e.g. tensor-core trellis decode — the
+      format's own design intent).
 - [ ] T7c-1c: full-pack bit-exact gate (whole pack, 5-class oracle shape)
       for v2 before any GEMV work consumes it.
 - [ ] T7c-2a: vector-side Hadamard transform kernels (input `v =
