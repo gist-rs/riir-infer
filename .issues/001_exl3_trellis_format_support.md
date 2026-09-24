@@ -1,6 +1,6 @@
 # Issue 001 — EXL3 (trellis-coded) weight-format support in the quantization zoo
 
-**Status:** OPEN — T1–T7 COMPLETE 2026-09-24 (T4b native oracle BIT-EXACT; T7a CPU 10.6-11.4×; T7b GPU 4090 71-87× wall / 4.7-5.8 Gw/s kernel, [Bench 002](../.benchmarks/002_exl3_t7b_gpu_dequant.md)). REMAINING: the §14 promotion trigger — the engine serving arm that consumes `Exl3Pack` end-to-end + the delivered-gain measurement (engine-repo wiring, not format work).
+**Status:** OPEN — T1–T7 COMPLETE 2026-09-24 (T4b native oracle BIT-EXACT; T7a CPU 10.6-11.4×; T7b GPU 4090 71-87× wall / 4.7-5.8 Gw/s kernel, [Bench 002](../.benchmarks/002_exl3_t7b_gpu_dequant.md)). **T7c ACTIVE (filed 2026-09-24, verdict-adjudicated §17): the fused trellis GEMV — the §14 trigger discharges at GEMV level IN-REPO (structural argument §17.1); engine serving integration remains separately open, not implied-complete.**
 **Owner:** unassigned. **Filed:** 2026-09-24. **T1–T4 executed:** 2026-09-24 (4090 box).
 **Origin:** riir-clippy Research 207 (`.research/207_qwen38_exl3_dgx_spark_distill_verdict.md`),
 lane-intel axis. The corpus half of that verdict is riir-clippy Plan 170 and is
@@ -973,11 +973,125 @@ first-bit-mismatch diagnostic hid a ~100% element miss; (3) the wgpu
 dispatch cap (65535 workgroups/dimension) bites at real layer sizes —
 grid-stride every kernel that maps thread-per-element.
 
-**What T7b does NOT do** (the honest scope line): the §14 promotion
-trigger requires a SERVING arm that consumes `Exl3Pack` end-to-end (weights
-GPU-resident, converted to the engine's dense f16 GEMV path) + the
-delivered-gain measurement (bytes moved per decode step / context headroom
-vs the f16/q4 incumbent). That is engine-repo wiring (riir-ai consumes this
-crate); the kernels, the pack-level driver, and the measured oracle here
-are the substrate it composes. The 16.35 GB pack + the `.raw/exl3-venv`
-oracle env stay on disk for that work.
+**What T7b does NOT do** (the honest scope line, **AMENDED 2026-09-24 by §17**): ~~the
+§14 promotion trigger requires a SERVING arm that consumes `Exl3Pack` end-to-end
+(weights GPU-resident, converted to the engine's dense f16 GEMV path)~~ — the
+two-stage "dequant → dense f16 GEMV" framing is SUPERSEDED for the trigger
+discharge by §17's fused-GEMV lane (the structural byte-traffic argument:
+any dequant-then-GEMV path moves ≥ pack bytes + 2× dense bytes per decode
+step — strictly more than fused — on the exact metric §14 names, at every
+model size and under every scheduling trick, including layer-at-a-time
+streaming). The delivered-gain measurement (§17.4) + the kernels compose
+here; the engine serving integration remains separately open, never
+implied-complete. The 16.35 GB pack + the `.raw/exl3-venv` oracle env stay
+on disk for that work.
+
+## 17. T7c — the fused trellis GEMV (the §14 trigger discharge lane, verdict-adjudicated 2026-09-24)
+
+**Status:** ACTIVE — filed 2026-09-24 (4090 box) after a 3-round Claude verdict
+ping-pong (AGREE; session `c56e3f15`). The §14 promotion trigger discharges at
+GEMV level **in this repo**; engine serving integration stays separately open.
+
+### 17.1 The path decision (what the verdict approved)
+
+**Supersession rests SOLELY on the structural byte-traffic argument** (the
+verdict's condition 1 — the residency argument was dropped as refutable):
+any dequant-then-GEMV path writes the dense weights then re-reads them, so
+it moves **≥ pack bytes + 2× dense bytes per decode step — strictly more
+than fused — on the exact metric §14 names (bytes moved per decode step),
+at every model size and under every scheduling trick** (including
+layer-at-a-time streaming dequant into scratch).
+
+**The fused design:** for `y = W·x` with
+`W = diag(suh)·(I⊗H)·W_rot·(I⊗H)·diag(svh)`, the Hadamard transforms
+collapse onto the VECTORS — `v = H·(svh⊙x)` per 128-block of the input,
+`y = suh⊙(H·t)` per 128-block of the output (7n ops per 128-block =
+n·log₂128, negligible against the GEMV) — leaving the weight-side work as
+a GEMV through `W_rot` with INLINE trellis decode: per weight, one
+closed-form decode (integer prefix math + 65536-entry f32 LUT gather,
+bit-exact) + one FMA. Reads only pack weight bytes per step (≈13.8 GB for
+the 27B league model at 4.09 bpw — the per-step read is WEIGHT bytes;
+16.35 GB is the whole pack incl. scales/unquantized tensors). Plane-per-
+output-column organization mirroring `gemv_q4k_cubecl.rs` (plane_sum
+reduction, no atomics); the 16 columns of a tile share the tile's ring
+words → L2 absorbs the ≤16× re-read (the decode kernel's measured
+locality precedent).
+
+**In-boundary:** BOUNDARY.md §Owns already names riir-infer-gpu's EXL3
+kernels; the incumbent comparison needs only this repo's existing
+`gemv_f16_cubecl` + `gemv_q4k_cubecl` — no sibling dep on the critical
+path (the verdict's procedural point).
+
+### 17.2 The measured risk + the discriminating bench (T7c-1)
+
+T7b's decode kernel runs at **4.7–5.8 Gw/s** — a naive fusion inherits
+~5.5 s per 27B decode step. Mechanism candidate: the inner loop
+(`exl3_dequant_cubecl.rs:137-141`) does 16 per-bit `% ring_bits` modulos
+**and 16 separate global loads** per weight. The mitigation (v2
+extraction): every `ring_bits` value is a multiple of 128 **by
+construction** (`stream_bits_per_tile()` = 256·ka or 256·ka+128 — a type
+invariant, not an observation), so `window16` = 1–2 u32 loads +
+shift/mask + conditional-subtract wrap, zero modulo.
+
+**The bench is DISCRIMINATING, three arms** (verdict condition 2):
+
+| arm | what it isolates |
+|---|---|
+| A1 | v1 kernel as-is (the 5.8 Gw/s baseline) |
+| A2 | v2 extraction (byte-aligned windows, modulo-free) — isolates the modulo+per-bit-load mechanism |
+| A3 | v2 + LUT gather replaced by a constant — isolates the surviving `lut[w]` gather (1 load/weight) |
+
+**Expected bound (a DERIVATION, not a measurement — arm A3 converts it):**
+the LUT gather survives v2 at 1 load/weight vs v1's ~17 loads/weight
+(16 window + 1 gather), so the achievable speedup is capped near **~17×
+(≈100 Gw/s)** — the next wall, written here with its inputs so the bench
+replaces it rather than inherits it as a measured constant.
+
+**Kill criterion (written BEFORE the bench — verdict condition 3):** if
+A2 lands under ~25 Gw/s, that is **a bound on the extraction, NOT a
+falsification of fused GEMV** — record it as a bound, leave the lane open
+(the Issue-825 lesson: a mechanism inferred from a consistent number is
+not a falsification).
+
+### 17.3 Gates (kept separate — verdict condition 4)
+
+1. **v2-vs-v1 decode: BIT-EXACT over the WHOLE real pack** (the T5
+   full-pack 5-class oracle shape, never a sample).
+2. **Fused GEMV: accumulation-order tolerance** vs the CPU reference
+   (`dequantize_f32` then matvec) — the T4b/T7b FMA-contraction class;
+   never pooled with gate 1 (a decode regression must not hide inside a
+   tolerance).
+
+### 17.4 The delivered-gain measurement (discharges §14's FIRST branch)
+
+Bytes moved per decode step + step time, measured on the same box, through
+the SAME layer weights/geometry in three GEMV paths: EXL3 fused (this
+lane), the repo's f16 GEMV kernel over f16 weights, the repo's q4k GEMV
+kernel over q4k-encoded copies of the same weights. The 117k-token
+context ceiling is NOT re-cited as delivered gain — §14's G2 already
+banked it as arithmetic on the format (Bench 001); residency appears only
+as already-banked context. **Every figure carries its box state** (free
+RAM, commit-vs-limit, concurrent jobs — multi-session 4090).
+
+### 17.5 Tasks
+
+- [ ] T7c-1a: v2 extraction kernel (integer-only, word-aligned windows,
+      conditional-subtract wrap) — bit-exact vs v1 pinned by a core unit
+      test on synthetic K3/K5/K4.5 tiles first.
+- [ ] T7c-1b: the discriminating bench (A1/A2/A3) on the real pack's
+      layers (CUDA lane, release), box state recorded; replace the ~17×
+      derivation with the measured numbers.
+- [ ] T7c-1c: full-pack bit-exact gate (whole pack, 5-class oracle shape)
+      for v2 before any GEMV work consumes it.
+- [ ] T7c-2a: vector-side Hadamard transform kernels (input `v =
+      H·(svh⊙x)` per 128-block; output `y = suh⊙(H·t)` per 128-block).
+- [ ] T7c-2b: the fused GEMV kernel `gemv_exl3_cubecl` (plane-per-output-
+      column, inline v2 decode + FMA; `Exl3Handle` = GPU-resident trellis
+      words + LUT + H + scales per layer) + the accumulation-order
+      tolerance oracle vs CPU.
+- [ ] T7c-3: the delivered-gain bench (Bench 003): bytes/step + step time
+      across EXL3-fused / f16 / q4k on the same weights + box, box state
+      recorded; §14 gate re-run with the runtime numbers.
+- [ ] T7c-4: era-gate wiring at `Exl3Pack` open (refuse legacy packs
+      loudly at open, not decode — §12.7) + the promotion gate re-run;
+      verdict-adjudicated promotion decision recorded here.
