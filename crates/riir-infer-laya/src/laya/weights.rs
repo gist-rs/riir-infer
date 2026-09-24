@@ -203,15 +203,11 @@ impl HashKind {
     }
 }
 
-/// Stream a URL to `dest.part`, verify, then rename into place.
-fn fetch_to_flat(
-    url: &str,
-    dest: &Path,
-    pin: &str,
-    kind: HashKind,
-    ckpt: Checkpoint,
-    local_name: &str,
-) -> Result<()> {
+/// Stream a URL to `dest` via curl (`.part` suffix while in flight, atomic
+/// rename on success — a partial download never installs). No pin check
+/// here; callers verify what they pin (the weights sha256/blake3 pins, or
+/// the ANE artifact's whole-dir digest after assembly).
+pub(crate) fn fetch_file(url: &str, dest: &Path) -> Result<()> {
     let tmp = dest.with_extension("part");
     let status = Command::new("curl")
         .args([
@@ -231,13 +227,27 @@ fn fetch_to_flat(
             "download failed ({url}): {status}"
         )));
     }
+    std::fs::rename(&tmp, dest)
+        .map_err(|e| LayaError::Runtime(format!("rename {}: {e}", dest.display())))
+}
+
+/// Stream a URL to `dest.part`, verify, then rename into place.
+fn fetch_to_flat(
+    url: &str,
+    dest: &Path,
+    pin: &str,
+    kind: HashKind,
+    ckpt: Checkpoint,
+    local_name: &str,
+) -> Result<()> {
+    let tmp = dest.with_extension("part");
+    fetch_file(url, &tmp)?;
     if let Err(e) = verify(&tmp, pin, kind, ckpt, local_name) {
         let _ = std::fs::remove_file(&tmp);
         return Err(e);
     }
     std::fs::rename(&tmp, dest)
-        .map_err(|e| LayaError::Runtime(format!("rename {}: {e}", dest.display())))?;
-    Ok(())
+        .map_err(|e| LayaError::Runtime(format!("rename {}: {e}", dest.display())))
 }
 
 /// Hash `path` and compare against `pin`.

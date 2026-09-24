@@ -611,6 +611,109 @@ fn collect_files(root: &Path, dir: &Path, out: &mut Vec<(String, PathBuf)>) -> R
     Ok(())
 }
 
+/// The standard `.mlpackage` bundle layout — the per-file fetch paths for
+/// download-on-demand. coremltools' bundle format is fixed (3 files), but
+/// a future layout change cannot corrupt an install: the staged tree must
+/// match the pinned file count/bytes/digest BEFORE it is renamed into
+/// place, and a short walk fails loud there.
+const BUNDLE_FILES: [&str; 3] = [
+    "Manifest.json",
+    "Data/com.apple.CoreML/model.mlmodel",
+    "Data/com.apple.CoreML/weights/weight.bin",
+];
+
+/// Fetch-on-first-use for the artifact tree (issue 017's release scope:
+/// download-on-demand, digest-pinned — macOS-only artifacts never ship in
+/// a release archive). Every manifest entry whose directory is missing is
+/// assembled from `<base_url>/<key>.mlpackage/<rel>` into a staging dir,
+/// digest-verified, then renamed into place — a bad download never
+/// installs. Entries already on disk are LEFT ALONE (the load re-verifies
+/// every digest, so a swapped artifact still refuses). `base_url` is the
+/// artifact host root (any static file server or HF-style repo layout
+/// carrying `<key>.mlpackage/` bundles); `None` refuses with the two
+/// remedies when anything is missing.
+pub fn ensure_artifacts(ane_root: &Path, base_url: Option<&str>) -> Result<()> {
+    let manifest_path = ane_root.join("manifest.json");
+    if !manifest_path.exists() {
+        return Err(LayaError::Runtime(format!(
+            "ane manifest missing at {} — run the consumer repo's scripts/ane_convert.py \
+             (offline, one-time) or point LAYA_ANE_ARTIFACTS_DIR at a populated tree",
+            manifest_path.display()
+        )));
+    }
+    let manifest = AneManifest::load(&manifest_path)?;
+    let mut missing: Vec<String> = Vec::new();
+    // Sorted keys: deterministic fetch order, deterministic refusal text.
+    let mut keys: Vec<&String> = manifest.artifacts.keys().collect();
+    keys.sort();
+    for key in keys {
+        let dir = ane_root.join(format!("{key}.mlpackage"));
+        if dir.is_dir() {
+            continue;
+        }
+        let Some(base) = base_url else {
+            missing.push(key.clone());
+            continue;
+        };
+        let entry = manifest.artifacts.get(key).expect("key from the map");
+        let staging = ane_root.join(".staging").join(format!("{key}.mlpackage"));
+        let _ = std::fs::remove_dir_all(&staging);
+        let staged = stage_bundle(&staging, base, key)
+            .and_then(|()| AneRuntime::verify_digest(&staging, entry))
+            .and_then(|()| {
+                let parent = dir.parent().expect("key carries a model dir");
+                std::fs::create_dir_all(parent).map_err(|e| {
+                    LayaError::Runtime(format!("create {}: {e}", parent.display()))
+                })
+            })
+            .and_then(|()| {
+                std::fs::rename(&staging, &dir).map_err(|e| {
+                    LayaError::Runtime(format!("install {}: {e}", dir.display()))
+                })
+            });
+        // A failed fetch installs nothing: the staging subtree goes, then
+        // the emptied parents (best-effort — a concurrent fetch of a
+        // sibling key owns its own subtree).
+        if let Err(e) = staged {
+            let _ = std::fs::remove_dir_all(&staging);
+            for p in [staging.parent(), Some(ane_root.join(".staging")).as_deref()] {
+                if let Some(p) = p {
+                    let _ = std::fs::remove_dir(p);
+                }
+            }
+            return Err(e);
+        }
+        for p in [staging.parent(), Some(ane_root.join(".staging")).as_deref()] {
+            if let Some(p) = p {
+                let _ = std::fs::remove_dir(p);
+            }
+        }
+    }
+    if missing.is_empty() {
+        return Ok(());
+    }
+    Err(LayaError::Runtime(format!(
+        "ane artifacts missing: {missing:?} — run scripts/ane_convert.py (offline, \
+         one-time) or set RIIR_REFLEX_ANE_BASE_URL to an artifact host carrying \
+         the `<key>.mlpackage/` bundles (fetch-on-first-use, digest-pinned)"
+    )))
+}
+
+/// Fetch one bundle's fixed file set into `staging` (per-file `.part` +
+/// rename, the weights precedent). The digest gate is the CALLER's —
+/// this only assembles bytes from the wire.
+fn stage_bundle(staging: &Path, base: &str, key: &str) -> Result<()> {
+    for rel in BUNDLE_FILES {
+        let url = format!("{base}/{key}.mlpackage/{rel}");
+        let dest = staging.join(rel);
+        let parent = dest.parent().expect("rel carries a dir");
+        std::fs::create_dir_all(parent)
+            .map_err(|e| LayaError::Runtime(format!("create {parent:?}: {e}")))?;
+        super::super::weights::fetch_file(&url, &dest)?;
+    }
+    Ok(())
+}
+
 /// Compile the `.mlpackage` into a content-addressed `.mlmodelc` cache
 /// (recompiles never load a stale artifact: the cache key IS the digest)
 /// and return the compiled bundle path. Cache location: `LAYA_ANE_CACHE`,
@@ -845,4 +948,154 @@ fn program_operations(
 
 fn ns_error_string(e: &NSError) -> String {
     e.localizedDescription().to_string()
+}
+
+#[cfg(test)]
+mod fetch_tests {
+    use super::*;
+    use blake3::Hasher;
+
+    /// blake3-dir-v1 over a bundle dir — the exact algorithm
+    /// [`AneRuntime::verify_digest`] pins (sorted rel, `rel\0bytes\0`).
+    fn digest_of(dir: &Path) -> (String, usize, u64) {
+        let mut files: Vec<(String, PathBuf)> = Vec::new();
+        collect_files(dir, dir, &mut files).expect("walk");
+        files.sort_by(|a, b| a.0.cmp(&b.0));
+        let mut total = 0u64;
+        let mut h = Hasher::new();
+        for (rel, path) in &files {
+            let data = std::fs::read(path).expect("read");
+            total += data.len() as u64;
+            h.update(rel.as_bytes());
+            h.update(b"\0");
+            h.update(&data);
+            h.update(b"\0");
+        }
+        (h.finalize().to_hex().to_string(), files.len(), total)
+    }
+
+    /// One 3-file fixture bundle + the manifest JSON that pins it.
+    /// `hidden`/`bucket_L`/`outputs`/`placement` are the manifest loader's
+    /// required fields (values are inert for the fetch path).
+    fn write_bundle(dir: &Path, payload: &[u8]) {
+        for rel in BUNDLE_FILES {
+            let p = dir.join(rel);
+            std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+            std::fs::write(p, payload).unwrap();
+        }
+    }
+
+    fn manifest_json(digest: &str, files: usize, bytes: u64) -> String {
+        format!(
+            r#"{{"artifacts": {{"en/L8": {{
+                "bucket_L": 8,
+                "geometry": {{"hidden": 4}},
+                "digest": {{"algo": "blake3-dir-v1", "digest": "{digest}", "files": {files}, "bytes": {bytes}}},
+                "outputs": {{"hidden_state": {{"shape": [1, 8, 4]}}}},
+                "mask_sentinel_fp16": -10000.0,
+                "placement": {{"ane_ops": 1, "device_ops": 1, "transitions": 0}}
+            }}}}}}"#
+        )
+    }
+
+    fn write_manifest(root: &Path, json: &str) {
+        std::fs::create_dir_all(root).unwrap();
+        std::fs::write(root.join("manifest.json"), json).unwrap();
+    }
+
+    #[test]
+    fn missing_artifact_with_no_base_refuses_naming_both_remedies() {
+        let tmp = std::env::temp_dir().join(format!("ane_fetch_t1_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&tmp);
+        let root = tmp.join("root");
+        write_manifest(&root, &manifest_json("00", 3, 9));
+        let err = ensure_artifacts(&root, None).expect_err("refuses");
+        let text = err.to_string();
+        assert!(text.contains("ane_convert.py"), "got: {text}");
+        assert!(text.contains("RIIR_REFLEX_ANE_BASE_URL"), "got: {text}");
+        assert!(text.contains("en/L8"), "names the entry: {text}");
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn missing_manifest_refuses_before_any_fetch() {
+        let tmp = std::env::temp_dir().join(format!("ane_fetch_t2_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&tmp);
+        let root = tmp.join("root");
+        std::fs::create_dir_all(&root).unwrap();
+        let err = ensure_artifacts(&root, Some("file:///nonexistent")).expect_err("refuses");
+        assert!(err.to_string().contains("manifest missing"), "got: {err}");
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn fetch_assembles_verifies_and_installs_atomically() {
+        let tmp = std::env::temp_dir().join(format!("ane_fetch_t3_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&tmp);
+        let root = tmp.join("root");
+        let host = tmp.join("host");
+        let bundle = host.join("en/L8.mlpackage");
+        write_bundle(&bundle, b"0123456789");
+        let (digest, files, bytes) = digest_of(&bundle);
+        write_manifest(&root, &manifest_json(&digest, files, bytes));
+        let base = format!("file://{}", host.display());
+        ensure_artifacts(&root, Some(&base)).expect("installs");
+        let installed = root.join("en/L8.mlpackage");
+        assert!(installed.is_dir(), "installed");
+        // The installed tree passes the SAME gate the load runs.
+        let manifest = AneManifest::load(&root.join("manifest.json")).unwrap();
+        let entry = manifest.artifacts.get("en/L8").unwrap();
+        AneRuntime::verify_digest(&installed, entry).expect("digest");
+        // No staging left behind.
+        assert!(!root.join(".staging").join("en/L8.mlpackage").exists());
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn corrupt_download_fails_the_gate_and_installs_nothing() {
+        let tmp = std::env::temp_dir().join(format!("ane_fetch_t4_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&tmp);
+        let root = tmp.join("root");
+        let host = tmp.join("host");
+        let bundle = host.join("en/L8.mlpackage");
+        write_bundle(&bundle, b"0123456789");
+        let (digest, files, bytes) = digest_of(&bundle);
+        write_manifest(&root, &manifest_json(&digest, files, bytes));
+        // The served copy diverges from the pin after the manifest was
+        // written (a tampered/truncated host).
+        std::fs::write(bundle.join(BUNDLE_FILES[1]), b"XXXXXXXXXX").unwrap();
+        let base = format!("file://{}", host.display());
+        let err = ensure_artifacts(&root, Some(&base)).expect_err("digest gate");
+        assert!(err.to_string().contains("digest mismatch"), "got: {err}");
+        assert!(
+            !root.join("en/L8.mlpackage").exists(),
+            "nothing installed"
+        );
+        assert!(
+            !root.join(".staging").exists() || {
+                let mut it = std::fs::read_dir(root.join(".staging")).unwrap();
+                it.next().is_none()
+            },
+            "staging cleaned"
+        );
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn present_entries_are_left_alone() {
+        let tmp = std::env::temp_dir().join(format!("ane_fetch_t5_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&tmp);
+        let root = tmp.join("root");
+        let host = tmp.join("host");
+        write_bundle(&host.join("en/L8.mlpackage"), b"0123456789");
+        let (digest, files, bytes) = digest_of(&host.join("en/L8.mlpackage"));
+        write_manifest(&root, &manifest_json(&digest, files, bytes));
+        // The entry already on disk — deliberately WRONG vs the pin (the
+        // load's own verify catches that; the fetcher must not touch it).
+        let present = root.join("en/L8.mlpackage");
+        write_bundle(&present, b"zz");
+        ensure_artifacts(&root, None).expect("present entry → no missing, no fetch");
+        assert!(present.join(BUNDLE_FILES[0]).exists(), "untouched");
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
 }
