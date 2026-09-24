@@ -4,6 +4,60 @@ Durable records for resolved questions and closed lanes (the noise-reduction
 convention: the record lands here, hash-pinned; open work lives in `.issues/`
 and `.plans/`). Created 2026-09-23 at the first record.
 
+## 2026-09-25 — Issue 009 CLOSED: software-pipelined narrow staging — NEGATIVE at the gate, and the probe's tiny-op floor exposed
+
+The `.issues/008` follow-up ("double-buffered staging / cp.async — latency
+hidden, not bandwidth saved") was built as the REGISTER form and answered
+**NO on the pre-registered gate** — with two findings that outlive the rung.
+
+**The rung** (built, measured, reverted): `sgemm_narrow_pipe` — the same
+32×64×BK64 tile/threads/fragment/grid as `sgemm_narrow`, k-loop software-
+pipelined: tile t+64's guarded loads issue into 12 registers at loop top, a
+compiler fence (`asm volatile("" ::: "memory")` — measured load-bearing,
+see below) pins their issue order, tile t's compute (~1300 cy) hides their
+latency, stores land after the post-compute barrier. Double-buffering both
+operands needs 51 456 B > the 48 KB static cap, so B ping-pongs (`tb[2]`)
+while A register-defers into the single `ta` — 43 136 B total. Bit-identical
+on every probe shape both postures, both runs; all gates green (smoke with
+8 pipe-posture arms incl. the ragged/epilogue paths, packed_equiv 4/4, lib
+41/41).
+
+**Finding 1 — the fence iteration**: the first build measured FLAT (median
+−1.8 % on the narrow rows) because nvcc SINKS the register loads to just
+before their consumers (a register-pressure choice), collapsing the window
+— the fence pins program order and is mandatory for this form. With it the
+probe still read −1.5 % (−1.2..−2.3 on the m=106/45 rows).
+
+**Finding 2 — the probe's tiny-op floor (the real yield)**: across the
+narrow-zone rows, FLOPs vary 400× (1×1028×256 = 0.5 MFLOP at 43.5 µs →
+106×1024×1024 = 222 MFLOP at 45.5 µs) while time varies 1.06× — every
+row is `≈ 40-41 µs launch/WDDM floor + flops/50 TFLOP/s`. The
+`sgemm_shape_timing` tiny-op rows are ~90 % submission floor and CANNOT
+resolve kernel-level rungs in the narrow zone; `.issues/006`'s "head tails
+−13..−17 %" rows were the same floor class (the float4 win was real but the
+row magnitudes were floor-shifted), and 008's reg4 reading only registered
+because a 4× warp cut punched the kernel ~75 µs PAST the floor. Future
+narrow-zone rungs must gate at the FORWARD level (launches amortize in the
+deep queue) or add a same-kernel floor-subtraction arm to the probe.
+
+**The honest instrument**: forward-level paired env-flip (`laya_fixture_timing`,
+english — the narrow-heavy checkpoint, 3 alternating pairs, quiet box):
+off 12.6/12.6/12.6 ms → on 12.4/12.4/12.5 ms row p50 — **−0.8..−1.6 %,
+reproducible 3/3** (p90 and ms/question improve too; the alternation kills
+drift). The pipelined kernel IS genuinely faster — by ~1.6 %, not the
+predicted ~25 %: TLP across 16 warps already hides most of the staging
+convoy at the phase boundary, and the residual (2 barriers + the store
+phase ≈ 1.5-2 % of the loop) is what the pipeline actually recovered.
+
+**Verdict** (the pre-registered gate binds): both instruments read under
+the ≥3 % bar → NO-GO. `cuda.rs` + the smoke arms + the reflex probe env
+dance reverted byte-identical to the pre-rung state; the kernel is not kept
+behind a switch because no posture clears the bar. The cp.async form
+(1 sync/iter, no register round-trip) remains the recorded next lever,
+priced by this record at ≤ ~4 % forward (the barrier + store residual) —
+not worth a rung unless the forward-level instrument shows the narrow share
+growing.
+
 ## 2026-09-25 — Issue 008 CLOSED: the narrow reg4 rung — NEGATIVE, the narrow zone is TLP-bound, not bandwidth-bound
 
 The `.issues/007` open question ("the NARROW instance (1×4 fragment, ~20 %
