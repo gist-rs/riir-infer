@@ -15,6 +15,69 @@ use anyhow::{Context, Result};
 
 use crate::gguf_loader::GgufFile;
 
+/// Leftmost-longest matcher over the special tokens (control=3,
+/// user_defined=4) — the split points `encode` must never BPE across.
+///
+/// One left-to-right pass: at each byte, only the specials starting with
+/// that byte are tried, longest first. That is the same answer as "the
+/// earliest occurrence of any special, the longest on a tie", in
+/// `O(text · candidates-per-byte)` rather than one full-text `find` per
+/// special per match — which is quadratic on Gemma's vocabulary, whose
+/// user-defined whitespace runs (`"\n\n"`, …) recur every few lines.
+/// Byte-level probing is sound for UTF-8: a token starts with a lead byte,
+/// which never equals a continuation byte, so no match can land mid-char.
+#[derive(Debug, Clone, Default)]
+struct SpecialTokenMatcher {
+    /// `by_first[b]` = `(token bytes, id)` starting with byte `b`, longest first.
+    by_first: Vec<Vec<(Box<[u8]>, usize)>>,
+    len: usize,
+}
+
+impl SpecialTokenMatcher {
+    /// Collect every control / user-defined token. On a duplicated string
+    /// the LAST id wins (the prior `HashMap::insert` semantics); empty
+    /// strings are skipped (they would match everywhere).
+    fn from_types(token_types: &[u32], id_to_token: &[String]) -> Self {
+        let mut map: HashMap<&str, usize> = HashMap::new();
+        for (id, &tt) in token_types.iter().enumerate() {
+            if (tt == 3 || tt == 4) && !id_to_token[id].is_empty() {
+                map.insert(id_to_token[id].as_str(), id);
+            }
+        }
+        let mut by_first: Vec<Vec<(Box<[u8]>, usize)>> = vec![Vec::new(); 256];
+        for (tok, id) in &map {
+            by_first[tok.as_bytes()[0] as usize].push((tok.as_bytes().into(), *id));
+        }
+        for bucket in &mut by_first {
+            bucket.sort_by(|a, b| b.0.len().cmp(&a.0.len()).then(a.1.cmp(&b.1)));
+        }
+        Self {
+            by_first,
+            len: map.len(),
+        }
+    }
+
+    fn is_empty(&self) -> bool {
+        self.len == 0
+    }
+
+    /// The leftmost special in `text`, longest at that position:
+    /// `(byte offset, byte length, id)`.
+    fn find_first(&self, text: &str) -> Option<(usize, usize, usize)> {
+        if self.is_empty() {
+            return None;
+        }
+        let bytes = text.as_bytes();
+        for (pos, &b) in bytes.iter().enumerate() {
+            let rest = &bytes[pos..];
+            if let Some((tok, id)) = self.by_first[b as usize].iter().find(|(t, _)| rest.starts_with(t)) {
+                return Some((pos, tok.len(), *id));
+            }
+        }
+        None
+    }
+}
+
 /// SentencePiece tokenizer wrapper for Gemma 2.
 pub struct SentencePieceTokenizer {
     processor: sentencepiece::SentencePieceProcessor,
@@ -219,8 +282,8 @@ pub struct BpeTokenizer {
     /// EOS token ID.
     eos_id: usize,
     /// Special tokens (control + user_defined) that should not be split
-    /// by BPE. Maps token string → token ID.
-    special_tokens: HashMap<String, usize>,
+    /// by BPE — leftmost-longest matcher.
+    special: SpecialTokenMatcher,
 }
 
 impl BpeTokenizer {
@@ -298,13 +361,8 @@ impl BpeTokenizer {
             .metadata_u64("tokenizer.ggml.eos_token_id")
             .map_or(0, |v| v as usize);
 
-        // ── Build special tokens map (control=3, user_defined=4) ─────
-        let mut special_tokens = HashMap::new();
-        for (id, &tt) in token_types.iter().enumerate() {
-            if tt == 3 || tt == 4 {
-                special_tokens.insert(id_to_token[id].clone(), id);
-            }
-        }
+        // ── Special tokens (control=3, user_defined=4) ───────────────
+        let special = SpecialTokenMatcher::from_types(&token_types, &id_to_token);
 
         Ok(Self {
             vocab,
@@ -315,7 +373,7 @@ impl BpeTokenizer {
             unicode_to_byte,
             bos_id,
             eos_id,
-            special_tokens,
+            special,
         })
     }
 
@@ -368,43 +426,22 @@ impl BpeTokenizer {
     /// as single token IDs without BPE processing. Non-special text
     /// between special tokens is pre-tokenized and BPE-encoded normally.
     pub fn encode(&self, text: &str) -> Vec<usize> {
-        if self.special_tokens.is_empty() {
+        if self.special.is_empty() {
             return self.encode_no_special(text);
         }
 
         let mut result = Vec::with_capacity(text.len() / 4 + 1);
         let mut remaining = text;
-
-        while !remaining.is_empty() {
-            // Find the earliest special token occurrence; on ties at the
-            // same position, pick the longest (longest-match).
-            let mut best: Option<(usize, &str, usize)> = None; // (pos, token, id)
-
-            for (token_str, &token_id) in &self.special_tokens {
-                if let Some(pos) = remaining.find(token_str.as_str()) {
-                    match best {
-                        None => best = Some((pos, token_str.as_str(), token_id)),
-                        Some((bp, bs, _)) => {
-                            if pos < bp || (pos == bp && token_str.len() > bs.len()) {
-                                best = Some((pos, token_str.as_str(), token_id));
-                            }
-                        }
-                    }
-                }
+        while let Some((pos, len, id)) = self.special.find_first(remaining) {
+            // BPE-encode the text before the special token.
+            if pos > 0 {
+                result.extend(self.encode_no_special(&remaining[..pos]));
             }
-
-            if let Some((pos, token, id)) = best {
-                // BPE-encode the text before the special token.
-                if pos > 0 {
-                    result.extend(self.encode_no_special(&remaining[..pos]));
-                }
-                result.push(id);
-                remaining = &remaining[pos + token.len()..];
-            } else {
-                // No more special tokens — encode the rest.
-                result.extend(self.encode_no_special(remaining));
-                break;
-            }
+            result.push(id);
+            remaining = &remaining[pos + len..];
+        }
+        if !remaining.is_empty() {
+            result.extend(self.encode_no_special(remaining));
         }
 
         result.shrink_to_fit();
@@ -689,7 +726,7 @@ pub struct SentencePieceGgufTokenizer {
     add_dummy_prefix: bool,
     /// Special tokens (control + user_defined) that should not be split.
     /// Maps token string → token ID.
-    special_tokens: HashMap<String, usize>,
+    special: SpecialTokenMatcher,
     /// Byte-fallback tokens: maps byte value → token ID for `<0xNN>` tokens
     /// (type=6). Used when a character is not in the vocab.
     byte_tokens: [usize; 256],
@@ -804,13 +841,8 @@ impl SentencePieceGgufTokenizer {
             .metadata_u64("tokenizer.ggml.eos_token_id")
             .map_or(1, |v| v as usize);
 
-        // ── Build special tokens map (control=3, user_defined=4) ─────
-        let mut special_tokens = HashMap::new();
-        for (id, &tt) in token_types.iter().enumerate() {
-            if tt == 3 || tt == 4 {
-                special_tokens.insert(id_to_token[id].clone(), id);
-            }
-        }
+        // ── Special tokens (control=3, user_defined=4) ───────────────
+        let special = SpecialTokenMatcher::from_types(&token_types, &id_to_token);
 
         // ── Build byte-fallback token table ───────────────────────────
         // Type-6 tokens are `<0xNN>` (hex byte). Scan for them once at load.
@@ -842,7 +874,7 @@ impl SentencePieceGgufTokenizer {
             merge_ranks,
             scores,
             add_dummy_prefix,
-            special_tokens,
+            special,
             byte_tokens,
             bos_id,
             eos_id,
@@ -867,40 +899,16 @@ impl SentencePieceGgufTokenizer {
             return;
         }
 
-        if self.special_tokens.is_empty() {
-            self.encode_no_special(text, out);
-            return;
-        }
-
         let mut remaining = text;
-        while !remaining.is_empty() {
-            // Find the earliest special token occurrence; on ties at the
-            // same position, pick the longest (longest-match).
-            let mut best: Option<(usize, &str, usize)> = None; // (pos, token, id)
-
-            for (token_str, &token_id) in &self.special_tokens {
-                if let Some(pos) = remaining.find(token_str.as_str()) {
-                    match best {
-                        None => best = Some((pos, token_str.as_str(), token_id)),
-                        Some((bp, bs, _)) => {
-                            if pos < bp || (pos == bp && token_str.len() > bs.len()) {
-                                best = Some((pos, token_str.as_str(), token_id));
-                            }
-                        }
-                    }
-                }
+        while let Some((pos, len, id)) = self.special.find_first(remaining) {
+            if pos > 0 {
+                self.encode_no_special(&remaining[..pos], out);
             }
-
-            if let Some((pos, token, id)) = best {
-                if pos > 0 {
-                    self.encode_no_special(&remaining[..pos], out);
-                }
-                out.push(id);
-                remaining = &remaining[pos + token.len()..];
-            } else {
-                self.encode_no_special(remaining, out);
-                break;
-            }
+            out.push(id);
+            remaining = &remaining[pos + len..];
+        }
+        if !remaining.is_empty() {
+            self.encode_no_special(remaining, out);
         }
     }
 
@@ -1447,4 +1455,51 @@ fn match_pretoken(chars: &[(usize, char)], i: usize) -> usize {
     // Rule 4 catches punctuation and Rule 7 catches whitespace, but included
     // for safety.
     i + 1
+}
+
+#[cfg(test)]
+mod special_token_matcher_tests {
+    use super::SpecialTokenMatcher;
+
+    /// Reference: the original per-token `find` scan (earliest, longest on a tie).
+    fn naive(specials: &[(&str, usize)], text: &str) -> Option<(usize, usize, usize)> {
+        let mut best: Option<(usize, usize, usize)> = None;
+        for &(t, id) in specials {
+            if let Some(pos) = text.find(t) {
+                match best {
+                    Some((bp, bl, _)) if pos > bp || (pos == bp && t.len() <= bl) => {}
+                    _ => best = Some((pos, t.len(), id)),
+                }
+            }
+        }
+        best
+    }
+
+    #[test]
+    fn leftmost_longest_matches_the_naive_scan() {
+        let toks = ["<a>", "<ab>", "\n\n", "\n\n\n", "é!", "x", ""];
+        let types = [3u32, 4, 4, 4, 3, 1, 3];
+        let names: Vec<String> = toks.iter().map(|s| s.to_string()).collect();
+        let m = SpecialTokenMatcher::from_types(&types, &names);
+        let specials = [("<a>", 0usize), ("<ab>", 1), ("\n\n", 2), ("\n\n\n", 3), ("é!", 4)];
+        for text in [
+            "",
+            "plain",
+            "a<ab>b",
+            "x\n\n\ny<a>",
+            "ée!é!",
+            "<a<ab><a>",
+            "tail\n",
+            "\n\n\n\n\n",
+        ] {
+            assert_eq!(m.find_first(text), naive(&specials, text), "{text:?}");
+        }
+    }
+
+    #[test]
+    fn duplicate_string_keeps_the_last_id() {
+        let names = vec!["<s>".to_string(), "<s>".to_string()];
+        let m = SpecialTokenMatcher::from_types(&[3, 3], &names);
+        assert_eq!(m.find_first("a<s>"), Some((1, 3, 1)));
+    }
 }
