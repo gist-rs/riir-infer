@@ -4,6 +4,32 @@ Durable records for resolved questions and closed lanes (the noise-reduction
 convention: the record lands here, hash-pinned; open work lives in `.issues/`
 and `.plans/`). Created 2026-09-23 at the first record.
 
+## 2026-09-25 — T10 rung 2 (Metal): the attn_rope hoist pre-pass — default-off, promotion probe pending
+
+`attn_rope` now derives the Q/K rope ONCE per layer into a packed
+`[2, seq, d]` device scratch (`5ef7442`), and `flash_attn`'s staging copies
+the rotated K instead of re-rotating it per (query block × head × key
+tile). Opt-in `LAYA_METAL_ROPE_HOIST=1`; the in-kernel rope arm stays the
+shipped default and is bit-identical by construction (same expressions,
+same order) — promotion follows the quiet-box position-balanced A/B
+(instrument archived: riir-reflex `.benchmarks/033_rope_hoist_ab/`), not a
+flag flip.
+
+The landing's own defect is the reusable lesson: widening the buffer list
+moved the flash staging to `[[threadgroup(11)]]` while the host kept
+binding its length at index 9 — the unbound-pointer class. Small smoke
+shapes passed on allocation luck; full-model G5 failed DEGENERATE (uniform
+probs, agreement 12/26), which is what surfaced it. Fixed (9 → 11) in the
+same commit: a shape-widening edit must move the host bind and the kernel
+binding together.
+
+Gates (both postures, hoist on/off): `metal_ops_smoke` 7/7 ×2,
+`packed_forward_equiv` 4/4 ×2, `packed_same_shape_gate` 1/1 raw-bit,
+lib 41/41; consumer G5 metal top-1 1.000000 ×3 checkpoints, drift ≤ 6.1e-6
+×2; `laya_batch_parity` ×2; clippy `-D` ×3 feature postures.
+
+Session: issue020-metal-lane, 1790285773
+
 ## 2026-09-25 — two silent MiniCPM5 (llama-arch GGUF) defects, found bringing it up as Issue 011's long-context fixture
 
 Both defects produced finite, plausible output that was wrong, and both were settled against a reference implementation (HF `tokenizers` / `transformers` fp32) rather than by reasoning.
