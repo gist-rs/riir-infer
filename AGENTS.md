@@ -41,6 +41,10 @@ cargo test --test issue879_gdn_quant_certification --features deltanet_ternary_i
 cargo test --test bonsai2_rotation_load --features bonsai2_hadamard
 # BONSAI_GGUF env (defaults to a riir-train data path) names the real
 # checkpoint for the certification test's full-file arm.
+# The EXL3 trellis lane (opt-in; issue 001 — CPU reference + fast arm here,
+# GPU kernels in riir-infer-gpu; oracle = the CPU reference):
+cargo test --lib --features exl3
+cargo test -p riir-infer-gpu --features exl3_gpu,cuda_backend --lib  # native CUDA arm (release recommended)
 # The encoder-lane crate (features mirror the names consumers forward):
 cargo check -p riir-infer-laya --features laya-riir
 cargo clippy -p riir-infer-laya --all-targets --features laya-riir-metal -- -D warnings

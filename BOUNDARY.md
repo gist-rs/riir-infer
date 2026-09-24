@@ -16,14 +16,19 @@
 needs BELOW the engine:
 
 - `riir-infer-core` (crate, repo root): GGUF + safetensors weight loading,
-  the quantization zoo (q2k → q8kv, q2_0 ternary, PTQ/TurboQuant), model
+  the quantization zoo (q2k → q8kv, q2_0 ternary, PTQ/TurboQuant, EXL3
+  trellis — multi-shard zero-copy pack reader + CPU reference + bit-identical
+  fast arm, opt-in `exl3`, Issue 001), model
   architectures (gemma / llama / ternary / wall layers, deltanet,
   transformer, rope, dflash speculative types), SIMD helpers, CPU reference
   paths. NO cognition, NO training, NO game/chain semantics.
 - `riir-infer-gpu` (crate, `crates/riir-infer-gpu`): the GPU runtime +
   kernel layer — device context, buffer helpers, the pool-poison
   detector, the CubeCL runtime, the persistent weight-buffer cache, the
-  GPU transpose kernel (+ its WGSL), and the adapter VRAM probe. The
+  GPU transpose kernel (+ its WGSL), the adapter VRAM probe, and the
+  EXL3 trellis GPU dequant kernels (feature `exl3_gpu`; decode bit-exact
+  vs the CPU reference, block-Hadamard gated in the FMA-contraction
+  class — Issue 001 T7b). The
   kernel-set migration from the engine's GPU layer is ongoing (tracked
   in the private workspace campaign that carved this repo).
 - `riir-infer-laya` (crate, `crates/riir-infer-laya`): the pinned-checkpoint
