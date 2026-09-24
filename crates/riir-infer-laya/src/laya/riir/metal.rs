@@ -2181,11 +2181,23 @@ impl Backend for Metal {
         let map = self.chain.lock().expect("chain cache poison");
         // The src may be a PREFIX of the written buffer (the CLS row is the
         // leading d of the whole hidden slot), so match by base pointer and
-        // sufficient extent, taking the newest epoch.
+        // sufficient extent. The resolution must be DETERMINISTIC: within
+        // one epoch several keys can share a base pointer (a forward's
+        // scratch frees its host Vecs mid-case while their keys stay in the
+        // map, and a later allocation reuses the address), so the pick is
+        // newest epoch FIRST, then the TIGHTEST container — the smallest
+        // extent that still covers src. A tie on epoch alone would fall
+        // through to HashMap iteration order, which is randomized per
+        // process, and serve the wrong buffer's bytes (measured: the packed
+        // path's CLS row read a dead encoder-scratch key holding the raw
+        // token-embedding row — act head saturated the wrong way, flaky by
+        // RandomState).
         let slot = map
             .iter()
             .filter(|(k, _)| k.0 == ptr && k.1 >= src.len())
-            .max_by_key(|(k, _)| k.2)
+            .max_by(|a, b| {
+                a.0 .2.cmp(&b.0 .2).then_with(|| b.0 .1.cmp(&a.0 .1))
+            })
             .map(|(_, b)| b.clone());
         let Some(b) = slot else {
             panic!(

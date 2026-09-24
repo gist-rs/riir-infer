@@ -1121,13 +1121,24 @@ RAM, commit-vs-limit, concurrent jobs — multi-session 4090).
       GEMV reaches q4k-class decode on its own. The A3 (no-LUT) rows were
       also inconsistent (fastest on 2 layers, slowest on 2) — no reliable
       LUT-gather bound either.
-- [ ] T7c-1d (NEW, blocks T7c-2): a SOUND timing harness before any more
-      kernel work — CUDA-event (or criterion) per-kernel timing, not
-      wall-differential with interleaved readbacks; re-measure A1/A2/A3 to
-      stable ±5% before deciding whether the fused GEMV proceeds on v1-
-      style inline decode, needs the LUT decoded arithmetically (an A3-class
-      variant), or the lane pivots (e.g. tensor-core trellis decode — the
-      format's own design intent).
+- [x] T7c-1d (NEW, blocked T7c-2) — **DONE 2026-09-25 01:44 (4090, plan 003)**: the stable harness LANDED (`bench_arm_stable` + `StableBench` + `TooFastToTime`, commit `9989e9f`; driver `real_pack_decode_bench_stable`) and the RE-RUN completed (exit 0, 520.7 s, REPS=64 SAMPLES=30, pack = the §13 4bpw author pack). **Design note (honest scope):** true CUDA-event timing is unreachable in cubecl 0.11 — the CUDA server's raw `CUstream` is private, its `Fence` exposes no elapsed — so the sound primitive is **sync-bracketed system-time sampling** with an enforced ≥5 ms/pass work floor (`TooFastToTime` refuses below it), a 10% within-run spread gate, and a 15% cross-method agreement gate vs the retained differential. **Results (peak Gw/s, spread; A1/A2/A3 = v1 / v2 / v2-no-LUT):**
+
+| layer | weights | A1 | A2 | A3 | A2/A1 | A3/A1 |
+|---|---:|---:|---:|---:|---:|---:|
+| L11 o_proj | 31.5M | 21.8 (4.2%) | 21.5 (4.1%) | 27.8 (9.8%) | 0.99 | 1.27 |
+| L0 down_proj | 89.1M | 21.4 (6.2%) | 21.9 (4.2%) | 27.7 (5.1%) | 1.02 | 1.29 |
+| L0 out_proj | 31.5M | 21.4 (13.4% UNST) | 21.3 (4.7%) | 27.3 (8.1%) | 1.00 | 1.28 |
+| L0 gate_proj | 89.1M | 23.0 (5.7%) | 22.3 (5.2%) | 28.8 (4.6%) | 0.97 | 1.25 |
+| lm_head | 1.27B | 21.0 (2.0%) | 20.3 (1.4%) | 26.6 (2.8%) | 0.97 | 1.27 |
+
+**Verdicts (the decision the task named):**
+1. **The T7c-1b kill criterion for the extraction class is CONFIRMED by the sound harness** — A2 ≈ A1 on every layer (0.97–1.02×). The modulo/loads mechanism was never the bottleneck; v1 stays the decode kernel; no further extraction work.
+2. **A3 is the first reliable signal of the real cost: the LUT gather is a consistent 1.25–1.29× on EVERY layer** (26.6–28.8 vs 21–23 Gw/s). An arithmetic-LUT (A3-class) variant is the only remaining extraction-class win, and it is bounded at ~28 Gw/s.
+3. **The ceiling arithmetic stands refuted as a target**: even at A3's ~28 Gw/s the decode is ~3.5× below the ~100 Gw/s (~17×) derivation — the wall is NOT the window math NOR the gather; at 13.8 GB of trellis bytes per 27B step the DRAM/L2 read of the codes themselves is the binding term (28 Gw/s ≈ 3.5 GB/s of codes at 0.125 B/weight — far under the 1 TB/s HBM, so the wall is LATENCY-class: the per-weight dependent-load chain, not bandwidth). The honest reading: **inline decode cannot reach q4k-class GEMV by extraction alone; the lane decision (proceed-with-A3 / pivot to tensor-core trellis decode per the format's own design intent / close) is the OWNER call this table feeds.**
+4. Harness validity: 14/15 rows under the 10% spread gate (one A1 row at 13.4% printed UNSTABLE and is excluded from verdicts); lm_head — the only layer where the pass is big enough to amortize the readback — is the only cross-agree=YES row, which is itself evidence the differential method was unsound at small scales (the reason it was replaced). v2-vs-v1 bit-exactness re-asserted per layer (§17.3 gate 1 at bench scope, green).
+5. Box state: RTX 4090 24 GiB, AC, GPU at the ~5% idle desktop baseline through the run (checked pre-launch; 503 MiB in use, no compute apps); the bench window was 01:35:20–01:44:50 (+0700); a CONCURRENT reflex harness (another agent's lane) started 01:51 — AFTER the run; numbers carry that provenance.
+
+  Blocked-on note (the process-level lesson, recorded because it cost two dead runs): a detached-over-SSH process on the 4090 is reaped when the launching SSH session tears down — the run only survives via `schtasks /create /sc once` + `/run` (session-independent). Any future long remote bench launches through a scheduled task, never `Start-Process`.
 - [ ] T7c-1c: full-pack bit-exact gate (whole pack, 5-class oracle shape)
       for v2 before any GEMV work consumes it.
 - [ ] T7c-2a: vector-side Hadamard transform kernels (input `v =

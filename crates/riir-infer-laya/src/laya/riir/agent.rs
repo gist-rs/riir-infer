@@ -34,7 +34,7 @@ use super::super::weights::ensure_checkpoint;
 use super::super::{LayaError, Result};
 use super::backend::{Backend, Cpu};
 use super::encoder::Encoder;
-use super::head::{Head, HeadOutput};
+use super::head::{Head, HeadOutput, HeadScratch};
 
 /// The device the riir forward runs on, chosen at load from `LAYA_DEVICE`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -379,8 +379,9 @@ impl RiirAgent {
                 #[cfg(all(target_os = "macos", feature = "laya-riir-ane"))]
                 EncoderStack::Ane(e) => e.forward(&ids)?,
             };
+            let mut sc = HeadScratch::new();
             self.head
-                .forward(self.backend.as_ref(), &mut hidden, q.qtype, &markers)
+                .forward(self.backend.as_ref(), &mut hidden, q.qtype, &markers, &mut sc)
         })?;
         let t = self.temps.for_question(q.qtype, markers.len());
         Ok(Self::make_forward(q, out, ids.len(), markers, t))
@@ -524,19 +525,52 @@ impl RiirAgent {
             let d = hidden.len() / total_ids.len();
             let mut out = Vec::with_capacity(items.len());
             let mut off_rows = 0usize;
-            for (qid, q, ids, markers) in &items {
-                let rows = ids.len();
-                let mut hq = vec![0f32; rows * d];
-                self.backend
-                    .copy_at(&hidden, off_rows * d, &mut hq, 0, rows * d);
-                let head_out = self
-                    .head
-                    .forward(self.backend.as_ref(), &mut hq, q.qtype, markers)?;
-                let t = self.temps.for_question(q.qtype, markers.len());
-                let f = Self::make_forward(q, head_out, rows, markers.clone(), t);
-                out.push(Self::answer_of(qid, q, f)?);
-                off_rows += rows;
-            }
+            // One slab + one scratch PER QUESTION, all allocated UP FRONT
+            // and kept alive for the whole case: within the case's single
+            // chain epoch, every logical buffer must own its (host ptr, len)
+            // key — per-question alloc/free would malloc-reuse addresses and
+            // alias the previous question's device buffers (the HeadScratch
+            // doc carries the measured failure).
+            let mut slabs: Vec<Vec<f32>> = items
+                .iter()
+                .map(|(_, _, ids, _)| vec![0f32; ids.len() * d])
+                .collect();
+            let mut scratches: Vec<HeadScratch> =
+                (0..items.len()).map(|_| HeadScratch::new()).collect();
+            let head_result = (|| -> Result<()> {
+                for ((qid, q, ids, markers), (hq, sc)) in items
+                    .iter()
+                    .zip(slabs.iter_mut().zip(scratches.iter_mut()))
+                {
+                    let rows = ids.len();
+                    self.backend
+                        .copy_at(&hidden, off_rows * d, hq, 0, rows * d);
+                    let head_out = self
+                        .head
+                        .forward(self.backend.as_ref(), hq, q.qtype, markers, sc)?;
+                    // The packed-path raw-bits parity seam (ungated — the
+                    // gate reads it; a few bytes per question is noise
+                    // beside a forward).
+                    let bits: [u32; 2] = [
+                        head_out.act_probabilities[0].to_bits(),
+                        head_out.act_probabilities[1].to_bits(),
+                    ];
+                    let logit_bits: Vec<u32> =
+                        head_out.logits.iter().map(|l| l.to_bits()).collect();
+                    let mut cap = PACKED_ACT_BITS.lock().unwrap();
+                    if cap.len() < PACKED_ACT_BITS_CAP {
+                        cap.push((bits, logit_bits));
+                    }
+                    let t = self.temps.for_question(q.qtype, markers.len());
+                    let f = Self::make_forward(q, head_out, rows, markers.clone(), t);
+                    out.push(Self::answer_of(qid, q, f)?);
+                    off_rows += rows;
+                }
+                Ok(())
+            })();
+            drop(slabs);
+            drop(scratches);
+            head_result?;
             Ok(out)
         })
     }
@@ -586,3 +620,14 @@ impl RiirAgent {
         })
     }
 }
+
+/// The packed-path raw act_probabilities + scorer-logits bits, in answer
+/// order — the PARITY SEAM the rounded [`Answer`] envelope cannot carry (a
+/// stale `act_in` or an aliased slab can hide inside 4-decimal rounding;
+/// neither can hide in f32 bits). Always recorded, capped at 4096 entries
+/// (the last survive); [`tests/packed_same_shape_gate.rs`] clears it
+/// before its packed run and reads it after. See [`HeadScratch`] for the
+/// aliasing hazard this seam caught.
+pub static PACKED_ACT_BITS: std::sync::Mutex<Vec<([u32; 2], Vec<u32>)>> =
+    std::sync::Mutex::new(Vec::new());
+const PACKED_ACT_BITS_CAP: usize = 4096;

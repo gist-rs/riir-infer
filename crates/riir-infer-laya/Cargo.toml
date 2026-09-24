@@ -92,6 +92,11 @@ block2 = { version = "0.6", optional = true }
 [target.'cfg(not(target_os = "macos"))'.dependencies]
 cudarc = { version = "0.19", default-features = false, features = ["std", "driver", "nvrtc", "cuda-13030", "fallback-dynamic-loading"], optional = true }
 
+[dev-dependencies]
+# The parity/gate tests parse fixture questions (serde_json is already a
+# regular dependency — same version, no new package).
+serde_json = "1"
+
 [features]
 # The checkpoint lane (substrate + the flat-Vec CPU forward).
 laya-riir = ["dep:serde", "dep:tokenizers", "dep:sha2", "dep:blake3", "dep:gemm", "dep:libm"]
@@ -120,6 +125,13 @@ laya-riir-cuda = ["laya-riir", "dep:cudarc"]
 # target_os half of the gate cannot be expressed here.
 [[test]]
 name = "metal_ops_smoke"
+required-features = ["laya-riir-metal"]
+
+# The packed-path chain-aliasing gate (same shape as metal_ops_smoke:
+# whole-file #![cfg]-gated macOS + metal; the row keeps a feature-less
+# selection skipping loudly instead of printing a green zero).
+[[test]]
+name = "packed_same_shape_gate"
 required-features = ["laya-riir-metal"]
 
 # The packed-forward equivalence gate is whole-file #![cfg]-gated

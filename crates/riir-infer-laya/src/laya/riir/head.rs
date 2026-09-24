@@ -75,6 +75,104 @@ pub struct HeadOutput {
     pub act_probabilities: Vec<f32>,
 }
 
+/// The head's op buffers, owned by the CALLER and reused across layers and
+/// questions.
+///
+/// Two reasons this lives outside [`Head::forward`] instead of as `vec!`
+/// locals:
+///
+/// 1. **Chain-key uniqueness (the packed-path aliasing hazard).** The Metal
+///    chain cache keys device buffers by `(host ptr, len, epoch)`, and one
+///    epoch covers a whole packed case. Per-question host buffers that are
+///    freed and re-allocated per question deterministically malloc-reuse
+///    addresses — two logical buffers then share one key within the epoch,
+///    and a `chain_buf` upload or a prefix-matched download serves the
+///    previous question's device bytes. Measured: a shared CLS row and a
+///    stale `act_in` for same-shape question pairs (raw-bit divergence from
+///    the loop path). With one scratch per question allocated UP FRONT and
+///    kept alive for the whole case, every logical buffer has its own
+///    address for the entire epoch and the collision class cannot fire.
+/// 2. **Allocation churn (reflex issue 020 T6's head half).** `forward`
+///    used to allocate ~20 zeroed buffers per layer per question; the
+///    scratch touches each page once and reuses it across layers and
+///    questions.
+///
+/// `fit` never reallocates at a constant length, so a buffer's address is
+/// stable from its first use on. Every buffer that reaches a backend op
+/// must be a scratch field — pure-host scratch (`softmax32` temps, the
+/// returned logits) stays local.
+pub struct HeadScratch {
+    pub(crate) sq: Vec<f32>,
+    pub(crate) nx: Vec<f32>,
+    pub(crate) qkv: Vec<f32>,
+    pub(crate) q: Vec<f32>,
+    pub(crate) k: Vec<f32>,
+    pub(crate) v: Vec<f32>,
+    pub(crate) scores: Vec<f32>,
+    pub(crate) ctx: Vec<f32>,
+    pub(crate) merged: Vec<f32>,
+    pub(crate) attn_out: Vec<f32>,
+    pub(crate) nx2: Vec<f32>,
+    pub(crate) ff: Vec<f32>,
+    pub(crate) ff2: Vec<f32>,
+    pub(crate) rows: Vec<f32>,
+    pub(crate) s: Vec<f32>,
+    pub(crate) s1: Vec<f32>,
+    pub(crate) logits_buf: Vec<f32>,
+    pub(crate) cls: Vec<f32>,
+    pub(crate) act_in: Vec<f32>,
+    pub(crate) a: Vec<f32>,
+    pub(crate) act_logits_buf: Vec<f32>,
+}
+
+impl HeadScratch {
+    /// Resize to `n` when needed; a constant length keeps both the capacity
+    /// AND the address (never reallocates), which is the chain-key
+    /// guarantee above.
+    fn fit(buf: &mut Vec<f32>, n: usize) {
+        if buf.len() != n {
+            buf.clear();
+            buf.resize(n, 0.0);
+        }
+    }
+
+    /// One fresh scratch per question. The packed path allocates ALL of a
+    /// case's scratches before its first forward (see the struct doc); the
+    /// per-question loop path allocates one per call — its epoch is per
+    /// question, so address reuse across calls cannot alias anything.
+    pub fn new() -> Self {
+        Self {
+            sq: Vec::new(),
+            nx: Vec::new(),
+            qkv: Vec::new(),
+            q: Vec::new(),
+            k: Vec::new(),
+            v: Vec::new(),
+            scores: Vec::new(),
+            ctx: Vec::new(),
+            merged: Vec::new(),
+            attn_out: Vec::new(),
+            nx2: Vec::new(),
+            ff: Vec::new(),
+            ff2: Vec::new(),
+            rows: Vec::new(),
+            s: Vec::new(),
+            s1: Vec::new(),
+            logits_buf: Vec::new(),
+            cls: Vec::new(),
+            act_in: Vec::new(),
+            a: Vec::new(),
+            act_logits_buf: Vec::new(),
+        }
+    }
+}
+
+impl Default for HeadScratch {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl Head {
     /// Pre-place every weight slice this forward hands to a backend op on
     /// the device (riir-reflex Issue 020 T1) — the `matmul_w` weights, the
@@ -169,17 +267,19 @@ impl Head {
     ///
     /// `h` is the encoder's `last_hidden_state` flat `[seq, d]` (consumed
     /// in place — the residual stream starts there); `qtype` selects the
-    /// type-embedding row; `markers` are the option `[MASK]` positions.
-    /// ONE forward body for every backend (`.issues/005`). Host reads of
-    /// device results go through [`Backend::download_into`] — exactly
-    /// three per forward (logits, CLS row, act logits); everything else
-    /// stays device-side under Metal.
+    /// type-embedding row; `markers` are the option `[MASK]` positions;
+    /// `sc` is the caller-owned scratch (see [`HeadScratch`] for why it is
+    /// not internal). ONE forward body for every backend (`.issues/005`).
+    /// Host reads of device results go through [`Backend::download_into`] —
+    /// exactly three per forward (logits, CLS row, act logits); everything
+    /// else stays device-side under Metal.
     pub fn forward(
         &self,
         b: &dyn Backend,
         h: &mut [f32],
         qtype: usize,
         markers: &[usize],
+        sc: &mut HeadScratch,
     ) -> Result<HeadOutput> {
         let d = self.d;
         let seq = h.len() / d;
@@ -198,73 +298,70 @@ impl Head {
                 detail: format!("qtype {qtype} outside the 3-row type embedding"),
             })?;
         b.add_bias_row(x, d, trow);
-        // The bias-free-LN scratch — one buffer, reused across all layers
-        // (the layer loop must not allocate it).
-        let mut sq = Vec::new();
 
         for layer in &self.layers {
             // Pre-norm MHA block (no key-padding mask: one unpadded row).
             // ops::layer_norm's op order = nobias LN + per-row bias add.
-            let mut nx = vec![0f32; seq * d];
-            b.layer_norm_nobias_into(x, &layer.n1w, self.eps, d, &mut sq, &mut nx);
-            b.add_bias_row(&mut nx, d, &layer.n1b);
-            let mut qkv = vec![0f32; seq * 3 * d];
-            b.matmul_w(&nx, seq, d, &layer.in_proj_w, 3 * d, &mut qkv);
-            b.add_bias_row(&mut qkv, 3 * d, &layer.in_proj_b);
-            let mut q = vec![0f32; seq * d];
-            let mut k = vec![0f32; seq * d];
-            let mut v = vec![0f32; seq * d];
-            b.split_heads(&qkv, 3 * d, 0, seq, heads, hd, &mut q);
-            b.split_heads(&qkv, 3 * d, d, seq, heads, hd, &mut k);
-            b.split_heads(&qkv, 3 * d, 2 * d, seq, heads, hd, &mut v);
+            HeadScratch::fit(&mut sc.nx, seq * d);
+            b.layer_norm_nobias_into(x, &layer.n1w, self.eps, d, &mut sc.sq, &mut sc.nx);
+            b.add_bias_row(&mut sc.nx, d, &layer.n1b);
+            HeadScratch::fit(&mut sc.qkv, seq * 3 * d);
+            b.matmul_w(&sc.nx, seq, d, &layer.in_proj_w, 3 * d, &mut sc.qkv);
+            b.add_bias_row(&mut sc.qkv, 3 * d, &layer.in_proj_b);
+            HeadScratch::fit(&mut sc.q, seq * d);
+            HeadScratch::fit(&mut sc.k, seq * d);
+            HeadScratch::fit(&mut sc.v, seq * d);
+            b.split_heads(&sc.qkv, 3 * d, 0, seq, heads, hd, &mut sc.q);
+            b.split_heads(&sc.qkv, 3 * d, d, seq, heads, hd, &mut sc.k);
+            b.split_heads(&sc.qkv, 3 * d, 2 * d, seq, heads, hd, &mut sc.v);
             // torch's need_weights path scales q by sqrt(1/head_dim) before
             // the matmul. All heads in ONE backend op (one dispatch under
             // Metal; the CPU lane loops per head identically to v1).
-            b.scale(&mut q, scale);
-            let mut scores = vec![0f32; heads * seq * seq];
-            b.matmul_kt_heads(&q, &k, heads, seq, hd, &mut scores);
-            b.softmax_rows(&mut scores, seq);
-            let mut ctx = vec![0f32; heads * seq * hd];
-            b.matmul_heads(&scores, &v, heads, seq, seq, hd, &mut ctx);
-            let mut merged = vec![0f32; seq * d];
-            b.merge_heads(&ctx, seq, heads, hd, &mut merged);
-            let mut attn_out = vec![0f32; seq * d];
-            b.matmul_w(&merged, seq, d, &layer.out_w, d, &mut attn_out);
-            b.add_bias_row(&mut attn_out, d, &layer.out_b);
-            b.add(x, 0, &attn_out, 0, x.len());
+            b.scale(&mut sc.q, scale);
+            HeadScratch::fit(&mut sc.scores, heads * seq * seq);
+            b.matmul_kt_heads(&sc.q, &sc.k, heads, seq, hd, &mut sc.scores);
+            b.softmax_rows(&mut sc.scores, seq);
+            HeadScratch::fit(&mut sc.ctx, heads * seq * hd);
+            b.matmul_heads(&sc.scores, &sc.v, heads, seq, seq, hd, &mut sc.ctx);
+            HeadScratch::fit(&mut sc.merged, seq * d);
+            b.merge_heads(&sc.ctx, seq, heads, hd, &mut sc.merged);
+            HeadScratch::fit(&mut sc.attn_out, seq * d);
+            b.matmul_w(&sc.merged, seq, d, &layer.out_w, d, &mut sc.attn_out);
+            b.add_bias_row(&mut sc.attn_out, d, &layer.out_b);
+            b.add(x, 0, &sc.attn_out, 0, x.len());
 
             // Pre-norm FF block — ReLU (torch's default activation).
-            let mut nx2 = vec![0f32; seq * d];
-            b.layer_norm_nobias_into(x, &layer.n2w, self.eps, d, &mut sq, &mut nx2);
-            b.add_bias_row(&mut nx2, d, &layer.n2b);
-            let mut ff = vec![0f32; seq * 4 * d];
-            b.matmul_w(&nx2, seq, d, &layer.l1w, 4 * d, &mut ff);
-            b.add_bias_row(&mut ff, 4 * d, &layer.l1b);
-            b.relu(&mut ff);
-            let mut ff2 = vec![0f32; seq * d];
-            b.matmul_w(&ff, seq, 4 * d, &layer.l2w, d, &mut ff2);
-            b.add_bias_row(&mut ff2, d, &layer.l2b);
-            b.add(x, 0, &ff2, 0, x.len());
+            HeadScratch::fit(&mut sc.nx2, seq * d);
+            b.layer_norm_nobias_into(x, &layer.n2w, self.eps, d, &mut sc.sq, &mut sc.nx2);
+            b.add_bias_row(&mut sc.nx2, d, &layer.n2b);
+            HeadScratch::fit(&mut sc.ff, seq * 4 * d);
+            b.matmul_w(&sc.nx2, seq, d, &layer.l1w, 4 * d, &mut sc.ff);
+            b.add_bias_row(&mut sc.ff, 4 * d, &layer.l1b);
+            b.relu(&mut sc.ff);
+            HeadScratch::fit(&mut sc.ff2, seq * d);
+            b.matmul_w(&sc.ff, seq, 4 * d, &layer.l2w, d, &mut sc.ff2);
+            b.add_bias_row(&mut sc.ff2, d, &layer.l2b);
+            b.add(x, 0, &sc.ff2, 0, x.len());
         }
 
         // Gather the marker rows: [k, d].
         let k_opts = markers.len();
-        let mut rows = vec![0f32; k_opts * d];
-        b.gather_rows(x, d, markers, &mut rows);
+        HeadScratch::fit(&mut sc.rows, k_opts * d);
+        b.gather_rows(x, d, markers, &mut sc.rows);
 
         // scorer: LN → Linear(d,d) → GELU → Linear(d,1).
-        let mut s = vec![0f32; k_opts * d];
-        b.layer_norm_nobias_into(&rows, &self.s0w, self.eps, d, &mut sq, &mut s);
-        b.add_bias_row(&mut s, d, &self.s0b);
-        let mut s1 = vec![0f32; k_opts * d];
-        b.matmul_w(&s, k_opts, d, &self.s1w, d, &mut s1);
-        b.add_bias_row(&mut s1, d, &self.s1b);
-        b.gelu_erf(&mut s1);
-        let mut logits_buf = vec![0f32; k_opts]; // [k, 1] row-major IS [k]
-        b.matmul_w(&s1, k_opts, d, &self.s3w, 1, &mut logits_buf);
-        b.add_bias_row(&mut logits_buf, 1, &self.s3b);
+        HeadScratch::fit(&mut sc.s, k_opts * d);
+        b.layer_norm_nobias_into(&sc.rows, &self.s0w, self.eps, d, &mut sc.sq, &mut sc.s);
+        b.add_bias_row(&mut sc.s, d, &self.s0b);
+        HeadScratch::fit(&mut sc.s1, k_opts * d);
+        b.matmul_w(&sc.s, k_opts, d, &self.s1w, d, &mut sc.s1);
+        b.add_bias_row(&mut sc.s1, d, &self.s1b);
+        b.gelu_erf(&mut sc.s1);
+        HeadScratch::fit(&mut sc.logits_buf, k_opts); // [k, 1] row-major IS [k]
+        b.matmul_w(&sc.s1, k_opts, d, &self.s3w, 1, &mut sc.logits_buf);
+        b.add_bias_row(&mut sc.logits_buf, 1, &self.s3b);
         let mut logits = vec![0f32; k_opts];
-        b.download_into(&logits_buf, &mut logits);
+        b.download_into(&sc.logits_buf, &mut logits);
 
         // act head feats — detached probs of the raw logits (inference: the
         // detach is a no-op numerically), entropy over max(k, 2).
@@ -285,20 +382,20 @@ impl Head {
         // pooled = CLS row (position 0) + feats → act logits → softmax.
         // The CLS row is a DEVICE result — sync it out; the features were
         // computed from the already-downloaded logits.
-        let mut cls = vec![0f32; d];
-        b.download_into(&x[..d], &mut cls);
-        let mut act_in = Vec::with_capacity(d + 4);
-        act_in.extend_from_slice(&cls);
-        act_in.extend_from_slice(&feats);
-        let mut a = vec![0f32; 256];
-        b.matmul_w(&act_in, 1, d + 4, &self.a0w, 256, &mut a);
-        b.add_bias_row(&mut a, 256, &self.a0b);
-        b.gelu_erf(&mut a);
-        let mut act_logits_buf = vec![0f32; 2];
-        b.matmul_w(&a, 1, 256, &self.a2w, 2, &mut act_logits_buf);
-        b.add_bias_row(&mut act_logits_buf, 2, &self.a2b);
+        HeadScratch::fit(&mut sc.cls, d);
+        b.download_into(&x[..d], &mut sc.cls);
+        HeadScratch::fit(&mut sc.act_in, d + 4);
+        sc.act_in[..d].copy_from_slice(&sc.cls);
+        sc.act_in[d..].copy_from_slice(&feats);
+        HeadScratch::fit(&mut sc.a, 256);
+        b.matmul_w(&sc.act_in, 1, d + 4, &self.a0w, 256, &mut sc.a);
+        b.add_bias_row(&mut sc.a, 256, &self.a0b);
+        b.gelu_erf(&mut sc.a);
+        HeadScratch::fit(&mut sc.act_logits_buf, 2);
+        b.matmul_w(&sc.a, 1, 256, &self.a2w, 2, &mut sc.act_logits_buf);
+        b.add_bias_row(&mut sc.act_logits_buf, 2, &self.a2b);
         let mut act_logits = vec![0f32; 2];
-        b.download_into(&act_logits_buf, &mut act_logits);
+        b.download_into(&sc.act_logits_buf, &mut act_logits);
         let act_probabilities = softmax32(&act_logits);
 
         Ok(HeadOutput {
