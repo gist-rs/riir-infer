@@ -100,49 +100,77 @@ const RESOURCE_OPTIONS: MTLResourceOptions =
 /// for banks — hence strides 65 (over 64-wide rows) and 33 (over 32-wide
 /// rows) and 129 (over 128-wide rows).
 ///
-/// Three instances picked per call (see `run_sgemm`):
-/// - narrow `sgemm` (32×64×64) for m < 256 — BK 64 halves the k-loop's
-///   barrier count at the short-sequence suites (its staging still fits:
-///   A [32][65] + B [64][65] = 6240 floats).
-/// - wide `sgemm_wide` (64×64×32) for m ≥ 256, n < 2048 — the attention
-///   scores/context shapes at long sequence (n = seq, n = 64). BK 48 (the
-///   largest k-chunk fitting 32 KB at 64×64) was tried and measured FLAT
-///   on the forward's wide population (O k=1024, down k=2624 — the
-///   sgemm_shape_timing probe, 2026-09-24): the ~34% fewer staging
-///   barriers were offset by +50% uncoalesced Wᵀ staging per iteration —
-///   barriers are not the wide instance's binding constraint. Don't re-try
-///   bigger wide BK without a new mechanism.
-/// - xwide `sgemm_xwide` (64×128×32) for m ≥ 256, n ≥ 2048 — the QKV and
-///   gate/up projections. BK stays 32: at BN 128 a BK-48 B tile is
-///   [48][129] = 6192 floats and the pair outgrows 32 KB. Staging arithmetic
-///   intensity BM·BN/(BM+BN) =
-///   42.7 MAC/staged-element (wide 32, narrow 21 — the axis the
-///   narrow→wide promotion was measured on); every n it serves (3072,
-///   5248, 4096) is an exact multiple of 128, so the bigger BN pads
-///   nothing, and the pick floor is measured: at n = 1024 the 64×128
-///   tiles yield only 40 threadgroups at seq ~317 — one per GPU core, no
-///   over-subscription — and the suite regressed (see [`XWIDE_N_MIN`]).
+/// Two instances picked per call (see `run_sgemm`):
+/// - narrow `sgemm` (32×64×64) — the default: the whole many-wave regime
+///   (grids past one wave), every short-k shape, and every badly
+///   under-filled grid.
+/// - xwide `sgemm_xwide` (64×128×32) — ONLY inside the measured single-wave
+///   BAND: the grid must fill most of one wave but not spill past it
+///   ([`WAVE_TG_FLOOR`] < ⌈m/64⌉·⌈n/128⌉·batch ≤ [`WAVE_TG_LIMIT`]) AND k
+///   must run enough iterations to amortize the fat staging
+///   (k ≥ [`XWAVE_K_MIN`]). One ~full wave of fat threadgroups (staging
+///   intensity 42.7 MAC/staged element vs narrow's 21) beats several thin
+///   waves of narrow tiles — but only while nothing queues behind it and
+///   nothing under-fills it. BK stays 32: at BN 128 a BK-48 B tile is
+///   [48][129] = 6192 floats and the pair outgrows 32 KB. Every n it
+///   serves (1024, 3072, 5248) is an exact multiple of 128, so the bigger
+///   BN pads nothing on the projection shapes.
+/// - the middle `sgemm_wide` (64×64×32) instance is NO LONGER PICKED: the
+///   2026-09-25 dispatch-sweep probe (60 hot-path cells, position-balanced,
+///   3 rotated postures — riir-reflex Issue 020 T7) measured wide dominated
+///   by xwide at identical m-tiling wherever xwide's band fits, and by
+///   narrow everywhere else, in EVERY cell. The kernel stays compiled for
+///   future retuning; the pick never routes to it. (Its own BK-48 history:
+///   the largest k-chunk fitting 32 KB at 64×64 was tried and measured FLAT
+///   — barriers are not the wide instance's binding constraint.)
+///
+/// Measured basis for the whole predicate (probe medians, pooled over
+/// 3 rotated posture rounds × 4 shape populations — encoder projections at
+/// m ∈ {231..512} and packed scale {1024..2048}, head MHA at batch = 16,
+/// small-m m ∈ {1..188}):
+/// - o/wo (n = 1024) at m 231–317: xwide's grid is 32–40 threadgroups =
+///   one wave; −14…−18% vs the old wide pick. At m ≥ 370 the grid spills
+///   past one wave and narrow wins (+9…+19% vs wide, +6…+19% vs xwide).
+/// - qkv/wi (n ≥ 2048) at m ≤ 283 and across the packed scale: narrow
+///   beats the old xwide pick by +2…+22% (xwide grids of 96–328 threadgroups
+///   queue multiple waves; narrow's finer tiles keep every core fed).
+/// - head MHA (batch = 16, k = 64 or n = 64): narrow beats the old wide
+///   pick by +13…+29% at m ≥ 283 (wide grids of 240–512 threadgroups with
+///   HALF the scheduling granularity); ties below. At 32 threadgroups the
+///   k = 64 MHA shapes LOSE with xwide (heads@92: 28.3 vs 20.5 µs) — the
+///   staging win does not amortize over two k-iterations, which is what
+///   [`XWAVE_K_MIN`] encodes.
+/// - m ≤ 188 projections: narrow is optimal or within noise of it. The
+///   under-fill misses are the floor's basis: 24 threadgroups LOSE with
+///   xwide (o@188 118.8 vs 104.8 µs, qkv@45 137.4 vs 108.0) while 32 WIN
+///   (o@231 119.4 vs 143.1) — hence [`WAVE_TG_FLOOR`] exclusive at 24.
+///
+/// The instances are result-identical (each accumulates one k-ascending
+/// chain per output — the shape-timing probe's divergence check reads
+/// bit-identical against the CPU triple loop on every instance), so the
+/// predicate is a pure dispatch change: G5 drift is untouched by it.
+const WAVE_TG_LIMIT: u64 = 40;
+/// The single-wave band's measured floor (exclusive): at 24 threadgroups
+/// xwide under-fills the machine and LOSES to narrow (o@188, qkv@45); at
+/// 32 it wins (o@231). See the [`WAVE_TG_LIMIT`] doc for the numbers.
+const WAVE_TG_FLOOR: u64 = 24;
+/// xwide's staging intensity only amortizes over enough k-iterations: the
+/// k = 64 head-MHA shapes measured xwide LOSING at a grid size (32) where
+/// the k ≥ 1024 projections WIN. 128 = four BK-32 iterations — the
+/// shortest k measured winning (1024) sits far above it, the longest
+/// losing (64) below.
+const XWAVE_K_MIN: u32 = 128;
 ///
 /// The ragged edge route reuses the staging front after the k-loop
 /// (barrier-ordered); every instance's staging fits Metal's 32 KB
 /// threadgroup limit (asserted below).
-const WIDE_M_MIN: usize = 256;
-/// The xwide pick: n ≥ this AND m ≥ [`WIDE_M_MIN`] routes to the 64×128
-/// instance. Measured floor, not a guess: at n = 1024 (O proj + down
-/// proj) the 64×128 tiles yield only ⌈317/64⌉×⌈1024/128⌉ = 40
-/// threadgroups at seq ~317 — exactly one per GPU core, no
-/// over-subscription to hide staging latency — and banking77 regressed;
-/// at n ≥ 2048 (QKV 3072, gate/up 5248) the tile count stays ≥ 120 and
-/// the bigger BN wins (~3% suite p50, position-balanced A/B). 2048 keeps
-/// the two largest projections (≈70% of the forward's GEMM FLOPs) on
-/// xwide and everything else on the 64×64 instance.
-const XWIDE_N_MIN: usize = 2048;
 /// Narrow instance staging (A [32][65] + B [64][65] floats) and dispatch.
 const NARROW_STAGING_BYTES: u64 = ((32 * 65 + 64 * 65) * std::mem::size_of::<f32>()) as u64;
 const NARROW_THREADS: u64 = 512;
-/// Wide instance staging (A [64][33] + B [32][65] floats) and dispatch.
+/// Wide instance staging (A [64][33] + B [32][65] floats) — the compiled
+/// but unpicked kernel's geometry, kept beside its MSL source.
+#[allow(dead_code)]
 const WIDE_STAGING_BYTES: u64 = ((64 * 33 + 32 * 65) * std::mem::size_of::<f32>()) as u64;
-const WIDE_THREADS: u64 = 1024;
 /// xwide instance staging (A [64][33] + B [32][129] floats) and dispatch.
 const XWIDE_STAGING_BYTES: u64 = ((64 * 33 + 32 * 129) * std::mem::size_of::<f32>()) as u64;
 const XWIDE_THREADS: u64 = 1024;
@@ -232,19 +260,21 @@ const MSL_HEAD: &str = r#"
 #include <metal_simdgroup_matrix>
 using namespace metal;
 
-// ── sgemm geometry, THREE instantiations picked per-call by `m`/`n`:
-// narrow `sgemm` (BM=32, 512 threads) for short sequences — its 32-row
-// tiles pad little at m ≈ 100–200 and the doubled threadgroup count hides
-// latency; wide `sgemm_wide` (BM=64, 1024 threads) for m ≥ 256 — the
-// doubled staging arithmetic intensity (64 MAC/element vs 21) is worth
-// ~14% at the seq-317 suites. Shared laws: BK is per-instance (narrow 64
-// — A [32][65] + B [64][65]; wide 32 — BK 48 fits 32 KB at 64×64 but
-// measured FLAT, the barrier saving is offset by the bigger uncoalesced
-// staging gather; xwide 32 — a BK-48 B tile at BN 128 is [48][129] and
-// the pair outgrows the limit); a staging stride must EXCEED the tile's
-// row width or the tile overlaps itself (33 over a
-// 64-wide tile corrupts every row from row 1's column 30 on); the ragged
-// edge route reuses the staging front after the k-loop (barrier-ordered).
+// ── sgemm geometry, instances picked per-call by the single-wave rule
+// (WAVE_TG_LIMIT, see run_sgemm): xwide `sgemm_xwide` (BM=64, BN=128,
+// 1024 threads) ONLY when ⌈m/64⌉·⌈n/128⌉·batch fits ONE wave on this GPU —
+// one full wave of fat threadgroups beats several thin ones, but only
+// while nothing queues behind it; narrow `sgemm` (BM=32, 512 threads)
+// otherwise — its finer tiles keep every core fed in the many-wave regime
+// and its 32-row tiles pad little at short m. `sgemm_wide` (64×64, 1024
+// threads) stays compiled but is NO LONGER PICKED: the 2026-09-25
+// dispatch sweep measured it dominated in every hot-path cell. Shared
+// laws: BK is per-instance (narrow 64 — A [32][65] + B [64][65]; xwide 32
+// — a BK-48 B tile at BN 128 is [48][129] and the pair outgrows the
+// limit); a staging stride must EXCEED the tile's row width or the tile
+// overlaps itself (33 over a 64-wide tile corrupts every row from row 1's
+// column 30 on); the ragged edge route reuses the staging front after the
+// k-loop (barrier-ordered).
 
 // candle-metal-kernels unary.metal — A&S 7.1.26 f32 erf, their constants.
 inline float erf_as(float x) {
@@ -271,7 +301,11 @@ inline float gelu_as(float x) {
 // (sgr+4)·8 of its column block).
 "#;
 
-/// The wide instance (the `m ≥ WIDE_M_MIN` geometry).
+/// The wide instance kernel (64×64 output per threadgroup, 1024 threads) —
+/// kept COMPILED but no longer picked by `run_sgemm` (the 2026-09-25
+/// dispatch sweep measured it dominated in every hot-path cell; the docs
+/// at [`WAVE_TG_LIMIT`] carry the numbers). Any future re-pick must
+/// re-run that sweep first.
 const MSL_SGEMM_WIDE: &str = r#"
 constant uint WBM = 64u;
 constant uint WBN = 64u;
@@ -387,8 +421,9 @@ kernel void sgemm_wide(
 }
 "#;
 
-/// The xwide instance (the `m ≥ WIDE_M_MIN && n ≥ XWIDE_N_MIN` geometry):
-/// 64×128 output per threadgroup, 32 simdgroups (1024 threads), four
+/// The xwide instance (the single-wave geometry: picked iff
+/// ⌈m/64⌉·⌈n/128⌉·batch ≤ [`WAVE_TG_LIMIT`]): 64×128 output per
+/// threadgroup, 32 simdgroups (1024 threads), four
 /// accumulators per simdgroup — the row twins (sgr·8, (sgr+4)·8) × the
 /// column twins (sgc·8, sgc·8+64) — covering the 8×16 grid of 8×8 blocks.
 const MSL_SGEMM_XWIDE: &str = r#"
@@ -1515,8 +1550,10 @@ impl Metal {
     }
 
     /// The batched simdgroup GEMM dispatch: grid = (⌈n/BN⌉, ⌈m/BM⌉, batch),
-    /// the instance picked per `m` and `n` (see [`WIDE_M_MIN`] /
-    /// [`XWIDE_N_MIN`]). `uargs` =
+    /// the instance picked by the single-wave BAND rule (see
+    /// [`WAVE_TG_LIMIT`]): xwide only inside the band (grid mostly-fills but
+    /// does not spill one wave) with enough k to amortize the staging;
+    /// narrow otherwise. `uargs` =
     /// [m, n, k, `a_rs`, `a_cs`, `b_rs`, `b_cs`, `a_bs`, `b_bs`, `c_bs`] — element
     /// strides, then per-batch element strides (batch-1 callers pass
     /// zeros).
@@ -1531,18 +1568,21 @@ impl Metal {
         n: u32,
         batch: u32,
     ) -> Result<()> {
-        let (name, bm, bn, staging, threads) = if m as usize >= WIDE_M_MIN {
-            if n as usize >= XWIDE_N_MIN {
-                (
-                    "sgemm_xwide",
-                    64u64,
-                    128u64,
-                    XWIDE_STAGING_BYTES,
-                    XWIDE_THREADS,
-                )
-            } else {
-                ("sgemm_wide", 64, 64, WIDE_STAGING_BYTES, WIDE_THREADS)
-            }
+        let rows = u64::from(m).div_ceil(64);
+        let cols = u64::from(n).div_ceil(128);
+        let tgs = rows * cols * u64::from(batch);
+        let k = uargs[2]; // uargs = [m, n, k, …] — see the doc above
+        let (name, bm, bn, staging, threads) = if tgs > WAVE_TG_FLOOR
+            && tgs <= WAVE_TG_LIMIT
+            && k >= XWAVE_K_MIN
+        {
+            (
+                "sgemm_xwide",
+                64u64,
+                128u64,
+                XWIDE_STAGING_BYTES,
+                XWIDE_THREADS,
+            )
         } else {
             ("sgemm", 32, 64, NARROW_STAGING_BYTES, NARROW_THREADS)
         };
