@@ -1,4 +1,4 @@
-# Bench 003 — Issue 883 P0 R² dashboard: gemma-2-2b-it FIRST SLICE (the fitted-token-value-table go/no-go)
+# Bench 004 — Issue 883 P0 R² dashboard: gemma-2-2b-it FIRST SLICE (the fitted-token-value-table go/no-go)
 
 **Status:** COMPLETE — MEASUREMENT-ONLY (the P0 law; no quality claim). **The offline go/no-go reads GO for the P1/P2/P3 products**: mean ρ_l(V−K) = 0.49 (layer range 0.30–0.98, U-shaped through depth) — token identity carries ~half the V−K residual's variance on this artifact, so the fitted `E_l[s]` table has real signal to refund; NOT a null. Feature `vk_calibration` stays OPT-IN (an offline instrument, never a serving path).
 
