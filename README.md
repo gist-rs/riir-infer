@@ -20,7 +20,7 @@ every engine, game, and application concern.
   here; the GPU kernels live in `riir-infer-gpu` behind `exl3_gpu`.
   `Exl3Pack::open` is era-gated fail-closed on the pack's
   `quantization_config.version` against the validated set (`["1.4.2"]`)
-  — legacy-era packs silently decode wrong (issue 001 §12.7); a
+  — legacy-era packs silently decode wrong (issue 001 §12.7, record in `.docs/001`); a
   deliberate unvalidated-era read is `Exl3Pack::open_unverified_era`).
 - **Architectures** — gemma / llama / ternary / wall layers, deltanet,
   transformer, rope, speculative-decoding types (dflash).
