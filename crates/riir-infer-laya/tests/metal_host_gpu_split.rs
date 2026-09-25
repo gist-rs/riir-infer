@@ -60,6 +60,8 @@ fn t6_host_gpu_split() {
 
     let vocab = 50368usize;
     let shapes: &[(&str, &[usize])] = &[
+        ("seq46", &[46]),
+        ("seq106", &[106]),
         ("seq188", &[188]),
         ("seq512", &[512]),
         ("packed2x256", &[256, 256]),
