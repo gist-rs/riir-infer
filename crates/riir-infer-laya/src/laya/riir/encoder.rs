@@ -224,6 +224,9 @@ impl Encoder {
     ) -> Result<Vec<f32>> {
         let total = input_ids.len();
         debug_assert_eq!(seqs.iter().sum::<usize>(), total, "packed seqs sum");
+        // Per-question row segments for the backend's kernel choice (the
+        // packed ≡ loop law under split-K); cleared on every exit path.
+        let _segments = RowSegments::set(b, seqs);
         let d = self.cfg.hidden;
         let hd = self.cfg.head_dim();
         let heads = self.cfg.heads;
@@ -301,9 +304,12 @@ impl Encoder {
             sc.qkv.resize(total * 3 * d, 0.0);
             b.matmul_w(&sc.x, total, d, &layer.wqkv, 3 * d, &mut sc.qkv);
             let rope = if layer.sliding {
-                rope_slide.get_or_insert_with(|| self.rope_tables_for(seqs, hd, self.cfg.rope_theta_slide))
+                rope_slide.get_or_insert_with(|| {
+                    self.rope_tables_for(seqs, hd, self.cfg.rope_theta_slide)
+                })
             } else {
-                rope_full.get_or_insert_with(|| self.rope_tables_for(seqs, hd, self.cfg.rope_theta_full))
+                rope_full
+                    .get_or_insert_with(|| self.rope_tables_for(seqs, hd, self.cfg.rope_theta_full))
             };
             let mut off = 0usize;
             for (si, &seq) in seqs.iter().enumerate() {
@@ -362,5 +368,23 @@ impl Encoder {
         } else {
             ops::rope_tables_packed(seqs, hd, theta)
         }
+    }
+}
+
+/// Scope guard for [`Backend::set_row_segments`]: set on entry, cleared on
+/// drop — an early `?` return must not leave the hint describing the next
+/// forward's GEMMs.
+struct RowSegments<'a>(&'a dyn Backend);
+
+impl<'a> RowSegments<'a> {
+    fn set(b: &'a dyn Backend, seqs: &[usize]) -> Self {
+        b.set_row_segments(seqs);
+        Self(b)
+    }
+}
+
+impl Drop for RowSegments<'_> {
+    fn drop(&mut self) {
+        self.0.set_row_segments(&[]);
     }
 }

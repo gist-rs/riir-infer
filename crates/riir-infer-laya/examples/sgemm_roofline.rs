@@ -542,7 +542,7 @@ fn main() {
             (rb.len() * 4) as u64,
             RESOURCE_OPTIONS,
         );
-        let rout_buf = device.new_buffer((pm * pn * 4) as u64, RESOURCE_OPTIONS);
+        let rout_buf = device.new_buffer(pm * pn * 4, RESOURCE_OPTIONS);
         let reps = (k / 64) as u32;
         let pn32 = pn as u32;
 

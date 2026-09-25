@@ -142,6 +142,14 @@ required-features = ["laya-riir-metal"]
 name = "metal_host_gpu_split"
 required-features = ["laya-riir-metal"]
 
+[[test]]
+name = "metal_small_m_profile"
+required-features = ["laya-riir-metal"]
+
+[[test]]
+name = "metal_splitk_ab"
+required-features = ["laya-riir-metal"]
+
 # The packed-forward equivalence gate is whole-file #![cfg]-gated
 # (feature `laya-riir`; its metal arm re-gates on target_os in-source);
 # this row keeps a feature-less selection skipping the target loudly

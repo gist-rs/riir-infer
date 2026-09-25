@@ -315,6 +315,14 @@ pub trait Backend {
     /// no-op. Called once per forward by the agent, before the encoder.
     fn begin_pass(&self);
 
+    /// The rows of the GEMMs about to run are these CONSECUTIVE segments
+    /// (the packed forward's per-question sequence lengths; empty = no
+    /// segmentation). A backend whose kernel choice depends on the row
+    /// count (Metal split-K, riir-reflex Issue 020 T11) decides per segment,
+    /// so a packed row gets the kernel — and the bits — the per-question
+    /// loop gives it. CPU: no-op (one kernel for every shape).
+    fn set_row_segments(&self, _segs: &[usize]) {}
+
     /// Does this backend CONSUME the `[seq, seq]` additive sliding-window
     /// mask at head dim `hd`, or does it predicate the window in-kernel?
     ///

@@ -664,3 +664,155 @@ fn metal_sliding_window_chain_matches_cpu() {
 
     report("sliding chain (merged)", &merged, &merged_got, 1e-3);
 }
+
+/// Split-K (reflex issue 020 T11): the sliced narrow GEMM + fixed-order
+/// reduce against the CPU reference AND the unsliced kernel, on shapes that
+/// REACH the split path — k tails inside the last slice (300, 1000, 257,
+/// 130), ragged m and n edge tiles, the d×d / MLP-down geometry at the
+/// arena's m (54 × 1024 × 1024, 54 × 2624 × 1024) — plus a one-slice k (64)
+/// and a grid over the ceiling, which must NOT split and so stay
+/// bit-identical to the plain kernel. The reach counter pins which arms
+/// took the split path, so no arm can pass on the plain kernel by accident.
+#[test]
+fn splitk_gemm_matches_cpu_and_the_unsliced_kernel() {
+    let _gpu = gpu_lock();
+    let c = Cpu;
+    // (m, k, n, expect_split)
+    let shapes = [
+        (54usize, 1024usize, 1024usize, true),
+        (54, 2624, 1024, true),
+        (7, 300, 33, true),
+        (7, 130, 33, true),
+        (33, 1000, 100, true),
+        (1, 257, 129, true),
+        (7, 64, 33, false),       // one slice — never split
+        (300, 1024, 1024, false), // 16 × 10 = 160 narrow TGs > ceiling
+    ];
+    let mut want_split = 0u64;
+    let mut outs_plain = Vec::new();
+    {
+        let off = Metal::with_splitk(false, 64).expect("metal backend");
+        for &(mm, k, n, _) in &shapes {
+            off.begin_pass();
+            let a = vec_of(mm * k);
+            let w = vec_of(n * k);
+            let mut d = vec![0f32; mm * n];
+            off.matmul_w(&a, mm, k, &w, n, &mut d);
+            outs_plain.push(sync_out(&off, &d));
+        }
+        assert_eq!(off.splitk_dispatches(), 0, "split-K off must never slice");
+    }
+    let on = Metal::with_splitk(true, 64).expect("metal backend");
+    for (i, &(mm, k, n, split)) in shapes.iter().enumerate() {
+        on.begin_pass();
+        let before = on.splitk_dispatches();
+        let a = vec_of(mm * k);
+        let w = vec_of(n * k);
+        let mut dc = vec![0f32; mm * n];
+        let mut dm = vec![0f32; mm * n];
+        c.matmul_w(&a, mm, k, &w, n, &mut dc);
+        on.matmul_w(&a, mm, k, &w, n, &mut dm);
+        let got = sync_out(&on, &dm);
+        let took = on.splitk_dispatches() - before;
+        assert_eq!(took, u64::from(split), "{mm}x{k}x{n}: split reach");
+        want_split += u64::from(split);
+        report(
+            &format!("splitk matmul_w {mm}x{k}x{n} vs cpu"),
+            &dc,
+            &got,
+            1e-3,
+        );
+        report(
+            &format!("splitk matmul_w {mm}x{k}x{n} vs unsliced"),
+            &outs_plain[i],
+            &got,
+            1e-4,
+        );
+        if !split {
+            assert!(
+                got.iter()
+                    .zip(&outs_plain[i])
+                    .all(|(x, y)| x.to_bits() == y.to_bits()),
+                "{mm}x{k}x{n}: an unsplit shape must stay bit-identical"
+            );
+        }
+    }
+    assert_eq!(on.splitk_dispatches(), want_split, "total split reach");
+}
+
+/// The packed ≡ loop law under split-K: a split row's result is a function
+/// of that row alone (fixed slice length, fixed reduce order), so the SAME
+/// rows computed inside two different-m calls that both split are
+/// bit-identical — the property `packed_same_shape_gate` reads at raw bits
+/// (loop m = seq, packed m = Σ seq). m 54 and m 100 both split at n 1024
+/// (32 and 64 narrow TGs); the first 54 rows must agree exactly.
+#[test]
+fn splitk_rows_are_bit_identical_across_m() {
+    let _gpu = gpu_lock();
+    let on = Metal::with_splitk(true, 64).expect("metal backend");
+    let (k, n) = (1024usize, 1024usize);
+    let a_big = vec_of(100 * k);
+    let w = vec_of(n * k);
+    on.begin_pass();
+    let mut small = vec![0f32; 54 * n];
+    on.matmul_w(&a_big[..54 * k], 54, k, &w, n, &mut small);
+    let small = sync_out(&on, &small);
+    on.begin_pass();
+    let mut big = vec![0f32; 100 * n];
+    on.matmul_w(&a_big, 100, k, &w, n, &mut big);
+    let big = sync_out(&on, &big);
+    assert_eq!(
+        on.splitk_dispatches(),
+        2,
+        "both calls must take the split path"
+    );
+    let diff = small
+        .iter()
+        .zip(&big[..54 * n])
+        .filter(|(x, y)| x.to_bits() != y.to_bits())
+        .count();
+    assert_eq!(
+        diff, 0,
+        "split rows must not depend on the call's m ({diff} differ)"
+    );
+}
+
+/// Sub-slice download resolution (reflex issue 020 T11): when two chain
+/// keys share a base pointer within one epoch, `download_into` must serve
+/// the buffer most recently written at that address — never the tightest
+/// container. Built deterministically (no heap lottery): a 2-row GEMM
+/// writes `buf[..2d]`, then a 4-row GEMM writes all of `buf` from DIFFERENT
+/// inputs; the row-0 download must be the second GEMM's row 0. The old
+/// tightest rule served the first (dead-at-that-point) key — the measured
+/// packed-path CLS-row failure, 6/6 failing processes with 2 candidates.
+#[test]
+fn download_resolves_to_the_most_recent_write_at_a_base_pointer() {
+    let _gpu = gpu_lock();
+    let m = Metal::new().expect("metal backend");
+    let c = Cpu;
+    let (k, d) = (64usize, 96usize);
+    let w = vec_of(d * k);
+    let a_old: Vec<f32> = vec_of(2 * k).iter().map(|v| v * 3.0 + 1.0).collect();
+    let a_new = vec_of(4 * k);
+    m.begin_pass();
+    let mut buf = vec![0f32; 4 * d];
+    m.matmul_w(&a_old, 2, k, &w, d, &mut buf[..2 * d]);
+    m.matmul_w(&a_new, 4, k, &w, d, &mut buf);
+    let mut row0 = vec![0f32; d];
+    m.download_into(&buf[..d], &mut row0);
+    let mut want = vec![0f32; 4 * d];
+    c.matmul_w(&a_new, 4, k, &w, d, &mut want);
+    let mut stale = vec![0f32; 2 * d];
+    c.matmul_w(&a_old, 2, k, &w, d, &mut stale);
+    report(
+        "download row 0 vs the newest write",
+        &want[..d],
+        &row0,
+        1e-3,
+    );
+    let off_stale = row0
+        .iter()
+        .zip(&stale[..d])
+        .any(|(x, y)| (x - y).abs() > 1e-2);
+    assert!(off_stale, "row 0 was served from the older, tighter key");
+}

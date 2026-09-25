@@ -185,6 +185,32 @@ const XWIDE_THREADS: u64 = 1024;
 /// buffers join the committed list and are waited at the next sync.
 const MAX_ENCODERS_PER_CB: u32 = 1024;
 
+/// Split-K slice length (reflex issue 020 T11) — FIXED, a multiple of the
+/// narrow BK (64 · 2 iterations per slice).
+///
+/// What this buys, and what it does not (measured, not assumed):
+/// - A split result is a function of its OWN row: row i is Σ over the same
+///   `SPLITK_KC`-slices, reduced in the same order, whatever m the call
+///   carried. So two calls that BOTH split — the packed forward and the
+///   per-question loop at the arena/parity shapes — are bit-identical per
+///   row, exactly as two unsplit calls always were.
+/// - A split call is NOT bit-identical to an unsplit one (one k-ascending
+///   chain vs a sum of slice chains). That only happens when two calls on
+///   the same row land on opposite sides of [`SPLITK_MAX_TGS`]; the
+///   difference is f32 summation order, bounded by G5 (measured prob drift
+///   ≤ 7.5e-6 against the 1e-3 gate, top-1 unchanged on all 3 checkpoints).
+/// - Making EVERY instance fold at this slice length (the global
+///   bit-identity route) was built and measured: +18…+31% on the unsplit
+///   m ≥ 188 shapes (live slice accumulators — register pressure, not the
+///   fold arithmetic: KC 512 still cost +18%). Rejected.
+const SPLITK_KC: u32 = 128;
+
+/// Split-K eligibility ceiling in narrow threadgroups (pinned by the T11
+/// paired A/B, `tests/metal_splitk_ab.rs`). At 96 the seq-188 grids (96
+/// narrow TGs) LOSE while seq 140 gains only 1.4%; above the ceiling the
+/// dispatch is untouched.
+const SPLITK_MAX_TGS: u64 = 64;
+
 /// Widest operand list any `run` / `run_rows` kernel binds — the stack
 /// array that replaced the per-dispatch `Vec` (riir-reflex Issue 020 T2).
 /// Asserted at every call rather than assumed: a new kernel with a fifth
@@ -230,6 +256,33 @@ fn trace_enabled() -> bool {
     *ON.get_or_init(|| std::env::var("LAYA_METAL_TRACE").as_deref() == Ok("1"))
 }
 
+/// Opt-in per-dispatch GPU profile (`LAYA_METAL_PROFILE=1`, reflex issue
+/// 020 T11). MEASUREMENT ONLY: every dispatch gets its OWN command buffer,
+/// committed and waited, and its `GPUStartTime..GPUEndTime` is recorded
+/// under `(kernel, grid)`. That serializes the pass, so absolute wall is
+/// NOT the shipped wall — read the per-kernel SHARES. Off, it costs one
+/// cached bool per dispatch.
+fn profile_enabled() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var("LAYA_METAL_PROFILE").as_deref() == Ok("1"))
+}
+
+/// One profiled dispatch: kernel name, dispatch grid (w, h, d), GPU seconds.
+#[derive(Clone, Debug)]
+pub struct ProfileRow {
+    pub kernel: &'static str,
+    pub grid: (u64, u64, u64),
+    pub gpu_s: f64,
+}
+
+static PROFILE: Mutex<Vec<ProfileRow>> = Mutex::new(Vec::new());
+
+/// Drain the rows recorded since the last call (empty unless
+/// `LAYA_METAL_PROFILE=1`).
+pub fn profile_take() -> Vec<ProfileRow> {
+    std::mem::take(&mut *PROFILE.lock().expect("profile poison"))
+}
+
 /// Debug-trace instance id source (separates the per-checkpoint Metal
 /// instances in the miss log).
 fn next_trace_instance() -> usize {
@@ -241,6 +294,8 @@ const KERNELS: &[&str] = &[
     "sgemm",
     "sgemm_wide",
     "sgemm_xwide",
+    "sgemm_splitk",
+    "splitk_reduce",
     "attn_rope",
     "flash_attn",
     "add",
@@ -680,6 +735,121 @@ kernel void sgemm(
             if (gr < m && gc1 < n) { C[gr * n + gc1] = edge[sg * 128u + 64u + e]; }
         }
     }
+}
+"#;
+
+/// Split-K narrow instance (reflex issue 020 T11): the narrow body over ONE
+/// k-slice `[z·kc, min(k, z·kc + kc))` per `grid.z`, writing its partial
+/// product into `part + z·m·n` (row stride n); `splitk_reduce` then sums the
+/// slices in ascending z. At small m the narrow grid is ⌈n/64⌉·⌈m/32⌉
+/// threadgroups — 32 for the d×d projections at m ≤ 64, under one per core
+/// on a 40-core part — and each walks the WHOLE k alone; slicing k
+/// multiplies the grid without touching the tile math. Batch-1 only
+/// (grid.z is the slice). The host always passes `kc =` [`SPLITK_KC`], so a
+/// split result is a function of its own row alone (see that constant for
+/// what is, and is not, bit-identical).
+const MSL_SGEMM_SPLITK: &str = r#"
+kernel void sgemm_splitk(
+    device const float* a [[buffer(0)]],
+    device const float* b [[buffer(1)]],
+    device float* part [[buffer(2)]],
+    constant uint& m [[buffer(3)]],
+    constant uint& n [[buffer(4)]],
+    constant uint& k [[buffer(5)]],
+    constant uint& a_rs [[buffer(6)]],
+    constant uint& a_cs [[buffer(7)]],
+    constant uint& b_rs [[buffer(8)]],
+    constant uint& b_cs [[buffer(9)]],
+    constant uint& kc [[buffer(10)]],
+    threadgroup float* raw [[threadgroup(13)]],
+    uint3 gtp [[threadgroup_position_in_grid]],
+    uint lid [[thread_index_in_threadgroup]])
+{
+    threadgroup float* ta = raw;
+    threadgroup float* tb = raw + 32u * TAS;
+    threadgroup float* edge = raw;
+    const uint m0 = gtp.y * BM;
+    const uint n0 = gtp.x * BN;
+    const uint k0 = gtp.z * kc;
+    const uint k1 = min(k, k0 + kc);
+    device const float* A = a;
+    device const float* B = b;
+    device float* C = part + gtp.z * (m * n);
+
+    const uint sg = lid >> 5u;
+    const uint lane = lid & 31u;
+    const uint sgr = sg >> 2u;
+    const uint sgc = sg & 3u;
+
+    simdgroup_float8x8 acc0 = simdgroup_float8x8(0.0f);
+    simdgroup_float8x8 acc1 = simdgroup_float8x8(0.0f);
+
+    for (uint t = k0; t < k1; t += BK) {
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+        for (uint q = 0u; q < 4u; ++q) {
+            const uint idx = lid + q * 512u;
+            const uint r = idx >> 6u;
+            const uint c = idx & 63u;
+            const uint gr = m0 + r;
+            const uint ac = t + c;
+            ta[r * TAS + c] = (gr < m && ac < k1) ? A[gr * a_rs + ac * a_cs] : 0.0f;
+        }
+        for (uint q = 0u; q < 8u; ++q) {
+            const uint idx = lid + q * 512u;
+            const uint kk = idx >> 6u;
+            const uint col = idx & 63u;
+            const uint bc = t + kk;
+            if (b_cs == 1u) {
+                tb[kk * TBS + col] =
+                    (bc < k1 && n0 + col < n) ? B[bc * b_rs + n0 + col] : 0.0f;
+            } else {
+                tb[kk * TBS + col] =
+                    (bc < k1 && n0 + col < n) ? B[bc * b_rs + (n0 + col) * b_cs] : 0.0f;
+            }
+        }
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+        for (uint kk = 0u; kk < BK; kk += 8u) {
+            simdgroup_float8x8 fa, fb0, fb1;
+            simdgroup_load(fa, ta + sgr * 8u * TAS + kk, TAS);
+            simdgroup_load(fb0, tb + kk * TBS + sgc * 8u, TBS);
+            simdgroup_load(fb1, tb + kk * TBS + (sgc + 4u) * 8u, TBS);
+            simdgroup_multiply_accumulate(acc0, fa, fb0, acc0);
+            simdgroup_multiply_accumulate(acc1, fa, fb1, acc1);
+        }
+    }
+
+    if ((m0 + BM <= m) && (n0 + BN <= n)) {
+        simdgroup_store(acc0, C + (m0 + sgr * 8u) * n + (n0 + sgc * 8u), n);
+        simdgroup_store(acc1, C + (m0 + sgr * 8u) * n + (n0 + sgc * 8u + 4u * 8u), n);
+    } else {
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+        simdgroup_store(acc0, edge + sg * 128u, 8u);
+        simdgroup_store(acc1, edge + sg * 128u + 64u, 8u);
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+        for (uint q = 0u; q < 2u; ++q) {
+            const uint e = lane + q * 32u;
+            const uint er = e >> 3u;
+            const uint ec = e & 7u;
+            const uint gr = m0 + sgr * 8u + er;
+            const uint gc0 = n0 + sgc * 8u + ec;
+            const uint gc1 = gc0 + 4u * 8u;
+            if (gr < m && gc0 < n) { C[gr * n + gc0] = edge[sg * 128u + e]; }
+            if (gr < m && gc1 < n) { C[gr * n + gc1] = edge[sg * 128u + 64u + e]; }
+        }
+    }
+}
+
+// out[i] = Σ_z part[z·mn + i], z ascending (a fixed order — deterministic
+// run to run).
+kernel void splitk_reduce(device const float* part [[buffer(0)]],
+                          device float* out [[buffer(1)]],
+                          constant uint& mn [[buffer(2)]],
+                          constant uint& slices [[buffer(3)]],
+                          uint gid [[thread_position_in_grid]]) {
+    if (gid >= mn) { return; }
+    float acc = part[gid];
+    for (uint z = 1u; z < slices; ++z) { acc += part[z * mn + gid]; }
+    out[gid] = acc;
 }
 "#;
 
@@ -1177,6 +1347,9 @@ struct PendingPass {
 /// A resolved kernel: the pipeline plus its `thread_execution_width`, read
 /// ONCE at init. The width was previously fetched per dispatch — an ObjC
 /// property message on the elementwise hot path (riir-reflex Issue 020 T2).
+/// A chain-cache key: `(host ptr, len, epoch)`.
+type ChainKey = (usize, usize, u64);
+
 struct Kern {
     p: ComputePipelineState,
     width: u64,
@@ -1207,7 +1380,12 @@ pub struct Metal {
     /// bytes; within an epoch a hit's device copy is current because the
     /// forward bodies write every activation device-side before reading
     /// it (the write-first audit in the module doc).
-    chain: Mutex<HashMap<(usize, usize, u64), Buffer>>,
+    /// Each entry carries its last-TOUCH stamp ([`Metal::touch`]): the
+    /// sub-slice download resolves to the most recently touched buffer at
+    /// a base pointer, never the tightest container (see `download_into`).
+    chain: Mutex<HashMap<ChainKey, (Buffer, u64)>>,
+    /// Monotonic touch counter for the chain entries.
+    touch_seq: AtomicU64,
     /// Device-resident TRANSPOSED projection weights — `Wᵀ` as row-major
     /// `[k, n]`, keyed by the ORIGINAL `W` slice's `(ptr, len)`. Permanent,
     /// first-miss build, never invalidated (same contract as `weights`).
@@ -1247,6 +1425,22 @@ pub struct Metal {
     /// before `flash_attn` reads them (write-first dispatch pair, serial
     /// GPU ordering), and no later op reads rows ≥ seq.
     rope_scratch: Mutex<Option<(usize, usize, Buffer)>>,
+    /// Split-K (reflex issue 020 T11) — default ON; `LAYA_METAL_SPLITK=0`
+    /// is the kill-switch back to the plain narrow kernel. See
+    /// [`Metal::splitk_slices`] and [`SPLITK_KC`].
+    splitk: bool,
+    /// Split-K eligibility ceiling: only grids of at most this many narrow
+    /// threadgroups are sliced (`LAYA_METAL_SPLITK_MAXTGS`, default
+    /// [`SPLITK_MAX_TGS`]).
+    splitk_max_tgs: u64,
+    /// The split-K partial scratch (capacity in f32, buffer) — grown with
+    /// headroom, never shrunk; serial dispatch orders its reuse.
+    splitk_scratch: Mutex<Option<(usize, Buffer)>>,
+    /// Split-K GEMMs dispatched by this instance (the reach counter a test
+    /// asserts, so a split arm can never pass on the plain kernel).
+    splitk_count: AtomicU64,
+    /// The pass's row segmentation hint ([`Backend::set_row_segments`]).
+    row_segments: Mutex<Vec<u32>>,
     /// Debug-trace instance id.
     trace_id: usize,
 }
@@ -1261,7 +1455,7 @@ impl Metal {
         };
         let queue = device.new_command_queue();
         let msl = format!(
-            "{MSL_HEAD}{MSL_SGEMM_NARROW}{MSL_SGEMM_WIDE}{MSL_SGEMM_XWIDE}{MSL_FLASH}{MSL_ATTN_ROPE}{MSL_TAIL}"
+            "{MSL_HEAD}{MSL_SGEMM_NARROW}{MSL_SGEMM_SPLITK}{MSL_SGEMM_WIDE}{MSL_SGEMM_XWIDE}{MSL_FLASH}{MSL_ATTN_ROPE}{MSL_TAIL}"
         );
         let lib = device
             .new_library_with_source(&msl, &metal::CompileOptions::new())
@@ -1284,6 +1478,7 @@ impl Metal {
             weights: Mutex::new(HashMap::new()),
             weights_t: Mutex::new(HashMap::new()),
             chain: Mutex::new(HashMap::new()),
+            touch_seq: AtomicU64::new(0),
             pending: Mutex::new(PendingState::default()),
             epoch: AtomicU64::new(0),
             per_op_sync: std::env::var("LAYA_METAL_PER_OP_SYNC")
@@ -1293,8 +1488,31 @@ impl Metal {
             flash_disabled: std::env::var("LAYA_METAL_FLASH").as_deref() == Ok("0"),
             rope_hoist: std::env::var("LAYA_METAL_ROPE_HOIST").as_deref() == Ok("1"),
             rope_scratch: Mutex::new(None),
+            splitk: std::env::var("LAYA_METAL_SPLITK").as_deref() != Ok("0"),
+            splitk_max_tgs: std::env::var("LAYA_METAL_SPLITK_MAXTGS")
+                .ok()
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(SPLITK_MAX_TGS),
+            splitk_scratch: Mutex::new(None),
+            splitk_count: AtomicU64::new(0),
+            row_segments: Mutex::new(Vec::new()),
             trace_id: next_trace_instance(),
         })
+    }
+
+    /// [`Self::new`] with the split-K knobs set explicitly instead of from
+    /// `LAYA_METAL_SPLITK` / `LAYA_METAL_SPLITK_MAXTGS`
+    /// — the A/B and test seam; env is process-global, this is per instance.
+    pub fn with_splitk(on: bool, max_tgs: u64) -> Result<Self> {
+        let mut m = Self::new()?;
+        m.splitk = on;
+        m.splitk_max_tgs = max_tgs;
+        Ok(m)
+    }
+
+    /// Split-K GEMMs this instance has dispatched.
+    pub fn splitk_dispatches(&self) -> u64 {
+        self.splitk_count.load(Ordering::Relaxed)
     }
 
     fn upload(&self, data: &[f32]) -> Buffer {
@@ -1360,11 +1578,13 @@ impl Metal {
         let epoch = self.epoch.load(Ordering::Relaxed);
         let key = (data.as_ptr() as usize, data.len(), epoch);
         let mut map = self.chain.lock().expect("chain cache poison");
-        if let Some(b) = map.get(&key) {
+        let stamp = self.touch_seq.fetch_add(1, Ordering::Relaxed);
+        if let Some((b, t)) = map.get_mut(&key) {
+            *t = stamp;
             return b.clone();
         }
         let b = self.upload(data);
-        map.insert(key, b.clone());
+        map.insert(key, (b.clone(), stamp));
         if trace_enabled() {
             eprintln!(
                 "[trace] chain MISS inst {} ptr {:p} len {} epoch {epoch}",
@@ -1385,11 +1605,13 @@ impl Metal {
         let epoch = self.epoch.load(Ordering::Relaxed);
         let key = (dst.as_ptr() as usize, dst.len(), epoch);
         let mut map = self.chain.lock().expect("chain cache poison");
-        if let Some(b) = map.get(&key) {
+        let stamp = self.touch_seq.fetch_add(1, Ordering::Relaxed);
+        if let Some((b, t)) = map.get_mut(&key) {
+            *t = stamp;
             return b.clone();
         }
         let b = self.scratch(dst.len());
-        map.insert(key, b.clone());
+        map.insert(key, (b.clone(), stamp));
         b
     }
 
@@ -1531,6 +1753,32 @@ impl Metal {
                 enc.dispatch_threads(grid, tpg);
             }
             pending.encodes += 1;
+            if profile_enabled() {
+                let done = st.open.take().expect("checked above");
+                done.enc.end_encoding();
+                done.cb.commit();
+                done.cb.wait_until_completed();
+                let cb: &metal::CommandBufferRef = &done.cb;
+                // SAFETY: GPUStartTime/GPUEndTime are CFTimeInterval (f64)
+                // properties of a completed MTLCommandBuffer.
+                // The legacy `objc` macro probes `feature = "cargo-clippy"`.
+                #[allow(unexpected_cfgs)]
+                let (t0, t1): (f64, f64) = {
+                    use metal::objc::{msg_send, sel, sel_impl};
+                    unsafe { (msg_send![cb, GPUStartTime], msg_send![cb, GPUEndTime]) }
+                };
+                let kernel = self
+                    .pipelines
+                    .iter()
+                    .find(|(_, k)| std::ptr::eq(&*k.p, &**p))
+                    .map_or("?", |(n, _)| *n);
+                PROFILE.lock().expect("profile poison").push(ProfileRow {
+                    kernel,
+                    grid: (grid.width, grid.height, grid.depth),
+                    gpu_s: t1 - t0,
+                });
+                return;
+            }
             if pending.encodes >= MAX_ENCODERS_PER_CB {
                 let done = st.open.take().expect("checked above");
                 done.enc.end_encoding();
@@ -1669,6 +1917,101 @@ impl Metal {
         )
     }
 
+    /// Split-K slice count for a batch-1 narrow GEMM whose grid is
+    /// `narrow_tgs` threadgroups (reflex issue 020 T11). `None` = run the
+    /// plain narrow kernel: split-K is off, the grid is over the ceiling
+    /// ([`SPLITK_MAX_TGS`]), or k holds fewer than two [`SPLITK_KC`]
+    /// slices. The slice length is FIXED — never a function of m.
+    fn splitk_slices(&self, narrow_tgs: u64, k: u32) -> Option<u32> {
+        if !self.splitk || narrow_tgs > self.splitk_max_tgs {
+            return None;
+        }
+        let slices = k.div_ceil(SPLITK_KC);
+        (slices >= 2).then_some(slices)
+    }
+
+    /// The split-K partial scratch, grown to hold `need` f32 (half again
+    /// as headroom so a suite's per-question m spread does not churn it).
+    fn splitk_buf(&self, need: usize) -> Buffer {
+        let mut g = self.splitk_scratch.lock().expect("splitk scratch poison");
+        if let Some((cap, b)) = g.as_ref()
+            && *cap >= need
+        {
+            return b.clone();
+        }
+        let cap = need + need / 2;
+        let b = self.scratch(cap);
+        *g = Some((cap, b.clone()));
+        b
+    }
+
+    /// Split-K narrow GEMM: `slices` k-slices of `kc` into the partial
+    /// scratch, then the fixed-order reduce into `out`. Same `uargs` layout
+    /// as [`Self::run_sgemm`] (the batch strides are unused — batch 1).
+    #[allow(clippy::too_many_arguments)]
+    fn run_sgemm_splitk(
+        &self,
+        a: (&Buffer, u64),
+        b: (&Buffer, u64),
+        out: (&Buffer, u64),
+        uargs: &[u32; 10],
+        m: u32,
+        n: u32,
+        slices: u32,
+        kc: u32,
+    ) -> Result<()> {
+        self.splitk_count.fetch_add(1, Ordering::Relaxed);
+        let mn = m as usize * n as usize;
+        let part = self.splitk_buf(mn * slices as usize);
+        let kern = self
+            .pipelines
+            .get("sgemm_splitk")
+            .ok_or_else(|| rt("kernel sgemm_splitk missing"))?;
+        self.encode(
+            &kern.p,
+            &[a, b, (&part, 0)],
+            &[
+                uargs[0], uargs[1], uargs[2], uargs[3], uargs[4], uargs[5], uargs[6], kc,
+            ],
+            &[],
+            MTLSize {
+                width: u64::from(n.div_ceil(64)),
+                height: u64::from(m).div_ceil(32),
+                depth: u64::from(slices),
+            },
+            MTLSize {
+                width: NARROW_THREADS,
+                height: 1,
+                depth: 1,
+            },
+            Some(&[(13, NARROW_STAGING_BYTES)]),
+            true,
+        )?;
+        let red = self
+            .pipelines
+            .get("splitk_reduce")
+            .ok_or_else(|| rt("kernel splitk_reduce missing"))?;
+        let width = red.width;
+        self.encode(
+            &red.p,
+            &[(&part, 0), out],
+            &[mn as u32, slices],
+            &[],
+            MTLSize {
+                width: (mn as u64).div_ceil(width) * width,
+                height: 1,
+                depth: 1,
+            },
+            MTLSize {
+                width,
+                height: 1,
+                depth: 1,
+            },
+            None,
+            false,
+        )
+    }
+
     /// The batched simdgroup GEMM dispatch: grid = (⌈n/BN⌉, ⌈m/BM⌉, batch),
     /// the instance picked by the single-wave BAND rule (see
     /// [`WAVE_TG_LIMIT`]): xwide only inside the band (grid mostly-fills but
@@ -1688,24 +2031,108 @@ impl Metal {
         n: u32,
         batch: u32,
     ) -> Result<()> {
+        if batch != 1 {
+            return self.run_sgemm_one(a, b, out, uargs, m, n, batch, false);
+        }
+        let plan = self.split_plan(m, n, uargs[2]);
+        if let [(_, _, split)] = plan.as_slice() {
+            return self.run_sgemm_one(a, b, out, uargs, m, n, 1, *split);
+        }
+        // Mixed decisions across a packed pass's rows: one dispatch per run
+        // of equal decisions, at row offsets (A row stride `a_rs`, C row
+        // stride n). Every instance is row-local, so each row gets exactly
+        // the bits the per-question loop gives it.
+        for (row0, rows, split) in plan {
+            let a_at = (a.0, a.1 + u64::from(row0) * u64::from(uargs[3]) * 4);
+            let o_at = (out.0, out.1 + u64::from(row0) * u64::from(n) * 4);
+            let mut u = *uargs;
+            u[0] = rows;
+            self.run_sgemm_one(a_at, b, o_at, &u, rows, n, 1, split)?;
+        }
+        Ok(())
+    }
+
+    /// The per-row split-K plan for a batch-1 GEMM of `m` rows: runs of
+    /// `(row0, rows, split)`. Decided PER SEGMENT of the pass's row
+    /// segmentation ([`Backend::set_row_segments`] — the packed forward's
+    /// per-question seqs; one segment `[m]` otherwise, or when the hint does
+    /// not describe this call), with the loop's own rule for a segment of
+    /// that many rows — so a packed row takes the kernel the per-question
+    /// loop takes for it, and the two paths stay bit-identical.
+    fn split_plan(&self, m: u32, n: u32, k: u32) -> Vec<(u32, u32, bool)> {
+        let segs = self.row_segments.lock().expect("row segments poison");
+        let hinted =
+            segs.len() > 1 && segs.iter().map(|&r| u64::from(r)).sum::<u64>() == u64::from(m);
+        let min_m: u32 = std::env::var("DBG_SPLITK_MINM")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(0);
+        let decide = |rows: u32| {
+            if rows < min_m {
+                return false;
+            }
+            let narrow_tgs = u64::from(n.div_ceil(64)) * u64::from(rows).div_ceil(32);
+            self.splitk_slices(narrow_tgs, k).is_some()
+        };
+        if !hinted {
+            return vec![(0, m, decide(m))];
+        }
+        let mut plan: Vec<(u32, u32, bool)> = Vec::with_capacity(segs.len());
+        let mut row0 = 0u32;
+        for &rows in segs.iter() {
+            let split = decide(rows);
+            match plan.last_mut() {
+                Some(last) if last.2 == split => last.1 += rows,
+                _ => plan.push((row0, rows, split)),
+            }
+            row0 += rows;
+        }
+        plan
+    }
+
+    /// One GEMM dispatch with the split decision already made: split-K when
+    /// `split`, else the instance the single-wave band picks (every unsplit
+    /// instance is result-identical, so that pick never changes bits).
+    #[allow(clippy::too_many_arguments)]
+    fn run_sgemm_one(
+        &self,
+        a: (&Buffer, u64),
+        b: (&Buffer, u64),
+        out: (&Buffer, u64),
+        uargs: &[u32; 10],
+        m: u32,
+        n: u32,
+        batch: u32,
+        split: bool,
+    ) -> Result<()> {
+        if split {
+            return self.run_sgemm_splitk(
+                a,
+                b,
+                out,
+                uargs,
+                m,
+                n,
+                uargs[2].div_ceil(SPLITK_KC),
+                SPLITK_KC,
+            );
+        }
         let rows = u64::from(m).div_ceil(64);
         let cols = u64::from(n).div_ceil(128);
         let tgs = rows * cols * u64::from(batch);
         let k = uargs[2]; // uargs = [m, n, k, …] — see the doc above
-        let (name, bm, bn, staging, threads) = if tgs > WAVE_TG_FLOOR
-            && tgs <= WAVE_TG_LIMIT
-            && k >= XWAVE_K_MIN
-        {
-            (
-                "sgemm_xwide",
-                64u64,
-                128u64,
-                XWIDE_STAGING_BYTES,
-                XWIDE_THREADS,
-            )
-        } else {
-            ("sgemm", 32, 64, NARROW_STAGING_BYTES, NARROW_THREADS)
-        };
+        let (name, bm, bn, staging, threads) =
+            if tgs > WAVE_TG_FLOOR && tgs <= WAVE_TG_LIMIT && k >= XWAVE_K_MIN {
+                (
+                    "sgemm_xwide",
+                    64u64,
+                    128u64,
+                    XWIDE_STAGING_BYTES,
+                    XWIDE_THREADS,
+                )
+            } else {
+                ("sgemm", 32, 64, NARROW_STAGING_BYTES, NARROW_THREADS)
+            };
         let k = self
             .pipelines
             .get(name)
@@ -1746,6 +2173,12 @@ impl Metal {
 impl Backend for Metal {
     fn name(&self) -> &'static str {
         "metal"
+    }
+
+    fn set_row_segments(&self, segs: &[usize]) {
+        let mut g = self.row_segments.lock().expect("row segments poison");
+        g.clear();
+        g.extend(segs.iter().map(|&r| r as u32));
     }
 
     fn matmul(
@@ -2389,24 +2822,44 @@ impl Backend for Metal {
         let map = self.chain.lock().expect("chain cache poison");
         // The src may be a PREFIX of the written buffer (the CLS row is the
         // leading d of the whole hidden slot), so match by base pointer and
-        // sufficient extent. The resolution must be DETERMINISTIC: within
-        // one epoch several keys can share a base pointer (a forward's
-        // scratch frees its host Vecs mid-case while their keys stay in the
-        // map, and a later allocation reuses the address), so the pick is
-        // newest epoch FIRST, then the TIGHTEST container — the smallest
-        // extent that still covers src. A tie on epoch alone would fall
-        // through to HashMap iteration order, which is randomized per
-        // process, and serve the wrong buffer's bytes (measured: the packed
-        // path's CLS row read a dead encoder-scratch key holding the raw
-        // token-embedding row — act head saturated the wrong way, flaky by
-        // RandomState).
-        let slot = map
+        // sufficient extent. Within one epoch several keys can share a base
+        // pointer (a forward's scratch frees its host Vecs mid-case while
+        // their keys stay in the map, and a later allocation reuses the
+        // address), so the pick is newest epoch, then the most recently
+        // TOUCHED entry — the buffer the program last produced or consumed
+        // at that address. A dead key is by definition untouched since its
+        // Vec died. The previous rule, the TIGHTEST container, picked a dead
+        // key whenever one was tighter than the live buffer: reflex issue
+        // 020 T11 measured it as the packed path's CLS row served from a
+        // dead encoder-scratch key (act head [0.59, 0.43] vs the loop's
+        // [1.0, 0.0], 7/30 processes — a heap-layout lottery the split-K
+        // dispatch happened to win; its own earlier fix, from HashMap order
+        // to tightest, was the same class one tie-break over).
+        let cands: Vec<_> = map
             .iter()
             .filter(|(k, _)| k.0 == ptr && k.1 >= src.len())
-            .max_by(|a, b| {
-                a.0 .2.cmp(&b.0 .2).then_with(|| b.0 .1.cmp(&a.0 .1))
-            })
-            .map(|(_, b)| b.clone());
+            .collect();
+        if trace_enabled() && cands.len() > 1 {
+            let tight = cands
+                .iter()
+                .max_by(|a, b| a.0.2.cmp(&b.0.2).then_with(|| b.0.1.cmp(&a.0.1)))
+                .map(|(k, _)| **k);
+            let recent = cands
+                .iter()
+                .max_by(|a, b| a.0.2.cmp(&b.0.2).then_with(|| a.1.1.cmp(&b.1.1)))
+                .map(|(k, _)| **k);
+            if tight != recent {
+                eprintln!(
+                    "[trace] download_into {:p}: tightest {tight:?} ≠ most-recent {recent:?} ({} candidates)",
+                    src.as_ptr(),
+                    cands.len()
+                );
+            }
+        }
+        let slot = cands
+            .iter()
+            .max_by(|a, b| a.0.2.cmp(&b.0.2).then_with(|| a.1.1.cmp(&b.1.1)))
+            .map(|(_, (b, _))| b.clone());
         let Some(b) = slot else {
             panic!(
                 "download_into: no device buffer for this slice — host reads \
