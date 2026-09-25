@@ -1,6 +1,6 @@
 # Bench 003 — row-logit floor on real attention rows: ppl, sink A/B, needle (Issue 011 T2/T3/T4)
 
-**Status:** IN PROGRESS (2026-09-25) · T2 + T4 measured; T3 gemma proxy and MiniCPM5 16K runs measuring · bin: `src/bin/row_logit_floor_ppl.rs` (feature `row_logit_floor`) · primitive: katgpt-core `row_logit_floor` (katgpt-rs Bench 888)
+**Status:** IN PROGRESS (2026-09-25) · T2 + T4 measured; T3a (gemma 64K-width proxy) + T3b (MiniCPM5 16K) done; T3c (MiniCPM5 64K) measuring · bin: `src/bin/row_logit_floor_ppl.rs` (feature `row_logit_floor`) · primitive: katgpt-core `row_logit_floor` (katgpt-rs Bench 888)
 
 ## What this measures
 
@@ -127,6 +127,51 @@ L12 (0.35), and are ≈ 0 at L0, L2 and L25.
   gemma-2 is 8K with a 4K SWA, so the true T3 needs a long-context
   fixture.
 
-### T3b — MiniCPM5-1B at 16K (`--decode-floor`)
+### T3b — MiniCPM5-1B at 16K (`--decode-floor`) (DONE)
 
-_Measuring._
+This is the first run with real long-context dilution: 16K live keys under
+every scored row, on a 131K-context llama-arch model (f32, GQA 16/2, no
+softcap). It uses 3 passkey prompts × 16384 tokens and 12 scored answer
+tokens. `--decode-floor true` runs the 49 137 prompt rows **once, dense**,
+and shares them across arms. Each arm floors only the scored rows, which is
+the decode-time low-bit consumer (its prompt KV is dense). So the arms
+measure the floor on the retrieval rows. They do **not** measure error
+compounding through a floored prefix. Log: `/tmp/ri011run/t5_minicpm16k.log`.
+Window 04:24–05:19 (+0700), load 18 → 21, 12.2 GB free at launch, power
+source not recorded. The dense prefix ran at 14.96 tok/s.
+
+| arm | answer ppl | Δ | mean \|ΔNLL\| | top-1 flip | seq-exact | mean env TV | floored | mean w |
+|---|---|---|---|---|---|---|---|---|
+| base | 1.1051 | — | — | — | 3/3 | — | — | — |
+| b8 | 1.1051 | +0.000% | 0.00026 | 0.00% | 3/3 | 0.0339 | 8.875% | 16.61 |
+| b6 | 1.1026 | −0.232% | 0.00257 | 0.00% | 3/3 | 0.1537 | 8.885% | 16.61 |
+| b6s0 | 1.1049 | −0.017% | 0.00091 | 0.00% | 3/3 | 0.1537 | 11.692% | 16.61 |
+| b6n65536 | 1.1067 | +0.145% | 0.00241 | 0.00% | 3/3 | 0.1684 | 4.913% | 18.00 |
+| b4 | 1.1086 | +0.319% | 0.00613 | 0.00% | 3/3 | 1.1379 | 9.009% | 16.61 |
+
+m_Y (all 24 × 16 heads): base 0.1204, top head L10H1 0.917. b8, b6, b6s0
+and b6n65536 all stay within 0.0001 of base, with the same top head.
+**b4** moves it to 0.1219 and the top head switches to L15H7 (0.923).
+
+- **Retrieval holds at 16K for every arm**, b4 included: 3/3 exact and 0
+  flips over 12 tokens.
+- **The floor term grows with n, as `A ≤ n·e^{−w}` predicts.** The floored
+  fraction is 8.9% here against 3.8% on gemma-2 rows of ≤ 1K. The
+  tv-budget width (16.61 nats at 16K) keeps the envelope bounded.
+  `n65536` widens every row to 18 nats and floors about half as many keys
+  (4.9%), which is the trade the T3 bullet names.
+- **b4 perturbs attention even while retrieval survives.** It is the only
+  arm that moves m_Y or the top head. This agrees with T2, where b4 flipped
+  4.32% of ppl tokens. 6-bit is the floor for admissibility.
+- ⚠ **Power: n = 12 tokens over 3 prompts.** Every Δppl sign is noise at
+  this size: b6 reads *better* than base, and b6s0's |ΔNLL| is below b6.
+  This row can show that retrieval did not break. It cannot rank arms, and
+  it cannot resolve a sub-percent retrieval regression.
+- 16K is not the 64K bar. T3c runs the same fixture at 64K.
+
+### T3c — MiniCPM5-1B at 64K (`--decode-floor`)
+
+_Measuring_ (launched 2026-09-25 20:28 +0700, M3 on AC, loadavg ~6.7, 91%
+memory free, same binary `b615672`; the llama forward is unchanged through
+`9c2d9f6`). Arms: base, b8, b6, b6s0, b4. `n65536` is omitted because it
+equals the per-row width at 64K.
