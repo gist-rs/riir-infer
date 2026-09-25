@@ -372,6 +372,8 @@ const KERNELS: &[&str] = &[
     "sgemm_xwide",
     "sgemm_splitk",
     "splitk_reduce",
+    "splitk_reduce_add",
+    "splitk_reduce_glu",
     "attn_rope",
     "flash_attn",
     "add",
@@ -927,6 +929,55 @@ kernel void splitk_reduce(device const float* part [[buffer(0)]],
     float acc = part[gid];
     for (uint z = 1u; z < slices; ++z) { acc += part[z * mn + gid]; }
     out[gid] = acc;
+}
+
+// The residual-fold epilogue (reflex issue 020 T11, the last open rung):
+// the split reduce and the encoder's residual add in ONE kernel —
+// out[gid] = (Σ slices) + res[gid]. Bit-identical to the pair it replaces
+// (the same k-ascending slice chain, then one add; IEEE addition
+// commutes), so the fold removes a full m·n staging write+read and the
+// add dispatch without touching a bit. out may alias res: each thread
+// reads only res[gid] before writing out[gid], and no other thread
+// touches that element.
+kernel void splitk_reduce_add(device const float* part [[buffer(0)]],
+                              device const float* res [[buffer(1)]],
+                              device float* out [[buffer(2)]],
+                              constant uint& mn [[buffer(3)]],
+                              constant uint& slices [[buffer(4)]],
+                              uint gid [[thread_position_in_grid]]) {
+    if (gid >= mn) { return; }
+    float acc = part[gid];
+    for (uint z = 1u; z < slices; ++z) { acc += part[z * mn + gid]; }
+    out[gid] = acc + res[gid];
+}
+
+// The GLU-fold epilogue: the MLP-up projection's split reduce and the
+// `glu_gelu_gate` activation in ONE kernel. Output element (r, j) carries
+// TWO chains — the activation half (fused[r, j]) and the gate half
+// (fused[r, I + j]) — each summed over z ascending exactly as
+// `splitk_reduce` sums it, then the glu kernel's own expression order
+// (gelu_as(act) * gate). Bit-identical to reduce + glu_gelu_gate by
+// construction; the fused [rows × 2i] staging never exists.
+kernel void splitk_reduce_glu(device const float* part [[buffer(0)]],
+                              device float* out [[buffer(1)]],
+                              constant uint& rows [[buffer(2)]],
+                              constant uint& i_sz [[buffer(3)]],
+                              constant uint& n [[buffer(4)]],
+                              constant uint& slices [[buffer(5)]],
+                              uint gid [[thread_position_in_grid]]) {
+    if (gid >= rows * i_sz) { return; }
+    const uint r = gid / i_sz;
+    const uint j = gid % i_sz;
+    const uint mn = rows * n;
+    const uint act_idx = r * n + j;
+    const uint gate_idx = r * n + i_sz + j;
+    float acc_act = part[act_idx];
+    float acc_gate = part[gate_idx];
+    for (uint z = 1u; z < slices; ++z) {
+        acc_act += part[z * mn + act_idx];
+        acc_gate += part[z * mn + gate_idx];
+    }
+    out[gid] = gelu_as(acc_act) * acc_gate;
 }
 "#;
 
@@ -1562,12 +1613,40 @@ pub struct Metal {
     /// LayerNorm through `ln_rows_wide` (reflex issue 020 T11) — default ON;
     /// `LAYA_METAL_LN_WIDE=0` restores the one-simdgroup `ln_rows`.
     ln_wide: bool,
+    /// The fold rungs (reflex issue 020 T11, the last open lever — default
+    /// OFF until the quiet-box paired A/B promotes them; the same posture
+    /// the rope hoist landed at):
+    /// - `fold_res` (`LAYA_METAL_FOLD_RES=1`): the encoder's two residual
+    ///   adds ride the split-K reduce (`splitk_reduce_add`) when the whole
+    ///   call splits — one kernel instead of reduce + staging + add.
+    /// - `fold_glu` (`LAYA_METAL_FOLD_GLU=1`): the MLP-up projection's
+    ///   reduce applies the GLU gate directly (`splitk_reduce_glu`) — the
+    ///   fused `[m × 2i]` staging round-trip never happens.
+    ///
+    /// Both arms are bit-identical to the streams they replace by
+    /// construction (same slice chains, the epilogue kernels' own
+    /// expression order); the knob-off arm runs the unfused stream on a
+    /// dedicated grow-only staging buffer so it stays HEAD's allocation
+    /// posture, never a per-call alloc.
+    fold_res: bool,
+    fold_glu: bool,
+    /// The fold fallback's GEMM staging (the encoder's retired
+    /// `attn_out`/`fused` scratch role): capacity in f32 + buffer,
+    /// grow-only with headroom, never shrunk; serial dispatch orders its
+    /// reuse. Deliberately NOT shared with [`Self::splitk_scratch`]: a
+    /// mixed plan's split runs use that buffer as their part slab in the
+    /// same dispatch stream while the fallback stages into this one.
+    fold_stage_scratch: Mutex<Option<(usize, Buffer)>>,
     /// The split-K partial scratch (capacity in f32, buffer) — grown with
     /// headroom, never shrunk; serial dispatch orders its reuse.
     splitk_scratch: Mutex<Option<(usize, Buffer)>>,
     /// Split-K GEMMs dispatched by this instance (the reach counter a test
     /// asserts, so a split arm can never pass on the plain kernel).
     splitk_count: AtomicU64,
+    /// FOLD epilogues dispatched (`splitk_reduce_add` / `splitk_reduce_glu`)
+    /// — the fold arm's reach counter, same law as [`Self::splitk_count`]:
+    /// a fold arm must never pass on the unfused stream.
+    fold_count: AtomicU64,
     /// The pass's row segmentation hint ([`Backend::set_row_segments`]).
     row_segments: Mutex<Vec<u32>>,
     /// Debug-trace instance id.
@@ -1618,6 +1697,9 @@ impl Metal {
             rope_hoist: std::env::var("LAYA_METAL_ROPE_HOIST").as_deref() == Ok("1"),
             rope_scratch: Mutex::new(None),
             ln_wide: std::env::var("LAYA_METAL_LN_WIDE").as_deref() != Ok("0"),
+            fold_res: std::env::var("LAYA_METAL_FOLD_RES").as_deref() == Ok("1"),
+            fold_glu: std::env::var("LAYA_METAL_FOLD_GLU").as_deref() == Ok("1"),
+            fold_stage_scratch: Mutex::new(None),
             split_rule: SplitRule {
                 on: std::env::var("LAYA_METAL_SPLITK").as_deref() != Ok("0"),
                 max_tgs: std::env::var("LAYA_METAL_SPLITK_MAXTGS")
@@ -1628,6 +1710,7 @@ impl Metal {
             },
             splitk_scratch: Mutex::new(None),
             splitk_count: AtomicU64::new(0),
+            fold_count: AtomicU64::new(0),
             row_segments: Mutex::new(Vec::new()),
             trace_id: next_trace_instance(),
         })
@@ -1659,9 +1742,24 @@ impl Metal {
         self
     }
 
+    /// Builder: the fold rungs' A/B seam — set both knobs explicitly
+    /// instead of from `LAYA_METAL_FOLD_RES` / `LAYA_METAL_FOLD_GLU` (env
+    /// is process-global, this is per instance).
+    pub fn with_folds(mut self, res: bool, glu: bool) -> Self {
+        self.fold_res = res;
+        self.fold_glu = glu;
+        self
+    }
+
     /// Split-K GEMMs this instance has dispatched.
     pub fn splitk_dispatches(&self) -> u64 {
         self.splitk_count.load(Ordering::Relaxed)
+    }
+
+    /// Fold epilogues (`splitk_reduce_add` + `splitk_reduce_glu`) this
+    /// instance has dispatched — the fold arm's reach counter.
+    pub fn fold_dispatches(&self) -> u64 {
+        self.fold_count.load(Ordering::Relaxed)
     }
 
     fn upload(&self, data: &[f32]) -> Buffer {
@@ -2090,6 +2188,102 @@ impl Metal {
         b
     }
 
+    /// The fold fallback's GEMM staging — the same grow-only shape as
+    /// [`Self::splitk_buf`], but a separate buffer: within one dispatch
+    /// stream a mixed plan's split runs take `splitk_buf` as their part
+    /// slab while the fallback stages here, so sharing one would corrupt
+    /// the other's rows.
+    fn fold_stage_buf(&self, need: usize) -> Buffer {
+        let mut g = self
+            .fold_stage_scratch
+            .lock()
+            .expect("fold stage scratch poison");
+        if let Some((cap, b)) = g.as_ref()
+            && *cap >= need
+        {
+            return b.clone();
+        }
+        let cap = need + need / 2;
+        let b = self.scratch(cap);
+        *g = Some((cap, b.clone()));
+        b
+    }
+
+    /// The unfused stream the fold replaces (and its mixed-plan fallback):
+    /// GEMM into the instance's own staging buffer, then the add — today's
+    /// op sequence with `fold_stage_buf` in the encoder's retired
+    /// `attn_out` scratch role, so the control arm keeps HEAD's allocation
+    /// posture (one grow-only buffer, never a per-call alloc).
+    fn matmul_w_then_add(&self, a: &[f32], m: usize, k: usize, w: &[f32], n: usize, x: &mut [f32]) {
+        let ab = self.chain_buf(a);
+        let wb = self.weight_t_buf(w, n, k);
+        let stage = self.fold_stage_buf(m * n);
+        self.run_sgemm(
+            (&ab, 0),
+            (&wb, 0),
+            (&stage, 0),
+            &[
+                m as u32, n as u32, k as u32, k as u32, // a_rs
+                1,        // a_cs
+                n as u32, // b_rs — Wᵀ row-major [k, n]
+                1,        // b_cs
+                0, 0, 0,
+            ],
+            m as u32,
+            n as u32,
+            1,
+        )
+        .unwrap_or_else(|e| panic!("{e}"));
+        let xb = self.chain_buf(x);
+        let len = m * n;
+        self.run_at("add", (&xb, 0), (&stage, 0), &[len as u32], &[], len as u64)
+            .unwrap_or_else(|e| panic!("{e}"));
+        self.debug_writeback(&xb, x);
+    }
+
+    /// [`Self::matmul_w_then_add`]'s GLU twin: GEMM into staging, then the
+    /// gate kernel — the unfused stream, same allocation posture.
+    fn matmul_w_then_glu(
+        &self,
+        a: &[f32],
+        m: usize,
+        k: usize,
+        w: &[f32],
+        i_sz: usize,
+        act: &mut [f32],
+    ) {
+        let n = i_sz * 2;
+        let ab = self.chain_buf(a);
+        let wb = self.weight_t_buf(w, n, k);
+        let stage = self.fold_stage_buf(m * n);
+        self.run_sgemm(
+            (&ab, 0),
+            (&wb, 0),
+            (&stage, 0),
+            &[
+                m as u32, n as u32, k as u32, k as u32, // a_rs
+                1,        // a_cs
+                n as u32, // b_rs — Wᵀ row-major [k, n]
+                1,        // b_cs
+                0, 0, 0,
+            ],
+            m as u32,
+            n as u32,
+            1,
+        )
+        .unwrap_or_else(|e| panic!("{e}"));
+        let ob = self.chain_slot_for(act);
+        self.run(
+            "glu_gelu_gate",
+            &[&stage, &ob],
+            &[m as u32, i_sz as u32],
+            &[],
+            (m * i_sz) as u64,
+        )
+        .unwrap_or_else(|e| panic!("{e}"));
+        self.debug_writeback(&ob, act);
+    }
+
     /// Split-K narrow GEMM: `slices` k-slices of `kc` into the partial
     /// scratch, then the fixed-order reduce into `out`. Same `uargs` layout
     /// as [`Self::run_sgemm`] (the batch strides are unused — batch 1).
@@ -2105,6 +2299,134 @@ impl Metal {
         slices: u32,
         kc: u32,
     ) -> Result<()> {
+        let (part, mn) = self.sgemm_splitk_parts(a, b, uargs, m, n, slices, kc)?;
+        let red = self
+            .pipelines
+            .get("splitk_reduce")
+            .ok_or_else(|| rt("kernel splitk_reduce missing"))?;
+        let width = red.width;
+        self.encode(
+            &red.p,
+            &[(&part, 0), out],
+            &[mn as u32, slices],
+            &[],
+            MTLSize {
+                width: (mn as u64).div_ceil(width) * width,
+                height: 1,
+                depth: 1,
+            },
+            MTLSize {
+                width,
+                height: 1,
+                depth: 1,
+            },
+            None,
+            false,
+        )
+    }
+
+    /// Split-K narrow GEMM with the RESIDUAL FOLD epilogue
+    /// (`splitk_reduce_add`): out = (Σ slices) + res, one kernel instead
+    /// of reduce + staging + add (reflex issue 020 T11). `out` and `res`
+    /// are the same device slot (the encoder's residual stream — the
+    /// buffer must be device-current; the encoder's LayerNorm always
+    /// makes it so this epoch).
+    #[allow(clippy::too_many_arguments)]
+    fn run_sgemm_splitk_accum(
+        &self,
+        a: (&Buffer, u64),
+        b: (&Buffer, u64),
+        out_res: (&Buffer, u64),
+        uargs: &[u32; 10],
+        m: u32,
+        n: u32,
+        slices: u32,
+        kc: u32,
+    ) -> Result<()> {
+        let (part, mn) = self.sgemm_splitk_parts(a, b, uargs, m, n, slices, kc)?;
+        let red = self
+            .pipelines
+            .get("splitk_reduce_add")
+            .ok_or_else(|| rt("kernel splitk_reduce_add missing"))?;
+        let width = red.width;
+        self.encode(
+            &red.p,
+            &[(&part, 0), out_res, out_res],
+            &[mn as u32, slices],
+            &[],
+            MTLSize {
+                width: (mn as u64).div_ceil(width) * width,
+                height: 1,
+                depth: 1,
+            },
+            MTLSize {
+                width,
+                height: 1,
+                depth: 1,
+            },
+            None,
+            false,
+        )
+    }
+
+    /// Split-K narrow GEMM with the GLU FOLD epilogue
+    /// (`splitk_reduce_glu`): the activation-half and gate-half chains are
+    /// both reduced in-kernel and the gate applied directly to `act` — the
+    /// fused `[m × 2·i]` staging never exists (reflex issue 020 T11).
+    #[allow(clippy::too_many_arguments)]
+    fn run_sgemm_splitk_glu(
+        &self,
+        a: (&Buffer, u64),
+        b: (&Buffer, u64),
+        act: (&Buffer, u64),
+        uargs: &[u32; 10],
+        m: u32,
+        i_sz: u32,
+        slices: u32,
+        kc: u32,
+    ) -> Result<()> {
+        let n = i_sz * 2;
+        let (part, _mn) = self.sgemm_splitk_parts(a, b, uargs, m, n, slices, kc)?;
+        let red = self
+            .pipelines
+            .get("splitk_reduce_glu")
+            .ok_or_else(|| rt("kernel splitk_reduce_glu missing"))?;
+        let width = red.width;
+        let out_len = m as usize * i_sz as usize;
+        self.encode(
+            &red.p,
+            &[(&part, 0), act],
+            &[m, i_sz, n, slices],
+            &[],
+            MTLSize {
+                width: (out_len as u64).div_ceil(width) * width,
+                height: 1,
+                depth: 1,
+            },
+            MTLSize {
+                width,
+                height: 1,
+                depth: 1,
+            },
+            None,
+            false,
+        )
+    }
+
+    /// The split-K PART dispatch shared by every epilogue: `slices`
+    /// k-slices of `kc` into the partial scratch; returns the part buffer
+    /// and the per-slice element count `m·n`.
+    #[allow(clippy::too_many_arguments)]
+    fn sgemm_splitk_parts(
+        &self,
+        a: (&Buffer, u64),
+        b: (&Buffer, u64),
+        uargs: &[u32; 10],
+        m: u32,
+        n: u32,
+        slices: u32,
+        kc: u32,
+    ) -> Result<(Buffer, usize)> {
         self.splitk_count.fetch_add(1, Ordering::Relaxed);
         let mn = m as usize * n as usize;
         let part = self.splitk_buf(mn * slices as usize);
@@ -2132,29 +2454,7 @@ impl Metal {
             Some(&[(13, NARROW_STAGING_BYTES)]),
             true,
         )?;
-        let red = self
-            .pipelines
-            .get("splitk_reduce")
-            .ok_or_else(|| rt("kernel splitk_reduce missing"))?;
-        let width = red.width;
-        self.encode(
-            &red.p,
-            &[(&part, 0), out],
-            &[mn as u32, slices],
-            &[],
-            MTLSize {
-                width: (mn as u64).div_ceil(width) * width,
-                height: 1,
-                depth: 1,
-            },
-            MTLSize {
-                width,
-                height: 1,
-                depth: 1,
-            },
-            None,
-            false,
-        )
+        Ok((part, mn))
     }
 
     /// The batched simdgroup GEMM dispatch: grid = (⌈n/BN⌉, ⌈m/BM⌉, batch),
@@ -2385,6 +2685,106 @@ impl Backend for Metal {
         )
         .unwrap_or_else(|e| panic!("{e}"));
         self.debug_writeback(&ob, dst);
+    }
+
+    /// The residual-stream projection (reflex issue 020 T11, the last open
+    /// rung): `x += a @ wᵀ` in ONE op. Fold arm (`LAYA_METAL_FOLD_RES=1`,
+    /// opt-in until the quiet-box paired A/B): when the whole call splits,
+    /// the split-K reduce applies the residual directly
+    /// (`splitk_reduce_add`) — the staging write+read and the add dispatch
+    /// never happen. Bit-identical to [`Backend::matmul_w`] +
+    /// [`Backend::add`] by construction: same slice chains, then one add
+    /// (IEEE addition commutes), so G5 carries the fold at zero drift.
+    /// Knob-off and mixed-plan (a packed call whose row segments disagree)
+    /// run the unfused stream staged on [`Self::fold_stage_buf`].
+    fn matmul_w_accum(&self, a: &[f32], m: usize, k: usize, w: &[f32], n: usize, x: &mut [f32]) {
+        assert_eq!(a.len(), m * k, "lhs extent");
+        assert_eq!(w.len(), n * k, "weight extent");
+        assert_eq!(x.len(), m * n, "residual extent");
+        if self.fold_res {
+            let plan = self.split_plan(m as u32, n as u32, k as u32);
+            if plan.iter().all(|(_, _, s)| *s) {
+                let ab = self.chain_buf(a);
+                let wb = self.weight_t_buf(w, n, k);
+                // Read-modify-write target: the residual stream is
+                // device-current this epoch (the LayerNorm before it wrote
+                // the slot), so `chain_buf` — never the write-first slot.
+                let xb = self.chain_buf(x);
+                for (row0, rows, _) in &plan {
+                    let u = [
+                        *rows, n as u32, k as u32, k as u32, // a_rs
+                        1,        // a_cs
+                        n as u32, // b_rs — Wᵀ row-major [k, n]
+                        1,        // b_cs
+                        0,        // batch strides (batch = 1)
+                        0, 0,
+                    ];
+                    self.run_sgemm_splitk_accum(
+                        (&ab, ((*row0 as usize) * k * 4) as u64),
+                        (&wb, 0),
+                        (&xb, ((*row0 as usize) * n * 4) as u64),
+                        &u,
+                        *rows,
+                        n as u32,
+                        (k as u32).div_ceil(SPLITK_KC),
+                        SPLITK_KC,
+                    )
+                    .unwrap_or_else(|e| panic!("{e}"));
+                    self.fold_count.fetch_add(1, Ordering::Relaxed);
+                }
+                self.debug_writeback(&xb, x);
+                return;
+            }
+        }
+        self.matmul_w_then_add(a, m, k, w, n, x);
+    }
+
+    /// The MLP-up projection with its GLU epilogue folded (reflex issue
+    /// 020 T11): `act = glu_gelu_gate(a @ wᵀ)` in ONE op. Fold arm
+    /// (`LAYA_METAL_FOLD_GLU=1`, opt-in until the quiet-box paired A/B):
+    /// when the whole call splits, `splitk_reduce_glu` reduces BOTH halves
+    /// in-kernel and applies the gate — the fused `[m × 2i]` staging
+    /// round-trip never happens. Bit-identical to [`Backend::matmul_w`] +
+    /// [`Backend::glu_gelu_gate`] by construction (same chains, the glu
+    /// kernel's own expression order).
+    fn matmul_w_glu(&self, a: &[f32], m: usize, k: usize, w: &[f32], i_sz: usize, act: &mut [f32]) {
+        let n = i_sz * 2;
+        assert_eq!(a.len(), m * k, "lhs extent");
+        assert_eq!(w.len(), n * k, "weight extent");
+        assert_eq!(act.len(), m * i_sz, "glu out extent");
+        if self.fold_glu {
+            let plan = self.split_plan(m as u32, n as u32, k as u32);
+            if plan.iter().all(|(_, _, s)| *s) {
+                let ab = self.chain_buf(a);
+                let wb = self.weight_t_buf(w, n, k);
+                let ob = self.chain_slot_for(act);
+                for (row0, rows, _) in &plan {
+                    let u = [
+                        *rows, n as u32, k as u32, k as u32, // a_rs
+                        1,        // a_cs
+                        n as u32, // b_rs — Wᵀ row-major [k, n]
+                        1,        // b_cs
+                        0,        // batch strides (batch = 1)
+                        0, 0,
+                    ];
+                    self.run_sgemm_splitk_glu(
+                        (&ab, ((*row0 as usize) * k * 4) as u64),
+                        (&wb, 0),
+                        (&ob, ((*row0 as usize) * i_sz * 4) as u64),
+                        &u,
+                        *rows,
+                        i_sz as u32,
+                        (k as u32).div_ceil(SPLITK_KC),
+                        SPLITK_KC,
+                    )
+                    .unwrap_or_else(|e| panic!("{e}"));
+                    self.fold_count.fetch_add(1, Ordering::Relaxed);
+                }
+                self.debug_writeback(&ob, act);
+                return;
+            }
+        }
+        self.matmul_w_then_glu(a, m, k, w, i_sz, act);
     }
 
     fn matmul_kt(

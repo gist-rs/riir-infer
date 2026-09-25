@@ -58,11 +58,8 @@ struct Scratch {
     qkv: Vec<f32>,
     attn: AttnScratch,
     merged: Vec<f32>,
-    attn_out: Vec<f32>,
     xn: Vec<f32>,
-    fused: Vec<f32>,
     act: Vec<f32>,
-    mlp_out: Vec<f32>,
     sq: Vec<f32>,
 }
 
@@ -73,11 +70,8 @@ impl Scratch {
             qkv: Vec::new(),
             attn: AttnScratch::default(),
             merged: Vec::new(),
-            attn_out: Vec::new(),
             xn: Vec::new(),
-            fused: Vec::new(),
             act: Vec::new(),
-            mlp_out: Vec::new(),
             sq: Vec::new(),
         }
     }
@@ -85,11 +79,13 @@ impl Scratch {
     fn reset(&mut self, n: usize) {
         self.x.resize(n, 0.0);
         self.merged.resize(n, 0.0);
-        self.attn_out.resize(n, 0.0);
         self.xn.resize(n, 0.0);
-        self.mlp_out.resize(n, 0.0);
         // qkv (seq·3d) and the attention scratch (split thirds + the score
-        // parent) are sized inside the backend's `attention_forward`.
+        // parent) are sized inside the backend's `attention_forward`. The
+        // GEMM stagings the fold rungs consumed (`attn_out`/`fused`/
+        // `mlp_out`) are gone with them (reflex issue 020 T11): the
+        // residual adds and the GLU ride the projection ops, and the
+        // Metal knob-off arm stages on its own grow-only device buffer.
     }
 }
 
@@ -336,20 +332,18 @@ impl Encoder {
                 );
                 off += seq;
             }
-            b.matmul_w(&sc.merged, total, d, &layer.wo, d, &mut sc.attn_out);
-            let h_len = h.len();
-            b.add(&mut h, 0, &sc.attn_out, 0, h_len);
+            b.matmul_w_accum(&sc.merged, total, d, &layer.wo, d, &mut h);
 
             // MLP: fused Wi → gelu(input) · gate → Wo — whole packed
-            // buffers, unchanged op order.
+            // buffers, unchanged op order. The GLU epilogue rides the
+            // projection op (reflex issue 020 T11: the fold rungs — the
+            // Metal lane folds them into the split-K epilogue when the
+            // whole call splits; both arms bit-identical to the unfused
+            // pair by construction).
             b.layer_norm_nobias_into(&h, &layer.mlp_norm, eps, d, &mut sc.sq, &mut sc.xn);
-            sc.fused.resize(total * 2 * i_sz, 0.0);
-            b.matmul_w(&sc.xn, total, d, &layer.wi, 2 * i_sz, &mut sc.fused);
             sc.act.resize(total * i_sz, 0.0);
-            b.glu_gelu_gate(&sc.fused, total, i_sz, &mut sc.act);
-            b.matmul_w(&sc.act, total, i_sz, &layer.mlp_wo, d, &mut sc.mlp_out);
-            let h_len = h.len();
-            b.add(&mut h, 0, &sc.mlp_out, 0, h_len);
+            b.matmul_w_glu(&sc.xn, total, d, &layer.wi, i_sz, &mut sc.act);
+            b.matmul_w_accum(&sc.act, total, i_sz, &layer.mlp_wo, d, &mut h);
         }
 
         let mut out = vec![0f32; total * d];

@@ -57,6 +57,36 @@ pub trait Backend {
     /// projections; whole buffers, no offsets.
     fn matmul_w(&self, a: &[f32], m: usize, k: usize, w: &[f32], n: usize, dst: &mut [f32]);
 
+    /// `x[m×n] += a[m×k] @ w[n×k]ᵀ` — the residual-stream projection: the
+    /// encoder's two per-layer residual adds (attention-out, MLP-down)
+    /// become ONE op instead of [`Backend::matmul_w`] + [`Backend::add`]
+    /// (reflex issue 020 T11, the last open rung). The Metal lane folds
+    /// the split-K reduce + residual add into one kernel when the whole
+    /// call splits; the default composes the unfused pair, which the fold
+    /// is bit-identical to by construction (same slice chains, then one
+    /// add — IEEE addition commutes), so parity carries it at zero drift.
+    /// `x` must be device-current on the device backends (the encoder's
+    /// residual stream always is: the LayerNorm before it writes the slot
+    /// this epoch).
+    fn matmul_w_accum(&self, a: &[f32], m: usize, k: usize, w: &[f32], n: usize, x: &mut [f32]) {
+        let mut tmp = vec![0f32; m * n];
+        self.matmul_w(a, m, k, w, n, &mut tmp);
+        self.add(x, 0, &tmp, 0, m * n);
+    }
+
+    /// `act[m×i] = glu_gelu_gate(a[m×k] @ w[(2i)×k]ᵀ)` — the MLP-up
+    /// projection with its GLU epilogue folded into ONE op instead of
+    /// [`Backend::matmul_w`] into a fused `[m × 2i]` buffer +
+    /// [`Backend::glu_gelu_gate`] (reflex issue 020 T11). The Metal lane
+    /// reduces both halves in the split-K epilogue and applies the gate
+    /// directly when the whole call splits; the default composes the
+    /// unfused pair, which the fold is bit-identical to by construction.
+    fn matmul_w_glu(&self, a: &[f32], m: usize, k: usize, w: &[f32], i_sz: usize, act: &mut [f32]) {
+        let mut fused = vec![0f32; m * 2 * i_sz];
+        self.matmul_w(a, m, k, w, 2 * i_sz, &mut fused);
+        self.glu_gelu_gate(&fused, m, i_sz, act);
+    }
+
     /// Batched over heads in ONE backend op:
     /// `dst[h·m·m ..] ← q[h·m·hd ..] @ k[h·m·hd ..]ᵀ` for every `h < heads`
     /// (q/k row-major `[heads, m, hd]`, dst `[heads, m, m]`) — the
