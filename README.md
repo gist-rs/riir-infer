@@ -17,7 +17,11 @@ every engine, game, and application concern.
   TurboQuant paths, EXL3 trellis decode + block-Hadamard (opt-in `exl3`;
   the multi-shard zero-copy pack reader, the CPU reference, and the
   bit-identical CPU fast arm — codebook LUT + rayon, 10.6-11.4x — land
-  here; the GPU kernels live in `riir-infer-gpu` behind `exl3_gpu`).
+  here; the GPU kernels live in `riir-infer-gpu` behind `exl3_gpu`.
+  `Exl3Pack::open` is era-gated fail-closed on the pack's
+  `quantization_config.version` against the validated set (`["1.4.2"]`)
+  — legacy-era packs silently decode wrong (issue 001 §12.7); a
+  deliberate unvalidated-era read is `Exl3Pack::open_unverified_era`).
 - **Architectures** — gemma / llama / ternary / wall layers, deltanet,
   transformer, rope, speculative-decoding types (dflash).
 - **CPU references** — the reference paths the GPU kernels are validated
