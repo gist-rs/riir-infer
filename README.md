@@ -4,6 +4,22 @@ The LLM inference substrate: weight loading, quantization, model
 architectures, and compute kernels for model-based inference — upstream of
 every engine, game, and application concern.
 
+## Built on KatGPT-RS
+
+The primitive core is [KatGPT-RS](https://github.com/katopz/katgpt-rs) (public, MIT); this repo adds loaders,
+quantization and model architectures on top. From it (path deps
+`../katgpt-rs`):
+
+- `katgpt-core` — shared types, SIMD kernels, `float_order`, sigmoid, fitted
+  anchor tables, SIMD-LUT dequant, ternary group-scale matvec, GDN tree
+  verify, row-logit floor, and the opt-in inference features forwarded from
+  the feature table (deltanet / gemma4 / ternary / dllm / belief drafter …).
+- `katgpt-transformer` — gated MLP, delta routing, wall attention.
+- `katgpt-speculative` — the DDTree / DFlash / Weaver speculative substrate.
+- `katgpt-forward` — canonical clustered + standard LM head, top-k select.
+- `katgpt-quant` (opt-in `turboquant`) — TurboQuant.
+- `katgpt-attn` (opt-in `flashmemory_gqa`) — FlashMemory sparse GQA.
+
 ## The crate
 
 `riir-infer-core` (repo root):
