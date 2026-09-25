@@ -1,5 +1,5 @@
 //! vk_calibration — Issue 883 P0 model-side harness (katgpt-rs
-//! `.issues/883_fitted_value_anchor_tables.md`, Research 587): the
+//! Issue 883, closed 2026-09-25 — HISTORY.md § Issue 883; Research 587): the
 //! offline R² dashboard for fitted token-value tables on gemma-2-2b-it.
 //!
 //! One pass over a natural-text corpus through the frozen checkpoint

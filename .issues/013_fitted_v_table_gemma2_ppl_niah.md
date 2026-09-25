@@ -1,6 +1,6 @@
 # Issue 013 — consume katgpt-core `fitted_value_tables` / `fitted_v_reconstruct` on gemma-2-2b: the model-bound G1 of katgpt-rs Issue 883 P1–P3
 
-**Status:** OPEN — filed 2026-09-25 from katgpt-rs Issue 883. The primitives landed there at katgpt-rs `0b768e95d` (katgpt-rs Bench 895). This issue is their model-bound quality gate and the tg128 cell.
+**Status:** OPEN — filed 2026-09-25 from katgpt-rs Issue 883 (closed there 2026-09-25; record in katgpt-rs HISTORY.md § Issue 883). The primitives landed there at katgpt-rs `0b768e95d` (katgpt-rs Bench 895). This issue is their model-bound quality gate and the tg128 cell.
 
 ## What exists (katgpt-rs `0b768e95d`, opt-in)
 
@@ -28,6 +28,7 @@ Passing `RopeAction` to `reconstruct_v_from_rope_k` against this cache is **sile
 ## Tasks (the gates katgpt-rs cannot run)
 
 - [ ] **T1 — P1 G1: gemma-2-2b PPL at matched bits, with and without mean removal.**
+  - ⛔ **Blocked on katgpt-rs Issue 896** (found 2026-09-25). KVarN's raw tile buffer was shared across layers, so decode-order stores at `n_layers ≥ 2` read back the LAST layer's data. The in-progress tile also dequantized to zeros, and 2-bit keys panicked there. Consume KVarN only at or after the 896 fix commit, or every T1 number carries the corruption.
   - Setup: V-cache quantizer from the in-tree backends (KVarN 2/3/4-bit), the table from `vk_calibration`'s `E^V` signal at top_k ∈ {1024, 8192}. The coverage dial is Bench 004's 73.6% / 97.6%.
   - Gate 1, prediction vs measurement: per layer, the measured V quant-MSE drop must agree with the dashboard's `1 − ρ_l(V)` (per-head aggregates, Bench 004) within a pre-registered tolerance. Where it does not, record the direction; the absmax caveat is the arbiter.
   - Gate 2: PPL at matched bits is ≤ the plain-quant PPL.
@@ -43,6 +44,7 @@ Passing `RopeAction` to `reconstruct_v_from_rope_k` against this cache is **sile
   - G3: `VReadPath::FullCache` is bitwise identical to today's path.
   - Record KV bytes/token. The law predicts exactly 50%, because gemma-2-2b is 8q:4kv at hd 256 and `n_v/(n_kv + n_v) = 1/2`. Sliding-window layers scale with the window and keep the same fraction.
 - [ ] **T4 — the P1/P3 G2 kernels on the real decode path.** The katgpt-rs primitive-level G2 bars failed: +5% for P1, 14–15× for P3.
+  - **Update (katgpt-rs 2026-09-25):** folding the add-back into KVarN's dequant was a LOSER (+13.9–14.2%, reverted). After katgpt-rs Issue 894 made the plain pass 2.46× faster, P1 fused/plain reads **+12.9–13.3%**: the absolute cost is unchanged but the denominator is smaller. The floor is the per-position token→row lookup (+2.1–2.8%). The named lever is the **deferred restore** by linearity, `Σ_p w_p·v̂_p + Σ_s W_s·E[s]` with the row index pre-resolved per position (+1.5–3.6% test-local). It regroups the sum, so it needs a stated error bound, and the miss and zero-table paths must stay bitwise. Its last per-position scalar add belongs in THIS repo's softmax-weight loop. Record: katgpt-rs Bench 895 Addenda I/II, HISTORY.md § Issue 883.
   - Re-measure inside this repo's actual attention kernel (the V-aggregation epilogue and the RoPE tables that already exist there) before anyone reads the primitive numbers as the model-level cost.
   - If P3 is still transcendental- or table-bandwidth-bound, a block angle-addition rotation (exact re-anchoring every N positions) is the named kernel to try.
 
