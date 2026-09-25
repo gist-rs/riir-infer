@@ -816,3 +816,45 @@ fn download_resolves_to_the_most_recent_write_at_a_base_pointer() {
         .any(|(x, y)| (x - y).abs() > 1e-2);
     assert!(off_stale, "row 0 was served from the older, tighter key");
 }
+
+/// `SplitRule::DEFAULT` against the per-shape sweep that pinned it
+/// (`metal_splitk_shape_sweep`) and the whole-forward A/B: every measured
+/// LOSS stays unsplit, every win the forward confirmed splits. A rule edit
+/// that splits a losing shape reds here before any timing run.
+#[test]
+fn split_rule_matches_the_measured_sweep() {
+    use riir_infer_laya::laya::riir::metal::SplitRule;
+    let r = SplitRule::DEFAULT;
+    // (n, k, m, split wins?)
+    let cells = [
+        (1024, 1024, 24, true),
+        (1024, 1024, 54, true),
+        (1024, 1024, 128, true),
+        (1024, 1024, 160, false),
+        (1024, 1024, 256, false),
+        (1024, 1024, 512, false),
+        // 160 / 256 are isolated-GEMM wins that LOST in the whole forward
+        // (seq 188: 1.020, 0/24) — unsplit by decision, see SplitRule.
+        (1024, 2624, 54, true),
+        (1024, 2624, 160, false),
+        (1024, 2624, 256, false),
+        (1024, 2624, 317, false),
+        (1024, 2624, 512, false),
+        (3072, 1024, 24, true),
+        (3072, 1024, 54, true),
+        (3072, 1024, 80, true),
+        (3072, 1024, 106, false),
+        (3072, 1024, 256, false),
+        (5248, 1024, 24, true),
+        (5248, 1024, 80, true),
+        (5248, 1024, 106, false),
+        (5248, 1024, 512, false),
+    ];
+    for (n, k, m, win) in cells {
+        assert_eq!(r.splits(m, n, k), win, "{m}×{n} over k {k}");
+    }
+    assert!(
+        !SplitRule { on: false, ..r }.splits(24, 1024, 1024),
+        "off never splits"
+    );
+}

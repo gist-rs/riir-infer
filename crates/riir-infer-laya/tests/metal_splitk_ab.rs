@@ -17,7 +17,7 @@
 use riir_infer_laya::laya::config::{Checkpoint, load_checkpoint_configs};
 use riir_infer_laya::laya::riir::backend::Backend;
 use riir_infer_laya::laya::riir::encoder::Encoder;
-use riir_infer_laya::laya::riir::metal::Metal;
+use riir_infer_laya::laya::riir::metal::{Metal, SplitRule};
 use riir_infer_laya::laya::riir::weights as ckpt_weights;
 use riir_infer_laya::laya::weights::{ensure_checkpoint, weights_root};
 
@@ -50,11 +50,26 @@ fn t11_splitk_paired_ab() {
     let (_agent_cfg, enc_cfg) = load_checkpoint_configs(&dir, name).expect("configs");
     let mut raw = ckpt_weights::load(&dir.join("model.safetensors"), name).expect("weights");
     let enc = Encoder::from_map(&mut raw, enc_cfg, name).expect("encoder");
-    let off = Metal::with_splitk(false, max_tgs).expect("metal off");
-    let on = Metal::with_splitk(true, max_tgs).expect("metal on");
+    // AB_BASE=ceiling compares DEFAULT against the first rule instead of off.
+    let base = match std::env::var("AB_BASE").as_deref() {
+        Ok("ceiling") => SplitRule::TG_CEILING_ONLY,
+        _ => SplitRule {
+            on: false,
+            ..SplitRule::DEFAULT
+        },
+    };
+    let off = Metal::with_split_rule(base).expect("metal base");
+    let on = Metal::with_split_rule(SplitRule {
+        max_tgs,
+        ..SplitRule::DEFAULT
+    })
+    .expect("metal on");
     enc.warm(&off);
     enc.warm(&on);
-    println!("t11 A/B: split-K (KC 128) · max_tgs {max_tgs} · {ROUNDS} paired rounds/shape");
+    println!(
+        "t11 A/B: base {:?} vs DEFAULT (max_tgs {max_tgs}) · {ROUNDS} paired rounds/shape",
+        std::env::var("AB_BASE").unwrap_or_else(|_| "off".into())
+    );
     let vocab = 50368usize;
     for seq in [24usize, 46, 54, 80, 106, 140, 188, 256, 317, 512] {
         let ids: Vec<u32> = (0..seq).map(|i| ((i * 7919) % vocab) as u32).collect();

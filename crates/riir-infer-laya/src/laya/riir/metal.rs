@@ -196,7 +196,7 @@ const MAX_ENCODERS_PER_CB: u32 = 1024;
 ///   row, exactly as two unsplit calls always were.
 /// - A split call is NOT bit-identical to an unsplit one (one k-ascending
 ///   chain vs a sum of slice chains). That only happens when two calls on
-///   the same row land on opposite sides of [`SPLITK_MAX_TGS`]; the
+///   the same row land on opposite sides of the [`SplitRule`]; the
 ///   difference is f32 summation order, bounded by G5 (measured prob drift
 ///   ≤ 7.5e-6 against the 1e-3 gate, top-1 unchanged on all 3 checkpoints).
 /// - Making EVERY instance fold at this slice length (the global
@@ -205,11 +205,84 @@ const MAX_ENCODERS_PER_CB: u32 = 1024;
 ///   fold arithmetic: KC 512 still cost +18%). Rejected.
 const SPLITK_KC: u32 = 128;
 
-/// Split-K eligibility ceiling in narrow threadgroups (pinned by the T11
-/// paired A/B, `tests/metal_splitk_ab.rs`). At 96 the seq-188 grids (96
-/// narrow TGs) LOSE while seq 140 gains only 1.4%; above the ceiling the
-/// dispatch is untouched.
-const SPLITK_MAX_TGS: u64 = 64;
+/// When a batch-1 GEMM of `rows × n` over `k` is split (reflex issue 020
+/// T11). Pinned by the per-shape sweep (`tests/metal_splitk_shape_sweep.rs`:
+/// unsplit vs forced split per encoder projection, 15 rotated paired
+/// rounds, M3 Max), which showed a narrow-TG ceiling alone is the WRONG
+/// predictor:
+///
+/// | shape (n × k) | split wins at | first loss |
+/// |---|---|---|
+/// | attn out 1024 × 1024 | m ≤ 128 (0.56 → 0.95) | m 160 (1.09) |
+/// | MLP down 1024 × 2624 | m ≤ 256 (0.35 → 0.95) | m 317 (1.17) |
+/// | qkv 3072 × 1024 | m ≤ 80 (0.79 → 0.99) | m 106 (1.09) |
+/// | MLP up 5248 × 1024 | m ≤ 80 (0.90 → 0.99) | m 106 (1.08) |
+///
+/// hence: split while the call has at most [`Self::max_row_tiles`] narrow
+/// row tiles (m ≤ 96 — every shape wins there), OR its narrow grid is at
+/// most [`Self::max_tgs`] threadgroups. Every sweep cell the rule splits
+/// measured ≤ 1.0, and every losing cell is unsplit.
+///
+/// ⛔ The long-k extension the table ALSO supports — MLP down split to
+/// m ≤ 256 via [`Self::long_k_max_tgs`] = 128 at `k ≥` [`Self::long_k`] —
+/// did NOT survive the whole-forward A/B: paired against the first rule it
+/// read seq 188 **1.020 (0/24 wins)**, seq 256 0.987, seq 140 0.994. An
+/// isolated-GEMM win at the margin does not transfer to the forward (the
+/// surrounding kernels change cache and occupancy), so the knob ships at
+/// the base ceiling (64) and stays for the next re-measure. The row-tile
+/// half: seq 24 / 46 / 54 / 80 **0.982 / 0.974 / 0.982 / 0.939** against
+/// the first rule, 24/24 each. A tile choice was also
+/// swept — the xwide 64×128 geometry reading each weight block once —
+/// and LOST to narrow on every shape (weights sit in L2; re-reads were
+/// never the binding cost — the f16-B finding again), so it is not built.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct SplitRule {
+    /// Master switch.
+    pub on: bool,
+    /// Split while ⌈m/32⌉ ≤ this.
+    pub max_row_tiles: u32,
+    /// Split while ⌈n/64⌉·⌈m/32⌉ ≤ this …
+    pub max_tgs: u64,
+    /// … or ≤ this once `k ≥ long_k`.
+    pub long_k_max_tgs: u64,
+    /// The k at which [`Self::long_k_max_tgs`] applies.
+    pub long_k: u32,
+}
+
+impl SplitRule {
+    /// The shipped rule (the table above).
+    pub const DEFAULT: Self = Self {
+        on: true,
+        max_row_tiles: 3,
+        max_tgs: 64,
+        long_k_max_tgs: 64,
+        long_k: 2048,
+    };
+    /// The first rule (`512477e`): the narrow-TG ceiling alone — kept as
+    /// the A/B arm for [`Self::DEFAULT`].
+    pub const TG_CEILING_ONLY: Self = Self {
+        on: true,
+        max_row_tiles: 0,
+        max_tgs: 64,
+        long_k_max_tgs: 64,
+        long_k: 2048,
+    };
+
+    /// Does a `rows × n` GEMM over `k` split?
+    pub fn splits(&self, rows: u32, n: u32, k: u32) -> bool {
+        if !self.on {
+            return false;
+        }
+        let row_tiles = rows.div_ceil(32);
+        let tgs = u64::from(n.div_ceil(64)) * u64::from(row_tiles);
+        let ceiling = if k >= self.long_k {
+            self.long_k_max_tgs
+        } else {
+            self.max_tgs
+        };
+        row_tiles <= self.max_row_tiles || tgs <= ceiling
+    }
+}
 
 /// Widest operand list any `run` / `run_rows` kernel binds — the stack
 /// array that replaced the per-dispatch `Vec` (riir-reflex Issue 020 T2).
@@ -1425,14 +1498,10 @@ pub struct Metal {
     /// before `flash_attn` reads them (write-first dispatch pair, serial
     /// GPU ordering), and no later op reads rows ≥ seq.
     rope_scratch: Mutex<Option<(usize, usize, Buffer)>>,
-    /// Split-K (reflex issue 020 T11) — default ON; `LAYA_METAL_SPLITK=0`
-    /// is the kill-switch back to the plain narrow kernel. See
-    /// [`Metal::splitk_slices`] and [`SPLITK_KC`].
-    splitk: bool,
-    /// Split-K eligibility ceiling: only grids of at most this many narrow
-    /// threadgroups are sliced (`LAYA_METAL_SPLITK_MAXTGS`, default
-    /// [`SPLITK_MAX_TGS`]).
-    splitk_max_tgs: u64,
+    /// The split-K decision (reflex issue 020 T11) — default
+    /// [`SplitRule::DEFAULT`]; `LAYA_METAL_SPLITK=0` is the kill-switch,
+    /// `LAYA_METAL_SPLITK_MAXTGS` overrides the base ceiling.
+    split_rule: SplitRule,
     /// The split-K partial scratch (capacity in f32, buffer) — grown with
     /// headroom, never shrunk; serial dispatch orders its reuse.
     splitk_scratch: Mutex<Option<(usize, Buffer)>>,
@@ -1488,11 +1557,14 @@ impl Metal {
             flash_disabled: std::env::var("LAYA_METAL_FLASH").as_deref() == Ok("0"),
             rope_hoist: std::env::var("LAYA_METAL_ROPE_HOIST").as_deref() == Ok("1"),
             rope_scratch: Mutex::new(None),
-            splitk: std::env::var("LAYA_METAL_SPLITK").as_deref() != Ok("0"),
-            splitk_max_tgs: std::env::var("LAYA_METAL_SPLITK_MAXTGS")
-                .ok()
-                .and_then(|v| v.parse().ok())
-                .unwrap_or(SPLITK_MAX_TGS),
+            split_rule: SplitRule {
+                on: std::env::var("LAYA_METAL_SPLITK").as_deref() != Ok("0"),
+                max_tgs: std::env::var("LAYA_METAL_SPLITK_MAXTGS")
+                    .ok()
+                    .and_then(|v| v.parse().ok())
+                    .unwrap_or(SplitRule::DEFAULT.max_tgs),
+                ..SplitRule::DEFAULT
+            },
             splitk_scratch: Mutex::new(None),
             splitk_count: AtomicU64::new(0),
             row_segments: Mutex::new(Vec::new()),
@@ -1504,9 +1576,18 @@ impl Metal {
     /// `LAYA_METAL_SPLITK` / `LAYA_METAL_SPLITK_MAXTGS`
     /// — the A/B and test seam; env is process-global, this is per instance.
     pub fn with_splitk(on: bool, max_tgs: u64) -> Result<Self> {
+        Self::with_split_rule(SplitRule {
+            on,
+            max_tgs,
+            ..SplitRule::DEFAULT
+        })
+    }
+
+    /// [`Self::new`] with an explicit [`SplitRule`] — the A/B seam for the
+    /// rule itself (e.g. [`SplitRule::TG_CEILING_ONLY`], the first rule).
+    pub fn with_split_rule(rule: SplitRule) -> Result<Self> {
         let mut m = Self::new()?;
-        m.splitk = on;
-        m.splitk_max_tgs = max_tgs;
+        m.split_rule = rule;
         Ok(m)
     }
 
@@ -1917,17 +1998,13 @@ impl Metal {
         )
     }
 
-    /// Split-K slice count for a batch-1 narrow GEMM whose grid is
-    /// `narrow_tgs` threadgroups (reflex issue 020 T11). `None` = run the
-    /// plain narrow kernel: split-K is off, the grid is over the ceiling
-    /// ([`SPLITK_MAX_TGS`]), or k holds fewer than two [`SPLITK_KC`]
-    /// slices. The slice length is FIXED — never a function of m.
-    fn splitk_slices(&self, narrow_tgs: u64, k: u32) -> Option<u32> {
-        if !self.splitk || narrow_tgs > self.splitk_max_tgs {
-            return None;
-        }
+    /// Split-K slice count for a batch-1 `rows × n` GEMM over `k` (reflex
+    /// issue 020 T11) — the [`SplitRule`] on this instance. `None` = run
+    /// the unsliced dispatch. The slice length is FIXED ([`SPLITK_KC`]) —
+    /// never a function of m.
+    fn splitk_slices(&self, rows: u32, n: u32, k: u32) -> Option<u32> {
         let slices = k.div_ceil(SPLITK_KC);
-        (slices >= 2).then_some(slices)
+        (self.split_rule.splits(rows, n, k) && slices >= 2).then_some(slices)
     }
 
     /// The split-K partial scratch, grown to hold `need` f32 (half again
@@ -2063,17 +2140,7 @@ impl Metal {
         let segs = self.row_segments.lock().expect("row segments poison");
         let hinted =
             segs.len() > 1 && segs.iter().map(|&r| u64::from(r)).sum::<u64>() == u64::from(m);
-        let min_m: u32 = std::env::var("DBG_SPLITK_MINM")
-            .ok()
-            .and_then(|v| v.parse().ok())
-            .unwrap_or(0);
-        let decide = |rows: u32| {
-            if rows < min_m {
-                return false;
-            }
-            let narrow_tgs = u64::from(n.div_ceil(64)) * u64::from(rows).div_ceil(32);
-            self.splitk_slices(narrow_tgs, k).is_some()
-        };
+        let decide = |rows: u32| self.splitk_slices(rows, n, k).is_some();
         if !hinted {
             return vec![(0, m, decide(m))];
         }
