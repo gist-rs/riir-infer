@@ -251,6 +251,10 @@ impl RiirAgent {
                     ane_root.to_path_buf(),
                     manifest_path,
                 )?;
+                // Every bucket loads HERE, not on the first request that
+                // reaches it — a lazy load is a ~0.9 s spike inside
+                // somebody's request (riir-reflex Bench 042).
+                enc.preload()?;
                 // The head runs the plain CPU backend (f32, unchanged).
                 (EncoderStack::Ane(enc), Box::new(Cpu))
             }

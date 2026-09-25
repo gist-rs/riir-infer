@@ -547,7 +547,7 @@ impl AneEncoder {
     }
 
     /// Forward `input_ids` to the final-norm'd hidden state `[n, d]`
-    /// (f32) — the bucket covering `n` loads lazily on first use, the
+    /// (f32) — the bucket covering `n` (preloaded by `load_ane`, else lazy), the
     /// pad tail is masked, the fp16 output slices to `n` and widens
     /// bit-exactly. Refuses loud when `n` exceeds the largest bucket (a
     /// longer sequence is a FAILED forward, never a CPU fallback).
@@ -582,6 +582,21 @@ impl AneEncoder {
             }
         }
         Ok(hidden)
+    }
+
+    /// Load every bucket's runtime (verify → compile → plan-gate) and run
+    /// one pad-only forward through each, so no request pays a first-use
+    /// load. Measured on the M3 (riir-reflex Bench 042): each lazy load
+    /// was ~0.93 s landing INSIDE a timed call — the 644–891 ms p99 of
+    /// every short ANE harness suite, and the p50 of code_fixtures, where
+    /// 2 of its 4 servable cases were each the first to reach a bucket.
+    /// `load_ane` calls this; [`Self::forward`]'s lazy path stays as the
+    /// fallback for a caller that built the encoder some other way.
+    pub fn preload(&self) -> Result<()> {
+        for bucket in self.buckets() {
+            self.forward(&vec![self.pad_id; bucket])?;
+        }
+        Ok(())
     }
 
     /// The bucket's runtime, loading (verify → compile → plan-gate) on
