@@ -1613,15 +1613,18 @@ pub struct Metal {
     /// LayerNorm through `ln_rows_wide` (reflex issue 020 T11) — default ON;
     /// `LAYA_METAL_LN_WIDE=0` restores the one-simdgroup `ln_rows`.
     ln_wide: bool,
-    /// The fold rungs (reflex issue 020 T11, the last open lever — default
-    /// OFF until the quiet-box paired A/B promotes them; the same posture
-    /// the rope hoist landed at):
-    /// - `fold_res` (`LAYA_METAL_FOLD_RES=1`): the encoder's two residual
-    ///   adds ride the split-K reduce (`splitk_reduce_add`) when the whole
-    ///   call splits — one kernel instead of reduce + staging + add.
-    /// - `fold_glu` (`LAYA_METAL_FOLD_GLU=1`): the MLP-up projection's
-    ///   reduce applies the GLU gate directly (`splitk_reduce_glu`) — the
-    ///   fused `[m × 2i]` staging round-trip never happens.
+    /// The fold rungs (reflex issue 020 T11) — default ON since the
+    /// quiet-box paired A/B promoted them (2026-09-26: 24/24 paired wins
+    /// on every shape within the split rule's reach, medians −1.5…−5.9%,
+    /// the no-op control flat at 1.002/1.001 above the crossover):
+    /// - `fold_res` (`LAYA_METAL_FOLD_RES=0` is the kill-switch): the
+    ///   encoder's two residual adds ride the split-K reduce
+    ///   (`splitk_reduce_add`) when the whole call splits — one kernel
+    ///   instead of reduce + staging + add.
+    /// - `fold_glu` (`LAYA_METAL_FOLD_GLU=0` is the kill-switch): the
+    ///   MLP-up projection's reduce applies the GLU gate directly
+    ///   (`splitk_reduce_glu`) — the fused `[m × 2i]` staging round-trip
+    ///   never happens.
     ///
     /// Both arms are bit-identical to the streams they replace by
     /// construction (same slice chains, the epilogue kernels' own
@@ -1697,8 +1700,8 @@ impl Metal {
             rope_hoist: std::env::var("LAYA_METAL_ROPE_HOIST").as_deref() == Ok("1"),
             rope_scratch: Mutex::new(None),
             ln_wide: std::env::var("LAYA_METAL_LN_WIDE").as_deref() != Ok("0"),
-            fold_res: std::env::var("LAYA_METAL_FOLD_RES").as_deref() == Ok("1"),
-            fold_glu: std::env::var("LAYA_METAL_FOLD_GLU").as_deref() == Ok("1"),
+            fold_res: std::env::var("LAYA_METAL_FOLD_RES").as_deref() != Ok("0"),
+            fold_glu: std::env::var("LAYA_METAL_FOLD_GLU").as_deref() != Ok("0"),
             fold_stage_scratch: Mutex::new(None),
             split_rule: SplitRule {
                 on: std::env::var("LAYA_METAL_SPLITK").as_deref() != Ok("0"),
@@ -2688,9 +2691,10 @@ impl Backend for Metal {
     }
 
     /// The residual-stream projection (reflex issue 020 T11, the last open
-    /// rung): `x += a @ wᵀ` in ONE op. Fold arm (`LAYA_METAL_FOLD_RES=1`,
-    /// opt-in until the quiet-box paired A/B): when the whole call splits,
-    /// the split-K reduce applies the residual directly
+    /// rung): `x += a @ wᵀ` in ONE op. Fold arm (default ON since the A/B
+    /// promotion; `LAYA_METAL_FOLD_RES=0` restores the unfused stream):
+    /// when the whole call splits, the split-K reduce applies the residual
+    /// directly
     /// (`splitk_reduce_add`) — the staging write+read and the add dispatch
     /// never happen. Bit-identical to [`Backend::matmul_w`] +
     /// [`Backend::add`] by construction: same slice chains, then one add
@@ -2741,9 +2745,10 @@ impl Backend for Metal {
 
     /// The MLP-up projection with its GLU epilogue folded (reflex issue
     /// 020 T11): `act = glu_gelu_gate(a @ wᵀ)` in ONE op. Fold arm
-    /// (`LAYA_METAL_FOLD_GLU=1`, opt-in until the quiet-box paired A/B):
-    /// when the whole call splits, `splitk_reduce_glu` reduces BOTH halves
-    /// in-kernel and applies the gate — the fused `[m × 2i]` staging
+    /// (default ON since the A/B promotion; `LAYA_METAL_FOLD_GLU=0`
+    /// restores the unfused stream): when the whole call splits,
+    /// `splitk_reduce_glu` reduces BOTH halves in-kernel and applies the
+    /// gate — the fused `[m × 2i]` staging
     /// round-trip never happens. Bit-identical to [`Backend::matmul_w`] +
     /// [`Backend::glu_gelu_gate`] by construction (same chains, the glu
     /// kernel's own expression order).
