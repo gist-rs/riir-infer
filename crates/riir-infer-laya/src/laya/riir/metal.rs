@@ -185,6 +185,9 @@ const XWIDE_THREADS: u64 = 1024;
 /// buffers join the committed list and are waited at the next sync.
 const MAX_ENCODERS_PER_CB: u32 = 1024;
 
+/// Widest row `ln_rows_wide` holds in registers (8 values × 256 threads).
+const LN_WIDE_MAX_D: usize = 2048;
+
 /// Split-K slice length (reflex issue 020 T11) — FIXED, a multiple of the
 /// narrow BK (64 · 2 iterations per slice).
 ///
@@ -379,6 +382,7 @@ const KERNELS: &[&str] = &[
     "gelu_erf",
     "glu_gelu_gate",
     "ln_rows",
+    "ln_rows_wide",
     "softmax_rows",
     "rope",
     "split_heads",
@@ -1299,6 +1303,59 @@ kernel void ln_rows(device const float* x [[buffer(0)]],
     for (uint i = lane; i < d; i += 32u) { orow[i] = (row[i] - mean) * inv * w[i]; }
 }
 
+// LayerNorm, 256 threads per row with the row held in REGISTERS (reflex
+// issue 020 T11): ONE read of the row instead of `ln_rows`' three strided
+// passes, 8× the lanes per row. Mean and variance reduce through simd_sum
+// plus an 8-entry threadgroup array that EVERY thread sums in the same
+// fixed order (deterministic, row-local — packed ≡ loop holds). d ≤ 2048
+// (8 values per thread); the host keeps `ln_rows` above that.
+kernel void ln_rows_wide(device const float* x [[buffer(0)]],
+                         device const float* w [[buffer(1)]],
+                         device float* out [[buffer(2)]],
+                         constant uint& rows [[buffer(3)]],
+                         constant uint& d [[buffer(4)]],
+                         constant float& inv_d [[buffer(5)]],
+                         constant float& eps [[buffer(6)]],
+                         uint tpg [[threadgroup_position_in_grid]],
+                         uint lid [[thread_index_in_threadgroup]]) {
+    threadgroup float part[8];
+    if (tpg >= rows) { return; }
+    device const float* row = x + tpg * d;
+    device float* orow = out + tpg * d;
+    const uint sg = lid >> 5u;
+    const uint ln = lid & 31u;
+    float v[8];
+    float acc = 0.0f;
+    for (uint j = 0u; j < 8u; ++j) {
+        const uint i = lid + j * 256u;
+        v[j] = i < d ? row[i] : 0.0f;
+        acc += v[j];
+    }
+    acc = simd_sum(acc);
+    if (ln == 0u) { part[sg] = acc; }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    float tot = 0.0f;
+    for (uint g = 0u; g < 8u; ++g) { tot += part[g]; }
+    const float mean = tot * inv_d;
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    float vacc = 0.0f;
+    for (uint j = 0u; j < 8u; ++j) {
+        const uint i = lid + j * 256u;
+        const float c = v[j] - mean;
+        vacc += i < d ? c * c : 0.0f;
+    }
+    vacc = simd_sum(vacc);
+    if (ln == 0u) { part[sg] = vacc; }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    float vtot = 0.0f;
+    for (uint g = 0u; g < 8u; ++g) { vtot += part[g]; }
+    const float inv = 1.0f / sqrt(vtot * inv_d + eps);
+    for (uint j = 0u; j < 8u; ++j) {
+        const uint i = lid + j * 256u;
+        if (i < d) { orow[i] = (v[j] - mean) * inv * w[i]; }
+    }
+}
+
 // One threadgroup (one simdgroup) per row: strided lanes + simd
 // reductions. The v1 kernel ran one thread per row — 32× the GPU idle.
 kernel void softmax_rows(device float* x [[buffer(0)]],
@@ -1502,6 +1559,9 @@ pub struct Metal {
     /// [`SplitRule::DEFAULT`]; `LAYA_METAL_SPLITK=0` is the kill-switch,
     /// `LAYA_METAL_SPLITK_MAXTGS` overrides the base ceiling.
     split_rule: SplitRule,
+    /// LayerNorm through `ln_rows_wide` (reflex issue 020 T11) — default ON;
+    /// `LAYA_METAL_LN_WIDE=0` restores the one-simdgroup `ln_rows`.
+    ln_wide: bool,
     /// The split-K partial scratch (capacity in f32, buffer) — grown with
     /// headroom, never shrunk; serial dispatch orders its reuse.
     splitk_scratch: Mutex<Option<(usize, Buffer)>>,
@@ -1557,6 +1617,7 @@ impl Metal {
             flash_disabled: std::env::var("LAYA_METAL_FLASH").as_deref() == Ok("0"),
             rope_hoist: std::env::var("LAYA_METAL_ROPE_HOIST").as_deref() == Ok("1"),
             rope_scratch: Mutex::new(None),
+            ln_wide: std::env::var("LAYA_METAL_LN_WIDE").as_deref() != Ok("0"),
             split_rule: SplitRule {
                 on: std::env::var("LAYA_METAL_SPLITK").as_deref() != Ok("0"),
                 max_tgs: std::env::var("LAYA_METAL_SPLITK_MAXTGS")
@@ -1589,6 +1650,13 @@ impl Metal {
         let mut m = Self::new()?;
         m.split_rule = rule;
         Ok(m)
+    }
+
+    /// Builder: route LayerNorm through `ln_rows_wide` (`true`, the
+    /// default) or the one-simdgroup `ln_rows` — the A/B seam.
+    pub fn with_ln_wide(mut self, on: bool) -> Self {
+        self.ln_wide = on;
+        self
     }
 
     /// Split-K GEMMs this instance has dispatched.
@@ -2658,14 +2726,41 @@ impl Backend for Metal {
         let xb = self.chain_buf(x);
         let wb = self.weight_buf(w);
         let ob = self.chain_slot_for(out);
-        self.run_rows(
-            "ln_rows",
-            &[&xb, &wb, &ob],
-            &[rows as u32, d as u32],
-            &[inv_d, eps],
-            rows as u64,
-        )
-        .unwrap_or_else(|e| panic!("{e}"));
+        if self.ln_wide && d <= LN_WIDE_MAX_D {
+            // reflex issue 020 T11: 256 threads per row, row in registers.
+            let k = self
+                .pipelines
+                .get("ln_rows_wide")
+                .unwrap_or_else(|| panic!("kernel ln_rows_wide missing"));
+            self.encode(
+                &k.p,
+                &[(&xb, 0), (&wb, 0), (&ob, 0)],
+                &[rows as u32, d as u32],
+                &[inv_d, eps],
+                MTLSize {
+                    width: (rows as u64).max(1),
+                    height: 1,
+                    depth: 1,
+                },
+                MTLSize {
+                    width: 256,
+                    height: 1,
+                    depth: 1,
+                },
+                None,
+                true,
+            )
+            .unwrap_or_else(|e| panic!("{e}"));
+        } else {
+            self.run_rows(
+                "ln_rows",
+                &[&xb, &wb, &ob],
+                &[rows as u32, d as u32],
+                &[inv_d, eps],
+                rows as u64,
+            )
+            .unwrap_or_else(|e| panic!("{e}"));
+        }
         self.debug_writeback(&ob, out);
     }
 

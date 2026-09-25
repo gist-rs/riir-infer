@@ -51,14 +51,18 @@ fn t11_splitk_paired_ab() {
     let mut raw = ckpt_weights::load(&dir.join("model.safetensors"), name).expect("weights");
     let enc = Encoder::from_map(&mut raw, enc_cfg, name).expect("encoder");
     // AB_BASE=ceiling compares DEFAULT against the first rule instead of off.
+    // AB_BASE=ln compares against the one-simdgroup LayerNorm (split on).
     let base = match std::env::var("AB_BASE").as_deref() {
         Ok("ceiling") => SplitRule::TG_CEILING_ONLY,
+        Ok("ln") => SplitRule::DEFAULT,
         _ => SplitRule {
             on: false,
             ..SplitRule::DEFAULT
         },
     };
-    let off = Metal::with_split_rule(base).expect("metal base");
+    let off = Metal::with_split_rule(base)
+        .expect("metal base")
+        .with_ln_wide(std::env::var("AB_BASE").as_deref() != Ok("ln"));
     let on = Metal::with_split_rule(SplitRule {
         max_tgs,
         ..SplitRule::DEFAULT
