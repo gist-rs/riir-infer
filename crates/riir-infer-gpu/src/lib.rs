@@ -66,6 +66,8 @@ pub mod gemv_cubecl;
 #[cfg(feature = "cubecl_runtime")]
 pub mod gemv_f16_cubecl;
 #[cfg(feature = "cubecl_runtime")]
+pub mod transpose_cubecl;
+#[cfg(feature = "cubecl_runtime")]
 pub mod gemv_geglu_cubecl;
 #[cfg(feature = "cubecl_runtime")]
 pub mod gemv_geglu_f16_cubecl;
@@ -116,6 +118,8 @@ pub mod exl3_dequant_cubecl;
 pub use gemv_autotune::GemvAutotune;
 #[cfg(feature = "cubecl_runtime")]
 pub use gemv_cubecl::GemvCubeCL;
+#[cfg(feature = "cubecl_runtime")]
+pub use transpose_cubecl::TransposeCubeCL;
 #[cfg(feature = "cubecl_runtime")]
 pub use matmul_cubecl::MatmulCubeCL;
 #[cfg(feature = "swap_ab_gemm")]

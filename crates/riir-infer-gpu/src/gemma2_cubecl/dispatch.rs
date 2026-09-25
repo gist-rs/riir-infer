@@ -878,6 +878,46 @@ impl GpuGemmaCubeCL {
         output_handle
     }
 
+    /// Transpose an `[rows x cols]` f32 handle into a `[cols x rows]` one,
+    /// entirely on the device (riir-train Issue 572).
+    ///
+    /// `dst` must already be allocated with at least `rows * cols` f32
+    /// elements; it is fully overwritten, so a reused scratch handle needs no
+    /// clearing. Nothing is read back and no CPU sync is forced — the write is
+    /// ordered before any later dispatch that reads `dst` on the same client.
+    ///
+    /// This exists so the training lane can hold ONE transposed scratch buffer
+    /// per projection role instead of a transposed copy of every weight: the
+    /// pre-transposed handles cost a second 9.74 GB of device memory at
+    /// Gemma-2-2B f32, which does not fit beside the weights on a 24 GB card.
+    ///
+    /// Deliberately NOT gated on `gpu_training_resident` (unlike its GEMV
+    /// neighbour): both Gemma-2 backward routes — the resident batched one and
+    /// the hybrid per-position one — build their transposed handles through the
+    /// same constructor, and a feature-gated dispatch would fork that
+    /// constructor into two code paths for no behavioural reason.
+    pub fn dispatch_transpose_gpu(
+        &self,
+        src_handle: &Handle,
+        dst_handle: &Handle,
+        rows: usize,
+        cols: usize,
+    ) {
+        use crate::transpose_cubecl::TransposeCubeCL;
+        // SAFETY: both handles are asserted by the caller to hold at least
+        // rows x cols f32 elements; the kernel takes its shape from params and
+        // derives nothing from either buffer's declared length.
+        unsafe {
+            TransposeCubeCL::launch::<ActiveRuntime>(
+                &self.client,
+                src_handle.clone(),
+                dst_handle.clone(),
+                rows,
+                cols,
+            );
+        }
+    }
+
     /// Launch batched plane GEMV for backward weight-transposed multiply.
     ///
     /// Issue 424 fix: replaces `dispatch_gemm_gpu` in the batched backward.
