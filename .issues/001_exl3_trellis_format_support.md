@@ -1263,8 +1263,9 @@ to be rebuilt.
 ### 17.7 Landing record (2026-09-25)
 
 Code: `src/quant/exl3_pack.rs` — era gate + escape + 5 new tests + the 4
-existing fixtures re-configured (known-good era configs), clippy `-D
-warnings` clean at default AND `--features exl3` postures,
+existing fixtures re-configured (known-good era configs), landed at
+**`55c154f`** — clippy `-D warnings` clean at default AND `--features exl3`
+postures,
 `cargo test --features exl3 --lib exl3` 22 passed / 0 failed (3 ignored:
 2 real-pack env-gated + the pre-existing ngram arm), real-pack
 pass-side arm green (573 groups). The §12.7 marker-sentence correction
