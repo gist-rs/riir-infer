@@ -27,97 +27,19 @@
 //! tables are `StreamingMeanTable` rows — James–Stein shrinkage at
 //! finalize, tail-lump lower-bound coverage, all in the shared substrate.
 
-use katgpt_core::fitted_anchor_table::StreamingMeanTable;
-
-use super::attention_heads_parallel;
-use super::{ForwardContext, RAYON_MLP_THRESHOLD, RAYON_QKV_THRESHOLD};
 // Re-homed to `gguf_loader` (general-purpose; the row-logit-floor bin uses it
 // too). Re-exported so existing import paths keep working.
 pub use crate::gguf_loader::load_gemma2_f16_direct;
+// The layered table builder is substrate-owned since the Kimi-K3 fixture
+// (883 P0 second fixture, Bench 889): one builder, two fixtures. Re-exported
+// under its historical name so the bin + downstream imports are unchanged.
+pub use katgpt_core::fitted_anchor_table::LayeredVkCalibration as CalibrationTables;
+pub use katgpt_core::fitted_anchor_table::VkLayerTables;
 use crate::gemma_layer::GemmaTransformerWeightsF16;
+use super::attention_heads_parallel;
+use super::{ForwardContext, RAYON_MLP_THRESHOLD, RAYON_QKV_THRESHOLD};
 use crate::types::{self, Config};
 use katgpt_transformer::MultiLayerKVCache;
-
-/// Per-layer triplet of streaming tables (V, K, V−K) — one
-/// [`StreamingMeanTable`] per signal, `top_k` tracked token rows + the
-/// tail lump. Constructed once; `observe` is the calibration loop's hot
-/// path (alloc-free, the substrate's Bench 886 G4b).
-pub struct VkLayerTables {
-    pub v: StreamingMeanTable,
-    pub k: StreamingMeanTable,
-    pub vk: StreamingMeanTable,
-}
-
-/// The full calibration state: one table triplet per layer + the
-/// token→row map (`u32::MAX` = untracked → tail) built from the corpus
-/// frequency pre-pass + the V−K scratch (owned here so the observe path
-/// never borrows a ForwardContext buffer whose sizing is a LoRA concern).
-pub struct CalibrationTables {
-    pub layers: Vec<VkLayerTables>,
-    /// vocab-size map: token id → tracked row index, or `u32::MAX`.
-    pub row_of_token: Vec<u32>,
-    /// corpus frequency counts per token id (the Zipf shape read).
-    pub token_counts: Vec<u64>,
-    pub top_k: usize,
-    vk_scratch: Vec<f32>,
-}
-
-impl CalibrationTables {
-    /// Build tables for `n_layer` layers of `kv_dim`-wide rows, tracking
-    /// the `top_k` most frequent tokens of `token_counts` (the frequency
-    /// pre-pass output; ties broken by token id for determinism).
-    #[must_use]
-    pub fn from_counts(n_layer: usize, kv_dim: usize, token_counts: Vec<u64>, top_k: usize) -> Self {
-        let vocab = token_counts.len();
-        let mut order: Vec<u32> = (0..vocab as u32).filter(|&t| token_counts[t as usize] > 0).collect();
-        order.sort_unstable_by(|a, b| {
-            token_counts[*b as usize]
-                .cmp(&token_counts[*a as usize])
-                .then_with(|| a.cmp(b))
-        });
-        let top_k = top_k.min(order.len());
-        let mut row_of_token = vec![u32::MAX; vocab];
-        for (row, &tok) in order[..top_k].iter().enumerate() {
-            row_of_token[tok as usize] = row as u32;
-        }
-        let layers = (0..n_layer)
-            .map(|_| VkLayerTables {
-                v: StreamingMeanTable::new(top_k, kv_dim),
-                k: StreamingMeanTable::new(top_k, kv_dim),
-                vk: StreamingMeanTable::new(top_k, kv_dim),
-            })
-            .collect();
-        Self {
-            layers,
-            row_of_token,
-            token_counts,
-            top_k,
-            vk_scratch: vec![0.0; kv_dim],
-        }
-    }
-
-    /// Observe one token's per-layer tap pair. `k_vec` MUST be the
-    /// pre-RoPE K (the tap-point law); `v_vec` the post-W_V V. The V−K
-    /// residual is computed into the owned scratch — the retrofit table's
-    /// exact future input.
-    pub fn observe_layer(&mut self, layer: usize, token: usize, k_vec: &[f32], v_vec: &[f32]) {
-        let kvd = self.vk_scratch.len();
-        for i in 0..kvd {
-            self.vk_scratch[i] = v_vec[i] - k_vec[i];
-        }
-        let t = &mut self.layers[layer];
-        let row = self.row_of_token[token] as usize;
-        if row != u32::MAX as usize {
-            t.v.observe(row, v_vec);
-            t.k.observe(row, k_vec);
-            t.vk.observe(row, &self.vk_scratch);
-        } else {
-            t.v.observe_tail(v_vec);
-            t.k.observe_tail(k_vec);
-            t.vk.observe_tail(&self.vk_scratch);
-        }
-    }
-}
 
 /// The calibration forward: the `forward_gemma2_f16` layer stack (f16
 /// weights, causal, per-token) **minus the final norm/lm_head/softcap**

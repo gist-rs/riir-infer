@@ -480,6 +480,20 @@ per-op dispatch overhead.
 
 Session: 4090-cuda-flash, 2026-09-25
 
+## 2026-09-25 — CalibrationTables promoted substrate-side (883 P0 Kimi fixture rider)
+
+The gemma-2 harness's layered table builder moved upstream:
+`katgpt_core::fitted_anchor_table::LayeredVkCalibration` (with
+`VkLayerTables`) is now the ONE builder for both 883 P0 fixtures — this
+repo's gemma-2 dashboard and katgpt-rs's new Kimi-K3 dashboard (katgpt-rs
+Bench 889, real weights: ρ(V)≈ρ(K)≈ρ(V−K) per MLA layer — the "coupled
+through one latent" signature; KDA layers = fixture-class null, no KV
+cache). `gemma2_calibration.rs` re-exports it under the historical name
+`CalibrationTables` — zero behavior change, the `vk_calibration` bin
+compiles + clippy-clean unchanged. The tap forward, corpus loader, and
+dashboard format stay here (gemma-specific); the row-map/triplet/scratch
+plumbing is substrate-owned (DRY: one builder, two fixtures).
+
 ## 2026-09-24 — Issue 002 CLOSED: the CUDA backend for the laya lane (the 4090 bench row, 17–60× the CPU posture)
 
 Landed `9b52cb1`/`99f156e`→rebased `e99d767`: the lane's third compute
