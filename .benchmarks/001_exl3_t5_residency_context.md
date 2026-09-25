@@ -1,7 +1,7 @@
 # Bench 001 — EXL3 residency + context ceiling on the 4090 (Issue 001 T5)
 
 **Status:** COMPLETE (2026-09-24) · method: measured pack bytes + arithmetic
-projection · evidence chain: Issue 001 §13 (`.issues/001_exl3_trellis_format_support.md`)
+projection · evidence chain: Issue 001 §13 (`.docs/001_exl3_trellis_format_support.md`, relocated at close)
 
 ## What this measures
 

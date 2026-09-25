@@ -3,7 +3,7 @@
 //!
 //! Format spec: read at pin `turboderp-org/exllamav3 @
 //! 6b84a21b6f1e5da3f291b9e1019061f0de788279` — the full record lives in
-//! [`.issues/001_exl3_trellis_format_support.md` §10](../../.issues/001_exl3_trellis_format_support.md);
+//! [`.docs/001_exl3_trellis_format_support.md` §10](../../.docs/001_exl3_trellis_format_support.md);
 //! this doc restates only what the code needs. The dequantization contract
 //! follows the T2 seam decision (§11 of the same issue): this module is the
 //! first SAFETENSORS-side quant (no `GgmlType` coupling), the layer struct is

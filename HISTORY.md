@@ -4,6 +4,30 @@ Durable records for resolved questions and closed lanes (the noise-reduction
 convention: the record lands here, hash-pinned; open work lives in `.issues/`
 and `.plans/`). Created 2026-09-23 at the first record.
 
+## 2026-09-25 — Issue 001 CLOSED: EXL3 (trellis-coded) weight format — reader complete, fused-GEMV lane closed at this tier
+
+The full record (§1–§17, section numbers unchanged, so every `Issue 001 §N`
+citation in `src/quant/exl3*.rs`, `riir-infer-gpu`, the benches and plans
+still resolves) moved to
+[`.docs/001_exl3_trellis_format_support.md`](.docs/001_exl3_trellis_format_support.md).
+
+- **Banked (opt-in `exl3`, not promoted):** the safetensors-side grouped
+  reader + `quant/exl3.rs` (T2 Option A, no `GgmlType` coupling), the CPU
+  reference and LUT+rayon fast arm (`725a8a5`, 10.6–11.4×), the pack loader
+  (`bd93a7b`), the CubeCL GPU decode v1/v2 (Bench 002; 71–87× wall on the
+  4090), the sound bench harness (`9989e9f`), the whole-pack bit-exact
+  gate (`425e0c5`: 573/573 layers, 26.48 G weights, 0 mismatches on CUDA
+  AND Metal), and the fail-closed era gate at open (`55c154f`, known-good
+  `{"1.4.2"}`, `open_unverified_era` escape).
+- **The axis that is real is residency** (Bench 001: 3.4× vs f16; context
+  0 → ~117k on 24 GiB), not decode throughput. Decode runs 21–29 Gw/s and is
+  NOT bandwidth-bound; the binding mechanism is UNMEASURED.
+- **Closed at this tier:** T7c-2a/2b/3 (fused GEMV). By composition,
+  26.5 Gw/step ÷ ~28 Gw/s ≈ 0.95 s/step against a 10–20 ms incumbent, so
+  §14's delivered-gain trigger cannot be met. Reopen triggers r1–r4 are in
+  §17.6. r1 (a serving consumer of the residency axis) is the owner of the
+  "engine serving integration" line, and it needs a NEW issue when it fires.
+
 ## 2026-09-25 — T10 rung 2 (Metal): the attn_rope hoist pre-pass — default-off, promotion probe pending
 
 `attn_rope` now derives the Q/K rope ONCE per layer into a packed
