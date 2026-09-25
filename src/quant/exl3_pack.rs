@@ -19,11 +19,21 @@
 //! class (trellis codes / channel scales / markers / dense leftovers) from
 //! metadata alone, plus achieved bits-per-weight — no tensor data touched.
 //!
-//! Era gate (Issue 001 §12.7): this reader is only correct for PIN-ERA
-//! packs. Old packs silently decode differently under current exllamav3;
-//! the marker-value verification carried per §11.3 condition 3 covers the
-//! codebook dimension, and the pack-era dimension is the CALLER's to gate
-//! (pack creation date vs the pin; see §12.7's detector candidate).
+//! Era gate (Issue 001 §12.7, wired at open by the T7c-4 hygiene half):
+//! [`Exl3Pack::open`] verifies `quantization_config.version` in the pack's
+//! `config.json` (or the standalone `quantization_config.json` spelling)
+//! against [`KNOWN_GOOD_ERA_VERSIONS`] and REFUSES fail-closed on an absent
+//! or unknown version — old packs silently decode differently under current
+//! exllamav3 (the §12.7 measured specimen: 2025-05-era pack, `rel-Frobenius
+//! 0.184` divergence). A deliberate legacy/exotic-era read is spelled at
+//! the call site via [`Exl3Pack::open_unverified_era`].
+//!
+//! ⚠ Gate blind spot (stated, not hidden): the PASS side is validated at
+//! n=1 (the pin-era 4.09 bpw 27B pack, `version = "1.4.2"`) and the REFUSE
+//! side at n=0 (no legacy specimen on disk) — fail-closed is what makes
+//! n=0 acceptable; a permissive gate would not be. Admission of a new
+//! writer version = the T7c-1c full-pack bit-exact gate on a real pack of
+//! that version, then one line in [`KNOWN_GOOD_ERA_VERSIONS`].
 
 use std::collections::{BTreeMap, HashSet};
 use std::path::Path;
@@ -33,6 +43,16 @@ use memmap2::Mmap;
 
 use super::exl3::{Exl3Layer, Exl3LayerPlan, detect_exl3_layers};
 use crate::safetensors_loader::{TensorMeta, parse_safetensors_header};
+
+/// exllamav3 writer versions this loader is VALIDATED against — admission
+/// is the T7c-1c full-pack bit-exact gate (573/573 layers, 26.48 G weights,
+/// 0 mismatches, CUDA + Metal) run on a real pack of that version. Today
+/// that is exactly the pin-era `turboderp/Qwen3.8-27B-exl3@SC_4.00bpw_H5_V6`
+/// (`version = "1.4.2"`). Everything else — including newer exllamav3
+/// releases until validated — is refused by [`Exl3Pack::open`] (fail-closed,
+/// Issue 001 §12.7); a deliberate read of an unvalidated era goes through
+/// [`Exl3Pack::open_unverified_era`], which names the risk at the call site.
+pub const KNOWN_GOOD_ERA_VERSIONS: &[&str] = &["1.4.2"];
 
 /// One mapped shard + its parsed header.
 struct Shard {
@@ -108,7 +128,14 @@ impl Exl3Residency {
 }
 
 impl Exl3Pack {
-    /// Open a pack directory. Layouts, in preference order:
+    /// Open a pack directory, era-gated (Issue 001 §12.7 / T7c-4): the
+    /// pack's `quantization_config.version` must appear in
+    /// [`KNOWN_GOOD_ERA_VERSIONS`] or the open REFUSES loudly — legacy-era
+    /// packs decode wrong under this reader (measured: the 2025-05 specimen
+    /// diverged at rel-Frobenius 0.184). Use [`Exl3Pack::open_unverified_era`]
+    /// for a deliberate unvalidated-era read.
+    ///
+    /// Layouts, in preference order:
     ///
     /// 1. `model.safetensors.index.json` — the sharded HF layout; the
     ///    weight map decides which shard each tensor lives in.
@@ -120,9 +147,27 @@ impl Exl3Pack {
     /// name appearing in two shards, or an index entry naming a missing
     /// shard, refuses loudly.
     pub fn open(dir: &Path) -> Result<Self> {
+        Self::open_with_era_policy(dir, EraPolicy::Verify)
+    }
+
+    /// Open a pack directory WITHOUT the era gate — the deliberate
+    /// unvalidated-era read (legacy packs, pre-release writer builds, or
+    /// a new exllamav3 version not yet admitted to
+    /// [`KNOWN_GOOD_ERA_VERSIONS`]). The caller owns the compatibility
+    /// risk: §12.7 measured a legacy pack decoding DIFFERENTLY (silently
+    /// wrong values, not an error) under pin-era code. Spelling the escape
+    /// at the call site is the point — a silent default would hide it.
+    pub fn open_unverified_era(dir: &Path) -> Result<Self> {
+        Self::open_with_era_policy(dir, EraPolicy::Unverified)
+    }
+
+    fn open_with_era_policy(dir: &Path, era: EraPolicy) -> Result<Self> {
         let shard_names = shard_file_names(dir)?;
         if shard_names.is_empty() {
             bail!("no safetensors shards found in {}", dir.display());
+        }
+        if era == EraPolicy::Verify {
+            verify_pack_era(dir)?;
         }
 
         let mut shards = Vec::with_capacity(shard_names.len());
@@ -328,6 +373,97 @@ fn read_u32(
     Some(u32::from_le_bytes(b))
 }
 
+/// Which era check [`Exl3Pack::open_with_era_policy`] runs.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum EraPolicy {
+    Verify,
+    Unverified,
+}
+
+/// The §12.7 pack-era gate: read the pack's writer version from either
+/// config spelling and refuse fail-closed unless it is a validated era.
+///
+/// * `config.json` → embedded `quantization_config.{version, quant_method}`
+///   (the exllamav3 writer has stamped this since versioning was
+///   established — `conversion/compile.py` writes `"version": __version__`)
+/// * `quantization_config.json` → the standalone HF spelling, same keys
+///
+/// Fail-closed in every unvalidated direction: no version found (the
+/// pre-versioning legacy class — exllamav3 was at `"0.0.1"` in 2025-05,
+/// the era of the §12.7 specimen), a version outside
+/// [`KNOWN_GOOD_ERA_VERSIONS`], disagreeing spellings, or a present
+/// `quant_method` that is not `exl3`.
+fn verify_pack_era(dir: &Path) -> Result<String> {
+    #[derive(Default)]
+    struct Found {
+        versions: Vec<String>,
+        quant_methods: Vec<String>,
+    }
+    let mut found = Found::default();
+    let mut read_spelling = |path: &Path, embedded: bool| -> Result<()> {
+        if !path.exists() {
+            return Ok(());
+        }
+        let text = std::fs::read_to_string(path)
+            .with_context(|| format!("failed to read {}", path.display()))?;
+        let v: serde_json::Value = serde_json::from_str(&text)
+            .with_context(|| format!("failed to parse {} as JSON", path.display()))?;
+        let qc = if embedded {
+            v.get("quantization_config")
+        } else {
+            Some(&v)
+        };
+        let Some(qc) = qc else { return Ok(()) };
+        if let Some(m) = qc.get("quant_method").and_then(|m| m.as_str()) {
+            found.quant_methods.push(m.to_string());
+        }
+        if let Some(v) = qc.get("version").and_then(|v| v.as_str()) {
+            found.versions.push(v.to_string());
+        }
+        Ok(())
+    };
+    read_spelling(&dir.join("config.json"), true)?;
+    read_spelling(&dir.join("quantization_config.json"), false)?;
+
+    for m in &found.quant_methods {
+        if m != "exl3" {
+            bail!(
+                "pack-era gate: quantization_config quant_method is '{m}', not 'exl3' — \
+                 {} is not an EXL3 pack",
+                dir.display()
+            );
+        }
+    }
+    if found.versions.is_empty() {
+        bail!(
+            "pack-era gate: no quantization_config.version in {} \
+             (config.json / quantization_config.json) — pre-versioning packs decode \
+             WRONG under this reader (Issue 001 §12.7); deliberate read? \
+             Exl3Pack::open_unverified_era",
+            dir.display()
+        );
+    }
+    if found.versions.len() > 1 && found.versions[0] != found.versions[1] {
+        bail!(
+            "pack-era gate: config spellings disagree on version ({} vs {}) in {} — \
+             refusing rather than guessing",
+            found.versions[0],
+            found.versions[1],
+            dir.display()
+        );
+    }
+    let version = found.versions.remove(0);
+    if !KNOWN_GOOD_ERA_VERSIONS.contains(&version.as_str()) {
+        bail!(
+            "pack-era gate: pack written by exllamav3 {version}; this reader is \
+             validated on {} only (admission = the full-pack bit-exact gate of \
+             Issue 001 §17.5 T7c-1c); deliberate read? Exl3Pack::open_unverified_era",
+            KNOWN_GOOD_ERA_VERSIONS.join(", ")
+        );
+    }
+    Ok(version)
+}
+
 /// Resolve the shard file list for `open`: index.json weight map if
 /// present, else the sorted `*.safetensors` directory entries.
 fn shard_file_names(dir: &Path) -> Result<Vec<String>> {
@@ -419,6 +555,44 @@ mod tests {
             .concat()
     }
 
+    /// Write a pack config carrying the given writer version. Real
+    /// converted packs always carry one (the exllamav3 writer stamps it),
+    /// so every fixture that expects `open` to succeed writes a
+    /// known-good-era config; era-refusal fixtures write their own.
+    fn write_config(dir: &Path, version: &str) {
+        std::fs::write(
+            dir.join("config.json"),
+            serde_json::json!({
+                "quantization_config": {
+                    "quant_method": "exl3",
+                    "version": version,
+                }
+            })
+            .to_string(),
+        )
+        .unwrap();
+    }
+
+    /// Minimal valid single-file pack (one 128×128 K=4 mul1 group), with a
+    /// known-good-era config — the base fixture for era-gate tests.
+    fn write_min_pack(dir: &Path) {
+        let (trellis, suh, svh) = group_raw(21);
+        write_shard(
+            &dir.join("model.safetensors"),
+            &[
+                ("l.trellis", "I16", vec![8, 8, 64], trellis),
+                ("l.suh", "F16", vec![128], suh),
+                ("l.svh", "F16", vec![128], svh),
+                (
+                    "l.mul1",
+                    "I32",
+                    vec![],
+                    EXL3_MUL1_MARKER.to_le_bytes().to_vec(),
+                ),
+            ],
+        );
+    }
+
     /// One 128×128 K=4 group's raw parts (random codes, benign scales).
     fn group_raw(seed: u64) -> (Vec<u8>, Vec<u8>, Vec<u8>) {
         let mut rng = fastrand::Rng::with_seed(seed);
@@ -478,6 +652,7 @@ mod tests {
             serde_json::to_string(&serde_json::json!({ "weight_map": weight_map })).unwrap(),
         )
         .unwrap();
+        write_config(&dir, KNOWN_GOOD_ERA_VERSIONS[0]);
 
         let pack = Exl3Pack::open(&dir).unwrap();
         assert_eq!(pack.shard_count(), 2);
@@ -547,6 +722,7 @@ mod tests {
                 ),
             ],
         );
+        write_config(&dir, KNOWN_GOOD_ERA_VERSIONS[0]);
         let pack = Exl3Pack::open(&dir).unwrap();
         assert_eq!(pack.shard_count(), 1);
         assert_eq!(pack.layer_keys(), vec!["l"]);
@@ -575,6 +751,7 @@ mod tests {
                 ),
             ],
         );
+        write_config(&dir, KNOWN_GOOD_ERA_VERSIONS[0]);
         let pack = Exl3Pack::open(&dir).unwrap();
         assert!(
             pack.layer_keys().is_empty(),
@@ -595,8 +772,122 @@ mod tests {
             &dir.join("b.safetensors"),
             &[("x", "F16", vec![2], vec![0, 0, 0, 0])],
         );
+        write_config(&dir, KNOWN_GOOD_ERA_VERSIONS[0]);
         let err = Exl3Pack::open(&dir).unwrap_err();
         assert!(err.to_string().contains("duplicate"), "got: {err}");
+    }
+
+    /// §12.7 / T7c-4: absent version = the pre-versioning legacy class →
+    /// `open` refuses fail-closed; the deliberate-read escape opens the
+    /// same directory (naming the risk at the call site, by design).
+    #[test]
+    fn era_gate_absent_version_refuses_and_escape_opens() {
+        let dir = test_dir("era_absent");
+        write_min_pack(&dir);
+        let err = Exl3Pack::open(&dir).unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("pack-era gate"), "got: {msg}");
+        assert!(msg.contains("open_unverified_era"), "got: {msg}");
+        let pack = Exl3Pack::open_unverified_era(&dir).unwrap();
+        assert_eq!(pack.layer_keys(), vec!["l"]);
+    }
+
+    /// Unknown writer version → refuse, naming the OBSERVED value (the
+    /// operator must see what the pack claims). "0.0.1" is the measured
+    /// legacy-era spelling (exllamav3 `version.py` at 2025-05-11).
+    #[test]
+    fn era_gate_unknown_version_refuses_with_observed_value() {
+        let dir = test_dir("era_unknown");
+        write_min_pack(&dir);
+        write_config(&dir, "0.0.1");
+        let err = Exl3Pack::open(&dir).unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("pack-era gate"), "got: {msg}");
+        assert!(msg.contains("0.0.1"), "got: {msg}");
+        assert!(msg.contains("open_unverified_era"), "got: {msg}");
+        assert!(Exl3Pack::open_unverified_era(&dir).is_ok());
+    }
+
+    /// The standalone `quantization_config.json` spelling is a first-class
+    /// citizen (some HF repos split it out) — same version, same gate.
+    #[test]
+    fn era_gate_standalone_quantization_config_spelling_opens() {
+        let dir = test_dir("era_standalone");
+        write_min_pack(&dir);
+        std::fs::write(
+            dir.join("quantization_config.json"),
+            serde_json::json!({
+                "quant_method": "exl3",
+                "version": KNOWN_GOOD_ERA_VERSIONS[0],
+            })
+            .to_string(),
+        )
+        .unwrap();
+        let pack = Exl3Pack::open(&dir).unwrap();
+        assert_eq!(pack.layer_keys(), vec!["l"]);
+    }
+
+    /// A directory that is not an EXL3 quantization at all (present
+    /// `quant_method` spelling something else) refuses with that observed
+    /// method — clearer than a downstream decode-shaped error.
+    #[test]
+    fn era_gate_wrong_quant_method_refuses() {
+        let dir = test_dir("era_method");
+        write_min_pack(&dir);
+        std::fs::write(
+            dir.join("config.json"),
+            serde_json::json!({
+                "quantization_config": {
+                    "quant_method": "awq",
+                    "version": KNOWN_GOOD_ERA_VERSIONS[0],
+                }
+            })
+            .to_string(),
+        )
+        .unwrap();
+        let err = Exl3Pack::open(&dir).unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("quant_method"), "got: {msg}");
+        assert!(msg.contains("awq"), "got: {msg}");
+    }
+
+    /// Disagreeing spellings refuse rather than guess — an ambiguous pack
+    /// is the operator's to inspect, not the loader's to adjudicate.
+    #[test]
+    fn era_gate_disagreeing_spellings_refuse() {
+        let dir = test_dir("era_disagree");
+        write_min_pack(&dir);
+        write_config(&dir, KNOWN_GOOD_ERA_VERSIONS[0]);
+        std::fs::write(
+            dir.join("quantization_config.json"),
+            serde_json::json!({
+                "quant_method": "exl3",
+                "version": "0.9.0",
+            })
+            .to_string(),
+        )
+        .unwrap();
+        let err = Exl3Pack::open(&dir).unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("disagree"), "got: {msg}");
+        assert!(msg.contains("0.9.0"), "got: {msg}");
+    }
+
+    /// Pass-side evidence on the REAL pin-era pack (the n=1 the gate's
+    /// blind-spot note names): `open` succeeds through the era gate on
+    /// `version = "1.4.2"` and finds the 573-group surface. Opt-in via
+    /// `EXL3_PACK_DIR`; skips loudly when unset.
+    #[test]
+    #[ignore = "needs a real EXL3 pack on disk (EXL3_PACK_DIR)"]
+    fn real_pack_era_gate_opens() {
+        let dir = std::env::var("EXL3_PACK_DIR").unwrap_or_default();
+        if dir.is_empty() {
+            eprintln!("SKIPPED: EXL3_PACK_DIR not set");
+            return;
+        }
+        let pack = Exl3Pack::open(Path::new(&dir)).unwrap();
+        assert!(!pack.layer_keys().is_empty(), "no EXL3 groups detected");
+        eprintln!("era gate passed: {} groups", pack.layer_keys().len());
     }
 
     /// Real-pack measurement (Issue 001 T5): residency table + sample

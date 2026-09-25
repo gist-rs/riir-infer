@@ -1,6 +1,6 @@
 # Issue 001 — EXL3 (trellis-coded) weight-format support in the quantization zoo
 
-**Status:** OPEN — T1–T7 COMPLETE 2026-09-24 (T4b native oracle BIT-EXACT; T7a CPU 10.6-11.4×; T7b GPU 4090 71-87× wall / 4.7-5.8 Gw/s kernel, [Bench 002](../.benchmarks/002_exl3_t7b_gpu_dequant.md)). **T7c ACTIVE (filed 2026-09-24, verdict-adjudicated §17): the fused trellis GEMV — T7c-1a DONE (v2 bit-exact); T7c-1b DONE (kill criterion FIRED for extraction, noisy harness documented); T7c-1d DONE 2026-09-25 (stable harness landed + re-run: A2≈A1 confirmed by sound measurement — extraction CLOSED; LUT gather = the one real 1.25×; decode wall ≈ 28 Gw/s is latency-class, not bandwidth — the T7c-2 proceed/pivot/close decision is the OWNER call the §17.5 T7c-1d table feeds). T7c-1c DONE 2026-09-25 (whole-pack bit-exact gate, plan 004: v2 ≡ v1 ≡ CPU on 573/573 layers / 26.48 G weights incl. first-ever K6 vision-tower decode — §17.3 gate 1 CLOSED at whole-pack scope). The §14 trigger discharges at GEMV level IN-REPO (structural argument §17.1); engine serving integration remains separately open, not implied-complete.**
+**Status:** OPEN (reader complete; fused-GEMV lane CLOSED) — T1–T7 COMPLETE 2026-09-24 (T4b native oracle BIT-EXACT; T7a CPU 10.6-11.4×; T7b GPU 4090 71-87× wall / 4.7-5.8 Gw/s kernel, [Bench 002](../.benchmarks/002_exl3_t7b_gpu_dequant.md)). **T7c: T7c-1a/1b/1d/1c DONE 2026-09-24/25** (v2 bit-exact; extraction kill criterion fired + confirmed by the sound harness — extraction CLOSED; LUT gather = the one real 1.25×; decode wall 21-29 Gw/s, NOT bandwidth-bound at ~3.5 GB/s of ~1008 GB/s — binding mechanism UNMEASURED, candidates: dependent-load latency / occupancy-ILP / LUT-gather serialization; whole-pack bit-exact gate green 573/573 layers / 26.48 G weights, CUDA + Metal). **T7c-2a/2b/3 CLOSED-AT-THIS-TIER 2026-09-25 by the owner-delegated Claude verdict ping-pong (session `36dc0297`, round-3 REVISE upholding CLOSE) — the fused GEMV's step time is computable from landed measurements (26.5 Gw/step ÷ ~28 Gw/s ≈ 0.95 s vs the 10-20 ms incumbent) and §14's trigger asks for delivered gain vs that incumbent; reopen triggers r1-r4 recorded at §17.5. T7c-4 SPLIT: the era-gate-at-open half LANDED 2026-09-25 (`verify_pack_era` on `quantization_config.version`, fail-closed, `open_unverified_era` escape, known-good = {"1.4.2"}); the promotion half closes UN-DISCHARGEABLE at this tier — §14 stays REFUSED with its trigger intact, now backed by a real refusal instead of a doc comment.** Engine serving integration remains separately open, not implied-complete.
 **Owner:** unassigned. **Filed:** 2026-09-24. **T1–T4 executed:** 2026-09-24 (4090 box).
 **Origin:** riir-clippy Research 207 (`.research/207_qwen38_exl3_dgx_spark_distill_verdict.md`),
 lane-intel axis. The corpus half of that verdict is riir-clippy Plan 170 and is
@@ -699,6 +699,21 @@ permutation, codebook defaults, packing) with no compat guarantee —
 exllamav3 carries no format version marker, so OLD PACKS SILENTLY DECODE
 WRONG (or at least differently) under current code.
 
+> **Correction 2026-09-25 (T7c-4 landing): the sentence above — "exllamav3
+> carries no format version marker" — is FALSE as written, and the era
+> gate landed on the truth.** The TENSOR format self-describes nothing,
+> but the pack CONFIG self-describes plenty: the writer has stamped
+> `quantization_config.version` (its own `__version__`) into the pack's
+> `config.json` since versioning was established (`conversion/compile.py`
+> at the pin writes `"version": __version__`), and the real 27B pack
+> carries `"version": "1.4.2"`. The legacy-era specimen predates the
+> stamp (exllamav3 `version.py` read `"0.0.1"` at 2025-05-11) — exactly
+> the absent-version class. The shipped detector candidate named below
+> (unpack-vs-reconstruct probe) was therefore never built: it needs the
+> exllamav3 Python env at open, and the config-key gate does not. Wired as
+> `verify_pack_era` at `Exl3Pack::open` — fail-closed, escape
+> `open_unverified_era`; see §17.5 T7c-4.
+
 **Consequences:**
 1. For any future oracle or production read: use pin-era packs only; the
    pack creation date vs the pin is a load-bearing compatibility axis the
@@ -871,6 +886,15 @@ reader into every build — surface with zero delivered gain. The reader is
 also era-gated by necessity (§12.7): a default-on surface that happily
 opens LEGACY packs (which decode wrong) is a hazard an opt-in surface
 keeps explicit.
+
+> **Update 2026-09-25 (T7c-4):** the era hazard named in the paragraph
+> above is now a REAL refusal at `Exl3Pack::open` (`verify_pack_era`,
+> fail-closed on `quantization_config.version`, `open_unverified_era`
+> escape) — no longer a doc comment the caller must remember. The
+> promotion trigger below stays INTACT and un-discharged: the fused-GEMV
+> arm that would have measured the delivered gain is CLOSED at this tier
+> (§17.6); on any reopen trigger r1-r4, this gate re-runs with runtime
+> numbers as written.
 
 **Promotion trigger (named, one condition):** T7 lands a serving/GPU arm
 that consumes `Exl3Pack` end-to-end AND measures the delivered gain on
@@ -1134,21 +1158,116 @@ RAM, commit-vs-limit, concurrent jobs — multi-session 4090).
 **Verdicts (the decision the task named):**
 1. **The T7c-1b kill criterion for the extraction class is CONFIRMED by the sound harness** — A2 ≈ A1 on every layer (0.97–1.02×). The modulo/loads mechanism was never the bottleneck; v1 stays the decode kernel; no further extraction work.
 2. **A3 is the first reliable signal of the real cost: the LUT gather is a consistent 1.25–1.29× on EVERY layer** (26.6–28.8 vs 21–23 Gw/s). An arithmetic-LUT (A3-class) variant is the only remaining extraction-class win, and it is bounded at ~28 Gw/s.
-3. **The ceiling arithmetic stands refuted as a target**: even at A3's ~28 Gw/s the decode is ~3.5× below the ~100 Gw/s (~17×) derivation — the wall is NOT the window math NOR the gather; at 13.8 GB of trellis bytes per 27B step the DRAM/L2 read of the codes themselves is the binding term (28 Gw/s ≈ 3.5 GB/s of codes at 0.125 B/weight — far under the 1 TB/s HBM, so the wall is LATENCY-class: the per-weight dependent-load chain, not bandwidth). The honest reading: **inline decode cannot reach q4k-class GEMV by extraction alone; the lane decision (proceed-with-A3 / pivot to tensor-core trellis decode per the format's own design intent / close) is the OWNER call this table feeds.**
+3. The ceiling arithmetic stands refuted as a target: even at A3's ~28 Gw/s the decode is ~3.5× below the ~100 Gw/s (~17×) derivation — the wall is NOT the window math NOR the gather; at 13.8 GB of trellis bytes per 27B step the DRAM/L2 read of the codes themselves is the binding term (28 Gw/s ≈ 3.5 GB/s of codes at 0.125 B/weight — far under the 1 TB/s HBM). The honest reading: **inline decode cannot reach q4k-class GEMV by extraction alone; the lane decision (proceed-with-A3 / pivot to tensor-core trellis decode per the format's own design intent / close) is the OWNER call this table feeds.**
+  [Correction 2026-09-25, per the closure verdict round 3: the original wording above concluded "the wall is LATENCY-class: the per-weight dependent-load chain, not bandwidth" — that mechanism was reached by ELIMINATION (bandwidth ruled out by the 3.5 GB/s-vs-1008 GB/s arithmetic), not measured; nothing measured the dependent-load chain itself, and occupancy/ILP limits and LUT-gather serialization remain live candidates. The lane decision this table fed was adjudicated 2026-09-25 by the owner-delegated verdict ping-pong (session `36dc0297`): **CLOSE at this tier** — see the T7c-2 closure block below.]
 4. Harness validity: 14/15 rows under the 10% spread gate (one A1 row at 13.4% printed UNSTABLE and is excluded from verdicts); lm_head — the only layer where the pass is big enough to amortize the readback — is the only cross-agree=YES row, which is itself evidence the differential method was unsound at small scales (the reason it was replaced). v2-vs-v1 bit-exactness re-asserted per layer (§17.3 gate 1 at bench scope, green).
 5. Box state: RTX 4090 24 GiB, AC, GPU at the ~5% idle desktop baseline through the run (checked pre-launch; 503 MiB in use, no compute apps); the bench window was 01:35:20–01:44:50 (+0700); a CONCURRENT reflex harness (another agent's lane) started 01:51 — AFTER the run; numbers carry that provenance.
 
   Blocked-on note (the process-level lesson, recorded because it cost two dead runs): a detached-over-SSH process on the 4090 is reaped when the launching SSH session tears down — the run only survives via `schtasks /create /sc once` + `/run` (session-independent). Any future long remote bench launches through a scheduled task, never `Start-Process`.
 - [x] T7c-1c: full-pack bit-exact gate — **DONE 2026-09-25 03:57 (+0700, 4090 CUDA, plan 004, exit 0 in 555 s)**: `real_pack_v2_bit_exact_full` + the core `decode_w_rot_f32` extraction (commit `425e0c5`), whole pack via scheduled task. **v2 ≡ v1 ≡ CPU reference on EVERY layer: 573/573 layers, 26,481,917,952 weights, 0 bit mismatches (both v2-vs-v1 and v2-vs-CPU), wall 551.9 s.** The CPU oracle is `Exl3Layer::decode_w_rot_f32` — the decode-only LUT stage extracted from `dequantize_f32_parallel`; the scalar `dequantize_f32` stays UNTOUCHED as the independent oracle (`parallel_matches_scalar_bit_identical` pins helper ≡ scalar; core suite 17 passed; GPU module 7 passed on M3 Metal before the run). **Coverage is the gate's payoff — the synthetic fixtures cover K 2/3/4.5/5 only:** K3 34 layers / 2.55 G w · K4 305 / 19.67 G · K5 66 / 3.78 G · **K6 168 layers / 480 M w — the vision tower (`model.visual.*`) decoded for the first time**; the table independently confirms the pack's own quantization_config (vision_bits 6 → K6, mtp_bits 4 → mtp K4, head_bits 5 → lm_head K5, 1.271 G w bit-exact). All 573 groups are Cb2Mul1 — this pack is mul1 throughout, so Cb0/Cb1Mcg remain synthetic-fixture-covered only. Coverage floors pinned in the gate (≥500 plans / ≥26 G weights / ≥3 K×codebook classes) — a loader regression REDS, never a green zero. Box state (agent-measured at launch): RTX 4090 24 GiB idle desktop baseline (20% util, 503 MiB, 37.5 W, no compute apps), AC; run window 03:45–03:57 via scheduled task (the reaping lesson; a git-bundle fetch — the box's github fetch hung twice). **M3 Metal DOUBLE-BACKEND CONFIRMATION (same gate, 03:57–04:12 +0700): PASSED — 573/573 layers / 26,481,917,952 weights / 0 mismatches on the wgpu→Metal codegen path too, wall 183.3 s.** The pack (16,349,968,660 B) was copied to the M3 and is byte-count-verified against §13's recorded download size; coverage table identical (K3 34 · K4 305 · K5 66 · K6 168, all Cb2Mul1). The 555 s (CUDA) vs 183 s (Metal) wall gap is a MEASUREMENT-SHAPE note, not a throughput claim: the 4090's per-layer cost is dominated by PCIe chunk readback, which M3 unified memory does not pay — the same latency-class reading §17.5 T7c-1d recorded for the decode wall itself. Box state: AC plugged, battery 100%; only idle co-tenants (the mmorpg authority at ~1.7% CPU, a reflex serve process at ~0%) — no GPU compute during the run. **§17.3 gate 1 is closed with double-backend evidence; the T7c-2 proceed/pivot/close decision remains the OWNER call.**
-- [ ] T7c-2a: vector-side Hadamard transform kernels (input `v =
+- [-] T7c-2a: vector-side Hadamard transform kernels (input `v =
       H·(svh⊙x)` per 128-block; output `y = suh⊙(H·t)` per 128-block).
-- [ ] T7c-2b: the fused GEMV kernel `gemv_exl3_cubecl` (plane-per-output-
+      **CLOSED-AT-THIS-TIER 2026-09-25** (with T7c-2b/3 below) by the
+      owner-delegated Claude verdict ping-pong — session `36dc0297`,
+      round 3: `REVISE` upholding the CLOSE recommendation; every revision
+      executed in this same landing (see the closure block + the T7c-4
+      era-gate record).
+- [-] T7c-2b: the fused GEMV kernel `gemv_exl3_cubecl` (plane-per-output-
       column, inline v2 decode + FMA; `Exl3Handle` = GPU-resident trellis
       words + LUT + H + scales per layer) + the accumulation-order
-      tolerance oracle vs CPU.
-- [ ] T7c-3: the delivered-gain bench (Bench 003): bytes/step + step time
-      across EXL3-fused / f16 / q4k on the same weights + box, box state
-      recorded; §14 gate re-run with the runtime numbers.
-- [ ] T7c-4: era-gate wiring at `Exl3Pack` open (refuse legacy packs
-      loudly at open, not decode — §12.7) + the promotion gate re-run;
-      verdict-adjudicated promotion decision recorded here.
+      tolerance oracle vs CPU. **CLOSED-AT-THIS-TIER 2026-09-25.**
+- [-] T7c-3: the delivered-gain bench (bench number NOT pre-allocated —
+      take the next free per `.benchmarks/.highwater` at reopen): bytes/step
+      + step time across EXL3-fused / f16 / q4k on the same weights + box,
+      box state recorded; §14 gate re-run with the runtime numbers.
+      **CLOSED-AT-THIS-TIER 2026-09-25.**
+
+### 17.6 T7c-2 closure record (2026-09-25, verdict ping-pong session `36dc0297`)
+
+**The decision:** CLOSE the fused-GEMV lane at this effort tier. Upheld by
+the reviewer's round-3 verdict (a `REVISE` whose revisions were executed,
+not a rejection of the close): (A) proceeding was refuted BY COMPOSITION,
+not pessimism — the fused GEMV changes byte traffic, not the decode rate,
+and the decode rate is the binding term; 26.5 Gw/step ÷ ~28 Gw/s ceiling ≈
+0.95 s/step against a 10-20 ms incumbent is ~50×; §14's trigger asks for
+measured delivered gain vs that incumbent, so the bench's verdict is
+already computable from landed measurements — three GPU-days to print a
+refusal buys nothing. (B) the hand-CUDA/tensor-core pivot stays rejected
+for its stated reasons (week+ uncertain effort, no consumer — engine
+serving integration separately open; 4090 windows owed to armed league
+lanes) and is sequenced behind a POC reopen trigger (r4) instead of a
+cold-start port.
+
+**The measured bound this closure rests on** (§17.5 T7c-1d, sound
+harness): decode 21-29 Gw/s across five real-pack layers and three
+structurally different kernel arms; NOT bandwidth-bound (~3.5 GB/s of
+codes vs ~1008 GB/s HBM). **The binding mechanism is UNMEASURED** —
+candidates: per-weight dependent-load latency, occupancy/ILP limits,
+LUT-gather serialization. The consistency of 21-29 Gw/s across three
+arms is itself evidence, and it does not select among the candidates
+(the round-3 correction to verdict 3 above).
+
+**Reopen triggers (any one fires):**
+- **r1 — a real consumer of the residency axis:** an engine serving
+  integration that needs 4 bpw residency / >100k-token context on 24 GiB
+  where decode speed is secondary (prefill-amortized long-context lane).
+  EXL3's banked win stays §2/Bench 001 (3.4× vs f16; context 0 → ~117k).
+- **r2 — upstream movement worth mining:** exllamav3 ships a production
+  decode/GEMV kernel reference, or a league opponent adopts an
+  EXL3-class format (competitive need).
+- **r3 — the Mac Ultra context lane:** unified memory changes the
+  readback economics (the T7c-1c full-pack gate already ran 3× faster on
+  Metal for exactly this reason; the Metal backend is bit-exact-validated).
+- **r4 — a two-stage probe proves the wall falls, cheap-first:** FIRST a
+  bounded occupancy/ILP sweep on the EXISTING v1 kernel (cubes-in-flight
+  × per-thread weight count — hours-class; a FLAT sweep confirms the
+  closure, a RISING one reopens cheaply); the cp.async/smem-staged POC
+  ONLY if the sweep is flat and the lane still matters. (The original
+  single-stage cp.async-POC wording presumed the unmeasured latency
+  diagnosis — corrected per the round-3 verdict.)
+
+**What closure keeps banked:** the loader, CPU reference + fast arm, GPU
+v1/v2 decode kernels, double-backend whole-pack bit-exactness (573/573
+layers), and the sound bench harness — nothing in any reopen trigger has
+to be rebuilt.
+
+- [x] T7c-4: era-gate wiring at `Exl3Pack` open — **DONE 2026-09-25 (the
+      hygiene half; commit recorded in §17.7)**: `verify_pack_era` reads
+      `quantization_config.version` from `config.json` (embedded) and/or
+      the standalone `quantization_config.json` spelling, checked against
+      `KNOWN_GOOD_ERA_VERSIONS = ["1.4.2"]` (the validated pin-era pack;
+      admission rule = the T7c-1c full-pack bit-exact gate on a real pack
+      of that version). Fail-closed in every unvalidated direction:
+      absent version (the pre-versioning legacy class — exllamav3 was at
+      "0.0.1" in 2025-05, the era of the §12.7 specimen), unknown version
+      (error names the OBSERVED value), disagreeing spellings, present
+      `quant_method ≠ "exl3"`. Escape: `Exl3Pack::open_unverified_era` —
+      the deliberate unvalidated-era read, spelled at the call site.
+      Fixture battery: 5 new tests (absent/unknown/standalone/method/
+      disagreement) + the 4 existing fixtures now carry known-good
+      configs (a `cfg(test)` bypass was refused — test posture = shipped
+      posture) + `real_pack_era_gate_opens` (env-gated pass-side arm,
+      run green on the real pack: 573 groups). **Blind spot, stated on
+      the gate itself:** pass side validated at n=1 (the pin-era pack),
+      refuse side at n=0 (no legacy specimen on disk) — fail-closed is
+      what makes n=0 acceptable. The `su/sv`-vs-`suh/svh` split was
+      measured NOT an era axis (legacy signs are a SUPPORTED
+      representation path, Group B/cb0, round-trip-pinned) and is not
+      consulted. **The promotion half of T7c-4 closes UN-DISCHARGEABLE at
+      this tier:** §14 stays REFUSED with its named trigger intact — no
+      consuming arm exists, and the fused-GEMV arm that would have
+      measured the delivered gain is closed above. The opt-in mitigation
+      §14 leaned on ("an opt-in surface keeps the hazard explicit") is
+      now a REAL refusal at open, not a doc comment.
+
+### 17.7 Landing record (2026-09-25)
+
+Code: `src/quant/exl3_pack.rs` — era gate + escape + 5 new tests + the 4
+existing fixtures re-configured (known-good era configs), clippy `-D
+warnings` clean at default AND `--features exl3` postures,
+`cargo test --features exl3 --lib exl3` 22 passed / 0 failed (3 ignored:
+2 real-pack env-gated + the pre-existing ngram arm), real-pack
+pass-side arm green (573 groups). The §12.7 marker-sentence correction
+landed in the same commit. No files under `crates/riir-infer-laya`
+(the concurrent sibling lane); no bench number consumed (T7c-3's slot
+released — next free per `.highwater` at reopen).
