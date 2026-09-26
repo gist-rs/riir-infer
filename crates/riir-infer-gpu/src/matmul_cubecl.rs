@@ -50,6 +50,9 @@ use cubecl::prelude::*;
 #[cfg(feature = "cubecl_runtime")]
 use cubecl::server::Handle;
 
+#[cfg(feature = "cubecl_runtime")]
+use crate::cubecl_runtime::debug_assert_binding_at_least;
+
 // ---------------------------------------------------------------------------
 // Tiled matmul kernel — matches matmul_transb.wgsl
 // ---------------------------------------------------------------------------
@@ -192,6 +195,207 @@ fn matmul_tiled_f32(a: &[f32], b: &[f32], out: &mut [f32]) {
 }
 
 // ---------------------------------------------------------------------------
+// The encoder-lane family (plan 611 S2): offset + head-batched tiled
+// kernels over WHOLE parent binds.
+// ---------------------------------------------------------------------------
+//
+// The laya `Backend` trait's matmul ops carry ELEMENT OFFSETS into parent
+// buffers and bind WHOLE parents — the S1b finding (wgpu's 32-byte
+// `min_storage_buffer_offset_alignment` vs the forward's element-arbitrary
+// offsets) means the slab cannot ride a byte-offset handle view; the
+// offsets ride the params buffer instead, exactly like the S1b elementwise
+// family. Dims are therefore EXPLICIT params too: the derivation-from-
+// lengths trick above (`matmul_tiled_f32`) only works when the binds are
+// the exact logical slabs, which whole-parent binds are not.
+//
+// Two kernels cover the trait's four offset ops:
+//
+// - `matmul_batched_transb_off_f32` — `out[h·m·m + i·m + j] = Σ_t
+//   a[a_off + h·m·k + i·k + t] · b[b_off + h·m·k + j·k + t]` — the score
+//   shape (`matmul_kt` at heads=1, `matmul_kt_heads` at heads=N; B is the
+//   [m×k] KEY matrix indexed by its row).
+// - `matmul_batched_rr_off_f32` — `out[h·m·n + i·n + j] = Σ_t
+//   a[a_off + h·m·k + i·k + t] · b[b_off + h·k·n + t·n + j]` — the plain
+//   row-major × row-major shape (`matmul` at heads=1, `matmul_heads` at
+//   heads=N).
+//
+// The head batch rides the DISPATCH z axis (`CUBE_POS_Z`) — one launch for
+// all heads, no host loop, no per-head cache lookups. The whole-batch
+// destination is ONE `client.empty` slot on the backend side (the packed
+// scores parent never fragments).
+//
+// Tile/dispatch geometry is the shipped transB kernel's: 16×16 smem tiles,
+// 256-thread cubes, `CubeCount::Static(ceil(m/16), ceil(p/16), heads)`.
+
+/// f32 exactly represents integers up to 2²⁴; the launcher shapes never
+/// approach it in the encoder geometry, and the guard keeps the bound loud
+/// instead of letting a huge packed offset round silently.
+#[cfg(feature = "cubecl_runtime")]
+fn f32_exact(v: usize) -> f32 {
+    assert!(
+        v <= (1usize << 24),
+        "shape {v} exceeds the f32-exact bound 2^24"
+    );
+    v as f32
+}
+
+/// Batched transB tiled matmul at element offsets (plan 611 S2).
+///
+/// One cube per 16×16 output tile per head. `params` = `[m, k, a_off,
+/// b_off, out_off]` (f32-encoded usize). Per-head slabs: `a`/`b` are
+/// `[heads × m × k]` at their base offsets, `out` is `[heads × m × m]`.
+#[cfg(feature = "cubecl_runtime")]
+#[cube(launch_unchecked)]
+fn matmul_batched_transb_off_f32(a: &[f32], b: &[f32], out: &mut [f32], params: &[f32]) {
+    let m = params[0usize] as u32;
+    let k = params[1usize] as u32;
+    let a_off = params[2usize] as u32;
+    let b_off = params[3usize] as u32;
+    let out_off = params[4usize] as u32;
+
+    let tile = 16u32;
+    let h = CUBE_POS_Z;
+    let wg_row = CUBE_POS_X;
+    let wg_col = CUBE_POS_Y;
+    let local_row = UNIT_POS / tile;
+    let local_col = UNIT_POS % tile;
+    let row = wg_row * tile + local_row;
+    let col = wg_col * tile + local_col;
+
+    // Per-head slab bases (q/k share the [heads, m, k] shape; out is
+    // [heads, m, m]).
+    let a_base = a_off + h * m * k;
+    let b_base = b_off + h * m * k;
+    let o_base = out_off + h * m * m;
+
+    let mut sum = f32::new(0.0f32);
+    let mut tile_a = Shared::<[f32]>::new_slice(256usize);
+    let mut tile_b = Shared::<[f32]>::new_slice(256usize);
+
+    let num_k_tiles = k.div_ceil(tile);
+    let mut k_tile = 0u32;
+    while k_tile < num_k_tiles {
+        let k_base = k_tile * tile;
+        let smem_a = (local_row * tile + local_col) as usize;
+        let smem_b = (local_col * tile + local_row) as usize;
+
+        // A row-major [m, k]: tile_a[slot] ← A[row, k_base + local_col].
+        let a_k = k_base + local_col;
+        if row < m && a_k < k {
+            tile_a[smem_a] = a[(a_base + row * k + a_k) as usize];
+        } else {
+            tile_a[smem_a] = f32::new(0.0f32);
+        }
+
+        // B row-major [m, k] (the key matrix): tile_b[slot] ← B[col,
+        // k_base + local_row] — the transB dot-product pairing.
+        let b_k = k_base + local_row;
+        if col < m && b_k < k {
+            tile_b[smem_b] = b[(b_base + col * k + b_k) as usize];
+        } else {
+            tile_b[smem_b] = f32::new(0.0f32);
+        }
+
+        sync_cube();
+
+        if row < m && col < m {
+            let mut t = 0u32;
+            while t < tile {
+                sum += tile_a[(local_row * tile + t) as usize]
+                    * tile_b[(local_col * tile + t) as usize];
+                t += 1u32;
+            }
+        }
+
+        sync_cube();
+        k_tile += 1u32;
+    }
+
+    if row < m && col < m {
+        out[(o_base + row * m + col) as usize] = sum;
+    }
+}
+
+/// Batched row-major × row-major tiled matmul at element offsets (plan 611
+/// S2).
+///
+/// One cube per 16×16 output tile per head. `params` = `[m, k, n, a_off,
+/// b_off, out_off]`. Per-head slabs: `a` is `[heads × m × k]`, `b` is
+/// `[heads × k × n]`, `out` is `[heads × m × n]`.
+#[cfg(feature = "cubecl_runtime")]
+#[cube(launch_unchecked)]
+fn matmul_batched_rr_off_f32(a: &[f32], b: &[f32], out: &mut [f32], params: &[f32]) {
+    let m = params[0usize] as u32;
+    let k = params[1usize] as u32;
+    let n = params[2usize] as u32;
+    let a_off = params[3usize] as u32;
+    let b_off = params[4usize] as u32;
+    let out_off = params[5usize] as u32;
+
+    let tile = 16u32;
+    let h = CUBE_POS_Z;
+    let wg_row = CUBE_POS_X;
+    let wg_col = CUBE_POS_Y;
+    let local_row = UNIT_POS / tile;
+    let local_col = UNIT_POS % tile;
+    let row = wg_row * tile + local_row;
+    let col = wg_col * tile + local_col;
+
+    let a_base = a_off + h * m * k;
+    let b_base = b_off + h * k * n;
+    let o_base = out_off + h * m * n;
+
+    let mut sum = f32::new(0.0f32);
+    let mut tile_a = Shared::<[f32]>::new_slice(256usize);
+    let mut tile_b = Shared::<[f32]>::new_slice(256usize);
+
+    let num_k_tiles = k.div_ceil(tile);
+    let mut k_tile = 0u32;
+    while k_tile < num_k_tiles {
+        let k_base = k_tile * tile;
+        let smem_a = (local_row * tile + local_col) as usize;
+        let smem_b = (local_col * tile + local_row) as usize;
+
+        // A row-major [m, k] — same load as the transB kernel.
+        let a_k = k_base + local_col;
+        if row < m && a_k < k {
+            tile_a[smem_a] = a[(a_base + row * k + a_k) as usize];
+        } else {
+            tile_a[smem_a] = f32::new(0.0f32);
+        }
+
+        // B row-major [k, n]: tile_b[slot] ← B[k_base + local_row, col].
+        // The smem slot [local_col·16 + local_row] then reads as
+        // B[k_base + t, col] in the accumulate loop — the transpose-for-free
+        // bank layout, no Bᵀ materialization anywhere.
+        let b_t = k_base + local_row;
+        if col < n && b_t < k {
+            tile_b[smem_b] = b[(b_base + b_t * n + col) as usize];
+        } else {
+            tile_b[smem_b] = f32::new(0.0f32);
+        }
+
+        sync_cube();
+
+        if row < m && col < n {
+            let mut t = 0u32;
+            while t < tile {
+                sum += tile_a[(local_row * tile + t) as usize]
+                    * tile_b[(local_col * tile + t) as usize];
+                t += 1u32;
+            }
+        }
+
+        sync_cube();
+        k_tile += 1u32;
+    }
+
+    if row < m && col < n {
+        out[(o_base + row * n + col) as usize] = sum;
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Public launcher
 // ---------------------------------------------------------------------------
 
@@ -284,6 +488,173 @@ impl MatmulCubeCL {
                 BufferArg::from_raw_parts(a_handle, m * n),
                 BufferArg::from_raw_parts(b_handle, p * n),
                 BufferArg::from_raw_parts(out_handle, m * p),
+            );
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Encoder-lane launchers (plan 611 S2)
+// ---------------------------------------------------------------------------
+
+/// Launcher for [`matmul_batched_transb_off_f32`] — the score shape over
+/// whole parent binds: `heads` slabs of `out[m×m] = a[m×k] @ b[m×k]ᵀ` at
+/// element base offsets (plan 611 S2).
+///
+/// `matmul_kt` calls it with heads=1; `matmul_kt_heads` with heads=N and
+/// zero offsets. Dispatch `Static(ceil(m/16), ceil(m/16), heads)`.
+#[cfg(feature = "cubecl_runtime")]
+pub struct MatmulTransbOffCubeCL;
+
+#[cfg(feature = "cubecl_runtime")]
+impl MatmulTransbOffCubeCL {
+    /// Launch the batched transB matmul over whole parent binds.
+    ///
+    /// # Safety
+    ///
+    /// Handles must back at least the declared lengths, with
+    /// `a_off + heads·m·k ≤ a_len`, `b_off + heads·m·k ≤ b_len`,
+    /// `out_off + heads·m·m ≤ out_len`.
+    #[allow(clippy::too_many_arguments)]
+    pub unsafe fn launch<R: Runtime>(
+        client: &ComputeClient<R>,
+        a_handle: Handle,
+        a_len: usize,
+        b_handle: Handle,
+        b_len: usize,
+        out_handle: Handle,
+        out_len: usize,
+        heads: usize,
+        m: usize,
+        k: usize,
+        a_off: usize,
+        b_off: usize,
+        out_off: usize,
+    ) {
+        assert!(
+            heads >= 1 && m >= 1 && k >= 1,
+            "transb-off: degenerate shape"
+        );
+        assert!(
+            a_off + heads * m * k <= a_len,
+            "transb-off: a extent ({a_off} + {} > {a_len})",
+            heads * m * k
+        );
+        assert!(
+            b_off + heads * m * k <= b_len,
+            "transb-off: b extent ({b_off} + {} > {b_len})",
+            heads * m * k
+        );
+        assert!(
+            out_off + heads * m * m <= out_len,
+            "transb-off: out extent ({out_off} + {} > {out_len})",
+            heads * m * m
+        );
+        debug_assert_binding_at_least(&a_handle, a_len, "TransbOff::a");
+        debug_assert_binding_at_least(&b_handle, b_len, "TransbOff::b");
+        debug_assert_binding_at_least(&out_handle, out_len, "TransbOff::out");
+        let params: &[f32] = &[
+            f32_exact(m),
+            f32_exact(k),
+            f32_exact(a_off),
+            f32_exact(b_off),
+            f32_exact(out_off),
+        ];
+        let params_handle = crate::params_cache::params_handle(client, f32::as_bytes(params));
+        let wg = (m as u32).div_ceil(16).max(1);
+        // SAFETY: extents asserted above; the kernel bounds-checks row/col.
+        unsafe {
+            matmul_batched_transb_off_f32::launch_unchecked::<R>(
+                client,
+                CubeCount::Static(wg, wg, heads as u32),
+                CubeDim::new_1d(256),
+                BufferArg::from_raw_parts(a_handle, a_len),
+                BufferArg::from_raw_parts(b_handle, b_len),
+                BufferArg::from_raw_parts(out_handle, out_len),
+                BufferArg::from_raw_parts(params_handle, params.len()),
+            );
+        }
+    }
+}
+
+/// Launcher for [`matmul_batched_rr_off_f32`] — the plain row-major ×
+/// row-major shape over whole parent binds: `heads` slabs of
+/// `out[m×n] = a[m×k] @ b[k×n]` at element base offsets (plan 611 S2).
+///
+/// `matmul` calls it with heads=1; `matmul_heads` with heads=N and zero
+/// offsets. Dispatch `Static(ceil(m/16), ceil(n/16), heads)`.
+#[cfg(feature = "cubecl_runtime")]
+pub struct MatmulRrOffCubeCL;
+
+#[cfg(feature = "cubecl_runtime")]
+impl MatmulRrOffCubeCL {
+    /// Launch the batched row-major matmul over whole parent binds.
+    ///
+    /// # Safety
+    ///
+    /// Handles must back at least the declared lengths, with
+    /// `a_off + heads·m·k ≤ a_len`, `b_off + heads·k·n ≤ b_len`,
+    /// `out_off + heads·m·n ≤ out_len`.
+    #[allow(clippy::too_many_arguments)]
+    pub unsafe fn launch<R: Runtime>(
+        client: &ComputeClient<R>,
+        a_handle: Handle,
+        a_len: usize,
+        b_handle: Handle,
+        b_len: usize,
+        out_handle: Handle,
+        out_len: usize,
+        heads: usize,
+        m: usize,
+        k: usize,
+        n: usize,
+        a_off: usize,
+        b_off: usize,
+        out_off: usize,
+    ) {
+        assert!(
+            heads >= 1 && m >= 1 && k >= 1 && n >= 1,
+            "rr-off: degenerate shape"
+        );
+        assert!(
+            a_off + heads * m * k <= a_len,
+            "rr-off: a extent ({a_off} + {} > {a_len})",
+            heads * m * k
+        );
+        assert!(
+            b_off + heads * k * n <= b_len,
+            "rr-off: b extent ({b_off} + {} > {b_len})",
+            heads * k * n
+        );
+        assert!(
+            out_off + heads * m * n <= out_len,
+            "rr-off: out extent ({out_off} + {} > {out_len})",
+            heads * m * n
+        );
+        debug_assert_binding_at_least(&a_handle, a_len, "RrOff::a");
+        debug_assert_binding_at_least(&b_handle, b_len, "RrOff::b");
+        debug_assert_binding_at_least(&out_handle, out_len, "RrOff::out");
+        let params: &[f32] = &[
+            f32_exact(m),
+            f32_exact(k),
+            f32_exact(n),
+            f32_exact(a_off),
+            f32_exact(b_off),
+            f32_exact(out_off),
+        ];
+        let params_handle = crate::params_cache::params_handle(client, f32::as_bytes(params));
+        let wg_x = (m as u32).div_ceil(16).max(1);
+        let wg_y = (n as u32).div_ceil(16).max(1);
+        // SAFETY: extents asserted above; the kernel bounds-checks row/col.
+        unsafe {
+            matmul_batched_rr_off_f32::launch_unchecked::<R>(
+                client,
+                CubeCount::Static(wg_x, wg_y, heads as u32),
+                CubeDim::new_1d(256),
+                BufferArg::from_raw_parts(a_handle, a_len),
+                BufferArg::from_raw_parts(b_handle, b_len),
+                BufferArg::from_raw_parts(out_handle, out_len),
+                BufferArg::from_raw_parts(params_handle, params.len()),
             );
         }
     }
@@ -600,5 +971,245 @@ mod tests {
         println!(
             "matmul ({m}×{n}) × ({p}×{n})^T [{wg_total} wgs > 65535 cap]: sparse-probe max_err = {max_err}"
         );
+    }
+
+    // -------------------------------------------------------------------
+    // Encoder-lane family (plan 611 S2): offset + head-batched kernels.
+    // -------------------------------------------------------------------
+
+    /// Deterministic [-1, 1) noise (the smoke test's LCG, same constant).
+    fn noise(n: usize, seed: u32) -> Vec<f32> {
+        let mut s = seed;
+        (0..n)
+            .map(|_| {
+                s = s.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+                ((s >> 8) as f32) / 8_388_608.0 - 1.0
+            })
+            .collect()
+    }
+
+    /// `out[h][m×n] = a[h][m×k] @ b[h][k×n]` (all row-major) on the host —
+    /// per-head slabs at base offsets (heads=1 degenerates to the plain
+    /// matmul).
+    fn matmul_rr_cpu(
+        a: &[f32],
+        a_off: usize,
+        b: &[f32],
+        b_off: usize,
+        heads: usize,
+        m: usize,
+        k: usize,
+        n: usize,
+    ) -> Vec<f32> {
+        let mut out = vec![0.0f32; heads * m * n];
+        for h in 0..heads {
+            for i in 0..m {
+                for j in 0..n {
+                    let mut sum = 0.0f32;
+                    for t in 0..k {
+                        sum += a[a_off + h * m * k + i * k + t] * b[b_off + h * k * n + t * n + j];
+                    }
+                    out[h * m * n + i * n + j] = sum;
+                }
+            }
+        }
+        out
+    }
+
+    /// Per-head score slabs `out[h][m×m] = a[h][m×k] @ b[h][m×k]ᵀ` on the
+    /// host, at base offsets.
+    fn scores_cpu(
+        q: &[f32],
+        q_off: usize,
+        kk: &[f32],
+        k_off: usize,
+        heads: usize,
+        m: usize,
+        hd: usize,
+    ) -> Vec<f32> {
+        let mut out = vec![0.0f32; heads * m * m];
+        for h in 0..heads {
+            for i in 0..m {
+                for j in 0..m {
+                    let mut sum = 0.0f32;
+                    for t in 0..hd {
+                        sum += q[q_off + h * m * hd + i * hd + t]
+                            * kk[k_off + h * m * hd + j * hd + t];
+                    }
+                    out[h * m * m + i * m + j] = sum;
+                }
+            }
+        }
+        out
+    }
+
+    /// One kernel, both postures the S2 slice serves: heads=1 at non-zero
+    /// offsets over PADDED parents (the whole-parent-bind shape the backend
+    /// actually binds — the derivation-from-lengths kernel cannot express
+    /// this) and heads=4 batched at zero offsets (the attention batch).
+    #[test]
+    fn test_matmul_transb_off_offsets_and_heads() {
+        let ctx = CubeCLContext::new().expect("CubeCL should initialize");
+        let client = ctx.client();
+        let tol = 1e-3;
+
+        // heads=1, non-zero offsets, padded parents.
+        {
+            let (heads, m, k) = (1usize, 37usize, 45usize);
+            let (qa, ka, oa) = (11usize, 7usize, 3usize);
+            let q = noise(qa + heads * m * k + 5, 0x1234);
+            let kk = noise(ka + heads * m * k + 9, 0x5678);
+            let q_h = client.create_from_slice(f32::as_bytes(&q));
+            let k_h = client.create_from_slice(f32::as_bytes(&kk));
+            let out_len = oa + heads * m * m + 13;
+            let out_h = client.empty(out_len * core::mem::size_of::<f32>());
+            unsafe {
+                MatmulTransbOffCubeCL::launch::<ActiveRuntime>(
+                    &client,
+                    q_h,
+                    q.len(),
+                    k_h,
+                    kk.len(),
+                    out_h.clone(),
+                    out_len,
+                    heads,
+                    m,
+                    k,
+                    qa,
+                    ka,
+                    oa,
+                );
+            }
+            let bytes = client.read_one(out_h).expect("read out");
+            let got = f32::from_bytes(&bytes);
+            let want = scores_cpu(&q, qa, &kk, ka, heads, m, k);
+            let mut max_err = 0.0f32;
+            for (&w, &g) in want.iter().zip(got[oa..].iter()) {
+                max_err = max_err.max((w - g).abs());
+            }
+            println!("transb-off offsets ({m}×{k}, heads {heads}): max_err = {max_err:.3e}");
+            assert!(max_err < tol, "transb-off offsets diverged: {max_err:.3e}");
+        }
+
+        // heads=4, zero offsets — the `matmul_kt_heads` dispatch.
+        {
+            let (heads, m, k) = (4usize, 54usize, 64usize);
+            let q = noise(heads * m * k, 0xabcd);
+            let kk = noise(heads * m * k, 0xef01);
+            let q_h = client.create_from_slice(f32::as_bytes(&q));
+            let k_h = client.create_from_slice(f32::as_bytes(&kk));
+            let out_h = client.empty(heads * m * m * core::mem::size_of::<f32>());
+            unsafe {
+                MatmulTransbOffCubeCL::launch::<ActiveRuntime>(
+                    &client,
+                    q_h,
+                    q.len(),
+                    k_h,
+                    kk.len(),
+                    out_h.clone(),
+                    heads * m * m,
+                    heads,
+                    m,
+                    k,
+                    0,
+                    0,
+                    0,
+                );
+            }
+            let bytes = client.read_one(out_h).expect("read out");
+            let got = f32::from_bytes(&bytes);
+            let want = scores_cpu(&q, 0, &kk, 0, heads, m, k);
+            let mut max_err = 0.0f32;
+            for (&w, &g) in want.iter().zip(got.iter()) {
+                max_err = max_err.max((w - g).abs());
+            }
+            println!("transb-off heads ({heads}×{m}×{k}): max_err = {max_err:.3e}");
+            assert!(max_err < tol, "transb-off heads diverged: {max_err:.3e}");
+        }
+    }
+
+    /// The RR kernel at both postures: heads=1 at non-zero offsets (the
+    /// `matmul` op) and heads=3 batched (the `matmul_heads` op).
+    #[test]
+    fn test_matmul_rr_off_offsets_and_heads() {
+        let ctx = CubeCLContext::new().expect("CubeCL should initialize");
+        let client = ctx.client();
+        let tol = 1e-3;
+
+        // heads=1, non-zero offsets over padded parents.
+        {
+            let (heads, m, k, n) = (1usize, 33usize, 29usize, 41usize);
+            let (aa, ba, oa) = (17usize, 5usize, 23usize);
+            let a = noise(aa + heads * m * k + 4, 0x0f0f);
+            let b = noise(ba + heads * k * n + 8, 0x1111);
+            let a_h = client.create_from_slice(f32::as_bytes(&a));
+            let b_h = client.create_from_slice(f32::as_bytes(&b));
+            let out_len = oa + heads * m * n + 6;
+            let out_h = client.empty(out_len * core::mem::size_of::<f32>());
+            unsafe {
+                MatmulRrOffCubeCL::launch::<ActiveRuntime>(
+                    &client,
+                    a_h,
+                    a.len(),
+                    b_h,
+                    b.len(),
+                    out_h.clone(),
+                    out_len,
+                    heads,
+                    m,
+                    k,
+                    n,
+                    aa,
+                    ba,
+                    oa,
+                );
+            }
+            let bytes = client.read_one(out_h).expect("read out");
+            let got = f32::from_bytes(&bytes);
+            let want = matmul_rr_cpu(&a, aa, &b, ba, heads, m, k, n);
+            let mut max_err = 0.0f32;
+            for (&w, &g) in want.iter().zip(got[oa..].iter()) {
+                max_err = max_err.max((w - g).abs());
+            }
+            println!("rr-off offsets ({m}×{k}×{n}): max_err = {max_err:.3e}");
+            assert!(max_err < tol, "rr-off offsets diverged: {max_err:.3e}");
+        }
+
+        // heads=3, zero offsets — the `matmul_heads` dispatch (scores @ v).
+        {
+            let (heads, m, k, n) = (3usize, 54usize, 54usize, 64usize);
+            let a = noise(heads * m * k, 0x2222);
+            let b = noise(heads * k * n, 0x3333);
+            let a_h = client.create_from_slice(f32::as_bytes(&a));
+            let b_h = client.create_from_slice(f32::as_bytes(&b));
+            let out_h = client.empty(heads * m * n * core::mem::size_of::<f32>());
+            unsafe {
+                MatmulRrOffCubeCL::launch::<ActiveRuntime>(
+                    &client,
+                    a_h,
+                    a.len(),
+                    b_h,
+                    b.len(),
+                    out_h.clone(),
+                    heads * m * n,
+                    heads,
+                    m,
+                    k,
+                    n,
+                    0,
+                    0,
+                    0,
+                );
+            }
+            let bytes = client.read_one(out_h).expect("read out");
+            let got = f32::from_bytes(&bytes);
+            let want = matmul_rr_cpu(&a, 0, &b, 0, heads, m, k, n);
+            let mut max_err = 0.0f32;
+            for (&w, &g) in want.iter().zip(got.iter()) {
+                max_err = max_err.max((w - g).abs());
+            }
+            println!("rr-off heads ({heads}×{m}×{k}×{n}): max_err = {max_err:.3e}");
+            assert!(max_err < tol, "rr-off heads diverged: {max_err:.3e}");
+        }
     }
 }

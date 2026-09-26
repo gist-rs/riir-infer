@@ -1632,7 +1632,9 @@ mod tests {
         let client = ctx.client();
 
         let x = lcg_vec(64);
-        let s = 0.7071f32;
+        // 1/√2 — the named constant (an approx_constant-clean spelling of
+        // the literal this test was landed with).
+        let s = core::f32::consts::FRAC_1_SQRT_2;
 
         let mut cpu_x = x.clone();
         for v in cpu_x.iter_mut() {

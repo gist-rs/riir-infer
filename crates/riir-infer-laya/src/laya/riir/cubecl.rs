@@ -52,25 +52,36 @@
 //!
 //! # Slice status (plan 611)
 //!
-//! S1b (this file): the trivial op family — `add`, `add_bias_row`,
-//! `scale`, `relu`, `gelu_erf`, `glu_gelu_gate`, `copy_into`, `copy_at` —
-//! over `riir-infer-gpu`'s elementwise launchers, plus the residency
-//! machinery above. Every math op that needs a kernel the S2/S3 slices
-//! have not landed yet panics LOUD naming its slice — never a silent
-//! wrong answer. `supports_packed_attention` answers `false` until the
-//! matmul family lands (an honest "this backend cannot run a forward
-//! yet").
+//! S1b: the trivial op family — `add`, `add_bias_row`, `scale`, `relu`,
+//! `gelu_erf`, `glu_gelu_gate`, `copy_into`, `copy_at` — over
+//! `riir-infer-gpu`'s elementwise launchers, plus the residency machinery
+//! above. S2 (this slice): the FULL matmul family — `matmul_w` over the
+//! shipped derived-dims transB kernel (the encoder's exact shape),
+//! `matmul`/`matmul_kt`/`matmul_heads`/`matmul_kt_heads` over the new
+//! offset+head-batched tiled kernels (the head batch rides the dispatch z
+//! axis — one launch for all heads, the whole-batch destination one
+//! `client.empty` slot). `matmul_w_accum`/`matmul_w_glu` compose through
+//! the trait defaults (the fold is bit-identical by construction);
+//! `set_row_segments` stays the trait's no-op (one kernel for every shape
+//! — the honest v1). Every op that still needs an S3 kernel panics LOUD
+//! naming its slice — never a silent wrong answer.
+//! `supports_packed_attention` answers `false` until the forward surface
+//! COMPLETES (S3: the norms/softmax/rope/split/merge family) — matmuls
+//! alone cannot run a forward, and the agent must never silently take a
+//! path it cannot execute.
 
 use std::collections::HashMap;
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use riir_infer_gpu::{
-    ActiveComputeClient, ActiveRuntime, CubeCLContext, Handle, create_f32, read_f32,
+    ActiveComputeClient, ActiveRuntime, CubeCLContext, Handle, create_f32,
     elementwise_cubecl::{
         AddBiasRowCubeCL, AddCubeCL, CopyAtCubeCL, CopyCubeCL, GeluErfCubeCL, GluGeluGateCubeCL,
         ReluCubeCL, ScaleCubeCL,
     },
+    matmul_cubecl::{MatmulCubeCL, MatmulRrOffCubeCL, MatmulTransbOffCubeCL},
+    read_f32,
 };
 
 use super::super::{LayaError, Result};
@@ -215,62 +226,180 @@ impl Backend for CubeclBackend {
         "cubecl"
     }
 
+    /// `dst[m×n] = a[m×k] @ w[n×k]ᵀ` — the shipped derived-dims transB
+    /// kernel EXACTLY (the kernel doc's "already the encoder's matmul_w
+    /// shape" prior-art note). The call sites guarantee whole exact-extent
+    /// parents (`HeadScratch::fit` then exact dims), so the in-kernel
+    /// derivation from the declared lengths is exact. The weight rides the
+    /// permanent cache (`warm_weight_2d` pre-takes it at load — the
+    /// first-miss upload here is the un-warmed path only).
+    fn matmul_w(&self, a: &[f32], m: usize, k: usize, w: &[f32], n: usize, dst: &mut [f32]) {
+        assert_eq!(a.len(), m * k, "matmul_w a extent");
+        assert_eq!(w.len(), n * k, "matmul_w w extent");
+        assert_eq!(dst.len(), m * n, "matmul_w dst extent");
+        let ab = self.chain_buf(a);
+        let wb = self.weight_buf(w);
+        let db = self.chain_slot_for(dst);
+        // Exact extents asserted above; whole-parent binds. (`launch` is the
+        // safe wrapper — the unsafe `launch_tiled` is internal.)
+        MatmulCubeCL::launch::<ActiveRuntime>(&self.client, ab, wb, db, m, k, n);
+    }
+
+    /// `dst[dst_off..][m×n] = a[a_off..][m×k] @ b[b_off..][k×n]` — the
+    /// offset-capable RR kernel at heads=1 (offsets ride the params
+    /// buffer over whole-parent binds — the S1b alignment finding).
     fn matmul(
         &self,
-        _a: &[f32],
-        _a_off: usize,
-        _m: usize,
-        _k: usize,
-        _b: &[f32],
-        _b_off: usize,
-        _n: usize,
-        _dst: &mut [f32],
-        _dst_off: usize,
+        a: &[f32],
+        a_off: usize,
+        m: usize,
+        k: usize,
+        b: &[f32],
+        b_off: usize,
+        n: usize,
+        dst: &mut [f32],
+        dst_off: usize,
     ) {
-        not_yet("matmul", "S2");
+        assert!(a.len() >= a_off + m * k, "matmul a extent");
+        assert!(b.len() >= b_off + k * n, "matmul b extent");
+        assert!(dst.len() >= dst_off + m * n, "matmul dst extent");
+        let ab = self.chain_buf(a);
+        let bb = self.chain_buf(b);
+        let db = self.chain_slot_for(dst);
+        // SAFETY: extents asserted above; parents bound whole.
+        unsafe {
+            MatmulRrOffCubeCL::launch::<ActiveRuntime>(
+                &self.client,
+                ab,
+                a.len(),
+                bb,
+                b.len(),
+                db,
+                dst.len(),
+                1,
+                m,
+                k,
+                n,
+                a_off,
+                b_off,
+                dst_off,
+            )
+        };
     }
 
+    /// `dst[dst_off..][m×m] = q[q_off..][m×hd] @ k[k_off..][m×hd]ᵀ` — the
+    /// offset-capable transB kernel at heads=1.
     fn matmul_kt(
         &self,
-        _q: &[f32],
-        _q_off: usize,
-        _m: usize,
-        _hd: usize,
-        _k: &[f32],
-        _k_off: usize,
-        _dst: &mut [f32],
-        _dst_off: usize,
+        q: &[f32],
+        q_off: usize,
+        m: usize,
+        hd: usize,
+        k: &[f32],
+        k_off: usize,
+        dst: &mut [f32],
+        dst_off: usize,
     ) {
-        not_yet("matmul_kt", "S2");
+        assert!(q.len() >= q_off + m * hd, "matmul_kt q extent");
+        assert!(k.len() >= k_off + m * hd, "matmul_kt k extent");
+        assert!(dst.len() >= dst_off + m * m, "matmul_kt dst extent");
+        let qb = self.chain_buf(q);
+        let kb = self.chain_buf(k);
+        let db = self.chain_slot_for(dst);
+        // SAFETY: extents asserted above; parents bound whole.
+        unsafe {
+            MatmulTransbOffCubeCL::launch::<ActiveRuntime>(
+                &self.client,
+                qb,
+                q.len(),
+                kb,
+                k.len(),
+                db,
+                dst.len(),
+                1,
+                m,
+                hd,
+                q_off,
+                k_off,
+                dst_off,
+            )
+        };
     }
 
-    fn matmul_w(&self, _a: &[f32], _m: usize, _k: usize, _w: &[f32], _n: usize, _dst: &mut [f32]) {
-        not_yet("matmul_w", "S2");
-    }
-
+    /// The score batch as ONE z-dispatched launch (heads ride `CUBE_POS_Z`;
+    /// q/k/dst bind whole once, the head slabs are in-kernel offsets) — no
+    /// host loop, no per-head cache lookups, no destination fragmentation.
     fn matmul_kt_heads(
         &self,
-        _q: &[f32],
-        _k: &[f32],
-        _heads: usize,
-        _m: usize,
-        _hd: usize,
-        _dst: &mut [f32],
+        q: &[f32],
+        k: &[f32],
+        heads: usize,
+        m: usize,
+        hd: usize,
+        dst: &mut [f32],
     ) {
-        not_yet("matmul_kt_heads", "S2");
+        assert_eq!(q.len(), heads * m * hd, "matmul_kt_heads q extent");
+        assert_eq!(k.len(), heads * m * hd, "matmul_kt_heads k extent");
+        assert_eq!(dst.len(), heads * m * m, "matmul_kt_heads dst extent");
+        let qb = self.chain_buf(q);
+        let kb = self.chain_buf(k);
+        let db = self.chain_slot_for(dst);
+        // SAFETY: exact extents asserted above; parents bound whole.
+        unsafe {
+            MatmulTransbOffCubeCL::launch::<ActiveRuntime>(
+                &self.client,
+                qb,
+                q.len(),
+                kb,
+                k.len(),
+                db,
+                dst.len(),
+                heads,
+                m,
+                hd,
+                0,
+                0,
+                0,
+            )
+        };
     }
 
+    /// The context batch as ONE z-dispatched launch (scores @ v per head).
     fn matmul_heads(
         &self,
-        _a: &[f32],
-        _b: &[f32],
-        _heads: usize,
-        _m: usize,
-        _k: usize,
-        _n: usize,
-        _dst: &mut [f32],
+        a: &[f32],
+        b: &[f32],
+        heads: usize,
+        m: usize,
+        k: usize,
+        n: usize,
+        dst: &mut [f32],
     ) {
-        not_yet("matmul_heads", "S2");
+        assert_eq!(a.len(), heads * m * k, "matmul_heads a extent");
+        assert_eq!(b.len(), heads * k * n, "matmul_heads b extent");
+        assert_eq!(dst.len(), heads * m * n, "matmul_heads dst extent");
+        let ab = self.chain_buf(a);
+        let bb = self.chain_buf(b);
+        let db = self.chain_slot_for(dst);
+        // SAFETY: exact extents asserted above; parents bound whole.
+        unsafe {
+            MatmulRrOffCubeCL::launch::<ActiveRuntime>(
+                &self.client,
+                ab,
+                a.len(),
+                bb,
+                b.len(),
+                db,
+                dst.len(),
+                heads,
+                m,
+                k,
+                n,
+                0,
+                0,
+                0,
+            )
+        };
     }
 
     fn add_mask_broadcast(&self, _x: &mut [f32], _mask: &[f32], _heads: usize) {
@@ -421,9 +550,10 @@ impl Backend for CubeclBackend {
         };
     }
 
-    /// `false` until the matmul family lands (S2): this backend cannot run
-    /// ANY forward yet, and the agent must never silently take a path it
-    /// cannot execute.
+    /// `false` until the forward surface COMPLETES (S3): the matmul family
+    /// is landed (S2) but a forward also needs the norms/softmax/rope/
+    /// split/merge family — this backend cannot run ANY forward yet, and
+    /// the agent must never silently take a path it cannot execute.
     fn supports_packed_attention(&self, _hd: usize) -> bool {
         false
     }

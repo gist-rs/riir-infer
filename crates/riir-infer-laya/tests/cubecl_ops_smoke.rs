@@ -152,8 +152,11 @@ fn cubecl_ops_match_cpu_op_by_op() {
         b.begin_pass();
         let mut x = vec_of(32);
         let mut x_cpu = x.clone();
-        c.scale(&mut x_cpu, 0.7071);
-        b.scale(&mut x, 0.7071);
+        // 1/√2 — the named constant (an approx_constant-clean spelling of
+        // the literal this arm was landed with).
+        let s = core::f32::consts::FRAC_1_SQRT_2;
+        c.scale(&mut x_cpu, s);
+        b.scale(&mut x, s);
         assert_exact("scale", &sync_out(&b, &x), &x_cpu);
     }
 
@@ -284,4 +287,179 @@ fn cubecl_begin_pass_invalidates_previous_pass_slots() {
         result.is_err(),
         "download_into after begin_pass must panic on a cleared slot"
     );
+}
+
+/// The S2 matmul family, op by op vs the CPU lane (plan 611 S2). Shape
+/// table: m over {1, 4, 54, 128, 512} × the encoder geometry classes for
+/// `matmul_w`; the attention batch at heads ∈ {1, 4}; the offset ops over
+/// genuinely-padded parents (the whole-parent-bind shape). Tolerance 1e-3:
+/// tiled-16 accumulation vs the CPU lane's sequential row dot over k ≤
+/// 3072 of [-1,1) values — the same reduction-order class the G5 1e-3
+/// budget prices, far above the ~1e-6 the gpu-side kernel tests measure.
+#[test]
+fn cubecl_matmul_family_matches_cpu() {
+    let _gpu = gpu_lock();
+    let b = CubeclBackend::new().expect("cubecl backend");
+    let c = Cpu;
+    const TOL: f32 = 1e-3;
+
+    // The weights cache has NO epoch — every weight Vec below is held to
+    // the end of the body (the module-doc hazard: a dropped weight Vec
+    // whose address recycles into a same-(ptr,len) later Vec would hit a
+    // stale permanent entry; the shape table's colliding n·k products make
+    // that a real possibility, not a hypothetical).
+    let mut weights: Vec<Vec<f32>> = Vec::new();
+
+    // matmul_w — the weight projections, the encoder's exact shape.
+    for &(m, k, n) in &[
+        (1usize, 1024usize, 3072usize),
+        (4, 1024, 1024),
+        (54, 512, 2048),
+        (128, 2048, 512),
+        (512, 256, 256),
+        (1, 260, 256), // the act_of class (k = d + 4 features)
+    ] {
+        b.begin_pass();
+        let a = vec_of(m * k);
+        // Move the ORIGINAL allocation into the keeper and borrow it back —
+        // a clone would leave the cached (ptr, len) pointing at a Vec this
+        // loop then drops.
+        weights.push(vec_of(n * k).into_iter().map(|v| v * 0.5).collect());
+        let w = weights.last().expect("keeper");
+        let mut dst = vec![0f32; m * n];
+        let mut dst_cpu = vec![0f32; m * n];
+        c.matmul_w(&a, m, k, w, n, &mut dst_cpu);
+        b.matmul_w(&a, m, k, w, n, &mut dst);
+        assert_close(
+            &format!("matmul_w {m}x{k}x{n}"),
+            &sync_out(&b, &dst),
+            &dst_cpu,
+            TOL,
+        );
+    }
+
+    // matmul — row-major × row-major at NON-ZERO offsets over padded
+    // parents (the slab-in-parent shape the derivation-from-lengths kernel
+    // cannot express; the offsets are the point).
+    for &(m, k, n) in &[(3usize, 8usize, 5usize), (54, 64, 64), (128, 128, 64)] {
+        b.begin_pass();
+        let (ao, bo, doo) = (7usize, 11usize, 13usize);
+        let a = vec_of(ao + m * k + 5);
+        let bb = vec_of(bo + k * n + 9);
+        let mut dst = vec![0f32; doo + m * n + 3];
+        let mut dst_cpu = dst.clone();
+        c.matmul(&a, ao, m, k, &bb, bo, n, &mut dst_cpu, doo);
+        b.matmul(&a, ao, m, k, &bb, bo, n, &mut dst, doo);
+        let got = sync_out(&b, &dst);
+        assert_close(
+            &format!("matmul {m}x{k}x{n} (offsets)"),
+            &got[doo..doo + m * n],
+            &dst_cpu[doo..doo + m * n],
+            TOL,
+        );
+    }
+
+    // matmul_kt — the score shape at offsets.
+    for &(m, hd) in &[(5usize, 16usize), (54, 64), (128, 64)] {
+        b.begin_pass();
+        let (qo, ko, oo) = (3usize, 5usize, 2usize);
+        let q = vec_of(qo + m * hd + 4);
+        let k = vec_of(ko + m * hd + 6);
+        let mut dst = vec![0f32; oo + m * m + 1];
+        let mut dst_cpu = dst.clone();
+        c.matmul_kt(&q, qo, m, hd, &k, ko, &mut dst_cpu, oo);
+        b.matmul_kt(&q, qo, m, hd, &k, ko, &mut dst, oo);
+        let got = sync_out(&b, &dst);
+        assert_close(
+            &format!("matmul_kt {m}x{hd} (offsets)"),
+            &got[oo..oo + m * m],
+            &dst_cpu[oo..oo + m * m],
+            TOL,
+        );
+    }
+
+    // matmul_kt_heads — the score batch (heads=1 exercises the same kernel
+    // at z=1; heads=4 the real attention shape).
+    for &(heads, m, hd) in &[
+        (1usize, 4usize, 64usize),
+        (4, 1, 64),
+        (4, 4, 64),
+        (4, 54, 64),
+        (4, 128, 32),
+    ] {
+        b.begin_pass();
+        let q = vec_of(heads * m * hd);
+        let k = vec_of(heads * m * hd);
+        let mut dst = vec![0f32; heads * m * m];
+        let mut dst_cpu = vec![0f32; heads * m * m];
+        c.matmul_kt_heads(&q, &k, heads, m, hd, &mut dst_cpu);
+        b.matmul_kt_heads(&q, &k, heads, m, hd, &mut dst);
+        assert_close(
+            &format!("matmul_kt_heads {heads}x{m}x{hd}"),
+            &sync_out(&b, &dst),
+            &dst_cpu,
+            TOL,
+        );
+    }
+
+    // matmul_heads — the context batch (scores @ v per head; a is the
+    // scores-shaped operand).
+    for &(heads, m, hd) in &[(4usize, 4usize, 64usize), (4, 128, 64)] {
+        b.begin_pass();
+        let a = vec_of(heads * m * m);
+        let v = vec_of(heads * m * hd);
+        let mut dst = vec![0f32; heads * m * hd];
+        let mut dst_cpu = vec![0f32; heads * m * hd];
+        c.matmul_heads(&a, &v, heads, m, m, hd, &mut dst_cpu);
+        b.matmul_heads(&a, &v, heads, m, m, hd, &mut dst);
+        assert_close(
+            &format!("matmul_heads {heads}x{m}x{hd}"),
+            &sync_out(&b, &dst),
+            &dst_cpu,
+            TOL,
+        );
+    }
+}
+
+/// The residual-stream fold (`matmul_w_accum`) and the MLP fold
+/// (`matmul_w_glu`) compose through the TRAIT DEFAULTS on this backend —
+/// the plan's bit-identical-by-construction claim, proven behaviorally:
+/// accum reads `x` device-current (the fold's add must see the matmul's
+/// slot, not a stale host byte), and glu reads the fused slot `matmul_w`
+/// just wrote in the same pass.
+#[test]
+fn cubecl_matmul_folds_match_cpu() {
+    let _gpu = gpu_lock();
+    let b = CubeclBackend::new().expect("cubecl backend");
+    let c = Cpu;
+    const TOL: f32 = 1e-3;
+
+    let w_accum: Vec<f32> = vec_of(24 * 12).into_iter().map(|v| v * 0.25).collect();
+    let w_glu: Vec<f32> = vec_of(48 * 12).into_iter().map(|v| v * 0.25).collect();
+
+    // matmul_w_accum — x starts host-authored (uploaded on the first miss),
+    // then accumulates the projection.
+    {
+        b.begin_pass();
+        let (m, k, n) = (6usize, 12usize, 24usize);
+        let mut x = vec_of(m * n);
+        let a = vec_of(m * k);
+        let mut x_cpu = x.clone();
+        c.matmul_w_accum(&a, m, k, &w_accum, n, &mut x_cpu);
+        b.matmul_w_accum(&a, m, k, &w_accum, n, &mut x);
+        assert_close("matmul_w_accum", &sync_out(&b, &x), &x_cpu, TOL);
+    }
+
+    // matmul_w_glu — the fused [m × 2i] intermediate never exists on the
+    // host; the gate must read the device slot.
+    {
+        b.begin_pass();
+        let (m, k, i_sz) = (5usize, 12usize, 24usize);
+        let a = vec_of(m * k);
+        let mut act = vec![0f32; m * i_sz];
+        let mut act_cpu = vec![0f32; m * i_sz];
+        c.matmul_w_glu(&a, m, k, &w_glu, i_sz, &mut act_cpu);
+        b.matmul_w_glu(&a, m, k, &w_glu, i_sz, &mut act);
+        assert_close("matmul_w_glu", &sync_out(&b, &act), &act_cpu, TOL);
+    }
 }
