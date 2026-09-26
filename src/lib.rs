@@ -82,6 +82,10 @@ pub mod dflash;
 /// GGUF weight loading.
 pub mod gguf_loader;
 
+/// Natural-text corpus loading for the offline calibration bins (the
+/// `chat_probe` HF-pages shape + plain text). One loader, both instruments.
+pub mod corpus_text;
+
 /// SentencePiece/BPE tokenizers for GGUF-embedded vocabularies (native-only;
 /// the sentencepiece-sys C++ backend cannot compile for wasm32).
 #[cfg(not(target_arch = "wasm32"))]

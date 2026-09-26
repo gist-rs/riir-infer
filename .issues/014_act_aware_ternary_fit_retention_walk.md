@@ -1,6 +1,6 @@
 # Issue 014 — activation-aware ternary scale fit on a real checkpoint: the per-family conditional retention walk (the model-bound G1 of katgpt-rs Issue 886 P1)
 
-**Status:** OPEN — filed 2026-09-25 from katgpt-rs Issue 886 (the substrate landed there at `0fb2254d9`, katgpt-rs Bench 896; this is its model-bound quality gate). No task started.
+**Status:** OPEN — filed 2026-09-25 from katgpt-rs Issue 886 (the substrate landed there at `0fb2254d9`, katgpt-rs Bench 896; this is its model-bound quality gate). **T1 LANDED 2026-09-26** (riir-infer Bench 005, commits in the task rows): the `act_diagonal_calibration` bin (feature `act_diagonal_calibration`, riding the forward's own `TernaryMatvecHook` seam — post-rotation inputs observed side-band, forward bit-identical) + the first-slice read over Bonsai-2-PQ2 (16 seq × 512 = 8192 tokens, chat_probe). **Verdict: the rotation did NOT flatten the diagonal globally** — layer_out is the heaviest tap (max/med up to 90.9, top-1% share up to 11.6%), attn_in 6.7/56.9 median/worst, final_in 9.3; **`swiglu` IS near-uniform (1.6× / 1.4%) — the null prediction is live for down_proj specifically**. T2 not foreclosed; per-tap priors recorded in Bench 005. Artifact digest `5b6aead0901e3133cd7ee28512e75122c788ae9d720dec78d099e6b390d9a9d2` (16 KiB-scale slice pinned; 17.3 MB artifact in gitignored `.raw/act_diag_005/`).
 
 ## What exists (katgpt-rs `0fb2254d9`, both opt-in)
 
@@ -14,10 +14,10 @@
 
 ## What this issue owns (the gate katgpt-rs cannot run)
 
-- [ ] **T1 — collect the diagonal on a real checkpoint.** Prefer the Ternary-Bonsai lane (`Ternary-Bonsai-2-27B-PQ2_0.gguf`, the DeltaNet ternary forward in `src/deltanet/ternary_forward.rs`). Forward katgpt-core `act_channel_moments` (a `act_diagonal_calibration` feature here, the `vk_calibration` shape).
-  - Tap every ternary projection's input. With `bonsai2_hadamard` on, tap the **post-rotation** input, because that is what the ternary matvec sees.
-  - Use a small calibration corpus: 16–128 sequences, which is AWQ's sample-efficiency claim. Commit the `ActChannelDiagonal` digest beside the run.
-  - Report the diagonal's flatness per layer, e.g. the max/median of `E[x²]` and the top-1% channel share. If rotation has flattened it to near-uniform, T2–T3 are predicted to be null, and saying so up front is part of the result.
+- [x] **T1 — collect the diagonal on a real checkpoint.** LANDED 2026-09-26 (riir-infer Bench 005): the `act_diagonal_calibration` bin + the Bonsai-2-PQ2 first slice (16 × 512 tokens, chat_probe), digest `5b6aead0…d9a9d2`. Prefer the Ternary-Bonsai lane (`Ternary-Bonsai-2-27B-PQ2_0.gguf`, the DeltaNet ternary forward in `src/deltanet/ternary_forward.rs`). Forward katgpt-core `act_channel_moments` (a `act_diagonal_calibration` feature here, the `vk_calibration` shape).
+  - Tap every ternary projection's input. With `bonsai2_hadamard` on, tap the **post-rotation** input, because that is what the ternary matvec sees. DONE — the hook seam observes exactly what `bitlinear` passes the kernel; `in_proj_a`/`b` are the dense escape set on Bonsai-2 (never ternary, out of scope by construction).
+  - Use a small calibration corpus: 16–128 sequences, which is AWQ's sample-efficiency claim. Commit the `ActChannelDiagonal` digest beside the run. DONE — digest in Bench 005 (16 sequences, the AWQ floor).
+  - Report the diagonal's flatness per layer, e.g. the max/median of `E[x²]` and the top-1% channel share. If rotation has flattened it to near-uniform, T2–T3 are predicted to be null, and saying so up front is part of the result. DONE — NOT flattened globally (layer_out/attn_in/final_in carry structure); swiglu IS near-uniform (down_proj null-predicted).
 - [ ] **T2 — re-author the ternary weights with `act_aware_fit`.** The Bonsai tensors are born-ternary: there are no f32 parents. There are two arms, and neither may be dropped:
   - **(a) Bonsai scale refit.** Dequantize the shipped `Q2_0_g128` tensor to f32, then requantize under {mean-abs (`quantize_from_f32`), `WeightedMeanAbs`, `WeightedSearch`} with the T1 diagonal.
     - ⚠ Mean-abs requantization of an already-ternary group is not the identity. Its mean-abs is `s·nnz/128`, not `s`. So the **as-shipped tensor** is the reference arm, and the mean-abs requant is the G3-class control.

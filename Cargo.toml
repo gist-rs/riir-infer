@@ -77,6 +77,21 @@ vk_calibration = ["katgpt-core/fitted_anchor_tables"]
 # `row_logit_floor_ppl` bin (the T2/T4 quality gate). OPT-IN: promotion is
 # katgpt-rs-side and waits on T2 + T3.
 row_logit_floor = ["katgpt-core/row_logit_floor"]
+# act_diagonal_calibration (riir-infer Issue 014 T1, 2026-09-26): the
+# activation-diagonal collector over the Bonsai-2 ternary lane — the
+# `vk_calibration` shape at the Issue-886 tap points (linear-layer INPUTS,
+# observed beside each ternary matvec through the existing
+# `TernaryMatvecHook` seam; the forward runs the same CPU SIMD kernel, so
+# the pass is bit-identical to an unhooked run). Forwards katgpt-core's
+# `act_channel_moments` (Issue 886 P0). OPT-IN, measurement-only: the
+# artifact is the T2 refit input, never a serving path. Implies the
+# bonsai-2 loading stack (ternary_inference + bonsai2_hadamard) because
+# the collector walks the qwen35 hybrid ternary weights.
+act_diagonal_calibration = [
+    "katgpt-core/act_channel_moments",
+    "ternary_inference",
+    "bonsai2_hadamard",
+]
 # attention_to_answer (katgpt-rs Issue 882 P4, 2026-09-25): the m_Y probe —
 # attention mass on a labeled answer span, per (layer, head), read off the
 # gemma-2 f16 forward on ARMED rows only (one extra QK pass there; the
@@ -156,6 +171,15 @@ required-features = ["vk_calibration"]
 name = "row_logit_floor_ppl"
 path = "src/bin/row_logit_floor_ppl.rs"
 required-features = ["row_logit_floor", "attention_to_answer"]
+
+# riir-infer Issue 014 T1 — the activation-diagonal collector bin. The
+# module lives behind #[cfg(feature = "act_diagonal_calibration")]; this
+# row is the reader protection (the green-zero law): a default build
+# SKIPS the bin loudly instead of compiling it to an empty binary.
+[[bin]]
+name = "act_diagonal_calibration"
+path = "src/bin/act_diagonal_calibration.rs"
+required-features = ["act_diagonal_calibration"]
 
 # ─── Workspace ────────────────────────────────────────────────────────
 # The repo is a root-package workspace: riir-infer-core at the root,
