@@ -1,7 +1,11 @@
 # Plan 611 — T7: the op-layer unification — the encoder lane's Backend trait implemented over the CubeCL layer, the A/B vs the hand-tuned lanes, the verdict
 
 **Status:** IN FLIGHT — S1 complete (a: `bc93e70`, b: `a5688a9`),
-S2 complete (`a3f8928`); S3–S6 remaining, each independently landable.
+S2 complete (`a3f8928`), S3 complete (`4e89963`), S4 complete WITH ONE
+OPEN FINDING (wiring + G5 arm landed; the G5 gate FAILS at the third
+posture — deterministic, filed as `.issues/016_cubecl_g5_fail.md`; the
+lane stays opt-in and its numbers PROVISIONAL). S5–S6 remaining; the
+S5 A/B must NOT publish Cubecl numbers until 016 closes.
 Feeds riir-reflex `.issues/008` T7 (the campaign's last open task) and
 riir-infer `.issues/998` S8 (the same task, mirrored home). The reflex-side
 issue 008 remains the campaign record; this plan is the execution home.
@@ -180,15 +184,27 @@ encoder" pin live laya-side. Confirmed GAP, not a naming miss.
       keeps the loop on the CubeCL posture — the agent's existing gate,
       zero new machinery); `needs_window_mask` → `true` (the default —
       the composed body consumes the tensor).
-- [ ] **S4 — the agent wiring + G5 at the third posture.**
-      `DeviceKind::Cubecl` + the env spelling + the fail-loud refusal
-      when the feature is off; `RiirAgent::load`'s backend match arm;
-      the head defer posture audited on the new backend (the drain
-      batching is backend-agnostic by construction — `reads_of`/`act_of`
-      go through `download_into` — but the packed gate runs at the
-      CubeCL posture to prove it); `tests/laya_riir_parity` extended to
-      run the G5 capture at `LAYA_DEVICE=cubecl` (feature-gated arm,
-      loud-skip without the feature, the cache_reuse pattern).
+- [x] **S4 — the agent wiring + G5 at the third posture. LANDED
+      2026-09-26 (riir-infer: DeviceKind::Cubecl + `LAYA_DEVICE=cubecl`
+      + the fail-loud refusal; `RiirAgent::load_with_device` — the
+      explicit-device constructor the A/B harness needs, one process
+      many postures, no env races; reflex `06d22bd`: the
+      `laya-riir-cubecl` feature forward + the [patch.crates-io] rows
+      the gpu tree needs cross-workspace (patches do NOT propagate; the
+      lock also needed an explicit `cargo update -p wgpu-hal` — a patch
+      whose version differs from the locked one is NOT auto-applied) +
+      the G5 arm in `tests/laya_riir_parity.rs` (the body extracted into
+      `g5_run(builder)`, the cubecl arm loads via the explicit
+      constructor) + the harness DeviceKind arm. **THE G5 GATE FAILS AT
+      THIS POSTURE** — top-1 0.33–0.46 vs 0.999, prob drift 5e-1 —
+      deterministic (byte-identical across debug/release and across the
+      wgpu-dispatch-cap fix `d4ab87a`), act_of EXACT (drift 0.0) while
+      the encoder path is wrong: a composition-level bug no isolated op
+      test exercises. Filed as `.issues/016_cubecl_g5_fail.md` with the
+      repro + next bisect levers. The head-defer audit: moot at this
+      posture — `supports_packed_attention` stays false, so the agent
+      keeps the per-question loop and the defer path is unreachable;
+      the G5 replay runs that exact loop.]
 - [ ] **S5 — the A/B harness + the verdict.**
       `tests/backend_ab.rs` (measurement-only, `#[ignore]`, the
       fold-A/B discipline): fixed fixtures (the G5 english + typed
