@@ -1,6 +1,7 @@
 # Plan 611 — T7: the op-layer unification — the encoder lane's Backend trait implemented over the CubeCL layer, the A/B vs the hand-tuned lanes, the verdict
 
-**Status:** PLANNED — slices S1–S6, each independently landable; nothing started.
+**Status:** IN FLIGHT — S1 complete (a: `bc93e70`, b: `a5688a9`);
+S2–S6 remaining, each independently landable.
 Feeds riir-reflex `.issues/008` T7 (the campaign's last open task) and
 riir-infer `.issues/998` S8 (the same task, mirrored home). The reflex-side
 issue 008 remains the campaign record; this plan is the execution home.
@@ -99,7 +100,7 @@ encoder" pin live laya-side. Confirmed GAP, not a naming miss.
 
 ## Slices
 
-- [-] **S1 — the GAP kernel + the skeleton (the engine payoff lands
+- [x] **S1 — the GAP kernel + the skeleton (the engine payoff lands
       first).** **(a) LANDED 2026-09-26 (riir-infer `bc93e70`):
       `LayerNormMeanBatchedCubeCL`** — one workgroup per row, ONE
       strided walk accumulating Σx + Σx², two unrolled 256-thread smem
@@ -109,15 +110,36 @@ encoder" pin live laya-side. Confirmed GAP, not a naming miss.
       Issue-639 params discipline. 2 parity tests green (7×1024
       identity-gamma with the zero-mean/unit-var row claims + 3×64
       non-trivial gamma); full gpu lib 203/0; clippy `-D` clean at
-      cubecl_runtime + default postures. (b) NOT STARTED — the
-      `CubeclBackend` skeleton in the laya lane
-      (`laya/riir/cubecl.rs`, feature-gated): `name()` = `"cubecl"`,
-      the trivial ops first (add / add_bias_row / scale / relu /
-      gelu_erf / glu_gelu_gate / copy_into / copy_at) over
-      `elementwise`-family launches, `begin_pass`/`download_into` over
-      the runtime client, `warm_weight` → `params_cache` handles.
-      Parity: every op vs the CPU lane on the smoke geometry
-      (`metal_ops_smoke.rs`'s pattern — op-by-op, not forward-level).
+      cubecl_runtime + default postures. **(b) LANDED 2026-09-26
+      (riir-infer `a5688a9` + the ane.rs mechanical fix `e20ca91`):
+      the `CubeclBackend` skeleton** — `laya/riir/cubecl.rs` behind the
+      new `laya-riir-cubecl` feature (optional in-repo path dep,
+      never a default): the Metal lane's residency model (weights
+      (ptr,len) permanent; chain (ptr,len,epoch) touch-stamped;
+      read-modify-write uploads on miss, write-first dsts get
+      `client.empty`) on CubeCL's server-managed memory;
+      `begin_pass` bumps the epoch + clears the chain WITHOUT a sync
+      (tasks hold their own handle refs — the engine's no-sync
+      decode residency); `download_into` resolves by base pointer +
+      most-recent touch, panics on host-authored slices; the trivial
+      op family (add / add_bias_row / scale / relu / gelu_erf /
+      glu_gelu_gate / copy_into / copy_at) dispatched over new gpu
+      elementwise launchers; every S2/S3 math op panics LOUD naming
+      its slice. Two measured findings baked into docs: (1) the layout
+      policy PADS allocations and returns handles with
+      `offset_end = Some(slack)` — live ranges read via
+      `size_in_used()`, never `size()`; (2) wgpu's 32-byte
+      storage-bind alignment makes byte-offset handle views unusable
+      for the forward's element-arbitrary offsets, so offset ops take
+      PARAMS over whole-parent binds. Parity: gpu-side kernel tests
+      (5 new, full gpu lib 208/0) + `tests/cubecl_ops_smoke.rs`
+      op-by-op vs Cpu (exact for non-erf ops, 2e-5 erf-bearing) + the
+      residency arms (chain reuse = x+2y not x+y; begin_pass
+      invalidation panics deterministically; device-side copy slabs);
+      runtime label resolved at construction (`wgpu<msl>` on this
+      host) and printed — the plan's backend-selection pin. Clippy
+      `-D` clean at default / cubecl_runtime / laya-riir-cubecl /
+      --all-features; the [[test]] row refuses without the feature.
 - [ ] **S2 — the matmul family.** `matmul_w` → `MatmulCubeCL` (the
       shapes already match); `matmul` (a[m×k] @ b[k×n], both row-major
       — a transposed-B variant or a second kernel; pick by reading the
