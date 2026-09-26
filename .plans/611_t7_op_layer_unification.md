@@ -4,10 +4,10 @@
 S2 complete (`a3f8928`), S3 complete (`4e89963`), S4 complete (wiring +
 G5 arm; the S4 finding RESOLVED — 016's G5 FAIL was the `gather_rows`
 residency class, fixed; top-1 = 1.000000 on all three checkpoints in
-every run; a residual sporadic drift wobble filed as `.issues/017`, the
+every run; a residual sporadic drift wobble filed as `.issues/018`, the
 cubecl G5 arm `#[ignore]`d until it closes, all Cubecl numbers
 PROVISIONAL). S5–S6 remaining; the S5 A/B may MEASURE at any time but
-must not PUBLISH Cubecl numbers until 017 closes.
+must not PUBLISH Cubecl numbers until 018 closes.
 Feeds riir-reflex `.issues/008` T7 (the campaign's last open task) and
 riir-infer `.issues/998` S8 (the same task, mirrored home). The reflex-side
 issue 008 remains the campaign record; this plan is the execution home.
@@ -221,12 +221,12 @@ encoder" pin live laya-side. Confirmed GAP, not a naming miss.
       TWO-PASS (the CPU lane's exact form, `inv_dim` the candle scale);
       drift floor 3.64e-4 → 1.64e-4 at the encoder output. The probe
       (`Encoder::forward_probe` + `tests/cubecl_encoder_probe`) stays as
-      the issue-017 instrument. RESIDUAL: a sporadic per-forward drift
+      the issue-018 instrument. RESIDUAL: a sporadic per-forward drift
       wobble (top-1 never flips; the outlier moves between checkpoints
       and runs; floor 3.7e-6/2.8e-5/6.4e-5 with 10–1000× excursions) —
-      filed `.issues/017_cubecl_drift_wobble.md`; the reflex G5 cubecl
+      filed `.issues/018_cubecl_drift_wobble.md`; the reflex G5 cubecl
       arm is `#[ignore]`d until it closes. 016 removed (resolved; this
-      section + 017 carry the record).]
+      section + 018 carry the record).]
 - [ ] **S5 — the A/B harness + the verdict.**
       `tests/backend_ab.rs` (measurement-only, `#[ignore]`, the
       fold-A/B discipline): fixed fixtures (the G5 english + typed

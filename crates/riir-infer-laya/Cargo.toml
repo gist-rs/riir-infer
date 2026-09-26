@@ -191,7 +191,7 @@ required-features = ["laya-riir-cuda"]
 name = "cubecl_ops_smoke"
 required-features = ["laya-riir-cubecl"]
 
-# The issue-016/017 probe (the 017 stability+bisect instrument):
+# The issue-016/018 probe (the 018 stability+bisect instrument):
 # CPU-vs-CubeCL per-op diff over the real encoder geometry.
 [[test]]
 name = "cubecl_encoder_probe"

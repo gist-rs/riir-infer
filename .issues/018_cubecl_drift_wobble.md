@@ -1,4 +1,4 @@
-# Issue 017 — plan 611 S4 follow-up: the Cubecl posture's residual prob-drift
+# Issue 018 — plan 611 S4 follow-up: the Cubecl posture's residual prob-drift
 # wobble (sporadic per-forward, top-1 never flips)
 
 **Status:** OPEN — the lane stays opt-in behind `laya-riir-cubecl`; the

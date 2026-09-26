@@ -364,7 +364,7 @@ impl Encoder {
         }
     }
 
-    /// DEBUG PROBE (issue 016; retained as the 017 stability+bisect
+    /// DEBUG PROBE (issue 016; retained as the 018 stability+bisect
     /// instrument): the single-sequence [`Self::forward`] op stream with a
     /// per-op sink. Every sink call receives `(tag, host-current bytes)`
     /// for the op's primary output (one `download_into` per call — a

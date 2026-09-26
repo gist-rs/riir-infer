@@ -1,5 +1,5 @@
 #![cfg(feature = "laya-riir-cubecl")]
-//! Issue-016/017 bisect + stability probe (the 017 instrument): run ONE
+//! Issue-016/018 bisect + stability probe (the 018 instrument): run ONE
 //! synthetic sequence through `Encoder::forward_probe` on the Cpu and
 //! Cubecl backends and diff per-op. Three questions in one run:
 //!
@@ -7,7 +7,7 @@
 //!    the reduction-order baseline (~1e-5) to something structural
 //!    localizes the wrong op.
 //! 2. cubecl-vs-cubecl across repeated passes (a `begin_pass` between) —
-//!    a nonzero diff means in-process non-determinism (the 017 wobble);
+//!    a nonzero diff means in-process non-determinism (the 018 wobble);
 //!    zero means the run's pass stream was stable.
 //!
 //! Geometry is the real english checkpoint (weights are cached — no
