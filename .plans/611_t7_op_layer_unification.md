@@ -1,14 +1,13 @@
 # Plan 611 — T7: the op-layer unification — the encoder lane's Backend trait implemented over the CubeCL layer, the A/B vs the hand-tuned lanes, the verdict
 
-**Status:** IN FLIGHT — S1 complete (a: `bc93e70`, b: `a5688a9`),
-S2 complete (`a3f8928`), S3 complete (`4e89963`), S4 complete (wiring +
-G5 arm; 016 RESOLVED by the `gather_rows` residency fix; the residual
-wobble, 018, RESOLVED 2026-09-26 by `2a34bd3`: a write-after-read race in
-the CubeCL row-softmax, sufficient alone in an isolated A/B. A second
-fix, `c0dfa06` (wgpu-hal Metal barriers), also landed; its necessity and
-cost are contested in Issue 019. G5 cubecl re-armed in riir-reflex
-`ccb5bd0`, 10/10 runs bit-identical at the floor, so Cubecl numbers are no
-longer provisional). S5–S6 remaining; S5 quotes the barrier setting.
+**Status:** DONE 2026-09-26 — S1–S6 complete. VERDICT (Bench 006,
+pre-registered at `fac0dfd`, results `ac85c8e`): the hand Metal lane stays
+the macOS default (CubeCL 5.1–8.4× slower, 0/12 wins in every cell); the
+CubeCL arm is KEPT opt-in behind `laya-riir-cubecl` as the portability/CI
+arm (it beats the CPU lane on the short ladder, 0.54–0.72, and on 1q,
+0.75); nothing deleted, nothing promoted. 016 resolved (`gather_rows`
+residency); 018 resolved (`2a34bd3`, softmax max-read race); 019 resolved
+(barrier reverted at `4205c12`). G5 cubecl armed in riir-reflex `ccb5bd0`.
 Feeds riir-reflex `.issues/008` T7 (the campaign's last open task) and
 riir-infer `.issues/998` S8 (the same task, mirrored home). The reflex-side
 issue 008 remains the campaign record; this plan is the execution home.
@@ -171,7 +170,7 @@ encoder" pin live laya-side. Confirmed GAP, not a naming miss.
       wgpu<msl> first try (no 3D-dispatch precedent existed in this
       codebase). supports_packed_attention stays FALSE until S3 completes
       the forward surface — matmuls alone cannot run a forward.
-- [ ] **S3 — the head ops + attention.** softmax_rows (the softmax
+- [x] **S3 — the head ops + attention.** LANDED 2026-09-26 (`4e89963`). softmax_rows (the softmax
       kernel; check its row-length generality at d=1024/2048 — the
       head's option rows are short, the scores rows are seq-long),
       layer_norm_nobias_into → the S1 GAP kernel, apply_rope (the
@@ -232,7 +231,7 @@ encoder" pin live laya-side. Confirmed GAP, not a naming miss.
       filed `.issues/018_cubecl_drift_wobble.md`; the reflex G5 cubecl
       arm is `#[ignore]`d until it closes. 016 removed (resolved; this
       section + 018 carry the record).]
-- [ ] **S5 — the A/B harness + the verdict.**
+- [x] **S5 — the A/B harness + the verdict. DONE 2026-09-26: `tests/backend_ab.rs` + Bench 006 (pre-registered `fac0dfd`, results `ac85c8e`).**
       `tests/backend_ab.rs` (measurement-only, `#[ignore]`, the
       fold-A/B discipline): fixed fixtures (the G5 english + typed
       capture sequences + the 5-q packed shape), position-balanced
@@ -244,7 +243,7 @@ encoder" pin live laya-side. Confirmed GAP, not a naming miss.
       the VERDICT paragraph: per-regime winner, the portability arm's
       keep/delete call, the GAP kernels' engine-side status (they stay
       regardless).
-- [ ] **S6 — closure.** The verdict written back into riir-reflex
+- [x] **S6 — closure. DONE 2026-09-26: verdict written back to riir-reflex 008 T7 (closed, record in its HISTORY.md) + the 998/610/1003 S8 rows; no deletion (the pre-registered criterion); AGENTS.md/README feature rows both repos; HISTORY entries.** The verdict written back into riir-reflex
       `.issues/008` T7 + `.issues/998` S8 (mirrored), the loser
       deleted IF the verdict says so (expected: no deletion — the arm
       stays opt-in behind its feature as the portability/CI lane, or

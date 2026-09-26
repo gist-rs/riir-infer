@@ -2,7 +2,7 @@
 
 > **Moved 2026-09-26:** this plan lives in `riir-infer/.plans/` now (moved verbatim from riir-ai, same number — riir-ai's ledger keeps 610 allocated). Prose paths are written from the riir-ai workspace root at writing time; **`../riir-infer` means THIS repo**, `../riir-ai/*` is the riir-ai checkout.
 
-**Status:** IN PROGRESS — slice 1 LANDED 2026-09-23 (T1–T7 green); S2 + S3 + S4a + S4b + S5 LANDED 2026-09-23. S4 (SEAM adjudication core) RESOLVED by S4a+S4b; **S6a LANDED 2026-09-24** (the T2.3 clippy retarget + its two carve riders, commits below). **S6b LANDED 2026-09-24 at honest scope** (patch re-points + adjudications; the full edge-drop is owner-blocked on the training-families home — measured 12/81 forwards mirrored, see the S6b row). **S7 LANDED 2026-09-24** (dead riir-gpu-async row removed; riir-router measured NOT dead — default-on feature; flip residue measured complete by compilation; riir-ai `498b1732b9`). **S8 remains** (gated on P2/T4).
+**Status:** IN PROGRESS — slice 1 LANDED 2026-09-23 (T1–T7 green); S2 + S3 + S4a + S4b + S5 LANDED 2026-09-23. S4 (SEAM adjudication core) RESOLVED by S4a+S4b; **S6a LANDED 2026-09-24** (the T2.3 clippy retarget + its two carve riders, commits below). **S6b LANDED 2026-09-24 at honest scope** (patch re-points + adjudications; the full edge-drop is owner-blocked on the training-families home — measured 12/81 forwards mirrored, see the S6b row). **S7 LANDED 2026-09-24** (dead riir-gpu-async row removed; riir-router measured NOT dead — default-on feature; flip residue measured complete by compilation; riir-ai `498b1732b9`). **S8 DONE 2026-09-26** (plan 611 — the T7 verdict, Bench 006).
 
 Executes **P3** of riir-reflex `.issues/008_riir_infer_consolidation.md`
 (the campaign plan; riir-ai mirror `.issues/998`). T2's module audit
@@ -639,7 +639,7 @@ adjudication from the T2 table)
         ratchet — compacted to net-zero (235); `ci_modelless_residue.sh`
         clean. Boundary contract rerun CLEAN (23 repos / 321 edges / 0
         violations / 0 rot).
-- [ ] S8 — P5 (op-layer unification) AFTER P2 lands the laya lane: one
+- [x] S8 — **DONE 2026-09-26 via plan 611** (Bench 006: Metal lane stays default, CubeCL kept opt-in, nothing deleted; record HISTORY.md § Plan 611). Original row: P5 (op-layer unification) AFTER P2 lands the laya lane: one
       Backend trait over the hand-MSL and CubeCL op layers, A/B vs the
       chart numbers, delete the loser. **SEQUENCING CALL 2026-09-24 (reflex
       session): deferred behind reflex issue 020 T5** — the T5 batched

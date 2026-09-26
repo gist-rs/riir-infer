@@ -2,7 +2,7 @@
 
 > **Moved 2026-09-26:** this file lives in `riir-infer/.issues/` now (moved verbatim from riir-ai, same number — riir-ai's ledger keeps 998 allocated). Prose paths below are written from the riir-ai side at writing time; **`../riir-infer` means THIS repo**.
 
-**Status:** OPEN — P0 contract landed with this issue; T2 audit recorded;
+**Status:** OPEN — **S8 (the op-layer unification, reflex 008 T7) DONE 2026-09-26 via plan 611 / Bench 006** (Metal lane stays default, CubeCL kept opt-in, nothing deleted); reflex 008 is closed. Remaining here: the T7/P3-riders row's D4 re-narrowing residue. P0 contract landed with this issue; T2 audit recorded;
 below; T3 carve (P1) executes in the same window. **P4/T6 EXECUTED
 2026-09-23 — both repos PUBLIC** (riir-infer + reflex; owner green-light;
 record at the end of this file). The 16:4x HEAD↔HEAD default-lane break

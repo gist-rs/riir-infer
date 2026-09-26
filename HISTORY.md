@@ -32,6 +32,37 @@ contested-evidence point (`4205c12`):
 - 019 marked RESOLVED in-file (kept; it carries the premise record and
   the re-open trigger).
 
+## 2026-09-26 — Plan 611 DONE: the T7 op-layer unification verdict (Bench 006) — riir-reflex Issue 008 closed
+
+The last open task of the riir-infer consolidation campaign (riir-reflex
+Issue 008 T7, mirrored as 998/610 S8). One portable CubeCL implementation
+of the laya `Backend` trait was built over this repo's op layer (S1–S4) and
+A/B'd against the hand lanes (S5). The verdict rules were pre-registered at
+`fac0dfd`, before any run.
+
+- **The hand Metal lane stays the macOS default.** CubeCL ran 5.1–8.4×
+  slower than Metal, 0/12 wins in every cell of three permutation-balanced
+  runs (Bench 006, results `ac85c8e`; loaded box, preflight refused on load
+  only, GPU canary OK).
+- **The CubeCL arm is KEPT opt-in** (`laya-riir-cubecl`; not default, not
+  in any release set). It beats the CPU lane on the short ladder (seq
+  16/54/128: 0.54–0.72, 12/12) and on the 1-question case (0.75), so the
+  pre-registered delete-if-slower-than-CPU-everywhere rule fails. Its G5
+  gate is armed (riir-reflex `ccb5bd0`). **Nothing was deleted or
+  promoted.**
+- **Engine-side payoff, kept regardless:** the two-pass mean-centered
+  LayerNorm (`LayerNormMeanBatchedCubeCL` — the GAP kernel; the engine's
+  norms were RMS-only), the batched in-place row-softmax, the offset +
+  head-batched tiled matmuls (z-dispatched heads), and the
+  rope/split/merge/gather permutation kernels.
+- **Defects the arm surfaced and fixed on the way:** the `gather_rows`
+  residency class (016); the one-pass LN cancellation at deep layers
+  (two-pass now); the softmax max-read race (018, `2a34bd3`), which is live
+  in the engine's single-row `softmax_f32` too; and the chunked-softmax row
+  offset. 019's contested barrier was reverted (`4205c12`).
+- Harness: `crates/riir-infer-laya/tests/backend_ab.rs` (measurement-only).
+  Re-read on a quiet box with one command (AGENTS.md).
+
 ## 2026-09-26 — Issue 018 CLOSED: the Cubecl-posture drift wobble was a softmax write-after-read race (fix `2a34bd3`)
 
 Plan 611 S4's residual: the laya G5 gate at the cubecl posture held top-1

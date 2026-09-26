@@ -51,6 +51,12 @@ cargo test -p riir-infer-gpu --features exl3_gpu,cuda_backend --lib  # native CU
 cargo check -p riir-infer-laya --features laya-riir
 cargo clippy -p riir-infer-laya --all-targets --features laya-riir-metal -- -D warnings
 cargo test -p riir-infer-laya --features laya-riir-metal --test metal_ops_smoke  # macOS only
+# The CubeCL portability arm (opt-in; plan 611 — KEPT, never default; the
+# consumer-side G5 at the cubecl posture is the acceptance gate):
+cargo clippy -p riir-infer-laya --all-targets --features laya-riir-cubecl -- -D warnings
+cargo test --release -p riir-infer-laya --features laya-riir-cubecl --test cubecl_ops_smoke
+# The three-backend A/B (measurement-only; Bench 006 — quote box state):
+cargo test --release -p riir-infer-laya --features laya-riir-metal,laya-riir-cubecl --test backend_ab -- --ignored --nocapture
 # The CUDA backend (non-macOS; inert on a Mac — no dep pulled). The op-level
 # gate + the consumer-side G5 (at LAYA_DEVICE=cuda) are the parity pair:
 cargo check -p riir-infer-laya --features laya-riir-cuda
