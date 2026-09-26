@@ -1,6 +1,6 @@
-# Issue 015 (2026-09-26) — `gpu_transpose` has no callers, and its docstring asserts an integration nobody performs
+# Issue 017 (2026-09-26) — `gpu_transpose` has no callers, and its docstring asserts an integration nobody performs
 
-**Status:** OPEN — owner adjudication. Not blocking: riir-train Issue 572 landed
+**Status:** OPEN — owner adjudication. RENUMBERED from 015 → 017 (2026-09-26): dual allocation with origin's audio-lane PoC 015 (pushed + cited by Research 001, it keeps the number; the 724-T2 rule sends the fewer-cited side); 016 was taken by the CubeCL G5 fail. `.issues/.highwater_local` now reads 017 (it also repairs the stale-015 counter the 016 allocation left behind). Not blocking: riir-train Issue 572 landed
 a CubeCL-native transpose beside it (`transpose_cubecl.rs`, `3c4bd92`) rather
 than waiting on this.
 **Scope:** `crates/riir-infer-gpu/src/gpu_transpose.rs` + `kernels/transpose.wgsl`
