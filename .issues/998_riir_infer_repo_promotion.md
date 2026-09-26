@@ -545,5 +545,10 @@ exceptions flipped the same day:
   `laya-riir-cubecl`, the Metal lane's residency model on CubeCL's
   server, `wgpu<msl>` pinned at construction) with the trivial op
   family + residency parity green (gpu lib 208/0; op-by-op vs Cpu +
-  the begin_pass/download_into/copy_at semantics arms). S2 (matmul
-  family) next.
+  the begin_pass/download_into/copy_at semantics arms). **S2
+  COMPLETE 2026-09-26 (`a3f8928`):** the full matmul family —
+  `matmul_w` over the shipped derived-dims transB kernel, the four
+  offset/batched ops over two new z-dispatched tiled kernels (the
+  head batch on CUBE_POS_Z, one launch per batch), the trait-default
+  folds proven behaviorally; gpu lib 210/0, smoke 7/7, max drift
+  1.07e-4 vs the 1e-3 budget. S3 (head ops + attention) next.

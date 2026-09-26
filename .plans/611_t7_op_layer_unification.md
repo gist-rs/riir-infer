@@ -1,7 +1,7 @@
 # Plan 611 — T7: the op-layer unification — the encoder lane's Backend trait implemented over the CubeCL layer, the A/B vs the hand-tuned lanes, the verdict
 
-**Status:** IN FLIGHT — S1 complete (a: `bc93e70`, b: `a5688a9`);
-S2–S6 remaining, each independently landable.
+**Status:** IN FLIGHT — S1 complete (a: `bc93e70`, b: `a5688a9`),
+S2 complete (`a3f8928`); S3–S6 remaining, each independently landable.
 Feeds riir-reflex `.issues/008` T7 (the campaign's last open task) and
 riir-infer `.issues/998` S8 (the same task, mirrored home). The reflex-side
 issue 008 remains the campaign record; this plan is the execution home.
@@ -140,18 +140,30 @@ encoder" pin live laya-side. Confirmed GAP, not a naming miss.
       host) and printed — the plan's backend-selection pin. Clippy
       `-D` clean at default / cubecl_runtime / laya-riir-cubecl /
       --all-features; the [[test]] row refuses without the feature.
-- [ ] **S2 — the matmul family.** `matmul_w` → `MatmulCubeCL` (the
-      shapes already match); `matmul` (a[m×k] @ b[k×n], both row-major
-      — a transposed-B variant or a second kernel; pick by reading the
-      tiled kernel's B indexing, never by transposing on the host);
-      `matmul_kt` / `matmul_kt_heads` / `matmul_heads` (batched-over-
-      heads; v1 may loop per head — correctness first, one dispatch
-      later if the A/B shows it matters); `set_row_segments` no-op v1
-      (one kernel for every shape — the honest v1; split-K-style
-      shape rules are the hand lanes' territory and explicitly NOT a
-      v1 goal). Parity per op per shape class (m ∈ {1, 4, 54, 128,
-      512}, k/n the encoder geometry) vs CPU at the G5 drift budget,
-      shape table in the test.
+- [x] **S2 — the matmul family. LANDED 2026-09-26 (riir-infer `a3f8928`).**
+      `matmul_w` → the SHIPPED `MatmulCubeCL` (derived-dims transB — exact
+      because every call site guarantees whole exact-extent parents,
+      `HeadScratch::fit` then exact dims; the weight rides the permanent
+      cache, `warm_weight_2d`'s slot); `matmul`/`matmul_kt`/
+      `matmul_kt_heads`/`matmul_heads` → TWO new offset+head-batched tiled
+      kernels (`matmul_batched_transb_off_f32`, `matmul_batched_rr_off_f32`
+      — the head batch rides the DISPATCH Z axis via `CUBE_POS_Z`, one
+      launch per batch, not the priced per-head loop: it is simpler than
+      the loop AND saves heads−1 dispatches; whole parents bound once, head
+      slabs are in-kernel offsets, the whole-batch destination ONE
+      `client.empty` slot); dims+offsets ride the params buffer as
+      f32-encoded usize (f32-exact guard at 2^24) per the S1b
+      alignment finding; `matmul_w_accum`/`matmul_w_glu` compose through
+      the trait defaults (bit-identical folds, proven behaviorally);
+      `set_row_segments` stays the trait's no-op v1. Parity: 2 gpu kernel
+      tests (offsets over genuinely-padded parents + batched heads, max_err
+      ~2e-6; full gpu lib 210/0) + 2 backend smoke tests (the full shape
+      table — m ∈ {1,4,54,128,512} × the encoder geometry classes, heads ∈
+      {1,4}, offsets arms; the fold pair) — 7/7 green, max drift 1.07e-4
+      vs the 1e-3 budget. Measured finding: the z-dispatch works on
+      wgpu<msl> first try (no 3D-dispatch precedent existed in this
+      codebase). supports_packed_attention stays FALSE until S3 completes
+      the forward surface — matmuls alone cannot run a forward.
 - [ ] **S3 — the head ops + attention.** softmax_rows (the softmax
       kernel; check its row-length generality at d=1024/2048 — the
       head's option rows are short, the scores rows are seq-long),
