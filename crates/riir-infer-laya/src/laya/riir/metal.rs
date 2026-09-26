@@ -274,6 +274,20 @@ impl SplitRule {
         long_k_max_tgs: 64,
         long_k: 2048,
     };
+    /// The rule under the MPS GEMM arm (reflex issue 020 T13b): split ONLY
+    /// single-row-tile calls (m ≤ 32). Measured paired whole-forward
+    /// (`tests/metal_mps_gemm.rs` `t13b`, 24 rounds/shape): all-MPS vs the
+    /// DEFAULT split-K reads 1.034 / 1.068 / 1.147 at seq 10 / 24 / 32
+    /// (split-K keeps those) and 0.779 / 0.806 / 0.724 / 0.721 at seq 46 /
+    /// 54 / 80 / 96 (24/24 — MPS takes them). Decided per row segment like
+    /// every rule, so packed ≡ loop holds.
+    pub const WITH_MPS: Self = Self {
+        on: true,
+        max_row_tiles: 1,
+        max_tgs: 0,
+        long_k_max_tgs: 0,
+        long_k: 2048,
+    };
     /// The first rule (`512477e`): the narrow-TG ceiling alone — kept as
     /// the A/B arm for [`Self::DEFAULT`].
     pub const TG_CEILING_ONLY: Self = Self {
@@ -1690,6 +1704,10 @@ impl Metal {
     /// candle lane's `device_from_env` precedent; never a silent CPU
     /// fallback).
     pub fn new() -> Result<Self> {
+        let mps = (std::env::var("LAYA_METAL_MPS").as_deref() != Ok("0"))
+            .then(mps::MpsGemm::new)
+            .flatten();
+        let base = Self::base_split_rule(mps.is_some());
         let Some(device) = Device::system_default() else {
             return Err(rt("LAYA_DEVICE=metal: no Metal device on this host"));
         };
@@ -1737,16 +1755,14 @@ impl Metal {
                 max_tgs: std::env::var("LAYA_METAL_SPLITK_MAXTGS")
                     .ok()
                     .and_then(|v| v.parse().ok())
-                    .unwrap_or(SplitRule::DEFAULT.max_tgs),
-                ..SplitRule::DEFAULT
+                    .unwrap_or(base.max_tgs),
+                ..base
             },
             splitk_scratch: Mutex::new(None),
             splitk_count: AtomicU64::new(0),
             fold_count: AtomicU64::new(0),
             row_segments: Mutex::new(Vec::new()),
-            mps: (std::env::var("LAYA_METAL_MPS").as_deref() != Ok("0"))
-                .then(mps::MpsGemm::new)
-                .flatten(),
+            mps,
             mps_min_m: std::env::var("LAYA_METAL_MPS_MIN_M")
                 .ok()
                 .and_then(|v| v.parse().ok())
@@ -1797,7 +1813,32 @@ impl Metal {
     /// resolve stays off (see [`Self::mps_active`]).
     pub fn with_mps(mut self, on: bool) -> Self {
         self.mps = if on { mps::MpsGemm::new() } else { None };
+        // Re-base the split rule on the new posture, keeping the master
+        // switch (an explicit `with_split_rule` AFTER this still wins).
+        self.split_rule = SplitRule {
+            on: self.split_rule.on,
+            ..Self::base_split_rule(self.mps.is_some())
+        };
         self
+    }
+
+    /// Builder: set the split rule on an existing instance — the seam a
+    /// gate uses to pin the SPLIT PLAN independently of the MPS posture
+    /// (apply after [`Self::with_mps`], which re-bases the rule).
+    pub fn with_rule(mut self, rule: SplitRule) -> Self {
+        self.split_rule = rule;
+        self
+    }
+
+    /// The split rule a posture starts from: [`SplitRule::WITH_MPS`] when
+    /// the MPS arm is live (unless `LAYA_METAL_MPS_SPLIT=0`, the T13b
+    /// kill-switch), else [`SplitRule::DEFAULT`].
+    fn base_split_rule(mps_live: bool) -> SplitRule {
+        if mps_live && std::env::var("LAYA_METAL_MPS_SPLIT").as_deref() != Ok("0") {
+            SplitRule::WITH_MPS
+        } else {
+            SplitRule::DEFAULT
+        }
     }
 
     /// Whether the MPS GEMM arm is live on this instance.

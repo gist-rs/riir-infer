@@ -9,8 +9,14 @@
 //!
 //! Reach is asserted both ways (the `splitk_dispatches` law): the MPS
 //! backend must dispatch MPS GEMMs once any encoder projection is unsplit
-//! (m ≥ 97 under the shipped `SplitRule`), and none while everything
-//! splits; the off backend must dispatch none.
+//! (m ≥ 33 under the MPS posture's `SplitRule::WITH_MPS`), and none while
+//! everything splits; the off backend must dispatch none.
+//!
+//! The bit gate pins the SPLIT PLAN on both sides (`with_rule(WITH_MPS)`
+//! on the off backend): it isolates the MPS kernel against the narrow
+//! instance on the same plan. The T13b rule change itself (split-K → an
+//! unsplit GEMM at m 33–96) IS a reduction-order change and is gated by
+//! the drift budget instead (G5 + `packed_forward_equiv`).
 //!
 //! ```sh
 //! # the gate (skips LOUD without the checkpoint)
@@ -25,13 +31,13 @@
 use riir_infer_laya::laya::config::{Checkpoint, load_checkpoint_configs};
 use riir_infer_laya::laya::riir::backend::Backend;
 use riir_infer_laya::laya::riir::encoder::Encoder;
-use riir_infer_laya::laya::riir::metal::Metal;
+use riir_infer_laya::laya::riir::metal::{Metal, SplitRule};
 use riir_infer_laya::laya::riir::weights as ckpt_weights;
 use riir_infer_laya::laya::weights::{ensure_checkpoint, weights_root};
 
-/// Loop shapes: all-split (24/54/80), the first unsplit band (106/140),
-/// partially split (188), nothing split (317/512).
-const LOOP_SEQS: &[usize] = &[24, 54, 80, 106, 140, 188, 317, 512];
+/// Loop shapes: all-split under WITH_MPS (10/24/32), the T13b band
+/// (33/54/80/96), and the unsplit band (106/140/188/317/512).
+const LOOP_SEQS: &[usize] = &[10, 24, 32, 33, 54, 80, 96, 106, 140, 188, 317, 512];
 
 /// Packed plans: both-split, mixed (one segment splits, one does not), all
 /// unsplit, and the typed_decisions case shape (5 questions × ~179 tokens).
@@ -84,7 +90,10 @@ fn run(enc: &Encoder, b: &Metal, ids: &[u32], seqs: Option<&[usize]>) -> Vec<f32
 }
 
 fn backends() -> (Metal, Metal) {
-    let off = Metal::new().expect("metal").with_mps(false);
+    let off = Metal::new()
+        .expect("metal")
+        .with_mps(false)
+        .with_rule(SplitRule::WITH_MPS);
     let on = Metal::new().expect("metal").with_mps(true);
     assert!(
         on.mps_active(),
@@ -113,7 +122,7 @@ fn mps_arm_is_bit_identical_on_loop_shapes() {
              raw-bit level"
         );
         let (on_d, off_d) = (on.mps_dispatches() - before.0, off.mps_dispatches() - before.1);
-        if seq <= 96 {
+        if seq <= 32 {
             assert_eq!(on_d, 0, "seq {seq}: all-split shape dispatched an MPS GEMM");
         } else {
             assert!(
@@ -212,6 +221,58 @@ fn t13_mps_paired_ab() {
             rs[ROUNDS / 4],
             rs[3 * ROUNDS / 4],
             r.iter().filter(|v| **v < 1.0).count(),
+        );
+    }
+}
+
+/// The small-m follow-up (reflex issue 020 T13): at m ≤ 96 the shipped
+/// `SplitRule` sends every encoder GEMM to split-K, so the MPS arm never
+/// sees those shapes. Does MPS beat split-K there too? Paired whole
+/// forward: control = the shipped posture (split-K + MPS above it), arm =
+/// the WITH_MPS rule (split only m ≤ 32; the pricing run used split-K OFF
+/// everywhere and found split-K still wins at seq ≤ 32). Measurement only.
+#[test]
+#[ignore = "measurement-only A/B (issue 020 T13 small-m) — run with --ignored --nocapture on a quiet box"]
+fn t13b_mps_vs_splitk_small_m() {
+    const ROUNDS: usize = 24;
+    let enc = load_encoder();
+    // Control = the PRE-T13b posture (MPS + the DEFAULT split rule); arm =
+    // the shipped T13b rule (WITH_MPS: split only m ≤ 32).
+    let ctrl = Metal::new()
+        .expect("metal")
+        .with_mps(true)
+        .with_rule(SplitRule::DEFAULT);
+    let arm = Metal::new().expect("metal").with_mps(true);
+    assert!(ctrl.mps_active() && arm.mps_active(), "MPS did not resolve");
+    enc.warm(&ctrl);
+    enc.warm(&arm);
+    println!("t13b: WITH_MPS rule vs DEFAULT split rule (both MPS) · {ROUNDS} paired rounds/shape");
+    for seq in [10usize, 24, 32, 33, 40, 46, 54, 64, 80, 96] {
+        let ids = ids_for(seq, 5);
+        let fwd = |b: &Metal| {
+            let t = std::time::Instant::now();
+            run(&enc, b, &ids, None);
+            t.elapsed().as_secs_f64() * 1e3
+        };
+        for _ in 0..2 {
+            fwd(&ctrl);
+            fwd(&arm);
+        }
+        let mut r = Vec::with_capacity(ROUNDS);
+        for round in 0..ROUNDS {
+            let (x, y) = if round % 2 == 0 {
+                let x = fwd(&ctrl);
+                (x, fwd(&arm))
+            } else {
+                let y = fwd(&arm);
+                (fwd(&ctrl), y)
+            };
+            r.push(y / x);
+        }
+        let wins = r.iter().filter(|v| **v < 1.0).count();
+        println!(
+            "seq {seq:>3}: WITH_MPS / DEFAULT median {:.3} · wins {wins}/{ROUNDS}",
+            median(r)
         );
     }
 }

@@ -16,6 +16,11 @@
 //! backend must dispatch fold epilogues at the all-split shapes and ZERO
 //! at the unsplit shapes; the off backend must dispatch zero everywhere.
 //!
+//! Posture: every backend here is pinned `with_mps(false)` — the fold's
+//! subject is the split-K reduce under [`SplitRule::DEFAULT`]'s reach (the
+//! MPS posture's `SplitRule::WITH_MPS` splits only m ≤ 32, so the reach
+//! arithmetic below is DEFAULT's by construction, reflex issue 020 T13b).
+//!
 //! Run: `cargo test --release -p riir-infer-laya --features laya-riir-metal
 //! --test metal_fold_bits` (skips LOUD without the checkpoint weights —
 //! never a silent pass; an absent subject must not read as green).
@@ -78,10 +83,10 @@ fn load_encoder() -> Encoder {
 #[test]
 fn fold_arms_are_bit_identical_to_the_unfused_stream() {
     let enc = load_encoder();
-    let off = Metal::new().expect("metal").with_folds(false, false);
-    let res_on = Metal::new().expect("metal").with_folds(true, false);
-    let glu_on = Metal::new().expect("metal").with_folds(false, true);
-    let both_on = Metal::new().expect("metal").with_folds(true, true);
+    let off = Metal::new().expect("metal").with_mps(false).with_folds(false, false);
+    let res_on = Metal::new().expect("metal").with_mps(false).with_folds(true, false);
+    let glu_on = Metal::new().expect("metal").with_mps(false).with_folds(false, true);
+    let both_on = Metal::new().expect("metal").with_mps(false).with_folds(true, true);
     for b in [&off, &res_on, &glu_on, &both_on] {
         enc.warm(b);
     }
@@ -155,8 +160,8 @@ fn fold_arms_are_bit_identical_to_the_unfused_stream() {
 #[test]
 fn fold_arms_are_bit_identical_under_packed_plans() {
     let enc = load_encoder();
-    let off = Metal::new().expect("metal").with_folds(false, false);
-    let both_on = Metal::new().expect("metal").with_folds(true, true);
+    let off = Metal::new().expect("metal").with_mps(false).with_folds(false, false);
+    let both_on = Metal::new().expect("metal").with_mps(false).with_folds(true, true);
     enc.warm(&off);
     enc.warm(&both_on);
 
