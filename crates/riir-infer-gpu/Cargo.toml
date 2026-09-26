@@ -33,6 +33,17 @@ riir-infer-core = { path = "../.." }
 # katgpt-rs being the one sanctioned public upstream. Inherited from the
 # workspace table so this manifest never spells the deeper sibling path.
 katgpt-core = { workspace = true }
+# The gpu crate speaks wgpu directly (the runtime's adapter probes + the
+# context selection). The VENDORED `wgpu-hal-30.0.0` ([patch] in the root
+# manifest) is the only hal whose adapter carries
+# `total_video_memory_bytes` — the video-memory probe in
+# cubecl_runtime.rs compiles against it and nothing else; the [patch]
+# forces every wgpu-30 consumer in the graph onto it, whatever minor the
+# registry resolves. (Measured 2026-09-26: the FIRST cross-workspace
+# resolution of this crate — reflex's laya-riir-cubecl lane — built
+# against the UN-patched hal because the reflex lock predated that
+# workspace's patch rows; the fix is the patch rows in the consumer
+# workspace + a lock refresh, never a version pin here.)
 wgpu = "30"
 # f16 weight storage (the f16 GEMV/attention/epilogue kernels).
 half = { version = "2", optional = true }

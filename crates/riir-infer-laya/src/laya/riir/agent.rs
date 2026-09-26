@@ -49,6 +49,10 @@ pub enum DeviceKind {
     /// reflex Plan 002 P1). The encoder runs a Core ML artifact; the head
     /// stays on the CPU backend.
     Ane,
+    /// The portable CubeCL/wgpu backend (`laya-riir-cubecl`, plan 611) —
+    /// the op-layer unification arm. Never a runtime default: selected
+    /// explicitly; the A/B (plan 611 S5) decides its fate.
+    Cubecl,
 }
 
 impl DeviceKind {
@@ -59,8 +63,9 @@ impl DeviceKind {
     /// tree is local-only and the lane is opt-in), `cpu` →
     /// [`DeviceKind::Cpu`] (the explicit opt-out), `metal` →
     /// [`DeviceKind::Metal`], `cuda` → [`DeviceKind::Cuda`], `ane` →
-    /// [`DeviceKind::Ane`], anything else is an error (an env typo must
-    /// fail loud, never fall back).
+    /// [`DeviceKind::Ane`], `cubecl` → [`DeviceKind::Cubecl`] (plan 611),
+    /// anything else is an error (an env typo must fail loud, never fall
+    /// back).
     pub fn from_env() -> Result<Self> {
         match std::env::var("LAYA_DEVICE").as_deref() {
             Ok("") | Err(_) => Ok(Self::default_device()),
@@ -68,10 +73,11 @@ impl DeviceKind {
             Ok("metal") => Ok(Self::Metal),
             Ok("cuda") => Ok(Self::Cuda),
             Ok("ane") => Ok(Self::Ane),
+            Ok("cubecl") => Ok(Self::Cubecl),
             Ok(other) => Err(LayaError::Config {
                 checkpoint: "riir",
                 detail: format!(
-                    "unknown LAYA_DEVICE {other:?} — expected unset, \"cpu\", \"metal\", \"cuda\" or \"ane\""
+                    "unknown LAYA_DEVICE {other:?} — expected unset, \"cpu\", \"metal\", \"cuda\", \"ane\" or \"cubecl\""
                 ),
             }),
         }
@@ -199,9 +205,23 @@ impl RiirAgent {
     /// Load one checkpoint from the weights root (downloading + verifying
     /// against the pins first — never bundled). The safetensors file is
     /// parsed ONCE and split between encoder and head (weights are removed
-    /// from the map, no second copy).
+    /// from the map, no second copy). The device comes from `LAYA_DEVICE`.
     pub fn load(root: &std::path::Path, ckpt: Checkpoint) -> Result<Self> {
-        Self::load_inner(root, ckpt, None)
+        Self::load_with_device(root, ckpt, DeviceKind::from_env()?)
+    }
+
+    /// Load one checkpoint on an EXPLICIT device — no env round-trip (an
+    /// env value can never silently demote an explicitly requested lane;
+    /// the `load_ane` rule). The A/B and parity harnesses construct the
+    /// postures they compare in ONE process through this constructor —
+    /// `LAYA_DEVICE` cannot express that, and mutating it mid-process
+    /// would race every other reader.
+    pub fn load_with_device(
+        root: &std::path::Path,
+        ckpt: Checkpoint,
+        device: DeviceKind,
+    ) -> Result<Self> {
+        Self::load_inner(root, ckpt, None, device)
     }
 
     /// Load one checkpoint for the ANE posture (Plan 002 P1): the encoder
@@ -216,22 +236,17 @@ impl RiirAgent {
         ane_root: &std::path::Path,
         manifest_path: &std::path::Path,
     ) -> Result<Self> {
-        Self::load_inner(root, ckpt, Some((ane_root, manifest_path)))
+        Self::load_inner(root, ckpt, Some((ane_root, manifest_path)), DeviceKind::Ane)
     }
 
     fn load_inner(
         root: &std::path::Path,
         ckpt: Checkpoint,
         ane: Option<(&std::path::Path, &std::path::Path)>,
+        device: DeviceKind,
     ) -> Result<Self> {
-        // The explicit ANE constructor owns its posture (no env round-trip:
-        // `load_ane` is the ANE lane, whatever `LAYA_DEVICE` says — an env
-        // value can never silently demote an explicitly requested lane);
-        // the plain constructor resolves the env as before.
-        let device = match ane {
-            Some(_) => DeviceKind::Ane,
-            None => DeviceKind::from_env()?,
-        };
+        // The caller owns the device choice (env via [`Self::load`], the
+        // explicit constructor, or the ANE lane); nothing here re-reads it.
         #[cfg(all(target_os = "macos", feature = "laya-riir-ane"))]
         let ane_requested = ane.is_some();
         #[cfg(not(all(target_os = "macos", feature = "laya-riir-ane")))]
@@ -310,6 +325,18 @@ impl RiirAgent {
                         detail: "LAYA_DEVICE=cuda needs --features laya-riir-cuda on a \
                                  non-macOS CUDA host — this build has no CUDA backend (fail \
                                  loud, never a silent CPU fallback)"
+                            .into(),
+                    });
+                }
+                #[cfg(feature = "laya-riir-cubecl")]
+                DeviceKind::Cubecl => Box::new(super::cubecl::CubeclBackend::new()?),
+                #[cfg(not(feature = "laya-riir-cubecl"))]
+                DeviceKind::Cubecl => {
+                    return Err(LayaError::Config {
+                        checkpoint: name,
+                        detail: "LAYA_DEVICE=cubecl needs --features laya-riir-cubecl — this \
+                                 build has no CubeCL backend (fail loud, never a silent \
+                                 CPU fallback)"
                             .into(),
                     });
                 }
