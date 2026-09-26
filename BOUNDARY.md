@@ -68,6 +68,7 @@ or checkpoints (this repo ships LOADERS, not weights).
 | Crate | Location | Condition |
 |---|---|---|
 | katgpt-core | `../katgpt-rs/crates/katgpt-core` | non-optional (public upstream) |
+| katgpt-types | `../katgpt-rs/crates/katgpt-types` | non-optional (public upstream; the `act_aware_fit` enum home — katgpt-core forwards the feature, not the type) |
 | katgpt-transformer / katgpt-speculative / katgpt-forward | `../katgpt-rs/crates/*` | non-optional (public upstream; transformer `default-features = false`) |
 | katgpt-quant / katgpt-attn | `../katgpt-rs/crates/*` | optional (`turboquant` / `flashmemory_gqa`) |
 | crates.io: half, rayon, anyhow, memmap2, fastrand, bytemuck, serde, serde_json, thiserror, log, blake3 | crates.io | as pinned in `Cargo.toml` |

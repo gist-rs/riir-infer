@@ -19,6 +19,11 @@ publish = false
 
 [dependencies]
 katgpt-core = { path = "../katgpt-rs/crates/katgpt-core" }
+# katgpt-types: named directly for the `act_aware_fit` enum
+# (ActAwareScaleFit) — the scale-fit API lives on TernaryGroupWeights in
+# types (Issue 886 P1), and katgpt-core forwards the FEATURE but not the
+# enum. Same upstream repo; version walks with katgpt-core by construction.
+katgpt-types = { path = "../katgpt-rs/crates/katgpt-types" }
 # default-features = false: mirrors riir-engine (kog_cpu_fusion off).
 katgpt-transformer = { path = "../katgpt-rs/crates/katgpt-transformer", default-features = false }
 # katgpt-speculative: shared DDTree substrate (dflash.rs et al.).
@@ -92,6 +97,15 @@ act_diagonal_calibration = [
     "ternary_inference",
     "bonsai2_hadamard",
 ]
+# act_scale_refit (riir-infer Issue 014 T2/T3, 2026-09-26): the act-aware
+# ternary scale-refit arms + the per-family conditional retention walk that
+# gates them (the katgpt-rs Issue 886 P1 model-bound quality gate — the walk
+# katgpt-rs cannot run: it needs the born-ternary, Hadamard-rotated Bonsai-2
+# checkpoint). Forwards katgpt-core's `act_aware_fit` (WeightedMeanAbs /
+# WeightedSearch group-scale fits, Bench 896). OPT-IN, measurement-only:
+# refit payloads live in-process for the walk's lifetime; nothing is written
+# back to the checkpoint.
+act_scale_refit = ["act_diagonal_calibration", "katgpt-core/act_aware_fit"]
 # attention_to_answer (katgpt-rs Issue 882 P4, 2026-09-25): the m_Y probe —
 # attention mass on a labeled answer span, per (layer, head), read off the
 # gemma-2 f16 forward on ARMED rows only (one extra QK pass there; the
@@ -180,6 +194,29 @@ required-features = ["row_logit_floor", "attention_to_answer"]
 name = "act_diagonal_calibration"
 path = "src/bin/act_diagonal_calibration.rs"
 required-features = ["act_diagonal_calibration"]
+
+# riir-infer Issue 014 T2/T3 — the act-aware ternary scale refit + the
+# per-family conditional retention walk (the Bench 948 pattern) over the
+# Bonsai-2 ternary lane. The module lives behind #[cfg(feature =
+# "act_scale_refit")]; this row is the reader protection (the green-zero
+# law): a default build SKIPS the bin loudly instead of compiling it to an
+# empty binary. Implies the collector feature (the diagonal artifact is the
+# refit input) and forwards katgpt-core's `act_aware_fit` (Issue 886 P1:
+# WeightedMeanAbs / WeightedSearch group-scale fits).
+[[bin]]
+name = "act_retention_walk"
+path = "src/bin/act_retention_walk.rs"
+required-features = ["act_scale_refit"]
+
+# riir-infer Issue 014 T2(b) — the dense-parent PTQ lane on gemma-2-2b f16
+# (the house fixture): the Issue-886 fits at Bench 896's held-out
+# reconstruction metric on REAL parents + REAL activations. Same feature
+# gate as the walk (the two lanes share the instrument family); the
+# green-zero law rows apply identically.
+[[bin]]
+name = "act_ptq_gemma2"
+path = "src/bin/act_ptq_gemma2.rs"
+required-features = ["act_scale_refit"]
 
 # ─── Workspace ────────────────────────────────────────────────────────
 # The repo is a root-package workspace: riir-infer-core at the root,

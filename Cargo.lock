@@ -3549,6 +3549,7 @@ dependencies = [
  "katgpt-quant",
  "katgpt-speculative",
  "katgpt-transformer",
+ "katgpt-types",
  "log",
  "memmap2",
  "rayon",

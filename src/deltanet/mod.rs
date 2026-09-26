@@ -79,6 +79,13 @@ pub mod rotation;
 #[cfg(feature = "deltanet_ternary_inference")]
 pub mod ternary_forward;
 
+// Issue 014 — the activation tap plan (linear-INPUT mapping + visit order)
+// shared by the diagonal collector (T1) and the refit/retention-walk
+// instrument (T2/T3). Both instruments must agree on the mapping or the
+// diagonal mis-attributes, so it lives here; the hook asserts it per token.
+#[cfg(feature = "act_diagonal_calibration")]
+pub mod act_taps;
+
 // Per-component profiling for the ternary forward (Issue 603). Instrumented
 // copy of `ternary_forward` with `Instant::now()` around each section. Used
 // to localize the ~370 ms/token gap not covered by GPU FFN + input_proj paths.
