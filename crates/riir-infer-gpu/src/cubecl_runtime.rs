@@ -97,6 +97,20 @@ pub fn debug_assert_binding_at_least(handle: &cubecl::server::Handle, len: usize
     );
 }
 
+/// Encode a shape/offset as an f32 params element, refusing to round: f32
+/// exactly represents integers up to 2²⁴, and the guard keeps that bound
+/// loud instead of letting a huge packed offset or row length round
+/// silently (plan 611 S2/S3 — the params-over-views discipline).
+#[cfg(feature = "cubecl_runtime")]
+#[inline]
+pub(crate) fn f32_exact(v: usize) -> f32 {
+    assert!(
+        v <= (1usize << 24),
+        "shape {v} exceeds the f32-exact bound 2^24"
+    );
+    v as f32
+}
+
 /// Assert that a kernel deriving a dimension from `x.len()` will derive the
 /// value its launcher intends.
 ///
@@ -164,6 +178,12 @@ pub fn read_f32<R: Runtime>(
 #[cfg(feature = "cubecl_runtime")]
 pub fn create_f32<R: Runtime>(client: &ComputeClient<R>, data: &[f32]) -> Handle {
     client.create_from_slice(f32::as_bytes(data))
+}
+
+/// Upload a u32 slice (the index-buffer shape — e.g. the encoder lane's
+/// row-gather ids) so the laya backend never names a cubecl type.
+pub fn create_u32<R: Runtime>(client: &ComputeClient<R>, data: &[u32]) -> Handle {
+    client.create_from_slice(u32::as_bytes(data))
 }
 
 // ---------------------------------------------------------------------------

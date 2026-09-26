@@ -55,33 +55,37 @@
 //! S1b: the trivial op family — `add`, `add_bias_row`, `scale`, `relu`,
 //! `gelu_erf`, `glu_gelu_gate`, `copy_into`, `copy_at` — over
 //! `riir-infer-gpu`'s elementwise launchers, plus the residency machinery
-//! above. S2 (this slice): the FULL matmul family — `matmul_w` over the
-//! shipped derived-dims transB kernel (the encoder's exact shape),
-//! `matmul`/`matmul_kt`/`matmul_heads`/`matmul_kt_heads` over the new
-//! offset+head-batched tiled kernels (the head batch rides the dispatch z
-//! axis — one launch for all heads, the whole-batch destination one
-//! `client.empty` slot). `matmul_w_accum`/`matmul_w_glu` compose through
-//! the trait defaults (the fold is bit-identical by construction);
-//! `set_row_segments` stays the trait's no-op (one kernel for every shape
-//! — the honest v1). Every op that still needs an S3 kernel panics LOUD
-//! naming its slice — never a silent wrong answer.
-//! `supports_packed_attention` answers `false` until the forward surface
-//! COMPLETES (S3: the norms/softmax/rope/split/merge family) — matmuls
-//! alone cannot run a forward, and the agent must never silently take a
-//! path it cannot execute.
+//! above. S2: the FULL matmul family (`matmul_w` over the shipped
+//! derived-dims transB kernel; the four offset/batched ops over z-dispatched
+//! tiled kernels). S3 (this slice): the remaining forward surface —
+//! `add_mask_broadcast` + `softmax_rows` (the batched in-place row-softmax,
+//! the single-row kernel's five phases with the row on `CUBE_POS_X`),
+//! `layer_norm_nobias_into` (the S1a GAP kernel wired), `apply_rope`
+//! (rotate-half, one thread per (head, position, lane) PAIR — race-free,
+//! CPU expressions verbatim), `split_heads`/`merge_heads` (permutation
+//! kernels, exact), `gather_rows` (the embedding gather; the table rides
+//! the permanent weight cache, ids upload fresh as u32). `attention_forward`
+//! stays INHERITED (`attention_forward_default`): with
+//! `supports_packed_attention == false` the agent keeps the per-question
+//! loop, so attention is only ever reached at qkv_off == 0 where the
+//! default's host slices are whole-parent exact-extent binds (safe); the
+//! rope/mask tables it slices are host-authored and therefore
+//! host-authoritative. `set_row_segments` stays the trait's no-op.
+//! `matmul_w_accum`/`matmul_w_glu` compose through the trait defaults.
 
 use std::collections::HashMap;
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use riir_infer_gpu::{
-    ActiveComputeClient, ActiveRuntime, CubeCLContext, Handle, create_f32,
+    ActiveComputeClient, ActiveRuntime, CubeCLContext, Handle, create_f32, create_u32, read_f32,
     elementwise_cubecl::{
-        AddBiasRowCubeCL, AddCubeCL, CopyAtCubeCL, CopyCubeCL, GeluErfCubeCL, GluGeluGateCubeCL,
-        ReluCubeCL, ScaleCubeCL,
+        AddBiasRowCubeCL, AddCubeCL, AddMaskBroadcastCubeCL, CopyAtCubeCL, CopyCubeCL,
+        GeluErfCubeCL, GluGeluGateCubeCL, ReluCubeCL, ScaleCubeCL, SoftmaxRowsInplaceCubeCL,
     },
+    encoder_lane_cubecl::{GatherRowsCubeCL, MergeHeadsCubeCL, RopeRotateHalfCubeCL, SplitHeadsCubeCL},
     matmul_cubecl::{MatmulCubeCL, MatmulRrOffCubeCL, MatmulTransbOffCubeCL},
-    read_f32,
+    norms_cubecl::LayerNormMeanBatchedCubeCL,
 };
 
 use super::super::{LayaError, Result};
@@ -210,15 +214,6 @@ impl CubeclBackend {
         };
         h
     }
-}
-
-/// The math ops the S2/S3 slices have not landed yet — LOUD, never a
-/// silent wrong answer.
-fn not_yet(op: &str, slice: &str) -> ! {
-    panic!(
-        "CubeclBackend::{op}: not landed — plan 611 {slice} (this skeleton \
-         is S1b: the trivial op family + residency)"
-    )
 }
 
 impl Backend for CubeclBackend {
@@ -402,8 +397,16 @@ impl Backend for CubeclBackend {
         };
     }
 
-    fn add_mask_broadcast(&self, _x: &mut [f32], _mask: &[f32], _heads: usize) {
-        not_yet("add_mask_broadcast", "S3");
+    fn add_mask_broadcast(&self, x: &mut [f32], mask: &[f32], heads: usize) {
+        assert!(heads > 0, "heads");
+        let mlen = mask.len();
+        assert_eq!(x.len(), heads * mlen, "mask broadcast extent");
+        let xb = self.chain_buf(x);
+        let mb = self.chain_buf(mask);
+        // SAFETY: extents asserted above; parents bound whole.
+        unsafe {
+            AddMaskBroadcastCubeCL::launch::<ActiveRuntime>(&self.client, xb, x.len(), mb, mlen)
+        };
     }
 
     fn add(&self, x: &mut [f32], x_off: usize, y: &[f32], y_off: usize, len: usize) {
@@ -447,20 +450,41 @@ impl Backend for CubeclBackend {
         unsafe { ScaleCubeCL::launch::<ActiveRuntime>(&self.client, xb, x.len(), s) };
     }
 
+    /// The S1a GAP kernel wired: batched mean-centered LayerNorm, one
+    /// workgroup per row, the one-pass `E[x²] − μ²` variance (the kernel
+    /// header documents the order divergence from the CPU lane's two-pass
+    /// form — the G5 budget prices it).
     fn layer_norm_nobias_into(
         &self,
-        _x: &[f32],
-        _w: &[f32],
-        _eps: f32,
-        _d: usize,
+        x: &[f32],
+        w: &[f32],
+        eps: f32,
+        d: usize,
         _sq: &mut Vec<f32>,
-        _out: &mut [f32],
+        out: &mut [f32],
     ) {
-        not_yet("layer_norm_nobias_into", "S3 — the S1a GAP kernel's wiring");
+        assert_eq!(x.len() % d, 0, "layer_norm row extent");
+        assert_eq!(w.len(), d, "layer_norm gamma extent");
+        assert_eq!(out.len(), x.len(), "layer_norm out extent");
+        let rows = x.len() / d;
+        let xb = self.chain_buf(x);
+        let wb = self.weight_buf(w);
+        let ob = self.chain_slot_for(out);
+        // SAFETY: extents asserted above; parents bound whole. `sq` is the
+        // CPU lane's scratch — ignored here (the trait doc's contract).
+        unsafe {
+            LayerNormMeanBatchedCubeCL::launch::<ActiveRuntime>(&self.client, xb, wb, ob, rows, d, eps)
+        };
     }
 
-    fn softmax_rows(&self, _x: &mut [f32], _n: usize) {
-        not_yet("softmax_rows", "S3");
+    fn softmax_rows(&self, x: &mut [f32], n: usize) {
+        assert_eq!(x.len() % n, 0, "softmax row extent");
+        let xb = self.chain_buf(x);
+        // SAFETY: extent asserted above; the whole parent is one binding
+        // read before any write (the kernel's phase barriers).
+        unsafe {
+            SoftmaxRowsInplaceCubeCL::launch::<ActiveRuntime>(&self.client, xb, x.len() / n, n)
+        };
     }
 
     fn relu(&self, x: &mut [f32]) {
@@ -486,37 +510,111 @@ impl Backend for CubeclBackend {
         };
     }
 
+    /// Rotate-half rope, one thread per (head, position, lane) pair —
+    /// race-free by construction, the CPU lane's expressions verbatim.
+    /// cos/sin are host-authored per-forward tables: chain_buf uploads
+    /// their CURRENT host bytes (the one place a host-authored slice is
+    /// legitimately the truth on a device backend).
     fn apply_rope(
         &self,
-        _q: &mut [f32],
-        _seq: usize,
-        _heads: usize,
-        _hd: usize,
-        _cos: &[f32],
-        _sin: &[f32],
+        q: &mut [f32],
+        seq: usize,
+        heads: usize,
+        hd: usize,
+        cos: &[f32],
+        sin: &[f32],
     ) {
-        not_yet("apply_rope", "S3");
+        assert_eq!(q.len(), heads * seq * hd, "rope q extent");
+        assert_eq!(cos.len(), seq * hd, "rope cos extent");
+        assert_eq!(sin.len(), seq * hd, "rope sin extent");
+        let qb = self.chain_buf(q);
+        let cb = self.chain_buf(cos);
+        let sb = self.chain_buf(sin);
+        // SAFETY: extents asserted above; the pair kernel is race-free.
+        unsafe {
+            RopeRotateHalfCubeCL::launch::<ActiveRuntime>(&self.client, qb, heads, seq, hd, cb, sb)
+        };
     }
 
     fn split_heads(
         &self,
-        _src: &[f32],
-        _row_stride: usize,
-        _off: usize,
-        _seq: usize,
-        _heads: usize,
-        _hd: usize,
-        _out: &mut [f32],
+        src: &[f32],
+        row_stride: usize,
+        off: usize,
+        seq: usize,
+        heads: usize,
+        hd: usize,
+        out: &mut [f32],
     ) {
-        not_yet("split_heads", "S3");
+        assert_eq!(out.len(), heads * seq * hd, "split extent");
+        let sb = self.chain_buf(src);
+        let ob = self.chain_slot_for(out);
+        // SAFETY: the launcher asserts the src read extent
+        // ((seq−1)·row_stride + off + heads·hd) against src.len().
+        unsafe {
+            SplitHeadsCubeCL::launch::<ActiveRuntime>(
+                &self.client,
+                sb,
+                src.len(),
+                ob,
+                out.len(),
+                row_stride,
+                off,
+                seq,
+                heads,
+                hd,
+            )
+        };
     }
 
-    fn merge_heads(&self, _src: &[f32], _seq: usize, _heads: usize, _hd: usize, _out: &mut [f32]) {
-        not_yet("merge_heads", "S3");
+    fn merge_heads(&self, src: &[f32], seq: usize, heads: usize, hd: usize, out: &mut [f32]) {
+        assert_eq!(out.len(), seq * heads * hd, "merge extent");
+        let sb = self.chain_buf(src);
+        let ob = self.chain_slot_for(out);
+        // SAFETY: extents asserted above (src heads·seq·hd, out seq·heads·hd).
+        unsafe {
+            MergeHeadsCubeCL::launch::<ActiveRuntime>(
+                &self.client,
+                sb,
+                ob,
+                out.len(),
+                seq,
+                heads,
+                hd,
+            )
+        };
     }
 
-    fn gather_rows(&self, _x: &[f32], _d: usize, _rows: &[usize], _out: &mut [f32]) {
-        not_yet("gather_rows", "S3");
+    /// The embedding row gather: the table is a model weight (the
+    /// permanent cache, `warm_weight`'s slot); the row indices are the
+    /// per-forward host ids, uploaded fresh as a u32 buffer (≤ a few KB
+    /// per forward, once per encoder pass).
+    fn gather_rows(&self, x: &[f32], d: usize, rows: &[usize], out: &mut [f32]) {
+        assert_eq!(out.len(), rows.len() * d, "gather extent");
+        let xb = self.weight_buf(x);
+        let rows_u32: Vec<u32> = rows
+            .iter()
+            .map(|&r| {
+                assert!(r <= u32::MAX as usize, "gather row index overflow");
+                r as u32
+            })
+            .collect();
+        let rb = create_u32(&self.client, &rows_u32);
+        let ob = self.chain_slot_for(out);
+        // SAFETY: extents asserted above + the launcher's per-row x extent
+        // check against the usize ids.
+        unsafe {
+            GatherRowsCubeCL::launch::<ActiveRuntime>(
+                &self.client,
+                xb,
+                x.len(),
+                rb,
+                rows,
+                ob,
+                out.len(),
+                d,
+            )
+        };
     }
 
     /// Device-side whole-buffer copy (the residual stream is

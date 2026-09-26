@@ -463,3 +463,171 @@ fn cubecl_matmul_folds_match_cpu() {
         assert_close("matmul_w_glu", &sync_out(&b, &act), &act_cpu, TOL);
     }
 }
+
+/// The S3 head-op family, op by op vs the CPU lane (plan 611 S3): the
+/// whole attention block's primitive set — mask broadcast, batched row
+/// softmax, the S1a mean-centered LayerNorm, rotate-half rope, the head
+/// split/merge permutations, and the row gather. Exact where the op is a
+/// copy or a same-expression elementwise map; tolerance where reduction
+/// order or compiler contraction can differ.
+#[test]
+fn cubecl_s3_head_ops_match_cpu() {
+    let _gpu = gpu_lock();
+    let b = CubeclBackend::new().expect("cubecl backend");
+    let c = Cpu;
+
+    // gather_rows — the embedding gather (table is a weight: held to the
+    // end of the body, the weights-cache discipline). Repeated +
+    // out-of-order ids.
+    let table: Vec<f32> = vec_of(17 * 12).into_iter().map(|v| v * 0.5).collect();
+    {
+        b.begin_pass();
+        let ids: Vec<usize> = vec![3, 0, 3, 16, 7];
+        let mut out = vec![0f32; ids.len() * 12];
+        let mut out_cpu = vec![0f32; ids.len() * 12];
+        c.gather_rows(&table, 12, &ids, &mut out_cpu);
+        b.gather_rows(&table, 12, &ids, &mut out);
+        assert_exact("gather_rows", &sync_out(&b, &out), &out_cpu);
+    }
+
+    // split_heads / merge_heads — pure permutations: EXACT.
+    {
+        b.begin_pass();
+        let (seq, heads, hd) = (7usize, 2usize, 8usize);
+        let row_stride = heads * hd + 3;
+        let src = vec_of(seq * row_stride);
+        let mut split = vec![0f32; heads * seq * hd];
+        let mut split_cpu = vec![0f32; heads * seq * hd];
+        c.split_heads(&src, row_stride, 2, seq, heads, hd, &mut split_cpu);
+        b.split_heads(&src, row_stride, 2, seq, heads, hd, &mut split);
+        assert_exact("split_heads", &sync_out(&b, &split), &split_cpu);
+
+        let mut merged = vec![0f32; seq * heads * hd];
+        let mut merged_cpu = vec![0f32; seq * heads * hd];
+        c.merge_heads(&split_cpu, seq, heads, hd, &mut merged_cpu);
+        b.merge_heads(&split, seq, heads, hd, &mut merged);
+        assert_exact("merge_heads", &sync_out(&b, &merged), &merged_cpu);
+    }
+
+    // apply_rope — same expressions on the device, so 1e-5 only prices
+    // compiler contraction (the S1b erf class, not a math difference).
+    {
+        b.begin_pass();
+        let (heads, seq, hd) = (2usize, 9usize, 16usize);
+        let mut q = vec_of(heads * seq * hd);
+        let cos = vec_of(seq * hd);
+        let sin = vec_of(seq * hd);
+        let mut q_cpu = q.clone();
+        c.apply_rope(&mut q_cpu, seq, heads, hd, &cos, &sin);
+        b.apply_rope(&mut q, seq, heads, hd, &cos, &sin);
+        assert_close("apply_rope", &sync_out(&b, &q), &q_cpu, 1e-5);
+    }
+
+    // add_mask_broadcast — one add per element of the same values: EXACT.
+    {
+        b.begin_pass();
+        let (heads, mlen) = (4usize, 20usize);
+        let mut x = vec_of(heads * mlen);
+        let mask = vec_of(mlen);
+        let mut x_cpu = x.clone();
+        c.add_mask_broadcast(&mut x_cpu, &mask, heads);
+        b.add_mask_broadcast(&mut x, &mask, heads);
+        assert_exact("add_mask_broadcast", &sync_out(&b, &x), &x_cpu);
+    }
+
+    // softmax_rows — reduction order differs (strided max/sum + multiply
+    // by the inverse vs the CPU's divide); values ≤ 1, so 1e-5 is generous.
+    for &(rows, n) in &[(1usize, 16usize), (8, 64), (6, 97)] {
+        b.begin_pass();
+        let mut x = vec_of(rows * n);
+        let mut x_cpu = x.clone();
+        c.softmax_rows(&mut x_cpu, n);
+        b.softmax_rows(&mut x, n);
+        assert_close(
+            &format!("softmax_rows {rows}x{n}"),
+            &sync_out(&b, &x),
+            &x_cpu,
+            1e-5,
+        );
+    }
+
+    // layer_norm_nobias_into — the S1a GAP kernel: one-pass variance vs
+    // the CPU lane's two-pass (the kernel header's documented divergence);
+    // the gamma is a weight (held: `table` above stays alive; this one is
+    // a second weight Vec, held the same way).
+    let gamma: Vec<f32> = vec_of(64).into_iter().map(|v| 1.0 + v * 0.1).collect();
+    {
+        b.begin_pass();
+        let (rows_n, d) = (5usize, 64usize);
+        let x = vec_of(rows_n * d);
+        let mut out = vec![0f32; rows_n * d];
+        let mut out_cpu = vec![0f32; rows_n * d];
+        let mut sq = Vec::new();
+        c.layer_norm_nobias_into(&x, &gamma, 1e-5, d, &mut sq, &mut out_cpu);
+        b.layer_norm_nobias_into(&x, &gamma, 1e-5, d, &mut sq, &mut out);
+        assert_close(
+            "layer_norm_nobias_into",
+            &sync_out(&b, &out),
+            &out_cpu,
+            1e-4,
+        );
+    }
+}
+
+/// The composed attention block — `attention_forward` INHERITED from the
+/// trait (the whole point of the op-layer unification) — against the CPU
+/// lane's identical composition, at a sliding-window shape that exercises
+/// the mask tensor (the G5 geometry class). Every primitive in the body is
+/// now real, so this is the S4 G5 gate's op-level pre-proof.
+#[test]
+fn cubecl_attention_forward_default_matches_cpu() {
+    let _gpu = gpu_lock();
+    let b = CubeclBackend::new().expect("cubecl backend");
+    let c = Cpu;
+    const TOL: f32 = 1e-4;
+
+    let (seq, heads, hd) = (13usize, 2usize, 8usize);
+    let d = heads * hd;
+    let window = 4usize; // < seq − 1 → the mask tensor exists
+
+    let qkv = vec_of(seq * 3 * d);
+    let rope_cos = vec_of(seq * hd);
+    let rope_sin = vec_of(seq * hd);
+    let scale = (1.0 / (hd as f32).sqrt()) * 0.5;
+    let mut mask = vec![f32::MIN; seq * seq];
+    for qi in 0..seq {
+        for kv in qi.saturating_sub(window)..=(qi + window).min(seq - 1) {
+            mask[qi * seq + kv] = 0.0;
+        }
+    }
+    let mut scratch = riir_infer_laya::laya::riir::backend::AttnScratch::default();
+    let mut out = vec![0f32; seq * d];
+    let mut out_cpu = vec![0f32; seq * d];
+    let mut scratch_cpu = riir_infer_laya::laya::riir::backend::AttnScratch::default();
+
+    b.begin_pass();
+    #[allow(clippy::too_many_arguments)]
+    let run = |b: &dyn Backend,
+               scratch: &mut riir_infer_laya::laya::riir::backend::AttnScratch,
+               out: &mut [f32]| {
+        b.attention_forward(
+            &qkv,
+            0,
+            &rope_cos,
+            &rope_sin,
+            0,
+            scale,
+            seq,
+            heads,
+            hd,
+            window,
+            Some(&mask),
+            scratch,
+            out,
+            0,
+        );
+    };
+    run(&c, &mut scratch_cpu, &mut out_cpu);
+    run(&b, &mut scratch, &mut out);
+    assert_close("attention_forward", &sync_out(&b, &out), &out_cpu, TOL);
+}

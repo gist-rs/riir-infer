@@ -51,7 +51,7 @@ use cubecl::prelude::*;
 use cubecl::server::Handle;
 
 #[cfg(feature = "cubecl_runtime")]
-use crate::cubecl_runtime::debug_assert_binding_at_least;
+use crate::cubecl_runtime::{debug_assert_binding_at_least, f32_exact};
 
 // ---------------------------------------------------------------------------
 // Tiled matmul kernel — matches matmul_transb.wgsl
@@ -226,18 +226,6 @@ fn matmul_tiled_f32(a: &[f32], b: &[f32], out: &mut [f32]) {
 //
 // Tile/dispatch geometry is the shipped transB kernel's: 16×16 smem tiles,
 // 256-thread cubes, `CubeCount::Static(ceil(m/16), ceil(p/16), heads)`.
-
-/// f32 exactly represents integers up to 2²⁴; the launcher shapes never
-/// approach it in the encoder geometry, and the guard keeps the bound loud
-/// instead of letting a huge packed offset round silently.
-#[cfg(feature = "cubecl_runtime")]
-fn f32_exact(v: usize) -> f32 {
-    assert!(
-        v <= (1usize << 24),
-        "shape {v} exceeds the f32-exact bound 2^24"
-    );
-    v as f32
-}
 
 /// Batched transB tiled matmul at element offsets (plan 611 S2).
 ///

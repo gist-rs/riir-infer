@@ -36,7 +36,7 @@ use cubecl::prelude::*;
 use cubecl::server::Handle;
 
 #[cfg(feature = "cubecl_runtime")]
-use crate::cubecl_runtime::debug_assert_binding_at_least;
+use crate::cubecl_runtime::{debug_assert_binding_at_least, f32_exact};
 
 // ---------------------------------------------------------------------------
 // Sigmoid kernel
@@ -1170,6 +1170,266 @@ fn copy_at_f32(src: &[f32], dst: &mut [f32], params: &[f32]) {
 
 fn elementwise_wg_count(n: usize) -> u32 {
     n.div_ceil(256).max(1) as u32
+}
+
+/// CubeCL launcher for [`add_mask_broadcast_f32`] — the laya
+/// `Backend::add_mask_broadcast` shape (plan 611 S3): `x[r] += mask[r %
+/// mask_len]` over the whole `heads·mask_len` scores parent, one
+/// elementwise dispatch.
+#[cfg(feature = "cubecl_runtime")]
+#[cube(launch_unchecked)]
+fn add_mask_broadcast_f32(x: &mut [f32], mask: &[f32], params: &[f32]) {
+    let mask_len = params[0usize] as u32;
+    let n = x.len() as u32;
+    let tid = ABSOLUTE_POS as u32;
+    if tid < n {
+        x[tid as usize] += mask[(tid % mask_len) as usize];
+    }
+}
+
+/// CubeCL launcher for [`add_mask_broadcast_f32`] (plan 611 S3).
+///
+/// `x` is read-modify-write (the scores slot is device-current);
+/// `mask` is a host-authored per-forward table (uploaded on miss).
+///
+/// # Safety
+///
+/// `x_handle` must back `x_len` f32 and `mask_handle` `mask_len` f32;
+/// `x_len` must be a multiple of `mask_len`.
+#[cfg(feature = "cubecl_runtime")]
+pub struct AddMaskBroadcastCubeCL;
+
+#[cfg(feature = "cubecl_runtime")]
+impl AddMaskBroadcastCubeCL {
+    /// # Safety
+    ///
+    /// `x_handle` must back `x_len` f32; `mask_handle` must back `mask_len`
+    /// f32; `x_len` must be a multiple of `mask_len`.
+    pub unsafe fn launch<R: Runtime>(
+        client: &ComputeClient<R>,
+        x_handle: Handle,
+        x_len: usize,
+        mask_handle: Handle,
+        mask_len: usize,
+    ) {
+        debug_assert_binding_at_least(&x_handle, x_len, "MaskBroadcast::x");
+        debug_assert_binding_at_least(&mask_handle, mask_len, "MaskBroadcast::mask");
+        assert!(mask_len > 0, "add_mask_broadcast: empty mask");
+        assert_eq!(x_len % mask_len, 0, "add_mask_broadcast: broadcast extent");
+        let params: &[f32] = &[f32_exact(mask_len)];
+        let params_handle = crate::params_cache::params_handle(client, f32::as_bytes(params));
+        let n_wg = elementwise_wg_count(x_len);
+        // SAFETY: extents asserted above; the kernel bounds-checks tid < n.
+        unsafe {
+            add_mask_broadcast_f32::launch_unchecked::<R>(
+                client,
+                CubeCount::Static(n_wg, 1, 1),
+                CubeDim::new_1d(256),
+                BufferArg::from_raw_parts(x_handle, x_len),
+                BufferArg::from_raw_parts(mask_handle, mask_len),
+                BufferArg::from_raw_parts(params_handle, 1),
+            );
+        }
+    }
+}
+
+/// CubeCL batched row-softmax, IN PLACE (plan 611 S3) — the laya
+/// `Backend::softmax_rows` shape: every row of `[rows × n]` gets the
+/// numerically stable max-shifted softmax. The single-row
+/// [`softmax_f32`]'s five-phase structure with the row offset riding
+/// `CUBE_POS_X`; one workgroup per row.
+///
+/// In place over ONE binding: every read (phases 1/3) happens before the
+/// last `sync_cube()`, every write (phase 5) after it — the buffer is
+/// never read and written in the same phase, and workgroups touch
+/// disjoint rows.
+#[cfg(feature = "cubecl_runtime")]
+#[cube(launch_unchecked)]
+fn softmax_rows_inplace_f32(x: &mut [f32], params: &[f32]) {
+    let n = params[0usize] as u32;
+    let cube_size = 256u32;
+    let tid = UNIT_POS;
+    let base = CUBE_POS_X * n;
+
+    // ── Phase 1: strided max reduction (the -1e30 sentinel, never
+    // NEG_INFINITY — the WGSL-gen constraint the single-row kernel hit) ──
+    let mut local_max = f32::new(-1e30f32);
+    let mut i = tid;
+    while i < n {
+        let v = x[(base + i) as usize];
+        if v > local_max {
+            local_max = v;
+        }
+        i += cube_size;
+    }
+
+    // ── Phase 2: shared-memory max reduction (128→…→1) ──
+    let mut smem = Shared::<[f32]>::new_slice(256usize);
+    smem[tid as usize] = local_max;
+    sync_cube();
+    if tid < 128u32 {
+        let other = smem[(tid + 128u32) as usize];
+        if other > smem[tid as usize] {
+            smem[tid as usize] = other;
+        }
+    }
+    sync_cube();
+    if tid < 64u32 {
+        let other = smem[(tid + 64u32) as usize];
+        if other > smem[tid as usize] {
+            smem[tid as usize] = other;
+        }
+    }
+    sync_cube();
+    if tid < 32u32 {
+        let other = smem[(tid + 32u32) as usize];
+        if other > smem[tid as usize] {
+            smem[tid as usize] = other;
+        }
+    }
+    sync_cube();
+    if tid < 16u32 {
+        let other = smem[(tid + 16u32) as usize];
+        if other > smem[tid as usize] {
+            smem[tid as usize] = other;
+        }
+    }
+    sync_cube();
+    if tid < 8u32 {
+        let other = smem[(tid + 8u32) as usize];
+        if other > smem[tid as usize] {
+            smem[tid as usize] = other;
+        }
+    }
+    sync_cube();
+    if tid < 4u32 {
+        let other = smem[(tid + 4u32) as usize];
+        if other > smem[tid as usize] {
+            smem[tid as usize] = other;
+        }
+    }
+    sync_cube();
+    if tid < 2u32 {
+        let other = smem[(tid + 2u32) as usize];
+        if other > smem[tid as usize] {
+            smem[tid as usize] = other;
+        }
+    }
+    sync_cube();
+    if tid < 1u32 {
+        let other = smem[1usize];
+        if other > smem[0usize] {
+            smem[0usize] = other;
+        }
+    }
+    sync_cube();
+
+    let global_max = smem[0usize];
+
+    // ── Phase 3: strided Σexp(x − max) ──
+    let mut local_sum = f32::new(0.0f32);
+    let mut j = tid;
+    while j < n {
+        local_sum += (x[(base + j) as usize] - global_max).exp();
+        j += cube_size;
+    }
+
+    // ── Phase 4: shared-memory sum reduction ──
+    smem[tid as usize] = local_sum;
+    sync_cube();
+    if tid < 128u32 {
+        smem[tid as usize] = smem[tid as usize] + smem[(tid + 128u32) as usize];
+    }
+    sync_cube();
+    if tid < 64u32 {
+        smem[tid as usize] = smem[tid as usize] + smem[(tid + 64u32) as usize];
+    }
+    sync_cube();
+    if tid < 32u32 {
+        smem[tid as usize] = smem[tid as usize] + smem[(tid + 32u32) as usize];
+    }
+    sync_cube();
+    if tid < 16u32 {
+        smem[tid as usize] = smem[tid as usize] + smem[(tid + 16u32) as usize];
+    }
+    sync_cube();
+    if tid < 8u32 {
+        smem[tid as usize] = smem[tid as usize] + smem[(tid + 8u32) as usize];
+    }
+    sync_cube();
+    if tid < 4u32 {
+        smem[tid as usize] = smem[tid as usize] + smem[(tid + 4u32) as usize];
+    }
+    sync_cube();
+    if tid < 2u32 {
+        smem[tid as usize] = smem[tid as usize] + smem[(tid + 2u32) as usize];
+    }
+    sync_cube();
+    if tid < 1u32 {
+        smem[0usize] = smem[0usize] + smem[1usize];
+    }
+    sync_cube();
+
+    let inv_sum = f32::new(1.0f32) / smem[0usize];
+
+    // ── Phase 5: normalize in place ──
+    let mut k = tid;
+    while k < n {
+        let idx = (base + k) as usize;
+        x[idx] = (x[idx] - global_max).exp() * inv_sum;
+        k += cube_size;
+    }
+}
+
+/// CubeCL launcher for [`softmax_rows_inplace_f32`] (plan 611 S3).
+///
+/// `n` must be ≤ 16384 (256 threads × 64 strided passes — the single-row
+/// kernel's documented limit; the scores rows are seq-long, well under).
+/// Row count rides the x dispatch, capped at `MAX_WG_X` per launch.
+///
+/// # Safety
+///
+/// `x_handle` must back `rows * n` f32 elements.
+#[cfg(feature = "cubecl_runtime")]
+pub struct SoftmaxRowsInplaceCubeCL;
+
+#[cfg(feature = "cubecl_runtime")]
+impl SoftmaxRowsInplaceCubeCL {
+    /// The per-launch row cap (wgpu's 65535 workgroups per dimension,
+    /// headroom-divided like the norms launchers).
+    const MAX_WG_X: usize = 32768;
+
+    /// # Safety
+    ///
+    /// `x_handle` must back `rows * n` f32 elements; `rows`/`n` must be > 0.
+    pub unsafe fn launch<R: Runtime>(
+        client: &ComputeClient<R>,
+        x_handle: Handle,
+        rows: usize,
+        n: usize,
+    ) {
+        debug_assert_binding_at_least(&x_handle, rows * n, "SoftmaxRows::x");
+        assert!(rows > 0 && n > 0, "softmax_rows: degenerate shape");
+        assert!(n <= 16384, "softmax_rows: row length exceeds the 256-thread strided limit");
+        let params: &[f32] = &[f32_exact(n)];
+        let params_handle = crate::params_cache::params_handle(client, f32::as_bytes(params));
+        let mut r0 = 0usize;
+        while r0 < rows {
+            let rc = (Self::MAX_WG_X).min(rows - r0);
+            // SAFETY: extents asserted above; the row offset rides CUBE_POS_X
+            // and each workgroup touches exactly its own row.
+            unsafe {
+                softmax_rows_inplace_f32::launch_unchecked::<R>(
+                    client,
+                    CubeCount::Static(rc as u32, 1, 1),
+                    CubeDim::new_1d(256),
+                    BufferArg::from_raw_parts(x_handle.clone(), rows * n),
+                    BufferArg::from_raw_parts(params_handle.clone(), 1),
+                );
+            }
+            r0 += rc;
+        }
+    }
 }
 
 /// CubeCL launcher for [`add_f32`] — the laya `Backend::add` shape: in-place

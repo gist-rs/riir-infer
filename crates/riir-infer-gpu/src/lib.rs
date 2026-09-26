@@ -41,7 +41,8 @@ pub use buffer::{
 pub use context::{GpuContext, GpuError};
 #[cfg(feature = "cubecl_runtime")]
 pub use cubecl_runtime::{
-    ActiveComputeClient, ActiveDevice, ActiveRuntime, CubeCLContext, Handle, create_f32, read_f32,
+    ActiveComputeClient, ActiveDevice, ActiveRuntime, CubeCLContext, Handle, create_f32,
+    create_u32, read_f32,
 };
 
 // ---------------------------------------------------------------------------
@@ -82,6 +83,8 @@ pub mod gemv_qkv_q4k_cubecl;
 pub mod gemv_geglu_q4k_cubecl;
 #[cfg(feature = "cubecl_runtime")]
 pub mod matmul_cubecl;
+#[cfg(feature = "cubecl_runtime")]
+pub mod encoder_lane_cubecl;
 #[cfg(feature = "swap_ab_gemm")]
 pub mod matmul_swap_ab_cubecl;
 #[cfg(feature = "cubecl_runtime")]
