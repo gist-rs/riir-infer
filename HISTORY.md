@@ -884,6 +884,6 @@ Instruments kept, env-gated, zero cost when unset: `LAYA_DEBUG_ACT_ECHO`
 under the existing `LAYA_CUDA_TRACE`, and the four probe tests (the [[test]]
 rows keep the green-zero rule honest).
 
-Landed at `5af0381` (fix + probes + instruments; the issue file is removed with this record — the noise-reduction rule).
+Landed at `c64d0b1` (fix + probes + instruments; the issue file is removed with this record — the noise-reduction rule; the docs commit is `9de953c`).
 
 Session: issue021-cuda-determinism
