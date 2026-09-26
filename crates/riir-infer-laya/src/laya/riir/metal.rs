@@ -43,6 +43,12 @@
 //!   kernel was a naive 16×16 one-thread-per-element tile (the recorded
 //!   honest baseline, ~3.5% of peak); this is the recorded optimization
 //!   ladder climbed.
+//!   The unsplit batch-1 dense calls (every encoder projection past the
+//!   split rule, m ≥ 97) dispatch Apple's `MPSMatrixMultiplication`
+//!   instead ([`mps`], reflex issue 020 T13, default ON,
+//!   `LAYA_METAL_MPS=0` kill-switch): bit-identical to the narrow
+//!   instance on every gated shape (`tests/metal_mps_gemm.rs`) and
+//!   0.58–0.74× the whole forward at m 106–895.
 //! - **attention is ONE fused dispatch per layer** — `flash_attn` consumes
 //!   the packed qkv directly (split, rope, q-scale, scores, sliding window,
 //!   softmax, value mix, head merge in-kernel) and materializes NO seq²
@@ -84,6 +90,8 @@ use objc2::rc::autoreleasepool;
 
 use super::super::{LayaError, Result};
 use super::backend::{AttnScratch, Backend};
+
+mod mps;
 
 /// Shared storage with EXPLICIT tracked hazard tracking: the pipeline
 /// flush commits a full command buffer mid-pass, and Metal only inserts
@@ -207,6 +215,11 @@ const LN_WIDE_MAX_D: usize = 2048;
 ///   m ≥ 188 shapes (live slice accumulators — register pressure, not the
 ///   fold arithmetic: KC 512 still cost +18%). Rejected.
 const SPLITK_KC: u32 = 128;
+
+/// The MPS arm's default row floor (reflex issue 020 T13). Every call it
+/// can see is already past the split rule (≤ 3 row tiles always split),
+/// so the floor only exists as the A/B's tuning seam.
+const MPS_MIN_M_DEFAULT: u32 = 0;
 
 /// When a batch-1 GEMM of `rows × n` over `k` is split (reflex issue 020
 /// T11). Pinned by the per-shape sweep (`tests/metal_splitk_shape_sweep.rs`:
@@ -1652,6 +1665,22 @@ pub struct Metal {
     fold_count: AtomicU64,
     /// The pass's row segmentation hint ([`Backend::set_row_segments`]).
     row_segments: Mutex<Vec<u32>>,
+    /// The MPS GEMM arm (reflex issue 020 T13, [`mps`]): unsplit batch-1
+    /// dense GEMMs with `m ≥ mps_min_m` dispatch Apple's
+    /// `MPSMatrixMultiplication` instead of the narrow/xwide instance —
+    /// bit-identical to narrow on every priced cell. Default ON since the
+    /// paired whole-forward A/B promoted it (2026-09-26, 24/24 wins on every
+    /// shape it reaches: loop 106 → 0.741, 188 → 0.657, 512 → 0.596, the
+    /// typed 5×179 packed case → 0.575; the all-split controls flat at
+    /// 1.000). `None` = off (`LAYA_METAL_MPS=0` is the kill-switch, or the
+    /// framework did not resolve).
+    mps: Option<mps::MpsGemm>,
+    /// The arm's row floor (`LAYA_METAL_MPS_MIN_M`, default
+    /// [`MPS_MIN_M_DEFAULT`]).
+    mps_min_m: u32,
+    /// MPS GEMMs dispatched — the arm's reach counter (same law as
+    /// [`Self::splitk_count`]).
+    mps_count: AtomicU64,
     /// Debug-trace instance id.
     trace_id: usize,
 }
@@ -1715,6 +1744,14 @@ impl Metal {
             splitk_count: AtomicU64::new(0),
             fold_count: AtomicU64::new(0),
             row_segments: Mutex::new(Vec::new()),
+            mps: (std::env::var("LAYA_METAL_MPS").as_deref() != Ok("0"))
+                .then(mps::MpsGemm::new)
+                .flatten(),
+            mps_min_m: std::env::var("LAYA_METAL_MPS_MIN_M")
+                .ok()
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(MPS_MIN_M_DEFAULT),
+            mps_count: AtomicU64::new(0),
             trace_id: next_trace_instance(),
         })
     }
@@ -1752,6 +1789,25 @@ impl Metal {
         self.fold_res = res;
         self.fold_glu = glu;
         self
+    }
+
+    /// Builder: the MPS GEMM arm's A/B seam (reflex issue 020 T13) — set it
+    /// explicitly instead of from `LAYA_METAL_MPS` (env is process-global,
+    /// this is per instance). `true` on a host whose MPS classes do not
+    /// resolve stays off (see [`Self::mps_active`]).
+    pub fn with_mps(mut self, on: bool) -> Self {
+        self.mps = if on { mps::MpsGemm::new() } else { None };
+        self
+    }
+
+    /// Whether the MPS GEMM arm is live on this instance.
+    pub fn mps_active(&self) -> bool {
+        self.mps.is_some()
+    }
+
+    /// MPS GEMMs this instance has dispatched — the arm's reach counter.
+    pub fn mps_dispatches(&self) -> u64 {
+        self.mps_count.load(Ordering::Relaxed)
     }
 
     /// Split-K GEMMs this instance has dispatched.
@@ -1968,15 +2024,7 @@ impl Metal {
     ) -> Result<()> {
         autoreleasepool(|_| {
             let mut st = self.pending.lock().expect("pending cb poison");
-            if st.open.is_none() {
-                let cb = self.queue.new_command_buffer().to_owned();
-                let enc = cb.new_compute_command_encoder().to_owned();
-                st.open = Some(PendingPass {
-                    cb,
-                    enc,
-                    encodes: 0,
-                });
-            }
+            self.open_pass(&mut st);
             let pending = st.open.as_mut().expect("just inserted");
             let enc = &pending.enc;
             enc.set_compute_pipeline_state(p);
@@ -2003,38 +2051,96 @@ impl Metal {
                 enc.dispatch_threads(grid, tpg);
             }
             pending.encodes += 1;
-            if profile_enabled() {
-                let done = st.open.take().expect("checked above");
-                done.enc.end_encoding();
-                done.cb.commit();
-                done.cb.wait_until_completed();
-                let cb: &metal::CommandBufferRef = &done.cb;
-                // SAFETY: GPUStartTime/GPUEndTime are CFTimeInterval (f64)
-                // properties of a completed MTLCommandBuffer.
-                // The legacy `objc` macro probes `feature = "cargo-clippy"`.
-                #[allow(unexpected_cfgs)]
-                let (t0, t1): (f64, f64) = {
-                    use metal::objc::{msg_send, sel, sel_impl};
-                    unsafe { (msg_send![cb, GPUStartTime], msg_send![cb, GPUEndTime]) }
-                };
-                let kernel = self
-                    .pipelines
-                    .iter()
-                    .find(|(_, k)| std::ptr::eq(&*k.p, &**p))
-                    .map_or("?", |(n, _)| *n);
-                PROFILE.lock().expect("profile poison").push(ProfileRow {
-                    kernel,
-                    grid: (grid.width, grid.height, grid.depth),
-                    gpu_s: t1 - t0,
-                });
-                return;
-            }
-            if pending.encodes >= MAX_ENCODERS_PER_CB {
-                let done = st.open.take().expect("checked above");
-                done.enc.end_encoding();
-                done.cb.commit();
-                st.committed.push(done.cb);
-            }
+            self.close_encode(
+                &mut st,
+                || {
+                    self.pipelines
+                        .iter()
+                        .find(|(_, k)| std::ptr::eq(&*k.p, &**p))
+                        .map_or("?", |(n, _)| *n)
+                },
+                (grid.width, grid.height, grid.depth),
+            );
+        });
+        Ok(())
+    }
+
+    /// The shared post-encode step: under `LAYA_METAL_PROFILE=1` commit +
+    /// wait + record this dispatch's GPU time; otherwise flush the pass at
+    /// the [`MAX_ENCODERS_PER_CB`] cap.
+    fn close_encode(
+        &self,
+        st: &mut PendingState,
+        kernel: impl FnOnce() -> &'static str,
+        grid: (u64, u64, u64),
+    ) {
+        if profile_enabled() {
+            let done = st.open.take().expect("an encode just ran");
+            done.enc.end_encoding();
+            done.cb.commit();
+            done.cb.wait_until_completed();
+            let cb: &metal::CommandBufferRef = &done.cb;
+            // SAFETY: GPUStartTime/GPUEndTime are CFTimeInterval (f64)
+            // properties of a completed MTLCommandBuffer.
+            // The legacy `objc` macro probes `feature = "cargo-clippy"`.
+            #[allow(unexpected_cfgs)]
+            let (t0, t1): (f64, f64) = {
+                use metal::objc::{msg_send, sel, sel_impl};
+                unsafe { (msg_send![cb, GPUStartTime], msg_send![cb, GPUEndTime]) }
+            };
+            PROFILE.lock().expect("profile poison").push(ProfileRow {
+                kernel: kernel(),
+                grid,
+                gpu_s: t1 - t0,
+            });
+            return;
+        }
+        let full = st
+            .open
+            .as_ref()
+            .is_some_and(|p| p.encodes >= MAX_ENCODERS_PER_CB);
+        if full {
+            let done = st.open.take().expect("checked above");
+            done.enc.end_encoding();
+            done.cb.commit();
+            st.committed.push(done.cb);
+        }
+    }
+
+    /// Open the pass buffer + its compute encoder if none is open.
+    fn open_pass(&self, st: &mut PendingState) {
+        if st.open.is_none() {
+            let cb = self.queue.new_command_buffer().to_owned();
+            let enc = cb.new_compute_command_encoder().to_owned();
+            st.open = Some(PendingPass {
+                cb,
+                enc,
+                encodes: 0,
+            });
+        }
+    }
+
+    /// One MPS GEMM into the open pass (reflex issue 020 T13): end the
+    /// pass's compute encoder, let MPS encode into the command buffer,
+    /// re-open a compute encoder for the ops that follow. Hazard-tracked
+    /// buffers order the boundary exactly as the serial encoder did.
+    fn run_sgemm_mps(
+        &self,
+        mps: &mps::MpsGemm,
+        a: mps::Operand<'_>,
+        b: mps::Operand<'_>,
+        c: mps::Operand<'_>,
+    ) -> Result<()> {
+        self.mps_count.fetch_add(1, Ordering::Relaxed);
+        autoreleasepool(|_| {
+            let mut st = self.pending.lock().expect("pending cb poison");
+            self.open_pass(&mut st);
+            let pending = st.open.as_mut().expect("just opened");
+            pending.enc.end_encoding();
+            mps.encode(&self.device, &pending.cb, a, b, c);
+            pending.enc = pending.cb.new_compute_command_encoder().to_owned();
+            pending.encodes += 1;
+            self.close_encode(&mut st, || "mps_sgemm", (u64::from(c.3), u64::from(c.2), 1));
         });
         Ok(())
     }
@@ -2553,6 +2659,22 @@ impl Metal {
                 n,
                 uargs[2].div_ceil(SPLITK_KC),
                 SPLITK_KC,
+            );
+        }
+        // The MPS arm (reflex issue 020 T13): unsplit, batch-1, both
+        // operands dense-row (`a_cs == b_cs == 1`), C dense `[m, n]`.
+        if let Some(mps) = &self.mps
+            && batch == 1
+            && uargs[4] == 1
+            && uargs[6] == 1
+            && m >= self.mps_min_m
+        {
+            let k = uargs[2];
+            return self.run_sgemm_mps(
+                mps,
+                (a.0, a.1, m, k, uargs[3]),
+                (b.0, b.1, k, n, uargs[5]),
+                (out.0, out.1, m, n, n),
             );
         }
         let rows = u64::from(m).div_ceil(64);

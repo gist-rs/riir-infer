@@ -155,6 +155,10 @@ required-features = ["laya-riir-metal"]
 name = "packed_same_shape_gate"
 required-features = ["laya-riir-metal"]
 
+[[test]]
+name = "metal_mps_gemm"
+required-features = ["laya-riir-metal"]
+
 # The issue-020 T6 host/GPU split probe — measurement-only (#[ignore]d,
 # run explicitly with --ignored), whole-file #![cfg]-gated macOS + metal;
 # the row keeps a feature-less selection skipping loudly instead of
@@ -210,4 +214,8 @@ required-features = ["laya-riir-cubecl"]
 # skipping the target loudly instead of printing a green zero.
 [[example]]
 name = "sgemm_roofline"
+required-features = ["laya-riir-metal"]
+
+[[example]]
+name = "sgemm_mps_probe"
 required-features = ["laya-riir-metal"]
