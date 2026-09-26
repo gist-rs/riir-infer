@@ -14,6 +14,25 @@
 use std::collections::HashMap;
 
 use super::super::temps::softmax32;
+
+/// The Issue-021 act-chain echo (`LAYA_DEBUG_ACT_ECHO=1`): per call, the
+/// raw-bit checksum of the downloaded CLS row + the act_logits, so a
+/// repeat-pair divergence names its stage (cls bytes vs act logits) at
+/// the fire. Diagnostic only — zero cost when unset (the LAYA_PROBE_DEEP
+/// posture).
+fn act_echo() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var("LAYA_DEBUG_ACT_ECHO").as_deref() == Ok("1"))
+}
+
+/// Order-sensitive f32 bit checksum (diagnostic).
+fn bits_sum(v: &[f32]) -> u32 {
+    let mut s: u32 = 0;
+    for (i, x) in v.iter().enumerate() {
+        s = s.wrapping_add(x.to_bits().rotate_left((i % 31) as u32));
+    }
+    s
+}
 use super::super::{LayaError, Result};
 use super::backend::Backend;
 use super::weights::Weights;
@@ -398,6 +417,16 @@ impl Head {
         // the act head's `act_in` (its op stream is unchanged).
         HeadScratch::fit(&mut sc.cls, d);
         b.download_into(&h[..d], &mut sc.cls);
+        if act_echo() {
+            eprintln!(
+                "[act-echo] cls sum {:08x} (hidden ptr {:p} len {}) logits sum {:08x} len {}",
+                bits_sum(&sc.cls),
+                h.as_ptr(),
+                h.len(),
+                bits_sum(&logits),
+                logits.len()
+            );
+        }
         Ok(logits)
     }
 
@@ -438,6 +467,14 @@ impl Head {
         b.add_bias_row(&mut sc.act_logits_buf, 2, &self.a2b);
         let mut act_logits = vec![0f32; 2];
         b.download_into(&sc.act_logits_buf, &mut act_logits);
+        if act_echo() {
+            eprintln!(
+                "[act-echo] act_logits {:?} feats {:?} cls sum {:08x}",
+                act_logits,
+                feats,
+                bits_sum(&sc.cls)
+            );
+        }
         let act_probabilities = softmax32(&act_logits);
 
         Ok(HeadOutput {

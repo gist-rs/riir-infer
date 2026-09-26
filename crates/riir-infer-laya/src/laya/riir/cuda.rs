@@ -1431,6 +1431,15 @@ impl Cuda {
         if let Some(b) = map.get(&key) {
             return Arc::clone(b);
         }
+        // A different-len entry at this address is a DEAD buffer's slot: the
+        // host address was recycled by a smaller/larger live allocation, and
+        // the stale entry would alias this buffer in `download_into`'s
+        // prefix match (two same-epoch candidates tie on `max_by_key` and
+        // HashMap iteration order picks — the Issue-021 CLS corruption — the
+        // fused-GLU temp's slot vs the hidden that reused its address).
+        // Two LIVE host allocations cannot share an address, so eviction is
+        // always sound.
+        map.retain(|k, _| k.0 != key.0 || k.1 == key.1);
         let t = Instant::now();
         let b = self
             .stream
@@ -1459,6 +1468,10 @@ impl Cuda {
         if let Some(b) = map.get(&key) {
             return Arc::clone(b);
         }
+        // Same eviction law as `chain_buf` (the Issue-021 root fix): a
+        // different-len slot at this address belongs to a dead host buffer
+        // whose address this allocation recycled.
+        map.retain(|k, _| k.0 != key.0 || k.1 == key.1);
         let t = Instant::now();
         let b = self
             .stream
@@ -2329,11 +2342,25 @@ impl Backend for Cuda {
         // The src may be a PREFIX of the written buffer (the CLS row is the
         // leading d of the whole hidden slot), so match by base pointer and
         // sufficient extent, taking the newest epoch — the Metal rule.
+        let mut candidates = 0usize;
+        let tracing = trace_enabled();
+        if tracing {
+            for (k, _) in map.iter().filter(|(k, _)| k.0 == ptr && k.1 >= src.len()) {
+                candidates += 1;
+                eprintln!(
+                    "[trace] download candidate ptr {ptr:#x} need {} slot len {} epoch {}",
+                    src.len(), k.1, k.2
+                );
+            }
+        }
         let slot = map
             .iter()
             .filter(|(k, _)| k.0 == ptr && k.1 >= src.len())
             .max_by_key(|(k, _)| k.2)
             .map(|(_, b)| Arc::clone(b));
+        if tracing {
+            eprintln!("[trace] download ptr {ptr:#x} need {} candidates {candidates}", src.len());
+        }
         drop(map);
         let Some(b) = slot else {
             panic!(
@@ -2347,6 +2374,17 @@ impl Backend for Cuda {
         self.stream
             .memcpy_dtoh(&view, out)
             .unwrap_or_else(|e| panic!("cuda download: {e}"));
+        // The copy is `cuMemcpyDtoHAsync` — STREAM-ORDERED but ASYNC (cudarc
+        // 0.19's `memcpy_dtoh` never blocks). Without this trailing sync the
+        // host reads `out` racing the in-flight copy: the pre-sync above
+        // drains only what was enqueued BEFORE the copy. The race fired as
+        // the harness banking77 repeat check (`determinism_ok = false` — the
+        // act head's CLS-row read came back materially stale while the
+        // scorer logits stayed exact; Issue 021). `synchronize` is
+        // stream-scoped: it waits for this copy too, then returns.
+        self.stream
+            .synchronize()
+            .unwrap_or_else(|e| panic!("cuda download post-copy sync: {e}"));
     }
 
     fn warm_weight(&self, data: &[f32]) {

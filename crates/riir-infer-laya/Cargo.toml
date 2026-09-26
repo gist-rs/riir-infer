@@ -195,6 +195,29 @@ required-features = ["laya-riir"]
 name = "cuda_ops_smoke"
 required-features = ["laya-riir-cuda"]
 
+# Issue 021 T1 — the banking77-shape repeat probe (kernel-level determinism).
+[[test]]
+name = "cuda_repeat_probe"
+required-features = ["laya-riir-cuda"]
+
+# Issue 021 T1b — the encoder-level repeat probe (real checkpoint, per-op tags;
+# forward_probe lives behind the cubecl feature, so the row carries both).
+[[test]]
+name = "cuda_encoder_repeat_probe"
+required-features = ["laya-riir-cuda", "laya-riir-cubecl"]
+
+# Issue 021 T1c — the packed-forward repeat probe (cuda-only closure; the
+# T1b per-op granularity waits on this box's rustc AV in the cubecl closure).
+[[test]]
+name = "cuda_packed_repeat_probe"
+required-features = ["laya-riir-cuda"]
+
+# Issue 021 T1e — the agent-level repeat probe (full system_one, real cases;
+# needs the cuda backend compiled in — LAYA_DEVICE=cuda at load).
+[[test]]
+name = "cuda_agent_repeat_probe"
+required-features = ["laya-riir", "laya-riir-cuda"]
+
 # The CubeCL op-parity + residency smoke (plan 611 S1b) — whole-file
 # #![cfg]-gated on the feature; the row keeps a feature-less selection
 # skipping the target loudly instead of printing a green zero.
