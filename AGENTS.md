@@ -78,6 +78,19 @@ Issue, plan, doc, benchmark, and research numbers are **monotonic and never
 reused**. Read the target dir's `.highwater`, use `value + 1`, write the
 new value back.
 
+⛔ **`.issues/` carries TWO lanes (carve-era, 2026-09-26) — read before
+allocating.** The files `998/1003/1004` are MOVED documents from the riir-ai
+carve (riir-ai's numbers, not allocations made here); `.highwater` reads 1004
+for that reason only and must not be treated as the local counter. LOCAL
+allocations run the small lane and own a dedicated counter:
+**`.issues/.highwater_local`** — read it, allocate value + 1, write the new
+value back in the same commit (a plain max-of-disk rule would REUSE a number
+once a closed issue file is removed, which is the katgpt-rs `.issues/121`
+recycling bug). Lane history: `011` → `012` → `013` → `014` → `015`. And
+NEVER allocate `1005–1008` here — riir-ai's own counter has already consumed
+that range (it read 1008 on 2026-09-26; re-check
+`../riir-ai/.issues/.highwater` before touching the inherited range at all).
+
 ## Branch
 
 `develop` is the working branch. Don't create feature branches; commit
