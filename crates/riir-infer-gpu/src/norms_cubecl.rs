@@ -999,6 +999,182 @@ impl ResidualAddRmsNormCubeCL {
     }
 }
 
+// ---------------------------------------------------------------------------
+// Mean-centered LayerNorm kernels (plan 611 S1a — the T7 GAP: the norms
+// family was RMS-shaped only; the encoder lane's `layer_norm_nobias_into`
+// semantics — mean-centered, bias-free — had no CubeCL form)
+// ---------------------------------------------------------------------------
+
+/// CubeCL batched mean-centered LayerNorm — `[rows × dim]`, one workgroup
+/// per row. Computes `y = (x − μ) / sqrt(var + eps) · gamma` where
+/// `μ = mean(x)` and `var = mean(x²) − μ²` (the one-pass variance form:
+/// both row sums accumulate in the SAME strided walk, no second pass over
+/// `x`). Bias-free by contract — the encoder lane pins "NO bias tensors
+/// anywhere in the encoder"; a biased form is a different kernel.
+///
+/// ## Parameter Layout
+///
+/// - `input`: `[f32; rows * dim]` — row-major batched input.
+/// - `gamma`: `[f32; dim]` — learnable scale (shared across rows).
+/// - `params`: `[f32; 3]` — `[inv_dim, eps, dim]` precomputed on CPU
+///   (the Issue-639 discipline: `dim` travels in params, never read from
+///   `input.len()`, so an oversized backing allocation is harmless).
+/// - `output`: `[f32; rows * dim]` — normalized output.
+///
+/// ## Dispatch
+///
+/// `CubeCount::Static(rows, 1, 1)`, `CubeDim::new_1d(256)`.
+#[cfg(feature = "cubecl_runtime")]
+#[cube(launch_unchecked)]
+fn layernorm_mean_batched_f32(
+    input: &[f32],
+    gamma: &[f32],
+    params: &[f32],
+    output: &mut [f32],
+) {
+    let inv_dim = params[0usize];
+    let eps = params[1usize];
+    let dim = params[2usize] as u32;
+    let cube_size = 256u32;
+    let tid = UNIT_POS;
+    let row = CUBE_POS_X;
+    let row_offset = row * dim;
+
+    // ── Phase 1: strided accumulation of Σx and Σx² for this row ──
+    let mut partial_sum = f32::new(0.0f32);
+    let mut partial_sq = f32::new(0.0f32);
+    let mut i = tid;
+    while i < dim {
+        let x = input[(row_offset + i) as usize];
+        partial_sum += x;
+        partial_sq += x * x;
+        i += cube_size;
+    }
+
+    // ── Phase 2: two unrolled shared-memory tree reductions (256 threads,
+    // 128→64→…→1) — sum slice first, sum-of-squares slice second ──
+    let mut smem_sum = Shared::<[f32]>::new_slice(256usize);
+    let mut smem_sq = Shared::<[f32]>::new_slice(256usize);
+    smem_sum[tid as usize] = partial_sum;
+    smem_sq[tid as usize] = partial_sq;
+    sync_cube();
+
+    if tid < 128u32 {
+        smem_sum[tid as usize] = smem_sum[tid as usize] + smem_sum[(tid + 128u32) as usize];
+        smem_sq[tid as usize] = smem_sq[tid as usize] + smem_sq[(tid + 128u32) as usize];
+    }
+    sync_cube();
+    if tid < 64u32 {
+        smem_sum[tid as usize] = smem_sum[tid as usize] + smem_sum[(tid + 64u32) as usize];
+        smem_sq[tid as usize] = smem_sq[tid as usize] + smem_sq[(tid + 64u32) as usize];
+    }
+    sync_cube();
+    if tid < 32u32 {
+        smem_sum[tid as usize] = smem_sum[tid as usize] + smem_sum[(tid + 32u32) as usize];
+        smem_sq[tid as usize] = smem_sq[tid as usize] + smem_sq[(tid + 32u32) as usize];
+    }
+    sync_cube();
+    if tid < 16u32 {
+        smem_sum[tid as usize] = smem_sum[tid as usize] + smem_sum[(tid + 16u32) as usize];
+        smem_sq[tid as usize] = smem_sq[tid as usize] + smem_sq[(tid + 16u32) as usize];
+    }
+    sync_cube();
+    if tid < 8u32 {
+        smem_sum[tid as usize] = smem_sum[tid as usize] + smem_sum[(tid + 8u32) as usize];
+        smem_sq[tid as usize] = smem_sq[tid as usize] + smem_sq[(tid + 8u32) as usize];
+    }
+    sync_cube();
+    if tid < 4u32 {
+        smem_sum[tid as usize] = smem_sum[tid as usize] + smem_sum[(tid + 4u32) as usize];
+        smem_sq[tid as usize] = smem_sq[tid as usize] + smem_sq[(tid + 4u32) as usize];
+    }
+    sync_cube();
+    if tid < 2u32 {
+        smem_sum[tid as usize] = smem_sum[tid as usize] + smem_sum[(tid + 2u32) as usize];
+        smem_sq[tid as usize] = smem_sq[tid as usize] + smem_sq[(tid + 2u32) as usize];
+    }
+    sync_cube();
+    if tid < 1u32 {
+        smem_sum[0usize] = smem_sum[0usize] + smem_sum[1usize];
+        smem_sq[0usize] = smem_sq[0usize] + smem_sq[1usize];
+        // ── Phase 3: μ, var = E[x²] − μ², inv_std — computed once, in
+        // shared, where both sums are already resident. Slot 0 of each
+        // slice carries one value out: sum→μ, sq→inv_std ──
+        let mean = smem_sum[0usize] * inv_dim;
+        let var = smem_sq[0usize] * inv_dim - mean * mean;
+        let inv_std = f32::new(1.0f32) / (var + eps).sqrt();
+        smem_sum[0usize] = mean;
+        smem_sq[0usize] = inv_std;
+    }
+    sync_cube();
+
+    let mean = smem_sum[0usize];
+    let inv_std = smem_sq[0usize];
+
+    // ── Phase 4: normalize and apply gamma for this row ──
+    let mut j = tid;
+    while j < dim {
+        let x = input[(row_offset + j) as usize];
+        let g = gamma[j as usize];
+        output[(row_offset + j) as usize] = (x - mean) * inv_std * g;
+        j += cube_size;
+    }
+}
+
+/// CubeCL batched mean-centered LayerNorm launcher (plan 611 S1a).
+///
+/// Processes `[rows × dim]` in one dispatch — one workgroup per row, the
+/// `RmsNormBatchedCubeCL` pattern. Bias-free by contract (the encoder
+/// lane's `layer_norm_nobias_into` semantics).
+#[cfg(feature = "cubecl_runtime")]
+pub struct LayerNormMeanBatchedCubeCL;
+
+#[cfg(feature = "cubecl_runtime")]
+impl LayerNormMeanBatchedCubeCL {
+    /// Launch batched mean-centered LayerNorm over `[rows × dim]`.
+    ///
+    /// Dispatch: `(rows, 1, 1)` workgroups of 256 threads (one per row).
+    ///
+    /// # Safety
+    ///
+    /// Buffer handles must have correct sizes:
+    /// - `input_handle`: `rows * dim` f32 elements
+    /// - `gamma_handle`: `dim` f32 elements
+    /// - `output_handle`: `rows * dim` f32 elements
+    ///
+    /// `rows` and `dim` must be > 0. `eps` must be > 0.
+    pub unsafe fn launch<R: Runtime>(
+        client: &ComputeClient<R>,
+        input_handle: Handle,
+        gamma_handle: Handle,
+        output_handle: Handle,
+        rows: usize,
+        dim: usize,
+        eps: f32,
+    ) {
+        let inv_dim = 1.0f32 / dim as f32;
+        let params: &[f32] = &[inv_dim, eps, dim as f32];
+        let params_handle = crate::params_cache::params_handle(client, f32::as_bytes(params));
+
+        let row_elems = rows * dim;
+        debug_assert_binding_at_least(&input_handle, row_elems, "LayerNormMeanBatched::input");
+        debug_assert_binding_at_least(&output_handle, row_elems, "LayerNormMeanBatched::output");
+
+        // SAFETY: Caller guarantees correct buffer sizes.
+        unsafe {
+            layernorm_mean_batched_f32::launch_unchecked::<R>(
+                client,
+                CubeCount::Static(rows as u32, 1, 1),
+                CubeDim::new_1d(256),
+                BufferArg::from_raw_parts(input_handle, row_elems),
+                BufferArg::from_raw_parts(gamma_handle, dim),
+                BufferArg::from_raw_parts(params_handle, 3),
+                BufferArg::from_raw_parts(output_handle, row_elems),
+            );
+        }
+    }
+}
+
 #[cfg(all(test, feature = "cubecl_runtime"))]
 mod tests {
     use crate::cubecl_runtime::ActiveRuntime;
@@ -1766,5 +1942,134 @@ mod tests {
         }
 
         println!("fused ResAdd+RMSNorm (dim={dim}): max_norm_err = {max_err}");
+    }
+
+    // ── Mean-centered LayerNorm tests (plan 611 S1a) ──
+
+    /// CPU reference, bias-free mean-centered LayerNorm — the
+    /// `layer_norm_nobias_into` semantics: `y = (x − μ) / sqrt(var + eps)
+    /// · gamma`, two-pass (μ first, then Σ(x−μ)² — the reference order;
+    /// the kernel's one-pass E[x²]−μ² form differs only in reduction
+    /// order, inside the 1e-5 tolerance).
+    fn layernorm_mean_cpu(data: &[f32], gamma: &[f32], dim: usize, eps: f32) -> Vec<f32> {
+        let rows = data.len() / dim;
+        let mut out = vec![0.0f32; data.len()];
+        for r in 0..rows {
+            let off = r * dim;
+            let mean: f32 = data[off..off + dim].iter().sum::<f32>() / dim as f32;
+            let var: f32 = data[off..off + dim]
+                .iter()
+                .map(|v| (v - mean) * (v - mean))
+                .sum::<f32>()
+                / dim as f32;
+            let inv_std = 1.0 / (var + eps).sqrt();
+            for (d, v) in data[off..off + dim].iter().enumerate() {
+                out[off + d] = (v - mean) * inv_std * gamma[d];
+            }
+        }
+        out
+    }
+
+    /// Verify mean-centered LN normalizes each row to zero mean, unit
+    /// variance (gamma = 1), across a multi-row batch with dim > 256 so
+    /// the strided walk is exercised.
+    #[test]
+    fn test_layernorm_mean_identity_batched() {
+        let ctx = CubeCLContext::new().expect("CubeCL should initialize");
+        let client = ctx.client();
+
+        let (rows, dim) = (7usize, 1024usize);
+        let eps = 1e-5f32;
+        // Deterministic pseudo-random rows (xorshift), mean ≈ 3, varied
+        // scale per row — a zero-mean input would make the mean subtraction
+        // untestable.
+        let mut s = 0x2545F4914F6CDD1Du64;
+        let input: Vec<f32> = (0..rows * dim)
+            .map(|i| {
+                s ^= s << 13;
+                s ^= s >> 7;
+                s ^= s << 17;
+                3.0 + 5.0 * ((i % (7 + i / dim)) as f32) * ((s % 2000) as f32 / 1000.0 - 1.0)
+            })
+            .collect();
+        let gamma: Vec<f32> = vec![1.0f32; dim];
+
+        let input_handle = client.create_from_slice(f32::as_bytes(&input));
+        let gamma_handle = client.create_from_slice(f32::as_bytes(&gamma));
+        let output_handle = client.empty(rows * dim * core::mem::size_of::<f32>());
+
+        // SAFETY: Buffers are correctly sized.
+        unsafe {
+            LayerNormMeanBatchedCubeCL::launch::<ActiveRuntime>(
+                &client,
+                input_handle,
+                gamma_handle,
+                output_handle.clone(),
+                rows,
+                dim,
+                eps,
+            );
+        }
+
+        let bytes = client.read_one(output_handle).expect("should read output");
+        let output = f32::from_bytes(&bytes);
+        let expected = layernorm_mean_cpu(&input, &gamma, dim, eps);
+
+        assert_eq!(output.len(), rows * dim);
+        let mut max_err = 0.0f32;
+        for (i, (&exp, &got)) in expected.iter().zip(output.iter()).enumerate() {
+            let err = (exp - got).abs();
+            max_err = max_err.max(err);
+            assert!(err < 1e-4, "element {i}: expected {exp}, got {got}");
+        }
+
+        // The NORMALIZATION claim, on row 0: output mean ≈ 0, var ≈ 1.
+        let out_mean: f32 = output[0..dim].iter().sum::<f32>() / dim as f32;
+        let out_var: f32 = output[0..dim].iter().map(|v| v * v).sum::<f32>() / dim as f32;
+        assert!(out_mean.abs() < 1e-4, "row 0 mean {out_mean} ≠ 0");
+        assert!((out_var - 1.0).abs() < 1e-2, "row 0 var {out_var} ≠ 1");
+        println!("mean-LN batched ({rows}×{dim}): max_err = {max_err:.2e}");
+    }
+
+    /// Verify mean-centered LN with a non-trivial gamma, small geometry.
+    #[test]
+    fn test_layernorm_mean_gamma() {
+        let ctx = CubeCLContext::new().expect("CubeCL should initialize");
+        let client = ctx.client();
+
+        let (rows, dim) = (3usize, 64usize);
+        let eps = 1e-5f32;
+        let input: Vec<f32> = (0..rows * dim)
+            .map(|i| ((i * 37 + 11) % 23) as f32 - 8.0)
+            .collect();
+        let gamma: Vec<f32> = (0..dim).map(|d| 0.5 + (d % 5) as f32 * 0.25).collect();
+
+        let input_handle = client.create_from_slice(f32::as_bytes(&input));
+        let gamma_handle = client.create_from_slice(f32::as_bytes(&gamma));
+        let output_handle = client.empty(rows * dim * core::mem::size_of::<f32>());
+
+        // SAFETY: Buffers are correctly sized.
+        unsafe {
+            LayerNormMeanBatchedCubeCL::launch::<ActiveRuntime>(
+                &client,
+                input_handle,
+                gamma_handle,
+                output_handle.clone(),
+                rows,
+                dim,
+                eps,
+            );
+        }
+
+        let bytes = client.read_one(output_handle).expect("should read output");
+        let output = f32::from_bytes(&bytes);
+        let expected = layernorm_mean_cpu(&input, &gamma, dim, eps);
+
+        for (i, (&exp, &got)) in expected.iter().zip(output.iter()).enumerate() {
+            assert!(
+                (exp - got).abs() < 1e-5,
+                "element {i}: expected {exp}, got {got}"
+            );
+        }
     }
 }

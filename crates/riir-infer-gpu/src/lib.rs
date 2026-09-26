@@ -138,8 +138,8 @@ pub use attention_q8kv_cubecl::{AttentionQ8KVCubeCL, Q8KVBuffers};
 pub use gemv_f16_cubecl::{F16Handle, GemvF16CubeCL};
 #[cfg(feature = "cubecl_runtime")]
 pub use norms_cubecl::{
-    ResidualAddCubeCL, RmsNormBatchedCubeCL, RmsNormCubeCL, RmsNormQkFusedCubeCL,
-    RmsNormZgateFusedCubeCL,
+    LayerNormMeanBatchedCubeCL, ResidualAddCubeCL, RmsNormBatchedCubeCL, RmsNormCubeCL,
+    RmsNormQkFusedCubeCL, RmsNormZgateFusedCubeCL,
 };
 #[cfg(feature = "cubecl_runtime")]
 pub use elementwise_cubecl::{
