@@ -4,6 +4,57 @@ Durable records for resolved questions and closed lanes (the noise-reduction
 convention: the record lands here, hash-pinned; open work lives in `.issues/`
 and `.plans/`). Created 2026-09-23 at the first record.
 
+## 2026-09-26 — Issue 018 CLOSED: the Cubecl-posture drift wobble was a softmax write-after-read race (fix `2a34bd3`)
+
+Plan 611 S4's residual: the laya G5 gate at the cubecl posture held top-1
+1.000000 in every run, but the prob-drift magnitude sporadically read
+10–1000× its per-checkpoint floor, the outlier moving between checkpoints
+and runs (9/20 G5 runs failing). The gate was `#[ignore]`d and every Cubecl
+number held PROVISIONAL.
+
+- **Root cause:** both CubeCL softmax kernels (`softmax_f32`,
+  `softmax_rows_inplace_f32`) read the reduced max from shared slot 0 and
+  then, with **no barrier**, let the sum phase write `smem[tid] =
+  local_sum`, so thread 0 could overwrite slot 0 while a slower SIMD group
+  was still reading the max. Scheduling-dependent, so worse under load.
+  One `sync_cube()` after the read. The same commit fixes a latent chunked
+  launch defect: rows past `MAX_WG_X` re-normalized rows 0.. (the chunk's
+  first row now rides `params[1]`; heads·seq > 32768 only, i.e. long
+  context).
+- **How it was localized:** the issue's own lever 1 (the encoder probe's
+  repeat loop, per-op drains). Every fire FIRST diverged at an `L*.attn`
+  output, and the row-softmax is the only reduction inside the composed
+  attention. A scan of every `let … = smem…[0usize]` read followed by a
+  shared write before the next barrier found exactly the two softmax
+  sites. The deltanet and two-pass-LN hits were false positives: only
+  thread 0 consumes the deltanet value, and LN keeps separate arrays.
+- **Refuted first, measured:** hypothesis 3 / lever 2 (a stream drain per
+  `begin_pass`): 10 interleaved pairs, excursions to 5e-2 in both arms.
+  Zero-filling every write-first slot (`client.empty` recycles pool bytes):
+  excursions to 2.4e-2. Neither the drain nor the pool was the class.
+- **Measured fix (M3, release, AC, load 12.8–16.6):** repeat-loop probe
+  **43/120 fired passes at HEAD vs 0/120** with the fix (same tree,
+  interleaved); G5 cubecl **10/10 PASS, every run bit-identical** at the
+  floor (english 3.092e-6 · typed 2.233e-6 · multilingual 5.187e-6), then
+  3/3 through the re-armed gate (riir-reflex `ccb5bd0`). Regression arms in
+  `elementwise_cubecl::tests` (chunked-offset parity + a 200-rep
+  bit-identical repeat at the 16×400 score geometry) both fail 5/5 with the
+  fix reverted. gpu lib 215/0; clippy `-D` workspace `--all-features
+  --all-targets` green.
+- **The second class is contested (Issue 019).** A concurrent session
+  (`riir-infer-m3-t7c`) landed `c0dfa06`, which emits Metal memory barriers
+  from the vendored `wgpu-hal`, and recorded 018 as two classes (`270740c`).
+  The measurement above was taken in a clean worktree at HEAD plus ONLY
+  `2a34bd3`, with no barrier code present, so **A alone was sufficient for
+  the observed wobble**. Class B's localizing evidence (`scores` diverging
+  with q/k/v clean) is read after the in-place softmax, which is A's site.
+  Its premise also does not match the fork's encoders, which never set a
+  dispatch type and so are serial. Necessity and per-rebind cost are
+  tracked in Issue 019. Nothing reverted.
+- Cubecl numbers are no longer provisional; plan 611 S5 may publish.
+- The issue file is removed; its full text (the pre-resolution trail + the
+  two-class record as written by `riir-infer-m3-t7c`) is at `270740c`.
+
 ## 2026-09-26 — the riir-ai carve docs adopted into this repo (Issues 998 + 1003, Plan 610, Proposal 041, Benches 870 + 871, doc 002)
 
 The riir-infer formation records moved home to the subject repo (owner noise-reduction pass on riir-ai), **numbers kept verbatim** so every existing "riir-ai Issue 998 / Plan 610 / Proposal 041" citation resolves to the same document:
