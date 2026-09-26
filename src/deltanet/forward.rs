@@ -700,6 +700,137 @@ pub fn forward_attention_layer(
         .matvec(&scratch.attn_out[..q_dim], &mut x[..n_embd]);
 }
 
+/// [`forward_attention_layer`] with an armed [`kv_evict::LayerEvict`]
+/// (Issue 012). Deliberately a near-copy rather than a parameterization:
+/// the original body stays bit-frozen for its existing callers (the
+/// relocated riir-train-engine modules and every feature-off build), and
+/// the three deltas are visible at their call sites —
+///
+/// 1. K/V write at the EVICTOR'S packed slot (`admit(pos)`), not at the
+///    logical position (RoPE still uses the logical `pos` — compaction
+///    moves storage, never phases);
+/// 2. `t_n = slot + 1` (the causal prefix the compacted cache holds),
+///    which equals `pos + 1` whenever no eviction has fired;
+/// 3. post-attention `observe` → `maybe_evict` → `tick` on the same
+///    `head_scores` the attention just wrote — pure side state, so an
+///    armed state with `budget ≥` the whole sequence produces
+///    `to_bits`-identical logits to the unarmed path (T3).
+#[cfg(feature = "kv_eviction")]
+#[allow(clippy::too_many_arguments)]
+pub fn forward_attention_layer_evictable(
+    x: &mut [f32],
+    layer: &DeltaNetLayerWeights,
+    cache: &mut crate::transformer::KVCache,
+    pos: usize,
+    config: &Config,
+    rope_freq: &crate::rope::RopeFreqTable,
+    scratch: &mut AttentionLayerScratch,
+    evictor: &mut crate::deltanet::kv_evict::LayerEvict,
+) {
+    let n_embd = config.n_embd;
+    let n_head = config.n_head;
+    let n_kv = config.n_kv_head;
+    let hd = config.head_dim;
+    let q_dim = n_head * hd;
+    let kvd = n_kv * hd;
+    let rotary_dim = effective_rotary_dim(config);
+
+    // 1. Gated Q + K + V projections (identical to the unarmed path).
+    layer.attn_wq.matvec(&x[..n_embd], &mut scratch.qg_buf);
+    for h in 0..n_head {
+        let src = h * 2 * hd;
+        let dst = h * hd;
+        scratch.q_buf[dst..dst + hd].copy_from_slice(&scratch.qg_buf[src..src + hd]);
+        scratch.gate_buf[dst..dst + hd].copy_from_slice(&scratch.qg_buf[src + hd..src + 2 * hd]);
+    }
+    layer.attn_wk.matvec(&x[..n_embd], &mut scratch.k_buf);
+    layer.attn_wv.matvec(&x[..n_embd], &mut scratch.v_buf);
+
+    // 2. QK-norm.
+    let eps = config.rms_norm_eps;
+    for h in 0..n_head {
+        let off = h * hd;
+        rmsnorm_with_gamma_eps(&mut scratch.q_buf[off..off + hd], &layer.attn_q_norm, eps);
+    }
+    for h in 0..n_kv {
+        let off = h * hd;
+        rmsnorm_with_gamma_eps(&mut scratch.k_buf[off..off + hd], &layer.attn_k_norm, eps);
+    }
+
+    // 3. Partial RoPE at the LOGICAL position (never the slot).
+    if rotary_dim == hd {
+        crate::rope::apply_rope_with_freq(
+            &mut scratch.q_buf,
+            &mut scratch.k_buf,
+            pos,
+            hd,
+            rope_freq.as_slice(),
+        );
+    } else {
+        crate::rope::apply_partial_rope_with_freq(
+            &mut scratch.q_buf,
+            &mut scratch.k_buf,
+            pos,
+            hd,
+            rotary_dim,
+            rope_freq.as_slice(),
+        );
+    }
+
+    // 4. Admit the slot, then store K, V there.
+    let slot = evictor.admit(pos as u64);
+    let pos_off = slot * kvd;
+    unsafe {
+        std::ptr::copy_nonoverlapping(
+            scratch.k_buf.as_ptr(),
+            cache.key.as_mut_ptr().add(pos_off),
+            kvd,
+        );
+        std::ptr::copy_nonoverlapping(
+            scratch.v_buf.as_ptr(),
+            cache.value.as_mut_ptr().add(pos_off),
+            kvd,
+        );
+    }
+
+    // 5. Multi-head attention over the causal prefix the cache holds.
+    let scale = 1.0 / (hd as f32).sqrt();
+    scratch.attn_out[..q_dim].fill(0.0);
+    let t_n = slot + 1;
+    let block_size = config.block_size;
+    unsafe {
+        crate::transformer::attention_heads_parallel(
+            &scratch.q_buf,
+            &cache.key,
+            &cache.value,
+            &mut scratch.attn_out,
+            &mut scratch.head_scores,
+            n_head,
+            n_kv,
+            kvd,
+            hd,
+            t_n,
+            scale,
+            0.0,
+            block_size,
+        );
+    }
+
+    // 6. Observe the post-softmax rows, then evict to budget when due.
+    //    Both are pure side state; neither reads or writes the activation.
+    evictor.observe(&scratch.head_scores, block_size, pos as u64);
+    evictor.maybe_evict(cache, kvd, pos as u64);
+    evictor.tick();
+
+    // 7. Output gating + o_proj (identical to the unarmed path).
+    for i in 0..q_dim {
+        scratch.attn_out[i] *= crate::simd::fast_sigmoid(scratch.gate_buf[i]);
+    }
+    layer
+        .attn_wo
+        .matvec(&scratch.attn_out[..q_dim], &mut x[..n_embd]);
+}
+
 /// Effective partial-RoPE dimension count for the full-attention layers.
 ///
 /// Returns `config.rope_dimension_count` if non-zero (Issue 594: Qwen3.5
@@ -968,6 +1099,84 @@ pub fn forward_qwen_deltanet<'a>(
     // 4. LM head (logits) — copy hidden state to avoid aliasing between
     //    the read (`x[..n]`) and the write (`x[..vocab_size]`). The
     //    `hidden_copy` scratch is pre-allocated in `HybridForwardScratch`.
+    scratch.hidden_copy[..n].copy_from_slice(&x[..n]);
+    weights
+        .lm_head
+        .matvec(&scratch.hidden_copy[..n], &mut x[..config.vocab_size]);
+
+    &mut x[..config.vocab_size]
+}
+
+/// [`forward_qwen_deltanet`] with an armed [`kv_evict::EvictorState`]
+/// (Issue 012). The per-layer dispatch is identical; attention layers route
+/// to [`forward_attention_layer_evictable`] with their layer's state.
+/// `pos` stays the LOGICAL sequence position (RoPE + slot bookkeeping);
+/// physical slots drift from it only when eviction fires.
+#[cfg(feature = "kv_eviction")]
+#[allow(clippy::too_many_arguments, clippy::needless_range_loop)]
+pub fn forward_qwen_deltanet_evictable<'a>(
+    x: &'a mut [f32],
+    weights: &QwenDeltaNetWeights,
+    cache: &mut HybridCache,
+    token: usize,
+    pos: usize,
+    config: &Config,
+    scratch: &'a mut HybridForwardScratch,
+    rope_freq: &crate::rope::RopeFreqTable,
+    evictor: &mut crate::deltanet::kv_evict::EvictorState,
+) -> &'a mut [f32] {
+    let n = config.n_embd;
+
+    let tok_off = token * n;
+    x[..n].copy_from_slice(&weights.wte[tok_off..tok_off + n]);
+
+    for (layer_idx, layer_weights) in weights.layers.iter().enumerate() {
+        let is_linear = weights.layer_types[layer_idx] == DeltaNetLayerType::DeltaNet;
+
+        scratch.residual[..n].copy_from_slice(&x[..n]);
+        rmsnorm_with_gamma_eps(&mut x[..n], &layer_weights.input_norm, config.rms_norm_eps);
+
+        if is_linear {
+            forward_deltanet_layer(
+                &mut x[..n],
+                layer_weights,
+                &mut cache.deltanet_state.recurrent_states[layer_idx],
+                &mut cache.deltanet_state.conv_states[layer_idx],
+                config,
+                &mut scratch.deltanet,
+            );
+        } else {
+            forward_attention_layer_evictable(
+                &mut x[..n],
+                layer_weights,
+                &mut cache.kv_cache.layers[layer_idx],
+                pos,
+                config,
+                rope_freq,
+                &mut scratch.attention,
+                evictor.layer(layer_idx),
+            );
+        }
+
+        for (xi, r) in x[..n].iter_mut().zip(&scratch.residual[..n]) {
+            *xi += *r;
+        }
+
+        scratch.residual[..n].copy_from_slice(&x[..n]);
+        rmsnorm_with_gamma_eps(&mut x[..n], &layer_weights.post_attn_norm, config.rms_norm_eps);
+
+        layer_weights.gate_proj.matvec(&x[..n], &mut scratch.gate);
+        layer_weights.up_proj.matvec(&x[..n], &mut scratch.up);
+        swiglu(&mut scratch.hidden, &scratch.gate, &scratch.up);
+        layer_weights.down_proj.matvec(&scratch.hidden, &mut x[..n]);
+
+        for (xi, r) in x[..n].iter_mut().zip(&scratch.residual[..n]) {
+            *xi += *r;
+        }
+    }
+
+    rmsnorm_with_gamma_eps(&mut x[..n], &weights.final_norm, config.rms_norm_eps);
+
     scratch.hidden_copy[..n].copy_from_slice(&x[..n]);
     weights
         .lm_head
@@ -1423,6 +1632,259 @@ pub fn prefill_qwen_deltanet_into(
 
     // 4. LM head (logits from last position hidden state) — write into the
     // caller-supplied buffer (zero-alloc).
+    let last_hidden = &prefill_ctx.hidden[last_off..last_off + n];
+    assert!(
+        logits_out.len() >= v,
+        "logits_out too short: {} < {v}",
+        logits_out.len()
+    );
+    weights.lm_head.matvec(last_hidden, &mut logits_out[..v]);
+}
+
+/// Chunked causal prefill with a logical-position offset and the optional
+/// eviction state (Issue 012). Calling this repeatedly over successive
+/// token slices (`pos0` = each slice's first logical position) processes an
+/// arbitrarily long prompt in bounded `PrefillContext` memory: K/V cache
+/// and `DeltaNet` recurrent state persist across calls, so chunk `c+1`
+/// attends over everything chunk `c` wrote. Per-token compute order is
+/// identical to the whole-prompt path (each output element is the same
+/// dot product in the same order), so chunking is bit-transparent.
+///
+/// With `evictor = Some`, attention layers switch to the staged path: Phase
+/// A computes the chunk's K/V into the prefill scratch WITHOUT cache
+/// writes; Phase B per position admits a packed slot, copies that row into
+/// the cache, attends over `slot + 1` rows, observes the post-softmax
+/// rows, and evicts to budget when due. With `evictor = None` the write is
+/// the legacy batched absolute-position path at offset `pos0`.
+#[cfg(feature = "kv_eviction")]
+#[allow(clippy::too_many_arguments, clippy::needless_range_loop)]
+pub fn prefill_qwen_deltanet_chunk_into(
+    weights: &QwenDeltaNetWeights,
+    config: &Config,
+    cache: &mut HybridCache,
+    prompt_tokens: &[usize],
+    pos0: usize,
+    scratch: &mut HybridForwardScratch,
+    rope_freq: &crate::rope::RopeFreqTable,
+    prefill_ctx: &mut PrefillContext,
+    logits_out: &mut [f32],
+    mut evictor: Option<&mut crate::deltanet::kv_evict::EvictorState>,
+) {
+    let n = config.n_embd;
+    let v = config.vocab_size;
+    let seq_len = prompt_tokens.len();
+    assert!(seq_len > 0, "prefill requires at least one token");
+    assert!(
+        seq_len <= prefill_ctx.max_prompt_len,
+        "prompt chunk {seq_len} exceeds prefill capacity {}",
+        prefill_ctx.max_prompt_len
+    );
+
+    let q_dim = config.n_head * config.head_dim;
+    let kvd = crate::types::kv_dim(config);
+    let hd = config.head_dim;
+    let mlp = config.mlp_hidden;
+    let eps = config.rms_norm_eps;
+    let rotary_dim = effective_rotary_dim(config);
+    let scale = 1.0 / (hd as f32).sqrt();
+    let block_size = config.block_size;
+
+    // 1. Embed the chunk (chunk-relative layout; `pos0` only affects RoPE
+    //    and the evictor's logical positions).
+    for (p, &token) in prompt_tokens.iter().enumerate() {
+        let tok_off = token * n;
+        prefill_ctx.hidden[p * n..(p + 1) * n].copy_from_slice(&weights.wte[tok_off..tok_off + n]);
+    }
+
+    for (layer_idx, layer_weights) in weights.layers.iter().enumerate() {
+        let is_linear = weights.layer_types[layer_idx] == DeltaNetLayerType::DeltaNet;
+        let mut ev = evictor.as_mut().map(|state| state.layer(layer_idx));
+
+        if is_linear {
+            // ── DeltaNet layer ────────────────────────────────
+            for p in 0..seq_len {
+                let hidden_slice = &mut prefill_ctx.hidden[p * n..(p + 1) * n];
+                scratch.residual[..n].copy_from_slice(hidden_slice);
+                rmsnorm_with_gamma_eps(hidden_slice, &layer_weights.input_norm, eps);
+                forward_deltanet_layer(
+                    hidden_slice,
+                    layer_weights,
+                    &mut cache.deltanet_state.recurrent_states[layer_idx],
+                    &mut cache.deltanet_state.conv_states[layer_idx],
+                    config,
+                    &mut scratch.deltanet,
+                );
+                for (h, &q) in hidden_slice.iter_mut().zip(&scratch.residual[..n]) {
+                    *h += q;
+                }
+            }
+            batched_mlp(prefill_ctx, layer_weights, seq_len, n, mlp, eps);
+        } else {
+            // ── Attention layer ───────────────────────────────
+            let kv_cache = &mut cache.kv_cache.layers[layer_idx];
+
+            // Phase A (batched): residual + norm + QKV + split + QK-norm
+            // + RoPE at the LOGICAL position. Cache write deferred to
+            // Phase B when armed (the slot is known only there).
+            prefill_ctx.attn_residual[..seq_len * n]
+                .copy_from_slice(&prefill_ctx.hidden[..seq_len * n]);
+            for p in 0..seq_len {
+                let hs = &mut prefill_ctx.hidden[p * n..(p + 1) * n];
+                rmsnorm_with_gamma_eps(hs, &layer_weights.input_norm, eps);
+            }
+            layer_weights.attn_wq.matmat(
+                &prefill_ctx.hidden[..seq_len * n],
+                &mut prefill_ctx.attn_qg[..seq_len * 2 * q_dim],
+                seq_len,
+            );
+            layer_weights.attn_wk.matmat(
+                &prefill_ctx.hidden[..seq_len * n],
+                &mut prefill_ctx.attn_k[..seq_len * kvd],
+                seq_len,
+            );
+            layer_weights.attn_wv.matmat(
+                &prefill_ctx.hidden[..seq_len * n],
+                &mut prefill_ctx.attn_v[..seq_len * kvd],
+                seq_len,
+            );
+            for p in 0..seq_len {
+                let qg_off = p * 2 * q_dim;
+                let q_off = p * q_dim;
+                for h in 0..config.n_head {
+                    let src = qg_off + h * 2 * hd;
+                    let dst = q_off + h * hd;
+                    prefill_ctx.attn_q[dst..dst + hd]
+                        .copy_from_slice(&prefill_ctx.attn_qg[src..src + hd]);
+                    prefill_ctx.attn_gate[dst..dst + hd]
+                        .copy_from_slice(&prefill_ctx.attn_qg[src + hd..src + 2 * hd]);
+                }
+            }
+            for p in 0..seq_len {
+                let q_off = p * q_dim;
+                let k_off = p * kvd;
+                for h in 0..config.n_head {
+                    let off = q_off + h * hd;
+                    rmsnorm_with_gamma_eps(
+                        &mut prefill_ctx.attn_q[off..off + hd],
+                        &layer_weights.attn_q_norm,
+                        eps,
+                    );
+                }
+                for h in 0..config.n_kv_head {
+                    let off = k_off + h * hd;
+                    rmsnorm_with_gamma_eps(
+                        &mut prefill_ctx.attn_k[off..off + hd],
+                        &layer_weights.attn_k_norm,
+                        eps,
+                    );
+                }
+            }
+            for p in 0..seq_len {
+                let pos = pos0 + p;
+                let q_off = p * q_dim;
+                let k_off = p * kvd;
+                if rotary_dim == hd {
+                    crate::rope::apply_rope_with_freq(
+                        &mut prefill_ctx.attn_q[q_off..q_off + q_dim],
+                        &mut prefill_ctx.attn_k[k_off..k_off + kvd],
+                        pos,
+                        hd,
+                        rope_freq.as_slice(),
+                    );
+                } else {
+                    crate::rope::apply_partial_rope_with_freq(
+                        &mut prefill_ctx.attn_q[q_off..q_off + q_dim],
+                        &mut prefill_ctx.attn_k[k_off..k_off + kvd],
+                        pos,
+                        hd,
+                        rotary_dim,
+                        rope_freq.as_slice(),
+                    );
+                }
+            }
+            // Unarmed: the legacy batched cache write at ABSOLUTE positions
+            // (offset by pos0).
+            if ev.is_none() {
+                for p in 0..seq_len {
+                    let pos_off = (pos0 + p) * kvd;
+                    kv_cache.key[pos_off..pos_off + kvd]
+                        .copy_from_slice(&prefill_ctx.attn_k[p * kvd..(p + 1) * kvd]);
+                    kv_cache.value[pos_off..pos_off + kvd]
+                        .copy_from_slice(&prefill_ctx.attn_v[p * kvd..(p + 1) * kvd]);
+                }
+            }
+
+            // Phase B (sequential): per-position attention scoring.
+            for p in 0..seq_len {
+                let pos = pos0 + p;
+                let q_off = p * q_dim;
+                let out_off = p * q_dim;
+                // The slot this position's K/V occupies, and the causal
+                // prefix length. Unarmed: the absolute position (the cache
+                // holds everything up to and including this position).
+                let (t_n, _slot) = match ev.as_mut() {
+                    None => (pos + 1, pos),
+                    Some(e) => {
+                        let slot = e.admit(pos as u64);
+                        let dst = slot * kvd;
+                        let src = p * kvd;
+                        kv_cache.key[dst..dst + kvd]
+                            .copy_from_slice(&prefill_ctx.attn_k[src..src + kvd]);
+                        kv_cache.value[dst..dst + kvd]
+                            .copy_from_slice(&prefill_ctx.attn_v[src..src + kvd]);
+                        (slot + 1, slot)
+                    }
+                };
+                prefill_ctx.attn_out[out_off..out_off + q_dim].fill(0.0);
+                unsafe {
+                    crate::transformer::attention_heads_parallel(
+                        &prefill_ctx.attn_q[q_off..q_off + q_dim],
+                        &kv_cache.key,
+                        &kv_cache.value,
+                        &mut prefill_ctx.attn_out[out_off..out_off + q_dim],
+                        &mut prefill_ctx.head_scores,
+                        config.n_head,
+                        config.n_kv_head,
+                        kvd,
+                        hd,
+                        t_n,
+                        scale,
+                        0.0,
+                        block_size,
+                    );
+                }
+                if let Some(e) = ev.as_mut() {
+                    e.observe(&prefill_ctx.head_scores, block_size, pos as u64);
+                    e.maybe_evict(kv_cache, kvd, pos as u64);
+                    e.tick();
+                }
+            }
+
+            // Phase C (batched): gate + o_proj + residual.
+            for i in 0..seq_len * q_dim {
+                prefill_ctx.attn_out[i] *= crate::simd::fast_sigmoid(prefill_ctx.attn_gate[i]);
+            }
+            layer_weights.attn_wo.matmat(
+                &prefill_ctx.attn_out[..seq_len * q_dim],
+                &mut prefill_ctx.hidden[..seq_len * n],
+                seq_len,
+            );
+            for i in 0..seq_len * n {
+                prefill_ctx.hidden[i] += prefill_ctx.attn_residual[i];
+            }
+
+            // Phase D (batched MLP).
+            batched_mlp(prefill_ctx, layer_weights, seq_len, n, mlp, eps);
+        }
+    }
+
+    // Final RMSNorm + LM head on the chunk's last position.
+    let last_off = (seq_len - 1) * n;
+    rmsnorm_with_gamma_eps(
+        &mut prefill_ctx.hidden[last_off..last_off + n],
+        &weights.final_norm,
+        eps,
+    );
     let last_hidden = &prefill_ctx.hidden[last_off..last_off + n];
     assert!(
         logits_out.len() >= v,

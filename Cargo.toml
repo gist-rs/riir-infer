@@ -112,6 +112,22 @@ act_scale_refit = ["act_diagonal_calibration", "katgpt-core/act_aware_fit"]
 # attention kernels are untouched). Reproduces the row_logit_floor policy
 # when both are on. Offline instrument, opt-in.
 attention_to_answer = []
+# kv_eviction (riir-infer Issue 012, 2026-09-27): the DIFFERENTIAL KV
+# eviction consumer — `deltanet::kv_evict` wires katgpt-core's
+# `DifferentialEvictTable` (+ the λ=0 max-recent, usage-rate, and
+# prompt-pinned-random arms) onto the qwen35-hybrid CPU decode/prefill KV
+# path via an Option<&mut EvictorState> seam (None = the existing path,
+# bit-identical; armed with budget ≥ context = also bit-identical — that is
+# T3). The multi-needle@64K quality gate lives in the
+# `needle_eviction_gate` bin. OPT-IN, measurement-only: eviction fires only
+# under an armed, under-budget state, and promotion is katgpt-rs-side.
+# Implies deltanet_inference (the wired lane) and forwards
+# katgpt-core/differential_kv_eviction (which pulls kv_sink_window +
+# usage_rate_eviction for the sink pins and the baseline arms).
+kv_eviction = [
+    "deltanet_inference",
+    "katgpt-core/differential_kv_eviction",
+]
 
 # katgpt-core forwards.
 sparse_mlp = ["katgpt-core/sparse_mlp"]

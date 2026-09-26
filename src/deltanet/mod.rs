@@ -30,6 +30,16 @@ pub mod reference;
 pub mod tree_forward;
 pub mod weights;
 
+// Differential KV eviction wired onto the hybrid attention KV path (Issue
+// 012 — the model-bound quality gate for katgpt-rs Issue 882 P3 / Bench
+// 894). Per-(layer, head) tables observe the post-softmax rows the forward
+// already computes; eviction to a per-layer budget selects through the
+// shipped sink-exempt rule and compacts the cache in place. The forward
+// seam is `Option<&mut EvictorState>`: None is the existing path
+// (bit-identical), armed with budget ≥ context is also bit-identical (T3).
+#[cfg(feature = "kv_eviction")]
+pub mod kv_evict;
+
 // Issue 741 T10 Phase C (2026-08-22): the training family moved to
 // `riir-train-engine::deltanet` — backward / full_backward / layer_backward /
 // attention_backward / model_backward / model_backward_recompute /
@@ -103,6 +113,13 @@ pub use forward::{
     forward_qwen_deltanet, generate_greedy_qwen_deltanet, prefill_qwen_deltanet,
     prefill_qwen_deltanet_into,
 };
+#[cfg(feature = "kv_eviction")]
+pub use forward::{
+    forward_attention_layer_evictable, forward_qwen_deltanet_evictable,
+    prefill_qwen_deltanet_chunk_into,
+};
+#[cfg(feature = "kv_eviction")]
+pub use kv_evict::{EvictLayerConfig, EvictPolicy, EvictorState, LayerEvict};
 pub use minimal_activation_cache::{
     DeltanetMinimalActs, MinimalActivationCache, MinimalLayerActivations,
 };
