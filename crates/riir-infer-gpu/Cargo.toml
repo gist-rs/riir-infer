@@ -195,3 +195,7 @@ required-features = ["cubecl_runtime", "ternary_gemm_batched", "metal_tensor_gem
 # Test RNG (qwen38_dflash2_gpu determinism fixtures; version matches the
 # engine gpu crate's).
 fastrand = "2"
+# The gelu CPU reference for the plan-611-S1b elementwise tests (`erff`) —
+# the same crate + version the laya lane's prod gelu calls, so the test
+# compares the GPU kernel against the lane's own reference exactly.
+libm = "0.2"

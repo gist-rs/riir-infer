@@ -40,7 +40,9 @@ pub use buffer::{
 };
 pub use context::{GpuContext, GpuError};
 #[cfg(feature = "cubecl_runtime")]
-pub use cubecl_runtime::{ActiveComputeClient, ActiveDevice, ActiveRuntime, CubeCLContext};
+pub use cubecl_runtime::{
+    ActiveComputeClient, ActiveDevice, ActiveRuntime, CubeCLContext, Handle, create_f32, read_f32,
+};
 
 // ---------------------------------------------------------------------------
 // P3 slice 2 (the elementwise/norm/matmul/attention family) — the CPU

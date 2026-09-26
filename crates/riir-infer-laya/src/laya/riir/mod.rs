@@ -59,6 +59,15 @@ pub mod metal;
 #[cfg(all(not(target_os = "macos"), feature = "laya-riir-cuda"))]
 pub mod cuda;
 
+/// The CubeCL backend (`laya-riir-cubecl`, plan 611 S1b) — the PORTABLE
+/// posture: wgpu (Metal on macOS, Vulkan/DX12 elsewhere) over
+/// `riir-infer-gpu`'s op layer, so the same kernels run on every host.
+/// Deliberately NO platform gate — portability is the arm's whole point.
+/// Never a runtime default: `LAYA_DEVICE=cubecl` selects it explicitly
+/// (the agent wiring is plan 611 S4).
+#[cfg(feature = "laya-riir-cubecl")]
+pub mod cubecl;
+
 /// The Apple Neural Engine whole-graph backend (`laya-riir-ane`, macOS) —
 /// compiles to nothing everywhere else.
 #[cfg(all(target_os = "macos", feature = "laya-riir-ane"))]

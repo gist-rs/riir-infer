@@ -35,6 +35,9 @@ use cubecl::prelude::*;
 #[cfg(feature = "cubecl_runtime")]
 use cubecl::server::Handle;
 
+#[cfg(feature = "cubecl_runtime")]
+use crate::cubecl_runtime::debug_assert_binding_at_least;
+
 // ---------------------------------------------------------------------------
 // Sigmoid kernel
 // ---------------------------------------------------------------------------
@@ -1018,6 +1021,412 @@ impl Split2CubeCL {
     }
 }
 
+// ---------------------------------------------------------------------------
+// The encoder-lane elementwise op family (plan 611 S1b — T7 op-layer
+// unification). The trivial half of the laya `Backend` trait's ops over
+// CubeCL: add / add_bias_row / scale / relu / gelu_erf / glu_gelu_gate /
+// copy_at.
+//
+// Offset-bearing ops (`add`, `copy_at`) bind WHOLE parent handles and take
+// their element offsets through the params array: wgpu enforces
+// `min_storage_buffer_offset_alignment` (32 B) on storage-buffer bindings,
+// and the forward's offsets are element-arbitrary (the attention slab adds
+// sit at `head · seq²`), so byte-offset handle views only ever cover the
+// d-multiple cases. Params triples are blake3-cached when the
+// `params_handle_cache` feature is on.
+//
+// gelu is the erf form — `x · ½ · (1 + erf(x/√2))` — through CubeCL's
+// `f32::erf`, the same kernel shape the crate's test-only `gelu_scalar_verify`
+// pinned; the CPU reference in the tests below is `libm::erff` (the laya
+// lane's own gelu), and the two implementations differ by a few ulp — the
+// tests use an absolute tolerance, never exact equality, on erf-bearing ops.
+//
+// Handle trivia the S1b work measured (worth keeping for S2's bind
+// decisions): CubeCL's layout policy PADS allocations to a bucket (a
+// 64-byte create lands in a 256-byte buffer) and returns handles whose
+// `offset_end` ALREADY carries the slack — a fresh handle's live range is
+// `[offset_start, size − offset_end)`, i.e. always read sizes through
+// `size_in_used()`, never `size()`. And byte-offset views are only bindable
+// at 32-byte-aligned offsets (wgpu's storage-buffer alignment limit), which
+// is exactly why the offset ops above take params instead.
+// ---------------------------------------------------------------------------
+
+/// Scalar erf-gelu: `x · ½ · (1 + erf(x/√2))`.
+#[cfg(feature = "cubecl_runtime")]
+#[allow(unstable_name_collisions)] // CubeCL's f32::erf() may collide with a future std method
+#[cube]
+fn gelu_erf_scalar(x: f32) -> f32 {
+    let sqrt2 = f32::new(comptime!(2.0f32.sqrt()));
+    x * (f32::erf(x / sqrt2) + f32::new(1.0f32)) / f32::new(2.0f32)
+}
+
+/// `x[x_off + i] += y[y_off + i]` for `i in [0, n)` — in place on the whole
+/// parent `x`, with the offsets as kernel params.
+///
+/// Offsets ride the params array rather than byte-offset handle views:
+/// wgpu enforces `min_storage_buffer_offset_alignment` (32 B) on storage
+/// bindings, and the forward's offsets are element-arbitrary (the attention
+/// slab adds sit at `head · seq²`), so views would only cover the
+/// d-multiple cases. Params are the portable answer; the per-op cost is
+/// one params upload on a new (n, x_off, y_off) triple — blake3-cached
+/// when the params_handle_cache feature is on.
+#[cfg(feature = "cubecl_runtime")]
+#[cube(launch_unchecked)]
+fn add_f32(x: &mut [f32], y: &[f32], params: &[f32]) {
+    let n = params[0usize] as u32;
+    let x_off = params[1usize] as u32;
+    let y_off = params[2usize] as u32;
+    let tid = ABSOLUTE_POS as u32;
+    if tid < n {
+        x[(x_off + tid) as usize] += y[(y_off + tid) as usize];
+    }
+}
+
+/// `x[i] += bias[i % d]` — the row-broadcast bias add over `[rows × d]`.
+#[cfg(feature = "cubecl_runtime")]
+#[cube(launch_unchecked)]
+fn add_bias_row_f32(x: &mut [f32], bias: &[f32], params: &[f32]) {
+    let n = x.len();
+    let tid = ABSOLUTE_POS;
+    if tid < n {
+        let d = params[0usize] as u32;
+        let col = (tid as u32) % d;
+        x[tid] += bias[col as usize];
+    }
+}
+
+/// `x[i] *= s` — the scalar (params[0]) multiply, in place.
+#[cfg(feature = "cubecl_runtime")]
+#[cube(launch_unchecked)]
+fn scale_f32(x: &mut [f32], params: &[f32]) {
+    let n = x.len();
+    let tid = ABSOLUTE_POS;
+    if tid < n {
+        x[tid] *= params[0usize];
+    }
+}
+
+/// `x[i] = max(0, x[i])`, in place.
+#[cfg(feature = "cubecl_runtime")]
+#[cube(launch_unchecked)]
+fn relu_f32(x: &mut [f32]) {
+    let n = x.len();
+    let tid = ABSOLUTE_POS;
+    if tid < n {
+        let v = x[tid];
+        if v < f32::new(0.0f32) {
+            x[tid] = f32::new(0.0f32);
+        }
+    }
+}
+
+/// erf-gelu, in place.
+#[cfg(feature = "cubecl_runtime")]
+#[cube(launch_unchecked)]
+fn gelu_erf_f32(x: &mut [f32]) {
+    let n = x.len();
+    let tid = ABSOLUTE_POS;
+    if tid < n {
+        x[tid] = gelu_erf_scalar(x[tid]);
+    }
+}
+
+/// `out[r·I + j] = gelu(fused[r·2I + j]) · fused[r·2I + I + j]` — the MLP-up
+/// projection's GLU gate: the fused `[rows × 2I]` buffer's first half is the
+/// value, second half the gate (the laya lane's exact semantics).
+#[cfg(feature = "cubecl_runtime")]
+#[cube(launch_unchecked)]
+fn glu_gelu_gate_f32(fused: &[f32], out: &mut [f32], params: &[f32]) {
+    let n = out.len();
+    let tid = ABSOLUTE_POS;
+    if tid < n {
+        let i_sz = params[0usize] as u32;
+        let t = tid as u32;
+        let row = t / i_sz;
+        let j = t % i_sz;
+        let base = row * i_sz * 2u32;
+        let v = fused[(base + j) as usize];
+        let gate = fused[(base + i_sz + j) as usize];
+        out[tid] = gelu_erf_scalar(v) * gate;
+    }
+}
+
+/// `dst[dst_off + i] = src[src_off + i]` for `i in [0, n)` — the offset
+/// copy over WHOLE parent binds (see [`add_f32`] for why the offsets ride
+/// the params array, not handle views).
+#[cfg(feature = "cubecl_runtime")]
+#[cube(launch_unchecked)]
+fn copy_at_f32(src: &[f32], dst: &mut [f32], params: &[f32]) {
+    let n = params[0usize] as u32;
+    let src_off = params[1usize] as u32;
+    let dst_off = params[2usize] as u32;
+    let tid = ABSOLUTE_POS as u32;
+    if tid < n {
+        dst[(dst_off + tid) as usize] = src[(src_off + tid) as usize];
+    }
+}
+
+// -- launchers --------------------------------------------------------------
+
+fn elementwise_wg_count(n: usize) -> u32 {
+    n.div_ceil(256).max(1) as u32
+}
+
+/// CubeCL launcher for [`add_f32`] — the laya `Backend::add` shape: in-place
+/// `x += y` at element offsets over WHOLE parent binds (plan 611 S1b).
+#[cfg(feature = "cubecl_runtime")]
+pub struct AddCubeCL;
+
+#[cfg(feature = "cubecl_runtime")]
+impl AddCubeCL {
+    /// Launch in-place add of `len` elements at the given parent offsets.
+    ///
+    /// # Safety
+    ///
+    /// `x_handle` must back `x_len` f32 and `y_handle` `y_len` f32, with
+    /// `x_off + len <= x_len` and `y_off + len <= y_len`.
+    pub unsafe fn launch<R: Runtime>(
+        client: &ComputeClient<R>,
+        x_handle: Handle,
+        x_len: usize,
+        y_handle: Handle,
+        y_len: usize,
+        x_off: usize,
+        y_off: usize,
+        len: usize,
+    ) {
+        debug_assert_binding_at_least(&x_handle, x_len, "Add::x");
+        debug_assert_binding_at_least(&y_handle, y_len, "Add::y");
+        assert!(x_off + len <= x_len, "add: x extent");
+        assert!(y_off + len <= y_len, "add: y extent");
+        let params: &[f32] = &[len as f32, x_off as f32, y_off as f32];
+        let params_handle = crate::params_cache::params_handle(client, f32::as_bytes(params));
+        let n_wg = elementwise_wg_count(len);
+        // SAFETY: extents asserted above; the kernel bounds-checks tid < n.
+        unsafe {
+            add_f32::launch_unchecked::<R>(
+                client,
+                CubeCount::Static(n_wg, 1, 1),
+                CubeDim::new_1d(256),
+                BufferArg::from_raw_parts(x_handle, x_len),
+                BufferArg::from_raw_parts(y_handle, y_len),
+                BufferArg::from_raw_parts(params_handle, 3),
+            );
+        }
+    }
+}
+
+/// CubeCL launcher for [`copy_at_f32`] — the laya `Backend::copy_at` shape
+/// (plan 611 S1b).
+#[cfg(feature = "cubecl_runtime")]
+pub struct CopyAtCubeCL;
+
+#[cfg(feature = "cubecl_runtime")]
+impl CopyAtCubeCL {
+    /// Launch the offset copy over whole parent binds.
+    ///
+    /// # Safety
+    ///
+    /// `src_handle` must back `src_len` f32 and `dst_handle` `dst_len` f32,
+    /// with `src_off + len <= src_len` and `dst_off + len <= dst_len`.
+    pub unsafe fn launch<R: Runtime>(
+        client: &ComputeClient<R>,
+        src_handle: Handle,
+        src_len: usize,
+        dst_handle: Handle,
+        dst_len: usize,
+        src_off: usize,
+        dst_off: usize,
+        len: usize,
+    ) {
+        debug_assert_binding_at_least(&src_handle, src_len, "CopyAt::src");
+        debug_assert_binding_at_least(&dst_handle, dst_len, "CopyAt::dst");
+        assert!(src_off + len <= src_len, "copy_at: src extent");
+        assert!(dst_off + len <= dst_len, "copy_at: dst extent");
+        let params: &[f32] = &[len as f32, src_off as f32, dst_off as f32];
+        let params_handle = crate::params_cache::params_handle(client, f32::as_bytes(params));
+        let n_wg = elementwise_wg_count(len);
+        // SAFETY: extents asserted above; the kernel bounds-checks tid < n.
+        unsafe {
+            copy_at_f32::launch_unchecked::<R>(
+                client,
+                CubeCount::Static(n_wg, 1, 1),
+                CubeDim::new_1d(256),
+                BufferArg::from_raw_parts(src_handle, src_len),
+                BufferArg::from_raw_parts(dst_handle, dst_len),
+                BufferArg::from_raw_parts(params_handle, 3),
+            );
+        }
+    }
+}
+
+/// CubeCL launcher for [`add_bias_row_f32`] (plan 611 S1b).
+#[cfg(feature = "cubecl_runtime")]
+pub struct AddBiasRowCubeCL;
+
+#[cfg(feature = "cubecl_runtime")]
+impl AddBiasRowCubeCL {
+    /// Launch the row-broadcast bias add over the whole `x` (`[rows × d]`).
+    ///
+    /// # Safety
+    ///
+    /// `x_handle` must back `x_len` f32; `bias_handle` must back `d` f32;
+    /// `x_len` must be a multiple of `d`.
+    pub unsafe fn launch<R: Runtime>(
+        client: &ComputeClient<R>,
+        x_handle: Handle,
+        x_len: usize,
+        bias_handle: Handle,
+        d: usize,
+    ) {
+        debug_assert_binding_at_least(&x_handle, x_len, "AddBiasRow::x");
+        debug_assert_binding_at_least(&bias_handle, d, "AddBiasRow::bias");
+        assert!(d > 0, "add_bias_row: d must be > 0");
+        assert_eq!(x_len % d, 0, "add_bias_row: row extent");
+        let params: &[f32] = &[d as f32];
+        let params_handle = crate::params_cache::params_handle(client, f32::as_bytes(params));
+        let n_wg = elementwise_wg_count(x_len);
+        // SAFETY: caller guarantees the binding sizes above.
+        unsafe {
+            add_bias_row_f32::launch_unchecked::<R>(
+                client,
+                CubeCount::Static(n_wg, 1, 1),
+                CubeDim::new_1d(256),
+                BufferArg::from_raw_parts(x_handle, x_len),
+                BufferArg::from_raw_parts(bias_handle, d),
+                BufferArg::from_raw_parts(params_handle, 1),
+            );
+        }
+    }
+}
+
+/// CubeCL launcher for [`scale_f32`] (plan 611 S1b).
+#[cfg(feature = "cubecl_runtime")]
+pub struct ScaleCubeCL;
+
+#[cfg(feature = "cubecl_runtime")]
+impl ScaleCubeCL {
+    /// Launch the in-place scalar multiply over `n` elements.
+    ///
+    /// # Safety
+    ///
+    /// `x_handle` must back ≥ `n` f32 elements.
+    pub unsafe fn launch<R: Runtime>(
+        client: &ComputeClient<R>,
+        x_handle: Handle,
+        n: usize,
+        s: f32,
+    ) {
+        debug_assert_binding_at_least(&x_handle, n, "Scale::x");
+        let params: &[f32] = &[s];
+        let params_handle = crate::params_cache::params_handle(client, f32::as_bytes(params));
+        let n_wg = elementwise_wg_count(n);
+        // SAFETY: caller guarantees the binding size above.
+        unsafe {
+            scale_f32::launch_unchecked::<R>(
+                client,
+                CubeCount::Static(n_wg, 1, 1),
+                CubeDim::new_1d(256),
+                BufferArg::from_raw_parts(x_handle, n),
+                BufferArg::from_raw_parts(params_handle, 1),
+            );
+        }
+    }
+}
+
+/// CubeCL launcher for [`relu_f32`] (plan 611 S1b).
+#[cfg(feature = "cubecl_runtime")]
+pub struct ReluCubeCL;
+
+#[cfg(feature = "cubecl_runtime")]
+impl ReluCubeCL {
+    /// Launch the in-place ReLU over `n` elements.
+    ///
+    /// # Safety
+    ///
+    /// `x_handle` must back ≥ `n` f32 elements.
+    pub unsafe fn launch<R: Runtime>(client: &ComputeClient<R>, x_handle: Handle, n: usize) {
+        debug_assert_binding_at_least(&x_handle, n, "Relu::x");
+        let n_wg = elementwise_wg_count(n);
+        // SAFETY: caller guarantees the binding size above.
+        unsafe {
+            relu_f32::launch_unchecked::<R>(
+                client,
+                CubeCount::Static(n_wg, 1, 1),
+                CubeDim::new_1d(256),
+                BufferArg::from_raw_parts(x_handle, n),
+            );
+        }
+    }
+}
+
+/// CubeCL launcher for [`gelu_erf_f32`] (plan 611 S1b).
+#[cfg(feature = "cubecl_runtime")]
+pub struct GeluErfCubeCL;
+
+#[cfg(feature = "cubecl_runtime")]
+impl GeluErfCubeCL {
+    /// Launch the in-place erf-gelu over `n` elements.
+    ///
+    /// # Safety
+    ///
+    /// `x_handle` must back ≥ `n` f32 elements.
+    pub unsafe fn launch<R: Runtime>(client: &ComputeClient<R>, x_handle: Handle, n: usize) {
+        debug_assert_binding_at_least(&x_handle, n, "GeluErf::x");
+        let n_wg = elementwise_wg_count(n);
+        // SAFETY: caller guarantees the binding size above.
+        unsafe {
+            gelu_erf_f32::launch_unchecked::<R>(
+                client,
+                CubeCount::Static(n_wg, 1, 1),
+                CubeDim::new_1d(256),
+                BufferArg::from_raw_parts(x_handle, n),
+            );
+        }
+    }
+}
+
+/// CubeCL launcher for [`glu_gelu_gate_f32`] (plan 611 S1b).
+#[cfg(feature = "cubecl_runtime")]
+pub struct GluGeluGateCubeCL;
+
+#[cfg(feature = "cubecl_runtime")]
+impl GluGeluGateCubeCL {
+    /// Launch the GLU gate: `out[r·I + j] = gelu(fused[r·2I + j]) ·
+    /// fused[r·2I + I + j]` over `rows × i_sz` outputs.
+    ///
+    /// # Safety
+    ///
+    /// `fused_handle` must back `rows * 2 * i_sz` f32; `out_handle` must back
+    /// `rows * i_sz` f32; `rows`/`i_sz` must be > 0.
+    pub unsafe fn launch<R: Runtime>(
+        client: &ComputeClient<R>,
+        fused_handle: Handle,
+        out_handle: Handle,
+        rows: usize,
+        i_sz: usize,
+    ) {
+        let n = rows * i_sz;
+        debug_assert_binding_at_least(&fused_handle, rows * 2 * i_sz, "GluGeluGate::fused");
+        debug_assert_binding_at_least(&out_handle, n, "GluGeluGate::out");
+        assert!(rows > 0 && i_sz > 0, "glu_gelu_gate: rows/i_sz must be > 0");
+        let params: &[f32] = &[i_sz as f32];
+        let params_handle = crate::params_cache::params_handle(client, f32::as_bytes(params));
+        let n_wg = elementwise_wg_count(n);
+        // SAFETY: caller guarantees the binding sizes above.
+        unsafe {
+            glu_gelu_gate_f32::launch_unchecked::<R>(
+                client,
+                CubeCount::Static(n_wg, 1, 1),
+                CubeDim::new_1d(256),
+                BufferArg::from_raw_parts(fused_handle, rows * 2 * i_sz),
+                BufferArg::from_raw_parts(out_handle, n),
+                BufferArg::from_raw_parts(params_handle, 1),
+            );
+        }
+    }
+}
+
 #[cfg(all(test, feature = "cubecl_runtime"))]
 mod tests {
     use super::*;
@@ -1129,5 +1538,187 @@ mod tests {
         }
 
         println!("split4 ({len1}+{len2}+{len3}+{len4} = {total}): all regions correct");
+    }
+
+    // ── plan 611 S1b: the encoder-lane elementwise family ──────────────
+
+    fn lcg_vec(n: usize) -> Vec<f32> {
+        let mut s = 0x1234_5678u32;
+        (0..n)
+            .map(|_| {
+                s = s.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+                ((s >> 8) as f32) / 8_388_608.0 - 1.0
+            })
+            .collect()
+    }
+
+    fn gelu_ref(x: f32) -> f32 {
+        x * 0.5 * (1.0 + libm::erff(x / std::f32::consts::SQRT_2))
+    }
+
+    #[test]
+    fn test_add_offsets_match_cpu() {
+        let ctx = CubeCLContext::new().expect("CubeCL should initialize");
+        let client = ctx.client();
+
+        let x_parent = lcg_vec(16);
+        let y_parent = lcg_vec(12);
+        let (x_off, y_off, len) = (4usize, 2usize, 8usize);
+
+        // CPU reference on copies.
+        let mut cpu_x = x_parent.clone();
+        for i in 0..len {
+            cpu_x[x_off + i] += y_parent[y_off + i];
+        }
+
+        let x_h = client.create_from_slice(f32::as_bytes(&x_parent));
+        let y_h = client.create_from_slice(f32::as_bytes(&y_parent));
+        // SAFETY: parents sized 16 / 12; offsets + len fit both.
+        unsafe {
+            AddCubeCL::launch::<ActiveRuntime>(
+                &client,
+                x_h.clone(),
+                x_parent.len(),
+                y_h.clone(),
+                y_parent.len(),
+                x_off,
+                y_off,
+                len,
+            );
+        }
+
+        let got = f32::from_bytes(&client.read_one(x_h).unwrap()).to_vec();
+        assert_eq!(got.len(), x_parent.len());
+        for i in 0..x_parent.len() {
+            assert_eq!(got[i], cpu_x[i], "add offset mismatch at {i}");
+        }
+        // The y parent must be untouched.
+        let y_back = f32::from_bytes(&client.read_one(y_h).unwrap()).to_vec();
+        assert_eq!(y_back, y_parent, "y parent modified");
+    }
+
+    #[test]
+    fn test_add_bias_row_matches_cpu() {
+        let ctx = CubeCLContext::new().expect("CubeCL should initialize");
+        let client = ctx.client();
+
+        let (rows, d) = (6usize, 16usize);
+        let x: Vec<f32> = lcg_vec(rows * d);
+        let bias: Vec<f32> = lcg_vec(d).into_iter().map(|v| v * 0.5 + 0.25).collect();
+
+        let mut cpu_x = x.clone();
+        for r in 0..rows {
+            for j in 0..d {
+                cpu_x[r * d + j] += bias[j];
+            }
+        }
+
+        let x_h = client.create_from_slice(f32::as_bytes(&x));
+        let b_h = client.create_from_slice(f32::as_bytes(&bias));
+        // SAFETY: bindings sized rows*d / d.
+        unsafe {
+            AddBiasRowCubeCL::launch::<ActiveRuntime>(&client, x_h.clone(), rows * d, b_h, d);
+        }
+
+        let got = f32::from_bytes(&client.read_one(x_h).unwrap()).to_vec();
+        for i in 0..cpu_x.len() {
+            assert_eq!(got[i], cpu_x[i], "add_bias_row mismatch at {i}");
+        }
+    }
+
+    #[test]
+    fn test_scale_relu_match_cpu() {
+        let ctx = CubeCLContext::new().expect("CubeCL should initialize");
+        let client = ctx.client();
+
+        let x = lcg_vec(64);
+        let s = 0.7071f32;
+
+        let mut cpu_x = x.clone();
+        for v in cpu_x.iter_mut() {
+            *v *= s;
+        }
+        let x_h = client.create_from_slice(f32::as_bytes(&x));
+        // SAFETY: binding sized 64.
+        unsafe {
+            ScaleCubeCL::launch::<ActiveRuntime>(&client, x_h.clone(), x.len(), s);
+        }
+        let got = f32::from_bytes(&client.read_one(x_h.clone()).unwrap()).to_vec();
+        for i in 0..x.len() {
+            assert_eq!(got[i], cpu_x[i], "scale mismatch at {i}");
+        }
+
+        for v in cpu_x.iter_mut() {
+            if *v < 0.0 {
+                *v = 0.0;
+            }
+        }
+        // SAFETY: binding sized 64.
+        unsafe {
+            ReluCubeCL::launch::<ActiveRuntime>(&client, x_h.clone(), x.len());
+        }
+        let got = f32::from_bytes(&client.read_one(x_h).unwrap()).to_vec();
+        for i in 0..x.len() {
+            assert_eq!(got[i], cpu_x[i], "relu mismatch at {i}");
+        }
+    }
+
+    #[test]
+    fn test_gelu_erf_matches_cpu() {
+        let ctx = CubeCLContext::new().expect("CubeCL should initialize");
+        let client = ctx.client();
+
+        // Spread beyond ±1 so the erf tail regions are exercised.
+        let x: Vec<f32> = lcg_vec(128).into_iter().map(|v| v * 3.0).collect();
+        let cpu_x: Vec<f32> = x.iter().map(|v| gelu_ref(*v)).collect();
+
+        let x_h = client.create_from_slice(f32::as_bytes(&x));
+        // SAFETY: binding sized 128.
+        unsafe {
+            GeluErfCubeCL::launch::<ActiveRuntime>(&client, x_h.clone(), x.len());
+        }
+        let got = f32::from_bytes(&client.read_one(x_h).unwrap()).to_vec();
+        let mut max = 0.0f32;
+        for i in 0..x.len() {
+            max = max.max((got[i] - cpu_x[i]).abs());
+        }
+        // cubecl f32::erf (Metal/WGSL intrinsic) vs libm::erff — a few ulp
+        // on values up to |gelu| ~ 3; 2e-5 is generous and still catches a
+        // wrong-form gelu (tanh approx differs by up to ~1e-2, sigmoid approx
+        // by up to ~2e-2).
+        assert!(max <= 2e-5, "gelu_erf drift {max:.4e}");
+        println!("gelu_erf vs libm::erff: max abs drift {max:.3e}");
+    }
+
+    #[test]
+    fn test_glu_gelu_gate_matches_cpu() {
+        let ctx = CubeCLContext::new().expect("CubeCL should initialize");
+        let client = ctx.client();
+
+        let (rows, i_sz) = (8usize, 24usize);
+        let fused: Vec<f32> = lcg_vec(rows * 2 * i_sz).into_iter().map(|v| v * 2.0).collect();
+        let mut cpu_out = vec![0f32; rows * i_sz];
+        for r in 0..rows {
+            for j in 0..i_sz {
+                let v = fused[r * 2 * i_sz + j];
+                let gate = fused[r * 2 * i_sz + i_sz + j];
+                cpu_out[r * i_sz + j] = gelu_ref(v) * gate;
+            }
+        }
+
+        let f_h = client.create_from_slice(f32::as_bytes(&fused));
+        let o_h = client.empty(rows * i_sz * core::mem::size_of::<f32>());
+        // SAFETY: bindings sized rows*2*i_sz / rows*i_sz.
+        unsafe {
+            GluGeluGateCubeCL::launch::<ActiveRuntime>(&client, f_h, o_h.clone(), rows, i_sz);
+        }
+        let got = f32::from_bytes(&client.read_one(o_h).unwrap()).to_vec();
+        assert_eq!(got.len(), rows * i_sz);
+        let mut max = 0.0f32;
+        for i in 0..got.len() {
+            max = max.max((got[i] - cpu_out[i]).abs());
+        }
+        assert!(max <= 2e-5, "glu_gelu_gate drift {max:.4e}");
+        println!("glu_gelu_gate vs cpu: max abs drift {max:.3e}");
     }
 }

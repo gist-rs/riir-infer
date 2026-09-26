@@ -55,6 +55,12 @@ gemm = { version = "0.18", optional = true, features = ["rayon"] }
 # erf approximation (a general-purpose f64 erf path measured ~1000x over
 # the drift gate). This pin is NUMERICS, not build-sharing.
 libm = { version = "0.2", optional = true }
+# The CubeCL backend (`laya-riir-cubecl`, plan 611 S1b): the portable
+# wgpu posture (Metal on macOS, Vulkan/DX12 elsewhere) of the forward,
+# over this repo's OWN op layer. Optional IN-REPO path dep — the fence's
+# F1 containment check covers it; default builds never resolve it and
+# RELEASE_FEATURES is unchanged (the A/B decides the arm's fate, S5).
+riir-infer-gpu = { path = "../riir-infer-gpu", optional = true, default-features = false, features = ["cubecl_runtime"] }
 
 [target.'cfg(target_os = "macos")'.dependencies]
 # The Apple Metal backend (`laya-riir-metal`): MSL kernels over the same
@@ -117,6 +123,14 @@ laya-riir-ane = ["laya-riir", "dep:objc2", "dep:objc2-core-ml", "dep:objc2-found
 # own posture), `LAYA_DEVICE=cpu` opts out; requesting cuda without the
 # feature or platform fails LOUD, never a silent CPU fallback.
 laya-riir-cuda = ["laya-riir", "dep:cudarc"]
+# The CubeCL backend of the forward (plan 611 S1b — T7 op-layer
+# unification): the portable wgpu posture over riir-infer-gpu's op layer.
+# NEVER a default and never a runtime default posture — the agent wires
+# it only behind an explicit `LAYA_DEVICE=cubecl` (S4); the Metal/CUDA
+# hand lanes stay the defaults regardless of the A/B unless the CubeCL
+# arm wins a REGIME (the plan prices that as unlikely). This arm exists
+# to prove ONE op vocabulary + to be the portability/CI lane.
+laya-riir-cubecl = ["laya-riir", "dep:riir-infer-gpu"]
 
 # The Metal-vs-CPU op-equivalence gate is whole-file #![cfg]-gated
 # (macOS + the metal feature) and compiles to an empty binary elsewhere;
@@ -169,6 +183,13 @@ required-features = ["laya-riir"]
 [[test]]
 name = "cuda_ops_smoke"
 required-features = ["laya-riir-cuda"]
+
+# The CubeCL op-parity + residency smoke (plan 611 S1b) — whole-file
+# #![cfg]-gated on the feature; the row keeps a feature-less selection
+# skipping the target loudly instead of printing a green zero.
+[[test]]
+name = "cubecl_ops_smoke"
+required-features = ["laya-riir-cubecl"]
 
 # The sgemm MMA-roofline probe (measurement only) — the f16-axis
 # discriminator for the T7 follow-up rungs (reflex issue 020). macOS +

@@ -46,6 +46,12 @@ impl std::error::Error for CubeCLError {}
 #[cfg(feature = "cubecl_runtime")]
 use cubecl::prelude::*;
 
+/// The CubeCL buffer handle, re-exported so downstream consumers of this
+/// crate's launchers can name the type without a direct `cubecl` dep (plan
+/// 611 S1b: the laya `CubeclBackend` residency tables key on it).
+#[cfg(feature = "cubecl_runtime")]
+pub use cubecl::server::Handle;
+
 // wgpu types are needed for the default (non-CUDA) path in CubeCLContext::new()
 // and in test code. Under `cuda_backend` on a NON-macOS target the wgpu init
 // branch is compiled out; on macOS the wgpu path is ALWAYS active (Issue 949:
@@ -130,6 +136,34 @@ pub fn assert_binding_derives_units(
          live range (`handle.offset_end(bytes)`) or pass the dimension \
          explicitly — see riir-train `.issues/515`."
     );
+}
+
+/// The host-read barrier shape the laya `CubeclBackend` uses (plan 611 S1b):
+/// read one handle's full content and widen it to f32.
+///
+/// `ComputeClient::read_one` is synchronous — it drains the stream up to and
+/// including every dispatch that produced the handle — so this is the ONE
+/// blocking point per forward, exactly the Metal lane's `download_into`
+/// sync. Keeping the `Bytes`-to-f32 conversion inside this crate means
+/// consumers never name a `cubecl` type to read their results.
+///
+/// Returns the handle's live range as f32 (offset views read their view,
+/// not the parent).
+#[cfg(feature = "cubecl_runtime")]
+pub fn read_f32<R: Runtime>(
+    client: &ComputeClient<R>,
+    handle: Handle,
+) -> Result<Vec<f32>, cubecl::server::ServerError> {
+    let bytes = client.read_one(handle)?;
+    Ok(f32::from_bytes(&bytes).to_vec())
+}
+
+/// Upload a host f32 slice into a fresh device handle — the create half of
+/// [`read_f32`], kept beside it so consumers of this crate's CubeCL surface
+/// never name a `cubecl` type for either direction (plan 611 S1b).
+#[cfg(feature = "cubecl_runtime")]
+pub fn create_f32<R: Runtime>(client: &ComputeClient<R>, data: &[f32]) -> Handle {
+    client.create_from_slice(f32::as_bytes(data))
 }
 
 // ---------------------------------------------------------------------------
