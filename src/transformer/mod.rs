@@ -38,6 +38,13 @@ pub mod gemma4;
 // Opt-in (`vk_calibration`).
 #[cfg(feature = "vk_calibration")]
 pub mod gemma2_calibration;
+
+// Issue 014 T2(b) — the dense-parent PTQ lane's diagonal collector: the
+// gemma-2 f16 forward re-forked at the Issue-886 LINEAR-INPUT tap points
+// (4 distinct inputs/layer) + the held-out activation capture pools the
+// PTQ arms score. Opt-in (`act_scale_refit`).
+#[cfg(feature = "act_scale_refit")]
+pub mod gemma2_act_tap;
 // Plan 320 Phase C1: Gemma 4 LoRA forward wiring (weight-delta application
 // at the 7 matmul insertion points). Feature-gated — opt-in.
 #[cfg(feature = "gemma4_lora")]
