@@ -137,6 +137,13 @@ laya-riir-cubecl = ["laya-riir", "dep:riir-infer-gpu"]
 # this row is the reader protection (a --features selection without the
 # union SKIPS the target loudly instead of printing a green zero). The
 # target_os half of the gate cannot be expressed here.
+# The plan-611 S5 three-backend A/B (Cpu vs Metal vs CubeCL) —
+# measurement-only (#[ignore]d), whole-file #![cfg]-gated on macOS + BOTH
+# device features; the row pins both so a partial feature set refuses.
+[[test]]
+name = "backend_ab"
+required-features = ["laya-riir-metal", "laya-riir-cubecl"]
+
 [[test]]
 name = "metal_ops_smoke"
 required-features = ["laya-riir-metal"]
