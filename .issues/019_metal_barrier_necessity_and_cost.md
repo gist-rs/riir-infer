@@ -1,8 +1,16 @@
 # Issue 019 — is the wgpu-hal Metal barrier (`c0dfa06`) needed, and what does it cost?
 
-**Status:** OPEN — filed 2026-09-26 (session `katgpt-rs-5e`), from the Issue 018
-close-out. Blocks nothing; plan 611 S5's A/B should run at BOTH settings of
-this question.
+**Status:** RESOLVED 2026-09-26 — T3 verdict **REVERTED** (`4205c12`, session
+`riir-infer-m3-t7c`): the c0dfa06 barrier emissions are out of the fork; the
+premise record below is the durable artifact. T1's isolation was accepted as
+controlling (and this session's own timing re-check conceded the confound:
+the deep-probe triplet's clean runs 4/5 carried `2a34bd3` — log mtimes
+16:07:52 / 16:09:22 vs the sibling's 16:07:41 edit). T2 was left unmeasured —
+MOOT after the revert (nothing ships); post-revert G5 ran 22-27 s vs 24-31 s
+with the barriers, directionally consistent with dropped driver calls.
+Re-validation at HEAD (A only): smoke 9/9, G5 cubecl ×3 bit-identical at the
+floor (3.092e-6 / 2.233e-6 / 5.187e-6), clippy `-D` clean. The laya probe
+instruments (repeat loop + deep mode) stay — zero prod cost.
 
 ## The disagreement (both sides measured or cited, neither overwritten)
 
@@ -50,12 +58,15 @@ cost on the hottest wgpu path in the repo.
 
 ## Tasks
 
-- [ ] T1 — necessity: G5 cubecl ×10 + the probe repeat loop ×120 at HEAD
-      with `c0dfa06` reverted (a worktree; `2a34bd3` kept). 0 fires /
-      10/10 bit-identical ⇒ B is not needed for the laya lane.
-- [ ] T2 — cost: an interleaved A/B of the engine decode lane (tok/s) and
-      the laya cubecl forward (p50), barrier ON vs OFF, box state quoted.
-- [ ] T3 — verdict: keep behind a feature/env gate if it costs, or revert if
-      T1 is clean and T2 shows cost. Record either way (a documented
-      premise, e.g. "serial dispatch type ⇒ no intra-pass barrier", is the
-      durable artifact).
+- [x] T1 — necessity: **DONE by the filing session** (43/120 → 0/120,
+      G5 10/10 bit-identical at A-only) and independently conceded by the
+      B author on the timing re-check above.
+- [x] T2 — cost: **MOOT** (reverted before measurement); the directional
+      reading is recorded in the status (G5 wall 22-27 s without vs
+      24-31 s with).
+- [x] T3 — verdict: **REVERTED** at `4205c12`. Durable artifact: the
+      premise — the fork's `begin_compute_pass` never sets a dispatch
+      type, Metal defaults to `MTLDispatchTypeSerial`, serial completion
+      implies memory visibility ⇒ no intra-pass barrier is required on
+      this path. If a concurrent-dispatch-type encoder ever lands (in a
+      future cubecl/wgpu bump or a new lane), re-open from this record.

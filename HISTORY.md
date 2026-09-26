@@ -4,6 +4,34 @@ Durable records for resolved questions and closed lanes (the noise-reduction
 convention: the record lands here, hash-pinned; open work lives in `.issues/`
 and `.plans/`). Created 2026-09-23 at the first record.
 
+## 2026-09-26 — Issue 019 RESOLVED: the c0dfa06 Metal barrier REVERTED — A alone was the wobble, and serial dispatches never needed barriers
+
+The 019 verdict (T3), landed by the c0dfa06 author after conceding the
+contested-evidence point (`4205c12`):
+
+- **Necessity (T1) conceded on the timing re-check:** the deep-probe
+  triplet that read "clean ×3 with barriers only" was confounded — runs
+  4/5 carried `2a34bd3` in the working tree (log mtimes 16:07:52 /
+  16:09:22 vs the sibling's 16:07:41 edit); run 3 (mine-only, 7 clean
+  passes) is ~4% luck at the measured 36% base fire rate, and
+  probe_deep_2's single `L3.scores` fire is exactly A's signature
+  (post-softmax corruption, clean q/k), not a between-dispatch race.
+- **Premise refuted on the code:** the fork's `begin_compute_pass`
+  never sets `MTLDispatchType` — Metal defaults to SERIAL, where the
+  GPU does not begin a dispatch until prior dispatches COMPLETE, so
+  memory visibility is implied and the empty transition bodies are
+  upstream-correct behavior, not a defect. The durable artifact is that
+  premise (if a concurrent-dispatch-type encoder ever lands, 019's
+  analysis is the map).
+- **The revert:** the barrier emissions are out of the fork; the probe
+  instruments (repeat loop, deep mode, tracked indices — zero prod
+  cost) STAY. Post-revert validation: smoke 9/9, G5 cubecl ×3
+  bit-identical at the floor (3.092e-6 / 2.233e-6 / 5.187e-6), clippy
+  `-D` clean; G5 wall 22-27 s without the barriers vs 24-31 s with
+  (directional; T2 formally MOOT — nothing ships).
+- 019 marked RESOLVED in-file (kept; it carries the premise record and
+  the re-open trigger).
+
 ## 2026-09-26 — Issue 018 CLOSED: the Cubecl-posture drift wobble was a softmax write-after-read race (fix `2a34bd3`)
 
 Plan 611 S4's residual: the laya G5 gate at the cubecl posture held top-1
