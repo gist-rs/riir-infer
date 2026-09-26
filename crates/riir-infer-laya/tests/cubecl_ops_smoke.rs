@@ -490,6 +490,41 @@ fn cubecl_s3_head_ops_match_cpu() {
         assert_exact("gather_rows", &sync_out(&b, &out), &out_cpu);
     }
 
+    // gather_rows over a DEVICE-WRITTEN source — the composition shape
+    // that produced the issue-016 G5 failure (the head's marker gather
+    // reads the hidden state, an activation whose host bytes are stale
+    // zeros; a weight-class bind uploaded those zeros and every marker
+    // row read zeros). The source here is written by a WRITE-FIRST op
+    // (LayerNorm's `chain_slot_for` destination), so its host bytes stay
+    // zeros while the device slot holds the LN result — the gather MUST
+    // bind the live device slot, never an upload of the host bytes.
+    {
+        b.begin_pass();
+        let (d, rows) = (12usize, 9usize);
+        let src = vec_of(rows * d);
+        let gamma: Vec<f32> = vec_of(d).into_iter().map(|v| 0.25 * v + 0.5).collect();
+        let eps = 1e-5f32;
+        let mut hidden = vec![0f32; rows * d];
+        let mut hidden_ref = vec![0f32; rows * d];
+        let mut sq = Vec::new();
+        c.layer_norm_nobias_into(&src, &gamma, eps, d, &mut sq, &mut hidden_ref);
+        b.layer_norm_nobias_into(&src, &gamma, eps, d, &mut sq, &mut hidden);
+        assert_eq!(hidden.iter().filter(|v| **v == 0.0).count(), rows * d);
+        let ids: Vec<usize> = vec![8, 2, 5];
+        let mut out = vec![0f32; ids.len() * d];
+        let mut out_cpu = vec![0f32; ids.len() * d];
+        c.gather_rows(&hidden_ref, d, &ids, &mut out_cpu);
+        b.gather_rows(&hidden, d, &ids, &mut out);
+        // The gathered rows carry the LN's reduction-order diff (the S1a
+        // class, priced at 1e-4 above) — close, not exact.
+        assert_close(
+            "gather_rows_device_written",
+            &sync_out(&b, &out),
+            &out_cpu,
+            1e-4,
+        );
+    }
+
     // split_heads / merge_heads — pure permutations: EXACT.
     {
         b.begin_pass();

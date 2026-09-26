@@ -585,13 +585,21 @@ impl Backend for CubeclBackend {
         };
     }
 
-    /// The embedding row gather: the table is a model weight (the
-    /// permanent cache, `warm_weight`'s slot); the row indices are the
-    /// per-forward host ids, uploaded fresh as a u32 buffer (≤ a few KB
-    /// per forward, once per encoder pass).
+    /// The marker-row gather (the head's only `gather_rows` call site).
+    /// `x` is the head's HIDDEN STATE — an activation, device-current with
+    /// stale host bytes — so it binds the CHAIN class (epoch-keyed, hit =
+    /// the live device slot), never the permanent weight cache: a
+    /// weight-class bind uploads the stale host bytes ONCE into a slot
+    /// that never refreshes, and a recycled buffer address would keep
+    /// hitting it forever (the G5 bug — every marker row read zeros, all
+    /// scorer logits collapsed to bias, top-1 fell to ~random while
+    /// `act_probabilities` stayed exact through the chain-class CLS read).
+    /// The encoder's embedding gather is host-side (no dispatch), so no
+    /// activation-sized table ever legitimately needs the weight class —
+    /// the Metal lane's identical comment is the precedent.
     fn gather_rows(&self, x: &[f32], d: usize, rows: &[usize], out: &mut [f32]) {
         assert_eq!(out.len(), rows.len() * d, "gather extent");
-        let xb = self.weight_buf(x);
+        let xb = self.chain_buf(x);
         let rows_u32: Vec<u32> = rows
             .iter()
             .map(|&r| {
@@ -648,10 +656,18 @@ impl Backend for CubeclBackend {
         };
     }
 
-    /// `false` until the forward surface COMPLETES (S3): the matmul family
-    /// is landed (S2) but a forward also needs the norms/softmax/rope/
-    /// split/merge family — this backend cannot run ANY forward yet, and
-    /// the agent must never silently take a path it cannot execute.
+    /// STILL `false` after S3 — and now for the LOAD-BEARING reason, not
+    /// the stale "surface incomplete" one it carried first: the inherited
+    /// [`Backend::attention_forward_default`] composes the primitive ops
+    /// on HOST SLICES of the parents, and every slice at a non-zero packed
+    /// offset has its own (ptr, len) — a `chain_buf` miss that would
+    /// UPLOAD THE STALE HOST BYTES of a device-written parent (`sc.qkv` is
+    /// written device-side by `matmul_w`) instead of binding the live
+    /// slot. The per-question path is exact (every offset is zero, the
+    /// slice ptr IS the parent ptr, the key hits the live slot); the
+    /// packed path needs an offset-aware override that binds each parent
+    /// ONCE and offsets in-kernel (the Metal fused path's contract).
+    /// Flip it only with that override + a G5 packed-posture gate.
     fn supports_packed_attention(&self, _hd: usize) -> bool {
         false
     }
