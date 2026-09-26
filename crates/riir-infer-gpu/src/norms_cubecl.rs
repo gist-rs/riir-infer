@@ -1006,10 +1006,20 @@ impl ResidualAddRmsNormCubeCL {
 // ---------------------------------------------------------------------------
 
 /// CubeCL batched mean-centered LayerNorm — `[rows × dim]`, one workgroup
-/// per row. Computes `y = (x − μ) / sqrt(var + eps) · gamma` where
-/// `μ = mean(x)` and `var = mean(x²) − μ²` (the one-pass variance form:
-/// both row sums accumulate in the SAME strided walk, no second pass over
-/// `x`). Bias-free by contract — the encoder lane pins "NO bias tensors
+/// per row. Computes `y = (x − μ) / sqrt(var + eps) · gamma` where `μ =
+/// mean(x)` and `var = mean((x − μ)²)` — the CPU lane's TWO-PASS form
+/// (`ops::layer_norm_nobias_into`: candle materializes `centered`, squares,
+/// then means). Plan 611 S1a shipped the one-pass `E[x²] − μ²` form and the
+/// issue-016 probe priced the divergence: the residual stream reaches
+/// ±4000 by mid-stack, and where a row carries a DC component the
+/// cancellation factor E[x²]/var amplifies the f32 rounding into exactly
+/// the long-sequence G5 outliers (probe: relative drift growing 2.6e-6 →
+/// 7.7e-5 with depth, fixtures at seq ≥ 400 blowing the 1e-3 prob gate
+/// while short fixtures sat at 2e-6). The second walk costs one extra
+/// strided read per row; the reduction ORDER still differs from the CPU
+/// lane's sequential `vec_sum` (strided-256 tree here) — that residual is
+/// the same class as the matmuls' and prices at ~1e-6 prob drift.
+/// Bias-free by contract — the encoder lane pins "NO bias tensors
 /// anywhere in the encoder"; a biased form is a different kernel.
 ///
 /// ## Parameter Layout
@@ -1019,6 +1029,8 @@ impl ResidualAddRmsNormCubeCL {
 /// - `params`: `[f32; 3]` — `[inv_dim, eps, dim]` precomputed on CPU
 ///   (the Issue-639 discipline: `dim` travels in params, never read from
 ///   `input.len()`, so an oversized backing allocation is harmless).
+///   `inv_dim` is the CPU lane's exact candle scale `(1f64 / d) as f32` —
+///   NOT `1f32 / d` (one ulp apart at d = 1152).
 /// - `output`: `[f32; rows * dim]` — normalized output.
 ///
 /// ## Dispatch
@@ -1040,84 +1052,107 @@ fn layernorm_mean_batched_f32(
     let row = CUBE_POS_X;
     let row_offset = row * dim;
 
-    // ── Phase 1: strided accumulation of Σx and Σx² for this row ──
+    // ── Pass 1: strided accumulation of Σx for this row, then the tree
+    // reduce; slot 0 becomes μ ──
     let mut partial_sum = f32::new(0.0f32);
-    let mut partial_sq = f32::new(0.0f32);
     let mut i = tid;
     while i < dim {
-        let x = input[(row_offset + i) as usize];
-        partial_sum += x;
-        partial_sq += x * x;
+        partial_sum += input[(row_offset + i) as usize];
         i += cube_size;
     }
-
-    // ── Phase 2: two unrolled shared-memory tree reductions (256 threads,
-    // 128→64→…→1) — sum slice first, sum-of-squares slice second ──
     let mut smem_sum = Shared::<[f32]>::new_slice(256usize);
-    let mut smem_sq = Shared::<[f32]>::new_slice(256usize);
     smem_sum[tid as usize] = partial_sum;
-    smem_sq[tid as usize] = partial_sq;
     sync_cube();
-
     if tid < 128u32 {
         smem_sum[tid as usize] = smem_sum[tid as usize] + smem_sum[(tid + 128u32) as usize];
-        smem_sq[tid as usize] = smem_sq[tid as usize] + smem_sq[(tid + 128u32) as usize];
     }
     sync_cube();
     if tid < 64u32 {
         smem_sum[tid as usize] = smem_sum[tid as usize] + smem_sum[(tid + 64u32) as usize];
-        smem_sq[tid as usize] = smem_sq[tid as usize] + smem_sq[(tid + 64u32) as usize];
     }
     sync_cube();
     if tid < 32u32 {
         smem_sum[tid as usize] = smem_sum[tid as usize] + smem_sum[(tid + 32u32) as usize];
-        smem_sq[tid as usize] = smem_sq[tid as usize] + smem_sq[(tid + 32u32) as usize];
     }
     sync_cube();
     if tid < 16u32 {
         smem_sum[tid as usize] = smem_sum[tid as usize] + smem_sum[(tid + 16u32) as usize];
-        smem_sq[tid as usize] = smem_sq[tid as usize] + smem_sq[(tid + 16u32) as usize];
     }
     sync_cube();
     if tid < 8u32 {
         smem_sum[tid as usize] = smem_sum[tid as usize] + smem_sum[(tid + 8u32) as usize];
-        smem_sq[tid as usize] = smem_sq[tid as usize] + smem_sq[(tid + 8u32) as usize];
     }
     sync_cube();
     if tid < 4u32 {
         smem_sum[tid as usize] = smem_sum[tid as usize] + smem_sum[(tid + 4u32) as usize];
-        smem_sq[tid as usize] = smem_sq[tid as usize] + smem_sq[(tid + 4u32) as usize];
     }
     sync_cube();
     if tid < 2u32 {
         smem_sum[tid as usize] = smem_sum[tid as usize] + smem_sum[(tid + 2u32) as usize];
+    }
+    sync_cube();
+    if tid < 1u32 {
+        smem_sum[0usize] = (smem_sum[0usize] + smem_sum[1usize]) * inv_dim;
+    }
+    sync_cube();
+    let mean = smem_sum[0usize];
+
+    // ── Pass 2: strided accumulation of Σ(x − μ)² for this row, then the
+    // tree reduce; slot 0 becomes inv_std (the CPU lane's var =
+    // mean(centered²), the SAME centered values, a different summation
+    // order — the documented residual) ──
+    let mut partial_sq = f32::new(0.0f32);
+    let mut j = tid;
+    while j < dim {
+        let c = input[(row_offset + j) as usize] - mean;
+        partial_sq += c * c;
+        j += cube_size;
+    }
+    let mut smem_sq = Shared::<[f32]>::new_slice(256usize);
+    smem_sq[tid as usize] = partial_sq;
+    sync_cube();
+    if tid < 128u32 {
+        smem_sq[tid as usize] = smem_sq[tid as usize] + smem_sq[(tid + 128u32) as usize];
+    }
+    sync_cube();
+    if tid < 64u32 {
+        smem_sq[tid as usize] = smem_sq[tid as usize] + smem_sq[(tid + 64u32) as usize];
+    }
+    sync_cube();
+    if tid < 32u32 {
+        smem_sq[tid as usize] = smem_sq[tid as usize] + smem_sq[(tid + 32u32) as usize];
+    }
+    sync_cube();
+    if tid < 16u32 {
+        smem_sq[tid as usize] = smem_sq[tid as usize] + smem_sq[(tid + 16u32) as usize];
+    }
+    sync_cube();
+    if tid < 8u32 {
+        smem_sq[tid as usize] = smem_sq[tid as usize] + smem_sq[(tid + 8u32) as usize];
+    }
+    sync_cube();
+    if tid < 4u32 {
+        smem_sq[tid as usize] = smem_sq[tid as usize] + smem_sq[(tid + 4u32) as usize];
+    }
+    sync_cube();
+    if tid < 2u32 {
         smem_sq[tid as usize] = smem_sq[tid as usize] + smem_sq[(tid + 2u32) as usize];
     }
     sync_cube();
     if tid < 1u32 {
-        smem_sum[0usize] = smem_sum[0usize] + smem_sum[1usize];
-        smem_sq[0usize] = smem_sq[0usize] + smem_sq[1usize];
-        // ── Phase 3: μ, var = E[x²] − μ², inv_std — computed once, in
-        // shared, where both sums are already resident. Slot 0 of each
-        // slice carries one value out: sum→μ, sq→inv_std ──
-        let mean = smem_sum[0usize] * inv_dim;
-        let var = smem_sq[0usize] * inv_dim - mean * mean;
-        let inv_std = f32::new(1.0f32) / (var + eps).sqrt();
-        smem_sum[0usize] = mean;
-        smem_sq[0usize] = inv_std;
+        let var = (smem_sq[0usize] + smem_sq[1usize]) * inv_dim;
+        smem_sq[0usize] = f32::new(1.0f32) / (var + eps).sqrt();
     }
     sync_cube();
-
-    let mean = smem_sum[0usize];
     let inv_std = smem_sq[0usize];
 
     // ── Phase 4: normalize and apply gamma for this row ──
-    let mut j = tid;
-    while j < dim {
-        let x = input[(row_offset + j) as usize];
-        let g = gamma[j as usize];
-        output[(row_offset + j) as usize] = (x - mean) * inv_std * g;
-        j += cube_size;
+    let mut k = tid;
+    while k < dim {
+        let x = input[(row_offset + k) as usize];
+        let g = gamma[k as usize];
+        output[(row_offset + k) as usize] = (x - mean) * inv_std * g;
+        k += cube_size;
     }
 }
 
@@ -1152,7 +1187,9 @@ impl LayerNormMeanBatchedCubeCL {
         dim: usize,
         eps: f32,
     ) {
-        let inv_dim = 1.0f32 / dim as f32;
+        // The CPU lane's exact candle mean scale (`ops::layer_norm_nobias_into`):
+        // `(1f64 / d) as f32`, not `1f32 / d` — one ulp apart at d = 1152.
+        let inv_dim = (1.0f64 / dim as f64) as f32;
         let params: &[f32] = &[inv_dim, eps, dim as f32];
         let params_handle = crate::params_cache::params_handle(client, f32::as_bytes(params));
 
