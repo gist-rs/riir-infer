@@ -4,6 +4,18 @@ Durable records for resolved questions and closed lanes (the noise-reduction
 convention: the record lands here, hash-pinned; open work lives in `.issues/`
 and `.plans/`). Created 2026-09-23 at the first record.
 
+## 2026-09-26 — the riir-ai carve docs adopted into this repo (Issues 998 + 1003, Plan 610, Proposal 041, Benches 870 + 871, doc 002)
+
+The riir-infer formation records moved home to the subject repo (owner noise-reduction pass on riir-ai), **numbers kept verbatim** so every existing "riir-ai Issue 998 / Plan 610 / Proposal 041" citation resolves to the same document:
+
+- `.issues/998_riir_infer_repo_promotion.md` + `.issues/1003_riir_infer_carve_remains_4090.md` — both OPEN (998: S8 remains, gated on riir-reflex 008 P2/T4; 1003: 4090-executable content done, remains = the owner-gated S6b edge-drop franchise + S8). riir-ai's issue ledger keeps 998/1003 allocated; its `.highwater` is unchanged.
+- `.plans/610_riir_infer_gpu_carve_slice1.md` — IN PROGRESS (S8 remains).
+- `.proposals/041_riir_infer_model_based_inference_split.md` — the founding split proposal (Phase 1 landed; Phase 2 executing via riir-reflex Issue 008). First file in this repo's new `.proposals/` ledger.
+- `.benchmarks/870_ternary_recipe_audit.md` + `.benchmarks/871_issue879_t1_gdn_quant_certification.md` — the Issue 879 GDN quant-survival records (871's harness is `tests/issue879_gdn_quant_certification.rs` here since the carve; Issue 879 itself was resolved in the riir-ai ledger, record in riir-ai HISTORY.md).
+- `.docs/002_riir_infer_core.md` — the crate doc from riir-ai's docs book (renumbered 002 in this repo's `.docs/` ledger).
+
+Cross-repo relative links inside the moved files were re-pointed; prose paths inside them remain written from the riir-ai side at writing time (each file carries a Moved header note saying so). riir-ai side: index rows struck + BOUNDARY.md/AGENTS.md citations re-qualified + HISTORY.md tombstone, same window.
+
 ## 2026-09-25 — Issue 001 CLOSED: EXL3 (trellis-coded) weight format — reader complete, fused-GEMV lane closed at this tier
 
 The full record (§1–§17, section numbers unchanged, so every `Issue 001 §N`

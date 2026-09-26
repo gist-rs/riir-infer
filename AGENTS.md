@@ -22,8 +22,10 @@ drift ledger. On any conflict with prose in this file, BOUNDARY.md wins.
 
 The LLM-inference substrate repo. Carved from the riir-ai workspace
 2026-09-22 (the crate moved out name-unchanged — engines re-export it at
-the same paths). Internal record + phase plan: riir-ai Issue 998 /
-riir-reflex Issue 008; extraction history: riir-ai Proposal 041. The
+the same paths). Internal record + phase plan: **Issues 998 + 1003 (local
+`.issues/`, moved from riir-ai 2026-09-26)** / riir-reflex Issue 008;
+extraction history: **Proposal 041 (local `.proposals/`, moved from
+riir-ai)**. The
 laya/MSL encoder lane LANDED as `crates/riir-infer-laya` (the
 pinned-checkpoint encoder lane, consumed by the public decision-engine
 serving repo); remaining planned work: the CLEAN GPU kernel layer
