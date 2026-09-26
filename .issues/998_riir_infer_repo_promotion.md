@@ -534,5 +534,10 @@ exceptions flipped the same day:
   tracked benchmark results. Verified green in an isolated worktree
   before the flip; CI green on every push since.
 - `publish = false` stays both sides — crates.io publication remains
-  owner-gated. Remaining in this campaign: P2/T4 (the encoder move) +
-  P5/T7 (op-layer unification), tracked in reflex Issue 008.
+  owner-gated. Remaining in this campaign: P2/T4 (the encoder move —
+  LANDED 2026-09-24) + P5/T7 (op-layer unification), tracked in reflex
+  Issue 008. **T7's execution plan LANDED 2026-09-26:
+  `.plans/611_t7_op_layer_unification.md`** (S1–S6; S1a's
+  mean-centered-LN GAP kernel is the engine-side payoff that survives
+  every A/B outcome; the deletion criterion is pre-registered in the
+  plan before any number is read).
