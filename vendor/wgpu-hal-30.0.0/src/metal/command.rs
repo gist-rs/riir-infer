@@ -4,13 +4,13 @@ use objc2::{
 };
 use objc2_foundation::{NSRange, NSString, NSUInteger};
 use objc2_metal::{
-    MTLAccelerationStructure, MTLAccelerationStructureCommandEncoder, MTLBarrierScope,
-    MTLBlitCommandEncoder, MTLBlitPassDescriptor, MTLBuffer, MTLCommandBuffer,
-    MTLCommandBufferStatus, MTLCommandEncoder, MTLCommandQueue, MTLComputeCommandEncoder,
-    MTLComputePassDescriptor, MTLCounterDontSample, MTLDevice, MTLLoadAction, MTLPrimitiveType,
-    MTLRenderCommandEncoder, MTLRenderPassDescriptor, MTLResidencySet, MTLResidencySetDescriptor,
-    MTLSamplerState, MTLScissorRect, MTLSize, MTLStoreAction, MTLTexture,
-    MTLVertexAmplificationViewMapping, MTLViewport, MTLVisibilityResultMode,
+    MTLAccelerationStructure, MTLAccelerationStructureCommandEncoder, MTLBlitCommandEncoder,
+    MTLBlitPassDescriptor, MTLBuffer, MTLCommandBuffer, MTLCommandBufferStatus, MTLCommandEncoder,
+    MTLCommandQueue, MTLComputeCommandEncoder, MTLComputePassDescriptor, MTLCounterDontSample,
+    MTLDevice, MTLLoadAction, MTLPrimitiveType, MTLRenderCommandEncoder, MTLRenderPassDescriptor,
+    MTLResidencySet, MTLResidencySetDescriptor, MTLSamplerState, MTLScissorRect, MTLSize,
+    MTLStoreAction, MTLTexture, MTLVertexAmplificationViewMapping, MTLViewport,
+    MTLVisibilityResultMode,
 };
 
 use super::{
@@ -155,18 +155,6 @@ impl Encoder<'_> {
 impl super::CommandEncoder {
     pub fn raw_command_buffer(&self) -> Option<&ProtocolObject<dyn MTLCommandBuffer>> {
         self.raw_cmd_buf.as_deref()
-    }
-
-    /// Emit a scope-based memory barrier on the ACTIVE encoder (see the
-    /// `transition_buffers`/`transition_textures` impls for why). Compute
-    /// is the only encoder type with a within-pass ordering hazard: Metal
-    /// orders work across encoder boundaries, and a blit's own copies are
-    /// coherent, so a barrier is only meaningful (and only has an API) on
-    /// the open compute encoder.
-    fn emit_memory_barrier(&mut self, scope: MTLBarrierScope) {
-        if let Some(encoder) = self.state.compute.as_ref() {
-            encoder.memoryBarrierWithScope(scope);
-        }
     }
 
     fn enter_blit(&mut self) -> Retained<ProtocolObject<dyn MTLBlitCommandEncoder>> {
@@ -595,25 +583,12 @@ impl crate::CommandEncoder for super::CommandEncoder {
     where
         T: Iterator<Item = crate::BufferBarrier<'a, super::Buffer>>,
     {
-        // Issue-018 fix (riir-infer): Metal orders dispatches ACROSS
-        // encoder/pass boundaries but NOT within one compute pass — a
-        // dispatch reading a buffer a previous dispatch in the SAME pass
-        // wrote requires an explicit `memoryBarrierWithScope:`. wgpu-core
-        // drains one barrier request per conflicting dispatch pair
-        // (`drain_barriers`, "barriers may be needed before each dispatch");
-        // dropping it made every write→read chain between kernels inside
-        // one pass unbarriered — sporadic, timing-dependent corruption of
-        // downstream values (the encoder lane's score GEMM read q/k before
-        // rope finished writing them). Coarse but correct: the scope-based
-        // barrier covers all buffer accesses of the prior dispatches.
-        self.emit_memory_barrier(MTLBarrierScope::Buffers);
     }
 
     unsafe fn transition_textures<'a, T>(&mut self, _barriers: T)
     where
         T: Iterator<Item = crate::TextureBarrier<'a, super::Texture>>,
     {
-        self.emit_memory_barrier(MTLBarrierScope::Textures);
     }
 
     unsafe fn clear_buffer(&mut self, buffer: &super::Buffer, range: crate::MemoryRange) {
@@ -1205,17 +1180,6 @@ impl crate::CommandEncoder for super::CommandEncoder {
                 }
                 encoder.useResource_usage(unsafe { resource.as_ref() }, use_info.uses);
             }
-            // Issue-018 (riir-infer): a set_bind_group precedes EVERY
-            // dispatch, and consecutive same-state dispatches (in-place
-            // read_write → read_write chains — rope→scale on q,
-            // add_mask→softmax on scores) never produce a usage TRANSITION,
-            // so `transition_buffers` is not called between them — yet they
-            // still carry write→read hazards Metal does not order inside a
-            // pass. Emitting the barrier here (before each dispatch) closes
-            // every within-pass pair; a barrier with nothing in flight is a
-            // driver fast path, so the cost is bounded by real pipeline
-            // depth, and it is measured by the S5 A/B.
-            self.emit_memory_barrier(MTLBarrierScope::Buffers);
         }
     }
 
