@@ -290,6 +290,11 @@ fn softmax_f32(input: &[f32], params: &[f32], output: &mut [f32]) {
 
     // Broadcast the global max via shared memory.
     let global_max = smem[0usize];
+    // Issue 018: every thread must finish READING slot 0 before Phase 4's
+    // `smem[tid] = local_sum` lets thread 0 overwrite it — without this
+    // barrier a slow SIMD group reads the SUM partial as the max
+    // (write-after-read), a sporadic scheduling-dependent corruption.
+    sync_cube();
 
     // ── Phase 3: Compute sum of exp(x - max) (without storing — recompute later) ──
     let mut local_sum = f32::new(0.0f32);
@@ -1268,9 +1273,10 @@ impl AddMaskBroadcastCubeCL {
 #[cube(launch_unchecked)]
 fn softmax_rows_inplace_f32(x: &mut [f32], params: &[f32]) {
     let n = params[0usize] as u32;
+    let row0 = params[1usize] as u32;
     let cube_size = 256u32;
     let tid = UNIT_POS;
-    let base = CUBE_POS_X * n;
+    let base = (row0 + CUBE_POS_X) * n;
 
     // ── Phase 1: strided max reduction (the -1e30 sentinel, never
     // NEG_INFINITY — the WGSL-gen constraint the single-row kernel hit) ──
@@ -1346,6 +1352,11 @@ fn softmax_rows_inplace_f32(x: &mut [f32], params: &[f32]) {
     sync_cube();
 
     let global_max = smem[0usize];
+    // Issue 018: every thread must finish READING slot 0 before Phase 4's
+    // `smem[tid] = local_sum` lets thread 0 overwrite it — without this
+    // barrier a slow SIMD group reads the SUM partial as the max
+    // (write-after-read), a sporadic scheduling-dependent corruption.
+    sync_cube();
 
     // ── Phase 3: strided Σexp(x − max) ──
     let mut local_sum = f32::new(0.0f32);
@@ -1432,12 +1443,17 @@ impl SoftmaxRowsInplaceCubeCL {
         debug_assert_binding_at_least(&x_handle, rows * n, "SoftmaxRows::x");
         assert!(rows > 0 && n > 0, "softmax_rows: degenerate shape");
         assert!(n <= 16384, "softmax_rows: row length exceeds the 256-thread strided limit");
-        let params: &[f32] = &[f32_exact(n)];
-        let params_handle = crate::params_cache::params_handle(client, f32::as_bytes(params));
         let mut r0 = 0usize;
         while r0 < rows {
             let rc = (Self::MAX_WG_X).min(rows - r0);
-            // SAFETY: extents asserted above; the row offset rides CUBE_POS_X
+            // The chunk's first row rides params[1]: without it every chunk
+            // past the first re-normalized rows 0.. (rows > MAX_WG_X, i.e.
+            // heads·seq > 32768 — unreachable at the G5 geometry, live at
+            // long context).
+            let params: &[f32] = &[f32_exact(n), f32_exact(r0)];
+            let params_handle =
+                crate::params_cache::params_handle(client, f32::as_bytes(params));
+            // SAFETY: extents asserted above; the row is `row0 + CUBE_POS_X`
             // and each workgroup touches exactly its own row.
             unsafe {
                 softmax_rows_inplace_f32::launch_unchecked::<R>(
@@ -1445,7 +1461,7 @@ impl SoftmaxRowsInplaceCubeCL {
                     CubeCount::Static(rc as u32, 1, 1),
                     CubeDim::new_1d(256),
                     BufferArg::from_raw_parts(x_handle.clone(), rows * n),
-                    BufferArg::from_raw_parts(params_handle.clone(), 1),
+                    BufferArg::from_raw_parts(params_handle, 2),
                 );
             }
             r0 += rc;
@@ -1711,7 +1727,7 @@ impl GluGeluGateCubeCL {
 #[cfg(all(test, feature = "cubecl_runtime"))]
 mod tests {
     use super::*;
-    use crate::cubecl_runtime::{ActiveRuntime, CubeCLContext};
+    use crate::cubecl_runtime::{ActiveComputeClient, ActiveRuntime, CubeCLContext};
 
     /// Verify Split2CubeCL correctly splits a qkv|z concat into 2 outputs
     /// (Plan 602 B2 — the folded-model GDN input fan-out).
@@ -2003,5 +2019,89 @@ mod tests {
         }
         assert!(max <= 2e-5, "glu_gelu_gate drift {max:.4e}");
         println!("glu_gelu_gate vs cpu: max abs drift {max:.3e}");
+    }
+
+    /// Row-wise max-shifted softmax on the host — the parity reference.
+    fn softmax_rows_cpu(x: &[f32], n: usize) -> Vec<f32> {
+        let mut out = x.to_vec();
+        for row in out.chunks_mut(n) {
+            let m = row.iter().copied().fold(f32::MIN, f32::max);
+            let mut s = 0.0f32;
+            for v in row.iter_mut() {
+                *v = (*v - m).exp();
+                s += *v;
+            }
+            for v in row.iter_mut() {
+                *v /= s;
+            }
+        }
+        out
+    }
+
+    /// Deterministic scores-like fill: per-row spread large enough that the
+    /// max shift matters (the Issue-018 race corrupts exactly the max).
+    fn scores_fill(rows: usize, n: usize) -> Vec<f32> {
+        let mut s: u64 = 0x2545F4914F6CDD1D;
+        (0..rows * n)
+            .map(|_| {
+                s ^= s << 13;
+                s ^= s >> 7;
+                s ^= s << 17;
+                ((s % 20_000) as f32 / 1000.0) - 10.0
+            })
+            .collect()
+    }
+
+    fn run_softmax_rows(client: &ActiveComputeClient, x: &[f32], rows: usize, n: usize) -> Vec<f32> {
+        let h = client.create_from_slice(f32::as_bytes(x));
+        // SAFETY: the handle backs rows·n f32.
+        unsafe { SoftmaxRowsInplaceCubeCL::launch::<ActiveRuntime>(client, h.clone(), rows, n) };
+        f32::from_bytes(&client.read_one(h).unwrap()).to_vec()[..rows * n].to_vec()
+    }
+
+    /// Issue 018 (the chunked-launch half): rows past `MAX_WG_X` must be
+    /// normalized from THEIR row, not re-normalize rows 0.. — the chunk's
+    /// first row rides params[1].
+    #[test]
+    fn softmax_rows_inplace_chunked_rows_use_their_offset() {
+        let ctx = CubeCLContext::new().expect("CubeCL should initialize");
+        let client = ctx.client();
+        let (rows, n) = (SoftmaxRowsInplaceCubeCL::MAX_WG_X + 37, 8usize);
+        let x = scores_fill(rows, n);
+        let got = run_softmax_rows(&client, &x, rows, n);
+        let want = softmax_rows_cpu(&x, n);
+        let worst = got
+            .iter()
+            .zip(&want)
+            .map(|(a, b)| (a - b).abs())
+            .fold(0.0f32, f32::max);
+        assert!(worst < 1e-6, "chunked softmax_rows drift {worst:.3e}");
+    }
+
+    /// Issue 018 (the race half): the global max read from smem slot 0 must
+    /// be fenced from Phase 4's `smem[tid] = local_sum` write. Unfenced, a
+    /// slow SIMD group sporadically reads a SUM partial as the max. The
+    /// fire is scheduling-dependent, so the arm repeats the G5-geometry
+    /// score batch (16 heads × seq 400) and requires every repetition to be
+    /// bit-identical to the first AND within tolerance of the host.
+    #[test]
+    fn softmax_rows_inplace_repeat_is_bit_identical() {
+        let ctx = CubeCLContext::new().expect("CubeCL should initialize");
+        let client = ctx.client();
+        let (rows, n) = (16 * 400usize, 400usize);
+        let x = scores_fill(rows, n);
+        let want = softmax_rows_cpu(&x, n);
+        let first = run_softmax_rows(&client, &x, rows, n);
+        let worst = first
+            .iter()
+            .zip(&want)
+            .map(|(a, b)| (a - b).abs())
+            .fold(0.0f32, f32::max);
+        assert!(worst < 1e-5, "softmax_rows vs host drift {worst:.3e}");
+        for rep in 1..200 {
+            let again = run_softmax_rows(&client, &x, rows, n);
+            let bad = first.iter().zip(&again).filter(|(a, b)| a.to_bits() != b.to_bits()).count();
+            assert_eq!(bad, 0, "rep {rep}: {bad} elements differ from rep 0");
+        }
     }
 }
