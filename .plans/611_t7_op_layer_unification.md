@@ -1,11 +1,13 @@
 # Plan 611 — T7: the op-layer unification — the encoder lane's Backend trait implemented over the CubeCL layer, the A/B vs the hand-tuned lanes, the verdict
 
 **Status:** IN FLIGHT — S1 complete (a: `bc93e70`, b: `a5688a9`),
-S2 complete (`a3f8928`), S3 complete (`4e89963`), S4 complete WITH ONE
-OPEN FINDING (wiring + G5 arm landed; the G5 gate FAILS at the third
-posture — deterministic, filed as `.issues/016_cubecl_g5_fail.md`; the
-lane stays opt-in and its numbers PROVISIONAL). S5–S6 remaining; the
-S5 A/B must NOT publish Cubecl numbers until 016 closes.
+S2 complete (`a3f8928`), S3 complete (`4e89963`), S4 complete (wiring +
+G5 arm; the S4 finding RESOLVED — 016's G5 FAIL was the `gather_rows`
+residency class, fixed; top-1 = 1.000000 on all three checkpoints in
+every run; a residual sporadic drift wobble filed as `.issues/017`, the
+cubecl G5 arm `#[ignore]`d until it closes, all Cubecl numbers
+PROVISIONAL). S5–S6 remaining; the S5 A/B may MEASURE at any time but
+must not PUBLISH Cubecl numbers until 017 closes.
 Feeds riir-reflex `.issues/008` T7 (the campaign's last open task) and
 riir-infer `.issues/998` S8 (the same task, mirrored home). The reflex-side
 issue 008 remains the campaign record; this plan is the execution home.
@@ -197,14 +199,34 @@ encoder" pin live laya-side. Confirmed GAP, not a naming miss.
       `g5_run(builder)`, the cubecl arm loads via the explicit
       constructor) + the harness DeviceKind arm. **THE G5 GATE FAILS AT
       THIS POSTURE** — top-1 0.33–0.46 vs 0.999, prob drift 5e-1 —
-      deterministic (byte-identical across debug/release and across the
-      wgpu-dispatch-cap fix `d4ab87a`), act_of EXACT (drift 0.0) while
-      the encoder path is wrong: a composition-level bug no isolated op
-      test exercises. Filed as `.issues/016_cubecl_g5_fail.md` with the
-      repro + next bisect levers. The head-defer audit: moot at this
-      posture — `supports_packed_attention` stays false, so the agent
-      keeps the per-question loop and the defer path is unreachable;
-      the G5 replay runs that exact loop.]
+      - [x] **S4 — the agent wiring + the G5 arm (RESOLVED finding).**
+      `DeviceKind::Cubecl` + `LAYA_DEVICE=cubecl` + fail-loud refusal +
+      `RiirAgent::load_with_device` (the explicit constructor the A/B
+      needs: one process, many postures). The reflex side landed the
+      feature forward + the cross-workspace `[patch.crates-io]` rows +
+      the G5 cubecl arm (reflex `bcb1c54`).
+      THE 016 FINDING, RESOLVED 2026-09-26 (`riir-infer-m3-t7b`): the G5
+      FAIL (top-1 0.33–0.46) was the **`gather_rows` residency class** —
+      the backend bound the head's marker-gather SOURCE (the hidden
+      state, an activation with stale host bytes) through the PERMANENT
+      weight cache, uploading the stale zeros once; every marker row read
+      zeros and all scorer logits collapsed to bias. The Metal lane's own
+      `gather_rows` comment named the chain class correctly all along.
+      Fix: the source binds `chain_buf`; regression arm
+      `gather_rows_device_written` in `cubecl_ops_smoke`. Result: top-1
+      1.000000 on all three checkpoints, EVERY run. A second fix landed
+      from the issue-016 hidden probe: the S1a one-pass LayerNorm
+      (`E[x²] − μ²`) cancellation at deep layers (residual ±4000) priced
+      2.6e-6 → 7.7e-5 relative drift with depth — the kernel is now
+      TWO-PASS (the CPU lane's exact form, `inv_dim` the candle scale);
+      drift floor 3.64e-4 → 1.64e-4 at the encoder output. The probe
+      (`Encoder::forward_probe` + `tests/cubecl_encoder_probe`) stays as
+      the issue-017 instrument. RESIDUAL: a sporadic per-forward drift
+      wobble (top-1 never flips; the outlier moves between checkpoints
+      and runs; floor 3.7e-6/2.8e-5/6.4e-5 with 10–1000× excursions) —
+      filed `.issues/017_cubecl_drift_wobble.md`; the reflex G5 cubecl
+      arm is `#[ignore]`d until it closes. 016 removed (resolved; this
+      section + 017 carry the record).]
 - [ ] **S5 — the A/B harness + the verdict.**
       `tests/backend_ab.rs` (measurement-only, `#[ignore]`, the
       fold-A/B discipline): fixed fixtures (the G5 english + typed

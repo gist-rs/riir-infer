@@ -191,6 +191,12 @@ required-features = ["laya-riir-cuda"]
 name = "cubecl_ops_smoke"
 required-features = ["laya-riir-cubecl"]
 
+# The issue-016/017 probe (the 017 stability+bisect instrument):
+# CPU-vs-CubeCL per-op diff over the real encoder geometry.
+[[test]]
+name = "cubecl_encoder_probe"
+required-features = ["laya-riir-cubecl"]
+
 # The sgemm MMA-roofline probe (measurement only) — the f16-axis
 # discriminator for the T7 follow-up rungs (reflex issue 020). macOS +
 # metal-gated like the gates above; the row keeps a feature-less selection

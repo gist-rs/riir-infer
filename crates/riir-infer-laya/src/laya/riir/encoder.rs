@@ -363,6 +363,126 @@ impl Encoder {
             ops::rope_tables_packed(seqs, hd, theta)
         }
     }
+
+    /// DEBUG PROBE (issue 016; retained as the 017 stability+bisect
+    /// instrument): the single-sequence [`Self::forward`] op stream with a
+    /// per-op sink. Every sink call receives `(tag, host-current bytes)`
+    /// for the op's primary output (one `download_into` per call — a
+    /// device sync per op, debug only). The op order mirrors
+    /// `forward_packed` at `seqs = [len]` exactly; running it against two
+    /// backends and zipping the tags localizes the first divergent op.
+    #[cfg(feature = "laya-riir-cubecl")]
+    pub fn forward_probe(
+        &self,
+        b: &dyn Backend,
+        input_ids: &[u32],
+        sink: &mut dyn FnMut(&str, &[f32]),
+    ) -> Result<()> {
+        fn dl(b: &dyn Backend, src: &[f32], buf: &mut Vec<f32>) {
+            buf.clear();
+            buf.resize(src.len(), 0.0);
+            b.download_into(src, buf);
+        }
+        let total = input_ids.len();
+        let _segments = RowSegments::set(b, std::slice::from_ref(&total));
+        let d = self.cfg.hidden;
+        let hd = self.cfg.head_dim();
+        let heads = self.cfg.heads;
+        let scale = 1.0f32 / (hd as f32).sqrt();
+        let i_sz = self.cfg.intermediate;
+        let eps = self.cfg.eps;
+
+        let mut gathered = vec![0f32; total * d];
+        for (s, id) in input_ids.iter().enumerate() {
+            let row = (*id as usize) * d;
+            let Some(src) = self.tok_emb.get(row..row + d) else {
+                return Err(LayaError::Config {
+                    checkpoint: self.ckpt,
+                    detail: format!("token id {id} outside the embedding table"),
+                });
+            };
+            gathered[s * d..s * d + d].copy_from_slice(src);
+        }
+        let mut h = vec![0f32; total * d];
+        let mut sq = Vec::new();
+        b.layer_norm_nobias_into(&gathered, &self.emb_norm, eps, d, &mut sq, &mut h);
+        let mut pb = Vec::new();
+        dl(b, &h, &mut pb);
+        sink("emb", &pb);
+
+        let mut sc = Scratch::new();
+        sc.reset(total * d);
+        let rope_full = self.rope_tables_for(std::slice::from_ref(&total), hd, self.cfg.rope_theta_full);
+        let rope_slide =
+            self.rope_tables_for(std::slice::from_ref(&total), hd, self.cfg.rope_theta_slide);
+        let window = self.cfg.sliding_window();
+        let mask: Option<Vec<f32>> = if b.needs_window_mask(hd) && total > 1 && window < total - 1 {
+            let mut m = vec![f32::MIN; total * total];
+            for qi in 0..total {
+                let lo = qi.saturating_sub(window);
+                let hi = (qi + window).min(total - 1);
+                for kv in lo..=hi {
+                    m[qi * total + kv] = 0.0;
+                }
+            }
+            Some(m)
+        } else {
+            None
+        };
+
+        for (li, layer) in self.layers.iter().enumerate() {
+            match &layer.attn_norm {
+                Some(w) => b.layer_norm_nobias_into(&h, w, eps, d, &mut sc.sq, &mut sc.x),
+                None => b.copy_into(&h, &mut sc.x),
+            }
+            dl(b, &sc.x, &mut pb);
+            sink(&format!("L{li}.x"), &pb);
+
+            sc.qkv.resize(total * 3 * d, 0.0);
+            b.matmul_w(&sc.x, total, d, &layer.wqkv, 3 * d, &mut sc.qkv);
+            dl(b, &sc.qkv, &mut pb);
+            sink(&format!("L{li}.qkv"), &pb);
+
+            let rope = if layer.sliding { &rope_slide } else { &rope_full };
+            b.attention_forward(
+                &sc.qkv,
+                0,
+                &rope.0,
+                &rope.1,
+                0,
+                scale,
+                total,
+                heads,
+                hd,
+                if layer.sliding { window } else { usize::MAX },
+                if layer.sliding { mask.as_deref() } else { None },
+                &mut sc.attn,
+                &mut sc.merged,
+                0,
+            );
+            dl(b, &sc.merged, &mut pb);
+            sink(&format!("L{li}.attn"), &pb);
+
+            b.matmul_w_accum(&sc.merged, total, d, &layer.wo, d, &mut h);
+            dl(b, &h, &mut pb);
+            sink(&format!("L{li}.h_attn"), &pb);
+
+            b.layer_norm_nobias_into(&h, &layer.mlp_norm, eps, d, &mut sc.sq, &mut sc.xn);
+            sc.act.resize(total * i_sz, 0.0);
+            b.matmul_w_glu(&sc.xn, total, d, &layer.wi, i_sz, &mut sc.act);
+            dl(b, &sc.act, &mut pb);
+            sink(&format!("L{li}.act"), &pb);
+            b.matmul_w_accum(&sc.act, total, i_sz, &layer.mlp_wo, d, &mut h);
+            dl(b, &h, &mut pb);
+            sink(&format!("L{li}.h_mlp"), &pb);
+        }
+
+        let mut out = vec![0f32; total * d];
+        b.layer_norm_nobias_into(&h, &self.final_norm, eps, d, &mut sc.sq, &mut out);
+        dl(b, &out, &mut pb);
+        sink("final", &pb);
+        Ok(())
+    }
 }
 
 /// Scope guard for [`Backend::set_row_segments`]: set on entry, cleared on
