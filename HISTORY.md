@@ -823,3 +823,67 @@ the measured local optimum on this hardware/toolchain. Reopen triggers: a
 Metal/toolchain change exposing direct-to-MMA staged layouts, or an L2-
 oversized working set (n > ~4096 changes B's residency class — the packed
 path's n grows with question count, worth re-probing there first).
+
+## 2026-09-27 — Issue 021 CLOSED: the cuda CLS-row corruption — a chain-cache prefix-match
+## alias, not a kernel race (the fused-GLU temp's slot vs the hidden that reused its address)
+
+The harness banking77 cuda repeat check (`determinism_ok = false`, Bench 052 §4090
+re-run) is fixed at the root: `chain_buf`/`chain_slot_for` now EVICT same-pointer
+different-length entries on bind. Plus a second, independent defect the hunt
+surfaced: `download_into`'s `memcpy_dtoh` is `cuMemcpyDtoHAsync` (cudarc 0.19) —
+stream-ordered but ASYNC — so the pre-copy `synchronize` never guarded the host
+read; a trailing sync now does.
+
+The mechanism, isolated by four probes (all committed under `tests/`):
+
+- `cuda_repeat_probe` (op level, banking77's real shapes ×200–2000 incl. the
+  act-head GEMMs `[1,1028]×[256,1028]` / `[1,256]×[2,256]`): every kernel
+  bit-stable — kernels exonerated.
+- `cuda_packed_repeat_probe` (real english checkpoint, packed forward ×30):
+  bit-stable — the encoder exonerated (and explains why the harness flag
+  carried "picks still match metal": the marker gather never reads row 0).
+- The harness bisect (flash=0 / ladder=0 / reg4=0 / head-defer=0): fires under
+  EVERY posture — posture exonerations; `LAYA_HEAD_DEFER` mechanically cannot
+  reach banking77 (1-question cases never take the packed path; the one clean
+  run was luck — never trust a single clean cell).
+- `cuda_agent_repeat_probe` (full `system_one`, 12 real cases, 30 rounds):
+  RED at round 1 on 6/12 cases — only `act_probability` moves (saturating to
+  1.0 on the bad read), probs/confidence bit-identical.
+
+The `LAYA_DEBUG_ACT_ECHO` instrument (head.rs, env-gated) then split the
+inputs: logits identical, feats identical, **the CLS row's raw-bit checksum
+different**; and the `LAYA_CUDA_TRACE` download-candidate log named the
+collision: the CLS prefix read matched TWO same-epoch slots at the hidden's
+base pointer — the hidden itself (320512 floats) and a 1642624-float slot =
+exactly `total·2·i_sz`, the fused GLU temp inside `matmul_w_glu`'s default
+composition. The temp is allocated+dropped per layer; its DEVICE slot entry
+survives in the epoch map (the map owns the Arc); the hidden Vec then
+allocated at the freed address and bound a second entry; `download_into`'s
+prefix match ties on epoch and `max_by_key` falls through to HashMap
+iteration order — ~50/50 per call, both directions, stable within a process
+for fixed key sets (why every earlier repeat probe was green). Metal is
+clean because it OVERRIDES `matmul_w_glu`/`matmul_w_accum` (the T11 fold
+rungs) — no fused temp, no address churn.
+
+The fix (cuda.rs, both bind sites): `map.retain(|k,_| k.0 != ptr || k.1 ==
+len)` on miss — a different-length slot at a recycled address is provably a
+dead buffer (two LIVE host allocations cannot share an address), so eviction
+is always sound. Acceptance: agent probe 30×12 GREEN (was 6/12 red at round
+1); harness banking77 cuda `determinism_ok = true` ×4/4 (was firing every
+run); accuracy unchanged (0.4220); `cuda_ops_smoke` 4/4; G5 cuda parity
+GREEN; clippy clean at cuda + all-features; the M3 lib tests 41/41.
+
+Rustc side-note (the box, not the code): two reproducible
+STATUS_ACCESS_VIOLATION rustc crashes on the 4090 (the cubecl test closure's
+katgpt-speculative/katgpt-forward, then riir-reflex lib) — both clear at
+`-j 4`; the first blocked the per-op encoder probe (`forward_probe` rides
+the cubecl gate), which is why the isolation went through the agent level.
+
+Instruments kept, env-gated, zero cost when unset: `LAYA_DEBUG_ACT_ECHO`
+(head.rs — CLS bits-sum + act_logits per call), the download-candidate trace
+under the existing `LAYA_CUDA_TRACE`, and the four probe tests (the [[test]]
+rows keep the green-zero rule honest).
+
+Landed at `5af0381` (fix + probes + instruments; the issue file is removed with this record — the noise-reduction rule).
+
+Session: issue021-cuda-determinism
