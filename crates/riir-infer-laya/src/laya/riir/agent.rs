@@ -126,17 +126,20 @@ fn batch_disabled() -> bool {
     *DISABLED.get_or_init(|| std::env::var("RIIR_LAYA_NO_BATCH").as_deref() == Ok("1"))
 }
 
-/// Opt-in T12 posture (`LAYA_HEAD_DEFER=1`, reflex issue 020): the packed
-/// driver defers every question's head reads into two drain classes
-/// instead of three reads per question. DEFAULT OFF — the composed
-/// per-question forward — because the interleave measured the win at
-/// ~1–3%, below this box's noise floor; the promotion A/B waits for a
-/// proven-quiet window (the rope-hoist precedent). Bit-identical either
-/// way (the packed_same_shape raw-bit gate runs the composed posture and
-/// `packed_forward_equiv` the drift budget).
+/// T12 posture (reflex issue 020): the packed driver defers every
+/// question's head reads into two drain classes instead of three reads
+/// per question. DEFAULT ON since the quiet-box paired A/B
+/// (`tests/metal_head_defer_ab.rs`, 24 paired rounds/shape,
+/// position-balanced, AC load < 6 preflight): typed 5-q median on/off
+/// **0.984 (24/24 wins)**, 5-q short **0.984 (22/24)**, and the 1-q
+/// wiring control FLAT (1.002 — `packed_eligible` excludes it, so both
+/// postures run the identical loop path). Bit-identical either way
+/// (`packed_same_shape` raw-bit gate + `packed_forward_equiv` drift
+/// budget). Kill-switch `LAYA_HEAD_DEFER=0` (the `LAYA_METAL_LN_WIDE`
+/// spelling) restores the composed per-question forward.
 fn head_defer() -> bool {
     static DEFER: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    *DEFER.get_or_init(|| std::env::var("LAYA_HEAD_DEFER").as_deref() == Ok("1"))
+    *DEFER.get_or_init(|| std::env::var("LAYA_HEAD_DEFER").as_deref() != Ok("0"))
 }
 
 /// The encoder half of the stack: the per-op lanes share the op-stream
@@ -184,6 +187,12 @@ pub struct RiirAgent {
     temps: Temperatures,
     cfg: AgentConfig,
     ckpt: &'static str,
+    /// The T12 A/B seam (reflex issue 020): `None` = the env posture
+    /// ([`head_defer`]); `Some(_)` overrides it for this agent. The paired
+    /// A/B harness toggles both postures in ONE process (the fold A/B's
+    /// `with_folds` pattern — pairing cancels between-round box drift);
+    /// serving paths never touch it.
+    head_defer_override: Option<bool>,
 }
 
 impl RiirAgent {
@@ -336,6 +345,7 @@ impl RiirAgent {
             temps,
             cfg: agent_cfg,
             ckpt: name,
+            head_defer_override: None,
         })
     }
 
@@ -349,6 +359,15 @@ impl RiirAgent {
     /// never be mistaken for the other posture.
     pub fn device(&self) -> &'static str {
         self.device_label
+    }
+
+    /// The T12 measurement seam (reflex issue 020): override the packed
+    /// head posture for this agent — `Some(true)` deferred (two drain
+    /// classes per case), `Some(false)` composed (the per-question
+    /// forward), `None` the env default (`LAYA_HEAD_DEFER=1`). Returns
+    /// the previous override so a harness can restore it.
+    pub fn set_head_defer_override(&mut self, defer: Option<bool>) -> Option<bool> {
+        std::mem::replace(&mut self.head_defer_override, defer)
     }
 
     /// The largest sequence length the ANE lane can serve (its biggest
@@ -504,18 +523,15 @@ impl RiirAgent {
     /// empty pipeline.
     /// The packed path's per-question reads split out of [`Head::forward`]
     /// (issue 020 T12): the per-question streams run in THREE PHASES over
-    /// the case behind `LAYA_HEAD_DEFER=1` — 1. every `copy_at` + layers +
-    /// scorer enqueues; 2. the scorer-logits + CLS reads (the FIRST read
-    /// drains the whole case's stage-1 stream — the other four are plain
-    /// copies); 3. the act heads (enqueue, then the act read). Two drain
-    /// classes per case instead of the composed form's three reads ×
-    /// questions — same ops, same order per question, bit-identical
-    /// outputs. DEFAULT OFF (the composed per-question forward): the
-    /// interleave measured the win at ~1–3% — below this box's noise floor
-    /// (Metal's enqueue already runs ahead of the GPU inside a case, so
-    /// most of the composed form's drains find an empty pipeline; the
-    /// promotion A/B waits for a proven-quiet window, the rope-hoist
-    /// precedent).
+    /// the case (the default; kill-switch `LAYA_HEAD_DEFER=0` restores the
+    /// composed form) — 1. every `copy_at` + layers + scorer enqueues; 2.
+    /// the scorer-logits + CLS reads (the FIRST read drains the whole
+    /// case's stage-1 stream — the other four are plain copies); 3. the act
+    /// heads (enqueue, then the act read). Two drain classes per case
+    /// instead of the composed form's three reads × questions — same ops,
+    /// same order per question, bit-identical outputs. The quiet-box
+    /// paired A/B measured typed 5-q median 0.984 (24/24 wins) with the
+    /// 1-q wiring control flat.
     fn system_one_packed(&self, state: &Value, questions: &[(String, Value)]) -> Result<Vec<Answer>> {
         // Collate first — the reference's `items` shape: ids + markers per
         // question, checked before any GPU work.
@@ -574,7 +590,7 @@ impl RiirAgent {
                 .collect();
             let mut scratches: Vec<HeadScratch> =
                 (0..items.len()).map(|_| HeadScratch::new()).collect();
-            let head_result = if head_defer() {
+            let head_result = if self.head_defer_override.unwrap_or_else(head_defer) {
                 self.packed_head_deferred(
                     &hidden,
                     &mut out,
@@ -628,9 +644,10 @@ impl RiirAgent {
         Ok(())
     }
 
-    /// The develop posture: each question's composed forward (its own three
-    /// reads) right after its slab copy — the op stream byte-identical to
-    /// the pre-T12 packed path.
+    /// The composed posture (`LAYA_HEAD_DEFER=0`, the pre-T12 default):
+    /// each question's composed forward (its own three reads) right after
+    /// its slab copy — the op stream byte-identical to the pre-T12 packed
+    /// path.
     fn packed_head_composed(
         &self,
         hidden: &[f32],
@@ -657,8 +674,10 @@ impl RiirAgent {
         Ok(())
     }
 
-    /// The T12 posture (`LAYA_HEAD_DEFER=1`): all streams enqueue first,
-    /// then one drain class serves every scorer read, then the act heads.
+    /// The T12 posture: all streams enqueue first, then one drain class
+    /// serves every scorer read, then the act heads. DEFAULT ON since the
+    /// quiet-box paired A/B (typed 5-q 0.984, 24/24); `LAYA_HEAD_DEFER=0`
+    /// restores the composed form.
     fn packed_head_deferred(
         &self,
         hidden: &[f32],
