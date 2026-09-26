@@ -219,3 +219,7 @@ required-features = ["laya-riir-metal"]
 [[example]]
 name = "sgemm_mps_probe"
 required-features = ["laya-riir-metal"]
+
+[[example]]
+name = "startup_rope_probe"
+required-features = ["laya-riir-metal"]
