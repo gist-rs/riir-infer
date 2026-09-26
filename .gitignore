@@ -1,3 +1,6 @@
 /target
 /.heal
 /.raw
+
+# Agent-instructions symlink (CLAUDE.md -> AGENTS.md), local only
+CLAUDE.md
