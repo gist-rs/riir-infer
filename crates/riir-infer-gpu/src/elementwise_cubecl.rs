@@ -1180,10 +1180,12 @@ fn elementwise_wg_count(n: usize) -> u32 {
 #[cube(launch_unchecked)]
 fn add_mask_broadcast_f32(x: &mut [f32], mask: &[f32], params: &[f32]) {
     let mask_len = params[0usize] as u32;
-    let n = x.len() as u32;
+    let n = params[1usize] as u32;
+    let base = params[2usize] as u32;
     let tid = ABSOLUTE_POS as u32;
-    if tid < n {
-        x[tid as usize] += mask[(tid % mask_len) as usize];
+    let idx = base + tid;
+    if idx < n {
+        x[idx as usize] += mask[(idx % mask_len) as usize];
     }
 }
 
@@ -1191,6 +1193,15 @@ fn add_mask_broadcast_f32(x: &mut [f32], mask: &[f32], params: &[f32]) {
 ///
 /// `x` is read-modify-write (the scores slot is device-current);
 /// `mask` is a host-authored per-forward table (uploaded on miss).
+///
+/// The dispatch is CHUNKED with a kernel-visible base offset: the scores
+/// parent is `heads·seq²` — quadratic in the sequence length, so at
+/// seq = 1024 with 16 heads it is exactly 2²⁴ elements and a flat
+/// `ceil(n/256)` grid is 65536 workgroups, ONE over wgpu's 65535 cap
+/// (measured 2026-09-26: the G5's bucket-1024 fixture tripped exactly
+/// there — `[65536, 1, 1] > 65535` — and every result after the first
+/// validation error was poisoned-pool garbage). 32768 cubes × 256 threads
+/// = 8 Mi elements per chunk, half the cap.
 ///
 /// # Safety
 ///
@@ -1201,6 +1212,9 @@ pub struct AddMaskBroadcastCubeCL;
 
 #[cfg(feature = "cubecl_runtime")]
 impl AddMaskBroadcastCubeCL {
+    /// f32 elements per dispatch chunk (32768 cubes × 256 threads).
+    const CHUNK: usize = 32_768 * 256;
+
     /// # Safety
     ///
     /// `x_handle` must back `x_len` f32; `mask_handle` must back `mask_len`
@@ -1216,19 +1230,26 @@ impl AddMaskBroadcastCubeCL {
         debug_assert_binding_at_least(&mask_handle, mask_len, "MaskBroadcast::mask");
         assert!(mask_len > 0, "add_mask_broadcast: empty mask");
         assert_eq!(x_len % mask_len, 0, "add_mask_broadcast: broadcast extent");
-        let params: &[f32] = &[f32_exact(mask_len)];
-        let params_handle = crate::params_cache::params_handle(client, f32::as_bytes(params));
-        let n_wg = elementwise_wg_count(x_len);
-        // SAFETY: extents asserted above; the kernel bounds-checks tid < n.
-        unsafe {
-            add_mask_broadcast_f32::launch_unchecked::<R>(
-                client,
-                CubeCount::Static(n_wg, 1, 1),
-                CubeDim::new_1d(256),
-                BufferArg::from_raw_parts(x_handle, x_len),
-                BufferArg::from_raw_parts(mask_handle, mask_len),
-                BufferArg::from_raw_parts(params_handle, 1),
-            );
+        let mut off = 0usize;
+        while off < x_len {
+            let count = (x_len - off).min(Self::CHUNK);
+            let params: &[f32] = &[f32_exact(mask_len), f32_exact(x_len), f32_exact(off)];
+            let params_handle = crate::params_cache::params_handle(client, f32::as_bytes(params));
+            let n_wg = count.div_ceil(256).max(1) as u32;
+            // SAFETY: extents asserted above; idx = base + tid is bounded by
+            // the kernel against n = x_len, and each chunk covers disjoint
+            // ranges.
+            unsafe {
+                add_mask_broadcast_f32::launch_unchecked::<R>(
+                    client,
+                    CubeCount::Static(n_wg, 1, 1),
+                    CubeDim::new_1d(256),
+                    BufferArg::from_raw_parts(x_handle.clone(), x_len),
+                    BufferArg::from_raw_parts(mask_handle.clone(), mask_len),
+                    BufferArg::from_raw_parts(params_handle, 3),
+                );
+            }
+            off += count;
         }
     }
 }
