@@ -126,6 +126,19 @@ fn batch_disabled() -> bool {
     *DISABLED.get_or_init(|| std::env::var("RIIR_LAYA_NO_BATCH").as_deref() == Ok("1"))
 }
 
+/// Opt-in T12 posture (`LAYA_HEAD_DEFER=1`, reflex issue 020): the packed
+/// driver defers every question's head reads into two drain classes
+/// instead of three reads per question. DEFAULT OFF — the composed
+/// per-question forward — because the interleave measured the win at
+/// ~1–3%, below this box's noise floor; the promotion A/B waits for a
+/// proven-quiet window (the rope-hoist precedent). Bit-identical either
+/// way (the packed_same_shape raw-bit gate runs the composed posture and
+/// `packed_forward_equiv` the drift budget).
+fn head_defer() -> bool {
+    static DEFER: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *DEFER.get_or_init(|| std::env::var("LAYA_HEAD_DEFER").as_deref() == Ok("1"))
+}
+
 /// The encoder half of the stack: the per-op lanes share the op-stream
 /// [`Encoder`]; the ANE lane swaps in the whole-graph executor. One enum
 /// at ONE seam — `forward_internal`'s match is the only place the two
@@ -489,6 +502,20 @@ impl RiirAgent {
     /// enqueued inside one pass (one `begin_pass`, one chain epoch), so
     /// the first head download drains the whole case and the rest find an
     /// empty pipeline.
+    /// The packed path's per-question reads split out of [`Head::forward`]
+    /// (issue 020 T12): the per-question streams run in THREE PHASES over
+    /// the case behind `LAYA_HEAD_DEFER=1` — 1. every `copy_at` + layers +
+    /// scorer enqueues; 2. the scorer-logits + CLS reads (the FIRST read
+    /// drains the whole case's stage-1 stream — the other four are plain
+    /// copies); 3. the act heads (enqueue, then the act read). Two drain
+    /// classes per case instead of the composed form's three reads ×
+    /// questions — same ops, same order per question, bit-identical
+    /// outputs. DEFAULT OFF (the composed per-question forward): the
+    /// interleave measured the win at ~1–3% — below this box's noise floor
+    /// (Metal's enqueue already runs ahead of the GPU inside a case, so
+    /// most of the composed form's drains find an empty pipeline; the
+    /// promotion A/B waits for a proven-quiet window, the rope-hoist
+    /// precedent).
     fn system_one_packed(&self, state: &Value, questions: &[(String, Value)]) -> Result<Vec<Answer>> {
         // Collate first — the reference's `items` shape: ids + markers per
         // question, checked before any GPU work.
@@ -547,42 +574,134 @@ impl RiirAgent {
                 .collect();
             let mut scratches: Vec<HeadScratch> =
                 (0..items.len()).map(|_| HeadScratch::new()).collect();
-            let head_result = (|| -> Result<()> {
-                for ((qid, q, ids, markers), (hq, sc)) in items
-                    .iter()
-                    .zip(slabs.iter_mut().zip(scratches.iter_mut()))
-                {
-                    let rows = ids.len();
-                    self.backend
-                        .copy_at(&hidden, off_rows * d, hq, 0, rows * d);
-                    let head_out = self
-                        .head
-                        .forward(self.backend.as_ref(), hq, q.qtype, markers, sc)?;
-                    // The packed-path raw-bits parity seam (ungated — the
-                    // gate reads it; a few bytes per question is noise
-                    // beside a forward).
-                    let bits: [u32; 2] = [
-                        head_out.act_probabilities[0].to_bits(),
-                        head_out.act_probabilities[1].to_bits(),
-                    ];
-                    let logit_bits: Vec<u32> =
-                        head_out.logits.iter().map(|l| l.to_bits()).collect();
-                    let mut cap = PACKED_ACT_BITS.lock().unwrap();
-                    if cap.len() < PACKED_ACT_BITS_CAP {
-                        cap.push((bits, logit_bits));
-                    }
-                    let t = self.temps.for_question(q.qtype, markers.len());
-                    let f = Self::make_forward(q, head_out, rows, markers.clone(), t);
-                    out.push(Self::answer_of(qid, q, f)?);
-                    off_rows += rows;
-                }
-                Ok(())
-            })();
+            let head_result = if head_defer() {
+                self.packed_head_deferred(
+                    &hidden,
+                    &mut out,
+                    &mut off_rows,
+                    &items,
+                    &mut slabs,
+                    &mut scratches,
+                )
+            } else {
+                self.packed_head_composed(
+                    &hidden,
+                    &mut out,
+                    &mut off_rows,
+                    &items,
+                    &mut slabs,
+                    &mut scratches,
+                )
+            };
             drop(slabs);
             drop(scratches);
             head_result?;
             Ok(out)
         })
+    }
+
+    /// The packed case's answer + capture tail, shared by both head drivers:
+    /// the raw-bits parity seam, temperatures and the answer envelope.
+    fn packed_capture_answer(
+        &self,
+        out: &mut Vec<Answer>,
+        qid: &str,
+        q: &InternalQuestion,
+        rows: usize,
+        markers: &[usize],
+        head_out: HeadOutput,
+    ) -> Result<()> {
+        // The packed-path raw-bits parity seam (ungated — the gate reads
+        // it; a few bytes per question is noise beside a forward).
+        let bits: [u32; 2] = [
+            head_out.act_probabilities[0].to_bits(),
+            head_out.act_probabilities[1].to_bits(),
+        ];
+        let logit_bits: Vec<u32> = head_out.logits.iter().map(|l| l.to_bits()).collect();
+        let mut cap = PACKED_ACT_BITS.lock().unwrap();
+        if cap.len() < PACKED_ACT_BITS_CAP {
+            cap.push((bits, logit_bits));
+        }
+        let t = self.temps.for_question(q.qtype, markers.len());
+        let f = Self::make_forward(q, head_out, rows, markers.to_vec(), t);
+        out.push(Self::answer_of(qid, q, f)?);
+        Ok(())
+    }
+
+    /// The develop posture: each question's composed forward (its own three
+    /// reads) right after its slab copy — the op stream byte-identical to
+    /// the pre-T12 packed path.
+    fn packed_head_composed(
+        &self,
+        hidden: &[f32],
+        out: &mut Vec<Answer>,
+        off_rows: &mut usize,
+        items: &[(String, InternalQuestion, Vec<u32>, Vec<usize>)],
+        slabs: &mut [Vec<f32>],
+        scratches: &mut [HeadScratch],
+    ) -> Result<()> {
+        let d = hidden.len() / items.iter().map(|(_, _, ids, _)| ids.len()).sum::<usize>();
+        for ((qid, q, ids, markers), (hq, sc)) in items
+            .iter()
+            .zip(slabs.iter_mut().zip(scratches.iter_mut()))
+        {
+            let rows = ids.len();
+            self.backend
+                .copy_at(hidden, *off_rows * d, hq, 0, rows * d);
+            let head_out =
+                self.head
+                    .forward(self.backend.as_ref(), hq, q.qtype, markers, sc)?;
+            *off_rows += rows;
+            self.packed_capture_answer(out, qid, q, rows, markers, head_out)?;
+        }
+        Ok(())
+    }
+
+    /// The T12 posture (`LAYA_HEAD_DEFER=1`): all streams enqueue first,
+    /// then one drain class serves every scorer read, then the act heads.
+    fn packed_head_deferred(
+        &self,
+        hidden: &[f32],
+        out: &mut Vec<Answer>,
+        off_rows: &mut usize,
+        items: &[(String, InternalQuestion, Vec<u32>, Vec<usize>)],
+        slabs: &mut [Vec<f32>],
+        scratches: &mut [HeadScratch],
+    ) -> Result<()> {
+        let d = hidden.len() / items.iter().map(|(_, _, ids, _)| ids.len()).sum::<usize>();
+        // Phase 1 — every question's stream enqueues: the slab copy out of
+        // the packed residual, then layers + scorer. No read in this loop.
+        for ((_, q, ids, markers), (hq, sc)) in items
+            .iter()
+            .zip(slabs.iter_mut().zip(scratches.iter_mut()))
+        {
+            let rows = ids.len();
+            self.backend
+                .copy_at(hidden, *off_rows * d, hq, 0, rows * d);
+            self.head
+                .forward_enqueue(self.backend.as_ref(), hq, q.qtype, markers, sc)?;
+            *off_rows += rows;
+        }
+        // Phase 2 — the scorer logits + CLS reads. ONE drain here serves
+        // the whole case's stage-1 stream; the remaining questions' reads
+        // are copies off an empty pipeline.
+        let logit_sets: Vec<Vec<f32>> = items
+            .iter()
+            .zip(slabs.iter_mut().zip(scratches.iter_mut()))
+            .map(|(_, (hq, sc))| self.head.reads_of(self.backend.as_ref(), hq, sc))
+            .collect::<Result<Vec<Vec<f32>>>>()?;
+        // Phase 3 — the act heads (each enqueues off the same epoch; the
+        // first act read drains them all) + answers.
+        for (((qid, q, ids, markers), (_hq, sc)), logits) in items
+            .iter()
+            .zip(slabs.iter_mut().zip(scratches.iter_mut()))
+            .zip(logit_sets)
+        {
+            let rows = ids.len();
+            let head_out = self.head.act_of(self.backend.as_ref(), sc, logits)?;
+            self.packed_capture_answer(out, qid, q, rows, markers, head_out)?;
+        }
+        Ok(())
     }
 
     /// The shared answer envelope: a [`Forward`] → the wire [`Answer`].

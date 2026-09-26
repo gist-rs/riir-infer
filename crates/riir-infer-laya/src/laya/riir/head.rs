@@ -273,6 +273,14 @@ impl Head {
     /// Host reads of device results go through [`Backend::download_into`] —
     /// exactly three per forward (logits, CLS row, act logits); everything
     /// else stays device-side under Metal.
+    ///
+    /// This is the composed form — [`Self::forward_enqueue`] +
+    /// [`Self::reads_of`] + [`Self::act_of`] in sequence, the per-question
+    /// loop path's exact op stream. The packed driver (`system_one_packed`)
+    /// calls the three pieces PER PHASE instead of per question, so a
+    /// 5-question case drains the pipeline twice (scorer reads, then act
+    /// reads) instead of fifteen times — same ops, same order per question,
+    /// bit-identical outputs (riir-reflex issue 020 T12).
     pub fn forward(
         &self,
         b: &dyn Backend,
@@ -281,6 +289,22 @@ impl Head {
         markers: &[usize],
         sc: &mut HeadScratch,
     ) -> Result<HeadOutput> {
+        self.forward_enqueue(b, h, qtype, markers, sc)?;
+        let logits = self.reads_of(b, h, sc)?;
+        self.act_of(b, sc, logits)
+    }
+
+    /// Stage 1 — the type-emb add, both encoder layers and the scorer, up
+    /// to and including the scorer-logits write. NO host read: under Metal
+    /// every op enqueues into the pass's command stream and returns.
+    pub fn forward_enqueue(
+        &self,
+        b: &dyn Backend,
+        h: &mut [f32],
+        qtype: usize,
+        markers: &[usize],
+        sc: &mut HeadScratch,
+    ) -> Result<()> {
         let d = self.d;
         let seq = h.len() / d;
         let heads = d / 64; // both pinned geometries: head_dim 64
@@ -360,13 +384,36 @@ impl Head {
         HeadScratch::fit(&mut sc.logits_buf, k_opts); // [k, 1] row-major IS [k]
         b.matmul_w(&sc.s1, k_opts, d, &self.s3w, 1, &mut sc.logits_buf);
         b.add_bias_row(&mut sc.logits_buf, 1, &self.s3b);
-        let mut logits = vec![0f32; k_opts];
-        b.download_into(&sc.logits_buf, &mut logits);
+        Ok(())
+    }
 
+    /// Stage 2 — the scorer-logits + CLS-row host reads. The ONLY syncs
+    /// stage 1's output needs: under Metal the first `download_into` drains
+    /// everything enqueued so far and the rest are plain copies.
+    pub fn reads_of(&self, b: &dyn Backend, h: &[f32], sc: &mut HeadScratch) -> Result<Vec<f32>> {
+        let d = self.d;
+        let mut logits = vec![0f32; sc.logits_buf.len()];
+        b.download_into(&sc.logits_buf, &mut logits);
+        // pooled = CLS row (position 0) — a DEVICE result, synced here for
+        // the act head's `act_in` (its op stream is unchanged).
+        HeadScratch::fit(&mut sc.cls, d);
+        b.download_into(&h[..d], &mut sc.cls);
+        Ok(logits)
+    }
+
+    /// Stage 3 — the act head: host feats from the downloaded logits, then
+    /// the CLS+feats GEMMs and the act-logits read.
+    pub fn act_of(
+        &self,
+        b: &dyn Backend,
+        sc: &mut HeadScratch,
+        logits: Vec<f32>,
+    ) -> Result<HeadOutput> {
+        let d = self.d;
         // act head feats — detached probs of the raw logits (inference: the
         // detach is a no-op numerically), entropy over max(k, 2).
         let p = softmax32(&logits);
-        let k_eff = std::cmp::max(k_opts, 2) as f64;
+        let k_eff = std::cmp::max(logits.len(), 2) as f64;
         let mut ent = 0f64;
         for pi in &p {
             let cl = (*pi as f64).max(1e-9);
@@ -379,11 +426,6 @@ impl Head {
         let top2 = sorted.get(1).copied().unwrap_or(0.0);
         let feats = [top1, top1 - top2, ent as f32, k_eff as f32 / 255.0];
 
-        // pooled = CLS row (position 0) + feats → act logits → softmax.
-        // The CLS row is a DEVICE result — sync it out; the features were
-        // computed from the already-downloaded logits.
-        HeadScratch::fit(&mut sc.cls, d);
-        b.download_into(&x[..d], &mut sc.cls);
         HeadScratch::fit(&mut sc.act_in, d + 4);
         sc.act_in[..d].copy_from_slice(&sc.cls);
         sc.act_in[d..].copy_from_slice(&feats);
