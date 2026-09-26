@@ -705,17 +705,13 @@ pub fn ensure_artifacts(ane_root: &Path, base_url: Option<&str>) -> Result<()> {
         // sibling key owns its own subtree).
         if let Err(e) = staged {
             let _ = std::fs::remove_dir_all(&staging);
-            for p in [staging.parent(), Some(ane_root.join(".staging")).as_deref()] {
-                if let Some(p) = p {
-                    let _ = std::fs::remove_dir(p);
-                }
+            for p in [staging.parent(), Some(ane_root.join(".staging")).as_deref()].into_iter().flatten() {
+                let _ = std::fs::remove_dir(p);
             }
             return Err(e);
         }
-        for p in [staging.parent(), Some(ane_root.join(".staging")).as_deref()] {
-            if let Some(p) = p {
-                let _ = std::fs::remove_dir(p);
-            }
+        for p in [staging.parent(), Some(ane_root.join(".staging")).as_deref()].into_iter().flatten() {
+            let _ = std::fs::remove_dir(p);
         }
     }
     if missing.is_empty() {
