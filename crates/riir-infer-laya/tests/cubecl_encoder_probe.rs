@@ -98,39 +98,85 @@ fn probe_ops_cpu_vs_cubecl_and_repeat() {
             first_bad = Some(t1.clone());
         }
     }
-    println!("first structural divergence: {:?}", first_bad);
+    println!("first structural divergence: {first_bad:?}");
 
-    // ── CubeCL repeat (new pass, same ids): in-process determinism ──
-    gpu.begin_pass();
-    let mut gpu_ops2: Vec<(String, Vec<f32>)> = Vec::new();
-    enc.forward_probe(&gpu, &ids, &mut |tag, bytes| {
-        gpu_ops2.push((tag.to_string(), bytes.to_vec()))
-    })
-    .expect("cubecl probe 2");
-    let mut repeat_max = 0.0f32;
-    let mut repeat_tag = String::new();
-    let mut first_repeat_bad: Option<String> = None;
-    for ((t1, a), (t2, b)) in gpu_ops.iter().zip(gpu_ops2.iter()) {
-        assert_eq!(t1, t2);
-        let mut diff = 0.0f32;
-        for (x, y) in a.iter().zip(b.iter()) {
-            let d = (x - y).abs();
-            if d > diff {
-                diff = d;
+    // Tracked-index trajectories (issue 018: the deterministic component
+    // of the drift lives on a handful of large-magnitude residual
+    // elements — print their per-tag diff so the injection SITE is
+    // visible, not just the per-tag max).
+    const TRACKED: [usize; 2] = [5499, 206203];
+    for &ti in &TRACKED {
+        print!("tracked[{ti:>6}]:");
+        for ((t1, a), (_t2, b)) in cpu_ops.iter().zip(gpu_ops.iter()) {
+            // Deep-mode tags include short buffers (the rope table is
+            // seq·hd) — guard the index per tag.
+            if a.len() <= ti || b.len() <= ti {
+                continue;
+            }
+            let d = (a[ti] - b[ti]).abs();
+            if d > 1e-6 {
+                print!(" {t1}={d:.2e}");
             }
         }
-        if diff > 1e-4 && first_repeat_bad.is_none() {
-            first_repeat_bad = Some(format!("{t1} ({diff:.3e})"));
-        }
-        if diff > repeat_max {
-            repeat_max = diff;
-            repeat_tag = t1.clone();
-        }
-        if diff > 1e-4 {
-            println!("  REPEAT-DIFF {t1:>14} {diff:.3e}");
-        }
+        println!();
     }
-    println!(
-        "cubecl repeat max diff: {repeat_max:.3e} (at {repeat_tag}) · first: {first_repeat_bad:?}"
-    );
+
+    // ── CubeCL repeat loop (new pass each iteration, same ids): in-process
+    // determinism — the 018 lever-1 instrument. Each pass is diffed against
+    // the FIRST cubecl pass op-by-op; a nonzero diff means the pass read
+    // content the same op produced differently in pass 1 (or read a slot
+    // another op trampled). The FIRST divergent tag per fire is the
+    // localization datum (the kernel or the binding path). Pass count:
+    // LAYA_PROBE_PASSES, default 8 — the wobble fires ~5–10% of forwards,
+    // so 8 passes ≈ coin-flip per run; run repeatedly (and under GPU load
+    // to raise the fire rate) until a fire names its op.
+    let passes: usize = std::env::var("LAYA_PROBE_PASSES")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(8);
+    let mut fires = 0usize;
+    for p in 0..passes {
+        gpu.begin_pass();
+        let mut gpu_ops_p: Vec<(String, Vec<f32>)> = Vec::new();
+        enc.forward_probe(&gpu, &ids, &mut |tag, bytes| {
+            gpu_ops_p.push((tag.to_string(), bytes.to_vec()))
+        })
+        .unwrap_or_else(|e| panic!("cubecl probe pass {p}: {e}"));
+        assert_eq!(gpu_ops.len(), gpu_ops_p.len(), "pass {p}: op count diverges");
+        let mut pass_max = 0.0f32;
+        let mut pass_tag = String::new();
+        let mut first_bad: Option<(String, f32)> = None;
+        for ((t1, a), (t2, b)) in gpu_ops.iter().zip(gpu_ops_p.iter()) {
+            assert_eq!(t1, t2, "pass {p}: op tags diverge");
+            let mut diff = 0.0f32;
+            for (x, y) in a.iter().zip(b.iter()) {
+                let d = (x - y).abs();
+                if d > diff {
+                    diff = d;
+                }
+            }
+            if diff > 1e-4 {
+                println!("  REPEAT-DIFF p={p} {t1:>14} {diff:.3e}");
+                if first_bad.is_none() {
+                    first_bad = Some((t1.clone(), diff));
+                }
+            }
+            if diff > pass_max {
+                pass_max = diff;
+                pass_tag = t1.clone();
+            }
+        }
+        if first_bad.is_some() {
+            fires += 1;
+        }
+        println!(
+            "pass {p}: max {pass_max:.3e} (at {pass_tag}) · first: {:?}",
+            first_bad.map(|(t, d)| format!("{t} ({d:.3e})"))
+        );
+    }
+    println!("cubecl repeat loop: {fires}/{passes} passes fired (threshold 1e-4)");
+    // The loop is a MEASUREMENT instrument, not a gate: the wobble is the
+    // issue-018 open question and a fire must not fail the run (the
+    // intermittently-failing-gate law). The cpu-vs-cubecl structural
+    // check above stays the asserting half.
 }

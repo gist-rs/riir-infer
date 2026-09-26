@@ -383,6 +383,22 @@ impl Encoder {
             buf.resize(src.len(), 0.0);
             b.download_into(src, buf);
         }
+        /// Issue 018 lever 1 (deep mode): ALSO sink the attention block's
+        /// device-written internals (q/k/v splits, the score parent, the
+        /// per-head context) and the host-authored mask/rope slots AS THE
+        /// DEVICE HOLDS THEM. `LAYA_PROBE_DEEP=1` arms it. This is the
+        /// granularity step that names a KERNEL rather than an op: the
+        /// attention composes ~10 kernels between the op-level sinks, and
+        /// a wobble fire inside that window only says "attention" — the
+        /// first divergent INTERNAL tag (`scores` after a clean `q` = the
+        /// score GEMM; `mask` ≠ host bytes = the upload path; …) pins the
+        /// kernel. Cost: ~15 MB of extra readback per layer per pass.
+        fn deep_probes() -> bool {
+            static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+            *ON.get_or_init(|| {
+                std::env::var("LAYA_PROBE_DEEP").is_ok_and(|v| v == "1")
+            })
+        }
         let total = input_ids.len();
         let _segments = RowSegments::set(b, std::slice::from_ref(&total));
         let d = self.cfg.hidden;
@@ -462,6 +478,29 @@ impl Encoder {
             );
             dl(b, &sc.merged, &mut pb);
             sink(&format!("L{li}.attn"), &pb);
+
+            if deep_probes() {
+                dl(b, &sc.attn.q, &mut pb);
+                sink(&format!("L{li}.q"), &pb);
+                dl(b, &sc.attn.k, &mut pb);
+                sink(&format!("L{li}.k"), &pb);
+                dl(b, &sc.attn.v, &mut pb);
+                sink(&format!("L{li}.v"), &pb);
+                dl(b, &sc.attn.scores, &mut pb);
+                sink(&format!("L{li}.scores"), &pb);
+                dl(b, &sc.attn.ctx, &mut pb);
+                sink(&format!("L{li}.ctx"), &pb);
+                if layer.sliding
+                    && let Some(m) = mask.as_deref()
+                {
+                    dl(b, m, &mut pb);
+                    sink(&format!("L{li}.mask"), &pb);
+                }
+                dl(b, &rope.0, &mut pb);
+                sink(&format!("L{li}.cos"), &pb);
+                dl(b, &rope.1, &mut pb);
+                sink(&format!("L{li}.sin"), &pb);
+            }
 
             b.matmul_w_accum(&sc.merged, total, d, &layer.wo, d, &mut h);
             dl(b, &h, &mut pb);
