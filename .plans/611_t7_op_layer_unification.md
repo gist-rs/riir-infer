@@ -100,22 +100,17 @@ encoder" pin live laya-side. Confirmed GAP, not a naming miss.
 ## Slices
 
 - [-] **S1 — the GAP kernel + the skeleton (the engine payoff lands
-      first).** (a) `layer_norm_mean_cubecl` in `riir-infer-gpu`: the
-      mean-centered, bias-free LayerNorm kernel (`y = (x − μ) / σ ⊙ w`,
-      row reduction Welford or two-pass — the CPU reference's exact
-      reduction order documented in the kernel header; parity test vs
-      `cpu_reference` at 1e-5, the norms test class) + a batched
-      variant. **(a) LANDED 2026-09-26 (`bc93e70`):
+      first).** **(a) LANDED 2026-09-26 (riir-infer `bc93e70`):
       `LayerNormMeanBatchedCubeCL`** — one workgroup per row, ONE
       strided walk accumulating Σx + Σx², two unrolled 256-thread smem
-      tree reduces, `var = E[x²] − μ²` (one-pass variance form — the
+      tree reduces, `var = E[x²] − μ²` (the one-pass variance form; the
       kernel header documents the order divergence from the two-pass
-      CPU reference; the 1e-5/1e-4 tolerances absorb it), the
+      CPU reference — the 1e-5/1e-4 tolerances absorb it), the
       Issue-639 params discipline. 2 parity tests green (7×1024
       identity-gamma with the zero-mean/unit-var row claims + 3×64
       non-trivial gamma); full gpu lib 203/0; clippy `-D` clean at
-      cubecl_runtime + default postures. (b) the `CubeclBackend`
-      skeleton in the laya lane — NOT STARTED. (b) `CubeclBackend` skeleton in the laya lane
+      cubecl_runtime + default postures. (b) NOT STARTED — the
+      `CubeclBackend` skeleton in the laya lane
       (`laya/riir/cubecl.rs`, feature-gated): `name()` = `"cubecl"`,
       the trivial ops first (add / add_bias_row / scale / relu /
       gelu_erf / glu_gelu_gate / copy_into / copy_at) over
