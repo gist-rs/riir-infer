@@ -137,7 +137,10 @@ struct Args {
     /// blocks through the haystack. 0 = the Bench 008 fixture,
     /// byte-identical (no hub splices, no hub rows).
     hubs: usize,
-    lambda: f32,
+    /// Differential λ grid — one diff arm per value (CSV). All share the
+    /// single full-cache reference, so every λ's delta is against the same
+    /// full run. max-recent is the λ=0 baseline arm regardless.
+    lambdas: Vec<f32>,
     beta: f32,
     window: u32,
     cadence: usize,
@@ -167,7 +170,7 @@ fn parse_args() -> Args {
         budget_fracs: vec![0.25, 0.50],
         needles: 8,
         hubs: 0,
-        lambda: 1.0,
+        lambdas: vec![1.0],
         beta: 0.1,
         window: 256,
         cadence: 512,
@@ -197,7 +200,12 @@ fn parse_args() -> Args {
             "--needles" => a.needles = val("needles").parse().unwrap(),
             "--hubs" => a.hubs = val("hubs").parse().unwrap(),
             "--sinks" => a.sinks = val("sinks").parse().unwrap(),
-            "--lambda" => a.lambda = val("lambda").parse().unwrap(),
+            "--lambda" => {
+                a.lambdas = val("lambda")
+                    .split(',')
+                    .map(|s| s.parse().unwrap())
+                    .collect()
+            }
             "--beta" => a.beta = val("beta").parse().unwrap(),
             "--window" => a.window = val("window").parse().unwrap(),
             "--cadence" => a.cadence = val("cadence").parse().unwrap(),
@@ -520,7 +528,11 @@ fn main() -> Result<()> {
         question_toks.len(),
         answer_toks.len(),
         args.budget_fracs,
-        args.lambda,
+        args.lambdas
+            .iter()
+            .map(|l| format!("{l}"))
+            .collect::<Vec<_>>()
+            .join(","),
         args.beta,
         args.window,
         args.cadence,
@@ -558,13 +570,15 @@ fn main() -> Result<()> {
     for &frac in &args.budget_fracs {
         let budget = (args.context as f32 * frac) as usize;
         let tag = format_frac(frac);
-        arms.push(Arm {
-            name: format!("diff_l{:.2}@{tag}", args.lambda),
-            policy: Some(EvictPolicy::Differential(DiffEvictConfig::new(
-                args.lambda, args.beta, args.window,
-            ))),
-            budget,
-        });
+        for &lambda in &args.lambdas {
+            arms.push(Arm {
+                name: format!("diff_l{lambda:.2}@{tag}"),
+                policy: Some(EvictPolicy::Differential(DiffEvictConfig::new(
+                    lambda, args.beta, args.window,
+                ))),
+                budget,
+            });
+        }
         arms.push(Arm {
             name: format!("maxrecent@{tag}"),
             policy: Some(EvictPolicy::Differential(DiffEvictConfig::max_recent(
@@ -723,7 +737,9 @@ fn main() -> Result<()> {
     }
 
     println!("\n# wall total {:.1}s | rig tokens {} | λ={} β={} W={} cadence={} hubs={} sinks={}",
-        t_start.elapsed().as_secs_f32(), prompt.len(), args.lambda, args.beta, args.window, args.cadence, args.hubs, args.sinks);
+        t_start.elapsed().as_secs_f32(), prompt.len(),
+        args.lambdas.iter().map(|l| format!("{l}")).collect::<Vec<_>>().join(","),
+        args.beta, args.window, args.cadence, args.hubs, args.sinks);
 
     if let Some(out) = &args.out {
         std::fs::create_dir_all(out)?;
