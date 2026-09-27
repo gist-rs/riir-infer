@@ -218,6 +218,43 @@ impl Encoder {
         input_ids: &[u32],
         seqs: &[usize],
     ) -> Result<Vec<f32>> {
+        self.forward_packed_impl(b, input_ids, seqs, None)
+    }
+
+    /// RESIDUAL-STATE CAPTURE (Issue 022 T1.2, feature `twt_profile`):
+    /// the packed forward with a per-stage sink over the residual stream.
+    /// The sink receives every row's stream state after the embedding
+    /// norm ([`CaptureStage::Embedding`]) and after each layer's final
+    /// residual add ([`CaptureStage::AfterLayer(i)`]) — the exact states
+    /// the TWT S-matrix builder pools. ONE forward body: this delegates
+    /// to the same impl [`Self::forward_packed`] runs, so capture output
+    /// is bit-identical to a plain forward by construction.
+    ///
+    /// Cost: one `download_into` (device sync) per stage — calibration
+    /// only, never a serving path.
+    #[cfg(feature = "twt_profile")]
+    pub fn forward_capture(
+        &self,
+        b: &dyn Backend,
+        input_ids: &[u32],
+        seqs: &[usize],
+        sink: &mut dyn FnMut(CaptureStage, usize, &[f32]),
+    ) -> Result<()> {
+        let cap = CaptureSink {
+            sink,
+            buf: Vec::new(),
+        };
+        self.forward_packed_impl(b, input_ids, seqs, Some(cap))?;
+        Ok(())
+    }
+
+    fn forward_packed_impl(
+        &self,
+        b: &dyn Backend,
+        input_ids: &[u32],
+        seqs: &[usize],
+        mut capture: Option<CaptureSink<'_>>,
+    ) -> Result<Vec<f32>> {
         let total = input_ids.len();
         debug_assert_eq!(seqs.iter().sum::<usize>(), total, "packed seqs sum");
         // Per-question row segments for the backend's kernel choice (the
@@ -248,6 +285,9 @@ impl Encoder {
         let mut h = vec![0f32; total * d];
         let mut sq = Vec::new();
         b.layer_norm_nobias_into(&gathered, &self.emb_norm, eps, d, &mut sq, &mut h);
+        if let Some(cap) = capture.as_mut() {
+            cap.emit(b, CaptureStage::Embedding, &h, total, d)?;
+        }
 
         let mut sc = Scratch::new();
         sc.reset(total * d);
@@ -281,7 +321,7 @@ impl Encoder {
             Vec::new()
         };
 
-        for layer in &self.layers {
+        for (li, layer) in self.layers.iter().enumerate() {
             // x = attn_norm(h) — or h itself on layer 0 (the identity path,
             // copied DEVICE-side: the residual stream is device-current
             // under Metal and a host copy would read stale bytes).
@@ -344,6 +384,9 @@ impl Encoder {
             sc.act.resize(total * i_sz, 0.0);
             b.matmul_w_glu(&sc.xn, total, d, &layer.wi, i_sz, &mut sc.act);
             b.matmul_w_accum(&sc.act, total, i_sz, &layer.mlp_wo, d, &mut h);
+            if let Some(cap) = capture.as_mut() {
+                cap.emit(b, CaptureStage::AfterLayer(li), &h, total, d)?;
+            }
         }
 
         let mut out = vec![0f32; total * d];
@@ -539,5 +582,43 @@ impl<'a> RowSegments<'a> {
 impl Drop for RowSegments<'_> {
     fn drop(&mut self) {
         self.0.set_row_segments(&[]);
+    }
+}
+
+/// Which residual-stream snapshot a capture sink is receiving (Issue 022
+/// T1.2). `AfterLayer(i)` is the stream after layer `i`'s final residual
+/// add — the state a TWT block surrogate would map TO; `Embedding` is the
+/// stream input (block 0's `h_{s-1}` side). Capture-only vocabulary: the
+/// only producer is [`Encoder::forward_capture`] (feature `twt_profile`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CaptureStage {
+    Embedding,
+    AfterLayer(usize),
+}
+
+/// The internal sink wrapper [`forward_packed_impl`] optionally carries.
+/// One `download_into` per stage (device-current under Metal), then one
+/// sink call per row with a `d`-wide slice.
+struct CaptureSink<'a> {
+    sink: &'a mut dyn FnMut(CaptureStage, usize, &[f32]),
+    buf: Vec<f32>,
+}
+
+impl CaptureSink<'_> {
+    fn emit(
+        &mut self,
+        b: &dyn Backend,
+        stage: CaptureStage,
+        h: &[f32],
+        total: usize,
+        d: usize,
+    ) -> Result<()> {
+        self.buf.clear();
+        self.buf.resize(h.len(), 0.0);
+        b.download_into(h, &mut self.buf);
+        for row in 0..total {
+            (self.sink)(stage, row, &self.buf[row * d..(row + 1) * d]);
+        }
+        Ok(())
     }
 }

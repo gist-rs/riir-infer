@@ -3553,6 +3553,7 @@ dependencies = [
  "log",
  "memmap2",
  "rayon",
+ "riir-infer-laya",
  "sentencepiece",
  "serde",
  "serde_json",

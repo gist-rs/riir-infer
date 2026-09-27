@@ -112,6 +112,16 @@ act_scale_refit = ["act_diagonal_calibration", "katgpt-core/act_aware_fit"]
 # attention kernels are untouched). Reproduces the row_logit_floor policy
 # when both are on. Offline instrument, opt-in.
 attention_to_answer = []
+# twt_profile (riir-infer Issue 022, 2026-09-27): the TWT phase-collapse
+# PoC lane — the S-matrix profiler (PairCosineAccum + streaming builder,
+# cosine + projected-SVCCA meter arms), the min-max DP partition, the ΔS
+# quant-damage map, and the `twt_laya_profile` capture driver. OPT-IN per
+# the feature-flag discipline: never a default without the Phase-5 GOAT
+# gate. Forwards katgpt-core's `svd_cca` (the public `svcca_into` meter
+# arm). The laya capture hook (`Encoder::forward_capture`) rides the
+# SAME-named feature on the lane crate (no deps on either side — pure
+# compile gating).
+twt_profile = ["katgpt-core/svd_cca"]
 # kv_eviction (riir-infer Issue 012, 2026-09-27): the DIFFERENTIAL KV
 # eviction consumer — `deltanet::kv_evict` wires katgpt-core's
 # `DifferentialEvictTable` (+ the λ=0 max-recent, usage-rate, and
@@ -247,6 +257,45 @@ required-features = ["act_scale_refit"]
 name = "needle_eviction_gate"
 path = "src/bin/needle_eviction_gate.rs"
 required-features = ["kv_eviction"]
+
+# riir-infer Issue 022 — the TWT gate battery (G1 planted known-answers,
+# brute-force DP agreement, monotonicity, G4 alloc-free accumulate, the
+# n=4096 partition perf probe). Whole-file #![cfg(feature =
+# "twt_profile")] protects the count; this row protects the reader (a
+# --features selection without the union SKIPS the target loudly instead
+# of printing a green zero).
+[[test]]
+name = "twt_gates"
+path = "tests/twt_gates.rs"
+required-features = ["twt_profile"]
+
+# The G4 alloc-free gate, in its OWN binary: the counting allocator is
+# process-global and parallel sibling tests would leak allocations into
+# the count (one test per binary is the isolation). Whole-file #![cfg]
+# + this row = the reader protection, same as twt_gates.
+[[test]]
+name = "twt_g4_alloc"
+path = "tests/twt_g4_alloc.rs"
+required-features = ["twt_profile"]
+
+# riir-infer Issue 022 — the laya calibration capture driver (checkpoint →
+# per-layer residual states → S matrices → ε-sweep + kill verdict). The
+# module code sits behind #[cfg(feature = "twt_profile")]; this row is
+# the reader protection.
+[[example]]
+name = "twt_laya_profile"
+path = "examples/twt_laya_profile.rs"
+required-features = ["twt_profile"]
+
+[dev-dependencies]
+# The laya encoder lane — the capture driver's checkpoint source (CPU
+# backend; the capture hook rides the same-named `twt_profile` feature).
+# DEV-ONLY: normal edges never resolve the lane tree (BOUNDARY.md keeps
+# the dependency direction; the fence's F1 containment covers the path).
+riir-infer-laya = { path = "crates/riir-infer-laya", features = [
+    "laya-riir",
+    "twt_profile",
+] }
 
 # ─── Workspace ────────────────────────────────────────────────────────
 # The repo is a root-package workspace: riir-infer-core at the root,

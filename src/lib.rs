@@ -86,6 +86,12 @@ pub mod gguf_loader;
 /// `chat_probe` HF-pages shape + plain text). One loader, both instruments.
 pub mod corpus_text;
 
+/// TWT phase-collapse lane (Issue 022): the S-matrix profiler, the
+/// min-max DP partition, the ΔS quant-damage map. Opt-in — never a
+/// default without the Phase-5 GOAT gate.
+#[cfg(feature = "twt_profile")]
+pub mod twt;
+
 /// SentencePiece/BPE tokenizers for GGUF-embedded vocabularies (native-only;
 /// the sentencepiece-sys C++ backend cannot compile for wasm32).
 #[cfg(not(target_arch = "wasm32"))]

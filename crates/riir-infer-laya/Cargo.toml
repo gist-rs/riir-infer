@@ -132,6 +132,14 @@ laya-riir-cuda = ["laya-riir", "dep:cudarc"]
 # to prove ONE op vocabulary + to be the portability/CI lane.
 laya-riir-cubecl = ["laya-riir", "dep:riir-infer-gpu"]
 
+# Issue 022 (TWT phase collapse) — the residual-state capture hook
+# (`Encoder::forward_capture`). No deps: pure compile gating of a
+# debug-only forward variant (one `download_into` per layer — device
+# syncs make it calibration-only by cost). The S-matrix builder that
+# consumes the sink lives in the root crate's `twt` module under the
+# same-named feature.
+twt_profile = []
+
 # The Metal-vs-CPU op-equivalence gate is whole-file #![cfg]-gated
 # (macOS + the metal feature) and compiles to an empty binary elsewhere;
 # this row is the reader protection (a --features selection without the
