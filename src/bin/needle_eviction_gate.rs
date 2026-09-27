@@ -58,6 +58,36 @@
 //! failure mode perplexity-style metrics read as FINE — katgpt-core
 //! `runaway_gate`).
 //!
+//! # T7 — the hub-distractor regime (`--hubs N`)
+//!
+//! Bench 008 measured differential ≡ max-recent on natural text: nothing in
+//! the filler carries persistent attention mass (μ ≈ 0 outside the sinks,
+//! which are exempt), so the λ common-mode correction has nothing to
+//! demote — the two policies' selections were identical to 3 decimals.
+//! This mode plants the regime: N hub codes (`QZARF####`, "sealed archive"
+//! notices — code-shaped like the needles so the question's queries attend
+//! them, semantically excluded from the question), each planted as 4
+//! repeated blocks through the haystack with the code repeated 3× per
+//! block. Within-block repetition is what builds μ: the block's own
+//! queries (recency + induction) continuously attend the earlier code
+//! occurrences, so hub code rows carry SUSTAINED mass while needle code
+//! rows carry only the question-time spike.
+//!
+//! Pre-registered separation readout: hub-row survival must FALL with λ
+//! while needle-row survival does not (the μ-correction demotes hubs
+//! specifically). If no λ in the grid moves hub survival at any budget,
+//! the μ mechanism does not bind on real text even under planted hub
+//! repetition — Issue 012 T7 closes as a recorded NEGATIVE (the primitive
+//! is synthetic-regime-bound at this observation state).
+//!
+//! # T5 — the sink A/B (`--sinks N`)
+//!
+//! The pinned sink count (kv_sink_window n_sink; default 4 = the shipped
+//! convention). The Bench 008 pilot's λ grid was flat with n_sink=4
+//! pinned throughout, so the sink A/B had no signal; rerun the winning
+//! hub-regime cell with `--sinks 0` vs `--sinks 4` once λ sensitivity
+//! exists.
+//!
 //! # Box state
 //!
 //! The bin prints wall times per arm and refuses to summarize without
@@ -86,7 +116,8 @@ use katgpt_core::kv_sink_window::SinkWindowPolicy;
 /// span). Frozen before any budget arm ran; see the module doc.
 const EPS_NATS: f32 = 1.0;
 
-/// Sinks: the kv_sink_window default convention (first 4 positions).
+/// Sinks: the kv_sink_window default convention (first 4 positions) — the
+/// `--sinks` default. The runtime value is `args.sinks` (T5 A/B lever).
 const N_SINK: usize = 4;
 
 /// T4 control text: a neutral continuation (nothing to do with the needles).
@@ -102,6 +133,10 @@ struct Args {
     context: usize,
     budget_fracs: Vec<f32>,
     needles: usize,
+    /// T7: distinct hub codes, each planted as 4 repeated "sealed archive"
+    /// blocks through the haystack. 0 = the Bench 008 fixture,
+    /// byte-identical (no hub splices, no hub rows).
+    hubs: usize,
     lambda: f32,
     beta: f32,
     window: u32,
@@ -115,9 +150,12 @@ struct Args {
     /// the budget applies. 0 = pure streaming (eviction during the
     /// haystack too; needles die young — the pilot's honest negative).
     defer: u8,
-    /// Arm filter substring: when set, only arms whose name contains it run
-    /// (plus the always-on full reference, which the deltas need).
-    arms_filter: Option<String>,
+    /// Arm filter: comma-separated substrings; an arm runs when its name
+    /// contains ANY of them (the full reference always runs — the deltas
+    /// need it).
+    arms_filter: Option<Vec<String>>,
+    /// T5: pinned sink rows at the head of the cache (kv_sink_window).
+    sinks: usize,
     out: Option<PathBuf>,
 }
 
@@ -128,6 +166,7 @@ fn parse_args() -> Args {
         context: 65_536,
         budget_fracs: vec![0.25, 0.50],
         needles: 8,
+        hubs: 0,
         lambda: 1.0,
         beta: 0.1,
         window: 256,
@@ -137,6 +176,7 @@ fn parse_args() -> Args {
         chunk: 8192,
         defer: 1,
         arms_filter: None,
+        sinks: N_SINK,
         out: None,
     };
     let mut it = std::env::args().skip(1);
@@ -155,6 +195,8 @@ fn parse_args() -> Args {
                     .collect()
             }
             "--needles" => a.needles = val("needles").parse().unwrap(),
+            "--hubs" => a.hubs = val("hubs").parse().unwrap(),
+            "--sinks" => a.sinks = val("sinks").parse().unwrap(),
             "--lambda" => a.lambda = val("lambda").parse().unwrap(),
             "--beta" => a.beta = val("beta").parse().unwrap(),
             "--window" => a.window = val("window").parse().unwrap(),
@@ -163,7 +205,14 @@ fn parse_args() -> Args {
             "--seed" => a.seed = val("seed").parse().unwrap(),
             "--chunk" => a.chunk = val("chunk").parse().unwrap(),
             "--defer" => a.defer = val("defer").parse().unwrap(),
-            "--arms" => a.arms_filter = Some(val("arms")),
+            "--arms" => {
+                a.arms_filter = Some(
+                    val("arms")
+                        .split(',')
+                        .map(str::to_string)
+                        .collect(),
+                )
+            }
             "--out" => a.out = Some(val("out").into()),
             other => panic!("unknown arg {other}"),
         }
@@ -194,6 +243,18 @@ struct ArmReport {
     /// Fraction of needle code rows still resident at answer start,
     /// averaged over attention layers.
     needle_row_survival: f32,
+    /// T7: same readout over the hub-code rows (NaN when `--hubs 0`).
+    /// The separation instrument: must FALL with λ while needle-row
+    /// survival does not.
+    hub_row_survival: f32,
+    /// T7: the WALL hub rows only (the last ~200 tokens before the
+    /// question — where μ is live at eviction time). The primary
+    /// separation readout.
+    wall_row_survival: f32,
+    /// Total hub code rows in the prompt (0 when `--hubs 0`).
+    hub_rows: usize,
+    /// Wall hub code rows (0 when `--hubs 0`).
+    wall_rows: usize,
     /// T4: neutral continuation NLL per token.
     generic_nll: Option<f32>,
     /// Runaway probe: greedy decode hit the cap without EOS.
@@ -285,34 +346,158 @@ fn main() -> Result<()> {
         answer_code_spans.push(span);
     }
 
-    // Prompt: filler with needle sentences spliced at even depths.
-    let needle_budget = needle_sent_toks.iter().map(|s| s.len()).sum::<usize>();
-    let usable = args
-        .context
-        .saturating_sub(question_toks.len() + needle_budget + 64);
-    let mut prompt: Vec<usize> = Vec::with_capacity(args.context + 64);
-    let mut filler_at = 0usize;
-    {
-        // Fill so far; splice; the final tail brings the total to `context`.
-        let mut filler_cursor = filler_at;
-        for (i, sent) in needle_sent_toks.iter().enumerate() {
-            let depth = usable * (i + 1) / (args.needles + 1) + N_SINK + 8;
-            while prompt.len() < depth && filler_cursor < filler_tokens.len() {
-                prompt.push(filler_tokens[filler_cursor]);
-                filler_cursor += 1;
-            }
-            let sent_start = prompt.len();
-            prompt.extend_from_slice(sent);
-            let phrase_toks = tok.encode(&format!(" QWARF{:04}", needles[i].code));
-            let span = find_subspan(sent, &phrase_toks)?;
-            needles[i].depth_tokens = sent_start;
-            needles[i].prompt_code_span = (sent_start + span.0, sent_start + span.1);
-        }
-        filler_at = filler_cursor;
+    // ── T7 hub blocks (distractor regime; none when --hubs 0) ──
+    //
+    // TWO placements, and the distinction is the instrument:
+    // - MID blocks: the even interleave through the haystack. Their μ decays
+    //   (β=0.1 EMA horizon ≈ 10 queries) long before eviction, so they
+    //   compete on question-time mass alone under BOTH scores — distractor
+    //   pressure, no λ separation expected.
+    // - WALL blocks: the last ~200 tokens before the question. Their own
+    //   queries sit inside the observation window (W), so their rows carry
+    //   SUSTAINED mass at eviction time: a moderate, μ ≈ a ⇒ d = a − λμ ≈ 0
+    //   (demoted at λ ≥ 1) while λ = 0 keeps them on raw a. Needle rows in
+    //   the same window carry the question spike with μ ≈ 0.1·spike. The
+    //   pre-registered separation readout is wall-hub survival FALLING with
+    //   λ while needle survival does not.
+    const HUB_BLOCKS_PER_CODE: usize = 4;
+    const HUB_WALL_BLOCKS: usize = 4;
+    struct HubBlock {
+        toks: Vec<usize>,
+        /// Relative spans of EVERY hub-code occurrence inside `toks`.
+        code_spans: Vec<(usize, usize)>,
     }
-    while prompt.len() < args.context && filler_at < filler_tokens.len() {
-        prompt.push(filler_tokens[filler_at]);
-        filler_at += 1;
+    let make_hub_block = |c: usize, code: u64| -> Result<HubBlock> {
+        let text = format!(
+            "Sealed archive notice {c}: restricted code QZARF{code:04} stays sealed; do not disclose QZARF{code:04} before the audit closes; reference QZARF{code:04} only through the records office. "
+        );
+        let toks = tok.encode(&text);
+        let phrase = tok.encode(&format!(" QZARF{code:04}"));
+        let code_spans = find_all_subspans(&toks, &phrase)
+            .with_context(|| format!("hub code spans (code {code})"))?;
+        Ok(HubBlock { toks, code_spans })
+    };
+    let hub_codes: Vec<u64> = (0..args.hubs).map(|i| 20_000 + i as u64 * 977).collect();
+    let mut hub_blocks: Vec<HubBlock> =
+        Vec::with_capacity(hub_codes.len() * HUB_BLOCKS_PER_CODE);
+    for _b in 0..HUB_BLOCKS_PER_CODE {
+        for (c, &code) in hub_codes.iter().enumerate() {
+            hub_blocks.push(make_hub_block(c, code)?);
+        }
+    }
+    let mut wall_blocks: Vec<HubBlock> = Vec::with_capacity(HUB_WALL_BLOCKS);
+    for wb in 0..HUB_WALL_BLOCKS {
+        if hub_codes.is_empty() {
+            break;
+        }
+        let c = wb % hub_codes.len();
+        wall_blocks.push(make_hub_block(c, hub_codes[c])?);
+    }
+
+    // Prompt: filler with needle sentences + hub blocks spliced at even
+    // depths (needles first at evenly-strided slots, hub blocks filling the
+    // remaining slots in order — each code's 4 blocks land ~1/4 of the
+    // usable depth apart).
+    let needle_budget = needle_sent_toks.iter().map(|s| s.len()).sum::<usize>();
+    let hub_budget: usize = hub_blocks.iter().map(|b| b.toks.len()).sum();
+    let usable = args.context.saturating_sub(
+        question_toks.len() + needle_budget + hub_budget + 64,
+    );
+    enum Splice<'a> {
+        Needle(usize),
+        Hub(&'a HubBlock),
+        /// A wall block — hub rows measured SEPARATELY (the separation
+        /// instrument; see the block comment above).
+        HubWall(&'a HubBlock),
+    }
+    let n_slots = args.needles + hub_blocks.len();
+    let mut slot_of: Vec<Option<Splice>> = (0..n_slots).map(|_| None).collect();
+    for i in 0..args.needles {
+        let s = ((i + 1) * n_slots / (args.needles + 1)).saturating_sub(1).min(n_slots - 1);
+        slot_of[s] = Some(Splice::Needle(i));
+    }
+    {
+        let mut hb = hub_blocks.iter();
+        for slot in slot_of.iter_mut() {
+            if slot.is_none()
+                && let Some(block) = hb.next()
+            {
+                *slot = Some(Splice::Hub(block));
+            }
+        }
+    }
+    // Wall depths: HUB_WALL_BLOCKS blocks ending `16` tokens before the
+    // question, stride block_len+8 — the final ~200 prompt tokens are hub
+    // blocks, all inside/at the edge of the W-token observation window.
+    let mut splices: Vec<(usize, Splice)> = Vec::with_capacity(n_slots + wall_blocks.len());
+    for (s, item) in slot_of.into_iter().enumerate() {
+        if let Some(item) = item {
+            let depth = usable * (s + 1) / (n_slots + 1) + args.sinks + 8;
+            splices.push((depth, item));
+        }
+    }
+    for (wb, block) in wall_blocks.iter().enumerate() {
+        let blen = block.toks.len();
+        let depth = args
+            .context
+            .saturating_sub(16 + blen + wb * (blen + 8));
+        splices.push((depth, Splice::HubWall(block)));
+    }
+    splices.sort_by_key(|(d, _)| *d);
+    let mut prompt: Vec<usize> = Vec::with_capacity(args.context + 64);
+    let mut filler_cursor = 0usize;
+    let mut hub_spans: Vec<(usize, usize)> = Vec::new();
+    let mut wall_spans: Vec<(usize, usize)> = Vec::new();
+    for (depth, item) in &splices {
+        while prompt.len() < *depth && filler_cursor < filler_tokens.len() {
+            prompt.push(filler_tokens[filler_cursor]);
+            filler_cursor += 1;
+        }
+        match item {
+            Splice::Needle(i) => {
+                let sent = &needle_sent_toks[*i];
+                let sent_start = prompt.len();
+                prompt.extend_from_slice(sent);
+                let phrase_toks = tok.encode(&format!(" QWARF{:04}", needles[*i].code));
+                let span = find_subspan(sent, &phrase_toks)?;
+                needles[*i].depth_tokens = sent_start;
+                needles[*i].prompt_code_span = (sent_start + span.0, sent_start + span.1);
+            }
+            Splice::Hub(block) => {
+                let start = prompt.len();
+                prompt.extend_from_slice(&block.toks);
+                for (r0, r1) in &block.code_spans {
+                    hub_spans.push((start + r0, start + r1));
+                }
+            }
+            Splice::HubWall(block) => {
+                let start = prompt.len();
+                prompt.extend_from_slice(&block.toks);
+                for (r0, r1) in &block.code_spans {
+                    let span = (start + r0, start + r1);
+                    wall_spans.push(span);
+                    hub_spans.push(span);
+                }
+            }
+        }
+    }
+    while prompt.len() < args.context && filler_cursor < filler_tokens.len() {
+        prompt.push(filler_tokens[filler_cursor]);
+        filler_cursor += 1;
+    }
+    // A splice is never placed close enough to the tail for the truncate to
+    // cut it (last slot sits ~usable/(n_slots+1) before `context`, and one
+    // block is far smaller) — but a corpus shorter than `context` would
+    // shift every depth, so the spans are checked, not assumed.
+    for (i, n) in needles.iter().enumerate() {
+        if n.prompt_code_span.1 > args.context {
+            bail!("needle {i} code span {:?} truncated (corpus shorter than context?)", n.prompt_code_span);
+        }
+    }
+    for (i, (s0, s1)) in hub_spans.iter().enumerate() {
+        if *s1 > args.context {
+            bail!("hub span {i} ({s0}..{s1}) truncated (corpus shorter than context?)");
+        }
     }
     prompt.truncate(args.context);
     // The question begins exactly at `args.context` — the prefill boundary.
@@ -324,9 +509,12 @@ fn main() -> Result<()> {
         .filter(|&&t| t == DeltaNetLayerType::Attention)
         .count();
     println!(
-        "# rig: context={} needles={} attn_layers={} prompt={} question={} answer={} fracs={:?} λ={} β={} W={} cadence={} defer={}",
+        "# rig: context={} needles={} hubs={} hub_code_rows={} wall_rows={} attn_layers={} prompt={} question={} answer={} fracs={:?} λ={} β={} W={} cadence={} defer={} sinks={}",
         args.context,
         args.needles,
+        args.hubs,
+        hub_spans.len(),
+        wall_spans.len(),
         n_attn_layers,
         prompt.len(),
         question_toks.len(),
@@ -337,11 +525,21 @@ fn main() -> Result<()> {
         args.window,
         args.cadence,
         args.defer,
+        args.sinks,
     );
     for (i, n) in needles.iter().enumerate() {
         println!(
             "# needle {i}: depth={} code_span={:?} answer_span={:?}",
             n.depth_tokens, n.prompt_code_span, answer_code_spans[i],
+        );
+    }
+    if !hub_spans.is_empty() {
+        println!(
+            "# hub spans: {} rows (wall {}), first={:?} last={:?}",
+            hub_spans.len(),
+            wall_spans.len(),
+            hub_spans.first(),
+            hub_spans.last(),
         );
     }
 
@@ -390,10 +588,11 @@ fn main() -> Result<()> {
     let mut full_nll_opt: Option<Vec<f32>> = None;
     let mut reports: Vec<ArmReport> = Vec::with_capacity(arms.len());
     for arm in &arms {
-        if let Some(f) = &args.arms_filter {
-            if arm.name != "full" && !arm.name.contains(f.as_str()) {
-                continue;
-            }
+        if let Some(fs) = &args.arms_filter
+            && arm.name != "full"
+            && !fs.iter().any(|f| arm.name.contains(f.as_str()))
+        {
+            continue;
         }
         let defer_until = if args.defer != 0 { prompt.len() as u64 } else { 0 };
         let layer_cfg = arm.policy.map(|policy| EvictLayerConfig {
@@ -409,6 +608,8 @@ fn main() -> Result<()> {
             &rope_freq,
             &prompt,
             &needles,
+            &hub_spans,
+            &wall_spans,
             &answer_code_spans,
             &answer_toks,
             layer_cfg,
@@ -416,7 +617,7 @@ fn main() -> Result<()> {
             &tok,
         )?;
         println!(
-            "# arm {:<18} {:.1}s | evicted={:>6} events={:>3} idle={:>3} | genNLL={:.3} | out_len={}{}",
+            "# arm {:<18} {:.1}s | evicted={:>6} events={:>3} idle={:>3} | genNLL={:.3} | out_len={}{} | surv n/h/w = {:.3}/{:.3}/{:.3}",
             report.name,
             report.wall_seconds,
             report.evicted_rows,
@@ -425,6 +626,9 @@ fn main() -> Result<()> {
             report.generic_nll.unwrap_or(f32::NAN),
             report.output_len,
             if report.capped { " (CAPPED)" } else { "" },
+            report.needle_row_survival,
+            report.hub_row_survival,
+            report.wall_row_survival,
         );
         // Incremental delta vs the full arm (it always runs first) — the
         // verdict survives even if a later arm or the summary is lost.
@@ -456,8 +660,8 @@ fn main() -> Result<()> {
     let bar = 1.0 - 1.0 / n_needles as f32;
     println!("\n# ── retrieval (bar ≥ {}/{} = {bar:.3}, EPS_NATS = {EPS_NATS}) ──", n_needles - 1, n_needles);
     println!(
-        "# {:<18} {:>9} {:>10} {:>10} {:>9}",
-        "arm", "retrieval", "meanΔnats", "survival", "genNLL"
+        "# {:<18} {:>9} {:>10} {:>10} {:>10} {:>10} {:>9}",
+        "arm", "retrieval", "meanΔnats", "n_surv", "hub_surv", "wall_surv", "genNLL"
     );
     for r in &mut reports {
         r.delta_nll = r
@@ -473,11 +677,13 @@ fn main() -> Result<()> {
         };
         r.retained = r.delta_nll.iter().filter(|&&d| d <= EPS_NATS).count();
         println!(
-            "# {:<18} {:>9.3} {:>+10.3} {:>10.3} {:>9.3}",
+            "# {:<18} {:>9.3} {:>+10.3} {:>10.3} {:>10.3} {:>10.3} {:>9.3}",
             r.name,
             r.retrieval(),
             r.mean_delta,
             r.needle_row_survival,
+            r.hub_row_survival,
+            r.wall_row_survival,
             r.generic_nll.unwrap_or(f32::NAN),
         );
     }
@@ -516,8 +722,8 @@ fn main() -> Result<()> {
         }
     }
 
-    println!("\n# wall total {:.1}s | rig tokens {} | λ={} β={} W={} cadence={}",
-        t_start.elapsed().as_secs_f32(), prompt.len(), args.lambda, args.beta, args.window, args.cadence);
+    println!("\n# wall total {:.1}s | rig tokens {} | λ={} β={} W={} cadence={} hubs={} sinks={}",
+        t_start.elapsed().as_secs_f32(), prompt.len(), args.lambda, args.beta, args.window, args.cadence, args.hubs, args.sinks);
 
     if let Some(out) = &args.out {
         std::fs::create_dir_all(out)?;
@@ -544,6 +750,28 @@ fn find_subspan(hay: &[usize], needle: &[usize]) -> Result<(usize, usize)> {
         }
     }
     bail!("needle span not found");
+}
+
+/// All non-overlapping occurrences of `needle` in `hay`, left to right
+/// (the hub block repeats its code, so one block carries several spans).
+fn find_all_subspans(hay: &[usize], needle: &[usize]) -> Result<Vec<(usize, usize)>> {
+    if needle.is_empty() || needle.len() > hay.len() {
+        bail!("empty/oversized needle span");
+    }
+    let mut out = Vec::new();
+    let mut start = 0usize;
+    while start + needle.len() <= hay.len() {
+        if hay[start..start + needle.len()] == *needle {
+            out.push((start, start + needle.len()));
+            start += needle.len();
+        } else {
+            start += 1;
+        }
+    }
+    if out.is_empty() {
+        bail!("needle span not found");
+    }
+    Ok(out)
 }
 
 /// NLL of `tok_id` under the categorical `logits` (nats).
@@ -573,6 +801,8 @@ fn run_arm(
     rope_freq: &RopeFreqTable,
     prompt: &[usize],
     needles: &[Needle],
+    hub_spans: &[(usize, usize)],
+    wall_spans: &[(usize, usize)],
     answer_code_spans: &[(usize, usize)],
     answer_toks: &[usize],
     layer_cfg: Option<EvictLayerConfig>,
@@ -598,7 +828,7 @@ fn run_arm(
     });
     let mut evictor = EvictorState::new(
         Some(&cfg),
-        SinkWindowPolicy::new(N_SINK, usize::MAX),
+        SinkWindowPolicy::new(args.sinks, usize::MAX),
         &layer_attn,
         config.n_head,
         config.block_size,
@@ -626,33 +856,52 @@ fn run_arm(
     let prefill_done = t_arm.elapsed().as_secs_f32();
     eprintln!("# [{name}] phases: prefill={prefill_done:.1}s");
 
-    // Secondary readout: are the needle's code rows still RESIDENT when the
-    // answer starts? (policy claim, model-independent) — averaged over
-    // attention layers, via the slot→logical map.
-    let mut surv_layers = 0usize;
-    let mut surv_acc = 0.0f32;
-    for (li, &is_attn) in layer_attn.iter().enumerate() {
-        if !is_attn {
-            continue;
+    // Secondary readout: are the needle / hub / wall-hub code rows still
+    // RESIDENT when the answer starts? (policy claim, model-independent) —
+    // averaged over attention layers, via the slot→logical map.
+    fn row_survival(
+        evictor: &mut EvictorState,
+        layer_attn: &[bool],
+        spans: &[(usize, usize)],
+    ) -> f32 {
+        if spans.is_empty() {
+            return f32::NAN;
         }
-        let layer = evictor.layer(li);
-        let mut hit = 0usize;
-        let mut total = 0usize;
-        for n in needles {
-            let (s0, s1) = n.prompt_code_span;
-            for pos in s0..s1 {
-                total += 1;
-                if layer.slot_of_logical(pos as u64).is_some() {
-                    hit += 1;
+        let mut layers = 0usize;
+        let mut acc = 0.0f32;
+        for (li, &is_attn) in layer_attn.iter().enumerate() {
+            if !is_attn {
+                continue;
+            }
+            let layer = evictor.layer(li);
+            let mut hit = 0usize;
+            let mut total = 0usize;
+            for (s0, s1) in spans {
+                for pos in *s0..*s1 {
+                    total += 1;
+                    if layer.slot_of_logical(pos as u64).is_some() {
+                        hit += 1;
+                    }
                 }
             }
+            if total > 0 {
+                acc += hit as f32 / total as f32;
+                layers += 1;
+            }
         }
-        if total > 0 {
-            surv_acc += hit as f32 / total as f32;
-            surv_layers += 1;
+        if layers > 0 {
+            acc / layers as f32
+        } else {
+            f32::NAN
         }
     }
-    let needle_row_survival = if surv_layers > 0 { surv_acc / surv_layers as f32 } else { f32::NAN };
+    let needle_spans: Vec<(usize, usize)> = needles
+        .iter()
+        .map(|n| n.prompt_code_span)
+        .collect();
+    let needle_row_survival = row_survival(&mut evictor, &layer_attn, &needle_spans);
+    let hub_row_survival = row_survival(&mut evictor, &layer_attn, hub_spans);
+    let wall_row_survival = row_survival(&mut evictor, &layer_attn, wall_spans);
     let survival_done = t_arm.elapsed().as_secs_f32();
     eprintln!("# [{name}] phases: +survival={:.1}s", survival_done - prefill_done);
 
@@ -759,6 +1008,10 @@ fn run_arm(
         retained: 0,
         n_needles: needles.len(),
         needle_row_survival,
+        hub_row_survival,
+        wall_row_survival,
+        hub_rows: hub_spans.iter().map(|(s0, s1)| s1 - s0).sum(),
+        wall_rows: wall_spans.iter().map(|(s0, s1)| s1 - s0).sum(),
         generic_nll,
         capped,
         output_len,
