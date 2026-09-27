@@ -4,6 +4,62 @@ Durable records for resolved questions and closed lanes (the noise-reduction
 convention: the record lands here, hash-pinned; open work lives in `.issues/`
 and `.plans/`). Created 2026-09-23 at the first record.
 
+## 2026-09-27 — Issue 020 RESOLVED: the len_derived CAPACITY finding was the classifier's, not ours — and both fixed temp paths are gone
+
+Filed 2026-09-26 from the katgpt-rs drift sweeps (the standing red on this
+repo since the carve). Both findings closed; the issue file removed.
+
+- **Finding 1 — CAPACITY at `encoder_lane_cubecl.rs` was a classifier false
+  positive, closed in the instrument (katgpt-rs `43c14d754`).** The bind
+  `BufferArg::from_raw_parts(rows_handle, rows_host.len())` is exact by
+  construction: `rows_host` is the HOST slice param whose `.len()` IS the
+  live row count (the launcher scans the same slice for per-row bounds and
+  asserts the binding floor from it), and every caller creates the handle
+  exactly-sized (`create_u32` → `create_from_slice`, plus the test). The
+  depth-1 classifier flagged ANY `.len(` in a bind-length position as
+  allocation-as-length; the upstream `classify_pair` already required the
+  receiver to BE the handle. katgpt-rs now shares ONE rule between both
+  classifiers (`length_from_handle_size_method`) and the bind capture is
+  paren-balanced (it truncated `kv_handle.len()` at the first `)`, which the
+  old broad regex matched by accident). The bind now reads UNRESOLVED
+  (reported-and-unpinned by design, Issue 785) and the riir-infer sweep row
+  is green at its `max_findings 0` wall. No riir-infer code changed for this
+  finding — the contract was always right.
+- **Finding 2, site 1 — the ANE compile-cache root (riir-infer `20ea589`).**
+  Default root moved `temp_dir().join("riir-laya-ane-cache")` →
+  `~/Library/Caches/riir-infer/laya-ane` (macOS cache home; this lane is
+  ANE-only): persists across /tmp cleanup, keeps the compile-once-per-
+  process-tree contract across processes, and leaves the
+  `env::temp_dir().join("literal")` shape. `LAYA_ANE_CACHE` override
+  unchanged; pid-suffixed temp only when HOME is unset. Trade-off recorded
+  in the module doc: the persistent root grows one bundle per digest,
+  unbounded — clear it or set the env to reclaim. The cross-process race was
+  already mechanized (pid-unique staging + atomic rename claim) — the pid
+  recipe applied to the ROOT would have defeated the cache for zero safety
+  gain.
+- **Finding 2, site 2 — the exl3 oracle fixture (same commit).**
+  `real_pack_oracle_k_proj`'s fixture moved `/tmp/exl3-pack` →
+  `<manifest>/.raw/exl3-pack` (repo-local, gitignored,
+  `CARGO_MANIFEST_DIR`-rooted). The test never wrote the path and the
+  referenced fetch script (`.raw/exl3_layer_oracle.py`) is gone — both stale
+  references corrected, the skip-loud contract unchanged, the `.raw`-cleanup
+  risk named in the doc. `.docs/001`'s gate parenthetical updated.
+- **Rider — the riir-instinct walk-floor DELEGATION break (katgpt-rs, same
+  commit as the classifier).** Both sweeps red on "no non-zero min_rs_files
+  row for riir-instinct (16 tracked .rs)" — the floors said md-only from
+  birth on 2026-09-26 and the P1–P5 code landed the same day. Re-pinned at
+  measured (clean HEAD `337da41`: 16 rs / 33 cfg sites / 178 cand / 0
+  findings) in orphaned_attr, platform_dead_code and percentile.
+- **Validation:** audit selftest clean; len_derived `--canary` 13/13;
+  len_derived sweep PASSED (riir-infer EXACT-UPSTREAM=3 GUARD-ONLY=4
+  GUARDED=25 PERSISTENT-UPSTREAM=8 UNRESOLVED=129, no CAPACITY);
+  shared_temp_path riir-infer `fixed=0` (was 2). Clippy `-D` clean at
+  `laya-riir-ane` (the module compiles to nothing at default features —
+  feature-aware check done) and `--features exl3 --all-targets`; exl3 lib
+  tests 214 passed / 0 failed. Remaining sweep reds (mmorpg-editor 3>1,
+  riir-ai 5>4 on shared_temp_path) are those repos' own pre-pinned backlogs,
+  each owner's adjudication.
+
 ## 2026-09-26 — Issue 019 RESOLVED: the c0dfa06 Metal barrier REVERTED — A alone was the wobble, and serial dispatches never needed barriers
 
 The 019 verdict (T3), landed by the c0dfa06 author after conceding the
