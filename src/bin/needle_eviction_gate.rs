@@ -109,6 +109,12 @@ struct Args {
     free_cap: usize,
     seed: u64,
     chunk: usize,
+    /// 1 = the deferred protocol (default): the prompt prefills into the
+    /// FULL cache and the first compression fires at decode start — the
+    /// regime where the question's queries re-arm needle evidence before
+    /// the budget applies. 0 = pure streaming (eviction during the
+    /// haystack too; needles die young — the pilot's honest negative).
+    defer: u8,
     out: Option<PathBuf>,
 }
 
@@ -126,6 +132,7 @@ fn parse_args() -> Args {
         free_cap: 96,
         seed: 1337,
         chunk: 8192,
+        defer: 1,
         out: None,
     };
     let mut it = std::env::args().skip(1);
@@ -151,6 +158,7 @@ fn parse_args() -> Args {
             "--gen" => a.free_cap = val("gen").parse().unwrap(),
             "--seed" => a.seed = val("seed").parse().unwrap(),
             "--chunk" => a.chunk = val("chunk").parse().unwrap(),
+            "--defer" => a.defer = val("defer").parse().unwrap(),
             "--out" => a.out = Some(val("out").into()),
             other => panic!("unknown arg {other}"),
         }
@@ -243,7 +251,7 @@ fn main() -> Result<()> {
     for i in 0..args.needles {
         let code = 1000 + (i as u64) * 977; // deterministic, distinct
         let sent_toks = tok.encode(&needle_sentence(i, code));
-        let phrase_toks = tok.encode(&format!("QWARF{code:04}"));
+        let phrase_toks = tok.encode(&format!(" QWARF{code:04}"));
         let span = find_subspan(&sent_toks, &phrase_toks)
             .with_context(|| format!("locate phrase in needle sentence {i}"))?;
         needles.push(Needle {
@@ -266,7 +274,7 @@ fn main() -> Result<()> {
     // merge across the written boundaries).
     let mut answer_code_spans: Vec<(usize, usize)> = Vec::with_capacity(needles.len());
     for (i, n) in needles.iter().enumerate() {
-        let phrase_toks = tok.encode(&format!("QWARF{:04}", n.code));
+        let phrase_toks = tok.encode(&format!(" QWARF{:04}", n.code));
         let span = find_subspan(&answer_toks, &phrase_toks)
             .with_context(|| format!("locate phrase in answer for needle {i}"))?;
         answer_code_spans.push(span);
@@ -290,7 +298,7 @@ fn main() -> Result<()> {
             }
             let sent_start = prompt.len();
             prompt.extend_from_slice(sent);
-            let phrase_toks = tok.encode(&format!("QWARF{:04}", needles[i].code));
+            let phrase_toks = tok.encode(&format!(" QWARF{:04}", needles[i].code));
             let span = find_subspan(sent, &phrase_toks)?;
             needles[i].depth_tokens = sent_start;
             needles[i].prompt_code_span = (sent_start + span.0, sent_start + span.1);
@@ -311,7 +319,7 @@ fn main() -> Result<()> {
         .filter(|&&t| t == DeltaNetLayerType::Attention)
         .count();
     println!(
-        "# rig: context={} needles={} attn_layers={} prompt={} question={} answer={} fracs={:?} λ={} β={} W={} cadence={}",
+        "# rig: context={} needles={} attn_layers={} prompt={} question={} answer={} fracs={:?} λ={} β={} W={} cadence={} defer={}",
         args.context,
         args.needles,
         n_attn_layers,
@@ -323,6 +331,7 @@ fn main() -> Result<()> {
         args.beta,
         args.window,
         args.cadence,
+        args.defer,
     );
     for (i, n) in needles.iter().enumerate() {
         println!(
@@ -375,10 +384,12 @@ fn main() -> Result<()> {
     // ── Run ──
     let mut reports: Vec<ArmReport> = Vec::with_capacity(arms.len());
     for arm in &arms {
+        let defer_until = if args.defer != 0 { prompt.len() as u64 } else { 0 };
         let layer_cfg = arm.policy.map(|policy| EvictLayerConfig {
             policy,
             budget: arm.budget,
             cadence: args.cadence,
+            defer_until,
         });
         let report = run_arm(
             &args,
@@ -551,6 +562,7 @@ fn run_arm(
         policy: EvictPolicy::Differential(DiffEvictConfig::new(0.0, args.beta, args.window)),
         budget: usize::MAX,
         cadence: args.cadence,
+        defer_until: 0,
     });
     let mut evictor = EvictorState::new(
         Some(&cfg),
@@ -580,6 +592,7 @@ fn run_arm(
         );
     }
     let prefill_done = t_arm.elapsed().as_secs_f32();
+    eprintln!("# [{name}] phases: prefill={prefill_done:.1}s");
 
     // Secondary readout: are the needle's code rows still RESIDENT when the
     // answer starts? (policy claim, model-independent) — averaged over
@@ -609,6 +622,7 @@ fn run_arm(
     }
     let needle_row_survival = if surv_layers > 0 { surv_acc / surv_layers as f32 } else { f32::NAN };
     let survival_done = t_arm.elapsed().as_secs_f32();
+    eprintln!("# [{name}] phases: +survival={:.1}s", survival_done - prefill_done);
 
     // ── Teacher-forced answer decode ──
     // `logits` (from the prefill's last position) predict answer_toks[0].
@@ -646,7 +660,7 @@ fn run_arm(
         }
     }
     let answer_done = t_arm.elapsed().as_secs_f32();
-    let _ = (prefill_done, survival_done, answer_done);
+    eprintln!("# [{name}] phases: +answer={:.1}s", answer_done - survival_done);
 
     // ── T4: generic continuation (teacher-forced, same cache) ──
     let generic_toks = tok.encode(GENERIC_CONTINUATION);
@@ -669,6 +683,8 @@ fn run_arm(
     }
     let generic_nll = (!generic_toks.is_empty())
         .then(|| generic_acc / generic_toks.len() as f32);
+    let generic_done = t_arm.elapsed().as_secs_f32();
+    eprintln!("# [{name}] phases: +generic={:.1}s", generic_done - answer_done);
 
     // ── Runaway probe: greedy free decode to the cap ──
     let eos = tok.eos_id();
@@ -699,6 +715,10 @@ fn run_arm(
     }
 
     let stats = evictor.total_stats();
+    eprintln!(
+        "# [{name}] phases: +runaway={:.1}s",
+        t_arm.elapsed().as_secs_f32() - generic_done
+    );
     Ok(ArmReport {
         name: name.to_string(),
         needle_nll,

@@ -361,6 +361,43 @@ pub fn forward_deltanet_layer(
     scratch: &mut DeltaNetLayerScratch,
 ) {
     let n_embd = config.n_embd;
+    let n_v_heads = config.deltanet_linear_n_value_heads;
+
+    // 1-4. Projections (per-token matvec), then the shared recurrent body.
+    // The body reads the projections back out of `scratch`.
+    layer.in_proj_qkv.matvec(&x[..n_embd], &mut scratch.qkv);
+    layer.in_proj_z.matvec(&x[..n_embd], &mut scratch.z);
+    layer.in_proj_a.matvec(&x[..n_embd], &mut scratch.ab_raw[..n_v_heads]);
+    layer.in_proj_b.matvec(&x[..n_embd], &mut scratch.ab_raw[n_v_heads..]);
+
+    deltanet_layer_recurrent_body(layer, state, conv_state, config, scratch);
+
+    // 11. Output projection
+    layer
+        .out_proj
+        .matvec(&scratch.recurrent_output, &mut x[..n_embd]);
+}
+
+/// Steps 5-10 of the `DeltaNet` layer, shared by the per-token decode path
+/// ([`forward_deltanet_layer`]) and the chunked prefill (which computes the
+/// projections BATCHED via `Proj::matmat`, stages one position's rows into
+/// `scratch.{qkv,z,ab_raw}`, and calls this body — the projections are
+/// position-independent GEMMs; the recurrence is the only sequential
+/// core). Bit-identity: the staged rows hold exactly the values the
+/// per-token `matvec`s produce (`matmat` is the same dot per row — Issue
+/// 598's law), and every step below is untouched.
+///
+/// Reads `scratch.qkv` / `scratch.z` / `scratch.ab_raw` (the staged
+/// projections); leaves the gated-norm output in `scratch.recurrent_output`
+/// (post step 10, PRE out-proj). Single `scratch` borrow by design — the
+/// caller never splits it.
+pub(super) fn deltanet_layer_recurrent_body(
+    layer: &DeltaNetLayerWeights,
+    state: &mut [f32],
+    conv_state: &mut [f32],
+    config: &Config,
+    scratch: &mut DeltaNetLayerScratch,
+) {
     let n_k_heads = config.deltanet_linear_n_heads;
     let n_v_heads = config.deltanet_linear_n_value_heads;
     let key_dim = config.deltanet_linear_head_dim;
@@ -370,32 +407,10 @@ pub fn forward_deltanet_layer(
     let q_dim = n_k_heads * key_dim;
     let k_dim = n_k_heads * key_dim;
     let v_dim = n_v_heads * val_dim;
-    let qkv_dim = q_dim + k_dim + v_dim;
-    let z_dim = v_dim; // output gate has same dim as value
-    let conv_dim = qkv_dim;
+    let conv_dim = q_dim + k_dim + v_dim;
 
-    // 1. QKV projection (scratch buffers are pre-sized in `DeltaNetLayerScratch::new`).
-    layer.in_proj_qkv.matvec(&x[..n_embd], &mut scratch.qkv);
-
-    // 2. Z projection (output gate)
-    layer.in_proj_z.matvec(&x[..n_embd], &mut scratch.z);
-
-    // 3. Gate projections: a (decay input), b (update rate input).
-    // Use the `ab_raw` scratch (`[a_raw | b_raw]`) to avoid per-call allocation.
-    // in_proj_a and in_proj_b each output n_v_heads values.
-    let (a_raw, b_raw) = scratch.ab_raw.split_at_mut(n_v_heads);
-    layer.in_proj_a.matvec(&x[..n_embd], a_raw);
-    layer.in_proj_b.matvec(&x[..n_embd], b_raw);
-
-    // 4. Split QKV
-    let (q_slice, rest) = scratch.qkv.split_at_mut(q_dim);
-    let (k_slice, v_slice) = rest.split_at_mut(k_dim);
-
-    // 5. Conv1D preprocessing
-    // Concatenate [q, k, v] into a single vector for conv1d
-    scratch.conv_buf[..q_dim].copy_from_slice(q_slice);
-    scratch.conv_buf[q_dim..q_dim + k_dim].copy_from_slice(k_slice);
-    scratch.conv_buf[q_dim + k_dim..].copy_from_slice(v_slice);
+    // 5. Conv1D preprocessing: [q | k | v] into conv_buf.
+    scratch.conv_buf[..conv_dim].copy_from_slice(&scratch.qkv[..conv_dim]);
 
     causal_conv1d_update(
         &mut scratch.conv_buf,
@@ -405,25 +420,14 @@ pub fn forward_deltanet_layer(
         kernel_size,
     );
 
-    // Copy back after conv
-    q_slice.copy_from_slice(&scratch.conv_buf[..q_dim]);
-    k_slice.copy_from_slice(&scratch.conv_buf[q_dim..q_dim + k_dim]);
-    v_slice.copy_from_slice(&scratch.conv_buf[q_dim + k_dim..]);
+    // Split post-conv into q/k/v views.
+    let (q_slice, rest) = scratch.conv_buf.split_at_mut(q_dim);
+    let (k_slice, v_slice) = rest.split_at_mut(k_dim);
 
-    // 6. Compute gates into the `beta_decay` scratch (`[beta | decay]`).
-    // β = sigmoid(b);  g = ssm_a * softplus(a + dt_bias);  decay = exp(g).
-    //
-    // **Issue 594 (2026-08-10):** the GGUF converter (`qwen.py` line 297)
-    // applies `data = -torch.exp(data)` during conversion, so the `ssm_a`
-    // tensor in the GGUF ALREADY contains `-exp(A_log_raw)`. Our `a_log`
-    // field is a direct copy of `ssm_a` (loader: `blk.N.ssm_a → a_log`),
-    // so `layer.a_log[h]` IS `-exp(A_log_raw)` — no further `-exp()` needed.
-    // The old code applied `-exp()` a second time, computing
-    // `-exp(-exp(A_log_raw))` instead of `-exp(A_log_raw)`, which produced
-    // wildly wrong decay rates → flat logits (G1 FAIL).
-    //
-    // Reference: `prismml-llama.cpp/src/models/qwen35.cpp` line 451:
-    //   gate = alpha_softplus * ssm_a;   // ssm_a IS -exp(A_log) from GGUF
+    // 6. Gates: β = sigmoid(b);  decay = exp(ssm_a * softplus(a + dt_bias)).
+    // `layer.a_log[h]` IS `-exp(A_log_raw)` from the GGUF (Issue 594 — the
+    // converter applied `-exp` once; no second application here).
+    let (a_raw, b_raw) = scratch.ab_raw.split_at_mut(n_v_heads);
     let (beta, decay) = scratch.beta_decay.split_at_mut(n_v_heads);
     for h in 0..n_v_heads {
         beta[h] = crate::simd::fast_sigmoid(b_raw[h]);
@@ -432,24 +436,12 @@ pub fn forward_deltanet_layer(
         decay[h] = g.exp(); // exp(g) ∈ (0, 1]
     }
 
-    // 7-8. Expand K/Q heads to match V heads (repeat_interleave) and L2-normalize.
-    // When `repeat_factor > 1`, each k/q head is broadcast to `repeat_factor` v heads.
-    // In-place normalize into the pre-allocated `q_normed` / `k_normed` scratch.
+    // 7-8. Expand K/Q heads to match V heads (tiled, Issue 594) + L2-normalize.
+    // When `repeat_factor > 1`, each k/q head is broadcast to `repeat_factor`
+    // v heads (ggml_repeat modulo semantics — see `expand_heads_into`).
     let repeat_factor = n_v_heads / n_k_heads;
-    expand_heads_into(
-        q_slice,
-        n_k_heads,
-        key_dim,
-        repeat_factor,
-        &mut scratch.q_normed,
-    );
-    expand_heads_into(
-        k_slice,
-        n_k_heads,
-        key_dim,
-        repeat_factor,
-        &mut scratch.k_normed,
-    );
+    expand_heads_into(q_slice, n_k_heads, key_dim, repeat_factor, &mut scratch.q_normed);
+    expand_heads_into(k_slice, n_k_heads, key_dim, repeat_factor, &mut scratch.k_normed);
     for h in 0..n_v_heads {
         let off = h * key_dim;
         l2_normalize(&mut scratch.q_normed[off..off + key_dim]);
@@ -472,18 +464,9 @@ pub fn forward_deltanet_layer(
         &mut scratch.delta,
     );
 
-    // 10. Gated RMSNorm: output = rms_norm(output) * silu(z)
-    //
-    // The norm is **PER HEAD** (Issue 594, 2026-08-10). `ssm_norm` is
-    // `[val_dim]` — one gamma shared across heads — while `recurrent_output`
-    // is `n_v_heads * val_dim`. The fork's `build_norm_gated` calls
-    // `build_norm` on a tensor shaped `[head_v_dim, n_v_heads, ...]`, and ggml
-    // norms along `ne[0]`, i.e. once per head.
-    //
-    // Normalizing the whole buffer against a `val_dim`-length gamma was both
-    // the wrong math and an out-of-bounds read (`simd_scale_mul_inplace`
-    // indexes gamma by `x`'s length). That is what produced NaN logits on the
-    // real Ternary-Bonsai-27B through the ternary twin of this function.
+    // 10. Gated RMSNorm: per-head RMSNorm (`linear_norm` is `[val_dim]`,
+    // one gamma per head — Issue 594; the whole-buffer form was both the
+    // wrong math and an OOB read on the real Bonsai-27B) × silu(z), in place.
     debug_assert_eq!(
         layer.linear_norm.len(),
         val_dim,
@@ -498,17 +481,11 @@ pub fn forward_deltanet_layer(
             config.rms_norm_eps,
         );
     }
-    // Apply SiLU gate in-place (fused with the RMSNorm result).
-    for i in 0..z_dim {
+    for i in 0..v_dim {
         let z_val = scratch.z[i];
         let sig = crate::simd::fast_sigmoid(z_val);
         scratch.recurrent_output[i] *= z_val * sig; // silu(z) = z * sigmoid(z)
     }
-
-    // 11. Output projection
-    layer
-        .out_proj
-        .matvec(&scratch.recurrent_output, &mut x[..n_embd]);
 }
 
 /// Expand `n_src_heads` heads of width `head_dim` into `n_src_heads * repeat`
@@ -1234,6 +1211,24 @@ pub struct PrefillContext {
     /// Per-position head scores scratch for the sequential scoring phase:
     /// `[n_head * block_size]` (reused like the single-token path).
     head_scores: Vec<f32>,
+
+    // ── Batched DeltaNet projection scratch (Issue 012: the prefill's
+    //    deltanet branch was running its projections as PER-TOKEN matvecs —
+    //    ~39 MB of weight traffic per token per layer — which dominated the
+    //    whole prefill. The projections are position-independent GEMMs;
+    //    compute them for the whole chunk, then run the sequential
+    //    recurrence body per position off the staged rows. Bit-identical
+    //    (matmat is the same dot per row).) ──
+    /// `in_proj_qkv` for all positions: `[max_prompt_len * qkv_dim]`.
+    dn_qkv: Vec<f32>,
+    /// `in_proj_z` for all positions: `[max_prompt_len * v_dim]`.
+    dn_z: Vec<f32>,
+    /// `in_proj_a` + `in_proj_b` for all positions: `[max_prompt_len * 2 * n_v_heads]`.
+    dn_ab: Vec<f32>,
+    /// Gated recurrent outputs (pre out-proj): `[max_prompt_len * v_dim]`.
+    dn_out: Vec<f32>,
+    /// `out_proj` results: `[max_prompt_len * n_embd]`.
+    dn_out_proj: Vec<f32>,
 }
 
 impl PrefillContext {
@@ -1259,6 +1254,15 @@ impl PrefillContext {
             attn_v: vec![0.0f32; cap * kvd],
             attn_out: vec![0.0f32; cap * q_dim],
             head_scores: vec![0.0f32; config.n_head * config.block_size],
+            dn_qkv: {
+                let qkv_dim = config.deltanet_linear_n_heads * config.deltanet_linear_head_dim * 2
+                    + config.deltanet_linear_n_value_heads * config.deltanet_linear_head_dim;
+                vec![0.0f32; cap * qkv_dim]
+            },
+            dn_z: vec![0.0f32; cap * config.deltanet_linear_n_value_heads * config.deltanet_linear_head_dim],
+            dn_ab: vec![0.0f32; cap * 2 * config.deltanet_linear_n_value_heads],
+            dn_out: vec![0.0f32; cap * config.deltanet_linear_n_value_heads * config.deltanet_linear_head_dim],
+            dn_out_proj: vec![0.0f32; cap * n],
         }
     }
 }
@@ -1699,26 +1703,108 @@ pub fn prefill_qwen_deltanet_chunk_into(
     for (layer_idx, layer_weights) in weights.layers.iter().enumerate() {
         let is_linear = weights.layer_types[layer_idx] == DeltaNetLayerType::DeltaNet;
         let mut ev = evictor.as_mut().map(|state| state.layer(layer_idx));
+        let prof = std::env::var("RIIR_KV_EVICT_PROF").is_ok();
+        let t_layer = prof.then(std::time::Instant::now);
 
         if is_linear {
-            // ── DeltaNet layer ────────────────────────────────
+            // ── DeltaNet layer (chunked-batched, Issue 012) ───────────
+            // Phase 1: save residual + batched input norm (elementwise).
+            // Phase 2: batched projections — one weight-reuse GEMM each
+            //   (the per-token matvec form cost ~39 MB of weight traffic
+            //   per token per layer and dominated the prefill).
+            // Phase 3: the sequential recurrent body per position (conv →
+            //   gates → recurrence → gated norm), off the staged rows.
+            // Phase 4: batched out_proj + residual + batched MLP.
+            let n_k_heads = config.deltanet_linear_n_heads;
+            let n_v_heads = config.deltanet_linear_n_value_heads;
+            let lhd = config.deltanet_linear_head_dim;
+            let qkv_dim = (n_k_heads * 2 + n_v_heads) * lhd;
+            let v_dim = n_v_heads * lhd;
+
+            prefill_ctx.attn_residual[..seq_len * n]
+                .copy_from_slice(&prefill_ctx.hidden[..seq_len * n]);
             for p in 0..seq_len {
-                let hidden_slice = &mut prefill_ctx.hidden[p * n..(p + 1) * n];
-                scratch.residual[..n].copy_from_slice(hidden_slice);
-                rmsnorm_with_gamma_eps(hidden_slice, &layer_weights.input_norm, eps);
-                forward_deltanet_layer(
-                    hidden_slice,
+                let hs = &mut prefill_ctx.hidden[p * n..(p + 1) * n];
+                rmsnorm_with_gamma_eps(hs, &layer_weights.input_norm, eps);
+            }
+            layer_weights.in_proj_qkv.matmat(
+                &prefill_ctx.hidden[..seq_len * n],
+                &mut prefill_ctx.dn_qkv[..seq_len * qkv_dim],
+                seq_len,
+            );
+            layer_weights.in_proj_z.matmat(
+                &prefill_ctx.hidden[..seq_len * n],
+                &mut prefill_ctx.dn_z[..seq_len * v_dim],
+                seq_len,
+            );
+            layer_weights.in_proj_a.matmat(
+                &prefill_ctx.hidden[..seq_len * n],
+                &mut prefill_ctx.dn_ab[..seq_len * n_v_heads],
+                seq_len,
+            );
+            layer_weights.in_proj_b.matmat(
+                &prefill_ctx.hidden[..seq_len * n],
+                &mut prefill_ctx.dn_ab[seq_len * n_v_heads..seq_len * 2 * n_v_heads],
+                seq_len,
+            );
+
+            // Phase 3: sequential body. `scratch` stages each position's rows
+            // (an O(qkv_dim) copy) so the body needs one scratch borrow.
+            let t_rec = prof.then(std::time::Instant::now);
+            for p in 0..seq_len {
+                scratch.deltanet.qkv[..qkv_dim]
+                    .copy_from_slice(&prefill_ctx.dn_qkv[p * qkv_dim..(p + 1) * qkv_dim]);
+                scratch.deltanet.z[..v_dim]
+                    .copy_from_slice(&prefill_ctx.dn_z[p * v_dim..(p + 1) * v_dim]);
+                // a lives in the dense [0 .. seq·nv) block, b in [seq·nv ..
+                // seq·2·nv) — matching the two matmat writes below.
+                scratch.deltanet.ab_raw[..n_v_heads].copy_from_slice(
+                    &prefill_ctx.dn_ab[p * n_v_heads..(p + 1) * n_v_heads],
+                );
+                scratch.deltanet.ab_raw[n_v_heads..2 * n_v_heads].copy_from_slice(
+                    &prefill_ctx.dn_ab[seq_len * n_v_heads + p * n_v_heads
+                        ..seq_len * n_v_heads + (p + 1) * n_v_heads],
+                );
+                deltanet_layer_recurrent_body(
                     layer_weights,
                     &mut cache.deltanet_state.recurrent_states[layer_idx],
                     &mut cache.deltanet_state.conv_states[layer_idx],
                     config,
                     &mut scratch.deltanet,
                 );
-                for (h, &q) in hidden_slice.iter_mut().zip(&scratch.residual[..n]) {
-                    *h += q;
+                prefill_ctx.dn_out[p * v_dim..(p + 1) * v_dim]
+                    .copy_from_slice(&scratch.deltanet.recurrent_output[..v_dim]);
+            }
+            if let (true, Some(t0)) = (prof, t_rec) {
+                eprintln!(
+                    "# [prof] chunk-pos0={pos0} deltanet layer {layer_idx}: recurrence {:?}",
+                    t0.elapsed()
+                );
+            }
+
+            // Phase 4: batched out_proj + residual + batched MLP. The out-proj
+            // OVERWRITES the (normed) hidden — the legacy path's matvec wrote
+            // into x — and the PRE-NORM residual (attn_residual) is added on
+            // top, mirroring the legacy save/add pair.
+            layer_weights.out_proj.matmat(
+                &prefill_ctx.dn_out[..seq_len * v_dim],
+                &mut prefill_ctx.dn_out_proj[..seq_len * n],
+                seq_len,
+            );
+            for p in 0..seq_len {
+                let hidden_slice = &mut prefill_ctx.hidden[p * n..(p + 1) * n];
+                hidden_slice.copy_from_slice(&prefill_ctx.dn_out_proj[p * n..(p + 1) * n]);
+                for (h, &r) in hidden_slice
+                    .iter_mut()
+                    .zip(&prefill_ctx.attn_residual[p * n..(p + 1) * n])
+                {
+                    *h += r;
                 }
             }
             batched_mlp(prefill_ctx, layer_weights, seq_len, n, mlp, eps);
+            if let (true, Some(t)) = (prof, t_layer) {
+                eprintln!("# [prof] chunk-pos0={pos0} deltanet layer {layer_idx}: total {:?}", t.elapsed());
+            }
         } else {
             // ── Attention layer ───────────────────────────────
             let kv_cache = &mut cache.kv_cache.layers[layer_idx];
@@ -1875,6 +1961,9 @@ pub fn prefill_qwen_deltanet_chunk_into(
 
             // Phase D (batched MLP).
             batched_mlp(prefill_ctx, layer_weights, seq_len, n, mlp, eps);
+            if let (true, Some(t)) = (prof, t_layer) {
+                eprintln!("# [prof] chunk-pos0={pos0} attention layer {layer_idx}: {:?}", t.elapsed());
+            }
         }
     }
 

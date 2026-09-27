@@ -73,6 +73,18 @@ pub struct EvictLayerConfig {
     pub budget: usize,
     /// Minimum positions between selection attempts.
     pub cadence: usize,
+    /// Logical position eviction may START at. `0` = the pure streaming
+    /// protocol (selection from the first overshoot); `prompt_len` = the
+    /// deferred protocol — the whole prompt prefills into the FULL cache and
+    /// the first compression fires at decode start, on evidence that
+    /// includes the question's own queries. The deferral is the regime the
+    /// primitive's synthetic win describes (Bench 894: a needle's recent
+    /// evidence must be able to COMPETE at eviction time; during-haystack
+    /// streaming evicts every needle long before the question arrives,
+    /// because no query attends it while its evidence window is live).
+    /// Headroom posture (`budget ≥` everything) is unaffected — the gate is
+    /// `k == 0` either way, so T3 holds under both protocols.
+    pub defer_until: u64,
 }
 
 impl EvictLayerConfig {
@@ -82,6 +94,7 @@ impl EvictLayerConfig {
             policy: EvictPolicy::Differential(DiffEvictConfig::max_recent(window)),
             budget,
             cadence,
+            defer_until: 0,
         }
     }
 }
@@ -257,6 +270,9 @@ impl LayerEvict {
     /// (`key`/`value` row-major, `kvd` floats per row). Returns `true` when
     /// rows were evicted.
     pub fn maybe_evict(&mut self, cache: &mut KVCache, kvd: usize, pos: u64) -> bool {
+        if pos < self.cfg.defer_until {
+            return false;
+        }
         if self.since_select < self.cfg.cadence {
             return false;
         }
@@ -369,6 +385,7 @@ impl EvictorState {
                         policy: EvictPolicy::Differential(DiffEvictConfig::max_recent(1)),
                         budget: 0,
                         cadence: usize::MAX,
+                        defer_until: 0,
                     },
                     sinks,
                     n_heads,
@@ -424,6 +441,7 @@ mod tests {
             policy: EvictPolicy::Differential(DiffEvictConfig::new(1.0, 0.5, 4)),
             budget: 8,
             cadence: 1,
+            defer_until: 0,
         };
         let mut ev = LayerEvict::new(cfg, sinks(), n_heads, cap);
         let mut cache = KVCache {
@@ -524,6 +542,7 @@ mod tests {
             policy: EvictPolicy::Differential(DiffEvictConfig::new(1.0, 0.5, 4)),
             budget: 2,
             cadence: 4,
+            defer_until: 0,
         };
         let mut ev = LayerEvict::new(cfg, sinks(), 1, 64);
         let mut cache = KVCache {
@@ -553,6 +572,7 @@ mod tests {
             policy: EvictPolicy::Differential(DiffEvictConfig::new(1.5, 0.5, 4)),
             budget: usize::MAX,
             cadence: 1,
+            defer_until: 0,
         };
         let mut ev = LayerEvict::new(cfg, sinks(), 1, 32);
         let mut cache = KVCache {
@@ -588,14 +608,42 @@ mod tests {
         config
     }
 
-    /// Non-degenerate weights: zeros everywhere except the embedding, so
-    /// distinct tokens produce distinct K rows and real softmax rows.
+    /// Non-degenerate weights: EVERY dense projection filled deterministically
+    /// (zeros elsewhere hid a real wiring bug — the batched-deltanet residual
+    /// add — because zero out_proj made the wrong base of the residual add
+    /// invisible; the real-model bisect caught it, this test now must too).
     fn perturbed_weights(config: &crate::types::Config) -> QwenDeltaNetWeights {
         let mut w = QwenDeltaNetWeights::zeros(config);
-        let n = config.n_embd;
-        for tok in 0..config.vocab_size {
-            for d in 0..n {
-                w.wte[tok * n + d] = ((tok * 31 + d * 7) % 13) as f32 * 0.01 - 0.06;
+        let mut seed = 0x9E3779B97F4A7C15u64;
+        let mut fill = |dst: &mut [f32]| {
+            for val in dst.iter_mut() {
+                seed = seed.wrapping_mul(6_364_136_223_846_793_005).wrapping_add(1);
+                *val = ((seed >> 33) as f32 / (1u64 << 31) as f32) - 1.0;
+            }
+        };
+        fill(&mut w.wte);
+        fill(&mut w.final_norm);
+        fill(w.lm_head.dense_data_mut());
+        for layer in &mut w.layers {
+            fill(&mut layer.input_norm);
+            fill(&mut layer.post_attn_norm);
+            if layer.attn_wq.is_empty() {
+                fill(layer.in_proj_qkv.dense_data_mut());
+                fill(layer.in_proj_z.dense_data_mut());
+                fill(layer.in_proj_a.dense_data_mut());
+                fill(layer.in_proj_b.dense_data_mut());
+                fill(layer.out_proj.dense_data_mut());
+                fill(&mut layer.conv1d_weight);
+                fill(&mut layer.dt_bias);
+                fill(&mut layer.a_log);
+                fill(&mut layer.linear_norm);
+            } else {
+                fill(layer.attn_wq.dense_data_mut());
+                fill(layer.attn_wk.dense_data_mut());
+                fill(layer.attn_wv.dense_data_mut());
+                fill(layer.attn_wo.dense_data_mut());
+                fill(&mut layer.attn_q_norm);
+                fill(&mut layer.attn_k_norm);
             }
         }
         w
@@ -673,6 +721,7 @@ mod tests {
                 policy: EvictPolicy::Differential(DiffEvictConfig::new(1.0, 0.5, 4)),
                 budget: usize::MAX,
                 cadence: 1,
+            defer_until: 0,
             };
             let mut evictor = EvictorState::new(Some(&cfg), sinks(), &layer_attn, config.n_head, 512);
             for (c, chunk) in tokens.chunks(8).enumerate() {
@@ -714,7 +763,6 @@ mod tests {
     fn t3_armed_decode_bit_identical() {
         let config = tiny_hybrid();
         let weights = perturbed_weights(&config);
-        let rope_freq = crate::rope::RopeFreqTable::new(config.rope_theta, config.head_dim);
         let prompt: Vec<usize> = (0..8).map(|i| 3 + (i * 11) % 90).collect();
         let v = config.vocab_size;
 
@@ -731,6 +779,7 @@ mod tests {
                 policy: EvictPolicy::Differential(DiffEvictConfig::new(1.0, 0.5, 4)),
                 budget: usize::MAX,
                 cadence: 1,
+            defer_until: 0,
             };
             let mut evictor = EvictorState::new(Some(&cfg), sinks(), &layer_attn, config.n_head, 512);
             let mut x = vec![0.0f32; v.max(config.n_embd)];
