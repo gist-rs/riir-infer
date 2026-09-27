@@ -73,4 +73,4 @@ pub mod cubecl;
 #[cfg(all(target_os = "macos", feature = "laya-riir-ane"))]
 pub mod ane;
 
-pub use agent::RiirAgent;
+pub use agent::{EncodedQuestion, RiirAgent};

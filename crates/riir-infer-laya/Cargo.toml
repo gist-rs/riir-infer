@@ -244,6 +244,14 @@ required-features = ["laya-riir-cubecl"]
 # metal-gated like the gates above; the row keeps a feature-less selection
 # skipping the target loudly instead of printing a green zero.
 [[example]]
+name = "dump_encoder_states"
+required-features = ["laya-riir"]
+
+[[example]]
+name = "dump_scorer_tensors"
+required-features = ["laya-riir"]
+
+[[example]]
 name = "sgemm_roofline"
 required-features = ["laya-riir-metal"]
 

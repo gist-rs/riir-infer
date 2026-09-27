@@ -197,6 +197,12 @@ impl Encoder {
         self.cfg.head_dim()
     }
 
+    /// The encoder's hidden width — the head consumes `[seq, d]` rows of
+    /// the same width (riir-train Plan 425's cache law reads it).
+    pub fn hidden_dim(&self) -> usize {
+        self.cfg.hidden
+    }
+
     /// Packed varlen forward (reflex issue 020 T5): `input_ids` is the
     /// CONCATENATION of `seqs.len()` sequences with lengths `seqs`
     /// (`Σ seqs == input_ids.len()`).
@@ -438,9 +444,7 @@ impl Encoder {
         /// kernel. Cost: ~15 MB of extra readback per layer per pass.
         fn deep_probes() -> bool {
             static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-            *ON.get_or_init(|| {
-                std::env::var("LAYA_PROBE_DEEP").is_ok_and(|v| v == "1")
-            })
+            *ON.get_or_init(|| std::env::var("LAYA_PROBE_DEEP").is_ok_and(|v| v == "1"))
         }
         let total = input_ids.len();
         let _segments = RowSegments::set(b, std::slice::from_ref(&total));
@@ -471,7 +475,8 @@ impl Encoder {
 
         let mut sc = Scratch::new();
         sc.reset(total * d);
-        let rope_full = self.rope_tables_for(std::slice::from_ref(&total), hd, self.cfg.rope_theta_full);
+        let rope_full =
+            self.rope_tables_for(std::slice::from_ref(&total), hd, self.cfg.rope_theta_full);
         let rope_slide =
             self.rope_tables_for(std::slice::from_ref(&total), hd, self.cfg.rope_theta_slide);
         let window = self.cfg.sliding_window();
@@ -502,7 +507,11 @@ impl Encoder {
             dl(b, &sc.qkv, &mut pb);
             sink(&format!("L{li}.qkv"), &pb);
 
-            let rope = if layer.sliding { &rope_slide } else { &rope_full };
+            let rope = if layer.sliding {
+                &rope_slide
+            } else {
+                &rope_full
+            };
             b.attention_forward(
                 &sc.qkv,
                 0,

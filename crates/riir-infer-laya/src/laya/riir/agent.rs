@@ -178,6 +178,29 @@ impl EncoderStack {
     }
 }
 
+/// The [`RiirAgent::encode_question`] output: the encoder's output
+/// residual stream (pre-type-emb) plus the head-addressing facts the
+/// caller needs to run or train a head over it (riir-train Plan 425's
+/// cached-feature lane).
+pub struct EncodedQuestion {
+    /// The encoder's final hidden states, row-major `[seq_len, d]` —
+    /// PRE-type-emb (the type-embedding add is the head's own first op).
+    pub hidden: Vec<f32>,
+    /// The head's FROZEN representation half: the gathered marker rows
+    /// `[k_opts, d]` AFTER the type-emb add + both head layers — the exact
+    /// bytes the scorer's LN would consume (the trainer trains the scorer
+    /// on these without re-running the encoder or the layers).
+    pub marker_rows: Vec<f32>,
+    /// The head's marker positions (one per rendered option).
+    pub markers: Vec<usize>,
+    /// The question type (0 choice / 1 score / 2 noul — the type-emb row).
+    pub qtype: usize,
+    /// The token count of the forward (`hidden.len() == seq_len * d`).
+    pub seq_len: usize,
+    /// The encoder's hidden width.
+    pub d: usize,
+}
+
 /// A loaded checkpoint (riir backend): tokenizer + encoder + head +
 /// temperature tables, plus the device backend the forward runs on.
 pub struct RiirAgent {
@@ -381,6 +404,13 @@ impl RiirAgent {
         self.ckpt
     }
 
+    /// The scorer readout's tensors, cloned out for the training lane
+    /// (riir-train Plan 425: the banking77 teacher fine-tune initializes
+    /// from the checkpoint's own scorer). See [`super::head::ScorerTensors`].
+    pub fn scorer_tensors(&self) -> super::head::ScorerTensors {
+        self.head.scorer_tensors()
+    }
+
     /// The backend posture this agent runs (`"cpu"` / `"metal"` /
     /// `"ane"`) — gate lines and timing labels print it so a reading can
     /// never be mistaken for the other posture.
@@ -418,6 +448,79 @@ impl RiirAgent {
         self.forward_internal(state, &q)
     }
 
+    /// The training-seam twin of [`Self::forward_question`] (riir-train
+    /// Plan 425: the banking77 teacher fine-tune's cached-feature lane):
+    /// everything up to and INCLUDING the encoder forward, NOT the head —
+    /// the caller gets the encoder's output residual stream (pre-type-emb:
+    /// the type-embedding add is the head's own first op, so the cache is
+    /// reusable at any `qtype`) plus the marker positions and `qtype` the
+    /// head would consume. Same `build_sequence` budget law and the same
+    /// marker-truncation refusal as the forward path, so a cache row and
+    /// the teacher pass's row can never disagree about shape. Zero effect
+    /// on any existing path — pure addition.
+    pub fn encode_question(&self, state: &Value, qdef: &Value) -> Result<EncodedQuestion> {
+        let q = to_internal(qdef)?;
+        let opts = render_options(&q);
+        let (ids, markers) =
+            build_sequence(&self.tok, state, &q, self.cfg.max_len, self.cfg.head_max_len)?;
+        if opts.is_empty() || markers.len() != opts.len() {
+            return Err(LayaError::Question(format!(
+                "options exceed the head budget: {} rendered, {} markers survived",
+                opts.len(),
+                markers.len()
+            )));
+        }
+        // The cache lane's whole point: also capture the head's FROZEN
+        // representation half (type-emb add + both head layers + marker
+        // gather) so the trainer never re-runs the encoder or the layer
+        // stack. Same pass/epoch contract as [`Self::forward_internal`]
+        // (begin_pass BEFORE the encoder — the metal device slots are
+        // epoch-keyed), and BOTH host-read results sync through the
+        // backend (under Metal the op stream only drains at a
+        // download_into; under CPU these are plain copies).
+        let (hidden, marker_rows, d) = pass_pool(|| {
+            self.backend.begin_pass();
+            let mut h = match &self.enc {
+                EncoderStack::Local(e) => e.forward(self.backend.as_ref(), &ids)?,
+                #[cfg(all(target_os = "macos", feature = "laya-riir-ane"))]
+                EncoderStack::Ane(_) => {
+                    return Err(LayaError::Runtime(
+                        "encode_question: the ANE lane is not supported — run the cache lane \
+                         on cpu/metal/cuda (no residual-stream seam)"
+                            .into(),
+                    ))
+                }
+            };
+            let d = match &self.enc {
+                EncoderStack::Local(e) => e.hidden_dim(),
+                #[cfg(all(target_os = "macos", feature = "laya-riir-ane"))]
+                EncoderStack::Ane(_) => 0,
+            };
+            let mut sc = HeadScratch::new();
+            self.head.layers_forward_rows(
+                self.backend.as_ref(),
+                &mut h,
+                q.qtype,
+                &markers,
+                &mut sc,
+            )?;
+            let k = markers.len();
+            let mut rows_host = vec![0f32; k * d];
+            self.backend.download_into(&sc.rows, &mut rows_host);
+            let mut h_host = vec![0f32; h.len()];
+            self.backend.download_into(&h, &mut h_host);
+            Ok((h_host, rows_host, d))
+        })?;
+        Ok(EncodedQuestion {
+            seq_len: ids.len(),
+            markers,
+            qtype: q.qtype,
+            hidden,
+            marker_rows,
+            d,
+        })
+    }
+
     /// The internal-typed variant (avoids re-parsing per row in the test).
     pub fn forward_internal(&self, state: &Value, q: &InternalQuestion) -> Result<Forward> {
         let opts = render_options(q);
@@ -443,8 +546,13 @@ impl RiirAgent {
                 EncoderStack::Ane(e) => e.forward(&ids)?,
             };
             let mut sc = HeadScratch::new();
-            self.head
-                .forward(self.backend.as_ref(), &mut hidden, q.qtype, &markers, &mut sc)
+            self.head.forward(
+                self.backend.as_ref(),
+                &mut hidden,
+                q.qtype,
+                &markers,
+                &mut sc,
+            )
         })?;
         let t = self.temps.for_question(q.qtype, markers.len());
         Ok(Self::make_forward(q, out, ids.len(), markers, t))
@@ -559,7 +667,11 @@ impl RiirAgent {
     /// same order per question, bit-identical outputs. The quiet-box
     /// paired A/B measured typed 5-q median 0.984 (24/24 wins) with the
     /// 1-q wiring control flat.
-    fn system_one_packed(&self, state: &Value, questions: &[(String, Value)]) -> Result<Vec<Answer>> {
+    fn system_one_packed(
+        &self,
+        state: &Value,
+        questions: &[(String, Value)],
+    ) -> Result<Vec<Answer>> {
         // Collate first — the reference's `items` shape: ids + markers per
         // question, checked before any GPU work.
         let mut items: Vec<(String, InternalQuestion, Vec<u32>, Vec<usize>)> =
@@ -568,8 +680,13 @@ impl RiirAgent {
         for (qid, qdef) in questions {
             let q = to_internal(qdef)?;
             let opts = render_options(&q);
-            let (ids, markers) =
-                build_sequence(&self.tok, state, &q, self.cfg.max_len, self.cfg.head_max_len)?;
+            let (ids, markers) = build_sequence(
+                &self.tok,
+                state,
+                &q,
+                self.cfg.max_len,
+                self.cfg.head_max_len,
+            )?;
             if opts.is_empty() || markers.len() != opts.len() {
                 return Err(LayaError::Question(format!(
                     "options exceed the head budget: {} rendered, {} markers survived",
@@ -685,16 +802,14 @@ impl RiirAgent {
         scratches: &mut [HeadScratch],
     ) -> Result<()> {
         let d = hidden.len() / items.iter().map(|(_, _, ids, _)| ids.len()).sum::<usize>();
-        for ((qid, q, ids, markers), (hq, sc)) in items
-            .iter()
-            .zip(slabs.iter_mut().zip(scratches.iter_mut()))
+        for ((qid, q, ids, markers), (hq, sc)) in
+            items.iter().zip(slabs.iter_mut().zip(scratches.iter_mut()))
         {
             let rows = ids.len();
-            self.backend
-                .copy_at(hidden, *off_rows * d, hq, 0, rows * d);
-            let head_out =
-                self.head
-                    .forward(self.backend.as_ref(), hq, q.qtype, markers, sc)?;
+            self.backend.copy_at(hidden, *off_rows * d, hq, 0, rows * d);
+            let head_out = self
+                .head
+                .forward(self.backend.as_ref(), hq, q.qtype, markers, sc)?;
             *off_rows += rows;
             self.packed_capture_answer(out, qid, q, rows, markers, head_out)?;
         }
@@ -717,13 +832,11 @@ impl RiirAgent {
         let d = hidden.len() / items.iter().map(|(_, _, ids, _)| ids.len()).sum::<usize>();
         // Phase 1 — every question's stream enqueues: the slab copy out of
         // the packed residual, then layers + scorer. No read in this loop.
-        for ((_, q, ids, markers), (hq, sc)) in items
-            .iter()
-            .zip(slabs.iter_mut().zip(scratches.iter_mut()))
+        for ((_, q, ids, markers), (hq, sc)) in
+            items.iter().zip(slabs.iter_mut().zip(scratches.iter_mut()))
         {
             let rows = ids.len();
-            self.backend
-                .copy_at(hidden, *off_rows * d, hq, 0, rows * d);
+            self.backend.copy_at(hidden, *off_rows * d, hq, 0, rows * d);
             self.head
                 .forward_enqueue(self.backend.as_ref(), hq, q.qtype, markers, sc)?;
             *off_rows += rows;

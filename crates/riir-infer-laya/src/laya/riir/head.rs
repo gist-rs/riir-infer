@@ -85,6 +85,37 @@ pub struct Head {
     d: usize,
 }
 
+/// The scorer readout's tensors, cloned out for the training lane (riir-train
+/// Plan 425: the fine-tune initializes from the checkpoint's own scorer).
+pub struct ScorerTensors {
+    pub s0w: Vec<f32>,
+    pub s0b: Vec<f32>,
+    pub s1w: Vec<f32>,
+    pub s1b: Vec<f32>,
+    pub s3w: Vec<f32>,
+    pub s3b: Vec<f32>,
+    pub d: usize,
+    pub eps: f32,
+}
+
+impl Head {
+    /// The trainable-subset view: scorer tensors + the geometry the scorer
+    /// law needs. The frozen half (layers + type-emb) stays inside — the
+    /// cache lane consumes it through `layers_forward_rows` instead.
+    pub fn scorer_tensors(&self) -> ScorerTensors {
+        ScorerTensors {
+            s0w: self.s0w.clone(),
+            s0b: self.s0b.clone(),
+            s1w: self.s1w.clone(),
+            s1b: self.s1b.clone(),
+            s3w: self.s3w.clone(),
+            s3b: self.s3b.clone(),
+            d: self.d,
+            eps: self.eps,
+        }
+    }
+}
+
 /// Per-question forward outputs (raw — the agent turns these into answers).
 pub struct HeadOutput {
     /// Per-marker scorer logits (length = marker count, all valid — the
@@ -313,10 +344,18 @@ impl Head {
         self.act_of(b, sc, logits)
     }
 
-    /// Stage 1 — the type-emb add, both encoder layers and the scorer, up
-    /// to and including the scorer-logits write. NO host read: under Metal
-    /// every op enqueues into the pass's command stream and returns.
-    pub fn forward_enqueue(
+    /// Stage 1a — the type-emb add + both encoder layers + the marker
+    /// gather: the FROZEN-representation half of the head, everything up
+    /// to (not including) the scorer. Leaves the gathered marker rows in
+    /// `sc.rows` — an op-WRITTEN slot the caller syncs through the
+    /// backend ([`Backend::download_into`]; under Metal the stream only
+    /// drains there, under CPU it is already host bytes). Writes to `h`
+    /// in place (the residual stream). [`Self::forward_enqueue`] is
+    /// exactly this + the scorer over `sc.rows` (same ops, same order —
+    /// the split is the riir-train Plan 425 cache lane's seam, which
+    /// trains the scorer on synced marker rows without re-running the
+    /// encoder).
+    pub fn layers_forward_rows(
         &self,
         b: &dyn Backend,
         h: &mut [f32],
@@ -391,10 +430,28 @@ impl Head {
         let k_opts = markers.len();
         HeadScratch::fit(&mut sc.rows, k_opts * d);
         b.gather_rows(x, d, markers, &mut sc.rows);
+        Ok(())
+    }
+
+    /// Stage 1 — the type-emb add, both encoder layers and the scorer, up
+    /// to and including the scorer-logits write. NO host read: under Metal
+    /// every op enqueues into the pass's command stream and returns.
+    pub fn forward_enqueue(
+        &self,
+        b: &dyn Backend,
+        h: &mut [f32],
+        qtype: usize,
+        markers: &[usize],
+        sc: &mut HeadScratch,
+    ) -> Result<()> {
+        self.layers_forward_rows(b, h, qtype, markers, sc)?;
+        let d = self.d;
+        let k_opts = markers.len();
+        let rows = &sc.rows;
 
         // scorer: LN → Linear(d,d) → GELU → Linear(d,1).
         HeadScratch::fit(&mut sc.s, k_opts * d);
-        b.layer_norm_nobias_into(&sc.rows, &self.s0w, self.eps, d, &mut sc.sq, &mut sc.s);
+        b.layer_norm_nobias_into(rows, &self.s0w, self.eps, d, &mut sc.sq, &mut sc.s);
         b.add_bias_row(&mut sc.s, d, &self.s0b);
         HeadScratch::fit(&mut sc.s1, k_opts * d);
         b.matmul_w(&sc.s, k_opts, d, &self.s1w, d, &mut sc.s1);
