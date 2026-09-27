@@ -157,6 +157,13 @@ struct Args {
     /// contains ANY of them (the full reference always runs — the deltas
     /// need it).
     arms_filter: Option<Vec<String>>,
+    /// Load the full-cache reference from a previous run's report JSON
+    /// instead of re-running it (it is deterministic — T3-bit-identical —
+    /// so re-running it per invocation is pure waste). Guarded: the loaded
+    /// row must be `full`, at this context, with this needle count, or the
+    /// run bails rather than computing deltas against a mismatched
+    /// fixture.
+    full_from: Option<PathBuf>,
     /// T5: pinned sink rows at the head of the cache (kv_sink_window).
     sinks: usize,
     out: Option<PathBuf>,
@@ -179,6 +186,7 @@ fn parse_args() -> Args {
         chunk: 8192,
         defer: 1,
         arms_filter: None,
+        full_from: None,
         sinks: N_SINK,
         out: None,
     };
@@ -221,6 +229,7 @@ fn parse_args() -> Args {
                         .collect(),
                 )
             }
+            "--full-from" => a.full_from = Some(val("full-from").into()),
             "--out" => a.out = Some(val("out").into()),
             other => panic!("unknown arg {other}"),
         }
@@ -238,7 +247,7 @@ struct Needle {
 }
 
 /// Per-arm result (also the JSON report row).
-#[derive(serde::Serialize)]
+#[derive(serde::Serialize, serde::Deserialize)]
 struct ArmReport {
     name: String,
     /// NLL per needle (nats/token over the code span).
@@ -248,16 +257,23 @@ struct ArmReport {
     mean_delta: f32,
     retained: usize,
     n_needles: usize,
+    /// Rig context the arm ran at (0 in pre-tweak JSONs — `--full-from`
+    /// refuses those rather than risking wrong deltas).
+    #[serde(default)]
+    context: usize,
     /// Fraction of needle code rows still resident at answer start,
     /// averaged over attention layers.
     needle_row_survival: f32,
     /// T7: same readout over the hub-code rows (NaN when `--hubs 0`).
     /// The separation instrument: must FALL with λ while needle-row
     /// survival does not.
+    /// serde_json writes NaN as `null`; accept that back on load.
+    #[serde(default, deserialize_with = "de_nan_f32")]
     hub_row_survival: f32,
     /// T7: the WALL hub rows only (the last ~200 tokens before the
     /// question — where μ is live at eviction time). The primary
     /// separation readout.
+    #[serde(default, deserialize_with = "de_nan_f32")]
     wall_row_survival: f32,
     /// Total hub code rows in the prompt (0 when `--hubs 0`).
     hub_rows: usize,
@@ -272,12 +288,27 @@ struct ArmReport {
     evict_events: u64,
     idle_events: u64,
     wall_seconds: f32,
+    /// True when this row was LOADED via `--full-from`, not run by this
+    /// invocation (`wall_seconds` is the original run's). Never serialized
+    /// as true from a fresh run.
+    #[serde(default)]
+    reference_loaded: bool,
 }
 
 impl ArmReport {
     fn retrieval(&self) -> f32 {
         self.retained as f32 / self.n_needles.max(1) as f32
     }
+}
+
+/// serde_json maps non-finite f32 to `null` on write; read that back as
+/// NaN (the hub/wall survival fields are NaN whenever `--hubs 0`).
+fn de_nan_f32<'de, D>(d: D) -> std::result::Result<f32, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let v: Option<f32> = serde::Deserialize::deserialize(d)?;
+    Ok(v.unwrap_or(f32::NAN))
 }
 
 fn main() -> Result<()> {
@@ -599,9 +630,72 @@ fn main() -> Result<()> {
     }
 
     // ── Run ──
-    let mut full_nll_opt: Option<Vec<f32>> = None;
+    // `--full-from`: the deterministic full-cache reference is LOADED, never
+    // re-run (T3-bit-identical ⇒ same fixture + same weights ⇒ same NLL).
+    // Guards make a stale/mismatched reference a loud bail, not wrong
+    // deltas: name must be `full`, at THIS context, with THIS needle count
+    // (context 0 = a pre-tweak JSON without the field — refused too).
+    let loaded_full: Option<ArmReport> = match &args.full_from {
+        None => None,
+        Some(path) => {
+            let txt = std::fs::read_to_string(path)
+                .with_context(|| format!("read --full-from {}", path.display()))?;
+            // The report file is a Vec<ArmReport> — accept any previous
+            // run's report and select the full row from it.
+            let rows: Vec<ArmReport> = serde_json::from_str(&txt)
+                .with_context(|| format!("parse --full-from {}", path.display()))?;
+            let rep = rows
+                .into_iter()
+                .find(|r| r.name == "full")
+                .with_context(|| {
+                    format!("--full-from {}: no 'full' row in report", path.display())
+                })?;
+            if rep.name != "full" {
+                bail!(
+                    "--full-from {}: row is '{}', not the full-cache reference",
+                    path.display(),
+                    rep.name
+                );
+            }
+            if rep.context != args.context {
+                bail!(
+                    "--full-from {}: context {} != this invocation's {} (stale or pre-tweak JSON — re-run the full arm)",
+                    path.display(),
+                    rep.context,
+                    args.context
+                );
+            }
+            if rep.n_needles != args.needles {
+                bail!(
+                    "--full-from {}: needles {} != this invocation's {} — fixture mismatch",
+                    path.display(),
+                    rep.n_needles,
+                    args.needles
+                );
+            }
+            println!(
+                "# full reference LOADED from {} (not re-run): surv n/h/w = {:.3}/{:.3}/{:.3} genNLL={:.3}",
+                path.display(),
+                rep.needle_row_survival,
+                rep.hub_row_survival,
+                rep.wall_row_survival,
+                rep.generic_nll.unwrap_or(f32::NAN),
+            );
+            Some(rep)
+        }
+    };
+    let have_loaded_full = loaded_full.is_some();
+    let mut full_nll_opt: Option<Vec<f32>> =
+        loaded_full.as_ref().map(|r| r.needle_nll.clone());
     let mut reports: Vec<ArmReport> = Vec::with_capacity(arms.len());
+    if let Some(mut r) = loaded_full {
+        r.reference_loaded = true;
+        reports.push(r);
+    }
     for arm in &arms {
+        if arm.name == "full" && have_loaded_full {
+            continue;
+        }
         if let Some(fs) = &args.arms_filter
             && arm.name != "full"
             && !fs.iter().any(|f| arm.name.contains(f.as_str()))
@@ -1044,5 +1138,7 @@ fn run_arm(
         evict_events: stats.evict_events,
         idle_events: stats.idle_events,
         wall_seconds: t_arm.elapsed().as_secs_f32(),
+        context: args.context,
+        reference_loaded: false,
     })
 }
