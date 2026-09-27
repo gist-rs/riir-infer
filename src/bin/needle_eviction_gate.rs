@@ -115,6 +115,9 @@ struct Args {
     /// the budget applies. 0 = pure streaming (eviction during the
     /// haystack too; needles die young — the pilot's honest negative).
     defer: u8,
+    /// Arm filter substring: when set, only arms whose name contains it run
+    /// (plus the always-on full reference, which the deltas need).
+    arms_filter: Option<String>,
     out: Option<PathBuf>,
 }
 
@@ -133,6 +136,7 @@ fn parse_args() -> Args {
         seed: 1337,
         chunk: 8192,
         defer: 1,
+        arms_filter: None,
         out: None,
     };
     let mut it = std::env::args().skip(1);
@@ -159,6 +163,7 @@ fn parse_args() -> Args {
             "--seed" => a.seed = val("seed").parse().unwrap(),
             "--chunk" => a.chunk = val("chunk").parse().unwrap(),
             "--defer" => a.defer = val("defer").parse().unwrap(),
+            "--arms" => a.arms_filter = Some(val("arms")),
             "--out" => a.out = Some(val("out").into()),
             other => panic!("unknown arg {other}"),
         }
@@ -382,8 +387,14 @@ fn main() -> Result<()> {
     }
 
     // ── Run ──
+    let mut full_nll_opt: Option<Vec<f32>> = None;
     let mut reports: Vec<ArmReport> = Vec::with_capacity(arms.len());
     for arm in &arms {
+        if let Some(f) = &args.arms_filter {
+            if arm.name != "full" && !arm.name.contains(f.as_str()) {
+                continue;
+            }
+        }
         let defer_until = if args.defer != 0 { prompt.len() as u64 } else { 0 };
         let layer_cfg = arm.policy.map(|policy| EvictLayerConfig {
             policy,
@@ -415,6 +426,27 @@ fn main() -> Result<()> {
             report.output_len,
             if report.capped { " (CAPPED)" } else { "" },
         );
+        // Incremental delta vs the full arm (it always runs first) — the
+        // verdict survives even if a later arm or the summary is lost.
+        if report.name == "full" {
+            full_nll_opt = Some(report.needle_nll.clone());
+        } else if let Some(full_nll) = &full_nll_opt {
+            let deltas: Vec<f32> = report
+                .needle_nll
+                .iter()
+                .zip(full_nll)
+                .map(|(&a, &f)| a - f)
+                .collect();
+            let mean = deltas.iter().sum::<f32>() / deltas.len() as f32;
+            let retained = deltas.iter().filter(|&&d| d <= EPS_NATS).count();
+            println!(
+                "#   -> {} retrieval {}/{} (meanΔ {mean:+.3}) per-needle Δ: {:?}",
+                report.name,
+                retained,
+                deltas.len(),
+                deltas,
+            );
+        }
         reports.push(report);
     }
 
