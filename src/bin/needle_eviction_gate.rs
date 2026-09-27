@@ -872,9 +872,13 @@ fn run_arm(
     let prefill_done = t_arm.elapsed().as_secs_f32();
     eprintln!("# [{name}] phases: prefill={prefill_done:.1}s");
 
-    // Secondary readout: are the needle / hub / wall-hub code rows still
-    // RESIDENT when the answer starts? (policy claim, model-independent) —
-    // averaged over attention layers, via the slot→logical map.
+    // ⚠ The survival readouts are taken AFTER the answer decode, not here:
+    // under the deferred protocol (defer_until = prompt_len) NO eviction
+    // fires during the prefill (every prefill position < defer_until), so a
+    // post-prefill readout is vacuously 1.000. The first decode step is the
+    // first `maybe_evict` past the deferral; cadence 512 then guarantees no
+    // second selection inside the ~100-token answer — post-answer is exactly
+    // post-first-eviction.
     fn row_survival(
         evictor: &mut EvictorState,
         layer_attn: &[bool],
@@ -915,11 +919,6 @@ fn run_arm(
         .iter()
         .map(|n| n.prompt_code_span)
         .collect();
-    let needle_row_survival = row_survival(&mut evictor, &layer_attn, &needle_spans);
-    let hub_row_survival = row_survival(&mut evictor, &layer_attn, hub_spans);
-    let wall_row_survival = row_survival(&mut evictor, &layer_attn, wall_spans);
-    let survival_done = t_arm.elapsed().as_secs_f32();
-    eprintln!("# [{name}] phases: +survival={:.1}s", survival_done - prefill_done);
 
     // ── Teacher-forced answer decode ──
     // `logits` (from the prefill's last position) predict answer_toks[0].
@@ -957,7 +956,17 @@ fn run_arm(
         }
     }
     let answer_done = t_arm.elapsed().as_secs_f32();
-    eprintln!("# [{name}] phases: +answer={:.1}s", answer_done - survival_done);
+    eprintln!("# [{name}] phases: +answer={:.1}s", answer_done - prefill_done);
+
+    // Secondary readout (post-first-eviction — see the prefill note): are
+    // the needle / hub / wall-hub code rows still RESIDENT? (policy claim,
+    // model-independent) — averaged over attention layers, via the
+    // slot→logical map.
+    let needle_row_survival = row_survival(&mut evictor, &layer_attn, &needle_spans);
+    let hub_row_survival = row_survival(&mut evictor, &layer_attn, hub_spans);
+    let wall_row_survival = row_survival(&mut evictor, &layer_attn, wall_spans);
+    let survival_done = t_arm.elapsed().as_secs_f32();
+    eprintln!("# [{name}] phases: +survival={:.1}s", survival_done - answer_done);
 
     // ── T4: generic continuation (teacher-forced, same cache) ──
     let generic_toks = tok.encode(GENERIC_CONTINUATION);
