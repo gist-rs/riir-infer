@@ -637,9 +637,9 @@ fn print_families(
             .collect();
         let label = match bi {
             // margins are non-negative by construction (top1 ≥ top2)
-            0 => format!("[0, {hi})"),
-            _ if bi == EDGES.len() => format!("[{lo:.0}, ∞)"),
-            _ => format!("[{lo:.0}, {hi})"),
+            0 => format!("[0, {hi:.1})"),
+            _ if bi == EDGES.len() => format!("[{lo:.1}, ∞)"),
+            _ => format!("[{lo:.1}, {hi:.1})"),
         };
         print!("| {label} | {} |", idx.len());
         for &a in &nb {
