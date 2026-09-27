@@ -1383,17 +1383,20 @@ mod tests {
     /// Compare the Rust dequant against the independent numpy oracle over
     /// the REAL async0x42/Qwen3-8B-exl3_4.0bpw `layers.0.self_attn.k_proj`
     /// bytes (in=4096, out=1024, K=4, cb0, suh+svh). Requires the range-
-    /// fetched fixture at `/tmp/exl3-pack/` + the numpy reference (see
-    /// `.raw/exl3_layer_oracle.py`); skips loudly when absent.
+    /// fetched fixture at `<manifest>/.raw/exl3-pack/` + the numpy
+    /// reference (repo-local + gitignored — the original fetch script
+    /// `.raw/exl3_layer_oracle.py` is gone, so re-fetching means
+    /// recreating it per Issue 001 §12.5; anything that cleans `.raw`
+    /// deletes the fixture). Skips loudly when absent.
     ///
     /// Bar: relative F-norm error < 1e-4 and max-abs < 1e-3·max|W| — the two
     /// implementations accumulate identical math in different orders, so
     /// rounding is ~1e-6 while any layout bug (bit order, permutation,
     /// codebook) lands at O(1).
     #[test]
-    #[ignore = "requires /tmp/exl3-pack fixture (Issue 001 T4a; .raw/exl3_layer_oracle.py)"]
+    #[ignore = "requires .raw/exl3-pack fixture (Issue 001 T4a; the fetch script is gone, re-create per Issue 001 §12.5)"]
     fn real_pack_oracle_k_proj() {
-        let dir = std::env::temp_dir().join("exl3-pack");
+        let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join(".raw/exl3-pack");
         let trellis = std::fs::read(dir.join("k_proj.trellis.bin"));
         let (Ok(trellis), Ok(scales)) = (trellis, std::fs::read(dir.join("k_proj.scales.bin")))
         else {

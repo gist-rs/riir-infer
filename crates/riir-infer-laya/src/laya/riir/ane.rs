@@ -742,13 +742,24 @@ fn stage_bundle(staging: &Path, base: &str, key: &str) -> Result<()> {
 /// Compile the `.mlpackage` into a content-addressed `.mlmodelc` cache
 /// (recompiles never load a stale artifact: the cache key IS the digest)
 /// and return the compiled bundle path. Cache location: `LAYA_ANE_CACHE`,
-/// else the system temp dir — compile once per process tree, then
-/// `MLModel` loads are ms-cheap.
+/// else `~/Library/Caches/riir-infer/laya-ane` (the macOS cache home —
+/// this lane is ANE-only; a persistent root survives /tmp cleanup and
+/// keeps the compile-once-per-process-tree contract across processes),
+/// else a pid-suffixed temp dir when HOME is unset. Trade-off: the
+/// persistent root grows one bundle per digest, unbounded — acceptable
+/// for compiled model bundles; clear it (or set `LAYA_ANE_CACHE`) to
+/// reclaim.
 fn compile_cached(artifact_dir: &Path, digest: &str) -> Result<PathBuf> {
     let key = &digest[..16.min(digest.len())];
     let cache_root = match std::env::var_os("LAYA_ANE_CACHE") {
         Some(p) => PathBuf::from(p),
-        None => std::env::temp_dir().join("riir-laya-ane-cache"),
+        None => match std::env::var_os("HOME") {
+            Some(h) => PathBuf::from(h).join("Library/Caches/riir-infer/laya-ane"),
+            None => std::env::temp_dir().join(format!(
+                "riir-laya-ane-cache_{}",
+                std::process::id()
+            )),
+        },
     };
     let final_dir = cache_root.join(format!("mlmodelc-{key}"));
     if final_dir.is_dir() {

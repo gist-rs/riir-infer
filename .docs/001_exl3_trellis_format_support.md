@@ -631,7 +631,8 @@ ring, tensor-core element permutation, cb0 codebook, Sylvester-128
 Hadamard, scale composition). Final-W stats sane for LLM weights
 (mean −1.3e-5, std 0.053). Gate: `cargo test --features exl3 --lib
 real_pack_oracle_k_proj -- --ignored` (env-gated on the fixture at
-`%TEMP%/exl3-pack/`; skips loudly when absent).
+`<manifest>/.raw/exl3-pack/`; skips loudly when absent — the original
+fetch script is gone, re-create per §12.5).
 
 **Modern-pack marker validation:** `Terra3312/GLM-5.3-Flash-EXL3-4bpw-MUL1`
 shard-1 header: `.mul1` on **all 887 groups**, `I32` **0-dim scalar**
