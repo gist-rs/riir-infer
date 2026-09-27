@@ -34,11 +34,21 @@
 //! row_logit_floor_ppl <gemma2-f16.gguf> <corpus.txt> [--tokens N] [--seq-len N]
 //!                     [--needle N] [--ctx N] [--tv EPS] [--n-sink N]
 //!                     [--arms base,b8,b6,b6s0,b6n65536,...] [--dump-tokens N]
-//!                     [--decode-floor true]
+//!                     [--decode-floor true] [--families true]
 //! ```
 //! Arm grammar: `base` (plain softmax) or `b<bits>` followed by optional
 //! `s<n>` (sink count; default `--n-sink`, `s0` = no exemption, T4) and
 //! `n<ctx>` (fixed width `ln(ctx/ε)` for every row; default per-row).
+//!
+//! `--families true` (the katgpt-rs Issue 903 per-family retention walk,
+//! the lossy-surface rule — aggregate flip rates can hide family-conditional
+//! behavior flips) prints two conditional views of the SAME paired data
+//! after the aggregate tables: (1) per-sequence families — the chunk (ppl
+//! mode) or the prompt (needle mode) is the family, so a family that
+//! concentrates the flips cannot vanish into the mean; (2) base-margin
+//! buckets — scored tokens bucketed by the base arm's `top1 − top2` gap, so
+//! the dangerous class (a flip on a CONFIDENT prediction, `[8, ∞)` nats) is
+//! read directly instead of being averaged away.
 
 use std::path::PathBuf;
 use std::time::Instant;
@@ -148,6 +158,17 @@ struct ArmAcc {
     secs: f64,
     stats: RowLogitFloorStats,
     probe: Option<AttnSpanProbe>,
+    /// Per scored token, in visit order — always recorded (the memory is
+    /// trivial: one bool + one f64 per scored token), printed under
+    /// `--families`. The base arm's stays empty.
+    fam: Vec<FamTok>,
+}
+
+/// One non-base arm's paired outcome for one scored token, aligned with the
+/// base arm's visit order (the global `ArmAcc.k` counter indexes it).
+struct FamTok {
+    flip: bool,
+    abs: f64,
 }
 
 /// `b<bits>[s<n>][n<ctx>]` → policy; `base` → none.
@@ -208,6 +229,21 @@ fn argmax(logits: &[f32]) -> usize {
             false => (bi, bv),
         })
         .0
+}
+
+/// `top1 − top2` — the family walk's margin axis (katgpt-rs Issue 903):
+/// a flip at a large base margin is a confident prediction that moved.
+fn margin(logits: &[f32]) -> f32 {
+    let (mut a, mut b) = (f32::NEG_INFINITY, f32::NEG_INFINITY);
+    for &v in logits {
+        if v > a {
+            b = a;
+            a = v;
+        } else if v > b {
+            b = v;
+        }
+    }
+    a - b
 }
 
 /// The T3 passkey prompts: `[BOS] intro filler₁ needle filler₂ question answer`.
@@ -278,6 +314,7 @@ fn main() -> Result<()> {
     let mut arm_specs = "base,b8,b6,b6s0".to_string();
     let mut dump_tokens = 0usize;
     let mut decode_floor = false;
+    let mut families = false;
     let mut i = 3;
     while i < args.len() {
         let v = args.get(i + 1).context("flag needs a value")?;
@@ -291,6 +328,7 @@ fn main() -> Result<()> {
             "--arms" => arm_specs = v.clone(),
             "--dump-tokens" => dump_tokens = v.parse()?,
             "--decode-floor" => decode_floor = v.parse()?,
+            "--families" => families = v.parse()?,
             other => bail!("unknown arg {other}"),
         }
         i += 2;
@@ -390,6 +428,7 @@ fn main() -> Result<()> {
     let mut cache = MultiLayerKVCache::new(&config);
     let mut base_nll: Vec<f64> = Vec::with_capacity(scored);
     let mut base_top: Vec<usize> = Vec::with_capacity(scored);
+    let mut base_margin: Vec<f32> = Vec::with_capacity(scored);
     let mut prefix_fwd = 0usize;
     let t_prefix = Instant::now();
     let mut prefix_secs = 0.0f64;
@@ -435,10 +474,14 @@ fn main() -> Result<()> {
                     None => {
                         base_nll.push(l);
                         base_top.push(top);
+                        base_margin.push(margin(logits));
                     }
                     Some(_) => {
-                        acc.sum_abs += (l - base_nll[acc.k]).abs();
-                        acc.flips += usize::from(top != base_top[acc.k]);
+                        let flip = top != base_top[acc.k];
+                        let abs = (l - base_nll[acc.k]).abs();
+                        acc.sum_abs += abs;
+                        acc.flips += usize::from(flip);
+                        acc.fam.push(FamTok { flip, abs });
                     }
                 }
                 acc.k += 1;
@@ -510,5 +553,108 @@ fn main() -> Result<()> {
             println!("{l}");
         }
     }
+
+    if families {
+        print_families(&arms, &accs, &seqs, &base_margin, decode_floor, needle);
+    }
     Ok(())
+}
+
+/// The katgpt-rs Issue 903 per-family retention walk (the lossy-surface
+/// rule): the aggregate table above can hide a family that concentrates the
+/// flips (Orthrus: aggregate metrics flat while per-prompt behavior flips).
+/// Two conditional views of the SAME paired data — per-sequence families
+/// (chunk | prompt) and base-margin buckets (the confident-flip class).
+fn print_families(
+    arms: &[Arm],
+    accs: &[ArmAcc],
+    seqs: &[Seq],
+    base_margin: &[f32],
+    decode_floor: bool,
+    needle: usize,
+) {
+    let unit = match needle {
+        0 => "chunk",
+        _ => "prompt",
+    };
+    // Family id per scored token: prefix sums of each sequence's scored
+    // count (the same visit order the arms used).
+    let mut bounds = Vec::with_capacity(seqs.len());
+    let mut run = 0usize;
+    for s in seqs {
+        let floor_from = match decode_floor {
+            true => s.score_from,
+            false => 0,
+        };
+        run += s.tokens.len() - 1 - s.score_from.max(floor_from);
+        bounds.push(run);
+    }
+    let nb: Vec<usize> = (1..arms.len()).collect(); // non-base arm indexes
+
+    println!("\n# families — per-{unit} conditional (flips / n, mean |ΔNLL|)");
+    print!("| {unit} | n |");
+    for &a in &nb {
+        print!(" {} flips | {} flip% | {} mean|ΔNLL| |", arms[a].name, arms[a].name, arms[a].name);
+    }
+    println!();
+    print!("|---|---|");
+    for _ in &nb {
+        print!("---|---|---|");
+    }
+    println!();
+    let mut start = 0usize;
+    for (f, &end) in bounds.iter().enumerate() {
+        print!("| {unit} {f} | {} |", end - start);
+        for &a in &nb {
+            let toks = &accs[a].fam[start..end];
+            let fl: usize = toks.iter().filter(|t| t.flip).count();
+            let mean: f64 = toks.iter().map(|t| t.abs).sum::<f64>() / (end - start).max(1) as f64;
+            print!(" {} | {:.2}% | {:.5} |", fl, 100.0 * fl as f64 / (end - start).max(1) as f64, mean);
+        }
+        println!();
+        start = end;
+    }
+
+    println!("\n# families — base-margin buckets (top1−top2, nats); the confident-flip class is [8, ∞)");
+    const EDGES: [f32; 3] = [0.5, 2.0, 8.0];
+    print!("| bucket | n |");
+    for &a in &nb {
+        print!(" {} flips | {} flip% | {} mean|ΔNLL| |", arms[a].name, arms[a].name, arms[a].name);
+    }
+    println!();
+    print!("|---|---|");
+    for _ in &nb {
+        print!("---|---|---|");
+    }
+    println!();
+    let mut lo = f32::NEG_INFINITY;
+    for (bi, &hi) in EDGES.iter().chain(std::iter::once(&f32::INFINITY)).enumerate() {
+        let idx: Vec<usize> = base_margin
+            .iter()
+            .enumerate()
+            .filter(|(_, m)| **m >= lo && (bi == EDGES.len() || **m < hi))
+            .map(|(i, _)| i)
+            .collect();
+        let label = match bi {
+            // margins are non-negative by construction (top1 ≥ top2)
+            0 => format!("[0, {hi})"),
+            _ if bi == EDGES.len() => format!("[{lo:.0}, ∞)"),
+            _ => format!("[{lo:.0}, {hi})"),
+        };
+        print!("| {label} | {} |", idx.len());
+        for &a in &nb {
+            let (fl, sum): (usize, f64) = idx
+                .iter()
+                .map(|&i| &accs[a].fam[i])
+                .fold((0usize, 0.0f64), |(f, s), t| (f + usize::from(t.flip), s + t.abs));
+            print!(
+                " {} | {:.2}% | {:.5} |",
+                fl,
+                100.0 * fl as f64 / idx.len().max(1) as f64,
+                sum / idx.len().max(1) as f64
+            );
+        }
+        println!();
+        lo = hi;
+    }
 }
