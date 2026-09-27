@@ -1,0 +1,172 @@
+[
+  {
+    "name": "full",
+    "needle_nll": [
+      0.05806187,
+      0.0051732743,
+      0.04405131,
+      0.0013395037,
+      0.00068637304,
+      0.0009313311,
+      0.0010501316,
+      0.0009400504
+    ],
+    "delta_nll": [
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      0.0
+    ],
+    "mean_delta": 0.0,
+    "retained": 8,
+    "n_needles": 8,
+    "needle_row_survival": 1.0,
+    "generic_nll": 3.0007148,
+    "capped": true,
+    "output_len": 32,
+    "evicted_rows": 0,
+    "evict_events": 0,
+    "idle_events": 192,
+    "wall_seconds": 1325.501
+  },
+  {
+    "name": "diff_l1.00@25pct",
+    "needle_nll": [
+      0.065334864,
+      0.00898116,
+      0.5520352,
+      0.9004642,
+      1.0112792,
+      1.5511597,
+      0.8126793,
+      0.9319493
+    ],
+    "delta_nll": [
+      0.0072729923,
+      0.0038078856,
+      0.5079839,
+      0.8991247,
+      1.0105928,
+      1.5502284,
+      0.8116292,
+      0.9310093
+    ],
+    "mean_delta": 0.71520615,
+    "retained": 6,
+    "n_needles": 8,
+    "needle_row_survival": 1.0,
+    "generic_nll": 3.012408,
+    "capped": true,
+    "output_len": 32,
+    "evicted_rows": 73896,
+    "evict_events": 6,
+    "idle_events": 0,
+    "wall_seconds": 1344.706
+  },
+  {
+    "name": "maxrecent@25pct",
+    "needle_nll": [
+      0.06499563,
+      0.008963994,
+      0.5517728,
+      0.89806527,
+      1.0091803,
+      1.550175,
+      0.8122711,
+      0.931539
+    ],
+    "delta_nll": [
+      0.00693376,
+      0.0037907194,
+      0.5077215,
+      0.8967258,
+      1.0084939,
+      1.5492436,
+      0.811221,
+      0.930599
+    ],
+    "mean_delta": 0.71434116,
+    "retained": 6,
+    "n_needles": 8,
+    "needle_row_survival": 1.0,
+    "generic_nll": 3.0114665,
+    "capped": true,
+    "output_len": 32,
+    "evicted_rows": 73896,
+    "evict_events": 6,
+    "idle_events": 0,
+    "wall_seconds": 1415.9911
+  },
+  {
+    "name": "usage@25pct",
+    "needle_nll": [
+      3.9583702,
+      1.956391,
+      1.2907751,
+      1.0132395,
+      0.3287272,
+      0.162726,
+      0.05005237,
+      0.014017923
+    ],
+    "delta_nll": [
+      3.9003084,
+      1.9512177,
+      1.2467238,
+      1.0119,
+      0.3280408,
+      0.16179466,
+      0.049002238,
+      0.013077873
+    ],
+    "mean_delta": 1.0827582,
+    "retained": 4,
+    "n_needles": 8,
+    "needle_row_survival": 1.0,
+    "generic_nll": 3.1294606,
+    "capped": true,
+    "output_len": 32,
+    "evicted_rows": 73896,
+    "evict_events": 6,
+    "idle_events": 0,
+    "wall_seconds": 1361.3463
+  },
+  {
+    "name": "random@25pct",
+    "needle_nll": [
+      1.5872097,
+      0.97936356,
+      1.0484551,
+      0.84072876,
+      0.70819175,
+      0.20121384,
+      0.940142,
+      0.55097115
+    ],
+    "delta_nll": [
+      1.5291479,
+      0.9741903,
+      1.0044038,
+      0.83938926,
+      0.7075054,
+      0.2002825,
+      0.93909186,
+      0.5500311
+    ],
+    "mean_delta": 0.84300524,
+    "retained": 6,
+    "n_needles": 8,
+    "needle_row_survival": 1.0,
+    "generic_nll": 3.0538497,
+    "capped": true,
+    "output_len": 32,
+    "evicted_rows": 73896,
+    "evict_events": 6,
+    "idle_events": 0,
+    "wall_seconds": 1346.3925
+  }
+]

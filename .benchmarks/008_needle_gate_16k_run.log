@@ -1,0 +1,43 @@
+# model: qwen35 hybrid | layers=24 n_embd=1024 n_head=8 n_kv_head=2 head_dim=256 vocab=248320 | load 3.0s
+# rig: context=16384 needles=8 attn_layers=6 prompt=16411 question=27 answer=96 fracs=[0.25] λ=1 β=0.1 W=256 cadence=512 defer=1
+# needle 0: depth=1797 code_span=(1806, 1813) answer_span=(4, 11)
+# needle 1: depth=3582 code_span=(3591, 3598) answer_span=(16, 23)
+# needle 2: depth=5368 code_span=(5377, 5384) answer_span=(28, 35)
+# needle 3: depth=7153 code_span=(7162, 7169) answer_span=(40, 47)
+# needle 4: depth=8939 code_span=(8948, 8955) answer_span=(52, 59)
+# needle 5: depth=10724 code_span=(10733, 10740) answer_span=(64, 71)
+# needle 6: depth=12510 code_span=(12519, 12526) answer_span=(76, 83)
+# needle 7: depth=14295 code_span=(14304, 14311) answer_span=(88, 95)
+# arm full               1325.5s | evicted=     0 events=  0 idle=192 | genNLL=3.001 | out_len=32 (CAPPED)
+# arm diff_l1.00@25pct   1344.7s | evicted= 73896 events=  6 idle=  0 | genNLL=3.012 | out_len=32 (CAPPED)
+#   -> diff_l1.00@25pct retrieval 6/8 (meanΔ +0.715) per-needle Δ: [0.0072729923, 0.0038078856, 0.5079839, 0.8991247, 1.0105928, 1.5502284, 0.8116292, 0.9310093]
+# arm maxrecent@25pct    1416.0s | evicted= 73896 events=  6 idle=  0 | genNLL=3.011 | out_len=32 (CAPPED)
+#   -> maxrecent@25pct retrieval 6/8 (meanΔ +0.714) per-needle Δ: [0.00693376, 0.0037907194, 0.5077215, 0.8967258, 1.0084939, 1.5492436, 0.811221, 0.930599]
+# arm usage@25pct        1361.3s | evicted= 73896 events=  6 idle=  0 | genNLL=3.129 | out_len=32 (CAPPED)
+#   -> usage@25pct retrieval 4/8 (meanΔ +1.083) per-needle Δ: [3.9003084, 1.9512177, 1.2467238, 1.0119, 0.3280408, 0.16179466, 0.049002238, 0.013077873]
+# arm random@25pct       1346.4s | evicted= 73896 events=  6 idle=  0 | genNLL=3.054 | out_len=32 (CAPPED)
+#   -> random@25pct retrieval 6/8 (meanΔ +0.843) per-needle Δ: [1.5291479, 0.9741903, 1.0044038, 0.83938926, 0.7075054, 0.2002825, 0.93909186, 0.5500311]
+
+# ── retrieval (bar ≥ 7/8 = 0.875, EPS_NATS = 1) ──
+# arm                retrieval  meanΔnats   survival    genNLL
+# full                   1.000     +0.000      1.000     3.001
+# diff_l1.00@25pct       0.750     +0.715      1.000     3.012
+# maxrecent@25pct        0.750     +0.714      1.000     3.011
+# usage@25pct            0.500     +1.083      1.000     3.129
+# random@25pct           0.750     +0.843      1.000     3.054
+
+# ── trap-4 control (generic NLL / max-recent's) ──
+# @25pct: differential/maxrecent = 1.000  (>1 ⇒ the trap fires on real text)
+
+# per-needle NLL delta vs full — diff_l1.00@25pct:
+# needle 0 depth   1797: Δ=+0.007 nats (arm 0.065 / full 0.058)
+# needle 1 depth   3582: Δ=+0.004 nats (arm 0.009 / full 0.005)
+# needle 2 depth   5368: Δ=+0.508 nats (arm 0.552 / full 0.044)
+# needle 3 depth   7153: Δ=+0.899 nats (arm 0.900 / full 0.001)
+# needle 4 depth   8939: Δ=+1.011 nats (arm 1.011 / full 0.001)
+# needle 5 depth  10724: Δ=+1.550 nats (arm 1.551 / full 0.001)
+# needle 6 depth  12510: Δ=+0.812 nats (arm 0.813 / full 0.001)
+# needle 7 depth  14295: Δ=+0.931 nats (arm 0.932 / full 0.001)
+
+# wall total 6801.9s | rig tokens 16411 | λ=1 β=0.1 W=256 cadence=512
+# report: E:\git\riir-infer\.benchmarks\needle_gate_16k\needle_gate_report.json

@@ -1,6 +1,36 @@
 # Issue 012 — consume katgpt-core `differential_kv_eviction` on a real KV cache: the multi-needle@64K half of katgpt-rs Issue 882 P3's G1
 
-**Status:** OPEN — filed 2026-09-25 from katgpt-rs Issue 882 P3. The primitive landed there at katgpt-rs `f4926c44a` (katgpt-rs Bench 894, all synthetic gates PASS), and this issue is its model-bound quality gate.
+**Status:** OPEN → T1/T3 RESOLVED, T2/T4 MEASURED (split verdict at 16K/25% — Bench 008); T5 + the 50%/64K cells recorded follow-ups. Filed 2026-09-25 from katgpt-rs Issue 882 P3. The primitive landed there at katgpt-rs `f4926c44a` (katgpt-rs Bench 894, all synthetic gates PASS), and this issue is its model-bound quality gate.
+
+## Landed (T1/T3 + the gate rig)
+
+- **T1 RESOLVED** — `src/deltanet/kv_evict.rs` wires `DifferentialEvictTable` (+ max-recent / usage-rate / seeded-random arms) onto the qwen35-hybrid attention KV path via `Option<&mut EvictorState>`: per-(layer, head) tables observing the post-softmax rows the forward already computes; per-layer budget with MEAN aggregation across heads (KV rows are shared under GQA); sink-exempt selection through the shipped `select_evict_sink_exempt` (n_sink=4); in-place K/V + table + slot→logical compaction (the `gather_rows` twin, katgpt-rs `c1c63435e`); cadence-gated selection; RoPE stays on the LOGICAL position. Forward seam: `forward_attention_layer_evictable`, `forward_qwen_deltanet_evictable`, `prefill_qwen_deltanet_chunk_into` (pos0 offset + staged per-position writes when armed). Feature `kv_eviction` (default-off), forwards `katgpt-core/differential_kv_eviction`.
+- **T3 RESOLVED, twice-pinned** — armed-with-headroom ≡ unarmed `to_bits` on the synthetic hybrid (lib tests, every dense projection perturbed) AND on the real Qwen3.5-0.8B weights (legacy whole-prompt vs chunked: 0/248320 logit bits, chunks=1 and 4). The real-model bisect caught a wiring bug the zeros-weighted synthetic had hidden (Phase-4 residual-add base); both gates now pin the class.
+- **The gate rig** — `needle_eviction_gate` bin: K needle sentences at fixed depths + question + teacher-forced answer; per-needle NLL-delta-vs-full metric (EPS_NATS=1.0, pre-registered); needle-row survival; trap-4 generic NLL; greedy free-decap runaway probe; deferred or streaming protocol.
+- **The prefill unblock** — the hybrid prefill's DeltaNet projections were per-token matvecs (~39 MB weight traffic/token/layer, 60% of prefill wall); now chunk-batched through a shared `deltanet_layer_recurrent_body` (2× arm wall, 47→25 ms/tok). Bit-identity pinned as above.
+
+## T2/T4 verdict at 16K/25% (Bench 008, `.benchmarks/008_needle_gate_16k.md`)
+
+Pre-registered: λ*=1.0 (8K pilot grid flat: 0.5/1.0/1.5 → identical), EPS_NATS=1.0, bar ≥ 7/8, deferred protocol (streaming is the recorded NEGATIVE: needle-row survival 0.000 — no query attends a mid-haystack needle while its evidence window is live).
+
+| arm | retrieval | meanΔ nats | survival |
+|---|---|---|---|
+| full | 1.000 | 0 | 1.000 |
+| diff λ=1.0 @25% | 0.750 | +0.715 | 1.000 |
+| maxrecent @25% | 0.750 | +0.714 | 1.000 |
+| usage @25% | 0.500 | +1.083 | 1.000 |
+| random @25% | 0.750 | +0.843 | 1.000 |
+
+1. **G1 bar FAILS for every policy** at 4× compression — the synthetic 0.945 does not transfer to the model/regime at the pre-registered bar.
+2. **differential ≡ max-recent** in this regime (no hub structure to reject): the λ separation needs Bench-894's hub-heavy fixture re-created on real text.
+3. **usage-rate loses** (4/8, monotone depth pattern — old needles evict first).
+4. **vs random: mean win (+0.715 vs +0.843), count tie (6/8)** — not a clean `beats_random_prompt_pin` pass.
+5. **Trap-4 quiet** (generic NLL ratio 1.000). Runaway uninformative at gen=32 (all arms cap incl. full).
+6. **NOT a promotion result.** Follow-ups: the 50% cell, 64K (rig validated; ~6-7 h detached for 5 arms), and the hub-distractor regime.
+
+## Model note (the rig decision, recorded)
+
+The issue preferred the Ternary-Bonsai-2-27B-PQ2 lane; that lane has no batched prefill and its 64K prefill is hours per arm on this box (arithmetic in Bench 008). The gate ran on `Qwen3.5-0.8B-Base-Q8_0.gguf` — the SAME qwen35-hybrid arch the wiring targets, 64K-in-distribution (ctx 262144), prefill-feasible. The wiring itself is family-generic (same forward paths the bonsai lane uses); a bonsai-family gate waits on either a small qwen35 ternary checkpoint or a GPU lane.
 
 ## What exists (katgpt-rs `f4926c44a`, feature `differential_kv_eviction`, opt-in, implies `kv_sink_window`)
 
@@ -20,13 +50,12 @@ Synthetic reading (katgpt-rs Bench 894, 55% hub keys, 16 needles, N = 1024): ret
 
 ## What this issue owns (the gate katgpt-rs cannot run)
 
-- [ ] **T1 — wire the table into one real decode KV path.** Prefer the Ternary-Bonsai GGUF lane (`riir-train/data/Ternary-Bonsai-2-27B-PQ2_0.gguf`). Qwen is an acceptable second family. The work is to surface each head's post-softmax row to `observe_query` and evict to a budget with `select_evict_sink_exempt` (`n_sink` from the model's sink convention; the `kv_sink_window` default is 4). The feature is gated default-off and forwards `katgpt-core/differential_kv_eviction`. The cadence (select every k decode steps, not every step: the N log n sort is ~120 µs at N = 4096 on the M3) is part of the wiring.
-- [ ] **T2 — G1: multi-needle @64K at 25% / 50% cache ≥ full-cache − ε.** Plant several needles in a 64K haystack and compare retrieval at a 25% and a 50% budget against full cache.
-  - Arms: differential (λ from a grid, pre-registered before the run), the λ = 0 max-recent baseline, katgpt-core's shipped usage-rate score, and prompt-pinned random (the `kv_eviction::beats_random_prompt_pin` bar — a scored policy must strictly beat it at matched budget).
-  - Report per-needle-position retrieval, not only the mean.
-- [ ] **T3 — G3: no-eviction is bit-identical.** Budget ≥ context must leave the logits `to_bits`-identical to the path without the table wired in, across a full decode.
-- [ ] **T4 — trap 4 on real text (the measured negative from Bench 894).** On a long context whose observation window holds one-off spikes the continuation does not need, then a generic continuation, the differential policy was 1.35–1.47× the baseline's output error synthetically. Measure whether real text hits this. Candidates are ppl on the continuation, or a runaway check via katgpt-core `runaway_gate`, which is mandatory for any lossy KV policy's promotion.
-- [ ] **T5 — the sink exemption at λ > 1.** Bench 894's λ grid peaked at λ = 1.5 on the fixture, and that is exactly where unpinned sinks are evicted first (32/32). If the real-model λ* lands above 1, A/B the pin mask on and off on real sinks.
+- [x] **T1 — wire the table into one real decode KV path.** DONE — `deltanet::kv_evict` on the qwen35-hybrid attention path (feature `kv_eviction`, default-off, forwards `katgpt-core/differential_kv_eviction`). The Bonsai-27B lane itself is compute-gated on this box (no batched prefill; hours/arm at long context) — the gate ran on the same-arch qwen35 0.8B checkpoint; the wiring is family-generic. Mean aggregation across heads (pre-registered; KV rows shared under GQA); cadence 512; n_sink=4.
+- [x] **T2 — G1: multi-needle @64K at 25% / 50% cache ≥ full-cache − ε.** MEASURED at 16K/25% (the 64K/50% cells are compute follow-ups): **bar FAILED for every policy** (best 6/8 = 0.750 vs the 0.875 bar), differential ≡ max-recent (no hub regime on natural text), usage-rate loses (4/8), vs random = mean win / count tie. Full table + per-needle deltas in Bench 008.
+- [x] **T3 — G3: no-eviction is bit-identical.** DONE — pinned on the synthetic hybrid (both postures, hardened to perturb every projection) AND on the real Qwen3.5-0.8B weights (0/248320 logit bits, chunks=1 and 4). The real-model bisect caught the Phase-4 residual-base bug the zeros-weighted synthetic had hidden.
+- [x] **T4 — trap 4 on real text.** MEASURED quiet at 16K/25%: generic-continuation NLL ratio diff/maxrecent = 1.000. The runaway probe is uninformative at gen=32 (all arms cap incl. full); the promotion-grade runaway gate on a sealed long-context eval remains UNRUN (katgpt-rs side).
+- [ ] **T5 — the sink exemption at λ > 1.** The pilot λ grid (0.5/1.0/1.5 at 8K) read IDENTICAL retrieval with n_sink=4 pinned throughout — no λ-sensitivity, so the A/B has no signal yet; rerun the grid when the hub-distractor regime exists (that is where λ > 1 changes the ranking).
+- [ ] **T6 (follow-up) — the 50% + 64K cells** (rig validated; 64K ≈ 6-7 h detached for 5 arms) and **T7 — the hub-distractor regime** (plant hub sentences as distractors so differential-vs-max-recent separation becomes measurable on real text; without it λ is provably inert here).
 
 ## Traps
 
