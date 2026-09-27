@@ -1,0 +1,68 @@
+# model: qwen35 hybrid | layers=24 n_embd=1024 n_head=8 n_kv_head=2 head_dim=256 vocab=248320 | load 0.8s
+# rig: context=16384 needles=8 hubs=0 hub_code_rows=0 wall_rows=0 attn_layers=6 prompt=16411 question=27 answer=96 fracs=[0.5] λ=1 β=0.1 W=256 cadence=512 defer=1 sinks=4
+# needle 0: depth=0 code_span=(9, 16) answer_span=(4, 11)
+# needle 1: depth=1797 code_span=(1806, 1813) answer_span=(16, 23)
+# needle 2: depth=3582 code_span=(3591, 3598) answer_span=(28, 35)
+# needle 3: depth=5368 code_span=(5377, 5384) answer_span=(40, 47)
+# needle 4: depth=7153 code_span=(7162, 7169) answer_span=(52, 59)
+# needle 5: depth=8939 code_span=(8948, 8955) answer_span=(64, 71)
+# needle 6: depth=10724 code_span=(10733, 10740) answer_span=(76, 83)
+# needle 7: depth=12510 code_span=(12519, 12526) answer_span=(88, 95)
+# [full] phases: prefill=1314.3s
+# [full] phases: +answer=13.9s
+# [full] phases: +survival=0.0s
+# [full] phases: +generic=2.9s
+# [full] phases: +runaway=4.6s
+# arm full               1335.7s | evicted=     0 events=  0 idle=192 | genNLL=3.199 | out_len=32 (CAPPED) | surv n/h/w = 1.000/NaN/NaN
+# [diff_l1.00@50pct] phases: prefill=1315.6s
+# [diff_l1.00@50pct] phases: +answer=12.9s
+# [diff_l1.00@50pct] phases: +survival=0.0s
+# [diff_l1.00@50pct] phases: +generic=2.7s
+# [diff_l1.00@50pct] phases: +runaway=4.3s
+# arm diff_l1.00@50pct   1335.6s | evicted= 49320 events=  6 idle=  0 | genNLL=3.185 | out_len=32 (CAPPED) | surv n/h/w = 0.812/NaN/NaN
+#   -> diff_l1.00@50pct retrieval 6/8 (meanΔ +0.489) per-needle Δ: [0.039901376, 0.0006626677, 0.013073241, 0.00176348, 1.0766563, 1.4164023, 0.640131, 0.72620255]
+# [maxrecent@50pct] phases: prefill=1310.4s
+# [maxrecent@50pct] phases: +answer=12.9s
+# [maxrecent@50pct] phases: +survival=0.0s
+# [maxrecent@50pct] phases: +generic=2.7s
+# [maxrecent@50pct] phases: +runaway=4.3s
+# arm maxrecent@50pct    1330.2s | evicted= 49320 events=  6 idle=  0 | genNLL=3.179 | out_len=32 (CAPPED) | surv n/h/w = 0.815/NaN/NaN
+#   -> maxrecent@50pct retrieval 6/8 (meanΔ +0.489) per-needle Δ: [0.008027554, 1.335144e-5, 0.011693137, 0.0021277836, 1.0830677, 1.4343293, 0.63579583, 0.73416793]
+# [usage@50pct] phases: prefill=1317.7s
+# [usage@50pct] phases: +answer=12.8s
+# [usage@50pct] phases: +survival=0.0s
+# [usage@50pct] phases: +generic=2.7s
+# [usage@50pct] phases: +runaway=4.2s
+# arm usage@50pct        1337.4s | evicted= 49320 events=  6 idle=  0 | genNLL=3.182 | out_len=32 (CAPPED) | surv n/h/w = 0.354/NaN/NaN
+#   -> usage@50pct retrieval 7/8 (meanΔ +0.584) per-needle Δ: [0.15432572, 1.2237216, 0.94997156, 0.83614624, 0.64245254, 0.57564026, 0.25021335, 0.0397704]
+# [random@50pct] phases: prefill=1310.3s
+# [random@50pct] phases: +answer=12.9s
+# [random@50pct] phases: +survival=0.0s
+# [random@50pct] phases: +generic=2.7s
+# [random@50pct] phases: +runaway=4.3s
+# arm random@50pct       1330.2s | evicted= 49320 events=  6 idle=  0 | genNLL=3.167 | out_len=32 (CAPPED) | surv n/h/w = 0.393/NaN/NaN
+#   -> random@50pct retrieval 6/8 (meanΔ +0.589) per-needle Δ: [-0.016774535, 0.46527943, 1.0141016, 0.9360837, 0.6614255, 0.029547011, 0.5238797, 1.097257]
+
+# ── retrieval (bar ≥ 7/8 = 0.875, EPS_NATS = 1) ──
+# arm                retrieval  meanΔnats     n_surv   hub_surv  wall_surv    genNLL
+# full                   1.000     +0.000      1.000        NaN        NaN     3.199
+# diff_l1.00@50pct       0.750     +0.489      0.812        NaN        NaN     3.185
+# maxrecent@50pct        0.750     +0.489      0.815        NaN        NaN     3.179
+# usage@50pct            0.875     +0.584      0.354        NaN        NaN     3.182
+# random@50pct           0.750     +0.589      0.393        NaN        NaN     3.167
+
+# ── trap-4 control (generic NLL / max-recent's) ──
+# @50pct: differential/maxrecent = 1.002  (>1 ⇒ the trap fires on real text)
+
+# per-needle NLL delta vs full — diff_l1.00@50pct:
+# needle 0 depth      0: Δ=+0.040 nats (arm 1.214 / full 1.174)
+# needle 1 depth   1797: Δ=+0.001 nats (arm 0.026 / full 0.025)
+# needle 2 depth   3582: Δ=+0.013 nats (arm 0.018 / full 0.005)
+# needle 3 depth   5368: Δ=+0.002 nats (arm 0.004 / full 0.002)
+# needle 4 depth   7153: Δ=+1.077 nats (arm 1.079 / full 0.002)
+# needle 5 depth   8939: Δ=+1.416 nats (arm 1.417 / full 0.001)
+# needle 6 depth  10724: Δ=+0.640 nats (arm 0.641 / full 0.001)
+# needle 7 depth  12510: Δ=+0.726 nats (arm 0.727 / full 0.001)
+
+# wall total 6674.7s | rig tokens 16411 | λ=1 β=0.1 W=256 cadence=512 hubs=0 sinks=4
+# report: .benchmarks/needle_gate_16k_50pct\needle_gate_report.json

@@ -1,0 +1,80 @@
+# model: qwen35 hybrid | layers=24 n_embd=1024 n_head=8 n_kv_head=2 head_dim=256 vocab=248320 | load 0.8s
+# rig: context=8192 needles=8 hubs=8 hub_code_rows=108 wall_rows=12 attn_layers=6 prompt=8219 question=27 answer=96 fracs=[0.03125, 0.0625] λ=1,1.5,2 β=0.1 W=256 cadence=512 defer=1 sinks=4
+# needle 0: depth=608 code_span=(617, 624) answer_span=(4, 11)
+# needle 1: depth=1205 code_span=(1214, 1221) answer_span=(16, 23)
+# needle 2: depth=1951 code_span=(1960, 1967) answer_span=(28, 35)
+# needle 3: depth=2548 code_span=(2557, 2564) answer_span=(40, 47)
+# needle 4: depth=3294 code_span=(3303, 3310) answer_span=(52, 59)
+# needle 5: depth=3891 code_span=(3900, 3907) answer_span=(64, 71)
+# needle 6: depth=4637 code_span=(4646, 4653) answer_span=(76, 83)
+# needle 7: depth=5233 code_span=(5242, 5249) answer_span=(88, 95)
+# hub spans: 108 rows (wall 12), first=Some((170, 179)) last=Some((8160, 8169))
+# [full] phases: prefill=621.5s
+# [full] phases: +survival=0.0s
+# [full] phases: +answer=13.0s
+# [full] phases: +generic=2.7s
+# [full] phases: +runaway=4.3s
+# arm full               641.5s | evicted=     0 events=  0 idle= 96 | genNLL=3.302 | out_len=32 (CAPPED) | surv n/h/w = 1.000/1.000/1.000
+# [diff_l1.00@3pct] phases: prefill=614.3s
+# [diff_l1.00@3pct] phases: +survival=0.0s
+# [diff_l1.00@3pct] phases: +answer=12.0s
+# [diff_l1.00@3pct] phases: +generic=2.5s
+# [diff_l1.00@3pct] phases: +runaway=4.0s
+# arm diff_l1.00@3pct    632.7s | evicted= 47784 events=  6 idle=  0 | genNLL=3.736 | out_len=32 (CAPPED) | surv n/h/w = 1.000/1.000/1.000
+#   -> diff_l1.00@3pct retrieval 6/8 (meanΔ +0.656) per-needle Δ: [1.4760587, 0.84166414, 1.357698, 0.4581375, 0.7275112, 0.20066725, 0.15204948, 0.038055964]
+# [diff_l1.50@3pct] phases: prefill=614.3s
+# [diff_l1.50@3pct] phases: +survival=0.0s
+# [diff_l1.50@3pct] phases: +answer=11.9s
+# [diff_l1.50@3pct] phases: +generic=2.5s
+# [diff_l1.50@3pct] phases: +runaway=4.0s
+# arm diff_l1.50@3pct    632.6s | evicted= 47784 events=  6 idle=  0 | genNLL=3.736 | out_len=32 (CAPPED) | surv n/h/w = 1.000/1.000/1.000
+#   -> diff_l1.50@3pct retrieval 6/8 (meanΔ +0.583) per-needle Δ: [1.3959911, 0.8450453, 1.3979446, 0.55029076, 0.24803679, 0.08928871, 0.111467905, 0.028757095]
+# [diff_l2.00@3pct] phases: prefill=628.1s
+# [diff_l2.00@3pct] phases: +survival=0.0s
+# [diff_l2.00@3pct] phases: +answer=11.9s
+# [diff_l2.00@3pct] phases: +generic=2.5s
+# [diff_l2.00@3pct] phases: +runaway=4.0s
+# arm diff_l2.00@3pct    646.4s | evicted= 47784 events=  6 idle=  0 | genNLL=3.730 | out_len=32 (CAPPED) | surv n/h/w = 1.000/1.000/1.000
+#   -> diff_l2.00@3pct retrieval 6/8 (meanΔ +0.577) per-needle Δ: [1.3593521, 0.8424944, 1.3821466, 0.55247307, 0.25007603, 0.08999443, 0.11149188, 0.028582709]
+# [maxrecent@3pct] phases: prefill=619.9s
+# [maxrecent@3pct] phases: +survival=0.0s
+# [maxrecent@3pct] phases: +answer=12.1s
+# [maxrecent@3pct] phases: +generic=2.5s
+# [maxrecent@3pct] phases: +runaway=4.0s
+# arm maxrecent@3pct     638.4s | evicted= 47784 events=  6 idle=  0 | genNLL=3.722 | out_len=32 (CAPPED) | surv n/h/w = 1.000/1.000/1.000
+#   -> maxrecent@3pct retrieval 6/8 (meanΔ +0.651) per-needle Δ: [1.4070482, 0.8211231, 1.3610034, 0.3995988, 0.7911159, 0.23758098, 0.15470995, 0.038640432]
+# [random@3pct] phases: prefill=615.2s
+# [random@3pct] phases: +survival=0.0s
+# [random@3pct] phases: +answer=11.9s
+# [random@3pct] phases: +generic=2.5s
+# [random@3pct] phases: +runaway=4.0s
+# arm random@3pct        633.6s | evicted= 47784 events=  6 idle=  0 | genNLL=3.569 | out_len=32 (CAPPED) | surv n/h/w = 1.000/1.000/1.000
+#   -> random@3pct retrieval 5/8 (meanΔ +1.053) per-needle Δ: [3.3548763, 1.9660429, 1.2576858, 0.7292578, 0.6138322, 0.2214034, 0.23740797, 0.046847206]
+# [diff_l1.00@6pct] phases: prefill=637.5s
+# [diff_l1.00@6pct] phases: +survival=0.0s
+# [diff_l1.00@6pct] phases: +answer=12.3s
+# [diff_l1.00@6pct] phases: +generic=2.5s
+# [diff_l1.00@6pct] phases: +runaway=4.1s
+# arm diff_l1.00@6pct    656.4s | evicted= 46248 events=  6 idle=  0 | genNLL=3.634 | out_len=32 (CAPPED) | surv n/h/w = 1.000/1.000/1.000
+#   -> diff_l1.00@6pct retrieval 5/8 (meanΔ +0.999) per-needle Δ: [1.4647244, 0.7108154, 1.2940426, 0.29728916, 2.2456799, 0.993054, 0.7807023, 0.20763615]
+# [diff_l1.50@6pct] phases: prefill=619.9s
+# [diff_l1.50@6pct] phases: +survival=0.0s
+# [diff_l1.50@6pct] phases: +answer=11.9s
+# [diff_l1.50@6pct] phases: +generic=2.5s
+# [diff_l1.50@6pct] phases: +runaway=3.9s
+# arm diff_l1.50@6pct    638.3s | evicted= 46248 events=  6 idle=  0 | genNLL=3.628 | out_len=32 (CAPPED) | surv n/h/w = 1.000/1.000/1.000
+#   -> diff_l1.50@6pct retrieval 4/8 (meanΔ +1.002) per-needle Δ: [1.4657866, 0.70700973, 1.3017012, 0.31954166, 2.2180915, 1.0053859, 0.7881099, 0.20985466]
+# [diff_l2.00@6pct] phases: prefill=616.1s
+# [diff_l2.00@6pct] phases: +survival=0.0s
+# [diff_l2.00@6pct] phases: +answer=12.0s
+# [diff_l2.00@6pct] phases: +generic=2.5s
+# [diff_l2.00@6pct] phases: +runaway=4.0s
+# arm diff_l2.00@6pct    634.6s | evicted= 46248 events=  6 idle=  0 | genNLL=3.644 | out_len=32 (CAPPED) | surv n/h/w = 1.000/1.000/1.000
+#   -> diff_l2.00@6pct retrieval 4/8 (meanΔ +1.016) per-needle Δ: [1.5440412, 0.6484871, 1.2799149, 0.32463482, 2.2364898, 1.0344743, 0.8203247, 0.23654556]
+# [maxrecent@6pct] phases: prefill=615.5s
+# [maxrecent@6pct] phases: +survival=0.0s
+# [maxrecent@6pct] phases: +answer=12.0s
+# [maxrecent@6pct] phases: +generic=2.5s
+# [maxrecent@6pct] phases: +runaway=4.0s
+# arm maxrecent@6pct     633.9s | evicted= 46248 events=  6 idle=  0 | genNLL=3.649 | out_len=32 (CAPPED) | surv n/h/w = 1.000/1.000/1.000
+#   -> maxrecent@6pct retrieval 5/8 (meanΔ +1.007) per-needle Δ: [1.4681542, 0.7112377, 1.3858392, 0.3033202, 2.238733, 0.99724495, 0.7602855, 0.19361414]
