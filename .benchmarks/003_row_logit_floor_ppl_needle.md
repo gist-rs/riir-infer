@@ -1,6 +1,6 @@
 # Bench 003 — row-logit floor on real attention rows: ppl, sink A/B, needle (Issue 011 T2/T3/T4)
 
-**Status:** IN PROGRESS (2026-09-25) · T2 + T4 measured; T3a (gemma 64K-width proxy) + T3b (MiniCPM5 16K) done; T3c (MiniCPM5 64K) measuring · bin: `src/bin/row_logit_floor_ppl.rs` (feature `row_logit_floor`) · primitive: katgpt-core `row_logit_floor` (katgpt-rs Bench 888)
+**Status:** COMPLETE (2026-09-27 — T3c harvested from its finished run; all arms PASS) · T2 PASS 8/6-bit · T4 exemption load-bearing · T3 PASS at 64K (proxy + 16K + 64K) · bin: `src/bin/row_logit_floor_ppl.rs` (feature `row_logit_floor`) · primitive: katgpt-core `row_logit_floor` (katgpt-rs Bench 888)
 
 ## What this measures
 
@@ -169,9 +169,54 @@ and b6n65536 all stay within 0.0001 of base, with the same top head.
   it cannot resolve a sub-percent retrieval regression.
 - 16K is not the 64K bar. T3c runs the same fixture at 64K.
 
-### T3c — MiniCPM5-1B at 64K (`--decode-floor`)
+### T3c — MiniCPM5-1B at 64K (`--decode-floor`) — DONE
 
-_Measuring_ (launched 2026-09-25 20:28 +0700, M3 on AC, loadavg ~6.7, 91%
-memory free, same binary `b615672`; the llama forward is unchanged through
-`9c2d9f6`). Arms: base, b8, b6, b6s0, b4. `n65536` is omitted because it
-equals the per-row width at 64K.
+3 passkey prompts × 65536 tokens, 12 scored answer tokens, shared dense
+prefix (196 593 rows at 8.05 tok/s, 24 410 s ≈ 6.8 h). Launched
+2026-09-25 20:28 +0700 (M3 on AC, loadavg ~4.6–5.2 at launch, 91% memory
+free), finished 03:16 +0700; same binary `b615672`, llama forward
+unchanged through `9c2d9f6`. Log: `/tmp/ri011run/t6_minicpm64k.log`.
+Width sanity: mean w = 18.00 nats = ln(65536/1e-3) exactly, which
+confirms the run is genuinely 64K-context (16K read 16.61).
+
+| arm | ppl | Δppl | mean \|ΔNLL\| | top-1 flip | seq-exact | mean env TV | floored | mean w (nats) |
+|---|---|---|---|---|---|---|---|---|
+| base | 1.0362 | — | — | — | 100.0% | — | — | — |
+| b8 | 1.0359 | −0.029% | 0.00038 | 0.00% | 100.0% | 0.0368 | 8.433% | 18.00 |
+| b6 | 1.0357 | −0.042% | 0.00096 | 0.00% | 100.0% | 0.1685 | 8.429% | 18.00 |
+| b6s0 | 1.0344 | −0.166% | 0.00188 | 0.00% | 100.0% | 0.1685 | 11.319% | 18.00 |
+| b4 | 1.0363 | +0.016% | 0.00236 | 0.00% | 100.0% | 1.3085 | 8.642% | 18.00 |
+
+m_Y (all 24 × 16 heads): base 0.0944, top head L15H7 0.968. Every arm
+stays within 0.0007 with the same top head — b4 does **not** move m_Y
+here, unlike at 16K where it flipped the top head to L15H7. At 64K the
+needle head is already L15H7, so the 16K "switch" was a tie broken, not
+a structural perturbation.
+
+- **Verdict: T3 PASS — the issue's bar (needle@64K at 6-bit ≥ baseline −
+  ε) is met with 0 flips and 3/3 seq-exact at every arm, b4 included.**
+- **The floor term saturated instead of growing.** The floored fraction
+  is 8.4% at 64K against 8.9% at 16K — the tv-budget width (16.61 →
+  18.00 nats) kept `A ≤ n·e^{−w}` bounded as n grew 4×. That is the
+  trade this task existed to measure, answering positive: the
+  `ln(n/ε)` width compensates the dilution.
+- **The closed-form envelope loses its teeth at 4 bits / 64K.** b4's
+  mean env TV reads 1.31 — a TV bound above 1 is vacuously true. At 6
+  bits it is 0.169 and at 8 bits 0.037. The 64K gate is therefore a
+  measured-retrieval gate at b4, not a bound-checking one.
+- ⚠ **Same small-n caveat as T3b, now doubled:** n = 12 tokens over 3
+  prompts. Three of four arms read *negative* Δppl — sign cancellation
+  noise, exactly T2's shape. This row proves retrieval did not break at
+  64K; it cannot rank arms and cannot resolve a sub-percent regression.
+  The sink-exemption verdict (T4) rests on T2's 4096-token table, not
+  on the b6s0 row here.
+
+## Verdict
+
+The model-bound G1 is **COMPLETE: PASS at 8-bit and 6-bit, at 4K, 16K
+and 64K**. 6-bit is the admissibility floor (T2: b4 flips 4.32% of ppl
+tokens; 16K: b4 moved m_Y; 64K: b4's envelope is vacuous). Promotion to
+katgpt-rs default stays a separate lane — filed as katgpt-rs Issue 903
+(per-family retention walk + full-forward G2 still owed there); the
+primitive remains opt-in (`ForwardContext.logit_floor: None` = the
+plain path, bit-identical).

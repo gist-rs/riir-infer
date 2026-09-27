@@ -887,3 +887,52 @@ rows keep the green-zero rule honest).
 Landed at `c64d0b1` (fix + probes + instruments; the issue file is removed with this record — the noise-reduction rule; the docs commit is `9de953c`).
 
 Session: issue021-cuda-determinism
+
+## 2026-09-27 — Issue 011 CLOSED: `row_logit_floor` model-bound G1 complete — needle@64K PASS at every arm
+
+The gate katgpt-rs could not run for itself finished measuring and sat
+unread for ~30 h: T3c (MiniCPM5-1B at 64K real dilution) completed
+2026-09-26 03:16 +0700 after a 6.8 h shared-dense-prefix run (196 593
+rows at 8.05 tok/s), and the issue still read "measuring". Harvested
+2026-09-27 (this session), log `/tmp/ri011run/t6_minicpm64k.log`.
+
+**Result: PASS at every arm, b4 included.** 3/3 passkey prompts
+seq-exact, 0.00% top-1 flips over the 12 scored tokens at b8/b6/b6s0/b4;
+m_Y preserved within 0.0007 with the same top head (L15H7); base ppl
+1.0362, all Δppl inside noise. Three readings worth keeping:
+
+- **The tv-budget width holds at 64K.** The floored fraction saturated
+  at 8.4% (16K read 8.9%) — `ln(n/ε)` width growth (16.61 → 18.00 nats)
+  compensates the 4× dilution exactly as `A ≤ n·e^{−w}` predicts. The
+  width-sanity check is load-bearing: mean w = 18.00 = ln(65536/1e-3)
+  confirms the run was genuinely 64K.
+- **The closed-form envelope is vacuous at 4 bits / 64K** (mean env TV
+  1.31 > 1), so b4's 64K row is measured-retrieval evidence, not a
+  bound check. Teeth survive at 6 bits (0.169) and 8 (0.037).
+- **b4's 16K m_Y "switch" was a tie broken, not a perturbation** — at
+  64K the top head is already L15H7 and b4 holds it.
+
+⚠ n = 12 over 3 prompts (same as T3b): Δppl signs are noise (three of
+four arms read negative — sign cancellation, T2's shape). The row
+proves retrieval did not break at 64K; it cannot rank arms. T4's
+exemption verdict rests on T2's 4096-token table.
+
+**Final gate standing:** T2 PASS 8/6-bit (gemma-2, 4096 tok: b8 +0.033%
+ppl / 0.17% flips; b6 +0.066% / 0.90%) · T3 PASS 64K (T3a proxy + T3b
+16K + T3c 64K, 0 flips everywhere) · T4 sink exemption load-bearing
+(s0: floored 1.58×, |ΔNLL| 1.35×, flips 1.49×, aggregate ppl looks
+*better* — the lossy-surface failure shape on real rows). 6-bit is the
+admissibility floor.
+
+**Promotion handoff:** issue 011's last condition ("promotion waits on
+T2 + T3 passing here") is met; the promotion lane itself is owned by
+katgpt-rs and filed there as **Issue 903** (per-family retention walk
+per the lossy-surface rule + full-forward G2 + the 8-vs-6-bit width
+decision). The primitive stays opt-in; `ForwardContext.logit_floor:
+None` is the plain path, bit-identical.
+
+Bench record: `.benchmarks/003_row_logit_floor_ppl_needle.md` (T3c
+section + Verdict added this session). The issue file is removed with
+this record — the noise-reduction rule.
+
+Session: issue011-t3c-harvest
