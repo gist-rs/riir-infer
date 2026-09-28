@@ -1,6 +1,6 @@
 # Bench 005 — act-diagonal first slice: Ternary-Bonsai-2-27B-PQ2 (Issue 014 T1)
 
-**Status:** RECORD — T1 of [Issue 014](../.issues/014_act_aware_ternary_fit_retention_walk.md)
+**Status:** RECORD — T1 of Issue 014 (resolved 2026-09-27, record in `HISTORY.md`)
 landed 2026-09-26 (the collector bin + this first-slice read); T2/T3 not started.
 
 ## What ran

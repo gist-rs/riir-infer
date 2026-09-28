@@ -1,6 +1,6 @@
 # Bench 007 — act-aware ternary scale refit: the born-ternary walk + the dense-parent PTQ lane (Issue 014 T2/T3)
 
-**Status:** RECORD — T2+T3 of [Issue 014](../.issues/014_act_aware_ternary_fit_retention_walk.md)
+**Status:** RECORD — T2+T3 of Issue 014 (resolved 2026-09-27, record in `HISTORY.md`)
 landed 2026-09-27 (the `act_retention_walk` bin + the `act_ptq_gemma2` bin); T4 = this
 doc + the katgpt-rs Issue 886 P1 close.
 
