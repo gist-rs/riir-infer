@@ -1197,6 +1197,24 @@ REAL collapsed file — which waits on the Bonsai audition (the apply
 path needs GDN cache snapshot/restore threading the laya mirror lacks;
 the Phase-5 prerequisite and the lane's next work).
 
+**Second real measurement (same session, `--compare-members`, the
+operator-level surrogate-pool pre-read):** on the same three GDN
+triples, the mean merge f̄ sits **0.65–0.69 rel-op-dist from EVERY
+member**, and the members sit **1.9–2.07 from each other** —
+consecutive GDN layers inside an S-close triple are near-ORTHOGONAL as
+operators (rel-dist ≈ 2 ⇔ ‖A−B‖² ≈ 2‖B‖², no shared structure), and
+the merge is a genuinely different operator from all of them. The
+Phase-1 S-matrix's STATE similarity does not transfer to OPERATOR
+similarity — the laya audition's S-vs-function gap, now visible
+operator-level without any forward. Pre-read verdict: the merge arms
+will likely lose the Bonsai audition too, so **the collapse lane's
+Bonsai value is (a) passthrough/pruning collapse and (b) arm-A dense
+blocks — reorder Phase 5 to a passthrough-collapsed checkpoint first**
+(the writer is already its deliverable), with the expensive GDN
+apply-path audition gated behind that GOAT result. Caveat kept honest:
+rel-op-dist is not mapping error; the audition remains the decision
+instrument — this pre-read only reorders what to build first.
+
 Session: riir-infer-022-phase4-arms-writer
 
 ## 2026-09-28 — Issue 015 audio PoC DEFERRED (owner: until M5 Ultra) + 023's missed hunk landed

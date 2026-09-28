@@ -85,6 +85,7 @@ fn main() {
     let mut blocks_spec = String::new();
     let mut suffix = String::from("ffn_down");
     let mut n_x = 8usize;
+    let mut compare_members = false;
     let mut args = std::env::args().skip(1);
     while let Some(a) = args.next() {
         match a.as_str() {
@@ -92,6 +93,7 @@ fn main() {
             "--blocks" => blocks_spec = args.next().expect("--blocks needs a:b,c:d"),
             "--suffix" => suffix = args.next().expect("--suffix needs a substring"),
             "--n-x" => n_x = args.next().expect("--n-x needs N").parse().unwrap(),
+            "--compare-members" => compare_members = true,
             other => panic!("unknown arg {other}"),
         }
     }
@@ -213,6 +215,50 @@ fn main() {
         println!(
             "[{start},{end})\t{used_name}\t{rows}×{cols}\t{d_a:.3e}\t{d_b:.3e}\t{d_c:.3e}\t{ratio:.1}"
         );
+
+        // Operator-level surrogate-pool pre-read: how far is f̄ from each
+        // member AS AN OPERATOR, and how far apart are the members from
+        // each other? The audition (activation-space, stack-compounded)
+        // decides winners, but these distances are the cheap pre-read: a
+        // merge that is already operator-far from every member is a
+        // different operator, and the laya precedent says the audition
+        // then keeps the member.
+        if compare_members {
+            for (i, m) in member_dense.iter().enumerate() {
+                let d_fm = materialization_rel_err(
+                    &fbar,
+                    m,
+                    &xs,
+                    rows,
+                    cols,
+                    n_x,
+                    &mut ya,
+                    &mut yb,
+                )
+                .expect("f̄ vs member");
+                println!(
+                    "[{start},{end})\tmember[{i}] blk.{}\tf̄→member rel-op-dist\t{d_fm:.4}",
+                    members[i]
+                );
+            }
+            if member_dense.len() >= 2 {
+                let d_mm = materialization_rel_err(
+                    &member_dense[0],
+                    &member_dense[member_dense.len() - 1],
+                    &xs,
+                    rows,
+                    cols,
+                    n_x,
+                    &mut ya,
+                    &mut yb,
+                )
+                .expect("member0 vs memberN");
+                println!(
+                    "[{start},{end})\tmember[0]→member[{}] rel-op-dist\t{d_mm:.4}",
+                    members[members.len() - 1]
+                );
+            }
+        }
     }
     println!("# reading: damage is the arm's OWN price vs the f32 f̄; the T4.2 κ budget reads");
     println!("# END-TO-END errors (audition), so arm C survives a block only where the surrogate's");
