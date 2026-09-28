@@ -1,6 +1,6 @@
 # Issue 025 — owner-gate pickup: D7/D8 prep; D9/D10 recorded
 
-**Status:** OPEN — pickup tasks from the workspace owner-gated summary (riir-ai 1016); execution gates per item; prep/recording tasks are agent-pickupable.
+**Status:** CLOSED 2026-09-28 — every row executed or recorded: D7 (gpu_transpose deletion, `734ef14`) · D8 (BOUNDARY widening, `a9ff83f`) · D9 deferred with T7/S8 (tracked in 1004) · D10 disposition ratified (`35c833b`). Master riir-ai 1016 rows D7/D8/D10 carry the execution marks. Removed per the noise-reduction rule — the durable record lives in this repo's HISTORY.md.
 
 Master: `../riir-ai/.issues/1016_workspace_owner_gated_decisions_summary.md` (riir-ai commit e8cbd91ff).
 Owner direction 2026-09-28: riir-mmorpg-examples / seal-online-remaster / seal-game-editor / sealm-toolkit are DEFERRED; ALL mainnet actions are ON HOLD.

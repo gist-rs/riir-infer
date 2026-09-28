@@ -1063,3 +1063,21 @@ via pathspec (`git commit -- <paths>`), never the bare index.
 Issue files removed with this record — the noise-reduction rule.
 
 Session: owner-gate-pickup-d7-fence
+
+## 2026-09-28 — Issue 025 (owner-gate pickup) closed: D7/D8 executed, D9/D10 recorded
+
+D7: gpu_transpose deleted + BOUNDARY.md repointed (record above).
+D8: the audio-lane BOUNDARY widening landed — an AUDIO Owns row
+(loader/serving-scoped, published CoreML bundles on `laya-riir-ane`)
++ the `objc2-core-ml` allowlist row's condition column names the
+reuse (no new dep; the fence did not move). 015's T1–T5 remain the
+PoC's own tasks.
+D9: research 327–332 routing stays deferred with Plan 611 T7/S8
+(tracked in 1004).
+D10: the S6b training-families disposition is ratified into 1003's
+status — riir-gpu-side by design (public repo vs training surface);
+closed absent a real consumer pull.
+
+Issue 025 removed with this record — the noise-reduction rule.
+
+Session: owner-gate-pickup-d7-d8-d10
