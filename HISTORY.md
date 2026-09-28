@@ -4,6 +4,44 @@ Durable records for resolved questions and closed lanes (the noise-reduction
 convention: the record lands here, hash-pinned; open work lives in `.issues/`
 and `.plans/`). Created 2026-09-23 at the first record.
 
+## 2026-09-27 — Issue 014 RESOLVED: activation-aware ternary scale fit — SPLIT BY LANE (born-ternary clean negative; dense-parent mechanism transfer)
+
+Filed 2026-09-25 from katgpt-rs Issue 886 (the per-family conditional
+retention walk's model-bound G1; the substrate landed there at `0fb2254d9`,
+katgpt-rs Bench 896). Issue file removed 2026-09-28 (noise-reduction; this
+is the durable record). Resolution commit `3c2b569`; lane commits `03681e9`
+(T2 prep: `act_taps` to the lib), `fc31777` (T2/T3: the
+`act_retention_walk` bin — born-ternary scale-refit arms + the per-family
+conditional retention walk, 6 arms incl. the ZeroQAT-class comparator at
+default knobs), `28b1566` (T2(b): the dense-parent PTQ lane on gemma-2 f16
+— linear-input tap forward + held-out capture + the Bench-896
+reconstruction metric over the five fits). Benches: `005_act_diagonal_bonsai_first_slice.md`
+(T1) + `007_act_scale_refit_walk_and_ptq.md` (T2/T3/T4).
+
+- **T1 (Bench 005, `act_diagonal_calibration` bin, feature
+  `act_diagonal_calibration`, rides the forward's own `TernaryMatvecHook`
+  seam — post-rotation inputs observed side-band, forward bit-identical):
+  the rotation did NOT flatten the diagonal globally** — layer_out heaviest
+  tap (max/med up to 90.9, top-1% share up to 11.6%), attn_in 6.7/56.9
+  median/worst, final_in 9.3; `swiglu` near-uniform (1.6× / 1.4%) — the
+  null prediction live for down_proj specifically. Artifact digest
+  `5b6aead0901e3133cd7ee28512e75122c788ae9d720dec78d099e6b390d9a9d2`.
+- **Born-ternary (Ternary-Bonsai-2-PQ2): CLEAN NEGATIVE** — the shipped
+  amax payload is the fit family's fixed point: requant controls collapse
+  it (scale ×0.668, 14.3% codes, NLL 2.68→8.78, 96.7% flips uniform across
+  all 6 families) while both search arms recover it (ws_ex2 0.001% delta /
+  31 coin-flip flips / 100% top-8 retention; ws_uniform 0.000% / 2 / 100%)
+  — diagonal-independently, because there is no quantization error to
+  redistribute. ZeroQAT-class at default knobs: structurally stationary on
+  shipped codes; at the requant insertion point its ≈1% GD drift made the
+  model WORSE than its own starting point (NLL 9.10 vs 8.78) — the
+  layer-local surrogate misaligns with model quality on damaged payloads.
+- **Dense-parent (gemma-2-2b f16, layer-level Bench-896 metric on real
+  parents + 48 real activations/tap): the mechanism TRANSFERS** — ws_ex2
+  −34.6% vs mean_abs, −20.1% vs the blind-search control (0.4176 vs
+  0.6383 / 0.5230), ordering exactly as Bench 896. katgpt-rs 886 P1 closed
+  on this evidence.
+
 ## 2026-09-27 — Issue 020 RESOLVED: the len_derived CAPACITY finding was the classifier's, not ours — and both fixed temp paths are gone
 
 Filed 2026-09-26 from the katgpt-rs drift sweeps (the standing red on this
