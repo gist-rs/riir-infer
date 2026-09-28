@@ -137,6 +137,71 @@ fn parent_arch(parent: &GgufFile) -> Result<String, TwtError> {
         ))
 }
 
+/// `prism.hadamard.weight_names` rides the block table: a kept member's
+/// folded entries renumber to their new block index, a dropped member's
+/// entries DROP (its tensors do not exist in the collapsed file — the
+/// loader's exists-check would refuse them), and a MERGED block keeps its
+/// FIRST member's entries (the Hadamard fold is linear, so a mean of
+/// folded weights IS the folded mean). Non-block names (`output.weight`)
+/// pass through verbatim; `sign_widths`/`sign_values` are WIDTH-keyed and
+/// survive collapse untouched.
+fn renumber_hadamard_names(
+    names: &[GgufValue],
+    blocks: &[(usize, usize, LayerSource)],
+    n_layer: usize,
+) -> Vec<GgufValue> {
+    // member index → Some(new block index) for kept members, None = dropped.
+    let mut fate: Vec<Option<usize>> = vec![None; n_layer];
+    for (b, &(start, end, ref src)) in blocks.iter().enumerate() {
+        match *src {
+            LayerSource::Member(m) if m < n_layer => fate[m] = Some(b),
+            LayerSource::Merged(_) if start < n_layer => fate[start] = Some(b),
+            _ => {}
+        }
+        let _ = end; // non-kept members of the block stay None (dropped)
+    }
+    names
+        .iter()
+        .filter_map(|v| {
+            let name = v.as_str()?;
+            let renamed = match name.strip_prefix("blk.") {
+                Some(rest) => {
+                    let (idx, suffix) = rest.split_once('.')?;
+                    let idx: usize = idx.parse().ok()?;
+                    let b = fate.get(idx).copied().flatten()?;
+                    format!("blk.{b}.{suffix}")
+                }
+                None => name.to_owned(), // globals pass through
+            };
+            Some(GgufValue::String(renamed))
+        })
+        .collect()
+}
+
+/// Every SURVIVING folded name must be known-foldable for the collapsed
+/// layer types — the same allowlist the loader enforces (it decides which
+/// matmuls rotate their activations). A name that outlives the collapse
+/// but is not foldable for its block's type would load with its rotation
+/// silently skipped; refuse at write time instead.
+fn folded_names_foldable_for(
+    names: &[GgufValue],
+    block_count: usize,
+    layer_types: &[DeltaNetLayerType],
+) -> Result<(), TwtError> {
+    for v in names {
+        let name = v.as_str().ok_or_else(|| {
+            TwtError::GgufWrite("prism.hadamard weight name not a string".to_owned())
+        })?;
+        if !crate::deltanet::rotation::is_known_folded_name(name, block_count, layer_types) {
+            return Err(TwtError::GgufWrite(format!(
+                "folded weight '{name}' is not foldable for the collapsed layer types — \
+                 check the twt.layer_types array against the kept members' kinds"
+            )));
+        }
+    }
+    Ok(())
+}
+
 fn parent_block_count(parent: &GgufFile, arch: &str) -> Result<usize, TwtError> {
     let key = format!("{arch}.block_count");
     parent
@@ -428,6 +493,14 @@ pub fn emit_collapsed_gguf<W: Write>(
         }
     }
 
+    // ── prism.hadamard.weight_names rides the block table ──
+    // A folded parent's declaration must renumber with the tensors it
+    // names, or the loader refuses a stale name (tensor not found) — or
+    // worse, honors a rotation at the WRONG block. The collapsed layer
+    // types (explicit above) decide foldability, so the two checks
+    // interlock here at write time.
+    let hadamard_key = "prism.hadamard.weight_names";
+
     // ── metadata: parent order, overrides applied in place, twt.* appended ──
     let mut kvs: Vec<(String, GgufValue)> = parent.metadata_order.clone();
     for (k, v) in &spec.metadata_overrides {
@@ -437,6 +510,51 @@ pub fn emit_collapsed_gguf<W: Write>(
         }
     }
     kvs.extend(spec.twt_meta.iter().cloned());
+
+    if let Some(slot) = kvs.iter_mut().find(|(k, _)| k == hadamard_key) {
+        let names = match &slot.1 {
+            GgufValue::Array(names) => names.clone(),
+            other => {
+                return Err(TwtError::GgufWrite(format!(
+                    "{hadamard_key} must be a string array, got {other:?}"
+                )))
+            }
+        };
+        let renumbered = renumber_hadamard_names(&names, &spec.blocks, n_layer);
+        if arch == "qwen35" {
+            let collapsed_types: Vec<DeltaNetLayerType> = spec
+                .twt_meta
+                .iter()
+                .find(|(k, _)| k == types_key)
+                .and_then(|(_, v)| v.as_array())
+                .expect("qwen35 collapse requires twt.layer_types (checked above)")
+                .iter()
+                .map(|v| {
+                    let code = v
+                        .as_u64()
+                        .ok_or_else(|| {
+                            TwtError::GgufWrite(
+                                "twt.layer_types element is not an integer".to_owned(),
+                            )
+                        })?;
+                    match code {
+                        c if c == DeltaNetLayerType::Attention as u64 => {
+                            Ok(DeltaNetLayerType::Attention)
+                        }
+                        c if c == DeltaNetLayerType::DeltaNet as u64 => {
+                            Ok(DeltaNetLayerType::DeltaNet)
+                        }
+                        _ => Err(TwtError::GgufWrite(format!(
+                            "twt.layer_types code {code} outside the vocabulary \
+                             (0=attention, 1=deltanet)"
+                        ))),
+                    }
+                })
+                .collect::<Result<Vec<_>, _>>()?;
+            folded_names_foldable_for(&renumbered, block_count, &collapsed_types)?;
+        }
+        slot.1 = GgufValue::Array(renumbered);
+    }
 
     // ── offsets: every tensor aligned to the parent's alignment ──
     let alignment = parent.alignment.max(1);

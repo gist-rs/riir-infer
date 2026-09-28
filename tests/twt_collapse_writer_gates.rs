@@ -173,10 +173,12 @@ fn write_kv(buf: &mut Vec<u8>, k: &str, v: &GgufValue) {
             (8, p)
         }
         GgufValue::Array(items) => {
-            // U32 and U8 arrays (the block table and the layer types).
+            // U32, U8 and string arrays (the block table, the layer types,
+            // and the folded-weight declaration).
             let elem_tag = match items.first() {
                 Some(GgufValue::U32(_)) => 4u32,
                 Some(GgufValue::U8(_)) => 0u32,
+                Some(GgufValue::String(_)) => 8u32,
                 other => panic!("fixture array elem unhandled: {other:?}"),
             };
             let mut p = elem_tag.to_le_bytes().to_vec();
@@ -185,6 +187,10 @@ fn write_kv(buf: &mut Vec<u8>, k: &str, v: &GgufValue) {
                 match it {
                     GgufValue::U32(x) => p.extend_from_slice(&x.to_le_bytes()),
                     GgufValue::U8(x) => p.push(*x),
+                    GgufValue::String(s) => {
+                        p.extend_from_slice(&(s.len() as u64).to_le_bytes());
+                        p.extend_from_slice(s.as_bytes());
+                    }
                     other => panic!("fixture array elem unhandled: {other:?}"),
                 }
             }
@@ -730,6 +736,83 @@ fn collapsed_qwen35_file_types_layers_explicitly() {
         collapsed.metadata_string("twt.layer_types_legend"),
         Some(LAYER_TYPES_LEGEND)
     );
+}
+
+#[test]
+fn folded_weight_names_ride_the_block_table() {
+    // A folded (prism.hadamard) parent: the declaration renumbers with
+    // the tensors it names — kept members renamed to their new block
+    // index, dropped members' entries gone, globals verbatim, and every
+    // survivor foldable for the collapsed layer types.
+    let folded_names = [
+        "output.weight",
+        "blk.0.attn_qkv.weight",
+        "blk.0.ssm_out.weight",
+        "blk.1.ffn_down.weight",
+        "blk.2.attn_qkv.weight",
+        "blk.3.attn_output.weight",
+    ];
+    let fx = build_qwen35_parent(vec![(
+        "prism.hadamard.weight_names".to_owned(),
+        GgufValue::Array(
+            folded_names
+                .iter()
+                .map(|n| GgufValue::String((*n).to_owned()))
+                .collect(),
+        ),
+    )]);
+    let parent_path = write_to_temp("qwen35_folded_parent.gguf", &fx.bytes);
+    let parent = GgufFile::open(&parent_path).unwrap();
+
+    // Keep members 0 (GDN) and 3 (attention) — blocks [DeltaNet, Attention].
+    let spec = qwen35_collapse_spec(&fx.bytes, true, Vec::new(), Vec::new());
+    let mut out = Vec::new();
+    emit_collapsed_gguf(&parent, &spec, &mut out).unwrap();
+    let collapsed_path = write_to_temp("qwen35_folded_collapsed.gguf", &out);
+    let collapsed = GgufFile::open(&collapsed_path).unwrap();
+
+    let got: Vec<&str> = collapsed
+        .metadata_array("prism.hadamard.weight_names")
+        .unwrap()
+        .iter()
+        .map(|v| v.as_str().unwrap())
+        .collect();
+    assert_eq!(
+        got,
+        vec![
+            "output.weight",           // global passes through
+            "blk.0.attn_qkv.weight",   // member 0 → block 0 (GDN names kept)
+            "blk.0.ssm_out.weight",
+            "blk.1.attn_output.weight", // member 3 → block 1 (attention names kept)
+        ],
+        "dropped members' entries (1, 2) must not survive the collapse"
+    );
+
+    // And the survivors pass the loader's own allowlist against the
+    // collapsed types (the writer refuses the file otherwise — this
+    // asserts the interlock from the read side).
+    let (_, types) = qwen35_deltanet_config_from_gguf_metadata(&collapsed).unwrap();
+    for name in &got {
+        assert!(
+            riir_infer_core::deltanet::rotation::is_known_folded_name(name, 2, &types),
+            "{name} must be foldable for collapsed types {types:?}"
+        );
+    }
+
+    // A WRONG types array (attention winner typed as DeltaNet) makes a
+    // surviving folded name unfoldable — the writer must refuse.
+    let wrong_types = vec![
+        ("twt.layer_types".to_owned(),
+         GgufValue::Array(vec![GgufValue::U8(1), GgufValue::U8(1)])),
+    ];
+    let spec = qwen35_collapse_spec(&fx.bytes, false, wrong_types, Vec::new());
+    let mut out = Vec::new();
+    match emit_collapsed_gguf(&parent, &spec, &mut out) {
+        Err(TwtError::GgufWrite(msg)) => {
+            assert!(msg.contains("not foldable"), "{msg}")
+        }
+        other => panic!("unfoldable survivor must refuse, got {other:?}"),
+    }
 }
 
 #[test]
