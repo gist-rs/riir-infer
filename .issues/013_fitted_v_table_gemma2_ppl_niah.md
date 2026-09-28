@@ -28,7 +28,7 @@ Passing `RopeAction` to `reconstruct_v_from_rope_k` against this cache is **sile
 ## Tasks (the gates katgpt-rs cannot run)
 
 - [ ] **T1 — P1 G1: gemma-2-2b PPL at matched bits, with and without mean removal.**
-  - ⛔ **Blocked on katgpt-rs Issue 896** (found 2026-09-25). KVarN's raw tile buffer was shared across layers, so decode-order stores at `n_layers ≥ 2` read back the LAST layer's data. The in-progress tile also dequantized to zeros, and 2-bit keys panicked there. Consume KVarN only at or after the 896 fix commit, or every T1 number carries the corruption.
+  - ✅ **Blocker CLEARED 2026-09-28 (was found 2026-09-25): katgpt-rs Issue 896 is FIXED and CLOSED at `62fd22b5f`** (layer-major raw tile buffers, one per layer; layer-major pin 10,427,200 elements 0 differing bits; 240 revert-probed cases; no perf regression). Consume KVarN at katgpt-rs ≥ `62fd22b5f`. T1 is unblocked — but re-verify the fix commit is in the checkout actually linked before any number is recorded (`git -C ../katgpt-rs merge-base --is-ancestor 62fd22b5f HEAD`).
   - Setup: V-cache quantizer from the in-tree backends (KVarN 2/3/4-bit), the table from `vk_calibration`'s `E^V` signal at top_k ∈ {1024, 8192}. The coverage dial is Bench 004's 73.6% / 97.6%.
   - Gate 1, prediction vs measurement: per layer, the measured V quant-MSE drop must agree with the dashboard's `1 − ρ_l(V)` (per-head aggregates, Bench 004) within a pre-registered tolerance. Where it does not, record the direction; the absmax caveat is the arbiter.
   - Gate 2: PPL at matched bits is ≤ the plain-quant PPL.
