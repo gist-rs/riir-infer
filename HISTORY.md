@@ -1030,3 +1030,36 @@ section + Verdict added this session). The issue file is removed with
 this record — the noise-reduction rule.
 
 Session: issue011-t3c-harvest
+
+## 2026-09-28 — Issue 017 (gpu_transpose dead module) + Issue 023 (fence F2 self-alias FP): both closed
+
+**Issue 017 / owner-gate D7 — deleted.** `gpu_transpose.rs` (286 L) +
+`src/kernels/transpose.wgsl` (57 L) removed; zero callers anywhere
+(grep incl. riir-ai's `riir_gpu::gpu_transpose` re-export consumers —
+none exist). `transpose_cubecl.rs` (Issue 572) covers the reachable use
+with owned `cubecl::server::Handle` in/out. lib.rs mod line removed;
+`transpose_cubecl.rs` relationship note rewritten as provenance;
+BOUNDARY.md riir-infer-gpu line repointed at `transpose_cubecl.rs` in
+the same commit (the D7 recipe). riir-ai's dead re-export dropped in
+the paired commit there (`6c6bf169b`). Clippy clean at
+cubecl_runtime + no-default postures; bench_663 target compiles.
+
+**Issue 023 — fence green.** The third file renamed
+(`cubecl_encoder_probe.rs`, `riir_weights` → `lane_weights`, the
+capture driver's convention; the two siblings landed earlier the same
+day after their fmt edits landed). `fence_gate.py`:
+`✓ PASSED — 0 undefended, 0 pinned`. Compile-checked at the file's
+required-features (`laya-riir-cubecl`).
+
+**Session note (the staged-set hazard, twice in one session):** the
+gpu_transpose deletions were swept by a sibling's index-commit into
+`3bed93f` 27s before this session's own commit (repaired by the
+companion commit `734ef14` — 3bed93f alone does not compile); in
+riir-ai the sibling's staged ambient files were swept into this
+session's first commit (`8330e196b`, repaired by reset + pathspec
+recommit `6c6bf169b`). Standing remedy: in shared checkouts, commit
+via pathspec (`git commit -- <paths>`), never the bare index.
+
+Issue files removed with this record — the noise-reduction rule.
+
+Session: owner-gate-pickup-d7-fence
