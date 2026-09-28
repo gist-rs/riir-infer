@@ -1082,6 +1082,63 @@ Issue 025 removed with this record — the noise-reduction rule.
 
 Session: owner-gate-pickup-d7-d8-d10
 
+## 2026-09-29 — Issue 022 Phase 3 complete (audition + zero-training surrogate); Issue 024 closed measured-N/A both mechanisms
+
+**022 Phase 3 (T3.1–T3.3) landed** at `27c9f86`: `src/twt/audition.rs`
+(pure merge operators mean + LaCo RDSC — clone fixed-points gate-tested —
+the per-channel α/β branch-correction fit + the through-origin
+`fit_alpha_only`, and the BLAKE3-pinned selection with its argmin
+cross-check) + `examples/twt_laya_audition.rs` (the driver) + the gated
+`Encoder::layer_weights` borrow accessor. The apply path is a verbatim
+mirror of the forward's per-layer body, proven BIT-IDENTICAL against the
+parent forward EVERY run (the parity arm: layers 5 sliding + 6 full, both
+checkpoints). 15-gate battery (`twt_audition_gates`); the whole
+`twt_profile` surface clippy-clean; pre-existing gated-posture warnings in
+the Phase-1/2 files (unused import, OR-pattern ranges, unused mut)
+repaired in the same landing.
+
+Measured both checkpoints × the full pre-registered grid (corpus:
+typed_decisions states + banking77 texts, 500 prompts → 1484 rows,
+stride-2 fit/held-out pinned in the driver doc before the first run):
+**every block's winner is a member passthrough — the mean/RDSC merges
+never won a single block.** Structural: laya's G-S-S pattern caps
+homogeneous blocks at k=2 (RDSC(k=2) = the last member exactly); the
+merges' room is the Bonsai GDN lane (48-run runs), not laya. The Phase-2
+DP carries no type constraint, so real blocks ARE type-mixed — a merge
+across RoPE thetas/mask types is incoherent (the tier-(i) rule), and
+mixed blocks ran passthrough-only pools, recorded per block. The α/β
+branch correction recovers 13–84% of held-out boundary mapping error on
+small blocks (k ≤ 6) and 6–24% on whole-model blocks (ε=1.2) — the
+recorded No-GD boundary datum for the Phase-5 track split. Two measured
+refinements recorded in-issue: the +α decomposition rung must be its OWN
+through-origin fit (the joint α with β=0 mis-prices it — +12.7% on block
+14..18 typed vs improvement from its own fit), and the +5% pathology
+guard skips zero-raw singleton blocks (a relative guard refuses an exact
+block on its own f64 rounding). Artifacts:
+`.raw/twt/{typed,english}_audition.json` (gitignored, BLAKE3-pinned).
+Phase 4 (ternarize arms + collapsed-GGUF writer) is next.
+
+**Issue 024 CLOSED — both NaiveRT mechanisms measured N/A** (removed
+with this record; the full verdict tables live in git history):
+024a (norm-share upper bound): `LAYA_METAL_PROFILE=1` × 2 checkpoints,
+preflight PASSED (PROVENANCE: power=AC, powermode=2, load 4.25, canary
+118.3 µs) — RMSNorm (`ln_rows_wide`) is 2.1–2.4% of its stage ≈
+1.8–1.9% of end-to-end GPU, an order of magnitude under the ±6% floor
+(the lane's own run-to-run spread measured ~1% — the borrowed floor was
+conservative); a perfect weight-fetch overlap cannot save more than the
+norm's own share → build nothing. 024b (small-m histogram, DERIVED):
+encoder packed sgemm m ∈ [773, 2716]; per-question head ops m ∈ [124,
+576] over 80 real questions — min m = 124 ≈ 4× the narrow tile M=32; the
+lane never runs m < tile M in anger, so the heads-in-n remap has no
+target shape and no kernel_opt rule was filed (a rule needs a measured
+win on our shapes). The generalizing lesson recorded as a distill note,
+not a rule: NaiveRT's intra-kernel wins are tied to TP8-decode shapes
+(8 heads/rank; TMA weight streaming) a single-GPU MSL classification
+encoder never produces — shape-transfer requires the shape, not the
+paper.
+
+Session: owner-gate-pickup-022-p3-024-na
+
 ## 2026-09-28 — Issue 015 audio PoC DEFERRED (owner: until M5 Ultra) + 023's missed hunk landed
 
 Owner directive same evening: defer the audio lane until an M5 Ultra is
