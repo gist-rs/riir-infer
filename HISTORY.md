@@ -1139,6 +1139,66 @@ paper.
 
 Session: owner-gate-pickup-022-p3-024-na
 
+## 2026-09-29 — Issue 022 Phase 4 LANDED (re-ternarization arms + κ budget + collapsed-GGUF writer)
+
+**T4.1–T4.3 landed** at `baeb686` behind the new `twt_collapse` feature
+(`twt_profile` + `deltanet_ternary_inference`). `src/twt/ternarize.rs`:
+the three deterministic re-ternarization arms + the PRE-REGISTERED
+budget (κ = 2.0, τ_code = 1 — the file's git history is the
+pre-registration). Two pinned conventions beyond the issue text: arm B
+is the integer CODE vote (scale-free — the issue's literal scale-weighted
+`sign(Σwᵢ)` was rejected at pre-registration: wildly-different member
+scales let one big-scale member dominate for scale reasons, not
+agreement reasons), and arm C divides by the f16-ROUNDED scale so the
+codes are self-consistent with the emitted wire. Arm C on ternary input
+is BIT-EXACT (gate). `src/twt/collapse_writer.rs`: GGUF v3 collapsed
+emission streamed from the parent mmap — member passthroughs are
+BYTE-COPIES renamed to the new index, merged blocks carry per-suffix
+payloads with completeness enforced against the block's first member
+(a missing suffix refuses loud), the parent's metadata mirrors IN FILE
+ORDER (the reader gained `metadata_order` + `GgmlType::id()`, Q2_0
+emitting the fork-tip relabel 142), the `{arch}.block_count` override is
+REQUIRED to equal the reduced count, and the `twt.*` provenance keys
+(`block_table`, `arm_codes` + legend, `parent_weights_blake3`) are
+standard metadata the train-side probe reads unchanged.
+
+Two real defects the gate batteries caught at landing, both fixed in
+the same commit: the Q2_0 wire pack (`pack_ternary_group_to_q2_0`, the
+repack's new inverse) initially skipped zero weights — a skipped nibble
+IS code 0, which decodes as −1; the bit-exact round-trip gate held it
+(zeros must emit code 1). And the writer's offset plan desynced from
+its own write loop on the first misaligned tensor (the debug assert
+fired before the alignment pad) — caught by the synthetic-parent
+battery.
+
+**First real Phase-4 measurement** (`examples/twt_ternarize_probe`, the
+league model `Ternary-Bonsai-2-27B-PQ2_0.gguf`, GDN triples
+[0,3)/[32,35)/[60,63), `ffn_down` 5120×17408, deterministic LCG
+inputs): **damage_A(f16) ≈ 3.7–3.9e-8; damage_B(majority) ≈ 20 — arm B
+is DESTROYED on cross-scale merges** (the supported-amax scale
+overshoots the typical |f̄| ~3× and the vote destroys the magnitude
+structure; arm B is dead for merged blocks — a same-scale-only arm at
+best); **damage_C(source-quant) ≈ 0.31** — the 5→3 level reduction's
+price, so the κ=2 budget admits arm C only where the audition's own
+surrogate error ≥ ~0.31; on strong merges **arm A (dense f16, one GEMM
+per block) is the only budget-viable arm** — the issue's own arm-A
+framing. Baseline clarification pinned the hard way in the module doc:
+the T4.2 denominator is the SURROGATE's end-to-end error vs the parent
+(the audition's E_dense), never arm A's f16 rounding floor — κ·1e-8
+would be unfailingly tight and every arm would die mechanically.
+
+Gates: `twt_ternarize_gates` 15, `twt_ternarize_g4` 1 (alloc-free
+rel-err loop, own binary per the counting-allocator isolation rule),
+`twt_collapse_writer_gates` 4 (re-open round-trip, byte-identity,
+refusals, determinism over a synthetic ternary parent); lib 291 green
+at the feature; clippy clean at default, twt_collapse, and
+all-targets-at-the-feature. The train-side probe verify waits for a
+REAL collapsed file — which waits on the Bonsai audition (the apply
+path needs GDN cache snapshot/restore threading the laya mirror lacks;
+the Phase-5 prerequisite and the lane's next work).
+
+Session: riir-infer-022-phase4-arms-writer
+
 ## 2026-09-28 — Issue 015 audio PoC DEFERRED (owner: until M5 Ultra) + 023's missed hunk landed
 
 Owner directive same evening: defer the audio lane until an M5 Ultra is
