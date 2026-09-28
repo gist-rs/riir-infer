@@ -31,6 +31,7 @@ use std::io::Write;
 
 use crate::gguf_loader::{GgufFile, GgmlType, GgufValue};
 use crate::quant::q2_0::{BlockQ2_0, Q2_0_BLOCK_SIZE};
+use crate::types::DeltaNetLayerType;
 
 use super::ternarize::TwtArm;
 use super::TwtError;
@@ -95,6 +96,31 @@ pub fn twt_block_table_value(blocks: &[(usize, usize)]) -> GgufValue {
 /// block count; `0` = member passthrough).
 pub fn twt_arm_codes_value(arms: &[TwtArm]) -> GgufValue {
     GgufValue::Array(arms.iter().map(|a| GgufValue::U8(a.code())).collect())
+}
+
+/// The legend written beside [`twt_layer_types_value`] (a code array
+/// without a legend is a guess — same discipline as [`TwtArm::LEGEND`]).
+pub const LAYER_TYPES_LEGEND: &str = "twt.layer_types: per collapsed block, \
+DeltaNetLayerType discriminants — 0=attention, 1=deltanet";
+
+/// `twt.layer_types` — one [`DeltaNetLayerType`] discriminant per emitted
+/// block (length = block count; the enum's own `#[repr(u8)]` values — no
+/// second vocabulary).
+///
+/// Load-bearing for `qwen35` collapses: the stock loader derives layer
+/// types from `{arch}.full_attention_interval` INDEX arithmetic, and the
+/// parent's interval pattern does not survive renumbering — a collapsed
+/// file retyped by the derived pattern silently runs winners through the
+/// WRONG forward (Issue 022 T5.0). The explicit array replaces the
+/// derivation at load (`gguf_loader::qwen35_deltanet_config_from_gguf_metadata`);
+/// this writer REFUSES to emit a `qwen35` collapse without it.
+pub fn twt_layer_types_value(layer_types: &[DeltaNetLayerType]) -> GgufValue {
+    GgufValue::Array(
+        layer_types
+            .iter()
+            .map(|t| GgufValue::U8(*t as u8))
+            .collect(),
+    )
 }
 
 /// The parent's architecture tag (`general.architecture`) — the prefix
@@ -343,6 +369,62 @@ pub fn emit_collapsed_gguf<W: Write>(
                 "the plan forgot to override {bc_key} to {block_count} — a collapsed file \
                  advertising the parent's layer count is worse than no file"
             )))
+        }
+    }
+
+    // ── T5.0 protocol: explicit layer types are REQUIRED for qwen35 ──
+    // The stock qwen35 loader types layers by full_attention_interval index
+    // arithmetic, which the parent's pattern does not survive renumbering.
+    // A collapsed qwen35 file without `twt.layer_types` would load every
+    // winner through a derived (and silently WRONG) type — worse than no
+    // file, exactly like the stale block_count above.
+    let types_key = "twt.layer_types";
+    let types_in_meta = match spec.twt_meta.iter().find(|(k, _)| k == types_key) {
+        Some((_, GgufValue::Array(v))) => Some(v.len()),
+        Some((_, other)) => {
+            return Err(TwtError::GgufWrite(format!(
+                "{types_key} must be a metadata array, got {other:?}"
+            )))
+        }
+        None => None,
+    };
+    if arch == "qwen35" {
+        let Some(n_types) = types_in_meta else {
+            return Err(TwtError::GgufWrite(format!(
+                "a collapsed qwen35 file must carry {types_key} (one DeltaNetLayerType \
+                 discriminant per block) — the parent's full_attention_interval pattern \
+                 does not survive renumbering; see twt_layer_types_value"
+            )));
+        };
+        if n_types != block_count {
+            return Err(TwtError::GgufWrite(format!(
+                "{types_key} has {n_types} entries for {block_count} collapsed blocks — \
+                 every block must be typed"
+            )));
+        }
+        // A stale `qwen35.nextn_predict_layers` shifts the loader's main-stack
+        // window and mistypes the LAST block — same class as the stale block
+        // count. A collapsed main-stack file is a nextn-0 file: the MTP draft
+        // blocks are not collapsible main layers, so the plan must override
+        // the key to 0 (and drop the MTP blocks from the table).
+        let nextn_key = "qwen35.nextn_predict_layers";
+        let parent_nextn = parent.metadata.get(nextn_key).and_then(|v| v.as_u64());
+        let plan_nextn = spec
+            .metadata_overrides
+            .iter()
+            .find(|(k, _)| k == nextn_key)
+            .and_then(|(_, v)| v.as_u64());
+        let stale_nextn = match (parent_nextn, plan_nextn) {
+            (Some(_), Some(o)) if o != 0 => Some(o),
+            (Some(p), None) if p != 0 => Some(p),
+            _ => None,
+        };
+        if let Some(n) = stale_nextn {
+            return Err(TwtError::GgufWrite(format!(
+                "{nextn_key} would survive the collapse as {n} — the loader would \
+                 subtract it from {bc_key} and mistype the trailing block; override it \
+                 to 0 (MTP blocks are not main-stack layers and must not tile the table)"
+            )));
         }
     }
 

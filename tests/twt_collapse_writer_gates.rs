@@ -11,21 +11,28 @@
 //!   own values (the wire is the container's truth);
 //! - refusal arms: incomplete merged plans, non-tiling tables, a stale
 //!   block_count override;
-//! - determinism: two emits of one spec are byte-identical.
+//! - determinism: two emits of one spec are byte-identical;
+//! - the T5.0 layer-type protocol: a collapsed `qwen35` file MUST carry
+//!   `twt.layer_types` (the parent's full_attention_interval pattern does
+//!   not survive renumbering), the loader REPLACES the derived types with
+//!   it, and length/vocabulary mismatches refuse loud on BOTH seams.
 
 #![cfg(feature = "twt_collapse")]
 
 use std::collections::BTreeMap;
 
 use katgpt_core::TernaryGroupWeights;
-use riir_infer_core::gguf_loader::{GgufFile, GgmlType, GgufValue};
+use riir_infer_core::gguf_loader::{
+    qwen35_deltanet_config_from_gguf_metadata, GgufFile, GgmlType, GgufValue,
+};
 use riir_infer_core::quant::q2_0::{dequantize_row_q2_0, pack_ternary_group_to_q2_0, BlockQ2_0};
 use riir_infer_core::twt::collapse_writer::{
     emit_collapsed_gguf, q2_0_wire_bytes, twt_arm_codes_value, twt_block_table_value,
-    CollapseSpec, LayerSource, TensorOut,
+    twt_layer_types_value, CollapseSpec, LAYER_TYPES_LEGEND, LayerSource, TensorOut,
 };
 use riir_infer_core::twt::ternarize::{arm_source_quant, TwtArm};
 use riir_infer_core::twt::TwtError;
+use riir_infer_core::types::DeltaNetLayerType;
 
 /// A minimal ternary layer fixture: one Q2_0 projection (2×256) + one
 /// F32 norm (256). Byte-serialized by hand with the writer's own layout
@@ -157,6 +164,7 @@ fn write_str(buf: &mut Vec<u8>, s: &str) {
 fn write_kv(buf: &mut Vec<u8>, k: &str, v: &GgufValue) {
     write_str(buf, k);
     let (tag, payload): (u32, Vec<u8>) = match v {
+        GgufValue::U8(x) => (0, vec![*x]),
         GgufValue::U64(x) => (10, x.to_le_bytes().to_vec()),
         GgufValue::U32(x) => (4, x.to_le_bytes().to_vec()),
         GgufValue::String(s) => {
@@ -165,12 +173,19 @@ fn write_kv(buf: &mut Vec<u8>, k: &str, v: &GgufValue) {
             (8, p)
         }
         GgufValue::Array(items) => {
-            // U32 array only (all this fixture needs).
-            let mut p = 4u32.to_le_bytes().to_vec();
+            // U32 and U8 arrays (the block table and the layer types).
+            let elem_tag = match items.first() {
+                Some(GgufValue::U32(_)) => 4u32,
+                Some(GgufValue::U8(_)) => 0u32,
+                other => panic!("fixture array elem unhandled: {other:?}"),
+            };
+            let mut p = elem_tag.to_le_bytes().to_vec();
             p.extend_from_slice(&(items.len() as u64).to_le_bytes());
             for it in items {
-                if let GgufValue::U32(x) = it {
-                    p.extend_from_slice(&x.to_le_bytes());
+                match it {
+                    GgufValue::U32(x) => p.extend_from_slice(&x.to_le_bytes()),
+                    GgufValue::U8(x) => p.push(*x),
+                    other => panic!("fixture array elem unhandled: {other:?}"),
                 }
             }
             (9, p)
@@ -490,4 +505,339 @@ fn pack_to_wire_round_trips_through_the_reader() {
     dequantize_row_q2_0(&blocks, &mut deq);
     let eval = riir_infer_core::deltanet::ternary_weights::QwenDeltaNetTernaryWeights::dequant_proj_to_dense(&w);
     assert_eq!(deq, eval);
+}
+
+// ── T5.0: the explicit layer-type protocol (qwen35 collapses) ────────────
+//
+// The stock qwen35 loader types layers by full_attention_interval INDEX
+// arithmetic; the parent's pattern does not survive collapse renumbering.
+// A collapsed file typed by the derived pattern would run winners through
+// the WRONG forward. These gates pin the fix at both seams: the writer
+// REFUSES a qwen35 collapse without explicit types (and refuses a stale
+// nextn that would shift the loader's main-stack window); the loader
+// REPLACES the derived types with the explicit array, refusing loud on
+// length/vocabulary mismatches.
+
+/// A synthetic 4-layer qwen35 parent (interval 4 → derived types
+/// [DeltaNet, DeltaNet, DeltaNet, Attention]) with the same per-layer
+/// tensor shape as [`build_parent`].
+fn build_qwen35_parent(extra_kvs: Vec<(String, GgufValue)>) -> FixtureParent {
+    let mut rng = 0x0BADC0DEu64;
+    let mut next_f32 = || {
+        rng = rng.wrapping_mul(6364136223846793005).wrapping_add(3);
+        (((rng >> 33) as u32) as f32 / u32::MAX as f32 - 0.5) * 0.5
+    };
+
+    let proj_payload: Vec<u8> = {
+        let mut blocks: Vec<BlockQ2_0> = Vec::new();
+        for _ in 0..4 {
+            let mut b = BlockQ2_0 { d: 0, qs: [0u8; 32] };
+            b.d = half::f16::from_f32(0.07).to_bits();
+            for j in 0..128 {
+                b.qs[j / 4] |= (((next_f32() * 1e6_f32).abs() as u64 % 3) as u8) << ((j % 4) * 2);
+            }
+            blocks.push(b);
+        }
+        blocks.iter().flat_map(|b| bytemuck::bytes_of(b).to_vec()).collect()
+    };
+    let emb_payload = {
+        let mut out = Vec::new();
+        for _ in 0..8 {
+            let mut b = BlockQ2_0 { d: 0, qs: [0u8; 32] };
+            b.d = half::f16::from_f32(0.05).to_bits();
+            out.extend_from_slice(bytemuck::bytes_of(&b));
+        }
+        out
+    };
+    let norm_payloads: Vec<Vec<f32>> = (0..4)
+        .map(|_| (0..256).map(|_| 0.9 + next_f32().abs() * 0.2).collect())
+        .collect();
+    let out_norm = (0..256).map(|_| 1.0f32).collect::<Vec<_>>();
+
+    let mut kvs: Vec<(String, GgufValue)> = vec![
+        ("general.architecture".to_owned(), GgufValue::String("qwen35".to_owned())),
+        ("qwen35.block_count".to_owned(), GgufValue::U64(4)),
+        ("qwen35.embedding_length".to_owned(), GgufValue::U64(256)),
+        ("qwen35.full_attention_interval".to_owned(), GgufValue::U64(4)),
+        ("general.file_type".to_owned(), GgufValue::U32(142)),
+    ];
+    kvs.extend(extra_kvs);
+
+    let q2 = GgmlType::Q2_0;
+    let f32t = GgmlType::F32;
+    let mut tensors: Vec<(String, GgmlType, Vec<usize>, Vec<u8>)> = vec![
+        ("token_embd.weight".to_owned(), q2, vec![256, 4], emb_payload),
+        ("output_norm.weight".to_owned(), f32t, vec![256], f32_bytes(&out_norm)),
+    ];
+    for (i, np) in norm_payloads.iter().enumerate() {
+        tensors.push((format!("blk.{i}.in_proj.weight"), q2, vec![256, 2], proj_payload.clone()));
+        tensors.push((
+            format!("blk.{i}.attn_norm.weight"),
+            f32t,
+            vec![256],
+            f32_bytes(np),
+        ));
+    }
+
+    let mut buf: Vec<u8> = Vec::new();
+    buf.extend_from_slice(&0x4655_4747u32.to_le_bytes());
+    buf.extend_from_slice(&3u32.to_le_bytes());
+    buf.extend_from_slice(&(tensors.len() as u64).to_le_bytes());
+    buf.extend_from_slice(&(kvs.len() as u64).to_le_bytes());
+    for (k, v) in &kvs {
+        write_kv(&mut buf, k, v);
+    }
+    let alignment = 32usize;
+    let mut infos: Vec<(String, u32, Vec<usize>, u64)> = Vec::new();
+    let mut cursor = 0u64;
+    for (name, t, shape, data) in &tensors {
+        cursor = cursor.div_ceil(alignment as u64) * alignment as u64;
+        infos.push((name.clone(), t.id(), shape.clone(), cursor));
+        cursor += data.len() as u64;
+    }
+    for (name, t, shape, off) in &infos {
+        write_str(&mut buf, name);
+        buf.extend_from_slice(&(shape.len() as u32).to_le_bytes());
+        for d in shape {
+            buf.extend_from_slice(&(*d as u64).to_le_bytes());
+        }
+        buf.extend_from_slice(&t.to_le_bytes());
+        buf.extend_from_slice(&off.to_le_bytes());
+    }
+    let data_start = (buf.len() as u64).div_ceil(alignment as u64) * alignment as u64;
+    while (buf.len() as u64) < data_start {
+        buf.push(0);
+    }
+    for ((_, _, _, off), (_, _, _, data)) in infos.iter().zip(tensors.iter()) {
+        while (buf.len() as u64) < data_start + off {
+            buf.push(0);
+        }
+        buf.extend_from_slice(data);
+    }
+    FixtureParent { bytes: buf }
+}
+
+/// A metadata-ONLY GGUF (zero tensors) — everything the qwen35 config fn
+/// reads has a default, so the loader arms need no payload at all.
+fn build_meta_only_gguf(kvs: Vec<(String, GgufValue)>) -> Vec<u8> {
+    let mut buf: Vec<u8> = Vec::new();
+    buf.extend_from_slice(&0x4655_4747u32.to_le_bytes());
+    buf.extend_from_slice(&3u32.to_le_bytes());
+    buf.extend_from_slice(&0u64.to_le_bytes());
+    buf.extend_from_slice(&(kvs.len() as u64).to_le_bytes());
+    for (k, v) in &kvs {
+        write_kv(&mut buf, k, v);
+    }
+    while !buf.len().is_multiple_of(32) {
+        buf.push(0);
+    }
+    buf
+}
+
+/// The T5.0 collapse of the 4-layer qwen35 fixture: keep winner 0 of
+/// [0,3) and winner 3 of [3,4) — collapsed types [DeltaNet, Attention],
+/// which NO interval arithmetic on the renumbered stack can derive.
+fn qwen35_collapse_spec(
+    parent_bytes: &[u8],
+    with_types: bool,
+    extra_twt: Vec<(String, GgufValue)>,
+    extra_overrides: Vec<(String, GgufValue)>,
+) -> CollapseSpec {
+    let types = [DeltaNetLayerType::DeltaNet, DeltaNetLayerType::Attention];
+    let mut twt_meta = vec![
+        ("twt.block_table".to_owned(), twt_block_table_value(&[(0, 3), (3, 4)])),
+        ("twt.arm_codes".to_owned(), twt_arm_codes_value(&[TwtArm::Member, TwtArm::Member])),
+        ("twt.arm_legend".to_owned(), GgufValue::String(TwtArm::LEGEND.to_owned())),
+        (
+            "twt.parent_weights_blake3".to_owned(),
+            GgufValue::String(riir_infer_core::twt::blake3_of(parent_bytes)),
+        ),
+    ];
+    if with_types {
+        twt_meta.push(("twt.layer_types".to_owned(), twt_layer_types_value(&types)));
+        twt_meta.push((
+            "twt.layer_types_legend".to_owned(),
+            GgufValue::String(LAYER_TYPES_LEGEND.to_owned()),
+        ));
+    }
+    twt_meta.extend(extra_twt);
+    CollapseSpec {
+        blocks: vec![(0, 3, LayerSource::Member(0)), (3, 4, LayerSource::Member(3))],
+        metadata_overrides: vec![
+            ("qwen35.block_count".to_owned(), GgufValue::U64(2)),
+        ]
+        .into_iter()
+        .chain(extra_overrides)
+        .collect(),
+        twt_meta,
+    }
+}
+
+#[test]
+fn collapsed_qwen35_file_types_layers_explicitly() {
+    let fx = build_qwen35_parent(Vec::new());
+    let parent_path = write_to_temp("qwen35_parent.gguf", &fx.bytes);
+    let parent = GgufFile::open(&parent_path).unwrap();
+
+    // The PARENT's derived types (the legacy interval path, untouched).
+    let (pcfg, ptypes) = qwen35_deltanet_config_from_gguf_metadata(&parent).unwrap();
+    assert_eq!(
+        ptypes,
+        vec![
+            DeltaNetLayerType::DeltaNet,
+            DeltaNetLayerType::DeltaNet,
+            DeltaNetLayerType::DeltaNet,
+            DeltaNetLayerType::Attention,
+        ]
+    );
+    assert_eq!(pcfg.n_layer, 4);
+
+    // Collapse through the writer: winners 0 and 3 → blocks [DeltaNet, Attention].
+    let spec = qwen35_collapse_spec(&fx.bytes, true, Vec::new(), Vec::new());
+    let mut out = Vec::new();
+    let stats = emit_collapsed_gguf(&parent, &spec, &mut out).unwrap();
+    assert_eq!(stats.block_count, 2);
+    let collapsed_path = write_to_temp("qwen35_collapsed.gguf", &out);
+    let collapsed = GgufFile::open(&collapsed_path).unwrap();
+
+    let (cfg, types) = qwen35_deltanet_config_from_gguf_metadata(&collapsed).unwrap();
+    assert_eq!(cfg.n_layer, 2);
+    assert_eq!(
+        types,
+        vec![DeltaNetLayerType::DeltaNet, DeltaNetLayerType::Attention],
+        "the collapsed file must type blocks by WINNER, not by interval arithmetic"
+    );
+
+    // The hazard the key exists to prevent, pinned as a positive: the same
+    // metadata WITHOUT the explicit array derives [DeltaNet, DeltaNet] —
+    // wrong for a stack whose second block is an attention winner.
+    let hazard = build_meta_only_gguf(vec![
+        ("qwen35.block_count".to_owned(), GgufValue::U64(2)),
+        ("qwen35.full_attention_interval".to_owned(), GgufValue::U64(4)),
+    ]);
+    let hazard_path = write_to_temp("qwen35_derived_hazard.gguf", &hazard);
+    let hazard_file = GgufFile::open(&hazard_path).unwrap();
+    let (_, derived) = qwen35_deltanet_config_from_gguf_metadata(&hazard_file).unwrap();
+    assert_eq!(
+        derived,
+        vec![DeltaNetLayerType::DeltaNet, DeltaNetLayerType::DeltaNet],
+        "the derived pattern on the renumbered stack must read the WRONG types — \
+         that is why the writer refuses to emit without the explicit array"
+    );
+
+    // The twt.* keys survive as standard metadata (cross-repo readable).
+    assert_eq!(
+        collapsed.metadata_string("twt.layer_types_legend"),
+        Some(LAYER_TYPES_LEGEND)
+    );
+}
+
+#[test]
+fn twt_layer_types_refusals_are_loud() {
+    let fx = build_qwen35_parent(Vec::new());
+    let parent_path = write_to_temp("qwen35_parent_ref.gguf", &fx.bytes);
+    let parent = GgufFile::open(&parent_path).unwrap();
+
+    // (1) WRITER: a qwen35 collapse WITHOUT the explicit types refuses —
+    // the derived pattern would silently mistype the renumbered stack.
+    let mut out = Vec::new();
+    match emit_collapsed_gguf(
+        &parent,
+        &qwen35_collapse_spec(&fx.bytes, false, Vec::new(), Vec::new()),
+        &mut out,
+    ) {
+        Err(TwtError::GgufWrite(msg)) => {
+            assert!(msg.contains("twt.layer_types"), "{msg}")
+        }
+        other => panic!("missing layer_types must refuse, got {other:?}"),
+    }
+
+    // (2) WRITER: a SHORT array refuses at the source.
+    let short = vec![(
+        "twt.layer_types".to_owned(),
+        GgufValue::Array(vec![GgufValue::U8(1)]),
+    )];
+    let mut out = Vec::new();
+    match emit_collapsed_gguf(&parent, &qwen35_collapse_spec(&fx.bytes, false, short, Vec::new()), &mut out) {
+        Err(TwtError::GgufWrite(msg)) => assert!(msg.contains("every block must be typed"), "{msg}"),
+        other => panic!("short layer_types must refuse, got {other:?}"),
+    }
+
+    // (3) WRITER: a stale nextn refuses — the loader would subtract it
+    // from the collapsed block count and mistype the trailing block.
+    let fx_nextn = build_qwen35_parent(vec![(
+        "qwen35.nextn_predict_layers".to_owned(),
+        GgufValue::U64(1),
+    )]);
+    let nextn_path = write_to_temp("qwen35_parent_nextn.gguf", &fx_nextn.bytes);
+    let parent_nextn = GgufFile::open(&nextn_path).unwrap();
+    let mut out = Vec::new();
+    match emit_collapsed_gguf(
+        &parent_nextn,
+        &qwen35_collapse_spec(&fx_nextn.bytes, true, Vec::new(), Vec::new()),
+        &mut out,
+    ) {
+        Err(TwtError::GgufWrite(msg)) => assert!(msg.contains("nextn"), "{msg}"),
+        other => panic!("stale nextn must refuse, got {other:?}"),
+    }
+
+    // ... and the override heals it (structure-only: same 4-layer parent).
+    let spec = qwen35_collapse_spec(
+        &fx_nextn.bytes,
+        true,
+        Vec::new(),
+        vec![("qwen35.nextn_predict_layers".to_owned(), GgufValue::U64(0))],
+    );
+    let mut out = Vec::new();
+    emit_collapsed_gguf(&parent_nextn, &spec, &mut out)
+        .unwrap_or_else(|e| panic!("nextn override to 0 must emit, got {e}"));
+
+    // (4) LOADER: out-of-vocabulary code refuses.
+    let bad_vocab = build_meta_only_gguf(vec![
+        ("qwen35.block_count".to_owned(), GgufValue::U64(2)),
+        ("qwen35.full_attention_interval".to_owned(), GgufValue::U64(4)),
+        (
+            "twt.layer_types".to_owned(),
+            GgufValue::Array(vec![GgufValue::U8(1), GgufValue::U8(7)]),
+        ),
+    ]);
+    let bad_vocab_path = write_to_temp("qwen35_bad_vocab.gguf", &bad_vocab);
+    let bad_vocab_file = GgufFile::open(&bad_vocab_path).unwrap();
+    let err = qwen35_deltanet_config_from_gguf_metadata(&bad_vocab_file)
+        .err()
+        .expect("code 7 must refuse");
+    assert!(err.to_string().contains("vocabulary"), "{err}");
+
+    // (5) LOADER: wrong length refuses.
+    let bad_len = build_meta_only_gguf(vec![
+        ("qwen35.block_count".to_owned(), GgufValue::U64(2)),
+        ("qwen35.full_attention_interval".to_owned(), GgufValue::U64(4)),
+        (
+            "twt.layer_types".to_owned(),
+            GgufValue::Array(vec![GgufValue::U8(1)]),
+        ),
+    ]);
+    let bad_len_path = write_to_temp("qwen35_bad_len.gguf", &bad_len);
+    let bad_len_file = GgufFile::open(&bad_len_path).unwrap();
+    let err = qwen35_deltanet_config_from_gguf_metadata(&bad_len_file)
+        .err()
+        .expect("short array must refuse");
+    assert!(err.to_string().contains("length"), "{err}");
+
+    // (6) LOADER: valid codes type the stack through the metadata-only
+    // path (the fn reads no tensors — every key defaults).
+    let ok = build_meta_only_gguf(vec![
+        ("qwen35.block_count".to_owned(), GgufValue::U64(2)),
+        (
+            "twt.layer_types".to_owned(),
+            GgufValue::Array(vec![GgufValue::U8(1), GgufValue::U8(0)]),
+        ),
+    ]);
+    let ok_path = write_to_temp("qwen35_ok_types.gguf", &ok);
+    let ok_file = GgufFile::open(&ok_path).unwrap();
+    let (_, types) = qwen35_deltanet_config_from_gguf_metadata(&ok_file).unwrap();
+    assert_eq!(
+        types,
+        vec![DeltaNetLayerType::DeltaNet, DeltaNetLayerType::Attention]
+    );
 }

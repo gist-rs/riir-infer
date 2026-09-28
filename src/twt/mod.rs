@@ -56,8 +56,8 @@ pub use audition::{
 pub use delta::{delta, localize_by_block, DeltaMap};
 #[cfg(feature = "twt_collapse")]
 pub use collapse_writer::{
-    emit_collapsed_gguf, twt_arm_codes_value, twt_block_table_value, CollapseSpec, CollapsedStats,
-    LayerSource, TensorOut,
+    emit_collapsed_gguf, twt_arm_codes_value, twt_block_table_value, twt_layer_types_value,
+    CollapseSpec, CollapsedStats, LayerSource, LAYER_TYPES_LEGEND, TensorOut,
 };
 #[cfg(feature = "twt_collapse")]
 pub use ternarize::{

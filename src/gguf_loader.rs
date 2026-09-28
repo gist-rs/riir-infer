@@ -2259,8 +2259,17 @@ pub fn load_qwen_deltanet_ternary_weights_gguf(
 /// - `qwen35.ssm.group_count` — `n_k_heads` (`ssm_n_group`)
 /// - `qwen35.full_attention_interval` — full attention every N layers (default 4)
 /// - `qwen35.nextn_predict_layers` — MTP layer count (subtracted from main layers)
+/// - `twt.layer_types` — OPTIONAL explicit per-main-layer types (U8 array,
+///   length = main layer count, [`DeltaNetLayerType`] discriminants —
+///   0=attention, 1=deltanet). Written by the Issue-022 collapse writer
+///   (REQUIRED on every `qwen35` file it emits): the parent's interval
+///   INDEX pattern does not survive collapse renumbering, so a collapsed
+///   file typed by the derived pattern would run winners through the wrong
+///   forward. Present ⇒ REPLACES the derived types, refusing loud on a
+///   length or vocabulary mismatch; absent ⇒ the interval derivation (all
+///   legacy checkpoints).
 #[cfg(feature = "deltanet_inference")]
-fn qwen35_deltanet_config_from_gguf_metadata(
+pub fn qwen35_deltanet_config_from_gguf_metadata(
     gguf: &GgufFile,
 ) -> Result<(Config, Vec<DeltaNetLayerType>)> {
     let prefix = "qwen35.";
@@ -2345,6 +2354,38 @@ fn qwen35_deltanet_config_from_gguf_metadata(
             DeltaNetLayerType::Attention
         }
     }));
+
+    // Issue 022 T5.0: a collapsed (`twt.*`) file carries EXPLICIT per-block
+    // types — the parent's interval pattern does not survive renumbering.
+    // Present ⇒ replace the derived types; refuse loud on any mismatch (a
+    // silently mistyped layer runs the wrong forward — DeltaNet vs attention
+    // is not a recoverable degradation).
+    if let Some(arr) = gguf.metadata_array("twt.layer_types") {
+        anyhow::ensure!(
+            arr.len() == n_main,
+            "twt.layer_types length {} != main layer count {n_main} — refusing (a \
+             renumbered stack must type every layer)",
+            arr.len()
+        );
+        let attn_code = DeltaNetLayerType::Attention as u64;
+        let gdn_code = DeltaNetLayerType::DeltaNet as u64;
+        layer_types = arr
+            .iter()
+            .map(|v| {
+                let code = v.as_u64().ok_or_else(|| {
+                    anyhow::anyhow!("twt.layer_types element is not an integer — refusing")
+                })?;
+                match code {
+                    c if c == attn_code => Ok(DeltaNetLayerType::Attention),
+                    c if c == gdn_code => Ok(DeltaNetLayerType::DeltaNet),
+                    _ => Err(anyhow::anyhow!(
+                        "twt.layer_types code {code} outside the vocabulary \
+                         (0=attention, 1=deltanet) — refusing"
+                    )),
+                }
+            })
+            .collect::<Result<Vec<_>>>()?;
+    }
 
     // Get vocab_size from token_embd tensor shape
     let vocab_size = gguf
