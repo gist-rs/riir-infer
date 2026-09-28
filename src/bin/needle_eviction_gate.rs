@@ -247,7 +247,7 @@ struct Needle {
 }
 
 /// Per-arm result (also the JSON report row).
-#[derive(serde::Serialize, serde::Deserialize)]
+#[derive(serde::Serialize, serde::Deserialize, Clone)]
 struct ArmReport {
     name: String,
     /// NLL per needle (nats/token over the code span).
@@ -309,6 +309,28 @@ where
 {
     let v: Option<f32> = serde::Deserialize::deserialize(d)?;
     Ok(v.unwrap_or(f32::NAN))
+}
+
+/// Upsert `fresh` rows into the report at `path` and rewrite it: per-arm
+/// invocations accumulate into ONE consolidated JSON instead of each
+/// overwriting it with only its own arms (the `--full-from` flow runs one
+/// arm per invocation — without the merge, every invocation erases the
+/// previous arms' rows). Rows match by name; a crash/restart loses at
+/// most the arm in flight.
+fn upsert_report(path: &std::path::Path, fresh: &[ArmReport]) -> Result<()> {
+    let mut all: Vec<ArmReport> = std::fs::read(path)
+        .ok()
+        .and_then(|bytes| serde_json::from_slice(&bytes).ok())
+        .unwrap_or_default();
+    for row in fresh {
+        match all.iter_mut().find(|r| r.name == row.name) {
+            Some(slot) => *slot = row.clone(),
+            None => all.push(row.clone()),
+        }
+    }
+    let json = serde_json::to_string_pretty(&all)?;
+    std::fs::write(path, json).with_context(|| format!("write {}", path.display()))?;
+    Ok(())
 }
 
 fn main() -> Result<()> {
@@ -760,6 +782,12 @@ fn main() -> Result<()> {
             );
         }
         reports.push(report);
+        // Incremental consolidated write: a restart between arms keeps
+        // every completed arm.
+        if let Some(out) = &args.out {
+            std::fs::create_dir_all(out)?;
+            upsert_report(&out.join("needle_gate_report.json"), &reports)?;
+        }
     }
 
     // ── Deltas vs full + the verdict table ──
@@ -837,10 +865,8 @@ fn main() -> Result<()> {
 
     if let Some(out) = &args.out {
         std::fs::create_dir_all(out)?;
-        let path = out.join("needle_gate_report.json");
-        let json = serde_json::to_string_pretty(&reports)?;
-        std::fs::write(&path, json).with_context(|| format!("write {}", path.display()))?;
-        println!("# report: {}", path.display());
+        upsert_report(&out.join("needle_gate_report.json"), &reports)?;
+        println!("# report: {}", out.join("needle_gate_report.json").display());
     }
     Ok(())
 }
@@ -949,6 +975,10 @@ fn run_arm(
     let mut x = vec![0.0f32; v.max(config.n_embd)];
 
     // ── Prefill in chunks (eviction runs from the first overshoot) ──
+    // Progress line per chunk: a 64K arm runs ~2 h and the session watchdog
+    // kills silent benchmark commands at ~30 min — one line per ~15-min
+    // chunk keeps the run visibly alive. (stderr like the other progress
+    // lines; the tee'd logs capture both streams.)
     for (c, chunk) in prompt.chunks(args.chunk).enumerate() {
         prefill_qwen_deltanet_chunk_into(
             weights,
@@ -961,6 +991,12 @@ fn run_arm(
             &mut pctx,
             &mut logits,
             Some(&mut evictor),
+        );
+        eprintln!(
+            "# [{name}] prefill chunk {}/{} at {:.0}s",
+            c + 1,
+            prompt.len().div_ceil(args.chunk),
+            t_arm.elapsed().as_secs_f32()
         );
     }
     let prefill_done = t_arm.elapsed().as_secs_f32();
