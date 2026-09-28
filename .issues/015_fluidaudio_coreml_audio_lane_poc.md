@@ -1,6 +1,6 @@
 # Issue 015: FluidAudio/CoreML audio lane PoC — load FluidInference's published models from Rust
 
-**Status:** OPEN
+**Status:** OPEN — DEFERRED 2026-09-28 (owner directive: audio until **M5 Ultra** is available). T0 boundary stays landed; T1–T6 below deferred with the recon recorded so the pickup is turnkey.
 **Date:** 2026-09-26
 **Filed from:** [`.research/001_FluidInference_OnDevice_Audio_Stack.md`](../.research/001_FluidInference_OnDevice_Audio_Stack.md) (F1)
 **Sources:** FluidAudio `@ 762baf6733ca0f0dbeb1ce335363fc75066bd2c9` (Apache-2.0) ·
@@ -16,6 +16,37 @@ models (default-on). FluidInference publishes ANE-optimized CoreML bundles of op
 models (VAD/ASR/TTS/diarization/AEC). The unblocked first step is a PoC that answers:
 **can riir-infer load and serve one of their published bundles from pure Rust, and at
 what cost vs the alternatives?**
+
+## Deferred state (2026-09-28 recon — turnkey handoff)
+
+Owner directive: defer until M5 Ultra. Recon done this session so the next
+pickup starts at T2, not at zero:
+
+- **Target bundle (exact):** `FluidInference/silero-vad-coreml` →
+  `silero-vad-unified-256ms-v6.2.1.mlmodelc` — a PRE-COMPILED `.mlmodelc`
+  directory (no compile step; direct `MLModel` load), named by FluidAudio
+  `ModelNames.VAD.sileroVadFile` (@ `20d4f0bd46d11d7f50a6eb4f7835cfdbd2b4ba14`,
+  HEAD — the pinned sha `762baf67` predates it; same wire).
+- **Wire contract** (from `VadManager.processUnifiedModel`):
+  inputs `audio_input` `[1, 4160]` f32 (64-sample context + 4096 new —
+  256 ms @ 16 kHz), `hidden_state` `[1, 128]`, `cell_state` `[1, 128]`;
+  outputs `vad_output` (prob, substring-matched — names may carry suffixes),
+  `new_hidden_state`, `new_cell_state`. State flow: context = last 64
+  samples of the PRIOR chunk, zero-init; LSTM state 128-d carried between
+  chunks (the streaming-state shape T1 wanted to exercise).
+- **Compute posture:** FluidAudio's default `.cpuAndNeuralEngine`; their
+  loader pools the three MLMultiArrays per key (surface churn matters —
+  3 allocs/chunk at 256 ms cadence is nothing, but noted).
+- **T2 shape (already known):** the generic pieces of
+  `crates/riir-infer-laya/src/laya/riir/ane.rs` (compile-cache,
+  `MLModel::modelWithContentsOfURL_configuration_error` under
+  `CPU_AND_NE`, `verify_compute_plan`) take any bundle URL — the
+  digest/manifest coupling is laya-encoder-specific and the audio lane
+  bypasses it. The audio lane's plan gate should REPORT the verdict
+  (FluidAudio's published bundle is not 100%-ANE/0-transition by
+  contract) rather than reuse `Placement::passes()`'s strict laya law.
+- First recon commit: `e8e17b8` (landed Issue 023's missed rename in the
+  same pass; unrelated to audio).
 
 ## PoC plan
 
@@ -38,10 +69,10 @@ recurrent state — exercises the streaming-state shape too).
       recorded verdict). T0's remaining half is the row riding the first code
       commit — done by construction: the row is already in the contract, so the
       first code commit cites it. T1–T5 below are the PoC's own tasks.**
-- [ ] **T1 — consult the cost model FIRST.** Run `ane_roofline` on silero-vad's shape
+- [-] **T1 — consult the cost model FIRST.** Run `ane_roofline` on silero-vad's shape
       (working set vs the 2 MB cliff, dispatch floor). Record the prediction before
       any measurement — Research 001 §6 caveat 5 / F5.
-- [ ] **T2 — gate 1: can the EXISTING `laya-riir-ane` path load an external
+- [-] **T2 — gate 1: can the EXISTING `laya-riir-ane` path load an external
       `.mlmodelc`?** riir-infer-laya already carries an allowlisted macOS ANE feature
       built on `objc2-core-ml` 0.3 (BOUNDARY.md May-depend-on, target-scoped) — the
       question is whether that binding's `MLModel` compile/load surface accepts an
@@ -49,16 +80,16 @@ recurrent state — exercises the streaming-state shape too).
       Time-box this; if it fails, document why and move to T4. (katgpt-rs's
       `coreml-native`/`coreml-proto` stack is the sibling spelling of the same idea —
       not a dep candidate here, it is not on this repo's allowlist.)
-- [ ] **T3 — if T2 passes:** drive 3 verdicts on synthetic audio (silence / tone /
+- [-] **T3 — if T2 passes:** drive 3 verdicts on synthetic audio (silence / tone /
       speech-shaped noise) and check VAD probabilities separate cleanly. Measure
       per-chunk latency vs their published posture (`.cpuAndNeuralEngine`).
-- [ ] **T4 — fallback path A:** `fluidaudio-rs` FFI (MIT) — full pipeline but drags a
+- [-] **T4 — fallback path A:** `fluidaudio-rs` FFI (MIT) — full pipeline but drags a
       Swift toolchain into `build.rs`, macOS 14+ only. Evaluate as macOS-only posture;
       requires the T0 allowlist row and is expected to lose to T2 on build hygiene.
-- [ ] **T5 — fallback path B (cross-platform):** mobius-convert silero-vad to ONNX →
+- [-] **T5 — fallback path B (cross-platform):** mobius-convert silero-vad to ONNX →
       `ort` (the `fastembed` precedent in riir-games shows ONNX-native consumption).
       This is the Linux-game-server / wasm path; requires the T0 allowlist row.
-- [ ] **T6 — verdict doc:** consumption-path decision matrix (pure-Rust CoreML vs FFI
+- [-] **T6 — verdict doc:** consumption-path decision matrix (pure-Rust CoreML vs FFI
       vs ONNX) with measured numbers; land behind a default-off feature gate; GOAT
       gate before any promotion.
 

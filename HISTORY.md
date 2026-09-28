@@ -1081,3 +1081,25 @@ closed absent a real consumer pull.
 Issue 025 removed with this record — the noise-reduction rule.
 
 Session: owner-gate-pickup-d7-d8-d10
+
+## 2026-09-28 — Issue 015 audio PoC DEFERRED (owner: until M5 Ultra) + 023's missed hunk landed
+
+Owner directive same evening: defer the audio lane until an M5 Ultra is
+available — the PoC targets ANE latency/working-set posture and M5-class
+silicon is the intended measurement box, so a pre-M5 measurement would
+not be the record that matters. Issue 015 stays OPEN with T1–T6
+deferred (`- [-]`) and a turnkey recon recorded IN the issue (exact
+bundle `silero-vad-unified-256ms-v6.2.1.mlmodelc`, the full wire
+contract from FluidAudio's `VadManager` @ `20d4f0bd`, and the T2 shape
+— the generic `ane.rs` load path takes any bundle URL; the audio lane
+bypasses the laya digest/manifest coupling and should REPORT the plan
+verdict rather than reuse the strict laya gate). T0's boundary rows
+stay landed (D8) — the widening is timing-independent.
+
+Follow-through: `e8e17b8` landed the `cubecl_encoder_probe.rs` alias
+rename that Issue 023's closing record (`61ebf9c`, HISTORY row 1047)
+claimed landed but the sweep repair left in the worktree — the
+record-vs-tree divergence class again; caught because HEAD's test file
+still carried the pre-rename spelling.
+
+Session: owner-gate-pickup-audio-defer
