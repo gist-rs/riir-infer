@@ -131,7 +131,7 @@ mod tests {
         acc.add(&[0.0, 0.0], &[1.0, 1.0]);
         assert_eq!(acc.distance(), 1.0);
 
-        let mut acc = PairCosineAccum::new();
+        let acc = PairCosineAccum::new();
         assert_eq!(acc.distance(), 1.0, "empty accumulator is conservative");
     }
 

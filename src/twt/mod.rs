@@ -18,20 +18,27 @@
 //!   and kill rule (T1.6) + the type-split forced-min floor (T2.1/T2.2).
 //! - [`synth`] — deterministic planted corpora for the gates (T1.5).
 //! - [`delta`] — the ΔS quant-damage map (T1.4, read-only diagnostic).
+//! - [`audition`] — the Phase-3 zero-training surrogate pool math (the
+//!   mean/RDSC merges) + the T3.3 per-channel branch-correction fit + the
+//!   T3.2 selection pin (pure over `f32` slices; the laya-coupled apply
+//!   half lives in the `twt_laya_audition` example, dev-dep direction).
 //!
-//! What Phase 1 does NOT ship: audition/surrogates (Phase 3), the
-//! collapsed-GGUF writer (Phase 4), the GOAT gate (Phase 5). The laya
-//! capture hook lives in `riir-infer-laya`
-//! (`Encoder::forward_capture`, its own `twt_profile` feature); the
-//! Bonsai/GDN capture sibling is an open T1.2 half.
+//! What Phase 3 does NOT ship here: the collapsed-GGUF writer (Phase 4),
+//! the GOAT gate (Phase 5). The laya capture hook lives in
+//! `riir-infer-laya` (`Encoder::forward_capture`, its own `twt_profile`
+//! feature); the Bonsai/GDN capture sibling is an open T1.2 half.
 
 pub mod accum;
+pub mod audition;
 pub mod delta;
 pub mod partition;
 pub mod smatrix;
 pub mod synth;
 
 pub use accum::PairCosineAccum;
+pub use audition::{
+    mean_sq_err, merge_mean, merge_rdsc, selection_pin, CandRow, CorrectionFit, SelectionPin,
+};
 pub use delta::{delta, localize_by_block, DeltaMap};
 pub use partition::{
     brute_force_optimal, forced_min_blocks, kill_verdict, minmax_partition,
@@ -79,4 +86,16 @@ pub enum TwtError {
         "SVCCA probe floor: {got} retained rows <= dim (need >= {need}) — keep n_probe > d (Plan 349 T4.1 pitfall); grow the corpus or shrink the stride"
     )]
     ProbeFloor { got: usize, need: usize },
+    #[error("merge member shape mismatch: expected {expected} elements, got {got}")]
+    MergeShapeMismatch { expected: usize, got: usize },
+    #[error("merge over zero members")]
+    EmptyMerge,
+    #[error("correction-fit slice mismatch: expected {expected} elements, got total {got}")]
+    FitShapeMismatch { expected: usize, got: usize },
+    #[error("row count × dim overflow")]
+    RowOverflow,
+    #[error(
+        "selection cross-check: stated argmin index {stated} is not the minimum (actual {actual}) — the candidate table is tampered or the scan reordered it"
+    )]
+    ArgminMismatch { stated: usize, actual: usize },
 }

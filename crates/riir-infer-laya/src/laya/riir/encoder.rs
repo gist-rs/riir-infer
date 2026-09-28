@@ -37,6 +37,20 @@ struct Layer {
     sliding: bool,
 }
 
+/// Read-only borrows of one layer's weights — the Phase-3 audition seam
+/// ([`Encoder::layer_weights`]). Shapes mirror `Layer`'s; `attn_norm` is
+/// `None` on layer 0.
+#[cfg(feature = "twt_profile")]
+pub struct LayerWeights<'a> {
+    pub attn_norm: Option<&'a [f32]>,
+    pub wqkv: &'a [f32],
+    pub wo: &'a [f32],
+    pub wi: &'a [f32],
+    pub mlp_wo: &'a [f32],
+    pub mlp_norm: &'a [f32],
+    pub sliding: bool,
+}
+
 /// The loaded `ModernBERT` encoder (our tensors).
 pub struct Encoder {
     cfg: EncoderConfig,
@@ -252,6 +266,29 @@ impl Encoder {
         };
         self.forward_packed_impl(b, input_ids, seqs, Some(cap))?;
         Ok(())
+    }
+
+    /// Phase-3 audition seam (issue 022 T3.1): read-only borrows of one
+    /// layer's weights, for the surrogate-pool builder in the
+    /// `twt_laya_audition` driver. Borrows, never clones — the whole-layer
+    /// clone set is ~1.3 GB and the audition holds it for nothing. The
+    /// slices are EXACTLY the fields `forward` consumes, in the same
+    /// shapes (`wqkv` [3d,d], `wo` [d,d], `wi` [2I,d], `mlp_wo` [d,I]);
+    /// `attn_norm` is `None` on layer 0 (the identity-path quirk) and the
+    /// merged-surrogate builder must propagate that None, not invent a
+    /// norm.
+    #[cfg(feature = "twt_profile")]
+    pub fn layer_weights(&self, li: usize) -> Option<LayerWeights<'_>> {
+        let l = self.layers.get(li)?;
+        Some(LayerWeights {
+            attn_norm: l.attn_norm.as_deref(),
+            wqkv: &l.wqkv,
+            wo: &l.wo,
+            wi: &l.wi,
+            mlp_wo: &l.mlp_wo,
+            mlp_norm: &l.mlp_norm,
+            sliding: l.sliding,
+        })
     }
 
     fn forward_packed_impl(

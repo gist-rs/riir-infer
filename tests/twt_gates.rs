@@ -11,7 +11,7 @@
 use riir_infer_core::twt::{
     brute_force_optimal, forced_min_blocks, kill_verdict, localize_by_block, minmax_partition,
     partition_worst, planted_corpus, planted_corpus_noisy, delta, Block, Bucket, DeltaMap,
-    KillVerdict, PairCosineAccum, PRE_REGISTERED_EPS_GRID, SMatrix, SMatrixBuilder, SvccaCfg,
+    KillVerdict, PRE_REGISTERED_EPS_GRID, SMatrix, SMatrixBuilder, SvccaCfg,
 };
 use riir_infer_core::twt::{Lcg, TwtError};
 
@@ -287,11 +287,11 @@ fn forward_split_invariance_bit_exact() {
 #[test]
 fn t1_4_delta_localizes_planted_damage() {
     let clean = SMatrix::from_fn(6, |i, j| {
-        let grp = |l: usize| matches!(l, 2 | 3 | 4);
+        let grp = |l: usize| matches!(l, 2..=4);
         if grp(i) && grp(j) { 0.0 } else { 1.0 }
     });
     let damaged = SMatrix::from_fn(6, |i, j| {
-        let grp = |l: usize| matches!(l, 2 | 3 | 4);
+        let grp = |l: usize| matches!(l, 2..=4);
         if grp(i) && grp(j) { 0.4 } else { 1.0 }
     });
     let d: DeltaMap = delta(&clean, &damaged).unwrap();

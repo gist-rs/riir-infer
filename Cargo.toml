@@ -332,6 +332,14 @@ name = "twt_gates"
 path = "tests/twt_gates.rs"
 required-features = ["twt_profile"]
 
+# Issue 022 Phase 3 (T3.1–T3.3) — the pure audition-math battery (merge
+# identities, the correction fit, the selection pin). Whole-file #![cfg]
+# + this row = the reader protection, same as twt_gates.
+[[test]]
+name = "twt_audition_gates"
+path = "tests/twt_audition_gates.rs"
+required-features = ["twt_profile"]
+
 # The G4 alloc-free gate, in its OWN binary: the counting allocator is
 # process-global and parallel sibling tests would leak allocations into
 # the count (one test per binary is the isolation). Whole-file #![cfg]
@@ -348,6 +356,14 @@ required-features = ["twt_profile"]
 [[example]]
 name = "twt_laya_profile"
 path = "examples/twt_laya_profile.rs"
+required-features = ["twt_profile"]
+
+# Issue 022 Phase 3 (T3.1–T3.3) — the surrogate-pool audition + branch
+# corrections over the laya encoder (CPU f32 deployment arithmetic; the
+# parity arm proves the apply path against the parent forward each run).
+[[example]]
+name = "twt_laya_audition"
+path = "examples/twt_laya_audition.rs"
 required-features = ["twt_profile"]
 
 # Issue 022 T1.2 — the Bonsai/GDN capture sibling on the root-crate ternary

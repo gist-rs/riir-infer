@@ -341,15 +341,15 @@ pub fn kill_verdict(partitions_by_eps: &[Vec<Block>], forced: usize) -> Result<K
 mod tests {
     use super::*;
 
-    fn s_of(n: usize, mut f: impl FnMut(usize, usize) -> f32) -> SMatrix {
-        SMatrix::from_fn(n, |i, j| f(i, j))
+    fn s_of(n: usize, f: impl FnMut(usize, usize) -> f32) -> SMatrix {
+        SMatrix::from_fn(n, f)
     }
 
     #[test]
     fn dp_recovers_one_planted_block() {
         // Layers 2,3,4 identical (distance 0); everything else ≈ 1.
         let s = s_of(6, |i, j| {
-            let grp = |l: usize| matches!(l, 2 | 3 | 4);
+            let grp = |l: usize| matches!(l, 2..=4);
             if grp(i) && grp(j) { 0.0 } else { 1.0 }
         });
         let p = minmax_partition(&s, 0.1).unwrap();

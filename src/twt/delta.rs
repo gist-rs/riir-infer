@@ -85,11 +85,11 @@ mod tests {
         // intra-block distances moved to 0.4 — damage must localize
         // inside block [2,5).
         let p = SMatrix::from_fn(6, |i, j| {
-            let grp = |l: usize| matches!(l, 2 | 3 | 4);
+            let grp = |l: usize| matches!(l, 2..=4);
             if grp(i) && grp(j) { 0.0 } else { 1.0 }
         });
         let q = SMatrix::from_fn(6, |i, j| {
-            let grp = |l: usize| matches!(l, 2 | 3 | 4);
+            let grp = |l: usize| matches!(l, 2..=4);
             if grp(i) && grp(j) {
                 0.4
             } else {
@@ -108,7 +108,7 @@ mod tests {
         assert_eq!(loc[1].1, 0.4);
         assert_eq!(loc[2].1, 0.0);
         // Top entry is an intra-block pair.
-        assert!(matches!(d.entries[0], (2, _, 0.4) | (3, _, 0.4) | (2, 4, 0.4)));
+        assert!(matches!(d.entries[0], (2, _, 0.4) | (3, _, 0.4)));
     }
 
     #[test]
