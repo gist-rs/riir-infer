@@ -7,4 +7,4 @@ Refs: `../riir-ai/.issues/1016_workspace_owner_gated_decisions_summary.md` (riir
 - [x] D7: delete the dead `gpu_transpose` module + repoint the BOUNDARY.md "GPU transpose kernel" ownership line at `transpose_cubecl.rs` in the SAME commit. Code task — dedicated follow-up commit, keep tests green. (EXECUTED 2026-09-28; see `.issues/025` D7 row for the record.)
 - [x] D8: widen the BOUNDARY allowlist for the audio-lane PoC by reusing the `objc2-core-ml` allowlist row; drift-row discipline per BOUNDARY.md (issue 015 owns the PoC record). (EXECUTED 2026-09-28; see `.issues/025` D8 row.)
 - [-] D9: research 327–332 routing to public katgpt-rs — deferred with T7/S8 (`.issues/1004_corpus_follows_op_layer_migration.md:34`).
-- Record-only: D10 — S6b training-families home closes as by-design unless a consumer pull appears (`.issues/1003_riir_infer_carve_remains_4090.md:5`).
+- Record-only: D10 — S6b training-families home closes as by-design unless a consumer pull appears (`.issues/1003_riir_infer_carve_remains_4090.md:5`). (RECORDED 2026-09-28 — disposition ratified into 1003's status; see `.issues/025` D10 row.)
