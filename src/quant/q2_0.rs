@@ -212,6 +212,82 @@ pub enum Q2oRepackError {
         "Q2_0 code 3 (+2d) at (row {row}, col {col}) cannot be represented in TernaryGroupWeights"
     )]
     UnsupportedFourthState { row: usize, col: usize },
+    /// A dense (arm A) tensor has no Q2_0 wire payload — the collapsed-GGUF
+    /// writer emits it as F16 wire instead (Issue 022 T4.1/T4.3).
+    #[error("dense_f16 tensor has no Q2_0 wire payload (write as F16 wire)")]
+    NotTernary,
+}
+
+/// Pack `TernaryGroupWeights` back into `Q2_0` wire blocks — the INVERSE of
+/// [`repack_q2_0_to_ternary_group`] (riir-infer Issue 022 T4.1: the
+/// re-ternarization arms emit the container; the collapsed-GGUF writer
+/// needs the wire payload).
+///
+/// Lossless by construction for every container this crate can hold: codes
+/// `{-1, 0, +1}` map to `00/01/10`, the f16 group scale copies verbatim, and
+/// code 3 (+2d) is unreachable from a two-plane container. `cols` must be a
+/// multiple of 128 (the wire format has no partial group) and the pos&neg
+/// invariant must hold — both refused loud.
+///
+/// Appends `rows * (cols / 128)` blocks to `out` (write-into: the caller can
+/// size the buffer once and reuse it across tensors).
+#[cfg(feature = "q2_0_ternary_bridge")]
+pub fn pack_ternary_group_to_q2_0(
+    w: &katgpt_core::TernaryGroupWeights,
+    out: &mut Vec<BlockQ2_0>,
+) -> Result<(), Q2oRepackError> {
+    if !w.cols.is_multiple_of(Q2_0_BLOCK_SIZE) {
+        return Err(Q2oRepackError::ColsNotMultipleOf128 { cols: w.cols });
+    }
+    if w.pos_bits.len() != w.rows * w.blocks64 || w.neg_bits.len() != w.rows * w.blocks64 {
+        return Err(Q2oRepackError::TooFewBlocks {
+            got: w.pos_bits.len().min(w.neg_bits.len()),
+            expected: w.rows * w.blocks64,
+        });
+    }
+    let blocks_per_row = w.cols / Q2_0_BLOCK_SIZE;
+    out.reserve(rows_blocks(w.rows, blocks_per_row));
+
+    for row in 0..w.rows {
+        for g in 0..blocks_per_row {
+            let b0 = row * w.blocks64 + g * 2;
+            let b1 = b0 + 1;
+            let mut block = BlockQ2_0 {
+                d: w.group_scale[row * w.groups_per_row + g].to_bits(),
+                qs: [0u8; Q2_0_BLOCK_SIZE / 4],
+            };
+            for j in 0..Q2_0_BLOCK_SIZE {
+                let word = if j < 64 { b0 } else { b1 };
+                let mask = 1u64 << (j & 63);
+                let pos = (w.pos_bits[word] & mask) != 0;
+                let neg = (w.neg_bits[word] & mask) != 0;
+                debug_assert!(
+                    !(pos && neg),
+                    "pos & neg == 0 invariant violated at row {row}, col {}",
+                    g * Q2_0_BLOCK_SIZE + j
+                );
+                // 2-bit code, 4 per byte, LSB-first. ALL FOUR states are
+                // written explicitly: 00 = -1, 01 = 0, 10 = +1 — a zero
+                // must emit code 1, never a skipped nibble (code 0 decodes
+                // as -1, and an unwritten qs nibble IS code 0).
+                let code: u8 = if pos {
+                    2
+                } else if neg {
+                    0
+                } else {
+                    1
+                };
+                block.qs[j / 4] |= code << ((j % 4) * 2);
+            }
+            out.push(block);
+        }
+    }
+    Ok(())
+}
+
+#[cfg(feature = "q2_0_ternary_bridge")]
+const fn rows_blocks(rows: usize, blocks_per_row: usize) -> usize {
+    rows * blocks_per_row
 }
 
 // ── Tests ───────────────────────────────────────────────────────

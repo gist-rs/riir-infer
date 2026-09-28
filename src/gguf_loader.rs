@@ -86,6 +86,36 @@ pub enum GgmlType {
 }
 
 impl GgmlType {
+    /// The wire type id this crate EMITS for the format. Q2_0 emits the
+    /// fork-tip relabel 142 (byte-identical payload; fork-tip builds refuse
+    /// the legacy id 42 — the loader maps 42|142 to the same variant).
+    pub fn id(self) -> u32 {
+        match self {
+            Self::F32 => 0,
+            Self::F16 => 1,
+            Self::Q4_0 => 2,
+            Self::Q4_1 => 3,
+            Self::Q5_0 => 6,
+            Self::Q5_1 => 7,
+            Self::Q8_0 => 8,
+            Self::Q8_1 => 9,
+            Self::Q2_K => 10,
+            Self::Q3_K => 11,
+            Self::Q4_K => 12,
+            Self::Q5_K => 13,
+            Self::Q6_K => 14,
+            Self::Q8_K => 15,
+            Self::I8 => 24,
+            Self::I16 => 25,
+            Self::I32 => 26,
+            Self::I64 => 27,
+            Self::F64 => 28,
+            Self::BF16 => 30,
+            Self::Q2_0 => 142,
+            Self::PTQ1_0 => 143,
+        }
+    }
+
     fn from_id(id: u32) -> Option<Self> {
         match id {
             0 => Some(Self::F32),
@@ -182,6 +212,31 @@ const META_TYPE_ARRAY: u32 = 9;
 const META_TYPE_UINT64: u32 = 10;
 const META_TYPE_INT64: u32 = 11;
 const META_TYPE_FLOAT64: u32 = 12;
+
+/// The wire type id of a parsed value — the collapsed-GGUF writer's
+/// serializer shares this ONE spelling with the reader (Issue 022 T4.3;
+/// consumed only by the `twt_collapse` writer, hence the cfg — at default
+/// features the fn would be dead code).
+/// Array elements share their element type in a valid GGUF, so the id is
+/// taken from the first element by the caller.
+#[cfg(feature = "twt_collapse")]
+pub(crate) fn meta_type_id(v: &GgufValue) -> u32 {
+    match v {
+        GgufValue::U8(_) => META_TYPE_UINT8,
+        GgufValue::I8(_) => META_TYPE_INT8,
+        GgufValue::U16(_) => META_TYPE_UINT16,
+        GgufValue::I16(_) => META_TYPE_INT16,
+        GgufValue::U32(_) => META_TYPE_UINT32,
+        GgufValue::I32(_) => META_TYPE_INT32,
+        GgufValue::F32(_) => META_TYPE_FLOAT32,
+        GgufValue::Bool(_) => META_TYPE_BOOL,
+        GgufValue::String(_) => META_TYPE_STRING,
+        GgufValue::Array(_) => META_TYPE_ARRAY,
+        GgufValue::U64(_) => META_TYPE_UINT64,
+        GgufValue::I64(_) => META_TYPE_INT64,
+        GgufValue::F64(_) => META_TYPE_FLOAT64,
+    }
+}
 
 // ── Metadata value ─────────────────────────────────────────────
 
@@ -298,16 +353,17 @@ pub struct GgufFile {
     pub version: u32,
     /// Parsed metadata key-value pairs.
     pub metadata: HashMap<String, GgufValue>,
+    /// The same pairs in FILE ORDER (the collapsed-GGUF writer's
+    /// serialization source — Issue 022 T4.3).
+    pub metadata_order: Vec<(String, GgufValue)>,
     /// Parsed tensor info (indexed by name for O(1) lookup).
     tensor_map: HashMap<String, GgufTensorInfo>,
     /// Tensor info list (in file order).
     pub tensor_infos: Vec<GgufTensorInfo>,
     /// Byte offset in mmap where tensor data section begins.
-    #[allow(dead_code)]
-    tensor_data_offset: u64,
+    pub tensor_data_offset: u64,
     /// Alignment (from metadata or default 32).
-    #[allow(dead_code)]
-    alignment: u64,
+    pub alignment: u64,
 }
 
 impl GgufFile {
@@ -337,11 +393,16 @@ impl GgufFile {
         let tensor_count = read_u64(&mmap, &mut cursor)?;
         let metadata_count = read_u64(&mmap, &mut cursor)?;
 
-        // Parse metadata KV pairs
+        // Parse metadata KV pairs. The ordered list is the WRITER's
+        // serialization source (Issue 022 T4.3: a collapsed file mirrors the
+        // parent's KV list; a HashMap cannot preserve emission order). Keys
+        // are unique in a valid GGUF, so order + map always agree.
         let mut metadata = HashMap::with_capacity(metadata_count as usize);
+        let mut metadata_order: Vec<(String, GgufValue)> = Vec::with_capacity(metadata_count as usize);
         for _ in 0..metadata_count {
             let key = read_gguf_string(&mmap, &mut cursor)?;
             let value = read_gguf_value(&mmap, &mut cursor)?;
+            metadata_order.push((key.clone(), value.clone()));
             metadata.insert(key, value);
         }
 
@@ -393,6 +454,7 @@ impl GgufFile {
             mmap,
             version,
             metadata,
+            metadata_order,
             tensor_map,
             tensor_infos,
             tensor_data_offset,

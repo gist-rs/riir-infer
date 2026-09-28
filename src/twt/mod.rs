@@ -22,11 +22,20 @@
 //!   mean/RDSC merges) + the T3.3 per-channel branch-correction fit + the
 //!   T3.2 selection pin (pure over `f32` slices; the laya-coupled apply
 //!   half lives in the `twt_laya_audition` example, dev-dep direction).
+//! - [`ternarize`] — the Phase-4 re-ternarization arms + the T4.2 κ
+//!   budget (`twt_collapse`): the deterministic materializers that turn
+//!   a merged operator into a DEPLOYABLE tensor (f16-dense / sign-majority
+//!   / source-quant), pre-registered, gate-adjudicated.
+//! - [`collapse_writer`] — the Phase-4 collapsed-GGUF writer
+//!   (`twt_collapse`): reduced layer count + renumbered metadata + the
+//!   `twt.*` provenance keys, member passthroughs as byte-copies.
 //!
-//! What Phase 3 does NOT ship here: the collapsed-GGUF writer (Phase 4),
-//! the GOAT gate (Phase 5). The laya capture hook lives in
-//! `riir-infer-laya` (`Encoder::forward_capture`, its own `twt_profile`
-//! feature); the Bonsai/GDN capture sibling is an open T1.2 half.
+//! What the lane does NOT ship yet: the Bonsai audition (the apply path
+//! needs GDN cache snapshot/restore — the Phase-5 prerequisite that
+//! picks the real winners), the Phase-5 GOAT gate. The laya capture hook
+//! lives in `riir-infer-laya` (`Encoder::forward_capture`, its own
+//! `twt_profile` feature); the Bonsai/GDN capture sibling is an open
+//! T1.2 half.
 
 pub mod accum;
 pub mod audition;
@@ -35,11 +44,26 @@ pub mod partition;
 pub mod smatrix;
 pub mod synth;
 
+#[cfg(feature = "twt_collapse")]
+pub mod collapse_writer;
+#[cfg(feature = "twt_collapse")]
+pub mod ternarize;
+
 pub use accum::PairCosineAccum;
 pub use audition::{
     mean_sq_err, merge_mean, merge_rdsc, selection_pin, CandRow, CorrectionFit, SelectionPin,
 };
 pub use delta::{delta, localize_by_block, DeltaMap};
+#[cfg(feature = "twt_collapse")]
+pub use collapse_writer::{
+    emit_collapsed_gguf, twt_arm_codes_value, twt_block_table_value, CollapseSpec, CollapsedStats,
+    LayerSource, TensorOut,
+};
+#[cfg(feature = "twt_collapse")]
+pub use ternarize::{
+    arm_dense_f16, arm_sign_majority, arm_source_quant, budget_ok, budget_ratio,
+    materialization_rel_err, DenseF16Weights, TwtArm, KAPPA_BUDGET, ARM_B_TAU_CODE,
+};
 pub use partition::{
     brute_force_optimal, forced_min_blocks, kill_verdict, minmax_partition,
     partition_worst, Block, KillVerdict, KILL_FRACTION, KILL_MIN_MIDDLE_BLOCK,
@@ -98,4 +122,20 @@ pub enum TwtError {
         "selection cross-check: stated argmin index {stated} is not the minimum (actual {actual}) — the candidate table is tampered or the scan reordered it"
     )]
     ArgminMismatch { stated: usize, actual: usize },
+    #[error("arm pool over zero members")]
+    ArmEmptyPool,
+    #[error("arm shape mismatch: expected {expected} elements, got {got}")]
+    ArmShapeMismatch { expected: usize, got: usize },
+    #[error("non-finite merged value — refused, never materialized")]
+    NonFiniteMerged,
+    #[error("f16 scale non-finite at (row {row}, group {group}) — merged magnitude overflows f16")]
+    NonFiniteScale { row: usize, group: usize },
+    #[error("degenerate baseline: ‖Bx‖ == 0 on every calibration row — the relative error is undefined")]
+    DegenerateBaseline,
+    #[error("block table does not tile [0, n_layer): {reason}")]
+    BadBlockTable { reason: &'static str },
+    #[error("collapsed plan for block [{start}, {end}) is incomplete: missing tensor suffixes {missing}")]
+    IncompletePlan { start: usize, end: usize, missing: String },
+    #[error("GGUF serialize failure: {0}")]
+    GgufWrite(String),
 }

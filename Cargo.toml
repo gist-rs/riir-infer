@@ -151,6 +151,15 @@ twt_profile = ["katgpt-core/svd_cca"]
 # root-crate ternary forward IS the league-model lane (deltanet_ternary
 # + the Issue-980 Hadamard rotation).
 twt_bonsai = ["twt_profile", "bonsai2_hadamard"]
+# twt_collapse (riir-infer Issue 022 Phase 4, 2026-09-29): the collapsed-
+# checkpoint lane — the T4.1 re-ternarization arms + the T4.2 κ budget
+# (`twt::ternarize`) + the T4.3 collapsed-GGUF writer
+# (`twt::collapse_writer`). Implies `deltanet_ternary_inference`
+# (→ `q2_0_ternary_bridge`): the arms emit the TernaryGroupWeights
+# container, the wire pack emits Q2_0 blocks, and the probe/writer read
+# real ternary-hybrid GGUFs. OPT-IN: the Phase-5 GOAT gate decides any
+# promotion; nothing here touches a serving path.
+twt_collapse = ["twt_profile", "deltanet_ternary_inference"]
 # kv_eviction (riir-infer Issue 012, 2026-09-27): the DIFFERENTIAL KV
 # eviction consumer — `deltanet::kv_evict` wires katgpt-core's
 # `DifferentialEvictTable` (+ the λ=0 max-recent, usage-rate, and
@@ -349,6 +358,32 @@ name = "twt_g4_alloc"
 path = "tests/twt_g4_alloc.rs"
 required-features = ["twt_profile"]
 
+# Issue 022 Phase 4 (T4.1/T4.2) — the re-ternarization arms + the κ
+# budget battery (arm identities, the bit-exact arm-C round trip on
+# ternary inputs, majority semantics, budget pass/breach, refusals).
+# Whole-file #![cfg(feature = "twt_collapse")] + this row = the reader
+# protection, same shape as twt_gates.
+[[test]]
+name = "twt_ternarize_gates"
+path = "tests/twt_ternarize_gates.rs"
+required-features = ["twt_collapse"]
+
+# Issue 022 Phase 4 — the arms' accumulate paths, alloc-free, in their
+# OWN binary (the counting allocator is process-global; one test per
+# binary is the isolation — the twt_g4_alloc precedent).
+[[test]]
+name = "twt_ternarize_g4"
+path = "tests/twt_ternarize_g4.rs"
+required-features = ["twt_collapse"]
+
+# Issue 022 Phase 4 (T4.3) — the collapsed-GGUF writer battery over a
+# synthetic parent fixture (round-trip re-open, byte-identity member
+# copies, metadata renumber + twt.* keys, refusal arms, determinism).
+[[test]]
+name = "twt_collapse_writer_gates"
+path = "tests/twt_collapse_writer_gates.rs"
+required-features = ["twt_collapse"]
+
 # riir-infer Issue 022 — the laya calibration capture driver (checkpoint →
 # per-layer residual states → S matrices → ε-sweep + kill verdict). The
 # module code sits behind #[cfg(feature = "twt_profile")]; this row is
@@ -372,6 +407,16 @@ required-features = ["twt_profile"]
 name = "twt_bonsai_profile"
 path = "examples/twt_bonsai_profile.rs"
 required-features = ["twt_bonsai"]
+
+# Issue 022 T4.2 — the arm-damage probe: operator-level materialization
+# error of the re-ternarization arms on REAL Bonsai blocks (dequant-only,
+# no forward; deterministic synthetic activations). The operator-level
+# half of the κ budget; the activation-space mapping-error half waits on
+# the audition apply path (Phase 5 prerequisite).
+[[example]]
+name = "twt_ternarize_probe"
+path = "examples/twt_ternarize_probe.rs"
+required-features = ["twt_collapse"]
 
 [dev-dependencies]
 # The laya encoder lane — the capture driver's checkpoint source (CPU
