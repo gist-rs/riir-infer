@@ -1,5 +1,5 @@
 # Issue 023: fence_gate F2 false positive — self-crate aliases spelled `riir_*` trip the foreign-crate regex
-> **Status:** Active — scanner false-positive class, fence red at HEAD `40fd452` (verified on a detached worktree; NOT introduced by working-tree edits). Fix is a rename in 3 test files; deferred only because those files carried a sibling session's in-flight fmt edits at filing time.
+> **Status:** PARTIALLY LANDED 2026-09-28 (idle watch session): the two CLEAN files renamed (`cuda_encoder_repeat_probe.rs`, `cuda_packed_repeat_probe.rs` — `riir_weights` → `lane_weights`, the capture driver's convention; both compile-checked at their required-features), fence red drops 3 → 1. The third (`cubecl_encoder_probe.rs`) STILL CARRIES the sibling session's uncommitted fmt edits — the rename there waits for those hunks to land (committing the file now would sweep a sibling's WIP; the staged-set discipline). Fence stays RED at 1 finding until then — honest, per this file's own rule. **Original deferral text below.**
 > **Date:** 2026-09-27
 
 ## Symptom

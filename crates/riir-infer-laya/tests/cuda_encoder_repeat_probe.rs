@@ -59,13 +59,13 @@ fn ids_for(seq: usize, vocab: usize) -> Vec<u32> {
 fn load_encoder(ckpt: Checkpoint) -> (riir_infer_laya::laya::riir::encoder::Encoder, usize) {
     use riir_infer_laya::laya::config::load_checkpoint_configs;
     use riir_infer_laya::laya::riir::encoder::Encoder;
-    use riir_infer_laya::laya::riir::weights as riir_weights;
+    use riir_infer_laya::laya::riir::weights as lane_weights;
     let root = weights_root();
     let name = ckpt.subfolder();
     let dir = root.join(name);
     let (_agent_cfg, enc_cfg) = load_checkpoint_configs(&dir, name).expect("checkpoint configs");
     let vocab = enc_cfg.vocab;
-    let mut raw = riir_weights::load(&dir.join("model.safetensors"), name).expect("safetensors");
+    let mut raw = lane_weights::load(&dir.join("model.safetensors"), name).expect("safetensors");
     let enc = Encoder::from_map(&mut raw, enc_cfg, name).expect("encoder");
     (enc, vocab)
 }
