@@ -1,0 +1,82 @@
+[
+  {
+    "name": "full",
+    "needle_nll": [
+      1.2206842,
+      0.24134228,
+      0.03887449,
+      0.009401866,
+      0.017802646,
+      0.009243284,
+      0.01062039,
+      0.0013144357
+    ],
+    "delta_nll": [
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      0.0
+    ],
+    "mean_delta": 0.0,
+    "retained": 8,
+    "n_needles": 8,
+    "context": 65536,
+    "needle_row_survival": 1.0,
+    "hub_row_survival": null,
+    "wall_row_survival": null,
+    "hub_rows": 0,
+    "wall_rows": 0,
+    "generic_nll": 3.224863,
+    "capped": true,
+    "output_len": 96,
+    "evicted_rows": 0,
+    "evict_events": 0,
+    "idle_events": 768,
+    "wall_seconds": 7121.0654,
+    "reference_loaded": true
+  },
+  {
+    "name": "random@25pct",
+    "needle_nll": [
+      1.2837044,
+      1.2684078,
+      1.042142,
+      0.7681642,
+      0.7304325,
+      0.9518479,
+      0.50877434,
+      0.14637539
+    ],
+    "delta_nll": [
+      0.06302023,
+      1.0270655,
+      1.0032675,
+      0.75876236,
+      0.71262985,
+      0.9426046,
+      0.49815395,
+      0.14506096
+    ],
+    "mean_delta": 0.64382064,
+    "retained": 6,
+    "n_needles": 8,
+    "context": 65536,
+    "needle_row_survival": 0.125,
+    "hub_row_survival": null,
+    "wall_row_survival": null,
+    "hub_rows": 0,
+    "wall_rows": 0,
+    "generic_nll": 3.1148357,
+    "capped": true,
+    "output_len": 96,
+    "evicted_rows": 295080,
+    "evict_events": 6,
+    "idle_events": 0,
+    "wall_seconds": 7741.6675,
+    "reference_loaded": false
+  }
+]

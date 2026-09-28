@@ -1,0 +1,47 @@
+# model: qwen35 hybrid | layers=24 n_embd=1024 n_head=8 n_kv_head=2 head_dim=256 vocab=248320 | load 0.8s
+# rig: context=65536 needles=8 hubs=0 hub_code_rows=0 wall_rows=0 attn_layers=6 prompt=65563 question=27 answer=96 fracs=[0.25] λ=1 β=0.1 W=256 cadence=512 defer=1 sinks=4
+# needle 0: depth=0 code_span=(9, 16) answer_span=(4, 11)
+# needle 1: depth=7258 code_span=(7267, 7274) answer_span=(16, 23)
+# needle 2: depth=14505 code_span=(14514, 14521) answer_span=(28, 35)
+# needle 3: depth=21752 code_span=(21761, 21768) answer_span=(40, 47)
+# needle 4: depth=28999 code_span=(29008, 29015) answer_span=(52, 59)
+# needle 5: depth=36245 code_span=(36254, 36261) answer_span=(64, 71)
+# needle 6: depth=43492 code_span=(43501, 43508) answer_span=(76, 83)
+# needle 7: depth=50739 code_span=(50748, 50755) answer_span=(88, 95)
+# full reference LOADED from .benchmarks/needle_gate_64k_25pct/needle_gate_report.json (not re-run): surv n/h/w = 1.000/NaN/NaN genNLL=3.225
+# [diff_l1.00@25pct] prefill chunk 1/9 at 583s
+# [diff_l1.00@25pct] prefill chunk 2/9 at 1247s
+# [diff_l1.00@25pct] prefill chunk 3/9 at 1991s
+# [diff_l1.00@25pct] prefill chunk 4/9 at 2821s
+# [diff_l1.00@25pct] prefill chunk 5/9 at 3739s
+# [diff_l1.00@25pct] prefill chunk 6/9 at 4747s
+# [diff_l1.00@25pct] prefill chunk 7/9 at 5866s
+# [diff_l1.00@25pct] prefill chunk 8/9 at 7071s
+# [diff_l1.00@25pct] prefill chunk 9/9 at 7074s
+# [diff_l1.00@25pct] phases: prefill=7073.7s
+# [diff_l1.00@25pct] phases: +answer=14.0s
+# [diff_l1.00@25pct] phases: +survival=0.0s
+# [diff_l1.00@25pct] phases: +generic=2.9s
+# [diff_l1.00@25pct] phases: +runaway=13.9s
+# arm diff_l1.00@25pct   7104.5s | evicted=295080 events=  6 idle=  0 | genNLL=3.253 | out_len=96 (CAPPED) | surv n/h/w = 0.872/NaN/NaN
+#   -> diff_l1.00@25pct retrieval 7/8 (meanΔ +0.286) per-needle Δ: [0.052541256, -0.015435085, 0.028106418, 0.033616204, 0.059544697, 0.97364205, 1.1416732, 0.016338076]
+
+# ── retrieval (bar ≥ 7/8 = 0.875, EPS_NATS = 1) ──
+# arm                retrieval  meanΔnats     n_surv   hub_surv  wall_surv    genNLL
+# full                   1.000     +0.000      1.000        NaN        NaN     3.225
+# diff_l1.00@25pct       0.875     +0.286      0.872        NaN        NaN     3.253
+
+# ── trap-4 control (generic NLL / max-recent's) ──
+
+# per-needle NLL delta vs full — diff_l1.00@25pct:
+# needle 0 depth      0: Δ=+0.053 nats (arm 1.273 / full 1.221)
+# needle 1 depth   7258: Δ=-0.015 nats (arm 0.226 / full 0.241)
+# needle 2 depth  14505: Δ=+0.028 nats (arm 0.067 / full 0.039)
+# needle 3 depth  21752: Δ=+0.034 nats (arm 0.043 / full 0.009)
+# needle 4 depth  28999: Δ=+0.060 nats (arm 0.077 / full 0.018)
+# needle 5 depth  36245: Δ=+0.974 nats (arm 0.983 / full 0.009)
+# needle 6 depth  43492: Δ=+1.142 nats (arm 1.152 / full 0.011)
+# needle 7 depth  50739: Δ=+0.016 nats (arm 0.018 / full 0.001)
+
+# wall total 7109.7s | rig tokens 65563 | λ=1 β=0.1 W=256 cadence=512 hubs=0 sinks=4
+# report: .benchmarks/needle_gate_64k_25pct\needle_gate_report.json

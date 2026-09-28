@@ -1,0 +1,18 @@
+# model: qwen35 hybrid | layers=24 n_embd=1024 n_head=8 n_kv_head=2 head_dim=256 vocab=248320 | load 5.2s
+# rig: context=65536 needles=8 hubs=0 hub_code_rows=0 wall_rows=0 attn_layers=6 prompt=65563 question=27 answer=96 fracs=[0.25] λ=1 β=0.1 W=256 cadence=512 defer=1 sinks=4
+# needle 0: depth=0 code_span=(9, 16) answer_span=(4, 11)
+# needle 1: depth=7258 code_span=(7267, 7274) answer_span=(16, 23)
+# needle 2: depth=14505 code_span=(14514, 14521) answer_span=(28, 35)
+# needle 3: depth=21752 code_span=(21761, 21768) answer_span=(40, 47)
+# needle 4: depth=28999 code_span=(29008, 29015) answer_span=(52, 59)
+# needle 5: depth=36245 code_span=(36254, 36261) answer_span=(64, 71)
+# needle 6: depth=43492 code_span=(43501, 43508) answer_span=(76, 83)
+# needle 7: depth=50739 code_span=(50748, 50755) answer_span=(88, 95)
+# full reference LOADED from .benchmarks/needle_gate_64k_25pct/needle_gate_report.json (not re-run): surv n/h/w = 1.000/NaN/NaN genNLL=3.225
+# [random@25pct] prefill chunk 1/9 at 611s
+# [random@25pct] prefill chunk 2/9 at 1291s
+# [random@25pct] prefill chunk 3/9 at 2060s
+# [random@25pct] prefill chunk 4/9 at 2900s
+# [random@25pct] prefill chunk 5/9 at 3842s
+# [random@25pct] prefill chunk 6/9 at 4836s
+# [random@25pct] prefill chunk 7/9 at 5914s

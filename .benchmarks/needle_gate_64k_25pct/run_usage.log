@@ -1,0 +1,28 @@
+# model: qwen35 hybrid | layers=24 n_embd=1024 n_head=8 n_kv_head=2 head_dim=256 vocab=248320 | load 0.8s
+# rig: context=65536 needles=8 hubs=0 hub_code_rows=0 wall_rows=0 attn_layers=6 prompt=65563 question=27 answer=96 fracs=[0.25] λ=1 β=0.1 W=256 cadence=512 defer=1 sinks=4
+# needle 0: depth=0 code_span=(9, 16) answer_span=(4, 11)
+# needle 1: depth=7258 code_span=(7267, 7274) answer_span=(16, 23)
+# needle 2: depth=14505 code_span=(14514, 14521) answer_span=(28, 35)
+# needle 3: depth=21752 code_span=(21761, 21768) answer_span=(40, 47)
+# needle 4: depth=28999 code_span=(29008, 29015) answer_span=(52, 59)
+# needle 5: depth=36245 code_span=(36254, 36261) answer_span=(64, 71)
+# needle 6: depth=43492 code_span=(43501, 43508) answer_span=(76, 83)
+# needle 7: depth=50739 code_span=(50748, 50755) answer_span=(88, 95)
+# full reference LOADED from .benchmarks/needle_gate_64k_25pct/needle_gate_report.json (not re-run): surv n/h/w = 1.000/NaN/NaN genNLL=3.225
+# [usage@25pct] phases: prefill=7033.1s
+# [usage@25pct] phases: +answer=13.9s
+# [usage@25pct] phases: +survival=0.0s
+# [usage@25pct] phases: +generic=2.9s
+# [usage@25pct] phases: +runaway=13.8s
+# arm usage@25pct        7063.6s | evicted=295080 events=  6 idle=  0 | genNLL=3.451 | out_len=96 (CAPPED) | surv n/h/w = 0.119/NaN/NaN
+#   -> usage@25pct retrieval 4/8 (meanΔ +0.911) per-needle Δ: [2.8902297, 1.7090646, 1.2928066, 1.0391876, 0.25724164, 0.07313347, 0.019061223, 0.0086778905]
+
+# ── retrieval (bar ≥ 7/8 = 0.875, EPS_NATS = 1) ──
+# arm                retrieval  meanΔnats     n_surv   hub_surv  wall_surv    genNLL
+# full                   1.000     +0.000      1.000        NaN        NaN     3.225
+# usage@25pct            0.500     +0.911      0.119        NaN        NaN     3.451
+
+# ── trap-4 control (generic NLL / max-recent's) ──
+
+# wall total 7069.0s | rig tokens 65563 | λ=1 β=0.1 W=256 cadence=512 hubs=0 sinks=4
+# report: .benchmarks/needle_gate_64k_25pct\needle_gate_report.json

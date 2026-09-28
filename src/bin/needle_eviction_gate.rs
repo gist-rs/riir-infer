@@ -318,10 +318,24 @@ where
 /// previous arms' rows). Rows match by name; a crash/restart loses at
 /// most the arm in flight.
 fn upsert_report(path: &std::path::Path, fresh: &[ArmReport]) -> Result<()> {
-    let mut all: Vec<ArmReport> = std::fs::read(path)
-        .ok()
-        .and_then(|bytes| serde_json::from_slice(&bytes).ok())
-        .unwrap_or_default();
+    let mut all: Vec<ArmReport> = match std::fs::read(path) {
+        // No existing file — first write.
+        Err(_) => Vec::new(),
+        Ok(bytes) => match serde_json::from_slice(&bytes) {
+            Ok(rows) => rows,
+            // NEVER silently default on a parse failure: a merge that
+            // quietly drops every existing row loses completed arms while
+            // printing a confident report (the 64K diff-row incident).
+            // Loud line + fresh start; the per-run logs keep the truth.
+            Err(e) => {
+                eprintln!(
+                    "# report merge: existing {} failed to parse ({e}) — rewriting WITHOUT the old rows; see the per-run logs",
+                    path.display()
+                );
+                Vec::new()
+            }
+        },
+    };
     for row in fresh {
         match all.iter_mut().find(|r| r.name == row.name) {
             Some(slot) => *slot = row.clone(),
