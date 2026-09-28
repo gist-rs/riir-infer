@@ -22,13 +22,13 @@ pub mod buffer;
 pub mod context;
 pub mod pool_poison;
 
-// GPU-side persistent weight buffer cache + transpose kernel + the
-// CubeCL runtime (JIT-compiled #[cube] kernels; the type aliases at the
-// crate root keep backend-agnostic kernel dispatch readable).
+// GPU-side persistent weight buffer cache + the CubeCL runtime
+// (JIT-compiled #[cube] kernels; the type aliases at the crate root keep
+// backend-agnostic kernel dispatch readable). The wgpu-side transpose
+// (gpu_transpose) was deleted 2026-09-28 — dead since Issue 572 landed the
+// CubeCL-native `transpose_cubecl` beside it; see riir-infer Issue 017.
 #[cfg(feature = "cubecl_runtime")]
 pub mod cubecl_runtime;
-#[cfg(feature = "cubecl_runtime")]
-pub mod gpu_transpose;
 #[cfg(feature = "cubecl_runtime")]
 pub mod weight_buffer_cache;
 

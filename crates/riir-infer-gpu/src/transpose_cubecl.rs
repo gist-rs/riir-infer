@@ -28,13 +28,15 @@
 //! `tile[lc * (TILE + 1) + lr]` walks a stride that is coprime with the bank
 //! count — the standard bank-conflict avoidance for this kernel.
 //!
-//! # Relationship to `gpu_transpose.rs`
+//! # Provenance
 //!
-//! [`crate::gpu_transpose`] is a raw-`wgpu` tiled transpose written for the
-//! same class of problem (LM-head weight transpose) and wired to nothing. It
-//! takes `wgpu::Buffer`s; every training and inference path in this workspace
-//! moves `cubecl::server::Handle`s. This module is the CubeCL-native form, so
-//! callers need no `Handle` ↔ `Buffer` bridge.
+//! A raw-`wgpu` tiled transpose for the same problem class (LM-head weight
+//! transpose) previously lived here as `gpu_transpose` and was DELETED
+//! 2026-09-28 (riir-infer Issue 017 / owner-gate D7): it was wired to
+//! nothing — it took `wgpu::Buffer`s while every training and inference
+//! path in this workspace moves `cubecl::server::Handle`s, so no caller
+//! ever bridged to it. This module is the CubeCL-native form; the owned
+//! `Handle` in/out means callers need no `Handle` ↔ `Buffer` bridge.
 
 #[cfg(feature = "cubecl_runtime")]
 use cubecl::prelude::*;

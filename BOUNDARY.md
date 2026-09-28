@@ -25,7 +25,9 @@ needs BELOW the engine:
 - `riir-infer-gpu` (crate, `crates/riir-infer-gpu`): the GPU runtime +
   kernel layer — device context, buffer helpers, the pool-poison
   detector, the CubeCL runtime, the persistent weight-buffer cache, the
-  GPU transpose kernel (+ its WGSL), the adapter VRAM probe, and the
+  CubeCL transpose kernel (`transpose_cubecl.rs`; the former raw-wgpu
+  `gpu_transpose` was deleted 2026-09-28, Issue 017 / owner-gate D7),
+  the adapter VRAM probe, and the
   EXL3 trellis GPU dequant kernels (feature `exl3_gpu`; decode bit-exact
   vs the CPU reference, block-Hadamard gated in the FMA-contraction
   class — Issue 001 T7b). The
