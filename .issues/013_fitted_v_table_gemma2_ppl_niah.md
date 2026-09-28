@@ -1,5 +1,6 @@
 # Issue 013 — consume katgpt-core `fitted_value_tables` / `fitted_v_reconstruct` on gemma-2-2b: the model-bound G1 of katgpt-rs Issue 883 P1–P3
 
+**Status:** OPEN — T1 PAUSED 2026-09-28 by owner re-aim ("we don't care about gemma, pivot bonsai/qwen"): the harness (`vk_p1_g1` bin + `transformer::gemma2_quantized`, clippy-clean, smoke-run at 512 cal / 1k eval) is LANDED as WIP for whoever picks the lane up; the full-grid run was NOT taken. The pre-registered protocol below stands. 896 blocker cleared (katgpt-rs `62fd22b5f`) — T1 is unblocked when prioritized.
 **Status:** OPEN — filed 2026-09-25 from katgpt-rs Issue 883 (closed there 2026-09-25; record in katgpt-rs HISTORY.md § Issue 883). The primitives landed there at katgpt-rs `0b768e95d` (katgpt-rs Bench 895). This issue is their model-bound quality gate and the tg128 cell.
 
 ## What exists (katgpt-rs `0b768e95d`, opt-in)
@@ -24,6 +25,51 @@
 katgpt-core's `RopeAction` rotates **interleaved** pairs `(2i, 2i+1)`. This repo's gemma-2 RoPE (`src/rope.rs::apply_rope_heads_precomputed`) rotates **half-split** pairs `(i, i + head_dim/2)`, the NeoX convention.
 
 Passing `RopeAction` to `reconstruct_v_from_rope_k` against this cache is **silent corruption**: plausible-looking V with no NaN. P3 must pass a half-split `PositionGroupAction` built on the forward's own cos/sin tables. That also fixes the transcendental-bound G2 cost. The primitive is generic over the action by design, so no katgpt-core change is needed.
+
+## T1 pre-registered protocol (added 2026-09-28, BEFORE any measurement)
+
+Written before the harness ran — the gates and tolerances below do not move
+after numbers exist (the absmax caveat is the only arbiter, per Bench 895
+G1c).
+
+**Fixture:** gemma-2-2b-it-f16.gguf (the Bench 004 artifact, 288-tensor
+no-qk-norm conversion — caveat 1 carries). Corpus: natural chat text, the
+`chat_probe` loader shape — HF datasets-server `HuggingFaceH4/ultrachat_200k`
+`train_sft` pages fetched 2026-09-28 (`riir-infer/.raw/chat_probe/page_{0,100,200}.json`,
+BLAKE3 recorded in the bench note). **Held-out split:** the first `--cal-tokens`
+(default 60k) = the calibration slice; the NEXT `--eval-tokens` (default
+12k = 12 × `[BOS]+1024` chunks) = the eval slice. Gate 1's ρ_l(V) comes from
+the run's OWN calibration slice — a held-out prediction on unseen text, not
+a re-read of the Bench 004 numbers. Chunks `[BOS] + 1024`, KV reset per
+chunk, PPL over next-token NLL (the `row_logit_floor_ppl` T2 convention).
+Backend: katgpt-kv `KVarNKVCache` (tile 128) at the requested bits; both
+arms quantize K identically (`MeanRemovedValueCache` passes keys through).
+λ_js = 0 (the Bench 895 convention). Eval token ids come from the SAME
+token stream — a chunk position's V tap is keyed by the token fed at that
+position.
+
+- **Gate 1 (prediction, pre-registered):** the measured per-layer V
+  quant-MSE drop `1 − MSE_mean/MSE_plain` — both quantizations replayed from
+  the SAME f16-trajectory K/V captures (captured from the full-precision
+  cache during the f16 control pass, so no cross-arm trajectory divergence
+  pollutes the comparison) — must agree with the prediction `1 − m·ρ_l(V)`
+  (m = the calibration slice's tracked mass at the run's top_k) with **mean
+  absolute error ≤ 0.10 over layers**. Per-layer misses are listed with
+  direction; the absmax caveat arbitrates direction, not the gate.
+- **Gate 2 (quality, hard):** PPL(mean-removed) ≤ PPL(plain) at each bits.
+- **Gate 3 (pilot slice):** NLL share by calibration-frequency band
+  (rank 0–1k / 1k–8k / tail) — the mean arm must not worsen any band by
+  more than its own aggregate PPL delta; the full per-family conditional
+  retention walk stays DEFERRED (needs task datasets; this pilot is
+  single-corpus).
+- **Gate 4 (pilot slice):** mean NLL over chunk positions 0–7 (the sink
+  proxy) recorded per arm; the `kv_sink_window` check stays DEFERRED.
+- A 2-bit PPL regression combined with a Gate-1 pass is the recorded
+  absmax-caveat confirmation (the off-mean-rows class), not a contradiction
+  — the issue's own caveat predicts it.
+- **Promotion reading:** this run is T1's pilot cell (60k cal / 12k eval).
+  The full T1 grid (bits 2/3/4 × top_k 1024/8192, larger eval) re-runs the
+  same bin; only the full grid passes promote.
 
 ## Tasks (the gates katgpt-rs cannot run)
 

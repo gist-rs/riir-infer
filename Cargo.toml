@@ -37,7 +37,10 @@ katgpt-quant = { path = "../katgpt-rs/crates/katgpt-quant", optional = true }
 # latent_functor/static_cal_bridge.rs which does NOT move).
 katgpt-attn = { path = "../katgpt-rs/crates/katgpt-attn", optional = true }
 # katgpt-kv: the KVarN V-cache quantizer backend (Issue 013 T1 lane).
-katgpt-kv = { path = "../katgpt-rs/crates/katgpt-kv", optional = true }
+# default-features = false: the kvarn backend is feature-selected explicitly
+# (both Issue-013 consumers — fitted_v_tables + gemma2_qkv — pull kvarn by
+# name), so the namespace crate's defaults stay out of every other posture.
+katgpt-kv = { path = "../katgpt-rs/crates/katgpt-kv", optional = true, default-features = false }
 
 half = "2"
 rayon = "1.10"
@@ -76,6 +79,24 @@ exl3 = []
 # no-default-consumer rule — the dashboard is an offline instrument,
 # never a serving path.
 vk_calibration = ["katgpt-core/fitted_anchor_tables"]
+# gemma2_qkv (riir-infer Issue 013 T1, 2026-09-28): the serve-shaped
+# quantized-KV gemma-2 forward — `transformer::gemma2_quantized` (the
+# `forward_gemma2_f16` layer stack with the KV cache behind the
+# `QuantizedKVCache` trait + a dequant mirror; T2/T3 consume the same
+# forward). Forwards katgpt-core's `fitted_value_tables` (the P1
+# `MeanRemovedValueCache` decorator — implies the fitted_anchor_tables
+# substrate) and pulls katgpt-kv/kvarn (the designated backend, BOUNDARY
+# allowlist row added with this feature). OPT-IN: a measurement-lane
+# capability, never a default-feature serving path.
+gemma2_qkv = ["katgpt-core/fitted_value_tables", "dep:katgpt-kv", "katgpt-kv/kvarn"]
+# vk_p1_g1 (riir-infer Issue 013 T1, 2026-09-28): the P1 model-bound G1
+# bin — calibration slice → FittedTokenTable, then the PPL arms
+# (f16 control / plain-KVarN / mean-removed) + the cache-level MSE replay
+# against the same f16-trajectory captures (Gate 1), all under the
+# pre-registered protocol in the issue. Implies both halves above.
+# OPT-IN, measurement-only (the P0 law carries: the bin makes no serving
+# claim; Gate 2 decides quality).
+vk_p1_g1 = ["vk_calibration", "gemma2_qkv"]
 # row_logit_floor (riir-infer Issue 011 T1, 2026-09-25): the opt-in consumer
 # of katgpt-core's sink-exempt row-logit floor + b-bit logit code +
 # exp-table softmax (katgpt-rs Issue 882 P2, Bench 888) —
@@ -225,6 +246,14 @@ required-features = ["bonsai2_hadamard"]
 name = "vk_calibration"
 path = "src/bin/vk_calibration.rs"
 required-features = ["vk_calibration"]
+
+# riir-infer Issue 013 T1 — the fitted-value-table P1 model-bound G1 bin
+# (PPL at matched bits with/without mean removal + the cache-level MSE
+# replay; pre-registered protocol in the issue).
+[[bin]]
+name = "vk_p1_g1"
+path = "src/bin/vk_p1_g1.rs"
+required-features = ["vk_p1_g1"]
 
 [[bin]]
 name = "row_logit_floor_ppl"

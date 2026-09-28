@@ -39,6 +39,12 @@ pub mod gemma4;
 #[cfg(feature = "vk_calibration")]
 pub mod gemma2_calibration;
 
+// Issue 013 T1/T2 — the serve-shaped quantized-KV gemma-2 forward (the
+// f16 stack over the `QuantizedKVCache` trait + a dequant mirror).
+// Opt-in (`gemma2_qkv`).
+#[cfg(feature = "gemma2_qkv")]
+pub mod gemma2_quantized;
+
 // Issue 014 T2(b) — the dense-parent PTQ lane's diagonal collector: the
 // gemma-2 f16 forward re-forked at the Issue-886 LINEAR-INPUT tap points
 // (4 distinct inputs/layer) + the held-out activation capture pools the
