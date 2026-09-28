@@ -18,7 +18,7 @@ use riir_infer_laya::laya::config::{Checkpoint, load_checkpoint_configs};
 use riir_infer_laya::laya::riir::backend::{Backend, Cpu};
 use riir_infer_laya::laya::riir::cubecl::CubeclBackend;
 use riir_infer_laya::laya::riir::encoder::Encoder;
-use riir_infer_laya::laya::riir::weights as riir_weights;
+use riir_infer_laya::laya::riir::weights as lane_weights;
 use riir_infer_laya::laya::weights::weights_root;
 
 /// Fixed xorshift id stream — deterministic across runs, no RNG crate.
@@ -40,7 +40,7 @@ fn load_encoder(ckpt: Checkpoint) -> (Encoder, usize) {
     let dir = root.join(name);
     let (_agent_cfg, enc_cfg) = load_checkpoint_configs(&dir, name).expect("checkpoint configs");
     let vocab = enc_cfg.vocab;
-    let mut raw = riir_weights::load(&dir.join("model.safetensors"), name).expect("safetensors");
+    let mut raw = lane_weights::load(&dir.join("model.safetensors"), name).expect("safetensors");
     let enc = Encoder::from_map(&mut raw, enc_cfg, name).expect("encoder");
     (enc, vocab)
 }
