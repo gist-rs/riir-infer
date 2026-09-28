@@ -33,6 +33,11 @@ recurrent state — exercises the streaming-state shape too).
       `fluidaudio-rs` + a Swift-toolchain build dep (heavy — expected to be
       discouraged for a public substrate repo); (3) `ort` (cross-platform). Per the
       boundary rule the row lands FIRST, in the same commit as the first code.
+      **BOUNDARY HALF DONE 2026-09-28 (owner-gate D8): the AUDIO Owns row landed +
+      the `objc2-core-ml` row's condition column names the REUSE (option 1, the
+      recorded verdict). T0's remaining half is the row riding the first code
+      commit — done by construction: the row is already in the contract, so the
+      first code commit cites it. T1–T5 below are the PoC's own tasks.**
 - [ ] **T1 — consult the cost model FIRST.** Run `ane_roofline` on silero-vad's shape
       (working set vs the 2 MB cliff, dispatch floor). Record the prediction before
       any measurement — Research 001 §6 caveat 5 / F5.
