@@ -85,8 +85,16 @@ pub use attention::block_causal_t_n;
 pub use gemma2::{
     AttnLayerFeatures, Gemma2ForwardTrace, forward_gemma2, forward_gemma2_attn_capture,
     forward_gemma2_f16, forward_gemma2_trace, forward_gemma2_with_embedding, generate_gemma2,
-    generate_gemma2_f16,
+    generate_gemma2_f16, NoVQuant, ValueStoreHook,
 };
+// Issue 013 T1: the hookable f16 forward (the lossy-V lane's entry point).
+pub use gemma2::forward_gemma2_f16_hk;
+
+// Issue 013 T1 (katgpt-rs Issue 883 P1 model-bound gate) — the lossy-V
+// seam state over the KVarN backend ± katgpt-core's `MeanRemovedValueCache`
+// token-mean decorator. Opt-in (`fitted_v_tables`).
+#[cfg(feature = "fitted_v_tables")]
+pub mod gemma2_vquant;
 // Plan 410 Phase 1: LoRA-aware Gemma 2 forward entry point.
 #[cfg(feature = "gemma_lora")]
 pub use gemma2::{forward_gemma2_with_embedding_lora, forward_gemma2_with_lora};

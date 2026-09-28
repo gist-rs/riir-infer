@@ -34,6 +34,26 @@ Passing `RopeAction` to `reconstruct_v_from_rope_k` against this cache is **sile
   - Gate 2: PPL at matched bits is ≤ the plain-quant PPL.
   - Gate 3: a **per-family conditional retention walk**, because this is a lossy surface and aggregate PPL alone is disqualified (the riir-ai Bench 948 pattern, the Orthrus law). The caveat concentrates on off-mean occurrences of frequent tokens, so the walk must slice by token frequency band, not only by task family.
   - Gate 4: sinks do not regress. The table absorbs the sink means; check `kv_sink_window` behaviour on the BOS/sink positions.
+
+### T1 protocol — PRE-REGISTERED 2026-09-28 (before any arm ran; the 012 a57145c precedent)
+
+**Instrument:** `fitted_v_gate` bin + `transformer::gemma2_vquant` (feature `fitted_v_tables`, opt-in, measurement-only). The seam is `ValueStoreHook` on the f16 decode loop (step f2: after the V store, before the read; `NoVQuant` monomorphizes away — the delegation is pinned bit-identical per run by an in-bin probe).
+
+**The simulation law (the honest-surface decision, made before measuring):** KVarN quantizes a V tile only when it FILLS (128 rows); until then `dequantize_value_into` serves the RAW row (Issue-896 semantics). The hook therefore feeds the backend the raw row the forward just stored, and — at a tile's closing store, detected via `value_row_view(..).is_some()` — rewrites every row of the tile in the plain cache with its dequantized (mean-restored) form, BEFORE attention reads. A row is read lossy iff a KVarN-backed cache would serve it lossy; within an open tile nothing diverges. Storage is virtual (the KVarN buffers are the accounting; the plain cache is scratch) — this is a QUALITY gate, not a G2 gate.
+
+**Fixture:** `../riir-train/data/gemma-2-2b-it-f16.gguf` (the Bench-004 artifact — caveats carry), corpus `../riir-train/data/chat_probe` natural-chat pages. Calibration = tokens [0..61 440) (60 chunks × 1024, cache reset per chunk — the Bench-004 protocol); eval = tokens [61 440..73 728) — DISJOINT slices, same distribution. seq = BOS + 1023 corpus tokens; 12 chunks; 12 276 scored positions per arm; teacher-forced NLL, no sampling (deterministic).
+
+**Freeze:** `FittedTokenTable::from_calibration(ValueMean, λ_js = 0)` at top_k = 8192, plus the dial table = rows 0..1024 (rank-ordered remap — no second pass). Untracked tokens take the plain path (never an error, never a zero-row guess).
+
+**Arms (8):** `f16` (base, no V quant) · `p-b2` `p-b3` `p-b4` (plain KVarN V quant, the matched-bits controls) · `mr-b2` `mr-b3` `mr-b4` (the P1 `MeanRemovedValueCache` decorator) · `mr-b4-k1024` (the coverage dial). K stays plain f32 in every arm (V-cache quantizer only); the ONLY arm delta at matched bits is mean removal. KVarN instantiation recorded: tile 128, hadamard OFF, var-norm ON at b > 2, skip-varn + grouped-4 RTN at b2 (KVarN's `with_config` derivation — the same shape as the kv_cache_flatten bench row).
+
+**Pre-registered tolerances (Gate 1):** the prediction is `ratio_l = MSE_mr,l / MSE_plain,l ≈ 1 − ρ_l(V)`, with ρ_l(V) from THIS run's calibration (cross-read against Bench 004's per-layer table; the Bench-895 synthetic read was ±5%, exact under stationary ranges). Real-text rows are absmax-quantized, so range effects add error the synthetic didn't carry: PASS at 3 and 4 bits = within ±0.20 on ≥ 20/26 layers AND |mean(ratio) − mean(1−ρ)| ≤ 0.10. At 2 bits: direction-only (ratio < 1 on most layers) — the Bench-895 G1c 3.8× off-mean worsening lives there; the arbiter is the per-layer `max |V − E|` vs `max |V|` telemetry (an encode-range GROWTH is the recorded direction the prediction degrades in).
+
+**Gate 2:** mean paired ΔNLL(mr − plain) < 0 at every bit width (primary); chunk-paired win share > 0.5 (secondary, 12 paired chunks). Gate 3: flips/ΔNLL by TARGET-token frequency band — top-64 / 64–1024 / tracked / tail (the caveat's off-mean-frequent-token concentration must be VISIBLE, and is recorded, not gated). Gate 4: (a) `‖E^V[BOS]‖/√d` vs the median tracked-row norm on layers 0/13/25 (the table absorbs the sink mean — the mechanism evidence); (b) the sink-window bin (scored positions < 32, the `kv_sink_window` n_sink convention's neighbourhood) must not flip worse under mr than plain at any bits.
+
+**Box state:** 4090 workstation, i7-13700K 16 cores, CPU lane, AC power; launch-time free RAM + commit-vs-limit recorded in the bench doc; runs > 30 min use the scheduled-task recipe (`run_*.cmd`, Issue 012). Expected wall ≈ 6 h (cal ≈ 2 h at the tapped ~8 tok/s + 8 eval arms ≈ 4 h).
+
+**Promotion statement (unchanged):** a measured null is a legitimate recorded negative; promotion is katgpt-rs-side and waits on T1/T2/T3 + the loser demoted.
 - [ ] **T2 — P2 G1: the K=V+ λ ladder.** Serve `V = K + λ·E_l[s]` with W_V deleted, at λ ∈ {0, 0.5, 1} plus a per-layer schedule chosen by direct grid evaluation on held-out fixtures (never GD).
   - Measure held-out PPL and NIAH (the katgpt-rs Bench 814 harness shape) against (a) full V and (b) `V := K`.
   - The only claim under test is `quality(K=V+) > quality(K=V)`, i.e. that the table refunds part of the 2.5–3.1% tax. **§3.6 discipline: no parity claim vs full V is made or expected.** Record the ladder honestly.

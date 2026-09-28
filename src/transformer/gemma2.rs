@@ -334,6 +334,27 @@ impl PostLayerHook for NoHook {
     fn after_layer(&mut self, _layer_idx: usize, _residual: &mut [f32]) {}
 }
 
+/// Lossy V-cache seam (riir-infer Issue 013 T1). Called once per layer per
+/// decode step, AFTER the value row is stored in the layer cache and BEFORE
+/// attention reads it. A hook may overwrite any stored row of
+/// `layer_values` (row-major, `kv_dim` floats per row) — the mutation IS
+/// the lossy surface: a quantized V cache is read back dequantized, so the
+/// honest simulation rewrites the rows the reader will see. The default
+/// no-op monomorphizes away exactly like [`NoHook`]/[`NoLora`].
+///
+/// Consumed by the f16 decode loop ([`forward_gemma2_f16_hk`]); the f32
+/// path stays plain — Issue 013 T1 scope.
+pub trait ValueStoreHook {
+    /// `layer_idx`'s value cache; the row at `pos * kv_dim` was just
+    /// written (raw). `pos` is the absolute sequence position.
+    fn value_stored(&mut self, _layer_idx: usize, _pos: usize, _layer_values: &mut [f32]) {}
+}
+
+/// Zero-overhead no-op [`ValueStoreHook`] — the full-precision V-cache
+/// posture (bit-identical to the pre-seam forward by monomorphization).
+pub struct NoVQuant;
+impl ValueStoreHook for NoVQuant {}
+
 // ─────────────────────────────────────────────────────────────────────────
 // LoRA application trait (Plan 410 Phase 1) — mirrors the PostLayerHook
 // monomorphization pattern so `NoLora` compiles to zero overhead while
@@ -1259,6 +1280,24 @@ pub fn forward_gemma2_f16<'a>(
     pos: usize,
     config: &Config,
 ) -> &'a mut [f32] {
+    forward_gemma2_f16_hk(ctx, weights, cache, &mut NoVQuant, token, pos, config)
+}
+
+/// [`forward_gemma2_f16`] with a [`ValueStoreHook`] — the one seam the
+/// Issue-013 T1 lossy-V lane drives. The plain path delegates with
+/// [`NoVQuant`] and stays bit-identical (the hook call is an empty fn that
+/// monomorphizes away, the `NoLora`/`NoHook` overhead law).
+#[allow(clippy::too_many_arguments)]
+#[inline(always)]
+pub fn forward_gemma2_f16_hk<'a, H: ValueStoreHook + ?Sized>(
+    ctx: &'a mut ForwardContext,
+    weights: &GemmaTransformerWeightsF16,
+    cache: &mut MultiLayerKVCache,
+    vq: &mut H,
+    token: usize,
+    pos: usize,
+    config: &Config,
+) -> &'a mut [f32] {
     let n = config.n_embd;
     let hd = config.head_dim;
     let q_dim = config.n_head * config.head_dim;
@@ -1331,6 +1370,10 @@ pub fn forward_gemma2_f16<'a>(
                 kvd,
             );
         }
+
+        // f2. [Issue 013 T1] Lossy V-cache seam — after the store, before
+        // the read. `NoVQuant`: empty, inlined away.
+        vq.value_stored(layer_idx, pos, &mut layer_cache.value);
 
         // g. Multi-head attention + softcapping (Plan 096: parallel heads),
         // with the shared m_Y probe / row-logit-floor hooks (Issue 011).

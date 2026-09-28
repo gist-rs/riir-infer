@@ -1,4 +1,6 @@
 /target
+/target-ptq
+/target-rel
 /.heal
 /.raw
 

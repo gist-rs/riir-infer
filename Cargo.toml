@@ -36,6 +36,8 @@ katgpt-quant = { path = "../katgpt-rs/crates/katgpt-quant", optional = true }
 # katgpt-attn: flashmemory_gqa only (optional; engine keeps its own copy for
 # latent_functor/static_cal_bridge.rs which does NOT move).
 katgpt-attn = { path = "../katgpt-rs/crates/katgpt-attn", optional = true }
+# katgpt-kv: the KVarN V-cache quantizer backend (Issue 013 T1 lane).
+katgpt-kv = { path = "../katgpt-rs/crates/katgpt-kv", optional = true }
 
 half = "2"
 rayon = "1.10"
@@ -137,6 +139,23 @@ twt_profile = ["katgpt-core/svd_cca"]
 kv_eviction = [
     "deltanet_inference",
     "katgpt-core/differential_kv_eviction",
+]
+
+# fitted_v_tables (riir-infer Issue 013 T1, 2026-09-28): the model-bound P1
+# gate lane — `transformer::gemma2_vquant` (the `ValueStoreHook` state:
+# KVarN-quantized V storage ± katgpt-core's `MeanRemovedValueCache`
+# token-mean decorator, rewritten into the gemma-2 f16 cache at KVarN's own
+# tile-close visibility) + the `fitted_v_gate` bin (calibrate → freeze →
+# the four-gate battery over the gemma-2-2b decode path). Implies
+# vk_calibration (the tapped calibration pass feeds the frozen tables) and
+# forwards katgpt-core/fitted_value_tables (the P1 product). OPT-IN,
+# measurement-only: the lossy surface is the rewritten cache rows; the
+# promotion is katgpt-rs-side and waits on the gates.
+fitted_v_tables = [
+    "vk_calibration",
+    "katgpt-core/fitted_value_tables",
+    "dep:katgpt-kv",
+    "katgpt-kv/kvarn",
 ]
 
 # katgpt-core forwards.
@@ -257,6 +276,15 @@ required-features = ["act_scale_refit"]
 name = "needle_eviction_gate"
 path = "src/bin/needle_eviction_gate.rs"
 required-features = ["kv_eviction"]
+
+# riir-infer Issue 013 T1 — the fitted-V P1 gate bin (calibrate → freeze →
+# the four-gate battery). The module lives behind #[cfg(feature =
+# "fitted_v_tables")]; this row is the reader protection (the green-zero
+# law). OPT-IN, measurement-only.
+[[bin]]
+name = "fitted_v_gate"
+path = "src/bin/fitted_v_gate.rs"
+required-features = ["fitted_v_tables"]
 
 # riir-infer Issue 022 — the TWT gate battery (G1 planted known-answers,
 # brute-force DP agreement, monotonicity, G4 alloc-free accumulate, the

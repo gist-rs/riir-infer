@@ -3546,6 +3546,7 @@ dependencies = [
  "katgpt-attn",
  "katgpt-core",
  "katgpt-forward",
+ "katgpt-kv",
  "katgpt-quant",
  "katgpt-speculative",
  "katgpt-transformer",
