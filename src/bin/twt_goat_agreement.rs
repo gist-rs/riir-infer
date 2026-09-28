@@ -38,6 +38,19 @@ use riir_infer_core::tokenizer::BpeTokenizer;
 /// The pre-registered absolute agreement bar (T5.1 lane budget).
 const AGREEMENT_BAR: f64 = 0.9;
 
+/// The parent arm's recording, cacheable across invocations (the parent
+/// arm is identical for every collapsed point — one 55-min pass, many
+/// collapsed arms).
+#[derive(serde::Serialize, serde::Deserialize)]
+struct ParentCache {
+    parent: String,
+    corpus: String,
+    seq_len: usize,
+    max_tokens: usize,
+    argmax: Vec<u32>,
+    truth: Vec<u32>,
+}
+
 struct ArmOut {
     /// Greedy argmax at every scored position (tokens[i] predicts
     /// argmax; scored = all positions except each chunk's first? No —
@@ -147,6 +160,7 @@ fn main() -> Result<()> {
     let mut corpus = None;
     let mut seq_len = 512usize;
     let mut max_tokens = 4096usize;
+    let mut cache_path: Option<std::path::PathBuf> = None;
     let mut args = std::env::args().skip(1);
     while let Some(a) = args.next() {
         match a.as_str() {
@@ -157,6 +171,7 @@ fn main() -> Result<()> {
             "--corpus" => corpus = Some(std::path::PathBuf::from(args.next().expect("path"))),
             "--seq-len" => seq_len = args.next().expect("n").parse()?,
             "--max-tokens" => max_tokens = args.next().expect("n").parse()?,
+            "--cache" => cache_path = Some(std::path::PathBuf::from(args.next().expect("path"))),
             other => bail!("unknown arg {other}"),
         }
     }
@@ -186,13 +201,58 @@ fn main() -> Result<()> {
     );
 
     // ── arm 1: parent (run once; every collapsed arm follows it) ──
-    let base = run_arm("parent", &parent, &chunks, seq_len)?;
-    let base_hit = base
-        .argmax
-        .iter()
-        .zip(base.truth.iter())
-        .filter(|(a, t)| a == t)
-        .count();
+    // Cache: the parent arm is identical for every collapsed point, so a
+    // --cache file (params-keyed) replays it. A cache hit prints LOUD —
+    // a silent replay would be indistinguishable from a fresh pass.
+    let cached = cache_path.as_ref().and_then(|p| {
+        let Ok(text) = std::fs::read_to_string(p) else {
+            return None;
+        };
+        let c: ParentCache = serde_json::from_str(&text).ok()?;
+        (c.parent == parent.display().to_string()
+            && c.corpus == corpus.display().to_string()
+            && c.seq_len == seq_len
+            && c.max_tokens == max_tokens)
+            .then_some(c)
+    });
+    let (base, base_hit, base_secs) = match cached {
+        Some(c) => {
+            eprintln!(
+                "[goat] parent: CACHE HIT ({parent:?} @ seq {seq_len} × {max_tokens}) — replaying {} recorded positions",
+                c.argmax.len()
+            );
+            let hit = c.argmax.iter().zip(c.truth.iter()).filter(|(a, t)| a == t).count();
+            (
+                ArmOut { argmax: c.argmax, truth: c.truth, secs: 0.0 },
+                hit,
+                0.0,
+            )
+        }
+        None => {
+            let base = run_arm("parent", &parent, &chunks, seq_len)?;
+            let hit = base
+                .argmax
+                .iter()
+                .zip(base.truth.iter())
+                .filter(|(a, t)| a == t)
+                .count();
+            if let Some(p) = &cache_path {
+                let c = ParentCache {
+                    parent: parent.display().to_string(),
+                    corpus: corpus.display().to_string(),
+                    seq_len,
+                    max_tokens,
+                    argmax: base.argmax.clone(),
+                    truth: base.truth.clone(),
+                };
+                std::fs::write(p, serde_json::to_string(&c).unwrap())
+                    .with_context(|| format!("write cache {p:?}"))?;
+                eprintln!("[goat] parent: cached to {p:?}");
+            }
+            let secs = base.secs;
+            (base, hit, secs)
+        }
+    };
 
     let n = base.argmax.len();
     let mut any_pass = false;
@@ -231,7 +291,7 @@ fn main() -> Result<()> {
         println!("# first divergence position: {:?}", first_div);
         println!(
             "# arm wall: parent {:.0}s, collapsed {:.0}s",
-            base.secs, arm2.secs
+            base_secs, arm2.secs
         );
         let ok = agreement >= AGREEMENT_BAR;
         any_pass |= ok;

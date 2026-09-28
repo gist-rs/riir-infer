@@ -1238,3 +1238,76 @@ record-vs-tree divergence class again; caught because HEAD's test file
 still carried the pre-rename spelling.
 
 Session: owner-gate-pickup-audio-defer
+
+## 2026-09-29 — Issue 022 T5.0 LANDED: the passthrough-collapsed checkpoint + the first real GOAT numbers (coarse grid FAIL; fine end measured)
+
+**The loader prerequisite (T5.0a `318b9fa` + T5.0b `ceb96c3`).** The stock
+qwen35 loader types layers by `full_attention_interval` INDEX arithmetic —
+a collapsed+renumbered file would type every winner WRONG. Fixed at both
+seams, fail-closed: the writer REFUSES a qwen35 collapse without an
+explicit `twt.layer_types` array (U8 `DeltaNetLayerType` discriminants —
+no second vocabulary; legend in-file) and refuses a stale
+`qwen35.nextn_predict_layers` (MTP blocks are not main-stack layers; the
+override-to-0 heals); the loader (`qwen35_deltanet_config_from_gguf_metadata`,
+now `pub`) REPLACES the derived types when the key is present, refusing
+loud on length/vocabulary mismatch — legacy files keep the interval
+derivation. The second defect surfaced while wiring the real lane: the
+league checkpoint IS Hadamard-folded, so `prism.hadamard.weight_names`
+must renumber with the tensors it names (stale names refuse at load;
+renamed names at the WRONG block would be worse). The writer transforms
+the key in place: kept members rename, dropped members' entries drop, a
+MERGED block keeps its first member's entries (the fold is linear — a
+mean of folded weights IS the folded mean), `sign_widths`/`sign_values`
+are width-keyed and survive untouched. Interlock: every SURVIVING folded
+name must pass `is_known_folded_name` against the collapsed types — a
+GDN-typed attention winner refuses (its rotation would silently skip).
+
+**The emit lane (T5.0c `9905c7c`).** `examples/twt_collapse_emit`: the
+profile artifact's real 64×64 S matrix (`.raw/twt/bonsai_ultrachat_profile.json`,
+51 ultrachat sequences, corpus BLAKE3-pinned) → the crate's own
+`minmax_partition` at a chosen ε → per-block winner = minimax medoid
+member → writer emission, all-member passthrough. Extra provenance keys:
+`twt.partition_eps`, `twt.partition_worst`, `twt.profile_corpus_blake3`;
+`twt.parent_weights_blake3` = BLAKE3 over the parent's tensor payloads in
+file order (the key name says exactly what it commits).
+
+**The artifacts + wire verification.** SEVEN real collapsed checkpoints of
+`Ternary-Bonsai-2-27B-PQ2_0.gguf` in /tmp (ε ∈ {0.015, 0.02, 0.03} fine +
+{0.05, 0.1, 0.2, 0.3} coarse). The ε=0.05 file hand-verified on the wire:
+`twt.layer_types` = the winner table exactly (18 DeltaNet + 7 Attention),
+`prism.hadamard.weight_names` = 158 entries exactly (18×6 GDN + 7×7
+attention + `output.weight`), block_count=25 — and riir-train's
+`plan402_gguf_probe.py` reads every `twt.*` key cross-repo AS-IS
+(T4.3's owed verify DONE, no train-side edit).
+
+**The GOAT (`twt_goat_agreement` bin).** Teacher-forced greedy argmax
+agreement parent-vs-collapsed over frozen corpus tokens (the T5.1
+pre-registered ≥0.9 ABSOLUTE bar); the parent arm runs once and is
+cacheable (`--cache`, params-keyed, loud on replay) — one ~55-min pass
+serves every future sweep point.
+
+**The coarse-sweep negative (4096 positions, 8 × 512-token chunks, M3
+CPU AC): ALL FOUR pre-registered grid points FAIL.** ε=0.05 (25 blocks,
+39% depth): agreement 0.1945; ε=0.1 (14, 22%): 0.0051; ε=0.2 (8,
+12.5%): 0.0029 (collapsed hit rate 0.0022); ε=0.3 (5, 7.8%): 0.0000.
+Parent hit rate 0.7478 — the harness measures a real signal. Reading:
+the grid's finest point already cuts 61% of depth, the known-fatal
+regime in the layer-pruning literature — cosine redundancy (the S
+matrix) is NOT a sufficient license for depth cuts on this model class
+(activation-space redundancy ≠ functional redundancy). This is the
+honest negative that JUSTIFIES the merge/audition question per T5.0's
+own gate. The fine end (ε=0.015 → 11% cut, 0.02 → 23%, 0.03 → 45%) is
+the bar-or-bounded question, measured in-flight (log:
+`.raw/twt/goat_agreement_sweep.log`; the fine results + verdict land in
+the issue row).
+
+**FINDING (kill-rule provenance):** the bonsai profile artifact's
+recorded `SURVIVES` is inconsistent with the current kill rule over its
+own stored S — re-derived: `minmax_partition(S, 1.2)` = ONE block
+(global worst 0.801 ≤ 1.2) against bar = ceil(0.8 × 32) = 26 →
+`KillBlockCount`. The laya SURVIVES verdicts (the Phase-2 record) are
+unaffected; the bonsai capture's `forced` was most plausibly degenerate
+(forced=1 → Survives trivially). Re-derive before any ε-sweep Pareto
+claim cites the artifact (T5.5).
+
+Session: riir-infer-022-phase5-t50
