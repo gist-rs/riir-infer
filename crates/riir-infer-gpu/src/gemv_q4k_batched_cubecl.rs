@@ -36,7 +36,7 @@ use cubecl::prelude::*;
 #[cfg(feature = "cubecl_runtime")]
 use cubecl::server::Handle;
 
-use crate::gemv_q4k_cubecl::{Q4KHandle, Q4K_BLOCK_SIZE, Q4K_WORDS_PER_BLOCK};
+use crate::gemv_q4k_cubecl::{Q4K_BLOCK_SIZE, Q4K_WORDS_PER_BLOCK, Q4KHandle};
 
 #[cfg(feature = "cubecl_runtime")]
 use crate::gemv_q4k_cubecl::{get_min_k4, get_scale_k4};
@@ -230,8 +230,8 @@ mod tests {
     use super::*;
     use crate::context::GpuContext;
     use crate::cubecl_runtime::ActiveRuntime;
-    use riir_infer_core::quant::q4k::{quantize_row_q4_k, BlockQ4K, QK_K};
     use bytemuck::Zeroable;
+    use riir_infer_core::quant::q4k::{BlockQ4K, QK_K, quantize_row_q4_k};
 
     fn quantize_matrix(data: &[f32], m: usize, n: usize) -> Vec<BlockQ4K> {
         assert!(n.is_multiple_of(QK_K));
@@ -246,7 +246,13 @@ mod tests {
     }
 
     /// CPU reference: batched GEMV. `output[pos, row] = sum_col W[row, col] * input[pos, col]`.
-    fn cpu_batched_gemv(weight: &[f32], input_batch: &[f32], m: usize, n: usize, batch: usize) -> Vec<f32> {
+    fn cpu_batched_gemv(
+        weight: &[f32],
+        input_batch: &[f32],
+        m: usize,
+        n: usize,
+        batch: usize,
+    ) -> Vec<f32> {
         let mut output = vec![0.0f32; batch * m];
         for pos in 0..batch {
             for row in 0..m {
@@ -277,7 +283,11 @@ mod tests {
 
         unsafe {
             GemvQ4KBatchedCubeCL::launch::<ActiveRuntime>(
-                &client, &handle, input_handle, output_handle.clone(), batch,
+                &client,
+                &handle,
+                input_handle,
+                output_handle.clone(),
+                batch,
             );
         }
 
@@ -321,7 +331,10 @@ mod tests {
         // Constant weights → deterministic output. CPU: 0.01 * sum(input[pos]).
         for (i, (cpu, gpu)) in cpu_out.iter().zip(gpu_out.iter()).enumerate() {
             let diff = (cpu - gpu).abs();
-            assert!(diff < 0.5, "batched GEMV mismatch at {i}: cpu={cpu:.6} gpu={gpu:.6} diff={diff:.6}");
+            assert!(
+                diff < 0.5,
+                "batched GEMV mismatch at {i}: cpu={cpu:.6} gpu={gpu:.6} diff={diff:.6}"
+            );
         }
     }
 
@@ -332,8 +345,12 @@ mod tests {
         let n = 256;
         let batch = 4;
 
-        let weight: Vec<f32> = (0..m * n).map(|i| ((i as u32).wrapping_mul(1103515245) as f32 % 1.0) - 0.5).collect();
-        let input_batch: Vec<f32> = (0..batch * n).map(|i| ((i as u32).wrapping_mul(12345) as f32 % 1.0) - 0.5).collect();
+        let weight: Vec<f32> = (0..m * n)
+            .map(|i| ((i as u32).wrapping_mul(1103515245) as f32 % 1.0) - 0.5)
+            .collect();
+        let input_batch: Vec<f32> = (0..batch * n)
+            .map(|i| ((i as u32).wrapping_mul(12345) as f32 % 1.0) - 0.5)
+            .collect();
 
         let batched_out = run_batched_gemv(&weight, &input_batch, m, n, batch);
 
@@ -349,18 +366,23 @@ mod tests {
             let out_handle = client.empty(m * core::mem::size_of::<f32>());
             unsafe {
                 crate::gemv_q4k_cubecl::GemvQ4KCubeCL::launch::<ActiveRuntime>(
-                    &client, &handle, in_handle, out_handle.clone(),
+                    &client,
+                    &handle,
+                    in_handle,
+                    out_handle.clone(),
                 );
             }
-            let single_out: Vec<f32> = bytemuck::cast_slice::<u8, f32>(
-                &client.read_one(out_handle).unwrap()
-            ).to_vec();
+            let single_out: Vec<f32> =
+                bytemuck::cast_slice::<u8, f32>(&client.read_one(out_handle).unwrap()).to_vec();
 
             for row in 0..m {
                 let b = batched_out[pos * m + row];
                 let s = single_out[row];
                 let diff = (b - s).abs();
-                assert!(diff < 1e-3, "batched vs single (blocks1) mismatch pos={pos} row={row}: batched={b:.5} single={s:.5} diff={diff:.6}");
+                assert!(
+                    diff < 1e-3,
+                    "batched vs single (blocks1) mismatch pos={pos} row={row}: batched={b:.5} single={s:.5} diff={diff:.6}"
+                );
             }
         }
     }
@@ -372,8 +394,12 @@ mod tests {
         let n = 512;
         let batch = 3;
 
-        let weight: Vec<f32> = (0..m * n).map(|i| ((i as u32).wrapping_mul(1103515245) as f32 % 1.0) - 0.5).collect();
-        let input_batch: Vec<f32> = (0..batch * n).map(|i| ((i as u32).wrapping_mul(12345) as f32 % 1.0) - 0.5).collect();
+        let weight: Vec<f32> = (0..m * n)
+            .map(|i| ((i as u32).wrapping_mul(1103515245) as f32 % 1.0) - 0.5)
+            .collect();
+        let input_batch: Vec<f32> = (0..batch * n)
+            .map(|i| ((i as u32).wrapping_mul(12345) as f32 % 1.0) - 0.5)
+            .collect();
 
         let batched_out = run_batched_gemv(&weight, &input_batch, m, n, batch);
 
@@ -389,18 +415,23 @@ mod tests {
             let out_handle = client.empty(m * core::mem::size_of::<f32>());
             unsafe {
                 crate::gemv_q4k_cubecl::GemvQ4KCubeCL::launch::<ActiveRuntime>(
-                    &client, &handle, in_handle, out_handle.clone(),
+                    &client,
+                    &handle,
+                    in_handle,
+                    out_handle.clone(),
                 );
             }
-            let single_out: Vec<f32> = bytemuck::cast_slice::<u8, f32>(
-                &client.read_one(out_handle).unwrap()
-            ).to_vec();
+            let single_out: Vec<f32> =
+                bytemuck::cast_slice::<u8, f32>(&client.read_one(out_handle).unwrap()).to_vec();
 
             for row in 0..m {
                 let b = batched_out[pos * m + row];
                 let s = single_out[row];
                 let diff = (b - s).abs();
-                assert!(diff < 1e-3, "batched vs single mismatch pos={pos} row={row}: batched={b:.5} single={s:.5} diff={diff:.6}");
+                assert!(
+                    diff < 1e-3,
+                    "batched vs single mismatch pos={pos} row={row}: batched={b:.5} single={s:.5} diff={diff:.6}"
+                );
             }
         }
     }

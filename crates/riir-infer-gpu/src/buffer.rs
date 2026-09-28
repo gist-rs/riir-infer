@@ -53,9 +53,7 @@ impl SyncMapResult {
         }
     }
 
-    pub fn callback(
-        self: &Arc<Self>,
-    ) -> impl FnOnce(Result<(), wgpu::BufferAsyncError>) + 'static {
+    pub fn callback(self: &Arc<Self>) -> impl FnOnce(Result<(), wgpu::BufferAsyncError>) + 'static {
         let this = self.clone();
         move |res| {
             // A poisoned lock here would mean a previous callback panicked
@@ -221,7 +219,10 @@ impl CapturedErrors {
 /// captured" rather than blocking — resolving is a diagnosis, never a wait.
 fn resolve_scope_now<F: Future<Output = Option<wgpu::Error>>>(fut: F) -> Option<wgpu::Error> {
     let mut fut = std::pin::pin!(fut);
-    match fut.as_mut().poll(&mut TaskContext::from_waker(Waker::noop())) {
+    match fut
+        .as_mut()
+        .poll(&mut TaskContext::from_waker(Waker::noop()))
+    {
         TaskPoll::Ready(captured) => captured,
         TaskPoll::Pending => None,
     }
@@ -256,10 +257,7 @@ fn resolve_scope_now<F: Future<Output = Option<wgpu::Error>>>(fut: F) -> Option<
 /// round-trip that blocks on the GPU — noise. Scopes are pushed and popped
 /// in LIFO order around `phase` alone; if `phase` itself panics, the guards'
 /// `Drop` pops them (wgpu's guards are unwind-safe).
-fn under_error_scopes<T>(
-    device: &wgpu::Device,
-    phase: impl FnOnce() -> T,
-) -> (T, CapturedErrors) {
+fn under_error_scopes<T>(device: &wgpu::Device, phase: impl FnOnce() -> T) -> (T, CapturedErrors) {
     let validation = device.push_error_scope(wgpu::ErrorFilter::Validation);
     let out_of_memory = device.push_error_scope(wgpu::ErrorFilter::OutOfMemory);
     let internal = device.push_error_scope(wgpu::ErrorFilter::Internal);
@@ -413,12 +411,7 @@ const UPLOAD_CHUNK_BYTES: usize = 64 * 1024 * 1024;
 /// full-size mapped-at-creation staging transient for multi-GB weight uploads.
 /// Every chunk boundary is 4-byte aligned by construction (f32 slice + a
 /// 4-multiple chunk size), satisfying COPY_BUFFER_ALIGNMENT.
-pub fn upload_f32(
-    device: &wgpu::Device,
-    queue: &wgpu::Queue,
-    data: &[f32],
-    label: &str,
-) -> Buffer {
+pub fn upload_f32(device: &wgpu::Device, queue: &wgpu::Queue, data: &[f32], label: &str) -> Buffer {
     let bytes = bytemuck::cast_slice(data);
     let buffer = device.create_buffer(&BufferDescriptor {
         label: Some(label),
@@ -427,11 +420,7 @@ pub fn upload_f32(
         mapped_at_creation: false,
     });
     for (offset, chunk) in bytes.chunks(UPLOAD_CHUNK_BYTES).enumerate() {
-        queue.write_buffer(
-            &buffer,
-            (offset * UPLOAD_CHUNK_BYTES) as u64,
-            chunk,
-        );
+        queue.write_buffer(&buffer, (offset * UPLOAD_CHUNK_BYTES) as u64, chunk);
     }
     buffer
 }
@@ -489,7 +478,8 @@ pub fn download_f32(
         return Err(diagnose_download_failure(e, Some(&creation_errs), &op_errs));
     }
 
-    let data = buffer_slice.get_mapped_range()
+    let data = buffer_slice
+        .get_mapped_range()
         .map_err(|e| GpuError::BufferError(e.to_string()))?;
     let output: Vec<f32> = bytemuck::cast_slice(&data).to_vec();
     drop(data);
@@ -550,7 +540,8 @@ pub fn download_f32_reuse_into(
         return Err(diagnose_download_failure(e, None, &op_errs));
     }
 
-    let data = buffer_slice.get_mapped_range()
+    let data = buffer_slice
+        .get_mapped_range()
         .map_err(|e| GpuError::BufferError(e.to_string()))?;
     let src_slice: &[f32] = bytemuck::cast_slice(&data);
     output.clear();
@@ -663,14 +654,16 @@ pub fn download_f32_batched_reuse_into(
     }
 
     // Read each region out of the mapped range into its output buffer.
-    let data = buffer_slice.get_mapped_range()
+    let data = buffer_slice
+        .get_mapped_range()
         .map_err(|e| GpuError::BufferError(e.to_string()))?;
     let all_bytes: &[u8] = &data;
 
     let mut offset_bytes = 0usize;
     for req in requests.iter_mut() {
         let bytes_needed = req.count * std::mem::size_of::<f32>();
-        let region: &[f32] = bytemuck::cast_slice(&all_bytes[offset_bytes..offset_bytes + bytes_needed]);
+        let region: &[f32] =
+            bytemuck::cast_slice(&all_bytes[offset_bytes..offset_bytes + bytes_needed]);
         req.output.clear();
         req.output.extend_from_slice(region);
         offset_bytes += bytes_needed;
@@ -748,7 +741,8 @@ pub fn download_u32(
         return Err(diagnose_download_failure(e, Some(&creation_errs), &op_errs));
     }
 
-    let data = buffer_slice.get_mapped_range()
+    let data = buffer_slice
+        .get_mapped_range()
         .map_err(|e| GpuError::BufferError(e.to_string()))?;
     let value = u32::from_ne_bytes(data[..4].try_into().unwrap());
     drop(data);
@@ -791,7 +785,8 @@ pub fn download_u32_reuse(
         return Err(diagnose_download_failure(e, None, &op_errs));
     }
 
-    let data = buffer_slice.get_mapped_range()
+    let data = buffer_slice
+        .get_mapped_range()
         .map_err(|e| GpuError::BufferError(e.to_string()))?;
     let value = u32::from_ne_bytes(data[..4].try_into().unwrap());
     drop(data);
@@ -807,10 +802,12 @@ mod tests {
 
     #[test]
     fn test_buffer_upload_download_roundtrip() {
-        let ctx = if let Ok(ctx) = GpuContext::new() { ctx } else {
-                println!("No GPU — skipping buffer test");
-                return;
-            };
+        let ctx = if let Ok(ctx) = GpuContext::new() {
+            ctx
+        } else {
+            println!("No GPU — skipping buffer test");
+            return;
+        };
 
         let original: Vec<f32> = (0..16).map(|i| i as f32 * 0.5).collect();
         let buffer = upload_f32(&ctx.device, &ctx.queue, &original, "test buffer");
@@ -826,10 +823,12 @@ mod tests {
 
     #[test]
     fn test_create_empty_buffer() {
-        let ctx = if let Ok(ctx) = GpuContext::new() { ctx } else {
-                println!("No GPU — skipping empty buffer test");
-                return;
-            };
+        let ctx = if let Ok(ctx) = GpuContext::new() {
+            ctx
+        } else {
+            println!("No GPU — skipping empty buffer test");
+            return;
+        };
 
         let buffer = create_buffer(&ctx.device, 1024, "empty test buffer");
         assert_eq!(buffer.size(), 1024 * std::mem::size_of::<f32>() as u64);
@@ -837,10 +836,12 @@ mod tests {
 
     #[test]
     fn test_buffer_download_reuse_roundtrip() {
-        let ctx = if let Ok(ctx) = GpuContext::new() { ctx } else {
-                println!("No GPU — skipping buffer reuse test");
-                return;
-            };
+        let ctx = if let Ok(ctx) = GpuContext::new() {
+            ctx
+        } else {
+            println!("No GPU — skipping buffer reuse test");
+            return;
+        };
 
         let mut staging = DownloadStaging::new();
 
@@ -875,10 +876,12 @@ mod tests {
 
     #[test]
     fn test_batched_download_roundtrip() {
-        let ctx = if let Ok(ctx) = GpuContext::new() { ctx } else {
-                println!("No GPU — skipping batched download test");
-                return;
-            };
+        let ctx = if let Ok(ctx) = GpuContext::new() {
+            ctx
+        } else {
+            println!("No GPU — skipping batched download test");
+            return;
+        };
 
         // Three buffers of different sizes (mirrors the LoRA-Muon 4-buffer
         // pattern, but with 3 to test non-power-of-two request counts).
@@ -896,9 +899,21 @@ mod tests {
         let mut staging = DownloadStaging::new();
 
         let mut reqs = [
-            BatchedDownloadRequest { src: &buf_a, count: 16, output: &mut out_a },
-            BatchedDownloadRequest { src: &buf_b, count: 32, output: &mut out_b },
-            BatchedDownloadRequest { src: &buf_c, count: 8,  output: &mut out_c },
+            BatchedDownloadRequest {
+                src: &buf_a,
+                count: 16,
+                output: &mut out_a,
+            },
+            BatchedDownloadRequest {
+                src: &buf_b,
+                count: 32,
+                output: &mut out_b,
+            },
+            BatchedDownloadRequest {
+                src: &buf_c,
+                count: 8,
+                output: &mut out_c,
+            },
         ];
         download_f32_batched_reuse_into(&ctx.device, &ctx.queue, &mut reqs, &mut staging)
             .expect("batched download should succeed");
@@ -916,10 +931,12 @@ mod tests {
         // Parity check: batched download produces bit-identical results to
         // sequential `download_f32_reuse_into` calls. This is the G1 gate
         // for the Issue 421 P0.5 optimization.
-        let ctx = if let Ok(ctx) = GpuContext::new() { ctx } else {
-                println!("No GPU — skipping batched parity test");
-                return;
-            };
+        let ctx = if let Ok(ctx) = GpuContext::new() {
+            ctx
+        } else {
+            println!("No GPU — skipping batched parity test");
+            return;
+        };
 
         // Use sizes that mirror the LoRA-Muon pattern: two different counts.
         let data_a: Vec<f32> = (0..48).map(|i| (i as f32).sin()).collect();
@@ -931,18 +948,40 @@ mod tests {
         let mut seq_a = Vec::new();
         let mut seq_b = Vec::new();
         let mut seq_staging = DownloadStaging::new();
-        download_f32_reuse_into(&ctx.device, &ctx.queue, &buf_a, 48, &mut seq_staging, &mut seq_a)
-            .unwrap();
-        download_f32_reuse_into(&ctx.device, &ctx.queue, &buf_b, 24, &mut seq_staging, &mut seq_b)
-            .unwrap();
+        download_f32_reuse_into(
+            &ctx.device,
+            &ctx.queue,
+            &buf_a,
+            48,
+            &mut seq_staging,
+            &mut seq_a,
+        )
+        .unwrap();
+        download_f32_reuse_into(
+            &ctx.device,
+            &ctx.queue,
+            &buf_b,
+            24,
+            &mut seq_staging,
+            &mut seq_b,
+        )
+        .unwrap();
 
         // Batched downloads.
         let mut bat_a = Vec::new();
         let mut bat_b = Vec::new();
         let mut bat_staging = DownloadStaging::new();
         let mut reqs = [
-            BatchedDownloadRequest { src: &buf_a, count: 48, output: &mut bat_a },
-            BatchedDownloadRequest { src: &buf_b, count: 24, output: &mut bat_b },
+            BatchedDownloadRequest {
+                src: &buf_a,
+                count: 48,
+                output: &mut bat_a,
+            },
+            BatchedDownloadRequest {
+                src: &buf_b,
+                count: 24,
+                output: &mut bat_b,
+            },
         ];
         download_f32_batched_reuse_into(&ctx.device, &ctx.queue, &mut reqs, &mut bat_staging)
             .unwrap();
@@ -955,10 +994,12 @@ mod tests {
     #[test]
     fn test_batched_download_empty() {
         // Edge case: empty request slice should be a no-op.
-        let ctx = if let Ok(ctx) = GpuContext::new() { ctx } else {
-                println!("No GPU — skipping batched empty test");
-                return;
-            };
+        let ctx = if let Ok(ctx) = GpuContext::new() {
+            ctx
+        } else {
+            println!("No GPU — skipping batched empty test");
+            return;
+        };
 
         let mut staging = DownloadStaging::new();
         let reqs: &mut [BatchedDownloadRequest<'_>] = &mut [];

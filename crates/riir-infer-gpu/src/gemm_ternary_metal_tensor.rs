@@ -52,8 +52,8 @@
 #![cfg(all(feature = "metal_tensor_gemm", target_os = "macos"))]
 
 use metal::{
-    Buffer, CommandQueue, CompileOptions, Device, Library,
-    MTLResourceOptions, MTLSize, ComputePipelineState,
+    Buffer, CommandQueue, CompileOptions, ComputePipelineState, Device, Library,
+    MTLResourceOptions, MTLSize,
 };
 
 // ---------------------------------------------------------------------------
@@ -140,10 +140,8 @@ impl MetalTensorGemm {
         if let Some(buf) = cache.remove(&byte_len) {
             return buf;
         }
-        self.device.new_buffer(
-            byte_len,
-            MTLResourceOptions::StorageModeManaged,
-        )
+        self.device
+            .new_buffer(byte_len, MTLResourceOptions::StorageModeManaged)
     }
 
     /// Upload ternary weights to Metal buffers.
@@ -193,10 +191,8 @@ impl MetalTensorGemm {
 
     /// Create a zeroed output buffer.
     pub fn create_output(&self, len: usize) -> Buffer {
-        self.device.new_buffer(
-            (len * 4) as u64,
-            MTLResourceOptions::StorageModeManaged,
-        )
+        self.device
+            .new_buffer((len * 4) as u64, MTLResourceOptions::StorageModeManaged)
     }
 
     /// Get a reused output buffer of `len` f32 elements (T8).
@@ -252,22 +248,22 @@ impl MetalTensorGemm {
         p: u32,
     ) {
         // matmul2d tile constants (must match the MSL kernel)
-        const NRA: u32 = 64;      // features (M) per workgroup
-        const NRB: u32 = 128;     // tokens (P) per workgroup
-        const NSG: u32 = 4;       // simdgroups per workgroup
+        const NRA: u32 = 64; // features (M) per workgroup
+        const NRB: u32 = 128; // tokens (P) per workgroup
+        const NSG: u32 = 4; // simdgroups per workgroup
         const THREADS_PER_SG: u32 = 32;
-        const NUM_THREADS: u32 = THREADS_PER_SG * NSG;  // 128
+        const NUM_THREADS: u32 = THREADS_PER_SG * NSG; // 128
 
         // Threadgroup memory for the dequanted A tile: K_TILE × NRA × sizeof(half)
         // K_TILE = 32, NRA = 64, sizeof(half) = 2 → 4096 bytes.
         // Must be explicitly allocated via set_threadgroup_memory_length — an
         // unsized `threadgroup char*` in the kernel defaults to zero bytes.
-        const THREADGROUP_MEM_BYTES: u64 = 32 * 64 * 2;  // 4096
+        const THREADGROUP_MEM_BYTES: u64 = 32 * 64 * 2; // 4096
 
         // Grid: one workgroup per output tile
         let grid = MTLSize {
-            width: p.div_ceil(NRB) as u64,   // token tiles
-            height: m.div_ceil(NRA) as u64,  // feature tiles
+            width: p.div_ceil(NRB) as u64,  // token tiles
+            height: m.div_ceil(NRA) as u64, // feature tiles
             depth: 1,
         };
         let threadgroup = MTLSize {

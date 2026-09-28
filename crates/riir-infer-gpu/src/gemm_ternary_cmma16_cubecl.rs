@@ -192,11 +192,19 @@ fn gemm_ternary_cmma16_f16(
             // B tiles — tokens base_tok + {0,16} + row_in (row_in doubles as
             // the token index within the tile).
             let tok_c0 = base_tok + row_in;
-            let tok_x0 = if tok_c0 < p_tokens { tok_c0 } else { p_tokens - 1u32 };
+            let tok_x0 = if tok_c0 < p_tokens {
+                tok_c0
+            } else {
+                p_tokens - 1u32
+            };
             b0[e as usize] = f16::cast_from(input_batch[(tok_x0 * n + col) as usize]);
 
             let tok_c1 = tok_c0 + CMMA16;
-            let tok_x1 = if tok_c1 < p_tokens { tok_c1 } else { p_tokens - 1u32 };
+            let tok_x1 = if tok_c1 < p_tokens {
+                tok_c1
+            } else {
+                p_tokens - 1u32
+            };
             b1[e as usize] = f16::cast_from(input_batch[(tok_x1 * n + col) as usize]);
         }
 
@@ -791,28 +799,36 @@ fn gemm_ternary_cmma16_f16_sg4(
     #[allow(unused_mut)]
     let mut acc0 = cmma::Matrix::<f32>::from_value(
         cmma::MatrixIdent::Accumulator,
-        16usize, 16usize, 16usize,
+        16usize,
+        16usize,
+        16usize,
         cmma::MatrixLayout::Undefined,
         0.0f32,
     );
     #[allow(unused_mut)]
     let mut acc1 = cmma::Matrix::<f32>::from_value(
         cmma::MatrixIdent::Accumulator,
-        16usize, 16usize, 16usize,
+        16usize,
+        16usize,
+        16usize,
         cmma::MatrixLayout::Undefined,
         0.0f32,
     );
     #[allow(unused_mut)]
     let mut acc2 = cmma::Matrix::<f32>::from_value(
         cmma::MatrixIdent::Accumulator,
-        16usize, 16usize, 16usize,
+        16usize,
+        16usize,
+        16usize,
         cmma::MatrixLayout::Undefined,
         0.0f32,
     );
     #[allow(unused_mut)]
     let mut acc3 = cmma::Matrix::<f32>::from_value(
         cmma::MatrixIdent::Accumulator,
-        16usize, 16usize, 16usize,
+        16usize,
+        16usize,
+        16usize,
         cmma::MatrixLayout::Undefined,
         0.0f32,
     );
@@ -838,20 +854,21 @@ fn gemm_ternary_cmma16_f16_sg4(
         let word_off1 = colbit1 / 32u32;
         // Tile pair 0.
         {
-            let row = base_row  + row_in0;
+            let row = base_row + row_in0;
             let row_c = if row < m { row } else { m - 1u32 };
             let posw = pos_bits_u32[(row_c * words_per_row + word_off0) as usize];
             let negw = neg_bits_u32[(row_c * words_per_row + word_off0) as usize];
             let sign = select((posw >> bitp0) & 1u32 != 0u32, one, zero)
                 - select((negw >> bitp0) & 1u32 != 0u32, one, zero);
             let sc = group_scale_f32[(row_c * groups_per_row + (colbit0 / 128u32)) as usize];
-            a0[(tid % 128u32 ) as usize] = f16::cast_from(sign * sc);
-            let tok = base_tok  + row_in0;
+            a0[(tid % 128u32) as usize] = f16::cast_from(sign * sc);
+            let tok = base_tok + row_in0;
             let tok_c = if tok < p_tokens { tok } else { p_tokens - 1u32 };
-            b0[(tid % 128u32 ) as usize] = f16::cast_from(input_batch[(tok_c * n + colbit0) as usize]);
+            b0[(tid % 128u32) as usize] =
+                f16::cast_from(input_batch[(tok_c * n + colbit0) as usize]);
         }
         {
-            let row = base_row  + row_in1;
+            let row = base_row + row_in1;
             let row_c = if row < m { row } else { m - 1u32 };
             let posw = pos_bits_u32[(row_c * words_per_row + word_off1) as usize];
             let negw = neg_bits_u32[(row_c * words_per_row + word_off1) as usize];
@@ -859,9 +876,10 @@ fn gemm_ternary_cmma16_f16_sg4(
                 - select((negw >> bitp1) & 1u32 != 0u32, one, zero);
             let sc = group_scale_f32[(row_c * groups_per_row + (colbit1 / 128u32)) as usize];
             a0[(tid % 128u32 + 128u32) as usize] = f16::cast_from(sign * sc);
-            let tok = base_tok  + row_in1;
+            let tok = base_tok + row_in1;
             let tok_c = if tok < p_tokens { tok } else { p_tokens - 1u32 };
-            b0[(tid % 128u32 + 128u32) as usize] = f16::cast_from(input_batch[(tok_c * n + colbit1) as usize]);
+            b0[(tid % 128u32 + 128u32) as usize] =
+                f16::cast_from(input_batch[(tok_c * n + colbit1) as usize]);
         }
         // Tile pair 1.
         {
@@ -872,10 +890,11 @@ fn gemm_ternary_cmma16_f16_sg4(
             let sign = select((posw >> bitp0) & 1u32 != 0u32, one, zero)
                 - select((negw >> bitp0) & 1u32 != 0u32, one, zero);
             let sc = group_scale_f32[(row_c * groups_per_row + (colbit0 / 128u32)) as usize];
-            a1[(tid % 128u32 ) as usize] = f16::cast_from(sign * sc);
+            a1[(tid % 128u32) as usize] = f16::cast_from(sign * sc);
             let tok = base_tok + 16u32 + row_in0;
             let tok_c = if tok < p_tokens { tok } else { p_tokens - 1u32 };
-            b1[(tid % 128u32 ) as usize] = f16::cast_from(input_batch[(tok_c * n + colbit0) as usize]);
+            b1[(tid % 128u32) as usize] =
+                f16::cast_from(input_batch[(tok_c * n + colbit0) as usize]);
         }
         {
             let row = base_row + 16u32 + row_in1;
@@ -888,7 +907,8 @@ fn gemm_ternary_cmma16_f16_sg4(
             a1[(tid % 128u32 + 128u32) as usize] = f16::cast_from(sign * sc);
             let tok = base_tok + 16u32 + row_in1;
             let tok_c = if tok < p_tokens { tok } else { p_tokens - 1u32 };
-            b1[(tid % 128u32 + 128u32) as usize] = f16::cast_from(input_batch[(tok_c * n + colbit1) as usize]);
+            b1[(tid % 128u32 + 128u32) as usize] =
+                f16::cast_from(input_batch[(tok_c * n + colbit1) as usize]);
         }
         // Tile pair 2.
         {
@@ -899,10 +919,11 @@ fn gemm_ternary_cmma16_f16_sg4(
             let sign = select((posw >> bitp0) & 1u32 != 0u32, one, zero)
                 - select((negw >> bitp0) & 1u32 != 0u32, one, zero);
             let sc = group_scale_f32[(row_c * groups_per_row + (colbit0 / 128u32)) as usize];
-            a2[(tid % 128u32 ) as usize] = f16::cast_from(sign * sc);
+            a2[(tid % 128u32) as usize] = f16::cast_from(sign * sc);
             let tok = base_tok + 32u32 + row_in0;
             let tok_c = if tok < p_tokens { tok } else { p_tokens - 1u32 };
-            b2[(tid % 128u32 ) as usize] = f16::cast_from(input_batch[(tok_c * n + colbit0) as usize]);
+            b2[(tid % 128u32) as usize] =
+                f16::cast_from(input_batch[(tok_c * n + colbit0) as usize]);
         }
         {
             let row = base_row + 32u32 + row_in1;
@@ -915,7 +936,8 @@ fn gemm_ternary_cmma16_f16_sg4(
             a2[(tid % 128u32 + 128u32) as usize] = f16::cast_from(sign * sc);
             let tok = base_tok + 32u32 + row_in1;
             let tok_c = if tok < p_tokens { tok } else { p_tokens - 1u32 };
-            b2[(tid % 128u32 + 128u32) as usize] = f16::cast_from(input_batch[(tok_c * n + colbit1) as usize]);
+            b2[(tid % 128u32 + 128u32) as usize] =
+                f16::cast_from(input_batch[(tok_c * n + colbit1) as usize]);
         }
         // Tile pair 3.
         {
@@ -926,10 +948,11 @@ fn gemm_ternary_cmma16_f16_sg4(
             let sign = select((posw >> bitp0) & 1u32 != 0u32, one, zero)
                 - select((negw >> bitp0) & 1u32 != 0u32, one, zero);
             let sc = group_scale_f32[(row_c * groups_per_row + (colbit0 / 128u32)) as usize];
-            a3[(tid % 128u32 ) as usize] = f16::cast_from(sign * sc);
+            a3[(tid % 128u32) as usize] = f16::cast_from(sign * sc);
             let tok = base_tok + 48u32 + row_in0;
             let tok_c = if tok < p_tokens { tok } else { p_tokens - 1u32 };
-            b3[(tid % 128u32 ) as usize] = f16::cast_from(input_batch[(tok_c * n + colbit0) as usize]);
+            b3[(tid % 128u32) as usize] =
+                f16::cast_from(input_batch[(tok_c * n + colbit0) as usize]);
         }
         {
             let row = base_row + 48u32 + row_in1;
@@ -942,7 +965,8 @@ fn gemm_ternary_cmma16_f16_sg4(
             a3[(tid % 128u32 + 128u32) as usize] = f16::cast_from(sign * sc);
             let tok = base_tok + 48u32 + row_in1;
             let tok_c = if tok < p_tokens { tok } else { p_tokens - 1u32 };
-            b3[(tid % 128u32 + 128u32) as usize] = f16::cast_from(input_batch[(tok_c * n + colbit1) as usize]);
+            b3[(tid % 128u32 + 128u32) as usize] =
+                f16::cast_from(input_batch[(tok_c * n + colbit1) as usize]);
         }
 
         sync_cube();
@@ -950,28 +974,36 @@ fn gemm_ternary_cmma16_f16_sg4(
         // ── MMA: 4 B fragments (uniform) + divergent A per subgroup. ──
         let mb0 = cmma::Matrix::<f16>::from_slice(
             cmma::MatrixIdent::B,
-            16usize, 16usize, 16usize,
+            16usize,
+            16usize,
+            16usize,
             cmma::MatrixLayout::ColMajor,
             &b0,
             16,
         );
         let mb1 = cmma::Matrix::<f16>::from_slice(
             cmma::MatrixIdent::B,
-            16usize, 16usize, 16usize,
+            16usize,
+            16usize,
+            16usize,
             cmma::MatrixLayout::ColMajor,
             &b1,
             16,
         );
         let mb2 = cmma::Matrix::<f16>::from_slice(
             cmma::MatrixIdent::B,
-            16usize, 16usize, 16usize,
+            16usize,
+            16usize,
+            16usize,
             cmma::MatrixLayout::ColMajor,
             &b2,
             16,
         );
         let mb3 = cmma::Matrix::<f16>::from_slice(
             cmma::MatrixIdent::B,
-            16usize, 16usize, 16usize,
+            16usize,
+            16usize,
+            16usize,
             cmma::MatrixLayout::ColMajor,
             &b3,
             16,
@@ -980,7 +1012,9 @@ fn gemm_ternary_cmma16_f16_sg4(
         if sg == 0u32 {
             let ma = cmma::Matrix::<f16>::from_slice(
                 cmma::MatrixIdent::A,
-                16usize, 16usize, 16usize,
+                16usize,
+                16usize,
+                16usize,
                 cmma::MatrixLayout::RowMajor,
                 &a0,
                 16,
@@ -989,11 +1023,12 @@ fn gemm_ternary_cmma16_f16_sg4(
             cmma::execute::<f16, f16, f32, f32, cmma::Plane>(&ma, &mb1, &acc1, &acc1);
             cmma::execute::<f16, f16, f32, f32, cmma::Plane>(&ma, &mb2, &acc2, &acc2);
             cmma::execute::<f16, f16, f32, f32, cmma::Plane>(&ma, &mb3, &acc3, &acc3);
-        }
-        else if sg == 1u32 {
+        } else if sg == 1u32 {
             let ma = cmma::Matrix::<f16>::from_slice(
                 cmma::MatrixIdent::A,
-                16usize, 16usize, 16usize,
+                16usize,
+                16usize,
+                16usize,
                 cmma::MatrixLayout::RowMajor,
                 &a1,
                 16,
@@ -1002,11 +1037,12 @@ fn gemm_ternary_cmma16_f16_sg4(
             cmma::execute::<f16, f16, f32, f32, cmma::Plane>(&ma, &mb1, &acc1, &acc1);
             cmma::execute::<f16, f16, f32, f32, cmma::Plane>(&ma, &mb2, &acc2, &acc2);
             cmma::execute::<f16, f16, f32, f32, cmma::Plane>(&ma, &mb3, &acc3, &acc3);
-        }
-        else if sg == 2u32 {
+        } else if sg == 2u32 {
             let ma = cmma::Matrix::<f16>::from_slice(
                 cmma::MatrixIdent::A,
-                16usize, 16usize, 16usize,
+                16usize,
+                16usize,
+                16usize,
                 cmma::MatrixLayout::RowMajor,
                 &a2,
                 16,
@@ -1015,11 +1051,12 @@ fn gemm_ternary_cmma16_f16_sg4(
             cmma::execute::<f16, f16, f32, f32, cmma::Plane>(&ma, &mb1, &acc1, &acc1);
             cmma::execute::<f16, f16, f32, f32, cmma::Plane>(&ma, &mb2, &acc2, &acc2);
             cmma::execute::<f16, f16, f32, f32, cmma::Plane>(&ma, &mb3, &acc3, &acc3);
-        }
-        else if sg == 3u32 {
+        } else if sg == 3u32 {
             let ma = cmma::Matrix::<f16>::from_slice(
                 cmma::MatrixIdent::A,
-                16usize, 16usize, 16usize,
+                16usize,
+                16usize,
+                16usize,
                 cmma::MatrixLayout::RowMajor,
                 &a3,
                 16,
@@ -1043,20 +1080,17 @@ fn gemm_ternary_cmma16_f16_sg4(
             cmma::store(&mut r01, &acc1, 16, cmma::MatrixLayout::RowMajor);
             cmma::store(&mut r02, &acc2, 16, cmma::MatrixLayout::RowMajor);
             cmma::store(&mut r03, &acc3, 16, cmma::MatrixLayout::RowMajor);
-        }
-        else if sg == 1u32 {
+        } else if sg == 1u32 {
             cmma::store(&mut r10, &acc0, 16, cmma::MatrixLayout::RowMajor);
             cmma::store(&mut r11, &acc1, 16, cmma::MatrixLayout::RowMajor);
             cmma::store(&mut r12, &acc2, 16, cmma::MatrixLayout::RowMajor);
             cmma::store(&mut r13, &acc3, 16, cmma::MatrixLayout::RowMajor);
-        }
-        else if sg == 2u32 {
+        } else if sg == 2u32 {
             cmma::store(&mut r20, &acc0, 16, cmma::MatrixLayout::RowMajor);
             cmma::store(&mut r21, &acc1, 16, cmma::MatrixLayout::RowMajor);
             cmma::store(&mut r22, &acc2, 16, cmma::MatrixLayout::RowMajor);
             cmma::store(&mut r23, &acc3, 16, cmma::MatrixLayout::RowMajor);
-        }
-        else if sg == 3u32 {
+        } else if sg == 3u32 {
             cmma::store(&mut r30, &acc0, 16, cmma::MatrixLayout::RowMajor);
             cmma::store(&mut r31, &acc1, 16, cmma::MatrixLayout::RowMajor);
             cmma::store(&mut r32, &acc2, 16, cmma::MatrixLayout::RowMajor);
@@ -1077,7 +1111,67 @@ fn gemm_ternary_cmma16_f16_sg4(
         let row = base_row + (tile / 4u32) * CMMA16 + row_in;
         let tok = base_tok + (tile % 4u32) * CMMA16 + tok_in;
         if row < m && tok < p_tokens {
-            output_batch[(tok * m + row) as usize] = select(tile == 0u32, r00[rem as usize], select(tile == 1u32, r01[rem as usize], select(tile == 2u32, r02[rem as usize], select(tile == 3u32, r03[rem as usize], select(tile == 4u32, r10[rem as usize], select(tile == 5u32, r11[rem as usize], select(tile == 6u32, r12[rem as usize], select(tile == 7u32, r13[rem as usize], select(tile == 8u32, r20[rem as usize], select(tile == 9u32, r21[rem as usize], select(tile == 10u32, r22[rem as usize], select(tile == 11u32, r23[rem as usize], select(tile == 12u32, r30[rem as usize], select(tile == 13u32, r31[rem as usize], select(tile == 14u32, r32[rem as usize], r33[rem as usize])))))))))))))));
+            output_batch[(tok * m + row) as usize] = select(
+                tile == 0u32,
+                r00[rem as usize],
+                select(
+                    tile == 1u32,
+                    r01[rem as usize],
+                    select(
+                        tile == 2u32,
+                        r02[rem as usize],
+                        select(
+                            tile == 3u32,
+                            r03[rem as usize],
+                            select(
+                                tile == 4u32,
+                                r10[rem as usize],
+                                select(
+                                    tile == 5u32,
+                                    r11[rem as usize],
+                                    select(
+                                        tile == 6u32,
+                                        r12[rem as usize],
+                                        select(
+                                            tile == 7u32,
+                                            r13[rem as usize],
+                                            select(
+                                                tile == 8u32,
+                                                r20[rem as usize],
+                                                select(
+                                                    tile == 9u32,
+                                                    r21[rem as usize],
+                                                    select(
+                                                        tile == 10u32,
+                                                        r22[rem as usize],
+                                                        select(
+                                                            tile == 11u32,
+                                                            r23[rem as usize],
+                                                            select(
+                                                                tile == 12u32,
+                                                                r30[rem as usize],
+                                                                select(
+                                                                    tile == 13u32,
+                                                                    r31[rem as usize],
+                                                                    select(
+                                                                        tile == 14u32,
+                                                                        r32[rem as usize],
+                                                                        r33[rem as usize],
+                                                                    ),
+                                                                ),
+                                                            ),
+                                                        ),
+                                                    ),
+                                                ),
+                                            ),
+                                        ),
+                                    ),
+                                ),
+                            ),
+                        ),
+                    ),
+                ),
+            );
         }
     }
 }
@@ -1162,28 +1256,36 @@ fn gemm_ternary_cmma16_f16_sg8(
     #[allow(unused_mut)]
     let mut acc0 = cmma::Matrix::<f32>::from_value(
         cmma::MatrixIdent::Accumulator,
-        16usize, 16usize, 16usize,
+        16usize,
+        16usize,
+        16usize,
         cmma::MatrixLayout::Undefined,
         0.0f32,
     );
     #[allow(unused_mut)]
     let mut acc1 = cmma::Matrix::<f32>::from_value(
         cmma::MatrixIdent::Accumulator,
-        16usize, 16usize, 16usize,
+        16usize,
+        16usize,
+        16usize,
         cmma::MatrixLayout::Undefined,
         0.0f32,
     );
     #[allow(unused_mut)]
     let mut acc2 = cmma::Matrix::<f32>::from_value(
         cmma::MatrixIdent::Accumulator,
-        16usize, 16usize, 16usize,
+        16usize,
+        16usize,
+        16usize,
         cmma::MatrixLayout::Undefined,
         0.0f32,
     );
     #[allow(unused_mut)]
     let mut acc3 = cmma::Matrix::<f32>::from_value(
         cmma::MatrixIdent::Accumulator,
-        16usize, 16usize, 16usize,
+        16usize,
+        16usize,
+        16usize,
         cmma::MatrixLayout::Undefined,
         0.0f32,
     );
@@ -1203,7 +1305,7 @@ fn gemm_ternary_cmma16_f16_sg8(
         let bitp = colbit % 32u32;
         let word_off = colbit / 32u32;
         {
-            let row = base_row  + row_in;
+            let row = base_row + row_in;
             let row_c = if row < m { row } else { m - 1u32 };
             let posw = pos_bits_u32[(row_c * words_per_row + word_off) as usize];
             let negw = neg_bits_u32[(row_c * words_per_row + word_off) as usize];
@@ -1211,7 +1313,7 @@ fn gemm_ternary_cmma16_f16_sg8(
                 - select((negw >> bitp) & 1u32 != 0u32, one, zero);
             let sc = group_scale_f32[(row_c * groups_per_row + (colbit / 128u32)) as usize];
             a0[tid as usize] = f16::cast_from(sign * sc);
-            let tok = base_tok  + row_in;
+            let tok = base_tok + row_in;
             let tok_c = if tok < p_tokens { tok } else { p_tokens - 1u32 };
             b0[tid as usize] = f16::cast_from(input_batch[(tok_c * n + colbit) as usize]);
         }
@@ -1300,28 +1402,36 @@ fn gemm_ternary_cmma16_f16_sg8(
         // ── MMA: 4 B fragments (uniform) + divergent A per subgroup. ──
         let mb0 = cmma::Matrix::<f16>::from_slice(
             cmma::MatrixIdent::B,
-            16usize, 16usize, 16usize,
+            16usize,
+            16usize,
+            16usize,
             cmma::MatrixLayout::ColMajor,
             &b0,
             16,
         );
         let mb1 = cmma::Matrix::<f16>::from_slice(
             cmma::MatrixIdent::B,
-            16usize, 16usize, 16usize,
+            16usize,
+            16usize,
+            16usize,
             cmma::MatrixLayout::ColMajor,
             &b1,
             16,
         );
         let mb2 = cmma::Matrix::<f16>::from_slice(
             cmma::MatrixIdent::B,
-            16usize, 16usize, 16usize,
+            16usize,
+            16usize,
+            16usize,
             cmma::MatrixLayout::ColMajor,
             &b2,
             16,
         );
         let mb3 = cmma::Matrix::<f16>::from_slice(
             cmma::MatrixIdent::B,
-            16usize, 16usize, 16usize,
+            16usize,
+            16usize,
+            16usize,
             cmma::MatrixLayout::ColMajor,
             &b3,
             16,
@@ -1330,7 +1440,9 @@ fn gemm_ternary_cmma16_f16_sg8(
         if sg == 0u32 {
             let ma = cmma::Matrix::<f16>::from_slice(
                 cmma::MatrixIdent::A,
-                16usize, 16usize, 16usize,
+                16usize,
+                16usize,
+                16usize,
                 cmma::MatrixLayout::RowMajor,
                 &a0,
                 16,
@@ -1339,11 +1451,12 @@ fn gemm_ternary_cmma16_f16_sg8(
             cmma::execute::<f16, f16, f32, f32, cmma::Plane>(&ma, &mb1, &acc1, &acc1);
             cmma::execute::<f16, f16, f32, f32, cmma::Plane>(&ma, &mb2, &acc2, &acc2);
             cmma::execute::<f16, f16, f32, f32, cmma::Plane>(&ma, &mb3, &acc3, &acc3);
-        }
-        else if sg == 1u32 {
+        } else if sg == 1u32 {
             let ma = cmma::Matrix::<f16>::from_slice(
                 cmma::MatrixIdent::A,
-                16usize, 16usize, 16usize,
+                16usize,
+                16usize,
+                16usize,
                 cmma::MatrixLayout::RowMajor,
                 &a1,
                 16,
@@ -1352,11 +1465,12 @@ fn gemm_ternary_cmma16_f16_sg8(
             cmma::execute::<f16, f16, f32, f32, cmma::Plane>(&ma, &mb1, &acc1, &acc1);
             cmma::execute::<f16, f16, f32, f32, cmma::Plane>(&ma, &mb2, &acc2, &acc2);
             cmma::execute::<f16, f16, f32, f32, cmma::Plane>(&ma, &mb3, &acc3, &acc3);
-        }
-        else if sg == 2u32 {
+        } else if sg == 2u32 {
             let ma = cmma::Matrix::<f16>::from_slice(
                 cmma::MatrixIdent::A,
-                16usize, 16usize, 16usize,
+                16usize,
+                16usize,
+                16usize,
                 cmma::MatrixLayout::RowMajor,
                 &a2,
                 16,
@@ -1365,11 +1479,12 @@ fn gemm_ternary_cmma16_f16_sg8(
             cmma::execute::<f16, f16, f32, f32, cmma::Plane>(&ma, &mb1, &acc1, &acc1);
             cmma::execute::<f16, f16, f32, f32, cmma::Plane>(&ma, &mb2, &acc2, &acc2);
             cmma::execute::<f16, f16, f32, f32, cmma::Plane>(&ma, &mb3, &acc3, &acc3);
-        }
-        else if sg == 3u32 {
+        } else if sg == 3u32 {
             let ma = cmma::Matrix::<f16>::from_slice(
                 cmma::MatrixIdent::A,
-                16usize, 16usize, 16usize,
+                16usize,
+                16usize,
+                16usize,
                 cmma::MatrixLayout::RowMajor,
                 &a3,
                 16,
@@ -1378,11 +1493,12 @@ fn gemm_ternary_cmma16_f16_sg8(
             cmma::execute::<f16, f16, f32, f32, cmma::Plane>(&ma, &mb1, &acc1, &acc1);
             cmma::execute::<f16, f16, f32, f32, cmma::Plane>(&ma, &mb2, &acc2, &acc2);
             cmma::execute::<f16, f16, f32, f32, cmma::Plane>(&ma, &mb3, &acc3, &acc3);
-        }
-        else if sg == 4u32 {
+        } else if sg == 4u32 {
             let ma = cmma::Matrix::<f16>::from_slice(
                 cmma::MatrixIdent::A,
-                16usize, 16usize, 16usize,
+                16usize,
+                16usize,
+                16usize,
                 cmma::MatrixLayout::RowMajor,
                 &a4,
                 16,
@@ -1391,11 +1507,12 @@ fn gemm_ternary_cmma16_f16_sg8(
             cmma::execute::<f16, f16, f32, f32, cmma::Plane>(&ma, &mb1, &acc1, &acc1);
             cmma::execute::<f16, f16, f32, f32, cmma::Plane>(&ma, &mb2, &acc2, &acc2);
             cmma::execute::<f16, f16, f32, f32, cmma::Plane>(&ma, &mb3, &acc3, &acc3);
-        }
-        else if sg == 5u32 {
+        } else if sg == 5u32 {
             let ma = cmma::Matrix::<f16>::from_slice(
                 cmma::MatrixIdent::A,
-                16usize, 16usize, 16usize,
+                16usize,
+                16usize,
+                16usize,
                 cmma::MatrixLayout::RowMajor,
                 &a5,
                 16,
@@ -1404,11 +1521,12 @@ fn gemm_ternary_cmma16_f16_sg8(
             cmma::execute::<f16, f16, f32, f32, cmma::Plane>(&ma, &mb1, &acc1, &acc1);
             cmma::execute::<f16, f16, f32, f32, cmma::Plane>(&ma, &mb2, &acc2, &acc2);
             cmma::execute::<f16, f16, f32, f32, cmma::Plane>(&ma, &mb3, &acc3, &acc3);
-        }
-        else if sg == 6u32 {
+        } else if sg == 6u32 {
             let ma = cmma::Matrix::<f16>::from_slice(
                 cmma::MatrixIdent::A,
-                16usize, 16usize, 16usize,
+                16usize,
+                16usize,
+                16usize,
                 cmma::MatrixLayout::RowMajor,
                 &a6,
                 16,
@@ -1417,11 +1535,12 @@ fn gemm_ternary_cmma16_f16_sg8(
             cmma::execute::<f16, f16, f32, f32, cmma::Plane>(&ma, &mb1, &acc1, &acc1);
             cmma::execute::<f16, f16, f32, f32, cmma::Plane>(&ma, &mb2, &acc2, &acc2);
             cmma::execute::<f16, f16, f32, f32, cmma::Plane>(&ma, &mb3, &acc3, &acc3);
-        }
-        else if sg == 7u32 {
+        } else if sg == 7u32 {
             let ma = cmma::Matrix::<f16>::from_slice(
                 cmma::MatrixIdent::A,
-                16usize, 16usize, 16usize,
+                16usize,
+                16usize,
+                16usize,
                 cmma::MatrixLayout::RowMajor,
                 &a7,
                 16,
@@ -1445,44 +1564,37 @@ fn gemm_ternary_cmma16_f16_sg8(
             cmma::store(&mut r01, &acc1, 16, cmma::MatrixLayout::RowMajor);
             cmma::store(&mut r02, &acc2, 16, cmma::MatrixLayout::RowMajor);
             cmma::store(&mut r03, &acc3, 16, cmma::MatrixLayout::RowMajor);
-        }
-        else if sg == 1u32 {
+        } else if sg == 1u32 {
             cmma::store(&mut r10, &acc0, 16, cmma::MatrixLayout::RowMajor);
             cmma::store(&mut r11, &acc1, 16, cmma::MatrixLayout::RowMajor);
             cmma::store(&mut r12, &acc2, 16, cmma::MatrixLayout::RowMajor);
             cmma::store(&mut r13, &acc3, 16, cmma::MatrixLayout::RowMajor);
-        }
-        else if sg == 2u32 {
+        } else if sg == 2u32 {
             cmma::store(&mut r20, &acc0, 16, cmma::MatrixLayout::RowMajor);
             cmma::store(&mut r21, &acc1, 16, cmma::MatrixLayout::RowMajor);
             cmma::store(&mut r22, &acc2, 16, cmma::MatrixLayout::RowMajor);
             cmma::store(&mut r23, &acc3, 16, cmma::MatrixLayout::RowMajor);
-        }
-        else if sg == 3u32 {
+        } else if sg == 3u32 {
             cmma::store(&mut r30, &acc0, 16, cmma::MatrixLayout::RowMajor);
             cmma::store(&mut r31, &acc1, 16, cmma::MatrixLayout::RowMajor);
             cmma::store(&mut r32, &acc2, 16, cmma::MatrixLayout::RowMajor);
             cmma::store(&mut r33, &acc3, 16, cmma::MatrixLayout::RowMajor);
-        }
-        else if sg == 4u32 {
+        } else if sg == 4u32 {
             cmma::store(&mut r40, &acc0, 16, cmma::MatrixLayout::RowMajor);
             cmma::store(&mut r41, &acc1, 16, cmma::MatrixLayout::RowMajor);
             cmma::store(&mut r42, &acc2, 16, cmma::MatrixLayout::RowMajor);
             cmma::store(&mut r43, &acc3, 16, cmma::MatrixLayout::RowMajor);
-        }
-        else if sg == 5u32 {
+        } else if sg == 5u32 {
             cmma::store(&mut r50, &acc0, 16, cmma::MatrixLayout::RowMajor);
             cmma::store(&mut r51, &acc1, 16, cmma::MatrixLayout::RowMajor);
             cmma::store(&mut r52, &acc2, 16, cmma::MatrixLayout::RowMajor);
             cmma::store(&mut r53, &acc3, 16, cmma::MatrixLayout::RowMajor);
-        }
-        else if sg == 6u32 {
+        } else if sg == 6u32 {
             cmma::store(&mut r60, &acc0, 16, cmma::MatrixLayout::RowMajor);
             cmma::store(&mut r61, &acc1, 16, cmma::MatrixLayout::RowMajor);
             cmma::store(&mut r62, &acc2, 16, cmma::MatrixLayout::RowMajor);
             cmma::store(&mut r63, &acc3, 16, cmma::MatrixLayout::RowMajor);
-        }
-        else if sg == 7u32 {
+        } else if sg == 7u32 {
             cmma::store(&mut r70, &acc0, 16, cmma::MatrixLayout::RowMajor);
             cmma::store(&mut r71, &acc1, 16, cmma::MatrixLayout::RowMajor);
             cmma::store(&mut r72, &acc2, 16, cmma::MatrixLayout::RowMajor);

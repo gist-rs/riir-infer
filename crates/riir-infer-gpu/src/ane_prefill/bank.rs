@@ -148,7 +148,9 @@ impl AneProgramBank {
                     .budget_warned
                     .swap(true, std::sync::atomic::Ordering::Relaxed)
                 {
-                    eprintln!("[ane] {op:?} skipped for remaining layers (budget): {msg} — raise RIIR_ANE_MAX_BYTES to enable");
+                    eprintln!(
+                        "[ane] {op:?} skipped for remaining layers (budget): {msg} — raise RIIR_ANE_MAX_BYTES to enable"
+                    );
                 }
                 return Ok(());
             }
@@ -207,9 +209,10 @@ impl Clone for AneProgramBank {
             block_tokens: self.block_tokens,
             bytes_total: self.bytes_total,
             max_bytes: self.max_bytes,
-            budget_warned: std::sync::atomic::AtomicBool::new(self.budget_warned.load(
-                std::sync::atomic::Ordering::Relaxed,
-            )),
+            budget_warned: std::sync::atomic::AtomicBool::new(
+                self.budget_warned
+                    .load(std::sync::atomic::Ordering::Relaxed),
+            ),
         }
     }
 }

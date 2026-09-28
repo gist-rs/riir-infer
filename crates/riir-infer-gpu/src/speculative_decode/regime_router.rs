@@ -360,7 +360,10 @@ mod tests {
     fn watch_threshold_boundary() {
         let cfg = RegimeRouterConfig::default();
         let mut w = NeedleWatch::new(&cfg);
-        assert_eq!(w.observe(&hit(cfg.switch_fill_threshold)), SwitchVerdict::NoSwitch);
+        assert_eq!(
+            w.observe(&hit(cfg.switch_fill_threshold)),
+            SwitchVerdict::NoSwitch
+        );
         assert_eq!(
             w.observe(&hit(cfg.switch_fill_threshold)),
             SwitchVerdict::SwitchToLookup

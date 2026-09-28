@@ -53,10 +53,7 @@ use rayon::prelude::*;
     feature = "gemv_fma_contract",
     cube(launch_unchecked, fast_math = FastMath::AllowContraction.into())
 )]
-#[cfg_attr(
-    not(feature = "gemv_fma_contract"),
-    cube(launch_unchecked)
-)]
+#[cfg_attr(not(feature = "gemv_fma_contract"), cube(launch_unchecked))]
 fn gemv_plane_f16_f32(weight: &[half_f16], input: &[f32], output: &mut [f32]) {
     let n = input.len() as u32;
     let m = output.len() as u32;
@@ -109,10 +106,7 @@ fn gemv_plane_f16_f32(weight: &[half_f16], input: &[f32], output: &mut [f32]) {
     feature = "gemv_fma_contract",
     cube(launch_unchecked, fast_math = FastMath::AllowContraction.into())
 )]
-#[cfg_attr(
-    not(feature = "gemv_fma_contract"),
-    cube(launch_unchecked)
-)]
+#[cfg_attr(not(feature = "gemv_fma_contract"), cube(launch_unchecked))]
 fn gemv_tile_f16_f32(weight: &[half_f16], input: &[f32], output: &mut [f32]) {
     let n = input.len() as u32;
     let m = output.len() as u32;
@@ -360,8 +354,8 @@ impl GemvF16CubeCL {
 
 #[cfg(all(test, feature = "cubecl_runtime"))]
 mod tests {
-    use cubecl::features::Plane;
     use crate::cubecl_runtime::ActiveRuntime;
+    use cubecl::features::Plane;
 
     use crate::cubecl_runtime::CubeCLContext;
 

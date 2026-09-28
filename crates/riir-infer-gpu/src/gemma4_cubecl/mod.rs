@@ -52,9 +52,9 @@ use riir_infer_core::types::{Config, Gemma4LayerType};
 
 // ── Submodules ─────────────────────────────────────────────────────
 
+pub mod dispatch;
 pub mod kv_cache;
 pub mod weight_buffers;
-pub mod dispatch;
 
 pub use kv_cache::Gemma4CpuKVCache;
 pub use weight_buffers::{
@@ -205,8 +205,7 @@ impl GpuGemma4CubeCL {
         // Build the two RoPE frequency tables (sliding + full).
         // Each table has `head_dim / 2` entries: freq[d] = 1 / theta^(2d / head_dim).
         let rope_freq_sliding = build_rope_freq_table(config.rope_theta, config.head_dim);
-        let rope_freq_full =
-            build_rope_freq_table(config.rope_theta_full, config.global_head_dim);
+        let rope_freq_full = build_rope_freq_table(config.rope_theta_full, config.global_head_dim);
 
         Self {
             client,
@@ -331,11 +330,21 @@ impl GpuGemma4CubeCL {
         // attn_q_norm / attn_k_norm length == head_dim (shared across heads).
         for h in 0..n_head {
             let off = h * head_dim;
-            rmsnorm_gamma(&mut q[off..off + head_dim], &norms.attn_q_norm, head_dim, eps);
+            rmsnorm_gamma(
+                &mut q[off..off + head_dim],
+                &norms.attn_q_norm,
+                head_dim,
+                eps,
+            );
         }
         for h in 0..n_kv_head {
             let off = h * head_dim;
-            rmsnorm_gamma(&mut k[off..off + head_dim], &norms.attn_k_norm, head_dim, eps);
+            rmsnorm_gamma(
+                &mut k[off..off + head_dim],
+                &norms.attn_k_norm,
+                head_dim,
+                eps,
+            );
         }
 
         // CPU: partial RoPE on Q and K (V is not rotated).

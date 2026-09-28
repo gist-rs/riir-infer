@@ -489,9 +489,9 @@ impl GemvQkvQ4KCubeCL {
 #[cfg(all(test, feature = "cubecl_runtime"))]
 mod tests {
     use super::*;
+    use crate::cubecl_runtime::ActiveRuntime;
     use crate::cubecl_runtime::CubeCLContext;
     use bytemuck::Zeroable;
-    use crate::cubecl_runtime::ActiveRuntime;
     use riir_infer_core::quant::q4k::{QK_K, dequantize_row_q4_k, quantize_row_q4_k};
 
     /// CPU reference: triple QKV GEMV with Q4_K quantization.

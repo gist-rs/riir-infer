@@ -594,7 +594,10 @@ fn print_families(
     println!("\n# families — per-{unit} conditional (flips / n, mean |ΔNLL|)");
     print!("| {unit} | n |");
     for &a in &nb {
-        print!(" {} flips | {} flip% | {} mean|ΔNLL| |", arms[a].name, arms[a].name, arms[a].name);
+        print!(
+            " {} flips | {} flip% | {} mean|ΔNLL| |",
+            arms[a].name, arms[a].name, arms[a].name
+        );
     }
     println!();
     print!("|---|---|");
@@ -609,17 +612,27 @@ fn print_families(
             let toks = &accs[a].fam[start..end];
             let fl: usize = toks.iter().filter(|t| t.flip).count();
             let mean: f64 = toks.iter().map(|t| t.abs).sum::<f64>() / (end - start).max(1) as f64;
-            print!(" {} | {:.2}% | {:.5} |", fl, 100.0 * fl as f64 / (end - start).max(1) as f64, mean);
+            print!(
+                " {} | {:.2}% | {:.5} |",
+                fl,
+                100.0 * fl as f64 / (end - start).max(1) as f64,
+                mean
+            );
         }
         println!();
         start = end;
     }
 
-    println!("\n# families — base-margin buckets (top1−top2, nats); the confident-flip class is [8, ∞)");
+    println!(
+        "\n# families — base-margin buckets (top1−top2, nats); the confident-flip class is [8, ∞)"
+    );
     const EDGES: [f32; 3] = [0.5, 2.0, 8.0];
     print!("| bucket | n |");
     for &a in &nb {
-        print!(" {} flips | {} flip% | {} mean|ΔNLL| |", arms[a].name, arms[a].name, arms[a].name);
+        print!(
+            " {} flips | {} flip% | {} mean|ΔNLL| |",
+            arms[a].name, arms[a].name, arms[a].name
+        );
     }
     println!();
     print!("|---|---|");
@@ -628,7 +641,11 @@ fn print_families(
     }
     println!();
     let mut lo = f32::NEG_INFINITY;
-    for (bi, &hi) in EDGES.iter().chain(std::iter::once(&f32::INFINITY)).enumerate() {
+    for (bi, &hi) in EDGES
+        .iter()
+        .chain(std::iter::once(&f32::INFINITY))
+        .enumerate()
+    {
         let idx: Vec<usize> = base_margin
             .iter()
             .enumerate()
@@ -646,7 +663,9 @@ fn print_families(
             let (fl, sum): (usize, f64) = idx
                 .iter()
                 .map(|&i| &accs[a].fam[i])
-                .fold((0usize, 0.0f64), |(f, s), t| (f + usize::from(t.flip), s + t.abs));
+                .fold((0usize, 0.0f64), |(f, s), t| {
+                    (f + usize::from(t.flip), s + t.abs)
+                });
             print!(
                 " {} | {:.2}% | {:.5} |",
                 fl,

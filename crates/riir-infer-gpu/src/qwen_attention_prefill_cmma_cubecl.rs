@@ -214,13 +214,20 @@ fn qwen_attention_prefill_tiled_cmma_f32(
         // accumulated over 32 k-steps. The window's non-real rows carry
         // other planes' query data — never read back (plane-private s_tile).
         let acc_s = cmma::Matrix::<f32>::from_value(
-            cmma::MatrixIdent::Accumulator, 8usize, 8usize, 8usize,
-            cmma::MatrixLayout::Undefined, 0.0f32,
+            cmma::MatrixIdent::Accumulator,
+            8usize,
+            8usize,
+            8usize,
+            cmma::MatrixLayout::Undefined,
+            0.0f32,
         );
         let mut ki = 0u32;
         while ki < CMMA_K_STEPS {
             let mat_q = cmma::Matrix::<f32>::from_slice(
-                cmma::MatrixIdent::A, 8usize, 8usize, 8usize,
+                cmma::MatrixIdent::A,
+                8usize,
+                8usize,
+                8usize,
                 cmma::MatrixLayout::RowMajor,
                 q_tile.slice((win_base * 256u32 + ki * 8u32) as usize, 4096usize),
                 256u32,
@@ -228,7 +235,10 @@ fn qwen_attention_prefill_tiled_cmma_f32(
             // kv_tile is [pos][dim] row-major; ColMajor B = K^T (the GEMM
             // kernels' staged-X idiom).
             let mat_k = cmma::Matrix::<f32>::from_slice(
-                cmma::MatrixIdent::B, 8usize, 8usize, 8usize,
+                cmma::MatrixIdent::B,
+                8usize,
+                8usize,
+                8usize,
                 cmma::MatrixLayout::ColMajor,
                 kv_tile.slice((ki * 8u32) as usize, 2048usize),
                 256u32,
@@ -238,7 +248,9 @@ fn qwen_attention_prefill_tiled_cmma_f32(
         }
         cmma::store(
             s_tile.slice_mut(s_base, s_base + 64usize),
-            &acc_s, 8u32, cmma::MatrixLayout::RowMajor,
+            &acc_s,
+            8u32,
+            cmma::MatrixLayout::RowMajor,
         );
         sync_cube(); // S stored; kv_tile free for V
 
@@ -253,10 +265,22 @@ fn qwen_attention_prefill_tiled_cmma_f32(
             let pos_abs = pos0 + j;
             let s_a = s_tile[s_base + lr0 * 8 + j as usize];
             let s_b = s_tile[s_base + lr1 * 8 + j as usize];
-            let masked_a = if active_a && pos_abs <= q_abs_a { s_a } else { f32::new(-1e30f32) };
-            let masked_b = if active_b && pos_abs <= q_abs_b { s_b } else { f32::new(-1e30f32) };
-            if masked_a > m0 { m0 = masked_a; }
-            if masked_b > m1 { m1 = masked_b; }
+            let masked_a = if active_a && pos_abs <= q_abs_a {
+                s_a
+            } else {
+                f32::new(-1e30f32)
+            };
+            let masked_b = if active_b && pos_abs <= q_abs_b {
+                s_b
+            } else {
+                f32::new(-1e30f32)
+            };
+            if masked_a > m0 {
+                m0 = masked_a;
+            }
+            if masked_b > m1 {
+                m1 = masked_b;
+            }
         }
         let new_max_a = m0;
         let new_max_b = m1;
@@ -288,7 +312,11 @@ fn qwen_attention_prefill_tiled_cmma_f32(
             };
             let pos_abs = pos0 + wj as u32;
             let s = s_tile[s_base + lr_r * 8 + wj];
-            let masked = if active_r && pos_abs <= q_abs_r { s } else { f32::new(-1e30f32) };
+            let masked = if active_r && pos_abs <= q_abs_r {
+                s
+            } else {
+                f32::new(-1e30f32)
+            };
             p_tile[s_base + lr_r * 8 + wj] = (masked - new_max_r).exp();
         }
         for j in 0..8u32 {
@@ -493,7 +521,7 @@ impl QwenAttentionPrefillTiledCmmaCubeCL {
     ) {
         const MAX_WG_X: u32 = 65535;
 
-debug_assert_eq!(
+        debug_assert_eq!(
             head_dim, 256,
             "tiled cmma flash kernel is head_dim-256 specialized"
         );
@@ -516,14 +544,18 @@ debug_assert_eq!(
                 (base_pos + t0) as f32,
                 tiles as f32,
             ];
-            let params_handle =
-                crate::params_cache::params_handle(client, f32::as_bytes(&params));
+            let params_handle = crate::params_cache::params_handle(client, f32::as_bytes(&params));
             let q_len = tc * n_head * head_dim;
             let kv_len = (base_pos + p) * n_kv_head * head_dim;
-            let q_slice = query_handle.clone().offset_start((t0 * n_head * head_dim * 4) as u64);
-            let g_slice = gate_handle.clone().offset_start((t0 * n_head * head_dim * 4) as u64);
-            let o_slice =
-                attn_out_handle.clone().offset_start((t0 * n_head * head_dim * 4) as u64);
+            let q_slice = query_handle
+                .clone()
+                .offset_start((t0 * n_head * head_dim * 4) as u64);
+            let g_slice = gate_handle
+                .clone()
+                .offset_start((t0 * n_head * head_dim * 4) as u64);
+            let o_slice = attn_out_handle
+                .clone()
+                .offset_start((t0 * n_head * head_dim * 4) as u64);
             let n_cubes = n_head * tiles;
             unsafe {
                 qwen_attention_prefill_tiled_cmma_f32::launch_unchecked::<R>(

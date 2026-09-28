@@ -85,7 +85,13 @@ pub fn ane_stage_dump() -> String {
         return "[ane-stage] no ANE stage activity (fail-open / GPU arm)".into();
     }
     let ms = |ns: u64| ns as f64 / 1e6;
-    let per = |ns: u64, n: u64| if n > 0 { format!("~{:.1}", ms(ns) / n as f64) } else { "—".into() };
+    let per = |ns: u64, n: u64| {
+        if n > 0 {
+            format!("~{:.1}", ms(ns) / n as f64)
+        } else {
+            "—".into()
+        }
+    };
     // Issue 769 T10 P5: `N_EVAL_FAILS` was reset here and incremented by both
     // exec paths, and printed by NOTHING — so a genuine fail-open (an ANE block
     // silently served by GPU, which changes what the arm measures) was invisible
@@ -98,16 +104,36 @@ pub fn ane_stage_dump() -> String {
         super::bridge::N_EVAL_RETRIES.load(Ordering::Relaxed),
         super::bridge::N_EVAL_ATTEMPTS.load(Ordering::Relaxed),
     );
-    let retry_pct = if nat > 0 { nrt as f64 / nat as f64 * 100.0 } else { 0.0 };
+    let retry_pct = if nat > 0 {
+        nrt as f64 / nat as f64 * 100.0
+    } else {
+        0.0
+    };
     format!(
         "[ane-stage] total {:.1} ms — read(map+sync) {:.1} ({}× {}) · copy {:.1} · pack {:.1} · eval {:.1} ({}× {}, {:.0}%) · unpack {:.1} · walloc {:.1} · wsubmit {:.1} ({}× {}) · health[fail-open {} · eval retries {}/{} attempts ({:.1}%)]",
         ms(total),
-        ms(r), nr, per(r, nr),
-        ms(rc), ms(pk),
-        ms(ev), ne, per(ev, ne), if total > 0 { ev as f64 / total as f64 * 100.0 } else { 0.0 },
-        ms(up), ms(wa),
-        ms(ws), nw, per(ws, nw),
-        nf, nrt, nat, retry_pct,
+        ms(r),
+        nr,
+        per(r, nr),
+        ms(rc),
+        ms(pk),
+        ms(ev),
+        ne,
+        per(ev, ne),
+        if total > 0 {
+            ev as f64 / total as f64 * 100.0
+        } else {
+            0.0
+        },
+        ms(up),
+        ms(wa),
+        ms(ws),
+        nw,
+        per(ws, nw),
+        nf,
+        nrt,
+        nat,
+        retry_pct,
     )
 }
 
@@ -474,11 +500,7 @@ pub fn read_input_token_major<R: Runtime>(
     Ok(v)
 }
 
-#[cfg(all(
-    test,
-    target_arch = "aarch64",
-    feature = "metal_tensor_gemm"
-))]
+#[cfg(all(test, target_arch = "aarch64", feature = "metal_tensor_gemm"))]
 mod tests {
     use super::*;
 
@@ -502,20 +524,35 @@ mod tests {
         N_EVALS.store(1, Ordering::Relaxed);
         T_EVAL_NS.store(1_000_000, Ordering::Relaxed);
         let d = ane_stage_dump();
-        assert!(d.contains("health[fail-open 0"), "ane-stage lost fail-open: {d}");
-        assert!(d.contains("eval retries 0/0"), "ane-stage lost retries: {d}");
+        assert!(
+            d.contains("health[fail-open 0"),
+            "ane-stage lost fail-open: {d}"
+        );
+        assert!(
+            d.contains("eval retries 0/0"),
+            "ane-stage lost retries: {d}"
+        );
 
         let z = super::super::exec_zc::zc_stage_dump();
-        assert!(z.contains("fails 0 retries 0/0"), "zc dump lost retries: {z}");
+        assert!(
+            z.contains("fails 0 retries 0/0"),
+            "zc dump lost retries: {z}"
+        );
 
         // And the counters must be readable as a nonzero rate, or the field is
         // decoration. 1 retry of 2 attempts is 50.0%.
         super::super::bridge::N_EVAL_RETRIES.store(1, Ordering::Relaxed);
         super::super::bridge::N_EVAL_ATTEMPTS.store(2, Ordering::Relaxed);
         let z = super::super::exec_zc::zc_stage_dump();
-        assert!(z.contains("retries 1/2 (50.0%)"), "zc retry rate wrong: {z}");
+        assert!(
+            z.contains("retries 1/2 (50.0%)"),
+            "zc retry rate wrong: {z}"
+        );
         let d = ane_stage_dump();
-        assert!(d.contains("eval retries 1/2 attempts (50.0%)"), "ane retry rate wrong: {d}");
+        assert!(
+            d.contains("eval retries 1/2 attempts (50.0%)"),
+            "ane retry rate wrong: {d}"
+        );
 
         // Leave the process's statics clean for the other tests in this binary.
         ane_stage_reset();

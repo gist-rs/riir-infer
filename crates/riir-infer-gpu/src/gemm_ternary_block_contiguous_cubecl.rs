@@ -222,12 +222,7 @@ fn gemm_ternary_block_contiguous(
     // So the token index comes from col, the m-row comes from row — NOT the
     // other way around. (An earlier draft of this kernel had them swapped,
     // producing a transposed output — caught by the pre-GPU audit 2026-08-13.)
-    cmma::store(
-        &mut result_tile,
-        &acc,
-        8,
-        cmma::MatrixLayout::RowMajor,
-    );
+    cmma::store(&mut result_tile, &acc, 8, cmma::MatrixLayout::RowMajor);
 
     sync_cube();
 
@@ -284,10 +279,7 @@ impl GemmTernaryBlockContiguousCubeCL {
                 client,
                 cube_count,
                 CubeDim::new_1d(32),
-                BufferArg::from_raw_parts(
-                    block_buf,
-                    m * groups_per_row * U32_PER_BLOCK_GROUP,
-                ),
+                BufferArg::from_raw_parts(block_buf, m * groups_per_row * U32_PER_BLOCK_GROUP),
                 BufferArg::from_raw_parts(input_batch, p_tokens * n),
                 BufferArg::from_raw_parts(output_batch, p_tokens * m),
                 groups_per_row as u32,

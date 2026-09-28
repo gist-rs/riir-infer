@@ -353,9 +353,7 @@ mod tests {
     const ARGMAX_SENTINEL: u32 = 0xDEAD_BEEF;
 
     /// Output handle pre-filled with [`ARGMAX_SENTINEL`].
-    fn sentinel_out(
-        client: &ComputeClient<crate::cubecl_runtime::ActiveRuntime>,
-    ) -> Handle {
+    fn sentinel_out(client: &ComputeClient<crate::cubecl_runtime::ActiveRuntime>) -> Handle {
         client.create_from_slice(u32::as_bytes(&[ARGMAX_SENTINEL]))
     }
 

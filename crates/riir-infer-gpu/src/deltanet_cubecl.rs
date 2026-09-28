@@ -25,9 +25,15 @@ use cubecl::prelude::*;
 
 #[cfg(all(
     feature = "cubecl_runtime",
-    any(feature = "deltanet_recurrence_rowpar", feature = "ternary_deltanet_chunked_prefill")
+    any(
+        feature = "deltanet_recurrence_rowpar",
+        feature = "ternary_deltanet_chunked_prefill"
+    )
 ))]
-#[allow(unused_imports, reason = "Plane trait needed for plane_sum() resolution")]
+#[allow(
+    unused_imports,
+    reason = "Plane trait needed for plane_sum() resolution"
+)]
 use cubecl::features::Plane;
 
 #[cfg(feature = "cubecl_runtime")]
@@ -468,12 +474,7 @@ fn deltanet_conv1d_f32(
 /// - `params`: `[n_elements_f32]`
 #[cfg(feature = "cubecl_runtime")]
 #[cube(launch_unchecked)]
-fn deltanet_gating_f32(
-    gate: &[f32],
-    up: &[f32],
-    output: &mut [f32],
-    params: &[f32],
-) {
+fn deltanet_gating_f32(gate: &[f32], up: &[f32], output: &mut [f32], params: &[f32]) {
     let n = params[0] as usize;
     let idx = ABSOLUTE_POS;
 
@@ -524,7 +525,10 @@ impl DeltanetRecurrenceCubeCL {
     /// - `state` has `n_head * head_dim * head_dim` f32 elements
     /// - `output` has `n_head * head_dim` f32 bytes allocated
     /// - `betas` and `decays` each have `n_head` elements
-#[allow(clippy::too_many_arguments, reason = "GPU kernel launch/dispatch: many buffer handles are inherent to the fused-kernel interface")]
+    #[allow(
+        clippy::too_many_arguments,
+        reason = "GPU kernel launch/dispatch: many buffer handles are inherent to the fused-kernel interface"
+    )]
     pub unsafe fn launch<R: Runtime>(
         client: &ComputeClient<R>,
         qkv_handle: Handle,
@@ -565,7 +569,10 @@ impl DeltanetRecurrenceCubeCL {
     /// - `beta_handle`, `decay_handle` each have `n_head` f32 elements
     /// - `state` has `n_head * head_dim * head_dim` f32 elements
     /// - `output` has `n_head * head_dim` f32 bytes allocated
-    #[allow(clippy::too_many_arguments, reason = "GPU kernel launch/dispatch: many buffer handles are inherent to the fused-kernel interface")]
+    #[allow(
+        clippy::too_many_arguments,
+        reason = "GPU kernel launch/dispatch: many buffer handles are inherent to the fused-kernel interface"
+    )]
     pub unsafe fn launch_with_gpu_handles<R: Runtime>(
         client: &ComputeClient<R>,
         qkv_handle: Handle,
@@ -999,9 +1006,15 @@ impl DeltanetGatingCubeCL {
                     client,
                     CubeCount::Static(num_wg, 1, 1),
                     CubeDim::new_1d(wg_size),
-                    BufferArg::from_raw_parts(gate_handle.clone().offset_start((e0 * 4) as u64), ec),
+                    BufferArg::from_raw_parts(
+                        gate_handle.clone().offset_start((e0 * 4) as u64),
+                        ec,
+                    ),
                     BufferArg::from_raw_parts(up_handle.clone().offset_start((e0 * 4) as u64), ec),
-                    BufferArg::from_raw_parts(output_handle.clone().offset_start((e0 * 4) as u64), ec),
+                    BufferArg::from_raw_parts(
+                        output_handle.clone().offset_start((e0 * 4) as u64),
+                        ec,
+                    ),
                     BufferArg::from_raw_parts(params_handle, 1),
                 );
             }
@@ -1031,11 +1044,7 @@ impl DeltanetGatingCubeCL {
 /// - `params`: `[n_elements_f32]`
 #[cfg(feature = "cubecl_runtime")]
 #[cube(launch_unchecked)]
-fn deltanet_gating_concat_f32(
-    gate_up: &[f32],
-    output: &mut [f32],
-    params: &[f32],
-) {
+fn deltanet_gating_concat_f32(gate_up: &[f32], output: &mut [f32], params: &[f32]) {
     let n = params[0] as usize;
     let idx = ABSOLUTE_POS;
 
@@ -1151,7 +1160,10 @@ impl DeltanetBetaDecayCubeCL {
     ///
     /// # Safety
     /// All handles must have at least `n_head` f32 elements.
-    #[allow(clippy::too_many_arguments, reason = "GPU kernel launch: many buffer handles are inherent")]
+    #[allow(
+        clippy::too_many_arguments,
+        reason = "GPU kernel launch: many buffer handles are inherent"
+    )]
     pub unsafe fn launch<R: Runtime>(
         client: &ComputeClient<R>,
         a_raw_handle: Handle,
@@ -1262,7 +1274,10 @@ impl DeltanetBetaDecayBatchedCubeCL {
     /// # Safety
     /// - `a_raw`, `b_raw`, `beta_out`, `decay_out`: >= `p * n_head` f32 elements.
     /// - `a_log`, `dt_bias`: >= `n_head` f32 elements.
-    #[allow(clippy::too_many_arguments, reason = "GPU kernel launch: many buffer handles are inherent")]
+    #[allow(
+        clippy::too_many_arguments,
+        reason = "GPU kernel launch: many buffer handles are inherent"
+    )]
     pub unsafe fn launch<R: Runtime>(
         client: &ComputeClient<R>,
         a_raw_handle: Handle,
@@ -1308,11 +1323,7 @@ impl DeltanetBetaDecayBatchedCubeCL {
 /// One thread per element. Dispatch: `CubeCount::Static(ceil(n/128), 1, 1)`.
 #[cfg(feature = "cubecl_runtime")]
 #[cube(launch_unchecked)]
-fn deltanet_z_gating_f32(
-    output: &mut [f32],
-    z: &[f32],
-    params: &[f32],
-) {
+fn deltanet_z_gating_f32(output: &mut [f32], z: &[f32], params: &[f32]) {
     let n = params[0usize] as usize;
     let idx = ABSOLUTE_POS;
 
@@ -1390,10 +1401,7 @@ impl DeltanetZGatingCubeCL {
 /// shared-memory reduction optimization deferred.
 #[cfg(feature = "cubecl_runtime")]
 #[cube(launch_unchecked)]
-fn l2_normalize_heads_f32(
-    qkv: &mut [f32],
-    params: &[f32],
-) {
+fn l2_normalize_heads_f32(qkv: &mut [f32], params: &[f32]) {
     let n_head = params[0usize] as usize;
     let head_dim = params[1usize] as usize;
     let total_qk = n_head * head_dim;
@@ -1495,11 +1503,7 @@ impl L2NormalizeHeadsCubeCL {
 /// For V, the thread copies the corresponding element verbatim.
 #[cfg(feature = "cubecl_runtime")]
 #[cube(launch_unchecked)]
-fn expand_and_l2_normalize_heads_f32(
-    compact: &[f32],
-    expanded: &mut [f32],
-    params: &[f32],
-) {
+fn expand_and_l2_normalize_heads_f32(compact: &[f32], expanded: &mut [f32], params: &[f32]) {
     let n_k_heads = params[0usize] as usize;
     let n_v_heads = params[1usize] as usize;
     let head_dim = params[2usize] as usize;
@@ -2003,7 +2007,7 @@ mod tests {
     fn test_deltanet_recurrence_rowpar_matches_reference() {
         const STEPS: usize = 2;
 
-let ctx = CubeCLContext::new().expect("CubeCL should initialize");
+        let ctx = CubeCLContext::new().expect("CubeCL should initialize");
         let client = ctx.client();
 
         let n_head: usize = 16;
@@ -2014,10 +2018,12 @@ let ctx = CubeCLContext::new().expect("CubeCL should initialize");
             "rowpar kernel must support the production head_dim"
         );
 
-        let betas: Vec<f32> =
-            (0..n_head).map(|h| 0.3 + 0.4 * (h as f32 / n_head as f32)).collect();
-        let decays: Vec<f32> =
-            (0..n_head).map(|h| 0.90 + 0.09 * (h as f32 / n_head as f32)).collect();
+        let betas: Vec<f32> = (0..n_head)
+            .map(|h| 0.3 + 0.4 * (h as f32 / n_head as f32))
+            .collect();
+        let decays: Vec<f32> = (0..n_head)
+            .map(|h| 0.90 + 0.09 * (h as f32 / n_head as f32))
+            .collect();
 
         let state_len = n_head * head_dim * head_dim;
         let output_len = n_head * head_dim;
@@ -2102,7 +2108,10 @@ let ctx = CubeCLContext::new().expect("CubeCL should initialize");
             f32::from_bytes(&client.read_one(lg_state).expect("read legacy state")).to_vec();
 
         let max_abs = |a: &[f32], b: &[f32]| -> f32 {
-            a.iter().zip(b.iter()).map(|(x, y)| (x - y).abs()).fold(0.0f32, f32::max)
+            a.iter()
+                .zip(b.iter())
+                .map(|(x, y)| (x - y).abs())
+                .fold(0.0f32, f32::max)
         };
 
         let rp_out_diff = max_abs(&rp_output, &cpu_output);
@@ -2121,7 +2130,11 @@ let ctx = CubeCLContext::new().expect("CubeCL should initialize");
         );
 
         assert_eq!(rp_output.len(), cpu_output.len(), "output length mismatch");
-        assert_eq!(rp_state_final.len(), cpu_state.len(), "state length mismatch");
+        assert_eq!(
+            rp_state_final.len(),
+            cpu_state.len(),
+            "state length mismatch"
+        );
         assert!(
             rp_out_diff < ROWPAR_TOL,
             "rowpar output vs CPU: max diff {rp_out_diff:.3e} >= {ROWPAR_TOL:.0e} \
@@ -2346,10 +2359,26 @@ let ctx = CubeCLContext::new().expect("CubeCL should initialize");
         // ── CPU reference: run gated_deltanet_step TWICE with the same qkv ──
         let mut cpu_state = state_zeros.clone();
         let _cpu_out1 = riir_infer_core::deltanet::forward::gated_deltanet_step(
-            &q, &k, &v, &mut cpu_state, &betas, &decays, n_head, head_dim, head_dim,
+            &q,
+            &k,
+            &v,
+            &mut cpu_state,
+            &betas,
+            &decays,
+            n_head,
+            head_dim,
+            head_dim,
         );
         let cpu_output = riir_infer_core::deltanet::forward::gated_deltanet_step(
-            &q, &k, &v, &mut cpu_state, &betas, &decays, n_head, head_dim, head_dim,
+            &q,
+            &k,
+            &v,
+            &mut cpu_state,
+            &betas,
+            &decays,
+            n_head,
+            head_dim,
+            head_dim,
         );
 
         // ── Compare outputs (after 2 steps) ──
@@ -2422,7 +2451,8 @@ let ctx = CubeCLContext::new().expect("CubeCL should initialize");
         }
         for h in 0..n_v_heads {
             for c in 0..head_dim {
-                compact[q_dim + k_dim + h * head_dim + c] = 0.1 * (h as f32 + 1.0) + 0.01 * c as f32;
+                compact[q_dim + k_dim + h * head_dim + c] =
+                    0.1 * (h as f32 + 1.0) + 0.01 * c as f32;
             }
         }
 
@@ -2454,8 +2484,7 @@ let ctx = CubeCLContext::new().expect("CubeCL should initialize");
         let repeat = n_v_heads / n_k_heads;
         let block = n_k_heads * head_dim;
         for r in 0..repeat {
-            cpu_expanded[r * block..r * block + block]
-                .copy_from_slice(&compact[..block]);
+            cpu_expanded[r * block..r * block + block].copy_from_slice(&compact[..block]);
         }
         // Expand K
         let k_expanded_off = n_v_heads * head_dim;
@@ -2542,7 +2571,8 @@ let ctx = CubeCLContext::new().expect("CubeCL should initialize");
         }
         for h in 0..n_v_heads {
             for c in 0..head_dim {
-                compact[q_dim + k_dim + h * head_dim + c] = 0.1 * (h as f32 + 1.0) + 0.01 * c as f32;
+                compact[q_dim + k_dim + h * head_dim + c] =
+                    0.1 * (h as f32 + 1.0) + 0.01 * c as f32;
             }
         }
 
@@ -2602,7 +2632,8 @@ let ctx = CubeCLContext::new().expect("CubeCL should initialize");
 
         for r in 0..repeat {
             q_expanded[r * block..r * block + block].copy_from_slice(&compact[..block]);
-            k_expanded[r * block..r * block + block].copy_from_slice(&compact[q_dim..q_dim + block]);
+            k_expanded[r * block..r * block + block]
+                .copy_from_slice(&compact[q_dim..q_dim + block]);
         }
 
         // L2-normalize each expanded head
@@ -2924,7 +2955,12 @@ let ctx = CubeCLContext::new().expect("CubeCL should initialize");
 
         let qkv_h = client.create_from_slice(f32::as_bytes(&qkv));
         unsafe {
-            L2NormalizeHeadsCubeCL::launch::<ActiveRuntime>(&client, qkv_h.clone(), n_head, head_dim);
+            L2NormalizeHeadsCubeCL::launch::<ActiveRuntime>(
+                &client,
+                qkv_h.clone(),
+                n_head,
+                head_dim,
+            );
         }
         let bytes = client.read_one(qkv_h).expect("read qkv");
         let gpu = f32::from_bytes(&bytes);
@@ -2935,7 +2971,11 @@ let ctx = CubeCLContext::new().expect("CubeCL should initialize");
         }
         // The zero head must stay exactly zero.
         for c in 0..head_dim {
-            assert_eq!(gpu[head_dim + c].to_bits(), 0u32, "zero head must stay zero");
+            assert_eq!(
+                gpu[head_dim + c].to_bits(),
+                0u32,
+                "zero head must stay zero"
+            );
         }
     }
 
@@ -3014,13 +3054,20 @@ let ctx = CubeCLContext::new().expect("CubeCL should initialize");
             })
             .sum::<f32>()
             .sqrt();
-        assert!((norm - 1.0).abs() < 1e-5, "expanded K head 0 norm = {norm}, expected 1.0");
+        assert!(
+            (norm - 1.0).abs() < 1e-5,
+            "expanded K head 0 norm = {norm}, expected 1.0"
+        );
         // V copied verbatim.
         for h in 0..n_v_heads {
             for c in 0..head_dim {
                 let got = gpu[2 * qk_block + h * head_dim + c];
                 let want = compact[q_dim + k_dim + h * head_dim + c];
-                assert_eq!(got.to_bits(), want.to_bits(), "V[{h},{c}] must copy verbatim");
+                assert_eq!(
+                    got.to_bits(),
+                    want.to_bits(),
+                    "V[{h},{c}] must copy verbatim"
+                );
             }
         }
     }

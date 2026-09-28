@@ -103,13 +103,7 @@ use cubecl::server::Handle;
 /// - `UNIT_POS = tid` (0..255, maps to key position `j` in phases 1–2, output dim `d` in phase 3)
 #[cfg(feature = "cubecl_runtime")]
 #[cube(launch_unchecked)]
-fn causal_attention_fused_f32(
-    q: &[f32],
-    k: &[f32],
-    v: &[f32],
-    params: &[f32],
-    output: &mut [f32],
-) {
+fn causal_attention_fused_f32(q: &[f32], k: &[f32], v: &[f32], params: &[f32], output: &mut [f32]) {
     // ── Unpack params (all precomputed on CPU as f32) ──
     let scale = params[0usize];
     let softcap = params[1usize];

@@ -46,7 +46,7 @@ use cubecl::prelude::*;
 #[cfg(feature = "cubecl_runtime")]
 use cubecl::server::Handle;
 
-use crate::gemv_ternary_cubecl::{TernaryHandle, TERNARY_ROWS_PER_PLANE_8};
+use crate::gemv_ternary_cubecl::{TERNARY_ROWS_PER_PLANE_8, TernaryHandle};
 
 // ---------------------------------------------------------------------------
 // Fused ternary GEMV + in-place ResidualAdd (width-8 row-tiled)
@@ -74,7 +74,10 @@ use crate::gemv_ternary_cubecl::{TernaryHandle, TERNARY_ROWS_PER_PLANE_8};
 ///
 /// `CubeCount::Static(ceil(m / 64), 1, 1)`, `CubeDim::new_1d(256)`.
 #[cfg(feature = "cubecl_runtime")]
-#[allow(clippy::assign_op_pattern, reason = "CubeCL macro expansion generates this pattern")]
+#[allow(
+    clippy::assign_op_pattern,
+    reason = "CubeCL macro expansion generates this pattern"
+)]
 #[cube(launch_unchecked)]
 fn gemv_ternary_residual_rowtiled8(
     pos_bits_u32: &[u32],
@@ -467,9 +470,9 @@ mod tests {
         group_size: usize,
         seed: u64,
     ) -> (
-        Vec<u64>,         // pos_bits (blocks64 per row)
-        Vec<u64>,         // neg_bits
-        Vec<half::f16>,   // group_scale
+        Vec<u64>,       // pos_bits (blocks64 per row)
+        Vec<u64>,       // neg_bits
+        Vec<half::f16>, // group_scale
     ) {
         use std::cell::Cell;
         thread_local! {
@@ -535,8 +538,7 @@ mod tests {
         let n = 256usize;
         let group_size = 128usize;
 
-        let (pos_bits, neg_bits, scales) =
-            make_random_ternary_weights(m, n, group_size, 42);
+        let (pos_bits, neg_bits, scales) = make_random_ternary_weights(m, n, group_size, 42);
 
         // Build CPU reference weights
         use katgpt_core::TernaryGroupWeights;
@@ -571,8 +573,7 @@ mod tests {
 
         // GPU: upload weights + input + residual (the residual handle IS the output)
         let handle = TernaryHandle::from_weights(&client, &w);
-        let input_handle =
-            client.create_from_slice(<f32 as CubeElement>::as_bytes(&input));
+        let input_handle = client.create_from_slice(<f32 as CubeElement>::as_bytes(&input));
         let residual_output_handle =
             client.create_from_slice(<f32 as CubeElement>::as_bytes(&residual));
 
@@ -601,9 +602,7 @@ mod tests {
                 "row {i}: gpu={g:.6} cpu={c:.6} rel={rel:.4} abs={abs:.6}"
             );
         }
-        eprintln!(
-            "[test] m={m} n={n}: max_rel={max_rel:.6} max_abs={max_abs:.6} — PASS"
-        );
+        eprintln!("[test] m={m} n={n}: max_rel={max_rel:.6} max_abs={max_abs:.6} — PASS");
     }
 
     #[test]
@@ -612,15 +611,14 @@ mod tests {
         // Smaller proxy to keep test fast: m=256, n=512 (4 groups).
         use katgpt_core::TernaryGroupWeights;
 
-let ctx = CubeCLContext::new().expect("GPU init");
+        let ctx = CubeCLContext::new().expect("GPU init");
         let client = ctx.client();
 
         let m = 256usize;
         let n = 512usize;
         let group_size = 128usize;
 
-        let (pos_bits, neg_bits, scales) =
-            make_random_ternary_weights(m, n, group_size, 7);
+        let (pos_bits, neg_bits, scales) = make_random_ternary_weights(m, n, group_size, 7);
         let mut w = TernaryGroupWeights::new(m, n);
         w.pos_bits = pos_bits.clone();
         w.neg_bits = neg_bits.clone();
@@ -649,8 +647,7 @@ let ctx = CubeCLContext::new().expect("GPU init");
         );
 
         let handle = TernaryHandle::from_weights(&client, &w);
-        let input_handle =
-            client.create_from_slice(<f32 as CubeElement>::as_bytes(&input));
+        let input_handle = client.create_from_slice(<f32 as CubeElement>::as_bytes(&input));
         let residual_output_handle =
             client.create_from_slice(<f32 as CubeElement>::as_bytes(&residual));
 
@@ -678,9 +675,7 @@ let ctx = CubeCLContext::new().expect("GPU init");
                 "row {i}: gpu={g:.6} cpu={c:.6} rel={rel:.4} abs={abs:.6}"
             );
         }
-        eprintln!(
-            "[test] m={m} n={n}: max_rel={max_rel:.6} max_abs={max_abs:.6} — PASS"
-        );
+        eprintln!("[test] m={m} n={n}: max_rel={max_rel:.6} max_abs={max_abs:.6} — PASS");
     }
 
     #[test]
@@ -688,15 +683,14 @@ let ctx = CubeCLContext::new().expect("GPU init");
         // Zero input → gemv_result = 0 → residual_output should equal residual input.
         use katgpt_core::TernaryGroupWeights;
 
-let ctx = CubeCLContext::new().expect("GPU init");
+        let ctx = CubeCLContext::new().expect("GPU init");
         let client = ctx.client();
 
         let m = 64usize;
         let n = 128usize;
         let group_size = 128usize;
 
-        let (pos_bits, neg_bits, scales) =
-            make_random_ternary_weights(m, n, group_size, 99);
+        let (pos_bits, neg_bits, scales) = make_random_ternary_weights(m, n, group_size, 99);
         let mut w = TernaryGroupWeights::new(m, n);
         w.pos_bits = pos_bits;
         w.neg_bits = neg_bits;
@@ -707,8 +701,7 @@ let ctx = CubeCLContext::new().expect("GPU init");
         let expected = residual.clone();
 
         let handle = TernaryHandle::from_weights(&client, &w);
-        let input_handle =
-            client.create_from_slice(<f32 as CubeElement>::as_bytes(&input));
+        let input_handle = client.create_from_slice(<f32 as CubeElement>::as_bytes(&input));
         let residual_output_handle =
             client.create_from_slice(<f32 as CubeElement>::as_bytes(&residual));
 

@@ -142,7 +142,12 @@ impl LayerEvict {
     /// Allocate for one attention layer: `n_heads` per-head tables over
     /// `capacity` slots. `capacity` must hold the whole sequence for the
     /// no-eviction posture (budget ≥ context ⇒ the tables never gather).
-    pub fn new(cfg: EvictLayerConfig, sinks: SinkWindowPolicy, n_heads: usize, capacity: usize) -> Self {
+    pub fn new(
+        cfg: EvictLayerConfig,
+        sinks: SinkWindowPolicy,
+        n_heads: usize,
+        capacity: usize,
+    ) -> Self {
         let diff = match cfg.policy {
             EvictPolicy::Differential(dcfg) => (0..n_heads)
                 .map(|_| DifferentialEvictTable::with_capacity(capacity, dcfg))
@@ -150,7 +155,9 @@ impl LayerEvict {
             _ => Vec::new(),
         };
         let usage = match cfg.policy {
-            EvictPolicy::UsageRate => (0..n_heads).map(|_| UsageScoreTable::with_capacity(capacity)).collect(),
+            EvictPolicy::UsageRate => (0..n_heads)
+                .map(|_| UsageScoreTable::with_capacity(capacity))
+                .collect(),
             _ => Vec::new(),
         };
         let random = match cfg.policy {
@@ -209,7 +216,10 @@ impl LayerEvict {
     /// aggregates.
     pub fn observe(&mut self, head_scores: &[f32], stride: usize, pos: u64) {
         let live = self.live();
-        debug_assert!(live <= stride, "live {live} exceeds head_scores stride {stride}");
+        debug_assert!(
+            live <= stride,
+            "live {live} exceeds head_scores stride {stride}"
+        );
         match self.cfg.policy {
             EvictPolicy::Differential(_) => {
                 for (h, t) in self.diff.iter_mut().enumerate() {
@@ -417,8 +427,8 @@ impl EvictorState {
 mod tests {
     use super::*;
     use crate::deltanet::forward::{
-        forward_qwen_deltanet, forward_qwen_deltanet_evictable, prefill_qwen_deltanet,
-        prefill_qwen_deltanet_chunk_into, HybridCache, HybridForwardScratch, PrefillContext,
+        HybridCache, HybridForwardScratch, PrefillContext, forward_qwen_deltanet,
+        forward_qwen_deltanet_evictable, prefill_qwen_deltanet, prefill_qwen_deltanet_chunk_into,
     };
     use crate::deltanet::weights::QwenDeltaNetWeights;
 
@@ -499,10 +509,16 @@ mod tests {
         // −∞) survives on the tie-break.
         let surviving: Vec<u64> = ev.slot_logical.clone();
         assert!(surviving.contains(&6), "needle must survive");
-        assert!(surviving.contains(&4) && surviving.contains(&5), "hubs survive (zero rows evicted first)");
+        assert!(
+            surviving.contains(&4) && surviving.contains(&5),
+            "hubs survive (zero rows evicted first)"
+        );
         assert_eq!(surviving.len(), 8);
         for gone in 7..12u64 {
-            assert!(!surviving.contains(&gone), "zero-mass slot {gone} must be evicted");
+            assert!(
+                !surviving.contains(&gone),
+                "zero-mass slot {gone} must be evicted"
+            );
         }
 
         // Cache compacted: a survivor's key row moved WITH it. Needle was
@@ -599,10 +615,8 @@ mod tests {
 
     fn tiny_hybrid() -> crate::types::Config {
         use crate::types::DeltaNetLayerType::*;
-        let mut config = crate::types::Config::qwen_deltanet(
-            4,
-            vec![DeltaNet, Attention, DeltaNet, Attention],
-        );
+        let mut config =
+            crate::types::Config::qwen_deltanet(4, vec![DeltaNet, Attention, DeltaNet, Attention]);
         config.vocab_size = 97;
         config.block_size = 512;
         config
@@ -721,9 +735,10 @@ mod tests {
                 policy: EvictPolicy::Differential(DiffEvictConfig::new(1.0, 0.5, 4)),
                 budget: usize::MAX,
                 cadence: 1,
-            defer_until: 0,
+                defer_until: 0,
             };
-            let mut evictor = EvictorState::new(Some(&cfg), sinks(), &layer_attn, config.n_head, 512);
+            let mut evictor =
+                EvictorState::new(Some(&cfg), sinks(), &layer_attn, config.n_head, 512);
             for (c, chunk) in tokens.chunks(8).enumerate() {
                 prefill_qwen_deltanet_chunk_into(
                     &weights,
@@ -779,9 +794,10 @@ mod tests {
                 policy: EvictPolicy::Differential(DiffEvictConfig::new(1.0, 0.5, 4)),
                 budget: usize::MAX,
                 cadence: 1,
-            defer_until: 0,
+                defer_until: 0,
             };
-            let mut evictor = EvictorState::new(Some(&cfg), sinks(), &layer_attn, config.n_head, 512);
+            let mut evictor =
+                EvictorState::new(Some(&cfg), sinks(), &layer_attn, config.n_head, 512);
             let mut x = vec![0.0f32; v.max(config.n_embd)];
             prefill_qwen_deltanet_chunk_into(
                 &weights,

@@ -306,7 +306,7 @@ fn gemm_ternary_cmma_i8_sg8(
     //    (tok*q_words_row + lane/4); the byte shift is invariant. ──
     let lane = tid % 32u32;
     let a2_addr = row_c * words_per_row; // + word_off per k-step
-    let a2_hb = t_sub * 16u32;           // this thread's base bit
+    let a2_hb = t_sub * 16u32; // this thread's base bit
     let a2_bb = (lane / 2u32) * 32u32 + a2_hb; // byte base within the tile
     let b2_sh = (lane % 4u32) * 8u32;
     let b2_lane4 = lane / 4u32;
@@ -314,13 +314,29 @@ fn gemm_ternary_cmma_i8_sg8(
     let b2_t1c = base_tok + sg + 8u32;
     let b2_t2c = base_tok + 16u32 + sg;
     let b2_t3c = base_tok + 16u32 + sg + 8u32;
-    let b2_t0 = (if b2_t0c < p_tokens { b2_t0c } else { p_tokens - 1u32 }) * q_words_row
+    let b2_t0 = (if b2_t0c < p_tokens {
+        b2_t0c
+    } else {
+        p_tokens - 1u32
+    }) * q_words_row
         + b2_lane4;
-    let b2_t1 = (if b2_t1c < p_tokens { b2_t1c } else { p_tokens - 1u32 }) * q_words_row
+    let b2_t1 = (if b2_t1c < p_tokens {
+        b2_t1c
+    } else {
+        p_tokens - 1u32
+    }) * q_words_row
         + b2_lane4;
-    let b2_t2 = (if b2_t2c < p_tokens { b2_t2c } else { p_tokens - 1u32 }) * q_words_row
+    let b2_t2 = (if b2_t2c < p_tokens {
+        b2_t2c
+    } else {
+        p_tokens - 1u32
+    }) * q_words_row
         + b2_lane4;
-    let b2_t3 = (if b2_t3c < p_tokens { b2_t3c } else { p_tokens - 1u32 }) * q_words_row
+    let b2_t3 = (if b2_t3c < p_tokens {
+        b2_t3c
+    } else {
+        p_tokens - 1u32
+    }) * q_words_row
         + b2_lane4;
 
     // 16 f32 output accumulators (registers).
@@ -349,28 +365,36 @@ fn gemm_ternary_cmma_i8_sg8(
         #[allow(unused_mut)]
         let mut ahi0 = cmma::Matrix::<i32>::from_value(
             cmma::MatrixIdent::Accumulator,
-            16usize, 16usize, 32usize,
+            16usize,
+            16usize,
+            32usize,
             cmma::MatrixLayout::Undefined,
             0i32,
         );
         #[allow(unused_mut)]
         let mut alo0 = cmma::Matrix::<i32>::from_value(
             cmma::MatrixIdent::Accumulator,
-            16usize, 16usize, 32usize,
+            16usize,
+            16usize,
+            32usize,
             cmma::MatrixLayout::Undefined,
             0i32,
         );
         #[allow(unused_mut)]
         let mut ahi1 = cmma::Matrix::<i32>::from_value(
             cmma::MatrixIdent::Accumulator,
-            16usize, 16usize, 32usize,
+            16usize,
+            16usize,
+            32usize,
             cmma::MatrixLayout::Undefined,
             0i32,
         );
         #[allow(unused_mut)]
         let mut alo1 = cmma::Matrix::<i32>::from_value(
             cmma::MatrixIdent::Accumulator,
-            16usize, 16usize, 32usize,
+            16usize,
+            16usize,
+            32usize,
             cmma::MatrixLayout::Undefined,
             0i32,
         );
@@ -446,8 +470,7 @@ fn gemm_ternary_cmma_i8_sg8(
                 a0[b0 + 13] = i8::cast_from(s13);
                 a0[b0 + 14] = i8::cast_from(s14);
                 a0[b0 + 15] = i8::cast_from(s15);
-            }
-            else if sg == 1u32 {
+            } else if sg == 1u32 {
                 a1[b0] = i8::cast_from(s0);
                 a1[b0 + 1] = i8::cast_from(s1);
                 a1[b0 + 2] = i8::cast_from(s2);
@@ -464,8 +487,7 @@ fn gemm_ternary_cmma_i8_sg8(
                 a1[b0 + 13] = i8::cast_from(s13);
                 a1[b0 + 14] = i8::cast_from(s14);
                 a1[b0 + 15] = i8::cast_from(s15);
-            }
-            else if sg == 2u32 {
+            } else if sg == 2u32 {
                 a2[b0] = i8::cast_from(s0);
                 a2[b0 + 1] = i8::cast_from(s1);
                 a2[b0 + 2] = i8::cast_from(s2);
@@ -482,8 +504,7 @@ fn gemm_ternary_cmma_i8_sg8(
                 a2[b0 + 13] = i8::cast_from(s13);
                 a2[b0 + 14] = i8::cast_from(s14);
                 a2[b0 + 15] = i8::cast_from(s15);
-            }
-            else if sg == 3u32 {
+            } else if sg == 3u32 {
                 a3[b0] = i8::cast_from(s0);
                 a3[b0 + 1] = i8::cast_from(s1);
                 a3[b0 + 2] = i8::cast_from(s2);
@@ -500,8 +521,7 @@ fn gemm_ternary_cmma_i8_sg8(
                 a3[b0 + 13] = i8::cast_from(s13);
                 a3[b0 + 14] = i8::cast_from(s14);
                 a3[b0 + 15] = i8::cast_from(s15);
-            }
-            else if sg == 4u32 {
+            } else if sg == 4u32 {
                 a4[b0] = i8::cast_from(s0);
                 a4[b0 + 1] = i8::cast_from(s1);
                 a4[b0 + 2] = i8::cast_from(s2);
@@ -518,8 +538,7 @@ fn gemm_ternary_cmma_i8_sg8(
                 a4[b0 + 13] = i8::cast_from(s13);
                 a4[b0 + 14] = i8::cast_from(s14);
                 a4[b0 + 15] = i8::cast_from(s15);
-            }
-            else if sg == 5u32 {
+            } else if sg == 5u32 {
                 a5[b0] = i8::cast_from(s0);
                 a5[b0 + 1] = i8::cast_from(s1);
                 a5[b0 + 2] = i8::cast_from(s2);
@@ -536,8 +555,7 @@ fn gemm_ternary_cmma_i8_sg8(
                 a5[b0 + 13] = i8::cast_from(s13);
                 a5[b0 + 14] = i8::cast_from(s14);
                 a5[b0 + 15] = i8::cast_from(s15);
-            }
-            else if sg == 6u32 {
+            } else if sg == 6u32 {
                 a6[b0] = i8::cast_from(s0);
                 a6[b0 + 1] = i8::cast_from(s1);
                 a6[b0 + 2] = i8::cast_from(s2);
@@ -554,8 +572,7 @@ fn gemm_ternary_cmma_i8_sg8(
                 a6[b0 + 13] = i8::cast_from(s13);
                 a6[b0 + 14] = i8::cast_from(s14);
                 a6[b0 + 15] = i8::cast_from(s15);
-            }
-            else if sg == 7u32 {
+            } else if sg == 7u32 {
                 a7[b0] = i8::cast_from(s0);
                 a7[b0 + 1] = i8::cast_from(s1);
                 a7[b0 + 2] = i8::cast_from(s2);
@@ -619,28 +636,36 @@ fn gemm_ternary_cmma_i8_sg8(
             if (ks & 1u32) == 0u32 {
                 let mb0 = cmma::Matrix::<i8>::from_slice(
                     cmma::MatrixIdent::B,
-                    16usize, 16usize, 32usize,
+                    16usize,
+                    16usize,
+                    32usize,
                     cmma::MatrixLayout::ColMajor,
                     &bh0,
                     32,
                 );
                 let mb1 = cmma::Matrix::<i8>::from_slice(
                     cmma::MatrixIdent::B,
-                    16usize, 16usize, 32usize,
+                    16usize,
+                    16usize,
+                    32usize,
                     cmma::MatrixLayout::ColMajor,
                     &bl0,
                     32,
                 );
                 let mb2 = cmma::Matrix::<i8>::from_slice(
                     cmma::MatrixIdent::B,
-                    16usize, 16usize, 32usize,
+                    16usize,
+                    16usize,
+                    32usize,
                     cmma::MatrixLayout::ColMajor,
                     &bh1,
                     32,
                 );
                 let mb3 = cmma::Matrix::<i8>::from_slice(
                     cmma::MatrixIdent::B,
-                    16usize, 16usize, 32usize,
+                    16usize,
+                    16usize,
+                    32usize,
                     cmma::MatrixLayout::ColMajor,
                     &bl1,
                     32,
@@ -648,7 +673,9 @@ fn gemm_ternary_cmma_i8_sg8(
                 if sg == 0u32 {
                     let ma = cmma::Matrix::<i8>::from_slice(
                         cmma::MatrixIdent::A,
-                        16usize, 16usize, 32usize,
+                        16usize,
+                        16usize,
+                        32usize,
                         cmma::MatrixLayout::RowMajor,
                         &a0,
                         32,
@@ -657,11 +684,12 @@ fn gemm_ternary_cmma_i8_sg8(
                     cmma::execute::<i8, i8, i32, i32, cmma::Plane>(&ma, &mb1, &alo0, &alo0);
                     cmma::execute::<i8, i8, i32, i32, cmma::Plane>(&ma, &mb2, &ahi1, &ahi1);
                     cmma::execute::<i8, i8, i32, i32, cmma::Plane>(&ma, &mb3, &alo1, &alo1);
-                }
-                else if sg == 1u32 {
+                } else if sg == 1u32 {
                     let ma = cmma::Matrix::<i8>::from_slice(
                         cmma::MatrixIdent::A,
-                        16usize, 16usize, 32usize,
+                        16usize,
+                        16usize,
+                        32usize,
                         cmma::MatrixLayout::RowMajor,
                         &a1,
                         32,
@@ -670,11 +698,12 @@ fn gemm_ternary_cmma_i8_sg8(
                     cmma::execute::<i8, i8, i32, i32, cmma::Plane>(&ma, &mb1, &alo0, &alo0);
                     cmma::execute::<i8, i8, i32, i32, cmma::Plane>(&ma, &mb2, &ahi1, &ahi1);
                     cmma::execute::<i8, i8, i32, i32, cmma::Plane>(&ma, &mb3, &alo1, &alo1);
-                }
-                else if sg == 2u32 {
+                } else if sg == 2u32 {
                     let ma = cmma::Matrix::<i8>::from_slice(
                         cmma::MatrixIdent::A,
-                        16usize, 16usize, 32usize,
+                        16usize,
+                        16usize,
+                        32usize,
                         cmma::MatrixLayout::RowMajor,
                         &a2,
                         32,
@@ -683,11 +712,12 @@ fn gemm_ternary_cmma_i8_sg8(
                     cmma::execute::<i8, i8, i32, i32, cmma::Plane>(&ma, &mb1, &alo0, &alo0);
                     cmma::execute::<i8, i8, i32, i32, cmma::Plane>(&ma, &mb2, &ahi1, &ahi1);
                     cmma::execute::<i8, i8, i32, i32, cmma::Plane>(&ma, &mb3, &alo1, &alo1);
-                }
-                else if sg == 3u32 {
+                } else if sg == 3u32 {
                     let ma = cmma::Matrix::<i8>::from_slice(
                         cmma::MatrixIdent::A,
-                        16usize, 16usize, 32usize,
+                        16usize,
+                        16usize,
+                        32usize,
                         cmma::MatrixLayout::RowMajor,
                         &a3,
                         32,
@@ -696,11 +726,12 @@ fn gemm_ternary_cmma_i8_sg8(
                     cmma::execute::<i8, i8, i32, i32, cmma::Plane>(&ma, &mb1, &alo0, &alo0);
                     cmma::execute::<i8, i8, i32, i32, cmma::Plane>(&ma, &mb2, &ahi1, &ahi1);
                     cmma::execute::<i8, i8, i32, i32, cmma::Plane>(&ma, &mb3, &alo1, &alo1);
-                }
-                else if sg == 4u32 {
+                } else if sg == 4u32 {
                     let ma = cmma::Matrix::<i8>::from_slice(
                         cmma::MatrixIdent::A,
-                        16usize, 16usize, 32usize,
+                        16usize,
+                        16usize,
+                        32usize,
                         cmma::MatrixLayout::RowMajor,
                         &a4,
                         32,
@@ -709,11 +740,12 @@ fn gemm_ternary_cmma_i8_sg8(
                     cmma::execute::<i8, i8, i32, i32, cmma::Plane>(&ma, &mb1, &alo0, &alo0);
                     cmma::execute::<i8, i8, i32, i32, cmma::Plane>(&ma, &mb2, &ahi1, &ahi1);
                     cmma::execute::<i8, i8, i32, i32, cmma::Plane>(&ma, &mb3, &alo1, &alo1);
-                }
-                else if sg == 5u32 {
+                } else if sg == 5u32 {
                     let ma = cmma::Matrix::<i8>::from_slice(
                         cmma::MatrixIdent::A,
-                        16usize, 16usize, 32usize,
+                        16usize,
+                        16usize,
+                        32usize,
                         cmma::MatrixLayout::RowMajor,
                         &a5,
                         32,
@@ -722,11 +754,12 @@ fn gemm_ternary_cmma_i8_sg8(
                     cmma::execute::<i8, i8, i32, i32, cmma::Plane>(&ma, &mb1, &alo0, &alo0);
                     cmma::execute::<i8, i8, i32, i32, cmma::Plane>(&ma, &mb2, &ahi1, &ahi1);
                     cmma::execute::<i8, i8, i32, i32, cmma::Plane>(&ma, &mb3, &alo1, &alo1);
-                }
-                else if sg == 6u32 {
+                } else if sg == 6u32 {
                     let ma = cmma::Matrix::<i8>::from_slice(
                         cmma::MatrixIdent::A,
-                        16usize, 16usize, 32usize,
+                        16usize,
+                        16usize,
+                        32usize,
                         cmma::MatrixLayout::RowMajor,
                         &a6,
                         32,
@@ -735,11 +768,12 @@ fn gemm_ternary_cmma_i8_sg8(
                     cmma::execute::<i8, i8, i32, i32, cmma::Plane>(&ma, &mb1, &alo0, &alo0);
                     cmma::execute::<i8, i8, i32, i32, cmma::Plane>(&ma, &mb2, &ahi1, &ahi1);
                     cmma::execute::<i8, i8, i32, i32, cmma::Plane>(&ma, &mb3, &alo1, &alo1);
-                }
-                else if sg == 7u32 {
+                } else if sg == 7u32 {
                     let ma = cmma::Matrix::<i8>::from_slice(
                         cmma::MatrixIdent::A,
-                        16usize, 16usize, 32usize,
+                        16usize,
+                        16usize,
+                        32usize,
                         cmma::MatrixLayout::RowMajor,
                         &a7,
                         32,
@@ -749,32 +783,39 @@ fn gemm_ternary_cmma_i8_sg8(
                     cmma::execute::<i8, i8, i32, i32, cmma::Plane>(&ma, &mb2, &ahi1, &ahi1);
                     cmma::execute::<i8, i8, i32, i32, cmma::Plane>(&ma, &mb3, &alo1, &alo1);
                 }
-            }
-            else {
+            } else {
                 let mb0 = cmma::Matrix::<i8>::from_slice(
                     cmma::MatrixIdent::B,
-                    16usize, 16usize, 32usize,
+                    16usize,
+                    16usize,
+                    32usize,
                     cmma::MatrixLayout::ColMajor,
                     &bh0b,
                     32,
                 );
                 let mb1 = cmma::Matrix::<i8>::from_slice(
                     cmma::MatrixIdent::B,
-                    16usize, 16usize, 32usize,
+                    16usize,
+                    16usize,
+                    32usize,
                     cmma::MatrixLayout::ColMajor,
                     &bl0b,
                     32,
                 );
                 let mb2 = cmma::Matrix::<i8>::from_slice(
                     cmma::MatrixIdent::B,
-                    16usize, 16usize, 32usize,
+                    16usize,
+                    16usize,
+                    32usize,
                     cmma::MatrixLayout::ColMajor,
                     &bh1b,
                     32,
                 );
                 let mb3 = cmma::Matrix::<i8>::from_slice(
                     cmma::MatrixIdent::B,
-                    16usize, 16usize, 32usize,
+                    16usize,
+                    16usize,
+                    32usize,
                     cmma::MatrixLayout::ColMajor,
                     &bl1b,
                     32,
@@ -782,7 +823,9 @@ fn gemm_ternary_cmma_i8_sg8(
                 if sg == 0u32 {
                     let ma = cmma::Matrix::<i8>::from_slice(
                         cmma::MatrixIdent::A,
-                        16usize, 16usize, 32usize,
+                        16usize,
+                        16usize,
+                        32usize,
                         cmma::MatrixLayout::RowMajor,
                         &a0b,
                         32,
@@ -791,11 +834,12 @@ fn gemm_ternary_cmma_i8_sg8(
                     cmma::execute::<i8, i8, i32, i32, cmma::Plane>(&ma, &mb1, &alo0, &alo0);
                     cmma::execute::<i8, i8, i32, i32, cmma::Plane>(&ma, &mb2, &ahi1, &ahi1);
                     cmma::execute::<i8, i8, i32, i32, cmma::Plane>(&ma, &mb3, &alo1, &alo1);
-                }
-                else if sg == 1u32 {
+                } else if sg == 1u32 {
                     let ma = cmma::Matrix::<i8>::from_slice(
                         cmma::MatrixIdent::A,
-                        16usize, 16usize, 32usize,
+                        16usize,
+                        16usize,
+                        32usize,
                         cmma::MatrixLayout::RowMajor,
                         &a1b,
                         32,
@@ -804,11 +848,12 @@ fn gemm_ternary_cmma_i8_sg8(
                     cmma::execute::<i8, i8, i32, i32, cmma::Plane>(&ma, &mb1, &alo0, &alo0);
                     cmma::execute::<i8, i8, i32, i32, cmma::Plane>(&ma, &mb2, &ahi1, &ahi1);
                     cmma::execute::<i8, i8, i32, i32, cmma::Plane>(&ma, &mb3, &alo1, &alo1);
-                }
-                else if sg == 2u32 {
+                } else if sg == 2u32 {
                     let ma = cmma::Matrix::<i8>::from_slice(
                         cmma::MatrixIdent::A,
-                        16usize, 16usize, 32usize,
+                        16usize,
+                        16usize,
+                        32usize,
                         cmma::MatrixLayout::RowMajor,
                         &a2b,
                         32,
@@ -817,11 +862,12 @@ fn gemm_ternary_cmma_i8_sg8(
                     cmma::execute::<i8, i8, i32, i32, cmma::Plane>(&ma, &mb1, &alo0, &alo0);
                     cmma::execute::<i8, i8, i32, i32, cmma::Plane>(&ma, &mb2, &ahi1, &ahi1);
                     cmma::execute::<i8, i8, i32, i32, cmma::Plane>(&ma, &mb3, &alo1, &alo1);
-                }
-                else if sg == 3u32 {
+                } else if sg == 3u32 {
                     let ma = cmma::Matrix::<i8>::from_slice(
                         cmma::MatrixIdent::A,
-                        16usize, 16usize, 32usize,
+                        16usize,
+                        16usize,
+                        32usize,
                         cmma::MatrixLayout::RowMajor,
                         &a3b,
                         32,
@@ -830,11 +876,12 @@ fn gemm_ternary_cmma_i8_sg8(
                     cmma::execute::<i8, i8, i32, i32, cmma::Plane>(&ma, &mb1, &alo0, &alo0);
                     cmma::execute::<i8, i8, i32, i32, cmma::Plane>(&ma, &mb2, &ahi1, &ahi1);
                     cmma::execute::<i8, i8, i32, i32, cmma::Plane>(&ma, &mb3, &alo1, &alo1);
-                }
-                else if sg == 4u32 {
+                } else if sg == 4u32 {
                     let ma = cmma::Matrix::<i8>::from_slice(
                         cmma::MatrixIdent::A,
-                        16usize, 16usize, 32usize,
+                        16usize,
+                        16usize,
+                        32usize,
                         cmma::MatrixLayout::RowMajor,
                         &a4b,
                         32,
@@ -843,11 +890,12 @@ fn gemm_ternary_cmma_i8_sg8(
                     cmma::execute::<i8, i8, i32, i32, cmma::Plane>(&ma, &mb1, &alo0, &alo0);
                     cmma::execute::<i8, i8, i32, i32, cmma::Plane>(&ma, &mb2, &ahi1, &ahi1);
                     cmma::execute::<i8, i8, i32, i32, cmma::Plane>(&ma, &mb3, &alo1, &alo1);
-                }
-                else if sg == 5u32 {
+                } else if sg == 5u32 {
                     let ma = cmma::Matrix::<i8>::from_slice(
                         cmma::MatrixIdent::A,
-                        16usize, 16usize, 32usize,
+                        16usize,
+                        16usize,
+                        32usize,
                         cmma::MatrixLayout::RowMajor,
                         &a5b,
                         32,
@@ -856,11 +904,12 @@ fn gemm_ternary_cmma_i8_sg8(
                     cmma::execute::<i8, i8, i32, i32, cmma::Plane>(&ma, &mb1, &alo0, &alo0);
                     cmma::execute::<i8, i8, i32, i32, cmma::Plane>(&ma, &mb2, &ahi1, &ahi1);
                     cmma::execute::<i8, i8, i32, i32, cmma::Plane>(&ma, &mb3, &alo1, &alo1);
-                }
-                else if sg == 6u32 {
+                } else if sg == 6u32 {
                     let ma = cmma::Matrix::<i8>::from_slice(
                         cmma::MatrixIdent::A,
-                        16usize, 16usize, 32usize,
+                        16usize,
+                        16usize,
+                        32usize,
                         cmma::MatrixLayout::RowMajor,
                         &a6b,
                         32,
@@ -869,11 +918,12 @@ fn gemm_ternary_cmma_i8_sg8(
                     cmma::execute::<i8, i8, i32, i32, cmma::Plane>(&ma, &mb1, &alo0, &alo0);
                     cmma::execute::<i8, i8, i32, i32, cmma::Plane>(&ma, &mb2, &ahi1, &ahi1);
                     cmma::execute::<i8, i8, i32, i32, cmma::Plane>(&ma, &mb3, &alo1, &alo1);
-                }
-                else if sg == 7u32 {
+                } else if sg == 7u32 {
                     let ma = cmma::Matrix::<i8>::from_slice(
                         cmma::MatrixIdent::A,
-                        16usize, 16usize, 32usize,
+                        16usize,
+                        16usize,
+                        32usize,
                         cmma::MatrixLayout::RowMajor,
                         &a7b,
                         32,
@@ -939,8 +989,7 @@ fn gemm_ternary_cmma_i8_sg8(
                         a0b[b0 + 13] = i8::cast_from(s13);
                         a0b[b0 + 14] = i8::cast_from(s14);
                         a0b[b0 + 15] = i8::cast_from(s15);
-                    }
-                    else if sg == 1u32 {
+                    } else if sg == 1u32 {
                         a1b[b0] = i8::cast_from(s0);
                         a1b[b0 + 1] = i8::cast_from(s1);
                         a1b[b0 + 2] = i8::cast_from(s2);
@@ -957,8 +1006,7 @@ fn gemm_ternary_cmma_i8_sg8(
                         a1b[b0 + 13] = i8::cast_from(s13);
                         a1b[b0 + 14] = i8::cast_from(s14);
                         a1b[b0 + 15] = i8::cast_from(s15);
-                    }
-                    else if sg == 2u32 {
+                    } else if sg == 2u32 {
                         a2b[b0] = i8::cast_from(s0);
                         a2b[b0 + 1] = i8::cast_from(s1);
                         a2b[b0 + 2] = i8::cast_from(s2);
@@ -975,8 +1023,7 @@ fn gemm_ternary_cmma_i8_sg8(
                         a2b[b0 + 13] = i8::cast_from(s13);
                         a2b[b0 + 14] = i8::cast_from(s14);
                         a2b[b0 + 15] = i8::cast_from(s15);
-                    }
-                    else if sg == 3u32 {
+                    } else if sg == 3u32 {
                         a3b[b0] = i8::cast_from(s0);
                         a3b[b0 + 1] = i8::cast_from(s1);
                         a3b[b0 + 2] = i8::cast_from(s2);
@@ -993,8 +1040,7 @@ fn gemm_ternary_cmma_i8_sg8(
                         a3b[b0 + 13] = i8::cast_from(s13);
                         a3b[b0 + 14] = i8::cast_from(s14);
                         a3b[b0 + 15] = i8::cast_from(s15);
-                    }
-                    else if sg == 4u32 {
+                    } else if sg == 4u32 {
                         a4b[b0] = i8::cast_from(s0);
                         a4b[b0 + 1] = i8::cast_from(s1);
                         a4b[b0 + 2] = i8::cast_from(s2);
@@ -1011,8 +1057,7 @@ fn gemm_ternary_cmma_i8_sg8(
                         a4b[b0 + 13] = i8::cast_from(s13);
                         a4b[b0 + 14] = i8::cast_from(s14);
                         a4b[b0 + 15] = i8::cast_from(s15);
-                    }
-                    else if sg == 5u32 {
+                    } else if sg == 5u32 {
                         a5b[b0] = i8::cast_from(s0);
                         a5b[b0 + 1] = i8::cast_from(s1);
                         a5b[b0 + 2] = i8::cast_from(s2);
@@ -1029,8 +1074,7 @@ fn gemm_ternary_cmma_i8_sg8(
                         a5b[b0 + 13] = i8::cast_from(s13);
                         a5b[b0 + 14] = i8::cast_from(s14);
                         a5b[b0 + 15] = i8::cast_from(s15);
-                    }
-                    else if sg == 6u32 {
+                    } else if sg == 6u32 {
                         a6b[b0] = i8::cast_from(s0);
                         a6b[b0 + 1] = i8::cast_from(s1);
                         a6b[b0 + 2] = i8::cast_from(s2);
@@ -1047,8 +1091,7 @@ fn gemm_ternary_cmma_i8_sg8(
                         a6b[b0 + 13] = i8::cast_from(s13);
                         a6b[b0 + 14] = i8::cast_from(s14);
                         a6b[b0 + 15] = i8::cast_from(s15);
-                    }
-                    else if sg == 7u32 {
+                    } else if sg == 7u32 {
                         a7b[b0] = i8::cast_from(s0);
                         a7b[b0 + 1] = i8::cast_from(s1);
                         a7b[b0 + 2] = i8::cast_from(s2);
@@ -1100,8 +1143,7 @@ fn gemm_ternary_cmma_i8_sg8(
                         let byte = ((ql3_n >> b2_sh) & 0xFFu32) as i32;
                         bl1b[be2] = i8::cast_from((byte << 24) >> 24);
                     }
-                }
-                else {
+                } else {
                     // → SET0
                     let wo_n = (a2_addr + g * 4u32 + ks1) as usize;
                     let kb4_n = g * 32u32 + ks1 * 8u32;
@@ -1151,8 +1193,7 @@ fn gemm_ternary_cmma_i8_sg8(
                         a0[b0 + 13] = i8::cast_from(s13);
                         a0[b0 + 14] = i8::cast_from(s14);
                         a0[b0 + 15] = i8::cast_from(s15);
-                    }
-                    else if sg == 1u32 {
+                    } else if sg == 1u32 {
                         a1[b0] = i8::cast_from(s0);
                         a1[b0 + 1] = i8::cast_from(s1);
                         a1[b0 + 2] = i8::cast_from(s2);
@@ -1169,8 +1210,7 @@ fn gemm_ternary_cmma_i8_sg8(
                         a1[b0 + 13] = i8::cast_from(s13);
                         a1[b0 + 14] = i8::cast_from(s14);
                         a1[b0 + 15] = i8::cast_from(s15);
-                    }
-                    else if sg == 2u32 {
+                    } else if sg == 2u32 {
                         a2[b0] = i8::cast_from(s0);
                         a2[b0 + 1] = i8::cast_from(s1);
                         a2[b0 + 2] = i8::cast_from(s2);
@@ -1187,8 +1227,7 @@ fn gemm_ternary_cmma_i8_sg8(
                         a2[b0 + 13] = i8::cast_from(s13);
                         a2[b0 + 14] = i8::cast_from(s14);
                         a2[b0 + 15] = i8::cast_from(s15);
-                    }
-                    else if sg == 3u32 {
+                    } else if sg == 3u32 {
                         a3[b0] = i8::cast_from(s0);
                         a3[b0 + 1] = i8::cast_from(s1);
                         a3[b0 + 2] = i8::cast_from(s2);
@@ -1205,8 +1244,7 @@ fn gemm_ternary_cmma_i8_sg8(
                         a3[b0 + 13] = i8::cast_from(s13);
                         a3[b0 + 14] = i8::cast_from(s14);
                         a3[b0 + 15] = i8::cast_from(s15);
-                    }
-                    else if sg == 4u32 {
+                    } else if sg == 4u32 {
                         a4[b0] = i8::cast_from(s0);
                         a4[b0 + 1] = i8::cast_from(s1);
                         a4[b0 + 2] = i8::cast_from(s2);
@@ -1223,8 +1261,7 @@ fn gemm_ternary_cmma_i8_sg8(
                         a4[b0 + 13] = i8::cast_from(s13);
                         a4[b0 + 14] = i8::cast_from(s14);
                         a4[b0 + 15] = i8::cast_from(s15);
-                    }
-                    else if sg == 5u32 {
+                    } else if sg == 5u32 {
                         a5[b0] = i8::cast_from(s0);
                         a5[b0 + 1] = i8::cast_from(s1);
                         a5[b0 + 2] = i8::cast_from(s2);
@@ -1241,8 +1278,7 @@ fn gemm_ternary_cmma_i8_sg8(
                         a5[b0 + 13] = i8::cast_from(s13);
                         a5[b0 + 14] = i8::cast_from(s14);
                         a5[b0 + 15] = i8::cast_from(s15);
-                    }
-                    else if sg == 6u32 {
+                    } else if sg == 6u32 {
                         a6[b0] = i8::cast_from(s0);
                         a6[b0 + 1] = i8::cast_from(s1);
                         a6[b0 + 2] = i8::cast_from(s2);
@@ -1259,8 +1295,7 @@ fn gemm_ternary_cmma_i8_sg8(
                         a6[b0 + 13] = i8::cast_from(s13);
                         a6[b0 + 14] = i8::cast_from(s14);
                         a6[b0 + 15] = i8::cast_from(s15);
-                    }
-                    else if sg == 7u32 {
+                    } else if sg == 7u32 {
                         a7[b0] = i8::cast_from(s0);
                         a7[b0 + 1] = i8::cast_from(s1);
                         a7[b0 + 2] = i8::cast_from(s2);
@@ -1326,44 +1361,37 @@ fn gemm_ternary_cmma_i8_sg8(
             cmma::store(&mut g0l0, &alo0, 16, cmma::MatrixLayout::RowMajor);
             cmma::store(&mut g0h1, &ahi1, 16, cmma::MatrixLayout::RowMajor);
             cmma::store(&mut g0l1, &alo1, 16, cmma::MatrixLayout::RowMajor);
-        }
-        else if sg == 1u32 {
+        } else if sg == 1u32 {
             cmma::store(&mut g1h0, &ahi0, 16, cmma::MatrixLayout::RowMajor);
             cmma::store(&mut g1l0, &alo0, 16, cmma::MatrixLayout::RowMajor);
             cmma::store(&mut g1h1, &ahi1, 16, cmma::MatrixLayout::RowMajor);
             cmma::store(&mut g1l1, &alo1, 16, cmma::MatrixLayout::RowMajor);
-        }
-        else if sg == 2u32 {
+        } else if sg == 2u32 {
             cmma::store(&mut g2h0, &ahi0, 16, cmma::MatrixLayout::RowMajor);
             cmma::store(&mut g2l0, &alo0, 16, cmma::MatrixLayout::RowMajor);
             cmma::store(&mut g2h1, &ahi1, 16, cmma::MatrixLayout::RowMajor);
             cmma::store(&mut g2l1, &alo1, 16, cmma::MatrixLayout::RowMajor);
-        }
-        else if sg == 3u32 {
+        } else if sg == 3u32 {
             cmma::store(&mut g3h0, &ahi0, 16, cmma::MatrixLayout::RowMajor);
             cmma::store(&mut g3l0, &alo0, 16, cmma::MatrixLayout::RowMajor);
             cmma::store(&mut g3h1, &ahi1, 16, cmma::MatrixLayout::RowMajor);
             cmma::store(&mut g3l1, &alo1, 16, cmma::MatrixLayout::RowMajor);
-        }
-        else if sg == 4u32 {
+        } else if sg == 4u32 {
             cmma::store(&mut g4h0, &ahi0, 16, cmma::MatrixLayout::RowMajor);
             cmma::store(&mut g4l0, &alo0, 16, cmma::MatrixLayout::RowMajor);
             cmma::store(&mut g4h1, &ahi1, 16, cmma::MatrixLayout::RowMajor);
             cmma::store(&mut g4l1, &alo1, 16, cmma::MatrixLayout::RowMajor);
-        }
-        else if sg == 5u32 {
+        } else if sg == 5u32 {
             cmma::store(&mut g5h0, &ahi0, 16, cmma::MatrixLayout::RowMajor);
             cmma::store(&mut g5l0, &alo0, 16, cmma::MatrixLayout::RowMajor);
             cmma::store(&mut g5h1, &ahi1, 16, cmma::MatrixLayout::RowMajor);
             cmma::store(&mut g5l1, &alo1, 16, cmma::MatrixLayout::RowMajor);
-        }
-        else if sg == 6u32 {
+        } else if sg == 6u32 {
             cmma::store(&mut g6h0, &ahi0, 16, cmma::MatrixLayout::RowMajor);
             cmma::store(&mut g6l0, &alo0, 16, cmma::MatrixLayout::RowMajor);
             cmma::store(&mut g6h1, &ahi1, 16, cmma::MatrixLayout::RowMajor);
             cmma::store(&mut g6l1, &alo1, 16, cmma::MatrixLayout::RowMajor);
-        }
-        else if sg == 7u32 {
+        } else if sg == 7u32 {
             cmma::store(&mut g7h0, &ahi0, 16, cmma::MatrixLayout::RowMajor);
             cmma::store(&mut g7l0, &alo0, 16, cmma::MatrixLayout::RowMajor);
             cmma::store(&mut g7h1, &ahi1, 16, cmma::MatrixLayout::RowMajor);
@@ -1381,305 +1409,530 @@ fn gemm_ternary_cmma_i8_sg8(
             if sg == 0u32 {
                 if t_sub == 0u32 {
                     o0 += sw * (f32::cast_from(g0h0[bh]) + f32::cast_from(g0l0[bh]) * one128);
-                    o1 += sw * (f32::cast_from(g0h0[bh + 1]) + f32::cast_from(g0l0[bh + 1]) * one128);
-                    o2 += sw * (f32::cast_from(g0h0[bh + 2]) + f32::cast_from(g0l0[bh + 2]) * one128);
-                    o3 += sw * (f32::cast_from(g0h0[bh + 3]) + f32::cast_from(g0l0[bh + 3]) * one128);
-                    o4 += sw * (f32::cast_from(g0h0[bh + 4]) + f32::cast_from(g0l0[bh + 4]) * one128);
-                    o5 += sw * (f32::cast_from(g0h0[bh + 5]) + f32::cast_from(g0l0[bh + 5]) * one128);
-                    o6 += sw * (f32::cast_from(g0h0[bh + 6]) + f32::cast_from(g0l0[bh + 6]) * one128);
-                    o7 += sw * (f32::cast_from(g0h0[bh + 7]) + f32::cast_from(g0l0[bh + 7]) * one128);
-                    o8 += sw * (f32::cast_from(g0h0[bh + 8]) + f32::cast_from(g0l0[bh + 8]) * one128);
-                    o9 += sw * (f32::cast_from(g0h0[bh + 9]) + f32::cast_from(g0l0[bh + 9]) * one128);
-                    o10 += sw * (f32::cast_from(g0h0[bh + 10]) + f32::cast_from(g0l0[bh + 10]) * one128);
-                    o11 += sw * (f32::cast_from(g0h0[bh + 11]) + f32::cast_from(g0l0[bh + 11]) * one128);
-                    o12 += sw * (f32::cast_from(g0h0[bh + 12]) + f32::cast_from(g0l0[bh + 12]) * one128);
-                    o13 += sw * (f32::cast_from(g0h0[bh + 13]) + f32::cast_from(g0l0[bh + 13]) * one128);
-                    o14 += sw * (f32::cast_from(g0h0[bh + 14]) + f32::cast_from(g0l0[bh + 14]) * one128);
-                    o15 += sw * (f32::cast_from(g0h0[bh + 15]) + f32::cast_from(g0l0[bh + 15]) * one128);
-                }
-                else {
+                    o1 +=
+                        sw * (f32::cast_from(g0h0[bh + 1]) + f32::cast_from(g0l0[bh + 1]) * one128);
+                    o2 +=
+                        sw * (f32::cast_from(g0h0[bh + 2]) + f32::cast_from(g0l0[bh + 2]) * one128);
+                    o3 +=
+                        sw * (f32::cast_from(g0h0[bh + 3]) + f32::cast_from(g0l0[bh + 3]) * one128);
+                    o4 +=
+                        sw * (f32::cast_from(g0h0[bh + 4]) + f32::cast_from(g0l0[bh + 4]) * one128);
+                    o5 +=
+                        sw * (f32::cast_from(g0h0[bh + 5]) + f32::cast_from(g0l0[bh + 5]) * one128);
+                    o6 +=
+                        sw * (f32::cast_from(g0h0[bh + 6]) + f32::cast_from(g0l0[bh + 6]) * one128);
+                    o7 +=
+                        sw * (f32::cast_from(g0h0[bh + 7]) + f32::cast_from(g0l0[bh + 7]) * one128);
+                    o8 +=
+                        sw * (f32::cast_from(g0h0[bh + 8]) + f32::cast_from(g0l0[bh + 8]) * one128);
+                    o9 +=
+                        sw * (f32::cast_from(g0h0[bh + 9]) + f32::cast_from(g0l0[bh + 9]) * one128);
+                    o10 += sw
+                        * (f32::cast_from(g0h0[bh + 10]) + f32::cast_from(g0l0[bh + 10]) * one128);
+                    o11 += sw
+                        * (f32::cast_from(g0h0[bh + 11]) + f32::cast_from(g0l0[bh + 11]) * one128);
+                    o12 += sw
+                        * (f32::cast_from(g0h0[bh + 12]) + f32::cast_from(g0l0[bh + 12]) * one128);
+                    o13 += sw
+                        * (f32::cast_from(g0h0[bh + 13]) + f32::cast_from(g0l0[bh + 13]) * one128);
+                    o14 += sw
+                        * (f32::cast_from(g0h0[bh + 14]) + f32::cast_from(g0l0[bh + 14]) * one128);
+                    o15 += sw
+                        * (f32::cast_from(g0h0[bh + 15]) + f32::cast_from(g0l0[bh + 15]) * one128);
+                } else {
                     o0 += sw * (f32::cast_from(g0h1[bh]) + f32::cast_from(g0l1[bh]) * one128);
-                    o1 += sw * (f32::cast_from(g0h1[bh + 1]) + f32::cast_from(g0l1[bh + 1]) * one128);
-                    o2 += sw * (f32::cast_from(g0h1[bh + 2]) + f32::cast_from(g0l1[bh + 2]) * one128);
-                    o3 += sw * (f32::cast_from(g0h1[bh + 3]) + f32::cast_from(g0l1[bh + 3]) * one128);
-                    o4 += sw * (f32::cast_from(g0h1[bh + 4]) + f32::cast_from(g0l1[bh + 4]) * one128);
-                    o5 += sw * (f32::cast_from(g0h1[bh + 5]) + f32::cast_from(g0l1[bh + 5]) * one128);
-                    o6 += sw * (f32::cast_from(g0h1[bh + 6]) + f32::cast_from(g0l1[bh + 6]) * one128);
-                    o7 += sw * (f32::cast_from(g0h1[bh + 7]) + f32::cast_from(g0l1[bh + 7]) * one128);
-                    o8 += sw * (f32::cast_from(g0h1[bh + 8]) + f32::cast_from(g0l1[bh + 8]) * one128);
-                    o9 += sw * (f32::cast_from(g0h1[bh + 9]) + f32::cast_from(g0l1[bh + 9]) * one128);
-                    o10 += sw * (f32::cast_from(g0h1[bh + 10]) + f32::cast_from(g0l1[bh + 10]) * one128);
-                    o11 += sw * (f32::cast_from(g0h1[bh + 11]) + f32::cast_from(g0l1[bh + 11]) * one128);
-                    o12 += sw * (f32::cast_from(g0h1[bh + 12]) + f32::cast_from(g0l1[bh + 12]) * one128);
-                    o13 += sw * (f32::cast_from(g0h1[bh + 13]) + f32::cast_from(g0l1[bh + 13]) * one128);
-                    o14 += sw * (f32::cast_from(g0h1[bh + 14]) + f32::cast_from(g0l1[bh + 14]) * one128);
-                    o15 += sw * (f32::cast_from(g0h1[bh + 15]) + f32::cast_from(g0l1[bh + 15]) * one128);
+                    o1 +=
+                        sw * (f32::cast_from(g0h1[bh + 1]) + f32::cast_from(g0l1[bh + 1]) * one128);
+                    o2 +=
+                        sw * (f32::cast_from(g0h1[bh + 2]) + f32::cast_from(g0l1[bh + 2]) * one128);
+                    o3 +=
+                        sw * (f32::cast_from(g0h1[bh + 3]) + f32::cast_from(g0l1[bh + 3]) * one128);
+                    o4 +=
+                        sw * (f32::cast_from(g0h1[bh + 4]) + f32::cast_from(g0l1[bh + 4]) * one128);
+                    o5 +=
+                        sw * (f32::cast_from(g0h1[bh + 5]) + f32::cast_from(g0l1[bh + 5]) * one128);
+                    o6 +=
+                        sw * (f32::cast_from(g0h1[bh + 6]) + f32::cast_from(g0l1[bh + 6]) * one128);
+                    o7 +=
+                        sw * (f32::cast_from(g0h1[bh + 7]) + f32::cast_from(g0l1[bh + 7]) * one128);
+                    o8 +=
+                        sw * (f32::cast_from(g0h1[bh + 8]) + f32::cast_from(g0l1[bh + 8]) * one128);
+                    o9 +=
+                        sw * (f32::cast_from(g0h1[bh + 9]) + f32::cast_from(g0l1[bh + 9]) * one128);
+                    o10 += sw
+                        * (f32::cast_from(g0h1[bh + 10]) + f32::cast_from(g0l1[bh + 10]) * one128);
+                    o11 += sw
+                        * (f32::cast_from(g0h1[bh + 11]) + f32::cast_from(g0l1[bh + 11]) * one128);
+                    o12 += sw
+                        * (f32::cast_from(g0h1[bh + 12]) + f32::cast_from(g0l1[bh + 12]) * one128);
+                    o13 += sw
+                        * (f32::cast_from(g0h1[bh + 13]) + f32::cast_from(g0l1[bh + 13]) * one128);
+                    o14 += sw
+                        * (f32::cast_from(g0h1[bh + 14]) + f32::cast_from(g0l1[bh + 14]) * one128);
+                    o15 += sw
+                        * (f32::cast_from(g0h1[bh + 15]) + f32::cast_from(g0l1[bh + 15]) * one128);
                 }
-            }
-            else if sg == 1u32 {
+            } else if sg == 1u32 {
                 if t_sub == 0u32 {
                     o0 += sw * (f32::cast_from(g1h0[bh]) + f32::cast_from(g1l0[bh]) * one128);
-                    o1 += sw * (f32::cast_from(g1h0[bh + 1]) + f32::cast_from(g1l0[bh + 1]) * one128);
-                    o2 += sw * (f32::cast_from(g1h0[bh + 2]) + f32::cast_from(g1l0[bh + 2]) * one128);
-                    o3 += sw * (f32::cast_from(g1h0[bh + 3]) + f32::cast_from(g1l0[bh + 3]) * one128);
-                    o4 += sw * (f32::cast_from(g1h0[bh + 4]) + f32::cast_from(g1l0[bh + 4]) * one128);
-                    o5 += sw * (f32::cast_from(g1h0[bh + 5]) + f32::cast_from(g1l0[bh + 5]) * one128);
-                    o6 += sw * (f32::cast_from(g1h0[bh + 6]) + f32::cast_from(g1l0[bh + 6]) * one128);
-                    o7 += sw * (f32::cast_from(g1h0[bh + 7]) + f32::cast_from(g1l0[bh + 7]) * one128);
-                    o8 += sw * (f32::cast_from(g1h0[bh + 8]) + f32::cast_from(g1l0[bh + 8]) * one128);
-                    o9 += sw * (f32::cast_from(g1h0[bh + 9]) + f32::cast_from(g1l0[bh + 9]) * one128);
-                    o10 += sw * (f32::cast_from(g1h0[bh + 10]) + f32::cast_from(g1l0[bh + 10]) * one128);
-                    o11 += sw * (f32::cast_from(g1h0[bh + 11]) + f32::cast_from(g1l0[bh + 11]) * one128);
-                    o12 += sw * (f32::cast_from(g1h0[bh + 12]) + f32::cast_from(g1l0[bh + 12]) * one128);
-                    o13 += sw * (f32::cast_from(g1h0[bh + 13]) + f32::cast_from(g1l0[bh + 13]) * one128);
-                    o14 += sw * (f32::cast_from(g1h0[bh + 14]) + f32::cast_from(g1l0[bh + 14]) * one128);
-                    o15 += sw * (f32::cast_from(g1h0[bh + 15]) + f32::cast_from(g1l0[bh + 15]) * one128);
-                }
-                else {
+                    o1 +=
+                        sw * (f32::cast_from(g1h0[bh + 1]) + f32::cast_from(g1l0[bh + 1]) * one128);
+                    o2 +=
+                        sw * (f32::cast_from(g1h0[bh + 2]) + f32::cast_from(g1l0[bh + 2]) * one128);
+                    o3 +=
+                        sw * (f32::cast_from(g1h0[bh + 3]) + f32::cast_from(g1l0[bh + 3]) * one128);
+                    o4 +=
+                        sw * (f32::cast_from(g1h0[bh + 4]) + f32::cast_from(g1l0[bh + 4]) * one128);
+                    o5 +=
+                        sw * (f32::cast_from(g1h0[bh + 5]) + f32::cast_from(g1l0[bh + 5]) * one128);
+                    o6 +=
+                        sw * (f32::cast_from(g1h0[bh + 6]) + f32::cast_from(g1l0[bh + 6]) * one128);
+                    o7 +=
+                        sw * (f32::cast_from(g1h0[bh + 7]) + f32::cast_from(g1l0[bh + 7]) * one128);
+                    o8 +=
+                        sw * (f32::cast_from(g1h0[bh + 8]) + f32::cast_from(g1l0[bh + 8]) * one128);
+                    o9 +=
+                        sw * (f32::cast_from(g1h0[bh + 9]) + f32::cast_from(g1l0[bh + 9]) * one128);
+                    o10 += sw
+                        * (f32::cast_from(g1h0[bh + 10]) + f32::cast_from(g1l0[bh + 10]) * one128);
+                    o11 += sw
+                        * (f32::cast_from(g1h0[bh + 11]) + f32::cast_from(g1l0[bh + 11]) * one128);
+                    o12 += sw
+                        * (f32::cast_from(g1h0[bh + 12]) + f32::cast_from(g1l0[bh + 12]) * one128);
+                    o13 += sw
+                        * (f32::cast_from(g1h0[bh + 13]) + f32::cast_from(g1l0[bh + 13]) * one128);
+                    o14 += sw
+                        * (f32::cast_from(g1h0[bh + 14]) + f32::cast_from(g1l0[bh + 14]) * one128);
+                    o15 += sw
+                        * (f32::cast_from(g1h0[bh + 15]) + f32::cast_from(g1l0[bh + 15]) * one128);
+                } else {
                     o0 += sw * (f32::cast_from(g1h1[bh]) + f32::cast_from(g1l1[bh]) * one128);
-                    o1 += sw * (f32::cast_from(g1h1[bh + 1]) + f32::cast_from(g1l1[bh + 1]) * one128);
-                    o2 += sw * (f32::cast_from(g1h1[bh + 2]) + f32::cast_from(g1l1[bh + 2]) * one128);
-                    o3 += sw * (f32::cast_from(g1h1[bh + 3]) + f32::cast_from(g1l1[bh + 3]) * one128);
-                    o4 += sw * (f32::cast_from(g1h1[bh + 4]) + f32::cast_from(g1l1[bh + 4]) * one128);
-                    o5 += sw * (f32::cast_from(g1h1[bh + 5]) + f32::cast_from(g1l1[bh + 5]) * one128);
-                    o6 += sw * (f32::cast_from(g1h1[bh + 6]) + f32::cast_from(g1l1[bh + 6]) * one128);
-                    o7 += sw * (f32::cast_from(g1h1[bh + 7]) + f32::cast_from(g1l1[bh + 7]) * one128);
-                    o8 += sw * (f32::cast_from(g1h1[bh + 8]) + f32::cast_from(g1l1[bh + 8]) * one128);
-                    o9 += sw * (f32::cast_from(g1h1[bh + 9]) + f32::cast_from(g1l1[bh + 9]) * one128);
-                    o10 += sw * (f32::cast_from(g1h1[bh + 10]) + f32::cast_from(g1l1[bh + 10]) * one128);
-                    o11 += sw * (f32::cast_from(g1h1[bh + 11]) + f32::cast_from(g1l1[bh + 11]) * one128);
-                    o12 += sw * (f32::cast_from(g1h1[bh + 12]) + f32::cast_from(g1l1[bh + 12]) * one128);
-                    o13 += sw * (f32::cast_from(g1h1[bh + 13]) + f32::cast_from(g1l1[bh + 13]) * one128);
-                    o14 += sw * (f32::cast_from(g1h1[bh + 14]) + f32::cast_from(g1l1[bh + 14]) * one128);
-                    o15 += sw * (f32::cast_from(g1h1[bh + 15]) + f32::cast_from(g1l1[bh + 15]) * one128);
+                    o1 +=
+                        sw * (f32::cast_from(g1h1[bh + 1]) + f32::cast_from(g1l1[bh + 1]) * one128);
+                    o2 +=
+                        sw * (f32::cast_from(g1h1[bh + 2]) + f32::cast_from(g1l1[bh + 2]) * one128);
+                    o3 +=
+                        sw * (f32::cast_from(g1h1[bh + 3]) + f32::cast_from(g1l1[bh + 3]) * one128);
+                    o4 +=
+                        sw * (f32::cast_from(g1h1[bh + 4]) + f32::cast_from(g1l1[bh + 4]) * one128);
+                    o5 +=
+                        sw * (f32::cast_from(g1h1[bh + 5]) + f32::cast_from(g1l1[bh + 5]) * one128);
+                    o6 +=
+                        sw * (f32::cast_from(g1h1[bh + 6]) + f32::cast_from(g1l1[bh + 6]) * one128);
+                    o7 +=
+                        sw * (f32::cast_from(g1h1[bh + 7]) + f32::cast_from(g1l1[bh + 7]) * one128);
+                    o8 +=
+                        sw * (f32::cast_from(g1h1[bh + 8]) + f32::cast_from(g1l1[bh + 8]) * one128);
+                    o9 +=
+                        sw * (f32::cast_from(g1h1[bh + 9]) + f32::cast_from(g1l1[bh + 9]) * one128);
+                    o10 += sw
+                        * (f32::cast_from(g1h1[bh + 10]) + f32::cast_from(g1l1[bh + 10]) * one128);
+                    o11 += sw
+                        * (f32::cast_from(g1h1[bh + 11]) + f32::cast_from(g1l1[bh + 11]) * one128);
+                    o12 += sw
+                        * (f32::cast_from(g1h1[bh + 12]) + f32::cast_from(g1l1[bh + 12]) * one128);
+                    o13 += sw
+                        * (f32::cast_from(g1h1[bh + 13]) + f32::cast_from(g1l1[bh + 13]) * one128);
+                    o14 += sw
+                        * (f32::cast_from(g1h1[bh + 14]) + f32::cast_from(g1l1[bh + 14]) * one128);
+                    o15 += sw
+                        * (f32::cast_from(g1h1[bh + 15]) + f32::cast_from(g1l1[bh + 15]) * one128);
                 }
-            }
-            else if sg == 2u32 {
+            } else if sg == 2u32 {
                 if t_sub == 0u32 {
                     o0 += sw * (f32::cast_from(g2h0[bh]) + f32::cast_from(g2l0[bh]) * one128);
-                    o1 += sw * (f32::cast_from(g2h0[bh + 1]) + f32::cast_from(g2l0[bh + 1]) * one128);
-                    o2 += sw * (f32::cast_from(g2h0[bh + 2]) + f32::cast_from(g2l0[bh + 2]) * one128);
-                    o3 += sw * (f32::cast_from(g2h0[bh + 3]) + f32::cast_from(g2l0[bh + 3]) * one128);
-                    o4 += sw * (f32::cast_from(g2h0[bh + 4]) + f32::cast_from(g2l0[bh + 4]) * one128);
-                    o5 += sw * (f32::cast_from(g2h0[bh + 5]) + f32::cast_from(g2l0[bh + 5]) * one128);
-                    o6 += sw * (f32::cast_from(g2h0[bh + 6]) + f32::cast_from(g2l0[bh + 6]) * one128);
-                    o7 += sw * (f32::cast_from(g2h0[bh + 7]) + f32::cast_from(g2l0[bh + 7]) * one128);
-                    o8 += sw * (f32::cast_from(g2h0[bh + 8]) + f32::cast_from(g2l0[bh + 8]) * one128);
-                    o9 += sw * (f32::cast_from(g2h0[bh + 9]) + f32::cast_from(g2l0[bh + 9]) * one128);
-                    o10 += sw * (f32::cast_from(g2h0[bh + 10]) + f32::cast_from(g2l0[bh + 10]) * one128);
-                    o11 += sw * (f32::cast_from(g2h0[bh + 11]) + f32::cast_from(g2l0[bh + 11]) * one128);
-                    o12 += sw * (f32::cast_from(g2h0[bh + 12]) + f32::cast_from(g2l0[bh + 12]) * one128);
-                    o13 += sw * (f32::cast_from(g2h0[bh + 13]) + f32::cast_from(g2l0[bh + 13]) * one128);
-                    o14 += sw * (f32::cast_from(g2h0[bh + 14]) + f32::cast_from(g2l0[bh + 14]) * one128);
-                    o15 += sw * (f32::cast_from(g2h0[bh + 15]) + f32::cast_from(g2l0[bh + 15]) * one128);
-                }
-                else {
+                    o1 +=
+                        sw * (f32::cast_from(g2h0[bh + 1]) + f32::cast_from(g2l0[bh + 1]) * one128);
+                    o2 +=
+                        sw * (f32::cast_from(g2h0[bh + 2]) + f32::cast_from(g2l0[bh + 2]) * one128);
+                    o3 +=
+                        sw * (f32::cast_from(g2h0[bh + 3]) + f32::cast_from(g2l0[bh + 3]) * one128);
+                    o4 +=
+                        sw * (f32::cast_from(g2h0[bh + 4]) + f32::cast_from(g2l0[bh + 4]) * one128);
+                    o5 +=
+                        sw * (f32::cast_from(g2h0[bh + 5]) + f32::cast_from(g2l0[bh + 5]) * one128);
+                    o6 +=
+                        sw * (f32::cast_from(g2h0[bh + 6]) + f32::cast_from(g2l0[bh + 6]) * one128);
+                    o7 +=
+                        sw * (f32::cast_from(g2h0[bh + 7]) + f32::cast_from(g2l0[bh + 7]) * one128);
+                    o8 +=
+                        sw * (f32::cast_from(g2h0[bh + 8]) + f32::cast_from(g2l0[bh + 8]) * one128);
+                    o9 +=
+                        sw * (f32::cast_from(g2h0[bh + 9]) + f32::cast_from(g2l0[bh + 9]) * one128);
+                    o10 += sw
+                        * (f32::cast_from(g2h0[bh + 10]) + f32::cast_from(g2l0[bh + 10]) * one128);
+                    o11 += sw
+                        * (f32::cast_from(g2h0[bh + 11]) + f32::cast_from(g2l0[bh + 11]) * one128);
+                    o12 += sw
+                        * (f32::cast_from(g2h0[bh + 12]) + f32::cast_from(g2l0[bh + 12]) * one128);
+                    o13 += sw
+                        * (f32::cast_from(g2h0[bh + 13]) + f32::cast_from(g2l0[bh + 13]) * one128);
+                    o14 += sw
+                        * (f32::cast_from(g2h0[bh + 14]) + f32::cast_from(g2l0[bh + 14]) * one128);
+                    o15 += sw
+                        * (f32::cast_from(g2h0[bh + 15]) + f32::cast_from(g2l0[bh + 15]) * one128);
+                } else {
                     o0 += sw * (f32::cast_from(g2h1[bh]) + f32::cast_from(g2l1[bh]) * one128);
-                    o1 += sw * (f32::cast_from(g2h1[bh + 1]) + f32::cast_from(g2l1[bh + 1]) * one128);
-                    o2 += sw * (f32::cast_from(g2h1[bh + 2]) + f32::cast_from(g2l1[bh + 2]) * one128);
-                    o3 += sw * (f32::cast_from(g2h1[bh + 3]) + f32::cast_from(g2l1[bh + 3]) * one128);
-                    o4 += sw * (f32::cast_from(g2h1[bh + 4]) + f32::cast_from(g2l1[bh + 4]) * one128);
-                    o5 += sw * (f32::cast_from(g2h1[bh + 5]) + f32::cast_from(g2l1[bh + 5]) * one128);
-                    o6 += sw * (f32::cast_from(g2h1[bh + 6]) + f32::cast_from(g2l1[bh + 6]) * one128);
-                    o7 += sw * (f32::cast_from(g2h1[bh + 7]) + f32::cast_from(g2l1[bh + 7]) * one128);
-                    o8 += sw * (f32::cast_from(g2h1[bh + 8]) + f32::cast_from(g2l1[bh + 8]) * one128);
-                    o9 += sw * (f32::cast_from(g2h1[bh + 9]) + f32::cast_from(g2l1[bh + 9]) * one128);
-                    o10 += sw * (f32::cast_from(g2h1[bh + 10]) + f32::cast_from(g2l1[bh + 10]) * one128);
-                    o11 += sw * (f32::cast_from(g2h1[bh + 11]) + f32::cast_from(g2l1[bh + 11]) * one128);
-                    o12 += sw * (f32::cast_from(g2h1[bh + 12]) + f32::cast_from(g2l1[bh + 12]) * one128);
-                    o13 += sw * (f32::cast_from(g2h1[bh + 13]) + f32::cast_from(g2l1[bh + 13]) * one128);
-                    o14 += sw * (f32::cast_from(g2h1[bh + 14]) + f32::cast_from(g2l1[bh + 14]) * one128);
-                    o15 += sw * (f32::cast_from(g2h1[bh + 15]) + f32::cast_from(g2l1[bh + 15]) * one128);
+                    o1 +=
+                        sw * (f32::cast_from(g2h1[bh + 1]) + f32::cast_from(g2l1[bh + 1]) * one128);
+                    o2 +=
+                        sw * (f32::cast_from(g2h1[bh + 2]) + f32::cast_from(g2l1[bh + 2]) * one128);
+                    o3 +=
+                        sw * (f32::cast_from(g2h1[bh + 3]) + f32::cast_from(g2l1[bh + 3]) * one128);
+                    o4 +=
+                        sw * (f32::cast_from(g2h1[bh + 4]) + f32::cast_from(g2l1[bh + 4]) * one128);
+                    o5 +=
+                        sw * (f32::cast_from(g2h1[bh + 5]) + f32::cast_from(g2l1[bh + 5]) * one128);
+                    o6 +=
+                        sw * (f32::cast_from(g2h1[bh + 6]) + f32::cast_from(g2l1[bh + 6]) * one128);
+                    o7 +=
+                        sw * (f32::cast_from(g2h1[bh + 7]) + f32::cast_from(g2l1[bh + 7]) * one128);
+                    o8 +=
+                        sw * (f32::cast_from(g2h1[bh + 8]) + f32::cast_from(g2l1[bh + 8]) * one128);
+                    o9 +=
+                        sw * (f32::cast_from(g2h1[bh + 9]) + f32::cast_from(g2l1[bh + 9]) * one128);
+                    o10 += sw
+                        * (f32::cast_from(g2h1[bh + 10]) + f32::cast_from(g2l1[bh + 10]) * one128);
+                    o11 += sw
+                        * (f32::cast_from(g2h1[bh + 11]) + f32::cast_from(g2l1[bh + 11]) * one128);
+                    o12 += sw
+                        * (f32::cast_from(g2h1[bh + 12]) + f32::cast_from(g2l1[bh + 12]) * one128);
+                    o13 += sw
+                        * (f32::cast_from(g2h1[bh + 13]) + f32::cast_from(g2l1[bh + 13]) * one128);
+                    o14 += sw
+                        * (f32::cast_from(g2h1[bh + 14]) + f32::cast_from(g2l1[bh + 14]) * one128);
+                    o15 += sw
+                        * (f32::cast_from(g2h1[bh + 15]) + f32::cast_from(g2l1[bh + 15]) * one128);
                 }
-            }
-            else if sg == 3u32 {
+            } else if sg == 3u32 {
                 if t_sub == 0u32 {
                     o0 += sw * (f32::cast_from(g3h0[bh]) + f32::cast_from(g3l0[bh]) * one128);
-                    o1 += sw * (f32::cast_from(g3h0[bh + 1]) + f32::cast_from(g3l0[bh + 1]) * one128);
-                    o2 += sw * (f32::cast_from(g3h0[bh + 2]) + f32::cast_from(g3l0[bh + 2]) * one128);
-                    o3 += sw * (f32::cast_from(g3h0[bh + 3]) + f32::cast_from(g3l0[bh + 3]) * one128);
-                    o4 += sw * (f32::cast_from(g3h0[bh + 4]) + f32::cast_from(g3l0[bh + 4]) * one128);
-                    o5 += sw * (f32::cast_from(g3h0[bh + 5]) + f32::cast_from(g3l0[bh + 5]) * one128);
-                    o6 += sw * (f32::cast_from(g3h0[bh + 6]) + f32::cast_from(g3l0[bh + 6]) * one128);
-                    o7 += sw * (f32::cast_from(g3h0[bh + 7]) + f32::cast_from(g3l0[bh + 7]) * one128);
-                    o8 += sw * (f32::cast_from(g3h0[bh + 8]) + f32::cast_from(g3l0[bh + 8]) * one128);
-                    o9 += sw * (f32::cast_from(g3h0[bh + 9]) + f32::cast_from(g3l0[bh + 9]) * one128);
-                    o10 += sw * (f32::cast_from(g3h0[bh + 10]) + f32::cast_from(g3l0[bh + 10]) * one128);
-                    o11 += sw * (f32::cast_from(g3h0[bh + 11]) + f32::cast_from(g3l0[bh + 11]) * one128);
-                    o12 += sw * (f32::cast_from(g3h0[bh + 12]) + f32::cast_from(g3l0[bh + 12]) * one128);
-                    o13 += sw * (f32::cast_from(g3h0[bh + 13]) + f32::cast_from(g3l0[bh + 13]) * one128);
-                    o14 += sw * (f32::cast_from(g3h0[bh + 14]) + f32::cast_from(g3l0[bh + 14]) * one128);
-                    o15 += sw * (f32::cast_from(g3h0[bh + 15]) + f32::cast_from(g3l0[bh + 15]) * one128);
-                }
-                else {
+                    o1 +=
+                        sw * (f32::cast_from(g3h0[bh + 1]) + f32::cast_from(g3l0[bh + 1]) * one128);
+                    o2 +=
+                        sw * (f32::cast_from(g3h0[bh + 2]) + f32::cast_from(g3l0[bh + 2]) * one128);
+                    o3 +=
+                        sw * (f32::cast_from(g3h0[bh + 3]) + f32::cast_from(g3l0[bh + 3]) * one128);
+                    o4 +=
+                        sw * (f32::cast_from(g3h0[bh + 4]) + f32::cast_from(g3l0[bh + 4]) * one128);
+                    o5 +=
+                        sw * (f32::cast_from(g3h0[bh + 5]) + f32::cast_from(g3l0[bh + 5]) * one128);
+                    o6 +=
+                        sw * (f32::cast_from(g3h0[bh + 6]) + f32::cast_from(g3l0[bh + 6]) * one128);
+                    o7 +=
+                        sw * (f32::cast_from(g3h0[bh + 7]) + f32::cast_from(g3l0[bh + 7]) * one128);
+                    o8 +=
+                        sw * (f32::cast_from(g3h0[bh + 8]) + f32::cast_from(g3l0[bh + 8]) * one128);
+                    o9 +=
+                        sw * (f32::cast_from(g3h0[bh + 9]) + f32::cast_from(g3l0[bh + 9]) * one128);
+                    o10 += sw
+                        * (f32::cast_from(g3h0[bh + 10]) + f32::cast_from(g3l0[bh + 10]) * one128);
+                    o11 += sw
+                        * (f32::cast_from(g3h0[bh + 11]) + f32::cast_from(g3l0[bh + 11]) * one128);
+                    o12 += sw
+                        * (f32::cast_from(g3h0[bh + 12]) + f32::cast_from(g3l0[bh + 12]) * one128);
+                    o13 += sw
+                        * (f32::cast_from(g3h0[bh + 13]) + f32::cast_from(g3l0[bh + 13]) * one128);
+                    o14 += sw
+                        * (f32::cast_from(g3h0[bh + 14]) + f32::cast_from(g3l0[bh + 14]) * one128);
+                    o15 += sw
+                        * (f32::cast_from(g3h0[bh + 15]) + f32::cast_from(g3l0[bh + 15]) * one128);
+                } else {
                     o0 += sw * (f32::cast_from(g3h1[bh]) + f32::cast_from(g3l1[bh]) * one128);
-                    o1 += sw * (f32::cast_from(g3h1[bh + 1]) + f32::cast_from(g3l1[bh + 1]) * one128);
-                    o2 += sw * (f32::cast_from(g3h1[bh + 2]) + f32::cast_from(g3l1[bh + 2]) * one128);
-                    o3 += sw * (f32::cast_from(g3h1[bh + 3]) + f32::cast_from(g3l1[bh + 3]) * one128);
-                    o4 += sw * (f32::cast_from(g3h1[bh + 4]) + f32::cast_from(g3l1[bh + 4]) * one128);
-                    o5 += sw * (f32::cast_from(g3h1[bh + 5]) + f32::cast_from(g3l1[bh + 5]) * one128);
-                    o6 += sw * (f32::cast_from(g3h1[bh + 6]) + f32::cast_from(g3l1[bh + 6]) * one128);
-                    o7 += sw * (f32::cast_from(g3h1[bh + 7]) + f32::cast_from(g3l1[bh + 7]) * one128);
-                    o8 += sw * (f32::cast_from(g3h1[bh + 8]) + f32::cast_from(g3l1[bh + 8]) * one128);
-                    o9 += sw * (f32::cast_from(g3h1[bh + 9]) + f32::cast_from(g3l1[bh + 9]) * one128);
-                    o10 += sw * (f32::cast_from(g3h1[bh + 10]) + f32::cast_from(g3l1[bh + 10]) * one128);
-                    o11 += sw * (f32::cast_from(g3h1[bh + 11]) + f32::cast_from(g3l1[bh + 11]) * one128);
-                    o12 += sw * (f32::cast_from(g3h1[bh + 12]) + f32::cast_from(g3l1[bh + 12]) * one128);
-                    o13 += sw * (f32::cast_from(g3h1[bh + 13]) + f32::cast_from(g3l1[bh + 13]) * one128);
-                    o14 += sw * (f32::cast_from(g3h1[bh + 14]) + f32::cast_from(g3l1[bh + 14]) * one128);
-                    o15 += sw * (f32::cast_from(g3h1[bh + 15]) + f32::cast_from(g3l1[bh + 15]) * one128);
+                    o1 +=
+                        sw * (f32::cast_from(g3h1[bh + 1]) + f32::cast_from(g3l1[bh + 1]) * one128);
+                    o2 +=
+                        sw * (f32::cast_from(g3h1[bh + 2]) + f32::cast_from(g3l1[bh + 2]) * one128);
+                    o3 +=
+                        sw * (f32::cast_from(g3h1[bh + 3]) + f32::cast_from(g3l1[bh + 3]) * one128);
+                    o4 +=
+                        sw * (f32::cast_from(g3h1[bh + 4]) + f32::cast_from(g3l1[bh + 4]) * one128);
+                    o5 +=
+                        sw * (f32::cast_from(g3h1[bh + 5]) + f32::cast_from(g3l1[bh + 5]) * one128);
+                    o6 +=
+                        sw * (f32::cast_from(g3h1[bh + 6]) + f32::cast_from(g3l1[bh + 6]) * one128);
+                    o7 +=
+                        sw * (f32::cast_from(g3h1[bh + 7]) + f32::cast_from(g3l1[bh + 7]) * one128);
+                    o8 +=
+                        sw * (f32::cast_from(g3h1[bh + 8]) + f32::cast_from(g3l1[bh + 8]) * one128);
+                    o9 +=
+                        sw * (f32::cast_from(g3h1[bh + 9]) + f32::cast_from(g3l1[bh + 9]) * one128);
+                    o10 += sw
+                        * (f32::cast_from(g3h1[bh + 10]) + f32::cast_from(g3l1[bh + 10]) * one128);
+                    o11 += sw
+                        * (f32::cast_from(g3h1[bh + 11]) + f32::cast_from(g3l1[bh + 11]) * one128);
+                    o12 += sw
+                        * (f32::cast_from(g3h1[bh + 12]) + f32::cast_from(g3l1[bh + 12]) * one128);
+                    o13 += sw
+                        * (f32::cast_from(g3h1[bh + 13]) + f32::cast_from(g3l1[bh + 13]) * one128);
+                    o14 += sw
+                        * (f32::cast_from(g3h1[bh + 14]) + f32::cast_from(g3l1[bh + 14]) * one128);
+                    o15 += sw
+                        * (f32::cast_from(g3h1[bh + 15]) + f32::cast_from(g3l1[bh + 15]) * one128);
                 }
-            }
-            else if sg == 4u32 {
+            } else if sg == 4u32 {
                 if t_sub == 0u32 {
                     o0 += sw * (f32::cast_from(g4h0[bh]) + f32::cast_from(g4l0[bh]) * one128);
-                    o1 += sw * (f32::cast_from(g4h0[bh + 1]) + f32::cast_from(g4l0[bh + 1]) * one128);
-                    o2 += sw * (f32::cast_from(g4h0[bh + 2]) + f32::cast_from(g4l0[bh + 2]) * one128);
-                    o3 += sw * (f32::cast_from(g4h0[bh + 3]) + f32::cast_from(g4l0[bh + 3]) * one128);
-                    o4 += sw * (f32::cast_from(g4h0[bh + 4]) + f32::cast_from(g4l0[bh + 4]) * one128);
-                    o5 += sw * (f32::cast_from(g4h0[bh + 5]) + f32::cast_from(g4l0[bh + 5]) * one128);
-                    o6 += sw * (f32::cast_from(g4h0[bh + 6]) + f32::cast_from(g4l0[bh + 6]) * one128);
-                    o7 += sw * (f32::cast_from(g4h0[bh + 7]) + f32::cast_from(g4l0[bh + 7]) * one128);
-                    o8 += sw * (f32::cast_from(g4h0[bh + 8]) + f32::cast_from(g4l0[bh + 8]) * one128);
-                    o9 += sw * (f32::cast_from(g4h0[bh + 9]) + f32::cast_from(g4l0[bh + 9]) * one128);
-                    o10 += sw * (f32::cast_from(g4h0[bh + 10]) + f32::cast_from(g4l0[bh + 10]) * one128);
-                    o11 += sw * (f32::cast_from(g4h0[bh + 11]) + f32::cast_from(g4l0[bh + 11]) * one128);
-                    o12 += sw * (f32::cast_from(g4h0[bh + 12]) + f32::cast_from(g4l0[bh + 12]) * one128);
-                    o13 += sw * (f32::cast_from(g4h0[bh + 13]) + f32::cast_from(g4l0[bh + 13]) * one128);
-                    o14 += sw * (f32::cast_from(g4h0[bh + 14]) + f32::cast_from(g4l0[bh + 14]) * one128);
-                    o15 += sw * (f32::cast_from(g4h0[bh + 15]) + f32::cast_from(g4l0[bh + 15]) * one128);
-                }
-                else {
+                    o1 +=
+                        sw * (f32::cast_from(g4h0[bh + 1]) + f32::cast_from(g4l0[bh + 1]) * one128);
+                    o2 +=
+                        sw * (f32::cast_from(g4h0[bh + 2]) + f32::cast_from(g4l0[bh + 2]) * one128);
+                    o3 +=
+                        sw * (f32::cast_from(g4h0[bh + 3]) + f32::cast_from(g4l0[bh + 3]) * one128);
+                    o4 +=
+                        sw * (f32::cast_from(g4h0[bh + 4]) + f32::cast_from(g4l0[bh + 4]) * one128);
+                    o5 +=
+                        sw * (f32::cast_from(g4h0[bh + 5]) + f32::cast_from(g4l0[bh + 5]) * one128);
+                    o6 +=
+                        sw * (f32::cast_from(g4h0[bh + 6]) + f32::cast_from(g4l0[bh + 6]) * one128);
+                    o7 +=
+                        sw * (f32::cast_from(g4h0[bh + 7]) + f32::cast_from(g4l0[bh + 7]) * one128);
+                    o8 +=
+                        sw * (f32::cast_from(g4h0[bh + 8]) + f32::cast_from(g4l0[bh + 8]) * one128);
+                    o9 +=
+                        sw * (f32::cast_from(g4h0[bh + 9]) + f32::cast_from(g4l0[bh + 9]) * one128);
+                    o10 += sw
+                        * (f32::cast_from(g4h0[bh + 10]) + f32::cast_from(g4l0[bh + 10]) * one128);
+                    o11 += sw
+                        * (f32::cast_from(g4h0[bh + 11]) + f32::cast_from(g4l0[bh + 11]) * one128);
+                    o12 += sw
+                        * (f32::cast_from(g4h0[bh + 12]) + f32::cast_from(g4l0[bh + 12]) * one128);
+                    o13 += sw
+                        * (f32::cast_from(g4h0[bh + 13]) + f32::cast_from(g4l0[bh + 13]) * one128);
+                    o14 += sw
+                        * (f32::cast_from(g4h0[bh + 14]) + f32::cast_from(g4l0[bh + 14]) * one128);
+                    o15 += sw
+                        * (f32::cast_from(g4h0[bh + 15]) + f32::cast_from(g4l0[bh + 15]) * one128);
+                } else {
                     o0 += sw * (f32::cast_from(g4h1[bh]) + f32::cast_from(g4l1[bh]) * one128);
-                    o1 += sw * (f32::cast_from(g4h1[bh + 1]) + f32::cast_from(g4l1[bh + 1]) * one128);
-                    o2 += sw * (f32::cast_from(g4h1[bh + 2]) + f32::cast_from(g4l1[bh + 2]) * one128);
-                    o3 += sw * (f32::cast_from(g4h1[bh + 3]) + f32::cast_from(g4l1[bh + 3]) * one128);
-                    o4 += sw * (f32::cast_from(g4h1[bh + 4]) + f32::cast_from(g4l1[bh + 4]) * one128);
-                    o5 += sw * (f32::cast_from(g4h1[bh + 5]) + f32::cast_from(g4l1[bh + 5]) * one128);
-                    o6 += sw * (f32::cast_from(g4h1[bh + 6]) + f32::cast_from(g4l1[bh + 6]) * one128);
-                    o7 += sw * (f32::cast_from(g4h1[bh + 7]) + f32::cast_from(g4l1[bh + 7]) * one128);
-                    o8 += sw * (f32::cast_from(g4h1[bh + 8]) + f32::cast_from(g4l1[bh + 8]) * one128);
-                    o9 += sw * (f32::cast_from(g4h1[bh + 9]) + f32::cast_from(g4l1[bh + 9]) * one128);
-                    o10 += sw * (f32::cast_from(g4h1[bh + 10]) + f32::cast_from(g4l1[bh + 10]) * one128);
-                    o11 += sw * (f32::cast_from(g4h1[bh + 11]) + f32::cast_from(g4l1[bh + 11]) * one128);
-                    o12 += sw * (f32::cast_from(g4h1[bh + 12]) + f32::cast_from(g4l1[bh + 12]) * one128);
-                    o13 += sw * (f32::cast_from(g4h1[bh + 13]) + f32::cast_from(g4l1[bh + 13]) * one128);
-                    o14 += sw * (f32::cast_from(g4h1[bh + 14]) + f32::cast_from(g4l1[bh + 14]) * one128);
-                    o15 += sw * (f32::cast_from(g4h1[bh + 15]) + f32::cast_from(g4l1[bh + 15]) * one128);
+                    o1 +=
+                        sw * (f32::cast_from(g4h1[bh + 1]) + f32::cast_from(g4l1[bh + 1]) * one128);
+                    o2 +=
+                        sw * (f32::cast_from(g4h1[bh + 2]) + f32::cast_from(g4l1[bh + 2]) * one128);
+                    o3 +=
+                        sw * (f32::cast_from(g4h1[bh + 3]) + f32::cast_from(g4l1[bh + 3]) * one128);
+                    o4 +=
+                        sw * (f32::cast_from(g4h1[bh + 4]) + f32::cast_from(g4l1[bh + 4]) * one128);
+                    o5 +=
+                        sw * (f32::cast_from(g4h1[bh + 5]) + f32::cast_from(g4l1[bh + 5]) * one128);
+                    o6 +=
+                        sw * (f32::cast_from(g4h1[bh + 6]) + f32::cast_from(g4l1[bh + 6]) * one128);
+                    o7 +=
+                        sw * (f32::cast_from(g4h1[bh + 7]) + f32::cast_from(g4l1[bh + 7]) * one128);
+                    o8 +=
+                        sw * (f32::cast_from(g4h1[bh + 8]) + f32::cast_from(g4l1[bh + 8]) * one128);
+                    o9 +=
+                        sw * (f32::cast_from(g4h1[bh + 9]) + f32::cast_from(g4l1[bh + 9]) * one128);
+                    o10 += sw
+                        * (f32::cast_from(g4h1[bh + 10]) + f32::cast_from(g4l1[bh + 10]) * one128);
+                    o11 += sw
+                        * (f32::cast_from(g4h1[bh + 11]) + f32::cast_from(g4l1[bh + 11]) * one128);
+                    o12 += sw
+                        * (f32::cast_from(g4h1[bh + 12]) + f32::cast_from(g4l1[bh + 12]) * one128);
+                    o13 += sw
+                        * (f32::cast_from(g4h1[bh + 13]) + f32::cast_from(g4l1[bh + 13]) * one128);
+                    o14 += sw
+                        * (f32::cast_from(g4h1[bh + 14]) + f32::cast_from(g4l1[bh + 14]) * one128);
+                    o15 += sw
+                        * (f32::cast_from(g4h1[bh + 15]) + f32::cast_from(g4l1[bh + 15]) * one128);
                 }
-            }
-            else if sg == 5u32 {
+            } else if sg == 5u32 {
                 if t_sub == 0u32 {
                     o0 += sw * (f32::cast_from(g5h0[bh]) + f32::cast_from(g5l0[bh]) * one128);
-                    o1 += sw * (f32::cast_from(g5h0[bh + 1]) + f32::cast_from(g5l0[bh + 1]) * one128);
-                    o2 += sw * (f32::cast_from(g5h0[bh + 2]) + f32::cast_from(g5l0[bh + 2]) * one128);
-                    o3 += sw * (f32::cast_from(g5h0[bh + 3]) + f32::cast_from(g5l0[bh + 3]) * one128);
-                    o4 += sw * (f32::cast_from(g5h0[bh + 4]) + f32::cast_from(g5l0[bh + 4]) * one128);
-                    o5 += sw * (f32::cast_from(g5h0[bh + 5]) + f32::cast_from(g5l0[bh + 5]) * one128);
-                    o6 += sw * (f32::cast_from(g5h0[bh + 6]) + f32::cast_from(g5l0[bh + 6]) * one128);
-                    o7 += sw * (f32::cast_from(g5h0[bh + 7]) + f32::cast_from(g5l0[bh + 7]) * one128);
-                    o8 += sw * (f32::cast_from(g5h0[bh + 8]) + f32::cast_from(g5l0[bh + 8]) * one128);
-                    o9 += sw * (f32::cast_from(g5h0[bh + 9]) + f32::cast_from(g5l0[bh + 9]) * one128);
-                    o10 += sw * (f32::cast_from(g5h0[bh + 10]) + f32::cast_from(g5l0[bh + 10]) * one128);
-                    o11 += sw * (f32::cast_from(g5h0[bh + 11]) + f32::cast_from(g5l0[bh + 11]) * one128);
-                    o12 += sw * (f32::cast_from(g5h0[bh + 12]) + f32::cast_from(g5l0[bh + 12]) * one128);
-                    o13 += sw * (f32::cast_from(g5h0[bh + 13]) + f32::cast_from(g5l0[bh + 13]) * one128);
-                    o14 += sw * (f32::cast_from(g5h0[bh + 14]) + f32::cast_from(g5l0[bh + 14]) * one128);
-                    o15 += sw * (f32::cast_from(g5h0[bh + 15]) + f32::cast_from(g5l0[bh + 15]) * one128);
-                }
-                else {
+                    o1 +=
+                        sw * (f32::cast_from(g5h0[bh + 1]) + f32::cast_from(g5l0[bh + 1]) * one128);
+                    o2 +=
+                        sw * (f32::cast_from(g5h0[bh + 2]) + f32::cast_from(g5l0[bh + 2]) * one128);
+                    o3 +=
+                        sw * (f32::cast_from(g5h0[bh + 3]) + f32::cast_from(g5l0[bh + 3]) * one128);
+                    o4 +=
+                        sw * (f32::cast_from(g5h0[bh + 4]) + f32::cast_from(g5l0[bh + 4]) * one128);
+                    o5 +=
+                        sw * (f32::cast_from(g5h0[bh + 5]) + f32::cast_from(g5l0[bh + 5]) * one128);
+                    o6 +=
+                        sw * (f32::cast_from(g5h0[bh + 6]) + f32::cast_from(g5l0[bh + 6]) * one128);
+                    o7 +=
+                        sw * (f32::cast_from(g5h0[bh + 7]) + f32::cast_from(g5l0[bh + 7]) * one128);
+                    o8 +=
+                        sw * (f32::cast_from(g5h0[bh + 8]) + f32::cast_from(g5l0[bh + 8]) * one128);
+                    o9 +=
+                        sw * (f32::cast_from(g5h0[bh + 9]) + f32::cast_from(g5l0[bh + 9]) * one128);
+                    o10 += sw
+                        * (f32::cast_from(g5h0[bh + 10]) + f32::cast_from(g5l0[bh + 10]) * one128);
+                    o11 += sw
+                        * (f32::cast_from(g5h0[bh + 11]) + f32::cast_from(g5l0[bh + 11]) * one128);
+                    o12 += sw
+                        * (f32::cast_from(g5h0[bh + 12]) + f32::cast_from(g5l0[bh + 12]) * one128);
+                    o13 += sw
+                        * (f32::cast_from(g5h0[bh + 13]) + f32::cast_from(g5l0[bh + 13]) * one128);
+                    o14 += sw
+                        * (f32::cast_from(g5h0[bh + 14]) + f32::cast_from(g5l0[bh + 14]) * one128);
+                    o15 += sw
+                        * (f32::cast_from(g5h0[bh + 15]) + f32::cast_from(g5l0[bh + 15]) * one128);
+                } else {
                     o0 += sw * (f32::cast_from(g5h1[bh]) + f32::cast_from(g5l1[bh]) * one128);
-                    o1 += sw * (f32::cast_from(g5h1[bh + 1]) + f32::cast_from(g5l1[bh + 1]) * one128);
-                    o2 += sw * (f32::cast_from(g5h1[bh + 2]) + f32::cast_from(g5l1[bh + 2]) * one128);
-                    o3 += sw * (f32::cast_from(g5h1[bh + 3]) + f32::cast_from(g5l1[bh + 3]) * one128);
-                    o4 += sw * (f32::cast_from(g5h1[bh + 4]) + f32::cast_from(g5l1[bh + 4]) * one128);
-                    o5 += sw * (f32::cast_from(g5h1[bh + 5]) + f32::cast_from(g5l1[bh + 5]) * one128);
-                    o6 += sw * (f32::cast_from(g5h1[bh + 6]) + f32::cast_from(g5l1[bh + 6]) * one128);
-                    o7 += sw * (f32::cast_from(g5h1[bh + 7]) + f32::cast_from(g5l1[bh + 7]) * one128);
-                    o8 += sw * (f32::cast_from(g5h1[bh + 8]) + f32::cast_from(g5l1[bh + 8]) * one128);
-                    o9 += sw * (f32::cast_from(g5h1[bh + 9]) + f32::cast_from(g5l1[bh + 9]) * one128);
-                    o10 += sw * (f32::cast_from(g5h1[bh + 10]) + f32::cast_from(g5l1[bh + 10]) * one128);
-                    o11 += sw * (f32::cast_from(g5h1[bh + 11]) + f32::cast_from(g5l1[bh + 11]) * one128);
-                    o12 += sw * (f32::cast_from(g5h1[bh + 12]) + f32::cast_from(g5l1[bh + 12]) * one128);
-                    o13 += sw * (f32::cast_from(g5h1[bh + 13]) + f32::cast_from(g5l1[bh + 13]) * one128);
-                    o14 += sw * (f32::cast_from(g5h1[bh + 14]) + f32::cast_from(g5l1[bh + 14]) * one128);
-                    o15 += sw * (f32::cast_from(g5h1[bh + 15]) + f32::cast_from(g5l1[bh + 15]) * one128);
+                    o1 +=
+                        sw * (f32::cast_from(g5h1[bh + 1]) + f32::cast_from(g5l1[bh + 1]) * one128);
+                    o2 +=
+                        sw * (f32::cast_from(g5h1[bh + 2]) + f32::cast_from(g5l1[bh + 2]) * one128);
+                    o3 +=
+                        sw * (f32::cast_from(g5h1[bh + 3]) + f32::cast_from(g5l1[bh + 3]) * one128);
+                    o4 +=
+                        sw * (f32::cast_from(g5h1[bh + 4]) + f32::cast_from(g5l1[bh + 4]) * one128);
+                    o5 +=
+                        sw * (f32::cast_from(g5h1[bh + 5]) + f32::cast_from(g5l1[bh + 5]) * one128);
+                    o6 +=
+                        sw * (f32::cast_from(g5h1[bh + 6]) + f32::cast_from(g5l1[bh + 6]) * one128);
+                    o7 +=
+                        sw * (f32::cast_from(g5h1[bh + 7]) + f32::cast_from(g5l1[bh + 7]) * one128);
+                    o8 +=
+                        sw * (f32::cast_from(g5h1[bh + 8]) + f32::cast_from(g5l1[bh + 8]) * one128);
+                    o9 +=
+                        sw * (f32::cast_from(g5h1[bh + 9]) + f32::cast_from(g5l1[bh + 9]) * one128);
+                    o10 += sw
+                        * (f32::cast_from(g5h1[bh + 10]) + f32::cast_from(g5l1[bh + 10]) * one128);
+                    o11 += sw
+                        * (f32::cast_from(g5h1[bh + 11]) + f32::cast_from(g5l1[bh + 11]) * one128);
+                    o12 += sw
+                        * (f32::cast_from(g5h1[bh + 12]) + f32::cast_from(g5l1[bh + 12]) * one128);
+                    o13 += sw
+                        * (f32::cast_from(g5h1[bh + 13]) + f32::cast_from(g5l1[bh + 13]) * one128);
+                    o14 += sw
+                        * (f32::cast_from(g5h1[bh + 14]) + f32::cast_from(g5l1[bh + 14]) * one128);
+                    o15 += sw
+                        * (f32::cast_from(g5h1[bh + 15]) + f32::cast_from(g5l1[bh + 15]) * one128);
                 }
-            }
-            else if sg == 6u32 {
+            } else if sg == 6u32 {
                 if t_sub == 0u32 {
                     o0 += sw * (f32::cast_from(g6h0[bh]) + f32::cast_from(g6l0[bh]) * one128);
-                    o1 += sw * (f32::cast_from(g6h0[bh + 1]) + f32::cast_from(g6l0[bh + 1]) * one128);
-                    o2 += sw * (f32::cast_from(g6h0[bh + 2]) + f32::cast_from(g6l0[bh + 2]) * one128);
-                    o3 += sw * (f32::cast_from(g6h0[bh + 3]) + f32::cast_from(g6l0[bh + 3]) * one128);
-                    o4 += sw * (f32::cast_from(g6h0[bh + 4]) + f32::cast_from(g6l0[bh + 4]) * one128);
-                    o5 += sw * (f32::cast_from(g6h0[bh + 5]) + f32::cast_from(g6l0[bh + 5]) * one128);
-                    o6 += sw * (f32::cast_from(g6h0[bh + 6]) + f32::cast_from(g6l0[bh + 6]) * one128);
-                    o7 += sw * (f32::cast_from(g6h0[bh + 7]) + f32::cast_from(g6l0[bh + 7]) * one128);
-                    o8 += sw * (f32::cast_from(g6h0[bh + 8]) + f32::cast_from(g6l0[bh + 8]) * one128);
-                    o9 += sw * (f32::cast_from(g6h0[bh + 9]) + f32::cast_from(g6l0[bh + 9]) * one128);
-                    o10 += sw * (f32::cast_from(g6h0[bh + 10]) + f32::cast_from(g6l0[bh + 10]) * one128);
-                    o11 += sw * (f32::cast_from(g6h0[bh + 11]) + f32::cast_from(g6l0[bh + 11]) * one128);
-                    o12 += sw * (f32::cast_from(g6h0[bh + 12]) + f32::cast_from(g6l0[bh + 12]) * one128);
-                    o13 += sw * (f32::cast_from(g6h0[bh + 13]) + f32::cast_from(g6l0[bh + 13]) * one128);
-                    o14 += sw * (f32::cast_from(g6h0[bh + 14]) + f32::cast_from(g6l0[bh + 14]) * one128);
-                    o15 += sw * (f32::cast_from(g6h0[bh + 15]) + f32::cast_from(g6l0[bh + 15]) * one128);
-                }
-                else {
+                    o1 +=
+                        sw * (f32::cast_from(g6h0[bh + 1]) + f32::cast_from(g6l0[bh + 1]) * one128);
+                    o2 +=
+                        sw * (f32::cast_from(g6h0[bh + 2]) + f32::cast_from(g6l0[bh + 2]) * one128);
+                    o3 +=
+                        sw * (f32::cast_from(g6h0[bh + 3]) + f32::cast_from(g6l0[bh + 3]) * one128);
+                    o4 +=
+                        sw * (f32::cast_from(g6h0[bh + 4]) + f32::cast_from(g6l0[bh + 4]) * one128);
+                    o5 +=
+                        sw * (f32::cast_from(g6h0[bh + 5]) + f32::cast_from(g6l0[bh + 5]) * one128);
+                    o6 +=
+                        sw * (f32::cast_from(g6h0[bh + 6]) + f32::cast_from(g6l0[bh + 6]) * one128);
+                    o7 +=
+                        sw * (f32::cast_from(g6h0[bh + 7]) + f32::cast_from(g6l0[bh + 7]) * one128);
+                    o8 +=
+                        sw * (f32::cast_from(g6h0[bh + 8]) + f32::cast_from(g6l0[bh + 8]) * one128);
+                    o9 +=
+                        sw * (f32::cast_from(g6h0[bh + 9]) + f32::cast_from(g6l0[bh + 9]) * one128);
+                    o10 += sw
+                        * (f32::cast_from(g6h0[bh + 10]) + f32::cast_from(g6l0[bh + 10]) * one128);
+                    o11 += sw
+                        * (f32::cast_from(g6h0[bh + 11]) + f32::cast_from(g6l0[bh + 11]) * one128);
+                    o12 += sw
+                        * (f32::cast_from(g6h0[bh + 12]) + f32::cast_from(g6l0[bh + 12]) * one128);
+                    o13 += sw
+                        * (f32::cast_from(g6h0[bh + 13]) + f32::cast_from(g6l0[bh + 13]) * one128);
+                    o14 += sw
+                        * (f32::cast_from(g6h0[bh + 14]) + f32::cast_from(g6l0[bh + 14]) * one128);
+                    o15 += sw
+                        * (f32::cast_from(g6h0[bh + 15]) + f32::cast_from(g6l0[bh + 15]) * one128);
+                } else {
                     o0 += sw * (f32::cast_from(g6h1[bh]) + f32::cast_from(g6l1[bh]) * one128);
-                    o1 += sw * (f32::cast_from(g6h1[bh + 1]) + f32::cast_from(g6l1[bh + 1]) * one128);
-                    o2 += sw * (f32::cast_from(g6h1[bh + 2]) + f32::cast_from(g6l1[bh + 2]) * one128);
-                    o3 += sw * (f32::cast_from(g6h1[bh + 3]) + f32::cast_from(g6l1[bh + 3]) * one128);
-                    o4 += sw * (f32::cast_from(g6h1[bh + 4]) + f32::cast_from(g6l1[bh + 4]) * one128);
-                    o5 += sw * (f32::cast_from(g6h1[bh + 5]) + f32::cast_from(g6l1[bh + 5]) * one128);
-                    o6 += sw * (f32::cast_from(g6h1[bh + 6]) + f32::cast_from(g6l1[bh + 6]) * one128);
-                    o7 += sw * (f32::cast_from(g6h1[bh + 7]) + f32::cast_from(g6l1[bh + 7]) * one128);
-                    o8 += sw * (f32::cast_from(g6h1[bh + 8]) + f32::cast_from(g6l1[bh + 8]) * one128);
-                    o9 += sw * (f32::cast_from(g6h1[bh + 9]) + f32::cast_from(g6l1[bh + 9]) * one128);
-                    o10 += sw * (f32::cast_from(g6h1[bh + 10]) + f32::cast_from(g6l1[bh + 10]) * one128);
-                    o11 += sw * (f32::cast_from(g6h1[bh + 11]) + f32::cast_from(g6l1[bh + 11]) * one128);
-                    o12 += sw * (f32::cast_from(g6h1[bh + 12]) + f32::cast_from(g6l1[bh + 12]) * one128);
-                    o13 += sw * (f32::cast_from(g6h1[bh + 13]) + f32::cast_from(g6l1[bh + 13]) * one128);
-                    o14 += sw * (f32::cast_from(g6h1[bh + 14]) + f32::cast_from(g6l1[bh + 14]) * one128);
-                    o15 += sw * (f32::cast_from(g6h1[bh + 15]) + f32::cast_from(g6l1[bh + 15]) * one128);
+                    o1 +=
+                        sw * (f32::cast_from(g6h1[bh + 1]) + f32::cast_from(g6l1[bh + 1]) * one128);
+                    o2 +=
+                        sw * (f32::cast_from(g6h1[bh + 2]) + f32::cast_from(g6l1[bh + 2]) * one128);
+                    o3 +=
+                        sw * (f32::cast_from(g6h1[bh + 3]) + f32::cast_from(g6l1[bh + 3]) * one128);
+                    o4 +=
+                        sw * (f32::cast_from(g6h1[bh + 4]) + f32::cast_from(g6l1[bh + 4]) * one128);
+                    o5 +=
+                        sw * (f32::cast_from(g6h1[bh + 5]) + f32::cast_from(g6l1[bh + 5]) * one128);
+                    o6 +=
+                        sw * (f32::cast_from(g6h1[bh + 6]) + f32::cast_from(g6l1[bh + 6]) * one128);
+                    o7 +=
+                        sw * (f32::cast_from(g6h1[bh + 7]) + f32::cast_from(g6l1[bh + 7]) * one128);
+                    o8 +=
+                        sw * (f32::cast_from(g6h1[bh + 8]) + f32::cast_from(g6l1[bh + 8]) * one128);
+                    o9 +=
+                        sw * (f32::cast_from(g6h1[bh + 9]) + f32::cast_from(g6l1[bh + 9]) * one128);
+                    o10 += sw
+                        * (f32::cast_from(g6h1[bh + 10]) + f32::cast_from(g6l1[bh + 10]) * one128);
+                    o11 += sw
+                        * (f32::cast_from(g6h1[bh + 11]) + f32::cast_from(g6l1[bh + 11]) * one128);
+                    o12 += sw
+                        * (f32::cast_from(g6h1[bh + 12]) + f32::cast_from(g6l1[bh + 12]) * one128);
+                    o13 += sw
+                        * (f32::cast_from(g6h1[bh + 13]) + f32::cast_from(g6l1[bh + 13]) * one128);
+                    o14 += sw
+                        * (f32::cast_from(g6h1[bh + 14]) + f32::cast_from(g6l1[bh + 14]) * one128);
+                    o15 += sw
+                        * (f32::cast_from(g6h1[bh + 15]) + f32::cast_from(g6l1[bh + 15]) * one128);
                 }
-            }
-            else if sg == 7u32 {
+            } else if sg == 7u32 {
                 if t_sub == 0u32 {
                     o0 += sw * (f32::cast_from(g7h0[bh]) + f32::cast_from(g7l0[bh]) * one128);
-                    o1 += sw * (f32::cast_from(g7h0[bh + 1]) + f32::cast_from(g7l0[bh + 1]) * one128);
-                    o2 += sw * (f32::cast_from(g7h0[bh + 2]) + f32::cast_from(g7l0[bh + 2]) * one128);
-                    o3 += sw * (f32::cast_from(g7h0[bh + 3]) + f32::cast_from(g7l0[bh + 3]) * one128);
-                    o4 += sw * (f32::cast_from(g7h0[bh + 4]) + f32::cast_from(g7l0[bh + 4]) * one128);
-                    o5 += sw * (f32::cast_from(g7h0[bh + 5]) + f32::cast_from(g7l0[bh + 5]) * one128);
-                    o6 += sw * (f32::cast_from(g7h0[bh + 6]) + f32::cast_from(g7l0[bh + 6]) * one128);
-                    o7 += sw * (f32::cast_from(g7h0[bh + 7]) + f32::cast_from(g7l0[bh + 7]) * one128);
-                    o8 += sw * (f32::cast_from(g7h0[bh + 8]) + f32::cast_from(g7l0[bh + 8]) * one128);
-                    o9 += sw * (f32::cast_from(g7h0[bh + 9]) + f32::cast_from(g7l0[bh + 9]) * one128);
-                    o10 += sw * (f32::cast_from(g7h0[bh + 10]) + f32::cast_from(g7l0[bh + 10]) * one128);
-                    o11 += sw * (f32::cast_from(g7h0[bh + 11]) + f32::cast_from(g7l0[bh + 11]) * one128);
-                    o12 += sw * (f32::cast_from(g7h0[bh + 12]) + f32::cast_from(g7l0[bh + 12]) * one128);
-                    o13 += sw * (f32::cast_from(g7h0[bh + 13]) + f32::cast_from(g7l0[bh + 13]) * one128);
-                    o14 += sw * (f32::cast_from(g7h0[bh + 14]) + f32::cast_from(g7l0[bh + 14]) * one128);
-                    o15 += sw * (f32::cast_from(g7h0[bh + 15]) + f32::cast_from(g7l0[bh + 15]) * one128);
-                }
-                else {
+                    o1 +=
+                        sw * (f32::cast_from(g7h0[bh + 1]) + f32::cast_from(g7l0[bh + 1]) * one128);
+                    o2 +=
+                        sw * (f32::cast_from(g7h0[bh + 2]) + f32::cast_from(g7l0[bh + 2]) * one128);
+                    o3 +=
+                        sw * (f32::cast_from(g7h0[bh + 3]) + f32::cast_from(g7l0[bh + 3]) * one128);
+                    o4 +=
+                        sw * (f32::cast_from(g7h0[bh + 4]) + f32::cast_from(g7l0[bh + 4]) * one128);
+                    o5 +=
+                        sw * (f32::cast_from(g7h0[bh + 5]) + f32::cast_from(g7l0[bh + 5]) * one128);
+                    o6 +=
+                        sw * (f32::cast_from(g7h0[bh + 6]) + f32::cast_from(g7l0[bh + 6]) * one128);
+                    o7 +=
+                        sw * (f32::cast_from(g7h0[bh + 7]) + f32::cast_from(g7l0[bh + 7]) * one128);
+                    o8 +=
+                        sw * (f32::cast_from(g7h0[bh + 8]) + f32::cast_from(g7l0[bh + 8]) * one128);
+                    o9 +=
+                        sw * (f32::cast_from(g7h0[bh + 9]) + f32::cast_from(g7l0[bh + 9]) * one128);
+                    o10 += sw
+                        * (f32::cast_from(g7h0[bh + 10]) + f32::cast_from(g7l0[bh + 10]) * one128);
+                    o11 += sw
+                        * (f32::cast_from(g7h0[bh + 11]) + f32::cast_from(g7l0[bh + 11]) * one128);
+                    o12 += sw
+                        * (f32::cast_from(g7h0[bh + 12]) + f32::cast_from(g7l0[bh + 12]) * one128);
+                    o13 += sw
+                        * (f32::cast_from(g7h0[bh + 13]) + f32::cast_from(g7l0[bh + 13]) * one128);
+                    o14 += sw
+                        * (f32::cast_from(g7h0[bh + 14]) + f32::cast_from(g7l0[bh + 14]) * one128);
+                    o15 += sw
+                        * (f32::cast_from(g7h0[bh + 15]) + f32::cast_from(g7l0[bh + 15]) * one128);
+                } else {
                     o0 += sw * (f32::cast_from(g7h1[bh]) + f32::cast_from(g7l1[bh]) * one128);
-                    o1 += sw * (f32::cast_from(g7h1[bh + 1]) + f32::cast_from(g7l1[bh + 1]) * one128);
-                    o2 += sw * (f32::cast_from(g7h1[bh + 2]) + f32::cast_from(g7l1[bh + 2]) * one128);
-                    o3 += sw * (f32::cast_from(g7h1[bh + 3]) + f32::cast_from(g7l1[bh + 3]) * one128);
-                    o4 += sw * (f32::cast_from(g7h1[bh + 4]) + f32::cast_from(g7l1[bh + 4]) * one128);
-                    o5 += sw * (f32::cast_from(g7h1[bh + 5]) + f32::cast_from(g7l1[bh + 5]) * one128);
-                    o6 += sw * (f32::cast_from(g7h1[bh + 6]) + f32::cast_from(g7l1[bh + 6]) * one128);
-                    o7 += sw * (f32::cast_from(g7h1[bh + 7]) + f32::cast_from(g7l1[bh + 7]) * one128);
-                    o8 += sw * (f32::cast_from(g7h1[bh + 8]) + f32::cast_from(g7l1[bh + 8]) * one128);
-                    o9 += sw * (f32::cast_from(g7h1[bh + 9]) + f32::cast_from(g7l1[bh + 9]) * one128);
-                    o10 += sw * (f32::cast_from(g7h1[bh + 10]) + f32::cast_from(g7l1[bh + 10]) * one128);
-                    o11 += sw * (f32::cast_from(g7h1[bh + 11]) + f32::cast_from(g7l1[bh + 11]) * one128);
-                    o12 += sw * (f32::cast_from(g7h1[bh + 12]) + f32::cast_from(g7l1[bh + 12]) * one128);
-                    o13 += sw * (f32::cast_from(g7h1[bh + 13]) + f32::cast_from(g7l1[bh + 13]) * one128);
-                    o14 += sw * (f32::cast_from(g7h1[bh + 14]) + f32::cast_from(g7l1[bh + 14]) * one128);
-                    o15 += sw * (f32::cast_from(g7h1[bh + 15]) + f32::cast_from(g7l1[bh + 15]) * one128);
+                    o1 +=
+                        sw * (f32::cast_from(g7h1[bh + 1]) + f32::cast_from(g7l1[bh + 1]) * one128);
+                    o2 +=
+                        sw * (f32::cast_from(g7h1[bh + 2]) + f32::cast_from(g7l1[bh + 2]) * one128);
+                    o3 +=
+                        sw * (f32::cast_from(g7h1[bh + 3]) + f32::cast_from(g7l1[bh + 3]) * one128);
+                    o4 +=
+                        sw * (f32::cast_from(g7h1[bh + 4]) + f32::cast_from(g7l1[bh + 4]) * one128);
+                    o5 +=
+                        sw * (f32::cast_from(g7h1[bh + 5]) + f32::cast_from(g7l1[bh + 5]) * one128);
+                    o6 +=
+                        sw * (f32::cast_from(g7h1[bh + 6]) + f32::cast_from(g7l1[bh + 6]) * one128);
+                    o7 +=
+                        sw * (f32::cast_from(g7h1[bh + 7]) + f32::cast_from(g7l1[bh + 7]) * one128);
+                    o8 +=
+                        sw * (f32::cast_from(g7h1[bh + 8]) + f32::cast_from(g7l1[bh + 8]) * one128);
+                    o9 +=
+                        sw * (f32::cast_from(g7h1[bh + 9]) + f32::cast_from(g7l1[bh + 9]) * one128);
+                    o10 += sw
+                        * (f32::cast_from(g7h1[bh + 10]) + f32::cast_from(g7l1[bh + 10]) * one128);
+                    o11 += sw
+                        * (f32::cast_from(g7h1[bh + 11]) + f32::cast_from(g7l1[bh + 11]) * one128);
+                    o12 += sw
+                        * (f32::cast_from(g7h1[bh + 12]) + f32::cast_from(g7l1[bh + 12]) * one128);
+                    o13 += sw
+                        * (f32::cast_from(g7h1[bh + 13]) + f32::cast_from(g7l1[bh + 13]) * one128);
+                    o14 += sw
+                        * (f32::cast_from(g7h1[bh + 14]) + f32::cast_from(g7l1[bh + 14]) * one128);
+                    o15 += sw
+                        * (f32::cast_from(g7h1[bh + 15]) + f32::cast_from(g7l1[bh + 15]) * one128);
                 }
             }
         }

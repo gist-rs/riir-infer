@@ -705,12 +705,18 @@ pub fn ensure_artifacts(ane_root: &Path, base_url: Option<&str>) -> Result<()> {
         // sibling key owns its own subtree).
         if let Err(e) = staged {
             let _ = std::fs::remove_dir_all(&staging);
-            for p in [staging.parent(), Some(ane_root.join(".staging")).as_deref()].into_iter().flatten() {
+            for p in [staging.parent(), Some(ane_root.join(".staging")).as_deref()]
+                .into_iter()
+                .flatten()
+            {
                 let _ = std::fs::remove_dir(p);
             }
             return Err(e);
         }
-        for p in [staging.parent(), Some(ane_root.join(".staging")).as_deref()].into_iter().flatten() {
+        for p in [staging.parent(), Some(ane_root.join(".staging")).as_deref()]
+            .into_iter()
+            .flatten()
+        {
             let _ = std::fs::remove_dir(p);
         }
     }
@@ -755,10 +761,9 @@ fn compile_cached(artifact_dir: &Path, digest: &str) -> Result<PathBuf> {
         Some(p) => PathBuf::from(p),
         None => match std::env::var_os("HOME") {
             Some(h) => PathBuf::from(h).join("Library/Caches/riir-infer/laya-ane"),
-            None => std::env::temp_dir().join(format!(
-                "riir-laya-ane-cache_{}",
-                std::process::id()
-            )),
+            None => {
+                std::env::temp_dir().join(format!("riir-laya-ane-cache_{}", std::process::id()))
+            }
         },
     };
     let final_dir = cache_root.join(format!("mlmodelc-{key}"));

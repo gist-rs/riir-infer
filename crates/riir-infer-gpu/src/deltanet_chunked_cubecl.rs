@@ -156,11 +156,7 @@ fn deltanet_conv1d_chunked_f32(
 ///   carry_idx_offset_f32]`.
 #[cfg(feature = "cubecl_runtime")]
 #[cube(launch_unchecked)]
-fn deltanet_conv1d_carry_update_f32(
-    input: &[f32],
-    carry: &mut [f32],
-    params: &[f32],
-) {
+fn deltanet_conv1d_carry_update_f32(input: &[f32], carry: &mut [f32], params: &[f32]) {
     let c = params[0usize] as usize;
     let conv_dim = params[1usize] as usize;
     let kernel_size = params[2usize] as usize;
@@ -220,70 +216,73 @@ pub struct DeltanetChunkedConv1dCubeCL;
 
 #[cfg(feature = "cubecl_runtime")]
 impl DeltanetChunkedConv1dCubeCL {
-/// Launch the chunked conv1d kernel.
-///
-/// # Safety
-///
-/// Caller must ensure:
-/// - `input_handle` has `c * conv_dim` f32 elements (raw inputs, read-only).
-/// - `output_handle` has `c * conv_dim` f32 elements (SiLU outputs, written).
-/// - `conv_weight_handle` has `conv_dim * kernel_size` f32 elements.
-/// - `carry_handle` has `conv_dim * carry_stride` f32 elements.
-/// - `carry_stride` is `kernel_size - 1` (compact) or `kernel_size` (conv_state).
-/// - `carry_idx_offset` is 0 (compact) or 1 (conv_state).
-#[allow(clippy::too_many_arguments, reason = "GPU kernel launch: many buffer handles are inherent")]
-pub unsafe fn launch<R: Runtime>(
-    client: &ComputeClient<R>,
-    input_handle: Handle,
-    output_handle: Handle,
-    conv_weight_handle: Handle,
-    carry_handle: Handle,
-    c: usize,
-    conv_dim: usize,
-    kernel_size: usize,
-    carry_stride: usize,
-    carry_idx_offset: usize,
-) {
-    let params: [f32; 5] = [
-        c as f32,
-        conv_dim as f32,
-        kernel_size as f32,
-        carry_stride as f32,
-        carry_idx_offset as f32,
-    ];
-    let params_handle = client.create_from_slice(f32::as_bytes(&params));
-    let total = c * conv_dim;
-    let wg = 256usize;
-    let n_wg = total.div_ceil(wg).max(1) as u32;
+    /// Launch the chunked conv1d kernel.
+    ///
+    /// # Safety
+    ///
+    /// Caller must ensure:
+    /// - `input_handle` has `c * conv_dim` f32 elements (raw inputs, read-only).
+    /// - `output_handle` has `c * conv_dim` f32 elements (SiLU outputs, written).
+    /// - `conv_weight_handle` has `conv_dim * kernel_size` f32 elements.
+    /// - `carry_handle` has `conv_dim * carry_stride` f32 elements.
+    /// - `carry_stride` is `kernel_size - 1` (compact) or `kernel_size` (conv_state).
+    /// - `carry_idx_offset` is 0 (compact) or 1 (conv_state).
+    #[allow(
+        clippy::too_many_arguments,
+        reason = "GPU kernel launch: many buffer handles are inherent"
+    )]
+    pub unsafe fn launch<R: Runtime>(
+        client: &ComputeClient<R>,
+        input_handle: Handle,
+        output_handle: Handle,
+        conv_weight_handle: Handle,
+        carry_handle: Handle,
+        c: usize,
+        conv_dim: usize,
+        kernel_size: usize,
+        carry_stride: usize,
+        carry_idx_offset: usize,
+    ) {
+        let params: [f32; 5] = [
+            c as f32,
+            conv_dim as f32,
+            kernel_size as f32,
+            carry_stride as f32,
+            carry_idx_offset as f32,
+        ];
+        let params_handle = client.create_from_slice(f32::as_bytes(&params));
+        let total = c * conv_dim;
+        let wg = 256usize;
+        let n_wg = total.div_ceil(wg).max(1) as u32;
 
-    unsafe {
-        deltanet_conv1d_chunked_f32::launch_unchecked::<R>(
-            client,
-            CubeCount::Static(n_wg, 1, 1),
-            CubeDim::new_1d(wg as u32),
-            BufferArg::from_raw_parts(input_handle.clone(), total),
-            BufferArg::from_raw_parts(output_handle, total),
-            BufferArg::from_raw_parts(conv_weight_handle, conv_dim * kernel_size),
-            BufferArg::from_raw_parts(carry_handle.clone(), conv_dim * carry_stride),
-            BufferArg::from_raw_parts(params_handle.clone(), 5),
-        );
+        unsafe {
+            deltanet_conv1d_chunked_f32::launch_unchecked::<R>(
+                client,
+                CubeCount::Static(n_wg, 1, 1),
+                CubeDim::new_1d(wg as u32),
+                BufferArg::from_raw_parts(input_handle.clone(), total),
+                BufferArg::from_raw_parts(output_handle, total),
+                BufferArg::from_raw_parts(conv_weight_handle, conv_dim * kernel_size),
+                BufferArg::from_raw_parts(carry_handle.clone(), conv_dim * carry_stride),
+                BufferArg::from_raw_parts(params_handle.clone(), 5),
+            );
 
-        // Carry update as a separate ordered dispatch (Issue 673 Bug C + the
-        // intra-dispatch carry read/write race): the conv kernel only READS
-        // the carry; this dispatch rewrites it AFTER those reads complete.
-        // One thread per channel — the per-channel left-shift is serial
-        // in-thread, so no cross-thread carry access.
-        let n_wg_carry = (conv_dim as u32).div_ceil(wg as u32).max(1);
-        deltanet_conv1d_carry_update_f32::launch_unchecked::<R>(
-            client,
-            CubeCount::Static(n_wg_carry, 1, 1),
-            CubeDim::new_1d(wg as u32),
-            BufferArg::from_raw_parts(input_handle, total),
-            BufferArg::from_raw_parts(carry_handle, conv_dim * carry_stride),
-            BufferArg::from_raw_parts(params_handle, 5),
-        );
+            // Carry update as a separate ordered dispatch (Issue 673 Bug C + the
+            // intra-dispatch carry read/write race): the conv kernel only READS
+            // the carry; this dispatch rewrites it AFTER those reads complete.
+            // One thread per channel — the per-channel left-shift is serial
+            // in-thread, so no cross-thread carry access.
+            let n_wg_carry = (conv_dim as u32).div_ceil(wg as u32).max(1);
+            deltanet_conv1d_carry_update_f32::launch_unchecked::<R>(
+                client,
+                CubeCount::Static(n_wg_carry, 1, 1),
+                CubeDim::new_1d(wg as u32),
+                BufferArg::from_raw_parts(input_handle, total),
+                BufferArg::from_raw_parts(carry_handle, conv_dim * carry_stride),
+                BufferArg::from_raw_parts(params_handle, 5),
+            );
+        }
     }
-}
 }
 
 // ---------------------------------------------------------------------------
@@ -328,11 +327,7 @@ pub unsafe fn launch<R: Runtime>(
 /// for the one-per-chunk-call cost.
 #[cfg(feature = "cubecl_runtime")]
 #[cube(launch_unchecked)]
-fn deltanet_chunk_decay_f32(
-    alpha: &[f32],
-    decay_to_end: &mut [f32],
-    params: &[f32],
-) {
+fn deltanet_chunk_decay_f32(alpha: &[f32], decay_to_end: &mut [f32], params: &[f32]) {
     let n_head = params[0usize] as usize;
     let c = params[1usize] as usize;
     let idx = ABSOLUTE_POS;
@@ -537,7 +532,10 @@ impl DeltanetWeightedVCubeCL {
     ///
     /// # Safety
     /// All handles must have the correct element counts (see kernel doc).
-    #[allow(clippy::too_many_arguments, reason = "GPU kernel launch: many buffer handles are inherent")]
+    #[allow(
+        clippy::too_many_arguments,
+        reason = "GPU kernel launch: many buffer handles are inherent"
+    )]
     pub unsafe fn launch<R: Runtime>(
         client: &ComputeClient<R>,
         v_handle: Handle,
@@ -714,13 +712,13 @@ impl DeltanetStateTransitionCubeCL {
 #[cfg(feature = "cubecl_runtime")]
 #[cube(launch_unchecked)]
 fn deltanet_intra_output_f32(
-    q: &[f32],       // [n_head, C, d]
-    k: &[f32],       // [n_head, C, d]
-    v: &[f32],       // [n_head, C, d]
-    alpha: &[f32],   // [n_head, C]
-    beta: &[f32],    // [n_head, C]
+    q: &[f32],          // [n_head, C, d]
+    k: &[f32],          // [n_head, C, d]
+    v: &[f32],          // [n_head, C, d]
+    alpha: &[f32],      // [n_head, C]
+    beta: &[f32],       // [n_head, C]
     output: &mut [f32], // [n_head, C, d]
-    params: &[f32],  // [n_head_f32, C_f32, d_f32]
+    params: &[f32],     // [n_head_f32, C_f32, d_f32]
 ) {
     let n_head = params[0usize] as u32;
     let c = params[1usize] as u32;
@@ -755,9 +753,12 @@ fn deltanet_intra_output_f32(
 
         // Compute q_t · v_j (plane-cooperative dot product).
         let qv0 = q[(q_base + lane) as usize] * v[(kv_base + lane) as usize];
-        let qv1 = q[(q_base + lane + plane_dim) as usize] * v[(kv_base + lane + plane_dim) as usize];
-        let qv2 = q[(q_base + lane + 2u32 * plane_dim) as usize] * v[(kv_base + lane + 2u32 * plane_dim) as usize];
-        let qv3 = q[(q_base + lane + 3u32 * plane_dim) as usize] * v[(kv_base + lane + 3u32 * plane_dim) as usize];
+        let qv1 =
+            q[(q_base + lane + plane_dim) as usize] * v[(kv_base + lane + plane_dim) as usize];
+        let qv2 = q[(q_base + lane + 2u32 * plane_dim) as usize]
+            * v[(kv_base + lane + 2u32 * plane_dim) as usize];
+        let qv3 = q[(q_base + lane + 3u32 * plane_dim) as usize]
+            * v[(kv_base + lane + 3u32 * plane_dim) as usize];
         let qv_dot = qv0 + qv1 + qv2 + qv3;
         let q_t_dot_v_j = plane_sum(qv_dot);
 
@@ -788,7 +789,10 @@ fn deltanet_intra_output_f32(
 /// Requires `d == PLANE * 4` (128 on Metal/CUDA where PLANE=32). Falls back to
 /// sequential per-token recurrence otherwise.
 #[cfg(all(feature = "cubecl_runtime", feature = "deltanet_recurrence_rowpar"))]
-#[allow(unused_imports, reason = "Plane trait needed for plane_sum() resolution")]
+#[allow(
+    unused_imports,
+    reason = "Plane trait needed for plane_sum() resolution"
+)]
 use cubecl::features::Plane;
 
 #[cfg(feature = "cubecl_runtime")]
@@ -812,7 +816,10 @@ impl DeltanetIntraOutputCubeCL {
     /// - Q, K, V: `n_head * C * d` f32 elements each.
     /// - alpha, beta: `n_head * C` f32 elements each.
     /// - output: `n_head * C * d` f32 elements.
-    #[allow(clippy::too_many_arguments, reason = "GPU kernel launch: many buffer handles are inherent")]
+    #[allow(
+        clippy::too_many_arguments,
+        reason = "GPU kernel launch: many buffer handles are inherent"
+    )]
     pub unsafe fn launch<R: Runtime>(
         client: &ComputeClient<R>,
         q_handle: Handle,
@@ -827,7 +834,8 @@ impl DeltanetIntraOutputCubeCL {
     ) {
         debug_assert!(
             Self::supports(d),
-            "intra-output kernel requires d == {}", Self::PLANE * Self::COLS_PER_LANE
+            "intra-output kernel requires d == {}",
+            Self::PLANE * Self::COLS_PER_LANE
         );
         let params: [f32; 3] = [n_head as f32, c as f32, d as f32];
         let params_handle = client.create_from_slice(f32::as_bytes(&params));
@@ -871,11 +879,7 @@ impl DeltanetIntraOutputCubeCL {
 /// - `params`: `[n_head_f32, C_f32]`
 #[cfg(feature = "cubecl_runtime")]
 #[cube(launch_unchecked)]
-fn deltanet_forward_decay_f32(
-    alpha: &[f32],
-    decay_to_t: &mut [f32],
-    params: &[f32],
-) {
+fn deltanet_forward_decay_f32(alpha: &[f32], decay_to_t: &mut [f32], params: &[f32]) {
     let n_head = params[0usize] as usize;
     let c = params[1usize] as usize;
     let idx = ABSOLUTE_POS;
@@ -1032,7 +1036,10 @@ impl DeltanetCrossChunkCubeCL {
     /// - `d` must satisfy [`Self::supports`].
     /// - Q: `n_head * C * d`, S_boundary: `n_head * d * d`,
     ///   decay_to_t: `n_head * C`, output: `n_head * C * d`.
-    #[allow(clippy::too_many_arguments, reason = "GPU kernel launch: many buffer handles are inherent")]
+    #[allow(
+        clippy::too_many_arguments,
+        reason = "GPU kernel launch: many buffer handles are inherent"
+    )]
     pub unsafe fn launch<R: Runtime>(
         client: &ComputeClient<R>,
         q_handle: Handle,
@@ -1153,7 +1160,10 @@ impl DeltanetDeltaSCubeCL {
     /// - `d` must satisfy [`Self::supports`].
     /// - K, V: `n_head * C * d`. beta, decay_to_end: `n_head * C`.
     /// - delta_s: `n_head * d * d`.
-    #[allow(clippy::too_many_arguments, reason = "GPU kernel launch: many buffer handles are inherent")]
+    #[allow(
+        clippy::too_many_arguments,
+        reason = "GPU kernel launch: many buffer handles are inherent"
+    )]
     pub unsafe fn launch<R: Runtime>(
         client: &ComputeClient<R>,
         k_handle: Handle,
@@ -1238,9 +1248,9 @@ fn deltanet_extract_qkv_chunk_f32(
     let head_offset = head * d + dim;
 
     let t_base = token * qkvx_stride;
-    q_out[idx] = qkvx[t_base + head_offset];              // Q block at offset 0
-    k_out[idx] = qkvx[t_base + v_dim + head_offset];      // K block at offset v_dim
-    v_out[idx] = qkvx[t_base + 2 * v_dim + head_offset];  // V block at offset 2*v_dim
+    q_out[idx] = qkvx[t_base + head_offset]; // Q block at offset 0
+    k_out[idx] = qkvx[t_base + v_dim + head_offset]; // K block at offset v_dim
+    v_out[idx] = qkvx[t_base + 2 * v_dim + head_offset]; // V block at offset 2*v_dim
 }
 
 /// Launcher for the QKV extraction kernel.
@@ -1254,7 +1264,10 @@ impl DeltanetExtractQkvChunkCubeCL {
     /// # Safety
     /// - `qkvx_handle`: C * 3 * n_head * d f32 elements.
     /// - q_out, k_out, v_out: n_head * C * d f32 elements each.
-    #[allow(clippy::too_many_arguments, reason = "GPU kernel launch: many buffer handles are inherent")]
+    #[allow(
+        clippy::too_many_arguments,
+        reason = "GPU kernel launch: many buffer handles are inherent"
+    )]
     pub unsafe fn launch<R: Runtime>(
         client: &ComputeClient<R>,
         qkvx_handle: Handle,
@@ -1450,9 +1463,9 @@ mod tests {
     /// (conv_state[ch, ks-1]) is the current token's raw input, which the chunked
     /// kernel reads from the input buffer.
     fn cpu_sequential_conv1d_chunked(
-        input_raw: &[f32],          // [c, conv_dim] raw inputs
-        conv_weight: &[f32],        // [conv_dim, kernel_size]
-        carry_in_out: &mut [f32],   // [conv_dim, kernel_size-1] IN-OUT
+        input_raw: &[f32],        // [c, conv_dim] raw inputs
+        conv_weight: &[f32],      // [conv_dim, kernel_size]
+        carry_in_out: &mut [f32], // [conv_dim, kernel_size-1] IN-OUT
         c: usize,
         conv_dim: usize,
         kernel_size: usize,
@@ -1477,8 +1490,7 @@ mod tests {
                 for k in 0..kernel_size {
                     let sample_pos_signed = t as i64 - ks_m1 as i64 + k as i64;
                     let val = if sample_pos_signed < 0 {
-                        let carry_idx =
-                            (sample_pos_signed + ks_m1 as i64) as usize;
+                        let carry_idx = (sample_pos_signed + ks_m1 as i64) as usize;
                         carry_in_out[ch * ks_m1 + carry_idx]
                     } else {
                         let sample_pos = sample_pos_signed as usize;
@@ -1501,8 +1513,7 @@ mod tests {
         if c >= ks_m1 {
             for ch in 0..conv_dim {
                 for j in 0..ks_m1 {
-                    carry_in_out[ch * ks_m1 + j] =
-                        input_raw[(c - ks_m1 + j) * conv_dim + ch];
+                    carry_in_out[ch * ks_m1 + j] = input_raw[(c - ks_m1 + j) * conv_dim + ch];
                 }
             }
         } else {
@@ -1518,8 +1529,7 @@ mod tests {
                 for j in 0..c {
                     new_carry[ks_m1 - c + j] = input_raw[j * conv_dim + ch];
                 }
-                carry_in_out[ch * ks_m1..ch * ks_m1 + ks_m1]
-                    .copy_from_slice(&new_carry);
+                carry_in_out[ch * ks_m1..ch * ks_m1 + ks_m1].copy_from_slice(&new_carry);
             }
         }
         output
@@ -1589,8 +1599,14 @@ mod tests {
 
         // ── CPU sequential reference ──
         let mut cpu_carry = carry_init.clone();
-        let cpu_output =
-            cpu_sequential_conv1d_chunked(&input_raw, &conv_weight, &mut cpu_carry, c, conv_dim, kernel_size);
+        let cpu_output = cpu_sequential_conv1d_chunked(
+            &input_raw,
+            &conv_weight,
+            &mut cpu_carry,
+            c,
+            conv_dim,
+            kernel_size,
+        );
 
         // ── Compare outputs ──
         assert_eq!(gpu_output.len(), cpu_output.len());
@@ -1677,8 +1693,14 @@ mod tests {
 
         // ── CPU sequential reference ──
         let mut cpu_carry = carry_init.clone();
-        let cpu_output =
-            cpu_sequential_conv1d_chunked(&input_raw, &conv_weight, &mut cpu_carry, c, conv_dim, kernel_size);
+        let cpu_output = cpu_sequential_conv1d_chunked(
+            &input_raw,
+            &conv_weight,
+            &mut cpu_carry,
+            c,
+            conv_dim,
+            kernel_size,
+        );
 
         // ── Compare outputs ──
         let mut max_diff = 0.0f32;
@@ -1768,8 +1790,14 @@ mod tests {
 
         // ── CPU: sequential reference over the full sequence ──
         let mut cpu_carry = vec![0.0f32; conv_dim * ks_m1];
-        let cpu_output =
-            cpu_sequential_conv1d_chunked(&input_raw, &conv_weight, &mut cpu_carry, total_tokens, conv_dim, kernel_size);
+        let cpu_output = cpu_sequential_conv1d_chunked(
+            &input_raw,
+            &conv_weight,
+            &mut cpu_carry,
+            total_tokens,
+            conv_dim,
+            kernel_size,
+        );
 
         // ── Compare full outputs ──
         let mut max_diff = 0.0f32;
@@ -1783,7 +1811,9 @@ mod tests {
                 "multi-chunk conv1d output[{i}] GPU={g:.8} CPU={c_ref:.8} diff={diff:.2e}"
             );
         }
-        println!("test_chunked_conv1d_g1_multi_chunk: max output diff = {max_diff:.2e} across {total_tokens} tokens / {n_chunks} chunks");
+        println!(
+            "test_chunked_conv1d_g1_multi_chunk: max output diff = {max_diff:.2e} across {total_tokens} tokens / {n_chunks} chunks"
+        );
     }
 
     // ── Issue 658 Phase 2: conv_state layout G1 test ─────────────────────
@@ -1825,8 +1855,16 @@ mod tests {
         let out_h1 = client.empty(c * conv_dim * std::mem::size_of::<f32>());
         unsafe {
             DeltanetChunkedConv1dCubeCL::launch::<ActiveRuntime>(
-                &client, input_h1, out_h1.clone(), weight_h.clone(),
-                carry_h1.clone(), c, conv_dim, kernel_size, ks_m1, 0,
+                &client,
+                input_h1,
+                out_h1.clone(),
+                weight_h.clone(),
+                carry_h1.clone(),
+                c,
+                conv_dim,
+                kernel_size,
+                ks_m1,
+                0,
             );
         }
         let out1_bytes = client.read_one(out_h1).expect("read");
@@ -1843,8 +1881,16 @@ mod tests {
         let out_h2 = client.empty(c * conv_dim * std::mem::size_of::<f32>());
         unsafe {
             DeltanetChunkedConv1dCubeCL::launch::<ActiveRuntime>(
-                &client, input_h2, out_h2.clone(), weight_h, conv_state_h.clone(),
-                c, conv_dim, kernel_size, kernel_size, 1,
+                &client,
+                input_h2,
+                out_h2.clone(),
+                weight_h,
+                conv_state_h.clone(),
+                c,
+                conv_dim,
+                kernel_size,
+                kernel_size,
+                1,
             );
         }
         let out2_bytes = client.read_one(out_h2).expect("read");
@@ -1924,8 +1970,14 @@ mod tests {
 
         // CPU reference (its c < ks_m1 branch does the correct merge).
         let mut cpu_carry = carry_init.clone();
-        let cpu_output =
-            cpu_sequential_conv1d_chunked(&input_raw, &conv_weight, &mut cpu_carry, c, conv_dim, kernel_size);
+        let cpu_output = cpu_sequential_conv1d_chunked(
+            &input_raw,
+            &conv_weight,
+            &mut cpu_carry,
+            c,
+            conv_dim,
+            kernel_size,
+        );
 
         let input_h = client.create_from_slice(f32::as_bytes(&input_raw));
         let weight_h = client.create_from_slice(f32::as_bytes(&conv_weight));
@@ -1933,8 +1985,16 @@ mod tests {
         let out_h = client.empty(c * conv_dim * std::mem::size_of::<f32>());
         unsafe {
             DeltanetChunkedConv1dCubeCL::launch::<ActiveRuntime>(
-                &client, input_h, out_h.clone(), weight_h.clone(), carry_h.clone(),
-                c, conv_dim, kernel_size, ks_m1, 0,
+                &client,
+                input_h,
+                out_h.clone(),
+                weight_h.clone(),
+                carry_h.clone(),
+                c,
+                conv_dim,
+                kernel_size,
+                ks_m1,
+                0,
             );
         }
         let out_bytes = client.read_one(out_h).expect("read output");
@@ -1970,7 +2030,12 @@ mod tests {
             .collect();
         let mut cpu_carry1 = carry_init.clone();
         let _ = cpu_sequential_conv1d_chunked(
-            &input_raw1, &conv_weight, &mut cpu_carry1, c1, conv_dim, kernel_size,
+            &input_raw1,
+            &conv_weight,
+            &mut cpu_carry1,
+            c1,
+            conv_dim,
+            kernel_size,
         );
 
         // conv_state: positions 1..ks-1 carry the compact carry; position 0 is
@@ -1986,8 +2051,16 @@ mod tests {
         let out_h1 = client.empty(c1 * conv_dim * std::mem::size_of::<f32>());
         unsafe {
             DeltanetChunkedConv1dCubeCL::launch::<ActiveRuntime>(
-                &client, input_h1, out_h1.clone(), weight_h, state_h.clone(),
-                c1, conv_dim, kernel_size, kernel_size, 1,
+                &client,
+                input_h1,
+                out_h1.clone(),
+                weight_h,
+                state_h.clone(),
+                c1,
+                conv_dim,
+                kernel_size,
+                kernel_size,
+                1,
             );
         }
         let state_bytes = client.read_one(state_h).expect("read conv_state");
@@ -2020,12 +2093,12 @@ mod tests {
     ///
     /// Returns (outputs [C, d per head], final_state [d*d per head]).
     fn cpu_sequential_recurrence(
-        q: &[f32],           // [n_head, C, d]
-        k: &[f32],           // [n_head, C, d]
-        v: &[f32],           // [n_head, C, d]
-        alpha: &[f32],       // [n_head, C]
-        beta: &[f32],        // [n_head, C]
-        s_init: &[f32],      // [n_head, d, d]
+        q: &[f32],      // [n_head, C, d]
+        k: &[f32],      // [n_head, C, d]
+        v: &[f32],      // [n_head, C, d]
+        alpha: &[f32],  // [n_head, C]
+        beta: &[f32],   // [n_head, C]
+        s_init: &[f32], // [n_head, d, d]
         n_head: usize,
         c: usize,
         d: usize,
@@ -2081,7 +2154,10 @@ mod tests {
         let n_head: usize = 4; // small for test speed
         let c: usize = 8;
         let d: usize = 128;
-        assert!(DeltanetIntraOutputCubeCL::supports(d), "test requires d=128");
+        assert!(
+            DeltanetIntraOutputCubeCL::supports(d),
+            "test requires d=128"
+        );
         let scale = 1.0 / (d as f32).sqrt();
 
         // Synthetic data with small magnitudes (to stay in linear regime of f32).
@@ -2129,7 +2205,11 @@ mod tests {
         let decay_to_end_h = client.empty(n_head * (c + 1) * std::mem::size_of::<f32>());
         unsafe {
             DeltanetChunkDecayCubeCL::launch::<ActiveRuntime>(
-                &client, alpha_h.clone(), decay_to_end_h.clone(), n_head, c,
+                &client,
+                alpha_h.clone(),
+                decay_to_end_h.clone(),
+                n_head,
+                c,
             );
         }
 
@@ -2144,7 +2224,9 @@ mod tests {
         // which would read from the WRONG offset (it would read total_decay of head h-1).
         // FIX: we need a separate [n_head, C] buffer for the per-token decay_to_end.
         // Let's read back decay_to_end, extract the first C per head, re-upload.
-        let decay_to_end_bytes = client.read_one(decay_to_end_h.clone()).expect("read decay_to_end");
+        let decay_to_end_bytes = client
+            .read_one(decay_to_end_h.clone())
+            .expect("read decay_to_end");
         let decay_to_end = f32::from_bytes(&decay_to_end_bytes);
         let mut decay_to_end_c = vec![0.0f32; n_head * c];
         for h in 0..n_head {
@@ -2159,8 +2241,15 @@ mod tests {
         let delta_s_h = client.empty(n_head * d * d * std::mem::size_of::<f32>());
         unsafe {
             DeltanetDeltaSCubeCL::launch::<ActiveRuntime>(
-                &client, k_h.clone(), v_h.clone(), beta_h.clone(),
-                decay_to_end_c_h.clone(), delta_s_h.clone(), n_head, c, d,
+                &client,
+                k_h.clone(),
+                v_h.clone(),
+                beta_h.clone(),
+                decay_to_end_c_h.clone(),
+                delta_s_h.clone(),
+                n_head,
+                c,
+                d,
             );
         }
 
@@ -2168,8 +2257,13 @@ mod tests {
         let s_next_h = client.empty(n_head * d * d * std::mem::size_of::<f32>());
         unsafe {
             DeltanetStateTransitionCubeCL::launch::<ActiveRuntime>(
-                &client, s_init_h.clone(), delta_s_h.clone(), total_decay_h.clone(),
-                s_next_h.clone(), n_head, d,
+                &client,
+                s_init_h.clone(),
+                delta_s_h.clone(),
+                total_decay_h.clone(),
+                s_next_h.clone(),
+                n_head,
+                d,
             );
         }
 
@@ -2177,7 +2271,11 @@ mod tests {
         let decay_to_t_h = client.empty(n_head * c * std::mem::size_of::<f32>());
         unsafe {
             DeltanetForwardDecayCubeCL::launch::<ActiveRuntime>(
-                &client, alpha_h.clone(), decay_to_t_h.clone(), n_head, c,
+                &client,
+                alpha_h.clone(),
+                decay_to_t_h.clone(),
+                n_head,
+                c,
             );
         }
 
@@ -2185,8 +2283,16 @@ mod tests {
         let intra_out_h = client.empty(n_head * c * d * std::mem::size_of::<f32>());
         unsafe {
             DeltanetIntraOutputCubeCL::launch::<ActiveRuntime>(
-                &client, q_h.clone(), k_h.clone(), v_h.clone(),
-                alpha_h.clone(), beta_h.clone(), intra_out_h.clone(), n_head, c, d,
+                &client,
+                q_h.clone(),
+                k_h.clone(),
+                v_h.clone(),
+                alpha_h.clone(),
+                beta_h.clone(),
+                intra_out_h.clone(),
+                n_head,
+                c,
+                d,
             );
         }
 
@@ -2194,8 +2300,14 @@ mod tests {
         let cross_out_h = client.empty(n_head * c * d * std::mem::size_of::<f32>());
         unsafe {
             DeltanetCrossChunkCubeCL::launch::<ActiveRuntime>(
-                &client, q_h.clone(), s_init_h.clone(), decay_to_t_h.clone(),
-                cross_out_h.clone(), n_head, c, d,
+                &client,
+                q_h.clone(),
+                s_init_h.clone(),
+                decay_to_t_h.clone(),
+                cross_out_h.clone(),
+                n_head,
+                c,
+                d,
             );
         }
 
@@ -2204,7 +2316,11 @@ mod tests {
         let intra = f32::from_bytes(&intra_bytes);
         let cross_bytes = client.read_one(cross_out_h).expect("read cross");
         let cross = f32::from_bytes(&cross_bytes);
-        let gpu_outputs: Vec<f32> = intra.iter().zip(cross.iter()).map(|(&i, &c_v)| (i + c_v) * scale).collect();
+        let gpu_outputs: Vec<f32> = intra
+            .iter()
+            .zip(cross.iter())
+            .map(|(&i, &c_v)| (i + c_v) * scale)
+            .collect();
 
         // Read back final state.
         let s_next_bytes = client.read_one(s_next_h).expect("read s_next");
@@ -2222,7 +2338,9 @@ mod tests {
                 max_out_diff = diff;
             }
         }
-        println!("test_chunked_recurrence_g1_full_pipeline: max output diff = {max_out_diff:.2e} (tol {REC_TOL:.0e})");
+        println!(
+            "test_chunked_recurrence_g1_full_pipeline: max output diff = {max_out_diff:.2e} (tol {REC_TOL:.0e})"
+        );
         assert!(
             max_out_diff < REC_TOL,
             "chunked recurrence output max diff {max_out_diff:.2e} exceeds tol {REC_TOL:.0e}"
@@ -2236,7 +2354,9 @@ mod tests {
                 max_state_diff = diff;
             }
         }
-        println!("test_chunked_recurrence_g1_full_pipeline: max state diff = {max_state_diff:.2e} (tol {REC_TOL:.0e})");
+        println!(
+            "test_chunked_recurrence_g1_full_pipeline: max state diff = {max_state_diff:.2e} (tol {REC_TOL:.0e})"
+        );
         assert!(
             max_state_diff < REC_TOL,
             "chunked recurrence final state max diff {max_state_diff:.2e} exceeds tol {REC_TOL:.0e}"
@@ -2297,7 +2417,14 @@ mod tests {
         let out_h = client.empty(n_head * c * d * std::mem::size_of::<f32>());
         unsafe {
             DeltanetCrossChunkCubeCL::launch::<ActiveRuntime>(
-                &client, q_h, s_h, decay_h, out_h.clone(), n_head, c, d,
+                &client,
+                q_h,
+                s_h,
+                decay_h,
+                out_h.clone(),
+                n_head,
+                c,
+                d,
             );
         }
         let out_bytes = client.read_one(out_h).expect("read cross output");

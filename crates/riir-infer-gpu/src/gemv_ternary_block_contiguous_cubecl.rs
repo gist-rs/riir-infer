@@ -49,9 +49,9 @@ use cubecl::prelude::*;
 #[cfg(feature = "cubecl_runtime")]
 use cubecl::server::Handle;
 
-use crate::gemv_ternary_cubecl::{prepare_block_contiguous_u32, U32_PER_BLOCK_GROUP};
 #[cfg(feature = "cubecl_runtime")]
 use crate::gemv_ternary_cubecl::{TERNARY_GROUP_SIZE, TERNARY_ROWS_PER_PLANE_8};
+use crate::gemv_ternary_cubecl::{U32_PER_BLOCK_GROUP, prepare_block_contiguous_u32};
 use katgpt_core::TernaryGroupWeights;
 
 // ── Handle ──────────────────────────────────────────────────────────
@@ -177,13 +177,27 @@ fn gemv_ternary_block_contiguous_rowtiled8(
     let mut r5 = m - 1u32;
     let mut r6 = m - 1u32;
     let mut r7 = m - 1u32;
-    if row_base + 1u32 < m { r1 = row_base + 1u32; }
-    if row_base + 2u32 < m { r2 = row_base + 2u32; }
-    if row_base + 3u32 < m { r3 = row_base + 3u32; }
-    if row_base + 4u32 < m { r4 = row_base + 4u32; }
-    if row_base + 5u32 < m { r5 = row_base + 5u32; }
-    if row_base + 6u32 < m { r6 = row_base + 6u32; }
-    if row_base + 7u32 < m { r7 = row_base + 7u32; }
+    if row_base + 1u32 < m {
+        r1 = row_base + 1u32;
+    }
+    if row_base + 2u32 < m {
+        r2 = row_base + 2u32;
+    }
+    if row_base + 3u32 < m {
+        r3 = row_base + 3u32;
+    }
+    if row_base + 4u32 < m {
+        r4 = row_base + 4u32;
+    }
+    if row_base + 5u32 < m {
+        r5 = row_base + 5u32;
+    }
+    if row_base + 6u32 < m {
+        r6 = row_base + 6u32;
+    }
+    if row_base + 7u32 < m {
+        r7 = row_base + 7u32;
+    }
 
     let mut acc0 = f32::new(0.0f32);
     let mut acc1 = f32::new(0.0f32);
@@ -372,13 +386,27 @@ fn gemv_ternary_block_contiguous_rowtiled8(
 
     if lane == 0u32 {
         output[r0 as usize] = t0;
-        if row_base + 1u32 < m { output[r1 as usize] = t1; }
-        if row_base + 2u32 < m { output[r2 as usize] = t2; }
-        if row_base + 3u32 < m { output[r3 as usize] = t3; }
-        if row_base + 4u32 < m { output[r4 as usize] = t4; }
-        if row_base + 5u32 < m { output[r5 as usize] = t5; }
-        if row_base + 6u32 < m { output[r6 as usize] = t6; }
-        if row_base + 7u32 < m { output[r7 as usize] = t7; }
+        if row_base + 1u32 < m {
+            output[r1 as usize] = t1;
+        }
+        if row_base + 2u32 < m {
+            output[r2 as usize] = t2;
+        }
+        if row_base + 3u32 < m {
+            output[r3 as usize] = t3;
+        }
+        if row_base + 4u32 < m {
+            output[r4 as usize] = t4;
+        }
+        if row_base + 5u32 < m {
+            output[r5 as usize] = t5;
+        }
+        if row_base + 6u32 < m {
+            output[r6 as usize] = t6;
+        }
+        if row_base + 7u32 < m {
+            output[r7 as usize] = t7;
+        }
     }
 }
 

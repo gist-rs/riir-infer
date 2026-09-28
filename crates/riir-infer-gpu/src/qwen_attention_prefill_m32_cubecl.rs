@@ -123,41 +123,169 @@ fn qwen_attention_prefill_tiled_m32_f32(
 
     // Lane dims, row A (hand-unrolled: statically-indexed scalars stay in
     // registers — the Batch-49 local-memory-demotion class).
-    let qa0 = if active_a { query[q_off_a + dims_base] } else { f32::new(0.0f32) };
-    let qa1 = if active_a { query[q_off_a + dims_base + 1usize] } else { f32::new(0.0f32) };
-    let qa2 = if active_a { query[q_off_a + dims_base + 2usize] } else { f32::new(0.0f32) };
-    let qa3 = if active_a { query[q_off_a + dims_base + 3usize] } else { f32::new(0.0f32) };
-    let qa4 = if active_a { query[q_off_a + dims_base + 4usize] } else { f32::new(0.0f32) };
-    let qa5 = if active_a { query[q_off_a + dims_base + 5usize] } else { f32::new(0.0f32) };
-    let qa6 = if active_a { query[q_off_a + dims_base + 6usize] } else { f32::new(0.0f32) };
-    let qa7 = if active_a { query[q_off_a + dims_base + 7usize] } else { f32::new(0.0f32) };
+    let qa0 = if active_a {
+        query[q_off_a + dims_base]
+    } else {
+        f32::new(0.0f32)
+    };
+    let qa1 = if active_a {
+        query[q_off_a + dims_base + 1usize]
+    } else {
+        f32::new(0.0f32)
+    };
+    let qa2 = if active_a {
+        query[q_off_a + dims_base + 2usize]
+    } else {
+        f32::new(0.0f32)
+    };
+    let qa3 = if active_a {
+        query[q_off_a + dims_base + 3usize]
+    } else {
+        f32::new(0.0f32)
+    };
+    let qa4 = if active_a {
+        query[q_off_a + dims_base + 4usize]
+    } else {
+        f32::new(0.0f32)
+    };
+    let qa5 = if active_a {
+        query[q_off_a + dims_base + 5usize]
+    } else {
+        f32::new(0.0f32)
+    };
+    let qa6 = if active_a {
+        query[q_off_a + dims_base + 6usize]
+    } else {
+        f32::new(0.0f32)
+    };
+    let qa7 = if active_a {
+        query[q_off_a + dims_base + 7usize]
+    } else {
+        f32::new(0.0f32)
+    };
     // Row B.
-    let qb0 = if active_b { query[q_off_b + dims_base] } else { f32::new(0.0f32) };
-    let qb1 = if active_b { query[q_off_b + dims_base + 1usize] } else { f32::new(0.0f32) };
-    let qb2 = if active_b { query[q_off_b + dims_base + 2usize] } else { f32::new(0.0f32) };
-    let qb3 = if active_b { query[q_off_b + dims_base + 3usize] } else { f32::new(0.0f32) };
-    let qb4 = if active_b { query[q_off_b + dims_base + 4usize] } else { f32::new(0.0f32) };
-    let qb5 = if active_b { query[q_off_b + dims_base + 5usize] } else { f32::new(0.0f32) };
-    let qb6 = if active_b { query[q_off_b + dims_base + 6usize] } else { f32::new(0.0f32) };
-    let qb7 = if active_b { query[q_off_b + dims_base + 7usize] } else { f32::new(0.0f32) };
+    let qb0 = if active_b {
+        query[q_off_b + dims_base]
+    } else {
+        f32::new(0.0f32)
+    };
+    let qb1 = if active_b {
+        query[q_off_b + dims_base + 1usize]
+    } else {
+        f32::new(0.0f32)
+    };
+    let qb2 = if active_b {
+        query[q_off_b + dims_base + 2usize]
+    } else {
+        f32::new(0.0f32)
+    };
+    let qb3 = if active_b {
+        query[q_off_b + dims_base + 3usize]
+    } else {
+        f32::new(0.0f32)
+    };
+    let qb4 = if active_b {
+        query[q_off_b + dims_base + 4usize]
+    } else {
+        f32::new(0.0f32)
+    };
+    let qb5 = if active_b {
+        query[q_off_b + dims_base + 5usize]
+    } else {
+        f32::new(0.0f32)
+    };
+    let qb6 = if active_b {
+        query[q_off_b + dims_base + 6usize]
+    } else {
+        f32::new(0.0f32)
+    };
+    let qb7 = if active_b {
+        query[q_off_b + dims_base + 7usize]
+    } else {
+        f32::new(0.0f32)
+    };
     // Row C.
-    let qc0 = if active_c { query[q_off_c + dims_base] } else { f32::new(0.0f32) };
-    let qc1 = if active_c { query[q_off_c + dims_base + 1usize] } else { f32::new(0.0f32) };
-    let qc2 = if active_c { query[q_off_c + dims_base + 2usize] } else { f32::new(0.0f32) };
-    let qc3 = if active_c { query[q_off_c + dims_base + 3usize] } else { f32::new(0.0f32) };
-    let qc4 = if active_c { query[q_off_c + dims_base + 4usize] } else { f32::new(0.0f32) };
-    let qc5 = if active_c { query[q_off_c + dims_base + 5usize] } else { f32::new(0.0f32) };
-    let qc6 = if active_c { query[q_off_c + dims_base + 6usize] } else { f32::new(0.0f32) };
-    let qc7 = if active_c { query[q_off_c + dims_base + 7usize] } else { f32::new(0.0f32) };
+    let qc0 = if active_c {
+        query[q_off_c + dims_base]
+    } else {
+        f32::new(0.0f32)
+    };
+    let qc1 = if active_c {
+        query[q_off_c + dims_base + 1usize]
+    } else {
+        f32::new(0.0f32)
+    };
+    let qc2 = if active_c {
+        query[q_off_c + dims_base + 2usize]
+    } else {
+        f32::new(0.0f32)
+    };
+    let qc3 = if active_c {
+        query[q_off_c + dims_base + 3usize]
+    } else {
+        f32::new(0.0f32)
+    };
+    let qc4 = if active_c {
+        query[q_off_c + dims_base + 4usize]
+    } else {
+        f32::new(0.0f32)
+    };
+    let qc5 = if active_c {
+        query[q_off_c + dims_base + 5usize]
+    } else {
+        f32::new(0.0f32)
+    };
+    let qc6 = if active_c {
+        query[q_off_c + dims_base + 6usize]
+    } else {
+        f32::new(0.0f32)
+    };
+    let qc7 = if active_c {
+        query[q_off_c + dims_base + 7usize]
+    } else {
+        f32::new(0.0f32)
+    };
     // Row D.
-    let qd0 = if active_d { query[q_off_d + dims_base] } else { f32::new(0.0f32) };
-    let qd1 = if active_d { query[q_off_d + dims_base + 1usize] } else { f32::new(0.0f32) };
-    let qd2 = if active_d { query[q_off_d + dims_base + 2usize] } else { f32::new(0.0f32) };
-    let qd3 = if active_d { query[q_off_d + dims_base + 3usize] } else { f32::new(0.0f32) };
-    let qd4 = if active_d { query[q_off_d + dims_base + 4usize] } else { f32::new(0.0f32) };
-    let qd5 = if active_d { query[q_off_d + dims_base + 5usize] } else { f32::new(0.0f32) };
-    let qd6 = if active_d { query[q_off_d + dims_base + 6usize] } else { f32::new(0.0f32) };
-    let qd7 = if active_d { query[q_off_d + dims_base + 7usize] } else { f32::new(0.0f32) };
+    let qd0 = if active_d {
+        query[q_off_d + dims_base]
+    } else {
+        f32::new(0.0f32)
+    };
+    let qd1 = if active_d {
+        query[q_off_d + dims_base + 1usize]
+    } else {
+        f32::new(0.0f32)
+    };
+    let qd2 = if active_d {
+        query[q_off_d + dims_base + 2usize]
+    } else {
+        f32::new(0.0f32)
+    };
+    let qd3 = if active_d {
+        query[q_off_d + dims_base + 3usize]
+    } else {
+        f32::new(0.0f32)
+    };
+    let qd4 = if active_d {
+        query[q_off_d + dims_base + 4usize]
+    } else {
+        f32::new(0.0f32)
+    };
+    let qd5 = if active_d {
+        query[q_off_d + dims_base + 5usize]
+    } else {
+        f32::new(0.0f32)
+    };
+    let qd6 = if active_d {
+        query[q_off_d + dims_base + 6usize]
+    } else {
+        f32::new(0.0f32)
+    };
+    let qd7 = if active_d {
+        query[q_off_d + dims_base + 7usize]
+    } else {
+        f32::new(0.0f32)
+    };
 
     // Online softmax state per row, per lane (uniform across the plane after
     // every broadcast).
@@ -220,14 +348,14 @@ fn qwen_attention_prefill_tiled_m32_f32(
         let k6 = key[k_base + dims_base + 6usize];
         let k7 = key[k_base + dims_base + 7usize];
 
-        let partial_a = qa0 * k0 + qa1 * k1 + qa2 * k2 + qa3 * k3
-            + qa4 * k4 + qa5 * k5 + qa6 * k6 + qa7 * k7;
-        let partial_b = qb0 * k0 + qb1 * k1 + qb2 * k2 + qb3 * k3
-            + qb4 * k4 + qb5 * k5 + qb6 * k6 + qb7 * k7;
-        let partial_c = qc0 * k0 + qc1 * k1 + qc2 * k2 + qc3 * k3
-            + qc4 * k4 + qc5 * k5 + qc6 * k6 + qc7 * k7;
-        let partial_d = qd0 * k0 + qd1 * k1 + qd2 * k2 + qd3 * k3
-            + qd4 * k4 + qd5 * k5 + qd6 * k6 + qd7 * k7;
+        let partial_a =
+            qa0 * k0 + qa1 * k1 + qa2 * k2 + qa3 * k3 + qa4 * k4 + qa5 * k5 + qa6 * k6 + qa7 * k7;
+        let partial_b =
+            qb0 * k0 + qb1 * k1 + qb2 * k2 + qb3 * k3 + qb4 * k4 + qb5 * k5 + qb6 * k6 + qb7 * k7;
+        let partial_c =
+            qc0 * k0 + qc1 * k1 + qc2 * k2 + qc3 * k3 + qc4 * k4 + qc5 * k5 + qc6 * k6 + qc7 * k7;
+        let partial_d =
+            qd0 * k0 + qd1 * k1 + qd2 * k2 + qd3 * k3 + qd4 * k4 + qd5 * k5 + qd6 * k6 + qd7 * k7;
         // Reduce + broadcast within this plane's 32 lanes (tree order — the
         // same FP-equivalent class as the m16 kernel, unchanged per row).
         let score_a = plane_sum(partial_a) * scale;
@@ -239,27 +367,91 @@ fn qwen_attention_prefill_tiled_m32_f32(
         let in_causal_b = active_b && pos <= q_abs_b;
         let in_causal_c = active_c && pos <= q_abs_c;
         let in_causal_d = active_d && pos <= q_abs_d;
-        let masked_a = if in_causal_a { score_a } else { f32::new(-1e30f32) };
-        let masked_b = if in_causal_b { score_b } else { f32::new(-1e30f32) };
-        let masked_c = if in_causal_c { score_c } else { f32::new(-1e30f32) };
-        let masked_d = if in_causal_d { score_d } else { f32::new(-1e30f32) };
+        let masked_a = if in_causal_a {
+            score_a
+        } else {
+            f32::new(-1e30f32)
+        };
+        let masked_b = if in_causal_b {
+            score_b
+        } else {
+            f32::new(-1e30f32)
+        };
+        let masked_c = if in_causal_c {
+            score_c
+        } else {
+            f32::new(-1e30f32)
+        };
+        let masked_d = if in_causal_d {
+            score_d
+        } else {
+            f32::new(-1e30f32)
+        };
 
-        let new_max_a = if masked_a > run_max_a { masked_a } else { run_max_a };
-        let new_max_b = if masked_b > run_max_b { masked_b } else { run_max_b };
-        let new_max_c = if masked_c > run_max_c { masked_c } else { run_max_c };
-        let new_max_d = if masked_d > run_max_d { masked_d } else { run_max_d };
+        let new_max_a = if masked_a > run_max_a {
+            masked_a
+        } else {
+            run_max_a
+        };
+        let new_max_b = if masked_b > run_max_b {
+            masked_b
+        } else {
+            run_max_b
+        };
+        let new_max_c = if masked_c > run_max_c {
+            masked_c
+        } else {
+            run_max_c
+        };
+        let new_max_d = if masked_d > run_max_d {
+            masked_d
+        } else {
+            run_max_d
+        };
 
         // Exp hoist per row: each plane-uniform exp runs on lane 0 ONLY and
         // is broadcast with one shuffle (the Bench 786 reduce-on-all-lanes
         // lesson; no shuffle inside a divergent branch).
-        let w_a0 = if lane == 0u32 { (masked_a - new_max_a).exp() } else { f32::new(0.0f32) };
-        let corr_a0 = if lane == 0u32 { (run_max_a - new_max_a).exp() } else { f32::new(0.0f32) };
-        let w_b0 = if lane == 0u32 { (masked_b - new_max_b).exp() } else { f32::new(0.0f32) };
-        let corr_b0 = if lane == 0u32 { (run_max_b - new_max_b).exp() } else { f32::new(0.0f32) };
-        let w_c0 = if lane == 0u32 { (masked_c - new_max_c).exp() } else { f32::new(0.0f32) };
-        let corr_c0 = if lane == 0u32 { (run_max_c - new_max_c).exp() } else { f32::new(0.0f32) };
-        let w_d0 = if lane == 0u32 { (masked_d - new_max_d).exp() } else { f32::new(0.0f32) };
-        let corr_d0 = if lane == 0u32 { (run_max_d - new_max_d).exp() } else { f32::new(0.0f32) };
+        let w_a0 = if lane == 0u32 {
+            (masked_a - new_max_a).exp()
+        } else {
+            f32::new(0.0f32)
+        };
+        let corr_a0 = if lane == 0u32 {
+            (run_max_a - new_max_a).exp()
+        } else {
+            f32::new(0.0f32)
+        };
+        let w_b0 = if lane == 0u32 {
+            (masked_b - new_max_b).exp()
+        } else {
+            f32::new(0.0f32)
+        };
+        let corr_b0 = if lane == 0u32 {
+            (run_max_b - new_max_b).exp()
+        } else {
+            f32::new(0.0f32)
+        };
+        let w_c0 = if lane == 0u32 {
+            (masked_c - new_max_c).exp()
+        } else {
+            f32::new(0.0f32)
+        };
+        let corr_c0 = if lane == 0u32 {
+            (run_max_c - new_max_c).exp()
+        } else {
+            f32::new(0.0f32)
+        };
+        let w_d0 = if lane == 0u32 {
+            (masked_d - new_max_d).exp()
+        } else {
+            f32::new(0.0f32)
+        };
+        let corr_d0 = if lane == 0u32 {
+            (run_max_d - new_max_d).exp()
+        } else {
+            f32::new(0.0f32)
+        };
         let w_a = plane_broadcast(w_a0, 0u32);
         let corr_a = plane_broadcast(corr_a0, 0u32);
         let w_b = plane_broadcast(w_b0, 0u32);
@@ -496,14 +688,18 @@ impl QwenAttentionPrefillTiledM32CubeCL {
                 (base_pos + t0) as f32,
                 tiles as f32,
             ];
-            let params_handle =
-                crate::params_cache::params_handle(client, f32::as_bytes(&params));
+            let params_handle = crate::params_cache::params_handle(client, f32::as_bytes(&params));
             let q_len = tc * n_head * head_dim;
             let kv_len = (base_pos + p) * n_kv_head * head_dim;
-            let q_slice = query_handle.clone().offset_start((t0 * n_head * head_dim * 4) as u64);
-            let g_slice = gate_handle.clone().offset_start((t0 * n_head * head_dim * 4) as u64);
-            let o_slice =
-                attn_out_handle.clone().offset_start((t0 * n_head * head_dim * 4) as u64);
+            let q_slice = query_handle
+                .clone()
+                .offset_start((t0 * n_head * head_dim * 4) as u64);
+            let g_slice = gate_handle
+                .clone()
+                .offset_start((t0 * n_head * head_dim * 4) as u64);
+            let o_slice = attn_out_handle
+                .clone()
+                .offset_start((t0 * n_head * head_dim * 4) as u64);
             let n_cubes = n_head * tiles;
             unsafe {
                 qwen_attention_prefill_tiled_m32_f32::launch_unchecked::<R>(

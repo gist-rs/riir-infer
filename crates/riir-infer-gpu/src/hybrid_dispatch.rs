@@ -20,11 +20,11 @@
 //! - Profile first: both paths produce the same output shape, benchmarking is straightforward
 
 #[cfg(feature = "deltanet_inference")]
+use crate::cubecl_runtime::ActiveRuntime;
+#[cfg(feature = "deltanet_inference")]
 use crate::deltanet_cubecl::DeltaNetStateBuffers;
 #[cfg(feature = "deltanet_inference")]
 use cubecl::prelude::*;
-#[cfg(feature = "deltanet_inference")]
-use crate::cubecl_runtime::ActiveRuntime;
 
 #[cfg(feature = "deltanet_inference")]
 use riir_infer_core::types::{Config, DeltaNetLayerType};

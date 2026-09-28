@@ -151,7 +151,13 @@ impl D2fScState {
 
         let mut estimates = Vec::with_capacity(seq_len);
         for logits in &all_logits[..seq_len] {
-            let estimate = compute_x0_estimate(logits, wte_cpu, n_embd, mask_token_id, self.config.x0_temperature);
+            let estimate = compute_x0_estimate(
+                logits,
+                wte_cpu,
+                n_embd,
+                mask_token_id,
+                self.config.x0_temperature,
+            );
             estimates.push(estimate);
         }
         self.prev_x0_estimate = Some(estimates);
@@ -209,7 +215,11 @@ pub fn compute_x0_estimate(
         .filter(|(t, _)| *t != mask_token_id)
         .map(|(_, &l)| l)
         .fold(f32::NEG_INFINITY, f32::max);
-    let inv_temp = if temperature > 0.0 { 1.0 / temperature } else { 1.0 };
+    let inv_temp = if temperature > 0.0 {
+        1.0 / temperature
+    } else {
+        1.0
+    };
 
     // Table-size check hoisted out of the vocab-sized hot loop (Issue 695
     // H21 — was a per-token compare across 256k iterations).
@@ -220,7 +230,10 @@ pub fn compute_x0_estimate(
 
     let mut sum_exp = 0.0f32;
     // First pass: compute sum of exponentials.
-    #[allow(clippy::needless_range_loop, reason = "skip-by-index: t == mask_token_id continue; cleaner than filter on enumerated index")]
+    #[allow(
+        clippy::needless_range_loop,
+        reason = "skip-by-index: t == mask_token_id continue; cleaner than filter on enumerated index"
+    )]
     for t in 0..vocab {
         if t == mask_token_id {
             continue;
@@ -236,7 +249,10 @@ pub fn compute_x0_estimate(
     // x̂_0[i] = Σ_t softmax_t * wte[t * n_embd + i]
     let mut estimate = vec![0.0f32; n_embd];
     let inv_sum = 1.0 / sum_exp;
-    #[allow(clippy::needless_range_loop, reason = "skip-by-index: t == mask_token_id continue")]
+    #[allow(
+        clippy::needless_range_loop,
+        reason = "skip-by-index: t == mask_token_id continue"
+    )]
     for t in 0..vocab {
         if t == mask_token_id {
             continue;
@@ -331,12 +347,7 @@ pub fn is_identity_padded(w_sc: &[f32], n_embd: usize) -> bool {
 /// # Panics
 ///
 /// Panics in debug if lengths don't match.
-pub fn project_sc(
-    x_t: &[f32],
-    sc_input: &[f32],
-    w_sc: &[f32],
-    n_embd: usize,
-) -> Vec<f32> {
+pub fn project_sc(x_t: &[f32], sc_input: &[f32], w_sc: &[f32], n_embd: usize) -> Vec<f32> {
     debug_assert_eq!(x_t.len(), n_embd, "x_t length must equal n_embd");
     debug_assert_eq!(sc_input.len(), n_embd, "sc_input length must equal n_embd");
     debug_assert_eq!(
@@ -348,7 +359,10 @@ pub fn project_sc(
     let cols = 2 * n_embd;
     let mut output = vec![0.0f32; n_embd];
 
-    #[allow(clippy::needless_range_loop, reason = "matmul: i selects row i*cols of w_sc")]
+    #[allow(
+        clippy::needless_range_loop,
+        reason = "matmul: i selects row i*cols of w_sc"
+    )]
     for i in 0..n_embd {
         let row_off = i * cols;
         let mut acc = 0.0f32;
@@ -398,7 +412,10 @@ pub fn project_sc_into(
     );
 
     let cols = 2 * n_embd;
-    #[allow(clippy::needless_range_loop, reason = "matmul: i selects row i*cols of w_sc")]
+    #[allow(
+        clippy::needless_range_loop,
+        reason = "matmul: i selects row i*cols of w_sc"
+    )]
     for i in 0..n_embd {
         let row_off = i * cols;
         let mut acc = 0.0f32;
@@ -476,8 +493,8 @@ mod tests {
         let mut state = D2fScState::new(D2fScConfig::enabled());
         // Fake logits: 3 positions, 4 vocab.
         let logits = vec![
-            vec![1.0, 2.0, 3.0, 0.1], // token 0
-            vec![0.5, 0.5, 0.5, 0.5], // uniform
+            vec![1.0, 2.0, 3.0, 0.1],  // token 0
+            vec![0.5, 0.5, 0.5, 0.5],  // uniform
             vec![0.0, 0.0, 10.0, 0.0], // peaked at token 2
         ];
         // Fake wte: 4 tokens × 2 dims.
@@ -541,8 +558,16 @@ mod tests {
         ];
         let estimate = compute_x0_estimate(&logits, &wte, 2, 99, 1.0);
         // Should be ≈ [0, 1] (token 1's embedding).
-        assert!((estimate[0] - 0.0).abs() < 0.01, "x should be ≈0, got {}", estimate[0]);
-        assert!((estimate[1] - 1.0).abs() < 0.01, "y should be ≈1, got {}", estimate[1]);
+        assert!(
+            (estimate[0] - 0.0).abs() < 0.01,
+            "x should be ≈0, got {}",
+            estimate[0]
+        );
+        assert!(
+            (estimate[1] - 1.0).abs() < 0.01,
+            "y should be ≈1, got {}",
+            estimate[1]
+        );
     }
 
     #[test]

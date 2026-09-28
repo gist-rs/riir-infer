@@ -41,9 +41,9 @@
 #![cfg(all(target_os = "macos", feature = "laya-riir-metal"))]
 
 use riir_infer_laya::laya::config::Checkpoint;
-use riir_infer_laya::laya::riir::agent::{RiirAgent, PACKED_ACT_BITS};
+use riir_infer_laya::laya::riir::agent::{PACKED_ACT_BITS, RiirAgent};
 use riir_infer_laya::laya::weights::weights_root;
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 
 const ROUNDS: usize = 24;
 
@@ -131,8 +131,12 @@ fn captured_bits() -> Vec<([u32; 2], Vec<u32>)> {
 fn t12_head_defer_paired_ab() {
     let mut agent = RiirAgent::load(&weights_root(), Checkpoint::TypedDecisions)
         .expect("typed checkpoint present");
-    assert_eq!(agent.device(), "metal", "run with LAYA_DEVICE=metal — a CPU \
-        posture measures a different lane and the table would be fiction");
+    assert_eq!(
+        agent.device(),
+        "metal",
+        "run with LAYA_DEVICE=metal — a CPU \
+        posture measures a different lane and the table would be fiction"
+    );
     let st = state();
 
     // Shape probe (the loop path — one throwaway forward reads seq_len).

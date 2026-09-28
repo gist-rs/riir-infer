@@ -40,8 +40,10 @@
 
 use std::sync::Arc;
 
-use cudarc::driver::safe::{CudaContext, CudaFunction, CudaModule, CudaStream, DevicePtr, LaunchConfig};
 use cudarc::driver::PushKernelArg;
+use cudarc::driver::safe::{
+    CudaContext, CudaFunction, CudaModule, CudaStream, DevicePtr, LaunchConfig,
+};
 
 /// Plan 603 R2 — the half-precision recurrent-state residency format.
 /// The state lives as 16-bit halves (half the per-token DRAM traffic); the
@@ -1411,9 +1413,10 @@ impl DeltanetKernels {
         let recurrence_half_hd128_f16 = module
             .load_function("recurrence_half_fused_hd128_f16")
             .map_err(|e| super::CudarcKernelError::Compile(format!("{e}")))?;
-        let recurrence_half_hd128_bf16 = module
-            .load_function("recurrence_half_fused_hd128_bf16")
-            .map_err(|e| super::CudarcKernelError::Compile(format!("{e}")))?;
+        let recurrence_half_hd128_bf16 =
+            module
+                .load_function("recurrence_half_fused_hd128_bf16")
+                .map_err(|e| super::CudarcKernelError::Compile(format!("{e}")))?;
         let z_gating = module
             .load_function("z_gating_f32")
             .map_err(|e| super::CudarcKernelError::Compile(format!("{e}")))?;
@@ -1432,9 +1435,10 @@ impl DeltanetKernels {
         let expand_l2_rows_v2 = module
             .load_function("expand_and_l2_normalize_heads_rows_v2_f32")
             .map_err(|e| super::CudarcKernelError::Compile(format!("{e}")))?;
-        let recurrence_fused_rows_hd128 = module
-            .load_function("recurrence_f32_fused_rows_hd128")
-            .map_err(|e| super::CudarcKernelError::Compile(format!("{e}")))?;
+        let recurrence_fused_rows_hd128 =
+            module
+                .load_function("recurrence_f32_fused_rows_hd128")
+                .map_err(|e| super::CudarcKernelError::Compile(format!("{e}")))?;
 
         Ok(Self {
             conv1d,
@@ -1703,7 +1707,7 @@ impl DeltanetKernels {
                 return Err(super::CudarcKernelError::InvalidArg(format!(
                     "recurrence_f32_fused is specialized for head_dim \
                      {{64,128,256}}; got {other} (use recurrence_parallel)"
-                )))
+                )));
             }
         };
         unsafe {
@@ -2086,7 +2090,8 @@ impl DeltanetKernels {
                 .map_err(|e| super::CudarcKernelError::Launch(e.to_string()))?;
         }
         Ok(())
-    }}
+    }
+}
 
 #[cfg(test)]
 mod tests {
@@ -2104,12 +2109,7 @@ mod tests {
 
     // ── CPU references ──
 
-    fn cpu_conv1d(
-        input: &mut [f32],
-        weight: &[f32],
-        conv_state: &mut [f32],
-        kernel_size: usize,
-    ) {
+    fn cpu_conv1d(input: &mut [f32], weight: &[f32], conv_state: &mut [f32], kernel_size: usize) {
         for (ch, input_val) in input.iter_mut().enumerate() {
             let state_off = ch * kernel_size;
             for k in 0..kernel_size - 1 {
@@ -2274,7 +2274,14 @@ mod tests {
         let state_dev = stream.clone_htod(&conv_state).unwrap();
 
         kernels
-            .launch_conv1d(&stream, &input_dev, &weight_dev, &state_dev, conv_dim, kernel_size)
+            .launch_conv1d(
+                &stream,
+                &input_dev,
+                &weight_dev,
+                &state_dev,
+                conv_dim,
+                kernel_size,
+            )
             .expect("launch");
         stream.synchronize().expect("sync");
 
@@ -2301,7 +2308,10 @@ mod tests {
             "[conv1d] conv_dim={conv_dim}, kernel={kernel_size}: input max_rel={max_rel:.4e}, state max_rel={max_state_rel:.4e}"
         );
         assert!(max_rel < 1e-4, "conv1d input max_rel {max_rel:.4e}");
-        assert!(max_state_rel < 1e-4, "conv1d state max_rel {max_state_rel:.4e}");
+        assert!(
+            max_state_rel < 1e-4,
+            "conv1d state max_rel {max_state_rel:.4e}"
+        );
     }
 
     #[test]
@@ -2402,7 +2412,9 @@ mod tests {
         stream.synchronize().expect("sync");
 
         let mut gpu_expanded = vec![0f32; expanded_len];
-        stream.memcpy_dtoh(&expanded_dev, &mut gpu_expanded).unwrap();
+        stream
+            .memcpy_dtoh(&expanded_dev, &mut gpu_expanded)
+            .unwrap();
 
         let mut max_rel = 0f32;
         for i in 0..expanded_len {
@@ -2426,9 +2438,9 @@ mod tests {
     #[test]
     fn test_expand_l2_rows_v2_bit_identical_to_legacy() {
         const P_ROWS: &[usize] = &[1, 3, 8];
-const POISON: f32 = 12_345.5;
+        const POISON: f32 = 12_345.5;
 
-let Some(_) = cuda_or_skip() else {
+        let Some(_) = cuda_or_skip() else {
             eprintln!("[skip] no CUDA device");
             return;
         };
@@ -2479,7 +2491,15 @@ let Some(_) = cuda_or_skip() else {
                     set_expand_l2_rows_v2(Some(v2));
                     let expanded_dev = stream.clone_htod(&poison[..expanded_len * p]).unwrap();
                     kernels
-                        .launch_expand_l2_rows(&stream, &compact_dev, &expanded_dev, n_k, n_v, hd, p)
+                        .launch_expand_l2_rows(
+                            &stream,
+                            &compact_dev,
+                            &expanded_dev,
+                            n_k,
+                            n_v,
+                            hd,
+                            p,
+                        )
                         .expect("launch");
                     stream.synchronize().expect("sync");
                     let mut out = vec![0f32; expanded_len * p];
@@ -2509,12 +2529,17 @@ let Some(_) = cuda_or_skip() else {
                 );
                 // Full coverage on BOTH paths: no sentinel survived.
                 assert!(
-                    legacy.iter().chain(v2_a.iter()).all(|v| v.to_bits() != POISON.to_bits()),
+                    legacy
+                        .iter()
+                        .chain(v2_a.iter())
+                        .all(|v| v.to_bits() != POISON.to_bits()),
                     "sentinel survived (coverage gap) n_k={n_k} n_v={n_v} hd={hd} p={p}",
                 );
                 // Run-twice determinism of the V2 kernel.
                 assert!(
-                    v2_a.iter().zip(v2_b.iter()).all(|(a, b)| a.to_bits() == b.to_bits()),
+                    v2_a.iter()
+                        .zip(v2_b.iter())
+                        .all(|(a, b)| a.to_bits() == b.to_bits()),
                     "V2 run-twice nondeterminism at n_k={n_k} n_v={n_v} hd={hd} p={p}",
                 );
                 // The zero row normalized to exact zeros on the legacy path.
@@ -2685,10 +2710,7 @@ let Some(_) = cuda_or_skip() else {
             "[recurrence] n_head={n_head}, hd={head_dim}: max_diff={max_diff:.6e} (worst idx={worst}: gpu={:.6}, cpu={:.6})",
             gpu_output[worst], cpu_output[worst]
         );
-        assert!(
-            max_diff <= TOL,
-            "recurrence max_diff={max_diff:.6} > {TOL}"
-        );
+        assert!(max_diff <= TOL, "recurrence max_diff={max_diff:.6} > {TOL}");
 
         // Also compare state (the persistent recurrent state after the step)
         let mut gpu_state = vec![0f32; state_len];
@@ -2700,7 +2722,10 @@ let Some(_) = cuda_or_skip() else {
             max_state_abs = max_state_abs.max(diff);
         }
         eprintln!("[recurrence] state max_abs={max_state_abs:.4e}");
-        assert!(max_state_abs < 1e-4, "recurrence state max_abs {max_state_abs:.4e}");
+        assert!(
+            max_state_abs < 1e-4,
+            "recurrence state max_abs {max_state_abs:.4e}"
+        );
     }
 
     /// Issue 617: the row-parallel recurrence kernel must be FP-equivalent
@@ -2749,8 +2774,14 @@ let Some(_) = cuda_or_skip() else {
 
         kernels
             .launch_recurrence_parallel(
-                &stream, &qkv_dev, &beta_dev, &decay_dev,
-                &state_dev, &output_dev, head_dim, n_head,
+                &stream,
+                &qkv_dev,
+                &beta_dev,
+                &decay_dev,
+                &state_dev,
+                &output_dev,
+                head_dim,
+                n_head,
             )
             .expect("launch parallel");
         stream.synchronize().expect("sync");
@@ -2762,9 +2793,7 @@ let Some(_) = cuda_or_skip() else {
         for i in 0..n_head * head_dim {
             max_diff = max_diff.max((gpu_output[i] - cpu_output[i]).abs());
         }
-        eprintln!(
-            "[recurrence_parallel] n_head={n_head}, hd={head_dim}: max_diff={max_diff:.6e}"
-        );
+        eprintln!("[recurrence_parallel] n_head={n_head}, hd={head_dim}: max_diff={max_diff:.6e}");
         // Use 10×TOL = 1e-3 to accommodate reduction-order differences
         // (smem tree vs __shfl_xor) — the existing TOL is 1e-4 vs CPU.
         assert!(
@@ -2819,14 +2848,14 @@ let Some(_) = cuda_or_skip() else {
             for step in 0..5 {
                 kernels
                     .launch_recurrence_parallel(
-                        &stream, &qkv_dev, &beta_dev, &decay_dev, &state_par, &out_par,
-                        head_dim, n_head,
+                        &stream, &qkv_dev, &beta_dev, &decay_dev, &state_par, &out_par, head_dim,
+                        n_head,
                     )
                     .expect("launch parallel");
                 kernels
                     .launch_recurrence_fused(
-                        &stream, &qkv_dev, &beta_dev, &decay_dev, &state_fus, &out_fus,
-                        head_dim, n_head,
+                        &stream, &qkv_dev, &beta_dev, &decay_dev, &state_fus, &out_fus, head_dim,
+                        n_head,
                     )
                     .expect("launch fused");
                 stream.synchronize().expect("sync");
@@ -2902,8 +2931,14 @@ let Some(_) = cuda_or_skip() else {
 
         kernels
             .launch_recurrence_fused(
-                &stream, &qkv_dev, &beta_dev, &decay_dev, &state_dev, &output_dev,
-                head_dim, n_head,
+                &stream,
+                &qkv_dev,
+                &beta_dev,
+                &decay_dev,
+                &state_dev,
+                &output_dev,
+                head_dim,
+                n_head,
             )
             .expect("launch fused");
         stream.synchronize().expect("sync");
@@ -2971,9 +3006,7 @@ let Some(_) = cuda_or_skip() else {
             // Quantize the initial state exactly as the device lane holds it.
             let quantize = |x: &f32| -> f32 {
                 match fmt {
-                    HalfStateFmt::F16 => {
-                        half::f16::from_f32(x.clamp(-65504.0, 65504.0)).to_f32()
-                    }
+                    HalfStateFmt::F16 => half::f16::from_f32(x.clamp(-65504.0, 65504.0)).to_f32(),
                     HalfStateFmt::Bf16 => half::bf16::from_f32(*x).to_f32(),
                 }
             };
@@ -3001,8 +3034,14 @@ let Some(_) = cuda_or_skip() else {
             let out_f32_dev = stream.alloc_zeros::<f32>(n_head * head_dim).unwrap();
             kernels
                 .launch_recurrence_fused(
-                    &stream, &qkv_dev, &beta_dev, &decay_dev, &state_f32_dev, &out_f32_dev,
-                    head_dim, n_head,
+                    &stream,
+                    &qkv_dev,
+                    &beta_dev,
+                    &decay_dev,
+                    &state_f32_dev,
+                    &out_f32_dev,
+                    head_dim,
+                    n_head,
                 )
                 .expect("launch f32 fused reference");
             let mut state_f32_ref = vec![0f32; state_len];
@@ -3015,8 +3054,14 @@ let Some(_) = cuda_or_skip() else {
 
             kernels
                 .launch_recurrence_fused_half_hd128(
-                    &stream, &qkv_dev, &beta_dev, &decay_dev, &state_dev, &output_dev,
-                    n_head, fmt,
+                    &stream,
+                    &qkv_dev,
+                    &beta_dev,
+                    &decay_dev,
+                    &state_dev,
+                    &output_dev,
+                    n_head,
+                    fmt,
                 )
                 .expect("launch half fused");
             stream.synchronize().expect("sync");
@@ -3042,7 +3087,9 @@ let Some(_) = cuda_or_skip() else {
             let mut cpu_max_diff = 0f32;
             for i in 0..state_len {
                 let want = match fmt {
-                    HalfStateFmt::F16 => half::f16::from_f32(state_f32_ref[i].clamp(-65504.0, 65504.0)).to_bits(),
+                    HalfStateFmt::F16 => {
+                        half::f16::from_f32(state_f32_ref[i].clamp(-65504.0, 65504.0)).to_bits()
+                    }
                     HalfStateFmt::Bf16 => half::bf16::from_f32(state_f32_ref[i]).to_bits(),
                 };
                 if gpu_state_bits[i] != want {
@@ -3123,15 +3170,27 @@ let Some(_) = cuda_or_skip() else {
                 if fused {
                     kernels
                         .launch_recurrence_fused(
-                            &stream, &qkv_dev, &beta_dev, &decay_dev, &states[b], &outputs[b],
-                            head_dim, n_head,
+                            &stream,
+                            &qkv_dev,
+                            &beta_dev,
+                            &decay_dev,
+                            &states[b],
+                            &outputs[b],
+                            head_dim,
+                            n_head,
                         )
                         .unwrap();
                 } else {
                     kernels
                         .launch_recurrence_parallel(
-                            &stream, &qkv_dev, &beta_dev, &decay_dev, &states[b], &outputs[b],
-                            head_dim, n_head,
+                            &stream,
+                            &qkv_dev,
+                            &beta_dev,
+                            &decay_dev,
+                            &states[b],
+                            &outputs[b],
+                            head_dim,
+                            n_head,
                         )
                         .unwrap();
                 }
@@ -3143,15 +3202,27 @@ let Some(_) = cuda_or_skip() else {
                 if fused {
                     kernels
                         .launch_recurrence_fused(
-                            &stream, &qkv_dev, &beta_dev, &decay_dev, &states[b], &outputs[b],
-                            head_dim, n_head,
+                            &stream,
+                            &qkv_dev,
+                            &beta_dev,
+                            &decay_dev,
+                            &states[b],
+                            &outputs[b],
+                            head_dim,
+                            n_head,
                         )
                         .unwrap();
                 } else {
                     kernels
                         .launch_recurrence_parallel(
-                            &stream, &qkv_dev, &beta_dev, &decay_dev, &states[b], &outputs[b],
-                            head_dim, n_head,
+                            &stream,
+                            &qkv_dev,
+                            &beta_dev,
+                            &decay_dev,
+                            &states[b],
+                            &outputs[b],
+                            head_dim,
+                            n_head,
                         )
                         .unwrap();
                 }
@@ -3272,10 +3343,14 @@ let Some(_) = cuda_or_skip() else {
 
                 // Decay
                 if t == 0 {
-                    for i in 0..sph { state_decayed[sd_off + i] = 0.0; }
+                    for i in 0..sph {
+                        state_decayed[sd_off + i] = 0.0;
+                    }
                 } else {
                     let prev_off = (t - 1) * n_head * sph + h * sph;
-                    for i in 0..sph { state_decayed[sd_off + i] = decay_val * state[prev_off + i]; }
+                    for i in 0..sph {
+                        state_decayed[sd_off + i] = decay_val * state[prev_off + i];
+                    }
                 }
 
                 // Retrieve + delta + update
@@ -3289,7 +3364,8 @@ let Some(_) = cuda_or_skip() else {
                     kv_mem[km_off + row] = kv;
                     delta[dl_off + row] = d;
                     for c in 0..head_dim {
-                        state[ss_off + row * head_dim + c] = state_decayed[sd_off + row * head_dim + c] + qkv_t[k_off + c] * d;
+                        state[ss_off + row * head_dim + c] =
+                            state_decayed[sd_off + row * head_dim + c] + qkv_t[k_off + c] * d;
                     }
                 }
             }
@@ -3469,8 +3545,12 @@ let Some(_) = cuda_or_skip() else {
                 }
             }
         }
-        let beta: Vec<f32> = (0..t_len * n_head).map(|i| 0.5 + (i as f32) * 0.01).collect();
-        let decay: Vec<f32> = (0..t_len * n_head).map(|i| 0.9 - (i as f32) * 0.01).collect();
+        let beta: Vec<f32> = (0..t_len * n_head)
+            .map(|i| 0.5 + (i as f32) * 0.01)
+            .collect();
+        let decay: Vec<f32> = (0..t_len * n_head)
+            .map(|i| 0.9 - (i as f32) * 0.01)
+            .collect();
         let grad_out: Vec<f32> = (0..t_len * n_head * head_dim)
             .map(|i| (i as f32) * 0.002 - 0.5)
             .collect();
@@ -3491,8 +3571,12 @@ let Some(_) = cuda_or_skip() else {
         let mut grad_decay_dev = stream.alloc_zeros::<f32>(t_len * n_head).unwrap();
         let mut sd_dev = stream.alloc_zeros::<f32>(t_len * n_head * sph).unwrap();
         let mut ss_dev = stream.alloc_zeros::<f32>(t_len * n_head * sph).unwrap();
-        let mut km_dev = stream.alloc_zeros::<f32>(t_len * n_head * head_dim).unwrap();
-        let mut dl_dev = stream.alloc_zeros::<f32>(t_len * n_head * head_dim).unwrap();
+        let mut km_dev = stream
+            .alloc_zeros::<f32>(t_len * n_head * head_dim)
+            .unwrap();
+        let mut dl_dev = stream
+            .alloc_zeros::<f32>(t_len * n_head * head_dim)
+            .unwrap();
         let mut gs_dev = stream.alloc_zeros::<f32>(n_head * sph).unwrap();
 
         kernels
@@ -3559,12 +3643,39 @@ let Some(_) = cuda_or_skip() else {
         }
         eprintln!("[bptt] grad_beta max_diff={max_gb:.6e}");
 
-        assert!(max_gq < 1e-3 * cpu_gq.iter().cloned().map(|x| x.abs()).fold(0f32, f32::max).max(1.0),
-            "grad_q max_diff {max_gq:.6e} (rel error too large)");
-        assert!(max_gv < 1e-3 * cpu_gv.iter().cloned().map(|x| x.abs()).fold(0f32, f32::max).max(1.0),
-            "grad_v max_diff {max_gv:.6e} (rel error too large)");
-        assert!(max_gb < 1e-3 * cpu_gb.iter().cloned().map(|x| x.abs()).fold(0f32, f32::max).max(1.0),
-            "grad_beta max_diff {max_gb:.6e} (rel error too large)");
+        assert!(
+            max_gq
+                < 1e-3
+                    * cpu_gq
+                        .iter()
+                        .cloned()
+                        .map(|x| x.abs())
+                        .fold(0f32, f32::max)
+                        .max(1.0),
+            "grad_q max_diff {max_gq:.6e} (rel error too large)"
+        );
+        assert!(
+            max_gv
+                < 1e-3
+                    * cpu_gv
+                        .iter()
+                        .cloned()
+                        .map(|x| x.abs())
+                        .fold(0f32, f32::max)
+                        .max(1.0),
+            "grad_v max_diff {max_gv:.6e} (rel error too large)"
+        );
+        assert!(
+            max_gb
+                < 1e-3
+                    * cpu_gb
+                        .iter()
+                        .cloned()
+                        .map(|x| x.abs())
+                        .fold(0f32, f32::max)
+                        .max(1.0),
+            "grad_beta max_diff {max_gb:.6e} (rel error too large)"
+        );
     }
 
     /// Issue 470 T2-B: production-shape recurrence-backward ceiling probe for
@@ -3672,56 +3783,75 @@ let Some(_) = cuda_or_skip() else {
             let mut grad_decay_dev = stream.alloc_zeros::<f32>(t_len * n_head).unwrap();
             let mut sd_dev = stream.alloc_zeros::<f32>(t_len * n_head * sph).unwrap();
             let mut ss_dev = stream.alloc_zeros::<f32>(t_len * n_head * sph).unwrap();
-            let mut km_dev = stream.alloc_zeros::<f32>(t_len * n_head * head_dim).unwrap();
-            let mut dl_dev = stream.alloc_zeros::<f32>(t_len * n_head * head_dim).unwrap();
+            let mut km_dev = stream
+                .alloc_zeros::<f32>(t_len * n_head * head_dim)
+                .unwrap();
+            let mut dl_dev = stream
+                .alloc_zeros::<f32>(t_len * n_head * head_dim)
+                .unwrap();
             let mut gs_dev = stream.alloc_zeros::<f32>(n_head * sph).unwrap();
 
-            let launch = |grad_qkv_dev: &mut cudarc::driver::safe::CudaSlice<f32>,
-                          grad_beta_dev: &mut cudarc::driver::safe::CudaSlice<f32>,
-                          grad_decay_dev: &mut cudarc::driver::safe::CudaSlice<f32>,
-                          sd_dev: &mut cudarc::driver::safe::CudaSlice<f32>,
-                          ss_dev: &mut cudarc::driver::safe::CudaSlice<f32>,
-                          km_dev: &mut cudarc::driver::safe::CudaSlice<f32>,
-                          dl_dev: &mut cudarc::driver::safe::CudaSlice<f32>,
-                          gs_dev: &mut cudarc::driver::safe::CudaSlice<f32>| {
-                // Outputs must be zeroed before each launch (kernel accumulates).
-                stream.memset_zeros(grad_qkv_dev).unwrap();
-                stream.memset_zeros(grad_beta_dev).unwrap();
-                stream.memset_zeros(grad_decay_dev).unwrap();
-                stream.memset_zeros(gs_dev).unwrap();
-                kernels
-                    .launch_bptt_recompute(
-                        &stream,
-                        &qkv_dev,
-                        &beta_dev,
-                        &decay_dev,
-                        &grad_out_dev,
-                        grad_qkv_dev,
-                        grad_beta_dev,
-                        grad_decay_dev,
-                        sd_dev,
-                        ss_dev,
-                        km_dev,
-                        dl_dev,
-                        gs_dev,
-                        t_len,
-                        head_dim,
-                        n_head,
-                    )
-                    .expect("launch");
-            };
+            let launch =
+                |grad_qkv_dev: &mut cudarc::driver::safe::CudaSlice<f32>,
+                 grad_beta_dev: &mut cudarc::driver::safe::CudaSlice<f32>,
+                 grad_decay_dev: &mut cudarc::driver::safe::CudaSlice<f32>,
+                 sd_dev: &mut cudarc::driver::safe::CudaSlice<f32>,
+                 ss_dev: &mut cudarc::driver::safe::CudaSlice<f32>,
+                 km_dev: &mut cudarc::driver::safe::CudaSlice<f32>,
+                 dl_dev: &mut cudarc::driver::safe::CudaSlice<f32>,
+                 gs_dev: &mut cudarc::driver::safe::CudaSlice<f32>| {
+                    // Outputs must be zeroed before each launch (kernel accumulates).
+                    stream.memset_zeros(grad_qkv_dev).unwrap();
+                    stream.memset_zeros(grad_beta_dev).unwrap();
+                    stream.memset_zeros(grad_decay_dev).unwrap();
+                    stream.memset_zeros(gs_dev).unwrap();
+                    kernels
+                        .launch_bptt_recompute(
+                            &stream,
+                            &qkv_dev,
+                            &beta_dev,
+                            &decay_dev,
+                            &grad_out_dev,
+                            grad_qkv_dev,
+                            grad_beta_dev,
+                            grad_decay_dev,
+                            sd_dev,
+                            ss_dev,
+                            km_dev,
+                            dl_dev,
+                            gs_dev,
+                            t_len,
+                            head_dim,
+                            n_head,
+                        )
+                        .expect("launch");
+                };
 
             // Warm launch (also the correctness arm at production shape).
-            launch(&mut grad_qkv_dev, &mut grad_beta_dev,
-                   &mut grad_decay_dev, &mut sd_dev, &mut ss_dev,
-                   &mut km_dev, &mut dl_dev, &mut gs_dev);
+            launch(
+                &mut grad_qkv_dev,
+                &mut grad_beta_dev,
+                &mut grad_decay_dev,
+                &mut sd_dev,
+                &mut ss_dev,
+                &mut km_dev,
+                &mut dl_dev,
+                &mut gs_dev,
+            );
             stream.synchronize().expect("sync");
 
             let gpu_start = std::time::Instant::now();
             for _ in 0..iters {
-                launch(&mut grad_qkv_dev, &mut grad_beta_dev,
-                       &mut grad_decay_dev, &mut sd_dev, &mut ss_dev,
-                       &mut km_dev, &mut dl_dev, &mut gs_dev);
+                launch(
+                    &mut grad_qkv_dev,
+                    &mut grad_beta_dev,
+                    &mut grad_decay_dev,
+                    &mut sd_dev,
+                    &mut ss_dev,
+                    &mut km_dev,
+                    &mut dl_dev,
+                    &mut gs_dev,
+                );
                 stream.synchronize().expect("sync");
             }
             let gpu_per_iter = gpu_start.elapsed() / iters as u32;
@@ -3753,7 +3883,12 @@ let Some(_) = cuda_or_skip() else {
                 .map(|(a, b)| (a - b).abs())
                 .fold(0f32, f32::max);
             let rel = |max_diff: f32, cpu: &[f32]| {
-                let scale = cpu.iter().cloned().map(|x| x.abs()).fold(0f32, f32::max).max(1.0);
+                let scale = cpu
+                    .iter()
+                    .cloned()
+                    .map(|x| x.abs())
+                    .fold(0f32, f32::max)
+                    .max(1.0);
                 max_diff < 1e-3 * scale
             };
 
@@ -3765,9 +3900,18 @@ let Some(_) = cuda_or_skip() else {
                 cpu_per_iter.as_secs_f64() / gpu_per_iter.as_secs_f64()
             );
 
-            assert!(rel(max_gq, &cpu_gq), "T={t_len} grad_q max_diff {max_gq:.3e} (rel too large)");
-            assert!(rel(max_gv, &cpu_gv), "T={t_len} grad_v max_diff {max_gv:.3e} (rel too large)");
-            assert!(rel(max_gb, &cpu_gb), "T={t_len} grad_beta max_diff {max_gb:.3e} (rel too large)");
+            assert!(
+                rel(max_gq, &cpu_gq),
+                "T={t_len} grad_q max_diff {max_gq:.3e} (rel too large)"
+            );
+            assert!(
+                rel(max_gv, &cpu_gv),
+                "T={t_len} grad_v max_diff {max_gv:.3e} (rel too large)"
+            );
+            assert!(
+                rel(max_gb, &cpu_gb),
+                "T={t_len} grad_beta max_diff {max_gb:.3e} (rel too large)"
+            );
         }
     }
 }

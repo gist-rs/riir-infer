@@ -113,10 +113,7 @@ fn test_encoder() -> Encoder {
             weights(vec![d], next()),
         );
     }
-    map.insert(
-        "encoder.final_norm.weight".into(),
-        weights(vec![d], next()),
-    );
+    map.insert("encoder.final_norm.weight".into(), weights(vec![d], next()));
     Encoder::from_map(&mut map, cfg, "packed-equiv-test").expect("synthetic encoder loads")
 }
 

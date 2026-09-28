@@ -169,8 +169,8 @@ fn matmul_swap_ab_tiled_f32(a: &[f32], b: &[f32], out: &mut [f32]) {
         if row_m < m && col_p < p {
             let mut k = 0u32;
             while k < tile {
-                sum += tile_a[(local_m * tile + k) as usize]
-                    * tile_b[(local_p * tile + k) as usize];
+                sum +=
+                    tile_a[(local_m * tile + k) as usize] * tile_b[(local_p * tile + k) as usize];
                 k += 1u32;
             }
         }
@@ -390,12 +390,7 @@ fn matmul_swap_ab_cmma_f32(a: &[f32], b: &[f32], out: &mut [f32]) {
     // the entire 8×8 tile unconditionally — out-of-bounds rows (when M is not
     // a multiple of 8) would corrupt memory. The staging buffer + per-element
     // bounds check is the safe path.
-    cmma::store(
-        &mut result_tile,
-        &acc,
-        8,
-        cmma::MatrixLayout::RowMajor,
-    );
+    cmma::store(&mut result_tile, &acc, 8, cmma::MatrixLayout::RowMajor);
     sync_cube();
 
     // Each thread copies its 2 elements from the staging buffer to the output,
@@ -525,8 +520,8 @@ impl MatmulSwapAb {
     /// (4 wmma configs registered including `(f32,f32,f32)`). On backends
     /// without CMMA support (e.g. pure WGSL), returns `false`.
     pub fn cmma_available<R: Runtime>(client: &ComputeClient<R>) -> bool {
-        use cubecl::ir::{ElemType, FloatKind};
         use cubecl::ir::features::MmaConfig;
+        use cubecl::ir::{ElemType, FloatKind};
         client.features().matmul.cmma.contains(&MmaConfig {
             a_type: ElemType::Float(FloatKind::F32).into(),
             b_type: ElemType::Float(FloatKind::F32).into(),
@@ -755,14 +750,7 @@ mod tests {
 
     /// Reference: `C[i,j] = Σ_k A[i,k] · B[j,k]` (transB convention), writing
     /// into a caller-provided buffer. Reused by the GPU-launch tests below.
-    fn matmul_transb_into(
-        a: &[f32],
-        b: &[f32],
-        out: &mut [f32],
-        m: usize,
-        n: usize,
-        p: usize,
-    ) {
+    fn matmul_transb_into(a: &[f32], b: &[f32], out: &mut [f32], m: usize, n: usize, p: usize) {
         for i in 0..m {
             for j in 0..p {
                 let mut sum = 0.0f32;
@@ -978,6 +966,10 @@ mod tests {
         let cmma_result = f32::from_bytes(&cmma_bytes);
 
         // Both kernels must agree (same math, different implementation).
-        verify_matmul(cmma_result, scalar_result, "CMMA vs scalar swap_ab agreement");
+        verify_matmul(
+            cmma_result,
+            scalar_result,
+            "CMMA vs scalar swap_ab agreement",
+        );
     }
 }

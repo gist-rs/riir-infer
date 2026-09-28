@@ -93,10 +93,10 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
+use cudarc::driver::PushKernelArg;
 use cudarc::driver::safe::{
     CudaContext, CudaEvent, CudaFunction, CudaSlice, CudaStream, LaunchConfig,
 };
-use cudarc::driver::PushKernelArg;
 
 use super::backend::{AttnScratch, Backend};
 use crate::laya::LayaError;
@@ -1417,7 +1417,8 @@ impl Cuda {
     /// pageable-copy class — blocking staged copies — is one of the two
     /// submit-path suspects `.issues/005` T1 splits apart).
     fn note_upload(&self, t: Instant, len: usize) {
-        self.up_ns.fetch_add(t.elapsed().as_nanos() as u64, Ordering::Relaxed);
+        self.up_ns
+            .fetch_add(t.elapsed().as_nanos() as u64, Ordering::Relaxed);
         self.up_bytes.fetch_add(len as u64, Ordering::Relaxed);
         self.up_n.fetch_add(1, Ordering::Relaxed);
     }
@@ -1549,25 +1550,24 @@ impl Cuda {
         // holds the 2-acc posture (the A/B switch).
         let blocks = |bm: u32, bn: u32| n.div_ceil(bn) * m.div_ceil(bm) * batch.max(1);
         let reg4 = !self.reg4_disabled;
-        let (name, bm, bn, threads) = if !self.ladder_disabled
-            && blocks(NARROW_BM, NARROW_BN) <= SM_COUNT
-        {
-            ("sgemm_narrow", NARROW_BM, NARROW_BN, NARROW_THREADS)
-        } else if !self.ladder_disabled
-            && m >= WIDE_M_MIN
-            && n >= XWIDE_N_MIN
-            && blocks(XWIDE_BM, XWIDE_BN) <= SM_COUNT
-        {
-            if reg4 {
-                ("sgemm_xwide_reg4", XWIDE_BM, XWIDE_BN, REG4_XWIDE_THREADS)
+        let (name, bm, bn, threads) =
+            if !self.ladder_disabled && blocks(NARROW_BM, NARROW_BN) <= SM_COUNT {
+                ("sgemm_narrow", NARROW_BM, NARROW_BN, NARROW_THREADS)
+            } else if !self.ladder_disabled
+                && m >= WIDE_M_MIN
+                && n >= XWIDE_N_MIN
+                && blocks(XWIDE_BM, XWIDE_BN) <= SM_COUNT
+            {
+                if reg4 {
+                    ("sgemm_xwide_reg4", XWIDE_BM, XWIDE_BN, REG4_XWIDE_THREADS)
+                } else {
+                    ("sgemm_xwide", XWIDE_BM, XWIDE_BN, XWIDE_THREADS)
+                }
+            } else if reg4 {
+                ("sgemm_wide_reg4", BM, BN, REG4_WIDE_THREADS)
             } else {
-                ("sgemm_xwide", XWIDE_BM, XWIDE_BN, XWIDE_THREADS)
-            }
-        } else if reg4 {
-            ("sgemm_wide_reg4", BM, BN, REG4_WIDE_THREADS)
-        } else {
-            ("sgemm_wide", BM, BN, SGEMM_THREADS)
-        };
+                ("sgemm_wide", BM, BN, SGEMM_THREADS)
+            };
         let f = self.kernel(name);
         // The instances stage through STATIC __shared__ arrays — the launch
         // binds ZERO dynamic smem. (The `.issues/002` form passed the staging
@@ -1636,7 +1636,9 @@ impl Backend for Cuda {
             b_off as u32,
             ob.as_ref(),
             dst_off as u32,
-            &[m as u32, n as u32, k as u32, k as u32, 1, n as u32, 1, 0, 0, 0],
+            &[
+                m as u32, n as u32, k as u32, k as u32, 1, n as u32, 1, 0, 0, 0,
+            ],
             1,
         );
     }
@@ -1658,7 +1660,9 @@ impl Backend for Cuda {
             0,
             ob.as_ref(),
             0,
-            &[m as u32, n as u32, k as u32, k as u32, 1, 1, k as u32, 0, 0, 0],
+            &[
+                m as u32, n as u32, k as u32, k as u32, 1, 1, k as u32, 0, 0, 0,
+            ],
             1,
         );
     }
@@ -1688,16 +1692,11 @@ impl Backend for Cuda {
             ob.as_ref(),
             dst_off as u32,
             &[
-                m as u32,
-                m as u32,
-                hd as u32,
-                hd as u32, // a_rs
+                m as u32, m as u32, hd as u32, hd as u32, // a_rs
                 1,         // a_cs
                 1,         // b_rs — B = Kᵀ, K row-major [m, hd]
                 hd as u32, // b_cs
-                0,
-                0,
-                0,
+                0, 0, 0,
             ],
             1,
         );
@@ -2349,7 +2348,9 @@ impl Backend for Cuda {
                 candidates += 1;
                 eprintln!(
                     "[trace] download candidate ptr {ptr:#x} need {} slot len {} epoch {}",
-                    src.len(), k.1, k.2
+                    src.len(),
+                    k.1,
+                    k.2
                 );
             }
         }
@@ -2359,7 +2360,10 @@ impl Backend for Cuda {
             .max_by_key(|(k, _)| k.2)
             .map(|(_, b)| Arc::clone(b));
         if tracing {
-            eprintln!("[trace] download ptr {ptr:#x} need {} candidates {candidates}", src.len());
+            eprintln!(
+                "[trace] download ptr {ptr:#x} need {} candidates {candidates}",
+                src.len()
+            );
         }
         drop(map);
         let Some(b) = slot else {

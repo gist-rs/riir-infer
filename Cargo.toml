@@ -145,6 +145,12 @@ attention_to_answer = []
 # SAME-named feature on the lane crate (no deps on either side — pure
 # compile gating).
 twt_profile = ["katgpt-core/svd_cca"]
+# twt_bonsai (riir-infer Issue 022 T1.2, 2026-09-28): the Bonsai/GDN
+# capture sibling — the league model's Phase-1 profile driver
+# (`twt_bonsai_profile`). Implies the bonsai-2 loading stack because the
+# root-crate ternary forward IS the league-model lane (deltanet_ternary
+# + the Issue-980 Hadamard rotation).
+twt_bonsai = ["twt_profile", "bonsai2_hadamard"]
 # kv_eviction (riir-infer Issue 012, 2026-09-27): the DIFFERENTIAL KV
 # eviction consumer — `deltanet::kv_evict` wires katgpt-core's
 # `DifferentialEvictTable` (+ the λ=0 max-recent, usage-rate, and
@@ -343,6 +349,13 @@ required-features = ["twt_profile"]
 name = "twt_laya_profile"
 path = "examples/twt_laya_profile.rs"
 required-features = ["twt_profile"]
+
+# Issue 022 T1.2 — the Bonsai/GDN capture sibling on the root-crate ternary
+# forward (the league model's Phase-1 profile driver).
+[[example]]
+name = "twt_bonsai_profile"
+path = "examples/twt_bonsai_profile.rs"
+required-features = ["twt_bonsai"]
 
 [dev-dependencies]
 # The laya encoder lane — the capture driver's checkpoint source (CPU

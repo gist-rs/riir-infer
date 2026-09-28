@@ -142,7 +142,10 @@ impl DeltanetDrCumDecayCubeCL {
     /// - `alpha_handle`: `n_head * C` f32 elements (all in (0, 1]; 0 is
     ///   tolerated — the log-floor clamps it, see module docs).
     /// - `log_gamma`/`gamma`/`decay_to_end`: `n_head * C`; `total_decay`: `n_head`.
-    #[allow(clippy::too_many_arguments, reason = "GPU kernel launch: many buffer handles are inherent")]
+    #[allow(
+        clippy::too_many_arguments,
+        reason = "GPU kernel launch: many buffer handles are inherent"
+    )]
     pub unsafe fn launch<R: Runtime>(
         client: &ComputeClient<R>,
         alpha_handle: Handle,
@@ -242,7 +245,10 @@ impl DeltanetDrGramCubeCL {
     /// # Safety
     /// - `q`/`k`: `n_head * C * d`; `beta`: `n_head * C`; `log_gamma`: `n_head * C`.
     /// - `x_mat`/`qkr_mat`: `n_head * C * C` each.
-    #[allow(clippy::too_many_arguments, reason = "GPU kernel launch: many buffer handles are inherent")]
+    #[allow(
+        clippy::too_many_arguments,
+        reason = "GPU kernel launch: many buffer handles are inherent"
+    )]
     pub unsafe fn launch<R: Runtime>(
         client: &ComputeClient<R>,
         q_handle: Handle,
@@ -328,7 +334,10 @@ impl DeltanetDrRhsCubeCL {
     /// # Safety
     /// - `k`/`v`: `n_head * C * d`; `beta`/`gamma`: `n_head * C`;
     ///   `state`: `n_head * d * d`; `rhs`: `n_head * C * d`.
-    #[allow(clippy::too_many_arguments, reason = "GPU kernel launch: many buffer handles are inherent")]
+    #[allow(
+        clippy::too_many_arguments,
+        reason = "GPU kernel launch: many buffer handles are inherent"
+    )]
     pub unsafe fn launch<R: Runtime>(
         client: &ComputeClient<R>,
         k_handle: Handle,
@@ -590,7 +599,10 @@ pub struct DeltanetDrOutputCubeCL;
 impl DeltanetDrOutputCubeCL {
     /// # Safety
     /// - `qs0`/`u_sol`/`o_chunk`: `n_head * C * d`; `qkr_mat`: `n_head * C * C`.
-    #[allow(clippy::too_many_arguments, reason = "GPU kernel launch: many buffer handles are inherent")]
+    #[allow(
+        clippy::too_many_arguments,
+        reason = "GPU kernel launch: many buffer handles are inherent"
+    )]
     pub unsafe fn launch<R: Runtime>(
         client: &ComputeClient<R>,
         qs0_handle: Handle,
@@ -730,7 +742,10 @@ impl DeltanetDrStateUpdateCubeCL {
     /// - `k`/`u_sol`: `n_head * C * d`; `decay_to_end`: `n_head * C`;
     ///   `total_decay`: `n_head`; `state`: `n_head * d * d` (in-place — each
     ///   thread reads then writes only its own element).
-    #[allow(clippy::too_many_arguments, reason = "GPU kernel launch: many buffer handles are inherent")]
+    #[allow(
+        clippy::too_many_arguments,
+        reason = "GPU kernel launch: many buffer handles are inherent"
+    )]
     pub unsafe fn launch<R: Runtime>(
         client: &ComputeClient<R>,
         k_handle: Handle,
@@ -862,7 +877,10 @@ mod tests {
         out: Handle,
     }
 
-    #[allow(clippy::too_many_arguments, reason = "test harness mirrors the kernel buffer set")]
+    #[allow(
+        clippy::too_many_arguments,
+        reason = "test harness mirrors the kernel buffer set"
+    )]
     fn run_pipeline(
         client: &ComputeClient<ActiveRuntime>,
         q: &[f32],
@@ -993,14 +1011,20 @@ mod tests {
         assert!(DeltanetDeltaRuleChunkedCubeCL::supports(d));
 
         let mut rng = Rng(0x5eed_1234_5678_9abc);
-        let rand_vec =
-            |n: usize, rng: &mut Rng| (0..n).map(|_| rng.next_f32() * 2.0 - 1.0).collect::<Vec<f32>>();
+        let rand_vec = |n: usize, rng: &mut Rng| {
+            (0..n)
+                .map(|_| rng.next_f32() * 2.0 - 1.0)
+                .collect::<Vec<f32>>()
+        };
 
         let q = rand_vec(h * c * d, &mut rng);
         let mut k = rand_vec(h * c * d, &mut rng);
         // Normalize k rows (production L2-normalizes — keeps X well-behaved).
         for off in 0..h * c {
-            let norm = (0..d).map(|i| k[off * d + i] * k[off * d + i]).sum::<f32>().sqrt();
+            let norm = (0..d)
+                .map(|i| k[off * d + i] * k[off * d + i])
+                .sum::<f32>()
+                .sqrt();
             for i in 0..d {
                 k[off * d + i] /= norm.max(1e-8);
             }
@@ -1047,8 +1071,11 @@ mod tests {
         let d = 4usize;
 
         let mut rng = Rng(0xfeed_beef);
-        let rand_vec =
-            |n: usize, rng: &mut Rng| (0..n).map(|_| rng.next_f32() * 2.0 - 1.0).collect::<Vec<f32>>();
+        let rand_vec = |n: usize, rng: &mut Rng| {
+            (0..n)
+                .map(|_| rng.next_f32() * 2.0 - 1.0)
+                .collect::<Vec<f32>>()
+        };
 
         let q = rand_vec(d, &mut rng);
         let k = rand_vec(d, &mut rng);
@@ -1101,7 +1128,9 @@ mod tests {
         for (name, a_lo, a_hi, b_lo, b_hi, q_unit) in regimes {
             let mut rng = Rng(0x1234_0000_beef_cafe);
             let rand_vec = |n: usize, rng: &mut Rng| {
-                (0..n).map(|_| rng.next_f32() * 2.0 - 1.0).collect::<Vec<f32>>()
+                (0..n)
+                    .map(|_| rng.next_f32() * 2.0 - 1.0)
+                    .collect::<Vec<f32>>()
             };
 
             let mut q = rand_vec(h * tokens * d, &mut rng);
@@ -1161,8 +1190,9 @@ mod tests {
                     }
                 }
 
-                let bufs =
-                    run_pipeline(&client, &q_c, &k_c, &v_c, &beta_c, &alpha_c, &state_h, h, c, d);
+                let bufs = run_pipeline(
+                    &client, &q_c, &k_c, &v_c, &beta_c, &alpha_c, &state_h, h, c, d,
+                );
                 let chunk_out = download(&client, &bufs.out);
                 gpu_out[base * h * d..(base + c) * h * d].copy_from_slice(&chunk_out);
             }

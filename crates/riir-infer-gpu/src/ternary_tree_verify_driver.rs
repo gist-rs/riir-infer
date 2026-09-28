@@ -34,8 +34,8 @@ use riir_infer_core::types::DeltaNetLayerType;
 use crate::cubecl_runtime::ActiveRuntime;
 use crate::deltanet_tree_verify_cubecl::{
     GatingConcatBatchedCubeCL, RowGatherScatterCubeCL, Split4BatchedCubeCL, TreeBuildRhsCubeCL,
-    TreeBuildXYCubeCL, TreeComputeOutCubeCL, TreeConv1dGatherCubeCL,
-    TreeCumulativeLogDecayCubeCL, TreeForwardSubCubeCL, TreeVerifyPlan,
+    TreeBuildXYCubeCL, TreeComputeOutCubeCL, TreeConv1dGatherCubeCL, TreeCumulativeLogDecayCubeCL,
+    TreeForwardSubCubeCL, TreeVerifyPlan,
 };
 use crate::elementwise_cubecl::CopyCubeCL;
 use crate::gemm_ternary_batched_cubecl::GemmTernaryBatchedCubeCL;
@@ -65,15 +65,15 @@ pub struct TreeVerifyGpuBuffers {
     pub ffn_out: Handle,
     // DeltaNet projections [t_max × proj_dim]
     pub input_proj_out: Handle,
-    pub qkv_raw: Handle, // [t_max × conv_dim] — pre-conv projections
-    pub z: Handle,       // [t_max × z_dim]
-    pub a_raw: Handle,   // [t_max × n_v]
-    pub b_raw: Handle,   // [t_max × n_v]
-    pub conv_out: Handle,     // [t_max × conv_dim] — silu conv output
-    pub qkv_expanded: Handle, // [t_max × 3·n_v·d]
-    pub beta: Handle,         // [t_max × n_v]
-    pub decay: Handle,        // [t_max × n_v]
-    pub cld: Handle,          // [t_max × n_v]
+    pub qkv_raw: Handle,       // [t_max × conv_dim] — pre-conv projections
+    pub z: Handle,             // [t_max × z_dim]
+    pub a_raw: Handle,         // [t_max × n_v]
+    pub b_raw: Handle,         // [t_max × n_v]
+    pub conv_out: Handle,      // [t_max × conv_dim] — silu conv output
+    pub qkv_expanded: Handle,  // [t_max × 3·n_v·d]
+    pub beta: Handle,          // [t_max × n_v]
+    pub decay: Handle,         // [t_max × n_v]
+    pub cld: Handle,           // [t_max × n_v]
     pub recurrent_out: Handle, // [t_max × n_v·d] — token-major solve output
     // Masked-solve scratch
     pub x_mat: Handle, // [n_v × t_max × t_max]
@@ -84,14 +84,14 @@ pub struct TreeVerifyGpuBuffers {
     pub ffn_gate_up: Handle, // [t_max × 2·mlp]
     pub ffn_hidden: Handle,  // [t_max × mlp]
     // Attention-layer scratch (Issue 721 T4a — batched tree attention)
-    pub attn_qg: Handle,    // [t_max × 2·q_dim] — interleaved [q, gate] per head
-    pub attn_kv: Handle,    // [t_max × 2·kvd] — concatenated [K, V]
-    pub attn_q: Handle,     // [t_max × q_dim]
-    pub attn_gate: Handle,  // [t_max × q_dim]
-    pub attn_k: Handle,     // [t_max × kvd] (post-RoPE)
-    pub attn_v: Handle,     // [t_max × kvd]
-    pub attn_out: Handle,   // [t_max × q_dim] (gated)
-    pub attn_pos: Handle,   // u32 [t_max] — RoPE positions = base_pos + depth
+    pub attn_qg: Handle,   // [t_max × 2·q_dim] — interleaved [q, gate] per head
+    pub attn_kv: Handle,   // [t_max × 2·kvd] — concatenated [K, V]
+    pub attn_q: Handle,    // [t_max × q_dim]
+    pub attn_gate: Handle, // [t_max × q_dim]
+    pub attn_k: Handle,    // [t_max × kvd] (post-RoPE)
+    pub attn_v: Handle,    // [t_max × kvd]
+    pub attn_out: Handle,  // [t_max × q_dim] (gated)
+    pub attn_pos: Handle,  // u32 [t_max] — RoPE positions = base_pos + depth
     /// Single-row scratch for the attention KV commit gather (T6 fast commit).
     pub attn_k_row: Handle, // [kvd]
     pub attn_v_row: Handle, // [kvd]
@@ -663,7 +663,10 @@ impl TernaryDeltanetGpuForward {
 
         let bufs = self.tree_buffers.as_ref().expect("tree buffers");
         let layer_w = &self.layers[layer_idx];
-        let wq = layer_w.attn_wq.as_ref().expect("attn_wq for Attention layer");
+        let wq = layer_w
+            .attn_wq
+            .as_ref()
+            .expect("attn_wq for Attention layer");
         let wkv = layer_w
             .attn_wkv
             .as_ref()

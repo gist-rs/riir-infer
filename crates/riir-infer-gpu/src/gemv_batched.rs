@@ -16,9 +16,9 @@
 //! Sync points are at natural data-dependency boundaries (e.g. before a CPU
 //! element-wise op), not per-GEMV.
 
+use crate::cubecl_runtime::ActiveRuntime;
 use cubecl::prelude::*;
 use cubecl::server::Handle;
-use crate::cubecl_runtime::ActiveRuntime;
 
 use crate::gemv_autotune::GemvAutotune;
 

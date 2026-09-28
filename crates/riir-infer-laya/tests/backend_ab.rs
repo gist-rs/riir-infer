@@ -266,7 +266,11 @@ fn s5_backend_paired_ab() {
             .collect();
         for (arm, got) in answers.iter().enumerate().skip(1) {
             for (x, y) in answers[0].iter().zip(got) {
-                assert_eq!(x.choice, y.choice, "{label}/{}: argmax diverges from cpu", ARMS[arm]);
+                assert_eq!(
+                    x.choice, y.choice,
+                    "{label}/{}: argmax diverges from cpu",
+                    ARMS[arm]
+                );
                 for ((kx, px), (ky, py)) in x.probabilities.iter().zip(&y.probabilities) {
                     assert_eq!(kx, ky, "{label}: option order");
                     assert!(

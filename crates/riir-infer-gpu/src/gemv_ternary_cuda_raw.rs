@@ -60,8 +60,10 @@
 use std::error::Error;
 use std::sync::Arc;
 
-use cudarc::driver::safe::{CudaContext, CudaFunction, CudaModule, CudaSlice, CudaStream, LaunchConfig};
 use cudarc::driver::PushKernelArg;
+use cudarc::driver::safe::{
+    CudaContext, CudaFunction, CudaModule, CudaSlice, CudaStream, LaunchConfig,
+};
 
 use katgpt_core::TernaryGroupWeights;
 
@@ -1124,9 +1126,7 @@ struct WeightBuffers {
 ///   to the old f32 upload at half the DRAM traffic).
 ///
 /// Panics if `N` is not a multiple of 8 (dp4a requires 8-element alignment).
-pub fn convert_bitplane_to_packed_codes(
-    w: &TernaryGroupWeights,
-) -> (Vec<i16>, Vec<u16>) {
+pub fn convert_bitplane_to_packed_codes(w: &TernaryGroupWeights) -> (Vec<i16>, Vec<u16>) {
     let m = w.rows;
     let n = w.cols;
     assert!(n.is_multiple_of(8), "dp4a requires N % 8 == 0; got N={n}");
@@ -1236,7 +1236,8 @@ impl TernaryGemmCudaRaw {
     /// (Ada Lovelace / RTX 4090); `__dp4a` + `__byte_perm` are sm_70+
     /// intrinsics, so older NVIDIA GPUs also work if the arch is adjusted.
     pub fn new() -> Result<Self, TernaryGemmCudaRawError> {
-        let ctx = CudaContext::new(0).map_err(|e| TernaryGemmCudaRawError::CudaInit(e.to_string()))?;
+        let ctx =
+            CudaContext::new(0).map_err(|e| TernaryGemmCudaRawError::CudaInit(e.to_string()))?;
         // `ctx.new_stream()` returns `Arc<CudaStream>` directly — no wrapping.
         let stream = ctx
             .new_stream()
@@ -1629,18 +1630,20 @@ impl katgpt_core::TernaryMatvecHook for GpuTernaryMatvecDp4a {
             out_buf,
         } = &mut *inner;
         let key = (w.pos_bits.as_ptr() as usize, w.neg_bits.as_ptr() as usize);
-        let idx = if let Some(idx) = cache.get(&key).copied() { idx } else {
-                // Lazy upload — should not happen if preupload_all was called,
-                // but handles the fallback gracefully.
-                let idx = handler
-                    .upload_weights(w)
-                    .expect("dp4a hook: weight upload failed");
-                cache.insert(key, idx);
-                if out_buf.len() < w.rows {
-                    out_buf.resize(w.rows, 0.0);
-                }
-                idx
-            };
+        let idx = if let Some(idx) = cache.get(&key).copied() {
+            idx
+        } else {
+            // Lazy upload — should not happen if preupload_all was called,
+            // but handles the fallback gracefully.
+            let idx = handler
+                .upload_weights(w)
+                .expect("dp4a hook: weight upload failed");
+            cache.insert(key, idx);
+            if out_buf.len() < w.rows {
+                out_buf.resize(w.rows, 0.0);
+            }
+            idx
+        };
 
         // Use the reusable output buffer, then copy to caller's slice.
         // This avoids per-call Vec allocation.
@@ -1757,9 +1760,7 @@ mod tests {
             mean_rel += rel;
         }
         mean_rel /= m as f32;
-        eprintln!(
-            "[dp4a_g1] m={m} n={n}: mean_rel={mean_rel:.4e} max_rel={max_rel:.4e}"
-        );
+        eprintln!("[dp4a_g1] m={m} n={n}: mean_rel={mean_rel:.4e} max_rel={max_rel:.4e}");
         // T3 tolerance: mean_rel < 0.02 (2%) for gaussian. Use max_rel < 0.05.
         assert!(
             mean_rel < 0.02,
@@ -1809,7 +1810,10 @@ mod tests {
             max_diff = max_diff.max((a - b).abs());
         }
         eprintln!("[all_pos] max_diff = {max_diff:.4e} (expected ~{n})");
-        assert!(max_diff < (n as f32 * 0.02), "max_diff {max_diff} too large");
+        assert!(
+            max_diff < (n as f32 * 0.02),
+            "max_diff {max_diff} too large"
+        );
     }
 
     /// Issue 616 T4 — fused kernel must produce BIT-IDENTICAL output to the
@@ -1909,9 +1913,7 @@ mod tests {
                 }
             }
         }
-        eprintln!(
-            "[fused_vs_split] m={m} n={n}: max_diff={max_diff:.4e}, mismatches={mismatches}"
-        );
+        eprintln!("[fused_vs_split] m={m} n={n}: max_diff={max_diff:.4e}, mismatches={mismatches}");
         assert!(
             max_diff == 0.0,
             "fused kernel diverges from split path: max_diff={max_diff:.4e}, {mismatches}/{m} rows differ"
@@ -2074,9 +2076,7 @@ mod tests {
             let denom = cpu_out[i].abs().max(1e-6);
             max_rel = max_rel.max(diff / denom);
         }
-        eprintln!(
-            "[transposed_gemv] m={m} n={n}: max_diff={max_diff:.6e}, max_rel={max_rel:.6e}"
-        );
+        eprintln!("[transposed_gemv] m={m} n={n}: max_diff={max_diff:.6e}, max_rel={max_rel:.6e}");
         assert!(
             max_diff < 1e-4,
             "transposed GEMV diverges from CPU: max_diff={max_diff:.6e}"
@@ -2247,10 +2247,7 @@ mod tests {
         let mut multi_outs: Vec<Vec<f32>> = Vec::with_capacity(4);
         for dev in &multi_out_dev {
             let mut out = vec![0f32; dev.len()];
-            handler
-                .stream
-                .memcpy_dtoh(dev, &mut out)
-                .expect("download");
+            handler.stream.memcpy_dtoh(dev, &mut out).expect("download");
             multi_outs.push(out);
         }
 
@@ -2329,7 +2326,10 @@ mod tests {
             let expect = base[i] + split_outs[0][i];
             acc_max_diff = acc_max_diff.max((expect - acc_out[i]).abs());
         }
-        eprintln!("[multi_accum] m={} n={n}: max_diff={acc_max_diff:.4e}", seg_m[0]);
+        eprintln!(
+            "[multi_accum] m={} n={n}: max_diff={acc_max_diff:.4e}",
+            seg_m[0]
+        );
         assert!(
             acc_max_diff == 0.0,
             "multi accumulate mode diverges from base+split: max_diff={acc_max_diff:.4e}"
@@ -2506,24 +2506,68 @@ mod tests {
                 .map(|&m| handler.stream.alloc_zeros::<f32>(m).expect("alloc"))
                 .collect();
             launch_variant(
-                &handler, &r1_kernel, &wbs, &m_i32, outs_r1.as_slice().try_into().unwrap(),
-                &act_dev, &ascale_dev, int16_per_row, groups_per_row, ablock_i32,
-                ablocks_i32, 0, total_rows, 1,
+                &handler,
+                &r1_kernel,
+                &wbs,
+                &m_i32,
+                outs_r1.as_slice().try_into().unwrap(),
+                &act_dev,
+                &ascale_dev,
+                int16_per_row,
+                groups_per_row,
+                ablock_i32,
+                ablocks_i32,
+                0,
+                total_rows,
+                1,
             );
             launch_variant(
-                &handler, &r2_kernel, &wbs, &m_i32, outs_r2.as_slice().try_into().unwrap(),
-                &act_dev, &ascale_dev, int16_per_row, groups_per_row, ablock_i32,
-                ablocks_i32, 0, total_rows, 2,
+                &handler,
+                &r2_kernel,
+                &wbs,
+                &m_i32,
+                outs_r2.as_slice().try_into().unwrap(),
+                &act_dev,
+                &ascale_dev,
+                int16_per_row,
+                groups_per_row,
+                ablock_i32,
+                ablocks_i32,
+                0,
+                total_rows,
+                2,
             );
             launch_variant(
-                &handler, &pf_kernel, &wbs, &m_i32, outs_pf.as_slice().try_into().unwrap(),
-                &act_dev, &ascale_dev, int16_per_row, groups_per_row, ablock_i32,
-                ablocks_i32, 0, total_rows, 1,
+                &handler,
+                &pf_kernel,
+                &wbs,
+                &m_i32,
+                outs_pf.as_slice().try_into().unwrap(),
+                &act_dev,
+                &ascale_dev,
+                int16_per_row,
+                groups_per_row,
+                ablock_i32,
+                ablocks_i32,
+                0,
+                total_rows,
+                1,
             );
             launch_variant(
-                &handler, &u4_kernel, &wbs, &m_i32, outs_u4.as_slice().try_into().unwrap(),
-                &act_dev, &ascale_dev, int16_per_row, groups_per_row, ablock_i32,
-                ablocks_i32, 0, total_rows, 1,
+                &handler,
+                &u4_kernel,
+                &wbs,
+                &m_i32,
+                outs_u4.as_slice().try_into().unwrap(),
+                &act_dev,
+                &ascale_dev,
+                int16_per_row,
+                groups_per_row,
+                ablock_i32,
+                ablocks_i32,
+                0,
+                total_rows,
+                1,
             );
             handler.stream.synchronize().expect("sync");
 
@@ -2533,8 +2577,14 @@ mod tests {
                 for seg in 0..4 {
                     let mut a = vec![0f32; segs[seg]];
                     let mut b = vec![0f32; segs[seg]];
-                    handler.stream.memcpy_dtoh(&outs_r1[seg], &mut a).expect("dtoh");
-                    handler.stream.memcpy_dtoh(&outs_x[seg], &mut b).expect("dtoh");
+                    handler
+                        .stream
+                        .memcpy_dtoh(&outs_r1[seg], &mut a)
+                        .expect("dtoh");
+                    handler
+                        .stream
+                        .memcpy_dtoh(&outs_x[seg], &mut b)
+                        .expect("dtoh");
                     for i in 0..segs[seg] {
                         let diff = (a[i] - b[i]).abs();
                         max_diff = max_diff.max(diff);
@@ -2558,31 +2608,53 @@ mod tests {
                     let v: Vec<f32> = (0..m).map(|i| ((i % 17) as f32 - 8.0) * 0.5).collect();
                     handler.stream.clone_htod(&v).expect("prefill")
                 };
-                let acc_r1: Vec<_> = segs
-                    .iter()
-                    .map(|&m| mk_prefill(&handler, m))
-                    .collect();
-                let acc_r2: Vec<_> = segs
-                    .iter()
-                    .map(|&m| mk_prefill(&handler, m))
-                    .collect();
+                let acc_r1: Vec<_> = segs.iter().map(|&m| mk_prefill(&handler, m)).collect();
+                let acc_r2: Vec<_> = segs.iter().map(|&m| mk_prefill(&handler, m)).collect();
                 launch_variant(
-                    &handler, &r1_kernel, &wbs, &m_i32, acc_r1.as_slice().try_into().unwrap(),
-                    &act_dev, &ascale_dev, int16_per_row, groups_per_row, ablock_i32,
-                    ablocks_i32, 1, total_rows, 1,
+                    &handler,
+                    &r1_kernel,
+                    &wbs,
+                    &m_i32,
+                    acc_r1.as_slice().try_into().unwrap(),
+                    &act_dev,
+                    &ascale_dev,
+                    int16_per_row,
+                    groups_per_row,
+                    ablock_i32,
+                    ablocks_i32,
+                    1,
+                    total_rows,
+                    1,
                 );
                 launch_variant(
-                    &handler, &r2_kernel, &wbs, &m_i32, acc_r2.as_slice().try_into().unwrap(),
-                    &act_dev, &ascale_dev, int16_per_row, groups_per_row, ablock_i32,
-                    ablocks_i32, 1, total_rows, 2,
+                    &handler,
+                    &r2_kernel,
+                    &wbs,
+                    &m_i32,
+                    acc_r2.as_slice().try_into().unwrap(),
+                    &act_dev,
+                    &ascale_dev,
+                    int16_per_row,
+                    groups_per_row,
+                    ablock_i32,
+                    ablocks_i32,
+                    1,
+                    total_rows,
+                    2,
                 );
                 handler.stream.synchronize().expect("sync");
                 let mut acc_max = 0.0f32;
                 for seg in 0..4 {
                     let mut a = vec![0f32; segs[seg]];
                     let mut b = vec![0f32; segs[seg]];
-                    handler.stream.memcpy_dtoh(&acc_r1[seg], &mut a).expect("dtoh");
-                    handler.stream.memcpy_dtoh(&acc_r2[seg], &mut b).expect("dtoh");
+                    handler
+                        .stream
+                        .memcpy_dtoh(&acc_r1[seg], &mut a)
+                        .expect("dtoh");
+                    handler
+                        .stream
+                        .memcpy_dtoh(&acc_r2[seg], &mut b)
+                        .expect("dtoh");
                     for i in 0..segs[seg] {
                         acc_max = acc_max.max((a[i] - b[i]).abs());
                     }
@@ -2744,28 +2816,61 @@ mod tests {
                 let outs_s2_a = mk_outs(&handler);
                 let outs_s2_b = mk_outs(&handler);
                 launch(
-                    &handler, &r1_kernel, &wbs, &m_i32,
+                    &handler,
+                    &r1_kernel,
+                    &wbs,
+                    &m_i32,
                     outs_r1.as_slice().try_into().unwrap(),
-                    &act_dev, &ascale_dev, int16_per_row, groups_per_row,
-                    ablock_i32, ablocks_i32, 0, total_rows, false,
+                    &act_dev,
+                    &ascale_dev,
+                    int16_per_row,
+                    groups_per_row,
+                    ablock_i32,
+                    ablocks_i32,
+                    0,
+                    total_rows,
+                    false,
                 );
                 launch(
-                    &handler, &split2_kernel, &wbs, &m_i32,
+                    &handler,
+                    &split2_kernel,
+                    &wbs,
+                    &m_i32,
                     outs_s2_a.as_slice().try_into().unwrap(),
-                    &act_dev, &ascale_dev, int16_per_row, groups_per_row,
-                    ablock_i32, ablocks_i32, 0, total_rows, true,
+                    &act_dev,
+                    &ascale_dev,
+                    int16_per_row,
+                    groups_per_row,
+                    ablock_i32,
+                    ablocks_i32,
+                    0,
+                    total_rows,
+                    true,
                 );
                 launch(
-                    &handler, &split2_kernel, &wbs, &m_i32,
+                    &handler,
+                    &split2_kernel,
+                    &wbs,
+                    &m_i32,
                     outs_s2_b.as_slice().try_into().unwrap(),
-                    &act_dev, &ascale_dev, int16_per_row, groups_per_row,
-                    ablock_i32, ablocks_i32, 0, total_rows, true,
+                    &act_dev,
+                    &ascale_dev,
+                    int16_per_row,
+                    groups_per_row,
+                    ablock_i32,
+                    ablocks_i32,
+                    0,
+                    total_rows,
+                    true,
                 );
                 handler.stream.synchronize().expect("sync");
 
                 let dl = |outs: &Vec<_>, seg: usize| -> Vec<f32> {
                     let mut v = vec![0f32; segs[seg]];
-                    handler.stream.memcpy_dtoh(&outs[seg], &mut v).expect("dtoh");
+                    handler
+                        .stream
+                        .memcpy_dtoh(&outs[seg], &mut v)
+                        .expect("dtoh");
                     v
                 };
                 let mut max_rel = 0.0f64;
@@ -2815,26 +2920,52 @@ mod tests {
                     let acc_r1 = mk_prefill_vec(&handler, segs[0]);
                     let acc_s2 = mk_prefill_vec(&handler, segs[0]);
                     launch(
-                        &handler, &r1_kernel, &wbs, &m_i32,
+                        &handler,
+                        &r1_kernel,
+                        &wbs,
+                        &m_i32,
                         acc_r1.as_slice().try_into().unwrap(),
-                        &act_dev, &ascale_dev, int16_per_row, groups_per_row,
-                        ablock_i32, ablocks_i32, 1, total_rows, false,
+                        &act_dev,
+                        &ascale_dev,
+                        int16_per_row,
+                        groups_per_row,
+                        ablock_i32,
+                        ablocks_i32,
+                        1,
+                        total_rows,
+                        false,
                     );
                     launch(
-                        &handler, &split2_kernel, &wbs, &m_i32,
+                        &handler,
+                        &split2_kernel,
+                        &wbs,
+                        &m_i32,
                         acc_s2.as_slice().try_into().unwrap(),
-                        &act_dev, &ascale_dev, int16_per_row, groups_per_row,
-                        ablock_i32, ablocks_i32, 1, total_rows, true,
+                        &act_dev,
+                        &ascale_dev,
+                        int16_per_row,
+                        groups_per_row,
+                        ablock_i32,
+                        ablocks_i32,
+                        1,
+                        total_rows,
+                        true,
                     );
                     handler.stream.synchronize().expect("sync");
                     let a: Vec<f32> = {
                         let mut v = vec![0f32; segs[0]];
-                        handler.stream.memcpy_dtoh(&acc_r1[0], &mut v).expect("dtoh");
+                        handler
+                            .stream
+                            .memcpy_dtoh(&acc_r1[0], &mut v)
+                            .expect("dtoh");
                         v
                     };
                     let b: Vec<f32> = {
                         let mut v = vec![0f32; segs[0]];
-                        handler.stream.memcpy_dtoh(&acc_s2[0], &mut v).expect("dtoh");
+                        handler
+                            .stream
+                            .memcpy_dtoh(&acc_s2[0], &mut v)
+                            .expect("dtoh");
                         v
                     };
                     let mut acc_rel = 0.0f64;
@@ -2843,7 +2974,9 @@ mod tests {
                         let denom = a[i].abs().max(1.0);
                         acc_rel = acc_rel.max((diff / denom) as f64);
                     }
-                    eprintln!("[split2_vs_r1] segs={segs:?} n={n} accumulate: max_rel={acc_rel:.3e}");
+                    eprintln!(
+                        "[split2_vs_r1] segs={segs:?} n={n} accumulate: max_rel={acc_rel:.3e}"
+                    );
                     assert!(
                         acc_rel < 1e-4,
                         "split2 accumulate exceeds reorder bound: n={n} max_rel={acc_rel:.3e}"
@@ -2926,12 +3059,7 @@ mod tests {
 
         // Grid ladder: far below residency (32 warps → many iterations per
         // warp), just below one full wave, exactly the work grid, and above it.
-        let grids = [
-            4u32,
-            17,
-            full_grid,
-            full_grid + 7,
-        ];
+        let grids = [4u32, 17, full_grid, full_grid + 7];
         for grid_x in grids {
             let mut out_dev = Vec::with_capacity(4);
             for &m in &seg_m {
@@ -3054,7 +3182,10 @@ mod tests {
             let expect = base[i] + split_outs[0][i];
             acc_max_diff = acc_max_diff.max((expect - acc_out[i]).abs());
         }
-        eprintln!("[persistent_accum] m={} n={n}: max_diff={acc_max_diff:.4e}", seg_m[0]);
+        eprintln!(
+            "[persistent_accum] m={} n={n}: max_diff={acc_max_diff:.4e}",
+            seg_m[0]
+        );
         assert!(
             acc_max_diff == 0.0,
             "persistent accumulate mode diverges from base+split: max_diff={acc_max_diff:.4e}"

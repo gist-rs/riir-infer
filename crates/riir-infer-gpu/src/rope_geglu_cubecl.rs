@@ -161,12 +161,7 @@ fn rope_from_combined_f32(
 /// `CubeCount::Static(ceil(n/256), 1, 1)`, `CubeDim::new_1d(256)`.
 #[cfg(feature = "cubecl_runtime")]
 #[cube(launch_unchecked)]
-fn rope_f32(
-    input: &[f32],
-    cos_sin: &[f32],
-    params: &[f32],
-    output: &mut [f32],
-) {
+fn rope_f32(input: &[f32], cos_sin: &[f32], params: &[f32], output: &mut [f32]) {
     let n = input.len();
     let head_dim_u32 = cos_sin.len() as u32;
     let pair_stride = params[0usize] as u32;
@@ -237,12 +232,7 @@ fn rope_f32(
 /// - `output`: `[f32; seq_len * n_heads * head_dim]`
 #[cfg(feature = "cubecl_runtime")]
 #[cube(launch_unchecked)]
-fn rope_batched_f32(
-    input: &[f32],
-    cos_sin_all: &[f32],
-    params: &[f32],
-    output: &mut [f32],
-) {
+fn rope_batched_f32(input: &[f32], cos_sin_all: &[f32], params: &[f32], output: &mut [f32]) {
     let head_dim_u32 = params[0usize] as u32;
     let row_stride = params[1usize] as u32; // n_heads * head_dim
     let pair_stride = params[2usize] as u32;
@@ -444,7 +434,10 @@ impl RopeCosSinCache {
             self.handle = Some(client.create_from_slice(f32::as_bytes(&self.table)));
             self.pos = pos;
         }
-        self.handle.as_ref().expect("handle populated above").clone()
+        self.handle
+            .as_ref()
+            .expect("handle populated above")
+            .clone()
     }
 }
 
@@ -539,7 +532,10 @@ impl RopeFromCombinedCubeCL {
     /// - `output_handle` must have `section_len` f32 elements
     /// - `head_dim` must be even and > 0
     /// - `section_offset` must be aligned to `head_dim` boundary
-#[allow(clippy::too_many_arguments, reason = "GPU kernel launch/dispatch: many buffer handles are inherent to the fused-kernel interface")]
+    #[allow(
+        clippy::too_many_arguments,
+        reason = "GPU kernel launch/dispatch: many buffer handles are inherent to the fused-kernel interface"
+    )]
     pub unsafe fn launch<R: Runtime>(
         client: &ComputeClient<R>,
         input_combined: Handle,
@@ -593,11 +589,7 @@ pub struct RopeBatchedCubeCL;
 /// `d` is the **pair index**, not a component index, so this table is shared by
 /// both [`RopePairing`] conventions — only the kernel's pairing changes.
 #[cfg(feature = "cubecl_runtime")]
-pub fn precompute_rope_cos_sin_batched(
-    seq_len: usize,
-    head_dim: usize,
-    theta: f32,
-) -> Vec<f32> {
+pub fn precompute_rope_cos_sin_batched(seq_len: usize, head_dim: usize, theta: f32) -> Vec<f32> {
     let half_dim = head_dim / 2;
     let mut table = vec![0.0f32; seq_len * head_dim];
     for pos in 0..seq_len {
@@ -633,17 +625,13 @@ impl RopeBatchedCubeCL {
         input_handle: Handle,
         cos_sin_handle: Handle,
         output_handle: Handle,
-        total: usize,         // seq_len * n_heads * head_dim
+        total: usize, // seq_len * n_heads * head_dim
         head_dim: usize,
         n_heads: usize,
         pairing: RopePairing,
     ) {
         let row_stride = (n_heads * head_dim) as f32;
-        let params: &[f32] = &[
-            head_dim as f32,
-            row_stride,
-            pairing.stride(head_dim) as f32,
-        ];
+        let params: &[f32] = &[head_dim as f32, row_stride, pairing.stride(head_dim) as f32];
         let params_handle = client.create_from_slice(f32::as_bytes(params));
         let cos_sin_len = (total / (n_heads * head_dim)) * head_dim; // seq_len * head_dim
         let num_wg = (total as u32).div_ceil(256u32).max(1);
@@ -860,7 +848,8 @@ mod tests {
 
         // The two conventions must actually differ at pos > 0 — otherwise this
         // test would pass even if `pair_stride` were ignored by the kernel.
-        let interleaved = run_rope_gpu(&client, input, &cos_sin, head_dim, RopePairing::Interleaved);
+        let interleaved =
+            run_rope_gpu(&client, input, &cos_sin, head_dim, RopePairing::Interleaved);
         let rotate_half = run_rope_gpu(&client, input, &cos_sin, head_dim, RopePairing::RotateHalf);
         assert!(
             interleaved
@@ -894,7 +883,13 @@ mod tests {
             let mut q = input.clone();
             let mut k = input.clone();
             let freq = riir_infer_core::rope::RopeFreqTable::new(theta, head_dim);
-            riir_infer_core::rope::apply_rope_with_freq(&mut q, &mut k, pos, head_dim, freq.as_slice());
+            riir_infer_core::rope::apply_rope_with_freq(
+                &mut q,
+                &mut k,
+                pos,
+                head_dim,
+                freq.as_slice(),
+            );
 
             assert_close(&q, &got, &format!("pos={pos}"));
         }

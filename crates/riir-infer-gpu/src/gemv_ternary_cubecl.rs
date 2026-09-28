@@ -71,15 +71,13 @@ use katgpt_core::TernaryGroupWeights;
 /// decode there is the cudarc dp4a path — which already ships its own f16
 /// wscale bits (Issue 734 T5, bit-identical + faster) — so this CubeCL
 /// toggle is M3's lane.
-static USE_F16_SCALE_GEMV: std::sync::atomic::AtomicBool =
-    std::sync::atomic::AtomicBool::new(true);
+static USE_F16_SCALE_GEMV: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(true);
 static F16_SCALE_INITIALIZED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
 
 /// Launches dispatched through the f16-scale path (the vacuous-guard
 /// counter — outputs are bit-identical to the f32 path, so ONLY this counter
 /// proves a toggle actually reached the kernel).
-static F16_SCALE_LAUNCHES: std::sync::atomic::AtomicUsize =
-    std::sync::atomic::AtomicUsize::new(0);
+static F16_SCALE_LAUNCHES: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
 
 fn f16_scale_enabled() -> bool {
     // Env is read exactly once (the first caller wins the OnceLock); the
@@ -1019,13 +1017,27 @@ fn gemv_ternary_interleaved_rowtiled8(
     let mut r5 = m - 1u32;
     let mut r6 = m - 1u32;
     let mut r7 = m - 1u32;
-    if row_base + 1u32 < m { r1 = row_base + 1u32; }
-    if row_base + 2u32 < m { r2 = row_base + 2u32; }
-    if row_base + 3u32 < m { r3 = row_base + 3u32; }
-    if row_base + 4u32 < m { r4 = row_base + 4u32; }
-    if row_base + 5u32 < m { r5 = row_base + 5u32; }
-    if row_base + 6u32 < m { r6 = row_base + 6u32; }
-    if row_base + 7u32 < m { r7 = row_base + 7u32; }
+    if row_base + 1u32 < m {
+        r1 = row_base + 1u32;
+    }
+    if row_base + 2u32 < m {
+        r2 = row_base + 2u32;
+    }
+    if row_base + 3u32 < m {
+        r3 = row_base + 3u32;
+    }
+    if row_base + 4u32 < m {
+        r4 = row_base + 4u32;
+    }
+    if row_base + 5u32 < m {
+        r5 = row_base + 5u32;
+    }
+    if row_base + 6u32 < m {
+        r6 = row_base + 6u32;
+    }
+    if row_base + 7u32 < m {
+        r7 = row_base + 7u32;
+    }
 
     let mut acc0 = f32::new(0.0f32);
     let mut acc1 = f32::new(0.0f32);
@@ -1178,13 +1190,27 @@ fn gemv_ternary_interleaved_rowtiled8(
 
     if lane == 0u32 {
         output[r0 as usize] = t0;
-        if row_base + 1u32 < m { output[r1 as usize] = t1; }
-        if row_base + 2u32 < m { output[r2 as usize] = t2; }
-        if row_base + 3u32 < m { output[r3 as usize] = t3; }
-        if row_base + 4u32 < m { output[r4 as usize] = t4; }
-        if row_base + 5u32 < m { output[r5 as usize] = t5; }
-        if row_base + 6u32 < m { output[r6 as usize] = t6; }
-        if row_base + 7u32 < m { output[r7 as usize] = t7; }
+        if row_base + 1u32 < m {
+            output[r1 as usize] = t1;
+        }
+        if row_base + 2u32 < m {
+            output[r2 as usize] = t2;
+        }
+        if row_base + 3u32 < m {
+            output[r3 as usize] = t3;
+        }
+        if row_base + 4u32 < m {
+            output[r4 as usize] = t4;
+        }
+        if row_base + 5u32 < m {
+            output[r5 as usize] = t5;
+        }
+        if row_base + 6u32 < m {
+            output[r6 as usize] = t6;
+        }
+        if row_base + 7u32 < m {
+            output[r7 as usize] = t7;
+        }
     }
 }
 
@@ -1250,13 +1276,27 @@ fn gemv_ternary_trit_rowtiled8(
     let mut r5 = m - 1u32;
     let mut r6 = m - 1u32;
     let mut r7 = m - 1u32;
-    if row_base + 1u32 < m { r1 = row_base + 1u32; }
-    if row_base + 2u32 < m { r2 = row_base + 2u32; }
-    if row_base + 3u32 < m { r3 = row_base + 3u32; }
-    if row_base + 4u32 < m { r4 = row_base + 4u32; }
-    if row_base + 5u32 < m { r5 = row_base + 5u32; }
-    if row_base + 6u32 < m { r6 = row_base + 6u32; }
-    if row_base + 7u32 < m { r7 = row_base + 7u32; }
+    if row_base + 1u32 < m {
+        r1 = row_base + 1u32;
+    }
+    if row_base + 2u32 < m {
+        r2 = row_base + 2u32;
+    }
+    if row_base + 3u32 < m {
+        r3 = row_base + 3u32;
+    }
+    if row_base + 4u32 < m {
+        r4 = row_base + 4u32;
+    }
+    if row_base + 5u32 < m {
+        r5 = row_base + 5u32;
+    }
+    if row_base + 6u32 < m {
+        r6 = row_base + 6u32;
+    }
+    if row_base + 7u32 < m {
+        r7 = row_base + 7u32;
+    }
 
     let mut acc0 = f32::new(0.0f32);
     let mut acc1 = f32::new(0.0f32);
@@ -1345,14 +1385,22 @@ fn gemv_ternary_trit_rowtiled8(
                 for k in 0u32..TRITS_PER_BYTE {
                     let col = bcol + k;
                     let x = input[col as usize];
-                    let code0 = rem0 % 3u32; rem0 = rem0 / 3u32;
-                    let code1 = rem1 % 3u32; rem1 = rem1 / 3u32;
-                    let code2 = rem2 % 3u32; rem2 = rem2 / 3u32;
-                    let code3 = rem3 % 3u32; rem3 = rem3 / 3u32;
-                    let code4 = rem4 % 3u32; rem4 = rem4 / 3u32;
-                    let code5 = rem5 % 3u32; rem5 = rem5 / 3u32;
-                    let code6 = rem6 % 3u32; rem6 = rem6 / 3u32;
-                    let code7 = rem7 % 3u32; rem7 = rem7 / 3u32;
+                    let code0 = rem0 % 3u32;
+                    rem0 = rem0 / 3u32;
+                    let code1 = rem1 % 3u32;
+                    rem1 = rem1 / 3u32;
+                    let code2 = rem2 % 3u32;
+                    rem2 = rem2 / 3u32;
+                    let code3 = rem3 % 3u32;
+                    rem3 = rem3 / 3u32;
+                    let code4 = rem4 % 3u32;
+                    rem4 = rem4 / 3u32;
+                    let code5 = rem5 % 3u32;
+                    rem5 = rem5 / 3u32;
+                    let code6 = rem6 % 3u32;
+                    rem6 = rem6 / 3u32;
+                    let code7 = rem7 % 3u32;
+                    rem7 = rem7 / 3u32;
                     a0p += select(code0 == 2u32, x, f32::new(0.0f32));
                     a0n += select(code0 == 0u32, x, f32::new(0.0f32));
                     a1p += select(code1 == 2u32, x, f32::new(0.0f32));
@@ -1401,14 +1449,22 @@ fn gemv_ternary_trit_rowtiled8(
                     let col = bcol + k;
                     if col < n {
                         let x = input[col as usize];
-                        let code0 = rem0 % 3u32; rem0 = rem0 / 3u32;
-                        let code1 = rem1 % 3u32; rem1 = rem1 / 3u32;
-                        let code2 = rem2 % 3u32; rem2 = rem2 / 3u32;
-                        let code3 = rem3 % 3u32; rem3 = rem3 / 3u32;
-                        let code4 = rem4 % 3u32; rem4 = rem4 / 3u32;
-                        let code5 = rem5 % 3u32; rem5 = rem5 / 3u32;
-                        let code6 = rem6 % 3u32; rem6 = rem6 / 3u32;
-                        let code7 = rem7 % 3u32; rem7 = rem7 / 3u32;
+                        let code0 = rem0 % 3u32;
+                        rem0 = rem0 / 3u32;
+                        let code1 = rem1 % 3u32;
+                        rem1 = rem1 / 3u32;
+                        let code2 = rem2 % 3u32;
+                        rem2 = rem2 / 3u32;
+                        let code3 = rem3 % 3u32;
+                        rem3 = rem3 / 3u32;
+                        let code4 = rem4 % 3u32;
+                        rem4 = rem4 / 3u32;
+                        let code5 = rem5 % 3u32;
+                        rem5 = rem5 / 3u32;
+                        let code6 = rem6 % 3u32;
+                        rem6 = rem6 / 3u32;
+                        let code7 = rem7 % 3u32;
+                        rem7 = rem7 / 3u32;
                         a0p += select(code0 == 2u32, x, f32::new(0.0f32));
                         a0n += select(code0 == 0u32, x, f32::new(0.0f32));
                         a1p += select(code1 == 2u32, x, f32::new(0.0f32));
@@ -1472,13 +1528,27 @@ fn gemv_ternary_trit_rowtiled8(
 
     if lane == 0u32 {
         output[r0 as usize] = t0;
-        if row_base + 1u32 < m { output[r1 as usize] = t1; }
-        if row_base + 2u32 < m { output[r2 as usize] = t2; }
-        if row_base + 3u32 < m { output[r3 as usize] = t3; }
-        if row_base + 4u32 < m { output[r4 as usize] = t4; }
-        if row_base + 5u32 < m { output[r5 as usize] = t5; }
-        if row_base + 6u32 < m { output[r6 as usize] = t6; }
-        if row_base + 7u32 < m { output[r7 as usize] = t7; }
+        if row_base + 1u32 < m {
+            output[r1 as usize] = t1;
+        }
+        if row_base + 2u32 < m {
+            output[r2 as usize] = t2;
+        }
+        if row_base + 3u32 < m {
+            output[r3 as usize] = t3;
+        }
+        if row_base + 4u32 < m {
+            output[r4 as usize] = t4;
+        }
+        if row_base + 5u32 < m {
+            output[r5 as usize] = t5;
+        }
+        if row_base + 6u32 < m {
+            output[r6 as usize] = t6;
+        }
+        if row_base + 7u32 < m {
+            output[r7 as usize] = t7;
+        }
     }
 }
 
@@ -1942,16 +2012,8 @@ impl TernaryHandle {
     ) -> Self {
         let blocks64 = cols.div_ceil(64);
         let groups_per_row = cols.div_ceil(TERNARY_GROUP_SIZE as usize);
-        debug_assert_eq!(
-            pos_bits.len(),
-            rows * blocks64,
-            "pos_bits length mismatch"
-        );
-        debug_assert_eq!(
-            neg_bits.len(),
-            rows * blocks64,
-            "neg_bits length mismatch"
-        );
+        debug_assert_eq!(pos_bits.len(), rows * blocks64, "pos_bits length mismatch");
+        debug_assert_eq!(neg_bits.len(), rows * blocks64, "neg_bits length mismatch");
         debug_assert_eq!(
             group_scale.len(),
             rows * groups_per_row,
@@ -2014,7 +2076,10 @@ impl TernaryHandle {
         client: &ComputeClient<crate::cubecl_runtime::ActiveRuntime>,
         weights: &[&TernaryGroupWeights],
     ) -> Self {
-        assert!(!weights.is_empty(), "from_weights_concat requires ≥1 weight");
+        assert!(
+            !weights.is_empty(),
+            "from_weights_concat requires ≥1 weight"
+        );
         let cols = weights[0].cols;
         let blocks64 = weights[0].blocks64;
         let groups_per_row = weights[0].groups_per_row;
@@ -2042,8 +2107,8 @@ impl TernaryHandle {
         let pos_bits_u32 = client.create_from_slice(bytemuck::cast_slice(&pos_u32));
         let neg_bits_u32 = client.create_from_slice(bytemuck::cast_slice(&neg_u32));
         let group_scale_f32 = client.create_from_slice(f32::as_bytes(&scale_f32));
-        let group_scale_f16 = f16_scale_enabled()
-            .then(|| client.create_from_slice(bytemuck::cast_slice(&scale_f16)));
+        let group_scale_f16 =
+            f16_scale_enabled().then(|| client.create_from_slice(bytemuck::cast_slice(&scale_f16)));
 
         Self {
             pos_bits_u32,
@@ -2370,7 +2435,11 @@ impl GemvTernaryCubeCL {
             F16_SCALE_LAUNCHES.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
             return unsafe {
                 crate::gemv_ternary_scale_ab_cubecl::GemvTernaryScaleAbCubeCL::launch_f16scale::<R>(
-                    client, handle, scale_f16, input_handle, output_handle,
+                    client,
+                    handle,
+                    scale_f16,
+                    input_handle,
+                    output_handle,
                 )
             };
         }
@@ -2874,10 +2943,10 @@ mod block_contiguous_tests {
     #[test]
     fn block_contiguous_gemm_matches_soa_per_token() {
         let shapes: &[(usize, usize)] = &[
-            (48, 128),    // ssm shape
-            (64, 256),    // small multi-group
-            (128, 512),   // attn shape
-            (256, 1024),  // medium projection
+            (48, 128),   // ssm shape
+            (64, 256),   // small multi-group
+            (128, 512),  // attn shape
+            (256, 1024), // medium projection
         ];
         let p_tokens = 4; // batch size
 
@@ -2911,8 +2980,7 @@ mod block_contiguous_tests {
 
             // Compare — allow small f32 rounding from different summation order.
             for i in 0..p_tokens * m {
-                let rel_err =
-                    (output_bc[i] - output_soa[i]).abs() / output_soa[i].abs().max(1e-6);
+                let rel_err = (output_bc[i] - output_soa[i]).abs() / output_soa[i].abs().max(1e-6);
                 assert!(
                     rel_err < 1e-5,
                     "block-contiguous vs SoA mismatch at shape ({m}×{n}), \
@@ -2962,9 +3030,7 @@ mod tests {
             );
         }
 
-        let bytes = client
-            .read_one(output_handle)
-            .expect("should read output");
+        let bytes = client.read_one(output_handle).expect("should read output");
         f32::from_bytes(&bytes).to_vec()
     }
 
@@ -2983,8 +3049,7 @@ mod tests {
         use half::f16;
         for r in 0..rows {
             for g in 0..w.groups_per_row {
-                w.group_scale[r * w.groups_per_row + g] =
-                    f16::from_f32(1.0 + 0.1 * (g as f32));
+                w.group_scale[r * w.groups_per_row + g] = f16::from_f32(1.0 + 0.1 * (g as f32));
             }
         }
         w

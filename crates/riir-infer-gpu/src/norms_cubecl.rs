@@ -73,12 +73,7 @@ use crate::cubecl_runtime::debug_assert_binding_at_least;
 /// `CubeCount::Static(1, 1, 1)`, `CubeDim::new_1d(256)`.
 #[cfg(feature = "cubecl_runtime")]
 #[cube(launch_unchecked)]
-fn rmsnorm_f32(
-    input: &[f32],
-    gamma: &[f32],
-    params: &[f32],
-    output: &mut [f32],
-) {
+fn rmsnorm_f32(input: &[f32], gamma: &[f32], params: &[f32], output: &mut [f32]) {
     let inv_dim = params[0usize];
     let eps = params[1usize];
     let dim = params[2usize] as u32;
@@ -199,12 +194,7 @@ fn residual_add_f32(a: &[f32], b: &[f32], output: &mut [f32]) {
 /// `CubeCount::Static(seq_len, 1, 1)`, `CubeDim::new_1d(256)`.
 #[cfg(feature = "cubecl_runtime")]
 #[cube(launch_unchecked)]
-fn rmsnorm_batched_f32(
-    input: &[f32],
-    gamma: &[f32],
-    params: &[f32],
-    output: &mut [f32],
-) {
+fn rmsnorm_batched_f32(input: &[f32], gamma: &[f32], params: &[f32], output: &mut [f32]) {
     let inv_dim = params[0usize];
     let eps = params[1usize];
     let dim = params[2usize] as u32;
@@ -573,7 +563,11 @@ fn rmsnorm_qk_fused_f32(
     let mut j = tid;
     while j < dim {
         let idx = (row_offset + j) as usize;
-        let g = if is_q { q_gamma[j as usize] } else { k_gamma[j as usize] };
+        let g = if is_q {
+            q_gamma[j as usize]
+        } else {
+            k_gamma[j as usize]
+        };
         let x = if is_q { q[idx] } else { k[idx] };
         let normalized = x * inv_rms * g;
         if is_q {
@@ -603,12 +597,7 @@ pub struct RmsNormQkFusedCubeCL;
 /// Dispatch: `CubeCount::Static(n_heads, 1, 1)`, `CubeDim::new_1d(256)`.
 #[cfg(feature = "cubecl_runtime")]
 #[cube(launch_unchecked)]
-fn rmsnorm_zgate_fused_f32(
-    output: &mut [f32],
-    gamma: &[f32],
-    z: &[f32],
-    params: &[f32],
-) {
+fn rmsnorm_zgate_fused_f32(output: &mut [f32], gamma: &[f32], z: &[f32], params: &[f32]) {
     let inv_dim = params[0usize];
     let eps = params[1usize];
     let dim = params[2usize] as u32;
@@ -1038,12 +1027,7 @@ impl ResidualAddRmsNormCubeCL {
 /// `CubeCount::Static(rows, 1, 1)`, `CubeDim::new_1d(256)`.
 #[cfg(feature = "cubecl_runtime")]
 #[cube(launch_unchecked)]
-fn layernorm_mean_batched_f32(
-    input: &[f32],
-    gamma: &[f32],
-    params: &[f32],
-    output: &mut [f32],
-) {
+fn layernorm_mean_batched_f32(input: &[f32], gamma: &[f32], params: &[f32], output: &mut [f32]) {
     let inv_dim = params[0usize];
     let eps = params[1usize];
     let dim = params[2usize] as u32;
@@ -1837,7 +1821,11 @@ mod tests {
         eps: f32,
     ) -> (Vec<f32>, Vec<f32>) {
         let _dim = x.len();
-        let x_post: Vec<f32> = x.iter().zip(residual.iter()).map(|(&a, &b)| a + b).collect();
+        let x_post: Vec<f32> = x
+            .iter()
+            .zip(residual.iter())
+            .map(|(&a, &b)| a + b)
+            .collect();
         let norm_out = rmsnorm_gamma_cpu(&x_post, gamma, eps);
         (x_post, norm_out)
     }
@@ -1890,7 +1878,9 @@ mod tests {
 
         let x_bytes = client.read_one(x_handle).expect("should read x output");
         let x_output = f32::from_bytes(&x_bytes);
-        let norm_bytes = client.read_one(norm_out_handle).expect("should read norm output");
+        let norm_bytes = client
+            .read_one(norm_out_handle)
+            .expect("should read norm output");
         let norm_output = f32::from_bytes(&norm_bytes);
 
         assert_eq!(x_output.len(), dim);
@@ -1971,11 +1961,17 @@ mod tests {
             if err > max_err {
                 max_err = err;
             }
-            assert!(err < 1e-5, "dim256 norm element {i}: expected {exp}, got {got}");
+            assert!(
+                err < 1e-5,
+                "dim256 norm element {i}: expected {exp}, got {got}"
+            );
         }
         // Also verify x was updated
         for (i, (&exp, &got)) in x_expected.iter().zip(x_output.iter()).enumerate() {
-            assert!((exp - got).abs() < 1e-5, "dim256 x element {i}: expected {exp}, got {got}");
+            assert!(
+                (exp - got).abs() < 1e-5,
+                "dim256 x element {i}: expected {exp}, got {got}"
+            );
         }
 
         println!("fused ResAdd+RMSNorm (dim={dim}): max_norm_err = {max_err}");

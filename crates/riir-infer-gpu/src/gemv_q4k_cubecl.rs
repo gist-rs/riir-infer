@@ -178,12 +178,7 @@ pub(crate) fn get_min_k4(j: u32, _s0: u32, s1: u32, s2: u32) -> f32 {
 /// - `output`: `m` f32 elements
 #[cfg(feature = "cubecl_runtime")]
 #[cube(launch_unchecked)]
-fn gemv_q4k_plane(
-    weight_q4k: &[u32],
-    d_dmin: &[f32],
-    input: &[f32],
-    output: &mut [f32],
-) {
+fn gemv_q4k_plane(weight_q4k: &[u32], d_dmin: &[f32], input: &[f32], output: &mut [f32]) {
     let n = input.len() as u32;
     let m = output.len() as u32;
     let blocks_per_row = n / Q4K_BLOCK_SIZE;
@@ -323,12 +318,7 @@ pub(crate) const Q4K_ROWS_PER_PLANE: u32 = 4;
 /// effects are measured separately rather than confounded.
 #[cfg(all(feature = "cubecl_runtime", feature = "q4k_rowtiled_gemv"))]
 #[cube(launch_unchecked)]
-fn gemv_q4k_plane_rowtiled(
-    weight_q4k: &[u32],
-    d_dmin: &[f32],
-    input: &[f32],
-    output: &mut [f32],
-) {
+fn gemv_q4k_plane_rowtiled(weight_q4k: &[u32], d_dmin: &[f32], input: &[f32], output: &mut [f32]) {
     let n = input.len() as u32;
     let m = output.len() as u32;
     let blocks_per_row = n / Q4K_BLOCK_SIZE;
@@ -519,12 +509,7 @@ fn gemv_q4k_plane_rowtiled(
 /// bounds checks on `col`.
 #[cfg(all(feature = "cubecl_runtime", feature = "q4k_rowtiled_gemv"))]
 #[cube(launch_unchecked)]
-fn gemv_q4k_plane_factored(
-    weight_q4k: &[u32],
-    d_dmin: &[f32],
-    input: &[f32],
-    output: &mut [f32],
-) {
+fn gemv_q4k_plane_factored(weight_q4k: &[u32], d_dmin: &[f32], input: &[f32], output: &mut [f32]) {
     let n = input.len() as u32;
     let m = output.len() as u32;
     let blocks_per_row = n / Q4K_BLOCK_SIZE;
@@ -696,12 +681,7 @@ fn gemv_q4k_plane_factored(
 /// alignment. The tiling matches `gemv_tile_f32` but with inline dequant.
 #[cfg(feature = "cubecl_runtime")]
 #[cube(launch_unchecked)]
-fn gemv_q4k_tiled(
-    weight_q4k: &[u32],
-    d_dmin: &[f32],
-    input: &[f32],
-    output: &mut [f32],
-) {
+fn gemv_q4k_tiled(weight_q4k: &[u32], d_dmin: &[f32], input: &[f32], output: &mut [f32]) {
     let n = input.len() as u32;
     let m = output.len() as u32;
     let blocks_per_row = n / Q4K_BLOCK_SIZE;
@@ -914,9 +894,15 @@ impl GemvQ4KCubeCL {
                 // Issue 949) because Issue 607 G5 found a 1.48× Metal win on
                 // the ternary path *reverse* to 0.48× on CUDA; Issue 609 G5 must
                 // sweep this kernel there before any CUDA promotion.
-                #[cfg(all(feature = "q4k_rowtiled_gemv", any(not(feature = "cuda_backend"), target_os = "macos")))]
+                #[cfg(all(
+                    feature = "q4k_rowtiled_gemv",
+                    any(not(feature = "cuda_backend"), target_os = "macos")
+                ))]
                 true => Self::launch_factored::<R>(client, handle, input_handle, output_handle),
-                #[cfg(not(all(feature = "q4k_rowtiled_gemv", any(not(feature = "cuda_backend"), target_os = "macos"))))]
+                #[cfg(not(all(
+                    feature = "q4k_rowtiled_gemv",
+                    any(not(feature = "cuda_backend"), target_os = "macos")
+                )))]
                 true => Self::launch_plane::<R>(client, handle, input_handle, output_handle),
                 false => Self::launch_tiled::<R>(client, handle, input_handle, output_handle),
             }
@@ -1089,11 +1075,9 @@ impl GemvQ4KCubeCL {
 mod tests {
     use super::*;
     use crate::context::GpuContext;
-    use bytemuck::Zeroable;
     use crate::cubecl_runtime::ActiveRuntime;
-    use riir_infer_core::quant::q4k::{
-        BlockQ4K, QK_K, gemv_q4_k, quantize_row_q4_k,
-    };
+    use bytemuck::Zeroable;
+    use riir_infer_core::quant::q4k::{BlockQ4K, QK_K, gemv_q4_k, quantize_row_q4_k};
 
     /// Helper: quantize a projection, run CubeCL GEMV, return result.
     ///
@@ -1272,9 +1256,7 @@ mod tests {
         // Larger matrix: 8×512 (2 blocks per row)
         let m = 8;
         let n = 512;
-        let weight: Vec<f32> = (0..m * n)
-            .map(|i| (i as f32 * 0.05).sin() * 0.5)
-            .collect();
+        let weight: Vec<f32> = (0..m * n).map(|i| (i as f32 * 0.05).sin() * 0.5).collect();
         let input: Vec<f32> = (0..n).map(|i| (i as f32 * 0.1).cos() * 0.3).collect();
 
         let gpu_result = run_q4k_gemv(&weight, &input, m, n);

@@ -79,8 +79,7 @@ use cubecl::server::Handle;
 
 /// Whether the fused pre-recurrence dispatch is active. Default: env
 /// `RIIR_GDN_FUSED_PRE_REC` ("1"/"on"/"true" ⇒ on), else OFF.
-static USE_FUSED_PRE_REC: std::sync::atomic::AtomicBool =
-    std::sync::atomic::AtomicBool::new(false);
+static USE_FUSED_PRE_REC: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 static FUSED_PRE_REC_INITIALIZED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
 
 /// Launches dispatched through the fused path (the vacuous-guard counter —
@@ -309,8 +308,7 @@ fn deltanet_pre_rec_fused_f32(
             conv_state[state_base + ks_us - 1] = input_proj[ch];
 
             // z slice copy for this head.
-            z_out[(h * hd + tid) as usize] =
-                input_proj[(conv_dim + h * hd + tid) as usize];
+            z_out[(h * hd + tid) as usize] = input_proj[(conv_dim + h * hd + tid) as usize];
         }
 
         // beta/decay for head h (verbatim deltanet_beta_decay_f32).
@@ -358,7 +356,12 @@ impl DeltanetPreRecFusedCubeCL {
     ///   be correct but is unexercised — keep the conservative gate).
     #[inline]
     #[must_use]
-    pub fn supports(n_k_heads: usize, n_v_heads: usize, head_dim: usize, kernel_size: usize) -> bool {
+    pub fn supports(
+        n_k_heads: usize,
+        n_v_heads: usize,
+        head_dim: usize,
+        kernel_size: usize,
+    ) -> bool {
         (1..=WG).contains(&head_dim)
             && n_k_heads >= 1
             && n_v_heads.is_multiple_of(n_k_heads)
@@ -379,7 +382,10 @@ impl DeltanetPreRecFusedCubeCL {
     /// - `z_out_handle`: `z_dim` (`n_v_heads * head_dim`) f32 elements.
     /// - `expanded_handle`: `3 * n_v_heads * head_dim` f32 elements.
     /// - Geometry must pass [`Self::supports`].
-    #[allow(clippy::too_many_arguments, reason = "GPU kernel launch: many buffer handles are inherent to the fused-kernel interface")]
+    #[allow(
+        clippy::too_many_arguments,
+        reason = "GPU kernel launch: many buffer handles are inherent to the fused-kernel interface"
+    )]
     pub unsafe fn launch<R: Runtime>(
         client: &ComputeClient<R>,
         input_proj_handle: Handle,
@@ -451,7 +457,9 @@ mod tests {
 
     /// Deterministic LCG (no rand dep; reproducible fixtures).
     fn lcg(state: &mut u64) -> f32 {
-        *state = state.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+        *state = state
+            .wrapping_mul(6364136223846793005)
+            .wrapping_add(1442695040888963407);
         let bits = (*state >> 33) as u32;
         (bits % 2001) as f32 / 1000.0 - 1.0 // [-1, 1)
     }
@@ -466,13 +474,7 @@ mod tests {
     /// Run BOTH paths on identical inputs; return the fused path's outputs
     /// plus the shipping chain's outputs for bit-exact comparison
     /// (expanded, z, beta, decay, conv_state per arm).
-    type PathOutputs = (
-        Vec<f32>,
-        Vec<f32>,
-        Vec<f32>,
-        Vec<f32>,
-        Vec<f32>,
-    );
+    type PathOutputs = (Vec<f32>, Vec<f32>, Vec<f32>, Vec<f32>, Vec<f32>);
 
     fn run_both(
         client: &ComputeClient<ActiveRuntime>,
@@ -631,8 +633,15 @@ mod tests {
     fn fused_matches_shipping_gqa_small() {
         let ctx = CubeCLContext::new().expect("CubeCL should initialize");
         let client = ctx.client();
-        let s = Shape { n_k: 2, n_v: 6, hd: 16, ks: 4 };
-        assert!(DeltanetPreRecFusedCubeCL::supports(s.n_k, s.n_v, s.hd, s.ks));
+        let s = Shape {
+            n_k: 2,
+            n_v: 6,
+            hd: 16,
+            ks: 4,
+        };
+        assert!(DeltanetPreRecFusedCubeCL::supports(
+            s.n_k, s.n_v, s.hd, s.ks
+        ));
         for seed in [1u64, 42, 0xDEAD] {
             let (ship, fused) = run_both(&client, &s, seed, 3);
             assert_bit_exact(&ship.0, &fused.0, "expanded");
@@ -648,8 +657,15 @@ mod tests {
         let ctx = CubeCLContext::new().expect("CubeCL should initialize");
         let client = ctx.client();
         // Production-like single token: n_k == n_v (no GQA), full head_dim.
-        let s = Shape { n_k: 4, n_v: 4, hd: 128, ks: 4 };
-        assert!(DeltanetPreRecFusedCubeCL::supports(s.n_k, s.n_v, s.hd, s.ks));
+        let s = Shape {
+            n_k: 4,
+            n_v: 4,
+            hd: 128,
+            ks: 4,
+        };
+        assert!(DeltanetPreRecFusedCubeCL::supports(
+            s.n_k, s.n_v, s.hd, s.ks
+        ));
         let (ship, fused) = run_both(&client, &s, 7, 2);
         assert_bit_exact(&ship.0, &fused.0, "expanded");
         assert_bit_exact(&ship.1, &fused.1, "z");
@@ -663,8 +679,15 @@ mod tests {
         let ctx = CubeCLContext::new().expect("CubeCL should initialize");
         let client = ctx.client();
         // Bonsai-class GQA ratio (1:4) at full head_dim.
-        let s = Shape { n_k: 8, n_v: 32, hd: 128, ks: 4 };
-        assert!(DeltanetPreRecFusedCubeCL::supports(s.n_k, s.n_v, s.hd, s.ks));
+        let s = Shape {
+            n_k: 8,
+            n_v: 32,
+            hd: 128,
+            ks: 4,
+        };
+        assert!(DeltanetPreRecFusedCubeCL::supports(
+            s.n_k, s.n_v, s.hd, s.ks
+        ));
         let (ship, fused) = run_both(&client, &s, 99, 2);
         assert_bit_exact(&ship.0, &fused.0, "expanded");
         assert_bit_exact(&ship.1, &fused.1, "z");

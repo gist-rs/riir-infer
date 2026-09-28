@@ -59,9 +59,7 @@ use katgpt_core::act_channel_moments::ActChannelMoments;
 
 use riir_infer_core::corpus_text::load_corpus_text;
 use riir_infer_core::deltanet::act_taps::{ActTapHook, ActTapPlan};
-use riir_infer_core::deltanet::forward::{
-    HybridCache, HybridForwardScratch, effective_rotary_dim,
-};
+use riir_infer_core::deltanet::forward::{HybridCache, HybridForwardScratch, effective_rotary_dim};
 use riir_infer_core::deltanet::ternary_forward::forward_qwen_deltanet_ternary_with_hook;
 use riir_infer_core::gguf_loader::{GgufFile, load_qwen_deltanet_ternary_weights_gguf};
 use riir_infer_core::rope::RopeFreqTable;
@@ -235,7 +233,11 @@ fn main() -> Result<()> {
     if let Some(p) = artifact_path {
         let bytes = diagonal.to_bytes();
         std::fs::write(&p, &bytes).with_context(|| format!("write artifact {}", p.display()))?;
-        println!("# artifact written: {} ({} bytes)", p.display(), bytes.len());
+        println!(
+            "# artifact written: {} ({} bytes)",
+            p.display(),
+            bytes.len()
+        );
     }
 
     // ── The flatness dashboard (the T1 readout) ──
@@ -245,13 +247,18 @@ fn main() -> Result<()> {
          hadamard={rotated}, slice {done} tokens (seq_len {seq_len})\n\n"
     ));
     out.push_str(&format!("digest: {digest_hex}\n\n"));
-    out.push_str("| tap | width | n_obs | med E[x²] | max/med | top-1% share |\n|---|---|---|---|---|---|\n");
+    out.push_str(
+        "| tap | width | n_obs | med E[x²] | max/med | top-1% share |\n|---|---|---|---|---|---|\n",
+    );
     // Per-tap rows, aggregated per kind across layers.
     let mut agg: Vec<(&'static str, Vec<f64>, Vec<f64>)> = Vec::new();
     for (t, tap) in plan.taps.iter().enumerate() {
         let n = diagonal.count(t);
         if n == 0 {
-            out.push_str(&format!("| {} | {} | 0 | — | — | — |\n", tap.label, tap.width));
+            out.push_str(&format!(
+                "| {} | {} | 0 | — | — | — |\n",
+                tap.label, tap.width
+            ));
             continue;
         }
         let sq = diagonal.mean_sq(t);
@@ -277,7 +284,9 @@ fn main() -> Result<()> {
         }
     }
     out.push_str("\n## aggregate per tap kind (across layers)\n\n");
-    out.push_str("| kind | taps | median-of-med | median max/med | max max/med |\n|---|---|---|---|---|\n");
+    out.push_str(
+        "| kind | taps | median-of-med | median max/med | max max/med |\n|---|---|---|---|---|\n",
+    );
     for (kind, meds, ratios) in &agg {
         let mut r = ratios.clone();
         r.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));

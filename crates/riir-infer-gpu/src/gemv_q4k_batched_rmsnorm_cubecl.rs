@@ -40,7 +40,7 @@ use cubecl::prelude::*;
 #[cfg(feature = "cubecl_runtime")]
 use cubecl::server::Handle;
 
-use crate::gemv_q4k_cubecl::{Q4KHandle, Q4K_BLOCK_SIZE, Q4K_WORDS_PER_BLOCK};
+use crate::gemv_q4k_cubecl::{Q4K_BLOCK_SIZE, Q4K_WORDS_PER_BLOCK, Q4KHandle};
 
 #[cfg(feature = "cubecl_runtime")]
 use crate::gemv_q4k_cubecl::{get_min_k4, get_scale_k4};
@@ -58,11 +58,7 @@ use crate::gemv_q4k_cubecl::{get_min_k4, get_scale_k4};
 /// cube — Issue 611: was 256 threads = 8 redundant planes).
 #[cfg(feature = "cubecl_runtime")]
 #[cube(launch_unchecked)]
-fn compute_inv_rms(
-    input: &[f32],
-    inv_rms_out: &mut [f32],
-    params: &[f32],
-) {
+fn compute_inv_rms(input: &[f32], inv_rms_out: &mut [f32], params: &[f32]) {
     let n = params[0usize] as u32;
     let batch = params[1usize] as u32;
     let pos = CUBE_POS_X;
@@ -182,7 +178,8 @@ fn gemv_q4k_batched_rmsnorm(
             let dequant = d * sc * (nibble as f32) - dmin * min_val;
 
             // Inline RMSNorm: normalize the input before accumulating.
-            let normed_input = input_batch[(input_offset + col) as usize] * inv_rms_val * gamma[col as usize];
+            let normed_input =
+                input_batch[(input_offset + col) as usize] * inv_rms_val * gamma[col as usize];
 
             partial += dequant * normed_input;
 

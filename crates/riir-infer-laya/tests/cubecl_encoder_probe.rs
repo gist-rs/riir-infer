@@ -14,7 +14,7 @@
 //! download); the input is a fixed xorshift id stream, seq 400 (long
 //! enough that the sliding window and odd-length edge tiles both bite).
 
-use riir_infer_laya::laya::config::{load_checkpoint_configs, Checkpoint};
+use riir_infer_laya::laya::config::{Checkpoint, load_checkpoint_configs};
 use riir_infer_laya::laya::riir::backend::{Backend, Cpu};
 use riir_infer_laya::laya::riir::cubecl::CubeclBackend;
 use riir_infer_laya::laya::riir::encoder::Encoder;
@@ -38,11 +38,9 @@ fn load_encoder(ckpt: Checkpoint) -> (Encoder, usize) {
     let root = weights_root();
     let name = ckpt.subfolder();
     let dir = root.join(name);
-    let (_agent_cfg, enc_cfg) =
-        load_checkpoint_configs(&dir, name).expect("checkpoint configs");
+    let (_agent_cfg, enc_cfg) = load_checkpoint_configs(&dir, name).expect("checkpoint configs");
     let vocab = enc_cfg.vocab;
-    let mut raw =
-        riir_weights::load(&dir.join("model.safetensors"), name).expect("safetensors");
+    let mut raw = riir_weights::load(&dir.join("model.safetensors"), name).expect("safetensors");
     let enc = Encoder::from_map(&mut raw, enc_cfg, name).expect("encoder");
     (enc, vocab)
 }
@@ -142,7 +140,11 @@ fn probe_ops_cpu_vs_cubecl_and_repeat() {
             gpu_ops_p.push((tag.to_string(), bytes.to_vec()))
         })
         .unwrap_or_else(|e| panic!("cubecl probe pass {p}: {e}"));
-        assert_eq!(gpu_ops.len(), gpu_ops_p.len(), "pass {p}: op count diverges");
+        assert_eq!(
+            gpu_ops.len(),
+            gpu_ops_p.len(),
+            "pass {p}: op count diverges"
+        );
         let mut pass_max = 0.0f32;
         let mut pass_tag = String::new();
         let mut first_bad: Option<(String, f32)> = None;

@@ -70,9 +70,24 @@ fn hash_ternary(
     t: &TernaryHandle,
     out: &mut Vec<WeightBufferEntry>,
 ) {
-    hash_handle(client, &format!("{prefix}.pos_bits_u32"), &t.pos_bits_u32, out);
-    hash_handle(client, &format!("{prefix}.neg_bits_u32"), &t.neg_bits_u32, out);
-    hash_handle(client, &format!("{prefix}.group_scale_f32"), &t.group_scale_f32, out);
+    hash_handle(
+        client,
+        &format!("{prefix}.pos_bits_u32"),
+        &t.pos_bits_u32,
+        out,
+    );
+    hash_handle(
+        client,
+        &format!("{prefix}.neg_bits_u32"),
+        &t.neg_bits_u32,
+        out,
+    );
+    hash_handle(
+        client,
+        &format!("{prefix}.group_scale_f32"),
+        &t.group_scale_f32,
+        out,
+    );
     if let Some(h) = &t.group_scale_f16 {
         hash_handle(client, &format!("{prefix}.group_scale_f16"), h, out);
     }
@@ -88,7 +103,12 @@ pub fn manifest(fwd: &TernaryDeltanetGpuForward) -> Vec<WeightBufferEntry> {
         let p = format!("layer{li}");
         #[cfg(feature = "ternary_gemm_batched")]
         {
-            hash_ternary(client, &format!("{p}.in_proj_qkv"), &l.in_proj_qkv, &mut out);
+            hash_ternary(
+                client,
+                &format!("{p}.in_proj_qkv"),
+                &l.in_proj_qkv,
+                &mut out,
+            );
             hash_ternary(client, &format!("{p}.in_proj_z"), &l.in_proj_z, &mut out);
             hash_ternary(client, &format!("{p}.in_proj_a"), &l.in_proj_a, &mut out);
             hash_ternary(client, &format!("{p}.in_proj_b"), &l.in_proj_b, &mut out);
@@ -99,18 +119,43 @@ pub fn manifest(fwd: &TernaryDeltanetGpuForward) -> Vec<WeightBufferEntry> {
         if let Some(h) = &l.in_proj_b_f32 {
             hash_handle(client, &format!("{p}.in_proj_b_f32"), h, &mut out);
         }
-        hash_ternary(client, &format!("{p}.in_proj_concat"), &l.in_proj_concat, &mut out);
+        hash_ternary(
+            client,
+            &format!("{p}.in_proj_concat"),
+            &l.in_proj_concat,
+            &mut out,
+        );
         hash_ternary(client, &format!("{p}.out_proj"), &l.out_proj, &mut out);
         hash_ternary(client, &format!("{p}.gate_proj"), &l.gate_proj, &mut out);
         hash_ternary(client, &format!("{p}.up_proj"), &l.up_proj, &mut out);
         hash_ternary(client, &format!("{p}.down_proj"), &l.down_proj, &mut out);
-        hash_ternary(client, &format!("{p}.gate_up_proj"), &l.gate_up_proj, &mut out);
+        hash_ternary(
+            client,
+            &format!("{p}.gate_up_proj"),
+            &l.gate_up_proj,
+            &mut out,
+        );
         hash_handle(client, &format!("{p}.input_norm"), &l.input_norm, &mut out);
-        hash_handle(client, &format!("{p}.post_attn_norm"), &l.post_attn_norm, &mut out);
-        hash_handle(client, &format!("{p}.conv1d_weight"), &l.conv1d_weight, &mut out);
+        hash_handle(
+            client,
+            &format!("{p}.post_attn_norm"),
+            &l.post_attn_norm,
+            &mut out,
+        );
+        hash_handle(
+            client,
+            &format!("{p}.conv1d_weight"),
+            &l.conv1d_weight,
+            &mut out,
+        );
         hash_handle(client, &format!("{p}.a_log"), &l.a_log, &mut out);
         hash_handle(client, &format!("{p}.dt_bias"), &l.dt_bias, &mut out);
-        hash_handle(client, &format!("{p}.linear_norm"), &l.linear_norm, &mut out);
+        hash_handle(
+            client,
+            &format!("{p}.linear_norm"),
+            &l.linear_norm,
+            &mut out,
+        );
         if let Some(t) = &l.attn_wq {
             hash_ternary(client, &format!("{p}.attn_wq"), t, &mut out);
         }
@@ -154,8 +199,7 @@ pub type WeightDiff = (String, (String, usize), (String, usize));
 /// exists on only one side).
 pub fn diff(a: &[WeightBufferEntry], b: &[WeightBufferEntry]) -> Vec<WeightDiff> {
     use std::collections::HashMap;
-    let mb: HashMap<&str, &WeightBufferEntry> =
-        b.iter().map(|e| (e.name.as_str(), e)).collect();
+    let mb: HashMap<&str, &WeightBufferEntry> = b.iter().map(|e| (e.name.as_str(), e)).collect();
     let mut seen: std::collections::HashSet<&str> = std::collections::HashSet::new();
     let mut out = Vec::new();
     for ea in a {

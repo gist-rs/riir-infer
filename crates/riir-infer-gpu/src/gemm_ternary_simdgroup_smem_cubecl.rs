@@ -159,68 +159,132 @@ fn gemm_ternary_simdgroup_smem(
 
     // 16 accumulators — (mi, pj) 8×8 sub-tiles of this simdgroup's 32×32.
     let acc_0_0 = cmma::Matrix::<f32>::from_value(
-        cmma::MatrixIdent::Accumulator, 8usize, 8usize, 8usize,
-        cmma::MatrixLayout::Undefined, 0.0f32,
+        cmma::MatrixIdent::Accumulator,
+        8usize,
+        8usize,
+        8usize,
+        cmma::MatrixLayout::Undefined,
+        0.0f32,
     );
     let acc_0_1 = cmma::Matrix::<f32>::from_value(
-        cmma::MatrixIdent::Accumulator, 8usize, 8usize, 8usize,
-        cmma::MatrixLayout::Undefined, 0.0f32,
+        cmma::MatrixIdent::Accumulator,
+        8usize,
+        8usize,
+        8usize,
+        cmma::MatrixLayout::Undefined,
+        0.0f32,
     );
     let acc_0_2 = cmma::Matrix::<f32>::from_value(
-        cmma::MatrixIdent::Accumulator, 8usize, 8usize, 8usize,
-        cmma::MatrixLayout::Undefined, 0.0f32,
+        cmma::MatrixIdent::Accumulator,
+        8usize,
+        8usize,
+        8usize,
+        cmma::MatrixLayout::Undefined,
+        0.0f32,
     );
     let acc_0_3 = cmma::Matrix::<f32>::from_value(
-        cmma::MatrixIdent::Accumulator, 8usize, 8usize, 8usize,
-        cmma::MatrixLayout::Undefined, 0.0f32,
+        cmma::MatrixIdent::Accumulator,
+        8usize,
+        8usize,
+        8usize,
+        cmma::MatrixLayout::Undefined,
+        0.0f32,
     );
     let acc_1_0 = cmma::Matrix::<f32>::from_value(
-        cmma::MatrixIdent::Accumulator, 8usize, 8usize, 8usize,
-        cmma::MatrixLayout::Undefined, 0.0f32,
+        cmma::MatrixIdent::Accumulator,
+        8usize,
+        8usize,
+        8usize,
+        cmma::MatrixLayout::Undefined,
+        0.0f32,
     );
     let acc_1_1 = cmma::Matrix::<f32>::from_value(
-        cmma::MatrixIdent::Accumulator, 8usize, 8usize, 8usize,
-        cmma::MatrixLayout::Undefined, 0.0f32,
+        cmma::MatrixIdent::Accumulator,
+        8usize,
+        8usize,
+        8usize,
+        cmma::MatrixLayout::Undefined,
+        0.0f32,
     );
     let acc_1_2 = cmma::Matrix::<f32>::from_value(
-        cmma::MatrixIdent::Accumulator, 8usize, 8usize, 8usize,
-        cmma::MatrixLayout::Undefined, 0.0f32,
+        cmma::MatrixIdent::Accumulator,
+        8usize,
+        8usize,
+        8usize,
+        cmma::MatrixLayout::Undefined,
+        0.0f32,
     );
     let acc_1_3 = cmma::Matrix::<f32>::from_value(
-        cmma::MatrixIdent::Accumulator, 8usize, 8usize, 8usize,
-        cmma::MatrixLayout::Undefined, 0.0f32,
+        cmma::MatrixIdent::Accumulator,
+        8usize,
+        8usize,
+        8usize,
+        cmma::MatrixLayout::Undefined,
+        0.0f32,
     );
     let acc_2_0 = cmma::Matrix::<f32>::from_value(
-        cmma::MatrixIdent::Accumulator, 8usize, 8usize, 8usize,
-        cmma::MatrixLayout::Undefined, 0.0f32,
+        cmma::MatrixIdent::Accumulator,
+        8usize,
+        8usize,
+        8usize,
+        cmma::MatrixLayout::Undefined,
+        0.0f32,
     );
     let acc_2_1 = cmma::Matrix::<f32>::from_value(
-        cmma::MatrixIdent::Accumulator, 8usize, 8usize, 8usize,
-        cmma::MatrixLayout::Undefined, 0.0f32,
+        cmma::MatrixIdent::Accumulator,
+        8usize,
+        8usize,
+        8usize,
+        cmma::MatrixLayout::Undefined,
+        0.0f32,
     );
     let acc_2_2 = cmma::Matrix::<f32>::from_value(
-        cmma::MatrixIdent::Accumulator, 8usize, 8usize, 8usize,
-        cmma::MatrixLayout::Undefined, 0.0f32,
+        cmma::MatrixIdent::Accumulator,
+        8usize,
+        8usize,
+        8usize,
+        cmma::MatrixLayout::Undefined,
+        0.0f32,
     );
     let acc_2_3 = cmma::Matrix::<f32>::from_value(
-        cmma::MatrixIdent::Accumulator, 8usize, 8usize, 8usize,
-        cmma::MatrixLayout::Undefined, 0.0f32,
+        cmma::MatrixIdent::Accumulator,
+        8usize,
+        8usize,
+        8usize,
+        cmma::MatrixLayout::Undefined,
+        0.0f32,
     );
     let acc_3_0 = cmma::Matrix::<f32>::from_value(
-        cmma::MatrixIdent::Accumulator, 8usize, 8usize, 8usize,
-        cmma::MatrixLayout::Undefined, 0.0f32,
+        cmma::MatrixIdent::Accumulator,
+        8usize,
+        8usize,
+        8usize,
+        cmma::MatrixLayout::Undefined,
+        0.0f32,
     );
     let acc_3_1 = cmma::Matrix::<f32>::from_value(
-        cmma::MatrixIdent::Accumulator, 8usize, 8usize, 8usize,
-        cmma::MatrixLayout::Undefined, 0.0f32,
+        cmma::MatrixIdent::Accumulator,
+        8usize,
+        8usize,
+        8usize,
+        cmma::MatrixLayout::Undefined,
+        0.0f32,
     );
     let acc_3_2 = cmma::Matrix::<f32>::from_value(
-        cmma::MatrixIdent::Accumulator, 8usize, 8usize, 8usize,
-        cmma::MatrixLayout::Undefined, 0.0f32,
+        cmma::MatrixIdent::Accumulator,
+        8usize,
+        8usize,
+        8usize,
+        cmma::MatrixLayout::Undefined,
+        0.0f32,
     );
     let acc_3_3 = cmma::Matrix::<f32>::from_value(
-        cmma::MatrixIdent::Accumulator, 8usize, 8usize, 8usize,
-        cmma::MatrixLayout::Undefined, 0.0f32,
+        cmma::MatrixIdent::Accumulator,
+        8usize,
+        8usize,
+        8usize,
+        cmma::MatrixLayout::Undefined,
+        0.0f32,
     );
 
     // Shared memory: the W tile (128 rows × 32 k) and X tile (64 tokens ×
@@ -249,8 +313,7 @@ fn gemm_ternary_simdgroup_smem(
         let k_base = it * SMEM_KT;
 
         // ── Cooperative dequant: 128×32 weight tile, 16 elements/thread ──
-        for j in 0..SMEM_W_J
-        {
+        for j in 0..SMEM_W_J {
             let idx = tid + j * SMEM_THREADS;
             let r = idx / SMEM_KT;
             let kk = idx % SMEM_KT;
@@ -272,8 +335,7 @@ fn gemm_ternary_simdgroup_smem(
         }
 
         // ── Cooperative X load: 64×32 token tile, 8 elements/thread ──
-        for j in 0..SMEM_X_J
-        {
+        for j in 0..SMEM_X_J {
             let idx = tid + j * SMEM_THREADS;
             let t = idx / SMEM_KT;
             let kk = idx % SMEM_KT;
@@ -300,44 +362,76 @@ fn gemm_ternary_simdgroup_smem(
                 let a_base = sg_m * 32u32 * SMEM_KT + ki * 8u32;
                 let b_base = sg_p * 32u32 * SMEM_KT + ki * 8u32;
                 let a0 = cmma::Matrix::<f32>::from_slice(
-                    cmma::MatrixIdent::A, 8usize, 8usize, 8usize,
+                    cmma::MatrixIdent::A,
+                    8usize,
+                    8usize,
+                    8usize,
                     cmma::MatrixLayout::RowMajor,
-                    tile_w.slice((a_base) as usize, SMEM_W_LEN), SMEM_KT,
+                    tile_w.slice((a_base) as usize, SMEM_W_LEN),
+                    SMEM_KT,
                 );
                 let a1 = cmma::Matrix::<f32>::from_slice(
-                    cmma::MatrixIdent::A, 8usize, 8usize, 8usize,
+                    cmma::MatrixIdent::A,
+                    8usize,
+                    8usize,
+                    8usize,
                     cmma::MatrixLayout::RowMajor,
-                    tile_w.slice((a_base + 8u32 * SMEM_KT) as usize, SMEM_W_LEN), SMEM_KT,
+                    tile_w.slice((a_base + 8u32 * SMEM_KT) as usize, SMEM_W_LEN),
+                    SMEM_KT,
                 );
                 let a2 = cmma::Matrix::<f32>::from_slice(
-                    cmma::MatrixIdent::A, 8usize, 8usize, 8usize,
+                    cmma::MatrixIdent::A,
+                    8usize,
+                    8usize,
+                    8usize,
                     cmma::MatrixLayout::RowMajor,
-                    tile_w.slice((a_base + 2u32 * 8u32 * SMEM_KT) as usize, SMEM_W_LEN), SMEM_KT,
+                    tile_w.slice((a_base + 2u32 * 8u32 * SMEM_KT) as usize, SMEM_W_LEN),
+                    SMEM_KT,
                 );
                 let a3 = cmma::Matrix::<f32>::from_slice(
-                    cmma::MatrixIdent::A, 8usize, 8usize, 8usize,
+                    cmma::MatrixIdent::A,
+                    8usize,
+                    8usize,
+                    8usize,
                     cmma::MatrixLayout::RowMajor,
-                    tile_w.slice((a_base + 3u32 * 8u32 * SMEM_KT) as usize, SMEM_W_LEN), SMEM_KT,
+                    tile_w.slice((a_base + 3u32 * 8u32 * SMEM_KT) as usize, SMEM_W_LEN),
+                    SMEM_KT,
                 );
                 let b0 = cmma::Matrix::<f32>::from_slice(
-                    cmma::MatrixIdent::B, 8usize, 8usize, 8usize,
+                    cmma::MatrixIdent::B,
+                    8usize,
+                    8usize,
+                    8usize,
                     cmma::MatrixLayout::ColMajor,
-                    tile_x.slice((b_base) as usize, SMEM_X_LEN), SMEM_KT,
+                    tile_x.slice((b_base) as usize, SMEM_X_LEN),
+                    SMEM_KT,
                 );
                 let b1 = cmma::Matrix::<f32>::from_slice(
-                    cmma::MatrixIdent::B, 8usize, 8usize, 8usize,
+                    cmma::MatrixIdent::B,
+                    8usize,
+                    8usize,
+                    8usize,
                     cmma::MatrixLayout::ColMajor,
-                    tile_x.slice((b_base + 8u32 * SMEM_KT) as usize, SMEM_X_LEN), SMEM_KT,
+                    tile_x.slice((b_base + 8u32 * SMEM_KT) as usize, SMEM_X_LEN),
+                    SMEM_KT,
                 );
                 let b2 = cmma::Matrix::<f32>::from_slice(
-                    cmma::MatrixIdent::B, 8usize, 8usize, 8usize,
+                    cmma::MatrixIdent::B,
+                    8usize,
+                    8usize,
+                    8usize,
                     cmma::MatrixLayout::ColMajor,
-                    tile_x.slice((b_base + 2u32 * 8u32 * SMEM_KT) as usize, SMEM_X_LEN), SMEM_KT,
+                    tile_x.slice((b_base + 2u32 * 8u32 * SMEM_KT) as usize, SMEM_X_LEN),
+                    SMEM_KT,
                 );
                 let b3 = cmma::Matrix::<f32>::from_slice(
-                    cmma::MatrixIdent::B, 8usize, 8usize, 8usize,
+                    cmma::MatrixIdent::B,
+                    8usize,
+                    8usize,
+                    8usize,
                     cmma::MatrixLayout::ColMajor,
-                    tile_x.slice((b_base + 3u32 * 8u32 * SMEM_KT) as usize, SMEM_X_LEN), SMEM_KT,
+                    tile_x.slice((b_base + 3u32 * 8u32 * SMEM_KT) as usize, SMEM_X_LEN),
+                    SMEM_KT,
                 );
                 cmma::execute::<f32, f32, f32, f32, cmma::Plane>(&a0, &b0, &acc_0_0, &acc_0_0);
                 cmma::execute::<f32, f32, f32, f32, cmma::Plane>(&a0, &b1, &acc_0_1, &acc_0_1);
@@ -369,223 +463,283 @@ fn gemm_ternary_simdgroup_smem(
     let m_row_base = base_m + sg_m * 32u32;
     let t_tok_base = base_p + sg_p * 32u32;
 
-    cmma::store(result.slice_mut(res_base as usize, res_base as usize + 64usize), &acc_0_0, 8u32, cmma::MatrixLayout::RowMajor);
+    cmma::store(
+        result.slice_mut(res_base as usize, res_base as usize + 64usize),
+        &acc_0_0,
+        8u32,
+        cmma::MatrixLayout::RowMajor,
+    );
     sync_cube();
     if m_row_base + lr0 < m && t_tok_base + lc0 < p_tokens {
-        output_batch[((t_tok_base + lc0) * m + m_row_base + lr0) as usize] = result[(res_base + e0) as usize];
+        output_batch[((t_tok_base + lc0) * m + m_row_base + lr0) as usize] =
+            result[(res_base + e0) as usize];
     }
     if m_row_base + lr1 < m && t_tok_base + lc1 < p_tokens {
-        output_batch[((t_tok_base + lc1) * m + m_row_base + lr1) as usize] = result[(res_base + e1) as usize];
+        output_batch[((t_tok_base + lc1) * m + m_row_base + lr1) as usize] =
+            result[(res_base + e1) as usize];
     }
     sync_cube();
 
-    cmma::store(result.slice_mut(res_base as usize, res_base as usize + 64usize), &acc_0_1, 8u32, cmma::MatrixLayout::RowMajor);
+    cmma::store(
+        result.slice_mut(res_base as usize, res_base as usize + 64usize),
+        &acc_0_1,
+        8u32,
+        cmma::MatrixLayout::RowMajor,
+    );
     sync_cube();
     if m_row_base + lr0 < m && t_tok_base + 8u32 + lc0 < p_tokens {
-        output_batch[
-            ((t_tok_base + 8u32 + lc0) * m + m_row_base + lr0) as usize
-        ] = result[(res_base + e0) as usize];
+        output_batch[((t_tok_base + 8u32 + lc0) * m + m_row_base + lr0) as usize] =
+            result[(res_base + e0) as usize];
     }
     if m_row_base + lr1 < m && t_tok_base + 8u32 + lc1 < p_tokens {
-        output_batch[
-            ((t_tok_base + 8u32 + lc1) * m + m_row_base + lr1) as usize
-        ] = result[(res_base + e1) as usize];
+        output_batch[((t_tok_base + 8u32 + lc1) * m + m_row_base + lr1) as usize] =
+            result[(res_base + e1) as usize];
     }
     sync_cube();
 
-    cmma::store(result.slice_mut(res_base as usize, res_base as usize + 64usize), &acc_0_2, 8u32, cmma::MatrixLayout::RowMajor);
+    cmma::store(
+        result.slice_mut(res_base as usize, res_base as usize + 64usize),
+        &acc_0_2,
+        8u32,
+        cmma::MatrixLayout::RowMajor,
+    );
     sync_cube();
     if m_row_base + lr0 < m && t_tok_base + 2u32 * 8u32 + lc0 < p_tokens {
-        output_batch[
-            ((t_tok_base + 2u32 * 8u32 + lc0) * m + m_row_base + lr0) as usize
-        ] = result[(res_base + e0) as usize];
+        output_batch[((t_tok_base + 2u32 * 8u32 + lc0) * m + m_row_base + lr0) as usize] =
+            result[(res_base + e0) as usize];
     }
     if m_row_base + lr1 < m && t_tok_base + 2u32 * 8u32 + lc1 < p_tokens {
-        output_batch[
-            ((t_tok_base + 2u32 * 8u32 + lc1) * m + m_row_base + lr1) as usize
-        ] = result[(res_base + e1) as usize];
+        output_batch[((t_tok_base + 2u32 * 8u32 + lc1) * m + m_row_base + lr1) as usize] =
+            result[(res_base + e1) as usize];
     }
     sync_cube();
 
-    cmma::store(result.slice_mut(res_base as usize, res_base as usize + 64usize), &acc_0_3, 8u32, cmma::MatrixLayout::RowMajor);
+    cmma::store(
+        result.slice_mut(res_base as usize, res_base as usize + 64usize),
+        &acc_0_3,
+        8u32,
+        cmma::MatrixLayout::RowMajor,
+    );
     sync_cube();
     if m_row_base + lr0 < m && t_tok_base + 3u32 * 8u32 + lc0 < p_tokens {
-        output_batch[
-            ((t_tok_base + 3u32 * 8u32 + lc0) * m + m_row_base + lr0) as usize
-        ] = result[(res_base + e0) as usize];
+        output_batch[((t_tok_base + 3u32 * 8u32 + lc0) * m + m_row_base + lr0) as usize] =
+            result[(res_base + e0) as usize];
     }
     if m_row_base + lr1 < m && t_tok_base + 3u32 * 8u32 + lc1 < p_tokens {
-        output_batch[
-            ((t_tok_base + 3u32 * 8u32 + lc1) * m + m_row_base + lr1) as usize
-        ] = result[(res_base + e1) as usize];
+        output_batch[((t_tok_base + 3u32 * 8u32 + lc1) * m + m_row_base + lr1) as usize] =
+            result[(res_base + e1) as usize];
     }
     sync_cube();
 
-    cmma::store(result.slice_mut(res_base as usize, res_base as usize + 64usize), &acc_1_0, 8u32, cmma::MatrixLayout::RowMajor);
+    cmma::store(
+        result.slice_mut(res_base as usize, res_base as usize + 64usize),
+        &acc_1_0,
+        8u32,
+        cmma::MatrixLayout::RowMajor,
+    );
     sync_cube();
     if m_row_base + 8u32 + lr0 < m && t_tok_base + lc0 < p_tokens {
-        output_batch[
-            ((t_tok_base + lc0) * m + m_row_base + 8u32 + lr0) as usize
-        ] = result[(res_base + e0) as usize];
+        output_batch[((t_tok_base + lc0) * m + m_row_base + 8u32 + lr0) as usize] =
+            result[(res_base + e0) as usize];
     }
     if m_row_base + 8u32 + lr1 < m && t_tok_base + lc1 < p_tokens {
-        output_batch[
-            ((t_tok_base + lc1) * m + m_row_base + 8u32 + lr1) as usize
-        ] = result[(res_base + e1) as usize];
+        output_batch[((t_tok_base + lc1) * m + m_row_base + 8u32 + lr1) as usize] =
+            result[(res_base + e1) as usize];
     }
     sync_cube();
 
-    cmma::store(result.slice_mut(res_base as usize, res_base as usize + 64usize), &acc_1_1, 8u32, cmma::MatrixLayout::RowMajor);
+    cmma::store(
+        result.slice_mut(res_base as usize, res_base as usize + 64usize),
+        &acc_1_1,
+        8u32,
+        cmma::MatrixLayout::RowMajor,
+    );
     sync_cube();
     if m_row_base + 8u32 + lr0 < m && t_tok_base + 8u32 + lc0 < p_tokens {
-        output_batch[
-            ((t_tok_base + 8u32 + lc0) * m + m_row_base + 8u32 + lr0) as usize
-        ] = result[(res_base + e0) as usize];
+        output_batch[((t_tok_base + 8u32 + lc0) * m + m_row_base + 8u32 + lr0) as usize] =
+            result[(res_base + e0) as usize];
     }
     if m_row_base + 8u32 + lr1 < m && t_tok_base + 8u32 + lc1 < p_tokens {
-        output_batch[
-            ((t_tok_base + 8u32 + lc1) * m + m_row_base + 8u32 + lr1) as usize
-        ] = result[(res_base + e1) as usize];
+        output_batch[((t_tok_base + 8u32 + lc1) * m + m_row_base + 8u32 + lr1) as usize] =
+            result[(res_base + e1) as usize];
     }
     sync_cube();
 
-    cmma::store(result.slice_mut(res_base as usize, res_base as usize + 64usize), &acc_1_2, 8u32, cmma::MatrixLayout::RowMajor);
+    cmma::store(
+        result.slice_mut(res_base as usize, res_base as usize + 64usize),
+        &acc_1_2,
+        8u32,
+        cmma::MatrixLayout::RowMajor,
+    );
     sync_cube();
     if m_row_base + 8u32 + lr0 < m && t_tok_base + 2u32 * 8u32 + lc0 < p_tokens {
-        output_batch[
-            ((t_tok_base + 2u32 * 8u32 + lc0) * m + m_row_base + 8u32 + lr0) as usize
-        ] = result[(res_base + e0) as usize];
+        output_batch[((t_tok_base + 2u32 * 8u32 + lc0) * m + m_row_base + 8u32 + lr0) as usize] =
+            result[(res_base + e0) as usize];
     }
     if m_row_base + 8u32 + lr1 < m && t_tok_base + 2u32 * 8u32 + lc1 < p_tokens {
-        output_batch[
-            ((t_tok_base + 2u32 * 8u32 + lc1) * m + m_row_base + 8u32 + lr1) as usize
-        ] = result[(res_base + e1) as usize];
+        output_batch[((t_tok_base + 2u32 * 8u32 + lc1) * m + m_row_base + 8u32 + lr1) as usize] =
+            result[(res_base + e1) as usize];
     }
     sync_cube();
 
-    cmma::store(result.slice_mut(res_base as usize, res_base as usize + 64usize), &acc_1_3, 8u32, cmma::MatrixLayout::RowMajor);
+    cmma::store(
+        result.slice_mut(res_base as usize, res_base as usize + 64usize),
+        &acc_1_3,
+        8u32,
+        cmma::MatrixLayout::RowMajor,
+    );
     sync_cube();
     if m_row_base + 8u32 + lr0 < m && t_tok_base + 3u32 * 8u32 + lc0 < p_tokens {
-        output_batch[
-            ((t_tok_base + 3u32 * 8u32 + lc0) * m + m_row_base + 8u32 + lr0) as usize
-        ] = result[(res_base + e0) as usize];
+        output_batch[((t_tok_base + 3u32 * 8u32 + lc0) * m + m_row_base + 8u32 + lr0) as usize] =
+            result[(res_base + e0) as usize];
     }
     if m_row_base + 8u32 + lr1 < m && t_tok_base + 3u32 * 8u32 + lc1 < p_tokens {
-        output_batch[
-            ((t_tok_base + 3u32 * 8u32 + lc1) * m + m_row_base + 8u32 + lr1) as usize
-        ] = result[(res_base + e1) as usize];
+        output_batch[((t_tok_base + 3u32 * 8u32 + lc1) * m + m_row_base + 8u32 + lr1) as usize] =
+            result[(res_base + e1) as usize];
     }
     sync_cube();
 
-    cmma::store(result.slice_mut(res_base as usize, res_base as usize + 64usize), &acc_2_0, 8u32, cmma::MatrixLayout::RowMajor);
+    cmma::store(
+        result.slice_mut(res_base as usize, res_base as usize + 64usize),
+        &acc_2_0,
+        8u32,
+        cmma::MatrixLayout::RowMajor,
+    );
     sync_cube();
     if m_row_base + 2u32 * 8u32 + lr0 < m && t_tok_base + lc0 < p_tokens {
-        output_batch[
-            ((t_tok_base + lc0) * m + m_row_base + 2u32 * 8u32 + lr0) as usize
-        ] = result[(res_base + e0) as usize];
+        output_batch[((t_tok_base + lc0) * m + m_row_base + 2u32 * 8u32 + lr0) as usize] =
+            result[(res_base + e0) as usize];
     }
     if m_row_base + 2u32 * 8u32 + lr1 < m && t_tok_base + lc1 < p_tokens {
-        output_batch[
-            ((t_tok_base + lc1) * m + m_row_base + 2u32 * 8u32 + lr1) as usize
-        ] = result[(res_base + e1) as usize];
+        output_batch[((t_tok_base + lc1) * m + m_row_base + 2u32 * 8u32 + lr1) as usize] =
+            result[(res_base + e1) as usize];
     }
     sync_cube();
 
-    cmma::store(result.slice_mut(res_base as usize, res_base as usize + 64usize), &acc_2_1, 8u32, cmma::MatrixLayout::RowMajor);
+    cmma::store(
+        result.slice_mut(res_base as usize, res_base as usize + 64usize),
+        &acc_2_1,
+        8u32,
+        cmma::MatrixLayout::RowMajor,
+    );
     sync_cube();
     if m_row_base + 2u32 * 8u32 + lr0 < m && t_tok_base + 8u32 + lc0 < p_tokens {
-        output_batch[
-            ((t_tok_base + 8u32 + lc0) * m + m_row_base + 2u32 * 8u32 + lr0) as usize
-        ] = result[(res_base + e0) as usize];
+        output_batch[((t_tok_base + 8u32 + lc0) * m + m_row_base + 2u32 * 8u32 + lr0) as usize] =
+            result[(res_base + e0) as usize];
     }
     if m_row_base + 2u32 * 8u32 + lr1 < m && t_tok_base + 8u32 + lc1 < p_tokens {
-        output_batch[
-            ((t_tok_base + 8u32 + lc1) * m + m_row_base + 2u32 * 8u32 + lr1) as usize
-        ] = result[(res_base + e1) as usize];
+        output_batch[((t_tok_base + 8u32 + lc1) * m + m_row_base + 2u32 * 8u32 + lr1) as usize] =
+            result[(res_base + e1) as usize];
     }
     sync_cube();
 
-    cmma::store(result.slice_mut(res_base as usize, res_base as usize + 64usize), &acc_2_2, 8u32, cmma::MatrixLayout::RowMajor);
+    cmma::store(
+        result.slice_mut(res_base as usize, res_base as usize + 64usize),
+        &acc_2_2,
+        8u32,
+        cmma::MatrixLayout::RowMajor,
+    );
     sync_cube();
     if m_row_base + 2u32 * 8u32 + lr0 < m && t_tok_base + 2u32 * 8u32 + lc0 < p_tokens {
-        output_batch[
-            ((t_tok_base + 2u32 * 8u32 + lc0) * m + m_row_base + 2u32 * 8u32 + lr0) as usize
-        ] = result[(res_base + e0) as usize];
+        output_batch
+            [((t_tok_base + 2u32 * 8u32 + lc0) * m + m_row_base + 2u32 * 8u32 + lr0) as usize] =
+            result[(res_base + e0) as usize];
     }
     if m_row_base + 2u32 * 8u32 + lr1 < m && t_tok_base + 2u32 * 8u32 + lc1 < p_tokens {
-        output_batch[
-            ((t_tok_base + 2u32 * 8u32 + lc1) * m + m_row_base + 2u32 * 8u32 + lr1) as usize
-        ] = result[(res_base + e1) as usize];
+        output_batch
+            [((t_tok_base + 2u32 * 8u32 + lc1) * m + m_row_base + 2u32 * 8u32 + lr1) as usize] =
+            result[(res_base + e1) as usize];
     }
     sync_cube();
 
-    cmma::store(result.slice_mut(res_base as usize, res_base as usize + 64usize), &acc_2_3, 8u32, cmma::MatrixLayout::RowMajor);
+    cmma::store(
+        result.slice_mut(res_base as usize, res_base as usize + 64usize),
+        &acc_2_3,
+        8u32,
+        cmma::MatrixLayout::RowMajor,
+    );
     sync_cube();
     if m_row_base + 2u32 * 8u32 + lr0 < m && t_tok_base + 3u32 * 8u32 + lc0 < p_tokens {
-        output_batch[
-            ((t_tok_base + 3u32 * 8u32 + lc0) * m + m_row_base + 2u32 * 8u32 + lr0) as usize
-        ] = result[(res_base + e0) as usize];
+        output_batch
+            [((t_tok_base + 3u32 * 8u32 + lc0) * m + m_row_base + 2u32 * 8u32 + lr0) as usize] =
+            result[(res_base + e0) as usize];
     }
     if m_row_base + 2u32 * 8u32 + lr1 < m && t_tok_base + 3u32 * 8u32 + lc1 < p_tokens {
-        output_batch[
-            ((t_tok_base + 3u32 * 8u32 + lc1) * m + m_row_base + 2u32 * 8u32 + lr1) as usize
-        ] = result[(res_base + e1) as usize];
+        output_batch
+            [((t_tok_base + 3u32 * 8u32 + lc1) * m + m_row_base + 2u32 * 8u32 + lr1) as usize] =
+            result[(res_base + e1) as usize];
     }
     sync_cube();
 
-    cmma::store(result.slice_mut(res_base as usize, res_base as usize + 64usize), &acc_3_0, 8u32, cmma::MatrixLayout::RowMajor);
+    cmma::store(
+        result.slice_mut(res_base as usize, res_base as usize + 64usize),
+        &acc_3_0,
+        8u32,
+        cmma::MatrixLayout::RowMajor,
+    );
     sync_cube();
     if m_row_base + 3u32 * 8u32 + lr0 < m && t_tok_base + lc0 < p_tokens {
-        output_batch[
-            ((t_tok_base + lc0) * m + m_row_base + 3u32 * 8u32 + lr0) as usize
-        ] = result[(res_base + e0) as usize];
+        output_batch[((t_tok_base + lc0) * m + m_row_base + 3u32 * 8u32 + lr0) as usize] =
+            result[(res_base + e0) as usize];
     }
     if m_row_base + 3u32 * 8u32 + lr1 < m && t_tok_base + lc1 < p_tokens {
-        output_batch[
-            ((t_tok_base + lc1) * m + m_row_base + 3u32 * 8u32 + lr1) as usize
-        ] = result[(res_base + e1) as usize];
+        output_batch[((t_tok_base + lc1) * m + m_row_base + 3u32 * 8u32 + lr1) as usize] =
+            result[(res_base + e1) as usize];
     }
     sync_cube();
 
-    cmma::store(result.slice_mut(res_base as usize, res_base as usize + 64usize), &acc_3_1, 8u32, cmma::MatrixLayout::RowMajor);
+    cmma::store(
+        result.slice_mut(res_base as usize, res_base as usize + 64usize),
+        &acc_3_1,
+        8u32,
+        cmma::MatrixLayout::RowMajor,
+    );
     sync_cube();
     if m_row_base + 3u32 * 8u32 + lr0 < m && t_tok_base + 8u32 + lc0 < p_tokens {
-        output_batch[
-            ((t_tok_base + 8u32 + lc0) * m + m_row_base + 3u32 * 8u32 + lr0) as usize
-        ] = result[(res_base + e0) as usize];
+        output_batch[((t_tok_base + 8u32 + lc0) * m + m_row_base + 3u32 * 8u32 + lr0) as usize] =
+            result[(res_base + e0) as usize];
     }
     if m_row_base + 3u32 * 8u32 + lr1 < m && t_tok_base + 8u32 + lc1 < p_tokens {
-        output_batch[
-            ((t_tok_base + 8u32 + lc1) * m + m_row_base + 3u32 * 8u32 + lr1) as usize
-        ] = result[(res_base + e1) as usize];
+        output_batch[((t_tok_base + 8u32 + lc1) * m + m_row_base + 3u32 * 8u32 + lr1) as usize] =
+            result[(res_base + e1) as usize];
     }
     sync_cube();
 
-    cmma::store(result.slice_mut(res_base as usize, res_base as usize + 64usize), &acc_3_2, 8u32, cmma::MatrixLayout::RowMajor);
+    cmma::store(
+        result.slice_mut(res_base as usize, res_base as usize + 64usize),
+        &acc_3_2,
+        8u32,
+        cmma::MatrixLayout::RowMajor,
+    );
     sync_cube();
     if m_row_base + 3u32 * 8u32 + lr0 < m && t_tok_base + 2u32 * 8u32 + lc0 < p_tokens {
-        output_batch[
-            ((t_tok_base + 2u32 * 8u32 + lc0) * m + m_row_base + 3u32 * 8u32 + lr0) as usize
-        ] = result[(res_base + e0) as usize];
+        output_batch
+            [((t_tok_base + 2u32 * 8u32 + lc0) * m + m_row_base + 3u32 * 8u32 + lr0) as usize] =
+            result[(res_base + e0) as usize];
     }
     if m_row_base + 3u32 * 8u32 + lr1 < m && t_tok_base + 2u32 * 8u32 + lc1 < p_tokens {
-        output_batch[
-            ((t_tok_base + 2u32 * 8u32 + lc1) * m + m_row_base + 3u32 * 8u32 + lr1) as usize
-        ] = result[(res_base + e1) as usize];
+        output_batch
+            [((t_tok_base + 2u32 * 8u32 + lc1) * m + m_row_base + 3u32 * 8u32 + lr1) as usize] =
+            result[(res_base + e1) as usize];
     }
     sync_cube();
 
-    cmma::store(result.slice_mut(res_base as usize, res_base as usize + 64usize), &acc_3_3, 8u32, cmma::MatrixLayout::RowMajor);
+    cmma::store(
+        result.slice_mut(res_base as usize, res_base as usize + 64usize),
+        &acc_3_3,
+        8u32,
+        cmma::MatrixLayout::RowMajor,
+    );
     sync_cube();
     if m_row_base + 3u32 * 8u32 + lr0 < m && t_tok_base + 3u32 * 8u32 + lc0 < p_tokens {
-        output_batch[
-            ((t_tok_base + 3u32 * 8u32 + lc0) * m + m_row_base + 3u32 * 8u32 + lr0) as usize
-        ] = result[(res_base + e0) as usize];
+        output_batch
+            [((t_tok_base + 3u32 * 8u32 + lc0) * m + m_row_base + 3u32 * 8u32 + lr0) as usize] =
+            result[(res_base + e0) as usize];
     }
     if m_row_base + 3u32 * 8u32 + lr1 < m && t_tok_base + 3u32 * 8u32 + lc1 < p_tokens {
-        output_batch[
-            ((t_tok_base + 3u32 * 8u32 + lc1) * m + m_row_base + 3u32 * 8u32 + lr1) as usize
-        ] = result[(res_base + e1) as usize];
+        output_batch
+            [((t_tok_base + 3u32 * 8u32 + lc1) * m + m_row_base + 3u32 * 8u32 + lr1) as usize] =
+            result[(res_base + e1) as usize];
     }
     sync_cube();
 }
@@ -641,68 +795,132 @@ fn gemm_ternary_simdgroup_smem_estage(
 
     // 16 accumulators — (mi, pj) 8×8 sub-tiles of this simdgroup's 32×32.
     let acc_0_0 = cmma::Matrix::<f32>::from_value(
-        cmma::MatrixIdent::Accumulator, 8usize, 8usize, 8usize,
-        cmma::MatrixLayout::Undefined, 0.0f32,
+        cmma::MatrixIdent::Accumulator,
+        8usize,
+        8usize,
+        8usize,
+        cmma::MatrixLayout::Undefined,
+        0.0f32,
     );
     let acc_0_1 = cmma::Matrix::<f32>::from_value(
-        cmma::MatrixIdent::Accumulator, 8usize, 8usize, 8usize,
-        cmma::MatrixLayout::Undefined, 0.0f32,
+        cmma::MatrixIdent::Accumulator,
+        8usize,
+        8usize,
+        8usize,
+        cmma::MatrixLayout::Undefined,
+        0.0f32,
     );
     let acc_0_2 = cmma::Matrix::<f32>::from_value(
-        cmma::MatrixIdent::Accumulator, 8usize, 8usize, 8usize,
-        cmma::MatrixLayout::Undefined, 0.0f32,
+        cmma::MatrixIdent::Accumulator,
+        8usize,
+        8usize,
+        8usize,
+        cmma::MatrixLayout::Undefined,
+        0.0f32,
     );
     let acc_0_3 = cmma::Matrix::<f32>::from_value(
-        cmma::MatrixIdent::Accumulator, 8usize, 8usize, 8usize,
-        cmma::MatrixLayout::Undefined, 0.0f32,
+        cmma::MatrixIdent::Accumulator,
+        8usize,
+        8usize,
+        8usize,
+        cmma::MatrixLayout::Undefined,
+        0.0f32,
     );
     let acc_1_0 = cmma::Matrix::<f32>::from_value(
-        cmma::MatrixIdent::Accumulator, 8usize, 8usize, 8usize,
-        cmma::MatrixLayout::Undefined, 0.0f32,
+        cmma::MatrixIdent::Accumulator,
+        8usize,
+        8usize,
+        8usize,
+        cmma::MatrixLayout::Undefined,
+        0.0f32,
     );
     let acc_1_1 = cmma::Matrix::<f32>::from_value(
-        cmma::MatrixIdent::Accumulator, 8usize, 8usize, 8usize,
-        cmma::MatrixLayout::Undefined, 0.0f32,
+        cmma::MatrixIdent::Accumulator,
+        8usize,
+        8usize,
+        8usize,
+        cmma::MatrixLayout::Undefined,
+        0.0f32,
     );
     let acc_1_2 = cmma::Matrix::<f32>::from_value(
-        cmma::MatrixIdent::Accumulator, 8usize, 8usize, 8usize,
-        cmma::MatrixLayout::Undefined, 0.0f32,
+        cmma::MatrixIdent::Accumulator,
+        8usize,
+        8usize,
+        8usize,
+        cmma::MatrixLayout::Undefined,
+        0.0f32,
     );
     let acc_1_3 = cmma::Matrix::<f32>::from_value(
-        cmma::MatrixIdent::Accumulator, 8usize, 8usize, 8usize,
-        cmma::MatrixLayout::Undefined, 0.0f32,
+        cmma::MatrixIdent::Accumulator,
+        8usize,
+        8usize,
+        8usize,
+        cmma::MatrixLayout::Undefined,
+        0.0f32,
     );
     let acc_2_0 = cmma::Matrix::<f32>::from_value(
-        cmma::MatrixIdent::Accumulator, 8usize, 8usize, 8usize,
-        cmma::MatrixLayout::Undefined, 0.0f32,
+        cmma::MatrixIdent::Accumulator,
+        8usize,
+        8usize,
+        8usize,
+        cmma::MatrixLayout::Undefined,
+        0.0f32,
     );
     let acc_2_1 = cmma::Matrix::<f32>::from_value(
-        cmma::MatrixIdent::Accumulator, 8usize, 8usize, 8usize,
-        cmma::MatrixLayout::Undefined, 0.0f32,
+        cmma::MatrixIdent::Accumulator,
+        8usize,
+        8usize,
+        8usize,
+        cmma::MatrixLayout::Undefined,
+        0.0f32,
     );
     let acc_2_2 = cmma::Matrix::<f32>::from_value(
-        cmma::MatrixIdent::Accumulator, 8usize, 8usize, 8usize,
-        cmma::MatrixLayout::Undefined, 0.0f32,
+        cmma::MatrixIdent::Accumulator,
+        8usize,
+        8usize,
+        8usize,
+        cmma::MatrixLayout::Undefined,
+        0.0f32,
     );
     let acc_2_3 = cmma::Matrix::<f32>::from_value(
-        cmma::MatrixIdent::Accumulator, 8usize, 8usize, 8usize,
-        cmma::MatrixLayout::Undefined, 0.0f32,
+        cmma::MatrixIdent::Accumulator,
+        8usize,
+        8usize,
+        8usize,
+        cmma::MatrixLayout::Undefined,
+        0.0f32,
     );
     let acc_3_0 = cmma::Matrix::<f32>::from_value(
-        cmma::MatrixIdent::Accumulator, 8usize, 8usize, 8usize,
-        cmma::MatrixLayout::Undefined, 0.0f32,
+        cmma::MatrixIdent::Accumulator,
+        8usize,
+        8usize,
+        8usize,
+        cmma::MatrixLayout::Undefined,
+        0.0f32,
     );
     let acc_3_1 = cmma::Matrix::<f32>::from_value(
-        cmma::MatrixIdent::Accumulator, 8usize, 8usize, 8usize,
-        cmma::MatrixLayout::Undefined, 0.0f32,
+        cmma::MatrixIdent::Accumulator,
+        8usize,
+        8usize,
+        8usize,
+        cmma::MatrixLayout::Undefined,
+        0.0f32,
     );
     let acc_3_2 = cmma::Matrix::<f32>::from_value(
-        cmma::MatrixIdent::Accumulator, 8usize, 8usize, 8usize,
-        cmma::MatrixLayout::Undefined, 0.0f32,
+        cmma::MatrixIdent::Accumulator,
+        8usize,
+        8usize,
+        8usize,
+        cmma::MatrixLayout::Undefined,
+        0.0f32,
     );
     let acc_3_3 = cmma::Matrix::<f32>::from_value(
-        cmma::MatrixIdent::Accumulator, 8usize, 8usize, 8usize,
-        cmma::MatrixLayout::Undefined, 0.0f32,
+        cmma::MatrixIdent::Accumulator,
+        8usize,
+        8usize,
+        8usize,
+        cmma::MatrixLayout::Undefined,
+        0.0f32,
     );
 
     // Shared memory: the W tile (128 rows × 32 k) and X tile (64 tokens ×
@@ -729,8 +947,7 @@ fn gemm_ternary_simdgroup_smem_estage(
         let k_base = it * SMEM_KT;
 
         // ── Cooperative dequant: 128×32 weight tile, 16 elements/thread ──
-        for j in 0..SMEM_W_J
-        {
+        for j in 0..SMEM_W_J {
             let idx = tid + j * SMEM_THREADS;
             let r = idx / SMEM_KT;
             let kk = idx % SMEM_KT;
@@ -752,8 +969,7 @@ fn gemm_ternary_simdgroup_smem_estage(
         }
 
         // ── Cooperative X load: 64×32 token tile, 8 elements/thread ──
-        for j in 0..SMEM_X_J
-        {
+        for j in 0..SMEM_X_J {
             let idx = tid + j * SMEM_THREADS;
             let t = idx / SMEM_KT;
             let kk = idx % SMEM_KT;
@@ -776,44 +992,76 @@ fn gemm_ternary_simdgroup_smem_estage(
                 let a_base = sg_m * 32u32 * SMEM_KT + ki * 8u32;
                 let b_base = sg_p * 32u32 * SMEM_KT + ki * 8u32;
                 let a0 = cmma::Matrix::<f32>::from_slice(
-                    cmma::MatrixIdent::A, 8usize, 8usize, 8usize,
+                    cmma::MatrixIdent::A,
+                    8usize,
+                    8usize,
+                    8usize,
                     cmma::MatrixLayout::RowMajor,
-                    tile_w.slice((a_base) as usize, SMEM_W_LEN), SMEM_KT,
+                    tile_w.slice((a_base) as usize, SMEM_W_LEN),
+                    SMEM_KT,
                 );
                 let a1 = cmma::Matrix::<f32>::from_slice(
-                    cmma::MatrixIdent::A, 8usize, 8usize, 8usize,
+                    cmma::MatrixIdent::A,
+                    8usize,
+                    8usize,
+                    8usize,
                     cmma::MatrixLayout::RowMajor,
-                    tile_w.slice((a_base + 8u32 * SMEM_KT) as usize, SMEM_W_LEN), SMEM_KT,
+                    tile_w.slice((a_base + 8u32 * SMEM_KT) as usize, SMEM_W_LEN),
+                    SMEM_KT,
                 );
                 let a2 = cmma::Matrix::<f32>::from_slice(
-                    cmma::MatrixIdent::A, 8usize, 8usize, 8usize,
+                    cmma::MatrixIdent::A,
+                    8usize,
+                    8usize,
+                    8usize,
                     cmma::MatrixLayout::RowMajor,
-                    tile_w.slice((a_base + 2u32 * 8u32 * SMEM_KT) as usize, SMEM_W_LEN), SMEM_KT,
+                    tile_w.slice((a_base + 2u32 * 8u32 * SMEM_KT) as usize, SMEM_W_LEN),
+                    SMEM_KT,
                 );
                 let a3 = cmma::Matrix::<f32>::from_slice(
-                    cmma::MatrixIdent::A, 8usize, 8usize, 8usize,
+                    cmma::MatrixIdent::A,
+                    8usize,
+                    8usize,
+                    8usize,
                     cmma::MatrixLayout::RowMajor,
-                    tile_w.slice((a_base + 3u32 * 8u32 * SMEM_KT) as usize, SMEM_W_LEN), SMEM_KT,
+                    tile_w.slice((a_base + 3u32 * 8u32 * SMEM_KT) as usize, SMEM_W_LEN),
+                    SMEM_KT,
                 );
                 let b0 = cmma::Matrix::<f32>::from_slice(
-                    cmma::MatrixIdent::B, 8usize, 8usize, 8usize,
+                    cmma::MatrixIdent::B,
+                    8usize,
+                    8usize,
+                    8usize,
                     cmma::MatrixLayout::ColMajor,
-                    tile_x.slice((b_base) as usize, SMEM_X_LEN), SMEM_KT,
+                    tile_x.slice((b_base) as usize, SMEM_X_LEN),
+                    SMEM_KT,
                 );
                 let b1 = cmma::Matrix::<f32>::from_slice(
-                    cmma::MatrixIdent::B, 8usize, 8usize, 8usize,
+                    cmma::MatrixIdent::B,
+                    8usize,
+                    8usize,
+                    8usize,
                     cmma::MatrixLayout::ColMajor,
-                    tile_x.slice((b_base + 8u32 * SMEM_KT) as usize, SMEM_X_LEN), SMEM_KT,
+                    tile_x.slice((b_base + 8u32 * SMEM_KT) as usize, SMEM_X_LEN),
+                    SMEM_KT,
                 );
                 let b2 = cmma::Matrix::<f32>::from_slice(
-                    cmma::MatrixIdent::B, 8usize, 8usize, 8usize,
+                    cmma::MatrixIdent::B,
+                    8usize,
+                    8usize,
+                    8usize,
                     cmma::MatrixLayout::ColMajor,
-                    tile_x.slice((b_base + 2u32 * 8u32 * SMEM_KT) as usize, SMEM_X_LEN), SMEM_KT,
+                    tile_x.slice((b_base + 2u32 * 8u32 * SMEM_KT) as usize, SMEM_X_LEN),
+                    SMEM_KT,
                 );
                 let b3 = cmma::Matrix::<f32>::from_slice(
-                    cmma::MatrixIdent::B, 8usize, 8usize, 8usize,
+                    cmma::MatrixIdent::B,
+                    8usize,
+                    8usize,
+                    8usize,
                     cmma::MatrixLayout::ColMajor,
-                    tile_x.slice((b_base + 3u32 * 8u32 * SMEM_KT) as usize, SMEM_X_LEN), SMEM_KT,
+                    tile_x.slice((b_base + 3u32 * 8u32 * SMEM_KT) as usize, SMEM_X_LEN),
+                    SMEM_KT,
                 );
                 cmma::execute::<f32, f32, f32, f32, cmma::Plane>(&a0, &b0, &acc_0_0, &acc_0_0);
                 cmma::execute::<f32, f32, f32, f32, cmma::Plane>(&a0, &b1, &acc_0_1, &acc_0_1);
@@ -845,14 +1093,54 @@ fn gemm_ternary_simdgroup_smem_estage(
     let res_base = sg * 512u32;
 
     // Half 1: mi ∈ {0, 1} — slot t ↔ (mi, pj) = (t/4, t%4).
-    cmma::store(tile_w.slice_mut(res_base as usize, (res_base + 64u32) as usize), &acc_0_0, 8u32, cmma::MatrixLayout::RowMajor);
-    cmma::store(tile_w.slice_mut((res_base + 64u32) as usize, (res_base + 128u32) as usize), &acc_0_1, 8u32, cmma::MatrixLayout::RowMajor);
-    cmma::store(tile_w.slice_mut((res_base + 128u32) as usize, (res_base + 192u32) as usize), &acc_0_2, 8u32, cmma::MatrixLayout::RowMajor);
-    cmma::store(tile_w.slice_mut((res_base + 192u32) as usize, (res_base + 256u32) as usize), &acc_0_3, 8u32, cmma::MatrixLayout::RowMajor);
-    cmma::store(tile_w.slice_mut((res_base + 256u32) as usize, (res_base + 320u32) as usize), &acc_1_0, 8u32, cmma::MatrixLayout::RowMajor);
-    cmma::store(tile_w.slice_mut((res_base + 320u32) as usize, (res_base + 384u32) as usize), &acc_1_1, 8u32, cmma::MatrixLayout::RowMajor);
-    cmma::store(tile_w.slice_mut((res_base + 384u32) as usize, (res_base + 448u32) as usize), &acc_1_2, 8u32, cmma::MatrixLayout::RowMajor);
-    cmma::store(tile_w.slice_mut((res_base + 448u32) as usize, (res_base + 512u32) as usize), &acc_1_3, 8u32, cmma::MatrixLayout::RowMajor);
+    cmma::store(
+        tile_w.slice_mut(res_base as usize, (res_base + 64u32) as usize),
+        &acc_0_0,
+        8u32,
+        cmma::MatrixLayout::RowMajor,
+    );
+    cmma::store(
+        tile_w.slice_mut((res_base + 64u32) as usize, (res_base + 128u32) as usize),
+        &acc_0_1,
+        8u32,
+        cmma::MatrixLayout::RowMajor,
+    );
+    cmma::store(
+        tile_w.slice_mut((res_base + 128u32) as usize, (res_base + 192u32) as usize),
+        &acc_0_2,
+        8u32,
+        cmma::MatrixLayout::RowMajor,
+    );
+    cmma::store(
+        tile_w.slice_mut((res_base + 192u32) as usize, (res_base + 256u32) as usize),
+        &acc_0_3,
+        8u32,
+        cmma::MatrixLayout::RowMajor,
+    );
+    cmma::store(
+        tile_w.slice_mut((res_base + 256u32) as usize, (res_base + 320u32) as usize),
+        &acc_1_0,
+        8u32,
+        cmma::MatrixLayout::RowMajor,
+    );
+    cmma::store(
+        tile_w.slice_mut((res_base + 320u32) as usize, (res_base + 384u32) as usize),
+        &acc_1_1,
+        8u32,
+        cmma::MatrixLayout::RowMajor,
+    );
+    cmma::store(
+        tile_w.slice_mut((res_base + 384u32) as usize, (res_base + 448u32) as usize),
+        &acc_1_2,
+        8u32,
+        cmma::MatrixLayout::RowMajor,
+    );
+    cmma::store(
+        tile_w.slice_mut((res_base + 448u32) as usize, (res_base + 512u32) as usize),
+        &acc_1_3,
+        8u32,
+        cmma::MatrixLayout::RowMajor,
+    );
     sync_cube();
     for t in 0..8u32 {
         let ro = (t / 4u32) * 8u32;
@@ -871,14 +1159,54 @@ fn gemm_ternary_simdgroup_smem_estage(
 
     // Half 2: mi ∈ {2, 3} — same slots, overwritten only after half 1's
     // scatter drained (the barrier above).
-    cmma::store(tile_w.slice_mut(res_base as usize, (res_base + 64u32) as usize), &acc_2_0, 8u32, cmma::MatrixLayout::RowMajor);
-    cmma::store(tile_w.slice_mut((res_base + 64u32) as usize, (res_base + 128u32) as usize), &acc_2_1, 8u32, cmma::MatrixLayout::RowMajor);
-    cmma::store(tile_w.slice_mut((res_base + 128u32) as usize, (res_base + 192u32) as usize), &acc_2_2, 8u32, cmma::MatrixLayout::RowMajor);
-    cmma::store(tile_w.slice_mut((res_base + 192u32) as usize, (res_base + 256u32) as usize), &acc_2_3, 8u32, cmma::MatrixLayout::RowMajor);
-    cmma::store(tile_w.slice_mut((res_base + 256u32) as usize, (res_base + 320u32) as usize), &acc_3_0, 8u32, cmma::MatrixLayout::RowMajor);
-    cmma::store(tile_w.slice_mut((res_base + 320u32) as usize, (res_base + 384u32) as usize), &acc_3_1, 8u32, cmma::MatrixLayout::RowMajor);
-    cmma::store(tile_w.slice_mut((res_base + 384u32) as usize, (res_base + 448u32) as usize), &acc_3_2, 8u32, cmma::MatrixLayout::RowMajor);
-    cmma::store(tile_w.slice_mut((res_base + 448u32) as usize, (res_base + 512u32) as usize), &acc_3_3, 8u32, cmma::MatrixLayout::RowMajor);
+    cmma::store(
+        tile_w.slice_mut(res_base as usize, (res_base + 64u32) as usize),
+        &acc_2_0,
+        8u32,
+        cmma::MatrixLayout::RowMajor,
+    );
+    cmma::store(
+        tile_w.slice_mut((res_base + 64u32) as usize, (res_base + 128u32) as usize),
+        &acc_2_1,
+        8u32,
+        cmma::MatrixLayout::RowMajor,
+    );
+    cmma::store(
+        tile_w.slice_mut((res_base + 128u32) as usize, (res_base + 192u32) as usize),
+        &acc_2_2,
+        8u32,
+        cmma::MatrixLayout::RowMajor,
+    );
+    cmma::store(
+        tile_w.slice_mut((res_base + 192u32) as usize, (res_base + 256u32) as usize),
+        &acc_2_3,
+        8u32,
+        cmma::MatrixLayout::RowMajor,
+    );
+    cmma::store(
+        tile_w.slice_mut((res_base + 256u32) as usize, (res_base + 320u32) as usize),
+        &acc_3_0,
+        8u32,
+        cmma::MatrixLayout::RowMajor,
+    );
+    cmma::store(
+        tile_w.slice_mut((res_base + 320u32) as usize, (res_base + 384u32) as usize),
+        &acc_3_1,
+        8u32,
+        cmma::MatrixLayout::RowMajor,
+    );
+    cmma::store(
+        tile_w.slice_mut((res_base + 384u32) as usize, (res_base + 448u32) as usize),
+        &acc_3_2,
+        8u32,
+        cmma::MatrixLayout::RowMajor,
+    );
+    cmma::store(
+        tile_w.slice_mut((res_base + 448u32) as usize, (res_base + 512u32) as usize),
+        &acc_3_3,
+        8u32,
+        cmma::MatrixLayout::RowMajor,
+    );
     sync_cube();
     for t in 0..8u32 {
         let ro = (2u32 + t / 4u32) * 8u32;

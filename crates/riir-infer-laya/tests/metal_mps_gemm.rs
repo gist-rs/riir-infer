@@ -121,7 +121,10 @@ fn mps_arm_is_bit_identical_on_loop_shapes() {
             "seq {seq}: the MPS arm diverges from the narrow instance at the \
              raw-bit level"
         );
-        let (on_d, off_d) = (on.mps_dispatches() - before.0, off.mps_dispatches() - before.1);
+        let (on_d, off_d) = (
+            on.mps_dispatches() - before.0,
+            off.mps_dispatches() - before.1,
+        );
         if seq <= 32 {
             assert_eq!(on_d, 0, "seq {seq}: all-split shape dispatched an MPS GEMM");
         } else {
@@ -180,7 +183,11 @@ fn t13_mps_paired_ab() {
     let shapes: Vec<(String, Vec<usize>)> = [54usize, 80, 106, 140, 188, 317, 512]
         .iter()
         .map(|s| (format!("loop {s}"), vec![*s]))
-        .chain(PACKED_CASES.iter().map(|s| (format!("packed {s:?}"), s.to_vec())))
+        .chain(
+            PACKED_CASES
+                .iter()
+                .map(|s| (format!("packed {s:?}"), s.to_vec())),
+        )
         .collect();
     for (label, seqs) in &shapes {
         let total: usize = seqs.iter().sum();

@@ -167,7 +167,12 @@ impl Qwen38PrefixCache {
             // contract, but the copy is cheap and keeps the invariant
             // self-enforcing). Move to front (MRU).
             let entry = &mut self.entries[idx];
-            copy_state_to_snaps(stream, state, &mut entry.snap_recurrent, &mut entry.snap_conv)?;
+            copy_state_to_snaps(
+                stream,
+                state,
+                &mut entry.snap_recurrent,
+                &mut entry.snap_conv,
+            )?;
             let e = self.entries.remove(idx);
             self.entries.insert(0, e);
             self.rebuild_index();

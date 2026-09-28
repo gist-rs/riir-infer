@@ -42,10 +42,10 @@
 
 use std::sync::Arc;
 
+use cudarc::driver::PushKernelArg;
 use cudarc::driver::safe::{
     CudaContext, CudaFunction, CudaModule, CudaSlice, CudaStream, LaunchConfig,
 };
-use cudarc::driver::PushKernelArg;
 
 // ---------------------------------------------------------------------------
 // Variant enums (probe-selectable)
@@ -824,8 +824,7 @@ pub struct CudaDeltanetKernels {
 /// order, same INV form, index-for-index identical writes), so the env is a
 /// KILL-SWITCH: `RIIR_EXPAND_L2_ROWS_LEGACY=1` restores the legacy kernels.
 /// The launch counter is the vacuous guard (the Bench-768 lesson).
-static EXPAND_L2_V2: std::sync::atomic::AtomicBool =
-    std::sync::atomic::AtomicBool::new(true);
+static EXPAND_L2_V2: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(true);
 static EXPAND_L2_V2_ENV: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
 static EXPAND_L2_V2_LAUNCHES: std::sync::atomic::AtomicUsize =
     std::sync::atomic::AtomicUsize::new(0);
@@ -925,7 +924,10 @@ fn rec_mr_arm() -> Option<usize> {
 /// done). Process-wide — sibling tests in the same binary share it.
 #[cfg_attr(not(test), allow(dead_code))]
 fn set_rec_mr(arm: Option<usize>) {
-    REC_MR_ARM.store(arm.unwrap_or(usize::MAX), std::sync::atomic::Ordering::Relaxed);
+    REC_MR_ARM.store(
+        arm.unwrap_or(usize::MAX),
+        std::sync::atomic::Ordering::Relaxed,
+    );
 }
 
 /// Launches dispatched through the LEGACY kernel (the vacuous guard: stays 0
@@ -1155,12 +1157,8 @@ impl CudaDeltanetKernels {
         p: usize,
     ) -> Result<(), String> {
         let total = p * n;
-        let (blocks64_i, groups_i, n_i, p_i) = (
-            blocks64 as i32,
-            groups_per_row as i32,
-            n as i32,
-            p as i32,
-        );
+        let (blocks64_i, groups_i, n_i, p_i) =
+            (blocks64 as i32, groups_per_row as i32, n as i32, p as i32);
         let grid = total.div_ceil(256) as u32;
         let cfg = LaunchConfig {
             grid_dim: (grid, 1, 1),
@@ -1452,21 +1450,23 @@ impl CudaDeltanetKernels {
         p: usize,
         v_dim: usize,
     ) -> Result<(), String> {
-        debug_assert_eq!(head_dim, 128, "register-blocked recurrence: head_dim == 128");
+        debug_assert_eq!(
+            head_dim, 128,
+            "register-blocked recurrence: head_dim == 128"
+        );
         // Issue 904 T3 — default-on multi-row dispatch (bit-identical by the
         // G1 gate; the env is a kill-switch, the runtime override is the A/B
         // seam).
         if let Some(arm) = rec_mr_arm() {
-            return unsafe { self.launch_recurrence_mr(stream, arm, qkvx, beta, decay, state, output, head_dim, n_head, p, v_dim) };
+            return unsafe {
+                self.launch_recurrence_mr(
+                    stream, arm, qkvx, beta, decay, state, output, head_dim, n_head, p, v_dim,
+                )
+            };
         }
         REC_MR_LEGACY_LAUNCHES.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         let func = &self.recurrence[idx_recurrence(dot, upd, ps, sc)];
-        let (hd_i, nh_i, p_i, vd_i) = (
-            head_dim as i32,
-            n_head as i32,
-            p as i32,
-            v_dim as i32,
-        );
+        let (hd_i, nh_i, p_i, vd_i) = (head_dim as i32, n_head as i32, p as i32, v_dim as i32);
         let cfg = LaunchConfig {
             grid_dim: (n_head as u32, head_dim as u32, 1),
             block_dim: (32, 1, 1),
@@ -1520,7 +1520,10 @@ impl CudaDeltanetKernels {
                 REC_MR_GEOMETRIES.len()
             ));
         };
-        debug_assert_eq!(head_dim, 128, "register-blocked recurrence: head_dim == 128");
+        debug_assert_eq!(
+            head_dim, 128,
+            "register-blocked recurrence: head_dim == 128"
+        );
         let rows_per_blk = (rpw * wpc) as usize;
         debug_assert_eq!(
             head_dim % rows_per_blk,
@@ -1528,12 +1531,7 @@ impl CudaDeltanetKernels {
             "multi-row recurrence: head_dim % (rpw*wpc) == 0"
         );
         let func = &self.recurrence_mr[arm];
-        let (hd_i, nh_i, p_i, vd_i) = (
-            head_dim as i32,
-            n_head as i32,
-            p as i32,
-            v_dim as i32,
-        );
+        let (hd_i, nh_i, p_i, vd_i) = (head_dim as i32, n_head as i32, p as i32, v_dim as i32);
         let cfg = LaunchConfig {
             grid_dim: (n_head as u32, (head_dim / rows_per_blk) as u32, 1),
             block_dim: (32 * wpc, 1, 1),
@@ -1580,20 +1578,16 @@ mod tests {
     #[test]
     fn test_expand_l2_v2_bit_identical_to_legacy_all_variants() {
         const P_ROWS: &[usize] = &[1, 3, 8];
-const POISON: f32 = 12_345.5;
+        const POISON: f32 = 12_345.5;
 
-let Some(_) = cuda_or_skip() else {
+        let Some(_) = cuda_or_skip() else {
             return;
         };
         let (kernels, stream) = CudaDeltanetKernels::new_standalone().expect("compile");
 
         // Bonsai production dims + smaller odd shapes (incl. hd % 4 != 0).
-        const DIMS: &[(usize, usize, usize)] = &[
-            (16, 48, 128),
-            (2, 6, 16),
-            (4, 4, 10),
-            (1, 1, 128),
-        ];
+        const DIMS: &[(usize, usize, usize)] =
+            &[(16, 48, 128), (2, 6, 16), (4, 4, 10), (1, 1, 128)];
 
         let variants = [
             (L2Accum::Ma, L2Inv::Rsqrt),
@@ -1677,12 +1671,17 @@ let Some(_) = cuda_or_skip() else {
                     );
                     // Full coverage on both paths: no sentinel survived.
                     assert!(
-                        legacy.iter().chain(v2_a.iter()).all(|v| v.to_bits() != POISON.to_bits()),
+                        legacy
+                            .iter()
+                            .chain(v2_a.iter())
+                            .all(|v| v.to_bits() != POISON.to_bits()),
                         "sentinel survived (coverage gap) variant {a:?}/{i:?} p={p}",
                     );
                     // Run-twice determinism of the V2 kernel.
                     assert!(
-                        v2_a.iter().zip(v2_b.iter()).all(|(x, y)| x.to_bits() == y.to_bits()),
+                        v2_a.iter()
+                            .zip(v2_b.iter())
+                            .all(|(x, y)| x.to_bits() == y.to_bits()),
                         "V2 run-twice nondeterminism variant {a:?}/{i:?} p={p}",
                     );
                     // The zero row produced exact zeros (val * 0.0 = 0.0).
@@ -1844,8 +1843,8 @@ let Some(_) = cuda_or_skip() else {
                 unsafe {
                     kernels
                         .launch_recurrence(
-                            &stream, rd, ru, rp, rsc, &qkvx_dev, &beta_dev, &decay_dev,
-                            &state_dev, &out_dev, hd, n_v, p, v_dim,
+                            &stream, rd, ru, rp, rsc, &qkvx_dev, &beta_dev, &decay_dev, &state_dev,
+                            &out_dev, hd, n_v, p, v_dim,
                         )
                         .expect("baseline launch");
                 }
@@ -1865,8 +1864,8 @@ let Some(_) = cuda_or_skip() else {
                     unsafe {
                         kernels
                             .launch_recurrence_mr(
-                                &stream, arm, &qkvx_dev, &beta_dev, &decay_dev,
-                                &state_dev, &out_dev, hd, n_v, p, v_dim,
+                                &stream, arm, &qkvx_dev, &beta_dev, &decay_dev, &state_dev,
+                                &out_dev, hd, n_v, p, v_dim,
                             )
                             .expect("arm launch");
                     }
@@ -1908,12 +1907,18 @@ let Some(_) = cuda_or_skip() else {
                 );
                 // Full write coverage: no sentinel survived anywhere.
                 assert!(
-                    a_out.iter().chain(a_state.iter()).all(|v| v.to_bits() != POISON.to_bits()),
+                    a_out
+                        .iter()
+                        .chain(a_state.iter())
+                        .all(|v| v.to_bits() != POISON.to_bits()),
                     "arm {arm} n_v={n_v} p={p}: sentinel survived (coverage gap)",
                 );
                 // Run-twice determinism.
                 assert!(
-                    a_out.iter().zip(b_out.iter()).all(|(x, y)| x.to_bits() == y.to_bits())
+                    a_out
+                        .iter()
+                        .zip(b_out.iter())
+                        .all(|(x, y)| x.to_bits() == y.to_bits())
                         && a_state
                             .iter()
                             .zip(b_state.iter())
@@ -1931,8 +1936,8 @@ let Some(_) = cuda_or_skip() else {
                 unsafe {
                     kernels
                         .launch_recurrence(
-                            &stream, rd, ru, rp, rsc, &qkvx_dev, &beta_dev, &decay_dev,
-                            &state_dev, &out_dev, hd, n_v, p, v_dim,
+                            &stream, rd, ru, rp, rsc, &qkvx_dev, &beta_dev, &decay_dev, &state_dev,
+                            &out_dev, hd, n_v, p, v_dim,
                         )
                         .expect("default dispatch launch");
                 }
@@ -1948,8 +1953,17 @@ let Some(_) = cuda_or_skip() else {
                 unsafe {
                     kernels
                         .launch_recurrence_mr(
-                            &stream, REC_MR_DEFAULT_ARM, &qkvx_dev, &beta_dev, &decay_dev,
-                            &state_dev2, &out_dev2, hd, n_v, p, v_dim,
+                            &stream,
+                            REC_MR_DEFAULT_ARM,
+                            &qkvx_dev,
+                            &beta_dev,
+                            &decay_dev,
+                            &state_dev2,
+                            &out_dev2,
+                            hd,
+                            n_v,
+                            p,
+                            v_dim,
                         )
                         .expect("winner direct launch");
                 }
@@ -1959,8 +1973,13 @@ let Some(_) = cuda_or_skip() else {
                 stream.memcpy_dtoh(&out_dev2, &mut out2).unwrap();
                 stream.memcpy_dtoh(&state_dev2, &mut st2).unwrap();
                 assert!(
-                    out.iter().zip(out2.iter()).all(|(x, y)| x.to_bits() == y.to_bits())
-                        && st.iter().zip(st2.iter()).all(|(x, y)| x.to_bits() == y.to_bits()),
+                    out.iter()
+                        .zip(out2.iter())
+                        .all(|(x, y)| x.to_bits() == y.to_bits())
+                        && st
+                            .iter()
+                            .zip(st2.iter())
+                            .all(|(x, y)| x.to_bits() == y.to_bits()),
                     "T3 wiring: default launch_recurrence != winner arm direct"
                 );
                 set_rec_mr(None);
@@ -2002,25 +2021,33 @@ let Some(_) = cuda_or_skip() else {
             let mut seed = 0xDEFA_CE90_4001u64;
             let beta: Vec<f32> = (0..p * n_v)
                 .map(|_| {
-                    seed = seed.wrapping_mul(6_364_136_223_846_793_005).wrapping_add(1_442_695_040_888_963_407);
+                    seed = seed
+                        .wrapping_mul(6_364_136_223_846_793_005)
+                        .wrapping_add(1_442_695_040_888_963_407);
                     0.05 + ((seed >> 40) as f32 / 16_777_216.0) * 0.90
                 })
                 .collect();
             let decay: Vec<f32> = (0..p * n_v)
                 .map(|_| {
-                    seed = seed.wrapping_mul(6_364_136_223_846_793_005).wrapping_add(1_442_695_040_888_963_407);
+                    seed = seed
+                        .wrapping_mul(6_364_136_223_846_793_005)
+                        .wrapping_add(1_442_695_040_888_963_407);
                     0.5 + ((seed >> 40) as f32 / 16_777_216.0) * 0.499
                 })
                 .collect();
             let qkvx: Vec<f32> = (0..qkvx_len)
                 .map(|_| {
-                    seed = seed.wrapping_mul(6_364_136_223_846_793_005).wrapping_add(1_442_695_040_888_963_407);
+                    seed = seed
+                        .wrapping_mul(6_364_136_223_846_793_005)
+                        .wrapping_add(1_442_695_040_888_963_407);
                     ((seed >> 33) & 0xFF_FFFF) as f32 / 8_388_608.0 - 0.5
                 })
                 .collect();
             let state0: Vec<f32> = (0..state_len)
                 .map(|_| {
-                    seed = seed.wrapping_mul(6_364_136_223_846_793_005).wrapping_add(1_442_695_040_888_963_407);
+                    seed = seed
+                        .wrapping_mul(6_364_136_223_846_793_005)
+                        .wrapping_add(1_442_695_040_888_963_407);
                     ((seed >> 33) & 0xFF_FFFF) as f32 / 8_388_608.0 - 0.5
                 })
                 .collect();
@@ -2037,14 +2064,14 @@ let Some(_) = cuda_or_skip() else {
                 let res = match arm {
                     Some(a) => unsafe {
                         kernels.launch_recurrence_mr(
-                            &stream, a, &qkvx_dev, &beta_dev, &decay_dev, &state_dev,
-                            &out_dev, hd, n_v, p, v_dim,
+                            &stream, a, &qkvx_dev, &beta_dev, &decay_dev, &state_dev, &out_dev, hd,
+                            n_v, p, v_dim,
                         )
                     },
                     None => unsafe {
                         kernels.launch_recurrence(
-                            &stream, rd, ru, rp, rsc, &qkvx_dev, &beta_dev, &decay_dev,
-                            &state_dev, &out_dev, hd, n_v, p, v_dim,
+                            &stream, rd, ru, rp, rsc, &qkvx_dev, &beta_dev, &decay_dev, &state_dev,
+                            &out_dev, hd, n_v, p, v_dim,
                         )
                     },
                 };

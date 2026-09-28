@@ -70,8 +70,8 @@ mod requant;
 
 #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
 pub use bridge::BridgeKernel;
-pub use requant::requant_per_row_int8;
 pub use requant::TERNARY_GROUP_SIZE;
+pub use requant::requant_per_row_int8;
 
 /// Fixed ANE block size in tokens — the compiled conv spatial width W=2048
 /// (P7/P9 verified shape: tokens along W, `[1, 5120, 1, 2048]`).
@@ -345,9 +345,14 @@ pub fn set_prefill_ane_zc_second_queue(on: bool) {
 /// See [`ANE_ZC_SECOND_QUEUE`]. Programmatic OR env - either arms it.
 #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
 pub fn prefill_ane_zc_second_queue() -> bool {
-    if ANE_ZC_SECOND_QUEUE.load(Ordering::Relaxed) { true } else { *ANE_ZC_SECOND_QUEUE_ENV.get_or_init(|| {
-            std::env::var("RIIR_ANE_ZC_SECOND_QUEUE").is_ok_and(|v| v == "1" || v.eq_ignore_ascii_case("true"))
-        }) }
+    if ANE_ZC_SECOND_QUEUE.load(Ordering::Relaxed) {
+        true
+    } else {
+        *ANE_ZC_SECOND_QUEUE_ENV.get_or_init(|| {
+            std::env::var("RIIR_ANE_ZC_SECOND_QUEUE")
+                .is_ok_and(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+        })
+    }
 }
 
 /// Issue 769 T10 P4 — the **attribution control** for the second-queue variant.
@@ -370,9 +375,14 @@ pub fn set_prefill_ane_zc_producer_flush(on: bool) {
 /// See [`ANE_ZC_PRODUCER_FLUSH`]. Programmatic OR env.
 #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
 pub fn prefill_ane_zc_producer_flush() -> bool {
-    if ANE_ZC_PRODUCER_FLUSH.load(Ordering::Relaxed) { true } else { *ANE_ZC_PRODUCER_FLUSH_ENV.get_or_init(|| {
-            std::env::var("RIIR_ANE_ZC_PRODUCER_FLUSH").is_ok_and(|v| v == "1" || v.eq_ignore_ascii_case("true"))
-        }) }
+    if ANE_ZC_PRODUCER_FLUSH.load(Ordering::Relaxed) {
+        true
+    } else {
+        *ANE_ZC_PRODUCER_FLUSH_ENV.get_or_init(|| {
+            std::env::var("RIIR_ANE_ZC_PRODUCER_FLUSH")
+                .is_ok_and(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+        })
+    }
 }
 
 /// Plan 549: the `down_proj` op toggle. Read at REGISTRATION time (set
@@ -396,8 +406,7 @@ pub fn prefill_ane_down() -> bool {
 /// `RIIR_ANE_MAX_BYTES` env var is the deployment surface; this is the
 /// harness surface). Read once at `TernaryDeltanetGpuForward::new()` — set
 /// BEFORE construction. `None` = no override (env → default resolution).
-static ANE_MAX_BYTES_OVERRIDE: std::sync::atomic::AtomicU64 =
-    std::sync::atomic::AtomicU64::new(0);
+static ANE_MAX_BYTES_OVERRIDE: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
 /// See [`ANE_MAX_BYTES_OVERRIDE`]. `0` clears the override.
 #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
@@ -817,7 +826,10 @@ impl AnePrefillCtx {
         let AnePrefillState::Ready(bank) = &mut self.state else {
             return false;
         };
-        if bank.try_register_splits(layer_idx, AnePrefillOp::DownProj, &[w]).is_err() {
+        if bank
+            .try_register_splits(layer_idx, AnePrefillOp::DownProj, &[w])
+            .is_err()
+        {
             return false;
         }
         bank.kernel(layer_idx, AnePrefillOp::DownProj).is_some()
@@ -1180,7 +1192,10 @@ mod tests {
         let gate = TernaryGroupWeights::new(192, 32);
         let up = TernaryGroupWeights::new(192, 32);
         let gu = [&gate, &up];
-        assert_eq!(registration_splits(true, AnePrefillOp::GateUpProj, &gu).len(), 1);
+        assert_eq!(
+            registration_splits(true, AnePrefillOp::GateUpProj, &gu).len(),
+            1
+        );
         // Empty stays empty (caller-contract error upstream, never inflated).
         let empty: [&TernaryGroupWeights; 0] = [];
         assert!(registration_splits(true, AnePrefillOp::InProjConcat, &empty).is_empty());
@@ -1271,6 +1286,13 @@ mod tests {
         assert!(!down_admits(ceiling, Some(900), 500, 400, 0, 300));
         assert!(down_admits(ceiling, Some(900), 500, 200, 0, 300));
         // Saturation safety: no panic at extremes.
-        assert!(!down_admits(u64::MAX, None, 0, u64::MAX - 10, u64::MAX - 10, 30));
+        assert!(!down_admits(
+            u64::MAX,
+            None,
+            0,
+            u64::MAX - 10,
+            u64::MAX - 10,
+            30
+        ));
     }
 }

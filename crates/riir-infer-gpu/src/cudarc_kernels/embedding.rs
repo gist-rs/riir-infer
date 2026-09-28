@@ -26,8 +26,8 @@
 
 use std::sync::Arc;
 
-use cudarc::driver::safe::{CudaContext, CudaFunction, CudaModule, CudaStream, LaunchConfig};
 use cudarc::driver::PushKernelArg;
+use cudarc::driver::safe::{CudaContext, CudaFunction, CudaModule, CudaStream, LaunchConfig};
 
 use super::CudarcKernelError;
 
@@ -367,9 +367,7 @@ mod tests {
             let diff = (gpu_out[i] - cpu_out[i]).abs();
             max_diff = max_diff.max(diff);
         }
-        eprintln!(
-            "[dequant_wte_row] n={n}, row={target_row}: max_diff={max_diff:.4e}"
-        );
+        eprintln!("[dequant_wte_row] n={n}, row={target_row}: max_diff={max_diff:.4e}");
         assert!(max_diff < 1e-6, "dequant max_diff {max_diff:.4e}");
     }
 
@@ -419,16 +417,34 @@ mod tests {
         // Scalar variant.
         let out_scalar = stream.alloc_zeros::<f32>(n).unwrap();
         kernels
-            .launch_dequant_row(&stream, &pos_dev, &neg_dev, &scale_dev, &out_scalar,
-                target_row, blocks64, groups_per_row, n)
+            .launch_dequant_row(
+                &stream,
+                &pos_dev,
+                &neg_dev,
+                &scale_dev,
+                &out_scalar,
+                target_row,
+                blocks64,
+                groups_per_row,
+                n,
+            )
             .expect("scalar launch");
 
         // Devpos variant — write target_row to a 1-element device buffer.
         let row_idx_buf = stream.clone_htod(&[target_row as i32]).unwrap();
         let out_devpos = stream.alloc_zeros::<f32>(n).unwrap();
         kernels
-            .launch_dequant_row_devpos(&stream, &pos_dev, &neg_dev, &scale_dev, &out_devpos,
-                &row_idx_buf, blocks64, groups_per_row, n)
+            .launch_dequant_row_devpos(
+                &stream,
+                &pos_dev,
+                &neg_dev,
+                &scale_dev,
+                &out_devpos,
+                &row_idx_buf,
+                blocks64,
+                groups_per_row,
+                n,
+            )
             .expect("devpos launch");
         stream.synchronize().expect("sync");
 
@@ -442,9 +458,7 @@ mod tests {
             let diff = (scalar_out[i] - devpos_out[i]).abs();
             max_diff = max_diff.max(diff);
         }
-        eprintln!(
-            "[dequant_devpos_vs_scalar] n={n}, row={target_row}: max_diff={max_diff:.4e}"
-        );
+        eprintln!("[dequant_devpos_vs_scalar] n={n}, row={target_row}: max_diff={max_diff:.4e}");
         assert!(max_diff < 1e-6, "devpos dequant max_diff {max_diff:.4e}");
     }
 }

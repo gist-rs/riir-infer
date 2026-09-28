@@ -109,7 +109,7 @@ use crate::gemv_ternary_cubecl::TernaryHandle;
 use crate::prefill_cuda_attention::{
     AttnAcc, AttnDot, AttnInv, AttnPh3, AttnRes, CudaAttnKernels, RopeRot, SinCosForm,
 };
-use crate::prefill_cuda_deltanet::{CudaDeltanetKernels, ConvFma, LogForm, SigDiv, SigExp};
+use crate::prefill_cuda_deltanet::{ConvFma, CudaDeltanetKernels, LogForm, SigDiv, SigExp};
 use crate::prefill_cuda_ffn::CudaFfnKernels;
 use crate::prefill_cuda_gdn_chunked::CudaGdnChunkedKernels;
 use crate::prefill_cuda_mma::build_weight_cache;
@@ -188,7 +188,8 @@ pub fn prefill_graph_probe_replay(n: usize) -> Option<f64> {
 pub fn prefill_gv_replay_count() -> usize {
     FULL_STACK
         .get()
-        .and_then(|s| s.as_ref()).map_or(0, |s| s.gv_replays.load(Ordering::Relaxed))
+        .and_then(|s| s.as_ref())
+        .map_or(0, |s| s.gv_replays.load(Ordering::Relaxed))
 }
 
 /// Issue 967 — the capture-ladder pricing counters:
@@ -198,13 +199,16 @@ pub fn prefill_gv_replay_count() -> usize {
 /// `fallback_tokens / total_tokens`. All zeros when the graph lane never
 /// armed (graphs off) — no lane, no ladder to price.
 pub fn prefill_gv_fallback_counts() -> (usize, usize, usize) {
-    FULL_STACK.get().and_then(|s| s.as_ref()).map_or((0, 0, 0), |s| {
-        (
-            s.gv_fallbacks.load(Ordering::Relaxed),
-            s.gv_fallback_tokens.load(Ordering::Relaxed),
-            s.gv_total_tokens.load(Ordering::Relaxed),
-        )
-    })
+    FULL_STACK
+        .get()
+        .and_then(|s| s.as_ref())
+        .map_or((0, 0, 0), |s| {
+            (
+                s.gv_fallbacks.load(Ordering::Relaxed),
+                s.gv_fallback_tokens.load(Ordering::Relaxed),
+                s.gv_total_tokens.load(Ordering::Relaxed),
+            )
+        })
 }
 
 /// Issue 742 T1.5 — tight-loop replay timing of the graph-verify graph
@@ -294,7 +298,8 @@ pub fn set_prefill_use_cuda(on: bool) {
 fn trace_enabled() -> bool {
     static TRACE: OnceLock<bool> = OnceLock::new();
     *TRACE.get_or_init(|| {
-        std::env::var("RIIR_PREFILL_CUDA_TRACE").is_ok_and(|s| matches!(s.trim(), "1" | "2" | "true" | "on"))
+        std::env::var("RIIR_PREFILL_CUDA_TRACE")
+            .is_ok_and(|s| matches!(s.trim(), "1" | "2" | "true" | "on"))
     })
 }
 
@@ -309,7 +314,8 @@ fn trace_enabled() -> bool {
 fn attention_mq_enabled() -> bool {
     static MQ: OnceLock<bool> = OnceLock::new();
     *MQ.get_or_init(|| {
-        std::env::var("RIIR_PREFILL_ATTN_MQ").map_or(true, |s| !matches!(s.trim(), "0" | "false" | "off"))
+        std::env::var("RIIR_PREFILL_ATTN_MQ")
+            .map_or(true, |s| !matches!(s.trim(), "0" | "false" | "off"))
     })
 }
 
@@ -370,11 +376,13 @@ fn attention_mq_enabled() -> bool {
 fn attn_arm() -> u8 {
     static ARM: OnceLock<u8> = OnceLock::new();
     *ARM.get_or_init(|| {
-        let split = std::env::var("QWEN38_PF_ATTN_SPLITKV").is_ok_and(|s| matches!(s.trim(), "1" | "true" | "on"));
+        let split = std::env::var("QWEN38_PF_ATTN_SPLITKV")
+            .is_ok_and(|s| matches!(s.trim(), "1" | "true" | "on"));
         if split {
             return 3;
         }
-        let staged = std::env::var("QWEN38_PF_ATTN_STAGED").is_ok_and(|s| matches!(s.trim(), "1" | "true" | "on"));
+        let staged = std::env::var("QWEN38_PF_ATTN_STAGED")
+            .is_ok_and(|s| matches!(s.trim(), "1" | "true" | "on"));
         if staged {
             return 2;
         }
@@ -384,20 +392,19 @@ fn attn_arm() -> u8 {
         // (the A/B hatch — the Bench-891 promotion shape). The engagement
         // gate (attn_gang_engaged, at the dispatch site) keeps the
         // small-p/verify regime on the vec arm.
-        let gang = std::env::var("QWEN38_PF_ATTN_GANG").map_or(true, |s| !matches!(s.trim(), "0" | "false" | "off"));
+        let gang = std::env::var("QWEN38_PF_ATTN_GANG")
+            .map_or(true, |s| !matches!(s.trim(), "0" | "false" | "off"));
         if gang {
             return 5;
         }
-        let vec = std::env::var("QWEN38_PF_ATTN_VEC").map_or(true, |s| !matches!(s.trim(), "0" | "false" | "off"));
+        let vec = std::env::var("QWEN38_PF_ATTN_VEC")
+            .map_or(true, |s| !matches!(s.trim(), "0" | "false" | "off"));
         if vec {
             return 4;
         }
-        let pf = std::env::var("QWEN38_PF_ATTN_PF").map_or(true, |s| !matches!(s.trim(), "0" | "false" | "off"));
-        if pf {
-            1
-        } else {
-            0
-        }
+        let pf = std::env::var("QWEN38_PF_ATTN_PF")
+            .map_or(true, |s| !matches!(s.trim(), "0" | "false" | "off"));
+        if pf { 1 } else { 0 }
     })
 }
 
@@ -422,8 +429,7 @@ fn fa_engaged() -> bool {
         // The Bench-805 env-once protocol: the env-derived value IS the
         // live value on the first call (no AtomicBool divergence — the
         // latent-bug class that promotion caught there).
-        !std::env::var("QWEN38_PF_ATTN_FA")
-            .is_ok_and(|s| matches!(s.trim(), "0" | "off" | "false"))
+        !std::env::var("QWEN38_PF_ATTN_FA").is_ok_and(|s| matches!(s.trim(), "0" | "off" | "false"))
     })
 }
 
@@ -551,7 +557,8 @@ fn attn_gang_engaged(arm: u8, n_head: usize, n_kv: usize, p: usize) -> bool {
 fn quantize_dedup_enabled() -> bool {
     static DEDUP: OnceLock<bool> = OnceLock::new();
     *DEDUP.get_or_init(|| {
-        std::env::var("RIIR_PREFILL_QDEDUP").map_or(true, |s| !matches!(s.trim(), "0" | "false" | "off"))
+        std::env::var("RIIR_PREFILL_QDEDUP")
+            .map_or(true, |s| !matches!(s.trim(), "0" | "false" | "off"))
     })
 }
 
@@ -566,7 +573,8 @@ fn quantize_dedup_enabled() -> bool {
 fn gv_armed() -> bool {
     static GV: OnceLock<bool> = OnceLock::new();
     *GV.get_or_init(|| {
-        std::env::var("RIIR_PREFILL_GRAPH_VERIFY").is_ok_and(|s| matches!(s.trim(), "1" | "true" | "on"))
+        std::env::var("RIIR_PREFILL_GRAPH_VERIFY")
+            .is_ok_and(|s| matches!(s.trim(), "1" | "true" | "on"))
     })
 }
 
@@ -580,7 +588,8 @@ fn gv_armed() -> bool {
 fn verify_tail_gemv() -> bool {
     static G: OnceLock<bool> = OnceLock::new();
     *G.get_or_init(|| {
-        std::env::var("RIIR_PREFILL_VERIFY_TAIL_GEMV").is_ok_and(|s| matches!(s.trim(), "1" | "true" | "on"))
+        std::env::var("RIIR_PREFILL_VERIFY_TAIL_GEMV")
+            .is_ok_and(|s| matches!(s.trim(), "1" | "true" | "on"))
     })
 }
 
@@ -695,12 +704,12 @@ pub fn canonical_attention_forms() -> (AttnDot, AttnAcc, SigExp, AttnPh3, AttnRe
 
 /// f32 weight mirrors for one layer (built once per process).
 struct LayerF32 {
-    input_norm: CudaSlice<f32>,     // [n]
-    post_attn_norm: CudaSlice<f32>, // [n]
-    conv1d_weight: CudaSlice<f32>,  // [conv_dim * ks]
-    a_log: CudaSlice<f32>,          // [n_v]
-    dt_bias: CudaSlice<f32>,        // [n_v]
-    linear_norm: CudaSlice<f32>,    // [hd]
+    input_norm: CudaSlice<f32>,          // [n]
+    post_attn_norm: CudaSlice<f32>,      // [n]
+    conv1d_weight: CudaSlice<f32>,       // [conv_dim * ks]
+    a_log: CudaSlice<f32>,               // [n_v]
+    dt_bias: CudaSlice<f32>,             // [n_v]
+    linear_norm: CudaSlice<f32>,         // [hd]
     attn_q_norm: Option<CudaSlice<f32>>, // [ahd]
     attn_k_norm: Option<CudaSlice<f32>>, // [ahd]
     /// Issue 980 T4-ALT — the Bonsai-2 dense `ssm_alpha`/`ssm_beta` escape
@@ -708,15 +717,15 @@ struct LayerF32 {
     /// consumed by `gemm_dense_ab_batched` on the PRIMAL normed input (the
     /// escape set is neither rotated nor folded).
     dense_a: Option<CudaSlice<f32>>, // [n_v * n]
-    dense_b: Option<CudaSlice<f32>>, // [n_v * n]
+    dense_b: Option<CudaSlice<f32>>,     // [n_v * n]
 }
 
 /// Persistent per-layer state mirrors (allocated once, values synced per
 /// prompt / after fall-throughs).
 struct StateMirrors {
-    dn_states: Vec<Option<CudaSlice<f32>>>,   // [n_v*hd*hd] per GDN layer
+    dn_states: Vec<Option<CudaSlice<f32>>>, // [n_v*hd*hd] per GDN layer
     conv_states: Vec<Option<CudaSlice<f32>>>, // [conv_dim*ks] per GDN layer
-    kv_k: Vec<Option<CudaSlice<f32>>>,        // [block_size*kvd] per ATT layer
+    kv_k: Vec<Option<CudaSlice<f32>>>,      // [block_size*kvd] per ATT layer
     kv_v: Vec<Option<CudaSlice<f32>>>,
 }
 
@@ -736,8 +745,8 @@ struct FullBufs {
     b_b: Option<CudaSlice<f32>>,
     beta_b: Option<CudaSlice<f32>>,
     decay_b: Option<CudaSlice<f32>>,
-    rec_b: Option<CudaSlice<f32>>, // [p*v_dim]
-    tmp_b: Option<CudaSlice<f32>>, // [p*n]
+    rec_b: Option<CudaSlice<f32>>,  // [p*v_dim]
+    tmp_b: Option<CudaSlice<f32>>,  // [p*n]
     gate_b: Option<CudaSlice<f32>>, // [p*mlp]
     up_b: Option<CudaSlice<f32>>,
     hid_b: Option<CudaSlice<f32>>,
@@ -751,12 +760,12 @@ struct FullBufs {
     attn_out_b: Option<CudaSlice<f32>>, // [p*qa]
     aproj_b: Option<CudaSlice<f32>>,    // [p*n]
     /// Arm-12 GDN chunked-recurrence scratch (grow-only, sized by p).
-    gdn_lg: Option<CudaSlice<f32>>,   // [n_v * n_chunks * 64]
+    gdn_lg: Option<CudaSlice<f32>>, // [n_v * n_chunks * 64]
     gdn_ga: Option<CudaSlice<f32>>,
     gdn_dte: Option<CudaSlice<f32>>,
-    gdn_td: Option<CudaSlice<f32>>,   // [n_v * n_chunks]
-    gdn_x: Option<CudaSlice<f32>>,    // [n_v * n_chunks * 4096]
-    gdn_t: Option<CudaSlice<f32>>,    // [n_v * n_chunks * 4096] (T-inverse)
+    gdn_td: Option<CudaSlice<f32>>, // [n_v * n_chunks]
+    gdn_x: Option<CudaSlice<f32>>,  // [n_v * n_chunks * 4096]
+    gdn_t: Option<CudaSlice<f32>>,  // [n_v * n_chunks * 4096] (T-inverse)
     gdn_qkr: Option<CudaSlice<f32>>,
     /// `(max words, p, scratch)` — one scratch sized for the largest GEMM
     /// input dim serves every smaller dim (the kernel derives its extent
@@ -1200,17 +1209,16 @@ fn sync_states(
     base_pos: usize,
     kvd: usize,
 ) -> bool {
-    let upload =
-        |src: &Handle, dst: &mut CudaSlice<f32>| -> bool {
-            let Ok(bytes) = client.read_one(src.clone()) else {
-                return false;
-            };
-            let host = f32::from_bytes(&bytes);
-            let Some(mut view) = dst.try_slice_mut(0..dst.len()) else {
-                return false;
-            };
-            stream.memcpy_htod(host, &mut view).is_ok()
+    let upload = |src: &Handle, dst: &mut CudaSlice<f32>| -> bool {
+        let Ok(bytes) = client.read_one(src.clone()) else {
+            return false;
         };
+        let host = f32::from_bytes(&bytes);
+        let Some(mut view) = dst.try_slice_mut(0..dst.len()) else {
+            return false;
+        };
+        stream.memcpy_htod(host, &mut view).is_ok()
+    };
 
     for (li, st) in fwd.deltanet_states.iter().enumerate() {
         if let (Some(src), Some(dst)) = (st, states.dn_states[li].as_mut())
@@ -1285,7 +1293,10 @@ fn writeback_states(
             if state_host.len() < src.len() {
                 state_host.resize(src.len(), 0.0);
             }
-            if stream.memcpy_dtoh(&view, &mut state_host[..src.len()]).is_err() {
+            if stream
+                .memcpy_dtoh(&view, &mut state_host[..src.len()])
+                .is_err()
+            {
                 return false;
             }
             client.write(
@@ -1304,7 +1315,10 @@ fn writeback_states(
             if state_host.len() < src.len() {
                 state_host.resize(src.len(), 0.0);
             }
-            if stream.memcpy_dtoh(&view, &mut state_host[..src.len()]).is_err() {
+            if stream
+                .memcpy_dtoh(&view, &mut state_host[..src.len()])
+                .is_err()
+            {
                 return false;
             }
             client.write(
@@ -1331,10 +1345,7 @@ fn writeback_states(
         if kv_host.len() < rows {
             kv_host.resize(rows, 0.0);
         }
-        let write_one = |src: &CudaSlice<f32>,
-                         cache: &Handle,
-                         host: &mut Vec<f32>|
-         -> bool {
+        let write_one = |src: &CudaSlice<f32>, cache: &Handle, host: &mut Vec<f32>| -> bool {
             let Some(view) = src.try_slice(base_pos * kvd..(base_pos + p) * kvd) else {
                 return false;
             };
@@ -1460,17 +1471,16 @@ unsafe fn wb_enqueue_layer(
     order_ev
         .record(&stack.stream)
         .map_err(|e| format!("wb order record: {e}"))?;
-    copy.wait(order_ev).map_err(|e| format!("wb order wait: {e}"))?;
+    copy.wait(order_ev)
+        .map_err(|e| format!("wb order wait: {e}"))?;
     let do_copy = |src: &CudaSlice<f32>, dst_off: usize, n: usize| -> Result<(), String> {
         let view = src.as_view();
         let (src_ptr, _guard) = view.device_ptr(copy);
         // SAFETY: the slot region `[dst_off, dst_off+n)` is within `cap`
         // (checked above) and no other copy targets it until `done` fires.
         let dst = unsafe { std::slice::from_raw_parts_mut(slot.ptr.add(dst_off), n) };
-        unsafe {
-            cudarc::driver::result::memcpy_dtoh_async(dst, src_ptr, copy.cu_stream())
-        }
-        .map_err(|e| format!("wb dtoh: {e}"))
+        unsafe { cudarc::driver::result::memcpy_dtoh_async(dst, src_ptr, copy.cu_stream()) }
+            .map_err(|e| format!("wb dtoh: {e}"))
     };
     match pend.kind {
         WbKind::Dn { li } => {
@@ -1498,19 +1508,17 @@ unsafe fn wb_enqueue_layer(
             let (k_ptr, _k_guard) = k_view.device_ptr(copy);
             // SAFETY: KV slot regions `[0, rows)` / `[rows, 2*rows)` within cap.
             let dst_k = unsafe { std::slice::from_raw_parts_mut(slot.ptr, rows) };
-            unsafe {
-                cudarc::driver::result::memcpy_dtoh_async(dst_k, k_ptr, copy.cu_stream())
-            }
-            .map_err(|e| format!("wb dtoh k: {e}"))?;
+            unsafe { cudarc::driver::result::memcpy_dtoh_async(dst_k, k_ptr, copy.cu_stream()) }
+                .map_err(|e| format!("wb dtoh k: {e}"))?;
             let (v_ptr, _v_guard) = v_view.device_ptr(copy);
             let dst_v = unsafe { std::slice::from_raw_parts_mut(slot.ptr.add(rows), rows) };
-            unsafe {
-                cudarc::driver::result::memcpy_dtoh_async(dst_v, v_ptr, copy.cu_stream())
-            }
-            .map_err(|e| format!("wb dtoh v: {e}"))?;
+            unsafe { cudarc::driver::result::memcpy_dtoh_async(dst_v, v_ptr, copy.cu_stream()) }
+                .map_err(|e| format!("wb dtoh v: {e}"))?;
         }
     }
-    slot.done.record(copy).map_err(|e| format!("wb done: {e}"))?;
+    slot.done
+        .record(copy)
+        .map_err(|e| format!("wb done: {e}"))?;
     Ok(())
 }
 
@@ -1542,9 +1550,7 @@ fn wb_drain_one(
     }
     // SAFETY: the done event fired — the pinned payload is stable.
     let payload = unsafe { std::slice::from_raw_parts(slot.ptr, pend.len) };
-    let bytes = |src: &[f32]| {
-        cubecl::bytes::Bytes::from_bytes_vec(f32::as_bytes(src).to_vec())
-    };
+    let bytes = |src: &[f32]| cubecl::bytes::Bytes::from_bytes_vec(f32::as_bytes(src).to_vec());
     match pend.kind {
         WbKind::Dn { li } => {
             let (Some(dn_h), Some(cv_h)) = (
@@ -1609,17 +1615,16 @@ fn wb_snapshot_take(
     states: &StateMirrors,
     snap: &mut StateMirrors,
 ) -> Result<(), String> {
-    let cp = |src: &Option<CudaSlice<f32>>,
-              dst: &mut Option<CudaSlice<f32>>|
-     -> Result<(), String> {
-        if let (Some(s), Some(d)) = (src, dst) {
-            stack
-                .stream
-                .memcpy_dtod(s, d)
-                .map_err(|e| format!("snap dtod: {e}"))?;
-        }
-        Ok(())
-    };
+    let cp =
+        |src: &Option<CudaSlice<f32>>, dst: &mut Option<CudaSlice<f32>>| -> Result<(), String> {
+            if let (Some(s), Some(d)) = (src, dst) {
+                stack
+                    .stream
+                    .memcpy_dtod(s, d)
+                    .map_err(|e| format!("snap dtod: {e}"))?;
+            }
+            Ok(())
+        };
     for (src, dst) in states.dn_states.iter().zip(snap.dn_states.iter_mut()) {
         cp(src, dst)?;
     }
@@ -1658,17 +1663,16 @@ fn wb_restore_on_failure(
         return;
     };
     let Ok(snap) = snap_lock.lock() else { return };
-    let cp = |src: &Option<CudaSlice<f32>>,
-              dst: &mut Option<CudaSlice<f32>>|
-     -> Result<(), String> {
-        if let (Some(s), Some(d)) = (src, dst) {
-            stack
-                .stream
-                .memcpy_dtod(s, d)
-                .map_err(|e| format!("restore dtod: {e}"))?;
-        }
-        Ok(())
-    };
+    let cp =
+        |src: &Option<CudaSlice<f32>>, dst: &mut Option<CudaSlice<f32>>| -> Result<(), String> {
+            if let (Some(s), Some(d)) = (src, dst) {
+                stack
+                    .stream
+                    .memcpy_dtod(s, d)
+                    .map_err(|e| format!("restore dtod: {e}"))?;
+            }
+            Ok(())
+        };
     for (src, dst) in snap.dn_states.iter().zip(states.dn_states.iter_mut()) {
         let _ = cp(src, dst);
     }
@@ -1847,7 +1851,7 @@ fn whole_prefill_inner(
         attn: u128,
         other: u128,
     }
-#[derive(Default)]
+    #[derive(Default)]
     struct GdnSubTimes {
         conv: u128,
         carry: u128,
@@ -1858,7 +1862,7 @@ fn whole_prefill_inner(
         zgate: u128,
     }
 
-if !prefill_use_cuda() {
+    if !prefill_use_cuda() {
         return None;
     }
     if !crate::ternary_deltanet_gpu_forward::prefill_cuda_gate_ok() {
@@ -1968,7 +1972,9 @@ if !prefill_use_cuda() {
         }
         return None;
     };
-    let Ok(mut states_guard) = states_lock.lock() else { return None };
+    let Ok(mut states_guard) = states_lock.lock() else {
+        return None;
+    };
     let states: &mut StateMirrors = &mut states_guard;
     let Some(wte) = mma_mirror_pair(client, stream, &fwd.wte_handle) else {
         if trace {
@@ -2048,9 +2054,7 @@ if !prefill_use_cuda() {
         && stack.graph_verify.get().is_some_and(|g| g.is_some())
         && stack.gv_p.load(Ordering::Relaxed) == p
         && stack.gv_staging_gen.load(Ordering::Relaxed)
-            == stack
-                .bufs
-                .lock().map_or(usize::MAX, |b| b.staging_gen);
+            == stack.bufs.lock().map_or(usize::MAX, |b| b.staging_gen);
     // Issue 742 T1.8 — a verify chunk ALWAYS carries the rollback substrate:
     // the verify loop's accept/rollback consumer needs the pre-chunk state
     // even when the chunk itself is served by a graph REPLAY (the T1.5
@@ -2069,7 +2073,9 @@ if !prefill_use_cuda() {
     };
     if want_snapshot {
         let snap_lock = stack.wb_snapshot.get().and_then(|s| s.as_ref())?;
-        let Ok(mut snap) = snap_lock.lock() else { return None };
+        let Ok(mut snap) = snap_lock.lock() else {
+            return None;
+        };
         if wb_snapshot_take(stack.as_ref(), states, &mut snap).is_err() {
             if trace {
                 eprintln!("[734-arm8] FALLTHROUGH: snapshot");
@@ -2192,7 +2198,11 @@ if !prefill_use_cuda() {
         // `staging_gen` and orphan the graph-verify capture for good).
         if verify_tail {
             let vocab = fwd.config.vocab_size;
-            if bufs.verify_logits.as_ref().is_none_or(|s| s.len() < p * vocab) {
+            if bufs
+                .verify_logits
+                .as_ref()
+                .is_none_or(|s| s.len() < p * vocab)
+            {
                 bufs.verify_logits = stream.alloc_zeros::<f32>(p * vocab).ok();
                 bufs.staging_gen += 1;
             }
@@ -2332,7 +2342,15 @@ if !prefill_use_cuda() {
     let gdn_chunked_ready = gdn_chunked_wanted
         && matches!(
             (gdn_lg, gdn_ga, gdn_dte, gdn_td, gdn_x, gdn_t, gdn_qkr),
-            (Some(_), Some(_), Some(_), Some(_), Some(_), Some(_), Some(_))
+            (
+                Some(_),
+                Some(_),
+                Some(_),
+                Some(_),
+                Some(_),
+                Some(_),
+                Some(_)
+            )
         );
     let (_, _, scratch) = scratch.as_ref()?;
 
@@ -2419,8 +2437,8 @@ if !prefill_use_cuda() {
     let (rl, re, rsc2, rr) = canonical_rope_forms();
     let (ad, aa, ae, aph, ars, ai) = canonical_attention_forms();
     let _ = (
-        ra, rm, rs, se, sr, rd, ru, rp, rsc, cf, ce, cd, bl, be, bd, ea, ei, ze, zd, rl, re,
-        rsc2, rr, ad, aa, ae, aph, ars, ai,
+        ra, rm, rs, se, sr, rd, ru, rp, rsc, cf, ce, cd, bl, be, bd, ea, ei, ze, zd, rl, re, rsc2,
+        rr, ad, aa, ae, aph, ars, ai,
     );
 
     // ── Embedding ──
@@ -2433,8 +2451,12 @@ if !prefill_use_cuda() {
         unsafe {
             stack.dn.launch_dequant_wte_batch(
                 stream,
-                wte.pos.as_ref().expect("wte mirror carries the bitplane pair"),
-                wte.neg.as_ref().expect("wte mirror carries the bitplane pair"),
+                wte.pos
+                    .as_ref()
+                    .expect("wte mirror carries the bitplane pair"),
+                wte.neg
+                    .as_ref()
+                    .expect("wte mirror carries the bitplane pair"),
                 &wte.scale,
                 x,
                 tokens_dev_ref,
@@ -2520,42 +2542,43 @@ if !prefill_use_cuda() {
         }
         Ok(())
     };
-    let wb_enqueue = |kind: WbKind, len: usize, split: usize, states: &StateMirrors| -> Result<(), String> {
-        if spec {
-            // Issue 742 T1.1 — spec mode: no writeback crossing. The mirrors
-            // carry on-device; rollback restores from the snapshot.
-            return Ok(());
-        }
-        let Some(slots_lock) = stack.wb_slots.get().and_then(|s| s.as_ref()) else {
-            return Err("enqueue: no slots".into());
+    let wb_enqueue =
+        |kind: WbKind, len: usize, split: usize, states: &StateMirrors| -> Result<(), String> {
+            if spec {
+                // Issue 742 T1.1 — spec mode: no writeback crossing. The mirrors
+                // carry on-device; rollback restores from the snapshot.
+                return Ok(());
+            }
+            let Some(slots_lock) = stack.wb_slots.get().and_then(|s| s.as_ref()) else {
+                return Err("enqueue: no slots".into());
+            };
+            let Ok(slots) = slots_lock.lock() else {
+                return Err("enqueue: slots lock".into());
+            };
+            let pend = WbPending { kind, len, split };
+            // SAFETY: each mirror is written only by its own layer's kernels,
+            // all of which precede this point on the compute stream.
+            unsafe {
+                wb_enqueue_layer(
+                    stack.as_ref(),
+                    &copy_stream,
+                    order_ev
+                        .as_ref()
+                        .expect("wb enqueue is non-spec; order_ev is Some"),
+                    &slots,
+                    &pend,
+                    states,
+                    base_pos,
+                    kvd,
+                )
+            }?;
+            wb_pending.borrow_mut().push(pend);
+            Ok(())
         };
-        let Ok(slots) = slots_lock.lock() else {
-            return Err("enqueue: slots lock".into());
-        };
-        let pend = WbPending { kind, len, split };
-        // SAFETY: each mirror is written only by its own layer's kernels,
-        // all of which precede this point on the compute stream.
-        unsafe {
-            wb_enqueue_layer(
-                stack.as_ref(),
-                &copy_stream,
-                order_ev
-                    .as_ref()
-                    .expect("wb enqueue is non-spec; order_ev is Some"),
-                &slots,
-                &pend,
-                states,
-                base_pos,
-                kvd,
-            )
-        }?;
-        wb_pending.borrow_mut().push(pend);
-        Ok(())
-    };
     let run_layers = || -> Result<(), String> {
         type WCache = Arc<crate::prefill_cuda_mma::CudaMmaWeightCache>;
 
-let rms = |input: &CudaSlice<f32>,
+        let rms = |input: &CudaSlice<f32>,
                    gamma: &CudaSlice<f32>,
                    out: &CudaSlice<f32>,
                    rows: usize,
@@ -2580,42 +2603,34 @@ let rms = |input: &CudaSlice<f32>,
         // (which merely READ the scratch) run in between, so re-quantizing
         // writes identical bytes to the same scratch (Issue 742 T1.4c dedup:
         // ~224 redundant launches/chunk, bit-identical by construction).
-        let gemm_pair =
-            |w: &Arc<crate::prefill_cuda_mma::CudaMmaWeightCache>,
-             input: &CudaSlice<f32>,
-             out: &CudaSlice<f32>,
-             m: usize,
-             n_in: usize,
-             quantize: bool|
-             -> Result<(), String> {
-                let t = std::time::Instant::now();
-                let r = (|| {
-                    // dedup ON: only the group's first GEMM quantizes; dedup OFF
-                    // (the A/B arm): every GEMM re-quantizes (the original path).
-                    if quantize || !quantize_dedup_enabled() {
-                        stack
-                            .mma
-                            .launch_prefill_quantize(stream, input, scratch, n_in, p)
-                            .map_err(|e| e.to_string())?;
-                    }
-                    crate::prefill_cuda_mma::launch_prefill_gemm_cached(
-                        &stack.mma,
-                        stream,
-                        w,
-                        scratch,
-                        out,
-                        m,
-                        n_in,
-                        p,
-                    )
-                    .map_err(|e| e.to_string())
-                })();
-                if stage_sync {
-                    let _ = stream.synchronize();
-                    stages.borrow_mut().gemm += t.elapsed().as_micros();
+        let gemm_pair = |w: &Arc<crate::prefill_cuda_mma::CudaMmaWeightCache>,
+                         input: &CudaSlice<f32>,
+                         out: &CudaSlice<f32>,
+                         m: usize,
+                         n_in: usize,
+                         quantize: bool|
+         -> Result<(), String> {
+            let t = std::time::Instant::now();
+            let r = (|| {
+                // dedup ON: only the group's first GEMM quantizes; dedup OFF
+                // (the A/B arm): every GEMM re-quantizes (the original path).
+                if quantize || !quantize_dedup_enabled() {
+                    stack
+                        .mma
+                        .launch_prefill_quantize(stream, input, scratch, n_in, p)
+                        .map_err(|e| e.to_string())?;
                 }
-                r
-            };
+                crate::prefill_cuda_mma::launch_prefill_gemm_cached(
+                    &stack.mma, stream, w, scratch, out, m, n_in, p,
+                )
+                .map_err(|e| e.to_string())
+            })();
+            if stage_sync {
+                let _ = stream.synchronize();
+                stages.borrow_mut().gemm += t.elapsed().as_micros();
+            }
+            r
+        };
         let gemm = |w: &Arc<crate::prefill_cuda_mma::CudaMmaWeightCache>,
                     input: &CudaSlice<f32>,
                     out: &CudaSlice<f32>,
@@ -2634,41 +2649,31 @@ let rms = |input: &CudaSlice<f32>,
         // v11gu/v11gut launch (both [m, n] slabs from one B tile stage) when
         // `RIIR_PREFILL_MMQ_GU` arms it; the two-launch fallback otherwise
         // (bit-identical in both arms — unit-gated).
-        let gemm_gu =
-            |w0: &Arc<crate::prefill_cuda_mma::CudaMmaWeightCache>,
-             w1: &Arc<crate::prefill_cuda_mma::CudaMmaWeightCache>,
-             input: &CudaSlice<f32>,
-             out0: &CudaSlice<f32>,
-             out1: &CudaSlice<f32>,
-             m: usize,
-             n_in: usize|
-             -> Result<(), String> {
-                let t = std::time::Instant::now();
-                let r = (|| {
-                    stack
-                        .mma
-                        .launch_prefill_quantize(stream, input, scratch, n_in, p)
-                        .map_err(|e| e.to_string())?;
-                    crate::prefill_cuda_mma::launch_prefill_gemm_pair_cached(
-                        &stack.mma,
-                        stream,
-                        w0,
-                        w1,
-                        scratch,
-                        out0,
-                        out1,
-                        m,
-                        n_in,
-                        p,
-                    )
-                    .map_err(|e| e.to_string())
-                })();
-                if stage_sync {
-                    let _ = stream.synchronize();
-                    stages.borrow_mut().gemm += t.elapsed().as_micros();
-                }
-                r
-            };
+        let gemm_gu = |w0: &Arc<crate::prefill_cuda_mma::CudaMmaWeightCache>,
+                       w1: &Arc<crate::prefill_cuda_mma::CudaMmaWeightCache>,
+                       input: &CudaSlice<f32>,
+                       out0: &CudaSlice<f32>,
+                       out1: &CudaSlice<f32>,
+                       m: usize,
+                       n_in: usize|
+         -> Result<(), String> {
+            let t = std::time::Instant::now();
+            let r = (|| {
+                stack
+                    .mma
+                    .launch_prefill_quantize(stream, input, scratch, n_in, p)
+                    .map_err(|e| e.to_string())?;
+                crate::prefill_cuda_mma::launch_prefill_gemm_pair_cached(
+                    &stack.mma, stream, w0, w1, scratch, out0, out1, m, n_in, p,
+                )
+                .map_err(|e| e.to_string())
+            })();
+            if stage_sync {
+                let _ = stream.synchronize();
+                stages.borrow_mut().gemm += t.elapsed().as_micros();
+            }
+            r
+        };
         // ── Issue 980 C0.5 — the fused-rotation GEMM helpers (folded lanes) ──
         // The rotated quantize rides the q8 pass when the route is on (ONE
         // memory pass — rotation is ~free); the q8 kill-switch falls back to
@@ -2683,7 +2688,9 @@ let rms = |input: &CudaSlice<f32>,
         // Fused rotated quantize of `input` [p x n_in] into the q8 scratch.
         #[allow(clippy::too_many_arguments)]
         let quantize_rot = |input: &CudaSlice<f32>, n_in: usize| -> Result<(), String> {
-            let Some(rot) = &rotation else { return Ok(()); };
+            let Some(rot) = &rotation else {
+                return Ok(());
+            };
             if qrot_fused_on {
                 rot.kernels
                     .quantize_rotate_q8(
@@ -2767,72 +2774,76 @@ let rms = |input: &CudaSlice<f32>,
         };
         // The gate+up pair on the rotated quantize.
         #[allow(clippy::too_many_arguments)]
-        let gemm_gu_rot =
-            |w0: &Arc<crate::prefill_cuda_mma::CudaMmaWeightCache>,
-             w1: &Arc<crate::prefill_cuda_mma::CudaMmaWeightCache>,
-             input: &CudaSlice<f32>,
-             out0: &CudaSlice<f32>,
-             out1: &CudaSlice<f32>,
-             m: usize,
-             n_in: usize|
-             -> Result<(), String> {
-                let t = std::time::Instant::now();
-                let r = (|| {
-                    quantize_rot(input, n_in)?;
-                    crate::prefill_cuda_mma::launch_prefill_gemm_pair_cached(
-                        &stack.mma, stream, w0, w1, scratch, out0, out1, m, n_in, p,
+        let gemm_gu_rot = |w0: &Arc<crate::prefill_cuda_mma::CudaMmaWeightCache>,
+                           w1: &Arc<crate::prefill_cuda_mma::CudaMmaWeightCache>,
+                           input: &CudaSlice<f32>,
+                           out0: &CudaSlice<f32>,
+                           out1: &CudaSlice<f32>,
+                           m: usize,
+                           n_in: usize|
+         -> Result<(), String> {
+            let t = std::time::Instant::now();
+            let r = (|| {
+                quantize_rot(input, n_in)?;
+                crate::prefill_cuda_mma::launch_prefill_gemm_pair_cached(
+                    &stack.mma, stream, w0, w1, scratch, out0, out1, m, n_in, p,
+                )
+                .map_err(|e| e.to_string())
+            })();
+            if stage_sync {
+                let _ = stream.synchronize();
+                stages.borrow_mut().gemm += t.elapsed().as_micros();
+            }
+            r
+        };
+        let ffn_block = |x: &CudaSlice<f32>,
+                         lw3: &LayerF32,
+                         gate_c: &WCache,
+                         up_c: &WCache,
+                         down_c: &WCache|
+         -> Result<(), String> {
+            rms(x, &lw3.post_attn_norm, normx, p, n)?;
+            // Issue 980 T4-ALT site (f) / C0.5 — on a folded model the
+            // FFN is a folded consumer at BOTH ends: gate/up consume
+            // the ROTATED q8 quantize of normx (fused, one pass) and
+            // after SwiGLU the down-proj input (hid, width mlp) goes
+            // through the same fused rotate+quantize — no standalone
+            // rotation passes at either end. The residual chain stays
+            // primal (x untouched).
+            if rotation.is_some() {
+                gemm_gu_rot(gate_c, up_c, normx, gate_b, up_b, mlp, n)?;
+            } else {
+                gemm_gu(gate_c, up_c, normx, gate_b, up_b, mlp, n)?;
+            }
+            unsafe {
+                stack
+                    .ffn
+                    .launch_swiglu(stream, se, sr, gate_b, up_b, hid_b, p * mlp)?;
+            }
+            // C0.5 hybrid: the WIDE hid row (17408 f32 = 68 KB smem → 1
+            // block/SM, ~17% occupancy — measured −3.5% pp2048 as
+            // single-pass fused) keeps the UNFUSED chain (in-place
+            // rotate + the stock streaming quantize inside `gemm`) —
+            // chunk-parallel, occupancy-healthy. The narrow sites ride
+            // the fused kernel.
+            if let Some(rot0) = &rotation {
+                rot0.kernels
+                    .fwht_rotate_forward_batched(
+                        stream,
+                        hid_b,
+                        rot0.signs_for_width(mlp),
+                        p,
+                        mlp,
+                        rot0.block_size,
                     )
-                    .map_err(|e| e.to_string())
-                })();
-                if stage_sync {
-                    let _ = stream.synchronize();
-                    stages.borrow_mut().gemm += t.elapsed().as_micros();
-                }
-                r
-            };
-        let ffn_block =
-            |x: &CudaSlice<f32>, lw3: &LayerF32, gate_c: &WCache, up_c: &WCache, down_c: &WCache| -> Result<(), String> {
-                rms(x, &lw3.post_attn_norm, normx, p, n)?;
-                // Issue 980 T4-ALT site (f) / C0.5 — on a folded model the
-                // FFN is a folded consumer at BOTH ends: gate/up consume
-                // the ROTATED q8 quantize of normx (fused, one pass) and
-                // after SwiGLU the down-proj input (hid, width mlp) goes
-                // through the same fused rotate+quantize — no standalone
-                // rotation passes at either end. The residual chain stays
-                // primal (x untouched).
-                if rotation.is_some() {
-                    gemm_gu_rot(gate_c, up_c, normx, gate_b, up_b, mlp, n)?;
-                } else {
-                    gemm_gu(gate_c, up_c, normx, gate_b, up_b, mlp, n)?;
-                }
-                unsafe {
-                    stack
-                        .ffn
-                        .launch_swiglu(stream, se, sr, gate_b, up_b, hid_b, p * mlp)?;
-                }
-                // C0.5 hybrid: the WIDE hid row (17408 f32 = 68 KB smem → 1
-                // block/SM, ~17% occupancy — measured −3.5% pp2048 as
-                // single-pass fused) keeps the UNFUSED chain (in-place
-                // rotate + the stock streaming quantize inside `gemm`) —
-                // chunk-parallel, occupancy-healthy. The narrow sites ride
-                // the fused kernel.
-                if let Some(rot0) = &rotation {
-                    rot0
-                        .kernels
-                        .fwht_rotate_forward_batched(
-                            stream,
-                            hid_b,
-                            rot0.signs_for_width(mlp),
-                            p,
-                            mlp,
-                            rot0.block_size,
-                        )
-                        .map_err(|e| e.to_string())?;
-                }
-                gemm(down_c, hid_b, ffnout_b, n, mlp)?;
-                unsafe { stack.ffn.launch_residual(stream, x, ffnout_b, x, p * n)?; }
-                Ok(())
-            };
+                    .map_err(|e| e.to_string())?;
+            }
+            gemm(down_c, hid_b, ffnout_b, n, mlp)?;
+            unsafe {
+                stack.ffn.launch_residual(stream, x, ffnout_b, x, p * n)?;
+            }
+            Ok(())
+        };
 
         for (li, lt) in fwd.layer_types.iter().enumerate() {
             let lw = &fwd.layers[li];
@@ -2867,8 +2878,7 @@ let rms = |input: &CudaSlice<f32>,
                 {
                     gemm_rot(&qkv_c, normx, qkv_b, qkv_dim, n)?;
                     gemm_pre_rot(&z_c, normx, z_b, v_dim, n)?;
-                    rot0
-                        .kernels
+                    rot0.kernels
                         .gemm_dense_ab_batched(stream, normx, da, db, a_b, b_b, p, n_v, n)
                         .map_err(|e| e.to_string())?;
                 } else {
@@ -2891,8 +2901,17 @@ let rms = |input: &CudaSlice<f32>,
                     // unconditional — ns-scale, no control-flow change).
                     let mut t_sub = std::time::Instant::now();
                     stack.dn.launch_conv1d(
-                        stream, cf, ce, cd, qkv_b, qkv_conv, &lw3.conv1d_weight, conv_state, p,
-                        conv_dim, ks,
+                        stream,
+                        cf,
+                        ce,
+                        cd,
+                        qkv_b,
+                        qkv_conv,
+                        &lw3.conv1d_weight,
+                        conv_state,
+                        p,
+                        conv_dim,
+                        ks,
                     )?;
                     if gdn_sub_sync {
                         let _ = stream.synchronize();
@@ -2950,7 +2969,22 @@ let rms = |input: &CudaSlice<f32>,
                             .as_ref()
                             .expect("gdn_chunked_ready implies Some")
                             .launch_chunked(
-                                stream, qkvx_b, beta_b, decay_b, dn_state, rec_b, gdn_lg.expect("grown"), gdn_ga.expect("grown"), gdn_dte.expect("grown"), gdn_td.expect("grown"), gdn_x.expect("grown"), gdn_t.expect("grown"), gdn_qkr.expect("grown"), n_v, p, v_dim,
+                                stream,
+                                qkvx_b,
+                                beta_b,
+                                decay_b,
+                                dn_state,
+                                rec_b,
+                                gdn_lg.expect("grown"),
+                                gdn_ga.expect("grown"),
+                                gdn_dte.expect("grown"),
+                                gdn_td.expect("grown"),
+                                gdn_x.expect("grown"),
+                                gdn_t.expect("grown"),
+                                gdn_qkr.expect("grown"),
+                                n_v,
+                                p,
+                                v_dim,
                             )?;
                     } else {
                         stack.dn.launch_recurrence(
@@ -3010,8 +3044,7 @@ let rms = |input: &CudaSlice<f32>,
                 if let Some(rot0) = &rotation {
                     if rot0.gdn_v_grouped {
                         if qrot_fused_on {
-                            rot0
-                                .kernels
+                            rot0.kernels
                                 .quantize_permute_rotate_q8(
                                     stream,
                                     rec_b,
@@ -3026,26 +3059,23 @@ let rms = |input: &CudaSlice<f32>,
                                 )
                                 .map_err(|e| e.to_string())?;
                             crate::prefill_cuda_mma::launch_prefill_gemm_cached(
-                                &stack.mma,
-                                stream,
-                                &out_c,
-                                scratch,
-                                tmp_b,
-                                n,
-                                v_dim,
-                                p,
+                                &stack.mma, stream, &out_c, scratch, tmp_b, n, v_dim, p,
                             )
                             .map_err(|e| e.to_string())?;
                         } else if let Some(pt) = permute_tmp {
                             // Unfused kill-switch chain (C0).
-                            rot0
-                                .kernels
+                            rot0.kernels
                                 .gdn_v_permute_batched(
-                                    stream, rec_b, pt, p, v_dim, hd, rot0.gdn_k_groups,
+                                    stream,
+                                    rec_b,
+                                    pt,
+                                    p,
+                                    v_dim,
+                                    hd,
+                                    rot0.gdn_k_groups,
                                 )
                                 .map_err(|e| e.to_string())?;
-                            rot0
-                                .kernels
+                            rot0.kernels
                                 .fwht_rotate_forward_batched(
                                     stream,
                                     pt,
@@ -3065,7 +3095,9 @@ let rms = |input: &CudaSlice<f32>,
                 } else {
                     gemm(&out_c, rec_b, tmp_b, n, v_dim)?;
                 }
-                unsafe { stack.ffn.launch_residual(stream, x, tmp_b, x, p * n)?; }
+                unsafe {
+                    stack.ffn.launch_residual(stream, x, tmp_b, x, p * n)?;
+                }
             } else {
                 // Attention block.
                 rms(x, &lw3.input_norm, normx, p, n)?;
@@ -3171,7 +3203,13 @@ let rms = |input: &CudaSlice<f32>,
                     }
                     if gv {
                         stack.at.launch_kv_fill_devpos(
-                            stream, k_b, v_b, kcache, vcache, kvd, p,
+                            stream,
+                            k_b,
+                            v_b,
+                            kcache,
+                            vcache,
+                            kvd,
+                            p,
                             pos_dev_ref.expect("gv implies pos_dev"),
                         )?;
                     } else {
@@ -3207,195 +3245,217 @@ let rms = |input: &CudaSlice<f32>,
                             let rows = *attn_fa_rows;
                             let r = if gv {
                                 let pos = pos_dev_ref.expect("gv implies pos_dev");
-                                stack.at.launch_kv_f32_to_f16_devpos(
-                                    stream, kc, vc, kh, vh, p, rows, n_kv, pos,
-                                )
-                                .and_then(|_| {
-                                    stack.at.launch_attention_fa_devpos(
-                                        stream, q_b, kh, vh, agate_b, attn_out_b, ahd,
-                                        n_head, n_kv, p, pos,
+                                stack
+                                    .at
+                                    .launch_kv_f32_to_f16_devpos(
+                                        stream, kc, vc, kh, vh, p, rows, n_kv, pos,
                                     )
-                                })
+                                    .and_then(|_| {
+                                        stack.at.launch_attention_fa_devpos(
+                                            stream, q_b, kh, vh, agate_b, attn_out_b, ahd, n_head,
+                                            n_kv, p, pos,
+                                        )
+                                    })
                             } else {
-                                stack.at.launch_kv_f32_to_f16(
-                                    stream, kc, vc, kh, vh, base_pos + p, rows, n_kv,
-                                )
-                                .and_then(|_| {
-                                    stack.at.launch_attention_fa(
-                                        stream, q_b, kh, vh, agate_b, attn_out_b, ahd,
-                                        n_head, n_kv, p, base_pos,
+                                stack
+                                    .at
+                                    .launch_kv_f32_to_f16(
+                                        stream,
+                                        kc,
+                                        vc,
+                                        kh,
+                                        vh,
+                                        base_pos + p,
+                                        rows,
+                                        n_kv,
                                     )
-                                })
+                                    .and_then(|_| {
+                                        stack.at.launch_attention_fa(
+                                            stream, q_b, kh, vh, agate_b, attn_out_b, ahd, n_head,
+                                            n_kv, p, base_pos,
+                                        )
+                                    })
                             };
                             r?;
                             fa_done = true;
                         }
                         if !fa_done {
-                        // Issue 742 T1.7 — the split-KV arm (opt-in,
-                        // tolerance-class): engaged only in the small-p
-                        // regime where the serial/prefetch grid
-                        // (n_head*ceil(p/8)) under-fills the SMs; falls back
-                        // to the prefetch arm otherwise. The gv arm uses the
-                        // FIXED max grid (n_chunks_max from block_size) with
-                        // neutral dead chunks — one capture serves every
-                        // position; the eager arm uses the live grid.
-                        let mut split_done = false;
-                        if attn_split_engaged(arm, n_head, p) {
-                            // Scratch was allocated in the chunk preamble
-                            // (BEFORE any capture region — see there); the
-                            // gv arm uses the FIXED max grid with neutral
-                            // dead chunks, the eager arm the live grid.
-                            let chunk_len = attn_split_chunk();
-                            let n_chunks_max = *attn_split_chunks;
-                            if let (Some(pm), Some(pl), Some(po)) = (
-                                attn_split_pm.as_ref(),
-                                attn_split_pl.as_ref(),
-                                attn_split_po.as_ref(),
-                            ) {
-                                let r = if gv {
-                                    stack.at.launch_attention_mq8_split_devpos(
-                                        stream, q_b, kcache, vcache, agate_b,
-                                        attn_out_b, pm, pl, po, ahd, n_head,
-                                        n_kv, p,
-                                        pos_dev_ref.expect("gv implies pos_dev"),
-                                        chunk_len, n_chunks_max,
-                                    )
+                            // Issue 742 T1.7 — the split-KV arm (opt-in,
+                            // tolerance-class): engaged only in the small-p
+                            // regime where the serial/prefetch grid
+                            // (n_head*ceil(p/8)) under-fills the SMs; falls back
+                            // to the prefetch arm otherwise. The gv arm uses the
+                            // FIXED max grid (n_chunks_max from block_size) with
+                            // neutral dead chunks — one capture serves every
+                            // position; the eager arm uses the live grid.
+                            let mut split_done = false;
+                            if attn_split_engaged(arm, n_head, p) {
+                                // Scratch was allocated in the chunk preamble
+                                // (BEFORE any capture region — see there); the
+                                // gv arm uses the FIXED max grid with neutral
+                                // dead chunks, the eager arm the live grid.
+                                let chunk_len = attn_split_chunk();
+                                let n_chunks_max = *attn_split_chunks;
+                                if let (Some(pm), Some(pl), Some(po)) = (
+                                    attn_split_pm.as_ref(),
+                                    attn_split_pl.as_ref(),
+                                    attn_split_po.as_ref(),
+                                ) {
+                                    let r = if gv {
+                                        stack.at.launch_attention_mq8_split_devpos(
+                                            stream,
+                                            q_b,
+                                            kcache,
+                                            vcache,
+                                            agate_b,
+                                            attn_out_b,
+                                            pm,
+                                            pl,
+                                            po,
+                                            ahd,
+                                            n_head,
+                                            n_kv,
+                                            p,
+                                            pos_dev_ref.expect("gv implies pos_dev"),
+                                            chunk_len,
+                                            n_chunks_max,
+                                        )
+                                    } else {
+                                        let n_live = (base_pos + p).div_ceil(chunk_len);
+                                        stack.at.launch_attention_mq8_split(
+                                            stream, q_b, kcache, vcache, agate_b, attn_out_b, pm,
+                                            pl, po, ahd, n_head, n_kv, p, base_pos, chunk_len,
+                                            n_live,
+                                        )
+                                    };
+                                    split_done = r.is_ok();
+                                }
+                            }
+                            if !split_done {
+                                // Arm 3 falling through (over-cap p or scratch alloc
+                                // failure) routes to the prefetch arm — the default.
+                                // Arm 5 (Issue 898) routes to the vec arm when the
+                                // gang grid under-fills the SMs (attn_gang_engaged).
+                                let arm = if arm == 3 {
+                                    1
+                                } else if arm == 5 && !attn_gang_engaged(arm, n_head, n_kv, p) {
+                                    4
                                 } else {
-                                    let n_live = (base_pos + p).div_ceil(chunk_len);
-                                    stack.at.launch_attention_mq8_split(
-                                        stream, q_b, kcache, vcache, agate_b,
-                                        attn_out_b, pm, pl, po, ahd, n_head,
-                                        n_kv, p, base_pos, chunk_len, n_live,
-                                    )
+                                    arm
                                 };
-                                split_done = r.is_ok();
-                            }
-                        }
-                        if !split_done {
-                        // Arm 3 falling through (over-cap p or scratch alloc
-                        // failure) routes to the prefetch arm — the default.
-                        // Arm 5 (Issue 898) routes to the vec arm when the
-                        // gang grid under-fills the SMs (attn_gang_engaged).
-                        let arm = if arm == 3 {
-                            1
-                        } else if arm == 5 && !attn_gang_engaged(arm, n_head, n_kv, p) {
-                            4
-                        } else {
-                            arm
-                        };
-                        if gv {
-                            let pos_dev = pos_dev_ref.expect("gv implies pos_dev");
-                            match arm {
-                                2 => {
-                                    stack.at.launch_attention_mq8_staged_devpos(
-                                        stream, q_b, kcache, vcache, agate_b, attn_out_b, ahd,
-                                        n_head, n_kv, p, pos_dev,
-                                    )?;
-                                }
-                                1 => {
-                                    stack.at.launch_attention_mq8_prefetch_devpos(
-                                        stream, q_b, kcache, vcache, agate_b, attn_out_b, ahd,
-                                        n_head, n_kv, p, pos_dev,
-                                    )?;
-                                }
-                                4 => {
-                                    stack.at.launch_attention_mq8_vec_devpos(
-                                        stream, q_b, kcache, vcache, agate_b, attn_out_b, ahd,
-                                        n_head, n_kv, p, pos_dev,
-                                    )?;
-                                }
-                                5 => {
-                                    // Issue 898/899 — head-gang family;
-                                    // the layout ladder picks the rung
-                                    // (default g3, the Bench-893 winner).
-                                    // Falls back to the vec arm on any
-                                    // launch-contract mismatch (non-6-head
-                                    // groups) — the split-arm fallthrough.
-                                    let r = match attn_gang_layout() {
-                                        6 => stack.at.launch_attention_mq8_gang_devpos(
-                                            stream, q_b, kcache, vcache, agate_b, attn_out_b,
-                                            ahd, n_head, n_kv, p, pos_dev,
-                                        ),
-                                        2 => stack.at.launch_attention_mq8_gang2_devpos(
-                                            stream, q_b, kcache, vcache, agate_b, attn_out_b,
-                                            ahd, n_head, n_kv, p, pos_dev,
-                                        ),
-                                        _ => stack.at.launch_attention_mq8_gang3_devpos(
-                                            stream, q_b, kcache, vcache, agate_b, attn_out_b,
-                                            ahd, n_head, n_kv, p, pos_dev,
-                                        ),
-                                    };
-                                    if r.is_err() {
-                                        stack.at.launch_attention_mq8_vec_devpos(
-                                            stream, q_b, kcache, vcache, agate_b, attn_out_b,
-                                            ahd, n_head, n_kv, p, pos_dev,
-                                        )?;
+                                if gv {
+                                    let pos_dev = pos_dev_ref.expect("gv implies pos_dev");
+                                    match arm {
+                                        2 => {
+                                            stack.at.launch_attention_mq8_staged_devpos(
+                                                stream, q_b, kcache, vcache, agate_b, attn_out_b,
+                                                ahd, n_head, n_kv, p, pos_dev,
+                                            )?;
+                                        }
+                                        1 => {
+                                            stack.at.launch_attention_mq8_prefetch_devpos(
+                                                stream, q_b, kcache, vcache, agate_b, attn_out_b,
+                                                ahd, n_head, n_kv, p, pos_dev,
+                                            )?;
+                                        }
+                                        4 => {
+                                            stack.at.launch_attention_mq8_vec_devpos(
+                                                stream, q_b, kcache, vcache, agate_b, attn_out_b,
+                                                ahd, n_head, n_kv, p, pos_dev,
+                                            )?;
+                                        }
+                                        5 => {
+                                            // Issue 898/899 — head-gang family;
+                                            // the layout ladder picks the rung
+                                            // (default g3, the Bench-893 winner).
+                                            // Falls back to the vec arm on any
+                                            // launch-contract mismatch (non-6-head
+                                            // groups) — the split-arm fallthrough.
+                                            let r = match attn_gang_layout() {
+                                                6 => stack.at.launch_attention_mq8_gang_devpos(
+                                                    stream, q_b, kcache, vcache, agate_b,
+                                                    attn_out_b, ahd, n_head, n_kv, p, pos_dev,
+                                                ),
+                                                2 => stack.at.launch_attention_mq8_gang2_devpos(
+                                                    stream, q_b, kcache, vcache, agate_b,
+                                                    attn_out_b, ahd, n_head, n_kv, p, pos_dev,
+                                                ),
+                                                _ => stack.at.launch_attention_mq8_gang3_devpos(
+                                                    stream, q_b, kcache, vcache, agate_b,
+                                                    attn_out_b, ahd, n_head, n_kv, p, pos_dev,
+                                                ),
+                                            };
+                                            if r.is_err() {
+                                                stack.at.launch_attention_mq8_vec_devpos(
+                                                    stream, q_b, kcache, vcache, agate_b,
+                                                    attn_out_b, ahd, n_head, n_kv, p, pos_dev,
+                                                )?;
+                                            }
+                                        }
+                                        _ => {
+                                            stack.at.launch_attention_mq8_devpos(
+                                                stream, q_b, kcache, vcache, agate_b, attn_out_b,
+                                                ahd, n_head, n_kv, p, pos_dev,
+                                            )?;
+                                        }
+                                    }
+                                } else {
+                                    match arm {
+                                        2 => {
+                                            stack.at.launch_attention_mq8_staged(
+                                                stream, q_b, kcache, vcache, agate_b, attn_out_b,
+                                                ahd, n_head, n_kv, p, base_pos,
+                                            )?;
+                                        }
+                                        1 => {
+                                            stack.at.launch_attention_mq8_prefetch(
+                                                stream, q_b, kcache, vcache, agate_b, attn_out_b,
+                                                ahd, n_head, n_kv, p, base_pos,
+                                            )?;
+                                        }
+                                        4 => {
+                                            stack.at.launch_attention_mq8_vec(
+                                                stream, q_b, kcache, vcache, agate_b, attn_out_b,
+                                                ahd, n_head, n_kv, p, base_pos,
+                                            )?;
+                                        }
+                                        5 => {
+                                            // Issue 898/899 — head-gang family;
+                                            // the layout ladder picks the rung
+                                            // (default g3, the Bench-893 winner).
+                                            // Falls back to the vec arm on any
+                                            // launch-contract mismatch (non-6-head
+                                            // groups) — the split-arm fallthrough.
+                                            let r = match attn_gang_layout() {
+                                                6 => stack.at.launch_attention_mq8_gang(
+                                                    stream, q_b, kcache, vcache, agate_b,
+                                                    attn_out_b, ahd, n_head, n_kv, p, base_pos,
+                                                ),
+                                                2 => stack.at.launch_attention_mq8_gang2(
+                                                    stream, q_b, kcache, vcache, agate_b,
+                                                    attn_out_b, ahd, n_head, n_kv, p, base_pos,
+                                                ),
+                                                _ => stack.at.launch_attention_mq8_gang3(
+                                                    stream, q_b, kcache, vcache, agate_b,
+                                                    attn_out_b, ahd, n_head, n_kv, p, base_pos,
+                                                ),
+                                            };
+                                            if r.is_err() {
+                                                stack.at.launch_attention_mq8_vec(
+                                                    stream, q_b, kcache, vcache, agate_b,
+                                                    attn_out_b, ahd, n_head, n_kv, p, base_pos,
+                                                )?;
+                                            }
+                                        }
+                                        _ => {
+                                            stack.at.launch_attention_mq8(
+                                                stream, q_b, kcache, vcache, agate_b, attn_out_b,
+                                                ahd, n_head, n_kv, p, base_pos,
+                                            )?;
+                                        }
                                     }
                                 }
-                                _ => {
-                                    stack.at.launch_attention_mq8_devpos(
-                                        stream, q_b, kcache, vcache, agate_b, attn_out_b, ahd,
-                                        n_head, n_kv, p, pos_dev,
-                                    )?;
-                                }
                             }
-                        } else {
-                            match arm {
-                                2 => {
-                                    stack.at.launch_attention_mq8_staged(
-                                        stream, q_b, kcache, vcache, agate_b, attn_out_b, ahd,
-                                        n_head, n_kv, p, base_pos,
-                                    )?;
-                                }
-                                1 => {
-                                    stack.at.launch_attention_mq8_prefetch(
-                                        stream, q_b, kcache, vcache, agate_b, attn_out_b, ahd,
-                                        n_head, n_kv, p, base_pos,
-                                    )?;
-                                }
-                                4 => {
-                                    stack.at.launch_attention_mq8_vec(
-                                        stream, q_b, kcache, vcache, agate_b, attn_out_b, ahd,
-                                        n_head, n_kv, p, base_pos,
-                                    )?;
-                                }
-                                5 => {
-                                    // Issue 898/899 — head-gang family;
-                                    // the layout ladder picks the rung
-                                    // (default g3, the Bench-893 winner).
-                                    // Falls back to the vec arm on any
-                                    // launch-contract mismatch (non-6-head
-                                    // groups) — the split-arm fallthrough.
-                                    let r = match attn_gang_layout() {
-                                        6 => stack.at.launch_attention_mq8_gang(
-                                            stream, q_b, kcache, vcache, agate_b, attn_out_b,
-                                            ahd, n_head, n_kv, p, base_pos,
-                                        ),
-                                        2 => stack.at.launch_attention_mq8_gang2(
-                                            stream, q_b, kcache, vcache, agate_b, attn_out_b,
-                                            ahd, n_head, n_kv, p, base_pos,
-                                        ),
-                                        _ => stack.at.launch_attention_mq8_gang3(
-                                            stream, q_b, kcache, vcache, agate_b, attn_out_b,
-                                            ahd, n_head, n_kv, p, base_pos,
-                                        ),
-                                    };
-                                    if r.is_err() {
-                                        stack.at.launch_attention_mq8_vec(
-                                            stream, q_b, kcache, vcache, agate_b, attn_out_b,
-                                            ahd, n_head, n_kv, p, base_pos,
-                                        )?;
-                                    }
-                                }
-                                _ => {
-                                    stack.at.launch_attention_mq8(
-                                        stream, q_b, kcache, vcache, agate_b, attn_out_b, ahd,
-                                        n_head, n_kv, p, base_pos,
-                                    )?;
-                                }
-                            }
-                        }
-                        }
                         } /* fa_done */
                     } else {
                         if gv {
@@ -3419,7 +3479,9 @@ let rms = |input: &CudaSlice<f32>,
                 } else {
                     gemm(&wo_c, attn_out_b, aproj_b, n, qa)?;
                 }
-                unsafe { stack.ffn.launch_residual(stream, x, aproj_b, x, p * n)?; }
+                unsafe {
+                    stack.ffn.launch_residual(stream, x, aproj_b, x, p * n)?;
+                }
             }
 
             // FFN block (both layer kinds).
@@ -3440,7 +3502,8 @@ let rms = |input: &CudaSlice<f32>,
     // graph capture + device-side param indirection (the decode path's
     // pos_dev_buf pattern).
     let graph_probe = spec
-        && std::env::var("RIIR_PREFILL_GRAPH_PROBE").is_ok_and(|s| matches!(s.trim(), "1" | "true" | "on"))
+        && std::env::var("RIIR_PREFILL_GRAPH_PROBE")
+            .is_ok_and(|s| matches!(s.trim(), "1" | "true" | "on"))
         && stack.graph_probe.get().is_none();
     let run_layers_result = if graph_probe {
         // cudarc's per-launch event tracking records an internal event per
@@ -3456,9 +3519,9 @@ let rms = |input: &CudaSlice<f32>,
         }
         embed().ok()?;
         t_embed = Some(t0.elapsed());
-        match stream.begin_capture(
-            cudarc::driver::sys::CUstreamCaptureMode::CU_STREAM_CAPTURE_MODE_GLOBAL,
-        ) {
+        match stream
+            .begin_capture(cudarc::driver::sys::CUstreamCaptureMode::CU_STREAM_CAPTURE_MODE_GLOBAL)
+        {
             Ok(()) => {
                 let r = run_layers();
                 let end = stream.end_capture(
@@ -3468,9 +3531,7 @@ let rms = |input: &CudaSlice<f32>,
                     (Ok(()), Ok(Some(graph))) => {
                         let _ = graph.upload();
                         let _ = stream.synchronize();
-                        let _ = stack
-                            .graph_probe
-                            .set(Some(Mutex::new(SendGraph(graph))));
+                        let _ = stack.graph_probe.set(Some(Mutex::new(SendGraph(graph))));
                         eprintln!("[742-probe] layer loop captured (p={p})");
                         Ok(())
                     }
@@ -3610,12 +3671,8 @@ let rms = |input: &CudaSlice<f32>,
                             stack
                                 .gv_knob_gen
                                 .store(GV_KNOB_GEN.load(Ordering::Relaxed), Ordering::Relaxed);
-                            let _ = stack
-                                .graph_verify
-                                .set(Some(Mutex::new(SendGraph(graph))));
-                            eprintln!(
-                                "[742-gv] layer loop captured (p={p}, gen={staging_gen})"
-                            );
+                            let _ = stack.graph_verify.set(Some(Mutex::new(SendGraph(graph))));
+                            eprintln!("[742-gv] layer loop captured (p={p}, gen={staging_gen})");
                             // Capture records but does NOT execute — this
                             // launch IS the capture chunk's execution.
                             let launched = stack
@@ -3766,10 +3823,12 @@ let rms = |input: &CudaSlice<f32>,
             let mut out: Vec<u32> = Vec::with_capacity(p);
             for r in 0..p {
                 let row_start = r * n;
-                let view = if let Some(v) = x.try_slice(row_start..row_start + n) { v } else {
-                        fail(states);
-                        return None;
-                    };
+                let view = if let Some(v) = x.try_slice(row_start..row_start + n) {
+                    v
+                } else {
+                    fail(states);
+                    return None;
+                };
                 if stream.memcpy_dtoh(&view, x_row_host).is_err() {
                     fail(states);
                     return None;
@@ -3835,9 +3894,9 @@ let rms = |input: &CudaSlice<f32>,
         // 1. p-row final norm (overwrites the last layer's normx — the same
         //    staging the layer loop uses; stream-ordered after it).
         if let Err(e) = unsafe {
-            stack.ffn.launch_rmsnorm(
-                stream, ra, rm, rs, x, final_gamma, normx, p, n, eps,
-            )
+            stack
+                .ffn
+                .launch_rmsnorm(stream, ra, rm, rs, x, final_gamma, normx, p, n, eps)
         } {
             if trace {
                 eprintln!("[734-arm8] verify tail: rmsnorm ({e})");
@@ -3859,14 +3918,7 @@ let rms = |input: &CudaSlice<f32>,
             .launch_prefill_quantize(stream, normx, scratch, n, p)
             .and_then(|()| {
                 crate::prefill_cuda_mma::launch_prefill_gemm_cached(
-                    &stack.mma,
-                    stream,
-                    &lh,
-                    scratch,
-                    vl,
-                    vocab,
-                    n,
-                    p,
+                    &stack.mma, stream, &lh, scratch, vl, vocab, n, p,
                 )
             })
         {
@@ -3886,10 +3938,12 @@ let rms = |input: &CudaSlice<f32>,
         }
         // 5. download p packed results → token ids.
         {
-            let view = if let Some(v) = va.try_slice(0..p) { v } else {
-                    fail(states);
-                    return None;
-                };
+            let view = if let Some(v) = va.try_slice(0..p) {
+                v
+            } else {
+                fail(states);
+                return None;
+            };
             if stream.memcpy_dtoh(&view, verify_argmax_host).is_err() {
                 fail(states);
                 return None;
@@ -3907,10 +3961,13 @@ let rms = |input: &CudaSlice<f32>,
         let nll_out: Option<Vec<f32>> = match (verify_nll, nll_targets) {
             (Some(nl), Some(targets)) => {
                 debug_assert_eq!(targets.len(), p, "nll targets per row");
-                let targets_i32: Vec<i32> = targets.iter().map(|&t| {
-                    debug_assert!(t < vocab, "nll target {t} out of vocab");
-                    t as i32
-                }).collect();
+                let targets_i32: Vec<i32> = targets
+                    .iter()
+                    .map(|&t| {
+                        debug_assert!(t < vocab, "nll target {t} out of vocab");
+                        t as i32
+                    })
+                    .collect();
                 let targets_dev = stream.clone_htod(&targets_i32).ok()?;
                 if unsafe {
                     stack
@@ -3923,10 +3980,12 @@ let rms = |input: &CudaSlice<f32>,
                     return None;
                 }
                 {
-                    let view = if let Some(v) = nl.try_slice(0..2 * p) { v } else {
-                            fail(states);
-                            return None;
-                        };
+                    let view = if let Some(v) = nl.try_slice(0..2 * p) {
+                        v
+                    } else {
+                        fail(states);
+                        return None;
+                    };
                     if stream.memcpy_dtoh(&view, verify_nll_host).is_err() {
                         fail(states);
                         return None;
@@ -4012,7 +4071,12 @@ let rms = |input: &CudaSlice<f32>,
         // closure wraps — that closure is scoped inside `run_layers`) + the
         // forward rotation (all p rows; only the final row crosses — one
         // extra FWHT pass, ~0.02% of the chunk wall).
-        unsafe { stack.ffn.launch_rmsnorm(stream, ra, rm, rs, x, gamma, normx, p, n, eps).ok()?; }
+        unsafe {
+            stack
+                .ffn
+                .launch_rmsnorm(stream, ra, rm, rs, x, gamma, normx, p, n, eps)
+                .ok()?;
+        }
         rot.kernels
             .fwht_rotate_forward_batched(
                 stream,
@@ -4120,8 +4184,9 @@ pub fn prefill_verify_chunk_argmax(
     tokens: &[usize],
     base_pos: usize,
 ) -> Option<Vec<u32>> {
-    match whole_prefill_inner(fwd, tokens, base_pos, /* is_final */ true, /* verify_tail */ true, None)
-    {
+    match whole_prefill_inner(
+        fwd, tokens, base_pos, /* is_final */ true, /* verify_tail */ true, None,
+    ) {
         Some(WholeOut::Argmax(v)) => Some(v),
         _ => None,
     }
@@ -4178,12 +4243,7 @@ pub fn prefill_verify_advance(
 ) -> bool {
     matches!(
         whole_prefill_inner(
-            fwd,
-            tokens,
-            base_pos,
-            /* is_final */ false,
-            /* verify_tail */ false,
-            None
+            fwd, tokens, base_pos, /* is_final */ false, /* verify_tail */ false, None
         ),
         Some(WholeOut::Logits(_))
     )
@@ -4211,17 +4271,16 @@ pub fn prefill_verify_rollback(base_pos: usize) -> bool {
     let (Ok(mut states), Ok(snap)) = (states_lock.lock(), snap_lock.lock()) else {
         return false;
     };
-    let cp = |src: &Option<CudaSlice<f32>>,
-              dst: &mut Option<CudaSlice<f32>>|
-     -> Result<(), String> {
-        if let (Some(s), Some(d)) = (src, dst) {
-            stack
-                .stream
-                .memcpy_dtod(s, d)
-                .map_err(|e| format!("verify rollback dtod: {e}"))?;
-        }
-        Ok(())
-    };
+    let cp =
+        |src: &Option<CudaSlice<f32>>, dst: &mut Option<CudaSlice<f32>>| -> Result<(), String> {
+            if let (Some(s), Some(d)) = (src, dst) {
+                stack
+                    .stream
+                    .memcpy_dtod(s, d)
+                    .map_err(|e| format!("verify rollback dtod: {e}"))?;
+            }
+            Ok(())
+        };
     for (src, dst) in snap.dn_states.iter().zip(states.dn_states.iter_mut()) {
         if cp(src, dst).is_err() {
             return false;

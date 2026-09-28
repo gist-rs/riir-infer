@@ -957,8 +957,7 @@ impl AttentionScoreMmaKernels {
                 .map_err(|e| super::CudarcKernelError::Compile(format!("{e}")))
         };
         let score_mma = load("attention_decode_splitgqa_partial_rows_qg_mma_f32")?;
-        let score_mma_devpos =
-            load("attention_decode_splitgqa_partial_rows_qg_mma_f32_devpos")?;
+        let score_mma_devpos = load("attention_decode_splitgqa_partial_rows_qg_mma_f32_devpos")?;
         let score_mma24 = load("attention_decode_splitgqa_partial_rows_qg_mma24_f32")?;
         let score_mma24_devpos =
             load("attention_decode_splitgqa_partial_rows_qg_mma24_f32_devpos")?;
@@ -968,9 +967,8 @@ impl AttentionScoreMmaKernels {
         // T-a24 pair adds red_max/red_sum ([g][2][8][4] each) reaching
         // 54,784 B at g=8 — one ceiling covers both (under the 99 KB
         // sm_89 per-block max).
-        let qg_smem =
-            (256 * 33 + 16 * 8 * 32 + 16 * 8 + 2 * (8 * 2 * 8 * 4))
-                * core::mem::size_of::<f32>() as i32;
+        let qg_smem = (256 * 33 + 16 * 8 * 32 + 16 * 8 + 2 * (8 * 2 * 8 * 4))
+            * core::mem::size_of::<f32>() as i32;
         for f in [
             &score_mma,
             &score_mma_devpos,
@@ -995,7 +993,12 @@ impl AttentionScoreMmaKernels {
         })
     }
 
-    fn validate(head_dim: usize, n_head: usize, n_kv_head: usize, p: usize) -> Result<(), super::CudarcKernelError> {
+    fn validate(
+        head_dim: usize,
+        n_head: usize,
+        n_kv_head: usize,
+        p: usize,
+    ) -> Result<(), super::CudarcKernelError> {
         if head_dim != 256 {
             return Err(super::CudarcKernelError::InvalidArg(format!(
                 "score mma: head_dim must be 256 (got {head_dim})"
@@ -1052,7 +1055,11 @@ impl AttentionScoreMmaKernels {
         // T-a24 adds red_max/red_sum ([g][2][8][4] each).
         let red = if arm24 { 2 * (g * 2 * 8 * 4) } else { 0 };
         let smem_floats = head_dim * 33 + 16 * g * 32 + 16 * g + red;
-        let func = if arm24 { &self.score_mma24 } else { &self.score_mma };
+        let func = if arm24 {
+            &self.score_mma24
+        } else {
+            &self.score_mma
+        };
         let cfg = LaunchConfig {
             grid_dim: (n_kv_head as u32, n_chunks as u32, p.div_ceil(16) as u32),
             block_dim: (1024, 1, 1),
@@ -1086,7 +1093,9 @@ impl AttentionScoreMmaKernels {
                 .launch(cfg)
                 .map_err(|e| super::CudarcKernelError::Launch(e.to_string()))?;
         }
-        self.launch_combine(stream, part_m, part_l, part_out, attn_out, head_dim, n_head, n_chunks, p)?;
+        self.launch_combine(
+            stream, part_m, part_l, part_out, attn_out, head_dim, n_head, n_chunks, p,
+        )?;
         Ok(())
     }
 
@@ -1163,7 +1172,9 @@ impl AttentionScoreMmaKernels {
                 .launch(cfg)
                 .map_err(|e| super::CudarcKernelError::Launch(e.to_string()))?;
         }
-        self.launch_combine(stream, part_m, part_l, part_out, attn_out, head_dim, n_head, n_chunks, p)?;
+        self.launch_combine(
+            stream, part_m, part_l, part_out, attn_out, head_dim, n_head, n_chunks, p,
+        )?;
         Ok(())
     }
 
@@ -1187,8 +1198,7 @@ impl AttentionScoreMmaKernels {
             block_dim: (head_dim as u32, 1, 1),
             shared_mem_bytes: 0,
         };
-        let (hd_i, nh_i, nc_i, p_i) =
-            (head_dim as i32, n_head as i32, n_chunks as i32, p as i32);
+        let (hd_i, nh_i, nc_i, p_i) = (head_dim as i32, n_head as i32, n_chunks as i32, p as i32);
         unsafe {
             stream
                 .launch_builder(&self.combine)

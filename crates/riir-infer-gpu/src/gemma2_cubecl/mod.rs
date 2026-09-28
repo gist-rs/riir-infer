@@ -125,13 +125,7 @@ pub fn rmsnorm_gamma(data: &mut [f32], gamma: &[f32], dim: usize, eps: f32) {
 /// rotation, so nothing errored — attention was just computed against scrambled
 /// head components, costing ~8× on training CE (6.33 vs 0.79 at step 1).
 #[cfg(feature = "cubecl_runtime")]
-pub fn apply_rope(
-    data: &mut [f32],
-    pos: usize,
-    head_dim: usize,
-    n_heads: usize,
-    theta: f32,
-) {
+pub fn apply_rope(data: &mut [f32], pos: usize, head_dim: usize, n_heads: usize, theta: f32) {
     let half_dim = head_dim / 2;
     for head in 0..n_heads {
         let base = head * head_dim;
@@ -329,12 +323,7 @@ impl DeltaRoutingState {
     /// `hidden` is the post-residual-add hidden state (will be modified at
     /// block boundaries). `pre_layer_residual` is the residual saved BEFORE
     /// this layer's RMSNorm (i.e., the previous layer's output).
-    pub fn apply_step(
-        &mut self,
-        hidden: &mut [f32],
-        pre_layer_residual: &[f32],
-        layer_idx: usize,
-    ) {
+    pub fn apply_step(&mut self, hidden: &mut [f32], pre_layer_residual: &[f32], layer_idx: usize) {
         let block_idx = layer_idx / Self::BLOCK_SIZE;
         let pos_in_block = layer_idx % Self::BLOCK_SIZE;
 
@@ -1770,13 +1759,7 @@ impl GpuGemmaCubeCL {
             use riir_infer_core::wall::wall_rescale_qk_inplace;
             // Single-token decode: prefix_q == prefix_k (WallGpuState).
             let prefix = &wall.prefix_cpu;
-            wall_rescale_qk_inplace(
-                &mut q,
-                &mut k,
-                prefix,
-                prefix,
-                self.config.head_dim,
-            );
+            wall_rescale_qk_inplace(&mut q, &mut k, prefix, prefix, self.config.head_dim);
         } else {
             apply_rope(
                 &mut q,

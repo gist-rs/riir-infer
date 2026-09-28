@@ -14,8 +14,8 @@
 //! Currently creates its own wgpu device. T2.6 will share the device with
 //! `GpuContext` via `cubecl::wgpu::init_device()` for zero-copy interop.
 
-use std::sync::Arc;
 use std::fmt;
+use std::sync::Arc;
 
 /// CubeCL runtime error types.
 #[derive(Debug)]
@@ -57,7 +57,10 @@ pub use cubecl::server::Handle;
 // branch is compiled out; on macOS the wgpu path is ALWAYS active (Issue 949:
 // `--all-features` enables `cuda_backend` everywhere, but macOS has no CUDA —
 // cudarc's libcuda load panics — so the feature is inert there by cfg).
-#[cfg(all(feature = "cubecl_runtime", any(not(feature = "cuda_backend"), target_os = "macos")))]
+#[cfg(all(
+    feature = "cubecl_runtime",
+    any(not(feature = "cuda_backend"), target_os = "macos")
+))]
 use cubecl::wgpu::{WgpuDevice, WgpuRuntime};
 
 // ---------------------------------------------------------------------------
@@ -260,11 +263,17 @@ pub struct CubeCLContext {
     /// Shared wgpu device — retained from `init_setup` for zero-copy interop
     /// (Issue 657: wgpu MSL passthrough dispatch). `None` on CUDA backend or
     /// when CubeCL manages its own device internally.
-    #[cfg(all(feature = "cubecl_runtime", any(not(feature = "cuda_backend"), target_os = "macos")))]
+    #[cfg(all(
+        feature = "cubecl_runtime",
+        any(not(feature = "cuda_backend"), target_os = "macos")
+    ))]
     wgpu_device: Option<Arc<wgpu::Device>>,
     /// Shared wgpu queue — same queue CubeCL submits to (shared via
     /// `init_setup`). Used by Issue 657's wgpu MSL passthrough dispatch.
-    #[cfg(all(feature = "cubecl_runtime", any(not(feature = "cuda_backend"), target_os = "macos")))]
+    #[cfg(all(
+        feature = "cubecl_runtime",
+        any(not(feature = "cuda_backend"), target_os = "macos")
+    ))]
     wgpu_queue: Option<Arc<wgpu::Queue>>,
     /// Issue 994: the adapter's total video memory, probed once at init via
     /// the vendored wgpu-hal accessors (DXGI `DedicatedVideoMemory` /
@@ -325,7 +334,7 @@ impl CubeCLContext {
     fn new_uncached() -> Self {
         #[cfg(any(not(feature = "cuda_backend"), target_os = "macos"))]
         {
-            use cubecl::wgpu::{init_setup, AutoGraphicsApi};
+            use cubecl::wgpu::{AutoGraphicsApi, init_setup};
 
             // Issue 649: set a high `CUBECL_WGPU_MAX_TASKS` default so the
             // entire decode forward (~835 dispatches) fits into a single
@@ -335,7 +344,9 @@ impl CubeCLContext {
             if std::env::var("CUBECL_WGPU_MAX_TASKS").is_err() {
                 // SAFETY: single-threaded init, before any CubeCL client exists.
                 // No other thread can read this env var concurrently.
-                unsafe { std::env::set_var("CUBECL_WGPU_MAX_TASKS", "1024"); }
+                unsafe {
+                    std::env::set_var("CUBECL_WGPU_MAX_TASKS", "1024");
+                }
             }
 
             // Issue 657: use `init_setup` instead of `WgpuRuntime::client` so
@@ -344,10 +355,8 @@ impl CubeCLContext {
             // difference is `init_setup` returns the `WgpuSetup` with device +
             // queue clones, while `WgpuRuntime::client` discards them.
             let device = WgpuDevice::DefaultDevice;
-            let setup = init_setup::<AutoGraphicsApi>(
-                &device,
-                cubecl::wgpu::RuntimeOptions::default(),
-            );
+            let setup =
+                init_setup::<AutoGraphicsApi>(&device, cubecl::wgpu::RuntimeOptions::default());
             let client = WgpuRuntime::client(&device);
             let runtime_name = WgpuRuntime::name(&client);
             println!("CubeCL runtime initialized: {runtime_name}");
@@ -385,7 +394,10 @@ impl CubeCLContext {
             // Issue 994: no wgpu adapter on the CUDA backend — the pre-flight
             // skips unless RIIR_GPU_VRAM_BUDGET_BYTES is set; the flush-gate
             // still protects (it is runtime-agnostic).
-            Self { device, total_video_memory: None }
+            Self {
+                device,
+                total_video_memory: None,
+            }
         }
     }
 
@@ -393,7 +405,10 @@ impl CubeCLContext {
     /// This is the same device CubeCL uses — sharing it enables zero-copy
     /// buffer interop between CubeCL and direct wgpu dispatch (e.g., the
     /// metal::tensor MSL passthrough path).
-    #[cfg(all(feature = "cubecl_runtime", any(not(feature = "cuda_backend"), target_os = "macos")))]
+    #[cfg(all(
+        feature = "cubecl_runtime",
+        any(not(feature = "cuda_backend"), target_os = "macos")
+    ))]
     #[inline]
     pub fn wgpu_device(&self) -> Option<&Arc<wgpu::Device>> {
         self.wgpu_device.as_ref()
@@ -402,7 +417,10 @@ impl CubeCLContext {
     /// Get the shared wgpu queue (Issue 657). Returns `None` on CUDA backend.
     /// This is the same queue CubeCL submits to — dispatching wgpu compute
     /// passes on this queue preserves ordering with CubeCL dispatches.
-    #[cfg(all(feature = "cubecl_runtime", any(not(feature = "cuda_backend"), target_os = "macos")))]
+    #[cfg(all(
+        feature = "cubecl_runtime",
+        any(not(feature = "cuda_backend"), target_os = "macos")
+    ))]
     #[inline]
     pub fn wgpu_queue(&self) -> Option<&Arc<wgpu::Queue>> {
         self.wgpu_queue.as_ref()
@@ -413,14 +431,22 @@ impl CubeCLContext {
     /// the doc promises) so metal-gated call sites compile under
     /// `--all-features` on macOS — their `None` arm already handles the
     /// "CUDA backend?" case.
-    #[cfg(all(feature = "cubecl_runtime", feature = "cuda_backend", not(target_os = "macos")))]
+    #[cfg(all(
+        feature = "cubecl_runtime",
+        feature = "cuda_backend",
+        not(target_os = "macos")
+    ))]
     #[inline]
     pub fn wgpu_device(&self) -> Option<&Arc<wgpu::Device>> {
         None
     }
 
     /// CUDA-backend twin of [`Self::wgpu_queue`] — see [`Self::wgpu_device`].
-    #[cfg(all(feature = "cubecl_runtime", feature = "cuda_backend", not(target_os = "macos")))]
+    #[cfg(all(
+        feature = "cubecl_runtime",
+        feature = "cuda_backend",
+        not(target_os = "macos")
+    ))]
     #[inline]
     pub fn wgpu_queue(&self) -> Option<&Arc<wgpu::Queue>> {
         None
@@ -543,7 +569,9 @@ fn apply_optional_memory_config(client: &ComputeClient<ActiveRuntime>) {
             client.allocation_mode(cubecl::MemoryAllocationMode::Persistent);
         }
         println!("CubeCL memory: Persistent mode (CUBECL_PERSISTENT_MODE set)");
-        eprintln!("WARNING: CUBECL_PERSISTENT_MODE is counterproductive on cubecl 0.11+ WDDM (Issue 614 T6).");
+        eprintln!(
+            "WARNING: CUBECL_PERSISTENT_MODE is counterproductive on cubecl 0.11+ WDDM (Issue 614 T6)."
+        );
     }
 }
 

@@ -216,7 +216,12 @@ fn cuda_ops_match_cpu_op_by_op() {
     let mut xg = xb.clone();
     c.gelu_erf(&mut xc);
     g.gelu_erf(&mut xg);
-    report("gelu_erf (libm vs CUDA erff)", &xc, &sync_out(&g, &xg), 1e-4);
+    report(
+        "gelu_erf (libm vs CUDA erff)",
+        &xc,
+        &sync_out(&g, &xg),
+        1e-4,
+    );
 
     let (r2, i_sz) = (5usize, 32usize);
     g.begin_pass();
@@ -335,10 +340,36 @@ fn cuda_fused_attention_matches_cpu_full() {
         let mut oc = vec![0f32; seq * d];
         let mut og = vec![0f32; seq * d];
         c.attention_forward(
-            &qkv, 0, &cos, &sin, 0, scale, seq, heads, hd, usize::MAX, None, &mut sa, &mut oc, 0,
+            &qkv,
+            0,
+            &cos,
+            &sin,
+            0,
+            scale,
+            seq,
+            heads,
+            hd,
+            usize::MAX,
+            None,
+            &mut sa,
+            &mut oc,
+            0,
         );
         g.attention_forward(
-            &qkv, 0, &cos, &sin, 0, scale, seq, heads, hd, usize::MAX, None, &mut sb, &mut og, 0,
+            &qkv,
+            0,
+            &cos,
+            &sin,
+            0,
+            scale,
+            seq,
+            heads,
+            hd,
+            usize::MAX,
+            None,
+            &mut sb,
+            &mut og,
+            0,
         );
         report(
             &format!("attn full {seq}x{heads}"),
@@ -379,10 +410,36 @@ fn cuda_fused_attention_matches_cpu_sliding() {
         let mut oc = vec![0f32; seq * d];
         let mut og = vec![0f32; seq * d];
         c.attention_forward(
-            &qkv, 0, &cos, &sin, 0, scale, seq, heads, hd, window, Some(&mask), &mut sa, &mut oc, 0,
+            &qkv,
+            0,
+            &cos,
+            &sin,
+            0,
+            scale,
+            seq,
+            heads,
+            hd,
+            window,
+            Some(&mask),
+            &mut sa,
+            &mut oc,
+            0,
         );
         g.attention_forward(
-            &qkv, 0, &cos, &sin, 0, scale, seq, heads, hd, window, Some(&mask), &mut sb, &mut og, 0,
+            &qkv,
+            0,
+            &cos,
+            &sin,
+            0,
+            scale,
+            seq,
+            heads,
+            hd,
+            window,
+            Some(&mask),
+            &mut sb,
+            &mut og,
+            0,
         );
         report(
             &format!("attn slide {seq}x{heads} w{window}"),
@@ -433,12 +490,36 @@ fn cuda_fused_attention_packed_offsets_match_singles() {
     let mut oc = vec![0f32; total * d];
     let mut sa = riir_infer_laya::laya::riir::backend::AttnScratch::default();
     c.attention_forward(
-        &qkv[..s1 * 3 * d], 0, &cos, &sin, 0, scale, s1, heads, hd, window, Some(&mask1), &mut sa,
-        &mut oc[..s1 * d], 0,
+        &qkv[..s1 * 3 * d],
+        0,
+        &cos,
+        &sin,
+        0,
+        scale,
+        s1,
+        heads,
+        hd,
+        window,
+        Some(&mask1),
+        &mut sa,
+        &mut oc[..s1 * d],
+        0,
     );
     c.attention_forward(
-        &qkv[s1 * 3 * d..], 0, &cos[s1 * hd..], &sin[s1 * hd..], 0, scale, s2, heads, hd, window,
-        Some(&mask2), &mut sa, &mut oc[s1 * d..], 0,
+        &qkv[s1 * 3 * d..],
+        0,
+        &cos[s1 * hd..],
+        &sin[s1 * hd..],
+        0,
+        scale,
+        s2,
+        heads,
+        hd,
+        window,
+        Some(&mask2),
+        &mut sa,
+        &mut oc[s1 * d..],
+        0,
     );
 
     // CUDA packed: ONE parent dispatch per sequence at its offsets (the
@@ -447,11 +528,36 @@ fn cuda_fused_attention_packed_offsets_match_singles() {
     let mut og = vec![0f32; total * d];
     let mut sb = riir_infer_laya::laya::riir::backend::AttnScratch::default();
     g.attention_forward(
-        &qkv, 0, &cos, &sin, 0, scale, s1, heads, hd, window, Some(&mask1), &mut sb, &mut og, 0,
+        &qkv,
+        0,
+        &cos,
+        &sin,
+        0,
+        scale,
+        s1,
+        heads,
+        hd,
+        window,
+        Some(&mask1),
+        &mut sb,
+        &mut og,
+        0,
     );
     g.attention_forward(
-        &qkv, s1 * 3 * d, &cos, &sin, s1, scale, s2, heads, hd, window, Some(&mask2), &mut sb,
-        &mut og, s1 * d,
+        &qkv,
+        s1 * 3 * d,
+        &cos,
+        &sin,
+        s1,
+        scale,
+        s2,
+        heads,
+        hd,
+        window,
+        Some(&mask2),
+        &mut sb,
+        &mut og,
+        s1 * d,
     );
     report("attn packed offsets", &oc, &sync_out(&g, &og), 1e-3);
 }

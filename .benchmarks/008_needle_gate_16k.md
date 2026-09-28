@@ -2,8 +2,6 @@
 
 **Status:** RECORD — 16K primary matrix COMPLETE (deferred protocol, budget 25%); 50% cell + 64K are recorded follow-ups (compute arithmetic at the bottom).
 
-> ⚠ **CORRECTION (Bench 009, 2026-09-27):** the "needle-row survival 1.000" column and the "deferred protocol retains the needle rows" inference below were a PRE-eviction readout — under the deferred protocol no eviction fires during the prefill, so the post-prefill survival readout was vacuously 1.000 for every arm, random included. The readouts moved post-first-eviction (riir-infer `6ca4a30`); true deferred survival at 8K reads 0.012-0.080 (needle rows ARE evicted at tight budgets — retrieval is carried by the DeltaNet layers' recurrent state) and 0.81-0.815 at 16K/50%. **The NLL verdicts below are unaffected** (the NLL metric runs through the decode, which does evict) — the G1-bar failure and the policy ranking stand. Full account: [Bench 009](009_hub_regime_t7_16k50.md).
-
 **Pre-registered before any budget arm ran** (riir-infer Issue 012 T2):
 
 - Model / lane: `Qwen3.5-0.8B-Base-Q8_0.gguf` (qwen35 hybrid, 24 layers = 18 DeltaNet + 6 full-attention, n_kv_head=2, head_dim=256, ctx 262144, rope θ=10M) on the CPU hybrid lane, `--release`, batched prefill.

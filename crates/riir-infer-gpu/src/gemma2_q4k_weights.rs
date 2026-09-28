@@ -142,10 +142,7 @@ impl GpuGemmaWeightBuffersQ4K {
             })
             .collect();
 
-        Self {
-            wte,
-            layers,
-        }
+        Self { wte, layers }
     }
 
     /// Load Q4_K weights directly from a GGUF file via zero-copy mmap upload.
@@ -223,10 +220,7 @@ impl GpuGemmaWeightBuffersQ4K {
             });
         }
 
-        Ok(Self {
-            wte,
-            layers,
-        })
+        Ok(Self { wte, layers })
     }
 
     /// Calculate total GPU memory used by Q4_K weights (bytes).

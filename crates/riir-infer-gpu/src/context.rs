@@ -298,7 +298,10 @@ impl GpuContext {
         // The wgpu device is still created above (for any direct WGSL paths), but
         // CubeCL kernels dispatch through the CUDA runtime — the two don't share
         // buffers, which is fine because the training loop uses CubeCL exclusively.
-        #[cfg(all(feature = "cubecl_runtime", any(not(feature = "cuda_backend"), target_os = "macos")))]
+        #[cfg(all(
+            feature = "cubecl_runtime",
+            any(not(feature = "cuda_backend"), target_os = "macos")
+        ))]
         let cubecl_device = {
             let setup = cubecl::wgpu::WgpuSetup {
                 instance,
@@ -310,7 +313,11 @@ impl GpuContext {
             cubecl::wgpu::init_device(setup, Default::default())
         };
 
-        #[cfg(all(feature = "cubecl_runtime", feature = "cuda_backend", not(target_os = "macos")))]
+        #[cfg(all(
+            feature = "cubecl_runtime",
+            feature = "cuda_backend",
+            not(target_os = "macos")
+        ))]
         let cubecl_device = {
             // Native CUDA path — device 0 is the primary GPU.
             // The CUDA runtime initializes lazily on first client() call.
@@ -371,7 +378,10 @@ pub enum GpuError {
     /// one (Issue 499): its per-layer bind groups capture the first forward's
     /// buffers and cannot be re-keyed, so a mismatched pairing would silently
     /// write gradients into the wrong instance. Reported instead of computed.
-    ForwardMismatch { bound: u64, given: u64 },
+    ForwardMismatch {
+        bound: u64,
+        given: u64,
+    },
 }
 
 impl std::fmt::Display for GpuError {

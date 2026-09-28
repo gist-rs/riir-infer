@@ -216,12 +216,7 @@ impl NgramDrafter {
             let suffix = &tokens[i..i + suffix_len];
             let next = tokens[i + suffix_len];
             let key = hash_suffix(suffix, &self.fallback_seed);
-            *self
-                .table
-                .entry(key)
-                .or_default()
-                .entry(next)
-                .or_insert(0) += 1;
+            *self.table.entry(key).or_default().entry(next).or_insert(0) += 1;
         }
     }
 
@@ -258,14 +253,10 @@ impl NgramDrafter {
             let key = hash_suffix(&suffix, &self.fallback_seed);
             if let Some(contins) = self.table.get(&key) {
                 // Greedy: pick the most frequent continuation.
-                let best = contins
-                    .iter()
-                    .max_by_key(|&(_, &count)| count).map_or_else(|| {
-                        self.bound_fabricated(deterministic_fallback(
-                            &suffix,
-                            &self.fallback_seed,
-                        ))
-                    }, |(&tok, _)| tok);
+                let best = contins.iter().max_by_key(|&(_, &count)| count).map_or_else(
+                    || self.bound_fabricated(deterministic_fallback(&suffix, &self.fallback_seed)),
+                    |(&tok, _)| tok,
+                );
                 predictions.push(best);
                 // Advance the suffix: drop the first element, append the prediction.
                 if suffix_len > 0 {
@@ -274,10 +265,8 @@ impl NgramDrafter {
                 }
             } else {
                 // No n-gram match — use deterministic fallback for this + remaining steps.
-                let fb = self.bound_fabricated(deterministic_fallback(
-                    &suffix,
-                    &self.fallback_seed,
-                ));
+                let fb =
+                    self.bound_fabricated(deterministic_fallback(&suffix, &self.fallback_seed));
                 predictions.push(fb);
                 if suffix_len > 0 {
                     suffix.remove(0);
@@ -571,7 +560,11 @@ mod tests {
         assert!(outcome.is_hit(), "repeated passage must hit");
         assert_eq!(outcome.matched_order, 8, "highest available order (8) wins");
         assert_eq!(outcome.filled, 16, "long repeat fills all K slots");
-        assert_eq!(&out[..16], &passage[0..16], "fill is the verbatim continuation");
+        assert_eq!(
+            &out[..16],
+            &passage[0..16],
+            "fill is the verbatim continuation"
+        );
     }
 
     #[test]
@@ -625,7 +618,10 @@ mod tests {
         let outcome = drafter.fill_lookup_draft(&ctx, &mut out);
         assert_eq!(outcome, LookupOutcome::MISS);
         assert!(!outcome.is_hit());
-        assert!(out.iter().all(|&t| t == u32::MAX), "miss must not touch the buffer");
+        assert!(
+            out.iter().all(|&t| t == u32::MAX),
+            "miss must not touch the buffer"
+        );
     }
 
     #[test]
@@ -646,9 +642,15 @@ mod tests {
         let drafter = NgramDrafter::default_trigram();
         // Context shorter than needle(2)+1 → miss.
         let mut out = [0u32; 16];
-        assert_eq!(drafter.fill_lookup_draft(&[1, 2], &mut out), LookupOutcome::MISS);
+        assert_eq!(
+            drafter.fill_lookup_draft(&[1, 2], &mut out),
+            LookupOutcome::MISS
+        );
         // Empty output buffer → miss.
-        assert_eq!(drafter.fill_lookup_draft(&[1, 2, 3], &mut []), LookupOutcome::MISS);
+        assert_eq!(
+            drafter.fill_lookup_draft(&[1, 2, 3], &mut []),
+            LookupOutcome::MISS
+        );
     }
 
     #[test]
@@ -659,7 +661,11 @@ mod tests {
         let drafter = NgramDrafter::default_trigram();
         let (a, oa) = drafter.predict_lookup(&ctx, 16);
         let (b, ob) = drafter.predict_lookup(&ctx, 16);
-        assert_eq!((a, oa), (b, ob), "same context must produce same lookup draft");
+        assert_eq!(
+            (a, oa),
+            (b, ob),
+            "same context must produce same lookup draft"
+        );
     }
 
     #[test]
@@ -819,26 +825,23 @@ mod tests {
     #[test]
     fn lookup_acceptance_real_bpe_tokens_qwen38() {
         let gguf_path = std::path::PathBuf::from(
-            std::env::var("QWEN38_GGUF").unwrap_or_else(|_| {
-                "F:/models/qwen38-27b-dbirks-Q4_K_M.gguf".to_string()
-            }),
+            std::env::var("QWEN38_GGUF")
+                .unwrap_or_else(|_| "F:/models/qwen38-27b-dbirks-Q4_K_M.gguf".to_string()),
         );
         if !gguf_path.exists() {
             eprintln!("SKIP: {} not found", gguf_path.display());
             return;
         }
-        let doc_path = std::path::PathBuf::from(
-            std::env::var("QWEN38_DOC").unwrap_or_else(|_| {
-                // Frozen corpus (Issue 859): the fixture the byte-level proxy
-                // calibrates against, so token-level numbers stay comparable
-                // across sessions. Override with QWEN38_DOC for other docs.
-                concat!(
-                    env!("CARGO_MANIFEST_DIR"),
-                    "/src/speculative_decode/testdata/prose_proxy.md"
-                )
-                .to_string()
-            }),
-        );
+        let doc_path = std::path::PathBuf::from(std::env::var("QWEN38_DOC").unwrap_or_else(|_| {
+            // Frozen corpus (Issue 859): the fixture the byte-level proxy
+            // calibrates against, so token-level numbers stay comparable
+            // across sessions. Override with QWEN38_DOC for other docs.
+            concat!(
+                env!("CARGO_MANIFEST_DIR"),
+                "/src/speculative_decode/testdata/prose_proxy.md"
+            )
+            .to_string()
+        }));
         let text = match std::fs::read_to_string(&doc_path) {
             Ok(t) => t,
             Err(e) => {

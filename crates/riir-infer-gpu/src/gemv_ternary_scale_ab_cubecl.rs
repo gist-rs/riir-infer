@@ -46,7 +46,7 @@ use cubecl::server::Handle;
 
 use half::f16 as half_f16;
 
-use crate::gemv_ternary_cubecl::{TernaryHandle, TERNARY_ROWS_PER_PLANE_8};
+use crate::gemv_ternary_cubecl::{TERNARY_ROWS_PER_PLANE_8, TernaryHandle};
 
 // ── Variant 1: f16 scale upload (the candidate) ─────────────────────
 

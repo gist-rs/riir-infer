@@ -65,8 +65,8 @@ use std::time::Instant;
 
 use anyhow::{Context, Result, bail};
 use half::f16;
-use katgpt_core::act_channel_moments::ActChannelDiagonal;
 use katgpt_core::TernaryGroupWeights;
+use katgpt_core::act_channel_moments::ActChannelDiagonal;
 use katgpt_types::ternary_group_act_aware::ActAwareScaleFit;
 
 use riir_infer_core::corpus_text::load_corpus_pages;
@@ -84,7 +84,14 @@ const GROUP: usize = 128;
 
 /// The arms, in run order. `shipped` FIRST — it is the reference the later
 /// arms compare against.
-const ARMS: [&str; 6] = ["shipped", "mean_abs", "wma_ex2", "ws_ex2", "ws_uniform", "zeroqat"];
+const ARMS: [&str; 6] = [
+    "shipped",
+    "mean_abs",
+    "wma_ex2",
+    "ws_ex2",
+    "ws_uniform",
+    "zeroqat",
+];
 
 /// riir-train `ZeroQatConfig::default()` (Plan 255 Ph4) — the comparator's
 /// knobs, mirrored verbatim.
@@ -369,12 +376,7 @@ fn main() -> Result<()> {
             writeln!(f, "{line}").context("write jsonl")?;
             f.flush().ok();
         }
-        report.push_str(&cmp.markdown_table(
-            arm,
-            refit_stats.as_ref(),
-            positions,
-            gold_nll_sum,
-        ));
+        report.push_str(&cmp.markdown_table(arm, refit_stats.as_ref(), positions, gold_nll_sum));
         report.push('\n');
     }
 
@@ -738,8 +740,7 @@ fn apply_arm(
             .zip(&new.pos_bits)
             .zip(w.neg_bits.iter().zip(&new.neg_bits))
         {
-            stats.changed_weights +=
-                ((po ^ pn) | (no ^ nn)).count_ones() as usize;
+            stats.changed_weights += ((po ^ pn) | (no ^ nn)).count_ones() as usize;
         }
         for r in 0..rows {
             let ob = r * w.groups_per_row;

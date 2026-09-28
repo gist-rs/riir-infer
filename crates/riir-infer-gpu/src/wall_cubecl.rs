@@ -58,12 +58,7 @@ use cubecl::server::Handle;
 /// `CubeCount::Static(ceil(gate_proj_dim/64), 1, 1)`, `CubeDim::new_1d(64)`.
 #[cfg(feature = "cubecl_runtime")]
 #[cube(launch_unchecked)]
-fn wall_gate_project_f32(
-    hidden: &[f32],
-    w_g: &[f32],
-    gate: &mut [f32],
-    params: &[f32],
-) {
+fn wall_gate_project_f32(hidden: &[f32], w_g: &[f32], gate: &mut [f32], params: &[f32]) {
     // params[0] = d_model, params[1] = gate_proj_dim, params[2] = bias, params[3] = gate_max
     let d_model = params[0usize] as u32;
     let gate_proj_dim = params[1usize] as u32;
@@ -127,11 +122,7 @@ fn wall_gate_project_f32(
 /// `CubeCount::Static(ceil(head_dim/256), 1, 1)`, `CubeDim::new_1d(256)`.
 #[cfg(feature = "cubecl_runtime")]
 #[cube(launch_unchecked)]
-fn wall_prefix_decode_f32(
-    log_gate: &[f32],
-    prefix_prev: &[f32],
-    prefix_curr: &mut [f32],
-) {
+fn wall_prefix_decode_f32(log_gate: &[f32], prefix_prev: &[f32], prefix_curr: &mut [f32]) {
     let n = log_gate.len();
     let tid = ABSOLUTE_POS;
 
@@ -172,11 +163,7 @@ fn wall_prefix_decode_f32(
 /// `CubeCount::Static(ceil(head_dim/256), 1, 1)`, `CubeDim::new_1d(256)`.
 #[cfg(feature = "cubecl_runtime")]
 #[cube(launch_unchecked)]
-fn wall_prefix_prefill_f32(
-    log_gates: &[f32],
-    prefix_sums: &mut [f32],
-    params: &[f32],
-) {
+fn wall_prefix_prefill_f32(log_gates: &[f32], prefix_sums: &mut [f32], params: &[f32]) {
     // params[0] = seq_len, params[1] = head_dim
     let seq_len = params[0usize] as u32;
     let head_dim = params[1usize] as u32;
@@ -233,12 +220,7 @@ fn wall_prefix_prefill_f32(
 /// `CubeCount::Static(ceil((q_dim+kv_dim)/256), 1, 1)`, `CubeDim::new_1d(256)`.
 #[cfg(feature = "cubecl_runtime")]
 #[cube(launch_unchecked)]
-fn wall_rescale_f32(
-    q: &mut [f32],
-    k: &mut [f32],
-    prefix_qk: &[f32],
-    params: &[f32],
-) {
+fn wall_rescale_f32(q: &mut [f32], k: &mut [f32], prefix_qk: &[f32], params: &[f32]) {
     // params[0] = q_dim (n_heads * head_dim)
     // params[1] = kv_dim (n_kv_heads * head_dim)
     // params[2] = head_dim
@@ -290,7 +272,10 @@ impl WallGateProjectCubeCL {
     /// - `hidden_handle`: `d_model` f32 elements
     /// - `w_g_handle`: `gate_proj_dim * d_model` f32 elements
     /// - `gate_handle`: `gate_proj_dim` f32 elements
-#[allow(clippy::too_many_arguments, reason = "GPU kernel launch/dispatch: many buffer handles are inherent to the fused-kernel interface")]
+    #[allow(
+        clippy::too_many_arguments,
+        reason = "GPU kernel launch/dispatch: many buffer handles are inherent to the fused-kernel interface"
+    )]
     pub unsafe fn launch<R: Runtime>(
         client: &ComputeClient<R>,
         hidden_handle: Handle,
@@ -429,7 +414,10 @@ impl WallRescaleCubeCL {
     /// - `q_handle`: `q_dim` f32 elements (n_heads * head_dim)
     /// - `k_handle`: `kv_dim` f32 elements (n_kv_heads * head_dim)
     /// - `prefix_qk_handle`: `2 * head_dim` f32 elements (concatenated)
-#[allow(clippy::too_many_arguments, reason = "GPU kernel launch/dispatch: many buffer handles are inherent to the fused-kernel interface")]
+    #[allow(
+        clippy::too_many_arguments,
+        reason = "GPU kernel launch/dispatch: many buffer handles are inherent to the fused-kernel interface"
+    )]
     pub unsafe fn launch<R: Runtime>(
         client: &ComputeClient<R>,
         q_handle: Handle,
@@ -566,7 +554,10 @@ impl WallRescaleFromCombinedCubeCL {
     ///   (concatenated `[prefix_qk(head_dim) | prefix_k(head_dim)]`)
     /// - `output_handle` must have `section_len` f32 elements
     /// - `section_offset` must be aligned to `head_dim` boundary
-#[allow(clippy::too_many_arguments, reason = "GPU kernel launch/dispatch: many buffer handles are inherent to the fused-kernel interface")]
+    #[allow(
+        clippy::too_many_arguments,
+        reason = "GPU kernel launch/dispatch: many buffer handles are inherent to the fused-kernel interface"
+    )]
     pub unsafe fn launch<R: Runtime>(
         client: &ComputeClient<R>,
         combined_handle: Handle,

@@ -662,7 +662,10 @@ impl VerifyMmaKernels {
         blocks_per_row: usize,
         p: usize,
     ) -> Result<(), String> {
-        assert!(p <= 16 && n.is_multiple_of(1024), "q4k mma: p<=16, n%1024==0");
+        assert!(
+            p <= 16 && n.is_multiple_of(1024),
+            "q4k mma: p<=16, n%1024==0"
+        );
         let (m_i, n_i, bpr_i, p_i) = (m as i32, n as i32, blocks_per_row as i32, p as i32);
         let grid = m.div_ceil(16).max(1) as u32;
         // SAFETY: caller contract above.
@@ -762,9 +765,12 @@ impl VerifyMmaKernels {
         blocks_per_row: usize,
         p: usize,
     ) -> Result<(), String> {
-        assert!(p <= 64 && n.is_multiple_of(128), "t5 q4k p64: p<=64, n%128==0");
+        assert!(
+            p <= 64 && n.is_multiple_of(128),
+            "t5 q4k p64: p<=64, n%128==0"
+        );
         let (m_i, n_i, bpr_i, p_i) = (m as i32, n as i32, blocks_per_row as i32, p as i32);
-        let grid = m.div_ceil(32).max(1) as u32;   // M_TILE=32 (tw1)
+        let grid = m.div_ceil(32).max(1) as u32; // M_TILE=32 (tw1)
         // SAFETY: caller contract above.
         unsafe {
             stream
@@ -810,7 +816,10 @@ impl VerifyMmaKernels {
         blocks_per_row: usize,
         p: usize,
     ) -> Result<(), String> {
-        assert!(p <= 64 && n.is_multiple_of(128), "t5 q6k p64: p<=64, n%128==0");
+        assert!(
+            p <= 64 && n.is_multiple_of(128),
+            "t5 q6k p64: p<=64, n%128==0"
+        );
         let (m_i, n_i, bpr_i, p_i) = (m as i32, n as i32, blocks_per_row as i32, p as i32);
         let grid = m.div_ceil(32).max(1) as u32;
         // SAFETY: caller contract above.

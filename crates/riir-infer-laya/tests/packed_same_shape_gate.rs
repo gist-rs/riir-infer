@@ -22,16 +22,14 @@
 #![cfg(all(target_os = "macos", feature = "laya-riir-metal"))]
 
 use riir_infer_laya::laya::config::Checkpoint;
-use riir_infer_laya::laya::riir::agent::{RiirAgent, PACKED_ACT_BITS};
+use riir_infer_laya::laya::riir::agent::{PACKED_ACT_BITS, RiirAgent};
 use riir_infer_laya::laya::types::Forward;
 
 fn weights_root() -> Option<std::path::PathBuf> {
     if let Some(dir) = std::env::var_os("LAYA_WEIGHTS_DIR") {
         return Some(std::path::PathBuf::from(dir));
     }
-    std::env::var_os("HOME").map(|h| {
-        std::path::PathBuf::from(h).join(".cache/riir-reflex/laya")
-    })
+    std::env::var_os("HOME").map(|h| std::path::PathBuf::from(h).join(".cache/riir-reflex/laya"))
 }
 
 #[test]
@@ -87,25 +85,24 @@ fn packed_same_shape_matches_loop_raw_bits() {
 
     for (i, (_, qdef)) in qs.iter().enumerate() {
         let q = riir_infer_laya::laya::tokenize::to_internal(qdef).expect("internal question");
-        let looped: Forward = agent
-            .forward_internal(&state, &q)
-            .expect("loop forward");
+        let looped: Forward = agent.forward_internal(&state, &q).expect("loop forward");
         let loop_act: [u32; 2] = [
             looped.act_probabilities[0].to_bits(),
             looped.act_probabilities[1].to_bits(),
         ];
-        let loop_logits: Vec<u32> =
-            looped.logits.iter().map(|l| l.to_bits()).collect();
+        let loop_logits: Vec<u32> = looped.logits.iter().map(|l| l.to_bits()).collect();
         let (packed_act, packed_logits) = &packed_bits[i];
         assert_eq!(
-            packed_act, &loop_act,
+            packed_act,
+            &loop_act,
             "question {} act_probabilities diverge from the loop at the raw-bit \
              level — the chain-aliasing hazard has regressed (packed {packed_act:?} \
              vs loop {loop_act:?}; logits packed {packed_logits:?} vs loop {loop_logits:?})",
             i + 1
         );
         assert_eq!(
-            packed_logits, &loop_logits,
+            packed_logits,
+            &loop_logits,
             "question {} scorer logits diverge from the loop at the raw-bit level",
             i + 1
         );

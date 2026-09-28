@@ -268,28 +268,36 @@ fn gemm_ternary_cmma_i8_direct(
         #[allow(unused_mut)]
         let mut ahi0 = cmma::Matrix::<i32>::from_value(
             cmma::MatrixIdent::Accumulator,
-            16usize, 16usize, 32usize,
+            16usize,
+            16usize,
+            32usize,
             cmma::MatrixLayout::Undefined,
             0i32,
         );
         #[allow(unused_mut)]
         let mut alo0 = cmma::Matrix::<i32>::from_value(
             cmma::MatrixIdent::Accumulator,
-            16usize, 16usize, 32usize,
+            16usize,
+            16usize,
+            32usize,
             cmma::MatrixLayout::Undefined,
             0i32,
         );
         #[allow(unused_mut)]
         let mut ahi1 = cmma::Matrix::<i32>::from_value(
             cmma::MatrixIdent::Accumulator,
-            16usize, 16usize, 32usize,
+            16usize,
+            16usize,
+            32usize,
             cmma::MatrixLayout::Undefined,
             0i32,
         );
         #[allow(unused_mut)]
         let mut alo1 = cmma::Matrix::<i32>::from_value(
             cmma::MatrixIdent::Accumulator,
-            16usize, 16usize, 32usize,
+            16usize,
+            16usize,
+            32usize,
             cmma::MatrixLayout::Undefined,
             0i32,
         );
@@ -310,22 +318,30 @@ fn gemm_ternary_cmma_i8_direct(
             let bl1_t = b_lo_view.slice(seq![k_base, base_tok + 16u32], seq![32u32, 16u32]);
             let mbh0 = cmma::Matrix::<i8>::from_tensor(
                 cmma::MatrixIdent::B,
-                16usize, 16usize, 32usize,
+                16usize,
+                16usize,
+                32usize,
                 &bh0_t,
             );
             let mbh1 = cmma::Matrix::<i8>::from_tensor(
                 cmma::MatrixIdent::B,
-                16usize, 16usize, 32usize,
+                16usize,
+                16usize,
+                32usize,
                 &bh1_t,
             );
             let mbl0 = cmma::Matrix::<i8>::from_tensor(
                 cmma::MatrixIdent::B,
-                16usize, 16usize, 32usize,
+                16usize,
+                16usize,
+                32usize,
                 &bl0_t,
             );
             let mbl1 = cmma::Matrix::<i8>::from_tensor(
                 cmma::MatrixIdent::B,
-                16usize, 16usize, 32usize,
+                16usize,
+                16usize,
+                32usize,
                 &bl1_t,
             );
 
@@ -573,7 +589,9 @@ fn gemm_ternary_cmma_i8_direct(
             if sg == 0u32 {
                 let ma = cmma::Matrix::<i8>::from_slice(
                     cmma::MatrixIdent::A,
-                    16usize, 16usize, 32usize,
+                    16usize,
+                    16usize,
+                    32usize,
                     cmma::MatrixLayout::RowMajor,
                     &a0,
                     32,
@@ -582,11 +600,12 @@ fn gemm_ternary_cmma_i8_direct(
                 cmma::execute::<i8, i8, i32, i32, cmma::Plane>(&ma, &mbl0, &alo0, &alo0);
                 cmma::execute::<i8, i8, i32, i32, cmma::Plane>(&ma, &mbh1, &ahi1, &ahi1);
                 cmma::execute::<i8, i8, i32, i32, cmma::Plane>(&ma, &mbl1, &alo1, &alo1);
-            }
-            else if sg == 1u32 {
+            } else if sg == 1u32 {
                 let ma = cmma::Matrix::<i8>::from_slice(
                     cmma::MatrixIdent::A,
-                    16usize, 16usize, 32usize,
+                    16usize,
+                    16usize,
+                    32usize,
                     cmma::MatrixLayout::RowMajor,
                     &a1,
                     32,
@@ -595,11 +614,12 @@ fn gemm_ternary_cmma_i8_direct(
                 cmma::execute::<i8, i8, i32, i32, cmma::Plane>(&ma, &mbl0, &alo0, &alo0);
                 cmma::execute::<i8, i8, i32, i32, cmma::Plane>(&ma, &mbh1, &ahi1, &ahi1);
                 cmma::execute::<i8, i8, i32, i32, cmma::Plane>(&ma, &mbl1, &alo1, &alo1);
-            }
-            else if sg == 2u32 {
+            } else if sg == 2u32 {
                 let ma = cmma::Matrix::<i8>::from_slice(
                     cmma::MatrixIdent::A,
-                    16usize, 16usize, 32usize,
+                    16usize,
+                    16usize,
+                    32usize,
                     cmma::MatrixLayout::RowMajor,
                     &a2,
                     32,
@@ -608,11 +628,12 @@ fn gemm_ternary_cmma_i8_direct(
                 cmma::execute::<i8, i8, i32, i32, cmma::Plane>(&ma, &mbl0, &alo0, &alo0);
                 cmma::execute::<i8, i8, i32, i32, cmma::Plane>(&ma, &mbh1, &ahi1, &ahi1);
                 cmma::execute::<i8, i8, i32, i32, cmma::Plane>(&ma, &mbl1, &alo1, &alo1);
-            }
-            else if sg == 3u32 {
+            } else if sg == 3u32 {
                 let ma = cmma::Matrix::<i8>::from_slice(
                     cmma::MatrixIdent::A,
-                    16usize, 16usize, 32usize,
+                    16usize,
+                    16usize,
+                    32usize,
                     cmma::MatrixLayout::RowMajor,
                     &a3,
                     32,
@@ -621,11 +642,12 @@ fn gemm_ternary_cmma_i8_direct(
                 cmma::execute::<i8, i8, i32, i32, cmma::Plane>(&ma, &mbl0, &alo0, &alo0);
                 cmma::execute::<i8, i8, i32, i32, cmma::Plane>(&ma, &mbh1, &ahi1, &ahi1);
                 cmma::execute::<i8, i8, i32, i32, cmma::Plane>(&ma, &mbl1, &alo1, &alo1);
-            }
-            else if sg == 4u32 {
+            } else if sg == 4u32 {
                 let ma = cmma::Matrix::<i8>::from_slice(
                     cmma::MatrixIdent::A,
-                    16usize, 16usize, 32usize,
+                    16usize,
+                    16usize,
+                    32usize,
                     cmma::MatrixLayout::RowMajor,
                     &a4,
                     32,
@@ -634,11 +656,12 @@ fn gemm_ternary_cmma_i8_direct(
                 cmma::execute::<i8, i8, i32, i32, cmma::Plane>(&ma, &mbl0, &alo0, &alo0);
                 cmma::execute::<i8, i8, i32, i32, cmma::Plane>(&ma, &mbh1, &ahi1, &ahi1);
                 cmma::execute::<i8, i8, i32, i32, cmma::Plane>(&ma, &mbl1, &alo1, &alo1);
-            }
-            else if sg == 5u32 {
+            } else if sg == 5u32 {
                 let ma = cmma::Matrix::<i8>::from_slice(
                     cmma::MatrixIdent::A,
-                    16usize, 16usize, 32usize,
+                    16usize,
+                    16usize,
+                    32usize,
                     cmma::MatrixLayout::RowMajor,
                     &a5,
                     32,
@@ -647,11 +670,12 @@ fn gemm_ternary_cmma_i8_direct(
                 cmma::execute::<i8, i8, i32, i32, cmma::Plane>(&ma, &mbl0, &alo0, &alo0);
                 cmma::execute::<i8, i8, i32, i32, cmma::Plane>(&ma, &mbh1, &ahi1, &ahi1);
                 cmma::execute::<i8, i8, i32, i32, cmma::Plane>(&ma, &mbl1, &alo1, &alo1);
-            }
-            else if sg == 6u32 {
+            } else if sg == 6u32 {
                 let ma = cmma::Matrix::<i8>::from_slice(
                     cmma::MatrixIdent::A,
-                    16usize, 16usize, 32usize,
+                    16usize,
+                    16usize,
+                    32usize,
                     cmma::MatrixLayout::RowMajor,
                     &a6,
                     32,
@@ -660,11 +684,12 @@ fn gemm_ternary_cmma_i8_direct(
                 cmma::execute::<i8, i8, i32, i32, cmma::Plane>(&ma, &mbl0, &alo0, &alo0);
                 cmma::execute::<i8, i8, i32, i32, cmma::Plane>(&ma, &mbh1, &ahi1, &ahi1);
                 cmma::execute::<i8, i8, i32, i32, cmma::Plane>(&ma, &mbl1, &alo1, &alo1);
-            }
-            else if sg == 7u32 {
+            } else if sg == 7u32 {
                 let ma = cmma::Matrix::<i8>::from_slice(
                     cmma::MatrixIdent::A,
-                    16usize, 16usize, 32usize,
+                    16usize,
+                    16usize,
+                    32usize,
                     cmma::MatrixLayout::RowMajor,
                     &a7,
                     32,
@@ -687,44 +712,37 @@ fn gemm_ternary_cmma_i8_direct(
             cmma::store(&mut g0l0, &alo0, 16, cmma::MatrixLayout::RowMajor);
             cmma::store(&mut g0h1, &ahi1, 16, cmma::MatrixLayout::RowMajor);
             cmma::store(&mut g0l1, &alo1, 16, cmma::MatrixLayout::RowMajor);
-        }
-        else if sg == 1u32 {
+        } else if sg == 1u32 {
             cmma::store(&mut g1h0, &ahi0, 16, cmma::MatrixLayout::RowMajor);
             cmma::store(&mut g1l0, &alo0, 16, cmma::MatrixLayout::RowMajor);
             cmma::store(&mut g1h1, &ahi1, 16, cmma::MatrixLayout::RowMajor);
             cmma::store(&mut g1l1, &alo1, 16, cmma::MatrixLayout::RowMajor);
-        }
-        else if sg == 2u32 {
+        } else if sg == 2u32 {
             cmma::store(&mut g2h0, &ahi0, 16, cmma::MatrixLayout::RowMajor);
             cmma::store(&mut g2l0, &alo0, 16, cmma::MatrixLayout::RowMajor);
             cmma::store(&mut g2h1, &ahi1, 16, cmma::MatrixLayout::RowMajor);
             cmma::store(&mut g2l1, &alo1, 16, cmma::MatrixLayout::RowMajor);
-        }
-        else if sg == 3u32 {
+        } else if sg == 3u32 {
             cmma::store(&mut g3h0, &ahi0, 16, cmma::MatrixLayout::RowMajor);
             cmma::store(&mut g3l0, &alo0, 16, cmma::MatrixLayout::RowMajor);
             cmma::store(&mut g3h1, &ahi1, 16, cmma::MatrixLayout::RowMajor);
             cmma::store(&mut g3l1, &alo1, 16, cmma::MatrixLayout::RowMajor);
-        }
-        else if sg == 4u32 {
+        } else if sg == 4u32 {
             cmma::store(&mut g4h0, &ahi0, 16, cmma::MatrixLayout::RowMajor);
             cmma::store(&mut g4l0, &alo0, 16, cmma::MatrixLayout::RowMajor);
             cmma::store(&mut g4h1, &ahi1, 16, cmma::MatrixLayout::RowMajor);
             cmma::store(&mut g4l1, &alo1, 16, cmma::MatrixLayout::RowMajor);
-        }
-        else if sg == 5u32 {
+        } else if sg == 5u32 {
             cmma::store(&mut g5h0, &ahi0, 16, cmma::MatrixLayout::RowMajor);
             cmma::store(&mut g5l0, &alo0, 16, cmma::MatrixLayout::RowMajor);
             cmma::store(&mut g5h1, &ahi1, 16, cmma::MatrixLayout::RowMajor);
             cmma::store(&mut g5l1, &alo1, 16, cmma::MatrixLayout::RowMajor);
-        }
-        else if sg == 6u32 {
+        } else if sg == 6u32 {
             cmma::store(&mut g6h0, &ahi0, 16, cmma::MatrixLayout::RowMajor);
             cmma::store(&mut g6l0, &alo0, 16, cmma::MatrixLayout::RowMajor);
             cmma::store(&mut g6h1, &ahi1, 16, cmma::MatrixLayout::RowMajor);
             cmma::store(&mut g6l1, &alo1, 16, cmma::MatrixLayout::RowMajor);
-        }
-        else if sg == 7u32 {
+        } else if sg == 7u32 {
             cmma::store(&mut g7h0, &ahi0, 16, cmma::MatrixLayout::RowMajor);
             cmma::store(&mut g7l0, &alo0, 16, cmma::MatrixLayout::RowMajor);
             cmma::store(&mut g7h1, &ahi1, 16, cmma::MatrixLayout::RowMajor);
@@ -741,305 +759,530 @@ fn gemm_ternary_cmma_i8_direct(
             if sg == 0u32 {
                 if t_sub == 0u32 {
                     o0 += sw * (f32::cast_from(g0h0[bh]) + f32::cast_from(g0l0[bh]) * one128);
-                    o1 += sw * (f32::cast_from(g0h0[bh + 1]) + f32::cast_from(g0l0[bh + 1]) * one128);
-                    o2 += sw * (f32::cast_from(g0h0[bh + 2]) + f32::cast_from(g0l0[bh + 2]) * one128);
-                    o3 += sw * (f32::cast_from(g0h0[bh + 3]) + f32::cast_from(g0l0[bh + 3]) * one128);
-                    o4 += sw * (f32::cast_from(g0h0[bh + 4]) + f32::cast_from(g0l0[bh + 4]) * one128);
-                    o5 += sw * (f32::cast_from(g0h0[bh + 5]) + f32::cast_from(g0l0[bh + 5]) * one128);
-                    o6 += sw * (f32::cast_from(g0h0[bh + 6]) + f32::cast_from(g0l0[bh + 6]) * one128);
-                    o7 += sw * (f32::cast_from(g0h0[bh + 7]) + f32::cast_from(g0l0[bh + 7]) * one128);
-                    o8 += sw * (f32::cast_from(g0h0[bh + 8]) + f32::cast_from(g0l0[bh + 8]) * one128);
-                    o9 += sw * (f32::cast_from(g0h0[bh + 9]) + f32::cast_from(g0l0[bh + 9]) * one128);
-                    o10 += sw * (f32::cast_from(g0h0[bh + 10]) + f32::cast_from(g0l0[bh + 10]) * one128);
-                    o11 += sw * (f32::cast_from(g0h0[bh + 11]) + f32::cast_from(g0l0[bh + 11]) * one128);
-                    o12 += sw * (f32::cast_from(g0h0[bh + 12]) + f32::cast_from(g0l0[bh + 12]) * one128);
-                    o13 += sw * (f32::cast_from(g0h0[bh + 13]) + f32::cast_from(g0l0[bh + 13]) * one128);
-                    o14 += sw * (f32::cast_from(g0h0[bh + 14]) + f32::cast_from(g0l0[bh + 14]) * one128);
-                    o15 += sw * (f32::cast_from(g0h0[bh + 15]) + f32::cast_from(g0l0[bh + 15]) * one128);
-                }
-                else {
+                    o1 +=
+                        sw * (f32::cast_from(g0h0[bh + 1]) + f32::cast_from(g0l0[bh + 1]) * one128);
+                    o2 +=
+                        sw * (f32::cast_from(g0h0[bh + 2]) + f32::cast_from(g0l0[bh + 2]) * one128);
+                    o3 +=
+                        sw * (f32::cast_from(g0h0[bh + 3]) + f32::cast_from(g0l0[bh + 3]) * one128);
+                    o4 +=
+                        sw * (f32::cast_from(g0h0[bh + 4]) + f32::cast_from(g0l0[bh + 4]) * one128);
+                    o5 +=
+                        sw * (f32::cast_from(g0h0[bh + 5]) + f32::cast_from(g0l0[bh + 5]) * one128);
+                    o6 +=
+                        sw * (f32::cast_from(g0h0[bh + 6]) + f32::cast_from(g0l0[bh + 6]) * one128);
+                    o7 +=
+                        sw * (f32::cast_from(g0h0[bh + 7]) + f32::cast_from(g0l0[bh + 7]) * one128);
+                    o8 +=
+                        sw * (f32::cast_from(g0h0[bh + 8]) + f32::cast_from(g0l0[bh + 8]) * one128);
+                    o9 +=
+                        sw * (f32::cast_from(g0h0[bh + 9]) + f32::cast_from(g0l0[bh + 9]) * one128);
+                    o10 += sw
+                        * (f32::cast_from(g0h0[bh + 10]) + f32::cast_from(g0l0[bh + 10]) * one128);
+                    o11 += sw
+                        * (f32::cast_from(g0h0[bh + 11]) + f32::cast_from(g0l0[bh + 11]) * one128);
+                    o12 += sw
+                        * (f32::cast_from(g0h0[bh + 12]) + f32::cast_from(g0l0[bh + 12]) * one128);
+                    o13 += sw
+                        * (f32::cast_from(g0h0[bh + 13]) + f32::cast_from(g0l0[bh + 13]) * one128);
+                    o14 += sw
+                        * (f32::cast_from(g0h0[bh + 14]) + f32::cast_from(g0l0[bh + 14]) * one128);
+                    o15 += sw
+                        * (f32::cast_from(g0h0[bh + 15]) + f32::cast_from(g0l0[bh + 15]) * one128);
+                } else {
                     o0 += sw * (f32::cast_from(g0h1[bh]) + f32::cast_from(g0l1[bh]) * one128);
-                    o1 += sw * (f32::cast_from(g0h1[bh + 1]) + f32::cast_from(g0l1[bh + 1]) * one128);
-                    o2 += sw * (f32::cast_from(g0h1[bh + 2]) + f32::cast_from(g0l1[bh + 2]) * one128);
-                    o3 += sw * (f32::cast_from(g0h1[bh + 3]) + f32::cast_from(g0l1[bh + 3]) * one128);
-                    o4 += sw * (f32::cast_from(g0h1[bh + 4]) + f32::cast_from(g0l1[bh + 4]) * one128);
-                    o5 += sw * (f32::cast_from(g0h1[bh + 5]) + f32::cast_from(g0l1[bh + 5]) * one128);
-                    o6 += sw * (f32::cast_from(g0h1[bh + 6]) + f32::cast_from(g0l1[bh + 6]) * one128);
-                    o7 += sw * (f32::cast_from(g0h1[bh + 7]) + f32::cast_from(g0l1[bh + 7]) * one128);
-                    o8 += sw * (f32::cast_from(g0h1[bh + 8]) + f32::cast_from(g0l1[bh + 8]) * one128);
-                    o9 += sw * (f32::cast_from(g0h1[bh + 9]) + f32::cast_from(g0l1[bh + 9]) * one128);
-                    o10 += sw * (f32::cast_from(g0h1[bh + 10]) + f32::cast_from(g0l1[bh + 10]) * one128);
-                    o11 += sw * (f32::cast_from(g0h1[bh + 11]) + f32::cast_from(g0l1[bh + 11]) * one128);
-                    o12 += sw * (f32::cast_from(g0h1[bh + 12]) + f32::cast_from(g0l1[bh + 12]) * one128);
-                    o13 += sw * (f32::cast_from(g0h1[bh + 13]) + f32::cast_from(g0l1[bh + 13]) * one128);
-                    o14 += sw * (f32::cast_from(g0h1[bh + 14]) + f32::cast_from(g0l1[bh + 14]) * one128);
-                    o15 += sw * (f32::cast_from(g0h1[bh + 15]) + f32::cast_from(g0l1[bh + 15]) * one128);
+                    o1 +=
+                        sw * (f32::cast_from(g0h1[bh + 1]) + f32::cast_from(g0l1[bh + 1]) * one128);
+                    o2 +=
+                        sw * (f32::cast_from(g0h1[bh + 2]) + f32::cast_from(g0l1[bh + 2]) * one128);
+                    o3 +=
+                        sw * (f32::cast_from(g0h1[bh + 3]) + f32::cast_from(g0l1[bh + 3]) * one128);
+                    o4 +=
+                        sw * (f32::cast_from(g0h1[bh + 4]) + f32::cast_from(g0l1[bh + 4]) * one128);
+                    o5 +=
+                        sw * (f32::cast_from(g0h1[bh + 5]) + f32::cast_from(g0l1[bh + 5]) * one128);
+                    o6 +=
+                        sw * (f32::cast_from(g0h1[bh + 6]) + f32::cast_from(g0l1[bh + 6]) * one128);
+                    o7 +=
+                        sw * (f32::cast_from(g0h1[bh + 7]) + f32::cast_from(g0l1[bh + 7]) * one128);
+                    o8 +=
+                        sw * (f32::cast_from(g0h1[bh + 8]) + f32::cast_from(g0l1[bh + 8]) * one128);
+                    o9 +=
+                        sw * (f32::cast_from(g0h1[bh + 9]) + f32::cast_from(g0l1[bh + 9]) * one128);
+                    o10 += sw
+                        * (f32::cast_from(g0h1[bh + 10]) + f32::cast_from(g0l1[bh + 10]) * one128);
+                    o11 += sw
+                        * (f32::cast_from(g0h1[bh + 11]) + f32::cast_from(g0l1[bh + 11]) * one128);
+                    o12 += sw
+                        * (f32::cast_from(g0h1[bh + 12]) + f32::cast_from(g0l1[bh + 12]) * one128);
+                    o13 += sw
+                        * (f32::cast_from(g0h1[bh + 13]) + f32::cast_from(g0l1[bh + 13]) * one128);
+                    o14 += sw
+                        * (f32::cast_from(g0h1[bh + 14]) + f32::cast_from(g0l1[bh + 14]) * one128);
+                    o15 += sw
+                        * (f32::cast_from(g0h1[bh + 15]) + f32::cast_from(g0l1[bh + 15]) * one128);
                 }
-            }
-            else if sg == 1u32 {
+            } else if sg == 1u32 {
                 if t_sub == 0u32 {
                     o0 += sw * (f32::cast_from(g1h0[bh]) + f32::cast_from(g1l0[bh]) * one128);
-                    o1 += sw * (f32::cast_from(g1h0[bh + 1]) + f32::cast_from(g1l0[bh + 1]) * one128);
-                    o2 += sw * (f32::cast_from(g1h0[bh + 2]) + f32::cast_from(g1l0[bh + 2]) * one128);
-                    o3 += sw * (f32::cast_from(g1h0[bh + 3]) + f32::cast_from(g1l0[bh + 3]) * one128);
-                    o4 += sw * (f32::cast_from(g1h0[bh + 4]) + f32::cast_from(g1l0[bh + 4]) * one128);
-                    o5 += sw * (f32::cast_from(g1h0[bh + 5]) + f32::cast_from(g1l0[bh + 5]) * one128);
-                    o6 += sw * (f32::cast_from(g1h0[bh + 6]) + f32::cast_from(g1l0[bh + 6]) * one128);
-                    o7 += sw * (f32::cast_from(g1h0[bh + 7]) + f32::cast_from(g1l0[bh + 7]) * one128);
-                    o8 += sw * (f32::cast_from(g1h0[bh + 8]) + f32::cast_from(g1l0[bh + 8]) * one128);
-                    o9 += sw * (f32::cast_from(g1h0[bh + 9]) + f32::cast_from(g1l0[bh + 9]) * one128);
-                    o10 += sw * (f32::cast_from(g1h0[bh + 10]) + f32::cast_from(g1l0[bh + 10]) * one128);
-                    o11 += sw * (f32::cast_from(g1h0[bh + 11]) + f32::cast_from(g1l0[bh + 11]) * one128);
-                    o12 += sw * (f32::cast_from(g1h0[bh + 12]) + f32::cast_from(g1l0[bh + 12]) * one128);
-                    o13 += sw * (f32::cast_from(g1h0[bh + 13]) + f32::cast_from(g1l0[bh + 13]) * one128);
-                    o14 += sw * (f32::cast_from(g1h0[bh + 14]) + f32::cast_from(g1l0[bh + 14]) * one128);
-                    o15 += sw * (f32::cast_from(g1h0[bh + 15]) + f32::cast_from(g1l0[bh + 15]) * one128);
-                }
-                else {
+                    o1 +=
+                        sw * (f32::cast_from(g1h0[bh + 1]) + f32::cast_from(g1l0[bh + 1]) * one128);
+                    o2 +=
+                        sw * (f32::cast_from(g1h0[bh + 2]) + f32::cast_from(g1l0[bh + 2]) * one128);
+                    o3 +=
+                        sw * (f32::cast_from(g1h0[bh + 3]) + f32::cast_from(g1l0[bh + 3]) * one128);
+                    o4 +=
+                        sw * (f32::cast_from(g1h0[bh + 4]) + f32::cast_from(g1l0[bh + 4]) * one128);
+                    o5 +=
+                        sw * (f32::cast_from(g1h0[bh + 5]) + f32::cast_from(g1l0[bh + 5]) * one128);
+                    o6 +=
+                        sw * (f32::cast_from(g1h0[bh + 6]) + f32::cast_from(g1l0[bh + 6]) * one128);
+                    o7 +=
+                        sw * (f32::cast_from(g1h0[bh + 7]) + f32::cast_from(g1l0[bh + 7]) * one128);
+                    o8 +=
+                        sw * (f32::cast_from(g1h0[bh + 8]) + f32::cast_from(g1l0[bh + 8]) * one128);
+                    o9 +=
+                        sw * (f32::cast_from(g1h0[bh + 9]) + f32::cast_from(g1l0[bh + 9]) * one128);
+                    o10 += sw
+                        * (f32::cast_from(g1h0[bh + 10]) + f32::cast_from(g1l0[bh + 10]) * one128);
+                    o11 += sw
+                        * (f32::cast_from(g1h0[bh + 11]) + f32::cast_from(g1l0[bh + 11]) * one128);
+                    o12 += sw
+                        * (f32::cast_from(g1h0[bh + 12]) + f32::cast_from(g1l0[bh + 12]) * one128);
+                    o13 += sw
+                        * (f32::cast_from(g1h0[bh + 13]) + f32::cast_from(g1l0[bh + 13]) * one128);
+                    o14 += sw
+                        * (f32::cast_from(g1h0[bh + 14]) + f32::cast_from(g1l0[bh + 14]) * one128);
+                    o15 += sw
+                        * (f32::cast_from(g1h0[bh + 15]) + f32::cast_from(g1l0[bh + 15]) * one128);
+                } else {
                     o0 += sw * (f32::cast_from(g1h1[bh]) + f32::cast_from(g1l1[bh]) * one128);
-                    o1 += sw * (f32::cast_from(g1h1[bh + 1]) + f32::cast_from(g1l1[bh + 1]) * one128);
-                    o2 += sw * (f32::cast_from(g1h1[bh + 2]) + f32::cast_from(g1l1[bh + 2]) * one128);
-                    o3 += sw * (f32::cast_from(g1h1[bh + 3]) + f32::cast_from(g1l1[bh + 3]) * one128);
-                    o4 += sw * (f32::cast_from(g1h1[bh + 4]) + f32::cast_from(g1l1[bh + 4]) * one128);
-                    o5 += sw * (f32::cast_from(g1h1[bh + 5]) + f32::cast_from(g1l1[bh + 5]) * one128);
-                    o6 += sw * (f32::cast_from(g1h1[bh + 6]) + f32::cast_from(g1l1[bh + 6]) * one128);
-                    o7 += sw * (f32::cast_from(g1h1[bh + 7]) + f32::cast_from(g1l1[bh + 7]) * one128);
-                    o8 += sw * (f32::cast_from(g1h1[bh + 8]) + f32::cast_from(g1l1[bh + 8]) * one128);
-                    o9 += sw * (f32::cast_from(g1h1[bh + 9]) + f32::cast_from(g1l1[bh + 9]) * one128);
-                    o10 += sw * (f32::cast_from(g1h1[bh + 10]) + f32::cast_from(g1l1[bh + 10]) * one128);
-                    o11 += sw * (f32::cast_from(g1h1[bh + 11]) + f32::cast_from(g1l1[bh + 11]) * one128);
-                    o12 += sw * (f32::cast_from(g1h1[bh + 12]) + f32::cast_from(g1l1[bh + 12]) * one128);
-                    o13 += sw * (f32::cast_from(g1h1[bh + 13]) + f32::cast_from(g1l1[bh + 13]) * one128);
-                    o14 += sw * (f32::cast_from(g1h1[bh + 14]) + f32::cast_from(g1l1[bh + 14]) * one128);
-                    o15 += sw * (f32::cast_from(g1h1[bh + 15]) + f32::cast_from(g1l1[bh + 15]) * one128);
+                    o1 +=
+                        sw * (f32::cast_from(g1h1[bh + 1]) + f32::cast_from(g1l1[bh + 1]) * one128);
+                    o2 +=
+                        sw * (f32::cast_from(g1h1[bh + 2]) + f32::cast_from(g1l1[bh + 2]) * one128);
+                    o3 +=
+                        sw * (f32::cast_from(g1h1[bh + 3]) + f32::cast_from(g1l1[bh + 3]) * one128);
+                    o4 +=
+                        sw * (f32::cast_from(g1h1[bh + 4]) + f32::cast_from(g1l1[bh + 4]) * one128);
+                    o5 +=
+                        sw * (f32::cast_from(g1h1[bh + 5]) + f32::cast_from(g1l1[bh + 5]) * one128);
+                    o6 +=
+                        sw * (f32::cast_from(g1h1[bh + 6]) + f32::cast_from(g1l1[bh + 6]) * one128);
+                    o7 +=
+                        sw * (f32::cast_from(g1h1[bh + 7]) + f32::cast_from(g1l1[bh + 7]) * one128);
+                    o8 +=
+                        sw * (f32::cast_from(g1h1[bh + 8]) + f32::cast_from(g1l1[bh + 8]) * one128);
+                    o9 +=
+                        sw * (f32::cast_from(g1h1[bh + 9]) + f32::cast_from(g1l1[bh + 9]) * one128);
+                    o10 += sw
+                        * (f32::cast_from(g1h1[bh + 10]) + f32::cast_from(g1l1[bh + 10]) * one128);
+                    o11 += sw
+                        * (f32::cast_from(g1h1[bh + 11]) + f32::cast_from(g1l1[bh + 11]) * one128);
+                    o12 += sw
+                        * (f32::cast_from(g1h1[bh + 12]) + f32::cast_from(g1l1[bh + 12]) * one128);
+                    o13 += sw
+                        * (f32::cast_from(g1h1[bh + 13]) + f32::cast_from(g1l1[bh + 13]) * one128);
+                    o14 += sw
+                        * (f32::cast_from(g1h1[bh + 14]) + f32::cast_from(g1l1[bh + 14]) * one128);
+                    o15 += sw
+                        * (f32::cast_from(g1h1[bh + 15]) + f32::cast_from(g1l1[bh + 15]) * one128);
                 }
-            }
-            else if sg == 2u32 {
+            } else if sg == 2u32 {
                 if t_sub == 0u32 {
                     o0 += sw * (f32::cast_from(g2h0[bh]) + f32::cast_from(g2l0[bh]) * one128);
-                    o1 += sw * (f32::cast_from(g2h0[bh + 1]) + f32::cast_from(g2l0[bh + 1]) * one128);
-                    o2 += sw * (f32::cast_from(g2h0[bh + 2]) + f32::cast_from(g2l0[bh + 2]) * one128);
-                    o3 += sw * (f32::cast_from(g2h0[bh + 3]) + f32::cast_from(g2l0[bh + 3]) * one128);
-                    o4 += sw * (f32::cast_from(g2h0[bh + 4]) + f32::cast_from(g2l0[bh + 4]) * one128);
-                    o5 += sw * (f32::cast_from(g2h0[bh + 5]) + f32::cast_from(g2l0[bh + 5]) * one128);
-                    o6 += sw * (f32::cast_from(g2h0[bh + 6]) + f32::cast_from(g2l0[bh + 6]) * one128);
-                    o7 += sw * (f32::cast_from(g2h0[bh + 7]) + f32::cast_from(g2l0[bh + 7]) * one128);
-                    o8 += sw * (f32::cast_from(g2h0[bh + 8]) + f32::cast_from(g2l0[bh + 8]) * one128);
-                    o9 += sw * (f32::cast_from(g2h0[bh + 9]) + f32::cast_from(g2l0[bh + 9]) * one128);
-                    o10 += sw * (f32::cast_from(g2h0[bh + 10]) + f32::cast_from(g2l0[bh + 10]) * one128);
-                    o11 += sw * (f32::cast_from(g2h0[bh + 11]) + f32::cast_from(g2l0[bh + 11]) * one128);
-                    o12 += sw * (f32::cast_from(g2h0[bh + 12]) + f32::cast_from(g2l0[bh + 12]) * one128);
-                    o13 += sw * (f32::cast_from(g2h0[bh + 13]) + f32::cast_from(g2l0[bh + 13]) * one128);
-                    o14 += sw * (f32::cast_from(g2h0[bh + 14]) + f32::cast_from(g2l0[bh + 14]) * one128);
-                    o15 += sw * (f32::cast_from(g2h0[bh + 15]) + f32::cast_from(g2l0[bh + 15]) * one128);
-                }
-                else {
+                    o1 +=
+                        sw * (f32::cast_from(g2h0[bh + 1]) + f32::cast_from(g2l0[bh + 1]) * one128);
+                    o2 +=
+                        sw * (f32::cast_from(g2h0[bh + 2]) + f32::cast_from(g2l0[bh + 2]) * one128);
+                    o3 +=
+                        sw * (f32::cast_from(g2h0[bh + 3]) + f32::cast_from(g2l0[bh + 3]) * one128);
+                    o4 +=
+                        sw * (f32::cast_from(g2h0[bh + 4]) + f32::cast_from(g2l0[bh + 4]) * one128);
+                    o5 +=
+                        sw * (f32::cast_from(g2h0[bh + 5]) + f32::cast_from(g2l0[bh + 5]) * one128);
+                    o6 +=
+                        sw * (f32::cast_from(g2h0[bh + 6]) + f32::cast_from(g2l0[bh + 6]) * one128);
+                    o7 +=
+                        sw * (f32::cast_from(g2h0[bh + 7]) + f32::cast_from(g2l0[bh + 7]) * one128);
+                    o8 +=
+                        sw * (f32::cast_from(g2h0[bh + 8]) + f32::cast_from(g2l0[bh + 8]) * one128);
+                    o9 +=
+                        sw * (f32::cast_from(g2h0[bh + 9]) + f32::cast_from(g2l0[bh + 9]) * one128);
+                    o10 += sw
+                        * (f32::cast_from(g2h0[bh + 10]) + f32::cast_from(g2l0[bh + 10]) * one128);
+                    o11 += sw
+                        * (f32::cast_from(g2h0[bh + 11]) + f32::cast_from(g2l0[bh + 11]) * one128);
+                    o12 += sw
+                        * (f32::cast_from(g2h0[bh + 12]) + f32::cast_from(g2l0[bh + 12]) * one128);
+                    o13 += sw
+                        * (f32::cast_from(g2h0[bh + 13]) + f32::cast_from(g2l0[bh + 13]) * one128);
+                    o14 += sw
+                        * (f32::cast_from(g2h0[bh + 14]) + f32::cast_from(g2l0[bh + 14]) * one128);
+                    o15 += sw
+                        * (f32::cast_from(g2h0[bh + 15]) + f32::cast_from(g2l0[bh + 15]) * one128);
+                } else {
                     o0 += sw * (f32::cast_from(g2h1[bh]) + f32::cast_from(g2l1[bh]) * one128);
-                    o1 += sw * (f32::cast_from(g2h1[bh + 1]) + f32::cast_from(g2l1[bh + 1]) * one128);
-                    o2 += sw * (f32::cast_from(g2h1[bh + 2]) + f32::cast_from(g2l1[bh + 2]) * one128);
-                    o3 += sw * (f32::cast_from(g2h1[bh + 3]) + f32::cast_from(g2l1[bh + 3]) * one128);
-                    o4 += sw * (f32::cast_from(g2h1[bh + 4]) + f32::cast_from(g2l1[bh + 4]) * one128);
-                    o5 += sw * (f32::cast_from(g2h1[bh + 5]) + f32::cast_from(g2l1[bh + 5]) * one128);
-                    o6 += sw * (f32::cast_from(g2h1[bh + 6]) + f32::cast_from(g2l1[bh + 6]) * one128);
-                    o7 += sw * (f32::cast_from(g2h1[bh + 7]) + f32::cast_from(g2l1[bh + 7]) * one128);
-                    o8 += sw * (f32::cast_from(g2h1[bh + 8]) + f32::cast_from(g2l1[bh + 8]) * one128);
-                    o9 += sw * (f32::cast_from(g2h1[bh + 9]) + f32::cast_from(g2l1[bh + 9]) * one128);
-                    o10 += sw * (f32::cast_from(g2h1[bh + 10]) + f32::cast_from(g2l1[bh + 10]) * one128);
-                    o11 += sw * (f32::cast_from(g2h1[bh + 11]) + f32::cast_from(g2l1[bh + 11]) * one128);
-                    o12 += sw * (f32::cast_from(g2h1[bh + 12]) + f32::cast_from(g2l1[bh + 12]) * one128);
-                    o13 += sw * (f32::cast_from(g2h1[bh + 13]) + f32::cast_from(g2l1[bh + 13]) * one128);
-                    o14 += sw * (f32::cast_from(g2h1[bh + 14]) + f32::cast_from(g2l1[bh + 14]) * one128);
-                    o15 += sw * (f32::cast_from(g2h1[bh + 15]) + f32::cast_from(g2l1[bh + 15]) * one128);
+                    o1 +=
+                        sw * (f32::cast_from(g2h1[bh + 1]) + f32::cast_from(g2l1[bh + 1]) * one128);
+                    o2 +=
+                        sw * (f32::cast_from(g2h1[bh + 2]) + f32::cast_from(g2l1[bh + 2]) * one128);
+                    o3 +=
+                        sw * (f32::cast_from(g2h1[bh + 3]) + f32::cast_from(g2l1[bh + 3]) * one128);
+                    o4 +=
+                        sw * (f32::cast_from(g2h1[bh + 4]) + f32::cast_from(g2l1[bh + 4]) * one128);
+                    o5 +=
+                        sw * (f32::cast_from(g2h1[bh + 5]) + f32::cast_from(g2l1[bh + 5]) * one128);
+                    o6 +=
+                        sw * (f32::cast_from(g2h1[bh + 6]) + f32::cast_from(g2l1[bh + 6]) * one128);
+                    o7 +=
+                        sw * (f32::cast_from(g2h1[bh + 7]) + f32::cast_from(g2l1[bh + 7]) * one128);
+                    o8 +=
+                        sw * (f32::cast_from(g2h1[bh + 8]) + f32::cast_from(g2l1[bh + 8]) * one128);
+                    o9 +=
+                        sw * (f32::cast_from(g2h1[bh + 9]) + f32::cast_from(g2l1[bh + 9]) * one128);
+                    o10 += sw
+                        * (f32::cast_from(g2h1[bh + 10]) + f32::cast_from(g2l1[bh + 10]) * one128);
+                    o11 += sw
+                        * (f32::cast_from(g2h1[bh + 11]) + f32::cast_from(g2l1[bh + 11]) * one128);
+                    o12 += sw
+                        * (f32::cast_from(g2h1[bh + 12]) + f32::cast_from(g2l1[bh + 12]) * one128);
+                    o13 += sw
+                        * (f32::cast_from(g2h1[bh + 13]) + f32::cast_from(g2l1[bh + 13]) * one128);
+                    o14 += sw
+                        * (f32::cast_from(g2h1[bh + 14]) + f32::cast_from(g2l1[bh + 14]) * one128);
+                    o15 += sw
+                        * (f32::cast_from(g2h1[bh + 15]) + f32::cast_from(g2l1[bh + 15]) * one128);
                 }
-            }
-            else if sg == 3u32 {
+            } else if sg == 3u32 {
                 if t_sub == 0u32 {
                     o0 += sw * (f32::cast_from(g3h0[bh]) + f32::cast_from(g3l0[bh]) * one128);
-                    o1 += sw * (f32::cast_from(g3h0[bh + 1]) + f32::cast_from(g3l0[bh + 1]) * one128);
-                    o2 += sw * (f32::cast_from(g3h0[bh + 2]) + f32::cast_from(g3l0[bh + 2]) * one128);
-                    o3 += sw * (f32::cast_from(g3h0[bh + 3]) + f32::cast_from(g3l0[bh + 3]) * one128);
-                    o4 += sw * (f32::cast_from(g3h0[bh + 4]) + f32::cast_from(g3l0[bh + 4]) * one128);
-                    o5 += sw * (f32::cast_from(g3h0[bh + 5]) + f32::cast_from(g3l0[bh + 5]) * one128);
-                    o6 += sw * (f32::cast_from(g3h0[bh + 6]) + f32::cast_from(g3l0[bh + 6]) * one128);
-                    o7 += sw * (f32::cast_from(g3h0[bh + 7]) + f32::cast_from(g3l0[bh + 7]) * one128);
-                    o8 += sw * (f32::cast_from(g3h0[bh + 8]) + f32::cast_from(g3l0[bh + 8]) * one128);
-                    o9 += sw * (f32::cast_from(g3h0[bh + 9]) + f32::cast_from(g3l0[bh + 9]) * one128);
-                    o10 += sw * (f32::cast_from(g3h0[bh + 10]) + f32::cast_from(g3l0[bh + 10]) * one128);
-                    o11 += sw * (f32::cast_from(g3h0[bh + 11]) + f32::cast_from(g3l0[bh + 11]) * one128);
-                    o12 += sw * (f32::cast_from(g3h0[bh + 12]) + f32::cast_from(g3l0[bh + 12]) * one128);
-                    o13 += sw * (f32::cast_from(g3h0[bh + 13]) + f32::cast_from(g3l0[bh + 13]) * one128);
-                    o14 += sw * (f32::cast_from(g3h0[bh + 14]) + f32::cast_from(g3l0[bh + 14]) * one128);
-                    o15 += sw * (f32::cast_from(g3h0[bh + 15]) + f32::cast_from(g3l0[bh + 15]) * one128);
-                }
-                else {
+                    o1 +=
+                        sw * (f32::cast_from(g3h0[bh + 1]) + f32::cast_from(g3l0[bh + 1]) * one128);
+                    o2 +=
+                        sw * (f32::cast_from(g3h0[bh + 2]) + f32::cast_from(g3l0[bh + 2]) * one128);
+                    o3 +=
+                        sw * (f32::cast_from(g3h0[bh + 3]) + f32::cast_from(g3l0[bh + 3]) * one128);
+                    o4 +=
+                        sw * (f32::cast_from(g3h0[bh + 4]) + f32::cast_from(g3l0[bh + 4]) * one128);
+                    o5 +=
+                        sw * (f32::cast_from(g3h0[bh + 5]) + f32::cast_from(g3l0[bh + 5]) * one128);
+                    o6 +=
+                        sw * (f32::cast_from(g3h0[bh + 6]) + f32::cast_from(g3l0[bh + 6]) * one128);
+                    o7 +=
+                        sw * (f32::cast_from(g3h0[bh + 7]) + f32::cast_from(g3l0[bh + 7]) * one128);
+                    o8 +=
+                        sw * (f32::cast_from(g3h0[bh + 8]) + f32::cast_from(g3l0[bh + 8]) * one128);
+                    o9 +=
+                        sw * (f32::cast_from(g3h0[bh + 9]) + f32::cast_from(g3l0[bh + 9]) * one128);
+                    o10 += sw
+                        * (f32::cast_from(g3h0[bh + 10]) + f32::cast_from(g3l0[bh + 10]) * one128);
+                    o11 += sw
+                        * (f32::cast_from(g3h0[bh + 11]) + f32::cast_from(g3l0[bh + 11]) * one128);
+                    o12 += sw
+                        * (f32::cast_from(g3h0[bh + 12]) + f32::cast_from(g3l0[bh + 12]) * one128);
+                    o13 += sw
+                        * (f32::cast_from(g3h0[bh + 13]) + f32::cast_from(g3l0[bh + 13]) * one128);
+                    o14 += sw
+                        * (f32::cast_from(g3h0[bh + 14]) + f32::cast_from(g3l0[bh + 14]) * one128);
+                    o15 += sw
+                        * (f32::cast_from(g3h0[bh + 15]) + f32::cast_from(g3l0[bh + 15]) * one128);
+                } else {
                     o0 += sw * (f32::cast_from(g3h1[bh]) + f32::cast_from(g3l1[bh]) * one128);
-                    o1 += sw * (f32::cast_from(g3h1[bh + 1]) + f32::cast_from(g3l1[bh + 1]) * one128);
-                    o2 += sw * (f32::cast_from(g3h1[bh + 2]) + f32::cast_from(g3l1[bh + 2]) * one128);
-                    o3 += sw * (f32::cast_from(g3h1[bh + 3]) + f32::cast_from(g3l1[bh + 3]) * one128);
-                    o4 += sw * (f32::cast_from(g3h1[bh + 4]) + f32::cast_from(g3l1[bh + 4]) * one128);
-                    o5 += sw * (f32::cast_from(g3h1[bh + 5]) + f32::cast_from(g3l1[bh + 5]) * one128);
-                    o6 += sw * (f32::cast_from(g3h1[bh + 6]) + f32::cast_from(g3l1[bh + 6]) * one128);
-                    o7 += sw * (f32::cast_from(g3h1[bh + 7]) + f32::cast_from(g3l1[bh + 7]) * one128);
-                    o8 += sw * (f32::cast_from(g3h1[bh + 8]) + f32::cast_from(g3l1[bh + 8]) * one128);
-                    o9 += sw * (f32::cast_from(g3h1[bh + 9]) + f32::cast_from(g3l1[bh + 9]) * one128);
-                    o10 += sw * (f32::cast_from(g3h1[bh + 10]) + f32::cast_from(g3l1[bh + 10]) * one128);
-                    o11 += sw * (f32::cast_from(g3h1[bh + 11]) + f32::cast_from(g3l1[bh + 11]) * one128);
-                    o12 += sw * (f32::cast_from(g3h1[bh + 12]) + f32::cast_from(g3l1[bh + 12]) * one128);
-                    o13 += sw * (f32::cast_from(g3h1[bh + 13]) + f32::cast_from(g3l1[bh + 13]) * one128);
-                    o14 += sw * (f32::cast_from(g3h1[bh + 14]) + f32::cast_from(g3l1[bh + 14]) * one128);
-                    o15 += sw * (f32::cast_from(g3h1[bh + 15]) + f32::cast_from(g3l1[bh + 15]) * one128);
+                    o1 +=
+                        sw * (f32::cast_from(g3h1[bh + 1]) + f32::cast_from(g3l1[bh + 1]) * one128);
+                    o2 +=
+                        sw * (f32::cast_from(g3h1[bh + 2]) + f32::cast_from(g3l1[bh + 2]) * one128);
+                    o3 +=
+                        sw * (f32::cast_from(g3h1[bh + 3]) + f32::cast_from(g3l1[bh + 3]) * one128);
+                    o4 +=
+                        sw * (f32::cast_from(g3h1[bh + 4]) + f32::cast_from(g3l1[bh + 4]) * one128);
+                    o5 +=
+                        sw * (f32::cast_from(g3h1[bh + 5]) + f32::cast_from(g3l1[bh + 5]) * one128);
+                    o6 +=
+                        sw * (f32::cast_from(g3h1[bh + 6]) + f32::cast_from(g3l1[bh + 6]) * one128);
+                    o7 +=
+                        sw * (f32::cast_from(g3h1[bh + 7]) + f32::cast_from(g3l1[bh + 7]) * one128);
+                    o8 +=
+                        sw * (f32::cast_from(g3h1[bh + 8]) + f32::cast_from(g3l1[bh + 8]) * one128);
+                    o9 +=
+                        sw * (f32::cast_from(g3h1[bh + 9]) + f32::cast_from(g3l1[bh + 9]) * one128);
+                    o10 += sw
+                        * (f32::cast_from(g3h1[bh + 10]) + f32::cast_from(g3l1[bh + 10]) * one128);
+                    o11 += sw
+                        * (f32::cast_from(g3h1[bh + 11]) + f32::cast_from(g3l1[bh + 11]) * one128);
+                    o12 += sw
+                        * (f32::cast_from(g3h1[bh + 12]) + f32::cast_from(g3l1[bh + 12]) * one128);
+                    o13 += sw
+                        * (f32::cast_from(g3h1[bh + 13]) + f32::cast_from(g3l1[bh + 13]) * one128);
+                    o14 += sw
+                        * (f32::cast_from(g3h1[bh + 14]) + f32::cast_from(g3l1[bh + 14]) * one128);
+                    o15 += sw
+                        * (f32::cast_from(g3h1[bh + 15]) + f32::cast_from(g3l1[bh + 15]) * one128);
                 }
-            }
-            else if sg == 4u32 {
+            } else if sg == 4u32 {
                 if t_sub == 0u32 {
                     o0 += sw * (f32::cast_from(g4h0[bh]) + f32::cast_from(g4l0[bh]) * one128);
-                    o1 += sw * (f32::cast_from(g4h0[bh + 1]) + f32::cast_from(g4l0[bh + 1]) * one128);
-                    o2 += sw * (f32::cast_from(g4h0[bh + 2]) + f32::cast_from(g4l0[bh + 2]) * one128);
-                    o3 += sw * (f32::cast_from(g4h0[bh + 3]) + f32::cast_from(g4l0[bh + 3]) * one128);
-                    o4 += sw * (f32::cast_from(g4h0[bh + 4]) + f32::cast_from(g4l0[bh + 4]) * one128);
-                    o5 += sw * (f32::cast_from(g4h0[bh + 5]) + f32::cast_from(g4l0[bh + 5]) * one128);
-                    o6 += sw * (f32::cast_from(g4h0[bh + 6]) + f32::cast_from(g4l0[bh + 6]) * one128);
-                    o7 += sw * (f32::cast_from(g4h0[bh + 7]) + f32::cast_from(g4l0[bh + 7]) * one128);
-                    o8 += sw * (f32::cast_from(g4h0[bh + 8]) + f32::cast_from(g4l0[bh + 8]) * one128);
-                    o9 += sw * (f32::cast_from(g4h0[bh + 9]) + f32::cast_from(g4l0[bh + 9]) * one128);
-                    o10 += sw * (f32::cast_from(g4h0[bh + 10]) + f32::cast_from(g4l0[bh + 10]) * one128);
-                    o11 += sw * (f32::cast_from(g4h0[bh + 11]) + f32::cast_from(g4l0[bh + 11]) * one128);
-                    o12 += sw * (f32::cast_from(g4h0[bh + 12]) + f32::cast_from(g4l0[bh + 12]) * one128);
-                    o13 += sw * (f32::cast_from(g4h0[bh + 13]) + f32::cast_from(g4l0[bh + 13]) * one128);
-                    o14 += sw * (f32::cast_from(g4h0[bh + 14]) + f32::cast_from(g4l0[bh + 14]) * one128);
-                    o15 += sw * (f32::cast_from(g4h0[bh + 15]) + f32::cast_from(g4l0[bh + 15]) * one128);
-                }
-                else {
+                    o1 +=
+                        sw * (f32::cast_from(g4h0[bh + 1]) + f32::cast_from(g4l0[bh + 1]) * one128);
+                    o2 +=
+                        sw * (f32::cast_from(g4h0[bh + 2]) + f32::cast_from(g4l0[bh + 2]) * one128);
+                    o3 +=
+                        sw * (f32::cast_from(g4h0[bh + 3]) + f32::cast_from(g4l0[bh + 3]) * one128);
+                    o4 +=
+                        sw * (f32::cast_from(g4h0[bh + 4]) + f32::cast_from(g4l0[bh + 4]) * one128);
+                    o5 +=
+                        sw * (f32::cast_from(g4h0[bh + 5]) + f32::cast_from(g4l0[bh + 5]) * one128);
+                    o6 +=
+                        sw * (f32::cast_from(g4h0[bh + 6]) + f32::cast_from(g4l0[bh + 6]) * one128);
+                    o7 +=
+                        sw * (f32::cast_from(g4h0[bh + 7]) + f32::cast_from(g4l0[bh + 7]) * one128);
+                    o8 +=
+                        sw * (f32::cast_from(g4h0[bh + 8]) + f32::cast_from(g4l0[bh + 8]) * one128);
+                    o9 +=
+                        sw * (f32::cast_from(g4h0[bh + 9]) + f32::cast_from(g4l0[bh + 9]) * one128);
+                    o10 += sw
+                        * (f32::cast_from(g4h0[bh + 10]) + f32::cast_from(g4l0[bh + 10]) * one128);
+                    o11 += sw
+                        * (f32::cast_from(g4h0[bh + 11]) + f32::cast_from(g4l0[bh + 11]) * one128);
+                    o12 += sw
+                        * (f32::cast_from(g4h0[bh + 12]) + f32::cast_from(g4l0[bh + 12]) * one128);
+                    o13 += sw
+                        * (f32::cast_from(g4h0[bh + 13]) + f32::cast_from(g4l0[bh + 13]) * one128);
+                    o14 += sw
+                        * (f32::cast_from(g4h0[bh + 14]) + f32::cast_from(g4l0[bh + 14]) * one128);
+                    o15 += sw
+                        * (f32::cast_from(g4h0[bh + 15]) + f32::cast_from(g4l0[bh + 15]) * one128);
+                } else {
                     o0 += sw * (f32::cast_from(g4h1[bh]) + f32::cast_from(g4l1[bh]) * one128);
-                    o1 += sw * (f32::cast_from(g4h1[bh + 1]) + f32::cast_from(g4l1[bh + 1]) * one128);
-                    o2 += sw * (f32::cast_from(g4h1[bh + 2]) + f32::cast_from(g4l1[bh + 2]) * one128);
-                    o3 += sw * (f32::cast_from(g4h1[bh + 3]) + f32::cast_from(g4l1[bh + 3]) * one128);
-                    o4 += sw * (f32::cast_from(g4h1[bh + 4]) + f32::cast_from(g4l1[bh + 4]) * one128);
-                    o5 += sw * (f32::cast_from(g4h1[bh + 5]) + f32::cast_from(g4l1[bh + 5]) * one128);
-                    o6 += sw * (f32::cast_from(g4h1[bh + 6]) + f32::cast_from(g4l1[bh + 6]) * one128);
-                    o7 += sw * (f32::cast_from(g4h1[bh + 7]) + f32::cast_from(g4l1[bh + 7]) * one128);
-                    o8 += sw * (f32::cast_from(g4h1[bh + 8]) + f32::cast_from(g4l1[bh + 8]) * one128);
-                    o9 += sw * (f32::cast_from(g4h1[bh + 9]) + f32::cast_from(g4l1[bh + 9]) * one128);
-                    o10 += sw * (f32::cast_from(g4h1[bh + 10]) + f32::cast_from(g4l1[bh + 10]) * one128);
-                    o11 += sw * (f32::cast_from(g4h1[bh + 11]) + f32::cast_from(g4l1[bh + 11]) * one128);
-                    o12 += sw * (f32::cast_from(g4h1[bh + 12]) + f32::cast_from(g4l1[bh + 12]) * one128);
-                    o13 += sw * (f32::cast_from(g4h1[bh + 13]) + f32::cast_from(g4l1[bh + 13]) * one128);
-                    o14 += sw * (f32::cast_from(g4h1[bh + 14]) + f32::cast_from(g4l1[bh + 14]) * one128);
-                    o15 += sw * (f32::cast_from(g4h1[bh + 15]) + f32::cast_from(g4l1[bh + 15]) * one128);
+                    o1 +=
+                        sw * (f32::cast_from(g4h1[bh + 1]) + f32::cast_from(g4l1[bh + 1]) * one128);
+                    o2 +=
+                        sw * (f32::cast_from(g4h1[bh + 2]) + f32::cast_from(g4l1[bh + 2]) * one128);
+                    o3 +=
+                        sw * (f32::cast_from(g4h1[bh + 3]) + f32::cast_from(g4l1[bh + 3]) * one128);
+                    o4 +=
+                        sw * (f32::cast_from(g4h1[bh + 4]) + f32::cast_from(g4l1[bh + 4]) * one128);
+                    o5 +=
+                        sw * (f32::cast_from(g4h1[bh + 5]) + f32::cast_from(g4l1[bh + 5]) * one128);
+                    o6 +=
+                        sw * (f32::cast_from(g4h1[bh + 6]) + f32::cast_from(g4l1[bh + 6]) * one128);
+                    o7 +=
+                        sw * (f32::cast_from(g4h1[bh + 7]) + f32::cast_from(g4l1[bh + 7]) * one128);
+                    o8 +=
+                        sw * (f32::cast_from(g4h1[bh + 8]) + f32::cast_from(g4l1[bh + 8]) * one128);
+                    o9 +=
+                        sw * (f32::cast_from(g4h1[bh + 9]) + f32::cast_from(g4l1[bh + 9]) * one128);
+                    o10 += sw
+                        * (f32::cast_from(g4h1[bh + 10]) + f32::cast_from(g4l1[bh + 10]) * one128);
+                    o11 += sw
+                        * (f32::cast_from(g4h1[bh + 11]) + f32::cast_from(g4l1[bh + 11]) * one128);
+                    o12 += sw
+                        * (f32::cast_from(g4h1[bh + 12]) + f32::cast_from(g4l1[bh + 12]) * one128);
+                    o13 += sw
+                        * (f32::cast_from(g4h1[bh + 13]) + f32::cast_from(g4l1[bh + 13]) * one128);
+                    o14 += sw
+                        * (f32::cast_from(g4h1[bh + 14]) + f32::cast_from(g4l1[bh + 14]) * one128);
+                    o15 += sw
+                        * (f32::cast_from(g4h1[bh + 15]) + f32::cast_from(g4l1[bh + 15]) * one128);
                 }
-            }
-            else if sg == 5u32 {
+            } else if sg == 5u32 {
                 if t_sub == 0u32 {
                     o0 += sw * (f32::cast_from(g5h0[bh]) + f32::cast_from(g5l0[bh]) * one128);
-                    o1 += sw * (f32::cast_from(g5h0[bh + 1]) + f32::cast_from(g5l0[bh + 1]) * one128);
-                    o2 += sw * (f32::cast_from(g5h0[bh + 2]) + f32::cast_from(g5l0[bh + 2]) * one128);
-                    o3 += sw * (f32::cast_from(g5h0[bh + 3]) + f32::cast_from(g5l0[bh + 3]) * one128);
-                    o4 += sw * (f32::cast_from(g5h0[bh + 4]) + f32::cast_from(g5l0[bh + 4]) * one128);
-                    o5 += sw * (f32::cast_from(g5h0[bh + 5]) + f32::cast_from(g5l0[bh + 5]) * one128);
-                    o6 += sw * (f32::cast_from(g5h0[bh + 6]) + f32::cast_from(g5l0[bh + 6]) * one128);
-                    o7 += sw * (f32::cast_from(g5h0[bh + 7]) + f32::cast_from(g5l0[bh + 7]) * one128);
-                    o8 += sw * (f32::cast_from(g5h0[bh + 8]) + f32::cast_from(g5l0[bh + 8]) * one128);
-                    o9 += sw * (f32::cast_from(g5h0[bh + 9]) + f32::cast_from(g5l0[bh + 9]) * one128);
-                    o10 += sw * (f32::cast_from(g5h0[bh + 10]) + f32::cast_from(g5l0[bh + 10]) * one128);
-                    o11 += sw * (f32::cast_from(g5h0[bh + 11]) + f32::cast_from(g5l0[bh + 11]) * one128);
-                    o12 += sw * (f32::cast_from(g5h0[bh + 12]) + f32::cast_from(g5l0[bh + 12]) * one128);
-                    o13 += sw * (f32::cast_from(g5h0[bh + 13]) + f32::cast_from(g5l0[bh + 13]) * one128);
-                    o14 += sw * (f32::cast_from(g5h0[bh + 14]) + f32::cast_from(g5l0[bh + 14]) * one128);
-                    o15 += sw * (f32::cast_from(g5h0[bh + 15]) + f32::cast_from(g5l0[bh + 15]) * one128);
-                }
-                else {
+                    o1 +=
+                        sw * (f32::cast_from(g5h0[bh + 1]) + f32::cast_from(g5l0[bh + 1]) * one128);
+                    o2 +=
+                        sw * (f32::cast_from(g5h0[bh + 2]) + f32::cast_from(g5l0[bh + 2]) * one128);
+                    o3 +=
+                        sw * (f32::cast_from(g5h0[bh + 3]) + f32::cast_from(g5l0[bh + 3]) * one128);
+                    o4 +=
+                        sw * (f32::cast_from(g5h0[bh + 4]) + f32::cast_from(g5l0[bh + 4]) * one128);
+                    o5 +=
+                        sw * (f32::cast_from(g5h0[bh + 5]) + f32::cast_from(g5l0[bh + 5]) * one128);
+                    o6 +=
+                        sw * (f32::cast_from(g5h0[bh + 6]) + f32::cast_from(g5l0[bh + 6]) * one128);
+                    o7 +=
+                        sw * (f32::cast_from(g5h0[bh + 7]) + f32::cast_from(g5l0[bh + 7]) * one128);
+                    o8 +=
+                        sw * (f32::cast_from(g5h0[bh + 8]) + f32::cast_from(g5l0[bh + 8]) * one128);
+                    o9 +=
+                        sw * (f32::cast_from(g5h0[bh + 9]) + f32::cast_from(g5l0[bh + 9]) * one128);
+                    o10 += sw
+                        * (f32::cast_from(g5h0[bh + 10]) + f32::cast_from(g5l0[bh + 10]) * one128);
+                    o11 += sw
+                        * (f32::cast_from(g5h0[bh + 11]) + f32::cast_from(g5l0[bh + 11]) * one128);
+                    o12 += sw
+                        * (f32::cast_from(g5h0[bh + 12]) + f32::cast_from(g5l0[bh + 12]) * one128);
+                    o13 += sw
+                        * (f32::cast_from(g5h0[bh + 13]) + f32::cast_from(g5l0[bh + 13]) * one128);
+                    o14 += sw
+                        * (f32::cast_from(g5h0[bh + 14]) + f32::cast_from(g5l0[bh + 14]) * one128);
+                    o15 += sw
+                        * (f32::cast_from(g5h0[bh + 15]) + f32::cast_from(g5l0[bh + 15]) * one128);
+                } else {
                     o0 += sw * (f32::cast_from(g5h1[bh]) + f32::cast_from(g5l1[bh]) * one128);
-                    o1 += sw * (f32::cast_from(g5h1[bh + 1]) + f32::cast_from(g5l1[bh + 1]) * one128);
-                    o2 += sw * (f32::cast_from(g5h1[bh + 2]) + f32::cast_from(g5l1[bh + 2]) * one128);
-                    o3 += sw * (f32::cast_from(g5h1[bh + 3]) + f32::cast_from(g5l1[bh + 3]) * one128);
-                    o4 += sw * (f32::cast_from(g5h1[bh + 4]) + f32::cast_from(g5l1[bh + 4]) * one128);
-                    o5 += sw * (f32::cast_from(g5h1[bh + 5]) + f32::cast_from(g5l1[bh + 5]) * one128);
-                    o6 += sw * (f32::cast_from(g5h1[bh + 6]) + f32::cast_from(g5l1[bh + 6]) * one128);
-                    o7 += sw * (f32::cast_from(g5h1[bh + 7]) + f32::cast_from(g5l1[bh + 7]) * one128);
-                    o8 += sw * (f32::cast_from(g5h1[bh + 8]) + f32::cast_from(g5l1[bh + 8]) * one128);
-                    o9 += sw * (f32::cast_from(g5h1[bh + 9]) + f32::cast_from(g5l1[bh + 9]) * one128);
-                    o10 += sw * (f32::cast_from(g5h1[bh + 10]) + f32::cast_from(g5l1[bh + 10]) * one128);
-                    o11 += sw * (f32::cast_from(g5h1[bh + 11]) + f32::cast_from(g5l1[bh + 11]) * one128);
-                    o12 += sw * (f32::cast_from(g5h1[bh + 12]) + f32::cast_from(g5l1[bh + 12]) * one128);
-                    o13 += sw * (f32::cast_from(g5h1[bh + 13]) + f32::cast_from(g5l1[bh + 13]) * one128);
-                    o14 += sw * (f32::cast_from(g5h1[bh + 14]) + f32::cast_from(g5l1[bh + 14]) * one128);
-                    o15 += sw * (f32::cast_from(g5h1[bh + 15]) + f32::cast_from(g5l1[bh + 15]) * one128);
+                    o1 +=
+                        sw * (f32::cast_from(g5h1[bh + 1]) + f32::cast_from(g5l1[bh + 1]) * one128);
+                    o2 +=
+                        sw * (f32::cast_from(g5h1[bh + 2]) + f32::cast_from(g5l1[bh + 2]) * one128);
+                    o3 +=
+                        sw * (f32::cast_from(g5h1[bh + 3]) + f32::cast_from(g5l1[bh + 3]) * one128);
+                    o4 +=
+                        sw * (f32::cast_from(g5h1[bh + 4]) + f32::cast_from(g5l1[bh + 4]) * one128);
+                    o5 +=
+                        sw * (f32::cast_from(g5h1[bh + 5]) + f32::cast_from(g5l1[bh + 5]) * one128);
+                    o6 +=
+                        sw * (f32::cast_from(g5h1[bh + 6]) + f32::cast_from(g5l1[bh + 6]) * one128);
+                    o7 +=
+                        sw * (f32::cast_from(g5h1[bh + 7]) + f32::cast_from(g5l1[bh + 7]) * one128);
+                    o8 +=
+                        sw * (f32::cast_from(g5h1[bh + 8]) + f32::cast_from(g5l1[bh + 8]) * one128);
+                    o9 +=
+                        sw * (f32::cast_from(g5h1[bh + 9]) + f32::cast_from(g5l1[bh + 9]) * one128);
+                    o10 += sw
+                        * (f32::cast_from(g5h1[bh + 10]) + f32::cast_from(g5l1[bh + 10]) * one128);
+                    o11 += sw
+                        * (f32::cast_from(g5h1[bh + 11]) + f32::cast_from(g5l1[bh + 11]) * one128);
+                    o12 += sw
+                        * (f32::cast_from(g5h1[bh + 12]) + f32::cast_from(g5l1[bh + 12]) * one128);
+                    o13 += sw
+                        * (f32::cast_from(g5h1[bh + 13]) + f32::cast_from(g5l1[bh + 13]) * one128);
+                    o14 += sw
+                        * (f32::cast_from(g5h1[bh + 14]) + f32::cast_from(g5l1[bh + 14]) * one128);
+                    o15 += sw
+                        * (f32::cast_from(g5h1[bh + 15]) + f32::cast_from(g5l1[bh + 15]) * one128);
                 }
-            }
-            else if sg == 6u32 {
+            } else if sg == 6u32 {
                 if t_sub == 0u32 {
                     o0 += sw * (f32::cast_from(g6h0[bh]) + f32::cast_from(g6l0[bh]) * one128);
-                    o1 += sw * (f32::cast_from(g6h0[bh + 1]) + f32::cast_from(g6l0[bh + 1]) * one128);
-                    o2 += sw * (f32::cast_from(g6h0[bh + 2]) + f32::cast_from(g6l0[bh + 2]) * one128);
-                    o3 += sw * (f32::cast_from(g6h0[bh + 3]) + f32::cast_from(g6l0[bh + 3]) * one128);
-                    o4 += sw * (f32::cast_from(g6h0[bh + 4]) + f32::cast_from(g6l0[bh + 4]) * one128);
-                    o5 += sw * (f32::cast_from(g6h0[bh + 5]) + f32::cast_from(g6l0[bh + 5]) * one128);
-                    o6 += sw * (f32::cast_from(g6h0[bh + 6]) + f32::cast_from(g6l0[bh + 6]) * one128);
-                    o7 += sw * (f32::cast_from(g6h0[bh + 7]) + f32::cast_from(g6l0[bh + 7]) * one128);
-                    o8 += sw * (f32::cast_from(g6h0[bh + 8]) + f32::cast_from(g6l0[bh + 8]) * one128);
-                    o9 += sw * (f32::cast_from(g6h0[bh + 9]) + f32::cast_from(g6l0[bh + 9]) * one128);
-                    o10 += sw * (f32::cast_from(g6h0[bh + 10]) + f32::cast_from(g6l0[bh + 10]) * one128);
-                    o11 += sw * (f32::cast_from(g6h0[bh + 11]) + f32::cast_from(g6l0[bh + 11]) * one128);
-                    o12 += sw * (f32::cast_from(g6h0[bh + 12]) + f32::cast_from(g6l0[bh + 12]) * one128);
-                    o13 += sw * (f32::cast_from(g6h0[bh + 13]) + f32::cast_from(g6l0[bh + 13]) * one128);
-                    o14 += sw * (f32::cast_from(g6h0[bh + 14]) + f32::cast_from(g6l0[bh + 14]) * one128);
-                    o15 += sw * (f32::cast_from(g6h0[bh + 15]) + f32::cast_from(g6l0[bh + 15]) * one128);
-                }
-                else {
+                    o1 +=
+                        sw * (f32::cast_from(g6h0[bh + 1]) + f32::cast_from(g6l0[bh + 1]) * one128);
+                    o2 +=
+                        sw * (f32::cast_from(g6h0[bh + 2]) + f32::cast_from(g6l0[bh + 2]) * one128);
+                    o3 +=
+                        sw * (f32::cast_from(g6h0[bh + 3]) + f32::cast_from(g6l0[bh + 3]) * one128);
+                    o4 +=
+                        sw * (f32::cast_from(g6h0[bh + 4]) + f32::cast_from(g6l0[bh + 4]) * one128);
+                    o5 +=
+                        sw * (f32::cast_from(g6h0[bh + 5]) + f32::cast_from(g6l0[bh + 5]) * one128);
+                    o6 +=
+                        sw * (f32::cast_from(g6h0[bh + 6]) + f32::cast_from(g6l0[bh + 6]) * one128);
+                    o7 +=
+                        sw * (f32::cast_from(g6h0[bh + 7]) + f32::cast_from(g6l0[bh + 7]) * one128);
+                    o8 +=
+                        sw * (f32::cast_from(g6h0[bh + 8]) + f32::cast_from(g6l0[bh + 8]) * one128);
+                    o9 +=
+                        sw * (f32::cast_from(g6h0[bh + 9]) + f32::cast_from(g6l0[bh + 9]) * one128);
+                    o10 += sw
+                        * (f32::cast_from(g6h0[bh + 10]) + f32::cast_from(g6l0[bh + 10]) * one128);
+                    o11 += sw
+                        * (f32::cast_from(g6h0[bh + 11]) + f32::cast_from(g6l0[bh + 11]) * one128);
+                    o12 += sw
+                        * (f32::cast_from(g6h0[bh + 12]) + f32::cast_from(g6l0[bh + 12]) * one128);
+                    o13 += sw
+                        * (f32::cast_from(g6h0[bh + 13]) + f32::cast_from(g6l0[bh + 13]) * one128);
+                    o14 += sw
+                        * (f32::cast_from(g6h0[bh + 14]) + f32::cast_from(g6l0[bh + 14]) * one128);
+                    o15 += sw
+                        * (f32::cast_from(g6h0[bh + 15]) + f32::cast_from(g6l0[bh + 15]) * one128);
+                } else {
                     o0 += sw * (f32::cast_from(g6h1[bh]) + f32::cast_from(g6l1[bh]) * one128);
-                    o1 += sw * (f32::cast_from(g6h1[bh + 1]) + f32::cast_from(g6l1[bh + 1]) * one128);
-                    o2 += sw * (f32::cast_from(g6h1[bh + 2]) + f32::cast_from(g6l1[bh + 2]) * one128);
-                    o3 += sw * (f32::cast_from(g6h1[bh + 3]) + f32::cast_from(g6l1[bh + 3]) * one128);
-                    o4 += sw * (f32::cast_from(g6h1[bh + 4]) + f32::cast_from(g6l1[bh + 4]) * one128);
-                    o5 += sw * (f32::cast_from(g6h1[bh + 5]) + f32::cast_from(g6l1[bh + 5]) * one128);
-                    o6 += sw * (f32::cast_from(g6h1[bh + 6]) + f32::cast_from(g6l1[bh + 6]) * one128);
-                    o7 += sw * (f32::cast_from(g6h1[bh + 7]) + f32::cast_from(g6l1[bh + 7]) * one128);
-                    o8 += sw * (f32::cast_from(g6h1[bh + 8]) + f32::cast_from(g6l1[bh + 8]) * one128);
-                    o9 += sw * (f32::cast_from(g6h1[bh + 9]) + f32::cast_from(g6l1[bh + 9]) * one128);
-                    o10 += sw * (f32::cast_from(g6h1[bh + 10]) + f32::cast_from(g6l1[bh + 10]) * one128);
-                    o11 += sw * (f32::cast_from(g6h1[bh + 11]) + f32::cast_from(g6l1[bh + 11]) * one128);
-                    o12 += sw * (f32::cast_from(g6h1[bh + 12]) + f32::cast_from(g6l1[bh + 12]) * one128);
-                    o13 += sw * (f32::cast_from(g6h1[bh + 13]) + f32::cast_from(g6l1[bh + 13]) * one128);
-                    o14 += sw * (f32::cast_from(g6h1[bh + 14]) + f32::cast_from(g6l1[bh + 14]) * one128);
-                    o15 += sw * (f32::cast_from(g6h1[bh + 15]) + f32::cast_from(g6l1[bh + 15]) * one128);
+                    o1 +=
+                        sw * (f32::cast_from(g6h1[bh + 1]) + f32::cast_from(g6l1[bh + 1]) * one128);
+                    o2 +=
+                        sw * (f32::cast_from(g6h1[bh + 2]) + f32::cast_from(g6l1[bh + 2]) * one128);
+                    o3 +=
+                        sw * (f32::cast_from(g6h1[bh + 3]) + f32::cast_from(g6l1[bh + 3]) * one128);
+                    o4 +=
+                        sw * (f32::cast_from(g6h1[bh + 4]) + f32::cast_from(g6l1[bh + 4]) * one128);
+                    o5 +=
+                        sw * (f32::cast_from(g6h1[bh + 5]) + f32::cast_from(g6l1[bh + 5]) * one128);
+                    o6 +=
+                        sw * (f32::cast_from(g6h1[bh + 6]) + f32::cast_from(g6l1[bh + 6]) * one128);
+                    o7 +=
+                        sw * (f32::cast_from(g6h1[bh + 7]) + f32::cast_from(g6l1[bh + 7]) * one128);
+                    o8 +=
+                        sw * (f32::cast_from(g6h1[bh + 8]) + f32::cast_from(g6l1[bh + 8]) * one128);
+                    o9 +=
+                        sw * (f32::cast_from(g6h1[bh + 9]) + f32::cast_from(g6l1[bh + 9]) * one128);
+                    o10 += sw
+                        * (f32::cast_from(g6h1[bh + 10]) + f32::cast_from(g6l1[bh + 10]) * one128);
+                    o11 += sw
+                        * (f32::cast_from(g6h1[bh + 11]) + f32::cast_from(g6l1[bh + 11]) * one128);
+                    o12 += sw
+                        * (f32::cast_from(g6h1[bh + 12]) + f32::cast_from(g6l1[bh + 12]) * one128);
+                    o13 += sw
+                        * (f32::cast_from(g6h1[bh + 13]) + f32::cast_from(g6l1[bh + 13]) * one128);
+                    o14 += sw
+                        * (f32::cast_from(g6h1[bh + 14]) + f32::cast_from(g6l1[bh + 14]) * one128);
+                    o15 += sw
+                        * (f32::cast_from(g6h1[bh + 15]) + f32::cast_from(g6l1[bh + 15]) * one128);
                 }
-            }
-            else if sg == 7u32 {
+            } else if sg == 7u32 {
                 if t_sub == 0u32 {
                     o0 += sw * (f32::cast_from(g7h0[bh]) + f32::cast_from(g7l0[bh]) * one128);
-                    o1 += sw * (f32::cast_from(g7h0[bh + 1]) + f32::cast_from(g7l0[bh + 1]) * one128);
-                    o2 += sw * (f32::cast_from(g7h0[bh + 2]) + f32::cast_from(g7l0[bh + 2]) * one128);
-                    o3 += sw * (f32::cast_from(g7h0[bh + 3]) + f32::cast_from(g7l0[bh + 3]) * one128);
-                    o4 += sw * (f32::cast_from(g7h0[bh + 4]) + f32::cast_from(g7l0[bh + 4]) * one128);
-                    o5 += sw * (f32::cast_from(g7h0[bh + 5]) + f32::cast_from(g7l0[bh + 5]) * one128);
-                    o6 += sw * (f32::cast_from(g7h0[bh + 6]) + f32::cast_from(g7l0[bh + 6]) * one128);
-                    o7 += sw * (f32::cast_from(g7h0[bh + 7]) + f32::cast_from(g7l0[bh + 7]) * one128);
-                    o8 += sw * (f32::cast_from(g7h0[bh + 8]) + f32::cast_from(g7l0[bh + 8]) * one128);
-                    o9 += sw * (f32::cast_from(g7h0[bh + 9]) + f32::cast_from(g7l0[bh + 9]) * one128);
-                    o10 += sw * (f32::cast_from(g7h0[bh + 10]) + f32::cast_from(g7l0[bh + 10]) * one128);
-                    o11 += sw * (f32::cast_from(g7h0[bh + 11]) + f32::cast_from(g7l0[bh + 11]) * one128);
-                    o12 += sw * (f32::cast_from(g7h0[bh + 12]) + f32::cast_from(g7l0[bh + 12]) * one128);
-                    o13 += sw * (f32::cast_from(g7h0[bh + 13]) + f32::cast_from(g7l0[bh + 13]) * one128);
-                    o14 += sw * (f32::cast_from(g7h0[bh + 14]) + f32::cast_from(g7l0[bh + 14]) * one128);
-                    o15 += sw * (f32::cast_from(g7h0[bh + 15]) + f32::cast_from(g7l0[bh + 15]) * one128);
-                }
-                else {
+                    o1 +=
+                        sw * (f32::cast_from(g7h0[bh + 1]) + f32::cast_from(g7l0[bh + 1]) * one128);
+                    o2 +=
+                        sw * (f32::cast_from(g7h0[bh + 2]) + f32::cast_from(g7l0[bh + 2]) * one128);
+                    o3 +=
+                        sw * (f32::cast_from(g7h0[bh + 3]) + f32::cast_from(g7l0[bh + 3]) * one128);
+                    o4 +=
+                        sw * (f32::cast_from(g7h0[bh + 4]) + f32::cast_from(g7l0[bh + 4]) * one128);
+                    o5 +=
+                        sw * (f32::cast_from(g7h0[bh + 5]) + f32::cast_from(g7l0[bh + 5]) * one128);
+                    o6 +=
+                        sw * (f32::cast_from(g7h0[bh + 6]) + f32::cast_from(g7l0[bh + 6]) * one128);
+                    o7 +=
+                        sw * (f32::cast_from(g7h0[bh + 7]) + f32::cast_from(g7l0[bh + 7]) * one128);
+                    o8 +=
+                        sw * (f32::cast_from(g7h0[bh + 8]) + f32::cast_from(g7l0[bh + 8]) * one128);
+                    o9 +=
+                        sw * (f32::cast_from(g7h0[bh + 9]) + f32::cast_from(g7l0[bh + 9]) * one128);
+                    o10 += sw
+                        * (f32::cast_from(g7h0[bh + 10]) + f32::cast_from(g7l0[bh + 10]) * one128);
+                    o11 += sw
+                        * (f32::cast_from(g7h0[bh + 11]) + f32::cast_from(g7l0[bh + 11]) * one128);
+                    o12 += sw
+                        * (f32::cast_from(g7h0[bh + 12]) + f32::cast_from(g7l0[bh + 12]) * one128);
+                    o13 += sw
+                        * (f32::cast_from(g7h0[bh + 13]) + f32::cast_from(g7l0[bh + 13]) * one128);
+                    o14 += sw
+                        * (f32::cast_from(g7h0[bh + 14]) + f32::cast_from(g7l0[bh + 14]) * one128);
+                    o15 += sw
+                        * (f32::cast_from(g7h0[bh + 15]) + f32::cast_from(g7l0[bh + 15]) * one128);
+                } else {
                     o0 += sw * (f32::cast_from(g7h1[bh]) + f32::cast_from(g7l1[bh]) * one128);
-                    o1 += sw * (f32::cast_from(g7h1[bh + 1]) + f32::cast_from(g7l1[bh + 1]) * one128);
-                    o2 += sw * (f32::cast_from(g7h1[bh + 2]) + f32::cast_from(g7l1[bh + 2]) * one128);
-                    o3 += sw * (f32::cast_from(g7h1[bh + 3]) + f32::cast_from(g7l1[bh + 3]) * one128);
-                    o4 += sw * (f32::cast_from(g7h1[bh + 4]) + f32::cast_from(g7l1[bh + 4]) * one128);
-                    o5 += sw * (f32::cast_from(g7h1[bh + 5]) + f32::cast_from(g7l1[bh + 5]) * one128);
-                    o6 += sw * (f32::cast_from(g7h1[bh + 6]) + f32::cast_from(g7l1[bh + 6]) * one128);
-                    o7 += sw * (f32::cast_from(g7h1[bh + 7]) + f32::cast_from(g7l1[bh + 7]) * one128);
-                    o8 += sw * (f32::cast_from(g7h1[bh + 8]) + f32::cast_from(g7l1[bh + 8]) * one128);
-                    o9 += sw * (f32::cast_from(g7h1[bh + 9]) + f32::cast_from(g7l1[bh + 9]) * one128);
-                    o10 += sw * (f32::cast_from(g7h1[bh + 10]) + f32::cast_from(g7l1[bh + 10]) * one128);
-                    o11 += sw * (f32::cast_from(g7h1[bh + 11]) + f32::cast_from(g7l1[bh + 11]) * one128);
-                    o12 += sw * (f32::cast_from(g7h1[bh + 12]) + f32::cast_from(g7l1[bh + 12]) * one128);
-                    o13 += sw * (f32::cast_from(g7h1[bh + 13]) + f32::cast_from(g7l1[bh + 13]) * one128);
-                    o14 += sw * (f32::cast_from(g7h1[bh + 14]) + f32::cast_from(g7l1[bh + 14]) * one128);
-                    o15 += sw * (f32::cast_from(g7h1[bh + 15]) + f32::cast_from(g7l1[bh + 15]) * one128);
+                    o1 +=
+                        sw * (f32::cast_from(g7h1[bh + 1]) + f32::cast_from(g7l1[bh + 1]) * one128);
+                    o2 +=
+                        sw * (f32::cast_from(g7h1[bh + 2]) + f32::cast_from(g7l1[bh + 2]) * one128);
+                    o3 +=
+                        sw * (f32::cast_from(g7h1[bh + 3]) + f32::cast_from(g7l1[bh + 3]) * one128);
+                    o4 +=
+                        sw * (f32::cast_from(g7h1[bh + 4]) + f32::cast_from(g7l1[bh + 4]) * one128);
+                    o5 +=
+                        sw * (f32::cast_from(g7h1[bh + 5]) + f32::cast_from(g7l1[bh + 5]) * one128);
+                    o6 +=
+                        sw * (f32::cast_from(g7h1[bh + 6]) + f32::cast_from(g7l1[bh + 6]) * one128);
+                    o7 +=
+                        sw * (f32::cast_from(g7h1[bh + 7]) + f32::cast_from(g7l1[bh + 7]) * one128);
+                    o8 +=
+                        sw * (f32::cast_from(g7h1[bh + 8]) + f32::cast_from(g7l1[bh + 8]) * one128);
+                    o9 +=
+                        sw * (f32::cast_from(g7h1[bh + 9]) + f32::cast_from(g7l1[bh + 9]) * one128);
+                    o10 += sw
+                        * (f32::cast_from(g7h1[bh + 10]) + f32::cast_from(g7l1[bh + 10]) * one128);
+                    o11 += sw
+                        * (f32::cast_from(g7h1[bh + 11]) + f32::cast_from(g7l1[bh + 11]) * one128);
+                    o12 += sw
+                        * (f32::cast_from(g7h1[bh + 12]) + f32::cast_from(g7l1[bh + 12]) * one128);
+                    o13 += sw
+                        * (f32::cast_from(g7h1[bh + 13]) + f32::cast_from(g7l1[bh + 13]) * one128);
+                    o14 += sw
+                        * (f32::cast_from(g7h1[bh + 14]) + f32::cast_from(g7l1[bh + 14]) * one128);
+                    o15 += sw
+                        * (f32::cast_from(g7h1[bh + 15]) + f32::cast_from(g7l1[bh + 15]) * one128);
                 }
             }
 

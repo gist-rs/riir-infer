@@ -78,14 +78,17 @@ use std::sync::Mutex;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use riir_infer_gpu::{
-    ActiveComputeClient, ActiveRuntime, CubeCLContext, Handle, create_f32, create_u32, read_f32,
+    ActiveComputeClient, ActiveRuntime, CubeCLContext, Handle, create_f32, create_u32,
     elementwise_cubecl::{
         AddBiasRowCubeCL, AddCubeCL, AddMaskBroadcastCubeCL, CopyAtCubeCL, CopyCubeCL,
         GeluErfCubeCL, GluGeluGateCubeCL, ReluCubeCL, ScaleCubeCL, SoftmaxRowsInplaceCubeCL,
     },
-    encoder_lane_cubecl::{GatherRowsCubeCL, MergeHeadsCubeCL, RopeRotateHalfCubeCL, SplitHeadsCubeCL},
+    encoder_lane_cubecl::{
+        GatherRowsCubeCL, MergeHeadsCubeCL, RopeRotateHalfCubeCL, SplitHeadsCubeCL,
+    },
     matmul_cubecl::{MatmulCubeCL, MatmulRrOffCubeCL, MatmulTransbOffCubeCL},
     norms_cubecl::LayerNormMeanBatchedCubeCL,
+    read_f32,
 };
 
 use super::super::{LayaError, Result};
@@ -187,9 +190,7 @@ impl CubeclBackend {
             *t = stamp;
             return h.clone();
         }
-        let h = self
-            .client
-            .empty(std::mem::size_of_val(dst));
+        let h = self.client.empty(std::mem::size_of_val(dst));
         map.insert(key, (h.clone(), stamp));
         h
     }
@@ -204,7 +205,7 @@ impl CubeclBackend {
         let slot = map
             .iter()
             .filter(|(k, _)| k.0 == ptr && k.1 >= src.len())
-            .max_by(|a, b| a.1 .1.cmp(&b.1 .1))
+            .max_by(|a, b| a.1.1.cmp(&b.1.1))
             .map(|(_, (h, _))| h.clone());
         let Some(h) = slot else {
             panic!(
@@ -439,9 +440,7 @@ impl Backend for CubeclBackend {
         let xb = self.chain_buf(x);
         let bb = self.weight_buf(bias);
         // SAFETY: bindings are the whole parents (asserted by the launcher).
-        unsafe {
-            AddBiasRowCubeCL::launch::<ActiveRuntime>(&self.client, xb, x.len(), bb, d)
-        };
+        unsafe { AddBiasRowCubeCL::launch::<ActiveRuntime>(&self.client, xb, x.len(), bb, d) };
     }
 
     fn scale(&self, x: &mut [f32], s: f32) {
@@ -473,7 +472,15 @@ impl Backend for CubeclBackend {
         // SAFETY: extents asserted above; parents bound whole. `sq` is the
         // CPU lane's scratch — ignored here (the trait doc's contract).
         unsafe {
-            LayerNormMeanBatchedCubeCL::launch::<ActiveRuntime>(&self.client, xb, wb, ob, rows, d, eps)
+            LayerNormMeanBatchedCubeCL::launch::<ActiveRuntime>(
+                &self.client,
+                xb,
+                wb,
+                ob,
+                rows,
+                d,
+                eps,
+            )
         };
     }
 
@@ -505,9 +512,7 @@ impl Backend for CubeclBackend {
         let fb = self.chain_buf(fused);
         let ob = self.chain_slot_for(out);
         // SAFETY: bindings are the whole parents (asserted by the launcher).
-        unsafe {
-            GluGeluGateCubeCL::launch::<ActiveRuntime>(&self.client, fb, ob, rows, i_sz)
-        };
+        unsafe { GluGeluGateCubeCL::launch::<ActiveRuntime>(&self.client, fb, ob, rows, i_sz) };
     }
 
     /// Rotate-half rope, one thread per (head, position, lane) pair —
@@ -675,9 +680,8 @@ impl Backend for CubeclBackend {
     fn download_into(&self, src: &[f32], out: &mut [f32]) {
         assert!(src.len() <= out.len(), "download extent");
         let h = self.resolve_written(src);
-        let got =
-            read_f32(&self.client, h)
-                .unwrap_or_else(|e| panic!("download_into: cubecl read failed: {e}"));
+        let got = read_f32(&self.client, h)
+            .unwrap_or_else(|e| panic!("download_into: cubecl read failed: {e}"));
         debug_assert!(got.len() >= src.len(), "read back fewer f32 than bound");
         out[..src.len()].copy_from_slice(&got[..src.len()]);
     }

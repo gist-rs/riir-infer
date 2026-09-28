@@ -46,10 +46,7 @@ use cubecl::server::Handle;
     feature = "gemv_fma_contract",
     cube(launch_unchecked, fast_math = FastMath::AllowContraction.into())
 )]
-#[cfg_attr(
-    not(feature = "gemv_fma_contract"),
-    cube(launch_unchecked)
-)]
+#[cfg_attr(not(feature = "gemv_fma_contract"), cube(launch_unchecked))]
 fn gemv_plane_f32(weight: &[f32], input: &[f32], output: &mut [f32]) {
     let n = input.len() as u32;
     let m = output.len() as u32;
@@ -124,16 +121,8 @@ fn gemv_plane_f32(weight: &[f32], input: &[f32], output: &mut [f32]) {
     feature = "gemv_fma_contract",
     cube(launch_unchecked, fast_math = FastMath::AllowContraction.into())
 )]
-#[cfg_attr(
-    not(feature = "gemv_fma_contract"),
-    cube(launch_unchecked)
-)]
-fn gemv_batched_plane_f32(
-    weight: &[f32],
-    input: &[f32],
-    output: &mut [f32],
-    params: &[f32],
-) {
+#[cfg_attr(not(feature = "gemv_fma_contract"), cube(launch_unchecked))]
+fn gemv_batched_plane_f32(weight: &[f32], input: &[f32], output: &mut [f32], params: &[f32]) {
     let batch = params[0usize] as u32;
     let in_dim = params[1usize] as u32;
     // `out_dim` MUST come from params, never `output.len() / batch` — the
@@ -204,10 +193,7 @@ fn gemv_batched_plane_f32(
     feature = "gemv_fma_contract",
     cube(launch_unchecked, fast_math = FastMath::AllowContraction.into())
 )]
-#[cfg_attr(
-    not(feature = "gemv_fma_contract"),
-    cube(launch_unchecked)
-)]
+#[cfg_attr(not(feature = "gemv_fma_contract"), cube(launch_unchecked))]
 fn gemv_tile_f32(weight: &[f32], input: &[f32], output: &mut [f32]) {
     let n = input.len() as u32;
     let m = output.len() as u32;
@@ -547,8 +533,8 @@ impl AddCubeCL {
 
 #[cfg(all(test, feature = "cubecl_runtime"))]
 mod tests {
-    use cubecl::features::Plane;
     use crate::cubecl_runtime::ActiveRuntime;
+    use cubecl::features::Plane;
 
     use crate::cubecl_runtime::CubeCLContext;
 
@@ -1251,8 +1237,7 @@ mod tests {
         let weight_handle = client.create_from_slice(f32::as_bytes(&weight_gpu));
         let input_handle = client.create_from_slice(f32::as_bytes(&input));
         // OVERSIZED: scratch_rows * out_dim instead of batch * out_dim.
-        let output_handle =
-            client.empty(scratch_rows * out_dim * core::mem::size_of::<f32>());
+        let output_handle = client.empty(scratch_rows * out_dim * core::mem::size_of::<f32>());
 
         unsafe {
             GemvBatchedCubeCL::launch::<ActiveRuntime>(

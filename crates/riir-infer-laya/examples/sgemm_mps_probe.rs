@@ -216,10 +216,16 @@ fn main() {
             let b: Vec<f32> = (0..k * n)
                 .map(|i| ((i * 40_503) % 997) as f32 / 997.0 - 0.5)
                 .collect();
-            let a_buf =
-                device.new_buffer_with_data(a.as_ptr().cast(), (a.len() * 4) as u64, RESOURCE_OPTIONS);
-            let b_buf =
-                device.new_buffer_with_data(b.as_ptr().cast(), (b.len() * 4) as u64, RESOURCE_OPTIONS);
+            let a_buf = device.new_buffer_with_data(
+                a.as_ptr().cast(),
+                (a.len() * 4) as u64,
+                RESOURCE_OPTIONS,
+            );
+            let b_buf = device.new_buffer_with_data(
+                b.as_ptr().cast(),
+                (b.len() * 4) as u64,
+                RESOURCE_OPTIONS,
+            );
             let o_nar = device.new_buffer((m * n * 4) as u64, RESOURCE_OPTIONS);
             let o_mps = device.new_buffer((m * n * 4) as u64, RESOURCE_OPTIONS);
             let (ma, mb, mc, gemm) = unsafe {
@@ -230,7 +236,9 @@ fn main() {
                     mps_gemm(&device, m, k, n),
                 )
             };
-            let uargs = [m as u32, n as u32, k as u32, k as u32, 1, n as u32, 1, 0, 0, 0];
+            let uargs = [
+                m as u32, n as u32, k as u32, k as u32, 1, n as u32, 1, 0, 0, 0,
+            ];
             let grid = MTLSize {
                 width: n.div_ceil(64) as u64,
                 height: m.div_ceil(32) as u64,
@@ -297,14 +305,21 @@ fn main() {
                         for kk in 0..k {
                             s += f64::from(a[i * k + kk]) * f64::from(b[kk * n + j]);
                         }
-                        cpu_rel = cpu_rel.max(((s as f32) - pm[i * n + j]).abs() / (s.abs() as f32).max(1.0));
+                        cpu_rel = cpu_rel
+                            .max(((s as f32) - pm[i * n + j]).abs() / (s.abs() as f32).max(1.0));
                     }
                 }
             }
-            assert!(wmax > 1.0, "{label} m{m}: outputs are ~zero (wmax {wmax}) — nothing computed");
+            assert!(
+                wmax > 1.0,
+                "{label} m{m}: outputs are ~zero (wmax {wmax}) — nothing computed"
+            );
             assert!(cpu_rel < 1e-3, "{label} m{m}: MPS vs CPU rel {cpu_rel:e}");
             let rel = dmax / wmax.max(1e-30);
-            assert!(rel < 1e-4, "{label} m{m}: MPS diverged from narrow rel {rel:e}");
+            assert!(
+                rel < 1e-4,
+                "{label} m{m}: MPS diverged from narrow rel {rel:e}"
+            );
             let (mut tn, mut tm) = (Vec::with_capacity(ROUNDS), Vec::with_capacity(ROUNDS));
             for r in 0..ROUNDS {
                 for pos in 0..2 {

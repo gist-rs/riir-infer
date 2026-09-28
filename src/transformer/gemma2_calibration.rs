@@ -33,12 +33,12 @@ pub use crate::gguf_loader::load_gemma2_f16_direct;
 // The layered table builder is substrate-owned since the Kimi-K3 fixture
 // (883 P0 second fixture, Bench 889): one builder, two fixtures. Re-exported
 // under its historical name so the bin + downstream imports are unchanged.
-pub use katgpt_core::fitted_anchor_table::LayeredVkCalibration as CalibrationTables;
-pub use katgpt_core::fitted_anchor_table::VkLayerTables;
-use crate::gemma_layer::GemmaTransformerWeightsF16;
 use super::attention_heads_parallel;
 use super::{ForwardContext, RAYON_MLP_THRESHOLD, RAYON_QKV_THRESHOLD};
+use crate::gemma_layer::GemmaTransformerWeightsF16;
 use crate::types::{self, Config};
+pub use katgpt_core::fitted_anchor_table::LayeredVkCalibration as CalibrationTables;
+pub use katgpt_core::fitted_anchor_table::VkLayerTables;
 use katgpt_transformer::MultiLayerKVCache;
 
 /// The calibration forward: the `forward_gemma2_f16` layer stack (f16
@@ -170,7 +170,11 @@ pub fn forward_gemma2_f16_tapped(
         types::matmul_f16(&mut ctx.x, &layer_weights.attn_wo, &ctx.attn_out, n, q_dim);
 
         // i. post-attn norm + residual
-        types::rmsnorm_with_gamma_eps(&mut ctx.x, &layer_weights.post_attn_norm, config.rms_norm_eps);
+        types::rmsnorm_with_gamma_eps(
+            &mut ctx.x,
+            &layer_weights.post_attn_norm,
+            config.rms_norm_eps,
+        );
         for i in 0..n {
             unsafe {
                 *ctx.x.get_unchecked_mut(i) += *ctx.xr.get_unchecked(i);
@@ -201,10 +205,20 @@ pub fn forward_gemma2_f16_tapped(
         types::gegelu_tanh(&mut ctx.hidden, &ctx.gate, &ctx.up);
 
         // m. down projection
-        types::matmul_f16_parallel(&mut ctx.x, &layer_weights.down_proj, &ctx.hidden, n, mlp_hidden);
+        types::matmul_f16_parallel(
+            &mut ctx.x,
+            &layer_weights.down_proj,
+            &ctx.hidden,
+            n,
+            mlp_hidden,
+        );
 
         // o. post-MLP norm + residual
-        types::rmsnorm_with_gamma_eps(&mut ctx.x, &layer_weights.post_mlp_norm, config.rms_norm_eps);
+        types::rmsnorm_with_gamma_eps(
+            &mut ctx.x,
+            &layer_weights.post_mlp_norm,
+            config.rms_norm_eps,
+        );
         for i in 0..n {
             unsafe {
                 *ctx.x.get_unchecked_mut(i) += *ctx.xr2.get_unchecked(i);

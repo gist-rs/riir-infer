@@ -44,8 +44,10 @@
 
 use std::sync::Arc;
 
-use cudarc::driver::safe::{CudaContext, CudaFunction, CudaModule, CudaStream, DevicePtr, LaunchConfig};
 use cudarc::driver::PushKernelArg;
+use cudarc::driver::safe::{
+    CudaContext, CudaFunction, CudaModule, CudaStream, DevicePtr, LaunchConfig,
+};
 
 /// Issue 754 T6 — the qg rows kernels' row cap. The kernel body owns rows
 /// in 16-row grid.z slices (`row_off = blockIdx.z * 16`), so the launcher
@@ -3068,7 +3070,10 @@ impl AttentionKernels {
         let attention_splitgqa_rows_qgma_devpos = module
             .load_function("attention_decode_splitgqa_partial_rows_qgma_f32_devpos")
             .map_err(|e| super::CudarcKernelError::Compile(e.to_string()))?;
-        for f in [&attention_splitgqa_rows_qgma, &attention_splitgqa_rows_qgma_devpos] {
+        for f in [
+            &attention_splitgqa_rows_qgma,
+            &attention_splitgqa_rows_qgma_devpos,
+        ] {
             f.set_attribute(
                 cudarc::driver::sys::CUfunction_attribute_enum::CU_FUNC_ATTRIBUTE_MAX_DYNAMIC_SHARED_SIZE_BYTES,
                 qg_smem,
@@ -3649,7 +3654,14 @@ impl AttentionKernels {
                 .map_err(|e| super::CudarcKernelError::Launch(e.to_string()))?;
         }
         self.launch_split_combine(
-            stream, part_m, part_l, part_out, attn_out, head_dim, n_head, n_chunks_max,
+            stream,
+            part_m,
+            part_l,
+            part_out,
+            attn_out,
+            head_dim,
+            n_head,
+            n_chunks_max,
         )
     }
 
@@ -3779,7 +3791,14 @@ impl AttentionKernels {
                 .map_err(|e| super::CudarcKernelError::Launch(e.to_string()))?;
         }
         self.launch_split_combine(
-            stream, part_m, part_l, part_out, attn_out, head_dim, n_head, n_chunks_max,
+            stream,
+            part_m,
+            part_l,
+            part_out,
+            attn_out,
+            head_dim,
+            n_head,
+            n_chunks_max,
         )
     }
 
@@ -5379,7 +5398,8 @@ mod tests {
         let mut out = vec![0.0f32; n_batch * head_dim];
         for b in 0..n_batch {
             let base = b * head_dim;
-            let mean_sq: f32 = (0..head_dim).map(|i| input[base + i].powi(2)).sum::<f32>() * inv_dim;
+            let mean_sq: f32 =
+                (0..head_dim).map(|i| input[base + i].powi(2)).sum::<f32>() * inv_dim;
             let inv_rms = 1.0 / (mean_sq + eps).sqrt();
             for i in 0..head_dim {
                 out[base + i] = input[base + i] * inv_rms * gamma[i];
@@ -5418,14 +5438,7 @@ mod tests {
         let mut q_cpu = q.clone();
         let mut k_cpu = k.clone();
         cpu_partial_rope(
-            &mut q_cpu,
-            &mut k_cpu,
-            rotary_dim,
-            head_dim,
-            n_head,
-            n_kv_head,
-            pos,
-            theta_base,
+            &mut q_cpu, &mut k_cpu, rotary_dim, head_dim, n_head, n_kv_head, pos, theta_base,
         );
 
         // GPU
@@ -5434,15 +5447,7 @@ mod tests {
 
         kernels
             .launch_rope(
-                &stream,
-                &q_dev,
-                &k_dev,
-                rotary_dim,
-                head_dim,
-                n_head,
-                n_kv_head,
-                pos,
-                theta_base,
+                &stream, &q_dev, &k_dev, rotary_dim, head_dim, n_head, n_kv_head, pos, theta_base,
             )
             .expect("launch");
         stream.synchronize().expect("sync");
@@ -5494,8 +5499,10 @@ mod tests {
         let q_scalar = stream.clone_htod(&q_init).unwrap();
         let k_scalar = stream.clone_htod(&k_init).unwrap();
         kernels
-            .launch_rope(&stream, &q_scalar, &k_scalar,
-                rotary_dim, head_dim, n_head, n_kv_head, pos, theta_base)
+            .launch_rope(
+                &stream, &q_scalar, &k_scalar, rotary_dim, head_dim, n_head, n_kv_head, pos,
+                theta_base,
+            )
             .expect("scalar launch");
 
         // Devpos variant — write pos to a 1-element device buffer.
@@ -5503,8 +5510,10 @@ mod tests {
         let q_devpos = stream.clone_htod(&q_init).unwrap();
         let k_devpos = stream.clone_htod(&k_init).unwrap();
         kernels
-            .launch_rope_devpos(&stream, &q_devpos, &k_devpos,
-                rotary_dim, head_dim, n_head, n_kv_head, &pos_dev, theta_base)
+            .launch_rope_devpos(
+                &stream, &q_devpos, &k_devpos, rotary_dim, head_dim, n_head, n_kv_head, &pos_dev,
+                theta_base,
+            )
             .expect("devpos launch");
         stream.synchronize().expect("sync");
 
@@ -5609,13 +5618,7 @@ mod tests {
 
         kernels
             .launch_rmsnorm_batched(
-                &stream,
-                &input_dev,
-                &gamma_dev,
-                &out_dev,
-                n_batch,
-                head_dim,
-                eps,
+                &stream, &input_dev, &gamma_dev, &out_dev, n_batch, head_dim, eps,
             )
             .expect("launch");
         stream.synchronize().expect("sync");
@@ -5629,8 +5632,13 @@ mod tests {
             let rel = (a - b).abs() / denom;
             max_rel = max_rel.max(rel);
         }
-        eprintln!("[rmsnorm_batched] head_dim={head_dim}, n_batch={n_batch}: max_rel={max_rel:.4e}");
-        assert!(max_rel < 1e-4, "RMSNorm batched max_rel {max_rel:.4e} > 1e-4");
+        eprintln!(
+            "[rmsnorm_batched] head_dim={head_dim}, n_batch={n_batch}: max_rel={max_rel:.4e}"
+        );
+        assert!(
+            max_rel < 1e-4,
+            "RMSNorm batched max_rel {max_rel:.4e} > 1e-4"
+        );
     }
 
     #[test]
@@ -5682,8 +5690,12 @@ mod tests {
         // Read back properly
         let mut key_cache_gpu = vec![0f32; max_seq * kvd];
         let mut value_cache_gpu = vec![0f32; max_seq * kvd];
-        stream.memcpy_dtoh(&key_cache_dev, &mut key_cache_gpu).unwrap();
-        stream.memcpy_dtoh(&value_cache_dev, &mut value_cache_gpu).unwrap();
+        stream
+            .memcpy_dtoh(&key_cache_dev, &mut key_cache_gpu)
+            .unwrap();
+        stream
+            .memcpy_dtoh(&value_cache_dev, &mut value_cache_gpu)
+            .unwrap();
 
         // Verify only position `pos` was written
         for j in 0..max_seq {
@@ -5757,7 +5769,10 @@ mod tests {
             max_diff = max_diff.max((value_s_out[i] - value_d_out[i]).abs());
         }
         eprintln!("[kv_cache_append_devpos_vs_scalar] max_diff={max_diff:.4e}");
-        assert!(max_diff < 1e-6, "kv_cache_append devpos max_diff {max_diff:.4e}");
+        assert!(
+            max_diff < 1e-6,
+            "kv_cache_append devpos max_diff {max_diff:.4e}"
+        );
     }
 
     #[test]
@@ -5931,7 +5946,10 @@ mod tests {
         eprintln!(
             "[attention_decode] head_dim={head_dim}, n_pos={n_positions}: max_diff={max_diff:.6e}"
         );
-        assert!(max_diff <= TOL, "head_dim=128 attention max_diff={max_diff:.6}");
+        assert!(
+            max_diff <= TOL,
+            "head_dim=128 attention max_diff={max_diff:.6}"
+        );
     }
 
     /// Issue 618 — verify attention_decode_f32_devpos matches scalar variant.
@@ -5981,16 +5999,26 @@ mod tests {
         // Scalar variant.
         let out_s = stream.alloc_zeros::<f32>(q_len).unwrap();
         kernels
-            .launch_attention_decode(&stream, &q_dev, &k_dev, &v_dev, &out_s,
-                head_dim, n_head, n_kv_head, n_positions)
+            .launch_attention_decode(
+                &stream,
+                &q_dev,
+                &k_dev,
+                &v_dev,
+                &out_s,
+                head_dim,
+                n_head,
+                n_kv_head,
+                n_positions,
+            )
             .expect("scalar");
 
         // Devpos variant — pos_dev = pos (n_positions = pos + 1).
         let pos_dev = stream.clone_htod(&[pos as i32]).unwrap();
         let out_d = stream.alloc_zeros::<f32>(q_len).unwrap();
         kernels
-            .launch_attention_decode_devpos(&stream, &q_dev, &k_dev, &v_dev, &out_d,
-                head_dim, n_head, n_kv_head, &pos_dev)
+            .launch_attention_decode_devpos(
+                &stream, &q_dev, &k_dev, &v_dev, &out_d, head_dim, n_head, n_kv_head, &pos_dev,
+            )
             .expect("devpos");
         stream.synchronize().expect("sync");
 
@@ -6004,7 +6032,10 @@ mod tests {
             max_diff = max_diff.max((out_s_cpu[i] - out_d_cpu[i]).abs());
         }
         eprintln!("[attention_decode_devpos_vs_scalar] max_diff={max_diff:.4e}");
-        assert!(max_diff < 1e-4, "attention_decode devpos max_diff {max_diff:.4e}");
+        assert!(
+            max_diff < 1e-4,
+            "attention_decode devpos max_diff {max_diff:.4e}"
+        );
     }
 
     #[test]
@@ -6131,8 +6162,7 @@ mod tests {
         let k_dev = stream.clone_htod(&k_orig).unwrap();
         kernels
             .launch_rope_backward(
-                &stream, &q_dev, &k_dev, rotary_dim, head_dim, n_head, n_kv_head,
-                pos, theta_base,
+                &stream, &q_dev, &k_dev, rotary_dim, head_dim, n_head, n_kv_head, pos, theta_base,
             )
             .expect("launch backward");
         stream.synchronize().expect("sync");
@@ -6159,8 +6189,7 @@ mod tests {
         // Apply forward RoPE on the backward output.
         kernels
             .launch_rope(
-                &stream, &q_dev, &k_dev, rotary_dim, head_dim, n_head, n_kv_head,
-                pos, theta_base,
+                &stream, &q_dev, &k_dev, rotary_dim, head_dim, n_head, n_kv_head, pos, theta_base,
             )
             .expect("launch forward");
         stream.synchronize().expect("sync");

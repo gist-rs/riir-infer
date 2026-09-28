@@ -148,10 +148,7 @@ impl MetalTensorZeroCopyGemm {
     /// kernel, and returns a dispatch context. Returns `Err` if:
     /// - wgpu isn't using the Metal backend (non-macOS without the feature)
     /// - MSL compilation fails (missing `metal::tensor` support — Metal 3.1+)
-    pub fn new(
-        wgpu_device: Arc<WgpuDevice>,
-        wgpu_queue: Arc<WgpuQueue>,
-    ) -> Result<Self, String> {
+    pub fn new(wgpu_device: Arc<WgpuDevice>, wgpu_queue: Arc<WgpuQueue>) -> Result<Self, String> {
         // Extract the raw Metal device + queue (T4 pattern).
         let device_ptr: *mut metal::MTLDevice = unsafe {
             let guard = wgpu_device.as_hal::<wgpu::hal::api::Metal>();
@@ -366,7 +363,7 @@ impl MetalTensorZeroCopyGemm {
         // which dispatches far too many workgroups + causes out-of-bounds writes.
         // (Issue 656's `MetalTensorGemm::launch` uses `dispatch_thread_groups`.)
         let grid = MTLSize {
-            width: (p as u64).div_ceil(NRB as u64), // token tiles
+            width: (p as u64).div_ceil(NRB as u64),    // token tiles
             height: (w.m as u64).div_ceil(NRA as u64), // feature tiles
             depth: 1,
         };
@@ -399,7 +396,7 @@ impl MetalTensorZeroCopyGemm {
         encoder.set_buffer(1, Some(neg_ref), neg_off);
         encoder.set_buffer(2, Some(scale_ref), scale_off);
         encoder.set_buffer(3, Some(input_ref), input_off);
-        encoder.set_buffer(4, Some(&dedicated_output), 0);  // offset 0 — dedicated
+        encoder.set_buffer(4, Some(&dedicated_output), 0); // offset 0 — dedicated
 
         // Scalar bindings (5..9 match the MSL `constant uint&` declarations).
         encoder.set_bytes(5, 4, &blocks64 as *const u32 as *const _);

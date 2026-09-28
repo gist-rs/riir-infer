@@ -367,8 +367,12 @@ pub fn forward_deltanet_layer(
     // The body reads the projections back out of `scratch`.
     layer.in_proj_qkv.matvec(&x[..n_embd], &mut scratch.qkv);
     layer.in_proj_z.matvec(&x[..n_embd], &mut scratch.z);
-    layer.in_proj_a.matvec(&x[..n_embd], &mut scratch.ab_raw[..n_v_heads]);
-    layer.in_proj_b.matvec(&x[..n_embd], &mut scratch.ab_raw[n_v_heads..]);
+    layer
+        .in_proj_a
+        .matvec(&x[..n_embd], &mut scratch.ab_raw[..n_v_heads]);
+    layer
+        .in_proj_b
+        .matvec(&x[..n_embd], &mut scratch.ab_raw[n_v_heads..]);
 
     deltanet_layer_recurrent_body(layer, state, conv_state, config, scratch);
 
@@ -440,8 +444,20 @@ pub(super) fn deltanet_layer_recurrent_body(
     // When `repeat_factor > 1`, each k/q head is broadcast to `repeat_factor`
     // v heads (ggml_repeat modulo semantics — see `expand_heads_into`).
     let repeat_factor = n_v_heads / n_k_heads;
-    expand_heads_into(q_slice, n_k_heads, key_dim, repeat_factor, &mut scratch.q_normed);
-    expand_heads_into(k_slice, n_k_heads, key_dim, repeat_factor, &mut scratch.k_normed);
+    expand_heads_into(
+        q_slice,
+        n_k_heads,
+        key_dim,
+        repeat_factor,
+        &mut scratch.q_normed,
+    );
+    expand_heads_into(
+        k_slice,
+        n_k_heads,
+        key_dim,
+        repeat_factor,
+        &mut scratch.k_normed,
+    );
     for h in 0..n_v_heads {
         let off = h * key_dim;
         l2_normalize(&mut scratch.q_normed[off..off + key_dim]);
@@ -1140,7 +1156,11 @@ pub fn forward_qwen_deltanet_evictable<'a>(
         }
 
         scratch.residual[..n].copy_from_slice(&x[..n]);
-        rmsnorm_with_gamma_eps(&mut x[..n], &layer_weights.post_attn_norm, config.rms_norm_eps);
+        rmsnorm_with_gamma_eps(
+            &mut x[..n],
+            &layer_weights.post_attn_norm,
+            config.rms_norm_eps,
+        );
 
         layer_weights.gate_proj.matvec(&x[..n], &mut scratch.gate);
         layer_weights.up_proj.matvec(&x[..n], &mut scratch.up);
@@ -1176,6 +1196,16 @@ pub fn forward_qwen_deltanet_evictable<'a>(
 /// (Issue 598 — the actual wiring-in of the Issue 597 substrate).
 /// Pre-allocated once at `new()` and reused across all layers + all positions;
 /// zero per-layer allocation on the hot path.
+//
+// The `dn_*` buffers are READ only by `prefill_qwen_deltanet_chunk_into`
+// (feature `kv_eviction`); the ungated prefill path constructs the context
+// without them. Without this mirror-of-the-gate allow, every combo that
+// compiles `deltanet` without `kv_eviction` (e.g. Issue 022's
+// `twt_bonsai`) dies on dead_code — surfaced 2026-09-28 by the first
+// example to combine `twt_profile` with the root ternary forward. Fix
+// path (field-level cfg split of ::new) is the reader-side surgery that
+// file's other lanes should own.
+#[cfg_attr(not(feature = "kv_eviction"), allow(dead_code))]
 pub struct PrefillContext {
     /// Hidden states for all prompt positions: `[seq_len * n_embd]`.
     /// Carried between layers as input/output.
@@ -1259,9 +1289,16 @@ impl PrefillContext {
                     + config.deltanet_linear_n_value_heads * config.deltanet_linear_head_dim;
                 vec![0.0f32; cap * qkv_dim]
             },
-            dn_z: vec![0.0f32; cap * config.deltanet_linear_n_value_heads * config.deltanet_linear_head_dim],
+            dn_z: vec![
+                0.0f32;
+                cap * config.deltanet_linear_n_value_heads * config.deltanet_linear_head_dim
+            ],
             dn_ab: vec![0.0f32; cap * 2 * config.deltanet_linear_n_value_heads],
-            dn_out: vec![0.0f32; cap * config.deltanet_linear_n_value_heads * config.deltanet_linear_head_dim],
+            dn_out: vec![
+                0.0f32;
+                cap * config.deltanet_linear_n_value_heads
+                    * config.deltanet_linear_head_dim
+            ],
             dn_out_proj: vec![0.0f32; cap * n],
         }
     }
@@ -1758,9 +1795,8 @@ pub fn prefill_qwen_deltanet_chunk_into(
                     .copy_from_slice(&prefill_ctx.dn_z[p * v_dim..(p + 1) * v_dim]);
                 // a lives in the dense [0 .. seq·nv) block, b in [seq·nv ..
                 // seq·2·nv) — matching the two matmat writes below.
-                scratch.deltanet.ab_raw[..n_v_heads].copy_from_slice(
-                    &prefill_ctx.dn_ab[p * n_v_heads..(p + 1) * n_v_heads],
-                );
+                scratch.deltanet.ab_raw[..n_v_heads]
+                    .copy_from_slice(&prefill_ctx.dn_ab[p * n_v_heads..(p + 1) * n_v_heads]);
                 scratch.deltanet.ab_raw[n_v_heads..2 * n_v_heads].copy_from_slice(
                     &prefill_ctx.dn_ab[seq_len * n_v_heads + p * n_v_heads
                         ..seq_len * n_v_heads + (p + 1) * n_v_heads],
@@ -1803,7 +1839,10 @@ pub fn prefill_qwen_deltanet_chunk_into(
             }
             batched_mlp(prefill_ctx, layer_weights, seq_len, n, mlp, eps);
             if let (true, Some(t)) = (prof, t_layer) {
-                eprintln!("# [prof] chunk-pos0={pos0} deltanet layer {layer_idx}: total {:?}", t.elapsed());
+                eprintln!(
+                    "# [prof] chunk-pos0={pos0} deltanet layer {layer_idx}: total {:?}",
+                    t.elapsed()
+                );
             }
         } else {
             // ── Attention layer ───────────────────────────────
@@ -1962,7 +2001,10 @@ pub fn prefill_qwen_deltanet_chunk_into(
             // Phase D (batched MLP).
             batched_mlp(prefill_ctx, layer_weights, seq_len, n, mlp, eps);
             if let (true, Some(t)) = (prof, t_layer) {
-                eprintln!("# [prof] chunk-pos0={pos0} attention layer {layer_idx}: {:?}", t.elapsed());
+                eprintln!(
+                    "# [prof] chunk-pos0={pos0} attention layer {layer_idx}: {:?}",
+                    t.elapsed()
+                );
             }
         }
     }

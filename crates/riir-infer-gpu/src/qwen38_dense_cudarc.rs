@@ -68,15 +68,15 @@
 use std::path::Path;
 use std::sync::Arc;
 
-use cudarc::driver::safe::{CudaContext, CudaFunction, CudaModule, CudaSlice, CudaStream};
 use cudarc::driver::LaunchConfig;
 use cudarc::driver::PushKernelArg;
-use riir_infer_core::gguf_loader::{GgufFile, GgmlType};
+use cudarc::driver::safe::{CudaContext, CudaFunction, CudaModule, CudaSlice, CudaStream};
+use riir_infer_core::gguf_loader::{GgmlType, GgufFile};
 
+use crate::cudarc_kernels::ElementwiseKernels;
 use crate::cudarc_kernels::attention::AttentionKernels;
 use crate::cudarc_kernels::attention_score_mma::AttentionScoreMmaKernels;
 use crate::cudarc_kernels::deltanet::DeltanetKernels;
-use crate::cudarc_kernels::ElementwiseKernels;
 use crate::qwen38_verify_mma::VerifyMmaKernels;
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -1511,7 +1511,10 @@ impl DenseKernels {
         dim: usize,
         eps: f32,
     ) -> Result<(), String> {
-        assert!(dim.is_multiple_of(16), "fused rnq: dim % 16 == 0 (got {dim})");
+        assert!(
+            dim.is_multiple_of(16),
+            "fused rnq: dim % 16 == 0 (got {dim})"
+        );
         let inv_dim = 1.0f32 / dim as f32;
         let (dim_i, groups_i) = (dim as i32, (dim / 16) as i32);
         // SAFETY: caller contract above (buffer extents + divisibility).
@@ -1795,7 +1798,6 @@ impl DenseKernels {
         Ok(())
     }
 
-
     /// The single-row q8 GEMV (the production decode path's kernel — the
     /// rows twins' bit-identity reference). Public so integration tests can
     /// drive the shipped kernel directly (the `launch_rmsnorm_quant_x_q8`
@@ -1820,11 +1822,7 @@ impl DenseKernels {
     ) -> Result<(), String> {
         let (m_i, n_i, bpr_i) = (m as i32, n as i32, blocks_per_row as i32);
         let grid = m.div_ceil(8).max(1) as u32;
-        let func = if q4 {
-            &self.q4k_q8x
-        } else {
-            &self.q6k_q8x
-        };
+        let func = if q4 { &self.q4k_q8x } else { &self.q6k_q8x };
         // SAFETY: caller contract above.
         unsafe {
             stream
@@ -1872,11 +1870,7 @@ impl DenseKernels {
     ) -> Result<(), String> {
         let (m_i, n_i, bpr_i) = (m as i32, n as i32, blocks_per_row as i32);
         let grid = m.div_ceil(8).max(1) as u32;
-        let func = if q4 {
-            &self.q4k_q8x
-        } else {
-            &self.q6k_q8x
-        };
+        let func = if q4 { &self.q4k_q8x } else { &self.q6k_q8x };
         // SAFETY: caller contract above (exact-size views).
         unsafe {
             stream
@@ -1987,8 +1981,7 @@ impl DenseKernels {
         p: usize,
     ) -> Result<(), String> {
         assert!(p <= 16 && n.is_multiple_of(32), "gemv rows: p<=16, n%32==0");
-        let (m_i, n_i, bpr_i, p_i) =
-            (m as i32, n as i32, blocks_per_row as i32, p as i32);
+        let (m_i, n_i, bpr_i, p_i) = (m as i32, n as i32, blocks_per_row as i32, p as i32);
         // The bit-identical arm: warp per row PAIR (R=2), lane-strided
         // sub-blocks + butterfly — per element equals the single-row kernel.
         let grid = m.div_ceil(16).max(1) as u32;
@@ -2040,8 +2033,7 @@ impl DenseKernels {
         p: usize,
     ) -> Result<(), String> {
         assert!(p <= 16 && n.is_multiple_of(32), "gemv rows: p<=16, n%32==0");
-        let (m_i, n_i, bpr_i, p_i) =
-            (m as i32, n as i32, blocks_per_row as i32, p as i32);
+        let (m_i, n_i, bpr_i, p_i) = (m as i32, n as i32, blocks_per_row as i32, p as i32);
         // Shape B: 8 output rows per warp (grid = m/64 blocks of 8 warps).
         let grid = m.div_ceil(64).max(1) as u32;
         // SAFETY: caller contract above.
@@ -2087,8 +2079,7 @@ impl DenseKernels {
         p: usize,
     ) -> Result<(), String> {
         assert!(p <= 16 && n.is_multiple_of(16), "gemv rows: p<=16, n%16==0");
-        let (m_i, n_i, bpr_i, p_i) =
-            (m as i32, n as i32, blocks_per_row as i32, p as i32);
+        let (m_i, n_i, bpr_i, p_i) = (m as i32, n as i32, blocks_per_row as i32, p as i32);
         // R=2 row-blocked warps: one warp per TWO output rows, 8 warps/block.
         let grid = m.div_ceil(16).max(1) as u32;
         // SAFETY: caller contract above.
@@ -2208,14 +2199,14 @@ pub enum Qwen38LayerType {
 /// Dense qwen35 model config (the dbirks 27B values in brackets).
 #[derive(Clone, Debug)]
 pub struct Qwen38DenseConfig {
-    pub n_embd: usize,      // 5120
-    pub n_layer: usize,     // 64 (main stack; MTP/nextn excluded)
-    pub n_head: usize,      // 24
-    pub n_kv_head: usize,   // 4
-    pub head_dim: usize,    // 256
-    pub rotary_dim: usize,  // 64 (partial RoPE)
-    pub rope_theta: f32,    // 1e7
-    pub vocab_size: usize,  // 248320
+    pub n_embd: usize,     // 5120
+    pub n_layer: usize,    // 64 (main stack; MTP/nextn excluded)
+    pub n_head: usize,     // 24
+    pub n_kv_head: usize,  // 4
+    pub head_dim: usize,   // 256
+    pub rotary_dim: usize, // 64 (partial RoPE)
+    pub rope_theta: f32,   // 1e7
+    pub vocab_size: usize, // 248320
     pub rms_norm_eps: f32,
     pub mlp_hidden: usize,  // 17408
     pub n_k_heads: usize,   // 16 (ssm.group_count)
@@ -2267,7 +2258,11 @@ impl Qwen38DenseConfig {
             })
             .collect();
         let head_v_dim = d_inner.checked_div(n_v_heads).unwrap_or(head_k_dim);
-        let rotary_dim = if rotary_dim == 0 { head_dim } else { rotary_dim };
+        let rotary_dim = if rotary_dim == 0 {
+            head_dim
+        } else {
+            rotary_dim
+        };
         let vocab_size = gguf
             .tensor_info("token_embd.weight")
             .and_then(|i| i.shape.last().copied())
@@ -2315,8 +2310,8 @@ pub struct F32W {
 
 /// Per-layer device weights (one variant arm populated per layer type).
 pub struct Qwen38LayerGpu {
-    pub input_norm: F32W,        // [n_embd]
-    pub post_attn_norm: F32W,    // [n_embd]
+    pub input_norm: F32W,     // [n_embd]
+    pub post_attn_norm: F32W, // [n_embd]
     // GDN-only
     pub qkv: Option<QuantW>,     // [q+k+v, n_embd] = [10240, 5120]
     pub z: Option<QuantW>,       // [d_inner, n_embd]
@@ -2328,16 +2323,16 @@ pub struct Qwen38LayerGpu {
     pub ssm_norm: Option<F32W>,  // [head_v_dim]
     pub ssm_out: Option<QuantW>, // [n_embd, d_inner]
     // attention-only
-    pub wq: Option<QuantW>,      // [2*q_dim, n_embd]
-    pub wk: Option<QuantW>,      // [kv_dim, n_embd]
-    pub wv: Option<QuantW>,      // [kv_dim, n_embd]
-    pub wo: Option<QuantW>,      // [n_embd, q_dim]
-    pub q_norm: Option<F32W>,    // [head_dim]
-    pub k_norm: Option<F32W>,    // [head_dim]
+    pub wq: Option<QuantW>,   // [2*q_dim, n_embd]
+    pub wk: Option<QuantW>,   // [kv_dim, n_embd]
+    pub wv: Option<QuantW>,   // [kv_dim, n_embd]
+    pub wo: Option<QuantW>,   // [n_embd, q_dim]
+    pub q_norm: Option<F32W>, // [head_dim]
+    pub k_norm: Option<F32W>, // [head_dim]
     // MLP (both)
-    pub ffn_gate: QuantW,        // [mlp_hidden, n_embd]
-    pub ffn_up: QuantW,          // [mlp_hidden, n_embd]
-    pub ffn_down: QuantW,        // [n_embd, mlp_hidden]
+    pub ffn_gate: QuantW, // [mlp_hidden, n_embd]
+    pub ffn_up: QuantW,   // [mlp_hidden, n_embd]
+    pub ffn_down: QuantW, // [n_embd, mlp_hidden]
 }
 
 /// Whole-model GPU-resident weights.
@@ -2398,7 +2393,7 @@ fn f32_bytes_from_gguf(gguf: &GgufFile, name: &str) -> Result<Vec<f32>, String> 
             return Err(format!(
                 "tensor '{name}': expected F32/F16/BF16 small tensor, got {:?}",
                 ggml_type_name(info.ggml_type)
-            ))
+            ));
         }
     };
     if v.len() != n {
@@ -2463,7 +2458,7 @@ fn upload_quant(
             return Err(format!(
                 "tensor '{name}': expected Q4_K/Q6_K, got {}",
                 ggml_type_name(t)
-            ))
+            ));
         }
     };
     let blocks_per_row = n / 256;
@@ -2514,11 +2509,7 @@ pub fn load_weights_gpu(
         let is_linear = cfg.layer_types[i] == Qwen38LayerType::Deltanet;
         let blk = format!("blk.{i}.");
         let input_norm = upload_f32(stream, gguf, &format!("{blk}attn_norm.weight"))?;
-        let post_attn_norm = upload_f32(
-            stream,
-            gguf,
-            &format!("{blk}post_attention_norm.weight"),
-        )?;
+        let post_attn_norm = upload_f32(stream, gguf, &format!("{blk}post_attention_norm.weight"))?;
         let ffn_gate = upload_quant(
             stream,
             gguf,
@@ -2533,7 +2524,13 @@ pub fn load_weights_gpu(
             cfg.mlp_hidden,
             n,
         )?;
-        let ffn_down = upload_quant(stream, gguf, &format!("{blk}ffn_down.weight"), n, cfg.mlp_hidden)?;
+        let ffn_down = upload_quant(
+            stream,
+            gguf,
+            &format!("{blk}ffn_down.weight"),
+            n,
+            cfg.mlp_hidden,
+        )?;
         let layer = if is_linear {
             Qwen38LayerGpu {
                 input_norm,
@@ -2566,7 +2563,11 @@ pub fn load_weights_gpu(
                     cfg.n_v_heads,
                     n,
                 )?),
-                conv1d: Some(upload_f32(stream, gguf, &format!("{blk}ssm_conv1d.weight"))?),
+                conv1d: Some(upload_f32(
+                    stream,
+                    gguf,
+                    &format!("{blk}ssm_conv1d.weight"),
+                )?),
                 a_log: Some(upload_f32(stream, gguf, &format!("{blk}ssm_a"))?),
                 dt_bias: Some(upload_f32(stream, gguf, &format!("{blk}ssm_dt.bias"))?),
                 ssm_norm: Some(upload_f32(stream, gguf, &format!("{blk}ssm_norm.weight"))?),
@@ -2628,8 +2629,16 @@ pub fn load_weights_gpu(
                     n,
                     q_dim,
                 )?),
-                q_norm: Some(upload_f32(stream, gguf, &format!("{blk}attn_q_norm.weight"))?),
-                k_norm: Some(upload_f32(stream, gguf, &format!("{blk}attn_k_norm.weight"))?),
+                q_norm: Some(upload_f32(
+                    stream,
+                    gguf,
+                    &format!("{blk}attn_q_norm.weight"),
+                )?),
+                k_norm: Some(upload_f32(
+                    stream,
+                    gguf,
+                    &format!("{blk}attn_k_norm.weight"),
+                )?),
                 ffn_gate,
                 ffn_up,
                 ffn_down,
@@ -2776,9 +2785,7 @@ pub const QWEN38_DFLASH2_TAP_LAYERS: [usize; 5] = [5, 19, 33, 47, 61];
 /// The tap slot (ascending index into [`QWEN38_DFLASH2_TAP_LAYERS`) for a
 /// layer, `None` when the layer is not a tap layer.
 fn dflash2_tap_slot(layer: usize) -> Option<usize> {
-    QWEN38_DFLASH2_TAP_LAYERS
-        .iter()
-        .position(|&t| t == layer)
+    QWEN38_DFLASH2_TAP_LAYERS.iter().position(|&t| t == layer)
 }
 
 /// Issue 755 T4 — the per-GDN-layer replay journal. One buffer per GDN layer,
@@ -2953,14 +2960,24 @@ fn alloc_verify_scratch(
         mrg_l: a_f32(p * cfg.n_head)?,
         snap_recurrent: {
             let mut v = Vec::new();
-            for _ in 0..cfg.layer_types.iter().filter(|t| **t == Qwen38LayerType::Deltanet).count() {
+            for _ in 0..cfg
+                .layer_types
+                .iter()
+                .filter(|t| **t == Qwen38LayerType::Deltanet)
+                .count()
+            {
                 v.push(a_f32(cfg.n_v_heads * cfg.head_k_dim * cfg.head_v_dim)?);
             }
             v
         },
         snap_conv: {
             let mut v = Vec::new();
-            for _ in 0..cfg.layer_types.iter().filter(|t| **t == Qwen38LayerType::Deltanet).count() {
+            for _ in 0..cfg
+                .layer_types
+                .iter()
+                .filter(|t| **t == Qwen38LayerType::Deltanet)
+                .count()
+            {
                 v.push(a_f32(l_qkv_out * cfg.conv_kernel)?);
             }
             v
@@ -3022,11 +3039,11 @@ pub struct Qwen38DenseForward {
     attn_part_m: CudaSlice<f32>,   // [n_head * n_chunks_max]
     attn_part_l: CudaSlice<f32>,   // [n_head * n_chunks_max]
     attn_part_out: CudaSlice<f32>, // [n_head * n_chunks_max * head_dim]
-    mlp_gate: CudaSlice<f32>,   // [mlp_hidden]
-    mlp_up: CudaSlice<f32>,     // [mlp_hidden]
-    mlp_hidden: CudaSlice<f32>, // [mlp_hidden]
-    logits: CudaSlice<f32>,     // [vocab]
-    argmax_res: CudaSlice<u64>, // [1]
+    mlp_gate: CudaSlice<f32>,      // [mlp_hidden]
+    mlp_up: CudaSlice<f32>,        // [mlp_hidden]
+    mlp_hidden: CudaSlice<f32>,    // [mlp_hidden]
+    logits: CudaSlice<f32>,        // [vocab]
+    argmax_res: CudaSlice<u64>,    // [1]
     // T5 graph path: device-side token/pos + the captured decode graph.
     token_dev: CudaSlice<i32>,
     pos_dev: CudaSlice<i32>,
@@ -3171,10 +3188,7 @@ pub struct Qwen38DenseForward {
     /// Key is `(p, use_qg, ingest)` — the third axis is Issue 754 T2's ingest
     /// tail (lm_head last-row-only), so ingest and verify graphs stay
     /// distinct captures. Bounded by 2 * 2 * 16 keys.
-    verify_graphs: std::collections::HashMap<
-        (usize, bool, bool),
-        cudarc::driver::safe::CudaGraph,
-    >,
+    verify_graphs: std::collections::HashMap<(usize, bool, bool), cudarc::driver::safe::CudaGraph>,
     /// Keys whose capture failed - permanent eager fallback for those.
     verify_graph_failed: std::collections::HashSet<(usize, bool, bool)>,
     /// Issue 742 T4 - the single-stream prefix KV+GDN cache (whole-prefix
@@ -3196,8 +3210,6 @@ pub struct Qwen38DenseForward {
     wide_ingest_active: bool,
 }
 
-
-
 /// Issue 753 — host-side f16↔f32 bit conversion (RN-even), the exact twin
 /// of the CUDA `kv_f16_to_f32` / `kv_f32_to_f16` helpers in
 /// `cudarc_kernels/attention.rs` (cudarc's nvrtc has no include dirs, so
@@ -3210,7 +3222,11 @@ pub mod kv_f16_bits {
         let exp = ((h as u32) >> 10) & 0x1f;
         let mut mant = (h as u32) & 0x3ff;
         if exp == 0x1f {
-            let payload = if mant != 0 { 0x400_000 | (mant << 13) } else { 0 };
+            let payload = if mant != 0 {
+                0x400_000 | (mant << 13)
+            } else {
+                0
+            };
             return f32::from_bits(sign | 0x7f80_0000 | payload);
         }
         if exp == 0 {
@@ -3254,8 +3270,7 @@ pub mod kv_f16_bits {
             let n = mf >> sh;
             let rem = mf & ((1u32 << sh) - 1);
             let half = 1u32 << (sh - 1);
-            let nr = n
-                + u32::from(rem > half || (rem == half && (n & 1) == 1));
+            let nr = n + u32::from(rem > half || (rem == half && (n & 1) == 1));
             return (sign | nr) as u16;
         }
         let mut h = (sign | ((he as u32) << 10) | (m >> 13)) as u16;
@@ -3363,9 +3378,8 @@ impl Qwen38DenseForward {
             None
         };
         let dn = DeltanetKernels::new(Arc::clone(&ctx)).map_err(|e| e.to_string())?;
-        let attn =
-            AttentionKernels::new_with_kv_dtype(Arc::clone(&ctx), kv_f16)
-                .map_err(|e| e.to_string())?;
+        let attn = AttentionKernels::new_with_kv_dtype(Arc::clone(&ctx), kv_f16)
+            .map_err(|e| e.to_string())?;
         let ew = ElementwiseKernels::new(Arc::clone(&ctx)).map_err(|e| e.to_string())?;
 
         let n = cfg.n_embd;
@@ -3373,10 +3387,10 @@ impl Qwen38DenseForward {
         let kvd = cfg.n_kv_head * cfg.head_dim;
         let mlp = cfg.mlp_hidden;
         // qkv layout (pinned by the real tensor): [q(n_k*hd) | k(n_k*hd) | v(n_v*hd)]
-    // = 2048 + 2048 + 6144 = 10240 for the dbirks 27B (the weights-struct
-    // doc comment's formula has the x2 on the wrong term — the CPU forward's
-    // q_dim/k_dim/v_dim split is the truth).
-    let l_qkv_out = 2 * cfg.n_k_heads * cfg.head_k_dim + cfg.n_v_heads * cfg.head_v_dim;
+        // = 2048 + 2048 + 6144 = 10240 for the dbirks 27B (the weights-struct
+        // doc comment's formula has the x2 on the wrong term — the CPU forward's
+        // q_dim/k_dim/v_dim split is the truth).
+        let l_qkv_out = 2 * cfg.n_k_heads * cfg.head_k_dim + cfg.n_v_heads * cfg.head_v_dim;
         let l_exp = 3 * cfg.n_v_heads * cfg.head_k_dim;
 
         macro_rules! alloc_f32 {
@@ -3399,14 +3413,16 @@ impl Qwen38DenseForward {
                     // PTX module reinterprets), holding ctx_len*kvd HALVES =
                     // ctx_len*kvd/2 f32 words. kvd is n_kv_head*head_dim —
                     // always even for every GQA geometry this engine serves.
-                    let kv_words = if kv_f16 { ctx_len * kvd / 2 } else { ctx_len * kvd };
+                    let kv_words = if kv_f16 {
+                        ctx_len * kvd / 2
+                    } else {
+                        ctx_len * kvd
+                    };
                     keys.push(alloc_f32!(kv_words));
                     values.push(alloc_f32!(kv_words));
                 }
                 Qwen38LayerType::Deltanet => {
-                    recurrent.push(alloc_f32!(
-                        cfg.n_v_heads * cfg.head_k_dim * cfg.head_v_dim
-                    ));
+                    recurrent.push(alloc_f32!(cfg.n_v_heads * cfg.head_k_dim * cfg.head_v_dim));
                     conv.push(alloc_f32!(l_qkv_out * cfg.conv_kernel));
                 }
             }
@@ -3491,8 +3507,7 @@ impl Qwen38DenseForward {
         // Round down to a 32-position multiple (the launcher contract:
         // chunk_len % 32 == 0 - a non-power-of-2 sub like 3 would otherwise
         // yield 85 and be rejected at launch time).
-        let verify_attn_chunk_len =
-            ((attn_chunk_len / verify_attn_sub) / 32).max(1) * 32;
+        let verify_attn_chunk_len = ((attn_chunk_len / verify_attn_sub) / 32).max(1) * 32;
         let verify_attn_n_chunks = ctx_len.div_ceil(verify_attn_chunk_len).max(1);
         // Issue 742 T9.14 - the two-pass flash restructure (the qg arm's
         // serial running-max chain removed): pass A computes per-tile
@@ -3553,8 +3568,8 @@ impl Qwen38DenseForward {
         // kernel's rolled loops serialize the strided loads; its 7.36 µs/site
         // is memory latency, not bandwidth). Resolved ONCE here, never per
         // dispatch.
-        let rnq_fast = std::env::var("QWEN38_RNQ_FAST").map_or(true, |v| v != "0")
-            && cfg.n_embd == 5120;
+        let rnq_fast =
+            std::env::var("QWEN38_RNQ_FAST").map_or(true, |v| v != "0") && cfg.n_embd == 5120;
         // Issue 742 lever-2 (Bench 737): the GDN post-recurrence chain fused
         // into one kernel — 144 launches/token -> 48 (each eliminated kernel
         // saves its whole ~2-3.5 µs invocation floor per the Bench-736 floor
@@ -3568,8 +3583,8 @@ impl Qwen38DenseForward {
         // next site's norm+quant). Resolved ONCE here, never per dispatch
         // (the env-once lesson). Requires n_embd == 5120 (the constexpr
         // twin; every decode/verify norm site is 5120 on this model).
-        let res_nq_fused = std::env::var("QWEN38_RES_NQ_FUSED").map_or(true, |v| v != "0")
-            && cfg.n_embd == 5120;
+        let res_nq_fused =
+            std::env::var("QWEN38_RES_NQ_FUSED").map_or(true, |v| v != "0") && cfg.n_embd == 5120;
         let attn_part_m = alloc_f32!(cfg.n_head * attn_n_chunks);
         let attn_part_l = alloc_f32!(cfg.n_head * attn_n_chunks);
         let attn_part_out = alloc_f32!(cfg.n_head * attn_n_chunks * cfg.head_dim);
@@ -3675,12 +3690,7 @@ impl Qwen38DenseForward {
 
     // ── kernel helpers ──
 
-    fn copy_f32(
-        &self,
-        src: &CudaSlice<f32>,
-        dst: &CudaSlice<f32>,
-        n: usize,
-    ) -> Result<(), String> {
+    fn copy_f32(&self, src: &CudaSlice<f32>, dst: &CudaSlice<f32>, n: usize) -> Result<(), String> {
         let stream = &self.stream;
         let n_i = n as i32;
         let grid = n.div_ceil(256).max(1) as u32;
@@ -3739,7 +3749,11 @@ impl Qwen38DenseForward {
     /// SAFETY note: `xq`/`xs`/`xsum` are sized for mlp_hidden (17408) ⊇
     /// 5120/320 (the same contract as [`Self::rmsnorm_quant_x`]); the
     /// launcher is `n_embd == 5120`-gated by `res_nq_fused`.
-    fn residual_norm_quant_x(&self, y: &CudaSlice<f32>, gamma: &CudaSlice<f32>) -> Result<(), String> {
+    fn residual_norm_quant_x(
+        &self,
+        y: &CudaSlice<f32>,
+        gamma: &CudaSlice<f32>,
+    ) -> Result<(), String> {
         // SAFETY: x_res/y/gamma cover 5120; x_out (self.x) covers 5120;
         // res_out ALIASES res (both self.x_res) — safe per the kernel's
         // ownership discipline (phase-1 same-thread read-before-write;
@@ -4077,7 +4091,12 @@ impl Qwen38DenseForward {
     }
 
     #[allow(clippy::too_many_lines)]
-    fn forward_attn_layer(&self, layer_idx: usize, attn_idx: usize, pos: usize) -> Result<(), String> {
+    fn forward_attn_layer(
+        &self,
+        layer_idx: usize,
+        attn_idx: usize,
+        pos: usize,
+    ) -> Result<(), String> {
         let stream = &self.stream;
         let cfg = &self.cfg;
         let lw = &self.weights.layers[layer_idx];
@@ -4143,7 +4162,13 @@ impl Qwen38DenseForward {
             let vc = &self.state.values[attn_idx];
             self.attn
                 .launch_kv_cache_append_devpos(
-                    stream, &self.k_normed, &self.v, kc, vc, kvd, &self.pos_dev,
+                    stream,
+                    &self.k_normed,
+                    &self.v,
+                    kc,
+                    vc,
+                    kvd,
+                    &self.pos_dev,
                 )
                 .map_err(|e| e.to_string())?;
             if self.attn_gqa {
@@ -4353,10 +4378,7 @@ impl Qwen38DenseForward {
                 }
                 // Site A: residual + next snapshot + this layer's MLP
                 // post_attn norm in one kernel.
-                self.residual_norm_quant_x(
-                    &self.y,
-                    &self.weights.layers[i].post_attn_norm.dev,
-                )?;
+                self.residual_norm_quant_x(&self.y, &self.weights.layers[i].post_attn_norm.dev)?;
                 self.forward_mlp(i)?;
                 if i + 1 < cfg.n_layer {
                     // Site B: residual + next snapshot + the NEXT layer's
@@ -4482,10 +4504,7 @@ impl Qwen38DenseForward {
                         attn_idx += 1;
                     }
                 }
-                self.residual_norm_quant_x(
-                    &self.y,
-                    &self.weights.layers[i].post_attn_norm.dev,
-                )?;
+                self.residual_norm_quant_x(&self.y, &self.weights.layers[i].post_attn_norm.dev)?;
                 self.forward_mlp(i)?;
                 if i + 1 < cfg.n_layer {
                     self.residual_norm_quant_x(
@@ -4626,9 +4645,7 @@ impl Qwen38DenseForward {
         self.gemv_quant_rows(&self.weights.lm_head, &self.verify.logits, n_rows)?;
         stream.synchronize().map_err(|e| e.to_string())?;
         let view = self.verify.logits.slice(0..n_rows * vocab);
-        stream
-            .clone_dtoh(&view)
-            .map_err(|e| e.to_string())
+        stream.clone_dtoh(&view).map_err(|e| e.to_string())
     }
 
     /// Issue 755 T2 — the TARGET's token-embedding rows, dequantized ON
@@ -4685,12 +4702,7 @@ impl Qwen38DenseForward {
             .memset_zeros(&mut self.argmax_res)
             .map_err(|e| e.to_string())?;
         self.ew
-            .launch_argmax_first(
-                stream,
-                &self.logits,
-                self.cfg.vocab_size,
-                &self.argmax_res,
-            )
+            .launch_argmax_first(stream, &self.logits, self.cfg.vocab_size, &self.argmax_res)
             .map_err(|e| e.to_string())
     }
 
@@ -4714,9 +4726,13 @@ impl Qwen38DenseForward {
                 // SAFETY: this struct is single-threaded and single-stream; the
                 // capture arm performs no cross-stream ops (the sibling
                 // prefill-probe contract, Issue 742 T1.2).
-                unsafe { stream.context().disable_event_tracking(); }
+                unsafe {
+                    stream.context().disable_event_tracking();
+                }
                 stream
-                    .begin_capture(cudarc::driver::sys::CUstreamCaptureMode::CU_STREAM_CAPTURE_MODE_GLOBAL)
+                    .begin_capture(
+                        cudarc::driver::sys::CUstreamCaptureMode::CU_STREAM_CAPTURE_MODE_GLOBAL,
+                    )
                     .map_err(|e| format!("begin_capture: {e}"))?;
             }
             self.capturing = true;
@@ -4730,9 +4746,7 @@ impl Qwen38DenseForward {
             };
             match (cap_result, end) {
                 (Ok(()), Ok(Some(graph))) => {
-                    graph
-                        .upload()
-                        .map_err(|e| format!("graph upload: {e}"))?;
+                    graph.upload().map_err(|e| format!("graph upload: {e}"))?;
                     self.stream.synchronize().map_err(|e| e.to_string())?;
                     self.graph = Some(graph);
                 }
@@ -4818,10 +4832,7 @@ impl Qwen38DenseForward {
                         attn_idx += 1;
                     }
                 }
-                self.residual_norm_quant_x(
-                    &self.y,
-                    &self.weights.layers[i].post_attn_norm.dev,
-                )?;
+                self.residual_norm_quant_x(&self.y, &self.weights.layers[i].post_attn_norm.dev)?;
                 self.forward_mlp(i)?;
                 if i + 1 < cfg.n_layer {
                     self.residual_norm_quant_x(
@@ -4858,9 +4869,7 @@ impl Qwen38DenseForward {
         self.rmsnorm_quant_x(&self.x, &self.weights.output_norm.dev, n, cfg.rms_norm_eps)?;
         self.gemv_quant(&self.weights.lm_head, &self.logits)?;
         stream.synchronize().map_err(|e| e.to_string())?;
-        let logits = stream
-            .clone_dtoh(&self.logits)
-            .map_err(|e| e.to_string())?;
+        let logits = stream.clone_dtoh(&self.logits).map_err(|e| e.to_string())?;
         let mut best = 0usize;
         let mut best_v = f32::NEG_INFINITY;
         for (i, &l) in logits.iter().enumerate() {
@@ -4877,7 +4886,6 @@ impl Qwen38DenseForward {
         let _ = stream.synchronize();
         stream.clone_dtoh(&self.x).unwrap_or_default()
     }
-
 
     // ─────────────────────────────────────────────────────────────────────────
     // Issue 742 T9.9 — the p-row batched speculative VERIFY chunk (the Q4_K
@@ -5117,13 +5125,23 @@ impl Qwen38DenseForward {
             ));
         }
         if self.kv_f16 {
-            return Err("enable_lanes: the f16 KV hatch is unsupported in lane mode (stage 1)".into());
+            return Err(
+                "enable_lanes: the f16 KV hatch is unsupported in lane mode (stage 1)".into(),
+            );
         }
         let cfg = &self.cfg;
         let kvd = cfg.n_kv_head * cfg.head_dim;
         let l_qkv_out = 2 * cfg.n_k_heads * cfg.head_k_dim + cfg.n_v_heads * cfg.head_v_dim;
-        let n_attn = cfg.layer_types.iter().filter(|t| **t == Qwen38LayerType::Attention).count();
-        let n_gdn = cfg.layer_types.iter().filter(|t| **t == Qwen38LayerType::Deltanet).count();
+        let n_attn = cfg
+            .layer_types
+            .iter()
+            .filter(|t| **t == Qwen38LayerType::Attention)
+            .count();
+        let n_gdn = cfg
+            .layer_types
+            .iter()
+            .filter(|t| **t == Qwen38LayerType::Deltanet)
+            .count();
         let mut keys = Vec::with_capacity(n_attn);
         let mut values = Vec::with_capacity(n_attn);
         let mut recurrent = Vec::with_capacity(n_gdn);
@@ -5145,9 +5163,7 @@ impl Qwen38DenseForward {
                 Qwen38LayerType::Deltanet => {
                     recurrent.push(
                         self.stream
-                            .alloc_zeros::<f32>(
-                                n * cfg.n_v_heads * cfg.head_k_dim * cfg.head_v_dim,
-                            )
+                            .alloc_zeros::<f32>(n * cfg.n_v_heads * cfg.head_k_dim * cfg.head_v_dim)
                             .map_err(|e| format!("lanes recurrent alloc: {e}"))?,
                     );
                     conv.push(
@@ -5500,14 +5516,28 @@ impl Qwen38DenseForward {
             let soff = l * conv_dim * cfg.conv_kernel;
             let state = lanes.conv[gdn_idx].slice(soff..soff + conv_dim * cfg.conv_kernel);
             self.dn
-                .launch_conv1d_rows(stream, &input, &conv_w.dev, &state, conv_dim,
-                    cfg.conv_kernel, 1)
+                .launch_conv1d_rows(
+                    stream,
+                    &input,
+                    &conv_w.dev,
+                    &state,
+                    conv_dim,
+                    cfg.conv_kernel,
+                    1,
+                )
                 .map_err(|e| e.to_string())?;
         }
         // Packed expand (row-agnostic over the conv outputs).
         self.dn
-            .launch_expand_l2_rows(stream, &v.qkv, &v.qkv_exp, cfg.n_k_heads, n_v,
-                cfg.head_k_dim, p)
+            .launch_expand_l2_rows(
+                stream,
+                &v.qkv,
+                &v.qkv_exp,
+                cfg.n_k_heads,
+                n_v,
+                cfg.head_k_dim,
+                p,
+            )
             .map_err(|e| e.to_string())?;
         // Per-lane recurrence (the state slice view IS the lane's state).
         for l in 0..p {
@@ -5521,8 +5551,9 @@ impl Qwen38DenseForward {
             let ooff = l * cfg.d_inner;
             let out = v.rec_out.slice(ooff..ooff + cfg.d_inner);
             self.dn
-                .launch_recurrence_fused_rows_hd128(stream, &qkv_in, &beta, &decay, &state,
-                    &out, n_v, 1)
+                .launch_recurrence_fused_rows_hd128(
+                    stream, &qkv_in, &beta, &decay, &state, &out, n_v, 1,
+                )
                 .map_err(|e| e.to_string())?;
         }
         // SAFETY: rec_out/z cover p*d_inner; xq/xs/xsum cover p*(d_inner/16).
@@ -5614,8 +5645,18 @@ impl Qwen38DenseForward {
             let koff = l * kvd;
             let krow = v.k_normed.slice(koff..koff + kvd);
             self.attn
-                .launch_rope_rows(stream, &qrow, &krow, cfg.rotary_dim, cfg.head_dim,
-                    cfg.n_head, cfg.n_kv_head, pos, 1, cfg.rope_theta)
+                .launch_rope_rows(
+                    stream,
+                    &qrow,
+                    &krow,
+                    cfg.rotary_dim,
+                    cfg.head_dim,
+                    cfg.n_head,
+                    cfg.n_kv_head,
+                    pos,
+                    1,
+                    cfg.rope_theta,
+                )
                 .map_err(|e| e.to_string())?;
         }
         for (l, &pos) in positions.iter().enumerate().take(p) {
@@ -5646,17 +5687,43 @@ impl Qwen38DenseForward {
             let aoff = l * q_dim;
             let arow = v.attn_out.slice(aoff..aoff + q_dim);
             let attn_res = if use_qg[l] {
-                let n_chunks = (positions[l] + 1).div_ceil(self.verify_attn_chunk_len).max(1);
+                let n_chunks = (positions[l] + 1)
+                    .div_ceil(self.verify_attn_chunk_len)
+                    .max(1);
                 self.attn.launch_attention_splitgqa_rows_qg(
-                    stream, &qrow, &kc, &vc, &pm, &pl, &po, &arow, cfg.head_dim,
-                    cfg.n_head, cfg.n_kv_head, self.verify_attn_chunk_len, n_chunks,
-                    positions[l], 1,
+                    stream,
+                    &qrow,
+                    &kc,
+                    &vc,
+                    &pm,
+                    &pl,
+                    &po,
+                    &arow,
+                    cfg.head_dim,
+                    cfg.n_head,
+                    cfg.n_kv_head,
+                    self.verify_attn_chunk_len,
+                    n_chunks,
+                    positions[l],
+                    1,
                 )
             } else {
                 self.attn.launch_attention_splitgqa_rows(
-                    stream, &qrow, &kc, &vc, &pm, &pl, &po, &arow, cfg.head_dim,
-                    cfg.n_head, cfg.n_kv_head, self.attn_chunk_len, self.attn_n_chunks,
-                    positions[l], 1,
+                    stream,
+                    &qrow,
+                    &kc,
+                    &vc,
+                    &pm,
+                    &pl,
+                    &po,
+                    &arow,
+                    cfg.head_dim,
+                    cfg.n_head,
+                    cfg.n_kv_head,
+                    self.attn_chunk_len,
+                    self.attn_n_chunks,
+                    positions[l],
+                    1,
                 )
             };
             attn_res.map_err(|e| e.to_string())?;
@@ -5718,8 +5785,7 @@ impl Qwen38DenseForward {
         let cfg = &self.cfg;
         let n = ls.n;
         let rec_len = cfg.n_v_heads * cfg.head_k_dim * cfg.head_v_dim;
-        let l_qkv_out =
-            2 * cfg.n_k_heads * cfg.head_k_dim + cfg.n_v_heads * cfg.head_v_dim;
+        let l_qkv_out = 2 * cfg.n_k_heads * cfg.head_k_dim + cfg.n_v_heads * cfg.head_v_dim;
         let conv_len = l_qkv_out * cfg.conv_kernel;
         let n_gdn = cfg
             .layer_types
@@ -5960,9 +6026,7 @@ impl Qwen38DenseForward {
                 .map_err(|e| e.to_string())?;
             let out: Vec<u32> = packed[..p].iter().map(|&pk| !(pk as u32)).collect();
             self.lanes_commit_ready = Some(k);
-            Ok((0..n)
-                .map(|l| out[l * k..(l + 1) * k].to_vec())
-                .collect())
+            Ok((0..n).map(|l| out[l * k..(l + 1) * k].to_vec()).collect())
         }
     }
 
@@ -5998,7 +6062,9 @@ impl Qwen38DenseForward {
             ));
         }
         if tokens.iter().any(|t| t.len() != k) {
-            return Err(format!("{op}: uniform k required (the row budget is packed)"));
+            return Err(format!(
+                "{op}: uniform k required (the row budget is packed)"
+            ));
         }
         for (l, &bp) in base_positions.iter().enumerate() {
             if bp + k > lane_ctx {
@@ -6113,7 +6179,9 @@ impl Qwen38DenseForward {
                 // SAFETY: single-threaded and single-stream; the capture arm
                 // performs no cross-stream ops (the T5 decode-graph
                 // contract).
-                unsafe { stream.context().disable_event_tracking(); }
+                unsafe {
+                    stream.context().disable_event_tracking();
+                }
                 stream
                     .begin_capture(
                         cudarc::driver::sys::CUstreamCaptureMode::CU_STREAM_CAPTURE_MODE_GLOBAL,
@@ -6187,9 +6255,7 @@ impl Qwen38DenseForward {
                 .map_err(|e| e.to_string())?;
             let out: Vec<u32> = packed[..p].iter().map(|&pk| !(pk as u32)).collect();
             self.lanes_commit_ready = Some(k);
-            Ok((0..n)
-                .map(|l| out[l * k..(l + 1) * k].to_vec())
-                .collect())
+            Ok((0..n).map(|l| out[l * k..(l + 1) * k].to_vec()).collect())
         }
     }
 
@@ -6640,15 +6706,39 @@ impl Qwen38DenseForward {
                     let attn_res = if use_qg[l] {
                         let n_chunks = (bp + k).div_ceil(self.verify_attn_chunk_len).max(1);
                         self.attn.launch_attention_splitgqa_rows_qg(
-                            stream, &qrow, &kc, &vc, &pm, &pl, &po, &arow, cfg.head_dim,
-                            cfg.n_head, cfg.n_kv_head, self.verify_attn_chunk_len, n_chunks,
-                            bp, k,
+                            stream,
+                            &qrow,
+                            &kc,
+                            &vc,
+                            &pm,
+                            &pl,
+                            &po,
+                            &arow,
+                            cfg.head_dim,
+                            cfg.n_head,
+                            cfg.n_kv_head,
+                            self.verify_attn_chunk_len,
+                            n_chunks,
+                            bp,
+                            k,
                         )
                     } else {
                         self.attn.launch_attention_splitgqa_rows(
-                            stream, &qrow, &kc, &vc, &pm, &pl, &po, &arow, cfg.head_dim,
-                            cfg.n_head, cfg.n_kv_head, self.attn_chunk_len, self.attn_n_chunks,
-                            bp, k,
+                            stream,
+                            &qrow,
+                            &kc,
+                            &vc,
+                            &pm,
+                            &pl,
+                            &po,
+                            &arow,
+                            cfg.head_dim,
+                            cfg.n_head,
+                            cfg.n_kv_head,
+                            self.attn_chunk_len,
+                            self.attn_n_chunks,
+                            bp,
+                            k,
                         )
                     };
                     attn_res.map_err(|e| e.to_string())?;
@@ -6673,9 +6763,21 @@ impl Qwen38DenseForward {
                     let arow = v.attn_out.slice(aoff..aoff + k * q_dim);
                     self.attn
                         .launch_attention_splitgqa_rows_devpos(
-                            stream, &qrow, &kc, &vc, &pm, &pl, &po, &arow, cfg.head_dim,
-                            cfg.n_head, cfg.n_kv_head, self.attn_chunk_len, self.attn_n_chunks,
-                            &pos_dev.slice(l..=l), k,
+                            stream,
+                            &qrow,
+                            &kc,
+                            &vc,
+                            &pm,
+                            &pl,
+                            &po,
+                            &arow,
+                            cfg.head_dim,
+                            cfg.n_head,
+                            cfg.n_kv_head,
+                            self.attn_chunk_len,
+                            self.attn_n_chunks,
+                            &pos_dev.slice(l..=l),
+                            k,
                         )
                         .map_err(|e| e.to_string())?;
                 }
@@ -6750,8 +6852,7 @@ impl Qwen38DenseForward {
         }
         let cfg = &self.cfg;
         let rec_len = cfg.n_v_heads * cfg.head_k_dim * cfg.head_v_dim;
-        let l_qkv_out =
-            2 * cfg.n_k_heads * cfg.head_k_dim + cfg.n_v_heads * cfg.head_v_dim;
+        let l_qkv_out = 2 * cfg.n_k_heads * cfg.head_k_dim + cfg.n_v_heads * cfg.head_v_dim;
         let conv_len = l_qkv_out * cfg.conv_kernel;
         // ── rollback the lanes that need it (G) ──
         {
@@ -6827,11 +6928,7 @@ impl Qwen38DenseForward {
                 }
                 {
                     let soff = l * cd * cfg.conv_kernel;
-                    let state = self
-                        .lanes
-                        .as_ref()
-                        .unwrap()
-                        .conv[gdn_idx]
+                    let state = self.lanes.as_ref().unwrap().conv[gdn_idx]
                         .slice(soff..soff + cd * cfg.conv_kernel);
                     self.dn
                         .launch_conv1d_rows(
@@ -6869,12 +6966,8 @@ impl Qwen38DenseForward {
                 }
                 {
                     let soff = l * rec_len;
-                    let state = self
-                        .lanes
-                        .as_ref()
-                        .unwrap()
-                        .recurrent[gdn_idx]
-                        .slice(soff..soff + rec_len);
+                    let state =
+                        self.lanes.as_ref().unwrap().recurrent[gdn_idx].slice(soff..soff + rec_len);
                     self.dn
                         .launch_recurrence_fused_rows_hd128(
                             &self.stream,
@@ -6906,8 +6999,7 @@ impl Qwen38DenseForward {
     /// rows below `tokens.len()` stay in the live buffers (the lineage
     /// rule keeps them byte-valid; captured graphs keep their addresses).
     pub fn prefix_cache_insert(&mut self, tokens: &[u32]) -> Result<(), String> {
-        self.prefix_cache
-            .insert(&self.stream, &self.state, tokens)
+        self.prefix_cache.insert(&self.stream, &self.state, tokens)
     }
 
     /// Longest-prefix match: on a hit, restore the GDN state (dtod,
@@ -6972,7 +7064,7 @@ impl Qwen38DenseForward {
     fn gemv_quant_rows(&self, w: &QuantW, y: &CudaSlice<f32>, p: usize) -> Result<(), String> {
         static VERIFY_GEMV_ARM: std::sync::OnceLock<String> = std::sync::OnceLock::new();
 
-let v = &self.verify;
+        let v = &self.verify;
         let stream = &self.stream;
         // Issue 754 P4-b — the WIDE-INGEST arm: while the 64-row scratch is
         // swapped in, every projection site rides the T5 tolerance-class
@@ -6990,26 +7082,38 @@ let v = &self.verify;
             unsafe {
                 if w.q4 {
                     self.verify_mma.launch_t5_gemm_q4k_p64(
-                        stream, &w.dev, &v.xq, &v.xs, &v.xsum, y, w.rows, w.n, w.blocks_per_row,
+                        stream,
+                        &w.dev,
+                        &v.xq,
+                        &v.xs,
+                        &v.xsum,
+                        y,
+                        w.rows,
+                        w.n,
+                        w.blocks_per_row,
                         p,
                     )?;
                 } else {
                     self.verify_mma.launch_t5_gemm_q6k_p64(
-                        stream, &w.dev, &v.xq, &v.xs, &v.xsum, y, w.rows, w.n, w.blocks_per_row,
+                        stream,
+                        &w.dev,
+                        &v.xq,
+                        &v.xs,
+                        &v.xsum,
+                        y,
+                        w.rows,
+                        w.n,
+                        w.blocks_per_row,
                         p,
                     )?;
                 }
             }
             return Ok(());
         }
-        let (m_i, n_i, bpr_i, p_i) = (
-            w.rows as i32,
-            w.n as i32,
-            w.blocks_per_row as i32,
-            p as i32,
-        );
+        let (m_i, n_i, bpr_i, p_i) = (w.rows as i32, w.n as i32, w.blocks_per_row as i32, p as i32);
         let grid = w.rows.div_ceil(8).max(1) as u32;
-        let arm = VERIFY_GEMV_ARM.get_or_init(|| std::env::var("QWEN38_VERIFY_GEMV").unwrap_or_default());
+        let arm =
+            VERIFY_GEMV_ARM.get_or_init(|| std::env::var("QWEN38_VERIFY_GEMV").unwrap_or_default());
         if arm.as_str() == "mma" {
             // Issue 742 T9.10 — the tensor-core GEMM arm: each weight read
             // serves the full 8-feature x 8-token mma tile (the x-side L1
@@ -7021,13 +7125,29 @@ let v = &self.verify;
             unsafe {
                 if w.q4 {
                     self.verify_mma.launch_gemv_q4k_rows_mma(
-                        stream, &w.dev, &v.xq, &v.xs, &v.xsum, y, w.rows, w.n,
-                        w.blocks_per_row, p,
+                        stream,
+                        &w.dev,
+                        &v.xq,
+                        &v.xs,
+                        &v.xsum,
+                        y,
+                        w.rows,
+                        w.n,
+                        w.blocks_per_row,
+                        p,
                     )?;
                 } else {
                     self.verify_mma.launch_gemv_q6k_rows_mma(
-                        stream, &w.dev, &v.xq, &v.xs, &v.xsum, y, w.rows, w.n,
-                        w.blocks_per_row, p,
+                        stream,
+                        &w.dev,
+                        &v.xq,
+                        &v.xs,
+                        &v.xsum,
+                        y,
+                        w.rows,
+                        w.n,
+                        w.blocks_per_row,
+                        p,
                     )?;
                 }
             }
@@ -7063,14 +7183,32 @@ let v = &self.verify;
         if w.q4 && arm.as_str() == "shapeb" {
             return unsafe {
                 self.dense.launch_gemv_q4k_rows(
-                    stream, &w.dev, &v.xq, &v.xs, &v.xsum, y, w.rows, w.n, w.blocks_per_row, p,
+                    stream,
+                    &w.dev,
+                    &v.xq,
+                    &v.xs,
+                    &v.xsum,
+                    y,
+                    w.rows,
+                    w.n,
+                    w.blocks_per_row,
+                    p,
                 )
             };
         }
         if w.q4 {
             return unsafe {
                 self.dense.launch_gemv_q4k_rows_strict(
-                    stream, &w.dev, &v.xq, &v.xs, &v.xsum, y, w.rows, w.n, w.blocks_per_row, p,
+                    stream,
+                    &w.dev,
+                    &v.xq,
+                    &v.xs,
+                    &v.xsum,
+                    y,
+                    w.rows,
+                    w.n,
+                    w.blocks_per_row,
+                    p,
                 )
             };
         }
@@ -7173,14 +7311,7 @@ let v = &self.verify;
             let state = &self.state.recurrent[gdn_idx];
             self.dn
                 .launch_recurrence_fused_rows_hd128(
-                    stream,
-                    &v.qkv_exp,
-                    &v.beta,
-                    &v.decay,
-                    state,
-                    &v.rec_out,
-                    n_v,
-                    p,
+                    stream, &v.qkv_exp, &v.beta, &v.decay, state, &v.rec_out, n_v, p,
                 )
                 .map_err(|e| e.to_string())?;
         }
@@ -7340,7 +7471,14 @@ let v = &self.verify;
                 VerifyPos::Dev => {
                     self.attn
                         .launch_kv_append_rows_devpos(
-                            stream, &v.k_normed, &v.vv, kc, vc, kvd, &self.pos_dev, p,
+                            stream,
+                            &v.k_normed,
+                            &v.vv,
+                            kc,
+                            vc,
+                            kvd,
+                            &self.pos_dev,
+                            p,
                         )
                         .map_err(|e| e.to_string())?;
                 }
@@ -7361,9 +7499,7 @@ let v = &self.verify;
             // boundaries, ~4e-6 max_rel measured); the model-level G1
             // (0/256 argmax + loop stream) is the gate.
             let n_chunks = match (use_qg, pos) {
-                (true, VerifyPos::Live(bp)) => {
-                    (bp + p).div_ceil(self.verify_attn_chunk_len).max(1)
-                }
+                (true, VerifyPos::Live(bp)) => (bp + p).div_ceil(self.verify_attn_chunk_len).max(1),
                 (true, VerifyPos::Dev) => self.verify_attn_n_chunks,
                 // Bench 759 G1 root-cause: the Live count MUST be the FIXED
                 // decode count (`attn_n_chunks`), not a live div_ceil — decode
@@ -7385,18 +7521,42 @@ let v = &self.verify;
                     let mma = self.attn_mma.as_ref().expect("mma knob without kernels");
                     mma.launch_splitgqa_rows_qg_mma(
                         self.verify_attn_mma_arm24,
-                        stream, &v.q_normed, kc, vc, &v.part_m, &v.part_l, &v.part_out,
-                        &v.attn_out, cfg.head_dim, cfg.n_head, cfg.n_kv_head,
-                        self.verify_attn_chunk_len, n_chunks, bp, p,
+                        stream,
+                        &v.q_normed,
+                        kc,
+                        vc,
+                        &v.part_m,
+                        &v.part_l,
+                        &v.part_out,
+                        &v.attn_out,
+                        cfg.head_dim,
+                        cfg.n_head,
+                        cfg.n_kv_head,
+                        self.verify_attn_chunk_len,
+                        n_chunks,
+                        bp,
+                        p,
                     )
                 }
                 (true, VerifyPos::Dev) if self.verify_attn_mma => {
                     let mma = self.attn_mma.as_ref().expect("mma knob without kernels");
                     mma.launch_splitgqa_rows_qg_mma_devpos(
                         self.verify_attn_mma_arm24,
-                        stream, &v.q_normed, kc, vc, &v.part_m, &v.part_l, &v.part_out,
-                        &v.attn_out, cfg.head_dim, cfg.n_head, cfg.n_kv_head,
-                        self.verify_attn_chunk_len, self.verify_attn_n_chunks, &self.pos_dev, p,
+                        stream,
+                        &v.q_normed,
+                        kc,
+                        vc,
+                        &v.part_m,
+                        &v.part_l,
+                        &v.part_out,
+                        &v.attn_out,
+                        cfg.head_dim,
+                        cfg.n_head,
+                        cfg.n_kv_head,
+                        self.verify_attn_chunk_len,
+                        self.verify_attn_n_chunks,
+                        &self.pos_dev,
+                        p,
                     )
                 }
                 // Issue 742 T9.14 - the two-pass arm (qg regime, default):
@@ -7404,78 +7564,198 @@ let v = &self.verify;
                 // PV -> the unchanged combine. The grids/strides mirror
                 // the qg arm's Live/Dev split (exact counts live; the
                 // T9.12 pins devpos).
-                (true, VerifyPos::Live(bp)) if self.verify_attn_2p => self
-                    .attn
-                    .launch_attention_verify2p(
-                        stream, &v.q_normed, kc, vc,
-                        &v.stat_m, &v.stat_l, &v.mrg_m, &v.mrg_l,
-                        &v.part_m, &v.part_l, &v.part_out, &v.attn_out,
-                        cfg.head_dim, cfg.n_head, cfg.n_kv_head,
-                        self.verify_attn_chunk_len, n_chunks,
-                        (bp + p).div_ceil(32).max(1), bp, p,
-                    ),
-                (true, VerifyPos::Dev) if self.verify_attn_2p => self
-                    .attn
-                    .launch_attention_verify2p_devpos(
-                        stream, &v.q_normed, kc, vc,
-                        &v.stat_m, &v.stat_l, &v.mrg_m, &v.mrg_l,
-                        &v.part_m, &v.part_l, &v.part_out, &v.attn_out,
-                        cfg.head_dim, cfg.n_head, cfg.n_kv_head,
-                        self.verify_attn_chunk_len, self.verify_attn_n_chunks,
-                        self.verify_stat_n_tiles, &self.pos_dev, p,
-                    ),
-                (true, VerifyPos::Live(bp)) if self.verify_attn_dotma => self
-                    .attn
-                    .launch_attention_splitgqa_rows_qgma(
-                        stream, &v.q_normed, kc, vc, &v.part_m, &v.part_l, &v.part_out,
-                        &v.attn_out, cfg.head_dim, cfg.n_head, cfg.n_kv_head,
-                        self.verify_attn_chunk_len, n_chunks, bp, p,
-                    ),
+                (true, VerifyPos::Live(bp)) if self.verify_attn_2p => {
+                    self.attn.launch_attention_verify2p(
+                        stream,
+                        &v.q_normed,
+                        kc,
+                        vc,
+                        &v.stat_m,
+                        &v.stat_l,
+                        &v.mrg_m,
+                        &v.mrg_l,
+                        &v.part_m,
+                        &v.part_l,
+                        &v.part_out,
+                        &v.attn_out,
+                        cfg.head_dim,
+                        cfg.n_head,
+                        cfg.n_kv_head,
+                        self.verify_attn_chunk_len,
+                        n_chunks,
+                        (bp + p).div_ceil(32).max(1),
+                        bp,
+                        p,
+                    )
+                }
+                (true, VerifyPos::Dev) if self.verify_attn_2p => {
+                    self.attn.launch_attention_verify2p_devpos(
+                        stream,
+                        &v.q_normed,
+                        kc,
+                        vc,
+                        &v.stat_m,
+                        &v.stat_l,
+                        &v.mrg_m,
+                        &v.mrg_l,
+                        &v.part_m,
+                        &v.part_l,
+                        &v.part_out,
+                        &v.attn_out,
+                        cfg.head_dim,
+                        cfg.n_head,
+                        cfg.n_kv_head,
+                        self.verify_attn_chunk_len,
+                        self.verify_attn_n_chunks,
+                        self.verify_stat_n_tiles,
+                        &self.pos_dev,
+                        p,
+                    )
+                }
+                (true, VerifyPos::Live(bp)) if self.verify_attn_dotma => {
+                    self.attn.launch_attention_splitgqa_rows_qgma(
+                        stream,
+                        &v.q_normed,
+                        kc,
+                        vc,
+                        &v.part_m,
+                        &v.part_l,
+                        &v.part_out,
+                        &v.attn_out,
+                        cfg.head_dim,
+                        cfg.n_head,
+                        cfg.n_kv_head,
+                        self.verify_attn_chunk_len,
+                        n_chunks,
+                        bp,
+                        p,
+                    )
+                }
                 (true, VerifyPos::Live(bp)) => self.attn.launch_attention_splitgqa_rows_qg(
-                    stream, &v.q_normed, kc, vc, &v.part_m, &v.part_l, &v.part_out,
-                    &v.attn_out, cfg.head_dim, cfg.n_head, cfg.n_kv_head,
-                    self.verify_attn_chunk_len, n_chunks, bp, p,
+                    stream,
+                    &v.q_normed,
+                    kc,
+                    vc,
+                    &v.part_m,
+                    &v.part_l,
+                    &v.part_out,
+                    &v.attn_out,
+                    cfg.head_dim,
+                    cfg.n_head,
+                    cfg.n_kv_head,
+                    self.verify_attn_chunk_len,
+                    n_chunks,
+                    bp,
+                    p,
                 ),
-                (true, VerifyPos::Dev) if self.verify_attn_dotma => self
-                    .attn
-                    .launch_attention_splitgqa_rows_qgma_devpos(
-                        stream, &v.q_normed, kc, vc, &v.part_m, &v.part_l, &v.part_out,
-                        &v.attn_out, cfg.head_dim, cfg.n_head, cfg.n_kv_head,
-                        self.verify_attn_chunk_len, self.verify_attn_n_chunks, &self.pos_dev, p,
-                    ),
-                (true, VerifyPos::Dev) => self
-                    .attn
-                    .launch_attention_splitgqa_rows_qg_devpos(
-                        stream, &v.q_normed, kc, vc, &v.part_m, &v.part_l, &v.part_out,
-                        &v.attn_out, cfg.head_dim, cfg.n_head, cfg.n_kv_head,
-                        self.verify_attn_chunk_len, self.verify_attn_n_chunks, &self.pos_dev, p,
-                    ),
-                (false, VerifyPos::Live(bp)) if self.verify_attn_dotma => self
-                    .attn
-                    .launch_attention_splitgqa_rows_ma(
-                        stream, &v.q_normed, kc, vc, &v.part_m, &v.part_l, &v.part_out,
-                        &v.attn_out, cfg.head_dim, cfg.n_head, cfg.n_kv_head,
-                        self.attn_chunk_len, n_chunks, bp, p,
-                    ),
+                (true, VerifyPos::Dev) if self.verify_attn_dotma => {
+                    self.attn.launch_attention_splitgqa_rows_qgma_devpos(
+                        stream,
+                        &v.q_normed,
+                        kc,
+                        vc,
+                        &v.part_m,
+                        &v.part_l,
+                        &v.part_out,
+                        &v.attn_out,
+                        cfg.head_dim,
+                        cfg.n_head,
+                        cfg.n_kv_head,
+                        self.verify_attn_chunk_len,
+                        self.verify_attn_n_chunks,
+                        &self.pos_dev,
+                        p,
+                    )
+                }
+                (true, VerifyPos::Dev) => self.attn.launch_attention_splitgqa_rows_qg_devpos(
+                    stream,
+                    &v.q_normed,
+                    kc,
+                    vc,
+                    &v.part_m,
+                    &v.part_l,
+                    &v.part_out,
+                    &v.attn_out,
+                    cfg.head_dim,
+                    cfg.n_head,
+                    cfg.n_kv_head,
+                    self.verify_attn_chunk_len,
+                    self.verify_attn_n_chunks,
+                    &self.pos_dev,
+                    p,
+                ),
+                (false, VerifyPos::Live(bp)) if self.verify_attn_dotma => {
+                    self.attn.launch_attention_splitgqa_rows_ma(
+                        stream,
+                        &v.q_normed,
+                        kc,
+                        vc,
+                        &v.part_m,
+                        &v.part_l,
+                        &v.part_out,
+                        &v.attn_out,
+                        cfg.head_dim,
+                        cfg.n_head,
+                        cfg.n_kv_head,
+                        self.attn_chunk_len,
+                        n_chunks,
+                        bp,
+                        p,
+                    )
+                }
                 (false, VerifyPos::Live(bp)) => self.attn.launch_attention_splitgqa_rows(
-                    stream, &v.q_normed, kc, vc, &v.part_m, &v.part_l, &v.part_out,
-                    &v.attn_out, cfg.head_dim, cfg.n_head, cfg.n_kv_head,
-                    self.attn_chunk_len, n_chunks, bp, p,
+                    stream,
+                    &v.q_normed,
+                    kc,
+                    vc,
+                    &v.part_m,
+                    &v.part_l,
+                    &v.part_out,
+                    &v.attn_out,
+                    cfg.head_dim,
+                    cfg.n_head,
+                    cfg.n_kv_head,
+                    self.attn_chunk_len,
+                    n_chunks,
+                    bp,
+                    p,
                 ),
-                (false, VerifyPos::Dev) if self.verify_attn_dotma => self
-                    .attn
-                    .launch_attention_splitgqa_rows_ma_devpos(
-                        stream, &v.q_normed, kc, vc, &v.part_m, &v.part_l, &v.part_out,
-                        &v.attn_out, cfg.head_dim, cfg.n_head, cfg.n_kv_head,
-                        self.attn_chunk_len, self.attn_n_chunks, &self.pos_dev, p,
-                    ),
-                (false, VerifyPos::Dev) => self
-                    .attn
-                    .launch_attention_splitgqa_rows_devpos(
-                        stream, &v.q_normed, kc, vc, &v.part_m, &v.part_l, &v.part_out,
-                        &v.attn_out, cfg.head_dim, cfg.n_head, cfg.n_kv_head,
-                        self.attn_chunk_len, self.attn_n_chunks, &self.pos_dev, p,
-                    ),
+                (false, VerifyPos::Dev) if self.verify_attn_dotma => {
+                    self.attn.launch_attention_splitgqa_rows_ma_devpos(
+                        stream,
+                        &v.q_normed,
+                        kc,
+                        vc,
+                        &v.part_m,
+                        &v.part_l,
+                        &v.part_out,
+                        &v.attn_out,
+                        cfg.head_dim,
+                        cfg.n_head,
+                        cfg.n_kv_head,
+                        self.attn_chunk_len,
+                        self.attn_n_chunks,
+                        &self.pos_dev,
+                        p,
+                    )
+                }
+                (false, VerifyPos::Dev) => self.attn.launch_attention_splitgqa_rows_devpos(
+                    stream,
+                    &v.q_normed,
+                    kc,
+                    vc,
+                    &v.part_m,
+                    &v.part_l,
+                    &v.part_out,
+                    &v.attn_out,
+                    cfg.head_dim,
+                    cfg.n_head,
+                    cfg.n_kv_head,
+                    self.attn_chunk_len,
+                    self.attn_n_chunks,
+                    &self.pos_dev,
+                    p,
+                ),
             };
             attn_res.map_err(|e| e.to_string())?;
         }
@@ -7572,8 +7852,7 @@ let v = &self.verify;
         if self.cfg.n_layer <= QWEN38_DFLASH2_TAP_LAYERS[4] {
             return Err(format!(
                 "enable_verify_taps: n_layer {} does not cover tap layer {}",
-                self.cfg.n_layer,
-                QWEN38_DFLASH2_TAP_LAYERS[4]
+                self.cfg.n_layer, QWEN38_DFLASH2_TAP_LAYERS[4]
             ));
         }
         let len = QWEN38_VERIFY_MAX_P * QWEN38_DFLASH2_TAP_LAYERS.len() * self.cfg.n_embd;
@@ -7604,9 +7883,7 @@ let v = &self.verify;
         base_pos: usize,
     ) -> Result<Vec<u32>, String> {
         if self.verify_taps_dev.is_none() {
-            return Err(
-                "forward_verify_chunk_taps: call enable_verify_taps() first".to_string(),
-            );
+            return Err("forward_verify_chunk_taps: call enable_verify_taps() first".to_string());
         }
         self.verify_chunk_eager(tokens, base_pos, true)
     }
@@ -7636,11 +7913,7 @@ let v = &self.verify;
     /// Bench 759 G1 diag — dump one attention layer's KV row pair at
     /// `pos` (`[kvd] + [kvd]` concatenated). Diagnostic only (2 syncs + a
     /// small dtoh); compares chunk-written vs decode-written rows.
-    pub fn dump_kv_row(
-        &self,
-        attn_idx: usize,
-        pos: usize,
-    ) -> Result<(Vec<f32>, Vec<f32>), String> {
+    pub fn dump_kv_row(&self, attn_idx: usize, pos: usize) -> Result<(Vec<f32>, Vec<f32>), String> {
         let kvd = self.cfg.n_kv_head * self.cfg.head_dim;
         let k = &self.state.keys[attn_idx];
         let v = &self.state.values[attn_idx];
@@ -7778,13 +8051,7 @@ let v = &self.verify;
                         gdn_idx += 1;
                     }
                     Qwen38LayerType::Attention => {
-                        self.verify_attn_layer(
-                            i,
-                            attn_idx,
-                            VerifyPos::Live(base_pos),
-                            use_qg,
-                            p,
-                        )?;
+                        self.verify_attn_layer(i, attn_idx, VerifyPos::Live(base_pos), use_qg, p)?;
                         attn_idx += 1;
                     }
                 }
@@ -7829,13 +8096,7 @@ let v = &self.verify;
                         gdn_idx += 1;
                     }
                     Qwen38LayerType::Attention => {
-                        self.verify_attn_layer(
-                            i,
-                            attn_idx,
-                            VerifyPos::Live(base_pos),
-                            use_qg,
-                            p,
-                        )?;
+                        self.verify_attn_layer(i, attn_idx, VerifyPos::Live(base_pos), use_qg, p)?;
                         attn_idx += 1;
                     }
                 }
@@ -7855,7 +8116,13 @@ let v = &self.verify;
         // Final norm + lm_head + per-row argmax.
         {
             let v = &self.verify;
-            self.rmsnorm_quant_x_rows(&v.xb, &self.weights.output_norm.dev, n, cfg.rms_norm_eps, p)?;
+            self.rmsnorm_quant_x_rows(
+                &v.xb,
+                &self.weights.output_norm.dev,
+                n,
+                cfg.rms_norm_eps,
+                p,
+            )?;
             self.gemv_quant_rows(&self.weights.lm_head, &v.logits, p)?;
         }
         {
@@ -8033,8 +8300,13 @@ let v = &self.verify;
             let rows = if ingest { 1 } else { p };
             // SAFETY: logits covers rows * vocab; argmax_res covers p (zeroed).
             unsafe {
-                self.dense
-                    .launch_argmax_rows(stream, &v.logits, cfg.vocab_size, rows, &v.argmax_res)
+                self.dense.launch_argmax_rows(
+                    stream,
+                    &v.logits,
+                    cfg.vocab_size,
+                    rows,
+                    &v.argmax_res,
+                )
             }?;
         }
         Ok(())
@@ -8056,9 +8328,7 @@ let v = &self.verify;
     ) -> Result<Vec<u32>, String> {
         let p = tokens.len();
         if p == 0 || p > QWEN38_VERIFY_MAX_P {
-            return Err(format!(
-                "verify chunk graph: p must be in 1..=16 (got {p})"
-            ));
+            return Err(format!("verify chunk graph: p must be in 1..=16 (got {p})"));
         }
         if base_pos + p > self.ctx_len {
             return Err(format!(
@@ -8080,7 +8350,9 @@ let v = &self.verify;
                 // SAFETY: single-threaded and single-stream; the capture arm
                 // performs no cross-stream ops (the T5 decode-graph
                 // contract).
-                unsafe { stream.context().disable_event_tracking(); }
+                unsafe {
+                    stream.context().disable_event_tracking();
+                }
                 stream
                     .begin_capture(
                         cudarc::driver::sys::CUstreamCaptureMode::CU_STREAM_CAPTURE_MODE_GLOBAL,
@@ -8153,11 +8425,7 @@ let v = &self.verify;
     /// rides the production single-row GEMV over the same quantized views the
     /// verify tail reads (per-row bit-identity: the T9.9 fold-order contract;
     /// gated 0/512 + continuation in bench_755).
-    pub fn forward_ingest_chunk(
-        &mut self,
-        tokens: &[u32],
-        base_pos: usize,
-    ) -> Result<u32, String> {
+    pub fn forward_ingest_chunk(&mut self, tokens: &[u32], base_pos: usize) -> Result<u32, String> {
         Ok(self
             .ingest_chunk_eager_body(tokens, base_pos, false)?
             .pop()
@@ -8184,9 +8452,7 @@ let v = &self.verify;
             QWEN38_VERIFY_MAX_P
         };
         if p == 0 || p > max_p {
-            return Err(format!(
-                "ingest chunk: p must be in 1..={max_p} (got {p})"
-            ));
+            return Err(format!("ingest chunk: p must be in 1..={max_p} (got {p})"));
         }
         if base_pos + p > self.ctx_len {
             return Err(format!(
@@ -8248,13 +8514,7 @@ let v = &self.verify;
                         gdn_idx += 1;
                     }
                     Qwen38LayerType::Attention => {
-                        self.verify_attn_layer(
-                            i,
-                            attn_idx,
-                            VerifyPos::Live(base_pos),
-                            use_qg,
-                            p,
-                        )?;
+                        self.verify_attn_layer(i, attn_idx, VerifyPos::Live(base_pos), use_qg, p)?;
                         attn_idx += 1;
                     }
                 }
@@ -8293,13 +8553,7 @@ let v = &self.verify;
                         gdn_idx += 1;
                     }
                     Qwen38LayerType::Attention => {
-                        self.verify_attn_layer(
-                            i,
-                            attn_idx,
-                            VerifyPos::Live(base_pos),
-                            use_qg,
-                            p,
-                        )?;
+                        self.verify_attn_layer(i, attn_idx, VerifyPos::Live(base_pos), use_qg, p)?;
                         attn_idx += 1;
                     }
                 }
@@ -8386,9 +8640,7 @@ let v = &self.verify;
     ) -> Result<u32, String> {
         let p = tokens.len();
         if p == 0 || p > QWEN38_VERIFY_MAX_P {
-            return Err(format!(
-                "ingest chunk graph: p must be in 1..=16 (got {p})"
-            ));
+            return Err(format!("ingest chunk graph: p must be in 1..=16 (got {p})"));
         }
         if base_pos + p > self.ctx_len {
             return Err(format!(
@@ -8410,7 +8662,9 @@ let v = &self.verify;
                 // SAFETY: single-threaded and single-stream; the capture arm
                 // performs no cross-stream ops (the T5 decode-graph
                 // contract).
-                unsafe { stream.context().disable_event_tracking(); }
+                unsafe {
+                    stream.context().disable_event_tracking();
+                }
                 stream
                     .begin_capture(
                         cudarc::driver::sys::CUstreamCaptureMode::CU_STREAM_CAPTURE_MODE_GLOBAL,
@@ -8522,8 +8776,7 @@ let v = &self.verify;
         // ctx_len.div_ceil(verify_attn_chunk_len) since bp + p <= ctx_len).
         if self.wide_scratch.is_none() {
             let cfg = self.cfg.clone();
-            let l_qkv_out =
-                2 * cfg.n_k_heads * cfg.head_k_dim + cfg.n_v_heads * cfg.head_v_dim;
+            let l_qkv_out = 2 * cfg.n_k_heads * cfg.head_k_dim + cfg.n_v_heads * cfg.head_v_dim;
             let l_exp = 3 * cfg.n_v_heads * cfg.head_k_dim;
             let q_dim = cfg.n_head * cfg.head_dim;
             let kvd = cfg.n_kv_head * cfg.head_dim;
@@ -8547,14 +8800,18 @@ let v = &self.verify;
         // window and rolls back after it, both unswapped.
         std::mem::swap(
             &mut self.verify,
-            self.wide_scratch.as_mut().expect("wide scratch allocated above"),
+            self.wide_scratch
+                .as_mut()
+                .expect("wide scratch allocated above"),
         );
         self.wide_ingest_active = true;
         let result = self.ingest_chunk_eager_body(tokens, base_pos, all_argmax);
         self.wide_ingest_active = false;
         std::mem::swap(
             &mut self.verify,
-            self.wide_scratch.as_mut().expect("wide scratch allocated above"),
+            self.wide_scratch
+                .as_mut()
+                .expect("wide scratch allocated above"),
         );
         result
     }
@@ -8595,7 +8852,9 @@ let v = &self.verify;
             let chunk = &tokens[c0..c0 + take];
             last = Some(if take == QWEN38_INGEST_WIDE_P {
                 let am = self.forward_ingest_chunk_wide(chunk, pos, false)?;
-                am.into_iter().next().expect("ingest tail produced one argmax")
+                am.into_iter()
+                    .next()
+                    .expect("ingest tail produced one argmax")
             } else {
                 self.forward_ingest_chunk(chunk, pos)?
             });

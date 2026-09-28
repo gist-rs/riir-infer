@@ -72,9 +72,9 @@
 
 use std::sync::Arc;
 
-use cudarc::driver::safe::{CudaContext, CudaFunction, CudaModule, CudaSlice, CudaStream};
 use cudarc::driver::LaunchConfig;
 use cudarc::driver::PushKernelArg;
+use cudarc::driver::safe::{CudaContext, CudaFunction, CudaModule, CudaSlice, CudaStream};
 
 /// Inner chunk size (the llama.cpp `delta-net-base.cpp` CS for non-KDA —
 /// also the T4 production-shape C).
@@ -574,11 +574,25 @@ impl CudaGdnChunkedKernels {
 
         unsafe {
             self.launch_decay(stream, decay, lg, gamma, dte, total_decay, n_head, p)?;
-            self.launch_gram(stream, qkvx, beta, lg, x_mat, qkr_mat, n_head, n_chunks, p, v_dim)?;
+            self.launch_gram(
+                stream, qkvx, beta, lg, x_mat, qkr_mat, n_head, n_chunks, p, v_dim,
+            )?;
             self.launch_tinv(stream, x_mat, t_mat, n_chunks, p)?;
             self.launch_chunk_seq(
-                stream, qkvx, beta, gamma, dte, total_decay, t_mat, qkr_mat, state, output,
-                n_head, n_chunks, p, v_dim,
+                stream,
+                qkvx,
+                beta,
+                gamma,
+                dte,
+                total_decay,
+                t_mat,
+                qkr_mat,
+                state,
+                output,
+                n_head,
+                n_chunks,
+                p,
+                v_dim,
             )?;
         }
         Ok(())

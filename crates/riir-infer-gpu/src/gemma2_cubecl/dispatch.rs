@@ -17,13 +17,7 @@ impl GpuGemmaCubeCL {
     ///
     /// Creates input handle from CPU data, allocates output handle,
     /// launches kernel, reads result back to CPU.
-    pub fn dispatch_gemv(
-        &self,
-        weight: &Handle,
-        input: &[f32],
-        m: usize,
-        n: usize,
-    ) -> Vec<f32> {
+    pub fn dispatch_gemv(&self, weight: &Handle, input: &[f32], m: usize, n: usize) -> Vec<f32> {
         let input_handle = self.client.create_from_slice(f32::as_bytes(input));
         let output_handle = self.client.empty(m * core::mem::size_of::<f32>());
 
@@ -1104,12 +1098,7 @@ impl GpuGemmaCubeCL {
     /// within a single forward pass `pos` is constant across layers and Q/K,
     /// so the `head_dim / 2` `powf` calls and the GPU buffer upload happen only
     /// once per token instead of once per `(layer, Q/K)` pair.
-    pub fn dispatch_rope_gpu(
-        &self,
-        input_handle: Handle,
-        pos: usize,
-        n_heads: usize,
-    ) -> Handle {
+    pub fn dispatch_rope_gpu(&self, input_handle: Handle, pos: usize, n_heads: usize) -> Handle {
         let head_dim = self.config.head_dim;
         let n = n_heads * head_dim;
         let cos_sin_handle = self.rope_cos_sin_cache.borrow_mut().get_or_compute(
@@ -1137,12 +1126,7 @@ impl GpuGemmaCubeCL {
     /// Launch CubeCL GeGLU entirely on GPU (handle-to-handle).
     ///
     /// Computes `output[i] = gate[i] * GELU(gate[i]) * up[i]` on GPU.
-    pub fn dispatch_geglu_gpu(
-        &self,
-        gate_handle: Handle,
-        up_handle: Handle,
-        n: usize,
-    ) -> Handle {
+    pub fn dispatch_geglu_gpu(&self, gate_handle: Handle, up_handle: Handle, n: usize) -> Handle {
         let output_handle = self.client.empty(n * core::mem::size_of::<f32>());
         // SAFETY: gate and up have `n` elements each.
         unsafe {
@@ -1637,8 +1621,9 @@ impl GpuGemmaCubeCL {
         let q_dim = n_head * head_dim;
         let kv_dim = n_kv_head * head_dim;
         let softcap = self.config.attn_logit_softcapping;
-        let output_handle =
-            self.client.empty(seq_len * q_dim * core::mem::size_of::<f32>());
+        let output_handle = self
+            .client
+            .empty(seq_len * q_dim * core::mem::size_of::<f32>());
         // SAFETY: q/k/v handles have correct sizes (caller contract).
         unsafe {
             CausalAttentionFusedCubeCL::launch::<ActiveRuntime>(

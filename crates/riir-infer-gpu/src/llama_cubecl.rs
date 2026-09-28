@@ -41,9 +41,9 @@ use riir_infer_core::types::Config;
 // Re-use shared CPU helpers and GPU types from gemma2_cubecl.
 #[cfg(feature = "cubecl_runtime")]
 use crate::epilogue::{NormResidualCubeCL, SwigluCubeCL};
-use crate::gemma2_cubecl::{CpuKVCache, GpuKVCache, apply_rope, rmsnorm_gamma};
 #[cfg(feature = "cubecl_runtime")]
 use crate::gemma2_cubecl::KvStoreCubeCL;
+use crate::gemma2_cubecl::{CpuKVCache, GpuKVCache, apply_rope, rmsnorm_gamma};
 #[cfg(feature = "cubecl_runtime")]
 use crate::norms_cubecl::{ResidualAddCubeCL, RmsNormCubeCL};
 #[cfg(feature = "cubecl_runtime")]
@@ -686,10 +686,12 @@ impl GpuLlamaCubeCL {
     fn dispatch_rope_gpu(&self, input_handle: Handle, pos: usize, n_heads: usize) -> Handle {
         let head_dim = self.config.head_dim;
         let n = n_heads * head_dim;
-        let cos_sin_handle = self
-            .rope_cos_sin_cache
-            .borrow_mut()
-            .get_or_compute(&self.client, pos, head_dim, self.config.rope_theta);
+        let cos_sin_handle = self.rope_cos_sin_cache.borrow_mut().get_or_compute(
+            &self.client,
+            pos,
+            head_dim,
+            self.config.rope_theta,
+        );
         let output_handle = self.client.empty(n * core::mem::size_of::<f32>());
         unsafe {
             RopeCubeCL::launch::<ActiveRuntime>(

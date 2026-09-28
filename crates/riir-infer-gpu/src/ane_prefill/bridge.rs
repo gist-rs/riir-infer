@@ -74,12 +74,8 @@ type LastErrorFn = unsafe extern "C" fn() -> *const c_char;
 /// (returns both RETAINED — the Rust side owns the +1). Only read by the
 /// `metal_tensor_gemm`-gated kernel methods (Issue 886 footnote).
 #[cfg(all(feature = "metal_tensor_gemm", target_os = "macos"))]
-type MtlTexturesFn = unsafe extern "C" fn(
-    *mut c_void,
-    *mut c_void,
-    *mut *mut c_void,
-    *mut *mut c_void,
-);
+type MtlTexturesFn =
+    unsafe extern "C" fn(*mut c_void, *mut c_void, *mut *mut c_void, *mut *mut c_void);
 /// Plan 550: the canonical texture geometry for a surface byte size.
 #[cfg(all(feature = "metal_tensor_gemm", target_os = "macos"))]
 type TexGeomFn = unsafe extern "C" fn(usize, *mut u32, *mut u32);
@@ -126,16 +122,32 @@ pub struct AneInvokeArg {
 
 impl AneInvokeArg {
     pub fn obj(o: *mut c_void) -> Self {
-        Self { kind: b'o', obj: o, u: 0 }
+        Self {
+            kind: b'o',
+            obj: o,
+            u: 0,
+        }
     }
     pub fn u32(v: u32) -> Self {
-        Self { kind: b'I', obj: std::ptr::null_mut(), u: v as u64 }
+        Self {
+            kind: b'I',
+            obj: std::ptr::null_mut(),
+            u: v as u64,
+        }
     }
     pub fn u64_kind(v: u64) -> Self {
-        Self { kind: b'Q', obj: std::ptr::null_mut(), u: v }
+        Self {
+            kind: b'Q',
+            obj: std::ptr::null_mut(),
+            u: v,
+        }
     }
     pub fn boolean(v: bool) -> Self {
-        Self { kind: b'c', obj: std::ptr::null_mut(), u: v as u64 }
+        Self {
+            kind: b'c',
+            obj: std::ptr::null_mut(),
+            u: v as u64,
+        }
     }
 }
 
@@ -256,9 +268,13 @@ fn bridge_fns() -> &'static BridgeFns {
             free: std::mem::transmute::<*mut c_void, FreeFn>(sym("ane_t0_free")),
             last_error: std::mem::transmute::<*mut c_void, LastErrorFn>(sym("ane_t0_last_error")),
             #[cfg(all(feature = "metal_tensor_gemm", target_os = "macos"))]
-            mtl_textures: std::mem::transmute::<*mut c_void, MtlTexturesFn>(sym("ane_t0_mtl_textures")),
+            mtl_textures: std::mem::transmute::<*mut c_void, MtlTexturesFn>(sym(
+                "ane_t0_mtl_textures",
+            )),
             #[cfg(all(feature = "metal_tensor_gemm", target_os = "macos"))]
-            tex_geom: std::mem::transmute::<*mut c_void, TexGeomFn>(sym("ane_t0_tex_geom_for_bytes")),
+            tex_geom: std::mem::transmute::<*mut c_void, TexGeomFn>(sym(
+                "ane_t0_tex_geom_for_bytes",
+            )),
             stage: std::mem::transmute::<*mut c_void, StageFn>(sym("ane_t0_stage")),
             dump_class_methods: std::mem::transmute::<*mut c_void, DumpClassMethodsFn>(sym(
                 "ane_t0_dump_class_methods",
@@ -282,9 +298,7 @@ fn bridge_fns() -> &'static BridgeFns {
             obj_ivar_name_at: std::mem::transmute::<*mut c_void, ObjIvarNameAtFn>(sym(
                 "ane_t0_obj_ivar_name_at",
             )),
-            get_ivar_obj: std::mem::transmute::<*mut c_void, GetIvarFn>(sym(
-                "ane_t0_get_ivar_obj",
-            )),
+            get_ivar_obj: std::mem::transmute::<*mut c_void, GetIvarFn>(sym("ane_t0_get_ivar_obj")),
             array_count: std::mem::transmute::<*mut c_void, ArrayCountFn>(sym(
                 "ane_t0_array_count",
             )),
@@ -388,7 +402,13 @@ pub unsafe fn probe_invoke(
         err_text: [0; 256],
     };
     let ok = unsafe {
-        (bridge_fns().invoke)(receiver, c.as_ptr(), args.as_ptr(), args.len() as i32, &mut ret)
+        (bridge_fns().invoke)(
+            receiver,
+            c.as_ptr(),
+            args.as_ptr(),
+            args.len() as i32,
+            &mut ret,
+        )
     };
     ret.ok = ok;
     ret
@@ -794,14 +814,16 @@ impl BridgeKernel {
             (fns.tex_geom)(self.in_elems * 2, &mut w_in, &mut h_in);
             (fns.tex_geom)(self.out_elems * 2, &mut w_out, &mut h_out);
         }
-        Ok(std::sync::Arc::new(crate::ane_prefill::bridge::ZcTextures {
-            tex_in,
-            tex_out,
-            w_in: w_in as u64,
-            h_in: h_in as u64,
-            w_out: w_out as u64,
-            h_out: h_out as u64,
-        }))
+        Ok(std::sync::Arc::new(
+            crate::ane_prefill::bridge::ZcTextures {
+                tex_in,
+                tex_out,
+                w_in: w_in as u64,
+                h_in: h_in as u64,
+                w_out: w_out as u64,
+                h_out: h_out as u64,
+            },
+        ))
     }
 
     /// Probe 778: dump a private ANE class's method table (class + instance
@@ -821,10 +843,7 @@ impl BridgeKernel {
     /// the surface: valid while `self` lives.
     #[cfg(all(feature = "metal_tensor_gemm", target_os = "macos"))]
     #[doc(hidden)]
-    pub fn out_no_copy_buffer(
-        &self,
-        device: &metal::DeviceRef,
-    ) -> Result<metal::Buffer, String> {
+    pub fn out_no_copy_buffer(&self, device: &metal::DeviceRef) -> Result<metal::Buffer, String> {
         use metal::foreign_types::{ForeignType, ForeignTypeRef};
         let fns = bridge_fns();
         let p = unsafe { (fns.out_no_copy_buffer)(self.handle, device.as_ptr() as *mut c_void) };
@@ -1061,8 +1080,8 @@ mod tests {
             }
         }
         let (q, ws) = super::super::requant::requant_per_row_int8(&pos, &neg, &scales, rows, cols);
-        let kernel =
-            BridgeKernel::compile_form_c(ic, oc, seq, &q, &ws).expect("ANE Form C compile (synthetic)");
+        let kernel = BridgeKernel::compile_form_c(ic, oc, seq, &q, &ws)
+            .expect("ANE Form C compile (synthetic)");
 
         // Dense-ish input (every channel nonzero at a small seq).
         let mut x16 = vec![0u16; ic * seq];

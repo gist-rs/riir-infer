@@ -280,44 +280,108 @@ fn gemm_ternary_tiled64(
     let wq7 = tile_tok0 + lq7;
 
     if wr0 < m {
-        if wq0 < p_tokens { output_batch[(wq0 * m + wr0) as usize] = a_r0q0; }
-        if wq1 < p_tokens { output_batch[(wq1 * m + wr0) as usize] = a_r0q1; }
-        if wq2 < p_tokens { output_batch[(wq2 * m + wr0) as usize] = a_r0q2; }
-        if wq3 < p_tokens { output_batch[(wq3 * m + wr0) as usize] = a_r0q3; }
-        if wq4 < p_tokens { output_batch[(wq4 * m + wr0) as usize] = a_r0q4; }
-        if wq5 < p_tokens { output_batch[(wq5 * m + wr0) as usize] = a_r0q5; }
-        if wq6 < p_tokens { output_batch[(wq6 * m + wr0) as usize] = a_r0q6; }
-        if wq7 < p_tokens { output_batch[(wq7 * m + wr0) as usize] = a_r0q7; }
+        if wq0 < p_tokens {
+            output_batch[(wq0 * m + wr0) as usize] = a_r0q0;
+        }
+        if wq1 < p_tokens {
+            output_batch[(wq1 * m + wr0) as usize] = a_r0q1;
+        }
+        if wq2 < p_tokens {
+            output_batch[(wq2 * m + wr0) as usize] = a_r0q2;
+        }
+        if wq3 < p_tokens {
+            output_batch[(wq3 * m + wr0) as usize] = a_r0q3;
+        }
+        if wq4 < p_tokens {
+            output_batch[(wq4 * m + wr0) as usize] = a_r0q4;
+        }
+        if wq5 < p_tokens {
+            output_batch[(wq5 * m + wr0) as usize] = a_r0q5;
+        }
+        if wq6 < p_tokens {
+            output_batch[(wq6 * m + wr0) as usize] = a_r0q6;
+        }
+        if wq7 < p_tokens {
+            output_batch[(wq7 * m + wr0) as usize] = a_r0q7;
+        }
     }
     if wr1 < m {
-        if wq0 < p_tokens { output_batch[(wq0 * m + wr1) as usize] = a_r1q0; }
-        if wq1 < p_tokens { output_batch[(wq1 * m + wr1) as usize] = a_r1q1; }
-        if wq2 < p_tokens { output_batch[(wq2 * m + wr1) as usize] = a_r1q2; }
-        if wq3 < p_tokens { output_batch[(wq3 * m + wr1) as usize] = a_r1q3; }
-        if wq4 < p_tokens { output_batch[(wq4 * m + wr1) as usize] = a_r1q4; }
-        if wq5 < p_tokens { output_batch[(wq5 * m + wr1) as usize] = a_r1q5; }
-        if wq6 < p_tokens { output_batch[(wq6 * m + wr1) as usize] = a_r1q6; }
-        if wq7 < p_tokens { output_batch[(wq7 * m + wr1) as usize] = a_r1q7; }
+        if wq0 < p_tokens {
+            output_batch[(wq0 * m + wr1) as usize] = a_r1q0;
+        }
+        if wq1 < p_tokens {
+            output_batch[(wq1 * m + wr1) as usize] = a_r1q1;
+        }
+        if wq2 < p_tokens {
+            output_batch[(wq2 * m + wr1) as usize] = a_r1q2;
+        }
+        if wq3 < p_tokens {
+            output_batch[(wq3 * m + wr1) as usize] = a_r1q3;
+        }
+        if wq4 < p_tokens {
+            output_batch[(wq4 * m + wr1) as usize] = a_r1q4;
+        }
+        if wq5 < p_tokens {
+            output_batch[(wq5 * m + wr1) as usize] = a_r1q5;
+        }
+        if wq6 < p_tokens {
+            output_batch[(wq6 * m + wr1) as usize] = a_r1q6;
+        }
+        if wq7 < p_tokens {
+            output_batch[(wq7 * m + wr1) as usize] = a_r1q7;
+        }
     }
     if wr2 < m {
-        if wq0 < p_tokens { output_batch[(wq0 * m + wr2) as usize] = a_r2q0; }
-        if wq1 < p_tokens { output_batch[(wq1 * m + wr2) as usize] = a_r2q1; }
-        if wq2 < p_tokens { output_batch[(wq2 * m + wr2) as usize] = a_r2q2; }
-        if wq3 < p_tokens { output_batch[(wq3 * m + wr2) as usize] = a_r2q3; }
-        if wq4 < p_tokens { output_batch[(wq4 * m + wr2) as usize] = a_r2q4; }
-        if wq5 < p_tokens { output_batch[(wq5 * m + wr2) as usize] = a_r2q5; }
-        if wq6 < p_tokens { output_batch[(wq6 * m + wr2) as usize] = a_r2q6; }
-        if wq7 < p_tokens { output_batch[(wq7 * m + wr2) as usize] = a_r2q7; }
+        if wq0 < p_tokens {
+            output_batch[(wq0 * m + wr2) as usize] = a_r2q0;
+        }
+        if wq1 < p_tokens {
+            output_batch[(wq1 * m + wr2) as usize] = a_r2q1;
+        }
+        if wq2 < p_tokens {
+            output_batch[(wq2 * m + wr2) as usize] = a_r2q2;
+        }
+        if wq3 < p_tokens {
+            output_batch[(wq3 * m + wr2) as usize] = a_r2q3;
+        }
+        if wq4 < p_tokens {
+            output_batch[(wq4 * m + wr2) as usize] = a_r2q4;
+        }
+        if wq5 < p_tokens {
+            output_batch[(wq5 * m + wr2) as usize] = a_r2q5;
+        }
+        if wq6 < p_tokens {
+            output_batch[(wq6 * m + wr2) as usize] = a_r2q6;
+        }
+        if wq7 < p_tokens {
+            output_batch[(wq7 * m + wr2) as usize] = a_r2q7;
+        }
     }
     if wr3 < m {
-        if wq0 < p_tokens { output_batch[(wq0 * m + wr3) as usize] = a_r3q0; }
-        if wq1 < p_tokens { output_batch[(wq1 * m + wr3) as usize] = a_r3q1; }
-        if wq2 < p_tokens { output_batch[(wq2 * m + wr3) as usize] = a_r3q2; }
-        if wq3 < p_tokens { output_batch[(wq3 * m + wr3) as usize] = a_r3q3; }
-        if wq4 < p_tokens { output_batch[(wq4 * m + wr3) as usize] = a_r3q4; }
-        if wq5 < p_tokens { output_batch[(wq5 * m + wr3) as usize] = a_r3q5; }
-        if wq6 < p_tokens { output_batch[(wq6 * m + wr3) as usize] = a_r3q6; }
-        if wq7 < p_tokens { output_batch[(wq7 * m + wr3) as usize] = a_r3q7; }
+        if wq0 < p_tokens {
+            output_batch[(wq0 * m + wr3) as usize] = a_r3q0;
+        }
+        if wq1 < p_tokens {
+            output_batch[(wq1 * m + wr3) as usize] = a_r3q1;
+        }
+        if wq2 < p_tokens {
+            output_batch[(wq2 * m + wr3) as usize] = a_r3q2;
+        }
+        if wq3 < p_tokens {
+            output_batch[(wq3 * m + wr3) as usize] = a_r3q3;
+        }
+        if wq4 < p_tokens {
+            output_batch[(wq4 * m + wr3) as usize] = a_r3q4;
+        }
+        if wq5 < p_tokens {
+            output_batch[(wq5 * m + wr3) as usize] = a_r3q5;
+        }
+        if wq6 < p_tokens {
+            output_batch[(wq6 * m + wr3) as usize] = a_r3q6;
+        }
+        if wq7 < p_tokens {
+            output_batch[(wq7 * m + wr3) as usize] = a_r3q7;
+        }
     }
 }
 
@@ -601,44 +665,108 @@ fn gemm_ternary_tiled_xfix(
     let wq7 = tile_tok0 + lq7;
 
     if wr0 < m {
-        if wq0 < p_tokens { output_batch[(wq0 * m + wr0) as usize] = a_0_0; }
-        if wq1 < p_tokens { output_batch[(wq1 * m + wr0) as usize] = a_0_1; }
-        if wq2 < p_tokens { output_batch[(wq2 * m + wr0) as usize] = a_0_2; }
-        if wq3 < p_tokens { output_batch[(wq3 * m + wr0) as usize] = a_0_3; }
-        if wq4 < p_tokens { output_batch[(wq4 * m + wr0) as usize] = a_0_4; }
-        if wq5 < p_tokens { output_batch[(wq5 * m + wr0) as usize] = a_0_5; }
-        if wq6 < p_tokens { output_batch[(wq6 * m + wr0) as usize] = a_0_6; }
-        if wq7 < p_tokens { output_batch[(wq7 * m + wr0) as usize] = a_0_7; }
+        if wq0 < p_tokens {
+            output_batch[(wq0 * m + wr0) as usize] = a_0_0;
+        }
+        if wq1 < p_tokens {
+            output_batch[(wq1 * m + wr0) as usize] = a_0_1;
+        }
+        if wq2 < p_tokens {
+            output_batch[(wq2 * m + wr0) as usize] = a_0_2;
+        }
+        if wq3 < p_tokens {
+            output_batch[(wq3 * m + wr0) as usize] = a_0_3;
+        }
+        if wq4 < p_tokens {
+            output_batch[(wq4 * m + wr0) as usize] = a_0_4;
+        }
+        if wq5 < p_tokens {
+            output_batch[(wq5 * m + wr0) as usize] = a_0_5;
+        }
+        if wq6 < p_tokens {
+            output_batch[(wq6 * m + wr0) as usize] = a_0_6;
+        }
+        if wq7 < p_tokens {
+            output_batch[(wq7 * m + wr0) as usize] = a_0_7;
+        }
     }
     if wr1 < m {
-        if wq0 < p_tokens { output_batch[(wq0 * m + wr1) as usize] = a_1_0; }
-        if wq1 < p_tokens { output_batch[(wq1 * m + wr1) as usize] = a_1_1; }
-        if wq2 < p_tokens { output_batch[(wq2 * m + wr1) as usize] = a_1_2; }
-        if wq3 < p_tokens { output_batch[(wq3 * m + wr1) as usize] = a_1_3; }
-        if wq4 < p_tokens { output_batch[(wq4 * m + wr1) as usize] = a_1_4; }
-        if wq5 < p_tokens { output_batch[(wq5 * m + wr1) as usize] = a_1_5; }
-        if wq6 < p_tokens { output_batch[(wq6 * m + wr1) as usize] = a_1_6; }
-        if wq7 < p_tokens { output_batch[(wq7 * m + wr1) as usize] = a_1_7; }
+        if wq0 < p_tokens {
+            output_batch[(wq0 * m + wr1) as usize] = a_1_0;
+        }
+        if wq1 < p_tokens {
+            output_batch[(wq1 * m + wr1) as usize] = a_1_1;
+        }
+        if wq2 < p_tokens {
+            output_batch[(wq2 * m + wr1) as usize] = a_1_2;
+        }
+        if wq3 < p_tokens {
+            output_batch[(wq3 * m + wr1) as usize] = a_1_3;
+        }
+        if wq4 < p_tokens {
+            output_batch[(wq4 * m + wr1) as usize] = a_1_4;
+        }
+        if wq5 < p_tokens {
+            output_batch[(wq5 * m + wr1) as usize] = a_1_5;
+        }
+        if wq6 < p_tokens {
+            output_batch[(wq6 * m + wr1) as usize] = a_1_6;
+        }
+        if wq7 < p_tokens {
+            output_batch[(wq7 * m + wr1) as usize] = a_1_7;
+        }
     }
     if wr2 < m {
-        if wq0 < p_tokens { output_batch[(wq0 * m + wr2) as usize] = a_2_0; }
-        if wq1 < p_tokens { output_batch[(wq1 * m + wr2) as usize] = a_2_1; }
-        if wq2 < p_tokens { output_batch[(wq2 * m + wr2) as usize] = a_2_2; }
-        if wq3 < p_tokens { output_batch[(wq3 * m + wr2) as usize] = a_2_3; }
-        if wq4 < p_tokens { output_batch[(wq4 * m + wr2) as usize] = a_2_4; }
-        if wq5 < p_tokens { output_batch[(wq5 * m + wr2) as usize] = a_2_5; }
-        if wq6 < p_tokens { output_batch[(wq6 * m + wr2) as usize] = a_2_6; }
-        if wq7 < p_tokens { output_batch[(wq7 * m + wr2) as usize] = a_2_7; }
+        if wq0 < p_tokens {
+            output_batch[(wq0 * m + wr2) as usize] = a_2_0;
+        }
+        if wq1 < p_tokens {
+            output_batch[(wq1 * m + wr2) as usize] = a_2_1;
+        }
+        if wq2 < p_tokens {
+            output_batch[(wq2 * m + wr2) as usize] = a_2_2;
+        }
+        if wq3 < p_tokens {
+            output_batch[(wq3 * m + wr2) as usize] = a_2_3;
+        }
+        if wq4 < p_tokens {
+            output_batch[(wq4 * m + wr2) as usize] = a_2_4;
+        }
+        if wq5 < p_tokens {
+            output_batch[(wq5 * m + wr2) as usize] = a_2_5;
+        }
+        if wq6 < p_tokens {
+            output_batch[(wq6 * m + wr2) as usize] = a_2_6;
+        }
+        if wq7 < p_tokens {
+            output_batch[(wq7 * m + wr2) as usize] = a_2_7;
+        }
     }
     if wr3 < m {
-        if wq0 < p_tokens { output_batch[(wq0 * m + wr3) as usize] = a_3_0; }
-        if wq1 < p_tokens { output_batch[(wq1 * m + wr3) as usize] = a_3_1; }
-        if wq2 < p_tokens { output_batch[(wq2 * m + wr3) as usize] = a_3_2; }
-        if wq3 < p_tokens { output_batch[(wq3 * m + wr3) as usize] = a_3_3; }
-        if wq4 < p_tokens { output_batch[(wq4 * m + wr3) as usize] = a_3_4; }
-        if wq5 < p_tokens { output_batch[(wq5 * m + wr3) as usize] = a_3_5; }
-        if wq6 < p_tokens { output_batch[(wq6 * m + wr3) as usize] = a_3_6; }
-        if wq7 < p_tokens { output_batch[(wq7 * m + wr3) as usize] = a_3_7; }
+        if wq0 < p_tokens {
+            output_batch[(wq0 * m + wr3) as usize] = a_3_0;
+        }
+        if wq1 < p_tokens {
+            output_batch[(wq1 * m + wr3) as usize] = a_3_1;
+        }
+        if wq2 < p_tokens {
+            output_batch[(wq2 * m + wr3) as usize] = a_3_2;
+        }
+        if wq3 < p_tokens {
+            output_batch[(wq3 * m + wr3) as usize] = a_3_3;
+        }
+        if wq4 < p_tokens {
+            output_batch[(wq4 * m + wr3) as usize] = a_3_4;
+        }
+        if wq5 < p_tokens {
+            output_batch[(wq5 * m + wr3) as usize] = a_3_5;
+        }
+        if wq6 < p_tokens {
+            output_batch[(wq6 * m + wr3) as usize] = a_3_6;
+        }
+        if wq7 < p_tokens {
+            output_batch[(wq7 * m + wr3) as usize] = a_3_7;
+        }
     }
 }
 
@@ -960,84 +1088,212 @@ fn gemm_ternary_tiled_8x8(
     let wq7 = tile_tok0 + lq7;
 
     if wr0 < m {
-        if wq0 < p_tokens { output_batch[(wq0 * m + wr0) as usize] = a_0_0; }
-        if wq1 < p_tokens { output_batch[(wq1 * m + wr0) as usize] = a_0_1; }
-        if wq2 < p_tokens { output_batch[(wq2 * m + wr0) as usize] = a_0_2; }
-        if wq3 < p_tokens { output_batch[(wq3 * m + wr0) as usize] = a_0_3; }
-        if wq4 < p_tokens { output_batch[(wq4 * m + wr0) as usize] = a_0_4; }
-        if wq5 < p_tokens { output_batch[(wq5 * m + wr0) as usize] = a_0_5; }
-        if wq6 < p_tokens { output_batch[(wq6 * m + wr0) as usize] = a_0_6; }
-        if wq7 < p_tokens { output_batch[(wq7 * m + wr0) as usize] = a_0_7; }
+        if wq0 < p_tokens {
+            output_batch[(wq0 * m + wr0) as usize] = a_0_0;
+        }
+        if wq1 < p_tokens {
+            output_batch[(wq1 * m + wr0) as usize] = a_0_1;
+        }
+        if wq2 < p_tokens {
+            output_batch[(wq2 * m + wr0) as usize] = a_0_2;
+        }
+        if wq3 < p_tokens {
+            output_batch[(wq3 * m + wr0) as usize] = a_0_3;
+        }
+        if wq4 < p_tokens {
+            output_batch[(wq4 * m + wr0) as usize] = a_0_4;
+        }
+        if wq5 < p_tokens {
+            output_batch[(wq5 * m + wr0) as usize] = a_0_5;
+        }
+        if wq6 < p_tokens {
+            output_batch[(wq6 * m + wr0) as usize] = a_0_6;
+        }
+        if wq7 < p_tokens {
+            output_batch[(wq7 * m + wr0) as usize] = a_0_7;
+        }
     }
     if wr1 < m {
-        if wq0 < p_tokens { output_batch[(wq0 * m + wr1) as usize] = a_1_0; }
-        if wq1 < p_tokens { output_batch[(wq1 * m + wr1) as usize] = a_1_1; }
-        if wq2 < p_tokens { output_batch[(wq2 * m + wr1) as usize] = a_1_2; }
-        if wq3 < p_tokens { output_batch[(wq3 * m + wr1) as usize] = a_1_3; }
-        if wq4 < p_tokens { output_batch[(wq4 * m + wr1) as usize] = a_1_4; }
-        if wq5 < p_tokens { output_batch[(wq5 * m + wr1) as usize] = a_1_5; }
-        if wq6 < p_tokens { output_batch[(wq6 * m + wr1) as usize] = a_1_6; }
-        if wq7 < p_tokens { output_batch[(wq7 * m + wr1) as usize] = a_1_7; }
+        if wq0 < p_tokens {
+            output_batch[(wq0 * m + wr1) as usize] = a_1_0;
+        }
+        if wq1 < p_tokens {
+            output_batch[(wq1 * m + wr1) as usize] = a_1_1;
+        }
+        if wq2 < p_tokens {
+            output_batch[(wq2 * m + wr1) as usize] = a_1_2;
+        }
+        if wq3 < p_tokens {
+            output_batch[(wq3 * m + wr1) as usize] = a_1_3;
+        }
+        if wq4 < p_tokens {
+            output_batch[(wq4 * m + wr1) as usize] = a_1_4;
+        }
+        if wq5 < p_tokens {
+            output_batch[(wq5 * m + wr1) as usize] = a_1_5;
+        }
+        if wq6 < p_tokens {
+            output_batch[(wq6 * m + wr1) as usize] = a_1_6;
+        }
+        if wq7 < p_tokens {
+            output_batch[(wq7 * m + wr1) as usize] = a_1_7;
+        }
     }
     if wr2 < m {
-        if wq0 < p_tokens { output_batch[(wq0 * m + wr2) as usize] = a_2_0; }
-        if wq1 < p_tokens { output_batch[(wq1 * m + wr2) as usize] = a_2_1; }
-        if wq2 < p_tokens { output_batch[(wq2 * m + wr2) as usize] = a_2_2; }
-        if wq3 < p_tokens { output_batch[(wq3 * m + wr2) as usize] = a_2_3; }
-        if wq4 < p_tokens { output_batch[(wq4 * m + wr2) as usize] = a_2_4; }
-        if wq5 < p_tokens { output_batch[(wq5 * m + wr2) as usize] = a_2_5; }
-        if wq6 < p_tokens { output_batch[(wq6 * m + wr2) as usize] = a_2_6; }
-        if wq7 < p_tokens { output_batch[(wq7 * m + wr2) as usize] = a_2_7; }
+        if wq0 < p_tokens {
+            output_batch[(wq0 * m + wr2) as usize] = a_2_0;
+        }
+        if wq1 < p_tokens {
+            output_batch[(wq1 * m + wr2) as usize] = a_2_1;
+        }
+        if wq2 < p_tokens {
+            output_batch[(wq2 * m + wr2) as usize] = a_2_2;
+        }
+        if wq3 < p_tokens {
+            output_batch[(wq3 * m + wr2) as usize] = a_2_3;
+        }
+        if wq4 < p_tokens {
+            output_batch[(wq4 * m + wr2) as usize] = a_2_4;
+        }
+        if wq5 < p_tokens {
+            output_batch[(wq5 * m + wr2) as usize] = a_2_5;
+        }
+        if wq6 < p_tokens {
+            output_batch[(wq6 * m + wr2) as usize] = a_2_6;
+        }
+        if wq7 < p_tokens {
+            output_batch[(wq7 * m + wr2) as usize] = a_2_7;
+        }
     }
     if wr3 < m {
-        if wq0 < p_tokens { output_batch[(wq0 * m + wr3) as usize] = a_3_0; }
-        if wq1 < p_tokens { output_batch[(wq1 * m + wr3) as usize] = a_3_1; }
-        if wq2 < p_tokens { output_batch[(wq2 * m + wr3) as usize] = a_3_2; }
-        if wq3 < p_tokens { output_batch[(wq3 * m + wr3) as usize] = a_3_3; }
-        if wq4 < p_tokens { output_batch[(wq4 * m + wr3) as usize] = a_3_4; }
-        if wq5 < p_tokens { output_batch[(wq5 * m + wr3) as usize] = a_3_5; }
-        if wq6 < p_tokens { output_batch[(wq6 * m + wr3) as usize] = a_3_6; }
-        if wq7 < p_tokens { output_batch[(wq7 * m + wr3) as usize] = a_3_7; }
+        if wq0 < p_tokens {
+            output_batch[(wq0 * m + wr3) as usize] = a_3_0;
+        }
+        if wq1 < p_tokens {
+            output_batch[(wq1 * m + wr3) as usize] = a_3_1;
+        }
+        if wq2 < p_tokens {
+            output_batch[(wq2 * m + wr3) as usize] = a_3_2;
+        }
+        if wq3 < p_tokens {
+            output_batch[(wq3 * m + wr3) as usize] = a_3_3;
+        }
+        if wq4 < p_tokens {
+            output_batch[(wq4 * m + wr3) as usize] = a_3_4;
+        }
+        if wq5 < p_tokens {
+            output_batch[(wq5 * m + wr3) as usize] = a_3_5;
+        }
+        if wq6 < p_tokens {
+            output_batch[(wq6 * m + wr3) as usize] = a_3_6;
+        }
+        if wq7 < p_tokens {
+            output_batch[(wq7 * m + wr3) as usize] = a_3_7;
+        }
     }
     if wr4 < m {
-        if wq0 < p_tokens { output_batch[(wq0 * m + wr4) as usize] = a_4_0; }
-        if wq1 < p_tokens { output_batch[(wq1 * m + wr4) as usize] = a_4_1; }
-        if wq2 < p_tokens { output_batch[(wq2 * m + wr4) as usize] = a_4_2; }
-        if wq3 < p_tokens { output_batch[(wq3 * m + wr4) as usize] = a_4_3; }
-        if wq4 < p_tokens { output_batch[(wq4 * m + wr4) as usize] = a_4_4; }
-        if wq5 < p_tokens { output_batch[(wq5 * m + wr4) as usize] = a_4_5; }
-        if wq6 < p_tokens { output_batch[(wq6 * m + wr4) as usize] = a_4_6; }
-        if wq7 < p_tokens { output_batch[(wq7 * m + wr4) as usize] = a_4_7; }
+        if wq0 < p_tokens {
+            output_batch[(wq0 * m + wr4) as usize] = a_4_0;
+        }
+        if wq1 < p_tokens {
+            output_batch[(wq1 * m + wr4) as usize] = a_4_1;
+        }
+        if wq2 < p_tokens {
+            output_batch[(wq2 * m + wr4) as usize] = a_4_2;
+        }
+        if wq3 < p_tokens {
+            output_batch[(wq3 * m + wr4) as usize] = a_4_3;
+        }
+        if wq4 < p_tokens {
+            output_batch[(wq4 * m + wr4) as usize] = a_4_4;
+        }
+        if wq5 < p_tokens {
+            output_batch[(wq5 * m + wr4) as usize] = a_4_5;
+        }
+        if wq6 < p_tokens {
+            output_batch[(wq6 * m + wr4) as usize] = a_4_6;
+        }
+        if wq7 < p_tokens {
+            output_batch[(wq7 * m + wr4) as usize] = a_4_7;
+        }
     }
     if wr5 < m {
-        if wq0 < p_tokens { output_batch[(wq0 * m + wr5) as usize] = a_5_0; }
-        if wq1 < p_tokens { output_batch[(wq1 * m + wr5) as usize] = a_5_1; }
-        if wq2 < p_tokens { output_batch[(wq2 * m + wr5) as usize] = a_5_2; }
-        if wq3 < p_tokens { output_batch[(wq3 * m + wr5) as usize] = a_5_3; }
-        if wq4 < p_tokens { output_batch[(wq4 * m + wr5) as usize] = a_5_4; }
-        if wq5 < p_tokens { output_batch[(wq5 * m + wr5) as usize] = a_5_5; }
-        if wq6 < p_tokens { output_batch[(wq6 * m + wr5) as usize] = a_5_6; }
-        if wq7 < p_tokens { output_batch[(wq7 * m + wr5) as usize] = a_5_7; }
+        if wq0 < p_tokens {
+            output_batch[(wq0 * m + wr5) as usize] = a_5_0;
+        }
+        if wq1 < p_tokens {
+            output_batch[(wq1 * m + wr5) as usize] = a_5_1;
+        }
+        if wq2 < p_tokens {
+            output_batch[(wq2 * m + wr5) as usize] = a_5_2;
+        }
+        if wq3 < p_tokens {
+            output_batch[(wq3 * m + wr5) as usize] = a_5_3;
+        }
+        if wq4 < p_tokens {
+            output_batch[(wq4 * m + wr5) as usize] = a_5_4;
+        }
+        if wq5 < p_tokens {
+            output_batch[(wq5 * m + wr5) as usize] = a_5_5;
+        }
+        if wq6 < p_tokens {
+            output_batch[(wq6 * m + wr5) as usize] = a_5_6;
+        }
+        if wq7 < p_tokens {
+            output_batch[(wq7 * m + wr5) as usize] = a_5_7;
+        }
     }
     if wr6 < m {
-        if wq0 < p_tokens { output_batch[(wq0 * m + wr6) as usize] = a_6_0; }
-        if wq1 < p_tokens { output_batch[(wq1 * m + wr6) as usize] = a_6_1; }
-        if wq2 < p_tokens { output_batch[(wq2 * m + wr6) as usize] = a_6_2; }
-        if wq3 < p_tokens { output_batch[(wq3 * m + wr6) as usize] = a_6_3; }
-        if wq4 < p_tokens { output_batch[(wq4 * m + wr6) as usize] = a_6_4; }
-        if wq5 < p_tokens { output_batch[(wq5 * m + wr6) as usize] = a_6_5; }
-        if wq6 < p_tokens { output_batch[(wq6 * m + wr6) as usize] = a_6_6; }
-        if wq7 < p_tokens { output_batch[(wq7 * m + wr6) as usize] = a_6_7; }
+        if wq0 < p_tokens {
+            output_batch[(wq0 * m + wr6) as usize] = a_6_0;
+        }
+        if wq1 < p_tokens {
+            output_batch[(wq1 * m + wr6) as usize] = a_6_1;
+        }
+        if wq2 < p_tokens {
+            output_batch[(wq2 * m + wr6) as usize] = a_6_2;
+        }
+        if wq3 < p_tokens {
+            output_batch[(wq3 * m + wr6) as usize] = a_6_3;
+        }
+        if wq4 < p_tokens {
+            output_batch[(wq4 * m + wr6) as usize] = a_6_4;
+        }
+        if wq5 < p_tokens {
+            output_batch[(wq5 * m + wr6) as usize] = a_6_5;
+        }
+        if wq6 < p_tokens {
+            output_batch[(wq6 * m + wr6) as usize] = a_6_6;
+        }
+        if wq7 < p_tokens {
+            output_batch[(wq7 * m + wr6) as usize] = a_6_7;
+        }
     }
     if wr7 < m {
-        if wq0 < p_tokens { output_batch[(wq0 * m + wr7) as usize] = a_7_0; }
-        if wq1 < p_tokens { output_batch[(wq1 * m + wr7) as usize] = a_7_1; }
-        if wq2 < p_tokens { output_batch[(wq2 * m + wr7) as usize] = a_7_2; }
-        if wq3 < p_tokens { output_batch[(wq3 * m + wr7) as usize] = a_7_3; }
-        if wq4 < p_tokens { output_batch[(wq4 * m + wr7) as usize] = a_7_4; }
-        if wq5 < p_tokens { output_batch[(wq5 * m + wr7) as usize] = a_7_5; }
-        if wq6 < p_tokens { output_batch[(wq6 * m + wr7) as usize] = a_7_6; }
-        if wq7 < p_tokens { output_batch[(wq7 * m + wr7) as usize] = a_7_7; }
+        if wq0 < p_tokens {
+            output_batch[(wq0 * m + wr7) as usize] = a_7_0;
+        }
+        if wq1 < p_tokens {
+            output_batch[(wq1 * m + wr7) as usize] = a_7_1;
+        }
+        if wq2 < p_tokens {
+            output_batch[(wq2 * m + wr7) as usize] = a_7_2;
+        }
+        if wq3 < p_tokens {
+            output_batch[(wq3 * m + wr7) as usize] = a_7_3;
+        }
+        if wq4 < p_tokens {
+            output_batch[(wq4 * m + wr7) as usize] = a_7_4;
+        }
+        if wq5 < p_tokens {
+            output_batch[(wq5 * m + wr7) as usize] = a_7_5;
+        }
+        if wq6 < p_tokens {
+            output_batch[(wq6 * m + wr7) as usize] = a_7_6;
+        }
+        if wq7 < p_tokens {
+            output_batch[(wq7 * m + wr7) as usize] = a_7_7;
+        }
     }
 }
 

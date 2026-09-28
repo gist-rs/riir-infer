@@ -162,7 +162,8 @@ fn bump(c: &AtomicU64, t: Instant) {
 fn drain_probe_armed() -> bool {
     static ARMED: OnceLock<bool> = OnceLock::new();
     *ARMED.get_or_init(|| {
-        std::env::var("RIIR_ANE_ZC_DRAIN_PROBE").is_ok_and(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+        std::env::var("RIIR_ANE_ZC_DRAIN_PROBE")
+            .is_ok_and(|v| v == "1" || v.eq_ignore_ascii_case("true"))
     })
 }
 
@@ -191,11 +192,11 @@ fn record_pack_exec(cmd: &CommandBufferRef) {
         (msg_send![obj, GPUStartTime], msg_send![obj, GPUEndTime])
     };
     if t0 > 0.0 && t1 >= t0 {
-            T_ZC_PACKEXEC_NS.fetch_add(((t1 - t0) * 1e9) as u64, Ordering::Relaxed);
-            N_ZC_TS_OK.fetch_add(1, Ordering::Relaxed);
-        } else {
-            N_ZC_TS_BAD.fetch_add(1, Ordering::Relaxed);
-        }
+        T_ZC_PACKEXEC_NS.fetch_add(((t1 - t0) * 1e9) as u64, Ordering::Relaxed);
+        N_ZC_TS_OK.fetch_add(1, Ordering::Relaxed);
+    } else {
+        N_ZC_TS_BAD.fetch_add(1, Ordering::Relaxed);
+    }
 }
 
 /// Reset the ZC stage counters (the harness brackets each arm).
@@ -630,13 +631,14 @@ fn encode_pack(
     encoder.set_compute_pipeline_state(&ctx.pack);
     encoder.set_buffer(0, Some(input), input_off);
     encoder.set_texture(0, Some(&textures.tex_in));
-    encoder.set_bytes(1, std::mem::size_of::<ZcPackParams>() as u64, &params as *const _ as *const _);
+    encoder.set_bytes(
+        1,
+        std::mem::size_of::<ZcPackParams>() as u64,
+        &params as *const _ as *const _,
+    );
     encoder.use_resource(input, metal::MTLResourceUsage::Read);
     encoder.use_resource(&textures.tex_in, metal::MTLResourceUsage::Write);
-    encoder.dispatch_threads(
-        MTLSize::new(total_u32 as u64, 1, 1),
-        MTLSize::new(64, 1, 1),
-    );
+    encoder.dispatch_threads(MTLSize::new(total_u32 as u64, 1, 1), MTLSize::new(64, 1, 1));
 }
 
 fn encode_unpack(
@@ -660,7 +662,11 @@ fn encode_unpack(
     encoder.set_compute_pipeline_state(&ctx.unpack);
     encoder.set_texture(0, Some(&textures.tex_out));
     encoder.set_buffer(0, Some(target), target_off);
-    encoder.set_bytes(1, std::mem::size_of::<ZcUnpackParams>() as u64, &params as *const _ as *const _);
+    encoder.set_bytes(
+        1,
+        std::mem::size_of::<ZcUnpackParams>() as u64,
+        &params as *const _ as *const _,
+    );
     encoder.use_resource(&textures.tex_out, metal::MTLResourceUsage::Read);
     encoder.use_resource(target, metal::MTLResourceUsage::Write);
     encoder.dispatch_threads(MTLSize::new(total as u64, 1, 1), MTLSize::new(64, 1, 1));
@@ -693,8 +699,7 @@ fn zc_worker_loop(worker: ZcWorker) -> Result<(), String> {
         let device_ref: &DeviceRef = unsafe { DeviceRef::from_ptr(ctx.device) };
         kernel.metal_textures_fresh(device_ref)
     };
-    let nc_ref: &BufferRef =
-        unsafe { BufferRef::from_ptr(out_nc_buffer.as_ptr() as *mut _) };
+    let nc_ref: &BufferRef = unsafe { BufferRef::from_ptr(out_nc_buffer.as_ptr() as *mut _) };
     let probe = drain_probe_armed();
     // Issue 769 T10: the pack's queue. The dedicated one when armed - its
     // `wait_until_completed()` then drains only work on THAT queue (our own
@@ -828,9 +833,7 @@ pub fn begin_split_overlapped_zc(
     // the main thread. Texture-view reads of the post-eval backing proved
     // sequence-fragile (fresh or cached, either thread); the buffer path
     // reads the live surface bytes unconditionally (Probe 778 C).
-    let out_nc_buffer = kernel.out_no_copy_buffer(unsafe {
-        DeviceRef::from_ptr(ctx.device)
-    })?;
+    let out_nc_buffer = kernel.out_no_copy_buffer(unsafe { DeviceRef::from_ptr(ctx.device) })?;
     // Issue 769 T10 - arm the producer fence BEFORE the caller's complement
     // exists, which is what makes the dedicated queue mean anything:
     //
@@ -850,22 +853,25 @@ pub fn begin_split_overlapped_zc(
     // P4: the flush is armable ALONE so the second queue's delta can be
     // attributed. The fence implies it (correctness); the reverse does not.
     let want_flush = two_q || crate::ane_prefill::prefill_ane_zc_producer_flush();
-    let fence_value = if !want_flush { None } else {
-            let t = Instant::now();
-            let _ = client.flush();
-            let v = if !two_q { None } else {
-                    let v = ctx.next_fence();
-                    let shared: &CommandQueueRef =
-                        unsafe { CommandQueueRef::from_ptr(ctx.queue) };
-                    let sig = shared.new_command_buffer();
-                    sig.encode_signal_event(&ctx.fence, v);
-                    sig.commit();
-                    Some(v)
-                };
-            bump(&T_ZC_FENCE_NS, t);
-            N_ZC_FENCES.fetch_add(1, Ordering::Relaxed);
-            v
+    let fence_value = if !want_flush {
+        None
+    } else {
+        let t = Instant::now();
+        let _ = client.flush();
+        let v = if !two_q {
+            None
+        } else {
+            let v = ctx.next_fence();
+            let shared: &CommandQueueRef = unsafe { CommandQueueRef::from_ptr(ctx.queue) };
+            let sig = shared.new_command_buffer();
+            sig.encode_signal_event(&ctx.fence, v);
+            sig.commit();
+            Some(v)
         };
+        bump(&T_ZC_FENCE_NS, t);
+        N_ZC_FENCES.fetch_add(1, Ordering::Relaxed);
+        v
+    };
     // Main-thread extraction — the worker never touches CubeCL. Texture
     // views are fetched FRESH per block inside the loop (Probe 778 A —
     // pre-eval views read the stale io_out backing).
@@ -891,9 +897,7 @@ pub fn begin_split_overlapped_zc(
         .name("ane-zc".into())
         .spawn(move || zc_worker_loop(worker))
         .map_err(|e| format!("ANE zc worker spawn failed: {e}"))?;
-    Ok(AneSplitJobZc {
-        handle: Some(join),
-    })
+    Ok(AneSplitJobZc { handle: Some(join) })
 }
 
 impl AneSplitJobZc {
@@ -1115,10 +1119,7 @@ pub fn begin_split_gpu_in(
 
 impl AneSplitJobGpuIn {
     /// See [`super::exec::AneSplitJob::finish`].
-    pub fn finish<R: cubecl::Runtime>(
-        self,
-        client: &ComputeClient<R>,
-    ) -> Result<(), String> {
+    pub fn finish<R: cubecl::Runtime>(self, client: &ComputeClient<R>) -> Result<(), String> {
         self.job.finish(client)
     }
 }
@@ -1149,10 +1150,7 @@ pub fn debug_unpack_probe(
         if gpu_prefill {
             // The round-trip probe: GPU-fill tex_out FIRST, then unpack —
             // separates read-path breakage from ANE-write visibility.
-            let geom = [
-                textures.w_out as u32,
-                textures.h_out as u32,
-            ];
+            let geom = [textures.w_out as u32, textures.h_out as u32];
             let val: u32 = 0x3C00_3C00; // two fp16 1.0s
             enc.set_compute_pipeline_state(&ctx.fill);
             enc.set_texture(0, Some(&textures.tex_out));
@@ -1169,7 +1167,9 @@ pub fn debug_unpack_probe(
             );
         }
         let slice_off = target_off + (block * w * seg_dim * 4) as u64;
-        encode_unpack(enc, ctx, &textures, target_ref, slice_off, w, chan_off, seg_dim);
+        encode_unpack(
+            enc, ctx, &textures, target_ref, slice_off, w, chan_off, seg_dim,
+        );
         enc.end_encoding();
     }
     cmd.commit();
@@ -1253,7 +1253,9 @@ pub fn debug_unpack_probe_tex(
     {
         let enc = cmd.new_compute_command_encoder();
         let slice_off = target_off + (block * w * seg_dim * 4) as u64;
-        encode_unpack(enc, ctx, textures, target_ref, slice_off, w, chan_off, seg_dim);
+        encode_unpack(
+            enc, ctx, textures, target_ref, slice_off, w, chan_off, seg_dim,
+        );
         enc.end_encoding();
     }
     cmd.commit();
@@ -1279,11 +1281,7 @@ pub fn debug_blit_probe(ctx: &ZcContext, textures: &ZcTextures) -> Result<Vec<u8
             &textures.tex_out,
             0, // source slice
             0, // source mip level
-            MTLOrigin {
-                x: 0,
-                y: 0,
-                z: 0,
-            },
+            MTLOrigin { x: 0, y: 0, z: 0 },
             MTLSize::new(textures.w_out, textures.h_out, 1),
             &buf,
             0,                  // destination offset
@@ -1337,8 +1335,16 @@ pub fn debug_unpack_buf_probe(
         let enc = cmd.new_compute_command_encoder();
         enc.set_compute_pipeline_state(&ctx.unpack_buf);
         enc.set_buffer(0, Some(nc_ref), 0);
-        enc.set_buffer(1, Some(target_ref), target_off + (block * w * seg_dim * 4) as u64);
-        enc.set_bytes(2, std::mem::size_of::<ZcUnpackParams>() as u64, &params as *const _ as *const _);
+        enc.set_buffer(
+            1,
+            Some(target_ref),
+            target_off + (block * w * seg_dim * 4) as u64,
+        );
+        enc.set_bytes(
+            2,
+            std::mem::size_of::<ZcUnpackParams>() as u64,
+            &params as *const _ as *const _,
+        );
         enc.use_resource(nc_ref, metal::MTLResourceUsage::Read);
         enc.use_resource(target_ref, metal::MTLResourceUsage::Write);
         enc.dispatch_threads(MTLSize::new(total as u64, 1, 1), MTLSize::new(64, 1, 1));

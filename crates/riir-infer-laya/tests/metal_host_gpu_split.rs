@@ -31,7 +31,7 @@
 //! quote `uptime` + free RAM from the run's shell, not from memory.
 #![cfg(all(target_os = "macos", feature = "laya-riir-metal"))]
 
-use riir_infer_laya::laya::config::{load_checkpoint_configs, Checkpoint};
+use riir_infer_laya::laya::config::{Checkpoint, load_checkpoint_configs};
 use riir_infer_laya::laya::riir::backend::Backend;
 use riir_infer_laya::laya::riir::encoder::Encoder;
 use riir_infer_laya::laya::riir::metal::Metal;
@@ -79,7 +79,9 @@ fn t6_host_gpu_split() {
         // the quantity being split.
         for _ in 0..2 {
             backend.begin_pass();
-            let h = enc.forward_packed(&backend, &ids, seqs).expect("warm forward");
+            let h = enc
+                .forward_packed(&backend, &ids, seqs)
+                .expect("warm forward");
             let mut out = vec![0f32; h.len()];
             backend.download_into(&h, &mut out);
         }
@@ -107,11 +109,17 @@ fn t6_host_gpu_split() {
         );
         println!(
             "[{label:>12}] enq rounds: {}",
-            enq.iter().map(|v| format!("{v:.1}")).collect::<Vec<_>>().join(" ")
+            enq.iter()
+                .map(|v| format!("{v:.1}"))
+                .collect::<Vec<_>>()
+                .join(" ")
         );
         println!(
             "[{label:>12}] sync rounds: {}",
-            sync.iter().map(|v| format!("{v:.1}")).collect::<Vec<_>>().join(" ")
+            sync.iter()
+                .map(|v| format!("{v:.1}"))
+                .collect::<Vec<_>>()
+                .join(" ")
         );
     }
     println!("done — record load average + free RAM beside these numbers");

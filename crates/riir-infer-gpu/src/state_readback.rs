@@ -129,7 +129,13 @@ pub fn manifest(fwd: &TernaryDeltanetGpuForward) -> Vec<StateBufferEntry> {
                     );
                 }
                 if let Some(h) = &fwd.conv_states[i] {
-                    push_hashed(client, &format!("state.layer{i}.conv_state"), h, None, &mut out);
+                    push_hashed(
+                        client,
+                        &format!("state.layer{i}.conv_state"),
+                        h,
+                        None,
+                        &mut out,
+                    );
                 }
             }
             DeltaNetLayerType::Attention => {

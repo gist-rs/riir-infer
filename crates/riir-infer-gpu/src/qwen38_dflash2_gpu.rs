@@ -89,10 +89,10 @@ use std::collections::VecDeque;
 use std::path::Path;
 use std::sync::Arc;
 
-use cudarc::driver::safe::{CudaContext, CudaFunction, CudaModule, CudaSlice, CudaStream};
 use cudarc::driver::LaunchConfig;
 use cudarc::driver::PushKernelArg;
-use riir_infer_core::gguf_loader::{GgufFile, GgmlType};
+use cudarc::driver::safe::{CudaContext, CudaFunction, CudaModule, CudaSlice, CudaStream};
+use riir_infer_core::gguf_loader::{GgmlType, GgufFile};
 
 use crate::qwen38_dflash2::DFlash2Config;
 
@@ -779,7 +779,9 @@ impl StRawFile {
                     .read_exact(&mut raw)
                     .map_err(|e| format!("read {name}: {e}"))?;
                 Ok(raw
-                    .as_chunks::<2>().0.iter()
+                    .as_chunks::<2>()
+                    .0
+                    .iter()
                     .map(|c| u16::from_le_bytes([c[0], c[1]]))
                     .collect())
             }
@@ -789,7 +791,9 @@ impl StRawFile {
                     .read_exact(&mut raw)
                     .map_err(|e| format!("read {name}: {e}"))?;
                 Ok(raw
-                    .as_chunks::<4>().0.iter()
+                    .as_chunks::<4>()
+                    .0
+                    .iter()
                     .map(|c| {
                         f32_to_bf16_bits(f32::from_bits(u32::from_le_bytes([
                             c[0], c[1], c[2], c[3],
@@ -1038,8 +1042,7 @@ impl DFlash2GpuDrafter {
         cfg: DFlash2Config,
         path: &str,
     ) -> Result<Self, String> {
-        let gguf =
-            GgufFile::open(Path::new(path)).map_err(|e| format!("open {path}: {e}"))?;
+        let gguf = GgufFile::open(Path::new(path)).map_err(|e| format!("open {path}: {e}"))?;
         let e = cfg.n_embd;
         let ff = cfg.n_ff;
         let qd = cfg.n_head * cfg.head_dim;
@@ -1116,9 +1119,7 @@ impl DFlash2GpuDrafter {
                         .map_err(|er| format!("upload {name}: {er}"))?;
                     Ok(QW::Q3K(dev))
                 }
-                t => Err(format!(
-                    "tensor '{name}' is {t:?}, expected Q2_K/Q3_K/Q4_K"
-                )),
+                t => Err(format!("tensor '{name}' is {t:?}, expected Q2_K/Q3_K/Q4_K")),
             }
         };
         let up_f32g = |name: &str, len: usize| -> Result<CudaSlice<f32>, String> {
@@ -1206,7 +1207,11 @@ impl DFlash2GpuDrafter {
         )
         .map_err(|e| format!("nvrtc: {e}"))?;
         let module = ctx.load_module(ptx).map_err(|e| e.to_string())?;
-        let f = |name: &str| module.load_function(name).map_err(|e| format!("{name}: {e}"));
+        let f = |name: &str| {
+            module
+                .load_function(name)
+                .map_err(|e| format!("{name}: {e}"))
+        };
 
         let e = cfg.n_embd;
         let ff = cfg.n_ff;
@@ -1392,14 +1397,31 @@ impl DFlash2GpuDrafter {
                 + l.ffn_conv_base.len() * 4;
         }
         let rings = self.ring_k.len() * self.ring_k[0].len() * 4 * 2;
-        let scratch = (self.x.len() + self.h.len() + self.hc.len() + self.dyn_coeff.len()
-            + self.q.len() + self.k.len() + self.v.len() + self.attn_out.len()
-            + self.ao.len() + self.attn_final.len() + self.ffn_inp.len() + self.hf.len()
-            + self.dynf.len() + self.hfc.len() + self.gate_out.len() + self.up_out.len()
-            + self.mid.len() + self.down_out.len() + self.ffn_final.len()
+        let scratch = (self.x.len()
+            + self.h.len()
+            + self.hc.len()
+            + self.dyn_coeff.len()
+            + self.q.len()
+            + self.k.len()
+            + self.v.len()
+            + self.attn_out.len()
+            + self.ao.len()
+            + self.attn_final.len()
+            + self.ffn_inp.len()
+            + self.hf.len()
+            + self.dynf.len()
+            + self.hfc.len()
+            + self.gate_out.len()
+            + self.up_out.len()
+            + self.mid.len()
+            + self.down_out.len()
+            + self.ffn_final.len()
             + self.out_rows.len())
             * 4
-            + (self.inj_x.len() + self.inj_g.len() + self.inj_gn.len() + self.inj_k.len()
+            + (self.inj_x.len()
+                + self.inj_g.len()
+                + self.inj_gn.len()
+                + self.inj_k.len()
                 + self.inj_v.len())
                 * 4
             + self.inj_slots.len() * 4
@@ -1601,7 +1623,10 @@ impl DFlash2GpuDrafter {
             cfg.n_kv_head as i32,
             cfg.head_dim as i32,
         );
-        let (swa, grp) = (cfg.sliding_window as i32, (cfg.n_head / cfg.n_kv_head) as i32);
+        let (swa, grp) = (
+            cfg.sliding_window as i32,
+            (cfg.n_head / cfg.n_kv_head) as i32,
+        );
         let (ap, nr) = (anchor_pos as i32, n_ring as i32);
         let scale = 1.0f32 / (cfg.head_dim as f32).sqrt();
         let causal = i32::from(crate::qwen38_dflash2::dflash2_causal_block());
@@ -1713,7 +1738,11 @@ impl DFlash2GpuDrafter {
     /// ascending contiguous from `base_pos`). Mirrors `inject_position`
     /// op-for-op, processed in 8-row chunks (the fc GEMV amortizes its
     /// 268 MB weight read once per chunk; n=8 reads it exactly once).
-    pub fn inject_positions(&mut self, features_rows: &[f32], base_pos: usize) -> Result<(), String> {
+    pub fn inject_positions(
+        &mut self,
+        features_rows: &[f32],
+        base_pos: usize,
+    ) -> Result<(), String> {
         let cfg = &self.cfg;
         let e = cfg.n_embd;
         let inp = 5 * e;
@@ -1868,7 +1897,8 @@ impl DFlash2GpuDrafter {
 
         // ring position list upload (pad -1 to the full slot count)
         self.ring_pos_host.clear();
-        self.ring_pos_host.extend(self.ring_pos.iter().map(|&p| p as i32));
+        self.ring_pos_host
+            .extend(self.ring_pos.iter().map(|&p| p as i32));
         self.ring_pos_host.resize(cfg.sliding_window, -1);
         let n_ring = self.ring_pos.len();
         self.stream
@@ -1881,7 +1911,14 @@ impl DFlash2GpuDrafter {
             unsafe {
                 // 1. h = rmsnorm(x, attn_norm); dyn_coeff
                 self.launch_rmsnorm_rows(&self.x, &layer.attn_norm, &self.h, bs, e)?;
-                self.launch_gemv(&layer.attn_conv_proj, &self.h, &self.dyn_coeff, projected, e, bs)?;
+                self.launch_gemv(
+                    &layer.attn_conv_proj,
+                    &self.h,
+                    &self.dyn_coeff,
+                    projected,
+                    e,
+                    bs,
+                )?;
                 // 2. conv side 0: h -> hc
                 self.launch_conv(&self.dyn_coeff, &layer.attn_conv_base, &self.h, &self.hc, 0)?;
                 // 3. q/k/v
@@ -1895,18 +1932,48 @@ impl DFlash2GpuDrafter {
                 self.launch_attention(li, anchor_pos, n_ring)?;
                 // 6. o_proj + conv side 1 + residual
                 self.launch_gemv(&layer.o_proj, &self.attn_out, &self.ao, e, qd, bs)?;
-                self.launch_conv(&self.dyn_coeff, &layer.attn_conv_base, &self.ao, &self.attn_final, 1)?;
-                self.launch_elementwise(&self.residual_add, &self.attn_final, &self.x, &self.ffn_inp, bs * e)?;
+                self.launch_conv(
+                    &self.dyn_coeff,
+                    &layer.attn_conv_base,
+                    &self.ao,
+                    &self.attn_final,
+                    1,
+                )?;
+                self.launch_elementwise(
+                    &self.residual_add,
+                    &self.attn_final,
+                    &self.x,
+                    &self.ffn_inp,
+                    bs * e,
+                )?;
                 // 7. ffn
                 self.launch_rmsnorm_rows(&self.ffn_inp, &layer.ffn_norm, &self.hf, bs, e)?;
                 self.launch_gemv(&layer.ffn_conv_proj, &self.hf, &self.dynf, projected, e, bs)?;
                 self.launch_conv(&self.dynf, &layer.ffn_conv_base, &self.hf, &self.hfc, 0)?;
                 self.launch_gemv(&layer.gate_proj, &self.hfc, &self.gate_out, cfg.n_ff, e, bs)?;
                 self.launch_gemv(&layer.up_proj, &self.hfc, &self.up_out, cfg.n_ff, e, bs)?;
-                self.launch_elementwise(&self.swiglu, &self.gate_out, &self.up_out, &self.mid, bs * cfg.n_ff)?;
+                self.launch_elementwise(
+                    &self.swiglu,
+                    &self.gate_out,
+                    &self.up_out,
+                    &self.mid,
+                    bs * cfg.n_ff,
+                )?;
                 self.launch_gemv(&layer.down_proj, &self.mid, &self.down_out, e, cfg.n_ff, bs)?;
-                self.launch_conv(&self.dynf, &layer.ffn_conv_base, &self.down_out, &self.ffn_final, 1)?;
-                self.launch_elementwise(&self.residual_add, &self.ffn_final, &self.ffn_inp, &self.x, bs * e)?;
+                self.launch_conv(
+                    &self.dynf,
+                    &layer.ffn_conv_base,
+                    &self.down_out,
+                    &self.ffn_final,
+                    1,
+                )?;
+                self.launch_elementwise(
+                    &self.residual_add,
+                    &self.ffn_final,
+                    &self.ffn_inp,
+                    &self.x,
+                    bs * e,
+                )?;
             }
         }
 
@@ -1922,8 +1989,6 @@ impl DFlash2GpuDrafter {
         Ok(out)
     }
 }
-
-
 
 /// Recover the stream's context for module loading. cudarc 0.19 does not
 /// expose `CudaStream::ctx()`, but the primary context is a process-wide
@@ -2089,12 +2154,12 @@ mod q2k_parity_tests {
         let n_probe = 8;
         for (name, w, out_dim, in_dim, fmt) in &probes {
             // first rows + a late row (row-order bugs hide at 0)
-            let worst_first = probe_rows(&drafter, &gguf, name, w, *out_dim, *in_dim, 0, n_probe, &x)
-                .unwrap_or_else(|err| panic!("{fmt} {name}: {err}"));
-            let late = out_dim - 1;
-            let worst_late =
-                probe_rows(&drafter, &gguf, name, w, *out_dim, *in_dim, late, 1, &x)
+            let worst_first =
+                probe_rows(&drafter, &gguf, name, w, *out_dim, *in_dim, 0, n_probe, &x)
                     .unwrap_or_else(|err| panic!("{fmt} {name}: {err}"));
+            let late = out_dim - 1;
+            let worst_late = probe_rows(&drafter, &gguf, name, w, *out_dim, *in_dim, late, 1, &x)
+                .unwrap_or_else(|err| panic!("{fmt} {name}: {err}"));
             eprintln!(
                 "[{fmt}] {name}: worst rel first-rows {worst_first:.3e} · last-row {worst_late:.3e} — PASS"
             );

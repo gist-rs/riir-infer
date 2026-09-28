@@ -29,13 +29,11 @@ pub fn load_corpus_pages(path: &Path) -> Result<Vec<(String, String)>> {
     let mut files: Vec<PathBuf> = std::fs::read_dir(path)?
         .filter_map(|e| e.ok().map(|e| e.path()))
         .filter(|p| {
-            p.file_name()
-                .and_then(|n| n.to_str())
-                .is_some_and(|n| {
-                    (n.starts_with("page_") && n.ends_with(".json"))
-                        || n.ends_with(".txt")
-                        || n.ends_with(".md")
-                })
+            p.file_name().and_then(|n| n.to_str()).is_some_and(|n| {
+                (n.starts_with("page_") && n.ends_with(".json"))
+                    || n.ends_with(".txt")
+                    || n.ends_with(".md")
+            })
         })
         .collect();
     files.sort();

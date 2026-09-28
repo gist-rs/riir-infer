@@ -25,7 +25,6 @@ use cubecl::prelude::*;
 use cubecl::server::Handle;
 
 #[cfg(feature = "cubecl_runtime")]
-
 // ---------------------------------------------------------------------------
 // Partial RoPE kernel
 // ---------------------------------------------------------------------------
@@ -45,11 +44,7 @@ use cubecl::server::Handle;
 /// terminate.
 #[cfg(feature = "cubecl_runtime")]
 #[cube(launch_unchecked)]
-fn qwen_rope_partial_f32(
-    q: &mut [f32],
-    k: &mut [f32],
-    params: &[f32],
-) {
+fn qwen_rope_partial_f32(q: &mut [f32], k: &mut [f32], params: &[f32]) {
     // params layout: [rotary_dim_pairs, pos_f32, theta_base, head_dim, n_head, n_kv_head]
     let rotary_pairs = params[0usize] as usize;
     let pos = params[1usize];
@@ -177,12 +172,7 @@ impl QwenRopePartialCubeCL {
 /// Output: `q[h*hd .. (h+1)*hd]` and `gate[h*hd .. (h+1)*hd]`
 #[cfg(feature = "cubecl_runtime")]
 #[cube(launch_unchecked)]
-fn qwen_split_qg_f32(
-    qg: &[f32],
-    q: &mut [f32],
-    gate: &mut [f32],
-    params: &[f32],
-) {
+fn qwen_split_qg_f32(qg: &[f32], q: &mut [f32], gate: &mut [f32], params: &[f32]) {
     let head_dim = params[0usize] as usize;
     let n_head = params[1usize] as usize;
     let idx = ABSOLUTE_POS;
@@ -919,7 +909,11 @@ impl QwenAttentionDecodeGatedCubeCL {
 /// `max_splits` bounds the persistent partials scratch (host-side); splits
 /// beyond it widen `split_len` instead (split_len stays a multiple of the
 /// `head_dim`-position tile so every split owns whole tiles).
-pub fn split_decode_geometry(n_positions: usize, head_dim: usize, max_splits: usize) -> (usize, usize) {
+pub fn split_decode_geometry(
+    n_positions: usize,
+    head_dim: usize,
+    max_splits: usize,
+) -> (usize, usize) {
     let tile = head_dim; // positions-per-tile == head_dim in the decode kernels
     let n_splits = n_positions.div_ceil(tile).min(max_splits.max(1));
     let split_len = n_positions.div_ceil(n_splits).div_ceil(tile) * tile;
@@ -1361,9 +1355,8 @@ static KV_F16_DECODE_LAUNCHES: std::sync::atomic::AtomicUsize =
 pub fn kv_f16_decode_enabled() -> bool {
     let v = KV_F16_DECODE.load(std::sync::atomic::Ordering::Relaxed);
     if v == KV_F16_DECODE_UNSET {
-        let env_on = std::env::var("RIIR_KV_F16_DECODE").is_ok_and(|v| {
-                !matches!(v.to_lowercase().as_str(), "0" | "off" | "false")
-            });
+        let env_on = std::env::var("RIIR_KV_F16_DECODE")
+            .is_ok_and(|v| !matches!(v.to_lowercase().as_str(), "0" | "off" | "false"));
         KV_F16_DECODE
             .compare_exchange(
                 KV_F16_DECODE_UNSET,
@@ -1427,14 +1420,12 @@ fn dec_f16(h: u32) -> f32 {
             val = f32::reinterpret(sign_bit | (anchor | (man16 << 13u32)))
                 - f32::reinterpret(sign_bit | anchor);
         } else if exp16 == 31u32 {
-                // inf / NaN — payload widened into the f32 mantissa MSBs.
-                val = f32::reinterpret(sign_bit | 0x7F800000u32 | (man16 << 13u32));
-            } else {
-                // Normal: exponent bias 15 → 127 (+112), mantissa << 13.
-                val = f32::reinterpret(
-                    sign_bit | ((exp16 + 112u32) << 23u32) | (man16 << 13u32),
-                );
-            }
+            // inf / NaN — payload widened into the f32 mantissa MSBs.
+            val = f32::reinterpret(sign_bit | 0x7F800000u32 | (man16 << 13u32));
+        } else {
+            // Normal: exponent bias 15 → 127 (+112), mantissa << 13.
+            val = f32::reinterpret(sign_bit | ((exp16 + 112u32) << 23u32) | (man16 << 13u32));
+        }
     }
     val
 }
@@ -1797,11 +1788,7 @@ impl QwenKvF16DecodeProbeCubeCL {
 /// Apply output gating: `attn_out[i] *= sigmoid(gate[i])`.
 #[cfg(feature = "cubecl_runtime")]
 #[cube(launch_unchecked)]
-fn qwen_output_gate_f32(
-    attn_out: &mut [f32],
-    gate: &[f32],
-    params: &[f32],
-) {
+fn qwen_output_gate_f32(attn_out: &mut [f32], gate: &[f32], params: &[f32]) {
     let n = params[0usize] as usize;
     let idx = ABSOLUTE_POS;
 
@@ -1869,12 +1856,7 @@ impl QwenOutputGateCubeCL {
 /// Output layout: `q[P, n_head, head_dim]`, `gate[P, n_head, head_dim]`
 #[cfg(feature = "cubecl_runtime")]
 #[cube(launch_unchecked)]
-fn qwen_split_qg_batched_f32(
-    qg: &[f32],
-    q: &mut [f32],
-    gate: &mut [f32],
-    params: &[f32],
-) {
+fn qwen_split_qg_batched_f32(qg: &[f32], q: &mut [f32], gate: &mut [f32], params: &[f32]) {
     let head_dim = params[0usize] as usize;
     let n_head = params[1usize] as usize;
     let p = params[2usize] as usize;
@@ -1946,7 +1928,9 @@ impl QwenSplitQgBatchedCubeCL {
                     CubeCount::Static(num_wg, 1, 1),
                     CubeDim::new_1d(wg_size),
                     BufferArg::from_raw_parts(
-                        qg_handle.clone().offset_start(((t0 * 2 * per_token) * 4) as u64),
+                        qg_handle
+                            .clone()
+                            .offset_start(((t0 * 2 * per_token) * 4) as u64),
                         tc * 2 * per_token,
                     ),
                     BufferArg::from_raw_parts(
@@ -1954,7 +1938,9 @@ impl QwenSplitQgBatchedCubeCL {
                         elems,
                     ),
                     BufferArg::from_raw_parts(
-                        gate_handle.clone().offset_start((t0 * per_token * 4) as u64),
+                        gate_handle
+                            .clone()
+                            .offset_start((t0 * per_token * 4) as u64),
                         elems,
                     ),
                     BufferArg::from_raw_parts(params_handle, 3),
@@ -1976,11 +1962,7 @@ impl QwenSplitQgBatchedCubeCL {
 #[cfg(feature = "cubecl_runtime")]
 #[allow(clippy::assign_op_pattern, reason = "CubeCL macro expansion")]
 #[cube(launch_unchecked)]
-fn qwen_rope_partial_batched_f32(
-    q: &mut [f32],
-    k: &mut [f32],
-    params: &[f32],
-) {
+fn qwen_rope_partial_batched_f32(q: &mut [f32], k: &mut [f32], params: &[f32]) {
     // params: [rotary_dim_pairs, theta_base, head_dim, n_head, n_kv_head, p, base_pos]
     let rotary_pairs = params[0usize] as usize;
     let theta_base = params[1usize];
@@ -2113,11 +2095,15 @@ impl QwenRopePartialBatchedCubeCL {
                     CubeCount::Static(num_wg, 1, 1),
                     CubeDim::new_1d(wg_size),
                     BufferArg::from_raw_parts(
-                        q_handle.clone().offset_start((t0 * n_head * head_dim * 4) as u64),
+                        q_handle
+                            .clone()
+                            .offset_start((t0 * n_head * head_dim * 4) as u64),
                         tc * n_head * head_dim,
                     ),
                     BufferArg::from_raw_parts(
-                        k_handle.clone().offset_start((t0 * n_kv_head * head_dim * 4) as u64),
+                        k_handle
+                            .clone()
+                            .offset_start((t0 * n_kv_head * head_dim * 4) as u64),
                         tc * n_kv_head * head_dim,
                     ),
                     BufferArg::from_raw_parts(params_handle, 7),
@@ -2210,7 +2196,9 @@ impl QwenKvCacheFillBatchedCubeCL {
                         total,
                     ),
                     BufferArg::from_raw_parts(
-                        value_cache_handle.clone().offset_start((t0 * kvd * 4) as u64),
+                        value_cache_handle
+                            .clone()
+                            .offset_start((t0 * kvd * 4) as u64),
                         total,
                     ),
                     BufferArg::from_raw_parts(params_handle, 2),
@@ -2320,12 +2308,7 @@ impl QwenKvCacheFillSplitBatchedCubeCL {
 /// attention kernel expects K and V in separate contiguous buffers.
 #[cfg(feature = "cubecl_runtime")]
 #[cube(launch_unchecked)]
-fn qwen_split_kv_batched_f32(
-    kv: &[f32],
-    k: &mut [f32],
-    v: &mut [f32],
-    params: &[f32],
-) {
+fn qwen_split_kv_batched_f32(kv: &[f32], k: &mut [f32], v: &mut [f32], params: &[f32]) {
     let kvd = params[0usize] as usize;
     let p = params[1usize] as usize;
     let idx = ABSOLUTE_POS;
@@ -2359,7 +2342,7 @@ impl QwenSplitKvBatchedCubeCL {
         kvd: usize,
         p: usize,
     ) {
-                // Metal grid guard (Issue 730): same class as the KV fill — token-
+        // Metal grid guard (Issue 730): same class as the KV fill — token-
         // boundary chunked, sliced handles, per-chunk params. Bit-identical.
         const MAX_WG_X: u32 = 65535;
         let wg_size = 128u32;
@@ -2661,9 +2644,15 @@ impl QwenAttentionPrefillGatedCubeCL {
             // 0..base_pos+p); single-launch callers bind scratch rows 0..p.
             let kv_len = (base_pos + p) * n_kv_head * head_dim;
             let n_cubes = n_head * tc;
-            let q_slice = query_handle.clone().offset_start((t0 * n_head * head_dim * 4) as u64);
-            let g_slice = gate_handle.clone().offset_start((t0 * n_head * head_dim * 4) as u64);
-            let o_slice = attn_out_handle.clone().offset_start((t0 * n_head * head_dim * 4) as u64);
+            let q_slice = query_handle
+                .clone()
+                .offset_start((t0 * n_head * head_dim * 4) as u64);
+            let g_slice = gate_handle
+                .clone()
+                .offset_start((t0 * n_head * head_dim * 4) as u64);
+            let o_slice = attn_out_handle
+                .clone()
+                .offset_start((t0 * n_head * head_dim * 4) as u64);
             unsafe {
                 qwen_attention_prefill_gated_f32::launch_unchecked::<R>(
                     client,
@@ -2780,14 +2769,46 @@ fn qwen_attention_prefill_tiled_f32(
 
     // Lane dims (hand-unrolled: statically-indexed scalars stay in registers —
     // the Batch-49 local-memory-demotion class).
-    let q0 = if active { query[q_off + dims_base] } else { f32::new(0.0f32) };
-    let q1 = if active { query[q_off + dims_base + 1usize] } else { f32::new(0.0f32) };
-    let q2 = if active { query[q_off + dims_base + 2usize] } else { f32::new(0.0f32) };
-    let q3 = if active { query[q_off + dims_base + 3usize] } else { f32::new(0.0f32) };
-    let q4 = if active { query[q_off + dims_base + 4usize] } else { f32::new(0.0f32) };
-    let q5 = if active { query[q_off + dims_base + 5usize] } else { f32::new(0.0f32) };
-    let q6 = if active { query[q_off + dims_base + 6usize] } else { f32::new(0.0f32) };
-    let q7 = if active { query[q_off + dims_base + 7usize] } else { f32::new(0.0f32) };
+    let q0 = if active {
+        query[q_off + dims_base]
+    } else {
+        f32::new(0.0f32)
+    };
+    let q1 = if active {
+        query[q_off + dims_base + 1usize]
+    } else {
+        f32::new(0.0f32)
+    };
+    let q2 = if active {
+        query[q_off + dims_base + 2usize]
+    } else {
+        f32::new(0.0f32)
+    };
+    let q3 = if active {
+        query[q_off + dims_base + 3usize]
+    } else {
+        f32::new(0.0f32)
+    };
+    let q4 = if active {
+        query[q_off + dims_base + 4usize]
+    } else {
+        f32::new(0.0f32)
+    };
+    let q5 = if active {
+        query[q_off + dims_base + 5usize]
+    } else {
+        f32::new(0.0f32)
+    };
+    let q6 = if active {
+        query[q_off + dims_base + 6usize]
+    } else {
+        f32::new(0.0f32)
+    };
+    let q7 = if active {
+        query[q_off + dims_base + 7usize]
+    } else {
+        f32::new(0.0f32)
+    };
 
     // Online softmax state, per lane (uniform across the plane after every
     // plane_sum broadcast).
@@ -2819,8 +2840,7 @@ fn qwen_attention_prefill_tiled_f32(
         let k6 = key[k_base + dims_base + 6usize];
         let k7 = key[k_base + dims_base + 7usize];
 
-        let partial = q0 * k0 + q1 * k1 + q2 * k2 + q3 * k3
-            + q4 * k4 + q5 * k5 + q6 * k6 + q7 * k7;
+        let partial = q0 * k0 + q1 * k1 + q2 * k2 + q3 * k3 + q4 * k4 + q5 * k5 + q6 * k6 + q7 * k7;
         // Reduce + broadcast within this plane's 32 lanes (tree order — the
         // documented FP-equivalent-not-bit-identical class).
         let score = plane_sum(partial) * scale;
@@ -2916,7 +2936,10 @@ impl QwenAttentionPrefillTiledCubeCL {
     ) {
         const MAX_WG_X: u32 = 65535;
 
-debug_assert_eq!(head_dim, 256, "tiled flash kernel is head_dim-256 specialized");
+        debug_assert_eq!(
+            head_dim, 256,
+            "tiled flash kernel is head_dim-256 specialized"
+        );
         let scale = 1.0f32 / (head_dim as f32).sqrt();
         // Grid = n_head × q_tiles (8 queries per cube) — chunk on query-TILE
         // boundaries with the same 65535 guard as the legacy launcher.
@@ -2936,14 +2959,18 @@ debug_assert_eq!(head_dim, 256, "tiled flash kernel is head_dim-256 specialized"
                 (base_pos + t0) as f32,
                 tiles as f32,
             ];
-            let params_handle =
-                crate::params_cache::params_handle(client, f32::as_bytes(&params));
+            let params_handle = crate::params_cache::params_handle(client, f32::as_bytes(&params));
             let q_len = tc * n_head * head_dim;
             let kv_len = (base_pos + p) * n_kv_head * head_dim;
-            let q_slice = query_handle.clone().offset_start((t0 * n_head * head_dim * 4) as u64);
-            let g_slice = gate_handle.clone().offset_start((t0 * n_head * head_dim * 4) as u64);
-            let o_slice =
-                attn_out_handle.clone().offset_start((t0 * n_head * head_dim * 4) as u64);
+            let q_slice = query_handle
+                .clone()
+                .offset_start((t0 * n_head * head_dim * 4) as u64);
+            let g_slice = gate_handle
+                .clone()
+                .offset_start((t0 * n_head * head_dim * 4) as u64);
+            let o_slice = attn_out_handle
+                .clone()
+                .offset_start((t0 * n_head * head_dim * 4) as u64);
             let n_cubes = n_head * tiles;
             unsafe {
                 qwen_attention_prefill_tiled_f32::launch_unchecked::<R>(
@@ -2981,12 +3008,7 @@ debug_assert_eq!(head_dim, 256, "tiled flash kernel is head_dim-256 specialized"
 #[cfg(feature = "cubecl_runtime")]
 #[allow(clippy::assign_op_pattern, reason = "CubeCL macro expansion")]
 #[cube(launch_unchecked)]
-fn qwen_rope_partial_tree_f32(
-    q: &mut [f32],
-    k: &mut [f32],
-    positions: &[u32],
-    params: &[f32],
-) {
+fn qwen_rope_partial_tree_f32(q: &mut [f32], k: &mut [f32], positions: &[u32], params: &[f32]) {
     // params: [rotary_dim_pairs, theta_base, head_dim, n_head, n_kv_head, t]
     let rotary_pairs = params[0usize] as usize;
     let theta_base = params[1usize];
@@ -3179,7 +3201,11 @@ fn qwen_attention_tree_gated_f32(
     // Ancestor-or-self visibility mask for the query node.
     let node_us = node as usize;
     let self_lo = if node < 32u32 { 1u32 << node } else { 0u32 };
-    let self_hi = if node >= 32u32 { 1u32 << (node - 32u32) } else { 0u32 };
+    let self_hi = if node >= 32u32 {
+        1u32 << (node - 32u32)
+    } else {
+        0u32
+    };
     let vis_lo = anc_lo[node_us] | self_lo;
     let vis_hi = anc_hi[node_us] | self_hi;
 
@@ -3668,12 +3694,8 @@ mod tests {
         // Random query, key/value cache, and gate
         let mut rng = simple_seed_rng(64810);
         let query: Vec<f32> = (0..q_dim).map(|_| rng.next()).collect();
-        let key_cache: Vec<f32> = (0..n_positions * kv_stride)
-            .map(|_| rng.next())
-            .collect();
-        let value_cache: Vec<f32> = (0..n_positions * kv_stride)
-            .map(|_| rng.next())
-            .collect();
+        let key_cache: Vec<f32> = (0..n_positions * kv_stride).map(|_| rng.next()).collect();
+        let value_cache: Vec<f32> = (0..n_positions * kv_stride).map(|_| rng.next()).collect();
         let gate: Vec<f32> = (0..q_dim).map(|_| rng.next() * 2.0 - 1.0).collect();
 
         let q_handle = client.create_from_slice(f32::as_bytes(&query));
@@ -3792,9 +3814,7 @@ mod tests {
         }
         let sep_key_bytes = client.read_one(key_cache_sep).expect("read key cache");
         let sep_key = f32::from_bytes(&sep_key_bytes);
-        let sep_val_bytes = client
-            .read_one(value_cache_sep)
-            .expect("read value cache");
+        let sep_val_bytes = client.read_one(value_cache_sep).expect("read value cache");
         let sep_val = f32::from_bytes(&sep_val_bytes);
 
         // Path B: combined KV append
@@ -3813,9 +3833,7 @@ mod tests {
         }
         let comb_key_bytes = client.read_one(key_cache_comb).expect("read key cache");
         let comb_key = f32::from_bytes(&comb_key_bytes);
-        let comb_val_bytes = client
-            .read_one(value_cache_comb)
-            .expect("read value cache");
+        let comb_val_bytes = client.read_one(value_cache_comb).expect("read value cache");
         let comb_val = f32::from_bytes(&comb_val_bytes);
 
         // G1: bit-identical
@@ -3823,7 +3841,10 @@ mod tests {
         for (s, c) in sep_key.iter().zip(comb_key.iter()) {
             key_diff = key_diff.max((s - c).abs());
         }
-        assert!(key_diff == 0.0, "Key cache mismatch: key_diff={key_diff:.6}");
+        assert!(
+            key_diff == 0.0,
+            "Key cache mismatch: key_diff={key_diff:.6}"
+        );
 
         let mut val_diff: f32 = 0.0;
         for (s, c) in sep_val.iter().zip(comb_val.iter()) {
@@ -4026,10 +4047,8 @@ mod tests {
                     n_positions,
                 );
             }
-            let plain: Vec<f32> = f32::from_bytes(
-                &client.read_one(out_handle).expect("read decode output"),
-            )
-            .to_vec();
+            let plain: Vec<f32> =
+                f32::from_bytes(&client.read_one(out_handle).expect("read decode output")).to_vec();
 
             let out_gated = client.empty(q_len * 4);
             unsafe {
@@ -4116,7 +4135,11 @@ mod tests {
 
     fn simple_seed_rng(seed: u64) -> SimpleRng {
         SimpleRng {
-            state: if seed == 0 { 0xdead_beef_cafe_babe } else { seed },
+            state: if seed == 0 {
+                0xdead_beef_cafe_babe
+            } else {
+                seed
+            },
         }
     }
 
@@ -4171,7 +4194,9 @@ mod tests {
         let positions: Vec<u32> = vec![5, 6, 6, 6, 7, 7, 7, 8, 8];
 
         let mut rng = simple_seed_rng(0x721_721);
-        let q_orig: Vec<f32> = (0..t * n_head * head_dim).map(|_| rng.next() * 0.5).collect();
+        let q_orig: Vec<f32> = (0..t * n_head * head_dim)
+            .map(|_| rng.next() * 0.5)
+            .collect();
         let k_orig: Vec<f32> = (0..t * n_kv * head_dim).map(|_| rng.next() * 0.5).collect();
 
         let q_h = client.create_from_slice(f32::as_bytes(&q_orig));
@@ -4197,8 +4222,11 @@ mod tests {
         let q_gpu = f32::from_bytes(&q_bytes);
         let k_bytes = client.read_one(k_h).expect("read k");
         let k_gpu = f32::from_bytes(&k_bytes);
-        let q_cpu = cpu_rope_partial_tree(&q_orig, &positions, rotary_dim, head_dim, n_head, theta_base);
-        let k_cpu = cpu_rope_partial_tree(&k_orig, &positions, rotary_dim, head_dim, n_kv, theta_base);
+        let q_cpu = cpu_rope_partial_tree(
+            &q_orig, &positions, rotary_dim, head_dim, n_head, theta_base,
+        );
+        let k_cpu =
+            cpu_rope_partial_tree(&k_orig, &positions, rotary_dim, head_dim, n_kv, theta_base);
 
         let mut worst = 0.0f32;
         for i in 0..q_gpu.len() {
@@ -4382,8 +4410,18 @@ mod tests {
         let out_bytes = client.read_one(out_h).expect("read output");
         let gpu_out = f32::from_bytes(&out_bytes);
         let cpu_out = cpu_attention_tree(
-            &query, &tree_k, &tree_v, &key_cache, &value_cache, &gate, &parent, n_head, n_kv,
-            head_dim, t, n_committed,
+            &query,
+            &tree_k,
+            &tree_v,
+            &key_cache,
+            &value_cache,
+            &gate,
+            &parent,
+            n_head,
+            n_kv,
+            head_dim,
+            t,
+            n_committed,
         );
 
         let mut max_diff = 0.0f32;

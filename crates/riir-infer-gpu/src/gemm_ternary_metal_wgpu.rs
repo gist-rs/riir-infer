@@ -151,7 +151,8 @@ impl MetalTensorWgpuGemm {
     pub fn new(device: Arc<Device>, queue: Arc<Queue>) -> Result<Self, String> {
         if !device.features().contains(Features::PASSTHROUGH_SHADERS) {
             return Err(
-                "PASSTHROUGH_SHADERS feature not enabled — required for MSL passthrough".to_string(),
+                "PASSTHROUGH_SHADERS feature not enabled — required for MSL passthrough"
+                    .to_string(),
             );
         }
 
@@ -159,12 +160,10 @@ impl MetalTensorWgpuGemm {
             device.create_shader_module_passthrough(ShaderModuleDescriptorPassthrough {
                 label: Some("gemm_ternary_metal_wgpu"),
                 msl: Some(std::borrow::Cow::Borrowed(MSL_SOURCE)),
-                entry_points: std::borrow::Cow::Borrowed(&[
-                    wgpu::PassthroughShaderEntryPoint {
-                        name: std::borrow::Cow::Borrowed("gemm_ternary_tensor_wgpu"),
-                        workgroup_size: (128, 1, 1),
-                    },
-                ]),
+                entry_points: std::borrow::Cow::Borrowed(&[wgpu::PassthroughShaderEntryPoint {
+                    name: std::borrow::Cow::Borrowed("gemm_ternary_tensor_wgpu"),
+                    workgroup_size: (128, 1, 1),
+                }]),
                 ..Default::default()
             })
         };
@@ -265,7 +264,8 @@ impl MetalTensorWgpuGemm {
 
     /// Total number of dispatches since creation (Issue 657 profiling).
     pub fn dispatch_count(&self) -> u64 {
-        self.dispatch_count.load(std::sync::atomic::Ordering::Relaxed)
+        self.dispatch_count
+            .load(std::sync::atomic::Ordering::Relaxed)
     }
 
     /// Copy CubeCL weight handles to dedicated wgpu staging buffers.
@@ -304,9 +304,11 @@ impl MetalTensorWgpuGemm {
         });
 
         // Copy CubeCL → staging in one command buffer.
-        let mut encoder = self.device.create_command_encoder(&CommandEncoderDescriptor {
-            label: Some("wgpu_weight_cache"),
-        });
+        let mut encoder = self
+            .device
+            .create_command_encoder(&CommandEncoderDescriptor {
+                label: Some("wgpu_weight_cache"),
+            });
         encoder.copy_buffer_to_buffer(&pos_src, pos_off, &pos_staging, 0, pos_size);
         encoder.copy_buffer_to_buffer(&neg_src, neg_off, &neg_staging, 0, neg_size);
         encoder.copy_buffer_to_buffer(&scale_src, scale_off, &scale_staging, 0, scale_size);
@@ -351,11 +353,7 @@ impl MetalTensorWgpuGemm {
                 .get_resource(handle.clone())
                 .map_err(|e| format!("get_resource failed: {e:?}"))?;
             let resource = managed.resource();
-            Ok((
-                resource.buffer.clone(),
-                resource.offset,
-                resource.size,
-            ))
+            Ok((resource.buffer.clone(), resource.offset, resource.size))
         }
     }
 
@@ -524,9 +522,11 @@ impl MetalTensorWgpuGemm {
         };
 
         // ── Build the command buffer: copy input → dispatch → copy output ──
-        let mut encoder = self.device.create_command_encoder(&CommandEncoderDescriptor {
-            label: Some("gemm_ternary_metal_wgpu"),
-        });
+        let mut encoder = self
+            .device
+            .create_command_encoder(&CommandEncoderDescriptor {
+                label: Some("gemm_ternary_metal_wgpu"),
+            });
 
         // 1. Copy CubeCL input → staging.
         encoder.copy_buffer_to_buffer(&input_src, input_off, &input_staging, 0, input_bytes);

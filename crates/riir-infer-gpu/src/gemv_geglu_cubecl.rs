@@ -64,12 +64,7 @@ use cubecl::features::Plane;
 /// `CubeCount::Static(m, 1, 1)`, `CubeDim::new_1d(plane_size)`.
 #[cfg(feature = "cubecl_runtime")]
 #[cube(launch_unchecked)]
-fn gemv_geglu_plane_f32(
-    weight_gate: &[f32],
-    weight_up: &[f32],
-    input: &[f32],
-    output: &mut [f32],
-) {
+fn gemv_geglu_plane_f32(weight_gate: &[f32], weight_up: &[f32], input: &[f32], output: &mut [f32]) {
     let n = input.len() as u32;
     let m = output.len() as u32;
 
@@ -130,12 +125,7 @@ fn gemv_geglu_plane_f32(
 /// then applies GeGLU.
 #[cfg(feature = "cubecl_runtime")]
 #[cube(launch_unchecked)]
-fn gemv_geglu_tiled_f32(
-    weight_gate: &[f32],
-    weight_up: &[f32],
-    input: &[f32],
-    output: &mut [f32],
-) {
+fn gemv_geglu_tiled_f32(weight_gate: &[f32], weight_up: &[f32], input: &[f32], output: &mut [f32]) {
     let n = input.len() as u32;
     let m = output.len() as u32;
 

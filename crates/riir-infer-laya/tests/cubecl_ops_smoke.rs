@@ -186,7 +186,10 @@ fn cubecl_ops_match_cpu_op_by_op() {
     {
         b.begin_pass();
         let (rows, i_sz) = (5usize, 12usize);
-        let fused: Vec<f32> = vec_of(rows * 2 * i_sz).into_iter().map(|v| v * 2.0).collect();
+        let fused: Vec<f32> = vec_of(rows * 2 * i_sz)
+            .into_iter()
+            .map(|v| v * 2.0)
+            .collect();
         let mut out = vec![0f32; rows * i_sz];
         let mut out_cpu = vec![0f32; rows * i_sz];
         c.glu_gelu_gate(&fused, rows, i_sz, &mut out_cpu);

@@ -57,8 +57,7 @@ impl Gemma4CubeCLWeightBuffers {
         weights: &Gemma4TransformerWeights,
         config: &Config,
     ) -> Self {
-        let wte =
-            client.create_from_slice(f32::as_bytes(&weights.wte));
+        let wte = client.create_from_slice(f32::as_bytes(&weights.wte));
 
         let layers = weights
             .layers
@@ -149,9 +148,7 @@ impl Gemma4NormGammas {
 
 /// Derive the per-layer KV stride, sliding-window capacity, and head_dim
 /// for the given config. Used to size the [`Gemma4CpuKVCache`] at construction.
-pub fn per_layer_cache_dims(
-    config: &Config,
-) -> (Vec<usize>, Vec<usize>, Vec<usize>) {
+pub fn per_layer_cache_dims(config: &Config) -> (Vec<usize>, Vec<usize>, Vec<usize>) {
     let mut kv_stride = Vec::with_capacity(config.n_layer);
     let mut sliding_capacity = Vec::with_capacity(config.n_layer);
     let mut head_dims = Vec::with_capacity(config.n_layer);

@@ -12,9 +12,9 @@
 //! Imports `pub(crate)` types from `gemma2_cubecl`: `CpuKVCache`, `CubeCLWeightFormat`,
 //! `CubeCLLayerWeights`, `NormGammas`, `GpuNormGammaHandles`, CPU helpers.
 
+use crate::cubecl_runtime::ActiveRuntime;
 use cubecl::prelude::*;
 use cubecl::server::Handle;
-use crate::cubecl_runtime::ActiveRuntime;
 
 use crate::attention_cubecl::{AttentionBlockCausalParams, AttentionCubeCL};
 use crate::gemma2_cubecl::{
@@ -113,7 +113,10 @@ impl SamplerFeatures {
         let mut t2 = 0.0f32;
         let mut t3 = 0.0f32;
 
-        #[allow(clippy::needless_range_loop, reason = "softmax: skip-by-index t == mask_token_id continue")]
+        #[allow(
+            clippy::needless_range_loop,
+            reason = "softmax: skip-by-index t == mask_token_id continue"
+        )]
         for t in 0..vocab {
             if t == mask_token_id {
                 continue;
@@ -357,10 +360,10 @@ pub struct GpuGemmaCubeCLD2F {
     /// (Issue 695 H12: the loop still allocates per position elsewhere — the
     /// `queries` rows, KV gather Vecs, `read_handle` Vecs, and `hidden_states`
     /// slot churn; see the issue's H8/H9 for those).
-    scratch_normed_a: Vec<f32>,     // [n_embd] Phase-A RMSNorm input
-    scratch_residual: Vec<f32>,     // [n_embd] Phase-B residual
-    scratch_residual2: Vec<f32>,    // [n_embd] Phase-B residual2
-    scratch_mlp_hidden: Vec<f32>,   // [mlp_hidden] Phase-B GeGLU output
+    scratch_normed_a: Vec<f32>, // [n_embd] Phase-A RMSNorm input
+    scratch_residual: Vec<f32>,   // [n_embd] Phase-B residual
+    scratch_residual2: Vec<f32>,  // [n_embd] Phase-B residual2
+    scratch_mlp_hidden: Vec<f32>, // [mlp_hidden] Phase-B GeGLU output
 }
 
 impl GpuGemmaCubeCLD2F {
@@ -1106,7 +1109,10 @@ impl GpuGemmaCubeCLD2F {
     ///
     /// Key difference from causal: uses `launch_block_causal()` with
     /// block-causal masking parameters (pos, prompt_len, block_size).
-#[allow(clippy::too_many_arguments, reason = "GPU kernel launch/dispatch: many buffer handles are inherent to the fused-kernel interface")]
+    #[allow(
+        clippy::too_many_arguments,
+        reason = "GPU kernel launch/dispatch: many buffer handles are inherent to the fused-kernel interface"
+    )]
     fn dispatch_block_causal_attention_wo(
         &self,
         layer_weights: &CubeCLLayerWeights,
@@ -1161,7 +1167,10 @@ impl GpuGemmaCubeCLD2F {
     }
 
     /// Launch block-causal attention + Wo GEMV (F16).
-#[allow(clippy::too_many_arguments, reason = "GPU kernel launch/dispatch: many buffer handles are inherent to the fused-kernel interface")]
+    #[allow(
+        clippy::too_many_arguments,
+        reason = "GPU kernel launch/dispatch: many buffer handles are inherent to the fused-kernel interface"
+    )]
     fn dispatch_block_causal_attention_wo_f16(
         &self,
         layer_weights: &CubeCLF16LayerWeights,
@@ -1211,7 +1220,10 @@ impl GpuGemmaCubeCLD2F {
     }
 
     /// Launch block-causal attention + Wo GEMV (Q4_K).
-#[allow(clippy::too_many_arguments, reason = "GPU kernel launch/dispatch: many buffer handles are inherent to the fused-kernel interface")]
+    #[allow(
+        clippy::too_many_arguments,
+        reason = "GPU kernel launch/dispatch: many buffer handles are inherent to the fused-kernel interface"
+    )]
     fn dispatch_block_causal_attention_wo_q4k(
         &self,
         layer_weights: &CubeCLQ4KLayerWeights,

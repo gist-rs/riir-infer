@@ -103,7 +103,10 @@ use cubecl::server::Handle;
 /// - Inline `if/else` expressions for assignment trigger the macro bug
 /// - Workaround: unrolled reductions (8 hardcoded steps), guard inside accumulation loop
 #[cfg(feature = "cubecl_runtime")]
-#[allow(clippy::assign_op_pattern, reason = "CubeCL macro expansion generates this pattern; not user-writable")]
+#[allow(
+    clippy::assign_op_pattern,
+    reason = "CubeCL macro expansion generates this pattern; not user-writable"
+)]
 #[cube(launch_unchecked)]
 fn attention_decode_f32(query: &[f32], kv: &[f32], attn_out: &mut [f32]) {
     // ── Gemma 2 2B constants ──
@@ -331,14 +334,12 @@ fn attention_decode_f32(query: &[f32], kv: &[f32], attn_out: &mut [f32]) {
 /// | Params | none (hardcoded) | 4-element buffer |
 #[cfg(feature = "fold_dispatch")]
 #[cfg(feature = "cubecl_runtime")]
-#[allow(clippy::assign_op_pattern, reason = "CubeCL macro expansion generates this pattern; not user-writable")]
+#[allow(
+    clippy::assign_op_pattern,
+    reason = "CubeCL macro expansion generates this pattern; not user-writable"
+)]
 #[cube(launch_unchecked)]
-fn attention_decode_folded_f32(
-    query: &[f32],
-    kv: &[f32],
-    params: &[f32],
-    attn_out: &mut [f32],
-) {
+fn attention_decode_folded_f32(query: &[f32], kv: &[f32], params: &[f32], attn_out: &mut [f32]) {
     // ── Gemma 2 2B constants ──
     let head_dim = 256u32;
     let n_kv_head = 4u32;
@@ -383,10 +384,9 @@ fn attention_decode_folded_f32(
         let out_head_off = (q_tok * n_head + head_idx) * head_dim;
 
         // Guard: no positions — write zeros
-        if n_positions == 0u32
-            && valid_dim {
-                attn_out[(out_head_off + tid) as usize] = f32::new(0.0f32);
-            }
+        if n_positions == 0u32 && valid_dim {
+            attn_out[(out_head_off + tid) as usize] = f32::new(0.0f32);
+        }
 
         // ── Online softmax running state (per-token) ──
         // Only compute attention when there are KV positions.
@@ -571,14 +571,12 @@ fn attention_decode_folded_f32(
 /// - `head_dim` must be ≤ 256 (cube size)
 /// - `n_head` must be ≤ 256 (reasonable for all current models)
 #[cfg(feature = "cubecl_runtime")]
-#[allow(clippy::assign_op_pattern, reason = "CubeCL macro expansion generates this pattern; not user-writable")]
+#[allow(
+    clippy::assign_op_pattern,
+    reason = "CubeCL macro expansion generates this pattern; not user-writable"
+)]
 #[cube(launch_unchecked)]
-fn attention_decode_llama_f32(
-    query: &[f32],
-    kv: &[f32],
-    params: &[f32],
-    attn_out: &mut [f32],
-) {
+fn attention_decode_llama_f32(query: &[f32], kv: &[f32], params: &[f32], attn_out: &mut [f32]) {
     // Read dimensions from params buffer (f32 → u32 cast, exact for small integers)
     let n_head = params[0usize] as u32;
     let n_kv_head = params[1usize] as u32;
@@ -817,14 +815,12 @@ fn attention_decode_llama_f32(
 /// | Value accumulation | `pos_i < n_positions` | `pos_i < t_n` |
 /// | Parameters | 3 arrays | 4 arrays (extra params) |
 #[cfg(feature = "gemma2_d2f")]
-#[allow(clippy::assign_op_pattern, reason = "CubeCL macro expansion generates this pattern; not user-writable")]
+#[allow(
+    clippy::assign_op_pattern,
+    reason = "CubeCL macro expansion generates this pattern; not user-writable"
+)]
 #[cube(launch_unchecked)]
-fn attention_block_causal_f32(
-    query: &[f32],
-    kv: &[f32],
-    params: &[f32],
-    attn_out: &mut [f32],
-) {
+fn attention_block_causal_f32(query: &[f32], kv: &[f32], params: &[f32], attn_out: &mut [f32]) {
     // ── Gemma 2 2B constants ──
     let head_dim = 256u32;
     let n_head = 8u32;
@@ -1601,7 +1597,6 @@ pub fn fold_factor(n_head: u32, seq_len_q: u32, workgroup_size: u32) -> u32 {
         .find(|&d| seq_len_q.is_multiple_of(d))
         .unwrap_or(1)
 }
-
 
 #[cfg(all(test, feature = "cubecl_runtime"))]
 mod tests;

@@ -226,8 +226,8 @@ fn tree_build_xy_f32(
                 // kᵢᵀkⱼ
                 let mut kk = f32::new(0.0f32);
                 for m in 0..d {
-                    kk += qkv_expanded[row_i + k_sec + hd + m]
-                        * qkv_expanded[row_j + k_sec + hd + m];
+                    kk +=
+                        qkv_expanded[row_i + k_sec + hd + m] * qkv_expanded[row_j + k_sec + hd + m];
                 }
                 let beta_i = beta[i * n_head + h];
                 x_val = ratio * beta_i * kk;
@@ -237,8 +237,8 @@ fn tree_build_xy_f32(
                 // qᵢᵀkⱼ
                 let mut qk = f32::new(0.0f32);
                 for m in 0..d {
-                    qk += qkv_expanded[row_i + q_sec + hd + m]
-                        * qkv_expanded[row_j + k_sec + hd + m];
+                    qk +=
+                        qkv_expanded[row_i + q_sec + hd + m] * qkv_expanded[row_j + k_sec + hd + m];
                 }
                 let scale = f32::new(1.0f32) / (params[2usize]).sqrt();
                 y_val = scale * ratio * qk;
@@ -313,12 +313,7 @@ fn tree_build_rhs_f32(
 /// reads).
 #[cfg(feature = "cubecl_runtime")]
 #[cube(launch_unchecked)]
-fn tree_forward_sub_f32(
-    x: &[f32],
-    rhs: &[f32],
-    u_out: &mut [f32],
-    params: &[f32],
-) {
+fn tree_forward_sub_f32(x: &[f32], rhs: &[f32], u_out: &mut [f32], params: &[f32]) {
     let n_head = params[0usize] as usize;
     let t = params[1usize] as usize;
     let d = params[2usize] as usize; // head_dim
@@ -484,13 +479,11 @@ impl TreeVerifyPlan {
             for ki in 0..kernel_size {
                 if ki < committed_count {
                     // committed tail: conv_state[ch·K + depth_k + ki]
-                    conv_lut[k * kernel_size + ki] =
-                        (t + depth_k + ki) as u32;
+                    conv_lut[k * kernel_size + ki] = (t + depth_k + ki) as u32;
                 } else {
                     // tree slot: ancestor at (depth_k − tree_pos) steps up,
                     // tree_pos = ki − (kernel_size − 1 − depth_k)
-                    let tree_pos = ki as isize + depth_k as isize
-                        - (kernel_size as isize - 1);
+                    let tree_pos = ki as isize + depth_k as isize - (kernel_size as isize - 1);
                     let steps_up = depth_k as isize - tree_pos;
                     let mut ancestor = k;
                     for _ in 0..steps_up {
@@ -831,7 +824,10 @@ impl Split4BatchedCubeCL {
     /// # Safety
     ///
     /// - `input`: `p * (l1+l2+l3+l4)` f32; each `outN`: `p * lN` f32.
-    #[allow(clippy::too_many_arguments, reason = "GPU kernel launch: many buffer handles are inherent")]
+    #[allow(
+        clippy::too_many_arguments,
+        reason = "GPU kernel launch: many buffer handles are inherent"
+    )]
     pub unsafe fn launch<R: Runtime>(
         client: &ComputeClient<R>,
         input: Handle,
@@ -873,11 +869,7 @@ impl Split4BatchedCubeCL {
 /// `[gate(n) | up(n)]` buffer globally; the T-row FFN produces per-row splits.
 #[cfg(feature = "cubecl_runtime")]
 #[cube(launch_unchecked)]
-fn gating_concat_batched_f32(
-    gate_up: &[f32],
-    output: &mut [f32],
-    params: &[f32],
-) {
+fn gating_concat_batched_f32(gate_up: &[f32], output: &mut [f32], params: &[f32]) {
     let n = params[0usize] as usize;
     let p = params[1usize] as usize;
     let total = p * n;
@@ -1050,17 +1042,7 @@ mod tests {
     fn tree9() -> Vec<u32> {
         // node: 0=root, 1..3 = children of 0, 4..5 = children of 1,
         // 6 = child of 2, 7..8 = children of 3
-        vec![
-            u32::MAX,
-            0,
-            0,
-            0,
-            1,
-            1,
-            2,
-            3,
-            3,
-        ]
+        vec![u32::MAX, 0, 0, 0, 1, 1, 2, 3, 3]
     }
 
     /// CPU reference for the tree conv1d gather — a direct transcription of
@@ -1114,7 +1096,14 @@ mod tests {
             .map(|_| rng.next_f32(-0.5, 0.5))
             .collect();
 
-        let expected = cpu_tree_conv(&raw_qkv, &conv_weight, &conv_state, &plan, conv_dim, kernel_size);
+        let expected = cpu_tree_conv(
+            &raw_qkv,
+            &conv_weight,
+            &conv_state,
+            &plan,
+            conv_dim,
+            kernel_size,
+        );
 
         let raw_h = client.create_from_slice(f32::as_bytes(&raw_qkv));
         let w_h = client.create_from_slice(f32::as_bytes(&conv_weight));
@@ -1124,7 +1113,15 @@ mod tests {
 
         unsafe {
             TreeConv1dGatherCubeCL::launch::<ActiveRuntime>(
-                &client, raw_h, w_h, st_h, lut_h, out_h.clone(), t, conv_dim, kernel_size,
+                &client,
+                raw_h,
+                w_h,
+                st_h,
+                lut_h,
+                out_h.clone(),
+                t,
+                conv_dim,
+                kernel_size,
             );
         }
 
@@ -1148,7 +1145,7 @@ mod tests {
     #[test]
     fn test_tree_masked_solve_matches_cpu_oracle() {
         use katgpt_core::gdn_tree_verify::{
-            build_topology, verify_gdn_tree, GdnLayerParams, GdnTreeVerifier,
+            GdnLayerParams, GdnTreeVerifier, build_topology, verify_gdn_tree,
         };
 
         let ctx = CubeCLContext::new().expect("CubeCL should initialize");
@@ -1176,8 +1173,11 @@ mod tests {
                     if sec < 2 {
                         // L2-normalize Q and K sections
                         let base = i * 3 * n_head * d + sec * n_head * d + h * d;
-                        let norm: f32 =
-                            qkv_expanded[base..base + d].iter().map(|v| v * v).sum::<f32>().sqrt();
+                        let norm: f32 = qkv_expanded[base..base + d]
+                            .iter()
+                            .map(|v| v * v)
+                            .sum::<f32>()
+                            .sqrt();
                         for m in 0..d {
                             qkv_expanded[base + m] /= norm.max(1e-8);
                         }
@@ -1189,7 +1189,9 @@ mod tests {
         let decay: Vec<f32> = (0..t * n_head).map(|_| rng.next_f32(0.8, 0.99)).collect();
 
         // GPU-layout state per head: [d_v × d_k], value-major rows.
-        let state: Vec<f32> = (0..n_head * d * d).map(|_| rng.next_f32(-0.05, 0.05)).collect();
+        let state: Vec<f32> = (0..n_head * d * d)
+            .map(|_| rng.next_f32(-0.05, 0.05))
+            .collect();
 
         // ── CPU oracle: per-head verify_gdn_tree (topology is identity-mapped
         // because our fixture is already topo-ordered; cld per head). ──
@@ -1203,7 +1205,13 @@ mod tests {
                 let topo = build_topology(
                     &parent
                         .iter()
-                        .map(|&p| if p == u32::MAX { usize::MAX } else { p as usize })
+                        .map(|&p| {
+                            if p == u32::MAX {
+                                usize::MAX
+                            } else {
+                                p as usize
+                            }
+                        })
                         .collect::<Vec<_>>(),
                     &alphas_h,
                 );
@@ -1280,7 +1288,12 @@ mod tests {
 
         unsafe {
             TreeCumulativeLogDecayCubeCL::launch::<ActiveRuntime>(
-                &client, decay_h.clone(), parent_h.clone(), cld_h.clone(), n_head, t,
+                &client,
+                decay_h.clone(),
+                parent_h.clone(),
+                cld_h.clone(),
+                n_head,
+                t,
             );
             TreeBuildXYCubeCL::launch::<ActiveRuntime>(
                 &client,
@@ -1307,7 +1320,13 @@ mod tests {
                 d,
             );
             TreeForwardSubCubeCL::launch::<ActiveRuntime>(
-                &client, x_h.clone(), rhs_h.clone(), u_h.clone(), n_head, t, d,
+                &client,
+                x_h.clone(),
+                rhs_h.clone(),
+                u_h.clone(),
+                n_head,
+                t,
+                d,
             );
             TreeComputeOutCubeCL::launch::<ActiveRuntime>(
                 &client,
@@ -1345,7 +1364,7 @@ mod tests {
     #[test]
     fn test_tree_solve_t1_chain() {
         use katgpt_core::gdn_tree_verify::{
-            build_topology, verify_gdn_tree, GdnLayerParams, GdnTreeVerifier,
+            GdnLayerParams, GdnTreeVerifier, build_topology, verify_gdn_tree,
         };
 
         let ctx = CubeCLContext::new().expect("CubeCL should initialize");
@@ -1367,8 +1386,11 @@ mod tests {
                         qkv_expanded[base + m] = rng.next_f32(-0.5, 0.5);
                     }
                     if sec < 2 {
-                        let norm: f32 =
-                            qkv_expanded[base..base + d].iter().map(|v| v * v).sum::<f32>().sqrt();
+                        let norm: f32 = qkv_expanded[base..base + d]
+                            .iter()
+                            .map(|v| v * v)
+                            .sum::<f32>()
+                            .sqrt();
                         for m in 0..d {
                             qkv_expanded[base + m] /= norm.max(1e-8);
                         }
@@ -1378,7 +1400,9 @@ mod tests {
         }
         let beta: Vec<f32> = (0..t * n_head).map(|_| rng.next_f32(0.1, 0.9)).collect();
         let decay: Vec<f32> = (0..t * n_head).map(|_| rng.next_f32(0.8, 0.99)).collect();
-        let state: Vec<f32> = (0..n_head * d * d).map(|_| rng.next_f32(-0.05, 0.05)).collect();
+        let state: Vec<f32> = (0..n_head * d * d)
+            .map(|_| rng.next_f32(-0.05, 0.05))
+            .collect();
 
         // CPU oracle
         let mut expected = vec![0.0f32; t * n_head * d];
@@ -1436,22 +1460,57 @@ mod tests {
 
         unsafe {
             TreeCumulativeLogDecayCubeCL::launch::<ActiveRuntime>(
-                &client, decay_h.clone(), parent_h.clone(), cld_h.clone(), n_head, t,
+                &client,
+                decay_h.clone(),
+                parent_h.clone(),
+                cld_h.clone(),
+                n_head,
+                t,
             );
             TreeBuildXYCubeCL::launch::<ActiveRuntime>(
-                &client, qkv_h.clone(), beta_h.clone(), cld_h.clone(), anc_lo_h.clone(),
-                anc_hi_h.clone(), x_h.clone(), y_h.clone(), n_head, t, d,
+                &client,
+                qkv_h.clone(),
+                beta_h.clone(),
+                cld_h.clone(),
+                anc_lo_h.clone(),
+                anc_hi_h.clone(),
+                x_h.clone(),
+                y_h.clone(),
+                n_head,
+                t,
+                d,
             );
             TreeBuildRhsCubeCL::launch::<ActiveRuntime>(
-                &client, qkv_h.clone(), beta_h.clone(), cld_h.clone(), state_h.clone(),
-                rhs_h.clone(), n_head, t, d,
+                &client,
+                qkv_h.clone(),
+                beta_h.clone(),
+                cld_h.clone(),
+                state_h.clone(),
+                rhs_h.clone(),
+                n_head,
+                t,
+                d,
             );
             TreeForwardSubCubeCL::launch::<ActiveRuntime>(
-                &client, x_h.clone(), rhs_h.clone(), u_h.clone(), n_head, t, d,
+                &client,
+                x_h.clone(),
+                rhs_h.clone(),
+                u_h.clone(),
+                n_head,
+                t,
+                d,
             );
             TreeComputeOutCubeCL::launch::<ActiveRuntime>(
-                &client, qkv_h.clone(), y_h.clone(), u_h.clone(), cld_h.clone(),
-                state_h.clone(), out_h.clone(), n_head, t, d,
+                &client,
+                qkv_h.clone(),
+                y_h.clone(),
+                u_h.clone(),
+                cld_h.clone(),
+                state_h.clone(),
+                out_h.clone(),
+                n_head,
+                t,
+                d,
             );
         }
 

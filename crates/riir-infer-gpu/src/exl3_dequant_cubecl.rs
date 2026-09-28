@@ -235,9 +235,19 @@ fn exl3_right_hadamard(
 /// construction (`stream_bits_per_tile`), so `start` stays word-aligned-domain
 /// and the only wrap case is `wi_hi == tile_words`.
 #[cube]
-fn window16_fast(trellis: &[u32], tile_base: u32, end: u32, ring_bits: u32, tile_words: u32) -> u32 {
+fn window16_fast(
+    trellis: &[u32],
+    tile_base: u32,
+    end: u32,
+    ring_bits: u32,
+    tile_words: u32,
+) -> u32 {
     // start = end - 16, wrapping once (end in 1..=ring_bits).
-    let start = if end >= 16u32 { end - 16u32 } else { end + ring_bits - 16u32 };
+    let start = if end >= 16u32 {
+        end - 16u32
+    } else {
+        end + ring_bits - 16u32
+    };
     let wi = start >> 5;
     let shift = start & 31u32;
     let word_lo = trellis[(tile_base + wi) as usize];
@@ -358,7 +368,10 @@ fn exl3_trellis_decode_v2_nolut(
 #[derive(Debug)]
 pub enum Exl3DequantError {
     /// Layer geometry exceeds the u32 kernel-index space (`in·out ≥ 2³²`).
-    LayerTooLarge { in_features: usize, out_features: usize },
+    LayerTooLarge {
+        in_features: usize,
+        out_features: usize,
+    },
     /// GPU readback failed (device lost / sync error).
     Readback(String),
     /// The stable bench's work floor: a pass finished under 5 ms — launch
@@ -370,7 +383,10 @@ pub enum Exl3DequantError {
 impl core::fmt::Display for Exl3DequantError {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         match self {
-            Self::LayerTooLarge { in_features, out_features } => write!(
+            Self::LayerTooLarge {
+                in_features,
+                out_features,
+            } => write!(
                 f,
                 "EXL3 layer {in_features}x{out_features} exceeds the GPU kernel's u32 index space"
             ),
@@ -448,7 +464,10 @@ fn trellis_as_u32(bytes: &[u8]) -> std::borrow::Cow<'_, [u32]> {
         std::borrow::Cow::Borrowed(bytemuck::cast_slice(bytes))
     } else {
         std::borrow::Cow::Owned(
-            bytes.as_chunks::<4>().0.iter()
+            bytes
+                .as_chunks::<4>()
+                .0
+                .iter()
                 .map(|c| u32::from_le_bytes([c[0], c[1], c[2], c[3]]))
                 .collect(),
         )
@@ -513,7 +532,10 @@ impl Exl3DequantCubeCL {
         let t0 = std::time::Instant::now();
         let (kin, nout) = (layer.in_features, layer.out_features);
         if (kin as u64) * (nout as u64) >= u64::from(u32::MAX) {
-            return Err(Exl3DequantError::LayerTooLarge { in_features: kin, out_features: nout });
+            return Err(Exl3DequantError::LayerTooLarge {
+                in_features: kin,
+                out_features: nout,
+            });
         }
 
         // Chunk width: 128-multiple, VRAM-bounded, layer-bounded.
@@ -521,8 +543,10 @@ impl Exl3DequantCubeCL {
             let by_budget = (CHUNK_BYTE_BUDGET / 3 / (kin * 4)).max(128) & !127;
             by_budget.min(nout)
         });
-        assert!(chunk.is_multiple_of(128) && chunk >= 128 && chunk <= nout,
-            "chunk_cols must be a 128-multiple in [128, out_features={nout}], got {chunk}");
+        assert!(
+            chunk.is_multiple_of(128) && chunk >= 128 && chunk <= nout,
+            "chunk_cols must be a 128-multiple in [128, out_features={nout}], got {chunk}"
+        );
 
         // Host-side expansion + one-shot uploads.
         let suh = layer.suh_f32();
@@ -644,7 +668,11 @@ impl Exl3DequantCubeCL {
         if reps <= 1 {
             return Ok((
                 w,
-                Exl3DequantTiming { weights: single.weights, wall_secs: single.wall_secs, kernel_secs: None },
+                Exl3DequantTiming {
+                    weights: single.weights,
+                    wall_secs: single.wall_secs,
+                    kernel_secs: None,
+                },
             ));
         }
         let (_, multi) = Self::dequant_layer_f32_chunked(client, layer, None, reps)?;
@@ -686,14 +714,19 @@ impl Exl3DequantCubeCL {
         let t0 = std::time::Instant::now();
         let (kin, nout) = (layer.in_features, layer.out_features);
         if (kin as u64) * (nout as u64) >= u64::from(u32::MAX) {
-            return Err(Exl3DequantError::LayerTooLarge { in_features: kin, out_features: nout });
+            return Err(Exl3DequantError::LayerTooLarge {
+                in_features: kin,
+                out_features: nout,
+            });
         }
         let chunk = chunk_cols.unwrap_or_else(|| {
             let by_budget = (CHUNK_BYTE_BUDGET / (kin * 4)).max(128) & !127;
             by_budget.min(nout)
         });
-        assert!(chunk.is_multiple_of(128) && chunk >= 128 && chunk <= nout,
-            "chunk_cols must be a 128-multiple in [128, out_features={nout}], got {chunk}");
+        assert!(
+            chunk.is_multiple_of(128) && chunk >= 128 && chunk <= nout,
+            "chunk_cols must be a 128-multiple in [128, out_features={nout}], got {chunk}"
+        );
 
         let trellis = trellis_as_u32(layer.trellis_bytes());
         let trellis_h = client.create_from_slice(u32::as_bytes(&trellis));
@@ -785,8 +818,11 @@ impl Exl3DequantCubeCL {
                 .read_one(w_rot_h)
                 .map_err(|e| Exl3DequantError::Readback(format!("{e:?}")))?;
             let chunk_out = f32::from_bytes(&bytes);
-            assert!(chunk_out.len() >= elems,
-                "readback {} < expected {elems} elements", chunk_out.len());
+            assert!(
+                chunk_out.len() >= elems,
+                "readback {} < expected {elems} elements",
+                chunk_out.len()
+            );
             // [in × cols] row-major chunk — scatter per-row (the §16 lesson).
             for (r, row) in chunk_out[..elems].chunks_exact(cols).enumerate() {
                 out[r * nout + c0..r * nout + c0 + cols].copy_from_slice(row);
@@ -796,7 +832,11 @@ impl Exl3DequantCubeCL {
         let wall = t0.elapsed().as_secs_f64().max(1e-9);
         Ok((
             out,
-            DecodeBench { weights: (kin * nout) as u64, wall_secs: wall, kernel_secs: None },
+            DecodeBench {
+                weights: (kin * nout) as u64,
+                wall_secs: wall,
+                kernel_secs: None,
+            },
         ))
     }
 
@@ -816,7 +856,14 @@ impl Exl3DequantCubeCL {
         }
         let (w, single) = Self::decode_only_layer_chunked(client, layer, arm, None, 1)?;
         if reps <= 1 {
-            return Ok((w, DecodeBench { weights: single.weights, wall_secs: single.wall_secs, kernel_secs: None }));
+            return Ok((
+                w,
+                DecodeBench {
+                    weights: single.weights,
+                    wall_secs: single.wall_secs,
+                    kernel_secs: None,
+                },
+            ));
         }
         let (_, multi) = Self::decode_only_layer_chunked(client, layer, arm, None, reps)?;
         let kernel = (multi.wall_secs - single.wall_secs) / (reps - 1) as f64;
@@ -896,13 +943,14 @@ impl Exl3DequantCubeCL {
         // The ≥5 ms/pass work floor (plan 003 contract 2).
         let pass_secs = min * f64::from(reps as u32);
         if pass_secs < 5e-3 {
-            return Err(Exl3DequantError::TooFastToTime {
-                pass_secs,
-                reps,
-            });
+            return Err(Exl3DequantError::TooFastToTime { pass_secs, reps });
         }
 
-        let spread = if min > 0.0 { (p90 - min) / min } else { f64::INFINITY };
+        let spread = if min > 0.0 {
+            (p90 - min) / min
+        } else {
+            f64::INFINITY
+        };
         let unstable = spread > 0.10;
 
         // Cross-method: the independent reps-differential estimate.
@@ -998,16 +1046,41 @@ mod tests {
                 Exl3Codebook::Cb1Mcg => (Some(0xCBAC_1FED), None),
                 Exl3Codebook::Cb2Mul1 => (None, Some(EXL3_MUL1_MARKER)),
             };
-            Self { trellis, su, sv, legacy_signs, mcg, mul1, in_f, out_f }
+            Self {
+                trellis,
+                su,
+                sv,
+                legacy_signs,
+                mcg,
+                mul1,
+                in_f,
+                out_f,
+            }
         }
 
         fn layer(&self) -> Exl3Layer<'_> {
             Exl3Layer::from_raw_parts(
                 &self.trellis,
-                if self.legacy_signs { None } else { Some(&self.su) },
-                if self.legacy_signs { None } else { Some(&self.sv) },
-                if self.legacy_signs { Some(&self.su) } else { None },
-                if self.legacy_signs { Some(&self.sv) } else { None },
+                if self.legacy_signs {
+                    None
+                } else {
+                    Some(&self.su)
+                },
+                if self.legacy_signs {
+                    None
+                } else {
+                    Some(&self.sv)
+                },
+                if self.legacy_signs {
+                    Some(&self.su)
+                } else {
+                    None
+                },
+                if self.legacy_signs {
+                    Some(&self.sv)
+                } else {
+                    None
+                },
                 self.mcg,
                 self.mul1,
                 self.in_f,
@@ -1053,7 +1126,10 @@ mod tests {
         let mut sq_diff = 0.0f64;
         let mut sq_ref = 0.0f64;
         for (i, (a, b)) in cpu.iter().zip(gpu).enumerate() {
-            assert!(a.is_finite() && b.is_finite(), "{what}[{i}]: non-finite (cpu={a} gpu={b})");
+            assert!(
+                a.is_finite() && b.is_finite(),
+                "{what}[{i}]: non-finite (cpu={a} gpu={b})"
+            );
             let d = (*a - *b) as f64;
             let ad = d.abs();
             if ad > max_abs {
@@ -1121,31 +1197,71 @@ mod tests {
 
     #[test]
     fn gpu_matches_cpu_integer_k_k3() {
-        assert_gpu_matches_cpu(256, 384, Exl3K { ka: 3, half: false }, Exl3Codebook::Cb0, false, None, 1);
+        assert_gpu_matches_cpu(
+            256,
+            384,
+            Exl3K { ka: 3, half: false },
+            Exl3Codebook::Cb0,
+            false,
+            None,
+            1,
+        );
     }
 
     #[test]
     fn gpu_matches_cpu_integer_k_k5_wide() {
         // K5 + a non-square layer (asymmetric block counts).
-        assert_gpu_matches_cpu(384, 640, Exl3K { ka: 5, half: false }, Exl3Codebook::Cb1Mcg, false, None, 2);
+        assert_gpu_matches_cpu(
+            384,
+            640,
+            Exl3K { ka: 5, half: false },
+            Exl3Codebook::Cb1Mcg,
+            false,
+            None,
+            2,
+        );
     }
 
     #[test]
     fn gpu_matches_cpu_half_k_mul1() {
         // Half-K requires the mul1 codebook (validated by from_raw_parts).
-        assert_gpu_matches_cpu(256, 512, Exl3K { ka: 4, half: true }, Exl3Codebook::Cb2Mul1, false, None, 3);
+        assert_gpu_matches_cpu(
+            256,
+            512,
+            Exl3K { ka: 4, half: true },
+            Exl3Codebook::Cb2Mul1,
+            false,
+            None,
+            3,
+        );
     }
 
     #[test]
     fn gpu_matches_cpu_legacy_signs() {
-        assert_gpu_matches_cpu(256, 256, Exl3K { ka: 2, half: false }, Exl3Codebook::Cb0, true, None, 4);
+        assert_gpu_matches_cpu(
+            256,
+            256,
+            Exl3K { ka: 2, half: false },
+            Exl3Codebook::Cb0,
+            true,
+            None,
+            4,
+        );
     }
 
     #[test]
     fn gpu_chunked_matches_whole() {
         // Force the streaming path: 4 chunks of 128 on a 512-col layer —
         // chunking must not move the parity verdict.
-        assert_gpu_matches_cpu(256, 512, Exl3K { ka: 4, half: false }, Exl3Codebook::Cb2Mul1, false, Some(128), 5);
+        assert_gpu_matches_cpu(
+            256,
+            512,
+            Exl3K { ka: 4, half: false },
+            Exl3Codebook::Cb2Mul1,
+            false,
+            Some(128),
+            5,
+        );
     }
 
     /// Tier-1 oracle: the trellis decode stage is BIT-EXACT (zero float
@@ -1175,7 +1291,12 @@ mod tests {
             for a in 0..in_f / 16 {
                 for c in 0..cols_tiles {
                     let off = (a * cols_tiles + c) * tile_bytes;
-                    decode_tile_rot(&mut tile, &synth.trellis[off..off + tile_bytes], k, codebook);
+                    decode_tile_rot(
+                        &mut tile,
+                        &synth.trellis[off..off + tile_bytes],
+                        k,
+                        codebook,
+                    );
                     for (p, &v) in tile.iter().enumerate() {
                         let (r, co) = ring_pos_to_tile_element(p);
                         cpu[(a * 16 + r) * out_f + c * 16 + co] = v;
@@ -1221,7 +1342,8 @@ mod tests {
                 .filter(|(a, b)| a.to_bits() != b.to_bits())
                 .count();
             assert_eq!(
-                bad, 0,
+                bad,
+                0,
                 "decode stage not bit-exact for K={}.{} cb={codebook:?}",
                 k.ka,
                 if k.half { 5 } else { 0 }
@@ -1278,7 +1400,8 @@ mod tests {
 
             let mw_wall = timing.weights as f64 / timing.wall_secs / 1e6;
             let mw_kernel = timing
-                .kernel_secs.map_or(f64::NAN, |k| timing.weights as f64 / k / 1e6);
+                .kernel_secs
+                .map_or(f64::NAN, |k| timing.weights as f64 / k / 1e6);
             eprintln!(
                 "{class}: in={} out={} K={}.{} weights={} | GPU wall {:.3}s ({:.1} Mw/s) \
                  kernel ~{:.3}s ({:.1} Mw/s) | CPU-parallel {:.3}s ({:.1} Mw/s, {:.1}x)",
@@ -1336,7 +1459,12 @@ mod tests {
         for a in 0..probe_a {
             for c in 0..cols_tiles {
                 let off = (a * cols_tiles + c) * tile_bytes;
-                decode_tile_rot(&mut tile, &layer.trellis_bytes()[off..off + tile_bytes], k, codebook);
+                decode_tile_rot(
+                    &mut tile,
+                    &layer.trellis_bytes()[off..off + tile_bytes],
+                    k,
+                    codebook,
+                );
                 for (p, &v) in tile.iter().enumerate() {
                     let (r, co) = ring_pos_to_tile_element(p);
                     cpu[(a * 16 + r) * out_f + c * 16 + co] = v;
@@ -1392,7 +1520,11 @@ mod tests {
             probe_len - bad,
             probe_len
         );
-        assert_eq!(bad, 0, "{}: decode stage not bit-exact vs the reference tile decoder", plan.key);
+        assert_eq!(
+            bad, 0,
+            "{}: decode stage not bit-exact vs the reference tile decoder",
+            plan.key
+        );
     }
 
     /// T7c-1a gate (§17.3 gate 1, synthetic half): v2 word-aligned extraction
@@ -1420,7 +1552,12 @@ mod tests {
             for a in 0..in_f / 16 {
                 for c in 0..cols_tiles {
                     let off = (a * cols_tiles + c) * tile_bytes;
-                    decode_tile_rot(&mut tile, &synth.trellis[off..off + tile_bytes], k, codebook);
+                    decode_tile_rot(
+                        &mut tile,
+                        &synth.trellis[off..off + tile_bytes],
+                        k,
+                        codebook,
+                    );
                     for (p, &v) in tile.iter().enumerate() {
                         let (r, co) = ring_pos_to_tile_element(p);
                         cpu[(a * 16 + r) * out_f + c * 16 + co] = v;
@@ -1502,10 +1639,21 @@ mod tests {
             let v1 = run(false);
             let v2 = run(true);
             let what = format!("K={}.{} cb={codebook:?}", k.ka, if k.half { 5 } else { 0 });
-            let bad_v1v2 = v1.iter().zip(&v2).filter(|(a, b)| a.to_bits() != b.to_bits()).count();
+            let bad_v1v2 = v1
+                .iter()
+                .zip(&v2)
+                .filter(|(a, b)| a.to_bits() != b.to_bits())
+                .count();
             assert_eq!(bad_v1v2, 0, "{what}: v2 decode not bit-exact vs v1");
-            let bad_cpu = cpu.iter().zip(&v2).filter(|(a, b)| a.to_bits() != b.to_bits()).count();
-            assert_eq!(bad_cpu, 0, "{what}: v2 decode not bit-exact vs the CPU reference tile decoder");
+            let bad_cpu = cpu
+                .iter()
+                .zip(&v2)
+                .filter(|(a, b)| a.to_bits() != b.to_bits())
+                .count();
+            assert_eq!(
+                bad_cpu, 0,
+                "{what}: v2 decode not bit-exact vs the CPU reference tile decoder"
+            );
         }
     }
 
@@ -1580,8 +1728,15 @@ mod tests {
 
             // §17.3 gate 1 at bench scope: v2 vs v1 BIT-EXACT on this layer.
             let (v1, v2) = (v1_out.unwrap(), v2_out.unwrap());
-            let bad = v1.iter().zip(&v2).filter(|(a, b)| a.to_bits() != b.to_bits()).count();
-            assert_eq!(bad, 0, "{key}: v2 decode not bit-exact vs v1 on the real pack");
+            let bad = v1
+                .iter()
+                .zip(&v2)
+                .filter(|(a, b)| a.to_bits() != b.to_bits())
+                .count();
+            assert_eq!(
+                bad, 0,
+                "{key}: v2 decode not bit-exact vs v1 on the real pack"
+            );
 
             let weights = (layer.in_features * layer.out_features) as u64;
             let gw = |secs: f64| weights as f64 / secs / 1e9;
@@ -1592,7 +1747,10 @@ mod tests {
         eprintln!("| layer | weights | A1 v1 Gw/s | A2 v2 Gw/s | A3 v2-noLUT Gw/s | v2/v1 |");
         eprintln!("|---|---:|---:|---:|---:|---:|");
         for (key, w, a1, a2, a3) in &rows {
-            eprintln!("| {key} | {w} | {a1:.1} | {a2:.1} | {a3:.1} | {:.2}x |", a2 / a1.max(1e-9));
+            eprintln!(
+                "| {key} | {w} | {a1:.1} | {a2:.1} | {a3:.1} | {:.2}x |",
+                a2 / a1.max(1e-9)
+            );
         }
         let total_w: u64 = rows.iter().map(|r| r.1).sum();
         let k1: f64 = rows.iter().map(|r| r.2 * r.1 as f64).sum::<f64>() / total_w as f64;
@@ -1638,10 +1796,10 @@ mod tests {
         const REPS: usize = 64;
         const SAMPLES: usize = 30;
 
+        eprintln!("\n=== T7c-1d stable decode bench (REPS={REPS} SAMPLES={SAMPLES}) ===");
         eprintln!(
-            "\n=== T7c-1d stable decode bench (REPS={REPS} SAMPLES={SAMPLES}) ==="
+            "| layer | weights | arm | peak Gw/s | median | p90 | spread | cross-agree | verdict |"
         );
-        eprintln!("| layer | weights | arm | peak Gw/s | median | p90 | spread | cross-agree | verdict |" );
         eprintln!("|---|---:|---|---:|---:|---:|---:|---|---|");
 
         for class in classes {
@@ -1658,14 +1816,24 @@ mod tests {
 
             // §17.3 gate 1 at bench scope (re-asserted every run): v2 vs v1.
             let (v1, _) = Exl3DequantCubeCL::decode_only_layer::<ActiveRuntime>(
-                &client, &layer, DecodeArm::V1, 1,
+                &client,
+                &layer,
+                DecodeArm::V1,
+                1,
             )
             .unwrap();
             let (v2, _) = Exl3DequantCubeCL::decode_only_layer::<ActiveRuntime>(
-                &client, &layer, DecodeArm::V2, 1,
+                &client,
+                &layer,
+                DecodeArm::V2,
+                1,
             )
             .unwrap();
-            let bad = v1.iter().zip(&v2).filter(|(a, b)| a.to_bits() != b.to_bits()).count();
+            let bad = v1
+                .iter()
+                .zip(&v2)
+                .filter(|(a, b)| a.to_bits() != b.to_bits())
+                .count();
             assert_eq!(bad, 0, "{}: v2 not bit-exact vs v1", plan.key);
 
             for (name, arm) in [
@@ -1734,7 +1902,13 @@ mod tests {
             plans.len()
         );
 
-        let k_of = |k: Exl3K| if k.half { format!("K{}.5", k.ka) } else { format!("K{}", k.ka) };
+        let k_of = |k: Exl3K| {
+            if k.half {
+                format!("K{}.5", k.ka)
+            } else {
+                format!("K{}", k.ka)
+            }
+        };
         let cb_of = |cb: Exl3Codebook| match cb {
             Exl3Codebook::Cb0 => "Cb0",
             Exl3Codebook::Cb1Mcg => "Cb1Mcg",
@@ -1746,22 +1920,39 @@ mod tests {
         let mut failures: Vec<String> = Vec::new();
         let t0 = std::time::Instant::now();
 
-        eprintln!("\n=== T7c-1c full-pack bit-exact gate: {} layers ===", plans.len());
+        eprintln!(
+            "\n=== T7c-1c full-pack bit-exact gate: {} layers ===",
+            plans.len()
+        );
         for (i, plan) in plans.iter().enumerate() {
             let layer = pack.layer(&plan.key).unwrap();
             let n = (layer.in_features as u64) * (layer.out_features as u64);
             let (v1, _) = Exl3DequantCubeCL::decode_only_layer::<ActiveRuntime>(
-                &client, &layer, DecodeArm::V1, 1,
+                &client,
+                &layer,
+                DecodeArm::V1,
+                1,
             )
             .unwrap();
             let (v2, _) = Exl3DequantCubeCL::decode_only_layer::<ActiveRuntime>(
-                &client, &layer, DecodeArm::V2, 1,
+                &client,
+                &layer,
+                DecodeArm::V2,
+                1,
             )
             .unwrap();
-            let bad_v2v1 = v1.iter().zip(&v2).filter(|(a, b)| a.to_bits() != b.to_bits()).count();
+            let bad_v2v1 = v1
+                .iter()
+                .zip(&v2)
+                .filter(|(a, b)| a.to_bits() != b.to_bits())
+                .count();
             drop(v1); // peak host memory: 2 × largest layer (lm_head ⇒ ~10 GiB)
             let cpu = layer.decode_w_rot_f32();
-            let bad_v2cpu = v2.iter().zip(&cpu).filter(|(a, b)| a.to_bits() != b.to_bits()).count();
+            let bad_v2cpu = v2
+                .iter()
+                .zip(&cpu)
+                .filter(|(a, b)| a.to_bits() != b.to_bits())
+                .count();
             drop(v2);
             drop(cpu);
 
@@ -1790,16 +1981,26 @@ mod tests {
                 // reproduction datum for a targeted probe).
                 if failures.len() < 20 {
                     let (v1, _) = Exl3DequantCubeCL::decode_only_layer::<ActiveRuntime>(
-                        &client, &layer, DecodeArm::V1, 1,
+                        &client,
+                        &layer,
+                        DecodeArm::V1,
+                        1,
                     )
                     .unwrap();
                     let (v2, _) = Exl3DequantCubeCL::decode_only_layer::<ActiveRuntime>(
-                        &client, &layer, DecodeArm::V2, 1,
+                        &client,
+                        &layer,
+                        DecodeArm::V2,
+                        1,
                     )
                     .unwrap();
                     let cpu = layer.decode_w_rot_f32();
                     let trip = |what: &str, a: &[f32], b: &[f32]| -> String {
-                        match a.iter().zip(b).position(|(x, y)| x.to_bits() != y.to_bits()) {
+                        match a
+                            .iter()
+                            .zip(b)
+                            .position(|(x, y)| x.to_bits() != y.to_bits())
+                        {
                             Some(idx) => format!(
                                 "{}: first mismatch at elem {idx} (in {}, out {}): {:#x} vs {:#x}",
                                 what,
@@ -1808,8 +2009,14 @@ mod tests {
                                 a[idx].to_bits(),
                                 b[idx].to_bits()
                             ),
-                            None => format!("{what}: no mismatch on re-decode (was {} — nondeterministic!)",
-                                if what.contains("v2cpu") { bad_v2cpu } else { bad_v2v1 }),
+                            None => format!(
+                                "{what}: no mismatch on re-decode (was {} — nondeterministic!)",
+                                if what.contains("v2cpu") {
+                                    bad_v2cpu
+                                } else {
+                                    bad_v2v1
+                                }
+                            ),
                         }
                     };
                     failures.push(format!(

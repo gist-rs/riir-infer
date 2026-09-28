@@ -25,8 +25,10 @@
 
 use std::sync::Arc;
 
-use cudarc::driver::safe::{CudaContext, CudaFunction, CudaModule, CudaSlice, CudaStream, LaunchConfig};
 use cudarc::driver::PushKernelArg;
+use cudarc::driver::safe::{
+    CudaContext, CudaFunction, CudaModule, CudaSlice, CudaStream, LaunchConfig,
+};
 
 use super::CudarcKernelError;
 
@@ -319,15 +321,29 @@ impl QvLoraGpuCudarc {
             return Err(CudarcKernelError::InvalidArg(format!(
                 "update_from: adapter shape mismatch (rank {}/{} n_embd {}/{} q_dim {}/{} v_dim {}/{}); \
                  re-attach instead of updating when the shape changes",
-                lora.rank, self.rank, lora.n_embd, self.n_embd,
-                lora.q_dim, self.q_dim, lora.v_dim, self.v_dim,
+                lora.rank,
+                self.rank,
+                lora.n_embd,
+                self.n_embd,
+                lora.q_dim,
+                self.q_dim,
+                lora.v_dim,
+                self.v_dim,
             )));
         }
         let upload_err = |e: cudarc::driver::DriverError| CudarcKernelError::Launch(e.to_string());
-        stream.memcpy_htod(&lora.a_q, &mut self.a_q).map_err(upload_err)?;
-        stream.memcpy_htod(&lora.b_q, &mut self.b_q).map_err(upload_err)?;
-        stream.memcpy_htod(&lora.a_v, &mut self.a_v).map_err(upload_err)?;
-        stream.memcpy_htod(&lora.b_v, &mut self.b_v).map_err(upload_err)?;
+        stream
+            .memcpy_htod(&lora.a_q, &mut self.a_q)
+            .map_err(upload_err)?;
+        stream
+            .memcpy_htod(&lora.b_q, &mut self.b_q)
+            .map_err(upload_err)?;
+        stream
+            .memcpy_htod(&lora.a_v, &mut self.a_v)
+            .map_err(upload_err)?;
+        stream
+            .memcpy_htod(&lora.b_v, &mut self.b_v)
+            .map_err(upload_err)?;
         self.scale = lora.scale();
         Ok(())
     }
@@ -368,7 +384,9 @@ mod tests {
         let alpha = 8.0;
 
         let mut rng = riir_infer_core::types::Rng::new(42);
-        let lora = riir_infer_core::deltanet::qv_lora::QvLora::new(rank, n_embd, q_dim, v_dim, alpha, &mut rng);
+        let lora = riir_infer_core::deltanet::qv_lora::QvLora::new(
+            rank, n_embd, q_dim, v_dim, alpha, &mut rng,
+        );
 
         // Random norm_x + initial qkv.
         let norm_x: Vec<f32> = (0..n_embd).map(|_| rng.normal() * 0.1).collect();

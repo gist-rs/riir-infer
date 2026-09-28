@@ -140,12 +140,7 @@ fn silu_f32(input: &[f32], output: &mut [f32]) {
 /// `CubeCount::Static(ceil(n/256), 1, 1)`, `CubeDim::new_1d(256)`.
 #[cfg(feature = "cubecl_runtime")]
 #[cube(launch_unchecked)]
-fn situ_f32(
-    gate: &[f32],
-    up: &[f32],
-    params: &[f32],
-    output: &mut [f32],
-) {
+fn situ_f32(gate: &[f32], up: &[f32], params: &[f32], output: &mut [f32]) {
     let beta = params[0usize];
     let linear_beta = params[1usize];
     let has_lb = params[2usize];
@@ -803,11 +798,7 @@ impl FillZerosCubeCL {
     /// # Safety
     ///
     /// - `output_handle`: `n` f32 elements (modified in-place)
-    pub unsafe fn launch<R: Runtime>(
-        client: &ComputeClient<R>,
-        output_handle: Handle,
-        n: usize,
-    ) {
+    pub unsafe fn launch<R: Runtime>(client: &ComputeClient<R>, output_handle: Handle, n: usize) {
         let n_wg = n.div_ceil(256).max(1) as u32;
         unsafe {
             fill_zeros_f32::launch_unchecked::<R>(
@@ -949,7 +940,10 @@ impl Split4CubeCL {
     /// - `out2_handle`: `len2` f32 elements
     /// - `out3_handle`: `len3` f32 elements
     /// - `out4_handle`: `len4` f32 elements
-    #[allow(clippy::too_many_arguments, reason = "GPU kernel launch: many buffer handles are inherent to the fused-kernel interface")]
+    #[allow(
+        clippy::too_many_arguments,
+        reason = "GPU kernel launch: many buffer handles are inherent to the fused-kernel interface"
+    )]
     pub unsafe fn launch<R: Runtime>(
         client: &ComputeClient<R>,
         input_handle: Handle,
@@ -1442,7 +1436,10 @@ impl SoftmaxRowsInplaceCubeCL {
     ) {
         debug_assert_binding_at_least(&x_handle, rows * n, "SoftmaxRows::x");
         assert!(rows > 0 && n > 0, "softmax_rows: degenerate shape");
-        assert!(n <= 16384, "softmax_rows: row length exceeds the 256-thread strided limit");
+        assert!(
+            n <= 16384,
+            "softmax_rows: row length exceeds the 256-thread strided limit"
+        );
         let mut r0 = 0usize;
         while r0 < rows {
             let rc = (Self::MAX_WG_X).min(rows - r0);
@@ -1451,8 +1448,7 @@ impl SoftmaxRowsInplaceCubeCL {
             // heads·seq > 32768 — unreachable at the G5 geometry, live at
             // long context).
             let params: &[f32] = &[f32_exact(n), f32_exact(r0)];
-            let params_handle =
-                crate::params_cache::params_handle(client, f32::as_bytes(params));
+            let params_handle = crate::params_cache::params_handle(client, f32::as_bytes(params));
             // SAFETY: extents asserted above; the row is `row0 + CUBE_POS_X`
             // and each workgroup touches exactly its own row.
             unsafe {
@@ -1995,7 +1991,10 @@ mod tests {
         let client = ctx.client();
 
         let (rows, i_sz) = (8usize, 24usize);
-        let fused: Vec<f32> = lcg_vec(rows * 2 * i_sz).into_iter().map(|v| v * 2.0).collect();
+        let fused: Vec<f32> = lcg_vec(rows * 2 * i_sz)
+            .into_iter()
+            .map(|v| v * 2.0)
+            .collect();
         let mut cpu_out = vec![0f32; rows * i_sz];
         for r in 0..rows {
             for j in 0..i_sz {
@@ -2052,7 +2051,12 @@ mod tests {
             .collect()
     }
 
-    fn run_softmax_rows(client: &ActiveComputeClient, x: &[f32], rows: usize, n: usize) -> Vec<f32> {
+    fn run_softmax_rows(
+        client: &ActiveComputeClient,
+        x: &[f32],
+        rows: usize,
+        n: usize,
+    ) -> Vec<f32> {
         let h = client.create_from_slice(f32::as_bytes(x));
         // SAFETY: the handle backs rows·n f32.
         unsafe { SoftmaxRowsInplaceCubeCL::launch::<ActiveRuntime>(client, h.clone(), rows, n) };
@@ -2100,7 +2104,11 @@ mod tests {
         assert!(worst < 1e-5, "softmax_rows vs host drift {worst:.3e}");
         for rep in 1..200 {
             let again = run_softmax_rows(&client, &x, rows, n);
-            let bad = first.iter().zip(&again).filter(|(a, b)| a.to_bits() != b.to_bits()).count();
+            let bad = first
+                .iter()
+                .zip(&again)
+                .filter(|(a, b)| a.to_bits() != b.to_bits())
+                .count();
             assert_eq!(bad, 0, "rep {rep}: {bad} elements differ from rep 0");
         }
     }

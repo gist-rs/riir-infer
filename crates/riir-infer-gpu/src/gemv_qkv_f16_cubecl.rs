@@ -77,12 +77,7 @@ use half::f16 as half_f16;
 /// `CubeCount::Static(total_rows, 1, 1)`, `CubeDim::new_1d(plane_size)`.
 #[cfg(feature = "cubecl_runtime")]
 #[cube(launch_unchecked)]
-fn gemv_qkv_plane_f16(
-    weight_qkv: &[half_f16],
-    input: &[f32],
-    output: &mut [f32],
-    params: &[f32],
-) {
+fn gemv_qkv_plane_f16(weight_qkv: &[half_f16], input: &[f32], output: &mut [f32], params: &[f32]) {
     let q_dim = params[0usize] as u32;
     let kv_dim = params[1usize] as u32;
     let n = params[2usize] as u32;
@@ -165,7 +160,10 @@ impl GemvQkvF16CubeCL {
     /// - `params_handle`: 3 f32 elements `[q_dim as f32, kv_dim as f32, n as f32]`
     ///
     /// The client must support `Plane::Ops` (subgroup operations).
-#[allow(clippy::too_many_arguments, reason = "GPU kernel launch/dispatch: many buffer handles are inherent to the fused-kernel interface")]
+    #[allow(
+        clippy::too_many_arguments,
+        reason = "GPU kernel launch/dispatch: many buffer handles are inherent to the fused-kernel interface"
+    )]
     pub unsafe fn launch<R: Runtime>(
         client: &ComputeClient<R>,
         weight_qkv_handle: Handle,

@@ -35,8 +35,8 @@ pub mod weight_buffer_cache;
 // Root item re-exports (the same paths consumers use today through the
 // engine gpu crate's re-export layer).
 pub use buffer::{
-    DownloadStaging, await_map_result, create_buffer, download_f32, download_f32_reuse, download_u32,
-    download_u32_reuse, upload_f32,
+    DownloadStaging, await_map_result, create_buffer, download_f32, download_f32_reuse,
+    download_u32, download_u32_reuse, upload_f32,
 };
 pub use context::{GpuContext, GpuError};
 #[cfg(feature = "cubecl_runtime")]
@@ -58,55 +58,55 @@ pub use cubecl_runtime::{
 pub mod cpu_reference;
 
 #[cfg(feature = "cubecl_runtime")]
-pub mod gemv_batched;
+pub mod attention_causal_fused_cubecl;
+#[cfg(feature = "cubecl_runtime")]
+pub mod attention_cubecl;
+#[cfg(feature = "cubecl_runtime")]
+pub mod attention_q8kv_cubecl;
+#[cfg(feature = "cubecl_runtime")]
+pub mod elementwise_cubecl;
+#[cfg(feature = "cubecl_runtime")]
+pub mod encoder_lane_cubecl;
+#[cfg(feature = "cubecl_runtime")]
+pub mod epilogue;
+#[cfg(feature = "gemma2_d2f")]
+pub mod gemma2_d2f_sc;
 #[cfg(feature = "cubecl_runtime")]
 pub mod gemv_autotune;
+#[cfg(feature = "cubecl_runtime")]
+pub mod gemv_batched;
 #[cfg(feature = "cubecl_runtime")]
 pub mod gemv_cubecl;
 #[cfg(feature = "cubecl_runtime")]
 pub mod gemv_f16_cubecl;
 #[cfg(feature = "cubecl_runtime")]
-pub mod transpose_cubecl;
-#[cfg(feature = "cubecl_runtime")]
 pub mod gemv_geglu_cubecl;
 #[cfg(feature = "cubecl_runtime")]
 pub mod gemv_geglu_f16_cubecl;
 #[cfg(feature = "cubecl_runtime")]
-pub mod gemv_qkv_f16_cubecl;
-#[cfg(feature = "cubecl_runtime")]
-pub mod gemv_q4k_cubecl;
+pub mod gemv_geglu_q4k_cubecl;
 #[cfg(feature = "cubecl_runtime")]
 pub mod gemv_q4k_batched_cubecl;
 #[cfg(feature = "cubecl_runtime")]
 pub mod gemv_q4k_batched_rmsnorm_cubecl;
 #[cfg(feature = "cubecl_runtime")]
+pub mod gemv_q4k_cubecl;
+#[cfg(feature = "cubecl_runtime")]
+pub mod gemv_qkv_f16_cubecl;
+#[cfg(feature = "cubecl_runtime")]
 pub mod gemv_qkv_q4k_cubecl;
 #[cfg(feature = "cubecl_runtime")]
-pub mod gemv_geglu_q4k_cubecl;
-#[cfg(feature = "cubecl_runtime")]
 pub mod matmul_cubecl;
-#[cfg(feature = "cubecl_runtime")]
-pub mod encoder_lane_cubecl;
 #[cfg(feature = "swap_ab_gemm")]
 pub mod matmul_swap_ab_cubecl;
 #[cfg(feature = "cubecl_runtime")]
-pub mod attention_cubecl;
-#[cfg(feature = "cubecl_runtime")]
-pub mod attention_causal_fused_cubecl;
-#[cfg(feature = "cubecl_runtime")]
-pub mod attention_q8kv_cubecl;
-#[cfg(feature = "gemma2_d2f")]
-pub mod gemma2_d2f_sc;
-#[cfg(feature = "cubecl_runtime")]
 pub mod norms_cubecl;
+#[cfg(feature = "cubecl_runtime")]
+pub mod params_cache;
 #[cfg(feature = "cubecl_runtime")]
 pub mod sampling_cubecl;
 #[cfg(feature = "cubecl_runtime")]
-pub mod elementwise_cubecl;
-#[cfg(feature = "cubecl_runtime")]
-pub mod epilogue;
-#[cfg(feature = "cubecl_runtime")]
-pub mod params_cache;
+pub mod transpose_cubecl;
 
 // EXL3 (trellis-coded) GPU dequant — Issue 001 T7b. Consumes the core `exl3`
 // reference tables (LUT/Hadamard) + zero-copy layer view as its oracle +
@@ -115,63 +115,62 @@ pub mod params_cache;
 pub mod exl3_dequant_cubecl;
 
 #[cfg(feature = "cubecl_runtime")]
-pub use gemv_autotune::GemvAutotune;
-#[cfg(feature = "cubecl_runtime")]
-pub use gemv_cubecl::GemvCubeCL;
-#[cfg(feature = "cubecl_runtime")]
-pub use transpose_cubecl::TransposeCubeCL;
-#[cfg(feature = "cubecl_runtime")]
-pub use matmul_cubecl::MatmulCubeCL;
-#[cfg(feature = "swap_ab_gemm")]
-pub use matmul_swap_ab_cubecl::{MatmulSwapAb, SWAP_AB_M_THRESHOLD};
-#[cfg(feature = "cubecl_runtime")]
-pub use attention_cubecl::{AttentionCubeCL, AttentionParams};
+pub use attention_causal_fused_cubecl::CausalAttentionFusedCubeCL;
 #[cfg(feature = "gemma2_d2f")]
 pub use attention_cubecl::AttentionBlockCausalParams;
+#[cfg(feature = "cubecl_runtime")]
+pub use attention_cubecl::{AttentionCubeCL, AttentionParams};
+#[cfg(feature = "cubecl_runtime")]
+pub use attention_q8kv_cubecl::{AttentionQ8KVCubeCL, Q8KVBuffers};
+#[cfg(feature = "cubecl_runtime")]
+pub use elementwise_cubecl::{
+    SigmoidCubeCL, SiluCubeCL, SituCubeCL, SoftmaxCubeCL, Split2CubeCL, Split4CubeCL, TopKCubeCL,
+};
+#[cfg(feature = "cubecl_runtime")]
+pub use epilogue::{
+    CodaReparam, DispatchBudget, GemvEpilogue, GemvResidualCubeCL, GemvResidualF16CubeCL,
+    NormEpilogue, NormResidualCubeCL,
+};
 #[cfg(feature = "gemma2_d2f")]
 pub use gemma2_d2f_sc::{
     D2fScConfig, D2fScState, ScTrainingForwardResult, compute_x0_estimate,
     init_w_sc_identity_padded, project_sc, project_sc_into,
 };
 #[cfg(feature = "cubecl_runtime")]
-pub use attention_causal_fused_cubecl::CausalAttentionFusedCubeCL;
+pub use gemv_autotune::GemvAutotune;
 #[cfg(feature = "cubecl_runtime")]
-pub use gemv_q4k_cubecl::{GemvQ4KCubeCL, Q4KHandle};
-#[cfg(feature = "cubecl_runtime")]
-pub use gemv_q4k_batched_cubecl::GemvQ4KBatchedCubeCL;
-#[cfg(feature = "cubecl_runtime")]
-pub use gemv_q4k_batched_rmsnorm_cubecl::GemvQ4KBatchedRmsnormCubeCL;
-#[cfg(feature = "cubecl_runtime")]
-pub use attention_q8kv_cubecl::{AttentionQ8KVCubeCL, Q8KVBuffers};
+pub use gemv_cubecl::GemvCubeCL;
 #[cfg(feature = "cubecl_runtime")]
 pub use gemv_f16_cubecl::{F16Handle, GemvF16CubeCL};
-#[cfg(feature = "cubecl_runtime")]
-pub use norms_cubecl::{
-    LayerNormMeanBatchedCubeCL, ResidualAddCubeCL, RmsNormBatchedCubeCL, RmsNormCubeCL,
-    RmsNormQkFusedCubeCL, RmsNormZgateFusedCubeCL,
-};
-#[cfg(feature = "cubecl_runtime")]
-pub use elementwise_cubecl::{
-    SigmoidCubeCL, SiluCubeCL, SituCubeCL, SoftmaxCubeCL, Split2CubeCL, Split4CubeCL,
-    TopKCubeCL,
-};
 #[cfg(feature = "cubecl_runtime")]
 pub use gemv_geglu_cubecl::GemvGegluCubeCL;
 #[cfg(feature = "cubecl_runtime")]
 pub use gemv_geglu_f16_cubecl::GemvGegluF16CubeCL;
 #[cfg(feature = "cubecl_runtime")]
+pub use gemv_geglu_q4k_cubecl::GemvGegluQ4KCubeCL;
+#[cfg(feature = "cubecl_runtime")]
+pub use gemv_q4k_batched_cubecl::GemvQ4KBatchedCubeCL;
+#[cfg(feature = "cubecl_runtime")]
+pub use gemv_q4k_batched_rmsnorm_cubecl::GemvQ4KBatchedRmsnormCubeCL;
+#[cfg(feature = "cubecl_runtime")]
+pub use gemv_q4k_cubecl::{GemvQ4KCubeCL, Q4KHandle};
+#[cfg(feature = "cubecl_runtime")]
 pub use gemv_qkv_f16_cubecl::GemvQkvF16CubeCL;
 #[cfg(feature = "cubecl_runtime")]
 pub use gemv_qkv_q4k_cubecl::GemvQkvQ4KCubeCL;
 #[cfg(feature = "cubecl_runtime")]
-pub use gemv_geglu_q4k_cubecl::GemvGegluQ4KCubeCL;
+pub use matmul_cubecl::MatmulCubeCL;
+#[cfg(feature = "swap_ab_gemm")]
+pub use matmul_swap_ab_cubecl::{MatmulSwapAb, SWAP_AB_M_THRESHOLD};
 #[cfg(feature = "cubecl_runtime")]
-pub use epilogue::{
-    CodaReparam, DispatchBudget, GemvEpilogue, GemvResidualCubeCL, GemvResidualF16CubeCL,
-    NormEpilogue, NormResidualCubeCL,
+pub use norms_cubecl::{
+    LayerNormMeanBatchedCubeCL, ResidualAddCubeCL, RmsNormBatchedCubeCL, RmsNormCubeCL,
+    RmsNormQkFusedCubeCL, RmsNormZgateFusedCubeCL,
 };
 #[cfg(all(feature = "cubecl_runtime", not(feature = "params_handle_cache")))]
 pub use params_cache::params_handle;
+#[cfg(feature = "cubecl_runtime")]
+pub use transpose_cubecl::TransposeCubeCL;
 
 // ---------------------------------------------------------------------------
 // P3 slice 3 (the ternary gemv/gemm + metal + CUDA-raw families): the
@@ -187,23 +186,11 @@ pub use params_cache::params_handle;
 // ---------------------------------------------------------------------------
 
 #[cfg(feature = "ternary_gemv")]
-pub mod gemv_ternary_cubecl;
-#[cfg(feature = "ternary_gemv")]
-pub mod gemv_ternary_scale_ab_cubecl;
-#[cfg(feature = "ternary_gemv")]
-pub mod gemv_ternary_fma_cubecl;
-#[cfg(all(feature = "cubecl_runtime", feature = "ternary_gemv_residual"))]
-pub mod gemv_ternary_residual_cubecl;
-#[cfg(all(feature = "cubecl_runtime", feature = "ternary_gemv"))]
-pub mod gemv_ternary_block_contiguous_cubecl;
-#[cfg(feature = "ternary_gemv")]
-pub mod ternary_ffn_fused;
-#[cfg(feature = "ternary_gemv")]
 pub mod deltanet_input_proj_fused;
 #[cfg(feature = "ternary_gemm_batched")]
 pub mod gemm_ternary_batched_cubecl;
-#[cfg(feature = "ternary_gemm_batched")]
-pub mod gemm_ternary_tiled_cubecl;
+#[cfg(feature = "ternary_gemm_simdgroup")]
+pub mod gemm_ternary_block_contiguous_cubecl;
 #[cfg(feature = "ternary_gemm_batched")]
 pub mod gemm_ternary_cmma16_cubecl;
 #[cfg(feature = "ternary_gemm_batched")]
@@ -211,21 +198,9 @@ pub mod gemm_ternary_cmma_i8_cubecl;
 #[cfg(feature = "ternary_gemm_batched")]
 pub mod gemm_ternary_cmma_i8_direct_cubecl;
 #[cfg(feature = "ternary_gemm_batched")]
-pub mod gemm_ternary_cmma_i8_t64_cubecl;
-#[cfg(feature = "ternary_gemm_batched")]
 pub mod gemm_ternary_cmma_i8_psplit_cubecl;
-#[cfg(feature = "ternary_gemm_simdgroup")]
-pub mod gemm_ternary_simdgroup_cubecl;
-#[cfg(feature = "ternary_gemm_simdgroup")]
-pub mod gemm_ternary_block_contiguous_cubecl;
-#[cfg(all(feature = "metal_tensor_gemm", target_os = "macos"))]
-pub mod gemm_ternary_metal_tensor;
-#[cfg(all(feature = "metal_tensor_gemm", target_os = "macos"))]
-pub mod gemm_ternary_metal_wgpu;
-#[cfg(all(feature = "metal_tensor_gemm", target_os = "macos"))]
-pub mod gemm_ternary_metal_zero_copy;
-#[cfg(all(feature = "ternary_gemv_cuda_raw", not(target_os = "macos")))]
-pub mod gemv_ternary_cuda_raw;
+#[cfg(feature = "ternary_gemm_batched")]
+pub mod gemm_ternary_cmma_i8_t64_cubecl;
 #[cfg(all(feature = "ternary_gemv_cuda_raw", not(target_os = "macos")))]
 pub mod gemm_ternary_i8_mma_cuda_raw;
 #[cfg(all(
@@ -234,27 +209,28 @@ pub mod gemm_ternary_i8_mma_cuda_raw;
     not(target_os = "macos")
 ))]
 pub mod gemm_ternary_i8_mma_v6_src;
-#[cfg(all(
-    feature = "ternary_gemv_cuda_raw",
-    feature = "ternary_gemm_batched",
-    feature = "cubecl_runtime",
-    not(target_os = "macos")
-))]
-pub mod prefill_cuda_mma;
-#[cfg(all(
-    feature = "ternary_gemv_cuda_raw",
-    feature = "ternary_gemm_batched",
-    feature = "cubecl_runtime",
-    not(target_os = "macos")
-))]
-pub mod prefill_cuda_ffn;
-#[cfg(all(
-    feature = "ternary_gemv_cuda_raw",
-    feature = "ternary_gemm_batched",
-    feature = "cubecl_runtime",
-    not(target_os = "macos")
-))]
-pub mod prefill_cuda_deltanet;
+#[cfg(all(feature = "metal_tensor_gemm", target_os = "macos"))]
+pub mod gemm_ternary_metal_tensor;
+#[cfg(all(feature = "metal_tensor_gemm", target_os = "macos"))]
+pub mod gemm_ternary_metal_wgpu;
+#[cfg(all(feature = "metal_tensor_gemm", target_os = "macos"))]
+pub mod gemm_ternary_metal_zero_copy;
+#[cfg(feature = "ternary_gemm_simdgroup")]
+pub mod gemm_ternary_simdgroup_cubecl;
+#[cfg(feature = "ternary_gemm_batched")]
+pub mod gemm_ternary_tiled_cubecl;
+#[cfg(all(feature = "cubecl_runtime", feature = "ternary_gemv"))]
+pub mod gemv_ternary_block_contiguous_cubecl;
+#[cfg(feature = "ternary_gemv")]
+pub mod gemv_ternary_cubecl;
+#[cfg(all(feature = "ternary_gemv_cuda_raw", not(target_os = "macos")))]
+pub mod gemv_ternary_cuda_raw;
+#[cfg(feature = "ternary_gemv")]
+pub mod gemv_ternary_fma_cubecl;
+#[cfg(all(feature = "cubecl_runtime", feature = "ternary_gemv_residual"))]
+pub mod gemv_ternary_residual_cubecl;
+#[cfg(feature = "ternary_gemv")]
+pub mod gemv_ternary_scale_ab_cubecl;
 #[cfg(all(
     feature = "ternary_gemv_cuda_raw",
     feature = "ternary_gemm_batched",
@@ -268,7 +244,7 @@ pub mod prefill_cuda_attention;
     feature = "cubecl_runtime",
     not(target_os = "macos")
 ))]
-pub mod prefill_cuda_attention_vec;
+pub mod prefill_cuda_attention_fa;
 #[cfg(all(
     feature = "ternary_gemv_cuda_raw",
     feature = "ternary_gemm_batched",
@@ -282,7 +258,21 @@ pub mod prefill_cuda_attention_gang;
     feature = "cubecl_runtime",
     not(target_os = "macos")
 ))]
-pub mod prefill_cuda_attention_fa;
+pub mod prefill_cuda_attention_vec;
+#[cfg(all(
+    feature = "ternary_gemv_cuda_raw",
+    feature = "ternary_gemm_batched",
+    feature = "cubecl_runtime",
+    not(target_os = "macos")
+))]
+pub mod prefill_cuda_deltanet;
+#[cfg(all(
+    feature = "ternary_gemv_cuda_raw",
+    feature = "ternary_gemm_batched",
+    feature = "cubecl_runtime",
+    not(target_os = "macos")
+))]
+pub mod prefill_cuda_ffn;
 #[cfg(all(
     feature = "ternary_gemv_cuda_raw",
     feature = "ternary_gemm_batched",
@@ -290,75 +280,81 @@ pub mod prefill_cuda_attention_fa;
     not(target_os = "macos")
 ))]
 pub mod prefill_cuda_gdn_chunked;
+#[cfg(all(
+    feature = "ternary_gemv_cuda_raw",
+    feature = "ternary_gemm_batched",
+    feature = "cubecl_runtime",
+    not(target_os = "macos")
+))]
+pub mod prefill_cuda_mma;
+#[cfg(feature = "ternary_gemv")]
+pub mod ternary_ffn_fused;
 
 #[cfg(feature = "ternary_gemv")]
 pub use deltanet_input_proj_fused::{
     GpuTernaryInputProj, InputProjOutputs, LayerInputProjWeightsRef, TernaryInputProjFused,
     TernaryInputProjHandles,
 };
-#[cfg(feature = "ternary_gemv")]
-pub use gemv_ternary_cubecl::{
-    gemv_f16_scale_launch_count, prepare_block_contiguous_u32, set_gemv_use_f16_scale,
-    GemvTernaryCubeCL, GpuTernaryMatvec, InterleavedTernaryHandle, TernaryHandle, TernaryTritHandle,
-};
-#[cfg(feature = "ternary_gemv")]
-pub use gemv_ternary_fma_cubecl::{
-    fma_enabled, fma_launch_count, pack_u32_digit_bytes, set_gemv_use_fma, GemvTernaryFmaCubeCL,
-    TernaryHandleFma,
-};
-#[cfg(feature = "ternary_gemv")]
-pub use gemv_ternary_scale_ab_cubecl::GemvTernaryScaleAbCubeCL;
-#[cfg(feature = "ternary_gemv")]
-pub use ternary_ffn_fused::{
-    GpuTernaryFfn, LayerFfnWeightsRef, TernaryFfnFused, TernaryFfnHandles,
-};
-#[cfg(all(feature = "cubecl_runtime", feature = "ternary_gemv"))]
-pub use gemv_ternary_block_contiguous_cubecl::{
-    GemvTernaryBlockContiguousCubeCL, TernaryHandleBlockContiguous,
-};
-#[cfg(all(feature = "cubecl_runtime", feature = "ternary_gemv_residual"))]
-pub use gemv_ternary_residual_cubecl::GemvTernaryResidualCubeCL;
 #[cfg(feature = "ternary_gemm_batched")]
 pub use gemm_ternary_batched_cubecl::GemmTernaryBatchedCubeCL;
-#[cfg(feature = "ternary_gemm_batched")]
-pub use gemm_ternary_cmma16_cubecl::GemmTernaryCmma16CubeCL;
+#[cfg(feature = "ternary_gemm_simdgroup")]
+pub use gemm_ternary_block_contiguous_cubecl::GemmTernaryBlockContiguousCubeCL;
 #[cfg(feature = "ternary_gemm_batched")]
 pub use gemm_ternary_cmma_i8_cubecl::GemmTernaryCmmaI8CubeCL;
 #[cfg(feature = "ternary_gemm_batched")]
-pub use gemm_ternary_tiled_cubecl::{
-    GemmTernaryTiled8x8CubeCL, GemmTernaryTiledCubeCL, GemmTernaryTiledXfixCubeCL,
-};
-#[cfg(feature = "ternary_gemm_simdgroup")]
-pub use gemm_ternary_block_contiguous_cubecl::GemmTernaryBlockContiguousCubeCL;
-#[cfg(feature = "ternary_gemm_simdgroup")]
-pub use gemm_ternary_simdgroup_cubecl::GemmTernarySimdgroupCubeCL;
-#[cfg(all(feature = "metal_tensor_gemm", target_os = "macos"))]
-pub use gemm_ternary_metal_tensor::MetalTensorGemm;
-#[cfg(all(feature = "metal_tensor_gemm", target_os = "macos"))]
-pub use gemm_ternary_metal_wgpu::MetalTensorWgpuGemm;
-#[cfg(all(feature = "metal_tensor_gemm", target_os = "macos"))]
-pub use gemm_ternary_metal_zero_copy::{MetalTensorZeroCopyGemm, ZeroCopyWeightCache};
-#[cfg(all(feature = "ternary_gemv_cuda_raw", not(target_os = "macos")))]
-pub use gemv_ternary_cuda_raw::{
-    GpuTernaryMatvecDp4a, TernaryGemmCudaRaw, TernaryGemmCudaRawError, WG_THREADS,
-};
-#[cfg(all(feature = "ternary_gemv_cuda_raw", not(target_os = "macos")))]
-pub use gemm_ternary_i8_mma_cuda_raw::{
-    mma_v2_enabled, mma_v5_enabled, FoldMode, GemmI8MmaError, GemmI8MmaScratch,
-    GemmTernaryI8MmaCuda, MmaGen, MmaTile, QuantDiv,
-};
+pub use gemm_ternary_cmma16_cubecl::GemmTernaryCmma16CubeCL;
 #[cfg(all(
     feature = "ternary_gemv_cuda_raw",
     feature = "prefill_q8_act",
     not(target_os = "macos")
 ))]
 pub use gemm_ternary_i8_mma_cuda_raw::q8_act_enabled;
+#[cfg(all(feature = "ternary_gemv_cuda_raw", not(target_os = "macos")))]
+pub use gemm_ternary_i8_mma_cuda_raw::{
+    FoldMode, GemmI8MmaError, GemmI8MmaScratch, GemmTernaryI8MmaCuda, MmaGen, MmaTile, QuantDiv,
+    mma_v2_enabled, mma_v5_enabled,
+};
 #[cfg(all(
     feature = "ternary_gemv_cuda_raw",
     feature = "prefill_mmq_v2",
     not(target_os = "macos")
 ))]
 pub use gemm_ternary_i8_mma_cuda_raw::{mmq_fmt_mode, mmq_v2_enabled};
+#[cfg(all(feature = "metal_tensor_gemm", target_os = "macos"))]
+pub use gemm_ternary_metal_tensor::MetalTensorGemm;
+#[cfg(all(feature = "metal_tensor_gemm", target_os = "macos"))]
+pub use gemm_ternary_metal_wgpu::MetalTensorWgpuGemm;
+#[cfg(all(feature = "metal_tensor_gemm", target_os = "macos"))]
+pub use gemm_ternary_metal_zero_copy::{MetalTensorZeroCopyGemm, ZeroCopyWeightCache};
+#[cfg(feature = "ternary_gemm_simdgroup")]
+pub use gemm_ternary_simdgroup_cubecl::GemmTernarySimdgroupCubeCL;
+#[cfg(feature = "ternary_gemm_batched")]
+pub use gemm_ternary_tiled_cubecl::{
+    GemmTernaryTiled8x8CubeCL, GemmTernaryTiledCubeCL, GemmTernaryTiledXfixCubeCL,
+};
+#[cfg(all(feature = "cubecl_runtime", feature = "ternary_gemv"))]
+pub use gemv_ternary_block_contiguous_cubecl::{
+    GemvTernaryBlockContiguousCubeCL, TernaryHandleBlockContiguous,
+};
+#[cfg(feature = "ternary_gemv")]
+pub use gemv_ternary_cubecl::{
+    GemvTernaryCubeCL, GpuTernaryMatvec, InterleavedTernaryHandle, TernaryHandle,
+    TernaryTritHandle, gemv_f16_scale_launch_count, prepare_block_contiguous_u32,
+    set_gemv_use_f16_scale,
+};
+#[cfg(all(feature = "ternary_gemv_cuda_raw", not(target_os = "macos")))]
+pub use gemv_ternary_cuda_raw::{
+    GpuTernaryMatvecDp4a, TernaryGemmCudaRaw, TernaryGemmCudaRawError, WG_THREADS,
+};
+#[cfg(feature = "ternary_gemv")]
+pub use gemv_ternary_fma_cubecl::{
+    GemvTernaryFmaCubeCL, TernaryHandleFma, fma_enabled, fma_launch_count, pack_u32_digit_bytes,
+    set_gemv_use_fma,
+};
+#[cfg(all(feature = "cubecl_runtime", feature = "ternary_gemv_residual"))]
+pub use gemv_ternary_residual_cubecl::GemvTernaryResidualCubeCL;
+#[cfg(feature = "ternary_gemv")]
+pub use gemv_ternary_scale_ab_cubecl::GemvTernaryScaleAbCubeCL;
 #[cfg(all(
     feature = "ternary_gemv_cuda_raw",
     feature = "ternary_gemm_batched",
@@ -382,8 +378,8 @@ pub use prefill_cuda_attention_fa::fa_scratch_rows;
     not(target_os = "macos")
 ))]
 pub use prefill_cuda_deltanet::{
-    canonical_expand_forms, ConvFma, L2Accum, L2Inv, LogForm, PlaneSum, RecDot, RecScale, RecUpd,
-    SigDiv, SigExp, CudaDeltanetKernels,
+    ConvFma, CudaDeltanetKernels, L2Accum, L2Inv, LogForm, PlaneSum, RecDot, RecScale, RecUpd,
+    SigDiv, SigExp, canonical_expand_forms,
 };
 #[cfg(all(
     feature = "ternary_gemv_cuda_raw",
@@ -392,8 +388,8 @@ pub use prefill_cuda_deltanet::{
     not(target_os = "macos")
 ))]
 pub use prefill_cuda_ffn::{
-    canonical_rmsnorm_forms, canonical_swiglu_forms, set_prefill_use_cuda_ffn, CudaFfnKernels,
-    FfnAccum, FfnExp, FfnInvSqrt, FfnMean, FfnRecip,
+    CudaFfnKernels, FfnAccum, FfnExp, FfnInvSqrt, FfnMean, FfnRecip, canonical_rmsnorm_forms,
+    canonical_swiglu_forms, set_prefill_use_cuda_ffn,
 };
 #[cfg(all(
     feature = "ternary_gemv_cuda_raw",
@@ -409,6 +405,10 @@ pub use prefill_cuda_gdn_chunked::{CudaGdnChunkedKernels, GDN_CHUNK};
     not(target_os = "macos")
 ))]
 pub use prefill_cuda_mma::set_prefill_use_cuda_mma;
+#[cfg(feature = "ternary_gemv")]
+pub use ternary_ffn_fused::{
+    GpuTernaryFfn, LayerFfnWeightsRef, TernaryFfnFused, TernaryFfnHandles,
+};
 
 // ---------------------------------------------------------------------------
 // P3 slice 4a (riir-ai Plan 610): the Qwen full-attention family and the
@@ -450,11 +450,17 @@ pub mod qwen_attention_prefill_cmma_pv_cubecl;
 #[cfg(feature = "cubecl_runtime")]
 pub mod qwen_prefill_q8kv_cubecl;
 // DeltaNet chunkwise parallel prefill (Issue 652 / Plan 533).
-#[cfg(all(feature = "cubecl_runtime", feature = "ternary_deltanet_chunked_prefill"))]
+#[cfg(all(
+    feature = "cubecl_runtime",
+    feature = "ternary_deltanet_chunked_prefill"
+))]
 pub mod deltanet_chunked_cubecl;
 // Correct Delta-rule chunkwise parallel prefill (Issue 734 T4 — the Bench 662
 // recorded algorithm).
-#[cfg(all(feature = "cubecl_runtime", feature = "ternary_deltanet_chunked_prefill"))]
+#[cfg(all(
+    feature = "cubecl_runtime",
+    feature = "ternary_deltanet_chunked_prefill"
+))]
 pub mod deltanet_delta_rule_chunked;
 // Tree-masked batched verify for DeltaNet layers (Issue 721 T2+T3).
 #[cfg(all(feature = "cubecl_runtime", feature = "speculative_tree_verify"))]
@@ -516,8 +522,7 @@ pub mod deltanet_pre_rec_fused_cubecl;
     any(test, feature = "ternary_gemv", feature = "deltanet_inference")
 ))]
 pub use deltanet_pre_rec_fused_cubecl::{
-    deltanet_fused_pre_rec_launch_count, set_deltanet_fused_pre_rec,
-    DeltanetPreRecFusedCubeCL,
+    DeltanetPreRecFusedCubeCL, deltanet_fused_pre_rec_launch_count, set_deltanet_fused_pre_rec,
 };
 
 // ---------------------------------------------------------------------------
@@ -569,16 +574,16 @@ pub mod ternary_deltanet_gpu_forward;
 // Root item surface (mirrors the engine gpu crate's root re-exports, so a
 // retargeted consumer swaps `riir_gpu::` for `riir_infer_gpu::` with no
 // other path changes).
-#[cfg(all(feature = "cubecl_runtime", feature = "ternary_gemv"))]
-pub use ternary_deltanet_gpu_forward::{TernaryDeltanetGpuForward, DequantWteRowCubeCL};
-#[cfg(all(feature = "ternary_gemm_batched", feature = "ternary_gemm_simdgroup"))]
-pub use ternary_deltanet_gpu_forward::set_prefill_use_simdgroup;
 #[cfg(all(
     feature = "ternary_gemm_batched",
     feature = "metal_tensor_gemm",
     target_os = "macos"
 ))]
 pub use ternary_deltanet_gpu_forward::set_prefill_use_metal_tensor_zerocopy;
+#[cfg(all(feature = "ternary_gemm_batched", feature = "ternary_gemm_simdgroup"))]
+pub use ternary_deltanet_gpu_forward::set_prefill_use_simdgroup;
+#[cfg(all(feature = "cubecl_runtime", feature = "ternary_gemv"))]
+pub use ternary_deltanet_gpu_forward::{DequantWteRowCubeCL, TernaryDeltanetGpuForward};
 
 // The speculative-decode drafting family (Issue 665) — modelless CPU-side
 // draft models + the routing half, moved from the engine gpu crate (its
@@ -607,10 +612,7 @@ pub mod ternary_deltanet_gpu_forward_cudarc;
 pub mod prefill_cuda_full;
 
 // Tree-verify driver over the S4a tree-mask kernels.
-#[cfg(all(
-    feature = "speculative_tree_verify",
-    feature = "ternary_gemm_batched"
-))]
+#[cfg(all(feature = "speculative_tree_verify", feature = "ternary_gemm_batched"))]
 pub mod ternary_tree_verify_driver;
 
 // Hybrid layer dispatcher (deltanet_inference-gated internals).
@@ -652,10 +654,10 @@ pub use cudarc_kernels::{
 // The qwen38 dense cudarc forward family (Issue 742; CUDA-only).
 #[cfg(all(feature = "ternary_gemv_cuda_raw", not(target_os = "macos")))]
 pub mod qwen38_dense_cudarc;
-#[cfg(all(feature = "ternary_gemv_cuda_raw", not(target_os = "macos")))]
-pub mod qwen38_verify_mma;
-#[cfg(all(feature = "ternary_gemv_cuda_raw", not(target_os = "macos")))]
-pub mod qwen38_prefix_cache;
 pub mod qwen38_dflash2;
 #[cfg(all(feature = "ternary_gemv_cuda_raw", not(target_os = "macos")))]
 pub mod qwen38_dflash2_gpu;
+#[cfg(all(feature = "ternary_gemv_cuda_raw", not(target_os = "macos")))]
+pub mod qwen38_prefix_cache;
+#[cfg(all(feature = "ternary_gemv_cuda_raw", not(target_os = "macos")))]
+pub mod qwen38_verify_mma;

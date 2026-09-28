@@ -346,7 +346,6 @@ fn gemm_ternary_plane_rowtiled_batched(
                 output_batch[(q1 * m + r3) as usize] = o31;
             }
         }
-
     }
 }
 

@@ -57,7 +57,10 @@ use cubecl::server::Handle;
 // ternary_attention_batched_prefill)`; the module gate below already supplies
 // `cubecl_runtime`). Ungated, the fields + `buffer_bytes` read as dead on every
 // lane that compiles this module without that ladder (the riir-clippy consumer set).
-#[cfg(all(feature = "ternary_gemm_batched", feature = "ternary_attention_batched_prefill"))]
+#[cfg(all(
+    feature = "ternary_gemm_batched",
+    feature = "ternary_attention_batched_prefill"
+))]
 #[derive(Debug)]
 pub struct Q8PrefillScratch {
     // pub (not pub(crate)) — the one consumer (ternary_deltanet_gpu_forward,
@@ -72,7 +75,10 @@ pub struct Q8PrefillScratch {
     pub rows: usize,
 }
 
-#[cfg(all(feature = "ternary_gemm_batched", feature = "ternary_attention_batched_prefill"))]
+#[cfg(all(
+    feature = "ternary_gemm_batched",
+    feature = "ternary_attention_batched_prefill"
+))]
 impl Q8PrefillScratch {
     /// `(qs_bytes, scales_bytes)` per buffer at `(rows, n_kv, head_dim)`.
     pub fn buffer_bytes(rows: usize, n_kv: usize, head_dim: usize) -> (usize, usize) {
@@ -249,12 +255,7 @@ pub unsafe fn launch_kv_quantize_q8<R: Runtime>(
     const THREADS: u32 = 256;
 
     let n_blocks = head_dim / 32;
-    let params: [f32; 4] = [
-        head_dim as f32,
-        n_kv as f32,
-        n_blocks as f32,
-        n_rows as f32,
-    ];
+    let params: [f32; 4] = [head_dim as f32, n_kv as f32, n_blocks as f32, n_rows as f32];
     let params_handle = crate::params_cache::params_handle(client, f32::as_bytes(&params));
 
     let blocks_per_row = n_kv * n_blocks;
@@ -355,14 +356,46 @@ fn qwen_attention_prefill_tiled_q8_f32(
     let blk = lane >> 2u32;
     let wpair = (lane & 3u32) * 2u32;
 
-    let q0 = if active { query[q_off + dims_base] } else { f32::new(0.0f32) };
-    let q1 = if active { query[q_off + dims_base + 1usize] } else { f32::new(0.0f32) };
-    let q2 = if active { query[q_off + dims_base + 2usize] } else { f32::new(0.0f32) };
-    let q3 = if active { query[q_off + dims_base + 3usize] } else { f32::new(0.0f32) };
-    let q4 = if active { query[q_off + dims_base + 4usize] } else { f32::new(0.0f32) };
-    let q5 = if active { query[q_off + dims_base + 5usize] } else { f32::new(0.0f32) };
-    let q6 = if active { query[q_off + dims_base + 6usize] } else { f32::new(0.0f32) };
-    let q7 = if active { query[q_off + dims_base + 7usize] } else { f32::new(0.0f32) };
+    let q0 = if active {
+        query[q_off + dims_base]
+    } else {
+        f32::new(0.0f32)
+    };
+    let q1 = if active {
+        query[q_off + dims_base + 1usize]
+    } else {
+        f32::new(0.0f32)
+    };
+    let q2 = if active {
+        query[q_off + dims_base + 2usize]
+    } else {
+        f32::new(0.0f32)
+    };
+    let q3 = if active {
+        query[q_off + dims_base + 3usize]
+    } else {
+        f32::new(0.0f32)
+    };
+    let q4 = if active {
+        query[q_off + dims_base + 4usize]
+    } else {
+        f32::new(0.0f32)
+    };
+    let q5 = if active {
+        query[q_off + dims_base + 5usize]
+    } else {
+        f32::new(0.0f32)
+    };
+    let q6 = if active {
+        query[q_off + dims_base + 6usize]
+    } else {
+        f32::new(0.0f32)
+    };
+    let q7 = if active {
+        query[q_off + dims_base + 7usize]
+    } else {
+        f32::new(0.0f32)
+    };
 
     // Online softmax state, per lane (uniform across the plane after every
     // plane_sum broadcast).
@@ -400,8 +433,7 @@ fn qwen_attention_prefill_tiled_q8_f32(
         let k6 = q8_dequant_byte(kw1, 2u32, k_scale);
         let k7 = q8_dequant_byte(kw1, 3u32, k_scale);
 
-        let partial = q0 * k0 + q1 * k1 + q2 * k2 + q3 * k3
-            + q4 * k4 + q5 * k5 + q6 * k6 + q7 * k7;
+        let partial = q0 * k0 + q1 * k1 + q2 * k2 + q3 * k3 + q4 * k4 + q5 * k5 + q6 * k6 + q7 * k7;
         // Reduce + broadcast within this plane's 32 lanes (tree order — the
         // documented FP-equivalent-not-bit-identical class).
         let score = plane_sum(partial) * scale;
@@ -528,13 +560,17 @@ impl QwenAttentionPrefillTiledQ8CubeCL {
                 tiles as f32,
                 n_blocks as f32,
             ];
-            let params_handle =
-                crate::params_cache::params_handle(client, f32::as_bytes(&params));
+            let params_handle = crate::params_cache::params_handle(client, f32::as_bytes(&params));
             let q_len = tc * n_head * head_dim;
-            let q_slice = query_handle.clone().offset_start((t0 * n_head * head_dim * 4) as u64);
-            let g_slice = gate_handle.clone().offset_start((t0 * n_head * head_dim * 4) as u64);
-            let o_slice =
-                attn_out_handle.clone().offset_start((t0 * n_head * head_dim * 4) as u64);
+            let q_slice = query_handle
+                .clone()
+                .offset_start((t0 * n_head * head_dim * 4) as u64);
+            let g_slice = gate_handle
+                .clone()
+                .offset_start((t0 * n_head * head_dim * 4) as u64);
+            let o_slice = attn_out_handle
+                .clone()
+                .offset_start((t0 * n_head * head_dim * 4) as u64);
             let n_cubes = n_head * tiles;
             unsafe {
                 qwen_attention_prefill_tiled_q8_f32::launch_unchecked::<R>(

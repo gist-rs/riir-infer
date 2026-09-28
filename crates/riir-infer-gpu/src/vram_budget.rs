@@ -308,9 +308,8 @@ pub fn forward_activation_bytes(config: &Config, layer_types: &[DeltaNetLayerTyp
     total += 2 * q_dim_attn; // attn_qg
     total += 3 * q_dim_attn; // attn_q, attn_gate, attn_out
     total += 2 * kvd_attn; // attn_kv (Issue 648 F9 fused)
-    let attn_split_max = (config.block_size.div_ceil(config.head_dim) as u64).min(
-        crate::ternary_deltanet_gpu_forward::ATTN_SPLIT_DECODE_MAX_SPLITS_DEFAULT as u64,
-    );
+    let attn_split_max = (config.block_size.div_ceil(config.head_dim) as u64)
+        .min(crate::ternary_deltanet_gpu_forward::ATTN_SPLIT_DECODE_MAX_SPLITS_DEFAULT as u64);
     total += config.n_head as u64 * attn_split_max * (config.head_dim as u64 + 2);
 
     // Per-layer persistent state (DeltaNet layers).
@@ -331,8 +330,8 @@ pub fn forward_activation_bytes(config: &Config, layer_types: &[DeltaNetLayerTyp
     #[cfg(feature = "speculative_decode")]
     {
         total += n_gdn * (state_dim + conv_dim * kernel_size);
-        total +=
-            crate::ternary_deltanet_gpu_forward::TernaryDeltanetGpuForward::SPEC_MAX_K as u64 * vocab;
+        total += crate::ternary_deltanet_gpu_forward::TernaryDeltanetGpuForward::SPEC_MAX_K as u64
+            * vocab;
     }
 
     total * F32
@@ -504,11 +503,26 @@ mod ladder_tests {
         assert_eq!(
             rungs,
             vec![
-                PoolRung { page_size: 16 * MIB, max_slice_size: MIB },
-                PoolRung { page_size: 64 * MIB, max_slice_size: 8 * MIB },
-                PoolRung { page_size: 256 * MIB, max_slice_size: 64 * MIB },
-                PoolRung { page_size: 1024 * MIB, max_slice_size: 512 * MIB },
-                PoolRung { page_size: 4096 * MIB, max_slice_size: 4096 * MIB },
+                PoolRung {
+                    page_size: 16 * MIB,
+                    max_slice_size: MIB
+                },
+                PoolRung {
+                    page_size: 64 * MIB,
+                    max_slice_size: 8 * MIB
+                },
+                PoolRung {
+                    page_size: 256 * MIB,
+                    max_slice_size: 64 * MIB
+                },
+                PoolRung {
+                    page_size: 1024 * MIB,
+                    max_slice_size: 512 * MIB
+                },
+                PoolRung {
+                    page_size: 4096 * MIB,
+                    max_slice_size: 4096 * MIB
+                },
             ]
         );
     }
@@ -526,11 +540,26 @@ mod ladder_tests {
         assert_eq!(
             rungs,
             vec![
-                PoolRung { page_size: 24_721_408, max_slice_size: 1_545_088 },
-                PoolRung { page_size: 98_885_632, max_slice_size: 12_360_704 },
-                PoolRung { page_size: 395_542_528, max_slice_size: 98_885_632 },
-                PoolRung { page_size: 1_582_170_112, max_slice_size: 791_085_056 },
-                PoolRung { page_size: limit, max_slice_size: limit },
+                PoolRung {
+                    page_size: 24_721_408,
+                    max_slice_size: 1_545_088
+                },
+                PoolRung {
+                    page_size: 98_885_632,
+                    max_slice_size: 12_360_704
+                },
+                PoolRung {
+                    page_size: 395_542_528,
+                    max_slice_size: 98_885_632
+                },
+                PoolRung {
+                    page_size: 1_582_170_112,
+                    max_slice_size: 791_085_056
+                },
+                PoolRung {
+                    page_size: limit,
+                    max_slice_size: limit
+                },
             ]
         );
 
@@ -545,10 +574,15 @@ mod ladder_tests {
         // co-tenancy dropping across the corruption gap: 49,216 (clean) → 7
         // slices/page; 57,408 (device lost) → 6; 65,472 (silent corruption)
         // and 65,600 → 5.
-        for (block, expected_per_page) in [(49_216u64, 7u64), (57_408, 6), (65_472, 5), (65_600, 5)] {
+        for (block, expected_per_page) in [(49_216u64, 7u64), (57_408, 6), (65_472, 5), (65_600, 5)]
+        {
             let kv = block * 1024 * 4; // kvd 1024, f32
             assert_eq!(select_pool_rung(&rungs, kv), Some(3), "block {block}");
-            assert_eq!(slices_per_page(rungs[3], kv), expected_per_page, "block {block}");
+            assert_eq!(
+                slices_per_page(rungs[3], kv),
+                expected_per_page,
+                "block {block}"
+            );
         }
     }
 

@@ -36,7 +36,7 @@ use cubecl::server::Handle;
 use cudarc::driver::{CudaContext, CudaSlice, CudaStream};
 
 use crate::cubecl_runtime::ActiveRuntime;
-use crate::gemm_ternary_i8_mma_cuda_raw::{GemmI8MmaScratch, GemmI8MmaError, GemmTernaryI8MmaCuda};
+use crate::gemm_ternary_i8_mma_cuda_raw::{GemmI8MmaError, GemmI8MmaScratch, GemmTernaryI8MmaCuda};
 // FoldMode is consumed only by the `prefill_mmq_v2` q8 launch arms below;
 // cfg-matched so feature slices without the arm (e.g. riir-train's dllm
 // dependency slice) don't see an unused import.
@@ -49,8 +49,7 @@ use crate::gemv_ternary_cubecl::TernaryHandle;
 // ---------------------------------------------------------------------------
 
 #[cfg(all(feature = "cubecl_runtime", feature = "ternary_gemm_batched"))]
-static PREFILL_CUDA_MMA: std::sync::atomic::AtomicBool =
-    std::sync::atomic::AtomicBool::new(false);
+static PREFILL_CUDA_MMA: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
 #[cfg(all(feature = "cubecl_runtime", feature = "ternary_gemm_batched"))]
 pub fn prefill_use_cuda_mma() -> bool {
@@ -79,7 +78,8 @@ pub fn set_prefill_use_cuda_mma(on: bool) {
 fn trace_enabled() -> bool {
     static TRACE: OnceLock<bool> = OnceLock::new();
     *TRACE.get_or_init(|| {
-        std::env::var("RIIR_PREFILL_CUDA_MMA_TRACE").is_ok_and(|s| matches!(s.trim(), "1" | "true" | "on"))
+        std::env::var("RIIR_PREFILL_CUDA_MMA_TRACE")
+            .is_ok_and(|s| matches!(s.trim(), "1" | "true" | "on"))
     })
 }
 
@@ -131,7 +131,13 @@ pub(crate) fn pack_bitplanes_to_q2(pos: &[u32], neg: &[u32], m: usize, n: usize)
     // (pos_bit, neg_bit) -> Q2_0 code: (1,0)=2 (+1), (0,1)=0 (−1),
     // (0,0)=1 (0), (1,1)=1 (fold — the non-disjoint bit case decodes to 0
     // on the shipping path too).
-    let code = |p: u32, n: u32| -> u32 { match (p, n) { (1, 0) => 2, (0, 1) => 0, _ => 1 } };
+    let code = |p: u32, n: u32| -> u32 {
+        match (p, n) {
+            (1, 0) => 2,
+            (0, 1) => 0,
+            _ => 1,
+        }
+    };
     let wpr = n / 32;
     let packed_wpr = n / 16;
     let mut out = vec![0u32; m * packed_wpr];
@@ -180,9 +186,39 @@ pub fn launch_prefill_gemm_cached(
         && let Some(packed) = &cache.packed
     {
         return match crate::gemm_ternary_i8_mma_cuda_raw::mmq_fmt_mode() {
-            3 => mma.launch_gemm_q8_v10t(stream, packed, &cache.scale, scratch, out, m, n, p, FoldMode::Fused),
-            2 => mma.launch_gemm_q8_v9t(stream, packed, &cache.scale, scratch, out, m, n, p, FoldMode::Fused),
-            _ => mma.launch_gemm_q8_v8t(stream, packed, &cache.scale, scratch, out, m, n, p, FoldMode::Fused),
+            3 => mma.launch_gemm_q8_v10t(
+                stream,
+                packed,
+                &cache.scale,
+                scratch,
+                out,
+                m,
+                n,
+                p,
+                FoldMode::Fused,
+            ),
+            2 => mma.launch_gemm_q8_v9t(
+                stream,
+                packed,
+                &cache.scale,
+                scratch,
+                out,
+                m,
+                n,
+                p,
+                FoldMode::Fused,
+            ),
+            _ => mma.launch_gemm_q8_v8t(
+                stream,
+                packed,
+                &cache.scale,
+                scratch,
+                out,
+                m,
+                n,
+                p,
+                FoldMode::Fused,
+            ),
         };
     }
     let (Some(pos), Some(neg)) = (&cache.pos, &cache.neg) else {
@@ -223,20 +259,60 @@ pub fn launch_prefill_gemm_pair_cached(
     {
         return match crate::gemm_ternary_i8_mma_cuda_raw::mmq_gu_mode() {
             4 => mma.launch_gemm_q8_v11gq_pair(
-                stream, packed0, &cache0.scale, packed1, &cache1.scale, scratch, out0, out1, m,
-                n, p, FoldMode::Fused,
+                stream,
+                packed0,
+                &cache0.scale,
+                packed1,
+                &cache1.scale,
+                scratch,
+                out0,
+                out1,
+                m,
+                n,
+                p,
+                FoldMode::Fused,
             ),
             3 => mma.launch_gemm_q8_v11gs_pair(
-                stream, packed0, &cache0.scale, packed1, &cache1.scale, scratch, out0, out1, m,
-                n, p, FoldMode::Fused,
+                stream,
+                packed0,
+                &cache0.scale,
+                packed1,
+                &cache1.scale,
+                scratch,
+                out0,
+                out1,
+                m,
+                n,
+                p,
+                FoldMode::Fused,
             ),
             2 => mma.launch_gemm_q8_v11gut_pair(
-                stream, packed0, &cache0.scale, packed1, &cache1.scale, scratch, out0, out1, m,
-                n, p, FoldMode::Fused,
+                stream,
+                packed0,
+                &cache0.scale,
+                packed1,
+                &cache1.scale,
+                scratch,
+                out0,
+                out1,
+                m,
+                n,
+                p,
+                FoldMode::Fused,
             ),
             _ => mma.launch_gemm_q8_v11gu_pair(
-                stream, packed0, &cache0.scale, packed1, &cache1.scale, scratch, out0, out1, m,
-                n, p, FoldMode::Fused,
+                stream,
+                packed0,
+                &cache0.scale,
+                packed1,
+                &cache1.scale,
+                scratch,
+                out0,
+                out1,
+                m,
+                n,
+                p,
+                FoldMode::Fused,
             ),
         };
     }
@@ -339,9 +415,7 @@ fn stack() -> Option<Arc<Stack>> {
         .get_or_init(|| match build_stack() {
             Ok(s) => Some(Arc::new(s)),
             Err(e) => {
-                eprintln!(
-                    "[734-arm6] CUDA mma stack init failed ({e}) — prefill stays on CubeCL"
-                );
+                eprintln!("[734-arm6] CUDA mma stack init failed ({e}) — prefill stays on CubeCL");
                 None
             }
         })
@@ -392,18 +466,19 @@ pub fn dispatch(
     let t_read = std::time::Instant::now();
 
     // Weight mirror — lazy, once per handle (the Issue 727 H3 pattern).
-    let cache = w.cuda_mma_cache.get_or_init(|| {
-        match build_weight_cache(client, &stack.stream, w, true) {
-            Ok(c) => Some(Arc::new(c)),
-            Err(e) => {
-                eprintln!(
-                    "[734-arm6] weight mirror failed for m={m} n={n} ({e}) — \
+    let cache =
+        w.cuda_mma_cache.get_or_init(
+            || match build_weight_cache(client, &stack.stream, w, true) {
+                Ok(c) => Some(Arc::new(c)),
+                Err(e) => {
+                    eprintln!(
+                        "[734-arm6] weight mirror failed for m={m} n={n} ({e}) — \
                      this weight stays on CubeCL"
-                );
-                None
-            }
-        }
-    });
+                    );
+                    None
+                }
+            },
+        );
     let Some(cache) = cache else { return false };
 
     // 1) Read the input activations back to host (DMA; syncs CubeCL).
@@ -418,7 +493,9 @@ pub fn dispatch(
     let out_len = m * p;
     let words = p * (n / 4);
 
-    let Ok(mut bufs) = stack.bufs.lock() else { return false };
+    let Ok(mut bufs) = stack.bufs.lock() else {
+        return false;
+    };
 
     // 2) Grow-only staging (replace when too small; prefix views below).
     if bufs.in_dev.as_ref().is_none_or(|s| s.len() < in_len) {
@@ -453,16 +530,24 @@ pub fn dispatch(
         out_host,
         scratch,
     } = &mut *bufs;
-    let Some(in_dev) = in_dev.as_mut() else { return false };
-    let Some(out_dev) = out_dev.as_mut() else { return false };
-    let Some((_, _, scratch)) = scratch.as_mut() else { return false };
+    let Some(in_dev) = in_dev.as_mut() else {
+        return false;
+    };
+    let Some(out_dev) = out_dev.as_mut() else {
+        return false;
+    };
+    let Some((_, _, scratch)) = scratch.as_mut() else {
+        return false;
+    };
 
     // 3) Upload the activations into the input staging prefix (scoped view:
     //    the mutable borrow ends with the block, re-freeing `in_dev` for the
     //    quantize launch).
     let t_up = std::time::Instant::now();
     {
-        let Some(mut in_view) = in_dev.try_slice_mut(0..in_len) else { return false };
+        let Some(mut in_view) = in_dev.try_slice_mut(0..in_len) else {
+            return false;
+        };
         if stack.stream.memcpy_htod(input_f32, &mut in_view).is_err() {
             return false;
         }
@@ -500,7 +585,9 @@ pub fn dispatch(
     // 5) Read back the exact output prefix (memcpy_dtoh copies the whole
     //    bound range — the view keeps it at p*m).
     let t_down = std::time::Instant::now();
-    let Some(out_view) = out_dev.try_slice(0..out_len) else { return false };
+    let Some(out_view) = out_dev.try_slice(0..out_len) else {
+        return false;
+    };
     if stack
         .stream
         .memcpy_dtoh(&out_view, &mut out_host[..out_len])
@@ -592,28 +679,13 @@ mod fmt_rung_tests {
         let packed = pack_bitplanes_to_q2(&vec![0u32; m * wpr], &vec![0u32; m * wpr], m, n);
         assert!(packed.iter().all(|&w| w == 0x5555_5555), "all codes 01");
         // All-neg -> every code = 0 (-1).
-        let packed = pack_bitplanes_to_q2(
-            &vec![0u32; m * wpr],
-            &vec![u32::MAX; m * wpr],
-            m,
-            n,
-        );
+        let packed = pack_bitplanes_to_q2(&vec![0u32; m * wpr], &vec![u32::MAX; m * wpr], m, n);
         assert!(packed.iter().all(|&w| w == 0), "all codes 00");
         // All-pos -> every code = 2 (+1).
-        let packed = pack_bitplanes_to_q2(
-            &vec![u32::MAX; m * wpr],
-            &vec![0u32; m * wpr],
-            m,
-            n,
-        );
+        let packed = pack_bitplanes_to_q2(&vec![u32::MAX; m * wpr], &vec![0u32; m * wpr], m, n);
         assert!(packed.iter().all(|&w| w == 0xAAAA_AAAA), "all codes 10");
         // Fully non-disjoint ((1,1) everywhere) -> every code = 1 (the fold).
-        let packed = pack_bitplanes_to_q2(
-            &vec![u32::MAX; m * wpr],
-            &vec![u32::MAX; m * wpr],
-            m,
-            n,
-        );
+        let packed = pack_bitplanes_to_q2(&vec![u32::MAX; m * wpr], &vec![u32::MAX; m * wpr], m, n);
         assert!(packed.iter().all(|&w| w == 0x5555_5555));
         // And the decode reference agrees on the folded fixture.
         for row in 0..m {
@@ -675,7 +747,8 @@ mod fmt_rung_tests {
             for ks in 0..4usize {
                 for t in 0..4u32 {
                     let pw = ((grp * 7 + ks * 13 + t as usize) as u32).wrapping_mul(0x9E37_79B9);
-                    let nw = ((grp * 5 + ks * 3 + t as usize * 17) as u32).wrapping_mul(0xBF58_476D);
+                    let nw =
+                        ((grp * 5 + ks * 3 + t as usize * 17) as u32).wrapping_mul(0xBF58_476D);
                     // The bitplane SWAR reference (v7's exact decode).
                     let tp0 = (pw >> (t * 4)) & 0xF;
                     let tn0 = (nw >> (t * 4)) & 0xF;
@@ -701,8 +774,12 @@ mod fmt_rung_tests {
         // bridge's own decode table) must agree bit-for-bit.
         let (m, n) = (1usize, 512usize);
         let wpr = n / 32;
-        let pos_bits: Vec<u32> = (0..wpr).map(|i| (i as u32).wrapping_mul(0x1234_5679)).collect();
-        let neg_bits: Vec<u32> = (0..wpr).map(|i| (i as u32).wrapping_mul(0x9ABC_DEF1)).collect();
+        let pos_bits: Vec<u32> = (0..wpr)
+            .map(|i| (i as u32).wrapping_mul(0x1234_5679))
+            .collect();
+        let neg_bits: Vec<u32> = (0..wpr)
+            .map(|i| (i as u32).wrapping_mul(0x9ABC_DEF1))
+            .collect();
         let packed = pack_bitplanes_to_q2(&pos_bits, &neg_bits, m, n);
         for k in 0..n {
             let code = (packed[k / 16] >> (2 * (k % 16))) & 0x3;
@@ -710,7 +787,14 @@ mod fmt_rung_tests {
             let ng = (neg_bits[k / 32] >> (k % 32)) & 1;
             // repack_q2_0_to_ternary_group's table: 0 -> neg, 2 -> pos,
             // 1 -> neither. (3 rejected — see pack_bitplanes_to_q2's doc.)
-            assert_eq!(code, match (p, ng) { (1, 0) => 2, (0, 1) => 0, _ => 1 });
+            assert_eq!(
+                code,
+                match (p, ng) {
+                    (1, 0) => 2,
+                    (0, 1) => 0,
+                    _ => 1,
+                }
+            );
         }
     }
 }

@@ -41,8 +41,10 @@
 
 use std::sync::Arc;
 
-use cudarc::driver::safe::{CudaContext, CudaFunction, CudaModule, CudaSlice, CudaStream, LaunchConfig};
 use cudarc::driver::PushKernelArg;
+use cudarc::driver::safe::{
+    CudaContext, CudaFunction, CudaModule, CudaSlice, CudaStream, LaunchConfig,
+};
 use riir_infer_core::deltanet::rotation::TernaryRotationConfig;
 
 use crate::cudarc_kernels::CudarcKernelError;
@@ -1295,7 +1297,10 @@ impl RotationKernels {
         n: usize,
         block_size: usize,
     ) -> Result<(), CudarcKernelError> {
-        assert!(block_size <= MAX_FWHT_BLOCK, "FWHT block {block_size} exceeds the {MAX_FWHT_BLOCK}-element shared-mem kernel");
+        assert!(
+            block_size <= MAX_FWHT_BLOCK,
+            "FWHT block {block_size} exceeds the {MAX_FWHT_BLOCK}-element shared-mem kernel"
+        );
         assert_eq!(x.len(), n, "rotation width must match the slice");
         let n_i = n as i32;
         let bs_i = block_size as i32;
@@ -1445,8 +1450,15 @@ impl RotationKernels {
         rows: usize,
         cols: usize,
     ) -> Result<(), CudarcKernelError> {
-        assert!(cols <= MAX_FWHT_BLOCK * MAX_FWHT_BLOCK, "dense GEMV row stride must fit size_t-checked addressing");
-        assert_eq!(w.len(), rows * cols, "dense weight extent must be rows*cols");
+        assert!(
+            cols <= MAX_FWHT_BLOCK * MAX_FWHT_BLOCK,
+            "dense GEMV row stride must fit size_t-checked addressing"
+        );
+        assert_eq!(
+            w.len(),
+            rows * cols,
+            "dense weight extent must be rows*cols"
+        );
         let cols_i = cols as i32;
         unsafe {
             stream
@@ -1458,7 +1470,8 @@ impl RotationKernels {
                 .launch(LaunchConfig {
                     grid_dim: (rows as u32, 1, 1),
                     block_dim: (GEMV_DENSE_THREADS, 1, 1),
-                    shared_mem_bytes: (GEMV_DENSE_THREADS as usize * std::mem::size_of::<f32>()) as u32,
+                    shared_mem_bytes: (GEMV_DENSE_THREADS as usize * std::mem::size_of::<f32>())
+                        as u32,
                 })
                 .map_err(|e| CudarcKernelError::Launch(e.to_string()))?;
         }
@@ -1873,7 +1886,10 @@ impl RotationKernels {
             n.is_multiple_of(block_size) && block_size <= MAX_FWHT_BLOCK,
             "qrot geometry: width {n} vs hblock {block_size}"
         );
-        assert!(n <= MAX_QROT_ROW, "qrot row {n} exceeds the smem budget (max {MAX_QROT_ROW})");
+        assert!(
+            n <= MAX_QROT_ROW,
+            "qrot row {n} exceeds the smem budget (max {MAX_QROT_ROW})"
+        );
         assert_eq!(input.len(), p * n, "qrot input shape");
         let n_i = n as i32;
         let hb_i = block_size as i32;
@@ -1933,9 +1949,9 @@ impl RotationKernels {
     }
 
     /// The GDN-out variant: PERMUTE (tiled→grouped V-heads) + rotate +
-        /// quantize in ONE pass — replaces the unfused permute + rotate +
-        /// quantize chain at the `out_proj` input site (byte-identical to
-        /// it; `hd`/`n_k` = the config's head_dim / `gdn_k_groups`).
+    /// quantize in ONE pass — replaces the unfused permute + rotate +
+    /// quantize chain at the `out_proj` input site (byte-identical to
+    /// it; `hd`/`n_k` = the config's head_dim / `gdn_k_groups`).
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn quantize_permute_rotate_q8(
         &self,
@@ -1954,12 +1970,18 @@ impl RotationKernels {
             n.is_multiple_of(block_size) && block_size <= MAX_FWHT_BLOCK,
             "qrot-permute geometry: width {n} vs hblock {block_size}"
         );
-        assert!(n <= MAX_QROT_ROW, "qrot row {n} exceeds the smem budget (max {MAX_QROT_ROW})");
+        assert!(
+            n <= MAX_QROT_ROW,
+            "qrot row {n} exceeds the smem budget (max {MAX_QROT_ROW})"
+        );
         assert!(
             n_k > 0 && n.is_multiple_of(head_dim) && (n / head_dim).is_multiple_of(n_k),
             "qrot-permute geometry: n {n}, hd {head_dim}, n_k {n_k}"
         );
-        assert!(n <= MAX_QROT_ROW, "qrot row {n} exceeds the smem budget (max {MAX_QROT_ROW})");
+        assert!(
+            n <= MAX_QROT_ROW,
+            "qrot row {n} exceeds the smem budget (max {MAX_QROT_ROW})"
+        );
         assert_eq!(input.len(), p * n, "qrot-permute input shape");
         let n_i = n as i32;
         let hb_i = block_size as i32;
@@ -2128,7 +2150,10 @@ impl RotationKernels {
         rows: usize,
         n: usize,
     ) -> Result<(), CudarcKernelError> {
-        assert!(rows <= 48, "dense ab GEMM tile supports rows <= 48 (got {rows})");
+        assert!(
+            rows <= 48,
+            "dense ab GEMM tile supports rows <= 48 (got {rows})"
+        );
         assert_eq!(wa.len(), rows * n);
         assert_eq!(wb.len(), rows * n);
         assert_eq!(x.len(), p * n);
@@ -2220,8 +2245,7 @@ impl RotationTables {
     /// hold at `dim` (the split path stays the fallback otherwise; Bonsai-2's
     /// 1024-block geometry always takes the fused path).
     pub(crate) fn fused_geometry_ok(&self, dim: usize) -> bool {
-        dim.is_multiple_of(self.block_size)
-            && (16..=MAX_FWHT_BLOCK).contains(&self.block_size)
+        dim.is_multiple_of(self.block_size) && (16..=MAX_FWHT_BLOCK).contains(&self.block_size)
     }
 
     /// The K3 (GDN output chain) guard — additionally requires the Hadamard
@@ -2266,7 +2290,15 @@ mod tests {
 
     fn signs_vec(n: usize, seed: u64) -> Vec<f32> {
         let mut lcg = Lcg(seed);
-        (0..n).map(|_| if lcg.next_f32(-1.0, 1.0) >= 0.0 { 1.0 } else { -1.0 }).collect()
+        (0..n)
+            .map(|_| {
+                if lcg.next_f32(-1.0, 1.0) >= 0.0 {
+                    1.0
+                } else {
+                    -1.0
+                }
+            })
+            .collect()
     }
 
     /// K1 — fused rmsnorm+sign+FWHT+quantize must be byte-identical to the
@@ -2298,10 +2330,13 @@ mod tests {
             let signs_a = stream.clone_htod(&signs).unwrap();
             let ref_i8 = stream.alloc_zeros::<i8>(dim).unwrap();
             let ref_as = stream.alloc_zeros::<f32>(ablocks).unwrap();
-            ew.launch_rmsnorm(&stream, &x_a, &gamma_a, &norm_x, dim, EPS).unwrap();
+            ew.launch_rmsnorm(&stream, &x_a, &gamma_a, &norm_x, dim, EPS)
+                .unwrap();
             stream.memcpy_dtod(&norm_x, &mut scratch).unwrap();
-            rot.fwht_rotate_forward(&stream, &scratch, &signs_a, dim, hblock).unwrap();
-            ew.launch_quantize(&stream, &scratch, &ref_i8, &ref_as, dim).unwrap();
+            rot.fwht_rotate_forward(&stream, &scratch, &signs_a, dim, hblock)
+                .unwrap();
+            ew.launch_quantize(&stream, &scratch, &ref_i8, &ref_as, dim)
+                .unwrap();
 
             // Fused.
             let x_b = stream.clone_htod(&x).unwrap();
@@ -2324,10 +2359,19 @@ mod tests {
             stream.memcpy_dtoh(&ref_as, &mut a_as).unwrap();
             stream.memcpy_dtoh(&fus_as, &mut b_as).unwrap();
             let i8_mm = a_i8.iter().zip(&b_i8).filter(|(p, q)| p != q).count();
-            let as_mm = a_as.iter().zip(&b_as).filter(|(p, q)| p.to_bits() != q.to_bits()).count();
-            eprintln!("[k1] dim={dim} hblock={hblock}: {i8_mm} i8 mismatches, {as_mm} ascale bit mismatches");
+            let as_mm = a_as
+                .iter()
+                .zip(&b_as)
+                .filter(|(p, q)| p.to_bits() != q.to_bits())
+                .count();
+            eprintln!(
+                "[k1] dim={dim} hblock={hblock}: {i8_mm} i8 mismatches, {as_mm} ascale bit mismatches"
+            );
             assert_eq!(i8_mm, 0, "dim {dim} hblock {hblock}: fused K1 i8 differs");
-            assert_eq!(as_mm, 0, "dim {dim} hblock {hblock}: fused K1 ascale differs");
+            assert_eq!(
+                as_mm, 0,
+                "dim {dim} hblock {hblock}: fused K1 ascale differs"
+            );
         }
     }
 
@@ -2366,12 +2410,17 @@ mod tests {
         let ref_as = stream.alloc_zeros::<f32>(ablocks).unwrap();
         let ref_a = stream.alloc_zeros::<f32>(rows).unwrap();
         let ref_b = stream.alloc_zeros::<f32>(rows).unwrap();
-        ew.launch_rmsnorm(&stream, &x_a, &gamma_a, &norm_x, dim, EPS).unwrap();
+        ew.launch_rmsnorm(&stream, &x_a, &gamma_a, &norm_x, dim, EPS)
+            .unwrap();
         stream.memcpy_dtod(&norm_x, &mut scratch).unwrap();
-        rot.fwht_rotate_forward(&stream, &scratch, &signs_a, dim, hblock).unwrap();
-        ew.launch_quantize(&stream, &scratch, &ref_i8, &ref_as, dim).unwrap();
-        rot.gemv_dense(&stream, &wa_d, &norm_x, &ref_a, rows, dim).unwrap();
-        rot.gemv_dense(&stream, &wb_d, &norm_x, &ref_b, rows, dim).unwrap();
+        rot.fwht_rotate_forward(&stream, &scratch, &signs_a, dim, hblock)
+            .unwrap();
+        ew.launch_quantize(&stream, &scratch, &ref_i8, &ref_as, dim)
+            .unwrap();
+        rot.gemv_dense(&stream, &wa_d, &norm_x, &ref_a, rows, dim)
+            .unwrap();
+        rot.gemv_dense(&stream, &wb_d, &norm_x, &ref_b, rows, dim)
+            .unwrap();
 
         // Fused.
         let x_b = stream.clone_htod(&x).unwrap();
@@ -2382,8 +2431,8 @@ mod tests {
         let fus_a = stream.alloc_zeros::<f32>(rows).unwrap();
         let fus_b = stream.alloc_zeros::<f32>(rows).unwrap();
         rot.gdn_input_fused(
-            &stream, &x_b, &gamma_b, &signs_b, &wa_d, &wb_d,
-            &fus_a, &fus_b, rows, &fus_i8, &fus_as, dim, EPS, hblock,
+            &stream, &x_b, &gamma_b, &signs_b, &wa_d, &wb_d, &fus_a, &fus_b, rows, &fus_i8,
+            &fus_as, dim, EPS, hblock,
         )
         .unwrap();
         stream.synchronize().unwrap();
@@ -2405,11 +2454,27 @@ mod tests {
         stream.memcpy_dtoh(&fus_a, &mut f_a).unwrap();
         stream.memcpy_dtoh(&fus_b, &mut f_b).unwrap();
         let i8_mm = a_i8.iter().zip(&b_i8).filter(|(p, q)| p != q).count();
-        let as_mm = a_as.iter().zip(&b_as).filter(|(p, q)| p.to_bits() != q.to_bits()).count();
-        let a_mm = a_raw.iter().zip(&f_a).filter(|(p, q)| p.to_bits() != q.to_bits()).count();
-        let b_mm = b_raw.iter().zip(&f_b).filter(|(p, q)| p.to_bits() != q.to_bits()).count();
+        let as_mm = a_as
+            .iter()
+            .zip(&b_as)
+            .filter(|(p, q)| p.to_bits() != q.to_bits())
+            .count();
+        let a_mm = a_raw
+            .iter()
+            .zip(&f_a)
+            .filter(|(p, q)| p.to_bits() != q.to_bits())
+            .count();
+        let b_mm = b_raw
+            .iter()
+            .zip(&f_b)
+            .filter(|(p, q)| p.to_bits() != q.to_bits())
+            .count();
         eprintln!("[k2] dim={dim}: {i8_mm} i8, {as_mm} ascale, {a_mm}+{b_mm} a/b bit mismatches");
-        assert_eq!(i8_mm + as_mm + a_mm + b_mm, 0, "fused K2 differs from the split GDN input");
+        assert_eq!(
+            i8_mm + as_mm + a_mm + b_mm,
+            0,
+            "fused K2 differs from the split GDN input"
+        );
     }
 
     /// K3 — the fused GDN output chain must be byte-identical to the split
@@ -2450,12 +2515,16 @@ mod tests {
             let mut ptmp = stream.alloc_zeros::<f32>(v_dim).unwrap();
             let ref_i8 = stream.alloc_zeros::<i8>(v_dim).unwrap();
             let ref_as = stream.alloc_zeros::<f32>(ablocks).unwrap();
-            at.launch_rmsnorm_batched(&stream, &x_a, &gamma_a, &x_a, n_heads, head_dim, EPS).unwrap();
+            at.launch_rmsnorm_batched(&stream, &x_a, &gamma_a, &x_a, n_heads, head_dim, EPS)
+                .unwrap();
             rot.gate_silu(&stream, &x_a, &z_a, v_dim).unwrap();
             stream.memcpy_dtod(&x_a, &mut ptmp).unwrap();
-            rot.gdn_v_permute(&stream, &ptmp, &x_a, v_dim, n_heads, n_k).unwrap();
-            rot.fwht_rotate_forward(&stream, &x_a, &signs_a, v_dim, hblock).unwrap();
-            ew.launch_quantize(&stream, &x_a, &ref_i8, &ref_as, v_dim).unwrap();
+            rot.gdn_v_permute(&stream, &ptmp, &x_a, v_dim, n_heads, n_k)
+                .unwrap();
+            rot.fwht_rotate_forward(&stream, &x_a, &signs_a, v_dim, hblock)
+                .unwrap();
+            ew.launch_quantize(&stream, &x_a, &ref_i8, &ref_as, v_dim)
+                .unwrap();
 
             // Fused.
             let x_b = stream.clone_htod(&x).unwrap();
@@ -2465,8 +2534,8 @@ mod tests {
             let fus_i8 = stream.alloc_zeros::<i8>(v_dim).unwrap();
             let fus_as = stream.alloc_zeros::<f32>(ablocks).unwrap();
             rot.gdn_out_fused(
-                &stream, &x_b, &z_b, &gamma_b, &signs_b, &fus_i8, &fus_as,
-                v_dim, head_dim, n_k, rep, EPS, hblock,
+                &stream, &x_b, &z_b, &gamma_b, &signs_b, &fus_i8, &fus_as, v_dim, head_dim, n_k,
+                rep, EPS, hblock,
             )
             .unwrap();
             stream.synchronize().unwrap();
@@ -2480,9 +2549,19 @@ mod tests {
             stream.memcpy_dtoh(&ref_as, &mut a_as).unwrap();
             stream.memcpy_dtoh(&fus_as, &mut b_as).unwrap();
             let i8_mm = a_i8.iter().zip(&b_i8).filter(|(p, q)| p != q).count();
-            let as_mm = a_as.iter().zip(&b_as).filter(|(p, q)| p.to_bits() != q.to_bits()).count();
-            eprintln!("[k3] heads={n_heads} nk={n_k} rep={rep}: {i8_mm} i8, {as_mm} ascale bit mismatches");
-            assert_eq!(i8_mm + as_mm, 0, "fused K3 differs from the split GDN output chain");
+            let as_mm = a_as
+                .iter()
+                .zip(&b_as)
+                .filter(|(p, q)| p.to_bits() != q.to_bits())
+                .count();
+            eprintln!(
+                "[k3] heads={n_heads} nk={n_k} rep={rep}: {i8_mm} i8, {as_mm} ascale bit mismatches"
+            );
+            assert_eq!(
+                i8_mm + as_mm,
+                0,
+                "fused K3 differs from the split GDN output chain"
+            );
         }
     }
 
@@ -2510,8 +2589,10 @@ mod tests {
         let ref_i8 = stream.alloc_zeros::<i8>(dim).unwrap();
         let ref_as = stream.alloc_zeros::<f32>(ablocks).unwrap();
         rot.gate_sigmoid(&stream, &x_a, &g_a, dim).unwrap();
-        rot.fwht_rotate_forward(&stream, &x_a, &signs_a, dim, hblock).unwrap();
-        ew.launch_quantize(&stream, &x_a, &ref_i8, &ref_as, dim).unwrap();
+        rot.fwht_rotate_forward(&stream, &x_a, &signs_a, dim, hblock)
+            .unwrap();
+        ew.launch_quantize(&stream, &x_a, &ref_i8, &ref_as, dim)
+            .unwrap();
 
         let x_b = stream.clone_htod(&x).unwrap();
         let g_b = stream.clone_htod(&gate).unwrap();
@@ -2533,9 +2614,17 @@ mod tests {
         stream.memcpy_dtoh(&ref_as, &mut a_as).unwrap();
         stream.memcpy_dtoh(&fus_as, &mut b_as).unwrap();
         let i8_mm = a_i8.iter().zip(&b_i8).filter(|(p, q)| p != q).count();
-        let as_mm = a_as.iter().zip(&b_as).filter(|(p, q)| p.to_bits() != q.to_bits()).count();
+        let as_mm = a_as
+            .iter()
+            .zip(&b_as)
+            .filter(|(p, q)| p.to_bits() != q.to_bits())
+            .count();
         eprintln!("[k4] dim={dim}: {i8_mm} i8, {as_mm} ascale bit mismatches");
-        assert_eq!(i8_mm + as_mm, 0, "fused K4 differs from the split attention-out path");
+        assert_eq!(
+            i8_mm + as_mm,
+            0,
+            "fused K4 differs from the split attention-out path"
+        );
     }
 
     /// K5 — fused SwiGLU+sign+FWHT+quantize vs the split path, at the real
@@ -2564,18 +2653,18 @@ mod tests {
         let ref_i8 = stream.alloc_zeros::<i8>(dim).unwrap();
         let ref_as = stream.alloc_zeros::<f32>(ablocks).unwrap();
         ew.launch_swiglu(&stream, &g_a, &u_a, &hid, dim).unwrap();
-        rot.fwht_rotate_forward(&stream, &hid, &signs_a, dim, hblock).unwrap();
-        ew.launch_quantize(&stream, &hid, &ref_i8, &ref_as, dim).unwrap();
+        rot.fwht_rotate_forward(&stream, &hid, &signs_a, dim, hblock)
+            .unwrap();
+        ew.launch_quantize(&stream, &hid, &ref_i8, &ref_as, dim)
+            .unwrap();
 
         let g_b = stream.clone_htod(&gate).unwrap();
         let u_b = stream.clone_htod(&up).unwrap();
         let signs_b = stream.clone_htod(&signs).unwrap();
         let fus_i8 = stream.alloc_zeros::<i8>(dim).unwrap();
         let fus_as = stream.alloc_zeros::<f32>(ablocks).unwrap();
-        rot.swiglu_rotate_quantize(
-            &stream, &g_b, &u_b, &signs_b, &fus_i8, &fus_as, dim, hblock,
-        )
-        .unwrap();
+        rot.swiglu_rotate_quantize(&stream, &g_b, &u_b, &signs_b, &fus_i8, &fus_as, dim, hblock)
+            .unwrap();
         stream.synchronize().unwrap();
 
         let mut a_i8 = vec![0i8; dim];
@@ -2587,9 +2676,17 @@ mod tests {
         stream.memcpy_dtoh(&ref_as, &mut a_as).unwrap();
         stream.memcpy_dtoh(&fus_as, &mut b_as).unwrap();
         let i8_mm = a_i8.iter().zip(&b_i8).filter(|(p, q)| p != q).count();
-        let as_mm = a_as.iter().zip(&b_as).filter(|(p, q)| p.to_bits() != q.to_bits()).count();
+        let as_mm = a_as
+            .iter()
+            .zip(&b_as)
+            .filter(|(p, q)| p.to_bits() != q.to_bits())
+            .count();
         eprintln!("[k5] dim={dim}: {i8_mm} i8, {as_mm} ascale bit mismatches");
-        assert_eq!(i8_mm + as_mm, 0, "fused K5 differs from the split FFN-down path");
+        assert_eq!(
+            i8_mm + as_mm,
+            0,
+            "fused K5 differs from the split FFN-down path"
+        );
     }
 
     /// Batched fwht forward/inverse — byte-identical to the single-row
@@ -2614,7 +2711,8 @@ mod tests {
         let mut ref_fwd = Vec::with_capacity(p * width);
         for r in 0..p {
             let row_dev = stream.clone_htod(&x[r * width..(r + 1) * width]).unwrap();
-            rot.fwht_rotate_forward(&stream, &row_dev, &signs_a, width, hblock).unwrap();
+            rot.fwht_rotate_forward(&stream, &row_dev, &signs_a, width, hblock)
+                .unwrap();
             let mut row = vec![0f32; width];
             stream.memcpy_dtoh(&row_dev, &mut row).unwrap();
             ref_fwd.extend_from_slice(&row);
@@ -2622,25 +2720,36 @@ mod tests {
 
         // Fused batched.
         let x_b = stream.clone_htod(&x).unwrap();
-        rot.fwht_rotate_forward_batched(&stream, &x_b, &signs_a, p, width, hblock).unwrap();
+        rot.fwht_rotate_forward_batched(&stream, &x_b, &signs_a, p, width, hblock)
+            .unwrap();
         let mut got_fwd = vec![0f32; p * width];
         stream.memcpy_dtoh(&x_b, &mut got_fwd).unwrap();
-        let fwd_mm = ref_fwd.iter().zip(&got_fwd).filter(|(a, b)| a.to_bits() != b.to_bits()).count();
+        let fwd_mm = ref_fwd
+            .iter()
+            .zip(&got_fwd)
+            .filter(|(a, b)| a.to_bits() != b.to_bits())
+            .count();
 
         // Inverse: reference = inverse applied per row to the ORIGINAL x.
         let mut inv_rows = Vec::with_capacity(p * width);
         for r in 0..p {
             let row_dev = stream.clone_htod(&x[r * width..(r + 1) * width]).unwrap();
-            rot.fwht_rotate_inverse(&stream, &row_dev, &signs_a, width, hblock).unwrap();
+            rot.fwht_rotate_inverse(&stream, &row_dev, &signs_a, width, hblock)
+                .unwrap();
             let mut row = vec![0f32; width];
             stream.memcpy_dtoh(&row_dev, &mut row).unwrap();
             inv_rows.extend_from_slice(&row);
         }
         let x_d = stream.clone_htod(&x).unwrap();
-        rot.fwht_rotate_inverse_batched(&stream, &x_d, &signs_a, p, width, hblock).unwrap();
+        rot.fwht_rotate_inverse_batched(&stream, &x_d, &signs_a, p, width, hblock)
+            .unwrap();
         let mut got_inv = vec![0f32; p * width];
         stream.memcpy_dtoh(&x_d, &mut got_inv).unwrap();
-        let inv_mm = inv_rows.iter().zip(&got_inv).filter(|(a, b)| a.to_bits() != b.to_bits()).count();
+        let inv_mm = inv_rows
+            .iter()
+            .zip(&got_inv)
+            .filter(|(a, b)| a.to_bits() != b.to_bits())
+            .count();
 
         eprintln!("[batched_fwht] p={p} w={width}: fwd {fwd_mm}, inv {inv_mm} bit mismatches");
         assert_eq!(fwd_mm + inv_mm, 0, "batched fwht differs from per-row");
@@ -2667,7 +2776,8 @@ mod tests {
             let row = &x[r * v_dim..(r + 1) * v_dim];
             let slice = stream.clone_htod(row).unwrap();
             let tmp = stream.clone_htod(row).unwrap();
-            rot.gdn_v_permute(&stream, &tmp, &slice, v_dim, v_dim / hd, n_k).unwrap();
+            rot.gdn_v_permute(&stream, &tmp, &slice, v_dim, v_dim / hd, n_k)
+                .unwrap();
             let mut out = vec![0f32; v_dim];
             stream.memcpy_dtoh(&slice, &mut out).unwrap();
             ref_rows.extend_from_slice(&out);
@@ -2676,10 +2786,15 @@ mod tests {
         // Batched.
         let x_b = stream.clone_htod(&x).unwrap();
         let tmp_b = stream.clone_htod(&x).unwrap();
-        rot.gdn_v_permute_batched(&stream, &tmp_b, &x_b, p, v_dim, hd, n_k).unwrap();
+        rot.gdn_v_permute_batched(&stream, &tmp_b, &x_b, p, v_dim, hd, n_k)
+            .unwrap();
         let mut got = vec![0f32; p * v_dim];
         stream.memcpy_dtoh(&x_b, &mut got).unwrap();
-        let mm = ref_rows.iter().zip(&got).filter(|(a, b)| a.to_bits() != b.to_bits()).count();
+        let mm = ref_rows
+            .iter()
+            .zip(&got)
+            .filter(|(a, b)| a.to_bits() != b.to_bits())
+            .count();
         eprintln!("[batched_permute] p={p}: {mm} bit mismatches");
         assert_eq!(mm, 0, "batched permute differs from per-row");
     }
@@ -2734,20 +2849,29 @@ mod tests {
                     worst_rel = worst_rel.max(diff / abs_sum.max(1e-12));
                 }
             }
-            eprintln!("[batched_gemm:{name}] worst abs {worst_abs:.3e}, cond-scaled {worst_rel:.3e}");
+            eprintln!(
+                "[batched_gemm:{name}] worst abs {worst_abs:.3e}, cond-scaled {worst_rel:.3e}"
+            );
             worst_rel
         };
         let ea = check(&got_a, &wa, "a");
         let eb = check(&got_b, &wb, "b");
         eprintln!("[batched_gemm] p={p} rows={rows} n={n}: cond-scaled err a={ea:.3e} b={eb:.3e}");
-        assert!(ea < 1e-4 && eb < 1e-4, "dense ab GEMM outside fp32 tolerance: {ea:.3e}/{eb:.3e}");
+        assert!(
+            ea < 1e-4 && eb < 1e-4,
+            "dense ab GEMM outside fp32 tolerance: {ea:.3e}/{eb:.3e}"
+        );
 
         // Determinism: a second run must be bit-identical (the pin property).
         rot.gemm_dense_ab_batched(&stream, &x_d, &wa_d, &wb_d, &out_a, &out_b, p, rows, n)
             .unwrap();
         let mut again_a = vec![0f32; p * rows];
         stream.memcpy_dtoh(&out_a, &mut again_a).unwrap();
-        let dmm = got_a.iter().zip(&again_a).filter(|(a, b)| a.to_bits() != b.to_bits()).count();
+        let dmm = got_a
+            .iter()
+            .zip(&again_a)
+            .filter(|(a, b)| a.to_bits() != b.to_bits())
+            .count();
         assert_eq!(dmm, 0, "dense ab GEMM nondeterministic");
     }
 
@@ -2767,7 +2891,9 @@ mod tests {
         let (rows, width, block) = (130usize, 4096usize, 1024usize);
         let mut lcg = Lcg(0xC0FFEE5);
         let src: Vec<f32> = (0..rows * width).map(|_| lcg.next_f32(-1.0, 1.0)).collect();
-        let signs: Vec<f32> = (0..width).map(|i| if i % 3 == 0 { -1.0f32 } else { 1.0f32 }).collect();
+        let signs: Vec<f32> = (0..width)
+            .map(|i| if i % 3 == 0 { -1.0f32 } else { 1.0f32 })
+            .collect();
 
         let src_d = stream.clone_htod(&src).unwrap();
         let signs_d = stream.clone_htod(&signs).unwrap();
@@ -2790,12 +2916,21 @@ mod tests {
             .zip(&got_dst)
             .filter(|(a, b)| a.to_bits() != b.to_bits())
             .count();
-        assert_eq!(diff, 0, "copy-rotate differs from memcpy+in-place at {diff} of {} elements", rows * width);
+        assert_eq!(
+            diff,
+            0,
+            "copy-rotate differs from memcpy+in-place at {diff} of {} elements",
+            rows * width
+        );
         // And the source must be untouched (the PRIMAL normx stays primal).
         let mut got_src = vec![0f32; rows * width];
         stream.memcpy_dtoh(&src_d, &mut got_src).unwrap();
         assert_eq!(
-            got_src.iter().zip(&src).filter(|(a, b)| a.to_bits() != b.to_bits()).count(),
+            got_src
+                .iter()
+                .zip(&src)
+                .filter(|(a, b)| a.to_bits() != b.to_bits())
+                .count(),
             0,
             "copy-rotate mutated its source"
         );
@@ -2820,7 +2955,9 @@ mod tests {
         let (p, n, block) = (5usize, 4096usize, 1024usize);
         let mut lcg = Lcg(0x900DC0DE);
         let x: Vec<f32> = (0..p * n).map(|_| lcg.next_f32(-1.0, 1.0)).collect();
-        let signs: Vec<f32> = (0..n).map(|i| if i % 5 == 0 { -1.0f32 } else { 1.0f32 }).collect();
+        let signs: Vec<f32> = (0..n)
+            .map(|i| if i % 5 == 0 { -1.0f32 } else { 1.0f32 })
+            .collect();
         let x_d = stream.clone_htod(&x).unwrap();
         let signs_d = stream.clone_htod(&signs).unwrap();
         let scratch = mma.alloc_scratch(&stream, n, p).unwrap();
@@ -2839,7 +2976,14 @@ mod tests {
 
         // Candidate A: the fused rotate+quantize.
         rot.quantize_rotate_q8(
-            &stream, &x_d, &signs_d, &scratch.q_hi_w, &scratch.s_t, n, p, block,
+            &stream,
+            &x_d,
+            &signs_d,
+            &scratch.q_hi_w,
+            &scratch.s_t,
+            n,
+            p,
+            block,
         )
         .unwrap();
         let mut words_a = vec![0u32; words];
@@ -2847,12 +2991,19 @@ mod tests {
         stream.memcpy_dtoh(&scratch.q_hi_w, &mut words_a).unwrap();
         stream.memcpy_dtoh(&scratch.s_t, &mut s_a).unwrap();
         assert_eq!(
-            words_a.iter().zip(&words_ref).filter(|(a, b)| a != b).count(),
+            words_a
+                .iter()
+                .zip(&words_ref)
+                .filter(|(a, b)| a != b)
+                .count(),
             0,
             "fused qrot q8 words differ from the unfused chain"
         );
         assert_eq!(
-            s_a.iter().zip(&s_ref).filter(|(a, b)| a.to_bits() != b.to_bits()).count(),
+            s_a.iter()
+                .zip(&s_ref)
+                .filter(|(a, b)| a.to_bits() != b.to_bits())
+                .count(),
             0,
             "fused qrot row scales differ from the unfused chain"
         );
@@ -2920,7 +3071,16 @@ mod tests {
             );
         }
         rot.quantize_permute_rotate_q8(
-            &stream, &x_d, &signs_d, &scratch.q_hi_w, &scratch.s_t, n, p, block, hd, n_k,
+            &stream,
+            &x_d,
+            &signs_d,
+            &scratch.q_hi_w,
+            &scratch.s_t,
+            n,
+            p,
+            block,
+            hd,
+            n_k,
         )
         .unwrap();
         let mut words_b = vec![0u32; words];
@@ -2928,12 +3088,19 @@ mod tests {
         stream.memcpy_dtoh(&scratch.q_hi_w, &mut words_b).unwrap();
         stream.memcpy_dtoh(&scratch.s_t, &mut s_b).unwrap();
         assert_eq!(
-            words_b.iter().zip(&perm_ref).filter(|(a, b)| a != b).count(),
+            words_b
+                .iter()
+                .zip(&perm_ref)
+                .filter(|(a, b)| a != b)
+                .count(),
             0,
             "fused permute+qrot q8 words differ from the unfused chain"
         );
         assert_eq!(
-            s_b.iter().zip(&perm_s_ref).filter(|(a, b)| a.to_bits() != b.to_bits()).count(),
+            s_b.iter()
+                .zip(&perm_s_ref)
+                .filter(|(a, b)| a.to_bits() != b.to_bits())
+                .count(),
             0,
             "fused permute+qrot row scales differ from the unfused chain"
         );
@@ -2943,7 +3110,9 @@ mod tests {
         // block kernel at a different width.
         let n2 = 12288usize;
         let x2: Vec<f32> = (0..p * n2).map(|_| lcg.next_f32(-1.0, 1.0)).collect();
-        let signs2: Vec<f32> = (0..n2).map(|i| if i % 7 == 0 { -1.0f32 } else { 1.0f32 }).collect();
+        let signs2: Vec<f32> = (0..n2)
+            .map(|i| if i % 7 == 0 { -1.0f32 } else { 1.0f32 })
+            .collect();
         let x2_d = stream.clone_htod(&x2).unwrap();
         let signs2_d = stream.clone_htod(&signs2).unwrap();
         let scratch2 = mma.alloc_scratch(&stream, n2, p).unwrap();
@@ -2957,7 +3126,14 @@ mod tests {
         stream.memcpy_dtoh(&scratch2.q_hi_w, &mut w2_ref).unwrap();
         stream.memcpy_dtoh(&scratch2.s_t, &mut s2_ref).unwrap();
         rot.quantize_rotate_q8(
-            &stream, &x2_d, &signs2_d, &scratch2.q_hi_w, &scratch2.s_t, n2, p, block,
+            &stream,
+            &x2_d,
+            &signs2_d,
+            &scratch2.q_hi_w,
+            &scratch2.s_t,
+            n2,
+            p,
+            block,
         )
         .unwrap();
         let mut w2_got = vec![0u32; p * (n2 / 4)];
@@ -2970,7 +3146,11 @@ mod tests {
             "block-kernel qrot q8 words differ from the unfused chain"
         );
         assert_eq!(
-            s2_got.iter().zip(&s2_ref).filter(|(a, b)| a.to_bits() != b.to_bits()).count(),
+            s2_got
+                .iter()
+                .zip(&s2_ref)
+                .filter(|(a, b)| a.to_bits() != b.to_bits())
+                .count(),
             0,
             "block-kernel qrot row scales differ from the unfused chain"
         );
@@ -3011,7 +3191,9 @@ mod tests {
         let (p, n, block, hd, n_k) = (5usize, 4096usize, 1024usize, 128usize, 16usize);
         let mut lcg = Lcg(0x900DC0DE);
         let x: Vec<f32> = (0..p * n).map(|_| lcg.next_f32(-1.0, 1.0)).collect();
-        let signs: Vec<f32> = (0..n).map(|i| if i % 5 == 0 { -1.0f32 } else { 1.0f32 }).collect();
+        let signs: Vec<f32> = (0..n)
+            .map(|i| if i % 5 == 0 { -1.0f32 } else { 1.0f32 })
+            .collect();
         let x_d = stream.clone_htod(&x).unwrap();
         let signs_d = stream.clone_htod(&signs).unwrap();
         let dbg_d = stream.alloc_zeros::<f32>(p * 12 * n).unwrap();
@@ -3093,10 +3275,14 @@ mod tests {
             let (k, lane) = (within / 32, within % 32);
             eprintln!(
                 "stage-0 diff: row {r} e={e} (chunk {chunk} k {k} lane {lane}) got=0x{hg:08X} ({}) host=0x{hh:08X} ({})",
-                f32::from_bits(*hg), f32::from_bits(*hh)
+                f32::from_bits(*hg),
+                f32::from_bits(*hh)
             );
         }
-        eprintln!("warp-vs-host per-stage diff counts (of {} elems/stage):", p * n);
+        eprintln!(
+            "warp-vs-host per-stage diff counts (of {} elems/stage):",
+            p * n
+        );
         for (s, count) in counts.iter().enumerate() {
             eprintln!("  stage {s:2} ({}): {}", stage_desc(s), count);
         }
@@ -3115,7 +3301,8 @@ mod tests {
                         "  CHUNK-MAX row {r} chunk {b}: probe={:016X} host={:016X} ({} ulp)",
                         got_chunk_max.to_bits(),
                         host_chunk_max.to_bits(),
-                        (got_chunk_max.to_bits() as i32).wrapping_sub(host_chunk_max.to_bits() as i32)
+                        (got_chunk_max.to_bits() as i32)
+                            .wrapping_sub(host_chunk_max.to_bits() as i32)
                     );
                 }
             }
@@ -3149,7 +3336,9 @@ mod tests {
         let (p, n, block, hd, n_k) = (5usize, 4096usize, 1024usize, 128usize, 16usize);
         let mut lcg = Lcg(0x900DC0DE);
         let x: Vec<f32> = (0..p * n).map(|_| lcg.next_f32(-1.0, 1.0)).collect();
-        let signs: Vec<f32> = (0..n).map(|i| if i % 5 == 0 { -1.0f32 } else { 1.0f32 }).collect();
+        let signs: Vec<f32> = (0..n)
+            .map(|i| if i % 5 == 0 { -1.0f32 } else { 1.0f32 })
+            .collect();
         let x_d = stream.clone_htod(&x).unwrap();
         let signs_d = stream.clone_htod(&signs).unwrap();
 
@@ -3235,23 +3424,27 @@ mod tests {
 
         // The unfused chain (mma quantize on the host-exact staging).
         let tmp = stream.alloc_zeros::<f32>(p * n).unwrap();
-        rot.gdn_v_permute_batched(&stream, &x_d, &tmp, p, n, hd, n_k).unwrap();
-        rot.fwht_rotate_forward_batched(&stream, &tmp, &signs_d, p, n, block).unwrap();
+        rot.gdn_v_permute_batched(&stream, &x_d, &tmp, p, n, hd, n_k)
+            .unwrap();
+        rot.fwht_rotate_forward_batched(&stream, &tmp, &signs_d, p, n, block)
+            .unwrap();
         let mut tmp_host = vec![0f32; p * n];
         stream.memcpy_dtoh(&tmp, &mut tmp_host).unwrap();
         // host-exact staging ground truth for m
         let mut m_true = vec![0f32; p];
         for r in 0..p {
-            m_true[r] = tmp_host[r * n..(r + 1) * n]
-                .iter()
-                .fold(0f32, |m, v| { let a = v.abs(); if a > m { a } else { m } });
+            m_true[r] = tmp_host[r * n..(r + 1) * n].iter().fold(0f32, |m, v| {
+                let a = v.abs();
+                if a > m { a } else { m }
+            });
         }
         let mut s_mma = vec![0f32; p];
         {
             use crate::gemm_ternary_i8_mma_cuda_raw::{GemmTernaryI8MmaCuda, QuantDiv};
             let mma = GemmTernaryI8MmaCuda::new(ctx.clone()).expect("compile mma");
             let scratch = mma.alloc_scratch(&stream, n, p).unwrap();
-            mma.launch_quantize_q8_div(&stream, &tmp, &scratch, n, p, QuantDiv::Full).unwrap();
+            mma.launch_quantize_q8_div(&stream, &tmp, &scratch, n, p, QuantDiv::Full)
+                .unwrap();
             stream.memcpy_dtoh(&scratch.s_t, &mut s_mma).unwrap();
         }
 
@@ -3303,22 +3496,33 @@ extern "C" __global__ void divfull_probe(const float* __restrict__ in, float* __
                     .collect();
                 eprintln!(
                     "row {r}: m_true={:016X} s_warp={:016X} matches k={hits:?} (k=0 => m exact, div/write path at fault; k!=0 => chunk/reduce codegen at fault)",
-                    m_true[r].to_bits(), s_warp[r].to_bits()
+                    m_true[r].to_bits(),
+                    s_warp[r].to_bits()
                 );
             }
         }
-        eprintln!("row | s_warp vs s_block(head-to-head) | s_warp vs s_mma | s_block vs s_mma | m_true");
+        eprintln!(
+            "row | s_warp vs s_block(head-to-head) | s_warp vs s_mma | s_block vs s_mma | m_true"
+        );
         let mut bad_wb = 0usize;
         for r in 0..p {
             let dwb = ulp(s_warp[r], s_blockp[r]);
             let dwm = ulp(s_warp[r], s_mma[r]);
             let dbm = ulp(s_blockp[r], s_mma[r]);
-            if dwb != 0 { bad_wb += 1; }
+            if dwb != 0 {
+                bad_wb += 1;
+            }
             eprintln!(
                 "  {r} | warp={:016X} block={:016X} mma={:016X} | w-b {dwb:+5} w-m {dwm:+5} b-m {dbm:+5} | m_true={:e}",
-                s_warp[r].to_bits(), s_blockp[r].to_bits(), s_mma[r].to_bits(), m_true[r]
+                s_warp[r].to_bits(),
+                s_blockp[r].to_bits(),
+                s_mma[r].to_bits(),
+                m_true[r]
             );
         }
-        assert_eq!(bad_wb, 0, "{bad_wb} row scale(s) diverged warp-vs-block head-to-head");
+        assert_eq!(
+            bad_wb, 0,
+            "{bad_wb} row scale(s) diverged warp-vs-block head-to-head"
+        );
     }
 }

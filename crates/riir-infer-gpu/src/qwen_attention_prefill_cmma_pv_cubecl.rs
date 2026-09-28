@@ -195,132 +195,260 @@ fn qwen_attention_prefill_tiled_cmma_pv_f32(
     // round-trip; drained at the epilogue. Explicit variables (no dynamic
     // register indexing — the corpus B49 local-memory-demotion class).
     let mut acc00 = cmma::Matrix::<f32>::from_value(
-        cmma::MatrixIdent::Accumulator, 8usize, 8usize, 8usize,
-        cmma::MatrixLayout::Undefined, 0.0f32,
+        cmma::MatrixIdent::Accumulator,
+        8usize,
+        8usize,
+        8usize,
+        cmma::MatrixLayout::Undefined,
+        0.0f32,
     );
     let mut acc01 = cmma::Matrix::<f32>::from_value(
-        cmma::MatrixIdent::Accumulator, 8usize, 8usize, 8usize,
-        cmma::MatrixLayout::Undefined, 0.0f32,
+        cmma::MatrixIdent::Accumulator,
+        8usize,
+        8usize,
+        8usize,
+        cmma::MatrixLayout::Undefined,
+        0.0f32,
     );
     let mut acc02 = cmma::Matrix::<f32>::from_value(
-        cmma::MatrixIdent::Accumulator, 8usize, 8usize, 8usize,
-        cmma::MatrixLayout::Undefined, 0.0f32,
+        cmma::MatrixIdent::Accumulator,
+        8usize,
+        8usize,
+        8usize,
+        cmma::MatrixLayout::Undefined,
+        0.0f32,
     );
     let mut acc03 = cmma::Matrix::<f32>::from_value(
-        cmma::MatrixIdent::Accumulator, 8usize, 8usize, 8usize,
-        cmma::MatrixLayout::Undefined, 0.0f32,
+        cmma::MatrixIdent::Accumulator,
+        8usize,
+        8usize,
+        8usize,
+        cmma::MatrixLayout::Undefined,
+        0.0f32,
     );
     let mut acc04 = cmma::Matrix::<f32>::from_value(
-        cmma::MatrixIdent::Accumulator, 8usize, 8usize, 8usize,
-        cmma::MatrixLayout::Undefined, 0.0f32,
+        cmma::MatrixIdent::Accumulator,
+        8usize,
+        8usize,
+        8usize,
+        cmma::MatrixLayout::Undefined,
+        0.0f32,
     );
     let mut acc05 = cmma::Matrix::<f32>::from_value(
-        cmma::MatrixIdent::Accumulator, 8usize, 8usize, 8usize,
-        cmma::MatrixLayout::Undefined, 0.0f32,
+        cmma::MatrixIdent::Accumulator,
+        8usize,
+        8usize,
+        8usize,
+        cmma::MatrixLayout::Undefined,
+        0.0f32,
     );
     let mut acc06 = cmma::Matrix::<f32>::from_value(
-        cmma::MatrixIdent::Accumulator, 8usize, 8usize, 8usize,
-        cmma::MatrixLayout::Undefined, 0.0f32,
+        cmma::MatrixIdent::Accumulator,
+        8usize,
+        8usize,
+        8usize,
+        cmma::MatrixLayout::Undefined,
+        0.0f32,
     );
     let mut acc07 = cmma::Matrix::<f32>::from_value(
-        cmma::MatrixIdent::Accumulator, 8usize, 8usize, 8usize,
-        cmma::MatrixLayout::Undefined, 0.0f32,
+        cmma::MatrixIdent::Accumulator,
+        8usize,
+        8usize,
+        8usize,
+        cmma::MatrixLayout::Undefined,
+        0.0f32,
     );
     let mut acc08 = cmma::Matrix::<f32>::from_value(
-        cmma::MatrixIdent::Accumulator, 8usize, 8usize, 8usize,
-        cmma::MatrixLayout::Undefined, 0.0f32,
+        cmma::MatrixIdent::Accumulator,
+        8usize,
+        8usize,
+        8usize,
+        cmma::MatrixLayout::Undefined,
+        0.0f32,
     );
     let mut acc09 = cmma::Matrix::<f32>::from_value(
-        cmma::MatrixIdent::Accumulator, 8usize, 8usize, 8usize,
-        cmma::MatrixLayout::Undefined, 0.0f32,
+        cmma::MatrixIdent::Accumulator,
+        8usize,
+        8usize,
+        8usize,
+        cmma::MatrixLayout::Undefined,
+        0.0f32,
     );
     let mut acc10 = cmma::Matrix::<f32>::from_value(
-        cmma::MatrixIdent::Accumulator, 8usize, 8usize, 8usize,
-        cmma::MatrixLayout::Undefined, 0.0f32,
+        cmma::MatrixIdent::Accumulator,
+        8usize,
+        8usize,
+        8usize,
+        cmma::MatrixLayout::Undefined,
+        0.0f32,
     );
     let mut acc11 = cmma::Matrix::<f32>::from_value(
-        cmma::MatrixIdent::Accumulator, 8usize, 8usize, 8usize,
-        cmma::MatrixLayout::Undefined, 0.0f32,
+        cmma::MatrixIdent::Accumulator,
+        8usize,
+        8usize,
+        8usize,
+        cmma::MatrixLayout::Undefined,
+        0.0f32,
     );
     let mut acc12 = cmma::Matrix::<f32>::from_value(
-        cmma::MatrixIdent::Accumulator, 8usize, 8usize, 8usize,
-        cmma::MatrixLayout::Undefined, 0.0f32,
+        cmma::MatrixIdent::Accumulator,
+        8usize,
+        8usize,
+        8usize,
+        cmma::MatrixLayout::Undefined,
+        0.0f32,
     );
     let mut acc13 = cmma::Matrix::<f32>::from_value(
-        cmma::MatrixIdent::Accumulator, 8usize, 8usize, 8usize,
-        cmma::MatrixLayout::Undefined, 0.0f32,
+        cmma::MatrixIdent::Accumulator,
+        8usize,
+        8usize,
+        8usize,
+        cmma::MatrixLayout::Undefined,
+        0.0f32,
     );
     let mut acc14 = cmma::Matrix::<f32>::from_value(
-        cmma::MatrixIdent::Accumulator, 8usize, 8usize, 8usize,
-        cmma::MatrixLayout::Undefined, 0.0f32,
+        cmma::MatrixIdent::Accumulator,
+        8usize,
+        8usize,
+        8usize,
+        cmma::MatrixLayout::Undefined,
+        0.0f32,
     );
     let mut acc15 = cmma::Matrix::<f32>::from_value(
-        cmma::MatrixIdent::Accumulator, 8usize, 8usize, 8usize,
-        cmma::MatrixLayout::Undefined, 0.0f32,
+        cmma::MatrixIdent::Accumulator,
+        8usize,
+        8usize,
+        8usize,
+        cmma::MatrixLayout::Undefined,
+        0.0f32,
     );
     let mut acc16 = cmma::Matrix::<f32>::from_value(
-        cmma::MatrixIdent::Accumulator, 8usize, 8usize, 8usize,
-        cmma::MatrixLayout::Undefined, 0.0f32,
+        cmma::MatrixIdent::Accumulator,
+        8usize,
+        8usize,
+        8usize,
+        cmma::MatrixLayout::Undefined,
+        0.0f32,
     );
     let mut acc17 = cmma::Matrix::<f32>::from_value(
-        cmma::MatrixIdent::Accumulator, 8usize, 8usize, 8usize,
-        cmma::MatrixLayout::Undefined, 0.0f32,
+        cmma::MatrixIdent::Accumulator,
+        8usize,
+        8usize,
+        8usize,
+        cmma::MatrixLayout::Undefined,
+        0.0f32,
     );
     let mut acc18 = cmma::Matrix::<f32>::from_value(
-        cmma::MatrixIdent::Accumulator, 8usize, 8usize, 8usize,
-        cmma::MatrixLayout::Undefined, 0.0f32,
+        cmma::MatrixIdent::Accumulator,
+        8usize,
+        8usize,
+        8usize,
+        cmma::MatrixLayout::Undefined,
+        0.0f32,
     );
     let mut acc19 = cmma::Matrix::<f32>::from_value(
-        cmma::MatrixIdent::Accumulator, 8usize, 8usize, 8usize,
-        cmma::MatrixLayout::Undefined, 0.0f32,
+        cmma::MatrixIdent::Accumulator,
+        8usize,
+        8usize,
+        8usize,
+        cmma::MatrixLayout::Undefined,
+        0.0f32,
     );
     let mut acc20 = cmma::Matrix::<f32>::from_value(
-        cmma::MatrixIdent::Accumulator, 8usize, 8usize, 8usize,
-        cmma::MatrixLayout::Undefined, 0.0f32,
+        cmma::MatrixIdent::Accumulator,
+        8usize,
+        8usize,
+        8usize,
+        cmma::MatrixLayout::Undefined,
+        0.0f32,
     );
     let mut acc21 = cmma::Matrix::<f32>::from_value(
-        cmma::MatrixIdent::Accumulator, 8usize, 8usize, 8usize,
-        cmma::MatrixLayout::Undefined, 0.0f32,
+        cmma::MatrixIdent::Accumulator,
+        8usize,
+        8usize,
+        8usize,
+        cmma::MatrixLayout::Undefined,
+        0.0f32,
     );
     let mut acc22 = cmma::Matrix::<f32>::from_value(
-        cmma::MatrixIdent::Accumulator, 8usize, 8usize, 8usize,
-        cmma::MatrixLayout::Undefined, 0.0f32,
+        cmma::MatrixIdent::Accumulator,
+        8usize,
+        8usize,
+        8usize,
+        cmma::MatrixLayout::Undefined,
+        0.0f32,
     );
     let mut acc23 = cmma::Matrix::<f32>::from_value(
-        cmma::MatrixIdent::Accumulator, 8usize, 8usize, 8usize,
-        cmma::MatrixLayout::Undefined, 0.0f32,
+        cmma::MatrixIdent::Accumulator,
+        8usize,
+        8usize,
+        8usize,
+        cmma::MatrixLayout::Undefined,
+        0.0f32,
     );
     let mut acc24 = cmma::Matrix::<f32>::from_value(
-        cmma::MatrixIdent::Accumulator, 8usize, 8usize, 8usize,
-        cmma::MatrixLayout::Undefined, 0.0f32,
+        cmma::MatrixIdent::Accumulator,
+        8usize,
+        8usize,
+        8usize,
+        cmma::MatrixLayout::Undefined,
+        0.0f32,
     );
     let mut acc25 = cmma::Matrix::<f32>::from_value(
-        cmma::MatrixIdent::Accumulator, 8usize, 8usize, 8usize,
-        cmma::MatrixLayout::Undefined, 0.0f32,
+        cmma::MatrixIdent::Accumulator,
+        8usize,
+        8usize,
+        8usize,
+        cmma::MatrixLayout::Undefined,
+        0.0f32,
     );
     let mut acc26 = cmma::Matrix::<f32>::from_value(
-        cmma::MatrixIdent::Accumulator, 8usize, 8usize, 8usize,
-        cmma::MatrixLayout::Undefined, 0.0f32,
+        cmma::MatrixIdent::Accumulator,
+        8usize,
+        8usize,
+        8usize,
+        cmma::MatrixLayout::Undefined,
+        0.0f32,
     );
     let mut acc27 = cmma::Matrix::<f32>::from_value(
-        cmma::MatrixIdent::Accumulator, 8usize, 8usize, 8usize,
-        cmma::MatrixLayout::Undefined, 0.0f32,
+        cmma::MatrixIdent::Accumulator,
+        8usize,
+        8usize,
+        8usize,
+        cmma::MatrixLayout::Undefined,
+        0.0f32,
     );
     let mut acc28 = cmma::Matrix::<f32>::from_value(
-        cmma::MatrixIdent::Accumulator, 8usize, 8usize, 8usize,
-        cmma::MatrixLayout::Undefined, 0.0f32,
+        cmma::MatrixIdent::Accumulator,
+        8usize,
+        8usize,
+        8usize,
+        cmma::MatrixLayout::Undefined,
+        0.0f32,
     );
     let mut acc29 = cmma::Matrix::<f32>::from_value(
-        cmma::MatrixIdent::Accumulator, 8usize, 8usize, 8usize,
-        cmma::MatrixLayout::Undefined, 0.0f32,
+        cmma::MatrixIdent::Accumulator,
+        8usize,
+        8usize,
+        8usize,
+        cmma::MatrixLayout::Undefined,
+        0.0f32,
     );
     let mut acc30 = cmma::Matrix::<f32>::from_value(
-        cmma::MatrixIdent::Accumulator, 8usize, 8usize, 8usize,
-        cmma::MatrixLayout::Undefined, 0.0f32,
+        cmma::MatrixIdent::Accumulator,
+        8usize,
+        8usize,
+        8usize,
+        cmma::MatrixLayout::Undefined,
+        0.0f32,
     );
     let mut acc31 = cmma::Matrix::<f32>::from_value(
-        cmma::MatrixIdent::Accumulator, 8usize, 8usize, 8usize,
-        cmma::MatrixLayout::Undefined, 0.0f32,
+        cmma::MatrixIdent::Accumulator,
+        8usize,
+        8usize,
+        8usize,
+        cmma::MatrixLayout::Undefined,
+        0.0f32,
     );
 
     // Uniform loop bound: the max causal position across the cube's 16
@@ -353,20 +481,30 @@ fn qwen_attention_prefill_tiled_cmma_pv_f32(
 
         // ── Score tile: acc_s = Q_win · K^T via the tensor core (as 809) ──
         let acc_s = cmma::Matrix::<f32>::from_value(
-            cmma::MatrixIdent::Accumulator, 8usize, 8usize, 8usize,
-            cmma::MatrixLayout::Undefined, 0.0f32,
+            cmma::MatrixIdent::Accumulator,
+            8usize,
+            8usize,
+            8usize,
+            cmma::MatrixLayout::Undefined,
+            0.0f32,
         );
         let mut ki = 0u32;
         while ki < PV_K_STEPS {
             let mat_q = cmma::Matrix::<f32>::from_slice(
-                cmma::MatrixIdent::A, 8usize, 8usize, 8usize,
+                cmma::MatrixIdent::A,
+                8usize,
+                8usize,
+                8usize,
                 cmma::MatrixLayout::RowMajor,
                 q_tile.slice((win_base * 256u32 + ki * 8u32) as usize, 4096usize),
                 256u32,
             );
             // kv_tile is [pos][dim] row-major; ColMajor B = K^T.
             let mat_k = cmma::Matrix::<f32>::from_slice(
-                cmma::MatrixIdent::B, 8usize, 8usize, 8usize,
+                cmma::MatrixIdent::B,
+                8usize,
+                8usize,
+                8usize,
                 cmma::MatrixLayout::ColMajor,
                 kv_tile.slice((ki * 8u32) as usize, 2048usize),
                 256u32,
@@ -376,7 +514,9 @@ fn qwen_attention_prefill_tiled_cmma_pv_f32(
         }
         cmma::store(
             s_tile.slice_mut(s_base, s_base + 64usize),
-            &acc_s, 8u32, cmma::MatrixLayout::RowMajor,
+            &acc_s,
+            8u32,
+            cmma::MatrixLayout::RowMajor,
         );
         sync_cube(); // S stored; kv_tile free for V
 
@@ -388,10 +528,22 @@ fn qwen_attention_prefill_tiled_cmma_pv_f32(
             let pos_abs = pos0 + j;
             let s_a = s_tile[s_base + lr0 * 8 + j as usize];
             let s_b = s_tile[s_base + lr1 * 8 + j as usize];
-            let masked_a = if active_a && pos_abs <= q_abs_a { s_a } else { f32::new(-1e30f32) };
-            let masked_b = if active_b && pos_abs <= q_abs_b { s_b } else { f32::new(-1e30f32) };
-            if masked_a > m0 { m0 = masked_a; }
-            if masked_b > m1 { m1 = masked_b; }
+            let masked_a = if active_a && pos_abs <= q_abs_a {
+                s_a
+            } else {
+                f32::new(-1e30f32)
+            };
+            let masked_b = if active_b && pos_abs <= q_abs_b {
+                s_b
+            } else {
+                f32::new(-1e30f32)
+            };
+            if masked_a > m0 {
+                m0 = masked_a;
+            }
+            if masked_b > m1 {
+                m1 = masked_b;
+            }
         }
         let new_max_a = m0;
         let new_max_b = m1;
@@ -431,7 +583,11 @@ fn qwen_attention_prefill_tiled_cmma_pv_f32(
             };
             let pos_abs = pos0 + wj as u32;
             let s = s_tile[s_base + lr_r * 8 + wj];
-            let masked = if active_r && pos_abs <= q_abs_r { s } else { f32::new(-1e30f32) };
+            let masked = if active_r && pos_abs <= q_abs_r {
+                s
+            } else {
+                f32::new(-1e30f32)
+            };
             p_tile[s_base + lr_r * 8 + wj] = (masked - new_max_r).exp();
         }
         for j in 0..8u32 {
@@ -464,7 +620,9 @@ fn qwen_attention_prefill_tiled_cmma_pv_f32(
             let sc_cr = if sc_wrow == 0u32 { corr_a } else { corr_b };
             cmma::store(
                 s_tile.slice_mut(s_base, s_base + 64usize),
-                &acc00, 8u32, cmma::MatrixLayout::RowMajor,
+                &acc00,
+                8u32,
+                cmma::MatrixLayout::RowMajor,
             );
             sync_cube();
             if lane < 16u32 {
@@ -481,7 +639,9 @@ fn qwen_attention_prefill_tiled_cmma_pv_f32(
             sync_cube();
             cmma::store(
                 s_tile.slice_mut(s_base, s_base + 64usize),
-                &acc01, 8u32, cmma::MatrixLayout::RowMajor,
+                &acc01,
+                8u32,
+                cmma::MatrixLayout::RowMajor,
             );
             sync_cube();
             if lane < 16u32 {
@@ -498,7 +658,9 @@ fn qwen_attention_prefill_tiled_cmma_pv_f32(
             sync_cube();
             cmma::store(
                 s_tile.slice_mut(s_base, s_base + 64usize),
-                &acc02, 8u32, cmma::MatrixLayout::RowMajor,
+                &acc02,
+                8u32,
+                cmma::MatrixLayout::RowMajor,
             );
             sync_cube();
             if lane < 16u32 {
@@ -515,7 +677,9 @@ fn qwen_attention_prefill_tiled_cmma_pv_f32(
             sync_cube();
             cmma::store(
                 s_tile.slice_mut(s_base, s_base + 64usize),
-                &acc03, 8u32, cmma::MatrixLayout::RowMajor,
+                &acc03,
+                8u32,
+                cmma::MatrixLayout::RowMajor,
             );
             sync_cube();
             if lane < 16u32 {
@@ -532,7 +696,9 @@ fn qwen_attention_prefill_tiled_cmma_pv_f32(
             sync_cube();
             cmma::store(
                 s_tile.slice_mut(s_base, s_base + 64usize),
-                &acc04, 8u32, cmma::MatrixLayout::RowMajor,
+                &acc04,
+                8u32,
+                cmma::MatrixLayout::RowMajor,
             );
             sync_cube();
             if lane < 16u32 {
@@ -549,7 +715,9 @@ fn qwen_attention_prefill_tiled_cmma_pv_f32(
             sync_cube();
             cmma::store(
                 s_tile.slice_mut(s_base, s_base + 64usize),
-                &acc05, 8u32, cmma::MatrixLayout::RowMajor,
+                &acc05,
+                8u32,
+                cmma::MatrixLayout::RowMajor,
             );
             sync_cube();
             if lane < 16u32 {
@@ -566,7 +734,9 @@ fn qwen_attention_prefill_tiled_cmma_pv_f32(
             sync_cube();
             cmma::store(
                 s_tile.slice_mut(s_base, s_base + 64usize),
-                &acc06, 8u32, cmma::MatrixLayout::RowMajor,
+                &acc06,
+                8u32,
+                cmma::MatrixLayout::RowMajor,
             );
             sync_cube();
             if lane < 16u32 {
@@ -583,7 +753,9 @@ fn qwen_attention_prefill_tiled_cmma_pv_f32(
             sync_cube();
             cmma::store(
                 s_tile.slice_mut(s_base, s_base + 64usize),
-                &acc07, 8u32, cmma::MatrixLayout::RowMajor,
+                &acc07,
+                8u32,
+                cmma::MatrixLayout::RowMajor,
             );
             sync_cube();
             if lane < 16u32 {
@@ -600,7 +772,9 @@ fn qwen_attention_prefill_tiled_cmma_pv_f32(
             sync_cube();
             cmma::store(
                 s_tile.slice_mut(s_base, s_base + 64usize),
-                &acc08, 8u32, cmma::MatrixLayout::RowMajor,
+                &acc08,
+                8u32,
+                cmma::MatrixLayout::RowMajor,
             );
             sync_cube();
             if lane < 16u32 {
@@ -617,7 +791,9 @@ fn qwen_attention_prefill_tiled_cmma_pv_f32(
             sync_cube();
             cmma::store(
                 s_tile.slice_mut(s_base, s_base + 64usize),
-                &acc09, 8u32, cmma::MatrixLayout::RowMajor,
+                &acc09,
+                8u32,
+                cmma::MatrixLayout::RowMajor,
             );
             sync_cube();
             if lane < 16u32 {
@@ -634,7 +810,9 @@ fn qwen_attention_prefill_tiled_cmma_pv_f32(
             sync_cube();
             cmma::store(
                 s_tile.slice_mut(s_base, s_base + 64usize),
-                &acc10, 8u32, cmma::MatrixLayout::RowMajor,
+                &acc10,
+                8u32,
+                cmma::MatrixLayout::RowMajor,
             );
             sync_cube();
             if lane < 16u32 {
@@ -651,7 +829,9 @@ fn qwen_attention_prefill_tiled_cmma_pv_f32(
             sync_cube();
             cmma::store(
                 s_tile.slice_mut(s_base, s_base + 64usize),
-                &acc11, 8u32, cmma::MatrixLayout::RowMajor,
+                &acc11,
+                8u32,
+                cmma::MatrixLayout::RowMajor,
             );
             sync_cube();
             if lane < 16u32 {
@@ -668,7 +848,9 @@ fn qwen_attention_prefill_tiled_cmma_pv_f32(
             sync_cube();
             cmma::store(
                 s_tile.slice_mut(s_base, s_base + 64usize),
-                &acc12, 8u32, cmma::MatrixLayout::RowMajor,
+                &acc12,
+                8u32,
+                cmma::MatrixLayout::RowMajor,
             );
             sync_cube();
             if lane < 16u32 {
@@ -685,7 +867,9 @@ fn qwen_attention_prefill_tiled_cmma_pv_f32(
             sync_cube();
             cmma::store(
                 s_tile.slice_mut(s_base, s_base + 64usize),
-                &acc13, 8u32, cmma::MatrixLayout::RowMajor,
+                &acc13,
+                8u32,
+                cmma::MatrixLayout::RowMajor,
             );
             sync_cube();
             if lane < 16u32 {
@@ -702,7 +886,9 @@ fn qwen_attention_prefill_tiled_cmma_pv_f32(
             sync_cube();
             cmma::store(
                 s_tile.slice_mut(s_base, s_base + 64usize),
-                &acc14, 8u32, cmma::MatrixLayout::RowMajor,
+                &acc14,
+                8u32,
+                cmma::MatrixLayout::RowMajor,
             );
             sync_cube();
             if lane < 16u32 {
@@ -719,7 +905,9 @@ fn qwen_attention_prefill_tiled_cmma_pv_f32(
             sync_cube();
             cmma::store(
                 s_tile.slice_mut(s_base, s_base + 64usize),
-                &acc15, 8u32, cmma::MatrixLayout::RowMajor,
+                &acc15,
+                8u32,
+                cmma::MatrixLayout::RowMajor,
             );
             sync_cube();
             if lane < 16u32 {
@@ -736,7 +924,9 @@ fn qwen_attention_prefill_tiled_cmma_pv_f32(
             sync_cube();
             cmma::store(
                 s_tile.slice_mut(s_base, s_base + 64usize),
-                &acc16, 8u32, cmma::MatrixLayout::RowMajor,
+                &acc16,
+                8u32,
+                cmma::MatrixLayout::RowMajor,
             );
             sync_cube();
             if lane < 16u32 {
@@ -753,7 +943,9 @@ fn qwen_attention_prefill_tiled_cmma_pv_f32(
             sync_cube();
             cmma::store(
                 s_tile.slice_mut(s_base, s_base + 64usize),
-                &acc17, 8u32, cmma::MatrixLayout::RowMajor,
+                &acc17,
+                8u32,
+                cmma::MatrixLayout::RowMajor,
             );
             sync_cube();
             if lane < 16u32 {
@@ -770,7 +962,9 @@ fn qwen_attention_prefill_tiled_cmma_pv_f32(
             sync_cube();
             cmma::store(
                 s_tile.slice_mut(s_base, s_base + 64usize),
-                &acc18, 8u32, cmma::MatrixLayout::RowMajor,
+                &acc18,
+                8u32,
+                cmma::MatrixLayout::RowMajor,
             );
             sync_cube();
             if lane < 16u32 {
@@ -787,7 +981,9 @@ fn qwen_attention_prefill_tiled_cmma_pv_f32(
             sync_cube();
             cmma::store(
                 s_tile.slice_mut(s_base, s_base + 64usize),
-                &acc19, 8u32, cmma::MatrixLayout::RowMajor,
+                &acc19,
+                8u32,
+                cmma::MatrixLayout::RowMajor,
             );
             sync_cube();
             if lane < 16u32 {
@@ -804,7 +1000,9 @@ fn qwen_attention_prefill_tiled_cmma_pv_f32(
             sync_cube();
             cmma::store(
                 s_tile.slice_mut(s_base, s_base + 64usize),
-                &acc20, 8u32, cmma::MatrixLayout::RowMajor,
+                &acc20,
+                8u32,
+                cmma::MatrixLayout::RowMajor,
             );
             sync_cube();
             if lane < 16u32 {
@@ -821,7 +1019,9 @@ fn qwen_attention_prefill_tiled_cmma_pv_f32(
             sync_cube();
             cmma::store(
                 s_tile.slice_mut(s_base, s_base + 64usize),
-                &acc21, 8u32, cmma::MatrixLayout::RowMajor,
+                &acc21,
+                8u32,
+                cmma::MatrixLayout::RowMajor,
             );
             sync_cube();
             if lane < 16u32 {
@@ -838,7 +1038,9 @@ fn qwen_attention_prefill_tiled_cmma_pv_f32(
             sync_cube();
             cmma::store(
                 s_tile.slice_mut(s_base, s_base + 64usize),
-                &acc22, 8u32, cmma::MatrixLayout::RowMajor,
+                &acc22,
+                8u32,
+                cmma::MatrixLayout::RowMajor,
             );
             sync_cube();
             if lane < 16u32 {
@@ -855,7 +1057,9 @@ fn qwen_attention_prefill_tiled_cmma_pv_f32(
             sync_cube();
             cmma::store(
                 s_tile.slice_mut(s_base, s_base + 64usize),
-                &acc23, 8u32, cmma::MatrixLayout::RowMajor,
+                &acc23,
+                8u32,
+                cmma::MatrixLayout::RowMajor,
             );
             sync_cube();
             if lane < 16u32 {
@@ -872,7 +1076,9 @@ fn qwen_attention_prefill_tiled_cmma_pv_f32(
             sync_cube();
             cmma::store(
                 s_tile.slice_mut(s_base, s_base + 64usize),
-                &acc24, 8u32, cmma::MatrixLayout::RowMajor,
+                &acc24,
+                8u32,
+                cmma::MatrixLayout::RowMajor,
             );
             sync_cube();
             if lane < 16u32 {
@@ -889,7 +1095,9 @@ fn qwen_attention_prefill_tiled_cmma_pv_f32(
             sync_cube();
             cmma::store(
                 s_tile.slice_mut(s_base, s_base + 64usize),
-                &acc25, 8u32, cmma::MatrixLayout::RowMajor,
+                &acc25,
+                8u32,
+                cmma::MatrixLayout::RowMajor,
             );
             sync_cube();
             if lane < 16u32 {
@@ -906,7 +1114,9 @@ fn qwen_attention_prefill_tiled_cmma_pv_f32(
             sync_cube();
             cmma::store(
                 s_tile.slice_mut(s_base, s_base + 64usize),
-                &acc26, 8u32, cmma::MatrixLayout::RowMajor,
+                &acc26,
+                8u32,
+                cmma::MatrixLayout::RowMajor,
             );
             sync_cube();
             if lane < 16u32 {
@@ -923,7 +1133,9 @@ fn qwen_attention_prefill_tiled_cmma_pv_f32(
             sync_cube();
             cmma::store(
                 s_tile.slice_mut(s_base, s_base + 64usize),
-                &acc27, 8u32, cmma::MatrixLayout::RowMajor,
+                &acc27,
+                8u32,
+                cmma::MatrixLayout::RowMajor,
             );
             sync_cube();
             if lane < 16u32 {
@@ -940,7 +1152,9 @@ fn qwen_attention_prefill_tiled_cmma_pv_f32(
             sync_cube();
             cmma::store(
                 s_tile.slice_mut(s_base, s_base + 64usize),
-                &acc28, 8u32, cmma::MatrixLayout::RowMajor,
+                &acc28,
+                8u32,
+                cmma::MatrixLayout::RowMajor,
             );
             sync_cube();
             if lane < 16u32 {
@@ -957,7 +1171,9 @@ fn qwen_attention_prefill_tiled_cmma_pv_f32(
             sync_cube();
             cmma::store(
                 s_tile.slice_mut(s_base, s_base + 64usize),
-                &acc29, 8u32, cmma::MatrixLayout::RowMajor,
+                &acc29,
+                8u32,
+                cmma::MatrixLayout::RowMajor,
             );
             sync_cube();
             if lane < 16u32 {
@@ -974,7 +1190,9 @@ fn qwen_attention_prefill_tiled_cmma_pv_f32(
             sync_cube();
             cmma::store(
                 s_tile.slice_mut(s_base, s_base + 64usize),
-                &acc30, 8u32, cmma::MatrixLayout::RowMajor,
+                &acc30,
+                8u32,
+                cmma::MatrixLayout::RowMajor,
             );
             sync_cube();
             if lane < 16u32 {
@@ -991,7 +1209,9 @@ fn qwen_attention_prefill_tiled_cmma_pv_f32(
             sync_cube();
             cmma::store(
                 s_tile.slice_mut(s_base, s_base + 64usize),
-                &acc31, 8u32, cmma::MatrixLayout::RowMajor,
+                &acc31,
+                8u32,
+                cmma::MatrixLayout::RowMajor,
             );
             sync_cube();
             if lane < 16u32 {
@@ -1018,230 +1238,329 @@ fn qwen_attention_prefill_tiled_cmma_pv_f32(
         // POSITION and the contraction ran over dims — case-C probe: dim 0
         // correct by coincidence, the rest exactly 0).
         let mat_p = cmma::Matrix::<f32>::from_slice(
-            cmma::MatrixIdent::A, 8usize, 8usize, 8usize,
+            cmma::MatrixIdent::A,
+            8usize,
+            8usize,
+            8usize,
             cmma::MatrixLayout::RowMajor,
             p_tile.slice(s_base, s_base + 64usize),
             8u32,
         );
         let mat_v00 = cmma::Matrix::<f32>::from_slice(
-            cmma::MatrixIdent::B, 8usize, 8usize, 8usize,
+            cmma::MatrixIdent::B,
+            8usize,
+            8usize,
+            8usize,
             cmma::MatrixLayout::RowMajor,
             kv_tile.slice(0usize, 2048usize),
             256u32,
         );
         cmma::execute::<f32, f32, f32, f32, cmma::Plane>(&mat_p, &mat_v00, &acc00, &acc00);
         let mat_v01 = cmma::Matrix::<f32>::from_slice(
-            cmma::MatrixIdent::B, 8usize, 8usize, 8usize,
+            cmma::MatrixIdent::B,
+            8usize,
+            8usize,
+            8usize,
             cmma::MatrixLayout::RowMajor,
             kv_tile.slice(8usize, 2048usize),
             256u32,
         );
         cmma::execute::<f32, f32, f32, f32, cmma::Plane>(&mat_p, &mat_v01, &acc01, &acc01);
         let mat_v02 = cmma::Matrix::<f32>::from_slice(
-            cmma::MatrixIdent::B, 8usize, 8usize, 8usize,
+            cmma::MatrixIdent::B,
+            8usize,
+            8usize,
+            8usize,
             cmma::MatrixLayout::RowMajor,
             kv_tile.slice(16usize, 2048usize),
             256u32,
         );
         cmma::execute::<f32, f32, f32, f32, cmma::Plane>(&mat_p, &mat_v02, &acc02, &acc02);
         let mat_v03 = cmma::Matrix::<f32>::from_slice(
-            cmma::MatrixIdent::B, 8usize, 8usize, 8usize,
+            cmma::MatrixIdent::B,
+            8usize,
+            8usize,
+            8usize,
             cmma::MatrixLayout::RowMajor,
             kv_tile.slice(24usize, 2048usize),
             256u32,
         );
         cmma::execute::<f32, f32, f32, f32, cmma::Plane>(&mat_p, &mat_v03, &acc03, &acc03);
         let mat_v04 = cmma::Matrix::<f32>::from_slice(
-            cmma::MatrixIdent::B, 8usize, 8usize, 8usize,
+            cmma::MatrixIdent::B,
+            8usize,
+            8usize,
+            8usize,
             cmma::MatrixLayout::RowMajor,
             kv_tile.slice(32usize, 2048usize),
             256u32,
         );
         cmma::execute::<f32, f32, f32, f32, cmma::Plane>(&mat_p, &mat_v04, &acc04, &acc04);
         let mat_v05 = cmma::Matrix::<f32>::from_slice(
-            cmma::MatrixIdent::B, 8usize, 8usize, 8usize,
+            cmma::MatrixIdent::B,
+            8usize,
+            8usize,
+            8usize,
             cmma::MatrixLayout::RowMajor,
             kv_tile.slice(40usize, 2048usize),
             256u32,
         );
         cmma::execute::<f32, f32, f32, f32, cmma::Plane>(&mat_p, &mat_v05, &acc05, &acc05);
         let mat_v06 = cmma::Matrix::<f32>::from_slice(
-            cmma::MatrixIdent::B, 8usize, 8usize, 8usize,
+            cmma::MatrixIdent::B,
+            8usize,
+            8usize,
+            8usize,
             cmma::MatrixLayout::RowMajor,
             kv_tile.slice(48usize, 2048usize),
             256u32,
         );
         cmma::execute::<f32, f32, f32, f32, cmma::Plane>(&mat_p, &mat_v06, &acc06, &acc06);
         let mat_v07 = cmma::Matrix::<f32>::from_slice(
-            cmma::MatrixIdent::B, 8usize, 8usize, 8usize,
+            cmma::MatrixIdent::B,
+            8usize,
+            8usize,
+            8usize,
             cmma::MatrixLayout::RowMajor,
             kv_tile.slice(56usize, 2048usize),
             256u32,
         );
         cmma::execute::<f32, f32, f32, f32, cmma::Plane>(&mat_p, &mat_v07, &acc07, &acc07);
         let mat_v08 = cmma::Matrix::<f32>::from_slice(
-            cmma::MatrixIdent::B, 8usize, 8usize, 8usize,
+            cmma::MatrixIdent::B,
+            8usize,
+            8usize,
+            8usize,
             cmma::MatrixLayout::RowMajor,
             kv_tile.slice(64usize, 2048usize),
             256u32,
         );
         cmma::execute::<f32, f32, f32, f32, cmma::Plane>(&mat_p, &mat_v08, &acc08, &acc08);
         let mat_v09 = cmma::Matrix::<f32>::from_slice(
-            cmma::MatrixIdent::B, 8usize, 8usize, 8usize,
+            cmma::MatrixIdent::B,
+            8usize,
+            8usize,
+            8usize,
             cmma::MatrixLayout::RowMajor,
             kv_tile.slice(72usize, 2048usize),
             256u32,
         );
         cmma::execute::<f32, f32, f32, f32, cmma::Plane>(&mat_p, &mat_v09, &acc09, &acc09);
         let mat_v10 = cmma::Matrix::<f32>::from_slice(
-            cmma::MatrixIdent::B, 8usize, 8usize, 8usize,
+            cmma::MatrixIdent::B,
+            8usize,
+            8usize,
+            8usize,
             cmma::MatrixLayout::RowMajor,
             kv_tile.slice(80usize, 2048usize),
             256u32,
         );
         cmma::execute::<f32, f32, f32, f32, cmma::Plane>(&mat_p, &mat_v10, &acc10, &acc10);
         let mat_v11 = cmma::Matrix::<f32>::from_slice(
-            cmma::MatrixIdent::B, 8usize, 8usize, 8usize,
+            cmma::MatrixIdent::B,
+            8usize,
+            8usize,
+            8usize,
             cmma::MatrixLayout::RowMajor,
             kv_tile.slice(88usize, 2048usize),
             256u32,
         );
         cmma::execute::<f32, f32, f32, f32, cmma::Plane>(&mat_p, &mat_v11, &acc11, &acc11);
         let mat_v12 = cmma::Matrix::<f32>::from_slice(
-            cmma::MatrixIdent::B, 8usize, 8usize, 8usize,
+            cmma::MatrixIdent::B,
+            8usize,
+            8usize,
+            8usize,
             cmma::MatrixLayout::RowMajor,
             kv_tile.slice(96usize, 2048usize),
             256u32,
         );
         cmma::execute::<f32, f32, f32, f32, cmma::Plane>(&mat_p, &mat_v12, &acc12, &acc12);
         let mat_v13 = cmma::Matrix::<f32>::from_slice(
-            cmma::MatrixIdent::B, 8usize, 8usize, 8usize,
+            cmma::MatrixIdent::B,
+            8usize,
+            8usize,
+            8usize,
             cmma::MatrixLayout::RowMajor,
             kv_tile.slice(104usize, 2048usize),
             256u32,
         );
         cmma::execute::<f32, f32, f32, f32, cmma::Plane>(&mat_p, &mat_v13, &acc13, &acc13);
         let mat_v14 = cmma::Matrix::<f32>::from_slice(
-            cmma::MatrixIdent::B, 8usize, 8usize, 8usize,
+            cmma::MatrixIdent::B,
+            8usize,
+            8usize,
+            8usize,
             cmma::MatrixLayout::RowMajor,
             kv_tile.slice(112usize, 2048usize),
             256u32,
         );
         cmma::execute::<f32, f32, f32, f32, cmma::Plane>(&mat_p, &mat_v14, &acc14, &acc14);
         let mat_v15 = cmma::Matrix::<f32>::from_slice(
-            cmma::MatrixIdent::B, 8usize, 8usize, 8usize,
+            cmma::MatrixIdent::B,
+            8usize,
+            8usize,
+            8usize,
             cmma::MatrixLayout::RowMajor,
             kv_tile.slice(120usize, 2048usize),
             256u32,
         );
         cmma::execute::<f32, f32, f32, f32, cmma::Plane>(&mat_p, &mat_v15, &acc15, &acc15);
         let mat_v16 = cmma::Matrix::<f32>::from_slice(
-            cmma::MatrixIdent::B, 8usize, 8usize, 8usize,
+            cmma::MatrixIdent::B,
+            8usize,
+            8usize,
+            8usize,
             cmma::MatrixLayout::RowMajor,
             kv_tile.slice(128usize, 2048usize),
             256u32,
         );
         cmma::execute::<f32, f32, f32, f32, cmma::Plane>(&mat_p, &mat_v16, &acc16, &acc16);
         let mat_v17 = cmma::Matrix::<f32>::from_slice(
-            cmma::MatrixIdent::B, 8usize, 8usize, 8usize,
+            cmma::MatrixIdent::B,
+            8usize,
+            8usize,
+            8usize,
             cmma::MatrixLayout::RowMajor,
             kv_tile.slice(136usize, 2048usize),
             256u32,
         );
         cmma::execute::<f32, f32, f32, f32, cmma::Plane>(&mat_p, &mat_v17, &acc17, &acc17);
         let mat_v18 = cmma::Matrix::<f32>::from_slice(
-            cmma::MatrixIdent::B, 8usize, 8usize, 8usize,
+            cmma::MatrixIdent::B,
+            8usize,
+            8usize,
+            8usize,
             cmma::MatrixLayout::RowMajor,
             kv_tile.slice(144usize, 2048usize),
             256u32,
         );
         cmma::execute::<f32, f32, f32, f32, cmma::Plane>(&mat_p, &mat_v18, &acc18, &acc18);
         let mat_v19 = cmma::Matrix::<f32>::from_slice(
-            cmma::MatrixIdent::B, 8usize, 8usize, 8usize,
+            cmma::MatrixIdent::B,
+            8usize,
+            8usize,
+            8usize,
             cmma::MatrixLayout::RowMajor,
             kv_tile.slice(152usize, 2048usize),
             256u32,
         );
         cmma::execute::<f32, f32, f32, f32, cmma::Plane>(&mat_p, &mat_v19, &acc19, &acc19);
         let mat_v20 = cmma::Matrix::<f32>::from_slice(
-            cmma::MatrixIdent::B, 8usize, 8usize, 8usize,
+            cmma::MatrixIdent::B,
+            8usize,
+            8usize,
+            8usize,
             cmma::MatrixLayout::RowMajor,
             kv_tile.slice(160usize, 2048usize),
             256u32,
         );
         cmma::execute::<f32, f32, f32, f32, cmma::Plane>(&mat_p, &mat_v20, &acc20, &acc20);
         let mat_v21 = cmma::Matrix::<f32>::from_slice(
-            cmma::MatrixIdent::B, 8usize, 8usize, 8usize,
+            cmma::MatrixIdent::B,
+            8usize,
+            8usize,
+            8usize,
             cmma::MatrixLayout::RowMajor,
             kv_tile.slice(168usize, 2048usize),
             256u32,
         );
         cmma::execute::<f32, f32, f32, f32, cmma::Plane>(&mat_p, &mat_v21, &acc21, &acc21);
         let mat_v22 = cmma::Matrix::<f32>::from_slice(
-            cmma::MatrixIdent::B, 8usize, 8usize, 8usize,
+            cmma::MatrixIdent::B,
+            8usize,
+            8usize,
+            8usize,
             cmma::MatrixLayout::RowMajor,
             kv_tile.slice(176usize, 2048usize),
             256u32,
         );
         cmma::execute::<f32, f32, f32, f32, cmma::Plane>(&mat_p, &mat_v22, &acc22, &acc22);
         let mat_v23 = cmma::Matrix::<f32>::from_slice(
-            cmma::MatrixIdent::B, 8usize, 8usize, 8usize,
+            cmma::MatrixIdent::B,
+            8usize,
+            8usize,
+            8usize,
             cmma::MatrixLayout::RowMajor,
             kv_tile.slice(184usize, 2048usize),
             256u32,
         );
         cmma::execute::<f32, f32, f32, f32, cmma::Plane>(&mat_p, &mat_v23, &acc23, &acc23);
         let mat_v24 = cmma::Matrix::<f32>::from_slice(
-            cmma::MatrixIdent::B, 8usize, 8usize, 8usize,
+            cmma::MatrixIdent::B,
+            8usize,
+            8usize,
+            8usize,
             cmma::MatrixLayout::RowMajor,
             kv_tile.slice(192usize, 2048usize),
             256u32,
         );
         cmma::execute::<f32, f32, f32, f32, cmma::Plane>(&mat_p, &mat_v24, &acc24, &acc24);
         let mat_v25 = cmma::Matrix::<f32>::from_slice(
-            cmma::MatrixIdent::B, 8usize, 8usize, 8usize,
+            cmma::MatrixIdent::B,
+            8usize,
+            8usize,
+            8usize,
             cmma::MatrixLayout::RowMajor,
             kv_tile.slice(200usize, 2048usize),
             256u32,
         );
         cmma::execute::<f32, f32, f32, f32, cmma::Plane>(&mat_p, &mat_v25, &acc25, &acc25);
         let mat_v26 = cmma::Matrix::<f32>::from_slice(
-            cmma::MatrixIdent::B, 8usize, 8usize, 8usize,
+            cmma::MatrixIdent::B,
+            8usize,
+            8usize,
+            8usize,
             cmma::MatrixLayout::RowMajor,
             kv_tile.slice(208usize, 2048usize),
             256u32,
         );
         cmma::execute::<f32, f32, f32, f32, cmma::Plane>(&mat_p, &mat_v26, &acc26, &acc26);
         let mat_v27 = cmma::Matrix::<f32>::from_slice(
-            cmma::MatrixIdent::B, 8usize, 8usize, 8usize,
+            cmma::MatrixIdent::B,
+            8usize,
+            8usize,
+            8usize,
             cmma::MatrixLayout::RowMajor,
             kv_tile.slice(216usize, 2048usize),
             256u32,
         );
         cmma::execute::<f32, f32, f32, f32, cmma::Plane>(&mat_p, &mat_v27, &acc27, &acc27);
         let mat_v28 = cmma::Matrix::<f32>::from_slice(
-            cmma::MatrixIdent::B, 8usize, 8usize, 8usize,
+            cmma::MatrixIdent::B,
+            8usize,
+            8usize,
+            8usize,
             cmma::MatrixLayout::RowMajor,
             kv_tile.slice(224usize, 2048usize),
             256u32,
         );
         cmma::execute::<f32, f32, f32, f32, cmma::Plane>(&mat_p, &mat_v28, &acc28, &acc28);
         let mat_v29 = cmma::Matrix::<f32>::from_slice(
-            cmma::MatrixIdent::B, 8usize, 8usize, 8usize,
+            cmma::MatrixIdent::B,
+            8usize,
+            8usize,
+            8usize,
             cmma::MatrixLayout::RowMajor,
             kv_tile.slice(232usize, 2048usize),
             256u32,
         );
         cmma::execute::<f32, f32, f32, f32, cmma::Plane>(&mat_p, &mat_v29, &acc29, &acc29);
         let mat_v30 = cmma::Matrix::<f32>::from_slice(
-            cmma::MatrixIdent::B, 8usize, 8usize, 8usize,
+            cmma::MatrixIdent::B,
+            8usize,
+            8usize,
+            8usize,
             cmma::MatrixLayout::RowMajor,
             kv_tile.slice(240usize, 2048usize),
             256u32,
         );
         cmma::execute::<f32, f32, f32, f32, cmma::Plane>(&mat_p, &mat_v30, &acc30, &acc30);
         let mat_v31 = cmma::Matrix::<f32>::from_slice(
-            cmma::MatrixIdent::B, 8usize, 8usize, 8usize,
+            cmma::MatrixIdent::B,
+            8usize,
+            8usize,
+            8usize,
             cmma::MatrixLayout::RowMajor,
             kv_tile.slice(248usize, 2048usize),
             256u32,
@@ -1282,7 +1601,9 @@ fn qwen_attention_prefill_tiled_cmma_pv_f32(
     let go_b = q_off_b + dims_base;
     cmma::store(
         s_tile.slice_mut(s_base, s_base + 64usize),
-        &acc00, 8u32, cmma::MatrixLayout::RowMajor,
+        &acc00,
+        8u32,
+        cmma::MatrixLayout::RowMajor,
     );
     sync_cube();
     if lane == 0u32 {
@@ -1302,7 +1623,9 @@ fn qwen_attention_prefill_tiled_cmma_pv_f32(
     sync_cube();
     cmma::store(
         s_tile.slice_mut(s_base, s_base + 64usize),
-        &acc01, 8u32, cmma::MatrixLayout::RowMajor,
+        &acc01,
+        8u32,
+        cmma::MatrixLayout::RowMajor,
     );
     sync_cube();
     if lane == 1u32 {
@@ -1322,7 +1645,9 @@ fn qwen_attention_prefill_tiled_cmma_pv_f32(
     sync_cube();
     cmma::store(
         s_tile.slice_mut(s_base, s_base + 64usize),
-        &acc02, 8u32, cmma::MatrixLayout::RowMajor,
+        &acc02,
+        8u32,
+        cmma::MatrixLayout::RowMajor,
     );
     sync_cube();
     if lane == 2u32 {
@@ -1342,7 +1667,9 @@ fn qwen_attention_prefill_tiled_cmma_pv_f32(
     sync_cube();
     cmma::store(
         s_tile.slice_mut(s_base, s_base + 64usize),
-        &acc03, 8u32, cmma::MatrixLayout::RowMajor,
+        &acc03,
+        8u32,
+        cmma::MatrixLayout::RowMajor,
     );
     sync_cube();
     if lane == 3u32 {
@@ -1362,7 +1689,9 @@ fn qwen_attention_prefill_tiled_cmma_pv_f32(
     sync_cube();
     cmma::store(
         s_tile.slice_mut(s_base, s_base + 64usize),
-        &acc04, 8u32, cmma::MatrixLayout::RowMajor,
+        &acc04,
+        8u32,
+        cmma::MatrixLayout::RowMajor,
     );
     sync_cube();
     if lane == 4u32 {
@@ -1382,7 +1711,9 @@ fn qwen_attention_prefill_tiled_cmma_pv_f32(
     sync_cube();
     cmma::store(
         s_tile.slice_mut(s_base, s_base + 64usize),
-        &acc05, 8u32, cmma::MatrixLayout::RowMajor,
+        &acc05,
+        8u32,
+        cmma::MatrixLayout::RowMajor,
     );
     sync_cube();
     if lane == 5u32 {
@@ -1402,7 +1733,9 @@ fn qwen_attention_prefill_tiled_cmma_pv_f32(
     sync_cube();
     cmma::store(
         s_tile.slice_mut(s_base, s_base + 64usize),
-        &acc06, 8u32, cmma::MatrixLayout::RowMajor,
+        &acc06,
+        8u32,
+        cmma::MatrixLayout::RowMajor,
     );
     sync_cube();
     if lane == 6u32 {
@@ -1422,7 +1755,9 @@ fn qwen_attention_prefill_tiled_cmma_pv_f32(
     sync_cube();
     cmma::store(
         s_tile.slice_mut(s_base, s_base + 64usize),
-        &acc07, 8u32, cmma::MatrixLayout::RowMajor,
+        &acc07,
+        8u32,
+        cmma::MatrixLayout::RowMajor,
     );
     sync_cube();
     if lane == 7u32 {
@@ -1442,7 +1777,9 @@ fn qwen_attention_prefill_tiled_cmma_pv_f32(
     sync_cube();
     cmma::store(
         s_tile.slice_mut(s_base, s_base + 64usize),
-        &acc08, 8u32, cmma::MatrixLayout::RowMajor,
+        &acc08,
+        8u32,
+        cmma::MatrixLayout::RowMajor,
     );
     sync_cube();
     if lane == 8u32 {
@@ -1462,7 +1799,9 @@ fn qwen_attention_prefill_tiled_cmma_pv_f32(
     sync_cube();
     cmma::store(
         s_tile.slice_mut(s_base, s_base + 64usize),
-        &acc09, 8u32, cmma::MatrixLayout::RowMajor,
+        &acc09,
+        8u32,
+        cmma::MatrixLayout::RowMajor,
     );
     sync_cube();
     if lane == 9u32 {
@@ -1482,7 +1821,9 @@ fn qwen_attention_prefill_tiled_cmma_pv_f32(
     sync_cube();
     cmma::store(
         s_tile.slice_mut(s_base, s_base + 64usize),
-        &acc10, 8u32, cmma::MatrixLayout::RowMajor,
+        &acc10,
+        8u32,
+        cmma::MatrixLayout::RowMajor,
     );
     sync_cube();
     if lane == 10u32 {
@@ -1502,7 +1843,9 @@ fn qwen_attention_prefill_tiled_cmma_pv_f32(
     sync_cube();
     cmma::store(
         s_tile.slice_mut(s_base, s_base + 64usize),
-        &acc11, 8u32, cmma::MatrixLayout::RowMajor,
+        &acc11,
+        8u32,
+        cmma::MatrixLayout::RowMajor,
     );
     sync_cube();
     if lane == 11u32 {
@@ -1522,7 +1865,9 @@ fn qwen_attention_prefill_tiled_cmma_pv_f32(
     sync_cube();
     cmma::store(
         s_tile.slice_mut(s_base, s_base + 64usize),
-        &acc12, 8u32, cmma::MatrixLayout::RowMajor,
+        &acc12,
+        8u32,
+        cmma::MatrixLayout::RowMajor,
     );
     sync_cube();
     if lane == 12u32 {
@@ -1542,7 +1887,9 @@ fn qwen_attention_prefill_tiled_cmma_pv_f32(
     sync_cube();
     cmma::store(
         s_tile.slice_mut(s_base, s_base + 64usize),
-        &acc13, 8u32, cmma::MatrixLayout::RowMajor,
+        &acc13,
+        8u32,
+        cmma::MatrixLayout::RowMajor,
     );
     sync_cube();
     if lane == 13u32 {
@@ -1562,7 +1909,9 @@ fn qwen_attention_prefill_tiled_cmma_pv_f32(
     sync_cube();
     cmma::store(
         s_tile.slice_mut(s_base, s_base + 64usize),
-        &acc14, 8u32, cmma::MatrixLayout::RowMajor,
+        &acc14,
+        8u32,
+        cmma::MatrixLayout::RowMajor,
     );
     sync_cube();
     if lane == 14u32 {
@@ -1582,7 +1931,9 @@ fn qwen_attention_prefill_tiled_cmma_pv_f32(
     sync_cube();
     cmma::store(
         s_tile.slice_mut(s_base, s_base + 64usize),
-        &acc15, 8u32, cmma::MatrixLayout::RowMajor,
+        &acc15,
+        8u32,
+        cmma::MatrixLayout::RowMajor,
     );
     sync_cube();
     if lane == 15u32 {
@@ -1602,7 +1953,9 @@ fn qwen_attention_prefill_tiled_cmma_pv_f32(
     sync_cube();
     cmma::store(
         s_tile.slice_mut(s_base, s_base + 64usize),
-        &acc16, 8u32, cmma::MatrixLayout::RowMajor,
+        &acc16,
+        8u32,
+        cmma::MatrixLayout::RowMajor,
     );
     sync_cube();
     if lane == 16u32 {
@@ -1622,7 +1975,9 @@ fn qwen_attention_prefill_tiled_cmma_pv_f32(
     sync_cube();
     cmma::store(
         s_tile.slice_mut(s_base, s_base + 64usize),
-        &acc17, 8u32, cmma::MatrixLayout::RowMajor,
+        &acc17,
+        8u32,
+        cmma::MatrixLayout::RowMajor,
     );
     sync_cube();
     if lane == 17u32 {
@@ -1642,7 +1997,9 @@ fn qwen_attention_prefill_tiled_cmma_pv_f32(
     sync_cube();
     cmma::store(
         s_tile.slice_mut(s_base, s_base + 64usize),
-        &acc18, 8u32, cmma::MatrixLayout::RowMajor,
+        &acc18,
+        8u32,
+        cmma::MatrixLayout::RowMajor,
     );
     sync_cube();
     if lane == 18u32 {
@@ -1662,7 +2019,9 @@ fn qwen_attention_prefill_tiled_cmma_pv_f32(
     sync_cube();
     cmma::store(
         s_tile.slice_mut(s_base, s_base + 64usize),
-        &acc19, 8u32, cmma::MatrixLayout::RowMajor,
+        &acc19,
+        8u32,
+        cmma::MatrixLayout::RowMajor,
     );
     sync_cube();
     if lane == 19u32 {
@@ -1682,7 +2041,9 @@ fn qwen_attention_prefill_tiled_cmma_pv_f32(
     sync_cube();
     cmma::store(
         s_tile.slice_mut(s_base, s_base + 64usize),
-        &acc20, 8u32, cmma::MatrixLayout::RowMajor,
+        &acc20,
+        8u32,
+        cmma::MatrixLayout::RowMajor,
     );
     sync_cube();
     if lane == 20u32 {
@@ -1702,7 +2063,9 @@ fn qwen_attention_prefill_tiled_cmma_pv_f32(
     sync_cube();
     cmma::store(
         s_tile.slice_mut(s_base, s_base + 64usize),
-        &acc21, 8u32, cmma::MatrixLayout::RowMajor,
+        &acc21,
+        8u32,
+        cmma::MatrixLayout::RowMajor,
     );
     sync_cube();
     if lane == 21u32 {
@@ -1722,7 +2085,9 @@ fn qwen_attention_prefill_tiled_cmma_pv_f32(
     sync_cube();
     cmma::store(
         s_tile.slice_mut(s_base, s_base + 64usize),
-        &acc22, 8u32, cmma::MatrixLayout::RowMajor,
+        &acc22,
+        8u32,
+        cmma::MatrixLayout::RowMajor,
     );
     sync_cube();
     if lane == 22u32 {
@@ -1742,7 +2107,9 @@ fn qwen_attention_prefill_tiled_cmma_pv_f32(
     sync_cube();
     cmma::store(
         s_tile.slice_mut(s_base, s_base + 64usize),
-        &acc23, 8u32, cmma::MatrixLayout::RowMajor,
+        &acc23,
+        8u32,
+        cmma::MatrixLayout::RowMajor,
     );
     sync_cube();
     if lane == 23u32 {
@@ -1762,7 +2129,9 @@ fn qwen_attention_prefill_tiled_cmma_pv_f32(
     sync_cube();
     cmma::store(
         s_tile.slice_mut(s_base, s_base + 64usize),
-        &acc24, 8u32, cmma::MatrixLayout::RowMajor,
+        &acc24,
+        8u32,
+        cmma::MatrixLayout::RowMajor,
     );
     sync_cube();
     if lane == 24u32 {
@@ -1782,7 +2151,9 @@ fn qwen_attention_prefill_tiled_cmma_pv_f32(
     sync_cube();
     cmma::store(
         s_tile.slice_mut(s_base, s_base + 64usize),
-        &acc25, 8u32, cmma::MatrixLayout::RowMajor,
+        &acc25,
+        8u32,
+        cmma::MatrixLayout::RowMajor,
     );
     sync_cube();
     if lane == 25u32 {
@@ -1802,7 +2173,9 @@ fn qwen_attention_prefill_tiled_cmma_pv_f32(
     sync_cube();
     cmma::store(
         s_tile.slice_mut(s_base, s_base + 64usize),
-        &acc26, 8u32, cmma::MatrixLayout::RowMajor,
+        &acc26,
+        8u32,
+        cmma::MatrixLayout::RowMajor,
     );
     sync_cube();
     if lane == 26u32 {
@@ -1822,7 +2195,9 @@ fn qwen_attention_prefill_tiled_cmma_pv_f32(
     sync_cube();
     cmma::store(
         s_tile.slice_mut(s_base, s_base + 64usize),
-        &acc27, 8u32, cmma::MatrixLayout::RowMajor,
+        &acc27,
+        8u32,
+        cmma::MatrixLayout::RowMajor,
     );
     sync_cube();
     if lane == 27u32 {
@@ -1842,7 +2217,9 @@ fn qwen_attention_prefill_tiled_cmma_pv_f32(
     sync_cube();
     cmma::store(
         s_tile.slice_mut(s_base, s_base + 64usize),
-        &acc28, 8u32, cmma::MatrixLayout::RowMajor,
+        &acc28,
+        8u32,
+        cmma::MatrixLayout::RowMajor,
     );
     sync_cube();
     if lane == 28u32 {
@@ -1862,7 +2239,9 @@ fn qwen_attention_prefill_tiled_cmma_pv_f32(
     sync_cube();
     cmma::store(
         s_tile.slice_mut(s_base, s_base + 64usize),
-        &acc29, 8u32, cmma::MatrixLayout::RowMajor,
+        &acc29,
+        8u32,
+        cmma::MatrixLayout::RowMajor,
     );
     sync_cube();
     if lane == 29u32 {
@@ -1882,7 +2261,9 @@ fn qwen_attention_prefill_tiled_cmma_pv_f32(
     sync_cube();
     cmma::store(
         s_tile.slice_mut(s_base, s_base + 64usize),
-        &acc30, 8u32, cmma::MatrixLayout::RowMajor,
+        &acc30,
+        8u32,
+        cmma::MatrixLayout::RowMajor,
     );
     sync_cube();
     if lane == 30u32 {
@@ -1902,7 +2283,9 @@ fn qwen_attention_prefill_tiled_cmma_pv_f32(
     sync_cube();
     cmma::store(
         s_tile.slice_mut(s_base, s_base + 64usize),
-        &acc31, 8u32, cmma::MatrixLayout::RowMajor,
+        &acc31,
+        8u32,
+        cmma::MatrixLayout::RowMajor,
     );
     sync_cube();
     if lane == 31u32 {
@@ -1952,7 +2335,7 @@ impl QwenAttentionPrefillTiledCmmaPvCubeCL {
     ) {
         const MAX_WG_X: u32 = 65535;
 
-debug_assert_eq!(
+        debug_assert_eq!(
             head_dim, 256,
             "tiled cmma-pv flash kernel is head_dim-256 specialized"
         );
@@ -1975,14 +2358,18 @@ debug_assert_eq!(
                 (base_pos + t0) as f32,
                 tiles as f32,
             ];
-            let params_handle =
-                crate::params_cache::params_handle(client, f32::as_bytes(&params));
+            let params_handle = crate::params_cache::params_handle(client, f32::as_bytes(&params));
             let q_len = tc * n_head * head_dim;
             let kv_len = (base_pos + p) * n_kv_head * head_dim;
-            let q_slice = query_handle.clone().offset_start((t0 * n_head * head_dim * 4) as u64);
-            let g_slice = gate_handle.clone().offset_start((t0 * n_head * head_dim * 4) as u64);
-            let o_slice =
-                attn_out_handle.clone().offset_start((t0 * n_head * head_dim * 4) as u64);
+            let q_slice = query_handle
+                .clone()
+                .offset_start((t0 * n_head * head_dim * 4) as u64);
+            let g_slice = gate_handle
+                .clone()
+                .offset_start((t0 * n_head * head_dim * 4) as u64);
+            let o_slice = attn_out_handle
+                .clone()
+                .offset_start((t0 * n_head * head_dim * 4) as u64);
             let n_cubes = n_head * tiles;
             unsafe {
                 qwen_attention_prefill_tiled_cmma_pv_f32::launch_unchecked::<R>(

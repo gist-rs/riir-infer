@@ -83,10 +83,22 @@ fn load_encoder() -> Encoder {
 #[test]
 fn fold_arms_are_bit_identical_to_the_unfused_stream() {
     let enc = load_encoder();
-    let off = Metal::new().expect("metal").with_mps(false).with_folds(false, false);
-    let res_on = Metal::new().expect("metal").with_mps(false).with_folds(true, false);
-    let glu_on = Metal::new().expect("metal").with_mps(false).with_folds(false, true);
-    let both_on = Metal::new().expect("metal").with_mps(false).with_folds(true, true);
+    let off = Metal::new()
+        .expect("metal")
+        .with_mps(false)
+        .with_folds(false, false);
+    let res_on = Metal::new()
+        .expect("metal")
+        .with_mps(false)
+        .with_folds(true, false);
+    let glu_on = Metal::new()
+        .expect("metal")
+        .with_mps(false)
+        .with_folds(false, true);
+    let both_on = Metal::new()
+        .expect("metal")
+        .with_mps(false)
+        .with_folds(true, true);
     for b in [&off, &res_on, &glu_on, &both_on] {
         enc.warm(b);
     }
@@ -160,8 +172,14 @@ fn fold_arms_are_bit_identical_to_the_unfused_stream() {
 #[test]
 fn fold_arms_are_bit_identical_under_packed_plans() {
     let enc = load_encoder();
-    let off = Metal::new().expect("metal").with_mps(false).with_folds(false, false);
-    let both_on = Metal::new().expect("metal").with_mps(false).with_folds(true, true);
+    let off = Metal::new()
+        .expect("metal")
+        .with_mps(false)
+        .with_folds(false, false);
+    let both_on = Metal::new()
+        .expect("metal")
+        .with_mps(false)
+        .with_folds(true, true);
     enc.warm(&off);
     enc.warm(&both_on);
 

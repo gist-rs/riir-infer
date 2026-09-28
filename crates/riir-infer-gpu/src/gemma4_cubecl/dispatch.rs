@@ -5,8 +5,8 @@
 //! per-layer-type dimension parameters (Q/K/V sizes vary between Sliding and
 //! Full attention layers).
 
-use super::*;
 use super::weight_buffers::Gemma4CubeCLLayerWeights;
+use super::*;
 
 #[allow(dead_code)] // Forward-path scaffolding — exercised under GPU tests.
 impl GpuGemma4CubeCL {
@@ -16,13 +16,7 @@ impl GpuGemma4CubeCL {
     ///
     /// Creates input handle from CPU data, allocates output handle, launches
     /// kernel via the autotune cache, reads result back to CPU.
-    pub fn dispatch_gemv(
-        &self,
-        weight: &Handle,
-        input: &[f32],
-        m: usize,
-        n: usize,
-    ) -> Vec<f32> {
+    pub fn dispatch_gemv(&self, weight: &Handle, input: &[f32], m: usize, n: usize) -> Vec<f32> {
         let input_handle = self.client.create_from_slice(f32::as_bytes(input));
         let output_handle = self.client.empty(m * core::mem::size_of::<f32>());
 

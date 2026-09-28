@@ -206,7 +206,9 @@ impl DsparkDrafter {
         let mask_token = get_u("dspark.dspark.mask_token_id") as usize;
         let rank = get_u("dspark.dspark.markov_rank") as usize;
         let rope_base = g.metadata_f64("dspark.rope.freq_base").unwrap_or(1e7) as f32;
-        let eps = g.metadata_f64("dspark.attention.layer_norm_rms_epsilon").unwrap_or(1e-6) as f32;
+        let eps = g
+            .metadata_f64("dspark.attention.layer_norm_rms_epsilon")
+            .unwrap_or(1e-6) as f32;
         let vocab = g.metadata_u64("dspark.vocab_size").unwrap_or(248320) as usize;
         println!(
             "[dspark] arch: {n_layer} layers, n_embd={n_embd}, heads={n_head}/{n_kv_head} \
@@ -237,14 +239,26 @@ impl DsparkDrafter {
         let out_norm = g.dequant_f16_to_f32("output_norm.weight").unwrap();
         let markov_a = g.dequant_f16_to_f32("dspark.markov_head_a.weight").unwrap();
         let markov_b = g.dequant_f16_to_f32("dspark.markov_head_b.weight").unwrap();
-        let conf_w = g.dequant_f16_to_f32("dspark.confidence_head.weight").unwrap();
+        let conf_w = g
+            .dequant_f16_to_f32("dspark.confidence_head.weight")
+            .unwrap();
         let conf_b = g.dequant_f16_to_f32("dspark.confidence_head.bias").unwrap()[0];
-        let lm_raw = g.tensor_slice("output.weight").expect("output.weight").to_vec();
+        let lm_raw = g
+            .tensor_slice("output.weight")
+            .expect("output.weight")
+            .to_vec();
         let mask_row = g
             .dequant_tensor_row("token_embd.weight", mask_token, n_embd)
             .unwrap();
-        println!("[dspark] weights dequantized in {:?} (host RSS note: ~4 GB)", t0.elapsed());
-        assert_eq!(enc_fc.len(), 5 * n_embd * n_embd, "fc is [5*n_embd, n_embd]");
+        println!(
+            "[dspark] weights dequantized in {:?} (host RSS note: ~4 GB)",
+            t0.elapsed()
+        );
+        assert_eq!(
+            enc_fc.len(),
+            5 * n_embd * n_embd,
+            "fc is [5*n_embd, n_embd]"
+        );
         assert_eq!(markov_a.len(), vocab * rank);
         assert_eq!(markov_b.len(), vocab * rank);
         assert_eq!(conf_w.len(), n_embd + rank);
@@ -412,8 +426,8 @@ impl DsparkDrafter {
                     let mut scores = vec![0.0f32; total];
                     let mut maxv = f32::NEG_INFINITY;
                     for t in 0..total {
-                        let key = &keys[t * kv + kvh * self.head_dim
-                            ..t * kv + (kvh + 1) * self.head_dim];
+                        let key =
+                            &keys[t * kv + kvh * self.head_dim..t * kv + (kvh + 1) * self.head_dim];
                         let mut s = 0.0f32;
                         for (qa, kb) in q.iter().zip(key) {
                             s += qa * kb;
@@ -431,8 +445,8 @@ impl DsparkDrafter {
                     let dst = &mut wo_in[i][qh * self.head_dim..(qh + 1) * self.head_dim];
                     for t in 0..total {
                         let wgt = scores[t] * inv;
-                        let vrow = &vals[t * kv + kvh * self.head_dim
-                            ..t * kv + (kvh + 1) * self.head_dim];
+                        let vrow =
+                            &vals[t * kv + kvh * self.head_dim..t * kv + (kvh + 1) * self.head_dim];
                         for (dv, vv) in dst.iter_mut().zip(vrow) {
                             *dv += wgt * vv;
                         }
@@ -484,7 +498,10 @@ impl DsparkDrafter {
                     .collect()
             })
             .collect();
-        BlockOut { base_logits, hidden }
+        BlockOut {
+            base_logits,
+            hidden,
+        }
     }
 
     /// The markov head chain (build_dspark_markov_head port).

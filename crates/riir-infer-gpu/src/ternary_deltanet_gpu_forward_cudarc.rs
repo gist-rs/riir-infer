@@ -46,18 +46,18 @@
 
 use std::sync::Arc;
 
+use cudarc::driver::PushKernelArg;
+#[cfg(feature = "cuda_graphs_forward")]
+use cudarc::driver::safe::CudaGraph;
 use cudarc::driver::safe::{
     CudaContext, CudaFunction, CudaModule, CudaSlice, CudaStream, LaunchConfig, PinnedHostSlice,
 };
-#[cfg(feature = "cuda_graphs_forward")]
-use cudarc::driver::safe::CudaGraph;
-use cudarc::driver::PushKernelArg;
 
 use crate::cudarc_kernels::{
     AttentionKernels, CudarcKernelError, DeltanetKernels, ElementwiseKernels,
     EmbeddingDequantKernels, HalfStateFmt, LoraDecodeKernels, QvLoraGpuCudarc,
 };
-use crate::gemv_ternary_cuda_raw::{convert_bitplane_to_packed_codes, GEMV_CUDA_SRC, WG_THREADS};
+use crate::gemv_ternary_cuda_raw::{GEMV_CUDA_SRC, WG_THREADS, convert_bitplane_to_packed_codes};
 
 use riir_infer_core::deltanet::ternary_weights::{
     DeltaNetTernaryLayerWeights, GateProjWeights, QwenDeltaNetTernaryWeights,
@@ -417,7 +417,10 @@ impl RecStateBuf {
         }
     }
 
-    fn memset_zeros(&mut self, stream: &Arc<CudaStream>) -> Result<(), cudarc::driver::DriverError> {
+    fn memset_zeros(
+        &mut self,
+        stream: &Arc<CudaStream>,
+    ) -> Result<(), cudarc::driver::DriverError> {
         match self {
             Self::F32(s) => stream.memset_zeros(s),
             Self::Half(s) => stream.memset_zeros(s),
@@ -463,9 +466,7 @@ impl RecStateBuf {
                 let mut bits = vec![0u16; s.len()];
                 stream.memcpy_dtoh(s, &mut bits)?;
                 Ok(match Self::half_fmt_from_env() {
-                    Some(HalfStateFmt::Bf16) => {
-                        bits.into_iter().map(bf16_bits_to_f32).collect()
-                    }
+                    Some(HalfStateFmt::Bf16) => bits.into_iter().map(bf16_bits_to_f32).collect(),
                     _ => bits.into_iter().map(f16_bits_to_f32).collect(),
                 })
             }
@@ -835,14 +836,14 @@ impl TernaryDeltanetGpuForwardCudarc {
         // thread; `attribute` is a pure device query and needs no binding.
         ctx.bind_to_thread()
             .map_err(|e| CudarcKernelError::CudaInit(format!("bind ctx: {e}")))?;
-        let sm_count = ctx
-            .attribute(cudarc::driver::sys::CUdevice_attribute::CU_DEVICE_ATTRIBUTE_MULTIPROCESSOR_COUNT)
+        let sm_count =
+            ctx.attribute(
+                cudarc::driver::sys::CUdevice_attribute::CU_DEVICE_ATTRIBUTE_MULTIPROCESSOR_COUNT,
+            )
             .map_err(|e| CudarcKernelError::CudaInit(format!("SM count: {e}")))? as u32;
         let blocks_per_sm = gemv_multi_persistent
             .occupancy_max_active_blocks_per_multiprocessor(WG_THREADS, 0, None)
-            .map_err(|e| {
-                CudarcKernelError::CudaInit(format!("gemv occupancy: {e}"))
-            })?
+            .map_err(|e| CudarcKernelError::CudaInit(format!("gemv occupancy: {e}")))?
             .max(1);
         // Issue 705 (filed as 702, renumbered) — grid cap, resolved ONCE here (never on the launch path).
         //
@@ -911,17 +912,37 @@ impl TernaryDeltanetGpuForwardCudarc {
         eprintln!(
             "[issue702] gemv grid cap: SMs={sm_count} blocks/SM={blocks_per_sm} occupancy_grid={occupancy_grid} -> cap={} ({})",
             gemv_multi.grid,
-            if gemv_multi.grid == u32::MAX { "uncapped default" } else { "env override" }
+            if gemv_multi.grid == u32::MAX {
+                "uncapped default"
+            } else {
+                "env override"
+            }
         );
         eprintln!(
             "[plan604] gemv r2: enabled={r2_enabled} pf: enabled={pf_enabled} u4: enabled={u4_enabled} underfilled_max_rows={r2_max_rows}{}{}{}",
-            if r2_enabled { " (RIIR_GEMV_R2 set)" } else { "" },
-            if pf_enabled { " (RIIR_GEMV_PF set)" } else { "" },
-            if u4_enabled { " (RIIR_GEMV_U4 set)" } else { "" }
+            if r2_enabled {
+                " (RIIR_GEMV_R2 set)"
+            } else {
+                ""
+            },
+            if pf_enabled {
+                " (RIIR_GEMV_PF set)"
+            } else {
+                ""
+            },
+            if u4_enabled {
+                " (RIIR_GEMV_U4 set)"
+            } else {
+                ""
+            }
         );
         eprintln!(
             "[plan611] gemv split2: enabled={split2_enabled}{} (lossy-class rung, default OFF)",
-            if split2_enabled { " (RIIR_GEMV_SPLIT set)" } else { "" }
+            if split2_enabled {
+                " (RIIR_GEMV_SPLIT set)"
+            } else {
+                ""
+            }
         );
         // Issue 616 T4 — fused quantize+dp4a kernel (same module, second entry).
         let gemv_fused = gemv_module
@@ -1080,7 +1101,11 @@ impl TernaryDeltanetGpuForwardCudarc {
                         RecStateBuf::alloc(&stream, state_dim, state_half_fmt)
                             .map_err(alloc_err)?,
                     ),
-                    Some(stream.alloc_zeros::<f32>(conv_state_dim).map_err(alloc_err)?),
+                    Some(
+                        stream
+                            .alloc_zeros::<f32>(conv_state_dim)
+                            .map_err(alloc_err)?,
+                    ),
                 )
             } else {
                 (None, None)
@@ -1157,7 +1182,7 @@ impl TernaryDeltanetGpuForwardCudarc {
             gemv_multi,
             gemv_fused,
             gemv_transposed,
-                        _gemv_module: gemv_module,
+            _gemv_module: gemv_module,
             config: config.clone(),
             layer_types,
             layers,
@@ -1653,8 +1678,7 @@ impl TernaryDeltanetGpuForwardCudarc {
 
             for layer_idx in 0..infra.config.n_layer {
                 let layer_w = &infra.layers[layer_idx];
-                let is_deltanet =
-                    infra.layer_types[layer_idx] == DeltaNetLayerType::DeltaNet;
+                let is_deltanet = infra.layer_types[layer_idx] == DeltaNetLayerType::DeltaNet;
                 if is_deltanet {
                     forward_deltanet_layer(
                         infra,
@@ -1778,7 +1802,10 @@ impl TernaryDeltanetGpuForwardCudarc {
         let n = self.infra.config.n_embd;
         let eps = self.infra.config.rms_norm_eps as f32;
         assert_eq!(donor_x.len(), n, "donor_x must be exactly n_embd");
-        assert!(patch_layer < self.infra.config.n_layer, "patch_layer out of range");
+        assert!(
+            patch_layer < self.infra.config.n_layer,
+            "patch_layer out of range"
+        );
 
         {
             let infra = &self.infra;
@@ -1813,8 +1840,7 @@ impl TernaryDeltanetGpuForwardCudarc {
                         .map_err(|e| CudarcKernelError::Launch(e.to_string()))?;
                 }
                 let layer_w = &infra.layers[layer_idx];
-                let is_deltanet =
-                    infra.layer_types[layer_idx] == DeltaNetLayerType::DeltaNet;
+                let is_deltanet = infra.layer_types[layer_idx] == DeltaNetLayerType::DeltaNet;
                 if is_deltanet {
                     forward_deltanet_layer(
                         infra,
@@ -2024,8 +2050,7 @@ impl TernaryDeltanetGpuForwardCudarc {
             // ── Layer loop (with per-layer x_in + norm_x download) ──
             for layer_idx in 0..n_layer {
                 let layer_w = &infra.layers[layer_idx];
-                let is_deltanet =
-                    infra.layer_types[layer_idx] == DeltaNetLayerType::DeltaNet;
+                let is_deltanet = infra.layer_types[layer_idx] == DeltaNetLayerType::DeltaNet;
 
                 // Sync + download x_in (the hidden state BEFORE input RMSNorm).
                 infra
@@ -2059,12 +2084,7 @@ impl TernaryDeltanetGpuForwardCudarc {
                         _ => None,
                     };
                     forward_attention_layer_training(
-                        infra,
-                        acts,
-                        layer_idx,
-                        layer_w,
-                        eps,
-                        attn_probe,
+                        infra, acts, layer_idx, layer_w, eps, attn_probe,
                     )?;
                 }
 
@@ -2115,29 +2135,49 @@ impl TernaryDeltanetGpuForwardCudarc {
 
                 // ── Residual add: x = x + tmp ──
                 infra.elementwise.launch_residual_add(
-                    &infra.stream, &acts.x, &acts.tmp, &acts.x, n,
+                    &infra.stream,
+                    &acts.x,
+                    &acts.tmp,
+                    &acts.x,
+                    n,
                 )?;
 
                 // ── Post-attention RMSNorm + FFN gate/up (fused) ──
                 rmsnorm_quantize_and_gemv_batch(
-                    &infra.elementwise, &infra.stream, &infra.gemv_multi,
-                    &acts.quant_i8_buf, &acts.ascale_buf,
-                    &acts.x, &layer_w.post_attn_norm, eps, n,
+                    &infra.elementwise,
+                    &infra.stream,
+                    &infra.gemv_multi,
+                    &acts.quant_i8_buf,
+                    &acts.ascale_buf,
+                    &acts.x,
+                    &layer_w.post_attn_norm,
+                    eps,
+                    n,
                     &[
                         (&layer_w.gate_proj, &acts.ffn_gate),
                         (&layer_w.up_proj, &acts.ffn_up),
                     ],
                 )?;
                 swiglu_quantize_and_gemv(
-                    &infra.elementwise, &infra.stream, &infra.gemv,
-                    &acts.quant_i8_buf, &acts.ascale_buf,
-                    &acts.ffn_gate, &acts.ffn_up, mlp,
-                    &layer_w.down_proj, &acts.ffn_out,
+                    &infra.elementwise,
+                    &infra.stream,
+                    &infra.gemv,
+                    &acts.quant_i8_buf,
+                    &acts.ascale_buf,
+                    &acts.ffn_gate,
+                    &acts.ffn_up,
+                    mlp,
+                    &layer_w.down_proj,
+                    &acts.ffn_out,
                 )?;
 
                 // ── Residual add: x = x + ffn_out ──
                 infra.elementwise.launch_residual_add(
-                    &infra.stream, &acts.x, &acts.ffn_out, &acts.x, n,
+                    &infra.stream,
+                    &acts.x,
+                    &acts.ffn_out,
+                    &acts.x,
+                    n,
                 )?;
             }
 
@@ -2155,9 +2195,16 @@ impl TernaryDeltanetGpuForwardCudarc {
 
             // ── Final RMSNorm + lm_head (fused, with norm_x side write) ──
             rmsnorm_quantize_and_gemv_batch_with_norm_x(
-                &infra.elementwise, &infra.stream, &infra.gemv_multi,
-                &acts.quant_i8_buf, &acts.ascale_buf,
-                &acts.x, &infra.final_norm, &acts.final_norm_x, eps, n,
+                &infra.elementwise,
+                &infra.stream,
+                &infra.gemv_multi,
+                &acts.quant_i8_buf,
+                &acts.ascale_buf,
+                &acts.x,
+                &infra.final_norm,
+                &acts.final_norm_x,
+                eps,
+                n,
                 &[(&infra.lm_head, &acts.logits)],
             )?;
 
@@ -2241,10 +2288,7 @@ impl TernaryDeltanetGpuForwardCudarc {
     ///
     /// The logits (downloaded once at the end — same as `forward_token`).
     #[cfg(feature = "cuda_graphs_forward")]
-    pub fn forward_token_graph(
-        &mut self,
-        token_id: usize,
-    ) -> Result<Vec<f32>, CudarcKernelError> {
+    pub fn forward_token_graph(&mut self, token_id: usize) -> Result<Vec<f32>, CudarcKernelError> {
         // Write to PERSISTENT host buffers (not stack locals) — cuMemcpyHtoDAsync_v2
         // is async, so the host pointer must remain valid until the GPU completes
         // the copy. Stack locals would be dropped before the async op reads them.
@@ -2359,8 +2403,9 @@ impl TernaryDeltanetGpuForwardCudarc {
             .stream
             .end_capture(cudarc::driver::sys::CUgraphInstantiate_flags::CUDA_GRAPH_INSTANTIATE_FLAG_AUTO_FREE_ON_LAUNCH)
             .map_err(|e| CudarcKernelError::Launch(e.to_string()))?;
-        let graph = graph
-            .ok_or_else(|| CudarcKernelError::Launch("end_capture returned None (no graph captured)".into()))?;
+        let graph = graph.ok_or_else(|| {
+            CudarcKernelError::Launch("end_capture returned None (no graph captured)".into())
+        })?;
         // Pre-upload to absorb first-launch setup overhead.
         graph
             .upload()
@@ -2499,7 +2544,10 @@ impl TernaryDeltanetGpuForwardCudarc {
         let stream = &self.infra.stream;
         let acts = &mut self.acts;
         stream
-            .memcpy_htod(std::slice::from_ref(&acts.token_host), &mut acts.token_dev_buf)
+            .memcpy_htod(
+                std::slice::from_ref(&acts.token_host),
+                &mut acts.token_dev_buf,
+            )
             .map_err(|e| CudarcKernelError::Launch(e.to_string()))?;
         stream
             .memcpy_htod(std::slice::from_ref(&acts.pos_host), &mut acts.pos_dev_buf)
@@ -2694,10 +2742,7 @@ impl TernaryDeltanetGpuForwardCudarc {
     /// exists or is needed (the rotation persists by design; see the contract
     /// above). Any captured CUDA Graph is invalidated here (see above).
     #[cfg(feature = "speculative_decode")]
-    fn spec_verify_dispatch(
-        &mut self,
-        draft_tokens: &[usize],
-    ) -> Result<(), CudarcKernelError> {
+    fn spec_verify_dispatch(&mut self, draft_tokens: &[usize]) -> Result<(), CudarcKernelError> {
         let k = draft_tokens.len();
         assert!(
             (1..=SPEC_MAX_K).contains(&k),
@@ -2744,10 +2789,7 @@ impl TernaryDeltanetGpuForwardCudarc {
 
     /// Read one packed-argmax buffer (must already be synchronized).
     #[cfg(feature = "speculative_decode")]
-    fn read_argmax_buf(
-        &self,
-        buf: &CudaSlice<u64>,
-    ) -> Result<usize, CudarcKernelError> {
+    fn read_argmax_buf(&self, buf: &CudaSlice<u64>) -> Result<usize, CudarcKernelError> {
         let mut packed = [0u64; 1];
         self.infra
             .stream
@@ -2958,9 +3000,9 @@ impl TernaryDeltanetGpuForwardCudarc {
             } else {
                 forward_attention_layer(infra, acts, layer_idx, layer_w, eps, false)?;
             }
-            infra.elementwise.launch_residual_add(
-                &infra.stream, &acts.x, &acts.tmp, &acts.x, n,
-            )?;
+            infra
+                .elementwise
+                .launch_residual_add(&infra.stream, &acts.x, &acts.tmp, &acts.x, n)?;
             // Note: post-attn RMSNorm is fused into the FFN block below (Issue 623).
 
             // Record event B (before FFN GEMVs).
@@ -2974,9 +3016,15 @@ impl TernaryDeltanetGpuForwardCudarc {
             // (event B → C), not pre_gemv. The timing boundary shifts by one
             // kernel launch (~5 µs) — negligible for section analysis.
             rmsnorm_quantize_and_gemv_batch(
-                &infra.elementwise, &infra.stream, &infra.gemv_multi,
-                &acts.quant_i8_buf, &acts.ascale_buf,
-                &acts.x, &layer_w.post_attn_norm, eps, n,
+                &infra.elementwise,
+                &infra.stream,
+                &infra.gemv_multi,
+                &acts.quant_i8_buf,
+                &acts.ascale_buf,
+                &acts.x,
+                &layer_w.post_attn_norm,
+                eps,
+                n,
                 &[
                     (&layer_w.gate_proj, &acts.ffn_gate),
                     (&layer_w.up_proj, &acts.ffn_up),
@@ -2986,10 +3034,16 @@ impl TernaryDeltanetGpuForwardCudarc {
             // Issue 625 — fuse SwiGLU + quantize into one kernel, then dispatch
             // down_proj GEMV. Saves 1 launch + intermediate ffn_hidden traffic.
             swiglu_quantize_and_gemv(
-                &infra.elementwise, &infra.stream, &infra.gemv,
-                &acts.quant_i8_buf, &acts.ascale_buf,
-                &acts.ffn_gate, &acts.ffn_up, infra.config.mlp_hidden,
-                &layer_w.down_proj, &acts.ffn_out,
+                &infra.elementwise,
+                &infra.stream,
+                &infra.gemv,
+                &acts.quant_i8_buf,
+                &acts.ascale_buf,
+                &acts.ffn_gate,
+                &acts.ffn_up,
+                infra.config.mlp_hidden,
+                &layer_w.down_proj,
+                &acts.ffn_out,
             )?;
             gemv_count += 1;
 
@@ -3000,7 +3054,11 @@ impl TernaryDeltanetGpuForwardCudarc {
 
             // ── Residual add ──
             infra.elementwise.launch_residual_add(
-                &infra.stream, &acts.x, &acts.ffn_out, &acts.x, n,
+                &infra.stream,
+                &acts.x,
+                &acts.ffn_out,
+                &acts.x,
+                n,
             )?;
 
             // Record event D (end of layer).
@@ -3012,9 +3070,15 @@ impl TernaryDeltanetGpuForwardCudarc {
         // ── Final norm + lm_head (fused) ──
         // Issue 623 — fuse RMSNorm + quantize + lm_head GEMV.
         rmsnorm_quantize_and_gemv_batch(
-            &infra.elementwise, &infra.stream, &infra.gemv_multi,
-            &acts.quant_i8_buf, &acts.ascale_buf,
-            &acts.x, &infra.final_norm, eps, n,
+            &infra.elementwise,
+            &infra.stream,
+            &infra.gemv_multi,
+            &acts.quant_i8_buf,
+            &acts.ascale_buf,
+            &acts.x,
+            &infra.final_norm,
+            eps,
+            n,
             &[(&infra.lm_head, &acts.logits)],
         )?;
         gemv_count += 1;
@@ -3095,7 +3159,7 @@ impl TernaryDeltanetGpuForwardCudarc {
     /// Only the first `self.acts.pos` positions of the KV caches are valid
     /// (positions `0..self.acts.pos` were written by the prompt forward). The
     /// DeltaNet recurrent + conv states are overwritten wholesale.
-        /// Issue 879 T3 — diagnostic KV fake-quant hook: download one attention
+    /// Issue 879 T3 — diagnostic KV fake-quant hook: download one attention
     /// layer's KV-cache rows `[row0, row0+rows)` (`[rows][kvd]` each), hand
     /// them to the caller's transform, upload the result back. The T3
     /// KV-quant NLL arms quantize each chunk's own rows at chunk boundaries
@@ -3194,9 +3258,12 @@ impl TernaryDeltanetGpuForwardCudarc {
                     .map_err(|e| CudarcKernelError::Launch(e.to_string()))?;
                 let dst = &mut cache.deltanet_state.conv_states[i];
                 debug_assert_eq!(
-                    dst.len(), n,
+                    dst.len(),
+                    n,
                     "conv state size mismatch at layer {}: GPU={}, CPU={}",
-                    i, n, dst.len()
+                    i,
+                    n,
+                    dst.len()
                 );
                 dst.copy_from_slice(&tmp);
             }
@@ -3294,7 +3361,11 @@ impl TernaryDeltanetGpuForwardCudarc {
             }
             if let Some(ref mut handle) = acts.layer_states[i].conv_state {
                 let src = &cache.deltanet_state.conv_states[i];
-                debug_assert_eq!(src.len(), handle.len(), "conv state size mismatch at layer {i}");
+                debug_assert_eq!(
+                    src.len(),
+                    handle.len(),
+                    "conv state size mismatch at layer {i}"
+                );
                 infra
                     .stream
                     .memcpy_htod(src, handle)
@@ -3523,10 +3594,7 @@ fn forward_layers(
 }
 
 #[allow(dead_code)]
-fn guard_no_rotation(
-    infra: &ForwardInfraCudarc,
-    entry: &str,
-) -> Result<(), CudarcKernelError> {
+fn guard_no_rotation(infra: &ForwardInfraCudarc, entry: &str) -> Result<(), CudarcKernelError> {
     if infra.rotation.is_some() {
         return Err(CudarcKernelError::InvalidArg(format!(
             "{entry}: the Hadamard-folded (Bonsai-2) runtime is eager-path only (Issue 980 T4) — use forward_token()"
@@ -3568,7 +3636,15 @@ fn forward_layers_with_lora(
         // Issue 697 — the layer's out_proj GEMV accumulates directly into the
         // residual stream, so there is NO separate residual_add after the layer.
         if is_deltanet {
-            forward_deltanet_layer(infra, acts, layer_idx, layer_w, eps, lora_ctx.as_deref_mut(), true)?;
+            forward_deltanet_layer(
+                infra,
+                acts,
+                layer_idx,
+                layer_w,
+                eps,
+                lora_ctx.as_deref_mut(),
+                true,
+            )?;
         } else {
             forward_attention_layer(infra, acts, layer_idx, layer_w, eps, true)?;
         }
@@ -3760,7 +3836,9 @@ pub struct SectionProfile {
 fn dn_recurrence_fused_enabled() -> bool {
     static FUSED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     *FUSED.get_or_init(|| {
-        std::env::var("RIIR_BONSAI_DN_FUSED").map(|v| v != "0").unwrap_or(true)
+        std::env::var("RIIR_BONSAI_DN_FUSED")
+            .map(|v| v != "0")
+            .unwrap_or(true)
     })
 }
 
@@ -3798,12 +3876,12 @@ fn forward_deltanet_layer(
     // `norm_x`/`kernels` (shared) are disjoint.
     let layer_lora: Option<LoraLayerApply<'_>> = match lora_ctx {
         Some(ctx) => ctx.slots[layer_idx].as_mut().map(|slot| LoraLayerApply {
-                kernels: ctx.kernels,
-                norm_x: ctx.norm_x,
-                ax_q: &mut slot.ax_q,
-                ax_v: &mut slot.ax_v,
-                lora: &slot.lora,
-            }),
+            kernels: ctx.kernels,
+            norm_x: ctx.norm_x,
+            ax_q: &mut slot.ax_q,
+            ax_v: &mut slot.ax_v,
+            lora: &slot.lora,
+        }),
         None => None,
     };
 
@@ -3892,8 +3970,10 @@ fn forward_deltanet_layer(
                 &acts.rot_scratch,
                 &[(qkv_w, &acts.qkv), (z_w, &acts.z_buf)],
             )?;
-            rot.kernels.gemv_dense(&infra.stream, d_a, &acts.norm_x, &acts.a_raw, n_v_heads, n)?;
-            rot.kernels.gemv_dense(&infra.stream, d_b, &acts.norm_x, &acts.b_raw, n_v_heads, n)?;
+            rot.kernels
+                .gemv_dense(&infra.stream, d_a, &acts.norm_x, &acts.a_raw, n_v_heads, n)?;
+            rot.kernels
+                .gemv_dense(&infra.stream, d_b, &acts.norm_x, &acts.b_raw, n_v_heads, n)?;
         }
     } else if let Some(la) = layer_lora {
         // Ternary a/b exist only on pre-rotation files (the folded branch uses
@@ -3901,9 +3981,16 @@ fn forward_deltanet_layer(
         let a_w = layer_w.in_proj_a.as_ref().expect("in_proj_a");
         let b_w = layer_w.in_proj_b.as_ref().expect("in_proj_b");
         rmsnorm_quantize_and_gemv_batch_with_norm_x(
-            &infra.elementwise, &infra.stream, &infra.gemv_multi,
-            &acts.quant_i8_buf, &acts.ascale_buf,
-            &acts.x, &layer_w.input_norm, la.norm_x, eps, infra.config.n_embd,
+            &infra.elementwise,
+            &infra.stream,
+            &infra.gemv_multi,
+            &acts.quant_i8_buf,
+            &acts.ascale_buf,
+            &acts.x,
+            &layer_w.input_norm,
+            la.norm_x,
+            eps,
+            infra.config.n_embd,
             &[
                 (qkv_w, &acts.qkv),
                 (z_w, &acts.z_buf),
@@ -3919,17 +4006,30 @@ fn forward_deltanet_layer(
             &mut acts.qkv,
             la.ax_q,
             la.ax_v,
-            &la.lora.a_q, &la.lora.b_q, &la.lora.a_v, &la.lora.b_v,
-            la.lora.n_embd, la.lora.q_dim, k_dim, la.lora.v_dim,
-            la.lora.rank, la.lora.scale,
+            &la.lora.a_q,
+            &la.lora.b_q,
+            &la.lora.a_v,
+            &la.lora.b_v,
+            la.lora.n_embd,
+            la.lora.q_dim,
+            k_dim,
+            la.lora.v_dim,
+            la.lora.rank,
+            la.lora.scale,
         )?;
     } else {
         let a_w = layer_w.in_proj_a.as_ref().expect("in_proj_a");
         let b_w = layer_w.in_proj_b.as_ref().expect("in_proj_b");
         rmsnorm_quantize_and_gemv_batch(
-            &infra.elementwise, &infra.stream, &infra.gemv_multi,
-            &acts.quant_i8_buf, &acts.ascale_buf,
-            &acts.x, &layer_w.input_norm, eps, infra.config.n_embd,
+            &infra.elementwise,
+            &infra.stream,
+            &infra.gemv_multi,
+            &acts.quant_i8_buf,
+            &acts.ascale_buf,
+            &acts.x,
+            &layer_w.input_norm,
+            eps,
+            infra.config.n_embd,
             &[
                 (qkv_w, &acts.qkv),
                 (z_w, &acts.z_buf),
@@ -4000,7 +4100,9 @@ fn forward_deltanet_layer(
                 RecStateBuf::half_fmt_from_env().unwrap_or(HalfStateFmt::F16),
             )?;
         }
-        RecStateBuf::F32(state_f32) if dn_recurrence_fused_enabled() && matches!(head_dim, 64 | 128 | 256) => {
+        RecStateBuf::F32(state_f32)
+            if dn_recurrence_fused_enabled() && matches!(head_dim, 64 | 128 | 256) =>
+        {
             infra.deltanet.launch_recurrence_fused(
                 &infra.stream,
                 &acts.qkv_expanded,
@@ -4266,11 +4368,7 @@ fn forward_attention_layer(
                 &infra.gemv_multi,
                 &acts.quant_i8_buf,
                 &acts.ascale_buf,
-                &[
-                    (wq, &acts.attn_qg),
-                    (wk, &acts.attn_k),
-                    (wv, &acts.attn_v),
-                ],
+                &[(wq, &acts.attn_qg), (wk, &acts.attn_k), (wv, &acts.attn_v)],
                 false,
             )?;
         } else {
@@ -4301,23 +4399,21 @@ fn forward_attention_layer(
                 &acts.quant_i8_buf,
                 &acts.ascale_buf,
                 &acts.rot_scratch,
-                &[
-                    (wq, &acts.attn_qg),
-                    (wk, &acts.attn_k),
-                    (wv, &acts.attn_v),
-                ],
+                &[(wq, &acts.attn_qg), (wk, &acts.attn_k), (wv, &acts.attn_v)],
             )?;
         }
     } else {
         rmsnorm_quantize_and_gemv_batch(
-            &infra.elementwise, &infra.stream, &infra.gemv_multi,
-            &acts.quant_i8_buf, &acts.ascale_buf,
-            &acts.x, &layer_w.input_norm, eps, infra.config.n_embd,
-            &[
-                (wq, &acts.attn_qg),
-                (wk, &acts.attn_k),
-                (wv, &acts.attn_v),
-            ],
+            &infra.elementwise,
+            &infra.stream,
+            &infra.gemv_multi,
+            &acts.quant_i8_buf,
+            &acts.ascale_buf,
+            &acts.x,
+            &layer_w.input_norm,
+            eps,
+            infra.config.n_embd,
+            &[(wq, &acts.attn_qg), (wk, &acts.attn_k), (wv, &acts.attn_v)],
         )?;
     }
 
@@ -4532,9 +4628,16 @@ fn forward_deltanet_layer_training(
 
     // 1-4. Input projections with norm_x side-buffer write (training mode).
     rmsnorm_quantize_and_gemv_batch_with_norm_x(
-        &infra.elementwise, &infra.stream, &infra.gemv_multi,
-        &acts.quant_i8_buf, &acts.ascale_buf,
-        &acts.x, &layer_w.input_norm, &acts.final_norm_x, eps, infra.config.n_embd,
+        &infra.elementwise,
+        &infra.stream,
+        &infra.gemv_multi,
+        &acts.quant_i8_buf,
+        &acts.ascale_buf,
+        &acts.x,
+        &layer_w.input_norm,
+        &acts.final_norm_x,
+        eps,
+        infra.config.n_embd,
         &[
             (qkv_w, &acts.qkv),
             (z_w, &acts.z_buf),
@@ -4550,36 +4653,62 @@ fn forward_deltanet_layer_training(
     // layer returns (so the cached norm_x stays the PRE-adapter projection
     // input, exactly what the host-side LoRA-grad math consumes).
     if let Some(ctx) = lora_ctx
-        && let Some(slot) = ctx.slots[layer_idx].as_mut() {
-            let k_dim = q_dim; // DeltaNet: k_dim == q_dim
-            ctx.kernels.launch_qv_apply(
-                &infra.stream,
-                &acts.final_norm_x,
-                &mut acts.qkv,
-                &mut slot.ax_q,
-                &mut slot.ax_v,
-                &slot.lora.a_q, &slot.lora.b_q, &slot.lora.a_v, &slot.lora.b_v,
-                slot.lora.n_embd, slot.lora.q_dim, k_dim, slot.lora.v_dim,
-                slot.lora.rank, slot.lora.scale,
-            )?;
-        }
+        && let Some(slot) = ctx.slots[layer_idx].as_mut()
+    {
+        let k_dim = q_dim; // DeltaNet: k_dim == q_dim
+        ctx.kernels.launch_qv_apply(
+            &infra.stream,
+            &acts.final_norm_x,
+            &mut acts.qkv,
+            &mut slot.ax_q,
+            &mut slot.ax_v,
+            &slot.lora.a_q,
+            &slot.lora.b_q,
+            &slot.lora.a_v,
+            &slot.lora.b_v,
+            slot.lora.n_embd,
+            slot.lora.q_dim,
+            k_dim,
+            slot.lora.v_dim,
+            slot.lora.rank,
+            slot.lora.scale,
+        )?;
+    }
 
     // 5. Conv1d + SiLU
     let conv_state = acts.layer_states[layer_idx]
-        .conv_state.as_ref().expect("conv_state");
+        .conv_state
+        .as_ref()
+        .expect("conv_state");
     infra.deltanet.launch_conv1d(
-        &infra.stream, &acts.qkv, conv1d_w, conv_state, conv_dim, kernel_size,
+        &infra.stream,
+        &acts.qkv,
+        conv1d_w,
+        conv_state,
+        conv_dim,
+        kernel_size,
     )?;
 
     // 6. Beta/decay
     infra.deltanet.launch_beta_decay(
-        &infra.stream, &acts.a_raw, &acts.b_raw, a_log, dt_bias,
-        &acts.beta_buf, &acts.decay_buf, n_v_heads,
+        &infra.stream,
+        &acts.a_raw,
+        &acts.b_raw,
+        a_log,
+        dt_bias,
+        &acts.beta_buf,
+        &acts.decay_buf,
+        n_v_heads,
     )?;
 
     // 7. Expand Q/K + L2-norm + copy V
     infra.deltanet.launch_expand_and_l2_normalize(
-        &infra.stream, &acts.qkv, &acts.qkv_expanded, n_k_heads, n_v_heads, head_dim,
+        &infra.stream,
+        &acts.qkv,
+        &acts.qkv_expanded,
+        n_k_heads,
+        n_v_heads,
+        head_dim,
     )?;
 
     // 8. Recurrence (Plan 603 R1 — fused single-pass default, the same
@@ -4601,27 +4730,54 @@ fn forward_deltanet_layer_training(
     };
     if dn_recurrence_fused_enabled() && matches!(head_dim, 64 | 128 | 256) {
         infra.deltanet.launch_recurrence_fused(
-            &infra.stream, &acts.qkv_expanded, &acts.beta_buf, &acts.decay_buf,
-            state_f32, &acts.recurrent_out, head_dim, n_v_heads,
+            &infra.stream,
+            &acts.qkv_expanded,
+            &acts.beta_buf,
+            &acts.decay_buf,
+            state_f32,
+            &acts.recurrent_out,
+            head_dim,
+            n_v_heads,
         )?;
     } else if cfg!(feature = "deltanet_recurrence_parallel") {
         infra.deltanet.launch_recurrence_parallel(
-            &infra.stream, &acts.qkv_expanded, &acts.beta_buf, &acts.decay_buf,
-            state_f32, &acts.recurrent_out, head_dim, n_v_heads,
+            &infra.stream,
+            &acts.qkv_expanded,
+            &acts.beta_buf,
+            &acts.decay_buf,
+            state_f32,
+            &acts.recurrent_out,
+            head_dim,
+            n_v_heads,
         )?;
     } else {
         infra.deltanet.launch_recurrence(
-            &infra.stream, &acts.qkv_expanded, &acts.beta_buf, &acts.decay_buf,
-            state_f32, &acts.recurrent_out, head_dim, n_v_heads,
+            &infra.stream,
+            &acts.qkv_expanded,
+            &acts.beta_buf,
+            &acts.decay_buf,
+            state_f32,
+            &acts.recurrent_out,
+            head_dim,
+            n_v_heads,
         )?;
     }
 
     // 9-11. Per-head RMSNorm + z gating + output projection (FUSED).
     rmsnorm_gate_silu_quantize_and_gemv(
-        &infra.elementwise, &infra.stream, &infra.gemv_multi,
-        &acts.quant_i8_buf, &acts.ascale_buf,
-        &acts.recurrent_out, &acts.z_buf, linear_norm,
-        n_v_heads, head_dim, eps, out_w, &acts.tmp,
+        &infra.elementwise,
+        &infra.stream,
+        &infra.gemv_multi,
+        &acts.quant_i8_buf,
+        &acts.ascale_buf,
+        &acts.recurrent_out,
+        &acts.z_buf,
+        linear_norm,
+        n_v_heads,
+        head_dim,
+        eps,
+        out_w,
+        &acts.tmp,
     )?;
     Ok(())
 }
@@ -4659,49 +4815,93 @@ fn forward_attention_layer_training(
 
     // 1. Q (gated), K, V projections with norm_x side-buffer write (training).
     rmsnorm_quantize_and_gemv_batch_with_norm_x(
-        &infra.elementwise, &infra.stream, &infra.gemv_multi,
-        &acts.quant_i8_buf, &acts.ascale_buf,
-        &acts.x, &layer_w.input_norm, &acts.final_norm_x, eps, infra.config.n_embd,
-        &[
-            (wq, &acts.attn_qg),
-            (wk, &acts.attn_k),
-            (wv, &acts.attn_v),
-        ],
+        &infra.elementwise,
+        &infra.stream,
+        &infra.gemv_multi,
+        &acts.quant_i8_buf,
+        &acts.ascale_buf,
+        &acts.x,
+        &layer_w.input_norm,
+        &acts.final_norm_x,
+        eps,
+        infra.config.n_embd,
+        &[(wq, &acts.attn_qg), (wk, &acts.attn_k), (wv, &acts.attn_v)],
     )?;
 
     // 2. Split QG into Q and gate
     infra.attention.launch_split_qg(
-        &infra.stream, &acts.attn_qg, &acts.attn_q, &acts.attn_gate, hd, n_head,
+        &infra.stream,
+        &acts.attn_qg,
+        &acts.attn_q,
+        &acts.attn_gate,
+        hd,
+        n_head,
     )?;
 
     // 3. Per-head RMSNorm on Q and K (in-place)
     infra.attention.launch_rmsnorm_batched(
-        &infra.stream, &acts.attn_q, q_norm, &acts.attn_q, n_head, hd, eps,
+        &infra.stream,
+        &acts.attn_q,
+        q_norm,
+        &acts.attn_q,
+        n_head,
+        hd,
+        eps,
     )?;
     infra.attention.launch_rmsnorm_batched(
-        &infra.stream, &acts.attn_k, k_norm, &acts.attn_k, n_kv, hd, eps,
+        &infra.stream,
+        &acts.attn_k,
+        k_norm,
+        &acts.attn_k,
+        n_kv,
+        hd,
+        eps,
     )?;
 
     // 4. Partial RoPE on Q and K (in-place)
     infra.attention.launch_rope(
-        &infra.stream, &acts.attn_q, &acts.attn_k, rotary_dim, hd, n_head, n_kv,
-        pos, theta_base,
+        &infra.stream,
+        &acts.attn_q,
+        &acts.attn_k,
+        rotary_dim,
+        hd,
+        n_head,
+        n_kv,
+        pos,
+        theta_base,
     )?;
 
     // 5. Append K, V to KV cache
     let key_cache = acts.layer_states[layer_idx]
-        .key_cache.as_ref().expect("key_cache");
+        .key_cache
+        .as_ref()
+        .expect("key_cache");
     let value_cache = acts.layer_states[layer_idx]
-        .value_cache.as_ref().expect("value_cache");
+        .value_cache
+        .as_ref()
+        .expect("value_cache");
     infra.attention.launch_kv_cache_append(
-        &infra.stream, &acts.attn_k, &acts.attn_v, key_cache, value_cache, kvd, pos,
+        &infra.stream,
+        &acts.attn_k,
+        &acts.attn_v,
+        key_cache,
+        value_cache,
+        kvd,
+        pos,
     )?;
 
     // 6. Flash attention decode
     let n_positions = pos + 1;
     infra.attention.launch_attention_decode(
-        &infra.stream, &acts.attn_q, key_cache, value_cache, &acts.attn_out,
-        hd, n_head, n_kv, n_positions,
+        &infra.stream,
+        &acts.attn_q,
+        key_cache,
+        value_cache,
+        &acts.attn_out,
+        hd,
+        n_head,
+        n_kv,
+        n_positions,
     )?;
 
     // Issue 492 T1 GPU lane - capture tap. Whole k/v cache buffers are
@@ -4756,9 +4956,16 @@ fn forward_attention_layer_training(
 
     // 7-8. Output gating + output projection (FUSED with quantize)
     gate_sigmoid_quantize_and_gemv(
-        &infra.elementwise, &infra.stream, &infra.gemv_multi,
-        &acts.quant_i8_buf, &acts.ascale_buf,
-        &acts.attn_out, &acts.attn_gate, q_dim, wo, &acts.tmp,
+        &infra.elementwise,
+        &infra.stream,
+        &infra.gemv_multi,
+        &acts.quant_i8_buf,
+        &acts.ascale_buf,
+        &acts.attn_out,
+        &acts.attn_gate,
+        q_dim,
+        wo,
+        &acts.tmp,
     )?;
     Ok(())
 }
@@ -4835,11 +5042,7 @@ fn forward_attention_layer_devpos(
                 &infra.gemv_multi,
                 &acts.quant_i8_buf,
                 &acts.ascale_buf,
-                &[
-                    (wq, &acts.attn_qg),
-                    (wk, &acts.attn_k),
-                    (wv, &acts.attn_v),
-                ],
+                &[(wq, &acts.attn_qg), (wk, &acts.attn_k), (wv, &acts.attn_v)],
                 false,
             )?;
         } else {
@@ -4870,23 +5073,21 @@ fn forward_attention_layer_devpos(
                 &acts.quant_i8_buf,
                 &acts.ascale_buf,
                 &acts.rot_scratch,
-                &[
-                    (wq, &acts.attn_qg),
-                    (wk, &acts.attn_k),
-                    (wv, &acts.attn_v),
-                ],
+                &[(wq, &acts.attn_qg), (wk, &acts.attn_k), (wv, &acts.attn_v)],
             )?;
         }
     } else {
         rmsnorm_quantize_and_gemv_batch(
-            &infra.elementwise, &infra.stream, &infra.gemv_multi,
-            &acts.quant_i8_buf, &acts.ascale_buf,
-            &acts.x, &layer_w.input_norm, eps, infra.config.n_embd,
-            &[
-                (wq, &acts.attn_qg),
-                (wk, &acts.attn_k),
-                (wv, &acts.attn_v),
-            ],
+            &infra.elementwise,
+            &infra.stream,
+            &infra.gemv_multi,
+            &acts.quant_i8_buf,
+            &acts.ascale_buf,
+            &acts.x,
+            &layer_w.input_norm,
+            eps,
+            infra.config.n_embd,
+            &[(wq, &acts.attn_qg), (wk, &acts.attn_k), (wv, &acts.attn_v)],
         )?;
     }
 
@@ -5091,13 +5292,8 @@ fn forward_from_x_devpos(
         && rot.inverse_embedding
     {
         let signs = rot.signs_for_width(n);
-        rot.kernels.fwht_rotate_inverse(
-            &infra.stream,
-            &acts.x,
-            signs,
-            n,
-            rot.block_size,
-        )?;
+        rot.kernels
+            .fwht_rotate_inverse(&infra.stream, &acts.x, signs, n, rot.block_size)?;
     }
 
     for layer_idx in 0..infra.config.n_layer {
@@ -5112,7 +5308,15 @@ fn forward_from_x_devpos(
         // residual stream (out[row] += acc), so there is NO separate
         // residual_add after the layer.
         if is_deltanet {
-            forward_deltanet_layer(infra, acts, layer_idx, layer_w, eps, lora_ctx.as_deref_mut(), true)?;
+            forward_deltanet_layer(
+                infra,
+                acts,
+                layer_idx,
+                layer_w,
+                eps,
+                lora_ctx.as_deref_mut(),
+                true,
+            )?;
         } else {
             forward_attention_layer_devpos(infra, acts, layer_idx, layer_w, eps, true)?;
         }
@@ -5541,7 +5745,10 @@ fn gemv_prequantized_multi(
     gemvs: &[(&WeightBuffersCudarc, &CudaSlice<f32>)],
     accumulate: bool,
 ) -> Result<(), CudarcKernelError> {
-    debug_assert!(gemvs.len() <= 4, "Issue 697: multi-GEMV supports up to 4 segments");
+    debug_assert!(
+        gemvs.len() <= 4,
+        "Issue 697: multi-GEMV supports up to 4 segments"
+    );
     if gemvs.is_empty() {
         return Ok(());
     }
@@ -5562,7 +5769,12 @@ fn gemv_prequantized_multi(
         segs.push(segs[0]);
     }
 
-    let m: [i32; 4] = segs.iter().map(|(w, _)| w.m as i32).collect::<Vec<_>>().try_into().unwrap();
+    let m: [i32; 4] = segs
+        .iter()
+        .map(|(w, _)| w.m as i32)
+        .collect::<Vec<_>>()
+        .try_into()
+        .unwrap();
     let int16_per_row = (n / 8) as i32;
     let groups_per_row = n.div_ceil(128) as i32;
     let ablock_i32 = 16i32;
@@ -5610,7 +5822,9 @@ fn gemv_prequantized_multi(
         shared_mem_bytes: 0,
     };
 
-    let [s0, s1, s2, s3] = segs.as_slice() else { unreachable!() };
+    let [s0, s1, s2, s3] = segs.as_slice() else {
+        unreachable!()
+    };
     let gemv_fn = if use_pf {
         &gemv_multi.function_pf
     } else if use_r2 {
@@ -5725,9 +5939,7 @@ fn rmsnorm_quantize_and_gemv_batch(
         return Ok(());
     }
     // Fused RMSNorm + quantize — writes int8 + ascale directly.
-    elementwise.launch_rmsnorm_quantize(
-        stream, x, gamma, quant_i8_buf, ascale_buf, dim, eps,
-    )?;
+    elementwise.launch_rmsnorm_quantize(stream, x, gamma, quant_i8_buf, ascale_buf, dim, eps)?;
     for (weights, _) in gemvs {
         debug_assert_eq!(
             weights.n, dim,
@@ -5766,13 +5978,27 @@ fn rmsnorm_quantize_and_gemv_batch_with_norm_x(
         // the sided kernel even if the GEMV is empty. Quantize-only path is
         // fine — the launcher doesn't know about GEMVs.
         elementwise.launch_rmsnorm_quantize_with_norm_x(
-            stream, x, gamma, quant_i8_buf, ascale_buf, norm_x_out, dim, eps,
+            stream,
+            x,
+            gamma,
+            quant_i8_buf,
+            ascale_buf,
+            norm_x_out,
+            dim,
+            eps,
         )?;
         return Ok(());
     }
     // Fused RMSNorm + quantize + norm_x side write.
     elementwise.launch_rmsnorm_quantize_with_norm_x(
-        stream, x, gamma, quant_i8_buf, ascale_buf, norm_x_out, dim, eps,
+        stream,
+        x,
+        gamma,
+        quant_i8_buf,
+        ascale_buf,
+        norm_x_out,
+        dim,
+        eps,
     )?;
     for (weights, _) in gemvs {
         debug_assert_eq!(
@@ -5812,9 +6038,7 @@ fn swiglu_quantize_and_gemv(
         "Issue 625: GEMV input dim must match SwiGLU dim"
     );
     // Fused SwiGLU + quantize — writes int8 + ascale directly.
-    elementwise.launch_swiglu_quantize(
-        stream, gate, up, quant_i8_buf, ascale_buf, n,
-    )?;
+    elementwise.launch_swiglu_quantize(stream, gate, up, quant_i8_buf, ascale_buf, n)?;
     gemv_prequantized(stream, gemv, quant_i8_buf, ascale_buf, weights, out)?;
     Ok(())
 }
@@ -5852,9 +6076,7 @@ fn gate_silu_quantize_and_gemv(
         "Issue 626: GEMV input dim must match gated-output dim"
     );
     // Fused silu-gate + quantize — writes int8 + ascale directly.
-    elementwise.launch_gate_silu_quantize(
-        stream, x, gate, quant_i8_buf, ascale_buf, n,
-    )?;
+    elementwise.launch_gate_silu_quantize(stream, x, gate, quant_i8_buf, ascale_buf, n)?;
     gemv_prequantized(stream, gemv, quant_i8_buf, ascale_buf, weights, out)?;
     Ok(())
 }
@@ -5894,10 +6116,15 @@ fn gate_sigmoid_quantize_and_gemv(
         "Issue 626: GEMV input dim must match gated-output dim"
     );
     // Fused sigmoid-gate + quantize — writes int8 + ascale directly.
-    elementwise.launch_gate_sigmoid_quantize(
-        stream, x, gate, quant_i8_buf, ascale_buf, n,
+    elementwise.launch_gate_sigmoid_quantize(stream, x, gate, quant_i8_buf, ascale_buf, n)?;
+    gemv_prequantized_multi(
+        stream,
+        gemv,
+        quant_i8_buf,
+        ascale_buf,
+        &[(weights, out)],
+        false,
     )?;
-    gemv_prequantized_multi(stream, gemv, quant_i8_buf, ascale_buf, &[(weights, out)], false)?;
     Ok(())
 }
 
@@ -5940,9 +6167,24 @@ fn rmsnorm_gate_silu_quantize_and_gemv(
     );
     // Fused per-head RMSNorm + silu-gate + quantize — writes int8 + ascale.
     elementwise.launch_rmsnorm_gate_silu_quantize(
-        stream, x, gate, gamma, quant_i8_buf, ascale_buf, n_v_heads, head_dim, eps,
+        stream,
+        x,
+        gate,
+        gamma,
+        quant_i8_buf,
+        ascale_buf,
+        n_v_heads,
+        head_dim,
+        eps,
     )?;
-    gemv_prequantized_multi(stream, gemv, quant_i8_buf, ascale_buf, &[(weights, out)], false)?;
+    gemv_prequantized_multi(
+        stream,
+        gemv,
+        quant_i8_buf,
+        ascale_buf,
+        &[(weights, out)],
+        false,
+    )?;
     Ok(())
 }
 
@@ -5972,7 +6214,8 @@ fn swiglu_quantize_and_gemv_accum(
         "Issue 697: GEMV input dim must match SwiGLU dim"
     );
     debug_assert_eq!(
-        weights.m, out_x.len(),
+        weights.m,
+        out_x.len(),
         "Issue 697: accumulate GEMV requires m == residual length (n_embd)"
     );
     elementwise.launch_swiglu_quantize(stream, gate, up, quant_i8_buf, ascale_buf, n)?;
@@ -6014,11 +6257,20 @@ fn rmsnorm_gate_silu_quantize_and_gemv_accum(
         "Issue 697: GEMV input dim must match recurrent_out dim"
     );
     debug_assert_eq!(
-        weights.m, out_x.len(),
+        weights.m,
+        out_x.len(),
         "Issue 697: accumulate GEMV requires m == residual length (n_embd)"
     );
     elementwise.launch_rmsnorm_gate_silu_quantize(
-        stream, x, gate, gamma, quant_i8_buf, ascale_buf, n_v_heads, head_dim, eps,
+        stream,
+        x,
+        gate,
+        gamma,
+        quant_i8_buf,
+        ascale_buf,
+        n_v_heads,
+        head_dim,
+        eps,
     )?;
     gemv_prequantized_multi(
         stream,
@@ -6054,7 +6306,8 @@ fn gate_sigmoid_quantize_and_gemv_accum(
         "Issue 697: GEMV input dim must match gated-output dim"
     );
     debug_assert_eq!(
-        weights.m, out_x.len(),
+        weights.m,
+        out_x.len(),
         "Issue 697: accumulate GEMV requires m == residual length (n_embd)"
     );
     elementwise.launch_gate_sigmoid_quantize(stream, x, gate, quant_i8_buf, ascale_buf, n)?;
@@ -6181,8 +6434,18 @@ fn upload_layer_weights_cudarc(
         // Issue 980: in_proj_a/b are the GateProjWeights escape-set enum —
         // ternary goes to the dp4a buffers, dense (Bonsai-2) to the fp32
         // escape-set slices consumed by `gemv_dense_f32`.
-        in_proj_a: maybe_upload(stream, l.in_proj_a.as_ternary().unwrap_or(&katgpt_core::TernaryGroupWeights::new(0, 0))),
-        in_proj_b: maybe_upload(stream, l.in_proj_b.as_ternary().unwrap_or(&katgpt_core::TernaryGroupWeights::new(0, 0))),
+        in_proj_a: maybe_upload(
+            stream,
+            l.in_proj_a
+                .as_ternary()
+                .unwrap_or(&katgpt_core::TernaryGroupWeights::new(0, 0)),
+        ),
+        in_proj_b: maybe_upload(
+            stream,
+            l.in_proj_b
+                .as_ternary()
+                .unwrap_or(&katgpt_core::TernaryGroupWeights::new(0, 0)),
+        ),
         out_proj: maybe_upload(stream, &l.out_proj),
         attn_wq: maybe_upload(stream, &l.attn_wq),
         attn_wk: maybe_upload(stream, &l.attn_wk),
@@ -6193,12 +6456,36 @@ fn upload_layer_weights_cudarc(
         down_proj: WeightBuffersCudarc::upload(stream, &l.down_proj),
         input_norm: upload_f32_slice(stream, &l.input_norm),
         post_attn_norm: upload_f32_slice(stream, &l.post_attn_norm),
-        conv1d_weight: if l.conv1d_weight.is_empty() { None } else { Some(upload_f32_slice(stream, &l.conv1d_weight)) },
-        a_log: if l.a_log.is_empty() { None } else { Some(upload_f32_slice(stream, &l.a_log)) },
-        dt_bias: if l.dt_bias.is_empty() { None } else { Some(upload_f32_slice(stream, &l.dt_bias)) },
-        linear_norm: if l.linear_norm.is_empty() { None } else { Some(upload_f32_slice(stream, &l.linear_norm)) },
-        attn_q_norm: if l.attn_q_norm.is_empty() { None } else { Some(upload_f32_slice(stream, &l.attn_q_norm)) },
-        attn_k_norm: if l.attn_k_norm.is_empty() { None } else { Some(upload_f32_slice(stream, &l.attn_k_norm)) },
+        conv1d_weight: if l.conv1d_weight.is_empty() {
+            None
+        } else {
+            Some(upload_f32_slice(stream, &l.conv1d_weight))
+        },
+        a_log: if l.a_log.is_empty() {
+            None
+        } else {
+            Some(upload_f32_slice(stream, &l.a_log))
+        },
+        dt_bias: if l.dt_bias.is_empty() {
+            None
+        } else {
+            Some(upload_f32_slice(stream, &l.dt_bias))
+        },
+        linear_norm: if l.linear_norm.is_empty() {
+            None
+        } else {
+            Some(upload_f32_slice(stream, &l.linear_norm))
+        },
+        attn_q_norm: if l.attn_q_norm.is_empty() {
+            None
+        } else {
+            Some(upload_f32_slice(stream, &l.attn_q_norm))
+        },
+        attn_k_norm: if l.attn_k_norm.is_empty() {
+            None
+        } else {
+            Some(upload_f32_slice(stream, &l.attn_k_norm))
+        },
     }
 }
 
@@ -6206,7 +6493,11 @@ fn maybe_upload(
     stream: &Arc<CudaStream>,
     w: &katgpt_core::TernaryGroupWeights,
 ) -> Option<WeightBuffersCudarc> {
-    if w.rows == 0 { None } else { Some(WeightBuffersCudarc::upload(stream, w)) }
+    if w.rows == 0 {
+        None
+    } else {
+        Some(WeightBuffersCudarc::upload(stream, w))
+    }
 }
 
 #[cfg(test)]
@@ -6230,17 +6521,18 @@ mod tests {
     fn f16_converter_roundtrip_matches_half_crate() {
         // Edge values + a deterministic LCG sweep over the f32 population.
         let edges = [
-            0.0f32, -0.0,
-            f32::MIN_POSITIVE * 2.0,          // deep subnormal region input
-            5.9604645e-8,                      // 2^-24, smallest f16 subnormal
-            2.9802322e-8,                      // 2^-25, the half-tip tie
-            6.097555e-5,                       // largest subnormal
-            6.1035156e-5,                      // smallest normal 2^-14
+            0.0f32,
+            -0.0,
+            f32::MIN_POSITIVE * 2.0, // deep subnormal region input
+            5.9604645e-8,            // 2^-24, smallest f16 subnormal
+            2.9802322e-8,            // 2^-25, the half-tip tie
+            6.097555e-5,             // largest subnormal
+            6.1035156e-5,            // smallest normal 2^-14
             1.0,
-            1.0009766,                         // smallest normal step
-            65504.0,                          // f16 max
-            65519.0,                          // rounds DOWN to 65504
-            65520.0,                          // the tie → inf (even rule)
+            1.0009766, // smallest normal step
+            65504.0,   // f16 max
+            65519.0,   // rounds DOWN to 65504
+            65520.0,   // the tie → inf (even rule)
             1e30,
             f32::INFINITY,
             f32::NAN,
@@ -6267,7 +6559,10 @@ mod tests {
             }
             let want = half::f16::from_f32(x).to_bits();
             let got = f32_to_f16_bits_rn(x);
-            assert_eq!(got, want, "f16 bits mismatch at {x}: got {got:04x} want {want:04x}");
+            assert_eq!(
+                got, want,
+                "f16 bits mismatch at {x}: got {got:04x} want {want:04x}"
+            );
             // Widen must invert exactly what the reference widens.
             let back_got = f16_bits_to_f32(got);
             let back_want = half::f16::from_bits(want).to_f32();
@@ -6288,7 +6583,16 @@ mod tests {
             z = (z ^ (z >> 30)).wrapping_mul(0xbf58476d1ce4e5b9);
             z ^ (z >> 31)
         };
-        let mut xs: Vec<f32> = vec![0.0, -0.0, 1.0, -1.0, 3.140625, f32::MAX, f32::MIN, f32::INFINITY];
+        let mut xs: Vec<f32> = vec![
+            0.0,
+            -0.0,
+            1.0,
+            -1.0,
+            3.140625,
+            f32::MAX,
+            f32::MIN,
+            f32::INFINITY,
+        ];
         for _ in 0..200_000 {
             xs.push(f32::from_bits(next() as u32));
         }
@@ -6350,10 +6654,13 @@ mod tests {
 
         let config = small_test_config();
         let weights = QwenDeltaNetTernaryWeights::zeros(&config);
-        assert!(weights.invariants_hold(), "zero weights should pass invariant check");
+        assert!(
+            weights.invariants_hold(),
+            "zero weights should pass invariant check"
+        );
 
-        let mut fwd = TernaryDeltanetGpuForwardCudarc::new(&config, &weights)
-            .expect("construct forward");
+        let mut fwd =
+            TernaryDeltanetGpuForwardCudarc::new(&config, &weights).expect("construct forward");
 
         fwd.set_input_token(0).expect("set_input_token");
         let logits = fwd.forward_token().expect("forward_token");
@@ -6455,10 +6762,7 @@ mod tests {
         let err = fwd
             .set_lora(config.n_layer, &lora)
             .expect_err("out-of-range idx must be rejected");
-        assert!(
-            err.to_string().contains("n_layer"),
-            "got: {err}"
-        );
+        assert!(err.to_string().contains("n_layer"), "got: {err}");
         // The one DeltaNet layer (idx 1) is accepted.
         fwd.set_lora(1, &lora).expect("DeltaNet layer accepted");
     }
@@ -6599,7 +6903,9 @@ mod tests {
                 config.deltanet_linear_head_dim,
                 config.n_embd,
             );
-            let (logits, _) = fwd.forward_token_training(&mut cache).expect("frozen train fwd");
+            let (logits, _) = fwd
+                .forward_token_training(&mut cache)
+                .expect("frozen train fwd");
             logits
         };
 
@@ -6651,8 +6957,14 @@ mod tests {
         let q_dim = config.deltanet_linear_n_heads * config.deltanet_linear_head_dim;
         let v_dim = config.deltanet_linear_n_value_heads * config.deltanet_linear_head_dim;
         // B = 0 by construction (QvLora::new zero-inits the up-projections).
-        let adapter =
-            riir_infer_core::deltanet::qv_lora::QvLora::new(8, config.n_embd, q_dim, v_dim, 4.0, &mut rng);
+        let adapter = riir_infer_core::deltanet::qv_lora::QvLora::new(
+            8,
+            config.n_embd,
+            q_dim,
+            v_dim,
+            4.0,
+            &mut rng,
+        );
         assert!(adapter.b_q.iter().all(|&v| v == 0.0), "B must be zero");
 
         let (frozen_logits, adapted_logits) = {
@@ -6737,7 +7049,9 @@ mod tests {
             adapted_off.set_lora_forward_enabled(false);
             assert!(!adapted_off.lora_forward_enabled());
             adapted_off.set_input_token(2).expect("set token");
-            let off = adapted_off.forward_token().expect("switched-off decode pos0");
+            let off = adapted_off
+                .forward_token()
+                .expect("switched-off decode pos0");
             (f0, on, off)
         };
 
@@ -6758,7 +7072,10 @@ mod tests {
             .map(|(a, b)| (a - b).abs())
             .fold(0.0f32, f32::max);
         eprintln!("[504-T1c] switch-off decode (pos0) max_diff = {max_diff:.3e}");
-        assert_eq!(max_diff, 0.0, "switch-off must freeze the decode forward exactly");
+        assert_eq!(
+            max_diff, 0.0,
+            "switch-off must freeze the decode forward exactly"
+        );
     }
 
     /// Issue 504 T1 G1d — `update_lora_layer_weights` must refresh the slot
@@ -6774,14 +7091,14 @@ mod tests {
         };
         let config = small_test_config();
         let weights = QwenDeltaNetTernaryWeights::zeros(&config);
-        let mut fwd =
-            TernaryDeltanetGpuForwardCudarc::new(&config, &weights).expect("fwd");
+        let mut fwd = TernaryDeltanetGpuForwardCudarc::new(&config, &weights).expect("fwd");
         let a1 = nonzero_b_adapter(&config, 21);
         let a2 = nonzero_b_adapter(&config, 22);
         assert_eq!(a1.rank, a2.rank, "test adapters must share the shape");
         fwd.update_lora_layer_weights(1, &a1).expect("first attach");
         assert_eq!(fwd.attached_lora_layers(), 1);
-        fwd.update_lora_layer_weights(1, &a2).expect("in-place refresh");
+        fwd.update_lora_layer_weights(1, &a2)
+            .expect("in-place refresh");
         assert_eq!(fwd.attached_lora_layers(), 1, "update must NOT re-attach");
         // Shape mismatch is loud.
         let mut rng = katgpt_core::Rng::new(5);
@@ -6864,9 +7181,8 @@ mod tests {
         // NOTE: graph capture requires the `new_graph_ready` construction
         // (event tracking off + dedicated non-blocking stream — capturing on
         // the default stream fails with CUDA_ERROR_STREAM_CAPTURE_UNSUPPORTED).
-        let mut mixed =
-            TernaryDeltanetGpuForwardCudarc::new_graph_ready(&config, &weights)
-                .expect("construct mixed");
+        let mut mixed = TernaryDeltanetGpuForwardCudarc::new_graph_ready(&config, &weights)
+            .expect("construct mixed");
         let g1 = mixed
             .forward_token_graph(tokens[0])
             .expect("graph forward (captures)");

@@ -264,18 +264,24 @@ impl SafetensorsFile {
                 // bf16 -> f32: the 16 bits become the HIGH half of the f32.
                 // from_le_bytes([0, 0, lo, hi]) places lo at byte 2 and hi at
                 // byte 3 — exactly `bf16_bits << 16` with NO further shift.
-                out.extend(raw.as_chunks::<2>().0.iter().map(|c| {
-                    f32::from_bits(u32::from_le_bytes([0, 0, c[0], c[1]]))
-                }));
+                out.extend(
+                    raw.as_chunks::<2>()
+                        .0
+                        .iter()
+                        .map(|c| f32::from_bits(u32::from_le_bytes([0, 0, c[0], c[1]]))),
+                );
             }
             "F32" => {
                 let mut raw = vec![0u8; n * 4];
                 self.file
                     .read_exact(&mut raw)
                     .map_err(|e| format!("read {name}: {e}"))?;
-                out.extend(raw.as_chunks::<4>().0.iter().map(|c| {
-                    f32::from_bits(u32::from_le_bytes([c[0], c[1], c[2], c[3]]))
-                }));
+                out.extend(
+                    raw.as_chunks::<4>()
+                        .0
+                        .iter()
+                        .map(|c| f32::from_bits(u32::from_le_bytes([c[0], c[1], c[2], c[3]]))),
+                );
             }
             other => return Err(format!("{name}: unsupported dtype {other}")),
         }
@@ -332,7 +338,11 @@ pub fn load_dflash2_safetensors(
         expect(&st, &p("mlp.up_proj.weight"), &[ff, e])?;
         expect(&st, &p("mlp.down_proj.weight"), &[e, ff])?;
         expect(&st, &p("attention_conv.base_kernel"), &[2, 2, e])?;
-        expect(&st, &p("attention_conv.kernel_projection.weight"), &[1280, e])?;
+        expect(
+            &st,
+            &p("attention_conv.kernel_projection.weight"),
+            &[1280, e],
+        )?;
         expect(&st, &p("mlp_conv.base_kernel"), &[2, 2, e])?;
         expect(&st, &p("mlp_conv.kernel_projection.weight"), &[1280, e])?;
         layers.push(DFlash2Layer {
@@ -542,7 +552,11 @@ impl DFlash2Drafter {
         let e = cfg.n_embd;
         let hd = cfg.head_dim;
         let kvh = cfg.n_kv_head;
-        assert_eq!(features_5x.len(), 5 * e, "features must be the 5x5120 concat");
+        assert_eq!(
+            features_5x.len(),
+            5 * e,
+            "features must be the 5x5120 concat"
+        );
         if self.ring_pos.back() >= Some(&pos) {
             return Err(format!(
                 "inject: pos {pos} not beyond ring back {:?} (must ascend)",
@@ -596,8 +610,12 @@ impl DFlash2Drafter {
     /// Read-only on the drafter — the harness runs many anchors in
     /// parallel via rayon (teacher-forced drafts are independent).
     #[allow(clippy::too_many_lines)]
-    pub fn draft_block_hidden(&self, anchor_token: u32, anchor_pos: usize,
-        embed_row: &dyn Fn(u32) -> Vec<f32>) -> Vec<f32> {
+    pub fn draft_block_hidden(
+        &self,
+        anchor_token: u32,
+        anchor_pos: usize,
+        embed_row: &dyn Fn(u32) -> Vec<f32>,
+    ) -> Vec<f32> {
         let cfg = &self.cfg;
         let e = cfg.n_embd;
         let hd = cfg.head_dim;
@@ -655,16 +673,21 @@ impl DFlash2Drafter {
                     &mut dyn_coeff[i * projected..(i + 1) * projected],
                 );
             }
-            apply_conv(&dyn_coeff, &layer.attn_conv_base, 0, bs, e, cfg, &h, &mut hc);
+            apply_conv(
+                &dyn_coeff,
+                &layer.attn_conv_base,
+                0,
+                bs,
+                e,
+                cfg,
+                &h,
+                &mut hc,
+            );
 
             // Q/K/V (block-local).
             for i in 0..bs {
                 let hseg = &hc[i * e..(i + 1) * e];
-                gemv_into(
-                    &layer.q_proj,
-                    hseg,
-                    &mut q[i * nh * hd..(i + 1) * nh * hd],
-                );
+                gemv_into(&layer.q_proj, hseg, &mut q[i * nh * hd..(i + 1) * nh * hd]);
                 gemv_into(
                     &layer.k_proj,
                     hseg,
@@ -800,7 +823,16 @@ impl DFlash2Drafter {
                     &mut ao[i * e..(i + 1) * e],
                 );
             }
-            apply_conv(&dyn_coeff, &layer.attn_conv_base, 1, bs, e, cfg, &ao, &mut attn_final);
+            apply_conv(
+                &dyn_coeff,
+                &layer.attn_conv_base,
+                1,
+                bs,
+                e,
+                cfg,
+                &ao,
+                &mut attn_final,
+            );
             for j in 0..bs * e {
                 ffn_inp[j] = attn_final[j] + x[j];
             }
@@ -841,7 +873,16 @@ impl DFlash2Drafter {
                     &mut down_out[i * e..(i + 1) * e],
                 );
             }
-            apply_conv(&dynf, &layer.ffn_conv_base, 1, bs, e, cfg, &down_out, &mut ffn_final);
+            apply_conv(
+                &dynf,
+                &layer.ffn_conv_base,
+                1,
+                bs,
+                e,
+                cfg,
+                &down_out,
+                &mut ffn_final,
+            );
             for j in 0..bs * e {
                 x[j] = ffn_final[j] + ffn_inp[j];
             }
@@ -875,7 +916,7 @@ impl DFlash2Drafter {
         /// One row's walk inputs: (candidates, unary, top1, hidden code).
         type WalkRow = (Vec<u32>, Vec<f32>, u32, Vec<f32>);
 
-let cfg = &self.cfg;
+        let cfg = &self.cfg;
         let e = cfg.n_embd;
         let bs = cfg.block_size;
         assert_eq!(hidden_rows.len(), bs * e);
@@ -940,8 +981,7 @@ let cfg = &self.cfg;
         let mut walk_scores: Vec<Vec<f32>> = Vec::with_capacity(n_out);
         let mut pred_tok = anchor_token;
         for i in 0..n_out {
-            let pcode =
-                &self.w.sel_prev[pred_tok as usize * rank..(pred_tok as usize + 1) * rank];
+            let pcode = &self.w.sel_prev[pred_tok as usize * rank..(pred_tok as usize + 1) * rank];
             let mut scores = vec![0.0f32; top_k];
             for (ki, &tok) in candidates[i].iter().enumerate() {
                 let ncode = &self.w.sel_next[tok as usize * rank..(tok as usize + 1) * rank];
@@ -1146,22 +1186,21 @@ mod tests {
         apply_conv(&dyn_coeff, &base2, 0, bs, e, &cfg, &src, &mut dst2);
         for i in 0..bs {
             for c in 0..e {
-                let want = src[i * e + c]
-                    + if i >= 1 { src[(i - 1) * e + c] } else { 0.0 };
+                let want = src[i * e + c] + if i >= 1 { src[(i - 1) * e + c] } else { 0.0 };
                 assert_eq!(dst2[i * e + c], want);
             }
         }
     }
 
     /// `out×in` identity matrix (row-major) — the crafted-weight tests'
-        /// projection helper.
-        fn identity_m(out: usize, inn: usize) -> Vec<f32> {
-            let mut m = vec![0.0f32; out * inn];
-            for i in 0..out.min(inn) {
-                m[i * inn + i] = 1.0;
-            }
-            m
+    /// projection helper.
+    fn identity_m(out: usize, inn: usize) -> Vec<f32> {
+        let mut m = vec![0.0f32; out * inn];
+        for i in 0..out.min(inn) {
+            m[i * inn + i] = 1.0;
         }
+        m
+    }
 
     #[test]
     fn causal_block_attention_pins_mask_row_visibility() {
@@ -1243,7 +1282,11 @@ mod tests {
         let anchor: Vec<f32> = vec![1.0, 0.0, 0.0, 0.0];
         let mask: Vec<f32> = vec![0.0, 1.0, 1.0, 1.0];
         let embed = |tok: u32| -> Vec<f32> {
-            if tok == 0 { anchor.clone() } else { mask.clone() }
+            if tok == 0 {
+                anchor.clone()
+            } else {
+                mask.clone()
+            }
         };
         let t = drafter.draft_block_hidden(0, 0, &embed);
 

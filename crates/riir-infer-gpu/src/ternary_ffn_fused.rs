@@ -48,12 +48,7 @@ use crate::gemv_ternary_cubecl::{GemvTernaryCubeCL, TernaryHandle};
 /// riir-engine). The fused FFN dispatch only needs cubecl_runtime + ternary_gemv.
 #[cfg(feature = "cubecl_runtime")]
 #[cube(launch_unchecked)]
-fn swiglu_elementwise(
-    gate: &[f32],
-    up: &[f32],
-    output: &mut [f32],
-    params: &[f32],
-) {
+fn swiglu_elementwise(gate: &[f32], up: &[f32], output: &mut [f32], params: &[f32]) {
     let n = params[0usize] as usize;
     let idx = ABSOLUTE_POS;
 
@@ -102,8 +97,14 @@ impl TernaryFfnHandles {
     ) -> Self {
         debug_assert_eq!(gate.rows, up.rows, "gate and up must have same output dim");
         debug_assert_eq!(gate.cols, up.cols, "gate and up must have same input dim");
-        debug_assert_eq!(down.cols, gate.rows, "down input dim must match gate/up output dim");
-        debug_assert_eq!(down.rows, gate.cols, "down output dim must match gate/up input dim");
+        debug_assert_eq!(
+            down.cols, gate.rows,
+            "down input dim must match gate/up output dim"
+        );
+        debug_assert_eq!(
+            down.rows, gate.cols,
+            "down output dim must match gate/up input dim"
+        );
 
         Self {
             gate: TernaryHandle::from_weights(client, gate),
@@ -185,7 +186,8 @@ impl TernaryFfnFused {
         // Dispatch 3: inter = silu(gate) * up
         // Inline SwiGLU: output[i] = gate[i] * sigmoid(gate[i]) * up[i]
         let swiglu_params: [f32; 1] = [mlp_dim as f32];
-        let swiglu_params_handle = client.create_from_slice(<f32 as CubeElement>::as_bytes(&swiglu_params));
+        let swiglu_params_handle =
+            client.create_from_slice(<f32 as CubeElement>::as_bytes(&swiglu_params));
         let swiglu_wg = 128u32;
         let swiglu_num_wg = (mlp_dim as u32).div_ceil(swiglu_wg);
         unsafe {
@@ -363,10 +365,7 @@ impl GpuTernaryFfn {
     ///
     /// Accepts any iterator yielding (gate, up, down) weight references — works
     /// with `QwenDeltaNetTernaryWeights.layers` or any other ternary model.
-    pub fn preupload_layers<
-        'w,
-        L: IntoIterator<Item = &'w LayerFfnWeightsRef<'w>>,
-    >(
+    pub fn preupload_layers<'w, L: IntoIterator<Item = &'w LayerFfnWeightsRef<'w>>>(
         &self,
         layers: L,
     ) {
@@ -389,16 +388,18 @@ impl katgpt_core::TernaryFfnHook for GpuTernaryFfn {
         let key = FfnCacheKey::new(gate_w, up_w, down_w);
         let pin = self.handles.pin();
         let handle = pin.get(&key);
-        if let Some(h) = handle { unsafe {
+        if let Some(h) = handle {
+            unsafe {
                 TernaryFfnFused::dispatch_ffn_with_readback(&self.client, h, x, out);
-            } } else {
-                // On-the-fly upload (first call without preupload).
-                let h = TernaryFfnHandles::from_weights(&self.client, gate_w, up_w, down_w);
-                pin.insert(key, h.clone());
-                unsafe {
-                    TernaryFfnFused::dispatch_ffn_with_readback(&self.client, &h, x, out);
-                }
             }
+        } else {
+            // On-the-fly upload (first call without preupload).
+            let h = TernaryFfnHandles::from_weights(&self.client, gate_w, up_w, down_w);
+            pin.insert(key, h.clone());
+            unsafe {
+                TernaryFfnFused::dispatch_ffn_with_readback(&self.client, &h, x, out);
+            }
+        }
     }
 }
 
@@ -418,7 +419,9 @@ mod tests {
 
         let dense: Vec<f32> = (0..rows * cols)
             .map(|_| {
-                state = state.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+                state = state
+                    .wrapping_mul(6364136223846793005)
+                    .wrapping_add(1442695040888963407);
                 let bits = state as i32;
                 (bits as f32) / (i32::MAX as f32) * 2.0 - 1.0
             })
@@ -602,7 +605,10 @@ mod tests {
             let denom = cpu.abs().max(1.0);
             max_rel = max_rel.max((cpu - gpu).abs() / denom);
         }
-        assert!(max_rel < 0.05, "up2 through 3-pair-keyed cache rel_err: {max_rel:.6}");
+        assert!(
+            max_rel < 0.05,
+            "up2 through 3-pair-keyed cache rel_err: {max_rel:.6}"
+        );
 
         // B1 class: clear empties the cache; a same-key lookup re-uploads.
         hook.clear();

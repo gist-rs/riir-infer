@@ -52,8 +52,8 @@ pub use lora::{LoraDecodeKernels, QvLoraGpuCudarc};
 
 use std::sync::Arc;
 
-use cudarc::driver::safe::{CudaContext, CudaFunction, CudaModule, CudaStream, LaunchConfig};
 use cudarc::driver::PushKernelArg;
+use cudarc::driver::safe::{CudaContext, CudaFunction, CudaModule, CudaStream, LaunchConfig};
 
 /// Combined CUDA source for all elementwise kernels. Compiled as a single
 /// PTX module — each kernel is a `__global__` function within it.
@@ -1170,8 +1170,10 @@ impl ElementwiseKernels {
         // Issue 734 T5 — multi-block path when scratch is ready and the shape
         // fits (block_size ≤ 512 leaves ≤ sm[512]; grid ≤ 16 one-warp blocks).
         if block_size <= 512
-            && let (Some(partials), Some(arrived)) =
-                (self.rmsnorm_mb_partials.get(), self.rmsnorm_mb_arrived.get())
+            && let (Some(partials), Some(arrived)) = (
+                self.rmsnorm_mb_partials.get(),
+                self.rmsnorm_mb_arrived.get(),
+            )
         {
             let grid = (block_size / 32).max(1) as u32;
             let cfg = LaunchConfig {
@@ -1539,8 +1541,8 @@ impl ElementwiseKernels {
         let cfg = LaunchConfig {
             grid_dim: (grid_x, 1, 1),
             block_dim: (256, 1, 1),
-            shared_mem_bytes: 256 * (core::mem::size_of::<f32>() + core::mem::size_of::<i32>())
-                as u32,
+            shared_mem_bytes: 256
+                * (core::mem::size_of::<f32>() + core::mem::size_of::<i32>()) as u32,
         };
         unsafe {
             stream
@@ -1744,7 +1746,9 @@ mod tests {
         let kernels = ElementwiseKernels::new(ctx).expect("compile");
 
         let n = 17408usize; // mlp_hidden for Bonsai-27B
-        let gate: Vec<f32> = (0..n).map(|i| ((i as f32) / n as f32 - 0.5) * 4.0).collect();
+        let gate: Vec<f32> = (0..n)
+            .map(|i| ((i as f32) / n as f32 - 0.5) * 4.0)
+            .collect();
         let up: Vec<f32> = (0..n).map(|i| ((i as f32) / n as f32) * 2.0).collect();
 
         // CPU reference: silu(g) * up
@@ -1785,7 +1789,7 @@ mod tests {
     fn test_quantize_matches_cpu() {
         const ABLOCK: usize = 16;
 
-let Some(_) = cuda_or_skip() else {
+        let Some(_) = cuda_or_skip() else {
             eprintln!("[skip] no CUDA device");
             return;
         };
@@ -1875,7 +1879,7 @@ let Some(_) = cuda_or_skip() else {
     fn test_rmsnorm_quantize_matches_separate() {
         const ABLOCK: usize = 16;
 
-let Some(_) = cuda_or_skip() else {
+        let Some(_) = cuda_or_skip() else {
             eprintln!("[skip] no CUDA device");
             return;
         };
@@ -1896,7 +1900,9 @@ let Some(_) = cuda_or_skip() else {
                 sign * mag
             })
             .collect();
-        let gamma: Vec<f32> = (0..dim).map(|i| 0.8 + 0.4 * ((i as f32) / dim as f32)).collect();
+        let gamma: Vec<f32> = (0..dim)
+            .map(|i| 0.8 + 0.4 * ((i as f32) / dim as f32))
+            .collect();
 
         // ── Reference path: separate rmsnorm → quantize ──
         let input_dev = stream.clone_htod(&input).unwrap();
@@ -1916,7 +1922,9 @@ let Some(_) = cuda_or_skip() else {
         let mut ref_i8 = vec![0i8; dim];
         let mut ref_ascale = vec![0f32; ablocks];
         stream.memcpy_dtoh(&ref_i8_dev, &mut ref_i8).unwrap();
-        stream.memcpy_dtoh(&ref_ascale_dev, &mut ref_ascale).unwrap();
+        stream
+            .memcpy_dtoh(&ref_ascale_dev, &mut ref_ascale)
+            .unwrap();
 
         // ── Fused path: rmsnorm_quantize in one kernel ──
         let fused_i8_dev = stream.alloc_zeros::<i8>(dim).unwrap();
@@ -1924,7 +1932,13 @@ let Some(_) = cuda_or_skip() else {
 
         kernels
             .launch_rmsnorm_quantize(
-                &stream, &input_dev, &gamma_dev, &fused_i8_dev, &fused_ascale_dev, dim, eps,
+                &stream,
+                &input_dev,
+                &gamma_dev,
+                &fused_i8_dev,
+                &fused_ascale_dev,
+                dim,
+                eps,
             )
             .expect("fused launch");
         stream.synchronize().expect("sync");
@@ -1932,7 +1946,9 @@ let Some(_) = cuda_or_skip() else {
         let mut fused_i8 = vec![0i8; dim];
         let mut fused_ascale = vec![0f32; ablocks];
         stream.memcpy_dtoh(&fused_i8_dev, &mut fused_i8).unwrap();
-        stream.memcpy_dtoh(&fused_ascale_dev, &mut fused_ascale).unwrap();
+        stream
+            .memcpy_dtoh(&fused_ascale_dev, &mut fused_ascale)
+            .unwrap();
 
         // ── Compare int8 codes (must be bit-exact) ──
         let mut i8_mismatches = 0usize;
@@ -1959,7 +1975,10 @@ let Some(_) = cuda_or_skip() else {
             "[rmsnorm_quantize] dim={dim}: {i8_mismatches} i8 mismatches, ascale max_diff={max_scale_diff:.4e}"
         );
         assert!(i8_mismatches == 0, "{i8_mismatches} int8 mismatches");
-        assert!(max_scale_diff < 1e-5, "ascale max_diff {max_scale_diff:.4e}");
+        assert!(
+            max_scale_diff < 1e-5,
+            "ascale max_diff {max_scale_diff:.4e}"
+        );
     }
 
     /// Issue 625 — verify the fused swiglu_quantize kernel produces bit-identical
@@ -1968,7 +1987,7 @@ let Some(_) = cuda_or_skip() else {
     fn test_swiglu_quantize_matches_separate() {
         const ABLOCK: usize = 16;
 
-let Some(_) = cuda_or_skip() else {
+        let Some(_) = cuda_or_skip() else {
             eprintln!("[skip] no CUDA device");
             return;
         };
@@ -2014,7 +2033,9 @@ let Some(_) = cuda_or_skip() else {
         let mut ref_i8 = vec![0i8; n];
         let mut ref_ascale = vec![0f32; ablocks];
         stream.memcpy_dtoh(&ref_i8_dev, &mut ref_i8).unwrap();
-        stream.memcpy_dtoh(&ref_ascale_dev, &mut ref_ascale).unwrap();
+        stream
+            .memcpy_dtoh(&ref_ascale_dev, &mut ref_ascale)
+            .unwrap();
 
         // ── Fused path: swiglu_quantize in one kernel ──
         let fused_i8_dev = stream.alloc_zeros::<i8>(n).unwrap();
@@ -2022,7 +2043,12 @@ let Some(_) = cuda_or_skip() else {
 
         kernels
             .launch_swiglu_quantize(
-                &stream, &gate_dev, &up_dev, &fused_i8_dev, &fused_ascale_dev, n,
+                &stream,
+                &gate_dev,
+                &up_dev,
+                &fused_i8_dev,
+                &fused_ascale_dev,
+                n,
             )
             .expect("fused launch");
         stream.synchronize().expect("sync");
@@ -2030,7 +2056,9 @@ let Some(_) = cuda_or_skip() else {
         let mut fused_i8 = vec![0i8; n];
         let mut fused_ascale = vec![0f32; ablocks];
         stream.memcpy_dtoh(&fused_i8_dev, &mut fused_i8).unwrap();
-        stream.memcpy_dtoh(&fused_ascale_dev, &mut fused_ascale).unwrap();
+        stream
+            .memcpy_dtoh(&fused_ascale_dev, &mut fused_ascale)
+            .unwrap();
 
         // ── Compare int8 codes (must be bit-exact) ──
         let mut i8_mismatches = 0usize;
@@ -2057,7 +2085,10 @@ let Some(_) = cuda_or_skip() else {
             "[swiglu_quantize] n={n}: {i8_mismatches} i8 mismatches, ascale max_diff={max_scale_diff:.4e}"
         );
         assert!(i8_mismatches == 0, "{i8_mismatches} int8 mismatches");
-        assert!(max_scale_diff < 1e-5, "ascale max_diff {max_scale_diff:.4e}");
+        assert!(
+            max_scale_diff < 1e-5,
+            "ascale max_diff {max_scale_diff:.4e}"
+        );
     }
 
     /// Issue 626 — verify the fused `gate_silu_quantize_f32` kernel produces
@@ -2069,7 +2100,7 @@ let Some(_) = cuda_or_skip() else {
     fn test_gate_silu_quantize_matches_separate() {
         const ABLOCK: usize = 16;
 
-let Some(_) = cuda_or_skip() else {
+        let Some(_) = cuda_or_skip() else {
             eprintln!("[skip] no CUDA device");
             return;
         };
@@ -2117,7 +2148,9 @@ let Some(_) = cuda_or_skip() else {
         let mut ref_i8 = vec![0i8; n];
         let mut ref_ascale = vec![0f32; ablocks];
         stream.memcpy_dtoh(&ref_i8_dev, &mut ref_i8).unwrap();
-        stream.memcpy_dtoh(&ref_ascale_dev, &mut ref_ascale).unwrap();
+        stream
+            .memcpy_dtoh(&ref_ascale_dev, &mut ref_ascale)
+            .unwrap();
 
         // ── Fused path: gate_silu_quantize in one kernel ──
         let x_dev_b = stream.clone_htod(&x).unwrap();
@@ -2127,7 +2160,12 @@ let Some(_) = cuda_or_skip() else {
 
         kernels
             .launch_gate_silu_quantize(
-                &stream, &x_dev_b, &gate_dev_b, &fused_i8_dev, &fused_ascale_dev, n,
+                &stream,
+                &x_dev_b,
+                &gate_dev_b,
+                &fused_i8_dev,
+                &fused_ascale_dev,
+                n,
             )
             .expect("fused launch");
         stream.synchronize().expect("sync");
@@ -2135,7 +2173,9 @@ let Some(_) = cuda_or_skip() else {
         let mut fused_i8 = vec![0i8; n];
         let mut fused_ascale = vec![0f32; ablocks];
         stream.memcpy_dtoh(&fused_i8_dev, &mut fused_i8).unwrap();
-        stream.memcpy_dtoh(&fused_ascale_dev, &mut fused_ascale).unwrap();
+        stream
+            .memcpy_dtoh(&fused_ascale_dev, &mut fused_ascale)
+            .unwrap();
 
         // ── Compare int8 codes (must be bit-exact) ──
         let mut i8_mismatches = 0usize;
@@ -2160,7 +2200,10 @@ let Some(_) = cuda_or_skip() else {
             "[gate_silu_quantize] n={n}: {i8_mismatches} i8 mismatches, ascale max_diff={max_scale_diff:.4e}"
         );
         assert!(i8_mismatches == 0, "{i8_mismatches} int8 mismatches");
-        assert!(max_scale_diff < 1e-5, "ascale max_diff {max_scale_diff:.4e}");
+        assert!(
+            max_scale_diff < 1e-5,
+            "ascale max_diff {max_scale_diff:.4e}"
+        );
     }
 
     /// Issue 626 — verify the fused `gate_sigmoid_quantize_f32` kernel produces
@@ -2170,7 +2213,7 @@ let Some(_) = cuda_or_skip() else {
     fn test_gate_sigmoid_quantize_matches_separate() {
         const ABLOCK: usize = 16;
 
-let Some(_) = cuda_or_skip() else {
+        let Some(_) = cuda_or_skip() else {
             eprintln!("[skip] no CUDA device");
             return;
         };
@@ -2217,7 +2260,9 @@ let Some(_) = cuda_or_skip() else {
         let mut ref_i8 = vec![0i8; n];
         let mut ref_ascale = vec![0f32; ablocks];
         stream.memcpy_dtoh(&ref_i8_dev, &mut ref_i8).unwrap();
-        stream.memcpy_dtoh(&ref_ascale_dev, &mut ref_ascale).unwrap();
+        stream
+            .memcpy_dtoh(&ref_ascale_dev, &mut ref_ascale)
+            .unwrap();
 
         // ── Fused path: gate_sigmoid_quantize in one kernel ──
         let x_dev_b = stream.clone_htod(&x).unwrap();
@@ -2227,7 +2272,12 @@ let Some(_) = cuda_or_skip() else {
 
         kernels
             .launch_gate_sigmoid_quantize(
-                &stream, &x_dev_b, &gate_dev_b, &fused_i8_dev, &fused_ascale_dev, n,
+                &stream,
+                &x_dev_b,
+                &gate_dev_b,
+                &fused_i8_dev,
+                &fused_ascale_dev,
+                n,
             )
             .expect("fused launch");
         stream.synchronize().expect("sync");
@@ -2235,7 +2285,9 @@ let Some(_) = cuda_or_skip() else {
         let mut fused_i8 = vec![0i8; n];
         let mut fused_ascale = vec![0f32; ablocks];
         stream.memcpy_dtoh(&fused_i8_dev, &mut fused_i8).unwrap();
-        stream.memcpy_dtoh(&fused_ascale_dev, &mut fused_ascale).unwrap();
+        stream
+            .memcpy_dtoh(&fused_ascale_dev, &mut fused_ascale)
+            .unwrap();
 
         let mut i8_mismatches = 0usize;
         for i in 0..n {
@@ -2259,7 +2311,10 @@ let Some(_) = cuda_or_skip() else {
             "[gate_sigmoid_quantize] n={n}: {i8_mismatches} i8 mismatches, ascale max_diff={max_scale_diff:.4e}"
         );
         assert!(i8_mismatches == 0, "{i8_mismatches} int8 mismatches");
-        assert!(max_scale_diff < 1e-5, "ascale max_diff {max_scale_diff:.4e}");
+        assert!(
+            max_scale_diff < 1e-5,
+            "ascale max_diff {max_scale_diff:.4e}"
+        );
     }
 
     /// Issue 627 — verify the fused `rmsnorm_gate_silu_quantize_f32` kernel
@@ -2273,7 +2328,7 @@ let Some(_) = cuda_or_skip() else {
     fn test_rmsnorm_gate_silu_quantize_matches_separate() {
         const ABLOCK: usize = 16;
 
-let Some(_) = cuda_or_skip() else {
+        let Some(_) = cuda_or_skip() else {
             eprintln!("[skip] no CUDA device");
             return;
         };
@@ -2318,7 +2373,13 @@ let Some(_) = cuda_or_skip() else {
         let normed_dev = stream.clone_htod(&x).unwrap();
         attn_kernels
             .launch_rmsnorm_batched(
-                &stream, &normed_dev, &gamma_dev, &normed_dev, n_v_heads, head_dim, eps,
+                &stream,
+                &normed_dev,
+                &gamma_dev,
+                &normed_dev,
+                n_v_heads,
+                head_dim,
+                eps,
             )
             .expect("rmsnorm_batched launch");
         let gate_dev_a = stream.clone_htod(&gate).unwrap();
@@ -2335,7 +2396,9 @@ let Some(_) = cuda_or_skip() else {
         let mut ref_i8 = vec![0i8; n];
         let mut ref_ascale = vec![0f32; ablocks];
         stream.memcpy_dtoh(&ref_i8_dev, &mut ref_i8).unwrap();
-        stream.memcpy_dtoh(&ref_ascale_dev, &mut ref_ascale).unwrap();
+        stream
+            .memcpy_dtoh(&ref_ascale_dev, &mut ref_ascale)
+            .unwrap();
 
         // ── Fused path: rmsnorm_gate_silu_quantize in one kernel ──
         let x_dev_b = stream.clone_htod(&x).unwrap();
@@ -2346,9 +2409,15 @@ let Some(_) = cuda_or_skip() else {
 
         kernels
             .launch_rmsnorm_gate_silu_quantize(
-                &stream, &x_dev_b, &gate_dev_b, &gamma_dev_b,
-                &fused_i8_dev, &fused_ascale_dev,
-                n_v_heads, head_dim, eps,
+                &stream,
+                &x_dev_b,
+                &gate_dev_b,
+                &gamma_dev_b,
+                &fused_i8_dev,
+                &fused_ascale_dev,
+                n_v_heads,
+                head_dim,
+                eps,
             )
             .expect("fused launch");
         stream.synchronize().expect("sync");
@@ -2356,7 +2425,9 @@ let Some(_) = cuda_or_skip() else {
         let mut fused_i8 = vec![0i8; n];
         let mut fused_ascale = vec![0f32; ablocks];
         stream.memcpy_dtoh(&fused_i8_dev, &mut fused_i8).unwrap();
-        stream.memcpy_dtoh(&fused_ascale_dev, &mut fused_ascale).unwrap();
+        stream
+            .memcpy_dtoh(&fused_ascale_dev, &mut fused_ascale)
+            .unwrap();
 
         // ── Compare int8 codes (must be bit-exact) ──
         let mut i8_mismatches = 0usize;
@@ -2381,7 +2452,10 @@ let Some(_) = cuda_or_skip() else {
             "[rmsnorm_gate_silu_quantize] n_v_heads={n_v_heads}, head_dim={head_dim}: {i8_mismatches} i8 mismatches, ascale max_diff={max_scale_diff:.4e}"
         );
         assert!(i8_mismatches == 0, "{i8_mismatches} int8 mismatches");
-        assert!(max_scale_diff < 1e-5, "ascale max_diff {max_scale_diff:.4e}");
+        assert!(
+            max_scale_diff < 1e-5,
+            "ascale max_diff {max_scale_diff:.4e}"
+        );
     }
 
     /// Issue 697 — GPU argmax must match the CPU first-index tie-break argmax

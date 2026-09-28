@@ -480,7 +480,15 @@ mod tests {
 
     fn signs_vec(n: usize, seed: u64) -> Vec<i8> {
         let mut lcg = Lcg(seed);
-        (0..n).map(|_| if lcg.next_f32(-1.0, 1.0) >= 0.0 { 1 } else { -1 }).collect()
+        (0..n)
+            .map(|_| {
+                if lcg.next_f32(-1.0, 1.0) >= 0.0 {
+                    1
+                } else {
+                    -1
+                }
+            })
+            .collect()
     }
 
     /// Forward rotation: GPU must be BIT-IDENTICAL to the CPU twin — the

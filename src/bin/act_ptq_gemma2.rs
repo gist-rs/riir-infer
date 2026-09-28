@@ -41,8 +41,8 @@ use anyhow::{Context, Result, bail};
 use half::f16;
 use katgpt_core::TernaryGroupWeights;
 use katgpt_core::act_channel_moments::{ActChannelDiagonal, ActChannelMoments};
-use katgpt_types::ternary_group_act_aware::ActAwareScaleFit;
 use katgpt_transformer::MultiLayerKVCache;
+use katgpt_types::ternary_group_act_aware::ActAwareScaleFit;
 
 use riir_infer_core::corpus_text::load_corpus_text;
 use riir_infer_core::gguf_loader::{GgufFile, config_from_gguf_metadata, load_gemma2_f16_direct};
@@ -212,9 +212,7 @@ fn main() -> Result<()> {
     // corpus is long enough at defaults) — a short pool means the eval
     // support shrank; report it, never fail silently.
     let min_pool = capture.pools.iter().map(|p| p.len()).min().unwrap_or(0);
-    println!(
-        "# eval pools: min {min_pool} / target {eval_vecs} vectors per tap",
-    );
+    println!("# eval pools: min {min_pool} / target {eval_vecs} vectors per tap",);
     if min_pool == 0 {
         bail!("capture produced empty pools — corpus too short for --min-pos/--stride");
     }
@@ -235,22 +233,16 @@ fn main() -> Result<()> {
         let base = l * 4;
         let tensors: [(&str, &[f16], usize, usize, usize); 7] = [
             ("attn_wq", &layer.attn_wq, q_dim, n, base),
-            (
-                "attn_wk",
-                &layer.attn_wk,
-                kv_dim(&config),
-                n,
-                base,
-            ),
-            (
-                "attn_wv",
-                &layer.attn_wv,
-                kv_dim(&config),
-                n,
-                base,
-            ),
+            ("attn_wk", &layer.attn_wk, kv_dim(&config), n, base),
+            ("attn_wv", &layer.attn_wv, kv_dim(&config), n, base),
             ("attn_wo", &layer.attn_wo, n, q_dim, base + 1),
-            ("gate_proj", &layer.gate_proj, config.mlp_hidden, n, base + 2),
+            (
+                "gate_proj",
+                &layer.gate_proj,
+                config.mlp_hidden,
+                n,
+                base + 2,
+            ),
             ("up_proj", &layer.up_proj, config.mlp_hidden, n, base + 2),
             (
                 "down_proj",
@@ -277,11 +269,7 @@ fn main() -> Result<()> {
                 let mut den = 0.0f64;
                 for (x, y_ref) in pool.iter().zip(&refs) {
                     let mut y = vec![0.0f32; rows];
-                    katgpt_core::simd_ternary_group_matvec_parallel(
-                        &payload,
-                        x,
-                        &mut y,
-                    );
+                    katgpt_core::simd_ternary_group_matvec_parallel(&payload, x, &mut y);
                     for (ye, yr) in y.iter().zip(y_ref) {
                         let d = f64::from(ye - yr);
                         num += d * d;
@@ -297,14 +285,21 @@ fn main() -> Result<()> {
                     acc_mlp[ai].0 += num;
                     acc_mlp[ai].1 += den;
                 }
-                let rel = if den > 0.0 { (num / den).sqrt() } else { f64::NAN };
+                let rel = if den > 0.0 {
+                    (num / den).sqrt()
+                } else {
+                    f64::NAN
+                };
                 if rel > worst[ai].0 {
                     worst[ai] = (rel, format!("l{l:02}.{name}"));
                 }
                 let _ = t_arm.elapsed();
             }
         }
-        println!("# layer {l} done ({:.0}s cumulative)", t3.elapsed().as_secs_f32());
+        println!(
+            "# layer {l} done ({:.0}s cumulative)",
+            t3.elapsed().as_secs_f32()
+        );
     }
 
     // ── Report ──
@@ -315,7 +310,9 @@ fn main() -> Result<()> {
         tokens.len(),
         min_pool,
     ));
-    out.push_str("| arm | overall | attn family | mlp family | worst tensor |\n|---|---|---|---|---|\n");
+    out.push_str(
+        "| arm | overall | attn family | mlp family | worst tensor |\n|---|---|---|---|---|\n",
+    );
     for (ai, arm) in ARMS.iter().enumerate() {
         let (num, den) = acc[ai];
         let (an, ad) = acc_attn[ai];
@@ -417,7 +414,10 @@ fn zeroqat_refit(
             let hmax = h.iter().copied().fold(0.0f32, f32::max);
             let s_rq = f32::from(rq.group_scale[r * rq.groups_per_row + g]);
             let (mut a, mut b, mut c) = (0.0f32, 0.0f32, 0.0f32);
-            for (j, &wij) in parent[r * cols + g_start..r * cols + g_end].iter().enumerate() {
+            for (j, &wij) in parent[r * cols + g_start..r * cols + g_end]
+                .iter()
+                .enumerate()
+            {
                 let u = if hmax > 0.0 { h[j] / hmax } else { 1.0 };
                 let q = ternary_sign(&rq, r, g_start + j) as f32;
                 a += u * wij * wij;

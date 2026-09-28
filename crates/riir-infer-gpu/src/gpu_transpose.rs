@@ -19,8 +19,8 @@
 use std::sync::Arc;
 use wgpu::{
     BindGroupDescriptor, BindGroupEntry, BindGroupLayoutDescriptor, BindGroupLayoutEntry,
-    BindingType, Buffer, BufferBinding, BufferBindingType, CommandEncoder, ComputePipeline,
-    ComputePassDescriptor, Device, PipelineLayoutDescriptor, Queue, ShaderStages,
+    BindingType, Buffer, BufferBinding, BufferBindingType, CommandEncoder, ComputePassDescriptor,
+    ComputePipeline, Device, PipelineLayoutDescriptor, Queue, ShaderStages,
 };
 
 /// Parameters for the transpose kernel (16-byte aligned for WGSL uniform).
@@ -253,11 +253,7 @@ impl GpuTranspose {
     /// No per-call bind group creation or uniform write — just begin the
     /// compute pass + dispatch. Use [`create_dispatch`] to create the
     /// cached dispatch state.
-    pub fn dispatch_cached(
-        &self,
-        encoder: &mut CommandEncoder,
-        cached: &GpuTransposeDispatch,
-    ) {
+    pub fn dispatch_cached(&self, encoder: &mut CommandEncoder, cached: &GpuTransposeDispatch) {
         let mut pass = encoder.begin_compute_pass(&ComputePassDescriptor {
             label: Some("transpose"),
             timestamp_writes: None,

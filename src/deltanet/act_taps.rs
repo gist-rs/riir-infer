@@ -147,15 +147,11 @@ impl ActTapPlan {
         let mut steps: Vec<ActTapStep> = Vec::new();
         let mut moment_widths: Vec<usize> = Vec::new();
         let push_tap = |taps: &mut Vec<ActTap>,
-                            widths: &mut Vec<usize>,
-                            label: String,
-                            kind: &'static str,
-                            width: usize| {
-            taps.push(ActTap {
-                label,
-                kind,
-                width,
-            });
+                        widths: &mut Vec<usize>,
+                        label: String,
+                        kind: &'static str,
+                        width: usize| {
+            taps.push(ActTap { label, kind, width });
             widths.push(width);
             taps.len() - 1
         };
@@ -168,11 +164,7 @@ impl ActTapPlan {
                 "attn_in",
                 n,
             );
-            let out_w = if gdn {
-                &layer.out_proj
-            } else {
-                &layer.attn_wo
-            };
+            let out_w = if gdn { &layer.out_proj } else { &layer.attn_wo };
             let layer_out = push_tap(
                 &mut taps,
                 &mut moment_widths,
@@ -349,11 +341,7 @@ pub fn for_each_ternary_site(
             } else {
                 TernarySite::AttnWo(l)
             },
-            if gdn {
-                &layer.out_proj
-            } else {
-                &layer.attn_wo
-            },
+            if gdn { &layer.out_proj } else { &layer.attn_wo },
         );
         f(TernarySite::GateProj(l), &layer.gate_proj);
         f(TernarySite::UpProj(l), &layer.up_proj);

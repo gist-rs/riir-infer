@@ -366,8 +366,7 @@ impl Q4KGegluHandle {
             let gate_bytes = client.read_one(h_gate.weight_q4k.clone()).unwrap();
             let up_bytes = client.read_one(h_up.weight_q4k.clone()).unwrap();
 
-            let mut combined =
-                Vec::with_capacity(gate_bytes.len() + up_bytes.len());
+            let mut combined = Vec::with_capacity(gate_bytes.len() + up_bytes.len());
             combined.extend_from_slice(&gate_bytes);
             combined.extend_from_slice(&up_bytes);
             combined
@@ -380,9 +379,8 @@ impl Q4KGegluHandle {
 
             let header: Vec<f32> = vec![m as f32, n as f32, 0.0f32, 0.0f32];
 
-            let mut combined = Vec::with_capacity(
-                DD_HEADER as usize * 4 + gate_bytes.len() + up_bytes.len(),
-            );
+            let mut combined =
+                Vec::with_capacity(DD_HEADER as usize * 4 + gate_bytes.len() + up_bytes.len());
             combined.extend_from_slice(f32::as_bytes(&header));
             combined.extend_from_slice(&gate_bytes);
             combined.extend_from_slice(&up_bytes);
@@ -490,9 +488,9 @@ impl GemvGegluQ4KCubeCL {
 #[cfg(all(test, feature = "cubecl_runtime"))]
 mod tests {
     use super::*;
+    use crate::cubecl_runtime::ActiveRuntime;
     use crate::cubecl_runtime::CubeCLContext;
     use bytemuck::Zeroable;
-    use crate::cubecl_runtime::ActiveRuntime;
     use riir_infer_core::quant::q4k::{QK_K, dequantize_row_q4_k, quantize_row_q4_k};
 
     /// CPU reference: dual GEMV + GeGLU with Q4_K quantization.
@@ -662,21 +660,11 @@ mod tests {
         let m = 2;
         let n = 256;
 
-        let weight_gate: Vec<f32> =
-            (0..m * n).map(|i| (i as f32 * 0.1).sin() * 2.0).collect();
-        let weight_up: Vec<f32> =
-            (0..m * n).map(|i| (i as f32 * 0.05).cos() * 1.5).collect();
+        let weight_gate: Vec<f32> = (0..m * n).map(|i| (i as f32 * 0.1).sin() * 2.0).collect();
+        let weight_up: Vec<f32> = (0..m * n).map(|i| (i as f32 * 0.05).cos() * 1.5).collect();
         let input: Vec<f32> = (0..n).map(|i| (i as f32 * 0.2).cos()).collect();
 
-        launch_and_verify(
-            &weight_gate,
-            &weight_up,
-            &input,
-            m,
-            n,
-            10.0,
-            "general",
-        );
+        launch_and_verify(&weight_gate, &weight_up, &input, m, n, 10.0, "general");
     }
 
     #[test]
@@ -692,17 +680,8 @@ mod tests {
         let weight_up: Vec<f32> = (0..m * n)
             .map(|i| ((i % 53) as f32 - 26.0) / 100.0)
             .collect();
-        let input: Vec<f32> =
-            (0..n).map(|i| ((i % 7) as f32 - 3.0) / 10.0).collect();
+        let input: Vec<f32> = (0..n).map(|i| ((i % 7) as f32 - 3.0) / 10.0).collect();
 
-        launch_and_verify(
-            &weight_gate,
-            &weight_up,
-            &input,
-            m,
-            n,
-            15.0,
-            "gemma2_dims",
-        );
+        launch_and_verify(&weight_gate, &weight_up, &input, m, n, 15.0, "gemma2_dims");
     }
 }

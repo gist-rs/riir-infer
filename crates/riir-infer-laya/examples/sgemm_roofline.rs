@@ -309,7 +309,12 @@ kernel void sgemm_hb(
 /// twin runs reps = k/64 at the same grid. Cell 1 is the CPU-verified one
 /// (ragged m exercises the edge path); cells 2-3 are exact-tile.
 const CELLS: &[(usize, usize, usize, &str)] = &[
-    (317, 3072, 1024, "encoder QKV @ m317 (ragged-edge, CPU-verified)"),
+    (
+        317,
+        3072,
+        1024,
+        "encoder QKV @ m317 (ragged-edge, CPU-verified)",
+    ),
     (1024, 3072, 1024, "packed scale @ m1024"),
     (1024, 8192, 1024, "deep-k @ m1024 (staging share stressed)"),
 ];
@@ -427,16 +432,10 @@ fn main() {
                 want[i * n + j] = s;
             }
         }
-        let a_buf = device.new_buffer_with_data(
-            a.as_ptr().cast(),
-            (a.len() * 4) as u64,
-            RESOURCE_OPTIONS,
-        );
-        let w_buf = device.new_buffer_with_data(
-            w.as_ptr().cast(),
-            (w.len() * 4) as u64,
-            RESOURCE_OPTIONS,
-        );
+        let a_buf =
+            device.new_buffer_with_data(a.as_ptr().cast(), (a.len() * 4) as u64, RESOURCE_OPTIONS);
+        let w_buf =
+            device.new_buffer_with_data(w.as_ptr().cast(), (w.len() * 4) as u64, RESOURCE_OPTIONS);
         let out_buf = device.new_buffer((got.len() * 4) as u64, RESOURCE_OPTIONS);
         {
             let cb = queue.new_command_buffer().to_owned();
@@ -445,9 +444,11 @@ fn main() {
             enc.set_buffer(0, Some(&a_buf), 0);
             enc.set_buffer(1, Some(&w_buf), 0);
             enc.set_buffer(2, Some(&out_buf), 0);
-            for (i, v) in [m as u32, n as u32, k as u32, k as u32, 1, n as u32, 1, 0, 0, 0]
-                .iter()
-                .enumerate()
+            for (i, v) in [
+                m as u32, n as u32, k as u32, k as u32, 1, n as u32, 1, 0, 0, 0,
+            ]
+            .iter()
+            .enumerate()
             {
                 enc.set_bytes(i as u64 + 3, 4, std::ptr::from_ref(v).cast());
             }
@@ -498,9 +499,11 @@ fn main() {
             enc.set_buffer(0, Some(&a_buf), 0);
             enc.set_buffer(1, Some(&wh_buf), 0);
             enc.set_buffer(2, Some(&out_buf), 0);
-            for (i, v) in [m as u32, n as u32, k as u32, k as u32, 1, n as u32, 1, 0, 0, 0]
-                .iter()
-                .enumerate()
+            for (i, v) in [
+                m as u32, n as u32, k as u32, k as u32, 1, n as u32, 1, 0, 0, 0,
+            ]
+            .iter()
+            .enumerate()
             {
                 enc.set_bytes(i as u64 + 3, 4, std::ptr::from_ref(v).cast());
             }
@@ -524,13 +527,13 @@ fn main() {
             .fold(0.0f32, f32::max);
         let hb_rel = hb_diff / max_want.max(1e-30);
         if hb_rel > 2e-2 {
-            panic!(
-                "cell {m}x{k}x{n}: f16-B arm diverged from narrow rel {hb_rel:e}"
-            );
+            panic!("cell {m}x{k}x{n}: f16-B arm diverged from narrow rel {hb_rel:e}");
         }
 
         // ── roofline buffers (padded, seeded) ──
-        let ra: Vec<f32> = (0..pm * 64).map(|i| (i % 7) as f32 * 0.125 - 0.375).collect();
+        let ra: Vec<f32> = (0..pm * 64)
+            .map(|i| (i % 7) as f32 * 0.125 - 0.375)
+            .collect();
         let rb: Vec<f32> = (0..64 * 64).map(|i| (i % 5) as f32 * 0.2 - 0.4).collect();
         let ra_buf = device.new_buffer_with_data(
             ra.as_ptr().cast(),
@@ -569,10 +572,11 @@ fn main() {
                                 enc.set_buffer(0, Some(&a_buf), 0);
                                 enc.set_buffer(1, Some(&w_buf), 0);
                                 enc.set_buffer(2, Some(&out_buf), 0);
-                                for (i, v) in
-                                    [m as u32, n as u32, k as u32, k as u32, 1, n as u32, 1, 0, 0, 0]
-                                        .iter()
-                                        .enumerate()
+                                for (i, v) in [
+                                    m as u32, n as u32, k as u32, k as u32, 1, n as u32, 1, 0, 0, 0,
+                                ]
+                                .iter()
+                                .enumerate()
                                 {
                                     enc.set_bytes(i as u64 + 3, 4, std::ptr::from_ref(v).cast());
                                 }
@@ -583,10 +587,11 @@ fn main() {
                                 enc.set_buffer(0, Some(&a_buf), 0);
                                 enc.set_buffer(1, Some(&wh_buf), 0);
                                 enc.set_buffer(2, Some(&out_buf), 0);
-                                for (i, v) in
-                                    [m as u32, n as u32, k as u32, k as u32, 1, n as u32, 1, 0, 0, 0]
-                                        .iter()
-                                        .enumerate()
+                                for (i, v) in [
+                                    m as u32, n as u32, k as u32, k as u32, 1, n as u32, 1, 0, 0, 0,
+                                ]
+                                .iter()
+                                .enumerate()
                                 {
                                     enc.set_bytes(i as u64 + 3, 4, std::ptr::from_ref(v).cast());
                                 }
@@ -629,7 +634,9 @@ fn main() {
             (us_h / us_n - 1.0) * 100.0,
         );
         // Keep the buffers alive past the closure borrows.
-        std::hint::black_box((&a_buf, &w_buf, &out_buf, &ra_buf, &rb_buf, &rout_buf, &wh_buf));
+        std::hint::black_box((
+            &a_buf, &w_buf, &out_buf, &ra_buf, &rb_buf, &rout_buf, &wh_buf,
+        ));
     }
     println!("done: {}", load_avg());
 }

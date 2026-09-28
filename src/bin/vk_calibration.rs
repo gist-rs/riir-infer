@@ -43,16 +43,16 @@
 use std::path::PathBuf;
 use std::time::Instant;
 
-use anyhow::{bail, Context, Result};
+use anyhow::{Context, Result, bail};
 use katgpt_core::fitted_anchor_table::StreamingMeanTable;
 use katgpt_transformer::MultiLayerKVCache;
 
 use riir_infer_core::corpus_text::load_corpus_text;
-use riir_infer_core::gguf_loader::{config_from_gguf_metadata, GgufFile};
+use riir_infer_core::gguf_loader::{GgufFile, config_from_gguf_metadata};
 use riir_infer_core::tokenizer::SentencePieceGgufTokenizer;
 use riir_infer_core::transformer::ForwardContext;
 use riir_infer_core::transformer::gemma2_calibration::{
-    forward_gemma2_f16_tapped, load_gemma2_f16_direct, CalibrationTables,
+    CalibrationTables, forward_gemma2_f16_tapped, load_gemma2_f16_direct,
 };
 use riir_infer_core::types::kv_dim;
 
@@ -175,7 +175,15 @@ fn main() -> Result<()> {
     for chunk in tokens.chunks(seq_len) {
         cache.reset();
         for (pos, &token) in chunk.iter().enumerate() {
-            forward_gemma2_f16_tapped(&mut ctx, &weights, &mut cache, &mut tables, token, pos, &config);
+            forward_gemma2_f16_tapped(
+                &mut ctx,
+                &weights,
+                &mut cache,
+                &mut tables,
+                token,
+                pos,
+                &config,
+            );
         }
         done += chunk.len();
         if done >= next_report {
@@ -229,7 +237,12 @@ fn main() -> Result<()> {
     {
         out.push_str(&format!(
             "| {} | {:.4} | {:.4} | {:.4} | {:.3} | {:.3} | {:.3} |\n",
-            l, r_v.aggregate, r_k.aggregate, r_vk.aggregate, r_v.tracked_mass, r_k.tracked_mass,
+            l,
+            r_v.aggregate,
+            r_k.aggregate,
+            r_vk.aggregate,
+            r_v.tracked_mass,
+            r_k.tracked_mass,
             r_vk.tracked_mass
         ));
     }

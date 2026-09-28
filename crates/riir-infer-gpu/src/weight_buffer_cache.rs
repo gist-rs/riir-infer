@@ -42,9 +42,9 @@
 //! bookkeeping remains consistent. The Handle must stay alive (held by the
 //! cache) to prevent CubeCL from recycling the buffer.
 
+use crate::cubecl_runtime::ActiveRuntime;
 use cubecl::prelude::*;
 use cubecl::server::Handle;
-use crate::cubecl_runtime::ActiveRuntime;
 use wgpu::Queue;
 
 /// A persistent GPU weight buffer slot.
@@ -303,7 +303,7 @@ pub fn parallel_write_buffer(queue: &Queue, buffer: &wgpu::Buffer, base_offset: 
     // panic. Pin the contract.
     const WRITE_ALIGN: usize = 256;
 
-debug_assert!(
+    debug_assert!(
         base_offset.is_multiple_of(256),
         "parallel_write_buffer base_offset {base_offset} not 256-aligned — chunk offsets would violate COPY_BUFFER_ALIGNMENT"
     );
@@ -453,7 +453,10 @@ fn coalesce_and_write_indexed(
     let first = run_indices[0];
     // Clone the buffer Arc so we don't hold an immutable borrow of `slots`
     // while we read slot data for the staging buffer.
-    let buffer = slots[first].buffer.clone().expect("buffer must be extracted");
+    let buffer = slots[first]
+        .buffer
+        .clone()
+        .expect("buffer must be extracted");
     let base_offset = slots[first].offset;
     let total_bytes: usize = run_indices.iter().map(|&i| slots[i].size_bytes).sum();
 
@@ -499,10 +502,12 @@ mod tests {
     fn test_slot_from_data_and_write_in_place() {
         // This test requires a GPU + CubeCL runtime — skip on CI without one.
         // Run locally with: cargo test -p riir-gpu --features kimi_k3_gpu_backward weight_buffer_cache -- --nocapture
-        let ctx = if let Ok(ctx) = crate::context::GpuContext::new() { ctx } else {
-                eprintln!("Skipping test — no GPU available");
-                return;
-            };
+        let ctx = if let Ok(ctx) = crate::context::GpuContext::new() {
+            ctx
+        } else {
+            eprintln!("Skipping test — no GPU available");
+            return;
+        };
         let client = ctx.cubecl_client();
 
         // Create a slot with initial data.

@@ -75,8 +75,10 @@ use std::error::Error;
 use std::fmt;
 use std::sync::Arc;
 
-use cudarc::driver::safe::{CudaContext, CudaFunction, CudaModule, CudaSlice, CudaStream, LaunchConfig};
 use cudarc::driver::PushKernelArg;
+use cudarc::driver::safe::{
+    CudaContext, CudaFunction, CudaModule, CudaSlice, CudaStream, LaunchConfig,
+};
 
 /// Padded A-stage row stride (bytes). 132 keeps the 128 payload bytes
 /// 4-byte aligned while breaking the every-row-same-bank pattern a 128
@@ -2466,7 +2468,8 @@ pub enum MmaGen {
 pub fn mma_v2_enabled() -> bool {
     static V2: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     *V2.get_or_init(|| {
-        std::env::var("RIIR_GEMM_MMA_V2").map_or(true, |s| !matches!(s.trim(), "0" | "false" | "off"))
+        std::env::var("RIIR_GEMM_MMA_V2")
+            .map_or(true, |s| !matches!(s.trim(), "0" | "false" | "off"))
     })
 }
 
@@ -2508,7 +2511,8 @@ const MMA_V5_MIN_M: usize = 2048;
 pub fn smallp_gemm_enabled() -> bool {
     static K: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     *K.get_or_init(|| {
-        std::env::var("RIIR_PREFILL_SMALLP_GEMM").map_or(true, |s| !matches!(s.trim(), "0" | "false" | "off"))
+        std::env::var("RIIR_PREFILL_SMALLP_GEMM")
+            .map_or(true, |s| !matches!(s.trim(), "0" | "false" | "off"))
     })
 }
 
@@ -2527,7 +2531,8 @@ pub fn smallp_gemm_enabled() -> bool {
 pub fn smallp_y8_enabled() -> bool {
     static K: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     *K.get_or_init(|| {
-        std::env::var("RIIR_PREFILL_SMALLP_Y8").is_ok_and(|s| matches!(s.trim(), "1" | "true" | "on"))
+        std::env::var("RIIR_PREFILL_SMALLP_Y8")
+            .is_ok_and(|s| matches!(s.trim(), "1" | "true" | "on"))
     })
 }
 
@@ -2562,7 +2567,8 @@ fn smallp_y8_routes(m: usize, p: usize) -> bool {
 pub fn q8_act_enabled() -> bool {
     static K: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     *K.get_or_init(|| {
-        !std::env::var("RIIR_PREFILL_Q8_ACT").is_ok_and(|s| matches!(s.trim(), "0" | "false" | "off"))
+        !std::env::var("RIIR_PREFILL_Q8_ACT")
+            .is_ok_and(|s| matches!(s.trim(), "0" | "false" | "off"))
     })
 }
 
@@ -2587,7 +2593,8 @@ pub fn q8_act_enabled() -> bool {
 pub fn mmq_v2_enabled() -> bool {
     static K: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     *K.get_or_init(|| {
-        !std::env::var("RIIR_PREFILL_MMQ_V2").is_ok_and(|s| matches!(s.trim(), "0" | "false" | "off"))
+        !std::env::var("RIIR_PREFILL_MMQ_V2")
+            .is_ok_and(|s| matches!(s.trim(), "0" | "false" | "off"))
     })
 }
 
@@ -2707,7 +2714,14 @@ impl GemmTernaryI8MmaCuda {
         // staging + 2×64×36×4 single-plane B slabs = 52224 B (> the 48 KB
         // default, like v4's 70.7 KB).
         #[cfg(feature = "prefill_q8_act")]
-        let (quantize_q8_rn, quantize_q8_full, quantize_q8_approx, gemm_tm128v4_q8_fused, gemm_tm128v4_q8_strict, _q8_module) = {
+        let (
+            quantize_q8_rn,
+            quantize_q8_full,
+            quantize_q8_approx,
+            gemm_tm128v4_q8_fused,
+            gemm_tm128v4_q8_strict,
+            _q8_module,
+        ) = {
             let q8_ptx = cudarc::nvrtc::compile_ptx_with_opts(
                 GEMM_Q8_CUDA_SRC,
                 cudarc::nvrtc::CompileOptions {
@@ -2749,7 +2763,50 @@ impl GemmTernaryI8MmaCuda {
         // stage + double 64x36-word B slabs) is under the 48 KB default —
         // no per-function smem opt-in (unlike v4/v5/q8).
         #[cfg(feature = "prefill_mmq_v2")]
-        let (gemm_tm128v6_q8_fused, gemm_tm128v6_q8_strict, gemm_tm128v6t_q8_fused, gemm_tm128v6t_q8_strict, gemm_tm128v6d_q8_fused, gemm_tm128v6d_q8_strict, gemm_tm128v6tl_q8_fused, gemm_tm128v6tl_q8_strict, gemm_tm128v6tb_q8_fused, gemm_tm128v6tb_q8_strict, gemm_tm128v7_q8_fused, gemm_tm128v7_q8_strict, gemm_tm128v7t_q8_fused, gemm_tm128v7t_q8_strict, gemm_tm128v8_q8_fused, gemm_tm128v8_q8_strict, gemm_tm128v8t_q8_fused, gemm_tm128v8t_q8_strict, gemm_tm128v9_q8_fused, gemm_tm128v9_q8_strict, gemm_tm128v9t_q8_fused, gemm_tm128v9t_q8_strict, gemm_tm128v10_q8_fused, gemm_tm128v10_q8_strict, gemm_tm128v10t_q8_fused, gemm_tm128v10t_q8_strict, gemm_tm128v10o3_q8_fused, gemm_tm128v10o3_q8_strict, gemm_tm128v10o3_q8_nodecode, gemm_tm64v12_q8_fused, gemm_tm64v12_q8_strict, gemm_tm64v12_q8_nodecode, gemm_tm128v11gu_q8_fused, gemm_tm128v11gu_q8_strict, gemm_tm128v11gut_q8_fused, gemm_tm128v11gut_q8_strict, gemm_tm128v11gs_q8_fused, gemm_tm128v11gs_q8_strict, gemm_tm128v11gq_q8_fused, gemm_tm128v11gq_q8_strict, gemm_tm128v10t_q8_nodecode, _mmq_v2_module) = {
+        let (
+            gemm_tm128v6_q8_fused,
+            gemm_tm128v6_q8_strict,
+            gemm_tm128v6t_q8_fused,
+            gemm_tm128v6t_q8_strict,
+            gemm_tm128v6d_q8_fused,
+            gemm_tm128v6d_q8_strict,
+            gemm_tm128v6tl_q8_fused,
+            gemm_tm128v6tl_q8_strict,
+            gemm_tm128v6tb_q8_fused,
+            gemm_tm128v6tb_q8_strict,
+            gemm_tm128v7_q8_fused,
+            gemm_tm128v7_q8_strict,
+            gemm_tm128v7t_q8_fused,
+            gemm_tm128v7t_q8_strict,
+            gemm_tm128v8_q8_fused,
+            gemm_tm128v8_q8_strict,
+            gemm_tm128v8t_q8_fused,
+            gemm_tm128v8t_q8_strict,
+            gemm_tm128v9_q8_fused,
+            gemm_tm128v9_q8_strict,
+            gemm_tm128v9t_q8_fused,
+            gemm_tm128v9t_q8_strict,
+            gemm_tm128v10_q8_fused,
+            gemm_tm128v10_q8_strict,
+            gemm_tm128v10t_q8_fused,
+            gemm_tm128v10t_q8_strict,
+            gemm_tm128v10o3_q8_fused,
+            gemm_tm128v10o3_q8_strict,
+            gemm_tm128v10o3_q8_nodecode,
+            gemm_tm64v12_q8_fused,
+            gemm_tm64v12_q8_strict,
+            gemm_tm64v12_q8_nodecode,
+            gemm_tm128v11gu_q8_fused,
+            gemm_tm128v11gu_q8_strict,
+            gemm_tm128v11gut_q8_fused,
+            gemm_tm128v11gut_q8_strict,
+            gemm_tm128v11gs_q8_fused,
+            gemm_tm128v11gs_q8_strict,
+            gemm_tm128v11gq_q8_fused,
+            gemm_tm128v11gq_q8_strict,
+            gemm_tm128v10t_q8_nodecode,
+            _mmq_v2_module,
+        ) = {
             let v6_ptx = cudarc::nvrtc::compile_ptx_with_opts(
                 crate::gemm_ternary_i8_mma_v6_src::GEMM_MMQ_V2_CUDA_SRC,
                 cudarc::nvrtc::CompileOptions {
@@ -2864,21 +2921,54 @@ impl GemmTernaryI8MmaCuda {
                 // double-buffered 128-float scale stage: 50,176 B.
                 (&v9t_fused, 2 * 128 * 12 * 4 + 2 * 128 * 36 * 4),
                 (&v9t_strict, 2 * 128 * 12 * 4 + 2 * 128 * 36 * 4),
-                (&v10t_fused, 2 * 128 * 12 * 4 + 2 * 128 * 36 * 4 + 2 * 128 * 4),
-                (&v10t_strict, 2 * 128 * 12 * 4 + 2 * 128 * 36 * 4 + 2 * 128 * 4),
+                (
+                    &v10t_fused,
+                    2 * 128 * 12 * 4 + 2 * 128 * 36 * 4 + 2 * 128 * 4,
+                ),
+                (
+                    &v10t_strict,
+                    2 * 128 * 12 * 4 + 2 * 128 * 36 * 4 + 2 * 128 * 4,
+                ),
                 // v11gu/v11gut (Issue 902): 4*128*12*4 A codes (2 mats x 2
                 // bufs) + 2*TOKS*36*4 B + 4*128*4 scales — 45,056 B at TOKS=64
                 // (under the 48 KB default but set for uniformity) and 63,488 B
                 // at TOKS=128 (the opt-in case).
-                (&v11gu_fused, 4 * 128 * 12 * 4 + 2 * 64 * 36 * 4 + 4 * 128 * 4),
-                (&v11gu_strict, 4 * 128 * 12 * 4 + 2 * 64 * 36 * 4 + 4 * 128 * 4),
-                (&v11gut_fused, 4 * 128 * 12 * 4 + 2 * 128 * 36 * 4 + 4 * 128 * 4),
-                (&v11gut_strict, 4 * 128 * 12 * 4 + 2 * 128 * 36 * 4 + 4 * 128 * 4),
-                (&v11gs_fused, 4 * 128 * 12 * 4 + 2 * 64 * 36 * 4 + 4 * 128 * 4),
-                (&v11gs_strict, 4 * 128 * 12 * 4 + 2 * 64 * 36 * 4 + 4 * 128 * 4),
-                (&v11gq_fused, 4 * 128 * 12 * 4 + 2 * 64 * 36 * 4 + 4 * 128 * 4),
-                (&v11gq_strict, 4 * 128 * 12 * 4 + 2 * 64 * 36 * 4 + 4 * 128 * 4),
-                (&v10t_nodecode, 2 * 128 * 12 * 4 + 2 * 128 * 36 * 4 + 2 * 128 * 4),
+                (
+                    &v11gu_fused,
+                    4 * 128 * 12 * 4 + 2 * 64 * 36 * 4 + 4 * 128 * 4,
+                ),
+                (
+                    &v11gu_strict,
+                    4 * 128 * 12 * 4 + 2 * 64 * 36 * 4 + 4 * 128 * 4,
+                ),
+                (
+                    &v11gut_fused,
+                    4 * 128 * 12 * 4 + 2 * 128 * 36 * 4 + 4 * 128 * 4,
+                ),
+                (
+                    &v11gut_strict,
+                    4 * 128 * 12 * 4 + 2 * 128 * 36 * 4 + 4 * 128 * 4,
+                ),
+                (
+                    &v11gs_fused,
+                    4 * 128 * 12 * 4 + 2 * 64 * 36 * 4 + 4 * 128 * 4,
+                ),
+                (
+                    &v11gs_strict,
+                    4 * 128 * 12 * 4 + 2 * 64 * 36 * 4 + 4 * 128 * 4,
+                ),
+                (
+                    &v11gq_fused,
+                    4 * 128 * 12 * 4 + 2 * 64 * 36 * 4 + 4 * 128 * 4,
+                ),
+                (
+                    &v11gq_strict,
+                    4 * 128 * 12 * 4 + 2 * 64 * 36 * 4 + 4 * 128 * 4,
+                ),
+                (
+                    &v10t_nodecode,
+                    2 * 128 * 12 * 4 + 2 * 128 * 36 * 4 + 2 * 128 * 4,
+                ),
             ] {
                 f.set_attribute(
                     cudarc::driver::sys::CUfunction_attribute_enum::CU_FUNC_ATTRIBUTE_MAX_DYNAMIC_SHARED_SIZE_BYTES,
@@ -2886,17 +2976,50 @@ impl GemmTernaryI8MmaCuda {
                 )
                 .map_err(|e| GemmI8MmaError::Load(format!("v6 smem opt-in: {e}")))?;
             }
-            (v6_fused, v6_strict, v6t_fused, v6t_strict, v6d_fused, v6d_strict,
-             v6tl_fused, v6tl_strict, v6tb_fused, v6tb_strict,
-             v7_fused, v7_strict, v7t_fused, v7t_strict,
-             v8_fused, v8_strict, v8t_fused, v8t_strict,
-             v9_fused, v9_strict, v9t_fused, v9t_strict,
-             v10_fused, v10_strict, v10t_fused, v10t_strict,
-             v10o3_fused, v10o3_strict, v10o3_nodecode,
-             v12_fused, v12_strict, v12_nodecode,
-             v11gu_fused, v11gu_strict, v11gut_fused, v11gut_strict,
-             v11gs_fused, v11gs_strict, v11gq_fused, v11gq_strict,
-             v10t_nodecode, v6_module)
+            (
+                v6_fused,
+                v6_strict,
+                v6t_fused,
+                v6t_strict,
+                v6d_fused,
+                v6d_strict,
+                v6tl_fused,
+                v6tl_strict,
+                v6tb_fused,
+                v6tb_strict,
+                v7_fused,
+                v7_strict,
+                v7t_fused,
+                v7t_strict,
+                v8_fused,
+                v8_strict,
+                v8t_fused,
+                v8t_strict,
+                v9_fused,
+                v9_strict,
+                v9t_fused,
+                v9t_strict,
+                v10_fused,
+                v10_strict,
+                v10t_fused,
+                v10t_strict,
+                v10o3_fused,
+                v10o3_strict,
+                v10o3_nodecode,
+                v12_fused,
+                v12_strict,
+                v12_nodecode,
+                v11gu_fused,
+                v11gu_strict,
+                v11gut_fused,
+                v11gut_strict,
+                v11gs_fused,
+                v11gs_strict,
+                v11gq_fused,
+                v11gq_strict,
+                v10t_nodecode,
+                v6_module,
+            )
         };
         let ret = Self {
             quantize_rn: load("quantize_rows_i8_hilo_cuda_rn")?,
@@ -3050,7 +3173,8 @@ impl GemmTernaryI8MmaCuda {
 
     /// Select the division form used by [`Self::launch_quantize`].
     pub fn set_quant_div(&self, d: QuantDiv) {
-        self.quant_div.store(d as u8, std::sync::atomic::Ordering::Relaxed);
+        self.quant_div
+            .store(d as u8, std::sync::atomic::Ordering::Relaxed);
     }
 
     /// Occupancy probe for the A/B benches: (name, regs/thread, local bytes,
@@ -4263,7 +4387,18 @@ impl GemmTernaryI8MmaCuda {
         fold: FoldMode,
     ) -> Result<(), GemmI8MmaError> {
         self.launch_gemm_q8_v11_pair_geom(
-            stream, packed0, scale0, packed1, scale1, scratch, out0, out1, m, n, p, fold,
+            stream,
+            packed0,
+            scale0,
+            packed1,
+            scale1,
+            scratch,
+            out0,
+            out1,
+            m,
+            n,
+            p,
+            fold,
             &self.gemm_tm128v11gu_q8_fused,
             &self.gemm_tm128v11gu_q8_strict,
             64,
@@ -4296,7 +4431,18 @@ impl GemmTernaryI8MmaCuda {
         fold: FoldMode,
     ) -> Result<(), GemmI8MmaError> {
         self.launch_gemm_q8_v11_pair_geom(
-            stream, packed0, scale0, packed1, scale1, scratch, out0, out1, m, n, p, fold,
+            stream,
+            packed0,
+            scale0,
+            packed1,
+            scale1,
+            scratch,
+            out0,
+            out1,
+            m,
+            n,
+            p,
+            fold,
             &self.gemm_tm128v11gut_q8_fused,
             &self.gemm_tm128v11gut_q8_strict,
             128,
@@ -4329,7 +4475,18 @@ impl GemmTernaryI8MmaCuda {
         fold: FoldMode,
     ) -> Result<(), GemmI8MmaError> {
         self.launch_gemm_q8_v11_pair_geom(
-            stream, packed0, scale0, packed1, scale1, scratch, out0, out1, m, n, p, fold,
+            stream,
+            packed0,
+            scale0,
+            packed1,
+            scale1,
+            scratch,
+            out0,
+            out1,
+            m,
+            n,
+            p,
+            fold,
             &self.gemm_tm128v11gs_q8_fused,
             &self.gemm_tm128v11gs_q8_strict,
             64,
@@ -4362,7 +4519,18 @@ impl GemmTernaryI8MmaCuda {
         fold: FoldMode,
     ) -> Result<(), GemmI8MmaError> {
         self.launch_gemm_q8_v11_pair_geom(
-            stream, packed0, scale0, packed1, scale1, scratch, out0, out1, m, n, p, fold,
+            stream,
+            packed0,
+            scale0,
+            packed1,
+            scale1,
+            scratch,
+            out0,
+            out1,
+            m,
+            n,
+            p,
+            fold,
             &self.gemm_tm128v11gq_q8_fused,
             &self.gemm_tm128v11gq_q8_strict,
             64,
@@ -4490,7 +4658,16 @@ impl GemmTernaryI8MmaCuda {
         // at any m/p use `launch_gemm_smallp_tm32` / `launch_gemm_smallp_y8`.
         if smallp_y8_enabled() && smallp_y8_routes(m, p) {
             return self.launch_gemm_smallp_y8(
-                stream, pos_bits, neg_bits, group_scale, scratch, out, m, n, p, fold,
+                stream,
+                pos_bits,
+                neg_bits,
+                group_scale,
+                scratch,
+                out,
+                m,
+                n,
+                p,
+                fold,
             );
         }
         let func = match fold {
@@ -4674,7 +4851,16 @@ impl GemmTernaryI8MmaCuda {
         // p=16; v4-sp's m/32 grid + 5 blocks/SM is the small-p shape).
         if smallp_gemm_enabled() && (1..=16).contains(&p) && n.is_multiple_of(128) {
             return self.launch_gemm_smallp(
-                stream, pos_bits, neg_bits, group_scale, scratch, out, m, n, p, fold,
+                stream,
+                pos_bits,
+                neg_bits,
+                group_scale,
+                scratch,
+                out,
+                m,
+                n,
+                p,
+                fold,
             );
         }
         let kernel_gen = if mma_v2_enabled() {
@@ -4696,7 +4882,18 @@ impl GemmTernaryI8MmaCuda {
             _ => tile,
         };
         self.launch_gemm_gen(
-            stream, pos_bits, neg_bits, group_scale, scratch, out, m, n, p, tile, fold, kernel_gen,
+            stream,
+            pos_bits,
+            neg_bits,
+            group_scale,
+            scratch,
+            out,
+            m,
+            n,
+            p,
+            tile,
+            fold,
+            kernel_gen,
         )
     }
 
@@ -4774,7 +4971,10 @@ impl GemmTernaryI8MmaCuda {
         fold: FoldMode,
         kernel_gen: MmaGen,
     ) -> Result<(), GemmI8MmaError> {
-        assert!(n.is_multiple_of(128), "n must be a multiple of 128 (GROUP_COLS)");
+        assert!(
+            n.is_multiple_of(128),
+            "n must be a multiple of 128 (GROUP_COLS)"
+        );
         assert!(p >= 1);
         let func = match (tile, fold, kernel_gen) {
             (MmaTile::Tm128, FoldMode::Fused, MmaGen::V1) => &self.gemm_tm128_fused,
@@ -4885,7 +5085,17 @@ impl GemmTernaryI8MmaCuda {
     ) -> Result<(), GemmI8MmaError> {
         self.launch_quantize(stream, input, scratch, n, p)?;
         self.launch_gemm(
-            stream, pos_bits, neg_bits, group_scale, scratch, out, m, n, p, tile, fold,
+            stream,
+            pos_bits,
+            neg_bits,
+            group_scale,
+            scratch,
+            out,
+            m,
+            n,
+            p,
+            tile,
+            fold,
         )
     }
 
@@ -4941,15 +5151,44 @@ impl GemmTernaryI8MmaCuda {
             // 1.107x). The v6/v6d/v6tl variants stay launchable via their
             // direct launchers as A/B artifacts.
             return self.launch_gemm_q8_v6tb(
-                stream, pos_bits, neg_bits, group_scale, scratch, out, m, n, p, FoldMode::Fused,
+                stream,
+                pos_bits,
+                neg_bits,
+                group_scale,
+                scratch,
+                out,
+                m,
+                n,
+                p,
+                FoldMode::Fused,
             );
         }
         #[cfg(feature = "prefill_q8_act")]
         if q8_act_enabled() {
-            return self.launch_gemm_q8(stream, pos_bits, neg_bits, group_scale, scratch, out, m, n, p, FoldMode::Fused);
+            return self.launch_gemm_q8(
+                stream,
+                pos_bits,
+                neg_bits,
+                group_scale,
+                scratch,
+                out,
+                m,
+                n,
+                p,
+                FoldMode::Fused,
+            );
         }
         self.launch_gemm(
-            stream, pos_bits, neg_bits, group_scale, scratch, out, m, n, p, MmaTile::Tm64,
+            stream,
+            pos_bits,
+            neg_bits,
+            group_scale,
+            scratch,
+            out,
+            m,
+            n,
+            p,
+            MmaTile::Tm64,
             FoldMode::Fused,
         )
     }
@@ -5085,7 +5324,11 @@ mod tests {
         for r in 0..p {
             let (q_exp, s_exp) = q8_quantize_cpu(&input[r * n..(r + 1) * n]);
             assert_eq!(s_host[r], s_exp, "row {r}: scale");
-            assert_eq!(&q_host[r * (n / 4)..(r + 1) * (n / 4)], &q_exp[..], "row {r}: q words");
+            assert_eq!(
+                &q_host[r * (n / 4)..(r + 1) * (n / 4)],
+                &q_exp[..],
+                "row {r}: q words"
+            );
         }
         assert!(lo_host.iter().all(|&w| w == 0), "q_lo_w must stay zeroed");
     }
@@ -5111,12 +5354,18 @@ mod tests {
         // Non-disjoint bitplanes on purpose (the G1 fixture class).
         // wrapping_mul: debug-profile-safe (the v6 fixture's convention —
         // release-mode wrap == wrapping_mul).
-        let pos_bits: Vec<u32> =
-            (0..m * wpr).map(|i| (i as u64).wrapping_mul(0x9E3779B97F4A7C15) as u32).collect();
-        let neg_bits: Vec<u32> =
-            (0..m * wpr).map(|i| (i as u64).wrapping_mul(0xBF58476D1CE4E5B9) as u32).collect();
-        let group_scale: Vec<f32> = (0..m * groups).map(|i| 0.001 + ((i * 17) % 100) as f32 * 0.0001).collect();
-        let input: Vec<f32> = (0..p * n).map(|i| (((i * 37) % 251) as f32 - 120.0) * 0.02).collect();
+        let pos_bits: Vec<u32> = (0..m * wpr)
+            .map(|i| (i as u64).wrapping_mul(0x9E3779B97F4A7C15) as u32)
+            .collect();
+        let neg_bits: Vec<u32> = (0..m * wpr)
+            .map(|i| (i as u64).wrapping_mul(0xBF58476D1CE4E5B9) as u32)
+            .collect();
+        let group_scale: Vec<f32> = (0..m * groups)
+            .map(|i| 0.001 + ((i * 17) % 100) as f32 * 0.0001)
+            .collect();
+        let input: Vec<f32> = (0..p * n)
+            .map(|i| (((i * 37) % 251) as f32 - 120.0) * 0.02)
+            .collect();
 
         let pos_dev = stream.clone_htod(&pos_bits).unwrap();
         let neg_dev = stream.clone_htod(&neg_bits).unwrap();
@@ -5132,18 +5381,37 @@ mod tests {
             let out_q8 = stream.alloc_zeros::<f32>(p * m).unwrap();
             kernels
                 .launch_gemm_gen(
-                    &stream, &pos_dev, &neg_dev, &gs_dev, &scratch, &out_anchor, m, n, p,
-                    MmaTile::Tm128, fold, MmaGen::V4,
+                    &stream,
+                    &pos_dev,
+                    &neg_dev,
+                    &gs_dev,
+                    &scratch,
+                    &out_anchor,
+                    m,
+                    n,
+                    p,
+                    MmaTile::Tm128,
+                    fold,
+                    MmaGen::V4,
                 )
                 .unwrap();
             kernels
-                .launch_gemm_q8(&stream, &pos_dev, &neg_dev, &gs_dev, &scratch, &out_q8, m, n, p, fold)
+                .launch_gemm_q8(
+                    &stream, &pos_dev, &neg_dev, &gs_dev, &scratch, &out_q8, m, n, p, fold,
+                )
                 .unwrap();
             let a = stream.clone_dtoh(&out_anchor).unwrap();
             let b = stream.clone_dtoh(&out_q8).unwrap();
-            let diffs = a.iter().zip(&b).filter(|(x, y)| x.to_bits() != y.to_bits()).count();
-            assert_eq!(diffs, 0, "{fold:?}: q8 GEMM must be bit-identical to the \
-                 zero-lo anchor (the lo term is exactly 0)");
+            let diffs = a
+                .iter()
+                .zip(&b)
+                .filter(|(x, y)| x.to_bits() != y.to_bits())
+                .count();
+            assert_eq!(
+                diffs, 0,
+                "{fold:?}: q8 GEMM must be bit-identical to the \
+                 zero-lo anchor (the lo term is exactly 0)"
+            );
         }
 
         // Absolute grounding: one CPU reference element (row 0, tok 0) —
@@ -5173,7 +5441,18 @@ mod tests {
         let out = {
             let o = stream.alloc_zeros::<f32>(p * m).unwrap();
             kernels
-                .launch_gemm_q8(&stream, &pos_dev, &neg_dev, &gs_dev, &scratch, &o, m, n, p, FoldMode::Fused)
+                .launch_gemm_q8(
+                    &stream,
+                    &pos_dev,
+                    &neg_dev,
+                    &gs_dev,
+                    &scratch,
+                    &o,
+                    m,
+                    n,
+                    p,
+                    FoldMode::Fused,
+                )
                 .unwrap();
             stream.clone_dtoh(&o).unwrap()
         };
@@ -5204,14 +5483,18 @@ mod tests {
         let (m, n, p) = (17408usize, 5120usize, 2048usize);
         let wpr = n / 32;
         let groups = n / 128;
-        let pos_bits: Vec<u32> =
-            (0..m * wpr).map(|i| (i as u64 * 0x9E3779B97F4A7C15) as u32).collect();
-        let neg_bits: Vec<u32> =
-            (0..m * wpr).map(|i| (i as u64 * 0xBF58476D1CE4E5B9) as u32).collect();
-        let group_scale: Vec<f32> =
-            (0..m * groups).map(|i| 0.001 + ((i * 17) % 100) as f32 * 0.0001).collect();
-        let input: Vec<f32> =
-            (0..p * n).map(|i| (((i * 37) % 251) as f32 - 120.0) * 0.02).collect();
+        let pos_bits: Vec<u32> = (0..m * wpr)
+            .map(|i| (i as u64 * 0x9E3779B97F4A7C15) as u32)
+            .collect();
+        let neg_bits: Vec<u32> = (0..m * wpr)
+            .map(|i| (i as u64 * 0xBF58476D1CE4E5B9) as u32)
+            .collect();
+        let group_scale: Vec<f32> = (0..m * groups)
+            .map(|i| 0.001 + ((i * 17) % 100) as f32 * 0.0001)
+            .collect();
+        let input: Vec<f32> = (0..p * n)
+            .map(|i| (((i * 37) % 251) as f32 - 120.0) * 0.02)
+            .collect();
         let pos_dev = stream.clone_htod(&pos_bits).unwrap();
         let neg_dev = stream.clone_htod(&neg_bits).unwrap();
         let gs_dev = stream.clone_htod(&group_scale).unwrap();
@@ -5244,8 +5527,18 @@ mod tests {
                 .unwrap();
             kernels
                 .launch_gemm_gen(
-                    &stream, &pos_dev, &neg_dev, &gs_dev, &scratch, &out, m, n, p,
-                    MmaTile::Tm128, FoldMode::Fused, MmaGen::V4,
+                    &stream,
+                    &pos_dev,
+                    &neg_dev,
+                    &gs_dev,
+                    &scratch,
+                    &out,
+                    m,
+                    n,
+                    p,
+                    MmaTile::Tm128,
+                    FoldMode::Fused,
+                    MmaGen::V4,
                 )
                 .unwrap();
         });
@@ -5255,7 +5548,15 @@ mod tests {
                 .unwrap();
             kernels
                 .launch_gemm_q8(
-                    &stream, &pos_dev, &neg_dev, &gs_dev, &scratch, &out, m, n, p,
+                    &stream,
+                    &pos_dev,
+                    &neg_dev,
+                    &gs_dev,
+                    &scratch,
+                    &out,
+                    m,
+                    n,
+                    p,
                     FoldMode::Fused,
                 )
                 .unwrap();
@@ -5296,12 +5597,18 @@ mod tests {
         // Non-disjoint bitplanes on purpose (the G1 fixture class).
         // wrapping_mul: the T2a fixture values verbatim (release-mode wrap ==
         // wrapping_mul), debug-profile-safe.
-        let pos_bits: Vec<u32> =
-            (0..m * wpr).map(|i| (i as u64).wrapping_mul(0x9E3779B97F4A7C15) as u32).collect();
-        let neg_bits: Vec<u32> =
-            (0..m * wpr).map(|i| (i as u64).wrapping_mul(0xBF58476D1CE4E5B9) as u32).collect();
-        let group_scale: Vec<f32> = (0..m * groups).map(|i| 0.001 + ((i * 17) % 100) as f32 * 0.0001).collect();
-        let input: Vec<f32> = (0..p * n).map(|i| (((i * 37) % 251) as f32 - 120.0) * 0.02).collect();
+        let pos_bits: Vec<u32> = (0..m * wpr)
+            .map(|i| (i as u64).wrapping_mul(0x9E3779B97F4A7C15) as u32)
+            .collect();
+        let neg_bits: Vec<u32> = (0..m * wpr)
+            .map(|i| (i as u64).wrapping_mul(0xBF58476D1CE4E5B9) as u32)
+            .collect();
+        let group_scale: Vec<f32> = (0..m * groups)
+            .map(|i| 0.001 + ((i * 17) % 100) as f32 * 0.0001)
+            .collect();
+        let input: Vec<f32> = (0..p * n)
+            .map(|i| (((i * 37) % 251) as f32 - 120.0) * 0.02)
+            .collect();
 
         let pos_dev = stream.clone_htod(&pos_bits).unwrap();
         let neg_dev = stream.clone_htod(&neg_bits).unwrap();
@@ -5333,46 +5640,122 @@ mod tests {
             let out_v10 = stream.alloc_zeros::<f32>(p * m).unwrap();
             let out_v10t = stream.alloc_zeros::<f32>(p * m).unwrap();
             kernels
-                .launch_gemm_q8(&stream, &pos_dev, &neg_dev, &gs_dev, &scratch, &out_v4, m, n, p, fold)
+                .launch_gemm_q8(
+                    &stream, &pos_dev, &neg_dev, &gs_dev, &scratch, &out_v4, m, n, p, fold,
+                )
                 .unwrap();
             kernels
-                .launch_gemm_q8_v6(&stream, &pos_dev, &neg_dev, &gs_dev, &scratch, &out_v6, m, n, p, fold)
+                .launch_gemm_q8_v6(
+                    &stream, &pos_dev, &neg_dev, &gs_dev, &scratch, &out_v6, m, n, p, fold,
+                )
                 .unwrap();
             kernels
-                .launch_gemm_q8_v6t(&stream, &pos_dev, &neg_dev, &gs_dev, &scratch, &out_v6t, m, n, p, fold)
+                .launch_gemm_q8_v6t(
+                    &stream, &pos_dev, &neg_dev, &gs_dev, &scratch, &out_v6t, m, n, p, fold,
+                )
                 .unwrap();
             kernels
-                .launch_gemm_q8_v6d(&stream, &pos_dev, &neg_dev, &gs_dev, &scratch, &out_v6d, m, n, p, fold)
+                .launch_gemm_q8_v6d(
+                    &stream, &pos_dev, &neg_dev, &gs_dev, &scratch, &out_v6d, m, n, p, fold,
+                )
                 .unwrap();
             kernels
-                .launch_gemm_q8_v6tl(&stream, &pos_dev, &neg_dev, &gs_dev, &scratch, &out_v6tl, m, n, p, fold)
+                .launch_gemm_q8_v6tl(
+                    &stream, &pos_dev, &neg_dev, &gs_dev, &scratch, &out_v6tl, m, n, p, fold,
+                )
                 .unwrap();
             kernels
-                .launch_gemm_q8_v6tb(&stream, &pos_dev, &neg_dev, &gs_dev, &scratch, &out_v6tb, m, n, p, fold)
+                .launch_gemm_q8_v6tb(
+                    &stream, &pos_dev, &neg_dev, &gs_dev, &scratch, &out_v6tb, m, n, p, fold,
+                )
                 .unwrap();
             kernels
-                .launch_gemm_q8_v7(&stream, &pos_dev, &neg_dev, &gs_dev, &scratch, &out_v7, m, n, p, fold)
+                .launch_gemm_q8_v7(
+                    &stream, &pos_dev, &neg_dev, &gs_dev, &scratch, &out_v7, m, n, p, fold,
+                )
                 .unwrap();
             kernels
-                .launch_gemm_q8_v7t(&stream, &pos_dev, &neg_dev, &gs_dev, &scratch, &out_v7t, m, n, p, fold)
+                .launch_gemm_q8_v7t(
+                    &stream, &pos_dev, &neg_dev, &gs_dev, &scratch, &out_v7t, m, n, p, fold,
+                )
                 .unwrap();
             kernels
-                .launch_gemm_q8_v8(&stream, &packed_dev, &gs_dev, &scratch, &out_v8, m, n, p, fold)
+                .launch_gemm_q8_v8(
+                    &stream,
+                    &packed_dev,
+                    &gs_dev,
+                    &scratch,
+                    &out_v8,
+                    m,
+                    n,
+                    p,
+                    fold,
+                )
                 .unwrap();
             kernels
-                .launch_gemm_q8_v8t(&stream, &packed_dev, &gs_dev, &scratch, &out_v8t, m, n, p, fold)
+                .launch_gemm_q8_v8t(
+                    &stream,
+                    &packed_dev,
+                    &gs_dev,
+                    &scratch,
+                    &out_v8t,
+                    m,
+                    n,
+                    p,
+                    fold,
+                )
                 .unwrap();
             kernels
-                .launch_gemm_q8_v9(&stream, &packed_dev, &gs_dev, &scratch, &out_v9, m, n, p, fold)
+                .launch_gemm_q8_v9(
+                    &stream,
+                    &packed_dev,
+                    &gs_dev,
+                    &scratch,
+                    &out_v9,
+                    m,
+                    n,
+                    p,
+                    fold,
+                )
                 .unwrap();
             kernels
-                .launch_gemm_q8_v9t(&stream, &packed_dev, &gs_dev, &scratch, &out_v9t, m, n, p, fold)
+                .launch_gemm_q8_v9t(
+                    &stream,
+                    &packed_dev,
+                    &gs_dev,
+                    &scratch,
+                    &out_v9t,
+                    m,
+                    n,
+                    p,
+                    fold,
+                )
                 .unwrap();
             kernels
-                .launch_gemm_q8_v10(&stream, &packed_dev, &gs_dev, &scratch, &out_v10, m, n, p, fold)
+                .launch_gemm_q8_v10(
+                    &stream,
+                    &packed_dev,
+                    &gs_dev,
+                    &scratch,
+                    &out_v10,
+                    m,
+                    n,
+                    p,
+                    fold,
+                )
                 .unwrap();
             kernels
-                .launch_gemm_q8_v10t(&stream, &packed_dev, &gs_dev, &scratch, &out_v10t, m, n, p, fold)
+                .launch_gemm_q8_v10t(
+                    &stream,
+                    &packed_dev,
+                    &gs_dev,
+                    &scratch,
+                    &out_v10t,
+                    m,
+                    n,
+                    p,
+                    fold,
+                )
                 .unwrap();
             let a = stream.clone_dtoh(&out_v4).unwrap();
             let b = stream.clone_dtoh(&out_v6).unwrap();
@@ -5388,48 +5771,139 @@ mod tests {
             let s9t = stream.clone_dtoh(&out_v9t).unwrap();
             let s10 = stream.clone_dtoh(&out_v10).unwrap();
             let s10t = stream.clone_dtoh(&out_v10t).unwrap();
-            let diffs = a.iter().zip(&b).filter(|(x, y)| x.to_bits() != y.to_bits()).count();
-            assert_eq!(diffs, 0, "{fold:?}: the v6 fork-config kernel is a \
-                 scheduling change only — it must be bit-identical to v4-q8");
-            let diffs_t = a.iter().zip(&t).filter(|(x, y)| x.to_bits() != y.to_bits()).count();
-            assert_eq!(diffs_t, 0, "{fold:?}: the v6t TOKS=128 tile is a \
-                 scheduling change only — it must be bit-identical to v4-q8");
-            let diffs_d = a.iter().zip(&d).filter(|(x, y)| x.to_bits() != y.to_bits()).count();
-            assert_eq!(diffs_d, 0, "{fold:?}: the v6d double-A tile is a \
-                 scheduling change only — it must be bit-identical to v4-q8");
-            let diffs_l = a.iter().zip(&l).filter(|(x, y)| x.to_bits() != y.to_bits()).count();
-            assert_eq!(diffs_l, 0, "{fold:?}: the v6tl ldmatrix-A twin is a \
-                 scheduling change only — it must be bit-identical to v4-q8");
-            let diffs_b = a.iter().zip(&bb).filter(|(x, y)| x.to_bits() != y.to_bits()).count();
-            assert_eq!(diffs_b, 0, "{fold:?}: the v6tb ldmatrix-A+B twin is a \
-                 scheduling change only — it must be bit-identical to v4-q8");
-            let diffs_7 = a.iter().zip(&s7).filter(|(x, y)| x.to_bits() != y.to_bits()).count();
-            assert_eq!(diffs_7, 0, "{fold:?}: the v7 fork-style global-A twin is a \
-                 scheduling change only — it must be bit-identical to v4-q8");
-            let diffs_7t = a.iter().zip(&s7t).filter(|(x, y)| x.to_bits() != y.to_bits()).count();
-            assert_eq!(diffs_7t, 0, "{fold:?}: the v7t TOKS=128 global-A twin is a \
-                 scheduling change only — it must be bit-identical to v4-q8");
-            let diffs_8 = a.iter().zip(&s8).filter(|(x, y)| x.to_bits() != y.to_bits()).count();
-            assert_eq!(diffs_8, 0, "{fold:?}: the v8 format-rung twin (packed \
+            let diffs = a
+                .iter()
+                .zip(&b)
+                .filter(|(x, y)| x.to_bits() != y.to_bits())
+                .count();
+            assert_eq!(
+                diffs, 0,
+                "{fold:?}: the v6 fork-config kernel is a \
+                 scheduling change only — it must be bit-identical to v4-q8"
+            );
+            let diffs_t = a
+                .iter()
+                .zip(&t)
+                .filter(|(x, y)| x.to_bits() != y.to_bits())
+                .count();
+            assert_eq!(
+                diffs_t, 0,
+                "{fold:?}: the v6t TOKS=128 tile is a \
+                 scheduling change only — it must be bit-identical to v4-q8"
+            );
+            let diffs_d = a
+                .iter()
+                .zip(&d)
+                .filter(|(x, y)| x.to_bits() != y.to_bits())
+                .count();
+            assert_eq!(
+                diffs_d, 0,
+                "{fold:?}: the v6d double-A tile is a \
+                 scheduling change only — it must be bit-identical to v4-q8"
+            );
+            let diffs_l = a
+                .iter()
+                .zip(&l)
+                .filter(|(x, y)| x.to_bits() != y.to_bits())
+                .count();
+            assert_eq!(
+                diffs_l, 0,
+                "{fold:?}: the v6tl ldmatrix-A twin is a \
+                 scheduling change only — it must be bit-identical to v4-q8"
+            );
+            let diffs_b = a
+                .iter()
+                .zip(&bb)
+                .filter(|(x, y)| x.to_bits() != y.to_bits())
+                .count();
+            assert_eq!(
+                diffs_b, 0,
+                "{fold:?}: the v6tb ldmatrix-A+B twin is a \
+                 scheduling change only — it must be bit-identical to v4-q8"
+            );
+            let diffs_7 = a
+                .iter()
+                .zip(&s7)
+                .filter(|(x, y)| x.to_bits() != y.to_bits())
+                .count();
+            assert_eq!(
+                diffs_7, 0,
+                "{fold:?}: the v7 fork-style global-A twin is a \
+                 scheduling change only — it must be bit-identical to v4-q8"
+            );
+            let diffs_7t = a
+                .iter()
+                .zip(&s7t)
+                .filter(|(x, y)| x.to_bits() != y.to_bits())
+                .count();
+            assert_eq!(
+                diffs_7t, 0,
+                "{fold:?}: the v7t TOKS=128 global-A twin is a \
+                 scheduling change only — it must be bit-identical to v4-q8"
+            );
+            let diffs_8 = a
+                .iter()
+                .zip(&s8)
+                .filter(|(x, y)| x.to_bits() != y.to_bits())
+                .count();
+            assert_eq!(
+                diffs_8, 0,
+                "{fold:?}: the v8 format-rung twin (packed \
                  Q2_0 codes + PRMT decode) moves no numerics — it must be \
-                 bit-identical to v4-q8 (incl. the non-disjoint-plane fold)");
-            let diffs_8t = a.iter().zip(&s8t).filter(|(x, y)| x.to_bits() != y.to_bits()).count();
-            assert_eq!(diffs_8t, 0, "{fold:?}: the v8t format-rung twin is a \
-                 scheduling change only — it must be bit-identical to v4-q8");
-            let diffs_9 = a.iter().zip(&s9).filter(|(x, y)| x.to_bits() != y.to_bits()).count();
-            assert_eq!(diffs_9, 0, "{fold:?}: the v9 staged-packed twin (cp.async \
+                 bit-identical to v4-q8 (incl. the non-disjoint-plane fold)"
+            );
+            let diffs_8t = a
+                .iter()
+                .zip(&s8t)
+                .filter(|(x, y)| x.to_bits() != y.to_bits())
+                .count();
+            assert_eq!(
+                diffs_8t, 0,
+                "{fold:?}: the v8t format-rung twin is a \
+                 scheduling change only — it must be bit-identical to v4-q8"
+            );
+            let diffs_9 = a
+                .iter()
+                .zip(&s9)
+                .filter(|(x, y)| x.to_bits() != y.to_bits())
+                .count();
+            assert_eq!(
+                diffs_9, 0,
+                "{fold:?}: the v9 staged-packed twin (cp.async \
                  code stage + per-use decode) moves no numerics — it must be \
-                 bit-identical to v4-q8 (incl. the non-disjoint-plane fold)");
-            let diffs_9t = a.iter().zip(&s9t).filter(|(x, y)| x.to_bits() != y.to_bits()).count();
-            assert_eq!(diffs_9t, 0, "{fold:?}: the v9t staged-packed twin is a \
-                 scheduling change only — it must be bit-identical to v4-q8");
-            let diffs_10 = a.iter().zip(&s10).filter(|(x, y)| x.to_bits() != y.to_bits()).count();
-            assert_eq!(diffs_10, 0, "{fold:?}: the v10 L2-traffic twin (smem \
+                 bit-identical to v4-q8 (incl. the non-disjoint-plane fold)"
+            );
+            let diffs_9t = a
+                .iter()
+                .zip(&s9t)
+                .filter(|(x, y)| x.to_bits() != y.to_bits())
+                .count();
+            assert_eq!(
+                diffs_9t, 0,
+                "{fold:?}: the v9t staged-packed twin is a \
+                 scheduling change only — it must be bit-identical to v4-q8"
+            );
+            let diffs_10 = a
+                .iter()
+                .zip(&s10)
+                .filter(|(x, y)| x.to_bits() != y.to_bits())
+                .count();
+            assert_eq!(
+                diffs_10, 0,
+                "{fold:?}: the v10 L2-traffic twin (smem \
                  scale stage + transposed epilogue) moves no numerics — it \
-                 must be bit-identical to v4-q8");
-            let diffs_10t = a.iter().zip(&s10t).filter(|(x, y)| x.to_bits() != y.to_bits()).count();
-            assert_eq!(diffs_10t, 0, "{fold:?}: the v10t L2-traffic twin is a \
-                 scheduling change only — it must be bit-identical to v4-q8");
+                 must be bit-identical to v4-q8"
+            );
+            let diffs_10t = a
+                .iter()
+                .zip(&s10t)
+                .filter(|(x, y)| x.to_bits() != y.to_bits())
+                .count();
+            assert_eq!(
+                diffs_10t, 0,
+                "{fold:?}: the v10t L2-traffic twin is a \
+                 scheduling change only — it must be bit-identical to v4-q8"
+            );
         }
 
         // Absolute grounding: the same CPU reference element the T2a gate
@@ -5456,27 +5930,123 @@ mod tests {
         }
         let expected = o * s_t[0];
         for (name, launch) in [
-            ("v6", &(|o: &CudaSlice<f32>|
-                kernels.launch_gemm_q8_v6(&stream, &pos_dev, &neg_dev, &gs_dev, &scratch, o, m, n, p, FoldMode::Fused))
-                as &dyn Fn(&CudaSlice<f32>) -> Result<(), GemmI8MmaError>),
-            ("v6tl", &(|o: &CudaSlice<f32>|
-                kernels.launch_gemm_q8_v6tl(&stream, &pos_dev, &neg_dev, &gs_dev, &scratch, o, m, n, p, FoldMode::Fused))
-                as &dyn Fn(&CudaSlice<f32>) -> Result<(), GemmI8MmaError>),
-            ("v6tb", &(|o: &CudaSlice<f32>|
-                kernels.launch_gemm_q8_v6tb(&stream, &pos_dev, &neg_dev, &gs_dev, &scratch, o, m, n, p, FoldMode::Fused))
-                as &dyn Fn(&CudaSlice<f32>) -> Result<(), GemmI8MmaError>),
-            ("v7", &(|o: &CudaSlice<f32>|
-                kernels.launch_gemm_q8_v7(&stream, &pos_dev, &neg_dev, &gs_dev, &scratch, o, m, n, p, FoldMode::Fused))
-                as &dyn Fn(&CudaSlice<f32>) -> Result<(), GemmI8MmaError>),
-            ("v7t", &(|o: &CudaSlice<f32>|
-                kernels.launch_gemm_q8_v7t(&stream, &pos_dev, &neg_dev, &gs_dev, &scratch, o, m, n, p, FoldMode::Fused))
-                as &dyn Fn(&CudaSlice<f32>) -> Result<(), GemmI8MmaError>),
-            ("v9t", &(|o: &CudaSlice<f32>|
-                kernels.launch_gemm_q8_v9t(&stream, &packed_dev, &gs_dev, &scratch, o, m, n, p, FoldMode::Fused))
-                as &dyn Fn(&CudaSlice<f32>) -> Result<(), GemmI8MmaError>),
-            ("v10t", &(|o: &CudaSlice<f32>|
-                kernels.launch_gemm_q8_v10t(&stream, &packed_dev, &gs_dev, &scratch, o, m, n, p, FoldMode::Fused))
-                as &dyn Fn(&CudaSlice<f32>) -> Result<(), GemmI8MmaError>),
+            (
+                "v6",
+                &(|o: &CudaSlice<f32>| {
+                    kernels.launch_gemm_q8_v6(
+                        &stream,
+                        &pos_dev,
+                        &neg_dev,
+                        &gs_dev,
+                        &scratch,
+                        o,
+                        m,
+                        n,
+                        p,
+                        FoldMode::Fused,
+                    )
+                }) as &dyn Fn(&CudaSlice<f32>) -> Result<(), GemmI8MmaError>,
+            ),
+            (
+                "v6tl",
+                &(|o: &CudaSlice<f32>| {
+                    kernels.launch_gemm_q8_v6tl(
+                        &stream,
+                        &pos_dev,
+                        &neg_dev,
+                        &gs_dev,
+                        &scratch,
+                        o,
+                        m,
+                        n,
+                        p,
+                        FoldMode::Fused,
+                    )
+                }) as &dyn Fn(&CudaSlice<f32>) -> Result<(), GemmI8MmaError>,
+            ),
+            (
+                "v6tb",
+                &(|o: &CudaSlice<f32>| {
+                    kernels.launch_gemm_q8_v6tb(
+                        &stream,
+                        &pos_dev,
+                        &neg_dev,
+                        &gs_dev,
+                        &scratch,
+                        o,
+                        m,
+                        n,
+                        p,
+                        FoldMode::Fused,
+                    )
+                }) as &dyn Fn(&CudaSlice<f32>) -> Result<(), GemmI8MmaError>,
+            ),
+            (
+                "v7",
+                &(|o: &CudaSlice<f32>| {
+                    kernels.launch_gemm_q8_v7(
+                        &stream,
+                        &pos_dev,
+                        &neg_dev,
+                        &gs_dev,
+                        &scratch,
+                        o,
+                        m,
+                        n,
+                        p,
+                        FoldMode::Fused,
+                    )
+                }) as &dyn Fn(&CudaSlice<f32>) -> Result<(), GemmI8MmaError>,
+            ),
+            (
+                "v7t",
+                &(|o: &CudaSlice<f32>| {
+                    kernels.launch_gemm_q8_v7t(
+                        &stream,
+                        &pos_dev,
+                        &neg_dev,
+                        &gs_dev,
+                        &scratch,
+                        o,
+                        m,
+                        n,
+                        p,
+                        FoldMode::Fused,
+                    )
+                }) as &dyn Fn(&CudaSlice<f32>) -> Result<(), GemmI8MmaError>,
+            ),
+            (
+                "v9t",
+                &(|o: &CudaSlice<f32>| {
+                    kernels.launch_gemm_q8_v9t(
+                        &stream,
+                        &packed_dev,
+                        &gs_dev,
+                        &scratch,
+                        o,
+                        m,
+                        n,
+                        p,
+                        FoldMode::Fused,
+                    )
+                }) as &dyn Fn(&CudaSlice<f32>) -> Result<(), GemmI8MmaError>,
+            ),
+            (
+                "v10t",
+                &(|o: &CudaSlice<f32>| {
+                    kernels.launch_gemm_q8_v10t(
+                        &stream,
+                        &packed_dev,
+                        &gs_dev,
+                        &scratch,
+                        o,
+                        m,
+                        n,
+                        p,
+                        FoldMode::Fused,
+                    )
+                }) as &dyn Fn(&CudaSlice<f32>) -> Result<(), GemmI8MmaError>,
+            ),
         ] {
             let o = stream.alloc_zeros::<f32>(p * m).unwrap();
             launch(&o).unwrap();
@@ -5507,20 +6077,27 @@ mod tests {
         let groups = n / 128;
         // mat0: the T2a fixture constants; mat1: shifted multipliers (distinct
         // weights AND distinct scales — a slab swap would fail loudly).
-        let pos0: Vec<u32> =
-            (0..m * wpr).map(|i| (i as u64).wrapping_mul(0x9E3779B97F4A7C15) as u32).collect();
-        let neg0: Vec<u32> =
-            (0..m * wpr).map(|i| (i as u64).wrapping_mul(0xBF58476D1CE4E5B9) as u32).collect();
-        let sc0: Vec<f32> =
-            (0..m * groups).map(|i| 0.001 + ((i * 17) % 100) as f32 * 0.0001).collect();
-        let pos1: Vec<u32> =
-            (0..m * wpr).map(|i| (i as u64).wrapping_mul(0x94D049BB133111EB) as u32).collect();
-        let neg1: Vec<u32> =
-            (0..m * wpr).map(|i| (i as u64).wrapping_mul(0x8D2E4FB5A5B77735) as u32).collect();
-        let sc1: Vec<f32> =
-            (0..m * groups).map(|i| 0.002 + ((i * 29) % 100) as f32 * 0.0002).collect();
-        let input: Vec<f32> =
-            (0..p * n).map(|i| (((i * 37) % 251) as f32 - 120.0) * 0.02).collect();
+        let pos0: Vec<u32> = (0..m * wpr)
+            .map(|i| (i as u64).wrapping_mul(0x9E3779B97F4A7C15) as u32)
+            .collect();
+        let neg0: Vec<u32> = (0..m * wpr)
+            .map(|i| (i as u64).wrapping_mul(0xBF58476D1CE4E5B9) as u32)
+            .collect();
+        let sc0: Vec<f32> = (0..m * groups)
+            .map(|i| 0.001 + ((i * 17) % 100) as f32 * 0.0001)
+            .collect();
+        let pos1: Vec<u32> = (0..m * wpr)
+            .map(|i| (i as u64).wrapping_mul(0x94D049BB133111EB) as u32)
+            .collect();
+        let neg1: Vec<u32> = (0..m * wpr)
+            .map(|i| (i as u64).wrapping_mul(0x8D2E4FB5A5B77735) as u32)
+            .collect();
+        let sc1: Vec<f32> = (0..m * groups)
+            .map(|i| 0.002 + ((i * 29) % 100) as f32 * 0.0002)
+            .collect();
+        let input: Vec<f32> = (0..p * n)
+            .map(|i| (((i * 37) % 251) as f32 - 120.0) * 0.02)
+            .collect();
 
         let _p0_dev = stream.clone_htod(&pos0).unwrap();
         let _n0_dev = stream.clone_htod(&neg0).unwrap();
@@ -5551,8 +6128,8 @@ mod tests {
                 .unwrap();
             kernels
                 .launch_gemm_q8_v11gu_pair(
-                    &stream, &pk0_dev, &s0_dev, &pk1_dev, &s1_dev, &scratch, &out0, &out1, m, n,
-                    p, fold,
+                    &stream, &pk0_dev, &s0_dev, &pk1_dev, &s1_dev, &scratch, &out0, &out1, m, n, p,
+                    fold,
                 )
                 .unwrap();
             let (r0, r1) = (
@@ -5563,12 +6140,26 @@ mod tests {
                 stream.clone_dtoh(&out0).unwrap(),
                 stream.clone_dtoh(&out1).unwrap(),
             );
-            let d0 = r0.iter().zip(&o0).filter(|(x, y)| x.to_bits() != y.to_bits()).count();
-            assert_eq!(d0, 0, "{fold:?}: v11gu slab0 is the pair fusion of v10t — \
-                 per-output op order is unchanged; it must be bit-identical");
-            let d1 = r1.iter().zip(&o1).filter(|(x, y)| x.to_bits() != y.to_bits()).count();
-            assert_eq!(d1, 0, "{fold:?}: v11gu slab1 is the pair fusion of v10t — \
-                 per-output op order is unchanged; it must be bit-identical");
+            let d0 = r0
+                .iter()
+                .zip(&o0)
+                .filter(|(x, y)| x.to_bits() != y.to_bits())
+                .count();
+            assert_eq!(
+                d0, 0,
+                "{fold:?}: v11gu slab0 is the pair fusion of v10t — \
+                 per-output op order is unchanged; it must be bit-identical"
+            );
+            let d1 = r1
+                .iter()
+                .zip(&o1)
+                .filter(|(x, y)| x.to_bits() != y.to_bits())
+                .count();
+            assert_eq!(
+                d1, 0,
+                "{fold:?}: v11gu slab1 is the pair fusion of v10t — \
+                 per-output op order is unchanged; it must be bit-identical"
+            );
             // v11gut (TOKS=128 geometry) + the Bench-895 repair rungs
             // (v11gs sequential, v11gq interleaved@255regs) — same refs.
             for (name, launch) in [
@@ -5576,8 +6167,8 @@ mod tests {
                     "v11gut",
                     &(|o0: &CudaSlice<f32>, o1: &CudaSlice<f32>| {
                         kernels.launch_gemm_q8_v11gut_pair(
-                            &stream, &pk0_dev, &s0_dev, &pk1_dev, &s1_dev, &scratch, o0, o1, m,
-                            n, p, fold,
+                            &stream, &pk0_dev, &s0_dev, &pk1_dev, &s1_dev, &scratch, o0, o1, m, n,
+                            p, fold,
                         )
                     })
                         as &dyn Fn(&CudaSlice<f32>, &CudaSlice<f32>) -> Result<(), GemmI8MmaError>,
@@ -5586,8 +6177,8 @@ mod tests {
                     "v11gs",
                     &(|o0: &CudaSlice<f32>, o1: &CudaSlice<f32>| {
                         kernels.launch_gemm_q8_v11gs_pair(
-                            &stream, &pk0_dev, &s0_dev, &pk1_dev, &s1_dev, &scratch, o0, o1, m,
-                            n, p, fold,
+                            &stream, &pk0_dev, &s0_dev, &pk1_dev, &s1_dev, &scratch, o0, o1, m, n,
+                            p, fold,
                         )
                     })
                         as &dyn Fn(&CudaSlice<f32>, &CudaSlice<f32>) -> Result<(), GemmI8MmaError>,
@@ -5596,8 +6187,8 @@ mod tests {
                     "v11gq",
                     &(|o0: &CudaSlice<f32>, o1: &CudaSlice<f32>| {
                         kernels.launch_gemm_q8_v11gq_pair(
-                            &stream, &pk0_dev, &s0_dev, &pk1_dev, &s1_dev, &scratch, o0, o1, m,
-                            n, p, fold,
+                            &stream, &pk0_dev, &s0_dev, &pk1_dev, &s1_dev, &scratch, o0, o1, m, n,
+                            p, fold,
                         )
                     })
                         as &dyn Fn(&CudaSlice<f32>, &CudaSlice<f32>) -> Result<(), GemmI8MmaError>,
@@ -5608,10 +6199,24 @@ mod tests {
                     stream.clone_dtoh(&out0).unwrap(),
                     stream.clone_dtoh(&out1).unwrap(),
                 );
-                let d0 = r0.iter().zip(&o0).filter(|(x, y)| x.to_bits() != y.to_bits()).count();
-                assert_eq!(d0, 0, "{fold:?}: {name} slab0 must be bit-identical to v10t");
-                let d1 = r1.iter().zip(&o1).filter(|(x, y)| x.to_bits() != y.to_bits()).count();
-                assert_eq!(d1, 0, "{fold:?}: {name} slab1 must be bit-identical to v10t");
+                let d0 = r0
+                    .iter()
+                    .zip(&o0)
+                    .filter(|(x, y)| x.to_bits() != y.to_bits())
+                    .count();
+                assert_eq!(
+                    d0, 0,
+                    "{fold:?}: {name} slab0 must be bit-identical to v10t"
+                );
+                let d1 = r1
+                    .iter()
+                    .zip(&o1)
+                    .filter(|(x, y)| x.to_bits() != y.to_bits())
+                    .count();
+                assert_eq!(
+                    d1, 0,
+                    "{fold:?}: {name} slab1 must be bit-identical to v10t"
+                );
             }
         }
     }
@@ -5639,21 +6244,26 @@ mod tests {
         let (m, n) = (17408usize, 5120usize);
         let wpr = n / 32;
         let groups = n / 128;
-        let pos_bits: Vec<u32> =
-            (0..m * wpr).map(|i| (i as u64 * 0x9E3779B97F4A7C15) as u32).collect();
-        let neg_bits: Vec<u32> =
-            (0..m * wpr).map(|i| (i as u64 * 0xBF58476D1CE4E5B9) as u32).collect();
-        let group_scale: Vec<f32> =
-            (0..m * groups).map(|i| 0.001 + ((i * 17) % 100) as f32 * 0.0001).collect();
-        let pos1_bits: Vec<u32> =
-            (0..m * wpr).map(|i| (i as u64 * 0x94D049BB133111EB) as u32).collect();
-        let neg1_bits: Vec<u32> =
-            (0..m * wpr).map(|i| (i as u64 * 0x8D2E4FB5A5B77735) as u32).collect();
-        let group1_scale: Vec<f32> =
-            (0..m * groups).map(|i| 0.002 + ((i * 29) % 100) as f32 * 0.0002).collect();
+        let pos_bits: Vec<u32> = (0..m * wpr)
+            .map(|i| (i as u64 * 0x9E3779B97F4A7C15) as u32)
+            .collect();
+        let neg_bits: Vec<u32> = (0..m * wpr)
+            .map(|i| (i as u64 * 0xBF58476D1CE4E5B9) as u32)
+            .collect();
+        let group_scale: Vec<f32> = (0..m * groups)
+            .map(|i| 0.001 + ((i * 17) % 100) as f32 * 0.0001)
+            .collect();
+        let pos1_bits: Vec<u32> = (0..m * wpr)
+            .map(|i| (i as u64 * 0x94D049BB133111EB) as u32)
+            .collect();
+        let neg1_bits: Vec<u32> = (0..m * wpr)
+            .map(|i| (i as u64 * 0x8D2E4FB5A5B77735) as u32)
+            .collect();
+        let group1_scale: Vec<f32> = (0..m * groups)
+            .map(|i| 0.002 + ((i * 29) % 100) as f32 * 0.0002)
+            .collect();
         let packed0 = crate::prefill_cuda_mma::pack_bitplanes_to_q2(&pos_bits, &neg_bits, m, n);
-        let packed1 =
-            crate::prefill_cuda_mma::pack_bitplanes_to_q2(&pos1_bits, &neg1_bits, m, n);
+        let packed1 = crate::prefill_cuda_mma::pack_bitplanes_to_q2(&pos1_bits, &neg1_bits, m, n);
         let pk0_dev = stream.clone_htod(&packed0).unwrap();
         let pk1_dev = stream.clone_htod(&packed1).unwrap();
         let s0_dev = stream.clone_htod(&group_scale).unwrap();
@@ -5677,8 +6287,9 @@ mod tests {
 
         type BenchArm<'a> = (&'a str, Box<dyn Fn() + 'a>);
         for p in [2048usize, 4096usize] {
-            let input: Vec<f32> =
-                (0..p * n).map(|i| (((i * 37) % 251) as f32 - 120.0) * 0.02).collect();
+            let input: Vec<f32> = (0..p * n)
+                .map(|i| (((i * 37) % 251) as f32 - 120.0) * 0.02)
+                .collect();
             let _in_dev = stream.clone_htod(&input).unwrap();
             let scratch = kernels.alloc_scratch(&stream, n, p).unwrap();
             let out0 = stream.alloc_zeros::<f32>(p * m).unwrap();
@@ -5697,13 +6308,27 @@ mod tests {
                         move || {
                             kernels
                                 .launch_gemm_q8_v10t(
-                                    stream, pk0_dev, s0_dev, scratch, out0, m, n, p,
+                                    stream,
+                                    pk0_dev,
+                                    s0_dev,
+                                    scratch,
+                                    out0,
+                                    m,
+                                    n,
+                                    p,
                                     FoldMode::Fused,
                                 )
                                 .unwrap();
                             kernels
                                 .launch_gemm_q8_v10t(
-                                    stream, pk1_dev, s1_dev, scratch, out1, m, n, p,
+                                    stream,
+                                    pk1_dev,
+                                    s1_dev,
+                                    scratch,
+                                    out1,
+                                    m,
+                                    n,
+                                    p,
                                     FoldMode::Fused,
                                 )
                                 .unwrap();
@@ -5721,8 +6346,18 @@ mod tests {
                         move || {
                             kernels
                                 .launch_gemm_q8_v11gu_pair(
-                                    stream, pk0_dev, s0_dev, pk1_dev, s1_dev, scratch, out0,
-                                    out1, m, n, p, FoldMode::Fused,
+                                    stream,
+                                    pk0_dev,
+                                    s0_dev,
+                                    pk1_dev,
+                                    s1_dev,
+                                    scratch,
+                                    out0,
+                                    out1,
+                                    m,
+                                    n,
+                                    p,
+                                    FoldMode::Fused,
                                 )
                                 .unwrap();
                         }
@@ -5739,8 +6374,18 @@ mod tests {
                         move || {
                             kernels
                                 .launch_gemm_q8_v11gut_pair(
-                                    stream, pk0_dev, s0_dev, pk1_dev, s1_dev, scratch, out0,
-                                    out1, m, n, p, FoldMode::Fused,
+                                    stream,
+                                    pk0_dev,
+                                    s0_dev,
+                                    pk1_dev,
+                                    s1_dev,
+                                    scratch,
+                                    out0,
+                                    out1,
+                                    m,
+                                    n,
+                                    p,
+                                    FoldMode::Fused,
                                 )
                                 .unwrap();
                         }
@@ -5757,8 +6402,18 @@ mod tests {
                         move || {
                             kernels
                                 .launch_gemm_q8_v11gs_pair(
-                                    stream, pk0_dev, s0_dev, pk1_dev, s1_dev, scratch, out0,
-                                    out1, m, n, p, FoldMode::Fused,
+                                    stream,
+                                    pk0_dev,
+                                    s0_dev,
+                                    pk1_dev,
+                                    s1_dev,
+                                    scratch,
+                                    out0,
+                                    out1,
+                                    m,
+                                    n,
+                                    p,
+                                    FoldMode::Fused,
                                 )
                                 .unwrap();
                         }
@@ -5775,8 +6430,18 @@ mod tests {
                         move || {
                             kernels
                                 .launch_gemm_q8_v11gq_pair(
-                                    stream, pk0_dev, s0_dev, pk1_dev, s1_dev, scratch, out0,
-                                    out1, m, n, p, FoldMode::Fused,
+                                    stream,
+                                    pk0_dev,
+                                    s0_dev,
+                                    pk1_dev,
+                                    s1_dev,
+                                    scratch,
+                                    out0,
+                                    out1,
+                                    m,
+                                    n,
+                                    p,
+                                    FoldMode::Fused,
                                 )
                                 .unwrap();
                         }
@@ -5881,14 +6546,18 @@ mod tests {
         let (m, n, p) = (17408usize, 5120usize, 2048usize);
         let wpr = n / 32;
         let groups = n / 128;
-        let pos_bits: Vec<u32> =
-            (0..m * wpr).map(|i| (i as u64 * 0x9E3779B97F4A7C15) as u32).collect();
-        let neg_bits: Vec<u32> =
-            (0..m * wpr).map(|i| (i as u64 * 0xBF58476D1CE4E5B9) as u32).collect();
-        let group_scale: Vec<f32> =
-            (0..m * groups).map(|i| 0.001 + ((i * 17) % 100) as f32 * 0.0001).collect();
-        let input: Vec<f32> =
-            (0..p * n).map(|i| (((i * 37) % 251) as f32 - 120.0) * 0.02).collect();
+        let pos_bits: Vec<u32> = (0..m * wpr)
+            .map(|i| (i as u64 * 0x9E3779B97F4A7C15) as u32)
+            .collect();
+        let neg_bits: Vec<u32> = (0..m * wpr)
+            .map(|i| (i as u64 * 0xBF58476D1CE4E5B9) as u32)
+            .collect();
+        let group_scale: Vec<f32> = (0..m * groups)
+            .map(|i| 0.001 + ((i * 17) % 100) as f32 * 0.0001)
+            .collect();
+        let input: Vec<f32> = (0..p * n)
+            .map(|i| (((i * 37) % 251) as f32 - 120.0) * 0.02)
+            .collect();
         let pos_dev = stream.clone_htod(&pos_bits).unwrap();
         let neg_dev = stream.clone_htod(&neg_bits).unwrap();
         let gs_dev = stream.clone_htod(&group_scale).unwrap();
@@ -5899,10 +6568,7 @@ mod tests {
         let out = stream.alloc_zeros::<f32>(p * m).unwrap();
         stream.synchronize().unwrap();
 
-        let v6_regs = kernels
-            .gemm_tm128v6_q8_fused
-            .num_regs()
-            .unwrap_or(-1);
+        let v6_regs = kernels.gemm_tm128v6_q8_fused.num_regs().unwrap_or(-1);
         let v6_local = kernels
             .gemm_tm128v6_q8_fused
             .local_size_bytes()
@@ -5947,7 +6613,15 @@ mod tests {
             quantize();
             kernels
                 .launch_gemm_q8(
-                    &stream, &pos_dev, &neg_dev, &gs_dev, &scratch, &out, m, n, p,
+                    &stream,
+                    &pos_dev,
+                    &neg_dev,
+                    &gs_dev,
+                    &scratch,
+                    &out,
+                    m,
+                    n,
+                    p,
                     FoldMode::Fused,
                 )
                 .unwrap();
@@ -5956,7 +6630,15 @@ mod tests {
             quantize();
             kernels
                 .launch_gemm_q8_v6(
-                    &stream, &pos_dev, &neg_dev, &gs_dev, &scratch, &out, m, n, p,
+                    &stream,
+                    &pos_dev,
+                    &neg_dev,
+                    &gs_dev,
+                    &scratch,
+                    &out,
+                    m,
+                    n,
+                    p,
                     FoldMode::Fused,
                 )
                 .unwrap();
@@ -5965,7 +6647,15 @@ mod tests {
             quantize();
             kernels
                 .launch_gemm_q8_v6t(
-                    &stream, &pos_dev, &neg_dev, &gs_dev, &scratch, &out, m, n, p,
+                    &stream,
+                    &pos_dev,
+                    &neg_dev,
+                    &gs_dev,
+                    &scratch,
+                    &out,
+                    m,
+                    n,
+                    p,
                     FoldMode::Fused,
                 )
                 .unwrap();
@@ -5974,7 +6664,15 @@ mod tests {
             quantize();
             kernels
                 .launch_gemm_q8_v6d(
-                    &stream, &pos_dev, &neg_dev, &gs_dev, &scratch, &out, m, n, p,
+                    &stream,
+                    &pos_dev,
+                    &neg_dev,
+                    &gs_dev,
+                    &scratch,
+                    &out,
+                    m,
+                    n,
+                    p,
                     FoldMode::Fused,
                 )
                 .unwrap();
@@ -5983,7 +6681,15 @@ mod tests {
             quantize();
             kernels
                 .launch_gemm_q8_v6tl(
-                    &stream, &pos_dev, &neg_dev, &gs_dev, &scratch, &out, m, n, p,
+                    &stream,
+                    &pos_dev,
+                    &neg_dev,
+                    &gs_dev,
+                    &scratch,
+                    &out,
+                    m,
+                    n,
+                    p,
                     FoldMode::Fused,
                 )
                 .unwrap();
@@ -5992,7 +6698,15 @@ mod tests {
             quantize();
             kernels
                 .launch_gemm_q8_v6tb(
-                    &stream, &pos_dev, &neg_dev, &gs_dev, &scratch, &out, m, n, p,
+                    &stream,
+                    &pos_dev,
+                    &neg_dev,
+                    &gs_dev,
+                    &scratch,
+                    &out,
+                    m,
+                    n,
+                    p,
                     FoldMode::Fused,
                 )
                 .unwrap();
@@ -6001,7 +6715,15 @@ mod tests {
             quantize();
             kernels
                 .launch_gemm_q8_v7(
-                    &stream, &pos_dev, &neg_dev, &gs_dev, &scratch, &out, m, n, p,
+                    &stream,
+                    &pos_dev,
+                    &neg_dev,
+                    &gs_dev,
+                    &scratch,
+                    &out,
+                    m,
+                    n,
+                    p,
                     FoldMode::Fused,
                 )
                 .unwrap();
@@ -6010,7 +6732,15 @@ mod tests {
             quantize();
             kernels
                 .launch_gemm_q8_v7t(
-                    &stream, &pos_dev, &neg_dev, &gs_dev, &scratch, &out, m, n, p,
+                    &stream,
+                    &pos_dev,
+                    &neg_dev,
+                    &gs_dev,
+                    &scratch,
+                    &out,
+                    m,
+                    n,
+                    p,
                     FoldMode::Fused,
                 )
                 .unwrap();
@@ -6019,7 +6749,14 @@ mod tests {
             quantize();
             kernels
                 .launch_gemm_q8_v8(
-                    &stream, &packed_dev, &gs_dev, &scratch, &out, m, n, p,
+                    &stream,
+                    &packed_dev,
+                    &gs_dev,
+                    &scratch,
+                    &out,
+                    m,
+                    n,
+                    p,
                     FoldMode::Fused,
                 )
                 .unwrap();
@@ -6028,7 +6765,14 @@ mod tests {
             quantize();
             kernels
                 .launch_gemm_q8_v8t(
-                    &stream, &packed_dev, &gs_dev, &scratch, &out, m, n, p,
+                    &stream,
+                    &packed_dev,
+                    &gs_dev,
+                    &scratch,
+                    &out,
+                    m,
+                    n,
+                    p,
                     FoldMode::Fused,
                 )
                 .unwrap();
@@ -6037,7 +6781,14 @@ mod tests {
             quantize();
             kernels
                 .launch_gemm_q8_v9(
-                    &stream, &packed_dev, &gs_dev, &scratch, &out, m, n, p,
+                    &stream,
+                    &packed_dev,
+                    &gs_dev,
+                    &scratch,
+                    &out,
+                    m,
+                    n,
+                    p,
                     FoldMode::Fused,
                 )
                 .unwrap();
@@ -6046,7 +6797,14 @@ mod tests {
             quantize();
             kernels
                 .launch_gemm_q8_v9t(
-                    &stream, &packed_dev, &gs_dev, &scratch, &out, m, n, p,
+                    &stream,
+                    &packed_dev,
+                    &gs_dev,
+                    &scratch,
+                    &out,
+                    m,
+                    n,
+                    p,
                     FoldMode::Fused,
                 )
                 .unwrap();
@@ -6055,7 +6813,14 @@ mod tests {
             quantize();
             kernels
                 .launch_gemm_q8_v10(
-                    &stream, &packed_dev, &gs_dev, &scratch, &out, m, n, p,
+                    &stream,
+                    &packed_dev,
+                    &gs_dev,
+                    &scratch,
+                    &out,
+                    m,
+                    n,
+                    p,
                     FoldMode::Fused,
                 )
                 .unwrap();
@@ -6064,109 +6829,109 @@ mod tests {
             quantize();
             kernels
                 .launch_gemm_q8_v10t(
-                    &stream, &packed_dev, &gs_dev, &scratch, &out, m, n, p,
+                    &stream,
+                    &packed_dev,
+                    &gs_dev,
+                    &scratch,
+                    &out,
+                    m,
+                    n,
+                    p,
                     FoldMode::Fused,
                 )
                 .unwrap();
         };
         let results = time(vec![
-            &run_v4, &run_v6, &run_v6t, &run_v6d, &run_v6tl, &run_v6tb, &run_v7, &run_v7t,
-            &run_v8, &run_v8t, &run_v9, &run_v9t, &run_v10, &run_v10t,
+            &run_v4, &run_v6, &run_v6t, &run_v6d, &run_v6tl, &run_v6tb, &run_v7, &run_v7t, &run_v8,
+            &run_v8t, &run_v9, &run_v9t, &run_v10, &run_v10t,
         ]);
-        let (q8_v4, q8_v6, q8_v6t, q8_v6d, q8_v6tl, q8_v6tb, q8_v7, q8_v7t, q8_v8, q8_v8t, q8_v9, q8_v9t, q8_v10, q8_v10t) =
-            (results[0], results[1], results[2], results[3], results[4], results[5], results[6], results[7], results[8], results[9], results[10], results[11], results[12], results[13]);
-        let v6d_regs = kernels
-            .gemm_tm128v6d_q8_fused
-            .num_regs()
-            .unwrap_or(-1);
+        let (
+            q8_v4,
+            q8_v6,
+            q8_v6t,
+            q8_v6d,
+            q8_v6tl,
+            q8_v6tb,
+            q8_v7,
+            q8_v7t,
+            q8_v8,
+            q8_v8t,
+            q8_v9,
+            q8_v9t,
+            q8_v10,
+            q8_v10t,
+        ) = (
+            results[0],
+            results[1],
+            results[2],
+            results[3],
+            results[4],
+            results[5],
+            results[6],
+            results[7],
+            results[8],
+            results[9],
+            results[10],
+            results[11],
+            results[12],
+            results[13],
+        );
+        let v6d_regs = kernels.gemm_tm128v6d_q8_fused.num_regs().unwrap_or(-1);
         let v6d_local = kernels
             .gemm_tm128v6d_q8_fused
             .local_size_bytes()
             .unwrap_or(-1);
-        let v6t_regs = kernels
-            .gemm_tm128v6t_q8_fused
-            .num_regs()
-            .unwrap_or(-1);
+        let v6t_regs = kernels.gemm_tm128v6t_q8_fused.num_regs().unwrap_or(-1);
         let v6t_local = kernels
             .gemm_tm128v6t_q8_fused
             .local_size_bytes()
             .unwrap_or(-1);
-        let v6tl_regs = kernels
-            .gemm_tm128v6tl_q8_fused
-            .num_regs()
-            .unwrap_or(-1);
+        let v6tl_regs = kernels.gemm_tm128v6tl_q8_fused.num_regs().unwrap_or(-1);
         let v6tl_local = kernels
             .gemm_tm128v6tl_q8_fused
             .local_size_bytes()
             .unwrap_or(-1);
-        let v6tb_regs = kernels
-            .gemm_tm128v6tb_q8_fused
-            .num_regs()
-            .unwrap_or(-1);
+        let v6tb_regs = kernels.gemm_tm128v6tb_q8_fused.num_regs().unwrap_or(-1);
         let v6tb_local = kernels
             .gemm_tm128v6tb_q8_fused
             .local_size_bytes()
             .unwrap_or(-1);
-        let v7_regs = kernels
-            .gemm_tm128v7_q8_fused
-            .num_regs()
-            .unwrap_or(-1);
+        let v7_regs = kernels.gemm_tm128v7_q8_fused.num_regs().unwrap_or(-1);
         let v7_local = kernels
             .gemm_tm128v7_q8_fused
             .local_size_bytes()
             .unwrap_or(-1);
-        let v7t_regs = kernels
-            .gemm_tm128v7t_q8_fused
-            .num_regs()
-            .unwrap_or(-1);
+        let v7t_regs = kernels.gemm_tm128v7t_q8_fused.num_regs().unwrap_or(-1);
         let v7t_local = kernels
             .gemm_tm128v7t_q8_fused
             .local_size_bytes()
             .unwrap_or(-1);
-        let v8_regs = kernels
-            .gemm_tm128v8_q8_fused
-            .num_regs()
-            .unwrap_or(-1);
+        let v8_regs = kernels.gemm_tm128v8_q8_fused.num_regs().unwrap_or(-1);
         let v8_local = kernels
             .gemm_tm128v8_q8_fused
             .local_size_bytes()
             .unwrap_or(-1);
-        let v8t_regs = kernels
-            .gemm_tm128v8t_q8_fused
-            .num_regs()
-            .unwrap_or(-1);
+        let v8t_regs = kernels.gemm_tm128v8t_q8_fused.num_regs().unwrap_or(-1);
         let v8t_local = kernels
             .gemm_tm128v8t_q8_fused
             .local_size_bytes()
             .unwrap_or(-1);
-        let v9_regs = kernels
-            .gemm_tm128v9_q8_fused
-            .num_regs()
-            .unwrap_or(-1);
+        let v9_regs = kernels.gemm_tm128v9_q8_fused.num_regs().unwrap_or(-1);
         let v9_local = kernels
             .gemm_tm128v9_q8_fused
             .local_size_bytes()
             .unwrap_or(-1);
-        let v9t_regs = kernels
-            .gemm_tm128v9t_q8_fused
-            .num_regs()
-            .unwrap_or(-1);
+        let v9t_regs = kernels.gemm_tm128v9t_q8_fused.num_regs().unwrap_or(-1);
         let v9t_local = kernels
             .gemm_tm128v9t_q8_fused
             .local_size_bytes()
             .unwrap_or(-1);
-        let v10_regs = kernels
-            .gemm_tm128v10_q8_fused
-            .num_regs()
-            .unwrap_or(-1);
+        let v10_regs = kernels.gemm_tm128v10_q8_fused.num_regs().unwrap_or(-1);
         let v10_local = kernels
             .gemm_tm128v10_q8_fused
             .local_size_bytes()
             .unwrap_or(-1);
-        let v10t_regs = kernels
-            .gemm_tm128v10t_q8_fused
-            .num_regs()
-            .unwrap_or(-1);
+        let v10t_regs = kernels.gemm_tm128v10t_q8_fused.num_regs().unwrap_or(-1);
         let v10t_local = kernels
             .gemm_tm128v10t_q8_fused
             .local_size_bytes()
@@ -6187,43 +6952,180 @@ mod tests {
         let out_v10 = stream.alloc_zeros::<f32>(p * m).unwrap();
         let out_v10t = stream.alloc_zeros::<f32>(p * m).unwrap();
         kernels
-            .launch_gemm_q8(&stream, &pos_dev, &neg_dev, &gs_dev, &scratch, &out_v4, m, n, p, FoldMode::Fused)
+            .launch_gemm_q8(
+                &stream,
+                &pos_dev,
+                &neg_dev,
+                &gs_dev,
+                &scratch,
+                &out_v4,
+                m,
+                n,
+                p,
+                FoldMode::Fused,
+            )
             .unwrap();
         kernels
-            .launch_gemm_q8_v6(&stream, &pos_dev, &neg_dev, &gs_dev, &scratch, &out_v6, m, n, p, FoldMode::Fused)
+            .launch_gemm_q8_v6(
+                &stream,
+                &pos_dev,
+                &neg_dev,
+                &gs_dev,
+                &scratch,
+                &out_v6,
+                m,
+                n,
+                p,
+                FoldMode::Fused,
+            )
             .unwrap();
         kernels
-            .launch_gemm_q8_v6t(&stream, &pos_dev, &neg_dev, &gs_dev, &scratch, &out_v6t, m, n, p, FoldMode::Fused)
+            .launch_gemm_q8_v6t(
+                &stream,
+                &pos_dev,
+                &neg_dev,
+                &gs_dev,
+                &scratch,
+                &out_v6t,
+                m,
+                n,
+                p,
+                FoldMode::Fused,
+            )
             .unwrap();
         kernels
-            .launch_gemm_q8_v6tl(&stream, &pos_dev, &neg_dev, &gs_dev, &scratch, &out_v6tl, m, n, p, FoldMode::Fused)
+            .launch_gemm_q8_v6tl(
+                &stream,
+                &pos_dev,
+                &neg_dev,
+                &gs_dev,
+                &scratch,
+                &out_v6tl,
+                m,
+                n,
+                p,
+                FoldMode::Fused,
+            )
             .unwrap();
         kernels
-            .launch_gemm_q8_v6tb(&stream, &pos_dev, &neg_dev, &gs_dev, &scratch, &out_v6tb, m, n, p, FoldMode::Fused)
+            .launch_gemm_q8_v6tb(
+                &stream,
+                &pos_dev,
+                &neg_dev,
+                &gs_dev,
+                &scratch,
+                &out_v6tb,
+                m,
+                n,
+                p,
+                FoldMode::Fused,
+            )
             .unwrap();
         kernels
-            .launch_gemm_q8_v7(&stream, &pos_dev, &neg_dev, &gs_dev, &scratch, &out_v7, m, n, p, FoldMode::Fused)
+            .launch_gemm_q8_v7(
+                &stream,
+                &pos_dev,
+                &neg_dev,
+                &gs_dev,
+                &scratch,
+                &out_v7,
+                m,
+                n,
+                p,
+                FoldMode::Fused,
+            )
             .unwrap();
         kernels
-            .launch_gemm_q8_v7t(&stream, &pos_dev, &neg_dev, &gs_dev, &scratch, &out_v7t, m, n, p, FoldMode::Fused)
+            .launch_gemm_q8_v7t(
+                &stream,
+                &pos_dev,
+                &neg_dev,
+                &gs_dev,
+                &scratch,
+                &out_v7t,
+                m,
+                n,
+                p,
+                FoldMode::Fused,
+            )
             .unwrap();
         kernels
-            .launch_gemm_q8_v8(&stream, &packed_dev, &gs_dev, &scratch, &out_v8, m, n, p, FoldMode::Fused)
+            .launch_gemm_q8_v8(
+                &stream,
+                &packed_dev,
+                &gs_dev,
+                &scratch,
+                &out_v8,
+                m,
+                n,
+                p,
+                FoldMode::Fused,
+            )
             .unwrap();
         kernels
-            .launch_gemm_q8_v8t(&stream, &packed_dev, &gs_dev, &scratch, &out_v8t, m, n, p, FoldMode::Fused)
+            .launch_gemm_q8_v8t(
+                &stream,
+                &packed_dev,
+                &gs_dev,
+                &scratch,
+                &out_v8t,
+                m,
+                n,
+                p,
+                FoldMode::Fused,
+            )
             .unwrap();
         kernels
-            .launch_gemm_q8_v9(&stream, &packed_dev, &gs_dev, &scratch, &out_v9, m, n, p, FoldMode::Fused)
+            .launch_gemm_q8_v9(
+                &stream,
+                &packed_dev,
+                &gs_dev,
+                &scratch,
+                &out_v9,
+                m,
+                n,
+                p,
+                FoldMode::Fused,
+            )
             .unwrap();
         kernels
-            .launch_gemm_q8_v9t(&stream, &packed_dev, &gs_dev, &scratch, &out_v9t, m, n, p, FoldMode::Fused)
+            .launch_gemm_q8_v9t(
+                &stream,
+                &packed_dev,
+                &gs_dev,
+                &scratch,
+                &out_v9t,
+                m,
+                n,
+                p,
+                FoldMode::Fused,
+            )
             .unwrap();
         kernels
-            .launch_gemm_q8_v10(&stream, &packed_dev, &gs_dev, &scratch, &out_v10, m, n, p, FoldMode::Fused)
+            .launch_gemm_q8_v10(
+                &stream,
+                &packed_dev,
+                &gs_dev,
+                &scratch,
+                &out_v10,
+                m,
+                n,
+                p,
+                FoldMode::Fused,
+            )
             .unwrap();
         kernels
-            .launch_gemm_q8_v10t(&stream, &packed_dev, &gs_dev, &scratch, &out_v10t, m, n, p, FoldMode::Fused)
+            .launch_gemm_q8_v10t(
+                &stream,
+                &packed_dev,
+                &gs_dev,
+                &scratch,
+                &out_v10t,
+                m,
+                n,
+                p,
+                FoldMode::Fused,
+            )
             .unwrap();
         let a = stream.clone_dtoh(&out_v4).unwrap();
         let b = stream.clone_dtoh(&out_v6).unwrap();
@@ -6238,18 +7140,55 @@ mod tests {
         let b9t = stream.clone_dtoh(&out_v9t).unwrap();
         let b10 = stream.clone_dtoh(&out_v10).unwrap();
         let b10t = stream.clone_dtoh(&out_v10t).unwrap();
-        let diffs = a.iter().zip(&b).filter(|(x, y)| x.to_bits() != y.to_bits()).count()
-            + a.iter().zip(&bt).filter(|(x, y)| x.to_bits() != y.to_bits()).count()
-            + a.iter().zip(&bl).filter(|(x, y)| x.to_bits() != y.to_bits()).count()
-            + a.iter().zip(&bb).filter(|(x, y)| x.to_bits() != y.to_bits()).count()
-            + a.iter().zip(&b7).filter(|(x, y)| x.to_bits() != y.to_bits()).count()
-            + a.iter().zip(&b7t).filter(|(x, y)| x.to_bits() != y.to_bits()).count()
-            + a.iter().zip(&b8).filter(|(x, y)| x.to_bits() != y.to_bits()).count()
-            + a.iter().zip(&b8t).filter(|(x, y)| x.to_bits() != y.to_bits()).count()
-            + a.iter().zip(&b9).filter(|(x, y)| x.to_bits() != y.to_bits()).count()
-            + a.iter().zip(&b9t).filter(|(x, y)| x.to_bits() != y.to_bits()).count()
-            + a.iter().zip(&b10).filter(|(x, y)| x.to_bits() != y.to_bits()).count()
-            + a.iter().zip(&b10t).filter(|(x, y)| x.to_bits() != y.to_bits()).count();
+        let diffs = a
+            .iter()
+            .zip(&b)
+            .filter(|(x, y)| x.to_bits() != y.to_bits())
+            .count()
+            + a.iter()
+                .zip(&bt)
+                .filter(|(x, y)| x.to_bits() != y.to_bits())
+                .count()
+            + a.iter()
+                .zip(&bl)
+                .filter(|(x, y)| x.to_bits() != y.to_bits())
+                .count()
+            + a.iter()
+                .zip(&bb)
+                .filter(|(x, y)| x.to_bits() != y.to_bits())
+                .count()
+            + a.iter()
+                .zip(&b7)
+                .filter(|(x, y)| x.to_bits() != y.to_bits())
+                .count()
+            + a.iter()
+                .zip(&b7t)
+                .filter(|(x, y)| x.to_bits() != y.to_bits())
+                .count()
+            + a.iter()
+                .zip(&b8)
+                .filter(|(x, y)| x.to_bits() != y.to_bits())
+                .count()
+            + a.iter()
+                .zip(&b8t)
+                .filter(|(x, y)| x.to_bits() != y.to_bits())
+                .count()
+            + a.iter()
+                .zip(&b9)
+                .filter(|(x, y)| x.to_bits() != y.to_bits())
+                .count()
+            + a.iter()
+                .zip(&b9t)
+                .filter(|(x, y)| x.to_bits() != y.to_bits())
+                .count()
+            + a.iter()
+                .zip(&b10)
+                .filter(|(x, y)| x.to_bits() != y.to_bits())
+                .count()
+            + a.iter()
+                .zip(&b10t)
+                .filter(|(x, y)| x.to_bits() != y.to_bits())
+                .count();
         let nominal_tf = 2.0 * m as f64 * n as f64 * p as f64 / 1e12;
         eprintln!(
             "[i884-t2b] ffn_gate m={m} n={n} p={p}: \
@@ -6316,7 +7255,10 @@ mod tests {
             q8_v4 / q8_v10,
             q8_v4 / q8_v10t,
         );
-        assert_eq!(diffs, 0, "bench-fixture bit-identity v6/v7/v8/v9/v10 family vs v4-q8");
+        assert_eq!(
+            diffs, 0,
+            "bench-fixture bit-identity v6/v7/v8/v9/v10 family vs v4-q8"
+        );
     }
 
     /// Plan 597 S1 rung-A occupancy probe (Issue 918, the owner-GO'd lever's
@@ -6345,14 +7287,18 @@ mod tests {
         let (m, n, p) = (17408usize, 5120usize, 2048usize);
         let wpr = n / 32;
         let groups = n / 128;
-        let pos_bits: Vec<u32> =
-            (0..m * wpr).map(|i| (i as u64 * 0x9E3779B97F4A7C15) as u32).collect();
-        let neg_bits: Vec<u32> =
-            (0..m * wpr).map(|i| (i as u64 * 0xBF58476D1CE4E5B9) as u32).collect();
-        let group_scale: Vec<f32> =
-            (0..m * groups).map(|i| 0.001 + ((i * 17) % 100) as f32 * 0.0001).collect();
-        let input: Vec<f32> =
-            (0..p * n).map(|i| (((i * 37) % 251) as f32 - 120.0) * 0.02).collect();
+        let pos_bits: Vec<u32> = (0..m * wpr)
+            .map(|i| (i as u64 * 0x9E3779B97F4A7C15) as u32)
+            .collect();
+        let neg_bits: Vec<u32> = (0..m * wpr)
+            .map(|i| (i as u64 * 0xBF58476D1CE4E5B9) as u32)
+            .collect();
+        let group_scale: Vec<f32> = (0..m * groups)
+            .map(|i| 0.001 + ((i * 17) % 100) as f32 * 0.0001)
+            .collect();
+        let input: Vec<f32> = (0..p * n)
+            .map(|i| (((i * 37) % 251) as f32 - 120.0) * 0.02)
+            .collect();
         let gs_dev = stream.clone_htod(&group_scale).unwrap();
         let in_dev = stream.clone_htod(&input).unwrap();
         let packed = crate::prefill_cuda_mma::pack_bitplanes_to_q2(&pos_bits, &neg_bits, m, n);
@@ -6362,17 +7308,35 @@ mod tests {
         stream.synchronize().unwrap();
 
         let v10_regs = kernels.gemm_tm128v10_q8_fused.num_regs().unwrap_or(-1);
-        let v10_local = kernels.gemm_tm128v10_q8_fused.local_size_bytes().unwrap_or(-1);
+        let v10_local = kernels
+            .gemm_tm128v10_q8_fused
+            .local_size_bytes()
+            .unwrap_or(-1);
         let v10t_regs = kernels.gemm_tm128v10t_q8_fused.num_regs().unwrap_or(-1);
-        let v10t_local = kernels.gemm_tm128v10t_q8_fused.local_size_bytes().unwrap_or(-1);
+        let v10t_local = kernels
+            .gemm_tm128v10t_q8_fused
+            .local_size_bytes()
+            .unwrap_or(-1);
         let o3_regs = kernels.gemm_tm128v10o3_q8_fused.num_regs().unwrap_or(-1);
-        let o3_local = kernels.gemm_tm128v10o3_q8_fused.local_size_bytes().unwrap_or(-1);
+        let o3_local = kernels
+            .gemm_tm128v10o3_q8_fused
+            .local_size_bytes()
+            .unwrap_or(-1);
         let o3nd_regs = kernels.gemm_tm128v10o3_q8_nodecode.num_regs().unwrap_or(-1);
-        let o3nd_local = kernels.gemm_tm128v10o3_q8_nodecode.local_size_bytes().unwrap_or(-1);
+        let o3nd_local = kernels
+            .gemm_tm128v10o3_q8_nodecode
+            .local_size_bytes()
+            .unwrap_or(-1);
         let v12_regs = kernels.gemm_tm64v12_q8_fused.num_regs().unwrap_or(-1);
-        let v12_local = kernels.gemm_tm64v12_q8_fused.local_size_bytes().unwrap_or(-1);
+        let v12_local = kernels
+            .gemm_tm64v12_q8_fused
+            .local_size_bytes()
+            .unwrap_or(-1);
         let v12nd_regs = kernels.gemm_tm64v12_q8_nodecode.num_regs().unwrap_or(-1);
-        let v12nd_local = kernels.gemm_tm64v12_q8_nodecode.local_size_bytes().unwrap_or(-1);
+        let v12nd_local = kernels
+            .gemm_tm64v12_q8_nodecode
+            .local_size_bytes()
+            .unwrap_or(-1);
 
         let time = |runs: Vec<&dyn Fn()>| -> Vec<f64> {
             for _ in 0..20 {
@@ -6408,7 +7372,15 @@ mod tests {
             quantize();
             kernels
                 .launch_gemm_q8_v10(
-                    &stream, &packed_dev, &gs_dev, &scratch, &out, m, n, p, FoldMode::Fused,
+                    &stream,
+                    &packed_dev,
+                    &gs_dev,
+                    &scratch,
+                    &out,
+                    m,
+                    n,
+                    p,
+                    FoldMode::Fused,
                 )
                 .unwrap();
         };
@@ -6416,7 +7388,15 @@ mod tests {
             quantize();
             kernels
                 .launch_gemm_q8_v10t(
-                    &stream, &packed_dev, &gs_dev, &scratch, &out, m, n, p, FoldMode::Fused,
+                    &stream,
+                    &packed_dev,
+                    &gs_dev,
+                    &scratch,
+                    &out,
+                    m,
+                    n,
+                    p,
+                    FoldMode::Fused,
                 )
                 .unwrap();
         };
@@ -6424,7 +7404,15 @@ mod tests {
             quantize();
             kernels
                 .launch_gemm_q8_v10o3(
-                    &stream, &packed_dev, &gs_dev, &scratch, &out, m, n, p, FoldMode::Fused,
+                    &stream,
+                    &packed_dev,
+                    &gs_dev,
+                    &scratch,
+                    &out,
+                    m,
+                    n,
+                    p,
+                    FoldMode::Fused,
                 )
                 .unwrap();
         };
@@ -6461,7 +7449,15 @@ mod tests {
             quantize();
             kernels
                 .launch_gemm_q8_v12(
-                    &stream, &packed_dev, &gs_dev, &scratch, &out, m, n, p, FoldMode::Fused,
+                    &stream,
+                    &packed_dev,
+                    &gs_dev,
+                    &scratch,
+                    &out,
+                    m,
+                    n,
+                    p,
+                    FoldMode::Fused,
                 )
                 .unwrap();
         };
@@ -6490,7 +7486,9 @@ mod tests {
                     .unwrap();
             }
         };
-        let results = time(vec![&run_v10, &run_v10t, &run_o3, &run_o3nd, &run_v12, &run_v12nd]);
+        let results = time(vec![
+            &run_v10, &run_v10t, &run_o3, &run_o3nd, &run_v12, &run_v12nd,
+        ]);
         let (t_v10, t_v10t, t_o3, t_o3nd, t_v12, t_v12nd) = (
             results[0], results[1], results[2], results[3], results[4], results[5],
         );
@@ -6502,17 +7500,41 @@ mod tests {
         quantize();
         kernels
             .launch_gemm_q8_v10t(
-                &stream, &packed_dev, &gs_dev, &scratch, &out_ref, m, n, p, FoldMode::Fused,
+                &stream,
+                &packed_dev,
+                &gs_dev,
+                &scratch,
+                &out_ref,
+                m,
+                n,
+                p,
+                FoldMode::Fused,
             )
             .unwrap();
         kernels
             .launch_gemm_q8_v10o3(
-                &stream, &packed_dev, &gs_dev, &scratch, &out_o3, m, n, p, FoldMode::Fused,
+                &stream,
+                &packed_dev,
+                &gs_dev,
+                &scratch,
+                &out_o3,
+                m,
+                n,
+                p,
+                FoldMode::Fused,
             )
             .unwrap();
         kernels
             .launch_gemm_q8_v12(
-                &stream, &packed_dev, &gs_dev, &scratch, &out_v12, m, n, p, FoldMode::Fused,
+                &stream,
+                &packed_dev,
+                &gs_dev,
+                &scratch,
+                &out_v12,
+                m,
+                n,
+                p,
+                FoldMode::Fused,
             )
             .unwrap();
         let a = stream.clone_dtoh(&out_ref).unwrap();
@@ -6559,7 +7581,13 @@ mod tests {
             t_v10t / t_v12,
             t_v10t / t_v12nd,
         );
-        assert_eq!(diffs, 0, "rung-A v10o3 bit-identity vs v10t failed — arithmetic leaked");
-        assert_eq!(v12_diffs, 0, "v12 tile-shrink bit-identity vs v10t failed — arithmetic leaked");
+        assert_eq!(
+            diffs, 0,
+            "rung-A v10o3 bit-identity vs v10t failed — arithmetic leaked"
+        );
+        assert_eq!(
+            v12_diffs, 0,
+            "v12 tile-shrink bit-identity vs v10t failed — arithmetic leaked"
+        );
     }
 }

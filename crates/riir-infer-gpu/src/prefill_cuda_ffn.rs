@@ -53,8 +53,10 @@ use std::sync::{Arc, Mutex, OnceLock};
 
 use cubecl::prelude::*;
 use cubecl::server::Handle;
-use cudarc::driver::safe::{CudaContext, CudaFunction, CudaModule, CudaSlice, CudaStream, LaunchConfig};
 use cudarc::driver::PushKernelArg;
+use cudarc::driver::safe::{
+    CudaContext, CudaFunction, CudaModule, CudaSlice, CudaStream, LaunchConfig,
+};
 
 use crate::cubecl_runtime::ActiveRuntime;
 use crate::gemm_ternary_i8_mma_cuda_raw::{GemmI8MmaScratch, GemmTernaryI8MmaCuda};
@@ -65,8 +67,7 @@ use crate::gemv_ternary_cubecl::TernaryHandle;
 // ---------------------------------------------------------------------------
 
 #[cfg(all(feature = "cubecl_runtime", feature = "ternary_gemm_batched"))]
-static PREFILL_CUDA_FFN: std::sync::atomic::AtomicBool =
-    std::sync::atomic::AtomicBool::new(false);
+static PREFILL_CUDA_FFN: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
 #[cfg(all(feature = "cubecl_runtime", feature = "ternary_gemm_batched"))]
 pub fn prefill_use_cuda_ffn() -> bool {
@@ -704,8 +705,8 @@ impl CudaFfnKernels {
         let cfg = LaunchConfig {
             grid_dim: (grid_x, rows as u32, 1),
             block_dim: (256, 1, 1),
-            shared_mem_bytes: 256 * (core::mem::size_of::<f32>() + core::mem::size_of::<i32>())
-                as u32,
+            shared_mem_bytes: 256
+                * (core::mem::size_of::<f32>() + core::mem::size_of::<i32>()) as u32,
         };
         unsafe {
             stream
@@ -734,7 +735,7 @@ impl CudaFfnKernels {
     /// # Safety
     ///
     /// Caller guarantees `values` covers `rows * n` f32 elements, `targets`
- /// covers `rows` i32 elements (each < n), and `out` covers `2 * rows`
+    /// covers `rows` i32 elements (each < n), and `out` covers `2 * rows`
     /// f32 elements.
     pub unsafe fn launch_nll_rows(
         &self,
@@ -771,13 +772,13 @@ impl CudaFfnKernels {
 // ---------------------------------------------------------------------------
 
 struct FfnBufs {
-    x: Option<CudaSlice<f32>>,       // [p*n] — input, then residual out (in-place)
-    normx: Option<CudaSlice<f32>>,   // [p*n]
-    gate: Option<CudaSlice<f32>>,    // [p*mlp]
-    up: Option<CudaSlice<f32>>,      // [p*mlp]
-    hid: Option<CudaSlice<f32>>,     // [p*mlp]
-    ffnout: Option<CudaSlice<f32>>,  // [p*n]
-    gamma: Option<CudaSlice<f32>>,   // [n]
+    x: Option<CudaSlice<f32>>, // [p*n] — input, then residual out (in-place)
+    normx: Option<CudaSlice<f32>>, // [p*n]
+    gate: Option<CudaSlice<f32>>, // [p*mlp]
+    up: Option<CudaSlice<f32>>, // [p*mlp]
+    hid: Option<CudaSlice<f32>>, // [p*mlp]
+    ffnout: Option<CudaSlice<f32>>, // [p*n]
+    gamma: Option<CudaSlice<f32>>, // [n]
     /// `(dim, words)` the scratch was sized for — `p` rides `words`.
     scratch_n: Option<(usize, usize, GemmI8MmaScratch)>,
     scratch_mlp: Option<(usize, usize, GemmI8MmaScratch)>,
@@ -798,9 +799,7 @@ fn ffn_stack() -> Option<Arc<FfnStack>> {
         .get_or_init(|| match build_ffn_stack() {
             Ok(s) => Some(Arc::new(s)),
             Err(e) => {
-                eprintln!(
-                    "[734-arm7] CUDA FFN stack init failed ({e}) — prefill stays on CubeCL"
-                );
+                eprintln!("[734-arm7] CUDA FFN stack init failed ({e}) — prefill stays on CubeCL");
                 None
             }
         })
@@ -859,7 +858,8 @@ pub fn canonical_swiglu_forms() -> (FfnExp, FfnRecip) {
 fn trace_enabled() -> bool {
     static TRACE: OnceLock<bool> = OnceLock::new();
     *TRACE.get_or_init(|| {
-        std::env::var("RIIR_PREFILL_CUDA_FFN_TRACE").is_ok_and(|s| matches!(s.trim(), "1" | "true" | "on"))
+        std::env::var("RIIR_PREFILL_CUDA_FFN_TRACE")
+            .is_ok_and(|s| matches!(s.trim(), "1" | "true" | "on"))
     })
 }
 
@@ -888,7 +888,9 @@ pub fn dispatch_ffn_block(
     if p == 0 {
         return true;
     }
-    let Some(stack) = ffn_stack() else { return false };
+    let Some(stack) = ffn_stack() else {
+        return false;
+    };
     let stream = &stack.stream;
     let trace = trace_enabled();
     let t0 = std::time::Instant::now();
@@ -911,9 +913,15 @@ pub fn dispatch_ffn_block(
             })
             .clone()
     };
-    let Some(gate_cache) = mirror(gate_w) else { return false };
-    let Some(up_cache) = mirror(up_w) else { return false };
-    let Some(down_cache) = mirror(down_w) else { return false };
+    let Some(gate_cache) = mirror(gate_w) else {
+        return false;
+    };
+    let Some(up_cache) = mirror(up_w) else {
+        return false;
+    };
+    let Some(down_cache) = mirror(down_w) else {
+        return false;
+    };
 
     // 1) Read gamma + x_b back to host (gamma rides the same queue drain).
     let Ok(gamma_bytes) = client.read_one(gamma_handle.clone()) else {
@@ -933,7 +941,9 @@ pub fn dispatch_ffn_block(
     let words_n = p * (n / 4);
     let words_m = p * (mlp / 4);
 
-    let Ok(mut bufs) = stack.bufs.lock() else { return false };
+    let Ok(mut bufs) = stack.bufs.lock() else {
+        return false;
+    };
 
     // 2) Grow-only staging (prefix views keep kernels inside [0..len)).
     macro_rules! grow {
@@ -1000,13 +1010,17 @@ pub fn dispatch_ffn_block(
 
     // 3) Upload gamma + x.
     {
-        let Some(mut g_view) = gamma.try_slice_mut(0..n) else { return false };
+        let Some(mut g_view) = gamma.try_slice_mut(0..n) else {
+            return false;
+        };
         if stream.memcpy_htod(gamma_f32, &mut g_view).is_err() {
             return false;
         }
     }
     {
-        let Some(mut x_view) = x.try_slice_mut(0..pn) else { return false };
+        let Some(mut x_view) = x.try_slice_mut(0..pn) else {
+            return false;
+        };
         if stream.memcpy_htod(x_f32, &mut x_view).is_err() {
             return false;
         }
@@ -1018,7 +1032,9 @@ pub fn dispatch_ffn_block(
     let (se, sr) = canonical_swiglu_forms();
     let run = || -> Result<(), String> {
         unsafe {
-            stack.ffn.launch_rmsnorm(stream, ra, rm, rs, x, gamma, normx, p, n, eps)?;
+            stack
+                .ffn
+                .launch_rmsnorm(stream, ra, rm, rs, x, gamma, normx, p, n, eps)?;
             stack
                 .mma
                 .launch_prefill_quantize(stream, normx, scr_n, n, p)
@@ -1063,7 +1079,9 @@ pub fn dispatch_ffn_block(
     let t_block = t0.elapsed();
 
     // 5) Read back + write into the CubeCL output handle.
-    let Some(x_view) = x.try_slice(0..pn) else { return false };
+    let Some(x_view) = x.try_slice(0..pn) else {
+        return false;
+    };
     if stream.memcpy_dtoh(&x_view, &mut out_host[..pn]).is_err() {
         return false;
     }
@@ -1125,9 +1143,7 @@ mod tests {
             values[hi] = 42.0;
         }
 
-        let values_dev = stream
-            .clone_htod(values.as_slice())
-            .expect("htod values");
+        let values_dev = stream.clone_htod(values.as_slice()).expect("htod values");
         let mut results_dev = stream.alloc_zeros::<u64>(rows).expect("alloc results");
         assert!(stream.memset_zeros(&mut results_dev).is_ok());
         unsafe {

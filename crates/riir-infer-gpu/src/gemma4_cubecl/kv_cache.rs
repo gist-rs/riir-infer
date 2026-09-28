@@ -30,11 +30,7 @@ impl Gemma4CpuKVCache {
     /// `sliding_capacity[layer]` must be pre-derived from the layer type
     /// (Sliding → `n_kv_head * head_dim` + `sliding_window`; Full →
     /// `n_global_kv_head * global_head_dim` + 0).
-    pub fn new(
-        n_layer: usize,
-        kv_stride: Vec<usize>,
-        sliding_capacity: Vec<usize>,
-    ) -> Self {
+    pub fn new(n_layer: usize, kv_stride: Vec<usize>, sliding_capacity: Vec<usize>) -> Self {
         debug_assert_eq!(kv_stride.len(), n_layer, "kv_stride length mismatch");
         debug_assert_eq!(
             sliding_capacity.len(),
@@ -97,12 +93,7 @@ impl Gemma4CpuKVCache {
     /// For sliding-window layers, the window is `[pos.saturating_sub(sw-1), pos]`,
     /// remapped into the ring buffer. For full-attention layers, the window is
     /// `[0, pos]`.
-    pub fn get_combined_kv_window(
-        &self,
-        layer: usize,
-        t_start: usize,
-        n_pos: usize,
-    ) -> Vec<f32> {
+    pub fn get_combined_kv_window(&self, layer: usize, t_start: usize, n_pos: usize) -> Vec<f32> {
         let stride = self.kv_stride[layer];
         let sw = self.sliding_capacity[layer];
         let keys = &self.keys[layer];

@@ -20,10 +20,10 @@
 
 use std::sync::Arc;
 
+use cudarc::driver::PushKernelArg;
 use cudarc::driver::safe::{
     CudaContext, CudaFunction, CudaModule, CudaSlice, CudaStream, LaunchConfig,
 };
-use cudarc::driver::PushKernelArg;
 
 use crate::prefill_cuda_deltanet::{LogForm, SigExp};
 
@@ -1795,20 +1795,11 @@ pub struct CudaAttnKernels {
 }
 
 fn idx_rope(l: LogForm, e: SigExp, sc: SinCosForm, r: RopeRot) -> usize {
-    ((l as usize * 2 + (e == SigExp::Fast) as usize) * 2
-        + (sc == SinCosForm::Fast) as usize)
-        * 2
+    ((l as usize * 2 + (e == SigExp::Fast) as usize) * 2 + (sc == SinCosForm::Fast) as usize) * 2
         + (r == RopeRot::Fma) as usize
 }
 
-fn idx_attention(
-    d: AttnDot,
-    a: AttnAcc,
-    e: SigExp,
-    ph: AttnPh3,
-    rs: AttnRes,
-    i: AttnInv,
-) -> usize {
+fn idx_attention(d: AttnDot, a: AttnAcc, e: SigExp, ph: AttnPh3, rs: AttnRes, i: AttnInv) -> usize {
     let di = (d == AttnDot::Fma) as usize;
     let ai = (a == AttnAcc::Fma) as usize;
     let ri = rs as usize;
@@ -2329,12 +2320,7 @@ impl CudaAttnKernels {
         }
         // Host-computed scale, exactly like the CubeCL launcher.
         let scale = 1.0f32 / (head_dim as f32).sqrt();
-        let (nh_i, nk_i, p_i, qo_i) = (
-            n_head as i32,
-            n_kv_head as i32,
-            p as i32,
-            base_pos as i32,
-        );
+        let (nh_i, nk_i, p_i, qo_i) = (n_head as i32, n_kv_head as i32, p as i32, base_pos as i32);
         let grid = (n_head * p.div_ceil(8)) as u32;
         let cfg = LaunchConfig {
             grid_dim: (grid, 1, 1),
@@ -2544,12 +2530,7 @@ impl CudaAttnKernels {
             return Err("att_pf_mq8s: head_dim != 256".into());
         }
         let scale = 1.0f32 / (head_dim as f32).sqrt();
-        let (nh_i, nk_i, p_i, qo_i) = (
-            n_head as i32,
-            n_kv_head as i32,
-            p as i32,
-            base_pos as i32,
-        );
+        let (nh_i, nk_i, p_i, qo_i) = (n_head as i32, n_kv_head as i32, p as i32, base_pos as i32);
         let grid = (n_head * p.div_ceil(8)) as u32;
         let smem = (head_dim * 33 * core::mem::size_of::<f32>()) as u32; // ATTN_STAGE+1 floats, BYTES
         let cfg = LaunchConfig {
@@ -2663,12 +2644,7 @@ impl CudaAttnKernels {
             return Err("att_pf_mq8p: head_dim != 256".into());
         }
         let scale = 1.0f32 / (head_dim as f32).sqrt();
-        let (nh_i, nk_i, p_i, qo_i) = (
-            n_head as i32,
-            n_kv_head as i32,
-            p as i32,
-            base_pos as i32,
-        );
+        let (nh_i, nk_i, p_i, qo_i) = (n_head as i32, n_kv_head as i32, p as i32, base_pos as i32);
         let grid = (n_head * p.div_ceil(8)) as u32;
         let cfg = LaunchConfig {
             grid_dim: (grid, 1, 1),
@@ -2779,12 +2755,7 @@ impl CudaAttnKernels {
             return Err("att_pf_mq8v: head_dim != 256".into());
         }
         let scale = 1.0f32 / (head_dim as f32).sqrt();
-        let (nh_i, nk_i, p_i, qo_i) = (
-            n_head as i32,
-            n_kv_head as i32,
-            p as i32,
-            base_pos as i32,
-        );
+        let (nh_i, nk_i, p_i, qo_i) = (n_head as i32, n_kv_head as i32, p as i32, base_pos as i32);
         let grid = (n_head * p.div_ceil(8)) as u32;
         let cfg = LaunchConfig {
             grid_dim: (grid, 1, 1),
@@ -2903,18 +2874,12 @@ impl CudaAttnKernels {
             ));
         }
         let scale = 1.0f32 / (head_dim as f32).sqrt();
-        let (nh_i, nk_i, p_i, qo_i) = (
-            n_head as i32,
-            n_kv_head as i32,
-            p as i32,
-            base_pos as i32,
-        );
+        let (nh_i, nk_i, p_i, qo_i) = (n_head as i32, n_kv_head as i32, p as i32, base_pos as i32);
         let grid = (n_kv_head * p.div_ceil(8)) as u32;
         let cfg = LaunchConfig {
             grid_dim: (grid, 1, 1),
             block_dim: (256, 1, 1),
-            shared_mem_bytes: crate::prefill_cuda_attention_gang::ATTENTION_GANG_SMEM_BYTES
-                as u32,
+            shared_mem_bytes: crate::prefill_cuda_attention_gang::ATTENTION_GANG_SMEM_BYTES as u32,
         };
         unsafe {
             stream
@@ -2972,8 +2937,7 @@ impl CudaAttnKernels {
         let cfg = LaunchConfig {
             grid_dim: (grid, 1, 1),
             block_dim: (256, 1, 1),
-            shared_mem_bytes: crate::prefill_cuda_attention_gang::ATTENTION_GANG_SMEM_BYTES
-                as u32,
+            shared_mem_bytes: crate::prefill_cuda_attention_gang::ATTENTION_GANG_SMEM_BYTES as u32,
         };
         unsafe {
             stream
@@ -3032,12 +2996,7 @@ impl CudaAttnKernels {
             ));
         }
         let scale = 1.0f32 / (head_dim as f32).sqrt();
-        let (nh_i, nk_i, p_i, qo_i) = (
-            n_head as i32,
-            n_kv_head as i32,
-            p as i32,
-            base_pos as i32,
-        );
+        let (nh_i, nk_i, p_i, qo_i) = (n_head as i32, n_kv_head as i32, p as i32, base_pos as i32);
         let grid = (n_kv_head * bpg * p.div_ceil(8)) as u32;
         let cfg = LaunchConfig {
             grid_dim: (grid, 1, 1),
@@ -3508,7 +3467,13 @@ impl CudaAttnKernels {
         Ok(())
     }
 
-    fn fa_launch_check(&self, tag: &str, head_dim: usize, n_head: usize, n_kv: usize) -> Result<(), String> {
+    fn fa_launch_check(
+        &self,
+        tag: &str,
+        head_dim: usize,
+        n_head: usize,
+        n_kv: usize,
+    ) -> Result<(), String> {
         if head_dim != 256 {
             return Err(format!("{tag}: head_dim != 256"));
         }
@@ -3561,23 +3526,8 @@ impl CudaAttnKernels {
     ) -> Result<(), String> {
         unsafe {
             self.launch_attention_mq8_split_inner(
-                stream,
-                None,
-                query,
-                key,
-                value,
-                gate,
-                attn_out,
-                part_m,
-                part_l,
-                part_out,
-                head_dim,
-                n_head,
-                n_kv_head,
-                p,
-                base_pos,
-                chunk_len,
-                n_chunks,
+                stream, None, query, key, value, gate, attn_out, part_m, part_l, part_out,
+                head_dim, n_head, n_kv_head, p, base_pos, chunk_len, n_chunks,
             )
         }
     }

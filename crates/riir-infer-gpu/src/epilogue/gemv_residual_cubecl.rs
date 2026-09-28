@@ -69,16 +69,8 @@ use cubecl::server::Handle;
     feature = "gemv_fma_contract",
     cube(launch_unchecked, fast_math = FastMath::AllowContraction.into())
 )]
-#[cfg_attr(
-    not(feature = "gemv_fma_contract"),
-    cube(launch_unchecked)
-)]
-fn gemv_plane_residual_f32(
-    weight: &[f32],
-    input: &[f32],
-    residual: &[f32],
-    output: &mut [f32],
-) {
+#[cfg_attr(not(feature = "gemv_fma_contract"), cube(launch_unchecked))]
+fn gemv_plane_residual_f32(weight: &[f32], input: &[f32], residual: &[f32], output: &mut [f32]) {
     let n = input.len() as u32;
     let m = output.len() as u32;
 
@@ -133,10 +125,7 @@ fn gemv_plane_residual_f32(
     feature = "gemv_fma_contract",
     cube(launch_unchecked, fast_math = FastMath::AllowContraction.into())
 )]
-#[cfg_attr(
-    not(feature = "gemv_fma_contract"),
-    cube(launch_unchecked)
-)]
+#[cfg_attr(not(feature = "gemv_fma_contract"), cube(launch_unchecked))]
 fn gemv_plane_residual_f16(
     weight: &[half::f16],
     input: &[f32],

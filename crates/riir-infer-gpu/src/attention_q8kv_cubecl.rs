@@ -353,11 +353,9 @@ fn attention_decode_q8kv(
                     // Issue 716 sink guard: lossless f32 sidecar row (values
                     // half) OVERRIDES the quantized read for the sink span.
                     if pos_i < sink_rows {
-                        v_val = sink_kv[(sink_half
-                            + pos_i * kv_f32_stride
-                            + kv_group * head_dim
-                            + tid)
-                            as usize];
+                        v_val =
+                            sink_kv[(sink_half + pos_i * kv_f32_stride + kv_group * head_dim + tid)
+                                as usize];
                     }
 
                     tile_val += smem[i as usize] * v_val;
@@ -540,7 +538,11 @@ impl Q8KVBuffers {
             kv_scale_stride,
         );
 
-        Self { kv_qs, kv_scales, sink_kv: Vec::new() }
+        Self {
+            kv_qs,
+            kv_scales,
+            sink_kv: Vec::new(),
+        }
     }
 
     /// Quantize with the Issue 716 sink guard: the first `sink_rows` positions
@@ -1094,11 +1096,13 @@ mod tests {
             scale: SCALE,
         };
 
-        let q8_bufs = Q8KVBuffers::quantize_kv_with_sink(keys, values, N_KV_HEAD, HEAD_DIM, sink_rows);
+        let q8_bufs =
+            Q8KVBuffers::quantize_kv_with_sink(keys, values, N_KV_HEAD, HEAD_DIM, sink_rows);
 
         let q_len = N_HEAD * HEAD_DIM;
         let query_handle = client.create_from_slice(f32::as_bytes(query));
-        let kv_qs_handle = client.create_from_slice(bytemuck::cast_slice::<u32, u8>(&q8_bufs.kv_qs));
+        let kv_qs_handle =
+            client.create_from_slice(bytemuck::cast_slice::<u32, u8>(&q8_bufs.kv_qs));
         let kv_scales_handle = client.create_from_slice(f32::as_bytes(&q8_bufs.kv_scales));
         // The sink handle's ALLOCATION size is the kernel-visible length
         // (Bench 642 lesson) — bind a 1-f32 dummy when the sidecar is empty
@@ -1291,7 +1295,9 @@ mod tests {
     /// True for dims sharing a 32-block with an MA channel (the poisoned
     /// blocks: neighbor channels collapse to ~1 quant step).
     fn is_poisoned_dim(dim: usize) -> bool {
-        MA_DIMS.iter().any(|&ma| dim / Q8_BLOCK_SIZE == ma / Q8_BLOCK_SIZE)
+        MA_DIMS
+            .iter()
+            .any(|&ma| dim / Q8_BLOCK_SIZE == ma / Q8_BLOCK_SIZE)
     }
 
     /// Build `make_test_data` with massive activations injected at
@@ -1716,7 +1722,10 @@ mod tests {
             .zip(sink_out.iter())
             .fold(0.0f32, |m, (&a, &b)| m.max((a - b).abs()));
         println!("full sidecar vs f32 kernel: max diff {max:.8}");
-        assert!(max < 1e-4, "all-sink path must match the f32 kernel, got {max}");
+        assert!(
+            max < 1e-4,
+            "all-sink path must match the f32 kernel, got {max}"
+        );
     }
 
     /// T4 G2 (release-only): the guard branch is perf-neutral — f32 sidecar
@@ -1748,7 +1757,9 @@ mod tests {
         }
         let sink = t1.elapsed();
 
-        println!("Issue 716 G2: base={base:?} sink(S=4)={sink:?} for {iters} iters @ n_pos={n_positions}");
+        println!(
+            "Issue 716 G2: base={base:?} sink(S=4)={sink:?} for {iters} iters @ n_pos={n_positions}"
+        );
         assert!(
             sink.as_secs_f64() < base.as_secs_f64() * 1.3 + 5e-3,
             "sink guard must be perf-neutral: base {base:?} vs sink {sink:?}"

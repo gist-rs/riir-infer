@@ -107,10 +107,7 @@ const B77_KEYS: [&str; 77] = [
 ];
 
 const B77_CASES: [(&str, &str); 12] = [
-    (
-        "How do I locate my card?",
-        "card arrival",
-    ),
+    ("How do I locate my card?", "card arrival"),
     (
         "I still have not received my new card, I ordered over a week ago.",
         "card arrival",
@@ -123,40 +120,21 @@ const B77_CASES: [(&str, &str); 12] = [
         "Is there a way to know when my card will arrive?",
         "card arrival",
     ),
-    (
-        "My card has not arrived yet.",
-        "card arrival",
-    ),
-    (
-        "When will I get my card?",
-        "card arrival",
-    ),
+    ("My card has not arrived yet.", "card arrival"),
+    ("When will I get my card?", "card arrival"),
     (
         "Do you know if there is a tracking number for the new card you sent me?",
         "card arrival",
     ),
-    (
-        "i have not received my card",
-        "card arrival",
-    ),
-    (
-        "still waiting on that card",
-        "card arrival",
-    ),
+    ("i have not received my card", "card arrival"),
+    ("still waiting on that card", "card arrival"),
     (
         "Is it normal to have to wait over a week for my new card?",
         "card arrival",
     ),
-    (
-        "How do I track my card?",
-        "card arrival",
-    ),
-    (
-        "How long does a card delivery take?",
-        "card arrival",
-    ),
+    ("How do I track my card?", "card arrival"),
+    ("How long does a card delivery take?", "card arrival"),
 ];
-
 
 fn question_json() -> serde_json::Value {
     let mut crit = serde_json::Map::new();
@@ -181,8 +159,7 @@ fn cuda_agent_system_one_repeats_stable() {
     let agent = RiirAgent::load(&weights_root(), Checkpoint::English).expect("agent load");
     let q = question_json();
 
-    let render =
-        |as_: &[riir_infer_laya::laya::types::Answer]| serde_json::to_string(as_).unwrap();
+    let render = |as_: &[riir_infer_laya::laya::types::Answer]| serde_json::to_string(as_).unwrap();
 
     // Round 0 answers for every case — the golden.
     let mut golden: Vec<String> = Vec::new();
@@ -204,7 +181,10 @@ fn cuda_agent_system_one_repeats_stable() {
             let got = render(&answers);
             if got != golden[ci] {
                 failed = true;
-                println!("✗ round {round} case {ci} DIVERGED:\n  a1 = {}\n  a2 = {}", golden[ci], got);
+                println!(
+                    "✗ round {round} case {ci} DIVERGED:\n  a1 = {}\n  a2 = {}",
+                    golden[ci], got
+                );
             }
         }
         if failed {

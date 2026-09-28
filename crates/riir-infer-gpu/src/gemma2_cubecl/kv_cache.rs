@@ -128,12 +128,7 @@ impl CpuKVCache {
 /// Each thread writes 1 K element + 1 V element (2 f32 writes total).
 #[cfg(feature = "cubecl_runtime")]
 #[cube(launch_unchecked)]
-fn kv_store_f32(
-    k_src: &[f32],
-    v_src: &[f32],
-    cache: &mut [f32],
-    params: &[f32],
-) {
+fn kv_store_f32(k_src: &[f32], v_src: &[f32], cache: &mut [f32], params: &[f32]) {
     // params[0] = kv_stride, params[1] = pos, params[2] = kv_half
     // Cast f32 → u32 for indexing (CubeCL v0.10 workaround for scalar params)
     let kv_stride = params[0] as u32;
@@ -271,7 +266,10 @@ impl KvStoreKRopeVCombinedCubeCL {
     /// - `qkv_combined` must have at least `v_offset + kv_stride` f32 elements
     /// - `cache` must have at least `2 * block_size * kv_stride` f32 elements
     /// - `pos` must be < `block_size`
-#[allow(clippy::too_many_arguments, reason = "GPU kernel launch/dispatch: many buffer handles are inherent to the fused-kernel interface")]
+    #[allow(
+        clippy::too_many_arguments,
+        reason = "GPU kernel launch/dispatch: many buffer handles are inherent to the fused-kernel interface"
+    )]
     pub unsafe fn launch<R: Runtime>(
         client: &ComputeClient<R>,
         k_rope: Handle,
@@ -572,10 +570,12 @@ impl GpuKVCache {
                 self.block_size,
             );
         }
-        let live_bytes =
-            (2 * n_positions * self.kv_stride * core::mem::size_of::<f32>()) as u64;
+        let live_bytes = (2 * n_positions * self.kv_stride * core::mem::size_of::<f32>()) as u64;
         let trim_bytes = self.compact_temp.size().saturating_sub(live_bytes);
-        (self.compact_temp.clone().offset_end(trim_bytes), n_positions)
+        (
+            self.compact_temp.clone().offset_end(trim_bytes),
+            n_positions,
+        )
     }
 
     /// KV stride: elements per position per K or V.

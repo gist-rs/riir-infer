@@ -260,12 +260,7 @@ fn gemm_ternary_simdgroup(
     // conditionally copy valid elements to the global output. Same bounds-safe
     // pattern as matmul_swap_ab_cmma_f32 — cmma::store writes the full 8×8
     // unconditionally, so we stage + bounds-check.
-    cmma::store(
-        &mut result_tile,
-        &acc,
-        8,
-        cmma::MatrixLayout::RowMajor,
-    );
+    cmma::store(&mut result_tile, &acc, 8, cmma::MatrixLayout::RowMajor);
     sync_cube();
 
     // Each thread copies its 2 elements from staging to the output.
@@ -328,23 +323,39 @@ fn gemm_ternary_simdgroup_8x32(
     // 4 accumulators — one per 8-token sub-tile.
     #[allow(unused_mut)]
     let mut acc0 = cmma::Matrix::<f32>::from_value(
-        cmma::MatrixIdent::Accumulator, 8usize, 8usize, 8usize,
-        cmma::MatrixLayout::Undefined, 0.0f32,
+        cmma::MatrixIdent::Accumulator,
+        8usize,
+        8usize,
+        8usize,
+        cmma::MatrixLayout::Undefined,
+        0.0f32,
     );
     #[allow(unused_mut)]
     let mut acc1 = cmma::Matrix::<f32>::from_value(
-        cmma::MatrixIdent::Accumulator, 8usize, 8usize, 8usize,
-        cmma::MatrixLayout::Undefined, 0.0f32,
+        cmma::MatrixIdent::Accumulator,
+        8usize,
+        8usize,
+        8usize,
+        cmma::MatrixLayout::Undefined,
+        0.0f32,
     );
     #[allow(unused_mut)]
     let mut acc2 = cmma::Matrix::<f32>::from_value(
-        cmma::MatrixIdent::Accumulator, 8usize, 8usize, 8usize,
-        cmma::MatrixLayout::Undefined, 0.0f32,
+        cmma::MatrixIdent::Accumulator,
+        8usize,
+        8usize,
+        8usize,
+        cmma::MatrixLayout::Undefined,
+        0.0f32,
     );
     #[allow(unused_mut)]
     let mut acc3 = cmma::Matrix::<f32>::from_value(
-        cmma::MatrixIdent::Accumulator, 8usize, 8usize, 8usize,
-        cmma::MatrixLayout::Undefined, 0.0f32,
+        cmma::MatrixIdent::Accumulator,
+        8usize,
+        8usize,
+        8usize,
+        cmma::MatrixLayout::Undefined,
+        0.0f32,
     );
 
     // Shared memory — 4 separate input sub-tiles + 4 staging tiles + 1 weight tile.
@@ -472,32 +483,57 @@ fn gemm_ternary_simdgroup_8x32(
 
         // mat_a is the same for all 4 sub-tiles (same weight, same K-slice).
         let mat_a = cmma::Matrix::<f32>::from_slice(
-            cmma::MatrixIdent::A, 8usize, 8usize, 8usize,
-            cmma::MatrixLayout::RowMajor, &tile_w, 8,
+            cmma::MatrixIdent::A,
+            8usize,
+            8usize,
+            8usize,
+            cmma::MatrixLayout::RowMajor,
+            &tile_w,
+            8,
         );
 
         // 4 cmma executes — one per sub-tile accumulator.
         let mat_b0 = cmma::Matrix::<f32>::from_slice(
-            cmma::MatrixIdent::B, 8usize, 8usize, 8usize,
-            cmma::MatrixLayout::ColMajor, &tile_x0, 8,
+            cmma::MatrixIdent::B,
+            8usize,
+            8usize,
+            8usize,
+            cmma::MatrixLayout::ColMajor,
+            &tile_x0,
+            8,
         );
         cmma::execute::<f32, f32, f32, f32, cmma::Plane>(&mat_a, &mat_b0, &acc0, &acc0);
 
         let mat_b1 = cmma::Matrix::<f32>::from_slice(
-            cmma::MatrixIdent::B, 8usize, 8usize, 8usize,
-            cmma::MatrixLayout::ColMajor, &tile_x1, 8,
+            cmma::MatrixIdent::B,
+            8usize,
+            8usize,
+            8usize,
+            cmma::MatrixLayout::ColMajor,
+            &tile_x1,
+            8,
         );
         cmma::execute::<f32, f32, f32, f32, cmma::Plane>(&mat_a, &mat_b1, &acc1, &acc1);
 
         let mat_b2 = cmma::Matrix::<f32>::from_slice(
-            cmma::MatrixIdent::B, 8usize, 8usize, 8usize,
-            cmma::MatrixLayout::ColMajor, &tile_x2, 8,
+            cmma::MatrixIdent::B,
+            8usize,
+            8usize,
+            8usize,
+            cmma::MatrixLayout::ColMajor,
+            &tile_x2,
+            8,
         );
         cmma::execute::<f32, f32, f32, f32, cmma::Plane>(&mat_a, &mat_b2, &acc2, &acc2);
 
         let mat_b3 = cmma::Matrix::<f32>::from_slice(
-            cmma::MatrixIdent::B, 8usize, 8usize, 8usize,
-            cmma::MatrixLayout::ColMajor, &tile_x3, 8,
+            cmma::MatrixIdent::B,
+            8usize,
+            8usize,
+            8usize,
+            cmma::MatrixLayout::ColMajor,
+            &tile_x3,
+            8,
         );
         cmma::execute::<f32, f32, f32, f32, cmma::Plane>(&mat_a, &mat_b3, &acc3, &acc3);
 
@@ -601,83 +637,147 @@ fn gemm_ternary_simdgroup_32x32(
     // 16 accumulators — one per (M-subtile, P-subtile) pair.
     #[allow(unused_mut)]
     let mut acc_0_0 = cmma::Matrix::<f32>::from_value(
-        cmma::MatrixIdent::Accumulator, 8usize, 8usize, 8usize,
-        cmma::MatrixLayout::Undefined, 0.0f32,
+        cmma::MatrixIdent::Accumulator,
+        8usize,
+        8usize,
+        8usize,
+        cmma::MatrixLayout::Undefined,
+        0.0f32,
     );
     #[allow(unused_mut)]
     let mut acc_0_1 = cmma::Matrix::<f32>::from_value(
-        cmma::MatrixIdent::Accumulator, 8usize, 8usize, 8usize,
-        cmma::MatrixLayout::Undefined, 0.0f32,
+        cmma::MatrixIdent::Accumulator,
+        8usize,
+        8usize,
+        8usize,
+        cmma::MatrixLayout::Undefined,
+        0.0f32,
     );
     #[allow(unused_mut)]
     let mut acc_0_2 = cmma::Matrix::<f32>::from_value(
-        cmma::MatrixIdent::Accumulator, 8usize, 8usize, 8usize,
-        cmma::MatrixLayout::Undefined, 0.0f32,
+        cmma::MatrixIdent::Accumulator,
+        8usize,
+        8usize,
+        8usize,
+        cmma::MatrixLayout::Undefined,
+        0.0f32,
     );
     #[allow(unused_mut)]
     let mut acc_0_3 = cmma::Matrix::<f32>::from_value(
-        cmma::MatrixIdent::Accumulator, 8usize, 8usize, 8usize,
-        cmma::MatrixLayout::Undefined, 0.0f32,
+        cmma::MatrixIdent::Accumulator,
+        8usize,
+        8usize,
+        8usize,
+        cmma::MatrixLayout::Undefined,
+        0.0f32,
     );
     #[allow(unused_mut)]
     let mut acc_1_0 = cmma::Matrix::<f32>::from_value(
-        cmma::MatrixIdent::Accumulator, 8usize, 8usize, 8usize,
-        cmma::MatrixLayout::Undefined, 0.0f32,
+        cmma::MatrixIdent::Accumulator,
+        8usize,
+        8usize,
+        8usize,
+        cmma::MatrixLayout::Undefined,
+        0.0f32,
     );
     #[allow(unused_mut)]
     let mut acc_1_1 = cmma::Matrix::<f32>::from_value(
-        cmma::MatrixIdent::Accumulator, 8usize, 8usize, 8usize,
-        cmma::MatrixLayout::Undefined, 0.0f32,
+        cmma::MatrixIdent::Accumulator,
+        8usize,
+        8usize,
+        8usize,
+        cmma::MatrixLayout::Undefined,
+        0.0f32,
     );
     #[allow(unused_mut)]
     let mut acc_1_2 = cmma::Matrix::<f32>::from_value(
-        cmma::MatrixIdent::Accumulator, 8usize, 8usize, 8usize,
-        cmma::MatrixLayout::Undefined, 0.0f32,
+        cmma::MatrixIdent::Accumulator,
+        8usize,
+        8usize,
+        8usize,
+        cmma::MatrixLayout::Undefined,
+        0.0f32,
     );
     #[allow(unused_mut)]
     let mut acc_1_3 = cmma::Matrix::<f32>::from_value(
-        cmma::MatrixIdent::Accumulator, 8usize, 8usize, 8usize,
-        cmma::MatrixLayout::Undefined, 0.0f32,
+        cmma::MatrixIdent::Accumulator,
+        8usize,
+        8usize,
+        8usize,
+        cmma::MatrixLayout::Undefined,
+        0.0f32,
     );
     #[allow(unused_mut)]
     let mut acc_2_0 = cmma::Matrix::<f32>::from_value(
-        cmma::MatrixIdent::Accumulator, 8usize, 8usize, 8usize,
-        cmma::MatrixLayout::Undefined, 0.0f32,
+        cmma::MatrixIdent::Accumulator,
+        8usize,
+        8usize,
+        8usize,
+        cmma::MatrixLayout::Undefined,
+        0.0f32,
     );
     #[allow(unused_mut)]
     let mut acc_2_1 = cmma::Matrix::<f32>::from_value(
-        cmma::MatrixIdent::Accumulator, 8usize, 8usize, 8usize,
-        cmma::MatrixLayout::Undefined, 0.0f32,
+        cmma::MatrixIdent::Accumulator,
+        8usize,
+        8usize,
+        8usize,
+        cmma::MatrixLayout::Undefined,
+        0.0f32,
     );
     #[allow(unused_mut)]
     let mut acc_2_2 = cmma::Matrix::<f32>::from_value(
-        cmma::MatrixIdent::Accumulator, 8usize, 8usize, 8usize,
-        cmma::MatrixLayout::Undefined, 0.0f32,
+        cmma::MatrixIdent::Accumulator,
+        8usize,
+        8usize,
+        8usize,
+        cmma::MatrixLayout::Undefined,
+        0.0f32,
     );
     #[allow(unused_mut)]
     let mut acc_2_3 = cmma::Matrix::<f32>::from_value(
-        cmma::MatrixIdent::Accumulator, 8usize, 8usize, 8usize,
-        cmma::MatrixLayout::Undefined, 0.0f32,
+        cmma::MatrixIdent::Accumulator,
+        8usize,
+        8usize,
+        8usize,
+        cmma::MatrixLayout::Undefined,
+        0.0f32,
     );
     #[allow(unused_mut)]
     let mut acc_3_0 = cmma::Matrix::<f32>::from_value(
-        cmma::MatrixIdent::Accumulator, 8usize, 8usize, 8usize,
-        cmma::MatrixLayout::Undefined, 0.0f32,
+        cmma::MatrixIdent::Accumulator,
+        8usize,
+        8usize,
+        8usize,
+        cmma::MatrixLayout::Undefined,
+        0.0f32,
     );
     #[allow(unused_mut)]
     let mut acc_3_1 = cmma::Matrix::<f32>::from_value(
-        cmma::MatrixIdent::Accumulator, 8usize, 8usize, 8usize,
-        cmma::MatrixLayout::Undefined, 0.0f32,
+        cmma::MatrixIdent::Accumulator,
+        8usize,
+        8usize,
+        8usize,
+        cmma::MatrixLayout::Undefined,
+        0.0f32,
     );
     #[allow(unused_mut)]
     let mut acc_3_2 = cmma::Matrix::<f32>::from_value(
-        cmma::MatrixIdent::Accumulator, 8usize, 8usize, 8usize,
-        cmma::MatrixLayout::Undefined, 0.0f32,
+        cmma::MatrixIdent::Accumulator,
+        8usize,
+        8usize,
+        8usize,
+        cmma::MatrixLayout::Undefined,
+        0.0f32,
     );
     #[allow(unused_mut)]
     let mut acc_3_3 = cmma::Matrix::<f32>::from_value(
-        cmma::MatrixIdent::Accumulator, 8usize, 8usize, 8usize,
-        cmma::MatrixLayout::Undefined, 0.0f32,
+        cmma::MatrixIdent::Accumulator,
+        8usize,
+        8usize,
+        8usize,
+        cmma::MatrixLayout::Undefined,
+        0.0f32,
     );
 
     // Shared memory — 4 weight sub-tiles + 4 input sub-tiles (64 f32 each)
@@ -903,36 +1003,76 @@ fn gemm_ternary_simdgroup_32x32(
 
         // ── 8 fragment loads + 16 executes (every A × every B) ──
         let mat_a0 = cmma::Matrix::<f32>::from_slice(
-            cmma::MatrixIdent::A, 8usize, 8usize, 8usize,
-            cmma::MatrixLayout::RowMajor, &tile_w0, 8,
+            cmma::MatrixIdent::A,
+            8usize,
+            8usize,
+            8usize,
+            cmma::MatrixLayout::RowMajor,
+            &tile_w0,
+            8,
         );
         let mat_a1 = cmma::Matrix::<f32>::from_slice(
-            cmma::MatrixIdent::A, 8usize, 8usize, 8usize,
-            cmma::MatrixLayout::RowMajor, &tile_w1, 8,
+            cmma::MatrixIdent::A,
+            8usize,
+            8usize,
+            8usize,
+            cmma::MatrixLayout::RowMajor,
+            &tile_w1,
+            8,
         );
         let mat_a2 = cmma::Matrix::<f32>::from_slice(
-            cmma::MatrixIdent::A, 8usize, 8usize, 8usize,
-            cmma::MatrixLayout::RowMajor, &tile_w2, 8,
+            cmma::MatrixIdent::A,
+            8usize,
+            8usize,
+            8usize,
+            cmma::MatrixLayout::RowMajor,
+            &tile_w2,
+            8,
         );
         let mat_a3 = cmma::Matrix::<f32>::from_slice(
-            cmma::MatrixIdent::A, 8usize, 8usize, 8usize,
-            cmma::MatrixLayout::RowMajor, &tile_w3, 8,
+            cmma::MatrixIdent::A,
+            8usize,
+            8usize,
+            8usize,
+            cmma::MatrixLayout::RowMajor,
+            &tile_w3,
+            8,
         );
         let mat_b0 = cmma::Matrix::<f32>::from_slice(
-            cmma::MatrixIdent::B, 8usize, 8usize, 8usize,
-            cmma::MatrixLayout::ColMajor, &tile_x0, 8,
+            cmma::MatrixIdent::B,
+            8usize,
+            8usize,
+            8usize,
+            cmma::MatrixLayout::ColMajor,
+            &tile_x0,
+            8,
         );
         let mat_b1 = cmma::Matrix::<f32>::from_slice(
-            cmma::MatrixIdent::B, 8usize, 8usize, 8usize,
-            cmma::MatrixLayout::ColMajor, &tile_x1, 8,
+            cmma::MatrixIdent::B,
+            8usize,
+            8usize,
+            8usize,
+            cmma::MatrixLayout::ColMajor,
+            &tile_x1,
+            8,
         );
         let mat_b2 = cmma::Matrix::<f32>::from_slice(
-            cmma::MatrixIdent::B, 8usize, 8usize, 8usize,
-            cmma::MatrixLayout::ColMajor, &tile_x2, 8,
+            cmma::MatrixIdent::B,
+            8usize,
+            8usize,
+            8usize,
+            cmma::MatrixLayout::ColMajor,
+            &tile_x2,
+            8,
         );
         let mat_b3 = cmma::Matrix::<f32>::from_slice(
-            cmma::MatrixIdent::B, 8usize, 8usize, 8usize,
-            cmma::MatrixLayout::ColMajor, &tile_x3, 8,
+            cmma::MatrixIdent::B,
+            8usize,
+            8usize,
+            8usize,
+            cmma::MatrixLayout::ColMajor,
+            &tile_x3,
+            8,
         );
 
         // NOTE: execute ORDER within a k_tile does not matter (each writes a
@@ -1078,27 +1218,27 @@ fn gemm_ternary_simdgroup_32x32(
     cmma::store(&mut result, &acc_2_2, 8, cmma::MatrixLayout::RowMajor);
     sync_cube();
     if (base_p + 2u32 * CMMA_DIM + col0) < p_tokens && (out_row0 + 2u32 * CMMA_DIM) < m {
-        output_batch[
-            ((base_p + 2u32 * CMMA_DIM + col0) * m + out_row0 + 2u32 * CMMA_DIM) as usize
-        ] = result[e0 as usize];
+        output_batch
+            [((base_p + 2u32 * CMMA_DIM + col0) * m + out_row0 + 2u32 * CMMA_DIM) as usize] =
+            result[e0 as usize];
     }
     if (base_p + 2u32 * CMMA_DIM + col1) < p_tokens && (out_row1 + 2u32 * CMMA_DIM) < m {
-        output_batch[
-            ((base_p + 2u32 * CMMA_DIM + col1) * m + out_row1 + 2u32 * CMMA_DIM) as usize
-        ] = result[e1 as usize];
+        output_batch
+            [((base_p + 2u32 * CMMA_DIM + col1) * m + out_row1 + 2u32 * CMMA_DIM) as usize] =
+            result[e1 as usize];
     }
     sync_cube();
     cmma::store(&mut result, &acc_2_3, 8, cmma::MatrixLayout::RowMajor);
     sync_cube();
     if (base_p + 3u32 * CMMA_DIM + col0) < p_tokens && (out_row0 + 2u32 * CMMA_DIM) < m {
-        output_batch[
-            ((base_p + 3u32 * CMMA_DIM + col0) * m + out_row0 + 2u32 * CMMA_DIM) as usize
-        ] = result[e0 as usize];
+        output_batch
+            [((base_p + 3u32 * CMMA_DIM + col0) * m + out_row0 + 2u32 * CMMA_DIM) as usize] =
+            result[e0 as usize];
     }
     if (base_p + 3u32 * CMMA_DIM + col1) < p_tokens && (out_row1 + 2u32 * CMMA_DIM) < m {
-        output_batch[
-            ((base_p + 3u32 * CMMA_DIM + col1) * m + out_row1 + 2u32 * CMMA_DIM) as usize
-        ] = result[e1 as usize];
+        output_batch
+            [((base_p + 3u32 * CMMA_DIM + col1) * m + out_row1 + 2u32 * CMMA_DIM) as usize] =
+            result[e1 as usize];
     }
     sync_cube();
 
@@ -1128,27 +1268,27 @@ fn gemm_ternary_simdgroup_32x32(
     cmma::store(&mut result, &acc_3_2, 8, cmma::MatrixLayout::RowMajor);
     sync_cube();
     if (base_p + 2u32 * CMMA_DIM + col0) < p_tokens && (out_row0 + 3u32 * CMMA_DIM) < m {
-        output_batch[
-            ((base_p + 2u32 * CMMA_DIM + col0) * m + out_row0 + 3u32 * CMMA_DIM) as usize
-        ] = result[e0 as usize];
+        output_batch
+            [((base_p + 2u32 * CMMA_DIM + col0) * m + out_row0 + 3u32 * CMMA_DIM) as usize] =
+            result[e0 as usize];
     }
     if (base_p + 2u32 * CMMA_DIM + col1) < p_tokens && (out_row1 + 3u32 * CMMA_DIM) < m {
-        output_batch[
-            ((base_p + 2u32 * CMMA_DIM + col1) * m + out_row1 + 3u32 * CMMA_DIM) as usize
-        ] = result[e1 as usize];
+        output_batch
+            [((base_p + 2u32 * CMMA_DIM + col1) * m + out_row1 + 3u32 * CMMA_DIM) as usize] =
+            result[e1 as usize];
     }
     sync_cube();
     cmma::store(&mut result, &acc_3_3, 8, cmma::MatrixLayout::RowMajor);
     sync_cube();
     if (base_p + 3u32 * CMMA_DIM + col0) < p_tokens && (out_row0 + 3u32 * CMMA_DIM) < m {
-        output_batch[
-            ((base_p + 3u32 * CMMA_DIM + col0) * m + out_row0 + 3u32 * CMMA_DIM) as usize
-        ] = result[e0 as usize];
+        output_batch
+            [((base_p + 3u32 * CMMA_DIM + col0) * m + out_row0 + 3u32 * CMMA_DIM) as usize] =
+            result[e0 as usize];
     }
     if (base_p + 3u32 * CMMA_DIM + col1) < p_tokens && (out_row1 + 3u32 * CMMA_DIM) < m {
-        output_batch[
-            ((base_p + 3u32 * CMMA_DIM + col1) * m + out_row1 + 3u32 * CMMA_DIM) as usize
-        ] = result[e1 as usize];
+        output_batch
+            [((base_p + 3u32 * CMMA_DIM + col1) * m + out_row1 + 3u32 * CMMA_DIM) as usize] =
+            result[e1 as usize];
     }
 }
 
@@ -1297,12 +1437,7 @@ fn gemm_ternary_simdgroup_f16(
         k_tile += 1u32;
     }
 
-    cmma::store(
-        &mut result_tile,
-        &acc,
-        8,
-        cmma::MatrixLayout::RowMajor,
-    );
+    cmma::store(&mut result_tile, &acc, 8, cmma::MatrixLayout::RowMajor);
     sync_cube();
 
     let out_tok0 = base_p + col0;
@@ -1380,23 +1515,39 @@ fn gemm_ternary_simdgroup_scale_deferred(
     // 4 partial accumulators — per-group UNSCALED partials.
     #[allow(unused_mut)]
     let mut acc0 = cmma::Matrix::<f32>::from_value(
-        cmma::MatrixIdent::Accumulator, 8usize, 8usize, 8usize,
-        cmma::MatrixLayout::Undefined, 0.0f32,
+        cmma::MatrixIdent::Accumulator,
+        8usize,
+        8usize,
+        8usize,
+        cmma::MatrixLayout::Undefined,
+        0.0f32,
     );
     #[allow(unused_mut)]
     let mut acc1 = cmma::Matrix::<f32>::from_value(
-        cmma::MatrixIdent::Accumulator, 8usize, 8usize, 8usize,
-        cmma::MatrixLayout::Undefined, 0.0f32,
+        cmma::MatrixIdent::Accumulator,
+        8usize,
+        8usize,
+        8usize,
+        cmma::MatrixLayout::Undefined,
+        0.0f32,
     );
     #[allow(unused_mut)]
     let mut acc2 = cmma::Matrix::<f32>::from_value(
-        cmma::MatrixIdent::Accumulator, 8usize, 8usize, 8usize,
-        cmma::MatrixLayout::Undefined, 0.0f32,
+        cmma::MatrixIdent::Accumulator,
+        8usize,
+        8usize,
+        8usize,
+        cmma::MatrixLayout::Undefined,
+        0.0f32,
     );
     #[allow(unused_mut)]
     let mut acc3 = cmma::Matrix::<f32>::from_value(
-        cmma::MatrixIdent::Accumulator, 8usize, 8usize, 8usize,
-        cmma::MatrixLayout::Undefined, 0.0f32,
+        cmma::MatrixIdent::Accumulator,
+        8usize,
+        8usize,
+        8usize,
+        cmma::MatrixLayout::Undefined,
+        0.0f32,
     );
 
     // f16 tiles — half the smem of the f32 8×32 variant (9 × 64 f16 ≈ 1.1 KB).
@@ -1529,31 +1680,56 @@ fn gemm_ternary_simdgroup_scale_deferred(
         sync_cube();
 
         let mat_a = cmma::Matrix::<f16>::from_slice(
-            cmma::MatrixIdent::A, 8usize, 8usize, 8usize,
-            cmma::MatrixLayout::RowMajor, &tile_w, 8,
+            cmma::MatrixIdent::A,
+            8usize,
+            8usize,
+            8usize,
+            cmma::MatrixLayout::RowMajor,
+            &tile_w,
+            8,
         );
 
         let mat_b0 = cmma::Matrix::<f16>::from_slice(
-            cmma::MatrixIdent::B, 8usize, 8usize, 8usize,
-            cmma::MatrixLayout::ColMajor, &tile_x0, 8,
+            cmma::MatrixIdent::B,
+            8usize,
+            8usize,
+            8usize,
+            cmma::MatrixLayout::ColMajor,
+            &tile_x0,
+            8,
         );
         cmma::execute::<f16, f16, f32, f32, cmma::Plane>(&mat_a, &mat_b0, &acc0, &acc0);
 
         let mat_b1 = cmma::Matrix::<f16>::from_slice(
-            cmma::MatrixIdent::B, 8usize, 8usize, 8usize,
-            cmma::MatrixLayout::ColMajor, &tile_x1, 8,
+            cmma::MatrixIdent::B,
+            8usize,
+            8usize,
+            8usize,
+            cmma::MatrixLayout::ColMajor,
+            &tile_x1,
+            8,
         );
         cmma::execute::<f16, f16, f32, f32, cmma::Plane>(&mat_a, &mat_b1, &acc1, &acc1);
 
         let mat_b2 = cmma::Matrix::<f16>::from_slice(
-            cmma::MatrixIdent::B, 8usize, 8usize, 8usize,
-            cmma::MatrixLayout::ColMajor, &tile_x2, 8,
+            cmma::MatrixIdent::B,
+            8usize,
+            8usize,
+            8usize,
+            cmma::MatrixLayout::ColMajor,
+            &tile_x2,
+            8,
         );
         cmma::execute::<f16, f16, f32, f32, cmma::Plane>(&mat_a, &mat_b2, &acc2, &acc2);
 
         let mat_b3 = cmma::Matrix::<f16>::from_slice(
-            cmma::MatrixIdent::B, 8usize, 8usize, 8usize,
-            cmma::MatrixLayout::ColMajor, &tile_x3, 8,
+            cmma::MatrixIdent::B,
+            8usize,
+            8usize,
+            8usize,
+            cmma::MatrixLayout::ColMajor,
+            &tile_x3,
+            8,
         );
         cmma::execute::<f16, f16, f32, f32, cmma::Plane>(&mat_a, &mat_b3, &acc3, &acc3);
 
@@ -1898,8 +2074,8 @@ impl GemmTernarySimdgroupCubeCL {
     /// On Metal3 this returns `true` (4 wmma configs registered including
     /// `(f32,f32,f32)`). On backends without cmma support, returns `false`.
     pub fn cmma_available<R: Runtime>(client: &ComputeClient<R>) -> bool {
-        use cubecl::ir::{ElemType, FloatKind};
         use cubecl::ir::features::MmaConfig;
+        use cubecl::ir::{ElemType, FloatKind};
 
         client.features().matmul.cmma.contains(&MmaConfig {
             a_type: ElemType::Float(FloatKind::F32).into(),
@@ -1967,8 +2143,8 @@ impl GemmTernarySimdgroupCubeCL {
     /// Check whether the device supports cmma `(f16, f16, f32)` at 8×8×8.
     #[cfg(feature = "ternary_gemm_simdgroup_f16")]
     pub fn cmma_available_f16<R: Runtime>(client: &ComputeClient<R>) -> bool {
-        use cubecl::ir::{ElemType, FloatKind};
         use cubecl::ir::features::MmaConfig;
+        use cubecl::ir::{ElemType, FloatKind};
 
         client.features().matmul.cmma.contains(&MmaConfig {
             a_type: ElemType::Float(FloatKind::F16).into(),

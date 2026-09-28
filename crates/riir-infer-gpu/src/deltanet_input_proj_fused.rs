@@ -235,9 +235,7 @@ impl TernaryInputProjFused {
         debug_assert_eq!(b_out.len(), handles.n_v_heads(), "b_out size mismatch");
 
         let x_handle = client.create_from_slice(<f32 as CubeElement>::as_bytes(x));
-        let outs = unsafe {
-            Self::dispatch_input_projections_noread(client, handles, x_handle)
-        };
+        let outs = unsafe { Self::dispatch_input_projections_noread(client, handles, x_handle) };
 
         // Read back each output. CubeCL's `read_one` forces a sync; the 4 calls
         // here all drain the same command queue (the dispatches were already
@@ -400,10 +398,7 @@ impl GpuTernaryInputProj {
     /// Call once after loading the model, before the first forward pass.
     ///
     /// Accepts any iterator yielding (qkv, z, a, b) weight references.
-    pub fn preupload_layers<
-        'w,
-        L: IntoIterator<Item = &'w LayerInputProjWeightsRef<'w>>,
-    >(
+    pub fn preupload_layers<'w, L: IntoIterator<Item = &'w LayerInputProjWeightsRef<'w>>>(
         &self,
         layers: L,
     ) {
@@ -429,20 +424,34 @@ impl katgpt_core::TernaryInputProjHook for GpuTernaryInputProj {
     ) {
         let key = InputProjCacheKey::new(qkv_w, z_w, a_w, b_w);
         let pin = self.handles.pin();
-        if let Some(h) = pin.get(&key) { unsafe {
+        if let Some(h) = pin.get(&key) {
+            unsafe {
                 TernaryInputProjFused::dispatch_input_projections_with_readback(
-                    &self.client, h, x, qkv_out, z_out, a_out, b_out,
+                    &self.client,
+                    h,
+                    x,
+                    qkv_out,
+                    z_out,
+                    a_out,
+                    b_out,
                 );
-            } } else {
-                // On-the-fly upload (first call without preupload).
-                let h = TernaryInputProjHandles::from_weights(&self.client, qkv_w, z_w, a_w, b_w);
-                pin.insert(key, h.clone());
-                unsafe {
-                    TernaryInputProjFused::dispatch_input_projections_with_readback(
-                        &self.client, &h, x, qkv_out, z_out, a_out, b_out,
-                    );
-                }
             }
+        } else {
+            // On-the-fly upload (first call without preupload).
+            let h = TernaryInputProjHandles::from_weights(&self.client, qkv_w, z_w, a_w, b_w);
+            pin.insert(key, h.clone());
+            unsafe {
+                TernaryInputProjFused::dispatch_input_projections_with_readback(
+                    &self.client,
+                    &h,
+                    x,
+                    qkv_out,
+                    z_out,
+                    a_out,
+                    b_out,
+                );
+            }
+        }
     }
 }
 
@@ -466,7 +475,9 @@ mod tests {
 
         let dense: Vec<f32> = (0..rows * cols)
             .map(|_| {
-                state = state.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+                state = state
+                    .wrapping_mul(6364136223846793005)
+                    .wrapping_add(1442695040888963407);
                 let bits = state as i32;
                 (bits as f32) / (i32::MAX as f32) * 2.0 - 1.0
             })
@@ -526,13 +537,11 @@ mod tests {
 
         let x: Vec<f32> = (0..n_embd).map(|i| (i as f32) * 0.01 - 1.0).collect();
 
-        let (cpu_qkv, cpu_z, cpu_a, cpu_b) =
-            cpu_input_projections(&qkv_w, &z_w, &a_w, &b_w, &x);
+        let (cpu_qkv, cpu_z, cpu_a, cpu_b) = cpu_input_projections(&qkv_w, &z_w, &a_w, &b_w, &x);
 
         let ctx = GpuContext::new().expect("GPU init");
         let client = ctx.cubecl_client();
-        let handles =
-            TernaryInputProjHandles::from_weights(&client, &qkv_w, &z_w, &a_w, &b_w);
+        let handles = TernaryInputProjHandles::from_weights(&client, &qkv_w, &z_w, &a_w, &b_w);
 
         let mut gpu_qkv = vec![0.0f32; 2 * q_dim + z_dim];
         let mut gpu_z = vec![0.0f32; z_dim];
@@ -573,13 +582,11 @@ mod tests {
             .map(|i| ((i as u32).wrapping_mul(1103515245) as f32 % 2.0) - 1.0)
             .collect();
 
-        let (cpu_qkv, cpu_z, cpu_a, cpu_b) =
-            cpu_input_projections(&qkv_w, &z_w, &a_w, &b_w, &x);
+        let (cpu_qkv, cpu_z, cpu_a, cpu_b) = cpu_input_projections(&qkv_w, &z_w, &a_w, &b_w, &x);
 
         let ctx = GpuContext::new().expect("GPU init");
         let client = ctx.cubecl_client();
-        let handles =
-            TernaryInputProjHandles::from_weights(&client, &qkv_w, &z_w, &a_w, &b_w);
+        let handles = TernaryInputProjHandles::from_weights(&client, &qkv_w, &z_w, &a_w, &b_w);
 
         let mut gpu_qkv = vec![0.0f32; qkv_dim];
         let mut gpu_z = vec![0.0f32; z_dim];
@@ -622,13 +629,11 @@ mod tests {
             .map(|i| ((i as u32).wrapping_mul(2654435761) as f32 % 2.0) - 1.0)
             .collect();
 
-        let (cpu_qkv, cpu_z, cpu_a, cpu_b) =
-            cpu_input_projections(&qkv_w, &z_w, &a_w, &b_w, &x);
+        let (cpu_qkv, cpu_z, cpu_a, cpu_b) = cpu_input_projections(&qkv_w, &z_w, &a_w, &b_w, &x);
 
         let ctx = GpuContext::new().expect("GPU init");
         let client = ctx.cubecl_client();
-        let handles =
-            TernaryInputProjHandles::from_weights(&client, &qkv_w, &z_w, &a_w, &b_w);
+        let handles = TernaryInputProjHandles::from_weights(&client, &qkv_w, &z_w, &a_w, &b_w);
 
         let mut gpu_qkv = vec![0.0f32; qkv_dim];
         let mut gpu_z = vec![0.0f32; z_dim];
@@ -672,8 +677,7 @@ mod tests {
         let a_w = make_ternary_weights(n_v_heads, n_embd, 9);
         let b_w = make_ternary_weights(n_v_heads, n_embd, 11);
         let x: Vec<f32> = (0..n_embd).map(|i| (i as f32) * 0.01 - 1.0).collect();
-        let (cpu_qkv, cpu_z, cpu_a, cpu_b) =
-            cpu_input_projections(&qkv_w, &z_w, &a_w, &b_w, &x);
+        let (cpu_qkv, cpu_z, cpu_a, cpu_b) = cpu_input_projections(&qkv_w, &z_w, &a_w, &b_w, &x);
 
         let ctx = GpuContext::new().expect("GPU init");
         let client = ctx.cubecl_client();
@@ -681,7 +685,11 @@ mod tests {
 
         // Populate the cache, then drop the model (the stale-handle scenario).
         hook.preupload(&qkv_w, &z_w, &a_w, &b_w);
-        assert_eq!(hook.handles.pin().len(), 1, "preupload should cache one entry");
+        assert_eq!(
+            hook.handles.pin().len(),
+            1,
+            "preupload should cache one entry"
+        );
 
         hook.clear(); // the model-reload invalidation contract
         assert_eq!(hook.handles.pin().len(), 0, "clear() must empty the cache");
