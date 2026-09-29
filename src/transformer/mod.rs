@@ -101,6 +101,14 @@ pub use gemma2::forward_gemma2_f16_hk;
 // token-mean decorator. Opt-in (`fitted_v_tables`).
 #[cfg(feature = "fitted_v_tables")]
 pub mod gemma2_vquant;
+// Issue 013 T2 (katgpt-rs Issue 883 P2 model-bound gate) — the K=V+ serve
+// state (`v_from_k_plus` over the pre-RoPE K tap) + the shared measurement
+// helpers (NLL/rank, the BLAKE3-pinned table artifact, the Bench-814 NIAH
+// builder). Opt-in (`fitted_v_tables`).
+#[cfg(feature = "fitted_v_tables")]
+pub mod gemma2_ktov;
+#[cfg(feature = "fitted_v_tables")]
+pub mod vk_harness;
 // Plan 410 Phase 1: LoRA-aware Gemma 2 forward entry point.
 #[cfg(feature = "gemma_lora")]
 pub use gemma2::{forward_gemma2_with_embedding_lora, forward_gemma2_with_lora};

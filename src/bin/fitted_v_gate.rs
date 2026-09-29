@@ -142,7 +142,6 @@ impl Acc {
 struct ReportCtx<'a> {
     r2: &'a [f32],
     kvd: usize,
-    n_chunks: usize,
     total_scored: usize,
     band_n: &'a [f64; 4],
     posbin_n: &'a [f64; 2],
@@ -523,7 +522,6 @@ fn main() -> Result<()> {
             let rctx = ReportCtx {
                 r2: &r2,
                 kvd,
-                n_chunks,
                 total_scored,
                 band_n: &band_n,
                 posbin_n: &posbin_n,
@@ -543,7 +541,6 @@ fn main() -> Result<()> {
     let rctx = ReportCtx {
         r2: &r2,
         kvd,
-        n_chunks,
         total_scored,
         band_n: &band_n,
         posbin_n: &posbin_n,

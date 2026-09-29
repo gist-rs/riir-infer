@@ -348,6 +348,14 @@ pub trait ValueStoreHook {
     /// `layer_idx`'s value cache; the row at `pos * kv_dim` was just
     /// written (raw). `pos` is the absolute sequence position.
     fn value_stored(&mut self, _layer_idx: usize, _pos: usize, _layer_values: &mut [f32]) {}
+
+    /// The layer's PRE-RoPE key row for `pos` — called between the QKV
+    /// projections and the in-place RoPE, exactly the Bench-004 tap point
+    /// (Issue 013 T2: the K=V+ serve point; T3's reconstruction inverts the
+    /// cache rotation to recover this row to 1.83ε). The hook must COPY what
+    /// it needs: `ctx.k` is rotated in place immediately after. Default
+    /// no-op (the T1 lossy-V hooks ignore it; monomorphizes away).
+    fn keys_pre_rope(&mut self, _layer_idx: usize, _pos: usize, _k_pre: &[f32]) {}
 }
 
 /// Zero-overhead no-op [`ValueStoreHook`] — the full-precision V-cache
@@ -1346,6 +1354,10 @@ pub fn forward_gemma2_f16_hk<'a, H: ValueStoreHook + ?Sized>(
             types::matmul_f16(k_buf, wk, x_in, kvd, n);
             types::matmul_f16(v_buf, wv, x_in, kvd, n);
         }
+
+        // d2. [Issue 013 T2] Pre-RoPE K tap — the K=V+ serve point (the same
+        // point the calibration taps). `NoVQuant`: empty, inlined away.
+        vq.keys_pre_rope(layer_idx, pos, &ctx.k[..kvd]);
 
         // e. RoPE
         crate::rope::apply_rope_with_freq(

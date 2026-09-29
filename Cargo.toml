@@ -339,6 +339,15 @@ name = "fitted_v_gate"
 path = "src/bin/fitted_v_gate.rs"
 required-features = ["fitted_v_tables"]
 
+# riir-infer Issue 013 T2 — the K=V+ λ ladder (the P2 model-bound gate):
+# calibrate/load → freeze (Residual) → G3 probe → λ ladder → per-layer
+# schedule grid → validation → NIAH (Bench-814 shape). Same feature gate +
+# reader protection as the T1 bin. OPT-IN, measurement-only.
+[[bin]]
+name = "kv_plus_ladder"
+path = "src/bin/kv_plus_ladder.rs"
+required-features = ["fitted_v_tables"]
+
 # riir-infer Issue 022 — the TWT gate battery (G1 planted known-answers,
 # brute-force DP agreement, monotonicity, G4 alloc-free accumulate, the
 # n=4096 partition perf probe). Whole-file #![cfg(feature =

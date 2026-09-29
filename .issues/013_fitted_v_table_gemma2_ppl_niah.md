@@ -101,10 +101,81 @@ position.
 **Box state:** 4090 workstation, i7-13700K 16 cores, CPU lane, AC power; launch-time free RAM + commit-vs-limit recorded in the bench doc; runs > 30 min use the scheduled-task recipe (`run_*.cmd`, Issue 012). Expected wall ≈ 6 h (cal ≈ 2 h at the tapped ~8 tok/s + 8 eval arms ≈ 4 h).
 
 **Promotion statement (unchanged):** a measured null is a legitimate recorded negative; promotion is katgpt-rs-side and waits on T1/T2/T3 + the loser demoted.
-- [ ] **T2 — P2 G1: the K=V+ λ ladder.** Serve `V = K + λ·E_l[s]` with W_V deleted, at λ ∈ {0, 0.5, 1} plus a per-layer schedule chosen by direct grid evaluation on held-out fixtures (never GD).
+- [x] **T2 — P2 G1: the K=V+ λ ladder.** Serve `V = K + λ·E_l[s]` with W_V deleted, at λ ∈ {0, 0.5, 1} plus a per-layer schedule chosen by direct grid evaluation on held-out fixtures (never GD).
   - Measure held-out PPL and NIAH (the katgpt-rs Bench 814 harness shape) against (a) full V and (b) `V := K`.
   - The only claim under test is `quality(K=V+) > quality(K=V)`, i.e. that the table refunds part of the 2.5–3.1% tax. **§3.6 discipline: no parity claim vs full V is made or expected.** Record the ladder honestly.
   - G3: λ = 0 must be `to_bits`-identical to the `V := K` path across a full decode.
+
+### T2 protocol — PRE-REGISTERED 2026-09-29 (before any arm ran; the T1/012 precedent)
+
+**Instrument:** `kv_plus_ladder` bin + `transformer::gemma2_ktov::KToVState`
+(the K=V+ serve hook, feature `fitted_v_tables`, measurement-only). The
+seam widens [`ValueStoreHook`] with `keys_pre_rope(layer, pos, k)` — called
+between the QKV projections and the in-place RoPE, exactly the Bench-004
+tap point — and the existing `value_stored` then rewrites the just-stored
+V row to `v_from_k_plus(k_pre, row, λ_l)` (katgpt-core P2 verbatim;
+untracked token or λ=0 ⇒ the bitwise `V := K` path — the primitive's early
+return means the multiply is never executed). Attention scores are
+untouched (the K path is unchanged); the served V surface is the only
+delta. W_V keeps running in the forward — the FLOP/byte claim is T3's G2
+lane; this is the quality ladder, and T3's read-path reconstruction serves
+bitwise this value up to rotation rounding (1.83ε).
+
+**Fixture:** identical to T1 (gemma-2-2b-it-f16.gguf, chat_probe corpus,
+cal [0..61 440), eval [61 440..73 728) = 12 chunks × [BOS]+1023, seq 1024,
+teacher-forced NLL, cache reset per chunk). NEW: schedule-search chunk =
+tokens [73 728..74 752) — held out from calibration (table fit), the eval
+(validation), and the ladder. Table = `FittedTokenTable::from_calibration
+(Residual, λ_js = 0)` at top_k = 8192 (the Bench-004 coverage; the storage
+dial stays T1's question), dumped to `.benchmarks/012_kv_table_residual.bin`
+(BLAKE3-pinned, in-process round-trip verified) so T3's reconstruction lane
+reuses it without a second 2 h calibration.
+
+**Arms (ladder, full eval):** `f16` (base, full V) · `k-0.00` (V:=K) ·
+`k-0.50` · `k-1.00` — the issue's λ set. Paired per-position ΔNLL + top-1
+flips vs f16 AND vs k-0.00; per-chunk win shares both ways.
+
+**Schedule grid (only if some λ > 0 beats k-0.00; skipped in smoke):**
+per layer λ_l ∈ {0, 0.5, 1} \ {λ*}, all other layers at λ*; ONE sweep over
+the 26 layers on the search chunk (52 passes + the all-λ* incumbent + the
+final chosen-schedule pass — interactions are never summed through
+layers); argmax per layer by mean paired ΔNLL vs the incumbent, ties
+(|Δ| < 1e-4) resolve to λ*. Direct grid evaluation, never GD. The chosen
+schedule then validates on the FULL eval chunks (the search→validation
+transfer is the recorded overfit check, G-D).
+
+**Gates (pre-registered):**
+- **G-A (the claim):** mean paired ΔNLL(λ − k-0) < 0 for at least one
+  λ ∈ {0.5, 1.0} on the held-out eval chunks. `quality(K=V+) >
+  quality(K=V)` is the ONLY claim; no parity claim vs full V (§3.6).
+- **G-C (hard):** the λ=0 serve hook's logits `to_bits`-identical to a
+direct `V := K` copy hook across a 64-position decode probe (tracked AND
+  untracked tokens) + the module unit tests (`v_from_k_plus` λ=0
+  early-return ⇒ bitwise copy, −0.0 entries included) + the T1 NoVQuant
+  delegation probe.
+- **G-D (recorded):** search-chunk ΔNLL vs held-out validation ΔNLL for
+  the chosen schedule; a schedule that wins on search and loses on
+  validation is recorded overfit, and the ladder's λ* stands.
+- **G-E (direction-only, n too small to gate):** NIAH in the Bench-814
+  shape — the 10-sentence filler pool (verbatim), one needle ("The magic
+  password is sunset{1000+137t}. Remember it for later. ") at depths
+  {0.25, 0.5, 0.75} × 6 trials, continuation tail (" The magic password
+  is"); password-token best rank + hits (rank 1) + answer NLL,
+  teacher-forced; arms {f16, k-0.00, k-0.50, k-1.00} (+ k-sched when the
+  grid ran). The recorded direction must not show K=V+ DEGRADING retrieval
+  vs k-0.00.
+- **Tax cross-check (recorded):** Δppl(k-0 − f16) — the V:=K tax the
+  refund is measured against (the issue cited 2.5–3.1%; this fixture
+  measures its own).
+- **Consistency (recorded):** the f16 arm must reproduce T1's 6.0907 PPL
+  (same fixture/slices/protocol — the free cross-run determinism check).
+
+**Box state:** 4090 workstation, i7-13700K 16 cores, CPU lane, AC power;
+launch-time free RAM + commit-vs-limit recorded in the bench doc;
+scheduled-task launch (`run_kv_plus_ladder.cmd`, the Issue-012 recipe).
+Expected wall ≈ 13 h (cal ≈ 2.1 h at ~8 tok/s + 4 ladder arms ≈ 3.1 h at
+~4.4 tok/s + grid 54 × 3.9 min ≈ 3.5 h + validation ≈ 0.8 h + NIAH 5 arms
+× 6 trials ≈ 1.7 h).
 - [ ] **T3 — P3: tg128 KV bytes/token −50%.** Drop the persistent V cache and reconstruct V from the cached post-RoPE K plus `E_l[s]` using a **half-split** `PositionGroupAction` that reads the forward's own cos/sin tables (see the trap above).
   - G1: PPL within the T2-measured tolerance at the same λ, plus the per-family retention walk.
   - G2: tg128 tok/s against the full-cache control, using the paired interleave (the katgpt-rs `tests/common/ab_timing.rs` protocol) with box state recorded.
