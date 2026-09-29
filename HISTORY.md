@@ -1311,3 +1311,38 @@ unaffected; the bonsai capture's `forced` was most plausibly degenerate
 claim cites the artifact (T5.5).
 
 Session: riir-infer-022-phase5-t50
+
+## 2026-09-29 — Issue 022 T5.0 COMPLETE: the agreement cliff mapped — 4.7% depth cut PASSES the GOAT bar, quality parity holds to 11%
+
+Bench record: `.benchmarks/022_t5_collapsed_goat_agreement.md` (full
+table + box state). The complete ε→agreement curve at 4,088 frozen
+positions (8 × 512-token teacher-forced chunks): **ε=0.01 (61/64
+blocks, 4.7% cut) agreement 0.9486 — the FIRST PASS of the
+pre-registered ≥0.9 absolute bar**; ε=0.015 (10.9% cut) 0.8955 (0.0045
+short); ε=0.02 (23.4%) 0.5247; ε=0.03 (45.3%) 0.0301; the four
+pre-registered grid points (0.05/0.1/0.2/0.3 → 61-92% cuts) all FAIL
+(0.19 → 0.00). Parent hit rate 0.7478.
+
+**The two-metrics finding (both recorded):** the collapsed model's own
+top-1 hit rate holds PARITY with the parent to 11% cut (0.7505/0.7495
+vs 0.7478 — the 11%-cut model is marginally BETTER at next-token
+prediction than its parent) while agreeing with the parent on only
+89.6% of argmaxes — trajectory divergence (chaotic stream sensitivity)
+overstates functional damage by one full grid notch. An
+agreement-controlled claim needs the hit-rate column beside it (T5.2's
+separation, one notch finer). Past 11% the hit rate falls off the same
+cliff (0.5076 at 23%, 0.024 at 45%).
+
+Consequences recorded in the issue: the merge/audition question is
+justified ONLY for quality at REAL depth cuts; riir-train 423's
+distillation owns the regime beyond ~11%. The parent arm is cached
+(params-keyed, loud replay) — every future sweep point pays only its
+collapsed arm.
+
+Kill-rule provenance finding (from the same session): the bonsai
+profile artifact's recorded `SURVIVES` is inconsistent with the current
+kill rule over its own stored S (re-derived KillBlockCount; the laya
+SURVIVES verdicts unaffected) — re-derive before any T5.5 Pareto claim
+cites it.
+
+Session: riir-infer-022-phase5-t50
