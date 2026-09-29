@@ -1,9 +1,10 @@
 # Plan 614 — the DQ phase-sensitivity bench (Issue 026 T1–T5): the 2×2 activation-quant phase matrix on the league artifact
 
 **Status:** OPEN — T0 CLOSED (round 3 **AGREE**, session c65b0114; rounds 1+2
-REVISE incorporated). This commit IS the pre-registration freeze (D6). T1–T6
-not started. No accuracy cell runs before the lane-acceptance predicate (D1)
-— which itself runs only after this freeze.
+REVISE incorporated). The pre-registration freeze commit landed (`d3300f2`).
+T1+T2 DONE (both lanes' kernels + injections; G-i3 green on Metal + CUDA;
+the D1 fallback lane is operative — no non-int8 prefill exists). T3 (the
+runner) is the remaining build; then T5 (the 4090 run) + T6 (close-out).
 
 Master: `.research/004_DQ_Disaggregated_Quantization.md` (arXiv:2609.26333 §2.2) · Issue `.issues/026_phase_sensitivity_quant_bench.md`. The issue's own gate: "Runs AFTER the 2×2 matrix definition review" — T0 below IS that review.
 
@@ -245,19 +246,41 @@ paired lane (the 4090's `F:/models/qwen38-27b-dbirks-Q4_K_M.gguf` via
       (session c65b0114 — conditions applied: Status line, Grids heading,
       commit-before-T2). **T0's completion commit IS the pre-registration freeze
       (D6).**
-- [ ] T1 — `dq_fakequant` module: grid spec (A2 027-T0 + A4 affine), host reference
+- [x] T1 — `dq_fakequant` module: grid spec (A2 027-T0 + A4 affine), host reference
       (the G-i3 oracle), knob statics + setters + PER-PHASE launch counters.
-- [ ] T2 — kernels + injections: nvrtc CUDA blockwise kernel (one workgroup per
-      block: reduce → round → write-back, in place) + CubeCL twin; the five sites
-      in `forward_from_x` (decode) and `whole_prefill_inner` (prefill), all
-      `#[cfg(feature = "dq_phase_bench")]`. FIRST STEP: verify the non-int8 folded
-      prefill path on the 4090 (sane logits) — else the D1 fallback arm.
+      **DONE (0edf36c, e62f9d0, d32e29e lineage)**: pure spec + per-row host
+      oracle (10 lib tests incl. the exhaustive f16-vs-`half` equality); CubeCL
+      decode-lane kernels (bit-exact f32→f16→f32 RNE emulation in integer bit
+      ops, half-away rounding — the GPU native round is half-to-EVEN —,
+      full-workgroup smem init for ragged tails, lowest-index tie-break);
+      CUDA prefill-lane kernels (nvrtc sm_89) as a dedicated `DqFqKernels`
+      module. G-i3 GREEN on BOTH lanes and BOTH backends (Metal M3 + CUDA
+      4090, 5/5 tests). Six kernel/oracle defects caught by the gates in
+      landing (flat-vs-per-row host blocking — a spec violation —, uninit
+      smem slots, half-even GPU rounding, f16 subnormal k=0 clobber,
+      shift-overflow guard, an A4 division slip).
+- [x] T2 — kernels + injections: DONE. Decode — the five `forward_from_x`/
+      layer-fn choke points (rot staging ×2, ffn_hidden, attn_out,
+      recurrent_out — all post-rotation, the folded basis). Prefill — the
+      five `whole_prefill_inner` sites (normx ×2 with the GDN escape-set
+      reorder under the feature, hid_b, attn_out_b, rec_b) via the
+      lazily-compiled DqFqKernels. All `#[cfg(feature = "dq_phase_bench")]`;
+      the 4090 build is green with the full feature set.
+      ⚠ D1's "non-int8 prefill path" was found NOT TO EXIST (the cudarc lane
+      ALWAYS activation-quantizes — both the q8 and the hi/lo arms are int8):
+      **the pre-registered fallback is OPERATIVE** (shipping A8 prefill in
+      every cell + the dec_a8 control cell). The lane-acceptance predicate
+      (top-1 agreement ≥ 0.80 vs shipping + base-acc window) still runs
+      first, per D1.
 - [ ] T3 — runner bin `dq_phase_matrix` (feature-gated): corpus generators +
-      BLAKE3 freeze, 4-cell × 2-grid driver, greedy generation + parsing + scoring,
-      paired bootstrap CIs, R tables, admissibility/saturation classification,
-      per-phase counter assertions, G-i1..G-i4, GPU-exclusivity probe, JSON+MD out.
-- [ ] T4 — local verification: M3 compile (CubeCL half) + clippy + host-reference
-      unit tests; 4090 compile of the cudarc half (SSH, isolated CARGO_TARGET_DIR).
+      BLAKE3 freeze, 4-cell × 2-grid (+dec_a8 control) driver, greedy generation
+      + parsing + scoring, paired bootstrap CIs, R tables, admissibility/
+      saturation classification, per-phase counter assertions, G-i1/G-i2/G-i4,
+      GPU-exclusivity probe, JSON+MD out.
+- [-] T4 — local verification: M3 half DONE (compile + clippy + lib tests +
+      CubeCL G-i3 green); 4090 half DONE (full-feature build green + G-i3 5/5
+      incl. the CUDA-lane arm). REMAINS: 4090 clippy + the runner's compile
+      once T3 lands.
 - [ ] T5 — the 4090 run (solo, GPU-exclusive, AC): both grids × both axes; write
       `.benchmarks/023_dq_phase_matrix.md` (live max is 022 — the `.highwater` 15
       is stale) with box state, exposure ratios, per-family/per-length tables, R
