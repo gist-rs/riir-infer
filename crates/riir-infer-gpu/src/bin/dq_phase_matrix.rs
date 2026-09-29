@@ -500,7 +500,16 @@ fn run() -> Result<(), String> {
     tdf::set_prefill_chunk_max(4096);
     riir_infer_gpu::prefill_cuda_full::set_prefill_use_cuda(true);
     // D5: graphs OFF in every cell (the knob must be consulted per launch).
-    std::env::set_var("RIIR_PREFILL_CUDA_GRAPHS", "0");
+    // The env is read once via OnceLock — set it in the INVOCATION, not here
+    // (an in-main set_var can race the first read); the runner refuses to
+    // run without it.
+    if std::env::var("RIIR_PREFILL_CUDA_GRAPHS").ok().as_deref() != Some("0") {
+        return Err(
+            "D5: run with RIIR_PREFILL_CUDA_GRAPHS=0 (graphs would freeze the \
+             fake-quant knob into a capture)"
+                .into(),
+        );
+    }
 
     // ── corpora + freeze hashes ───────────────────────────────────────────
     let arith = arith_items(arith_n);
