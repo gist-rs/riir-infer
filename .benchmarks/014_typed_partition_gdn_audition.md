@@ -96,13 +96,26 @@ class adds nothing on this lane**. The lane's honest ceiling stays the
 fine-end passthrough window (~5% cut PASSES the 0.9 bar; ~11% hit-parity).
 Beyond: riir-train 423's distillation track.
 
-## The typed-control GOAT (this session's remaining arm)
+## The typed-control GOAT (landed same session)
 
-`/tmp/twt_collapse_pq2_typed_e01_members.gguf` (34 blocks, medoid
-passthroughs — emitted by `twt_collapse_emit --typed`) vs parent, the T5.1
-budget: absolute top-1 agreement ≥ 0.9, parent arm CACHED. Result recorded
-below when the arm lands.
+`/tmp/twt_collapse_pq2_typed_e01_members.gguf` (34 blocks = 53.1% depth,
+medoid passthroughs — emitted by `twt_collapse_emit --typed`) vs parent, the
+T5.1 budget: absolute top-1 agreement ≥ 0.9. Parent hit rate 0.7478 (matches
+the frozen sweep — the harness is stable); **collapsed hit rate 0.0127;
+agreement 0.0135 (55/4088) — FAIL**, first divergence position 0. Log:
+`.raw/twt/goat_typed_e01.log`.
 
 ```text
-(pending — /tmp/twt_audition_logs/goat_typed_e01.log)
+# parent top-1 hit rate (context):    0.7478
+# collapsed top-1 hit rate:           0.0127
+# parent-vs-collapsed argmax agreement: 0.0135 (55/4088)
+# verdict: FAIL (bar 0.9 absolute, pre-registered)
 ```
+
+**The typed-structure hypothesis is DEAD:** type-pure medoid passthroughs at
+53% depth destroy the model exactly like the unconstrained cuts (ε=0.1
+unconstrained at 22% depth: 0.0051). The passthrough depth curve is now
+complete on this model: 4.7% cut PASSES (0.9486), ~11% cut hit-parity
+(0.8955 agreement), 22%-53% all read ~0.01. The cliff is REAL and neither
+the partition structure (typed) nor the member selection (audition) moves
+it — the zero-training ceiling on this model class is the ~5% window.
