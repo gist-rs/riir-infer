@@ -261,7 +261,7 @@ mod tests {
     fn row_with_neg_zero(p: usize) -> Vec<f32> {
         (0..KVD)
             .map(|i| {
-                if (p + i) % 3 == 0 {
+                if (p + i).is_multiple_of(3) {
                     -0.0 // the −0.0 class: 0·x and −0.0 + 0.0 flips its sign
                 } else {
                     ((p * 13 + i * 5) % 9) as f32 - 4.0
@@ -327,7 +327,7 @@ mod tests {
         let mut st = KToVState::new_uniform(table, 0.5, LAYERS, KVD, SEQ);
         st.set_token(0, 1);
         let k: Vec<f32> = (0..KVD).map(|i| (i as f32) * 0.25 - 1.0).collect();
-        let served = serve(&mut st, 1, 0, &k, &vec![3.0f32; KVD]);
+        let served = serve(&mut st, 1, 0, &k, &[3.0f32; KVD]);
         for i in 0..KVD {
             assert!(
                 (served[i] - (k[i] + 0.5 * row[i])).abs() < 1e-6,
@@ -339,7 +339,7 @@ mod tests {
         // Miss: untracked token serves exact k even at λ=1.
         let mut st1 = KToVState::new_uniform(table, 1.0, LAYERS, KVD, SEQ);
         st1.set_token(0, 2);
-        let served = serve(&mut st1, 1, 0, &k, &vec![3.0f32; KVD]);
+        let served = serve(&mut st1, 1, 0, &k, &[3.0f32; KVD]);
         assert_eq!(served, k, "miss at λ=1 must serve exact k");
     }
 

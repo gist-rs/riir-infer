@@ -685,7 +685,7 @@ mod tests {
     fn t3_armed_headroom_and_chunking_are_bit_identical() {
         let config = tiny_hybrid();
         let weights = perturbed_weights(&config);
-        let rope_freq = crate::rope::RopeFreqTable::new(config.rope_theta, config.head_dim);
+        let _rope_freq = crate::rope::RopeFreqTable::new(config.rope_theta, config.head_dim);
         let tokens: Vec<usize> = (0..16).map(|i| 3 + (i * 5) % 90).collect();
         let v = config.vocab_size;
 
