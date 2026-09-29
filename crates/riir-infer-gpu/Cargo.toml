@@ -214,6 +214,10 @@ required-features = ["cubecl_runtime", "ternary_gemm_batched", "metal_tensor_gem
 # feature union (cubecl_runtime activates dep:blake3; serde_json is a
 # plain dependency of this crate).
 [[bin]]
+name = "dq_phase_matrix"
+required-features = ["dq_phase_bench", "ternary_gemv_cuda_raw", "ternary_gemm_batched"]
+
+[[bin]]
 name = "qwen38_pyramid_capture"
 required-features = ["ternary_gemv_cuda_raw"]
 
