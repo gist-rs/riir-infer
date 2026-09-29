@@ -282,6 +282,17 @@ name = "vk_calibration"
 path = "src/bin/vk_calibration.rs"
 required-features = ["vk_calibration"]
 
+# katgpt-rs Issue 907 — the REAL V-row fixture capture (post-W_V rows off
+# the tapped forward, headered + corpus-BLAKE3'd, gitignored under
+# .raw/vrow/): the fixture half of the KVarN bit-ladder attribution bench
+# (the katgpt-rs side replays these rows through the b2/b3/b4 arms + the
+# crossed machinery). Same feature gate + reader protection as the
+# dashboard bin (the green-zero law).
+[[bin]]
+name = "vrow_capture"
+path = "src/bin/vrow_capture.rs"
+required-features = ["vk_calibration"]
+
 # riir-infer Issue 013 T1 — the fitted-value-table P1 model-bound G1 bin
 # (PPL at matched bits with/without mean removal + the cache-level MSE
 # replay; pre-registered protocol in the issue).
