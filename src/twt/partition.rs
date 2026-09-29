@@ -614,13 +614,8 @@ mod tests {
         let n = 16usize;
         let types: Vec<bool> = (0..n).map(|i| (i + 1) % 4 != 0).collect();
         let s = s_of(n, |i, j| {
-            if i == j {
-                0.0
-            } else if types[i] && types[j] {
-                0.01 // identical GDN clones
-            } else {
-                0.01 // distances don't matter across the constraint
-            }
+            if i == j { 0.0 } else { 0.01 } // distances don't matter: the
+            // type constraint, not ε, is what forces the cuts here
         });
         let p = minmax_partition_typed(&s, 0.1, &types).unwrap();
         for b in &p {
