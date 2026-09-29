@@ -74,6 +74,42 @@ fn worst_table(s: &SMatrix) -> Vec<f32> {
 /// non-decreasing as the block grows leftward) lets each candidate scan
 /// stop at the first infeasible boundary.
 pub fn minmax_partition(s: &SMatrix, eps: f32) -> Result<Vec<Block>, TwtError> {
+    partition_dp(s, eps, None)
+}
+
+/// [`minmax_partition`] under the TYPE constraint (T2.1's tier-(i) rule
+/// made structural): a block may only span layers of ONE type, because a
+/// GDN layer and an attention layer carry different tensor sets and
+/// shapes — there is no operator to average across the boundary. This is
+/// the merge-feasible partition: every multi-layer block it emits is a
+/// REAL merge candidate (homogeneous), which the unconstrained DP only
+/// produced by accident (on the qwen35 interval-4 rhythm it produced
+/// almost none — every block spanned an attention layer).
+///
+/// `types[i]` = true for sliding-window/DeltaNet layers, false for
+/// full-attention — the same convention [`forced_min_blocks`] documents.
+/// Monotone feasibility carries over: the block `[i, j]` grows leftward
+/// in the scans, so the first `types[i] != types[j]` boundary ends the
+/// scan (every deeper `i` keeps the mismatched layer `i` inside).
+pub fn minmax_partition_typed(
+    s: &SMatrix,
+    eps: f32,
+    types: &[bool],
+) -> Result<Vec<Block>, TwtError> {
+    if types.len() != s.n() {
+        return Err(TwtError::GgufWrite(format!(
+            "types length {} != S size {} — the typed partition needs one flag per layer",
+            types.len(),
+            s.n()
+        )));
+    }
+    partition_dp(s, eps, Some(types))
+}
+
+/// The two-pass min-max DP core. `types = None` is the unconstrained
+/// original; `Some(types)` restricts every block to one type (see
+/// [`minmax_partition_typed`]).
+fn partition_dp(s: &SMatrix, eps: f32, types: Option<&[bool]>) -> Result<Vec<Block>, TwtError> {
     if !eps.is_finite() || eps < 0.0 {
         return Err(TwtError::InvalidEps(eps));
     }
@@ -82,6 +118,14 @@ pub fn minmax_partition(s: &SMatrix, eps: f32) -> Result<Vec<Block>, TwtError> {
         return Ok(Vec::new());
     }
     let worst = worst_table(s);
+    // The per-scan feasibility guard: a type-constrained scan stops at the
+    // first mismatched layer (monotone — see minmax_partition_typed).
+    let type_ok = |i: usize, j: usize| -> bool {
+        match types {
+            None => true,
+            Some(t) => t[i] == t[j],
+        }
+    };
 
     const INF: usize = usize::MAX;
     // Pass 1 — count[j]: minimum blocks covering [0, j).
@@ -90,7 +134,7 @@ pub fn minmax_partition(s: &SMatrix, eps: f32) -> Result<Vec<Block>, TwtError> {
         let mut i = j + 1;
         while i > 0 {
             i -= 1;
-            if worst[i * n + j] > eps {
+            if !type_ok(i, j) || worst[i * n + j] > eps {
                 break; // feasibility is monotone in i — everything further left is worse
             }
             let prev = if i == 0 { 0 } else { count[i - 1] };
@@ -112,7 +156,7 @@ pub fn minmax_partition(s: &SMatrix, eps: f32) -> Result<Vec<Block>, TwtError> {
         let mut i = j + 1;
         while i > 0 {
             i -= 1;
-            if worst[i * n + j] > eps {
+            if !type_ok(i, j) || worst[i * n + j] > eps {
                 break;
             }
             let prev_count = if i == 0 { 0 } else { count[i - 1] };
@@ -142,7 +186,7 @@ pub fn minmax_partition(s: &SMatrix, eps: f32) -> Result<Vec<Block>, TwtError> {
         let mut chosen = 0usize;
         while i > 0 {
             i -= 1;
-            if worst[i * n + j] > eps {
+            if !type_ok(i, j) || worst[i * n + j] > eps {
                 break;
             }
             let prev_count = if i == 0 { 0 } else { count[i - 1] };
@@ -211,6 +255,55 @@ pub fn brute_force_optimal(s: &SMatrix, eps: f32) -> (usize, f32) {
                 for q in (p + 1)..b.end {
                     let v = s.get(q, p);
                     if v > eps {
+                        feasible = false;
+                        break 'blk;
+                    }
+                    if v > worst {
+                        worst = v;
+                    }
+                }
+            }
+        }
+        if !feasible {
+            continue;
+        }
+        let cand = (blocks.len(), worst);
+        let better = match best {
+            None => true,
+            Some((bc, bw)) => bc > cand.0 || (bc == cand.0 && bw > cand.1),
+        };
+        if better {
+            best = Some(cand);
+        }
+    }
+    best.expect("eps >= 0: singleton partition always feasible")
+}
+
+/// The typed twin of [`brute_force_optimal`] — the G1 comparator for
+/// [`minmax_partition_typed`]. Same enumeration, feasibility adds the
+/// same-type requirement per block.
+pub fn brute_force_optimal_typed(s: &SMatrix, eps: f32, types: &[bool]) -> (usize, f32) {
+    let n = s.n();
+    assert!(n <= 14, "brute force is 2^(n-1) — gate instrument only");
+    assert_eq!(types.len(), n, "one flag per layer");
+    let mut best: Option<(usize, f32)> = None;
+    for mask in 0u32..(1u32 << (n - 1)) {
+        let mut blocks: Vec<Block> = Vec::with_capacity(n);
+        let mut start = 0usize;
+        for c in 0..(n - 1) {
+            if mask & (1 << c) != 0 {
+                blocks.push(Block { start, end: c + 1 });
+                start = c + 1;
+            }
+        }
+        blocks.push(Block { start, end: n });
+        let mut feasible = true;
+        let mut worst = 0.0f32;
+        'blk: for b in &blocks {
+            for p in b.start..b.end {
+                for q in (p + 1)..b.end {
+                    let v = s.get(q, p);
+                    if v > eps || types[p] != types[q] {
                         feasible = false;
                         break 'blk;
                     }
@@ -428,6 +521,119 @@ mod tests {
             minmax_partition(&s, f32::NAN),
             Err(TwtError::InvalidEps(_))
         ));
+    }
+
+    #[test]
+    fn typed_partition_matches_typed_brute_force_and_enforces_types() {
+        // Alternating types + identical layer clones across types: the
+        // unconstrained DP merges everything, the typed DP may not —
+        // exact agreement with the typed brute force is the assertion.
+        let mut st: u64 = 0x0B0B_5EED_1D1E_CAFEu64;
+        let mut draw = move || {
+            st = st
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407);
+            (st >> 11) as f32 / (1u64 << 53) as f32
+        };
+        for n in [2usize, 5, 8, 11] {
+            let s = s_of(n, |i, j| if i == j { 0.0 } else { draw() * 1.5 });
+            let types: Vec<bool> = (0..n).map(|i| i % 3 != 0).collect();
+            for eps in [0.05f32, 0.3, 0.7, 1.2] {
+                let p = minmax_partition_typed(&s, eps, &types).unwrap();
+                let got = (p.len(), partition_worst(&s, &p));
+                let want = brute_force_optimal_typed(&s, eps, &types);
+                assert_eq!(got, want, "typed n={n} eps={eps}");
+                for b in &p {
+                    for x in b.start..b.end {
+                        assert_eq!(
+                            types[x], types[b.start],
+                            "mixed-type block n={n} eps={eps}"
+                        );
+                        for y in (x + 1)..b.end {
+                            assert!(s.get(y, x) <= eps);
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn typed_partition_grows_no_fewer_blocks_than_unconstrained() {
+        // The type constraint only REMOVES feasible partitions, so m is
+        // pointwise ≥ the unconstrained m at every ε.
+        let mut st: u64 = 0x1234_ABCD_5678_EF90u64;
+        let mut draw = move || {
+            st = st
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407);
+            (st >> 11) as f32 / (1u64 << 53) as f32
+        };
+        let n = 12usize;
+        let s = s_of(n, |i, j| if i == j { 0.0 } else { draw() });
+        let types: Vec<bool> = (0..n).map(|i| i % 4 != 3).collect();
+        for eps in PRE_REGISTERED_EPS_GRID {
+            let un = minmax_partition(&s, eps).unwrap().len();
+            let ty = minmax_partition_typed(&s, eps, &types).unwrap().len();
+            assert!(ty >= un, "typed m {ty} < unconstrained {un} at eps={eps}");
+        }
+    }
+
+    #[test]
+    fn typed_partition_m_monotone_non_increasing_in_eps() {
+        let mut st: u64 = 0xFEED_FACE_DADA_5501u64;
+        let mut draw = move || {
+            st = st
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407);
+            (st >> 11) as f32 / (1u64 << 53) as f32
+        };
+        let n = 12usize;
+        let s = s_of(n, |i, j| if i == j { 0.0 } else { draw() });
+        let types: Vec<bool> = (0..n).map(|i| i % 4 != 3).collect();
+        let mut prev = usize::MAX;
+        for eps in PRE_REGISTERED_EPS_GRID {
+            let m = minmax_partition_typed(&s, eps, &types).unwrap().len();
+            assert!(m <= prev, "typed m grew at eps={eps}");
+            prev = m;
+        }
+    }
+
+    #[test]
+    fn typed_partition_refuses_length_mismatch() {
+        let s = s_of(3, |_, _| 0.5);
+        assert!(minmax_partition_typed(&s, 0.5, &[true, false]).is_err());
+    }
+
+    #[test]
+    fn typed_partition_bonsai_rhythm_structure() {
+        // The qwen35 interval-4 rhythm (3 DeltaNet runs + 1 attention) at
+        // generous ε: the typed DP cannot cross types, so every attention
+        // layer is its own singleton block — m = 16 singletons + merged
+        // GDN triples, strictly less than L.
+        let n = 16usize;
+        let types: Vec<bool> = (0..n).map(|i| (i + 1) % 4 != 0).collect();
+        let s = s_of(n, |i, j| {
+            if i == j {
+                0.0
+            } else if types[i] && types[j] {
+                0.01 // identical GDN clones
+            } else {
+                0.01 // distances don't matter across the constraint
+            }
+        });
+        let p = minmax_partition_typed(&s, 0.1, &types).unwrap();
+        for b in &p {
+            for x in b.start..b.end {
+                assert_eq!(types[x], types[b.start]);
+            }
+        }
+        let attn_singletons = p
+            .iter()
+            .filter(|b| !types[b.start] && b.len() == 1)
+            .count();
+        assert_eq!(attn_singletons, 4, "every attention layer a singleton");
+        assert!(p.len() < n, "merges happened: m {} < {n}", p.len());
     }
 
     #[test]

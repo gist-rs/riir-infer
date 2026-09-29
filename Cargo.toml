@@ -485,6 +485,22 @@ name = "twt_collapse_emit"
 path = "examples/twt_collapse_emit.rs"
 required-features = ["twt_collapse"]
 
+# Issue 022 T5.0 ⚠-finding follow-up — re-derive the kill-rule verdict from
+# the artifact's own stored S under the current rule (T5.5's citation gate).
+[[example]]
+name = "twt_kill_rederive"
+path = "examples/twt_kill_rederive.rs"
+required-features = ["twt_collapse"]
+
+# Issue 022 Phase 5 — the Bonsai GDN apply-path audition: typed-partition
+# blocks, parent boundary-h capture, per-block candidate pool (members +
+# arm-B sign vote + arm-C mean/rdsc) through the forward's own layer body,
+# bit-exact preflight parity, selection table for the merged emit.
+[[example]]
+name = "twt_bonsai_audition"
+path = "examples/twt_bonsai_audition.rs"
+required-features = ["twt_bonsai", "twt_collapse"]
+
 [dev-dependencies]
 # The laya encoder lane — the capture driver's checkpoint source (CPU
 # backend; the capture hook rides the same-named `twt_profile` feature).

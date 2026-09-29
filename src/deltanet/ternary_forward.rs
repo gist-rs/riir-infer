@@ -574,17 +574,143 @@ pub fn forward_qwen_deltanet_ternary_with_capture<'a>(
     )
 }
 
-/// Forward pass with optional GPU matvec hook (Issue 599).
+/// The full per-layer body — norm → attention/DeltaNet → MLP, both
+/// residual adds — mutating `x[..n]` in place (the caller's slice must be
+/// at least `config.n_embd` long; only the first `n` values are read and
+/// written).
 ///
-/// This is the real implementation — all other variants delegate here.
-/// When `hook` is `Some`, ternary projections dispatch to the GPU
-/// (`GemvTernaryCubeCL`) instead of CPU SIMD. Everything else (`DeltaNet`
-/// recurrence, attention scoring, `RMSNorm`, `SwiGLU`, `RoPE`) stays on CPU.
-///
-/// When `hook` is `None`, this is bit-identical to the CPU-only path.
-/// G1 tolerance: GPU floating-point reduction order differs from CPU SIMD
-/// (~1e-5 relative), which is acceptable for inference (greedy decode / argmax)
-/// but NOT for bit-exact regression tests.
+/// Public so the TWT audition's candidate apply path runs the same code
+/// (Issue 022 T3.1: a forward-body drift indicts the instrument, not the
+/// checkpoint; here the parity is structural, not mirrored). The main
+/// loop calls this once per layer; the audition calls it once per
+/// candidate layer.
+#[allow(clippy::too_many_arguments)]
+pub fn qwen_deltanet_ternary_layer_body(
+    x: &mut [f32],
+    layer_weights: &DeltaNetTernaryLayerWeights,
+    is_linear: bool,
+    gdn_state: &mut [f32],
+    gdn_conv: &mut [f32],
+    kv_cache: &mut crate::transformer::KVCache,
+    pos: usize,
+    config: &Config,
+    scratch: &mut HybridForwardScratch,
+    rope_freq: &crate::rope::RopeFreqTable,
+    rotation: Option<&TernaryRotationConfig>,
+    hook: Option<&dyn TernaryMatvecHook>,
+    input_proj_hook: Option<&dyn TernaryInputProjHook>,
+    ffn_hook: Option<&dyn TernaryFfnHook>,
+) {
+    let n = config.n_embd;
+    let x = &mut x[..n];
+
+    // a. Save residual. MUST NOT be `attention.q_buf` — the attention layer
+    //    overwrites it with the Q projection (Issue 594).
+    scratch.residual[..n].copy_from_slice(&x[..n]);
+
+    // b. Pre-attention/input RMSNorm (dense field)
+    rmsnorm_with_gamma_eps(&mut x[..n], &layer_weights.input_norm, config.rms_norm_eps);
+
+    // c. Layer-specific forward (ternary projections)
+    if is_linear {
+        forward_deltanet_layer_ternary(
+            &mut x[..n],
+            layer_weights,
+            gdn_state,
+            gdn_conv,
+            config,
+            &mut scratch.deltanet,
+            hook,
+            input_proj_hook,
+            rotation,
+            &mut scratch.rotation_buf,
+        );
+    } else {
+        forward_attention_layer_ternary(
+            &mut x[..n],
+            layer_weights,
+            kv_cache,
+            pos,
+            config,
+            rope_freq,
+            &mut scratch.attention,
+            hook,
+            rotation,
+            &mut scratch.rotation_buf,
+        );
+    }
+
+    // d. Residual add
+    for (xi, r) in x[..n].iter_mut().zip(&scratch.residual[..n]) {
+        *xi += *r;
+    }
+
+    // e. Save residual for MLP
+    scratch.residual[..n].copy_from_slice(&x[..n]);
+
+    // f. Pre-MLP RMSNorm (dense field)
+    rmsnorm_with_gamma_eps(
+        &mut x[..n],
+        &layer_weights.post_attn_norm,
+        config.rms_norm_eps,
+    );
+
+    // g-i. SwiGLU MLP (ternary projections) + residual add.
+    //
+    // Issue 601: when ffn_hook is present, the 3 matvecs + SwiGLU are fused
+    // into a single GPU command buffer (2.574× faster than CPU parallel).
+    // out aliases x (the residual was saved in step e).
+    //
+    // Issue 980: gate/up/down are all folded — the hook path cannot apply
+    // the rotation, so it is bypassed on a rotated model (same posture as
+    // the DeltaNet input-proj hook).
+    if let Some(fh) = ffn_hook
+        && rotation.is_none()
+    {
+        // Copy x to scratch.hidden_copy (the GPU dispatch uploads from the
+        // input slice before writing the output, but Rust's borrow checker
+        // can't prove non-aliasing of &x and &mut x).
+        scratch.hidden_copy[..n].copy_from_slice(&x[..n]);
+        fh.ffn(
+            &layer_weights.gate_proj,
+            &layer_weights.up_proj,
+            &layer_weights.down_proj,
+            &scratch.hidden_copy[..n],
+            &mut x[..n],
+        );
+    } else {
+        // g. SwiGLU MLP (ternary projections)
+        //
+        // Issue 980: gate + up share the normed input — rotate ONCE into
+        // the rotation scratch (fork memoization), then both matmuls read
+        // it.
+        let x_ffn: &[f32] = if let Some(rot) = rotation {
+            let signs = rot.signs_for_width(n);
+            scratch.rotation_buf[..n].copy_from_slice(&x[..n]);
+            rotate_forward_inplace(&mut scratch.rotation_buf[..n], signs, rot.block_size);
+            &scratch.rotation_buf[..n]
+        } else {
+            &x[..n]
+        };
+        bitlinear(&mut scratch.gate, &layer_weights.gate_proj, x_ffn, hook);
+        bitlinear(&mut scratch.up, &layer_weights.up_proj, x_ffn, hook);
+        swiglu(&mut scratch.hidden, &scratch.gate, &scratch.up);
+
+        // h. Down projection (ternary) — folded: rotate `hidden` in place
+        // (it is consumed only here; the output is primal).
+        if let Some(rot) = rotation {
+            let signs = rot.signs_for_width(config.mlp_hidden);
+            rotate_forward_inplace(&mut scratch.hidden, signs, rot.block_size);
+        }
+        bitlinear(&mut x[..n], &layer_weights.down_proj, &scratch.hidden, hook);
+    }
+
+    // i. Residual add
+    for (xi, r) in x.iter_mut().zip(&scratch.residual[..n]) {
+        *xi += *r;
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 pub fn forward_qwen_deltanet_ternary_with_hook<'a>(
     x: &'a mut [f32],
@@ -630,115 +756,32 @@ pub fn forward_qwen_deltanet_ternary_with_hook<'a>(
     for (layer_idx, layer_weights) in weights.layers.iter().enumerate() {
         let is_linear = weights.layer_types[layer_idx] == DeltaNetLayerType::DeltaNet;
 
-        // a. Save residual. MUST NOT be `attention.q_buf` — the attention layer
-        //    overwrites it with the Q projection (Issue 594).
-        scratch.residual[..n].copy_from_slice(&x[..n]);
-
-        // b. Pre-attention/input RMSNorm (dense field)
-        rmsnorm_with_gamma_eps(&mut x[..n], &layer_weights.input_norm, config.rms_norm_eps);
-
-        // c. Layer-specific forward (ternary projections)
-        if is_linear {
-            forward_deltanet_layer_ternary(
-                &mut x[..n],
-                layer_weights,
-                &mut cache.deltanet_state.recurrent_states[layer_idx],
-                &mut cache.deltanet_state.conv_states[layer_idx],
-                config,
-                &mut scratch.deltanet,
-                hook,
-                if rotation.is_some() {
-                    None
-                } else {
-                    input_proj_hook
-                },
-                rotation,
-                &mut scratch.rotation_buf,
-            );
-        } else {
-            forward_attention_layer_ternary(
-                &mut x[..n],
-                layer_weights,
-                &mut cache.kv_cache.layers[layer_idx],
-                pos,
-                config,
-                rope_freq,
-                &mut scratch.attention,
-                hook,
-                rotation,
-                &mut scratch.rotation_buf,
-            );
-        }
-
-        // d. Residual add
-        for (xi, r) in x[..n].iter_mut().zip(&scratch.residual[..n]) {
-            *xi += *r;
-        }
-
-        // e. Save residual for MLP
-        scratch.residual[..n].copy_from_slice(&x[..n]);
-
-        // f. Pre-MLP RMSNorm (dense field)
-        rmsnorm_with_gamma_eps(
-            &mut x[..n],
-            &layer_weights.post_attn_norm,
-            config.rms_norm_eps,
-        );
-
-        // g-i. SwiGLU MLP (ternary projections) + residual add.
-        //
-        // Issue 601: when ffn_hook is present, the 3 matvecs + SwiGLU are fused
-        // into a single GPU command buffer (2.574× faster than CPU parallel).
-        // out aliases x (the residual was saved in step e).
-        //
-        // Issue 980: gate/up/down are all folded — the hook path cannot apply
-        // the rotation, so it is bypassed on a rotated model (same posture as
-        // the DeltaNet input-proj hook).
-        if let Some(fh) = ffn_hook
-            && rotation.is_none()
-        {
-            // Copy x to scratch.hidden_copy (the GPU dispatch uploads from the
-            // input slice before writing the output, but Rust's borrow checker
-            // can't prove non-aliasing of &x and &mut x).
-            scratch.hidden_copy[..n].copy_from_slice(&x[..n]);
-            fh.ffn(
-                &layer_weights.gate_proj,
-                &layer_weights.up_proj,
-                &layer_weights.down_proj,
-                &scratch.hidden_copy[..n],
-                &mut x[..n],
-            );
-        } else {
-            // g. SwiGLU MLP (ternary projections)
-            //
-            // Issue 980: gate + up share the normed input — rotate ONCE into
-            // the rotation scratch (fork memoization), then both matmuls read
-            // it.
-            let x_ffn: &[f32] = if let Some(rot) = rotation {
-                let signs = rot.signs_for_width(n);
-                scratch.rotation_buf[..n].copy_from_slice(&x[..n]);
-                rotate_forward_inplace(&mut scratch.rotation_buf[..n], signs, rot.block_size);
-                &scratch.rotation_buf[..n]
+        // The full per-layer body (norm → attention/DeltaNet → MLP, both
+        // residual adds) lives in [`qwen_deltanet_ternary_layer_body`] —
+        // extracted verbatim so the TWT audition's apply path
+        // (`examples/twt_bonsai_audition`) executes the SAME code the
+        // forward does; a forward-body drift indicts the audition, not the
+        // checkpoint (the Issue 022 T3.1 parity law, structural now).
+        qwen_deltanet_ternary_layer_body(
+            x,
+            layer_weights,
+            is_linear,
+            &mut cache.deltanet_state.recurrent_states[layer_idx],
+            &mut cache.deltanet_state.conv_states[layer_idx],
+            &mut cache.kv_cache.layers[layer_idx],
+            pos,
+            config,
+            scratch,
+            rope_freq,
+            rotation,
+            hook,
+            if rotation.is_some() {
+                None
             } else {
-                &x[..n]
-            };
-            bitlinear(&mut scratch.gate, &layer_weights.gate_proj, x_ffn, hook);
-            bitlinear(&mut scratch.up, &layer_weights.up_proj, x_ffn, hook);
-            swiglu(&mut scratch.hidden, &scratch.gate, &scratch.up);
-
-            // h. Down projection (ternary) — folded: rotate `hidden` in place
-            // (it is consumed only here; the output is primal).
-            if let Some(rot) = rotation {
-                let signs = rot.signs_for_width(config.mlp_hidden);
-                rotate_forward_inplace(&mut scratch.hidden, signs, rot.block_size);
-            }
-            bitlinear(&mut x[..n], &layer_weights.down_proj, &scratch.hidden, hook);
-        }
-
-        // i. Residual add
-        for (xi, r) in x[..n].iter_mut().zip(&scratch.residual[..n]) {
-            *xi += *r;
-        }
+                input_proj_hook
+            },
+            ffn_hook,
+        );
 
         // Diagnostic tap: snapshot the post-layer residual (matches the fork's
         // `l_out` capture tap). Only copies when a capture buffer was supplied.
