@@ -4123,6 +4123,17 @@ impl TernaryDeltanetGpuForward {
             // once here — both layer types read `rot_scratch`.
             if self.rot_tables.is_some() && decode_stage_on(0) {
                 self.stage_rotated_norm_x();
+                // Plan 614 site 1 (decode): fake-quant the ROTATED staging copy
+                // in place before the folded projections consume it (the
+                // primal norm_x — the a/b escape set's input — stays clean).
+                #[cfg(feature = "dq_phase_bench")]
+                crate::dq_fakequant_cubecl::launch_decode_pass::<ActiveRuntime>(
+                    &self.client,
+                    self.rot_scratch.clone(),
+                    n,
+                    1,
+                    crate::dq_fakequant::current_grid(),
+                );
             }
 
             if is_deltanet {
@@ -4163,6 +4174,16 @@ impl TernaryDeltanetGpuForward {
                 // after the post-attn norm; the previous staging is stale).
                 if self.rot_tables.is_some() {
                     self.stage_rotated_norm_x();
+                    // Plan 614 site 2 (decode): fake-quant the fresh ROTATED
+                    // staging before the gate|up GEMV.
+                    #[cfg(feature = "dq_phase_bench")]
+                    crate::dq_fakequant_cubecl::launch_decode_pass::<ActiveRuntime>(
+                        &self.client,
+                        self.rot_scratch.clone(),
+                        n,
+                        1,
+                        crate::dq_fakequant::current_grid(),
+                    );
                 }
             }
 
@@ -4211,6 +4232,17 @@ impl TernaryDeltanetGpuForward {
                         );
                     }
                 }
+                // Plan 614 site 3 (decode): fake-quant ffn_hidden AFTER the
+                // in-place fold rotation, before the down GEMV (rotated basis
+                // — the down proj's actual input).
+                #[cfg(feature = "dq_phase_bench")]
+                crate::dq_fakequant_cubecl::launch_decode_pass::<ActiveRuntime>(
+                    &self.client,
+                    self.ffn_hidden.clone(),
+                    mlp,
+                    1,
+                    crate::dq_fakequant::current_grid(),
+                );
                 // FFN down-projection.
                 //
                 // Issue 616: when `ternary_gemv_residual` is enabled, the down-projection
@@ -4773,6 +4805,17 @@ impl TernaryDeltanetGpuForward {
                 );
             }
         }
+        // Plan 614 site 5 (decode): fake-quant recurrent_out AFTER the fold
+        // rotation (rotated basis — the folded out_proj's actual input),
+        // before the out-projection GEMV.
+        #[cfg(feature = "dq_phase_bench")]
+        crate::dq_fakequant_cubecl::launch_decode_pass::<ActiveRuntime>(
+            &self.client,
+            self.recurrent_out.clone(),
+            n_v_heads * head_dim,
+            1,
+            crate::dq_fakequant::current_grid(),
+        );
         unsafe {
             GemvTernaryCubeCL::launch::<ActiveRuntime>(
                 &self.client,
@@ -5062,6 +5105,17 @@ impl TernaryDeltanetGpuForward {
                     );
                 }
             }
+            // Plan 614 site 4 (decode): fake-quant attn_out AFTER the in-place
+            // fold rotation (rotated basis — the folded wo's actual input),
+            // before the output-projection GEMV.
+            #[cfg(feature = "dq_phase_bench")]
+            crate::dq_fakequant_cubecl::launch_decode_pass::<ActiveRuntime>(
+                &self.client,
+                self.attn_out.clone(),
+                q_dim,
+                1,
+                crate::dq_fakequant::current_grid(),
+            );
             let wo = layer_w
                 .attn_wo
                 .as_ref()

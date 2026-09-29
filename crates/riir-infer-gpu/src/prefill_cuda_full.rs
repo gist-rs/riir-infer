@@ -2803,6 +2803,21 @@ fn whole_prefill_inner(
                          down_c: &WCache|
          -> Result<(), String> {
             rms(x, &lw3.post_attn_norm, normx, p, n)?;
+            // Plan 614 site 2 (prefill): fake-quant normx in place before the
+            // gate/up GEMM's rotate+q8 quantize consumes it (the FFN-input
+            // norm — same buffer class as the layer-input site; quantized
+            // BEFORE any consumer, so both the fused and unfused routes see
+            // the damaged f32 activations).
+            #[cfg(feature = "dq_phase_bench")]
+            unsafe {
+                stack.ffn.launch_dq_fakequant(
+                    stream,
+                    normx,
+                    n,
+                    p,
+                    crate::dq_fakequant::current_grid(),
+                )?;
+            };
             // Issue 980 T4-ALT site (f) / C0.5 — on a folded model the
             // FFN is a folded consumer at BOTH ends: gate/up consume
             // the ROTATED q8 quantize of normx (fused, one pass) and
@@ -2837,6 +2852,18 @@ fn whole_prefill_inner(
                         rot0.block_size,
                     )
                     .map_err(|e| e.to_string())?;
+            }
+            // Plan 614 site 3 (prefill): fake-quant hid_b AFTER the in-place
+            // fold rotation, before the down GEMM's quantize (rotated basis).
+            #[cfg(feature = "dq_phase_bench")]
+            unsafe {
+                stack.ffn.launch_dq_fakequant(
+                    stream,
+                    hid_b,
+                    mlp,
+                    p,
+                    crate::dq_fakequant::current_grid(),
+                )?;
             }
             gemm(down_c, hid_b, ffnout_b, n, mlp)?;
             unsafe {
@@ -2876,11 +2903,45 @@ fn whole_prefill_inner(
                 if let (Some(rot0), (Some(da), Some(db))) =
                     (&rotation, (lw3.dense_a.as_ref(), lw3.dense_b.as_ref()))
                 {
-                    gemm_rot(&qkv_c, normx, qkv_b, qkv_dim, n)?;
-                    gemm_pre_rot(&z_c, normx, z_b, v_dim, n)?;
-                    rot0.kernels
-                        .gemm_dense_ab_batched(stream, normx, da, db, a_b, b_b, p, n_v, n)
-                        .map_err(|e| e.to_string())?;
+                    // Plan 614 site 1 (prefill, GDN layers): the escape-set a/b
+                    // GEMMs run FIRST on the PRIMAL (clean) normx, then the
+                    // fake-quant damages normx in place, then the folded qkv/z
+                    // consume the damaged activations (the D2 escape-set law —
+                    // a/b never sees quantized activations, matching the
+                    // decode lane's primal/rotated split). Value-neutral
+                    // reorder of independent GEMMs on disjoint outputs; the
+                    // feature-off arm keeps the original issue order exactly.
+                    #[cfg(feature = "dq_phase_bench")]
+                    if crate::dq_fakequant::prefill_armed() {
+                        rot0.kernels
+                            .gemm_dense_ab_batched(stream, normx, da, db, a_b, b_b, p, n_v, n)
+                            .map_err(|e| e.to_string())?;
+                        unsafe {
+                            stack.ffn.launch_dq_fakequant(
+                                stream,
+                                normx,
+                                n,
+                                p,
+                                crate::dq_fakequant::current_grid(),
+                            )?;
+                        }
+                        gemm_rot(&qkv_c, normx, qkv_b, qkv_dim, n)?;
+                        gemm_pre_rot(&z_c, normx, z_b, v_dim, n)?;
+                    } else {
+                        gemm_rot(&qkv_c, normx, qkv_b, qkv_dim, n)?;
+                        gemm_pre_rot(&z_c, normx, z_b, v_dim, n)?;
+                        rot0.kernels
+                            .gemm_dense_ab_batched(stream, normx, da, db, a_b, b_b, p, n_v, n)
+                            .map_err(|e| e.to_string())?;
+                    }
+                    #[cfg(not(feature = "dq_phase_bench"))]
+                    {
+                        gemm_rot(&qkv_c, normx, qkv_b, qkv_dim, n)?;
+                        gemm_pre_rot(&z_c, normx, z_b, v_dim, n)?;
+                        rot0.kernels
+                            .gemm_dense_ab_batched(stream, normx, da, db, a_b, b_b, p, n_v, n)
+                            .map_err(|e| e.to_string())?;
+                    }
                 } else {
                     let a_c = mma_mirror(client, stream, &lw.in_proj_a).ok_or("a mirror")?;
                     let b_c = mma_mirror(client, stream, &lw.in_proj_b).ok_or("b mirror")?;
@@ -3040,6 +3101,21 @@ fn whole_prefill_inner(
                 // (grouped files; the unfused C0 chain is the kill-switch
                 // fallback), or just the fused rotate+quantize when
                 // ungrouped. rec_b stays PRIMAL either way.
+                //
+                // Plan 614 site 5 (prefill): fake-quant rec_b in place BEFORE
+                // the fused permute+rotate+quantize / rotate+quantize chain —
+                // the damage lands on the out_proj's actual (rotated) input
+                // basis, mirroring the decode site 5.
+                #[cfg(feature = "dq_phase_bench")]
+                unsafe {
+                    stack.ffn.launch_dq_fakequant(
+                        stream,
+                        rec_b,
+                        v_dim,
+                        p,
+                        crate::dq_fakequant::current_grid(),
+                    )?;
+                }
                 let out_c = mma_mirror(client, stream, &lw.out_proj).ok_or("out mirror")?;
                 if let Some(rot0) = &rotation {
                     if rot0.gdn_v_grouped {
@@ -3101,6 +3177,20 @@ fn whole_prefill_inner(
             } else {
                 // Attention block.
                 rms(x, &lw3.input_norm, normx, p, n)?;
+                // Plan 614 site 1 (prefill, attention layers): fake-quant
+                // normx in place before wq/wkv's rotate+q8 quantize consumes
+                // it (no escape-set GEMMs in attention layers — direct
+                // in-place quantize is the whole site).
+                #[cfg(feature = "dq_phase_bench")]
+                unsafe {
+                    stack.ffn.launch_dq_fakequant(
+                        stream,
+                        normx,
+                        n,
+                        p,
+                        crate::dq_fakequant::current_grid(),
+                    )?;
+                }
                 let wq = lw.attn_wq.as_ref().ok_or("attn_wq")?;
                 let wkv = lw.attn_wkv.as_ref().ok_or("attn_wkv")?;
                 let wo = lw.attn_wo.as_ref().ok_or("attn_wo")?;
@@ -3474,6 +3564,20 @@ fn whole_prefill_inner(
                 // the fused rotate+quantize consumes the gated attention
                 // output (width qa) directly — no standalone rotation pass.
                 // The residual add stays primal.
+                //
+                // Plan 614 site 4 (prefill): fake-quant attn_out_b in place
+                // before wo's rotate+q8 quantize (the o_in site; rotated
+                // basis via the fused rotation, mirroring decode site 4).
+                #[cfg(feature = "dq_phase_bench")]
+                unsafe {
+                    stack.ffn.launch_dq_fakequant(
+                        stream,
+                        attn_out_b,
+                        qa,
+                        p,
+                        crate::dq_fakequant::current_grid(),
+                    )?;
+                }
                 if rotation.is_some() {
                     gemm_rot(&wo_c, attn_out_b, aproj_b, n, qa)?;
                 } else {

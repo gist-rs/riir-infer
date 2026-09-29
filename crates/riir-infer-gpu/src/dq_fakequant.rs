@@ -364,6 +364,10 @@ pub fn fq_reset_counters() {
 }
 
 #[inline]
+#[cfg_attr(
+    all(target_os = "macos", feature = "dq_phase_bench"),
+    allow(dead_code, reason = "the prefill lane is CUDA-only (not-macos) — the caller exists on the 4090")
+)]
 pub(crate) fn note_prefill_launch() {
     FQ_PREFILL_LAUNCHES.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
 }
