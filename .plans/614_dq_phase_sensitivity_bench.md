@@ -1,10 +1,16 @@
 # Plan 614 — the DQ phase-sensitivity bench (Issue 026 T1–T5): the 2×2 activation-quant phase matrix on the league artifact
 
-**Status:** OPEN — T0 CLOSED (round 3 **AGREE**, session c65b0114; rounds 1+2
-REVISE incorporated). The pre-registration freeze commit landed (`d3300f2`).
-T1+T2 DONE (both lanes' kernels + injections; G-i3 green on Metal + CUDA;
-the D1 fallback lane is operative — no non-int8 prefill exists). T3 (the
-runner) is the remaining build; then T5 (the 4090 run) + T6 (close-out).
+**Status:** OPEN — T0 CLOSED (round-3 AGREE, session c65b0114; freeze `d3300f2`).
+T1+T2+T3 DONE: both lanes' kernels + injections (G-i3 green on Metal M3 +
+CUDA 4090, 5/5), the runner release-green on the 4090 (build kicked off in
+`E:/git/dq614-wt`, logs at `F:/wt/dq614-build.*.log`). REMAINS: T5 — the
+4090 RUN (`RIIR_PREFILL_CUDA_GRAPHS=0 BONSAI_GGUF=E:/git/riir-train/data/
+Ternary-Bonsai-2-27B-PQ2_0.gguf cargo run --release -p riir-infer-gpu
+--no-default-features --features dq_phase_bench,ternary_gemv_cuda_raw,
+ternary_gemm_batched --bin dq_phase_matrix`, GPU-exclusive, detached+logged;
+first `DQ_LANE_CHECK_ONLY=1`, then the full matrix) + T6 close-out. The
+worktree `E:/git/dq614-wt` is a shallow clone at origin/develop — refresh it
+before the run, delete after T6.
 
 Master: `.research/004_DQ_Disaggregated_Quantization.md` (arXiv:2609.26333 §2.2) · Issue `.issues/026_phase_sensitivity_quant_bench.md`. The issue's own gate: "Runs AFTER the 2×2 matrix definition review" — T0 below IS that review.
 
@@ -272,11 +278,19 @@ paired lane (the 4090's `F:/models/qwen38-27b-dbirks-Q4_K_M.gguf` via
       every cell + the dec_a8 control cell). The lane-acceptance predicate
       (top-1 agreement ≥ 0.80 vs shipping + base-acc window) still runs
       first, per D1.
-- [ ] T3 — runner bin `dq_phase_matrix` (feature-gated): corpus generators +
-      BLAKE3 freeze, 4-cell × 2-grid (+dec_a8 control) driver, greedy generation
-      + parsing + scoring, paired bootstrap CIs, R tables, admissibility/
-      saturation classification, per-phase counter assertions, G-i1/G-i2/G-i4,
-      GPU-exclusivity probe, JSON+MD out.
+- [x] T3 — runner bin `dq_phase_matrix`: DONE (release-green on the 4090).
+      Deterministic corpora (arith-CoT 48 with the 4-shot completion prefix +
+      exact-answer parse; NIAH 8-needle/one-queried over the built-in paragraph
+      bank — the pycap pattern, no data dependency), BLAKE3 freeze of corpus +
+      model before any cell, the LANE RECORD frozen (fallback lane), cells
+      base/pf_aq/dec_aq/both_aq + dec_a8 control, G-i1 (knob-off counters == 0
+      — the build-diff half is a recorded disclosure: a feature-gated bin
+      cannot exist feature-off), G-i2 (exact per-phase counts from actual
+      lengths + the positive-control FNV + refusal on mismatch), G-i4 (base
+      twice byte-stable), paired bootstrap CIs, admissibility/saturation/
+      HIT-REVERSED-NULL classification, MD report. Graphs env is CHECKED
+      (refuses without RIIR_PREFILL_CUDA_GRAPHS=0) not set in-process
+      (OnceLock read order).
 - [-] T4 — local verification: M3 half DONE (compile + clippy + lib tests +
       CubeCL G-i3 green); 4090 half DONE (full-feature build green + G-i3 5/5
       incl. the CUDA-lane arm). REMAINS: 4090 clippy + the runner's compile
