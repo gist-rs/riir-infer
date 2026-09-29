@@ -162,3 +162,81 @@ fn cubecl_fakequant_ragged_tail_multi_row() {
         check(grid, &got, &expected);
     }
 }
+
+// ─── The CUDA-lane arm (the cudarc prefill kernels; 4090-only) ──────────────
+
+/// G-i3's second arm: the nvrtc-compiled DqFqKernels must equal the SAME host
+/// reference bit-exactly. This exercises the nvrtc compile of DQ_FQ_CUDA_SRC
+/// plus all three kernels on real buffers (the prefill shapes: [p × n]).
+#[cfg(all(
+    feature = "dq_phase_bench",
+    feature = "ternary_gemv_cuda_raw",
+    not(target_os = "macos")
+))]
+#[test]
+fn cuda_fakequant_matches_host_reference() {
+    use cudarc::driver::safe::CudaContext;
+    use riir_infer_gpu::cudarc_kernels::DqFqKernels;
+
+    let ctx = match CudaContext::new(0) {
+        Ok(c) => std::sync::Arc::new(c),
+        Err(e) => {
+            eprintln!("SKIP: no CUDA device ({e})");
+            return;
+        }
+    };
+    let stream = match ctx.new_stream() {
+        Ok(s) => std::sync::Arc::new(s),
+        Err(e) => {
+            eprintln!("SKIP: stream alloc failed ({e})");
+            return;
+        }
+    };
+    let kernels = match DqFqKernels::new(ctx) {
+        Ok(k) => k,
+        Err(e) => panic!("nvrtc compile of DQ_FQ_CUDA_SRC failed: {e}"),
+    };
+
+    // Force the armed state (the launcher no-ops otherwise — the knob gate is
+    // part of the contract under test).
+    riir_infer_gpu::dq_fakequant::set_arm(riir_infer_gpu::dq_fakequant::DqPhaseArm::PrefillOnly);
+    riir_infer_gpu::dq_fakequant::fq_reset_counters();
+    let dim = 3584usize;
+    let p = 8usize; // prefill rows
+    let before = riir_infer_gpu::dq_fakequant::fq_prefill_launches();
+    for (grid, seed) in [
+        (DqGrid::A2, 0xC0DA1u64),
+        (DqGrid::A4, 0xC0DA2u64),
+        (DqGrid::A8, 0xC0DA3u64),
+    ] {
+        riir_infer_gpu::dq_fakequant::set_grid(grid);
+        let buf: Vec<f32> = lcg(seed).take(dim * p).collect();
+        let mut expected = vec![0f32; buf.len()];
+        host_quant_dequant(grid, &buf, &mut expected, dim);
+
+        let mut dev = stream.memcpy_htod(&buf).expect("htod");
+        kernels
+            .launch_dq_fakequant(&stream, &dev, dim, p, grid)
+            .expect("launch");
+        let got = stream.memcpy_dtoh(&dev).expect("dtoh");
+        let mut bad = 0usize;
+        let mut first: Option<(usize, f32, f32)> = None;
+        for (i, (&g, &e)) in got.iter().zip(expected.iter()).enumerate() {
+            if g.to_bits() != e.to_bits() {
+                bad += 1;
+                if first.is_none() {
+                    first = Some((i, g, e));
+                }
+            }
+        }
+        assert_eq!(
+            bad, 0,
+            "CUDA lane {grid:?}: {bad}/{} mismatched, first at {first:?}",
+            got.len()
+        );
+    }
+    let launches = riir_infer_gpu::dq_fakequant::fq_prefill_launches() - before;
+    assert_eq!(launches, 3, "the counter must count every fired pass");
+    // Restore the fail-closed default.
+    riir_infer_gpu::dq_fakequant::set_arm(riir_infer_gpu::dq_fakequant::DqPhaseArm::Off);
+}
