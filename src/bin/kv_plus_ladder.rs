@@ -60,7 +60,7 @@ use riir_infer_core::transformer::vk_harness::{
     argmax, build_niah_trial, dump_fitted_table, load_fitted_table, nll, rank, NiahTrial,
 };
 use riir_infer_core::transformer::{
-    forward_gemma2_f16, forward_gemma2_f16_hk, ForwardContext, NoVQuant, ValueStoreHook,
+    forward_gemma2_f16, forward_gemma2_f16_hk, ForwardContext, NoHook, NoVQuant, ValueStoreHook,
 };
 use riir_infer_core::types::{kv_dim, Config};
 
@@ -480,6 +480,7 @@ fn main() -> Result<()> {
                 for (pos, &token) in chunk.iter().enumerate() {
                     forward_gemma2_f16_tapped(
                         &mut ctx, &weights, &mut cache, &mut tables, token, pos, &config,
+                        &mut NoHook,
                     );
                 }
                 done += chunk.len();

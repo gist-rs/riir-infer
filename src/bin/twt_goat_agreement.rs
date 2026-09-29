@@ -11,12 +11,20 @@
 //! ≥ 0.9 — the parent trivially agrees with itself at 1.0, so the bar is
 //! absolute, never a ratio.
 //!
-//! Usage:
+//! Usage (qwen35 lane, T5.0):
 //!   cargo run --release --features twt_bonsai --bin twt_goat_agreement -- \
 //!     --parent ../riir-train/data/Ternary-Bonsai-2-27B-PQ2_0.gguf \
 //!     --collapsed /tmp/twt_collapse_pq2_e005.gguf \
 //!     --corpus .raw/twt/audition_calib.txt \
 //!     --seq-len 512 --max-tokens 4096
+//!
+//! Usage (gemma2 lane, T5.1 lane 1 — the family is read off the parent's
+//! `general.architecture`, the same dispatch applies to the collapsed files):
+//!   cargo run --release --features twt_bonsai --bin twt_goat_agreement -- \
+//!     --parent ../riir-train/data/gemma-2-2b-it-f16.gguf \
+//!     --collapsed /tmp/twt_collapse_gemma2_e005.gguf \
+//!     --corpus ../riir-train/data/chat_probe \
+//!     --seq-len 1024 --max-tokens 4096 --cache .raw/twt/gemma2_parent_cache.json
 //!
 //! Box state: run on AC power; quote the tok/s lines beside the verdict.
 
@@ -31,9 +39,13 @@ use riir_infer_core::deltanet::forward::{
     HybridCache, HybridForwardScratch, effective_rotary_dim,
 };
 use riir_infer_core::deltanet::ternary_forward::forward_qwen_deltanet_ternary_with_hook;
-use riir_infer_core::gguf_loader::{GgufFile, load_qwen_deltanet_ternary_weights_gguf};
+use riir_infer_core::gguf_loader::{
+    GgufFile, config_from_gguf_metadata, load_gemma2_f16_direct, load_qwen_deltanet_ternary_weights_gguf,
+};
 use riir_infer_core::rope::RopeFreqTable;
-use riir_infer_core::tokenizer::BpeTokenizer;
+use riir_infer_core::tokenizer::{BpeTokenizer, SentencePieceGgufTokenizer};
+use riir_infer_core::transformer::{ForwardContext, forward_gemma2_f16};
+use katgpt_transformer::MultiLayerKVCache;
 
 /// The pre-registered absolute agreement bar (T5.1 lane budget).
 const AGREEMENT_BAR: f64 = 0.9;
@@ -66,7 +78,41 @@ struct ArmOut {
     secs: f32,
 }
 
+/// The model family of an arm — read off the parent GGUF's
+/// `general.architecture` once, then every arm (the collapsed files
+/// inherit the parent's arch + metadata) dispatches the same way.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum Family {
+    /// qwen35 DeltaNet hybrid ternary (the T5.0 league lane).
+    Qwen35,
+    /// gemma-2 f16 dense (the T5.1 lane-1 control).
+    Gemma2,
+}
+
+fn family_of(gguf_path: &std::path::Path) -> anyhow::Result<Family> {
+    let gguf = GgufFile::open(gguf_path)
+        .with_context(|| format!("open {}", gguf_path.display()))?;
+    match gguf.architecture().unwrap_or("unknown") {
+        "qwen35" => Ok(Family::Qwen35),
+        "gemma2" => Ok(Family::Gemma2),
+        other => bail!("unsupported arm arch {other} (this bin: qwen35 | gemma2)"),
+    }
+}
+
 fn run_arm(
+    label: &str,
+    gguf_path: &std::path::Path,
+    chunks: &[Vec<usize>],
+    seq_len: usize,
+    family: Family,
+) -> Result<ArmOut> {
+    match family {
+        Family::Qwen35 => run_arm_qwen35(label, gguf_path, chunks, seq_len),
+        Family::Gemma2 => run_arm_gemma2(label, gguf_path, chunks, seq_len),
+    }
+}
+
+fn run_arm_qwen35(
     label: &str,
     gguf_path: &std::path::Path,
     chunks: &[Vec<usize>],
@@ -154,6 +200,79 @@ fn run_arm(
     Ok(ArmOut { argmax, truth, secs })
 }
 
+/// The gemma-2 f16 arm (T5.1 lane 1): the dense production forward over the
+/// SAME frozen chunks. Sequence semantics match the profile driver (≤ 4096
+/// per chunk — the in-repo stack is exact only below the sliding window).
+fn run_arm_gemma2(
+    label: &str,
+    gguf_path: &std::path::Path,
+    chunks: &[Vec<usize>],
+    seq_len: usize,
+) -> Result<ArmOut> {
+    let t0 = Instant::now();
+    let gguf = GgufFile::open(gguf_path).with_context(|| format!("open {}", gguf_path.display()))?;
+    let mut config = config_from_gguf_metadata(&gguf)
+        .with_context(|| format!("config {}", gguf_path.display()))?;
+    let weights = load_gemma2_f16_direct(&gguf, &config)
+        .with_context(|| format!("weights {}", gguf_path.display()))?;
+    drop(gguf);
+    let load_s = t0.elapsed().as_secs_f32();
+    eprintln!(
+        "[goat] {label}: gemma-2 f16, {} layers | load {load_s:.1}s",
+        config.n_layer,
+    );
+
+    // Cap the KV window at the chunk length (the row_logit_floor law).
+    config.block_size = seq_len;
+    let mut cache = MultiLayerKVCache::new(&config);
+    let mut ctx = ForwardContext::new(&config);
+
+    let mut argmax: Vec<u32> = Vec::new();
+    let mut truth: Vec<u32> = Vec::new();
+    let t1 = Instant::now();
+    for (ci, chunk) in chunks.iter().enumerate() {
+        cache.reset();
+        // Score positions 0..len-1 (the last position's prediction lands
+        // outside the chunk — dropped, same as the qwen35 arm).
+        for (p, &tok) in chunk.iter().enumerate().take(chunk.len() - 1) {
+            let logits = forward_gemma2_f16(&mut ctx, &weights, &mut cache, tok, p, &config);
+            let am = logits
+                .iter()
+                .enumerate()
+                .max_by(|a, b| a.1.partial_cmp(b.1).unwrap())
+                .map(|(i, _)| i)
+                .expect("non-empty logits");
+            argmax.push(am as u32);
+            truth.push(chunk[p + 1] as u32);
+        }
+        if (ci + 1) % 4 == 0 || ci + 1 == chunks.len() {
+            let el = t1.elapsed().as_secs_f32();
+            let done: usize = chunks[..=ci].iter().map(|c| c.len() - 1).sum();
+            eprintln!(
+                "[goat] {label}: chunk {}/{} | {} positions | {:.2} tok/s | eta {:.0} min",
+                ci + 1,
+                chunks.len(),
+                done,
+                done as f32 / el.max(1e-6),
+                (chunks.len() - ci - 1) as f32
+                    * (seq_len - 1) as f32
+                    / (done as f32 / el.max(1e-6))
+                    / 60.0,
+            );
+        }
+    }
+    let secs = t1.elapsed().as_secs_f32();
+    let positions = argmax.len();
+    eprintln!(
+        "[goat] {label}: {positions} positions in {secs:.0}s ({:.2} tok/s)",
+        positions as f32 / secs.max(1e-6),
+    );
+    drop(cache);
+    drop(ctx);
+    drop(weights);
+    Ok(ArmOut { argmax, truth, secs })
+}
+
 fn main() -> Result<()> {
     let mut parent = None;
     let mut collapsed: Vec<std::path::PathBuf> = Vec::new();
@@ -184,11 +303,23 @@ fn main() -> Result<()> {
 
     // ── the frozen token stream (byte-identical for both arms) ──
     let text = load_corpus_text(&corpus)?;
-    let tok = {
+    let family = family_of(&parent)?;
+    type Encoder = Box<dyn Fn(&str) -> Vec<usize> + Send>;
+    let encode: Encoder = {
         let gguf = GgufFile::open(&parent).context("re-open parent for tokenizer")?;
-        BpeTokenizer::from_gguf(&gguf).context("gpt2 BPE tokenizer from gguf")?
+        match family {
+            Family::Qwen35 => {
+                let tok = BpeTokenizer::from_gguf(&gguf).context("gpt2 BPE tokenizer from gguf")?;
+                Box::new(move |t: &str| tok.encode(t))
+            }
+            Family::Gemma2 => {
+                let tok =
+                    SentencePieceGgufTokenizer::from_gguf(&gguf).context("sentencepiece tokenizer from gguf")?;
+                Box::new(move |t: &str| tok.encode(t))
+            }
+        }
     };
-    let all = tok.encode(&text);
+    let all = encode(&text);
     let take = all.len().min(max_tokens);
     let tokens: Vec<usize> = all[..take].to_vec();
     let chunks: Vec<Vec<usize>> = tokens.chunks(seq_len).map(<[usize]>::to_vec).collect();
@@ -229,7 +360,7 @@ fn main() -> Result<()> {
             )
         }
         None => {
-            let base = run_arm("parent", &parent, &chunks, seq_len)?;
+            let base = run_arm("parent", &parent, &chunks, seq_len, family)?;
             let hit = base
                 .argmax
                 .iter()
@@ -257,7 +388,7 @@ fn main() -> Result<()> {
     let n = base.argmax.len();
     let mut any_pass = false;
     for path in &collapsed {
-        let arm2 = run_arm("collapsed", path, &chunks, seq_len)?;
+        let arm2 = run_arm("collapsed", path, &chunks, seq_len, family)?;
         let arm2_hit = arm2
             .argmax
             .iter()

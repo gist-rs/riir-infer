@@ -34,6 +34,7 @@ pub use crate::gguf_loader::load_gemma2_f16_direct;
 // (883 P0 second fixture, Bench 889): one builder, two fixtures. Re-exported
 // under its historical name so the bin + downstream imports are unchanged.
 use super::attention_heads_parallel;
+use super::gemma2::PostLayerHook;
 use super::{ForwardContext, RAYON_MLP_THRESHOLD, RAYON_QKV_THRESHOLD};
 use crate::gemma_layer::GemmaTransformerWeightsF16;
 use crate::types::{self, Config};
@@ -55,7 +56,14 @@ use katgpt_transformer::MultiLayerKVCache;
 /// Returns the pre-final-norm hidden state slice (the layer stack's raw
 /// output — calibration callers consume K/V via `tables`, this is for
 /// continuity checks only).
-pub fn forward_gemma2_f16_tapped(
+///
+/// `hook` (Issue 022 T5.1 lane 1) is the Issue-395 post-layer seam: called
+/// after step o's residual add with `(layer_idx, &mut ctx.x[..n])` — the
+/// post-layer residual stream is exactly the state the TWT S-matrix pools.
+/// `NoHook` (the default posture) monomorphizes away, bit-identical to the
+/// pre-seam forward.
+#[allow(clippy::too_many_arguments)] // the Issue-395 hook seam adds the 8th — same posture as forward_gemma2_layers
+pub fn forward_gemma2_f16_tapped<P: PostLayerHook + ?Sized>(
     ctx: &mut ForwardContext,
     weights: &GemmaTransformerWeightsF16,
     cache: &mut MultiLayerKVCache,
@@ -63,6 +71,7 @@ pub fn forward_gemma2_f16_tapped(
     token: usize,
     pos: usize,
     config: &Config,
+    hook: &mut P,
 ) {
     let n = config.n_embd;
     let hd = config.head_dim;
@@ -224,6 +233,11 @@ pub fn forward_gemma2_f16_tapped(
                 *ctx.x.get_unchecked_mut(i) += *ctx.xr2.get_unchecked(i);
             }
         }
+
+        // p. the post-layer capture seam (Issue 022 T5.1 lane 1) — after the
+        // residual add, exactly the layer's output residual state. `NoHook`
+        // is an inlined no-op.
+        hook.after_layer(layer_idx, &mut ctx.x[..n]);
     }
 
     ctx.hidden_state[..n].copy_from_slice(&ctx.x[..n]);

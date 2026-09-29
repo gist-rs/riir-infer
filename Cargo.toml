@@ -160,6 +160,15 @@ twt_bonsai = ["twt_profile", "bonsai2_hadamard"]
 # real ternary-hybrid GGUFs. OPT-IN: the Phase-5 GOAT gate decides any
 # promotion; nothing here touches a serving path.
 twt_collapse = ["twt_profile", "deltanet_ternary_inference"]
+# twt_gemma2 (riir-infer Issue 022 T5.1 lane 1, 2026-09-29): the gemma-2-2b
+# f16 CONTROL capture driver (`twt_gemma2_profile`) — the cheapest T5.1
+# lane: a dense f16 parent with zero quantization interaction, so the
+# profile → partition → collapsed-GGUF → agreement pipeline is adjudicated
+# with every lane constant except depth. Implies `vk_calibration` because
+# the capture rides `forward_gemma2_f16_tapped` (the Issue-883 calibration
+# forward + the Issue-395 post-layer hook); the V/K tables are lane baggage
+# the S-matrix never reads. OPT-IN per the feature-flag discipline.
+twt_gemma2 = ["twt_profile", "vk_calibration"]
 # kv_eviction (riir-infer Issue 012, 2026-09-27): the DIFFERENTIAL KV
 # eviction consumer — `deltanet::kv_evict` wires katgpt-core's
 # `DifferentialEvictTable` (+ the λ=0 max-recent, usage-rate, and
@@ -448,6 +457,14 @@ required-features = ["twt_profile"]
 name = "twt_bonsai_profile"
 path = "examples/twt_bonsai_profile.rs"
 required-features = ["twt_bonsai"]
+
+# Issue 022 T5.1 lane (1) — the gemma-2-2b f16 control capture driver: the
+# Issue-395 post-layer hook over `forward_gemma2_f16_tapped` → S matrices →
+# ε sweep + kill verdict.
+[[example]]
+name = "twt_gemma2_profile"
+path = "examples/twt_gemma2_profile.rs"
+required-features = ["twt_gemma2"]
 
 # Issue 022 T4.2 — the arm-damage probe: operator-level materialization
 # error of the re-ternarization arms on REAL Bonsai blocks (dequant-only,

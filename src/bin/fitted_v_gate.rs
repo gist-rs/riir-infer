@@ -65,7 +65,7 @@ use riir_infer_core::corpus_text::load_corpus_text;
 use riir_infer_core::gguf_loader::{config_from_gguf_metadata, GgufFile};
 use riir_infer_core::tokenizer::SentencePieceGgufTokenizer;
 use riir_infer_core::transformer::{
-    forward_gemma2_f16, forward_gemma2_f16_hk, ForwardContext, NoVQuant,
+    forward_gemma2_f16, forward_gemma2_f16_hk, ForwardContext, NoHook, NoVQuant,
 };
 use riir_infer_core::transformer::gemma2_calibration::{
     forward_gemma2_f16_tapped, load_gemma2_f16_direct, CalibrationTables,
@@ -279,7 +279,7 @@ fn main() -> Result<()> {
         cache.reset();
         for (pos, &token) in chunk.iter().enumerate() {
             forward_gemma2_f16_tapped(
-                &mut ctx, &weights, &mut cache, &mut tables, token, pos, &config,
+                &mut ctx, &weights, &mut cache, &mut tables, token, pos, &config, &mut NoHook,
             );
         }
         done += chunk.len();

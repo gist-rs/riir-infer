@@ -51,6 +51,7 @@ use riir_infer_core::corpus_text::load_corpus_text;
 use riir_infer_core::gguf_loader::{GgufFile, config_from_gguf_metadata};
 use riir_infer_core::tokenizer::SentencePieceGgufTokenizer;
 use riir_infer_core::transformer::ForwardContext;
+use riir_infer_core::transformer::NoHook;
 use riir_infer_core::transformer::gemma2_calibration::{
     CalibrationTables, forward_gemma2_f16_tapped, load_gemma2_f16_direct,
 };
@@ -183,6 +184,7 @@ fn main() -> Result<()> {
                 token,
                 pos,
                 &config,
+                &mut NoHook,
             );
         }
         done += chunk.len();

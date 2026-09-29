@@ -51,7 +51,7 @@ use riir_infer_core::transformer::gemma2_calibration::{
 use riir_infer_core::transformer::gemma2_quantized::{
     MirrorRefresh, QuantizedKvMirror, forward_gemma2_f16_qkv,
 };
-use riir_infer_core::transformer::{forward_gemma2_f16};
+use riir_infer_core::transformer::{forward_gemma2_f16, NoHook};
 use riir_infer_core::types::kv_dim;
 
 /// Chunk positions ≤ this count as "early" (the Gate-4 sink proxy).
@@ -288,6 +288,7 @@ fn main() -> Result<()> {
                 token,
                 pos,
                 &config,
+                &mut NoHook,
             );
         }
     }

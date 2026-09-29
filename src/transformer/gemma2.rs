@@ -328,7 +328,10 @@ pub trait PostLayerHook {
 
 /// Zero-overhead no-op hook. The empty `after_layer` is `#[inline(always)]`,
 /// so monomorphization + inlining eliminates the call site entirely.
-pub(crate) struct NoHook;
+/// `pub` (was `pub(crate)`, Issue 022 T5.1 lane 1): the calibration-forward
+/// call sites in `src/bin/` are separate crates and pass `&mut NoHook` —
+/// same posture as [`NoVQuant`]/[`NoLora`].
+pub struct NoHook;
 impl PostLayerHook for NoHook {
     #[inline(always)]
     fn after_layer(&mut self, _layer_idx: usize, _residual: &mut [f32]) {}

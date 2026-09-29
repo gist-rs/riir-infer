@@ -8,18 +8,23 @@
 //! GGUF through the landed writer with EVERY block a MEMBER passthrough
 //! (the winner's tensors byte-copied, zero re-quant). The explicit
 //! `twt.layer_types` array (winner types) is REQUIRED for a qwen35
-//! collapse — the writer refuses without it (T5.0a).
+//! collapse — the writer refuses without it (T5.0a); a gemma2 collapse
+//! (T5.1 lane 1, the f16 control) carries the all-attention array as
+//! provenance and needs only the renumbered `gemma2.block_count`.
 //!
-//! This is the no-apply-path lane: winners are members, the writer
-//! byte-copies them, and the T5 GOAT adjudicates the result. The GDN
-//! apply-path audition (merges) gates behind this GOAT.
-//!
-//! Usage:
+//! Usage (qwen35 league lane):
 //!   cargo run --release --features twt_collapse --example twt_collapse_emit -- \
 //!     --parent ../riir-train/data/Ternary-Bonsai-2-27B-PQ2_0.gguf \
 //!     --profile .raw/twt/bonsai_ultrachat_profile.json \
 //!     --eps 0.05 \
 //!     --out /tmp/twt_collapse_pq2_e005.gguf
+//!
+//! Usage (gemma2 f16 control, T5.1 lane 1):
+//!   cargo run --release --features twt_collapse --example twt_collapse_emit -- \
+//!     --parent ../riir-train/data/gemma-2-2b-it-f16.gguf \
+//!     --profile .raw/twt/gemma2_profile.json \
+//!     --eps 0.05 \
+//!     --out /tmp/twt_collapse_gemma2_e005.gguf
 //!
 //! The parent-weights BLAKE3 recorded in `twt.parent_weights_blake3` is
 //! BLAKE3 over the parent's tensor PAYLOADS concatenated in tensor-infos
@@ -57,7 +62,10 @@ fn main() {
     let profile_path = profile_path.expect("--profile is required");
     let out_path = out_path.expect("--out is required");
 
-    // ── parent facts ──
+    // ── parent facts (arch-dispatched: qwen35 = the DeltaNet hybrid lane;
+    //    gemma2 = the T5.1 lane-1 f16 control — a single-operator stack in
+    //    this repo (no SWA), so no index-derived layer typing survives to
+    //    break under renumbering and no prism keys exist to renumber) ──
     let parent = GgufFile::open(&parent_path).unwrap_or_else(|e| panic!("open {}: {e}", parent_path.display()));
     let arch = parent
         .metadata
@@ -65,28 +73,43 @@ fn main() {
         .and_then(|v| v.as_str())
         .unwrap_or("?")
         .to_owned();
-    assert_eq!(arch, "qwen35", "this lane collapses the qwen35 DeltaNet hybrid, got {arch}");
-    let n_layer = parent.metadata_u64("qwen35.block_count").expect("qwen35.block_count") as usize;
-    let interval = parent
-        .metadata_u64("qwen35.full_attention_interval")
-        .unwrap_or(4) as usize;
-    let nextn = parent
-        .metadata_u64("qwen35.nextn_predict_layers")
-        .unwrap_or(0) as usize;
-    assert_eq!(nextn, 0, "this lane is main-stack-only; a nextn parent needs its own plan");
-    // The same derivation the loader runs (twt.layer_types makes the
-    // collapsed file independent of it — this is only the PARENT's truth).
-    let parent_types: Vec<DeltaNetLayerType> = (0..n_layer)
-        .map(|i| {
-            if (i + 1).is_multiple_of(interval) {
-                DeltaNetLayerType::Attention
-            } else {
-                DeltaNetLayerType::DeltaNet
-            }
-        })
-        .collect();
+    let (n_layer, block_count_key, parent_types) = match arch.as_str() {
+        "qwen35" => {
+            let n_layer =
+                parent.metadata_u64("qwen35.block_count").expect("qwen35.block_count") as usize;
+            let interval = parent
+                .metadata_u64("qwen35.full_attention_interval")
+                .unwrap_or(4) as usize;
+            let nextn = parent
+                .metadata_u64("qwen35.nextn_predict_layers")
+                .unwrap_or(0) as usize;
+            assert_eq!(
+                nextn, 0,
+                "this lane is main-stack-only; a nextn parent needs its own plan"
+            );
+            // The same derivation the loader runs (twt.layer_types makes the
+            // collapsed file independent of it — this is only the PARENT's truth).
+            let types: Vec<DeltaNetLayerType> = (0..n_layer)
+                .map(|i| {
+                    if (i + 1).is_multiple_of(interval) {
+                        DeltaNetLayerType::Attention
+                    } else {
+                        DeltaNetLayerType::DeltaNet
+                    }
+                })
+                .collect();
+            (n_layer, "qwen35.block_count".to_owned(), types)
+        }
+        "gemma2" => {
+            let n_layer =
+                parent.metadata_u64("gemma2.block_count").expect("gemma2.block_count") as usize;
+            let types = vec![DeltaNetLayerType::Attention; n_layer];
+            (n_layer, "gemma2.block_count".to_owned(), types)
+        }
+        other => panic!("unsupported parent arch {other} (this lane: qwen35 | gemma2)"),
+    };
     eprintln!(
-        "[twt-emit] parent {} arch {arch}: {n_layer} layers (interval {interval}), {} tensors",
+        "[twt-emit] parent {} arch {arch}: {n_layer} layers, {} tensors",
         parent_path.display(),
         parent.tensor_infos.len(),
     );
@@ -161,8 +184,13 @@ fn main() {
     let pair_list: Vec<(usize, usize)> =
         blocks.iter().map(|b| (b.start, b.end)).collect();
 
-    let mut overrides = vec![("qwen35.block_count".to_owned(), GgufValue::U64(m as u64))];
-    if nextn > 0 {
+    let mut overrides = vec![(block_count_key, GgufValue::U64(m as u64))];
+    if arch == "qwen35"
+        && parent
+            .metadata_u64("qwen35.nextn_predict_layers")
+            .unwrap_or(0)
+            > 0
+    {
         overrides.push(("qwen35.nextn_predict_layers".to_owned(), GgufValue::U64(0)));
     }
 

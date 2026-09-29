@@ -91,7 +91,7 @@ pub use attention::block_causal_t_n;
 pub use gemma2::{
     AttnLayerFeatures, Gemma2ForwardTrace, forward_gemma2, forward_gemma2_attn_capture,
     forward_gemma2_f16, forward_gemma2_trace, forward_gemma2_with_embedding, generate_gemma2,
-    generate_gemma2_f16, NoVQuant, ValueStoreHook,
+    generate_gemma2_f16, NoHook, NoVQuant, ValueStoreHook,
 };
 // Issue 013 T1: the hookable f16 forward (the lossy-V lane's entry point).
 pub use gemma2::forward_gemma2_f16_hk;
@@ -134,7 +134,13 @@ pub use gemma2::forward_gemma2_block_causal;
 // itself (lib.rs) — the only consumers live there and don't compile on wasm32.
 // `PostLayerHook` is `pub` since Issue 673 Phase 2 (the Recirculation PoC's
 // capture+mix hook — see gemma2.rs); the other two stay crate-internal.
-#[cfg(all(not(target_arch = "wasm32"), feature = "causal_validation"))]
+// Issue 022 T5.1 lane 1: the gemma-2 capture driver (`twt_gemma2`) names the
+// same trait for its S-matrix capture hook (the trait is wasm-safe; the
+// gate follows its consumers).
+#[cfg(any(
+    all(not(target_arch = "wasm32"), feature = "causal_validation"),
+    feature = "twt_gemma2"
+))]
 pub use gemma2::PostLayerHook;
 #[cfg(all(not(target_arch = "wasm32"), feature = "causal_validation"))]
 pub use gemma2::{NoLora, forward_gemma2_layers};
