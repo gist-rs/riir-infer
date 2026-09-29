@@ -214,11 +214,14 @@ fn cuda_fakequant_matches_host_reference() {
         let mut expected = vec![0f32; buf.len()];
         host_quant_dequant(grid, &buf, &mut expected, dim);
 
-        let mut dev = stream.memcpy_htod(&buf).expect("htod");
+        let mut dev = ctx.alloc(buf.len()).expect("alloc");
+        stream.memcpy_htod(&buf, &mut dev).expect("htod");
         kernels
             .launch_dq_fakequant(&stream, &dev, dim, p, grid)
             .expect("launch");
-        let got = stream.memcpy_dtoh(&dev).expect("dtoh");
+        let mut host = vec![0f32; buf.len()];
+        stream.memcpy_dtoh(&dev, &mut host).expect("dtoh");
+        let got = host;
         let mut bad = 0usize;
         let mut first: Option<(usize, f32, f32)> = None;
         for (i, (&g, &e)) in got.iter().zip(expected.iter()).enumerate() {
