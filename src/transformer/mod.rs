@@ -109,6 +109,12 @@ pub mod gemma2_vquant;
 pub mod gemma2_ktov;
 #[cfg(feature = "fitted_v_tables")]
 pub mod vk_harness;
+// Issue 013 T3 (katgpt-rs Issue 883 P3 model-bound gate) — the P3 V-cache
+// reconstruction lane: the half-split `PositionGroupAction` over this
+// forward's own rope table + the `VReadPath::Reconstruct` serve state.
+// Opt-in (`vk_p3_tg`, implies the T1/T2 feature family).
+#[cfg(feature = "vk_p3_tg")]
+pub mod gemma2_vrecon;
 // Plan 410 Phase 1: LoRA-aware Gemma 2 forward entry point.
 #[cfg(feature = "gemma_lora")]
 pub use gemma2::{forward_gemma2_with_embedding_lora, forward_gemma2_with_lora};

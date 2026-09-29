@@ -193,6 +193,17 @@ fitted_v_tables = [
     "dep:katgpt-kv",
     "katgpt-kv/kvarn",
 ]
+# vk_p3_tg (riir-infer Issue 013 T3, 2026-09-29): the P3 V-cache
+# reconstruction lane — `transformer::gemma2_vrecon` (the half-split
+# `PositionGroupAction` over this forward's own rope table + the
+# `VReadPath::Reconstruct` serve state) + the `kv_reconstruct_gate` bin
+# (G3 seam probe, the paired store-vs-reconstruct G1, the tg128 paired
+# interleave G2, the bytes/token record). Implies the T1/T2 feature family
+# (the store-arm reference and the table artifact reader live there) and
+# forwards katgpt-core's `fitted_v_reconstruct` (the P3 read-path
+# substrate). OPT-IN, measurement-only: promotion is katgpt-rs-side and
+# waits on the gates.
+vk_p3_tg = ["fitted_v_tables", "katgpt-core/fitted_v_reconstruct"]
 
 # katgpt-core forwards.
 sparse_mlp = ["katgpt-core/sparse_mlp"]
@@ -347,6 +358,18 @@ required-features = ["fitted_v_tables"]
 name = "kv_plus_ladder"
 path = "src/bin/kv_plus_ladder.rs"
 required-features = ["fitted_v_tables"]
+
+# riir-infer Issue 013 T3 — the P3 V-cache reconstruction gate bin: the G3
+# seam probe (plain vs NoVQuant to_bits after the read-path selector), the
+# paired store-vs-reconstruct G1 at λ ∈ {0, 0.5, 1} (+ the retention
+# walk), the tg128 paired-interleave G2 against the full-cache control,
+# and the bytes/token record (the 50% law). Consumes T2's table artifact
+# (`.benchmarks/012_kv_table_residual.bin`) — no second calibration. Same
+# reader protection as the T1/T2 bins. OPT-IN, measurement-only.
+[[bin]]
+name = "kv_reconstruct_gate"
+path = "src/bin/kv_reconstruct_gate.rs"
+required-features = ["vk_p3_tg"]
 
 # riir-infer Issue 022 — the TWT gate battery (G1 planted known-answers,
 # brute-force DP agreement, monotonicity, G4 alloc-free accumulate, the

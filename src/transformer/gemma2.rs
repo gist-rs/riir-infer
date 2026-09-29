@@ -356,6 +356,28 @@ pub trait ValueStoreHook {
     /// it needs: `ctx.k` is rotated in place immediately after. Default
     /// no-op (the T1 lossy-V hooks ignore it; monomorphizes away).
     fn keys_pre_rope(&mut self, _layer_idx: usize, _pos: usize, _k_pre: &[f32]) {}
+
+    /// [Issue 013 T3] The V read-path selector. Called once per layer per
+    /// decode step, AFTER the value-store seams and BEFORE attention reads.
+    /// Returns `Some(slice)` to override the V attention reads (a P3
+    /// reconstruction lane serves its own scratch, `V = G(−θp)·K̂ +
+    /// λ·E_l[s]`, from `k_cache` — the cached post-RoPE keys, rows
+    /// `0..t_n`); `None` (the default) reads the layer cache — bitwise
+    /// today's path.
+    ///
+    /// The returned borrow lives until the attention call returns; the layer
+    /// loop does not use the hook mutably again before that call returns, so
+    /// implementations may borrow internal scratch. Default no-op —
+    /// monomorphizes away exactly like [`NoVQuant`]'s other methods.
+    fn values_for_attention(
+        &mut self,
+        _layer_idx: usize,
+        _pos: usize,
+        _t_n: usize,
+        _k_cache: &[f32],
+    ) -> Option<&[f32]> {
+        None
+    }
 }
 
 /// Zero-overhead no-op [`ValueStoreHook`] — the full-precision V-cache
@@ -1387,13 +1409,25 @@ pub fn forward_gemma2_f16_hk<'a, H: ValueStoreHook + ?Sized>(
         // the read. `NoVQuant`: empty, inlined away.
         vq.value_stored(layer_idx, pos, &mut layer_cache.value);
 
+        // f3. [Issue 013 T3] V read-path selector — after the store seams,
+        // before attention. `None` (the default): read the layer cache,
+        // bitwise today's path; `Some(slice)`: the P3 reconstruction lane's
+        // scratch serving `V = G(−θp)·K̂ + λ·E_l[s]` from the cached
+        // post-RoPE K, rows `0..t_n`.
+        let v_read: &[f32] = match
+            vq.values_for_attention(layer_idx, pos, t_n, &layer_cache.key)
+        {
+            Some(v) => v,
+            None => &layer_cache.value,
+        };
+
         // g. Multi-head attention + softcapping (Plan 096: parallel heads),
         // with the shared m_Y probe / row-logit-floor hooks (Issue 011).
         unsafe {
             super::attend::attend_row(
                 ctx,
                 &layer_cache.key,
-                &layer_cache.value,
+                v_read,
                 layer_idx,
                 super::attend::AttnShape {
                     n_head: config.n_head,
