@@ -1346,3 +1346,74 @@ SURVIVES verdicts unaffected) — re-derive before any T5.5 Pareto claim
 cites it.
 
 Session: riir-infer-022-phase5-t50
+
+## 2026-09-29 — Issue 022 T5.1 lane (1) COMPLETE: gemma-2 f16 control — clean negative at every real depth cut; the fine-end bracket is structurally empty
+
+Bench record: `.benchmarks/015_t51_gemma2_control_goat.md` (full table,
+box state, pre-registration). Instrument landed at `0e0436c`
+(`PostLayerHook` capture seam on `forward_gemma2_f16_tapped` — NoHook
+monomorphizes to the unchanged forward; profile driver
+`examples/twt_gemma2_profile` behind feature `twt_gemma2`; gemma2 arch
+arms in `twt_collapse_emit` + `twt_goat_agreement`; the pre-registered
+protocol in the issue in the SAME commit), verdict at `55fa831`.
+
+**The verdict: ε=0.05 identity row 1.0000 (4092/4092 — the pipeline is
+bit-faithful), then EVERY real depth cut FAILS** — 65.4% depth →
+0.2571 agreement, 38.5% → 0.0831, 23.1% → 0.0132, down to 0.0015 at
+3.8% depth with hit rates dying to 0.0002. Parent hit rate 0.4746
+(healthy signal on a no-BOS raw-text stream). **The fine-end bracket
+is structurally EMPTY**: at ε≤0.03 the partition is m=26 with
+worst-block 0.0000 — ZERO merges, no S rung between identity and the
+65.4% cut (unlike bonsai's 4.7% pass). The four bracket arms were
+emitted and their agreements not run — each is a byte-identical
+re-emit of the ε=0.05 identity row, which already measures that point.
+
+**The zero-training passthrough question is closed on TWO
+architectures** (hybrid ternary bonsai + dense f16 gemma-2, same
+meter/DP/writer): cosine redundancy ≠ functional redundancy, and
+gemma-2's phase structure (m=10 at ε=0.2) transfers to merge safety no
+better than bonsai's did. The rescue, if one exists, lives in the
+apply-path (auditioned merges / distillation, riir-train 423) — the
+control lane hands riir-train 423 its baseline artifact + negative
+control. Kill-rule footnote carried in the bench: the single-operator
+stack makes `KillBlockCount` fire on a technicality (bar trivially 1);
+the depth-reduction license on this lane is carried by the S sweep,
+adjudicated by the bench — the T5.5 Pareto report cites the sweep,
+never the kill verdict.
+
+En-route: a live Bench-number collision with the M3 sibling's
+in-flight typed-partition/GDN-audition lane (their Bench 014,
+committed + referenced first) — my bench renumbered 014→015 per the
+collision rule (theirs kept it), highwater 15, ff-merged onto theirs;
+the merged tree verified compile-clean. Collapsed GGUFs (~21 GB)
+deleted post-measurement — regenerable from the kept profile artifact
+(`.raw/twt/gemma2_profile.json`, corpus BLAKE3'd) + the cached parent
+arm in ~20–90 s per point.
+
+Session: riir-infer-022-t51-gemma2-control
+
+## 2026-09-29 — two Windows batch traps hit by the T2/T3/T5.1 schtask runners (recorded; the deleted wait-loop script's durable note)
+
+Both diagnosed live while landing the Issue-013 T2/T3 chain and the
+T5.1 GOAT pipeline; recorded because the deleted script's header note
+died with it:
+
+1. **`Start-Process`-launched `.cmd` inherits the SPAWNING MSYS session's
+PATH.** Inside such a script, `tasklist | find` resolves `find` to
+`/usr/bin/find` (MSYS), which does not read stdin the way cmd's
+`find.exe` does — a `tasklist /FI ... | find /I "name"` wait-loop then
+wedges forever (the wait loop never observes the process exit). The
+T2/T3 schtask launchers are IMMUNE: Task Scheduler runs with a clean
+system environment, so `find` resolves to `C:\Windows\System32\find.exe`.
+   *Rule: never hand-launch a wait-loop `.cmd` via `Start-Process` from
+an MSYS shell; use `schtasks /Run`, or fully-qualify
+`%SystemRoot%\System32\find.exe` inside the script.*
+2. **A hand-rolled no-wait batch rewrite died silently while identical
+constructs passed in isolation.** Root cause never fully isolated
+(multiple rewrites, all plausible, all dead); bypassed by invoking the
+exes directly from the agent shell. *Rule: for chained measurement
+runs, prefer `schtasks` wrappers (the Issue-012 recipe — clean env,
+survives agent teardown) or PowerShell; never a hand-rolled wait-loop
+batch whose failure mode is silence.*
+
+Session: riir-infer-022-t51-gemma2-control
