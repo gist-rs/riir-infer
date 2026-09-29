@@ -22,7 +22,7 @@ tasklist /FI "IMAGENAME eq kv_plus_ladder.exe" 2>nul | find /I "kv_plus_ladder.e
 if %ERRORLEVEL% EQU 0 (
   set /a waits+=1
   if %waits% GTR 720 (
-    echo === GUARD TIMEOUT: kv_plus_ladder.exe still running after 12h — refusing to start (%DATE% %TIME%) === >> .benchmarks\013_t3_run.log
+    echo === GUARD TIMEOUT: kv_plus_ladder.exe still running after 12h - refusing to start at %DATE% %TIME% === >> .benchmarks\013_t3_run.log
     exit /b 1
   )
   ping -n 61 127.0.0.1 >nul
@@ -32,7 +32,7 @@ echo === T2 process exited after %waits% min; box is ours (%DATE% %TIME%) === >>
 
 rem -- Guard: the T2 table artifact must exist --
 if not exist .benchmarks\012_kv_table_residual.bin (
-  echo === REFUSED: T2 table artifact missing — T2 must have died before freeze (%DATE% %TIME%) === >> .benchmarks\013_t3_run.log
+  echo === REFUSED: T2 table artifact missing - T2 must have died before freeze at %DATE% %TIME% === >> .benchmarks\013_t3_run.log
   exit /b 1
 )
 
@@ -41,7 +41,7 @@ wmic OS get FreePhysicalMemory,TotalVirtualMemorySize /format:list >> .benchmark
 tasklist | findstr /I "cargo python kv_ vk_ riir" >> .benchmarks\013_t3_run.log 2>nul
 
 rem -- Run the PREBUILT exe (built from the committed sources before this
-rem task was registered; the T2-recipe discipline — no overnight rebuild,
+rem task was registered; the T2-recipe discipline โ€” no overnight rebuild,
 rem so a sibling's late source edits cannot alter the measurement) --
 target-rel\release\kv_reconstruct_gate.exe ^
   ..\riir-train\data\gemma-2-2b-it-f16.gguf ^

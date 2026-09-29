@@ -1415,6 +1415,21 @@ exes directly from the agent shell. *Rule: for chained measurement
 runs, prefer `schtasks` wrappers (the Issue-012 recipe — clean env,
 survives agent teardown) or PowerShell; never a hand-rolled wait-loop
 batch whose failure mode is silence.*
+3. **A literal `)` in an echo INSIDE a parenthesized block silently turns
+the block's follow-up `exit /b 1` unconditional** (found 2026-09-29
+23:15, the T3 launcher `run_kv_reconstruct_gate.cmd`). cmd's block
+parser treats the echo text's `)` as the block terminator: the guard
+echo `echo ... (%DATE% %TIME%) === >> log` inside the wait-loop's
+`if %ERRORLEVEL% EQU 0 ( ... )` closed the block early, so the
+`exit /b 1` after it executed the MOMENT T2 was found running — the
+chained T3 task fired at 22:30, wrote its header, and died rc=1 in
+seconds, three times (22:30 scheduled, 23:15 manual re-fire, clean-env
+repro), silently. Found by bisection only because Task Scheduler
+history is disabled on this box and the failure mode was silence; the
+`noguard` variant (nested block deleted) was the flip. SAME latent bug
+in `run_twt_gemma2_goat.cmd` (3 in-block echoes) — fixed in the same
+pass. *Rule: inside a `( ... )` block, an echo line must carry NO
+literal `)` — reword to `at %DATE% %TIME%` or escape `^)`.*
 
 Session: riir-infer-022-t51-gemma2-control
 

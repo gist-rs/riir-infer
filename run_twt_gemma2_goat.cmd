@@ -22,7 +22,7 @@ tasklist /FI "IMAGENAME eq twt_gemma2_profile.exe" 2>nul | find /I "twt_gemma2_p
 if %ERRORLEVEL% EQU 0 (
   set /a waits+=1
   if %waits% GTR 60 (
-    echo === GUARD TIMEOUT: twt_gemma2_profile.exe still running after 1h — refusing (%DATE% %TIME%) === >> .raw\twt\gemma2_goat_run.log
+    echo === GUARD TIMEOUT: twt_gemma2_profile.exe still running after 1h - refusing at %DATE% %TIME% === >> .raw\twt\gemma2_goat_run.log
     exit /b 1
   )
   ping -n 61 127.0.0.1 >nul
@@ -32,7 +32,7 @@ echo === profile exited after %waits% min; box is ours (%DATE% %TIME%) === >> .r
 
 rem -- Guard: the profile artifact must exist --
 if not exist .raw\twt\gemma2_profile.json (
-  echo === REFUSED: profile artifact missing — the profile died before writing (%DATE% %TIME%) === >> .raw\twt\gemma2_goat_run.log
+  echo === REFUSED: profile artifact missing — the profile died before writing at %DATE% %TIME% === >> .raw\twt\gemma2_goat_run.log
   exit /b 1
 )
 
@@ -56,7 +56,7 @@ target-twt\twt_collapse_emit.exe ^
   --out .raw/twt/gemma2_collapse_e%EPSN%.gguf ^
   >> .raw\twt\gemma2_goat_run.log 2>&1
 if not exist .raw\twt\gemma2_collapse_e%EPSN%.gguf (
-  echo === REFUSED: emit failed at eps=%EPS% (%DATE% %TIME%) === >> .raw\twt\gemma2_goat_run.log
+  echo === REFUSED: emit failed at eps=%EPS% - %DATE% %TIME% === >> .raw\twt\gemma2_goat_run.log
   goto :eof
 )
 echo === agreement eps=%EPS% (%DATE% %TIME%) === >> .raw\twt\gemma2_goat_run.log
