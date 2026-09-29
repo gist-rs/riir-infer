@@ -93,10 +93,10 @@ Prefill (compute-bound, T≫1) and decode (memory-bound, batch-1) reward differe
 
 | File | What |
 |---|---|
-| `riir-infer/.research/004_DQ_Disaggregated_Quantization.md` | this note (`.highwater` 003→004) |
+| `riir-infer/.research/004_DQ_Disaggregated_Quantization.md` | this note (`.highwater` 003→004) — landed at riir-infer `a5041b3` |
 | `riir-infer/.issues/026_phase_sensitivity_quant_bench.md` | the instrument (falsifiable directional assertion) |
 | `riir-infer/.issues/027_lut_grid_optimization_lane.md` | encoder-only asymmetric Q2_0 (T0) + Lloyd-Max grids + non-uniform Q2_0A; dense-GGUF gain site; kernel cost priced |
 | `riir-infer/.issues/028_dual_ptq_disaggregated_serving.md` | resident dual-checkpoint container + PTQ-vs-QADD recovery measurement |
-| `riir-train/.plans/430_qadd_disaggregated_prefiller.md` | the QADD pre-registration (secondary track; budget ladder + gates; 27B convergence explicitly not priceable) |
+| `riir-train/.plans/430_qadd_disaggregated_prefiller.md` | the QADD pre-registration (secondary track; budget ladder + gates; 27B convergence explicitly not priceable) — landed at riir-train `1c7ec255` |
 
 GOAT discipline: every issue carries its own gate; nothing promotes without a measured win per-family at matched bpw (the lossy-surface law); Plan 430's phase-mask mechanism gate is pre-registered to be able to fail.
