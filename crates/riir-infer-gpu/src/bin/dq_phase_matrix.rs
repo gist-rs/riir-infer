@@ -604,7 +604,7 @@ fn run() -> Result<(), String> {
                 first_fnvs.push(g.first_fnv);
                 prompt_toks.push(tok.encode(&it.prompt).len() + 1);
             }
-            ni_correct.insert(l, v);
+            ni_correct.insert(*l, v);
             eprintln!("[dq614] {name} niah@{l}: {}/{}", ni_correct[&l].iter().filter(|x| **x).count(), items.len());
         }
         // G-i2 (D5, frozen arithmetic): prefill = 256/chunk where chunks =
