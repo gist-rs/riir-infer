@@ -63,6 +63,13 @@ pub mod attention_causal_fused_cubecl;
 pub mod attention_cubecl;
 #[cfg(feature = "cubecl_runtime")]
 pub mod attention_q8kv_cubecl;
+// The DQ phase-sensitivity fake-quant instrument (Plan 614 / Issue 026) —
+// the pure spec/knobs are UNGATED (host-reference unit tests compile at
+// default features); the CubeCL kernels are cubecl_runtime-gated like every
+// kernel module.
+pub mod dq_fakequant;
+#[cfg(feature = "cubecl_runtime")]
+pub mod dq_fakequant_cubecl;
 #[cfg(feature = "cubecl_runtime")]
 pub mod elementwise_cubecl;
 #[cfg(feature = "cubecl_runtime")]

@@ -79,6 +79,11 @@ cubecl = { version = "=0.11.0-pre.2", features = ["wgpu-spirv"], optional = true
 cudarc = { version = "0.19", default-features = false, features = ["std", "driver", "nvrtc", "cuda-13030", "fallback-dynamic-loading"], optional = true }
 
 [features]
+# The DQ phase-sensitivity fake-quant instrument (riir-infer Plan 614 /
+# Issue 026): on-device activation quantize→dequantize at five linear-input
+# sites per layer, per phase, on the folded ternary forward. Default-off —
+# the hot path is untouched when off (the injection blocks are cfg-gated).
+dq_phase_bench = ["cubecl_runtime", "ternary_gemv", "ternary_gemm_batched"]
 cubecl_runtime = ["dep:cubecl", "dep:half", "dep:papaya", "dep:blake3"]
 cuda_backend = ["cubecl_runtime", "cubecl/cuda"]
 # Ternary bit-plane (Q2_0_g128) GEMV family around the gemv_ternary_cubecl
