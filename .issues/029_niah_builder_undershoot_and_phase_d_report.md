@@ -2,6 +2,11 @@
 
 **Status:** OPEN — filed 2026-09-30 from the Bench 012 run (issue 013 T2): the
 NIAH phase crashed at trial 0 and the structured report was never written.
+**In flight (sibling session, uncommitted WIP in the live worktree — do not
+duplicate):** the grow-loop fix in `build_niah_trial` (token-ratio-adaptive,
+better than a fixed-step retry — keep THAT form) + the `--niah-only` wiring in
+`kv_plus_ladder.rs`. Remaining: the unit test, the incremental per-arm report
+write, and the rerun itself.
 
 ## Defect 1 — `build_niah_trial` undershoot hard-bails
 
