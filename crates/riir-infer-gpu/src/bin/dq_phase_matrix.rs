@@ -62,9 +62,8 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::Instant;
 
-use riir_infer_core::gguf_loader::{
-    load_qwen_deltanet_ternary_weights_gguf, GgufFile, QwenDeltaNetTernaryWeights,
-};
+use riir_infer_core::deltanet::ternary_weights::QwenDeltaNetTernaryWeights;
+use riir_infer_core::gguf_loader::{load_qwen_deltanet_ternary_weights_gguf, GgufFile};
 use riir_infer_core::tokenizer::BpeTokenizer;
 use riir_infer_gpu::dq_fakequant::{self as dq, DqGrid, DqPhaseArm};
 use riir_infer_gpu::ternary_deltanet_gpu_forward as tdf;
@@ -495,7 +494,7 @@ fn run() -> Result<(), String> {
     tdf::set_prefill_batch_elementwise(true);
     tdf::set_prefill_use_cmma16(true);
     tdf::set_prefill_use_cmma_i8(true);
-    tdf::set_prefill_use_cmma_i8_psplit(true);
+    tdf::set_prefill_cmma_i8_psplit(true);
     riir_infer_gpu::set_prefill_use_cuda_mma(false);
     riir_infer_gpu::set_prefill_use_cuda_ffn(false);
     tdf::set_prefill_chunk_max(4096);
