@@ -1,4 +1,6 @@
-# Issue 013 — consume katgpt-core `fitted_value_tables` / `fitted_v_reconstruct` on gemma-2-2b: the model-bound G1 of katgpt-rs Issue 883 P1–P3
+# Issue 013 — consume katgpt-core `fitted_value_tables` / `fitted_v_reconstruct` on gemma-2-2b: the model-bound G1 of katgpt-rs Issue 883 P1–P3 [L1-198]
+
+**Status:** T1 EXECUTED — measured negative for P1 (recorded). T2 instrument landed `239724a`, full run IN FLIGHT (scheduled task, ~13 h). T3 instrument landed (this session), run chained after T2 exits. T4 pending.
 
 **Status:** OPEN — T1 PAUSED 2026-09-28 by owner re-aim ("we don't care about gemma, pivot bonsai/qwen"): the harness (`vk_p1_g1` bin + `transformer::gemma2_quantized`, clippy-clean, smoke-run at 512 cal / 1k eval) is LANDED as WIP for whoever picks the lane up; the full-grid run was NOT taken. The pre-registered protocol below stands. 896 blocker cleared (katgpt-rs `62fd22b5f`) — T1 is unblocked when prioritized.
 **Status:** OPEN — filed 2026-09-25 from katgpt-rs Issue 883 (closed there 2026-09-25; record in katgpt-rs HISTORY.md § Issue 883). The primitives landed there at katgpt-rs `0b768e95d` (katgpt-rs Bench 895). This issue is their model-bound quality gate and the tg128 cell.
@@ -101,7 +103,8 @@ position.
 **Box state:** 4090 workstation, i7-13700K 16 cores, CPU lane, AC power; launch-time free RAM + commit-vs-limit recorded in the bench doc; runs > 30 min use the scheduled-task recipe (`run_*.cmd`, Issue 012). Expected wall ≈ 6 h (cal ≈ 2 h at the tapped ~8 tok/s + 8 eval arms ≈ 4 h).
 
 **Promotion statement (unchanged):** a measured null is a legitimate recorded negative; promotion is katgpt-rs-side and waits on T1/T2/T3 + the loser demoted.
-- [x] **T2 — P2 G1: the K=V+ λ ladder.** Serve `V = K + λ·E_l[s]` with W_V deleted, at λ ∈ {0, 0.5, 1} plus a per-layer schedule chosen by direct grid evaluation on held-out fixtures (never GD).
+- [-] **T2 — P2 G1: the K=V+ λ ladder.** Serve `V = K + λ·E_l[s]` with W_V deleted, at λ ∈ {0, 0.5, 1} plus a per-layer schedule chosen by direct grid evaluation on held-out fixtures (never GD).
+  - **IN FLIGHT 2026-09-29** (scheduled task `riir_infer_t2_ladder`, launched 08:47; instrument `239724a`, launcher `e2e84ba`) — the `[x]` here was premature; the verdict pends on `.benchmarks/012_t2_kv_ladder_report.md` + the Bench-012 gate doc. Protocol below was pre-registered before any arm ran.
   - Measure held-out PPL and NIAH (the katgpt-rs Bench 814 harness shape) against (a) full V and (b) `V := K`.
   - The only claim under test is `quality(K=V+) > quality(K=V)`, i.e. that the table refunds part of the 2.5–3.1% tax. **§3.6 discipline: no parity claim vs full V is made or expected.** Record the ladder honestly.
   - G3: λ = 0 must be `to_bits`-identical to the `V := K` path across a full decode.
@@ -176,11 +179,88 @@ scheduled-task launch (`run_kv_plus_ladder.cmd`, the Issue-012 recipe).
 Expected wall ≈ 13 h (cal ≈ 2.1 h at ~8 tok/s + 4 ladder arms ≈ 3.1 h at
 ~4.4 tok/s + grid 54 × 3.9 min ≈ 3.5 h + validation ≈ 0.8 h + NIAH 5 arms
 × 6 trials ≈ 1.7 h).
-- [ ] **T3 — P3: tg128 KV bytes/token −50%.** Drop the persistent V cache and reconstruct V from the cached post-RoPE K plus `E_l[s]` using a **half-split** `PositionGroupAction` that reads the forward's own cos/sin tables (see the trap above).
+- [-] **T3 — P3: tg128 KV bytes/token −50%.** Drop the persistent V cache and reconstruct V from the cached post-RoPE K plus `E_l[s]` using a **half-split** `PositionGroupAction` that reads the forward's own cos/sin tables (see the trap above).
+  - **Instrument landed 2026-09-29** (this session): `transformer::gemma2_vrecon` (`HalfSplitRopeInverse` — the rotate-half `PositionGroupAction` over THIS forward's own freq table, pos-0 early return matching `apply_rope_with_freq`; `VReconState` — the scratch-serving hook state) + the `values_for_attention` seam on `ValueStoreHook` (`None` default = the cache slice, bitwise today's path; `Some(slice)` = the P3 scratch) + the `kv_reconstruct_gate` bin (`vk_p3_tg` feature, implied `fitted_v_tables` + katgpt-core `fitted_v_reconstruct`). SMOKE PASS (synthetic zero table, wiring-validated: G3 seam identity to_bits, recon-vs-store max |Δlogit| 1.25e-4, bytes/token 50.0%). Run chained after T2 — protocol below pre-registered before the run.
   - G1: PPL within the T2-measured tolerance at the same λ, plus the per-family retention walk.
   - G2: tg128 tok/s against the full-cache control, using the paired interleave (the katgpt-rs `tests/common/ab_timing.rs` protocol) with box state recorded.
   - G3: `VReadPath::FullCache` is bitwise identical to today's path.
   - Record KV bytes/token. The law predicts exactly 50%, because gemma-2-2b is 8q:4kv at hd 256 and `n_v/(n_kv + n_v) = 1/2`. Sliding-window layers scale with the window and keep the same fraction.
+
+### T3 protocol — PRE-REGISTERED 2026-09-29 (before the run; the T1/T2 precedent)
+
+**Instrument:** `kv_reconstruct_gate` bin + `transformer::gemma2_vrecon`
+(feature `vk_p3_tg`, measurement-only). The seam is a defaulted
+[`ValueStoreHook::values_for_attention`] on the f16 decode loop: `None`
+(default) reads the layer cache — bitwise today's path; `Some(slice)` reads
+the lane's scratch. `VReconState` serves rows `0..t_n` of
+`V = G(−θp)·K̂ + λ_l·E_l[s]` via katgpt-core's `reconstruct_v_from_rope_k`
+(P3 verbatim), with `HalfSplitRopeInverse` — the rotate-half action over
+THIS forward's own `RopeFreqTable` (katgpt-core's `RopeAction` is the
+ADJACENT-pair subgroup — the wrong convention here, the rope.rs RoVE note
+and Issue 013 trap 1; the action matches `apply_rope_with_freq` exactly:
+same `angle = pos·freq` expression, same `f32::sin_cos`, and the same pos-0
+early return so the pos-0 rows recover BITWISE, −0.0 included). ONE
+one-directional inverse rotation per read — never a round-trip (trap 2).
+Module tests pin: action round-trip vs the repo's own rope (pos-0 bitwise,
+else ≤1e-3), reconstruct == `v_from_k_plus(k_pre)` on rotated keys (the
+P3 == P2 law), `read_v` FullCache bitwise copy, and the state end-to-end.
+
+**Fixture:** identical to T1/T2 (gemma-2-2b-it-f16.gguf, chat_probe, seq
+1024, teacher-forced, cache reset per chunk). Table = T2's dumped artifact
+`.benchmarks/012_kv_table_residual.bin` (BLAKE3-verified; NO second
+calibration). Eval slice = T2's eval start, tokens [61440..63488) — the
+FIRST 2 eval chunks (2046 scored positions per arm; the G1 pairing is
+self-contained store-vs-reconstruct at the same λ, so 2 chunks suffice to
+resolve the rotation-rounding class vs a wiring bug, which moves PPL by
+orders of magnitude).
+
+**Arms:** f16 base (context) + for λ ∈ {0, 0.5, 1}: store arm
+(`KToVState` λ, T2's serve — the pairing base) and reconstruct arm
+(`VReconState` λ). The retention walk rides the largest-λ pair.
+
+**Gates (pre-registered):**
+- **G3 (hard, wiring):** plain `forward_gemma2_f16` vs
+  `forward_gemma2_f16_hk(NoVQuant)` logits `to_bits`-identical across a
+  65-position decode — pins the seam insertion post-edit (the default
+  returns the cache slice). Plus (recorded, bound 5e-2): recon-λ0 vs
+  store-λ0 max |Δlogit| — the rotation-rounding class.
+- **G1 (the claim):** for every λ, paired per-position ΔNLL(recon − store):
+  mean |Δ| ≤ 2e-3 AND max |Δ| ≤ 5e-2 (pre-registered tolerances; the
+  rotation-rounding class measured ~4e-5 in smoke — a convention/wiring bug
+  — wrong rotation subgroup, stale token map — blows past 0.05 by orders
+  of magnitude; the reconstruction is deterministic algebra, so a FAIL is a
+  bug, never a model effect). PPL per arm recorded; flips recorded; the
+  retention walk (ΔNLL/flips by target-token count tertile × tracked/miss)
+  is recorded, not gated.
+- **G2 (recorded, not gated):** tg64 decode after a 128-token prefill —
+  12 interleaved (full-cache, recon-λ0, recon-λ1) triples, median of
+  per-pair medians, ratios as medians of per-pair ratios (the katgpt-rs
+  `tests/common/ab_timing.rs` paired-interleave shape). The naive read
+  path's cost is EXPECTED to be a regression at long context — the issue
+  already names the kernel levers (deferred restore, block
+  angle-addition) as T4's lane; this number is the baseline those levers
+  must beat. Box state headed into the log; absolute µs on a loaded box
+  are noise, the per-pair ratios are the figure.
+- **Bytes/token (the law, recorded):** full = 2·1024·4 B·26 = 212,992
+  B/token; P3 key-only = 106,496 B/token = exactly 50.0%
+  (`n_v/(n_kv+n_v) = 1/2`; sliding-window layers scale with the window and
+  keep the fraction). Instrument caveat recorded: this lane still WRITES
+  the raw V row at store (one memcpy/step); the READ path is fully
+  reconstructed — a production P3 cache drops the V allocation.
+
+**Dependency on T2:** the artifact (else the run refuses). λ* and the T2
+verdict are CONTEXT, not inputs — T3's gates read only its own
+store-vs-reconstruct pairing, so the run is valid whatever T2's G-A says
+(λ*=0 makes every arm's claim the V:=K̂ reconstruction at the same
+tolerance).
+
+**Box state:** 4090 workstation, i7-13700K 16 cores, CPU lane, AC; launch-
+time free RAM + commit-vs-limit + the concurrent-process list recorded in
+the log; chained scheduled task (`run_kv_reconstruct_gate.cmd`, the
+Issue-012 recipe) that WAITS for the T2 process to exit (the box is
+exclusive), verifies the table artifact exists, rebuilds in `target-rel`
+(T2's warm cache), then runs. Expected wall ≈ 1.2 h (7 G1 passes ≈ 45 min
++ G2 ≈ 25 min + probes).
 - [ ] **T4 — the P1/P3 G2 kernels on the real decode path.** The katgpt-rs primitive-level G2 bars failed: +5% for P1, 14–15× for P3.
   - **Update (katgpt-rs 2026-09-25):** folding the add-back into KVarN's dequant was a LOSER (+13.9–14.2%, reverted). After katgpt-rs Issue 894 made the plain pass 2.46× faster, P1 fused/plain reads **+12.9–13.3%**: the absolute cost is unchanged but the denominator is smaller. The floor is the per-position token→row lookup (+2.1–2.8%). The named lever is the **deferred restore** by linearity, `Σ_p w_p·v̂_p + Σ_s W_s·E[s]` with the row index pre-resolved per position (+1.5–3.6% test-local). It regroups the sum, so it needs a stated error bound, and the miss and zero-table paths must stay bitwise. Its last per-position scalar add belongs in THIS repo's softmax-weight loop. Record: katgpt-rs Bench 895 Addenda I/II, HISTORY.md § Issue 883.
   - Re-measure inside this repo's actual attention kernel (the V-aggregation epilogue and the RoPE tables that already exist there) before anyone reads the primitive numbers as the model-level cost.
