@@ -594,7 +594,7 @@ fn run() -> Result<(), String> {
             );
         }
         let mut ni_correct = BTreeMap::new();
-        for (&l, items) in &niah {
+        for (l, items) in &niah {
             let mut v = Vec::with_capacity(items.len());
             for it in items {
                 let g = greedy_generate(fwd, weights_ref, &tok, bos, &it.prompt, 32);
@@ -841,6 +841,5 @@ fn run() -> Result<(), String> {
     let md_path = out_dir.join("dq_phase_matrix.md");
     std::fs::write(&md_path, &md).map_err(|e| e.to_string())?;
     eprintln!("[dq614] report: {}", md_path.display());
-    let _ = n_chunks_for;
-        Ok(())
+    Ok(())
 }
