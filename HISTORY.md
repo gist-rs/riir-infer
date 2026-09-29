@@ -4,6 +4,41 @@ Durable records for resolved questions and closed lanes (the noise-reduction
 convention: the record lands here, hash-pinned; open work lives in `.issues/`
 and `.plans/`). Created 2026-09-23 at the first record.
 
+## 2026-09-30 — Issue 013 T2 EXECUTED: the K=V+ λ ladder on gemma-2 — G-A PASS vs a catastrophic baseline; K=V+ not viable standalone; G-D overfit; NIAH build crash (029)
+
+Run 2026-09-29 12:51 → 2026-09-30 06:30 (task `riir_infer_t2_ladder`, ~17.7 h
+on a contended box: a sibling python trainer held ~14 cores, cal 3 tok/s vs
+T1's uncontended 9). Record: `.benchmarks/012_t2_kv_ladder_gate.md`; run log
+`012_t2_run.log`; table artifact `012_kv_table_residual.bin` (783,556,688 B,
+sha `3a0f5333d6bafd63…`, reused by T3 — no second calibration).
+
+- **Ladder (held-out eval, 12,276 scored/arm):** f16 **6.0907** (== T1 exactly,
+  cross-run determinism PASS) · k-0.00 1,884,959 (**tax +30,948,056% —
+  catastrophic-class; the issue's cited 2.5–3.1% was another posture, this
+  fixture measures its own**) · k-0.50 11,233 (×1844) · **k-1.00 563.7 (×92.6;
+  λ\* = 1, mean paired ΔNLL vs k-0 −8.11487 < 0 → G-A PASS; 3344× recovery of
+  the destruction)** · k-sched 1238.0 (validation).
+- **G-C PASS** (in-run to_bits λ=0 probe). **G-D OVERFIT**: the 54-pass grid
+  (12/26 layers diverging on the search chunk, composed −0.01643) read 2.20×
+  WORSE than uniform λ=1 on validation — per-layer λ interactions on a
+  1024-token search chunk are noise; the uniform λ\* stands.
+- **G-E MISSING**: NIAH crashed at trial 0 (`token budget 972 < target 1023
+  (grow the filler)` — `build_niah_trial`'s 4.2 chars/token estimate
+  undershoots the pool at ~4.49; shrink path absorbs overshoot only).
+  Pre-registered direction-only, flips no gate. Fix + `--niah-only` rerun:
+  `.issues/029_niah_builder_undershoot_and_phase_d_report.md`.
+- **The verdict substance:** the table refunds a real fraction of the V:=K
+  destruction and the destruction is total — 92.6× off f16 is nowhere near a
+  serve posture. The recorded negative for K=V+ as standalone V-cache
+  elimination on gemma-2 is the finding. P3 (T3, chained, started 06:31 with
+  the table BLAKE3-verified) is a different product: its G1 tolerance is
+  rotation-rounding class vs the STORE arm (1.254e-4 max |Δlogit| at the G3
+  probe — in family with the smoke), not the V:=K destruction class.
+- **Instrument gap:** the report writer runs at Phase D only — a crash loses
+  the structured report + in-memory per-arm detail (win shares, flips, the ρ
+  dashboard); the gates here were adjudicated from log lines. Incremental
+  per-arm report write filed with 029.
+
 ## 2026-09-27 — Issue 014 RESOLVED: activation-aware ternary scale fit — SPLIT BY LANE (born-ternary clean negative; dense-parent mechanism transfer)
 
 Filed 2026-09-25 from katgpt-rs Issue 886 (the per-family conditional

@@ -1,0 +1,69 @@
+=== box state at launch (2026-09-29 12:51:44.57) === 
+OS Name:                       Microsoft Windows 11 Pro
+Total Physical Memory:         32,538 MB
+Available Physical Memory:     20,411 MB
+# kv_plus_ladder: gemma-2 f16 | layers=26 n_embd=2304 kv_dim=1024 vocab=256000 | load 171.8s
+# corpus: 13121614 chars → 2702627 tokens | cal [0..61440) eval [61440..73728) search [73728..74752)
+# calibrate 1024/61440 | 4 tok/s | eta 263 min
+# calibrate 4096/61440 | 3 tok/s | eta 294 min
+# calibrate 7168/61440 | 4 tok/s | eta 256 min
+# calibrate 10240/61440 | 3 tok/s | eta 271 min
+# calibrate 13312/61440 | 3 tok/s | eta 265 min
+# calibrate 16384/61440 | 3 tok/s | eta 260 min
+# calibrate 19456/61440 | 3 tok/s | eta 268 min
+# calibrate 22528/61440 | 3 tok/s | eta 247 min
+# calibrate 25600/61440 | 3 tok/s | eta 224 min
+# calibrate 28672/61440 | 3 tok/s | eta 197 min
+# calibrate 31744/61440 | 3 tok/s | eta 172 min
+# calibrate 34816/61440 | 3 tok/s | eta 150 min
+# calibrate 37888/61440 | 3 tok/s | eta 129 min
+# calibrate 40960/61440 | 3 tok/s | eta 110 min
+# calibrate 44032/61440 | 3 tok/s | eta 95 min
+# calibrate 47104/61440 | 3 tok/s | eta 78 min
+# calibrate 50176/61440 | 3 tok/s | eta 62 min
+# calibrate 53248/61440 | 3 tok/s | eta 45 min
+# calibrate 56320/61440 | 3 tok/s | eta 28 min
+# calibrate 59392/61440 | 3 tok/s | eta 11 min
+# calibrated in 20559s (3 tok/s)
+# table dumped: .benchmarks\012_kv_table_residual.bin sha 3a0f5333d6bafd63…
+# G3 probe: PASS
+# eval: 12 chunks × 1023 = 12276 scored per arm | λ [0.0, 0.5, 1.0]
+# arm f16 done: 12276 scored | ppl 6.0907 | 3 fwd/s
+# arm k-0.00 done: 12276 scored | ppl 1884959.3480 | 3 fwd/s
+# arm k-0.50 done: 12276 scored | ppl 11233.3113 | 2 fwd/s
+# arm k-1.00 done: 12276 scored | ppl 563.7147 | 2 fwd/s
+# λ* = 1 (mean ΔNLL vs k-0 -8.11487) — grid armed
+# grid: incumbent (all λ=1) search-chunk ppl 2859.4870
+# grid layer 0: λ 1 (Δ +0.00000)
+# grid layer 1: λ 1 (Δ +0.00000)
+# grid layer 2: λ 1 (Δ +0.00000)
+# grid layer 3: λ 1 (Δ +0.00000)
+# grid layer 4: λ 0.5 (Δ -0.05281)
+# grid layer 5: λ 1 (Δ +0.00000)
+# grid layer 6: λ 1 (Δ +0.00000)
+# grid layer 7: λ 0 (Δ -0.08818)
+# grid layer 8: λ 0 (Δ -0.11126)
+# grid layer 9: λ 0.5 (Δ -0.05350)
+# grid layer 10: λ 0 (Δ -0.06517)
+# grid layer 11: λ 0.5 (Δ -0.05170)
+# grid layer 12: λ 1 (Δ +0.00000)
+# grid layer 13: λ 1 (Δ +0.00000)
+# grid layer 14: λ 0 (Δ -0.21499)
+# grid layer 15: λ 0.5 (Δ -0.17022)
+# grid layer 16: λ 1 (Δ +0.00000)
+# grid layer 17: λ 0.5 (Δ -0.15893)
+# grid layer 18: λ 1 (Δ +0.00000)
+# grid layer 19: λ 0.5 (Δ -0.00821)
+# grid layer 20: λ 1 (Δ +0.00000)
+# grid layer 21: λ 1 (Δ +0.00000)
+# grid layer 22: λ 0 (Δ -0.00718)
+# grid layer 23: λ 0 (Δ -0.01643)
+# grid layer 24: λ 1 (Δ +0.00000)
+# grid layer 25: λ 1 (Δ +0.00000)
+# grid done: chosen ΔNLL vs incumbent -0.01643 on the search chunk
+# arm k-sched done: ppl 1238.0031 | 4 fwd/s
+Error: niah trial 0 (sunset1000)
+
+Caused by:
+    niah build: token budget 972 < target 1023 (grow the filler)
+=== run exited (2026-09-30  6:30:50.20) rc=1 === 
