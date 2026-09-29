@@ -4562,6 +4562,167 @@ impl Qwen38DenseForward {
         Ok(!(packed as u32))
     }
 
+    /// **Per-layer attention-Q capture** (katgpt-rs Issue 908 / Plan 612
+    /// T2.1 — the PISA pyramid selection gate's real-tensor fixture tap).
+    /// After each Attention layer listed in `q_capture_layers` completes,
+    /// the layer's post-RoPE query row `self.q_normed` (`[n_head *
+    /// head_dim]` — the exact buffer the decode attention kernels score
+    /// with; `launch_rope` rewrites it in place and nothing writes it again
+    /// until the NEXT Attention layer) is downloaded into
+    /// `q_capture_out[i][..n_head * head_dim]`.
+    ///
+    /// The K twin needs no tap: `forward_attn_layer` appends the post-RoPE
+    /// K row into `state.keys[attn_idx][pos * kvd ..]`, so the caller
+    /// downloads the KV cache directly after the fill (under the Issue-753
+    /// f16 hatch the halves ride the f32 words — decode with
+    /// [`kv_f16_bits::f16_to_f32`]).
+    ///
+    /// `q_capture_layers` must be strictly ascending model-layer indices
+    /// whose `layer_types` entry is `Attention`; one buffer per entry, each
+    /// `>= n_head * head_dim`. Same diagnostic cadence as
+    /// [`Self::forward_token_capture`]: one sync + one small dtoh per tap,
+    /// never a hot path. Returns the greedy argmax token (the same
+    /// first-index convention as [`Self::forward_token`]).
+    pub fn forward_token_attn_q_capture(
+        &mut self,
+        token: u32,
+        pos: usize,
+        q_capture_layers: &[usize],
+        q_capture_out: &mut [Vec<f32>],
+    ) -> Result<u32, String> {
+        let cfg = &self.cfg;
+        let n = cfg.n_embd;
+        let qd = cfg.n_head * cfg.head_dim;
+        assert_eq!(q_capture_layers.len(), q_capture_out.len());
+        for w in q_capture_out.iter() {
+            assert!(
+                w.len() >= qd,
+                "q capture buffers must be >= n_head * head_dim"
+            );
+        }
+        for w in q_capture_layers.windows(2) {
+            assert!(w[0] < w[1], "q_capture_layers must be strictly ascending");
+        }
+        for &li in q_capture_layers {
+            assert!(
+                cfg.layer_types[li] == Qwen38LayerType::Attention,
+                "q_capture layer {li} is not an Attention layer"
+            );
+        }
+        // T4: a capture write clobbers KV rows [pos, ..) exactly like a
+        // decode step — keep the prefix-cache lineage rule identical.
+        self.prefix_cache.note_write(pos);
+        let stream = &self.stream;
+        self.embed_row(token)?;
+        let mut cap_i = 0usize;
+        let mut gdn_idx = 0usize;
+        let mut attn_idx = 0usize;
+        if self.res_nq_fused {
+            // Issue 755 fused boundary chain (same sequence as
+            // run_layer_stack's fused arm). The tap window is identical to
+            // the unfused arm — q_normed survives the fused boundary
+            // kernels untouched until the next Attention layer rewrites it.
+            self.copy_f32(&self.x, &self.x_res, n)?;
+            self.rmsnorm_quant_x(
+                &self.x,
+                &self.weights.layers[0].input_norm.dev,
+                n,
+                cfg.rms_norm_eps,
+            )?;
+            for i in 0..cfg.n_layer {
+                match cfg.layer_types[i] {
+                    Qwen38LayerType::Deltanet => {
+                        self.forward_gdn_layer(i, gdn_idx)?;
+                        gdn_idx += 1;
+                    }
+                    Qwen38LayerType::Attention => {
+                        self.forward_attn_layer(i, attn_idx, pos)?;
+                        if cap_i < q_capture_layers.len() && q_capture_layers[cap_i] == i {
+                            stream.synchronize().map_err(|e| e.to_string())?;
+                            let row = stream
+                                .clone_dtoh(&self.q_normed)
+                                .map_err(|e| e.to_string())?;
+                            q_capture_out[cap_i][..qd].copy_from_slice(&row[..qd]);
+                            cap_i += 1;
+                        }
+                        attn_idx += 1;
+                    }
+                }
+                self.residual_norm_quant_x(&self.y, &self.weights.layers[i].post_attn_norm.dev)?;
+                self.forward_mlp(i)?;
+                if i + 1 < cfg.n_layer {
+                    self.residual_norm_quant_x(
+                        &self.y,
+                        &self.weights.layers[i + 1].input_norm.dev,
+                    )?;
+                } else {
+                    self.ew
+                        .launch_residual_add(stream, &self.x_res, &self.y, &self.x, n)
+                        .map_err(|e| e.to_string())?;
+                }
+            }
+        } else {
+            for i in 0..cfg.n_layer {
+                self.copy_f32(&self.x, &self.x_res, n)?;
+                match cfg.layer_types[i] {
+                    Qwen38LayerType::Deltanet => {
+                        self.forward_gdn_layer(i, gdn_idx)?;
+                        gdn_idx += 1;
+                    }
+                    Qwen38LayerType::Attention => {
+                        self.forward_attn_layer(i, attn_idx, pos)?;
+                        if cap_i < q_capture_layers.len() && q_capture_layers[cap_i] == i {
+                            stream.synchronize().map_err(|e| e.to_string())?;
+                            let row = stream
+                                .clone_dtoh(&self.q_normed)
+                                .map_err(|e| e.to_string())?;
+                            q_capture_out[cap_i][..qd].copy_from_slice(&row[..qd]);
+                            cap_i += 1;
+                        }
+                        attn_idx += 1;
+                    }
+                }
+                self.copy_f32(&self.x, &self.x_res, n)?;
+                self.forward_mlp(i)?;
+            }
+        }
+
+        self.rmsnorm_quant_x(&self.x, &self.weights.output_norm.dev, n, cfg.rms_norm_eps)?;
+        self.gemv_quant(&self.weights.lm_head, &self.logits)?;
+        stream
+            .memcpy_htod(ZERO_U64.as_slice(), &mut self.argmax_res)
+            .map_err(|e| e.to_string())?;
+        self.ew
+            .launch_argmax_first(stream, &self.logits, self.cfg.vocab_size, &self.argmax_res)
+            .map_err(|e| e.to_string())?;
+        stream.synchronize().map_err(|e| e.to_string())?;
+        let packed = stream
+            .clone_dtoh(&self.argmax_res)
+            .map_err(|e| e.to_string())?[0];
+        Ok(!(packed as u32))
+    }
+
+    /// **Diagnostic K-cache download** (katgpt-rs Issue 908 / Plan 612
+    /// T2.1 — the Q/K capture bin's K half). Downloads the first `words`
+    /// f32 words of FA layer `attn_idx`'s key cache. Under the Issue-753
+    /// f16 hatch the halves ride the f32 words (`ctx_len*kvd/2` words hold
+    /// `ctx_len*kvd` halves — decode with [`kv_f16_bits::f16_to_f32`],
+    /// low half first). One sync + one dtoh per call — the
+    /// `forward_token_capture` diagnostic cadence, never a hot path.
+    pub fn download_k_cache(&self, attn_idx: usize, words: usize) -> Result<Vec<f32>, String> {
+        let kc = &self.state.keys[attn_idx];
+        if kc.len() < words {
+            return Err(format!(
+                "k cache at attn_idx {attn_idx} holds {} words, requested {words}",
+                kc.len()
+            ));
+        }
+        let stream = &self.stream;
+        stream.synchronize().map_err(|e| e.to_string())?;
+        let host = stream.clone_dtoh(kc).map_err(|e| e.to_string())?;
+        Ok(host[..words].to_vec())
+    }
+
     /// lm_head rows for an EXTERNAL caller (Issue 742 T3 — the DFlash2
     /// drafter's noise block consumes the target's output projection; the
     /// shared-weights contract — the drafter GGUF ships no `output` tensor).

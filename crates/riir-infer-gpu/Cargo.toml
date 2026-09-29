@@ -202,6 +202,16 @@ gemma4_gpu = ["cubecl_runtime", "riir-infer-core/gemma4_inference"]
 name = "bench_663_t5_single_gemm_isolation"
 required-features = ["cubecl_runtime", "ternary_gemm_batched", "metal_tensor_gemm"]
 
+# katgpt-rs Issue 908 / Plan 612 T2.1 — the FA-layer Q/K capture bin (the
+# PISA pyramid selection gate's fixture producer; 4090 cudarc lane).
+# Whole-file #![cfg] inside keeps non-CUDA hosts an empty target; this row
+# is the bench_663 reader protection. blake3 + serde_json arrive via the
+# feature union (cubecl_runtime activates dep:blake3; serde_json is a
+# plain dependency of this crate).
+[[bin]]
+name = "qwen38_pyramid_capture"
+required-features = ["ternary_gemv_cuda_raw"]
+
 [dev-dependencies]
 # Test RNG (qwen38_dflash2_gpu determinism fixtures; version matches the
 # engine gpu crate's).
