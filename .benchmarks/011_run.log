@@ -1,0 +1,185 @@
+# fitted_v_gate: gemma-2 f16 | layers=26 n_embd=2304 kv_dim=1024 vocab=256000 | load 11.3s
+# corpus: 13121614 chars → 2702627 tokens | cal [0..61440) eval [61440..73728) seq_len=1024
+# calibrate 1024/61440 | 9 tok/s | eta 108 min
+# calibrate 4096/61440 | 9 tok/s | eta 104 min
+# calibrate 7168/61440 | 9 tok/s | eta 97 min
+# calibrate 10240/61440 | 9 tok/s | eta 91 min
+# calibrate 13312/61440 | 9 tok/s | eta 85 min
+# calibrate 16384/61440 | 9 tok/s | eta 80 min
+# calibrate 19456/61440 | 9 tok/s | eta 74 min
+# calibrate 22528/61440 | 9 tok/s | eta 69 min
+# calibrate 25600/61440 | 9 tok/s | eta 63 min
+# calibrate 28672/61440 | 9 tok/s | eta 58 min
+# calibrate 31744/61440 | 9 tok/s | eta 52 min
+# calibrate 34816/61440 | 9 tok/s | eta 47 min
+# calibrate 37888/61440 | 9 tok/s | eta 42 min
+# calibrate 40960/61440 | 9 tok/s | eta 36 min
+# calibrate 44032/61440 | 9 tok/s | eta 31 min
+# calibrate 47104/61440 | 9 tok/s | eta 26 min
+# calibrate 50176/61440 | 9 tok/s | eta 20 min
+# calibrate 53248/61440 | 9 tok/s | eta 15 min
+# calibrate 56320/61440 | 9 tok/s | eta 9 min
+# calibrate 59392/61440 | 9 tok/s | eta 4 min
+# calibrated in 6632s (9 tok/s) | box: 4090 workstation i7-13700K, CPU lane
+# frozen: top_k=8192 (26 layers × 7348 rows × 1024 wide) + dial top_k=1024 | mean ρ_l(V)=0.5256 (Bench-004 shape: 0.48 at 120k)
+
+# Gate 4a — sink-mean absorption (‖E^V[BOS]‖/√d vs median tracked row)
+
+| layer | ‖E^V[BOS]‖/√d | median row ‖·‖/√d | ratio |
+|---|---|---|---|
+| 0 | (BOS untracked) | — | — |
+| 13 | (BOS untracked) | — | — |
+| 25 | (BOS untracked) | — | — |
+
+(A ratio » 1 means the BOS sink's V mean is far larger than a typical token's — the table absorbs it as `E^V[BOS]`, so the mean-removed encode quantizes the residual, not the sink.)
+# eval: 12 chunks × 1023 corpus tokens | 12276 scored per arm | bits [2, 3, 4]
+# probe: f16_hk(NoVQuant) bit-identical to forward_gemma2_f16 (pos 0+1)
+# arm f16 done: 12276 scored | ppl 6.0907 | flip 0.00% | 4 fwd/s | 2762s
+# arm p-b2 done: 12276 scored | ppl 6.0957 | flip 1.04% | 2 fwd/s | 5180s
+# arm p-b3 done: 12276 scored | ppl 6.0761 | flip 5.72% | 3 fwd/s | 4589s
+# arm p-b4 done: 12276 scored | ppl 6.0986 | flip 2.63% | 2 fwd/s | 5639s
+# arm mr-b2 done: 12276 scored | ppl 6.0944 | flip 1.11% | 2 fwd/s | 5749s
+# arm mr-b3 done: 12276 scored | ppl 6.1805 | flip 5.17% | 2 fwd/s | 5589s
+# arm mr-b4 done: 12276 scored | ppl 6.1285 | flip 2.88% | 2 fwd/s | 5477s
+# arm mr-b4-k1024 done: 12276 scored | ppl 6.1212 | flip 2.38% | 2 fwd/s | 5111s
+# Issue 013 T1 — fitted-V P1 gate: gemma-2-2b decode (fitted_v_gate)
+
+status: FINAL (12276 scored per completed arm / 12276 total) | arms 8/8 | cal 61440 eval 12288 tokens | seq_len 1024 | top_k 8192 dial_k 1024
+
+Pre-registered gates: (1) |ratio_l − (1−ρ_l)| ≤ 0.20 on ≥ 20/26 layers AND |mean ratio − mean pred| ≤ 0.10 at 3+4 bits (2-bit: direction-only, the absmax caveat is the arbiter) · (2) mean paired ΔNLL(mr−plain) < 0 at every bits, secondary chunk win share > 0.5 · (3) per-band conditional view, recorded honestly · (4) sink-window flips(mr) ≤ flips(plain) at every bits.
+
+## Arms
+
+| arm | ppl | Δppl vs base | mean \|ΔNLL\| | flip | tok/s |
+|---|---|---|---|---|---|
+| f16 | 6.0907 | +0.000% | — | — | 4.4 |
+| p-b2 | 6.0957 | +0.083% | 0.02319 | 1.04% | 2.4 |
+| p-b3 | 6.0761 | -0.239% | 0.10908 | 5.72% | 2.7 |
+| p-b4 | 6.0986 | +0.130% | 0.04956 | 2.63% | 2.2 |
+| mr-b2 | 6.0944 | +0.061% | 0.02211 | 1.11% | 2.1 |
+| mr-b3 | 6.1805 | +1.474% | 0.10344 | 5.17% | 2.2 |
+| mr-b4 | 6.1285 | +0.621% | 0.05073 | 2.88% | 2.2 |
+| mr-b4-k1024 | 6.1212 | +0.501% | 0.04602 | 2.38% | 2.4 |
+
+## Gate 1 — prediction vs measurement (mr/plain MSE ratio vs 1 − ρ_l(V))
+
+| layer | 1−ρ (pred) | ratio b2 | ratio b3 | ratio b4 |
+|---|---|---|---|---|
+| 0 | 0.000 | 0.102 | 0.117 | 0.117 |
+| 1 | 0.121 | 0.300 | 0.389 | 0.388 |
+| 2 | 0.171 | 0.362 | 0.422 | 0.425 |
+| 3 | 0.282 | 0.460 | 0.455 | 0.455 |
+| 4 | 0.449 | 0.630 | 0.537 | 0.538 |
+| 5 | 0.489 | 0.709 | 0.671 | 0.668 |
+| 6 | 0.608 | 0.864 | 0.679 | 0.675 |
+| 7 | 0.594 | 0.888 | 1.010 | 1.011 |
+| 8 | 0.575 | 0.935 | 0.880 | 0.884 |
+| 9 | 0.578 | 0.837 | 0.760 | 0.761 |
+| 10 | 0.593 | 0.832 | 0.759 | 0.758 |
+| 11 | 0.641 | 0.926 | 0.889 | 0.889 |
+| 12 | 0.680 | 0.963 | 0.916 | 0.914 |
+| 13 | 0.649 | 0.912 | 0.914 | 0.914 |
+| 14 | 0.628 | 0.908 | 0.856 | 0.862 |
+| 15 | 0.589 | 0.789 | 0.686 | 0.686 |
+| 16 | 0.531 | 0.815 | 0.772 | 0.772 |
+| 17 | 0.552 | 0.776 | 0.718 | 0.720 |
+| 18 | 0.429 | 0.650 | 0.610 | 0.617 |
+| 19 | 0.434 | 0.620 | 0.575 | 0.577 |
+| 20 | 0.386 | 0.591 | 0.539 | 0.540 |
+| 21 | 0.544 | 0.730 | 0.510 | 0.517 |
+| 22 | 0.287 | 0.482 | 0.520 | 0.523 |
+| 23 | 0.419 | 0.624 | 0.649 | 0.650 |
+| 24 | 0.497 | 0.704 | 0.594 | 0.589 |
+| 25 | 0.609 | 0.748 | 0.569 | 0.570 |
+
+- b2: direction-only (absmax caveat is the arbiter): ratio < 1 on 26/26 layers
+- b2 caveat arbiter: encode range (max |V−E|) > raw range (max |V|) on 11/26 layers; global max enc 18.292 vs raw 19.336
+
+- b3: FAIL — within ±0.20 on 15/26 layers (median |Δ| 0.181), |mean ratio − mean pred| = 0.179
+- b3 caveat arbiter: encode range (max |V−E|) > raw range (max |V|) on 11/26 layers; global max enc 18.267 vs raw 19.244
+
+- b4: FAIL — within ±0.20 on 15/26 layers (median |Δ| 0.183), |mean ratio − mean pred| = 0.180
+- b4 caveat arbiter: encode range (max |V−E|) > raw range (max |V|) on 11/26 layers; global max enc 18.274 vs raw 19.218
+
+## Gate 2 — PPL at matched bits (mr vs plain)
+
+| bits | Δppl(mr−plain) | mean paired ΔNLL | chunk win share | verdict |
+|---|---|---|---|---|
+| 2 | -0.022% | -0.00022 | 7/12 (58%) | PASS |
+| 3 | +1.717% | +0.01702 | 0/12 (0%) | FAIL |
+| 4 | +0.489% | +0.00488 | 3/12 (25%) | FAIL |
+
+- coverage dial (mr-b4-k1024 vs k8192): ΔNLL -0.00119 — the cost of dropping table rows 8192→1024 (P(K) 832→104 MiB)
+
+## Gate 3 — per-band conditional retention (target-token frequency bands)
+
+### b2
+
+| band | n | flip p | flip mr | mean\|Δ\| p | mean\|Δ\| mr | mean Δ (mr−plain) |
+|---|---|---|---|---|---|---|
+| top-64 | 5366 | 0.69% | 0.73% | 0.01376 | 0.01282 | -0.00026 |
+| 64–1024 | 3146 | 1.18% | 1.08% | 0.02892 | 0.02643 | +0.00047 |
+| 1024–top_k | 2185 | 1.69% | 1.60% | 0.03133 | 0.03092 | -0.00236 |
+| tail/untracked | 1579 | 1.08% | 1.77% | 0.03254 | 0.03287 | +0.00148 |
+
+### b3
+
+| band | n | flip p | flip mr | mean\|Δ\| p | mean\|Δ\| mr | mean Δ (mr−plain) |
+|---|---|---|---|---|---|---|
+| top-64 | 5366 | 3.82% | 3.37% | 0.06773 | 0.06373 | +0.00776 |
+| 64–1024 | 3146 | 7.09% | 6.52% | 0.12966 | 0.12448 | +0.03090 |
+| 1024–top_k | 2185 | 7.55% | 7.09% | 0.14874 | 0.13820 | +0.01823 |
+| tail/untracked | 1579 | 6.90% | 5.95% | 0.15371 | 0.14840 | +0.01920 |
+
+### b4
+
+| band | n | flip p | flip mr | mean\|Δ\| p | mean\|Δ\| mr | mean Δ (mr−plain) |
+|---|---|---|---|---|---|---|
+| top-64 | 5366 | 1.71% | 1.71% | 0.03048 | 0.03051 | +0.00242 |
+| 64–1024 | 3146 | 3.21% | 3.62% | 0.05999 | 0.06176 | +0.00910 |
+| 1024–top_k | 2185 | 3.89% | 3.94% | 0.06852 | 0.06923 | +0.00353 |
+| tail/untracked | 1579 | 2.85% | 3.93% | 0.06741 | 0.07183 | +0.00672 |
+
+The Bench-895 caveat predicts the mr damage concentrates in OFF-MEAN occurrences of FREQUENT tokens at 2 bits — visible here as a positive top-band mean Δ at b2 even when the aggregate Gate 2 read is negative.
+
+## Gate 4 — sinks
+
+| bits | sink-bin flip p | sink-bin flip mr | body flip mr | verdict |
+|---|---|---|---|---|
+| 2 | 0.00% | 0.00% | 1.14% | PASS (mr ≤ plain) |
+| 3 | 0.00% | 0.00% | 5.34% | PASS (mr ≤ plain) |
+| 4 | 0.00% | 0.00% | 2.98% | PASS (mr ≤ plain) |
+
+# Gate 4a — sink-mean absorption (‖E^V[BOS]‖/√d vs median tracked row)
+
+| layer | ‖E^V[BOS]‖/√d | median row ‖·‖/√d | ratio |
+|---|---|---|---|
+| 0 | (BOS untracked) | — | — |
+| 13 | (BOS untracked) | — | — |
+| 25 | (BOS untracked) | — | — |
+
+(A ratio » 1 means the BOS sink's V mean is far larger than a typical token's — the table absorbs it as `E^V[BOS]`, so the mean-removed encode quantizes the residual, not the sink.)
+
+
+## Coverage + storage
+
+- table bytes (P(K) = b_w·L·K·d_v, b_w=4): top_k 8192 = 832 MiB, dial k1024 = 104 MiB
+- mr-b2: realized table coverage on the eval slice = 87.1% (278122/319488 flushed rows tracked)
+- mr-b3: realized table coverage on the eval slice = 87.1% (278122/319488 flushed rows tracked)
+- mr-b4: realized table coverage on the eval slice = 87.1% (278122/319488 flushed rows tracked)
+- mr-b4-k1024, dial table: realized table coverage on the eval slice = 69.3% (221312/319488 flushed rows tracked)
+- V bytes/token at b2: 300 (packed 256 + rtn scale/zp 8 + var-norm 36 amortized) vs f32 4096 (0.073×)
+- V bytes/token at b3: 428 (packed 384 + rtn scale/zp 8 + var-norm 36 amortized) vs f32 4096 (0.104×)
+- V bytes/token at b4: 556 (packed 512 + rtn scale/zp 8 + var-norm 36 amortized) vs f32 4096 (0.136×)
+- (b2 runs KVarN's skip-varn + grouped-4 RTN posture; the var-norm term above is the stored-meta figure, not per-bits work.)
+
+## Fixture caveats
+
+- 288-tensor conversion, NO q/k-norm (the Bench-004 fixture) — trap-1 re-arms on a standard conversion.
+- Simulation law: lossy rows are rewritten into the plain cache at TILE close (KVarN's own streaming visibility — within-open-tile reads raw, closed-tile reads dequantized). Storage is virtual; the quality surface is exact.
+- KVarN instantiation: tile 128, hadamard OFF, var-norm ON at b > 2, skip-varn + grouped-4 RTN at b2.
+- Tap point: pre-RoPE K / post-W_V V; RoVE OFF (the default decode path). Freeze λ_js = 0; untracked tokens take the plain path (never an error, never a zero-row guess).
+- Calibration and eval are DISJOINT token slices of the same corpus; realized coverage is reported above.
+- MEASUREMENT-ONLY — promotion is katgpt-rs-side and waits on these gates.
+# report written: .benchmarks\011_run_report.md
+# eval done: 8 arms × 12276 scored in 40099s | box: 4090 workstation i7-13700K, CPU lane
