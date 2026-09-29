@@ -2941,15 +2941,14 @@ fn whole_prefill_inner(
                         rot0.kernels
                             .gemm_dense_ab_batched(stream, normx, da, db, a_b, b_b, p, n_v, n)
                             .map_err(|e| e.to_string())?;
-                        unsafe {
-                            stack.ffn.launch_dq_fakequant(
-                                stream,
-                                normx,
-                                n,
-                                p,
-                                crate::dq_fakequant::current_grid(),
-                            )?;
-                        }
+                        dq_fq()?.launch_dq_fakequant(
+                            stream,
+                            normx,
+                            n,
+                            p,
+                            crate::dq_fakequant::current_grid(),
+                        )
+                        .map_err(|e| e.to_string())?;
                         gemm_rot(&qkv_c, normx, qkv_b, qkv_dim, n)?;
                         gemm_pre_rot(&z_c, normx, z_b, v_dim, n)?;
                     } else {
