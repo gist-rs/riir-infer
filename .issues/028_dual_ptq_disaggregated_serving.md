@@ -1,0 +1,15 @@
+# Issue 028 — dual-PTQ disaggregated serving container (resident; no ODP)
+
+**Status:** OPEN — fusion idea, PoC-gated; a Pareto-null vs single-checkpoint at matched TOTAL storage is a pre-registered acceptable outcome.
+
+Master: `.research/004_DQ_Disaggregated_Quantization.md` (arXiv:2609.26333 §2.4–2.6). Quantize one checkpoint twice: a compact decode copy (resident) + a higher-precision prefill copy. This is the modelless ceiling of the paper's trained-prefiller result — and our hardware inverts their headline constraint: at 27B, q4-class prefill + q2-class decode ≈ 21–22 GB fits the 4090 (at the edge) and is trivial on the M3's 64 GB unified memory, so the resident posture needs NO ODP streaming. ODP stays an optional arm (T5) for the day a f16 prefill copy is wanted.
+
+## Tasks
+
+- [ ] **T1 — two-checkpoint loader.** Container naming for tensor variants (`.pf`/`.dec` class suffixes in `gguf_loader.rs`); both copies may live in one GGUF or as two files; load policy: decode copy resident, prefill copy resident-or-lazy.
+- [ ] **T2 — in-process phase handoff.** The paper's engine-to-engine KV+state contract collapses to an in-process handoff for us. Prefill pass produces KVs (and, for hybrid GDN, the recurrent state) with prefill weights; decode consumes them with decode weights. G1: decode-from-handoff logits **byte-identical** to in-process single-checkpoint prefill on a fixed prompt (this state feeds replay-sensitive paths — raw exact, no latent rounding). GDN escape rule carried: recurrence dynamics (`a_log`/`dt_bias`/gate projections) stay SHARED+frozen across the two copies — never diverged per phase.
+- [ ] **T3 — memory budget table.** 27B: decode q2_0 ≈ 7.2 GB + prefill q4_k ≈ 15.2 GB ≈ 22.4 GB (4090: at the edge — record KV headroom honestly; q3-class prefill ≈ 12 GB = comfortable). M3 64 GB: comfortable at q8 prefill. Pin the table in the bench doc; the 4090 arm picks its prefill format from the measured headroom, not the wish.
+- [ ] **T4 — the PTQ-vs-QADD recovery measurement (the science).** With Issue 026's instrument + the accuracy axis: dual-PTQ accuracy recovery vs single-checkpoint at matched TOTAL storage, per family. Then the decomposition: the paper's trained prefiller bought +32.5 MMLU-Pro at 1-bit decode / +7.4 at 2-bit (their Table 5) — *how much survives pure PTQ?* A small fraction is itself a result (it prices what training buys at each bit tier); a large fraction demotes riir-train Plan 430's 27B ambitions honestly.
+- [ ] **T5 — optional ODP arm (deferred by default).** Only if a resident prefill copy ever breaks the budget (f16-class prefill): SSD streaming + the closed-form crossover predictor `T* = (W_pf_bytes / BW_ssd_eff) / t_tok_prefill`, calibrated per box (one 1 GB sequential read + one 128-token prefill timing; predicted vs measured crossover within ±20%). Correctness core if ever built: post-restore decode logits bit-identical to pre-stream (deterministic-replay law).
+
+PoC gate: vs single-checkpoint serving at matched total storage on the league accuracy axis + TTFT at 4K/8K prompts. Null = recorded, container shelved, T4's decomposition number stands on its own.
