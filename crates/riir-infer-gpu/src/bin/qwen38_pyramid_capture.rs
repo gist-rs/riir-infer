@@ -318,13 +318,30 @@ fn run_capture(out: &Path) -> Result<(), String> {
         .output()
         .map_err(|e| format!("nvidia-smi compute-apps probe failed: {e}"))?;
     let apps_csv = String::from_utf8_lossy(&apps.stdout).trim().to_string();
-    if !apps_csv.is_empty() {
+    // Windows desktop processes (DWM, explorer, ShellHost, …) hold WDDM
+    // contexts that nvidia-smi lists with `[N/A]` memory — the AGENTS GPU
+    // rule targets COMPUTE consumers, and a real one reports a parseable
+    // dedicated-memory figure. Refuse only those; record the raw list.
+    let compute_consumers: Vec<&str> = apps_csv
+        .lines()
+        .filter(|line| {
+            let mem = line.rsplit(',').next().unwrap_or("").trim();
+            !mem.is_empty()
+                && mem != "[N/A]"
+                && mem
+                    .trim_end_matches(" MiB")
+                    .parse::<u64>()
+                    .is_ok_and(|m| m > 0)
+        })
+        .collect();
+    if !compute_consumers.is_empty() {
         return Err(format!(
-            "GPU-EXCLUSIVITY refusal: co-resident compute apps:\n{apps_csv}"
+            "GPU-EXCLUSIVITY refusal: co-resident compute apps:\n{}",
+            compute_consumers.join("\n")
         ));
     }
     eprintln!("[pycap] box: {gpu_csv}");
-    eprintln!("[pycap] compute apps: (none — exclusive)");
+    eprintln!("[pycap] compute apps: none with dedicated memory (raw list: {apps_csv})");
 
     // ── env snapshot (posture is recorded, never assumed) ─────────────────
     let mut env_snapshot: Vec<(String, String)> = std::env::vars()
