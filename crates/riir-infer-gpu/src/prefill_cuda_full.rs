@@ -2839,7 +2839,8 @@ fn whole_prefill_inner(
                     n,
                     p,
                     crate::dq_fakequant::current_grid(),
-                )?;
+                )
+                .map_err(|e| e.to_string())?;
             };
             // Issue 980 T4-ALT site (f) / C0.5 — on a folded model the
             // FFN is a folded consumer at BOTH ends: gate/up consume
@@ -2886,7 +2887,8 @@ fn whole_prefill_inner(
                     mlp,
                     p,
                     crate::dq_fakequant::current_grid(),
-                )?;
+                )
+                .map_err(|e| e.to_string())?;
             }
             gemm(down_c, hid_b, ffnout_b, n, mlp)?;
             unsafe {
@@ -3137,7 +3139,8 @@ fn whole_prefill_inner(
                         v_dim,
                         p,
                         crate::dq_fakequant::current_grid(),
-                    )?;
+                    )
+                    .map_err(|e| e.to_string())?;
                 }
                 let out_c = mma_mirror(client, stream, &lw.out_proj).ok_or("out mirror")?;
                 if let Some(rot0) = &rotation {
@@ -3212,7 +3215,8 @@ fn whole_prefill_inner(
                         n,
                         p,
                         crate::dq_fakequant::current_grid(),
-                    )?;
+                    )
+                    .map_err(|e| e.to_string())?;
                 }
                 let wq = lw.attn_wq.as_ref().ok_or("attn_wq")?;
                 let wkv = lw.attn_wkv.as_ref().ok_or("attn_wkv")?;
@@ -3599,7 +3603,8 @@ fn whole_prefill_inner(
                         qa,
                         p,
                         crate::dq_fakequant::current_grid(),
-                    )?;
+                    )
+                    .map_err(|e| e.to_string())?;
                 }
                 if rotation.is_some() {
                     gemm_rot(&wo_c, attn_out_b, aproj_b, n, qa)?;
