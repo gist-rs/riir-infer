@@ -214,7 +214,7 @@ fn cuda_fakequant_matches_host_reference() {
         let mut expected = vec![0f32; buf.len()];
         host_quant_dequant(grid, &buf, &mut expected, dim);
 
-        let mut dev = ctx.alloc(buf.len()).expect("alloc");
+        let mut dev = stream.alloc::<f32>(buf.len()).expect("alloc");
         stream.memcpy_htod(&buf, &mut dev).expect("htod");
         kernels
             .launch_dq_fakequant(&stream, &dev, dim, p, grid)
