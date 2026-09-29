@@ -911,172 +911,6 @@ extern "C" __global__ void argmax_first_f32(
         atomicMax(result, packed);
     }
 }
-// ─── Plan 614 / Issue 026 — the DQ fake-quant kernels (prefill lane) ───────
-//
-// Blockwise activation quantize→dequantize, IN PLACE, mirroring the host
-// reference (dq_fakequant.rs) bit-exactly: per-row blocks (never crossing a
-// token), f16-RNE scale rounding via integer bit ops, roundf (CUDA's native
-// round IS half-away-from-zero — the frozen spec), lowest-index argmax tie
-// -break, full-block shared-memory init (ragged tails contribute 0).
-
-// f32 → f16 → f32 RNE round-trip (== half::f16::from_f32(x).to_f32()).
-__device__ __forceinline__ float dq_f16_round(float x)
-{
-    const unsigned int bits = __float_as_uint(x);
-    const unsigned int sign = bits & 0x80000000u;
-    const int exp_f = (int)((bits >> 23) & 0xFFu);
-    const unsigned int mant = bits & 0x007FFFFFu;
-    if (exp_f == 0xFF) return __uint_as_float(sign | 0x7F800000u); // ±Inf
-    if (exp_f == 0) return __uint_as_float(sign); // subnormal f32 → ±0
-    const int e = exp_f - 127 + 15;
-    if (e >= 0x1F) return __uint_as_float(sign | 0x7F800000u); // overflow
-    if (e <= 0) {
-        // f16-subnormal range: nearest multiple of 2^-24.
-        const unsigned int m24 = mant | 0x00800000u;
-        const int shi = 126 - exp_f;
-        if (shi > 24) return __uint_as_float(sign);
-        const unsigned int sh = (unsigned int)shi;
-        const unsigned int kept = m24 >> sh;
-        const unsigned int rem = m24 & ((1u << sh) - 1u);
-        const unsigned int half = 1u << (sh - 1);
-        unsigned int k = kept;
-        if (rem > half || (rem == half && (kept & 1u))) k = kept + 1u;
-        if (k >= 1024u) return __uint_as_float(sign | (113u << 23)); // 2^-14
-        if (k == 0u) return __uint_as_float(sign);
-        // k × 2^-24 from bits (leading bit p, normalized mantissa).
-        unsigned int kk = k, p = 0;
-        while (kk > 1u) { kk >>= 1; p += 1u; }
-        return __uint_as_float(sign | (((p + 127u - 24u) << 23) | ((k << (23u - p)) & 0x007FFFFFu)));
-    }
-    // Normal: round the 23-bit mantissa to 10 bits (RNE).
-    unsigned int h10 = mant >> 13;
-    const unsigned int rem = mant & 0x1FFFu;
-    const unsigned int half = 0x1000u;
-    int e2 = e;
-    if (rem > half || (rem == half && (h10 & 1u))) {
-        h10 += 1u;
-        if (h10 == 0x400u) { h10 = 0; e2 = e + 1; }
-    }
-    if (e2 >= 0x1F) return __uint_as_float(sign | 0x7F800000u);
-    return __uint_as_float(sign | ((((unsigned int)(e2 - 15 + 127)) << 23) | (h10 << 13)));
-}
-
-// A2 — asymmetric 4-level, per-128, d = sign(argmax|a|)·f16(amax/2).
-// One 128-thread block per (row, block). roundf = half-away (the spec).
-extern "C" __global__ void dq_fq_a2(
-    float* __restrict__ buf,  // [rows * dim], row-major, in place
-    int dim, int blocks_per_row, int rows)
-{
-    const int row = blockIdx.x / blocks_per_row;
-    const int blk = blockIdx.x % blocks_per_row;
-    if (row >= rows) return;
-    const int base = row * dim + blk * 128;
-    const int row_end = row * dim + dim;
-    if (base >= row_end) return;
-    const int n_here = (base + 128 <= row_end) ? 128 : (row_end - base);
-    const int tid = threadIdx.x; // 0..127
-
-    __shared__ float sm[128];
-    __shared__ int si[128];
-    const bool live = tid < n_here;
-    const float orig = live ? buf[base + tid] : 0.0f;
-    sm[tid] = live ? fabsf(orig) : 0.0f;
-    si[tid] = tid;
-    __syncthreads();
-
-    for (int s = 64; s > 0; s >>= 1) {
-        if (tid < s) {
-            if (sm[tid + s] > sm[tid] || (sm[tid + s] == sm[tid] && si[tid + s] < si[tid])) {
-                sm[tid] = sm[tid + s];
-                si[tid] = si[tid + s];
-            }
-        }
-        __syncthreads();
-    }
-    if (!live) return;
-    const float amax = sm[0];
-    if (amax == 0.0f) { buf[base + tid] = 0.0f; return; }
-    const float sign_val = buf[base + si[0]]; // still original
-    const float sgn = (sign_val < 0.0f) ? -1.0f : 1.0f;
-    const float d = dq_f16_round(sgn * amax / 2.0f);
-    if (d == 0.0f) { buf[base + tid] = 0.0f; return; }
-    const float q = fminf(fmaxf(roundf(orig / d), -1.0f), 2.0f);
-    buf[base + tid] = q * d;
-}
-
-// A4 — affine 16-level, per-32, s = f16((max−min)/15). One 32-thread block.
-extern "C" __global__ void dq_fq_a4(
-    float* __restrict__ buf,
-    int dim, int blocks_per_row, int rows)
-{
-    const int row = blockIdx.x / blocks_per_row;
-    const int blk = blockIdx.x % blocks_per_row;
-    if (row >= rows) return;
-    const int base = row * dim + blk * 32;
-    const int row_end = row * dim + dim;
-    if (base >= row_end) return;
-    const int n_here = (base + 32 <= row_end) ? 32 : (row_end - base);
-    const int tid = threadIdx.x; // 0..31
-
-    __shared__ float smn[32];
-    __shared__ float smx[32];
-    const bool live = tid < n_here;
-    const float orig = live ? buf[base + tid] : 0.0f;
-    smn[tid] = live ? orig : 1e30f;
-    smx[tid] = live ? orig : -1e30f;
-    __syncthreads();
-
-    for (int s = 16; s > 0; s >>= 1) {
-        if (tid < s) {
-            if (smn[tid + s] < smn[tid]) smn[tid] = smn[tid + s];
-            if (smx[tid + s] > smx[tid]) smx[tid] = smx[tid + s];
-        }
-        __syncthreads();
-    }
-    if (!live) return;
-    const float mn = smn[0], mx = smx[0];
-    const float range = mx - mn;
-    if (!(range > 0.0f)) { buf[base + tid] = mn; return; }
-    const float s = dq_f16_round(range / 15.0f);
-    if (s == 0.0f) { buf[base + tid] = orig; return; }
-    const float q = fminf(fmaxf(roundf((orig - mn) / s), 0.0f), 15.0f);
-    buf[base + tid] = q * s + mn;
-}
-
-// A8 — symmetric int8 control, per-128, d = f16(amax/127).
-extern "C" __global__ void dq_fq_a8(
-    float* __restrict__ buf,
-    int dim, int blocks_per_row, int rows)
-{
-    const int row = blockIdx.x / blocks_per_row;
-    const int blk = blockIdx.x % blocks_per_row;
-    if (row >= rows) return;
-    const int base = row * dim + blk * 128;
-    const int row_end = row * dim + dim;
-    if (base >= row_end) return;
-    const int n_here = (base + 128 <= row_end) ? 128 : (row_end - base);
-    const int tid = threadIdx.x; // 0..127
-
-    __shared__ float sm[128];
-    const bool live = tid < n_here;
-    const float orig = live ? buf[base + tid] : 0.0f;
-    sm[tid] = live ? fabsf(orig) : 0.0f;
-    __syncthreads();
-
-    for (int s = 64; s > 0; s >>= 1) {
-        if (tid < s) {
-            if (sm[tid + s] > sm[tid]) sm[tid] = sm[tid + s];
-        }
-        __syncthreads();
-    }
-    if (!live) return;
-    const float amax = sm[0];
-    if (amax == 0.0f) { buf[base + tid] = 0.0f; return; }
-    const float d = dq_f16_round(amax / 127.0f);
-    if (d == 0.0f) { buf[base + tid] = 0.0f; return; }
-    const float q = fminf(fmaxf(roundf(orig / d), -127.0f), 127.0f);
-    buf[base + tid] = q * d;
-}
 "#;
 
 /// Error type for cudarc kernel operations.
@@ -1140,11 +974,6 @@ pub struct ElementwiseKernels {
     rmsnorm_gate_silu_quantize: CudaFunction,
     /// Issue 697 — GPU-side argmax (first-index tie-break, CPU-exact).
     argmax_first: CudaFunction,
-    /// Plan 614 / Issue 026 — the DQ fake-quant kernels (per grid; the
-    /// launcher is `launch_dq_fakequant`).
-    dq_fq_a2: CudaFunction,
-    dq_fq_a4: CudaFunction,
-    dq_fq_a8: CudaFunction,
     _module: Arc<CudaModule>,
 }
 
@@ -1209,17 +1038,6 @@ impl ElementwiseKernels {
         let argmax_first = module
             .load_function("argmax_first_f32")
             .map_err(|e| CudarcKernelError::Compile(format!("{e}")))?;
-        // Plan 614 / Issue 026 — the DQ fake-quant kernels (prefill lane).
-        let dq_fq_a2 = module
-            .load_function("dq_fq_a2")
-            .map_err(|e| CudarcKernelError::Compile(format!("{e}")))?;
-        let dq_fq_a4 = module
-            .load_function("dq_fq_a4")
-            .map_err(|e| CudarcKernelError::Compile(format!("{e}")))?;
-        let dq_fq_a8 = module
-            .load_function("dq_fq_a8")
-            .map_err(|e| CudarcKernelError::Compile(format!("{e}")))?;
-
         Ok(Self {
             rmsnorm,
             residual_add,
@@ -1235,9 +1053,6 @@ impl ElementwiseKernels {
             gate_sigmoid_quantize,
             rmsnorm_gate_silu_quantize,
             argmax_first,
-            dq_fq_a2,
-            dq_fq_a4,
-            dq_fq_a8,
             _module: module,
         })
     }
@@ -1744,53 +1559,6 @@ impl ElementwiseKernels {
     ///
     /// where `silu(x) = x * sigmoid(x) = x / (1 + exp(-x))`.
     ///
-    /// Plan 614 / Issue 026 — launch the DQ fake-quant kernel over `buf`
-    /// viewed as `[rows][dim]` row-major, IN PLACE, on the given grid. Mirrors
-    /// the host reference bit-exactly (G-i3's CUDA-lane arm). No dispatch
-    /// unless the prefill arm is armed; bumps the prefill launch counter.
-    #[cfg(feature = "dq_phase_bench")]
-    pub fn launch_dq_fakequant(
-        &self,
-        stream: &CudaStream,
-        buf: &cudarc::driver::safe::CudaSlice<f32>,
-        dim: usize,
-        rows: usize,
-        grid: crate::dq_fakequant::DqGrid,
-    ) -> Result<(), CudarcKernelError> {
-        use crate::dq_fakequant::{note_prefill_launch, prefill_armed};
-        if !prefill_armed() {
-            return Ok(());
-        }
-        let block = grid.block();
-        let blocks_per_row = dim.div_ceil(block);
-        let total = (blocks_per_row * rows) as u32;
-        let dim_i = dim as i32;
-        let bpr_i = blocks_per_row as i32;
-        let rows_i = rows as i32;
-        let (func, block_dim) = match grid {
-            crate::dq_fakequant::DqGrid::A4 => (&self.dq_fq_a4, 32u32),
-            crate::dq_fakequant::DqGrid::A8 => (&self.dq_fq_a8, 128u32),
-            crate::dq_fakequant::DqGrid::A2 => (&self.dq_fq_a2, 128u32),
-        };
-        let cfg = LaunchConfig {
-            grid_dim: (total.max(1), 1, 1),
-            block_dim: (block_dim, 1, 1),
-            shared_mem_bytes: 0,
-        };
-        unsafe {
-            stream
-                .launch_builder(func)
-                .arg(buf)
-                .arg(&dim_i)
-                .arg(&bpr_i)
-                .arg(&rows_i)
-                .launch(cfg)
-                .map_err(|e| CudarcKernelError::Launch(e.to_string()))?;
-        }
-        note_prefill_launch();
-        Ok(())
-    }
-
     /// Launch SwiGLU: `output[i] = silu(gate[i]) * up[i]`.
     ///
     /// where `silu(x) = x * sigmoid(x) = x / (1 + exp(-x))`.
@@ -2760,5 +2528,273 @@ mod tests {
             assert_eq!(idx, cpu, "GPU argmax diverged from CPU first-index argmax");
         }
         eprintln!("[argmax_first] n={n}: gpu == cpu == {cpu} (with duplicate maxima)");
+    }
+}
+
+/// Plan 614 / Issue 026 — the DQ fake-quant kernel source (compiled as its
+/// own module by [`DqFqKernels`]; mirrors the host reference bit-exactly).
+pub(crate) const DQ_FQ_CUDA_SRC: &str = r#"
+// ─── Plan 614 / Issue 026 — the DQ fake-quant kernels (prefill lane) ───────
+//
+// Blockwise activation quantize→dequantize, IN PLACE, mirroring the host
+// reference (dq_fakequant.rs) bit-exactly: per-row blocks (never crossing a
+// token), f16-RNE scale rounding via integer bit ops, roundf (CUDA's native
+// round IS half-away-from-zero — the frozen spec), lowest-index argmax tie
+// -break, full-block shared-memory init (ragged tails contribute 0).
+
+// f32 → f16 → f32 RNE round-trip (== half::f16::from_f32(x).to_f32()).
+__device__ __forceinline__ float dq_f16_round(float x)
+{
+    const unsigned int bits = __float_as_uint(x);
+    const unsigned int sign = bits & 0x80000000u;
+    const int exp_f = (int)((bits >> 23) & 0xFFu);
+    const unsigned int mant = bits & 0x007FFFFFu;
+    if (exp_f == 0xFF) return __uint_as_float(sign | 0x7F800000u); // ±Inf
+    if (exp_f == 0) return __uint_as_float(sign); // subnormal f32 → ±0
+    const int e = exp_f - 127 + 15;
+    if (e >= 0x1F) return __uint_as_float(sign | 0x7F800000u); // overflow
+    if (e <= 0) {
+        // f16-subnormal range: nearest multiple of 2^-24.
+        const unsigned int m24 = mant | 0x00800000u;
+        const int shi = 126 - exp_f;
+        if (shi > 24) return __uint_as_float(sign);
+        const unsigned int sh = (unsigned int)shi;
+        const unsigned int kept = m24 >> sh;
+        const unsigned int rem = m24 & ((1u << sh) - 1u);
+        const unsigned int half = 1u << (sh - 1);
+        unsigned int k = kept;
+        if (rem > half || (rem == half && (kept & 1u))) k = kept + 1u;
+        if (k >= 1024u) return __uint_as_float(sign | (113u << 23)); // 2^-14
+        if (k == 0u) return __uint_as_float(sign);
+        // k × 2^-24 from bits (leading bit p, normalized mantissa).
+        unsigned int kk = k, p = 0;
+        while (kk > 1u) { kk >>= 1; p += 1u; }
+        return __uint_as_float(sign | (((p + 127u - 24u) << 23) | ((k << (23u - p)) & 0x007FFFFFu)));
+    }
+    // Normal: round the 23-bit mantissa to 10 bits (RNE).
+    unsigned int h10 = mant >> 13;
+    const unsigned int rem = mant & 0x1FFFu;
+    const unsigned int half = 0x1000u;
+    int e2 = e;
+    if (rem > half || (rem == half && (h10 & 1u))) {
+        h10 += 1u;
+        if (h10 == 0x400u) { h10 = 0; e2 = e + 1; }
+    }
+    if (e2 >= 0x1F) return __uint_as_float(sign | 0x7F800000u);
+    return __uint_as_float(sign | ((((unsigned int)(e2 - 15 + 127)) << 23) | (h10 << 13)));
+}
+
+// A2 — asymmetric 4-level, per-128, d = sign(argmax|a|)·f16(amax/2).
+// One 128-thread block per (row, block). roundf = half-away (the spec).
+extern "C" __global__ void dq_fq_a2(
+    float* __restrict__ buf,  // [rows * dim], row-major, in place
+    int dim, int blocks_per_row, int rows)
+{
+    const int row = blockIdx.x / blocks_per_row;
+    const int blk = blockIdx.x % blocks_per_row;
+    if (row >= rows) return;
+    const int base = row * dim + blk * 128;
+    const int row_end = row * dim + dim;
+    if (base >= row_end) return;
+    const int n_here = (base + 128 <= row_end) ? 128 : (row_end - base);
+    const int tid = threadIdx.x; // 0..127
+
+    __shared__ float sm[128];
+    __shared__ int si[128];
+    const bool live = tid < n_here;
+    const float orig = live ? buf[base + tid] : 0.0f;
+    sm[tid] = live ? fabsf(orig) : 0.0f;
+    si[tid] = tid;
+    __syncthreads();
+
+    for (int s = 64; s > 0; s >>= 1) {
+        if (tid < s) {
+            if (sm[tid + s] > sm[tid] || (sm[tid + s] == sm[tid] && si[tid + s] < si[tid])) {
+                sm[tid] = sm[tid + s];
+                si[tid] = si[tid + s];
+            }
+        }
+        __syncthreads();
+    }
+    if (!live) return;
+    const float amax = sm[0];
+    if (amax == 0.0f) { buf[base + tid] = 0.0f; return; }
+    const float sign_val = buf[base + si[0]]; // still original
+    const float sgn = (sign_val < 0.0f) ? -1.0f : 1.0f;
+    const float d = dq_f16_round(sgn * amax / 2.0f);
+    if (d == 0.0f) { buf[base + tid] = 0.0f; return; }
+    const float q = fminf(fmaxf(roundf(orig / d), -1.0f), 2.0f);
+    buf[base + tid] = q * d;
+}
+
+// A4 — affine 16-level, per-32, s = f16((max−min)/15). One 32-thread block.
+extern "C" __global__ void dq_fq_a4(
+    float* __restrict__ buf,
+    int dim, int blocks_per_row, int rows)
+{
+    const int row = blockIdx.x / blocks_per_row;
+    const int blk = blockIdx.x % blocks_per_row;
+    if (row >= rows) return;
+    const int base = row * dim + blk * 32;
+    const int row_end = row * dim + dim;
+    if (base >= row_end) return;
+    const int n_here = (base + 32 <= row_end) ? 32 : (row_end - base);
+    const int tid = threadIdx.x; // 0..31
+
+    __shared__ float smn[32];
+    __shared__ float smx[32];
+    const bool live = tid < n_here;
+    const float orig = live ? buf[base + tid] : 0.0f;
+    smn[tid] = live ? orig : 1e30f;
+    smx[tid] = live ? orig : -1e30f;
+    __syncthreads();
+
+    for (int s = 16; s > 0; s >>= 1) {
+        if (tid < s) {
+            if (smn[tid + s] < smn[tid]) smn[tid] = smn[tid + s];
+            if (smx[tid + s] > smx[tid]) smx[tid] = smx[tid + s];
+        }
+        __syncthreads();
+    }
+    if (!live) return;
+    const float mn = smn[0], mx = smx[0];
+    const float range = mx - mn;
+    if (!(range > 0.0f)) { buf[base + tid] = mn; return; }
+    const float s = dq_f16_round(range / 15.0f);
+    if (s == 0.0f) { buf[base + tid] = orig; return; }
+    const float q = fminf(fmaxf(roundf((orig - mn) / s), 0.0f), 15.0f);
+    buf[base + tid] = q * s + mn;
+}
+
+// A8 — symmetric int8 control, per-128, d = f16(amax/127).
+extern "C" __global__ void dq_fq_a8(
+    float* __restrict__ buf,
+    int dim, int blocks_per_row, int rows)
+{
+    const int row = blockIdx.x / blocks_per_row;
+    const int blk = blockIdx.x % blocks_per_row;
+    if (row >= rows) return;
+    const int base = row * dim + blk * 128;
+    const int row_end = row * dim + dim;
+    if (base >= row_end) return;
+    const int n_here = (base + 128 <= row_end) ? 128 : (row_end - base);
+    const int tid = threadIdx.x; // 0..127
+
+    __shared__ float sm[128];
+    const bool live = tid < n_here;
+    const float orig = live ? buf[base + tid] : 0.0f;
+    sm[tid] = live ? fabsf(orig) : 0.0f;
+    __syncthreads();
+
+    for (int s = 64; s > 0; s >>= 1) {
+        if (tid < s) {
+            if (sm[tid + s] > sm[tid]) sm[tid] = sm[tid + s];
+        }
+        __syncthreads();
+    }
+    if (!live) return;
+    const float amax = sm[0];
+    if (amax == 0.0f) { buf[base + tid] = 0.0f; return; }
+    const float d = dq_f16_round(amax / 127.0f);
+    if (d == 0.0f) { buf[base + tid] = 0.0f; return; }
+    const float q = fminf(fmaxf(roundf(orig / d), -127.0f), 127.0f);
+    buf[base + tid] = q * d;
+}
+"#;
+
+// ---------------------------------------------------------------------------
+// Plan 614 / Issue 026 — the dedicated DQ fake-quant module
+// ---------------------------------------------------------------------------
+
+/// The DQ fake-quant kernels, compiled as their OWN nvrtc module (the prefill
+/// lane's `CudaFfnKernels` and `ElementwiseKernels` compile separate modules —
+/// a CUDA function can only launch from the module it was loaded from, so the
+/// instrument carries its own; one compile per process, shared via `Arc`).
+///
+/// The launch path is `launch_dq_fakequant` — no dispatch unless the prefill
+/// arm is armed; every fired pass bumps the prefill launch counter (D5's
+/// phase-leak detection).
+#[cfg(feature = "dq_phase_bench")]
+pub struct DqFqKernels {
+    a2: CudaFunction,
+    a4: CudaFunction,
+    a8: CudaFunction,
+    _module: Arc<CudaModule>,
+}
+
+#[cfg(feature = "dq_phase_bench")]
+impl DqFqKernels {
+    /// Compile + load once per context (the caller caches the `Arc`).
+    pub fn new(ctx: Arc<CudaContext>) -> Result<Self, CudarcKernelError> {
+        let ptx = cudarc::nvrtc::compile_ptx_with_opts(
+            DQ_FQ_CUDA_SRC,
+            cudarc::nvrtc::CompileOptions {
+                arch: Some("sm_89"),
+                ..Default::default()
+            },
+        )
+        .map_err(|e| CudarcKernelError::Compile(format!("{e}")))?;
+        let module = ctx
+            .load_module(ptx)
+            .map_err(|e| CudarcKernelError::Compile(e.to_string()))?;
+        let a2 = module
+            .load_function("dq_fq_a2")
+            .map_err(|e| CudarcKernelError::Compile(format!("{e}")))?;
+        let a4 = module
+            .load_function("dq_fq_a4")
+            .map_err(|e| CudarcKernelError::Compile(format!("{e}")))?;
+        let a8 = module
+            .load_function("dq_fq_a8")
+            .map_err(|e| CudarcKernelError::Compile(format!("{e}")))?;
+        Ok(Self {
+            a2,
+            a4,
+            a8,
+            _module: module,
+        })
+    }
+
+    /// Launch the grid kernel over `buf` viewed as `[rows][dim]` row-major,
+    /// IN PLACE. No dispatch unless the prefill arm is armed.
+    pub fn launch_dq_fakequant(
+        &self,
+        stream: &CudaStream,
+        buf: &cudarc::driver::safe::CudaSlice<f32>,
+        dim: usize,
+        rows: usize,
+        grid: crate::dq_fakequant::DqGrid,
+    ) -> Result<(), CudarcKernelError> {
+        use crate::dq_fakequant::{note_prefill_launch, prefill_armed};
+        if !prefill_armed() {
+            return Ok(());
+        }
+        let block = grid.block();
+        let blocks_per_row = dim.div_ceil(block);
+        let total = (blocks_per_row * rows) as u32;
+        let dim_i = dim as i32;
+        let bpr_i = blocks_per_row as i32;
+        let rows_i = rows as i32;
+        let (func, block_dim) = match grid {
+            crate::dq_fakequant::DqGrid::A4 => (&self.a4, 32u32),
+            crate::dq_fakequant::DqGrid::A8 => (&self.a8, 128u32),
+            crate::dq_fakequant::DqGrid::A2 => (&self.a2, 128u32),
+        };
+        let cfg = LaunchConfig {
+            grid_dim: (total.max(1), 1, 1),
+            block_dim: (block_dim, 1, 1),
+            shared_mem_bytes: 0,
+        };
+        unsafe {
+            stream
+                .launch_builder(func)
+                .arg(buf)
+                .arg(&dim_i)
+                .arg(&bpr_i)
+                .arg(&rows_i)
+                .launch(cfg)
+                .map_err(|e| CudarcKernelError::Launch(e.to_string()))?;
+        }
+        note_prefill_launch();
+        Ok(())
     }
 }

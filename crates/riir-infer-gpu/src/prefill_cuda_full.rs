@@ -839,6 +839,11 @@ struct FullStack {
     ffn: CudaFfnKernels,
     dn: CudaDeltanetKernels,
     at: CudaAttnKernels,
+    /// Plan 614 / Issue 026 — the DQ fake-quant module, compiled LAZILY on
+    /// the first armed pass (an NVRTC failure here disables only the
+    /// instrument — loud at the injection site, never the prefill lane).
+    #[cfg(feature = "dq_phase_bench")]
+    dq_fq: OnceLock<Option<Arc<crate::cudarc_kernels::DqFqKernels>>>,
     /// Arm 12 — None if NVRTC compile fails (falls back to rowpar).
     gdn_chunked: Option<CudaGdnChunkedKernels>,
     bufs: Mutex<FullBufs>,
@@ -983,6 +988,8 @@ fn build_full_stack() -> Result<FullStack, String> {
         ffn,
         dn,
         at,
+        #[cfg(feature = "dq_phase_bench")]
+        dq_fq: OnceLock::new(),
         gdn_chunked,
         bufs: Mutex::new(FullBufs {
             x: None,
@@ -2645,6 +2652,22 @@ fn whole_prefill_inner(
                         m: usize,
                         n_in: usize|
          -> Result<(), String> { gemm_pair(w, input, out, m, n_in, false) };
+        // Plan 614 / Issue 026 — the shared DQ fake-quant handle (lazily
+        // compiled ONCE per process; a compile failure is a hard error at the
+        // injection site — the instrument must never silently no-op).
+        #[cfg(feature = "dq_phase_bench")]
+        let dq_fq = || -> Result<Arc<crate::cudarc_kernels::DqFqKernels>, String> {
+            let cell = &stack.dq_fq;
+            let arc = cell
+                .get_or_init(|| {
+                    crate::cudarc_kernels::DqFqKernels::new(stream.context().clone())
+                        .map(Arc::new)
+                        .map_err(|e| e.to_string())
+                        .ok()
+                })
+                .clone();
+            arc.ok_or_else(|| "DQ fake-quant module compile failed".to_string())
+        };
         // Issue 902 T1 — the fused gate+up pair: quantize once, then ONE
         // v11gu/v11gut launch (both [m, n] slabs from one B tile stage) when
         // `RIIR_PREFILL_MMQ_GU` arms it; the two-launch fallback otherwise
@@ -2809,8 +2832,8 @@ fn whole_prefill_inner(
             // BEFORE any consumer, so both the fused and unfused routes see
             // the damaged f32 activations).
             #[cfg(feature = "dq_phase_bench")]
-            unsafe {
-                stack.ffn.launch_dq_fakequant(
+            {
+                dq_fq()?.launch_dq_fakequant(
                     stream,
                     normx,
                     n,
@@ -2856,8 +2879,8 @@ fn whole_prefill_inner(
             // Plan 614 site 3 (prefill): fake-quant hid_b AFTER the in-place
             // fold rotation, before the down GEMM's quantize (rotated basis).
             #[cfg(feature = "dq_phase_bench")]
-            unsafe {
-                stack.ffn.launch_dq_fakequant(
+            {
+                dq_fq()?.launch_dq_fakequant(
                     stream,
                     hid_b,
                     mlp,
@@ -3107,8 +3130,8 @@ fn whole_prefill_inner(
                 // the damage lands on the out_proj's actual (rotated) input
                 // basis, mirroring the decode site 5.
                 #[cfg(feature = "dq_phase_bench")]
-                unsafe {
-                    stack.ffn.launch_dq_fakequant(
+                {
+                    dq_fq()?.launch_dq_fakequant(
                         stream,
                         rec_b,
                         v_dim,
@@ -3182,8 +3205,8 @@ fn whole_prefill_inner(
                 // it (no escape-set GEMMs in attention layers — direct
                 // in-place quantize is the whole site).
                 #[cfg(feature = "dq_phase_bench")]
-                unsafe {
-                    stack.ffn.launch_dq_fakequant(
+                {
+                    dq_fq()?.launch_dq_fakequant(
                         stream,
                         normx,
                         n,
@@ -3569,8 +3592,8 @@ fn whole_prefill_inner(
                 // before wo's rotate+q8 quantize (the o_in site; rotated
                 // basis via the fused rotation, mirroring decode site 4).
                 #[cfg(feature = "dq_phase_bench")]
-                unsafe {
-                    stack.ffn.launch_dq_fakequant(
+                {
+                    dq_fq()?.launch_dq_fakequant(
                         stream,
                         attn_out_b,
                         qa,
