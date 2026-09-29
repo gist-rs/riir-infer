@@ -179,14 +179,14 @@ fn cuda_fakequant_matches_host_reference() {
     use riir_infer_gpu::cudarc_kernels::DqFqKernels;
 
     let ctx = match CudaContext::new(0) {
-        Ok(c) => std::sync::Arc::new(c),
+        Ok(c) => c,
         Err(e) => {
             eprintln!("SKIP: no CUDA device ({e})");
             return;
         }
     };
     let stream = match ctx.new_stream() {
-        Ok(s) => std::sync::Arc::new(s),
+        Ok(s) => s,
         Err(e) => {
             eprintln!("SKIP: stream alloc failed ({e})");
             return;
