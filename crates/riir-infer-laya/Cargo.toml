@@ -251,6 +251,13 @@ required-features = ["laya-riir"]
 name = "dump_scorer_tensors"
 required-features = ["laya-riir"]
 
+# riir-train 602 (instinct 014 C2): the TOKN token-id sidecar — the exact
+# build_sequence stream, CPU-cheap, joined row-for-row against the LENC
+# cache by the consumer's seq_len assert.
+[[example]]
+name = "dump_token_ids"
+required-features = ["laya-riir"]
+
 [[example]]
 name = "sgemm_roofline"
 required-features = ["laya-riir-metal"]

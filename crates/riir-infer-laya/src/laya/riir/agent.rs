@@ -521,6 +521,24 @@ impl RiirAgent {
         })
     }
 
+    /// The token twin of [`Self::encode_question`] (riir-train 602: the
+    /// static-vector surrogate's corpus-averaging join). Returns the SAME
+    /// token stream `encode_question` feeds the encoder — the identical
+    /// `to_internal` + `build_sequence` construction with the same budgets —
+    /// so a caller can key per-token hidden states by token id with a
+    /// row-for-row `ids.len() == seq_len` join and zero drift. Pure
+    /// addition; touches no forward path.
+    pub fn tokenize_question(
+        &self,
+        state: &Value,
+        qdef: &Value,
+    ) -> Result<(Vec<u32>, Vec<usize>)> {
+        let q = to_internal(qdef)?;
+        let (ids, markers) =
+            build_sequence(&self.tok, state, &q, self.cfg.max_len, self.cfg.head_max_len)?;
+        Ok((ids, markers))
+    }
+
     /// The internal-typed variant (avoids re-parsing per row in the test).
     pub fn forward_internal(&self, state: &Value, q: &InternalQuestion) -> Result<Forward> {
         let opts = render_options(q);
