@@ -47,6 +47,15 @@ pickup starts at T2, not at zero:
   contract) rather than reuse `Placement::passes()`'s strict laya law.
 - First recon commit: `e8e17b8` (landed Issue 023's missed rename in the
   same pass; unrelated to audio).
+- **Candidate-model addendum (2026-09-30, Research 005):** FermionResearch
+  **Phonon-2** — 164 MB English ASR, 5.21 % WER, ~2.1 bpw five-level
+  encoder, a QAT derivative of the same `parakeet-tdt-0.6b-v3` this lane
+  targets; beats Parakeet Redux at equal size on their harness. Not the
+  first load (English-only vs EN/TH scope; **no CoreML bundle yet** —
+  "coming soon"; weights CC-BY-4.0). Re-evaluate when its CoreML runtime
+  lands, or measure via `fermion serve` (OpenAI-compatible HTTP) as a
+  subprocess comparison lane. Full comparison table:
+  [Research 005](../.research/005_Phonon2_Neutrino1_Ternary_ASR_Lane_Intelligence.md) §2.
 
 ## PoC plan
 

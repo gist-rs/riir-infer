@@ -253,6 +253,11 @@ public substrate's modality surface. It stays zero-`riir-*`-dep by construction,
 the EXTERNAL deps each path would add (objc2-core-ml row exists; fluidaudio-rs / ort
 rows do not) need BOUNDARY.md allowlist rows first — `.issues/015` T0 owns that.
 
+> **Follow-up (2026-09-30):** FermionResearch [Phonon-2 — Introducing Phonon-2]
+> (164 MB / 5.21 % WER English ASR; QAT derivative of the same
+> parakeet-tdt-0.6b-v3) — recorded as a lane candidate + ternary-league
+> competitor intelligence in [Research 005](005_Phonon2_Neutrino1_Ternary_ASR_Lane_Intelligence.md).
+
 ## 8. Provenance
 
 - Clones: `riir-infer/.raw/{FluidAudio,mobius,text-processing-rs}` at the shas in the
