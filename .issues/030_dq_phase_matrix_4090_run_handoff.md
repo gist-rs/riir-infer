@@ -33,6 +33,22 @@ Plan 614 T0–T3 are DONE (round-3 AGREE freeze `d3300f2`; both lanes' kernels +
 - 2026-09-30 ~07:45 ICT: pre-flight found the GPU compute-idle (2%, 655 MiB, GUI-only) but the owner observed **high CPU on the box** and stopped the kickoff. The build was started and aborted by the stop; **verified no orphaned cargo/rustc/dq_phase processes remain** and the worktree was left clean at `4d7304e`. Nothing half-run: no matrix cells were measured.
 - The plan's own precondition ("GPU-exclusive, detached+logged") plus the workspace rule (riir-ai AGENTS §GPU exclusivity — load average is NOT a proxy) makes waiting the correct call, not a deferral of convenience.
 
+## 2026-09-30 ~10:0x +07 — pickup pre-flight RE-CHECK: precondition still unmet (documented, not run)
+
+An idle-loop session picked this up ~2h15m after the deferral: GPU compute still
+clear (nvidia-smi compute-apps = GUI-only, all exempt) but **CPU 83–84%** —
+the documented OpenThai uvicorn pair is burning ~15 cores (pid 29012, 271
+cumulative CPU-hours — an actively-served batch, not an idle server) beside
+`kv_plus_ladder.exe` (~3 cores, the riir-train plan-612 KV-table lane's bench
+over gemma-2-2b). "Re-check overall box idle" fails → the run stays correctly
+deferred; nothing measured, nothing touched, the worktree remains clean at
+`4d7304e`. For the next pickup: both consumers are sibling lanes with unknown
+durations — re-run the pre-flight as written above; if the box has calmed,
+proceed verbatim (steps 2–6 need no re-derivation). Note: the 2026-09-30
+boundary-contract 162nd run flagged `dq614-wt` as contract rot (27th discovered
+repo, no CANONICAL row) — expected shape, self-resolves at this run's own T6
+deletion clause; do not "fix" it separately.
+
 ## Non-goals
 
 - Do not touch Issue 029's lane (sibling-owned WIP).
