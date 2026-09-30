@@ -3,14 +3,19 @@
 **Status:** OPEN — T0 CLOSED (round-3 AGREE, session c65b0114; freeze `d3300f2`).
 T1+T2+T3 DONE: both lanes' kernels + injections (G-i3 green on Metal M3 +
 CUDA 4090, 5/5), the runner release-green on the 4090 (build kicked off in
-`E:/git/dq614-wt`, logs at `F:/wt/dq614-build.*.log`). REMAINS: T5 — the
+`E:/git/dq614-wt`, logs at `F:/wt/dq614-build.*.log`). **T5 DEFERRED
+2026-09-30 on the owner's stop — the box was CPU-busy at kickoff (pre-flight
+GPU was compute-idle; no orphaned processes left; worktree clean at
+`4d7304e`); NOTHING was measured. The turnkey pickup is
+[Issue 030](../.issues/030_dq_phase_matrix_4090_run_handoff.md) (commands,
+diligence, T6 close-out, worktree cleanup).** REMAINS: T5 — the
 4090 RUN (`RIIR_PREFILL_CUDA_GRAPHS=0 BONSAI_GGUF=E:/git/riir-train/data/
 Ternary-Bonsai-2-27B-PQ2_0.gguf cargo run --release -p riir-infer-gpu
 --no-default-features --features dq_phase_bench,ternary_gemv_cuda_raw,
 ternary_gemm_batched --bin dq_phase_matrix`, GPU-exclusive, detached+logged;
 first `DQ_LANE_CHECK_ONLY=1`, then the full matrix) + T6 close-out. The
-worktree `E:/git/dq614-wt` is a shallow clone at origin/develop — refresh it
-before the run, delete after T6.
+worktree `E:/git/dq614-wt` is a shallow clone at origin/develop — refreshed
+to `4d7304e` at deferral, delete after T6.
 
 Master: `.research/004_DQ_Disaggregated_Quantization.md` (arXiv:2609.26333 §2.2) · Issue `.issues/026_phase_sensitivity_quant_bench.md`. The issue's own gate: "Runs AFTER the 2×2 matrix definition review" — T0 below IS that review.
 
