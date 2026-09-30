@@ -46,8 +46,9 @@
 //! 4090 lane (folded prefill is CUDA-only). GPU-EXCLUSIVE (the AGENTS rule):
 //! refuses on co-resident compute apps. Env: `BONSAI_GGUF` · `DQ_OUT` ·
 //! `DQ_GRIDS` (a2,a4) · `DQ_ARITH_N` (48) · `DQ_NI_LENGTHS` (4096,8192,16384)
-//! · `DQ_NI_PER_LEN` (32) · `DQ_BOOTSTRAP` (10000) · `DQ_LANE_CHECK_ONLY` (1)
-//! · `DQ_CELLS` (subset, comma; default all).
+//! · `DQ_NI_PER_LEN` (32) · `DQ_BOOTSTRAP` (10000) · `DQ_LANE_CHECK_ONLY` (1).
+//! (The header's `DQ_CELLS` subset knob was documented but never implemented;
+//! smokes narrow via `DQ_GRIDS` + the N knobs.)
 
 #![cfg(all(
     feature = "dq_phase_bench",
@@ -165,7 +166,7 @@ fn eval_standard_precedence(first: i128, ops: &[(char, i128)]) -> Option<i128> {
 /// disclosed in the run record (the stop rule's instrument-defect clause; no
 /// accuracy cell was admissible before this fix).
 fn arith_items_v2(n: usize) -> Vec<ArithItem> {
-    let mut rng = Rng(0xA71A_614_4847);
+    let mut rng = Rng(0x0A71_A614_4847);
     let mut out = Vec::with_capacity(n);
     for _ in 0..n {
         // 2-4 operations; multiplication operands kept small enough that a
@@ -210,9 +211,7 @@ fn parse_arith_answer(out: &str) -> Option<i128> {
     // take the leading run of digits/sign
     let mut num = String::new();
     for (i, c) in cleaned.char_indices() {
-        if i == 0 && (c == '-') {
-            num.push(c);
-        } else if c.is_ascii_digit() {
+        if (i == 0 && c == '-') || c.is_ascii_digit() {
             num.push(c);
         } else {
             break;
@@ -279,7 +278,7 @@ fn niah_item(idx: usize, len_round: usize, target_tokens: usize, tok: &BpeTokeni
             (s, c)
         })
         .collect();
-    let target_k = ((idx * 5 + 2) % 8) as usize;
+    let target_k = (idx * 5 + 2) % 8;
     let (t_server, t_code) = needles[target_k];
 
     // Build filler text and place needles at ~even depth bands.
@@ -338,10 +337,10 @@ fn niah_item(idx: usize, len_round: usize, target_tokens: usize, tok: &BpeTokeni
 fn score_niah(out: &str, item: &NiahItem) -> bool {
     let mut first: Option<(usize, &str)> = None;
     for c in &item.all_codes {
-        if let Some(p) = out.find(c.as_str()) {
-            if first.is_none() || p < first.unwrap().0 {
-                first = Some((p, c.as_str()));
-            }
+        if let Some(p) = out.find(c.as_str())
+            && (first.is_none() || p < first.unwrap().0)
+        {
+            first = Some((p, c.as_str()));
         }
     }
     matches!(&first, Some((_, c)) if *c == item.gold)
@@ -446,7 +445,7 @@ fn paired_bootstrap_ci(d: &[i8], n_boot: usize) -> (f64, f64) {
     if d.is_empty() {
         return (0.0, 0.0);
     }
-    let mut rng = Rng(0xB005_614);
+    let mut rng = Rng(0x0B00_5614);
     let n = d.len();
     let mut means: Vec<f64> = Vec::with_capacity(n_boot);
     for _ in 0..n_boot {
@@ -627,8 +626,6 @@ fn run() -> Result<(), String> {
     struct CellResult {
         arith_correct: Vec<bool>,
         ni_correct: BTreeMap<usize, Vec<bool>>,
-        gen_lens: Vec<usize>,
-        prompt_toks: Vec<usize>,
         first_fnvs: Vec<u64>,
         second_fnvs: Vec<u64>,
         prefill_launches: u64,
@@ -683,7 +680,7 @@ fn run() -> Result<(), String> {
                 prompt_toks.push(tok.encode(&it.prompt).len() + 1);
             }
             ni_correct.insert(*l, v);
-            eprintln!("[dq614] {name} niah@{l}: {}/{}", ni_correct[&l].iter().filter(|x| **x).count(), items.len());
+            eprintln!("[dq614] {name} niah@{l}: {}/{}", ni_correct[l].iter().filter(|x| **x).count(), items.len());
         }
         // G-i2 (D5, frozen arithmetic): prefill = 256/chunk where chunks =
         // ceil(prompt_toks/4096); decode = 256 * (n_generated − 1) — token 1
@@ -712,8 +709,6 @@ fn run() -> Result<(), String> {
         Ok(CellResult {
             arith_correct,
             ni_correct,
-            gen_lens,
-            prompt_toks,
             first_fnvs,
             second_fnvs,
             prefill_launches: got_pf,
