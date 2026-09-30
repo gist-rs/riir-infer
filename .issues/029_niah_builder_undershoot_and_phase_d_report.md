@@ -1,12 +1,12 @@
 # Issue 029 — NIAH builder undershoot crash + Phase-D-only report writer (Bench 012 follow-ups)
 
-**Status:** RESOLVED 2026-09-30 — Defect 1 fixed + Defect 2's scope landed as
-`--niah-only` (commit `d9acd5a`), rerun executed (`.benchmarks/012b_niah_only_report.md`,
-rc=0, 6/6 trials built past the exact crash point); the G-E rows are appended to the
-Bench 012 gate doc. The fixture-gated unit test LANDED `e474f62` (2026-09-30, 5-trial
-guard grid, loud-skip without the fixture). Remaining open (deliberate): the
-incremental per-arm report write — below, unexecuted; the instrument gap is documented
-in the gate doc's finding 4.
+**Status:** CLOSED 2026-09-30 — all rows landed. Defect 1 fixed + Defect 2's scope
+landed as `--niah-only` (commit `d9acd5a`), rerun executed
+(`.benchmarks/012b_niah_only_report.md`, rc=0, 6/6 trials built past the exact crash
+point); the G-E rows are appended to the Bench 012 gate doc. Fixture-gated unit test
+LANDED `e474f62`. Incremental per-arm report write LANDED `edaebf2` (the last row —
+the module header's "rewritten after every arm" contract is now the code's behavior).
+Nothing open.
 **In flight (sibling session, uncommitted WIP in the live worktree — do not
 duplicate):** ~~the grow-loop fix in `build_niah_trial`~~ landed; ~~the
 `--niah-only` wiring~~ landed.
@@ -59,9 +59,17 @@ incrementally after every arm completes** (the .cmd header already claims
       verify-decode, and the needle contiguous post-cut; loud SKIP without the
       gitignored gemma-2 fixture (`RIIR_INFER_SP_GGUF` override). Validated 3/3 at
       `--features fitted_v_tables` + 192/192 default.
-- [ ] Incremental report write per arm in `kv_plus_ladder.rs` — still open (a real
-      refactor of the Phase-D report block into a re-renderable fn; deliberately NOT
-      half-landed at the end of the session that found it).
+- [x] Incremental report write per arm in `kv_plus_ladder.rs` — **LANDED `edaebf2`
+      (2026-09-30)**: the Phase-D report block extracted verbatim into
+      `ReportCtx::snapshot` + `write_incremental` called at 8 sites (after every arm
+      push + the λ* determination + post-grid); intermediate write failures log and
+      continue, the final render stays byte-identical (graceful-degradation branches
+      unreachable in final states — the λ*/k-0 `expect`s became PENDING/guard, caught
+      by the new tests). 4 unit tests behind the bin's `fitted_v_tables` required-
+      features (mid-run completed-arms-only + G-A PENDING, section order + NIAH row
+      format, niah-only ABSENT contract, incremental write). 4/4 green; clippy clean
+      at both postures. GPU-path live validation rides the next real run (the box was
+      owned by the 012b sibling rerun at landing time).
 - [x] `--niah-only` flag: load `--table <path>` (skip calibration), skip the
       ladder/grid/validation, run only Phase C4 + D, write a NIAH-only report — **LANDED
       `d9acd5a`** (the reduced report marks the ladder/gates sections ABSENT by construction
