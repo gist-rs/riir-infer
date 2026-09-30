@@ -83,7 +83,11 @@ cudarc = { version = "0.19", default-features = false, features = ["std", "drive
 # Issue 026): on-device activation quantize→dequantize at five linear-input
 # sites per layer, per phase, on the folded ternary forward. Default-off —
 # the hot path is untouched when off (the injection blocks are cfg-gated).
-dq_phase_bench = ["cubecl_runtime", "ternary_gemv", "ternary_gemm_batched"]
+# Forwards bonsai2_hadamard (the folded loader — Issue 030's first-ever lane
+# check: the pinned league artifact declares prism.hadamard and the loader
+# refuses it LOUDLY without this; T3's release-green was build-only, so the
+# gap surfaced only at the T5 lane check).
+dq_phase_bench = ["cubecl_runtime", "ternary_gemv", "ternary_gemm_batched", "riir-infer-core/bonsai2_hadamard"]
 cubecl_runtime = ["dep:cubecl", "dep:half", "dep:papaya", "dep:blake3"]
 cuda_backend = ["cubecl_runtime", "cubecl/cuda"]
 # Ternary bit-plane (Q2_0_g128) GEMV family around the gemv_ternary_cubecl
