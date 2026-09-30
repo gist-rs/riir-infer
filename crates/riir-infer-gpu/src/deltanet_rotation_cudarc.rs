@@ -2156,7 +2156,20 @@ impl RotationKernels {
         );
         assert_eq!(wa.len(), rows * n);
         assert_eq!(wb.len(), rows * n);
-        assert_eq!(x.len(), p * n);
+        // Grow-only staging (prefill_cuda_full's `grow!` macro) hands this a
+        // capacity-sized x — the buffer holds the MAX chunk seen so far, not
+        // the current p. The kernel's grid is p.div_ceil(32): rows >= p are
+        // never read. Exact-eq here panicked on the second ragged prompt of
+        // the dq_phase_bench lane check (1520-row buffer, 1495-token chunk —
+        // Issue 030's pickup): any variable-length workload on the folded
+        // cudarc lane tripped it; the engine's uniform-prompt benches never
+        // did. Undersized still refuses (the real shape-bug class).
+        assert!(
+            x.len() >= p * n,
+            "gemm_dense_ab_batched: x.len {} < p*n {} (undersized staging)",
+            x.len(),
+            p * n
+        );
         let p_i = p as i32;
         let rows_i = rows as i32;
         let n_i = n as i32;
@@ -2873,6 +2886,72 @@ mod tests {
             .filter(|(a, b)| a.to_bits() != b.to_bits())
             .count();
         assert_eq!(dmm, 0, "dense ab GEMM nondeterministic");
+    }
+
+    /// Issue 030 (Plan 614 lane check) regression: grow-only staging hands
+    /// the GEMM a CAPACITY-sized x (the max chunk seen so far), while p is
+    /// the current logical rows. The exact-eq assert panicked on the second
+    /// ragged prompt (1520-row buffer, 1495-token chunk) — the engine's
+    /// uniform-prompt benches never exposed it. The excess rows must be
+    /// NEVER READ: NaN-poison them — any read leaks into the output and the
+    /// tolerance check redds.
+    #[test]
+    fn batched_dense_gemm_accepts_capacity_sized_x() {
+        let Some(_) = cuda_or_skip() else {
+            eprintln!("[skip] no CUDA device");
+            return;
+        };
+        let ctx = CudaContext::new(0).unwrap();
+        let stream = ctx.new_stream().unwrap();
+        let rot = RotationKernels::new(&ctx).expect("compile rotation");
+        // p_max > p: the buffer carries 25 excess rows (the lane-check shape:
+        // 1520 vs 1495 — scaled down to keep the CPU reference cheap).
+        let (p_max, p, rows, n) = (160usize, 135usize, 48usize, 512usize);
+        let mut lcg = Lcg(0x0D0614);
+        let mut x: Vec<f32> = (0..p_max * n).map(|_| lcg.next_f32(-1.0, 1.0)).collect();
+        // NaN-poison every excess row — rows [p, p_max) are never read.
+        for t in p..p_max {
+            for k in 0..n {
+                x[t * n + k] = f32::NAN;
+            }
+        }
+        let wa: Vec<f32> = (0..rows * n).map(|_| lcg.next_f32(-0.05, 0.05)).collect();
+        let wb: Vec<f32> = (0..rows * n).map(|_| lcg.next_f32(-0.05, 0.05)).collect();
+
+        let x_d = stream.clone_htod(&x).unwrap();
+        let wa_d = stream.clone_htod(&wa).unwrap();
+        let wb_d = stream.clone_htod(&wb).unwrap();
+        let out_a = stream.alloc_zeros::<f32>(p * rows).unwrap();
+        let out_b = stream.alloc_zeros::<f32>(p * rows).unwrap();
+        // The OLD assert_eq(x.len(), p*n) panicked here (capacity != logical).
+        rot.gemm_dense_ab_batched(&stream, &x_d, &wa_d, &wb_d, &out_a, &out_b, p, rows, n)
+            .expect("capacity-sized x must be accepted");
+        let mut got_a = vec![0f32; p * rows];
+        stream.memcpy_dtoh(&out_a, &mut got_a).unwrap();
+
+        // The p live rows must match the CPU reference — proving the NaN
+        // rows never leaked (a read would poison the dot products).
+        let mut worst_rel = 0f64;
+        for t in 0..p {
+            for r in 0..rows {
+                let mut acc = 0f64;
+                let mut abs_sum = 0f64;
+                for k in 0..n {
+                    let term = x[t * n + k] as f64 * wa[r * n + k] as f64;
+                    acc += term;
+                    abs_sum += term.abs();
+                }
+                let diff = (got_a[t * rows + r] as f64 - acc).abs();
+                worst_rel = worst_rel.max(diff / abs_sum.max(1e-12));
+            }
+        }
+        eprintln!(
+            "[batched_gemm_capacity] p={p} of p_max={p_max}: cond-scaled err {worst_rel:.3e}"
+        );
+        assert!(
+            worst_rel < 1e-4,
+            "capacity-sized x corrupted the live rows (NaN leak?): {worst_rel:.3e}"
+        );
     }
 
     /// Issue 980 T4-ALT — the copy-rotate staging twin must be BIT-IDENTICAL
