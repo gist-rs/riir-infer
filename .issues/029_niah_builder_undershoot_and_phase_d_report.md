@@ -1,12 +1,14 @@
 # Issue 029 — NIAH builder undershoot crash + Phase-D-only report writer (Bench 012 follow-ups)
 
-**Status:** OPEN — filed 2026-09-30 from the Bench 012 run (issue 013 T2): the
-NIAH phase crashed at trial 0 and the structured report was never written.
+**Status:** RESOLVED 2026-09-30 — Defect 1 fixed + Defect 2's scope landed as
+`--niah-only` (commit `d9acd5a`), rerun executed (`.benchmarks/012b_niah_only_report.md`,
+rc=0, 6/6 trials built past the exact crash point); the G-E rows are appended to the
+Bench 012 gate doc. Remaining open (deliberate): the unit test and the incremental
+per-arm report write — both below, unexecuted; the instrument gap is documented in
+the gate doc's finding 4.
 **In flight (sibling session, uncommitted WIP in the live worktree — do not
-duplicate):** the grow-loop fix in `build_niah_trial` (token-ratio-adaptive,
-better than a fixed-step retry — keep THAT form) + the `--niah-only` wiring in
-`kv_plus_ladder.rs`. Remaining: the unit test, the incremental per-arm report
-write, and the rerun itself.
+duplicate):** ~~the grow-loop fix in `build_niah_trial`~~ landed; ~~the
+`--niah-only` wiring~~ landed.
 
 ## Defect 1 — `build_niah_trial` undershoot hard-bails
 
@@ -43,13 +45,22 @@ incrementally after every arm completes** (the .cmd header already claims
 
 ## Follow-up lane
 
-- [ ] Grow-retry fix in `build_niah_trial` + a unit test that builds a trial at
-      a chars/token ratio that undershoots (the 4.49 case) and still produces a
-      valid `seq_len`-token trial with the password intact.
-- [ ] Incremental report write per arm in `kv_plus_ladder.rs`.
-- [ ] `--niah-only` flag: load `--table <path>` (skip calibration), skip the
-      ladder/grid/validation, run only Phase C4 + D, write a NIAH-only report.
-- [ ] Rerun NIAH off `.benchmarks/012_kv_table_residual.bin` (sha
+- [x] Grow-retry fix in `build_niah_trial` — **LANDED `d9acd5a`, ratio-adaptive form**
+      (multiply `body_chars` by the measured deficit `body_target/total + 256`, re-encode,
+      bounded loop; all downstream guards — prefix monotonicity, verify-decode, shrink —
+      run on the final text unchanged). Validated live by the 012b rerun (6/6 trials built
+      past the exact crash point). ~~unit test~~ NOT written — the builder needs the GGUF
+      tokenizer (gitignored-fixture law); the rerun is the validating evidence. A fixture-gated
+      test stays open for the next instrument pass.
+- [ ] Incremental report write per arm in `kv_plus_ladder.rs` — still open (a real
+      refactor of the Phase-D report block into a re-renderable fn; deliberately NOT
+      half-landed at the end of the session that found it).
+- [x] `--niah-only` flag: load `--table <path>` (skip calibration), skip the
+      ladder/grid/validation, run only Phase C4 + D, write a NIAH-only report — **LANDED
+      `d9acd5a`** (the reduced report marks the ladder/gates sections ABSENT by construction
+      instead of rendering empty tables).
+- [x] Rerun NIAH off `.benchmarks/012_kv_table_residual.bin` (sha
       `3a0f5333d6bafd63…`) — arms {f16, k-0.00, k-0.50, k-1.00} (the k-sched
       arm is moot: G-D recorded the schedule overfit) — and append the G-E
-      direction rows to the Bench 012 gate doc. ~2.1 h at the observed 4 fwd/s.
+      direction rows to the Bench 012 gate doc — **DONE** (`.benchmarks/012b_niah_only_report.md`,
+      6382 s wall under the sibling trainer's load; G-E rows in the gate doc).
