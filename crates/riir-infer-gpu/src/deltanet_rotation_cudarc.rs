@@ -1890,7 +1890,16 @@ impl RotationKernels {
             n <= MAX_QROT_ROW,
             "qrot row {n} exceeds the smem budget (max {MAX_QROT_ROW})"
         );
-        assert_eq!(input.len(), p * n, "qrot input shape");
+        // Capacity semantics (>=, not == — the fwht_rotate_copy_batched
+        // convention): callers stage input through prefill_cuda_full's
+        // grow-only macro, so a shorter chunk after a longer one hands us a
+        // capacity-sized buffer. The kernel touches exactly p*n elements.
+        assert!(
+            input.len() >= p * n,
+            "qrot input too small: {} < p*n {}",
+            input.len(),
+            p * n
+        );
         let n_i = n as i32;
         let hb_i = block_size as i32;
         // C0.5 rung 2 — the warp-parallel variant (hblock 1024, ≤ 8
@@ -1982,7 +1991,13 @@ impl RotationKernels {
             n <= MAX_QROT_ROW,
             "qrot row {n} exceeds the smem budget (max {MAX_QROT_ROW})"
         );
-        assert_eq!(input.len(), p * n, "qrot-permute input shape");
+        // Capacity semantics (>=, not == — the qrot/grow-only convention).
+        assert!(
+            input.len() >= p * n,
+            "qrot-permute input too small: {} < p*n {}",
+            input.len(),
+            p * n
+        );
         let n_i = n as i32;
         let hb_i = block_size as i32;
         // C0.5 rung 2 — see quantize_rotate_q8: dispatched (FFMA-contraction
