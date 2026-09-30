@@ -335,6 +335,7 @@ fn main() -> Result<()> {
     let mut niah_trials: usize = if smoke { 1 } else { 6 };
     let mut report_path: Option<PathBuf> = None;
     let mut box_note = String::from("4090 workstation i7-13700K, CPU lane, AC");
+    let mut niah_only = false;
     let mut i = 3;
     while i < args.len() {
         match args[i].as_str() {
@@ -384,12 +385,19 @@ fn main() -> Result<()> {
                 box_note = args[i + 1].clone();
                 i += 2;
             }
+            "--niah-only" => {
+                niah_only = true;
+                i += 1;
+            }
             "--smoke" => i += 1,
             other => bail!("unknown arg {other}"),
         }
     }
     if seq_len > 4096 {
         bail!("--seq-len must stay <= 4096 (gemma-2 sliding window)");
+    }
+    if niah_only && table_path.is_none() {
+        bail!("--niah-only requires --table (the NIAH arms need the frozen table; never a second calibration)");
     }
 
     // ── Load model + tokenizer ────────────────────────────────────────
@@ -576,16 +584,27 @@ fn main() -> Result<()> {
         ok
     };
 
-    // ── Phase C1: the ladder ──────────────────────────────────────────
+    // ── Phase C1: the ladder ──────────────────────────────────────
     let eval_tokens: Vec<usize> = all_tokens[cal_n..cal_n + eval_n].to_vec();
     let search_tokens: Vec<usize> = all_tokens[cal_n + eval_n..cal_n + eval_n + search_n].to_vec();
-    println!(
-        "# eval: {n_chunks} chunks × {corpus_per_chunk} = {} scored per arm | λ {lambdas:?}",
-        n_chunks * corpus_per_chunk
-    );
     let mut arms: Vec<LadderArm> = Vec::new();
     let t_eval = Instant::now();
-
+    // λ*, schedule, and the grid state exist in BOTH modes (the report's
+    // gates/schedule sections read them); the gated block below fills them
+    // only when the ladder ran. In --niah-only the ladder/grid/validation
+    // are SKIPPED — those numbers live in the parent run's log.
+    let (mut lam_star, mut lam_star_d): (Option<f32>, Option<f64>) = (None, None);
+    let mut schedule: Vec<f32> = Vec::new();
+    let mut grid_note =
+        String::from("skipped (niah-only run — the ladder lives in the parent run's log)");
+    let mut sched_search_d: Option<f64> = None;
+    if !niah_only {
+        println!(
+            "# eval: {n_chunks} chunks × {corpus_per_chunk} = {} scored per arm | λ {lambdas:?}",
+            n_chunks * corpus_per_chunk
+        );
+    }
+    if !niah_only {
     // f16 base.
     {
         let mut hook = ArmHook::Plain;
@@ -645,7 +664,7 @@ fn main() -> Result<()> {
 
     // λ* — the best-beating λ > 0 (mean paired ΔNLL vs k-0). Computed in a
     // scoped block so the arm borrows end before the k-sched push below.
-    let (lam_star, lam_star_d): (Option<f32>, Option<f64>) = {
+    let star = {
         let k0 = arms.iter().find(|a| a.lam == Some(0.0)).expect("k-0 arm");
         let mut best: Option<(f32, f64)> = None;
         for a in arms.iter().filter(|a| a.lam.is_some_and(|l| l > 0.0)) {
@@ -665,11 +684,11 @@ fn main() -> Result<()> {
             }
         }
     };
+    lam_star = star.0;
+    lam_star_d = star.1;
 
-    // ── Phase C2: the schedule grid ───────────────────────────────────
-    let mut schedule: Vec<f32> = Vec::new();
-    let mut grid_note = String::from("skipped (no λ > 0 beat k-0)");
-    let mut sched_search_d: Option<f64> = None;
+    // ── Phase C2: the schedule grid ───────────────────────────────
+    grid_note = String::from("skipped (no λ > 0 beat k-0)");
     let grid_armed = lam_star.filter(|_| !smoke);
     if let Some(ls) = grid_armed {
         schedule = vec![ls; n_layers];
@@ -752,6 +771,8 @@ fn main() -> Result<()> {
         });
         let _ = std::io::stdout().flush();
     }
+    } // end !niah_only (ladder + grid + validation)
+    let _ = lam_star_d; // read by the report gates below in ladder mode
 
     // ── Phase C4: NIAH ────────────────────────────────────────────────
     let mut niah: Vec<(String, NiahOut)> = Vec::new();
@@ -810,8 +831,10 @@ fn main() -> Result<()> {
         .unwrap_or_default();
 
     // Pairings (computed once, here — after every push, so the borrows are
-    // fresh and the base/k-0 rows are found in the FINAL arm set).
-    let base_arm = arms.first().expect("base arm exists");
+    // fresh and the base/k-0 rows are found in the FINAL arm set). In
+    // --niah-only mode arms is EMPTY: the report carries the G3 + NIAH
+    // sections only, and the ladder/gates live in the parent run's log.
+    let base_arm = arms.first();
     let k0 = arms.iter().find(|a| a.lam == Some(0.0));
     struct Row {
         name: String,
@@ -828,11 +851,12 @@ fn main() -> Result<()> {
     }
     let mut rows: Vec<Row> = Vec::new();
     for a in &arms {
-        let is_base = std::ptr::eq(a, base_arm);
+        let base = base_arm.expect("base arm exists");
+        let is_base = std::ptr::eq(a, base);
         let (dp_base, dn_base, fl_base, win_base) = if is_base {
             (None, None, None, None)
         } else {
-            match base_pair(a, base_arm) {
+            match base_pair(a, base) {
                 Some((dp, dn, fl, w)) => (Some(dp), Some(dn), Some(fl), Some(w)),
                 None => (None, None, None, None),
             }
@@ -889,6 +913,13 @@ fn main() -> Result<()> {
         )),
     ));
 
+    if niah_only {
+        out.push_str(
+            "**--niah-only run: the ladder/grid/validation sections below are ABSENT — those numbers live in the parent run's log + the Bench 012 doc.**\n\n",
+        );
+    }
+
+    if !niah_only {
     out.push_str("## Ladder (held-out eval)\n\n");
     out.push_str("| arm | ppl | Δppl f16 | ΔNLL f16 | flip f16 | win f16 | Δppl k-0 | ΔNLL k-0 | flip k-0 | win k-0 | tok/s |\n");
     out.push_str("|---|---|---|---|---|---|---|---|---|---|---|\n");
@@ -912,8 +943,7 @@ fn main() -> Result<()> {
 
     // Gates.
     out.push_str("## Gates (pre-registered)\n\n");
-    if let Some(k0a) = k0 {
-        let b = base_arm;
+    if let (Some(k0a), Some(b)) = (k0, base_arm) {
         let tax = 100.0 * ((k0a.ppl() / b.ppl()) - 1.0);
         out.push_str(&format!(
             "- **Tax cross-check:** Δppl(k-0 − f16) = {tax:+.3}% — the V:=K cost the refund is measured against (issue cited 2.5–3.1%).\n"
@@ -958,6 +988,7 @@ fn main() -> Result<()> {
         ));
     }
     out.push('\n');
+    } // end !niah_only report sections
 
     if !rho_vk.is_empty() && !rho_vk[0].is_nan() {
         out.push_str("## Calibration dashboard — ρ_l(V−K) and the λ=1 telemetry\n\n");

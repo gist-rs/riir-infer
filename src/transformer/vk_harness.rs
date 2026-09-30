@@ -253,9 +253,6 @@ pub fn build_niah_trial(
 ) -> Result<NiahTrial> {
     let needle_text = format!("The magic password is {password}. Remember it for later. ");
     let tail_text = " The magic password is".to_string();
-    // Body char budget: ~4.2 chars/token for this pool (measured on the
-    // gemma SP tokenizer; the shrink path below corrects any error).
-    let body_chars = seq_len * 42 / 10 + 64;
     let filler = |chars: usize| -> String {
         let mut s = String::with_capacity(chars + FILLER_POOL[0].len());
         let mut i = 0usize;
@@ -265,19 +262,32 @@ pub fn build_niah_trial(
         }
         s
     };
-    let depth_chars = ((body_chars as f32) * depth.clamp(0.05, 0.9)) as usize;
-    let text = format!(
-        "{}{needle_text}{}{tail_text}",
-        filler(depth_chars),
-        filler(body_chars.saturating_sub(depth_chars) + 256)
-    );
-    let toks = tok.encode(&text);
+    // Body char budget: ~4.2 chars/token for this pool (the shrink path
+    // below corrects overshoot; the GROW loop here corrects undershoot —
+    // the measured pool ratio drifted past 4.2 (4365 chars → 972 tokens at
+    // seq 1024, the run that died at `token budget 972 < target 1023`), so
+    // a fixed estimate can undershoot and the builder must re-encode, never
+    // bail). Bounded: 4 growth iterations is far past convergence.
+    let body_target = seq_len - 1;
+    let mut body_chars = seq_len * 42 / 10 + 64;
+    let (text, toks, filler_a_len) = loop {
+        let depth_chars = ((body_chars as f32) * depth.clamp(0.05, 0.9)) as usize;
+        let text = format!(
+            "{}{needle_text}{}{tail_text}",
+            filler(depth_chars),
+            filler(body_chars.saturating_sub(depth_chars) + 256)
+        );
+        let toks = tok.encode(&text);
+        if toks.len() >= body_target {
+            break (text, toks, filler(depth_chars).len());
+        }
+        body_chars = body_chars * body_target / toks.len().max(1) + 256;
+    };
     // Prefix-diff ranges (p1 = needle start, p2 = needle end, p3 = tail
     // start — all token indices in `toks`, since SP encoding is
     // prefix-stable for this pool: the verify-decode below pins it).
-    let filler_a = filler(depth_chars);
-    let p1 = tok.encode(&text[..filler_a.len()]).len();
-    let p2 = tok.encode(&text[..filler_a.len() + needle_text.len()]).len();
+    let p1 = tok.encode(&text[..filler_a_len]).len();
+    let p2 = tok.encode(&text[..filler_a_len + needle_text.len()]).len();
     let p3 = tok.encode(&text[..text.len() - tail_text.len()]).len();
     let total = toks.len();
     if p3 < p2 || p2 < p1 || total < p3 + 1 {
@@ -286,7 +296,7 @@ pub fn build_niah_trial(
     // The password subsequence: locate inside the needle by its own
     // prefix-diff (the password text sits after "The magic password is ").
     let pw_off = "The magic password is ".len();
-    let pw_start_in_text = filler_a.len() + pw_off;
+    let pw_start_in_text = filler_a_len + pw_off;
     let pw_end_in_text = pw_start_in_text + password.len();
     let pw1 = tok.encode(&text[..pw_start_in_text]).len();
     let pw2 = tok.encode(&text[..pw_end_in_text]).len();
@@ -306,11 +316,8 @@ pub fn build_niah_trial(
     }
     // Shrink to exactly seq_len − 1 (BOS prepends): cut inside the
     // post-needle filler only — the cut region is [p3_adjustable..] before
-    // the tail. Cut count = total − (seq_len − 1).
-    let body_target = seq_len - 1;
-    if total < body_target {
-        bail!("niah build: token budget {total} < target {body_target} (grow the filler)");
-    }
+    // the tail. Cut count = total − (seq_len − 1). (The grow loop above
+    // guarantees total ≥ body_target.)
     let drop = total - body_target;
     if p3 - p2 < drop {
         bail!(
