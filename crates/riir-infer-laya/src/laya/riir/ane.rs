@@ -119,6 +119,16 @@ impl AneManifest {
             .ok_or_else(|| LayaError::Runtime("ane manifest: missing `artifacts`".into()))?;
         let mut artifacts = HashMap::new();
         for (key, a) in arts {
+            // The manifest is the conversion tool's file and carries rows
+            // beyond this lane's artifacts (the `<model>/table_e8` int8
+            // embedding sidecars of the KV-table lane share it) with their
+            // own schema — no `bucket_L`, no `outputs`. Only `<dir>/L<n>`
+            // rows are ANE artifacts; foreign rows are skipped, never
+            // validated, honoring the "tool may grow the schema freely"
+            // contract above. A malformed ARTIFACT row still errors below.
+            if !is_bucket_artifact_key(key) {
+                continue;
+            }
             let bucket_l = a
                 .get("bucket_L")
                 .and_then(serde_json::Value::as_u64)
@@ -214,6 +224,17 @@ impl AneManifest {
 
 fn missing(key: &str, field: &str) -> LayaError {
     LayaError::Runtime(format!("ane manifest {key}: missing {field}"))
+}
+
+/// `"<model_dir>/L<digits>"` — the ANE-lane artifact key shape. Anything
+/// else in the manifest (e.g. `<model>/table_e8`) belongs to another
+/// consumer and must not be parsed against the artifact schema.
+fn is_bucket_artifact_key(key: &str) -> bool {
+    let Some((_, l)) = key.rsplit_once('/') else {
+        return false;
+    };
+    let digits = l.strip_prefix('L').unwrap_or("");
+    !digits.is_empty() && digits.bytes().all(|b| b.is_ascii_digit())
 }
 
 /// One loaded + verified artifact: the compiled Core ML model plus the
@@ -1128,6 +1149,41 @@ mod fetch_tests {
         write_bundle(&present, b"zz");
         ensure_artifacts(&root, None).expect("present entry → no missing, no fetch");
         assert!(present.join(BUNDLE_FILES[0]).exists(), "untouched");
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn manifest_load_skips_foreign_non_bucket_rows() {
+        // The KV-table lane's `<model>/table_e8` sidecar rows share this
+        // manifest (reflex 6535b75) with their own schema — no `bucket_L`,
+        // no `outputs`. The loader must skip them rather than validate
+        // them against the artifact schema, while real `<model>/L<n>`
+        // rows still parse and absent buckets still error (the regression
+        // that broke the ANE lane at load from 2026-09-26).
+        let tmp = std::env::temp_dir().join(format!("ane_fetch_t6_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&tmp);
+        let root = tmp.join("root");
+        let json = r#"{"artifacts": {
+            "en/table_e8": {"path": "assets/ane/en/table_e8.safetensors", "table": {"tensor": "table", "dtype": "int8"}},
+            "en/L8": {
+                "bucket_L": 8,
+                "geometry": {"hidden": 4},
+                "digest": {"algo": "blake3-dir-v1", "digest": "00", "files": 3, "bytes": 9},
+                "outputs": {"hidden_state": {"shape": [1, 8, 4]}},
+                "mask_sentinel_fp16": -10000.0,
+                "placement": {"ane_ops": 1, "device_ops": 1, "transitions": 0}
+            }
+        }}"#;
+        write_manifest(&root, json);
+        let manifest = AneManifest::load(&root.join("manifest.json"))
+            .expect("loads with a foreign non-bucket row present");
+        assert!(manifest.artifacts.contains_key("en/L8"), "artifact row parsed");
+        assert!(manifest.entry("en", 8).is_ok(), "bucket entry resolves");
+        assert!(manifest.entry("en", 128).is_err(), "absent bucket still errors");
+        assert!(
+            !manifest.artifacts.contains_key("en/table_e8"),
+            "foreign row not admitted as an artifact"
+        );
         let _ = std::fs::remove_dir_all(&tmp);
     }
 }
