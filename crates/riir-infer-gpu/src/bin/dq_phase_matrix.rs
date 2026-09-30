@@ -379,6 +379,17 @@ fn greedy_generate(
     if tokens.first() != Some(&bos) {
         tokens.insert(0, bos);
     }
+    // Every item is an INDEPENDENT sequence: the GDN recurrent state carries
+    // IN PLACE across prefill calls (never self-zeroing), so without this
+    // reset every item after the first starts from the previous item's final
+    // state — degradation ACCUMULATES across the run (measured: arith fell
+    // from 4/5 early to 2/43 late within base(1); base(2)'s niah@4096 —
+    // items 97+, after 96 accumulated items — collapsed to 12/32 vs
+    // base(1)'s 27/32; the shot-regeneration outputs were state pollution,
+    // not model behavior). The attention KV needs no zeroing — decode bounds
+    // reads to pos+1 and every touched position is overwritten before read
+    // (reset_state's own doc).
+    fwd.reset_state();
     let logits = fwd.prefill(&tokens);
     let first_fnv = logits_fnv(&logits);
     // D1 phase boundary: generated token 1 comes from the prefill's final
