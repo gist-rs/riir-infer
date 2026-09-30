@@ -3,9 +3,10 @@
 **Status:** RESOLVED 2026-09-30 — Defect 1 fixed + Defect 2's scope landed as
 `--niah-only` (commit `d9acd5a`), rerun executed (`.benchmarks/012b_niah_only_report.md`,
 rc=0, 6/6 trials built past the exact crash point); the G-E rows are appended to the
-Bench 012 gate doc. Remaining open (deliberate): the unit test and the incremental
-per-arm report write — both below, unexecuted; the instrument gap is documented in
-the gate doc's finding 4.
+Bench 012 gate doc. The fixture-gated unit test LANDED `e474f62` (2026-09-30, 5-trial
+guard grid, loud-skip without the fixture). Remaining open (deliberate): the
+incremental per-arm report write — below, unexecuted; the instrument gap is documented
+in the gate doc's finding 4.
 **In flight (sibling session, uncommitted WIP in the live worktree — do not
 duplicate):** ~~the grow-loop fix in `build_niah_trial`~~ landed; ~~the
 `--niah-only` wiring~~ landed.
@@ -49,9 +50,15 @@ incrementally after every arm completes** (the .cmd header already claims
       (multiply `body_chars` by the measured deficit `body_target/total + 256`, re-encode,
       bounded loop; all downstream guards — prefix monotonicity, verify-decode, shrink —
       run on the final text unchanged). Validated live by the 012b rerun (6/6 trials built
-      past the exact crash point). ~~unit test~~ NOT written — the builder needs the GGUF
-      tokenizer (gitignored-fixture law); the rerun is the validating evidence. A fixture-gated
-      test stays open for the next instrument pass.
+      past the exact crash point).
+- [x] Fixture-gated unit test for `build_niah_trial` — **LANDED `e474f62`
+      (2026-09-30)**: `transformer::vk_harness::tests::niah_builder_fixture_gated_guards`
+      behind the module's own `fitted_v_tables` cfg — 5-trial grid mirroring the
+      kv_plus_ladder NIAH schedule (row 0 IS the Bench-012 crash shape), asserts exact
+      `seq_len`, BOS head, `answer_pos`, tail decode post-cut, password-span
+      verify-decode, and the needle contiguous post-cut; loud SKIP without the
+      gitignored gemma-2 fixture (`RIIR_INFER_SP_GGUF` override). Validated 3/3 at
+      `--features fitted_v_tables` + 192/192 default.
 - [ ] Incremental report write per arm in `kv_plus_ladder.rs` — still open (a real
       refactor of the Phase-D report block into a re-renderable fn; deliberately NOT
       half-landed at the end of the session that found it).
