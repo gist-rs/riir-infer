@@ -950,25 +950,30 @@ mod tests {
                 assert!(matches!(op, '+' | '-' | '*'), "v2 generated a division: {body}");
                 ops.push((op, operand));
             }
-            // Independent RPN evaluation: * first (right-assoc run fold), then +/-.
-            let mut rpn: Vec<(char, i128)> = Vec::new();
+            // Independent RPN evaluation: fold multiplicative runs into
+            // (pending_addop, product) pairs FIRST — including the FINAL run,
+            // which joins with its own pending op (v1 of this re-derivation
+            // always ADDED the last term — wrong when the expr ends in '-').
+            let mut terms: Vec<(char, i128)> = Vec::new();
             let mut mul_run: Vec<i128> = vec![first];
+            let mut pending: char = '+';
             for &(op, operand) in &ops {
                 match op {
                     '*' => mul_run.push(operand),
                     add => {
                         let product: i128 = mul_run.iter().product();
-                        rpn.push((add, product));
+                        terms.push((pending, product));
+                        pending = add;
                         mul_run = vec![operand];
                     }
                 }
             }
             let last: i128 = mul_run.iter().product();
+            terms.push((pending, last));
             let mut acc = 0i128;
-            for &(op, value) in &rpn {
+            for &(op, value) in &terms {
                 acc = if op == '+' { acc + value } else { acc - value };
             }
-            acc += last;
             assert_eq!(it.gold, acc, "gold mismatch for {body}");
         }
     }
