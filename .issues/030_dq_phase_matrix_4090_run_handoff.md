@@ -72,6 +72,61 @@ is unchanged — the run stays deferred; nothing measured, nothing touched,
 the worktree remains clean at `4d7304e`. For the next pickup: re-run the
 pre-flight as written; steps 2–6 proceed verbatim once the box calms.
 
+## 2026-09-30 ~19:00–23:00 +07 — FOURTH pickup: box calmed; the lane check ran for the first time and root-caused SEVEN defects (all fixed on develop)
+
+Pre-flight PASSED (uvicorn 0 cores, box 8-10%, GPU GUI-only). The lane
+check — never before executed (T3's release-green was build-only) — was run
+four times and each failure root-caused + fixed at source:
+
+1. **`63700b0`** — the pinned GGUF declares `prism.hadamard`; the core
+   loader refuses without `bonsai2_hadamard` (Issue-980 guard).
+   `dq_phase_bench` now forwards it.
+2. **`babd69d`** — `[734-arm8-gate] blocked by: feature:
+   ternary_deltanet_chunked_prefill` (RIIR_PREFILL_CUDA_TRACE named it);
+   the cudarc whole-prefill arm hard-requires chunked + attention-batched
+   prefill. Both forwarded.
+3. **`5ba91d1`** — `gemm_dense_ab_batched` panicked on the SECOND ragged
+   prompt (x.len 1556480 vs p*n 1530880): grow-only staging (the `grow!`
+   macro) hands it a capacity-sized buffer; the kernel reads only p rows.
+   Capacity semantics (>=) + a NaN-poison regression test (25 excess rows;
+   4090-verified 3.4e-8).
+4. **`cd800a5`** — the two qrot entry points carried the same exact-eq
+   asserts (the next calls in the same path); aligned to the
+   fwht_rotate_copy_batched capacity convention.
+5. **`b2fc1d5`** — with fallback kernels selected (no simdgroup/recurrence
+   features) the lane ran ~10× slow; forwarded the engine's
+   kernel-selection features so the bench BUILDS the shipping lane it
+   measures.
+6. **`7c578b7` + `d753e85` + `feb631e`** — THE BIG ONE: the arith corpus
+   gold was LEFT-TO-RIGHT while the model — and the few-shot shots
+   themselves — use standard ×-before-+/- precedence. 35/48 items
+   mislabeled (73%); the model was answering its own prompts correctly
+   while gold disagreed (specimen: `4359 + 592 - 198 * 96 * 8`, v1 gold
+   3650304 = LTR, model −147113 = standard). **THE LANE WAS NEVER BROKEN.**
+   v2 gold = eval_standard_precedence; unit tests pin the specimen +
+   re-derive every item's gold from the RENDERED prompt via an independent
+   evaluator.
+7. **`32f4395`** — first NIAH entry OOM'd ([issue 994] wgpu OoM → pool
+   poison, fail-loud working): the block_size clamp was INVERTED (`.max`
+   kept the full 32768 block = 4 GiB KV; Issue-864's advice never applied).
+   Fixed to `.min(max_len + 64)`.
+
+v2-corpus lane check (in flight at this writing): base(1) arith landed
+**6/48 = 12.5%** — BELOW the 0.25 admissibility floor. This is now the
+MODEL's genuine ternary-arithmetic rate (instrument verified correct), not
+an instrument defect; difficulty tuning after seeing accuracy is exactly
+what the pre-registration freeze forbids. Per the plan's outcome table the
+decode-heavy axis reports INADMISSIBLE (no gate from that axis) and the
+NIAH per-length windows carry the run's value. The en-route
+shot-4-regeneration pattern on negative-gold items (the shots are all
+positive-result; v2 generates '-' freely) is noted for the record — a
+corpus-distribution observation, not a defect.
+
+Also en route (housekeeping): M3 incremental caches cleaned (134 G freed,
+disk 85→202 Gi); the 4090 detached-run mechanism is SCHEDULED TASKS
+(`schtasks`), not Start-Process — ssh session teardown kills the session
+job object's children (measured: log created, no done-marker, batch dead).
+
 ## Non-goals
 
 - Do not touch Issue 029's lane (sibling-owned WIP).
