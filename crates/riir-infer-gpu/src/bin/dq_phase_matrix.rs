@@ -927,10 +927,15 @@ mod tests {
         for it in &items {
             // Re-parse the rendered expression and re-evaluate independently
             // (a second evaluator, written differently: shunting to RPN).
+            // The item's question is the LAST "Compute " line — the 4-shot
+            // prefix carries four earlier ones (v1 of this test parsed the
+            // FIRST and compared item gold vs shot-1's body — a test bug the
+            // first 4090 run caught).
             let expr_line = it
                 .prompt
                 .lines()
-                .find(|l| l.starts_with("Compute "))
+                .filter(|l| l.starts_with("Compute "))
+                .last()
                 .expect("Compute line");
             let body = expr_line
                 .strip_prefix("Compute ")
