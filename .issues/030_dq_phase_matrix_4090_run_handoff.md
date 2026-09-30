@@ -62,6 +62,16 @@ headroom). Nothing measured, nothing touched, the worktree remains clean
 at `4d7304e`. Re-run the pre-flight as written; the run proceeds verbatim
 (steps 2-6) once the box calms.
 
+## 2026-09-30 ~17:05 +07 — third pickup re-check: blocker UNCHANGED (uvicorn)
+
+The next idle-loop session re-ran the pre-flight verbatim: GPU compute
+clear (22%, 632 MiB, GUI-only, exempt) but pid 29012 (`python`, the
+OpenThai SystemOne uvicorn pair) measured **15.7 cores over an 8s window**
+(box load 64–68%). `kv_plus_ladder` remains finished. The go/no-go verdict
+is unchanged — the run stays deferred; nothing measured, nothing touched,
+the worktree remains clean at `4d7304e`. For the next pickup: re-run the
+pre-flight as written; steps 2–6 proceed verbatim once the box calms.
+
 ## Non-goals
 
 - Do not touch Issue 029's lane (sibling-owned WIP).
