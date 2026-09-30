@@ -387,4 +387,80 @@ mod tests {
         assert!(load_fitted_table(&path, None).is_err());
         let _ = std::fs::remove_dir_all(&dir);
     }
+
+    /// The SP tokenizer only loads from the gitignored gemma-2 GGUF fixture
+    /// (default `../riir-train/data/gemma-2-2b-it-f16.gguf`, override
+    /// `RIIR_INFER_SP_GGUF`). Absent → LOUD skip, never a silent pass: the
+    /// 012b rerun stays the live-validated evidence, this test makes the
+    /// builder's guards re-runnable on demand (issue 029 follow-up).
+    fn sp_fixture() -> Option<std::path::PathBuf> {
+        if let Ok(p) = std::env::var("RIIR_INFER_SP_GGUF") {
+            let p = std::path::PathBuf::from(p);
+            return p.exists().then_some(p);
+        }
+        let p = std::path::PathBuf::from("../riir-train/data/gemma-2-2b-it-f16.gguf");
+        p.exists().then_some(p)
+    }
+
+    #[test]
+    fn niah_builder_fixture_gated_guards() {
+        let Some(path) = sp_fixture() else {
+            println!(
+                "SKIP niah_builder_fixture_gated_guards: no SP GGUF fixture — set \
+                 RIIR_INFER_SP_GGUF or check out ../riir-train/data/gemma-2-2b-it-f16.gguf"
+            );
+            return;
+        };
+        let gguf = crate::gguf_loader::GgufFile::open(&path).expect("open gguf fixture");
+        let tok =
+            crate::tokenizer::SentencePieceGgufTokenizer::from_gguf(&gguf).expect("sp tokenizer");
+        let bos = tok.bos_id();
+        // Mirrors the kv_plus_ladder NIAH grid (`sunset{1000 + 137*t}` × the
+        // depth cycle); the first row IS the Bench-012 crash shape that died
+        // at `token budget 972 < target 1023` before the grow-retry landed.
+        for (t, &(seq_len, depth)) in [
+            (1024usize, 0.25f32),
+            (1024, 0.5),
+            (1024, 0.75),
+            (512, 0.25),
+            (512, 0.75),
+        ]
+        .iter()
+        .enumerate()
+        {
+            let password = format!("sunset{}", 1000 + 137 * t);
+            let trial = build_niah_trial(&tok, bos, seq_len, depth, &password)
+                .unwrap_or_else(|e| panic!("trial {t} seq {seq_len} depth {depth}: {e}"));
+            // Exact-length contract: [BOS] + body cut to exactly seq_len.
+            assert_eq!(trial.tokens.len(), seq_len, "trial {t} length");
+            assert_eq!(trial.tokens[0], bos, "trial {t} must start at BOS");
+            assert_eq!(trial.answer_pos, seq_len - 1);
+            assert!((trial.depth - depth).abs() < f32::EPSILON);
+            // The tail still decodes to the ask (the cut must not mangle it).
+            let tail_start = trial.answer_pos.saturating_sub(6);
+            let tail = tok.decode(&trial.tokens[tail_start..]);
+            assert!(
+                tail.contains("magic password is"),
+                "trial {t} tail mangled: {tail:?}"
+            );
+            // The password span verifies (the boundary-alignment proof).
+            let pw = tok.decode(&trial.password_tokens);
+            let digits: String =
+                password.chars().filter(|c| c.is_ascii_digit()).collect();
+            assert!(
+                pw.replace('▁', " ").contains(&digits),
+                "trial {t} password span '{pw}' lacks '{digits}'"
+            );
+            // The needle survives the cut contiguously (cut happens in the
+            // post-needle filler only, so the password token subsequence must
+            // sit intact inside the prompt tokens).
+            assert!(
+                trial
+                    .tokens
+                    .windows(trial.password_tokens.len())
+                    .any(|w| w == trial.password_tokens.as_slice()),
+                "trial {t} password subsequence not contiguous in the prompt"
+            );
+        }
+    }
 }
