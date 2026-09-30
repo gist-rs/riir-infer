@@ -584,11 +584,33 @@ fn main() -> Result<()> {
         ok
     };
 
-    // ── Phase C1: the ladder ──────────────────────────────────────
+    // ── Phase C1: the ladder ─────────────────────────────────────
     let eval_tokens: Vec<usize> = all_tokens[cal_n..cal_n + eval_n].to_vec();
     let search_tokens: Vec<usize> = all_tokens[cal_n + eval_n..cal_n + eval_n + search_n].to_vec();
     let mut arms: Vec<LadderArm> = Vec::new();
     let t_eval = Instant::now();
+    // Report context — everything the Phase-D render reads that is final by
+    // this point. `write_incremental` re-renders + rewrites the report file
+    // after every arm completes (the module header's "rewritten after every
+    // arm" contract — issue 029 defect 2: a mid-run death keeps completed
+    // arms); the final render below is byte-identical to the old single-shot
+    // writer.
+    let rep = ReportCtx {
+        seq_len,
+        cal_n,
+        eval_n,
+        search_n,
+        top_k,
+        table_sha,
+        box_note: box_note.clone(),
+        smoke,
+        niah_only,
+        g3_pass,
+        table_loaded,
+        rho_vk,
+        report_path,
+    };
+    let mut niah: Vec<(String, NiahOut)> = Vec::new();
     // λ*, schedule, and the grid state exist in BOTH modes (the report's
     // gates/schedule sections read them); the gated block below fills them
     // only when the ladder ran. In --niah-only the ladder/grid/validation
@@ -629,6 +651,7 @@ fn main() -> Result<()> {
             tel: Vec::new(),
         });
         let _ = std::io::stdout().flush();
+        rep.write_incremental(&arms, &niah, &schedule, &grid_note, lam_star, lam_star_d, sched_search_d);
     }
 
     // λ arms (0 first — the k-0 pairing base).
@@ -660,6 +683,7 @@ fn main() -> Result<()> {
             tel,
         });
         let _ = std::io::stdout().flush();
+        rep.write_incremental(&arms, &niah, &schedule, &grid_note, lam_star, lam_star_d, sched_search_d);
     }
 
     // λ* — the best-beating λ > 0 (mean paired ΔNLL vs k-0). Computed in a
@@ -686,6 +710,7 @@ fn main() -> Result<()> {
     };
     lam_star = star.0;
     lam_star_d = star.1;
+    rep.write_incremental(&arms, &niah, &schedule, &grid_note, lam_star, lam_star_d, sched_search_d);
 
     // ── Phase C2: the schedule grid ───────────────────────────────
     grid_note = String::from("skipped (no λ > 0 beat k-0)");
@@ -742,6 +767,7 @@ fn main() -> Result<()> {
         schedule = vec![ls; n_layers];
         grid_note = "smoke — grid skipped, schedule = uniform λ*".into();
     }
+    rep.write_incremental(&arms, &niah, &schedule, &grid_note, lam_star, lam_star_d, sched_search_d);
 
     // ── Phase C3: schedule validation on the full eval ────────────────
     if !schedule.is_empty() {
@@ -770,12 +796,11 @@ fn main() -> Result<()> {
             tel,
         });
         let _ = std::io::stdout().flush();
+        rep.write_incremental(&arms, &niah, &schedule, &grid_note, lam_star, lam_star_d, sched_search_d);
     }
     } // end !niah_only (ladder + grid + validation)
-    let _ = lam_star_d; // read by the report gates below in ladder mode
 
     // ── Phase C4: NIAH ────────────────────────────────────────────────
-    let mut niah: Vec<(String, NiahOut)> = Vec::new();
     if niah_trials > 0 {
         let mut trials: Vec<NiahTrial> = Vec::with_capacity(niah_trials);
         for t in 0..niah_trials {
@@ -798,6 +823,7 @@ fn main() -> Result<()> {
             }, o.best_rank.iter().filter(|&&x| x == 1).count(), o.best_rank.len());
             niah.push(("f16".into(), o));
         }
+        rep.write_incremental(&arms, &niah, &schedule, &grid_note, lam_star, lam_star_d, sched_search_d);
         // λ arms.
         for &lam in lambdas.iter() {
             let mut st = KToVState::new_uniform(table, lam, n_layers, kvd, seq_len + 32);
@@ -806,6 +832,7 @@ fn main() -> Result<()> {
             let name = format!("k-{lam:.2}");
             println!("# niah {name}: done");
             niah.push((name, o));
+            rep.write_incremental(&arms, &niah, &schedule, &grid_note, lam_star, lam_star_d, sched_search_d);
         }
         // The schedule arm (when the grid ran).
         if !schedule.is_empty() {
@@ -814,232 +841,27 @@ fn main() -> Result<()> {
             let o = run_niah_arm(&mut ctx, &weights, &mut cache, &mut hook, &trials, &config);
             println!("# niah k-sched: done");
             niah.push(("k-sched".into(), o));
+            rep.write_incremental(&arms, &niah, &schedule, &grid_note, lam_star, lam_star_d, sched_search_d);
         }
     }
 
-    // ── Phase D: the report ───────────────────────────────────────────
-    // Telemetry source: the λ=1 arm when present, else the largest λ.
-    let tel_src = arms
-        .iter()
-        .filter(|a| a.lam.is_some_and(|l| l > 0.0) && !a.tel.is_empty())
-        .max_by(|a, b| a.lam.unwrap().partial_cmp(&b.lam.unwrap()).unwrap());
-    let tel_cos: Vec<f64> = tel_src
-        .map(|a| a.tel.iter().map(|t| t.cos_kv()).collect())
-        .unwrap_or_default();
-    let tel_refund: Vec<f64> = tel_src
-        .map(|a| a.tel.iter().map(|t| t.refund_share()).collect())
-        .unwrap_or_default();
-
-    // Pairings (computed once, here — after every push, so the borrows are
-    // fresh and the base/k-0 rows are found in the FINAL arm set). In
-    // --niah-only mode arms is EMPTY: the report carries the G3 + NIAH
-    // sections only, and the ladder/gates live in the parent run's log.
-    let base_arm = arms.first();
-    let k0 = arms.iter().find(|a| a.lam == Some(0.0));
-    struct Row {
-        name: String,
-        ppl: f64,
-        dp_base: Option<f64>,
-        dn_base: Option<f64>,
-        fl_base: Option<f64>,
-        win_base: Option<(usize, usize)>,
-        dp_k0: Option<f64>,
-        dn_k0: Option<f64>,
-        fl_k0: Option<f64>,
-        win_k0: Option<(usize, usize)>,
-        tok_s: f64,
-    }
-    let mut rows: Vec<Row> = Vec::new();
-    for a in &arms {
-        let base = base_arm.expect("base arm exists");
-        let is_base = std::ptr::eq(a, base);
-        let (dp_base, dn_base, fl_base, win_base) = if is_base {
-            (None, None, None, None)
-        } else {
-            match base_pair(a, base) {
-                Some((dp, dn, fl, w)) => (Some(dp), Some(dn), Some(fl), Some(w)),
-                None => (None, None, None, None),
-            }
-        };
-        let (dp_k0, dn_k0, fl_k0, win_k0) = if a.lam == Some(0.0) {
-            (None, None, None, None)
-        } else {
-            match k0 {
-                Some(k0a) => {
-                    let dp = 100.0 * ((a.ppl() / k0a.ppl()) - 1.0);
-                    let dn = a.mean_d(k0a);
-                    let n = a.nlls.len().min(k0a.nlls.len());
-                    let fl = 100.0
-                        * (0..n).filter(|&i| a.top[i] != k0a.top[i]).count() as f64
-                        / n as f64;
-                    let w = a.win_count(k0a);
-                    (Some(dp), Some(dn), Some(fl), Some(w))
-                }
-                None => (None, None, None, None),
-            }
-        };
-        rows.push(Row {
-            name: a.name.clone(),
-            ppl: a.ppl(),
-            dp_base,
-            dn_base,
-            fl_base,
-            win_base,
-            dp_k0,
-            dn_k0,
-            fl_k0,
-            win_k0,
-            tok_s: a.fwd as f64 / a.secs.max(1e-9),
-        });
-    }
-
-    let mut out = String::new();
-    out.push_str("# Issue 013 T2 — K=V+ λ ladder: gemma-2-2b decode (kv_plus_ladder)\n\n");
-    out.push_str(&format!(
-        "seq_len {seq_len} | cal {cal_n} eval {eval_n} search {search_n} tokens | top_k {top_k} | table {}\n\n",
-        table_sha
-    ));
-    out.push_str(&format!("box: {box_note}\n\n"));
-    if smoke {
-        out.push_str("**SMOKE RUN — harness check only, never evidence.**\n\n");
-    }
-    out.push_str(&format!(
-        "- G3 probe (hard): {}{}\n- λ*: {}\n- grid: {grid_note}\n\n",
-        if g3_pass { "PASS" } else { "FAIL" },
-        if table_loaded { " | table LOADED (".to_owned() + &table_sha + ")" } else { String::new() },
-        lam_star.map_or("(none)".into(), |l| format!(
-            "{l} (ΔNLL vs k-0 {:+.5})",
-            lam_star_d.unwrap_or(f64::NAN)
-        )),
-    ));
-
-    if niah_only {
-        out.push_str(
-            "**--niah-only run: the ladder/grid/validation sections below are ABSENT — those numbers live in the parent run's log + the Bench 012 doc.**\n\n",
-        );
-    }
-
-    if !niah_only {
-    out.push_str("## Ladder (held-out eval)\n\n");
-    out.push_str("| arm | ppl | Δppl f16 | ΔNLL f16 | flip f16 | win f16 | Δppl k-0 | ΔNLL k-0 | flip k-0 | win k-0 | tok/s |\n");
-    out.push_str("|---|---|---|---|---|---|---|---|---|---|---|\n");
-    for r in &rows {
-        let dpb = r.dp_base.map_or("—".into(), |x| format!("{x:+.3}%"));
-        let dnb = r.dn_base.map_or("—".into(), |x| format!("{x:+.5}"));
-        let flb = r.fl_base.map_or("—".into(), |x| format!("{x:.2}%"));
-        let wb = r
-            .win_base
-            .map_or("—".into(), |(w, n)| format!("{w}/{n}"));
-        let dpk = r.dp_k0.map_or("—".into(), |x| format!("{x:+.3}%"));
-        let dnk = r.dn_k0.map_or("—".into(), |x| format!("{x:+.5}"));
-        let flk = r.fl_k0.map_or("—".into(), |x| format!("{x:.2}%"));
-        let wk = r.win_k0.map_or("—".into(), |(w, n)| format!("{w}/{n}"));
-        out.push_str(&format!(
-            "| {} | {:.4} | {} | {} | {} | {} | {} | {} | {} | {} | {:.1} |\n",
-            r.name, r.ppl, dpb, dnb, flb, wb, dpk, dnk, flk, wk, r.tok_s
-        ));
-    }
-    out.push('\n');
-
-    // Gates.
-    out.push_str("## Gates (pre-registered)\n\n");
-    if let (Some(k0a), Some(b)) = (k0, base_arm) {
-        let tax = 100.0 * ((k0a.ppl() / b.ppl()) - 1.0);
-        out.push_str(&format!(
-            "- **Tax cross-check:** Δppl(k-0 − f16) = {tax:+.3}% — the V:=K cost the refund is measured against (issue cited 2.5–3.1%).\n"
-        ));
-        out.push_str(&format!(
-            "- **Consistency:** f16 ppl {:.4} vs T1's {T1_F16_PPL:.4} (Δ {:+.3}%).\n",
-            b.ppl(),
-            100.0 * ((b.ppl() / T1_F16_PPL) - 1.0)
-        ));
-    }
-    match lam_star {
-        Some(l) => {
-            let best = arms
-                .iter()
-                .find(|a| a.lam == Some(l))
-                .expect("λ* arm exists");
-            let k0a = k0.expect("k-0 exists");
-            out.push_str(&format!(
-                "- **G-A (the claim): PASS** — k-{l:.2} mean paired ΔNLL vs k-0 = {:+.5} (< 0); win share {}/{} chunks.\n",
-                best.mean_d(k0a),
-                best.win_count(k0a).0,
-                best.win_count(k0a).1
-            ));
-        }
-        None => out.push_str(
-            "- **G-A (the claim): FAIL** — no λ > 0 beat k-0 on mean paired ΔNLL: the table refunds nothing measurable on this fixture.\n",
-        ),
-    }
-    out.push_str(&format!(
-        "- **G-C (bit-identity): {}**\n",
-        if g3_pass { "PASS" } else { "FAIL" }
-    ));
-    if let (Some(sd), Some(sa)) = (sched_search_d, arms.iter().find(|a| a.name == "k-sched")) {
-        let k0a = k0.expect("k-0 exists");
-        out.push_str(&format!(
-            "- **G-D (schedule transfer):** search ΔNLL vs incumbent {sd:+.5} → validation ΔNLL vs k-0 {:+.5} (ppl {:.4}); uniform λ* arm for the same comparison: ΔNLL {:+.5}.\n",
-            sa.mean_d(k0a),
-            sa.ppl(),
-            lam_star
-                .and_then(|l| arms.iter().find(|a| a.lam == Some(l)))
-                .map_or(f64::NAN, |a| a.mean_d(k0a))
-        ));
-    }
-    out.push('\n');
-    } // end !niah_only report sections
-
-    if !rho_vk.is_empty() && !rho_vk[0].is_nan() {
-        out.push_str("## Calibration dashboard — ρ_l(V−K) and the λ=1 telemetry\n\n");
-        out.push_str("| layer | ρ_l(V−K) | cos(K,V) | λ²‖E‖²/‖V‖² |\n|---|---|---|---|\n");
-        for (l, r) in rho_vk.iter().enumerate() {
-            out.push_str(&format!(
-                "| {l} | {r:.4} | {:.4} | {:.4} |\n",
-                tel_cos.get(l).copied().unwrap_or(f64::NAN),
-                tel_refund.get(l).copied().unwrap_or(f64::NAN)
-            ));
-        }
-        out.push('\n');
-    }
-
-    if !schedule.is_empty() {
-        out.push_str(&format!(
-            "## Chosen per-layer schedule\n\n`{:?}`\n\n",
-            schedule
-        ));
-    }
-
-    if !niah.is_empty() {
-        let t_n = niah.first().map(|(_, o)| o.best_rank.len()).unwrap_or(0);
-        out.push_str(&format!(
-            "## NIAH (Bench-814 shape, {t_n} trials, direction-only)\n\n| arm | median best rank | hits (rank 1) | mean answer NLL |\n|---|---|---|---|\n"
-        ));
-        for (name, o) in &niah {
-            let mut r = o.best_rank.clone();
-            r.sort_unstable();
-            let med = r.get(r.len() / 2).copied().unwrap_or(0);
-            let hits = o.best_rank.iter().filter(|&&x| x == 1).count();
-            let m = if o.answer_nll.is_empty() {
-                0.0
-            } else {
-                o.answer_nll.iter().sum::<f64>() / o.answer_nll.len() as f64
-            };
-            out.push_str(&format!(
-                "| {name} | {med} | {hits}/{} | {m:.3} |\n",
-                o.best_rank.len()
-            ));
-        }
-        out.push('\n');
-    }
-
-    out.push_str(
-        "\n---\n*Measurement-only (issue 013 T2). The only claim under test is quality(K=V+) > quality(K=V); no parity claim vs full V. Promotion is katgpt-rs-side.*\n",
+    // ── Phase D: the report (final render) ────────────────────────────
+    // Byte-identical to the pre-029 single-shot writer; the incremental
+    // snapshots above already persisted every completed arm (issue 029
+    // defect 2 — "rewritten after every arm" is now the code's behavior,
+    // not just the .cmd header's claim). This render also prints to stdout.
+    let out = rep.snapshot(
+        &arms,
+        &niah,
+        &schedule,
+        &grid_note,
+        lam_star,
+        lam_star_d,
+        sched_search_d,
     );
-
     print!("{out}");
     let _ = std::io::stdout().flush();
-    if let Some(p) = &report_path {
+    if let Some(p) = &rep.report_path {
         std::fs::write(p, &out).with_context(|| format!("write report {}", p.display()))?;
         eprintln!("# report written: {}", p.display());
     }
@@ -1065,4 +887,434 @@ fn base_pair(
     let fl = 100.0 * (0..n).filter(|&i| a.top[i] != base.top[i]).count() as f64 / n as f64;
     let w = a.win_count(base);
     Some((dp, dn, fl, w))
+}
+
+// ── Phase-D report rendering (re-renderable) ───────────────────────────
+
+/// Everything the Phase-D report reads that is final before Phase C1 (run
+/// config + probe state). The per-arm state is passed per call so the report
+/// can be re-rendered — and the report file rewritten — after every arm
+/// completes (issue 029 defect 2: a crash in a later phase keeps the
+/// structured report; previously "rewritten after every arm" lived only in
+/// the .cmd header's claim, the code wrote once at the end).
+struct ReportCtx {
+    seq_len: usize,
+    cal_n: usize,
+    eval_n: usize,
+    search_n: usize,
+    top_k: usize,
+    table_sha: String,
+    box_note: String,
+    smoke: bool,
+    niah_only: bool,
+    g3_pass: bool,
+    table_loaded: bool,
+    rho_vk: Vec<f64>,
+    report_path: Option<PathBuf>,
+}
+
+impl ReportCtx {
+    /// Render the full report from the CURRENT run state. Byte-identical to
+    /// the single-shot writer this replaced — the final call in `main` IS
+    /// that writer (stdout print + fatal file write).
+    #[allow(clippy::too_many_arguments)]
+    fn snapshot(
+        &self,
+        arms: &[LadderArm],
+        niah: &[(String, NiahOut)],
+        schedule: &[f32],
+        grid_note: &str,
+        lam_star: Option<f32>,
+        lam_star_d: Option<f64>,
+        sched_search_d: Option<f64>,
+    ) -> String {
+        // Telemetry source: the λ=1 arm when present, else the largest λ.
+        let tel_src = arms
+            .iter()
+            .filter(|a| a.lam.is_some_and(|l| l > 0.0) && !a.tel.is_empty())
+            .max_by(|a, b| a.lam.unwrap().partial_cmp(&b.lam.unwrap()).unwrap());
+        let tel_cos: Vec<f64> = tel_src
+            .map(|a| a.tel.iter().map(|t| t.cos_kv()).collect())
+            .unwrap_or_default();
+        let tel_refund: Vec<f64> = tel_src
+            .map(|a| a.tel.iter().map(|t| t.refund_share()).collect())
+            .unwrap_or_default();
+
+        // Pairings (computed on every render, from the arms present — the
+        // base/k-0 rows are found in the CURRENT arm set). In --niah-only
+        // mode `arms` is EMPTY: the report carries the G3 + NIAH sections
+        // only, and the ladder/gates live in the parent run's log.
+        let base_arm = arms.first();
+        let k0 = arms.iter().find(|a| a.lam == Some(0.0));
+        struct Row {
+            name: String,
+            ppl: f64,
+            dp_base: Option<f64>,
+            dn_base: Option<f64>,
+            fl_base: Option<f64>,
+            win_base: Option<(usize, usize)>,
+            dp_k0: Option<f64>,
+            dn_k0: Option<f64>,
+            fl_k0: Option<f64>,
+            win_k0: Option<(usize, usize)>,
+            tok_s: f64,
+        }
+        let mut rows: Vec<Row> = Vec::new();
+        for a in arms {
+            let Some(base) = base_arm else { break };
+            let is_base = std::ptr::eq(a, base);
+            let (dp_base, dn_base, fl_base, win_base) = if is_base {
+                (None, None, None, None)
+            } else {
+                match base_pair(a, base) {
+                    Some((dp, dn, fl, w)) => (Some(dp), Some(dn), Some(fl), Some(w)),
+                    None => (None, None, None, None),
+                }
+            };
+            let (dp_k0, dn_k0, fl_k0, win_k0) = if a.lam == Some(0.0) {
+                (None, None, None, None)
+            } else {
+                match k0 {
+                    Some(k0a) => {
+                        let dp = 100.0 * ((a.ppl() / k0a.ppl()) - 1.0);
+                        let dn = a.mean_d(k0a);
+                        let n = a.nlls.len().min(k0a.nlls.len());
+                        let fl = 100.0
+                            * (0..n).filter(|&i| a.top[i] != k0a.top[i]).count() as f64
+                            / n as f64;
+                        let w = a.win_count(k0a);
+                        (Some(dp), Some(dn), Some(fl), Some(w))
+                    }
+                    None => (None, None, None, None),
+                }
+            };
+            rows.push(Row {
+                name: a.name.clone(),
+                ppl: a.ppl(),
+                dp_base,
+                dn_base,
+                fl_base,
+                win_base,
+                dp_k0,
+                dn_k0,
+                fl_k0,
+                win_k0,
+                tok_s: a.fwd as f64 / a.secs.max(1e-9),
+            });
+        }
+
+        let mut out = String::new();
+        out.push_str("# Issue 013 T2 — K=V+ λ ladder: gemma-2-2b decode (kv_plus_ladder)\n\n");
+        out.push_str(&format!(
+            "seq_len {} | cal {} eval {} search {} tokens | top_k {} | table {}\n\n",
+            self.seq_len, self.cal_n, self.eval_n, self.search_n, self.top_k, self.table_sha
+        ));
+        out.push_str(&format!("box: {}\n\n", self.box_note));
+        if self.smoke {
+            out.push_str("**SMOKE RUN — harness check only, never evidence.**\n\n");
+        }
+        out.push_str(&format!(
+            "- G3 probe (hard): {}{}\n- λ*: {}\n- grid: {}\n\n",
+            if self.g3_pass { "PASS" } else { "FAIL" },
+            if self.table_loaded {
+                " | table LOADED (".to_owned() + &self.table_sha + ")"
+            } else {
+                String::new()
+            },
+            lam_star.map_or("(none)".into(), |l| format!(
+                "{l} (ΔNLL vs k-0 {:+.5})",
+                lam_star_d.unwrap_or(f64::NAN)
+            )),
+            grid_note,
+        ));
+
+        if self.niah_only {
+            out.push_str(
+                "**--niah-only run: the ladder/grid/validation sections below are ABSENT — those numbers live in the parent run's log + the Bench 012 doc.**\n\n",
+            );
+        }
+
+        if !self.niah_only {
+            out.push_str("## Ladder (held-out eval)\n\n");
+            out.push_str("| arm | ppl | Δppl f16 | ΔNLL f16 | flip f16 | win f16 | Δppl k-0 | ΔNLL k-0 | flip k-0 | win k-0 | tok/s |\n");
+            out.push_str("|---|---|---|---|---|---|---|---|---|---|---|\n");
+            for r in &rows {
+                let dpb = r.dp_base.map_or("—".into(), |x| format!("{x:+.3}%"));
+                let dnb = r.dn_base.map_or("—".into(), |x| format!("{x:+.5}"));
+                let flb = r.fl_base.map_or("—".into(), |x| format!("{x:.2}%"));
+                let wb = r.win_base.map_or("—".into(), |(w, n)| format!("{w}/{n}"));
+                let dpk = r.dp_k0.map_or("—".into(), |x| format!("{x:+.3}%"));
+                let dnk = r.dn_k0.map_or("—".into(), |x| format!("{x:+.5}"));
+                let flk = r.fl_k0.map_or("—".into(), |x| format!("{x:.2}%"));
+                let wk = r.win_k0.map_or("—".into(), |(w, n)| format!("{w}/{n}"));
+                out.push_str(&format!(
+                    "| {} | {:.4} | {} | {} | {} | {} | {} | {} | {} | {} | {:.1} |\n",
+                    r.name, r.ppl, dpb, dnb, flb, wb, dpk, dnk, flk, wk, r.tok_s
+                ));
+            }
+            out.push('\n');
+
+            // Gates.
+            out.push_str("## Gates (pre-registered)\n\n");
+            if let (Some(k0a), Some(b)) = (k0, base_arm) {
+                let tax = 100.0 * ((k0a.ppl() / b.ppl()) - 1.0);
+                out.push_str(&format!(
+                    "- **Tax cross-check:** Δppl(k-0 − f16) = {tax:+.3}% — the V:=K cost the refund is measured against (issue cited 2.5–3.1%).\n"
+                ));
+                out.push_str(&format!(
+                    "- **Consistency:** f16 ppl {:.4} vs T1's {T1_F16_PPL:.4} (Δ {:+.3}%).\n",
+                    b.ppl(),
+                    100.0 * ((b.ppl() / T1_F16_PPL) - 1.0)
+                ));
+            }
+            match lam_star {
+                Some(l) =>
+                // Mid-run-snapshot guard: λ* is derived FROM completed arms,
+                // so the arm exists in every real state — but a snapshot must
+                // never panic (issue 029 defect 2's whole point). Degrade to
+                // PENDING instead; unreachable in a final render.
+                match (arms.iter().find(|a| a.lam == Some(l)), k0) {
+                    (Some(best), Some(k0a)) => {
+                        out.push_str(&format!(
+                            "- **G-A (the claim): PASS** — k-{l:.2} mean paired ΔNLL vs k-0 = {:+.5} (< 0); win share {}/{} chunks.\n",
+                            best.mean_d(k0a),
+                            best.win_count(k0a).0,
+                            best.win_count(k0a).1
+                        ));
+                    }
+                    _ => out.push_str(&format!(
+                        "- **G-A (the claim): PENDING** — λ* {l} determined; its arm or k-0 is not in the current snapshot.\n"
+                    )),
+                },
+                None => out.push_str(
+                    "- **G-A (the claim): FAIL** — no λ > 0 beat k-0 on mean paired ΔNLL: the table refunds nothing measurable on this fixture.\n",
+                ),
+            }
+            out.push_str(&format!(
+                "- **G-C (bit-identity): {}**\n",
+                if self.g3_pass { "PASS" } else { "FAIL" }
+            ));
+            if let (Some(sd), Some(sa)) = (
+                sched_search_d,
+                arms.iter().find(|a| a.name == "k-sched"),
+            ) {
+                // Same mid-run guard as G-A: k-sched runs after k-0, so k0 is
+                // Some in every real state that reaches here.
+                if let Some(k0a) = k0 {
+                    out.push_str(&format!(
+                        "- **G-D (schedule transfer):** search ΔNLL vs incumbent {sd:+.5} → validation ΔNLL vs k-0 {:+.5} (ppl {:.4}); uniform λ* arm for the same comparison: ΔNLL {:+.5}.\n",
+                        sa.mean_d(k0a),
+                        sa.ppl(),
+                        lam_star
+                            .and_then(|l| arms.iter().find(|a| a.lam == Some(l)))
+                            .map_or(f64::NAN, |a| a.mean_d(k0a))
+                    ));
+                }
+            }
+            out.push('\n');
+        } // end !niah_only report sections
+
+        if !self.rho_vk.is_empty() && !self.rho_vk[0].is_nan() {
+            out.push_str("## Calibration dashboard — ρ_l(V−K) and the λ=1 telemetry\n\n");
+            out.push_str("| layer | ρ_l(V−K) | cos(K,V) | λ²‖E‖²/‖V‖² |\n|---|---|---|---|\n");
+            for (l, r) in self.rho_vk.iter().enumerate() {
+                out.push_str(&format!(
+                    "| {l} | {r:.4} | {:.4} | {:.4} |\n",
+                    tel_cos.get(l).copied().unwrap_or(f64::NAN),
+                    tel_refund.get(l).copied().unwrap_or(f64::NAN)
+                ));
+            }
+            out.push('\n');
+        }
+
+        if !schedule.is_empty() {
+            out.push_str(&format!(
+                "## Chosen per-layer schedule\n\n`{:?}`\n\n",
+                schedule
+            ));
+        }
+
+        if !niah.is_empty() {
+            let t_n = niah.first().map(|(_, o)| o.best_rank.len()).unwrap_or(0);
+            out.push_str(&format!(
+                "## NIAH (Bench-814 shape, {t_n} trials, direction-only)\n\n| arm | median best rank | hits (rank 1) | mean answer NLL |\n|---|---|---|---|\n"
+            ));
+            for (name, o) in niah {
+                let mut r = o.best_rank.clone();
+                r.sort_unstable();
+                let med = r.get(r.len() / 2).copied().unwrap_or(0);
+                let hits = o.best_rank.iter().filter(|&&x| x == 1).count();
+                let m = if o.answer_nll.is_empty() {
+                    0.0
+                } else {
+                    o.answer_nll.iter().sum::<f64>() / o.answer_nll.len() as f64
+                };
+                out.push_str(&format!(
+                    "| {name} | {med} | {hits}/{} | {m:.3} |\n",
+                    o.best_rank.len()
+                ));
+            }
+            out.push('\n');
+        }
+
+        out.push_str(
+            "\n---\n*Measurement-only (issue 013 T2). The only claim under test is quality(K=V+) > quality(K=V); no parity claim vs full V. Promotion is katgpt-rs-side.*\n",
+        );
+        out
+    }
+
+    /// Rewrite the report file from the current state — called after every
+    /// arm completes. Intermediate write failures log and continue (never
+    /// fatal mid-run); the FINAL write in `main` stays fatal and also prints
+    /// the full report to stdout.
+    #[allow(clippy::too_many_arguments)]
+    fn write_incremental(
+        &self,
+        arms: &[LadderArm],
+        niah: &[(String, NiahOut)],
+        schedule: &[f32],
+        grid_note: &str,
+        lam_star: Option<f32>,
+        lam_star_d: Option<f64>,
+        sched_search_d: Option<f64>,
+    ) {
+        let Some(p) = &self.report_path else {
+            return;
+        };
+        let out =
+            self.snapshot(arms, niah, schedule, grid_note, lam_star, lam_star_d, sched_search_d);
+        match std::fs::write(p, &out) {
+            Ok(()) => eprintln!(
+                "# report rewritten ({} arms, {} niah): {}",
+                arms.len(),
+                niah.len(),
+                p.display()
+            ),
+            Err(e) => eprintln!("# incremental report write FAILED (continuing): {e}"),
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn arm(name: &str, lam: Option<f32>) -> LadderArm {
+        LadderArm {
+            name: name.into(),
+            lam,
+            nlls: vec![1.0, 2.0, 3.0],
+            top: vec![1, 2, 3],
+            chunk_sums: vec![6.0],
+            fwd: 3,
+            secs: 1.0,
+            tel: Vec::new(),
+        }
+    }
+
+    fn ctx(niah_only: bool, report_path: Option<PathBuf>) -> ReportCtx {
+        ReportCtx {
+            seq_len: 1024,
+            cal_n: 1024,
+            eval_n: 1024,
+            search_n: 1024,
+            top_k: 8192,
+            table_sha: "test-sha".into(),
+            box_note: "unit".into(),
+            smoke: false,
+            niah_only,
+            g3_pass: true,
+            table_loaded: !niah_only,
+            rho_vk: Vec::new(),
+            report_path,
+        }
+    }
+
+    fn niah_f16() -> (String, NiahOut) {
+        (
+            "f16".into(),
+            NiahOut {
+                best_rank: vec![1, 5, 3],
+                answer_nll: vec![0.1, 0.2, 0.3],
+                fwd: 3,
+                secs: 1.0,
+            },
+        )
+    }
+
+    #[test]
+    fn mid_run_snapshot_renders_completed_arms_only() {
+        let rep = ctx(false, None);
+        let arms = [
+            arm("f16", None),
+            arm("k-0.00", Some(0.0)),
+            arm("k-1.00", Some(1.0)),
+        ];
+        let schedule: Vec<f32> = vec![1.0; 4];
+        // Mid-run: only the first two arms have completed.
+        let mid = rep.snapshot(&arms[..2], &[], &schedule, "", Some(1.0), Some(-0.01), None);
+        assert!(mid.contains("| k-0.00 |"), "completed arm must render");
+        assert!(
+            !mid.contains("| k-1.00 |"),
+            "a not-yet-run arm must be absent from the mid-run snapshot"
+        );
+        assert!(mid.contains("## Chosen per-layer schedule"));
+        // The mid-run guard: λ* set but its arm absent → PENDING, never a panic.
+        assert!(mid.contains("G-A (the claim): PENDING"), "mid: {mid}");
+    }
+
+    #[test]
+    fn final_snapshot_section_order_and_niah_row() {
+        let rep = ctx(false, None);
+        let arms = vec![
+            arm("f16", None),
+            arm("k-0.00", Some(0.0)),
+            arm("k-1.00", Some(1.0)),
+            arm("k-sched", None),
+        ];
+        let niah = vec![niah_f16()];
+        let full = rep.snapshot(
+            &arms,
+            &niah,
+            &[1.0; 4],
+            "",
+            Some(1.0),
+            Some(-0.01),
+            Some(-0.02),
+        );
+        let i_ladder = full.find("## Ladder").expect("ladder section");
+        let i_gates = full.find("## Gates").expect("gates section");
+        let i_sched = full
+            .find("## Chosen per-layer schedule")
+            .expect("schedule section");
+        let i_niah = full.find("## NIAH").expect("niah section");
+        assert!(i_ladder < i_gates && i_gates < i_sched && i_sched < i_niah);
+        assert!(full.contains("| k-1.00 |"));
+        // sorted [1,3,5] → median 3; hits 1/3; mean answer NLL 0.200.
+        assert!(full.contains("| f16 | 3 | 1/3 | 0.200 |"), "niah row: {full}");
+        assert!(full.contains("G-A (the claim): PASS"));
+        assert!(full.contains("G-D (schedule transfer)"));
+    }
+
+    #[test]
+    fn niah_only_snapshot_marks_ladder_sections_absent() {
+        let rep = ctx(true, None);
+        let out = rep.snapshot(&[], &[niah_f16()], &[], "skipped (niah-only)", None, None, None);
+        assert!(out.contains("the ladder/grid/validation sections below are ABSENT"));
+        assert!(!out.contains("## Ladder"));
+        assert!(!out.contains("## Gates"));
+        assert!(out.contains("## NIAH"));
+        // ctx(true, _) sets table_loaded=false → the LOADED branch stays dark.
+        assert!(!out.contains("table LOADED"));
+    }
+
+    #[test]
+    fn write_incremental_persists_current_state() {
+        let p = std::env::temp_dir().join(format!("kvpl_inc_{}.md", std::process::id()));
+        let rep = ctx(false, Some(p.clone()));
+        rep.write_incremental(&[arm("f16", None)], &[], &[], "", None, None, None);
+        let s = std::fs::read_to_string(&p).expect("incremental report written");
+        assert!(s.contains("| f16 |"));
+        let _ = std::fs::remove_file(&p);
+    }
 }
