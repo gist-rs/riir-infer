@@ -127,6 +127,35 @@ disk 85→202 Gi); the 4090 detached-run mechanism is SCHEDULED TASKS
 (`schtasks`), not Start-Process — ssh session teardown kills the session
 job object's children (measured: log created, no done-marker, batch dead).
 
+## 2026-10-01 ~01:30 +07 — THE STATE LEAK: fix #8 was the root of everything; lane check EXIT 0; THE MATRIX IS RUNNING
+
+Retraction + resolution of the fourth pickup's own readings: the v2-corpus
+lane check still failed G-i4 (base(2) niah@4096 12/32 vs base(1) 27/32)
+and the arith decline WITHIN cells (4/5 early → 2/43 late) was the tell —
+degradation ACCUMULATED across items. **The bin never called
+`fwd.reset_state()` between items** (`a07fffd`): the GDN recurrent state
+carries IN PLACE across prefill calls, so every item after the first
+started from the previous item's final state. The shot-regeneration
+outputs, the 12.5% arith reading, the base(2) collapse — all state
+pollution, not model behavior. Every pre-fix accuracy observation is
+retracted.
+
+With the reset (`a07fffd`), the lane check **EXIT 0**:
+- base arith acc = **0.9583** (46/48) — above the 0.95 window ceiling by
+  0.008 (a borderline the record classifies; the damage axis has full
+  downward headroom)
+- NIAH near-ceiling: base(1) 27/32@4k · 31/32@8k · **32/32@16k**; base(2)
+  MATCHED (32/32@4k, 31/32@8k) — G-i4 byte-identical green, G-i1 green
+- Clean outputs also run ~2× faster (polluted generations looped to the
+  256-token cap; clean ones hit EOS early) — the matrix estimate returns
+  to the plan's 2–3h class
+
+**The full matrix fired 2026-10-01 ~01:30 +07** (both grids, all cells,
+DQ_OUT=F:\wt\dq614-matrix, schtasks-detached, logged). T6 close-out
+follows its completion: read the four cells + damage ratios R, write
+`.benchmarks/023_dq_phase_matrix.md` with box state, verdict into Issue 026
++ Plan 614, delete `E:/git/dq614-wt`.
+
 ## Non-goals
 
 - Do not touch Issue 029's lane (sibling-owned WIP).
