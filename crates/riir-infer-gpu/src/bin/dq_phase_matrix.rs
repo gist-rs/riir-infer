@@ -515,8 +515,14 @@ fn run() -> Result<(), String> {
     let gguf = GgufFile::open(Path::new(&model_path)).map_err(|e| format!("reopen: {e}"))?;
     let tok = BpeTokenizer::from_gguf(&gguf).map_err(|e| format!("tokenizer: {e}"))?;
     let bos = config.bos_token;
+    // Issue 864's own advice, CLAMP-DOWN (the first lane check OOM'd at
+    // NIAH entry with the v1 form — `(max_len+64).max(block.min(32768))`,
+    // which keeps the model's full 32768 block (4 GiB KV reservation) and
+    // never clamps: `.max` selects the LARGER. The bench's real sequence
+    // bound is the longest NIAH prompt + generation headroom; clamping to it
+    // halves the attention KV working set (32768 → 16448 slots).
     let max_len = *ni_lengths.last().unwrap_or(&4096);
-    config.block_size = (max_len + 64).max(config.block_size.min(32768));
+    config.block_size = config.block_size.min(max_len + 64);
     let ctx = CubeCLContext::new().map_err(|e| format!("GPU init: {e}"))?;
     let mut fwd = TernaryDeltanetGpuForward::new(&ctx, &config, &weights);
     eprintln!("[dq614] forward ready ({:.0}s)", t0.elapsed().as_secs());
