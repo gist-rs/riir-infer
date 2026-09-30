@@ -49,6 +49,19 @@ boundary-contract 162nd run flagged `dq614-wt` as contract rot (27th discovered
 repo, no CANONICAL row) — expected shape, self-resolves at this run's own T6
 deletion clause; do not "fix" it separately.
 
+## 2026-09-30 ~13:1x +07 — second pickup re-check: ONE consumer cleared, the blocker stands (uvicorn)
+
+The Batch-193 conversion session re-checked before taking the next queue
+item: GPU compute still clear (GUI-only, exempt) but **CPU 73-74%** — the
+OpenThai uvicorn pair (pid 29012, `openthai_systemone.server:app` :8002)
+measured **16.11 cores** over an 8s window (the dominant consumer, ~24
+logical procs). **`kv_plus_ladder` has FINISHED** — no longer in the top
+consumers — so the earlier note's "both consumers" is stale by one; the
+go/no-go verdict is unchanged (uvicorn alone saturates the box's CPU
+headroom). Nothing measured, nothing touched, the worktree remains clean
+at `4d7304e`. Re-run the pre-flight as written; the run proceeds verbatim
+(steps 2-6) once the box calms.
+
 ## Non-goals
 
 - Do not touch Issue 029's lane (sibling-owned WIP).
