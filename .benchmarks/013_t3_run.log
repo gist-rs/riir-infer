@@ -1,0 +1,22 @@
+=== box state at launch (2026-09-29 23:35:48.08) === 
+=== T2 process exited after 399 min; box is ours (2026-09-30  6:31:11.51) === 
+OS Name:                       Microsoft Windows 11 Pro
+Total Physical Memory:         32,538 MB
+Available Physical Memory:     19,029 MB
+python.exe                   31440 Console                    1        856 K
+python.exe                   29012 Console                    1  2,765,636 K
+# kv_reconstruct_gate: gemma-2 f16 | layers=26 n_embd=2304 kv_dim=1024 vocab=256000 | load 44.5s
+# corpus: 13121614 chars → 2702627 tokens | eval [61440..63488) | seq 1024
+# table loaded: .benchmarks\012_kv_table_residual.bin (7348 rows, cal_tokens 61440) — BLAKE3 verified
+# G3: seam-identity PASS | recon-vs-store max |Δlogit| 1.254e-4 (rotation-rounding class)
+# arm f16: 2046 scored | ppl 4.5901 | 4 fwd/s
+# arm λ=0: store ppl 1931443.0536 recon ppl 1931443.9140 | mean Δ +4.45e-7 max |Δ| 4.98e-5 | PASS
+# arm λ=0.5: store ppl 10519.8704 recon ppl 10519.8685 | mean Δ -1.84e-7 max |Δ| 4.42e-5 | PASS
+# arm λ=1: store ppl 476.8323 recon ppl 476.8323 | mean Δ +5.17e-8 max |Δ| 2.10e-5 | PASS
+# G2 tg64 decode (12 pairs, seq 129):
+  full-cache: median 265772 µs/step (3.8 tok/s) | min 258177 µs | prefill 34214 ms
+    recon-λ0: median 285703 µs/step (3.5 tok/s) | min 276841 µs | ratio 1.079× | prefill 35830 ms
+    recon-λ1: median 288489 µs/step (3.5 tok/s) | min 279162 µs | ratio 1.088× | prefill 36448 ms
+# P4 bytes/token: full 212992 B, P3 106496 B (50.0%)
+# done: G3 PASS G1 PASS
+=== run exited (2026-09-30  8:25:12.90) rc=0 === 

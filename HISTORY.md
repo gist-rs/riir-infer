@@ -39,6 +39,32 @@ sha `3a0f5333d6bafd63…`, reused by T3 — no second calibration).
   dashboard); the gates here were adjudicated from log lines. Incremental
   per-arm report write filed with 029.
 
+## 2026-09-30 — Issue 013 T3 EXECUTED: P3 V-cache reconstruction — G1+G3 PASS at every λ; the 50.0% bytes/token law holds; G2 +7.9–8.8% recorded (the promotable P-half)
+
+Chained run 06:31 → 08:25 (rc 0): the `riir_infer_t3_reconstruct` task waited
+399 min for the T2 process, BLAKE3-verified T2's table artifact, and ran the
+prebuilt exe — the chain design held even through T2's crash. Record:
+`.benchmarks/013_t3_p3_reconstruct_gate.md`; run report `013_t3_reconstruct_report.md`
+(incrementally written — the Phase-D defect does not exist here) + `013_t3_run.log`.
+
+- **G3 PASS** (seam identity to_bits; recon-vs-store max |Δlogit| 1.254e-4,
+  the rotation-rounding class). **G1 PASS at every λ: 0 flips in 2046 scored
+  positions** — mean ΔNLL ≤ 8.3e-6, max ≤ 5.0e-5 against the 2e-3/5e-2
+  pre-registered bounds; retention walk clean in every band.
+- **Bytes/token 212,992 → 106,496 = exactly 50.0%** (n_v/(n_kv+n_v) = 1/2;
+  sliding-window layers keep the fraction).
+- **G2 recorded (not gated):** tg64 paired interleave — full-cache 265,772
+  µs/step, recon-λ0 1.079×, recon-λ1 1.088×. Mild at this geometry (seq 129 +
+  64 decode), NOT the primitive-level 14–15×; the long-context re-measure +
+  the kernel levers (deferred restore, block angle-addition) are T4's lane,
+  and these numbers are the baseline they must beat.
+- **The verdict substance:** P3 is the promotable P-half on gemma-2 — the
+  served V is algebraically the stored V up to f32 rotation rounding (the
+  FULL-V quality surface), unlike T2's V:=K destruction. What it buys: the V
+  cache allocation (50%); what it costs today: the +8–9% read-path baseline.
+  T1 (P1) negative, T2 (P2) not viable standalone, T3 (P3) clean — the
+  katgpt-rs-side promotion decision now has its full model-bound input set.
+
 ## 2026-09-27 — Issue 014 RESOLVED: activation-aware ternary scale fit — SPLIT BY LANE (born-ternary clean negative; dense-parent mechanism transfer)
 
 Filed 2026-09-25 from katgpt-rs Issue 886 (the per-family conditional
