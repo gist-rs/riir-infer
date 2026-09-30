@@ -362,6 +362,14 @@ struct GenOut {
     text: String,
     n_generated: usize, // INCLUDING the prefill-produced first token
     first_fnv: u64,
+    /// FNV of the FIRST DECODE-LANE logits (token 2's) — 0 when generation
+    /// stopped at the prefill token. The decode-side positive-control
+    /// signal: a decode-only fake-quant arm cannot change `first_fnv` (the
+    /// prefill computes it BEFORE any decode step — the G-i2 control as
+    /// first written compared prefill logits for decode-armed cells and was
+    /// structurally unsatisfiable, FATALing the completed matrix at the
+    /// final gate).
+    second_fnv: u64,
 }
 
 /// Greedy-generate up to `cap` tokens. The FIRST generated token comes from
@@ -392,6 +400,7 @@ fn greedy_generate(
     fwd.reset_state();
     let logits = fwd.prefill(&tokens);
     let first_fnv = logits_fnv(&logits);
+    let mut second_fnv: u64 = 0;
     // D1 phase boundary: generated token 1 comes from the prefill's final
     // logits; every later token is a decode-lane step (256 launches each).
     let mut out_ids: Vec<usize> = Vec::with_capacity(cap + 1);
@@ -403,6 +412,9 @@ fn greedy_generate(
         }
         fwd.set_input_token(weights, next);
         let l = fwd.forward_token();
+        if second_fnv == 0 {
+            second_fnv = logits_fnv(&l);
+        }
         next = argmax(&l);
         out_ids.push(next);
     }
@@ -410,6 +422,7 @@ fn greedy_generate(
         text: tok.decode(&out_ids),
         n_generated: out_ids.len(),
         first_fnv,
+        second_fnv,
     }
 }
 
@@ -617,6 +630,7 @@ fn run() -> Result<(), String> {
         gen_lens: Vec<usize>,
         prompt_toks: Vec<usize>,
         first_fnvs: Vec<u64>,
+        second_fnvs: Vec<u64>,
         prefill_launches: u64,
         decode_launches: u64,
         /// G-i2: the EXACT expected counts, computed from actual lengths.
@@ -640,6 +654,7 @@ fn run() -> Result<(), String> {
         let mut arith_correct = Vec::with_capacity(arith.len());
         let mut gen_lens = Vec::new();
         let mut first_fnvs = Vec::new();
+        let mut second_fnvs = Vec::new();
         let mut prompt_toks = Vec::new();
         for a in &arith {
             let g = greedy_generate(fwd, weights_ref, &tok, bos, &a.prompt, 256);
@@ -647,6 +662,7 @@ fn run() -> Result<(), String> {
             arith_correct.push(ok);
             gen_lens.push(g.n_generated);
             first_fnvs.push(g.first_fnv);
+            second_fnvs.push(g.second_fnv);
             prompt_toks.push(tok.encode(&a.prompt).len() + 1);
             eprintln!(
                 "[dq614] {name} arith gold={} out={:?} ok={ok}",
@@ -663,6 +679,7 @@ fn run() -> Result<(), String> {
                 v.push(ok);
                 gen_lens.push(g.n_generated);
                 first_fnvs.push(g.first_fnv);
+                second_fnvs.push(g.second_fnv);
                 prompt_toks.push(tok.encode(&it.prompt).len() + 1);
             }
             ni_correct.insert(*l, v);
@@ -698,6 +715,7 @@ fn run() -> Result<(), String> {
             gen_lens,
             prompt_toks,
             first_fnvs,
+            second_fnvs,
             prefill_launches: got_pf,
             decode_launches: got_dec,
             expected_prefill,
@@ -713,6 +731,7 @@ fn run() -> Result<(), String> {
     let base2 = run_cell("base(2)", DqPhaseArm::Off, DqGrid::A2, &mut fwd)?;
     let gi1_counters_zero = base1.prefill_launches == 0 && base1.decode_launches == 0;
     let gi4_stable = base1.first_fnvs == base2.first_fnvs
+        && base1.second_fnvs == base2.second_fnvs
         && base1.arith_correct == base2.arith_correct
         && base1.ni_correct == base2.ni_correct;
     if !gi1_counters_zero {
@@ -757,18 +776,30 @@ fn run() -> Result<(), String> {
             ));
         }
     }
-    // Positive control: every armed cell's first arith FNV must differ from
-    // base's at some item (the vacuous-guard law).
+    // Positive control (the vacuous-guard law), PHASE-AWARE: the signal a
+    // fake-quant arm can move depends on WHICH phase it arms — a decode-only
+    // arm cannot change the prefill-produced `first_fnv` (token 1 comes from
+    // the prefill BEFORE any decode step), and a prefill-only arm's decode
+    // continuation may legitimately coincide on some items. The FIRST
+    // matrix run FATALed here at the final gate with every cell measured:
+    // the v1 control compared first_fnvs for ALL armed cells, structurally
+    // unsatisfiable for dec_aq. (Cells: pf/both → first_fnv; dec →
+    // second_fnv — the first decode-lane logits.)
     for (name, c) in &cells {
-        if name != "base" && name != "dec_a8" {
-            let differs = c
-                .first_fnvs
-                .iter()
-                .zip(cells["base"].first_fnvs.iter())
-                .any(|(a, b)| a != b);
-            if !differs {
-                return Err(format!("G-i2 positive control FAIL: {name} logits identical to base"));
-            }
+        if name == "base" || name == "dec_a8" {
+            continue;
+        }
+        let decode_armed = name.starts_with("dec_aq");
+        let (theirs, bases) = if decode_armed {
+            (&c.second_fnvs, &cells["base"].second_fnvs)
+        } else {
+            (&c.first_fnvs, &cells["base"].first_fnvs)
+        };
+        let differs = theirs.iter().zip(bases.iter()).any(|(a, b)| a != b);
+        if !differs {
+            return Err(format!(
+                "G-i2 positive control FAIL: {name} logits identical to base"
+            ));
         }
     }
 
