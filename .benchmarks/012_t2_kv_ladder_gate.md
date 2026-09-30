@@ -81,7 +81,11 @@ the chosen schedule on the full eval → (C4) NIAH — **crashed here**.
    in-memory per-arm NLL detail (win shares, flip distributions, the ρ
    dashboard). The log's per-arm summary lines carried every gate input this
    time; the fix (incremental report write after each arm) is filed with the
-   NIAH bug.
+   NIAH bug. **RESOLVED 2026-09-30 (issue 029 closed): the grow-retry builder
+   fix + `--niah-only` landed `d9acd5a` (012b rerun validated), the
+   fixture-gated builder unit test `e474f62`, and the incremental per-arm
+   report write `edaebf2` (8 write sites; mid-run states degrade, never
+   panic). The next parent run carries the re-writable report by default.**
 
 **Files:** run log `.benchmarks/012_t2_run.log` (verbatim, all arms + grid +
 the crash); table artifact `.benchmarks/012_kv_table_residual.bin` (sha
