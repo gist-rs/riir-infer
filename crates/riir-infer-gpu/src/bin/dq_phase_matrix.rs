@@ -117,50 +117,85 @@ Compute 5000 / 4 - 250. Think step by step, then give the final answer after ###
 ";
 
 fn arith_items(n: usize) -> Vec<ArithItem> {
+    arith_items_v2(n)
+}
+
+/// Precedence-correct gold: × binds before +/-; each class evaluates
+/// left-to-right. Returns `None` on overflow (checked) — the caller skips
+/// such items (none occur at these operand scales; the check is a guard).
+fn eval_standard_precedence(first: i128, ops: &[(char, i128)]) -> Option<i128> {
+    // Pass 1: fold the multiplicative runs into term values.
+    let mut terms: Vec<(char, i128)> = Vec::with_capacity(ops.len() + 1); // (pending_addop, value)
+    let mut product = first;
+    let mut pending: char = '+'; // the additive op that will join `product` into the sum
+    for &(op, operand) in ops {
+        match op {
+            '*' => product = product.checked_mul(operand)?,
+            add @ ('+' | '-') => {
+                terms.push((pending, product));
+                pending = add;
+                product = operand;
+            }
+            _ => return None,
+        }
+    }
+    terms.push((pending, product));
+    // Pass 2: additive, left-to-right.
+    let mut sum: i128 = 0;
+    for (op, value) in terms {
+        sum = match op {
+            '+' => sum.checked_add(value)?,
+            '-' => sum.checked_sub(value)?,
+            _ => return None,
+        };
+    }
+    Some(sum)
+}
+
+/// v2 (the Issue-030 lane-check fix): v1 accumulated the gold LEFT-TO-RIGHT
+/// while the model — and the few-shot examples themselves — apply standard
+/// ×-before-+/- precedence, so every mixed-precedence item was mislabeled
+/// (measured: the model answering its own prompt correctly while gold
+/// disagreed; base acc ≈ the precedence-neutral fraction). v2 generates the
+/// same operator/operand stream but takes the gold from
+/// `eval_standard_precedence`, so gold == what the convention the shots teach
+/// actually computes. Division is dropped: keeping generated divisions exact
+/// under precedence adds a retry lane for a class the shots already cover;
+/// +/-/* suffice for the phase-sensitivity axis. The corpus hash changes —
+/// disclosed in the run record (the stop rule's instrument-defect clause; no
+/// accuracy cell was admissible before this fix).
+fn arith_items_v2(n: usize) -> Vec<ArithItem> {
     let mut rng = Rng(0xA71A_614_4847);
     let mut out = Vec::with_capacity(n);
     for _ in 0..n {
         // 2-4 operations; multiplication operands kept small enough that a
         // 27B has a real but non-trivial shot (GSM8K-class difficulty).
         let n_ops = 2 + (rng.below(3) as usize);
-        let mut terms: Vec<(i128, char)> = Vec::new();
-        let mut expr = String::new();
         let first = 100 + rng.below(9900) as i128;
-        expr.push_str(&first.to_string());
-        let mut val = first;
+        let mut ops: Vec<(char, i128)> = Vec::with_capacity(n_ops);
         for _ in 0..n_ops {
-            let op = match rng.below(4) {
+            let op = match rng.below(3) {
                 0 => '+',
                 1 => '-',
-                2 => '*',
-                _ => {
-                    // division only with exact results
-                    let d = (2 + rng.below(40)) as i128;
-                    if val % d == 0 && val / d != 0 {
-                        expr.push_str(&format!(" / {d}"));
-                        val /= d;
-                        continue;
-                    }
-                    '+'
-                }
+                _ => '*',
             };
             let operand: i128 = match op {
                 '*' => (3 + rng.below(97)) as i128,
                 _ => (10 + rng.below(990)) as i128,
             };
-            expr.push_str(&format!(" {op} {operand}"));
-            val = match op {
-                '+' => val + operand,
-                '-' => val - operand,
-                _ => val * operand,
-            };
-            let _ = &mut terms;
+            ops.push((op, operand));
         }
+        let mut expr = format!("{first}");
+        for &(op, operand) in &ops {
+            expr.push_str(&format!(" {op} {operand}"));
+        }
+        let gold = eval_standard_precedence(first, &ops)
+            .expect("operand scales cannot overflow i128");
         out.push(ArithItem {
             prompt: format!(
                 "{ARITH_FEW_SHOT}Compute {expr}. Think step by step, then give the final answer after ####.\n"
             ),
-            gold: val,
+            gold,
         });
     }
     out
@@ -851,4 +886,85 @@ fn run() -> Result<(), String> {
     std::fs::write(&md_path, &md).map_err(|e| e.to_string())?;
     eprintln!("[dq614] report: {}", md_path.display());
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The Issue-030 lane-check defect, pinned: v1's left-to-right gold for a
+    /// mixed-precedence expr disagreed with what the few-shots teach. The
+    /// failing lane-check specimen was `4359 + 592 - 198 * 96 * 8` — v1 gold
+    /// (((4359+592)-198)*96*8) = 3650304; the model (standard precedence, per
+    /// its shots) computed 4359+592-(198*96*8) = -147113. The v2 gold IS the
+    /// standard-precedence value.
+    #[test]
+    fn eval_matches_the_few_shot_convention() {
+        // The shots' own two examples (both standard precedence).
+        assert_eq!(eval_standard_precedence(23, &[('*', 17), ('+', 45)]), Some(436));
+        assert_eq!(eval_standard_precedence(8842, &[('-', 1907), ('+', 333)]), Some(7268));
+        assert_eq!(eval_standard_precedence(12, &[('*', 12), ('*', 12)]), Some(1728));
+        // The lane-check specimen: standard precedence, NOT left-to-right.
+        assert_eq!(
+            eval_standard_precedence(4359, &[('+', 592), ('-', 198), ('*', 96), ('*', 8)]),
+            Some(-147_113)
+        );
+        // Precedence-neutral chains agree with left-to-right by construction.
+        assert_eq!(eval_standard_precedence(100, &[('+', 200), ('-', 50)]), Some(250));
+        // Multiplicative run binds as one term.
+        assert_eq!(
+            eval_standard_precedence(1000, &[('*', 3), ('+', 2), ('*', 4), ('-', 1)]),
+            Some(1000 * 3 + 2 * 4 - 1)
+        );
+    }
+
+    /// Every generated item's gold is exactly the standard-precedence value of
+    /// its own rendered expression, and no v2 item overflows.
+    #[test]
+    fn arith_items_gold_is_precedence_correct() {
+        let items = arith_items(48);
+        assert_eq!(items.len(), 48);
+        for it in &items {
+            // Re-parse the rendered expression and re-evaluate independently
+            // (a second evaluator, written differently: shunting to RPN).
+            let expr_line = it
+                .prompt
+                .lines()
+                .find(|l| l.starts_with("Compute "))
+                .expect("Compute line");
+            let body = expr_line
+                .strip_prefix("Compute ")
+                .and_then(|s| s.strip_suffix(". Think step by step, then give the final answer after ####."))
+                .expect("body");
+            let mut tokens = body.split_whitespace();
+            let first: i128 = tokens.next().unwrap().parse().unwrap();
+            let mut ops = Vec::new();
+            while let Some(op) = tokens.next() {
+                let operand: i128 = tokens.next().unwrap().parse().unwrap();
+                let op = op.chars().next().unwrap();
+                assert!(matches!(op, '+' | '-' | '*'), "v2 generated a division: {body}");
+                ops.push((op, operand));
+            }
+            // Independent RPN evaluation: * first (right-assoc run fold), then +/-.
+            let mut rpn: Vec<(char, i128)> = Vec::new();
+            let mut mul_run: Vec<i128> = vec![first];
+            for &(op, operand) in &ops {
+                match op {
+                    '*' => mul_run.push(operand),
+                    add => {
+                        let product: i128 = mul_run.iter().product();
+                        rpn.push((add, product));
+                        mul_run = vec![operand];
+                    }
+                }
+            }
+            let last: i128 = mul_run.iter().product();
+            let mut acc = 0i128;
+            for &(op, value) in &rpn {
+                acc = if op == '+' { acc + value } else { acc - value };
+            }
+            acc += last;
+            assert_eq!(it.gold, acc, "gold mismatch for {body}");
+        }
+    }
 }
