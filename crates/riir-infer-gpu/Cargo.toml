@@ -83,16 +83,21 @@ cudarc = { version = "0.19", default-features = false, features = ["std", "drive
 # Issue 026): on-device activation quantize→dequantize at five linear-input
 # sites per layer, per phase, on the folded ternary forward. Default-off —
 # the hot path is untouched when off (the injection blocks are cfg-gated).
-# Forwards bonsai2_hadamard (the folded loader) + the two prefill-lane
-# features the shipping A8 lane is built from — Issue 030's first-ever lane
-# check caught BOTH gaps: the pinned league artifact declares prism.hadamard
-# (the loader refuses LOUDLY without bonsai2_hadamard, the Issue-980 guard)
-# and the 734-arm8 gate hard-fails without chunked/batched prefill
-# (RIIR_PREFILL_CUDA_TRACE named 'feature: ternary_deltanet_chunked_prefill';
-# the engine's shipping default — riir-gpu line 503 — carries both). T3's
-# release-green was build-only, so the gaps surfaced only at the T5 lane
-# check.
-dq_phase_bench = ["cubecl_runtime", "ternary_gemv", "ternary_gemm_batched", "ternary_deltanet_chunked_prefill", "ternary_attention_batched_prefill", "riir-infer-core/bonsai2_hadamard"]
+# Forwards bonsai2_hadamard (the folded loader) + the prefill-lane features
+# the shipping A8 lane is built from — Issue 030's first-ever lane check
+# caught the gaps in sequence: (1) the pinned league artifact declares
+# prism.hadamard (the loader refuses LOUDLY without bonsai2_hadamard, the
+# Issue-980 guard); (2) the 734-arm8 gate hard-fails without chunked/batched
+# prefill (RIIR_PREFILL_CUDA_TRACE named 'feature: ternary_deltanet_chunked_prefill');
+# (3) WITHOUT the engine's kernel-selection features (ternary_gemm_simdgroup +
+# both recurrence arms) the lane runs fallback kernels that compute WRONG
+# LOGITS — lane-check base arith acc ≈ 0.07 vs the 0.25–0.95 admissibility
+# window (3 ok / 38 bad, coherent structure, broken arithmetic, ~10× slower
+# than the engine's lane). The bench MEASURES the shipping lane; it must
+# BUILD the shipping lane: the engine default (riir-gpu line 503) carries all
+# three. cuda_graphs_forward stays out — the bench pins
+# RIIR_PREFILL_CUDA_GRAPHS=0 by its own check.
+dq_phase_bench = ["cubecl_runtime", "ternary_gemv", "ternary_gemm_batched", "ternary_gemm_simdgroup", "ternary_deltanet_chunked_prefill", "ternary_attention_batched_prefill", "deltanet_recurrence_parallel", "deltanet_recurrence_rowpar", "riir-infer-core/bonsai2_hadamard"]
 cubecl_runtime = ["dep:cubecl", "dep:half", "dep:papaya", "dep:blake3"]
 cuda_backend = ["cubecl_runtime", "cubecl/cuda"]
 # Ternary bit-plane (Q2_0_g128) GEMV family around the gemv_ternary_cubecl
