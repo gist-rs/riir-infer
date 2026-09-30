@@ -4,6 +4,36 @@ Durable records for resolved questions and closed lanes (the noise-reduction
 convention: the record lands here, hash-pinned; open work lives in `.issues/`
 and `.plans/`). Created 2026-09-23 at the first record.
 
+## 2026-09-30 — Issue 054 Part 2 (reflex) REFUTED for this lane: the prefix-state handoff lead — laya is ModernBERT (bidirectional), not GDN; the coupling gate landed
+
+The reflex issue's Part 2 asked the riir-infer-laya owning session to evaluate
+open-jev-fast's `fla_mode="state"` prefix-state handoff (encode a case's shared
+state once, hand its final GDN recurrent state to each question's suffix) for
+`riir-infer-laya` serving. **Verdict: does not transfer — the premise named the
+wrong architecture.** The laya checkpoints are ModernBERT-large / mmBERT-base
+(`encoder_config.json`), a bidirectional encoder: no causal mask anywhere in
+the op stream (the only mask is the symmetric sliding-window band), while GDN's
+causal delta-rule recurrence is exactly what makes the upstream handoff
+lossless. The `deltanet` substrate serves the ternary Bonsai/GDN lane,
+unrelated to laya. Two further structural grounds: the state sits AFTER the
+per-question head span in `build_sequence`'s render (different RoPE offset per
+question — measured 34 vs 35), and the state truncation room is per-question
+(the "shared prefix" is not guaranteed identical tokens).
+
+**The gate** (`crates/riir-infer-laya/tests/prefix_state_coupling.rs` + its
+Cargo `[[test]]` row, feature `laya-riir`): TWO-SIDED — the shared span must
+drift STRICTLY ABOVE 1e-4 (a reading at or below the 1e-5 packed-equivalence
+GEMM budget FAILS the test, so an architecture change that ever makes the span
+independent re-opens the record mechanically). Measured (CPU posture, release
++ debug agree): real typed checkpoint, two choice questions against one shared
+state — the shared span (283 of 317/318 tokens: the state is ~89% of each
+sequence, so the as-filed ~5× prize was real) drifts **5.1e2**; synthetic
+4-layer geometry arm **2.7e0** over a 16-row shared prefix with a bit-identical
+determinism control. Consequence: the packed per-question pass (reflex issue
+020 T5) stays the exact floor for laya case serving; the lead's shape stays
+valid only for causal serving models (GDN/KV decoders). Full verdict: reflex
+`.issues/054_openjev_lane_and_prefix_state_handoff.md` Part 2 + its HISTORY.
+
 ## 2026-09-30 — Issue 013 T2 EXECUTED: the K=V+ λ ladder on gemma-2 — G-A PASS vs a catastrophic baseline; K=V+ not viable standalone; G-D overfit; NIAH build crash (029)
 
 Run 2026-09-29 12:51 → 2026-09-30 06:30 (task `riir_infer_t2_ladder`, ~17.7 h
