@@ -340,6 +340,13 @@ name = "lut_grid_solve"
 path = "src/bin/lut_grid_solve.rs"
 required-features = ["lut_grid"]
 
+# Issue 027 / Plan 615 T6 — the model-level per-family retention gate
+# (fakequant-at-load over the llama path; MiniCPM5-1B vehicle).
+[[bin]]
+name = "lut_grid_ppl"
+path = "src/bin/lut_grid_ppl.rs"
+required-features = ["lut_grid"]
+
 # riir-infer Issue 022 T5.0 — the collapsed-vs-parent top-1 agreement GOAT
 # (the T5.1 pre-registered ≥0.9 absolute budget on the qwen35 lane).
 # `twt_bonsai` carries deltanet_ternary_inference + bonsai2_hadamard — the

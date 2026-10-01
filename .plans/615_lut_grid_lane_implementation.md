@@ -1,6 +1,6 @@
 # Plan 615 — Issue 027 implementation: T0 asymmetric encoder + T1 Lloyd-Max grid solver + weight-space G1 eval
 
-**Status:** T0/T1/T4/T5 LANDED (weight-space tables below — solved grid wins every family on both artifacts); T6 model-level gate + T7 kernel pricing open.
+**Status:** T0/T1/T4/T5 LANDED + **T6 MODEL-LEVEL GATE EXECUTED — NEGATIVE, LANE CLOSED** (2026-10-01). Weight-space wins were real (+4.9 dB / +0.5–1.2 dB) but the 2-bit class is 4 orders of magnitude past the usability floor on our dense artifacts: ppl 6.8e5–7.0e6 vs base 49.8, EVERY family, EVERY reachable granularity (per-128/64/32). The dense-GGUF arm has no operating point for this lane at 1B.
 
 Issue: `riir-infer/.issues/027_lut_grid_optimization_lane.md`. Master: `.research/004_DQ_Disaggregated_Quantization.md` §2.3 + A.3 (arXiv:2609.26333).
 
@@ -30,8 +30,18 @@ Issue: `riir-infer/.issues/027_lut_grid_optimization_lane.md`. Master: `.researc
   - **`dequantize_row_q2_0_grid` — the Q2_0A decode path.** The base wire decode hard-pins `(c−1)·d`; a non-uniform grid is UNCONSUMABLE without a decoder that knows the grid. This was the session's load-bearing finding (below).
 - [x] **T4 — `src/bin/lut_grid_solve.rs`** (feature `lut_grid`, `[[bin]]` row + feature in the same commit): pooled d²-weighted histogram → solve → 3-arm per-family weight-space eval + `--granularity` sweep + `--out` JSON.
 - [x] **T5 — run on both dense artifacts** (tables below; grids differ per model ⇒ per-model committed grids, which the BLAKE3 commitment already anticipates). The T1 tensor-level-f32-scale axis is CLOSED at the proxy by the scale audit (verdict 5 below).
-- [ ] **T6 — model-level G1 (open):** ppl + per-family conditional retention with re-encoded weights (grid-aware decode / Q2_0A reader); the lane's GOAT gate.
-- [ ] **T7 — T4 kernel cost** (documented in Issue 027, no code): Q2_0A artifacts need the grid-aware decode kernel (a per-level scale multiply — the LUT form `lut16-pshufb-byte-expansion-at-stage` + one f16 scale), priced against the ternary sign-magnitude fast path. Rides Issue 028.
+- [x] **T6 — model-level G1 (EXECUTED 2026-10-01, NEGATIVE):** `src/bin/lut_grid_ppl.rs` (feature `lut_grid`) — fakequant-at-load over the llama path (MiniCPM5-1B vehicle, f32 weights, `LlamaTransformerWeights` now `Clone` so postures never compound), corpus files as FAMILIES (chat | repo-docs), per-family Δppl + paired |ΔNLL|. **Verdict: the 2-bit class is function-destroying on this artifact.** Record run (1024 tok × 256, skip-embed — embeddings left at f32 to give the class its best shot):
+
+  | posture | ppl | chat Δppl | docs Δppl |
+  |---|---|---|---|
+  | base | 49.78 | — (10.94 / 226.5) | — |
+  | sym | 6.96e6 | +5.5e7 % | +3.6e6 % |
+  | t0 | 6.76e5 | +1.0e7 % | +1.8e5 % |
+  | q2_0a | 9.19e5 | +5.2e6 % | +6.6e5 % |
+  | t0g64 / t0g32 (smoke) | 9.6e5 / 5.8e5 | — | — |
+
+  Granularity does NOT rescue it (per-32, the sweep's own +2.3 dB arm, still 5.8e5). The negative is UNIFORM across families — no family-conditional nuance. Honest limits: (a) measured at 1B; the paper's 27B dense regime is UNMEASURED here (a 27B f32 fakequant needs ~108 GB weights — infeasible on both boxes with this harness); (b) the paper's regime differs in per-16 groups + two-level scale + 27B scale — at least two of which are outside our wire format's reach; (c) t0g64 reading WORSE than t0 is destruction-level noise, not a finding.
+- [-] **T7 — T4 kernel cost** — MOOT for the dense arm (no operating point to serve); the Issue 028 serving container loses its Q2_0A dense decode candidate with this verdict.
 
 ## Results (weight-space, 2026-10-01, M3 Max, AC, release build)
 
@@ -70,7 +80,7 @@ Granularity sweep (T0 rule, both models agree in shape):
 | per-64 | 2.250 | 7.24 dB | 7.92 dB |
 | per-32 | 2.500 | 8.39 dB | 8.72 dB |
 
-**Weight-space verdicts (proxy — T6 is the GOAT gate):**
+**Weight-space verdicts (proxy — superseded by T6):**
 1. **T0 beats the symmetric reference by ~+4.9 dB on every family, both models** — the lane's core premise (activating the 4th code state encoder-only, same bytes) is a massive dense-arm win.
 2. **Q2_0A (solved grid) beats T0 by +0.5..+1.2 dB per family at matched bpw** — the T2 bar (beat T0, not the ternary encoder) is met at the proxy.
 3. **Per-model grids differ materially** (l2: 0.621 vs 0.709) — one global grid would strand ~0.2 dB; commit per-model (the commitment mechanism already anticipates this).

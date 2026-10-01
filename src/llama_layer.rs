@@ -4,6 +4,7 @@
 //! Uses `SwiGLU` MLP (gate/up/down), `RMSNorm` (no offset), `RoPE`, separate `lm_head`.
 
 /// Per-layer `LLaMA` transformer weights.
+#[derive(Clone)]
 pub struct LlamaLayerWeights {
     // Attention projections
     pub attn_wq: Vec<f32>, // [n_head * head_dim, n_embd]
@@ -21,6 +22,9 @@ pub struct LlamaLayerWeights {
 
 /// All LLaMA-family transformer weights.
 /// Separate `lm_head` (not tied to wte). No wpe (uses `RoPE`).
+/// `Clone` for the fakequant-at-load arms (Plan 615 T6: every quant
+/// posture builds from the PRISTINE weights — postures never compound).
+#[derive(Clone)]
 pub struct LlamaTransformerWeights {
     pub wte: Vec<f32>,                  // [vocab_size, n_embd]
     pub lm_head: Vec<f32>,              // [vocab_size, n_embd] (separate from wte)
