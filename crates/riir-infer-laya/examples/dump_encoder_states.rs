@@ -25,9 +25,9 @@
 use std::io::Write as _;
 use std::path::PathBuf;
 
+use riir_infer_laya::laya::Result as LayaResult;
 use riir_infer_laya::laya::config::Checkpoint;
 use riir_infer_laya::laya::riir::RiirAgent;
-use riir_infer_laya::laya::Result as LayaResult;
 
 const MAGIC: &[u8; 4] = b"LENC";
 const VERSION: u32 = 1;
@@ -74,14 +74,15 @@ struct CaseRow {
 }
 
 fn load_cases(path: &std::path::Path, limit: usize) -> Result<Vec<CaseRow>, String> {
-    let text = std::fs::read_to_string(path).map_err(|e| format!("read {}: {e}", path.display()))?;
+    let text =
+        std::fs::read_to_string(path).map_err(|e| format!("read {}: {e}", path.display()))?;
     let mut rows = Vec::new();
     for (ln, line) in text.lines().enumerate() {
         if line.trim().is_empty() {
             continue;
         }
-        let v: serde_json::Value = serde_json::from_str(line)
-            .map_err(|e| format!("{}:{ln}: {e}", path.display()))?;
+        let v: serde_json::Value =
+            serde_json::from_str(line).map_err(|e| format!("{}:{ln}: {e}", path.display()))?;
         rows.push(CaseRow {
             id: v
                 .get("id")
@@ -135,24 +136,28 @@ fn main() -> LayaResult<()> {
     );
     let cases = load_cases(&args.cases, args.limit).expect("cases");
     let t0 = std::time::Instant::now();
-    let mut out = std::io::BufWriter::new(
-        std::fs::File::create(&args.out).map_err(|e| {
-            riir_infer_laya::laya::LayaError::Runtime(format!("create {}: {e}", args.out.display()))
-        })?,
-    );
+    let mut out = std::io::BufWriter::new(std::fs::File::create(&args.out).map_err(|e| {
+        riir_infer_laya::laya::LayaError::Runtime(format!("create {}: {e}", args.out.display()))
+    })?);
     out.write_all(MAGIC).map_err(io_err)?;
     out.write_all(&VERSION.to_le_bytes()).map_err(io_err)?;
-    out.write_all(&(cases.len() as u32).to_le_bytes()).map_err(io_err)?;
+    out.write_all(&(cases.len() as u32).to_le_bytes())
+        .map_err(io_err)?;
     for (n, c) in cases.iter().enumerate() {
         let enc = agent.encode_question(&c.state, &c.question)?;
         let fwd = agent.forward_question(&c.state, &c.question)?;
         assert_eq!(enc.markers.len(), fwd.logits.len(), "marker/logit join");
-        out.write_all(&(c.id.len() as u32).to_le_bytes()).map_err(io_err)?;
+        out.write_all(&(c.id.len() as u32).to_le_bytes())
+            .map_err(io_err)?;
         out.write_all(c.id.as_bytes()).map_err(io_err)?;
-        out.write_all(&(enc.seq_len as u32).to_le_bytes()).map_err(io_err)?;
-        out.write_all(&(enc.d as u32).to_le_bytes()).map_err(io_err)?;
-        out.write_all(&(enc.qtype as u32).to_le_bytes()).map_err(io_err)?;
-        out.write_all(&(enc.markers.len() as u32).to_le_bytes()).map_err(io_err)?;
+        out.write_all(&(enc.seq_len as u32).to_le_bytes())
+            .map_err(io_err)?;
+        out.write_all(&(enc.d as u32).to_le_bytes())
+            .map_err(io_err)?;
+        out.write_all(&(enc.qtype as u32).to_le_bytes())
+            .map_err(io_err)?;
+        out.write_all(&(enc.markers.len() as u32).to_le_bytes())
+            .map_err(io_err)?;
         for m in &enc.markers {
             out.write_all(&(*m as u32).to_le_bytes()).map_err(io_err)?;
         }

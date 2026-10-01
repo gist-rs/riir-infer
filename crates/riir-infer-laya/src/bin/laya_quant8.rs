@@ -22,7 +22,10 @@ fn main() {
     }
     let dir = std::path::PathBuf::from(&args[1]);
     if !dir.join("model.safetensors").is_file() {
-        eprintln!("⛔ {}: no model.safetensors — not a checkpoint dir", dir.display());
+        eprintln!(
+            "⛔ {}: no model.safetensors — not a checkpoint dir",
+            dir.display()
+        );
         std::process::exit(2);
     }
     let t = std::time::Instant::now();

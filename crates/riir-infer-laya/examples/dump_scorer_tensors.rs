@@ -13,9 +13,9 @@
 use std::io::Write as _;
 use std::path::PathBuf;
 
+use riir_infer_laya::laya::Result as LayaResult;
 use riir_infer_laya::laya::config::Checkpoint;
 use riir_infer_laya::laya::riir::RiirAgent;
-use riir_infer_laya::laya::Result as LayaResult;
 
 struct Args {
     checkpoint: String,
@@ -57,17 +57,17 @@ fn main() -> LayaResult<()> {
     let root = riir_infer_laya::laya::weights::weights_root();
     let agent = RiirAgent::load(&root, ck)?;
     let st = agent.scorer_tensors();
-    let mut out = std::io::BufWriter::new(
-        std::fs::File::create(&args.out).map_err(|e| {
-            riir_infer_laya::laya::LayaError::Runtime(format!("create {}: {e}", args.out.display()))
-        })?,
-    );
+    let mut out = std::io::BufWriter::new(std::fs::File::create(&args.out).map_err(|e| {
+        riir_infer_laya::laya::LayaError::Runtime(format!("create {}: {e}", args.out.display()))
+    })?);
     out.write_all(b"LSTN").map_err(io_err)?;
     out.write_all(&1u32.to_le_bytes()).map_err(io_err)?;
-    out.write_all(&(st.d as u32).to_le_bytes()).map_err(io_err)?;
+    out.write_all(&(st.d as u32).to_le_bytes())
+        .map_err(io_err)?;
     out.write_all(&st.eps.to_le_bytes()).map_err(io_err)?;
     for t in [&st.s0w, &st.s0b, &st.s1w, &st.s1b, &st.s3w, &st.s3b] {
-        out.write_all(&(t.len() as u32).to_le_bytes()).map_err(io_err)?;
+        out.write_all(&(t.len() as u32).to_le_bytes())
+            .map_err(io_err)?;
         for v in t.iter() {
             out.write_all(&v.to_le_bytes()).map_err(io_err)?;
         }
