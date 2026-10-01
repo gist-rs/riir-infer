@@ -11,6 +11,7 @@ pub mod exl3;
 pub mod exl3_pack;
 pub mod ptq1_0;
 pub mod q2_0;
+pub mod lut_grid;
 pub mod q2k;
 pub mod q3k;
 pub mod q4k;

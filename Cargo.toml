@@ -70,6 +70,11 @@ lora_still = []
 # EXL3 (trellis-coded, QTIP-variant) safetensors-side quant — CPU reference
 # dequantization, opt-in until the Issue-001 T6 GOAT gate (workspace rule).
 exl3 = []
+# Issue 027 / Plan 615: the offline LUT-grid lane — `quant::lut_grid` (the
+# solver + histogram, UNGATED in the lib) + the `lut_grid_solve` bin
+# (extraction + weight-space 3-arm eval over the dense GGUF artifacts).
+# Measurement-only; the model-level G1 (Plan 615 T6) is a separate gate.
+lut_grid = []
 # vk_calibration (katgpt-rs Issue 883 P0, 2026-09-25): the gemma-2 V/K
 # calibration lane — `transformer::gemma2_calibration` (tapped f16
 # forward, no lm_head) + the `vk_calibration` bin (the offline R²
@@ -327,6 +332,13 @@ required-features = ["act_diagonal_calibration"]
 name = "act_retention_walk"
 path = "src/bin/act_retention_walk.rs"
 required-features = ["act_scale_refit"]
+
+# Issue 027 / Plan 615 — the offline LUT-grid solver + weight-space eval
+# (dense-GGUF gain site; the model-level gate is Plan 615 T6).
+[[bin]]
+name = "lut_grid_solve"
+path = "src/bin/lut_grid_solve.rs"
+required-features = ["lut_grid"]
 
 # riir-infer Issue 022 T5.0 — the collapsed-vs-parent top-1 agreement GOAT
 # (the T5.1 pre-registered ≥0.9 absolute budget on the qwen35 lane).
