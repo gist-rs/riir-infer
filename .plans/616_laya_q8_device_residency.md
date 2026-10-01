@@ -1,11 +1,13 @@
 # Plan 616 — Laya D2b: the Q8 residency tiers (host → device) with dequant-fused staging
 
-**Status:** PHASE 1 DONE (2026-10-02, host residency + the device load
-kernel — all gates green, the live artifact probe byte-identical, RSS
-1489 vs 4238 MiB); Phase 0 done; Phase 2 is the next task. Plan of
-record: `../riir-instinct/.issues/018_rethink_encoder_lean_goat.md`
-§Lane D2b ("device-resident Q8 buffers + dequant-fused kernels — the real
-device-memory tier; per-device determinism re-seats apply THERE").
+**Status:** PHASE 2 DONE (2026-10-02, device-resident Q8 + the fused
+staging kernels — all gates green, the live artifact probe: fused
+deterministic ×2, the Phase 1 tree byte-identical, the option-(i)
+dispatch delta measured at 5.4e-7 probs, device residency 1654.9 →
+348.8 MiB = 4.74×, whole-forward paired median 1.002×; the dense-cell
+A/B priced fused/mps 1.22–2.07×). Phase 0 + 1 done. Phase 3 (adoption
++ re-seat + the Q4 seam) is the next task. Plan of record:
+`../riir-instinct/.issues/018_rethink_encoder_lean_goat.md` §Lane D2b.
 
 ## The measured premise (what exists today)
 
@@ -75,6 +77,15 @@ Phase 2's A/B measures (i)'s cost explicitly (the m 33–895 dense shapes
 under q8, sgemm-fused vs today's MPS); if the regression is material AND
 the GPU host is memory-rich, (iii) re-prices with its own bench — an owner
 call at that point, not this plan's default.
+
+**MEASURED (Phase 2, `examples/sgemm_q8_fused_probe`, 2026-10-02):**
+option (i) shipped as the default with the cost priced per cell —
+fused/mps 1.22–2.07× on the dense cells (m-scaling), fused/narrow
+~1.15 (the dequant ALU), whole-forward 1.002× at the single-question
+serving shape. The re-pricing condition above is MET with numbers:
+long-prefill q8 serving is where (iii) would earn its bench — owner
+call, not this plan's default. Until then `LAYA_Q8_DEVICE_F32=1` is
+the documented escape at exactly those postures.
 
 ## Phases
 
@@ -177,39 +188,101 @@ call at that point, not this plan's default.
       it as the control arm — one env, bit-restoring, residency
       restoring).
 
-### Phase 2 — device-resident Q8 + dequant-fused staging (the real tier)
+### Phase 2 — device-resident Q8 + dequant-fused staging (the real tier) — **EXECUTED 2026-10-02**
 
-- [ ] The Q8 device representation: per tensor ONE buffer in the native
+- [x] The Q8 device representation: per tensor ONE buffer in the native
       [n, k] block layout (numel/32 × 34 B ≈ numel × 1.0625 — 26.5% of
-      F32), permanent-cache keyed like `weight_t_buf`; `Encoder::warm`
-      gains the Q8 warm path keyed on the agent's posture.
-- [ ] The fused-staging kernels: `sgemm`, `sgemm_xwide`, `sgemm_splitk`
-      gain a Q8-B instance (compile-time format constant — the Q4/PQ2
-      forward seam; the decode table lives behind it) that stages from
-      native-layout Q8 with in-staging dequant+transpose. The A-side, the
-      MMA, the epilogues, and the T12/split-K folds are untouched — the
-      staged tile VALUES are identical, so the outputs are bit-identical
-      by construction.
-- [ ] MPS OFF under the q8 device-resident posture (option (i)): the
-      dispatch arm refuses with a loud one-line disclosure naming the
-      priced alternative; `SplitRule` falls back to the pre-T13 rule.
-      The Phase 0 baseline vs the fused-sgemm A/B prices the cost; (iii)
-      re-prices only if it bites (owner call).
-- [ ] Gates: the bit-identity battery (byte-identical vs F16 AND vs
-      today's q8, both A/B'd in one session — the 0046 fresh-F16-witness
-      pattern), G5 parity at the q8 posture (Metal AND CPU reference),
-      the alloc-free G4 arms unchanged, and the **per-device determinism
-      re-seat** — THIS is the gate Lane D2b exists to run: the frozen
-      reads re-seat per device only if bits moved anywhere (the design
-      claim is they did not; the gates prove it, and a moved bit is a
-      loud FAIL, never an absorbed one).
-- [ ] Kill-switch `LAYA_Q8_DEVICE_F32=1` falls back to Phase 1's
-      device-F32 Wᵀ (two switches compose back to today).
-- [ ] Latency columns re-measured on the fit box (the Issue-021 law —
-      `bench_preflight.sh` PROVENANCE quoted); the win claim is MEMORY
-      (measured in Phase 0's units); any latency claim rides the same
-      A/B discipline as every lane here (paired, position-balanced,
-      quiet-box).
+      F32), permanent-cache keyed like `weight_t_buf` (`weights_q8`,
+      first-miss bare UPLOAD — no kernel, no transpose); `warm_weight_2d_q8`
+      routes on the posture (resident = upload; kill-switch = the load
+      kernel). **Measured: device_allocated 1654.9 → 348.8 MiB = 4.74×**
+      (`live_q8_device_bytes_resident_vs_widened`, #[ignore]d, the real
+      english map through the agent's own load path minus the tokenizer;
+      Phase 0 derived 3.76× for the FULL checkpoint incl. the head — the
+      encoder-only probe is consistent).
+- [x] The fused-staging kernels: `sgemm_q8` (narrow geometry) /
+      `sgemm_xwide_q8` (the single-wave band) / `sgemm_splitk_q8` — the
+      SAME tile math as the f32 instances (A staging, MMA, stores,
+      ragged-edge route line-for-line), with the B tile staged from the
+      RAW blocked bytes: **k-fastest lanes** (`col = idx >> log2(BK)`,
+      `kk = idx & (BK-1)` — the INVERSE of the f32 mapping; a warp reads
+      32 contiguous quant bytes = one block, the 2-byte scale
+      warp-uniform; the shared write strides the odd TBS so all 32 banks
+      enumerate). The reduce epilogues are format-agnostic and shared
+      verbatim; the T12/split-K folds run per format through one spine
+      (`matmul_w_{,accum_,glu_}wb(WBuf)` — `WBuf::F32T | Q8Raw`, ONE body
+      per op, never a second transcription).
+- [x] MPS OFF under the q8 device-resident posture (option (i)): the
+      fused dispatch never consults the MPS arm; the split rule falls
+      back to the pre-T13 shape (`q8_split_rule()` — WITH_MPS re-based
+      to DEFAULT, other pinned rules carry over; the master switch +
+      `LAYA_METAL_SPLITK_MAXTGS` honored). ONE loud disclosure on the
+      first unsplit fused dispatch naming the priced alternative and the
+      switch back (per-dispatch would be noise at ~100 GEMMs/forward).
+      Reach counters: `q8_fused_dispatches()` (the fused arm can never
+      pass on the Phase 1 path) + `q8_widen_dispatches()` (the resident
+      posture never builds the widened Wᵀ — the mechanism pin).
+- [x] Gates: ALL GREEN —
+      - THE BIT-IDENTITY BATTERY (`metal_ops_smoke`, the shared-tree
+        law): fused-q8 vs the f32 carrier on a `.with_mps(false)`
+        instance — byte-identical at 7 shapes (split-K, ragged n, k
+        tails, the xwide pick (70,1024,2048), the flat-tail a0w class)
+        + the fold entries (accum_q8/glu_q8 vs the unfused device
+        streams — a host erf manual reference would differ in the last
+        bits by construction) + the kill-switch arm (bit-identical on
+        the DEFAULT tree incl. MPS; widen counter moves, fused frozen).
+      - `q8_widen_identity.rs`: CPU bit-identity (unchanged), the dense
+        Metal pair on the shared tree, first-miss, unfused stream, the
+        NEW `q8_resident_matches_device_f32_posture` (Phase 2 vs Phase 1
+        in one process: counters pinned, packed hidden states max abs
+        **0.000e0** at the test geometry), the load-kernel transpose
+        gate (now under the kill-switch, where the kernel actually
+        runs).
+      - **THE LIVE ARTIFACT PROBE** (`live_q8_artifact_device_widen_matches_host_widen`,
+        #[ignore]d, three postures in one process): fused deterministic
+        ×2 (byte-identical); Phase-1 tree byte-identical (device-f32 ==
+        host-widen, probs/conf/act all exact); the option-(i) dispatch
+        delta MEASURED at probs 5.36e-7 / conf 7.15e-7 / act exactly 0
+        — two orders under the G5 1e-3 gate, the T13-class
+        accumulation-order change (MPS vs our chains on the shapes the
+        WITH_MPS/DEFAULT rules disagree about); RSS 1492 (fused) vs
+        1881 (Phase 1) vs 4826 MiB (host-widen).
+      - **THE DENSE-CELL A/B** (`examples/sgemm_q8_fused_probe`, the
+        plan's asked-for A/B): mps vs fused-q8 vs f32 narrow on Phase
+        0's exact cells (4 projection shapes × m 106–1700,
+        position-balanced 15 rounds, 3 dispatches/round):
+        **bit-identical at all 24 cells; fused/narrow 1.065–1.161 (geo
+        ~1.15 — the in-staging dequant ALU; the T11 L2 finding says the
+        halved B bytes buy nothing where re-reads were never the
+        binding cost); fused/mps 1.22–2.07 growing with m (geo 1.42 @
+        m106 → 1.96 @ m1700)**. The whole-forward single-question
+        paired median: **1.002×** (PROVENANCE: power=AC, load 4.17,
+        powermode 2-high) — the dense cells are a small share at the
+        serving shape; long-prefill postures would feel the m-scaling
+        and should price `LAYA_Q8_DEVICE_F32=1` or re-open option (iii)
+        (owner call, the plan's own condition now MET with numbers).
+      - G5 parity green against the in-flight substrate (reflex
+        `laya_riir_parity`, 2/2, 27.4 s — the F16 surface untouched:
+        Dense weights → `matmul_w` → MPS, byte-unchanged, so NO frozen
+        cell moves; the per-device re-seat for the q8 posture is the
+        no-change proof at this tier and the Phase 3 adoption record).
+      - lib 48/48 + every metal suite (mps_gemm, fold_ab, fold_bits,
+        splitk_ab, packed_forward_equiv, prefix_state_coupling); clippy
+        `-D warnings` at laya-riir / laya-riir-metal /
+        +laya-riir-cubecl (lib + tests + examples).
+- [x] Kill-switch `LAYA_Q8_DEVICE_F32=1` falls back to Phase 1's
+      device-F32 Wᵀ (read live per call in the three q8 entries + warm;
+      two switches compose back to Phase 0). Gated in both postures.
+- [x] Latency columns re-measured (the dense-cell A/B above + the
+      whole-forward paired medians; PROVENANCE quoted; position-balanced
+      interleaves both).
+
+      THE PROBE FIXTURE LAW (caught by the probe's own bit assert): the
+      f32 carrier arm must stage the DECODED values (`q8_fixture`
+      returns bytes + decoded; the first draft transposed the RAW fill
+      and the probe refused with 1e-3-scale diffs on every element — a
+      fixture bug wearing a kernel-bug costume, the same law the
+      identity tests encode as `dense_twin`).
 
 ### Phase 3 — adoption + re-seat + the Q4 seam
 

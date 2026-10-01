@@ -80,7 +80,7 @@
 use std::collections::HashMap;
 use std::ffi::c_void;
 use std::sync::Mutex;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
 use metal::{
     Buffer, CommandBuffer, CommandQueue, ComputeCommandEncoder, ComputePipelineState, Device,
@@ -420,6 +420,9 @@ const KERNELS: &[&str] = &[
     "gather_rows",
     "add_mask_bcast",
     "q8_widen_t",
+    "sgemm_q8",
+    "sgemm_xwide_q8",
+    "sgemm_splitk_q8",
 ];
 
 /// The MSL source. Sizes fit u32 (every pinned extent < 2³¹); `erf_as` is
@@ -731,6 +734,130 @@ kernel void sgemm_xwide(
 }
 "#;
 
+/// The xwide Q8 instance (Plan 616 Phase 2): the f32 xwide geometry
+/// (BM 64, BN 128, BK 32, 1024 threads, four accumulators) with the B
+/// tile staged from the native blocked Q8 bytes. Concatenated after
+/// `MSL_SGEMM_XWIDE` — the `XBM`/`XTAS`/`XTBS` constants it reads are
+/// declared there, and MSL is one translation unit.
+const MSL_SGEMM_XWIDE_Q8: &str = r#"
+// ── xwide Q8 instance: the xwide geometry (BM 64, BN 128, BK 32, 1024
+// threads, four accumulators) with the B tile staged from the native
+// blocked bytes — 4 elements per thread, k-fastest lanes (one block per
+// warp; BK 32 IS one block).
+kernel void sgemm_xwide_q8(
+    device const float* a [[buffer(0)]],
+    device const uint8_t* q8 [[buffer(1)]],
+    device float* out [[buffer(2)]],
+    constant uint& m [[buffer(3)]],
+    constant uint& n [[buffer(4)]],
+    constant uint& k [[buffer(5)]],
+    constant uint& a_rs [[buffer(6)]],
+    constant uint& a_cs [[buffer(7)]],
+    threadgroup float* raw [[threadgroup(8)]],
+    uint3 gtp [[threadgroup_position_in_grid]],
+    uint lid [[thread_index_in_threadgroup]])
+{
+    // Carved staging: the f32 xwide geometry exactly (A [64][33] + B
+    // [32][129] floats); the ragged-edge route reuses the front in the
+    // f32 instance's two phases.
+    threadgroup float* ta = raw;
+    threadgroup float* tb = raw + 64u * XTAS;
+    threadgroup float* edge = raw;
+    const uint m0 = gtp.y * XBM;
+    const uint n0 = gtp.x * XBN;
+    device const float* A = a;
+    device float* C = out;
+
+    const uint sg = lid >> 5u;   // simdgroup id 0..31
+    const uint lane = lid & 31u;
+    const uint sgr = sg >> 3u;   // row block 0..3 (the +4 twin below)
+    const uint sgc = sg & 7u;    // column block 0..7 (the +8 twin below)
+
+    simdgroup_float8x8 acc00 = simdgroup_float8x8(0.0f);
+    simdgroup_float8x8 acc01 = simdgroup_float8x8(0.0f);
+    simdgroup_float8x8 acc10 = simdgroup_float8x8(0.0f);
+    simdgroup_float8x8 acc11 = simdgroup_float8x8(0.0f);
+
+    for (uint t = 0u; t < k; t += XBK) {
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+        // Stage A [64][32]: two elements per thread.
+        for (uint q = 0u; q < 2u; ++q) {
+            const uint idx = lid + q * 1024u;
+            const uint r = idx >> 5u;
+            const uint c = idx & 31u;
+            const uint gr = m0 + r;
+            const uint ac = t + c;
+            ta[r * XTAS + c] = (gr < m && ac < k) ? A[gr * a_rs + ac * a_cs] : 0.0f;
+        }
+        // Stage B [32][128]: four elements per thread, k-fastest lanes.
+        for (uint q = 0u; q < 4u; ++q) {
+            const uint idx = lid + q * 1024u;
+            const uint col = idx >> 5u;   // 0..127 — BN
+            const uint kk = idx & 31u;    // 0..31 — BK
+            const uint bc = t + kk;
+            float v = 0.0f;
+            if (bc < k && n0 + col < n) {
+                const uint e = (n0 + col) * k + bc;
+                device const uint8_t* bp = q8 + (uint64_t)(e >> 5) * 34u;
+                const ushort bits = (ushort)bp[0] | ((ushort)bp[1] << 8);
+                v = float(as_type<half>(bits)) * float((int8_t)bp[2u + (e & 31u)]);
+            }
+            tb[kk * XTBS + col] = v;
+        }
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+        for (uint kk = 0u; kk < XBK; kk += 8u) {
+            simdgroup_float8x8 fa0, fa1, fb0, fb1;
+            simdgroup_load(fa0, ta + sgr * 8u * XTAS + kk, XTAS);
+            simdgroup_load(fa1, ta + (sgr + 4u) * 8u * XTAS + kk, XTAS);
+            simdgroup_load(fb0, tb + kk * XTBS + sgc * 8u, XTBS);
+            simdgroup_load(fb1, tb + kk * XTBS + sgc * 8u + 64u, XTBS);
+            simdgroup_multiply_accumulate(acc00, fa0, fb0, acc00);
+            simdgroup_multiply_accumulate(acc01, fa0, fb1, acc01);
+            simdgroup_multiply_accumulate(acc10, fa1, fb0, acc10);
+            simdgroup_multiply_accumulate(acc11, fa1, fb1, acc11);
+        }
+    }
+
+    if ((m0 + XBM <= m) && (n0 + XBN <= n)) {
+        simdgroup_store(acc00, C + (m0 + sgr * 8u) * n + (n0 + sgc * 8u), n);
+        simdgroup_store(acc01, C + (m0 + sgr * 8u) * n + (n0 + sgc * 8u + 64u), n);
+        simdgroup_store(acc10, C + (m0 + sgr * 8u + 32u) * n + (n0 + sgc * 8u), n);
+        simdgroup_store(acc11, C + (m0 + sgr * 8u + 32u) * n + (n0 + sgc * 8u + 64u), n);
+    } else {
+        // Ragged tile: drain through the shared front in two phases, the
+        // f32 xwide instance's exact route.
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+        simdgroup_store(acc00, edge + sg * 128u, 8u);
+        simdgroup_store(acc01, edge + sg * 128u + 64u, 8u);
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+        for (uint q = 0u; q < 2u; ++q) {
+            const uint e = lane + q * 32u;
+            const uint er = e >> 3u;
+            const uint ec = e & 7u;
+            const uint gr0 = m0 + sgr * 8u + er;
+            const uint gc0 = n0 + sgc * 8u + ec;
+            const uint gc1 = gc0 + 64u;
+            if (gr0 < m && gc0 < n) { C[gr0 * n + gc0] = edge[sg * 128u + e]; }
+            if (gr0 < m && gc1 < n) { C[gr0 * n + gc1] = edge[sg * 128u + 64u + e]; }
+        }
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+        simdgroup_store(acc10, edge + sg * 128u, 8u);
+        simdgroup_store(acc11, edge + sg * 128u + 64u, 8u);
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+        for (uint q = 0u; q < 2u; ++q) {
+            const uint e = lane + q * 32u;
+            const uint er = e >> 3u;
+            const uint ec = e & 7u;
+            const uint gr0 = m0 + sgr * 8u + 32u + er;
+            const uint gc0 = n0 + sgc * 8u + ec;
+            const uint gc1 = gc0 + 64u;
+            if (gr0 < m && gc0 < n) { C[gr0 * n + gc0] = edge[sg * 128u + e]; }
+            if (gr0 < m && gc1 < n) { C[gr0 * n + gc1] = edge[sg * 128u + 64u + e]; }
+        }
+    }
+}
+"#;
+
 /// The narrow instance: 32×64 output per threadgroup, 16 simdgroups (512
 /// threads), two column-twin accumulators per simdgroup (columns sgc·8 and
 /// (sgc+4)·8 of its row block). Same staging laws as the wide instance.
@@ -1008,6 +1135,225 @@ kernel void splitk_reduce_glu(device const float* part [[buffer(0)]],
     }
     out[gid] = gelu_as(acc_act) * acc_gate;
 }
+"#;
+
+/// The Q8-resident staging instances (Plan 616 Phase 2): the SAME tile
+/// math as the f32 narrow/split-K instances — the A staging, the MMA,
+/// the stores, the ragged-edge route are line-for-line the f32 bodies —
+/// with the B tile staged from the RAW blocked Q8_0 bytes in the
+/// weight's NATIVE `[n, k]` layout, dequantized in-flight. The staged
+/// tile VALUES are the host widen's exactly (`float(as_type<half>(bits))
+/// · float(int8)` — f16→f32 exact, i8→f32 exact, one IEEE multiply — the
+/// `q8_widen_t` contract verbatim), so every output is bit-identical to
+/// the f32-carrier dispatch by construction and the device never holds
+/// a widened copy.
+///
+/// THE STAGING MAPPING (the coalescing law): consecutive lanes walk
+/// consecutive K within ONE weight row — `col = idx >> log2(BK)`,
+/// `kk = idx & (BK-1)` — the INVERSE of the f32 mapping (there, lanes
+/// walk consecutive n over the row-major Wᵀ, which does not exist here).
+/// A warp's 32 lanes read 32 contiguous quant bytes (one block; with BK a
+/// multiple of 32 and t block-aligned, the 2-byte scale is warp-uniform —
+/// at a ragged k a warp may straddle two blocks and the per-lane formula
+/// handles it), and the shared write `tb[kk·TBS + col]` strides TBS
+/// floats per lane — TBS odd ⇒ `kk·TBS mod 32` enumerates all 32 banks,
+/// so the byte-coalesced read does not buy a bank-conflicted write.
+///
+/// No batch strides: the weight GEMMs are batch-1 structurally (the
+/// `Weight2D` family in `weights`), so A = a, C = out directly and the
+/// operand list is two scalars shorter than the f32 kernels'.
+const MSL_SGEMM_Q8: &str = r#"
+// ── narrow Q8 instance: the narrow geometry (BM 32, BN 64, BK 64, 512
+// threads) with the B tile staged from the native blocked bytes. The
+// block/lane arithmetic is the FLAT tensor order — `block = e/32`,
+// `lane = e%32` — the converter's own walk, valid for every k (a ragged
+// k has blocks crossing row boundaries; the flat formula is the single
+// law for both, the same one `q8_widen_t` runs).
+kernel void sgemm_q8(
+    device const float* a [[buffer(0)]],
+    device const uint8_t* q8 [[buffer(1)]],
+    device float* out [[buffer(2)]],
+    constant uint& m [[buffer(3)]],
+    constant uint& n [[buffer(4)]],
+    constant uint& k [[buffer(5)]],
+    constant uint& a_rs [[buffer(6)]],
+    constant uint& a_cs [[buffer(7)]],
+    threadgroup float* raw [[threadgroup(8)]],
+    uint3 gtp [[threadgroup_position_in_grid]],
+    uint lid [[thread_index_in_threadgroup]])
+{
+    // Carved staging: the f32 narrow geometry exactly (A [32][65] + B
+    // [64][65] floats); the dequant happens in registers, never in
+    // staging.
+    threadgroup float* ta = raw;
+    threadgroup float* tb = raw + 32u * TAS;
+    threadgroup float* edge = raw;
+    const uint m0 = gtp.y * BM;
+    const uint n0 = gtp.x * BN;
+    device const float* A = a;
+    device float* C = out;
+
+    const uint sg = lid >> 5u;   // simdgroup id 0..15
+    const uint lane = lid & 31u;
+    const uint sgr = sg >> 2u;   // 8×8 block row 0..3
+    const uint sgc = sg & 3u;    // 8×8 block col 0..3 (the +4 twin below)
+
+    simdgroup_float8x8 acc0 = simdgroup_float8x8(0.0f);
+    simdgroup_float8x8 acc1 = simdgroup_float8x8(0.0f);
+
+    for (uint t = 0u; t < k; t += BK) {
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+        for (uint q = 0u; q < 4u; ++q) {
+            // A tile [BM][BK] = [32][64]: four elements per thread.
+            const uint idx = lid + q * 512u;
+            const uint r = idx >> 6u;
+            const uint c = idx & 63u;
+            const uint gr = m0 + r;
+            const uint ac = t + c;
+            ta[r * TAS + c] = (gr < m && ac < k) ? A[gr * a_rs + ac * a_cs] : 0.0f;
+        }
+        for (uint q = 0u; q < 8u; ++q) {
+            // B tile [BK][BN] = [64][64]: 8 elements per thread,
+            // k-fastest lanes — col from the high bits, kk from the low,
+            // so a warp reads one contiguous 32-byte quant run.
+            const uint idx = lid + q * 512u;
+            const uint col = idx >> 6u;
+            const uint kk = idx & 63u;
+            const uint bc = t + kk;
+            float v = 0.0f;
+            if (bc < k && n0 + col < n) {
+                const uint e = (n0 + col) * k + bc;   // the weight's FLAT element
+                device const uint8_t* bp = q8 + (uint64_t)(e >> 5) * 34u;
+                const ushort bits = (ushort)bp[0] | ((ushort)bp[1] << 8);
+                v = float(as_type<half>(bits)) * float((int8_t)bp[2u + (e & 31u)]);
+            }
+            tb[kk * TBS + col] = v;
+        }
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+        for (uint kk = 0u; kk < BK; kk += 8u) {
+            simdgroup_float8x8 fa, fb0, fb1;
+            simdgroup_load(fa, ta + sgr * 8u * TAS + kk, TAS);
+            simdgroup_load(fb0, tb + kk * TBS + sgc * 8u, TBS);
+            simdgroup_load(fb1, tb + kk * TBS + (sgc + 4u) * 8u, TBS);
+            simdgroup_multiply_accumulate(acc0, fa, fb0, acc0);
+            simdgroup_multiply_accumulate(acc1, fa, fb1, acc1);
+        }
+    }
+
+    if ((m0 + BM <= m) && (n0 + BN <= n)) {
+        simdgroup_store(acc0, C + (m0 + sgr * 8u) * n + (n0 + sgc * 8u), n);
+        simdgroup_store(acc1, C + (m0 + sgr * 8u) * n + (n0 + sgc * 8u + 4u * 8u), n);
+    } else {
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+        simdgroup_store(acc0, edge + sg * 128u, 8u);
+        simdgroup_store(acc1, edge + sg * 128u + 64u, 8u);
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+        for (uint q = 0u; q < 2u; ++q) {
+            const uint e = lane + q * 32u;
+            const uint er = e >> 3u;
+            const uint ec = e & 7u;
+            const uint gr = m0 + sgr * 8u + er;
+            const uint gc0 = n0 + sgc * 8u + ec;
+            const uint gc1 = gc0 + 4u * 8u;
+            if (gr < m && gc0 < n) { C[gr * n + gc0] = edge[sg * 128u + e]; }
+            if (gr < m && gc1 < n) { C[gr * n + gc1] = edge[sg * 128u + 64u + e]; }
+        }
+    }
+}
+
+// ── split-K Q8 instance: the split-K skeleton over the narrow-Q8 body —
+// one k-slice [z·kc, min(k, z·kc + kc)) per grid.z into `part + z·m·n`;
+// the reduce epilogues (splitk_reduce / _add / _glu) are FORMAT-AGNOSTIC
+// (they consume the f32 partials) and are shared with the f32 instance
+// verbatim.
+kernel void sgemm_splitk_q8(
+    device const float* a [[buffer(0)]],
+    device const uint8_t* q8 [[buffer(1)]],
+    device float* part [[buffer(2)]],
+    constant uint& m [[buffer(3)]],
+    constant uint& n [[buffer(4)]],
+    constant uint& k [[buffer(5)]],
+    constant uint& a_rs [[buffer(6)]],
+    constant uint& a_cs [[buffer(7)]],
+    constant uint& kc [[buffer(8)]],
+    threadgroup float* raw [[threadgroup(9)]],
+    uint3 gtp [[threadgroup_position_in_grid]],
+    uint lid [[thread_index_in_threadgroup]])
+{
+    threadgroup float* ta = raw;
+    threadgroup float* tb = raw + 32u * TAS;
+    threadgroup float* edge = raw;
+    const uint m0 = gtp.y * BM;
+    const uint n0 = gtp.x * BN;
+    const uint k0 = gtp.z * kc;
+    const uint k1 = min(k, k0 + kc);
+    device const float* A = a;
+    device float* C = part + gtp.z * (m * n);
+
+    const uint sg = lid >> 5u;
+    const uint lane = lid & 31u;
+    const uint sgr = sg >> 2u;
+    const uint sgc = sg & 3u;
+
+    simdgroup_float8x8 acc0 = simdgroup_float8x8(0.0f);
+    simdgroup_float8x8 acc1 = simdgroup_float8x8(0.0f);
+
+    for (uint t = k0; t < k1; t += BK) {
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+        for (uint q = 0u; q < 4u; ++q) {
+            const uint idx = lid + q * 512u;
+            const uint r = idx >> 6u;
+            const uint c = idx & 63u;
+            const uint gr = m0 + r;
+            const uint ac = t + c;
+            ta[r * TAS + c] = (gr < m && ac < k1) ? A[gr * a_rs + ac * a_cs] : 0.0f;
+        }
+        for (uint q = 0u; q < 8u; ++q) {
+            const uint idx = lid + q * 512u;
+            const uint col = idx >> 6u;
+            const uint kk = idx & 63u;
+            const uint bc = t + kk;
+            float v = 0.0f;
+            if (bc < k1 && n0 + col < n) {
+                const uint e = (n0 + col) * k + bc;
+                device const uint8_t* bp = q8 + (uint64_t)(e >> 5) * 34u;
+                const ushort bits = (ushort)bp[0] | ((ushort)bp[1] << 8);
+                v = float(as_type<half>(bits)) * float((int8_t)bp[2u + (e & 31u)]);
+            }
+            tb[kk * TBS + col] = v;
+        }
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+        for (uint kk = 0u; kk < BK; kk += 8u) {
+            simdgroup_float8x8 fa, fb0, fb1;
+            simdgroup_load(fa, ta + sgr * 8u * TAS + kk, TAS);
+            simdgroup_load(fb0, tb + kk * TBS + sgc * 8u, TBS);
+            simdgroup_load(fb1, tb + kk * TBS + (sgc + 4u) * 8u, TBS);
+            simdgroup_multiply_accumulate(acc0, fa, fb0, acc0);
+            simdgroup_multiply_accumulate(acc1, fa, fb1, acc1);
+        }
+    }
+
+    if ((m0 + BM <= m) && (n0 + BN <= n)) {
+        simdgroup_store(acc0, C + (m0 + sgr * 8u) * n + (n0 + sgc * 8u), n);
+        simdgroup_store(acc1, C + (m0 + sgr * 8u) * n + (n0 + sgc * 8u + 4u * 8u), n);
+    } else {
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+        simdgroup_store(acc0, edge + sg * 128u, 8u);
+        simdgroup_store(acc1, edge + sg * 128u + 64u, 8u);
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+        for (uint q = 0u; q < 2u; ++q) {
+            const uint e = lane + q * 32u;
+            const uint er = e >> 3u;
+            const uint ec = e & 7u;
+            const uint gr = m0 + sgr * 8u + er;
+            const uint gc0 = n0 + sgc * 8u + ec;
+            const uint gc1 = gc0 + 4u * 8u;
+            if (gr < m && gc0 < n) { C[gr * n + gc0] = edge[sg * 128u + e]; }
+            if (gr < m && gc1 < n) { C[gr * n + gc1] = edge[sg * 128u + 64u + e]; }
+        }
+    }
+}
+
 "#;
 
 /// The fused attention's rope pre-pass (opt-in, reflex issue 020 T10 rung
@@ -1658,9 +2004,25 @@ pub struct Metal {
     /// blocked bytes' `(ptr, len)` — a separate map, so an f32 slice key
     /// and a Q8 bytes key are structurally incapable of colliding. The
     /// value is the SAME device F32 `Wᵀ` the f32 path serves (the load
-    /// kernel dequant-transposes into it; the Q8 bytes never persist on
-    /// the device).
+    /// kernel dequant-transposes into it; under Phase 1 the Q8 bytes never
+    /// persisted on the device).
+    ///
+    /// Plan 616 Phase 2: this map is now the KILL-SWITCH posture only
+    /// (`LAYA_Q8_DEVICE_F32=1`). The default is the device-resident RAW
+    /// posture — [`Self::weights_q8`] holds the blocked bytes (26.5% of
+    /// the F32 `Wᵀ`) and the fused q8 staging kernels dequant in-flight.
     weights_t_q8: Mutex<HashMap<(usize, usize), Buffer>>,
+    /// The device-resident RAW blocked Q8_0 weight bytes (Plan 616 Phase
+    /// 2): ONE buffer per weight in the artifact's native `[n, k]` layout
+    /// — `numel/32 × 34 B ≈ numel × 1.0625` bytes, 26.5% of the F32 `Wᵀ`
+    /// Phase 1 held. Permanent, first-miss UPLOAD (no kernel, no
+    /// transpose — the fused staging kernels consume these bytes
+    /// directly), never invalidated. Keyed by the RAW bytes' `(ptr, len)`,
+    /// the same law as [`Self::weights_t_q8`]; the two maps never share a
+    /// key set in one process because the residency decision is read per
+    /// call and a flipped kill-switch simply builds the other map's
+    /// buffer for the same key.
+    weights_q8: Mutex<HashMap<(usize, usize), Buffer>>,
     /// The pass-scoped command buffer + the committed drain list.
     pending: Mutex<PendingState>,
     /// The sync generation (how many host-read barriers have run).
@@ -1751,8 +2113,37 @@ pub struct Metal {
     /// MPS GEMMs dispatched — the arm's reach counter (same law as
     /// [`Self::splitk_count`]).
     mps_count: AtomicU64,
+    /// Fused-q8 GEMM dispatches (`sgemm_q8` / `sgemm_xwide_q8` /
+    /// `sgemm_splitk_q8`) — the device-resident posture's reach counter
+    /// (same law as [`Self::splitk_count`]): a fused-q8 arm can never
+    /// pass on the Phase 1 load-kernel path, and the kill-switch arm
+    /// asserts this stays frozen.
+    q8_fused: AtomicU64,
+    /// `q8_widen_t` load-kernel dispatches — the Phase 1 posture's reach
+    /// counter (the widen runs once per weight on the `weights_t_q8`
+    /// first miss). Under the default device-resident posture this stays
+    /// at zero — the mechanism pin that the widened `Wᵀ` is never built.
+    q8_widen: AtomicU64,
+    /// The once-flag behind the MPS-off disclosure (Plan 616 Phase 2,
+    /// option (i)): the first unsplit fused-q8 GEMM on a shape MPS would
+    /// have served prints ONE line naming the priced alternative and the
+    /// switch back — per-dispatch would be noise (~100 GEMMs/forward).
+    q8_mps_note: AtomicBool,
     /// Debug-trace instance id.
     trace_id: usize,
+}
+
+/// The resolved weight-buffer lookup (Plan 616 Phase 2): the staged-B
+/// FORMAT of a `matmul_w`-family GEMM. `F32T` is the device F32 `Wᵀ`
+/// (the f32 posture and the `LAYA_Q8_DEVICE_F32=1` kill-switch);
+/// `Q8Raw` is the device-resident RAW blocked bytes — the fused q8
+/// staging kernels dequant-transpose in-flight, the same `d·q` tile
+/// values the widen produces, so the two arms are bit-identical by
+/// construction and differ ONLY in device residency and dispatch.
+#[derive(Clone, Copy)]
+enum WBuf<'a> {
+    F32T(&'a Buffer),
+    Q8Raw(&'a Buffer),
 }
 
 impl Metal {
@@ -1769,7 +2160,7 @@ impl Metal {
         };
         let queue = device.new_command_queue();
         let msl = format!(
-            "{MSL_HEAD}{MSL_SGEMM_NARROW}{MSL_SGEMM_SPLITK}{MSL_SGEMM_WIDE}{MSL_SGEMM_XWIDE}{MSL_FLASH}{MSL_ATTN_ROPE}{MSL_TAIL}"
+            "{MSL_HEAD}{MSL_SGEMM_NARROW}{MSL_SGEMM_SPLITK}{MSL_SGEMM_Q8}{MSL_SGEMM_WIDE}{MSL_SGEMM_XWIDE}{MSL_SGEMM_XWIDE_Q8}{MSL_FLASH}{MSL_ATTN_ROPE}{MSL_TAIL}"
         );
         let lib = device
             .new_library_with_source(&msl, &metal::CompileOptions::new())
@@ -1792,6 +2183,7 @@ impl Metal {
             weights: Mutex::new(HashMap::new()),
             weights_t: Mutex::new(HashMap::new()),
             weights_t_q8: Mutex::new(HashMap::new()),
+            weights_q8: Mutex::new(HashMap::new()),
             chain: Mutex::new(HashMap::new()),
             touch_seq: AtomicU64::new(0),
             pending: Mutex::new(PendingState::default()),
@@ -1825,6 +2217,9 @@ impl Metal {
                 .and_then(|v| v.parse().ok())
                 .unwrap_or(MPS_MIN_M_DEFAULT),
             mps_count: AtomicU64::new(0),
+            q8_fused: AtomicU64::new(0),
+            q8_widen: AtomicU64::new(0),
+            q8_mps_note: AtomicBool::new(false),
             trace_id: next_trace_instance(),
         })
     }
@@ -1919,6 +2314,51 @@ impl Metal {
         self.fold_count.load(Ordering::Relaxed)
     }
 
+    /// Fused-q8 GEMM dispatches this instance has made (Plan 616 Phase 2)
+    /// — the device-resident posture's reach counter.
+    pub fn q8_fused_dispatches(&self) -> u64 {
+        self.q8_fused.load(Ordering::Relaxed)
+    }
+
+    /// `q8_widen_t` load-kernel dispatches — the Phase 1 posture's reach
+    /// counter. Under the default device-resident posture this stays at 0.
+    pub fn q8_widen_dispatches(&self) -> u64 {
+        self.q8_widen.load(Ordering::Relaxed)
+    }
+
+    /// The device pool's current allocation (Plan 616 Phase 2's residency
+    /// column): what THIS process has charged the GPU so far, weights
+    /// included. A measurement accessor, not a gate.
+    pub fn device_allocated_bytes(&self) -> u64 {
+        self.device.current_allocated_size()
+    }
+
+    /// The Phase 2 residency decision, read live per call (the house
+    /// kill-switch convention): `LAYA_Q8_DEVICE_F32=1` routes the q8 GEMM
+    /// entries back through Phase 1's device-F32 `Wᵀ` — the load kernel
+    /// and today's dispatch tree, MPS included. Two switches compose back
+    /// to the pre-plan shape: `LAYA_Q8_DEVICE_F32=1` restores Phase 1 and
+    /// `LAYA_Q8_HOST_F32=1` (read at parse) restores Phase 0.
+    fn q8_device_resident(&self) -> bool {
+        std::env::var("LAYA_Q8_DEVICE_F32").as_deref() != Ok("1")
+    }
+
+    /// The split rule the fused-q8 posture runs under: the PRE-T13 shape
+    /// (Plan 616 option (i) — MPS cannot read Q8 bytes, so the MPS-derived
+    /// [`SplitRule::WITH_MPS`] does not apply); any other pinned rule is
+    /// already pre-T13-shaped and carries over as-is. The master switch
+    /// (`LAYA_METAL_SPLITK=0`) is honored either way.
+    fn q8_split_rule(&self) -> SplitRule {
+        if self.split_rule == SplitRule::WITH_MPS {
+            SplitRule {
+                on: self.split_rule.on,
+                ..SplitRule::DEFAULT
+            }
+        } else {
+            self.split_rule
+        }
+    }
+
     fn upload(&self, data: &[f32]) -> Buffer {
         self.device.new_buffer_with_data(
             data.as_ptr().cast::<c_void>(),
@@ -1971,14 +2411,15 @@ impl Metal {
         b
     }
 
-    /// The Q8 twin (Plan 616 Phase 1): same device F32 `Wᵀ`, built from
-    /// the RAW blocked bytes. First miss: upload the Q8 bytes to a
-    /// TRANSIENT device buffer, dispatch `q8_widen_t` (dequant + transpose
-    /// in-kernel — the host `d·q` values exactly), then DROP the Q8 buffer
-    /// (the command buffer retains it; the serial queue orders the widen
-    /// before every later read). The host f32 copy never exists and the
-    /// device holds ONE copy per weight — today's residency exactly; the
-    /// win is the HOST's (the raw bytes replace the widened f32).
+    /// The Q8 twin (Plan 616 Phase 1, the kill-switch posture): same
+    /// device F32 `Wᵀ`, built from the RAW blocked bytes. First miss:
+    /// upload the Q8 bytes to a TRANSIENT device buffer, dispatch
+    /// `q8_widen_t` (dequant + transpose in-kernel — the host `d·q`
+    /// values exactly), then DROP the Q8 buffer (the command buffer
+    /// retains it; the serial queue orders the widen before every later
+    /// read). The host f32 copy never exists; the device holds ONE F32
+    /// copy per weight. Phase 2's default is [`Self::weight_q_buf`] —
+    /// this path runs only under `LAYA_Q8_DEVICE_F32=1`.
     fn weight_t_buf_q8(&self, q: &RawQ8, n: usize, k: usize) -> Buffer {
         assert_eq!(q.numel(), n * k, "weight_t_q8 extent");
         let key = (q.raw().as_ptr() as usize, q.raw().len());
@@ -1988,6 +2429,7 @@ impl Metal {
         }
         let src = self.upload_bytes(q.raw());
         let dst = self.scratch(n * k);
+        self.q8_widen.fetch_add(1, Ordering::Relaxed);
         self.run(
             "q8_widen_t",
             &[&src, &dst],
@@ -1999,6 +2441,23 @@ impl Metal {
         drop(src);
         map.insert(key, dst.clone());
         dst
+    }
+
+    /// Device-resident RAW blocked Q8_0 bytes (Plan 616 Phase 2, the
+    /// default posture): ONE permanent buffer per weight in the
+    /// artifact's native `[n, k]` layout — `numel × 1.0625` bytes, 26.5%
+    /// of the F32 `Wᵀ`. First miss is a bare UPLOAD (no kernel, no
+    /// transpose — the fused staging kernels dequant in-flight from these
+    /// bytes), never invalidated.
+    fn weight_q_buf(&self, q: &RawQ8) -> Buffer {
+        let key = (q.raw().as_ptr() as usize, q.raw().len());
+        let mut map = self.weights_q8.lock().expect("weight_q8 cache poison");
+        if let Some(b) = map.get(&key) {
+            return b.clone();
+        }
+        let b = self.upload_bytes(q.raw());
+        map.insert(key, b.clone());
+        b
     }
 
     /// Device-resident copy of an agent-owned weight slice — permanent
@@ -2409,13 +2868,13 @@ impl Metal {
         )
     }
 
-    /// Split-K slice count for a batch-1 `rows × n` GEMM over `k` (reflex
-    /// issue 020 T11) — the [`SplitRule`] on this instance. `None` = run
-    /// the unsliced dispatch. The slice length is FIXED ([`SPLITK_KC`]) —
-    /// never a function of m.
-    fn splitk_slices(&self, rows: u32, n: u32, k: u32) -> Option<u32> {
+    /// [`Self::splitk_slices`] under an explicit rule — the f32 posture
+    /// passes [`Self::split_rule`], the fused-q8 posture its pre-T13 rule
+    /// (Plan 616 Phase 2). `None` = run the unsliced dispatch; the slice
+    /// length is FIXED ([`SPLITK_KC`]) — never a function of m.
+    fn splitk_slices_with(&self, rule: &SplitRule, rows: u32, n: u32, k: u32) -> Option<u32> {
         let slices = k.div_ceil(SPLITK_KC);
-        (self.split_rule.splits(rows, n, k) && slices >= 2).then_some(slices)
+        (rule.splits(rows, n, k) && slices >= 2).then_some(slices)
     }
 
     /// The split-K partial scratch, grown to hold `need` f32 (half again
@@ -2533,6 +2992,341 @@ impl Metal {
         )
         .unwrap_or_else(|e| panic!("{e}"));
         self.debug_writeback(&ob, act);
+    }
+
+    /// [`Self::matmul_w_then_add`]'s fused-q8 twin (Plan 616 Phase 2):
+    /// the q8 GEMM into the fold staging, then the add — the same op
+    /// sequence and allocation posture, the B bytes staged from the raw
+    /// blocked weight.
+    fn matmul_w_q8_then_add(
+        &self,
+        a: &[f32],
+        m: usize,
+        k: usize,
+        qb: &Buffer,
+        n: usize,
+        x: &mut [f32],
+    ) {
+        let ab = self.chain_buf(a);
+        let stage = self.fold_stage_buf(m * n);
+        self.run_sgemm_q8(
+            (&ab, 0),
+            (qb, 0),
+            (&stage, 0),
+            &[m as u32, n as u32, k as u32, k as u32, 1],
+            m as u32,
+            n as u32,
+        )
+        .unwrap_or_else(|e| panic!("{e}"));
+        let xb = self.chain_buf(x);
+        let len = m * n;
+        self.run_at("add", (&xb, 0), (&stage, 0), &[len as u32], &[], len as u64)
+            .unwrap_or_else(|e| panic!("{e}"));
+        self.debug_writeback(&xb, x);
+    }
+
+    /// [`Self::matmul_w_then_glu`]'s fused-q8 twin — same shape.
+    fn matmul_w_q8_then_glu(
+        &self,
+        a: &[f32],
+        m: usize,
+        k: usize,
+        qb: &Buffer,
+        i_sz: usize,
+        act: &mut [f32],
+    ) {
+        let n = i_sz * 2;
+        let ab = self.chain_buf(a);
+        let stage = self.fold_stage_buf(m * n);
+        self.run_sgemm_q8(
+            (&ab, 0),
+            (qb, 0),
+            (&stage, 0),
+            &[m as u32, n as u32, k as u32, k as u32, 1],
+            m as u32,
+            n as u32,
+        )
+        .unwrap_or_else(|e| panic!("{e}"));
+        let ob = self.chain_slot_for(act);
+        self.run(
+            "glu_gelu_gate",
+            &[&stage, &ob],
+            &[m as u32, i_sz as u32],
+            &[],
+            (m * i_sz) as u64,
+        )
+        .unwrap_or_else(|e| panic!("{e}"));
+        self.debug_writeback(&ob, act);
+    }
+
+    /// The fused-q8 twin of [`Self::run_sgemm`] (Plan 616 Phase 2): the
+    /// split plan decided per row segment under the posture's rule
+    /// ([`Self::q8_split_rule`] — the pre-T13 shape, MPS cannot read Q8),
+    /// one fused dispatch per run. Weight GEMMs are batch-1
+    /// structurally; `uargs` = [m, n, k, `a_rs`, `a_cs`].
+    fn run_sgemm_q8(
+        &self,
+        a: (&Buffer, u64),
+        q8: (&Buffer, u64),
+        out: (&Buffer, u64),
+        uargs: &[u32; 5],
+        m: u32,
+        n: u32,
+    ) -> Result<()> {
+        let rule = self.q8_split_rule();
+        for (row0, rows, split) in self.split_plan_with(&rule, m, n, uargs[2]) {
+            let a_at = (a.0, a.1 + u64::from(row0) * u64::from(uargs[3]) * 4);
+            let o_at = (out.0, out.1 + u64::from(row0) * u64::from(n) * 4);
+            let mut u = *uargs;
+            u[0] = rows;
+            self.run_sgemm_one_q8(a_at, q8, o_at, &u, rows, n, split)?;
+        }
+        Ok(())
+    }
+
+    /// One fused-q8 GEMM dispatch with the split decision already made:
+    /// split-K when `split`, else the instance the single-wave band picks
+    /// — the SAME band rule as the f32 tree (the instances are
+    /// result-identical, so the pick never changes bits). NO MPS ARM:
+    /// option (i) — the dense shapes MPS serves on the F32 `Wᵀ` run these
+    /// fused instances under device-resident q8, disclosed once.
+    #[allow(clippy::too_many_arguments)]
+    fn run_sgemm_one_q8(
+        &self,
+        a: (&Buffer, u64),
+        q8: (&Buffer, u64),
+        out: (&Buffer, u64),
+        uargs: &[u32; 5],
+        m: u32,
+        n: u32,
+        split: bool,
+    ) -> Result<()> {
+        self.q8_fused.fetch_add(1, Ordering::Relaxed);
+        if split {
+            return self.run_sgemm_splitk_q8(
+                a,
+                q8,
+                out,
+                uargs,
+                m,
+                n,
+                uargs[2].div_ceil(SPLITK_KC),
+                SPLITK_KC,
+            );
+        }
+        if self.mps.is_some()
+            && m >= self.mps_min_m
+            && !self.q8_mps_note.swap(true, Ordering::Relaxed)
+        {
+            eprintln!(
+                "[q8] device-resident: MPS off under q8 on the dense weight shapes (option (i), \
+                 priced −23…−42% GEMM time vs MPS; LAYA_Q8_DEVICE_F32=1 restores the F32 Wᵀ + MPS posture)"
+            );
+        }
+        let k = uargs[2];
+        let rows = u64::from(m).div_ceil(64);
+        let cols = u64::from(n).div_ceil(128);
+        let tgs = rows * cols;
+        let (name, bm, bn, staging, threads) =
+            if tgs > WAVE_TG_FLOOR && tgs <= WAVE_TG_LIMIT && k >= XWAVE_K_MIN {
+                (
+                    "sgemm_xwide_q8",
+                    64u64,
+                    128u64,
+                    XWIDE_STAGING_BYTES,
+                    XWIDE_THREADS,
+                )
+            } else {
+                ("sgemm_q8", 32, 64, NARROW_STAGING_BYTES, NARROW_THREADS)
+            };
+        let kern = self
+            .pipelines
+            .get(name)
+            .ok_or_else(|| rt(format!("kernel {name} missing")))?;
+        self.encode(
+            &kern.p,
+            &[a, q8, out],
+            &[uargs[0], uargs[1], uargs[2], uargs[3], uargs[4]],
+            &[],
+            MTLSize {
+                width: u64::from(n.div_ceil(bn as u32)),
+                height: u64::from(m).div_ceil(bm),
+                depth: 1,
+            },
+            MTLSize {
+                width: threads,
+                height: 1,
+                depth: 1,
+            },
+            Some(&[(8, staging)]),
+            true,
+        )
+    }
+
+    /// The fused-q8 split-K PART dispatch (the f32
+    /// [`Self::sgemm_splitk_parts`] twin): `slices` k-slices of `kc` from
+    /// the raw blocked bytes into the partial scratch; returns the part
+    /// buffer and the per-slice element count `m·n`.
+    #[allow(clippy::too_many_arguments)]
+    fn sgemm_splitk_parts_q8(
+        &self,
+        a: (&Buffer, u64),
+        q8: (&Buffer, u64),
+        uargs: &[u32; 5],
+        m: u32,
+        n: u32,
+        slices: u32,
+        kc: u32,
+    ) -> Result<(Buffer, usize)> {
+        self.splitk_count.fetch_add(1, Ordering::Relaxed);
+        let mn = m as usize * n as usize;
+        let part = self.splitk_buf(mn * slices as usize);
+        let kern = self
+            .pipelines
+            .get("sgemm_splitk_q8")
+            .ok_or_else(|| rt("kernel sgemm_splitk_q8 missing"))?;
+        self.encode(
+            &kern.p,
+            &[a, q8, (&part, 0)],
+            &[uargs[0], uargs[1], uargs[2], uargs[3], uargs[4], kc],
+            &[],
+            MTLSize {
+                width: u64::from(n.div_ceil(64)),
+                height: u64::from(m).div_ceil(32),
+                depth: u64::from(slices),
+            },
+            MTLSize {
+                width: NARROW_THREADS,
+                height: 1,
+                depth: 1,
+            },
+            Some(&[(9, NARROW_STAGING_BYTES)]),
+            true,
+        )?;
+        Ok((part, mn))
+    }
+
+    /// Fused-q8 split-K GEMM, plain reduce — the [`Self::run_sgemm_splitk`]
+    /// twin; the reduce epilogues are format-agnostic (f32 partials) and
+    /// shared verbatim.
+    #[allow(clippy::too_many_arguments)]
+    fn run_sgemm_splitk_q8(
+        &self,
+        a: (&Buffer, u64),
+        q8: (&Buffer, u64),
+        out: (&Buffer, u64),
+        uargs: &[u32; 5],
+        m: u32,
+        n: u32,
+        slices: u32,
+        kc: u32,
+    ) -> Result<()> {
+        let (part, mn) = self.sgemm_splitk_parts_q8(a, q8, uargs, m, n, slices, kc)?;
+        let red = self
+            .pipelines
+            .get("splitk_reduce")
+            .ok_or_else(|| rt("kernel splitk_reduce missing"))?;
+        let width = red.width;
+        self.encode(
+            &red.p,
+            &[(&part, 0), out],
+            &[mn as u32, slices],
+            &[],
+            MTLSize {
+                width: (mn as u64).div_ceil(width) * width,
+                height: 1,
+                depth: 1,
+            },
+            MTLSize {
+                width,
+                height: 1,
+                depth: 1,
+            },
+            None,
+            false,
+        )
+    }
+
+    /// Fused-q8 split-K GEMM with the RESIDUAL FOLD epilogue — the
+    /// [`Self::run_sgemm_splitk_accum`] twin (the epilogue is shared).
+    #[allow(clippy::too_many_arguments)]
+    fn run_sgemm_splitk_accum_q8(
+        &self,
+        a: (&Buffer, u64),
+        q8: (&Buffer, u64),
+        out_res: (&Buffer, u64),
+        uargs: &[u32; 5],
+        m: u32,
+        n: u32,
+        slices: u32,
+        kc: u32,
+    ) -> Result<()> {
+        let (part, mn) = self.sgemm_splitk_parts_q8(a, q8, uargs, m, n, slices, kc)?;
+        let red = self
+            .pipelines
+            .get("splitk_reduce_add")
+            .ok_or_else(|| rt("kernel splitk_reduce_add missing"))?;
+        let width = red.width;
+        self.encode(
+            &red.p,
+            &[(&part, 0), out_res, out_res],
+            &[mn as u32, slices],
+            &[],
+            MTLSize {
+                width: (mn as u64).div_ceil(width) * width,
+                height: 1,
+                depth: 1,
+            },
+            MTLSize {
+                width,
+                height: 1,
+                depth: 1,
+            },
+            None,
+            false,
+        )
+    }
+
+    /// Fused-q8 split-K GEMM with the GLU FOLD epilogue — the
+    /// [`Self::run_sgemm_splitk_glu`] twin (the epilogue is shared).
+    #[allow(clippy::too_many_arguments)]
+    fn run_sgemm_splitk_glu_q8(
+        &self,
+        a: (&Buffer, u64),
+        q8: (&Buffer, u64),
+        act: (&Buffer, u64),
+        uargs: &[u32; 5],
+        m: u32,
+        i_sz: u32,
+        slices: u32,
+        kc: u32,
+    ) -> Result<()> {
+        let n = i_sz * 2;
+        let (part, _mn) = self.sgemm_splitk_parts_q8(a, q8, uargs, m, n, slices, kc)?;
+        let red = self
+            .pipelines
+            .get("splitk_reduce_glu")
+            .ok_or_else(|| rt("kernel splitk_reduce_glu missing"))?;
+        let width = red.width;
+        let out_len = m as usize * i_sz as usize;
+        self.encode(
+            &red.p,
+            &[(&part, 0), act],
+            &[m, i_sz, n, slices],
+            &[],
+            MTLSize {
+                width: (out_len as u64).div_ceil(width) * width,
+                height: 1,
+                depth: 1,
+            },
+            MTLSize {
+                width,
+                height: 1,
+                depth: 1,
+            },
+            None,
+            false,
+        )
     }
 
     /// Split-K narrow GEMM: `slices` k-slices of `kc` into the partial
@@ -2756,10 +3550,16 @@ impl Metal {
     /// that many rows — so a packed row takes the kernel the per-question
     /// loop takes for it, and the two paths stay bit-identical.
     fn split_plan(&self, m: u32, n: u32, k: u32) -> Vec<(u32, u32, bool)> {
+        self.split_plan_with(&self.split_rule, m, n, k)
+    }
+
+    /// [`Self::split_plan`] under an explicit rule — the fused-q8 posture
+    /// dispatches through here with [`Self::q8_split_rule`].
+    fn split_plan_with(&self, rule: &SplitRule, m: u32, n: u32, k: u32) -> Vec<(u32, u32, bool)> {
         let segs = self.row_segments.lock().expect("row segments poison");
         let hinted =
             segs.len() > 1 && segs.iter().map(|&r| u64::from(r)).sum::<u64>() == u64::from(m);
-        let decide = |rows: u32| self.splitk_slices(rows, n, k).is_some();
+        let decide = |rows: u32| self.splitk_slices_with(rule, rows, n, k).is_some();
         if !hinted {
             return vec![(0, m, decide(m))];
         }
@@ -2859,45 +3659,65 @@ impl Metal {
         )
     }
 
-    /// The resolved-weight spine of [`Backend::matmul_w`] — everything
-    /// after the `weight_t_buf` lookup, shared by the f32 and Q8 entries
-    /// (one body, never a second transcription).
-    fn matmul_w_wb(&self, a: &[f32], m: usize, k: usize, wb: &Buffer, n: usize, dst: &mut [f32]) {
+    /// The resolved-weight spine of [`Backend::matmul_w`] — everything after
+    /// the weight-buffer lookup, shared by the f32 and Q8 entries (one body,
+    /// never a second transcription). `wb` selects the staged-B format:
+    /// f32 dispatches through [`Self::run_sgemm`] (the MPS arm included), Q8
+    /// through [`Self::run_sgemm_q8`] (the fused staging kernels, MPS off —
+    /// option (i)).
+    fn matmul_w_wb(&self, a: &[f32], m: usize, k: usize, wb: WBuf<'_>, n: usize, dst: &mut [f32]) {
         let ab = self.chain_buf(a);
         let ob = self.chain_slot_for(dst);
-        self.run_sgemm(
-            (&ab, 0),
-            (wb, 0),
-            (&ob, 0),
-            &[
-                m as u32, n as u32, k as u32, k as u32, // a_rs
-                1,        // a_cs
-                n as u32, // b_rs — B = Wᵀ held row-major [k, n]
-                1,        // b_cs
-                0,        // batch strides (batch = 1)
-                0, 0,
-            ],
-            m as u32,
-            n as u32,
-            1,
-        )
+        match wb {
+            WBuf::F32T(wb) => self.run_sgemm(
+                (&ab, 0),
+                (wb, 0),
+                (&ob, 0),
+                &[
+                    m as u32, n as u32, k as u32, k as u32, // a_rs
+                    1,        // a_cs
+                    n as u32, // b_rs — B = Wᵀ held row-major [k, n]
+                    1,        // b_cs
+                    0,        // batch strides (batch = 1)
+                    0, 0,
+                ],
+                m as u32,
+                n as u32,
+                1,
+            ),
+            WBuf::Q8Raw(qb) => self.run_sgemm_q8(
+                (&ab, 0),
+                (qb, 0),
+                (&ob, 0),
+                &[m as u32, n as u32, k as u32, k as u32, 1],
+                m as u32,
+                n as u32,
+            ),
+        }
         .unwrap_or_else(|e| panic!("{e}"));
         self.debug_writeback(&ob, dst);
     }
 
     /// The resolved-weight spine of [`Backend::matmul_w_accum`] — one body
-    /// for the f32 and Q8 entries.
+    /// for the f32 and Q8 entries. The fold arm runs per format (the
+    /// fused-q8 split-K stages from the raw bytes; the reduce epilogues
+    /// are format-agnostic and shared); knob-off and mixed-plan run each
+    /// format's unfused stream.
     fn matmul_w_accum_wb(
         &self,
         a: &[f32],
         m: usize,
         k: usize,
-        wb: &Buffer,
+        wb: WBuf<'_>,
         n: usize,
         x: &mut [f32],
     ) {
         if self.fold_res {
-            let plan = self.split_plan(m as u32, n as u32, k as u32);
+            let rule = match wb {
+                WBuf::F32T(_) => self.split_rule,
+                WBuf::Q8Raw(_) => self.q8_split_rule(),
+            };
+            let plan = self.split_plan_with(&rule, m as u32, n as u32, k as u32);
             if plan.iter().all(|(_, _, s)| *s) {
                 let ab = self.chain_buf(a);
                 // Read-modify-write target: the residual stream is
@@ -2905,7 +3725,7 @@ impl Metal {
                 // the slot), so `chain_buf` — never the write-first slot.
                 let xb = self.chain_buf(x);
                 for (row0, rows, _) in &plan {
-                    let u = [
+                    let u32args = [
                         *rows, n as u32, k as u32, k as u32, // a_rs
                         1,        // a_cs
                         n as u32, // b_rs — Wᵀ row-major [k, n]
@@ -2913,70 +3733,112 @@ impl Metal {
                         0,        // batch strides (batch = 1)
                         0, 0,
                     ];
-                    self.run_sgemm_splitk_accum(
-                        (&ab, ((*row0 as usize) * k * 4) as u64),
-                        (wb, 0),
-                        (&xb, ((*row0 as usize) * n * 4) as u64),
-                        &u,
-                        *rows,
-                        n as u32,
-                        (k as u32).div_ceil(SPLITK_KC),
-                        SPLITK_KC,
-                    )
-                    .unwrap_or_else(|e| panic!("{e}"));
+                    match wb {
+                        WBuf::F32T(wb) => self
+                            .run_sgemm_splitk_accum(
+                                (&ab, ((*row0 as usize) * k * 4) as u64),
+                                (wb, 0),
+                                (&xb, ((*row0 as usize) * n * 4) as u64),
+                                &u32args,
+                                *rows,
+                                n as u32,
+                                (k as u32).div_ceil(SPLITK_KC),
+                                SPLITK_KC,
+                            )
+                            .unwrap_or_else(|e| panic!("{e}")),
+                        WBuf::Q8Raw(qb) => self
+                            .run_sgemm_splitk_accum_q8(
+                                (&ab, ((*row0 as usize) * k * 4) as u64),
+                                (qb, 0),
+                                (&xb, ((*row0 as usize) * n * 4) as u64),
+                                &[*rows, n as u32, k as u32, k as u32, 1],
+                                *rows,
+                                n as u32,
+                                (k as u32).div_ceil(SPLITK_KC),
+                                SPLITK_KC,
+                            )
+                            .unwrap_or_else(|e| panic!("{e}")),
+                    }
                     self.fold_count.fetch_add(1, Ordering::Relaxed);
                 }
                 self.debug_writeback(&xb, x);
                 return;
             }
         }
-        self.matmul_w_then_add(a, m, k, wb, n, x);
+        match wb {
+            WBuf::F32T(wb) => self.matmul_w_then_add(a, m, k, wb, n, x),
+            WBuf::Q8Raw(qb) => self.matmul_w_q8_then_add(a, m, k, qb, n, x),
+        }
     }
 
     /// The resolved-weight spine of [`Backend::matmul_w_glu`] — one body
-    /// for the f32 and Q8 entries.
+    /// for the f32 and Q8 entries. The fold arm runs per format (the
+    /// fused-q8 split-K stages from the raw bytes; the GLU epilogue
+    /// consumes f32 partials and is shared); knob-off and mixed-plan run
+    /// each format's unfused stream.
     fn matmul_w_glu_wb(
         &self,
         a: &[f32],
         m: usize,
         k: usize,
-        wb: &Buffer,
+        wb: WBuf<'_>,
         i_sz: usize,
         act: &mut [f32],
     ) {
         let n = i_sz * 2;
         if self.fold_glu {
-            let plan = self.split_plan(m as u32, n as u32, k as u32);
+            let rule = match wb {
+                WBuf::F32T(_) => self.split_rule,
+                WBuf::Q8Raw(_) => self.q8_split_rule(),
+            };
+            let plan = self.split_plan_with(&rule, m as u32, n as u32, k as u32);
             if plan.iter().all(|(_, _, s)| *s) {
                 let ab = self.chain_buf(a);
                 let ob = self.chain_slot_for(act);
                 for (row0, rows, _) in &plan {
-                    let u = [
-                        *rows, n as u32, k as u32, k as u32, // a_rs
-                        1,        // a_cs
-                        n as u32, // b_rs — Wᵀ row-major [k, n]
-                        1,        // b_cs
-                        0,        // batch strides (batch = 1)
-                        0, 0,
-                    ];
-                    self.run_sgemm_splitk_glu(
-                        (&ab, ((*row0 as usize) * k * 4) as u64),
-                        (wb, 0),
-                        (&ob, ((*row0 as usize) * i_sz * 4) as u64),
-                        &u,
-                        *rows,
-                        i_sz as u32,
-                        (k as u32).div_ceil(SPLITK_KC),
-                        SPLITK_KC,
-                    )
-                    .unwrap_or_else(|e| panic!("{e}"));
+                    match wb {
+                        WBuf::F32T(wb) => self
+                            .run_sgemm_splitk_glu(
+                                (&ab, ((*row0 as usize) * k * 4) as u64),
+                                (wb, 0),
+                                (&ob, ((*row0 as usize) * i_sz * 4) as u64),
+                                &[
+                                    *rows, n as u32, k as u32, k as u32, // a_rs
+                                    1,        // a_cs
+                                    n as u32, // b_rs — Wᵀ row-major [k, n]
+                                    1,        // b_cs
+                                    0,        // batch strides (batch = 1)
+                                    0, 0,
+                                ],
+                                *rows,
+                                i_sz as u32,
+                                (k as u32).div_ceil(SPLITK_KC),
+                                SPLITK_KC,
+                            )
+                            .unwrap_or_else(|e| panic!("{e}")),
+                        WBuf::Q8Raw(qb) => self
+                            .run_sgemm_splitk_glu_q8(
+                                (&ab, ((*row0 as usize) * k * 4) as u64),
+                                (qb, 0),
+                                (&ob, ((*row0 as usize) * i_sz * 4) as u64),
+                                &[*rows, n as u32, k as u32, k as u32, 1],
+                                *rows,
+                                i_sz as u32,
+                                (k as u32).div_ceil(SPLITK_KC),
+                                SPLITK_KC,
+                            )
+                            .unwrap_or_else(|e| panic!("{e}")),
+                    }
                     self.fold_count.fetch_add(1, Ordering::Relaxed);
                 }
                 self.debug_writeback(&ob, act);
                 return;
             }
         }
-        self.matmul_w_then_glu(a, m, k, wb, i_sz, act);
+        match wb {
+            WBuf::F32T(wb) => self.matmul_w_then_glu(a, m, k, wb, i_sz, act),
+            WBuf::Q8Raw(qb) => self.matmul_w_q8_then_glu(a, m, k, qb, i_sz, act),
+        }
     }
 }
 
@@ -3052,19 +3914,31 @@ impl Backend for Metal {
         // way — the k-accumulation order is untouched, so the result is
         // bit-identical to the `b_cs = k` binding.
         let wb = self.weight_t_buf(w, n, k);
-        self.matmul_w_wb(a, m, k, &wb, n, dst);
+        self.matmul_w_wb(a, m, k, WBuf::F32T(&wb), n, dst);
     }
 
-    /// The Q8 twin (Plan 616 Phase 1): the SAME device F32 `Wᵀ`, built by
-    /// the load kernel from the raw blocked bytes — the staged tile values
-    /// are the host widen's exactly, so this dispatch is bit-identical to
-    /// the f32 path above and the host f32 copy never exists.
+    /// The Q8 twin (Plan 616 Phase 1 + 2): DEVICE-RESIDENT by default —
+    /// the raw blocked bytes upload once ([`Self::weight_q_buf`],
+    /// 1.0625 B/element on the device, 26.5% of the F32 `Wᵀ`) and the
+    /// fused q8 staging kernels (`sgemm_q8` / `sgemm_xwide_q8` /
+    /// `sgemm_splitk_q8`) dequant-transpose in-flight — the same `d·q`
+    /// tile values this f32 path stages, so the dispatch is bit-identical
+    /// by construction and the host f32 copy never exists
+    /// ([`Self::q8_fused_dispatches`] pins the reach).
+    /// `LAYA_Q8_DEVICE_F32=1` restores Phase 1: the `q8_widen_t` load
+    /// kernel dequant-transposes into the SAME device F32 `Wᵀ` and
+    /// today's dispatch tree (MPS included) runs unchanged.
     fn matmul_w_q8(&self, a: &[f32], m: usize, k: usize, q: &RawQ8, n: usize, dst: &mut [f32]) {
         assert_eq!(a.len(), m * k, "lhs extent");
         assert_eq!(q.numel(), n * k, "weight extent");
         assert_eq!(dst.len(), m * n, "dst extent");
-        let wb = self.weight_t_buf_q8(q, n, k);
-        self.matmul_w_wb(a, m, k, &wb, n, dst);
+        if self.q8_device_resident() {
+            let qb = self.weight_q_buf(q);
+            self.matmul_w_wb(a, m, k, WBuf::Q8Raw(&qb), n, dst);
+        } else {
+            let wb = self.weight_t_buf_q8(q, n, k);
+            self.matmul_w_wb(a, m, k, WBuf::F32T(&wb), n, dst);
+        }
     }
 
     /// The residual-stream projection (reflex issue 020 T11, the last open
@@ -3083,17 +3957,24 @@ impl Backend for Metal {
         assert_eq!(w.len(), n * k, "weight extent");
         assert_eq!(x.len(), m * n, "residual extent");
         let wb = self.weight_t_buf(w, n, k);
-        self.matmul_w_accum_wb(a, m, k, &wb, n, x);
+        self.matmul_w_accum_wb(a, m, k, WBuf::F32T(&wb), n, x);
     }
 
-    /// The Q8 twin (Plan 616 Phase 1) — same device F32 `Wᵀ` via the load
-    /// kernel, bit-identical by construction.
+    /// The Q8 twin (Plan 616 Phase 1 + 2) — device-resident by default,
+    /// the fused-q8 split-K staging from the raw bytes; the fold
+    /// epilogues are format-agnostic and shared. Kill-switch and doc:
+    /// [`Backend::matmul_w_q8`].
     fn matmul_w_accum_q8(&self, a: &[f32], m: usize, k: usize, q: &RawQ8, n: usize, x: &mut [f32]) {
         assert_eq!(a.len(), m * k, "lhs extent");
         assert_eq!(q.numel(), n * k, "weight extent");
         assert_eq!(x.len(), m * n, "residual extent");
-        let wb = self.weight_t_buf_q8(q, n, k);
-        self.matmul_w_accum_wb(a, m, k, &wb, n, x);
+        if self.q8_device_resident() {
+            let qb = self.weight_q_buf(q);
+            self.matmul_w_accum_wb(a, m, k, WBuf::Q8Raw(&qb), n, x);
+        } else {
+            let wb = self.weight_t_buf_q8(q, n, k);
+            self.matmul_w_accum_wb(a, m, k, WBuf::F32T(&wb), n, x);
+        }
     }
 
     /// The MLP-up projection with its GLU epilogue folded (reflex issue
@@ -3111,11 +3992,12 @@ impl Backend for Metal {
         assert_eq!(w.len(), n * k, "weight extent");
         assert_eq!(act.len(), m * i_sz, "glu out extent");
         let wb = self.weight_t_buf(w, n, k);
-        self.matmul_w_glu_wb(a, m, k, &wb, i_sz, act);
+        self.matmul_w_glu_wb(a, m, k, WBuf::F32T(&wb), i_sz, act);
     }
 
-    /// The Q8 twin (Plan 616 Phase 1) — same device F32 `Wᵀ` via the load
-    /// kernel, bit-identical by construction.
+    /// The Q8 twin (Plan 616 Phase 1 + 2) — device-resident by default,
+    /// the fused-q8 GLU fold staging from the raw bytes. Kill-switch and
+    /// doc: [`Backend::matmul_w_q8`].
     fn matmul_w_glu_q8(
         &self,
         a: &[f32],
@@ -3129,8 +4011,13 @@ impl Backend for Metal {
         assert_eq!(a.len(), m * k, "lhs extent");
         assert_eq!(q.numel(), n * k, "weight extent");
         assert_eq!(act.len(), m * i_sz, "glu out extent");
-        let wb = self.weight_t_buf_q8(q, n, k);
-        self.matmul_w_glu_wb(a, m, k, &wb, i_sz, act);
+        if self.q8_device_resident() {
+            let qb = self.weight_q_buf(q);
+            self.matmul_w_glu_wb(a, m, k, WBuf::Q8Raw(&qb), i_sz, act);
+        } else {
+            let wb = self.weight_t_buf_q8(q, n, k);
+            self.matmul_w_glu_wb(a, m, k, WBuf::F32T(&wb), i_sz, act);
+        }
     }
 
     fn matmul_kt(
@@ -3723,16 +4610,25 @@ impl Backend for Metal {
         let _ = self.weight_t_buf(data, n, k);
     }
 
-    /// The Q8 twin (Plan 616 Phase 1): build the SAME device F32 `Wᵀ` at
-    /// load via the `q8_widen_t` kernel — the raw bytes upload once to a
-    /// TRANSIENT buffer and drop; the host never widens. First-miss-safe
-    /// (`weight_t_buf_q8` builds on any miss, so an un-warmed weight still
-    /// serves).
+    /// The Q8 twin (Plan 616 Phase 1 + 2): DEVICE-RESIDENT by default —
+    /// a bare first-miss UPLOAD of the raw blocked bytes
+    /// ([`Self::weight_q_buf`]; no kernel, no transpose — the fused
+    /// staging kernels consume the bytes directly), so the warm path pays
+    /// one copy instead of Phase 1's widen dispatch.
+    /// `LAYA_Q8_DEVICE_F32=1` restores Phase 1: build the device F32
+    /// `Wᵀ` at load via the `q8_widen_t` kernel. First-miss-safe either
+    /// way (the matmul entries build on any miss, so an un-warmed weight
+    /// still serves).
     fn warm_weight_2d_q8(&self, q: &RawQ8, n: usize, k: usize) {
         if q.numel() == 0 {
             return;
         }
-        let _ = self.weight_t_buf_q8(q, n, k);
+        assert_eq!(q.numel(), n * k, "warm_weight_2d_q8 extent");
+        if self.q8_device_resident() {
+            let _ = self.weight_q_buf(q);
+        } else {
+            let _ = self.weight_t_buf_q8(q, n, k);
+        }
     }
 
     fn download_into(&self, src: &[f32], out: &mut [f32]) {

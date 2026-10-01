@@ -175,41 +175,162 @@ fn metal_ops_match_cpu_op_by_op() {
         let q8 = q8_bytes_for(&w);
         let raw = RawQ8::new(n * k, q8).expect("blocked layout");
         let wide = raw.wide().to_vec();
-        let mut wd = vec![0f32; mm * n];
-        m.matmul_w(&a, mm, k, &wide, n, &mut wd);
-        let dense_q8 = sync_out(&m, &wd);
+        let mut wq = vec![0f32; mm * n];
+        c.matmul_w(&a, mm, k, &wide, n, &mut wq);
         let mut wqm = vec![0f32; mm * n];
         m.begin_pass();
         m.matmul_w_q8(&a, mm, k, &raw, n, &mut wqm);
         let got = sync_out(&m, &wqm);
-        assert_eq!(
-            dense_q8, got,
-            "matmul_w_q8 {mm}x{k}x{n} must be bit-identical to the f32 carrier"
-        );
-        let mut wq = vec![0f32; mm * n];
-        c.matmul_w(&a, mm, k, &wide, n, &mut wq);
+        // Under the DEFAULT posture (MPS live) the two arms' dispatch
+        // trees legitimately differ on the dense shapes — option (i): the
+        // f32 carrier rides MPS over the F32 Wᵀ, the fused-q8 arm rides
+        // OUR instances — so the bit-identity pair moved to the shared
+        // tree below (`m_bit`, MPS off) and this arm keeps the file's
+        // accumulation-order budget.
         report(&format!("matmul_w_q8 vs cpu {mm}x{k}x{n}"), &wq, &got, 1e-3);
     }
     {
-        // The k-tail shape (plan 616 Phase 1): k % 32 != 0 walks the flat
-        // tail block — the a0w class ([256, d+4]). The dense reference is
-        // the DECODED values (the f32 the carrier holds).
-        let (mm, k, n) = (5usize, 100usize, 33usize);
-        m.begin_pass();
+        // THE BIT-IDENTITY BATTERY (Plan 616 Phase 2): fused-q8 vs the
+        // f32 carrier on the SAME dispatch tree — `m_bit` is MPS-off, so
+        // both arms run OUR narrow/xwide/split-K instances under the same
+        // (DEFAULT) split rule and the staged tile values are the only
+        // difference. Under the default MPS-on posture the trees differ
+        // by design on the dense shapes (option (i)) — that delta is the
+        // priced T13-class accumulation-order change, bounded by the
+        // 1e-3 CPU arms above, NOT a carrier defect. The instance is
+        // scoped (the file's one-live-instance discipline) and DRAINED
+        // before it drops — an open pass encoder at dealloc aborts the
+        // process.
+        let m_bit = Metal::new().expect("metal backend").with_mps(false);
+        assert!(m_bit.q8_fused_dispatches() == 0);
+        for (mm, k, n) in [
+            (25usize, 768usize, 2304usize), // split-K (q8 fused splitk + fold f32)
+            (7, 64, 33),                    // ragged n
+            (1, 257, 129),                  // k tail past BK 64
+            (300, 100, 700),                // narrow, ragged m + k
+            (512, 64, 2048),                // narrow exact tiles
+            (70, 1024, 2048),               // THE XWIDE-Q8 PICK: tgs 32 ∈ (24, 40], k ≥ 128
+            (5, 100, 33),                   // k % 32 != 0 — the flat tail block (the a0w class)
+        ] {
+            m_bit.begin_pass();
+            let a = vec_of(mm * k);
+            let w = vec_of(n * k);
+            let q8 = q8_bytes_for(&w);
+            let raw = RawQ8::new(n * k, q8).expect("blocked layout");
+            let wide = raw.wide().to_vec();
+            let mut wd = vec![0f32; mm * n];
+            m_bit.matmul_w(&a, mm, k, &wide, n, &mut wd);
+            let dense_q8 = sync_out(&m_bit, &wd);
+            let mut wqm = vec![0f32; mm * n];
+            m_bit.matmul_w_q8(&a, mm, k, &raw, n, &mut wqm);
+            let got = sync_out(&m_bit, &wqm);
+            assert_eq!(
+                dense_q8, got,
+                "matmul_w_q8 {mm}x{k}x{n} must be bit-identical to the f32 carrier (shared tree)"
+            );
+        }
+        assert!(
+            m_bit.q8_fused_dispatches() > 0,
+            "the fused-q8 arm must have dispatched (reach counter)"
+        );
+        assert_eq!(
+            m_bit.q8_widen_dispatches(),
+            0,
+            "the resident posture must never build the widened Wᵀ"
+        );
+
+        // The fold entries over the raw bytes (m_bit, folds default ON):
+        // matmul_w_accum_q8 / matmul_w_glu_q8 vs the manual q8-GEMM +
+        // add / glu streams — bit-identical when the whole call splits
+        // (the reduce epilogues are format-agnostic), at a shape the
+        // DEFAULT rule splits.
+        for (mm, k, n, i_sz) in [(7usize, 768usize, 2304usize, 1152usize)] {
+            m_bit.begin_pass();
+            let a = vec_of(mm * k);
+            let w = vec_of(n * k);
+            let q8 = q8_bytes_for(&w);
+            let raw = RawQ8::new(n * k, q8).expect("blocked layout");
+
+            // accum: x += a @ Wᵀ
+            let mut x_manual = vec_of(mm * n);
+            let mut x_fold = x_manual.clone();
+            let mut stage = vec![0f32; mm * n];
+            m_bit.matmul_w_q8(&a, mm, k, &raw, n, &mut stage);
+            for (v, s) in x_manual.iter_mut().zip(&stage) {
+                *v += s;
+            }
+            m_bit.matmul_w_accum_q8(&a, mm, k, &raw, n, &mut x_fold);
+            assert_eq!(x_manual, x_fold, "accum_q8 fold must be bit-identical");
+
+            // glu: act = glu(a @ W[2i]ᵀ) — the fold vs the UNFUSED
+            // device stream it replaces (q8 GEMM into the fused staging,
+            // then the gate kernel): same erf kernel both arms, so the
+            // pair is bit-identical when the whole call splits. (A host
+            // erf manual reference would differ in the last bits by
+            // construction — libm vs the kernel's A&S polynomial.)
+            let mut fused = vec![0f32; mm * (2 * i_sz)];
+            m_bit.matmul_w_q8(&a, mm, k, &raw, 2 * i_sz, &mut fused);
+            let mut act_manual = vec![0f32; mm * i_sz];
+            m_bit.glu_gelu_gate(&fused, mm, i_sz, &mut act_manual);
+            let mut act_fold = vec![0f32; mm * i_sz];
+            m_bit.matmul_w_glu_q8(&a, mm, k, &raw, i_sz, &mut act_fold);
+            assert_eq!(act_manual, act_fold, "glu_q8 fold must be bit-identical");
+        }
+        assert!(
+            m_bit.fold_dispatches() > 0,
+            "the fold arms must have dispatched the epilogues"
+        );
+        // Drain the open pass before the instance drops (an un-ended
+        // encoder at dealloc is a Metal abort, not a leak) — begin_pass
+        // provably syncs. The scope closes here: m_bit drops before the
+        // kill-switch instance is built (the file's one-live-instance
+        // discipline).
+        m_bit.begin_pass();
+    }
+
+    {
+        // THE KILL-SWITCH ARM: LAYA_Q8_DEVICE_F32=1 restores Phase 1 —
+        // both arms then ride the SAME tree INCLUDING MPS (the widened
+        // Wᵀ is a plain f32 buffer to MPS), so the pair is bit-identical
+        // on the DEFAULT instance too. The widen counter must move (the
+        // load kernel ran) and the fused counter must stay frozen (the
+        // fused path never dispatched on this instance).
+        let m_ks = Metal::new().expect("metal backend");
+        assert_eq!(m_ks.q8_fused_dispatches(), 0);
+        // The gpu_lock serializes this file, so the flip cannot interleave
+        // with another test's calls on THIS instance; other files' tests
+        // (if any ran concurrently) only see a re-route, never a bit
+        // change — both paths are bit-identical per tree.
+        // SAFETY: sequential single-threaded flip under the file's GPU
+        // lock; restored before the test returns.
+        unsafe { std::env::set_var("LAYA_Q8_DEVICE_F32", "1") };
+        let (mm, k, n) = (7usize, 768usize, 2304usize);
+        m_ks.begin_pass();
         let a = vec_of(mm * k);
         let w = vec_of(n * k);
         let q8 = q8_bytes_for(&w);
         let raw = RawQ8::new(n * k, q8).expect("blocked layout");
         let wide = raw.wide().to_vec();
         let mut wd = vec![0f32; mm * n];
-        m.matmul_w(&a, mm, k, &wide, n, &mut wd);
-        let dense = sync_out(&m, &wd);
+        m_ks.matmul_w(&a, mm, k, &wide, n, &mut wd);
+        let dense_q8 = sync_out(&m_ks, &wd);
         let mut wqm = vec![0f32; mm * n];
-        m.matmul_w_q8(&a, mm, k, &raw, n, &mut wqm);
-        let got = sync_out(&m, &wqm);
+        m_ks.matmul_w_q8(&a, mm, k, &raw, n, &mut wqm);
+        let got = sync_out(&m_ks, &wqm);
+        // SAFETY: restore before any further arm (see the set above).
+        unsafe { std::env::remove_var("LAYA_Q8_DEVICE_F32") };
         assert_eq!(
-            dense, got,
-            "matmul_w_q8 k-tail must be bit-identical to the f32 carrier"
+            dense_q8, got,
+            "kill-switch: matmul_w_q8 must be bit-identical to the f32 carrier (Phase 1 tree)"
+        );
+        assert!(
+            m_ks.q8_widen_dispatches() > 0,
+            "the kill-switch arm must have dispatched the load kernel"
+        );
+        assert_eq!(
+            m_ks.q8_fused_dispatches(),
+            0,
+            "the kill-switch arm must stay off the fused path"
         );
     }
     {
