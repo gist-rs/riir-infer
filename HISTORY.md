@@ -4,6 +4,35 @@ Durable records for resolved questions and closed lanes (the noise-reduction
 convention: the record lands here, hash-pinned; open work lives in `.issues/`
 and `.plans/`). Created 2026-09-23 at the first record.
 
+## 2026-10-01 — Issue 026 CLOSED (hygiene): the DQ phase-matrix instrument landed and ran — every axis INADMISSIBLE at the frozen corpora
+
+Plan 614 delivered the 2×2 phase-matrix instrument (`dq_fakequant` + the
+`dq_phase_matrix` runner; record `.benchmarks/023_dq_phase_matrix.md`) and ran
+it to EXIT0: base arith 0.9583 and NIAH pooled 0.9896 both sit OUTSIDE the
+pre-registered 0.25–0.95 admissibility window, so T3's damage-ratio assertions
+receive NO GATE — the honest no-gate outcome; a gating re-run needs a NEW
+pre-registration on corpora inside the window. The R numbers were still
+reported per axis/grid (a2 prefill-heavy 0.085; a2 decode-heavy 0.733; a4
+decode-heavy 0.000). T5's standing promotion rule — any future weight format
+publishes its per-phase R before default promotion — rides the INSTRUMENT
+(pinned in bench 023), armed by nothing in this run. The runner's defects and
+the twin-session collision narrative: Issue 030's HISTORY row.
+
+**T4 (the KV-axis extension arm) was never in the Plan-614 freeze** — split
+into `.issues/033_kv_axis_extension_arm.md` so the queue keeps surfacing it.
+
+**Numbering repair en route:** `.issues/.highwater_local` read `031` at this
+pass even though Issue 032 had been allocated, landed (`5d0592f`), and its
+file removed (`4f68e5d`) — the counter was never bumped for 032 (the katgpt-rs
+`.issues/121` recycling-bug class; caught because HISTORY's newest row named
+032 while the counter still said 031, which would have handed the next
+allocation a reused number). This commit sets the counter to `033` with this
+issue's allocation.
+
+File removed per the noise-reduction rule — full task narrative:
+`git log --follow -- .issues/026_phase_sensitivity_quant_bench.md`.
+Hygiene session: riir-clippy idle loop (2026-10-01).
+
 ## 2026-10-01 — Issue 032 DONE: Metal CubeCL prefill computes Hadamard-folded (Bonsai-2) models (`5d0592f`)
 
 - **What was blocked:** `prefill_tokens_chunk` panicked on folded files whenever the cudarc whole-prefill lane was unavailable — always on macOS — so Metal could never batch-prefill the production Bonsai-2 PQ2_0 file (riir-ai Plan 602 Phase C / Plan 607 A4 named it the hard predecessor of every M3 prefill cell; neither owned the task).
