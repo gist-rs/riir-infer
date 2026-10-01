@@ -1,6 +1,6 @@
 # Bench 024 — Issue 1004 R2: the fused GDN prework (conv1d + SiLU + q/k L2-norm + head expansion, ONE dispatch)
 
-**Status:** RECORD (R2 BUILT, opt-in `deltanet_prework_fused`; e2e verdict: real but modest — @2048 **1.045×** with every round ≥ 1.025, @4096 1.018×; a quiet-box confirmation cell is owed before any promotion claim)
+**Status:** RECORD (R2 BUILT, opt-in `deltanet_prework_fused`; e2e verdict: real but small — four positive medians across two runs, ALL inside the round spread → NOT promoted, opt-in stands; the structural case is the dispatch-count elimination, the league bout owns any promotion)
 
 **Date:** 2026-10-01 · **Box:** M3 Max (AC, powermode 2) · **Load class:** LOADED (loadavg 28–34 — the riir-refine sibling's all-features test suite at ~594% CPU throughout; ratios are interleave-paired so drift lands on both arms, but ABSOLUTE tok/s are load-deflated)
 
@@ -60,23 +60,29 @@ the 11 ms wall; the traffic is ~0.8 ms of it), not traffic-bound. The fused kern
 
 ## G2 — e2e A/B (`riir-ai crates/riir-gpu/tests/bench_1004_r2_prework_fused_e2e.rs`)
 
-Production `prefill` over the folded Bonsai-2 PQ2_0 file, one process, 5 interleaved rounds
-per P, order alternating, FNV bit-identity asserted EVERY round:
+Production `prefill` over the folded Bonsai-2 PQ2_0 file, one process, interleaved rounds,
+order alternating, FNV bit-identity asserted EVERY round. TWO runs (the second the quiet-box
+confirmation cell the R1 owed-cell precedent demands):
 
-| P | shipping | fused | speedup median | range |
-|---:|---:|---:|---:|---|
-| 2048 | 79.7 tok/s | 85.4 tok/s | **1.045×** | 1.025–1.080 (every round > 1) |
-| 4096 | 70.5 tok/s | 70.8 tok/s | 1.018× | 1.003–1.030 |
+| Run | Load (1-min) | Rounds | P=2048 | P=4096 |
+|---|---:|---:|---|---|
+| A (loaded) | 28.8 | 5 | 79.7 → 85.4 tok/s, **1.045×** (1.025–1.080, every round > 1) | 70.5 → 70.8, 1.018× (1.003–1.030) |
+| B (quiet-ish) | 5.5 | 8 | 57.6 → 60.8 tok/s, **1.022×** (0.974–1.123) | 59.2 → 61.1, **1.034×** (0.844–1.238) |
 
-Read honestly: the stage-isolated 7–9× collapses to 4.5%/1.8% e2e because the prework is a
-small slice of the layer (the GEMM wall dominates — the issue's own projection). The @2048
-median 1.045 with min 1.025 is a DIFFERENT class from R1's 1.002× (noise) verdict: consistent,
-not scatter. ⚠ **Load caveat:** measured at loadavg 28–34; under CPU contention each of the
-~3310 eliminated dispatch submissions costs more wall time, so the e2e gain is likely
-load-inflated — a quiet-box confirmation cell is OWED before any promotion-to-default claim
-(the R1 owed-cell precedent). Direction is safe regardless: the fused arm does strictly less
-work (fewer dispatches, less traffic) at bit-identical output; it cannot be slower at any
-load.
+Bit-identity: FNV `0ec2396fd4627f29` @2048 / `f35280cb95f5d306` @4096 in BOTH runs —
+byte-for-byte R1's recorded pins.
+
+Read honestly: (a) the stage-isolated 7–9× collapses to 2–4% e2e because the prework is a
+small slice of the layer (the GEMM wall dominates — the issue's own projection). (b) All
+four medians are positive, but run B's spreads cross 1.0 (min 0.974 / 0.844) — by this
+repo's own R1 standard ("inside the ±10% round spread = NOT promoted"), the e2e verdict is
+**real but small; opt-in stands**. (c) The run-to-run ABSOLUTE flip (79.7 tok/s loaded vs
+57.6 quiet @2048 — the LOADED run faster) is the same box-state-dominates-absolutes class
+R1 documented across its day (60–103 tok/s @2048); only within-run interleaved ratios are
+comparable. (d) The load asymmetry makes mechanistic sense: dispatch elimination pays MORE
+under CPU contention (run A's 1.045× vs run B's 1.022× @2048), and can never invert the
+sign — the fused arm does strictly less work (fewer dispatches, less traffic) at
+bit-identical output.
 
 ## G3 — no decode regression
 
@@ -86,8 +92,12 @@ untouched; the fused kernel is wired only into `prefill_tokens_chunk`'s prework 
 ## Posture
 
 - Feature `deltanet_prework_fused` **opt-in** (both repos), toggle default ON when compiled —
-  the R1 posture. Promotion to default rides: (a) the quiet-box confirmation cell, (b) the
-  league loop's bout (never a solo claim — the issue's own law).
+  the R1 posture. The quiet-box confirmation cell is DISCHARGED (run B above); by the R1
+  "inside the round spread" standard the e2e gain does not promote on its own — promotion
+  rides the league loop's bout (never a solo claim — the issue's own law). The structural
+case that survives any load: **~67 fewer dispatches/layer, ~160 MB/layer less traffic,
+bit-identical output, and the p%64 fallback pathology removed** (odd-p chunks no longer
+drop to P sequential dispatches).
 - Composes with R1's staged recurrence (independent stages of the same layer).
 
 ## Files

@@ -4,6 +4,39 @@ Durable records for resolved questions and closed lanes (the noise-reduction
 convention: the record lands here, hash-pinned; open work lives in `.issues/`
 and `.plans/`). Created 2026-09-23 at the first record.
 
+## 2026-10-01 — riir-ai Issue 1004 R2 LANDED: the fused GDN prework (conv1d + SiLU + q/k L2-norm + head expansion, ONE dispatch) — `929d31e`
+
+The MTPLX `gdn_prefill_prework.py` shape, built and measured (record
+[`.benchmarks/024_deltanet_prework_fused_ab.md`](.benchmarks/024_deltanet_prework_fused_ab.md);
+feature `deltanet_prework_fused`, opt-in, toggle `set_prefill_prework_fused`
+default-on-when-compiled). One workgroup per (token, head-slot) with 512 B
+threadgroup staging + the shared carry-update dispatch: **2 dispatches/layer
+vs the shipping chain's ~69** (P/64 chunked conv × 2 + batched expand), the
+`qkv_conv_b` intermediate never exists (~160 MB/layer less traffic @2048), and
+the `p % 64 == 0` fallback pathology is GONE (odd p no longer drops to P
+sequential dispatches).
+
+- **G1 bit-identical by construction** (conv/silu/sq_sum/guard op-order
+  verbatim; the compact→expanded broadcast inverted) — pinned in-module (6
+  shapes incl. odd p, p=1, p<ks−1; expanded + carry) and e2e: logits FNV
+  `0ec2396fd4627f29` @2048 / `f35280cb95f5d306` @4096, byte-for-byte R1's
+  recorded pins.
+- **Stage-isolated 7.29× @2048 / 9.13× @4096** (11 interleaved pairs,
+  bit-checked every pair) — the issue's ~0.5% traffic-only estimate
+  undercounted the real term: the shipping chain is DISPATCH-OVERHEAD-bound
+  (69 kernels ≈ 10 ms of the 11 ms wall @2048), not traffic-bound.
+- **e2e (production folded Bonsai-2 PQ2_0 file): four positive medians across
+  two runs — loaded 1.045×/1.018×, quiet-box confirmation 1.022×/1.034× —
+  all INSIDE the round spread → NOT promoted (the R1 standard); opt-in
+  stands.** The load asymmetry is mechanistic (dispatch elimination pays more
+  under CPU contention) and the sign cannot invert (strictly less work at
+  bit-identical output).
+- En route: `deltanet_chunked_cubecl`'s carry-update dispatch extracted to
+  `launch_conv1d_carry_update` (DRY — the chunked launcher and the fused
+  launcher now call the same helper); the chunked-conv tests re-run green.
+- The league re-pin bout stays the league loop's job — never a solo claim
+  (riir-ai Issue 1004's own law).
+
 ## 2026-10-01 — Issue 026 CLOSED (hygiene): the DQ phase-matrix instrument landed and ran — every axis INADMISSIBLE at the frozen corpora
 
 Plan 614 delivered the 2×2 phase-matrix instrument (`dq_fakequant` + the
