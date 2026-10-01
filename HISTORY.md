@@ -4,6 +4,14 @@ Durable records for resolved questions and closed lanes (the noise-reduction
 convention: the record lands here, hash-pinned; open work lives in `.issues/`
 and `.plans/`). Created 2026-09-23 at the first record.
 
+## 2026-10-01 — Issue 032 DONE: Metal CubeCL prefill computes Hadamard-folded (Bonsai-2) models (`5d0592f`)
+
+- **What was blocked:** `prefill_tokens_chunk` panicked on folded files whenever the cudarc whole-prefill lane was unavailable — always on macOS — so Metal could never batch-prefill the production Bonsai-2 PQ2_0 file (riir-ai Plan 602 Phase C / Plan 607 A4 named it the hard predecessor of every M3 prefill cell; neither owned the task).
+- **What landed:** batched twins of all 8 decode eager rotation sites (Plan 602 B3) in the CubeCL prefill body; dense a/b via the new bit-identical token-grid GEMV (`GemvBatchedCubeCL::launch_token_grid`); the non-macOS cudarc FFN block skipped for folded files (no rotation wiring); the refusal replaced by a marker/tables agreement assert.
+- **Gates (M3 Max, AC):** G1 vs folded decode-eager at P=64/100/128/512 — top-1 equal, top-5/top-20 1.00, worst rel err ≤ 1.5e-5 at the last position and one decode step later; revert probe (site 7 dropped) reds it (top-5 0.00); G3 pre-rotation `Q2_0` pin `99a0733c45a0e663` @2048 exact.
+- **First Bonsai-2 M3 prefill reading (unscored):** 100.9 tok/s @2048 batched vs 15.7 tok/s token-by-token = 6.44× time-to-first-token. The league cell stays riir-ai Plan 602 C4 (Ultra-gated).
+- **Test:** `crates/riir-infer-gpu/tests/g1_032_folded_prefill_metal.rs` (three `#[ignore]` arms: G1, pin, throughput).
+
 ## 2026-09-30 — Issue 054 Part 2 (reflex) REFUTED for this lane: the prefix-state handoff lead — laya is ModernBERT (bidirectional), not GDN; the coupling gate landed
 
 The reflex issue's Part 2 asked the riir-infer-laya owning session to evaluate
