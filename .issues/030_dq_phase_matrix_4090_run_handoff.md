@@ -216,3 +216,30 @@ control green for pf/dec/both, counters table rendering.
 above the new run's). Corpus/model blake3s verified frozen at launch. The
 v2 run re-validates the whole session's fix chain (a07fffd included) and
 writes the report only on full success.
+
+## 2026-10-01 ~07:50 +07 — ⚠ SESSION-CROSSING EVENT: the 06:40 v2 run was killed by the OTHER session; the LIVE run is now 07:46:38 on c2a22bb (log matrix2)
+
+Two sessions have been working this issue in overlapping windows on the
+same box (the twin-duplicate reconciliation above already records the code
+half). The RUN half also collided — destructively, and this note is the
+handoff so the next pickup (either session) sees one unambiguous state:
+
+- The 06:40 v2 re-run (task `dq614_matrix`) was **killed at ~07:35 by the
+  other session**, which misread the task's guarded retries as a zombie
+  respawner and swept ALL `dq_phase_matrix` processes + every dq614 task.
+  Nothing of that run survives past ~55 min in (mid base cells; its
+  appended log tail remains in `F:/wt/dq614-matrix.log`).
+- **THE LIVE RUN**: started 07:46:38 (pid 48904, schtasks run-once-delete
+  pattern under `dq614_m2.cmd`), code `c2a22bb` (the merged tip — 3cf9ae9's
+  clippy discharge + 23bbff5's phase-aware control + a07fffd's state reset
+  + every earlier fix), log `F:/wt/dq614-matrix2.log`, results
+  `DQ_OUT=F:\wt\dq614-matrix2`, marker `F:/wt/dq614-matrix2.done`. ETA
+  ~12:15 +07. **Do NOT launch another dq614 run before reading its marker.**
+- Lesson recorded for both sessions: the ALIVE-probe guard lives in the
+  `.cmd` files this box shares — before ANY sweep of dq_phase processes,
+  read the live task's `.cmd` log targets + the newest log's mtime to see
+  WHICH session's run is alive. Two sessions, one GPU: the exclusivity
+  probe protects the binary, not the schedule.
+- The FATAL-teardown hang the sibling recorded is real and unowned — it
+  explains several apparent "zombie" states this session swept; file as
+  its own issue before the next error-path run.
