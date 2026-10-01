@@ -29,7 +29,7 @@ Issue: `riir-infer/.issues/027_lut_grid_optimization_lane.md`. Master: `.researc
   - `quantize_row_q2_0_grid` — nearest-level encoder over any `Q2Grid` (decoded-space, ties → lowest code; error-equal to round-clamp on the uniform grid — tested).
   - **`dequantize_row_q2_0_grid` — the Q2_0A decode path.** The base wire decode hard-pins `(c−1)·d`; a non-uniform grid is UNCONSUMABLE without a decoder that knows the grid. This was the session's load-bearing finding (below).
 - [x] **T4 — `src/bin/lut_grid_solve.rs`** (feature `lut_grid`, `[[bin]]` row + feature in the same commit): pooled d²-weighted histogram → solve → 3-arm per-family weight-space eval + `--granularity` sweep + `--out` JSON.
-- [x] **T5 — run on both dense artifacts** (tables below; grids differ per model ⇒ per-model committed grids, which the BLAKE3 commitment already anticipates).
+- [x] **T5 — run on both dense artifacts** (tables below; grids differ per model ⇒ per-model committed grids, which the BLAKE3 commitment already anticipates). The T1 tensor-level-f32-scale axis is CLOSED at the proxy by the scale audit (verdict 5 below).
 - [ ] **T6 — model-level G1 (open):** ppl + per-family conditional retention with re-encoded weights (grid-aware decode / Q2_0A reader); the lane's GOAT gate.
 - [ ] **T7 — T4 kernel cost** (documented in Issue 027, no code): Q2_0A artifacts need the grid-aware decode kernel (a per-level scale multiply — the LUT form `lut16-pshufb-byte-expansion-at-stage` + one f16 scale), priced against the ternary sign-magnitude fast path. Rides Issue 028.
 
@@ -75,6 +75,7 @@ Granularity sweep (T0 rule, both models agree in shape):
 2. **Q2_0A (solved grid) beats T0 by +0.5..+1.2 dB per family at matched bpw** — the T2 bar (beat T0, not the ternary encoder) is met at the proxy.
 3. **Per-model grids differ materially** (l2: 0.621 vs 0.709) — one global grid would strand ~0.2 dB; commit per-model (the commitment mechanism already anticipates this).
 4. Finer scale granularity buys ~+0.7 dB per +0.125 bpw (per-64) — positive at the weight-space proxy; the wire-format cost side is T5's open question at the model level.
+5. **Tensor-level f32 scale axis: DEAD for gemma, negligible for MiniCPM.** The scale audit (riding the histogram pass) found: gemma's f16 rel-err of `d = amax/2` is EXACTLY ZERO — the scale rule halves an f16-native weight, which decrements the exponent and never rounds (the audit's own premise, that f16 rounding was the axis, is refuted by construction). MiniCPM shows 141/8.4M blocks where `amax/2` underflows f16 → the zero-block guard (plus subnormal rounding, max rel 0.333 near the floor) — REAL silent-zeroing warts, but the induced error is bounded by those blocks' own amax (~1e-7), negligible in MSE. Verdict: no second scale level on OUR formats; the paper's two-level scaling exists to repair their FP8-E4M3 block scale (3-bit mantissa), which we never had. The 141 underflow blocks are recorded as a robustness note, not an accuracy axis.
 
 ## The load-bearing finding: the wire decode pins the level ladder
 

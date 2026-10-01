@@ -53,6 +53,13 @@ struct SolveReport {
     /// BLAKE3 over (histogram geometry + counts, solved levels, stats) —
     /// the artifact commitment for the cross-box re-run diff.
     grid_digest_hex: String,
+    /// T1 tensor-level-f32-scale axis audit: f16 rounding of the block
+    /// scale. If max rel error is at the f16 floor and no block underflows,
+    /// the paper's second-level scale has nothing left to fix on OUR scales
+    /// (it exists to repair their FP8-E4M3 block scale).
+    scale_underflow_blocks: u64,
+    scale_rel_err_max: f64,
+    scale_rel_err_mean: f64,
     families: Vec<FamilyRow>,
     granularity: Vec<GranularityRow>,
 }
@@ -184,8 +191,17 @@ fn solve_one(path: &str, granularity_sweep: bool) -> Result<SolveReport> {
     // Mass-weighted by d² per element — the solver's objective is the
     // ENERGY-weighted MSE the round-trip SNR measures (see the
     // WeightHistogram doc for the measured unweighted-pool failure).
+    // Riding the same pass: the T1 tensor-level-f32-scale axis audit. The
+    // paper's second-level scale fixes their FP8-E4M3 block scale (3-bit
+    // mantissa); ours is already f16 (2^-11 relative), so the audit just
+    // has to show the f16 rounding of d is negligible against the
+    // quantization error (~|x|·0.25) and that no block underflows.
     let mut hist = WeightHistogram::new();
     let mut total_weights = 0u64;
+    let mut scale_underflow_blocks = 0u64;
+    let mut scale_rel_err_max = 0f64;
+    let mut scale_rel_err_sum = 0f64;
+    let mut scale_count = 0u64;
     for (name, _) in &eligible {
         let w = f16_tensor_to_f32(&gguf, name)?;
         for block in w.as_chunks::<Q2_0_BLOCK_SIZE>().0 {
@@ -196,6 +212,29 @@ fn solve_one(path: &str, granularity_sweep: bool) -> Result<SolveReport> {
             for &v in block {
                 hist.record_weighted((v / d) as f64, mass);
             }
+        }
+        // Scale audit over the same blocks (d from t0_block_scale is ALREADY
+        // the f16-rounded value; recover the exact amax/2 for the error).
+        for block in w.as_chunks::<Q2_0_BLOCK_SIZE>().0 {
+            let mut amax = 0f32;
+            for &v in block {
+                let a = v.abs();
+                if a > amax {
+                    amax = a;
+                }
+            }
+            if amax == 0.0 {
+                continue;
+            }
+            let d = f16::from_f32(amax / 2.0);
+            if d.to_f32() == 0.0 {
+                scale_underflow_blocks += 1;
+                continue;
+            }
+            let rel = ((d.to_f32() - amax / 2.0).abs() / (amax / 2.0)) as f64;
+            scale_rel_err_max = scale_rel_err_max.max(rel);
+            scale_rel_err_sum += rel;
+            scale_count += 1;
         }
         total_weights += w.len() as u64;
         eprintln!("[lut-grid] hist {name} ({} weights)", w.len());
@@ -307,6 +346,13 @@ fn solve_one(path: &str, granularity_sweep: bool) -> Result<SolveReport> {
         hist_mse_t0: stats.mse_start,
         hist_mse_solved: stats.mse_end,
         grid_digest_hex: hex(&digest),
+        scale_underflow_blocks,
+        scale_rel_err_max,
+        scale_rel_err_mean: if scale_count > 0 {
+            scale_rel_err_sum / scale_count as f64
+        } else {
+            0.0
+        },
         families: fam_rows,
         granularity,
     })
@@ -385,6 +431,17 @@ fn render_report(r: &SolveReport) -> String {
         r.hist_mse_solved,
         (1.0 - r.hist_mse_solved / r.hist_mse_t0) * 100.0,
         r.grid_digest_hex
+    ));
+    s.push_str(&format!(
+        "scale audit: f16 rel-err mean {:.3e} max {:.3e} (floor 2.4e-4) · underflow blocks {} — tensor-level f32 axis {}\n",
+        r.scale_rel_err_mean,
+        r.scale_rel_err_max,
+        r.scale_underflow_blocks,
+        if r.scale_underflow_blocks == 0 && r.scale_rel_err_max < 0.001 {
+            "DEAD at proxy (nothing for a second level to fix)"
+        } else {
+            "has material to repair — evaluate with/without"
+        }
     ));
     s.push_str("{:<28} {:>7} {:>14} {:>14} {:>14}  worst-tensor SNR\n");
     s.push_str(&format!(
