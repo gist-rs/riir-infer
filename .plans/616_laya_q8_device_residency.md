@@ -70,17 +70,28 @@ call at that point, not this plan's default.
 
 ## Phases
 
-### Phase 0 — measure the baseline (before any code)
+### Phase 0 — measure the baseline (before any code) — **EXECUTED 2026-10-02**
 
-- [ ] Device + host residency report at both postures (F16, q8-artifact):
-      sum the warm-map buffer lengths (`weights` map + `weight_t` entries)
-      and the host `Weights.data` total; print beside the existing
-      `q8_artifact_disclosure`. The plan's win figures become measured, not
-      estimated.
-- [ ] The dense-shape latency baseline under q8 (today: dequant-at-load +
-      MPS ON): the harness's per-suite p50/p99 rows for the three encoder
-      suites + typed, quoted into this plan — the number option (i) is
-      measured against in Phase 2.
+- [x] Device + host residency at both postures, measured from the artifact
+      headers + the warm-path set (`scripts/plan616_residency_probe.py`, the
+      derivation committed): each checkpoint carries **421,205,504 Q8_0
+      elements + 88,326 1D F16 elements**; device today (F32 widened) =
+      **1.685 GB per checkpoint**; device-resident Q8 + F32 small =
+      **0.448 GB (26.6%)** — a **3.76×** cut. Host (Phase 1) identical:
+      1.685 → 0.448 GB. Lane B's two-worker posture: **3.37 GB → 0.90 GB**.
+      (`tok_emb` is host-only today and stays host-only — not in either
+      figure; its 206 MB F32 host copy is a separate Phase 1+ candidate if
+      the gather ever moves on-device.)
+- [x] The dense-shape MPS baseline (`sgemm_mps_probe`, m3 Metal, load
+      2.18-2.31, ratios-only — the probe's own shared-box posture):
+      **geo-mean mps/narrow 0.770 (m106) · 0.783 (m188) · 0.703 (m317) ·
+      0.663 (m512) · 0.628 (m895) · 0.584 (m1700)** over the four real
+      projection shapes (qkv/o/mlp-up/mlp-down), correctness
+      bit-identical every cell. **Option (i)'s priced cost: −23%…−42%
+      GEMM time on the dense shapes MPS serves today.** The Phase 2 A/B
+      reads the fused-Q8 staging against exactly these cells (the staged B
+      bytes halve under Q8 — the memory-bound staging gets cheaper, which
+      is the mechanism that may partially offset the MPS loss).
 
 ### Phase 1 — host residency (cheap first rung, no kernel work)
 
