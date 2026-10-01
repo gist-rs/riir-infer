@@ -333,7 +333,7 @@ mod tests {
     /// and the digest is stable.
     #[test]
     fn solve_is_bit_identical_across_runs() {
-        let mut mk = || {
+        let mk = || {
             let mut h = WeightHistogram::new();
             for i in 0..10_000 {
                 h.record(((i * 2654435761u64 % 9973) as f64 / 9973.0 - 0.5) * 3.0);
