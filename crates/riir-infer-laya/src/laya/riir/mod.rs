@@ -44,6 +44,7 @@
 pub mod agent;
 pub mod backend;
 pub mod encoder;
+pub mod fake_quant;
 pub mod head;
 pub mod ops;
 pub mod weights;
@@ -74,3 +75,4 @@ pub mod cubecl;
 pub mod ane;
 
 pub use agent::{EncodedQuestion, RiirAgent};
+pub use fake_quant::{FakeQuantReport, WeightPosture};

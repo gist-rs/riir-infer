@@ -222,6 +222,11 @@ pub struct RiirAgent {
     /// `with_folds` pattern — pairing cancels between-round box drift);
     /// serving paths never touch it.
     head_defer_override: Option<bool>,
+    /// The weight-posture measurement record (instinct issue 018 Lane D1):
+    /// `Some` iff this agent loaded under [`WeightPosture::FakeQuantQ8`] —
+    /// what was quantized, what was skipped, the measured error. `None`
+    /// (the shipped posture) discloses nothing because nothing changed.
+    fake_quant: Option<super::fake_quant::FakeQuantReport>,
 }
 
 impl RiirAgent {
@@ -244,7 +249,28 @@ impl RiirAgent {
         ckpt: Checkpoint,
         device: DeviceKind,
     ) -> Result<Self> {
-        Self::load_inner(root, ckpt, None, device)
+        Self::load_inner(root, ckpt, None, device, super::fake_quant::WeightPosture::F16)
+    }
+
+    /// Load one checkpoint under an explicit WEIGHT posture (instinct
+    /// issue 018 Lane D1): the device comes from `LAYA_DEVICE` exactly as
+    /// [`Self::load`], and the checkpoint's >=2D tensors are fake-
+    /// quantized Q8_0 at load (quantize-then-dequantize, forward
+    /// unchanged). Measurement-only — serving paths never call this; the
+    /// posture is disclosed by [`Self::weight_posture`] and the returned
+    /// report, never inferred.
+    pub fn load_with_posture(
+        root: &std::path::Path,
+        ckpt: Checkpoint,
+        posture: super::fake_quant::WeightPosture,
+    ) -> Result<Self> {
+        Self::load_inner(
+            root,
+            ckpt,
+            None,
+            DeviceKind::from_env()?,
+            posture,
+        )
     }
 
     /// Load one checkpoint for the ANE posture (Plan 002 P1): the encoder
@@ -259,7 +285,13 @@ impl RiirAgent {
         ane_root: &std::path::Path,
         manifest_path: &std::path::Path,
     ) -> Result<Self> {
-        Self::load_inner(root, ckpt, Some((ane_root, manifest_path)), DeviceKind::Ane)
+        Self::load_inner(
+            root,
+            ckpt,
+            Some((ane_root, manifest_path)),
+            DeviceKind::Ane,
+            super::fake_quant::WeightPosture::F16,
+        )
     }
 
     fn load_inner(
@@ -267,6 +299,7 @@ impl RiirAgent {
         ckpt: Checkpoint,
         ane: Option<(&std::path::Path, &std::path::Path)>,
         device: DeviceKind,
+        posture: super::fake_quant::WeightPosture,
     ) -> Result<Self> {
         // The caller owns the device choice (env via [`Self::load`], the
         // explicit constructor, or the ANE lane); nothing here re-reads it.
@@ -290,6 +323,27 @@ impl RiirAgent {
 
         let tok = Tok::from_dir(&dir, name)?;
         let mut raw = super::weights::load(&dir.join("model.safetensors"), name)?;
+
+        // The weight posture (instinct issue 018 Lane D1): applied BEFORE
+        // the encoder/head split so every per-op lane sees the same
+        // quantized bytes. The ANE lane refuses — its layer weights live
+        // in the Core ML artifact, so a map-level transform would be a
+        // silent no-op wearing a quantized label.
+        let fake_quant = match posture {
+            super::fake_quant::WeightPosture::F16 => None,
+            super::fake_quant::WeightPosture::FakeQuantQ8 if ane_requested => {
+                return Err(LayaError::Config {
+                    checkpoint: name,
+                    detail: "fake-quant does not apply to the ANE lane — its layer weights \
+                             live in the Core ML artifact, not this map; refusing rather \
+                             than labeling an unquantized forward"
+                        .into(),
+                });
+            }
+            super::fake_quant::WeightPosture::FakeQuantQ8 => {
+                Some(super::fake_quant::fake_quant_q8_map(&mut raw))
+            }
+        };
 
         let (enc, backend): (EncoderStack, Box<dyn Backend>) = if ane_requested {
             #[cfg(all(target_os = "macos", feature = "laya-riir-ane"))]
@@ -396,6 +450,7 @@ impl RiirAgent {
             cfg: agent_cfg,
             ckpt: name,
             head_defer_override: None,
+            fake_quant,
         })
     }
 
@@ -425,6 +480,16 @@ impl RiirAgent {
     /// the previous override so a harness can restore it.
     pub fn set_head_defer_override(&mut self, defer: Option<bool>) -> Option<bool> {
         std::mem::replace(&mut self.head_defer_override, defer)
+    }
+
+    /// The weight posture this agent loaded under (instinct issue 018
+    /// Lane D1) with its measurement report — `None` = the shipped F16
+    /// posture, `Some((posture, report))` = fake-quant (the report names
+    /// every skipped tensor and the measured error).
+    pub fn weight_posture(&self) -> Option<(super::fake_quant::WeightPosture, &super::fake_quant::FakeQuantReport)> {
+        self.fake_quant
+            .as_ref()
+            .map(|r| (super::fake_quant::WeightPosture::FakeQuantQ8, r))
     }
 
     /// The largest sequence length the ANE lane can serve (its biggest
