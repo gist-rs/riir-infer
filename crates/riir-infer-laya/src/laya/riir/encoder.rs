@@ -16,21 +16,22 @@ use super::super::config::EncoderConfig;
 use super::super::{LayaError, Result};
 use super::backend::{AttnScratch, Backend};
 use super::ops;
-use super::weights::Weights;
+use super::weights::{Weight2D, Weights};
 
-/// One encoder layer's weights (all f32, bias-free — taken out of the
-/// parsed map, never cloned).
+/// One encoder layer's weights (bias-free — taken out of the parsed map,
+/// never cloned; the four GEMM weights carry as [`Weight2D`] so the q8
+/// artifact posture retains their raw bytes, Plan 616 Phase 1).
 struct Layer {
     /// `attn_norm` — `None` for layer 0 (the reference's `nn.Identity`).
     attn_norm: Option<Vec<f32>>,
     /// `attn.Wqkv.weight` [3d, d].
-    wqkv: Vec<f32>,
+    wqkv: Weight2D,
     /// `attn.Wo.weight` [d, d].
-    wo: Vec<f32>,
+    wo: Weight2D,
     /// `mlp.Wi.weight` [2I, d] — fused (input, gate).
-    wi: Vec<f32>,
+    wi: Weight2D,
     /// `mlp.Wo.weight` [d, I].
-    mlp_wo: Vec<f32>,
+    mlp_wo: Weight2D,
     /// `mlp_norm.weight` [d].
     mlp_norm: Vec<f32>,
     /// Sliding-window layer?
@@ -122,12 +123,12 @@ impl Encoder {
             }
             // Shapes MIRROR `forward`'s own `matmul_w` calls — a warm at
             // the wrong shape would build a transpose the hot path then
-            // misses on, so these are asserted inside `weight_t_buf`
-            // (`n · k == len`) rather than trusted.
-            b.warm_weight_2d(&layer.wqkv, 3 * d, d);
-            b.warm_weight_2d(&layer.wo, d, d);
-            b.warm_weight_2d(&layer.wi, 2 * i_sz, d);
-            b.warm_weight_2d(&layer.mlp_wo, d, i_sz);
+            // misses on, so these are asserted inside `weight_t_buf` /
+            // `weight_t_buf_q8` (`n · k == len`) rather than trusted.
+            layer.wqkv.warm_2d(b, 3 * d, d);
+            layer.wo.warm_2d(b, d, d);
+            layer.wi.warm_2d(b, 2 * i_sz, d);
+            layer.mlp_wo.warm_2d(b, d, i_sz);
             b.warm_weight(&layer.mlp_norm);
         }
         b.warm_weight(&self.final_norm);
@@ -161,26 +162,27 @@ impl Encoder {
                 ),
             });
         }
-        let tok_emb = tok_w.data;
-        let mut take = |name: &str| -> Result<Vec<f32>> {
-            map.remove(name)
-                .map(|w| w.data)
-                .ok_or_else(|| missing(name))
-        };
+        let tok_emb = tok_w.into_f32();
+        let mut take =
+            |name: &str| -> Result<Weights> { map.remove(name).ok_or_else(|| missing(name)) };
         let mut layers = Vec::with_capacity(cfg.layers);
         for idx in 0..cfg.layers {
             let attn_norm = if idx == 0 {
                 None
             } else {
-                Some(take(&format!("encoder.layers.{idx}.attn_norm.weight"))?)
+                Some(take(&format!("encoder.layers.{idx}.attn_norm.weight"))?.into_f32())
             };
             layers.push(Layer {
                 attn_norm,
-                wqkv: take(&format!("encoder.layers.{idx}.attn.Wqkv.weight"))?,
-                wo: take(&format!("encoder.layers.{idx}.attn.Wo.weight"))?,
-                wi: take(&format!("encoder.layers.{idx}.mlp.Wi.weight"))?,
-                mlp_wo: take(&format!("encoder.layers.{idx}.mlp.Wo.weight"))?,
-                mlp_norm: take(&format!("encoder.layers.{idx}.mlp_norm.weight"))?,
+                wqkv: Weight2D::from_weights(take(&format!(
+                    "encoder.layers.{idx}.attn.Wqkv.weight"
+                ))?),
+                wo: Weight2D::from_weights(take(&format!("encoder.layers.{idx}.attn.Wo.weight"))?),
+                wi: Weight2D::from_weights(take(&format!("encoder.layers.{idx}.mlp.Wi.weight"))?),
+                mlp_wo: Weight2D::from_weights(take(&format!(
+                    "encoder.layers.{idx}.mlp.Wo.weight"
+                ))?),
+                mlp_norm: take(&format!("encoder.layers.{idx}.mlp_norm.weight"))?.into_f32(),
                 sliding: cfg.sliding[idx],
             });
         }
@@ -188,9 +190,9 @@ impl Encoder {
             cfg,
             ckpt,
             tok_emb,
-            emb_norm: take("encoder.embeddings.norm.weight")?,
+            emb_norm: take("encoder.embeddings.norm.weight")?.into_f32(),
             layers,
-            final_norm: take("encoder.final_norm.weight")?,
+            final_norm: take("encoder.final_norm.weight")?.into_f32(),
         })
     }
 
@@ -282,10 +284,10 @@ impl Encoder {
         let l = self.layers.get(li)?;
         Some(LayerWeights {
             attn_norm: l.attn_norm.as_deref(),
-            wqkv: &l.wqkv,
-            wo: &l.wo,
-            wi: &l.wi,
-            mlp_wo: &l.mlp_wo,
+            wqkv: l.wqkv.wide(),
+            wo: l.wo.wide(),
+            wi: l.wi.wide(),
+            mlp_wo: l.mlp_wo.wide(),
             mlp_norm: &l.mlp_norm,
             sliding: l.sliding,
         })
@@ -381,7 +383,7 @@ impl Encoder {
             // + head merge in ONE op per sequence — the sequence sees its
             // own rows and window exactly as the unbatched forward).
             sc.qkv.resize(total * 3 * d, 0.0);
-            b.matmul_w(&sc.x, total, d, &layer.wqkv, 3 * d, &mut sc.qkv);
+            layer.wqkv.matmul_w(b, &sc.x, total, d, 3 * d, &mut sc.qkv);
             let rope = if layer.sliding {
                 rope_slide.get_or_insert_with(|| {
                     self.rope_tables_for(seqs, hd, self.cfg.rope_theta_slide)
@@ -415,7 +417,7 @@ impl Encoder {
                 );
                 off += seq;
             }
-            b.matmul_w_accum(&sc.merged, total, d, &layer.wo, d, &mut h);
+            layer.wo.matmul_w_accum(b, &sc.merged, total, d, d, &mut h);
 
             // MLP: fused Wi → gelu(input) · gate → Wo — whole packed
             // buffers, unchanged op order. The GLU epilogue rides the
@@ -425,8 +427,12 @@ impl Encoder {
             // pair by construction).
             b.layer_norm_nobias_into(&h, &layer.mlp_norm, eps, d, &mut sc.sq, &mut sc.xn);
             sc.act.resize(total * i_sz, 0.0);
-            b.matmul_w_glu(&sc.xn, total, d, &layer.wi, i_sz, &mut sc.act);
-            b.matmul_w_accum(&sc.act, total, i_sz, &layer.mlp_wo, d, &mut h);
+            layer
+                .wi
+                .matmul_w_glu(b, &sc.xn, total, d, i_sz, &mut sc.act);
+            layer
+                .mlp_wo
+                .matmul_w_accum(b, &sc.act, total, i_sz, d, &mut h);
             if let Some(cap) = capture.as_mut() {
                 cap.emit(b, CaptureStage::AfterLayer(li), &h, total, d)?;
             }
@@ -540,7 +546,7 @@ impl Encoder {
             sink(&format!("L{li}.x"), &pb);
 
             sc.qkv.resize(total * 3 * d, 0.0);
-            b.matmul_w(&sc.x, total, d, &layer.wqkv, 3 * d, &mut sc.qkv);
+            layer.wqkv.matmul_w(b, &sc.x, total, d, 3 * d, &mut sc.qkv);
             dl(b, &sc.qkv, &mut pb);
             sink(&format!("L{li}.qkv"), &pb);
 
@@ -591,16 +597,20 @@ impl Encoder {
                 sink(&format!("L{li}.sin"), &pb);
             }
 
-            b.matmul_w_accum(&sc.merged, total, d, &layer.wo, d, &mut h);
+            layer.wo.matmul_w_accum(b, &sc.merged, total, d, d, &mut h);
             dl(b, &h, &mut pb);
             sink(&format!("L{li}.h_attn"), &pb);
 
             b.layer_norm_nobias_into(&h, &layer.mlp_norm, eps, d, &mut sc.sq, &mut sc.xn);
             sc.act.resize(total * i_sz, 0.0);
-            b.matmul_w_glu(&sc.xn, total, d, &layer.wi, i_sz, &mut sc.act);
+            layer
+                .wi
+                .matmul_w_glu(b, &sc.xn, total, d, i_sz, &mut sc.act);
             dl(b, &sc.act, &mut pb);
             sink(&format!("L{li}.act"), &pb);
-            b.matmul_w_accum(&sc.act, total, i_sz, &layer.mlp_wo, d, &mut h);
+            layer
+                .mlp_wo
+                .matmul_w_accum(b, &sc.act, total, i_sz, d, &mut h);
             dl(b, &h, &mut pb);
             sink(&format!("L{li}.h_mlp"), &pb);
         }

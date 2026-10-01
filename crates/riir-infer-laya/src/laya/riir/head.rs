@@ -35,49 +35,54 @@ fn bits_sum(v: &[f32]) -> u32 {
 }
 use super::super::{LayaError, Result};
 use super::backend::Backend;
-use super::weights::Weights;
+use super::weights::{Weight2D, Weights};
 
 /// One pre-norm transformer-encoder layer of the head (torch
 /// `nn.TransformerEncoderLayer`, `norm_first`, `batch_first`, `ReLU` FF).
+/// The four GEMM weights carry as [`Weight2D`] (the q8 artifact posture
+/// retains their raw bytes — Plan 616 Phase 1; they are tiny, but the
+/// path is ONE code path, never a special case).
 struct HeadLayer {
     /// `self_attn.in_proj_weight` [3d, d] — torch layout: Q rows, then K
     /// rows, then V rows.
-    in_proj_w: Vec<f32>,
+    in_proj_w: Weight2D,
     in_proj_b: Vec<f32>,
     /// `self_attn.out_proj`.
-    out_w: Vec<f32>,
+    out_w: Weight2D,
     out_b: Vec<f32>,
     n1w: Vec<f32>,
     n1b: Vec<f32>,
     n2w: Vec<f32>,
     n2b: Vec<f32>,
     /// `linear1` [4d, d] (`ReLU` between).
-    l1w: Vec<f32>,
+    l1w: Weight2D,
     l1b: Vec<f32>,
     /// `linear2` [d, 4d].
-    l2w: Vec<f32>,
+    l2w: Weight2D,
     l2b: Vec<f32>,
 }
 
 /// The decision head (our tensors).
 pub struct Head {
     layers: Vec<HeadLayer>,
-    /// `type_emb.weight` [3, d].
+    /// `type_emb.weight` [3, d] — widened f32 (its rows feed
+    /// `add_bias_row` host→device; a Q8 artifact payload widens once
+    /// here and drops its raw bytes).
     type_emb: Vec<f32>,
     /// `scorer.0` `LayerNorm`.
     s0w: Vec<f32>,
     s0b: Vec<f32>,
     /// `scorer.1` Linear(d→d) + GELU.
-    s1w: Vec<f32>,
+    s1w: Weight2D,
     s1b: Vec<f32>,
     /// `scorer.3` Linear(d→1).
-    s3w: Vec<f32>,
+    s3w: Weight2D,
     s3b: Vec<f32>,
     /// `act_head.0` Linear(d+4→256) + GELU.
-    a0w: Vec<f32>,
+    a0w: Weight2D,
     a0b: Vec<f32>,
     /// `act_head.2` Linear(256→2).
-    a2w: Vec<f32>,
+    a2w: Weight2D,
     a2b: Vec<f32>,
     eps: f32,
     /// The head's hidden size (the encoder's `d` — the pinned checkpoints
@@ -106,9 +111,9 @@ impl Head {
         ScorerTensors {
             s0w: self.s0w.clone(),
             s0b: self.s0b.clone(),
-            s1w: self.s1w.clone(),
+            s1w: self.s1w.to_dense(),
             s1b: self.s1b.clone(),
-            s3w: self.s3w.clone(),
+            s3w: self.s3w.to_dense(),
             s3b: self.s3b.clone(),
             d: self.d,
             eps: self.eps,
@@ -234,15 +239,15 @@ impl Head {
         for layer in &self.layers {
             b.warm_weight(&layer.n1w);
             b.warm_weight(&layer.n1b);
-            b.warm_weight_2d(&layer.in_proj_w, 3 * d, d);
+            layer.in_proj_w.warm_2d(b, 3 * d, d);
             b.warm_weight(&layer.in_proj_b);
-            b.warm_weight_2d(&layer.out_w, d, d);
+            layer.out_w.warm_2d(b, d, d);
             b.warm_weight(&layer.out_b);
             b.warm_weight(&layer.n2w);
             b.warm_weight(&layer.n2b);
-            b.warm_weight_2d(&layer.l1w, 4 * d, d);
+            layer.l1w.warm_2d(b, 4 * d, d);
             b.warm_weight(&layer.l1b);
-            b.warm_weight_2d(&layer.l2w, d, 4 * d);
+            layer.l2w.warm_2d(b, d, 4 * d);
             b.warm_weight(&layer.l2b);
         }
         for row in self.type_emb.chunks_exact(self.d) {
@@ -250,13 +255,13 @@ impl Head {
         }
         b.warm_weight(&self.s0w);
         b.warm_weight(&self.s0b);
-        b.warm_weight_2d(&self.s1w, d, d);
+        self.s1w.warm_2d(b, d, d);
         b.warm_weight(&self.s1b);
-        b.warm_weight_2d(&self.s3w, 1, d);
+        self.s3w.warm_2d(b, 1, d);
         b.warm_weight(&self.s3b);
-        b.warm_weight_2d(&self.a0w, 256, d + 4);
+        self.a0w.warm_2d(b, 256, d + 4);
         b.warm_weight(&self.a0b);
-        b.warm_weight_2d(&self.a2w, 2, 256);
+        self.a2w.warm_2d(b, 2, 256);
         b.warm_weight(&self.a2b);
     }
 
@@ -273,41 +278,42 @@ impl Head {
             file: name.to_string(),
             detail: "head tensor missing from checkpoint".into(),
         };
-        let mut take = |name: &str| -> Result<Vec<f32>> {
-            map.remove(name)
-                .map(|w| w.data)
-                .ok_or_else(|| missing(name))
-        };
+        let mut take =
+            |name: &str| -> Result<Weights> { map.remove(name).ok_or_else(|| missing(name)) };
         let mut layers = Vec::with_capacity(2);
         for idx in 0..2 {
             layers.push(HeadLayer {
-                in_proj_w: take(&format!("head.layers.{idx}.self_attn.in_proj_weight"))?,
-                in_proj_b: take(&format!("head.layers.{idx}.self_attn.in_proj_bias"))?,
-                out_w: take(&format!("head.layers.{idx}.self_attn.out_proj.weight"))?,
-                out_b: take(&format!("head.layers.{idx}.self_attn.out_proj.bias"))?,
-                n1w: take(&format!("head.layers.{idx}.norm1.weight"))?,
-                n1b: take(&format!("head.layers.{idx}.norm1.bias"))?,
-                n2w: take(&format!("head.layers.{idx}.norm2.weight"))?,
-                n2b: take(&format!("head.layers.{idx}.norm2.bias"))?,
-                l1w: take(&format!("head.layers.{idx}.linear1.weight"))?,
-                l1b: take(&format!("head.layers.{idx}.linear1.bias"))?,
-                l2w: take(&format!("head.layers.{idx}.linear2.weight"))?,
-                l2b: take(&format!("head.layers.{idx}.linear2.bias"))?,
+                in_proj_w: Weight2D::from_weights(take(&format!(
+                    "head.layers.{idx}.self_attn.in_proj_weight"
+                ))?),
+                in_proj_b: take(&format!("head.layers.{idx}.self_attn.in_proj_bias"))?.into_f32(),
+                out_w: Weight2D::from_weights(take(&format!(
+                    "head.layers.{idx}.self_attn.out_proj.weight"
+                ))?),
+                out_b: take(&format!("head.layers.{idx}.self_attn.out_proj.bias"))?.into_f32(),
+                n1w: take(&format!("head.layers.{idx}.norm1.weight"))?.into_f32(),
+                n1b: take(&format!("head.layers.{idx}.norm1.bias"))?.into_f32(),
+                n2w: take(&format!("head.layers.{idx}.norm2.weight"))?.into_f32(),
+                n2b: take(&format!("head.layers.{idx}.norm2.bias"))?.into_f32(),
+                l1w: Weight2D::from_weights(take(&format!("head.layers.{idx}.linear1.weight"))?),
+                l1b: take(&format!("head.layers.{idx}.linear1.bias"))?.into_f32(),
+                l2w: Weight2D::from_weights(take(&format!("head.layers.{idx}.linear2.weight"))?),
+                l2b: take(&format!("head.layers.{idx}.linear2.bias"))?.into_f32(),
             });
         }
         Ok(Self {
             layers,
-            type_emb: take("type_emb.weight")?,
-            s0w: take("scorer.0.weight")?,
-            s0b: take("scorer.0.bias")?,
-            s1w: take("scorer.1.weight")?,
-            s1b: take("scorer.1.bias")?,
-            s3w: take("scorer.3.weight")?,
-            s3b: take("scorer.3.bias")?,
-            a0w: take("act_head.0.weight")?,
-            a0b: take("act_head.0.bias")?,
-            a2w: take("act_head.2.weight")?,
-            a2b: take("act_head.2.bias")?,
+            type_emb: take("type_emb.weight")?.into_f32(),
+            s0w: take("scorer.0.weight")?.into_f32(),
+            s0b: take("scorer.0.bias")?.into_f32(),
+            s1w: Weight2D::from_weights(take("scorer.1.weight")?),
+            s1b: take("scorer.1.bias")?.into_f32(),
+            s3w: Weight2D::from_weights(take("scorer.3.weight")?),
+            s3b: take("scorer.3.bias")?.into_f32(),
+            a0w: Weight2D::from_weights(take("act_head.0.weight")?),
+            a0b: take("act_head.0.bias")?.into_f32(),
+            a2w: Weight2D::from_weights(take("act_head.2.weight")?),
+            a2b: take("act_head.2.bias")?.into_f32(),
             eps,
             d,
         })
@@ -388,7 +394,9 @@ impl Head {
             b.layer_norm_nobias_into(x, &layer.n1w, self.eps, d, &mut sc.sq, &mut sc.nx);
             b.add_bias_row(&mut sc.nx, d, &layer.n1b);
             HeadScratch::fit(&mut sc.qkv, seq * 3 * d);
-            b.matmul_w(&sc.nx, seq, d, &layer.in_proj_w, 3 * d, &mut sc.qkv);
+            layer
+                .in_proj_w
+                .matmul_w(b, &sc.nx, seq, d, 3 * d, &mut sc.qkv);
             b.add_bias_row(&mut sc.qkv, 3 * d, &layer.in_proj_b);
             HeadScratch::fit(&mut sc.q, seq * d);
             HeadScratch::fit(&mut sc.k, seq * d);
@@ -408,7 +416,9 @@ impl Head {
             HeadScratch::fit(&mut sc.merged, seq * d);
             b.merge_heads(&sc.ctx, seq, heads, hd, &mut sc.merged);
             HeadScratch::fit(&mut sc.attn_out, seq * d);
-            b.matmul_w(&sc.merged, seq, d, &layer.out_w, d, &mut sc.attn_out);
+            layer
+                .out_w
+                .matmul_w(b, &sc.merged, seq, d, d, &mut sc.attn_out);
             b.add_bias_row(&mut sc.attn_out, d, &layer.out_b);
             b.add(x, 0, &sc.attn_out, 0, x.len());
 
@@ -417,11 +427,11 @@ impl Head {
             b.layer_norm_nobias_into(x, &layer.n2w, self.eps, d, &mut sc.sq, &mut sc.nx2);
             b.add_bias_row(&mut sc.nx2, d, &layer.n2b);
             HeadScratch::fit(&mut sc.ff, seq * 4 * d);
-            b.matmul_w(&sc.nx2, seq, d, &layer.l1w, 4 * d, &mut sc.ff);
+            layer.l1w.matmul_w(b, &sc.nx2, seq, d, 4 * d, &mut sc.ff);
             b.add_bias_row(&mut sc.ff, 4 * d, &layer.l1b);
             b.relu(&mut sc.ff);
             HeadScratch::fit(&mut sc.ff2, seq * d);
-            b.matmul_w(&sc.ff, seq, 4 * d, &layer.l2w, d, &mut sc.ff2);
+            layer.l2w.matmul_w(b, &sc.ff, seq, 4 * d, d, &mut sc.ff2);
             b.add_bias_row(&mut sc.ff2, d, &layer.l2b);
             b.add(x, 0, &sc.ff2, 0, x.len());
         }
@@ -454,11 +464,12 @@ impl Head {
         b.layer_norm_nobias_into(rows, &self.s0w, self.eps, d, &mut sc.sq, &mut sc.s);
         b.add_bias_row(&mut sc.s, d, &self.s0b);
         HeadScratch::fit(&mut sc.s1, k_opts * d);
-        b.matmul_w(&sc.s, k_opts, d, &self.s1w, d, &mut sc.s1);
+        self.s1w.matmul_w(b, &sc.s, k_opts, d, d, &mut sc.s1);
         b.add_bias_row(&mut sc.s1, d, &self.s1b);
         b.gelu_erf(&mut sc.s1);
         HeadScratch::fit(&mut sc.logits_buf, k_opts); // [k, 1] row-major IS [k]
-        b.matmul_w(&sc.s1, k_opts, d, &self.s3w, 1, &mut sc.logits_buf);
+        self.s3w
+            .matmul_w(b, &sc.s1, k_opts, d, 1, &mut sc.logits_buf);
         b.add_bias_row(&mut sc.logits_buf, 1, &self.s3b);
         Ok(())
     }
@@ -516,11 +527,12 @@ impl Head {
         sc.act_in[..d].copy_from_slice(&sc.cls);
         sc.act_in[d..].copy_from_slice(&feats);
         HeadScratch::fit(&mut sc.a, 256);
-        b.matmul_w(&sc.act_in, 1, d + 4, &self.a0w, 256, &mut sc.a);
+        self.a0w.matmul_w(b, &sc.act_in, 1, d + 4, 256, &mut sc.a);
         b.add_bias_row(&mut sc.a, 256, &self.a0b);
         b.gelu_erf(&mut sc.a);
         HeadScratch::fit(&mut sc.act_logits_buf, 2);
-        b.matmul_w(&sc.a, 1, 256, &self.a2w, 2, &mut sc.act_logits_buf);
+        self.a2w
+            .matmul_w(b, &sc.a, 1, 256, 2, &mut sc.act_logits_buf);
         b.add_bias_row(&mut sc.act_logits_buf, 2, &self.a2b);
         let mut act_logits = vec![0f32; 2];
         b.download_into(&sc.act_logits_buf, &mut act_logits);

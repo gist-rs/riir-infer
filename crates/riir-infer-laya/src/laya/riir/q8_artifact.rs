@@ -21,7 +21,7 @@
 use std::path::{Path, PathBuf};
 
 use super::super::{LayaError, Result};
-use super::fake_quant::{q8_quant_of, q8_scale_bits, q8_scale_f32, BLOCK};
+use super::fake_quant::{BLOCK, q8_quant_of, q8_scale_bits, q8_scale_f32};
 use super::weights::{self, f32_to_f16_bits};
 
 /// The derived artifact's path under a checkpoint dir.
@@ -64,7 +64,7 @@ pub fn convert_checkpoint(dir: &Path) -> Result<Q8ConvertReport> {
         if w.shape.len() < 2 {
             skipped.push((*tensor_name).clone());
             let mut data = Vec::with_capacity(numel * 2);
-            for &v in &w.data {
+            for &v in w.wide_f32() {
                 data.extend_from_slice(&f32_to_f16_bits(v).to_le_bytes());
             }
             q8_bytes += data.len() as u64;
@@ -74,7 +74,7 @@ pub fn convert_checkpoint(dir: &Path) -> Result<Q8ConvertReport> {
         quantized_tensors += 1;
         quantized_elements += numel;
         let mut data = Vec::with_capacity(numel / BLOCK * 34 + 34);
-        for block in w.data.chunks(BLOCK) {
+        for block in w.wide_f32().chunks(BLOCK) {
             let amax = block.iter().fold(0.0f32, |m, &x| m.max(x.abs()));
             let bits = q8_scale_bits(amax);
             data.extend_from_slice(&bits.to_le_bytes());
@@ -113,9 +113,12 @@ pub fn convert_checkpoint(dir: &Path) -> Result<Q8ConvertReport> {
     // PROOF before commit: read the serialized artifact back through the
     // LOADER's own path and require byte-identity with the in-memory
     // fake-quant of the same weights. This is the adoption's
-    // no-numerics-change evidence, produced on the real bytes.
+    // no-numerics-change evidence, produced on the real bytes. The
+    // read-back's >=2D payloads are RETAINED Q8 (Plan 616 Phase 1) — the
+    // comparison resolves both sides through the same widen arithmetic.
     let mut expect_map = f16_map;
-    let _expect_rep = super::fake_quant::fake_quant_q8_map(&mut expect_map);
+    let _expect_rep =
+        super::fake_quant::fake_quant_q8_map(&mut expect_map).map_err(LayaError::Runtime)?;
     let got_map = weights::from_bytes(&out_bytes, "q8-convert-verify")?;
     if got_map.len() != expect_map.len() {
         return Err(LayaError::Pin {
@@ -136,14 +139,19 @@ pub fn convert_checkpoint(dir: &Path) -> Result<Q8ConvertReport> {
                 detail: format!("tensor {tensor_name} missing from the read-back"),
             });
         };
-        if got_w.shape != expect_w.shape || got_w.data.len() != expect_w.data.len() {
+        if got_w.shape != expect_w.shape || got_w.numel() != expect_w.numel() {
             return Err(LayaError::Pin {
                 checkpoint: "q8-convert",
                 file: "model.q8.safetensors".into(),
                 detail: format!("tensor {tensor_name} shape drift"),
             });
         }
-        for (i, (g, e)) in got_w.data.iter().zip(&expect_w.data).enumerate() {
+        for (i, (g, e)) in got_w
+            .wide_f32()
+            .iter()
+            .zip(expect_w.wide_f32().iter())
+            .enumerate()
+        {
             if g.to_bits() != e.to_bits() {
                 return Err(LayaError::Pin {
                     checkpoint: "q8-convert",

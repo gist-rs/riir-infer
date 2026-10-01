@@ -535,8 +535,11 @@ impl AneEncoder {
             file: name.to_string(),
             detail: "tensor missing from checkpoint".into(),
         })?;
+        // The ANE posture refuses the q8 variant at load (agent.rs), so
+        // this payload is always widened F32 — the resolution below is a
+        // compile-shaped no-op on the F16 file.
         let table_f16: Vec<u16> = tok
-            .data
+            .wide_f32()
             .iter()
             .map(|v| super::weights::f32_to_f16_bits(*v))
             .collect();
@@ -1177,9 +1180,15 @@ mod fetch_tests {
         write_manifest(&root, json);
         let manifest = AneManifest::load(&root.join("manifest.json"))
             .expect("loads with a foreign non-bucket row present");
-        assert!(manifest.artifacts.contains_key("en/L8"), "artifact row parsed");
+        assert!(
+            manifest.artifacts.contains_key("en/L8"),
+            "artifact row parsed"
+        );
         assert!(manifest.entry("en", 8).is_ok(), "bucket entry resolves");
-        assert!(manifest.entry("en", 128).is_err(), "absent bucket still errors");
+        assert!(
+            manifest.entry("en", 128).is_err(),
+            "absent bucket still errors"
+        );
         assert!(
             !manifest.artifacts.contains_key("en/table_e8"),
             "foreign row not admitted as an artifact"

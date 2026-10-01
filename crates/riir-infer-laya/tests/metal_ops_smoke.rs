@@ -41,6 +41,28 @@ use std::sync::{Mutex, MutexGuard, OnceLock};
 
 use riir_infer_laya::laya::riir::backend::{Backend, Cpu};
 use riir_infer_laya::laya::riir::metal::Metal;
+use riir_infer_laya::laya::riir::weights::RawQ8;
+
+/// Serialize fake-quantized values into the raw Q8_0 block layout (the
+/// converter's own block loop) — the Q8 arms' fixture.
+fn q8_bytes_for(data: &[f32]) -> Vec<u8> {
+    use riir_infer_laya::laya::riir::fake_quant::{
+        BLOCK, fake_quant_q8, q8_quant_of, q8_scale_bits, q8_scale_f32,
+    };
+    let mut q = data.to_vec();
+    fake_quant_q8(&mut q);
+    let mut out = Vec::new();
+    for block in q.chunks(BLOCK) {
+        let amax = block.iter().fold(0.0f32, |m, &x| m.max(x.abs()));
+        let bits = q8_scale_bits(amax);
+        let d = q8_scale_f32(bits);
+        out.extend_from_slice(&bits.to_le_bytes());
+        for &x in block {
+            out.push(q8_quant_of(x, d) as u8);
+        }
+    }
+    out
+}
 
 /// Serialize test BODIES, never instances: hold the lock, build this
 /// test's own backend, drop both at body end (locals drop in reverse
@@ -139,11 +161,55 @@ fn metal_ops_match_cpu_op_by_op() {
         let mut wm = vec![0f32; mm * n];
         c.matmul_w(&a, mm, k, &w, n, &mut wc);
         m.matmul_w(&a, mm, k, &w, n, &mut wm);
-        report(
-            &format!("matmul_w {mm}x{k}x{n}"),
-            &wc,
-            &sync_out(&m, &wm),
-            1e-3,
+        let dense = sync_out(&m, &wm);
+        report(&format!("matmul_w {mm}x{k}x{n}"), &wc, &dense, 1e-3);
+
+        // The Q8 twin (plan 616 Phase 1): the same weight serialized to
+        // RAW Q8_0 blocks; the DENSE reference runs on the DECODED values
+        // (`raw.wide()` — the f32 the carrier holds). The BIT-identity
+        // pair is Metal-q8 vs Metal-dense — the same dispatch tree, the
+        // same staged tile values, only the weight carrier differs — so
+        // the load kernel is proven against the host widen on-device.
+        // Metal vs CPU stays at the file's tolerance (the
+        // accumulation-order budget this file already prices).
+        let q8 = q8_bytes_for(&w);
+        let raw = RawQ8::new(n * k, q8).expect("blocked layout");
+        let wide = raw.wide().to_vec();
+        let mut wd = vec![0f32; mm * n];
+        m.matmul_w(&a, mm, k, &wide, n, &mut wd);
+        let dense_q8 = sync_out(&m, &wd);
+        let mut wqm = vec![0f32; mm * n];
+        m.begin_pass();
+        m.matmul_w_q8(&a, mm, k, &raw, n, &mut wqm);
+        let got = sync_out(&m, &wqm);
+        assert_eq!(
+            dense_q8, got,
+            "matmul_w_q8 {mm}x{k}x{n} must be bit-identical to the f32 carrier"
+        );
+        let mut wq = vec![0f32; mm * n];
+        c.matmul_w(&a, mm, k, &wide, n, &mut wq);
+        report(&format!("matmul_w_q8 vs cpu {mm}x{k}x{n}"), &wq, &got, 1e-3);
+    }
+    {
+        // The k-tail shape (plan 616 Phase 1): k % 32 != 0 walks the flat
+        // tail block — the a0w class ([256, d+4]). The dense reference is
+        // the DECODED values (the f32 the carrier holds).
+        let (mm, k, n) = (5usize, 100usize, 33usize);
+        m.begin_pass();
+        let a = vec_of(mm * k);
+        let w = vec_of(n * k);
+        let q8 = q8_bytes_for(&w);
+        let raw = RawQ8::new(n * k, q8).expect("blocked layout");
+        let wide = raw.wide().to_vec();
+        let mut wd = vec![0f32; mm * n];
+        m.matmul_w(&a, mm, k, &wide, n, &mut wd);
+        let dense = sync_out(&m, &wd);
+        let mut wqm = vec![0f32; mm * n];
+        m.matmul_w_q8(&a, mm, k, &raw, n, &mut wqm);
+        let got = sync_out(&m, &wqm);
+        assert_eq!(
+            dense, got,
+            "matmul_w_q8 k-tail must be bit-identical to the f32 carrier"
         );
     }
     {

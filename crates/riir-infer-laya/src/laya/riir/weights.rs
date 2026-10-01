@@ -19,17 +19,256 @@
 
 use std::collections::HashMap;
 use std::path::Path;
+use std::sync::OnceLock;
 
 use super::super::{LayaError, Result};
+use super::backend::Backend;
 
-/// One widened tensor: the header's shape + the f32 data (row-major, the
+/// One parsed tensor: the header's shape + the payload (row-major, the
 /// safetensors storage order).
 #[derive(Debug)]
 pub struct Weights {
     /// The declared shape (e.g. `[3d, d]` for a fused Wqkv).
     pub shape: Vec<usize>,
+    /// The payload — widened f32 for every flat dtype, or the RAW blocked
+    /// Q8_0 bytes for the q8 artifact's tensors (Plan 616 Phase 1: the
+    /// q8 posture retains the bytes; resolution is per-consumer).
+    pub data: WeightData,
+}
+
+/// The payload of one parsed tensor.
+#[derive(Debug)]
+pub enum WeightData {
     /// The widened f32 payload (the `shape` product of elements).
-    pub data: Vec<f32>,
+    F32(Vec<f32>),
+    /// The RAW blocked Q8_0 bytes (`widen_q8_0`'s input layout —
+    /// 34 bytes per 32 weights, an f16 scale + i8 quants; the tail block
+    /// when `numel % 32 != 0`). Never widened at parse.
+    Q8(RawQ8),
+}
+
+impl Weights {
+    /// The element count (the `shape` product).
+    #[must_use]
+    pub fn numel(&self) -> usize {
+        self.shape.iter().product()
+    }
+
+    /// The payload as widened f32 (borrows; a Q8 payload resolves through
+    /// its once-only host widening).
+    #[must_use]
+    pub fn wide_f32(&self) -> &[f32] {
+        match &self.data {
+            WeightData::F32(v) => v,
+            WeightData::Q8(q) => q.wide(),
+        }
+    }
+
+    /// Consume into the widened f32 payload (a Q8 payload widens once and
+    /// drops its raw bytes — the host-consumer seams: the token gather
+    /// table, the type-embedding rows).
+    #[must_use]
+    pub fn into_f32(self) -> Vec<f32> {
+        match self.data {
+            WeightData::F32(v) => v,
+            WeightData::Q8(q) => q.into_wide(),
+        }
+    }
+}
+
+/// A raw blocked Q8_0 payload (the q8 artifact's parse form —
+/// Plan 616 Phase 1). The bytes are the loader's blocked layout exactly:
+/// `numel/32` full blocks + an optional tail block, each an f16 scale
+/// followed by its i8 quants.
+#[derive(Debug)]
+pub struct RawQ8 {
+    numel: usize,
+    raw: Vec<u8>,
+    /// The once-only host widening — the CPU lane's resolution and the
+    /// f32-consuming seams. The Metal lane NEVER touches it (Phase 1's
+    /// whole point: the device dequantizes from these bytes; the host f32
+    /// copy never exists).
+    wide: OnceLock<Vec<f32>>,
+}
+
+impl RawQ8 {
+    /// Validate the blocked byte length and retain. The length law is the
+    /// parse-time wall: a malformed payload is refused HERE, never at a
+    /// later resolution.
+    pub fn new(numel: usize, raw: Vec<u8>) -> Result<Self> {
+        let expect = q8_blocked_len(numel);
+        if raw.len() != expect {
+            return Err(LayaError::Runtime(format!(
+                "Q8_0 payload {} bytes != the blocked layout ({expect}) for {numel} elements",
+                raw.len()
+            )));
+        }
+        Ok(Self {
+            numel,
+            raw,
+            wide: OnceLock::new(),
+        })
+    }
+
+    /// The element count.
+    #[must_use]
+    pub fn numel(&self) -> usize {
+        self.numel
+    }
+
+    /// The raw blocked bytes (the device dequant's input).
+    #[must_use]
+    pub fn raw(&self) -> &[u8] {
+        &self.raw
+    }
+
+    /// The once-only host widening (the CPU resolution). Deterministic:
+    /// the same `d · q` arithmetic `widen_q8_0` has always run.
+    #[must_use]
+    pub fn wide(&self) -> &[f32] {
+        self.wide.get_or_init(|| widen_q8_0(&self.raw, self.numel))
+    }
+
+    /// Consume into the widened f32 payload (the raw bytes drop).
+    #[must_use]
+    pub fn into_wide(self) -> Vec<f32> {
+        match self.wide.into_inner() {
+            Some(v) => v,
+            None => widen_q8_0(&self.raw, self.numel),
+        }
+    }
+}
+
+/// The blocked byte length of a Q8_0 payload: `numel/32` full blocks of
+/// 34 bytes + an optional tail block (2 + `numel % 32`).
+#[must_use]
+pub fn q8_blocked_len(numel: usize) -> usize {
+    let block = super::fake_quant::BLOCK;
+    let full = numel / block;
+    let tail = numel % block;
+    full * (2 + block) + usize::from(tail > 0) * (2 + tail)
+}
+
+/// One 2D GEMM weight in a layer (Plan 616 Phase 1): the widened form
+/// (the F16 posture — today's exact behavior) or the retained Q8 bytes
+/// (the q8 artifact posture — the Metal lane dequantizes device-side at
+/// warm; every other backend resolves through the once-only host
+/// widening, so the CPU lane keeps widening on demand).
+#[derive(Debug)]
+pub enum Weight2D {
+    /// Row-major `[n, k]`, widened f32.
+    Dense(Vec<f32>),
+    /// Row-major `[n, k]` blocked Q8_0 bytes, retained.
+    Q8(RawQ8),
+}
+
+impl Weight2D {
+    /// From a parsed tensor. The kill-switch (`LAYA_Q8_HOST_F32=1`)
+    /// restores the pre-Phase-1 load: the Q8 payload widens ONCE here and
+    /// the raw bytes drop — today's widen-at-load, byte-restoring (one
+    /// env, read live per tensor like every house kill-switch).
+    #[must_use]
+    pub fn from_weights(w: Weights) -> Self {
+        match w.data {
+            WeightData::F32(v) => Self::Dense(v),
+            WeightData::Q8(q) => {
+                if std::env::var("LAYA_Q8_HOST_F32").as_deref() == Ok("1") {
+                    Self::Dense(q.into_wide())
+                } else {
+                    Self::Q8(q)
+                }
+            }
+        }
+    }
+
+    /// The element count (`n · k`).
+    #[must_use]
+    pub fn len(&self) -> usize {
+        match self {
+            Self::Dense(v) => v.len(),
+            Self::Q8(q) => q.numel(),
+        }
+    }
+
+    /// True when the weight carries no elements.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+
+    /// The widened f32 view (the host-consumer seams: the audition's
+    /// read-only layer weights, the scorer clone-out). Metal never calls
+    /// it on the forward path.
+    #[must_use]
+    pub fn wide(&self) -> &[f32] {
+        match self {
+            Self::Dense(v) => v,
+            Self::Q8(q) => q.wide(),
+        }
+    }
+
+    /// A widened f32 copy (the scorer clone-out seam).
+    #[must_use]
+    pub fn to_dense(&self) -> Vec<f32> {
+        self.wide().to_vec()
+    }
+
+    /// Pre-place on the backend (`Backend::warm_weight_2d`'s Q8 twin).
+    pub fn warm_2d(&self, b: &dyn Backend, n: usize, k: usize) {
+        match self {
+            Self::Dense(v) => b.warm_weight_2d(v, n, k),
+            Self::Q8(q) => b.warm_weight_2d_q8(q, n, k),
+        }
+    }
+
+    /// `dst[m×n] ← a[m×k] @ self[n×k]ᵀ` (the `matmul_w` dispatch).
+    pub fn matmul_w(
+        &self,
+        b: &dyn Backend,
+        a: &[f32],
+        m: usize,
+        k: usize,
+        n: usize,
+        dst: &mut [f32],
+    ) {
+        match self {
+            Self::Dense(v) => b.matmul_w(a, m, k, v, n, dst),
+            Self::Q8(q) => b.matmul_w_q8(a, m, k, q, n, dst),
+        }
+    }
+
+    /// `x[m×n] += a[m×k] @ self[n×k]ᵀ` (the `matmul_w_accum` dispatch).
+    pub fn matmul_w_accum(
+        &self,
+        b: &dyn Backend,
+        a: &[f32],
+        m: usize,
+        k: usize,
+        n: usize,
+        x: &mut [f32],
+    ) {
+        match self {
+            Self::Dense(v) => b.matmul_w_accum(a, m, k, v, n, x),
+            Self::Q8(q) => b.matmul_w_accum_q8(a, m, k, q, n, x),
+        }
+    }
+
+    /// `act[m×i] = glu(a[m×k] @ self[(2i)×k]ᵀ)` (the `matmul_w_glu`
+    /// dispatch).
+    pub fn matmul_w_glu(
+        &self,
+        b: &dyn Backend,
+        a: &[f32],
+        m: usize,
+        k: usize,
+        i_sz: usize,
+        act: &mut [f32],
+    ) {
+        match self {
+            Self::Dense(v) => b.matmul_w_glu(a, m, k, v, i_sz, act),
+            Self::Q8(q) => b.matmul_w_glu_q8(a, m, k, q, i_sz, act),
+        }
+    }
 }
 
 /// Parse + widen a safetensors file from disk.
@@ -98,10 +337,7 @@ pub fn from_bytes(bytes: &[u8], ckpt: &'static str) -> Result<HashMap<String, We
         // 32 weights + a short tail block), every other dtype is flat
         // (its per-element width validated by `widen`'s own dtype match).
         let expect = if dtype == "Q8_0" {
-            let full = numel / super::fake_quant::BLOCK;
-            let tail = numel % super::fake_quant::BLOCK;
-            full * (2 + super::fake_quant::BLOCK)
-                + usize::from(tail > 0) * (2 + tail)
+            q8_blocked_len(numel)
         } else {
             numel * dtype_width(dtype, name, ckpt)?
         };
@@ -123,10 +359,15 @@ pub fn from_bytes(bytes: &[u8], ckpt: &'static str) -> Result<HashMap<String, We
                 bytes.len()
             )));
         }
+        // Plan 616 Phase 1: the Q8_0 payload is RETAINED raw (never widened
+        // at parse — the whole point of the tier); every other dtype widens
+        // here exactly as before.
         let data = if dtype == "Q8_0" {
-            widen_q8_0(&bytes[abs_begin..abs_end], numel, name, ckpt)?
+            let raw = RawQ8::new(numel, bytes[abs_begin..abs_end].to_vec())
+                .map_err(|e| bad(format!("{name}: {e}")))?;
+            WeightData::Q8(raw)
         } else {
-            widen(dtype, &bytes[abs_begin..abs_end], name, ckpt)?
+            WeightData::F32(widen(dtype, &bytes[abs_begin..abs_end], name, ckpt)?)
         };
         out.insert(name.to_string(), Weights { shape, data });
     }
@@ -140,45 +381,35 @@ pub fn from_bytes(bytes: &[u8], ckpt: &'static str) -> Result<HashMap<String, We
 /// artifact widened here is byte-identical to the same weights
 /// fake-quantized in memory — the D2a adoption's no-numerics-change
 /// proof (instinct issue 018).
-fn widen_q8_0(bytes: &[u8], numel: usize, name: &str, ckpt: &'static str) -> Result<Vec<f32>> {
+///
+/// The blocked length is the CONSTRUCTOR's law ([`RawQ8::new`]); this
+/// body only asserts it (it cannot fire past that wall) and is the ONE
+/// arithmetic both the host resolution ([`RawQ8::wide`]) and the Metal
+/// load kernel's bit-identity gate compare against.
+#[must_use]
+pub fn widen_q8_0(raw: &[u8], numel: usize) -> Vec<f32> {
+    debug_assert_eq!(raw.len(), q8_blocked_len(numel));
     let block = super::fake_quant::BLOCK;
     let full = numel / block;
     let tail = numel % block;
-    let expect = full * (2 + block) + usize::from(tail > 0) * (2 + tail);
-    let bad = |detail: String| LayaError::Pin {
-        checkpoint: ckpt,
-        file: name.to_string(),
-        detail,
-    };
-    if bytes.len() != expect {
-        return Err(bad(format!(
-            "Q8_0 payload {} bytes != the blocked layout ({expect})",
-            bytes.len()
-        )));
-    }
     let mut out = Vec::with_capacity(numel);
     let mut pos = 0usize;
-    let mut take_block = |out: &mut Vec<f32>, count: usize| -> Result<()> {
-        let bits = u16::from_le_bytes(
-            bytes[pos..pos + 2]
-                .try_into()
-                .map_err(|_| bad("truncated scale".into()))?,
-        );
+    let mut take_block = |out: &mut Vec<f32>, count: usize| {
+        let bits = u16::from_le_bytes(raw[pos..pos + 2].try_into().expect("2 scale bytes"));
         pos += 2;
         let d = super::fake_quant::q8_scale_f32(bits);
-        for q in &bytes[pos..pos + count] {
+        for q in &raw[pos..pos + count] {
             out.push(d * f32::from(i8::from_le_bytes([*q])));
         }
         pos += count;
-        Ok(())
     };
     for _ in 0..full {
-        take_block(&mut out, block)?;
+        take_block(&mut out, block);
     }
     if tail > 0 {
-        take_block(&mut out, tail)?;
+        take_block(&mut out, tail);
     }
-    Ok(out)
+    out
 }
 
 /// The storage byte width per element of `dtype`.
@@ -387,9 +618,99 @@ mod tests {
 
         let map = from_bytes(&buf, "test").expect("parses");
         assert_eq!(map["a"].shape, vec![3]);
-        assert_eq!(map["a"].data, vec![1.0, 2.0, 0.0]);
+        assert_eq!(map["a"].wide_f32(), &[1.0, 2.0, 0.0]);
         assert_eq!(map["b"].shape, vec![1, 1]);
-        assert_eq!(map["b"].data, vec![-1.5]);
+        assert_eq!(map["b"].wide_f32(), &[-1.5]);
+    }
+
+    /// A Q8_0 tensor parses to the RETAINED raw payload (never widened at
+    /// parse — Plan 616 Phase 1): the blocked bytes survive verbatim, the
+    /// resolution widens through the same `d · q` arithmetic, and a
+    /// malformed blocked length is refused loud (naming the tensor).
+    #[test]
+    fn q8_tensor_retains_raw_bytes_and_resolves_on_demand() {
+        use super::WeightData;
+        // One full block + a 4-weight tail: scale f16 0x3C00 (1.0), quants
+        // [1, -2, 3, 0, ...]; tail scale 0x4000 (2.0), quants [-127, 127,
+        // 5, -6].
+        let mut q8: Vec<u8> = Vec::new();
+        q8.extend_from_slice(&0x3C00u16.to_le_bytes());
+        q8.extend_from_slice(&[1, 254, 3, 0, 7, 8, 9, 10]); // 254 = -2 as u8
+        q8.resize(2 + 32, 0x81); // 0x81 = -127
+        q8.extend_from_slice(&0x4000u16.to_le_bytes());
+        q8.extend_from_slice(&[129, 127, 5, 250]); // 129 = -127, 250 = -6
+        let numel = 36;
+        let header = format!(
+            r#"{{"w":{{"dtype":"Q8_0","shape":[6,6],"data_offsets":[0,{}]}}}}"#,
+            q8.len()
+        );
+        let mut buf = Vec::new();
+        buf.extend_from_slice(&(header.len() as u64).to_le_bytes());
+        buf.extend_from_slice(header.as_bytes());
+        buf.extend_from_slice(&q8);
+
+        let map = from_bytes(&buf, "test").expect("parses");
+        let w = &map["w"];
+        assert_eq!(w.shape, vec![6, 6]);
+        let WeightData::Q8(raw) = &w.data else {
+            panic!("q8 tensor must retain the raw payload");
+        };
+        assert_eq!(raw.raw(), &q8);
+        assert_eq!(raw.numel(), numel);
+        // The resolution IS the widen arithmetic (spot values: q=1 → 1.0,
+        // the tail's -127 → -254.0).
+        assert_eq!(w.wide_f32()[0], 1.0);
+        assert_eq!(w.wide_f32()[32], -127.0 * 2.0);
+        assert_eq!(w.wide_f32().len(), numel);
+
+        // The malformed-payload wall: a truncated blocked span refuses.
+        let header_bad = r#"{"w":{"dtype":"Q8_0","shape":[6,6],"data_offsets":[0,5]}}"#;
+        let mut bad = Vec::new();
+        bad.extend_from_slice(&(header_bad.len() as u64).to_le_bytes());
+        bad.extend_from_slice(header_bad.as_bytes());
+        bad.extend_from_slice(&[0u8; 5]);
+        let err = from_bytes(&bad, "test").expect_err("refused");
+        assert!(err.to_string().contains("Q8_0 layout"), "{err}");
+    }
+
+    /// The kill-switch (`LAYA_Q8_HOST_F32=1`) widens at
+    /// [`Weight2D::from_weights`] and drops the raw bytes — today's
+    /// load-shape restored. The variable is read ONLY by `from_weights`
+    /// (grep: this test is its only other reader in this binary), so the
+    /// in-process mutation cannot race another test's assertion.
+    #[test]
+    fn host_f32_kill_switch_widens_at_load() {
+        use super::{RawQ8, Weight2D, WeightData};
+        // SAFETY: env mutation in edition 2024; the variable is read only
+        // by `Weight2D::from_weights`, no other thread is running in this
+        // process at this moment, and the value is restored below.
+        unsafe { std::env::set_var("LAYA_Q8_HOST_F32", "1") };
+        let mk = |raw: Vec<u8>| {
+            Weight2D::from_weights(Weights {
+                shape: vec![2, 32],
+                data: WeightData::Q8(RawQ8::new(64, raw).expect("layout")),
+            })
+        };
+        let mut raw = vec![0u8; 68]; // 64 elements = 2 full blocks
+        raw[..2].copy_from_slice(&0x3C00u16.to_le_bytes());
+        raw[2] = 3;
+        let w = mk(raw);
+        assert!(
+            matches!(w, Weight2D::Dense(_)),
+            "switch forces the dense form"
+        );
+        assert_eq!(w.wide()[0], 3.0);
+        assert_eq!(w.len(), 64);
+        // SAFETY: restoring the unset state (see above).
+        unsafe { std::env::remove_var("LAYA_Q8_HOST_F32") };
+        let mut raw2 = vec![0u8; 68];
+        raw2[..2].copy_from_slice(&0x3C00u16.to_le_bytes());
+        raw2[2] = 5;
+        let w2 = mk(raw2);
+        assert!(
+            matches!(w2, Weight2D::Q8(_)),
+            "default retains the raw bytes"
+        );
     }
 
     /// The F16 widening bit laws on known values, including the subnormal /

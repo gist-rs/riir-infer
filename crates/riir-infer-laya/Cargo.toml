@@ -204,6 +204,13 @@ required-features = ["laya-riir-metal"]
 name = "packed_forward_equiv"
 required-features = ["laya-riir"]
 
+# The Q8 residency bit-identity gate (plan 616 Phase 1) — whole-file
+#![cfg]-gated on macOS + metal; the row keeps a feature-less selection
+# skipping the target loudly instead of printing a green zero.
+[[test]]
+name = "q8_widen_identity"
+required-features = ["laya-riir-metal"]
+
 # The prefix-state coupling gate (riir-reflex issue 054 Part 2 verdict
 # record) — whole-file #![cfg]-gated on the feature; the row keeps a
 # feature-less selection skipping the target loudly instead of printing a

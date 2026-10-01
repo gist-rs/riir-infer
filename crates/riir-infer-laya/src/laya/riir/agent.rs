@@ -227,9 +227,10 @@ fn q8_artifact_disclosure(
             continue;
         }
         rep.quantized_tensors += 1;
-        rep.quantized_elements += w.data.len();
-        rep.quantized_f16_bytes += w.data.len() as u64 * 2;
-        rep.blocks += w.data.len().div_ceil(super::fake_quant::BLOCK);
+        let numel = w.numel();
+        rep.quantized_elements += numel;
+        rep.quantized_f16_bytes += numel as u64 * 2;
+        rep.blocks += numel.div_ceil(super::fake_quant::BLOCK);
     }
     rep
 }
@@ -287,7 +288,13 @@ impl RiirAgent {
         ckpt: Checkpoint,
         device: DeviceKind,
     ) -> Result<Self> {
-        Self::load_inner(root, ckpt, None, device, super::fake_quant::WeightPosture::F16)
+        Self::load_inner(
+            root,
+            ckpt,
+            None,
+            device,
+            super::fake_quant::WeightPosture::F16,
+        )
     }
 
     /// Load one checkpoint under an explicit WEIGHT posture (instinct
@@ -302,13 +309,7 @@ impl RiirAgent {
         ckpt: Checkpoint,
         posture: super::fake_quant::WeightPosture,
     ) -> Result<Self> {
-        Self::load_inner(
-            root,
-            ckpt,
-            None,
-            DeviceKind::from_env()?,
-            posture,
-        )
+        Self::load_inner(root, ckpt, None, DeviceKind::from_env()?, posture)
     }
 
     /// Load one checkpoint for the ANE posture (Plan 002 P1): the encoder
@@ -361,10 +362,7 @@ impl RiirAgent {
         // load F16 weights under a quantized label — refused, never a
         // silent mislabel.
         if posture == super::fake_quant::WeightPosture::Q8Artifact
-            && !matches!(
-                std::env::var("LAYA_WEIGHTS_VARIANT").as_deref(),
-                Ok("q8")
-            )
+            && !matches!(std::env::var("LAYA_WEIGHTS_VARIANT").as_deref(), Ok("q8"))
         {
             return Err(LayaError::Config {
                 checkpoint: ckpt.subfolder(),
@@ -388,10 +386,7 @@ impl RiirAgent {
         // FakeQuantQ8 on a q8 artifact would quantize twice.
         let (weights_path, q8_artifact) = super::q8_artifact::resolve_weights_file(&dir, name)?;
         if q8_artifact {
-            if matches!(
-                posture,
-                super::fake_quant::WeightPosture::FakeQuantQ8
-            ) {
+            if matches!(posture, super::fake_quant::WeightPosture::FakeQuantQ8) {
                 return Err(LayaError::Config {
                     checkpoint: name,
                     detail: "--fake-quant over a Q8 artifact would quantize TWICE — the \
@@ -429,7 +424,13 @@ impl RiirAgent {
                 });
             }
             super::fake_quant::WeightPosture::FakeQuantQ8 => {
-                Some(super::fake_quant::fake_quant_q8_map(&mut raw))
+                let rep = super::fake_quant::fake_quant_q8_map(&mut raw).map_err(|e| {
+                    LayaError::Config {
+                        checkpoint: name,
+                        detail: e,
+                    }
+                })?;
+                Some(rep)
             }
         };
         // The q8-artifact posture's disclosure: the decode built no report
@@ -595,9 +596,7 @@ impl RiirAgent {
         super::fake_quant::WeightPosture,
         &super::fake_quant::FakeQuantReport,
     )> {
-        self.fake_quant
-            .as_ref()
-            .map(|(p, r)| (*p, r))
+        self.fake_quant.as_ref().map(|(p, r)| (*p, r))
     }
 
     /// The largest sequence length the ANE lane can serve (its biggest
@@ -634,8 +633,13 @@ impl RiirAgent {
     pub fn encode_question(&self, state: &Value, qdef: &Value) -> Result<EncodedQuestion> {
         let q = to_internal(qdef)?;
         let opts = render_options(&q);
-        let (ids, markers) =
-            build_sequence(&self.tok, state, &q, self.cfg.max_len, self.cfg.head_max_len)?;
+        let (ids, markers) = build_sequence(
+            &self.tok,
+            state,
+            &q,
+            self.cfg.max_len,
+            self.cfg.head_max_len,
+        )?;
         if opts.is_empty() || markers.len() != opts.len() {
             return Err(LayaError::Question(format!(
                 "options exceed the head budget: {} rendered, {} markers survived",
@@ -661,7 +665,7 @@ impl RiirAgent {
                         "encode_question: the ANE lane is not supported — run the cache lane \
                          on cpu/metal/cuda (no residual-stream seam)"
                             .into(),
-                    ))
+                    ));
                 }
             };
             let d = match &self.enc {
@@ -701,14 +705,15 @@ impl RiirAgent {
     /// so a caller can key per-token hidden states by token id with a
     /// row-for-row `ids.len() == seq_len` join and zero drift. Pure
     /// addition; touches no forward path.
-    pub fn tokenize_question(
-        &self,
-        state: &Value,
-        qdef: &Value,
-    ) -> Result<(Vec<u32>, Vec<usize>)> {
+    pub fn tokenize_question(&self, state: &Value, qdef: &Value) -> Result<(Vec<u32>, Vec<usize>)> {
         let q = to_internal(qdef)?;
-        let (ids, markers) =
-            build_sequence(&self.tok, state, &q, self.cfg.max_len, self.cfg.head_max_len)?;
+        let (ids, markers) = build_sequence(
+            &self.tok,
+            state,
+            &q,
+            self.cfg.max_len,
+            self.cfg.head_max_len,
+        )?;
         Ok((ids, markers))
     }
 

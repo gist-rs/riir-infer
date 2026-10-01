@@ -1,8 +1,9 @@
 # Plan 616 — Laya D2b: the Q8 residency tiers (host → device) with dequant-fused staging
 
-**Status:** PLANNED — scoped from the Lane C session (instinct issue 018's
-amended order: C closed negative → D2b next). Not started; Phase 0 is the
-first task. Plan of record: `../riir-instinct/.issues/018_rethink_encoder_lean_goat.md`
+**Status:** PHASE 1 DONE (2026-10-02, host residency + the device load
+kernel — all gates green, the live artifact probe byte-identical, RSS
+1489 vs 4238 MiB); Phase 0 done; Phase 2 is the next task. Plan of
+record: `../riir-instinct/.issues/018_rethink_encoder_lean_goat.md`
 §Lane D2b ("device-resident Q8 buffers + dequant-fused kernels — the real
 device-memory tier; per-device determinism re-seats apply THERE").
 
@@ -38,10 +39,16 @@ device-memory tier; per-device determinism re-seats apply THERE").
 
 ## The layout constraint (why this is kernel work, not a flag)
 
-The Q8 bytes are [n, k] row-major with blocks along k (32 consecutive
-k-elements of one output row share one scale). Today's staging consumes
-Wᵀ [k, n] (`weight_t_buf` transposes at load; Issue-020 T4's coalesced
-`b_cs == 1` branch). A host-side Q8 TRANSPOSE (re-blocking Wᵀ) would
+⚠ CORRECTED BY PHASE 1 (measured, the op gate caught the first draft):
+the house Q8_0 blocks run over the FLAT tensor order — the converter's
+`w.data.chunks(32)` — NOT per-row. "Blocks along k" holds only for
+k % 32 == 0 (every big projection); a ragged k (the a0w class,
+k = d + 4) has blocks CROSSING row boundaries and the tail block at the
+flat end. The kernel's addressing is the flat formula (block = flat
+element / 32, lane = flat element % 32) — no row_bytes/tail constants,
+and the exact `widen_q8_0` walk per element.
+
+A host-side Q8 TRANSPOSE (re-blocking Wᵀ) would
 requantize — `d'·q' ≠ d·q` in general — and break the bit-identity claim
 at the root. So the fused staging must read the NATIVE [n, k] layout and
 dequant-then-transpose in-kernel: for a staged [BK, BN] B-tile, fixed-n
@@ -50,7 +57,8 @@ column ≈ 68 contiguous bytes), consecutive threads take consecutive n —
 a different staging shape with its own coalescing analysis, not a flag
 flip. (The kernel_opt corpus' staged-B family — dequant-once-per-macrotile,
 in-place-transpose-at-staging — is the pattern library; B186's regime
-gates apply.)
+gates apply; the flat-block law above is the Phase 2 staging's
+addressing premise.)
 
 ## The MPS tension (the one real design decision — priced, then decided by measurement)
 
@@ -93,23 +101,81 @@ call at that point, not this plan's default.
       bytes halve under Q8 — the memory-bound staging gets cheaper, which
       is the mechanism that may partially offset the MPS loss).
 
-### Phase 1 — host residency (cheap first rung, no kernel work)
+### Phase 1 — host residency (cheap first rung, no kernel work) — **EXECUTED 2026-10-02**
 
-- [ ] Under `LAYA_WEIGHTS_VARIANT=q8` + Metal: skip the host F32
+- [x] Under `LAYA_WEIGHTS_VARIANT=q8` + Metal: skip the host F32
       materialization for the 126 Q8_0 GEMM tensors; keep the raw Q8 map
-      (the loader already parses it — retain instead of discard) and
-      dequantize-transpose on the DEVICE at warm time (`weight_t_buf`'s
-      upload becomes a load kernel: read Q8 [n,k], write F32 Wᵀ [k,n],
-      then the Q8 buffer drops). Host ≈ 1.68 GB → ~0.5 GB; device
-      unchanged; MPS unchanged; bit-identity trivial (the device kernel
-      computes the same `d·q` values — f16→f32 exact — the host widen
-      did, and the transpose is value-preserving).
-- [ ] Gates: byte-identical forward vs today at q8 (`metal_ops_smoke` arms
-      + `packed_forward_equiv` + one G5 checkpoint); the CPU lane and the
-      G5 reference keep widening on demand (the widening stays available —
-      the resident host map is what skips it).
-- [ ] Kill-switch `LAYA_Q8_HOST_F32=1` restores today's widen-at-load
-      (one env, bit-restoring).
+      (the loader retains it — `WeightData::Q8(RawQ8)`, never widened at
+      parse) and dequantize-transpose on the DEVICE at warm time
+      (`weight_t_buf_q8`: upload raw → the `q8_widen_t` load kernel →
+      the SAME device F32 Wᵀ → the Q8 device buffer drops). Host ≈
+      1.68 GB → ~0.5 GB; device unchanged; MPS unchanged (the q8-loaded
+      Wᵀ is a plain f32 MTLBuffer to MPS); bit-identity proven (below).
+      - The GEMM weights carry as `Weight2D { Dense(Vec<f32>) | Q8(RawQ8) }`
+        through Encoder/Head; the forwards dispatch via `Weight2D`'s
+        helpers; the Backend trait gains `warm_weight_2d_q8` /
+        `matmul_w_q8` / `matmul_w_accum_q8` / `matmul_w_glu_q8` with
+        WIDEN-ONCE defaults (`RawQ8.wide()` — the CPU/CUDA/CubeCL lanes
+        resolve through it, byte-identical, no per-call widen); Metal
+        overrides all four with the device path. One spine per op
+        (`matmul_w_wb` family) — the f32 and Q8 entries share the body.
+      - `tok_emb` + `type_emb` widen once at from_map and drop their raw
+        bytes (host consumers: the gather, the bias rows) — the plan's
+        tok_emb note stands (its 206 MB f32 is the Phase 1+ candidate).
+      - THE LAYOUT LESSON (corrects this plan's own §layout-constraint
+        prose): the house Q8_0 blocks run over the FLAT tensor order
+        (the converter's `w.data.chunks(32)`), NOT per-row — the
+        kernel's first draft assumed per-row blocking with a per-row
+        tail and the op gate caught it (nn≠0 columns read the wrong
+        scale wherever k % 32 != 0; blocks cross row boundaries). The
+        flat addressing (`block = flat_element / 32`) is BOTH simpler
+        (no row_bytes/tail constants) and the exact `widen_q8_0` walk,
+        which is what makes the bit-identity claim structural per
+        element rather than per shape. The plan's "blocks along k"
+        sentence is true only for k % 32 == 0 — every big projection.
+      - CPU-lane residency note: after first use the Q8 payload holds
+        BOTH the raw bytes and the once-widened cache (~5.06 B/elt vs
+        today's 4) — the CPU lane is the measurement/reference posture
+        (serving is Metal), and `LAYA_Q8_HOST_F32=1` restores the
+        exact pre-Phase-1 shape wherever the CPU posture carries
+        production weight.
+- [x] Gates: ALL GREEN —
+      - `tests/q8_widen_identity.rs` (new, 5 tests): synthetic CPU
+        identity (Q8 carrier vs Dense twin, encoder + head, bit-exact);
+        Metal identity through the PACKED forward (mixed row segments →
+        the fold arms AND the mixed-plan then_add fallback, warm path,
+        bit-exact); first-miss (no warm call); the unfused stream
+        (`with_folds(false, false)`); the load kernel's transpose read
+        out through an identity matmul vs the host widen (k-tail
+        shape).
+      - `metal_ops_smoke`: q8 arms on the op level — `matmul_w_q8` vs
+        the f32 carrier BIT-identical on Metal (25×768×2304 split-K +
+        the 5×100×33 k-tail), Metal-vs-CPU at the file's 1e-3
+        accumulation-order budget (the identity pair is device-vs-device;
+        the first draft's device-vs-CPU bit assert was the wrong pair
+        and the gate caught it within minutes).
+      - THE LIVE ARTIFACT PROBE (the "one G5 checkpoint" gate, q8
+        edition): `live_q8_artifact_device_widen_matches_host_widen`
+        (#[ignore]d) loads the REAL english q8 artifact through BOTH
+        paths in one process — served answers BYTE-identical
+        (probs `[0.02236964, 0.013016701, 0.07665773, 0.3653884,
+        0.5225676]`, conf 0.350442, act [1.0, 0.0]); RSS alone:
+        **device-widen 1489 MiB vs host-widen 4238 MiB — a 2.85×
+        whole-process host-residency cut** (the delta ≈ 2.7 GB ≈ the
+        widened f32 the posture no longer holds; Phase 0 derived 1.685
+        GB — agrees). Box state: m3, quiet-ish (the standing authority
+        + serve processes), AC, 2026-10-02.
+      - The standing F16 surface untouched: G5 parity green against the
+        in-flight substrate (reflex `laya_riir_parity`, 2/2, 10.7 s),
+        `metal_ops_smoke` 11/11, `metal_mps_gemm` 2/2 (+2 ignored
+        measurement-only), `packed_forward_equiv` 4/4,
+        `prefix_state_coupling` 2/2, `metal_fold_ab` 2/2, lib 48/48 at
+        metal features, clippy `-D warnings` at laya-riir /
+        laya-riir-metal / +laya-riir-cubecl (lib + tests).
+- [x] Kill-switch `LAYA_Q8_HOST_F32=1` restores today's widen-at-load
+      (read live per tensor in `Weight2D::from_weights`; the probe USES
+      it as the control arm — one env, bit-restoring, residency
+      restoring).
 
 ### Phase 2 — device-resident Q8 + dequant-fused staging (the real tier)
 

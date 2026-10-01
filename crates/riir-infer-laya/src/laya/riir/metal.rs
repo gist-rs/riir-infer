@@ -90,6 +90,7 @@ use objc2::rc::autoreleasepool;
 
 use super::super::{LayaError, Result};
 use super::backend::{AttnScratch, Backend};
+use super::weights::RawQ8;
 
 mod mps;
 
@@ -418,6 +419,7 @@ const KERNELS: &[&str] = &[
     "merge_heads",
     "gather_rows",
     "add_mask_bcast",
+    "q8_widen_t",
 ];
 
 /// The MSL source. Sizes fit u32 (every pinned extent < 2³¹); `erf_as` is
@@ -1531,6 +1533,53 @@ kernel void add_mask_bcast(device float* x [[buffer(0)]],
                            uint gid [[thread_position_in_grid]]) {
     if (gid < len) { x[gid] += mask[gid % mlen]; }
 }
+
+// The Q8 load kernel (Plan 616 Phase 1): read a RAW blocked Q8_0 weight
+// and write the DEQUANTIZED TRANSPOSE, F32 Wᵀ row-major [k, n] — exactly
+// the buffer `weight_t_buf` builds on the host today.
+//
+// THE LAYOUT LAW: the house Q8_0 blocks run over the FLAT row-major
+// tensor order (the converter's `w.data.chunks(32)`), one f16 scale per
+// 32 consecutive flat elements. For the block-exact GEMM weights
+// (k % 32 == 0 — every big projection) that is one scale per output row
+// per 32 k-elements; for a ragged k the blocks cross row boundaries and
+// the tail block sits at the flat end — the flat addressing below is the
+// single formula for both, and it is `widen_q8_0`'s own walk (block =
+// flat element / 32, lane = flat element % 32), which is what makes the
+// bit-identity claim structural rather than per-shape.
+//
+// Bit-identity is this kernel's contract: `float(as_type<half>(bits))`
+// is the exact f16→f32 widening the host's `f16_bits_to_f32` performs
+// (binary16 ⊂ binary32; the conversion is exact), `float(int8_t)` is the
+// exact sign-extended i8 conversion, and one IEEE f32 multiply is the
+// host's `d * f32::from(q)` — the staged tile VALUES are identical, so
+// every downstream GEMM accumulation is bit-identical by construction.
+// The transpose itself copies, never combines. (A NaN scale would quiet
+// differently between the two laws — the identity gate pins the real
+// tensors byte-for-byte; a real scale is `f16(amax/127)` for finite
+// weights and cannot be NaN.)
+kernel void q8_widen_t(device const uint8_t* src [[buffer(0)]],
+                       device float* dst [[buffer(1)]],
+                       constant uint& n [[buffer(2)]],
+                       constant uint& k [[buffer(3)]],
+                       uint gid [[thread_position_in_grid]]) {
+    if (gid >= (uint64_t)n * (uint64_t)k) { return; }
+    // gid enumerates the OUTPUT (Wᵀ) row-major: kk = the weight's k
+    // index, nn = the weight's row. Consecutive threads walk one output
+    // row's columns = consecutive source rows (the transpose).
+    const uint kk = gid / n;
+    const uint nn = gid % n;
+    const uint e = nn * k + kk;   // the weight's FLAT element index
+    const uint blk = e / 32u;
+    const uint lane = e - blk * 32u;
+    // lane < the block's stored quant count by construction (e < numel,
+    // so a flat tail block's lane is < numel % 32); bp[2 + lane] is
+    // always a stored byte.
+    device const uint8_t* bp = src + (uint64_t)blk * 34u;
+    const ushort bits = (ushort)bp[0] | ((ushort)bp[1] << 8);
+    const float d = float(as_type<half>(bits));
+    dst[gid] = d * float((int8_t)bp[2u + lane]);
+}
 "#;
 
 fn rt(detail: impl std::fmt::Display) -> LayaError {
@@ -1605,6 +1654,13 @@ pub struct Metal {
     /// instead puts the SAME staged values on the kernel's `b_cs == 1`
     /// branch — the one the activation `matmul` already uses.
     weights_t: Mutex<HashMap<(usize, usize), Buffer>>,
+    /// The Q8 twin of `weights_t` (Plan 616 Phase 1): keyed by the RAW
+    /// blocked bytes' `(ptr, len)` — a separate map, so an f32 slice key
+    /// and a Q8 bytes key are structurally incapable of colliding. The
+    /// value is the SAME device F32 `Wᵀ` the f32 path serves (the load
+    /// kernel dequant-transposes into it; the Q8 bytes never persist on
+    /// the device).
+    weights_t_q8: Mutex<HashMap<(usize, usize), Buffer>>,
     /// The pass-scoped command buffer + the committed drain list.
     pending: Mutex<PendingState>,
     /// The sync generation (how many host-read barriers have run).
@@ -1735,6 +1791,7 @@ impl Metal {
             pipelines,
             weights: Mutex::new(HashMap::new()),
             weights_t: Mutex::new(HashMap::new()),
+            weights_t_q8: Mutex::new(HashMap::new()),
             chain: Mutex::new(HashMap::new()),
             touch_seq: AtomicU64::new(0),
             pending: Mutex::new(PendingState::default()),
@@ -1878,6 +1935,14 @@ impl Metal {
         )
     }
 
+    fn upload_bytes(&self, data: &[u8]) -> Buffer {
+        self.device.new_buffer_with_data(
+            data.as_ptr().cast::<c_void>(),
+            data.len() as u64,
+            RESOURCE_OPTIONS,
+        )
+    }
+
     /// Device-resident TRANSPOSE of an agent-owned projection weight:
     /// `W` is row-major `[n, k]`, the buffer holds `Wᵀ` row-major `[k, n]`.
     /// Permanent cache keyed by the ORIGINAL slice, first-miss build.
@@ -1904,6 +1969,36 @@ impl Metal {
         let b = self.upload(&t);
         map.insert(key, b.clone());
         b
+    }
+
+    /// The Q8 twin (Plan 616 Phase 1): same device F32 `Wᵀ`, built from
+    /// the RAW blocked bytes. First miss: upload the Q8 bytes to a
+    /// TRANSIENT device buffer, dispatch `q8_widen_t` (dequant + transpose
+    /// in-kernel — the host `d·q` values exactly), then DROP the Q8 buffer
+    /// (the command buffer retains it; the serial queue orders the widen
+    /// before every later read). The host f32 copy never exists and the
+    /// device holds ONE copy per weight — today's residency exactly; the
+    /// win is the HOST's (the raw bytes replace the widened f32).
+    fn weight_t_buf_q8(&self, q: &RawQ8, n: usize, k: usize) -> Buffer {
+        assert_eq!(q.numel(), n * k, "weight_t_q8 extent");
+        let key = (q.raw().as_ptr() as usize, q.raw().len());
+        let mut map = self.weights_t_q8.lock().expect("weight_t_q8 cache poison");
+        if let Some(b) = map.get(&key) {
+            return b.clone();
+        }
+        let src = self.upload_bytes(q.raw());
+        let dst = self.scratch(n * k);
+        self.run(
+            "q8_widen_t",
+            &[&src, &dst],
+            &[n as u32, k as u32],
+            &[],
+            (n * k) as u64,
+        )
+        .unwrap_or_else(|e| panic!("q8_widen_t: {e}"));
+        drop(src);
+        map.insert(key, dst.clone());
+        dst
     }
 
     /// Device-resident copy of an agent-owned weight slice — permanent
@@ -2364,13 +2459,20 @@ impl Metal {
     /// op sequence with `fold_stage_buf` in the encoder's retired
     /// `attn_out` scratch role, so the control arm keeps HEAD's allocation
     /// posture (one grow-only buffer, never a per-call alloc).
-    fn matmul_w_then_add(&self, a: &[f32], m: usize, k: usize, w: &[f32], n: usize, x: &mut [f32]) {
+    fn matmul_w_then_add(
+        &self,
+        a: &[f32],
+        m: usize,
+        k: usize,
+        wb: &Buffer,
+        n: usize,
+        x: &mut [f32],
+    ) {
         let ab = self.chain_buf(a);
-        let wb = self.weight_t_buf(w, n, k);
         let stage = self.fold_stage_buf(m * n);
         self.run_sgemm(
             (&ab, 0),
-            (&wb, 0),
+            (wb, 0),
             (&stage, 0),
             &[
                 m as u32, n as u32, k as u32, k as u32, // a_rs
@@ -2398,17 +2500,16 @@ impl Metal {
         a: &[f32],
         m: usize,
         k: usize,
-        w: &[f32],
+        wb: &Buffer,
         i_sz: usize,
         act: &mut [f32],
     ) {
         let n = i_sz * 2;
         let ab = self.chain_buf(a);
-        let wb = self.weight_t_buf(w, n, k);
         let stage = self.fold_stage_buf(m * n);
         self.run_sgemm(
             (&ab, 0),
-            (&wb, 0),
+            (wb, 0),
             (&stage, 0),
             &[
                 m as u32, n as u32, k as u32, k as u32, // a_rs
@@ -2757,6 +2858,126 @@ impl Metal {
             true,
         )
     }
+
+    /// The resolved-weight spine of [`Backend::matmul_w`] — everything
+    /// after the `weight_t_buf` lookup, shared by the f32 and Q8 entries
+    /// (one body, never a second transcription).
+    fn matmul_w_wb(&self, a: &[f32], m: usize, k: usize, wb: &Buffer, n: usize, dst: &mut [f32]) {
+        let ab = self.chain_buf(a);
+        let ob = self.chain_slot_for(dst);
+        self.run_sgemm(
+            (&ab, 0),
+            (wb, 0),
+            (&ob, 0),
+            &[
+                m as u32, n as u32, k as u32, k as u32, // a_rs
+                1,        // a_cs
+                n as u32, // b_rs — B = Wᵀ held row-major [k, n]
+                1,        // b_cs
+                0,        // batch strides (batch = 1)
+                0, 0,
+            ],
+            m as u32,
+            n as u32,
+            1,
+        )
+        .unwrap_or_else(|e| panic!("{e}"));
+        self.debug_writeback(&ob, dst);
+    }
+
+    /// The resolved-weight spine of [`Backend::matmul_w_accum`] — one body
+    /// for the f32 and Q8 entries.
+    fn matmul_w_accum_wb(
+        &self,
+        a: &[f32],
+        m: usize,
+        k: usize,
+        wb: &Buffer,
+        n: usize,
+        x: &mut [f32],
+    ) {
+        if self.fold_res {
+            let plan = self.split_plan(m as u32, n as u32, k as u32);
+            if plan.iter().all(|(_, _, s)| *s) {
+                let ab = self.chain_buf(a);
+                // Read-modify-write target: the residual stream is
+                // device-current this epoch (the LayerNorm before it wrote
+                // the slot), so `chain_buf` — never the write-first slot.
+                let xb = self.chain_buf(x);
+                for (row0, rows, _) in &plan {
+                    let u = [
+                        *rows, n as u32, k as u32, k as u32, // a_rs
+                        1,        // a_cs
+                        n as u32, // b_rs — Wᵀ row-major [k, n]
+                        1,        // b_cs
+                        0,        // batch strides (batch = 1)
+                        0, 0,
+                    ];
+                    self.run_sgemm_splitk_accum(
+                        (&ab, ((*row0 as usize) * k * 4) as u64),
+                        (wb, 0),
+                        (&xb, ((*row0 as usize) * n * 4) as u64),
+                        &u,
+                        *rows,
+                        n as u32,
+                        (k as u32).div_ceil(SPLITK_KC),
+                        SPLITK_KC,
+                    )
+                    .unwrap_or_else(|e| panic!("{e}"));
+                    self.fold_count.fetch_add(1, Ordering::Relaxed);
+                }
+                self.debug_writeback(&xb, x);
+                return;
+            }
+        }
+        self.matmul_w_then_add(a, m, k, wb, n, x);
+    }
+
+    /// The resolved-weight spine of [`Backend::matmul_w_glu`] — one body
+    /// for the f32 and Q8 entries.
+    fn matmul_w_glu_wb(
+        &self,
+        a: &[f32],
+        m: usize,
+        k: usize,
+        wb: &Buffer,
+        i_sz: usize,
+        act: &mut [f32],
+    ) {
+        let n = i_sz * 2;
+        if self.fold_glu {
+            let plan = self.split_plan(m as u32, n as u32, k as u32);
+            if plan.iter().all(|(_, _, s)| *s) {
+                let ab = self.chain_buf(a);
+                let ob = self.chain_slot_for(act);
+                for (row0, rows, _) in &plan {
+                    let u = [
+                        *rows, n as u32, k as u32, k as u32, // a_rs
+                        1,        // a_cs
+                        n as u32, // b_rs — Wᵀ row-major [k, n]
+                        1,        // b_cs
+                        0,        // batch strides (batch = 1)
+                        0, 0,
+                    ];
+                    self.run_sgemm_splitk_glu(
+                        (&ab, ((*row0 as usize) * k * 4) as u64),
+                        (wb, 0),
+                        (&ob, ((*row0 as usize) * i_sz * 4) as u64),
+                        &u,
+                        *rows,
+                        i_sz as u32,
+                        (k as u32).div_ceil(SPLITK_KC),
+                        SPLITK_KC,
+                    )
+                    .unwrap_or_else(|e| panic!("{e}"));
+                    self.fold_count.fetch_add(1, Ordering::Relaxed);
+                }
+                self.debug_writeback(&ob, act);
+                return;
+            }
+        }
+        self.matmul_w_then_glu(a, m, k, wb, i_sz, act);
+    }
 }
 
 /// Classification of every backend arg (the lazy-sync correctness
@@ -2825,32 +3046,25 @@ impl Backend for Metal {
         assert_eq!(a.len(), m * k, "lhs extent");
         assert_eq!(w.len(), n * k, "weight extent");
         assert_eq!(dst.len(), m * n, "dst extent");
-        let ab = self.chain_buf(a);
         // riir-reflex Issue 020 T4: bind the TRANSPOSE, row-major [k, n], so the
         // staging takes the kernel's coalesced `b_cs == 1` branch. The
         // staged tile is the same [K][N] block of the same values either
         // way — the k-accumulation order is untouched, so the result is
         // bit-identical to the `b_cs = k` binding.
         let wb = self.weight_t_buf(w, n, k);
-        let ob = self.chain_slot_for(dst);
-        self.run_sgemm(
-            (&ab, 0),
-            (&wb, 0),
-            (&ob, 0),
-            &[
-                m as u32, n as u32, k as u32, k as u32, // a_rs
-                1,        // a_cs
-                n as u32, // b_rs — B = Wᵀ held row-major [k, n]
-                1,        // b_cs
-                0,        // batch strides (batch = 1)
-                0, 0,
-            ],
-            m as u32,
-            n as u32,
-            1,
-        )
-        .unwrap_or_else(|e| panic!("{e}"));
-        self.debug_writeback(&ob, dst);
+        self.matmul_w_wb(a, m, k, &wb, n, dst);
+    }
+
+    /// The Q8 twin (Plan 616 Phase 1): the SAME device F32 `Wᵀ`, built by
+    /// the load kernel from the raw blocked bytes — the staged tile values
+    /// are the host widen's exactly, so this dispatch is bit-identical to
+    /// the f32 path above and the host f32 copy never exists.
+    fn matmul_w_q8(&self, a: &[f32], m: usize, k: usize, q: &RawQ8, n: usize, dst: &mut [f32]) {
+        assert_eq!(a.len(), m * k, "lhs extent");
+        assert_eq!(q.numel(), n * k, "weight extent");
+        assert_eq!(dst.len(), m * n, "dst extent");
+        let wb = self.weight_t_buf_q8(q, n, k);
+        self.matmul_w_wb(a, m, k, &wb, n, dst);
     }
 
     /// The residual-stream projection (reflex issue 020 T11, the last open
@@ -2868,42 +3082,18 @@ impl Backend for Metal {
         assert_eq!(a.len(), m * k, "lhs extent");
         assert_eq!(w.len(), n * k, "weight extent");
         assert_eq!(x.len(), m * n, "residual extent");
-        if self.fold_res {
-            let plan = self.split_plan(m as u32, n as u32, k as u32);
-            if plan.iter().all(|(_, _, s)| *s) {
-                let ab = self.chain_buf(a);
-                let wb = self.weight_t_buf(w, n, k);
-                // Read-modify-write target: the residual stream is
-                // device-current this epoch (the LayerNorm before it wrote
-                // the slot), so `chain_buf` — never the write-first slot.
-                let xb = self.chain_buf(x);
-                for (row0, rows, _) in &plan {
-                    let u = [
-                        *rows, n as u32, k as u32, k as u32, // a_rs
-                        1,        // a_cs
-                        n as u32, // b_rs — Wᵀ row-major [k, n]
-                        1,        // b_cs
-                        0,        // batch strides (batch = 1)
-                        0, 0,
-                    ];
-                    self.run_sgemm_splitk_accum(
-                        (&ab, ((*row0 as usize) * k * 4) as u64),
-                        (&wb, 0),
-                        (&xb, ((*row0 as usize) * n * 4) as u64),
-                        &u,
-                        *rows,
-                        n as u32,
-                        (k as u32).div_ceil(SPLITK_KC),
-                        SPLITK_KC,
-                    )
-                    .unwrap_or_else(|e| panic!("{e}"));
-                    self.fold_count.fetch_add(1, Ordering::Relaxed);
-                }
-                self.debug_writeback(&xb, x);
-                return;
-            }
-        }
-        self.matmul_w_then_add(a, m, k, w, n, x);
+        let wb = self.weight_t_buf(w, n, k);
+        self.matmul_w_accum_wb(a, m, k, &wb, n, x);
+    }
+
+    /// The Q8 twin (Plan 616 Phase 1) — same device F32 `Wᵀ` via the load
+    /// kernel, bit-identical by construction.
+    fn matmul_w_accum_q8(&self, a: &[f32], m: usize, k: usize, q: &RawQ8, n: usize, x: &mut [f32]) {
+        assert_eq!(a.len(), m * k, "lhs extent");
+        assert_eq!(q.numel(), n * k, "weight extent");
+        assert_eq!(x.len(), m * n, "residual extent");
+        let wb = self.weight_t_buf_q8(q, n, k);
+        self.matmul_w_accum_wb(a, m, k, &wb, n, x);
     }
 
     /// The MLP-up projection with its GLU epilogue folded (reflex issue
@@ -2920,39 +3110,27 @@ impl Backend for Metal {
         assert_eq!(a.len(), m * k, "lhs extent");
         assert_eq!(w.len(), n * k, "weight extent");
         assert_eq!(act.len(), m * i_sz, "glu out extent");
-        if self.fold_glu {
-            let plan = self.split_plan(m as u32, n as u32, k as u32);
-            if plan.iter().all(|(_, _, s)| *s) {
-                let ab = self.chain_buf(a);
-                let wb = self.weight_t_buf(w, n, k);
-                let ob = self.chain_slot_for(act);
-                for (row0, rows, _) in &plan {
-                    let u = [
-                        *rows, n as u32, k as u32, k as u32, // a_rs
-                        1,        // a_cs
-                        n as u32, // b_rs — Wᵀ row-major [k, n]
-                        1,        // b_cs
-                        0,        // batch strides (batch = 1)
-                        0, 0,
-                    ];
-                    self.run_sgemm_splitk_glu(
-                        (&ab, ((*row0 as usize) * k * 4) as u64),
-                        (&wb, 0),
-                        (&ob, ((*row0 as usize) * i_sz * 4) as u64),
-                        &u,
-                        *rows,
-                        i_sz as u32,
-                        (k as u32).div_ceil(SPLITK_KC),
-                        SPLITK_KC,
-                    )
-                    .unwrap_or_else(|e| panic!("{e}"));
-                    self.fold_count.fetch_add(1, Ordering::Relaxed);
-                }
-                self.debug_writeback(&ob, act);
-                return;
-            }
-        }
-        self.matmul_w_then_glu(a, m, k, w, i_sz, act);
+        let wb = self.weight_t_buf(w, n, k);
+        self.matmul_w_glu_wb(a, m, k, &wb, i_sz, act);
+    }
+
+    /// The Q8 twin (Plan 616 Phase 1) — same device F32 `Wᵀ` via the load
+    /// kernel, bit-identical by construction.
+    fn matmul_w_glu_q8(
+        &self,
+        a: &[f32],
+        m: usize,
+        k: usize,
+        q: &RawQ8,
+        i_sz: usize,
+        act: &mut [f32],
+    ) {
+        let n = i_sz * 2;
+        assert_eq!(a.len(), m * k, "lhs extent");
+        assert_eq!(q.numel(), n * k, "weight extent");
+        assert_eq!(act.len(), m * i_sz, "glu out extent");
+        let wb = self.weight_t_buf_q8(q, n, k);
+        self.matmul_w_glu_wb(a, m, k, &wb, i_sz, act);
     }
 
     fn matmul_kt(
@@ -3543,6 +3721,18 @@ impl Backend for Metal {
             return;
         }
         let _ = self.weight_t_buf(data, n, k);
+    }
+
+    /// The Q8 twin (Plan 616 Phase 1): build the SAME device F32 `Wᵀ` at
+    /// load via the `q8_widen_t` kernel — the raw bytes upload once to a
+    /// TRANSIENT buffer and drop; the host never widens. First-miss-safe
+    /// (`weight_t_buf_q8` builds on any miss, so an un-warmed weight still
+    /// serves).
+    fn warm_weight_2d_q8(&self, q: &RawQ8, n: usize, k: usize) {
+        if q.numel() == 0 {
+            return;
+        }
+        let _ = self.weight_t_buf_q8(q, n, k);
     }
 
     fn download_into(&self, src: &[f32], out: &mut [f32]) {

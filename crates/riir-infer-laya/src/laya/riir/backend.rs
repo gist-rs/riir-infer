@@ -13,6 +13,8 @@
 //! `Encoder` / `Head` / `RiirAgent` single concrete types (the device is
 //! chosen at load, [`super::agent`]).
 
+use super::weights::RawQ8;
+
 /// The ~15 ops the model forward needs. Signatures mirror the [`super::ops`]
 /// free fns 1:1 so the CPU impl is a straight delegation and the forward
 /// rewrite is mechanical (`ops::foo(..)` → `b.foo(..)`).
@@ -383,6 +385,48 @@ pub trait Backend {
     /// host slice (the Metal lane holds `Wᵀ`, riir-reflex Issue 020 T4), and the shape
     /// is the thing that cannot be recovered from the slice alone.
     fn warm_weight_2d(&self, _data: &[f32], _n: usize, _k: usize) {}
+
+    // ── The Q8-carried GEMM family (Plan 616 Phase 1) ─────────────────
+    //
+    // The weight arrives as RAW blocked Q8_0 bytes ([`RawQ8`], row-major
+    // `[n, k]`). The DEFAULTS resolve on host through the payload's
+    // once-only widening (`q.wide()` — one `d · q` pass, then the exact
+    // f32 method above), so the CPU lane (and any backend that does not
+    // override) keeps widening on demand with byte-identical numerics.
+    // The Metal lane overrides all four: the raw bytes upload once and a
+    // load kernel dequant-transposes into the SAME device F32 `Wᵀ` buffer
+    // the f32 path serves — `float(half)·float(int8)` is the host widen's
+    // exact arithmetic, so every downstream GEMM is bit-identical by
+    // construction and the host f32 copy never exists.
+
+    /// Pre-place one Q8-carried projection weight (the
+    /// [`Backend::warm_weight_2d`] twin for the q8 artifact posture).
+    fn warm_weight_2d_q8(&self, q: &RawQ8, n: usize, k: usize) {
+        self.warm_weight_2d(q.wide(), n, k);
+    }
+
+    /// [`Backend::matmul_w`] over a Q8-carried weight.
+    fn matmul_w_q8(&self, a: &[f32], m: usize, k: usize, q: &RawQ8, n: usize, dst: &mut [f32]) {
+        self.matmul_w(a, m, k, q.wide(), n, dst);
+    }
+
+    /// [`Backend::matmul_w_accum`] over a Q8-carried weight.
+    fn matmul_w_accum_q8(&self, a: &[f32], m: usize, k: usize, q: &RawQ8, n: usize, x: &mut [f32]) {
+        self.matmul_w_accum(a, m, k, q.wide(), n, x);
+    }
+
+    /// [`Backend::matmul_w_glu`] over a Q8-carried weight.
+    fn matmul_w_glu_q8(
+        &self,
+        a: &[f32],
+        m: usize,
+        k: usize,
+        q: &RawQ8,
+        i_sz: usize,
+        act: &mut [f32],
+    ) {
+        self.matmul_w_glu(a, m, k, q.wide(), i_sz, act);
+    }
 }
 
 /// The attention block's host scratch — the split q/k/v thirds, the score

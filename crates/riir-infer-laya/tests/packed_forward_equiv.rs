@@ -44,7 +44,7 @@ fn weights(shape: Vec<usize>, seed: u64) -> Weights {
     let n: usize = shape.iter().product();
     Weights {
         shape,
-        data: fill(n, seed),
+        data: riir_infer_laya::laya::riir::weights::WeightData::F32(fill(n, seed)),
     }
 }
 

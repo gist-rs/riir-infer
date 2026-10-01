@@ -81,7 +81,7 @@ fn weights(shape: Vec<usize>, seed: u64) -> Weights {
     let n: usize = shape.iter().product();
     Weights {
         shape,
-        data: fill(n, seed),
+        data: riir_infer_laya::laya::riir::weights::WeightData::F32(fill(n, seed)),
     }
 }
 
@@ -282,12 +282,8 @@ fn shared_state_span_is_suffix_dependent_real_typed() {
         "criteria": ["close_case", "notify_policyholder", "reconcile_invoice_totals"]
     });
 
-    let enc1 = agent
-        .encode_question(&state, &q1)
-        .expect("q1 encodes");
-    let enc2 = agent
-        .encode_question(&state, &q2)
-        .expect("q2 encodes");
+    let enc1 = agent.encode_question(&state, &q1).expect("q1 encodes");
+    let enc2 = agent.encode_question(&state, &q2).expect("q2 encodes");
 
     let (ids1, m1) = agent.tokenize_question(&state, &q1).expect("q1 tokenizes");
     let (ids2, m2) = agent.tokenize_question(&state, &q2).expect("q2 tokenizes");
@@ -307,8 +303,12 @@ fn shared_state_span_is_suffix_dependent_real_typed() {
     println!(
         "typed lane spans: seq1 {} (markers {}), seq2 {} (markers {}), shared suffix {k} tokens; \
          span offsets {} vs {} (per-question RoPE positions differ)",
-        ids1.len(), m1.len(), ids2.len(), m2.len(),
-        ids1.len() - k, ids2.len() - k
+        ids1.len(),
+        m1.len(),
+        ids2.len(),
+        m2.len(),
+        ids1.len() - k,
+        ids2.len() - k
     );
     assert!(
         k >= 32,

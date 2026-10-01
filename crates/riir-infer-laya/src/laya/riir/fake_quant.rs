@@ -20,7 +20,7 @@ use std::collections::HashMap;
 
 use serde::Serialize;
 
-use super::weights::{Weights, f16_bits_to_f32, f32_to_f16_bits};
+use super::weights::{WeightData, Weights, f16_bits_to_f32, f32_to_f16_bits};
 
 /// The block size of the house GGUF Q8_0 family.
 pub const BLOCK: usize = 32;
@@ -78,8 +78,13 @@ impl WeightPosture {
 /// Fake-quantize every >=2D tensor of a loaded weight map in place.
 /// Deterministic: tensors are visited in sorted-name order and the
 /// transform is a pure function of the bytes.
-#[must_use]
-pub fn fake_quant_q8_map(map: &mut HashMap<String, Weights>) -> FakeQuantReport {
+///
+/// A RETAINED Q8 payload ([`super::weights::WeightData::Q8`] — the q8
+/// artifact posture, Plan 616 Phase 1) is REFUSED loud: the probe is the
+/// in-memory transform of an F16 map, and quantizing a payload whose
+/// stored values ARE the quantized values would quantize twice (the same
+/// refusal the agent's load path already applies, one layer out).
+pub fn fake_quant_q8_map(map: &mut HashMap<String, Weights>) -> Result<FakeQuantReport, String> {
     let mut rep = FakeQuantReport {
         quantized_tensors: 0,
         quantized_elements: 0,
@@ -99,18 +104,25 @@ pub fn fake_quant_q8_map(map: &mut HashMap<String, Weights>) -> FakeQuantReport 
             rep.skipped_tensors.push(name.clone());
             continue;
         }
+        let WeightData::F32(data) = &mut w.data else {
+            return Err(format!(
+                "fake-quant probe over tensor {name}: the payload is ALREADY raw Q8_0 \
+                 (the q8 artifact posture) — quantizing twice is refused; \
+                 unset LAYA_WEIGHTS_VARIANT"
+            ));
+        };
         rep.quantized_tensors += 1;
-        rep.quantized_elements += w.data.len();
-        rep.quantized_f16_bytes += w.data.len() as u64 * 2;
-        let (max_err, sum_err) = fake_quant_q8(&mut w.data);
-        rep.blocks += w.data.len().div_ceil(BLOCK);
+        rep.quantized_elements += data.len();
+        rep.quantized_f16_bytes += data.len() as u64 * 2;
+        let (max_err, sum_err) = fake_quant_q8(data);
+        rep.blocks += data.len().div_ceil(BLOCK);
         rep.max_abs_err = rep.max_abs_err.max(max_err);
         rep.mean_abs_err += sum_err;
     }
     if rep.quantized_elements > 0 {
         rep.mean_abs_err /= rep.quantized_elements as f64;
     }
-    rep
+    Ok(rep)
 }
 
 /// The Q8_0 scale for one block's amax: the f16-ROUNDED value of
@@ -225,14 +237,14 @@ mod tests {
             let n: usize = shape.iter().product();
             Weights {
                 shape,
-                data: vec![v; n],
+                data: WeightData::F32(vec![v; n]),
             }
         };
         let mut map = HashMap::new();
         map.insert("b_norm".to_string(), mk(vec![8], 1.0));
         map.insert("w_small".to_string(), mk(vec![2, 2], 3.0));
         map.insert("a_emb".to_string(), mk(vec![4, 8], 0.25));
-        let rep = fake_quant_q8_map(&mut map);
+        let rep = fake_quant_q8_map(&mut map).expect("f32 payloads");
         assert_eq!(rep.quantized_tensors, 2);
         assert_eq!(rep.quantized_elements, 4 + 32);
         assert_eq!(rep.blocks, 1 + 1);
@@ -244,8 +256,25 @@ mod tests {
         // Determinism: a second pass over the SAME map is a no-op change
         // (already-quantized values re-quantize to themselves up to the
         // grid) and the report is identical.
-        let rep2 = fake_quant_q8_map(&mut map);
+        let rep2 = fake_quant_q8_map(&mut map).expect("f32 payloads");
         assert_eq!(rep.quantized_tensors, rep2.quantized_tensors);
         assert_eq!(rep.quantized_elements, rep2.quantized_elements);
+    }
+
+    /// A retained Q8 payload (the q8 artifact posture) is REFUSED — the
+    /// probe must never quantize twice.
+    #[test]
+    fn map_pass_refuses_a_raw_q8_payload() {
+        let q8: Vec<u8> = vec![0u8; super::super::weights::q8_blocked_len(32)];
+        let mut map = HashMap::new();
+        map.insert(
+            "w".to_string(),
+            Weights {
+                shape: vec![1, 32],
+                data: WeightData::Q8(super::super::weights::RawQ8::new(32, q8).expect("layout")),
+            },
+        );
+        let err = fake_quant_q8_map(&mut map).expect_err("refused");
+        assert!(err.contains("twice"), "{err}");
     }
 }
