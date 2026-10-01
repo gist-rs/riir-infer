@@ -73,7 +73,7 @@ impl super::Adapter {
     /// This accessor is the Metal half of the budget query; see also the DX12
     /// and Vulkan twins and riir-gpu's `vram_budget` module.
     pub fn total_video_memory_bytes(&self) -> Option<u64> {
-        let size = unsafe { self.shared.device.recommendedMaxWorkingSetSize() };
+        let size = self.shared.device.recommendedMaxWorkingSetSize();
         (size > 0).then_some(size)
     }
 }

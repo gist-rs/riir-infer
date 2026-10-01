@@ -412,6 +412,10 @@ pub(crate) fn dq_fq_a8(buf: &mut [f32], params: &[f32]) {
 /// rows = 1). No dispatch unless the decode arm is armed. Bumps the decode
 /// launch counter on every fired pass (D5's phase-leak detection).
 #[cfg(feature = "cubecl_runtime")]
+#[cfg_attr(
+    not(feature = "dq_phase_bench"),
+    allow(dead_code, reason = "the only callers are the dq_phase_bench-gated Plan-614 injection sites")
+)]
 pub(crate) fn launch_decode_pass<R: Runtime>(
     client: &ComputeClient<R>,
     buf: Handle,

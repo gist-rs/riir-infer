@@ -365,13 +365,21 @@ pub fn fq_reset_counters() {
 
 #[inline]
 #[cfg_attr(
-    all(target_os = "macos", feature = "dq_phase_bench"),
-    allow(dead_code, reason = "the prefill lane is CUDA-only (not-macos) — the caller exists on the 4090")
+    not(all(
+        not(target_os = "macos"),
+        feature = "ternary_gemv_cuda_raw",
+        feature = "dq_phase_bench"
+    )),
+    allow(dead_code, reason = "the only caller is the cudarc DqFqKernels lane (CUDA-only, dq_phase_bench-gated) — absent on macOS and at non-dq combos")
 )]
 pub(crate) fn note_prefill_launch() {
     FQ_PREFILL_LAUNCHES.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
 }
 #[inline]
+#[cfg_attr(
+    not(feature = "dq_phase_bench"),
+    allow(dead_code, reason = "the only callers are the dq_phase_bench-gated Plan-614 injection sites")
+)]
 pub(crate) fn note_decode_launch() {
     FQ_DECODE_LAUNCHES.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
 }
