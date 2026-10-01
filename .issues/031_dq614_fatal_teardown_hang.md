@@ -1,6 +1,6 @@
 # Issue 031 — dq_phase_matrix FATAL teardown hangs inside process exit (CUDA driver detach-time cleanup)
 
-**Status:** OPEN — filed 2026-10-01, defensive fix landed same day; root-cause confirmation pending an error-path repro (owner: any next matrix session)
+**Status:** OPEN — filed 2026-10-01, defensive fix landed same day; root-cause confirmation pending an error-path repro (owner: any next matrix session). Prior-art web survey appended 2026-10-01 (§Prior art below: the class is upstream-documented driver-side teardown, config-dependent; repro guidance sharpened — sticky-error capture + context-reset A/B).
 
 The v1 matrix run (`a07fffd`, 2026-10-01 ~06:0x +07) measured all 9 cells,
 then FATALed at the final gate (`G-i2 positive control FAIL`, the
@@ -78,6 +78,49 @@ close-out — do NOT edit `dq614_m2.cmd` while the v2 run is live.
 - [x] File the issue (this file) — 2026-10-01
 - [x] Land the `hard_exit` defensive fix in `dq_phase_matrix.rs`
 - [x] Cross-reference from Issue 030's unowned-hang note
+
+## Prior art (web survey, 2026-10-01 idle session — zero-box, read-only)
+
+Searched the CUDA-driver-teardown hang class. Findings for whoever runs the
+error-path repro:
+
+1. **The class is documented upstream and is driver-side, config-dependent.**
+   [NVIDIA forums #49680](https://forums.developer.nvidia.com/t/use-of-driver-api-in-dlls-causes-a-hang-on-exit-on-some-configurations/49680)
+   (2017, Win7/driver 369.3/CUDA 8): a CUDA program using driver APIs hangs
+   **after `main` returns**, must be killed from the task manager, and only on
+   some configurations — the exact observed shape (FATAL line printed → no
+   further output → killed by hand). Their resolution was giving the driver's
+   cleanup a well-defined context (explicit `cuCtxPush/Pop` around GPU work in
+   the library). Modern moral for us: **explicitly destroying/resetting the
+   context before exit** is the upstream-sanctioned graceful alternative to
+   skipping teardown.
+2. **The landed fix matches documented exit semantics.** [NVIDIA forums
+   #201239](https://forums.developer.nvidia.com/t/terminating-a-multi-threaded-cuda-program-that-uses-cusolver-exit-vs-exit/201239):
+   CUDA registers **atexit handlers invoked by `exit()` but not `_exit()`**.
+   `hard_exit`'s `TerminateProcess` skips atexit AND `DLL_PROCESS_DETACH` —
+   the documented-strongest form of the same escape. Prior art validates the
+   mechanism; nothing to change.
+3. **Sharpened hypothesis 1 — exit-time cleanup of an ERROR-state context.**
+   Our FATAL followed a failed gate (a kernel-output mismatch), i.e. a possible
+   sticky CUDA error at exit. [NVIDIA forums
+   #263505](https://forums.developer.nvidia.com/t/how-to-re-init-the-context-after-cudaresetdevice-now-error-cudaerrorcontextisdestroyed/263505):
+   a context corrupted by a kernel execution error (700-class) does **not**
+   fully recover via `cudaDeviceReset`. Every prior-art hang above is a PASSIVE
+   wait — **ours allocates (~7 MB/s)**, which fits a retry/allocate loop inside
+   cleanup-of-a-broken-context better than a clean block. The novel bit (RAM
+   climb) remains ours to explain; the repro is still owed.
+4. **cudarc-specific reports: none found** (negative search across cudarc
+   GitHub/HN/dependents) — hypothesis 2 (cudarc static state) has no upstream
+   attestation either way; keep it behind the debugger evidence.
+
+**Repro additions for the matrix session** (cheap, alongside the WER dump):
+- At the hang, capture any pending sticky error (`cuCtxGetLastError` /
+  `cudaGetLastError` from a second attach) — its presence would confirm (3).
+- A/B the error path once: explicitly drop/destroy the cudarc context (or
+  `cuDevicePrimaryCtxReset`) BEFORE `hard_exit` — a graceful exit would
+  confirm the mechanism and yield an optional clean-error-path fix;
+  `hard_exit` stays the backstop regardless (a corrupted context may not
+  reset cleanly — #263505).
 - [ ] Root-cause confirmation (Windows repro/dump) — only on a quiet box,
       never while a matrix run is live
 - [ ] Watchdog arm in the runner `.cmd` wrappers at Issue 030 close-out
