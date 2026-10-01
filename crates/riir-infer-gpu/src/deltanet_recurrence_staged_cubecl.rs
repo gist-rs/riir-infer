@@ -192,6 +192,19 @@ fn deltanet_recurrence_multi_token_staged_f32(
     }
 }
 
+/// Dispatches through [`DeltanetRecurrenceStagedCubeCL`] so far — lets an e2e
+/// A/B prove the staged arm actually ran (a toggle that silently never reaches
+/// the kernel would otherwise read as a tie).
+#[cfg(feature = "deltanet_recurrence_smem_staged")]
+static STAGED_LAUNCHES: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
+/// Total staged-recurrence dispatches in this process.
+#[cfg(feature = "deltanet_recurrence_smem_staged")]
+#[must_use]
+pub fn staged_recurrence_launch_count() -> usize {
+    STAGED_LAUNCHES.load(std::sync::atomic::Ordering::Relaxed)
+}
+
 /// Launcher for the staged multi-token recurrence (riir-ai Issue 1004 R1).
 #[cfg(feature = "deltanet_recurrence_smem_staged")]
 pub struct DeltanetRecurrenceStagedCubeCL;
@@ -314,6 +327,7 @@ impl DeltanetRecurrenceStagedCubeCL {
         let state_len = n_head * head_dim * head_dim;
         let output_len = p * v_dim;
 
+        STAGED_LAUNCHES.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         unsafe {
             deltanet_recurrence_multi_token_staged_f32::launch_unchecked::<R>(
                 client,

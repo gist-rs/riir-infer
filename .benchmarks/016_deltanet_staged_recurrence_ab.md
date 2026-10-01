@@ -1,6 +1,6 @@
 # Bench 016 — DeltaNet threadgroup-staged multi-token recurrence (riir-ai Issue 1004 R1)
 
-**Status:** STAGE-ISOLATED GOAT (G1 + G2-stage pass); feature `deltanet_recurrence_smem_staged` OPT-IN. The default promotion waits on the e2e A/B (riir-ai Issue 1004 G2-e2e).
+**Status:** STAGE-ISOLATED GOAT; e2e gain BELOW THE NOISE BAND → feature `deltanet_recurrence_smem_staged` stays OPT-IN (2026-10-01). G1 holds end to end (logits FNV `99a0733c45a0e663` = the pinned anchor); G2-e2e is 1.006× @2048 / 1.019× @4096, inside a ±10% round spread.
 
 ## What
 
@@ -41,6 +41,27 @@ best with (32,8) and (8,24), with the smallest threadgroup footprint of the thre
 **Why it scales:** the shipping kernel's time grows faster than P (6.2 → 15.2 → 50.2 ms for 1K → 2K → 4K). Its
 6144 one-plane cubes drift apart in `t`, so the 128 row-cubes of a head stop sharing k/q lines in cache and the
 re-reads go to DRAM. Staging reads each k/q element once per 8-row cube instead of once per row.
+
+## G2-e2e — the production prefill, one process
+
+riir-ai `crates/riir-gpu/tests/bench_1004_r1_staged_recurrence_e2e.rs`, pre-rotation Bonsai-1 `Ternary-Bonsai-27B-Q2_0.gguf`
+(the Hadamard-folded Bonsai-2 file cannot run Metal prefill yet: the CubeCL body refuses folded weights, Issue 980
+T4-ALT, now riir-infer Issue 032). It has the same GDN shape, which is all this kernel sees. Shipping knobs, 5
+interleaved rounds after a warm pair. Every round asserts bit-identical logits, and that each arm made (staged) or
+skipped (shipping) staged launches (`staged_recurrence_launch_count`).
+
+PROVENANCE: M3 Max, AC, `powermode 2`, loadavg 4.6–5.2, GPU exclusive (a sibling's concurrent run was killed and
+this one restarted clean), 2026-10-01 08:44–09:04.
+
+| P | shipping | staged | speedup median (min–max) | logits FNV |
+|---|---|---|---|---|
+| 2048 | 89.4 tok/s | 94.0 tok/s | 1.006× (0.928–1.128) | `99a0733c45a0e663` — the Issue 1004 G1 pin |
+| 4096 | 66.9 tok/s | 68.5 tok/s | 1.019× (0.962–1.117) | `d571603c76f5e75e` |
+
+The medians match the projection below (recurrence ≈ 0.3% of a 2048 prefill and ≈ 1.4% at 4096), but each is
+inside the round-to-round spread, so the e2e gain is **not demonstrated**. Verdict: keep opt-in. Re-test when the
+prefill gets faster elsewhere (the GEMM wall), which raises the recurrence's share, or at 8–16 rounds in an idle
+window.
 
 ## Projection (not a measurement)
 
