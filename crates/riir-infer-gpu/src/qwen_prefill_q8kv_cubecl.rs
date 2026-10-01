@@ -56,7 +56,7 @@ use cubecl::server::Handle;
 // ladder in `ternary_deltanet_gpu_forward` (`all(cubecl_runtime, ternary_gemm_batched,
 // ternary_attention_batched_prefill)`; the module gate below already supplies
 // `cubecl_runtime`). Ungated, the fields + `buffer_bytes` read as dead on every
-// lane that compiles this module without that ladder (the riir-clippy consumer set).
+// lane that compiles this module without that ladder (the riir-refine consumer set).
 #[cfg(all(
     feature = "ternary_gemm_batched",
     feature = "ternary_attention_batched_prefill"

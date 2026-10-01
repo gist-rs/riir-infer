@@ -92,7 +92,7 @@ use crate::deltanet_chunked_cubecl::DeltanetChunkedConv1dCubeCL;
 // Issue 734 T4's multi-token recurrence launcher. Gated to match the type's own
 // gate (deltanet_cubecl) + the dispatch site below: ungated, it breaks the
 // public `cubecl_runtime + ternary_gemv` combo without
-// `ternary_deltanet_chunked_prefill` (the exact riir-clippy `ternary_inference`
+// `ternary_deltanet_chunked_prefill` (the exact riir-refine `ternary_inference`
 // dep shape — Issue 724's recorded pre-existing finding).
 #[cfg(all(
     feature = "cubecl_runtime",
@@ -120,7 +120,7 @@ use crate::qwen_attention_cubecl::{
 // `all(cubecl_runtime, ternary_gemm_batched, ternary_attention_batched_prefill)`).
 // Gated with their use sites — on `cubecl_runtime` alone they read as unused
 // imports on every lane that compiles this module without the full ladder
-// (the riir-clippy consumer set names exactly such a combination).
+// (the riir-refine consumer set names exactly such a combination).
 #[cfg(all(
     feature = "cubecl_runtime",
     feature = "ternary_gemm_batched",

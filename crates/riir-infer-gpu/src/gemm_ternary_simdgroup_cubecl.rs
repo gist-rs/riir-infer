@@ -1,7 +1,7 @@
 //! Simdgroup-matrix ternary GEMM kernel (Issue 641 / Issue 637 T5 follow-up).
 //!
 //! This is the **real lever** for the 8.38× prefill gap measured in
-//! [riir-clippy Bench 010](../../riir-clippy/.benchmarks/010_llamacpp_vs_katgpt_ternary_clippy_tps.md):
+//! [riir-clippy Bench 010](../../riir-refine/.benchmarks/010_llamacpp_vs_katgpt_ternary_clippy_tps.md):
 //! llama.cpp's `kernel_mul_mm_q2_0_f32` uses Metal `simdgroup_matrix_8x8`
 //! cooperative matrix intrinsics, which is a different hardware path from the
 //! plane-cooperative kernel in [`crate::gemm_ternary_batched_cubecl`]. This

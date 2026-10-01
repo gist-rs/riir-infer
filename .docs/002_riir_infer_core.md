@@ -38,7 +38,7 @@ engine `lib.rs` under the same feature gate).
 
 `riir-engine` **re-exports everything at the SAME paths** (`riir_engine::transformer::*`
 etc. now route through to `riir_infer_core`), so every consumer — riir-gpu's 52
-importing files, `riir-train-engine`, riir-clippy's opt-in arms — compiles
+importing files, `riir-train-engine`, riir-refine's opt-in arms — compiles
 unchanged. 31 engine features forward to it (`X = [..., "riir-infer-core/X"]`),
 so feature unification is preserved bit-for-bit.
 
