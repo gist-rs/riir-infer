@@ -90,7 +90,7 @@ use objc2::rc::autoreleasepool;
 
 use super::super::{LayaError, Result};
 use super::backend::{AttnScratch, Backend};
-use super::weights::RawQ8;
+use super::weights::{RawQ4, RawQ8};
 
 mod mps;
 
@@ -423,7 +423,69 @@ const KERNELS: &[&str] = &[
     "sgemm_q8",
     "sgemm_xwide_q8",
     "sgemm_splitk_q8",
+    "q4_widen_t",
+    "sgemm_q4",
+    "sgemm_xwide_q4",
+    "sgemm_splitk_q4",
 ];
+
+/// The Q4 instances of the fused staging kernels (Plan 616 Phase 3 — the
+/// staging decode's format seam): DERIVED from the shipped Q8 texts by
+/// exact token replacement, never a second transcription. The tile math,
+/// the k-fastest lane mapping, the ragged-edge routes and the MMA bodies
+/// are the Q8 instances' bytes verbatim; the ONLY differences are the
+/// format seam itself — the block byte width (34 → 18), the buffer arg
+/// name, the kernel names, and the DECODE BLOCK (the per-element value:
+/// the same `float(half)·float(q)` shape with a sign-extended 4-bit
+/// nibble unpacked from the byte pair, branch-free: `nib − ((nib & 8)
+/// << 1)` is −16 exactly when the nibble's top bit is set). The shipped
+/// Q8 text is untouched — the q8 bit-identity battery keeps pinning
+/// byte-for-byte what it has always pinned.
+///
+/// (`q8`/`q4` are RUST-side string generations resolved BEFORE the MSL
+/// compiles — the per-format kernels are separate entry points, zero
+/// hot-loop format branching; PQ2 lands through this same seam as a
+/// third token table + decode body, per the Bonsai PQ precedent.)
+fn msl_sgemm_q4() -> String {
+    const Q8_DECODE: &str = "v = float(as_type<half>(bits)) * float((int8_t)bp[2u + (e & 31u)]);";
+    const Q4_DECODE: &str = concat!(
+        "const uint bix = e & 31u;\n",
+        "                const uint8_t qb = bp[2u + (bix >> 1u)];\n",
+        "                const uint nib4 = ((bix & 1u) == 0u) ? (qb & 0xFu) : (qb >> 4u);\n",
+        "                const int nib = (int)nib4 - (int)((nib4 & 0x8u) << 1u);\n",
+        "                v = float(as_type<half>(bits)) * float(nib);"
+    );
+    let swap = |src: &str, expect_decode: usize| -> String {
+        let s = src
+            .replace("kernel void sgemm_splitk_q8", "kernel void sgemm_splitk_q4")
+            .replace("kernel void sgemm_q8", "kernel void sgemm_q4")
+            .replace("kernel void sgemm_xwide_q8", "kernel void sgemm_xwide_q4")
+            .replace(
+                "device const uint8_t* q8 [[buffer(1)]],",
+                "device const uint8_t* q4 [[buffer(1)]],",
+            )
+            .replace(
+                "device const uint8_t* bp = q8 + (uint64_t)(e >> 5) * 34u;",
+                "device const uint8_t* bp = q4 + (uint64_t)(e >> 5) * 18u;",
+            )
+            .replace(Q8_DECODE, Q4_DECODE)
+            .replace("Q8 instance", "Q4 instance")
+            .replace("the narrow-Q8 body", "the narrow-Q4 body");
+        // The decode swap above must hit EXACTLY once per kernel body —
+        // a drifted token table would silently generate a Q4 kernel that
+        // decodes like Q8. Count, never assume (the narrow+splitk const
+        // carries two kernel bodies, the xwide const one).
+        assert_eq!(
+            src.matches(Q8_DECODE).count(),
+            expect_decode,
+            "the q8 decode token drifted in {} bytes of MSL",
+            src.len()
+        );
+        assert_eq!(src.matches("* 34u;").count(), expect_decode);
+        s
+    };
+    format!("{}{}", swap(MSL_SGEMM_Q8, 2), swap(MSL_SGEMM_XWIDE_Q8, 1))
+}
 
 /// The MSL source. Sizes fit u32 (every pinned extent < 2³¹); `erf_as` is
 /// candle's kernel verbatim (their constants, their op order). Every
@@ -1928,6 +1990,36 @@ kernel void q8_widen_t(device const uint8_t* src [[buffer(0)]],
 }
 "#;
 
+/// The Q4 load kernel (Plan 616 Phase 3 — the `q8_widen_t` twin at half
+/// the byte rate, kill-switch posture only): read a RAW blocked Q4_0
+/// weight, write the DEQUANTIZED TRANSPOSE, F32 `Wᵀ` row-major [k, n].
+/// The layout law is the same flat blocked walk (`block = e/32`, `lane =
+/// e%32`); the nibble unpack is the staging decode's exact arithmetic —
+/// even element low, odd element high, sign-extended branch-free — so
+/// the written values are [`crate::laya::riir::weights::widen_q4_0`]'s
+/// bit-for-bit.
+const MSL_Q4_WIDEN_T: &str = r#"
+kernel void q4_widen_t(device const uint8_t* src [[buffer(0)]],
+                       device float* dst [[buffer(1)]],
+                       constant uint& n [[buffer(2)]],
+                       constant uint& k [[buffer(3)]],
+                       uint gid [[thread_position_in_grid]]) {
+    if (gid >= (uint64_t)n * (uint64_t)k) { return; }
+    const uint kk = gid / n;
+    const uint nn = gid % n;
+    const uint e = nn * k + kk;   // the weight's FLAT element index
+    const uint blk = e / 32u;
+    const uint lane = e - blk * 32u;
+    device const uint8_t* bp = src + (uint64_t)blk * 18u;
+    const ushort bits = (ushort)bp[0] | ((ushort)bp[1] << 8);
+    const float d = float(as_type<half>(bits));
+    const uint nib4 = ((lane & 1u) == 0u) ? (bp[2u + (lane >> 1u)] & 0xFu)
+                                          : (bp[2u + (lane >> 1u)] >> 4u);
+    const int nib = (int)nib4 - (int)((nib4 & 0x8u) << 1u);
+    dst[gid] = d * float(nib);
+}
+"#;
+
 fn rt(detail: impl std::fmt::Display) -> LayaError {
     LayaError::Runtime(format!("riir metal backend: {detail}"))
 }
@@ -2023,6 +2115,14 @@ pub struct Metal {
     /// call and a flipped kill-switch simply builds the other map's
     /// buffer for the same key.
     weights_q8: Mutex<HashMap<(usize, usize), Buffer>>,
+    /// The Q4 twins of [`Self::weights_t_q8`] / [`Self::weights_q8`]
+    /// (Plan 616 Phase 3) — separate maps, so a Q8 key and a Q4 key are
+    /// structurally incapable of colliding. Same residency laws: the
+    /// default holds the RAW blocked bytes (18 B per 32 weights ≈ numel ×
+    /// 0.5625 — half the q8 tier), the kill-switch builds the F32 `Wᵀ`
+    /// through `q4_widen_t`.
+    weights_t_q4: Mutex<HashMap<(usize, usize), Buffer>>,
+    weights_q4: Mutex<HashMap<(usize, usize), Buffer>>,
     /// The pass-scoped command buffer + the committed drain list.
     pending: Mutex<PendingState>,
     /// The sync generation (how many host-read barriers have run).
@@ -2124,6 +2224,13 @@ pub struct Metal {
     /// first miss). Under the default device-resident posture this stays
     /// at zero — the mechanism pin that the widened `Wᵀ` is never built.
     q8_widen: AtomicU64,
+    /// Fused-q4 GEMM dispatches (`sgemm_q4` family) — the q4 tier's
+    /// reach counter, the same law as [`Self::q8_fused`] (Plan 616
+    /// Phase 3).
+    q4_fused: AtomicU64,
+    /// `q4_widen_t` load-kernel dispatches — the q4 kill-switch posture's
+    /// reach counter (zero under the default resident posture).
+    q4_widen: AtomicU64,
     /// The once-flag behind the MPS-off disclosure (Plan 616 Phase 2,
     /// option (i)): the first unsplit fused-q8 GEMM on a shape MPS would
     /// have served prints ONE line naming the priced alternative and the
@@ -2133,17 +2240,68 @@ pub struct Metal {
     trace_id: usize,
 }
 
+/// The raw-quant FORMAT of a fused staged-B dispatch (Plan 616 Phase 3 —
+/// the staging decode's format constant). The Q8 instances shipped in
+/// Phase 2; Q4 is the SAME tile math through a different decode + block
+/// width, and a third format (PQ2, the Bonsai PQ precedent) lands as the
+/// next row of this table + its decode, never a kernel transcription.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum QFmt {
+    Q8,
+    Q4,
+}
+
+impl QFmt {
+    /// The fused narrow instance's kernel name.
+    #[must_use]
+    const fn narrow(self) -> &'static str {
+        match self {
+            Self::Q8 => "sgemm_q8",
+            Self::Q4 => "sgemm_q4",
+        }
+    }
+
+    /// The fused xwide instance's kernel name.
+    #[must_use]
+    const fn xwide(self) -> &'static str {
+        match self {
+            Self::Q8 => "sgemm_xwide_q8",
+            Self::Q4 => "sgemm_xwide_q4",
+        }
+    }
+
+    /// The fused split-K instance's kernel name.
+    #[must_use]
+    const fn splitk(self) -> &'static str {
+        match self {
+            Self::Q8 => "sgemm_splitk_q8",
+            Self::Q4 => "sgemm_splitk_q4",
+        }
+    }
+
+    /// The kill-switch load kernel's name.
+    #[must_use]
+    const fn widen_t(self) -> &'static str {
+        match self {
+            Self::Q8 => "q8_widen_t",
+            Self::Q4 => "q4_widen_t",
+        }
+    }
+}
+
 /// The resolved weight-buffer lookup (Plan 616 Phase 2): the staged-B
 /// FORMAT of a `matmul_w`-family GEMM. `F32T` is the device F32 `Wᵀ`
 /// (the f32 posture and the `LAYA_Q8_DEVICE_F32=1` kill-switch);
-/// `Q8Raw` is the device-resident RAW blocked bytes — the fused q8
-/// staging kernels dequant-transpose in-flight, the same `d·q` tile
-/// values the widen produces, so the two arms are bit-identical by
-/// construction and differ ONLY in device residency and dispatch.
+/// `QRaw` is the device-resident RAW blocked bytes of one quant format
+/// ([`QFmt`] — the fused staging kernels dequant-transpose in-flight,
+/// the same tile values the format's widen produces, so the arms are
+/// bit-identical by construction and differ ONLY in device residency and
+/// dispatch). Plan 616 Phase 3 generalizes the old `Q8Raw` arm by the
+/// format constant — the spines below stay one body per op.
 #[derive(Clone, Copy)]
 enum WBuf<'a> {
     F32T(&'a Buffer),
-    Q8Raw(&'a Buffer),
+    QRaw { buf: &'a Buffer, fmt: QFmt },
 }
 
 impl Metal {
@@ -2160,7 +2318,8 @@ impl Metal {
         };
         let queue = device.new_command_queue();
         let msl = format!(
-            "{MSL_HEAD}{MSL_SGEMM_NARROW}{MSL_SGEMM_SPLITK}{MSL_SGEMM_Q8}{MSL_SGEMM_WIDE}{MSL_SGEMM_XWIDE}{MSL_SGEMM_XWIDE_Q8}{MSL_FLASH}{MSL_ATTN_ROPE}{MSL_TAIL}"
+            "{MSL_HEAD}{MSL_SGEMM_NARROW}{MSL_SGEMM_SPLITK}{MSL_SGEMM_Q8}{MSL_SGEMM_WIDE}{MSL_SGEMM_XWIDE}{MSL_SGEMM_XWIDE_Q8}{MSL_Q4_WIDEN_T}{}{MSL_FLASH}{MSL_ATTN_ROPE}{MSL_TAIL}",
+            msl_sgemm_q4()
         );
         let lib = device
             .new_library_with_source(&msl, &metal::CompileOptions::new())
@@ -2219,7 +2378,11 @@ impl Metal {
             mps_count: AtomicU64::new(0),
             q8_fused: AtomicU64::new(0),
             q8_widen: AtomicU64::new(0),
+            q4_fused: AtomicU64::new(0),
+            q4_widen: AtomicU64::new(0),
             q8_mps_note: AtomicBool::new(false),
+            weights_t_q4: Mutex::new(HashMap::new()),
+            weights_q4: Mutex::new(HashMap::new()),
             trace_id: next_trace_instance(),
         })
     }
@@ -2326,6 +2489,19 @@ impl Metal {
         self.q8_widen.load(Ordering::Relaxed)
     }
 
+    /// Fused-q4 GEMM dispatches this instance has made (Plan 616 Phase
+    /// 3) — the q4 device-resident posture's reach counter.
+    pub fn q4_fused_dispatches(&self) -> u64 {
+        self.q4_fused.load(Ordering::Relaxed)
+    }
+
+    /// `q4_widen_t` load-kernel dispatches — the q4 kill-switch posture's
+    /// reach counter. Under the default device-resident posture this
+    /// stays at 0.
+    pub fn q4_widen_dispatches(&self) -> u64 {
+        self.q4_widen.load(Ordering::Relaxed)
+    }
+
     /// The device pool's current allocation (Plan 616 Phase 2's residency
     /// column): what THIS process has charged the GPU so far, weights
     /// included. A measurement accessor, not a gate.
@@ -2334,21 +2510,23 @@ impl Metal {
     }
 
     /// The Phase 2 residency decision, read live per call (the house
-    /// kill-switch convention): `LAYA_Q8_DEVICE_F32=1` routes the q8 GEMM
-    /// entries back through Phase 1's device-F32 `Wᵀ` — the load kernel
-    /// and today's dispatch tree, MPS included. Two switches compose back
-    /// to the pre-plan shape: `LAYA_Q8_DEVICE_F32=1` restores Phase 1 and
+    /// kill-switch convention): `LAYA_Q8_DEVICE_F32=1` routes the raw-quant
+    /// GEMM entries (q8 — and, Phase 3, q4; the name is historical, the
+    /// switch governs the family) back through the device-F32 `Wᵀ` — the
+    /// load kernel and the pre-Phase-2 dispatch tree, MPS included. Two
+    /// switches compose back to the pre-plan shape:
+    /// `LAYA_Q8_DEVICE_F32=1` restores the Phase-1 device posture and
     /// `LAYA_Q8_HOST_F32=1` (read at parse) restores Phase 0.
-    fn q8_device_resident(&self) -> bool {
+    fn q_device_resident(&self) -> bool {
         std::env::var("LAYA_Q8_DEVICE_F32").as_deref() != Ok("1")
     }
 
-    /// The split rule the fused-q8 posture runs under: the PRE-T13 shape
-    /// (Plan 616 option (i) — MPS cannot read Q8 bytes, so the MPS-derived
-    /// [`SplitRule::WITH_MPS`] does not apply); any other pinned rule is
-    /// already pre-T13-shaped and carries over as-is. The master switch
-    /// (`LAYA_METAL_SPLITK=0`) is honored either way.
-    fn q8_split_rule(&self) -> SplitRule {
+    /// The split rule the fused-quant posture runs under: the PRE-T13
+    /// shape (Plan 616 option (i) — MPS cannot read RAW quant bytes, so
+    /// the MPS-derived [`SplitRule::WITH_MPS`] does not apply); any other
+    /// pinned rule is already pre-T13-shaped and carries over as-is. The
+    /// master switch (`LAYA_METAL_SPLITK=0`) is honored either way.
+    fn q_split_rule(&self) -> SplitRule {
         if self.split_rule == SplitRule::WITH_MPS {
             SplitRule {
                 on: self.split_rule.on,
@@ -2411,51 +2589,63 @@ impl Metal {
         b
     }
 
-    /// The Q8 twin (Plan 616 Phase 1, the kill-switch posture): same
-    /// device F32 `Wᵀ`, built from the RAW blocked bytes. First miss:
-    /// upload the Q8 bytes to a TRANSIENT device buffer, dispatch
-    /// `q8_widen_t` (dequant + transpose in-kernel — the host `d·q`
-    /// values exactly), then DROP the Q8 buffer (the command buffer
-    /// retains it; the serial queue orders the widen before every later
-    /// read). The host f32 copy never exists; the device holds ONE F32
-    /// copy per weight. Phase 2's default is [`Self::weight_q_buf`] —
-    /// this path runs only under `LAYA_Q8_DEVICE_F32=1`.
-    fn weight_t_buf_q8(&self, q: &RawQ8, n: usize, k: usize) -> Buffer {
-        assert_eq!(q.numel(), n * k, "weight_t_q8 extent");
-        let key = (q.raw().as_ptr() as usize, q.raw().len());
-        let mut map = self.weights_t_q8.lock().expect("weight_t_q8 cache poison");
+    /// The raw-quant twin (Plan 616 Phase 1 + Phase 3, the kill-switch
+    /// posture): same device F32 `Wᵀ`, built from the RAW blocked bytes.
+    /// First miss: upload the bytes to a TRANSIENT device buffer, dispatch
+    /// the format's widen kernel (dequant + transpose in-kernel — the
+    /// host `d·q` values exactly), then DROP the quant buffer (the command
+    /// buffer retains it; the serial queue orders the widen before every
+    /// later read). The host f32 copy never exists; the device holds ONE
+    /// F32 copy per weight. The default posture is [`Self::weight_q_buf`]
+    /// — this path runs only under `LAYA_Q8_DEVICE_F32=1`.
+    fn weight_t_buf_q(&self, fmt: QFmt, raw: &[u8], numel: usize, n: usize, k: usize) -> Buffer {
+        assert_eq!(numel, n * k, "weight_t_q extent");
+        let key = (raw.as_ptr() as usize, raw.len());
+        let map_slot = match fmt {
+            QFmt::Q8 => &self.weights_t_q8,
+            QFmt::Q4 => &self.weights_t_q4,
+        };
+        let mut map = map_slot.lock().expect("weight_t_q cache poison");
         if let Some(b) = map.get(&key) {
             return b.clone();
         }
-        let src = self.upload_bytes(q.raw());
+        let src = self.upload_bytes(raw);
         let dst = self.scratch(n * k);
-        self.q8_widen.fetch_add(1, Ordering::Relaxed);
+        match fmt {
+            QFmt::Q8 => self.q8_widen.fetch_add(1, Ordering::Relaxed),
+            QFmt::Q4 => self.q4_widen.fetch_add(1, Ordering::Relaxed),
+        };
+        let name = fmt.widen_t();
         self.run(
-            "q8_widen_t",
+            name,
             &[&src, &dst],
             &[n as u32, k as u32],
             &[],
             (n * k) as u64,
         )
-        .unwrap_or_else(|e| panic!("q8_widen_t: {e}"));
+        .unwrap_or_else(|e| panic!("{name}: {e}"));
         drop(src);
         map.insert(key, dst.clone());
         dst
     }
 
-    /// Device-resident RAW blocked Q8_0 bytes (Plan 616 Phase 2, the
-    /// default posture): ONE permanent buffer per weight in the
-    /// artifact's native `[n, k]` layout — `numel × 1.0625` bytes, 26.5%
-    /// of the F32 `Wᵀ`. First miss is a bare UPLOAD (no kernel, no
-    /// transpose — the fused staging kernels dequant in-flight from these
-    /// bytes), never invalidated.
-    fn weight_q_buf(&self, q: &RawQ8) -> Buffer {
-        let key = (q.raw().as_ptr() as usize, q.raw().len());
-        let mut map = self.weights_q8.lock().expect("weight_q8 cache poison");
+    /// Device-resident RAW blocked quant bytes (Plan 616 Phase 2 + Phase
+    /// 3, the default posture): ONE permanent buffer per weight in the
+    /// artifact's native `[n, k]` layout — 34 B per 32 weights (q8,
+    /// 1.0625 B/elt) or 18 B (q4, 0.5625 B/elt). First miss is a bare
+    /// UPLOAD (no kernel, no transpose — the fused staging kernels
+    /// dequant in-flight from these bytes), never invalidated.
+    fn weight_q_buf(&self, fmt: QFmt, raw: &[u8]) -> Buffer {
+        let key = (raw.as_ptr() as usize, raw.len());
+        let map_slot = match fmt {
+            QFmt::Q8 => &self.weights_q8,
+            QFmt::Q4 => &self.weights_q4,
+        };
+        let mut map = map_slot.lock().expect("weight_q cache poison");
         if let Some(b) = map.get(&key) {
             return b.clone();
         }
-        let b = self.upload_bytes(q.raw());
+        let b = self.upload_bytes(raw);
         map.insert(key, b.clone());
         b
     }
@@ -2994,22 +3184,25 @@ impl Metal {
         self.debug_writeback(&ob, act);
     }
 
-    /// [`Self::matmul_w_then_add`]'s fused-q8 twin (Plan 616 Phase 2):
-    /// the q8 GEMM into the fold staging, then the add — the same op
-    /// sequence and allocation posture, the B bytes staged from the raw
-    /// blocked weight.
-    fn matmul_w_q8_then_add(
+    /// [`Self::matmul_w_then_add`]'s fused-quant twin (Plan 616 Phase 2;
+    /// Phase 3 adds the format constant): the quant GEMM into the fold
+    /// staging, then the add — the same op sequence and allocation
+    /// posture, the B bytes staged from the raw blocked weight.
+    #[allow(clippy::too_many_arguments)]
+    fn matmul_w_q_then_add(
         &self,
         a: &[f32],
         m: usize,
         k: usize,
+        fmt: QFmt,
         qb: &Buffer,
         n: usize,
         x: &mut [f32],
     ) {
         let ab = self.chain_buf(a);
         let stage = self.fold_stage_buf(m * n);
-        self.run_sgemm_q8(
+        self.run_sgemm_q(
+            fmt,
             (&ab, 0),
             (qb, 0),
             (&stage, 0),
@@ -3025,12 +3218,14 @@ impl Metal {
         self.debug_writeback(&xb, x);
     }
 
-    /// [`Self::matmul_w_then_glu`]'s fused-q8 twin — same shape.
-    fn matmul_w_q8_then_glu(
+    /// [`Self::matmul_w_then_glu`]'s fused-quant twin — same shape.
+    #[allow(clippy::too_many_arguments)]
+    fn matmul_w_q_then_glu(
         &self,
         a: &[f32],
         m: usize,
         k: usize,
+        fmt: QFmt,
         qb: &Buffer,
         i_sz: usize,
         act: &mut [f32],
@@ -3038,7 +3233,8 @@ impl Metal {
         let n = i_sz * 2;
         let ab = self.chain_buf(a);
         let stage = self.fold_stage_buf(m * n);
-        self.run_sgemm_q8(
+        self.run_sgemm_q(
+            fmt,
             (&ab, 0),
             (qb, 0),
             (&stage, 0),
@@ -3059,53 +3255,63 @@ impl Metal {
         self.debug_writeback(&ob, act);
     }
 
-    /// The fused-q8 twin of [`Self::run_sgemm`] (Plan 616 Phase 2): the
-    /// split plan decided per row segment under the posture's rule
-    /// ([`Self::q8_split_rule`] — the pre-T13 shape, MPS cannot read Q8),
-    /// one fused dispatch per run. Weight GEMMs are batch-1
-    /// structurally; `uargs` = [m, n, k, `a_rs`, `a_cs`].
-    fn run_sgemm_q8(
+    /// The fused-quant twin of [`Self::run_sgemm`] (Plan 616 Phase 2;
+    /// Phase 3 adds the format constant): the split plan decided per row
+    /// segment under the posture's rule ([`Self::q_split_rule`] — the
+    /// pre-T13 shape, MPS cannot read RAW quant bytes), one fused dispatch
+    /// per run. Weight GEMMs are batch-1 structurally; `uargs` = [m, n,
+    /// k, `a_rs`, `a_cs`].
+    #[allow(clippy::too_many_arguments)]
+    fn run_sgemm_q(
         &self,
+        fmt: QFmt,
         a: (&Buffer, u64),
-        q8: (&Buffer, u64),
+        q: (&Buffer, u64),
         out: (&Buffer, u64),
         uargs: &[u32; 5],
         m: u32,
         n: u32,
     ) -> Result<()> {
-        let rule = self.q8_split_rule();
+        let rule = self.q_split_rule();
         for (row0, rows, split) in self.split_plan_with(&rule, m, n, uargs[2]) {
             let a_at = (a.0, a.1 + u64::from(row0) * u64::from(uargs[3]) * 4);
             let o_at = (out.0, out.1 + u64::from(row0) * u64::from(n) * 4);
             let mut u = *uargs;
             u[0] = rows;
-            self.run_sgemm_one_q8(a_at, q8, o_at, &u, rows, n, split)?;
+            self.run_sgemm_one_q(fmt, a_at, q, o_at, &u, rows, n, split)?;
         }
         Ok(())
     }
 
-    /// One fused-q8 GEMM dispatch with the split decision already made:
+    /// One fused-quant GEMM dispatch with the split decision already made:
     /// split-K when `split`, else the instance the single-wave band picks
     /// — the SAME band rule as the f32 tree (the instances are
     /// result-identical, so the pick never changes bits). NO MPS ARM:
     /// option (i) — the dense shapes MPS serves on the F32 `Wᵀ` run these
-    /// fused instances under device-resident q8, disclosed once.
+    /// fused instances under device-resident quant weights, disclosed once
+    /// (the disclosure is per process, shared across the formats — the
+    /// priced trade is the posture's, not a format's).
     #[allow(clippy::too_many_arguments)]
-    fn run_sgemm_one_q8(
+    fn run_sgemm_one_q(
         &self,
+        fmt: QFmt,
         a: (&Buffer, u64),
-        q8: (&Buffer, u64),
+        q: (&Buffer, u64),
         out: (&Buffer, u64),
         uargs: &[u32; 5],
         m: u32,
         n: u32,
         split: bool,
     ) -> Result<()> {
-        self.q8_fused.fetch_add(1, Ordering::Relaxed);
+        match fmt {
+            QFmt::Q8 => self.q8_fused.fetch_add(1, Ordering::Relaxed),
+            QFmt::Q4 => self.q4_fused.fetch_add(1, Ordering::Relaxed),
+        };
         if split {
-            return self.run_sgemm_splitk_q8(
+            return self.run_sgemm_splitk_q(
+                fmt,
                 a,
-                q8,
+                q,
                 out,
                 uargs,
                 m,
@@ -3119,7 +3325,7 @@ impl Metal {
             && !self.q8_mps_note.swap(true, Ordering::Relaxed)
         {
             eprintln!(
-                "[q8] device-resident: MPS off under q8 on the dense weight shapes (option (i), \
+                "[quant] device-resident: MPS off under raw-quant weights (option (i), \
                  priced −23…−42% GEMM time vs MPS; LAYA_Q8_DEVICE_F32=1 restores the F32 Wᵀ + MPS posture)"
             );
         }
@@ -3130,14 +3336,14 @@ impl Metal {
         let (name, bm, bn, staging, threads) =
             if tgs > WAVE_TG_FLOOR && tgs <= WAVE_TG_LIMIT && k >= XWAVE_K_MIN {
                 (
-                    "sgemm_xwide_q8",
+                    fmt.xwide(),
                     64u64,
                     128u64,
                     XWIDE_STAGING_BYTES,
                     XWIDE_THREADS,
                 )
             } else {
-                ("sgemm_q8", 32, 64, NARROW_STAGING_BYTES, NARROW_THREADS)
+                (fmt.narrow(), 32, 64, NARROW_STAGING_BYTES, NARROW_THREADS)
             };
         let kern = self
             .pipelines
@@ -3145,7 +3351,7 @@ impl Metal {
             .ok_or_else(|| rt(format!("kernel {name} missing")))?;
         self.encode(
             &kern.p,
-            &[a, q8, out],
+            &[a, q, out],
             &[uargs[0], uargs[1], uargs[2], uargs[3], uargs[4]],
             &[],
             MTLSize {
@@ -3163,15 +3369,16 @@ impl Metal {
         )
     }
 
-    /// The fused-q8 split-K PART dispatch (the f32
+    /// The fused-quant split-K PART dispatch (the f32
     /// [`Self::sgemm_splitk_parts`] twin): `slices` k-slices of `kc` from
     /// the raw blocked bytes into the partial scratch; returns the part
     /// buffer and the per-slice element count `m·n`.
     #[allow(clippy::too_many_arguments)]
-    fn sgemm_splitk_parts_q8(
+    fn sgemm_splitk_parts_q(
         &self,
+        fmt: QFmt,
         a: (&Buffer, u64),
-        q8: (&Buffer, u64),
+        q: (&Buffer, u64),
         uargs: &[u32; 5],
         m: u32,
         n: u32,
@@ -3181,13 +3388,14 @@ impl Metal {
         self.splitk_count.fetch_add(1, Ordering::Relaxed);
         let mn = m as usize * n as usize;
         let part = self.splitk_buf(mn * slices as usize);
+        let name = fmt.splitk();
         let kern = self
             .pipelines
-            .get("sgemm_splitk_q8")
-            .ok_or_else(|| rt("kernel sgemm_splitk_q8 missing"))?;
+            .get(name)
+            .ok_or_else(|| rt(format!("kernel {name} missing")))?;
         self.encode(
             &kern.p,
-            &[a, q8, (&part, 0)],
+            &[a, q, (&part, 0)],
             &[uargs[0], uargs[1], uargs[2], uargs[3], uargs[4], kc],
             &[],
             MTLSize {
@@ -3206,14 +3414,15 @@ impl Metal {
         Ok((part, mn))
     }
 
-    /// Fused-q8 split-K GEMM, plain reduce — the [`Self::run_sgemm_splitk`]
-    /// twin; the reduce epilogues are format-agnostic (f32 partials) and
-    /// shared verbatim.
+    /// Fused-quant split-K GEMM, plain reduce — the
+    /// [`Self::run_sgemm_splitk`] twin; the reduce epilogues are
+    /// format-agnostic (f32 partials) and shared verbatim.
     #[allow(clippy::too_many_arguments)]
-    fn run_sgemm_splitk_q8(
+    fn run_sgemm_splitk_q(
         &self,
+        fmt: QFmt,
         a: (&Buffer, u64),
-        q8: (&Buffer, u64),
+        q: (&Buffer, u64),
         out: (&Buffer, u64),
         uargs: &[u32; 5],
         m: u32,
@@ -3221,7 +3430,7 @@ impl Metal {
         slices: u32,
         kc: u32,
     ) -> Result<()> {
-        let (part, mn) = self.sgemm_splitk_parts_q8(a, q8, uargs, m, n, slices, kc)?;
+        let (part, mn) = self.sgemm_splitk_parts_q(fmt, a, q, uargs, m, n, slices, kc)?;
         let red = self
             .pipelines
             .get("splitk_reduce")
@@ -3247,13 +3456,14 @@ impl Metal {
         )
     }
 
-    /// Fused-q8 split-K GEMM with the RESIDUAL FOLD epilogue — the
+    /// Fused-quant split-K GEMM with the RESIDUAL FOLD epilogue — the
     /// [`Self::run_sgemm_splitk_accum`] twin (the epilogue is shared).
     #[allow(clippy::too_many_arguments)]
-    fn run_sgemm_splitk_accum_q8(
+    fn run_sgemm_splitk_accum_q(
         &self,
+        fmt: QFmt,
         a: (&Buffer, u64),
-        q8: (&Buffer, u64),
+        q: (&Buffer, u64),
         out_res: (&Buffer, u64),
         uargs: &[u32; 5],
         m: u32,
@@ -3261,7 +3471,7 @@ impl Metal {
         slices: u32,
         kc: u32,
     ) -> Result<()> {
-        let (part, mn) = self.sgemm_splitk_parts_q8(a, q8, uargs, m, n, slices, kc)?;
+        let (part, mn) = self.sgemm_splitk_parts_q(fmt, a, q, uargs, m, n, slices, kc)?;
         let red = self
             .pipelines
             .get("splitk_reduce_add")
@@ -3287,13 +3497,14 @@ impl Metal {
         )
     }
 
-    /// Fused-q8 split-K GEMM with the GLU FOLD epilogue — the
+    /// Fused-quant split-K GEMM with the GLU FOLD epilogue — the
     /// [`Self::run_sgemm_splitk_glu`] twin (the epilogue is shared).
     #[allow(clippy::too_many_arguments)]
-    fn run_sgemm_splitk_glu_q8(
+    fn run_sgemm_splitk_glu_q(
         &self,
+        fmt: QFmt,
         a: (&Buffer, u64),
-        q8: (&Buffer, u64),
+        q: (&Buffer, u64),
         act: (&Buffer, u64),
         uargs: &[u32; 5],
         m: u32,
@@ -3302,7 +3513,7 @@ impl Metal {
         kc: u32,
     ) -> Result<()> {
         let n = i_sz * 2;
-        let (part, _mn) = self.sgemm_splitk_parts_q8(a, q8, uargs, m, n, slices, kc)?;
+        let (part, _mn) = self.sgemm_splitk_parts_q(fmt, a, q, uargs, m, n, slices, kc)?;
         let red = self
             .pipelines
             .get("splitk_reduce_glu")
@@ -3553,8 +3764,8 @@ impl Metal {
         self.split_plan_with(&self.split_rule, m, n, k)
     }
 
-    /// [`Self::split_plan`] under an explicit rule — the fused-q8 posture
-    /// dispatches through here with [`Self::q8_split_rule`].
+    /// [`Self::split_plan`] under an explicit rule — the fused-quant
+    /// posture dispatches through here with [`Self::q_split_rule`].
     fn split_plan_with(&self, rule: &SplitRule, m: u32, n: u32, k: u32) -> Vec<(u32, u32, bool)> {
         let segs = self.row_segments.lock().expect("row segments poison");
         let hinted =
@@ -3685,7 +3896,8 @@ impl Metal {
                 n as u32,
                 1,
             ),
-            WBuf::Q8Raw(qb) => self.run_sgemm_q8(
+            WBuf::QRaw { buf: qb, fmt } => self.run_sgemm_q(
+                fmt,
                 (&ab, 0),
                 (qb, 0),
                 (&ob, 0),
@@ -3715,7 +3927,7 @@ impl Metal {
         if self.fold_res {
             let rule = match wb {
                 WBuf::F32T(_) => self.split_rule,
-                WBuf::Q8Raw(_) => self.q8_split_rule(),
+                WBuf::QRaw { .. } => self.q_split_rule(),
             };
             let plan = self.split_plan_with(&rule, m as u32, n as u32, k as u32);
             if plan.iter().all(|(_, _, s)| *s) {
@@ -3746,8 +3958,9 @@ impl Metal {
                                 SPLITK_KC,
                             )
                             .unwrap_or_else(|e| panic!("{e}")),
-                        WBuf::Q8Raw(qb) => self
-                            .run_sgemm_splitk_accum_q8(
+                        WBuf::QRaw { buf: qb, fmt } => self
+                            .run_sgemm_splitk_accum_q(
+                                fmt,
                                 (&ab, ((*row0 as usize) * k * 4) as u64),
                                 (qb, 0),
                                 (&xb, ((*row0 as usize) * n * 4) as u64),
@@ -3767,7 +3980,7 @@ impl Metal {
         }
         match wb {
             WBuf::F32T(wb) => self.matmul_w_then_add(a, m, k, wb, n, x),
-            WBuf::Q8Raw(qb) => self.matmul_w_q8_then_add(a, m, k, qb, n, x),
+            WBuf::QRaw { buf: qb, fmt } => self.matmul_w_q_then_add(a, m, k, fmt, qb, n, x),
         }
     }
 
@@ -3789,7 +4002,7 @@ impl Metal {
         if self.fold_glu {
             let rule = match wb {
                 WBuf::F32T(_) => self.split_rule,
-                WBuf::Q8Raw(_) => self.q8_split_rule(),
+                WBuf::QRaw { .. } => self.q_split_rule(),
             };
             let plan = self.split_plan_with(&rule, m as u32, n as u32, k as u32);
             if plan.iter().all(|(_, _, s)| *s) {
@@ -3816,8 +4029,9 @@ impl Metal {
                                 SPLITK_KC,
                             )
                             .unwrap_or_else(|e| panic!("{e}")),
-                        WBuf::Q8Raw(qb) => self
-                            .run_sgemm_splitk_glu_q8(
+                        WBuf::QRaw { buf: qb, fmt } => self
+                            .run_sgemm_splitk_glu_q(
+                                fmt,
                                 (&ab, ((*row0 as usize) * k * 4) as u64),
                                 (qb, 0),
                                 (&ob, ((*row0 as usize) * i_sz * 4) as u64),
@@ -3837,7 +4051,7 @@ impl Metal {
         }
         match wb {
             WBuf::F32T(wb) => self.matmul_w_then_glu(a, m, k, wb, i_sz, act),
-            WBuf::Q8Raw(qb) => self.matmul_w_q8_then_glu(a, m, k, qb, i_sz, act),
+            WBuf::QRaw { buf: qb, fmt } => self.matmul_w_q_then_glu(a, m, k, fmt, qb, i_sz, act),
         }
     }
 }
@@ -3927,16 +4141,59 @@ impl Backend for Metal {
     /// ([`Self::q8_fused_dispatches`] pins the reach).
     /// `LAYA_Q8_DEVICE_F32=1` restores Phase 1: the `q8_widen_t` load
     /// kernel dequant-transposes into the SAME device F32 `Wᵀ` and
-    /// today's dispatch tree (MPS included) runs unchanged.
+    /// today's dispatch tree (MPS included) runs unchanged. The Q4 twin
+    /// below is this entry's Phase 3 shape with the format constant
+    /// flipped — one spine, never a second transcription.
     fn matmul_w_q8(&self, a: &[f32], m: usize, k: usize, q: &RawQ8, n: usize, dst: &mut [f32]) {
         assert_eq!(a.len(), m * k, "lhs extent");
         assert_eq!(q.numel(), n * k, "weight extent");
         assert_eq!(dst.len(), m * n, "dst extent");
-        if self.q8_device_resident() {
-            let qb = self.weight_q_buf(q);
-            self.matmul_w_wb(a, m, k, WBuf::Q8Raw(&qb), n, dst);
+        if self.q_device_resident() {
+            let qb = self.weight_q_buf(QFmt::Q8, q.raw());
+            self.matmul_w_wb(
+                a,
+                m,
+                k,
+                WBuf::QRaw {
+                    buf: &qb,
+                    fmt: QFmt::Q8,
+                },
+                n,
+                dst,
+            );
         } else {
-            let wb = self.weight_t_buf_q8(q, n, k);
+            let wb = self.weight_t_buf_q(QFmt::Q8, q.raw(), q.numel(), n, k);
+            self.matmul_w_wb(a, m, k, WBuf::F32T(&wb), n, dst);
+        }
+    }
+
+    /// The Q4 twin (Plan 616 Phase 3): the q8 entry's shape with
+    /// [`QFmt::Q4`] — the raw blocked nibble bytes upload once (0.5625
+    /// B/element, half the q8 tier) and the fused `sgemm_q4` staging
+    /// family dequant-transposes in-flight; bit-identity to the Q4 host
+    /// widen by the same construction argument (the staging decode IS
+    /// `widen_q4_0`'s arithmetic). The load-kernel kill-switch posture is
+    /// shared: `LAYA_Q8_DEVICE_F32=1` routes through `q4_widen_t` + the
+    /// f32 tree (MPS included).
+    fn matmul_w_q4(&self, a: &[f32], m: usize, k: usize, q: &RawQ4, n: usize, dst: &mut [f32]) {
+        assert_eq!(a.len(), m * k, "lhs extent");
+        assert_eq!(q.numel(), n * k, "weight extent");
+        assert_eq!(dst.len(), m * n, "dst extent");
+        if self.q_device_resident() {
+            let qb = self.weight_q_buf(QFmt::Q4, q.raw());
+            self.matmul_w_wb(
+                a,
+                m,
+                k,
+                WBuf::QRaw {
+                    buf: &qb,
+                    fmt: QFmt::Q4,
+                },
+                n,
+                dst,
+            );
+        } else {
+            let wb = self.weight_t_buf_q(QFmt::Q4, q.raw(), q.numel(), n, k);
             self.matmul_w_wb(a, m, k, WBuf::F32T(&wb), n, dst);
         }
     }
@@ -3968,11 +4225,47 @@ impl Backend for Metal {
         assert_eq!(a.len(), m * k, "lhs extent");
         assert_eq!(q.numel(), n * k, "weight extent");
         assert_eq!(x.len(), m * n, "residual extent");
-        if self.q8_device_resident() {
-            let qb = self.weight_q_buf(q);
-            self.matmul_w_accum_wb(a, m, k, WBuf::Q8Raw(&qb), n, x);
+        if self.q_device_resident() {
+            let qb = self.weight_q_buf(QFmt::Q8, q.raw());
+            self.matmul_w_accum_wb(
+                a,
+                m,
+                k,
+                WBuf::QRaw {
+                    buf: &qb,
+                    fmt: QFmt::Q8,
+                },
+                n,
+                x,
+            );
         } else {
-            let wb = self.weight_t_buf_q8(q, n, k);
+            let wb = self.weight_t_buf_q(QFmt::Q8, q.raw(), q.numel(), n, k);
+            self.matmul_w_accum_wb(a, m, k, WBuf::F32T(&wb), n, x);
+        }
+    }
+
+    /// The Q4 twin (Plan 616 Phase 3) — the q8 entry's shape with the
+    /// format constant flipped. Kill-switch and doc:
+    /// [`Backend::matmul_w_q4`].
+    fn matmul_w_accum_q4(&self, a: &[f32], m: usize, k: usize, q: &RawQ4, n: usize, x: &mut [f32]) {
+        assert_eq!(a.len(), m * k, "lhs extent");
+        assert_eq!(q.numel(), n * k, "weight extent");
+        assert_eq!(x.len(), m * n, "residual extent");
+        if self.q_device_resident() {
+            let qb = self.weight_q_buf(QFmt::Q4, q.raw());
+            self.matmul_w_accum_wb(
+                a,
+                m,
+                k,
+                WBuf::QRaw {
+                    buf: &qb,
+                    fmt: QFmt::Q4,
+                },
+                n,
+                x,
+            );
+        } else {
+            let wb = self.weight_t_buf_q(QFmt::Q4, q.raw(), q.numel(), n, k);
             self.matmul_w_accum_wb(a, m, k, WBuf::F32T(&wb), n, x);
         }
     }
@@ -4011,11 +4304,56 @@ impl Backend for Metal {
         assert_eq!(a.len(), m * k, "lhs extent");
         assert_eq!(q.numel(), n * k, "weight extent");
         assert_eq!(act.len(), m * i_sz, "glu out extent");
-        if self.q8_device_resident() {
-            let qb = self.weight_q_buf(q);
-            self.matmul_w_glu_wb(a, m, k, WBuf::Q8Raw(&qb), i_sz, act);
+        if self.q_device_resident() {
+            let qb = self.weight_q_buf(QFmt::Q8, q.raw());
+            self.matmul_w_glu_wb(
+                a,
+                m,
+                k,
+                WBuf::QRaw {
+                    buf: &qb,
+                    fmt: QFmt::Q8,
+                },
+                i_sz,
+                act,
+            );
         } else {
-            let wb = self.weight_t_buf_q8(q, n, k);
+            let wb = self.weight_t_buf_q(QFmt::Q8, q.raw(), q.numel(), n, k);
+            self.matmul_w_glu_wb(a, m, k, WBuf::F32T(&wb), i_sz, act);
+        }
+    }
+
+    /// The Q4 twin (Plan 616 Phase 3) — the q8 entry's shape with the
+    /// format constant flipped. Kill-switch and doc:
+    /// [`Backend::matmul_w_q4`].
+    fn matmul_w_glu_q4(
+        &self,
+        a: &[f32],
+        m: usize,
+        k: usize,
+        q: &RawQ4,
+        i_sz: usize,
+        act: &mut [f32],
+    ) {
+        let n = i_sz * 2;
+        assert_eq!(a.len(), m * k, "lhs extent");
+        assert_eq!(q.numel(), n * k, "weight extent");
+        assert_eq!(act.len(), m * i_sz, "glu out extent");
+        if self.q_device_resident() {
+            let qb = self.weight_q_buf(QFmt::Q4, q.raw());
+            self.matmul_w_glu_wb(
+                a,
+                m,
+                k,
+                WBuf::QRaw {
+                    buf: &qb,
+                    fmt: QFmt::Q4,
+                },
+                i_sz,
+                act,
+            );
+        } else {
+            let wb = self.weight_t_buf_q(QFmt::Q4, q.raw(), q.numel(), n, k);
             self.matmul_w_glu_wb(a, m, k, WBuf::F32T(&wb), i_sz, act);
         }
     }
@@ -4624,10 +4962,25 @@ impl Backend for Metal {
             return;
         }
         assert_eq!(q.numel(), n * k, "warm_weight_2d_q8 extent");
-        if self.q8_device_resident() {
-            let _ = self.weight_q_buf(q);
+        if self.q_device_resident() {
+            let _ = self.weight_q_buf(QFmt::Q8, q.raw());
         } else {
-            let _ = self.weight_t_buf_q8(q, n, k);
+            let _ = self.weight_t_buf_q(QFmt::Q8, q.raw(), q.numel(), n, k);
+        }
+    }
+
+    /// The Q4 twin (Plan 616 Phase 3): pre-place the raw blocked nibble
+    /// bytes (or build the F32 `Wᵀ` via `q4_widen_t` under the
+    /// kill-switch). First-miss-safe either way.
+    fn warm_weight_2d_q4(&self, q: &RawQ4, n: usize, k: usize) {
+        if q.numel() == 0 {
+            return;
+        }
+        assert_eq!(q.numel(), n * k, "warm_weight_2d_q4 extent");
+        if self.q_device_resident() {
+            let _ = self.weight_q_buf(QFmt::Q4, q.raw());
+        } else {
+            let _ = self.weight_t_buf_q(QFmt::Q4, q.raw(), q.numel(), n, k);
         }
     }
 

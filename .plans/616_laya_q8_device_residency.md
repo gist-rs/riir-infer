@@ -284,19 +284,80 @@ the documented escape at exactly those postures.
       fixture bug wearing a kernel-bug costume, the same law the
       identity tests encode as `dense_twin`).
 
-### Phase 3 — adoption + re-seat + the Q4 seam
+### Phase 3 — adoption + re-seat + the Q4 seam — **EXECUTED 2026-10-02**
 
-- [ ] If (and only if) any gate moved bits: the instinct/serve cells
-      re-seat per device at the new numerics (the issue's "never
-      grandfathered" law); if no bit moved: the re-seat is the no-change
-      proof, recorded like 0047's.
-- [ ] The `/#sizes` row + its note re-measure (the served posture's
-      memory line becomes the headline number).
-- [ ] The Q4/PQ2 second (the issue's): the staging decode's format
-      constant is the seam — a new format lands as a decoder + an
-      artifact converter + the same bit-identity battery at ITS fidelity
-      (Q4 retention is D1-priced separately; PQ2 rides the Bonsai PQ
-      precedent).
+- [x] The re-seat: NO bit moved at any seated cell's surface — the F16
+      path (Dense → `matmul_w` → MPS) is byte-untouched (G5 parity green
+      at both postures against the in-flight substrate, CPU 27.5 s / Metal
+      10.7 s; the live probe's B==C arms byte-identical), so the seated
+      instinct/serve cells STAND — the re-seat is the no-change proof,
+      recorded like 0047's. The q8 posture's own adoption re-seat: the
+      live probe re-run at HEAD reproduced Phase 2's numbers exactly
+      (fused deterministic ×2 byte-identical; Phase-1 tree byte-identical;
+      the option-(i) dispatch delta 5.364e-7 probs / 7.153e-7 conf / act
+      exactly 0 — two orders under G5; RSS 1491 / 1880 / 4825 MiB; device
+      residency 348.8 vs 1654.9 MiB = 4.74×) — D2b is ADOPTED as the q8
+      serving posture on that evidence.
+- [x] The `/#sizes` row + note re-measured (reflex-site `78488db`): the
+      rethink_encoder row's model bytes are now the ADOPTED q8 artifact
+      (447,729,135 B recorded measurement + the three NLEH heads
+      7,994,976 B = 455,724,111 B; engine 28,748,684 B unchanged — total
+      484,472,795 B, 44% under the F16 row), and the note leads with the
+      served posture's MEMORY line (device residency 348.8 MiB / 4.74×,
+      RSS 1,492 vs 4,825 MiB) as the headline; the F16 HF-tree number
+      (848,195,504 B) stays as the legacy reference. Self-test + live
+      regeneration clean (`test_publish_sizes.py` 10/10, `--check` PASS).
+- [x] The Q4 seam (the issue's Q4 second — the FORMAT tier only, its
+      retention D1-priced separately): the staging decode's format
+      constant is the seam, and it landed as
+      - **decoder**: `RawQ4` / `WeightData::Q4` / `Weight2D::Q4` +
+        `widen_q4_0` + `q4_blocked_len` (weights.rs) — the house Q8 law's
+        4-bit shape: block-32, scale `f16(amax/7)`, signed grid [-7, +7]
+        (both ±amax on the grid ends up to the f16 scale's own rounding,
+        zero exact), GGML nibble order (even element low, odd high),
+        18 B/block = 0.5625 B/elt — half the q8 tier. A `-8` nibble
+        decodes too (never produced by the house converter, accepted for
+        GGML interop).
+      - **converter**: `laya-quant4` + `q4_artifact::convert_checkpoint`
+        over the SHARED container machinery (`blocked_artifact.rs` —
+        serialize / read-back proof / atomic commit / sidecar / variant
+        resolution extracted from the q8 lane, so a third format lands
+        as a decode + an encode loop, never a second transcription);
+        the proof target is the in-memory fake-quant-Q4 grid, byte-exact;
+        `LAYA_WEIGHTS_VARIANT=q4` resolves through the same env seam
+        (both formats in one table, sidecar-verified, never auto-derived).
+      - **the device tier through the format constant**: `metal.rs`'s
+        `QFmt` enum (narrow/xwide/splitk/widen_t names per format) +
+        `WBuf::QRaw { buf, fmt }` — the spines stay one body per op;
+        the q4 MSL kernels are DERIVED from the shipped q8 texts by
+        exact token replacement (the decode block + block width 34→18
+        + names — the tile math, k-fastest lanes and ragged-edge routes
+        are the q8 bytes verbatim; the token table asserts its own hit
+        counts at generation, so a drifted token fails loud, never
+        generates a q4 kernel that decodes like q8); `q4_widen_t` is
+        the load kernel twin; `q4_fused`/`q4_widen` reach counters;
+        the kill-switches (`LAYA_Q8_DEVICE_F32`, `LAYA_Q8_HOST_F32`)
+        govern the raw-quant FAMILY (both formats), documented.
+      - **the bit-identity battery at ITS fidelity** (ALL GREEN):
+        `q4_widen_identity` 6/6 (CPU bit-identity; Metal packed-forward
+        bit-identity incl. the fold arms + mixed-plan fallback; first
+        miss; unfused stream; resident-vs-kill-switch counters + the
+        dispatch delta G5-class; the `q4_widen_t` transpose read out
+        through an identity matmul vs the host nibble widen at the k-tail
+        shape) + the `metal_ops_smoke` q4 arms (the shared-tree battery
+        at 7 shapes incl. the xwide pick + the k-tail + the flat-tail
+        a0w class, the accum/glu folds vs the unfused streams, and the
+        kill-switch arm). lib 56/56 (+8), every metal suite green, the
+        q8 battery byte-unchanged (6/6, the shipped surface untouched),
+        clippy `-D warnings` at metal / default / no-default / cubecl.
+      - **PQ2** rides this same seam as the next format row (the Bonsai
+        PQ precedent) — a decode + an encode loop + a QFmt row, no
+        kernel transcription.
+      - En-route, pre-existing at HEAD: the `sgemm_q8_fused_probe`
+        example (Phase 2's own A/B) carried no `[[example]]` row and
+        its `#![cfg]`-gated body compiled to a main-less example — the
+        bare-clippy posture red on it; the required-features row landed
+        with this work (the repo-birth gate discipline).
 
 ## Non-goals
 

@@ -149,6 +149,11 @@ name = "laya-quant8"
 path = "src/bin/laya_quant8.rs"
 required-features = ["laya-riir"]
 
+[[bin]]
+name = "laya-quant4"
+path = "src/bin/laya_quant4.rs"
+required-features = ["laya-riir"]
+
 # The Metal-vs-CPU op-equivalence gate is whole-file #![cfg]-gated
 # (macOS + the metal feature) and compiles to an empty binary elsewhere;
 # this row is the reader protection (a --features selection without the
@@ -209,6 +214,12 @@ required-features = ["laya-riir"]
 # skipping the target loudly instead of printing a green zero.
 [[test]]
 name = "q8_widen_identity"
+required-features = ["laya-riir-metal"]
+
+# The Q4 residency bit-identity gate (Plan 616 Phase 3) — the q8
+# battery's 4-bit twin, same cfg law.
+[[test]]
+name = "q4_widen_identity"
 required-features = ["laya-riir-metal"]
 
 # The prefix-state coupling gate (riir-reflex issue 054 Part 2 verdict
@@ -288,6 +299,10 @@ required-features = ["laya-riir-metal"]
 
 [[example]]
 name = "sgemm_mps_probe"
+required-features = ["laya-riir-metal"]
+
+[[example]]
+name = "sgemm_q8_fused_probe"
 required-features = ["laya-riir-metal"]
 
 [[example]]

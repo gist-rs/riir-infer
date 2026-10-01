@@ -43,10 +43,12 @@
 
 pub mod agent;
 pub mod backend;
+pub mod blocked_artifact;
 pub mod encoder;
 pub mod fake_quant;
 pub mod head;
 pub mod ops;
+pub mod q4_artifact;
 pub mod q8_artifact;
 pub mod weights;
 
@@ -77,4 +79,5 @@ pub mod ane;
 
 pub use agent::{EncodedQuestion, RiirAgent};
 pub use fake_quant::{FakeQuantReport, WeightPosture};
+pub use q4_artifact::Q4ConvertReport;
 pub use q8_artifact::Q8ConvertReport;

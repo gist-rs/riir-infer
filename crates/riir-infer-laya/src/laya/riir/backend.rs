@@ -13,7 +13,7 @@
 //! `Encoder` / `Head` / `RiirAgent` single concrete types (the device is
 //! chosen at load, [`super::agent`]).
 
-use super::weights::RawQ8;
+use super::weights::{RawQ4, RawQ8};
 
 /// The ~15 ops the model forward needs. Signatures mirror the [`super::ops`]
 /// free fns 1:1 so the CPU impl is a straight delegation and the forward
@@ -422,6 +422,43 @@ pub trait Backend {
         m: usize,
         k: usize,
         q: &RawQ8,
+        i_sz: usize,
+        act: &mut [f32],
+    ) {
+        self.matmul_w_glu(a, m, k, q.wide(), i_sz, act);
+    }
+
+    // ── The Q4_0 family (Plan 616 Phase 3): the Q8 family's 4-bit twin,
+    // the same widen-once defaults — the CPU lane (and any backend that
+    // does not override) resolves through the payload's once-only host
+    // widening (`q.wide()` — the `d · q` nibble pass), byte-identical.
+    // The Metal lane overrides all four: resident RAW bytes + the fused
+    // q4 staging kernels by default, the `q4_widen_t` load kernel under
+    // the kill-switch.
+
+    /// Pre-place one Q4-carried projection weight (the
+    /// [`Backend::warm_weight_2d`] twin for the q4 artifact posture).
+    fn warm_weight_2d_q4(&self, q: &RawQ4, n: usize, k: usize) {
+        self.warm_weight_2d(q.wide(), n, k);
+    }
+
+    /// [`Backend::matmul_w`] over a Q4-carried weight.
+    fn matmul_w_q4(&self, a: &[f32], m: usize, k: usize, q: &RawQ4, n: usize, dst: &mut [f32]) {
+        self.matmul_w(a, m, k, q.wide(), n, dst);
+    }
+
+    /// [`Backend::matmul_w_accum`] over a Q4-carried weight.
+    fn matmul_w_accum_q4(&self, a: &[f32], m: usize, k: usize, q: &RawQ4, n: usize, x: &mut [f32]) {
+        self.matmul_w_accum(a, m, k, q.wide(), n, x);
+    }
+
+    /// [`Backend::matmul_w_glu`] over a Q4-carried weight.
+    fn matmul_w_glu_q4(
+        &self,
+        a: &[f32],
+        m: usize,
+        k: usize,
+        q: &RawQ4,
         i_sz: usize,
         act: &mut [f32],
     ) {

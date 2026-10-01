@@ -34,6 +34,7 @@ use super::super::weights::ensure_checkpoint;
 use super::super::{LayaError, Result};
 use super::backend::{Backend, Cpu};
 use super::encoder::Encoder;
+use super::fake_quant::WeightPosture;
 use super::head::{Head, HeadOutput, HeadScratch};
 
 /// The device the riir forward runs on, chosen at load from `LAYA_DEVICE`.
@@ -206,7 +207,7 @@ pub struct EncodedQuestion {
 /// form), but the record still names the quantized surface (tensors/
 /// elements; the 1D tensors carried F16) with zero error (the stored
 /// values ARE the weights).
-fn q8_artifact_disclosure(
+fn quant_artifact_disclosure(
     raw: &std::collections::HashMap<String, super::weights::Weights>,
 ) -> super::fake_quant::FakeQuantReport {
     let mut rep = super::fake_quant::FakeQuantReport {
@@ -356,20 +357,35 @@ impl RiirAgent {
                     .into(),
             });
         }
-        // The Q8 artifact posture is a STORAGE selection, not an in-memory
-        // transform — the env owns it (LAYA_WEIGHTS_VARIANT=q8). An
-        // explicit load_with_posture(Q8Artifact) with the env unset would
+        // The derived-artifact postures are STORAGE selections, not
+        // in-memory transforms — the env owns them
+        // (LAYA_WEIGHTS_VARIANT=q8|q4). An explicit
+        // load_with_posture(<artifact posture>) with the env unset would
         // load F16 weights under a quantized label — refused, never a
         // silent mislabel.
-        if posture == super::fake_quant::WeightPosture::Q8Artifact
-            && !matches!(std::env::var("LAYA_WEIGHTS_VARIANT").as_deref(), Ok("q8"))
-        {
+        let posture_env_ok = match posture {
+            WeightPosture::Q8Artifact => {
+                matches!(std::env::var("LAYA_WEIGHTS_VARIANT").as_deref(), Ok("q8"))
+            }
+            WeightPosture::Q4Artifact => {
+                matches!(std::env::var("LAYA_WEIGHTS_VARIANT").as_deref(), Ok("q4"))
+            }
+            _ => true,
+        };
+        if !posture_env_ok {
+            let env = if posture == WeightPosture::Q4Artifact {
+                "q4"
+            } else {
+                "q8"
+            };
             return Err(LayaError::Config {
                 checkpoint: ckpt.subfolder(),
-                detail: "WeightPosture::Q8Artifact is selected by LAYA_WEIGHTS_VARIANT=q8 \
-                         (the storage variant), not by load_with_posture — set the env \
-                         or use WeightPosture::F16"
-                    .into(),
+                detail: format!(
+                    "WeightPosture::{} is selected by LAYA_WEIGHTS_VARIANT={env} \
+                     (the storage variant), not by load_with_posture — set the env \
+                     or use WeightPosture::F16",
+                    posture.label()
+                ),
             });
         }
         let dir = ensure_checkpoint(root, ckpt)?;
@@ -377,20 +393,22 @@ impl RiirAgent {
         let (agent_cfg, enc_cfg) = load_checkpoint_configs(&dir, name)?;
 
         let tok = Tok::from_dir(&dir, name)?;
-        // The storage variant (instinct issue 018 Lane D2a): LAYA_WEIGHTS_VARIANT=q8
-        // loads the derived Q8_0 artifact (sidecar-verified) instead of the
-        // canonical F16 file — the decode arithmetic is the fake-quant
-        // path's own, so the numerics are the probe's measured ones with
-        // NO in-memory transform. The explicit postures below win over
-        // the env where they disagree is a REFUSAL, never a silent pick:
-        // FakeQuantQ8 on a q8 artifact would quantize twice.
-        let (weights_path, q8_artifact) = super::q8_artifact::resolve_weights_file(&dir, name)?;
-        if q8_artifact {
-            if matches!(posture, super::fake_quant::WeightPosture::FakeQuantQ8) {
+        // The storage variant (instinct issue 018 Lane D2a; Plan 616
+        // Phase 3 adds q4): LAYA_WEIGHTS_VARIANT=q8|q4 loads the derived
+        // artifact (sidecar-verified) instead of the canonical F16 file —
+        // the decode arithmetic is the fake-quant path's own, so the
+        // numerics are the probe's measured ones with NO in-memory
+        // transform. The explicit postures below win over the env where
+        // they disagree is a REFUSAL, never a silent pick: FakeQuantQ8 on
+        // any artifact would quantize twice.
+        let (weights_path, artifact_posture) =
+            super::q8_artifact::resolve_weights_posture(&dir, name)?;
+        if artifact_posture.is_some() {
+            if matches!(posture, WeightPosture::FakeQuantQ8) {
                 return Err(LayaError::Config {
                     checkpoint: name,
-                    detail: "--fake-quant over a Q8 artifact would quantize TWICE — the \
-                             artifact already carries the probe's exact weight values; \
+                    detail: "--fake-quant over a derived quant artifact would quantize TWICE — \
+                             the artifact already carries quantized values; \
                              drop --fake-quant or unset LAYA_WEIGHTS_VARIANT"
                         .into(),
                 });
@@ -398,7 +416,7 @@ impl RiirAgent {
             if ane_requested {
                 return Err(LayaError::Config {
                     checkpoint: name,
-                    detail: "the ANE lane runs the Core ML artifact — a Q8 weights \
+                    detail: "the ANE lane runs the Core ML artifact — a quant weights \
                              variant does not apply (refusing, never a silent ignore)"
                         .into(),
                 });
@@ -412,9 +430,11 @@ impl RiirAgent {
         // in the Core ML artifact, so a map-level transform would be a
         // silent no-op wearing a quantized label.
         let fake_quant = match posture {
-            super::fake_quant::WeightPosture::F16 => None,
-            super::fake_quant::WeightPosture::Q8Artifact => None, // loaded that way above
-            super::fake_quant::WeightPosture::FakeQuantQ8 if ane_requested => {
+            WeightPosture::F16 => None,
+            // The artifact postures load that way above — no in-memory
+            // transform here (Q4Artifact rides the same arm).
+            WeightPosture::Q8Artifact | WeightPosture::Q4Artifact => None,
+            WeightPosture::FakeQuantQ8 if ane_requested => {
                 return Err(LayaError::Config {
                     checkpoint: name,
                     detail: "fake-quant does not apply to the ANE lane — its layer weights \
@@ -423,7 +443,7 @@ impl RiirAgent {
                         .into(),
                 });
             }
-            super::fake_quant::WeightPosture::FakeQuantQ8 => {
+            WeightPosture::FakeQuantQ8 => {
                 let rep = super::fake_quant::fake_quant_q8_map(&mut raw).map_err(|e| {
                     LayaError::Config {
                         checkpoint: name,
@@ -433,11 +453,11 @@ impl RiirAgent {
                 Some(rep)
             }
         };
-        // The q8-artifact posture's disclosure: the decode built no report
-        // (nothing was transformed here), but the record needs the tensor
-        // surface — derive it from the loaded map's shape words.
-        let fake_quant = if q8_artifact {
-            Some(q8_artifact_disclosure(&raw))
+        // A derived-artifact posture's disclosure: the decode built no
+        // report (nothing was transformed here), but the record needs the
+        // tensor surface — derive it from the loaded map's shape words.
+        let fake_quant = if artifact_posture.is_some() {
+            Some(quant_artifact_disclosure(&raw))
         } else {
             fake_quant
         };
@@ -537,8 +557,8 @@ impl RiirAgent {
 
         let temps = Temperatures::from_config(&agent_cfg);
         let device_label = if ane_requested { "ane" } else { backend.name() };
-        let posture_word = if q8_artifact {
-            super::fake_quant::WeightPosture::Q8Artifact
+        let posture_word = if let Some(p) = artifact_posture {
+            p
         } else {
             posture
         };

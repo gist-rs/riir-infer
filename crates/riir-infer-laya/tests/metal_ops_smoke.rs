@@ -41,7 +41,7 @@ use std::sync::{Mutex, MutexGuard, OnceLock};
 
 use riir_infer_laya::laya::riir::backend::{Backend, Cpu};
 use riir_infer_laya::laya::riir::metal::Metal;
-use riir_infer_laya::laya::riir::weights::RawQ8;
+use riir_infer_laya::laya::riir::weights::{RawQ4, RawQ8};
 
 /// Serialize fake-quantized values into the raw Q8_0 block layout (the
 /// converter's own block loop) — the Q8 arms' fixture.
@@ -59,6 +59,30 @@ fn q8_bytes_for(data: &[f32]) -> Vec<u8> {
         out.extend_from_slice(&bits.to_le_bytes());
         for &x in block {
             out.push(q8_quant_of(x, d) as u8);
+        }
+    }
+    out
+}
+
+/// Serialize fake-quantized values into the raw Q4_0 block layout (the
+/// converter's own block loop + GGML nibble order: even element low,
+/// odd element high) — the Q4 arms' fixture (Plan 616 Phase 3).
+fn q4_bytes_for(data: &[f32]) -> Vec<u8> {
+    use riir_infer_laya::laya::riir::fake_quant::{
+        BLOCK, fake_quant_q4, q4_quant_of, q4_scale_bits, q4_scale_f32,
+    };
+    let mut q = data.to_vec();
+    fake_quant_q4(&mut q);
+    let mut out = Vec::new();
+    for block in q.chunks(BLOCK) {
+        let amax = block.iter().fold(0.0f32, |m, &x| m.max(x.abs()));
+        let bits = q4_scale_bits(amax);
+        let d = q4_scale_f32(bits);
+        out.extend_from_slice(&bits.to_le_bytes());
+        for pair in block.chunks(2) {
+            let lo = q4_quant_of(pair[0], d) as u8;
+            let hi = pair.get(1).map(|&v| q4_quant_of(v, d) as u8).unwrap_or(0);
+            out.push((hi & 0x0F) << 4 | (lo & 0x0F));
         }
     }
     out
@@ -329,6 +353,128 @@ fn metal_ops_match_cpu_op_by_op() {
         );
         assert_eq!(
             m_ks.q8_fused_dispatches(),
+            0,
+            "the kill-switch arm must stay off the fused path"
+        );
+    }
+    {
+        // THE Q4 BIT-IDENTITY BATTERY (Plan 616 Phase 3 — the q8 block's
+        // 4-bit twin through the format seam): the derived `sgemm_q4`
+        // family vs the f32 carrier OF THE DECODED Q4 VALUES on the SAME
+        // dispatch tree (m4_bit is MPS-off). The instance is scoped and
+        // DRAINED before it drops (the file's one-live-instance
+        // discipline).
+        let m4_bit = Metal::new().expect("metal backend").with_mps(false);
+        assert!(m4_bit.q4_fused_dispatches() == 0);
+        for (mm, k, n) in [
+            (25usize, 768usize, 2304usize), // split-K (q4 fused splitk + fold f32)
+            (7, 64, 33),                    // ragged n
+            (1, 257, 129),                  // k tail past BK 64 (odd-tail blocks)
+            (300, 100, 700),                // narrow, ragged m + k
+            (512, 64, 2048),                // narrow exact tiles
+            (70, 1024, 2048),               // THE XWIDE-Q4 PICK: tgs 32 ∈ (24, 40], k ≥ 128
+            (5, 100, 33),                   // k % 32 != 0 — the flat tail block (the a0w class)
+        ] {
+            m4_bit.begin_pass();
+            let a = vec_of(mm * k);
+            let w = vec_of(n * k);
+            let q4 = q4_bytes_for(&w);
+            let raw = RawQ4::new(n * k, q4).expect("blocked layout");
+            let wide = raw.wide().to_vec();
+            let mut wd = vec![0f32; mm * n];
+            m4_bit.matmul_w(&a, mm, k, &wide, n, &mut wd);
+            let dense_q4 = sync_out(&m4_bit, &wd);
+            let mut wqm = vec![0f32; mm * n];
+            m4_bit.matmul_w_q4(&a, mm, k, &raw, n, &mut wqm);
+            let got = sync_out(&m4_bit, &wqm);
+            assert_eq!(
+                dense_q4, got,
+                "matmul_w_q4 {mm}x{k}x{n} must be bit-identical to the f32 carrier (shared tree)"
+            );
+        }
+        assert!(
+            m4_bit.q4_fused_dispatches() > 0,
+            "the fused-q4 arm must have dispatched (reach counter)"
+        );
+        assert_eq!(
+            m4_bit.q4_widen_dispatches(),
+            0,
+            "the resident posture must never build the widened Wᵀ (q4)"
+        );
+
+        // The fold entries over the raw nibble bytes (m4_bit, folds
+        // default ON): matmul_w_accum_q4 / matmul_w_glu_q4 vs the manual
+        // q4-GEMM + add / glu streams — bit-identical when the whole call
+        // splits (the reduce epilogues are format-agnostic).
+        for (mm, k, n, i_sz) in [(7usize, 768usize, 2304usize, 1152usize)] {
+            m4_bit.begin_pass();
+            let a = vec_of(mm * k);
+            let w = vec_of(n * k);
+            let q4 = q4_bytes_for(&w);
+            let raw = RawQ4::new(n * k, q4).expect("blocked layout");
+
+            // accum: x += a @ Wᵀ
+            let mut x_manual = vec_of(mm * n);
+            let mut x_fold = x_manual.clone();
+            let mut stage = vec![0f32; mm * n];
+            m4_bit.matmul_w_q4(&a, mm, k, &raw, n, &mut stage);
+            for (v, s) in x_manual.iter_mut().zip(&stage) {
+                *v += s;
+            }
+            m4_bit.matmul_w_accum_q4(&a, mm, k, &raw, n, &mut x_fold);
+            assert_eq!(x_manual, x_fold, "accum_q4 fold must be bit-identical");
+
+            // glu: the fold vs the UNFUSED device stream it replaces.
+            let mut fused = vec![0f32; mm * (2 * i_sz)];
+            m4_bit.matmul_w_q4(&a, mm, k, &raw, 2 * i_sz, &mut fused);
+            let mut act_manual = vec![0f32; mm * i_sz];
+            m4_bit.glu_gelu_gate(&fused, mm, i_sz, &mut act_manual);
+            let mut act_fold = vec![0f32; mm * i_sz];
+            m4_bit.matmul_w_glu_q4(&a, mm, k, &raw, i_sz, &mut act_fold);
+            assert_eq!(act_manual, act_fold, "glu_q4 fold must be bit-identical");
+        }
+        assert!(
+            m4_bit.fold_dispatches() > 0,
+            "the q4 fold arms must have dispatched the epilogues"
+        );
+        // Drain the open pass before the instance drops.
+        m4_bit.begin_pass();
+    }
+    {
+        // THE Q4 KILL-SWITCH ARM: LAYA_Q8_DEVICE_F32=1 routes the q4
+        // entries through `q4_widen_t` + the f32 tree (MPS included) —
+        // the pair is bit-identical on the DEFAULT instance. The widen
+        // counter must move and the fused counter must stay frozen.
+        let m4_ks = Metal::new().expect("metal backend");
+        assert_eq!(m4_ks.q4_fused_dispatches(), 0);
+        // SAFETY: sequential single-threaded flip under the file's GPU
+        // lock; restored before the test returns.
+        unsafe { std::env::set_var("LAYA_Q8_DEVICE_F32", "1") };
+        let (mm, k, n) = (7usize, 768usize, 2304usize);
+        m4_ks.begin_pass();
+        let a = vec_of(mm * k);
+        let w = vec_of(n * k);
+        let q4 = q4_bytes_for(&w);
+        let raw = RawQ4::new(n * k, q4).expect("blocked layout");
+        let wide = raw.wide().to_vec();
+        let mut wd = vec![0f32; mm * n];
+        m4_ks.matmul_w(&a, mm, k, &wide, n, &mut wd);
+        let dense_q4 = sync_out(&m4_ks, &wd);
+        let mut wqm = vec![0f32; mm * n];
+        m4_ks.matmul_w_q4(&a, mm, k, &raw, n, &mut wqm);
+        let got = sync_out(&m4_ks, &wqm);
+        // SAFETY: restore before any further arm (see the set above).
+        unsafe { std::env::remove_var("LAYA_Q8_DEVICE_F32") };
+        assert_eq!(
+            dense_q4, got,
+            "kill-switch: matmul_w_q4 must be bit-identical to the f32 carrier (load-kernel tree)"
+        );
+        assert!(
+            m4_ks.q4_widen_dispatches() > 0,
+            "the kill-switch arm must have dispatched the q4 load kernel"
+        );
+        assert_eq!(
+            m4_ks.q4_fused_dispatches(),
             0,
             "the kill-switch arm must stay off the fused path"
         );

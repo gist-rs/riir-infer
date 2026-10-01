@@ -60,6 +60,13 @@ pub enum WeightPosture {
     /// the decode values are byte-identical to [`Self::FakeQuantQ8`]
     /// (the converter's proof), so the probe's reads carry.
     Q8Artifact,
+    /// D2's Q4 second (Plan 616 Phase 3): the weights loaded from the
+    /// derived Q4_0 artifact (`LAYA_WEIGHTS_VARIANT=q4`) — no in-memory
+    /// transform; the decode values are byte-identical to the in-memory
+    /// fake-quant Q4 (the converter's proof). ITS OWN posture, never a
+    /// q8 relabel — its numerics are the Q4 grid's, its retention is
+    /// D1-priced separately before any adoption.
+    Q4Artifact,
 }
 
 impl WeightPosture {
@@ -71,20 +78,75 @@ impl WeightPosture {
             Self::F16 => "f16",
             Self::FakeQuantQ8 => "fake-quant-q8",
             Self::Q8Artifact => "q8-artifact",
+            Self::Q4Artifact => "q4-artifact",
         }
     }
 }
 
-/// Fake-quantize every >=2D tensor of a loaded weight map in place.
-/// Deterministic: tensors are visited in sorted-name order and the
-/// transform is a pure function of the bytes.
+/// Fake-quantize every >=2D tensor of a loaded weight map in place with
+/// the Q8_0 grid. Deterministic: tensors are visited in sorted-name order
+/// and the transform is a pure function of the bytes.
 ///
-/// A RETAINED Q8 payload ([`super::weights::WeightData::Q8`] — the q8
-/// artifact posture, Plan 616 Phase 1) is REFUSED loud: the probe is the
+/// A RETAINED raw-quant payload ([`super::weights::WeightData::Q8`] or
+/// `Q4` — either artifact posture) is REFUSED loud: the probe is the
 /// in-memory transform of an F16 map, and quantizing a payload whose
 /// stored values ARE the quantized values would quantize twice (the same
 /// refusal the agent's load path already applies, one layer out).
 pub fn fake_quant_q8_map(map: &mut HashMap<String, Weights>) -> Result<FakeQuantReport, String> {
+    fake_quant_map(map, QuantGrid::Q8)
+}
+
+/// The Q4_0 twin (Plan 616 Phase 3): the same map pass against the Q4
+/// grid — the converter's read-back proof target and the future D4
+/// retention probe's instrument. Same refusals, same report shape.
+pub fn fake_quant_q4_map(map: &mut HashMap<String, Weights>) -> Result<FakeQuantReport, String> {
+    fake_quant_map(map, QuantGrid::Q4)
+}
+
+/// The grid a [`fake_quant_map`] pass runs — the ONE enum behind both
+/// entry points, so the two probes cannot drift apart structurally.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum QuantGrid {
+    Q8,
+    Q4,
+}
+
+impl QuantGrid {
+    /// The scale (as f16 BITS) for one block's amax — the grid's own law.
+    #[must_use]
+    pub fn scale_bits(self, amax: f32) -> u16 {
+        match self {
+            Self::Q8 => q8_scale_bits(amax),
+            Self::Q4 => q4_scale_bits(amax),
+        }
+    }
+
+    /// The quantized value of ONE weight against scale `d`.
+    #[must_use]
+    pub fn quant_of(self, w: f32, d: f32) -> i8 {
+        match self {
+            Self::Q8 => q8_quant_of(w, d),
+            Self::Q4 => q4_quant_of(w, d),
+        }
+    }
+
+    /// The scale as f32 (the dequant arithmetic).
+    #[must_use]
+    pub fn scale_f32(self, bits: u16) -> f32 {
+        match self {
+            Self::Q8 => q8_scale_f32(bits),
+            Self::Q4 => q4_scale_f32(bits),
+        }
+    }
+}
+
+/// The shared map pass behind both `fake_quant_{q8,q4}_map` entry
+/// points — one body, the grid injected ([`QuantGrid`]), never a second
+/// transcription.
+fn fake_quant_map(
+    map: &mut HashMap<String, Weights>,
+    grid: QuantGrid,
+) -> Result<FakeQuantReport, String> {
     let mut rep = FakeQuantReport {
         quantized_tensors: 0,
         quantized_elements: 0,
@@ -106,15 +168,15 @@ pub fn fake_quant_q8_map(map: &mut HashMap<String, Weights>) -> Result<FakeQuant
         }
         let WeightData::F32(data) = &mut w.data else {
             return Err(format!(
-                "fake-quant probe over tensor {name}: the payload is ALREADY raw Q8_0 \
-                 (the q8 artifact posture) — quantizing twice is refused; \
+                "fake-quant probe over tensor {name}: the payload is ALREADY raw quantized \
+                 (the artifact posture) — quantizing twice is refused; \
                  unset LAYA_WEIGHTS_VARIANT"
             ));
         };
         rep.quantized_tensors += 1;
         rep.quantized_elements += data.len();
         rep.quantized_f16_bytes += data.len() as u64 * 2;
-        let (max_err, sum_err) = fake_quant_q8(data);
+        let (max_err, sum_err) = fake_quant_grid(data, grid);
         rep.blocks += data.len().div_ceil(BLOCK);
         rep.max_abs_err = rep.max_abs_err.max(max_err);
         rep.mean_abs_err += sum_err;
@@ -123,6 +185,26 @@ pub fn fake_quant_q8_map(map: &mut HashMap<String, Weights>) -> Result<FakeQuant
         rep.mean_abs_err /= rep.quantized_elements as f64;
     }
     Ok(rep)
+}
+
+/// The shared block loop behind [`fake_quant_q8`] / [`fake_quant_q4`]
+/// — one body, the grid injected.
+fn fake_quant_grid(data: &mut [f32], grid: QuantGrid) -> (f32, f64) {
+    let mut max_err = 0.0f32;
+    let mut sum_err = 0.0f64;
+    for block in data.chunks_mut(BLOCK) {
+        let amax = block.iter().fold(0.0f32, |m, &w| m.max(w.abs()));
+        let d = grid.scale_f32(grid.scale_bits(amax));
+        for w in block.iter_mut() {
+            let q = f32::from(grid.quant_of(*w, d));
+            let dq = d * q;
+            let err = (*w - dq).abs();
+            sum_err += f64::from(err);
+            max_err = max_err.max(err);
+            *w = dq;
+        }
+    }
+    (max_err, sum_err)
 }
 
 /// The Q8_0 scale for one block's amax: the f16-ROUNDED value of
@@ -167,6 +249,77 @@ pub fn fake_quant_q8(data: &mut [f32]) -> (f32, f64) {
         let d = q8_scale_f32(q8_scale_bits(amax));
         for w in block.iter_mut() {
             let q = f32::from(q8_quant_of(*w, d));
+            let dq = d * q;
+            let err = (*w - dq).abs();
+            sum_err += f64::from(err);
+            max_err = max_err.max(err);
+            *w = dq;
+        }
+    }
+    (max_err, sum_err)
+}
+
+/// The Q4_0 twins (Plan 616 Phase 3): the house blocked family's 4-bit
+/// rung — the SAME block law (32 weights, one f16 scale) with a signed
+/// 4-bit grid. Deliberately NOT GGML's unsigned `d·(q−8)` form: the
+/// house Q8_0 is the symmetric `d·q` whose grid ends carry ±amax (up to
+/// the scale's own f16 rounding, the same storage-grid law), and the
+/// 4-bit rung keeps that shape (`d = f16(amax/7)`, q in [-7, 7], zero
+/// exact), packed as GGML nibbles (even element low, odd high) so the
+/// container layout stays GGUF-shaped. The decode sign-extends, so a
+/// `-8` nibble (never produced here, produced by GGML's own converters)
+/// decodes as d·(−8) — interop-safe, house-exact.
+///
+/// # The scale
+///
+/// The Q4_0 scale for one block's amax: the f16-ROUNDED value of
+/// `amax / 7` — returned as f16 BITS (the storage form). The real-grid
+/// law puts both ±amax exactly on the grid ends (q = ±7) and zero at 0;
+/// the STORED scale carries the f16 rounding's own ~2⁻¹² relative error,
+/// exactly as the Q8 scale does (the same storage-grid law — the probe
+/// quantizes against the f16-rounded scale, so the measured error is the
+/// error real adoption introduces). The converter and the artifact
+/// reader derive the scale through this ONE function, so an artifact
+/// widened anywhere decodes to the same values the converter proved.
+#[must_use]
+pub fn q4_scale_bits(amax: f32) -> u16 {
+    f32_to_f16_bits(amax / 7.0)
+}
+
+/// The Q4_0 scale as f32 (the reader arithmetic).
+#[must_use]
+pub fn q4_scale_f32(bits: u16) -> f32 {
+    f16_bits_to_f32(bits)
+}
+
+/// The quantized value of ONE weight against scale `d` — `roundf(w/d)`
+/// (half away from zero, the GGUF reference's rounding) clamped to
+/// [-7, 7]. A non-positive `d` (degenerate block) quantizes to 0.
+#[must_use]
+pub fn q4_quant_of(w: f32, d: f32) -> i8 {
+    if d <= 0.0 {
+        return 0;
+    }
+    ((w * (1.0 / d)).round().clamp(-7.0, 7.0)) as i8
+}
+
+/// Q4_0 fake-quant of ONE tensor's payload (Plan 616 Phase 3): per
+/// [`BLOCK`]-weight block, scale `d = f16(amax / 7)` ([`q4_scale_bits`]),
+/// `q = [`q4_quant_of`]`, dequant `w' = d · q`. A degenerate block maps
+/// every weight to 0.0 (its stored scale IS 0). This is the converter's
+/// read-back proof target and the future D4 retention probe's in-memory
+/// twin — the Q4 grid's error is measured against THIS arithmetic, never
+/// a wider-grid idealization.
+///
+/// Returns (max |err|, Σ |err|) over the tensor.
+pub fn fake_quant_q4(data: &mut [f32]) -> (f32, f64) {
+    let mut max_err = 0.0f32;
+    let mut sum_err = 0.0f64;
+    for block in data.chunks_mut(BLOCK) {
+        let amax = block.iter().fold(0.0f32, |m, &w| m.max(w.abs()));
+        let d = q4_scale_f32(q4_scale_bits(amax));
+        for w in block.iter_mut() {
+            let q = f32::from(q4_quant_of(*w, d));
             let dq = d * q;
             let err = (*w - dq).abs();
             sum_err += f64::from(err);
@@ -276,5 +429,112 @@ mod tests {
         );
         let err = fake_quant_q8_map(&mut map).expect_err("refused");
         assert!(err.contains("twice"), "{err}");
+    }
+
+    /// A retained Q4 payload is refused by BOTH probes — the double-quant
+    /// refusal is posture-shaped, not format-shaped.
+    #[test]
+    fn map_pass_refuses_a_raw_q4_payload_from_both_probes() {
+        let q4: Vec<u8> = vec![0u8; super::super::weights::q4_blocked_len(32)];
+        let mk = || {
+            let mut map = HashMap::new();
+            map.insert(
+                "w".to_string(),
+                Weights {
+                    shape: vec![1, 32],
+                    data: WeightData::Q4(
+                        super::super::weights::RawQ4::new(32, q4.clone()).expect("layout"),
+                    ),
+                },
+            );
+            map
+        };
+        assert!(
+            fake_quant_q8_map(&mut mk())
+                .expect_err("q8 probe refused")
+                .contains("twice")
+        );
+        assert!(
+            fake_quant_q4_map(&mut mk())
+                .expect_err("q4 probe refused")
+                .contains("twice")
+        );
+    }
+
+    /// The Q4 grid's laws, on synthetic values: ±amax land exactly on the
+    /// grid ends in QUANT (q = ±7 — round of 7±ε is 7), zero maps to zero
+    /// exactly, the dequant error at the ends is the f16 scale's own
+    /// rounding (never more), and a degenerate block maps to zeros.
+    #[test]
+    fn q4_grid_both_amax_ends_exact_and_zero_exact() {
+        for &amax in &[0.25f32, 1.0, 3.0, 0.001] {
+            let d = q4_scale_f32(q4_scale_bits(amax));
+            assert_eq!(q4_quant_of(amax, d), 7);
+            assert_eq!(q4_quant_of(-amax, d), -7);
+            // The end-point dequant error is exactly the f16 scale rounding
+            // (|7·f16(a/7) − a| — the SAME term the Q8 end point carries at
+            // q=±127), never larger.
+            let scale_err = (7.0 * d - amax).abs();
+            let f16_bound = (amax / 7.0 - d).abs() * 7.0 + 1e-9;
+            assert!(scale_err <= f16_bound, "amax={amax} scale_err={scale_err}");
+            assert_eq!(q4_quant_of(0.0, d), 0);
+            assert_eq!(d * 0.0, 0.0);
+        }
+        // A degenerate block: scale 0 → all zeros, error 0.
+        let mut data = vec![0.0f32; BLOCK + 5];
+        let (max_err, sum) = fake_quant_q4(&mut data);
+        assert_eq!((max_err, sum), (0.0, 0.0));
+    }
+
+    /// The Q4 error bound on a deterministic sweep: |w − d·q| ≤ d/2 plus
+    /// the scale's f16 rounding applied at |q| ≤ 7 — the Q8 bound test's
+    /// 4-bit shape, one-eighteenth the resolution.
+    #[test]
+    fn q4_error_stays_within_the_format_bound() {
+        let mut s = 0x12345678u32;
+        let mut data = Vec::with_capacity(64 * BLOCK);
+        for _ in 0..64 * BLOCK {
+            s = s.wrapping_mul(1664525).wrapping_add(1013904223);
+            let u = (s >> 8) as f32 / 16_777_216.0; // 2^24
+            data.push((u - 0.5) * 4.0);
+        }
+        let amax = data.iter().fold(0.0f32, |m, &w| m.max(w.abs()));
+        let d = f16_bits_to_f32(f32_to_f16_bits(amax / 7.0));
+        let (max_err, _) = fake_quant_q4(&mut data);
+        let bound = d * 0.5 + (amax / 7.0 - d).abs() * 7.0 + 1e-6;
+        assert!(max_err <= bound, "err {max_err} > bound {bound}");
+    }
+
+    /// The Q4 map pass: the report's arithmetic matches the Q8 pass's
+    /// shape (same tensors, same blocks, same skipped set) — the two
+    /// probes differ ONLY in the grid, never in coverage.
+    #[test]
+    fn q4_map_pass_covers_the_same_surface_as_q8() {
+        let mk = |shape: Vec<usize>, v: f32| {
+            let n: usize = shape.iter().product();
+            Weights {
+                shape,
+                data: WeightData::F32(vec![v; n]),
+            }
+        };
+        let mut m8 = HashMap::new();
+        m8.insert("b_norm".to_string(), mk(vec![8], 1.0));
+        m8.insert("w".to_string(), mk(vec![4, 8], 0.25));
+        let mut m4 = HashMap::new();
+        m4.insert("b_norm".to_string(), mk(vec![8], 1.0));
+        m4.insert("w".to_string(), mk(vec![4, 8], 0.25));
+        let r8 = fake_quant_q8_map(&mut m8).expect("f32");
+        let r4 = fake_quant_q4_map(&mut m4).expect("f32");
+        assert_eq!(r8.quantized_tensors, r4.quantized_tensors);
+        assert_eq!(r8.quantized_elements, r4.quantized_elements);
+        assert_eq!(r8.blocks, r4.blocks);
+        assert_eq!(r8.skipped_tensors, r4.skipped_tensors);
+        // The Q4 error on a constant block is the f16 scale rounding plus
+        // the coarser grid — bounded, never zero-exact like Q8's tail.
+        assert!(
+            r4.max_abs_err > 0.0 && r4.max_abs_err < 0.05,
+            "{}",
+            r4.max_abs_err
+        );
     }
 }
