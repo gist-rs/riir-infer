@@ -17,7 +17,12 @@
 //!   asserts the conv / recurrence / KV state handoff, not just the logits.
 //!
 //! P covers the chunked-conv1d path (multiples of 64) and the sequential
-//! conv1d fallback (`P % 64 != 0`).
+//! conv1d fallback (`P % 64 != 0`). ⚠ The default list stops at 512 for
+//! cost; **`I032_P=4096` is the production chunk-max arm** (~12 min, decode
+//! reference included) and the one that matters for grid limits — the first
+//! landing was green to 2048 while P=4096 crashed on Metal's 65535
+//! workgroups-per-dimension cap (fixed `5f075ff` + `7e99f34`; 4096 G1 green
+//! after, worst rel err 1.23e-5).
 //!
 //! T5 (no regression on the pre-rotation file) rides the same binary:
 //! `prerotation_prefill_pin_unchanged` reproduces the `Q2_0` prefill pin
