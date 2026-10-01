@@ -241,5 +241,10 @@ handoff so the next pickup (either session) sees one unambiguous state:
   WHICH session's run is alive. Two sessions, one GPU: the exclusivity
   probe protects the binary, not the schedule.
 - The FATAL-teardown hang the sibling recorded is real and unowned — it
-  explains several apparent "zombie" states this session swept; file as
-  its own issue before the next error-path run.
+  explains several apparent "zombie" states this session swept; **now filed
+  as Issue 031 with the defensive `hard_exit` fix landed** (2026-10-01,
+  same day). Note for the next 4090 build: this fix adds a
+  `[target.'cfg(windows)'.dependencies] windows-sys` row to
+  riir-infer-gpu — the dq614-wt worktree's Cargo.lock predates it, so a
+  fresh checkout (the close-out plan) resolves it; do NOT pass `--locked`
+  when rebuilding that worktree.

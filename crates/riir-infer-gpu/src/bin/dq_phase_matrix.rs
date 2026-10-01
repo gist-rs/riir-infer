@@ -470,8 +470,29 @@ fn env_or(k: &str, d: &str) -> String {
 fn main() {
     if let Err(e) = run() {
         eprintln!("[dq614] FATAL: {e}");
-        std::process::exit(1);
+        hard_exit(1);
     }
+}
+
+/// The error path must not trust the CRT exit: the v1 matrix FATALed and
+/// then HUNG >10 min inside `std::process::exit` (Issue 031 — the CUDA
+/// driver's detach-time context cleanup blocks under the loader lock; RAM
+/// climbed 4.7→8.8 GB and the process had to be killed by hand, which is
+/// the trap that made live runs look like zombies). Flush what we have,
+/// then terminate hard: TerminateProcess on SELF skips atexit AND
+/// DLL_PROCESS_DETACH, so no handler can block the exit.
+fn hard_exit(code: i32) -> ! {
+    use std::io::Write as _;
+    let _ = std::io::stdout().flush();
+    let _ = std::io::stderr().flush();
+    #[cfg(windows)]
+    unsafe {
+        windows_sys::Win32::System::Threading::TerminateProcess(
+            windows_sys::Win32::System::Threading::GetCurrentProcess(),
+            code as u32,
+        );
+    }
+    std::process::exit(code)
 }
 
 fn run() -> Result<(), String> {
