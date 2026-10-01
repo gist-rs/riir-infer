@@ -61,6 +61,11 @@ use crate::elementwise_cubecl::Split4CubeCL;
 #[cfg(feature = "cubecl_runtime")]
 use crate::elementwise_cubecl::{CopyCubeCL, FillZerosCubeCL, Split2CubeCL};
 use crate::gemv_cubecl::GemvCubeCL;
+// riir-infer Issue 032: the folded prefill's dense a/b (token-grid GEMV).
+#[cfg(feature = "ternary_gemm_batched")]
+use crate::gemv_cubecl::GemvBatchedCubeCL;
+#[cfg(feature = "ternary_gemm_batched")]
+use crate::deltanet_rotation_cubecl::RotationTablesCubeCL;
 #[cfg(feature = "cubecl_runtime")]
 use crate::gemv_ternary_cubecl::{GemvTernaryCubeCL, TernaryHandle};
 // Issue 637 T3: batched prefill projections. Opt-in — the decode path never
@@ -494,6 +499,17 @@ pub fn take_attn_tap() -> Option<AttnScratch> {
 /// therefore throws away `P - 1` rows that are already on the host — which is
 /// why capturing every position used to cost `P` full prefills (`O(P²)` work)
 /// instead of one (`O(P)`).
+/// riir-infer Issue 032: which folded-basis rotation a batched prefill site
+/// applies (see `prefill_rotate`).
+#[cfg(feature = "ternary_gemm_batched")]
+#[derive(Clone, Copy, Debug)]
+enum RotDir {
+    /// sign then Hadamard — every folded projection's input.
+    Forward,
+    /// Hadamard then sign — the rotated embedding table's restore.
+    Inverse,
+}
+
 #[cfg(feature = "ternary_gemm_batched")]
 #[derive(Clone, Copy, Debug)]
 enum CaptureRows {
@@ -2386,8 +2402,9 @@ pub struct TernaryDeltanetGpuForward {
     /// constructor accepts folded models since B2/B3 — the decode eager path
     /// carries the rotation). The whole-prefill cudarc lane builds its own
     /// `RotationTables` from this config lazily (the stack's OnceLock); every
-    /// non-rotation-aware compute path (the CubeCL prefill body, training,
-    /// the diagnostic capture) refuses loudly while it is `Some`.
+    /// non-rotation-aware compute path (training, the diagnostic capture,
+    /// tree-verify) refuses loudly while it is `Some`; the CubeCL prefill
+    /// body is rotation-aware since riir-infer Issue 032.
     pub(crate) rotation: Option<TernaryRotationConfig>,
     /// Plan 602 B3 — the GPU-resident rotation tables (sign vectors uploaded
     /// as f32, width-keyed). `Some` iff `rotation` is; built ONCE here (the
@@ -2621,8 +2638,9 @@ impl TernaryDeltanetGpuForward {
     /// constructor also accepts folded models (the CubeCL decode eager path
     /// carries the rotation), so this entry's remaining distinctions are the
     /// loud REQUIREMENT that the file be folded (a pre-rotation file here is
-    /// a caller bug) — the per-path refusals (prefill body on Metal,
-    /// training, capture) are keyed on the `rotation` marker either way.
+    /// a caller bug) — the per-path refusals (training, capture) are keyed
+    /// on the `rotation` marker either way, and the CubeCL prefill body
+    /// (Metal's only prefill) computes folded files since Issue 032.
     ///
     /// PANICS on a pre-rotation file (no `prism.hadamard` config) — use
     /// [`Self::new`] there.
@@ -2647,10 +2665,11 @@ impl TernaryDeltanetGpuForward {
         // the default constructor — the decode eager path carries the
         // rotation at every folded site (B3), the dense escape-set a/b
         // dispatch as f32 GEMVs on the PRIMAL input, and the GPU sign tables
-        // build here. The remaining loud refusals are per-PATH (the CubeCL
-        // prefill body, training, the diagnostic capture — all refuse while
-        // `rotation` is `Some`). Running folded weights UNROTATED remains the
-        // silent-garbage class those guards prevent.
+        // build here. The remaining loud refusals are per-PATH (training,
+        // the diagnostic capture — both refuse while `rotation` is `Some`;
+        // the CubeCL prefill body carries the rotation since riir-infer Issue
+        // 032). Running folded weights UNROTATED remains the silent-garbage
+        // class those guards prevent.
         if require_folded {
             assert!(
                 weights.rotation.is_some(),
@@ -3258,7 +3277,7 @@ impl TernaryDeltanetGpuForward {
                 let ane_folded_skip = weights.rotation.is_some();
                 if ane_folded_skip {
                     eprintln!(
-                        "[Issue 980/Plan 602] Hadamard-folded model: ANE prefill bank registration SKIPPED (ANE programs are primal-shaped; prefill refuses folded on this lane)"
+                        "[Issue 980/Plan 602] Hadamard-folded model: ANE prefill bank registration SKIPPED (ANE programs are primal-shaped; the folded prefill runs every projection on the GPU)"
                     );
                 }
                 for i in 0..config.n_layer {
@@ -4057,6 +4076,69 @@ impl TernaryDeltanetGpuForward {
                     cfg.block_size,
                 );
             }
+        }
+    }
+
+    /// riir-infer Issue 032 — one batched folded-basis rotation for the CubeCL
+    /// prefill body: `total = rows * width` f32 of `src`, written to `dst`
+    /// (`None` → in place). `Forward` with a `dst` is the copy-rotate staging
+    /// form (`norm_x` → `rot_scratch` in decode); `Inverse` is the
+    /// embedding-lookup twin. The kernels index signs by `base % width`, so a
+    /// `[rows × width]` batch is one dispatch with the decode arithmetic.
+    #[cfg(feature = "ternary_gemm_batched")]
+    #[allow(clippy::too_many_arguments, reason = "rotation launch wiring")]
+    fn prefill_rotate(
+        &self,
+        dir: RotDir,
+        src: &Handle,
+        dst: Option<&Handle>,
+        tables: &RotationTablesCubeCL,
+        hblock: usize,
+        total: usize,
+        width: usize,
+    ) {
+        let signs = tables.signs_for_width(width).clone();
+        unsafe {
+            match (dir, dst) {
+                (RotDir::Forward, None) => RotationCubeCL::launch_forward::<ActiveRuntime>(
+                    &self.client,
+                    src.clone(),
+                    signs,
+                    total,
+                    width,
+                    hblock,
+                ),
+                (RotDir::Forward, Some(d)) => RotationCubeCL::launch_forward_copy::<ActiveRuntime>(
+                    &self.client,
+                    src.clone(),
+                    d.clone(),
+                    signs,
+                    total,
+                    width,
+                    hblock,
+                ),
+                (RotDir::Inverse, None) => RotationCubeCL::launch_inverse::<ActiveRuntime>(
+                    &self.client,
+                    src.clone(),
+                    signs,
+                    total,
+                    width,
+                    hblock,
+                ),
+                (RotDir::Inverse, Some(_)) => {
+                    unreachable!("prefill_rotate: no copy form of the inverse rotation")
+                }
+            }
+        }
+    }
+
+    /// Both halves of the folded marker — callers have already branched on
+    /// `rot_tables.is_some()` (the prefill body asserts the two agree).
+    #[cfg(feature = "ternary_gemm_batched")]
+    fn rotation_pair(&self) -> (&TernaryRotationConfig, &RotationTablesCubeCL) {
+        match (&self.rotation, &self.rot_tables) {
+            (Some(cfg), Some(tables)) => (cfg, tables),
+            _ => unreachable!("rotation_pair on a pre-rotation model"),
         }
     }
 
@@ -5240,6 +5322,11 @@ impl TernaryDeltanetGpuForward {
         if attn_sub_on(5) {
             Self::prefill_norm(&self.client, x_b, &layer_w.input_norm, normx_b, p, n, eps);
         }
+        // Issue 032 — folded site 5 (batched path): wq/wkv are folded and an
+        // attention layer has no primal consumer of the norm — rotate in place.
+        if let (Some(cfg), Some(tables)) = (&self.rotation, &self.rot_tables) {
+            self.prefill_rotate(RotDir::Forward, normx_b, None, tables, cfg.block_size, p * n, n);
+        }
 
         // 2. Q projection (batched GEMM) — attn_wq writes [2*q_dim] per token.
         // 3. KV projection (batched GEMM) — attn_wkv writes [2*kvd] per token.
@@ -5618,6 +5705,11 @@ impl TernaryDeltanetGpuForward {
                 .attn_wo
                 .as_ref()
                 .expect("attn_wo for Attention layer");
+            // Issue 032 — folded site 5b (attn_out): gate already applied.
+            if let (Some(cfg), Some(tables)) = (&self.rotation, &self.rot_tables) {
+                let q_dim = n_head * hd;
+                self.prefill_rotate(RotDir::Forward, &scratch.attn_out_b, None, tables, cfg.block_size, p * q_dim, q_dim);
+            }
             self.prefill_project(wo, &scratch.attn_out_b, &scratch.out_proj_b, p);
         }
 
@@ -7149,21 +7241,20 @@ impl TernaryDeltanetGpuForward {
             }
         }
 
-        // Issue 980 T4-ALT — fall-through ERROR semantics for folded models:
-        // the CubeCL body below CANNOT compute a Hadamard-folded file (it
-        // would run folded weights unrotated — silent garbage), so a folded
-        // model whose cudarc whole-prefill lane refused (or is compiled out)
-        // must ERROR here, never fall through. Reaching this line with the
-        // marker set means the arm returned None or the cudarc features are
-        // off — either way the prefill is not computable on this lane.
-        if self.rotation.is_some() {
-            panic!(
-                "Bonsai-2 Hadamard-folded prefill: the cudarc whole-prefill lane \
-                 refused or is unavailable (knob/gate/features — see \
-                 RIIR_PREFILL_CUDA_TRACE=1) and the CubeCL fallback cannot \
-                 compute folded weights unrotated (Issue 980 T4-ALT)"
-            );
-        }
+        // riir-infer Issue 032 — the CubeCL body below computes Hadamard-folded
+        // files: every folded site of the decode eager path (Plan 602 B3) has a
+        // batched twin here (`prefill_rotate_*`, keyed on `rot_tables`), so a
+        // folded model whose cudarc whole-prefill lane refused (or is compiled
+        // out — always on Metal) falls through instead of erroring (the Issue
+        // 980 T4-ALT refusal this replaces). The one sub-path with no rotation
+        // wiring — the non-macOS cudarc FFN block — is skipped for folded
+        // files at its own gate below.
+        assert_eq!(
+            self.rotation.is_some(),
+            self.rot_tables.is_some(),
+            "folded prefill: rotation marker and GPU rotation tables disagree"
+        );
+        let folded = self.rot_tables.is_some();
 
         // Arm 13 — the CubeCL body below mutates the state handles; if the
         // cudarc arm is off / fell through, its mirrors are now stale.
@@ -7237,6 +7328,12 @@ impl TernaryDeltanetGpuForward {
             self.client.empty(f)
         };
         let normx_b = self.client.empty(p * n * f);
+        // riir-infer Issue 032: folded-only scratch — the ROTATED copy of the
+        // GDN input norm (the dense a/b escape set reads the PRIMAL `normx_b`,
+        // so it cannot rotate in place) and the gdn_v permute source. 4 bytes
+        // on pre-rotation files, so their allocation pattern is unchanged.
+        let rotx_b = self.client.empty(if folded { p * n * f } else { f });
+        let permute_b = self.client.empty(if folded { p * v_dim * f } else { f });
         // Issue 658 Phase 2: when chunked conv1d is on, the conv1d step writes SiLU
         // outputs to a SEPARATE buffer (the chunked kernel cannot be in-place
         // because token t needs the RAW input of tokens t-1..t-3). After all
@@ -7385,6 +7482,13 @@ impl TernaryDeltanetGpuForward {
                 );
             }
         }
+        // Issue 032 — folded site 1 (embed): restore the primal basis of every
+        // looked-up row (the decode `launch_inverse` over `p` rows at once).
+        if let (Some(cfg), Some(tables)) = (&self.rotation, &self.rot_tables)
+            && cfg.inverse_embedding
+        {
+            self.prefill_rotate(RotDir::Inverse, &x_b, None, tables, cfg.block_size, p * n, n);
+        }
 
         for layer_idx in 0..self.layers.len() {
             let is_deltanet = self.layer_types[layer_idx] == DeltaNetLayerType::DeltaNet;
@@ -7408,11 +7512,39 @@ impl TernaryDeltanetGpuForward {
                 // qkv/z/a/b output segments directly. Every other path
                 // falls through to the split batched GEMMs, unchanged.
                 #[cfg(feature = "ane_prefill")]
-                let ane_inproj_done =
-                    self.ane_prefill_try_inproj(layer_idx, &normx_b, &qkv_b, &z_b, &a_b, &b_b, p);
+                let ane_inproj_done = !folded
+                    && self.ane_prefill_try_inproj(layer_idx, &normx_b, &qkv_b, &z_b, &a_b, &b_b, p);
                 #[cfg(not(feature = "ane_prefill"))]
                 let ane_inproj_done = false;
-                if !ane_inproj_done {
+                if folded {
+                    // Issue 032 — folded sites 2/3 (GDN input): qkv/z are folded
+                    // and read the ROTATED copy; the dense a/b escape set reads
+                    // the PRIMAL norm as one token-grid f32 GEMV each — row t
+                    // bit-identical to decode's `GemvCubeCL` on token t.
+                    let (cfg, tables) = self.rotation_pair();
+                    self.prefill_rotate(RotDir::Forward, &normx_b, Some(&rotx_b), tables, cfg.block_size, p * n, n);
+                    self.prefill_project(&layer_w.in_proj_qkv, &rotx_b, &qkv_b, p);
+                    self.prefill_project(&layer_w.in_proj_z, &rotx_b, &z_b, p);
+                    for (w, out, name) in [
+                        (&layer_w.in_proj_a_f32, &a_b, "ssm_alpha"),
+                        (&layer_w.in_proj_b_f32, &b_b, "ssm_beta"),
+                    ] {
+                        let w = w.as_ref().unwrap_or_else(|| {
+                            panic!("folded GDN layer: dense {name} missing (loader contract guarantees the escape set)")
+                        });
+                        unsafe {
+                            GemvBatchedCubeCL::launch_token_grid::<ActiveRuntime>(
+                                &self.client,
+                                w.clone(),
+                                normx_b.clone(),
+                                out.clone(),
+                                p,
+                                n,
+                                n_v_heads,
+                            );
+                        }
+                    }
+                } else if !ane_inproj_done {
                     for (w, out) in [
                         (&layer_w.in_proj_qkv, &qkv_b),
                         (&layer_w.in_proj_z, &z_b),
@@ -7725,6 +7857,33 @@ impl TernaryDeltanetGpuForward {
                         p * z_dim,
                     );
                 }
+                // Issue 032 — folded site 4 (ssm_out): gdn_v tiled→grouped head
+                // permute, then the forward rotation, in place on `rec_b` (its
+                // only consumer is the folded out_proj). After norm + z-gate —
+                // both commute with the permute — the decode order.
+                if let (Some(cfg), Some(tables)) = (&self.rotation, &self.rot_tables) {
+                    if cfg.gdn_v_grouped {
+                        unsafe {
+                            CopyCubeCL::launch::<ActiveRuntime>(
+                                &self.client,
+                                rec_b.clone(),
+                                permute_b.clone(),
+                                p * v_dim,
+                            );
+                            RotationCubeCL::launch_gdn_v_permute::<ActiveRuntime>(
+                                &self.client,
+                                permute_b.clone(),
+                                rec_b.clone(),
+                                p * v_dim,
+                                v_dim,
+                                head_dim,
+                                cfg.gdn_k_groups,
+                                n_v_heads / cfg.gdn_k_groups,
+                            );
+                        }
+                    }
+                    self.prefill_rotate(RotDir::Forward, &rec_b, None, tables, cfg.block_size, p * v_dim, v_dim);
+                }
                 // 11. Out projection.
                 self.prefill_project(&layer_w.out_proj, &rec_b, &tmp_b, p);
 
@@ -7867,6 +8026,11 @@ impl TernaryDeltanetGpuForward {
                                     eps,
                                 );
                             }
+                            // Issue 032 — folded site 5 (sequential path): the
+                            // decode attention layer reads `rot_scratch` and
+                            // rotates its own attn_out; stage it per token.
+                            // No-op on pre-rotation files.
+                            self.stage_rotated_norm_x();
                         } // sub-stage 5: outer norm
 
                         // ── Issue 640 Bench 657/658: per-token sync diagnostic ──
@@ -7922,7 +8086,8 @@ impl TernaryDeltanetGpuForward {
                 // any failure — both paths compute the same values (Bench-721
                 // FNV-gated bit-identity incl. the rmsnorm/swiglu forms).
                 #[cfg(all(feature = "ternary_gemv_cuda_raw", not(target_os = "macos")))]
-                let cuda_ffn_done = crate::prefill_cuda_ffn::prefill_use_cuda_ffn()
+                let cuda_ffn_done = !folded // Issue 032: the block has no rotation wiring
+                    && crate::prefill_cuda_ffn::prefill_use_cuda_ffn()
                     && p <= 4096
                     && n.is_multiple_of(128)
                     && mlp.is_multiple_of(128)
@@ -7956,9 +8121,14 @@ impl TernaryDeltanetGpuForward {
                     // above; the gate additionally requires the layer to be GDN
                     // (attention-layer FFNs stay GPU — the contract scopes
                     // acceleration to the GDN family).
+                    // Issue 032 — folded site 6 (FFN input): gate/up are folded
+                    // and the norm has no primal consumer, so rotate in place.
+                    if let (Some(cfg), Some(tables)) = (&self.rotation, &self.rot_tables) {
+                        self.prefill_rotate(RotDir::Forward, &normx_b, None, tables, cfg.block_size, p * n, n);
+                    }
                     #[cfg(feature = "ane_prefill")]
-                    let ane_gate_up_done =
-                        self.ane_prefill_try_gate_up(layer_idx, &normx_b, &gate_b, &up_b, p);
+                    let ane_gate_up_done = !folded
+                        && self.ane_prefill_try_gate_up(layer_idx, &normx_b, &gate_b, &up_b, p);
                     #[cfg(not(feature = "ane_prefill"))]
                     let ane_gate_up_done = false;
                     if !ane_gate_up_done {
@@ -7977,8 +8147,13 @@ impl TernaryDeltanetGpuForward {
                     }
                     // Plan 549: the down_proj ANE seam (runtime-gated, per-op
                     // fail-open — skipped entirely when the toggle/bank is off).
+                    // Issue 032 — folded site 7 (ffn_hidden): rotate before down.
+                    if let (Some(cfg), Some(tables)) = (&self.rotation, &self.rot_tables) {
+                        self.prefill_rotate(RotDir::Forward, &hid_b, None, tables, cfg.block_size, p * mlp, mlp);
+                    }
                     #[cfg(feature = "ane_prefill")]
-                    let ane_down_done = self.ane_prefill_try_down(layer_idx, &hid_b, &ffnout_b, p);
+                    let ane_down_done =
+                        !folded && self.ane_prefill_try_down(layer_idx, &hid_b, &ffnout_b, p);
                     #[cfg(not(feature = "ane_prefill"))]
                     let ane_down_done = false;
                     if !ane_down_done {
@@ -8057,11 +8232,19 @@ impl TernaryDeltanetGpuForward {
                 eps,
             );
         }
+        // Issue 032 — folded site 8 (lm_head): the decode form — `norm_x`
+        // stays PRIMAL (the hidden-state handoff), lm_head reads the rotated
+        // staging copy.
+        self.stage_rotated_norm_x();
         unsafe {
             GemvTernaryCubeCL::launch::<ActiveRuntime>(
                 &self.client,
                 &self.lm_head,
-                self.norm_x.clone(),
+                if folded {
+                    self.rot_scratch.clone()
+                } else {
+                    self.norm_x.clone()
+                },
                 self.logits.clone(),
             );
         }

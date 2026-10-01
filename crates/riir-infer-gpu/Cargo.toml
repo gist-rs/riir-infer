@@ -241,6 +241,14 @@ required-features = ["deltanet_recurrence_smem_staged"]
 name = "bench_663_t5_single_gemm_isolation"
 required-features = ["cubecl_runtime", "ternary_gemm_batched", "metal_tensor_gemm"]
 
+# riir-infer Issue 032 — G1 of the Metal folded (Bonsai-2) CubeCL prefill vs
+# the folded decode eager path, plus the pre-rotation pin (T5). The
+# whole-file #![cfg] keeps the count honest; this row keeps the reader honest
+# (the folded loader needs riir-infer-core/bonsai2_hadamard).
+[[test]]
+name = "g1_032_folded_prefill_metal"
+required-features = ["cubecl_runtime", "ternary_gemm_batched", "ternary_deltanet_chunked_prefill", "ternary_attention_batched_prefill", "riir-infer-core/bonsai2_hadamard"]
+
 # katgpt-rs Issue 908 / Plan 612 T2.1 — the FA-layer Q/K capture bin (the
 # PISA pyramid selection gate's fixture producer; 4090 cudarc lane).
 # Whole-file #![cfg] inside keeps non-CUDA hosts an empty target; this row

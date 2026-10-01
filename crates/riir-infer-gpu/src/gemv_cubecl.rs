@@ -169,6 +169,55 @@ fn gemv_batched_plane_f32(weight: &[f32], input: &[f32], output: &mut [f32], par
     }
 }
 
+/// CubeCL token-grid batched plane GEMV (riir-infer Issue 032):
+/// `output[b, row] = Σ_k input[b, k] * weight[row, k]` with the batch on the
+/// Y axis of the cube grid.
+///
+/// [`gemv_batched_plane_f32`] serialises the whole batch inside one plane, so
+/// a small `out_dim` (the folded GDN a/b projections: 48 rows) occupies
+/// `ceil(48 / 8) = 6` workgroups however long the prompt is. Here every
+/// (row, token) pair is its own plane, and the per-pair arithmetic is
+/// **exactly** [`gemv_plane_f32`]'s — same lane stride, same `plane_sum` — so
+/// row `b` of the output is bit-identical to a single-vector GEMV of input
+/// row `b` (the decode path's dense a/b), not merely close to it.
+///
+/// Dispatch: `CubeCount::Static(ceil(out_dim / 8), batch, 1)`, 256 threads.
+/// `params = [in_dim, out_dim]` (never derived from `len()` — Issue 697/698).
+#[cfg(feature = "cubecl_runtime")]
+#[cfg_attr(
+    feature = "gemv_fma_contract",
+    cube(launch_unchecked, fast_math = FastMath::AllowContraction.into())
+)]
+#[cfg_attr(not(feature = "gemv_fma_contract"), cube(launch_unchecked))]
+fn gemv_token_grid_plane_f32(weight: &[f32], input: &[f32], output: &mut [f32], params: &[f32]) {
+    let in_dim = params[0usize] as u32;
+    let out_dim = params[1usize] as u32;
+
+    let row = ABSOLUTE_POS_X / PLANE_DIM;
+    let lane = UNIT_POS_PLANE;
+    let b = CUBE_POS_Y;
+
+    if row >= out_dim {
+        terminate!();
+    }
+
+    let row_offset = row * in_dim;
+    let input_offset = b * in_dim;
+
+    let mut partial = f32::new(0.0f32);
+    let mut k = lane;
+    while k < in_dim {
+        partial += weight[(row_offset + k) as usize] * input[(input_offset + k) as usize];
+        k += PLANE_DIM;
+    }
+
+    let result = plane_sum(partial);
+
+    if lane == 0 {
+        output[(b * out_dim + row) as usize] = result;
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Shared memory GEMV — fallback kernel (no subgroups required)
 // ---------------------------------------------------------------------------
@@ -478,6 +527,46 @@ impl GemvBatchedCubeCL {
                 BufferArg::from_raw_parts(input_handle, batch * in_dim),
                 BufferArg::from_raw_parts(output_handle, batch * out_dim),
                 BufferArg::from_raw_parts(params_handle, 3),
+            );
+        }
+    }
+}
+
+#[cfg(feature = "cubecl_runtime")]
+impl GemvBatchedCubeCL {
+    /// Token-grid variant of [`Self::launch`]: one plane per (output row,
+    /// batch row) — see [`gemv_token_grid_plane_f32`]. Row `b` of the output is
+    /// bit-identical to [`GemvCubeCL::launch_plane`] on input row `b`.
+    ///
+    /// # Safety
+    ///
+    /// Same buffer contract as [`Self::launch`]; `batch <= u32::MAX` cubes on
+    /// the Y axis, and the device must support plane operations.
+    pub unsafe fn launch_token_grid<R: Runtime>(
+        client: &ComputeClient<R>,
+        weight_handle: Handle,
+        input_handle: Handle,
+        output_handle: Handle,
+        batch: usize,
+        in_dim: usize,
+        out_dim: usize,
+    ) {
+        let wg_size = 256u32;
+        let rows_per_wg = wg_size / 32; // 8 planes of 32 lanes (Apple Silicon)
+        let num_wg = (out_dim as u32).div_ceil(rows_per_wg).max(1);
+        let params: &[f32] = &[in_dim as f32, out_dim as f32];
+        let params_handle = crate::params_cache::params_handle(client, f32::as_bytes(params));
+
+        // SAFETY: Caller guarantees correct buffer sizes.
+        unsafe {
+            gemv_token_grid_plane_f32::launch_unchecked::<R>(
+                client,
+                CubeCount::Static(num_wg, batch as u32, 1),
+                CubeDim::new_1d(wg_size),
+                BufferArg::from_raw_parts(weight_handle, out_dim * in_dim),
+                BufferArg::from_raw_parts(input_handle, batch * in_dim),
+                BufferArg::from_raw_parts(output_handle, batch * out_dim),
+                BufferArg::from_raw_parts(params_handle, 2),
             );
         }
     }
@@ -1122,6 +1211,61 @@ mod tests {
             );
         }
         println!("batched plane GEMV ({batch}×{in_dim}×{out_dim}): max_err = {max_err}");
+    }
+
+    /// riir-infer Issue 032 T1: the token-grid batched GEMV is BIT-identical,
+    /// row for row, to one `launch_plane` GEMV per input row — the property
+    /// that makes folded prefill's dense a/b equal decode's dense a/b. Shape
+    /// is the Bonsai-2 GDN a/b projection (48 × 5120) at an odd batch.
+    #[test]
+    fn test_gemv_token_grid_bit_identical_to_plane() {
+        let ctx = CubeCLContext::new().expect("CubeCL should initialize");
+        let client = ctx.client();
+        if !client.features().plane.contains(Plane::Ops) {
+            eprintln!("Skipping: device does not support plane ops");
+            return;
+        }
+        let (batch, in_dim, out_dim) = (37usize, 5120usize, 48usize);
+        let mut seed = 7u32;
+        let mut lcg = || {
+            seed = seed.wrapping_mul(1664525).wrapping_add(1013904223);
+            (seed as f32) / (u32::MAX as f32) * 2.0 - 1.0
+        };
+        let input: Vec<f32> = (0..batch * in_dim).map(|_| lcg()).collect();
+        let weight: Vec<f32> = (0..out_dim * in_dim).map(|_| lcg()).collect();
+        let w = client.create_from_slice(f32::as_bytes(&weight));
+        let x = client.create_from_slice(f32::as_bytes(&input));
+        let f = core::mem::size_of::<f32>();
+
+        let grid_out = client.empty(batch * out_dim * f);
+        unsafe {
+            GemvBatchedCubeCL::launch_token_grid::<ActiveRuntime>(
+                &client,
+                w.clone(),
+                x.clone(),
+                grid_out.clone(),
+                batch,
+                in_dim,
+                out_dim,
+            );
+        }
+        let grid = f32::from_bytes(&client.read_one(grid_out).expect("read grid")).to_vec();
+
+        for b in 0..batch {
+            let xb = client.create_from_slice(f32::as_bytes(&input[b * in_dim..(b + 1) * in_dim]));
+            let ob = client.empty(out_dim * f);
+            unsafe {
+                GemvCubeCL::launch_plane::<ActiveRuntime>(&client, w.clone(), xb, ob.clone(), out_dim, in_dim);
+            }
+            let single = f32::from_bytes(&client.read_one(ob).expect("read plane")).to_vec();
+            for r in 0..out_dim {
+                assert_eq!(
+                    grid[b * out_dim + r].to_bits(),
+                    single[r].to_bits(),
+                    "token-grid GEMV differs from plane GEMV at batch {b} row {r}"
+                );
+            }
+        }
     }
 
     /// Plan 436 T2.1: Batched GEMV with non-square weight (gate/up projection shape).
