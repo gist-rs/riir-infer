@@ -568,6 +568,24 @@ fn copy_f32(input: &[f32], output: &mut [f32]) {
     }
 }
 
+/// [`copy_f32`] over a 2-D grid, for copies past Metal's 65535 x-dimension
+/// cap (riir-infer Issue 032: the folded prefill's `p * v_dim` gdn_v permute
+/// staging copy is 98304 workgroups at P=4096). The linear index is rebuilt
+/// from `(CUBE_POS_X, CUBE_POS_Y)` and bounded by the EXPLICIT `params[0] = n`
+/// (u32 — an f32 param is exact only to 2^24, and P=4096 × v_dim is 25.2M)
+/// — never `output.len()`, which is the bound buffer's declared size (the
+/// riir-ai Issue 511 / riir-train Issue 511 class).
+#[cfg(feature = "cubecl_runtime")]
+#[cube(launch_unchecked)]
+fn copy_f32_grid2d(input: &[f32], output: &mut [f32], params: &[u32]) {
+    let n = params[0usize] as usize;
+    let cube = (CUBE_POS_Y * CUBE_COUNT_X + CUBE_POS_X) as usize;
+    let tid = cube * CUBE_DIM_X as usize + UNIT_POS_X as usize;
+    if tid < n {
+        output[tid] = input[tid];
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Launchers (public API mirroring RmsNormCubeCL / ArgmaxCubeCL)
 // ---------------------------------------------------------------------------
@@ -838,14 +856,34 @@ impl CopyCubeCL {
         output_handle: Handle,
         n: usize,
     ) {
-        let n_wg = n.div_ceil(256).max(1) as u32;
+        const MAX_WG_X: u32 = 65535;
+        let n_wg = n.div_ceil(256).max(1);
+        if n_wg <= MAX_WG_X as usize {
+            unsafe {
+                copy_f32::launch_unchecked::<R>(
+                    client,
+                    CubeCount::Static(n_wg as u32, 1, 1),
+                    CubeDim::new_1d(256),
+                    BufferArg::from_raw_parts(input_handle, n),
+                    BufferArg::from_raw_parts(output_handle, n),
+                );
+            }
+            return;
+        }
+        // Metal grid guard (riir-infer Issue 032): fold the workgroups into
+        // (x <= 65535, y); the tail of the last row is masked by `n`.
+        let y = n_wg.div_ceil(MAX_WG_X as usize) as u32;
+        let x = n_wg.div_ceil(y as usize) as u32;
+        let params: [u32; 1] = [u32::try_from(n).expect("CopyCubeCL: n exceeds u32")];
+        let params_handle = crate::params_cache::params_handle(client, u32::as_bytes(&params));
         unsafe {
-            copy_f32::launch_unchecked::<R>(
+            copy_f32_grid2d::launch_unchecked::<R>(
                 client,
-                CubeCount::Static(n_wg, 1, 1),
+                CubeCount::Static(x, y, 1),
                 CubeDim::new_1d(256),
                 BufferArg::from_raw_parts(input_handle, n),
                 BufferArg::from_raw_parts(output_handle, n),
+                BufferArg::from_raw_parts(params_handle, 1),
             );
         }
     }
@@ -1724,6 +1762,29 @@ impl GluGeluGateCubeCL {
 mod tests {
     use super::*;
     use crate::cubecl_runtime::{ActiveComputeClient, ActiveRuntime, CubeCLContext};
+
+    /// riir-infer Issue 032: a copy past Metal's 65535 x-dimension cap (the
+    /// folded prefill's gdn_v staging copy at P=4096: 4096 × 6144 f32 = 98304
+    /// workgroups) completes exactly, and writes nothing past `n` even into
+    /// an OVERSIZED output (the explicit-bound half of the fix).
+    #[test]
+    fn test_copy_past_65535_workgroups() {
+        let ctx = CubeCLContext::new().expect("CubeCL should initialize");
+        let client = ctx.client();
+        let n = 4096 * 6144usize;
+        let pad = 1000usize;
+        let input: Vec<f32> = (0..n).map(|i| (i % 65_521) as f32 + 0.25).collect();
+        let sentinel = vec![-7.0f32; n + pad];
+        let in_h = client.create_from_slice(f32::as_bytes(&input));
+        let out_h = client.create_from_slice(f32::as_bytes(&sentinel));
+        unsafe {
+            CopyCubeCL::launch::<ActiveRuntime>(&client, in_h, out_h.clone(), n);
+        }
+        let out = f32::from_bytes(&client.read_one(out_h).expect("read copy")).to_vec();
+        let first_bad = (0..n).find(|&i| out[i].to_bits() != input[i].to_bits());
+        assert_eq!(first_bad, None, "copy differs at {first_bad:?}");
+        assert!(out[n..].iter().all(|&v| v == -7.0), "copy wrote past n");
+    }
 
     /// Verify Split2CubeCL correctly splits a qkv|z concat into 2 outputs
     /// (Plan 602 B2 — the folded-model GDN input fan-out).
