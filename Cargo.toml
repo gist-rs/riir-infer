@@ -356,6 +356,17 @@ name = "twt_goat_agreement"
 path = "src/bin/twt_goat_agreement.rs"
 required-features = ["twt_bonsai"]
 
+# riir-infer Issue 022 T5.3 — collapsed-vs-parent decode/prefill perf at the
+# quality-matched point: greedy tg loop + teacher-forced pp over the frozen
+# corpus head (512 tokens — the sweep's chunk length), the KV-per-token and
+# fixed-GDN-state m/L laws asserted by integer cross-multiplication, and
+# box-state provenance printed for every rate. Same gate as the agreement
+# bin (the folded league checkpoint refuses without bonsai2_hadamard).
+[[bin]]
+name = "twt_perf_tg_pp"
+path = "src/bin/twt_perf_tg_pp.rs"
+required-features = ["twt_bonsai"]
+
 # riir-infer Issue 014 T2(b) — the dense-parent PTQ lane on gemma-2-2b f16
 # (the house fixture): the Issue-886 fits at Bench 896's held-out
 # reconstruction metric on REAL parents + REAL activations. Same feature
@@ -520,6 +531,15 @@ required-features = ["twt_collapse"]
 [[example]]
 name = "twt_kill_rederive"
 path = "examples/twt_kill_rederive.rs"
+required-features = ["twt_collapse"]
+
+# Issue 022 T5.5 — the ε-sweep Pareto CHECK: re-runs the min-max DP at every
+# pre-registered ε + the fine-end probes over the profile artifact and
+# ASSERTS m(ε) monotonicity (a violation is a Phase 2 bug), with the eight
+# measured points pinned as known answers. No GGUF written.
+[[example]]
+name = "twt_pareto_check"
+path = "examples/twt_pareto_check.rs"
 required-features = ["twt_collapse"]
 
 # Issue 022 Phase 5 — the Bonsai GDN apply-path audition: typed-partition
