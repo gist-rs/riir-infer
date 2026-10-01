@@ -507,6 +507,11 @@ pub use deltanet_cubecl::DeltaNetStateBuffers;
 // k/q/v (bit-identical to `DeltanetRecurrenceMultiTokenCubeCL`, opt-in).
 #[cfg(feature = "deltanet_recurrence_smem_staged")]
 pub mod deltanet_recurrence_staged_cubecl;
+// riir-ai Issue 1004 R2: the fused GDN prework — conv1d + SiLU + q/k L2-norm
+// + head expansion in ONE dispatch (bit-identical to the chunked-conv +
+// batched-expand chain by construction, opt-in).
+#[cfg(feature = "deltanet_prework_fused")]
+pub mod deltanet_prework_fused_cubecl;
 
 // Bonsai-2 ternary weight rotation tables (CubeCL arm).
 #[cfg(all(feature = "cubecl_runtime", feature = "ternary_gemv"))]

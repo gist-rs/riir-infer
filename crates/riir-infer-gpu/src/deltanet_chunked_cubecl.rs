@@ -128,6 +128,48 @@ fn deltanet_conv1d_chunked_f32(
     output[idx] = sum * sig;
 }
 
+/// Launch ONLY the chunked-conv1d carry update (the second ordered dispatch
+/// of [`DeltanetChunkedConv1dCubeCL::launch`], extracted so the R2 fused
+/// prework kernel — which READS the same carry in its one fused dispatch —
+/// can issue the identical ordered rewrite without re-running the conv.
+/// Same buffer contract as the conv kernel's carry.
+///
+/// # Safety
+/// - `input_handle`: `c * conv_dim` f32 raw inputs (read-only).
+/// - `carry_handle`: `conv_dim * carry_stride` f32 (rewritten).
+#[cfg(feature = "cubecl_runtime")]
+pub(crate) unsafe fn launch_conv1d_carry_update<R: Runtime>(
+    client: &ComputeClient<R>,
+    input_handle: Handle,
+    carry_handle: Handle,
+    c: usize,
+    conv_dim: usize,
+    kernel_size: usize,
+    carry_stride: usize,
+    carry_idx_offset: usize,
+) {
+    let params: [f32; 5] = [
+        c as f32,
+        conv_dim as f32,
+        kernel_size as f32,
+        carry_stride as f32,
+        carry_idx_offset as f32,
+    ];
+    let params_handle = client.create_from_slice(f32::as_bytes(&params));
+    let wg = 256usize;
+    let n_wg_carry = (conv_dim as u32).div_ceil(wg as u32).max(1);
+    unsafe {
+        deltanet_conv1d_carry_update_f32::launch_unchecked::<R>(
+            client,
+            CubeCount::Static(n_wg_carry, 1, 1),
+            CubeDim::new_1d(wg as u32),
+            BufferArg::from_raw_parts(input_handle, c * conv_dim),
+            BufferArg::from_raw_parts(carry_handle, conv_dim * carry_stride),
+            BufferArg::from_raw_parts(params_handle, 5),
+        );
+    }
+}
+
 /// Carry update for the chunked conv1d: shift the carry left by `c` and append
 /// the chunk's last `min(c, ks-1)` raw inputs (Issue 673 Bug C fix).
 ///
@@ -272,14 +314,15 @@ impl DeltanetChunkedConv1dCubeCL {
             // the carry; this dispatch rewrites it AFTER those reads complete.
             // One thread per channel — the per-channel left-shift is serial
             // in-thread, so no cross-thread carry access.
-            let n_wg_carry = (conv_dim as u32).div_ceil(wg as u32).max(1);
-            deltanet_conv1d_carry_update_f32::launch_unchecked::<R>(
+            launch_conv1d_carry_update::<R>(
                 client,
-                CubeCount::Static(n_wg_carry, 1, 1),
-                CubeDim::new_1d(wg as u32),
-                BufferArg::from_raw_parts(input_handle, total),
-                BufferArg::from_raw_parts(carry_handle, conv_dim * carry_stride),
-                BufferArg::from_raw_parts(params_handle, 5),
+                input_handle,
+                carry_handle,
+                c,
+                conv_dim,
+                kernel_size,
+                carry_stride,
+                carry_idx_offset,
             );
         }
     }

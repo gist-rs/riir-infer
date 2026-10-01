@@ -167,6 +167,14 @@ ternary_deltanet_chunked_prefill = ["cubecl_runtime"]
 # (pinned by its unit test). `ternary_gemv` brings in `deltanet_cubecl`, whose
 # kernel is the test's reference.
 deltanet_recurrence_smem_staged = ["ternary_deltanet_chunked_prefill", "ternary_gemv"]
+# riir-ai Issue 1004 R2 (opt-in until its GOAT A/B): the fused GDN prework —
+# conv1d + SiLU + q/k L2-norm + head expansion in ONE dispatch reading the
+# raw qkv stream once. Bit-identical to the chunked-conv + batched-expand
+# chain by construction (pinned by its unit test); `ternary_gemv` brings in
+# `deltanet_cubecl` (the expand kernel — the test's reference) and
+# `ternary_deltanet_chunked_prefill` the chunked conv + the shared
+# carry-update dispatch.
+deltanet_prework_fused = ["ternary_deltanet_chunked_prefill", "ternary_gemv"]
 # Row-parallel register-blocked recurrence arm (Issue 619) - cfg key for the
 # chunked kernels' row-parallel internals. Mirrors the engine crate's empty
 # feature.
@@ -236,6 +244,12 @@ gemma4_gpu = ["cubecl_runtime", "riir-infer-core/gemma4_inference"]
 [[test]]
 name = "bench_1004_r1_staged_recurrence_ab"
 required-features = ["deltanet_recurrence_smem_staged"]
+
+# riir-ai Issue 1004 R2 — the fused-prework stage-isolated A/B. Whole-file
+# #![cfg] + this row = the reader-protection pair (the R1 pattern).
+[[test]]
+name = "bench_1004_r2_prework_fused_ab"
+required-features = ["deltanet_prework_fused"]
 
 [[test]]
 name = "bench_663_t5_single_gemm_isolation"

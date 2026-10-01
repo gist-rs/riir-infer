@@ -2175,6 +2175,33 @@ pub fn set_prefill_recurrence_staged(on: bool) {
     PREFILL_RECURRENCE_STAGED.store(on, std::sync::atomic::Ordering::Relaxed);
 }
 
+/// Whether the GDN prework chain (conv1d + SiLU + q/k L2-norm + head
+/// expansion) runs the R2 fused kernel
+/// ([`crate::deltanet_prework_fused_cubecl`]) instead of the chunked-conv +
+/// batched-expand pair.
+///
+/// Bit-identical by construction (pinned at kernel level against the shipping
+/// chain). Default **on** whenever `deltanet_prework_fused` is compiled; the
+/// toggle exists so the e2e A/B measures both arms in one process (mandatory
+/// per Issue 642). The beta/decay dispatch is unchanged either way (it reads
+/// the a/b projection stream, not qkv).
+#[cfg(all(
+    feature = "cubecl_runtime",
+    feature = "ternary_gemm_batched",
+    feature = "deltanet_prework_fused"
+))]
+static PREFILL_PREWORK_FUSED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(true);
+
+/// See [`PREFILL_PREWORK_FUSED`].
+#[cfg(all(
+    feature = "cubecl_runtime",
+    feature = "ternary_gemm_batched",
+    feature = "deltanet_prework_fused"
+))]
+pub fn set_prefill_prework_fused(on: bool) {
+    PREFILL_PREWORK_FUSED.store(on, std::sync::atomic::Ordering::Relaxed);
+}
+
 /// The chunk size C for chunked prefill. 64 is the standard DeltaNet choice
 /// (Yang & Wang 2024). Each chunk processes C tokens in parallel within the
 /// chunk, with sequential state transition between chunks.
@@ -7566,26 +7593,6 @@ impl TernaryDeltanetGpuForward {
                     .expect("state for DeltaNet layer")
                     .clone();
 
-                // 5. conv1d. Sequential (per-token) or chunked (C tokens/dispatch).
-                //    The chunked kernel is G1-verified (deltanet_chunked_cubecl.rs
-                //    tests) and reduces P dispatches to ceil(P/C). It uses
-                //    conv_state directly as the carry buffer (stride=ks, offset=1),
-                //    so no carry-format translation is needed — the chunked kernel
-                //    reads/writes conv_state positions 1..ks-1, leaving position 0
-                //    untouched (stale, shifted out on the next decode before use).
-                //
-                //    The chunked kernel writes to a SEPARATE output buffer
-                //    (`qkv_conv_b`) because token t needs the RAW input of tokens
-                //    t-1..t-3 (in-place would read SiLU'd values). After all chunks,
-                //    `qkv_b` is swapped with `qkv_conv_b` so the subsequent
-                //    expand/L2-norm step reads SiLU outputs from qkv_b.
-                //
-                //    Constraint: P must be evenly divisible by C. For partial last
-                //    chunks, the sequential fallback writes SiLU to qkv_b (not
-                //    qkv_conv_b), and the swap would leave garbage in those tokens.
-                //    A copy kernel would fix this but adds complexity for an edge
-                //    case that doesn't arise in production (P=128, C=64). When P is
-                //    not divisible by C, we fall back to the full sequential path.
                 #[cfg(all(
                     feature = "cubecl_runtime",
                     feature = "ternary_gemm_batched",
@@ -7599,7 +7606,68 @@ impl TernaryDeltanetGpuForward {
                 )))]
                 let can_chunk_conv1d = false;
 
-                if can_chunk_conv1d {
+                // 5. conv1d (+ Issue 1004 R2: the fused prework). Sequential
+                //    (per-token) or chunked (C tokens/dispatch).
+                //    The chunked kernel is G1-verified (deltanet_chunked_cubecl.rs
+                //    tests) and reduces P dispatches to ceil(P/C). It uses
+                //    conv_state directly as the carry buffer (stride=ks, offset=1),
+                //    so no carry-format translation is needed — the chunked kernel
+                //    reads/writes conv_state positions 1..ks-1, leaving position 0
+                //    untouched (stale, shifted out on the next decode before use).
+                //
+                //    The chunked kernel writes to a SEPARATE output buffer
+                //    (`qkv_conv_b`) because token t needs the RAW input of tokens
+                //    t-1..t-3 (in-place would read SiLU'd values). After all chunks,
+                //    `qkv_b` is swapped with `qkv_conv_b` so the subsequent
+                //    expand/L2-norm step reads SiLU outputs from qkv_b.
+                //
+                //    R2 replaces conv + swap + expand with ONE fused dispatch
+                //    (conv + SiLU + L2-norm + expansion, raw stream read once,
+                //    plus the ordered carry update) — reading `qkv_b` directly
+                //    and writing `qkvx_b`, so the intermediate never exists. No
+                //    p-multiple-of-64 constraint (any p; the 64-chunk boundary
+                //    windows come from the raw stream). Bit-identical by
+                //    construction (the kernel's unit test pins it).
+                #[cfg(all(
+                    feature = "cubecl_runtime",
+                    feature = "ternary_gemm_batched",
+                    feature = "deltanet_prework_fused"
+                ))]
+                let prework_fused_on =
+                    PREFILL_PREWORK_FUSED.load(std::sync::atomic::Ordering::Relaxed)
+                        && crate::deltanet_prework_fused_cubecl::DeltanetPreworkFusedCubeCL::supports(
+                            head_dim, n_k_heads, n_v_heads,
+                        )
+                        && p <= 65535;
+                #[cfg(not(all(
+                    feature = "cubecl_runtime",
+                    feature = "ternary_gemm_batched",
+                    feature = "deltanet_prework_fused"
+                )))]
+                let prework_fused_on = false;
+
+                if prework_fused_on {
+                    #[cfg(all(
+                        feature = "cubecl_runtime",
+                        feature = "ternary_gemm_batched",
+                        feature = "deltanet_prework_fused"
+                    ))]
+                    unsafe {
+                        crate::deltanet_prework_fused_cubecl::DeltanetPreworkFusedCubeCL::launch::<ActiveRuntime>(
+                            &self.client,
+                            qkv_b.clone(),
+                            qkvx_b.clone(),
+                            layer_w.conv1d_weight.clone(),
+                            conv_state.clone(),
+                            p,
+                            conv_dim,
+                            kernel_size,
+                            n_k_heads,
+                            n_v_heads,
+                            head_dim,
+                        );
+                    }
+                } else if can_chunk_conv1d {
                     #[cfg(all(
                         feature = "cubecl_runtime",
                         feature = "ternary_gemm_batched",
@@ -7657,7 +7725,9 @@ impl TernaryDeltanetGpuForward {
                 //      their own token's data — beta/decay reads only the `a_b` /
                 //      `b_b` projections (independent of conv1d), expansion reads
                 //      `qkv_b` after conv1d has written every token above. See
-                //      [`PREFILL_BATCH_ELEMENTWISE`].
+                //      [`PREFILL_BATCH_ELEMENTWISE`]. Under the R2 fused prework
+                //      the expansion ran INSIDE the fused dispatch — only the
+                //      beta/decay dispatch below executes.
                 if PREFILL_BATCH_ELEMENTWISE.load(std::sync::atomic::Ordering::Relaxed) {
                     unsafe {
                         DeltanetBetaDecayBatchedCubeCL::launch::<ActiveRuntime>(
@@ -7672,16 +7742,18 @@ impl TernaryDeltanetGpuForward {
                             p,
                         );
                     }
-                    unsafe {
-                        ExpandAndL2NormalizeHeadsBatchedCubeCL::launch::<ActiveRuntime>(
-                            &self.client,
-                            qkv_b.clone(),
-                            qkvx_b.clone(),
-                            n_k_heads,
-                            n_v_heads,
-                            head_dim,
-                            p,
-                        );
+                    if !prework_fused_on {
+                        unsafe {
+                            ExpandAndL2NormalizeHeadsBatchedCubeCL::launch::<ActiveRuntime>(
+                                &self.client,
+                                qkv_b.clone(),
+                                qkvx_b.clone(),
+                                n_k_heads,
+                                n_v_heads,
+                                head_dim,
+                                p,
+                            );
+                        }
                     }
                 } else {
                     for t in 0..p {
@@ -7697,15 +7769,17 @@ impl TernaryDeltanetGpuForward {
                                 n_v_heads,
                             );
                         }
-                        unsafe {
-                            ExpandAndL2NormalizeHeadsCubeCL::launch::<ActiveRuntime>(
-                                &self.client,
-                                Self::tok_slice(&qkv_b, t, qkv_dim, p),
-                                Self::tok_slice(&qkvx_b, t, qkvx_dim, p),
-                                n_k_heads,
-                                n_v_heads,
-                                head_dim,
-                            );
+                        if !prework_fused_on {
+                            unsafe {
+                                ExpandAndL2NormalizeHeadsCubeCL::launch::<ActiveRuntime>(
+                                    &self.client,
+                                    Self::tok_slice(&qkv_b, t, qkv_dim, p),
+                                    Self::tok_slice(&qkvx_b, t, qkvx_dim, p),
+                                    n_k_heads,
+                                    n_v_heads,
+                                    head_dim,
+                                );
+                            }
                         }
                     }
                 }
