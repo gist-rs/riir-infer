@@ -503,6 +503,10 @@ pub mod deltanet_cubecl;
     any(feature = "ternary_gemv", feature = "deltanet_inference")
 ))]
 pub use deltanet_cubecl::DeltaNetStateBuffers;
+// riir-ai Issue 1004 R1: the multi-token recurrence with threadgroup-staged
+// k/q/v (bit-identical to `DeltanetRecurrenceMultiTokenCubeCL`, opt-in).
+#[cfg(feature = "deltanet_recurrence_smem_staged")]
+pub mod deltanet_recurrence_staged_cubecl;
 
 // Bonsai-2 ternary weight rotation tables (CubeCL arm).
 #[cfg(all(feature = "cubecl_runtime", feature = "ternary_gemv"))]

@@ -2134,6 +2134,31 @@ pub fn set_prefill_chunked(on: bool) {
     PREFILL_CHUNKED.store(on, std::sync::atomic::Ordering::Relaxed);
 }
 
+/// Whether the multi-token recurrence runs the threadgroup-staged kernel
+/// (riir-ai Issue 1004 R1, [`crate::deltanet_recurrence_staged_cubecl`])
+/// instead of the one-plane-per-cube `DeltanetRecurrenceMultiTokenCubeCL`.
+///
+/// Bit-identical by construction (pinned at kernel level against the shipping
+/// kernel). Default **on** whenever `deltanet_recurrence_smem_staged` is
+/// compiled; the toggle exists so the e2e A/B measures both arms in one
+/// process (mandatory per Issue 642). Only read when [`PREFILL_CHUNKED`] is on.
+#[cfg(all(
+    feature = "cubecl_runtime",
+    feature = "ternary_gemm_batched",
+    feature = "deltanet_recurrence_smem_staged"
+))]
+static PREFILL_RECURRENCE_STAGED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(true);
+
+/// See [`PREFILL_RECURRENCE_STAGED`].
+#[cfg(all(
+    feature = "cubecl_runtime",
+    feature = "ternary_gemm_batched",
+    feature = "deltanet_recurrence_smem_staged"
+))]
+pub fn set_prefill_recurrence_staged(on: bool) {
+    PREFILL_RECURRENCE_STAGED.store(on, std::sync::atomic::Ordering::Relaxed);
+}
+
 /// The chunk size C for chunked prefill. 64 is the standard DeltaNet choice
 /// (Yang & Wang 2024). Each chunk processes C tokens in parallel within the
 /// chunk, with sequential state transition between chunks.
@@ -7582,17 +7607,38 @@ impl TernaryDeltanetGpuForward {
                         feature = "ternary_deltanet_chunked_prefill"
                     ))]
                     unsafe {
-                        DeltanetRecurrenceMultiTokenCubeCL::launch_with_gpu_handles::<ActiveRuntime>(
-                            &self.client,
-                            qkvx_b.clone(),
-                            beta_b.clone(),
-                            decay_b.clone(),
-                            state.clone(),
-                            rec_b.clone(),
-                            n_v_heads,
-                            head_dim,
-                            p,
-                        );
+                        // riir-ai Issue 1004 R1: the threadgroup-staged twin
+                        // (bit-identical; same handles, same contract).
+                        #[cfg(feature = "deltanet_recurrence_smem_staged")]
+                        let staged = PREFILL_RECURRENCE_STAGED.load(std::sync::atomic::Ordering::Relaxed);
+                        #[cfg(not(feature = "deltanet_recurrence_smem_staged"))]
+                        let staged = false;
+                        if staged {
+                            #[cfg(feature = "deltanet_recurrence_smem_staged")]
+                            crate::deltanet_recurrence_staged_cubecl::DeltanetRecurrenceStagedCubeCL::launch_with_gpu_handles::<ActiveRuntime>(
+                                &self.client,
+                                qkvx_b.clone(),
+                                beta_b.clone(),
+                                decay_b.clone(),
+                                state.clone(),
+                                rec_b.clone(),
+                                n_v_heads,
+                                head_dim,
+                                p,
+                            );
+                        } else {
+                            DeltanetRecurrenceMultiTokenCubeCL::launch_with_gpu_handles::<ActiveRuntime>(
+                                &self.client,
+                                qkvx_b.clone(),
+                                beta_b.clone(),
+                                decay_b.clone(),
+                                state.clone(),
+                                rec_b.clone(),
+                                n_v_heads,
+                                head_dim,
+                                p,
+                            );
+                        }
                     }
                     // Without `ternary_deltanet_chunked_prefill` the dual-cfg
                     // `chunked_enabled` binding above compiles to `false`, so
