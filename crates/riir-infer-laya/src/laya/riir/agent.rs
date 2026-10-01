@@ -201,6 +201,39 @@ pub struct EncodedQuestion {
     pub d: usize,
 }
 
+/// The q8-artifact posture's disclosure: the decode built no error report
+/// (nothing was transformed at load — the artifact IS the quantized
+/// form), but the record still names the quantized surface (tensors/
+/// elements; the 1D tensors carried F16) with zero error (the stored
+/// values ARE the weights).
+fn q8_artifact_disclosure(
+    raw: &std::collections::HashMap<String, super::weights::Weights>,
+) -> super::fake_quant::FakeQuantReport {
+    let mut rep = super::fake_quant::FakeQuantReport {
+        quantized_tensors: 0,
+        quantized_elements: 0,
+        blocks: 0,
+        skipped_tensors: Vec::new(),
+        max_abs_err: 0.0,
+        mean_abs_err: 0.0,
+        quantized_f16_bytes: 0,
+    };
+    let mut names: Vec<&String> = raw.keys().collect();
+    names.sort_unstable();
+    for tensor_name in names {
+        let w = &raw[tensor_name];
+        if w.shape.len() < 2 {
+            rep.skipped_tensors.push(tensor_name.clone());
+            continue;
+        }
+        rep.quantized_tensors += 1;
+        rep.quantized_elements += w.data.len();
+        rep.quantized_f16_bytes += w.data.len() as u64 * 2;
+        rep.blocks += w.data.len().div_ceil(super::fake_quant::BLOCK);
+    }
+    rep
+}
+
 /// A loaded checkpoint (riir backend): tokenizer + encoder + head +
 /// temperature tables, plus the device backend the forward runs on.
 pub struct RiirAgent {
@@ -222,11 +255,16 @@ pub struct RiirAgent {
     /// `with_folds` pattern — pairing cancels between-round box drift);
     /// serving paths never touch it.
     head_defer_override: Option<bool>,
-    /// The weight-posture measurement record (instinct issue 018 Lane D1):
-    /// `Some` iff this agent loaded under [`WeightPosture::FakeQuantQ8`] —
-    /// what was quantized, what was skipped, the measured error. `None`
-    /// (the shipped posture) discloses nothing because nothing changed.
-    fake_quant: Option<super::fake_quant::FakeQuantReport>,
+    /// The weight-posture disclosure (instinct issue 018 Lane D1/D2a):
+    /// `Some` iff this agent loaded under a non-F16 weight posture —
+    /// fake-quant (the measured error) or the Q8 artifact (the tensor
+    /// surface; values byte-identical to the fake-quant by the
+    /// converter's proof). `None` (the shipped posture) discloses
+    /// nothing because nothing changed.
+    fake_quant: Option<(
+        super::fake_quant::WeightPosture,
+        super::fake_quant::FakeQuantReport,
+    )>,
 }
 
 impl RiirAgent {
@@ -317,20 +355,70 @@ impl RiirAgent {
                     .into(),
             });
         }
+        // The Q8 artifact posture is a STORAGE selection, not an in-memory
+        // transform — the env owns it (LAYA_WEIGHTS_VARIANT=q8). An
+        // explicit load_with_posture(Q8Artifact) with the env unset would
+        // load F16 weights under a quantized label — refused, never a
+        // silent mislabel.
+        if posture == super::fake_quant::WeightPosture::Q8Artifact
+            && !matches!(
+                std::env::var("LAYA_WEIGHTS_VARIANT").as_deref(),
+                Ok("q8")
+            )
+        {
+            return Err(LayaError::Config {
+                checkpoint: ckpt.subfolder(),
+                detail: "WeightPosture::Q8Artifact is selected by LAYA_WEIGHTS_VARIANT=q8 \
+                         (the storage variant), not by load_with_posture — set the env \
+                         or use WeightPosture::F16"
+                    .into(),
+            });
+        }
         let dir = ensure_checkpoint(root, ckpt)?;
         let name = ckpt.subfolder();
         let (agent_cfg, enc_cfg) = load_checkpoint_configs(&dir, name)?;
 
         let tok = Tok::from_dir(&dir, name)?;
-        let mut raw = super::weights::load(&dir.join("model.safetensors"), name)?;
+        // The storage variant (instinct issue 018 Lane D2a): LAYA_WEIGHTS_VARIANT=q8
+        // loads the derived Q8_0 artifact (sidecar-verified) instead of the
+        // canonical F16 file — the decode arithmetic is the fake-quant
+        // path's own, so the numerics are the probe's measured ones with
+        // NO in-memory transform. The explicit postures below win over
+        // the env where they disagree is a REFUSAL, never a silent pick:
+        // FakeQuantQ8 on a q8 artifact would quantize twice.
+        let (weights_path, q8_artifact) = super::q8_artifact::resolve_weights_file(&dir, name)?;
+        if q8_artifact {
+            if matches!(
+                posture,
+                super::fake_quant::WeightPosture::FakeQuantQ8
+            ) {
+                return Err(LayaError::Config {
+                    checkpoint: name,
+                    detail: "--fake-quant over a Q8 artifact would quantize TWICE — the \
+                             artifact already carries the probe's exact weight values; \
+                             drop --fake-quant or unset LAYA_WEIGHTS_VARIANT"
+                        .into(),
+                });
+            }
+            if ane_requested {
+                return Err(LayaError::Config {
+                    checkpoint: name,
+                    detail: "the ANE lane runs the Core ML artifact — a Q8 weights \
+                             variant does not apply (refusing, never a silent ignore)"
+                        .into(),
+                });
+            }
+        }
+        let mut raw = super::weights::load(&weights_path, name)?;
 
-        // The weight posture (instinct issue 018 Lane D1): applied BEFORE
+        // The weight posture (instinct issue 018 Lane D1/D2a): applied BEFORE
         // the encoder/head split so every per-op lane sees the same
         // quantized bytes. The ANE lane refuses — its layer weights live
         // in the Core ML artifact, so a map-level transform would be a
         // silent no-op wearing a quantized label.
         let fake_quant = match posture {
             super::fake_quant::WeightPosture::F16 => None,
+            super::fake_quant::WeightPosture::Q8Artifact => None, // loaded that way above
             super::fake_quant::WeightPosture::FakeQuantQ8 if ane_requested => {
                 return Err(LayaError::Config {
                     checkpoint: name,
@@ -343,6 +431,14 @@ impl RiirAgent {
             super::fake_quant::WeightPosture::FakeQuantQ8 => {
                 Some(super::fake_quant::fake_quant_q8_map(&mut raw))
             }
+        };
+        // The q8-artifact posture's disclosure: the decode built no report
+        // (nothing was transformed here), but the record needs the tensor
+        // surface — derive it from the loaded map's shape words.
+        let fake_quant = if q8_artifact {
+            Some(q8_artifact_disclosure(&raw))
+        } else {
+            fake_quant
         };
 
         let (enc, backend): (EncoderStack, Box<dyn Backend>) = if ane_requested {
@@ -440,6 +536,11 @@ impl RiirAgent {
 
         let temps = Temperatures::from_config(&agent_cfg);
         let device_label = if ane_requested { "ane" } else { backend.name() };
+        let posture_word = if q8_artifact {
+            super::fake_quant::WeightPosture::Q8Artifact
+        } else {
+            posture
+        };
         Ok(Self {
             tok,
             enc,
@@ -450,7 +551,7 @@ impl RiirAgent {
             cfg: agent_cfg,
             ckpt: name,
             head_defer_override: None,
-            fake_quant,
+            fake_quant: fake_quant.map(|r| (posture_word, r)),
         })
     }
 
@@ -483,13 +584,20 @@ impl RiirAgent {
     }
 
     /// The weight posture this agent loaded under (instinct issue 018
-    /// Lane D1) with its measurement report — `None` = the shipped F16
-    /// posture, `Some((posture, report))` = fake-quant (the report names
-    /// every skipped tensor and the measured error).
-    pub fn weight_posture(&self) -> Option<(super::fake_quant::WeightPosture, &super::fake_quant::FakeQuantReport)> {
+    /// Lane D1/D2a) with its disclosure report — `None` = the shipped
+    /// F16 posture, `Some((posture, report))` = fake-quant (the report
+    /// names every skipped tensor and the measured error) or the Q8
+    /// artifact (the report names the quantized tensor surface; the
+    /// values ARE the probe's, byte-identical by the converter's proof).
+    pub fn weight_posture(
+        &self,
+    ) -> Option<(
+        super::fake_quant::WeightPosture,
+        &super::fake_quant::FakeQuantReport,
+    )> {
         self.fake_quant
             .as_ref()
-            .map(|r| (super::fake_quant::WeightPosture::FakeQuantQ8, r))
+            .map(|(p, r)| (*p, r))
     }
 
     /// The largest sequence length the ANE lane can serve (its biggest

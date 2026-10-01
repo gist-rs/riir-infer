@@ -140,6 +140,15 @@ laya-riir-cubecl = ["laya-riir", "dep:riir-infer-gpu"]
 # same-named feature.
 twt_profile = []
 
+# The Q8 artifact converter (Lane D2a): F16 model.safetensors →
+# derived/model.q8.safetensors + BLAKE3 sidecar, round-trip-verified
+# byte-identical to the fake-quant path BEFORE the file commits. Needs
+# the lane (the reader + the quant primitives).
+[[bin]]
+name = "laya-quant8"
+path = "src/bin/laya_quant8.rs"
+required-features = ["laya-riir"]
+
 # The Metal-vs-CPU op-equivalence gate is whole-file #![cfg]-gated
 # (macOS + the metal feature) and compiles to an empty binary elsewhere;
 # this row is the reader protection (a --features selection without the

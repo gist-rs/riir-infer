@@ -93,11 +93,21 @@ pub fn from_bytes(bytes: &[u8], ckpt: &'static str) -> Result<HashMap<String, We
         }
         let begin = offsets[0].as_u64().unwrap_or(u64::MAX) as usize;
         let end = offsets[1].as_u64().unwrap_or(0) as usize;
-        let width = dtype_width(dtype, name, ckpt)?;
         let numel: usize = shape.iter().product();
-        if end < begin || end - begin != numel * width {
+        // The expected byte span per dtype — Q8_0 is BLOCKED (34 bytes per
+        // 32 weights + a short tail block), every other dtype is flat
+        // (its per-element width validated by `widen`'s own dtype match).
+        let expect = if dtype == "Q8_0" {
+            let full = numel / super::fake_quant::BLOCK;
+            let tail = numel % super::fake_quant::BLOCK;
+            full * (2 + super::fake_quant::BLOCK)
+                + usize::from(tail > 0) * (2 + tail)
+        } else {
+            numel * dtype_width(dtype, name, ckpt)?
+        };
+        if end < begin || end - begin != expect {
             return Err(bad(format!(
-                "{name}: data span {} bytes != {numel} × {width}",
+                "{name}: data span {} bytes != the {dtype} layout ({expect} for {numel} elements)",
                 end.saturating_sub(begin)
             )));
         }
@@ -113,8 +123,60 @@ pub fn from_bytes(bytes: &[u8], ckpt: &'static str) -> Result<HashMap<String, We
                 bytes.len()
             )));
         }
-        let data = widen(dtype, &bytes[abs_begin..abs_end], name, ckpt)?;
+        let data = if dtype == "Q8_0" {
+            widen_q8_0(&bytes[abs_begin..abs_end], numel, name, ckpt)?
+        } else {
+            widen(dtype, &bytes[abs_begin..abs_end], name, ckpt)?
+        };
         out.insert(name.to_string(), Weights { shape, data });
+    }
+    Ok(out)
+}
+
+/// Widen a Q8_0 tensor's storage bytes to f32: per 32-weight block, one
+/// f16 scale + N i8 quants; `w = d · q`. The tail (numel % BLOCK) is its
+/// own block with its own scale — the converter's layout. The decode
+/// arithmetic is the fake-quant path's OWN (d · f32::from(q)), so an
+/// artifact widened here is byte-identical to the same weights
+/// fake-quantized in memory — the D2a adoption's no-numerics-change
+/// proof (instinct issue 018).
+fn widen_q8_0(bytes: &[u8], numel: usize, name: &str, ckpt: &'static str) -> Result<Vec<f32>> {
+    let block = super::fake_quant::BLOCK;
+    let full = numel / block;
+    let tail = numel % block;
+    let expect = full * (2 + block) + usize::from(tail > 0) * (2 + tail);
+    let bad = |detail: String| LayaError::Pin {
+        checkpoint: ckpt,
+        file: name.to_string(),
+        detail,
+    };
+    if bytes.len() != expect {
+        return Err(bad(format!(
+            "Q8_0 payload {} bytes != the blocked layout ({expect})",
+            bytes.len()
+        )));
+    }
+    let mut out = Vec::with_capacity(numel);
+    let mut pos = 0usize;
+    let mut take_block = |out: &mut Vec<f32>, count: usize| -> Result<()> {
+        let bits = u16::from_le_bytes(
+            bytes[pos..pos + 2]
+                .try_into()
+                .map_err(|_| bad("truncated scale".into()))?,
+        );
+        pos += 2;
+        let d = super::fake_quant::q8_scale_f32(bits);
+        for q in &bytes[pos..pos + count] {
+            out.push(d * f32::from(i8::from_le_bytes([*q])));
+        }
+        pos += count;
+        Ok(())
+    };
+    for _ in 0..full {
+        take_block(&mut out, block)?;
+    }
+    if tail > 0 {
+        take_block(&mut out, tail)?;
     }
     Ok(out)
 }

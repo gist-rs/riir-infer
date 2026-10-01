@@ -46,8 +46,8 @@ pub struct FakeQuantReport {
     pub quantized_f16_bytes: u64,
 }
 
-/// The weight-posture vocabulary (D1's fake-quant today; D2's real
-/// quantized kernels extend this enum — never a bool).
+/// The weight-posture vocabulary (D1's fake-quant, D2a's Q8 artifact;
+/// D2b's device-resident kernels extend this enum — never a bool).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum WeightPosture {
     /// The shipped posture: the checkpoint's own F16 widened to F32.
@@ -55,16 +55,22 @@ pub enum WeightPosture {
     /// D1's probe: every >=2D tensor fake-quantized Q8_0 (block-32, f16
     /// scale) in memory; the forward is byte-identical code.
     FakeQuantQ8,
+    /// D2a's storage tier: the weights loaded from the derived Q8_0
+    /// artifact (`LAYA_WEIGHTS_VARIANT=q8`) — no in-memory transform;
+    /// the decode values are byte-identical to [`Self::FakeQuantQ8`]
+    /// (the converter's proof), so the probe's reads carry.
+    Q8Artifact,
 }
 
 impl WeightPosture {
     /// The record label — printed/serialized beside every number so a
-    /// fake-quant read can never be mistaken for the shipped posture.
+    /// quantized read can never be mistaken for the shipped posture.
     #[must_use]
     pub const fn label(self) -> &'static str {
         match self {
             Self::F16 => "f16",
             Self::FakeQuantQ8 => "fake-quant-q8",
+            Self::Q8Artifact => "q8-artifact",
         }
     }
 }
@@ -107,14 +113,38 @@ pub fn fake_quant_q8_map(map: &mut HashMap<String, Weights>) -> FakeQuantReport 
     rep
 }
 
+/// The Q8_0 scale for one block's amax: the f16-ROUNDED value of
+/// `amax / 127` — returned as f16 BITS (the storage form). The probe,
+/// the artifact converter and the artifact reader all derive the scale
+/// through this ONE function; the probe quantizes against the storage
+/// grid so its measured error is the error real adoption introduces.
+#[must_use]
+pub fn q8_scale_bits(amax: f32) -> u16 {
+    f32_to_f16_bits(amax / 127.0)
+}
+
+/// The scale as f32 (the reader/probe arithmetic).
+#[must_use]
+pub fn q8_scale_f32(bits: u16) -> f32 {
+    f16_bits_to_f32(bits)
+}
+
+/// The quantized value of ONE weight against scale `d` — `roundf(w/d)`
+/// (half away from zero, the GGUF reference's rounding) clamped to
+/// [-127, 127]. A non-positive `d` (degenerate block) quantizes to 0.
+#[must_use]
+pub fn q8_quant_of(w: f32, d: f32) -> i8 {
+    if d <= 0.0 {
+        return 0;
+    }
+    ((w * (1.0 / d)).round().clamp(-127.0, 127.0)) as i8
+}
+
 /// Q8_0 fake-quant of ONE tensor's payload: per [`BLOCK`]-weight block,
-/// scale `d = f16(amax / 127)` (the f16-rounded scale the real format
-/// stores — quantize against the STORAGE grid, not a wider one), `q =
-/// round(w / d)` (the `roundf` convention — half away from zero, the
-/// GGUF reference's own rounding) clamped to [-127, 127], dequant
-/// `w' = d · q`. A degenerate block (amax 0, or a scale that flushes to
-/// zero in f16) maps every weight to 0.0 — the format's own behaviour
-/// for that block (its stored scale IS 0).
+/// scale `d = f16(amax / 127)` ([`q8_scale_bits`]), `q =
+/// [`q8_quant_of`]`, dequant `w' = d · q`. A degenerate block (amax 0,
+/// or a scale that flushes to zero in f16) maps every weight to 0.0 —
+/// the format's own behaviour for that block (its stored scale IS 0).
 ///
 /// Returns (max |err|, Σ |err|) over the tensor.
 pub fn fake_quant_q8(data: &mut [f32]) -> (f32, f64) {
@@ -122,18 +152,9 @@ pub fn fake_quant_q8(data: &mut [f32]) -> (f32, f64) {
     let mut sum_err = 0.0f64;
     for block in data.chunks_mut(BLOCK) {
         let amax = block.iter().fold(0.0f32, |m, &w| m.max(w.abs()));
-        let d = f16_bits_to_f32(f32_to_f16_bits(amax / 127.0));
-        if d <= 0.0 {
-            for w in block.iter_mut() {
-                sum_err += f64::from(w.abs());
-                max_err = max_err.max(w.abs());
-                *w = 0.0;
-            }
-            continue;
-        }
-        let inv = 1.0 / d;
+        let d = q8_scale_f32(q8_scale_bits(amax));
         for w in block.iter_mut() {
-            let q = (*w * inv).round().clamp(-127.0, 127.0);
+            let q = f32::from(q8_quant_of(*w, d));
             let dq = d * q;
             let err = (*w - dq).abs();
             sum_err += f64::from(err);
