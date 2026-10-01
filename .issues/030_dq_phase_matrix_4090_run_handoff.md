@@ -161,3 +161,58 @@ follows its completion: read the four cells + damage ratios R, write
 - Do not touch Issue 029's lane (sibling-owned WIP).
 - Do not re-derive the matrix definition — T0's round-3 AGREE freeze (`d3300f2`) is the review of record.
 - Issues 027/028 accuracy claims stay gated on this run's instrument (Issue 026's own ordering).
+
+## 2026-10-01 01:44–06:02 +07 — the v1 matrix run: all 9 cells measured, then FATALED at the final gate (phase-blind control)
+
+The full matrix (task `dq614_matrix`, log `F:/wt/dq614-matrix.log`, worktree
+`a07fffd`) measured every cell cleanly — base(1)/base(2) byte-stable (G-i4
+PASS; arith 46/48 each, NIAH 32/31/32 each), then the armed cells in
+grid-major order (a2: pf/dec/both, a4: pf/dec/both, dec_a8 last):
+
+| cell | arith | NIAH per len (4096/8192/16384) |
+|---|---|---|
+| base(1) / base(2) | 46/48 / 46/48 | 32/32, 31/32, 32/32 (×2) |
+| pf_aq[a2] | ~23/48 | **7/32, 9/32, 8/32** — catastrophic |
+| dec_aq[a2] | — | 32/32, 28/32, 29/32 — mild |
+| both_aq[a2] | — | 9/32, 8/32, 5/32 ≈ pf-only |
+| pf_aq[a4] / dec_aq[a4] / both_aq[a4] | near-clean | 32/32, 32/32, 32/32 (all) |
+| dec_a8 control | 46/48 (matches base item-for-item) | 32/32, 31/32, 32/32 |
+
+…then: `FATAL: G-i2 positive control FAIL: dec_aq.a2 logits identical to
+base`. The report never wrote. The arm was NOT dead — dec_aq's decode
+launch counts matched the frozen expectation (the G-i2 count gate passed
+with 0 mismatches across ALL cells) and its accuracies moved. The control
+hashed the PREFILL forward's final logits for every armed cell, but the D1
+phase boundary keeps a decode-only arm's prefill clean by construction —
+structurally unsatisfiable. (Per the label precedence this is an
+INSTRUMENT-FAIL: no accuracy claim from the v1 run; the per-item tables
+above are recovery evidence, not gate results.)
+
+En-route: 00:43 a second unguarded chain launch truncated the first lane
+check's log (the collision this lane's tooling now guards against —
+`E:/git/_sync/dq614_{chain,matrix}.cmd` carry an ALIVE probe; the guard
+was live-tested against the actually-running lane check before the v1
+launch). And the FATAL teardown path HANGS (RAM 4.7→8.8 GB over ~10 min,
+GPU released, process stuck unwinding; killed by hand PID 45132) — the
+error-exit path needs its own fix, noted for the record.
+
+## 2026-10-01 06:02–06:40 +07 — TWIN duplicate control fix (Batch-169 class), reconciled; re-run launched on the merged tip
+
+Two idle-loop sessions independently diagnosed the same phase-blind control
+and landed fixes ~20 min apart: `23bbff5` (origin, canonical — the other
+session's, phase-aware via dec→second_fnv dispatch) and `5977565` (this
+session's — Option<u64> capture + arm-phase-matched control; died in the
+reset per the origin-canonical precedent). This session re-landed only its
+non-overlapping value on top: `3cf9ae9` — the plan T4 4090-clippy
+discharge (7 pre-existing mechanicals; the two corpus/bootstrap seed
+regroups are VALUE-PRESERVING leading-zero pads — the re-run's corpus
+blake3 reproduces `6f3c6f02…f04c53d` byte-exact) + the header's
+never-implemented `DQ_CELLS` doc line corrected. Merged tip smoke-validated
+(DQ_GRIDS=a2, N=4/2, 3 armed cells): exit 0, G-i1/G-i4 PASS, phase-matched
+control green for pf/dec/both, counters table rendering.
+
+**Re-run v2 launched 06:40 on `3cf9ae9`** (worktree reset + rebuilt; task
+`dq614_matrix`, appended to the same log — the v1 fatal line is preserved
+above the new run's). Corpus/model blake3s verified frozen at launch. The
+v2 run re-validates the whole session's fix chain (a07fffd included) and
+writes the report only on full success.
