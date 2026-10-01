@@ -1,21 +1,13 @@
 # Plan 614 — the DQ phase-sensitivity bench (Issue 026 T1–T5): the 2×2 activation-quant phase matrix on the league artifact
 
-**Status:** OPEN — T0 CLOSED (round-3 AGREE, session c65b0114; freeze `d3300f2`).
-T1+T2+T3 DONE: both lanes' kernels + injections (G-i3 green on Metal M3 +
-CUDA 4090, 5/5), the runner release-green on the 4090 (build kicked off in
-`E:/git/dq614-wt`, logs at `F:/wt/dq614-build.*.log`). **T5 DEFERRED
-2026-09-30 on the owner's stop — the box was CPU-busy at kickoff (pre-flight
-GPU was compute-idle; no orphaned processes left; worktree clean at
-`4d7304e`); NOTHING was measured. The turnkey pickup is
-[Issue 030](../.issues/030_dq_phase_matrix_4090_run_handoff.md) (commands,
-diligence, T6 close-out, worktree cleanup).** REMAINS: T5 — the
-4090 RUN (`RIIR_PREFILL_CUDA_GRAPHS=0 BONSAI_GGUF=E:/git/riir-train/data/
-Ternary-Bonsai-2-27B-PQ2_0.gguf cargo run --release -p riir-infer-gpu
---no-default-features --features dq_phase_bench,ternary_gemv_cuda_raw,
-ternary_gemm_batched --bin dq_phase_matrix`, GPU-exclusive, detached+logged;
-first `DQ_LANE_CHECK_ONLY=1`, then the full matrix) + T6 close-out. The
-worktree `E:/git/dq614-wt` is a shallow clone at origin/develop — refreshed
-to `4d7304e` at deferral, delete after T6.
+**Status:** COMPLETE — T0–T6 all landed (the 4090 run + close-out 2026-10-01;
+verdict: instrument stands, all four axes INADMISSIBLE at the frozen
+corpora — `.benchmarks/023_dq_phase_matrix.md`). T1+T2+T3 DONE: both lanes'
+kernels + injections (G-i3 green on Metal M3 + CUDA 4090, 5/5), the runner
+release-green on the 4090. The turnkey pickup was
+[Issue 030](../.issues/030_dq_phase_matrix_4090_run_handoff.md) (closed
+2026-10-01, record in HISTORY.md). The worktree `E:/git/dq614-wt` was
+deleted at T6 per the cleanup clause.
 
 Master: `.research/004_DQ_Disaggregated_Quantization.md` (arXiv:2609.26333 §2.2) · Issue `.issues/026_phase_sensitivity_quant_bench.md`. The issue's own gate: "Runs AFTER the 2×2 matrix definition review" — T0 below IS that review.
 
@@ -296,18 +288,21 @@ paired lane (the 4090's `F:/models/qwen38-27b-dbirks-Q4_K_M.gguf` via
       HIT-REVERSED-NULL classification, MD report. Graphs env is CHECKED
       (refuses without RIIR_PREFILL_CUDA_GRAPHS=0) not set in-process
       (OnceLock read order).
-- [-] T4 — local verification: M3 half DONE (compile + clippy + lib tests +
+- [x] T4 — local verification: M3 half DONE (compile + clippy + lib tests +
       CubeCL G-i3 green); 4090 half DONE (full-feature build green + G-i3 5/5
-      incl. the CUDA-lane arm). REMAINS: 4090 clippy + the runner's compile
-      once T3 lands.
-- [ ] T5 — the 4090 run (solo, GPU-exclusive, AC): both grids × both axes; write
-      `.benchmarks/023_dq_phase_matrix.md` (live max is 022 — the `.highwater` 15
-      is stale) with box state, exposure ratios, per-family/per-length tables, R
-      + CI table, outcome classification per the D6 table, and the standing
-      promotion rule (any future weight format publishes its per-phase R before
-      default promotion).
-- [ ] T6 — Issue 026 T1–T5 marks + verdict; HISTORY row; `.benchmarks/.highwater`
-      repair (15 → 023) in the same commit.
+      incl. the CUDA-lane arm; 4090 clippy -D clean discharged 2026-10-01 at
+      `3cf9ae9` — the T4 leftover).
+- [x] T5 — the 4090 run: DONE 2026-10-01 (v2 run, `23bbff5`+`3cf9ae9`, after
+      the v1 run fatal at the phase-blind control — both runs byte-identical
+      per item). **Every axis INADMISSIBLE** (base arith 0.9583 > 0.95, NIAH
+      pooled 0.9896 > 0.95) — no directional gate; the report-only damage
+      tables + the standing rule live in
+      `.benchmarks/023_dq_phase_matrix.md`. G-i1/G-i2(phase-matched)/G-i4 +
+      dec_a8 (|Δ|=0) ALL PASS. A gating re-run needs a NEW pre-registration
+      with corpora inside the admissibility window (more-recorded in the
+      bench doc's Reading section) — never a protocol edit of this freeze.
+- [x] T6 — Issue 026 marks + verdict; HISTORY row; `.benchmarks/.highwater`
+      repaired (15 → 23) in the same commit.
 
 ## Budget
 
