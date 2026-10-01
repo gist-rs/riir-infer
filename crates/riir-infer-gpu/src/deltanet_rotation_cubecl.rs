@@ -82,7 +82,8 @@ fn fwht_rotate_forward_f32(x: &mut [f32], signs: &[f32], params: &[f32]) {
     let width = params[0usize] as u32;
     let hblock = params[1usize] as u32;
     let threads = 256u32;
-    let base = CUBE_POS_X * hblock;
+    // 2-D grid (see `split_grid`): rebuild the linear cube index.
+    let base = (CUBE_POS_Y * CUBE_COUNT_X + CUBE_POS_X) * hblock;
     if base >= total {
         terminate!();
     }
@@ -134,7 +135,8 @@ fn fwht_rotate_inverse_f32(x: &mut [f32], signs: &[f32], params: &[f32]) {
     let width = params[0usize] as u32;
     let hblock = params[1usize] as u32;
     let threads = 256u32;
-    let base = CUBE_POS_X * hblock;
+    // 2-D grid (see `split_grid`): rebuild the linear cube index.
+    let base = (CUBE_POS_Y * CUBE_COUNT_X + CUBE_POS_X) * hblock;
     if base >= total {
         terminate!();
     }
@@ -187,7 +189,8 @@ fn fwht_forward_copy_f32(src: &[f32], dst: &mut [f32], signs: &[f32], params: &[
     let width = params[0usize] as u32;
     let hblock = params[1usize] as u32;
     let threads = 256u32;
-    let base = CUBE_POS_X * hblock;
+    // 2-D grid (see `split_grid`): rebuild the linear cube index.
+    let base = (CUBE_POS_Y * CUBE_COUNT_X + CUBE_POS_X) * hblock;
     if base >= total {
         terminate!();
     }
@@ -240,7 +243,8 @@ fn gdn_v_permute_f32(tmp: &[f32], x: &mut [f32], params: &[f32]) {
     let hd = params[1usize] as usize;
     let n_k = params[2usize] as usize;
     let rep = params[3usize] as usize;
-    let i = ABSOLUTE_POS;
+    // 2-D grid (see `split_grid`): rebuild the linear unit index.
+    let i = ((CUBE_POS_Y * CUBE_COUNT_X + CUBE_POS_X) * CUBE_DIM + UNIT_POS) as usize;
     if i >= total {
         terminate!();
     }
@@ -288,7 +292,7 @@ impl RotationCubeCL {
         unsafe {
             fwht_rotate_forward_f32::launch_unchecked::<R>(
                 client,
-                CubeCount::Static(n_cubes, 1, 1),
+                split_grid(n_cubes),
                 CubeDim::new_1d(FWHT_THREADS),
                 BufferArg::from_raw_parts(x_handle, total),
                 BufferArg::from_raw_parts(signs_handle, width),
@@ -316,7 +320,7 @@ impl RotationCubeCL {
         unsafe {
             fwht_rotate_inverse_f32::launch_unchecked::<R>(
                 client,
-                CubeCount::Static(n_cubes, 1, 1),
+                split_grid(n_cubes),
                 CubeDim::new_1d(FWHT_THREADS),
                 BufferArg::from_raw_parts(x_handle, total),
                 BufferArg::from_raw_parts(signs_handle, width),
@@ -347,7 +351,7 @@ impl RotationCubeCL {
         unsafe {
             fwht_forward_copy_f32::launch_unchecked::<R>(
                 client,
-                CubeCount::Static(n_cubes, 1, 1),
+                split_grid(n_cubes),
                 CubeDim::new_1d(FWHT_THREADS),
                 BufferArg::from_raw_parts(src_handle, total),
                 BufferArg::from_raw_parts(dst_handle, total),
@@ -381,7 +385,7 @@ impl RotationCubeCL {
         unsafe {
             gdn_v_permute_f32::launch_unchecked::<R>(
                 client,
-                CubeCount::Static(n_wg, 1, 1),
+                split_grid(n_wg),
                 CubeDim::new_1d(FWHT_THREADS),
                 BufferArg::from_raw_parts(tmp_handle, total),
                 BufferArg::from_raw_parts(x_handle, total),
@@ -389,6 +393,24 @@ impl RotationCubeCL {
             );
         }
     }
+}
+
+/// Per-dimension workgroup-count ceiling (wgpu/Metal `maxComputeWorkgroupsPerDimension`).
+#[cfg(all(feature = "cubecl_runtime", feature = "ternary_gemv"))]
+const MAX_GRID_DIM: u32 = 65_535;
+
+/// Lay `n` cubes out as `(x, y)` with `x ≤ MAX_GRID_DIM`; the kernels rebuild
+/// the linear index as `CUBE_POS_Y * CUBE_COUNT_X + CUBE_POS_X` and the
+/// overshoot cubes (`x * y > n`) fall to their existing bounds guard.
+///
+/// A 1-D `n` was fine for decode (`p == 1`) and broke batch prefill: at
+/// P = 4096 over `v_dim` 6144 the permute alone is 98 304 workgroups
+/// (Issue 1004 R1's Bonsai-2 e2e run, wgpu validation error).
+#[cfg(all(feature = "cubecl_runtime", feature = "ternary_gemv"))]
+fn split_grid(n: u32) -> CubeCount {
+    let n = n.max(1);
+    let x = n.min(MAX_GRID_DIM);
+    CubeCount::Static(x, n.div_ceil(x), 1)
 }
 
 // ---------------------------------------------------------------------------
@@ -713,6 +735,90 @@ mod tests {
                 "permute elem {i}: cpu {c} vs gpu {g}"
             );
         }
+    }
+
+    /// Batch prefill sizes exceed the 65 535 per-dimension workgroup limit:
+    /// at P = 4096 the Bonsai-2 GDN permute alone is 98 304 workgroups (the
+    /// Issue 1004 R1 e2e run died on that wgpu validation error). Both launch
+    /// shapes go past the limit here and are checked bit-exact against the
+    /// CPU reference over EVERY row, so a cube that the 2-D split drops or
+    /// double-counts reds.
+    #[test]
+    fn launches_past_the_65535_grid_dim() {
+        let ctx = CubeCLContext::new().expect("CubeCL should initialize");
+        let client = ctx.client();
+
+        // FWHT: width 128, hblock 32 → 4 cubes/row; 17 000 rows → 68 000 cubes.
+        let (width, hblock, rows) = (128usize, 32usize, 17_000usize);
+        let total = width * rows;
+        assert!(total / hblock > MAX_GRID_DIM as usize);
+        let mut lcg = Lcg(0x1004);
+        let x: Vec<f32> = (0..total).map(|_| lcg.next_f32(-2.0, 2.0)).collect();
+        let signs = signs_vec(width, 0x65535);
+        let mut cpu = x.clone();
+        for row in cpu.chunks_exact_mut(width) {
+            rotate_forward_inplace(row, Some(&signs), hblock);
+        }
+        let x_handle = client.create_from_slice(f32::as_bytes(&x));
+        let signs_f32: Vec<f32> = signs.iter().map(|&s| s as f32).collect();
+        let signs_handle = client.create_from_slice(f32::as_bytes(&signs_f32));
+        unsafe {
+            RotationCubeCL::launch_forward::<ActiveRuntime>(
+                &client,
+                x_handle.clone(),
+                signs_handle,
+                total,
+                width,
+                hblock,
+            );
+        }
+        let gpu = f32::from_bytes(&client.read_one(x_handle).expect("read rotated")).to_vec();
+        let bad = cpu
+            .iter()
+            .zip(&gpu)
+            .filter(|(c, g)| c.to_bits() != g.to_bits())
+            .count();
+        assert_eq!(
+            bad, 0,
+            "FWHT past the grid limit: {bad} of {total} elements differ"
+        );
+
+        // Permute: the Bonsai-2 GDN shape (48 v-heads, 16 k-groups, hd 128) at
+        // 3 000 rows → 72 000 workgroups of 256.
+        let (n_v, n_k, hd, rows) = (48usize, 16usize, 128usize, 3_000usize);
+        let v_dim = n_v * hd;
+        let total = rows * v_dim;
+        assert!(total.div_ceil(256) > MAX_GRID_DIM as usize);
+        let x: Vec<f32> = (0..total).map(|_| lcg.next_f32(-2.0, 2.0)).collect();
+        let mut cpu = x.clone();
+        let mut tmp = vec![0.0f32; v_dim];
+        for row in cpu.chunks_exact_mut(v_dim) {
+            permute_gdn_v_grouped_inplace(row, &mut tmp, n_v, n_k);
+        }
+        let tmp_handle = client.create_from_slice(f32::as_bytes(&x));
+        let x_handle = client.create_from_slice(f32::as_bytes(&x));
+        unsafe {
+            RotationCubeCL::launch_gdn_v_permute::<ActiveRuntime>(
+                &client,
+                tmp_handle,
+                x_handle.clone(),
+                total,
+                v_dim,
+                hd,
+                n_k,
+                n_v / n_k,
+            );
+        }
+        let gpu = f32::from_bytes(&client.read_one(x_handle).expect("read permuted")).to_vec();
+        let bad = cpu
+            .iter()
+            .zip(&gpu)
+            .filter(|(c, g)| c.to_bits() != g.to_bits())
+            .count();
+        assert_eq!(
+            bad, 0,
+            "permute past the grid limit: {bad} of {total} elements differ"
+        );
     }
 
     /// Tables build: validates the block-size bound + uploads width-keyed
