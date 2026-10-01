@@ -8,3 +8,6 @@
 
 # Agent-instructions symlink (CLAUDE.md -> AGENTS.md), local only
 CLAUDE.md
+
+# cargo-refine machine-local state (trajectories, fixseq, outbox, active-set)
+.refine/
