@@ -69,6 +69,28 @@
 //! tensor-scaled ≤ ~1e-5 on synthetic regimes; the e2e distributional gates
 //! judge the real-data class). `__logf`/`__expf` fast forms accepted. The
 //! log-γ floor at −60 keeps underflowed α (=0.0f32) from poisoning ratios.
+//!
+//! # Scheduling re-arm note (2026-10-02, the open-jev-fast distill)
+//!
+//! The two-chunk state-independent overlap lead (riir-refine Research 221 /
+//! Batch 189, `two-chunk-state-independent-overlap-serial-chunk-recurrence`)
+//! is ABSORBED by this design in a stronger form: the source overlaps chunk
+//! n+1's prologue inside chunk n's barrier window; v3 hoists the ENTIRE
+//! state-independent set for ALL chunks into the parallel pre-pass kernels
+//! (`gdn_pf_decay`/`gdn_pf_gram`/`gdn_pf_tinv`) before the serial kernel —
+//! the source's rule merely overlaps the next chunk's prologue, this design
+//! removed it from the serial chain entirely. The residual serial chain is
+//! the true state-carried dependency (rhs/qs0 state dots → U = T·RHS → O →
+//! the rank-64 state update). The one remaining scheduling idea — the
+//! CROSS-CHUNK state-dot recurrence: maintain S·k_j / S·q_j for the next
+//! chunk's tokens incrementally (next_dots = γ·cur_dots + K·U over a
+//! precomputed cross-chunk token gram), turning the per-chunk 64×128 state
+//! dots into 64×64 matvecs — is a numerics-affecting rewrite of a
+//! league-ranked kernel: it fits this arm's owner-approved numerics class
+//! (argmax-stability + distributional agreement, NOT bit-identity) and
+//! therefore lands only as a MEASURED-GOAT re-arm on the 4090 prefill row.
+//! Full analysis: riir-reflex `.research/006_open_jev_fast_serving_techniques_mapping.md`
+//! (issue 054 Part 3).
 
 use std::sync::Arc;
 
