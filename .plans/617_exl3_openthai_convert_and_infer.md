@@ -1,6 +1,6 @@
 # Plan 617 — OpenThai-SystemOne EXL3: convert (4090) + infer (Metal) — the r1 consumer lane
 
-**Status:** PROPOSED — awaiting Phase-A GO; lane-home verdict RECORDED below (Reflex comparison lane recommended, Rethink declined). AMENDED 2026-10-02 per the verdict ping-pong (AGREE with amendments; the dedicated claude_code reviewer backend lacked auth — independent sub-agent reviewer, claims verified against the records before applying): pre-registered A5 bar added; §14-primary/r1-not-literal citation fix; GDN-hybrid scope; §14 re-run gain definition; B2 substrate-reuse + dep-edge. Cheap-falsification-first order: Phase A buys the accuracy answer for ~half a day before any Metal serving work is priced. **A6 EXECUTED 2026-10-02 on the M3 (the plan's own "any box that meets the wall" clause): reflex Bench 107 — the 400M wins 6/9 EN suites vs the published modelless rows, beats the 68M on all 9 (overall +2.6 pt, flipping the family's −6.1), lane seat moved 68M→400M; A1–A5 remain the 4090 half-day.**
+**Status:** IN PROGRESS — Phase A executing on the 4090 (GO received 2026-10-02); A1–A3 DONE, A4 (CUDA half) next. Lane-home verdict RECORDED below (Reflex comparison lane recommended, Rethink declined). AMENDED 2026-10-02 per the verdict ping-pong (AGREE with amendments; the dedicated claude_code reviewer backend lacked auth — independent sub-agent reviewer, claims verified against the records before applying): pre-registered A5 bar added; §14-primary/r1-not-literal citation fix; GDN-hybrid scope; §14 re-run gain definition; B2 substrate-reuse + dep-edge. Cheap-falsification-first order: Phase A buys the accuracy answer for ~half a day before any Metal serving work is priced. **A6 EXECUTED 2026-10-02 on the M3 (the plan's own "any box that meets the wall" clause): reflex Bench 107 — the 400M wins 6/9 EN suites vs the published modelless rows, beats the 68M on all 9 (overall +2.6 pt, flipping the family's −6.1), lane seat moved 68M→400M; A1–A5 remain the 4090 half-day.**
 
 **Consumer:** `iapp/OpenThai-SystemOne` @ `5d04bcca` (Apache-2.0) — Qwen3.5-0.8B tower + 256-slot head; fp32 board pins at Bench 074/084/086 (massive 0.9200 · sib200 0.8382 · xnli 0.8967/0.9000 · wisesight 0.4750/0.4675).
 **Substrate:** riir-infer Issue 034 (the §14-primary serving-arm trigger; r1 closest-but-not-literal — its recorded text requires 4 bpw residency / >100k context on 24 GiB, which this 0.8B single-shot consumer needs neither of); reader + Metal dequant already landed (`.docs/001`, two-tier oracle: decode BIT-EXACT / Hadamard tolerance-class).
@@ -52,23 +52,73 @@ Verdict: **EXL3 = structural NO for the whole bekko family; the 68M is already s
 
 ## Phase A — convert + cheap falsification (4090, ~half day–1 day)
 
-- [ ] A1 — env: exllamav3 venv under `.raw/` on the 4090 (Windows box: mind the
+- [x] A1 — env: exllamav3 venv under `.raw/` on the 4090 (Windows box: mind the
       git-over-SSH quirks — schtasks `gitsync` for repo syncs; `;` separators). Download
       `iapp/OpenThai-SystemOne` (weights cached under `.raw/hf`). Record the
       arch-support check — **expect the GDN HYBRID (gated-delta-net + causal-conv,
       Research 003) as the LIKELY exllamav3 failure mode; fail-loud STOP + record if
       the converter does not know it — a clean convert is the surprise, not the
       baseline.**
-- [ ] A2 — tower extraction surgery: standard causal-LM checkpoint (config + tokenizer
+      **DONE 2026-10-02 (4090) — THE SURPRISE FIRED: arch check PASSES.** exllamav3
+      1.5.3 (venv `.raw/exl3-env`; torch 2.14.1+cu130 — the PyPI Windows torch is
+      CPU-ONLY, the +cu130 wheel comes from download.pytorch.org; JIT ext build needs
+      ninja + CUDA_HOME + an EXPLICIT `vcvarsall.bat amd64` env — torch's internal
+      MSVC detection produced C1060 heap-death at any parallelism, 14.41.34120 is the
+      only installed toolset). `ARCHITECTURES` knows `Qwen3_5ForCausalLM`
+      (GatedDeltaNet + interval-4 full attn + `interleaved_gate=True` — the exact
+      hybrid); it does NOT know `OpenThaiSystemOneForDecision` (the wrapper). The
+      pre-registered "GDN hybrid = likely failure mode" is REFUTED at the arch level;
+      the wrapper arch remains the A2 surgery as planned. Checkpoint cross-check
+      (`model.safetensors` header): 320 tower tensors under `model.layers.*` with the
+      Qwen3_5 GDN key spellings (separate `in_proj_qkv`/`in_proj_z`/`in_proj_b`/
+      `in_proj_a`, fused qkv already, conv1d [6144,1,4], A_log/dt_bias [16]) +
+      full-attn q/k/v/o + q_norm/k_norm + NO lm_head tensor (tied embeddings in
+      fact, though config declares false) + head trio (`slot_head.weight/bias`,
+      `log_temperature`). Config: 24 layers, 8Q/2KV heads dim 256 (attn_output_gate
+      true), linear 16K/16V heads dim 128, intermediate 3584, vocab 248339,
+      rope_parameters{mrope_interleaved, sections [11,11,10], partial 0.25, theta
+      1e7}, `mtp_num_hidden_layers: 1` with NO MTP tensors shipped.
+- [x] A2 — tower extraction surgery: standard causal-LM checkpoint (config + tokenizer
       kept; the 256-slot head EXCLUDED — it stays bf16 beside the pack, tiny). Record
       BLAKE3 of the extracted checkpoint.
-- [ ] A3 — convert @ 4.0 bpw (the verified fixture class; `head_bits`/H5 class to match
+      **DONE 2026-10-02 — `scripts/plan617_extract_openthai_tower.py`.** 320 tower
+      tensors renamed `model.*` -> `model.language_model.*` (exllamav3 Qwen3_5 key
+      prefix; the Qwen3Next arch would have matched `model.*` but carries the FUSED
+      in_proj_qkvz/ba spellings this checkpoint does not use), head trio excluded to
+      `.raw/packs/openthai-head/openthai_slot_head.safetensors`. Config flattened,
+      `architectures=["Qwen3_5ForCausalLM"]`, `tie_word_embeddings=true` (source
+      declares false but ships no lm_head — exllamav3 alt-key path; the convert log
+      confirms `Cloned lm_head from model.language_model.embed_tokens`),
+      `mtp_num_hidden_layers=0` (none shipped). FULL byte-compare 320/320 vs source
+      (not sampled). **BLAKE3 tower `462ccc445c88afb483a52ea624f4039dd81ebaee74a52e9a5c57e929523f6881`**
+      · head `67007722f965f69968c9cbcacd711219bd363bf96d9339545d5a588584a0d6c1`.
+      Extracted dir `.raw/hf/openthai-tower-qwen35-0.8b` (EXTRACTION_RECORD.json in
+      dir).
+- [x] A3 — convert @ 4.0 bpw (the verified fixture class; `head_bits`/H5 class to match
       the pin-era pack shape; optionally a 3.0-bpw pass for the size/quality curve).
       **Calibration mix recorded** (thai_wisesight + thai_sib200 + EN suites proportions
       — per-suite calibration sensitivity is the lossy-law exposure; §2). Output to
       `.raw/packs/`. Record achieved bpw + `Exl3Residency` numbers. Era-gate check:
       if the converter emits `quantization_config.version` ∉ `{"1.4.2"}`, extend the
       known-good set ONLY with per-pack verification — never silently.
+      **DONE 2026-10-02 — clean convert (the surprise, fully).** `-b 4.0 -hb 5`
+      (pin-era H5 class, codebook mul1), `-cd` the custom cal file — **calibration
+      mix RECORDED** (`scripts/plan617_build_calibration.py`, seed 617, from the
+      reflex canonical pool `.raw/datasets/`): 250×2048 rows, thai 116 (wisesight 87
+      + sib200 29 = 46.4% — sib200 pool-capped) + EN 134 (ag_news/banking77/emotion/
+      massive/sst5/xnli 21 each, prompt_injections 8 pool-capped); BLAKE3
+      `ea2bfde47b054c86798e32d81c0fe56d9b7ca3eda49015c80b2afb07fcc88c4a`. All 24
+      layers quantized clean (proxy_err ~1e-4, cos ~1e-8..1e-5, SQNR ~47 dB; per-layer
+      4.0 bpw, lm_head 5.0). **Pack: `.raw/packs/openthai-tower-exl3-4.0bpw`,
+      920,167,472 B (0.857 GiB)** — quantized layers ≈ 408 MB @ 4.0 bpw (the plan's
+      ~0.4 GB holds); embed_tokens stays bf16 = 509 MB (half the pack — noted;
+      consistent with the pin-era 27B pack's fp16 embed). **ERA-GATE CHECK FIRED:
+      the converter emitted `quantization_config.version = "1.5.3"` ∉ known-good
+      `{"1.4.2"}`** — extension of the known-good set is gated on A4's per-pack
+      verification (the plan's own rule), one commit with the gate evidence.
+      GPU state during convert: sibling riir-train plan435 CUDA training active
+      (11.3/24.5 GiB VRAM) — convert is quantization compute, not a correctness
+      gate; shared-GPU noted per the exclusivity rule's scoping.
 - [ ] A4 — reader parity in-repo: pack opens through `Exl3Pack`, residency report,
       full-pack gate on Metal AND CUDA (plan 004's harness shape): **decode-stage
       bit-exact + Hadamard stages at the recorded tolerance gates** (the record's
