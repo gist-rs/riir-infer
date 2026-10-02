@@ -176,6 +176,51 @@ pub fn ensure_checkpoint(root: &Path, ckpt: Checkpoint) -> Result<PathBuf> {
     Ok(dir)
 }
 
+/// `ensure_checkpoint`'s verify-only half (instinct issue 018 Lane A: a
+/// lazy serving row's config errors must refuse at BOOT, never on the
+/// first request). Every pinned file must be PRESENT (flat or hub-shaped)
+/// and digest-matching — a missing file REFUSES, naming the file and the
+/// pin, never downloads. Returns the checkpoint's local directory.
+pub fn verify_checkpoint_present(root: &Path, ckpt: Checkpoint) -> Result<PathBuf> {
+    let local_sub = ckpt.subfolder();
+    let dir = root.join(local_sub);
+    if !dir.is_dir() {
+        return Err(LayaError::Runtime(format!(
+            "weights dir {} absent — the checkpoint was never fetched (set LAYA_WEIGHTS_DIR \
+             / LAYA_HOME or fetch it before serving a lazy row)",
+            dir.display()
+        )));
+    }
+    for (local_name, hub_rel) in FILES {
+        let kind = if local_name == "model.safetensors" {
+            HashKind::Sha256
+        } else {
+            HashKind::Blake3
+        };
+        let pin = if local_name == "model.safetensors" {
+            weight_pin(ckpt)
+        } else {
+            small_pin(local_sub, local_name)
+        };
+        let flat = dir.join(local_name);
+        if flat.exists() {
+            verify(&flat, pin, kind, ckpt, local_name)?;
+            continue;
+        }
+        let hub_shaped = dir.join(hub_rel);
+        if hub_shaped.exists() {
+            verify(&hub_shaped, pin, kind, ckpt, local_name)?;
+            continue;
+        }
+        return Err(LayaError::Runtime(format!(
+            "{local_sub}/{local_name} absent (pin {}…) — fetch the checkpoint before \
+             serving a lazy row (the loader would download it; a lazy row refuses instead)",
+            &pin[..16.min(pin.len())]
+        )));
+    }
+    Ok(dir)
+}
+
 /// Link `src` to `dst` (symlink on unix; byte copy where symlinks fail).
 fn link_or_copy(src: &Path, dst: &Path) -> Result<()> {
     #[cfg(unix)]
