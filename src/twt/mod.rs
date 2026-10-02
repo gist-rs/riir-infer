@@ -9,13 +9,16 @@
 //! Phase-5 GOAT gate.
 //!
 //! Layout:
-//! - [`accum`] — `PairCosineAccum`, the streaming f64 dot+norm pair
-//!   accumulator (T1.1; the cosine_distance reduction discipline).
+//! - [`accum`] — `PairCosineAccum` re-export shim (Plan 616: the type
+//!   lives in katgpt-core `partition`).
 //! - [`smatrix`] — the streaming S-matrix builder: layer-major capture
 //!   arrival, position buckets, the cosine meter + the opt-in SVCCA meter
-//!   arm (T1.3).
-//! - [`partition`] — the two-pass min-max DP + the PRE-REGISTERED ε grid
-//!   and kill rule (T1.6) + the type-split forced-min floor (T2.1/T2.2).
+//!   arm (T1.3); `SMatrix` itself is the katgpt-core re-export (Plan 616).
+//! - [`partition`] — the min-max DP re-export shim (Plan 616: the DP +
+//!   pair-distance substrate live in katgpt-core `partition`) + the
+//!   PRE-REGISTERED ε grid and kill rule (T1.6, lane-local — its
+//!   pre-registration record is the file's git history) + the type-split
+//!   forced-min floor (T2.1/T2.2, promoted with the DP).
 //! - [`synth`] — deterministic planted corpora for the gates (T1.5).
 //! - [`delta`] — the ΔS quant-damage map (T1.4, read-only diagnostic).
 //! - [`audition`] — the Phase-3 zero-training surrogate pool math (the
@@ -66,7 +69,7 @@ pub use ternarize::{
 };
 pub use partition::{
     brute_force_optimal, forced_min_blocks, kill_verdict, minmax_partition,
-    partition_worst, Block, KillVerdict, KILL_FRACTION, KILL_MIN_MIDDLE_BLOCK,
+    partition_worst, Block, KillVerdict, PartitionError, KILL_FRACTION, KILL_MIN_MIDDLE_BLOCK,
     PRE_REGISTERED_EPS_GRID,
 };
 pub use smatrix::{Bucket, SMatrix, SMatrixBuilder, SMatrices, SvccaCfg};

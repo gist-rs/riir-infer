@@ -146,10 +146,14 @@ attention_to_answer = []
 # quant-damage map, and the `twt_laya_profile` capture driver. OPT-IN per
 # the feature-flag discipline: never a default without the Phase-5 GOAT
 # gate. Forwards katgpt-core's `svd_cca` (the public `svcca_into` meter
-# arm). The laya capture hook (`Encoder::forward_capture`) rides the
-# SAME-named feature on the lane crate (no deps on either side — pure
-# compile gating).
-twt_profile = ["katgpt-core/svd_cca"]
+# arm) AND `minmax_partition` (Plan 616, 2026-10-02: the partition DP +
+# SMatrix + PairCosineAccum promoted verbatim to katgpt-core — this
+# crate's twt::partition/smatrix/accum are re-export shims at the
+# historical paths; the lane keeps only the kill rule + the streaming
+# builder + capture drivers). The laya capture hook
+# (`Encoder::forward_capture`) rides the SAME-named feature on the lane
+# crate (no deps on either side — pure compile gating).
+twt_profile = ["katgpt-core/svd_cca", "katgpt-core/minmax_partition"]
 # twt_bonsai (riir-infer Issue 022 T1.2, 2026-09-28): the Bonsai/GDN
 # capture sibling — the league model's Phase-1 profile driver
 # (`twt_bonsai_profile`). Implies the bonsai-2 loading stack because the

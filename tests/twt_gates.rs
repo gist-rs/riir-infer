@@ -11,7 +11,7 @@
 use riir_infer_core::twt::{
     brute_force_optimal, forced_min_blocks, kill_verdict, localize_by_block, minmax_partition,
     partition_worst, planted_corpus, planted_corpus_noisy, delta, Block, Bucket, DeltaMap,
-    KillVerdict, PRE_REGISTERED_EPS_GRID, SMatrix, SMatrixBuilder, SvccaCfg,
+    KillVerdict, PartitionError, PRE_REGISTERED_EPS_GRID, SMatrix, SMatrixBuilder, SvccaCfg,
 };
 use riir_infer_core::twt::{Lcg, TwtError};
 
@@ -210,9 +210,11 @@ fn t2_2_m_monotone_non_increasing_over_the_pinned_grid() {
 #[test]
 fn t2_2_invalid_eps_refused() {
     let s = SMatrix::from_fn(3, |_, _| 0.5);
-    assert!(matches!(minmax_partition(&s, -0.1), Err(TwtError::InvalidEps(_))));
-    assert!(matches!(minmax_partition(&s, f32::NAN), Err(TwtError::InvalidEps(_))));
-    assert!(matches!(minmax_partition(&s, f32::INFINITY), Err(TwtError::InvalidEps(_))));
+    // The error type moved with the primitive (Plan 616): PartitionError
+    // re-exported at the same twt paths.
+    assert!(matches!(minmax_partition(&s, -0.1), Err(PartitionError::InvalidEps(_))));
+    assert!(matches!(minmax_partition(&s, f32::NAN), Err(PartitionError::InvalidEps(_))));
+    assert!(matches!(minmax_partition(&s, f32::INFINITY), Err(PartitionError::InvalidEps(_))));
 }
 
 // ── T1.6 — the kill-rule arms on synthetic partitions ────────────────────

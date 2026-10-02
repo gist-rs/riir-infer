@@ -55,48 +55,14 @@ impl Bucket {
     }
 }
 
-/// A finalized L×L symmetric discrepancy matrix (row-major, diagonal 0,
-/// upper triangle computed and mirrored — symmetry holds BY CONSTRUCTION,
-/// the gate asserts it anyway).
-#[derive(Debug, Clone)]
-pub struct SMatrix {
-    n: usize,
-    data: Vec<f32>,
-}
-
-impl SMatrix {
-    pub fn n(&self) -> usize {
-        self.n
-    }
-
-    pub fn get(&self, i: usize, j: usize) -> f32 {
-        self.data[i * self.n + j]
-    }
-
-    /// Synthetic construction for gates and perf probes (T2.2/T2.3) — not
-    /// a production path; the diagonal is forced to 0, the fn is only
-    /// read for `i < j` in fixed row-major order, and NaN/Inf inputs
-    /// panic (the DP requires a finite oracle; `minmax_partition` would
-    /// misread NaN as feasible).
-    pub fn from_fn(n: usize, mut f: impl FnMut(usize, usize) -> f32) -> Self {
-        let mut data = vec![0.0f32; n * n];
-        for i in 0..n {
-            for j in (i + 1)..n {
-                let v = f(i, j);
-                assert!(v.is_finite(), "SMatrix::from_fn: non-finite at ({i},{j})");
-                data[i * n + j] = v;
-                data[j * n + i] = v;
-            }
-        }
-        Self { n, data }
-    }
-
-    /// Upper-triangle iteration (i < j) — the DP's only read pattern.
-    pub fn entries(&self) -> impl Iterator<Item = (usize, usize, f32)> + '_ {
-        let n = self.n;
-        (0..n).flat_map(move |i| ((i + 1)..n).map(move |j| (i, j, self.data[i * n + j])))
-    }
-}
+/// A finalized L×L symmetric discrepancy matrix — Plan 616 promotion
+/// shim: the type moved to `katgpt_core::partition` (feature
+/// `minmax_partition`, forwarded by `twt_profile`) and re-exports here at
+/// its historical path. The builder's finalize constructs it through the
+/// eager-finiteness `from_parts` constructor (a NaN distance would read
+/// FEASIBLE inside the DP, so non-finite inputs are refused at
+/// construction, never pooled).
+pub use katgpt_core::partition::SMatrix;
 
 /// SVCCA-arm retention config: keep rows whose GLOBAL index (monotonic
 /// across forwards, corpus order) satisfies `idx % stride == 0`, up to
@@ -341,7 +307,7 @@ impl SMatrixBuilder {
                 }
             }
             if any {
-                per_bucket[bi] = Some(SMatrix { n, data });
+                per_bucket[bi] = Some(SMatrix::from_parts(n, data));
             }
         }
 
@@ -422,7 +388,7 @@ impl SMatrixBuilder {
                     data[j * n + i] = d;
                 }
             }
-            svcca = Some(SMatrix { n, data });
+            svcca = Some(SMatrix::from_parts(n, data));
         }
 
         Ok(SMatrices {
