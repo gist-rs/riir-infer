@@ -1,12 +1,17 @@
 # Plan 616 — Laya D2b: the Q8 residency tiers (host → device) with dequant-fused staging
 
-**Status:** PHASE 2 DONE (2026-10-02, device-resident Q8 + the fused
-staging kernels — all gates green, the live artifact probe: fused
-deterministic ×2, the Phase 1 tree byte-identical, the option-(i)
-dispatch delta measured at 5.4e-7 probs, device residency 1654.9 →
-348.8 MiB = 4.74×, whole-forward paired median 1.002×; the dense-cell
-A/B priced fused/mps 1.22–2.07×). Phase 0 + 1 done. Phase 3 (adoption
-+ re-seat + the Q4 seam) is the next task. Plan of record:
+**Status:** COMPLETE (2026-10-02 — all four phases executed; Phase 3
+landed `323edbf`: the D2b adoption recorded via the no-change re-seat
+(G5 both postures green vs the in-flight substrate; the live probe
+reproduced Phase 2 exactly at HEAD), the /#sizes row re-measured at the
+adopted q8 posture (reflex-site `78488db`, model 455,724,111 B, the
+memory line the headline), and the Q4 format seam landed (decoder +
+shared blocked-artifact converter + derived q4 staging kernels + the
+bit-identity battery at Q4's own fidelity, ALL GREEN; Q4 retention
+D1-priced separately before serving; PQ2 rides the same seam). Phase 0
+(baselines) · Phase 1 (host residency 2.85×) · Phase 2 (device residency
+4.74×, the fused staging, option (i) shipped) done as recorded below.
+Plan of record:
 `../riir-instinct/.issues/018_rethink_encoder_lean_goat.md` §Lane D2b.
 
 ## The measured premise (what exists today)
