@@ -367,6 +367,17 @@ name = "twt_perf_tg_pp"
 path = "src/bin/twt_perf_tg_pp.rs"
 required-features = ["twt_bonsai"]
 
+# riir-infer Issue 022 T5.4 — the equal-FLOP skip-class arms (ShortGPT
+# removal / hydra-skip class): glue-parity-gated amputation forward + the
+# ShortGPT Block-Influence/greedy selection + the random floor control,
+# all at the TWT kept count through the shared ternary layer body. Same
+# gate as the agreement bin (the folded league checkpoint refuses without
+# bonsai2_hadamard).
+[[bin]]
+name = "twt_skip_amputation"
+path = "src/bin/twt_skip_amputation.rs"
+required-features = ["twt_bonsai"]
+
 # riir-infer Issue 014 T2(b) — the dense-parent PTQ lane on gemma-2-2b f16
 # (the house fixture): the Issue-886 fits at Bench 896's held-out
 # reconstruction metric on REAL parents + REAL activations. Same feature
