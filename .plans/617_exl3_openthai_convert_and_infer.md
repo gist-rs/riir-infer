@@ -150,6 +150,28 @@ Verdict: **EXL3 = structural NO for the whole bekko family; the 68M is already s
         refused — an owner re-scope would be a NEW decision, not this plan's.
       → **GO/NO-GO for Phase B.** A retention failure here kills Phase B for the cost
       of half a day — that is the point of the order.
+      **SERVER LANDED + SMOKE + PARITY PROBE GREEN (2026-10-02, commits `09b1eb2` +
+      this one): `scripts/plan617_openthai_exl3_server.py`** — the fp32 lane's exact
+      wire; tower forward over the pack (exllamav3, module loop minus the
+      logits_output-capped lm_head, flash-attn params with the page-aligned
+      batch_shape geometry, the recurrent slot FREED per request — single-shot
+      requests leak slots otherwise); head half THEIR code verbatim (Formatter
+      imported from the reflex checkout = byte-identical prompt by construction;
+      slot-head bf16 matmul → f32, log_temperature per-qtype, option-count mask,
+      their decode semantics). Wrapper keys ride `head_meta.json` (the converter's
+      config.json carries only the tower). Smoke: billing/technical → billing @
+      0.978. **PARITY PROBE (scripts/plan617_a5_parity_probe.py, 6 real states from
+      the canonical pool, all three question types, both servers live on this box):
+      6/6 top-1 agreement; max prob delta 0.008 (noul) – 0.074 (banking77), mean L1
+      0.089 — the healthy 4-bpw signature, no rendering/position/temperature bug.**
+      **BOARD: WAITING ON GPU EXCLUSIVITY — the sibling plan435 CUDA training has
+      held the GPU at ~100% since 18:56; the pre-registered bar is a correctness
+      gate and waits (rule + contaminated-latency law). The run command is staged:
+      `OPENTHAI_SERVE_URL=http://127.0.0.1:8011 REFLEX_BENCH_HOST=4090-windows cargo
+      run --release --bin harness -- --openthai --skip-laya --out .benchmarks/<N>_…`
+      + the thai pair as the second run (the 084 two-run shape; fp32 pins for the
+      bar = 084's OWN 4090 table — same box: massive 0.9200 / sib200 0.8382 / xnli
+      0.9000 / wisesight 0.4675 / ag_news 0.8900 / banking77 0.6540 / typed 0.5360…).**
 - [x] A6 — **(reflex-side, parallel, no EXL3 dependency) the bekko-400M board seat** —
       **EXECUTED 2026-10-02 on the M3 (not the 4090 — the box met the wall here:
       ~19 min for all 4,648 questions on CPU; the Bench-103 "~2 h CPU-infeasible"
@@ -170,6 +192,7 @@ Verdict: **EXL3 = structural NO for the whole bekko family; the 68M is already s
       box load 5→9.1, sibling active — the Issue-021 wall); the lane seat moved
       68M→400M (the 400M strictly dominates per-suite). Measurement-only
       posture unchanged.** (The original task text below.)
+      - [ ] A6 — **(reflex-side, parallel, no EXL3 dependency) the bekko-400M board seat**
       (the Bench-103 recorded follow-up): on the 4090 (or any box that meets the
       wall), run the existing reflex `--bekko` lane with
       `BEKKO_MODEL=hotchpotch/bekko-system-one-v0-400m`, revision pinned to the FULL
@@ -184,6 +207,12 @@ Verdict: **EXL3 = structural NO for the whole bekko family; the 68M is already s
       two thai suites stay openthai/encoder-only); measurement-only posture — the
       lane is harness-side, never in a release set; record license as MIT (Bench 103
       addendum, verified).
+      **PREP DONE (2026-10-02, CPU/network while the GPU waits): bekko venv at
+      `riir-reflex/.raw/bekko-env` (torch 2.10.0+cu130 — CUDA on the 4090, the
+      card's transformers 5.17 + sentence-transformers 6.1 pins); revision RESOLVED
+      `4aeb85b` → FULL `4aeb85b9d4042d75d8b8adf6ff7ba9e4629510ba` (lastModified
+      2026-09-30); weights cached (3.01 GB snapshot). RUN waits on the same GPU
+      window as A5 (the board run is a measured gate).**
 
 ## Phase B — Metal serving arm (gated on Phase-A per-suite PASS; multi-day)
 
