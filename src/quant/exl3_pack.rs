@@ -29,10 +29,11 @@
 //! the call site via [`Exl3Pack::open_unverified_era`].
 //!
 //! ⚠ Gate blind spot (stated, not hidden): the PASS side is validated at
-//! n=1 (the pin-era 4.09 bpw 27B pack, `version = "1.4.2"`) and the REFUSE
+//! n=2 (the pin-era 4.09 bpw 27B pack `"1.4.2"`; the Plan 617 A3
+//! self-converted OpenThai tower pack `"1.5.3"`) and the REFUSE
 //! side at n=0 (no legacy specimen on disk) — fail-closed is what makes
 //! n=0 acceptable; a permissive gate would not be. Admission of a new
-//! writer version = the T7c-1c full-pack bit-exact gate on a real pack of
+//! writer version = a full-pack bit-exact gate on a real pack of
 //! that version, then one line in [`KNOWN_GOOD_ERA_VERSIONS`].
 
 use std::collections::{BTreeMap, HashSet};
@@ -45,14 +46,23 @@ use super::exl3::{Exl3Layer, Exl3LayerPlan, detect_exl3_layers};
 use crate::safetensors_loader::{TensorMeta, parse_safetensors_header};
 
 /// exllamav3 writer versions this loader is VALIDATED against — admission
-/// is the T7c-1c full-pack bit-exact gate (573/573 layers, 26.48 G weights,
-/// 0 mismatches, CUDA + Metal) run on a real pack of that version. Today
-/// that is exactly the pin-era `turboderp/Qwen3.8-27B-exl3@SC_4.00bpw_H5_V6`
-/// (`version = "1.4.2"`). Everything else — including newer exllamav3
+/// is the full-pack bit-exact gate run on a real pack of that version.
+/// Today that is:
+/// - `"1.4.2"` — the pin-era `turboderp/Qwen3.8-27B-exl3@SC_4.00bpw_H5_V6`
+///   (573/573 layers, 26.48 G weights, 0 mismatches, CUDA + Metal;
+///   T7c-1c).
+/// - `"1.5.3"` — the Plan 617 A3 self-converted OpenThai tower pack
+///   (exllamav3 1.5.3 converter, `-b 4.0 -hb 5`, cal mix recorded):
+///   151/151 layers, 751,435,776 weights, 0 mismatches vs the CPU oracle
+///   on CUDA (`real_pack_openthai_bit_exact_full`, 4090, 7.1 s wall,
+///   2026-10-02) — K4 150 + K5 lm_head, mul1. The M3 Metal arm of that
+///   gate is the same test on the M3; CUDA admission here does not claim
+///   it.
+/// Everything else — including newer exllamav3
 /// releases until validated — is refused by [`Exl3Pack::open`] (fail-closed,
 /// Issue 001 §12.7); a deliberate read of an unvalidated era goes through
 /// [`Exl3Pack::open_unverified_era`], which names the risk at the call site.
-pub const KNOWN_GOOD_ERA_VERSIONS: &[&str] = &["1.4.2"];
+pub const KNOWN_GOOD_ERA_VERSIONS: &[&str] = &["1.4.2", "1.5.3"];
 
 /// One mapped shard + its parsed header.
 struct Shard {

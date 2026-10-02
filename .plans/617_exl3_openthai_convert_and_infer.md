@@ -123,6 +123,18 @@ Verdict: **EXL3 = structural NO for the whole bekko family; the 68M is already s
       full-pack gate on Metal AND CUDA (plan 004's harness shape): **decode-stage
       bit-exact + Hadamard stages at the recorded tolerance gates** (the record's
       two-tier oracle). Coverage floors pinned. Repo test committed.
+      **CUDA HALF DONE 2026-10-02 — `real_pack_openthai_bit_exact_full`
+      (crates/riir-infer-gpu/src/exl3_dequant_cubecl.rs): 151/151 layers /
+      751,435,776 weights / 0 bit mismatches (v1≡v2≡CPU oracle per layer), K4
+      150 + K5 lm_head (mul1), wall 6.6 s on the 4090; floors pinned to THIS
+      pack's metadata (151 groups / 751.3 M weights / both K classes).**
+      **ERA SET EXTENDED: `KNOWN_GOOD_ERA_VERSIONS = ["1.4.2", "1.5.3"]`
+      (src/quant/exl3_pack.rs) — the extension this gate's green run is the
+      per-pack verification for, exactly per the A3 era-gate check's rule;
+      era-gate unit tests 10/10 still green incl. the refuse side;
+      post-extension the gate opens the pack through the DEFAULT Verify door.
+      METAL HALF: the same test on the M3 — NOT run here (4090 box; M3 session
+      owns that arm, same test name).**
 - [ ] A5 — hybrid board re-run (the cheap falsifier): Python hybrid server on the 4090
       (exllamav3 tower forward → hidden states → their torch head + decide contract,
       `permutations=1`; the 084 disclosed-patch pattern for the dtype/numerics pin).

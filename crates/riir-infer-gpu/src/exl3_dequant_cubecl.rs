@@ -2061,4 +2061,202 @@ mod tests {
             failures.join("\n")
         );
     }
+
+    /// Plan 617 A4 — the OpenThai tower pack's own full-pack gate (the
+    /// era-extension evidence for `version = "1.5.3"`). Same comparison
+    /// machinery as [`real_pack_v2_bit_exact_full`] (v1≡v2≡CPU,
+    /// decode-only) over a DIFFERENT population: this pack's floors are
+    /// its OWN measured metadata (150 K4 layer groups + 1 K5 lm_head,
+    /// 751,323,520 quantized weights, 2 K classes, mul1 codebook) — the
+    /// 27B pack's 573-group / 26 G-weight floors would refuse a different
+    /// pack by design, and a per-pack gate is what the era extension cites
+    /// (extend `KNOWN_GOOD_ERA_VERSIONS` ONLY with per-pack verification).
+    /// The pack is opened through the DEFAULT verified-era door: the
+    /// era-set extension ("1.5.3") landed WITH this test's first green
+    /// run (the per-pack verification the admission rule requires), so
+    /// this gate now exercises the same `open()` path production
+    /// consumers take.
+    /// Opt-in via `EXL3_OPENTHAI_PACK_DIR` + a GPU (0.75 G weights ×3
+    /// decodes — minutes on the 4090, not the 27B's ~1 h).
+    #[test]
+    #[ignore = "needs the OpenThai EXL3 pack on disk (EXL3_OPENTHAI_PACK_DIR) + a GPU"]
+    fn real_pack_openthai_bit_exact_full() {
+        use riir_infer_core::quant::exl3_pack::Exl3Pack;
+        use std::collections::BTreeMap;
+
+        let dir = std::env::var("EXL3_OPENTHAI_PACK_DIR").unwrap_or_default();
+        if dir.is_empty() {
+            eprintln!("SKIPPED: EXL3_OPENTHAI_PACK_DIR not set");
+            return;
+        }
+        // Era 1.5.3 is ADMITTED (the extension this test's green run is
+        // the evidence for): open through the default Verify door — the
+        // same door every production consumer uses.
+        let pack = Exl3Pack::open(std::path::Path::new(&dir)).unwrap();
+        let ctx = CubeCLContext::new().expect("CubeCL should initialize");
+        let client = ctx.client();
+
+        let plans = pack.plans();
+        // Floors are THIS pack's measured metadata (A3): 151 exl3 groups
+        // (150 K4 + 1 K5 lm_head), 751,323,520 quantized weights. A loader
+        // regression that sees fewer must RED, never print a green zero.
+        assert!(
+            plans.len() >= 151,
+            "pack exposes {} layer plans, below this pack's measured 151-group floor",
+            plans.len()
+        );
+
+        let k_of = |k: Exl3K| {
+            if k.half {
+                format!("K{}.5", k.ka)
+            } else {
+                format!("K{}", k.ka)
+            }
+        };
+        let cb_of = |cb: Exl3Codebook| match cb {
+            Exl3Codebook::Cb0 => "Cb0",
+            Exl3Codebook::Cb1Mcg => "Cb1Mcg",
+            Exl3Codebook::Cb2Mul1 => "Cb2Mul1",
+        };
+        let mut coverage: BTreeMap<String, (usize, u64)> = BTreeMap::new();
+        let mut total_weights = 0u64;
+        let mut bad_layers = 0usize;
+        let mut failures: Vec<String> = Vec::new();
+        let t0 = std::time::Instant::now();
+
+        eprintln!(
+            "\n=== plan 617 A4 OpenThai full-pack bit-exact gate: {} layers ===",
+            plans.len()
+        );
+        for (i, plan) in plans.iter().enumerate() {
+            let layer = pack.layer(&plan.key).unwrap();
+            let n = (layer.in_features as u64) * (layer.out_features as u64);
+            let (v1, _) = Exl3DequantCubeCL::decode_only_layer::<ActiveRuntime>(
+                &client,
+                &layer,
+                DecodeArm::V1,
+                1,
+            )
+            .unwrap();
+            let (v2, _) = Exl3DequantCubeCL::decode_only_layer::<ActiveRuntime>(
+                &client,
+                &layer,
+                DecodeArm::V2,
+                1,
+            )
+            .unwrap();
+            let bad_v2v1 = v1
+                .iter()
+                .zip(&v2)
+                .filter(|(a, b)| a.to_bits() != b.to_bits())
+                .count();
+            drop(v1);
+            let cpu = layer.decode_w_rot_f32();
+            let bad_v2cpu = v2
+                .iter()
+                .zip(&cpu)
+                .filter(|(a, b)| a.to_bits() != b.to_bits())
+                .count();
+            drop(v2);
+            drop(cpu);
+
+            let entry = coverage
+                .entry(format!("{}|{}", k_of(plan.k), cb_of(plan.codebook)))
+                .or_insert((0usize, 0u64));
+            entry.0 += 1;
+            entry.1 += n;
+            total_weights += n;
+
+            eprintln!(
+                "[{}/{}] {} {} {} {}w v2v1={} v2cpu={}",
+                i + 1,
+                plans.len(),
+                plan.key,
+                k_of(plan.k),
+                cb_of(plan.codebook),
+                n,
+                bad_v2v1,
+                bad_v2cpu
+            );
+            if bad_v2v1 > 0 || bad_v2cpu > 0 {
+                bad_layers += 1;
+                if failures.len() < 20 {
+                    let (v1, _) = Exl3DequantCubeCL::decode_only_layer::<ActiveRuntime>(
+                        &client,
+                        &layer,
+                        DecodeArm::V1,
+                        1,
+                    )
+                    .unwrap();
+                    let (v2, _) = Exl3DequantCubeCL::decode_only_layer::<ActiveRuntime>(
+                        &client,
+                        &layer,
+                        DecodeArm::V2,
+                        1,
+                    )
+                    .unwrap();
+                    let cpu = layer.decode_w_rot_f32();
+                    let trip = |what: &str, a: &[f32], b: &[f32]| -> String {
+                        match a.iter().zip(b).position(|(x, y)| x.to_bits() != y.to_bits()) {
+                            Some(idx) => format!(
+                                "{}: first mismatch at elem {idx} (in {}, out {}): {:#x} vs {:#x}",
+                                what,
+                                idx / layer.out_features,
+                                idx % layer.out_features,
+                                a[idx].to_bits(),
+                                b[idx].to_bits()
+                            ),
+                            None => format!(
+                                "{what}: no mismatch on re-decode (was {} — nondeterministic!)",
+                                if what.contains("v2cpu") {
+                                    bad_v2cpu
+                                } else {
+                                    bad_v2v1
+                                }
+                            ),
+                        }
+                    };
+                    failures.push(format!(
+                        "{} {} {} {}w:\n  {}\n  {}",
+                        plan.key,
+                        k_of(plan.k),
+                        cb_of(plan.codebook),
+                        n,
+                        trip("v2-vs-v1", &v2, &v1),
+                        trip("v2-vs-cpu", &v2, &cpu),
+                    ));
+                }
+            }
+        }
+
+        eprintln!("\n=== coverage (K|codebook: layers, weights) ===");
+        for (key, (layers, weights)) in &coverage {
+            eprintln!("  {key}: {layers} layers, {weights} weights");
+        }
+        eprintln!(
+            "total: {} layers, {total_weights} weights, {bad_layers} bad, wall {:.1} s",
+            plans.len(),
+            t0.elapsed().as_secs_f64()
+        );
+
+        // Coverage floors (this pack's own measured metadata):
+        // 151 groups / 751,323,520 weights / BOTH K classes present. The
+        // lm_head group is the K5 arm — a loader regression that drops it
+        // would halve the K5 coverage silently without this floor.
+        assert!(
+            total_weights >= 750_000_000,
+            "compared only {total_weights} weights, below this pack's 751.3 M floor"
+        );
+        assert!(
+            coverage.contains_key("K4|Cb2Mul1") && coverage.contains_key("K5|Cb2Mul1"),
+            "expected K4 + K5 mul1 classes, got {:?}",
+            coverage.keys().collect::<Vec<_>>()
+        );
+        assert!(
+            failures.is_empty(),
+            "v2 decode DIVERGES on {bad_layers}/{} layers:\n{}",
+            plans.len(),
+            failures.join("\n")
+        );
+    }
 }
