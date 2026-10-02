@@ -101,6 +101,7 @@
 use std::collections::VecDeque;
 use std::path::Path;
 
+use katgpt_core::keyed_gumbel_noise;
 use rayon::prelude::*;
 
 /// The drafter config (z-lab `config.json` values; see the module header).
@@ -913,6 +914,49 @@ impl DFlash2Drafter {
         hidden_rows: &[f32],
         logits: &[f32],
     ) -> DraftWalk {
+        let (candidates, unary, logits_top1, codes) = self.walk_rows(hidden_rows, logits);
+
+        // Chain walk with per-position confidence (the greedy driver path).
+        let mut chain: Vec<(u32, f32)> = Vec::with_capacity(candidates.len());
+        let mut walk_scores: Vec<Vec<f32>> = Vec::with_capacity(candidates.len());
+        let mut pred_tok = anchor_token;
+        for i in 0..candidates.len() {
+            let scores = self.chain_step_scores(pred_tok, &candidates[i], &unary[i], &codes[i]);
+            let mut best = 0usize;
+            let mut best_s = f32::NEG_INFINITY;
+            for (ki, &s) in scores.iter().enumerate() {
+                if s > best_s {
+                    best_s = s;
+                    best = ki;
+                }
+            }
+            let mut sum = 0.0f32;
+            for &s in scores.iter() {
+                sum += (s - best_s).exp();
+            }
+            chain.push((candidates[i][best], 1.0 / sum));
+            walk_scores.push(scores);
+            pred_tok = candidates[i][best];
+        }
+
+        DraftWalk {
+            chain,
+            logits_top1,
+            candidates,
+            scores: walk_scores,
+        }
+    }
+
+    /// The per-row phase both chain walks share — asserts + the top-k /
+    /// `sel_hidden` computation, moved verbatim out of `lattice_walk` (the
+    /// rayon knob and row order unchanged, so the greedy path's values are
+    /// bit-identical to the pre-extraction code).
+    #[allow(clippy::type_complexity)]
+    fn walk_rows(
+        &self,
+        hidden_rows: &[f32],
+        logits: &[f32],
+    ) -> (Vec<Vec<u32>>, Vec<Vec<f32>>, Vec<u32>, Vec<Vec<f32>>) {
         /// One row's walk inputs: (candidates, unary, top1, hidden code).
         type WalkRow = (Vec<u32>, Vec<f32>, u32, Vec<f32>);
 
@@ -975,35 +1019,101 @@ impl DFlash2Drafter {
                 codes.push(c);
             }
         }
+        (candidates, unary, logits_top1, codes)
+    }
 
-        // Chain walk with per-position confidence (the greedy driver path).
-        let mut chain: Vec<(u32, f32)> = Vec::with_capacity(n_out);
-        let mut walk_scores: Vec<Vec<f32>> = Vec::with_capacity(n_out);
-        let mut pred_tok = anchor_token;
-        for i in 0..n_out {
-            let pcode = &self.w.sel_prev[pred_tok as usize * rank..(pred_tok as usize + 1) * rank];
-            let mut scores = vec![0.0f32; top_k];
-            for (ki, &tok) in candidates[i].iter().enumerate() {
-                let ncode = &self.w.sel_next[tok as usize * rank..(tok as usize + 1) * rank];
-                let mut dot = 0.0f32;
-                for r in 0..rank {
-                    dot += ncode[r] * (pcode[r] * codes[i][r]);
-                }
-                scores[ki] = dot + unary[i][ki];
+    /// One chain step's selector scores: `dot(sel_next[cand],
+    /// sel_prev[pred] ⊙ code) + unary` per candidate — shared verbatim by
+    /// the greedy and keyed chain walks (identical arithmetic and order,
+    /// so the greedy path's scores are bit-identical to the pre-extraction
+    /// code).
+    fn chain_step_scores(
+        &self,
+        pred_tok: u32,
+        candidates: &[u32],
+        unary: &[f32],
+        code: &[f32],
+    ) -> Vec<f32> {
+        let rank = self.cfg.selector_rank;
+        let pcode = &self.w.sel_prev[pred_tok as usize * rank..(pred_tok as usize + 1) * rank];
+        let mut scores = vec![0.0f32; candidates.len()];
+        for (ki, &tok) in candidates.iter().enumerate() {
+            let ncode = &self.w.sel_next[tok as usize * rank..(tok as usize + 1) * rank];
+            let mut dot = 0.0f32;
+            for r in 0..rank {
+                dot += ncode[r] * (pcode[r] * code[r]);
             }
+            scores[ki] = dot + unary[ki];
+        }
+        scores
+    }
+
+    /// The keyed-sampled chain walk — the exact-sampling posture (Plan 614
+    /// Phase 1, the drafter half of the byte-exact verify contract). At
+    /// each draft position `anchor_pos + 1 + i` the picked candidate is
+    /// the keyed-Gumbel argmax over the row's selector scores, with the
+    /// noise keyed by `(seed, absolute position, candidate token)` — the
+    /// SAME keyed stream the target's verify loop samples with
+    /// (`katgpt_core::keyed_gumbel_max_sample`). A draft token therefore
+    /// equals the target's own keyed sample at that position whenever the
+    /// drafter's score ordering agrees with the target's logit ordering
+    /// after the shared noise — "a draft is accepted exactly when it equals
+    /// the token serial decoding samples there" — and the pick is invariant
+    /// to evaluation order and batch composition by construction.
+    ///
+    /// This closes the greedy-vs-sampled half of the Bench-746/747
+    /// acceptance-gap residuals: on a sampled target stream a greedy chain
+    /// can only match at the target's mode probability, while the keyed
+    /// walk coincides at the distributional-agreement rate. `temperature`
+    /// scales the scores (`s/T`) exactly as the target's sampler scales its
+    /// logits; `temperature <= 0` delegates to the greedy chain walk
+    /// (bit-identical to [`Self::lattice_walk`] — the tested posture).
+    ///
+    /// `chain[i].1` carries the chosen candidate's `softmax(s/T)`
+    /// probability, which is exactly what [`DraftWalk::confidence`]
+    /// returns for the picked token — the p-min gate reads it unchanged.
+    pub fn lattice_walk_keyed(
+        &self,
+        anchor_token: u32,
+        hidden_rows: &[f32],
+        logits: &[f32],
+        seed: u64,
+        anchor_pos: usize,
+        temperature: f32,
+    ) -> DraftWalk {
+        if temperature <= 0.0 {
+            return self.lattice_walk(anchor_token, hidden_rows, logits);
+        }
+        let (candidates, unary, logits_top1, codes) = self.walk_rows(hidden_rows, logits);
+
+        let mut chain: Vec<(u32, f32)> = Vec::with_capacity(candidates.len());
+        let mut walk_scores: Vec<Vec<f32>> = Vec::with_capacity(candidates.len());
+        let mut pred_tok = anchor_token;
+        for i in 0..candidates.len() {
+            let scores = self.chain_step_scores(pred_tok, &candidates[i], &unary[i], &codes[i]);
+            // The keyed pick: temperature-scaled scores + the shared keyed
+            // stream (candidate TOKEN keys the noise, never the candidate
+            // index — drafter and target must agree on the same token's
+            // noise value at the same position).
+            let position = (anchor_pos + 1 + i) as u64;
             let mut best = 0usize;
             let mut best_s = f32::NEG_INFINITY;
-            for (ki, &s) in scores.iter().enumerate() {
+            for (ki, &tok) in candidates[i].iter().enumerate() {
+                let s = scores[ki] / temperature + keyed_gumbel_noise(seed, position, tok);
                 if s > best_s {
                     best_s = s;
                     best = ki;
                 }
             }
+            // The chosen candidate's softmax(s/T) probability — the same
+            // quantity `DraftWalk::confidence(i, temperature)` reads back.
+            let max = scores.iter().copied().fold(f32::NEG_INFINITY, f32::max);
             let mut sum = 0.0f32;
             for &s in scores.iter() {
-                sum += (s - best_s).exp();
+                sum += ((s - max) / temperature).exp();
             }
-            chain.push((candidates[i][best], 1.0 / sum));
+            let conf = ((scores[best] - max) / temperature).exp() / sum;
+            chain.push((candidates[i][best], conf));
             walk_scores.push(scores);
             pred_tok = candidates[i][best];
         }
@@ -1026,6 +1136,50 @@ impl DFlash2Drafter {
         embed_row: &dyn Fn(u32) -> Vec<f32>,
         lm_head_rows: &dyn Fn(&[f32], usize) -> Result<Vec<f32>, String>,
     ) -> Result<DraftWalk, String> {
+        let (hidden, logits) = self.draft_block_rows(anchor_token, anchor_pos, embed_row, lm_head_rows)?;
+        Ok(self.lattice_walk(anchor_token, &hidden, &logits))
+    }
+
+    /// The keyed-sampled composition — [`Self::draft_block`] under the
+    /// exact-sampling posture: the chain walk keyed by
+    /// `(seed, absolute position, candidate token)` at the deployment
+    /// `temperature` (see [`Self::lattice_walk_keyed`]). This is the entry
+    /// point the verify loop calls when the target decodes with the keyed
+    /// sampler — the drafted block is then proposed in the target's own
+    /// sampling stream. `temperature <= 0` is the greedy posture,
+    /// bit-identical to [`Self::draft_block`].
+    #[allow(clippy::type_complexity)]
+    pub fn draft_block_keyed(
+        &self,
+        anchor_token: u32,
+        anchor_pos: usize,
+        embed_row: &dyn Fn(u32) -> Vec<f32>,
+        lm_head_rows: &dyn Fn(&[f32], usize) -> Result<Vec<f32>, String>,
+        seed: u64,
+        temperature: f32,
+    ) -> Result<DraftWalk, String> {
+        let (hidden, logits) = self.draft_block_rows(anchor_token, anchor_pos, embed_row, lm_head_rows)?;
+        Ok(self.lattice_walk_keyed(
+            anchor_token,
+            &hidden,
+            &logits,
+            seed,
+            anchor_pos,
+            temperature,
+        ))
+    }
+
+    /// The two phases' shared body: the noise-block forward + the MASK-row
+    /// extraction + the target lm_head (moved verbatim out of
+    /// `draft_block`). Returns `(hidden_rows, logits)`.
+    #[allow(clippy::type_complexity)]
+    fn draft_block_rows(
+        &self,
+        anchor_token: u32,
+        anchor_pos: usize,
+        embed_row: &dyn Fn(u32) -> Vec<f32>,
+        lm_head_rows: &dyn Fn(&[f32], usize) -> Result<Vec<f32>, String>,
+    ) -> Result<(Vec<f32>, Vec<f32>), String> {
         let bs = self.cfg.block_size;
         let e = self.cfg.n_embd;
         let hidden = self.draft_block_hidden(anchor_token, anchor_pos, embed_row);
@@ -1035,7 +1189,7 @@ impl DFlash2Drafter {
             rows[(i - 1) * e..i * e].copy_from_slice(&hidden[i * e..(i + 1) * e]);
         }
         let logits = lm_head_rows(&rows, n_out)?;
-        Ok(self.lattice_walk(anchor_token, &hidden, &logits))
+        Ok((hidden, logits))
     }
 }
 /// The DFlash2 dynamic conv (`build_dflash2_conv`): per block token `i`,
@@ -1358,5 +1512,195 @@ mod tests {
             let c = w.confidence(0, t);
             assert!(c.is_finite() && c > 0.0 && c <= 1.0 + 1e-6);
         }
+    }
+
+    /// The synthetic drafter for the keyed-walk tests: the causal fixture's
+    /// all-zero SELECTOR weights (sel_hidden/sel_prev/sel_next = 0), so the
+    /// chain scores collapse to the candidates' own lm_head logits (`unary`)
+    /// — full control of the walk from the crafted logits alone. Zero
+    /// weights are legal here because the walk never reads missing weights.
+    fn zero_selector_drafter() -> DFlash2Drafter {
+        let cfg = DFlash2Config {
+            n_layer: 1,
+            n_embd: 4,
+            n_head: 2,
+            n_kv_head: 1,
+            head_dim: 2,
+            n_ff: 4,
+            block_size: 4,
+            conv_kernel: 1,
+            conv_group: 2,
+            selector_rank: 2,
+            selector_top_k: 2,
+            rope_theta: 1.0e4,
+            sliding_window: 8,
+            rms_eps: 1.0e-6,
+            vocab_size: 32,
+            mask_token_id: 1,
+        };
+        let e = cfg.n_embd;
+        let n_kv = cfg.n_kv_head * cfg.head_dim;
+        let n_q = cfg.n_head * cfg.head_dim;
+        let mut layer = DFlash2Layer::default();
+        layer.attn_norm = vec![1.0; e];
+        layer.ffn_norm = vec![1.0; e];
+        layer.q_norm = vec![1.0; cfg.head_dim];
+        layer.k_norm = vec![1.0; cfg.head_dim];
+        layer.attn_conv_base = {
+            let mut b = vec![0.0f32; 2 * cfg.conv_kernel * e];
+            for (i, v) in b.iter_mut().enumerate() {
+                if i < e || (cfg.conv_kernel * e..cfg.conv_kernel * e + e).contains(&i) {
+                    *v = 1.0;
+                }
+            }
+            b
+        };
+        layer.ffn_conv_base = layer.attn_conv_base.clone();
+        layer.k_proj = identity_m(n_kv, e);
+        layer.v_proj = identity_m(n_kv, e);
+        layer.o_proj = identity_m(e, n_q);
+        layer.q_proj = vec![0.0; n_q * e];
+        let projected = 2 * cfg.conv_kernel * (e / cfg.conv_group);
+        layer.attn_conv_proj = vec![0.0; projected * e];
+        layer.ffn_conv_proj = vec![0.0; projected * e];
+        layer.gate_proj = vec![0.0; cfg.n_ff * e];
+        layer.up_proj = vec![0.0; cfg.n_ff * e];
+        layer.down_proj = vec![0.0; e * cfg.n_ff];
+        let w = DFlash2Weights {
+            fc: vec![0.0; e * 5 * e],
+            hidden_norm: vec![1.0; e],
+            output_norm: vec![1.0; e],
+            sel_hidden: vec![0.0; cfg.selector_rank * e],
+            sel_prev: vec![0.0; cfg.vocab_size * cfg.selector_rank],
+            sel_next: vec![0.0; cfg.vocab_size * cfg.selector_rank],
+            layers: vec![layer],
+        };
+        DFlash2Drafter::new(cfg, w)
+    }
+
+    /// Three lm_head rows (block_size 4 → n_out 3) over vocab 32, top-2
+    /// candidates each, with a TINY gap on row 2 (0.5 vs 0.49) so the keyed
+    /// noise flips that pick at a measurable seed fraction.
+    fn crafted_logits() -> Vec<f32> {
+        let v = 32usize;
+        let mut lg = vec![0.0f32; 3 * v];
+        let mut set = |row: usize, a: u32, va: f32, b: u32, vb: f32| {
+            lg[row * v + a as usize] = va;
+            lg[row * v + b as usize] = vb;
+        };
+        set(0, 5, 2.0, 9, 1.9);
+        set(1, 3, 1.0, 7, 0.9);
+        set(2, 1, 0.5, 2, 0.49);
+        lg
+    }
+
+    #[test]
+    fn keyed_walk_greedy_posture_is_bit_identical_to_the_greedy_walk() {
+        let drafter = zero_selector_drafter();
+        let anchor = vec![1.0f32, 0.0, 0.0, 0.0];
+        let mask = vec![0.0f32, 1.0, 1.0, 1.0];
+        let embed = |tok: u32| -> Vec<f32> {
+            if tok == 0 { anchor.clone() } else { mask.clone() }
+        };
+        let lg = crafted_logits();
+        let lm_head = |_rows: &[f32], _n: usize| -> Result<Vec<f32>, String> { Ok(lg.clone()) };
+        let greedy = drafter.draft_block(0, 100, &embed, &lm_head).expect("draft");
+        for t in [0.0f32, -1.0] {
+            let keyed = drafter
+                .draft_block_keyed(0, 100, &embed, &lm_head, 7, t)
+                .expect("draft keyed");
+            assert_eq!(keyed.chain, greedy.chain, "T={t} must delegate to greedy");
+            assert_eq!(keyed.scores, greedy.scores);
+            assert_eq!(keyed.candidates, greedy.candidates);
+            assert_eq!(keyed.logits_top1, greedy.logits_top1);
+        }
+    }
+
+    #[test]
+    fn keyed_walk_matches_the_keyed_argmax_composition() {
+        let drafter = zero_selector_drafter();
+        let anchor = vec![1.0f32, 0.0, 0.0, 0.0];
+        let mask = vec![0.0f32, 1.0, 1.0, 1.0];
+        let embed = |tok: u32| -> Vec<f32> {
+            if tok == 0 { anchor.clone() } else { mask.clone() }
+        };
+        let lg = crafted_logits();
+        let lm_head = |_rows: &[f32], _n: usize| -> Result<Vec<f32>, String> { Ok(lg.clone()) };
+        let (seed, t) = (0xD1A_5EED_u64, 0.6f32);
+        let walk = drafter
+            .draft_block_keyed(0, 100, &embed, &lm_head, seed, t)
+            .expect("draft keyed");
+        // Independent recomposition of the contract: with the zero selector,
+        // scores == the candidates' logits; the pick is the keyed-Gumbel
+        // argmax over the candidate TOKENS (not indices) at absolute
+        // positions 101..103; confidence is the chosen's softmax(s/T).
+        let cands = [
+            vec![5u32, 9],
+            vec![3, 7],
+            vec![1, 2],
+        ];
+        let rows = [
+            [2.0f32, 1.9],
+            [1.0, 0.9],
+            [0.5, 0.49],
+        ];
+        for i in 0..3 {
+            let scores = rows[i]; // zero selector → unary only (sel_prev is
+            // zero, so the chain step's dot term is 0 for ANY pred — the
+            // recomposition legitimately ignores the chain history)
+            let position = (100 + 1 + i) as u64;
+            let mut best = 0usize;
+            let mut best_s = f32::NEG_INFINITY;
+            for (k, &tok) in cands[i].iter().enumerate() {
+                let s = scores[k] / t + keyed_gumbel_noise(seed, position, tok);
+                if s > best_s {
+                    best_s = s;
+                    best = k;
+                }
+            }
+            let max = scores.iter().copied().fold(f32::NEG_INFINITY, f32::max);
+            let sum: f32 = scores.iter().map(|&s| ((s - max) / t).exp()).sum();
+            let conf = ((scores[best] - max) / t).exp() / sum;
+            assert_eq!(walk.chain[i].0, cands[i][best], "row {i} keyed pick");
+            assert!((walk.chain[i].1 - conf).abs() < 1e-6, "row {i} confidence");
+            assert_eq!(walk.scores[i], scores.to_vec(), "row {i} scores");
+            assert_eq!(walk.candidates[i], cands[i], "row {i} candidates");
+        }
+    }
+
+    #[test]
+    fn keyed_walk_is_deterministic_and_actually_samples() {
+        let drafter = zero_selector_drafter();
+        let anchor = vec![1.0f32, 0.0, 0.0, 0.0];
+        let mask = vec![0.0f32, 1.0, 1.0, 1.0];
+        let embed = |tok: u32| -> Vec<f32> {
+            if tok == 0 { anchor.clone() } else { mask.clone() }
+        };
+        let lg = crafted_logits();
+        let lm_head = |_rows: &[f32], _n: usize| -> Result<Vec<f32>, String> { Ok(lg.clone()) };
+        let a = drafter
+            .draft_block_keyed(0, 100, &embed, &lm_head, 42, 0.6)
+            .expect("a");
+        let b = drafter
+            .draft_block_keyed(0, 100, &embed, &lm_head, 42, 0.6)
+            .expect("b");
+        assert_eq!(a.chain, b.chain, "same seed must reproduce the walk");
+        // It ACTUALLY samples: with the 0.1-gap row 0 (2.0 vs 1.9 at T=0.6)
+        // and the 0.01-gap row 2, the keyed noise flips picks for a large
+        // fraction of seeds. The greedy pick at every row is candidates[0].
+        let greedy: Vec<u32> = vec![5, 3, 1];
+        let mut flipped = 0u32;
+        for seed in 0..200u64 {
+            let w = drafter
+                .draft_block_keyed(0, 100, &embed, &lm_head, seed, 0.6)
+                .expect("w");
+            if w.chain.iter().zip(&greedy).any(|(c, g)| c.0 != *g) {
+                flipped += 1;
+            }
+        }
+        assert!(
+            flipped > 40,
+            "keyed walk should diverge from greedy on a large seed fraction: {flipped}/200"
+        );
     }
 }
