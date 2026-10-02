@@ -55,6 +55,14 @@ pub enum WeightPosture {
     /// D1's probe: every >=2D tensor fake-quantized Q8_0 (block-32, f16
     /// scale) in memory; the forward is byte-identical code.
     FakeQuantQ8,
+    /// The Q4 retention probe's read posture (instinct issue 018 Lane D4):
+    /// every >=2D tensor fake-quantized Q4_0 (block-32, f16 scale, signed
+    /// grid [-7,+7]) in memory; the forward is byte-identical code. The
+    /// transform's values are byte-identical to the Q4_0 artifact's decode
+    /// (the converter's read-back proof), so this probe's verdict IS the
+    /// artifact tier's retention — with the in-memory transform kept as
+    /// the instrument, the same shape D1 read Q8 at.
+    FakeQuantQ4,
     /// D2a's storage tier: the weights loaded from the derived Q8_0
     /// artifact (`LAYA_WEIGHTS_VARIANT=q8`) — no in-memory transform;
     /// the decode values are byte-identical to [`Self::FakeQuantQ8`]
@@ -77,6 +85,7 @@ impl WeightPosture {
         match self {
             Self::F16 => "f16",
             Self::FakeQuantQ8 => "fake-quant-q8",
+            Self::FakeQuantQ4 => "fake-quant-q4",
             Self::Q8Artifact => "q8-artifact",
             Self::Q4Artifact => "q4-artifact",
         }

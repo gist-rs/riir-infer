@@ -404,12 +404,15 @@ impl RiirAgent {
         let (weights_path, artifact_posture) =
             super::q8_artifact::resolve_weights_posture(&dir, name)?;
         if artifact_posture.is_some() {
-            if matches!(posture, WeightPosture::FakeQuantQ8) {
+            if matches!(
+                posture,
+                WeightPosture::FakeQuantQ8 | WeightPosture::FakeQuantQ4
+            ) {
                 return Err(LayaError::Config {
                     checkpoint: name,
-                    detail: "--fake-quant over a derived quant artifact would quantize TWICE — \
-                             the artifact already carries quantized values; \
-                             drop --fake-quant or unset LAYA_WEIGHTS_VARIANT"
+                    detail: "--fake-quant / --fake-quant-q4 over a derived quant artifact \
+                             would quantize TWICE — the artifact already carries quantized \
+                             values; drop the flag or unset LAYA_WEIGHTS_VARIANT"
                         .into(),
                 });
             }
@@ -434,7 +437,7 @@ impl RiirAgent {
             // The artifact postures load that way above — no in-memory
             // transform here (Q4Artifact rides the same arm).
             WeightPosture::Q8Artifact | WeightPosture::Q4Artifact => None,
-            WeightPosture::FakeQuantQ8 if ane_requested => {
+            WeightPosture::FakeQuantQ8 | WeightPosture::FakeQuantQ4 if ane_requested => {
                 return Err(LayaError::Config {
                     checkpoint: name,
                     detail: "fake-quant does not apply to the ANE lane — its layer weights \
@@ -445,6 +448,15 @@ impl RiirAgent {
             }
             WeightPosture::FakeQuantQ8 => {
                 let rep = super::fake_quant::fake_quant_q8_map(&mut raw).map_err(|e| {
+                    LayaError::Config {
+                        checkpoint: name,
+                        detail: e,
+                    }
+                })?;
+                Some(rep)
+            }
+            WeightPosture::FakeQuantQ4 => {
+                let rep = super::fake_quant::fake_quant_q4_map(&mut raw).map_err(|e| {
                     LayaError::Config {
                         checkpoint: name,
                         detail: e,
