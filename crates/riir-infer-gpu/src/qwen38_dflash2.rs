@@ -1049,29 +1049,47 @@ impl DFlash2Drafter {
     }
 
     /// The keyed-sampled chain walk — the exact-sampling posture (Plan 614
-    /// Phase 1, the drafter half of the byte-exact verify contract). At
-    /// each draft position `anchor_pos + 1 + i` the picked candidate is
-    /// the keyed-Gumbel argmax over the row's selector scores, with the
-    /// noise keyed by `(seed, absolute position, candidate token)` — the
-    /// SAME keyed stream the target's verify loop samples with
-    /// (`katgpt_core::keyed_gumbel_max_sample`). A draft token therefore
-    /// equals the target's own keyed sample at that position whenever the
-    /// drafter's score ordering agrees with the target's logit ordering
-    /// after the shared noise — "a draft is accepted exactly when it equals
-    /// the token serial decoding samples there" — and the pick is invariant
-    /// to evaluation order and batch composition by construction.
+    /// Phase 1, the drafter half of a LOSSLESS SAMPLED-TARGET production
+    /// lane). At each draft position `anchor_pos + 1 + i` the picked
+    /// candidate is the keyed-Gumbel argmax over the row's selector
+    /// scores, with the noise keyed by `(seed, absolute position,
+    /// candidate token)` — the keyed stream the target's verify loop
+    /// samples with once Phase 2 wires the target side
+    /// (`katgpt_core::keyed_gumbel_max_sample`; no target-side caller
+    /// exists yet — the joint key-convention test below pins the pair).
+    /// A draft token then equals the target's own keyed sample exactly
+    /// when the two score orderings agree after the shared noise, and the
+    /// pick is invariant to evaluation order and batch composition by
+    /// construction — "a draft is accepted exactly when it equals the
+    /// token serial decoding samples there" (the byte-exact contract).
     ///
-    /// This closes the greedy-vs-sampled half of the Bench-746/747
-    /// acceptance-gap residuals: on a sampled target stream a greedy chain
-    /// can only match at the target's mode probability, while the keyed
-    /// walk coincides at the distributional-agreement rate. `temperature`
-    /// scales the scores (`s/T`) exactly as the target's sampler scales its
-    /// logits; `temperature <= 0` delegates to the greedy chain walk
-    /// (bit-identical to [`Self::lattice_walk`] — the tested posture).
+    /// Scope, stated honestly (verdict round 1): this does NOT lift the
+    /// Bench-746/747 greedy-stream 1.92 — that comparison ran greedy
+    /// drafter vs greedy target, already the most favourable regime, and
+    /// the residual analysis there stands. What it buys: the production
+    /// lane's target decodes SAMPLED (chat T ≈ 0.6), where a greedy chain
+    /// accepts only at the target's per-position mode probability; under
+    /// the shared keyed stream acceptance approaches 1 as the drafter's
+    /// distribution converges to the target's (shared-Gumbel coupling:
+    /// P(match) ≥ (1−TV)/(1+TV), exact 1 at equality).
     ///
-    /// `chain[i].1` carries the chosen candidate's `softmax(s/T)`
-    /// probability, which is exactly what [`DraftWalk::confidence`]
-    /// returns for the picked token — the p-min gate reads it unchanged.
+    /// Truncation contract (Phase 2 must honor): the deployment sampler is
+    /// truncated (Qwen3 recommends top-p 0.95 / top-k 20 at T = 0.6), so
+    /// the target must mask its logits BEFORE the keyed argmax, and the
+    /// drafter should apply the same mask to its candidate set — a pick
+    /// outside the target's nucleus is a guaranteed miss. Masking first
+    /// also bounds the target side's cost to the survivors.
+    ///
+    /// `temperature` scales the scores (`s/T`) exactly as the target's
+    /// sampler scales its logits; `temperature <= 0` delegates to the
+    /// greedy chain walk (bit-identical to [`Self::lattice_walk`] — the
+    /// tested posture). `chain[i].1` carries the chosen candidate's
+    /// `softmax(s/T)` probability, which is exactly what
+    /// [`DraftWalk::confidence`] returns for the picked token — the p-min
+    /// gate reads it unchanged (NOTE for the A/B: the incumbent's p-min
+    /// 0.82 was calibrated on argmax-pick confidences; keyed picks are
+    /// often non-argmax, so the gate truncates more and the threshold must
+    /// be re-calibrated in-run).
     pub fn lattice_walk_keyed(
         &self,
         anchor_token: u32,
@@ -1268,6 +1286,7 @@ fn apply_rope_in_place(v: &mut [f32], pos: usize, freqs: &[f32]) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use katgpt_core::keyed_gumbel_max_sample;
 
     #[test]
     fn rope_identity_at_zero_and_pairwise_rotation() {
@@ -1665,6 +1684,52 @@ mod tests {
             assert!((walk.chain[i].1 - conf).abs() < 1e-6, "row {i} confidence");
             assert_eq!(walk.scores[i], scores.to_vec(), "row {i} scores");
             assert_eq!(walk.candidates[i], cands[i], "row {i} candidates");
+        }
+    }
+
+    #[test]
+    fn keyed_walk_matches_the_target_keyed_sampler_under_a_masked_shared_distribution() {
+        // The Phase-2 target half's contract, pinned from the drafter side:
+        // when the target's full-vocab logits equal the drafter's candidate
+        // scores everywhere the drafter can propose (every other token at
+        // −inf — the truncation mask), the keyed walk's pick at each block
+        // row must equal `keyed_gumbel_max_sample(logits/T, seed, position)`
+        // at that row's produced-token position — 100% match, by
+        // construction IDENTICAL computation. This fails if anyone moves
+        // the drafter's position convention off `anchor_pos + 1 + i` (the
+        // produced token's position, never the input position whose logits
+        // produced it): an off-by-one keeps the output lossless but
+        // silently decouples the shared stream, and the only symptom would
+        // be an acceptance drop no correctness test catches.
+        let drafter = zero_selector_drafter();
+        let anchor = vec![1.0f32, 0.0, 0.0, 0.0];
+        let mask = vec![0.0f32, 1.0, 1.0, 1.0];
+        let embed = |tok: u32| -> Vec<f32> {
+            if tok == 0 { anchor.clone() } else { mask.clone() }
+        };
+        let lg = crafted_logits();
+        let lm_head = |_rows: &[f32], _n: usize| -> Result<Vec<f32>, String> { Ok(lg.clone()) };
+        let (seed, t) = (0xFEED_5EED_u64, 0.6f32);
+        let walk = drafter
+            .draft_block_keyed(0, 100, &embed, &lm_head, seed, t)
+            .expect("draft keyed");
+        let cands = [vec![5u32, 9], vec![3, 7], vec![1, 2]];
+        let rows = [[2.0f32, 1.9], [1.0, 0.9], [0.5, 0.49]];
+        for i in 0..3 {
+            let position = (100 + 1 + i) as u64;
+            // The masked target distribution: −inf everywhere except the
+            // drafter's own candidates at their scores.
+            let mut full = [f32::NEG_INFINITY; 32];
+            for (k, &tok) in cands[i].iter().enumerate() {
+                full[tok as usize] = rows[i][k];
+            }
+            let scaled: Vec<f32> = full.iter().map(|&l| l / t).collect();
+            let target_tok = keyed_gumbel_max_sample(&scaled, seed, position);
+            assert_eq!(
+                walk.chain[i].0, target_tok,
+                "row {i}: drafter pick diverged from the target keyed sampler \
+                 — key convention or arithmetic drifted"
+            );
         }
     }
 
