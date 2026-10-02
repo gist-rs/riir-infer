@@ -1,6 +1,6 @@
 # Plan 617 — OpenThai-SystemOne EXL3: convert (4090) + infer (Metal) — the r1 consumer lane
 
-**Status:** PROPOSED — awaiting Phase-A GO; lane-home verdict RECORDED below (Reflex comparison lane recommended, Rethink declined). AMENDED 2026-10-02 per the verdict ping-pong (AGREE with amendments; the dedicated claude_code reviewer backend lacked auth — independent sub-agent reviewer, claims verified against the records before applying): pre-registered A5 bar added; §14-primary/r1-not-literal citation fix; GDN-hybrid scope; §14 re-run gain definition; B2 substrate-reuse + dep-edge. Cheap-falsification-first order: Phase A buys the accuracy answer for ~half a day before any Metal serving work is priced.
+**Status:** PROPOSED — awaiting Phase-A GO; lane-home verdict RECORDED below (Reflex comparison lane recommended, Rethink declined). AMENDED 2026-10-02 per the verdict ping-pong (AGREE with amendments; the dedicated claude_code reviewer backend lacked auth — independent sub-agent reviewer, claims verified against the records before applying): pre-registered A5 bar added; §14-primary/r1-not-literal citation fix; GDN-hybrid scope; §14 re-run gain definition; B2 substrate-reuse + dep-edge. Cheap-falsification-first order: Phase A buys the accuracy answer for ~half a day before any Metal serving work is priced. **A6 EXECUTED 2026-10-02 on the M3 (the plan's own "any box that meets the wall" clause): reflex Bench 107 — the 400M wins 6/9 EN suites vs the published modelless rows, beats the 68M on all 9 (overall +2.6 pt, flipping the family's −6.1), lane seat moved 68M→400M; A1–A5 remain the 4090 half-day.**
 
 **Consumer:** `iapp/OpenThai-SystemOne` @ `5d04bcca` (Apache-2.0) — Qwen3.5-0.8B tower + 256-slot head; fp32 board pins at Bench 074/084/086 (massive 0.9200 · sib200 0.8382 · xnli 0.8967/0.9000 · wisesight 0.4750/0.4675).
 **Substrate:** riir-infer Issue 034 (the §14-primary serving-arm trigger; r1 closest-but-not-literal — its recorded text requires 4 bpw residency / >100k context on 24 GiB, which this 0.8B single-shot consumer needs neither of); reader + Metal dequant already landed (`.docs/001`, two-tier oracle: decode BIT-EXACT / Hadamard tolerance-class).
@@ -88,7 +88,26 @@ Verdict: **EXL3 = structural NO for the whole bekko family; the 68M is already s
         refused — an owner re-scope would be a NEW decision, not this plan's.
       → **GO/NO-GO for Phase B.** A retention failure here kills Phase B for the cost
       of half a day — that is the point of the order.
-- [ ] A6 — **(reflex-side, parallel, no EXL3 dependency) the bekko-400M board seat**
+- [x] A6 — **(reflex-side, parallel, no EXL3 dependency) the bekko-400M board seat** —
+      **EXECUTED 2026-10-02 on the M3 (not the 4090 — the box met the wall here:
+      ~19 min for all 4,648 questions on CPU; the Bench-103 "~2 h CPU-infeasible"
+      estimate refuted — it extrapolated the 17M compute ratio, the real
+      shared-prefix batched ratio is far kinder). reflex Bench 107
+      (`riir-reflex/.benchmarks/107_bekko_v0_400m_board/`, commit `e054d7e`):
+      bekko-400M wins 6/9 EN dataset suites vs the byte-reproduced published
+      modelless rows (ag_news 0.9150 · xnli 0.8600 · massive 0.9100 · typed
+      0.6235 · sst5 0.4550 · code_fixtures 0.5938; reflex keeps emotion /
+      prompt_injections / banking77), beats the 68M on ALL 9 (overall +2.6 pt
+      vs the 68M's −6.1 — the family sign flips), and is the strongest lane on
+      the board's EN suites overall (vs openthai 0.6205 and the Rethink hybrid
+      0.6270 — read under the author-flagged family-familiarity caveat).
+      Revision pinned to the FULL hash (resolved `4aeb85b9d4042d75d8b8adf6ff7ba9e4629510ba`
+      via the HF API); comparator-posture law enforced (modelless rows byte-
+      reproduced 9/9 first); determinism witness across two processes
+      (code_fixtures 0.5938); license MIT; board publish acc-only (this run's
+      box load 5→9.1, sibling active — the Issue-021 wall); the lane seat moved
+      68M→400M (the 400M strictly dominates per-suite). Measurement-only
+      posture unchanged.** (The original task text below.)
       (the Bench-103 recorded follow-up): on the 4090 (or any box that meets the
       wall), run the existing reflex `--bekko` lane with
       `BEKKO_MODEL=hotchpotch/bekko-system-one-v0-400m`, revision pinned to the FULL
