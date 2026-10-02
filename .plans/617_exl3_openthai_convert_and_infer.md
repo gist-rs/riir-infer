@@ -1,6 +1,11 @@
 # Plan 617 — OpenThai-SystemOne EXL3: convert (4090) + infer (Metal) — the r1 consumer lane
 
-**Status:** IN PROGRESS — Phase A executing on the 4090 (GO received 2026-10-02); A1–A3 DONE, A4 (CUDA half) next. Lane-home verdict RECORDED below (Reflex comparison lane recommended, Rethink declined). AMENDED 2026-10-02 per the verdict ping-pong (AGREE with amendments; the dedicated claude_code reviewer backend lacked auth — independent sub-agent reviewer, claims verified against the records before applying): pre-registered A5 bar added; §14-primary/r1-not-literal citation fix; GDN-hybrid scope; §14 re-run gain definition; B2 substrate-reuse + dep-edge. Cheap-falsification-first order: Phase A buys the accuracy answer for ~half a day before any Metal serving work is priced. **A6 EXECUTED 2026-10-02 on the M3 (the plan's own "any box that meets the wall" clause): reflex Bench 107 — the 400M wins 6/9 EN suites vs the published modelless rows, beats the 68M on all 9 (overall +2.6 pt, flipping the family's −6.1), lane seat moved 68M→400M; A1–A5 remain the 4090 half-day.**
+**Status:** IN PROGRESS — Phase A executing on the 4090 (GO received 2026-10-02); A1–A3 DONE, A4 (CUDA half) next. Lane-home verdict RECORDED below (Reflex comparison lane recommended, Rethink declined). AMENDED 2026-10-02 per the verdict ping-pong (AGREE with amendments; the dedicated claude_code reviewer backend lacked auth — independent sub-agent reviewer, claims verified against the records before applying): pre-registered A5 bar added; §14-primary/r1-not-literal citation fix; GDN-hybrid scope; §14 re-run gain definition; B2 substrate-reuse + dep-edge. Cheap-falsification-first order: Phase A buys the accuracy answer for ~half a day before any Metal serving work is priced. **A6 EXECUTED 2026-10-02 on the M3 (the plan's own "any box that meets the wall" clause): reflex Bench 107 — the 400M wins 6/9 EN suites vs the published modelless rows, beats the 68M on all 9 (overall +2.6 pt, flipping the family's −6.1), lane seat moved 68M→400M.** **CLOSED 2026-10-02 — A1–A5 complete; A5 = NO-GO by
+the pre-registered letter and the NO-GO STANDS (owner-delegated Claude verdict:
+AGREE round 1 + round-2 confirmation): Phase B does not fire; re-open only as a
+NEW pre-registered decision under the recorded conditions (see C1). Reflex side
+landed same day: Bench 110 + the sib200 pool-floor re-base (`ff0b33a` /
+`8458c66` / `3cad008`).**
 
 **Consumer:** `iapp/OpenThai-SystemOne` @ `5d04bcca` (Apache-2.0) — Qwen3.5-0.8B tower + 256-slot head; fp32 board pins at Bench 074/084/086 (massive 0.9200 · sib200 0.8382 · xnli 0.8967/0.9000 · wisesight 0.4750/0.4675).
 **Substrate:** riir-infer Issue 034 (the §14-primary serving-arm trigger; r1 closest-but-not-literal — its recorded text requires 4 bpw residency / >100k context on 24 GiB, which this 0.8B single-shot consumer needs neither of); reader + Metal dequant already landed (`.docs/001`, two-tier oracle: decode BIT-EXACT / Hadamard tolerance-class).
@@ -301,9 +306,33 @@ Verdict: **EXL3 = structural NO for the whole bekko family; the 68M is already s
 
 ## Phase C — verdict + records
 
-- [ ] C1 — lane-home record re-affirmed or revised with evidence; promote/demote per
-      results; doc-sync (riir-infer `.docs/001` cross-ref, reflex HISTORY entry when
-      the lane lands).
+- [x] C1 — **DONE 2026-10-02 (decision recorded; reflex side landed).** A5
+      NO-GO STANDS — owner-delegated Claude verdict, AGREE (round 1) +
+      confirmation (round 2). Reasons on record: the pre-registered
+      mixed-outcome rule refuses both carve-outs BY NAME; GO is unreachable
+      even with the breaches excused (sib200 unmeasurable then +
+      semantic_defects unpinned = 2 of 13); the two-sided bar is correct for a
+      lossy surface (ag_news +1.50 is divergence from the reference, not a
+      win); typed −1.00 at n=2000 is the most statistically meaningful at-bar
+      cell (20 net questions — not obviously noise the way one-of-32 is);
+      economics unchanged (memory-axis comparison lane; product posture
+      declined). **Phase B does not fire. Re-open = a NEW pre-registered owner
+      decision under:** (1) a per-suite paired-discordance bar (exact
+      binomial/McNemar on per-question fp32-vs-EXL3 flips — fixes the
+      code_fixtures granularity defect without a special case); (2) sib200
+      measured after the reflex floor fix + the suite population re-pinned to
+      today's harness (11 comparable + semantic_defects once fp32-pinned); (3)
+      tied to an actual consumer need for the 0.4 GB M3-resident footprint —
+      never to the gate fix or a quiet GPU window alone. Doc-sync landed:
+      reflex Bench 110 (`.benchmarks/110_openthai_exl3_convert_board.md`,
+      `3cad008`) + the sib200 pool-floor re-base (560→400, `ff0b33a`, the
+      source-measurement justification in reflex HISTORY — 701 train rows can
+      never yield 560 after the cal front) + the reflex highwater
+      normalization + thai_rerun.sh reader hardening (`8458c66`). §14 note
+      (the verdict's): this consumer's NO-GO does NOT falsify the §14
+      serving-arm mandate — reader, era gate and per-pack bit-exact gate are
+      green; the "file a new issue when a consumer appears" handoff holds for
+      FUTURE consumers.
 
 ## Explicitly deferred
 

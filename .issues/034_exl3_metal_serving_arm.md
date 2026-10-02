@@ -1,6 +1,16 @@
 # Issue 034 — EXL3 Metal serving arm (Issue 001 §14 / reopen trigger r1: the OpenThai-SystemOne consumer)
 
-**Status:** VERDICT DELIVERED 2026-10-02 — Phase A complete on the 4090; **A5 = NO-GO by the pre-registered letter (code_fixtures −3.13, ag_news +1.50; typed/sst5 at-bar) → Phase B does NOT fire**; A6 executed on the M3 (Bench 107, bekko-400M seated). Provisional-GPU disclosure recorded (sibling training shared the GPU; quiet-window re-confirm owed before any site publish). Owner decisions surfaced: (a) A5 re-scope = a NEW decision per the plan's own rule; (b) riir-reflex sib200 pool floor (560) is unsatisfiable at source (701 train rows) — floor-mispin. Plan 617 Phase B/C-partial below stays for the record.
+**Status:** VERDICT DELIVERED 2026-10-02 — Phase A complete on the 4090; **A5 = NO-GO by the pre-registered letter (code_fixtures −3.13, ag_news +1.50; typed/sst5 at-bar) → Phase B does NOT fire**; A6 executed on the M3 (Bench 107, bekko-400M seated). Provisional-GPU disclosure recorded (sibling training shared the GPU; quiet-window re-confirm owed before any site publish). Owner decisions surfaced: (a) A5 re-scope = a NEW decision per the plan's own rule; (b) riir-reflex sib200 pool floor (560) is unsatisfiable at source (701 train rows) — floor-mispin. Plan 617 Phase B/C-partial below stays for the record. **FINAL (same day,
+2026-10-02): the owner-delegated Claude verdict returned AGREE — NO-GO STANDS,
+the lane closes, Phase B does not fire.** Re-open conditions recorded in Plan
+617 C1 (paired-discordance bar; sib200 measured post-floor-fix — the reflex
+`thai_sib200` floor was re-based 560→400 at `ff0b33a` the same day, justified
+from the source measurement; consumer-tied). **§14 scope note (the verdict's):
+this consumer's NO-GO does NOT discharge or falsify the §14 serving-arm mandate
+— the reader, era gate and per-pack bit-exact gate are green; the issue-001
+handoff ("file a new issue when a consumer appears") stays armed for FUTURE
+consumers.** Reflex record: Bench 110 (`.benchmarks/110_openthai_exl3_convert_board.md`,
+`3cad008`).
 
 ## Why this fires now (the recorded trigger — precise)
 
