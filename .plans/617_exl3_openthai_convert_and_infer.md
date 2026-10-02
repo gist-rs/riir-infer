@@ -1,9 +1,9 @@
 # Plan 617 — OpenThai-SystemOne EXL3: convert (4090) + infer (Metal) — the r1 consumer lane
 
-**Status:** PROPOSED — awaiting Phase-A GO; lane-home verdict RECORDED below (Reflex comparison lane recommended, Rethink declined). Cheap-falsification-first order: Phase A buys the accuracy answer for ~half a day before any Metal serving work is priced.
+**Status:** PROPOSED — awaiting Phase-A GO; lane-home verdict RECORDED below (Reflex comparison lane recommended, Rethink declined). AMENDED 2026-10-02 per the verdict ping-pong (AGREE with amendments; the dedicated claude_code reviewer backend lacked auth — independent sub-agent reviewer, claims verified against the records before applying): pre-registered A5 bar added; §14-primary/r1-not-literal citation fix; GDN-hybrid scope; §14 re-run gain definition; B2 substrate-reuse + dep-edge. Cheap-falsification-first order: Phase A buys the accuracy answer for ~half a day before any Metal serving work is priced.
 
 **Consumer:** `iapp/OpenThai-SystemOne` @ `5d04bcca` (Apache-2.0) — Qwen3.5-0.8B tower + 256-slot head; fp32 board pins at Bench 074/084/086 (massive 0.9200 · sib200 0.8382 · xnli 0.8967/0.9000 · wisesight 0.4750/0.4675).
-**Substrate:** riir-infer Issue 034 (the §14/r1 reopen); reader + Metal dequant already landed (`.docs/001`).
+**Substrate:** riir-infer Issue 034 (the §14-primary serving-arm trigger; r1 closest-but-not-literal — its recorded text requires 4 bpw residency / >100k context on 24 GiB, which this 0.8B single-shot consumer needs neither of); reader + Metal dequant already landed (`.docs/001`, two-tier oracle: decode BIT-EXACT / Hadamard tolerance-class).
 **Expected size math (0.8B):** fp32 ~3.2 GB · bf16 ~1.6 GB · **EXL3 4.0 bpw ~0.4 GB** (optionally 3.0 bpw ~0.3 GB for the curve).
 
 ## Lane verdict (the worth question, recorded)
@@ -19,8 +19,9 @@
   already record-only), and (c) riir-train vessel-minting work for cells that could not
   clear serve bars anyway — stacked recorded declines.
 - OpenThai's EN strength (xnli 0.8967 / massive 0.9200) is best captured in Rethink the
-  way the record already does: teacher-side (synth-corpus openthai VETO, distill-teacher
-  pass) — not by serving the teacher.
+  way the record already does: teacher-side in its three recorded roles — synth-corpus
+  agreement VETO, `--synth-teacher`, and `--distill-teacher openthai` single-teacher
+  fallback (Benches 083/089/104) — not by serving the teacher.
 - EXL3's own axis (`.docs/001` §2) is MEMORY, not throughput — the consumer for a
   smaller footprint is the M3-resident dev/arena story (Reflex), not a GPU serving tier.
 
@@ -29,8 +30,10 @@
 - [ ] A1 — env: exllamav3 venv under `.raw/` on the 4090 (Windows box: mind the
       git-over-SSH quirks — schtasks `gitsync` for repo syncs; `;` separators). Download
       `iapp/OpenThai-SystemOne` (weights cached under `.raw/hf`). Record the
-      arch-support check (exllamav3 model type for the tower) — **fail-loud STOP +
-      record if the converter does not know the arch.**
+      arch-support check — **expect the GDN HYBRID (gated-delta-net + causal-conv,
+      Research 003) as the LIKELY exllamav3 failure mode; fail-loud STOP + record if
+      the converter does not know it — a clean convert is the surprise, not the
+      baseline.**
 - [ ] A2 — tower extraction surgery: standard causal-LM checkpoint (config + tokenizer
       kept; the 256-slot head EXCLUDED — it stays bf16 beside the pack, tiny). Record
       BLAKE3 of the extracted checkpoint.
@@ -42,13 +45,22 @@
       if the converter emits `quantization_config.version` ∉ `{"1.4.2"}`, extend the
       known-good set ONLY with per-pack verification — never silently.
 - [ ] A4 — reader parity in-repo: pack opens through `Exl3Pack`, residency report,
-      full-pack dequant bit-exact vs the CPU reference on Metal AND CUDA (plan 004's
-      harness shape). Repo test committed.
+      full-pack gate on Metal AND CUDA (plan 004's harness shape): **decode-stage
+      bit-exact + Hadamard stages at the recorded tolerance gates** (the record's
+      two-tier oracle). Coverage floors pinned. Repo test committed.
 - [ ] A5 — hybrid board re-run (the cheap falsifier): Python hybrid server on the 4090
       (exllamav3 tower forward → hidden states → their torch head + decide contract,
       `permutations=1`; the 084 disclosed-patch pattern for the dtype/numerics pin).
-      Point reflex `--openthai` at it; run the 17-suite board + determinism pin;
-      **per-suite retention verdict vs the fp32 pins (acc AND readout-ECE)**.
+      Point reflex `--openthai` at it; run the 17-suite board + determinism pin.
+      **PRE-REGISTERED RETENTION BAR (pinned BEFORE the run — the post-hoc-bar
+      refusal; measured noise scale = 084's fp32 M3↔4090 cross-posture deltas of
+      ≤0.8 pt):**
+      - acc: |Δacc| ≤ **1.0 pt per suite** vs the fp32 pin;
+      - calibration: Δreadout-ECE ≤ **+0.050 absolute per suite**;
+      - determinism pin green (×2 byte-compare, the T2.3 law);
+      - **mixed-outcome rule: ALL 17 suites must pass for Phase-B GO — ANY breach =
+        NO-GO.** One pack serves every suite; a post-hoc suite-scoped carve-out is
+        refused — an owner re-scope would be a NEW decision, not this plan's.
       → **GO/NO-GO for Phase B.** A retention failure here kills Phase B for the cost
       of half a day — that is the point of the order.
 
@@ -56,14 +68,32 @@
 
 - [ ] B1 — packed-resident load path; measure dequant-in-forward (streamed per-layer)
       vs dequant-once-at-load for the 0.8B single-shot shape — runtime memory vs
-      latency, both measured (§17.6 scope note: never transferred by analogy).
-- [ ] B2 — forward port in Rust (tower + head + decide contract) over the pack; G5
-      parity vs frozen captures from A5's server before any number is quoted.
+      latency, both measured, **PER LAYER CLASS** (GDN fixed-state vs KV-attention vs
+      dense MLP — the GDN hybrid makes one average a lie; §17.6 scope note: never
+      transferred by analogy).
+- [ ] B2 — forward port in Rust over the pack — **substrate-side in riir-infer** (the
+      laya-riir precedent), REUSING the qwen35-deltanet substrate this repo carries
+      (`qwen35_deltanet_config_from_gguf_metadata` loader, deltanet forward family,
+      GDN chunked-prefill kernels) + the head-side pieces Research 003 pins
+      (tokenizer special tokens, `SlotHead` Linear(H→256) at `<|ts_answer|>` states
+      with slot 255 = abstain, per-question-type log-temperatures, the padded
+      multi-option single forward, the renormalized-probability decide contract);
+      reflex consumes via a re-export shim behind an opt-in feature — **name the dep
+      edge and run the boundary check (`ci_boundary_contract.sh` via the
+      boundary-guard skill) before landing; reflex's sibling-layout doc today names
+      only `riir-infer-laya`.** G5 parity vs frozen captures from A5's server before
+      any number is quoted.
 - [ ] B3 — reflex lane `openthai-exl3` (comparison-lane family law; lane file filed in
       riir-reflex); 17-suite board re-run through the Rust path; determinism pin;
       site republish.
-- [ ] B4 — §14 gate re-run with runtime numbers (its own trigger text); feature-flag
-      promotion/demotion decision per GOAT.
+- [ ] B4 — §14 gate re-run with runtime numbers under the **pre-registered,
+      cell-appropriate gain definition** (the records' decode-step metric has no
+      decode loop here and no f16/q4 GGUF incumbent exists for OpenThai — define:
+      bytes-at-load + runtime residency vs the fp32/bf16 server, and paired latency
+      vs the fp32 server on the same box; cite §16's amendment as well as §17.6).
+      **Expected posture pre-registered: STAYS OPT-IN even on full success** — a
+      lane consumer is not a default-path gain; feature-flag promotion/demotion per
+      GOAT.
 
 ## Phase C — verdict + records
 
