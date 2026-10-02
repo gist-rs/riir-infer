@@ -296,6 +296,14 @@ fn fetch_to_flat(
 }
 
 /// Hash `path` and compare against `pin`.
+///
+/// `LAYA_ALLOW_UNPINNED_WEIGHTS=1` (exact literal) downgrades a pin mismatch
+/// to a loud stderr warning instead of `LayaError::Pin` — the research-lane
+/// escape hatch for fine-tuned checkpoints measured through this loader
+/// (Plan 435 / riir-train Issue 607). Never set it on a serving path: the
+/// pins are the serving trust root, and the env is read per verify call so
+/// a serving process that somehow inherits it still names every unpinned
+/// file on stderr.
 fn verify(path: &Path, pin: &str, kind: HashKind, ckpt: Checkpoint, file: &str) -> Result<()> {
     let bytes = std::fs::read(path)
         .map_err(|e| LayaError::Runtime(format!("read {}: {e}", path.display())))?;
@@ -313,6 +321,16 @@ fn verify(path: &Path, pin: &str, kind: HashKind, ckpt: Checkpoint, file: &str) 
         }
     };
     if got != pin {
+        if std::env::var("LAYA_ALLOW_UNPINNED_WEIGHTS").as_deref() == Ok("1") {
+            eprintln!(
+                "laya weights UNPINNED (research lane): {}/{} {} {} != pinned {pin}",
+                ckpt.subfolder(),
+                file,
+                kind.name(),
+                got
+            );
+            return Ok(());
+        }
         return Err(LayaError::Pin {
             checkpoint: ckpt.subfolder(),
             file: file.to_string(),
