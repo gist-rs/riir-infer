@@ -207,12 +207,17 @@ Verdict: **EXL3 = structural NO for the whole bekko family; the 68M is already s
       two thai suites stay openthai/encoder-only); measurement-only posture — the
       lane is harness-side, never in a release set; record license as MIT (Bench 103
       addendum, verified).
+      **EXECUTED ON THE M3, NOT HERE (2026-10-02, this repo `b20d6d2` / reflex Bench
+      107 `e054d7e`): bekko-400M wins 6/9 EN suites, beats the 68M on all 9 (+2.6 pt
+      overall, family sign flips), lane seat MOVED 68M → 400M; full-hash revision
+      pin, comparator-posture law, determinism witness, acc-only publish. A6 is
+      DONE — the 4090-side prep below stands as this box's artifact (venv +
+      revision + weights), no 4090 re-run owed.**
       **PREP DONE (2026-10-02, CPU/network while the GPU waits): bekko venv at
       `riir-reflex/.raw/bekko-env` (torch 2.10.0+cu130 — CUDA on the 4090, the
       card's transformers 5.17 + sentence-transformers 6.1 pins); revision RESOLVED
       `4aeb85b` → FULL `4aeb85b9d4042d75d8b8adf6ff7ba9e4629510ba` (lastModified
-      2026-09-30); weights cached (3.01 GB snapshot). RUN waits on the same GPU
-      window as A5 (the board run is a measured gate).**
+      2026-09-30); weights cached (3.01 GB snapshot).**
 
 ## Phase B — Metal serving arm (gated on Phase-A per-suite PASS; multi-day)
 
