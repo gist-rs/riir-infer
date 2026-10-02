@@ -140,7 +140,7 @@ Verdict: **EXL3 = structural NO for the whole bekko family; the 68M is already s
       post-extension the gate opens the pack through the DEFAULT Verify door.
       METAL HALF: the same test on the M3 — NOT run here (4090 box; M3 session
       owns that arm, same test name).**
-- [ ] A5 — hybrid board re-run (the cheap falsifier): Python hybrid server on the 4090
+- [x] A5 — hybrid board re-run (the cheap falsifier): Python hybrid server on the 4090
       (exllamav3 tower forward → hidden states → their torch head + decide contract,
       `permutations=1`; the 084 disclosed-patch pattern for the dtype/numerics pin).
       Point reflex `--openthai` at it; run the 17-suite board + determinism pin.
@@ -246,7 +246,7 @@ Verdict: **EXL3 = structural NO for the whole bekko family; the 68M is already s
       box load 5→9.1, sibling active — the Issue-021 wall); the lane seat moved
       68M→400M (the 400M strictly dominates per-suite). Measurement-only
       posture unchanged.** (The original task text below.)
-      - [ ] A6 — **(reflex-side, parallel, no EXL3 dependency) the bekko-400M board seat**
+      - [x] A6 — **(reflex-side, parallel, no EXL3 dependency) the bekko-400M board seat**
       (the Bench-103 recorded follow-up): on the 4090 (or any box that meets the
       wall), run the existing reflex `--bekko` lane with
       `BEKKO_MODEL=hotchpotch/bekko-system-one-v0-400m`, revision pinned to the FULL
