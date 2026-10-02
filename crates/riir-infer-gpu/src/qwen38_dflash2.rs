@@ -1709,27 +1709,34 @@ mod tests {
         };
         let lg = crafted_logits();
         let lm_head = |_rows: &[f32], _n: usize| -> Result<Vec<f32>, String> { Ok(lg.clone()) };
-        let (seed, t) = (0xFEED_5EED_u64, 0.6f32);
-        let walk = drafter
-            .draft_block_keyed(0, 100, &embed, &lm_head, seed, t)
-            .expect("draft keyed");
         let cands = [vec![5u32, 9], vec![3, 7], vec![1, 2]];
         let rows = [[2.0f32, 1.9], [1.0, 0.9], [0.5, 0.49]];
-        for i in 0..3 {
-            let position = (100 + 1 + i) as u64;
-            // The masked target distribution: −inf everywhere except the
-            // drafter's own candidates at their scores.
-            let mut full = [f32::NEG_INFINITY; 32];
-            for (k, &tok) in cands[i].iter().enumerate() {
-                full[tok as usize] = rows[i][k];
+        let t = 0.6f32;
+        // 64 seeds, not one: a single seed can coincide across ±1 position
+        // offsets (measured: one seed misses a −1 mutant 12.3% of the time;
+        // the planted-mutation canary in the landing commit saw seed
+        // 0xFEED_5EED give identical picks at all three offsets). A 64-seed
+        // sweep misses the mutant with probability ~0.123⁶⁴ — effectively 0.
+        for seed in 0..64u64 {
+            let walk = drafter
+                .draft_block_keyed(0, 100, &embed, &lm_head, seed, t)
+                .expect("draft keyed");
+            for i in 0..3 {
+                let position = (100 + 1 + i) as u64;
+                // The masked target distribution: −inf everywhere except
+                // the drafter's own candidates at their scores.
+                let mut full = [f32::NEG_INFINITY; 32];
+                for (k, &tok) in cands[i].iter().enumerate() {
+                    full[tok as usize] = rows[i][k];
+                }
+                let scaled: Vec<f32> = full.iter().map(|&l| l / t).collect();
+                let target_tok = keyed_gumbel_max_sample(&scaled, seed, position);
+                assert_eq!(
+                    walk.chain[i].0, target_tok,
+                    "seed {seed} row {i}: drafter pick diverged from the target \
+                     keyed sampler — key convention or arithmetic drifted"
+                );
             }
-            let scaled: Vec<f32> = full.iter().map(|&l| l / t).collect();
-            let target_tok = keyed_gumbel_max_sample(&scaled, seed, position);
-            assert_eq!(
-                walk.chain[i].0, target_tok,
-                "row {i}: drafter pick diverged from the target keyed sampler \
-                 — key convention or arithmetic drifted"
-            );
         }
     }
 
