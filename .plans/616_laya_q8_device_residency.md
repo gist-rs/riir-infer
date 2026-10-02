@@ -91,6 +91,15 @@ serving shape. The re-pricing condition above is MET with numbers:
 long-prefill q8 serving is where (iii) would earn its bench — owner
 call, not this plan's default. Until then `LAYA_Q8_DEVICE_F32=1` is
 the documented escape at exactly those postures.
+**OWNER CALL RECORDED 2026-10-02 (instinct issue 018 Update 10): (iii)
+DECLINED at today's shapes** — whole-forward 1.002× means a full
+MPS-class kernel rewrite buys ≈0.2% in every lane the product serves
+now, and T13 is the risk record (we measured LOSING the dense-GEMM
+race to MPS at F16, −26…−44% p50; (iii) is that race with a harder
+kernel). RE-ARM TRIGGER: a real serving posture running q8 at
+long-prefill (m ≥ ~1024 dense) on a memory-rich host re-opens (iii)
+with its own bench; until then the `LAYA_Q8_DEVICE_F32=1` escape above
+is the whole answer.
 
 ## Phases
 
