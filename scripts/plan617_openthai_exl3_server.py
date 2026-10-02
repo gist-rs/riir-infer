@@ -134,6 +134,10 @@ def tower_hidden(input_ids: torch.Tensor) -> torch.Tensor:
     for m in tower_modules[:-1]:
         x = m.prepare_for_device(x, params)
         x = m.forward(x, params)
+    # the single-shot request's recurrent slot is DONE — free it, or every
+    # request leaks one of the cache's max_batch_size slots
+    for rs in params.get("recurrent_states") or []:
+        rs.free()
     return x
 
 
@@ -156,56 +160,73 @@ def slot_logits(hidden: torch.Tensor, answer_positions, option_counts, qtypes):
 
 
 def run_system_one(state, questions, permutations: int | None) -> SystemOneResponse:
-    parsed = {k: v for k, v in questions.items()}
-    # permutations: None = automatic (their AUTO law); the lane pins 1, and
-    # this server honors the request field the same way the fp32 one does.
-    if permutations is None:
-        from openthai_systemone.types import Choice, parse_question
+    # their system_one_batch posture law: explicit n, else AUTO (8 cyclic
+    # orders when any choice question has >= 11 options, else 1). The lane
+    # wire sends neither field, so the fp32 reference (and the 084 pins)
+    # ran AUTO — this server mirrors it cell-vs-cell.
+    from openthai_systemone.types import Choice, parse_question
 
-        pq = {k: parse_question(v) for k, v in parsed.items()}
-        choice_k = [len(q.criteria) for q in pq.values() if isinstance(q, Choice)]
-        n = 8 if any(k >= 11 for k in choice_k) else 1
-    else:
-        n = max(1, permutations)
+    pq = {k: parse_question(v) for k, v in questions.items()}
+    choice_k = {qid: len(q.criteria) for qid, q in pq.items() if isinstance(q, Choice)}
+    n = permutations
+    if n is None:
+        n = 8 if any(k >= 11 for k in choice_k.values()) else 1
+    n = max(1, min(n, max(choice_k.values(), default=1)))
 
-    # single order only when n == 1 (permutations=1 pinned by the lane);
-    # n > 1 averaging is NOT implemented here — the A5 bar runs at 1 and a
-    # wider lane posture would extend this server deliberately.
-    assert n == 1, f"permutations={n} unsupported in the A5 server (pin is 1)"
+    # their _cyclic_orders: n distinct cyclic shifts, identity first
+    def cyclic_orders(k: int, m: int) -> list[list[int]]:
+        m = max(1, min(m, k))
+        offsets = sorted({round(j * k / m) % k for j in range(m)})
+        return [[(i + off) % k for i in range(k)] for off in offsets]
 
-    enc = fmt.encode(state, parsed)
-    ids = torch.tensor([enc.input_ids], dtype=torch.long, device=DEVICE)
-    hidden = tower_hidden(ids)
-    B = 1
-    Q = len(enc.answer_positions)
-    ap_t = torch.tensor([enc.answer_positions], dtype=torch.long, device=DEVICE)
-    oc_t = torch.tensor([enc.option_counts], dtype=torch.long, device=DEVICE)
-    qt_t = torch.tensor(
-        [[QTYPE_INDEX[s.qtype] for s in enc.specs]], dtype=torch.long, device=DEVICE
-    )
-    logits = slot_logits(hidden, ap_t, oc_t, qt_t)
-    probs = logits.softmax(-1).float().cpu()
+    orders = {qid: cyclic_orders(k, n) for qid, k in choice_k.items()}
+    plans = [{qid: ords[j % len(ords)] for qid, ords in orders.items()}
+             for j in range(n)]
 
-    # their _decode_named, single-order form
+    encs = [fmt.encode(state, pq, option_orders=oo) for oo in plans]
+    per_q: dict[str, dict[str, float]] = {}
+    per_q_abstain: dict[str, float] = {}
+    for e in encs:
+        ids = torch.tensor([e.input_ids], dtype=torch.long, device=DEVICE)
+        hidden = tower_hidden(ids)
+        Q = len(e.answer_positions)
+        ap_t = torch.tensor([e.answer_positions], dtype=torch.long, device=DEVICE)
+        oc_t = torch.tensor([e.option_counts], dtype=torch.long, device=DEVICE)
+        qt_t = torch.tensor(
+            [[QTYPE_INDEX[s.qtype] for s in e.specs]], dtype=torch.long, device=DEVICE
+        )
+        logits = slot_logits(hidden, ap_t, oc_t, qt_t)
+        probs = logits.softmax(-1).float().cpu()
+        for qi, spec in enumerate(e.specs):
+            p = probs[0][qi]
+            k = len(spec.option_names)
+            pk = p[:k] / p[:k].sum().clamp(min=1e-12)
+            d = per_q.setdefault(spec.qid, {})
+            for name, v in zip(spec.option_names, pk.tolist()):
+                d[name] = d.get(name, 0.0) + v / len(encs)
+            per_q_abstain[spec.qid] = per_q_abstain.get(spec.qid, 0.0) + \
+                float(p[ABSTAIN_SLOT]) / len(encs)
+
+    # their _decode_named, from the base (identity-permutation) encoding
+    base = encs[0]
     answers = {}
-    total_input_tokens = 0
-    for qi, spec in enumerate(enc.specs):
-        p = probs[0][qi]
+    for spec in base.specs:
+        d = per_q[spec.qid]
         k = len(spec.option_names)
-        pk = p[:k] / p[:k].sum().clamp(min=1e-12)
+        names = spec.option_names if spec.qtype != "choice" else list(d.keys())
+        pk = torch.tensor([d[nm] for nm in names], dtype=torch.float32)
         pk = pk / pk.sum().clamp(min=1e-12)
         conf = confidence_from_probs(pk, k)
-        abstain_p = float(p[ABSTAIN_SLOT])
         if spec.qtype == "noul":
-            answers[spec.qid] = {"noul": float(pk[1])}
+            answers[spec.qid] = {"noul": float(d["yes"])}
         elif spec.qtype == "choice":
-            prob_map = {name: float(v) for name, v in zip(spec.option_names, pk.tolist())}
+            prob_map = {nm: float(v) for nm, v in zip(names, pk.tolist())}
             best = max(prob_map, key=prob_map.get)
             answers[spec.qid] = {
                 "choice": best,
                 "probabilities": prob_map,
                 "confidence": conf,
-                "abstain": abstain_p,
+                "abstain": per_q_abstain.get(spec.qid),
             }
         else:
             answers[spec.qid] = {
@@ -214,11 +235,10 @@ def run_system_one(state, questions, permutations: int | None) -> SystemOneRespo
                 "probabilities": {str(i): float(pk[i]) for i in range(k)},
                 "confidence": conf,
             }
-    total_input_tokens = enc.n_tokens
     return SystemOneResponse(
         model=args.model_name,
         answers=answers,
-        usage=Usage(input_tokens=total_input_tokens, permutations=1),
+        usage=Usage(input_tokens=base.n_tokens, permutations=n),
     )
 
 

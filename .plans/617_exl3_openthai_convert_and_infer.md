@@ -150,6 +150,55 @@ Verdict: **EXL3 = structural NO for the whole bekko family; the 68M is already s
         refused — an owner re-scope would be a NEW decision, not this plan's.
       → **GO/NO-GO for Phase B.** A retention failure here kills Phase B for the cost
       of half a day — that is the point of the order.
+      **EXECUTED 2026-10-02 (4090) — VERDICT: NO-GO BY THE PRE-REGISTERED LETTER;
+      Phase B does not fire.** Board: reflex harness @ `f730497` (rebuild,
+      isolated target), `OPENTHAI_SERVE_URL=:8011` (the EXL3 hybrid server — AUTO
+      permutation law implemented to mirror the fp32 server cell-vs-cell; the
+      first board attempt's massive/banking77 rows were my server's `permutations=8
+      unsupported` assert, root-caused and fixed: the lane wire sends NO
+      permutations field, so both servers run the AUTO law — 8 cyclic orders on
+      ≥11-option choice questions), `REFLEX_BENCH_HOST=4090-windows`, results
+      `.benchmarks/617_openthai_exl3_4090/` (+ `/retry`, + `/thai`) in
+      **riir-reflex**. Determinism pin ✓ on every row (×2 byte-compare).
+      **PROVISIONAL per the GPU-exclusivity rule's own clause: the sibling plan435
+      CUDA training held the GPU (~100%, 12-16 GiB) throughout — acc/ECE/determinism
+      are contention-immune numerics; the latency columns are UNQUOTABLE (Issue-021
+      law); a quiet-window re-confirm is owed before any number is published to the
+      site.**
+
+      | suite | exl3 acc | fp32 pin (084, same box) | dAcc | dECE | acc bar (|d|≤1.0) | ECE bar (d≤+0.05) |
+      |---|---:|---:|---:|---:|---|---|
+      | typed_decisions | 0.5260 | 0.5360 | −1.00 | +0.0078 | AT BAR (n=2000 → 20 q) | PASS |
+      | ag_news | 0.9050 | 0.8900 | **+1.50** | −0.0152 | **BREACH (improvement dir)** | PASS |
+      | emotion | 0.5900 | 0.5950 | −0.50 | +0.0031 | PASS | PASS |
+      | sst5 | 0.4233 | 0.4333 | −1.00 | +0.0094 | AT BAR (3 q of 300) | PASS |
+      | prompt_injections | 0.6379 | 0.6293 | +0.86 | −0.0142 | PASS | PASS |
+      | banking77 | 0.6500 | 0.6540 | −0.40 | +0.0223 | PASS | PASS |
+      | code_fixtures | 0.5625 | 0.5938 | **−3.13** | +0.0477 | **BREACH (1 q of 32)** | PASS (hair) |
+      | xnli_en | 0.9000 | 0.9000 | +0.00 | +0.0013 | PASS | PASS |
+      | massive_intent_en | 0.9167 | 0.9200 | −0.33 | −0.0134 | PASS | PASS |
+      | thai_wisesight | 0.4675 | 0.4675 | +0.00 | +0.0041 | PASS | PASS |
+      | thai_sib200 | — | 0.8382 | ABSENT | — | see below | — |
+      | semantic_defects | 0.4118 | — (suite born after 084) | — | — | no pin; beats modelless 0.1863 | — |
+
+      - **thai_sib200 ABSENCE (not a breach): slice-integrity refusal — pool-after-cal
+        501 < floor 560. Re-fetch ran (SUITES=thai_sib200 TRAIN_CAP=20000): the
+        SOURCE itself yields 701 train rows — the floor (landed 10-01, `ad94345`,
+        AFTER the 084 run) is unsatisfiable for this suite at any pull. Floor-mispin
+        observation filed for riir-reflex's owner; not this lane's fix.**
+      - **The NO-GO is by the letter, and the letter's own pressure is recorded:**
+        code_fixtures is ONE question at n=32 (granularity 3.125 pt vs the bar's
+        1.0 pt — the pre-registered noise premise ≤0.8 pt is finer than the suite's
+        own granularity); ag_news's breach is the IMPROVEMENT direction (+1.5, 6 q);
+        typed/sst5 sit exactly at the bar. The pre-registered mixed-outcome rule
+        refuses the post-hoc suite-scoped carve-out BY NAME — so the verdict stands
+        NO-GO and any re-scope is an OWNER decision (a NEW decision, per the plan).**
+      - ECE bar: PASS on all 11 measured suites (largest +0.0477, code_fixtures).
+      - The board population itself moved since the pre-registration: the six
+        harness_* families were RETIRED (owner call, 10-02, reflex `31b11d2`) and
+        semantic_defects joined — "17 suites" is no longer the harness's population;
+        the bar above maps onto today's 11 comparable suites + the 2 that cannot
+        run (sib200 floor; semantic_defects unpinned).
       **SERVER LANDED + SMOKE + PARITY PROBE GREEN (2026-10-02, commits `09b1eb2` +
       this one): `scripts/plan617_openthai_exl3_server.py`** — the fp32 lane's exact
       wire; tower forward over the pack (exllamav3, module loop minus the

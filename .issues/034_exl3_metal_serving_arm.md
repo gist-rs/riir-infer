@@ -1,6 +1,6 @@
 # Issue 034 — EXL3 Metal serving arm (Issue 001 §14 / reopen trigger r1: the OpenThai-SystemOne consumer)
 
-**Status:** OPEN — filed 2026-10-02 from the OpenThai-EXL3 lane question (reflex session); the convert half rides [Plan 617](../.plans/617_exl3_openthai_convert_and_infer.md); unpriced until Phase-A data lands.
+**Status:** VERDICT DELIVERED 2026-10-02 — Phase A complete on the 4090; **A5 = NO-GO by the pre-registered letter (code_fixtures −3.13, ag_news +1.50; typed/sst5 at-bar) → Phase B does NOT fire**; A6 executed on the M3 (Bench 107, bekko-400M seated). Provisional-GPU disclosure recorded (sibling training shared the GPU; quiet-window re-confirm owed before any site publish). Owner decisions surfaced: (a) A5 re-scope = a NEW decision per the plan's own rule; (b) riir-reflex sib200 pool floor (560) is unsatisfiable at source (701 train rows) — floor-mispin. Plan 617 Phase B/C-partial below stays for the record.
 
 ## Why this fires now (the recorded trigger — precise)
 
