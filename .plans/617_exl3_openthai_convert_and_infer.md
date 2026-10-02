@@ -25,6 +25,31 @@
 - EXL3's own axis (`.docs/001` §2) is MEMORY, not throughput — the consumer for a
   smaller footprint is the M3-resident dev/arena story (Reflex), not a GPU serving tier.
 
+## The Bekko SystemOne family — EXL3 verdict (owner ask 2026-10-02)
+
+Owner asked to add `hotchpotch/bekko-system-one-v0` **68M** and **400M** to this lane.
+Verdict: **EXL3 = structural NO for the whole bekko family; the 68M is already seated; the 400M joins the board via A6.**
+
+- **EXL3 structural NO:** bekko is a **ModernBERT-compatible shared-prefix ENCODER**
+  (base `cross-encoder/ettin-reranker-400m-v1`; bidirectional; the state+instruction
+  prefix never attends candidates, candidates never attend each other; Choice/Noul/Score
+  heads over mean-pooled candidate branches). EXL3 is a CAUSAL-DECODER format and
+  exllamav3's converter accepts decoder archs only — this is the wrong model CLASS for
+  the format, not a conversion risk. No convert task is filed for bekko, ever, under
+  this plan.
+- **The size motive is also weak:** 68M ≈ 244–272 MB fp32; the author's own browser
+  exports already exist (17M 29 MB / 68M 196 MB ONNX, INT8 row-wise embeddings + FP32
+  blocks). A SMALLER bekko in OUR runtime would be a separate encoder-port plan
+  (laya-encoder substrate + ModernBERT + the shared-prefix mask + the three heads,
+  G5-gated) — a new filing if M3-resident bekko ever becomes a product want. Not here.
+- **68M — already seated:** Bench 103 (17M/68M; owner wired the `--bekko` lane
+  2026-10-01; 68M seats 9/9 EN dataset suites, wins 4/7 incl. xnli +15.3 / massive
+  +8.7; distill follow-ups measured NEGATIVE in Bench 104). Nothing to add.
+- **400M — the recorded follow-up (A6):** Bench 103 recorded it UNMEASURED
+  ("CPU-infeasible ~2 h; the natural 4090-box follow-up"). A6 runs it through the
+  EXISTING `--bekko` lane — zero code change (the lane takes `BEKKO_MODEL` env;
+  Bench 103's env-override path proved it).
+
 ## Phase A — convert + cheap falsification (4090, ~half day–1 day)
 
 - [ ] A1 — env: exllamav3 venv under `.raw/` on the 4090 (Windows box: mind the
@@ -63,6 +88,21 @@
         refused — an owner re-scope would be a NEW decision, not this plan's.
       → **GO/NO-GO for Phase B.** A retention failure here kills Phase B for the cost
       of half a day — that is the point of the order.
+- [ ] A6 — **(reflex-side, parallel, no EXL3 dependency) the bekko-400M board seat**
+      (the Bench-103 recorded follow-up): on the 4090 (or any box that meets the
+      wall), run the existing reflex `--bekko` lane with
+      `BEKKO_MODEL=hotchpotch/bekko-system-one-v0-400m`, revision pinned to the FULL
+      commit hash at run time (the card's short pin `4aeb85b`; the Bench-103
+      `BEKKO_REVISION` convention) — all 9 EN dataset suites, `--nb-select
+      --ridge-select` (+ `--oc-select` for typed_decisions), byte-reproducing the
+      published modelless rows FIRST (the comparator-posture law, Bench 103 ⛔).
+      Publish acc-only if the box state is unfit (the Issue-021 wall as before).
+      **Caveats carried from the card + Bench 103:** bekko v0's generalization is
+      author-flagged weak (training data shares dataset families with eval suites —
+      read wins as family familiarity, never broad generalization); English-only (the
+      two thai suites stay openthai/encoder-only); measurement-only posture — the
+      lane is harness-side, never in a release set; record license as MIT (Bench 103
+      addendum, verified).
 
 ## Phase B — Metal serving arm (gated on Phase-A per-suite PASS; multi-day)
 

@@ -104,3 +104,10 @@ Research 003) — not a plain transformer. Consequences:
   three recorded roles (synth-corpus agreement VETO; `--synth-teacher`;
   `--distill-teacher openthai` single-teacher fallback — Benches 083/089/104).
 - The reflex-side lane file (`openthai-exl3`) — filed in riir-reflex when Phase B fires.
+- **The Bekko SystemOne family (17M/68M/400M) — EXL3 structural NO** (owner ask
+  2026-10-02): ModernBERT-compatible shared-prefix ENCODER, wrong model class for a
+  causal-decoder format — exllamav3's converter refuses by design. 68M/17M already
+  seated on the reflex board (Bench 103); the 400M board seat is Plan 617 A6 via the
+  existing `--bekko` lane. A smaller-bekko-in-our-runtime idea would be a separate
+  encoder-port filing (laya substrate + ModernBERT + the shared-prefix mask + three
+  heads, G5-gated) — never this issue.
