@@ -123,4 +123,58 @@ error-path repro:
   reset cleanly — #263505).
 - [ ] Root-cause confirmation (Windows repro/dump) — only on a quiet box,
       never while a matrix run is live
-- [ ] Watchdog arm in the runner `.cmd` wrappers at Issue 030 close-out
+- [x] Watchdog arm in the runner `.cmd` wrappers — **LANDED 2026-10-02 (idle
+      session, the close-out precondition met: Issue 030 closed, no run
+      live).** Machine-local `E:/git/_sync/dq614_watchdog.ps1` (the
+      regeneration copy below), started detached by a `start /B` line
+      inserted before the exe launch in all three wrappers
+      (`dq614_chain.cmd` → lanecheck log · `dq614_matrix.cmd` → matrix log ·
+      `dq614_m2.cmd` → matrix2 log; one-line diffs, verified against
+      backups). Semantics: poll the run log every 30 s for `FATAL`; once
+      seen, if the image is still alive after the 600 s grace →
+      `Stop-Process -Force` by image name (safe: the ALIVE guard admits at
+      most one instance) + write `dq614_watchdog.fired` beside the log for
+      forensics; exits quietly when the process dies first (the normal
+      hard_exit path — no-op by design) and self-caps at 8 h.
+      Measured both arms on this box: FATAL + live process (ping.exe
+      stand-in) → killed after grace + marker written; FATAL + process gone
+      → quiet exit in ~35 s (one poll cycle). No-op today: `hard_exit`
+      already removes the observed hang — this covers a future error-path
+      regression only.
+
+      Regeneration copy (the wrappers and this script are machine-local;
+      the durable text lives here):
+
+      ```powershell
+      param(
+          [Parameter(Mandatory = $true)][string]$Log,
+          [string]$ImageName = 'dq_phase_matrix.exe',
+          [int]$GraceSeconds = 600,
+          [int]$MaxHours = 8
+      )
+      $ErrorActionPreference = 'SilentlyContinue'
+      $procName = $ImageName -replace '\.exe$', ''
+      $deadline = (Get-Date).AddHours($MaxHours)
+      $fatalSeen = $false
+      $fatalAt = $null
+      while ((Get-Date) -lt $deadline) {
+          if (-not $fatalSeen) {
+              if ((Test-Path $Log) -and (Select-String -Path $Log -Pattern 'FATAL' -Quiet)) {
+                  $fatalSeen = $true
+                  $fatalAt = Get-Date
+              }
+          }
+          else {
+              $alive = Get-Process -Name $procName -ErrorAction SilentlyContinue
+              if (-not $alive) { exit 0 }
+              if (((Get-Date) - $fatalAt).TotalSeconds -ge $GraceSeconds) {
+                  Stop-Process -Name $procName -Force -ErrorAction SilentlyContinue
+                  $marker = Join-Path (Split-Path $Log -Parent) 'dq614_watchdog.fired'
+                  "FATAL seen $fatalAt ; killed $ImageName at $(Get-Date) after ${GraceSeconds}s grace" |
+                      Out-File $marker -Encoding utf8
+                  exit 0
+              }
+          }
+          Start-Sleep -Seconds 30
+      }
+      ```
