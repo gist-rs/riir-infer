@@ -1274,3 +1274,28 @@ pass-side arm green (573 groups). The §12.7 marker-sentence correction
 landed in the same commit. No files under `crates/riir-infer-laya`
 (the concurrent sibling lane); no bench number consumed (T7c-3's slot
 released — next free per `.highwater` at reopen).
+
+## 18. Issue 034 record — the §14-primary serving-arm trigger, closed NO-GO (2026-10-02)
+
+The r1 consumer lane (OpenThai-SystemOne EXL3 convert + infer) executed as
+[Plan 617](../.plans/617_exl3_openthai_convert_and_infer.md): Phase A on the
+4090 (convert + the pre-registered A5 accuracy bar — the cheap-falsification-first
+order), A6 on the M3 (reflex Bench 107 — the bekko-400M board seat, lane seat
+moved 68M→400M).
+
+**Verdict: A5 = NO-GO by the pre-registered letter** (code_fixtures −3.13,
+ag_news +1.50; typed/sst5 at-bar) **→ Phase B does not fire.** The
+owner-delegated Claude verdict returned AGREE (round 1 + round-2 confirmation) —
+the NO-GO stands and the lane closes. Re-open conditions live in Plan 617 C1
+(paired-discordance bar; sib200 measured post-floor-fix — the reflex sib200
+pool floor 560 was unsatisfiable at source at 701 train rows; re-based at
+reflex `ff0b33a` / `8458c66` / `3cad008`).
+
+Consequences for this doc: §14 stays REFUSED with its named trigger intact —
+the one candidate consuming arm is now CLOSED-NEGATIVE, so no discharge path
+exists today. The lane-home verdict (Reflex comparison lane YES; Rethink
+declined) and the bekko-family structural NO (a ModernBERT-class shared-prefix
+encoder is the wrong model class for a causal-decoder format; exllamav3's
+converter refuses by design) are recorded in Plan 617's own sections. Issue
+034's file is removed per the noise-reduction rule; this section + Plan 617
++ git history are the record.
