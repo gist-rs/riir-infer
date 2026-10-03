@@ -4562,6 +4562,30 @@ impl Qwen38DenseForward {
         Ok(!(packed as u32))
     }
 
+    /// Plan 614 Phase 2 — the keyed-sampled serial twin: the capture
+    /// forward VERBATIM plus this step's full-vocab logits. The serial
+    /// keyed reference (the lossless oracle the spec lane is gated
+    /// against) samples EVERY position with the truncated keyed sampler,
+    /// so each step needs the row the argmax-only forward throws away.
+    /// Same liveness coupling as the capture twin's taps: the download
+    /// reads `self.logits` after the step's argmax sync and before any
+    /// other launch. One extra ~1 MB dtoh per step — diagnostic cadence,
+    /// never a hot path (the reference runs once per gate).
+    pub fn forward_token_capture_logits(
+        &mut self,
+        token: u32,
+        pos: usize,
+        capture_layers: &[usize],
+        capture_out: &mut [Vec<f32>],
+    ) -> Result<(u32, Vec<f32>), String> {
+        let argmax = self.forward_token_capture(token, pos, capture_layers, capture_out)?;
+        let logits = self
+            .stream
+            .clone_dtoh(&self.logits)
+            .map_err(|e| format!("token logits dtoh: {e}"))?;
+        Ok((argmax, logits))
+    }
+
     /// **Per-layer attention-Q capture** (katgpt-rs Issue 908 / Plan 612
     /// T2.1 — the PISA pyramid selection gate's real-tensor fixture tap).
     /// After each Attention layer listed in `q_capture_layers` completes,
@@ -8047,6 +8071,37 @@ impl Qwen38DenseForward {
             return Err("forward_verify_chunk_taps: call enable_verify_taps() first".to_string());
         }
         self.verify_chunk_eager(tokens, base_pos, true)
+    }
+
+    /// Plan 614 Phase 2 — the keyed-sampled verify twin: the tap-carrying
+    /// chunk VERBATIM plus the per-row logits download. The keyed sampler
+    /// (`qwen38_spec::keyed_accept`) consumes the `[p][vocab]` rows and the
+    /// shared keyed stream — the argmaxes ride along unchanged for the
+    /// greedy-arm diagnostics. The download happens AFTER the chunk's own
+    /// argmax sync and BEFORE any other launch, so `verify.logits` still
+    /// holds this chunk's rows (the same liveness coupling
+    /// `forward_verify_chunk_taps` relies on for its tap buffer); ~1 MB per
+    /// row over the PCIe — the Phase-2 correctness posture, the Phase-3
+    /// tensor-unit lane moves the sampler on-GPU.
+    pub fn forward_verify_chunk_taps_logits(
+        &mut self,
+        tokens: &[u32],
+        base_pos: usize,
+    ) -> Result<(Vec<u32>, Vec<f32>), String> {
+        if self.verify_taps_dev.is_none() {
+            return Err(
+                "forward_verify_chunk_taps_logits: call enable_verify_taps() first".to_string(),
+            );
+        }
+        let p = tokens.len();
+        let argmaxes = self.verify_chunk_eager(tokens, base_pos, true)?;
+        let vocab = self.cfg.vocab_size;
+        let view = self.verify.logits.slice(0..p * vocab);
+        let logits = self
+            .stream
+            .clone_dtoh(&view)
+            .map_err(|e| format!("verify logits dtoh: {e}"))?;
+        Ok((argmaxes, logits))
     }
 
     /// Issue 755 T2 — download the first `rows` tap rows (`[rows][25600]`

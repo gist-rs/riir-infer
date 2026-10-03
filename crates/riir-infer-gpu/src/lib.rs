@@ -673,6 +673,12 @@ pub mod qwen38_dense_cudarc;
 pub mod qwen38_dflash2;
 #[cfg(all(feature = "ternary_gemv_cuda_raw", not(target_os = "macos")))]
 pub mod qwen38_dflash2_gpu;
+// Plan 614 Phase 2 — the keyed spec-decode lane: the pure decision layer is
+// always-on (M3-testable); the cudarc loop composition rides `qwen38_spec`
+// (implies ternary_gemv_cuda_raw; CUDA-only like its target).
+pub mod qwen38_spec;
+#[cfg(all(feature = "qwen38_spec", not(target_os = "macos")))]
+pub mod qwen38_spec_cudarc;
 #[cfg(all(feature = "ternary_gemv_cuda_raw", not(target_os = "macos")))]
 pub mod qwen38_prefix_cache;
 #[cfg(all(feature = "ternary_gemv_cuda_raw", not(target_os = "macos")))]

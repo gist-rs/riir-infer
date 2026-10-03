@@ -1144,6 +1144,87 @@ impl DFlash2Drafter {
         }
     }
 
+    /// The INDEPENDENT-sampled chain walk — the incumbent llama.cpp posture
+    /// (the PR's sampled branch: each draft token is a fresh categorical
+    /// draw from `softmax(scores/T)` over the row's candidates, random
+    /// private to the drafter, sharing NOTHING with the target's sampling
+    /// stream). Plan-614 Phase-1 box-4's control arm: against a keyed-
+    /// sampled target stream its per-position hit chance is the plain
+    /// `sum p_target·p_drafter` collision mass — the coupling lower bound
+    /// `(1−TV)/(1+TV)` the keyed arm rides is exactly what it lacks.
+    ///
+    /// RNG: a SplitMix64 finalizer over `(rng_seed, step, draw_index)` —
+    /// the keyed noise's own finalizer shape (full avalanche, open-interval
+    /// u via 53 bits), so the arm is deterministic under a seed yet has no
+    /// positional agreement with the target's keyed stream even at the
+    /// same seed: the keys differ by construction (no target seed/position
+    /// enters). `temperature <= 0` delegates to the greedy walk
+    /// (bit-identical to [`Self::lattice_walk`]).
+    pub fn lattice_walk_independent(
+        &self,
+        anchor_token: u32,
+        hidden_rows: &[f32],
+        logits: &[f32],
+        rng_seed: u64,
+        temperature: f32,
+    ) -> DraftWalk {
+        if temperature <= 0.0 {
+            return self.lattice_walk(anchor_token, hidden_rows, logits);
+        }
+        #[inline(always)]
+        fn fin(z: u64) -> u64 {
+            let z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+            let z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
+            z ^ (z >> 31)
+        }
+        // One uniform per draw, advanced within the step: u(open (0,1))
+        // from 53 bits — the keyed construction without a key.
+        let draw = |step: u64, k: u64| -> f32 {
+            let z = fin(fin(rng_seed ^ step.wrapping_mul(0x9E37_79B9_7F4A_7C15)) ^ k);
+            let inv = 1.0f64 / (1u64 << 53) as f64;
+            (((z >> 11) as f64) * inv + inv * 0.5) as f32
+        };
+
+        let (candidates, unary, logits_top1, codes) = self.walk_rows(hidden_rows, logits);
+        let mut chain: Vec<(u32, f32)> = Vec::with_capacity(candidates.len());
+        let mut walk_scores: Vec<Vec<f32>> = Vec::with_capacity(candidates.len());
+        let mut pred_tok = anchor_token;
+        for i in 0..candidates.len() {
+            let scores = self.chain_step_scores(pred_tok, &candidates[i], &unary[i], &codes[i]);
+            // Categorical pick over softmax(scores/T) via one uniform on
+            // the cumulative distribution (candidate order fixed = the
+            // top-k-desc order; f32 accumulation is deterministic).
+            let max = scores.iter().copied().fold(f32::NEG_INFINITY, f32::max);
+            let mut sum = 0.0f32;
+            let mut probs = vec![0.0f32; scores.len()];
+            for (pi, &s) in scores.iter().enumerate() {
+                probs[pi] = ((s - max) / temperature).exp();
+                sum += probs[pi];
+            }
+            let u = draw(i as u64, 0) * sum;
+            let mut acc = 0.0f32;
+            let mut best = scores.len() - 1;
+            for (pi, &w) in probs.iter().enumerate() {
+                acc += w;
+                if u < acc {
+                    best = pi;
+                    break;
+                }
+            }
+            let conf = probs[best] / sum;
+            chain.push((candidates[i][best], conf));
+            walk_scores.push(scores);
+            pred_tok = candidates[i][best];
+        }
+
+        DraftWalk {
+            chain,
+            logits_top1,
+            candidates,
+            scores: walk_scores,
+        }
+    }
+
     /// The one-shot composition (the future integrated loop's entry): the
     /// two phases around a caller-supplied lm_head.
     #[allow(clippy::type_complexity)]
@@ -1774,5 +1855,134 @@ mod tests {
             flipped > 40,
             "keyed walk should diverge from greedy on a large seed fraction: {flipped}/200"
         );
+    }
+
+    #[test]
+    fn independent_walk_greedy_posture_is_bit_identical_to_the_greedy_walk() {
+        let drafter = zero_selector_drafter();
+        let anchor = vec![1.0f32, 0.0, 0.0, 0.0];
+        let mask = vec![0.0f32, 1.0, 1.0, 1.0];
+        let embed = |tok: u32| -> Vec<f32> {
+            if tok == 0 { anchor.clone() } else { mask.clone() }
+        };
+        let lg = crafted_logits();
+        let lm_head = |_rows: &[f32], _n: usize| -> Result<Vec<f32>, String> { Ok(lg.clone()) };
+        let greedy = drafter.draft_block(0, 100, &embed, &lm_head).expect("draft");
+        for t in [0.0f32, -1.0] {
+            let ind = drafter
+                .lattice_walk_independent(0, &drafter_draft_hidden(&drafter, 0, 100, &embed), &lg, 7, t);
+            assert_eq!(ind.chain, greedy.chain, "T={t} must delegate to greedy");
+            assert_eq!(ind.scores, greedy.scores);
+        }
+    }
+
+    /// The zero-selector drafter's noise-block hidden for the walk-only
+    /// tests (draft_block_keyed hides this seam; the independent walk takes
+    /// hidden rows directly like `lattice_walk` does).
+    fn drafter_draft_hidden(
+        drafter: &DFlash2Drafter,
+        anchor: u32,
+        anchor_pos: usize,
+        embed: &dyn Fn(u32) -> Vec<f32>,
+    ) -> Vec<f32> {
+        drafter.draft_block_hidden(anchor, anchor_pos, embed)
+    }
+
+    #[test]
+    fn independent_walk_recomposes_the_categorical_pick_exactly() {
+        let drafter = zero_selector_drafter();
+        let anchor = vec![1.0f32, 0.0, 0.0, 0.0];
+        let mask = vec![0.0f32, 1.0, 1.0, 1.0];
+        let embed = |tok: u32| -> Vec<f32> {
+            if tok == 0 { anchor.clone() } else { mask.clone() }
+        };
+        let hidden = drafter.draft_block_hidden(0, 100, &embed);
+        let lg = crafted_logits();
+        let (seed, t) = (0xBEEF_u64, 0.6f32);
+        let walk = drafter.lattice_walk_independent(0, &hidden, &lg, seed, t);
+        // Independent recomposition: with the zero selector, scores == the
+        // candidates' logits; the pick is the categorical draw from
+        // softmax(scores/T) via the walk's own uniform stream (the same
+        // splitmix finalizer over (seed, step, 0) — duplicated HERE on
+        // purpose, the test-side recomposition convention).
+        let cands = [vec![5u32, 9], vec![3, 7], vec![1, 2]];
+        let rows = [[2.0f32, 1.9], [1.0, 0.9], [0.5, 0.49]];
+        let fin = |mut z: u64| -> u64 {
+            z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+            z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
+            z ^ (z >> 31)
+        };
+        for i in 0..3 {
+            let scores = rows[i];
+            let max = scores.iter().copied().fold(f32::NEG_INFINITY, f32::max);
+            let mut sum = 0.0f32;
+            let probs: Vec<f32> = scores
+                .iter()
+                .map(|&s| {
+                    let w = ((s - max) / t).exp();
+                    sum += w;
+                    w
+                })
+                .collect();
+            let z = fin(fin(seed ^ ((i as u64).wrapping_mul(0x9E37_79B9_7F4A_7C15))) ^ 0);
+            let inv = 1.0f64 / (1u64 << 53) as f64;
+            let u = (((z >> 11) as f64) * inv + inv * 0.5) as f32;
+            let target = u * sum;
+            let mut acc = 0.0f32;
+            let mut best = scores.len() - 1;
+            for (pi, &w) in probs.iter().enumerate() {
+                acc += w;
+                if target < acc {
+                    best = pi;
+                    break;
+                }
+            }
+            assert_eq!(walk.chain[i].0, cands[i][best], "row {i} categorical pick");
+            assert!(
+                (walk.chain[i].1 - probs[best] / sum).abs() < 1e-6,
+                "row {i} confidence == the picked softmax prob"
+            );
+        }
+        // Determinism under the seed.
+        let again = drafter.lattice_walk_independent(0, &hidden, &lg, seed, t);
+        assert_eq!(again.chain, walk.chain);
+        // And a different seed is a different stream (the finalizer avalanche).
+        assert!(
+            drafter
+                .lattice_walk_independent(0, &hidden, &lg, seed + 1, t)
+                .chain
+                .iter()
+                .zip(&walk.chain)
+                .any(|(a, b)| a.0 != b.0),
+            "seed+1 should move at least one pick on these tiny gaps"
+        );
+    }
+
+    #[test]
+    fn independent_walk_actually_samples_not_greedy() {
+        let drafter = zero_selector_drafter();
+        let anchor = vec![1.0f32, 0.0, 0.0, 0.0];
+        let mask = vec![0.0f32, 1.0, 1.0, 1.0];
+        let embed = |tok: u32| -> Vec<f32> {
+            if tok == 0 { anchor.clone() } else { mask.clone() }
+        };
+        let hidden = drafter.draft_block_hidden(0, 100, &embed);
+        let lg = crafted_logits();
+        // Greedy picks candidates[0] at every row. The independent arm at
+        // T=0.6 draws from softmax — row 0's p(first) is only ~0.54, so the
+        // greedy-token rate across seeds must land far below 100% (a
+        // greedy-posture bug pins it at exactly 200/200).
+        let mut greedy_first = 0u32;
+        for seed in 0..200u64 {
+            let w = drafter.lattice_walk_independent(0, &hidden, &lg, seed, 0.6);
+            if w.chain[0].0 == 5 {
+                greedy_first += 1;
+            }
+        }
+        assert!(
+            greedy_first < 160,
+            "independent walk collapsed to greedy: {greedy_first}/200 picked the argmax"
+        );
+        assert!(greedy_first > 40, "sampler degenerate: only {greedy_first}/200 argmax picks");
     }
 }

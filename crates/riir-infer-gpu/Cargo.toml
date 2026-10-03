@@ -126,6 +126,12 @@ ternary_gemm_simdgroup_f16 = ["ternary_gemm_simdgroup"]
 ternary_lut_gemv = ["ternary_gemv"]
 # Raw CUDA dp4a/mma ternary GEMV/GEMM + the whole-prefill cudarc family.
 ternary_gemv_cuda_raw = ["ternary_gemv", "dep:cudarc"]
+# Plan 614 Phase 2 — the keyed spec-decode lane's cudarc composition (the
+# keyed verify loop over the dense forward + the DFlash2 GPU drafter). The
+# pure decision layer (qwen38_spec.rs) is always-on; this gates the loop
+# that produces its rows. CUDA-only like its target (implies the cudarc
+# family; the module is additionally cfg(not(target_os = "macos"))).
+qwen38_spec = ["ternary_gemv_cuda_raw"]
 # The single-plane activation-quant prefill arm (Issue 884 T2a).
 prefill_q8_act = []
 # The fork-config utilization arm; implies the q8 arm (Issue 884 T2b).
