@@ -44,6 +44,16 @@ pub struct KeyedSpecConfig {
     /// gate semantics — an unconfident position stops the draft, it does
     /// not skip). `None` = ungated.
     pub p_min: Option<f32>,
+    /// The DRAFTER's truncation (Plan 614's Phase-2 contract drafter half:
+    /// the drafter never proposes outside its own nucleus — a pick outside
+    /// the target's is a guaranteed miss). `(top_k, top_p)` over the
+    /// drafter's own lm_head rows, the SAME semantics as the posture's
+    /// sampler; `None`/`None` (the default) is the unmasked keyed walk —
+    /// the A/B's 4th arm (`keyed_masked`) passes the posture's own
+    /// truncation here, and promoting masked-to-default is a GOAT call on
+    /// the A/B numbers, not a default.
+    pub draft_top_k: Option<usize>,
+    pub draft_top_p: Option<f32>,
 }
 
 impl Default for KeyedSpecConfig {
@@ -51,6 +61,8 @@ impl Default for KeyedSpecConfig {
         Self {
             posture: KeyedVerifyPosture::default(),
             p_min: None,
+            draft_top_k: None,
+            draft_top_p: None,
         }
     }
 }
@@ -125,9 +137,23 @@ pub fn run_keyed_spec_loop(
         let logits_n = gpu.lm_head_rows_batched(&rows_n, bs - 1)?;
         // The keyed walk (the shared stream); the greedy posture delegates
         // inside it bit-identically — the explicit arm only skips the
-        // noise arithmetic for the incumbent-exact A/B posture.
+        // noise arithmetic for the incumbent-exact A/B posture. The
+        // masked arm (`draft_top_k`/`draft_top_p` set) filters the
+        // drafter's own nucleus before the pick — the Phase-2 contract's
+        // drafter half.
         let walk = if posture.is_greedy() {
             cpu.lattice_walk(pending, &hidden, &logits_n)
+        } else if cfg.draft_top_k.is_some() || cfg.draft_top_p.is_some() {
+            cpu.lattice_walk_keyed_masked(
+                pending,
+                &hidden,
+                &logits_n,
+                posture.seed,
+                pos,
+                posture.temperature,
+                cfg.draft_top_k,
+                cfg.draft_top_p,
+            )
         } else {
             cpu.lattice_walk_keyed(
                 pending,

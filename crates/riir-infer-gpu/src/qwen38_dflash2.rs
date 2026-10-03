@@ -101,7 +101,7 @@
 use std::collections::VecDeque;
 use std::path::Path;
 
-use katgpt_core::keyed_gumbel_noise;
+use katgpt_core::{keyed_gumbel_noise, truncation_keep_mask};
 use rayon::prelude::*;
 
 /// The drafter config (z-lab `config.json` values; see the module header).
@@ -1099,10 +1099,109 @@ impl DFlash2Drafter {
         anchor_pos: usize,
         temperature: f32,
     ) -> DraftWalk {
+        self.lattice_walk_keyed_impl(
+            anchor_token,
+            hidden_rows,
+            logits,
+            seed,
+            anchor_pos,
+            temperature,
+            None,
+        )
+    }
+
+    /// The keyed walk under the DEPLOYMENT TRUNCATION — the Plan-614
+    /// Phase-2 contract's drafter half: "the drafter should apply the same
+    /// mask to its candidate set — a pick outside the target's nucleus is a
+    /// guaranteed miss." Per block row the drafter builds
+    /// [`katgpt_core::truncation_keep_mask`] over its OWN lm_head logits
+    /// (the same `(top_k, top_p)` the target's sampler uses — the mask
+    /// semantics live in ONE place), then the keyed pick consults only the
+    /// SURVIVING candidates, and the recorded confidence is the chosen
+    /// token's `softmax(s/T)` over the survivors — the proposal
+    /// distribution the p-min gate reads. The pick can never empty:
+    /// candidate 0 is the row's logits top-1 and the mask always keeps the
+    /// first survivor (the sole exception is a non-finite top-1 — the mask
+    /// drops `+inf` while `top_k_desc` ranks it — where the walk falls back
+    /// to candidate 0 with confidence 0.0, which the p-min gate then cuts;
+    /// real model rows are finite). The untruncated posture (`None`/`None`)
+    /// delegates bit-identically to [`Self::lattice_walk_keyed`], and
+    /// `temperature <= 0` delegates to the greedy walk like every sampled
+    /// arm (greedy never leaves the top-`selector_top_k`, so masking has no
+    /// greedy meaning).
+    ///
+    /// Cost note: one full-vocab sort per row beyond `walk_rows`' selection
+    /// — the arm's measurement posture accepts it; a rank-only keep-count
+    /// helper can replace it if production adopts the mask (the two orders
+    /// agree on finite rows — same ties-earlier comparator).
+    pub fn lattice_walk_keyed_masked(
+        &self,
+        anchor_token: u32,
+        hidden_rows: &[f32],
+        logits: &[f32],
+        seed: u64,
+        anchor_pos: usize,
+        temperature: f32,
+        top_k: Option<usize>,
+        top_p: Option<f32>,
+    ) -> DraftWalk {
+        if temperature <= 0.0 {
+            return self.lattice_walk(anchor_token, hidden_rows, logits);
+        }
+        if top_k.is_none() && top_p.is_none() {
+            return self.lattice_walk_keyed(
+                anchor_token,
+                hidden_rows,
+                logits,
+                seed,
+                anchor_pos,
+                temperature,
+            );
+        }
+        let n_out = self.cfg.block_size - 1;
+        let vocab = self.cfg.vocab_size;
+        debug_assert_eq!(logits.len(), n_out * vocab);
+        let mut keep = Vec::with_capacity(n_out * vocab);
+        for i in 0..n_out {
+            keep.extend(truncation_keep_mask(
+                &logits[i * vocab..(i + 1) * vocab],
+                top_k,
+                top_p,
+            ));
+        }
+        self.lattice_walk_keyed_impl(
+            anchor_token,
+            hidden_rows,
+            logits,
+            seed,
+            anchor_pos,
+            temperature,
+            Some(&keep),
+        )
+    }
+
+    /// The keyed walk's shared body: `keep == None` is the untruncated
+    /// [`Self::lattice_walk_keyed`]; `Some(flat [n_out * vocab])` filters
+    /// both the pick and the confidence's softmax to the surviving
+    /// candidates (the masked arm's contract above). The unmasked path's
+    /// arithmetic is BIT-IDENTICAL to the pre-extraction walk: same
+    /// candidate order, same comparison chain, same max/sum accumulation
+    /// order.
+    fn lattice_walk_keyed_impl(
+        &self,
+        anchor_token: u32,
+        hidden_rows: &[f32],
+        logits: &[f32],
+        seed: u64,
+        anchor_pos: usize,
+        temperature: f32,
+        keep: Option<&[bool]>,
+    ) -> DraftWalk {
         if temperature <= 0.0 {
             return self.lattice_walk(anchor_token, hidden_rows, logits);
         }
         let (candidates, unary, logits_top1, codes) = self.walk_rows(hidden_rows, logits);
+        let vocab = self.cfg.vocab_size;
 
         let mut chain: Vec<(u32, f32)> = Vec::with_capacity(candidates.len());
         let mut walk_scores: Vec<Vec<f32>> = Vec::with_capacity(candidates.len());
@@ -1112,28 +1211,61 @@ impl DFlash2Drafter {
             // The keyed pick: temperature-scaled scores + the shared keyed
             // stream (candidate TOKEN keys the noise, never the candidate
             // index — drafter and target must agree on the same token's
-            // noise value at the same position).
+            // noise value at the same position). The masked arm consults
+            // survivor keys only (mask → scale → keyed argmax, the
+            // Phase-2 order).
             let position = (anchor_pos + 1 + i) as u64;
+            let row_keep = keep.map(|k| &k[i * vocab..(i + 1) * vocab]);
+            let survives = |ki: usize| -> bool {
+                row_keep.is_none_or(|rk| rk[candidates[i][ki] as usize])
+            };
             let mut best = 0usize;
             let mut best_s = f32::NEG_INFINITY;
-            for (ki, &tok) in candidates[i].iter().enumerate() {
-                let s = scores[ki] / temperature + keyed_gumbel_noise(seed, position, tok);
-                if s > best_s {
+            let mut any = false;
+            for ki in 0..candidates[i].len() {
+                if !survives(ki) {
+                    continue;
+                }
+                let s = scores[ki] / temperature
+                    + keyed_gumbel_noise(seed, position, candidates[i][ki]);
+                if !any || s > best_s {
                     best_s = s;
                     best = ki;
+                    any = true;
                 }
             }
-            // The chosen candidate's softmax(s/T) probability — the same
-            // quantity `DraftWalk::confidence(i, temperature)` reads back.
-            let max = scores.iter().copied().fold(f32::NEG_INFINITY, f32::max);
-            let mut sum = 0.0f32;
-            for &s in scores.iter() {
-                sum += ((s - max) / temperature).exp();
+            // The chosen candidate's softmax(s/T) probability over the
+            // PROPOSAL distribution — survivors only when masked (the
+            // unmasked path folds every candidate, bit-identical to the
+            // pre-extraction walk). `DraftWalk::confidence` remains the
+            // UNMASKED readback — the masked arm's chain confidence is
+            // deliberately the gated distribution's.
+            let mut max = f32::NEG_INFINITY;
+            for (ki, &s) in scores.iter().enumerate() {
+                if survives(ki) {
+                    max = max.max(s);
+                }
             }
-            let conf = ((scores[best] - max) / temperature).exp() / sum;
-            chain.push((candidates[i][best], conf));
+            let mut sum = 0.0f32;
+            for (ki, &s) in scores.iter().enumerate() {
+                if survives(ki) {
+                    sum += ((s - max) / temperature).exp();
+                }
+            }
+            let (tok, conf) = if any {
+                (
+                    candidates[i][best],
+                    ((scores[best] - max) / temperature).exp() / sum,
+                )
+            } else {
+                // Unreachable on finite rows (candidate 0 = the logits
+                // top-1 always survives); the non-finite-top-1 fallback is
+                // confidence 0.0 so the p-min gate cuts the chain here.
+                (candidates[i][0], 0.0)
+            };
+            chain.push((tok, conf));
             walk_scores.push(scores);
-            pred_tok = candidates[i][best];
+            pred_tok = tok;
         }
 
         DraftWalk {
@@ -1265,6 +1397,35 @@ impl DFlash2Drafter {
             seed,
             anchor_pos,
             temperature,
+        ))
+    }
+
+    /// The masked keyed composition — [`Self::draft_block_keyed`] plus the
+    /// drafter's own-nucleus truncation ([`Self::lattice_walk_keyed_masked`]).
+    /// `None`/`None` truncation delegates bit-identically to
+    /// [`Self::draft_block_keyed`].
+    #[allow(clippy::type_complexity)]
+    pub fn draft_block_keyed_masked(
+        &self,
+        anchor_token: u32,
+        anchor_pos: usize,
+        embed_row: &dyn Fn(u32) -> Vec<f32>,
+        lm_head_rows: &dyn Fn(&[f32], usize) -> Result<Vec<f32>, String>,
+        seed: u64,
+        temperature: f32,
+        top_k: Option<usize>,
+        top_p: Option<f32>,
+    ) -> Result<DraftWalk, String> {
+        let (hidden, logits) = self.draft_block_rows(anchor_token, anchor_pos, embed_row, lm_head_rows)?;
+        Ok(self.lattice_walk_keyed_masked(
+            anchor_token,
+            &hidden,
+            &logits,
+            seed,
+            anchor_pos,
+            temperature,
+            top_k,
+            top_p,
         ))
     }
 
@@ -1854,6 +2015,108 @@ mod tests {
         assert!(
             flipped > 40,
             "keyed walk should diverge from greedy on a large seed fraction: {flipped}/200"
+        );
+    }
+
+    #[test]
+    fn masked_keyed_walk_none_truncation_is_bit_identical_to_the_keyed_walk() {
+        let drafter = zero_selector_drafter();
+        let anchor = vec![1.0f32, 0.0, 0.0, 0.0];
+        let mask = vec![0.0f32, 1.0, 1.0, 1.0];
+        let embed = |tok: u32| -> Vec<f32> {
+            if tok == 0 { anchor.clone() } else { mask.clone() }
+        };
+        let lg = crafted_logits();
+        let lm_head = |_rows: &[f32], _n: usize| -> Result<Vec<f32>, String> { Ok(lg.clone()) };
+        for seed in 0..32u64 {
+            let keyed = drafter
+                .draft_block_keyed(0, 100, &embed, &lm_head, seed, 0.6)
+                .expect("keyed");
+            let masked = drafter
+                .draft_block_keyed_masked(0, 100, &embed, &lm_head, seed, 0.6, None, None)
+                .expect("masked");
+            assert_eq!(masked.chain, keyed.chain, "seed {seed}: None/None must delegate");
+            assert_eq!(masked.scores, keyed.scores);
+            assert_eq!(masked.candidates, keyed.candidates);
+            assert_eq!(masked.logits_top1, keyed.logits_top1);
+        }
+    }
+
+    #[test]
+    fn masked_keyed_walk_never_picks_outside_the_survivor_nucleus() {
+        // top_k = Some(1) keeps the row's logits top-1 ONLY (the mask's
+        // first-survivor rule) — so every seed's pick on every row must be
+        // candidates[0], i.e. exactly the untruncated walk's logits_top1,
+        // and the single-survivor softmax is confidence 1.0. This pins the
+        // FILTER (a drifted implementation that ignores the mask keeps
+        // sampling the second candidate on flip-prone seeds — the crafted
+        // rows flip on >20% of seeds per the determinism test above).
+        let drafter = zero_selector_drafter();
+        let anchor = vec![1.0f32, 0.0, 0.0, 0.0];
+        let mask = vec![0.0f32, 1.0, 1.0, 1.0];
+        let embed = |tok: u32| -> Vec<f32> {
+            if tok == 0 { anchor.clone() } else { mask.clone() }
+        };
+        let lg = crafted_logits();
+        let lm_head = |_rows: &[f32], _n: usize| -> Result<Vec<f32>, String> { Ok(lg.clone()) };
+        let untrunc_top1 = vec![5u32, 3, 1]; // candidates[0] per row
+        let mut conf_seen = 0usize;
+        for seed in 0..200u64 {
+            let w = drafter
+                .draft_block_keyed_masked(0, 100, &embed, &lm_head, seed, 0.6, Some(1), None)
+                .expect("masked");
+            let picks: Vec<u32> = w.chain.iter().map(|&(t, _)| t).collect();
+            assert_eq!(picks, untrunc_top1, "seed {seed}: pick outside the k=1 nucleus");
+            for &(_, c) in &w.chain {
+                assert!((c - 1.0).abs() < 1e-6, "single-survivor confidence must be 1.0");
+                conf_seen += 1;
+            }
+            // The walk still records the FULL candidate set + scores
+            // (diagnostics, not filtered).
+            assert_eq!(w.candidates, [vec![5u32, 9], vec![3, 7], vec![1, 2]]);
+        }
+        assert_eq!(conf_seen, 600);
+    }
+
+    #[test]
+    fn masked_keyed_walk_top_p_survivor_mass_cuts_the_candidate_set() {
+        // The arm's real bite: top-p OVER THE SURVIVORS can keep FEWER
+        // candidates than the walk proposes — row 0 of the crafted logits
+        // (2.0 vs 1.9, rest 0.0) puts only ~16.8% of the finite mass on
+        // token 5, so top_p = 0.1 keeps ONLY token 5 and that row's pick
+        // must equal it for every seed, while the UNMASKED keyed walk
+        // flips row 0 on a large seed fraction (the same-seed disagreement
+        // count is the mask actually firing, not a delegation accident;
+        // rows 1–2 keep both candidates — their share thresholds are
+        // higher — and stay unasserted).
+        let drafter = zero_selector_drafter();
+        let anchor = vec![1.0f32, 0.0, 0.0, 0.0];
+        let mask = vec![0.0f32, 1.0, 1.0, 1.0];
+        let embed = |tok: u32| -> Vec<f32> {
+            if tok == 0 { anchor.clone() } else { mask.clone() }
+        };
+        let lg = crafted_logits();
+        let lm_head = |_rows: &[f32], _n: usize| -> Result<Vec<f32>, String> { Ok(lg.clone()) };
+        let mut disagreements = 0u32;
+        for seed in 0..200u64 {
+            let masked = drafter
+                .draft_block_keyed_masked(0, 100, &embed, &lm_head, seed, 0.6, None, Some(0.1))
+                .expect("masked");
+            assert_eq!(masked.chain[0].0, 5, "seed {seed}: row 0 must keep only its top-1");
+            assert!(
+                (masked.chain[0].1 - 1.0).abs() < 1e-6,
+                "single-survivor row confidence must be 1.0"
+            );
+            let keyed = drafter
+                .draft_block_keyed(0, 100, &embed, &lm_head, seed, 0.6)
+                .expect("keyed");
+            if keyed.chain[0].0 != 5 {
+                disagreements += 1;
+            }
+        }
+        assert!(
+            disagreements > 20,
+            "the mask must actually change picks on a real seed fraction: {disagreements}/200"
         );
     }
 
