@@ -1206,6 +1206,17 @@ the same commit (the D7 recipe). riir-ai's dead re-export dropped in
 the paired commit there (`6c6bf169b`). Clippy clean at
 cubecl_runtime + no-default postures; bench_663 target compiles.
 
+⛔ **Correction (2026-10-03): "zero callers anywhere" was false.** The grep
+covered riir-ai and riir-infer only. riir-train's `riir-train-engine` used
+`riir_gpu::gpu_transpose` behind the default-off `kimi_k3_gpu_backward`
+feature: the Phase 9h LM-head fast path in `kimi_k3_gpu_backward_sequence`,
+wired from `kimi_k3_train`. That feature stopped compiling on 09-28, and
+nothing noticed because no default build selects it. `transpose_cubecl.rs`
+isn't a drop-in there: that path writes into a raw `wgpu` slot buffer at an
+offset. The module + WGSL now live beside that consumer (riir-train
+`04bd961b`). The lesson for the D7 recipe: a dead-module grep has to cover
+every repo that path-depends on the crate, at `--all-features`.
+
 **Issue 023 — fence green.** The third file renamed
 (`cubecl_encoder_probe.rs`, `riir_weights` → `lane_weights`, the
 capture driver's convention; the two siblings landed earlier the same
