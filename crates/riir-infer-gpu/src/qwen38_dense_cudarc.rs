@@ -5141,6 +5141,32 @@ impl Qwen38DenseForward {
         Ok(())
     }
 
+    /// The LANES twin of [`Self::verify_reset_gdn`]: zero the per-lane GDN
+    /// arenas back to the construction state. `verify_reset_gdn` touches
+    /// only the solo request's state (`self.state` — lane mode is a separate
+    /// substrate), so a lanes caller that re-fills (the gates' determinism
+    /// arm; any multi-request server reuse) needs this to start each fill
+    /// from the same state the first one saw. Without it the second fill's
+    /// chunks evolve loop #1's end state and every downstream logit moves
+    /// (measured: G-lanes-determinism diverged at stream index 1, 4090
+    /// 2026-10-03, while the fill's own bonuses still matched — the
+    /// sample positions the assert reads are computed from the last row's
+    /// logits, which this reset's absence moved only off the committed
+    /// prefix; the loop's first chunk is where the divergence lands).
+    pub fn lanes_reset_gdn(&mut self) -> Result<(), String> {
+        let Some(ls) = self.lanes.as_ref() else {
+            return Err("lanes_reset_gdn: lanes not enabled".into());
+        };
+        let stream = &self.stream;
+        for r in ls.recurrent.iter() {
+            stream.memset_zeros(r).map_err(|e| e.to_string())?;
+        }
+        for c in ls.conv.iter() {
+            stream.memset_zeros(c).map_err(|e| e.to_string())?;
+        }
+        Ok(())
+    }
+
     /// Issue 755 T4 — allocate the per-GDN-layer replay journal (~82 MB at
     /// the dbirks dims: 44 layers × (16×10240 + 16×18432 + 2×16×48) f32).
     /// Call once before the first journaled chunk; idempotent. While enabled,
