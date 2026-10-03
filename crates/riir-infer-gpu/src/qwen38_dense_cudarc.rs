@@ -5154,14 +5154,14 @@ impl Qwen38DenseForward {
     /// logits, which this reset's absence moved only off the committed
     /// prefix; the loop's first chunk is where the divergence lands).
     pub fn lanes_reset_gdn(&mut self) -> Result<(), String> {
-        let Some(ls) = self.lanes.as_ref() else {
+        let Some(ls) = self.lanes.as_mut() else {
             return Err("lanes_reset_gdn: lanes not enabled".into());
         };
         let stream = &self.stream;
-        for r in ls.recurrent.iter() {
+        for r in ls.recurrent.iter_mut() {
             stream.memset_zeros(r).map_err(|e| e.to_string())?;
         }
-        for c in ls.conv.iter() {
+        for c in ls.conv.iter_mut() {
             stream.memset_zeros(c).map_err(|e| e.to_string())?;
         }
         Ok(())
