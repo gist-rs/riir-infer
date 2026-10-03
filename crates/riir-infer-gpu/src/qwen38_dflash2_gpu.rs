@@ -1394,7 +1394,6 @@ impl DFlash2GpuDrafter {
         DFlash2RingState::new(&self.stream, &self.cfg)
     }
 
-    impl DFlash2GpuDrafter {
     /// Exchange the CURRENT ring set with the caller's slot (a two-way
     /// `mem::swap`: after the call the drafter holds what was in `slot`
     /// and `slot` holds what the drafter held). No placeholder, no
@@ -1403,7 +1402,6 @@ impl DFlash2GpuDrafter {
     pub fn exchange_rings(&mut self, slot: &mut DFlash2RingState) {
         std::mem::swap(&mut self.rings, slot);
     }
-}
 
     /// Device bytes held by this drafter (weights + rings + scratch) —
     /// diagnostic/reporting helper.
