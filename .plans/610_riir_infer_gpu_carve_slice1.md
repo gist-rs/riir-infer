@@ -428,7 +428,7 @@ adjudication from the T2 table)
       pre-flight sync at session start does not cover a 100-minute
       execution window.
 
-- [ ] S4 — SEAM adjudications: `forward`'s adapter slots
+- [x] S4 — SEAM adjudications: `forward`'s adapter slots
       (moa/oft/oscpart/speft — strip or feature-forward), `lora/ia3` →
       moa edge, `ternary_deltanet_gpu_forward` → `training_activation_cache`
       un-cfg'd use (L179) — this one gates the T2.3 retarget of
@@ -439,6 +439,10 @@ adjudication from the T2 table)
       (`TernaryDeltanetGpuForward` now lives in riir-infer-gpu, re-exported
       at riir_gpu::). The engine-side `forward` adapter slots remain S6
       rider territory if the gemma cluster (S5) needs them.
+      (Checkbox flipped 2026-10-03 — substrate-first audit's defer-sweep
+      pass found the resolution recorded inline under an unchecked box;
+      downstream landing verified: riir-refine AGENTS.md §standalone
+      documents the landed T2.3 retarget, reflex Issue 008.)
 - [x] S5 — LANDED 2026-09-23 (the 4090 box; the gemma cluster unlock).
       `wall_config` re-homed to riir-infer-core (the module is the
       Issue-019-C.1 de-fork re-export of `katgpt_core::types::WallConfig`;
