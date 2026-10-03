@@ -248,6 +248,13 @@ pub fn run_keyed_spec_loop(
     } else {
         0.0
     };
+    // The final chunk can commit past `n_gen` (a full-block accept spanning
+    // the boundary — G1-keyed seed 0xa11ce measured 98 for n_gen 96, 4090
+    // 2026-10-03). The returned stream is exactly `n_gen`: the committed
+    // stream IS the serial keyed decode, so its first `n_gen` tokens are
+    // the serial decode's first `n_gen` — truncation is semantically exact,
+    // never a repair. `st.committed` keeps the raw count.
+    generated.truncate(n_gen);
     Ok((generated, st))
 }
 
@@ -501,6 +508,15 @@ pub fn run_keyed_spec_loop_lanes(
         } else {
             0.0
         };
+    }
+    // The doc'd overshoot: lanes finish on chunk boundaries while slower
+    // lanes keep cycling, and any lane's final chunk can commit past its
+    // own `n_gen`. Truncate per lane to the session's target (the same
+    // semantics as the solo loop — the committed stream IS the serial
+    // keyed decode, so the first `n_gen` tokens are exactly it;
+    // `committed` keeps the raw count).
+    for (l, g) in generated.iter_mut().enumerate() {
+        g.truncate(sessions[l].n_gen);
     }
     Ok(generated.into_iter().zip(st).collect())
 }
