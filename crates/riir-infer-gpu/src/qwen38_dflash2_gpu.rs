@@ -888,12 +888,12 @@ pub struct DFlash2GpuDrafter {
     hidden_norm: CudaSlice<f32>,
     output_norm: CudaSlice<f32>,
     layers: Vec<GpuLayer>,
-    // rings (device K/V + host occupancy, mirroring the CPU drafter)
-    ring_k: Vec<CudaSlice<f32>>,
-    ring_v: Vec<CudaSlice<f32>>,
-    ring_pos: VecDeque<usize>,
+    // rings — per-lane state (the Plan-614 Phase-2 weights/ring split):
+    // the shared weights/kernels/scratch stay on the drafter; each decode
+    // lane owns one [`DFlash2RingState`] and the keyed lanes loop swaps it
+    // in via [`Self::swap_rings`] around the lane's draft/inject calls.
+    rings: DFlash2RingState,
     rope_freqs: CudaSlice<f32>,
-    ring_pos_dev: CudaSlice<i32>,
     // draft scratch [8][dim] family
     x: CudaSlice<f32>,
     h: CudaSlice<f32>,
@@ -924,7 +924,61 @@ pub struct DFlash2GpuDrafter {
     inj_slots: CudaSlice<i32>,
     inj_x_host: Vec<f32>,
     inj_slots_host: Vec<i32>,
-    ring_pos_host: Vec<i32>,
+}
+
+/// One decode lane's drafter ring state — the per-SEQUENCE half of the GPU
+/// drafter (Plan 614 Phase 2's weights/ring split). The ~3.85 GB of weights,
+/// the kernels and the scratch stay on [`DFlash2GpuDrafter`] and are shared
+/// by every lane; a lane owns one of these and the keyed lanes loop
+/// (`qwen38_spec_cudarc::run_keyed_spec_loop_lanes`) swaps it in around the
+/// lane's draft/inject calls. n ring sets cost `n × swa·kvd·n_layer·8B` —
+/// trivial against the weights, which is the whole point of the split (two
+/// full drafters would not fit beside the 16.8 GB target).
+pub struct DFlash2RingState {
+    pub(crate) ring_k: Vec<CudaSlice<f32>>,
+    pub(crate) ring_v: Vec<CudaSlice<f32>>,
+    pub(crate) ring_pos: VecDeque<usize>,
+    pub(crate) ring_pos_dev: CudaSlice<i32>,
+    pub(crate) ring_pos_host: Vec<i32>,
+}
+
+impl DFlash2RingState {
+    /// Allocate a fresh (empty-occupancy) ring set on `stream`. Same
+    /// construction as the constructor's own set — a set is interchangeable
+    /// with any other built from the same `cfg`.
+    pub fn new(stream: &Arc<CudaStream>, cfg: &DFlash2Config) -> Result<Self, String> {
+        let swa = cfg.sliding_window;
+        let n_kv = cfg.n_kv_head * cfg.head_dim;
+        let mut ring_k = Vec::with_capacity(cfg.n_layer);
+        let mut ring_v = Vec::with_capacity(cfg.n_layer);
+        for _ in 0..cfg.n_layer {
+            ring_k.push(
+                stream
+                    .alloc_zeros::<f32>(swa * n_kv)
+                    .map_err(|er| format!("ring_k alloc: {er}"))?,
+            );
+            ring_v.push(
+                stream
+                    .alloc_zeros::<f32>(swa * n_kv)
+                    .map_err(|er| format!("ring_v alloc: {er}"))?,
+            );
+        }
+        let mut ring_pos_dev = stream
+            .alloc_zeros::<i32>(swa)
+            .map_err(|er| format!("ring_pos alloc: {er}"))?;
+        // -1 = empty (the kernel skips rp < 0).
+        let pad = vec![-1i32; swa];
+        stream
+            .memcpy_htod(&pad, &mut ring_pos_dev)
+            .map_err(|er| format!("ring_pos init: {er}"))?;
+        Ok(Self {
+            ring_k,
+            ring_v,
+            ring_pos: VecDeque::with_capacity(swa + DFLASH2_TILE),
+            ring_pos_dev,
+            ring_pos_host: Vec::with_capacity(swa),
+        })
+    }
 }
 
 impl DFlash2GpuDrafter {
@@ -1219,23 +1273,7 @@ impl DFlash2GpuDrafter {
         let kvd = cfg.n_kv_head * cfg.head_dim;
         let inp = 5 * e;
 
-        // Rings + rope freqs.
-        let swa = cfg.sliding_window;
-        let n_kv = cfg.n_kv_head * cfg.head_dim;
-        let mut ring_k = Vec::with_capacity(cfg.n_layer);
-        let mut ring_v = Vec::with_capacity(cfg.n_layer);
-        for _ in 0..cfg.n_layer {
-            ring_k.push(
-                stream
-                    .alloc_zeros::<f32>(swa * n_kv)
-                    .map_err(|er| format!("ring_k alloc: {er}"))?,
-            );
-            ring_v.push(
-                stream
-                    .alloc_zeros::<f32>(swa * n_kv)
-                    .map_err(|er| format!("ring_v alloc: {er}"))?,
-            );
-        }
+        // Rings (the shared constructor set) + rope freqs.
         let mut rope_freqs_host = vec![0.0f32; cfg.head_dim / 2];
         for (i, fr) in rope_freqs_host.iter_mut().enumerate() {
             *fr = cfg.rope_theta.powf(-(2.0 * i as f32) / cfg.head_dim as f32);
@@ -1246,14 +1284,7 @@ impl DFlash2GpuDrafter {
         stream
             .memcpy_htod(&rope_freqs_host, &mut rope_freqs)
             .map_err(|er| format!("rope upload: {er}"))?;
-        let mut ring_pos_dev = stream
-            .alloc_zeros::<i32>(swa)
-            .map_err(|er| format!("ring_pos alloc: {er}"))?;
-        // -1 = empty (the kernel skips rp < 0).
-        let pad = vec![-1i32; swa];
-        stream
-            .memcpy_htod(&pad, &mut ring_pos_dev)
-            .map_err(|er| format!("ring_pos init: {er}"))?;
+        let rings = DFlash2RingState::new(&stream, &cfg)?;
 
         // Scratch.
         let bs = cfg.block_size;
@@ -1317,11 +1348,8 @@ impl DFlash2GpuDrafter {
             hidden_norm,
             output_norm,
             layers,
-            ring_k,
-            ring_v,
-            ring_pos: VecDeque::with_capacity(swa + DFLASH2_TILE),
+            rings,
             rope_freqs,
-            ring_pos_dev,
             x,
             h,
             hc,
@@ -1350,15 +1378,32 @@ impl DFlash2GpuDrafter {
             inj_slots,
             inj_x_host: vec![0.0f32; DFLASH2_TILE * inp],
             inj_slots_host,
-            ring_pos_host: Vec::with_capacity(swa),
         })
     }
 
-    /// Reset the ring for a fresh sequence (occupancy only — slots are
-    /// rewritten on injection; mirrors the CPU `reset_ring`).
+    /// Reset the CURRENT ring set for a fresh sequence (occupancy only —
+    /// slots are rewritten on injection; mirrors the CPU `reset_ring`).
     pub fn reset_ring(&mut self) {
-        self.ring_pos.clear();
+        self.rings.ring_pos.clear();
     }
+
+    /// Allocate ANOTHER ring set for an additional decode lane (Plan 614
+    /// Phase 2's weights/ring split — the drafter is the shared resource,
+    /// one [`DFlash2RingState`] per lane).
+    pub fn new_rings(&self) -> Result<DFlash2RingState, String> {
+        DFlash2RingState::new(&self.stream, &self.cfg)
+    }
+
+    impl DFlash2GpuDrafter {
+    /// Exchange the CURRENT ring set with the caller's slot (a two-way
+    /// `mem::swap`: after the call the drafter holds what was in `slot`
+    /// and `slot` holds what the drafter held). No placeholder, no
+    /// allocation — the keyed lanes loop brackets every lane's draft/inject
+    /// with a pair of these.
+    pub fn exchange_rings(&mut self, slot: &mut DFlash2RingState) {
+        std::mem::swap(&mut self.rings, slot);
+    }
+}
 
     /// Device bytes held by this drafter (weights + rings + scratch) —
     /// diagnostic/reporting helper.
@@ -1396,7 +1441,7 @@ impl DFlash2GpuDrafter {
                 + l.attn_conv_base.len() * 4
                 + l.ffn_conv_base.len() * 4;
         }
-        let rings = self.ring_k.len() * self.ring_k[0].len() * 4 * 2;
+        let rings = self.rings.ring_k.len() * self.rings.ring_k[0].len() * 4 * 2;
         let scratch = (self.x.len()
             + self.h.len()
             + self.hc.len()
@@ -1425,32 +1470,34 @@ impl DFlash2GpuDrafter {
                 + self.inj_v.len())
                 * 4
             + self.inj_slots.len() * 4
-            + self.ring_pos_dev.len() * 4
+            + self.rings.ring_pos_dev.len() * 4
             + self.rope_freqs.len() * 4;
         let _ = (ff, qd, projected, bs, kvd);
         gemm + rings + scratch
     }
 
-    /// Download one layer's K/V ring (test/diagnostic accessor — the G1
-    /// batch-vs-single parity gate reads the ring bits back).
+    /// Download one layer's K/V ring of the CURRENT ring set (test/diagnostic
+    /// accessor — the G1 batch-vs-single parity gate reads the ring bits
+    /// back; for a specific lane, swap that lane's set in first).
     pub fn download_ring(&self, li: usize) -> Result<(Vec<f32>, Vec<f32>), String> {
-        if li >= self.ring_k.len() {
+        if li >= self.rings.ring_k.len() {
             return Err(format!("ring layer {li} out of range"));
         }
-        let mut k = vec![0.0f32; self.ring_k[li].len()];
+        let mut k = vec![0.0f32; self.rings.ring_k[li].len()];
         self.stream
-            .memcpy_dtoh(&self.ring_k[li], &mut k)
+            .memcpy_dtoh(&self.rings.ring_k[li], &mut k)
             .map_err(|e| e.to_string())?;
-        let mut v = vec![0.0f32; self.ring_v[li].len()];
+        let mut v = vec![0.0f32; self.rings.ring_v[li].len()];
         self.stream
-            .memcpy_dtoh(&self.ring_v[li], &mut v)
+            .memcpy_dtoh(&self.rings.ring_v[li], &mut v)
             .map_err(|e| e.to_string())?;
         Ok((k, v))
     }
 
-    /// Ring occupancy (host-side truth, mirroring the CPU drafter).
+    /// Ring occupancy of the CURRENT ring set (host-side truth, mirroring
+    /// the CPU drafter).
     pub fn ring_positions(&self) -> Vec<usize> {
-        self.ring_pos.iter().copied().collect()
+        self.rings.ring_pos.iter().copied().collect()
     }
 
     // ── launch helpers ──
@@ -1637,9 +1684,9 @@ impl DFlash2GpuDrafter {
                 .arg(&self.q)
                 .arg(&self.k)
                 .arg(&self.v)
-                .arg(&self.ring_k[li])
-                .arg(&self.ring_v[li])
-                .arg(&self.ring_pos_dev)
+                .arg(&self.rings.ring_k[li])
+                .arg(&self.rings.ring_v[li])
+                .arg(&self.rings.ring_pos_dev)
                 .arg(&nr)
                 .arg(&ap)
                 .arg(&swa)
@@ -1762,10 +1809,10 @@ impl DFlash2GpuDrafter {
                 cfg.sliding_window
             ));
         }
-        if self.ring_pos.back() >= Some(&base_pos) {
+        if self.rings.ring_pos.back() >= Some(&base_pos) {
             return Err(format!(
                 "inject: pos {base_pos} not beyond ring back {:?} (must ascend)",
-                self.ring_pos.back()
+                self.rings.ring_pos.back()
             ));
         }
         let kvd = cfg.n_kv_head * cfg.head_dim;
@@ -1820,7 +1867,7 @@ impl DFlash2GpuDrafter {
                 unsafe {
                     self.stream
                         .launch_builder(&self.scatter)
-                        .arg(&self.ring_k[li])
+                        .arg(&self.rings.ring_k[li])
                         .arg(&self.inj_k)
                         .arg(&self.inj_slots)
                         .arg(&rows_i)
@@ -1833,7 +1880,7 @@ impl DFlash2GpuDrafter {
                         .map_err(|er| er.to_string())?;
                     self.stream
                         .launch_builder(&self.scatter)
-                        .arg(&self.ring_v[li])
+                        .arg(&self.rings.ring_v[li])
                         .arg(&self.inj_v)
                         .arg(&self.inj_slots)
                         .arg(&rows_i)
@@ -1850,10 +1897,10 @@ impl DFlash2GpuDrafter {
 
         // host occupancy (mirrors the CPU's per-position pop/push)
         for r in 0..n {
-            if self.ring_pos.len() == cfg.sliding_window {
-                self.ring_pos.pop_front();
+            if self.rings.ring_pos.len() == cfg.sliding_window {
+                self.rings.ring_pos.pop_front();
             }
-            self.ring_pos.push_back(base_pos + r);
+            self.rings.ring_pos.push_back(base_pos + r);
         }
         Ok(())
     }
@@ -1896,13 +1943,13 @@ impl DFlash2GpuDrafter {
             .map_err(|er| format!("x upload: {er}"))?;
 
         // ring position list upload (pad -1 to the full slot count)
-        self.ring_pos_host.clear();
-        self.ring_pos_host
-            .extend(self.ring_pos.iter().map(|&p| p as i32));
-        self.ring_pos_host.resize(cfg.sliding_window, -1);
-        let n_ring = self.ring_pos.len();
+        self.rings.ring_pos_host.clear();
+        self.rings.ring_pos_host
+            .extend(self.rings.ring_pos.iter().map(|&p| p as i32));
+        self.rings.ring_pos_host.resize(cfg.sliding_window, -1);
+        let n_ring = self.rings.ring_pos.len();
         self.stream
-            .memcpy_htod(&self.ring_pos_host, &mut self.ring_pos_dev)
+            .memcpy_htod(&self.rings.ring_pos_host, &mut self.rings.ring_pos_dev)
             .map_err(|er| format!("ring_pos upload: {er}"))?;
 
         for li in 0..cfg.n_layer {

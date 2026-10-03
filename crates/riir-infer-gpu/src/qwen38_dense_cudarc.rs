@@ -6053,6 +6053,58 @@ impl Qwen38DenseForward {
         tokens: &[Vec<u32>],
         base_positions: &[usize],
     ) -> Result<Vec<Vec<u32>>, String> {
+        self.forward_lanes_verify_inner(tokens, base_positions, false)
+    }
+
+    /// Plan 614 Phase 2 — the keyed lanes-verify twin: the lane chunk
+    /// VERBATIM plus (a) the DFlash2 tap copies at every
+    /// [`QWEN38_DFLASH2_TAP_LAYERS`] boundary (the same observers the solo
+    /// chunk runs — they read `verify.xb` at the post-layer boundary, write
+    /// only the tap buffer, so the argmax/logits outputs are bit-identical
+    /// with taps on) and (b) the per-row logits download after the chunk's
+    /// own argmax sync (the same liveness coupling
+    /// [`Self::forward_verify_chunk_taps_logits`] relies on —
+    /// `verify.logits` still holds this chunk's `[n·k][vocab]` rows).
+    ///
+    /// EAGER-only like its solo twin (the graphed entry's captured sequence
+    /// has no tap copies — a tap-carrying capture would need its own graph
+    /// key). Tap rows beyond a lane's accepted prefix are STALE after a
+    /// rewind (the rejected rows wrote them) — the caller downloads only
+    /// accepted rows, and the next chunk rewrites every row it uses.
+    pub fn forward_lanes_verify_taps_logits(
+        &mut self,
+        tokens: &[Vec<u32>],
+        base_positions: &[usize],
+    ) -> Result<(Vec<Vec<u32>>, Vec<f32>), String> {
+        if self.verify_taps_dev.is_none() {
+            return Err(
+                "forward_lanes_verify_taps_logits: call enable_verify_taps() first".to_string(),
+            );
+        }
+        let argmaxes = self.forward_lanes_verify_inner(tokens, base_positions, true)?;
+        let p: usize = tokens.iter().map(|t| t.len()).sum();
+        let vocab = self.cfg.vocab_size;
+        let view = self.verify.logits.slice(0..p * vocab);
+        let logits = self
+            .stream
+            .clone_dtoh(&view)
+            .map_err(|e| format!("verify logits dtoh: {e}"))?;
+        Ok((argmaxes, logits))
+    }
+
+    /// The shared lanes-verify body (`taps` gates the Issue-755 tap copies;
+    /// the copies mirror [`Self::verify_chunk_eager`]'s placement — fused
+    /// arm: after the site-B fused boundary / the plain last-layer add;
+    /// plain arm: right after `verify_mlp`'s trailing residual add). The
+    /// solo and lanes bodies are VERBATIM structurally: whatever residual
+    /// value `verify.xb` holds at a tap slot in one holds in the other.
+    #[allow(clippy::too_many_lines)]
+    fn forward_lanes_verify_inner(
+        &mut self,
+        tokens: &[Vec<u32>],
+        base_positions: &[usize],
+        taps: bool,
+    ) -> Result<Vec<Vec<u32>>, String> {
         // ── H: validate EVERYTHING before the first mutation ──
         let (n, _lane_ctx, k, p) =
             self.lanes_verify_precheck(tokens, base_positions, "forward_lanes_verify")?;
@@ -6152,6 +6204,15 @@ impl Qwen38DenseForward {
                         )
                         .map_err(|e| e.to_string())?;
                 }
+                // VERBATIM the solo fused arm's tap slot: after site B (the
+                // fused boundary wrote `xb = xb_res + y` — the post-MLP
+                // residual) or the plain last-layer add.
+                if let Some(k) = dflash2_tap_slot(i).filter(|_| taps) {
+                    let Some(taps_buf) = self.verify_taps_dev.as_mut() else {
+                        return Err("verify tap copy: taps not enabled".to_string());
+                    };
+                    Self::verify_tap_copy(&self.stream, &self.verify.xb, taps_buf, n_embd, k, p)?;
+                }
             }
         } else {
             for i in 0..cfg.n_layer {
@@ -6176,6 +6237,15 @@ impl Qwen38DenseForward {
                 }
                 self.copy_f32(&self.verify.xb, &self.verify.xb_res, n_embd * p)?;
                 self.verify_mlp(i, p)?;
+                // VERBATIM the solo plain arm's tap slot: `v.xb` holds the
+                // raw post-layer residual the instant verify_mlp's trailing
+                // residual_add lands.
+                if let Some(k) = dflash2_tap_slot(i).filter(|_| taps) {
+                    let Some(taps_buf) = self.verify_taps_dev.as_mut() else {
+                        return Err("verify tap copy: taps not enabled".to_string());
+                    };
+                    Self::verify_tap_copy(&self.stream, &self.verify.xb, taps_buf, n_embd, k, p)?;
+                }
             }
         }
         // Final norm + lm_head + per-row argmax (verbatim the chunk tail).

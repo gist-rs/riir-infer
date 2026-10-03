@@ -27,7 +27,7 @@
 #![cfg(all(feature = "qwen38_spec", not(target_os = "macos")))]
 
 use crate::qwen38_dflash2::DFlash2Drafter;
-use crate::qwen38_dflash2_gpu::DFlash2GpuDrafter;
+use crate::qwen38_dflash2_gpu::{DFlash2GpuDrafter, DFlash2RingState};
 use crate::qwen38_dense_cudarc::{Qwen38DenseForward, QWEN38_DFLASH2_TAP_LAYERS};
 use crate::qwen38_spec::{keyed_accept, KeyedVerifyPosture};
 use std::time::Instant;
@@ -251,7 +251,259 @@ pub fn run_keyed_spec_loop(
     Ok((generated, st))
 }
 
-/// The serial keyed reference — the lossless oracle: decode one token at a
+/// One decode lane's keyed session (the per-lane slice of
+/// [`run_keyed_spec_loop_lanes`]): the anchor's start position, the
+/// unforwarded bonus token after the lane's prompt, the lane's own
+/// generation target, and the lane's OWN stream seed (the keyed walk and
+/// the acceptance verdict both sample `(seed, position, token)` — lanes
+/// sharing a seed and position would draft identical chains; per-lane seeds
+/// keep the proposals independent while the acceptance contract keeps the
+/// committed stream lossless either way). The lane's prompt must ALREADY be
+/// in the target's lane state (KV + GDN) — the caller fills it; the drafter
+/// ring the lane will use starts from whatever the caller injected (an
+/// empty ring is a valid, tested posture — the ring shapes proposals, never
+/// the stream).
+#[derive(Debug, Clone, Copy)]
+pub struct LaneKeyedSession {
+    pub prompt_len: usize,
+    pub first: u32,
+    pub n_gen: usize,
+    pub seed: u64,
+}
+
+/// The keyed spec loop over N decode lanes — the multi-lane composition of
+/// [`run_keyed_spec_loop`] (Plan 614 Phase 2's open increment).
+///
+/// Per cycle, each lane drafts from its OWN pending/position/ring/seed (the
+/// rings exchange through [`DFlash2GpuDrafter::exchange_rings`] — the
+/// weights, kernels and scratch stay shared), the uniform window (pending +
+/// the full block chain, `k = block_size` per lane) feeds ONE
+/// `forward_lanes_verify_taps_logits` chunk (n·k packed rows,
+/// row-invariant), every lane's acceptance runs on its OWN real rows only,
+/// [`Qwen38DenseForward::lanes_commit`] applies the per-lane partial
+/// accepts (rollback + journal replay inside), and each lane's accepted
+/// tap rows inject into that lane's ring.
+///
+/// THE CONTRACT (the reason this composition is safe): the committed
+/// stream is the serial keyed decode PER LANE by the same construction the
+/// solo loop is — keyed acceptance filters whatever the drafter proposes,
+/// so ring contents and cross-lane independence shape the COST, never the
+/// stream. The 4090 G-lanes gate pins lane-vs-solo byte-identity.
+///
+/// `p_min` must be `None`: the chain is the full block on every lane (the
+/// packing rule wants uniform `k`; a per-lane p-min cut would give uneven
+/// chain lengths and right-padding waste — a future increment if the
+/// gate ever earns it). Lanes overshoot their `n_gen` while slower lanes
+/// finish — the overshoot is truncated from the returned streams.
+///
+/// `rings` is one [`DFlash2RingState`] per lane, caller-allocated (the
+/// first can be the constructor's own set; extras via
+/// [`DFlash2GpuDrafter::new_rings`]); after the call each slot holds the
+/// same set it held before (the exchange is bracketed). Returns one
+/// (stream, stats) pair per lane, in lane order; the per-cycle timings are
+/// the SHARED phase costs (the draft phase serializes the lanes' walks, so
+/// every lane's `draft_ms` sees the whole phase — the honest number for a
+/// shared-GPU composition).
+///
+/// # Errors
+/// Propagates GPU errors verbatim; per-lane wiring (rings count, `p_min`)
+/// errors loudly before the first cycle.
+#[allow(clippy::too_many_lines)]
+pub fn run_keyed_spec_loop_lanes(
+    gpu: &mut Qwen38DenseForward,
+    drafter_gpu: &mut DFlash2GpuDrafter,
+    cpu: &DFlash2Drafter,
+    mask_emb: &[f32],
+    cfg: &KeyedSpecConfig,
+    sessions: &[LaneKeyedSession],
+    rings: &mut [DFlash2RingState],
+) -> Result<Vec<(Vec<u32>, KeyedLoopStats)>, String> {
+    let e = cpu.cfg.n_embd;
+    let bs = cpu.cfg.block_size;
+    let vocab = gpu.cfg.vocab_size;
+    let posture = &cfg.posture;
+    let n = sessions.len();
+    if rings.len() != n {
+        return Err(format!(
+            "lanes keyed loop: rings.len() {} != sessions.len() {n}",
+            rings.len()
+        ));
+    }
+    if cfg.p_min.is_some() {
+        return Err(
+            "lanes keyed loop: p_min must be None (uniform full-block chains; \
+             a per-lane cut would right-pad the packed verify window)"
+                .to_string(),
+        );
+    }
+    if n == 0 {
+        return Err("lanes keyed loop: at least one lane".to_string());
+    }
+    // The per-lane sampler: the shared posture's truncation + the lane's
+    // own stream seed (the walk and the acceptance must sample the SAME
+    // stream — the solo loop's single-posture property, per lane).
+    let lane_posture: Vec<KeyedVerifyPosture> = sessions
+        .iter()
+        .map(|s| KeyedVerifyPosture {
+            temperature: posture.temperature,
+            top_k: posture.top_k,
+            top_p: posture.top_p,
+            seed: s.seed,
+        })
+        .collect();
+    let mut pending: Vec<u32> = sessions.iter().map(|s| s.first).collect();
+    let mut pos: Vec<usize> = sessions.iter().map(|s| s.prompt_len).collect();
+    let mut generated: Vec<Vec<u32>> = sessions.iter().map(|s| vec![s.first]).collect();
+    let mut st: Vec<KeyedLoopStats> = (0..n)
+        .map(|_| KeyedLoopStats {
+            hist: vec![0usize; bs + 2],
+            ..Default::default()
+        })
+        .collect();
+    let t_loop = Instant::now();
+    loop {
+        if (0..n).all(|l| generated[l].len() >= sessions[l].n_gen) {
+            break;
+        }
+        // ── draft per lane (rings exchange in/out; weights stay shared) ──
+        let t = Instant::now();
+        let mut drafts: Vec<Vec<u32>> = Vec::with_capacity(n);
+        let mut k_max = 1usize;
+        for l in 0..n {
+            drafter_gpu.exchange_rings(&mut rings[l]);
+            let emb = gpu.embed_rows_host(&[pending[l]])?;
+            let hidden = drafter_gpu.draft_block_hidden_gpu(&emb[..e], mask_emb, pos[l])?;
+            let rows_n: Vec<f32> = hidden[e..bs * e].to_vec();
+            let logits_n = gpu.lm_head_rows_batched(&rows_n, bs - 1)?;
+            let walk = if posture.is_greedy() {
+                cpu.lattice_walk(pending[l], &hidden, &logits_n)
+            } else if cfg.draft_top_k.is_some() || cfg.draft_top_p.is_some() {
+                cpu.lattice_walk_keyed_masked(
+                    pending[l],
+                    &hidden,
+                    &logits_n,
+                    lane_posture[l].seed,
+                    pos[l],
+                    lane_posture[l].temperature,
+                    cfg.draft_top_k,
+                    cfg.draft_top_p,
+                )
+            } else {
+                cpu.lattice_walk_keyed(
+                    pending[l],
+                    &hidden,
+                    &logits_n,
+                    lane_posture[l].seed,
+                    pos[l],
+                    lane_posture[l].temperature,
+                )
+            };
+            let mut draft: Vec<u32> = Vec::with_capacity(1 + walk.chain.len());
+            draft.push(pending[l]);
+            draft.extend(walk.chain.iter().map(|&(t, _)| t));
+            k_max = k_max.max(draft.len());
+            drafts.push(draft);
+            drafter_gpu.exchange_rings(&mut rings[l]);
+        }
+        let draft_ms = t.elapsed().as_secs_f64() * 1e3;
+        // ── pad to the uniform window (the packing rule; a no-op at the
+        //       full-block chain every arm produces) ──
+        let real_p: Vec<usize> = drafts.iter().map(|d| d.len()).collect();
+        for draft in drafts.iter_mut() {
+            // The lane's own pending again — padded rows are computed and
+            // discarded, never sampled (the acceptance reads only the
+            // lane's real rows below).
+            let last = *draft.last().expect("draft carries its pending");
+            draft.resize(k_max, last);
+        }
+
+        // ── verify (ONE packed chunk) + per-lane keyed acceptance ──
+        let t = Instant::now();
+        let (am, logits_flat) = gpu.forward_lanes_verify_taps_logits(&drafts, &pos)?;
+        let mut accepted = vec![0usize; n];
+        let mut bonuses = vec![0u32; n];
+        for l in 0..n {
+            let p_l = real_p[l];
+            let slice = &logits_flat[(l * k_max) * vocab..(l * k_max + p_l) * vocab];
+            let acc = keyed_accept(
+                &lane_posture[l],
+                slice,
+                vocab,
+                &drafts[l][1..p_l],
+                pos[l],
+            );
+            accepted[l] = acc.j;
+            bonuses[l] = acc.bonus;
+            let s = &mut st[l];
+            s.hist[acc.j] += 1;
+            s.n_chunks += 1;
+            if p_l == 1 {
+                s.n_nodraft += 1;
+            } else if acc.j == p_l {
+                s.n_full += 1;
+            } else {
+                s.n_rewind += 1;
+                if acc.j == 1 {
+                    s.n_correction += 1;
+                }
+            }
+            // The greedy-posture cross-check (the solo loop's, per lane).
+            if lane_posture[l].is_greedy() {
+                debug_assert_eq!(
+                    acc.bonus, am[l][acc.j - 1],
+                    "greedy posture: lane {l} keyed bonus {} != chunk argmax {} at pos {}",
+                    acc.bonus, am[l][acc.j - 1], pos[l]
+                );
+            }
+        }
+        let verify_ms = t.elapsed().as_secs_f64() * 1e3;
+
+        // ── commit (per-lane partial accepts: rollback + journal replay
+        //       inside for every lane below the full window) ──
+        gpu.lanes_commit(&accepted)?;
+
+        // ── inject the accepted prefix's taps into each lane's ring ──
+        // (VERBATIM the solo ordering: after the commit, whose
+        // rollback/replay never touches the tap buffer; rows l·k .. l·k+j
+        // are positions pos_l .. pos_l+j−1, the committed prefix.)
+        let t = Instant::now();
+        let taps_all = gpu.verify_taps_download(n * k_max)?;
+        let inp = taps_all.len() / (n * k_max);
+        for l in 0..n {
+            let j = accepted[l];
+            let taps_l = &taps_all[(l * k_max) * inp..(l * k_max + j) * inp];
+            drafter_gpu.exchange_rings(&mut rings[l]);
+            drafter_gpu.inject_positions(taps_l, pos[l])?;
+            drafter_gpu.exchange_rings(&mut rings[l]);
+        }
+        let inject_ms = t.elapsed().as_secs_f64() * 1e3;
+        for s in st.iter_mut() {
+            s.draft_ms.push(draft_ms);
+            s.verify_ms.push(verify_ms);
+            s.inject_ms.push(inject_ms);
+        }
+
+        // ── advance every lane ──
+        for l in 0..n {
+            let j = accepted[l];
+            generated[l].extend_from_slice(&drafts[l][1..j]);
+            generated[l].push(bonuses[l]);
+            pos[l] += j;
+            pending[l] = bonuses[l];
+        }
+    }
+    for (l, s) in st.iter_mut().enumerate() {
+        s.wall_s = t_loop.elapsed().as_secs_f64();
+        s.committed = generated[l].len();
+        s.mean_j = if s.n_chunks > 0 {
+            s.hist.iter().enumerate().map(|(j, &c)| j * c).sum::<usize>() as f64
+                / s.n_chunks as f64
+        } else {
+            0.0
+        };
+    }
+    Ok(generated.into_iter().zip(st).collect())
+}
 /// time, sampling EVERY position with the posture's truncated keyed
 /// sampler (the argmax-only forward throws away the row the sampler
 /// needs, so this rides the logits twin). Also collects the per-position
