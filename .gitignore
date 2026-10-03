@@ -3,7 +3,6 @@
 /target-rel
 /target-twt
 /.benchmarks/012_kv_table_residual.bin
-/.heal
 /.raw
 
 # Agent-instructions symlink (CLAUDE.md -> AGENTS.md), local only
