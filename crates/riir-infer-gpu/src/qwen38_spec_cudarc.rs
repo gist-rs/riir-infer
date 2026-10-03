@@ -65,9 +65,13 @@ pub struct KeyedLoopStats {
     pub n_full: usize,
     /// Cycles rewinding (j < p).
     pub n_rewind: usize,
-    /// Cycles where j == 1 — the correction path (the stream's own token
-    /// committed; nothing drafted survived).
+    /// Cycles where a DRAFTED chain head was rejected (j == 1 with p > 1
+    /// — the stream's own token committed as the correction).
     pub n_correction: usize,
+    /// Cycles with NO draft at all (p == 1 — the p-min gate cut the chain
+    /// to zero, or the caller ran the 1-token posture). Nothing was
+    /// rejected; the cycle is a serial step through the chunk path.
+    pub n_nodraft: usize,
     pub wall_s: f64,
     pub draft_ms: Vec<f64>,
     pub verify_ms: Vec<f64>,
@@ -161,7 +165,11 @@ pub fn run_keyed_spec_loop(
         let j = acc.j;
         st.hist[j] += 1;
         st.n_chunks += 1;
-        if j == p {
+        if p == 1 {
+            // No draft existed to accept or reject — a serial step through
+            // the chunk path (the p-min gate cut the chain to zero).
+            st.n_nodraft += 1;
+        } else if j == p {
             st.n_full += 1;
         } else {
             st.n_rewind += 1;
@@ -187,8 +195,12 @@ pub fn run_keyed_spec_loop(
 
         // The greedy-posture cross-check: at T<=0 the keyed sampler IS the
         // argmax over survivors, which equals the chunk argmax whenever the
-        // raw argmax is inside the (trivial, unfiltered) nucleus. A
-        // divergence here is a sampler bug, surfaced loudly in debug.
+        // raw argmax is inside the (trivial, unfiltered) nucleus. Premise,
+        // stated: this holds when the GPU argmax's tie-break matches the
+        // CPU sampler's first-index rule (the Issue-697 packed reduction is
+        // first-index by contract). DEBUG-ONLY — the release gate never
+        // runs it; the real greedy identity gate is G1-greedy in the
+        // plan614_phase2_spec_gates harness.
         if posture.is_greedy() {
             debug_assert_eq!(
                 acc.bonus, am[j - 1],

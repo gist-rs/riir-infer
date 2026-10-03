@@ -203,7 +203,6 @@ mod tests {
     struct FakeDrafter {
         model: FakeModel,
         quality: f32,
-        top_k: usize,
     }
 
     impl FakeDrafter {
@@ -251,19 +250,15 @@ mod tests {
         // `generated = vec![first]` shape: the pending is a real stream
         // token, committed by definition before any cycle runs).
         let mut ctx = prompt.to_vec();
-        let mut bonus_logits = model.logits(&ctx);
+        let bonus_logits = model.logits(&ctx);
         let first = posture.sample_row(&bonus_logits, prompt.len());
         let mut stream: Vec<u32> = vec![first];
         let mut js: Vec<usize> = Vec::new();
         let mut pos = prompt.len();
         while stream.len() < steps {
-            // Draft (pending = the stream's token at pos, from bonus_logits
-            // when the stream is behind — mirroring the loop's `pending`).
-            let pending = if stream.is_empty() {
-                posture.sample_row(&bonus_logits, pos)
-            } else {
-                *stream.last().expect("non-empty")
-            };
+            // Draft (pending = the stream's token at pos — always present:
+            // the stream is seeded with the first pending before the loop).
+            let pending = *stream.last().expect("seeded stream");
             let mut chain_ctx = ctx.clone();
             chain_ctx.push(pending);
             let chain = drafter.chain(&chain_ctx, pos, posture, block - 1);
@@ -297,7 +292,6 @@ mod tests {
             stream.push(acc.bonus);
             js.push(acc.j);
             pos += acc.j;
-            bonus_logits = rows[acc.j - 1].clone();
         }
         stream.truncate(steps);
         (stream, js)
@@ -423,7 +417,6 @@ mod tests {
             let drafter = FakeDrafter {
                 model: FakeModel { vocab: 64 },
                 quality,
-                top_k: 8,
             };
             let (stream, js) = spec_stream(&model, &drafter, &posture, &prompt, 60, 5);
             let serial = serial_stream(&model, &posture, &prompt, 60);
