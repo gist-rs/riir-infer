@@ -485,7 +485,11 @@ fn main() -> Result<()> {
         eval_start + eval_n
     );
 
-    config.block_size = seq_len + 64;
+    // The G2 prefill rides the same cache — the block must hold
+    // (tg_prefill + BOS + tg_decode) positions, else the timing loop writes
+    // past the allocation (the 0xC0000005 class: the Bench-016 cells died at
+    // exactly one position over when block_size followed seq_len alone).
+    config.block_size = seq_len.max(tg_prefill + tg_decode + 8) + 64;
     let kvd = kv_dim(&config);
     let n_layers = config.n_layer;
     let corpus_per_chunk = seq_len - 1;
