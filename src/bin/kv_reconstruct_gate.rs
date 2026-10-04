@@ -369,7 +369,7 @@ fn main() -> Result<()> {
         eprintln!(
             "usage: kv_reconstruct_gate <gguf> <corpus> [--table PATH] [--eval-tokens N] \
              [--seq-len N] [--lambdas 0,0.5,1] [--tg-pairs R] [--tg-prefill N] \
-             [--tg-decode N] [--report PATH] [--box-note S] [--smoke]"
+             [--tg-decode N] [--report PATH] [--box-note S] [--skip-g1] [--smoke]"
         );
         std::process::exit(2);
     }
@@ -383,6 +383,7 @@ fn main() -> Result<()> {
     let (mut tg_pairs, mut tg_prefill, mut tg_decode) = if smoke { (2, 64, 16) } else { (12, 128, 64) };
     let mut report_path: Option<PathBuf> = None;
     let mut box_note = String::from("4090 workstation i7-13700K, CPU lane, AC");
+    let mut skip_g1 = false;
     let mut i = 3;
     while i < args.len() {
         match args[i].as_str() {
@@ -427,6 +428,10 @@ fn main() -> Result<()> {
             "--box-note" => {
                 box_note = args[i + 1].clone();
                 i += 2;
+            }
+            "--skip-g1" => {
+                skip_g1 = true;
+                i += 1;
             }
             "--smoke" => i += 1,
             other => bail!("unknown arg {other}"),
@@ -638,6 +643,18 @@ fn main() -> Result<()> {
     let mut g1_pass = true;
     let mut walk = Walk::new();
     let mut walk_done = false;
+    if skip_g1 {
+        // The G2-scaling posture (--skip-g1): the G1 record lives in Bench
+        // 013 (this repo) — this run measures the read-path scaling axis
+        // only. The eval slice still allocates one chunk so the corpus
+        // geometry (block_size, n_chunks) stays well-formed.
+        g1_rows.clear();
+        g1_rows.push_str(
+            "## P2 — G1 paired store-vs-reconstruct\n\n\
+             SKIPPED (--skip-g1): the G1 record is Bench 013's (T3, seq 1024, \
+             0 flips at every λ); this run measures the G2 scaling axis only.  \n\n",
+        );
+    } else
     // The f16 base (context for the recorded tax; the pairing base is the
     // store arm at the same λ).
     {
@@ -657,6 +674,7 @@ fn main() -> Result<()> {
             ppl_of(&po.nll)
         ));
     }
+    if !skip_g1 {
     for &lam in lambdas.iter() {
         let po_store = {
             let mut st = KToVState::new_uniform(table, lam, n_layers, kvd, seq_len + 32);
@@ -698,9 +716,18 @@ fn main() -> Result<()> {
         }
         let _ = std::io::stdout().flush();
     }
+    }
     g1_rows.push_str(&format!(
         "\nTolerances (pre-registered): mean \\|ΔNLL\\| ≤ {G1_MEAN_ABS_TOL}, max ≤ {G1_MAX_ABS_TOL} — the rotation-rounding class.  \n\n"
     ));
+    if skip_g1 {
+        g1_rows.clear();
+        g1_rows.push_str(
+            "## P2 — G1 paired store-vs-reconstruct\n\n\
+             SKIPPED (--skip-g1): the G1 record is Bench 013's (T3, seq 1024, \
+             0 flips at every λ); this run measures the G2 scaling axis only.  \n\n",
+        );
+    }
     g1_rows.push_str(&walk.render("Retention walk (recon − store, by target-token frequency band × tracked)"));
     g1_rows.push('\n');
     report.push(&g1_rows);
@@ -832,11 +859,15 @@ fn main() -> Result<()> {
          A G1 FAIL means a convention/wiring bug (the wrong rotation subgroup, a stale token \
          map), not a model effect — the reconstruction is deterministic algebra.  \n",
         if g3 { "PASS" } else { "FAIL" },
-        if g1_pass { "PASS" } else { "FAIL" },
+        if skip_g1 { "SKIPPED (--skip-g1; record: Bench 013)" } else if g1_pass { "PASS" } else { "FAIL" },
         tg_decode
     ));
-    let status = if g3 && g1_pass {
-        "**Status:** COMPLETE — G3 PASS, G1 PASS (G2/bytes recorded)"
+    let status = if g3 && (g1_pass || skip_g1) {
+        if skip_g1 {
+            "**Status:** COMPLETE — G3 PASS, G1 SKIPPED (G2-scaling posture; G1 record: Bench 013)"
+        } else {
+            "**Status:** COMPLETE — G3 PASS, G1 PASS (G2/bytes recorded)"
+        }
     } else {
         "**Status:** COMPLETE — GATE FAILURE (see verdicts)"
     };
@@ -846,8 +877,12 @@ fn main() -> Result<()> {
     );
     report.push("");
 
-    println!("# done: G3 {} G1 {}", if g3 { "PASS" } else { "FAIL" }, if g1_pass { "PASS" } else { "FAIL" });
-    if !(g3 && g1_pass) {
+    println!(
+        "# done: G3 {} G1 {}",
+        if g3 { "PASS" } else { "FAIL" },
+        if skip_g1 { "SKIPPED" } else if g1_pass { "PASS" } else { "FAIL" }
+    );
+    if !(g3 && (g1_pass || skip_g1)) {
         bail!("gate failure — see the report");
     }
     Ok(())

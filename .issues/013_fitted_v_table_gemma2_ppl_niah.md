@@ -267,6 +267,41 @@ exclusive), verifies the table artifact exists, rebuilds in `target-rel`
   - Re-measure inside this repo's actual attention kernel (the V-aggregation epilogue and the RoPE tables that already exist there) before anyone reads the primitive numbers as the model-level cost.
   - If P3 is still transcendental- or table-bandwidth-bound, a block angle-addition rotation (exact re-anchoring every N positions) is the named kernel to try.
 
+### T4 protocol — the G2 scaling cells — PRE-REGISTERED 2026-09-30 (before the run; the T1/T2/T3 precedent)
+
+**Instrument:** `kv_reconstruct_gate` + the new `--skip-g1` flag (G1's record
+is Bench 013's — seq 1024, 0 flips at every λ; the T4 cells measure the G2
+read-path scaling axis only; the G3 seam probe still runs and still gates).
+Same table artifact, same corpus, same arms (full-cache, recon-λ0, recon-λ1),
+same paired-interleave shape. `--seq-len` sets the cache block (the G2
+prefill rides it); pair counts are trimmed vs T3's 12 because the prefill —
+not the timed decode — dominates the wall, and the question is a scaling
+TREND, not a fine difference.
+
+**Cells (chained, one process per cell, box otherwise idle):**
+- **Cell A — context ~1025:** `--seq-len 1024 --eval-tokens 2048 --skip-g1
+  --tg-pairs 4 --tg-prefill 1024 --tg-decode 64`.
+- **Cell B — the sliding-window edge, context ~4097:** `--seq-len 4096
+  --eval-tokens 4096 --skip-g1 --tg-pairs 2 --tg-prefill 4096 --tg-decode
+  64`. All 26 layers read their full ≤4096 window here (gemma-2-2b: 22
+  sliding + 4 global; at this context the two classes coincide). The
+  >4096-context axis (global layers exceeding the window) is NOT measured —
+  recorded as out of scope for this decision (the naive CPU path is not the
+  production deployment shape; the levers change this curve anyway).
+
+**Recorded (not gated — this is the decision evidence, not a GOAT):** median
+µs/step + per-pair ratio vs full-cache at each context; the ratio-vs-context
+curve {129 (T3, 12 pairs) → 1025 → 4097}; box state. **Decision rule
+(pre-registered): the katgpt-rs-side promotion reads the WINDOW-EDGE cell** —
+ratio ≤ 1.20 at 4097 promotes `fitted_v_reconstruct` to katgpt-core default
+(G1+G3 already PASS; the 50% KV-bytes law is the modelless gain; the levers
+stay T4's open lane to shrink the cost); ratio > 1.20 at 4097 holds promotion
+until the deferred-restore lever lands and re-measures. The threshold is the
+T3 geometry's measured cost (+8–9%) plus headroom for the 32× row growth —
+a cost that stays ~2× the tg128 figure is a tractable baseline, not a
+disqualifier, because the primitive is consumer-SELECTED (the default path
+stays bitwise FullCache) and the memory win scales WITH context.
+
 ## Traps
 
 1. **Tap point:** the fit tapped pre-RoPE K / post-W_V V (Bench 004). The P2/P3 serve must consume K at the same point, and P3 must invert exactly the rotation the cache applied, half-split for gemma-2. On a gemma-3/4-class model, K is post-QK-norm.
