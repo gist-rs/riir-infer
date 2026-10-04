@@ -369,7 +369,8 @@ fn main() -> Result<()> {
         eprintln!(
             "usage: kv_reconstruct_gate <gguf> <corpus> [--table PATH] [--eval-tokens N] \
              [--seq-len N] [--lambdas 0,0.5,1] [--tg-pairs R] [--tg-prefill N] \
-             [--tg-decode N] [--report PATH] [--box-note S] [--skip-g1] [--smoke]"
+             [--tg-decode N] [--report PATH] [--box-note S] [--skip-g1] [--smoke] \
+             [--recon eager|deferred]"
         );
         std::process::exit(2);
     }
@@ -384,6 +385,11 @@ fn main() -> Result<()> {
     let mut report_path: Option<PathBuf> = None;
     let mut box_note = String::from("4090 workstation i7-13700K, CPU lane, AC");
     let mut skip_g1 = false;
+    // The read posture (Issue 013 T4): `eager` = the T3 scratch (Bench 013/016
+    // continuity, the default); `deferred` = the fused kernel lane — and it
+    // carries its own in-run probe (the bitwise λ0 law + the regrouping
+    // bound), so no separate flag.
+    let mut recon_deferred = false;
     let mut i = 3;
     while i < args.len() {
         match args[i].as_str() {
@@ -432,6 +438,14 @@ fn main() -> Result<()> {
             "--skip-g1" => {
                 skip_g1 = true;
                 i += 1;
+            }
+            "--recon" => {
+                recon_deferred = match args[i + 1].as_str() {
+                    "eager" => false,
+                    "deferred" => true,
+                    other => bail!("--recon expects eager|deferred, got {other}"),
+                };
+                i += 2;
             }
             "--smoke" => i += 1,
             other => bail!("unknown arg {other}"),
@@ -590,8 +604,16 @@ fn main() -> Result<()> {
             ok = plain == noop;
             // (b) recon λ=0 vs store λ=0 over the same positions.
             let mut st_store = KToVState::new_uniform(table, 0.0, n_layers, kvd, seq.len() + 32);
-            let mut st_recon =
-                VReconState::new_uniform(table, 0.0, n_layers, kvd, &freq, seq.len() + 32);
+            let mut st_recon = VReconState::new_uniform(
+                table,
+                0.0,
+                n_layers,
+                kvd,
+                &freq,
+                seq.len() + 32,
+                config.n_head,
+                false,
+            );
             let mut store_lg: Vec<Vec<f32>> = Vec::new();
             let mut recon_lg: Vec<Vec<f32>> = Vec::new();
             cache.reset();
@@ -636,6 +658,100 @@ fn main() -> Result<()> {
             if ok { "PASS" } else { "FAIL" }
         ));
         ok
+    };
+
+    // ── P1b: the deferred-lane probe (Issue 013 T4, --recon deferred) ─
+    // The fused kernel's two laws, on the REAL model + table over a
+    // 65-position decode:
+    // (a) deferred-λ0 == eager-λ0 to_bits (the bitwise zero-λ law);
+    // (b) all-miss deferred-λ1 == eager-λ1 to_bits (the miss law);
+    // (c) tracked λ1: deferred vs eager max |Δlogit| (the regrouping
+    //     class, recorded against the 5e-2 wiring bound) and vs store.
+    let deferred_probe = if recon_deferred {
+        let probe_tokens: Vec<usize> = all_tokens[eval_start..eval_start + 64].to_vec();
+        let mut seq = vec![bos];
+        seq.extend_from_slice(&probe_tokens);
+        let max_delta = |a: &[Vec<f32>], b: &[Vec<f32>]| -> f32 {
+            a.iter()
+                .zip(b)
+                .flat_map(|(x, y)| x.iter().zip(y).map(|(p, q)| (p - q).abs()))
+                .fold(0.0f32, f32::max)
+        };
+        let mut run_lg = |lam: f32, deferred: bool, miss: bool| -> Vec<Vec<f32>> {
+            let mut st = VReconState::new_uniform(
+                table,
+                lam,
+                n_layers,
+                kvd,
+                &freq,
+                seq.len() + 32,
+                config.n_head,
+                deferred,
+            );
+            cache.reset();
+            let mut lgs: Vec<Vec<f32>> = Vec::with_capacity(seq.len());
+            for (pos, &t) in seq.iter().enumerate() {
+                // u32::MAX is out of vocab — set_token resolves it to the
+                // miss row (MAX), which IS the all-miss arm.
+                st.set_token(pos, if miss { u32::MAX } else { t as u32 });
+                let lg = forward_gemma2_f16_hk(
+                    &mut ctx, &weights, &mut cache, &mut st, t, pos, &config,
+                );
+                lgs.push(lg.to_vec());
+            }
+            lgs
+        };
+        let eager0 = run_lg(0.0, false, false);
+        let def0 = run_lg(0.0, true, false);
+        let miss1_eager = run_lg(1.0, false, true);
+        let miss1_def = run_lg(1.0, true, true);
+        let eager1 = run_lg(1.0, false, false);
+        let def1 = run_lg(1.0, true, false);
+        let store1 = {
+            let mut st = KToVState::new_uniform(table, 1.0, n_layers, kvd, seq.len() + 32);
+            cache.reset();
+            let mut lgs: Vec<Vec<f32>> = Vec::with_capacity(seq.len());
+            for (pos, &t) in seq.iter().enumerate() {
+                st.set_token(pos, t as u32);
+                let lg = forward_gemma2_f16_hk(
+                    &mut ctx, &weights, &mut cache, &mut st, t, pos, &config,
+                );
+                lgs.push(lg.to_vec());
+            }
+            lgs
+        };
+        let bits = |lgs: &[Vec<f32>]| {
+            lgs.iter()
+                .flat_map(|l| l.iter().map(|x| x.to_bits()))
+                .collect::<Vec<_>>()
+        };
+        let law_a = bits(&eager0) == bits(&def0);
+        let law_b = bits(&miss1_eager) == bits(&miss1_def);
+        let regroup_max = max_delta(&eager1, &def1);
+        let vs_store_max = max_delta(&def1, &store1);
+        let ok = law_a && law_b && regroup_max <= G3_LOGIT_DELTA_TOL;
+        println!(
+            "# deferred probe: λ0 to_bits {} | miss-λ1 to_bits {} | \
+             regroup max |Δlogit| {regroup_max:.3e} | def-λ1 vs store {vs_store_max:.3e} ({})",
+            if law_a { "PASS" } else { "FAIL" },
+            if law_b { "PASS" } else { "FAIL" },
+            if ok { "PASS" } else { "FAIL" }
+        );
+        report.push(&format!(
+            "## P1b — deferred-lane probe (--recon deferred)\n\n\
+             65-position decode on the real model + table.  \n\n\
+             - deferred-λ0 vs eager-λ0: **{}** (to_bits — the zero-λ law).  \n\
+             - deferred-λ1 all-miss vs eager-λ1: **{}** (to_bits — the miss law).  \n\
+             - tracked λ1, deferred vs eager max \\|Δlogit\\|: **{regroup_max:.3e}** \
+             (the regrouped-association class; bound {G3_LOGIT_DELTA_TOL}).  \n\
+             - tracked λ1, deferred vs STORE max \\|Δlogit\\|: **{vs_store_max:.3e}** \
+             (the full P3 class: regrouping + rotation rounding).  \n\n",
+            if law_a { "PASS" } else { "FAIL" },
+            if law_b { "PASS" } else { "FAIL" }
+        ));
+        ok
+    } else {
+        true
     };
 
     // ── P2: the G1 paired store-vs-reconstruct arms ───────────────────
@@ -689,7 +805,16 @@ fn main() -> Result<()> {
             )
         };
         let po_recon = {
-            let mut st = VReconState::new_uniform(table, lam, n_layers, kvd, &freq, seq_len + 32);
+            let mut st = VReconState::new_uniform(
+                table,
+                lam,
+                n_layers,
+                kvd,
+                &freq,
+                seq_len + 32,
+                config.n_head,
+                false,
+            );
             let mut hook = ArmHook::R(&mut st);
             run_pass(
                 &mut ctx, &weights, &mut cache, &mut hook, &eval_tokens, corpus_per_chunk,
@@ -743,21 +868,74 @@ fn main() -> Result<()> {
         let decode_tokens: Vec<usize> = all_tokens
             [eval_start + eval_n + tg_prefill..eval_start + eval_n + tg_prefill + tg_decode]
             .to_vec();
-        let mut pairs: Vec<Vec<(f64, f64)>> = Vec::with_capacity(tg_pairs);
-        for _ in 0..tg_pairs {
-            // One interleaved (control, recon-λ0, recon-λ1) triple; the
-            // states bind first (a temporary would drop inside the array).
-            let mut st_l0 = VReconState::new_uniform(
-                table, 0.0, n_layers, kvd, &freq, tg_prefill + tg_decode + 8,
-            );
-            let mut st_l1 = VReconState::new_uniform(
-                table, 1.0, n_layers, kvd, &freq, tg_prefill + tg_decode + 8,
-            );
-            let mut hooks = [
+        // Arm list: the full-cache control first (ratios read against it);
+        // eager mode = the T3 triple (Bench 013/016 continuity); deferred
+        // mode = the T4 four (the eager-λ1 anchor + the fused arms — the
+        // decision figure).
+        let mut st_l0 = VReconState::new_uniform(
+            table,
+            0.0,
+            n_layers,
+            kvd,
+            &freq,
+            tg_prefill + tg_decode + 8,
+            config.n_head,
+            false,
+        );
+        let mut st_l1 = VReconState::new_uniform(
+            table,
+            1.0,
+            n_layers,
+            kvd,
+            &freq,
+            tg_prefill + tg_decode + 8,
+            config.n_head,
+            false,
+        );
+        let mut st_d0 = VReconState::new_uniform(
+            table,
+            0.0,
+            n_layers,
+            kvd,
+            &freq,
+            tg_prefill + tg_decode + 8,
+            config.n_head,
+            true,
+        );
+        let mut st_d1 = VReconState::new_uniform(
+            table,
+            1.0,
+            n_layers,
+            kvd,
+            &freq,
+            tg_prefill + tg_decode + 8,
+            config.n_head,
+            true,
+        );
+        let (arm_names, n_arms) = if recon_deferred {
+            (
+                ["full-cache", "eager-λ1", "def-λ0", "def-λ1"],
+                4usize,
+            )
+        } else {
+            (["full-cache", "recon-λ0", "recon-λ1", ""], 3usize)
+        };
+        let mut hooks: Vec<ArmHook<'_>> = if recon_deferred {
+            vec![
+                ArmHook::None,
+                ArmHook::R(&mut st_l1),
+                ArmHook::R(&mut st_d0),
+                ArmHook::R(&mut st_d1),
+            ]
+        } else {
+            vec![
                 ArmHook::None,
                 ArmHook::R(&mut st_l0),
                 ArmHook::R(&mut st_l1),
-            ];
+            ]
+        };
+        let mut pairs: Vec<Vec<(f64, f64)>> = Vec::with_capacity(tg_pairs);
+        for _ in 0..tg_pairs {
             let triple = timing_triple(
                 &mut ctx, &weights, &mut cache, &mut hooks, &prefill_tokens, &decode_tokens,
                 bos, &config,
@@ -766,7 +944,7 @@ fn main() -> Result<()> {
         }
         // Per arm: median of per-pair medians + min + median ratio vs arm 0.
         let mut arms_out: Vec<TimingArm> = Vec::new();
-        for arm_idx in 0..3 {
+        for arm_idx in 0..n_arms {
             let mut meds: Vec<f64> = pairs.iter().map(|p| p[arm_idx].0).collect();
             meds.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
             let med = meds[meds.len() / 2];
@@ -784,14 +962,19 @@ fn main() -> Result<()> {
                 Some(rs[rs.len() / 2])
             };
             arms_out.push(TimingArm {
-                name: ["full-cache", "recon-λ0", "recon-λ1"][arm_idx],
+                name: arm_names[arm_idx],
                 med_us: med,
                 min_us: min,
                 ratio,
                 prefill_ms,
             });
         }
-        println!("# G2 tg{tg_decode} decode ({} pairs, seq {}):", tg_pairs, tg_prefill + 1);
+        println!(
+            "# G2 tg{tg_decode} decode ({} pairs, seq {}, {} mode):",
+            tg_pairs,
+            tg_prefill + 1,
+            if recon_deferred { "deferred" } else { "eager" }
+        );
         for a in &arms_out {
             println!(
                 "  {:>10}: median {:.0} µs/step ({:.1} tok/s) | min {:.0} µs{} | prefill {:.0} ms",
@@ -807,11 +990,17 @@ fn main() -> Result<()> {
         }
         let mut s = format!(
             "## P3 — G2 tg{} paired interleave\n\n\
-             {} interleaved (full-cache, recon-λ0, recon-λ1) triples; {}-token prefill + \
+             {} interleaved triples over {} arms ({}); {}-token prefill + \
              {} timed decode steps; median of per-pair medians; ratios are medians of \
-             per-pair ratios (the katgpt-rs `ab_timing` shape).  \n\n\
+             per-pair ratios (the katgpt-rs `ab_timing` shape). Mode: **{}**.  \n\n\
              | arm | median µs/step | tok/s | min µs | ratio vs full | prefill ms |\n|---|---|---|---|---|---|\n",
-            tg_decode, tg_pairs, tg_prefill + 1, tg_decode
+            tg_decode,
+            tg_pairs,
+            n_arms,
+            arm_names[..n_arms].join(", "),
+            tg_prefill + 1,
+            tg_decode,
+            if recon_deferred { "deferred (the T4 fused lane)" } else { "eager (the T3 scratch)" }
         );
         for a in &arms_out {
             s.push_str(&format!(
@@ -827,9 +1016,13 @@ fn main() -> Result<()> {
             ));
         }
         s.push_str(&format!(
-            "\nBox: {box_note}. Recorded, not gated — the kernel levers (the deferred restore, \
-             block angle-addition) are T4's lane.  \n\n"
-        ));
+            "\nBox: {box_note}. Recorded, not gated{}  \n\n"
+        , if recon_deferred {
+            " — the decision rule reads the WINDOW-EDGE deferred ratio: ≤ 1.20 re-fires the \
+             katgpt-core promotion; > 1.20 holds (riir-infer Issue 013 T4 pre-registration)."
+        } else {
+            "."
+        }));
         s
     };
     report.push(&tg);
@@ -853,20 +1046,28 @@ fn main() -> Result<()> {
         println!("# P4 bytes/token: full {full} B, P3 {p3} B (50.0%)");
     }
 
-    // ── P5: verdicts ──────────────────────────────────────────────────
+    // ── P5: verdicts ──────────────────────────────────────────
     report.push(&format!(
         "## Verdicts\n\n\
+         - Read posture: **{}**  \n\
          - **G3 (seam identity): {}**  \n\
+         - **Deferred-lane probe (λ0/miss to_bits + regrouping bound): {}**  \n\
          - **G1 (reconstruct == store within rotation rounding): {}**  \n\
          - **G2 (tg{} read-path cost): recorded** (see P3)  \n\
          - **Bytes/token: 50.0%** (the law, recorded)  \n\n\
          A G1 FAIL means a convention/wiring bug (the wrong rotation subgroup, a stale token \
          map), not a model effect — the reconstruction is deterministic algebra.  \n",
+        if recon_deferred { "deferred (the T4 fused lane)" } else { "eager (the T3 scratch)" },
         if g3 { "PASS" } else { "FAIL" },
+        if recon_deferred {
+            if deferred_probe { "PASS" } else { "FAIL" }
+        } else {
+            "n/a (eager mode)"
+        },
         if skip_g1 { "SKIPPED (--skip-g1; record: Bench 013)" } else if g1_pass { "PASS" } else { "FAIL" },
         tg_decode
     ));
-    let status = if g3 && (g1_pass || skip_g1) {
+    let status = if g3 && deferred_probe && (g1_pass || skip_g1) {
         if skip_g1 {
             "**Status:** COMPLETE — G3 PASS, G1 SKIPPED (G2-scaling posture; G1 record: Bench 013)"
         } else {
@@ -882,11 +1083,16 @@ fn main() -> Result<()> {
     report.push("");
 
     println!(
-        "# done: G3 {} G1 {}",
+        "# done: G3 {} deferred-probe {} G1 {}",
         if g3 { "PASS" } else { "FAIL" },
+        if recon_deferred {
+            if deferred_probe { "PASS" } else { "FAIL" }
+        } else {
+            "n/a"
+        },
         if skip_g1 { "SKIPPED" } else if g1_pass { "PASS" } else { "FAIL" }
     );
-    if !(g3 && (g1_pass || skip_g1)) {
+    if !(g3 && deferred_probe && (g1_pass || skip_g1)) {
         bail!("gate failure — see the report");
     }
     Ok(())

@@ -381,6 +381,31 @@ pub trait ValueStoreHook {
     ) -> Option<&[f32]> {
         None
     }
+
+    /// [Issue 013 T4] The fused deferred-restore read. Called once per layer
+    /// per step BEFORE [`Self::values_for_attention`]; `Some(view)` routes
+    /// attention through the fused kernel (pass 3 reconstructs `v̂_t =
+    /// G(−θt)·K̂_t` from the hot K row; the table part lands in the
+    /// deferred epilogue) and `values_for_attention` is NOT called for that
+    /// layer step. `None` (the default) falls through to the eager paths —
+    /// monomorphizes away exactly like the other defaults.
+    ///
+    /// The forward only consults this when `attn_logit_softcapping > 0` and
+    /// (with the `row_logit_floor` feature) no floor policy is set — a hook
+    /// returning `Some` elsewhere is ignored. The view's weights/used halves
+    /// are the implementation's own state; the fused epilogue clears them.
+    /// One explicit lifetime on BOTH inputs: the view unifies the hook's own
+    /// buffers and the caller's K cache into one region (the forward holds
+    /// both for the whole layer step, so the call site instantiates it
+    /// body-wide).
+    fn fused_recon<'s>(
+        &'s mut self,
+        _layer_idx: usize,
+        _t_n: usize,
+        _k_cache: &'s [f32],
+    ) -> Option<crate::transformer::attend::FusedRecon<'s>> {
+        None
+    }
 }
 
 /// Zero-overhead no-op [`ValueStoreHook`] — the full-precision V-cache
@@ -1413,36 +1438,49 @@ pub fn forward_gemma2_f16_hk<'a, H: ValueStoreHook + ?Sized>(
         vq.value_stored(layer_idx, pos, &mut layer_cache.value);
 
         // f3. [Issue 013 T3] V read-path selector — after the store seams,
-        // before attention. `None` (the default): read the layer cache,
-        // bitwise today's path; `Some(slice)`: the P3 reconstruction lane's
-        // scratch serving `V = G(−θp)·K̂ + λ·E_l[s]` from the cached
-        // post-RoPE K, rows `0..t_n`.
-        let v_read: &[f32] = match
-            vq.values_for_attention(layer_idx, pos, t_n, &layer_cache.key)
-        {
-            Some(v) => v,
-            None => &layer_cache.value,
+        // before attention. The fused deferred-restore lane (Issue 013 T4)
+        // is consulted first: `Some(view)` routes attention through the
+        // fused kernel and skips the eager paths entirely. Its preconditions
+        // are the softcap shape + no floor policy — both fallbacks stay on
+        // today's bitwise paths. `None` (the default hook) reads the layer
+        // cache, bitwise today's path; `Some(slice)` from
+        // `values_for_attention` is the P3 eager scratch.
+        let shape = super::attend::AttnShape {
+            n_head: config.n_head,
+            n_kv_head: n_kv,
+            kv_dim: kvd,
+            head_dim: hd,
+            t_n,
+            scale,
+            softcap: config.attn_logit_softcapping,
+            block_size: config.block_size,
         };
+        #[cfg(feature = "row_logit_floor")]
+        let fused_supported = config.attn_logit_softcapping > 0.0 && ctx.logit_floor.is_none();
+        #[cfg(not(feature = "row_logit_floor"))]
+        let fused_supported = config.attn_logit_softcapping > 0.0;
+        let fused = if fused_supported {
+            vq.fused_recon(layer_idx, t_n, &layer_cache.key)
+        } else {
+            None
+        };
+        if let Some(view) = fused {
+            unsafe {
+                super::attend::attend_row_fused(ctx, view, layer_idx, shape);
+            }
+        } else {
+            let v_read: &[f32] = match
+                vq.values_for_attention(layer_idx, pos, t_n, &layer_cache.key)
+            {
+                Some(v) => v,
+                None => &layer_cache.value,
+            };
 
-        // g. Multi-head attention + softcapping (Plan 096: parallel heads),
-        // with the shared m_Y probe / row-logit-floor hooks (Issue 011).
-        unsafe {
-            super::attend::attend_row(
-                ctx,
-                &layer_cache.key,
-                v_read,
-                layer_idx,
-                super::attend::AttnShape {
-                    n_head: config.n_head,
-                    n_kv_head: n_kv,
-                    kv_dim: kvd,
-                    head_dim: hd,
-                    t_n,
-                    scale,
-                    softcap: config.attn_logit_softcapping,
-                    block_size: config.block_size,
-                },
-            );
+            // g. Multi-head attention + softcapping (Plan 096: parallel heads),
+            // with the shared m_Y probe / row-logit-floor hooks (Issue 011).
+            unsafe {
+                super::attend::attend_row(ctx, &layer_cache.key, v_read, layer_idx, shape);
+            }
         }
 
         // h. Output projection (f16)

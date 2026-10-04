@@ -103,12 +103,31 @@ impl PositionGroupAction for HalfSplitRopeInverse<'_> {
 
 /// The Issue-013 T3 [`ValueStoreHook`] state — the P3 read-path lane.
 ///
-/// Attention reads THIS state's scratch: rows `0..t_n` of
-/// `V = G(−θp)·K̂ + λ_l·E_l[s]`, reconstructed from the cached post-RoPE
-/// keys each time attention asks. The persistent V cache is never read (the
-/// raw V store still executes in this instrument — one memcpy per step,
-/// recorded as an instrument caveat; a production P3 cache drops the
-/// allocation and the bytes/token claim is the recorded arithmetic).
+/// Two read postures (Issue 013 T4):
+///
+/// - **Eager** (the T3 baseline, `deferred = false`): attention reads THIS
+///   state's scratch — rows `0..t_n` of `V = G(−θp)·K̂ + λ_l·E_l[s]`,
+///   reconstructed from the cached post-RoPE keys each time attention asks.
+///   The persistent V cache is never read (the raw V store still executes in
+///   this instrument — one memcpy per step, recorded as an instrument
+///   caveat; a production P3 cache drops the allocation and the bytes/token
+///   claim is the recorded arithmetic).
+/// - **Deferred** (the T4 fused lever, `deferred = true`): `values_for_attention`
+///   stays `None` and [`ValueStoreHook::fused_recon`] serves the fused view —
+///   the rotation rides the attention kernel's pass 3 over the hot K rows and
+///   the table part regroups into per-(head, row) weight sums applied once
+///   per distinct row (attend.rs's module docs carry the numerics contract:
+///   λ=0 and all-miss stay bitwise; λ>0 is the stated regrouping bound).
+///
+/// Two exactness instruments back the fused rotation:
+///
+/// - **`cs`** — the per-position `(sin, cos)` table, built ONCE with the
+///   exact `(pos as f32 * freq).sin_cos()` expression the action computes,
+///   so the fused inverse rotation is bitwise the on-the-fly one (the
+///   transcendental cost leaves the per-row path without moving a bit).
+/// - **`row_idx`** — the per-position tracked-row index, resolved at
+///   `set_token` time (the lookup is layer-independent; the eager path
+///   re-resolved it per layer per step).
 ///
 /// The table borrow is `'static` BY CALLER CONTRACT (the bin `Box::leak`s
 /// the loaded table — process-lifetime by design, the `KToVState` shape).
@@ -119,20 +138,38 @@ pub struct VReconState {
     /// Token id per position (`u32::MAX` = unset ⇒ the miss path: exact
     /// `G(−θp)·K̂`, never a zero-row guess).
     tokens: Vec<u32>,
+    /// Per-position tracked-row index (resolved in `set_token`; `u32::MAX`
+    /// = miss). Layer-independent by construction.
+    row_idx: Vec<u32>,
     /// The forward's own rope frequency table (cloned — the hook cannot
     /// borrow the `ForwardContext`; `head_dim/2` floats).
     freq: Vec<f32>,
     kvd: usize,
-    /// The served-V scratch (`max_seq_len × kvd`), allocated once.
+    /// The served-V scratch (`max_seq_len × kvd`), allocated once — the
+    /// EAGER posture only (never written in deferred mode).
     scratch: Vec<f32>,
-    /// Arm-lifetime telemetry: rows reconstructed.
+    /// Per-position `(sin, cos)` table (`max_seq_len × half × 2`) — the
+    /// DEFERRED posture's rotation source, bitwise the on-the-fly values.
+    cs: Vec<f32>,
+    /// Deferred fused view state: `n_head × rows` weight sums + per-head
+    /// touched-row lists. The fused epilogue clears both (the all-zero
+    /// contract between layer steps); `reset` re-arms them too.
+    weights: Vec<f32>,
+    used: Vec<Vec<u32>>,
+    n_head: usize,
+    /// The T4 fused posture switch (false = the T3 eager baseline).
+    deferred: bool,
+    /// Arm-lifetime telemetry: rows reconstructed (eager) or fused-step rows
+    /// served (deferred — the sum of per-layer `t_n`s the fused kernel ran).
     pub rows_served: u64,
 }
 
 impl VReconState {
     /// `lam` must have one entry per layer; `freq_table` must be the
     /// forward's own `RopeFreqTable` contents; the table width must equal
-    /// `kvd`; `kvd` must be a head multiple of the action dim.
+    /// `kvd`; `kvd` must be a head multiple of the action dim; `n_head`
+    /// must match the forward (the fused weights are per-head).
+    #[allow(clippy::too_many_arguments)]
     #[must_use]
     pub fn new(
         table: &'static FittedTokenTable,
@@ -141,6 +178,8 @@ impl VReconState {
         kvd: usize,
         freq_table: &[f32],
         max_seq_len: usize,
+        n_head: usize,
+        deferred: bool,
     ) -> Self {
         assert_eq!(
             lam.len(),
@@ -156,18 +195,39 @@ impl VReconState {
             kvd.is_multiple_of(freq_table.len() * 2),
             "VReconState: kv_dim not a head multiple of the action dim"
         );
+        assert!(n_head > 0, "VReconState: n_head must be positive");
+        // The fused rotation's exactness premise: the cs table entry for
+        // (pos, i) IS `(pos as f32 * freq[i]).sin_cos()` — the same
+        // expression `HalfSplitRopeInverse` evaluates per row per read.
+        let half = freq_table.len();
+        let mut cs = Vec::with_capacity(max_seq_len * half * 2);
+        for p in 0..max_seq_len {
+            let n = p as f32;
+            for &f in freq_table {
+                let (sin_a, cos_a) = (n * f).sin_cos();
+                cs.push(sin_a);
+                cs.push(cos_a);
+            }
+        }
         Self {
             table,
             lam,
             tokens: vec![u32::MAX; max_seq_len],
+            row_idx: vec![u32::MAX; max_seq_len],
             freq: freq_table.to_vec(),
             kvd,
             scratch: vec![0.0; max_seq_len * kvd],
+            cs,
+            weights: vec![0.0; n_head * table.rows()],
+            used: vec![Vec::new(); n_head],
+            n_head,
+            deferred,
             rows_served: 0,
         }
     }
 
     /// Uniform-λ arm constructor.
+    #[allow(clippy::too_many_arguments)]
     #[must_use]
     pub fn new_uniform(
         table: &'static FittedTokenTable,
@@ -176,6 +236,8 @@ impl VReconState {
         kvd: usize,
         freq_table: &[f32],
         max_seq_len: usize,
+        n_head: usize,
+        deferred: bool,
     ) -> Self {
         Self::new(
             table,
@@ -184,22 +246,33 @@ impl VReconState {
             kvd,
             freq_table,
             max_seq_len,
+            n_head,
+            deferred,
         )
     }
 
     /// Record the token at `pos` (call once per decode step, before the
     /// forward — including every prefill position: the read path looks up
-    /// rows for ALL cached positions, not just the current one).
+    /// rows for ALL cached positions, not just the current one). The
+    /// tracked-row index resolves HERE — it is layer-independent, so the
+    /// per-layer-per-step re-resolution the eager path paid never happens.
     #[inline]
     pub fn set_token(&mut self, pos: usize, token: u32) {
         if let Some(t) = self.tokens.get_mut(pos) {
             *t = token;
+            self.row_idx[pos] = self.table.row_index_of(token).unwrap_or(u32::MAX);
         }
     }
 
-    /// Reset for a new sequence (the token map; telemetry survives).
+    /// Reset for a new sequence (the token + row maps; the fused weight
+    /// sums re-arm zero; telemetry survives).
     pub fn reset(&mut self) {
         self.tokens.fill(u32::MAX);
+        self.row_idx.fill(u32::MAX);
+        self.weights.fill(0.0);
+        for u in &mut self.used {
+            u.clear();
+        }
     }
 
     /// Overwrite the λ schedule in place.
@@ -227,6 +300,12 @@ impl ValueStoreHook for VReconState {
         t_n: usize,
         k_cache: &[f32],
     ) -> Option<&[f32]> {
+        // Deferred mode never serves the scratch — the fused view rides
+        // `fused_recon` (the forward consults it first; this stays None so
+        // a fused-less fallback would read the layer cache, not pay twice).
+        if self.deferred {
+            return None;
+        }
         let Self {
             table,
             lam,
@@ -235,6 +314,7 @@ impl ValueStoreHook for VReconState {
             kvd,
             scratch,
             rows_served,
+            ..
         } = self;
         let kvd = *kvd;
         let lam_l = lam[layer_idx];
@@ -248,6 +328,38 @@ impl ValueStoreHook for VReconState {
         }
         *rows_served += t_n as u64;
         Some(&scratch[..t_n * kvd])
+    }
+
+    fn fused_recon<'s>(
+        &'s mut self,
+        layer_idx: usize,
+        _t_n: usize,
+        k_cache: &'s [f32],
+    ) -> Option<crate::transformer::attend::FusedRecon<'s>> {
+        if !self.deferred {
+            return None;
+        }
+        use crate::transformer::attend::{FusedRecon, ReconShared};
+        let half = self.freq.len();
+        let table_rows = self.table.rows();
+        debug_assert_eq!(self.weights.len(), self.n_head * table_rows);
+        debug_assert_eq!(self.used.len(), self.n_head);
+        let shared = ReconShared {
+            cs: &self.cs,
+            half,
+            k_cache,
+            kv_dim: self.kvd,
+            row_of_pos: &self.row_idx,
+            lambda: self.lam[layer_idx],
+            e_rows: self.table.layer_rows_slab(layer_idx),
+            table_rows,
+            table_width: self.table.width(),
+        };
+        Some(FusedRecon {
+            shared,
+            weights: &mut self.weights,
+            used: &mut self.used,
+        })
     }
 }
 
@@ -408,7 +520,7 @@ mod tests {
             (0..2 * KVD).map(|i| (i % KVD) as f32 * 0.25).collect(),
         )));
         let row: Vec<f32> = (0..KVD).map(|i| (i as f32) * 0.25).collect();
-        let mut st = VReconState::new_uniform(table, 0.5, 2, KVD, &freq, 8);
+        let mut st = VReconState::new_uniform(table, 0.5, 2, KVD, &freq, 8, 2, false);
         st.set_token(0, 0);
         st.set_token(1, 1);
         // Build a fake key cache: rows pre-rotated by the repo's rope.
@@ -437,5 +549,101 @@ mod tests {
                 served[KVD + i]
             );
         }
+    }
+
+    // ── Issue 013 T4 — the deferred posture ─────────────────────────────
+
+    /// The cs table entry for (pos, i) is BITWISE `(pos as f32 · freq[i])
+    /// .sin_cos()` — the exact expression the on-the-fly action evaluates.
+    /// This is the fused rotation's exactness premise.
+    #[test]
+    fn cs_table_is_bitwise_the_on_the_fly_sincos() {
+        let freq = freq_table();
+        let table = Box::leak(Box::new(FittedTokenTable::from_rows(
+            1,
+            KVD,
+            vec![u32::MAX],
+            Vec::new(),
+        )));
+        let st = VReconState::new_uniform(table, 0.0, 1, KVD, &freq, 300, 2, true);
+        let half = freq.len();
+        for p in [0usize, 1, 7, 42, 299] {
+            for (i, &f) in freq.iter().enumerate() {
+                let (sin_a, cos_a) = (p as f32 * f).sin_cos();
+                assert_eq!(st.cs[(p * half + i) * 2], sin_a, "p={p} i={i}");
+                assert_eq!(st.cs[(p * half + i) * 2 + 1], cos_a, "p={p} i={i}");
+            }
+        }
+    }
+
+    /// The tracked-row index resolves at `set_token` (layer-independent),
+    /// misses stay MAX, and `reset` re-arms the maps + the fused state.
+    #[test]
+    fn row_idx_resolves_at_set_token_and_reset_clears() {
+        let freq = freq_table();
+        // token 5 → row 0, token 9 → row 1, others miss.
+        let table = Box::leak(Box::new(FittedTokenTable::from_rows(
+            2,
+            KVD,
+            {
+                let mut m = vec![u32::MAX; 10];
+                m[5] = 0;
+                m[9] = 1;
+                m
+            },
+            vec![0.0; 2 * 2 * KVD],
+        )));
+        let mut st = VReconState::new_uniform(table, 0.0, 2, KVD, &freq, 8, 2, true);
+        st.set_token(0, 5);
+        st.set_token(1, 9);
+        st.set_token(2, 6);
+        assert_eq!(st.row_idx[0], 0);
+        assert_eq!(st.row_idx[1], 1);
+        assert_eq!(st.row_idx[2], u32::MAX, "untracked → miss");
+        st.set_token(0, 6); // re-pointing the same position re-resolves
+        assert_eq!(st.row_idx[0], u32::MAX);
+        st.weights[0] = 1.5;
+        st.used[0].push(3);
+        st.reset();
+        assert_eq!(st.row_idx[1], u32::MAX, "reset clears the row map");
+        assert_eq!(st.weights[0], 0.0, "reset re-arms the fused weights");
+        assert!(st.used[0].is_empty(), "reset clears the used lists");
+    }
+
+    /// The posture split: eager serves the scratch and never a fused view;
+    /// deferred serves the fused view and never the scratch.
+    #[test]
+    fn posture_split_eager_vs_deferred() {
+        let freq = freq_table();
+        let table = Box::leak(Box::new(FittedTokenTable::from_rows(
+            1,
+            KVD,
+            vec![0],
+            vec![1.0; KVD],
+        )));
+        let k_cache = vec![0.5f32; 2 * KVD];
+        let mut eager = VReconState::new_uniform(table, 0.5, 1, KVD, &freq, 4, 2, false);
+        assert!(
+            ValueStoreHook::fused_recon(&mut eager, 0, 2, &k_cache).is_none(),
+            "eager posture: no fused view"
+        );
+        assert!(
+            ValueStoreHook::values_for_attention(&mut eager, 0, 0, 2, &k_cache).is_some(),
+            "eager posture: the scratch serves"
+        );
+        let mut deferred = VReconState::new_uniform(table, 0.5, 1, KVD, &freq, 4, 2, true);
+        assert!(
+            ValueStoreHook::values_for_attention(&mut deferred, 0, 0, 2, &k_cache).is_none(),
+            "deferred posture: the scratch never serves"
+        );
+        let fr = ValueStoreHook::fused_recon(&mut deferred, 0, 2, &k_cache)
+            .expect("deferred posture: the fused view serves");
+        assert_eq!(fr.shared.half, freq.len());
+        assert_eq!(fr.shared.lambda, 0.5);
+        assert_eq!(fr.shared.table_rows, 1);
+        assert_eq!(fr.shared.table_width, KVD);
+        assert_eq!(fr.shared.e_rows, &[1.0; KVD], "the layer slab");
+        assert_eq!(fr.weights.len(), 2, "n_head × rows");
+        assert_eq!(fr.used.len(), 2);
     }
 }
