@@ -166,6 +166,33 @@ prebuilt exe — the chain design held even through T2's crash. Record:
   T1 (P1) negative, T2 (P2) not viable standalone, T3 (P3) clean — the
   katgpt-rs-side promotion decision now has its full model-bound input set.
 
+## 2026-10-05 — Issue 013 T4 scaling half EXECUTED: the naive read-path cost explodes with context (1.08→1.79→3.82×); the pre-registered rule fired HOLD — katgpt-core `fitted_v_reconstruct` stays opt-in
+
+Bench 016 (`.benchmarks/016_t4_g2_scaling_hold.md`, cells `016a`/`016b`, run
+`016_t4_g2_run.log`): the pre-registered scaling protocol — two chained
+scheduled-task cells (`--skip-g1`, G3 still gating; cache-sizing fix
+`2300457` after both cells segfaulted at exactly one position over — the
+block must hold prefill+BOS+decode, not seq_len+64). The curve (within-cell
+paired ratios; cross-cell absolutes are not comparable — different box
+loads):
+
+- 129 (T3/Bench 013, 12 pairs): **1.079× / 1.088×**
+- 1025 (cell A, 4 pairs): **1.789× / 1.751×**
+- 4097 (cell B, 2 pairs, the gemma-2-2b sliding-window edge): **3.821× /
+  3.957×**
+
+**The decision rule fired:** window-edge ratio ≫ the ≤ 1.20 promotion bar →
+**katgpt-rs-side promotion HELD** (`682936a1c` there: the feature-def comment
+carries the verdict + the re-fire condition; HISTORY § Issue 883 amended;
+feature counts gate green). Quality untouched (G3 PASS both cells at
+1.254e-4; the 50% law re-confirmed in both cells) — the HOLD is a COST
+verdict on the naive read path, worst exactly where the memory win matters.
+**The losers demoted on record:** P1 (Bench 011 negative) and P2 (Bench 012
+non-viable standalone). **The promotion re-fires** when the deferred-restore
+lever (Bench 895 Addenda I/II, +1.5–3.6% primitive-level) or block
+angle-addition lands in a consumer and re-measures ≤ 1.20 at the window edge
+— T4's kernel half is that lane.
+
 ## 2026-09-27 — Issue 014 RESOLVED: activation-aware ternary scale fit — SPLIT BY LANE (born-ternary clean negative; dense-parent mechanism transfer)
 
 Filed 2026-09-25 from katgpt-rs Issue 886 (the per-family conditional

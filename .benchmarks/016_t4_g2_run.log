@@ -1,0 +1,28 @@
+=== T4 box state at launch (2026-10-04 21:50:18.51) === 
+OS Name:                       Microsoft Windows 11 Pro
+Total Physical Memory:         32,538 MB
+Available Physical Memory:     15,036 MB
+=== cell A: context ~1025 === 
+# kv_reconstruct_gate: gemma-2 f16 | layers=26 n_embd=2304 kv_dim=1024 vocab=256000 | load 2.2s
+# corpus: 13121614 chars → 2702627 tokens | eval [61440..63488) | seq 1024
+# table loaded: .benchmarks\012_kv_table_residual.bin (7348 rows, cal_tokens 61440) — BLAKE3 verified
+# G3: seam-identity PASS | recon-vs-store max |Δlogit| 1.254e-4 (rotation-rounding class)
+# G2 tg64 decode (4 pairs, seq 1025):
+  full-cache: median 133456 µs/step (7.5 tok/s) | min 127461 µs | prefill 140046 ms
+    recon-λ0: median 229792 µs/step (4.4 tok/s) | min 219323 µs | ratio 1.789× | prefill 183358 ms
+    recon-λ1: median 233714 µs/step (4.3 tok/s) | min 223178 µs | ratio 1.751× | prefill 182746 ms
+# P4 bytes/token: full 212992 B, P3 106496 B (50.0%)
+# done: G3 PASS G1 SKIPPED
+=== cell A exited rc=0 (2026-10-04 22:27:23.15) === 
+=== cell B: window edge ~4097 === 
+# kv_reconstruct_gate: gemma-2 f16 | layers=26 n_embd=2304 kv_dim=1024 vocab=256000 | load 16.3s
+# corpus: 13121614 chars → 2702627 tokens | eval [61440..65536) | seq 4096
+# table loaded: .benchmarks\012_kv_table_residual.bin (7348 rows, cal_tokens 61440) — BLAKE3 verified
+# G3: seam-identity PASS | recon-vs-store max |Δlogit| 1.254e-4 (rotation-rounding class)
+# G2 tg64 decode (2 pairs, seq 4097):
+  full-cache: median 149956 µs/step (6.7 tok/s) | min 141603 µs | prefill 586886 ms
+    recon-λ0: median 550358 µs/step (1.8 tok/s) | min 541119 µs | ratio 3.821× | prefill 1335012 ms
+    recon-λ1: median 560263 µs/step (1.8 tok/s) | min 558336 µs | ratio 3.957× | prefill 1599451 ms
+# P4 bytes/token: full 212992 B, P3 106496 B (50.0%)
+# done: G3 PASS G1 SKIPPED
+=== cell B exited rc=0 (2026-10-05  0:28:47.45) === 
