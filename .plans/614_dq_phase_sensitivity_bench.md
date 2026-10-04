@@ -5,7 +5,7 @@ verdict: instrument stands, all four axes INADMISSIBLE at the frozen
 corpora — `.benchmarks/023_dq_phase_matrix.md`). T1+T2+T3 DONE: both lanes'
 kernels + injections (G-i3 green on Metal M3 + CUDA 4090, 5/5), the runner
 release-green on the 4090. The turnkey pickup was
-[Issue 030](../.issues/030_dq_phase_matrix_4090_run_handoff.md) (closed
+`Issue 030` (closed
 2026-10-01, record in HISTORY.md). The worktree `E:/git/dq614-wt` was
 deleted at T6 per the cleanup clause.
 
