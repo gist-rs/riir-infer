@@ -47,7 +47,11 @@ pub enum FaError {
         dst: usize,
     },
     #[error("edge {src}->{dst} allows token {token} twice")]
-    DuplicateTokenInEdge { src: usize, dst: usize, token: usize },
+    DuplicateTokenInEdge {
+        src: usize,
+        dst: usize,
+        token: usize,
+    },
     #[error("determinism violation: node {node} has two outgoing edges allowing token {token}")]
     DuplicateEdgeToken { node: usize, token: usize },
     #[error("determinism violation: node {node} has two edges to node {dst}")]
@@ -71,7 +75,9 @@ pub enum FaError {
     DeadStart(usize),
     #[error("constraint unsatisfiable: no accepting path of length {len} from the start node")]
     Unsatisfiable { len: usize },
-    #[error("internal: sampled edge to a dead state at position {pos} (backward-pass accounting bug)")]
+    #[error(
+        "internal: sampled edge to a dead state at position {pos} (backward-pass accounting bug)"
+    )]
     InternalDeadState { pos: usize },
 }
 
@@ -349,6 +355,14 @@ impl Automaton {
         None
     }
 
+    /// Whether any edge allows `token` — the decode lane's mask-placeholder
+    /// guard (issue 035 P1: the automaton must never emit the mask token,
+    /// or a committed proposal could BE the mask and the block would never
+    /// converge). One linear scan over the concatenated token sets.
+    pub fn allows(&self, token: u32) -> bool {
+        self.emit_tokens.contains(&token)
+    }
+
     /// Walk a token sequence from the start node, returning the final node —
     /// the determinism invariant makes the walk unique. `None` if some
     /// position has no allowed edge (the walk dies).
@@ -476,7 +490,15 @@ impl Automaton {
         out_tokens: &mut [u32],
     ) -> Result<usize, FaError> {
         self.sample_joint_from(
-            scratch, self.start, logits, len, forced, temperature, argmax_tokens, rng, out_tokens,
+            scratch,
+            self.start,
+            logits,
+            len,
+            forced,
+            temperature,
+            argmax_tokens,
+            rng,
+            out_tokens,
         )
     }
 
@@ -671,7 +693,10 @@ impl Automaton {
                 continue;
             }
             let row = &logits[t * self.vocab..(t + 1) * self.vocab];
-            let (a, b) = (self.emit_start[chosen] as usize, self.emit_start[chosen + 1] as usize);
+            let (a, b) = (
+                self.emit_start[chosen] as usize,
+                self.emit_start[chosen + 1] as usize,
+            );
             let toks = &self.emit_tokens[a..b];
             out_tokens[t] = if argmax_tokens {
                 let mut best = toks[0];
@@ -897,10 +922,8 @@ impl Automaton {
                     let v = match usize::try_from(e) {
                         Err(_) => f64::NEG_INFINITY,
                         Ok(e) => {
-                            let (a, b) = (
-                                self.emit_start[e] as usize,
-                                self.emit_start[e + 1] as usize,
-                            );
+                            let (a, b) =
+                                (self.emit_start[e] as usize, self.emit_start[e + 1] as usize);
                             let toks = &self.emit_tokens[a..b];
                             let base = if pin != FREE {
                                 // 0/1 indicator: the pin is IN or the edge is dead.
@@ -953,7 +976,11 @@ impl Automaton {
         for _ in len..len_pad {
             let mut id = vec![f64::NEG_INFINITY; n * n];
             for (i, v) in id.iter_mut().enumerate() {
-                *v = if i % (n + 1) == 0 { 0.0 } else { f64::NEG_INFINITY };
+                *v = if i % (n + 1) == 0 {
+                    0.0
+                } else {
+                    f64::NEG_INFINITY
+                };
             }
             levels.push(id);
         }
@@ -1129,7 +1156,10 @@ impl ParallelTree<'_> {
                 continue;
             }
             let row = &self.logits[t * self.fa.vocab..(t + 1) * self.fa.vocab];
-            let (a, b) = (self.fa.emit_start[e] as usize, self.fa.emit_start[e + 1] as usize);
+            let (a, b) = (
+                self.fa.emit_start[e] as usize,
+                self.fa.emit_start[e + 1] as usize,
+            );
             let toks = &self.fa.emit_tokens[a..b];
             if std::env::var("FA_DEBUG").is_ok() {
                 println!("t={t} s={s} d={d} edge={e:?}");
@@ -1160,13 +1190,7 @@ impl ParallelTree<'_> {
         let n = self.n;
         let levels = &self.scratch.levels;
         let leaf_off = self.level_off(0);
-        let one = |m: f64| -> f64 {
-            if m == f64::NEG_INFINITY {
-                0.0
-            } else {
-                m.exp()
-            }
-        };
+        let one = |m: f64| -> f64 { if m == f64::NEG_INFINITY { 0.0 } else { m.exp() } };
         // Forward prefixes F[0..=len]: F[0] = I; F[t+1] = F[t]·M_t.
         let mut fwd: Vec<Vec<f64>> = Vec::with_capacity(self.len + 1);
         let mut id = vec![0.0f64; n * n];
@@ -1244,16 +1268,14 @@ impl ParallelTree<'_> {
                     if flow == 0.0 {
                         continue;
                     }
-                    let (a, b) =
-                        (self.fa.emit_start[e] as usize, self.fa.emit_start[e + 1] as usize);
+                    let (a, b) = (
+                        self.fa.emit_start[e] as usize,
+                        self.fa.emit_start[e + 1] as usize,
+                    );
                     let pin = self.forced[t];
                     for &v in &self.fa.emit_tokens[a..b] {
                         let w = if pin != FREE {
-                            if v == pin {
-                                1.0
-                            } else {
-                                0.0
-                            }
+                            if v == pin { 1.0 } else { 0.0 }
                         } else {
                             ((row[v as usize] as f64) / temp - gmax).exp()
                         };
@@ -1276,19 +1298,16 @@ impl ParallelTree<'_> {
 
 /// Token draw given the crossed edge's token set — temperature multinomial
 /// (greedy is handled at the call site; the raw argmax needs no draw).
-fn draw_token_from_edge(
-    toks: &[u32],
-    row: &[f32],
-    temp: f32,
-    rng: &mut SplitMix64,
-) -> u32 {
+fn draw_token_from_edge(toks: &[u32], row: &[f32], temp: f32, rng: &mut SplitMix64) -> u32 {
     let t = temp as f64;
-    let weights: Vec<f64> = toks.iter().map(|&v| (row[v as usize] as f64 / t).exp()).collect();
+    let weights: Vec<f64> = toks
+        .iter()
+        .map(|&v| (row[v as usize] as f64 / t).exp())
+        .collect();
     toks[draw_categorical(&weights, rng)]
     // (exp(l/T) without a shift: test-scale logits stay in f64 range; the
     // sequential sampler shifts because it is the f32 hot path.)
 }
-
 
 #[cfg(test)]
 mod tests {
@@ -1398,8 +1417,17 @@ mod tests {
             let mut scratch = FaScratch::new();
             let mut rng = SplitMix64::new(seed ^ (i as u64).wrapping_mul(0x9E37_79B9_7F4A_7C15));
             let mut out = vec![0u32; len];
-            fa.sample_joint(&mut scratch, logits, len, forced, temp, false, &mut rng, &mut out)
-                .expect("draw");
+            fa.sample_joint(
+                &mut scratch,
+                logits,
+                len,
+                forced,
+                temp,
+                false,
+                &mut rng,
+                &mut out,
+            )
+            .expect("draw");
             out
         })
     }
@@ -1424,7 +1452,10 @@ mod tests {
             .edge(1, 2, &[0, 1, 2, 3])
             .build()
             .unwrap_err();
-        assert!(matches!(err, FaError::DuplicateEdgeToken { node: 0, token: 1 }));
+        assert!(matches!(
+            err,
+            FaError::DuplicateEdgeToken { node: 0, token: 1 }
+        ));
 
         // Duplicate token WITHIN one edge.
         let err = AutomatonBuilder::new(2, 4, 0)
@@ -1432,19 +1463,26 @@ mod tests {
             .edge(0, 1, &[2, 2])
             .build()
             .unwrap_err();
-        assert!(matches!(err, FaError::DuplicateTokenInEdge { token: 2, .. }));
+        assert!(matches!(
+            err,
+            FaError::DuplicateTokenInEdge { token: 2, .. }
+        ));
 
         // Empty edge + out-of-range token + bad start.
-        assert!(AutomatonBuilder::new(2, 4, 0)
-            .accept(1)
-            .edge(0, 1, &[])
-            .build()
-            .is_err());
-        assert!(AutomatonBuilder::new(2, 4, 0)
-            .accept(1)
-            .edge(0, 1, &[9])
-            .build()
-            .is_err());
+        assert!(
+            AutomatonBuilder::new(2, 4, 0)
+                .accept(1)
+                .edge(0, 1, &[])
+                .build()
+                .is_err()
+        );
+        assert!(
+            AutomatonBuilder::new(2, 4, 0)
+                .accept(1)
+                .edge(0, 1, &[9])
+                .build()
+                .is_err()
+        );
         assert!(AutomatonBuilder::new(2, 4, 5).accept(1).build().is_err());
     }
 
@@ -1460,7 +1498,9 @@ mod tests {
             .build()
             .unwrap();
         let len = 3;
-        let logits: Vec<f32> = (0..(len * 4)).map(|i| ((i * 7919) % 23) as f32 - 8.0).collect();
+        let logits: Vec<f32> = (0..(len * 4))
+            .map(|i| ((i * 7919) % 23) as f32 - 8.0)
+            .collect();
         let forced = [FREE; 3];
         let exact = brute_force(&fa, &logits, len, &forced, 1.0);
         let tv = tv_distance(&exact, sample_iter(&fa, &logits, len, &forced, 1.0, 42), 4);
@@ -1479,7 +1519,9 @@ mod tests {
             .build()
             .unwrap();
         let len = 4;
-        let logits: Vec<f32> = (0..(len * 2)).map(|i| ((i * 104729) % 17) as f32 - 6.0).collect();
+        let logits: Vec<f32> = (0..(len * 2))
+            .map(|i| ((i * 104729) % 17) as f32 - 6.0)
+            .collect();
         let forced = [FREE; 4];
         let exact = brute_force(&fa, &logits, len, &forced, 1.0);
         let tv = tv_distance(&exact, sample_iter(&fa, &logits, len, &forced, 1.0, 7), 2);
@@ -1543,14 +1585,18 @@ mod tests {
                 }
             }
             let fa = b.build().expect("generator must satisfy the invariants");
-            let logits: Vec<f32> =
-                (0..(len * vocab)).map(|i| ((i * 65537 + 11) % 29) as f32 - 11.0).collect();
+            let logits: Vec<f32> = (0..(len * vocab))
+                .map(|i| ((i * 65537 + 11) % 29) as f32 - 11.0)
+                .collect();
             let forced = [FREE; 3];
             let exact = brute_force(&fa, &logits, len, &forced, 1.0);
             // The spine guarantees a satisfiable block, so the posterior has
             // mass — assert it rather than skipping (a vacuous pass here
             // would hide a sampler bug).
-            assert!(exact.iter().sum::<f64>() > 0.0, "case {case}: unsatisfiable");
+            assert!(
+                exact.iter().sum::<f64>() > 0.0,
+                "case {case}: unsatisfiable"
+            );
             let tv = tv_distance(
                 &exact,
                 sample_iter(&fa, &logits, len, &forced, 1.0, 100 + case),
@@ -1570,7 +1616,9 @@ mod tests {
             .build()
             .unwrap();
         let len = 5;
-        let logits: Vec<f32> = (0..(len * 3)).map(|i| ((i * 7919) % 13) as f32 - 4.0).collect();
+        let logits: Vec<f32> = (0..(len * 3))
+            .map(|i| ((i * 7919) % 13) as f32 - 4.0)
+            .collect();
         let forced = [FREE; 5];
         for seq in sample_iter(&fa, &logits, len, &forced, 1.0, 99) {
             let end = fa.walk(&seq).expect("walk must survive (determinism)");
@@ -1593,7 +1641,16 @@ mod tests {
         let mut out = [0u32; 1];
         let logits1 = [0.0f32; 2];
         let err = fa
-            .sample_joint(&mut scratch, &logits1, 1, &[FREE], 1.0, false, &mut rng, &mut out)
+            .sample_joint(
+                &mut scratch,
+                &logits1,
+                1,
+                &[FREE],
+                1.0,
+                false,
+                &mut rng,
+                &mut out,
+            )
             .unwrap_err();
         assert!(matches!(err, FaError::Unsatisfiable { len: 1 }));
 
@@ -1614,23 +1671,66 @@ mod tests {
         // Dead start (logits shape-check first — supply a well-shaped row).
         let fa3 = AutomatonBuilder::new(2, 2, 1).accept(0).build().unwrap();
         let err = fa3
-            .sample_joint(&mut scratch, &[0.0f32; 4], 2, &[FREE; 2], 1.0, false, &mut rng, &mut [0u32; 2])
+            .sample_joint(
+                &mut scratch,
+                &[0.0f32; 4],
+                2,
+                &[FREE; 2],
+                1.0,
+                false,
+                &mut rng,
+                &mut [0u32; 2],
+            )
             .unwrap_err();
         assert!(matches!(err, FaError::DeadStart(1)));
 
         // Shape guards (they fire before any satisfiability work).
-        let fa4 = AutomatonBuilder::new(2, 2, 0).accept(1).edge(0, 1, &[0, 1]).build().unwrap();
+        let fa4 = AutomatonBuilder::new(2, 2, 0)
+            .accept(1)
+            .edge(0, 1, &[0, 1])
+            .build()
+            .unwrap();
         let logits2 = [0.0f32; 4];
         let mut out2 = [0u32; 2];
-        assert!(fa4
-            .sample_joint(&mut scratch, &logits2, 2, &[FREE], 1.0, false, &mut rng, &mut out2)
-            .is_err());
-        assert!(fa4
-            .sample_joint(&mut scratch, &logits2, 2, &[FREE; 2], 1.0, false, &mut rng, &mut [0u32; 3])
-            .is_err());
-        assert!(fa4
-            .sample_joint(&mut scratch, &[0.0; 5], 2, &[FREE; 2], 1.0, false, &mut rng, &mut out2)
-            .is_err());
+        assert!(
+            fa4.sample_joint(
+                &mut scratch,
+                &logits2,
+                2,
+                &[FREE],
+                1.0,
+                false,
+                &mut rng,
+                &mut out2
+            )
+            .is_err()
+        );
+        assert!(
+            fa4.sample_joint(
+                &mut scratch,
+                &logits2,
+                2,
+                &[FREE; 2],
+                1.0,
+                false,
+                &mut rng,
+                &mut [0u32; 3]
+            )
+            .is_err()
+        );
+        assert!(
+            fa4.sample_joint(
+                &mut scratch,
+                &[0.0; 5],
+                2,
+                &[FREE; 2],
+                1.0,
+                false,
+                &mut rng,
+                &mut out2
+            )
+            .is_err()
+        );
     }
 
     #[test]
@@ -1667,8 +1767,17 @@ mod tests {
         let mut out = [0u32; 2];
         let forced = [FREE; 2];
         let mut rng = SplitMix64::new(3);
-        fa.sample_joint(&mut scratch, &logits, len, &forced, 1.0, true, &mut rng, &mut out)
-            .unwrap();
+        fa.sample_joint(
+            &mut scratch,
+            &logits,
+            len,
+            &forced,
+            1.0,
+            true,
+            &mut rng,
+            &mut out,
+        )
+        .unwrap();
         assert_eq!(out, [0, 2]);
     }
 
@@ -1711,7 +1820,8 @@ mod tests {
             let mut rng = SplitMix64::new(seed ^ (i as u64).wrapping_mul(0x9E37_79B9_7F4A_7C15));
             let mut out = vec![0u32; len];
             let mut nan = 0u64;
-            tree.sample(argmax, &mut rng, &mut nan, &mut out).expect("draw");
+            tree.sample(argmax, &mut rng, &mut nan, &mut out)
+                .expect("draw");
             assert_eq!(nan, 0, "unexpected NaN fallback");
             out
         })
@@ -1730,8 +1840,9 @@ mod tests {
             .build()
             .unwrap();
         let len = 5;
-        let logits: Vec<f32> =
-            (0..(len * 2)).map(|i| ((i * 104729) % 17) as f32 - 6.0).collect();
+        let logits: Vec<f32> = (0..(len * 2))
+            .map(|i| ((i * 104729) % 17) as f32 - 6.0)
+            .collect();
         let forced = [FREE; 5];
         let exact = brute_force(&fa, &logits, len, &forced, 1.0);
         let tv_par = tv_distance(
@@ -1740,11 +1851,7 @@ mod tests {
             2,
         );
         assert!(tv_par < 0.03, "parallel tv {tv_par}");
-        let tv_seq = tv_distance(
-            &exact,
-            sample_iter(&fa, &logits, len, &forced, 1.0, 78),
-            2,
-        );
+        let tv_seq = tv_distance(&exact, sample_iter(&fa, &logits, len, &forced, 1.0, 78), 2);
         assert!(tv_seq < 0.03, "sequential tv {tv_seq}");
         // Mutual agreement is bounded by the sum of the two bars above.
 
@@ -1772,8 +1879,9 @@ mod tests {
             .build()
             .unwrap();
         let len = 4; // exactly 2² — no padding
-        let logits: Vec<f32> =
-            (0..(len * 3)).map(|i| ((i * 65537) % 19) as f32 - 5.0).collect();
+        let logits: Vec<f32> = (0..(len * 3))
+            .map(|i| ((i * 65537) % 19) as f32 - 5.0)
+            .collect();
         let forced = [FREE; 4];
         let exact = brute_force(&fa, &logits, len, &forced, 1.0);
         let tv = tv_distance(
@@ -1795,7 +1903,9 @@ mod tests {
         let len = 2;
         let logits = [5.0f32, -9.0, -9.0, -9.0, -9.0, 4.0]; // pos1 favors 2
         let mut scratch = TreeScratch::new();
-        let tree = fa.build_tree(&mut scratch, &logits, len, &[FREE; 2], 1.0).unwrap();
+        let tree = fa
+            .build_tree(&mut scratch, &logits, len, &[FREE; 2], 1.0)
+            .unwrap();
         let mut out = [0u32; 2];
         let mut rng = SplitMix64::new(3);
         let mut nan = 0u64;
@@ -1814,8 +1924,9 @@ mod tests {
             .build()
             .unwrap();
         let len = 3;
-        let logits: Vec<f32> =
-            (0..(len * 4)).map(|i| ((i * 7919) % 23) as f32 - 8.0).collect();
+        let logits: Vec<f32> = (0..(len * 4))
+            .map(|i| ((i * 7919) % 23) as f32 - 8.0)
+            .collect();
         let forced = [FREE; 3];
         let mut scratch = TreeScratch::new();
         let tree = fa
@@ -1844,10 +1955,7 @@ mod tests {
                         p += q;
                     }
                 }
-                assert!(
-                    (mv - p).abs() < 1e-9,
-                    "t={t} v={v}: {mv} vs {p}"
-                );
+                assert!((mv - p).abs() < 1e-9, "t={t} v={v}: {mv} vs {p}");
             }
         }
     }
@@ -1929,7 +2037,15 @@ mod tests {
             let mut rng = SplitMix64::new(seed ^ (i as u64).wrapping_mul(0x9E37_79B9_7F4A_7C15));
             let mut out = vec![0u32; len];
             fa.sample_joint_from(
-                &mut scratch, start, logits, len, forced, temp, false, &mut rng, &mut out,
+                &mut scratch,
+                start,
+                logits,
+                len,
+                forced,
+                temp,
+                false,
+                &mut rng,
+                &mut out,
             )
             .expect("draw");
             out
@@ -1955,13 +2071,18 @@ mod tests {
             .unwrap();
         let start = 1;
         let len = 3;
-        let logits: Vec<f32> =
-            (0..(len * 3)).map(|i| ((i * 7919) % 23) as f32 - 8.0).collect();
+        let logits: Vec<f32> = (0..(len * 3))
+            .map(|i| ((i * 7919) % 23) as f32 - 8.0)
+            .collect();
         let forced = [FREE; 3];
 
         // Sequential lane.
         let exact = brute_force_from(&fa, start, &logits, len, &forced, 1.0);
-        let tv = tv_distance(&exact, sample_iter_from(&fa, start, &logits, len, &forced, 1.0, 91), 3);
+        let tv = tv_distance(
+            &exact,
+            sample_iter_from(&fa, start, &logits, len, &forced, 1.0, 91),
+            3,
+        );
         assert!(tv < 0.03, "carry-over sequential tv {tv}");
 
         // Parallel lane (len 3 → 4 leaves, one identity pad).
@@ -1976,11 +2097,11 @@ mod tests {
                 let tree = fa
                     .build_tree_from(&mut scratch, start, &logits, len, &forced, 1.0)
                     .expect("tree");
-                let mut rng =
-                    SplitMix64::new(97 ^ (i as u64).wrapping_mul(0x9E37_79B9_7F4A_7C15));
+                let mut rng = SplitMix64::new(97 ^ (i as u64).wrapping_mul(0x9E37_79B9_7F4A_7C15));
                 let mut out = vec![0u32; len];
                 let mut nan = 0u64;
-                tree.sample(false, &mut rng, &mut nan, &mut out).expect("draw");
+                tree.sample(false, &mut rng, &mut nan, &mut out)
+                    .expect("draw");
                 assert_eq!(nan, 0);
                 out
             }),
@@ -2007,7 +2128,10 @@ mod tests {
                         p += q;
                     }
                 }
-                assert!((mv - p).abs() < 1e-9, "carry-over marg t={t} v={v}: {mv} vs {p}");
+                assert!(
+                    (mv - p).abs() < 1e-9,
+                    "carry-over marg t={t} v={v}: {mv} vs {p}"
+                );
             }
         }
     }
@@ -2023,8 +2147,17 @@ mod tests {
         // Out-of-range start nodes refuse on both lanes.
         let mut s = FaScratch::new();
         assert!(matches!(
-            fa.sample_joint_from(&mut s, 7, &[0.0; 2], 1, &[FREE], 1.0, false,
-                                 &mut SplitMix64::new(1), &mut [0u32; 1]),
+            fa.sample_joint_from(
+                &mut s,
+                7,
+                &[0.0; 2],
+                1,
+                &[FREE],
+                1.0,
+                false,
+                &mut SplitMix64::new(1),
+                &mut [0u32; 1]
+            ),
             Err(FaError::BadStart(7))
         ));
         let mut t = TreeScratch::new();
