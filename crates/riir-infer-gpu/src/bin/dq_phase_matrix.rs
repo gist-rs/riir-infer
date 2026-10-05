@@ -1123,24 +1123,34 @@ fn run() -> Result<(), String> {
         md.push_str(&format!(
             "- **kv[{gname}] prefill-heavy (pooled)**: acc base={base_n:.4} kv={kv_n:.4}; Δkv={dkv_n:.4}; CI=[{lo2:.4},{hi2:.4}] → **{label_n}**\n"
         ));
-        // the pf×kv interaction (decode-heavy)
-        if let Some(pfkv) = cells.get(&format!("pfkv_aq.{gname}")) {
-            let pf = cells
-                .get(&format!("pf_aq.{gname}"))
-                .ok_or_else(|| format!("missing pf_aq.{gname} for the interaction row"))?;
-            let d_i: Vec<i8> = pfkv
-                .arith_correct
-                .iter()
-                .zip(pf.arith_correct.iter())
-                .map(|(a, b)| (*a as i8) - (*b as i8))
-                .collect();
-            let (loi, hii) = paired_bootstrap_ci(&d_i, n_boot);
-            let pfkv_acc = acc_of(&pfkv.arith_correct);
-            let pf_acc = acc_of(&pf.arith_correct);
-            let dpi = pf_acc - pfkv_acc;
-            md.push_str(&format!(
-                "- **interaction pf→pfkv [{gname}] decode-heavy**: pf={pf_acc:.4} pfkv={pfkv_acc:.4}; Δ(kv|pf armed)={dpi:.4}; CI=[{loi:.4},{hii:.4}] (marginal KV damage ON TOP of prefill quant)\n"
-            ));
+        // the pf×kv interaction (decode-heavy) — needs the SAME-grid pf cell
+        // (an interaction against a different activation grid would mix
+        // grids); skipped loud when the activation sweep didn't include it.
+        match (
+            cells.get(&format!("pf_aq.{gname}")),
+            cells.get(&format!("pfkv_aq.{gname}")),
+        ) {
+            (Some(pf), Some(pfkv)) => {
+                let d_i: Vec<i8> = pfkv
+                    .arith_correct
+                    .iter()
+                    .zip(pf.arith_correct.iter())
+                    .map(|(a, b)| (*a as i8) - (*b as i8))
+                    .collect();
+                let (loi, hii) = paired_bootstrap_ci(&d_i, n_boot);
+                let pfkv_acc = acc_of(&pfkv.arith_correct);
+                let pf_acc = acc_of(&pf.arith_correct);
+                let dpi = pf_acc - pfkv_acc;
+                md.push_str(&format!(
+                    "- **interaction pf→pfkv [{gname}] decode-heavy**: pf={pf_acc:.4} pfkv={pfkv_acc:.4}; Δ(kv|pf armed)={dpi:.4}; CI=[{loi:.4},{hii:.4}] (marginal KV damage ON TOP of prefill quant)\n"
+                ));
+            }
+            (None, Some(_)) => {
+                md.push_str(&format!(
+                    "- interaction [{gname}]: SKIPPED — no same-grid pf_aq cell (DQ_GRIDS did not include {gname})\n"
+                ));
+            }
+            _ => {}
         }
     }
     // Axis dominance summary (the issue's deliverable): rank |Δ| at the
