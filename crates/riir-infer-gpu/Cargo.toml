@@ -279,6 +279,13 @@ required-features = ["cubecl_runtime", "ternary_gemm_batched", "ternary_deltanet
 name = "dq_phase_matrix"
 required-features = ["dq_phase_bench", "ternary_gemv_cuda_raw", "ternary_gemm_batched"]
 
+# Issue 031 T-root-cause — the Windows CUDA teardown-hang repro harness
+# (the whole-file #![cfg] keeps non-CUDA hosts an empty target; this row is
+# the reader protection).
+[[bin]]
+name = "dq614_teardown_repro"
+required-features = ["ternary_gemv_cuda_raw"]
+
 [[bin]]
 name = "qwen38_pyramid_capture"
 required-features = ["ternary_gemv_cuda_raw"]

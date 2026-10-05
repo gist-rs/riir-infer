@@ -46,7 +46,10 @@
 //! 4090 lane (folded prefill is CUDA-only). GPU-EXCLUSIVE (the AGENTS rule):
 //! refuses on co-resident compute apps. Env: `BONSAI_GGUF` · `DQ_OUT` ·
 //! `DQ_GRIDS` (a2,a4) · `DQ_ARITH_N` (48) · `DQ_NI_LENGTHS` (4096,8192,16384)
-//! · `DQ_NI_PER_LEN` (32) · `DQ_BOOTSTRAP` (10000) · `DQ_LANE_CHECK_ONLY` (1).
+//! · `DQ_NI_PER_LEN` (32) · `DQ_BOOTSTRAP` (10000) · `DQ_LANE_CHECK_ONLY` (1). Issue 031 repro axes
+//! (no-op by default, never set by the runner): `DQ614_FORCE_FATAL=1` FATALs
+//! after the G-i1/G-i4 base cells (both GPU stacks warm) · `DQ614_EXIT_PLAIN=1`
+//! takes the v1 plain-exit error path instead of hard_exit.
 //! (The header's `DQ_CELLS` subset knob was documented but never implemented;
 //! smokes narrow via `DQ_GRIDS` + the N knobs.)
 
@@ -498,6 +501,13 @@ fn main() {
 fn main() {
     if let Err(e) = run() {
         eprintln!("[dq614] FATAL: {e}");
+        // Issue 031 repro axis: DQ614_EXIT_PLAIN=1 restores the v1 error
+        // path (std::process::exit — the hang site, by elimination) for the
+        // teardown A/B; the default stays hard_exit (the landed defense).
+        if std::env::var("DQ614_EXIT_PLAIN").as_deref() == Ok("1") {
+            eprintln!("[dq614] DQ614_EXIT_PLAIN=1 — taking the v1 plain-exit path (repro axis)");
+            std::process::exit(1);
+        }
         hard_exit(1);
     }
 }
@@ -828,6 +838,16 @@ fn run() -> Result<(), String> {
     }
     cells.insert("base".into(), base1);
     let _ = base2;
+
+    // Issue 031 T-root-cause: the error-path repro knob (no-op by default).
+    // With DQ614_FORCE_FATAL=1 the run FATALs here — both GPU stacks (cudarc
+    // + CubeCL) warm, real launches done, the exact v1 error-path shape —
+    // and main routes the FATAL per DQ614_EXIT_PLAIN (old path) or the
+    // default hard_exit (the landed defense). A/B instrument, never set by
+    // the runner.
+    if env_or("DQ614_FORCE_FATAL", "0") == "1" {
+        return Err("forced FATAL (Issue 031 repro: DQ614_FORCE_FATAL=1)".into());
+    }
 
     if lane_check_only {
         let acc = cells["base"].arith_correct.iter().filter(|x| **x).count() as f64
