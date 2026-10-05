@@ -41,6 +41,9 @@ cargo test --lib
 # required-features (see Cargo.toml [[test]] rows):
 cargo test --test issue879_gdn_quant_certification --features deltanet_ternary_inference
 cargo test --test bonsai2_rotation_load --features bonsai2_hadamard
+# Issue 028 disaggregated container + phase handoff (synthetic battery; the
+# real 6.7 GB PQ2_0 arm is #[ignore]d — BONSAI_PQ2_0_GGUF env, release run):
+cargo test --test issue028_disaggregated_handoff --features deltanet_ternary_inference
 # BONSAI_GGUF env (defaults to a riir-train data path) names the real
 # checkpoint for the certification test's full-file arm.
 # The EXL3 trellis lane (opt-in; issue 001, closed — record in .docs/001; CPU reference + fast arm here,

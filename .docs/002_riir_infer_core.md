@@ -67,6 +67,26 @@ inference-only graph / T-C riir-ai contention top pain) and is then executed as
 the first act of the pulling campaign. The runbook is
 [Proposal 041 §Session 5](../.proposals/041_riir_infer_model_based_inference_split.md) — Phase-2 deferral record.
 
+## The disaggregated container (Issue 028, 2026-10-06)
+
+`disaggregated.rs` — the dual-PTQ disaggregated serving container (Research
+004, arXiv:2609.26333): one checkpoint quantized twice (compact decode copy +
+higher-precision prefill copy), the prompt run through the prefill copy, the
+resulting `HybridCache` handed off IN-PROCESS, generation continuing on the
+decode copy. Container forms: two GGUFs (`load_pair` — compat checked on the
+`qwen35.*` metadata plane BEFORE either copy dequantizes) or one file whose
+prefill tensors carry the `.pf` suffix (`load_single_file`, read through the
+suffix-parameterized `load_qwen_deltanet_ternary_from_gguf`); `from_single`
+is the degenerate same-weights container. The T2 escape law refuses loudly
+when `ssm_a`/`ssm_dt.bias`/`ssm_alpha`/`ssm_beta` are not bit-shared between
+the copies (the paper's Appendix A.2 + our Issue-980 set). G1 gate: the
+same-weights phase split is byte-identical to the single-checkpoint loop —
+pinned on the synthetic contract AND on the real 6.7 GB
+`Ternary-Bonsai-2-27B-PQ2_0.gguf` pack (`tests/issue028_disaggregated_handoff.rs`,
+the real arm `#[ignore]`d, `BONSAI_PQ2_0_GGUF` env). T4 (the dual-PTQ
+accuracy measurement — needs a q4-class prefill pack to exist) and T5 (ODP,
+deferred by default) remain open in `.issues/028`.
+
 ## See also
 
 - [Proposal 041](../.proposals/041_riir_infer_model_based_inference_split.md) — the split decision record (sessions 1–5)

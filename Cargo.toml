@@ -282,6 +282,17 @@ required-features = ["deltanet_ternary_inference"]
 name = "bonsai2_rotation_load"
 required-features = ["bonsai2_hadamard"]
 
+# Issue 028 T1/T2 — the disaggregated container + phase-handoff battery
+# (same-weights byte-identity through the phase split, boundary-freshness
+# negative control, one-file `.pf` container, escape-set + compat refusals).
+# Whole-file #![cfg(feature = "deltanet_ternary_inference")] protects the
+# count; this row protects the reader (a --features selection without the
+# union SKIPS the target loudly instead of printing a green zero).
+[[test]]
+name = "issue028_disaggregated_handoff"
+path = "tests/issue028_disaggregated_handoff.rs"
+required-features = ["deltanet_ternary_inference"]
+
 # katgpt-rs Issue 883 P0 — the V/K calibration dashboard bin. The module
 # lives behind #[cfg(feature = "vk_calibration")]; this row is the reader
 # protection (the green-zero law): a default build SKIPS the bin loudly

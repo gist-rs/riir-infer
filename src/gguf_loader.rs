@@ -2057,19 +2057,45 @@ pub fn load_qwen_deltanet_ternary_weights_gguf(
     Config,
     crate::deltanet::ternary_weights::QwenDeltaNetTernaryWeights,
 )> {
+    let gguf = GgufFile::open(path)?;
+    load_qwen_deltanet_ternary_from_gguf(&gguf, "")
+}
+
+/// Issue 028 T1 — the suffix-parameterized ternary loader.
+///
+/// Loads one weight copy from an ALREADY-OPEN GGUF, appending
+/// `tensor_suffix` to every TENSOR-name lookup. `""` is the standard
+/// spelling (byte-identical to [`load_qwen_deltanet_ternary_weights_gguf`]);
+/// [`crate::disaggregated::PREFILL_TENSOR_SUFFIX`] reads the prefill copy of
+/// a one-file dual-tensor disaggregated container (`<name>.pf` beside the
+/// bare decode set).
+///
+/// Metadata (arch check, geometry, `prism.hadamard.*`) is read from the SAME
+/// shared keys in both modes — only tensor NAMES move — so both copies of a
+/// one-file container parse identical rotation configs by construction.
+#[cfg(feature = "deltanet_ternary_inference")]
+pub fn load_qwen_deltanet_ternary_from_gguf(
+    gguf: &GgufFile,
+    tensor_suffix: &str,
+) -> Result<(
+    Config,
+    crate::deltanet::ternary_weights::QwenDeltaNetTernaryWeights,
+)> {
     use crate::deltanet::ternary_weights::{
         DeltaNetTernaryLayerWeights, GateProjWeights, QwenDeltaNetTernaryWeights,
     };
     use katgpt_core::TernaryGroupWeights;
 
-    let gguf = GgufFile::open(path)?;
+    // Append the container suffix to a tensor name (identity for the
+    // standard spellings — a `///` on a let binding is an unused doc comment).
+    let sfx = |name: &str| format!("{name}{tensor_suffix}");
 
     let arch = gguf.architecture().unwrap_or("unknown");
     if arch != "qwen35" {
         bail!("expected qwen35 architecture, got '{arch}'");
     }
 
-    let (config, layer_types) = qwen35_deltanet_config_from_gguf_metadata(&gguf)?;
+    let (config, layer_types) = qwen35_deltanet_config_from_gguf_metadata(gguf)?;
     let n_layer = config.n_layer;
 
     // Issue 980 (T1): a file declaring prism.hadamard must be honored or
@@ -2078,7 +2104,7 @@ pub fn load_qwen_deltanet_ternary_weights_gguf(
     // stock-llama.cpp-class garbage (the dev repo's Q2_0-prism-fork-required
     // fixture exists to make that failure loud).
     #[cfg(feature = "bonsai2_hadamard")]
-    let rotation = crate::deltanet::rotation::parse_prism_hadamard(&gguf)?;
+    let rotation = crate::deltanet::rotation::parse_prism_hadamard(gguf)?;
     #[cfg(not(feature = "bonsai2_hadamard"))]
     {
         if gguf.metadata_u64("prism.hadamard.version").is_some() {
@@ -2094,11 +2120,11 @@ pub fn load_qwen_deltanet_ternary_weights_gguf(
 
     // Global weights — token_embd.weight and output.weight are Q2_0 (type 42).
     // Staying ternary saves ~10 GB vs dequantizing to f32.
-    let wte = load_ternary_proj(&gguf, "token_embd.weight")?;
-    let final_norm = gguf.dequant_f16_to_f32("output_norm.weight")?;
+    let wte = load_ternary_proj(gguf, &sfx("token_embd.weight"))?;
+    let final_norm = gguf.dequant_f16_to_f32(&sfx("output_norm.weight"))?;
     // output.weight may be absent if tied; check before loading.
-    let lm_head = if gguf.tensor_info("output.weight").is_some() {
-        load_ternary_proj(&gguf, "output.weight")?
+    let lm_head = if gguf.tensor_info(&sfx("output.weight")).is_some() {
+        load_ternary_proj(gguf, &sfx("output.weight"))?
     } else {
         // Tied embeddings — clone the bit-plane layout. TernaryGroupWeights is
         // all-Vec, so this is a deep copy of the bit-planes + scales.
@@ -2113,24 +2139,24 @@ pub fn load_qwen_deltanet_ternary_weights_gguf(
             let ln = qwen35_deltanet_gguf_names(i);
 
             // Ternary projections (Q2_0 → repack)
-            let in_proj_qkv = load_ternary_proj(&gguf, &ln.attn_qkv)?;
-            let in_proj_z = load_ternary_proj(&gguf, &ln.attn_gate)?;
+            let in_proj_qkv = load_ternary_proj(gguf, &sfx(&ln.attn_qkv))?;
+            let in_proj_z = load_ternary_proj(gguf, &sfx(&ln.attn_gate))?;
             // Issue 980 T2: a/b dispatch on storage type (ternary old file /
             // dense BF16 Bonsai 2).
-            let in_proj_a = load_gate_proj(&gguf, &ln.ssm_alpha)?;
-            let in_proj_b = load_gate_proj(&gguf, &ln.ssm_beta)?;
-            let out_proj = load_ternary_proj(&gguf, &ln.ssm_out)?;
-            let gate_proj = load_ternary_proj(&gguf, &ln.ffn_gate)?;
-            let up_proj = load_ternary_proj(&gguf, &ln.ffn_up)?;
-            let down_proj = load_ternary_proj(&gguf, &ln.ffn_down)?;
+            let in_proj_a = load_gate_proj(gguf, &sfx(&ln.ssm_alpha))?;
+            let in_proj_b = load_gate_proj(gguf, &sfx(&ln.ssm_beta))?;
+            let out_proj = load_ternary_proj(gguf, &sfx(&ln.ssm_out))?;
+            let gate_proj = load_ternary_proj(gguf, &sfx(&ln.ffn_gate))?;
+            let up_proj = load_ternary_proj(gguf, &sfx(&ln.ffn_up))?;
+            let down_proj = load_ternary_proj(gguf, &sfx(&ln.ffn_down))?;
 
             // Dense fields (F32 in GGUF)
-            let conv1d_weight = gguf.dequant_f16_to_f32(&ln.ssm_conv1d)?;
-            let a_log = gguf.dequant_f16_to_f32(&ln.ssm_a)?;
-            let dt_bias = gguf.dequant_f16_to_f32(&ln.ssm_dt)?;
-            let linear_norm = gguf.dequant_f16_to_f32(&ln.ssm_norm)?;
-            let input_norm = gguf.dequant_f16_to_f32(&ln.attn_norm)?;
-            let post_attn_norm = gguf.dequant_f16_to_f32(&ln.post_attn_norm)?;
+            let conv1d_weight = gguf.dequant_f16_to_f32(&sfx(&ln.ssm_conv1d))?;
+            let a_log = gguf.dequant_f16_to_f32(&sfx(&ln.ssm_a))?;
+            let dt_bias = gguf.dequant_f16_to_f32(&sfx(&ln.ssm_dt))?;
+            let linear_norm = gguf.dequant_f16_to_f32(&sfx(&ln.ssm_norm))?;
+            let input_norm = gguf.dequant_f16_to_f32(&sfx(&ln.attn_norm))?;
+            let post_attn_norm = gguf.dequant_f16_to_f32(&sfx(&ln.post_attn_norm))?;
 
             DeltaNetTernaryLayerWeights {
                 // Full attention: empty for DeltaNet layers
@@ -2164,19 +2190,19 @@ pub fn load_qwen_deltanet_ternary_weights_gguf(
             // Ternary projections (Q2_0 → repack)
             // NOTE (Issue 594): blk.N.attn_q is [5120 × 12288] = q concatenated
             // with a gate. The loader loads it as-is; the forward pass splits.
-            let attn_wq = load_ternary_proj(&gguf, &ln.attn_q)?;
-            let attn_wk = load_ternary_proj(&gguf, &ln.attn_k)?;
-            let attn_wv = load_ternary_proj(&gguf, &ln.attn_v)?;
-            let attn_wo = load_ternary_proj(&gguf, &ln.attn_output)?;
-            let gate_proj = load_ternary_proj(&gguf, &ln.ffn_gate)?;
-            let up_proj = load_ternary_proj(&gguf, &ln.ffn_up)?;
-            let down_proj = load_ternary_proj(&gguf, &ln.ffn_down)?;
+            let attn_wq = load_ternary_proj(gguf, &sfx(&ln.attn_q))?;
+            let attn_wk = load_ternary_proj(gguf, &sfx(&ln.attn_k))?;
+            let attn_wv = load_ternary_proj(gguf, &sfx(&ln.attn_v))?;
+            let attn_wo = load_ternary_proj(gguf, &sfx(&ln.attn_output))?;
+            let gate_proj = load_ternary_proj(gguf, &sfx(&ln.ffn_gate))?;
+            let up_proj = load_ternary_proj(gguf, &sfx(&ln.ffn_up))?;
+            let down_proj = load_ternary_proj(gguf, &sfx(&ln.ffn_down))?;
 
             // Dense fields (F32 in GGUF)
-            let attn_q_norm = gguf.dequant_f16_to_f32(&ln.attn_q_norm)?;
-            let attn_k_norm = gguf.dequant_f16_to_f32(&ln.attn_k_norm)?;
-            let input_norm = gguf.dequant_f16_to_f32(&ln.attn_norm)?;
-            let post_attn_norm = gguf.dequant_f16_to_f32(&ln.post_attn_norm)?;
+            let attn_q_norm = gguf.dequant_f16_to_f32(&sfx(&ln.attn_q_norm))?;
+            let attn_k_norm = gguf.dequant_f16_to_f32(&sfx(&ln.attn_k_norm))?;
+            let input_norm = gguf.dequant_f16_to_f32(&sfx(&ln.attn_norm))?;
+            let post_attn_norm = gguf.dequant_f16_to_f32(&sfx(&ln.post_attn_norm))?;
 
             DeltaNetTernaryLayerWeights {
                 // Full attention

@@ -82,6 +82,12 @@ pub mod dflash;
 /// GGUF weight loading.
 pub mod gguf_loader;
 
+/// Issue 028 — the dual-PTQ disaggregated container (`.pf` one-file law +
+/// two-file pair) and the in-process prefill→decode phase handoff over the
+/// shared `HybridCache`. Opt-in with the ternary lane it serves.
+#[cfg(feature = "deltanet_ternary_inference")]
+pub mod disaggregated;
+
 /// Natural-text corpus loading for the offline calibration bins (the
 /// `chat_probe` HF-pages shape + plain text). One loader, both instruments.
 pub mod corpus_text;
