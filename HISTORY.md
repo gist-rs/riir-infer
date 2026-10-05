@@ -4,7 +4,45 @@ Durable records for resolved questions and closed lanes (the noise-reduction
 convention: the record lands here, hash-pinned; open work lives in `.issues/`
 and `.plans/`). Created 2026-09-23 at the first record.
 
-## 2026-10-06 — Issue 035 P2.5 LANDED: DFA minimization — the G2 ratio drops ~4.4× — this commit
+## 2026-10-06 — Issue 035 P2.6 LANDED: real-vocabulary compile + the row-fold — the honest G2 regime — `ddcaeb0`
+
+Two compile/sampler rebuilds, both needed before a real-vocab number could exist:
+
+1. **The trie-stepped subset construction** (`fa_schema.rs`): tokens live in a
+trie; each source subset walks it once with `(current subset, char)`-memoized
+steps (the memo keys the CONTENT-INTERNED pool subset — the first red run keyed
+the source subset and mid-token subsets collided) and a generation-stamped
+`seen` buffer (the old `closure` allocated a fresh bitmap per char step — the
+compile-time pathology). Cost = trie nodes × subsets-that-reach-them. A 256k
+vocab now compiles the fn-call grammar in 60s (toy 0.13s, object 1.8s).
+Prefix tokens, duplicate-text ids, dead tokens, and a 20k-token scale smoke are
+pinned; all P2 grammar tests unchanged.
+
+2. **The row-fold** (`fa_posterior.rs`, both lanes): one vocab-wide exp row per
+position (`erow` f64, shifted by the vocab max), each edge's fold = `row_max +
+ln Σ erow[v]` with an f64 accumulator. Replaces exp-per-(position, edge, token),
+which recomputed every token's exp once per edge containing it — the 256k-vocab
+string-body edges made that 11.79 s per fn-call draw. The f64 sum keeps the old
+per-edge f32 shift's dynamic range (down to exp(−745)); an all-−INF row folds to
+−INF where the old code produced NaN. Exactness battery unchanged-green (TV,
+1e-9 marginals, carry-over, G4).
+
+The bench gained `--real-vocab <path.gguf>` (GGUF `tokenizer.ggml.tokens`, mmap,
+ids = array index). **gemma-2-2b, 256k vocab, the 4090 box:**
+
+| grammar | raw n/e | min n/e | compile | constrained/unconstrained |
+|---|---|---|---|---|
+| toy-enum | 31/102 | 20/56 | 0.13s | **0.93×** (the floor: both arms pay one vocab exp row) |
+| object-2p | 133/976 | 43/125 | 1.76s | **~1.8×** |
+| fn-call-5p | 2873/27294 | 859/3194 | 60s | **~6.0×** (draw 11.79s → 1.98s at L=256) |
+
+This is the REAL regime (string bodies admit ~every text token), and it is the
+table the P3 owner verdict should read. The fn-call residual ~6× is the Σ|e|
+add pass — the recorded axes are a base+delta fold over near-duplicate body-edge
+sets (compiler+sampler structure change) or the GPU-side fold (P0.5's tree lane
+is the seam). **P3 stays owner-gated.**
+
+## 2026-10-06 — Issue 035 P2.5 LANDED: DFA minimization — the G2 ratio drops ~4.4× — `9e94684`+`672e2b0`
 
 `src/fa_minimize.rs` (UNGATED core, 7 tests): trim (forward-reachable ∧
 co-reachable-to-accept) + partition refinement at BLOCK granularity with
