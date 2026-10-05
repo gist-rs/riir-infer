@@ -405,3 +405,68 @@ fn sampler_round_trip_with_pins_matches_a_partial_instance() {
     let node = fa.walk(&out).expect("pinned draw walks");
     assert!(fa.is_accept(node));
 }
+
+#[test]
+fn compile_minimizes_the_subset_graph_and_stays_grammar_valid() {
+    // The G2 axis (issue 035): the subset construction's 2^k·k member-chain
+    // bloat must collapse under minimization, and the minimized automaton
+    // must keep the sampler's by-construction acceptance.
+    let schema = Schema::Object {
+        properties: vec![
+            ("name".into(), Schema::String),
+            ("age".into(), Schema::Integer),
+            (
+                "tags".into(),
+                Schema::Array {
+                    items: Box::new(Schema::String),
+                },
+            ),
+            (
+                "mode".into(),
+                Schema::AnyOf(vec![Schema::Null, Schema::Boolean, Schema::String]),
+            ),
+            ("note".into(), Schema::String),
+        ],
+        required: vec!["name".into(), "age".into()],
+    };
+    let vocab = toy_vocab();
+    let (fa, stats) = compile_stats(&schema, &vocab).expect("compile");
+
+    // The fn-call-shaped grammar is exactly the case minimization exists
+    // for: the member orders are language-equivalent and must merge.
+    assert!(
+        stats.nodes < stats.raw_nodes,
+        "minimization must shrink the subset graph (raw {}, min {})",
+        stats.raw_nodes,
+        stats.nodes
+    );
+    assert!(stats.edges < stats.raw_edges);
+    assert_eq!(fa.n_nodes(), stats.nodes);
+    assert_eq!(fa.n_edges(), stats.edges);
+
+    // By-construction acceptance through the MINIMIZED automaton.
+    let v = fa.vocab();
+    let len = 24;
+    let logits: Vec<f32> = (0..len * v)
+        .map(|i| (((i * 7919) % 23) as f32 - 8.0) / 4.0)
+        .collect();
+    let forced = vec![FREE; len];
+    let mut scratch = FaScratch::new();
+    for seed in 0..100u64 {
+        let mut rng = SplitMix64::new(seed);
+        let mut out = vec![0u32; len];
+        fa.sample_joint(
+            &mut scratch,
+            &logits,
+            len,
+            &forced,
+            1.0,
+            false,
+            &mut rng,
+            &mut out,
+        )
+        .expect("draw");
+        let node = fa.walk(&out).expect("draw must walk");
+        assert!(fa.is_accept(node), "draw must land accepting");
+    }
+}

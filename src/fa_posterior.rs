@@ -342,6 +342,16 @@ impl Automaton {
         self.edge_dst[edge] as usize
     }
 
+    /// Sorted token set of `edge` — a slice into the concatenated CSR
+    /// buffer (the minimizer reads it to compare state signatures).
+    pub fn edge_tokens(&self, edge: usize) -> &[u32] {
+        let (a, b) = (
+            self.emit_start[edge] as usize,
+            self.emit_start[edge + 1] as usize,
+        );
+        &self.emit_tokens[a..b]
+    }
+
     /// The edge leaving `node` that allows `token`, if any (the determinism
     /// invariant makes it unique). Linear over the node's fanout with a
     /// binary search inside each edge's sorted token set.

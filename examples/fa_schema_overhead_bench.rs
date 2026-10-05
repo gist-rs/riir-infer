@@ -9,12 +9,16 @@
 //! schema automaton), at L ∈ {64, 128, 256} × three grammar scales (toy
 //! enum → 2-prop object → function-call-shaped object).
 //!
+//! Since P2.5 the compiled automaton is MINIMIZED (`fa_schema::compile` →
+//! `fa_minimize`); the `raw n/e` vs `min n/e` columns expose the subset
+//! construction's 2^k·k bloat and what the minimizer collapsed it to.
+//!
 //! CPU-only: no GPU, no model. Box state printed per the G2 provenance law
 //! (the numbers are CPU µs/step on THIS box at THIS moment — record the
 //! line beside any published figure).
 
-use riir_infer_core::fa_posterior::{FaScratch, SplitMix64, FREE};
-use riir_infer_core::fa_schema::{compile, JsonLit, Schema};
+use riir_infer_core::fa_posterior::{FREE, FaScratch, SplitMix64};
+use riir_infer_core::fa_schema::{JsonLit, Schema, compile_stats};
 use std::time::Instant;
 
 fn box_state_line() -> String {
@@ -74,14 +78,16 @@ fn fn_call_schema() -> Schema {
         properties: vec![
             ("name".into(), Schema::String),
             ("id".into(), Schema::Integer),
-            ("tags".into(), Schema::Array {
-                items: Box::new(Schema::String),
-            }),
-            ("mode".into(), Schema::AnyOf(vec![
-                Schema::Null,
-                Schema::Boolean,
-                Schema::String,
-            ])),
+            (
+                "tags".into(),
+                Schema::Array {
+                    items: Box::new(Schema::String),
+                },
+            ),
+            (
+                "mode".into(),
+                Schema::AnyOf(vec![Schema::Null, Schema::Boolean, Schema::String]),
+            ),
             ("note".into(), Schema::String),
         ],
         required: vec!["name".into(), "id".into()],
@@ -101,13 +107,20 @@ fn vocab(scale: usize) -> Vec<(u32, String)> {
         push(&s, &mut v);
     }
     for w in [
-        "true", "false", "null", "name", "age", "id", "tags", "mode", "note",
-        "alice", "bob", "abc",
+        "true", "false", "null", "name", "age", "id", "tags", "mode", "note", "alice", "bob", "abc",
     ] {
         push(w, &mut v);
     }
     if scale >= 2 {
-        for f in ["{\"name\":", ",\"age\":", "\":", "\",\"", "\":null}", "[\"", "\"]"] {
+        for f in [
+            "{\"name\":",
+            ",\"age\":",
+            "\":",
+            "\",\"",
+            "\":null}",
+            "[\"",
+            "\"]",
+        ] {
             push(f, &mut v);
         }
     }
@@ -117,8 +130,8 @@ fn vocab(scale: usize) -> Vec<(u32, String)> {
 fn main() {
     println!("{}", box_state_line());
     println!(
-        "{:<12} {:>5} {:>10} {:>8} {:>8} {:>14} {:>12} {:>10}",
-        "grammar", "L", "vocab", "nodes", "edges", "unconstr µs/st", "constr µs/st", "ratio"
+        "{:<12} {:>5} {:>10} {:>13} {:>13} {:>14} {:>12} {:>10}",
+        "grammar", "L", "vocab", "raw n/e", "min n/e", "unconstr µs/st", "constr µs/st", "ratio"
     );
     let scales = [
         ("toy-enum", enum_schema()),
@@ -128,10 +141,9 @@ fn main() {
     for (gname, schema) in &scales {
         for vscale in 1..=2 {
             let v = vocab(vscale);
-            let v_refs: Vec<(u32, &str)> =
-                v.iter().map(|&(id, ref s)| (id, s.as_str())).collect();
-            let fa =
-                compile(schema, &v_refs).unwrap_or_else(|e| panic!("{gname} v{vscale}: {e}"));
+            let v_refs: Vec<(u32, &str)> = v.iter().map(|&(id, ref s)| (id, s.as_str())).collect();
+            let (fa, stats) =
+                compile_stats(schema, &v_refs).unwrap_or_else(|e| panic!("{gname} v{vscale}: {e}"));
             let vcount = v.len();
             for &len in &[64usize, 128, 256] {
                 let logits: Vec<f32> = (0..len * vcount)
@@ -175,22 +187,33 @@ fn main() {
                 let mut scratch = FaScratch::new();
                 let constrained = best_of_5_us(|| {
                     fa.sample_joint(
-                        &mut scratch, &logits, len, &forced, 1.0, false, &mut rng_c, &mut out,
+                        &mut scratch,
+                        &logits,
+                        len,
+                        &forced,
+                        1.0,
+                        false,
+                        &mut rng_c,
+                        &mut out,
                     )
                     .expect("constrained draw");
                 });
 
                 // Sanity: the constrained draw is grammar-valid.
-                let node = fa.walk(&out).unwrap_or_else(|| panic!("{gname}: draw not grammar-valid"));
+                let node = fa
+                    .walk(&out)
+                    .unwrap_or_else(|| panic!("{gname}: draw not grammar-valid"));
                 assert!(fa.is_accept(node));
 
                 println!(
-                    "{:<12} {:>5} {:>10} {:>8} {:>8} {:>14.1} {:>12.1} {:>9.2}x",
+                    "{:<12} {:>5} {:>10} {:>7}/{:<5} {:>7}/{:<5} {:>14.1} {:>12.1} {:>9.2}x",
                     format!("{gname}/v{vscale}"),
                     len,
                     vcount,
-                    fa.n_nodes(),
-                    fa.n_edges(),
+                    stats.raw_nodes,
+                    stats.raw_edges,
+                    stats.nodes,
+                    stats.edges,
                     unconstr,
                     constrained,
                     constrained / unconstr

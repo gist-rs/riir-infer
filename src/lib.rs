@@ -106,6 +106,14 @@ pub mod twt;
 pub mod fa_posterior;
 pub mod fa_schema;
 
+/// Language-preserving minimization for [`fa_posterior::Automaton`] (issue
+/// 035, the G2 axis): trim + partition refinement at block granularity.
+/// `fa_schema::compile` applies it; hand-built automata can too. The merged
+/// states carry identical per-token flow, so the exact joint sampler's
+/// token-sequence distribution is preserved — the test battery pins that
+/// distributionally, not just language-level.
+pub mod fa_minimize;
+
 /// SentencePiece/BPE tokenizers for GGUF-embedded vocabularies (native-only;
 /// the sentencepiece-sys C++ backend cannot compile for wasm32).
 #[cfg(not(target_arch = "wasm32"))]

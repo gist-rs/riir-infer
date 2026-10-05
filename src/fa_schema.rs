@@ -30,7 +30,7 @@
 //! property count — the bitmask construction is exponential in the member
 //! count, so it is capped hard.
 
-use crate::fa_posterior::{Automaton, AutomatonBuilder};
+use crate::fa_posterior::{Automaton, AutomatonBuilder, FaError};
 use std::collections::{BTreeMap, HashMap, VecDeque};
 
 /// Maximum schema nesting depth (objects/arrays/anyOf).
@@ -105,7 +105,7 @@ pub enum SchemaError {
     },
     /// A malformed schema the subset cannot express, or a compiler-bug
     /// invariant trip.
-    InvalidSchema(&'static str),
+    InvalidSchema(String),
 }
 
 impl std::fmt::Display for SchemaError {
@@ -364,7 +364,8 @@ fn lit_frag(b: &mut NfaBuilder, lit: &JsonLit) -> Result<(usize, usize), SchemaE
                     '\t' => esc.push_str("\\t"),
                     c if (c as u32) < 0x20 => {
                         return Err(SchemaError::InvalidSchema(
-                            "control char in enum string (use \\u escapes in the schema source)",
+                            "control char in enum string (use \\u escapes in the schema source)"
+                                .to_string(),
                         ));
                     }
                     c => esc.push(c),
@@ -479,7 +480,7 @@ fn compile_object(
     for req in required {
         let Some(idx) = properties.iter().position(|(name, _)| name == req) else {
             return Err(SchemaError::InvalidSchema(
-                "required names a property absent from properties",
+                "required names a property absent from properties".to_string(),
             ));
         };
         required_bits |= 1usize << idx;
@@ -632,10 +633,35 @@ impl NfaIndex {
     }
 }
 
+/// Compile shape counts — the raw subset-graph automaton vs the minimized
+/// one `compile` returns (issue 035, the G2 axis: the sampler's per-step
+/// cost is O(L·E) over the MINIMIZED automaton).
+#[derive(Clone, Copy, Debug)]
+pub struct CompileStats {
+    /// NFA states the schema compiled to (pre-subset-construction).
+    pub nfa_states: usize,
+    /// Subset-graph nodes/edges before minimization.
+    pub raw_nodes: usize,
+    pub raw_edges: usize,
+    /// Minimized nodes/edges — what the returned [`Automaton`] carries.
+    pub nodes: usize,
+    pub edges: usize,
+}
+
 /// Compile `schema` into a token automaton over `tokens` — `(token id,
-/// token string)` pairs. The returned [`Automaton`] plugs straight into the
-/// `fa_constraint` decode lane (`FaConstraintConfig::new(&automaton)`).
-pub fn compile(schema: &Schema, tokens: &[(u32, &str)]) -> Result<Automaton, SchemaError> {
+/// token string)` pairs — reporting raw vs minimized shape. The returned
+/// [`Automaton`] plugs straight into the `fa_constraint` decode lane
+/// (`FaConstraintConfig::new(&automaton)`).
+///
+/// The result is minimized ([`crate::fa_minimize`]): language-preserving,
+/// distribution-preserving for the exact joint sampler, and it collapses
+/// the subset construction's 2^k·k member-chain bloat. A schema whose
+/// automaton has no accepting path from the start (accepts no instance)
+/// errors here instead of at the first decode draw.
+pub fn compile_stats(
+    schema: &Schema,
+    tokens: &[(u32, &str)],
+) -> Result<(Automaton, CompileStats), SchemaError> {
     let mut b = NfaBuilder::default();
     let (start, fin) = top_level(&mut b, schema, 0)?;
     let index = NfaIndex::build(b.edges, b.states);
@@ -750,8 +776,32 @@ pub fn compile(schema: &Schema, tokens: &[(u32, &str)]) -> Result<Automaton, Sch
         tids.dedup();
         ab.edge(from as usize, to as usize, &tids);
     }
-    ab.build()
-        .map_err(|_| SchemaError::InvalidSchema("automaton invariants violated (compiler bug)"))
+    let raw = ab.build().map_err(|_| {
+        SchemaError::InvalidSchema("automaton invariants violated (compiler bug)".to_string())
+    })?;
+    let (fa, m) = crate::fa_minimize::minimize_with_stats(&raw).map_err(|e| match e {
+        FaError::DeadStart(_) => SchemaError::InvalidSchema(
+            "schema accepts no instance (no accepting path from the start)".to_string(),
+        ),
+        other => SchemaError::InvalidSchema(format!(
+            "minimization rejected the compiled automaton: {other}"
+        )),
+    })?;
+    Ok((
+        fa,
+        CompileStats {
+            nfa_states: b.states,
+            raw_nodes: m.nodes_in,
+            raw_edges: m.edges_in,
+            nodes: m.nodes_out,
+            edges: m.edges_out,
+        },
+    ))
+}
+
+/// Compile `schema` (minimized; stats discarded).
+pub fn compile(schema: &Schema, tokens: &[(u32, &str)]) -> Result<Automaton, SchemaError> {
+    compile_stats(schema, tokens).map(|(fa, _)| fa)
 }
 
 #[cfg(test)]
