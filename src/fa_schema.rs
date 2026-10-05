@@ -31,6 +31,7 @@
 //! count, so it is capped hard.
 
 use crate::fa_posterior::{Automaton, AutomatonBuilder, FaError};
+use std::collections::hash_map::Entry;
 use std::collections::{BTreeMap, HashMap, VecDeque};
 
 /// Maximum schema nesting depth (objects/arrays/anyOf).
@@ -609,27 +610,140 @@ impl NfaIndex {
         }
     }
 
-    /// ε-closure of a state set (result: sorted, deduped).
-    fn closure(&self, set: &mut Vec<usize>) {
+    /// ε-closure of a state set (result: sorted, deduped). `seen` is a
+    /// generation-stamped visit buffer owned by the caller's [`Stepper`] —
+    /// one allocation for the whole compile, `stamp` must differ from every
+    /// stamp still present in `seen` (the caller bumps per call).
+    fn closure_into(&self, set: &mut Vec<usize>, seen: &mut [u32], stamp: u32) {
         let mut stack: Vec<usize> = std::mem::take(set);
         stack.sort_unstable();
         stack.dedup();
-        let mut seen: Vec<bool> = vec![false; self.out.len()];
         let mut result = Vec::new();
         while let Some(q) = stack.pop() {
-            if seen[q] {
+            if seen[q] == stamp {
                 continue;
             }
-            seen[q] = true;
+            seen[q] = stamp;
             result.push(q);
             for (label, d) in &self.out[q] {
-                if matches!(label, Label::Eps) && !seen[*d] {
+                if matches!(label, Label::Eps) && seen[*d] != stamp {
                     stack.push(*d);
                 }
             }
         }
         result.sort_unstable();
         *set = result;
+    }
+}
+
+/// The subset-machine driver: one [`NfaIndex`] plus reusable scratch, so a
+/// real-vocabulary compile (10⁵ tokens × 10³ subsets) does not allocate a
+/// fresh `seen` bitmap per char step (the P2.6 law — the naive per-call
+/// allocation was the compile-time pathology).
+struct Stepper<'a> {
+    index: &'a NfaIndex,
+    /// Generation-stamped visit marks for [`NfaIndex::closure_into`] — one
+    /// buffer for the whole compile, stamped per call.
+    seen: Vec<u32>,
+    stamp: u32,
+    /// `move_state` accumulator, reused per char step.
+    moved: Vec<usize>,
+}
+
+impl<'a> Stepper<'a> {
+    fn new(index: &'a NfaIndex) -> Self {
+        Self {
+            index,
+            seen: vec![0; index.out.len()],
+            stamp: 0,
+            moved: Vec::new(),
+        }
+    }
+
+    /// Step one subset over one char: `move` then `ε-closure`.
+    /// `None` = the char kills every state (dead).
+    fn step(&mut self, cur: &[usize], c: char) -> Option<Vec<usize>> {
+        self.moved.clear();
+        for &q in cur {
+            self.index.move_state(q, c, &mut self.moved);
+        }
+        if self.moved.is_empty() {
+            return None;
+        }
+        self.begin_stamp();
+        let mut out = std::mem::take(&mut self.moved);
+        let stamp = self.stamp;
+        self.index.closure_into(&mut out, &mut self.seen, stamp);
+        Some(out)
+    }
+
+    /// ε-closure only (the start subset's preparation).
+    fn closure_only(&mut self, set: &mut Vec<usize>) {
+        self.begin_stamp();
+        let stamp = self.stamp;
+        self.index.closure_into(set, &mut self.seen, stamp);
+    }
+
+    fn begin_stamp(&mut self) {
+        self.stamp = self.stamp.wrapping_add(1);
+        if self.stamp == 0 {
+            // u32 stamps exhausted — reset the buffer cleanly.
+            self.seen.iter_mut().for_each(|v| *v = 0);
+            self.stamp = 1;
+        }
+    }
+}
+
+/// Intern a step-result set by content; returns the pool id (stable for
+/// the whole compile, so the char-step memo can key on it).
+fn pool_intern(
+    pool_sets: &mut Vec<Vec<usize>>,
+    pool: &mut HashMap<Vec<usize>, u32>,
+    s: Vec<usize>,
+) -> u32 {
+    if let Some(&idx) = pool.get(&s) {
+        return idx;
+    }
+    let idx = pool_sets.len() as u32;
+    pool.insert(s.clone(), idx);
+    pool_sets.push(s);
+    idx
+}
+
+/// Trie over the token strings: shared prefixes are single nodes, so a
+/// subset's token walk visits (trie node × subsets-that-reach-it) instead
+/// of (token × subset × token length). Children are kept char-sorted at
+/// insert; `terminals[node]` holds the token ids ENDING there (a node can
+/// be both terminal and internal — one token may be another's prefix).
+#[derive(Default)]
+struct TokenTrie {
+    children: Vec<Vec<(char, u32)>>,
+    terminals: Vec<Vec<u32>>,
+}
+
+impl TokenTrie {
+    fn new() -> Self {
+        Self {
+            children: vec![Vec::new()],
+            terminals: vec![Vec::new()],
+        }
+    }
+
+    fn insert(&mut self, tid: u32, text: &str) {
+        let mut node = 0usize;
+        for c in text.chars() {
+            match self.children[node].binary_search_by_key(&c, |&(ch, _)| ch) {
+                Ok(i) => node = self.children[node][i].1 as usize,
+                Err(i) => {
+                    let kid = self.children.len() as u32;
+                    self.children.push(Vec::new());
+                    self.terminals.push(Vec::new());
+                    self.children[node].insert(i, (c, kid));
+                    node = kid as usize;
+                }
+            }
+        }
+        self.terminals[node].push(tid);
     }
 }
 
@@ -700,11 +814,28 @@ pub fn compile_stats(
         Ok(id)
     };
 
+    let mut stepper = Stepper::new(&index);
     let start_subset = {
         let mut s = vec![start];
-        index.closure(&mut s);
+        stepper.closure_only(&mut s);
         s
     };
+
+    // Token trie + step memo (P2.6 — the real-vocabulary machinery). The
+    // trie dedups shared token prefixes; `steps` memoizes every char step
+    // by (source subset, char); `step_sets`/`step_pool` intern step RESULTS
+    // by content so memo values stay identity-stable across walks. All
+    // compile-time only; none of it iterates, so ordering stays
+    // deterministic.
+    let mut trie = TokenTrie::new();
+    for &(tid, text) in tokens {
+        if !text.is_empty() {
+            trie.insert(tid, text);
+        }
+    }
+    let mut steps: HashMap<(u32, char), Option<u32>> = HashMap::new();
+    let mut step_pool: HashMap<Vec<usize>, u32> = HashMap::new();
+    let mut step_sets: Vec<Vec<usize>> = Vec::new();
     let start_id = id_of(
         &mut subsets,
         &mut ids,
@@ -715,40 +846,62 @@ pub fn compile_stats(
     queue.push_back(start_id);
     queued[start_id as usize] = true;
 
-    let mut scratch: Vec<usize> = Vec::new();
     while let Some(from) = queue.pop_front() {
         // `queued` means DISCOVERED (never reset on pop — a self-loop subset
         // would otherwise re-queue itself forever). Each subset is processed
         // exactly once; self-loops only add their edge.
-        // Group token → target subset, then merge per target (the
-        // Automaton's ≤1-edge-per-pair invariant; semantics-preserving).
-        let mut by_target: BTreeMap<Vec<usize>, Vec<u32>> = BTreeMap::new();
-        for &(tid, text) in tokens {
-            if text.is_empty() {
-                continue;
+        //
+        // The token → target mapping is walked over a TRIE of the token
+        // strings, DFS from (root, this subset), with every CHAR STEP
+        // memoized on `(current subset, char)` (P2.6 — the real-vocabulary
+        // law). A string-body self-loop class collapses its whole trie
+        // subtree to one memo hit per distinct char, so the walk cost is
+        // trie nodes × subsets-that-reach-them, never tokens × subsets ×
+        // token length. Step results are interned in a content pool, so
+        // the memo is identity-stable across source subsets. Targets are
+        // gathered per pool id, then ordered by their SET (lexicographic
+        // Vec order — exactly the BTreeMap order this loop used to intern
+        // in), keeping subset numbering byte-identical with the P2 naive
+        // walk.
+        let mut by_target: HashMap<u32, Vec<u32>> = HashMap::new();
+        let src = subsets[from as usize].clone();
+        let src_idx = pool_intern(&mut step_sets, &mut step_pool, src);
+        let mut stack: Vec<(u32, u32)> = vec![(0, src_idx)];
+        while let Some((node, pidx)) = stack.pop() {
+            let tids = &trie.terminals[node as usize];
+            if !tids.is_empty() {
+                by_target.entry(pidx).or_default().extend_from_slice(tids);
             }
-            let mut cur = subsets[from as usize].clone();
-            let mut dead = false;
-            for c in text.chars() {
-                scratch.clear();
-                for &q in &cur {
-                    index.move_state(q, c, &mut scratch);
+            for &(c, kid) in &trie.children[node as usize] {
+                // Memo key = (CURRENT pool subset, char) — the pool id is
+                // content-interned and stable for the whole compile, so a
+                // hit is the same step result the walk took before.
+                let target = match steps.entry((pidx, c)) {
+                    Entry::Occupied(o) => *o.get(),
+                    Entry::Vacant(v) => {
+                        let t = stepper
+                            .step(&step_sets[pidx as usize], c)
+                            .map(|s| pool_intern(&mut step_sets, &mut step_pool, s));
+                        v.insert(t);
+                        t
+                    }
+                };
+                if let Some(t) = target {
+                    stack.push((kid, t));
                 }
-                if scratch.is_empty() {
-                    dead = true;
-                    break;
-                }
-                index.closure(&mut scratch);
-                cur = std::mem::take(&mut scratch);
             }
-            if dead {
-                continue;
-            }
-            by_target.entry(cur).or_default().push(tid);
         }
-        for (target, mut tids) in by_target {
-            tids.sort_unstable();
-            tids.dedup();
+        // Emit in set order (the P2 interning order).
+        let mut targets: Vec<(Vec<usize>, Vec<u32>)> = by_target
+            .into_iter()
+            .map(|(pidx, mut tids)| {
+                tids.sort_unstable();
+                tids.dedup();
+                (step_sets[pidx as usize].clone(), tids)
+            })
+            .collect();
+        targets.sort_unstable_by(|a, b| a.0.cmp(&b.0));
+        for (target, tids) in targets {
             let to = id_of(&mut subsets, &mut ids, &mut accept, &mut queued, target)?;
             edges.entry((from, to)).or_default().extend(tids);
             if !queued[to as usize] {

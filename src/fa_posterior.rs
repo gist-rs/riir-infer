@@ -446,6 +446,14 @@ pub struct FaScratch {
     /// Categorical weight buffer — sized for max(node fanout, edge token
     /// count) since the edge draw and the token draw share it.
     weights: Vec<f32>,
+    /// Per-position exp row (P2.6 — the real-vocabulary fold): one
+    /// `exp(logits[t,v]/T − row_max)` per vocab token per position, shared
+    /// by every edge fold at that position. Replaces exp-per-(t,e,v),
+    /// which re-computed the same token's exp once per edge containing it.
+    /// f64 so an edge whose whole token set sits far below the vocab max
+    /// keeps its mass down to exp(−745) (the old per-edge f32 shift's
+    /// dynamic range, without the per-edge exp cost).
+    erow: Vec<f64>,
 }
 
 impl FaScratch {
@@ -453,13 +461,16 @@ impl FaScratch {
         Self::default()
     }
 
-    fn ensure(&mut self, len: usize, n_edges: usize, n_nodes: usize, fanout: usize) {
+    fn ensure(&mut self, len: usize, n_edges: usize, n_nodes: usize, fanout: usize, vocab: usize) {
         if self.e_log.len() < len * n_edges {
             self.e_log.resize(len * n_edges, 0.0);
         }
         let back_need = (len + 1) * n_nodes;
         if self.back.len() < back_need {
             self.back.resize(back_need, 0.0);
+        }
+        if self.erow.len() < vocab {
+            self.erow.resize(vocab, 0.0);
         }
         if self.weights.len() < fanout {
             self.weights.resize(fanout, 0.0);
@@ -584,6 +595,7 @@ impl Automaton {
             n_edges,
             self.n_nodes,
             self.max_fanout().max(self.max_edge_tokens()),
+            self.vocab,
         );
         let temp = if temperature.is_finite() && temperature > 0.0 {
             temperature
@@ -594,32 +606,67 @@ impl Automaton {
         // ── 1. the emission fold ─────────────────────────────────────
         // Free position:  e_log[t][e] = log Σ_{v∈e} exp(logits[t,v]/T)
         // Pinned position: e_log[t][e] = 0 if forced[t] ∈ e else -INF
+        //
+        // The exp work is ONE vocab-wide row per position (P2.6 — the
+        // real-vocabulary law): `erow[v] = exp(row[v]/T − row_max)`,
+        // computed once and shared by every edge fold at that position.
+        // The old form re-ran exp per (position, edge, token) — the same
+        // token's exp once per edge containing it, which is what made a
+        // 256k-vocab string-heavy grammar cost seconds per draw. The row
+        // is shifted by the VOCAB max (not per edge), so every entry is ≤
+        // 1 and nothing overflows; edge sums accumulate in f64, which
+        // keeps edges whose tokens sit far below the vocab max exact (the
+        // per-edge shift they replace only mattered in f32).
         for t in 0..len {
             let row = &logits[t * self.vocab..(t + 1) * self.vocab];
             let pin = forced[t];
             let base = t * n_edges;
-            for e in 0..n_edges {
-                let (a, b) = (self.emit_start[e] as usize, self.emit_start[e + 1] as usize);
-                let toks = &self.emit_tokens[a..b];
-                scratch.e_log[base + e] = if pin != FREE {
-                    if toks.binary_search(&pin).is_ok() {
+            if pin != FREE {
+                for e in 0..n_edges {
+                    let (a, b) = (self.emit_start[e] as usize, self.emit_start[e + 1] as usize);
+                    scratch.e_log[base + e] = if self.emit_tokens[a..b].binary_search(&pin).is_ok()
+                    {
                         0.0
                     } else {
                         f32::NEG_INFINITY
+                    };
+                }
+                continue;
+            }
+            let mut rmax = f32::NEG_INFINITY;
+            for &l in row.iter() {
+                let l = l / temp;
+                if l > rmax {
+                    rmax = l;
+                }
+            }
+            if rmax.is_finite() {
+                for (v, &l) in row.iter().enumerate() {
+                    scratch.erow[v] = (l as f64 / temp as f64 - rmax as f64).exp();
+                }
+            } else {
+                // An all-−INF row: every edge folds to −INF (the limit of
+                // the shift math; the old code produced NaN here).
+                scratch.erow.iter_mut().for_each(|e| *e = 0.0);
+            }
+            for e in 0..n_edges {
+                let (a, b) = (self.emit_start[e] as usize, self.emit_start[e + 1] as usize);
+                let toks = &self.emit_tokens[a..b];
+                scratch.e_log[base + e] = if rmax.is_finite() {
+                    let mut acc = 0.0f64;
+                    for &v in toks {
+                        acc += scratch.erow[v as usize];
+                    }
+                    if acc > 0.0 {
+                        (rmax as f64 + acc.ln()) as f32
+                    } else {
+                        // Underflow to a true zero: the edge's whole token
+                        // set sits >~745/T below the vocab max — the honest
+                        // limit of the shift math.
+                        f32::NEG_INFINITY
                     }
                 } else {
-                    let mut max = f32::NEG_INFINITY;
-                    for &v in toks {
-                        let l = row[v as usize] / temp;
-                        if l > max {
-                            max = l;
-                        }
-                    }
-                    let mut acc = 0.0f32;
-                    for &v in toks {
-                        acc += (row[v as usize] / temp - max).exp();
-                    }
-                    max + acc.ln()
+                    f32::NEG_INFINITY
                 };
             }
         }
@@ -773,6 +820,11 @@ pub struct TreeScratch {
     /// automaton changes.
     pair_edge: Vec<i32>,
     pair_edge_nodes: usize,
+    /// Per-position exp row (P2.6 — mirrors `FaScratch::erow`; f64, the
+    /// tree lane's native precision). One vocab-wide pass per position
+    /// replaces exp-per-(position, pair, token).
+    erow: Vec<f64>,
+    erow_vocab: usize,
 }
 
 impl TreeScratch {
@@ -786,6 +838,13 @@ impl TreeScratch {
             self.pair_edge_nodes = n;
         } else {
             self.pair_edge.iter_mut().for_each(|v| *v = -1);
+        }
+    }
+
+    fn ensure_erow(&mut self, vocab: usize) {
+        if self.erow_vocab < vocab {
+            self.erow.resize(vocab, 0.0);
+            self.erow_vocab = vocab;
         }
     }
 }
@@ -913,11 +972,16 @@ impl Automaton {
                 scratch.pair_edge[s * n + self.edge_dst(e)] = e as i32;
             }
         }
+        scratch.ensure_erow(self.vocab);
 
         // Leaf matrices. Position t: leaf[i][j] = e_log[t][edge(i,j)] —
         // the fold with temperature and pins; the LAST REAL leaf folds the
         // acceptance weights on its diagonal (only accepting dsts survive).
         // Each leaf is shifted by its own max before storing.
+        //
+        // The free-position fold reads the P2.6 exp row (one vocab-wide
+        // pass per position, shared by every pair): e_log(e) = row_max +
+        // ln Σ_{v∈e} erow[v], accumulated in f64.
         let len_pad = len.next_power_of_two();
         let mut levels: Vec<Vec<f64>> = Vec::with_capacity(2 * len_pad);
         let mut leaf = vec![0.0f64; n * n];
@@ -925,6 +989,26 @@ impl Automaton {
             let row = &logits[t * self.vocab..(t + 1) * self.vocab];
             let pin = forced[t];
             let last_real = t + 1 == len;
+            // Build the shared exp row once per position (free positions).
+            let row_shift = if pin == FREE {
+                let mut rmax = f64::NEG_INFINITY;
+                for &l in row.iter() {
+                    let l = l as f64 / temp as f64;
+                    if l > rmax {
+                        rmax = l;
+                    }
+                }
+                if rmax.is_finite() {
+                    for (v, &l) in row.iter().enumerate() {
+                        scratch.erow[v] = (l as f64 / temp as f64 - rmax).exp();
+                    }
+                } else {
+                    scratch.erow[..self.vocab].iter_mut().for_each(|e| *e = 0.0);
+                }
+                Some(rmax)
+            } else {
+                None
+            };
             let mut m = f64::NEG_INFINITY;
             for i in 0..n {
                 for j in 0..n {
@@ -943,22 +1027,19 @@ impl Automaton {
                                     f64::NEG_INFINITY
                                 }
                             } else {
-                                let mut mx = f64::NEG_INFINITY;
-                                for &v in toks {
-                                    let l = (row[v as usize] as f64) / (temp as f64);
-                                    if l > mx {
-                                        mx = l;
+                                match row_shift {
+                                    None => f64::NEG_INFINITY,
+                                    Some(rmax) => {
+                                        let mut acc = 0.0f64;
+                                        for &v in toks {
+                                            acc += scratch.erow[v as usize];
+                                        }
+                                        if acc > 0.0 {
+                                            rmax + acc.ln()
+                                        } else {
+                                            f64::NEG_INFINITY
+                                        }
                                     }
-                                }
-                                if mx == f64::NEG_INFINITY {
-                                    f64::NEG_INFINITY
-                                } else {
-                                    let mut acc = 0.0f64;
-                                    for &v in toks {
-                                        acc +=
-                                            ((row[v as usize] as f64) / (temp as f64) - mx).exp();
-                                    }
-                                    mx + acc.ln()
                                 }
                             };
                             if last_real && !(base.is_finite() && self.accept[j]) {

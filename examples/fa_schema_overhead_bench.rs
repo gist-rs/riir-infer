@@ -128,11 +128,27 @@ fn vocab(scale: usize) -> Vec<(u32, String)> {
 }
 
 fn main() {
+    // `--real-vocab <path.gguf>`: extract `tokenizer.ggml.tokens` from the
+    // GGUF metadata (mmap — cheap even at 5 GB) and run every grammar at
+    // REAL tokenizer granularity. Without the flag: the synthetic vocab
+    // sweep (the P2 table's form).
+    let args: Vec<String> = std::env::args().collect();
+    let real = args
+        .iter()
+        .position(|a| a == "--real-vocab")
+        .map(|i| args[i + 1].clone());
     println!("{}", box_state_line());
     println!(
         "{:<12} {:>5} {:>10} {:>13} {:>13} {:>14} {:>12} {:>10}",
         "grammar", "L", "vocab", "raw n/e", "min n/e", "unconstr µs/st", "constr µs/st", "ratio"
     );
+    match real {
+        Some(path) => run_real_vocab(&path),
+        None => run_synthetic(),
+    }
+}
+
+fn run_synthetic() {
     let scales = [
         ("toy-enum", enum_schema()),
         ("object-2p", object2_schema()),
@@ -220,5 +236,109 @@ fn main() {
                 );
             }
         }
+    }
+}
+
+/// Real-vocabulary run: the same three grammars over a GGUF tokenizer's
+/// full token array (ids = array index). The honest G2 regime — string
+/// bodies admit ~every text token, so the emission fold dominates.
+fn run_real_vocab(path: &str) {
+    let gguf = riir_infer_core::gguf_loader::GgufFile::open(std::path::Path::new(path))
+        .unwrap_or_else(|e| panic!("open {path}: {e}"));
+    let arr = gguf
+        .metadata_array("tokenizer.ggml.tokens")
+        .unwrap_or_else(|| panic!("{path}: no tokenizer.ggml.tokens"));
+    let toks: Vec<String> = arr
+        .iter()
+        .map(|v| v.as_str().unwrap_or_default().to_string())
+        .collect();
+    println!("real-vocab arm: {} tokens from {path}", toks.len());
+    let scales = [
+        ("toy-enum", enum_schema()),
+        ("object-2p", object2_schema()),
+        ("fn-call-5p", fn_call_schema()),
+    ];
+    for (gname, schema) in &scales {
+        let v_refs: Vec<(u32, &str)> = toks
+            .iter()
+            .enumerate()
+            .map(|(i, s)| (i as u32, s.as_str()))
+            .collect();
+        let t0 = Instant::now();
+        let (fa, stats) =
+            compile_stats(schema, &v_refs).unwrap_or_else(|e| panic!("{gname} real: {e}"));
+        let compile_s = t0.elapsed().as_secs_f64();
+        let vcount = toks.len();
+        for &len in &[64usize, 256] {
+            let logits: Vec<f32> = (0..len * vcount)
+                .map(|i| (((i * 7919) % 23) as f32 - 8.0) / 4.0)
+                .collect();
+            let forced = vec![FREE; len];
+            let mut out = vec![0u32; len];
+
+            let mut rng_u = SplitMix64::new(42);
+            let unconstr = best_of_5_us(|| {
+                for t in 0..len {
+                    let row = &logits[t * vcount..(t + 1) * vcount];
+                    let max = row.iter().copied().fold(f32::NEG_INFINITY, f32::max);
+                    let mut acc = 0.0f64;
+                    let weights: Vec<f64> = row
+                        .iter()
+                        .map(|&l| ((l - max) as f64).exp())
+                        .inspect(|w| acc += *w)
+                        .collect();
+                    let r = rng_u.next_f64() * acc;
+                    let mut cum = 0.0f64;
+                    let mut pick = vcount - 1;
+                    for (i, &w) in weights.iter().enumerate() {
+                        cum += w;
+                        if r < cum {
+                            pick = i;
+                            break;
+                        }
+                    }
+                    out[t] = pick as u32;
+                }
+            });
+
+            let mut rng_c = SplitMix64::new(42);
+            let mut scratch = FaScratch::new();
+            let constrained = best_of_5_us(|| {
+                fa.sample_joint(
+                    &mut scratch,
+                    &logits,
+                    len,
+                    &forced,
+                    1.0,
+                    false,
+                    &mut rng_c,
+                    &mut out,
+                )
+                .expect("constrained draw");
+            });
+
+            let node = fa
+                .walk(&out)
+                .unwrap_or_else(|| panic!("{gname}: draw not grammar-valid"));
+            assert!(fa.is_accept(node));
+
+            println!(
+                "{:<12} {:>5} {:>10} {:>7}/{:<5} {:>7}/{:<5} {:>14.1} {:>12.1} {:>9.2}x",
+                format!("{gname}/gguf"),
+                len,
+                vcount,
+                stats.raw_nodes,
+                stats.raw_edges,
+                stats.nodes,
+                stats.edges,
+                unconstr,
+                constrained,
+                constrained / unconstr
+            );
+        }
+        println!(
+            "{:<12} compile {:>6.2}s (trie walk + minimize; raw→min {}/{})",
+            gname, compile_s, stats.raw_nodes, stats.nodes
+        );
     }
 }

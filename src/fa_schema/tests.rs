@@ -279,6 +279,129 @@ fn bounds_are_enforced() {
     ));
 }
 
+// ── P2.6 differential: the trie walk's new cases ─────────────────────
+
+#[test]
+fn trie_walk_matches_naive_stepping_on_prefix_and_duplicate_tokens() {
+    // The differential that matters most: one token a PREFIX of another
+    // (`"ab"` ⊂ `"abc"`), duplicated TEXT across ids (`"x"` twice — the
+    // P2 toy vocab's double-quote case at the trie level), and tokens that
+    // die everywhere. Every accepted string must be identical.
+    let vocab: Vec<(u32, &str)> = vec![
+        (0, "{"),
+        (1, "}"),
+        (2, ":"),
+        (3, ","),
+        (4, "\""),
+        (5, "ab"),
+        (6, "abc"),
+        (7, "a"),
+        (8, "\""), // duplicate text, different id
+        (9, "z"),  // dies everywhere (not in any schema)
+        (10, " "),
+    ];
+    let schema = Schema::Object {
+        properties: vec![("ab".into(), Schema::Enum(vec![JsonLit::Str("abc".into())]))],
+        required: vec!["ab".into()],
+    };
+    let fa = compile(&schema, &vocab).expect("compile");
+
+    // {"ab":"abc"} — the full instance, token by token.
+    let good = [0u32, 4, 5, 4, 2, 4, 6, 4, 1];
+    assert!(accepts(&fa, &good), "full instance must walk");
+    // Same instance with the duplicate quote id 8 wherever id 4 appears —
+    // the automaton cannot tell them apart (identical text).
+    let twin: Vec<u32> = good.iter().map(|&t| if t == 4 { 8 } else { t }).collect();
+    assert!(
+        accepts(&fa, &twin),
+        "duplicate-text ids are interchangeable"
+    );
+    // `ab` (5) in place of `abc` (6): the enum value refuses the prefix.
+    let short = [0u32, 4, 5, 4, 2, 4, 5, 4, 1];
+    assert!(!accepts(&fa, &short), "enum value must be exactly abc");
+    // Single-char `a` (7) as the key text: `"a"` is not the key `"ab"`.
+    let wrongkey = [0u32, 4, 7, 4, 2, 4, 6, 4, 1];
+    assert!(!accepts(&fa, &wrongkey), "key must be exactly ab");
+}
+
+#[test]
+fn trie_walk_compiles_a_large_synthetic_vocab() {
+    // The P2.6 scalability smoke: a 20k-token vocab (word + subword mix,
+    // the real-BPE shape) against the fn-call grammar must compile fast
+    // and keep the sampler round-trip intact. 20k × ~150 naive steps-per-
+    // token × subsets was the pathology; the trie walks prefixes once.
+    let mut vocab: Vec<(u32, String)> = Vec::new();
+    let push = |s: &str, vocab: &mut Vec<(u32, String)>| {
+        vocab.push((vocab.len() as u32, s.to_string()));
+    };
+    for c in "{}[]:,\" \\n\t".chars() {
+        let mut s = String::new();
+        s.push(c);
+        push(&s, &mut vocab);
+    }
+    for w in [
+        "true", "false", "null", "name", "id", "tags", "mode", "note",
+    ] {
+        push(w, &mut vocab);
+    }
+    // 20k word-ish tokens: three-letter prefix + number suffix, with
+    // shared prefixes (the trie's reason to exist).
+    for i in 0..20_000u32 {
+        let pfx = [b'a' + (i % 26) as u8, b'm', b'z' + (i % 3) as u8];
+        push(
+            &format!("{}_{}{}", String::from_utf8_lossy(&pfx), i % 997, i % 13),
+            &mut vocab,
+        );
+    }
+    let v_refs: Vec<(u32, &str)> = vocab.iter().map(|&(id, ref s)| (id, s.as_str())).collect();
+
+    let schema = Schema::Object {
+        properties: vec![
+            ("name".into(), Schema::String),
+            ("id".into(), Schema::Integer),
+            (
+                "tags".into(),
+                Schema::Array {
+                    items: Box::new(Schema::String),
+                },
+            ),
+        ],
+        required: vec!["name".into()],
+    };
+    let (fa, stats) = compile_stats(&schema, &v_refs).expect("compile 20k vocab");
+
+    // The string-body states must admit the word tokens — sample a joint
+    // draw and require grammar validity (the by-construction law).
+    let len = 32;
+    let v = fa.vocab();
+    let logits: Vec<f32> = (0..len * v)
+        .map(|i| (((i * 7919) % 23) as f32 - 8.0) / 4.0)
+        .collect();
+    let forced = vec![FREE; len];
+    let mut scratch = FaScratch::new();
+    let mut rng = SplitMix64::new(7);
+    let mut out = vec![0u32; len];
+    fa.sample_joint(
+        &mut scratch,
+        &logits,
+        len,
+        &forced,
+        1.0,
+        false,
+        &mut rng,
+        &mut out,
+    )
+    .expect("draw at 20k vocab");
+    let node = fa.walk(&out).expect("draw must walk");
+    assert!(fa.is_accept(node));
+    // Sanity: the compiled graph is bounded (no subset explosion).
+    assert!(
+        stats.raw_nodes < 4096,
+        "subset count bounded, got {}",
+        stats.raw_nodes
+    );
+}
+
 #[test]
 fn determinism_invariants_hold_on_compiled_grammars() {
     // The merge-by-(from,to) must produce a builder-clean automaton on a
