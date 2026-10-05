@@ -4,6 +4,39 @@ Durable records for resolved questions and closed lanes (the noise-reduction
 convention: the record lands here, hash-pinned; open work lives in `.issues/`
 and `.plans/`). Created 2026-09-23 at the first record.
 
+## 2026-10-06 — Issue 035 P2 LANDED: the schema front end + the honest overhead table — `1254264`+`5b5c462`
+
+`src/fa_schema.rs` (UNGATED core, 12 tests): JSON-schema subset (six types ·
+properties/required · items · enum · anyOf) → Thompson NFA → subset graph stepped
+ON DEMAND by token-string chars (no alphabet table — the token re-alphabetization
+is the only consumer) → token `Automaton` with (from,to)-merged edges (satisfies
+the segment-tree lane's ≤1-edge-per-pair invariant; merge is semantics-preserving).
+Trailing-whitespace star = the block-padding language. Caps (depth/NFA/subsets/props)
+refuse as named errors. Three grammar-soundness laws the tests paid for (each pinned
+in-doc): fresh ws wrappers (a shared star final leaks ε-exits across positions —
+`[42,]` walked an Integer array); per-(mask,member) member chains (a shared value
+fragment funnels every origin mask into ONE successor subset — `{"age":42}` accepted
+with `name` required — the mask state machine tolerates NO shared subgraph between
+mask states); acceptance = walk ∧ final (an unterminated string walks to a
+non-accepting node).
+
+The bench (`examples/fa_schema_overhead_bench.rs`, CPU best-of-5, PROVENANCE line;
+both arms run the SAME forwards so the delta IS the sampling step):
+
+| grammar | automaton | L=64 | L=128 | L=256 |
+|---|---|---|---|---|
+| toy-enum | 14n/37e | 1.9× | 1.9× | 2.2× |
+| object-2p | 83n/316e | 21.8× | 22.4× | 22.6× |
+| fn-call-5p | 1473n/5997e | 437× | 443× | 454× |
+
+(vs the unconstrained per-position draw: 13-59 µs/step. The constrained joint draw
+is O(L·E), E bloats ∝ the 2^k·k member chains — 1473 nodes for a 5-prop schema is
+the construction's cost, not the grammar's.) **P3's G2 reading: the CPU sequential
+lane meets single-digit-% ONLY on small automata; the axes are automaton
+minimization (non-mask-adjacent subgraph sharing), and the GPU-side fold (the
+paper's own posture — P0.5's tree lane is the seam). The promote/demote verdict is
+owner-gated and consumes this table.**
+
 ## 2026-10-06 — Issue 022 T5.4 CLOSED: the equal-FLOP skip-class gate — the lane wins, honestly — `8bd5c2d`+this commit
 
 The lane's one honest comparison debt paid (record
