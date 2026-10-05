@@ -1,0 +1,33 @@
+=== T4 deferred cells launch (2026-10-05  4:11:25.54) === 
+=== box state at launch === 
+Total Physical Memory:         32,538 MB
+Available Physical Memory:     20,868 MB
+=== CELL A: context ~1025 (2026-10-05  4:11:27.64) === 
+# kv_reconstruct_gate: gemma-2 f16 | layers=26 n_embd=2304 kv_dim=1024 vocab=256000 | load 2.2s
+# corpus: 13121614 chars → 2702627 tokens | eval [61440..63488) | seq 1024
+# table loaded: .benchmarks\012_kv_table_residual.bin (7348 rows, cal_tokens 61440) — BLAKE3 verified
+# G3: seam-identity PASS | recon-vs-store max |Δlogit| 1.254e-4 (rotation-rounding class)
+# deferred probe: λ0 to_bits PASS | miss-λ1 to_bits PASS | regroup max |Δlogit| 8.011e-5 | def-λ1 vs store 7.915e-5 (PASS)
+# G2 tg64 decode (4 pairs, seq 1025, deferred mode):
+  full-cache: median 127624 µs/step (7.8 tok/s) | min 127216 µs | prefill 127549 ms
+    eager-λ1: median 224952 µs/step (4.4 tok/s) | min 224140 µs | ratio 1.760× | prefill 174354 ms
+      def-λ0: median 129979 µs/step (7.7 tok/s) | min 129138 µs | ratio 1.020× | prefill 128290 ms
+      def-λ1: median 134409 µs/step (7.4 tok/s) | min 133050 µs | ratio 1.053× | prefill 131276 ms
+# P4 bytes/token: full 212992 B, P3 106496 B (50.0%)
+# done: G3 PASS deferred-probe PASS G1 SKIPPED
+=== cell A exited rc=0 (2026-10-05  4:53:04.37) === 
+=== CELL B: window edge ~4097 (2026-10-05  4:53:04.37) === 
+# kv_reconstruct_gate: gemma-2 f16 | layers=26 n_embd=2304 kv_dim=1024 vocab=256000 | load 2.1s
+# corpus: 13121614 chars → 2702627 tokens | eval [61440..65536) | seq 4096
+# table loaded: .benchmarks\012_kv_table_residual.bin (7348 rows, cal_tokens 61440) — BLAKE3 verified
+# G3: seam-identity PASS | recon-vs-store max |Δlogit| 1.254e-4 (rotation-rounding class)
+# deferred probe: λ0 to_bits PASS | miss-λ1 to_bits PASS | regroup max |Δlogit| 8.011e-5 | def-λ1 vs store 7.915e-5 (PASS)
+# G2 tg64 decode (2 pairs, seq 4097, deferred mode):
+  full-cache: median 143862 µs/step (7.0 tok/s) | min 143414 µs | prefill 543681 ms
+    eager-λ1: median 557841 µs/step (1.8 tok/s) | min 557473 µs | ratio 3.887× | prefill 1347558 ms
+      def-λ0: median 151072 µs/step (6.6 tok/s) | min 150218 µs | ratio 1.050× | prefill 556007 ms
+      def-λ1: median 161051 µs/step (6.2 tok/s) | min 160914 µs | ratio 1.123× | prefill 582295 ms
+# P4 bytes/token: full 212992 B, P3 106496 B (50.0%)
+# done: G3 PASS deferred-probe PASS G1 SKIPPED
+=== cell B exited rc=0 (2026-10-05  6:37:47.43) === 
+=== T4 deferred cells complete (2026-10-05  6:37:47.43) === 
