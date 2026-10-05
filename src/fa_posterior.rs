@@ -353,7 +353,14 @@ impl Automaton {
     /// the determinism invariant makes the walk unique. `None` if some
     /// position has no allowed edge (the walk dies).
     pub fn walk(&self, tokens: &[u32]) -> Option<usize> {
-        let mut node = self.start;
+        self.walk_from(self.start, tokens)
+    }
+
+    /// [`Automaton::walk`] from an arbitrary node — the block-carry-over
+    /// probe: the caller walks a prior block's accepted output from its own
+    /// start and threads the landing node into the next block's sampler.
+    pub fn walk_from(&self, node: usize, tokens: &[u32]) -> Option<usize> {
+        let mut node = node;
         for &t in tokens {
             let e = self.edge_for_token(node, t)?;
             node = self.edge_dst[e] as usize;
@@ -453,7 +460,30 @@ impl Automaton {
             .unwrap_or(0)
     }
 
-    /// The exact joint draw over one block.
+    /// The exact joint draw over one block from the automaton's designated
+    /// start node. See [`Automaton::sample_joint_from`] (the carry-over
+    /// generalization) for the full contract.
+    #[allow(clippy::too_many_arguments)]
+    pub fn sample_joint(
+        &self,
+        scratch: &mut FaScratch,
+        logits: &[f32],
+        len: usize,
+        forced: &[u32],
+        temperature: f32,
+        argmax_tokens: bool,
+        rng: &mut SplitMix64,
+        out_tokens: &mut [u32],
+    ) -> Result<usize, FaError> {
+        self.sample_joint_from(
+            scratch, self.start, logits, len, forced, temperature, argmax_tokens, rng, out_tokens,
+        )
+    }
+
+    /// [`Automaton::sample_joint`] from an arbitrary start node — the
+    /// block-carry-over entry: `start_node` is the state reached by the
+    /// ACCEPTED PREFIX from earlier blocks (issue 035 P1). Returns the final
+    /// node (accepting by construction) for the next block's `start_node`.
     ///
     /// * `logits` — `len × vocab` row-major per-position LM logits.
     /// * `forced` — per-position pin (`FREE` = drawn); a pinned position
@@ -467,15 +497,13 @@ impl Automaton {
     ///   "greedy" posture: the PATH is still drawn from the exact joint);
     ///   `false` = multinomial token draw.
     ///
-    /// Returns the final node (accepting by construction — every produced
-    /// sequence is accepted; that is the sampler's contract, not luck).
-    ///
     /// Allocation-free in steady state: all buffers come from `scratch`,
     /// tokens land in `out_tokens`.
     #[allow(clippy::too_many_arguments)]
-    pub fn sample_joint(
+    pub fn sample_joint_from(
         &self,
         scratch: &mut FaScratch,
+        start_node: usize,
         logits: &[f32],
         len: usize,
         forced: &[u32],
@@ -484,6 +512,9 @@ impl Automaton {
         rng: &mut SplitMix64,
         out_tokens: &mut [u32],
     ) -> Result<usize, FaError> {
+        if start_node >= self.n_nodes {
+            return Err(FaError::BadStart(start_node));
+        }
         if forced.len() != len {
             return Err(FaError::ForcedShape {
                 got: forced.len(),
@@ -507,14 +538,14 @@ impl Automaton {
         }
         let n_edges = self.n_edges();
         if len == 0 {
-            return if self.accept[self.start] {
-                Ok(self.start)
+            return if self.accept[start_node] {
+                Ok(start_node)
             } else {
                 Err(FaError::Unsatisfiable { len: 0 })
             };
         }
-        if self.out_start[self.start] == self.out_start[self.start + 1] {
-            return Err(FaError::DeadStart(self.start));
+        if self.out_start[start_node] == self.out_start[start_node + 1] {
+            return Err(FaError::DeadStart(start_node));
         }
         scratch.ensure(
             len,
@@ -586,12 +617,12 @@ impl Automaton {
                 scratch.back[t * n + s] = logsumexp_shifted(&scratch.weights[..k]);
             }
         }
-        if scratch.back[self.start] == f32::NEG_INFINITY {
+        if scratch.back[start_node] == f32::NEG_INFINITY {
             return Err(FaError::Unsatisfiable { len });
         }
 
         // ── 3. the forward joint draw ────────────────────────────────
-        let mut state = self.start;
+        let mut state = start_node;
         for t in 0..len {
             let range = self.out_range(state);
             let base = t * n_edges;
@@ -737,6 +768,9 @@ pub struct ParallelTree<'a> {
     len_pad: usize,
     n: usize,
     temperature: f32,
+    /// The walk's start node (the designated start, or a carry-over node —
+    /// issue 035 P1's block-carry-over axis).
+    start: usize,
     /// First level-array index per level (leaves at 0). Root is last.
     level_offsets: Vec<usize>,
 }
@@ -783,9 +817,8 @@ fn draw_categorical(w: &[f64], rng: &mut SplitMix64) -> usize {
 }
 
 impl Automaton {
-    /// Build the segment tree for one block. `logits`/`forced`/
-    /// `temperature` follow [`Automaton::sample_joint`]'s contract.
-    /// Unsatisfiable blocks error before any sampling.
+    /// Build the segment tree for one block from the automaton's designated
+    /// start node. See [`Automaton::build_tree_from`] for the contract.
     pub fn build_tree<'a>(
         &'a self,
         scratch: &'a mut TreeScratch,
@@ -794,6 +827,25 @@ impl Automaton {
         forced: &'a [u32],
         temperature: f32,
     ) -> Result<ParallelTree<'a>, FaError> {
+        self.build_tree_from(scratch, self.start, logits, len, forced, temperature)
+    }
+
+    /// [`Automaton::build_tree`] from an arbitrary start node — the
+    /// block-carry-over build (issue 035 P1). `logits`/`forced`/
+    /// `temperature` follow [`Automaton::sample_joint`]'s contract.
+    /// Unsatisfiable blocks error before any sampling.
+    pub fn build_tree_from<'a>(
+        &'a self,
+        scratch: &'a mut TreeScratch,
+        start_node: usize,
+        logits: &'a [f32],
+        len: usize,
+        forced: &'a [u32],
+        temperature: f32,
+    ) -> Result<ParallelTree<'a>, FaError> {
+        if start_node >= self.n_nodes {
+            return Err(FaError::BadStart(start_node));
+        }
         if forced.len() != len {
             return Err(FaError::ForcedShape {
                 got: forced.len(),
@@ -923,7 +975,7 @@ impl Automaton {
 
         // Root row over the start node must carry mass.
         let root = levels.last().unwrap();
-        if root[self.start * n..(self.start + 1) * n]
+        if root[start_node * n..(start_node + 1) * n]
             .iter()
             .all(|&v| v == f64::NEG_INFINITY)
         {
@@ -954,6 +1006,7 @@ impl Automaton {
             len_pad,
             n,
             temperature: temp,
+            start: start_node,
             level_offsets,
         })
     }
@@ -993,7 +1046,7 @@ impl ParallelTree<'_> {
 
         // 1. The final state from the root row (already accept-folded).
         let final_state = {
-            let row = &root[self.fa.start * n..(self.fa.start + 1) * n];
+            let row = &root[self.start * n..(self.start + 1) * n];
             let m = row.iter().copied().fold(f64::NEG_INFINITY, f64::max);
             if m == f64::NEG_INFINITY {
                 return Err(FaError::Unsatisfiable { len: self.len });
@@ -1005,10 +1058,10 @@ impl ParallelTree<'_> {
         // 2. Top-down midpoint walk. Frames: (level, idx, s_begin, s_end);
         //    segment positions are [idx·width, (idx+1)·width) at `level`.
         let mut states = vec![0usize; self.len_pad + 1];
-        states[0] = self.fa.start;
+        states[0] = self.start;
         states[self.len_pad] = final_state;
         let mut stack: Vec<(usize, usize, usize, usize)> = Vec::with_capacity(2 * self.len_pad);
-        stack.push((0usize, 0usize, self.fa.start, final_state));
+        stack.push((0usize, 0usize, self.start, final_state));
         while let Some((level, idx, sb, se)) = stack.pop() {
             let width = self.len_pad >> level;
             if width == 1 {
@@ -1169,7 +1222,7 @@ impl ParallelTree<'_> {
         let temp = self.temperature as f64;
         let mut out = Vec::with_capacity(self.len);
         for t in 0..self.len {
-            let f = &fwd[t][self.fa.start * n..(self.fa.start + 1) * n];
+            let f = &fwd[t][self.start * n..(self.start + 1) * n];
             let bnext = &bwd[t + 1];
             let row = &self.logits[t * self.fa.vocab..(t + 1) * self.fa.vocab];
             let gmax = row
@@ -1812,5 +1865,176 @@ mod tests {
         let mut scratch = TreeScratch::new();
         let built = fa.build_tree(&mut scratch, &[0.0f32; 2], 1, &[FREE], 1.0);
         assert!(matches!(built, Err(FaError::Unsatisfiable { len: 1 })));
+    }
+
+    /// [`brute_force`] from an arbitrary start node (the carry-over
+    /// reference): walks `seq` from `start` instead of the designated start.
+    fn brute_force_from(
+        fa: &Automaton,
+        start: usize,
+        logits: &[f32],
+        len: usize,
+        forced: &[u32],
+        temp: f32,
+    ) -> Vec<f64> {
+        let vocab = fa.vocab();
+        let mut dist = vec![0.0f64; vocab.pow(len as u32)];
+        let mut seq = vec![0u32; len];
+        for (code, d) in dist.iter_mut().enumerate() {
+            let mut c = code;
+            for t in (0..len).rev() {
+                seq[t] = (c % vocab) as u32;
+                c /= vocab;
+            }
+            let mut skip = false;
+            for t in 0..len {
+                if forced[t] != FREE && seq[t] != forced[t] {
+                    skip = true;
+                    break;
+                }
+            }
+            if skip {
+                continue;
+            }
+            match fa.walk_from(start, &seq) {
+                Some(end) if fa.is_accept(end) => {
+                    let mut p = 1.0f64;
+                    for t in 0..len {
+                        let row = &logits[t * vocab..(t + 1) * vocab];
+                        p *= lm_probs(row, temp)[seq[t] as usize];
+                    }
+                    *d = p;
+                }
+                _ => *d = 0.0,
+            }
+        }
+        let z: f64 = dist.iter().sum();
+        for d in &mut dist {
+            *d /= z;
+        }
+        dist
+    }
+
+    fn sample_iter_from<'a>(
+        fa: &'a Automaton,
+        start: usize,
+        logits: &'a [f32],
+        len: usize,
+        forced: &'a [u32],
+        temp: f32,
+        seed: u64,
+    ) -> impl Iterator<Item = Vec<u32>> + 'a {
+        (0..N_DRAWS).map(move |i| {
+            let mut scratch = FaScratch::new();
+            let mut rng = SplitMix64::new(seed ^ (i as u64).wrapping_mul(0x9E37_79B9_7F4A_7C15));
+            let mut out = vec![0u32; len];
+            fa.sample_joint_from(
+                &mut scratch, start, logits, len, forced, temp, false, &mut rng, &mut out,
+            )
+            .expect("draw");
+            out
+        })
+    }
+
+    #[test]
+    fn carry_over_start_node_matches_conditioned_brute_force() {
+        // The block-carry-over contract (issue 035 P1): sampling from a
+        // NON-designated start node must reproduce the posterior conditioned
+        // on that start — both lanes, plus the marginals axis.
+        // Diamond into an accepting self-loop; start mid-graph at node 1
+        // (two-branch entry, every length-3 path lands accepting).
+        let fa = AutomatonBuilder::new(5, 3, 0)
+            .accept(4)
+            .edge(0, 1, &[0, 1])
+            .edge(1, 2, &[1])
+            .edge(1, 3, &[2])
+            .edge(2, 4, &[0, 2])
+            .edge(3, 4, &[0, 1])
+            .edge(4, 4, &[0, 1, 2])
+            .build()
+            .unwrap();
+        let start = 1;
+        let len = 3;
+        let logits: Vec<f32> =
+            (0..(len * 3)).map(|i| ((i * 7919) % 23) as f32 - 8.0).collect();
+        let forced = [FREE; 3];
+
+        // Sequential lane.
+        let exact = brute_force_from(&fa, start, &logits, len, &forced, 1.0);
+        let tv = tv_distance(&exact, sample_iter_from(&fa, start, &logits, len, &forced, 1.0, 91), 3);
+        assert!(tv < 0.03, "carry-over sequential tv {tv}");
+
+        // Parallel lane (len 3 → 4 leaves, one identity pad).
+        let mut scratch = TreeScratch::new();
+        let tree = fa
+            .build_tree_from(&mut scratch, start, &logits, len, &forced, 1.0)
+            .expect("tree from carry-over node");
+        let tv = tv_distance(
+            &exact,
+            (0..N_DRAWS).map(|i| {
+                let mut scratch = TreeScratch::new();
+                let tree = fa
+                    .build_tree_from(&mut scratch, start, &logits, len, &forced, 1.0)
+                    .expect("tree");
+                let mut rng =
+                    SplitMix64::new(97 ^ (i as u64).wrapping_mul(0x9E37_79B9_7F4A_7C15));
+                let mut out = vec![0u32; len];
+                let mut nan = 0u64;
+                tree.sample(false, &mut rng, &mut nan, &mut out).expect("draw");
+                assert_eq!(nan, 0);
+                out
+            }),
+            3,
+        );
+        assert!(tv < 0.03, "carry-over parallel tv {tv}");
+
+        // Marginals from the carry-over tree.
+        let marg = tree.marginals();
+        for (t, mt) in marg.iter().enumerate() {
+            for (v, &mv) in mt.iter().enumerate() {
+                let mut p = 0.0f64;
+                for (code, &q) in exact.iter().enumerate() {
+                    let mut c = code;
+                    let mut tok_at_t = 0u32;
+                    for tt in (0..len).rev() {
+                        let tok = (c % 3) as u32;
+                        c /= 3;
+                        if tt == t {
+                            tok_at_t = tok;
+                        }
+                    }
+                    if tok_at_t == v as u32 {
+                        p += q;
+                    }
+                }
+                assert!((mv - p).abs() < 1e-9, "carry-over marg t={t} v={v}: {mv} vs {p}");
+            }
+        }
+    }
+
+    #[test]
+    fn carry_over_bad_start_and_walk_from() {
+        let fa = AutomatonBuilder::new(3, 2, 0)
+            .accept(2)
+            .edge(0, 1, &[0])
+            .edge(1, 2, &[0])
+            .build()
+            .unwrap();
+        // Out-of-range start nodes refuse on both lanes.
+        let mut s = FaScratch::new();
+        assert!(matches!(
+            fa.sample_joint_from(&mut s, 7, &[0.0; 2], 1, &[FREE], 1.0, false,
+                                 &mut SplitMix64::new(1), &mut [0u32; 1]),
+            Err(FaError::BadStart(7))
+        ));
+        let mut t = TreeScratch::new();
+        assert!(matches!(
+            fa.build_tree_from(&mut t, 7, &[0.0; 2], 1, &[FREE], 1.0),
+            Err(FaError::BadStart(7))
+        ));
+        // walk_from generalizes walk; both die on a disallowed token.
+        assert_eq!(fa.walk(&[0, 0]), fa.walk_from(fa.start(), &[0, 0]));
+        assert_eq!(fa.walk_from(0, &[0, 0]), Some(2));
+        assert_eq!(fa.walk_from(0, &[1]), None);
     }
 }
