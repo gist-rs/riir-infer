@@ -120,8 +120,8 @@ Compute 5000 / 4 - 250. Think step by step, then give the final answer after ###
 
 ";
 
-fn arith_items(n: usize) -> Vec<ArithItem> {
-    arith_items_v2(n)
+fn arith_items(n: usize, hard: bool) -> Vec<ArithItem> {
+    arith_items_v2(n, hard)
 }
 
 /// Precedence-correct gold: × binds before +/-; each class evaluates
@@ -168,14 +168,21 @@ fn eval_standard_precedence(first: i128, ops: &[(char, i128)]) -> Option<i128> {
 /// +/-/* suffice for the phase-sensitivity axis. The corpus hash changes —
 /// disclosed in the run record (the stop rule's instrument-defect clause; no
 /// accuracy cell was admissible before this fix).
-fn arith_items_v2(n: usize) -> Vec<ArithItem> {
+///
+/// `hard` (DQ_ARITH_HARD=1, Issue 033): the v2 operand scales read base
+/// arith 0.9583 at n=48 — ABOVE the 0.95 admissibility ceiling, so no Δ can
+/// gate (bench 023). The hard posture widens every scale (ops 3-6, first
+/// 1_000-99_999, +/- operands 100-9_999, × operands 11-999) to pull base
+/// into the window; the frozen default (hard=false) is BYTE-IDENTICAL to
+/// the v2 corpus the earlier runs measured.
+fn arith_items_v2(n: usize, hard: bool) -> Vec<ArithItem> {
     let mut rng = Rng(0x0A71_A614_4847);
     let mut out = Vec::with_capacity(n);
     for _ in 0..n {
         // 2-4 operations; multiplication operands kept small enough that a
         // 27B has a real but non-trivial shot (GSM8K-class difficulty).
-        let n_ops = 2 + (rng.below(3) as usize);
-        let first = 100 + rng.below(9900) as i128;
+        let n_ops = if hard { 3 + (rng.below(4) as usize) } else { 2 + (rng.below(3) as usize) };
+        let first = if hard { 1_000 + rng.below(99_000) as i128 } else { 100 + rng.below(9900) as i128 };
         let mut ops: Vec<(char, i128)> = Vec::with_capacity(n_ops);
         for _ in 0..n_ops {
             let op = match rng.below(3) {
@@ -184,8 +191,8 @@ fn arith_items_v2(n: usize) -> Vec<ArithItem> {
                 _ => '*',
             };
             let operand: i128 = match op {
-                '*' => (3 + rng.below(97)) as i128,
-                _ => (10 + rng.below(990)) as i128,
+                '*' => (if hard { 11 + rng.below(989) } else { 3 + rng.below(97) }) as i128,
+                _ => (if hard { 100 + rng.below(9_900) } else { 10 + rng.below(990) }) as i128,
             };
             ops.push((op, operand));
         }
@@ -269,19 +276,23 @@ struct NiahItem {
 }
 
 /// Build one NIAH prompt ≈ `target_tokens` long: interleaved paragraphs from
-/// the deterministic bank with 8 needle sentences at spread depths, query last.
-fn niah_item(idx: usize, len_round: usize, target_tokens: usize, tok: &BpeTokenizer) -> NiahItem {
+/// the deterministic bank with `nn` needle sentences at spread depths, query last.
+/// `nn` (DQ_NI_NEEDLES, Issue 033): the default 8 read base pooled 0.9896 —
+/// ABOVE the 0.95 admissibility ceiling; more distractors pull base down.
+/// Capped at the 10-entry needle banks.
+fn niah_item(idx: usize, len_round: usize, target_tokens: usize, tok: &BpeTokenizer, nn: usize) -> NiahItem {
+    let nn = nn.clamp(1, NEEDLE_SERVERS.len());
     let mut rng = Rng(0x61A1_0000 + idx as u64 * 7919 + len_round as u64);
-    // rotate needle assignment deterministically; 8 needles per prompt
+    // rotate needle assignment deterministically; nn needles per prompt
     let needle_off = (idx * 3) % 10;
-    let needles: Vec<(usize, usize)> = (0..8)
+    let needles: Vec<(usize, usize)> = (0..nn)
         .map(|k| {
             let s = (needle_off + k) % 10;
             let c = (s + idx + k) % 10;
             (s, c)
         })
         .collect();
-    let target_k = (idx * 5 + 2) % 8;
+    let target_k = (idx * 5 + 2) % nn;
     let (t_server, t_code) = needles[target_k];
 
     // Build filler text and place needles at ~even depth bands.
@@ -289,10 +300,10 @@ fn niah_item(idx: usize, len_round: usize, target_tokens: usize, tok: &BpeTokeni
     let mut tokens_so_far = 0usize;
     let mut para_i = rng.below(24) as usize;
     let mut needle_i = 0usize;
-    let needle_band = (target_tokens / 9).max(1);
+    let needle_band = (target_tokens / (nn + 1)).max(1);
     let mut next_needle_at = needle_band;
     loop {
-        if needle_i < 8 && tokens_so_far >= next_needle_at {
+        if needle_i < nn && tokens_so_far >= next_needle_at {
             let (s, c) = needles[needle_i];
             parts.push(format!(
                 "Note: the password for server {} is {}.\n",
@@ -314,7 +325,7 @@ fn niah_item(idx: usize, len_round: usize, target_tokens: usize, tok: &BpeTokeni
         }
     }
     // any unplaced needles go at the end region
-    while needle_i < 8 {
+    while needle_i < nn {
         let (s, c) = needles[needle_i];
         parts.push(format!(
             "Note: the password for server {} is {}.\n",
@@ -528,11 +539,26 @@ fn run() -> Result<(), String> {
         return Err("DQ_GRIDS produced no grids".into());
     }
     let arith_n: usize = env_or("DQ_ARITH_N", "48").parse().map_err(|_| "DQ_ARITH_N")?;
+    let arith_hard = env_or("DQ_ARITH_HARD", "0") == "1";
     let ni_lengths: Vec<usize> = env_or("DQ_NI_LENGTHS", "4096,8192,16384")
         .split(',')
         .filter_map(|s| s.trim().parse().ok())
         .collect();
     let ni_per_len: usize = env_or("DQ_NI_PER_LEN", "32").parse().map_err(|_| "DQ_NI_PER_LEN")?;
+    let ni_needles: usize = env_or("DQ_NI_NEEDLES", "8").parse().map_err(|_| "DQ_NI_NEEDLES")?;
+    // Issue 033 — the KV-STORE axis cells. Empty string = no KV cells (the
+    // axis-1-only replication posture); "off" entries are skipped like
+    // unknown spellings. Default a8,a4: the q8kv-class cell + one sensitivity
+    // rung below it.
+    let kv_grids: Vec<DqGrid> = env_or("DQ_KV_GRIDS", "a8,a4")
+        .split(',')
+        .filter_map(|s| match s.trim() {
+            "a2" => Some(DqGrid::A2),
+            "a4" => Some(DqGrid::A4),
+            "a8" => Some(DqGrid::A8),
+            _ => None,
+        })
+        .collect();
     let n_boot: usize = env_or("DQ_BOOTSTRAP", "10000")
         .parse()
         .map_err(|_| "DQ_BOOTSTRAP")?;
@@ -613,8 +639,8 @@ fn run() -> Result<(), String> {
         );
     }
 
-    // ── corpora + freeze hashes ───────────────────────────────────────────
-    let arith = arith_items(arith_n);
+    // ── corpora + freeze hashes ───────────────────────────────────────
+    let arith = arith_items(arith_n, arith_hard);
     let niah: Vec<(usize, Vec<NiahItem>)> = ni_lengths
         .iter()
         .enumerate()
@@ -622,7 +648,7 @@ fn run() -> Result<(), String> {
             (
                 l,
                 (0..ni_per_len)
-                    .map(|i| niah_item(i, r, l, &tok))
+                    .map(|i| niah_item(i, r, l, &tok, ni_needles))
                     .collect(),
             )
         })
@@ -660,7 +686,15 @@ fn run() -> Result<(), String> {
          folded prefill lane exists; T2 measurement)"
     );
 
-    // ── the cells ─────────────────────────────────────────────────────────
+    // ── the cells ────────────────────────────────────────────────
+    // Issue 033 — the attention-layer count (the KV axis fires per
+    // ATTENTION layer; the GDN layers carry recurrent state, no KV cache).
+    let attn_layers = weights
+        .layer_types
+        .iter()
+        .filter(|t| **t != riir_infer_core::types::DeltaNetLayerType::DeltaNet)
+        .count();
+    eprintln!("[dq614] attn_layers={attn_layers} (KV axis fires per attention layer)");
     struct CellResult {
         arith_correct: Vec<bool>,
         ni_correct: BTreeMap<usize, Vec<bool>>,
@@ -668,9 +702,11 @@ fn run() -> Result<(), String> {
         second_fnvs: Vec<u64>,
         prefill_launches: u64,
         decode_launches: u64,
+        kv_launches: u64,
         /// G-i2: the EXACT expected counts, computed from actual lengths.
         expected_prefill: u64,
         expected_decode: u64,
+        expected_kv: u64,
         count_ok: bool,
     }
     let mut cells: BTreeMap<String, CellResult> = BTreeMap::new();
@@ -679,13 +715,16 @@ fn run() -> Result<(), String> {
     let run_cell = |name: &str,
                     arm: DqPhaseArm,
                     grid: DqGrid,
+                    kv_grid: Option<DqGrid>,
                     fwd: &mut TernaryDeltanetGpuForward|
      -> Result<CellResult, String> {
         dq::set_arm(arm);
         dq::set_grid(grid);
+        dq::set_kv_grid(kv_grid);
         dq::fq_reset_counters();
         let p0 = dq::fq_prefill_launches();
         let d0 = dq::fq_decode_launches();
+        let k0 = dq::fq_kv_launches();
         let mut arith_correct = Vec::with_capacity(arith.len());
         let mut gen_lens = Vec::new();
         let mut first_fnvs = Vec::new();
@@ -721,12 +760,16 @@ fn run() -> Result<(), String> {
             eprintln!("[dq614] {name} niah@{l}: {}/{}", ni_correct[l].iter().filter(|x| **x).count(), items.len());
         }
         // G-i2 (D5, frozen arithmetic): prefill = 256/chunk where chunks =
-        // ceil(prompt_toks/4096); decode = 256 * (n_generated − 1) — token 1
-        // is the prefill's (the D1 phase boundary).
+        // ceil(prompt_toks/4096); decode = 256 × (n_generated − 1) — token 1
+        // is the prefill's (the D1 phase boundary). Issue 033: KV = 2 (k+v)
+        // × attn_layers per prefill chunk and per decode step, whenever the
+        // KV arm is set.
         let armed_pf = arm.prefill_armed();
         let armed_dec = arm.decode_armed();
+        let per_item_kv = 2u64 * attn_layers as u64;
         let mut expected_prefill = 0u64;
         let mut expected_decode = 0u64;
+        let mut expected_kv = 0u64;
         for (&pt, &ng) in prompt_toks.iter().zip(gen_lens.iter()) {
             let chunks = pt.div_ceil(4096).max(1) as u64;
             if armed_pf {
@@ -735,13 +778,18 @@ fn run() -> Result<(), String> {
             if armed_dec {
                 expected_decode += 256 * ng.saturating_sub(1) as u64;
             }
+            if kv_grid.is_some() {
+                expected_kv += per_item_kv * chunks + per_item_kv * ng.saturating_sub(1) as u64;
+            }
         }
         let got_pf = dq::fq_prefill_launches() - p0;
         let got_dec = dq::fq_decode_launches() - d0;
-        let count_ok = got_pf == expected_prefill && got_dec == expected_decode;
+        let got_kv = dq::fq_kv_launches() - k0;
+        let count_ok =
+            got_pf == expected_prefill && got_dec == expected_decode && got_kv == expected_kv;
         if !count_ok {
             eprintln!(
-                "[dq614] G-i2 COUNT MISMATCH {name}: prefill {got_pf} vs exp {expected_prefill}, decode {got_dec} vs exp {expected_decode}"
+                "[dq614] G-i2 COUNT MISMATCH {name}: prefill {got_pf} vs exp {expected_prefill}, decode {got_dec} vs exp {expected_decode}, kv {got_kv} vs exp {expected_kv}"
             );
         }
         Ok(CellResult {
@@ -751,18 +799,23 @@ fn run() -> Result<(), String> {
             second_fnvs,
             prefill_launches: got_pf,
             decode_launches: got_dec,
+            kv_launches: got_kv,
             expected_prefill,
             expected_decode,
+            expected_kv,
             count_ok,
         })
     };
 
     // G-i4 + G-i1(knob-off): base run twice.
     dq::set_arm(DqPhaseArm::Off);
+    dq::set_kv_grid(None);
     dq::fq_reset_counters();
-    let base1 = run_cell("base(1)", DqPhaseArm::Off, DqGrid::A2, &mut fwd)?;
-    let base2 = run_cell("base(2)", DqPhaseArm::Off, DqGrid::A2, &mut fwd)?;
-    let gi1_counters_zero = base1.prefill_launches == 0 && base1.decode_launches == 0;
+    let base1 = run_cell("base(1)", DqPhaseArm::Off, DqGrid::A2, None, &mut fwd)?;
+    let base2 = run_cell("base(2)", DqPhaseArm::Off, DqGrid::A2, None, &mut fwd)?;
+    let gi1_counters_zero = base1.prefill_launches == 0
+        && base1.decode_launches == 0
+        && base1.kv_launches == 0;
     let gi4_stable = base1.first_fnvs == base2.first_fnvs
         && base1.second_fnvs == base2.second_fnvs
         && base1.arith_correct == base2.arith_correct
@@ -779,33 +832,90 @@ fn run() -> Result<(), String> {
     if lane_check_only {
         let acc = cells["base"].arith_correct.iter().filter(|x| **x).count() as f64
             / arith_n as f64;
-        eprintln!("[dq614] LANE-CHECK: base arith acc = {acc:.4} (window 0.25–0.95)");
+        let ni_pooled: Vec<bool> = cells["base"]
+            .ni_correct
+            .values()
+            .flat_map(|v| v.iter().copied())
+            .collect();
+        let ni_acc = ni_pooled.iter().filter(|x| **x).count() as f64 / ni_pooled.len() as f64;
+        eprintln!(
+            "[dq614] LANE-CHECK: base arith acc = {acc:.4}, niah pooled = {ni_acc:.4} (window 0.25–0.95)"
+        );
         println!("lane_check_base_acc={acc:.4}");
+        println!("lane_check_ni_pooled_acc={ni_acc:.4}");
         return Ok(());
     }
 
     for grid in &grids {
         let gname = format!("{grid:?}").to_lowercase();
-        let pf = run_cell(&format!("pf_aq[{gname}]"), DqPhaseArm::PrefillOnly, *grid, &mut fwd)?;
-        let dec = run_cell(&format!("dec_aq[{gname}]"), DqPhaseArm::DecodeOnly, *grid, &mut fwd)?;
-        let both = run_cell(&format!("both_aq[{gname}]"), DqPhaseArm::Both, *grid, &mut fwd)?;
+        let pf = run_cell(
+            &format!("pf_aq[{gname}]"),
+            DqPhaseArm::PrefillOnly,
+            *grid,
+            None,
+            &mut fwd,
+        )?;
+        let dec = run_cell(
+            &format!("dec_aq[{gname}]"),
+            DqPhaseArm::DecodeOnly,
+            *grid,
+            None,
+            &mut fwd,
+        )?;
+        let both = run_cell(
+            &format!("both_aq[{gname}]"),
+            DqPhaseArm::Both,
+            *grid,
+            None,
+            &mut fwd,
+        )?;
         cells.insert(format!("pf_aq.{gname}"), pf);
         cells.insert(format!("dec_aq.{gname}"), dec);
         cells.insert(format!("both_aq.{gname}"), both);
         if *grid == DqGrid::A4 {
             // The D1 control: A8-on-decode vs base (|Δ| ≤ 2 items).
-            let c = run_cell("dec_a8", DqPhaseArm::DecodeOnly, DqGrid::A8, &mut fwd)?;
+            let c = run_cell("dec_a8", DqPhaseArm::DecodeOnly, DqGrid::A8, None, &mut fwd)?;
             cells.insert("dec_a8".into(), c);
         }
     }
     dq::set_arm(DqPhaseArm::Off);
 
-    // ── G-i2 gate: every cell's counts must have matched ──────────────────
+    // Issue 033 — the KV-STORE axis cells: kv-only (activation arm Off) and
+    // the pf×kv interaction (prefill activation quant + KV store quant,
+    // decode clean) per KV grid. The interaction cell separates "damage
+    // composes additively" from "the axes overlap in one mechanism".
+    for grid in &kv_grids {
+        let gname = format!("{grid:?}").to_lowercase();
+        let kv = run_cell(
+            &format!("kv_aq[{gname}]"),
+            DqPhaseArm::Off,
+            DqGrid::A2,
+            Some(*grid),
+            &mut fwd,
+        )?;
+        cells.insert(format!("kv_aq.{gname}"), kv);
+        let pfkv = run_cell(
+            &format!("pfkv_aq[{gname}]"),
+            DqPhaseArm::PrefillOnly,
+            *grid,
+            Some(*grid),
+            &mut fwd,
+        )?;
+        cells.insert(format!("pfkv_aq.{gname}"), pfkv);
+    }
+    dq::set_kv_grid(None);
+
+    // ── G-i2 gate: every cell's counts must have matched ──────────────
     for (name, c) in &cells {
         if !c.count_ok {
             return Err(format!(
-                "G-i2 FAIL ({name}): prefill {} vs exp {}, decode {} vs exp {}",
-                c.prefill_launches, c.expected_prefill, c.decode_launches, c.expected_decode
+                "G-i2 FAIL ({name}): prefill {} vs exp {}, decode {} vs exp {}, kv {} vs exp {}",
+                c.prefill_launches,
+                c.expected_prefill,
+                c.decode_launches,
+                c.expected_decode,
+                c.kv_launches,
+                c.expected_kv
             ));
         }
     }
@@ -841,11 +951,11 @@ fn run() -> Result<(), String> {
     let mut md = String::new();
     md.push_str("# DQ phase-matrix run (Plan 614 / Issue 026) — RAW DUMP\n\n");
     md.push_str(&format!(
-        "- model: `{model_path}` blake3=`{model_hash}`\n- corpus blake3: `{corpus_hash}`\n- gpu: {gpu_csv}\n- compute apps at start: none with dedicated memory\n- grids: {grids:?}\n- arith_n: {arith_n}, ni_lengths: {ni_lengths:?}, ni_per_len: {ni_per_len}\n- bootstrap: {n_boot}\n\n"
+        "- model: `{model_path}` blake3=`{model_hash}`\n- corpus blake3: `{corpus_hash}`\n- gpu: {gpu_csv}\n- compute apps at start: none with dedicated memory\n- grids: {grids:?}\n- kv grids (Issue 033): {kv_grids:?}\n- arith_n: {arith_n}, arith_hard: {arith_hard}, ni_lengths: {ni_lengths:?}, ni_per_len: {ni_per_len}, ni_needles: {ni_needles}\n- bootstrap: {n_boot}\n- attn_layers: {attn_layers}\n\n"
     ));
     md.push_str("## G-i1/G-i4\n\n- G-i1 (knob-off counters == 0): PASS\n- G-i4 (base twice byte-stable): PASS\n\n");
     md.push_str("## Per-cell accuracy + counters\n\n");
-    md.push_str("| cell | arith acc | nih acc per len | prefill launches | decode launches |\n|---|---|---|---|---|\n");
+    md.push_str("| cell | arith acc | nih acc per len | prefill launches | decode launches | kv launches |\n|---|---|---|---|---|---|\n");
     for (name, c) in &cells {
         let a = c.arith_correct.iter().filter(|x| **x).count() as f64 / c.arith_correct.len() as f64;
         let nis: Vec<String> = c
@@ -854,10 +964,11 @@ fn run() -> Result<(), String> {
             .map(|(l, v)| format!("{l}: {:.3}", v.iter().filter(|x| **x).count() as f64 / v.len() as f64))
             .collect();
         md.push_str(&format!(
-            "| {name} | {a:.4} | {} | {} | {} |\n",
+            "| {name} | {a:.4} | {} | {} | {} | {} |\n",
             nis.join(", "),
             c.prefill_launches,
-            c.decode_launches
+            c.decode_launches,
+            c.kv_launches
         ));
     }
 
@@ -944,6 +1055,121 @@ fn run() -> Result<(), String> {
             if dpf_n > 0.0 { ddec_n / dpf_n } else { f64::NAN }
         ));
     }
+
+    // ── Issue 033: the KV-STORE axis + the pf×kv interaction ──────────
+    // One-arm ladder: the two-arm SATURATED test degenerates with a single
+    // arm, so the kv rows use the one-arm form (arm dead OR damage
+    // ≥ near-total); the axis-1 pf/dec rows above keep their own two-arm
+    // ladder. The store spelling IS the read spelling for accuracy
+    // (quant-dequant is idempotent: values entering the attention dot are
+    // round(x) either way) — the record states this once, here.
+    let one_arm_label = |base_acc: f64, arm_acc: f64, lo: f64, hi: f64, chance: f64| -> String {
+        if base_acc < 0.25 || base_acc > 0.95 {
+            "INADMISSIBLE".to_string()
+        } else if arm_acc <= chance + 0.05 || (base_acc - arm_acc) >= (base_acc - chance) - 0.05 {
+            "SATURATED".to_string()
+        } else if lo > 0.0 {
+            "HIT".to_string()
+        } else if hi < 0.0 {
+            "REVERSED".to_string()
+        } else {
+            "NULL".to_string()
+        }
+    };
+    let acc_of = |c: &Vec<bool>| c.iter().filter(|x| **x).count() as f64 / c.len() as f64;
+    let suite_acc = |c: &CellResult| -> f64 {
+        let all: Vec<bool> = c.ni_correct.values().flat_map(|v| v.iter().copied()).collect();
+        acc_of(&all)
+    };
+    md.push_str("\n## Issue 033 — KV-store axis + interaction\n\n");
+    md.push_str(
+        "- Spelling: KV rows rounded in place to the grid at WRITE (the q8kv store posture). For accuracy this equals a q8 read rounding (idempotence) — the axis is ONE accuracy experiment.\n",
+    );
+    for grid in &kv_grids {
+        let gname = format!("{grid:?}").to_lowercase();
+        let kv = cells
+            .get(&format!("kv_aq.{gname}"))
+            .ok_or_else(|| format!("missing kv_aq.{gname} cell"))?;
+        let base = &cells["base"];
+        // decode-heavy (arith — the issue's primary read)
+        let d: Vec<i8> = kv
+            .arith_correct
+            .iter()
+            .zip(base.arith_correct.iter())
+            .map(|(a, b)| (*a as i8) - (*b as i8))
+            .collect();
+        let (lo, hi) = paired_bootstrap_ci(&d, n_boot);
+        let (base_acc, kv_acc) = (acc_of(&base.arith_correct), acc_of(&kv.arith_correct));
+        let dkv = base_acc - kv_acc;
+        let label = one_arm_label(base_acc, kv_acc, lo, hi, 0.05);
+        verdicts.insert(format!("kv[{gname}].decode_heavy"), label.clone());
+        md.push_str(&format!(
+            "- **kv[{gname}] decode-heavy (arith)**: acc base={base_acc:.4} kv={kv_acc:.4}; Δkv={dkv:.4}; CI(Δkv)=[{lo:.4},{hi:.4}] → **{label}**\n"
+        ));
+        // prefill-heavy (pooled NIAH)
+        let d_ni: Vec<i8> = kv
+            .ni_correct
+            .iter()
+            .zip(base.ni_correct.iter())
+            .flat_map(|((_, kv_v), (_, base_v))| {
+                kv_v.iter().zip(base_v.iter()).map(|(a, b)| (*a as i8) - (*b as i8))
+            })
+            .collect();
+        let (lo2, hi2) = paired_bootstrap_ci(&d_ni, n_boot);
+        let (base_n, kv_n) = (suite_acc(base), suite_acc(kv));
+        let dkv_n = base_n - kv_n;
+        let label_n = one_arm_label(base_n, kv_n, lo2, hi2, 0.125);
+        verdicts.insert(format!("kv[{gname}].prefill_heavy"), label_n.clone());
+        md.push_str(&format!(
+            "- **kv[{gname}] prefill-heavy (pooled)**: acc base={base_n:.4} kv={kv_n:.4}; Δkv={dkv_n:.4}; CI=[{lo2:.4},{hi2:.4}] → **{label_n}**\n"
+        ));
+        // the pf×kv interaction (decode-heavy)
+        if let Some(pfkv) = cells.get(&format!("pfkv_aq.{gname}")) {
+            let pf = cells
+                .get(&format!("pf_aq.{gname}"))
+                .ok_or_else(|| format!("missing pf_aq.{gname} for the interaction row"))?;
+            let d_i: Vec<i8> = pfkv
+                .arith_correct
+                .iter()
+                .zip(pf.arith_correct.iter())
+                .map(|(a, b)| (*a as i8) - (*b as i8))
+                .collect();
+            let (loi, hii) = paired_bootstrap_ci(&d_i, n_boot);
+            let pfkv_acc = acc_of(&pfkv.arith_correct);
+            let pf_acc = acc_of(&pf.arith_correct);
+            let dpi = pf_acc - pfkv_acc;
+            md.push_str(&format!(
+                "- **interaction pf→pfkv [{gname}] decode-heavy**: pf={pf_acc:.4} pfkv={pfkv_acc:.4}; Δ(kv|pf armed)={dpi:.4}; CI=[{loi:.4},{hii:.4}] (marginal KV damage ON TOP of prefill quant)\n"
+            ));
+        }
+    }
+    // Axis dominance summary (the issue's deliverable): rank |Δ| at the
+    // q8kv-class grid on the decode-heavy suite.
+    md.push_str("\n### Axis dominance (decode-heavy, |Δacc| vs base)\n\n");
+    {
+        let base = &cells["base"];
+        let base_acc = acc_of(&base.arith_correct);
+        let mut rows: Vec<(String, f64)> = Vec::new();
+        for g in &grids {
+            let gname = format!("{g:?}").to_lowercase();
+            if let Some(pf) = cells.get(&format!("pf_aq.{gname}")) {
+                rows.push((format!("prefill-act[{gname}]"), base_acc - acc_of(&pf.arith_correct)));
+            }
+            if let Some(dec) = cells.get(&format!("dec_aq.{gname}")) {
+                rows.push((format!("decode-act[{gname}]"), base_acc - acc_of(&dec.arith_correct)));
+            }
+        }
+        for g in &kv_grids {
+            let gname = format!("{g:?}").to_lowercase();
+            if let Some(kv) = cells.get(&format!("kv_aq.{gname}")) {
+                rows.push((format!("kv-store[{gname}]"), base_acc - acc_of(&kv.arith_correct)));
+            }
+        }
+        rows.sort_by(|a, b| b.1.abs().total_cmp(&a.1.abs()));
+        for (k, v) in &rows {
+            md.push_str(&format!("- {k}: {v:+.4}\n"));
+        }
+    }
     // dec_a8 control
     if let Some(c8) = cells.get("dec_a8") {
         let base = &cells["base"];
@@ -1003,7 +1229,13 @@ mod tests {
     /// its own rendered expression, and no v2 item overflows.
     #[test]
     fn arith_items_gold_is_precedence_correct() {
-        let items = arith_items(48);
+        let items = arith_items(48, false);
+        assert_eq!(items.len(), 48);
+        // The hard posture (Issue 033): same count, same evaluator — the gold
+        // property must hold at BOTH operand scales.
+        let hard_items = arith_items(48, true);
+        assert_eq!(hard_items.len(), 48);
+        assert!(hard_items.iter().zip(items.iter()).any(|(h, s)| h.gold != s.gold));
         assert_eq!(items.len(), 48);
         for it in &items {
             // Re-parse the rendered expression and re-evaluate independently

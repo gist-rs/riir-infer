@@ -2768,6 +2768,41 @@ impl DqFqKernels {
         if !prefill_armed() {
             return Ok(());
         }
+        let view = buf.slice(0..rows * dim);
+        self.launch_kv_quant_impl(stream, &view, dim, rows, grid)?;
+        note_prefill_launch();
+        Ok(())
+    }
+
+    /// Issue 033 axis 2 — quantize a K/V cache row region in place (the
+    /// q8kv store spelling). Same kernels as the activation lane (a KV row
+    /// region is rows×dim f32; the per-128 blocks never cross rows), gated
+    /// on the KV arm instead of the phase arm, counted separately.
+    pub fn launch_dq_kv_quant(
+        &self,
+        stream: &CudaStream,
+        buf: &cudarc::driver::safe::CudaView<f32>,
+        dim: usize,
+        rows: usize,
+        grid: crate::dq_fakequant::DqGrid,
+    ) -> Result<(), CudarcKernelError> {
+        use crate::dq_fakequant::{kv_armed, note_kv_launch};
+        if !kv_armed() {
+            return Ok(());
+        }
+        self.launch_kv_quant_impl(stream, buf, dim, rows, grid)?;
+        note_kv_launch();
+        Ok(())
+    }
+
+    fn launch_kv_quant_impl(
+        &self,
+        stream: &CudaStream,
+        buf: &cudarc::driver::safe::CudaView<f32>,
+        dim: usize,
+        rows: usize,
+        grid: crate::dq_fakequant::DqGrid,
+    ) -> Result<(), CudarcKernelError> {
         let block = grid.block();
         let blocks_per_row = dim.div_ceil(block);
         let total = (blocks_per_row * rows) as u32;
@@ -2794,7 +2829,6 @@ impl DqFqKernels {
                 .launch(cfg)
                 .map_err(|e| CudarcKernelError::Launch(e.to_string()))?;
         }
-        note_prefill_launch();
         Ok(())
     }
 }

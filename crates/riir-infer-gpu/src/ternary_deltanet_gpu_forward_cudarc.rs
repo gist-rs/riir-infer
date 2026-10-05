@@ -4478,6 +4478,35 @@ fn forward_attention_layer(
         kvd,
         pos,
     )?;
+    // Plan 614 / Issue 033 — KV-STORE axis (decode half): round this
+    // position's just-appended cache row in place to the KV grid (the
+    // q8kv deployment spelling) BEFORE the attention kernel reads it.
+    #[cfg(feature = "dq_phase_bench")]
+    {
+        use std::sync::Arc;
+        static DECODE_DQ_FQ: std::sync::OnceLock<Option<Arc<crate::cudarc_kernels::DqFqKernels>>> =
+            std::sync::OnceLock::new();
+        if crate::dq_fakequant::kv_armed() {
+            let dq_fq = DECODE_DQ_FQ
+                .get_or_init(|| {
+                    crate::cudarc_kernels::DqFqKernels::new(infra.ctx.clone())
+                        .map(Arc::new)
+                        .ok()
+                })
+                .clone()
+                .ok_or_else(|| {
+                    CudarcKernelError::Compile(
+                        "DQ fake-quant module compile failed (decode KV site)".into(),
+                    )
+                })?;
+            let lo = pos * kvd;
+            let hi = lo + kvd;
+            let grid = crate::dq_fakequant::current_kv_grid()
+                .expect("kv_armed() implies a grid");
+            dq_fq.launch_dq_kv_quant(&infra.stream, &key_cache.slice(lo..hi), kvd, 1, grid)?;
+            dq_fq.launch_dq_kv_quant(&infra.stream, &value_cache.slice(lo..hi), kvd, 1, grid)?;
+        }
+    }
 
     // 6. Flash attention decode.
     let n_positions = pos + 1;
@@ -5152,6 +5181,39 @@ fn forward_attention_layer_devpos(
         kvd,
         &acts.pos_dev_buf,
     )?;
+    // Plan 614 / Issue 033 — KV-STORE axis (graphs decode twin; inert under
+    // the D5 graphs-off posture, wired for coverage so the graphs lane
+    // cannot silently skip the arm).
+    #[cfg(feature = "dq_phase_bench")]
+    {
+        use std::sync::Arc;
+        static DECODE_DQ_FQ: std::sync::OnceLock<Option<Arc<crate::cudarc_kernels::DqFqKernels>>> =
+            std::sync::OnceLock::new();
+        if crate::dq_fakequant::kv_armed() {
+            let dq_fq = DECODE_DQ_FQ
+                .get_or_init(|| {
+                    crate::cudarc_kernels::DqFqKernels::new(infra.ctx.clone())
+                        .map(Arc::new)
+                        .ok()
+                })
+                .clone()
+                .ok_or_else(|| {
+                    CudarcKernelError::Compile(
+                        "DQ fake-quant module compile failed (decode KV devpos site)".into(),
+                    )
+                })?;
+            // The devpos variant keeps pos on the device; `acts.pos` is its
+            // host mirror (the documented invariant: pos_dev_buf MUST contain
+            // acts.pos as i32) — round THAT row.
+            let pos_host = acts.pos;
+            let lo = pos_host * kvd;
+            let hi = lo + kvd;
+            let grid = crate::dq_fakequant::current_kv_grid()
+                .expect("kv_armed() implies a grid");
+            dq_fq.launch_dq_kv_quant(&infra.stream, &key_cache.slice(lo..hi), kvd, 1, grid)?;
+            dq_fq.launch_dq_kv_quant(&infra.stream, &value_cache.slice(lo..hi), kvd, 1, grid)?;
+        }
+    }
 
     // 6. Flash attention decode — _devpos variant.
     //    (Kernel internally computes n_positions = *pos_dev + 1.)

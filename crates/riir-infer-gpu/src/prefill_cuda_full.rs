@@ -3333,6 +3333,36 @@ fn whole_prefill_inner(
                             .at
                             .launch_kv_fill(stream, k_b, v_b, kcache, vcache, kvd, p, base_pos)?;
                     }
+                    // Plan 614 / Issue 033 — KV-STORE axis (prefill half):
+                    // round this chunk's just-written cache rows in place to
+                    // the KV grid (the q8kv deployment spelling). Runs BEFORE
+                    // the attention kernel reads the cache (same ordering
+                    // contract as the mirror-stream comment below) and BEFORE
+                    // wb_enqueue, so the mirrors capture the QUANTIZED rows
+                    // (the mirror view of a quantized cache must not silently
+                    // revert the arm).
+                    #[cfg(feature = "dq_phase_bench")]
+                    if let Some(kv_grid) = crate::dq_fakequant::current_kv_grid() {
+                        let kv_rows = p * kvd;
+                        let lo = base_pos * kvd;
+                        let hi = lo + kv_rows;
+                        dq_fq()?.launch_dq_kv_quant(
+                            stream,
+                            &kcache.slice(lo..hi),
+                            kvd,
+                            p,
+                            kv_grid,
+                        )
+                        .map_err(|e| e.to_string())?;
+                        dq_fq()?.launch_dq_kv_quant(
+                            stream,
+                            &vcache.slice(lo..hi),
+                            kvd,
+                            p,
+                            kv_grid,
+                        )
+                        .map_err(|e| e.to_string())?;
+                    }
                     // Arm 13 — this chunk's KV rows are final in the mirrors:
                     // stream them now (the attention kernel only READS the
                     // cache after this point).

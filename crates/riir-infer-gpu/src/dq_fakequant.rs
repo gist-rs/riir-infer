@@ -282,6 +282,13 @@ static FQ_PREFILL_LAUNCHES: std::sync::atomic::AtomicU64 =
     std::sync::atomic::AtomicU64::new(0);
 static FQ_DECODE_LAUNCHES: std::sync::atomic::AtomicU64 =
     std::sync::atomic::AtomicU64::new(0);
+/// Issue 033 axis 2 — the KV-STORE precision arm: `None` = off (f32 KV,
+/// the shipped posture), `Some(grid)` = round every stored K/V cache row
+/// in place to the grid (the q8kv deployment spelling). NOT gated on the
+/// phase arm — the KV axis is independent by construction (the runner
+/// pairs it with each arm to build the axis matrix).
+static FQ_KV_GRID: std::sync::atomic::AtomicU8 = std::sync::atomic::AtomicU8::new(KV_GRID_OFF);
+static FQ_KV_LAUNCHES: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
 const ARM_OFF: u8 = 0;
 const ARM_PREFILL: u8 = 1;
@@ -290,6 +297,12 @@ const ARM_BOTH: u8 = 3;
 const GRID_A2: u8 = 0;
 const GRID_A4: u8 = 1;
 const GRID_A8: u8 = 2;
+// The KV static needs its own OFF encoding (the activation grid has no
+// off state; A2 shares 0 there).
+const KV_GRID_OFF: u8 = 0;
+const KV_GRID_A2: u8 = 1;
+const KV_GRID_A4: u8 = 2;
+const KV_GRID_A8: u8 = 3;
 
 /// Configure the instrument (the runner calls this per cell; the env vars
 /// `RIIR_DQ_FQ_PHASE` / `RIIR_DQ_FQ_GRID` are convenience wrappers for
@@ -330,6 +343,26 @@ pub fn current_grid() -> DqGrid {
     }
 }
 
+/// Issue 033 axis 2 — the KV-store grid (`None` = off).
+pub fn set_kv_grid(grid: Option<DqGrid>) {
+    let v = match grid {
+        None => KV_GRID_OFF,
+        Some(DqGrid::A2) => KV_GRID_A2,
+        Some(DqGrid::A4) => KV_GRID_A4,
+        Some(DqGrid::A8) => KV_GRID_A8,
+    };
+    FQ_KV_GRID.store(v, std::sync::atomic::Ordering::Relaxed);
+}
+
+pub fn current_kv_grid() -> Option<DqGrid> {
+    match FQ_KV_GRID.load(std::sync::atomic::Ordering::Relaxed) {
+        KV_GRID_A2 => Some(DqGrid::A2),
+        KV_GRID_A4 => Some(DqGrid::A4),
+        KV_GRID_A8 => Some(DqGrid::A8),
+        _ => None,
+    }
+}
+
 /// Read the env knobs (`RIIR_DQ_FQ_PHASE=off|prefill|decode|both`,
 /// `RIIR_DQ_FQ_GRID=a2|a4|a8`). Unset/unknown = Off/A2 — the fail-closed
 /// default (an unset instrument never injects).
@@ -358,9 +391,15 @@ pub fn fq_prefill_launches() -> u64 {
 pub fn fq_decode_launches() -> u64 {
     FQ_DECODE_LAUNCHES.load(std::sync::atomic::Ordering::Relaxed)
 }
+/// Issue 033 — the KV-store launch counter (one per quantized cache row
+/// region; k and v each count).
+pub fn fq_kv_launches() -> u64 {
+    FQ_KV_LAUNCHES.load(std::sync::atomic::Ordering::Relaxed)
+}
 pub fn fq_reset_counters() {
     FQ_PREFILL_LAUNCHES.store(0, std::sync::atomic::Ordering::Relaxed);
     FQ_DECODE_LAUNCHES.store(0, std::sync::atomic::Ordering::Relaxed);
+    FQ_KV_LAUNCHES.store(0, std::sync::atomic::Ordering::Relaxed);
 }
 
 #[inline]
@@ -383,6 +422,14 @@ pub(crate) fn note_prefill_launch() {
 pub(crate) fn note_decode_launch() {
     FQ_DECODE_LAUNCHES.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
 }
+#[inline]
+#[cfg_attr(
+    not(feature = "dq_phase_bench"),
+    allow(dead_code, reason = "the only callers are the dq_phase_bench-gated KV-store injection sites (Issue 033)")
+)]
+pub(crate) fn note_kv_launch() {
+    FQ_KV_LAUNCHES.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+}
 
 /// Whether the prefill-side injections should fire right now.
 #[inline]
@@ -394,6 +441,12 @@ pub fn prefill_armed() -> bool {
 #[inline]
 pub fn decode_armed() -> bool {
     current_arm().decode_armed()
+}
+
+/// Whether the KV-store injections should fire right now (Issue 033).
+#[inline]
+pub fn kv_armed() -> bool {
+    current_kv_grid().is_some()
 }
 
 #[cfg(test)]
