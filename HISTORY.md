@@ -4,6 +4,41 @@ Durable records for resolved questions and closed lanes (the noise-reduction
 convention: the record lands here, hash-pinned; open work lives in `.issues/`
 and `.plans/`). Created 2026-09-23 at the first record.
 
+## 2026-10-06 — Issue 022 T5.4 CLOSED: the equal-FLOP skip-class gate — the lane wins, honestly — `8bd5c2d`+this commit
+
+The lane's one honest comparison debt paid (record
+[`.benchmarks/022_t54_skip_arms.md`](.benchmarks/022_t54_skip_arms.md); instrument
+`src/bin/twt_skip_amputation.rs` at `a7b080c`; overnight detached run on the 4090 box,
+parent cache self-generated over the REAL forward, glue parity 511/511 byte-identical):
+
+**twt 0.8919 > hydra 0.8642 > random floor 0.8437 >> ShortGPT 0.0320** at the equal
+3-layer cut (4088 teacher-forced positions, chat_probe corpus, the league model).
+
+- **The selection disagreement is total** — twt {4,12,15} vs hydra {19,20,21} vs
+  shortgpt {0,1,29}; zero shared layers.
+- **ShortGPT's Block-Influence greedy is 81 points BELOW random** on this class: its
+  BI meter is <5% flat across layers, so the greedy rides noise, and it picked layers
+  {0,1} — first divergence at position 0, babbling. A dense-model removal criterion
+  does not transfer to the quantized ternary GDN/attention hybrid.
+- **The floor is 0.84** — the 4.7% cut is nearly floor-degenerate; the lane's real
+  edge is +4.8 pt over random. Honest framing recorded, not buried.
+- hydra's logit-lens DE is the strongest published-class arm (hit-parity 0.4883); the
+  transcription was pinned against katgpt-rs's own `hydra_budget` module test.
+- XMerge-class: boundary reconstruction is a repair axis, not a selection criterion —
+  scoped in the bench record, not gated.
+- katgpt-rs Research 594 §7 updated — **the public-novelty caveat is discharged**
+  (decoder-LLM × quantized/ternary-GGUF × auditioned zero-training surrogate × DP
+  partition × throughput gate now stands without the T5.4 comparison debt). The
+  TWT absolute-0.9 bar passed on the M3's corpus (0.9486) and misses by 0.008 on this
+  box's chat_probe corpus — corpus-attributed (hit-rate parity both boxes), disclosed.
+
+Same commit wave: Issue 035 P0+P0.5 — `src/fa_posterior.rs`, the FA-constrained exact
+joint sampler for the dLLM decode lane (Mosaic arXiv:2607.07026 distill; CSR automaton
+tensors + edge-space forward–backward sequential sampler in f32 + the O(log L)
+f64 segment-tree parallel sampler + 1e-9-verified token marginals; 14 lib tests incl.
+brute-force TV exactness on toy/random automata + the G4 allocation-free gate
+`tests/fa_g4_alloc.rs`). P1 (the `fa_constraint` decode-loop wiring) is the next task.
+
 ## 2026-10-01 — riir-ai Issue 1004 R2 LANDED: the fused GDN prework (conv1d + SiLU + q/k L2-norm + head expansion, ONE dispatch) — `929d31e`
 
 The MTPLX `gdn_prefill_prework.py` shape, built and measured (record
