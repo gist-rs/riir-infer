@@ -225,6 +225,32 @@ The re-fire lane above EXECUTED same-day (Bench 017,
   production P3 KV cache that drops the V allocation is the natural
   follow-on, not owed by this issue).
 
+## 2026-10-05 — Issue 033 COMPLETE: the KV-axis extension arm landed and ran — the KV-store axis is NULL (a4-class KV storage accuracy-free), the activation axis dominates; instrument extended with the KV arm + hardened corpora
+
+Bench 033 (`.benchmarks/033_kv_axis_extension/`, report + full run log;
+exe at `ad683a6`): the dq_phase_matrix runner gained the KV-STORE axis
+(`DQ_KV_GRIDS`; every stored K/V row rounded in place at write — the CUDA
+`kv_fill` prefill site + the CubeCL `forward_attention_layer_gpu` decode
+site, the runner's real decode path) + the corpus-hardening knobs the
+admissibility rule demanded (`DQ_ARITH_HARD=1` pulls base arith 0.9583 →
+0.7500 into the window; `DQ_NI_NEEDLES`). Store ≡ read for accuracy
+(idempotence) — the axis is ONE experiment; the record states it.
+
+**The verdict: KV stored/read precision is NULL at BOTH a8 and a4** (Δ =
+0.0000 CI [0,0] at a8; −0.0208 CI [0, 0.0625] at a4; NIAH byte-stable at
+base; the pf×kv interaction adds nothing) — **the activation axis
+dominates catastrophically at a2** (pf 0.2083 / dec 0.1250 arith;
+pf_aq[a2] NIAH collapses to 0.19) and is free at a4. For serving: the
+hybrid's KV cache tolerates a4-class storage (~20–25% of f32 KV bytes)
+with zero measured accuracy cost; the sensitivity lives in the quantized
+GEMM activations. All gates PASS (G-i1/i2-with-the-KV-formula/i4,
+positive controls, dec_a8) across 16 cells × (48 arith + 96 NIAH).
+Disclosures: prefill-heavy rows are INADMISSIBLE by the pre-registered
+rule (base NIAH pooled 1.0000 > 0.95 — the standing boundary of this
+instrument at this model; the raw damage cells sit in the table). Two
+transient rustc 0xc0000005 build crashes cleared on retry (box history).
+Issue file removed (noise-reduction); this entry + the bench carry it.
+
 ## 2026-09-27 — Issue 014 RESOLVED: activation-aware ternary scale fit — SPLIT BY LANE (born-ternary clean negative; dense-parent mechanism transfer)
 
 Filed 2026-09-25 from katgpt-rs Issue 886 (the per-family conditional

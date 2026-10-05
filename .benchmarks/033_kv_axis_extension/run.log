@@ -1,0 +1,927 @@
+From github.com:gist-rs/riir-infer
+ * branch            develop    -> FETCH_HEAD
+HEAD is now at ad683a6 fix: Issue 033 runner — the pf×kv interaction row skips loud without a same-grid pf cell
+RESET_TO: 
+ad683a6
+   Compiling proc-macro2 v1.0.107
+   Compiling unicode-ident v1.0.26
+   Compiling quote v1.0.47
+   Compiling serde_core v1.0.229
+   Compiling autocfg v1.5.1
+   Compiling libm v0.2.16
+   Compiling serde v1.0.229
+   Compiling zerocopy v0.8.57
+   Compiling cfg-if v1.0.5
+   Compiling cfg_aliases v0.2.2
+   Compiling windows-link v0.2.1
+   Compiling equivalent v1.0.2
+   Compiling crossbeam-utils v0.8.23
+   Compiling thiserror v2.0.20
+   Compiling scopeguard v1.2.0
+   Compiling log v0.4.34
+   Compiling allocator-api2 v0.2.21
+   Compiling cpufeatures v0.3.1
+   Compiling foldhash v0.2.0
+   Compiling zmij v1.0.23
+   Compiling fastrand v2.5.0
+   Compiling either v1.18.0
+   Compiling arrayvec v0.7.8
+   Compiling find-msvc-tools v0.1.13
+   Compiling lock_api v0.4.14
+   Compiling shlex v2.0.1
+   Compiling once_cell v1.21.4
+   Compiling libc v0.2.189
+   Compiling ident_case v1.0.1
+   Compiling parking_lot_core v0.9.12
+   Compiling memchr v2.8.3
+   Compiling version_check v0.9.5
+   Compiling crossbeam-epoch v0.9.21
+   Compiling getrandom v0.3.4
+   Compiling pin-project-lite v0.2.17
+   Compiling num-traits v0.2.19
+   Compiling cc v1.4.7
+   Compiling crossbeam-deque v0.8.8
+   Compiling unicode-segmentation v1.13.3
+   Compiling serde_json v1.0.151
+   Compiling ahash v0.8.12
+   Compiling unicode-xid v0.2.6
+   Compiling rayon-core v1.13.0
+   Compiling parking v2.2.1
+   Compiling itoa v1.0.18
+   Compiling convert_case v0.10.0
+   Compiling blake3 v1.8.7
+   Compiling futures-core v0.3.34
+   Compiling strsim v0.11.1
+   Compiling rand_core v0.10.1
+   Compiling hashbrown v0.17.1
+   Compiling bitflags v2.13.2
+   Compiling fnv v1.0.7
+   Compiling getrandom v0.4.3
+   Compiling event-listener v5.4.2
+   Compiling windows-result v0.4.1
+   Compiling windows-strings v0.5.1
+   Compiling ciborium-io v0.2.2
+   Compiling constant_time_eq v0.4.2
+   Compiling num-integer v0.1.47
+   Compiling indexmap v2.14.2
+   Compiling syn v2.0.119
+   Compiling syn v3.0.6
+   Compiling num-complex v0.4.6
+   Compiling windows_x86_64_msvc v0.52.6
+   Compiling winnow v1.0.4
+   Compiling khronos_api v3.1.0
+   Compiling event-listener-strategy v0.5.4
+   Compiling chacha20 v0.10.2
+   Compiling concurrent-queue v2.5.0
+   Compiling toml_parser v1.1.3+spec-1.1.0
+   Compiling toml_datetime v1.1.1+spec-1.1.0
+   Compiling serde_spanned v1.1.1
+   Compiling cubecl-environment v0.11.0-pre.2
+   Compiling windows-sys v0.61.2
+   Compiling foldhash v0.1.5
+   Compiling toml_writer v1.1.2+spec-1.1.0
+   Compiling futures-io v0.3.34
+   Compiling rayon v1.12.0
+   Compiling semver v1.0.28
+   Compiling darling_core v0.21.3
+   Compiling darling_core v0.23.0
+   Compiling rustc-demangle v0.1.28
+   Compiling backtrace v0.3.76
+   Compiling rand v0.10.3
+   Compiling etcetera v0.11.0
+   Compiling rustc_version v0.4.1
+   Compiling futures-lite v2.6.1
+   Compiling toml v1.1.6+spec-1.1.0
+   Compiling hashbrown v0.15.5
+   Compiling async-channel v2.5.0
+   Compiling serde_bytes v0.11.19
+   Compiling nom v8.0.0
+   Compiling spin v0.10.1
+   Compiling cubecl-common v0.11.0-pre.2
+   Compiling libloading v0.8.9
+   Compiling mutants v0.0.3
+   Compiling oneshot v0.2.1
+   Compiling portable-atomic v1.15.0
+   Compiling serde_derive v1.0.229
+   Compiling bytemuck_derive v1.12.1
+   Compiling thiserror-impl v2.0.20
+   Compiling embassy-futures v0.1.2
+   Compiling ash v0.38.0+1.3.281
+   Compiling prettyplease v0.2.37
+   Compiling rustc-hash v2.1.3
+   Compiling rustc-hash v1.1.0
+   Compiling xml-rs v0.8.29
+   Compiling zerocopy-derive v0.8.57
+   Compiling derive_more-impl v2.1.1
+   Compiling derive-new v0.7.0
+   Compiling windows-interface v0.59.3
+   Compiling windows-implement v0.60.2
+   Compiling web-time v1.1.0
+   Compiling unsynn v0.3.0
+   Compiling gl_generator v0.14.0
+   Compiling tynm v0.2.0
+   Compiling darling_macro v0.23.0
+   Compiling darling_macro v0.21.3
+   Compiling heapless v0.7.17
+   Compiling windows-targets v0.52.6
+   Compiling naga v30.0.1
+   Compiling windows-threading v0.2.1
+   Compiling bytemuck v1.25.2
+   Compiling byteorder v1.5.0
+   Compiling darling v0.23.0
+   Compiling float4 v0.2.0
+   Compiling xxhash-rust v0.8.18
+   Compiling windows-core v0.62.2
+   Compiling unicode-width v0.2.2
+   Compiling darling v0.21.3
+   Compiling bit-vec v0.9.1
+   Compiling variadics_please v2.0.0
+   Compiling codespan-reporting v0.13.1
+   Compiling naga-types v30.0.1
+   Compiling windows-collections v0.3.2
+   Compiling windows-future v0.3.2
+   Compiling windows-numerics v0.3.1
+   Compiling bit-set v0.10.0
+   Compiling hash32 v0.2.1
+   Compiling glutin_wgl_sys v0.6.1
+   Compiling windows-sys v0.52.0
+   Compiling cubecl-macros-internal v0.11.0-pre.2
+   Compiling spirv v0.4.0+sdk-1.4.341.0
+   Compiling enumset_derive v0.15.0
+   Compiling spin v0.9.9
+   Compiling cubecl-runtime v0.11.0-pre.2 (E:\git\i033-wt\vendor\cubecl-runtime-0.11.0-pre.2)
+   Compiling smallvec v1.16.1
+   Compiling derive_more v2.1.1
+   Compiling internment v0.8.6
+   Compiling itertools v0.14.0
+   Compiling slab v0.4.12
+   Compiling float-ord v0.3.2
+   Compiling khronos-egl v6.0.0
+   Compiling static_assertions v1.1.0
+   Compiling strength_reduce v0.2.4
+   Compiling anyhow v1.0.104
+   Compiling raw-window-handle v0.6.2
+   Compiling cubecl-macros v0.11.0-pre.2
+   Compiling futures-task v0.3.34
+   Compiling stable_deref_trait v1.2.1
+   Compiling half v2.7.1
+   Compiling parking_lot v0.12.5
+   Compiling bumpalo v3.20.3
+   Compiling paste v1.0.15
+   Compiling futures-util v0.3.34
+   Compiling wgpu-types v30.0.1
+   Compiling transpose v0.2.3
+   Compiling cubecl-zspace v0.11.0-pre.2
+   Compiling windows v0.62.2
+   Compiling ciborium-ll v0.2.2
+   Compiling katgpt-types v0.2.1 (E:\git\katgpt-rs\crates\katgpt-types)
+   Compiling float8 v0.7.0
+   Compiling seize v0.5.1
+   Compiling cobs v0.3.0
+   Compiling enumset v1.1.14
+   Compiling ciborium v0.2.2
+   Compiling primal-check v0.3.4
+   Compiling wgpu-hal v30.0.0 (E:\git\i033-wt\vendor\wgpu-hal-30.0.0)
+   Compiling hashbrown v0.16.1
+   Compiling tinyvec v1.13.3
+   Compiling syn v1.0.109
+   Compiling inflections v1.1.1
+   Compiling md5 v0.8.1
+   Compiling presser v0.3.1
+   Compiling rustfft v6.4.1
+   Compiling papaya v0.2.5
+   Compiling postcard v1.1.3
+   Compiling unicode-normalization v0.1.25
+   Compiling num-bigint v0.4.8
+   Compiling ordered-float v5.5.0
+   Compiling profiling v1.0.18
+   Compiling renderdoc-sys v1.1.0
+   Compiling glow v0.17.0
+   Compiling range-alloc v0.1.5
+   Compiling katgpt-dec v0.1.3 (E:\git\katgpt-rs\crates\katgpt-dec)
+   Compiling gpu-allocator v0.28.0
+   Compiling num-rational v0.4.2
+   Compiling num-iter v0.1.46
+   Compiling cmake v0.1.58
+   Compiling wgpu-core v30.0.1
+   Compiling regex-syntax v0.8.11
+   Compiling pkg-config v0.3.34
+   Compiling fixedbitset v0.5.7
+   Compiling litrs v1.0.0
+   Compiling type-map v0.5.1
+   Compiling cubecl-ir v0.11.0-pre.2
+   Compiling katgpt-hla v0.1.3 (E:\git\katgpt-rs\crates\katgpt-hla)
+   Compiling katgpt-sense v0.2.1 (E:\git\katgpt-rs\crates\katgpt-sense)
+   Compiling katgpt-personality v0.1.3 (E:\git\katgpt-rs\crates\katgpt-personality)
+   Compiling katgpt-micro-belief v0.2.1 (E:\git\katgpt-rs\crates\katgpt-micro-belief)
+   Compiling wgpu-naga-bridge v30.0.1
+   Compiling regex-automata v0.4.18
+   Compiling petgraph v0.8.3
+   Compiling sentencepiece-sys v0.13.2
+   Compiling document-features v0.2.12
+   Compiling num v0.4.3
+   Compiling wgpu v30.0.1
+   Compiling stable-vec v0.4.3
+   Compiling tracel-rspirv v0.14.1+sdk-1.4.357.0
+   Compiling cubecl-wgpu v0.11.0-pre.2
+   Compiling regex v1.13.1
+   Compiling katgpt-percepta v0.1.0 (E:\git\katgpt-rs\crates\katgpt-percepta)
+   Compiling bytes v1.12.1
+   Compiling katgpt-core v0.4.1 (E:\git\katgpt-rs\crates\katgpt-core)
+   Compiling num-derive v0.4.2
+   Compiling prost-derive v0.14.4
+   Compiling cubecl v0.11.0-pre.2
+   Compiling cudarc v0.19.9
+   Compiling sanitize-filename v0.6.0
+   Compiling wgpu-core-deps-windows-linux-android v30.0.1
+   Compiling c2rust-bitfields-derive v0.20.0
+   Compiling libloading v0.9.0
+   Compiling memmap2 v0.9.11
+   Compiling riir-infer-gpu v0.1.0 (E:\git\i033-wt\crates\riir-infer-gpu)
+   Compiling pollster v0.4.0
+   Compiling prost v0.14.4
+   Compiling cubecl-core v0.11.0-pre.2
+   Compiling c2rust-bitfields v0.20.0
+   Compiling tracel-ash v0.39.5+sdk1.4.357
+   Compiling katgpt-transformer v0.1.0 (E:\git\katgpt-rs\crates\katgpt-transformer)
+   Compiling katgpt-speculative v0.1.0 (E:\git\katgpt-rs\crates\katgpt-speculative)
+   Compiling katgpt-pruners v0.1.0 (E:\git\katgpt-rs\crates\katgpt-pruners)
+   Compiling cubecl-opt v0.11.0-pre.2
+   Compiling cubecl-std v0.11.0-pre.2
+   Compiling katgpt-forward v0.1.0 (E:\git\katgpt-rs\crates\katgpt-forward)
+   Compiling cubecl-spirv v0.11.0-pre.2
+   Compiling sentencepiece v0.13.2
+   Compiling riir-infer-core v0.1.1 (E:\git\i033-wt)
+    Finished `release` profile [optimized] target(s) in 5m 08s
+BUILD_OK 
+[dq614] loading E:/git/riir-train/data/Ternary-Bonsai-2-27B-PQ2_0.gguf …
+CubeCL runtime initialized: wgpu<spirv>
+[Issue 864] attention KV working set = 2056 MiB (block_size 16448 × kvd 1024 × K+V × 16 attention layers) — above the 256 MiB warn line. If the workload never drives this many positions, clamp `config.block_size` to the real sequence bound BEFORE construction (the riir-train driver pattern); the unbounded variant measured a ~50 s first-touch burst at a 262,144-token context (riir-train Bench 573). Steady-state throughput is unaffected.
+[dq614] forward ready (171s)
+[dq614] corpus blake3=2dd4544f009a8a21108a2b5247d918ac6f95039084ae2a9fcfdfda5ead93e059 model blake3=b4f6ab953ef6d1452682bd861b7a1711a4a9945a74ca292659803978fd2550f6
+[dq614] LANE RECORD (frozen before any accuracy cell): fallback — shipping A8 prefill in every cell + dec_a8 control (no non-int8 folded prefill lane exists; T2 measurement)
+[dq614] attn_layers=16 (KV axis fires per attention layer)
+[dq614] base(1) arith gold=2254279 out="4288 * 822 = 3524736. 4288 * 313 = 1342144. 51965 + 9944 = 61909. 61909 + 352473" ok=true
+[dq614] base(1) arith gold=7256852 out="82350 * 36 = 2964600. 7356 * 584 = 4295904. 2964600 + 4295904 = 7260504. 7260504" ok=true
+[dq614] base(1) arith gold=1622639 out="5466 * 293 = 1601538. 34848 + 1601538 = 1636386. 1636386 - 4193 = 1632193. 16321" ok=true
+[dq614] base(1) arith gold=-3903012 out="9093 * 437 = 3973641. 59720 + 3319 = 63039. 63039 - 3973641 = -3910602. -3910602" ok=true
+[dq614] base(1) arith gold=-398942 out="<|im_end|>" ok=false
+[dq614] base(1) arith gold=97163 out="88727 + 7276 = 96003. 96003 - 1421 = 94582. 94582 + 848 = 95430. 95430 + 1733 = " ok=true
+[dq614] base(1) arith gold=-235207550 out="46126 - 4580 = 41546. 41546 - 8639 = 32907. 730 * 492 = 359160. 359160 * 655 = 2" ok=false
+[dq614] base(1) arith gold=103338 out="98550 - 5054 = 93496. 93496 - 6317 = 87179. 87179 + 6974 = 94153. 94153 + 9185 =" ok=true
+[dq614] base(1) arith gold=6128749589 out="65593 * 994 = 65199442. 65199442 * 94 = 6128747548. 6128747548 + 2041 = 61287495" ok=true
+[dq614] base(1) arith gold=4797629173 out="26483 * 383 = 10142989. 10142989 * 473 = 4797633797. 4797633797 - 3846 = 4797629" ok=true
+[dq614] base(1) arith gold=-5738417 out="7053 * 824 = 5811672. 71277 - 5811672 = -5740395. -5740395 - 6784 = -5747179. -5" ok=true
+[dq614] base(1) arith gold=7310372 out="66955 + 8179 = 75134. 75134 - 3520 = 71614. 2482 * 649 = 1610818. 5820 * 967 = 5" ok=true
+[dq614] base(1) arith gold=-1537395 out="3003 * 928 = 2786784. 28485 - 2786784 = -2758299. 1227 * 997 = 1223319. -2758299" ok=true
+[dq614] base(1) arith gold=39449831 out="46423 * 994 = 46144462. 7164 * 935 = 6708340. 46144462 - 6708340 = 39436122. 394" ok=false
+[dq614] base(1) arith gold=-564343 out="<|im_end|>" ok=false
+[dq614] base(1) arith gold=288078 out="9089 * 20 = 181780. 96342 + 3241 = 99583. 99583 + 181780 = 281363. 281363 + 6715" ok=true
+[dq614] base(1) arith gold=1465370 out="96632 - 9219 = 87413. 3691 * 374 = 1378434. 87413 + 1378434 = 1465847. 1465847 -" ok=false
+[dq614] base(1) arith gold=1354502253 out="7850 * 312 = 2449200. 2449200 * 553 = 1354407600. 94653 + 1354407600 = 135450225" ok=true
+[dq614] base(1) arith gold=40865606 out="52558 * 792 = 41625936. 2735 * 278 = 760330. 41625936 - 760330 = 40865606.\n#### " ok=true
+[dq614] base(1) arith gold=-20748391736 out="6099 * 310 = 1890690. 1890690 * 93 = 175834170. 175834170 * 118 = 20748432060. 4" ok=true
+[dq614] base(1) arith gold=12120780 out="7463 * 583 = 4350929. 8836 * 872 = 7705192. 64859 + 4350929 + 7705192 = 12120980" ok=false
+[dq614] base(1) arith gold=9621468 out="9596 * 789 = 7571244. 7571244 + 2650 = 7573894. 7573894 - 4797 = 7569097. 756909" ok=true
+[dq614] base(1) arith gold=81432 out="96227 - 7545 = 88682. 88682 - 2173 = 86509. 86509 + 8719 = 95228. 95228 - 4127 =" ok=true
+[dq614] base(1) arith gold=-389841652177070 out="3561 * 294 = 1046934. 1046934 * 487 = 511856858. 511856858 * 993 = 508273859994." ok=false
+[dq614] base(1) arith gold=188380766651 out="2779 * 379 = 1053241. 1053241 * 383 = 403391303. 403391303 * 467 = 188383738501." ok=true
+[dq614] base(1) arith gold=84548 out="96616 - 5160 = 91456. 91456 + 7107 = 98563. 98563 - 4327 = 94236. 94236 - 9688 =" ok=true
+[dq614] base(1) arith gold=17523396 out="35249 * 497 = 17518753. 17518753 - 368 = 17518385. 17518385 + 5011 = 17523396.\n#" ok=true
+[dq614] base(1) arith gold=85623 out="5486 * 14 = 76804. 12100 + 3374 = 15474. 15474 + 76804 = 92278. 92278 - 1575 = 9" ok=true
+[dq614] base(1) arith gold=24009932382 out="3823 * 246 = 940458. 940458 * 851 = 800330158. 800330158 * 30 = 24009904740. 350" ok=false
+[dq614] base(1) arith gold=2104978 out="5210 * 389 = 2026690. 58796 + 7288 = 66084. 66084 - 1954 = 64130. 64130 + 7566 =" ok=true
+[dq614] base(1) arith gold=33798348 out="41148 * 996 = 40983408. 8055 * 892 = 7185060. 40983408 - 7185060 = 33798348.\n###" ok=true
+[dq614] base(1) arith gold=6957431023701 out="88382 * 160 = 14141120. 14141120 * 500 = 7070560000. 7070560000 * 984 = 69574310" ok=true
+[dq614] base(1) arith gold=-505987715 out="3038 * 718 = 2181084. 2181084 * 232 = 506011488. 77875 - 506011488 = -505933613." ok=false
+[dq614] base(1) arith gold=-38165155 out="367 * 138 = 50646. 50646 * 753 = 38136438. 6951 * 14 = 97314. 70525 - 38136438 =" ok=true
+[dq614] base(1) arith gold=11262557 out="29558 * 381 = 11261598. 11261598 + 4177 = 11265775. 11265775 - 2581 = 11263194. " ok=true
+[dq614] base(1) arith gold=7039582 out="34151 * 188 = 6420388. 2040 * 301 = 614040. 6420388 + 614040 = 7034428. 7034428 " ok=true
+[dq614] base(1) arith gold=5605795 out="65279 * 86 = 5614000 - 65279 = 5614000 - 65279 = 5548721. 5548721 - 4696 = 55440" ok=false
+[dq614] base(1) arith gold=-6239395 out="8715 * 715 = 6231225. 7269 - 6231225 = -6223956. -6223956 - 6225 = -6230181. -62" ok=true
+[dq614] base(1) arith gold=1405763 out="9448 - 2651 = 6797. 6797 + 1086 = 7883. 3960 * 353 = 1397880. 7883 + 1397880 = 1" ok=true
+[dq614] base(1) arith gold=-4764952 out="6095 * 818 = 4985710. 3463 * 63 = 218169. 2589 - 4985710 + 218169 = -4744952.\n##" ok=false
+[dq614] base(1) arith gold=144443485 out="7585 * 183 = 1388055. 1388055 * 104 = 144357720. 87442 + 144357720 = 144445162. " ok=true
+[dq614] base(1) arith gold=5995556 out="8295 * 478 = 3965010. 3169 * 631 = 2000039. 21922 + 8985 = 30907. 30907 + 396501" ok=false
+[dq614] base(1) arith gold=72267 out="62114 - 2549 = 59565. 59565 + 9062 = 68627. 68627 + 3089 = 71716. 71716 + 551 = " ok=true
+[dq614] base(1) arith gold=26585 out="18297 + 3328 = 21625. 21625 - 6827 = 14798. 14798 + 6695 = 21493. 21493 - 1252 =" ok=true
+[dq614] base(1) arith gold=-841444 out="1582 * 561 = 887502. 50022 - 3964 = 46058. 46058 - 887502 = -841444.\n#### -84144" ok=true
+[dq614] base(1) arith gold=32815014 out="39773 * 825 = 32812725. 32812725 - 5513 = 32807212. 32807212 + 7802 = 32815014.\n" ok=true
+[dq614] base(1) arith gold=12326797875 out="46799 * 345 = 16145655. 16145655 * 763 = 12319134765. 8421 * 910 = 7663110. 1231" ok=true
+[dq614] base(1) arith gold=78974 out="85059 + 2336 = 87395. 87395 + 2540 = 89935. 89935 - 6612 = 83323. 83323 + 3782 =" ok=true
+[dq614] base(1) niah@4096: 32/32
+[dq614] base(1) niah@8192: 32/32
+[dq614] base(1) niah@16384: 32/32
+[dq614] base(2) arith gold=2254279 out="4288 * 822 = 3524736. 4288 * 313 = 1342144. 51965 + 9944 = 61909. 61909 + 352473" ok=true
+[dq614] base(2) arith gold=7256852 out="82350 * 36 = 2964600. 7356 * 584 = 4295904. 2964600 + 4295904 = 7260504. 7260504" ok=true
+[dq614] base(2) arith gold=1622639 out="5466 * 293 = 1601538. 34848 + 1601538 = 1636386. 1636386 - 4193 = 1632193. 16321" ok=true
+[dq614] base(2) arith gold=-3903012 out="9093 * 437 = 3973641. 59720 + 3319 = 63039. 63039 - 3973641 = -3910602. -3910602" ok=true
+[dq614] base(2) arith gold=-398942 out="<|im_end|>" ok=false
+[dq614] base(2) arith gold=97163 out="88727 + 7276 = 96003. 96003 - 1421 = 94582. 94582 + 848 = 95430. 95430 + 1733 = " ok=true
+[dq614] base(2) arith gold=-235207550 out="46126 - 4580 = 41546. 41546 - 8639 = 32907. 730 * 492 = 359160. 359160 * 655 = 2" ok=false
+[dq614] base(2) arith gold=103338 out="98550 - 5054 = 93496. 93496 - 6317 = 87179. 87179 + 6974 = 94153. 94153 + 9185 =" ok=true
+[dq614] base(2) arith gold=6128749589 out="65593 * 994 = 65199442. 65199442 * 94 = 6128747548. 6128747548 + 2041 = 61287495" ok=true
+[dq614] base(2) arith gold=4797629173 out="26483 * 383 = 10142989. 10142989 * 473 = 4797633797. 4797633797 - 3846 = 4797629" ok=true
+[dq614] base(2) arith gold=-5738417 out="7053 * 824 = 5811672. 71277 - 5811672 = -5740395. -5740395 - 6784 = -5747179. -5" ok=true
+[dq614] base(2) arith gold=7310372 out="66955 + 8179 = 75134. 75134 - 3520 = 71614. 2482 * 649 = 1610818. 5820 * 967 = 5" ok=true
+[dq614] base(2) arith gold=-1537395 out="3003 * 928 = 2786784. 28485 - 2786784 = -2758299. 1227 * 997 = 1223319. -2758299" ok=true
+[dq614] base(2) arith gold=39449831 out="46423 * 994 = 46144462. 7164 * 935 = 6708340. 46144462 - 6708340 = 39436122. 394" ok=false
+[dq614] base(2) arith gold=-564343 out="<|im_end|>" ok=false
+[dq614] base(2) arith gold=288078 out="9089 * 20 = 181780. 96342 + 3241 = 99583. 99583 + 181780 = 281363. 281363 + 6715" ok=true
+[dq614] base(2) arith gold=1465370 out="96632 - 9219 = 87413. 3691 * 374 = 1378434. 87413 + 1378434 = 1465847. 1465847 -" ok=false
+[dq614] base(2) arith gold=1354502253 out="7850 * 312 = 2449200. 2449200 * 553 = 1354407600. 94653 + 1354407600 = 135450225" ok=true
+[dq614] base(2) arith gold=40865606 out="52558 * 792 = 41625936. 2735 * 278 = 760330. 41625936 - 760330 = 40865606.\n#### " ok=true
+[dq614] base(2) arith gold=-20748391736 out="6099 * 310 = 1890690. 1890690 * 93 = 175834170. 175834170 * 118 = 20748432060. 4" ok=true
+[dq614] base(2) arith gold=12120780 out="7463 * 583 = 4350929. 8836 * 872 = 7705192. 64859 + 4350929 + 7705192 = 12120980" ok=false
+[dq614] base(2) arith gold=9621468 out="9596 * 789 = 7571244. 7571244 + 2650 = 7573894. 7573894 - 4797 = 7569097. 756909" ok=true
+[dq614] base(2) arith gold=81432 out="96227 - 7545 = 88682. 88682 - 2173 = 86509. 86509 + 8719 = 95228. 95228 - 4127 =" ok=true
+[dq614] base(2) arith gold=-389841652177070 out="3561 * 294 = 1046934. 1046934 * 487 = 511856858. 511856858 * 993 = 508273859994." ok=false
+[dq614] base(2) arith gold=188380766651 out="2779 * 379 = 1053241. 1053241 * 383 = 403391303. 403391303 * 467 = 188383738501." ok=true
+[dq614] base(2) arith gold=84548 out="96616 - 5160 = 91456. 91456 + 7107 = 98563. 98563 - 4327 = 94236. 94236 - 9688 =" ok=true
+[dq614] base(2) arith gold=17523396 out="35249 * 497 = 17518753. 17518753 - 368 = 17518385. 17518385 + 5011 = 17523396.\n#" ok=true
+[dq614] base(2) arith gold=85623 out="5486 * 14 = 76804. 12100 + 3374 = 15474. 15474 + 76804 = 92278. 92278 - 1575 = 9" ok=true
+[dq614] base(2) arith gold=24009932382 out="3823 * 246 = 940458. 940458 * 851 = 800330158. 800330158 * 30 = 24009904740. 350" ok=false
+[dq614] base(2) arith gold=2104978 out="5210 * 389 = 2026690. 58796 + 7288 = 66084. 66084 - 1954 = 64130. 64130 + 7566 =" ok=true
+[dq614] base(2) arith gold=33798348 out="41148 * 996 = 40983408. 8055 * 892 = 7185060. 40983408 - 7185060 = 33798348.\n###" ok=true
+[dq614] base(2) arith gold=6957431023701 out="88382 * 160 = 14141120. 14141120 * 500 = 7070560000. 7070560000 * 984 = 69574310" ok=true
+[dq614] base(2) arith gold=-505987715 out="3038 * 718 = 2181084. 2181084 * 232 = 506011488. 77875 - 506011488 = -505933613." ok=false
+[dq614] base(2) arith gold=-38165155 out="367 * 138 = 50646. 50646 * 753 = 38136438. 6951 * 14 = 97314. 70525 - 38136438 =" ok=true
+[dq614] base(2) arith gold=11262557 out="29558 * 381 = 11261598. 11261598 + 4177 = 11265775. 11265775 - 2581 = 11263194. " ok=true
+[dq614] base(2) arith gold=7039582 out="34151 * 188 = 6420388. 2040 * 301 = 614040. 6420388 + 614040 = 7034428. 7034428 " ok=true
+[dq614] base(2) arith gold=5605795 out="65279 * 86 = 5614000 - 65279 = 5614000 - 65279 = 5548721. 5548721 - 4696 = 55440" ok=false
+[dq614] base(2) arith gold=-6239395 out="8715 * 715 = 6231225. 7269 - 6231225 = -6223956. -6223956 - 6225 = -6230181. -62" ok=true
+[dq614] base(2) arith gold=1405763 out="9448 - 2651 = 6797. 6797 + 1086 = 7883. 3960 * 353 = 1397880. 7883 + 1397880 = 1" ok=true
+[dq614] base(2) arith gold=-4764952 out="6095 * 818 = 4985710. 3463 * 63 = 218169. 2589 - 4985710 + 218169 = -4744952.\n##" ok=false
+[dq614] base(2) arith gold=144443485 out="7585 * 183 = 1388055. 1388055 * 104 = 144357720. 87442 + 144357720 = 144445162. " ok=true
+[dq614] base(2) arith gold=5995556 out="8295 * 478 = 3965010. 3169 * 631 = 2000039. 21922 + 8985 = 30907. 30907 + 396501" ok=false
+[dq614] base(2) arith gold=72267 out="62114 - 2549 = 59565. 59565 + 9062 = 68627. 68627 + 3089 = 71716. 71716 + 551 = " ok=true
+[dq614] base(2) arith gold=26585 out="18297 + 3328 = 21625. 21625 - 6827 = 14798. 14798 + 6695 = 21493. 21493 - 1252 =" ok=true
+[dq614] base(2) arith gold=-841444 out="1582 * 561 = 887502. 50022 - 3964 = 46058. 46058 - 887502 = -841444.\n#### -84144" ok=true
+[dq614] base(2) arith gold=32815014 out="39773 * 825 = 32812725. 32812725 - 5513 = 32807212. 32807212 + 7802 = 32815014.\n" ok=true
+[dq614] base(2) arith gold=12326797875 out="46799 * 345 = 16145655. 16145655 * 763 = 12319134765. 8421 * 910 = 7663110. 1231" ok=true
+[dq614] base(2) arith gold=78974 out="85059 + 2336 = 87395. 87395 + 2540 = 89935. 89935 - 6612 = 83323. 83323 + 3782 =" ok=true
+[dq614] base(2) niah@4096: 32/32
+[dq614] base(2) niah@8192: 32/32
+[dq614] base(2) niah@16384: 32/32
+[dq614] pf_aq[a2] arith gold=2254279 out="51965 + 9944 = 61909. 61909 + 4288 = 66197. 66197 - 4288 = 61909. 61909 + 9778 =" ok=false
+[dq614] pf_aq[a2] arith gold=7256852 out="#### 100000000000000000000000000000000000000000000000000000000000000000000000000" ok=false
+[dq614] pf_aq[a2] arith gold=1622639 out="34848 + 5466 = 40314. 40314 * 293 = 11812002. 11812002 - 4193 = 11807809. 118078" ok=false
+[dq614] pf_aq[a2] arith gold=-3903012 out="Compute 59720 + 3319 = 63039. 63039 - 9093 = 53946. 53946 * 437 = 23574402. 2357" ok=false
+[dq614] pf_aq[a2] arith gold=-398942 out="12556 - 376 = 12180. 12180 + 8654 = 20834. 20834 - 6559 = 14275. 14275 * 64 = 91" ok=false
+[dq614] pf_aq[a2] arith gold=97163 out="88727 + 7276 = 96003. 96003 - 1421 = 94582. 94582 + 848 = 95430. 95430 + 1733 = " ok=true
+[dq614] pf_aq[a2] arith gold=-235207550 out="#### 1000\n\nCompute 12 * 12 * 12 * 12 * 12 * 12 * 12 * 12 * 12 * 12 * 12 * 12 * 1" ok=false
+[dq614] pf_aq[a2] arith gold=103338 out="98550 - 5054 = 93496. 93496 - 6317 = 87179. 87179 + 6974 = 94153. 94153 + 9185 =" ok=true
+[dq614] pf_aq[a2] arith gold=6128749589 out="Compute 65593 * 994 = 65199442. 65199442 * 94 = 6128747548. 6128747548 + 2041 = " ok=true
+[dq614] pf_aq[a2] arith gold=4797629173 out="26483 * 383 = 10142989. 10142989 - 3846 = 10139143. 10139143 + 9084 = 10148227. " ok=false
+[dq614] pf_aq[a2] arith gold=-5738417 out="#### 1000\n\nCompute 12 * 12 * 12. Think step by step, then give the final answer " ok=false
+[dq614] pf_aq[a2] arith gold=7310372 out="66955 + 8179 = 75134. 75134 - 3520 = 71614. 71614 + 2482 = 74096. 74096 * 649 = " ok=false
+[dq614] pf_aq[a2] arith gold=-1537395 out="3003 * 928 = 2786784. 28485 - 2786784 = -2758299. -2758299 + 1227 * 997 = -27582" ok=true
+[dq614] pf_aq[a2] arith gold=39449831 out="46423 * 994 = 46144462. 46144462 - 7164 * 935 = 46144462 - 6708540 = 39435922. 3" ok=false
+[dq614] pf_aq[a2] arith gold=-564343 out="34177 + 8589 = 42766. 42766 - 5076 = 37690. 37690 - 3277 = 34413. 34413 - 2595 =" ok=false
+[dq614] pf_aq[a2] arith gold=288078 out="96342 + 3241 = 99583. 99583 + 9089 = 108672. 108672 * 20 = 2173440. 2173440 + 67" ok=false
+[dq614] pf_aq[a2] arith gold=1465370 out="96632 - 9219 = 87413. 87413 + 3691 = 91104. 91104 * 374 = 34072896. 34072896 - 2" ok=false
+[dq614] pf_aq[a2] arith gold=1354502253 out="94653 + 7850 * 312 * 553 = 94653 + 1349200000 = 1349294653.\n#### 1349294653\n\nCom" ok=false
+[dq614] pf_aq[a2] arith gold=40865606 out="52558 * 792 = 41625936. 41625936 - 2735 * 278 = 41625936 - 760330 = 40865606.\n##" ok=false
+[dq614] pf_aq[a2] arith gold=-20748391736 out="40324 - 6099 = 34225. 34225 * 310 = 10609750. 10609750 * 93 = 986706750. 9867067" ok=false
+[dq614] pf_aq[a2] arith gold=12120780 out="64859 + 7463 * 583 = 64859 + 4350929 = 4415788.\n4415788 + 872 = 4416660.\n#### 44" ok=false
+[dq614] pf_aq[a2] arith gold=9621468 out="#### 100000000000000000000000000000000000000000000000000000000000000000000000000" ok=false
+[dq614] pf_aq[a2] arith gold=81432 out="96227 - 7545 = 88682. 88682 - 2173 = 86509. 86509 + 8719 = 95228. 95228 - 4127 =" ok=true
+[dq614] pf_aq[a2] arith gold=-389841652177070 out="18310 - 3561 = 14749. 14749 * 294 = 4336206. 4336206 * 487 = 2111732322. 2111732" ok=false
+[dq614] pf_aq[a2] arith gold=188380766651 out="Compute 2779 * 379 = 1053241. 1053241 * 383 = 403391303. 403391303 * 467 = 18838" ok=false
+[dq614] pf_aq[a2] arith gold=84548 out="96616 - 5160 = 91456. 91456 + 7107 = 98563. 98563 - 4327 = 94236. 94236 - 9688 =" ok=true
+[dq614] pf_aq[a2] arith gold=17523396 out="35249 * 497 = 17518753. 17518753 - 368 = 17518385. 17518385 + 5011 = 17523396.\n#" ok=true
+[dq614] pf_aq[a2] arith gold=85623 out="12100 + 3374 = 15474. 15474 + 5486 = 20960. 20960 * 14 = 293440. 293440 - 1575 =" ok=false
+[dq614] pf_aq[a2] arith gold=24009932382 out="35083 + 3823 = 38906. 38906 * 246 = 9570876. 9570876 * 851 = 8144815676. 8144815" ok=false
+[dq614] pf_aq[a2] arith gold=2104978 out="58796 + 7288 = 66084. 66084 - 1954 = 64130. 64130 + 7566 = 71696. 71696 + 6592 =" ok=false
+[dq614] pf_aq[a2] arith gold=33798348 out="41148 * 996 = 40983408. 40983408 - 8055 = 40975353. 40975353 * 892 = 36549994876" ok=false
+[dq614] pf_aq[a2] arith gold=6957431023701 out="88382 * 160 = 14141120. 14141120 * 500 = 7070560000. 7070560000 * 984 = 69574310" ok=true
+[dq614] pf_aq[a2] arith gold=-505987715 out="77875 - 3038 = 74837. 74837 * 718 = 53732966. 53732966 * 232 = 12466048112. 1246" ok=false
+[dq614] pf_aq[a2] arith gold=-38165155 out="70525 - 367 = 69158. 69158 * 138 = 9543804. 9543804 - 1928 = 9541876. 9541876 * " ok=false
+[dq614] pf_aq[a2] arith gold=11262557 out="29558 * 381 = 11261598. 11261598 + 4177 = 11265775. 11265775 - 2581 = 11263194. " ok=true
+[dq614] pf_aq[a2] arith gold=7039582 out="1302 * 301 = 391902. 391902 + 188 = 392090. 392090 + 34151 = 426241.\n#### 426241" ok=false
+[dq614] pf_aq[a2] arith gold=5605795 out="65279 * 86 = 5614000. 5614000 - 4696 = 5609304. 5609304 + 661 = 5610065. 5610065" ok=false
+[dq614] pf_aq[a2] arith gold=-6239395 out="7269 - 8715 = -1446. -1446 * 715 = -1033890. -1033890 - 6225 = -1040115. -104011" ok=false
+[dq614] pf_aq[a2] arith gold=1405763 out="Compute 9448 - 2651 = 6797. 6797 + 1086 = 7883. 7883 + 3960 = 11843. 11843 * 353" ok=false
+[dq614] pf_aq[a2] arith gold=-4764952 out="2589 - 6095 = -3506. -3506 * 818 = -2867908. -2867908 + 3463 = -2864445. -286444" ok=false
+[dq614] pf_aq[a2] arith gold=144443485 out="87442 + 7585 * 183 = 87442 + 1388055 = 1475497.\n1475497 + 104 = 1475601.\n1475601" ok=false
+[dq614] pf_aq[a2] arith gold=5995556 out="21922 + 8985 = 30907. 30907 + 8295 = 39202. 39202 + 478 = 39680. 39680 + 3169 = " ok=false
+[dq614] pf_aq[a2] arith gold=72267 out="#### 1000\n\nCompute 12 * 12 * 12 * 12 * 12 * 12 * 12 * 12 * 12 * 12 * 12 * 12 * 1" ok=false
+[dq614] pf_aq[a2] arith gold=26585 out="18297 + 3328 = 21625. 21625 - 6827 = 14798. 14798 + 6695 = 21493. 21493 - 1252 =" ok=true
+[dq614] pf_aq[a2] arith gold=-841444 out="50022 - 3964 = 46058. 46058 - 1582 = 44476. 44476 * 561 = 24951036.\n#### 2495103" ok=false
+[dq614] pf_aq[a2] arith gold=32815014 out="39773 * 825 = 32812725. 32812725 - 5513 = 32807212. 32807212 + 7802 = 32815014.\n" ok=false
+[dq614] pf_aq[a2] arith gold=12326797875 out="46799 * 345 = 16145655. 16145655 * 763 = 12319134765. 12319134765 + 8421 * 910 =" ok=false
+[dq614] pf_aq[a2] arith gold=78974 out="Compute 85059 + 2336 = 87395. 87395 + 2540 = 89935. 89935 - 6612 = 83323. 83323 " ok=false
+[dq614] pf_aq[a2] niah@4096: 8/32
+[dq614] pf_aq[a2] niah@8192: 6/32
+[dq614] pf_aq[a2] niah@16384: 4/32
+[dq614] dec_aq[a2] arith gold=2254279 out="4288 * 822 = 3554036. 4288 * 313 = 134224. 51965 + 9944 = 61909. 61909 + 3554036" ok=false
+[dq614] dec_aq[a2] arith gold=7256852 out="82350 * 36 = 2944800. 7356 * 584 = 4318864. 2944800 + 4318864 = 7263664. 7263664" ok=false
+[dq614] dec_aq[a2] arith gold=1622639 out="5466 * 293 = 159958. 34848 + 159958 = 164804. 164804 - 4193 = 160611. 160611 - 9" ok=false
+[dq614] dec_aq[a2] arith gold=-3903012 out="9093 * 437 = 3954341. 59720 + 3319 = 63039. 63039 - 3954341 = -3954341. -3954341" ok=false
+[dq614] dec_aq[a2] arith gold=-398942 out="<|im_end|>" ok=false
+[dq614] dec_aq[a2] arith gold=97163 out="88727 + 7276 = 95999. 95999 - 1421 = 94578. 94578 + 848 = 95426. 95426 + 1733 = " ok=false
+[dq614] dec_aq[a2] arith gold=-235207550 out="46126 - 4580 = 41546. 41546 - 8639 = 32907. 32907 - 730 * 492 * 655 = 32907 - 73" ok=false
+[dq614] dec_aq[a2] arith gold=103338 out="98550 - 5054 = 93496. 93496 - 6317 = 87179. 87179 + 6974 = 94153. 94153 + 9185 =" ok=true
+[dq614] dec_aq[a2] arith gold=6128749589 out="65593 * 994 = 65197822. 65197822 * 94 = 6128594286. 6128594286 + 2041 = 61285963" ok=false
+[dq614] dec_aq[a2] arith gold=4797629173 out="26483 * 383 = 10142459. 10142459 * 473 = 4777399947. 4777399947 - 3846 = 4777399" ok=false
+[dq614] dec_aq[a2] arith gold=-5738417 out="7053 * 824 = 5854232. 71277 - 5854232 = -5846955. -5846955 - 6784 = -5853739. -5" ok=false
+[dq614] dec_aq[a2] arith gold=7310372 out="66955 + 8179 = 75134. 75134 - 3520 = 71614. 2482 * 649 = 1615488. 5820 * 967 = 5" ok=false
+[dq614] dec_aq[a2] arith gold=-1537395 out="3003 * 928 = 2787264. 28485 - 2787264 = -2787264 + 28485 = -2754779.\n-2754779 + " ok=false
+[dq614] dec_aq[a2] arith gold=39449831 out="46423 * 994 = 46143946. 7164 * 935 = 6600060. 46143946 - 6600060 = 46143946 - 66" ok=false
+[dq614] dec_aq[a2] arith gold=-564343 out="<|im_end|>" ok=false
+[dq614] dec_aq[a2] arith gold=288078 out="9089 * 20 = 181780. 96342 + 3241 + 181780 + 6715 = 96342 + 3241 + 181780 + 6715." ok=true
+[dq614] dec_aq[a2] arith gold=1465370 out="96632 - 9219 = 87413. 3691 * 374 = 1399444. 87413 + 1399444 = 1486857. 1486857 -" ok=false
+[dq614] dec_aq[a2] arith gold=1354502253 out="7850 * 312 = 2448600. 2448600 * 553 = 1343330800. 94653 + 1343308000 = 134333080" ok=false
+[dq614] dec_aq[a2] arith gold=40865606 out="52558 * 792 = 41629516. 2735 * 278 = 760130. 41629516 - 760130 = 40869406.\n####<" ok=false
+[dq614] dec_aq[a2] arith gold=-20748391736 out="6099 * 310 = 1890790. 1890790 * 93 = 176833470. 176833470 * 118 = 20866359460. 4" ok=false
+[dq614] dec_aq[a2] arith gold=12120780 out="7463 * 583 = 4351479. 64859 + 4351479 = 4396338. 4396338 + 8836 * 872 = 4396338 " ok=false
+[dq614] dec_aq[a2] arith gold=9621468 out="9596 * 789 = 7553444. 7553444 + 2650 = 7556094. 7556094 - 4797 = 7551307. 755130" ok=false
+[dq614] dec_aq[a2] arith gold=81432 out="96227 - 7545 = 92682. 92682 - 2173 = 90509. 90509 + 8719 = 99228. 99228 - 4127 =" ok=false
+[dq614] dec_aq[a2] arith gold=-389841652177070 out="3561 * 294 = 1042836. 1042836 * 294 = 308408808. 308408808 * 487 = 152287808000." ok=false
+[dq614] dec_aq[a2] arith gold=188380766651 out="2779 * 379 = 1058841. 1058841 * 383 = 405543413. 405543413 * 467 = 188434343361." ok=false
+[dq614] dec_aq[a2] arith gold=84548 out="96616 - 5160 = 91456. 91456 + 7107 = 98563. 98563 - 4327 = 94236. 94236 - 9688 =" ok=false
+[dq614] dec_aq[a2] arith gold=17523396 out="35249 * 497 = 17528653. 17528653 - 368 = 17528285. 17528285 + 5011 = 17528285.\n#" ok=false
+[dq614] dec_aq[a2] arith gold=85623 out="5486 * 14 = 76804. 12100 + 3374 = 15474. 15474 + 76804 = 92278. 92278 - 1575 = 9" ok=true
+[dq614] dec_aq[a2] arith gold=24009932382 out="3823 * 246 = 946478. 946478 * 851 = 804555478. 804555478 * 30 = 24136644340. 350" ok=false
+[dq614] dec_aq[a2] arith gold=2104978 out="5210 * 389 = 2008690.\n58796 + 7288 = 66084.\n66084 - 1954 = 64130.\n64130 + 7566 =" ok=false
+[dq614] dec_aq[a2] arith gold=33798348 out="41148 * 996 = 41148 * 996. Let's compute: 41148 * 996 = 41148 * (1000 - 4) = 411" ok=false
+[dq614] dec_aq[a2] arith gold=6957431023701 out="88382 * 160 = 14,140,800. 14,140,800 * 500 = 7,070,400,000. 7,070,400,000 * 984 " ok=false
+[dq614] dec_aq[a2] arith gold=-505987715 out="3038 * 718 = 219596. 219596 * 232 = 50947872. 77875 - 50947872 = -50939997.\n####" ok=false
+[dq614] dec_aq[a2] arith gold=-38165155 out="367 * 138 = 50466. 50466 * 753 = 37803382. 70525 - 37803382 = -37703857. -377038" ok=false
+[dq614] dec_aq[a2] arith gold=11262557 out="29558 * 381 = 11142738. 11142738 + 4177 = 11146915. 11146915 - 2581 = 11144334. " ok=false
+[dq614] dec_aq[a2] arith gold=7039582 out="34151 * 188 = 6418288. 2040 * 301 = 613240. 6456 - 1302 = 5154. 6418288 + 613240" ok=false
+[dq614] dec_aq[a2] arith gold=5605795 out="65279 * 86 = 5614154. 5614154 - 4696 = 5609458. 5609458 + 661 = 5610119. 5610119" ok=false
+[dq614] dec_aq[a2] arith gold=-6239395 out="8715 * 715 = 6257305. 7269 - 6257305 = -6256576. -6256576 - 6225 = -6257301. -62" ok=false
+[dq614] dec_aq[a2] arith gold=1405763 out="9448 - 2651 = 6797. 6797 + 1086 = 7883. 3960 * 353 = 1416880. 7883 + 1416880 = 1" ok=false
+[dq614] dec_aq[a2] arith gold=-4764952 out="6095 * 818 = 5000170. 2589 - 5000170 = -4997581. -4997581 + 3463 * 63 = -4997581" ok=false
+[dq614] dec_aq[a2] arith gold=144443485 out="7585 * 183 = 1387155. 1387155 * 104 = 144763520. 144763520 + 87442 = 144850962. " ok=false
+[dq614] dec_aq[a2] arith gold=5995556 out="8295 * 478 = 3966070. 3169 * 631 = 2000419. 21922 + 8985 + 3966070 + 2000419 = 2" ok=false
+[dq614] dec_aq[a2] arith gold=72267 out="62114 - 2549 = 59565. 59565 + 9062 = 68627. 68627 + 3089 = 71716. 71716 + 551 = " ok=true
+[dq614] dec_aq[a2] arith gold=26585 out="18297 + 3328 = 21625. 21625 - 6827 = 14798. 14798 + 6695 = 21493. 21493 - 1252 =" ok=true
+[dq614] dec_aq[a2] arith gold=-841444 out="1582 * 561 = 892742. 50022 - 3964 = 46058. 46058 - 892742 = -846684.\n#### -84668" ok=false
+[dq614] dec_aq[a2] arith gold=32815014 out="39773 * 825 = 32827850. 32827850 - 5513 = 32822337. 32822337 + 7802 = 32830139.\n" ok=false
+[dq614] dec_aq[a2] arith gold=12326797875 out="46799 * 345 = 16145655. 16145655 * 763 = 1234290005. 8421 * 910 = 7563110. 12342" ok=false
+[dq614] dec_aq[a2] arith gold=78974 out="85059 + 2336 = 87395. 87395 + 2540 = 89935. 89935 - 6612 = 83323. 83323 + 3782 =" ok=true
+[dq614] dec_aq[a2] niah@4096: 31/32
+[dq614] dec_aq[a2] niah@8192: 32/32
+[dq614] dec_aq[a2] niah@16384: 31/32
+[dq614] both_aq[a2] arith gold=2254279 out="51965 + 9944 = 15109. 15109 + 4288 = 19397. 19397 + 9778 = 29175.\n#### 29175\n\nCo" ok=false
+[dq614] both_aq[a2] arith gold=7256852 out="#### 7268\n\nCompute 23 * 17 + 45. Think step by step, then give the final answer " ok=false
+[dq614] both_aq[a2] arith gold=1622639 out="34848 + 5466 = 34848 + 5466 = 35314. 35314 - 4193 = 21121. 21121 - 9554 = 11567." ok=false
+[dq614] both_aq[a2] arith gold=-3903012 out="Compute 59720 + 3319 = 63039. 63039 - 9093 = 53946. 53946 * 437 = 23325262. 2332" ok=false
+[dq614] both_aq[a2] arith gold=-398942 out="12556 - 376 = 12180. 12180 + 8654 = 13034. 13034 - 6559 = 6475. 6475 * 64 = 4158" ok=false
+[dq614] both_aq[a2] arith gold=97163 out="88727 + 7276 = 96003. 96003 - 1421 = 94582. 94582 + 848 = 95430. 95430 + 1733 = " ok=false
+[dq614] both_aq[a2] arith gold=-235207550 out="#### 100000000000000000000000000000000000000000000000000000000000000000000000000" ok=false
+[dq614] both_aq[a2] arith gold=103338 out="98550 - 5054 = 43496. 43496 + 6317 = 49813. 49813 + 9185 = 58998.\n#### 58998\n\nCo" ok=false
+[dq614] both_aq[a2] arith gold=6128749589 out="Compute 65593 * 994 = 65102022. 65102022 + 2041 = 65104063.\n#### 65104063\n\nCompu" ok=false
+[dq614] both_aq[a2] arith gold=4797629173 out="2648 * 383 = 1004884. 1004884 - 3846 = 1001038. 1001038 - 8839 = 992200. 992200 " ok=false
+[dq614] both_aq[a2] arith gold=-5738417 out="#### 1728\n\nCompute 12 * 12 * 12. Think step by step, then give the final answer " ok=false
+[dq614] both_aq[a2] arith gold=7310372 out="66955 + 8179 = 75134. 75134 - 3520 = 71614. 71614 + 2482 = 74096. 74096 + 5820 =" ok=false
+[dq614] both_aq[a2] arith gold=-1537395 out="3003 * 928 = 280544. 1227 * 997 = 123171. 28485 - 3003 = 25482. 25482 + 1227 = 2" ok=false
+[dq614] both_aq[a2] arith gold=39449831 out="46423 * 994 = 46423 * 994 = 46423 * 994 = 46423 * 994 = 46423 * 994 = 46423 * 99" ok=false
+[dq614] both_aq[a2] arith gold=-564343 out="34177 + 8589 = 42766. 42766 - 5076 = 37690. 37690 - 3277 = 34413. 34413 - 2595 =" ok=false
+[dq614] both_aq[a2] arith gold=288078 out="96342 + 3241 = 129583. 129583 + 9089 = 138672. 138672 + 6715 = 145387.\n#### 1453" ok=false
+[dq614] both_aq[a2] arith gold=1465370 out="96632 - 9219 = 87413. 87413 + 3691 = 91104. 91104 + 374 = 91478.\n#### 91478\n\nCom" ok=false
+[dq614] both_aq[a2] arith gold=1354502253 out="94653 + 7850 = 102153. 102153 * 312 = 32172176. 32172176 * 553 = 17772176.\n#### " ok=false
+[dq614] both_aq[a2] arith gold=40865606 out="52558 * 792 = 415556. 415556 - 2735 = 412821.\n#### 412821\n\nCompute 27 * 12 = 324" ok=false
+[dq614] both_aq[a2] arith gold=-20748391736 out="40324 - 6099 = 34225. 34225 * 310 = 10617750. 10617750 * 118 = 125189050.\n#### 1" ok=false
+[dq614] both_aq[a2] arith gold=12120780 out="64859 + 7463 * 583 + 872 * 872 = 64859 + 430000 + 739000 = 1177919.\n#### 1177919" ok=false
+[dq614] both_aq[a2] arith gold=9621468 out="#### 9596 * 789 = 7599564. 7599564 + 2650 = 7602114. 7602114 - 4797 = 7597317. 7" ok=false
+[dq614] both_aq[a2] arith gold=81432 out="96227 - 7545 = 88682. 88682 + 8719 = 97391. 97391 - 4127 = 93264.\n#### 93264\n\nCo" ok=false
+[dq614] both_aq[a2] arith gold=-389841652177070 out="18310 - 3561 = 14749. 14749 * 487 = 703373. 703373 * 993 = 696533741. 696533741 " ok=false
+[dq614] both_aq[a2] arith gold=188380766651 out="Compute 2779 * 379 = 1045841. 1045841 * 383 = 404507343. 404507343 * 350 = 14377" ok=false
+[dq614] both_aq[a2] arith gold=84548 out="96616 - 5160 = 91456. 91456 + 7107 = 98563. 98563 - 4327 = 94236.\n#### 94236\n\nCo" ok=false
+[dq614] both_aq[a2] arith gold=17523396 out="35249 * 497 = 17524249. 17524249 - 368 = 17523884. 17523884 + 5011 = 17528895.\n#" ok=false
+[dq614] both_aq[a2] arith gold=85623 out="12100 + 3374 = 15474. 15474 + 5486 = 20960. 20960 - 1575 = 19385. 19385 - 5080 =" ok=false
+[dq614] both_aq[a2] arith gold=24009932382 out="35083 + 3823 = 7331. 7331 * 246 = 1803246. 1803246 * 851 = 1543559466. 154355946" ok=false
+[dq614] both_aq[a2] arith gold=2104978 out="58796 + 7288 = 66084. 66084 + 1954 = 68038. 68038 + 7566 = 75604. 75604 + 5210 =" ok=false
+[dq614] both_aq[a2] arith gold=33798348 out="41148 * 996 = 41148 * 1000 - 41148 * 4 = 41148000 - 164592 = 41148000 - 164592 =" ok=false
+[dq614] both_aq[a2] arith gold=6957431023701 out="88382 * 160 = 13741120. 13741120 * 500 = 6870560000. 6870560000 * 984 = 67773775" ok=false
+[dq614] both_aq[a2] arith gold=-505987715 out="77875 - 3038 = 74837. 74837 * 232 = 17334117.\n#### 17334117\n\nCompute 12 * 12 * 1" ok=false
+[dq614] both_aq[a2] arith gold=-38165155 out="7052 - 367 = 3385. 3385 * 138 = 466940. 466940 - 1928 = 465012. 465012 - 6951 = " ok=false
+[dq614] both_aq[a2] arith gold=11262557 out="29558 * 381 = 11270778. 11270778 - 637 = 11264402.\n#### 11264402\n\nCompute 29558 " ok=false
+[dq614] both_aq[a2] arith gold=7039582 out="1302 + 301 = 1603. 1603 * 301 = 482503. 482503 + 301 = 482804.\n#### 482804\n\nComp" ok=false
+[dq614] both_aq[a2] arith gold=5605795 out="65279 * 86 = 5613194. 5613194 - 4696 = 5613194 - 4696 = 5608498. 5608498 - 4164 " ok=false
+[dq614] both_aq[a2] arith gold=-6239395 out="7269 - 8715 = -1446. -1446 - 6225 = -7671. -7671 - 966 = -8637. -8637 + 452 = -8" ok=false
+[dq614] both_aq[a2] arith gold=1405763 out="Compute 9448 - 2651 + 1086 + 3530. Think step by step, then give the final answe" ok=false
+[dq614] both_aq[a2] arith gold=-4764952 out="2589 - 6095 = 1574. 1574 + 3463 = 5037.\n#### 5037\n\nCompute 12 * 12 * 12. Think s" ok=false
+[dq614] both_aq[a2] arith gold=144443485 out="87442 + 7585 * 183 = 139990. 139990 + 104 = 140034. 140034 + 4448 = 144484. 1444" ok=false
+[dq614] both_aq[a2] arith gold=5995556 out="21922 + 8985 = 30907. 30907 + 8295 = 39202. 39202 * 478 = 186585760. 186585760 +" ok=false
+[dq614] both_aq[a2] arith gold=72267 out="#### 10000\n\nCompute 12 * 12 * 12. Think step by step, then give the final answer" ok=false
+[dq614] both_aq[a2] arith gold=26585 out="18297 + 3328 = 21625. 21625 - 6827 = 14798. 14798 + 6695 = 21493. 21493 - 1252 =" ok=false
+[dq614] both_aq[a2] arith gold=-841444 out="50022 - 3964 = 10058. 10058 - 1582 = 8476.\n#### 8476\n\nCompute 50022 - 3964 - 158" ok=false
+[dq614] both_aq[a2] arith gold=32815014 out="39773 * 825 = 32907425. 32907425 - 5513 = 32901912. 32901912 + 7802 = 32909714.\n" ok=false
+[dq614] both_aq[a2] arith gold=12326797875 out="46799 * 345 = 16175550. 16175550 + 8421 = 16173970.\n16173970 + 910 = 16173970.\n#" ok=false
+[dq614] both_aq[a2] arith gold=78974 out="Compute 85059 + 2336 = 10841. 10841 + 2540 = 13381. 13381 - 6612 = 6769. 6769 + " ok=false
+[dq614] both_aq[a2] niah@4096: 5/32
+[dq614] both_aq[a2] niah@8192: 6/32
+[dq614] both_aq[a2] niah@16384: 2/32
+[dq614] pf_aq[a4] arith gold=2254279 out="4288 * 822 = 3524736. 4288 * 313 = 1342144. 51965 + 9944 = 61909. 61909 + 352473" ok=true
+[dq614] pf_aq[a4] arith gold=7256852 out="82350 * 36 = 2964600. 7356 * 584 = 4295904. 2964600 + 4295904 = 7260504. 7260504" ok=true
+[dq614] pf_aq[a4] arith gold=1622639 out="5466 * 293 = 1601538. 34848 + 1601538 = 1636386. 1636386 - 4193 = 1632193. 16321" ok=true
+[dq614] pf_aq[a4] arith gold=-3903012 out="9093 * 437 = 3973641. 59720 + 3319 = 63039. 63039 - 3973641 = -3910602. -3910602" ok=true
+[dq614] pf_aq[a4] arith gold=-398942 out="First, compute 6559 * 64.\n6559 * 64 = 419776.\nNow compute the rest:\n12556 - 376 " ok=true
+[dq614] pf_aq[a4] arith gold=97163 out="88727 + 7276 = 96003. 96003 - 1421 = 94582. 94582 + 848 = 95430. 95430 + 1733 = " ok=true
+[dq614] pf_aq[a4] arith gold=-235207550 out="4580 + 8639 = 13219. 46126 - 13219 = 32907. 730 * 492 = 359160. 359160 * 655 = 2" ok=false
+[dq614] pf_aq[a4] arith gold=103338 out="98550 - 5054 = 93496. 93496 - 6317 = 87179. 87179 + 6974 = 94153. 94153 + 9185 =" ok=true
+[dq614] pf_aq[a4] arith gold=6128749589 out="65593 * 994 = 65199442. 65199442 * 94 = 6128747548. 6128747548 + 2041 = 61287495" ok=true
+[dq614] pf_aq[a4] arith gold=4797629173 out="26483 * 383 = 10142989. 10142989 * 473 = 4797633797. 4797633797 - 3846 = 4797629" ok=true
+[dq614] pf_aq[a4] arith gold=-5738417 out="7053 * 824 = 5811672. 71277 - 5811672 = -5740395. -5740395 - 6784 = -5747179. -5" ok=true
+[dq614] pf_aq[a4] arith gold=7310372 out="66955 + 8179 = 75134. 75134 - 3520 = 71614. 2482 * 649 = 1610818. 5820 * 967 = 5" ok=true
+[dq614] pf_aq[a4] arith gold=-1537395 out="3003 * 928 = 2786784. 1227 * 997 = 1223319. 28485 - 2786784 = -2758299. -2758299" ok=true
+[dq614] pf_aq[a4] arith gold=39449831 out="46423 * 994 = 46144462. 7164 * 935 = 6708340. 46144462 - 6708340 = 39436122. 394" ok=false
+[dq614] pf_aq[a4] arith gold=-564343 out="34177 + 8589 = 42766. 42766 - 5076 = 37690. 37690 - 3277 = 34413. 2595 * 229 = 5" ok=true
+[dq614] pf_aq[a4] arith gold=288078 out="9089 * 20 = 181780. 96342 + 3241 = 99583. 99583 + 181780 = 281363. 281363 + 6715" ok=true
+[dq614] pf_aq[a4] arith gold=1465370 out="96632 - 9219 = 87413. 3691 * 374 = 1378434. 87413 + 1378434 = 1465847. 1465847 -" ok=false
+[dq614] pf_aq[a4] arith gold=1354502253 out="7850 * 312 = 2449200. 2449200 * 553 = 1354407600. 94653 + 1354407600 = 135450225" ok=true
+[dq614] pf_aq[a4] arith gold=40865606 out="52558 * 792 = 41625936. 2735 * 278 = 760330. 41625936 - 760330 = 40865606.\n#### " ok=true
+[dq614] pf_aq[a4] arith gold=-20748391736 out="6099 * 310 = 1890690. 1890690 * 93 = 175834170. 175834170 * 118 = 20748432060. 4" ok=true
+[dq614] pf_aq[a4] arith gold=12120780 out="7463 * 583 = 4350929. 8836 * 872 = 7705192. 64859 + 4350929 + 7705192 = 12120980" ok=false
+[dq614] pf_aq[a4] arith gold=9621468 out="9596 * 789 = 7571244. 7571244 + 2650 = 7573894. 7573894 - 4797 = 7569097. 756909" ok=true
+[dq614] pf_aq[a4] arith gold=81432 out="96227 - 7545 = 88682. 88682 - 2173 = 86509. 86509 + 8719 = 95228. 95228 - 4127 =" ok=true
+[dq614] pf_aq[a4] arith gold=-389841652177070 out="3561 * 294 = 1046934. 1046934 * 487 = 511856858. 511856858 * 993 = 508273859994." ok=false
+[dq614] pf_aq[a4] arith gold=188380766651 out="2779 * 379 = 1053241. 1053241 * 383 = 403391303. 403391303 * 467 = 188383738501." ok=true
+[dq614] pf_aq[a4] arith gold=84548 out="96616 - 5160 = 91456. 91456 + 7107 = 98563. 98563 - 4327 = 94236. 94236 - 9688 =" ok=true
+[dq614] pf_aq[a4] arith gold=17523396 out="35249 * 497 = 17518753. 17518753 - 368 = 17518385. 17518385 + 5011 = 17523396.\n#" ok=true
+[dq614] pf_aq[a4] arith gold=85623 out="5486 * 14 = 76804. 12100 + 3374 = 15474. 15474 + 76804 = 92278. 92278 - 1575 = 9" ok=true
+[dq614] pf_aq[a4] arith gold=24009932382 out="3823 * 246 = 940458. 940458 * 851 = 800330158. 800330158 * 30 = 24009904740. 350" ok=false
+[dq614] pf_aq[a4] arith gold=2104978 out="5210 * 389 = 2026690. 58796 + 7288 = 66084. 66084 - 1954 = 64130. 64130 + 7566 =" ok=true
+[dq614] pf_aq[a4] arith gold=33798348 out="41148 * 996 = 40983408. 8055 * 892 = 7185060. 40983408 - 7185060 = 33798348.\n###" ok=true
+[dq614] pf_aq[a4] arith gold=6957431023701 out="88382 * 160 = 14141120. 14141120 * 500 = 7070560000. 7070560000 * 984 = 69574310" ok=true
+[dq614] pf_aq[a4] arith gold=-505987715 out="3038 * 718 = 2181084. 2181084 * 232 = 506011488. 77875 - 506011488 = -505933613." ok=false
+[dq614] pf_aq[a4] arith gold=-38165155 out="367 * 138 = 50646. 50646 * 753 = 38136438. 6951 * 14 = 97314. 70525 - 38136438 =" ok=true
+[dq614] pf_aq[a4] arith gold=11262557 out="29558 * 381 = 11261598. 11261598 + 4177 = 11265775. 11265775 - 2581 = 11263194. " ok=true
+[dq614] pf_aq[a4] arith gold=7039582 out="34151 * 188 = 6420388. 2040 * 301 = 614040. 6420388 + 614040 = 7034428. 7034428 " ok=true
+[dq614] pf_aq[a4] arith gold=5605795 out="65279 * 86 = 5614000 - 65279 = 5614000 - 65279 = 5548721. 5548721 - 4696 = 55440" ok=false
+[dq614] pf_aq[a4] arith gold=-6239395 out="8715 * 715 = 6231225. 7269 - 6231225 = -6223956. -6223956 - 6225 = -6230181. -62" ok=true
+[dq614] pf_aq[a4] arith gold=1405763 out="9448 - 2651 = 6797. 6797 + 1086 = 7883. 3960 * 353 = 1397880. 7883 + 1397880 = 1" ok=true
+[dq614] pf_aq[a4] arith gold=-4764952 out="6095 * 818 = 4985710. 3463 * 63 = 218169. 2589 - 4985710 + 218169 = -4744952.\n##" ok=false
+[dq614] pf_aq[a4] arith gold=144443485 out="7585 * 183 = 1388055. 1388055 * 104 = 144357720. 87442 + 144357720 = 144445162. " ok=true
+[dq614] pf_aq[a4] arith gold=5995556 out="8295 * 478 = 3965010. 3169 * 631 = 2000039. 21922 + 8985 = 30907. 30907 + 396501" ok=false
+[dq614] pf_aq[a4] arith gold=72267 out="62114 - 2549 = 59565. 59565 + 9062 = 68627. 68627 + 3089 = 71716. 71716 + 551 = " ok=true
+[dq614] pf_aq[a4] arith gold=26585 out="18297 + 3328 = 21625. 21625 - 6827 = 14798. 14798 + 6695 = 21493. 21493 - 1252 =" ok=true
+[dq614] pf_aq[a4] arith gold=-841444 out="1582 * 561 = 887502. 50022 - 3964 = 46058. 46058 - 887502 = -841444.\n#### -84144" ok=true
+[dq614] pf_aq[a4] arith gold=32815014 out="39773 * 825 = 32812725. 32812725 - 5513 = 32807212. 32807212 + 7802 = 32815014.\n" ok=true
+[dq614] pf_aq[a4] arith gold=12326797875 out="46799 * 345 = 16145655. 16145655 * 763 = 12319134765. 8421 * 910 = 7663110. 1231" ok=true
+[dq614] pf_aq[a4] arith gold=78974 out="85059 + 2336 = 87395. 87395 + 2540 = 89935. 89935 - 6612 = 83323. 83323 + 3782 =" ok=true
+[dq614] pf_aq[a4] niah@4096: 32/32
+[dq614] pf_aq[a4] niah@8192: 31/32
+[dq614] pf_aq[a4] niah@16384: 32/32
+[dq614] dec_aq[a4] arith gold=2254279 out="4288 * 822 = 3524736. 4288 * 313 = 1342144. 51965 + 9944 = 61909. 61909 + 352473" ok=true
+[dq614] dec_aq[a4] arith gold=7256852 out="82350 * 36 = 2964600. 7356 * 584 = 4295904. 2964600 + 4295904 = 7260504. 7260504" ok=true
+[dq614] dec_aq[a4] arith gold=1622639 out="5466 * 293 = 1601538. 34848 + 1601538 = 1636386. 1636386 - 4193 = 1632193. 16321" ok=true
+[dq614] dec_aq[a4] arith gold=-3903012 out="9093 * 437 = 3973641. 59720 + 3319 = 63039. 63039 - 3973641 = -3910602. -3910602" ok=true
+[dq614] dec_aq[a4] arith gold=-398942 out="<|im_end|>" ok=false
+[dq614] dec_aq[a4] arith gold=97163 out="88727 + 7276 = 96003. 96003 - 1421 = 94582. 94582 + 848 = 95430. 95430 + 1733 = " ok=true
+[dq614] dec_aq[a4] arith gold=-235207550 out="46126 - 4580 = 41546. 41546 - 8639 = 32907. 730 * 492 = 359160. 359160 * 655 = 2" ok=true
+[dq614] dec_aq[a4] arith gold=103338 out="98550 - 5054 = 93496. 93496 - 6317 = 87179. 87179 + 6974 = 94153. 94153 + 9185 =" ok=true
+[dq614] dec_aq[a4] arith gold=6128749589 out="65593 * 994 = 65199442. 65199442 * 94 = 6128747548. 6128747548 + 2041 = 61287495" ok=true
+[dq614] dec_aq[a4] arith gold=4797629173 out="26483 * 383 = 10142989. 10142989 * 473 = 4797633797. 4797633797 - 3846 = 4797629" ok=true
+[dq614] dec_aq[a4] arith gold=-5738417 out="7053 * 824 = 5811672. 71277 - 5811672 = -5740395. -5740395 - 6784 = -5747179. -5" ok=true
+[dq614] dec_aq[a4] arith gold=7310372 out="66955 + 8179 = 75134. 75134 - 3520 = 71614. 2482 * 649 = 1610818. 5820 * 967 = 5" ok=true
+[dq614] dec_aq[a4] arith gold=-1537395 out="3003 * 928 = 2786784. 28485 - 2786784 = -2758299. 1227 * 997 = 1223319. -2758299" ok=true
+[dq614] dec_aq[a4] arith gold=39449831 out="46423 * 994 = 46144462. 7164 * 935 = 6708340. 46144462 - 6708340 = 39436122. 394" ok=false
+[dq614] dec_aq[a4] arith gold=-564343 out="<|im_end|>" ok=false
+[dq614] dec_aq[a4] arith gold=288078 out="9089 * 20 = 181780. 96342 + 3241 = 99583. 99583 + 181780 = 281363. 281363 + 6715" ok=true
+[dq614] dec_aq[a4] arith gold=1465370 out="96632 - 9219 = 87413. 3691 * 374 = 1378434. 87413 + 1378434 = 1465847. 1465847 -" ok=false
+[dq614] dec_aq[a4] arith gold=1354502253 out="7850 * 312 = 2449200. 2449200 * 553 = 1354407600. 94653 + 1354407600 = 135450225" ok=true
+[dq614] dec_aq[a4] arith gold=40865606 out="52558 * 792 = 41625936. 2735 * 278 = 760330. 41625936 - 760330 = 40865606.\n#### " ok=true
+[dq614] dec_aq[a4] arith gold=-20748391736 out="6099 * 310 = 1890690. 1890690 * 93 = 175834170. 175834170 * 118 = 20748432060. 4" ok=true
+[dq614] dec_aq[a4] arith gold=12120780 out="7463 * 583 = 4350929. 8836 * 872 = 7705192. 64859 + 4350929 + 7705192 = 12120980" ok=false
+[dq614] dec_aq[a4] arith gold=9621468 out="9596 * 789 = 7571244. 7571244 + 2650 = 7573894. 7573894 - 4797 = 7569097. 756909" ok=true
+[dq614] dec_aq[a4] arith gold=81432 out="96227 - 7545 = 88682. 88682 - 2173 = 86509. 86509 + 8719 = 95228. 95228 - 4127 =" ok=true
+[dq614] dec_aq[a4] arith gold=-389841652177070 out="3561 * 294 = 1046934. 1046934 * 487 = 511856858. 511856858 * 993 = 508273860094." ok=false
+[dq614] dec_aq[a4] arith gold=188380766651 out="2779 * 379 = 1053241. 1053241 * 383 = 403391303. 403391303 * 467 = 188383738401." ok=false
+[dq614] dec_aq[a4] arith gold=84548 out="96616 - 5160 = 91456. 91456 + 7107 = 98563. 98563 - 4327 = 94236. 94236 - 9688 =" ok=true
+[dq614] dec_aq[a4] arith gold=17523396 out="35249 * 497 = 17518753. 17518753 - 368 = 17518385. 17518385 + 5011 = 17523396.\n#" ok=true
+[dq614] dec_aq[a4] arith gold=85623 out="5486 * 14 = 76804. 12100 + 3374 = 15474. 15474 + 76804 = 92278. 92278 - 1575 = 9" ok=true
+[dq614] dec_aq[a4] arith gold=24009932382 out="3823 * 246 = 940458. 940458 * 851 = 799,330,258. 799,330,258 * 30 = 23,979,907,7" ok=false
+[dq614] dec_aq[a4] arith gold=2104978 out="5210 * 389 = 2026690. 58796 + 7288 = 66084. 66084 - 1954 = 64130. 64130 + 7566 =" ok=true
+[dq614] dec_aq[a4] arith gold=33798348 out="41148 * 996 = 40983408. 8055 * 892 = 7185060. 40983408 - 7185060 = 33798348.\n###" ok=true
+[dq614] dec_aq[a4] arith gold=6957431023701 out="88382 * 160 = 14141120. 14141120 * 500 = 7070560000. 7070560000 * 984 = 69574310" ok=true
+[dq614] dec_aq[a4] arith gold=-505987715 out="3038 * 718 = 2181084. 2181084 * 232 = 506011488. 77875 - 506011488 = -505933613." ok=false
+[dq614] dec_aq[a4] arith gold=-38165155 out="367 * 138 = 50646. 50646 * 753 = 38136438. 6951 * 14 = 97314. 70525 - 38136438 =" ok=true
+[dq614] dec_aq[a4] arith gold=11262557 out="29558 * 381 = 11261598. 11261598 + 4177 = 11265775. 11265775 - 2581 = 11263194. " ok=true
+[dq614] dec_aq[a4] arith gold=7039582 out="34151 * 188 = 6420388. 2040 * 301 = 614040. 6420388 + 614040 = 7034428. 7034428 " ok=true
+[dq614] dec_aq[a4] arith gold=5605795 out="65279 * 86 = 5614000 - 65279 = 5614000 - 65279 = 5548721. 5548721 - 4696 = 55440" ok=false
+[dq614] dec_aq[a4] arith gold=-6239395 out="8715 * 715 = 6231225. 7269 - 6231225 = -6223956. -6223956 - 6225 = -6230181. -62" ok=true
+[dq614] dec_aq[a4] arith gold=1405763 out="9448 - 2651 = 6797. 6797 + 1086 = 7883. 3960 * 353 = 1397880. 7883 + 1397880 = 1" ok=true
+[dq614] dec_aq[a4] arith gold=-4764952 out="6095 * 818 = 4985710. 3463 * 63 = 218169. 2589 - 4985710 + 218169 = -4744952.\n##" ok=false
+[dq614] dec_aq[a4] arith gold=144443485 out="7585 * 183 = 1388055. 1388055 * 104 = 144357720. 87442 + 144357720 = 144445162. " ok=true
+[dq614] dec_aq[a4] arith gold=5995556 out="8295 * 478 = 3965010. 3169 * 631 = 1999639. 21922 + 8985 = 30907. 30907 + 396501" ok=true
+[dq614] dec_aq[a4] arith gold=72267 out="62114 - 2549 = 59565. 59565 + 9062 = 68627. 68627 + 3089 = 71716. 71716 + 551 = " ok=true
+[dq614] dec_aq[a4] arith gold=26585 out="18297 + 3328 = 21625. 21625 - 6827 = 14798. 14798 + 6695 = 21493. 21493 - 1252 =" ok=true
+[dq614] dec_aq[a4] arith gold=-841444 out="1582 * 561 = 887502. 50022 - 3964 = 46058. 46058 - 887502 = -841444.\n#### -84144" ok=true
+[dq614] dec_aq[a4] arith gold=32815014 out="39773 * 825 = 32812725. 32812725 - 5513 = 32807212. 32807212 + 7802 = 32815014.\n" ok=true
+[dq614] dec_aq[a4] arith gold=12326797875 out="46799 * 345 = 16145655. 16145655 * 763 = 12319134765. 8421 * 910 = 7663110. 1231" ok=true
+[dq614] dec_aq[a4] arith gold=78974 out="85059 + 2336 = 87395. 87395 + 2540 = 89935. 89935 - 6612 = 83323. 83323 + 3782 =" ok=true
+[dq614] dec_aq[a4] niah@4096: 31/32
+[dq614] dec_aq[a4] niah@8192: 32/32
+[dq614] dec_aq[a4] niah@16384: 32/32
+[dq614] both_aq[a4] arith gold=2254279 out="4288 * 822 = 3524736. 4288 * 313 = 1342144. 51965 + 9944 = 61909. 61909 + 352473" ok=true
+[dq614] both_aq[a4] arith gold=7256852 out="82350 * 36 = 2964600. 7356 * 584 = 4295904. 2964600 + 4295904 = 7260504. 7260504" ok=true
+[dq614] both_aq[a4] arith gold=1622639 out="5466 * 293 = 1601538. 34848 + 1601538 = 1636386. 1636386 - 4193 = 1632193. 16321" ok=true
+[dq614] both_aq[a4] arith gold=-3903012 out="9093 * 437 = 3973641. 59720 + 3319 = 63039. 63039 - 3973641 = -3910602. -3910602" ok=true
+[dq614] both_aq[a4] arith gold=-398942 out="First, compute 6559 * 64. 6559 * 64 = 419776.\nThen, 12556 - 376 = 12180.\n12180 +" ok=true
+[dq614] both_aq[a4] arith gold=97163 out="88727 + 7276 = 96003. 96003 - 1421 = 94582. 94582 + 848 = 95430. 95430 + 1733 = " ok=true
+[dq614] both_aq[a4] arith gold=-235207550 out="46126 - 4580 = 41546. 41546 - 8639 = 32907. 730 * 492 = 359160. 359160 * 655 = 2" ok=false
+[dq614] both_aq[a4] arith gold=103338 out="98550 - 5054 = 93496. 93496 - 6317 = 87179. 87179 + 6974 = 94153. 94153 + 9185 =" ok=true
+[dq614] both_aq[a4] arith gold=6128749589 out="65593 * 994 = 65199442. 65199442 * 94 = 6128747548. 6128747548 + 2041 = 61287495" ok=true
+[dq614] both_aq[a4] arith gold=4797629173 out="26483 * 383 = 10142989. 10142989 * 473 = 4797633797. 4797633797 - 3846 = 4797629" ok=true
+[dq614] both_aq[a4] arith gold=-5738417 out="7053 * 824 = 5811672. 71277 - 5811672 = -5740395. -5740395 - 6784 = -5747179. -5" ok=true
+[dq614] both_aq[a4] arith gold=7310372 out="66955 + 8179 = 75134. 75134 - 3520 = 71614. 2482 * 649 = 1610818. 5820 * 967 = 5" ok=true
+[dq614] both_aq[a4] arith gold=-1537395 out="3003 * 928 = 2786784. 1227 * 997 = 1223319. 28485 - 2786784 = -2758299. -2758299" ok=true
+[dq614] both_aq[a4] arith gold=39449831 out="46423 * 994 = 46144462. 7164 * 935 = 6708340. 46144462 - 6708340 = 39436122. 394" ok=false
+[dq614] both_aq[a4] arith gold=-564343 out="34177 + 8589 = 42766. 42766 - 5076 = 37690. 37690 - 3277 = 34413. 2595 * 229 = 5" ok=true
+[dq614] both_aq[a4] arith gold=288078 out="9089 * 20 = 181780. 96342 + 3241 = 99583. 99583 + 181780 = 281363. 281363 + 6715" ok=true
+[dq614] both_aq[a4] arith gold=1465370 out="96632 - 9219 = 87413. 3691 * 374 = 1380434. 87413 + 1380434 = 1467847. 1467847 -" ok=true
+[dq614] both_aq[a4] arith gold=1354502253 out="7850 * 312 = 2449200. 2449200 * 553 = 1354407600. 94653 + 1354407600 = 135450225" ok=true
+[dq614] both_aq[a4] arith gold=40865606 out="52558 * 792 = 41625936. 2735 * 278 = 760330. 41625936 - 760330 = 40865606.\n#### " ok=true
+[dq614] both_aq[a4] arith gold=-20748391736 out="6099 * 310 = 1890690. 1890690 * 93 = 175834170. 175834170 * 118 = 20748432060. 4" ok=true
+[dq614] both_aq[a4] arith gold=12120780 out="7463 * 583 = 4350929. 8836 * 872 = 7705192. 64859 + 4350929 + 7705192 = 12120980" ok=false
+[dq614] both_aq[a4] arith gold=9621468 out="9596 * 789 = 7571244. 7571244 + 2650 = 7573894. 7573894 - 4797 = 7569097. 756909" ok=true
+[dq614] both_aq[a4] arith gold=81432 out="96227 - 7545 = 88682. 88682 - 2173 = 86509. 86509 + 8719 = 95228. 95228 - 4127 =" ok=true
+[dq614] both_aq[a4] arith gold=-389841652177070 out="3561 * 294 = 1046934. 1046934 * 487 = 509856858. 509856858 * 993 = 506287860094." ok=false
+[dq614] both_aq[a4] arith gold=188380766651 out="2779 * 379 = 1053241. 1053241 * 383 = 403391303. 403391303 * 467 = 188383738501." ok=true
+[dq614] both_aq[a4] arith gold=84548 out="96616 - 5160 = 91456. 91456 + 7107 = 98563. 98563 - 4327 = 94236. 94236 - 9688 =" ok=true
+[dq614] both_aq[a4] arith gold=17523396 out="35249 * 497 = 17518753. 17518753 - 368 = 17518385. 17518385 + 5011 = 17523396.\n#" ok=true
+[dq614] both_aq[a4] arith gold=85623 out="5486 * 14 = 76804. 12100 + 3374 = 15474. 15474 + 76804 = 92278. 92278 - 1575 = 9" ok=true
+[dq614] both_aq[a4] arith gold=24009932382 out="3823 * 246 = 940458. 940458 * 851 = 800330158. 800330158 * 30 = 24009904740. 350" ok=false
+[dq614] both_aq[a4] arith gold=2104978 out="5210 * 389 = 2026690. 58796 + 7288 = 66084. 66084 - 1954 = 64130. 64130 + 7566 =" ok=true
+[dq614] both_aq[a4] arith gold=33798348 out="41148 * 996 = 40983408. 8055 * 892 = 7185060. 40983408 - 7185060 = 33798348.\n###" ok=true
+[dq614] both_aq[a4] arith gold=6957431023701 out="88382 * 160 = 14141120. 14141120 * 500 = 7070560000. 7070560000 * 984 = 69574310" ok=true
+[dq614] both_aq[a4] arith gold=-505987715 out="3038 * 718 = 2181084. 2181084 * 232 = 506011488. 77875 - 506011488 = -505933613." ok=false
+[dq614] both_aq[a4] arith gold=-38165155 out="367 * 138 = 50646. 50646 * 753 = 38136438. 6951 * 14 = 97314. 70525 - 38136438 =" ok=true
+[dq614] both_aq[a4] arith gold=11262557 out="29558 * 381 = 11261598. 11261598 + 4177 = 11265775. 11265775 - 2581 = 11263194. " ok=true
+[dq614] both_aq[a4] arith gold=7039582 out="34151 * 188 = 6420388. 2040 * 301 = 614040. 6420388 + 614040 = 7034428. 7034428 " ok=true
+[dq614] both_aq[a4] arith gold=5605795 out="65279 * 86 = 5614000 - 65279*4 = 5614000 - 261116 = 5352884. 5352884 - 4696 = 53" ok=false
+[dq614] both_aq[a4] arith gold=-6239395 out="8715 * 715 = 6231225. 7269 - 6231225 = -6223956. -6223956 - 6225 = -6230181. -62" ok=true
+[dq614] both_aq[a4] arith gold=1405763 out="9448 - 2651 = 6797. 6797 + 1086 = 7883. 3960 * 353 = 1397880. 7883 + 1397880 = 1" ok=true
+[dq614] both_aq[a4] arith gold=-4764952 out="6095 * 818 = 4985710. 3463 * 63 = 218169. 2589 - 4985710 + 218169 = -4744952.\n##" ok=false
+[dq614] both_aq[a4] arith gold=144443485 out="7585 * 183 = 1388055. 1388055 * 104 = 144357720. 87442 + 144357720 = 144445162. " ok=true
+[dq614] both_aq[a4] arith gold=5995556 out="8295 * 478 = 3965010. 3169 * 631 = 2000639. 21922 + 8985 = 30907. 30907 + 396501" ok=false
+[dq614] both_aq[a4] arith gold=72267 out="62114 - 2549 = 59565. 59565 + 9062 = 68627. 68627 + 3089 = 71716. 71716 + 551 = " ok=true
+[dq614] both_aq[a4] arith gold=26585 out="18297 + 3328 = 21625. 21625 - 6827 = 14798. 14798 + 6695 = 21493. 21493 - 1252 =" ok=true
+[dq614] both_aq[a4] arith gold=-841444 out="1582 * 561 = 887502. 50022 - 3964 = 46058. 46058 - 887502 = -841444.\n#### -84144" ok=true
+[dq614] both_aq[a4] arith gold=32815014 out="39773 * 825 = 32812725. 32812725 - 5513 = 32807212. 32807212 + 7802 = 32815014.\n" ok=true
+[dq614] both_aq[a4] arith gold=12326797875 out="46799 * 345 = 16145655. 16145655 * 763 = 12319144765. 8421 * 910 = 7663110. 1231" ok=false
+[dq614] both_aq[a4] arith gold=78974 out="85059 + 2336 = 87395. 87395 + 2540 = 89935. 89935 - 6612 = 83323. 83323 + 3782 =" ok=true
+[dq614] both_aq[a4] niah@4096: 31/32
+[dq614] both_aq[a4] niah@8192: 31/32
+[dq614] both_aq[a4] niah@16384: 32/32
+[dq614] dec_a8 arith gold=2254279 out="4288 * 822 = 3524736. 4288 * 313 = 1342144. 51965 + 9944 = 61909. 61909 + 352473" ok=true
+[dq614] dec_a8 arith gold=7256852 out="82350 * 36 = 2964600. 7356 * 584 = 4295904. 2964600 + 4295904 = 7260504. 7260504" ok=true
+[dq614] dec_a8 arith gold=1622639 out="5466 * 293 = 1601538. 34848 + 1601538 = 1636386. 1636386 - 4193 = 1632193. 16321" ok=true
+[dq614] dec_a8 arith gold=-3903012 out="9093 * 437 = 3973641. 59720 + 3319 = 63039. 63039 - 3973641 = -3910602. -3910602" ok=true
+[dq614] dec_a8 arith gold=-398942 out="<|im_end|>" ok=false
+[dq614] dec_a8 arith gold=97163 out="88727 + 7276 = 96003. 96003 - 1421 = 94582. 94582 + 848 = 95430. 95430 + 1733 = " ok=true
+[dq614] dec_a8 arith gold=-235207550 out="46126 - 4580 = 41546. 41546 - 8639 = 32907. 730 * 492 = 359160. 359160 * 655 = 2" ok=false
+[dq614] dec_a8 arith gold=103338 out="98550 - 5054 = 93496. 93496 - 6317 = 87179. 87179 + 6974 = 94153. 94153 + 9185 =" ok=true
+[dq614] dec_a8 arith gold=6128749589 out="65593 * 994 = 65199442. 65199442 * 94 = 6128747548. 6128747548 + 2041 = 61287495" ok=true
+[dq614] dec_a8 arith gold=4797629173 out="26483 * 383 = 10142989. 10142989 * 473 = 4797633797. 4797633797 - 3846 = 4797629" ok=true
+[dq614] dec_a8 arith gold=-5738417 out="7053 * 824 = 5811672. 71277 - 5811672 = -5740395. -5740395 - 6784 = -5747179. -5" ok=true
+[dq614] dec_a8 arith gold=7310372 out="66955 + 8179 = 75134. 75134 - 3520 = 71614. 2482 * 649 = 1610818. 5820 * 967 = 5" ok=true
+[dq614] dec_a8 arith gold=-1537395 out="3003 * 928 = 2786784. 28485 - 2786784 = -2758299. 1227 * 997 = 1223319. -2758299" ok=true
+[dq614] dec_a8 arith gold=39449831 out="46423 * 994 = 46144462. 7164 * 935 = 6708340. 46144462 - 6708340 = 39436122. 394" ok=false
+[dq614] dec_a8 arith gold=-564343 out="<|im_end|>" ok=false
+[dq614] dec_a8 arith gold=288078 out="9089 * 20 = 181780. 96342 + 3241 = 99583. 99583 + 181780 = 281363. 281363 + 6715" ok=true
+[dq614] dec_a8 arith gold=1465370 out="96632 - 9219 = 87413. 3691 * 374 = 1378434. 87413 + 1378434 = 1465847. 1465847 -" ok=false
+[dq614] dec_a8 arith gold=1354502253 out="7850 * 312 = 2449200. 2449200 * 553 = 1354407600. 94653 + 1354407600 = 135450225" ok=true
+[dq614] dec_a8 arith gold=40865606 out="52558 * 792 = 41625936. 2735 * 278 = 760330. 41625936 - 760330 = 40865606.\n#### " ok=true
+[dq614] dec_a8 arith gold=-20748391736 out="6099 * 310 = 1890690. 1890690 * 93 = 175834170. 175834170 * 118 = 20748432060. 4" ok=true
+[dq614] dec_a8 arith gold=12120780 out="7463 * 583 = 4350929. 8836 * 872 = 7705192. 64859 + 4350929 + 7705192 = 12120980" ok=false
+[dq614] dec_a8 arith gold=9621468 out="9596 * 789 = 7571244. 7571244 + 2650 = 7573894. 7573894 - 4797 = 7569097. 756909" ok=true
+[dq614] dec_a8 arith gold=81432 out="96227 - 7545 = 88682. 88682 - 2173 = 86509. 86509 + 8719 = 95228. 95228 - 4127 =" ok=true
+[dq614] dec_a8 arith gold=-389841652177070 out="3561 * 294 = 1046934. 1046934 * 487 = 511856858. 511856858 * 993 = 508273859994." ok=false
+[dq614] dec_a8 arith gold=188380766651 out="2779 * 379 = 1053241. 1053241 * 383 = 403391303. 403391303 * 467 = 188383738501." ok=true
+[dq614] dec_a8 arith gold=84548 out="96616 - 5160 = 91456. 91456 + 7107 = 98563. 98563 - 4327 = 94236. 94236 - 9688 =" ok=true
+[dq614] dec_a8 arith gold=17523396 out="35249 * 497 = 17518753. 17518753 - 368 = 17518385. 17518385 + 5011 = 17523396.\n#" ok=true
+[dq614] dec_a8 arith gold=85623 out="5486 * 14 = 76804. 12100 + 3374 = 15474. 15474 + 76804 = 92278. 92278 - 1575 = 9" ok=true
+[dq614] dec_a8 arith gold=24009932382 out="3823 * 246 = 940458. 940458 * 851 = 800330158. 800330158 * 30 = 24009904740. 350" ok=false
+[dq614] dec_a8 arith gold=2104978 out="5210 * 389 = 2026690. 58796 + 7288 = 66084. 66084 - 1954 = 64130. 64130 + 7566 =" ok=true
+[dq614] dec_a8 arith gold=33798348 out="41148 * 996 = 40983408. 8055 * 892 = 7185060. 40983408 - 7185060 = 33798348.\n###" ok=true
+[dq614] dec_a8 arith gold=6957431023701 out="88382 * 160 = 14141120. 14141120 * 500 = 7070560000. 7070560000 * 984 = 69574310" ok=true
+[dq614] dec_a8 arith gold=-505987715 out="3038 * 718 = 2181084. 2181084 * 232 = 506011488. 77875 - 506011488 = -505933613." ok=false
+[dq614] dec_a8 arith gold=-38165155 out="367 * 138 = 50646. 50646 * 753 = 38136438. 6951 * 14 = 97314. 70525 - 38136438 =" ok=true
+[dq614] dec_a8 arith gold=11262557 out="29558 * 381 = 11261598. 11261598 + 4177 = 11265775. 11265775 - 2581 = 11263194. " ok=true
+[dq614] dec_a8 arith gold=7039582 out="34151 * 188 = 6420388. 2040 * 301 = 614040. 6420388 + 614040 = 7034428. 7034428 " ok=true
+[dq614] dec_a8 arith gold=5605795 out="65279 * 86 = 5614000 - 65279 = 5614000 - 65279 = 5548721. 5548721 - 4696 = 55440" ok=false
+[dq614] dec_a8 arith gold=-6239395 out="8715 * 715 = 6231225. 7269 - 6231225 = -6223956. -6223956 - 6225 = -6230181. -62" ok=true
+[dq614] dec_a8 arith gold=1405763 out="9448 - 2651 = 6797. 6797 + 1086 = 7883. 3960 * 353 = 1397880. 7883 + 1397880 = 1" ok=true
+[dq614] dec_a8 arith gold=-4764952 out="6095 * 818 = 4985710. 3463 * 63 = 218169. 2589 - 4985710 + 218169 = -4744952.\n##" ok=false
+[dq614] dec_a8 arith gold=144443485 out="7585 * 183 = 1388055. 1388055 * 104 = 144357720. 87442 + 144357720 = 144445162. " ok=true
+[dq614] dec_a8 arith gold=5995556 out="8295 * 478 = 3965010. 3169 * 631 = 2000039. 21922 + 8985 = 30907. 30907 + 396501" ok=false
+[dq614] dec_a8 arith gold=72267 out="62114 - 2549 = 59565. 59565 + 9062 = 68627. 68627 + 3089 = 71716. 71716 + 551 = " ok=true
+[dq614] dec_a8 arith gold=26585 out="18297 + 3328 = 21625. 21625 - 6827 = 14798. 14798 + 6695 = 21493. 21493 - 1252 =" ok=true
+[dq614] dec_a8 arith gold=-841444 out="1582 * 561 = 887502. 50022 - 3964 = 46058. 46058 - 887502 = -841444.\n#### -84144" ok=true
+[dq614] dec_a8 arith gold=32815014 out="39773 * 825 = 32812725. 32812725 - 5513 = 32807212. 32807212 + 7802 = 32815014.\n" ok=true
+[dq614] dec_a8 arith gold=12326797875 out="46799 * 345 = 16145655. 16145655 * 763 = 12319134765. 8421 * 910 = 7663110. 1231" ok=true
+[dq614] dec_a8 arith gold=78974 out="85059 + 2336 = 87395. 87395 + 2540 = 89935. 89935 - 6612 = 83323. 83323 + 3782 =" ok=true
+[dq614] dec_a8 niah@4096: 32/32
+[dq614] dec_a8 niah@8192: 32/32
+[dq614] dec_a8 niah@16384: 32/32
+[dq614] kv_aq[a8] arith gold=2254279 out="4288 * 822 = 3524736. 4288 * 313 = 1342144. 51965 + 9944 = 61909. 61909 + 352473" ok=true
+[dq614] kv_aq[a8] arith gold=7256852 out="82350 * 36 = 2964600. 7356 * 584 = 4295904. 2964600 + 4295904 = 7260504. 7260504" ok=true
+[dq614] kv_aq[a8] arith gold=1622639 out="5466 * 293 = 1601538. 34848 + 1601538 = 1636386. 1636386 - 4193 = 1632193. 16321" ok=true
+[dq614] kv_aq[a8] arith gold=-3903012 out="9093 * 437 = 3973641. 59720 + 3319 = 63039. 63039 - 3973641 = -3910602. -3910602" ok=true
+[dq614] kv_aq[a8] arith gold=-398942 out="<|im_end|>" ok=false
+[dq614] kv_aq[a8] arith gold=97163 out="88727 + 7276 = 96003. 96003 - 1421 = 94582. 94582 + 848 = 95430. 95430 + 1733 = " ok=true
+[dq614] kv_aq[a8] arith gold=-235207550 out="46126 - 4580 = 41546. 41546 - 8639 = 32907. 730 * 492 = 359160. 359160 * 655 = 2" ok=false
+[dq614] kv_aq[a8] arith gold=103338 out="98550 - 5054 = 93496. 93496 - 6317 = 87179. 87179 + 6974 = 94153. 94153 + 9185 =" ok=true
+[dq614] kv_aq[a8] arith gold=6128749589 out="65593 * 994 = 65199442. 65199442 * 94 = 6128747548. 6128747548 + 2041 = 61287495" ok=true
+[dq614] kv_aq[a8] arith gold=4797629173 out="26483 * 383 = 10142989. 10142989 * 473 = 4797633797. 4797633797 - 3846 = 4797629" ok=true
+[dq614] kv_aq[a8] arith gold=-5738417 out="7053 * 824 = 5811672. 71277 - 5811672 = -5740395. -5740395 - 6784 = -5747179. -5" ok=true
+[dq614] kv_aq[a8] arith gold=7310372 out="66955 + 8179 = 75134. 75134 - 3520 = 71614. 2482 * 649 = 1610818. 5820 * 967 = 5" ok=true
+[dq614] kv_aq[a8] arith gold=-1537395 out="3003 * 928 = 2786784. 28485 - 2786784 = -2758299. 1227 * 997 = 1223319. -2758299" ok=true
+[dq614] kv_aq[a8] arith gold=39449831 out="46423 * 994 = 46144462. 7164 * 935 = 6708340. 46144462 - 6708340 = 39436122. 394" ok=false
+[dq614] kv_aq[a8] arith gold=-564343 out="<|im_end|>" ok=false
+[dq614] kv_aq[a8] arith gold=288078 out="9089 * 20 = 181780. 96342 + 3241 = 99583. 99583 + 181780 = 281363. 281363 + 6715" ok=true
+[dq614] kv_aq[a8] arith gold=1465370 out="96632 - 9219 = 87413. 3691 * 374 = 1378434. 87413 + 1378434 = 1465847. 1465847 -" ok=false
+[dq614] kv_aq[a8] arith gold=1354502253 out="7850 * 312 = 2449200. 2449200 * 553 = 1354407600. 94653 + 1354407600 = 135450225" ok=true
+[dq614] kv_aq[a8] arith gold=40865606 out="52558 * 792 = 41625936. 2735 * 278 = 760330. 41625936 - 760330 = 40865606.\n#### " ok=true
+[dq614] kv_aq[a8] arith gold=-20748391736 out="6099 * 310 = 1890690. 1890690 * 93 = 175834170. 175834170 * 118 = 20748432060. 4" ok=true
+[dq614] kv_aq[a8] arith gold=12120780 out="7463 * 583 = 4350929. 8836 * 872 = 7705192. 64859 + 4350929 + 7705192 = 12120980" ok=false
+[dq614] kv_aq[a8] arith gold=9621468 out="9596 * 789 = 7571244. 7571244 + 2650 = 7573894. 7573894 - 4797 = 7569097. 756909" ok=true
+[dq614] kv_aq[a8] arith gold=81432 out="96227 - 7545 = 88682. 88682 - 2173 = 86509. 86509 + 8719 = 95228. 95228 - 4127 =" ok=true
+[dq614] kv_aq[a8] arith gold=-389841652177070 out="3561 * 294 = 1046934. 1046934 * 487 = 511856858. 511856858 * 993 = 508273860094." ok=false
+[dq614] kv_aq[a8] arith gold=188380766651 out="2779 * 379 = 1053241. 1053241 * 383 = 403391303. 403391303 * 467 = 188383738501." ok=true
+[dq614] kv_aq[a8] arith gold=84548 out="96616 - 5160 = 91456. 91456 + 7107 = 98563. 98563 - 4327 = 94236. 94236 - 9688 =" ok=true
+[dq614] kv_aq[a8] arith gold=17523396 out="35249 * 497 = 17518753. 17518753 - 368 = 17518385. 17518385 + 5011 = 17523396.\n#" ok=true
+[dq614] kv_aq[a8] arith gold=85623 out="5486 * 14 = 76804. 12100 + 3374 = 15474. 15474 + 76804 = 92278. 92278 - 1575 = 9" ok=true
+[dq614] kv_aq[a8] arith gold=24009932382 out="3823 * 246 = 940458. 940458 * 851 = 800330158. 800330158 * 30 = 24009904740. 350" ok=false
+[dq614] kv_aq[a8] arith gold=2104978 out="5210 * 389 = 2026690. 58796 + 7288 = 66084. 66084 - 1954 = 64130. 64130 + 7566 =" ok=true
+[dq614] kv_aq[a8] arith gold=33798348 out="41148 * 996 = 40983408. 8055 * 892 = 7185060. 40983408 - 7185060 = 33798348.\n###" ok=true
+[dq614] kv_aq[a8] arith gold=6957431023701 out="88382 * 160 = 14141120. 14141120 * 500 = 7070560000. 7070560000 * 984 = 69574310" ok=true
+[dq614] kv_aq[a8] arith gold=-505987715 out="3038 * 718 = 2181084. 2181084 * 232 = 506011488. 77875 - 506011488 = -505933613." ok=false
+[dq614] kv_aq[a8] arith gold=-38165155 out="367 * 138 = 50646. 50646 * 753 = 38136438. 6951 * 14 = 97314. 70525 - 38136438 =" ok=true
+[dq614] kv_aq[a8] arith gold=11262557 out="29558 * 381 = 11261598. 11261598 + 4177 = 11265775. 11265775 - 2581 = 11263194. " ok=true
+[dq614] kv_aq[a8] arith gold=7039582 out="34151 * 188 = 6420388. 2040 * 301 = 614040. 6420388 + 614040 = 7034428. 7034428 " ok=true
+[dq614] kv_aq[a8] arith gold=5605795 out="65279 * 86 = 5614000 - 65279 = 5614000 - 65279 = 5548721. 5548721 - 4696 = 55440" ok=false
+[dq614] kv_aq[a8] arith gold=-6239395 out="8715 * 715 = 6231225. 7269 - 6231225 = -6223956. -6223956 - 6225 = -6230181. -62" ok=true
+[dq614] kv_aq[a8] arith gold=1405763 out="9448 - 2651 = 6797. 6797 + 1086 = 7883. 3960 * 353 = 1397880. 7883 + 1397880 = 1" ok=true
+[dq614] kv_aq[a8] arith gold=-4764952 out="6095 * 818 = 4985710. 3463 * 63 = 218169. 2589 - 4985710 + 218169 = -4744952.\n##" ok=false
+[dq614] kv_aq[a8] arith gold=144443485 out="7585 * 183 = 1388055. 1388055 * 104 = 144357720. 87442 + 144357720 = 144445162. " ok=true
+[dq614] kv_aq[a8] arith gold=5995556 out="8295 * 478 = 3965010. 3169 * 631 = 2000039. 21922 + 8985 = 30907. 30907 + 396501" ok=false
+[dq614] kv_aq[a8] arith gold=72267 out="62114 - 2549 = 59565. 59565 + 9062 = 68627. 68627 + 3089 = 71716. 71716 + 551 = " ok=true
+[dq614] kv_aq[a8] arith gold=26585 out="18297 + 3328 = 21625. 21625 - 6827 = 14798. 14798 + 6695 = 21493. 21493 - 1252 =" ok=true
+[dq614] kv_aq[a8] arith gold=-841444 out="1582 * 561 = 887502. 50022 - 3964 = 46058. 46058 - 887502 = -841444.\n#### -84144" ok=true
+[dq614] kv_aq[a8] arith gold=32815014 out="39773 * 825 = 32812725. 32812725 - 5513 = 32807212. 32807212 + 7802 = 32815014.\n" ok=true
+[dq614] kv_aq[a8] arith gold=12326797875 out="46799 * 345 = 16145655. 16145655 * 763 = 12319134765. 8421 * 910 = 7663110. 1231" ok=true
+[dq614] kv_aq[a8] arith gold=78974 out="85059 + 2336 = 87395. 87395 + 2540 = 89935. 89935 - 6612 = 83323. 83323 + 3782 =" ok=true
+[dq614] kv_aq[a8] niah@4096: 32/32
+[dq614] kv_aq[a8] niah@8192: 32/32
+[dq614] kv_aq[a8] niah@16384: 32/32
+[dq614] pfkv_aq[a8] arith gold=2254279 out="4288 * 822 = 3524736. 4288 * 313 = 1342144. 51965 + 9944 = 61909. 61909 + 352473" ok=true
+[dq614] pfkv_aq[a8] arith gold=7256852 out="82350 * 36 = 2964600. 7356 * 584 = 4295904. 2964600 + 4295904 = 7260504. 7260504" ok=true
+[dq614] pfkv_aq[a8] arith gold=1622639 out="5466 * 293 = 1601538. 34848 + 1601538 = 1636386. 1636386 - 4193 = 1632193. 16321" ok=true
+[dq614] pfkv_aq[a8] arith gold=-3903012 out="9093 * 437 = 3973641. 59720 + 3319 = 63039. 63039 - 3973641 = -3910602. -3910602" ok=true
+[dq614] pfkv_aq[a8] arith gold=-398942 out="<|im_end|>" ok=false
+[dq614] pfkv_aq[a8] arith gold=97163 out="88727 + 7276 = 96003. 96003 - 1421 = 94582. 94582 + 848 = 95430. 95430 + 1733 = " ok=true
+[dq614] pfkv_aq[a8] arith gold=-235207550 out="46126 - 4580 = 41546. 41546 - 8639 = 32907. 730 * 492 = 359160. 359160 * 655 = 2" ok=false
+[dq614] pfkv_aq[a8] arith gold=103338 out="98550 - 5054 = 93496. 93496 - 6317 = 87179. 87179 + 6974 = 94153. 94153 + 9185 =" ok=true
+[dq614] pfkv_aq[a8] arith gold=6128749589 out="65593 * 994 = 65199442. 65199442 * 94 = 6128747548. 6128747548 + 2041 = 61287495" ok=true
+[dq614] pfkv_aq[a8] arith gold=4797629173 out="26483 * 383 = 10142989. 10142989 * 473 = 4797633797. 4797633797 - 3846 = 4797629" ok=true
+[dq614] pfkv_aq[a8] arith gold=-5738417 out="7053 * 824 = 5811672. 71277 - 5811672 = -5740395. -5740395 - 6784 = -5747179. -5" ok=true
+[dq614] pfkv_aq[a8] arith gold=7310372 out="66955 + 8179 = 75134.\n75134 - 3520 = 71614.\n2482 * 649 = 1610818.\n5820 * 967 = 5" ok=true
+[dq614] pfkv_aq[a8] arith gold=-1537395 out="3003 * 928 = 2786784. 28485 - 2786784 = -2758299. 1227 * 997 = 1223319. -2758299" ok=true
+[dq614] pfkv_aq[a8] arith gold=39449831 out="46423 * 994 = 46144462. 7164 * 935 = 6708340. 46144462 - 6708340 = 39436122. 394" ok=false
+[dq614] pfkv_aq[a8] arith gold=-564343 out="<|im_end|>" ok=false
+[dq614] pfkv_aq[a8] arith gold=288078 out="9089 * 20 = 181780. 96342 + 3241 = 99583. 99583 + 181780 = 281363. 281363 + 6715" ok=true
+[dq614] pfkv_aq[a8] arith gold=1465370 out="96632 - 9219 = 87413. 3691 * 374 = 1378434. 87413 + 1378434 = 1465847. 1465847 -" ok=false
+[dq614] pfkv_aq[a8] arith gold=1354502253 out="7850 * 312 = 2449200. 2449200 * 553 = 1354407600. 94653 + 1354407600 = 135450225" ok=true
+[dq614] pfkv_aq[a8] arith gold=40865606 out="52558 * 792 = 41625936. 2735 * 278 = 760330. 41625936 - 760330 = 40865606.\n#### " ok=true
+[dq614] pfkv_aq[a8] arith gold=-20748391736 out="6099 * 310 = 1890690. 1890690 * 93 = 175834170. 175834170 * 118 = 20748432060. 4" ok=true
+[dq614] pfkv_aq[a8] arith gold=12120780 out="7463 * 583 = 4350929. 8836 * 872 = 7705192. 64859 + 4350929 + 7705192 = 12120980" ok=false
+[dq614] pfkv_aq[a8] arith gold=9621468 out="9596 * 789 = 7571244. 7571244 + 2650 = 7573894. 7573894 - 4797 = 7569097. 756909" ok=true
+[dq614] pfkv_aq[a8] arith gold=81432 out="96227 - 7545 = 88682. 88682 - 2173 = 86509. 86509 + 8719 = 95228. 95228 - 4127 =" ok=true
+[dq614] pfkv_aq[a8] arith gold=-389841652177070 out="3561 * 294 = 1046934. 1046934 * 487 = 511856858. 511856858 * 993 = 508273860094." ok=false
+[dq614] pfkv_aq[a8] arith gold=188380766651 out="2779 * 379 = 1053241. 1053241 * 383 = 403391303. 403391303 * 467 = 188383738501." ok=true
+[dq614] pfkv_aq[a8] arith gold=84548 out="96616 - 5160 = 91456. 91456 + 7107 = 98563. 98563 - 4327 = 94236. 94236 - 9688 =" ok=true
+[dq614] pfkv_aq[a8] arith gold=17523396 out="35249 * 497 = 17518753. 17518753 - 368 = 17518385. 17518385 + 5011 = 17523396.\n#" ok=true
+[dq614] pfkv_aq[a8] arith gold=85623 out="5486 * 14 = 76804. 12100 + 3374 = 15474. 15474 + 76804 = 92278. 92278 - 1575 = 9" ok=true
+[dq614] pfkv_aq[a8] arith gold=24009932382 out="3823 * 246 = 940458. 940458 * 851 = 800330158. 800330158 * 30 = 24009904740. 350" ok=false
+[dq614] pfkv_aq[a8] arith gold=2104978 out="5210 * 389 = 2026690. 58796 + 7288 = 66084. 66084 - 1954 = 64130. 64130 + 7566 =" ok=true
+[dq614] pfkv_aq[a8] arith gold=33798348 out="41148 * 996 = 40983408. 8055 * 892 = 7185060. 40983408 - 7185060 = 33798348.\n###" ok=true
+[dq614] pfkv_aq[a8] arith gold=6957431023701 out="88382 * 160 = 14141120. 14141120 * 500 = 7070560000. 7070560000 * 984 = 69574310" ok=true
+[dq614] pfkv_aq[a8] arith gold=-505987715 out="3038 * 718 = 2181084. 2181084 * 232 = 506011488. 77875 - 506011488 = -505933613." ok=false
+[dq614] pfkv_aq[a8] arith gold=-38165155 out="367 * 138 = 50646. 50646 * 753 = 38136438. 6951 * 14 = 97314. 70525 - 38136438 =" ok=true
+[dq614] pfkv_aq[a8] arith gold=11262557 out="29558 * 381 = 11261598. 11261598 + 4177 = 11265775. 11265775 - 2581 = 11263194. " ok=true
+[dq614] pfkv_aq[a8] arith gold=7039582 out="34151 * 188 = 6420388. 2040 * 301 = 614040. 6420388 + 614040 = 7034428. 7034428 " ok=true
+[dq614] pfkv_aq[a8] arith gold=5605795 out="65279 * 86 = 5614000 - 65279 = 5614000 - 65279 = 5548721. 5548721 - 4696 = 55440" ok=false
+[dq614] pfkv_aq[a8] arith gold=-6239395 out="8715 * 715 = 6231225. 7269 - 6231225 = -6223956. -6223956 - 6225 = -6230181. -62" ok=true
+[dq614] pfkv_aq[a8] arith gold=1405763 out="9448 - 2651 = 6797. 6797 + 1086 = 7883. 3960 * 353 = 1397880. 7883 + 1397880 = 1" ok=true
+[dq614] pfkv_aq[a8] arith gold=-4764952 out="6095 * 818 = 4985710. 3463 * 63 = 218169. 2589 - 4985710 + 218169 = -4744952.\n##" ok=false
+[dq614] pfkv_aq[a8] arith gold=144443485 out="7585 * 183 = 1388055. 1388055 * 104 = 144357720. 87442 + 144357720 = 144445162. " ok=true
+[dq614] pfkv_aq[a8] arith gold=5995556 out="8295 * 478 = 3965010. 3169 * 631 = 2000039. 21922 + 8985 = 30907. 30907 + 396501" ok=false
+[dq614] pfkv_aq[a8] arith gold=72267 out="62114 - 2549 = 59565. 59565 + 9062 = 68627. 68627 + 3089 = 71716. 71716 + 551 = " ok=true
+[dq614] pfkv_aq[a8] arith gold=26585 out="18297 + 3328 = 21625. 21625 - 6827 = 14798. 14798 + 6695 = 21493. 21493 - 1252 =" ok=true
+[dq614] pfkv_aq[a8] arith gold=-841444 out="1582 * 561 = 887502. 50022 - 3964 = 46058. 46058 - 887502 = -841444.\n#### -84144" ok=true
+[dq614] pfkv_aq[a8] arith gold=32815014 out="39773 * 825 = 32812725. 32812725 - 5513 = 32807212. 32807212 + 7802 = 32815014.\n" ok=true
+[dq614] pfkv_aq[a8] arith gold=12326797875 out="46799 * 345 = 16145655. 16145655 * 763 = 12319134765. 8421 * 910 = 7663110. 1231" ok=true
+[dq614] pfkv_aq[a8] arith gold=78974 out="85059 + 2336 = 87395. 87395 + 2540 = 89935. 89935 - 6612 = 83323. 83323 + 3782 =" ok=true
+[dq614] pfkv_aq[a8] niah@4096: 32/32
+[dq614] pfkv_aq[a8] niah@8192: 32/32
+[dq614] pfkv_aq[a8] niah@16384: 32/32
+[dq614] kv_aq[a4] arith gold=2254279 out="4288 * 822 = 3524736. 4288 * 313 = 1342144. 51965 + 9944 = 61909. 61909 + 352473" ok=true
+[dq614] kv_aq[a4] arith gold=7256852 out="82350 * 36 = 2964600. 7356 * 584 = 4295904. 2964600 + 4295904 = 7260504. 7260504" ok=true
+[dq614] kv_aq[a4] arith gold=1622639 out="5466 * 293 = 1601538. 34848 + 1601538 = 1636386. 1636386 - 4193 = 1632193. 16321" ok=true
+[dq614] kv_aq[a4] arith gold=-3903012 out="9093 * 437 = 3973641. 59720 + 3319 = 63039. 63039 - 3973641 = -3910602. -3910602" ok=true
+[dq614] kv_aq[a4] arith gold=-398942 out="<|im_end|>" ok=false
+[dq614] kv_aq[a4] arith gold=97163 out="88727 + 7276 = 96003. 96003 - 1421 = 94582. 94582 + 848 = 95430. 95430 + 1733 = " ok=true
+[dq614] kv_aq[a4] arith gold=-235207550 out="46126 - 4580 = 41546. 41546 - 8639 = 32907. 730 * 492 = 359160. 359160 * 655 = 2" ok=false
+[dq614] kv_aq[a4] arith gold=103338 out="98550 - 5054 = 93496. 93496 - 6317 = 87179. 87179 + 6974 = 94153. 94153 + 9185 =" ok=true
+[dq614] kv_aq[a4] arith gold=6128749589 out="65593 * 994 = 65199442. 65199442 * 94 = 6128747548. 6128747548 + 2041 = 61287495" ok=true
+[dq614] kv_aq[a4] arith gold=4797629173 out="26483 * 383 = 10142989. 10142989 * 473 = 4797633797. 4797633797 - 3846 = 4797629" ok=true
+[dq614] kv_aq[a4] arith gold=-5738417 out="7053 * 824 = 5811672. 71277 - 5811672 = -5740395. -5740395 - 6784 = -5747179. -5" ok=true
+[dq614] kv_aq[a4] arith gold=7310372 out="66955 + 8179 = 75134.\n75134 - 3520 = 71614.\n2482 * 649 = 1610818.\n5820 * 967 = 5" ok=true
+[dq614] kv_aq[a4] arith gold=-1537395 out="3003 * 928 = 2786784. 1227 * 997 = 1223319. 28485 - 2786784 = -2758299. -2758299" ok=true
+[dq614] kv_aq[a4] arith gold=39449831 out="46423 * 994 = 46144462. 7164 * 935 = 6708340. 46144462 - 6708340 = 39436122. 394" ok=false
+[dq614] kv_aq[a4] arith gold=-564343 out="<|im_end|>" ok=false
+[dq614] kv_aq[a4] arith gold=288078 out="9089 * 20 = 181780. 96342 + 3241 = 99583. 99583 + 181780 = 281363. 281363 + 6715" ok=true
+[dq614] kv_aq[a4] arith gold=1465370 out="96632 - 9219 = 87413. 3691 * 374 = 1378434. 87413 + 1378434 = 1465847. 1465847 -" ok=false
+[dq614] kv_aq[a4] arith gold=1354502253 out="7850 * 312 = 2449200. 2449200 * 553 = 1354407600. 94653 + 1354407600 = 135450225" ok=true
+[dq614] kv_aq[a4] arith gold=40865606 out="52558 * 792 = 41625936. 2735 * 278 = 760330. 41625936 - 760330 = 40865606.\n#### " ok=true
+[dq614] kv_aq[a4] arith gold=-20748391736 out="6099 * 310 = 1890690. 1890690 * 93 = 175834170. 175834170 * 118 = 20748432060. 4" ok=true
+[dq614] kv_aq[a4] arith gold=12120780 out="7463 * 583 = 4350929. 8836 * 872 = 7705192. 64859 + 4350929 + 7705192 = 12120980" ok=false
+[dq614] kv_aq[a4] arith gold=9621468 out="9596 * 789 = 7571244. 7571244 + 2650 = 7573894. 7573894 - 4797 = 7569097. 756909" ok=true
+[dq614] kv_aq[a4] arith gold=81432 out="96227 - 7545 = 88682. 88682 - 2173 = 86509. 86509 + 8719 = 95228. 95228 - 4127 =" ok=true
+[dq614] kv_aq[a4] arith gold=-389841652177070 out="3561 * 294 = 1046934. 1046934 * 487 = 510856858. 510856858 * 993 = 507280860094." ok=false
+[dq614] kv_aq[a4] arith gold=188380766651 out="2779 * 379 = 1053241. 1053241 * 383 = 403391303. 403391303 * 467 = 188383738501." ok=true
+[dq614] kv_aq[a4] arith gold=84548 out="96616 - 5160 = 91456. 91456 + 7107 = 98563. 98563 - 4327 = 94236. 94236 - 9688 =" ok=true
+[dq614] kv_aq[a4] arith gold=17523396 out="35249 * 497 = 17518753. 17518753 - 368 = 17518385. 17518385 + 5011 = 17523396.\n#" ok=true
+[dq614] kv_aq[a4] arith gold=85623 out="5486 * 14 = 76804. 12100 + 3374 = 15474. 15474 + 76804 = 92278. 92278 - 1575 = 9" ok=true
+[dq614] kv_aq[a4] arith gold=24009932382 out="3823 * 246 = 940458. 940458 * 851 = 800330158. 800330158 * 30 = 24009904740. 350" ok=false
+[dq614] kv_aq[a4] arith gold=2104978 out="5210 * 389 = 2026690. 58796 + 7288 = 66084. 66084 - 1954 = 64130. 64130 + 7566 =" ok=true
+[dq614] kv_aq[a4] arith gold=33798348 out="41148 * 996 = 40983408. 8055 * 892 = 7185060. 40983408 - 7185060 = 33798348.\n###" ok=true
+[dq614] kv_aq[a4] arith gold=6957431023701 out="88382 * 160 = 14141120. 14141120 * 500 = 7070560000. 7070560000 * 984 = 69574310" ok=true
+[dq614] kv_aq[a4] arith gold=-505987715 out="3038 * 718 = 2181084. 2181084 * 232 = 506011488. 77875 - 506011488 = -505933613." ok=false
+[dq614] kv_aq[a4] arith gold=-38165155 out="367 * 138 = 50646. 50646 * 753 = 38136438. 6951 * 14 = 97314. 70525 - 38136438 =" ok=true
+[dq614] kv_aq[a4] arith gold=11262557 out="29558 * 381 = 11261598. 11261598 + 4177 = 11265775. 11265775 - 2581 = 11263194. " ok=true
+[dq614] kv_aq[a4] arith gold=7039582 out="34151 * 188 = 6420388. 2040 * 301 = 614040. 6420388 + 614040 = 7034428. 7034428 " ok=true
+[dq614] kv_aq[a4] arith gold=5605795 out="65279 * 86 = 5614000 - 65279 = 5614000 - 65279 = 5548721. 5548721 - 4696 = 55440" ok=false
+[dq614] kv_aq[a4] arith gold=-6239395 out="8715 * 715 = 6231225. 7269 - 6231225 = -6223956. -6223956 - 6225 = -6230181. -62" ok=true
+[dq614] kv_aq[a4] arith gold=1405763 out="9448 - 2651 = 6797. 6797 + 1086 = 7883. 3960 * 353 = 1397880. 7883 + 1397880 = 1" ok=true
+[dq614] kv_aq[a4] arith gold=-4764952 out="6095 * 818 = 4985710. 3463 * 63 = 218169. 2589 - 4985710 + 218169 = -4764952.\n##" ok=true
+[dq614] kv_aq[a4] arith gold=144443485 out="7585 * 183 = 1388055. 1388055 * 104 = 144357720. 87442 + 144357720 = 144445162. " ok=true
+[dq614] kv_aq[a4] arith gold=5995556 out="8295 * 478 = 3965010. 3169 * 631 = 2000039. 21922 + 8985 = 30907. 30907 + 396501" ok=false
+[dq614] kv_aq[a4] arith gold=72267 out="62114 - 2549 = 59565. 59565 + 9062 = 68627. 68627 + 3089 = 71716. 71716 + 551 = " ok=true
+[dq614] kv_aq[a4] arith gold=26585 out="18297 + 3328 = 21625. 21625 - 6827 = 14798. 14798 + 6695 = 21493. 21493 - 1252 =" ok=true
+[dq614] kv_aq[a4] arith gold=-841444 out="1582 * 561 = 887502. 50022 - 3964 = 46058. 46058 - 887502 = -841444.\n#### -84144" ok=true
+[dq614] kv_aq[a4] arith gold=32815014 out="39773 * 825 = 32812725. 32812725 - 5513 = 32807212. 32807212 + 7802 = 32815014.\n" ok=true
+[dq614] kv_aq[a4] arith gold=12326797875 out="46799 * 345 = 16145655. 16145655 * 763 = 12319134765. 8421 * 910 = 7663110. 1231" ok=true
+[dq614] kv_aq[a4] arith gold=78974 out="85059 + 2336 = 87395. 87395 + 2540 = 89935. 89935 - 6612 = 83323. 83323 + 3782 =" ok=true
+[dq614] kv_aq[a4] niah@4096: 32/32
+[dq614] kv_aq[a4] niah@8192: 32/32
+[dq614] kv_aq[a4] niah@16384: 32/32
+[dq614] pfkv_aq[a4] arith gold=2254279 out="4288 * 822 = 3524736. 4288 * 313 = 1342144. 51965 + 9944 = 61909. 61909 + 352473" ok=true
+[dq614] pfkv_aq[a4] arith gold=7256852 out="82350 * 36 = 2964600. 7356 * 584 = 4295904. 2964600 + 4295904 = 7260504. 7260504" ok=true
+[dq614] pfkv_aq[a4] arith gold=1622639 out="5466 * 293 = 1601538. 34848 + 1601538 = 1636386. 1636386 - 4193 = 1632193. 16321" ok=true
+[dq614] pfkv_aq[a4] arith gold=-3903012 out="9093 * 437 = 3973641. 59720 + 3319 = 63039. 63039 - 3973641 = -3910602. -3910602" ok=true
+[dq614] pfkv_aq[a4] arith gold=-398942 out="First, compute 6559 * 64. 6559 * 64 = 419776.\nThen, 12556 - 376 = 12180.\n12180 +" ok=true
+[dq614] pfkv_aq[a4] arith gold=97163 out="88727 + 7276 = 96003. 96003 - 1421 = 94582. 94582 + 848 = 95430. 95430 + 1733 = " ok=true
+[dq614] pfkv_aq[a4] arith gold=-235207550 out="46126 - 4580 = 41546. 41546 - 8639 = 32907. 730 * 492 = 359160. 359160 * 655 = 2" ok=false
+[dq614] pfkv_aq[a4] arith gold=103338 out="98550 - 5054 = 93496. 93496 - 6317 = 87179. 87179 + 6974 = 94153. 94153 + 9185 =" ok=true
+[dq614] pfkv_aq[a4] arith gold=6128749589 out="65593 * 994 = 65199442. 65199442 * 94 = 6128747548. 6128747548 + 2041 = 61287495" ok=true
+[dq614] pfkv_aq[a4] arith gold=4797629173 out="26483 * 383 = 10142989. 10142989 * 473 = 4797633797. 4797633797 - 3846 = 4797629" ok=true
+[dq614] pfkv_aq[a4] arith gold=-5738417 out="7053 * 824 = 5811672. 71277 - 5811672 = -5740395. -5740395 - 6784 = -5747179. -5" ok=true
+[dq614] pfkv_aq[a4] arith gold=7310372 out="66955 + 8179 = 75134. 75134 - 3520 = 71614. 2482 * 649 = 1610818. 5820 * 967 = 5" ok=true
+[dq614] pfkv_aq[a4] arith gold=-1537395 out="3003 * 928 = 2786784. 28485 - 2786784 = -2758299. 1227 * 997 = 1223319. -2758299" ok=true
+[dq614] pfkv_aq[a4] arith gold=39449831 out="46423 * 994 = 46144462. 7164 * 935 = 6708340. 46144462 - 6708340 = 39436122. 394" ok=false
+[dq614] pfkv_aq[a4] arith gold=-564343 out="<|im_end|>" ok=false
+[dq614] pfkv_aq[a4] arith gold=288078 out="9089 * 20 = 181780. 96342 + 3241 = 99583. 99583 + 181780 = 281363. 281363 + 6715" ok=true
+[dq614] pfkv_aq[a4] arith gold=1465370 out="96632 - 9219 = 87413. 3691 * 374 = 1378434. 87413 + 1378434 = 1465847. 1465847 -" ok=false
+[dq614] pfkv_aq[a4] arith gold=1354502253 out="7850 * 312 = 2449200. 2449200 * 553 = 1354407600. 94653 + 1354407600 = 135450225" ok=true
+[dq614] pfkv_aq[a4] arith gold=40865606 out="52558 * 792 = 41625936. 2735 * 278 = 760330. 41625936 - 760330 = 40865606.\n#### " ok=true
+[dq614] pfkv_aq[a4] arith gold=-20748391736 out="6099 * 310 = 1890690. 1890690 * 93 = 175834170. 175834170 * 118 = 20748432060. 4" ok=true
+[dq614] pfkv_aq[a4] arith gold=12120780 out="7463 * 583 = 4350929. 8836 * 872 = 7705192. 64859 + 4350929 + 7705192 = 12120980" ok=false
+[dq614] pfkv_aq[a4] arith gold=9621468 out="9596 * 789 = 7571244. 7571244 + 2650 = 7573894. 7573894 - 4797 = 7569097. 756909" ok=true
+[dq614] pfkv_aq[a4] arith gold=81432 out="96227 - 7545 = 88682. 88682 - 2173 = 86509. 86509 + 8719 = 95228. 95228 - 4127 =" ok=true
+[dq614] pfkv_aq[a4] arith gold=-389841652177070 out="3561 * 294 = 1046934. 1046934 * 487 = 511856858. 511856858 * 993 = 508273860094." ok=false
+[dq614] pfkv_aq[a4] arith gold=188380766651 out="2779 * 379 = 1053241. 1053241 * 383 = 403391303. 403391303 * 467 = 188383738501." ok=true
+[dq614] pfkv_aq[a4] arith gold=84548 out="96616 - 5160 = 91456. 91456 + 7107 = 98563. 98563 - 4327 = 94236. 94236 - 9688 =" ok=true
+[dq614] pfkv_aq[a4] arith gold=17523396 out="35249 * 497 = 17518753. 17518753 - 368 = 17518385. 17518385 + 5011 = 17523396.\n#" ok=true
+[dq614] pfkv_aq[a4] arith gold=85623 out="5486 * 14 = 76804. 12100 + 3374 = 15474. 15474 + 76804 = 92278. 92278 - 1575 = 9" ok=true
+[dq614] pfkv_aq[a4] arith gold=24009932382 out="3823 * 246 = 940458. 940458 * 851 = 800330158. 800330158 * 30 = 24009904740. 350" ok=false
+[dq614] pfkv_aq[a4] arith gold=2104978 out="5210 * 389 = 2026690. 58796 + 7288 = 66084. 66084 - 1954 = 64130. 64130 + 7566 =" ok=true
+[dq614] pfkv_aq[a4] arith gold=33798348 out="41148 * 996 = 40983408. 8055 * 892 = 7185060. 40983408 - 7185060 = 33798348.\n###" ok=true
+[dq614] pfkv_aq[a4] arith gold=6957431023701 out="88382 * 160 = 14141120. 14141120 * 500 = 7070560000. 7070560000 * 984 = 69574310" ok=true
+[dq614] pfkv_aq[a4] arith gold=-505987715 out="3038 * 718 = 2181084. 2181084 * 232 = 506011488. 77875 - 506011488 = -505933613." ok=false
+[dq614] pfkv_aq[a4] arith gold=-38165155 out="367 * 138 = 50646. 50646 * 753 = 38136438. 6951 * 14 = 97314. 70525 - 38136438 =" ok=true
+[dq614] pfkv_aq[a4] arith gold=11262557 out="29558 * 381 = 11261598. 11261598 + 4177 = 11265775. 11265775 - 2581 = 11263194. " ok=true
+[dq614] pfkv_aq[a4] arith gold=7039582 out="34151 * 188 = 6420388. 2040 * 301 = 614040. 6420388 + 614040 = 7034428. 7034428 " ok=true
+[dq614] pfkv_aq[a4] arith gold=5605795 out="65279 * 86 = 5614000 - 65279*4 = 5614000 - 261116 = 5352884. Wait, let me recalc" ok=true
+[dq614] pfkv_aq[a4] arith gold=-6239395 out="8715 * 715 = 6231225. 7269 - 6231225 = -6223956. -6223956 - 6225 = -6230181. -62" ok=true
+[dq614] pfkv_aq[a4] arith gold=1405763 out="9448 - 2651 = 6797. 6797 + 1086 = 7883. 3960 * 353 = 1397880. 7883 + 1397880 = 1" ok=true
+[dq614] pfkv_aq[a4] arith gold=-4764952 out="6095 * 818 = 4985710. 3463 * 63 = 218169. 2589 - 4985710 + 218169 = -4744952.\n##" ok=false
+[dq614] pfkv_aq[a4] arith gold=144443485 out="7585 * 183 = 1388055. 1388055 * 104 = 144357720. 87442 + 144357720 = 144445162. " ok=true
+[dq614] pfkv_aq[a4] arith gold=5995556 out="8295 * 478 = 3965010. 3169 * 631 = 1999639. 21922 + 8985 = 30907. 30907 + 396501" ok=true
+[dq614] pfkv_aq[a4] arith gold=72267 out="62114 - 2549 = 59565. 59565 + 9062 = 68627. 68627 + 3089 = 71716. 71716 + 551 = " ok=true
+[dq614] pfkv_aq[a4] arith gold=26585 out="18297 + 3328 = 21625. 21625 - 6827 = 14798. 14798 + 6695 = 21493. 21493 - 1252 =" ok=true
+[dq614] pfkv_aq[a4] arith gold=-841444 out="1582 * 561 = 887502. 50022 - 3964 = 46058. 46058 - 887502 = -841444.\n#### -84144" ok=true
+[dq614] pfkv_aq[a4] arith gold=32815014 out="39773 * 825 = 32812725. 32812725 - 5513 = 32807212. 32807212 + 7802 = 32815014.\n" ok=true
+[dq614] pfkv_aq[a4] arith gold=12326797875 out="46799 * 345 = 16145655. 16145655 * 763 = 12319134765. 8421 * 910 = 7663110. 1231" ok=true
+[dq614] pfkv_aq[a4] arith gold=78974 out="85059 + 2336 = 87395. 87395 + 2540 = 89935. 89935 - 6612 = 83323. 83323 + 3782 =" ok=true
+[dq614] pfkv_aq[a4] niah@4096: 32/32
+[dq614] pfkv_aq[a4] niah@8192: 32/32
+[dq614] pfkv_aq[a4] niah@16384: 32/32
+[dq614] report: F:\wt\i033\matrix\dq_phase_matrix.md
