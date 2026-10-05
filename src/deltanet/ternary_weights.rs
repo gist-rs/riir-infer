@@ -438,37 +438,16 @@ impl QwenDeltaNetTernaryWeights {
     /// in the dense forward pass.
     #[allow(clippy::needless_range_loop)]
     pub fn dequant_wte_row_into(&self, row_idx: usize, out: &mut [f32]) {
-        let w = &self.wte;
-        debug_assert_eq!(out.len(), w.cols, "out slice must match wte.cols");
-        debug_assert!(row_idx < w.rows, "row_idx out of range");
+        dequant_group_row_into(&self.wte, row_idx, out);
+    }
 
-        let blocks64 = w.blocks64;
-        let groups_per_row = w.groups_per_row;
-        let pos_base = row_idx * blocks64;
-        let neg_base = row_idx * blocks64;
-        let scale_base = row_idx * groups_per_row;
-
-        for c in 0..w.cols {
-            let word = c / 64;
-            let bit = c % 64;
-            let pos_mask = 1u64 << bit;
-            let neg_mask = 1u64 << bit;
-
-            let is_pos = (w.pos_bits[pos_base + word] & pos_mask) != 0;
-            let is_neg = (w.neg_bits[neg_base + word] & neg_mask) != 0;
-
-            let ternary: f32 = match (is_pos, is_neg) {
-                (true, false) => 1.0,
-                (false, true) => -1.0,
-                _ => 0.0,
-            };
-
-            // GROUP_SIZE = 128 (katgpt-types::GROUP_SIZE). Hardcoded to avoid
-            // the binary_plasma/ternary_group_scale feature-export ambiguity.
-            let group = c / 128;
-            let scale = w.group_scale[scale_base + group].to_f32();
-            out[c] = ternary * scale;
-        }
+    /// Dequantize one row of the LM head into `out` — the logit-lens reads
+    /// the top-token row (Issue 022 T5.4's hydra arm consumes the lens DE
+    /// against the parent's own argmax). Same bit-plane layout as
+    /// [`Self::dequant_wte_row_into`]: `lm_head` is the identical
+    /// [`TernaryGroupWeights`] type.
+    pub fn dequant_lm_head_row_into(&self, row_idx: usize, out: &mut [f32]) {
+        dequant_group_row_into(&self.lm_head, row_idx, out);
     }
 
     /// Total ternary parameter count across all projections + global tensors.
@@ -622,6 +601,42 @@ impl QwenDeltaNetTernaryWeights {
             layers,
             layer_types: self.layer_types.clone(),
         }
+    }
+}
+
+/// Shared row dequant for the two [`TernaryGroupWeights`] tables (the wte
+/// lookup and the LM head's logit-lens reads). Bit-planes + per-128-weight
+/// f16 group scales, the layout `dequant_wte_row_into` documented.
+/// `out.len()` must equal `w.cols`.
+#[allow(clippy::needless_range_loop)]
+fn dequant_group_row_into(w: &TernaryGroupWeights, row_idx: usize, out: &mut [f32]) {
+    debug_assert_eq!(out.len(), w.cols, "out slice must match w.cols");
+    debug_assert!(row_idx < w.rows, "row_idx out of range");
+
+    let blocks64 = w.blocks64;
+    let groups_per_row = w.groups_per_row;
+    let base = row_idx * blocks64;
+    let scale_base = row_idx * groups_per_row;
+
+    for c in 0..w.cols {
+        let word = c / 64;
+        let bit = c % 64;
+        let mask = 1u64 << bit;
+
+        let is_pos = (w.pos_bits[base + word] & mask) != 0;
+        let is_neg = (w.neg_bits[base + word] & mask) != 0;
+
+        let ternary: f32 = match (is_pos, is_neg) {
+            (true, false) => 1.0,
+            (false, true) => -1.0,
+            _ => 0.0,
+        };
+
+        // GROUP_SIZE = 128 (katgpt-types::GROUP_SIZE). Hardcoded to avoid
+        // the binary_plasma/ternary_group_scale feature-export ambiguity.
+        let group = c / 128;
+        let scale = w.group_scale[scale_base + group].to_f32();
+        out[c] = ternary * scale;
     }
 }
 
