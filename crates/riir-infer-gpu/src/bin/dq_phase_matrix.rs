@@ -56,7 +56,10 @@
     feature = "ternary_gemm_batched",
     not(target_os = "macos"),
 ))]
-#![cfg(not(debug_assertions))]
+// Dev profile: the refusing main makes the measurement body dead code BY
+// DESIGN (it must never run unoptimised) — silence exactly that class, in
+// exactly that profile. Release keeps every warning live.
+#![cfg_attr(debug_assertions, allow(dead_code))]
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -467,6 +470,20 @@ fn env_or(k: &str, d: &str) -> String {
     std::env::var(k).unwrap_or_else(|_| d.to_string())
 }
 
+/// Release-only measurement: a debug build would time an unoptimised
+/// binary, so the dev-profile arm is a LOUD refusal (compile_error is
+/// E0601-adjacent noise; a refusing main keeps `--all-features` dev
+/// builds valid while refusing to measure).
+#[cfg(debug_assertions)]
+fn main() {
+    eprintln!(
+        "[dq614] REFUSED: release-only measurement — rebuild with \
+         `cargo build --release --features dq_phase_bench,ternary_gemv_cuda_raw,ternary_gemm_batched`"
+    );
+    std::process::exit(2);
+}
+
+#[cfg(not(debug_assertions))]
 fn main() {
     if let Err(e) = run() {
         eprintln!("[dq614] FATAL: {e}");
