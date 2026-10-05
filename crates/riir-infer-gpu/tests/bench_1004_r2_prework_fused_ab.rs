@@ -240,10 +240,10 @@ fn bench_1004_r2_prework_fused_ab() {
             "P={p:>6}  fused median {:>8.2} ms vs shipping median {:>8.2} ms  ratio fused/shipping median {:.3} (min {:.3} max {:.3}) → speedup {:.3}x",
             median(fused_ms),
             median(ship_ms),
-            median(ratios.iter().copied().collect()),
+            median(ratios.clone()),
             lo,
             hi,
-            1.0 / median(ratios.iter().copied().collect()),
+            1.0 / median(ratios),
         );
     }
 }

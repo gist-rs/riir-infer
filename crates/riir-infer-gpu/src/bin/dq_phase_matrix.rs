@@ -1277,8 +1277,8 @@ mod tests {
             let expr_line = it
                 .prompt
                 .lines()
-                .filter(|l| l.starts_with("Compute "))
-                .last()
+                .rev()
+                .find(|l| l.starts_with("Compute "))
                 .expect("Compute line");
             let body = expr_line
                 .strip_prefix("Compute ")

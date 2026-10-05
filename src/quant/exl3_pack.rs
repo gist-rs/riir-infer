@@ -58,10 +58,10 @@ use crate::safetensors_loader::{TensorMeta, parse_safetensors_header};
 ///   2026-10-02) — K4 150 + K5 lm_head, mul1. The M3 Metal arm of that
 ///   gate is the same test on the M3; CUDA admission here does not claim
 ///   it.
-/// Everything else — including newer exllamav3
-/// releases until validated — is refused by [`Exl3Pack::open`] (fail-closed,
-/// Issue 001 §12.7); a deliberate read of an unvalidated era goes through
-/// [`Exl3Pack::open_unverified_era`], which names the risk at the call site.
+/// - Everything else — including newer exllamav3
+///   releases until validated — is refused by [`Exl3Pack::open`] (fail-closed,
+///   Issue 001 §12.7); a deliberate read of an unvalidated era goes through
+///   [`Exl3Pack::open_unverified_era`], which names the risk at the call site.
 pub const KNOWN_GOOD_ERA_VERSIONS: &[&str] = &["1.4.2", "1.5.3"];
 
 /// One mapped shard + its parsed header.

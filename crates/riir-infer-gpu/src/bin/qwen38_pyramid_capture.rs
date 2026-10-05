@@ -139,7 +139,7 @@ fn k_row(
         let e = p * kvd + h * hd + d;
         if kv_f16 {
             let w = host[e / 2].to_bits();
-            let half = if e % 2 == 0 {
+            let half = if e.is_multiple_of(2) {
                 (w & 0xFFFF) as u16
             } else {
                 (w >> 16) as u16
@@ -176,7 +176,7 @@ fn dump_mark_k(
     let words = if kv_f16 { l * kvd / 2 } else { l * kvd };
 
     // commit position set: uniform stride to the row cap + forced + Q
-    let stride = ((l + commit_rows - 1) / commit_rows).max(1);
+    let stride = l.div_ceil(commit_rows).max(1);
     let mut commit_pos: Vec<usize> = (0..l).step_by(stride).collect();
     for p in [0, l / 4, l / 2, (3 * l) / 4, l - 1]
         .into_iter()
@@ -481,8 +481,7 @@ fn run_capture(out: &Path) -> Result<(), String> {
     let mut mark_iter = lengths.iter().peekable();
 
     let fill_start = Instant::now();
-    for pos in 0..max_l {
-        let token = tokens[pos];
+    for (pos, &token) in tokens.iter().enumerate() {
         if tap_pos_set.contains(&pos) {
             let mut bufs: Vec<Vec<f32>> = fa_layers.iter().map(|_| vec![0f32; qd]).collect();
             fwd.forward_token_attn_q_capture(token, pos, &fa_layers, &mut bufs)?;
@@ -494,31 +493,31 @@ fn run_capture(out: &Path) -> Result<(), String> {
         } else {
             fwd.forward_token(token, pos)?;
         }
-        if let Some(&&l) = mark_iter.peek() {
-            if pos + 1 == l {
-                mark_iter.next();
-                let q_positions = &q_positions_of
-                    .iter()
-                    .find(|(pl, _)| *pl == l)
-                    .map(|(_, ps)| ps.clone())
-                    .unwrap_or_default();
-                let dump = dump_mark_k(
-                    &fwd,
-                    &cfg,
-                    l,
-                    &k_layers,
-                    &commit_heads,
-                    commit_rows,
-                    q_positions,
-                    &full,
-                    &commit,
-                )?;
-                marks.push(dump.json);
-                eprintln!(
-                    "[pycap] mark L={l} dumped ({:.0}s elapsed)",
-                    fill_start.elapsed().as_secs_f32()
-                );
-            }
+        if let Some(&&l) = mark_iter.peek()
+            && pos + 1 == l
+        {
+            mark_iter.next();
+            let q_positions = &q_positions_of
+                .iter()
+                .find(|(pl, _)| *pl == l)
+                .map(|(_, ps)| ps.clone())
+                .unwrap_or_default();
+            let dump = dump_mark_k(
+                &fwd,
+                &cfg,
+                l,
+                &k_layers,
+                &commit_heads,
+                commit_rows,
+                q_positions,
+                &full,
+                &commit,
+            )?;
+            marks.push(dump.json);
+            eprintln!(
+                "[pycap] mark L={l} dumped ({:.0}s elapsed)",
+                fill_start.elapsed().as_secs_f32()
+            );
         }
         if pos % 8192 == 0 && pos > 0 {
             eprintln!(

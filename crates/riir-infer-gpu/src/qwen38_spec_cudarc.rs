@@ -36,7 +36,7 @@ use std::time::Instant;
 /// stream's definition) plus the drafter-side p-min gate. The gate is a
 /// DRAFTER property (which positions get a proposal), never a sampler
 /// property — it changes the cost, never the stream.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub struct KeyedSpecConfig {
     pub posture: KeyedVerifyPosture,
     /// Per-position confidence floor: the chain is truncated BEFORE the
@@ -54,17 +54,6 @@ pub struct KeyedSpecConfig {
     /// the A/B numbers, not a default.
     pub draft_top_k: Option<usize>,
     pub draft_top_p: Option<f32>,
-}
-
-impl Default for KeyedSpecConfig {
-    fn default() -> Self {
-        Self {
-            posture: KeyedVerifyPosture::default(),
-            p_min: None,
-            draft_top_k: None,
-            draft_top_p: None,
-        }
-    }
 }
 
 /// The keyed loop's telemetry (the Bench-759 `LoopStats` shape, keyed).
@@ -523,6 +512,10 @@ pub fn run_keyed_spec_loop_lanes(
 /// time, sampling EVERY position with the posture's truncated keyed
 /// sampler (the argmax-only forward throws away the row the sampler
 /// needs, so this rides the logits twin). Also collects the per-position
+/// The keyed loop's per-position telemetry row (`run_serial_keyed`'s
+/// return tuple, factored — the type alias keeps the signature readable).
+type KeyedSerialFeats = (Vec<u32>, Vec<u32>, Vec<f32>);
+
 /// argmaxes (diagnostics: how far the keyed stream sits from greedy) and
 /// the 5-tap features for every forwarded position (the A/B harness's
 /// teacher-forced drafter input). Returns (stream, argmaxes, feats).
@@ -531,7 +524,7 @@ pub fn run_serial_keyed(
     prompt: &[u32],
     n_gen: usize,
     posture: &KeyedVerifyPosture,
-) -> Result<(Vec<u32>, Vec<u32>, Vec<f32>), String> {
+) -> Result<KeyedSerialFeats, String> {
     gpu.verify_reset_gdn()?;
     let n_tap = QWEN38_DFLASH2_TAP_LAYERS.len();
     let inp = n_tap * gpu.cfg.n_embd;

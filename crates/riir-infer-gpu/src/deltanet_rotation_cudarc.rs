@@ -1221,9 +1221,21 @@ pub struct RotationKernels {
     // escalation): rotation rides the quantize pass, byte-identical to the
     // unfused chain (see the kernel doc). The *_warp pair is the rung-2
     // shuffle/register variant dispatched at Bonsai-2's geometry.
+    // C0.5 — the fused rotate(+permute)+quantize pair. The two `*_warp`
+    // fields are read only by the two launcher methods below, whose only
+    // callers are this module's tests (the rung-2 FFMA-contraction gate
+    // probes) — dead in non-test lib builds (what bins link).
     quantize_rot_q8: CudaFunction,
     quantize_permute_rot_q8: CudaFunction,
+    #[cfg_attr(
+        not(all(test, feature = "prefill_q8_act")),
+        allow(dead_code, reason = "read only by the quantize_rotate_q8 launcher, whose only callers are the prefill_q8_act-gated tests")
+    )]
     quantize_rot_q8_warp: CudaFunction,
+    #[cfg_attr(
+        not(all(test, feature = "prefill_q8_act")),
+        allow(dead_code, reason = "read only by the quantize_permute_rotate_q8 launcher, whose only callers are the prefill_q8_act-gated tests")
+    )]
     quantize_permute_rot_q8_warp: CudaFunction,
     // C0.5 rung-2 isolation probe (see the kernel doc) — test instrument
     // (loaded unconditionally: the kernel ships in ROTATION_CUDA_SRC; the
@@ -1870,6 +1882,9 @@ impl RotationKernels {
     /// escalation's bitexact contract — the folded pins hold across the
     /// fusion). Writes the SAME scratch layout (`q_w` words `[p*(n/4)]` +
     /// `s_t` row scales `[p]`) the prefill GEMMs consume.
+    /// Test-consumed only (the prefill_q8_act-gated gate probes in this
+    /// module's tests) — dead at every other posture.
+    #[cfg_attr(not(all(test, feature = "prefill_q8_act")), allow(dead_code))]
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn quantize_rotate_q8(
         &self,
@@ -1961,6 +1976,8 @@ impl RotationKernels {
     /// quantize in ONE pass — replaces the unfused permute + rotate +
     /// quantize chain at the `out_proj` input site (byte-identical to
     /// it; `hd`/`n_k` = the config's head_dim / `gdn_k_groups`).
+    /// Test-consumed only (prefill_q8_act) — dead at every other posture.
+    #[cfg_attr(not(all(test, feature = "prefill_q8_act")), allow(dead_code))]
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn quantize_permute_rotate_q8(
         &self,
