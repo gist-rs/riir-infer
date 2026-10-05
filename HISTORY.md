@@ -37,7 +37,48 @@ joint sampler for the dLLM decode lane (Mosaic arXiv:2607.07026 distill; CSR aut
 tensors + edge-space forward–backward sequential sampler in f32 + the O(log L)
 f64 segment-tree parallel sampler + 1e-9-verified token marginals; 14 lib tests incl.
 brute-force TV exactness on toy/random automata + the G4 allocation-free gate
-`tests/fa_g4_alloc.rs`). P1 (the `fa_constraint` decode-loop wiring) is the next task.
+`tests/fa_g4_alloc.rs`).
+
+## 2026-10-06 — Issue 035 P1 LANDED: the `fa_constraint` decode wiring — exact joint x→0 per denoising step — `304876f`+`f4ffa93`
+
+P0's sampler wired into the `gemma2_d2f` denoising loop behind the opt-in
+`fa_constraint` feature (implies `gemma2_d2f` ⇒ `dllm`). Per step: ONE exact joint
+draw over the generation block (committed positions pinned, masked free), then
+confidence-ordered commit with the fixed threshold or the learned sampler; the rest
+remask. Four lanes beyond the bare wiring:
+
+- **Commit axes** (`FaCommitBy`): `RawTop1` = `P_lm(proposal | position)` from the
+  mask-suppressed softmax (the A/B baseline — same confidence currency as the base
+  loop, read at the proposal); `ConstrainedMarginal` = the constrained posterior
+  marginal of the proposal, its log riding `SamplerFeatures::marginal_log` as the
+  7th input of the new 7-param `ConstrainedSampler` (the 6-slot `to_array` is
+  untouched — the trained `DiffusionSampler` surface is unchanged). The marginal
+  axis normalizes over the ALLOWED set, so confidence is meaningfully scaled where
+  raw top-1 over a 256k vocab is noise (~3.8e-6 on the test fixture).
+- **Block carry-over**: core `sample_joint_from`/`build_tree_from`/`walk_from` +
+  `ParallelTree.start` (carry-over start nodes validated against conditioned
+  brute force: sequential TV + parallel TV + marginals to 1e-9 from a NON-designated
+  start); the decode returns `final_node` and the next block threads it as
+  `start_node`. The two-block GPU test walks the CONCATENATED blocks from the
+  original start to an accepting node.
+- **The mask-free output guarantee** (the lane's product point, beyond the issue
+  text): after the loop, still-masked positions take the final step's x→0 proposal —
+  accepted by construction — so the returned block NEVER carries mask tokens and
+  always walks `start_node → accepting` (`WalkBrokeContract` guard asserts it); the
+  base lane leaves mask placeholders in SemiActivated blocks. `FaDecodeError`
+  refuses mask-in-automaton, bad carry-over start, 0 denoise steps, and
+  ConstrainedMarginal tree-budget overruns at decode entry (fail loud before GPU
+  work, never OOM at step 3 of 8).
+- **Feature-off byte-identical**: the base `d2f_decode_gemma2` +
+  `sample_with_confidence` are untouched — the constrained lane is a separate loop
+  (`d2f_decode_gemma2_constrained`), deliberate-divergence note in the module doc.
+
+Tests: 6 CPU-pure (schedule/lm-prob/sampler-math/validation/propose pins/carry-over)
++ 4 GPU integration on the Gemma2-2B fixture (chain grammar converges at tau 1e-9
+raw; tau 0.99 final-commit never leaves masks; marginal axis converges at tau 0.05;
+two-block carry-over). Clippy `-D` clean at `fa_constraint`; default and
+`--no-default-features` postures compile; G4 alloc gate re-run green. P2 (the
+JSON-schema → DFA compiler + overhead bench) is the next task; P3 GOAT owner-gated.
 
 ## 2026-10-01 — riir-ai Issue 1004 R2 LANDED: the fused GDN prework (conv1d + SiLU + q/k L2-norm + head expansion, ONE dispatch) — `929d31e`
 

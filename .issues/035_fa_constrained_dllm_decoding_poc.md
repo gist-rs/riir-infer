@@ -1,6 +1,6 @@
 # Issue 035 — FA-constrained exact posterior sampling for the dLLM decode lane (POC)
 
-**Status:** OPEN — **P0 COMPLETE 2026-10-05 (riir-infer `8223d27`): the pure joint sampler ships exact (9/9 incl. brute-force TV + forced-conditioned + seeded-random automata) and allocation-free (G4 gate)**; P0.5 (parallel segment-tree + fp64 hatch) next, then P1 wires `fa_constraint` into the `gemma2_d2f` decode loop. POC filed from Research 008 (arXiv:2607.07026 / `MhDang/mosaic` distill); GOAT-tier, consumer = the `gemma2_d2f` denoising decode loop; owner-gated promote/demote at P3.
+**Status:** OPEN — **P0+P0.5+P1 COMPLETE 2026-10-06 (the 4090 box): the sampler ships exact and allocation-free (P0 `8223d27`), the O(log L) f64 segment-tree lane + 1e-9-verified marginals (P0.5 `8bd5c2d`), and the decode wiring (P1 `304876f`+`f4ffa93` — `propose_x0` per denoising step, confidence-ordered commit + budget, RawTop1/ConstrainedMarginal axes, block carry-over, final x0 commit = mask-free accepted output; 6 CPU + 4 GPU integration tests, feature-off path untouched, clippy `-D` clean both postures). P2 (schema front end + bench) next; GOAT verdict owner-gated at P3.** POC filed from Research 008 (arXiv:2607.07026 / `MhDang/mosaic` distill); GOAT-tier, consumer = the `gemma2_d2f` denoising decode loop.
 
 ## Why
 
@@ -23,18 +23,19 @@ The `dllm` decode path (`riir-infer/src/transformer/dllm.rs` D2F forwards + `rii
 - [x] zero-alloc steady state audit — `tests/fa_g4_alloc.rs` (its own test target, the twt G4 precedent): scratch warmed across 8 draws of the largest shape, then 64 measured draws → **0 allocations**; `FaScratch` bounds cover max(node fanout, edge token count) — the token draw reuses the weights buffer and an edge may allow more tokens than any node's fanout
 - Clippy `-D warnings` clean at lib/all-targets/`--no-default-features`; full default lib suite 219 passed (210 pre-existing + 9 new)
 
-### P0.5 — parallel sampler (the paper's headline)
-- [ ] segment-tree build: identity-leaf power-of-two padding, end-weights folded on the last leaf, pairwise log-space matrix products, per-level max-shift
-- [ ] top-down midpoint conditional sampling (`z_mid ~ softmax(left[begin→·] + right[·→end])`, one draw per level)
-- [ ] fp64 escape hatch on tree products (fp32 underflows at L=64 with spread logits — measured upstream)
-- [ ] parallel ≡ sequential distribution cross-check + marginals (`α/β` midpoint fill) to 1e-9 vs brute force
-- [ ] NaN→uniform fallbacks with deferred (end-of-run) warning counters — no host syncs mid-step
+### P0.5 — parallel sampler (the paper's headline) — **COMPLETE 2026-10-05 (riir-infer `8bd5c2d`)**
+- [x] segment-tree build: identity-leaf power-of-two padding, end-weights folded on the last leaf, pairwise log-space matrix products, per-level max-shift
+- [x] top-down midpoint conditional sampling (`z_mid ~ softmax(left[begin→·] + right[·→end])`, one draw per level; walk-level→tree-array indexing `total-2-L` pinned by test)
+- [x] fp64 escape hatch on tree products — STRUCTURAL: every tree quantity is f64 log-space, so the fp32-underflow-at-L=64 trap cannot occur by construction (documented in-module)
+- [x] parallel ≡ sequential distribution cross-check + marginals (`α/β` midpoint fill) to 1e-9 vs brute force (pow2 + padded lengths + greedy parity)
+- [x] NaN→uniform fallbacks with deferred (end-of-run) warning counters — no host syncs mid-step (`ParallelTree::sample`'s `nan_count`)
 
-### P1 — decode integration (opt-in feature)
-- [ ] `fa_constraint` feature (implies `dllm`): `propose_x0` at each `gemma2_d2f` denoising step — forced = committed positions, free = masked; confidence-ordered commit, rest remasked
-- [ ] feature-off arm byte-identical (existing `sample_with_confidence` path untouched)
-- [ ] constrained-marginal feature for `DiffusionSampler` (the `commit_by="constrained"` axis): `marginal_log` as an extra `SamplerFeatures` input, A/B vs raw top-1 confidence
-- [ ] automaton state carry-over across blocks (`start_nodes` from the accepted prefix; block-causal decode)
+### P1 — decode integration (opt-in feature) — **COMPLETE 2026-10-06 (riir-infer `304876f` core half + `f4ffa93` GPU wiring)**
+- [x] `fa_constraint` feature (implies `gemma2_d2f` ⇒ `dllm` transitively): `propose_x0` at each `gemma2_d2f` denoising step — forced = committed positions, free = masked; confidence-ordered commit, rest remasked (`d2f_decode_gemma2_constrained` + `FaConstraintConfig`, `commit_budget` = the mosaic top-k knob; confidence-ordered schedule is deterministic on ties)
+- [x] feature-off arm byte-identical (the base `d2f_decode_gemma2` + `sample_with_confidence` untouched — the constrained lane is a separate loop; divergence-risk note in the module doc)
+- [x] constrained-marginal feature for `DiffusionSampler` (the `commit_by="constrained"` axis): `SamplerFeatures::marginal_log` (excluded from the 6-slot `to_array` — the trained surface unchanged) + 7-param `ConstrainedSampler`; A/B vs raw top-1 via `FaCommitBy::{RawTop1, ConstrainedMarginal}`
+- [x] automaton state carry-over across blocks (`start_node` from the accepted prefix: core `sample_joint_from`/`build_tree_from`/`walk_from` + `ParallelTree.start`; `Gemma2D2fFaResult::final_node` threads into the next block; two-block GPU test walks the CONCATENATED blocks to accepting)
+- [x] lane contract beyond the issue text: the final x0 commit (still-masked positions take the last joint proposal) — the returned block NEVER carries mask tokens and always walks `start_node → accepting` (`WalkBrokeContract` guard); `FaDecodeError` refuses mask-in-automaton, bad carry-over start, 0 steps, and tree-budget overruns at decode entry
 
 ### P2 — schema front end + bench
 - [ ] JSON-schema → char-NFA → token-DFA compiler (type/properties/required/items/enum/anyOf, depth-bounded recursion — mosaic `grammar/json_schema.py` is the reference shape; tokenizer-trie re-alphabetisation for our vocab)
