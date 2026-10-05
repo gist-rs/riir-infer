@@ -246,7 +246,9 @@ fn test_sample_with_confidence_uniform_logits() {
 /// Create minimal test weights with Gemma2 2B correct shapes but random data.
 /// NOT numerically correct — just for structure/binding validation.
 /// NOTE: Creates ~2.3 GB of weight data (256K × 2304 vocab embedding).
-fn create_test_weights(config: &Config) -> GemmaTransformerWeights {
+/// `pub(crate)` so the sibling `fa_constraint::tests` GPU suite reuses the
+/// same fixture (visibility only — the weights are unchanged).
+pub(crate) fn create_test_weights(config: &Config) -> GemmaTransformerWeights {
     use riir_infer_core::gemma_layer::GemmaLayerWeights;
     use riir_infer_core::types::Rng;
 
@@ -717,6 +719,7 @@ fn test_sampler_decide_with_trained_weights() {
         entropy: 0.3,
         step_norm: 0.5,
         pos_norm: 0.5,
+        marginal_log: 0.0,
     };
     assert!(
         accept_sampler.decide(&good_features, 0.5),
@@ -739,6 +742,7 @@ fn test_sampler_predict_bounded() {
         entropy: 0.0,
         step_norm: 1.0,
         pos_norm: 1.0,
+        marginal_log: 0.0,
     };
     let p = sampler.predict(&features);
     assert!(p <= 1.0, "predict should be ≤ 1.0, got {p}");

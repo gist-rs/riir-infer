@@ -61,6 +61,9 @@ serde_json = "1"
 log = "0.4"
 # Diffusion sampler RNG (gemma2_d2f lane; version matches the engine gpu crate).
 fastrand = { version = "2", optional = true }
+# FA-constrained decode error enum (fa_constraint lane; optional like the
+# lane — the derive runs nowhere until the feature is selected).
+thiserror = { version = "2", optional = true }
 
 [target.'cfg(target_os = "macos")'.dependencies]
 cubecl = { version = "=0.11.0-pre.2", features = ["wgpu-msl"], optional = true }
@@ -147,6 +150,11 @@ swap_ab_gemm = ["cubecl_runtime"]
 # dllm forward leg chain: needs fastrand (the sampler RNG) + infer-core's
 # dllm-gated Config fields (AttentionMode/NoiseSchedule) directly.
 gemma2_d2f = ["cubecl_runtime", "dep:fastrand", "riir-infer-core/dllm"]
+# FA-constrained exact posterior decoding over the gemma2_d2f denoising
+# loop (issue 035 P1; POC). Implies the dllm forward leg transitively via
+# gemma2_d2f; the pure sampler (fa_posterior) is UNGATED in infer-core —
+# only the decode-loop wiring gates here.
+fa_constraint = ["gemma2_d2f", "dep:thiserror"]
 # Compile the blake3-keyed params-handle cache in (default-off
 # pass-through without it). Mirrors the engine gpu crate's feature.
 params_handle_cache = ["cubecl_runtime"]

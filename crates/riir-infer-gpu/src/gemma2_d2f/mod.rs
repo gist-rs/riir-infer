@@ -33,6 +33,17 @@ use crate::gemma2_d2f_sc::{
     D2fScConfig, D2fScState, init_w_sc_identity_padded, is_identity_padded, project_sc_into,
 };
 
+// FA-constrained exact posterior decoding (issue 035 P1) — the `propose_x0`
+// arm of the denoising loop behind the opt-in feature. The default decode
+// path below is untouched (the byte-identical feature-off law).
+#[cfg(feature = "fa_constraint")]
+pub mod fa_constraint;
+#[cfg(feature = "fa_constraint")]
+pub use fa_constraint::{
+    ConstrainedSampler, FaCommitBy, FaConstraintConfig, FaDecodeError, Gemma2D2fFaResult,
+    d2f_decode_gemma2_constrained,
+};
+
 // ── D2F Block State ────────────────────────────────────────────────
 
 /// Final state of a D2F decode block.
@@ -76,6 +87,13 @@ pub struct SamplerFeatures {
     pub step_norm: f32,
     /// Position within block normalized: pos / block_size.
     pub pos_norm: f32,
+    /// Constrained posterior marginal log-probability of the proposed token
+    /// (issue 035 P1). Populated only by the `fa_constraint` lane's
+    /// ConstrainedMarginal axis; `0.0` everywhere else. Excluded from
+    /// `to_array` — the trained 6-param `DiffusionSampler` surface is
+    /// unchanged; the constrained lane's `ConstrainedSampler` reads it as
+    /// the 7th input.
+    pub marginal_log: f32,
 }
 
 impl SamplerFeatures {
@@ -171,6 +189,7 @@ impl SamplerFeatures {
             } else {
                 0.0
             },
+            marginal_log: 0.0,
         }
     }
 

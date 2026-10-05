@@ -3580,6 +3580,7 @@ dependencies = [
  "rayon",
  "riir-infer-core",
  "serde_json",
+ "thiserror 2.0.20",
  "wgpu",
  "windows-sys 0.61.2",
 ]
