@@ -104,6 +104,7 @@ pub mod twt;
 /// state-path-then-tokens draws. Ungated pure math (the decode-loop
 /// wiring is the `fa_constraint` arm, P1); allocation-free hot path.
 pub mod fa_posterior;
+pub mod fa_schema;
 
 /// SentencePiece/BPE tokenizers for GGUF-embedded vocabularies (native-only;
 /// the sentencepiece-sys C++ backend cannot compile for wasm32).
