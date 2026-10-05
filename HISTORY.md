@@ -193,6 +193,38 @@ lever (Bench 895 Addenda I/II, +1.5–3.6% primitive-level) or block
 angle-addition lands in a consumer and re-measures ≤ 1.20 at the window edge
 — T4's kernel half is that lane.
 
+## 2026-10-05 — Issue 013 COMPLETE (T4 kernel half + the promotion EXECUTED): both levers landed as one read path, the window-edge bar met — `fitted_v_reconstruct` PROMOTED to katgpt-core default
+
+The re-fire lane above EXECUTED same-day (Bench 017,
+`.benchmarks/017_t4_deferred_lever.md`, cells `017a`/`017b`, run log
+`017_t4_deferred_run.log`):
+
+- **Both pre-registered levers landed as one read path** (`fe75497`, extended
+  by katgpt-rs `618d7ec71`'s `FittedTokenTable::row_index_of` +
+  `layer_rows_slab`): the fused deferred-restore attention kernel (pass 3
+  reconstructs v̂_t = G(−θt)·K̂_t from the hot K row; the table part regroups
+  into per-(head,row) weight sums applied once per distinct row;
+  λ=0/all-miss bitwise the eager path) + the bitwise per-position (sin,cos)
+  table (block angle-addition's no-re-anchor limit: same bits, zero
+  transcendental cost). Forward dispatch via `ValueStoreHook::fused_recon`
+  (default None → eager fallback; today's paths untouched).
+- **The curve:** 1.020×/1.053× @1025 and **1.050×/1.123× @4097** (λ0/λ*) —
+  both under the ≤ 1.20 window-edge bar (was 3.82×/3.96× naive); the eager
+  anchor reproduced Bench 016 in-session (1.760×/3.887×); prefill 2.3×
+  faster than eager; λ0/miss bitwise PASS + the regrouping bound 8.011e-5
+  on the real model, all three cells.
+- **The promotion EXECUTED** (katgpt-rs `34145bfd5`):
+  `fitted_v_reconstruct` → katgpt-core **default** per the pre-registered
+  window-edge rule; bench_895's superseded primitive-level ≤1.00× gate
+  flipped to RECORDED with provenance (it joined the default all-targets
+  surface and red-ed it). Default-on = compile availability — zero runtime
+  cost unless a consumer selects `VReadPath::Reconstruct`.
+- **Issue file removed** (noise-reduction) — this entry + the katgpt-rs
+  HISTORY § 883 amendment + the bench record carry the decision. Standing
+  caveat recorded in the bench: the instrument still writes raw V rows (a
+  production P3 KV cache that drops the V allocation is the natural
+  follow-on, not owed by this issue).
+
 ## 2026-09-27 — Issue 014 RESOLVED: activation-aware ternary scale fit — SPLIT BY LANE (born-ternary clean negative; dense-parent mechanism transfer)
 
 Filed 2026-09-25 from katgpt-rs Issue 886 (the per-family conditional
