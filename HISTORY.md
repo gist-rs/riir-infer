@@ -4,6 +4,41 @@ Durable records for resolved questions and closed lanes (the noise-reduction
 convention: the record lands here, hash-pinned; open work lives in `.issues/`
 and `.plans/`). Created 2026-09-23 at the first record.
 
+## 2026-10-06 — Issue 035 P2.5 LANDED: DFA minimization — the G2 ratio drops ~4.4× — this commit
+
+`src/fa_minimize.rs` (UNGATED core, 7 tests): trim (forward-reachable ∧
+co-reachable-to-accept) + partition refinement at BLOCK granularity with
+per-block edge re-merging, applied ALWAYS inside `fa_schema::compile`
+(language-preserving by construction — unlike the NFA-fragment sharing the P2
+soundness laws forbid, which changed the language). New block ids follow
+first-member order → deterministic + idempotent, both pinned. A schema accepting
+no instance now fails at COMPILE time (`InvalidSchema`), not at the first decode
+draw. `SchemaError::InvalidSchema` widened `&'static str` → `String` for the
+formatted refusal (in-repo wildcard matches unaffected).
+
+The exactness carry-over is an ARGUMENT with a measured pin: per-node out-edge
+token sets are disjoint (the builder's ≤1-edge-per-(node,token) law), so a
+token's flow is `e_v·β(dst(e))` raw and `e_v·β(block(dst(e)))` merged —
+identical; continuations land in equivalent states → the joint distribution
+over token sequences is preserved. Pinned distributionally (2×20k seeds, raw vs
+minimized per-sequence counts within 5σ of the binomial difference) and by
+exhaustive language enumeration (3-symbol alphabet, lengths ≤ 6, five shapes).
+
+The bench now prints raw vs minimized (`compile_stats`):
+
+| grammar | raw n/e | minimized n/e | ratio before | ratio now |
+|---|---|---|---|---|
+| toy-enum | 14/37 | 5/7 | 1.6-2.2× | **0.50-0.64×** (now FASTER than unconstrained) |
+| object-2p | 83/316 | 29/56 | ~22× | **~6.2-6.6×** |
+| fn-call-5p | 1473/5997 | 435/940 | ~440× | **~96-111×** |
+
+(same box posture as the P2 table: 24 logical CPUs, release, CPU best-of-5.) The
+subset construction's k!·2^k member orders collapse to the 2^k·k distinct
+futures. The residual ~100× on large grammars is the O(L·Σ|e|) emission fold
+(exp per position × edge-token occurrence) — the next CPU axis if the owner
+wants it before the GPU-side fold (P0.5's tree lane is the seam). **P3 stays
+owner-gated; the GOAT verdict now consumes the minimized table.**
+
 ## 2026-10-06 — Issue 035 P2 LANDED: the schema front end + the honest overhead table — `1254264`+`5b5c462`
 
 `src/fa_schema.rs` (UNGATED core, 12 tests): JSON-schema subset (six types ·
