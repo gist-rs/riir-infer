@@ -169,10 +169,13 @@ pub(crate) fn round_half_away(x: f32) -> f32 {
 )]
 #[cube(launch_unchecked)]
 pub(crate) fn dq_fq_a2(buf: &mut [f32], params: &[f32]) {
-    // params: [dim, blocks_per_row, rows]
+    // params: [dim, blocks_per_row, rows, elem_offset] — the offset (Issue
+    // 033 KV lane) shifts every access into a larger slab; the activation
+    // callers pass 0.
     let dim = params[0usize] as u32;
     let bpr = params[1usize] as u32;
     let rows = params[2usize] as u32;
+    let off = params[3usize] as u32;
     let wid = CUBE_POS_X;
     let tid = UNIT_POS;
     let row = wid / bpr;
@@ -193,7 +196,7 @@ pub(crate) fn dq_fq_a2(buf: &mut [f32], params: &[f32]) {
     // contribute m = 0 — a ragged tail's unwritten slot must never inject
     // garbage into the reduction; the G-i3 ragged fixture pins this).
     let orig = if live {
-        buf[(base + tid) as usize]
+        buf[(off + base + tid) as usize]
     } else {
         f32::new(0.0f32)
     };
@@ -231,24 +234,24 @@ pub(crate) fn dq_fq_a2(buf: &mut [f32], params: &[f32]) {
     if live {
         let amax = sm[0];
         if amax == f32::new(0.0f32) {
-            buf[(base + tid) as usize] = f32::new(0.0f32);
+            buf[(off + base + tid) as usize] = f32::new(0.0f32);
             terminate!();
         }
         // The winning index's SIGNED value supplies the sign (lowest index on
         // ties, by construction). buf[widx] is still original — no writes yet.
         let widx = si[0] as usize;
-        let sign_val = buf[(base + widx as u32) as usize];
+        let sign_val = buf[(off + base + widx as u32) as usize];
         let mut sgn = f32::new(1.0f32);
         if sign_val < f32::new(0.0f32) {
             sgn = f32::new(-1.0f32);
         }
         let d = f16_round_bits((sgn * amax / f32::new(2.0f32)).to_bits());
         if d == f32::new(0.0f32) {
-            buf[(base + tid) as usize] = f32::new(0.0f32);
+            buf[(off + base + tid) as usize] = f32::new(0.0f32);
             terminate!();
         }
         let q = round_half_away(orig / d).clamp(f32::new(-1.0f32), f32::new(2.0f32));
-        buf[(base + tid) as usize] = q * d;
+        buf[(off + base + tid) as usize] = q * d;
     }
 }
 
@@ -267,6 +270,7 @@ pub(crate) fn dq_fq_a4(buf: &mut [f32], params: &[f32]) {
     let dim = params[0usize] as u32;
     let bpr = params[1usize] as u32;
     let rows = params[2usize] as u32;
+    let off = params[3usize] as u32;
     let wid = CUBE_POS_X;
     let tid = UNIT_POS;
     let row = wid / bpr;
@@ -287,7 +291,7 @@ pub(crate) fn dq_fq_a4(buf: &mut [f32], params: &[f32]) {
     // live min/max — contributing neutrally: for min use +INF-analog, for max
     // -INF-analog, so they can never win; orig stays 0 for the pass-through).
     let orig = if live {
-        buf[(base + tid) as usize]
+        buf[(off + base + tid) as usize]
     } else {
         f32::new(0.0f32)
     };
@@ -325,16 +329,16 @@ pub(crate) fn dq_fq_a4(buf: &mut [f32], params: &[f32]) {
         let range = mx - mn;
         if !(range > f32::new(0.0f32)) {
             // Constant block: reproduces exactly.
-            buf[(base + tid) as usize] = mn;
+            buf[(off + base + tid) as usize] = mn;
             terminate!();
         }
         let s = f16_round_bits((range / f32::new(15.0f32)).to_bits());
         if s == f32::new(0.0f32) {
-            buf[(base + tid) as usize] = orig;
+            buf[(off + base + tid) as usize] = orig;
             terminate!();
         }
         let q = round_half_away((orig - mn) / s).clamp(f32::new(0.0f32), f32::new(15.0f32));
-        buf[(base + tid) as usize] = q * s + mn;
+        buf[(off + base + tid) as usize] = q * s + mn;
     }
 }
 
@@ -349,6 +353,7 @@ pub(crate) fn dq_fq_a8(buf: &mut [f32], params: &[f32]) {
     let dim = params[0usize] as u32;
     let bpr = params[1usize] as u32;
     let rows = params[2usize] as u32;
+    let off = params[3usize] as u32;
     let wid = CUBE_POS_X;
     let tid = UNIT_POS;
     let row = wid / bpr;
@@ -366,7 +371,7 @@ pub(crate) fn dq_fq_a8(buf: &mut [f32], params: &[f32]) {
     let live = in_grid && in_blk && tid < n_here;
 
     let orig = if live {
-        buf[(base + tid) as usize]
+        buf[(off + base + tid) as usize]
     } else {
         f32::new(0.0f32)
     };
@@ -391,16 +396,16 @@ pub(crate) fn dq_fq_a8(buf: &mut [f32], params: &[f32]) {
     if live {
         let amax = sm[0];
         if amax == f32::new(0.0f32) {
-            buf[(base + tid) as usize] = f32::new(0.0f32);
+            buf[(off + base + tid) as usize] = f32::new(0.0f32);
             terminate!();
         }
         let d = f16_round_bits((amax / f32::new(127.0f32)).to_bits());
         if d == f32::new(0.0f32) {
-            buf[(base + tid) as usize] = f32::new(0.0f32);
+            buf[(off + base + tid) as usize] = f32::new(0.0f32);
             terminate!();
         }
         let q = round_half_away(orig / d).clamp(f32::new(-127.0f32), f32::new(127.0f32));
-        buf[(base + tid) as usize] = q * d;
+        buf[(off + base + tid) as usize] = q * d;
     }
 }
 
@@ -431,7 +436,7 @@ pub(crate) fn launch_decode_pass<R: Runtime>(
     let block = grid.block();
     let blocks_per_row = dim.div_ceil(block);
     let total_blocks = (blocks_per_row * rows) as u32;
-    let params: [f32; 3] = [dim as f32, blocks_per_row as f32, rows as f32];
+    let params: [f32; 4] = [dim as f32, blocks_per_row as f32, rows as f32, 0.0f32];
     let params_handle = crate::params_cache::params_handle(client, f32::as_bytes(&params));
     let count = CubeCount::Static(total_blocks.max(1), 1, 1);
     let cube_dim = if block == 32 {
@@ -468,6 +473,77 @@ pub(crate) fn launch_decode_pass<R: Runtime>(
     note_decode_launch();
 }
 
+/// Issue 033 — the KV-STORE axis (CubeCL runtime): in-place fake-quant of
+/// the row region at element offset `off_elems` inside the cache slab
+/// (`buf` viewed as `[off_elems .. off_elems + rows*dim]`). Gated on the
+/// KV arm; bumps the KV launch counter. The kernels index through
+/// `params[3]`, so the SAME compiled kernels serve the activation lane
+/// (offset 0) and this one — no second kernel set.
+#[cfg(feature = "cubecl_runtime")]
+#[cfg_attr(
+    not(feature = "dq_phase_bench"),
+    allow(dead_code, reason = "the only callers are the dq_phase_bench-gated KV injection sites (Issue 033)")
+)]
+pub(crate) fn launch_kv_pass<R: Runtime>(
+    client: &ComputeClient<R>,
+    buf: Handle,
+    dim: usize,
+    rows: usize,
+    off_elems: usize,
+    grid: DqGrid,
+) {
+    use crate::dq_fakequant::{kv_armed, note_kv_launch};
+
+    if !kv_armed() {
+        return;
+    }
+    let block = grid.block();
+    let blocks_per_row = dim.div_ceil(block);
+    let total_blocks = (blocks_per_row * rows) as u32;
+    let params: [f32; 4] = [
+        dim as f32,
+        blocks_per_row as f32,
+        rows as f32,
+        off_elems as f32,
+    ];
+    let params_handle = crate::params_cache::params_handle(client, f32::as_bytes(&params));
+    let count = CubeCount::Static(total_blocks.max(1), 1, 1);
+    let cube_dim = if block == 32 {
+        CubeDim::new_1d(32)
+    } else {
+        CubeDim::new_1d(128)
+    };
+    // The arg spans the offset + the quantized region (the kernel indexes
+    // up to off + rows*dim - 1).
+    let n = off_elems + dim * rows;
+    unsafe {
+        match grid {
+            DqGrid::A2 => dq_fq_a2::launch_unchecked::<R>(
+                client,
+                count,
+                cube_dim,
+                BufferArg::from_raw_parts(buf.clone(), n),
+                BufferArg::from_raw_parts(params_handle, 4),
+            ),
+            DqGrid::A4 => dq_fq_a4::launch_unchecked::<R>(
+                client,
+                count,
+                cube_dim,
+                BufferArg::from_raw_parts(buf.clone(), n),
+                BufferArg::from_raw_parts(params_handle, 4),
+            ),
+            DqGrid::A8 => dq_fq_a8::launch_unchecked::<R>(
+                client,
+                count,
+                cube_dim,
+                BufferArg::from_raw_parts(buf.clone(), n),
+                BufferArg::from_raw_parts(params_handle, 4),
+            ),
+        }
+    }
+    note_kv_launch();
+}
+
 // ---------------------------------------------------------------------------
 // G-i3 test support (feature-gated with the module; used by
 // tests/dq_fakequant_gi3.rs — NOT part of the instrument's hot path)
@@ -487,7 +563,7 @@ pub fn test_support_launch<R: Runtime>(
     let block = grid.block();
     let blocks_per_row = dim.div_ceil(block);
     let total_blocks = (blocks_per_row * rows) as u32;
-    let params: [f32; 3] = [dim as f32, blocks_per_row as f32, rows as f32];
+    let params: [f32; 4] = [dim as f32, blocks_per_row as f32, rows as f32, 0.0f32];
     let params_handle = crate::params_cache::params_handle(client, f32::as_bytes(&params));
     let count = CubeCount::Static(total_blocks.max(1), 1, 1);
     let cube_dim = if block == 32 {
@@ -503,21 +579,21 @@ pub fn test_support_launch<R: Runtime>(
                 count,
                 cube_dim,
                 BufferArg::from_raw_parts(buf.clone(), n),
-                BufferArg::from_raw_parts(params_handle, 3),
+                BufferArg::from_raw_parts(params_handle, 4),
             ),
             DqGrid::A4 => dq_fq_a4::launch_unchecked::<R>(
                 client,
                 count,
                 cube_dim,
                 BufferArg::from_raw_parts(buf.clone(), n),
-                BufferArg::from_raw_parts(params_handle, 3),
+                BufferArg::from_raw_parts(params_handle, 4),
             ),
             DqGrid::A8 => dq_fq_a8::launch_unchecked::<R>(
                 client,
                 count,
                 cube_dim,
                 BufferArg::from_raw_parts(buf.clone(), n),
-                BufferArg::from_raw_parts(params_handle, 3),
+                BufferArg::from_raw_parts(params_handle, 4),
             ),
         }
     }

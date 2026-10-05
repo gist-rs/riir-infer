@@ -5148,6 +5148,31 @@ impl TernaryDeltanetGpuForward {
             }
         } // sub-stage 2: kv_append
 
+        // Plan 614 / Issue 033 — KV-STORE axis (decode half, CubeCL
+        // runtime): round this position's just-appended cache rows in place
+        // to the KV grid (the q8kv store spelling) BEFORE the attention
+        // kernel reads them. Independent of attn_sub_on (the tap gate —
+        // the instrument must not inherit a probe's posture).
+        #[cfg(feature = "dq_phase_bench")]
+        if let Some(kv_grid) = crate::dq_fakequant::current_kv_grid() {
+            crate::dq_fakequant_cubecl::launch_kv_pass::<ActiveRuntime>(
+                &self.client,
+                key_cache.clone(),
+                kvd,
+                1,
+                pos * kvd,
+                kv_grid,
+            );
+            crate::dq_fakequant_cubecl::launch_kv_pass::<ActiveRuntime>(
+                &self.client,
+                value_cache.clone(),
+                kvd,
+                1,
+                pos * kvd,
+                kv_grid,
+            );
+        }
+
         // 6+7. Issue 648 F10: fused flash attention decode + output gate.
         //      Replaces separate QwenAttentionDecodeCubeCL + QwenOutputGateCubeCL
         //      with a single QwenAttentionDecodeGatedCubeCL dispatch. The sigmoid
