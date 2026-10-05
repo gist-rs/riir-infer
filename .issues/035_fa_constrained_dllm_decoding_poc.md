@@ -1,6 +1,6 @@
 # Issue 035 — FA-constrained exact posterior sampling for the dLLM decode lane (POC)
 
-**Status:** OPEN — POC filed from Research 008 (arXiv:2607.07026 / `MhDang/mosaic` distill); GOAT-tier, consumer = the `gemma2_d2f` denoising decode loop; owner-gated promote/demote at P3.
+**Status:** OPEN — **P0 COMPLETE 2026-10-05 (riir-infer `8223d27`): the pure joint sampler ships exact (9/9 incl. brute-force TV + forced-conditioned + seeded-random automata) and allocation-free (G4 gate)**; P0.5 (parallel segment-tree + fp64 hatch) next, then P1 wires `fa_constraint` into the `gemma2_d2f` decode loop. POC filed from Research 008 (arXiv:2607.07026 / `MhDang/mosaic` distill); GOAT-tier, consumer = the `gemma2_d2f` denoising decode loop; owner-gated promote/demote at P3.
 
 ## Why
 
@@ -15,12 +15,13 @@ The `dllm` decode path (`riir-infer/src/transformer/dllm.rs` D2F forwards + `rii
 
 ## Tasks
 
-### P0 — pure sampler module (no model)
-- [ ] `fa_posterior` module in `riir-infer-core`: automaton tensors (CSR `transition`/`emission`, `edge_index`, `accept`, derived `edge_lookup`), determinism invariants asserted (≤1 edge per (node, token) and per (i,j) pair)
-- [ ] emission fold: `e_logits[t,e] = log Σᵥ emission[e,v]·exp(logits[t,v])`, max-shift stabilized; committed positions as 0/1 indicators (branchless)
-- [ ] sequential sampler: edge-space backward pass + forward ancestral draw; exact **joint** state-path-then-tokens sampling (never per-position marginals)
-- [ ] exactness tests vs brute-force enumeration on toy automata (TV distance bar; forced tokens; length budget via reverse-BFS `steps_to_accept` / `finish_within`)
-- [ ] zero-alloc steady state audit (bounded scratch per workspace rules)
+### P0 — pure sampler module (no model) — **COMPLETE 2026-10-05 (riir-infer `8223d27`, the 4090 box)**
+- [x] `fa_posterior` module in `riir-infer-core` (`src/fa_posterior.rs`, UNGATED — the pure-math precedent; the decode-loop wiring is the `fa_constraint` arm at P1): CSR automaton tensors (edges grouped by source + per-edge sorted token-set CSR lists + `accept` mask; `edge_for_token`/`walk` as the derived lookup surface; `edge_lookup (N,N)` matrix deliberately NOT materialized — P0.5's gather path derives it on demand if it needs it), determinism invariants enforced at `AutomatonBuilder::build` with named errors (≤1 edge per (node, token), ≤1 edge per (i,j) pair, no empty/out-of-range edges, bad start)
+- [x] emission fold: `e_log[t,e] = log Σ_{v∈e} exp(logits[t,v]/T)`, per-edge max-shift stabilized; committed positions as 0/1 indicators (binary-search membership on the sorted token set — branchless at the fold level: the only visible effect is which edges carry finite flow); temperature with a documented 1.0 fallback for non-finite/non-positive
+- [x] sequential sampler: node-level backward table `(len+1)×N` + forward ancestral draw over edge flow weights `e_log + back[dst]`; exact **joint** state-path-then-tokens sampling (tokens given the sampled edge: pinned take the pin, greedy = raw-logit argmax over the edge's tokens, else temperature multinomial) — `SplitMix64` internal RNG (seeded ⇒ reproducible, zero deps); `same_seed_same_logits_same_draw` pins it
+- [x] exactness tests vs brute-force enumeration on toy automata — **9/9 green**: chain (constraint never binds ⇒ product of marginals), parity (positions coupled), forced-conditioned posterior, 4 seeded random automata (spine-guaranteed satisfiable — the vacuous-pass guard asserts the posterior has mass), TV < 0.03 at N=200k over f64 brute force; every-draw-accepted-by-construction asserted inside the TV test; `steps_to_accept` reverse-BFS with known answers incl. an unreachable dead branch; `finish_within` conditioning rides P1's matcher (the fixed-L backward table already enforces exact-length completability — `Unsatisfiable` error arms pin it)
+- [x] zero-alloc steady state audit — `tests/fa_g4_alloc.rs` (its own test target, the twt G4 precedent): scratch warmed across 8 draws of the largest shape, then 64 measured draws → **0 allocations**; `FaScratch` bounds cover max(node fanout, edge token count) — the token draw reuses the weights buffer and an edge may allow more tokens than any node's fanout
+- Clippy `-D warnings` clean at lib/all-targets/`--no-default-features`; full default lib suite 219 passed (210 pre-existing + 9 new)
 
 ### P0.5 — parallel sampler (the paper's headline)
 - [ ] segment-tree build: identity-leaf power-of-two padding, end-weights folded on the last leaf, pairwise log-space matrix products, per-level max-shift
