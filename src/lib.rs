@@ -92,6 +92,13 @@ pub mod corpus_text;
 #[cfg(feature = "twt_profile")]
 pub mod twt;
 
+/// FA-constrained exact posterior sampling for the dLLM decode lane
+/// (Issue 035 P0): the pure joint sampler over automaton-constrained
+/// blocks — CSR automaton tensors, edge-space forward–backward, exact
+/// state-path-then-tokens draws. Ungated pure math (the decode-loop
+/// wiring is the `fa_constraint` arm, P1); allocation-free hot path.
+pub mod fa_posterior;
+
 /// SentencePiece/BPE tokenizers for GGUF-embedded vocabularies (native-only;
 /// the sentencepiece-sys C++ backend cannot compile for wasm32).
 #[cfg(not(target_arch = "wasm32"))]
