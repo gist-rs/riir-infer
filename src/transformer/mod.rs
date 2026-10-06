@@ -51,6 +51,13 @@ pub mod gemma2_quantized;
 // PTQ arms score. Opt-in (`act_scale_refit`).
 #[cfg(feature = "act_scale_refit")]
 pub mod gemma2_act_tap;
+
+// katgpt-rs Issue 920 T1 — the HyperThink modelless delta-overlay lane's
+// capture/apply seam: the gemma-2 f16 forward re-forked at the six
+// projection-OUTPUT hook points (q/v/o/gate/up/down; K excluded by
+// construction — softmax shift-invariance). Opt-in (`hyperthink_t1`).
+#[cfg(feature = "hyperthink_t1")]
+pub mod gemma2_bias_delta;
 // Plan 320 Phase C1: Gemma 4 LoRA forward wiring (weight-delta application
 // at the 7 matmul insertion points). Feature-gated — opt-in.
 #[cfg(feature = "gemma4_lora")]

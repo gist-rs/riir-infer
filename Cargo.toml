@@ -41,6 +41,12 @@ katgpt-attn = { path = "../katgpt-rs/crates/katgpt-attn", optional = true }
 # (both Issue-013 consumers — fitted_v_tables + gemma2_qkv — pull kvarn by
 # name), so the namespace crate's defaults stay out of every other posture.
 katgpt-kv = { path = "../katgpt-rs/crates/katgpt-kv", optional = true, default-features = false }
+# katgpt-pruners: the bias-delta vocabulary (BiasDeltaBuilder/BiasDeltaTable,
+# katgpt-rs Issue 920 T1) — the capture bin accumulates through the shipped
+# substrate, never a hand-rolled duplicate. default-features = false,
+# optional: measurement-lane capability (`hyperthink_t1` only), never a
+# default-feature dep (the katgpt-kv precedent).
+katgpt-pruners = { path = "../katgpt-rs/crates/katgpt-pruners", optional = true, default-features = false }
 
 half = "2"
 rayon = "1.10"
@@ -121,6 +127,16 @@ spike_census_t3_ternary = ["deltanet_ternary_inference", "bonsai2_hadamard"]
 # cosine + collapse stats vs the pre-registered 0.99 bar. Needs only the
 # gemma-2 f16 loader (vk_calibration); no quant backends.
 spike_census_t4 = ["vk_calibration"]
+# katgpt-rs Issue 920 T1 (2026-10-07): the HyperThink modelless delta-overlay
+# lane — the gemma-2 f16 forward re-forked at the six projection-OUTPUT hook
+# points (`transformer::gemma2_bias_delta`, K excluded by construction) + the
+# T1 capture bin (paired with_c/plain sweeps over seed-pinned GSM8K probes →
+# per-probe Δ dump + global Δb table + the pre-registered ρ capture-ratio
+# premise check). Needs the f16 loader (vk_calibration) + the bias-delta
+# vocabulary (katgpt-pruners, the builder the bin accumulates through).
+# OPT-IN, measurement-only: no serving claim; the issue's pre-registered
+# gates decide.
+hyperthink_t1 = ["vk_calibration", "dep:katgpt-pruners", "katgpt-pruners/bias_delta"]
 # row_logit_floor (riir-infer Issue 011 T1, 2026-09-25): the opt-in consumer
 # of katgpt-core's sink-exempt row-logit floor + b-bit logit code +
 # exp-table softmax (katgpt-rs Issue 882 P2, Bench 888) —
@@ -360,6 +376,11 @@ required-features = ["spike_census_t3_ternary"]
 name = "spike_census_t4_sink_constancy"
 path = "src/bin/spike_census_t4_sink_constancy.rs"
 required-features = ["spike_census_t4"]
+
+[[bin]]
+name = "hyperthink_t1_delta_census"
+path = "src/bin/hyperthink_t1_delta_census.rs"
+required-features = ["hyperthink_t1"]
 
 [[bin]]
 name = "row_logit_floor_ppl"
