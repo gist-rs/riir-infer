@@ -109,6 +109,12 @@ windows-sys = { version = "0.61", features = ["Win32_System_Threading", "Win32_F
 # three. cuda_graphs_forward stays out — the bench pins
 # RIIR_PREFILL_CUDA_GRAPHS=0 by its own check.
 dq_phase_bench = ["cubecl_runtime", "ternary_gemv", "ternary_gemm_batched", "ternary_gemm_simdgroup", "ternary_deltanet_chunked_prefill", "ternary_attention_batched_prefill", "deltanet_recurrence_parallel", "deltanet_recurrence_rowpar", "riir-infer-core/bonsai2_hadamard"]
+# Plan 618 S3 — the dual-PTQ disaggregated measurement (issue 028 T4): the
+# cudarc GEMV lane for ALL arms (kernel policy held constant) + the real
+# packs' prism.hadamard rotation. Deliberately NOT dq_phase_bench — the
+# fake-quant machinery is out of scope here; this is the WEIGHT-format
+# matrix.
+dq_s3_bench = ["ternary_gemv_cuda_raw", "riir-infer-core/bonsai2_hadamard", "dep:blake3"]
 cubecl_runtime = ["dep:cubecl", "dep:half", "dep:papaya", "dep:blake3"]
 cuda_backend = ["cubecl_runtime", "cubecl/cuda"]
 # Ternary bit-plane (Q2_0_g128) GEMV family around the gemv_ternary_cubecl
@@ -286,6 +292,10 @@ required-features = ["cubecl_runtime", "ternary_gemm_batched", "ternary_deltanet
 [[bin]]
 name = "dq_phase_matrix"
 required-features = ["dq_phase_bench", "ternary_gemv_cuda_raw", "ternary_gemm_batched"]
+
+[[bin]]
+name = "dq_s3_matrix"
+required-features = ["dq_s3_bench"]
 
 # Issue 031 T-root-cause — the Windows CUDA teardown-hang repro harness
 # (the whole-file #![cfg] keeps non-CUDA hosts an empty target; this row is

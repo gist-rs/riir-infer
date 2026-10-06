@@ -303,14 +303,28 @@ Landed (`feat: 028 T4 S3 substrate`):
   `ProjWeights` (hook refuses quant arms loud) + the fused-hook/ffn-hook
   lanes `as_ternary`-expect. 0 now.
 
-### S3.2 — the matched-single pack — the run design
+### S3.2 — the matched-single pack — **COMPLETE 2026-10-06**
 
-`Ternary-Bonsai-2-27B-Q6_K.sg.gguf` (the `.sg` = single q6; NOT `.pf` —
-it is a standalone single-checkpoint control, never a prefill copy): the
-S1 policy at the q6 target — identity block table, 400 projections → Q6_K,
-everything else byte-copied (globals ternary + the whole escape set, so the
-storage comparison isolates the projection planes), blake3 sidecar,
-`--verify-only` re-runnable.
+`Ternary-Bonsai-2-27B-Q6_K.sg.gguf` — **20,700,032,160 bytes (20.70 GB)**,
+blake3 `d5647d4b2fae320487ef55fe8c88fc2bf3324a8f9067daa0cd1ff2426cc0bf68`
+(sidecar beside the file). The S1 policy at the q6 target — identity block
+table, 400 projections → Q6_K (19.96 GB requant payload), 451 copy-class
+tensors byte-identical (globals + the whole escape set), metadata mirrored
+in file order incl. `prism.hadamard.*` untouched.
+
+- Run: `cargo run --release --features twt_collapse --example requant_q4_prefill --
+  --target q6k` (staging 1654 s + emit + verify; two runs raced the output
+  path — the deterministic requantizer makes them byte-identical, the
+  surviving run's verify is the landed one; disclosed as the concurrent-
+  process hazard it was).
+- Verify (exit 0, `--verify-only --target q6k` re-runnable): geometry plane
+  equal, copy-class byte-identity PASS, all 400 requant tensors structurally
+  Q6_K at the parent's shapes, sampled read-back max err ≈ 2.2–2.6e-4 within
+  the 10%-amax bound.
+- **The matched-storage delta lands at ~2%**: dual 21.13 GB (6.70 + 14.43)
+  vs the q6k single 20.70 GB — the control is CHEAPER, the conservative
+  direction for the container's verdict (a win under a cheaper control is a
+  stronger win; a loss is not excused by it).
 
 ### S3.3 — the arms (fixed at run design time, pre-registered)
 
