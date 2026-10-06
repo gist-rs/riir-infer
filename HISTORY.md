@@ -51,7 +51,7 @@ Plan 614's instrument (`dq_fakequant` + the `dq_phase_matrix` runner; record `.b
 
 Batched twins of all 8 decode rotation sites in the CubeCL prefill body + `GemvBatchedCubeCL::launch_token_grid`; G1 vs folded decode-eager top-1 equal, worst rel err ≤ 1.5e-5; pre-rotation Q2_0 pin `99a0733c45a0e663` @2048 exact; first Bonsai-2 M3 prefill 6.44× TTFT (100.9 tok/s @2048); test `crates/riir-infer-gpu/tests/g1_032_folded_prefill_metal.rs`. ⛔ Correction: production 4096 chunks CRASHED (>65535 workgroups on Metal's x-axis cap) — fixed `5f075ff` + `7e99f34`, G1 re-run green at P=4096 (`I032_P=4096`): a G1 that stops below the production chunk size certifies a size nobody ships.
 
-## 2026-09-30 — Issue 054 Part 2 (reflex) REFUTED for this lane: the prefix-state handoff lead — laya is ModernBERT (bidirectional), not GDN; the coupling gate landed
+## 2026-09-30 — reflex Issue 054 Part 2 REFUTED for this lane: the prefix-state handoff lead — laya is ModernBERT (bidirectional), not GDN; the coupling gate landed
 
 The premise named the wrong architecture: laya checkpoints are ModernBERT-large / mmBERT-base (no causal mask; the state also sits after the per-question head span — different RoPE offset per question). Gate `crates/riir-infer-laya/tests/prefix_state_coupling.rs` (`[[test]]` row, feature `laya-riir`) is TWO-SIDED at 1e-4 — the shared span measured 5.1e2 (synthetic arm 2.7e0, determinism control bit-identical). The packed per-question pass (reflex issue 020 T5) stays the exact floor; the lead's shape stays valid only for causal serving models. Full verdict: reflex `.issues/054_openjev_lane_and_prefix_state_handoff.md` Part 2.
 
@@ -119,15 +119,15 @@ The premise was false: upstream `Gemma2Attention` defines no `q_norm`/`k_norm` �
 
 `sgemm_narrow_pipe` built, measured, reverted: gate NO-GO (probe −1.5%; forward-level paired env-flip −0.8..−1.6%, reproducible 3/3, under the ≥3% bar; nvcc SINKS register loads — the `asm volatile("" ::: "memory")` fence is load-bearing). The real yield: `sgemm_shape_timing` tiny-op rows are ~90% launch/WDDM floor (FLOPs vary 400×, time 1.06×) — narrow-zone rungs must gate at FORWARD level or add a floor-subtraction arm; `.issues/006`'s head-tail rows were the same floor class. cp.async remains the recorded next lever (priced ≤ ~4%).
 
-## 2026-09-25 — Issue 008 CLOSED: the narrow reg4 rung — NEGATIVE, the narrow zone is TLP-bound, not bandwidth-bound
+## 2026-09-25 — riir-infer Issue 008 CLOSED: the narrow reg4 rung — NEGATIVE, the narrow zone is TLP-bound, not bandwidth-bound
 
 `sgemm_narrow_reg4` (4×4 fragments, 32×16 warp tile → 128 threads): every true narrow-served row regressed +41..+177% (`sgemm_shape_timing`, the `LAYA_CUDA_REG4` axis; the wide/xwide rows re-measured the 007 rung at −2.6..−20% both runs — the consistency check). Mechanism: the narrow zone's grids are ≤128 blocks by construction — 1 block/SM, staging latency exposed; the measured ceiling was never the 20% roofline (~5% of fp32 peak at m=106). Reverted byte-identical (the BK48 precedent). Follow-up on record: double-buffered staging / `cp.async` — the right repair for a LATENCY-bound zone.
 
-## 2026-09-25 — Issue 007 CLOSED: the register-blocking sgemm rung — 4×4 fragments, −9..−21 % kernel on every wide/xwide shape
+## 2026-09-25 — riir-infer Issue 007 CLOSED: the register-blocking sgemm rung — 4×4 fragments, −9..−21 % kernel on every wide/xwide shape
 
 `sgemm_wide_reg4` + `sgemm_xwide_reg4` (16 accumulators, 2 B smem/FMA vs 3, ceiling 50%; same grids so block-fit cliffs carry over; k-ascending per-output accumulation). Measured: banking77 zone −9.4..−16.1%, packed multi-wave −9.4..−21.4%, m=106/45 n≥2560 −10..−22%; forward english −5.3% / typed −3.9%; the reflex `.benchmarks/031` refresh (15 suites, host 4090-windows) median −6.2% (14/17 rows BIT-IDENTICAL; the typed_decisions wobble is that lane's pre-existing `determinism_ok: false`). Kill-switch `LAYA_CUDA_REG4=0`; gates `cuda_ops_smoke` 4/4, `packed_forward_equiv` 4/4, lib 41/41, G5 cuda 2/2, `laya_batch_parity` 1/1.
 
-## 2026-09-25 — Issue 006 CLOSED: the float4 sgemm rung — every instance's B loads collapsed, −7..−17 % on every suite
+## 2026-09-25 — riir-infer Issue 006 CLOSED: the float4 sgemm rung — every instance's B loads collapsed, −7..−17 % on every suite
 
 The packed zone's problem was LOAD-ISSUE THROUGHPUT (12-16.5 TF/s = 15-20% of peak; 6 smem loads per 8 FMAs with the four B loads contiguous). B staging rows pad to a 16 B multiple (65→68, 129→132) and the four B loads → one `reinterpret_cast<float4>` (result-identical by construction, bit-verified). −10.3..−25.2% multi-wave, forward −12.5..−15.2%; the reflex `.benchmarks/030` refresh −6.8..−16.7% p50 incl. the packed suites, 13/16 rows bit-identical. No kill-switch — the float4 form IS the kernels now; `LAYA_CUDA_LADDER=0` still holds the A/B posture.
 
