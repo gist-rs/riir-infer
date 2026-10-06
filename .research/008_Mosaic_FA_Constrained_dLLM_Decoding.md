@@ -1,6 +1,6 @@
 # 008 — Mosaic: FA-Constrained Exact Posterior Sampling for the dLLM Decode Lane (paper distill + the serving piece the D2F loop is missing)
 
-**Status:** DISTILLED — pending owner decision (GOAT-tier distillation; consumer exists in-tree — the `gemma2_d2f` denoising decode loop — arming is a feature-gated POC filed as local Issue 035).
+**Status:** DISTILLED — POC executed; Issue 035 CLOSED NOT PROMOTED 2026-10-07 (G2 FAIL, sequential lane) — record in `../HISTORY.md` (`7d90dfd`, `caed1ea`); parked behind the §Tier re-grade trigger (a product structured-output surface for the D2F lane).
 
 Date: 2026-10-05 · filed from the M3, user-directed `@research` session (arXiv:2607.07026 + MhDang/mosaic).
 
@@ -77,4 +77,4 @@ What the paper adds to that loop:
 
 ## P0–P3 priority
 
-P0 pure sampler + exactness tests (no model) → P0.5 parallel tree + fp64 hatch → P1 decode-integration arm (opt-in feature, byte-identical off) + constrained-confidence feature for the sampler → P2 schema compiler + bench → P3 GOAT verdict + promote/demote (owner-gated). Filed as `../.issues/035_fa_constrained_dllm_decoding_poc.md`.
+P0 pure sampler + exactness tests (no model) → P0.5 parallel tree + fp64 hatch → P1 decode-integration arm (opt-in feature, byte-identical off) + constrained-confidence feature for the sampler → P2 schema compiler + bench → P3 GOAT verdict + promote/demote (owner-gated). Filed as `../.issues/035_fa_constrained_dllm_decoding_poc.md` — **executed P0–P3 and CLOSED 2026-10-07 NOT PROMOTED (G2 FAIL on the sequential lane; the file was removed under the noise-reduction convention; the closure record — gates, the UNMEASURED tree-lane note, the bench-baseline precondition, and the three-step unblock order — lives in `../HISTORY.md`, commits `7d90dfd` + `caed1ea`)**.
