@@ -363,6 +363,13 @@ pub struct ForwardInfraCudarc {
     pub config: Config,
     pub layer_types: Vec<DeltaNetLayerType>,
     pub layers: Vec<GpuLayerWeightsCudarc>,
+    /// Plan 618 S3 — the disaggregated container's PREFILL copy, per layer.
+    /// EMPTY on every single-copy forward (never consulted — the layer loop
+    /// falls through to `layers`); populated only by
+    /// [`TernaryDeltanetGpuForwardCudarc::attach_prefill_copy`], which also
+    /// validates the layer_types pairing. Globals (wte/lm_head/final_norm)
+    /// are byte-shared by the pack law — ONE upload serves both phases.
+    pub layers_prefill: Vec<GpuLayerWeightsCudarc>,
     final_norm: CudaSlice<f32>,
     lm_head: WeightBuffersCudarc,
     wte_pos_bits: CudaSlice<u32>,
@@ -462,6 +469,11 @@ struct ActivationsCudarc {
     /// Issue 984 T2(a) — the argmax dtoh landing half of the pinned pair.
     #[cfg_attr(not(feature = "cuda_graphs_forward"), allow(dead_code))]
     argmax_pinned: PinnedHostSlice<u64>,
+    /// Plan 618 S3 — the disaggregated container's phase switch: TRUE while
+    /// the forward consumes the prefill copy's per-layer weights. Never
+    /// consulted when `infra.layers_prefill` is empty (the single-copy
+    /// forward's phase field stays FALSE forever — set_phase refuses there).
+    prefill_phase: bool,
 }
 
 /// Plan 603 R2 — the persistent recurrent state's RESIDENT dtype. F32 is
@@ -1286,6 +1298,10 @@ impl TernaryDeltanetGpuForwardCudarc {
             config: config.clone(),
             layer_types,
             layers,
+            // Plan 618 S3 — single-copy posture: the prefill set stays empty
+            // until `attach_prefill_copy` populates it (the disaggregated
+            // container's GPU serving shape).
+            layers_prefill: Vec::new(),
             final_norm,
             lm_head,
             wte_pos_bits,
@@ -1332,6 +1348,7 @@ impl TernaryDeltanetGpuForwardCudarc {
             argmax_buf,
             feed_pinned,
             argmax_pinned,
+            prefill_phase: false,
         };
         // Issue 666 — LoRA decode kernel infrastructure. Compiled once at
         // construction (~1ms nvrtc); slots start empty and are populated via
@@ -2784,6 +2801,58 @@ impl TernaryDeltanetGpuForwardCudarc {
         reset_state(infra, acts)
     }
 
+    /// Plan 618 S3 — upload the disaggregated container's PREFILL copy as
+    /// the second per-layer weight set (the phase-switch source). The decode
+    /// copy stays exactly as constructed; globals are NOT re-uploaded (the
+    /// pack law byte-shares them, so one upload serves both phases).
+    ///
+    /// Refuses (loud, before any upload) unless the pairing is lawful: same
+    /// layer count + identical `layer_types` (the T4 container's own
+    /// load-time refusal, mirrored here — a mismatched pairing would route
+    /// layers through the wrong forward shapes).
+    pub fn attach_prefill_copy(
+        &mut self,
+        prefill: &riir_infer_core::deltanet::ternary_weights::QwenDeltaNetTernaryWeights,
+    ) -> Result<(), CudarcKernelError> {
+        if self.infra.layers.len() != prefill.layers.len() {
+            return Err(CudarcKernelError::Launch(format!(
+                "attach_prefill_copy: layer count mismatch (decode {} vs prefill {})",
+                self.infra.layers.len(),
+                prefill.layers.len()
+            )));
+        }
+        if self.infra.layer_types != prefill.layer_types {
+            return Err(CudarcKernelError::Launch(
+                "attach_prefill_copy: decode/prefill layer_types differ — the phase split \
+                 would route layers through the wrong forward"
+                    .to_owned(),
+            ));
+        }
+        let layers = prefill
+            .layers
+            .iter()
+            .map(|l| upload_layer_weights_cudarc(&self.infra.stream, l))
+            .collect();
+        self.infra.layers_prefill = layers;
+        Ok(())
+    }
+
+    /// Plan 618 S3 — arm/disarm the prefill phase (which per-layer weight
+    /// set the eager forward consumes). Single-copy forwards (no prefill set
+    /// attached) refuse arm — a silently-ignored phase would serve the wrong
+    /// copy. Disarm is always legal.
+    pub fn set_phase_prefill(&mut self, prefill: bool) -> Result<(), CudarcKernelError> {
+        if prefill && self.infra.layers_prefill.is_empty() {
+            return Err(CudarcKernelError::Launch(
+                "set_phase_prefill(true) with no prefill copy attached — the single-copy \
+                 forward would silently ignore the phase"
+                    .to_owned(),
+            ));
+        }
+        self.acts.prefill_phase = prefill;
+        Ok(())
+    }
+
     /// Current decode position (number of tokens processed).
     /// Needed by the speculative seam: [`checkpoint_speculative_gpu`] does not
     /// carry `pos` (it is host-side bookkeeping) — the caller snapshots it
@@ -3742,7 +3811,17 @@ fn forward_layers_with_lora(
     );
 
     for layer_idx in 0..infra.config.n_layer {
-        let layer_w = &infra.layers[layer_idx];
+        // Plan 618 S3 — the disaggregated phase switch: the prefill copy's
+        // per-layer weights serve while `prefill_phase` is armed (the S3
+        // bench / the GPU serving path flips it between the prompt and the
+        // generation). EMPTY prefill set = every single-copy forward — the
+        // decode layers, exactly as before this field existed.
+        let decoding_weights = infra.layers_prefill.is_empty() || !acts.prefill_phase;
+        let layer_w = if decoding_weights {
+            &infra.layers[layer_idx]
+        } else {
+            &infra.layers_prefill[layer_idx]
+        };
         let is_deltanet = infra.layer_types[layer_idx] == DeltaNetLayerType::DeltaNet;
 
         // ── Pre-attention RMSNorm is fused into the layer functions' input
@@ -5504,6 +5583,17 @@ fn forward_from_x_devpos(
     }
 
     for layer_idx in 0..infra.config.n_layer {
+        // Plan 618 S3 — the CUDA-graph lane NEVER phase-switches: a captured
+        // graph froze the weight pointers at capture (whichever set was
+        // resident), so a prefill_phase arm here would silently serve ONE
+        // copy in both phases — the exact mis-load the container's escape
+        // law exists to prevent. The disaggregated container rides the eager
+        // lane (forward_from_x / forward_token).
+        assert!(
+            !acts.prefill_phase,
+            "devpos/graph lane cannot serve the disaggregated prefill phase — \
+             use the eager forward (Issue 618 graphs are single-copy by capture law)"
+        );
         let layer_w = &infra.layers[layer_idx];
         let is_deltanet = infra.layer_types[layer_idx] == DeltaNetLayerType::DeltaNet;
 
@@ -7491,6 +7581,152 @@ mod tests {
             "q6 GPU logits diverged from CPU: max|Δ| {max_abs:.3e}"
         );
         assert!(gpu_logits.iter().all(|l| l.is_finite()), "NaN/Inf in q6 GPU logits");
+    }
+
+    /// Plan 618 S3 — the disaggregated DUAL forward: the prefill copy's
+    /// arms serve the prompt, the phase switch hands the KV + GDN state to
+    /// the decode copy, and the greedy sequence must match the CPU
+    /// container's `generate_greedy_disaggregated` over the SAME two copies.
+    /// The divergences are the q4-prefill activation class (GPU dp4a int8 vs
+    /// CPU f32 matvec — the q4 e2e's bound) + f32 association noise; the
+    /// gate is token-sequence agreement + per-logit bound at the boundary.
+    #[test]
+    fn dual_phase_switch_forward_matches_cpu_container() {
+        let Some(_) = cuda_or_skip() else {
+            eprintln!("[skip] no CUDA device");
+            return;
+        };
+        use riir_infer_core::disaggregated::{DisaggregatedTernaryWeights, PhaseHandoff};
+        use riir_infer_core::quant::q4k::{QK_K, quantize_row_q4_k};
+        use bytemuck::Zeroable as _;
+
+        let config = small_test_config();
+        let mut decode = QwenDeltaNetTernaryWeights::zeros(&config);
+        seed_live_backbone(&mut decode);
+
+        // The prefill copy: the SAME backbone with every per-layer projection
+        // requantized to Q4K (the S1 copy policy at toy dims; globals + a/b
+        // byte-shared by construction here — a clone keeps them identical).
+        let mut prefill = decode.clone();
+        for layer in &mut prefill.layers {
+            let projections = [
+                &mut layer.attn_wq,
+                &mut layer.attn_wk,
+                &mut layer.attn_wv,
+                &mut layer.attn_wo,
+                &mut layer.in_proj_qkv,
+                &mut layer.in_proj_z,
+                &mut layer.out_proj,
+                &mut layer.gate_proj,
+                &mut layer.up_proj,
+                &mut layer.down_proj,
+            ];
+            for p in projections {
+                let dense = p.dequant_to_dense();
+                let (rows, cols) = (p.rows(), p.cols());
+                if rows == 0 || cols == 0 {
+                    continue;
+                }
+                assert!(cols.is_multiple_of(QK_K));
+                let nb = cols / QK_K;
+                let mut blocks = Vec::with_capacity(rows * nb);
+                let mut row_blocks = vec![riir_infer_core::quant::q4k::BlockQ4K::zeroed(); nb];
+                for r in 0..rows {
+                    quantize_row_q4_k(&dense[r * cols..(r + 1) * cols], &mut row_blocks);
+                    blocks.extend_from_slice(&row_blocks);
+                }
+                *p = ProjWeights::Q4K(blocks, rows, cols);
+            }
+        }
+
+        // ── CPU container reference ──
+        let container = DisaggregatedTernaryWeights::from_parts(
+            decode.clone(),
+            prefill.clone(),
+        );
+        let layer_types = if decode.layer_types.is_empty() {
+            vec![DeltaNetLayerType::Attention; config.n_layer]
+        } else {
+            decode.layer_types.clone()
+        };
+        let prompt: Vec<usize> = (3..12).collect();
+        let mut handoff = PhaseHandoff::begin(&config, &layer_types);
+        let last = handoff.prefill(&prefill, &config, &prompt).to_vec();
+        let cpu_first = last
+            .iter()
+            .enumerate()
+            .max_by(|(_, a), (_, b)| a.partial_cmp(b).unwrap())
+            .map_or(0, |(i, _)| i);
+        let mut cpu_tokens = vec![cpu_first];
+        for _ in 1..6 {
+            let logits = handoff.decode_step(&decode, &config, *cpu_tokens.last().unwrap()).to_vec();
+            let next = logits
+                .iter()
+                .enumerate()
+                .max_by(|(_, a), (_, b)| a.partial_cmp(b).unwrap())
+                .map_or(0, |(i, _)| i);
+            cpu_tokens.push(next);
+        }
+
+        // ── GPU dual: prefill on the prefill copy, phase switch, decode ──
+        let mut fwd = TernaryDeltanetGpuForwardCudarc::new(&config, &decode)
+            .expect("dual fwd construct");
+        fwd.attach_prefill_copy(&prefill).expect("attach prefill");
+        fwd.set_phase_prefill(true).expect("arm prefill phase");
+        fwd.reset_state().expect("reset");
+        let mut gpu_logits = Vec::<f32>::new();
+        for (i, &t) in prompt.iter().enumerate() {
+            fwd.set_input_token(t).expect("set token");
+            if i + 1 < prompt.len() {
+                fwd.forward_dispatch_only().expect("prefill dispatch");
+                fwd.synchronize().expect("prefill sync");
+            } else {
+                gpu_logits = fwd.forward_token().expect("prefill last");
+            }
+        }
+        let gpu_first = gpu_logits
+            .iter()
+            .enumerate()
+            .max_by(|(_, a), (_, b)| a.partial_cmp(b).unwrap())
+            .map_or(0, |(i, _)| i);
+        let max_abs = dual_boundary_max_delta(&last, &gpu_logits);
+        assert!(
+            max_abs < 0.05,
+            "dual boundary logits diverged: max|Δ| {max_abs:.3e}"
+        );
+
+        // Phase switch — the decode copy serves generation.
+        fwd.set_phase_prefill(false).expect("disarm prefill phase");
+        let mut gpu_tokens = vec![gpu_first];
+        for _ in 1..6 {
+            fwd.set_input_token(*gpu_tokens.last().unwrap()).expect("set decode token");
+            let l = fwd.forward_token().expect("decode step");
+            let next = l
+                .iter()
+                .enumerate()
+                .max_by(|(_, a), (_, b)| a.partial_cmp(b).unwrap())
+                .map_or(0, |(i, _)| i);
+            gpu_tokens.push(next);
+        }
+        assert_eq!(
+            gpu_tokens, cpu_tokens,
+            "dual greedy sequence diverged from the CPU container"
+        );
+
+        // The single-copy refusals (the mis-load guards).
+        let mut single = TernaryDeltanetGpuForwardCudarc::new(&config, &decode).expect("single");
+        assert!(single.set_phase_prefill(true).is_err(), "arm without prefill set must refuse");
+        single.set_phase_prefill(false).expect("disarm always legal");
+    }
+
+    /// max|Δ| over the shared prefix (the boundary-logits comparator; the
+    /// CPU handoff's slice and the GPU download are both full-vocab — zip
+    /// handles any length mismatch conservatively).
+    fn dual_boundary_max_delta(a: &[f32], b: &[f32]) -> f64 {
+        a.iter()
+            .zip(b.iter())
+            .map(|(x, y)| f64::from(*x - *y).abs())
+            .fold(0.0f64, f64::max)
     }
 
     /// Issue 504 T1 G1a — closed-loop non-vacuity: with a non-zero-B adapter

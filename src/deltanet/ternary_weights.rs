@@ -468,6 +468,11 @@ impl DeltaNetTernaryLayerWeights {
 /// `wte` and `lm_head` are [`TernaryGroupWeights`] (not dense f32) because
 /// Ternary-Bonsai-27B stores them as `Q2_0` — see the module docs for why
 /// dequantizing would defeat the memory win.
+///
+/// `Clone` (plan 618 S3): the disaggregated GPU lane clones the decode copy
+/// to build the prefill copy (per-layer requantize in place) — all fields
+/// are Vecs/enums, the clone is a deep copy of the same bytes.
+#[derive(Clone)]
 pub struct QwenDeltaNetTernaryWeights {
     /// Embedding table [`vocab_size`, `n_embd`] as ternary bit-planes.
     /// Row lookup via [`Self::dequant_wte_row_into`].

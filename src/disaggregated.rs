@@ -200,6 +200,31 @@ impl DisaggregatedTernaryWeights {
         }
     }
 
+    /// The in-memory two-copy container (plan 618 S3): the GPU serving lane
+    /// holds both copies resident and uploads each to its own phase — the
+    /// same pairing law as [`Self::load_pair`], minus the files. Escape-set
+    /// sharing is verified (the T2 law) exactly as the loaded pair's;
+    /// `layer_types` equality is enforced here as in `load_pair`.
+    pub fn from_parts(
+        decode: QwenDeltaNetTernaryWeights,
+        prefill: QwenDeltaNetTernaryWeights,
+    ) -> anyhow::Result<Self> {
+        if decode.layer_types != prefill.layer_types {
+            anyhow::bail!(
+                "disaggregated container refused: decode/prefill layer_types differ \
+                 (the phase split would route layers through the wrong forward)"
+            );
+        }
+        let container = Self {
+            copies: CopySet::Split {
+                decode: Box::new(decode),
+                prefill: Box::new(prefill),
+            },
+        };
+        container.verify_escape_set_shared()?;
+        Ok(container)
+    }
+
     /// Two-file container: load the decode copy + the prefill copy from two
     /// GGUFs of the same geometry (the natural T4 form: `…-PQ2_0.gguf` decode
     /// + a q4-class prefill pack). Returns the decode file's Config.
