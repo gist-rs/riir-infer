@@ -1,10 +1,12 @@
-//! Fixture gate for the Issue 919 T3 KV-diagonal sidecars (both cells).
+//! Fixture gate for the Issue 919 spike-census sidecars (T3 KV-diagonal
+//! cells + the T4 sink-constancy cell).
 //!
-//! The committed `tests/fixtures/spike_census_kv/*.kvdiag.json` artifacts are
-//! the BLAKE3-pinned provenance of the cell runs (gemma-2-2b cell 1
-//! `47efae7`, Bonsai-27B cell 2). The pins are data: a sidecar edit or a
-//! truncated re-write reds here. No semantic re-derivation — the harness
-//! bins own the measurement; this gate owns the bytes.
+//! The committed `tests/fixtures/spike_census_kv/*` artifacts are the
+//! BLAKE3-pinned provenance of the lane's runs (gemma-2-2b cell 1 `47efae7`,
+//! Bonsai-27B cell 2 `d91971b`, gemma-2-2b T4 sink constancy). The pins are
+//! data: a sidecar edit or a truncated re-write reds here. No semantic
+//! re-derivation — the harness bins own the measurement; this gate owns the
+//! bytes.
 
 use std::path::PathBuf;
 
@@ -37,8 +39,8 @@ fn kvdiag_sidecars_match_their_blake3_pins() {
         checked += 1;
     }
     assert!(
-        checked >= 2,
-        "expected both cell sidecars pinned (gemma + bonsai), found {checked}"
+        checked >= 3,
+        "expected the pinned sidecar set (gemma kvdiag + bonsai kvdiag + gemma sink_constancy), found {checked}"
     );
 }
 

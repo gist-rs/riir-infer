@@ -115,6 +115,12 @@ spike_census_t3 = ["vk_calibration", "gemma2_qkv"]
 # forward (deltanet_ternary_inference — `deltanet::ternary_kvq`, the
 # quantized-KV seam) + the folded-file loader (bonsai2_hadamard implies it).
 spike_census_t3_ternary = ["deltanet_ternary_inference", "bonsai2_hadamard"]
+# katgpt-rs Issue 919 T4 (2026-10-07): the delimiter-sink constancy probe —
+# pre-RoPE K/V captured at delimiter positions across windows
+# (`ValueStoreHook::keys_pre_rope` + `value_stored`), cross-prompt pairwise
+# cosine + collapse stats vs the pre-registered 0.99 bar. Needs only the
+# gemma-2 f16 loader (vk_calibration); no quant backends.
+spike_census_t4 = ["vk_calibration"]
 # row_logit_floor (riir-infer Issue 011 T1, 2026-09-25): the opt-in consumer
 # of katgpt-core's sink-exempt row-logit floor + b-bit logit code +
 # exp-table softmax (katgpt-rs Issue 882 P2, Bench 888) —
@@ -349,6 +355,11 @@ required-features = ["spike_census_t3"]
 name = "spike_census_t3_kv_ab_ternary"
 path = "src/bin/spike_census_t3_kv_ab_ternary.rs"
 required-features = ["spike_census_t3_ternary"]
+
+[[bin]]
+name = "spike_census_t4_sink_constancy"
+path = "src/bin/spike_census_t4_sink_constancy.rs"
+required-features = ["spike_census_t4"]
 
 [[bin]]
 name = "row_logit_floor_ppl"
