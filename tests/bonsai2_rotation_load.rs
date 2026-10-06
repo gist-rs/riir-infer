@@ -90,7 +90,7 @@ fn bonsai2_synthetic_loads_with_rotation_and_dense_gate_projs() {
 
     // a/b dense arm with the right geometry ([n_v_heads × n_embd]).
     for l in &weights.layers {
-        if l.in_proj_qkv.rows > 0 {
+        if l.in_proj_qkv.rows() > 0 {
             let GateProjShape(a_rows, a_cols) = GateProjShape::of(&l.in_proj_a);
             assert_eq!((a_rows, a_cols), (N_V as usize, N_EMBD as usize));
             assert!(matches!(
@@ -127,7 +127,7 @@ fn old_file_loads_without_rotation() {
     let _ = std::fs::remove_file(&path);
     assert!(weights.rotation.is_none());
     for l in &weights.layers {
-        if l.in_proj_qkv.rows > 0 {
+        if l.in_proj_qkv.rows() > 0 {
             assert!(matches!(
                 l.in_proj_a,
                 riir_infer_core::deltanet::ternary_weights::GateProjWeights::Ternary(_)
@@ -195,7 +195,12 @@ fn folded_matmul_matches_explicit_matrix_reference() {
     let rot = weights.rotation.as_ref().unwrap();
     let signs = rot.signs_for_width(N_EMBD as usize).unwrap();
     let layer = &weights.layers[0];
-    let w = &layer.in_proj_qkv; // [key_dim*2+value_dim, n_embd] folded ternary
+    // Issue 028 T4 S2: these fixture files are all-ternary — the direct
+    // kernel call takes the ternary arm.
+    let w = layer
+        .in_proj_qkv
+        .as_ternary()
+        .expect("rotation fixtures are all-ternary"); // [key_dim*2+value_dim, n_embd] folded ternary
 
     // Deterministic input.
     let x: Vec<f32> = (0..N_EMBD as usize)
@@ -336,7 +341,7 @@ fn ptq1_0_synthetic_loads_with_rotation() {
     // Ternary a/b still the Dense (BF16) escape set — the 143 payload only
     // touches the ternary projections.
     for l in &weights.layers {
-        if l.in_proj_qkv.rows > 0 {
+        if l.in_proj_qkv.rows() > 0 {
             assert!(matches!(
                 l.in_proj_a,
                 riir_infer_core::deltanet::ternary_weights::GateProjWeights::Dense(..)

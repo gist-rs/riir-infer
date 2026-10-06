@@ -40,11 +40,11 @@ use super::forward::{
     causal_conv1d_update, effective_rotary_dim, expand_heads_into, gated_deltanet_step_inplace,
     l2_normalize, softplus,
 };
-use super::ternary_weights::{DeltaNetTernaryLayerWeights, QwenDeltaNetTernaryWeights};
+use super::ternary_weights::{DeltaNetTernaryLayerWeights, ProjWeights, QwenDeltaNetTernaryWeights};
 use crate::types::{Config, DeltaNetLayerType, rmsnorm_with_gamma_eps, swiglu};
 use katgpt_core::TernaryMatvecHook;
 use katgpt_core::{
-    TernaryFfnHook, TernaryGroupWeights, TernaryInputProjHook, simd_ternary_group_matvec_parallel,
+    TernaryFfnHook, TernaryInputProjHook, simd_ternary_group_matvec_parallel,
 };
 
 use crate::deltanet::rotation::{
@@ -74,14 +74,31 @@ use crate::deltanet::rotation::{
 #[inline(always)]
 fn bitlinear(
     y: &mut [f32],
-    w: &TernaryGroupWeights,
+    w: &ProjWeights,
     x: &[f32],
     hook: Option<&dyn TernaryMatvecHook>,
 ) {
-    if let Some(h) = hook {
-        h.matvec(w, &x[..w.cols], &mut y[..w.rows]);
-    } else {
-        simd_ternary_group_matvec_parallel(w, &x[..w.cols], &mut y[..w.rows]);
+    match w {
+        ProjWeights::Ternary(t) => {
+            if let Some(h) = hook {
+                h.matvec(t, &x[..t.cols], &mut y[..t.rows]);
+            } else {
+                simd_ternary_group_matvec_parallel(t, &x[..t.cols], &mut y[..t.rows]);
+            }
+        }
+        ProjWeights::Q4K(..) => {
+            // Issue 028 T4 S2: the hooks (the GPU capture lanes + the
+            // act-tap probe) pass `&TernaryGroupWeights` — a q4 projection
+            // has no ternary payload. Refuse loud rather than silently
+            // dropping the hook (the disaggregated host path runs with no
+            // hook; the q4 GPU arm is its own lane when it lands).
+            assert!(
+                hook.is_none(),
+                "bitlinear: a q4 projection has no ternary payload for the matvec hook — \
+                 the GPU/act-tap lanes are ternary-only (Issue 028 T4 S2)"
+            );
+            w.matvec_into(y, x);
+        }
     }
 }
 
@@ -148,8 +165,12 @@ fn forward_deltanet_layer_ternary(
     if use_fused_hook {
         let iph = input_proj_hook.unwrap();
         iph.input_projections(
-            &layer.in_proj_qkv,
-            &layer.in_proj_z,
+            layer.in_proj_qkv.as_ternary().expect(
+                "fused input-proj hook requires ternary qkv/z — the q4 prefill copy runs the host path (Issue 028 T4 S2)",
+            ),
+            layer.in_proj_z.as_ternary().expect(
+                "fused input-proj hook requires ternary qkv/z — the q4 prefill copy runs the host path (Issue 028 T4 S2)",
+            ),
             layer.in_proj_a.as_ternary().unwrap(),
             layer.in_proj_b.as_ternary().unwrap(),
             x_in,
@@ -671,10 +692,17 @@ pub fn qwen_deltanet_ternary_layer_body(
         // input slice before writing the output, but Rust's borrow checker
         // can't prove non-aliasing of &x and &mut x).
         scratch.hidden_copy[..n].copy_from_slice(&x[..n]);
+        let ternary_missing = "fused ffn hook requires ternary projections — the q4 prefill copy runs the host path (Issue 028 T4 S2)";
         fh.ffn(
-            &layer_weights.gate_proj,
-            &layer_weights.up_proj,
-            &layer_weights.down_proj,
+            layer_weights
+                .gate_proj
+                .as_ternary()
+                .expect(ternary_missing),
+            layer_weights.up_proj.as_ternary().expect(ternary_missing),
+            layer_weights
+                .down_proj
+                .as_ternary()
+                .expect(ternary_missing),
             &scratch.hidden_copy[..n],
             &mut x[..n],
         );
@@ -795,7 +823,10 @@ pub fn forward_qwen_deltanet_ternary_with_hook<'a>(
     // 3. Final RMSNorm (dense field)
     rmsnorm_with_gamma_eps(&mut x[..n], &weights.final_norm, config.rms_norm_eps);
 
-    // 4. LM head — ternary matvec (one call, produces all vocab_size logits)
+    // 4. LM head — ternary matvec (one call, produces all vocab_size logits).
+    // The globals keep the bare ternary type (Issue 028 T4 S2: the pack
+    // byte-copies them; only the PER-LAYER projections carry the q4 arm), so
+    // the dispatch is spelled directly here instead of through bitlinear.
     scratch.hidden_copy[..n].copy_from_slice(&x[..n]);
     // Issue 980: output.weight is folded — rotate the final hidden in place
     // on the copy (the fork builds the head through the same rotated-matmul
@@ -804,12 +835,19 @@ pub fn forward_qwen_deltanet_ternary_with_hook<'a>(
         let signs = rot.signs_for_width(n);
         rotate_forward_inplace(&mut scratch.hidden_copy[..n], signs, rot.block_size);
     }
-    bitlinear(
-        &mut x[..config.vocab_size],
-        &weights.lm_head,
-        &scratch.hidden_copy[..n],
-        hook,
-    );
+    if let Some(h) = hook {
+        h.matvec(
+            &weights.lm_head,
+            &scratch.hidden_copy[..n],
+            &mut x[..config.vocab_size],
+        );
+    } else {
+        simd_ternary_group_matvec_parallel(
+            &weights.lm_head,
+            &scratch.hidden_copy[..n],
+            &mut x[..config.vocab_size],
+        );
+    }
 
     &mut x[..config.vocab_size]
 }
@@ -1102,12 +1140,13 @@ mod tests {
 
         // Structural property: attn_wq has 2*q_dim rows (q + gate concatenated per head).
         assert_eq!(
-            layer.attn_wq.rows,
+            layer.attn_wq.rows(),
             2 * config.n_head * config.head_dim,
             "gated attn_wq must have 2*q_dim rows (q + gate concatenated per head)"
         );
         assert_eq!(
-            layer.attn_wq.cols, config.n_embd,
+            layer.attn_wq.cols(),
+            config.n_embd,
             "attn_wq input dim must be n_embd"
         );
 

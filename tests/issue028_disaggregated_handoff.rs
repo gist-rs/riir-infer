@@ -430,3 +430,145 @@ fn real_bonsai_phase_split_is_byte_identical() {
     }
     assert_eq!(a_tokens, b_tokens);
 }
+
+// ── Issue 028 T4 S2 — the dual-format pair (q4-class prefill pack) ─────────
+
+use riir_infer_core::deltanet::ternary_weights::{GateProjWeights, ProjWeights};
+
+/// The dual-format container LOADS and RUNS: decode = `PQ2_0` ternary
+/// (id 142), prefill = the same per-layer projections re-quantized to
+/// `Q4_K` (type 12, only ε(Q4_K) on the identical ternary content), with
+/// globals + a/b + dense fields byte-shared — the S1 pack's exact copy
+/// policy at synthetic dims.
+///
+/// Gates:
+///
+/// 1. the prefill copy carries `ProjWeights::Q4K` arms on its projections
+///    while the decode copy stays all-ternary (a/b stay `GateProjWeights`);
+/// 2. the escape-set law passes at load (byte-identical a/b, BF16 on both
+///    sides — `verify_escape_set_shared` runs inside `load_pair`);
+/// 3. the phase split RUNS through the q4 arms (bitlinear's Q4K path end to
+///    end) and the prefill-boundary logits track the all-ternary reference
+///    within a loose relative-L2 envelope (the formats differ — NOT a bit
+///    identity; the T2 byte-compare law stays on the same-format arms
+///    above);
+/// 4. decode-phase logits are finite.
+#[test]
+fn dual_format_q4_prefill_pair_loads_and_runs() {
+    let decode_bytes = build_gguf(&synth_metadata(false), &synth_tensors_bonsai2_typed(142));
+    let prefill_bytes = build_gguf(&synth_metadata(false), &synth_tensors_bonsai2_q4_prefill());
+    let dpath = write_tmp("riir_028_q4_decode", &decode_bytes);
+    let ppath = write_tmp("riir_028_q4_prefill", &prefill_bytes);
+
+    // The all-ternary reference (decode copy through the single loop).
+    let (config, ref_weights) = load_single(&dpath);
+    let (ref_last, _ref_decode, _ref_tokens) = run_single_checkpoint(&config, &ref_weights);
+    drop(ref_weights);
+
+    let (config, container) = DisaggregatedTernaryWeights::load_pair(&dpath, &ppath)
+        .expect("load the dual-format pair");
+    let _ = std::fs::remove_file(&dpath);
+    let _ = std::fs::remove_file(&ppath);
+
+    // 1. Arm layout: q4 projections on the prefill side, ternary on decode;
+    //    the a/b escape fields stay GateProjWeights (Dense BF16 arm here).
+    let pre = container.prefill();
+    let dec = container.decode();
+    assert!(matches!(
+        pre.layers[0].in_proj_qkv,
+        ProjWeights::Q4K(..)
+    ));
+    assert!(matches!(pre.layers[3].attn_wq, ProjWeights::Q4K(..)));
+    assert!(matches!(
+        dec.layers[0].in_proj_qkv,
+        ProjWeights::Ternary(_)
+    ));
+    assert!(matches!(
+        pre.layers[0].in_proj_a,
+        GateProjWeights::Dense(..)
+    ));
+    assert!(dec.layers[0].in_proj_qkv.rows() > 0);
+    assert!(pre.layers[0].in_proj_qkv.rows() > 0);
+
+    // 2/3. The phase split through the q4 prefill arms, then the ternary
+    //      decode copy — logits track the all-ternary reference.
+    let layer_types = dec.layer_types.clone();
+    let (pre_last, decode_logits, tokens) = run_phase_split(&config, &container, &layer_types);
+
+    let num: f32 = ref_last
+        .iter()
+        .zip(&pre_last)
+        .map(|(a, b)| (a - b) * (a - b))
+        .sum();
+    let den: f32 = ref_last.iter().map(|a| a * a).sum::<f32>().max(1e-30);
+    let rel_l2 = (num / den).sqrt();
+    assert!(
+        rel_l2 < 0.05,
+        "q4-prefill boundary logits diverge from the ternary reference: relative L2 {rel_l2}"
+    );
+    eprintln!("[q4-pair] boundary rel L2 vs ternary reference: {rel_l2:.6}");
+
+    // 4. Decode-phase sanity (the decode copy is ternary — its logits are
+    //    finite and the greedy loop produced DECODE_STEPS tokens).
+    assert_eq!(tokens.len(), DECODE_STEPS);
+    for (step, l) in decode_logits.iter().enumerate() {
+        assert!(
+            l.iter().all(|v| v.is_finite()),
+            "decode step {step}: non-finite logit"
+        );
+    }
+}
+
+/// The real dual-format pair — the S1 `Q4_K.pf` pack against the 6.7 GB
+/// PQ2_0 decode pack (20.5 GB resident total; the T4 budget row). Proves the
+/// LOAD path at production scale (the geometry fingerprint + escape law on
+/// the real files) and the q4 host matvec on real shapes. Run:
+/// `cargo test --release --features bonsai2_hadamard --test issue028_disaggregated_handoff real_q4 -- --ignored --nocapture`
+#[test]
+#[cfg(feature = "bonsai2_hadamard")]
+#[ignore = "loads the real 20.5 GB pair — run manually (see the doc comment)"]
+fn real_q4_prefill_pair_loads_and_prefills() {
+    let decode_path = std::env::var("BONSAI_PQ2_0_GGUF")
+        .unwrap_or_else(|_| "../riir-train/data/Ternary-Bonsai-2-27B-PQ2_0.gguf".to_string());
+    let prefill_path = std::env::var("BONSAI_Q4_PF_GGUF")
+        .unwrap_or_else(|_| "../riir-train/data/Ternary-Bonsai-2-27B-Q4_K.pf.gguf".to_string());
+    let (decode_path, prefill_path) =
+        (std::path::PathBuf::from(decode_path), std::path::PathBuf::from(prefill_path));
+    if !decode_path.exists() || !prefill_path.exists() {
+        eprintln!(
+            "[skip] pair not found: {} / {}",
+            decode_path.display(),
+            prefill_path.display()
+        );
+        return;
+    }
+
+    let t0 = std::time::Instant::now();
+    let (config, container) = DisaggregatedTernaryWeights::load_pair(&decode_path, &prefill_path)
+        .expect("load the real dual-format pair");
+    eprintln!("[real-q4] load_pair: {:?}", t0.elapsed());
+
+    // Arm layout at real shapes: layer 0 is a DeltaNet layer (attention
+    // every 4th — full_attention_interval 4), layer 3 the first attention
+    // layer. Their projections carry the q4 arm; the a/b escape fields load
+    // from the byte-copied BF16 — the escape check already passed inside
+    // load_pair.
+    let pre = container.prefill();
+    assert!(matches!(pre.layers[0].in_proj_qkv, ProjWeights::Q4K(..)));
+    assert!(matches!(pre.layers[3].attn_wq, ProjWeights::Q4K(..)));
+    let layer_types = container.decode().layer_types.clone();
+
+    // A SHORT prefill only — the q4 host matvec is the S2 functional arm,
+    // not the TTFT deliverable (that is the GPU lane / S3's bench).
+    let prompt: &[usize] = &PROMPT;
+    let mut handoff = PhaseHandoff::begin(&config, &layer_types);
+    let t1 = std::time::Instant::now();
+    let last = handoff.prefill(container.prefill(), &config, prompt).to_vec();
+    eprintln!(
+        "[real-q4] prefill {} tokens: {:?} ({:.3} s/token)",
+        prompt.len(),
+        t1.elapsed(),
+        t1.elapsed().as_secs_f32() / prompt.len() as f32
+    );
+    assert!(last.iter().all(|v| v.is_finite()), "non-finite prefill logits");
+}

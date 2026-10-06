@@ -698,11 +698,17 @@ fn apply_arm(
         _ => None, // mean_abs / zeroqat / shipped: the act-aware fit is unused
     };
     for_each_ternary_site_mut(weights, |site, w| {
+        // Issue 028 T4 S2: the walker hands out ProjWeights — the refit
+        // operates on the ternary arm (these runs load ternary files; a q4
+        // site has no bit-plane payload to refit and refuses loud instead).
+        let t = w.as_ternary_mut().expect(
+            "act-retention refit runs ternary payloads; a q4 projection is not refit-able (Issue 028 T4 S2)",
+        );
         // Dequantize the SHIPPED payload — the reference values every arm
         // requantizes from (never a prior arm's output).
-        let dense = QwenDeltaNetTernaryWeights::dequant_proj_to_dense(w);
-        let cols = w.cols;
-        let rows = w.rows;
+        let dense = QwenDeltaNetTernaryWeights::dequant_proj_to_dense(t);
+        let cols = t.cols;
+        let rows = t.rows;
         let new = match arm {
             "mean_abs" => TernaryGroupWeights::quantize_from_f32(&dense, rows, cols),
             "wma_ex2" | "ws_ex2" => {
@@ -727,32 +733,32 @@ fn apply_arm(
                     fit.expect("act-aware arms carry a fit"),
                 )
             }
-            "zeroqat" => zeroqat_refit(w, &dense, plan.diag_for(diagonal, site)),
+            "zeroqat" => zeroqat_refit(t, &dense, plan.diag_for(diagonal, site)),
             _ => unreachable!("arm names validated in main"),
         };
         // Stats: payload delta vs shipped. A WEIGHT changed when either of
         // its two plane bits differs (counted per u64 word pair, popcount of
         // the OR of the two XORs).
         stats.total_weights += rows * cols;
-        for ((po, pn), (no, nn)) in w
+        for ((po, pn), (no, nn)) in t
             .pos_bits
             .iter()
             .zip(&new.pos_bits)
-            .zip(w.neg_bits.iter().zip(&new.neg_bits))
+            .zip(t.neg_bits.iter().zip(&new.neg_bits))
         {
             stats.changed_weights += ((po ^ pn) | (no ^ nn)).count_ones() as usize;
         }
         for r in 0..rows {
-            let ob = r * w.groups_per_row;
-            for g in 0..w.groups_per_row {
-                let os = f32::from(w.group_scale[ob + g]);
+            let ob = r * t.groups_per_row;
+            for g in 0..t.groups_per_row {
+                let os = f32::from(t.group_scale[ob + g]);
                 let ns = f32::from(new.group_scale[ob + g]);
                 if os > 0.0 {
                     stats.ratio.observe(ns / os);
                 }
             }
         }
-        *w = new;
+        *t = new;
     });
     Ok(stats)
 }

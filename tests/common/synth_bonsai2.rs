@@ -305,6 +305,51 @@ pub fn synth_tensors_bonsai2() -> Vec<TensorSpec> {
     synth_tensors_bonsai2_typed(142)
 }
 
+/// Issue 028 T4 S2 — the q4-class PREFILL tensor set: every per-layer
+/// projection re-quantized to `Q4_K` (type 12) from the SAME ternary content
+/// the decode set carries (dequant → `quantize_row_q4_k` — only ε(Q4_K) on
+/// top of the ternary payload, the real pack's requant law); the globals
+/// stay ternary `Q2_0` and the escape/dense set is untouched, so decode =
+/// [`synth_tensors_bonsai2_typed`] + this prefill forms a legal dual-format
+/// pair (the escape-set law passes; both copies share byte-identical a/b).
+pub fn synth_tensors_bonsai2_q4_prefill() -> Vec<TensorSpec> {
+    synth_tensors_bonsai2_typed(142)
+        .into_iter()
+        .map(|t| {
+            let is_projection = t.name.starts_with("blk.") && t.ggml_type == 142;
+            if !is_projection {
+                return t;
+            }
+            let n = t.ne[0] * t.ne[1];
+            let seed = t.name.bytes().map(|b| b as u64).sum::<u64>() % 97;
+            TensorSpec {
+                ggml_type: 12, // Q4_K
+                data: q4_k_payload_from_ternary(n, seed),
+                ..t
+            }
+        })
+        .collect()
+}
+
+/// A `Q4_K` payload carrying the quantization of the SAME ternary content
+/// [`q2_0_payload`] encodes for this seed (f32[j] = d_b · trit(j, b, seed),
+/// the loader's exact reconstruction), serialized as raw super-blocks.
+pub fn q4_k_payload_from_ternary(n_elements: u64, seed: u64) -> Vec<u8> {
+    use riir_infer_core::quant::q4k::{BlockQ4K, QK_K, quantize_row_q4_k};
+
+    let n = n_elements as usize;
+    assert!(n.is_multiple_of(QK_K), "fixture size {n} not a multiple of {QK_K}");
+    let mut src = vec![0.0f32; n];
+    for (j, v) in src.iter_mut().enumerate() {
+        let b = j / 128;
+        let d = 0.25f32 + ((b as f32 + seed as f32) % 7.0) * 0.125;
+        *v = d * synth_trit(j % 128, b, seed) as f32;
+    }
+    let mut blocks: Vec<BlockQ4K> = vec![bytemuck::Zeroable::zeroed(); n / QK_K];
+    quantize_row_q4_k(&src, &mut blocks);
+    bytemuck::cast_slice(&blocks).to_vec()
+}
+
 /// The folded Bonsai-2 tensor set with the ternary wire format parameterized:
 /// 142 = PQ2_0 (the Phase B pack), 143 = PTQ1_0 (the Phase C decode pack,
 /// Issue 980 T6). Both encoders carry IDENTICAL trits + f16 group scales, so

@@ -64,7 +64,7 @@ use riir_infer_core::deltanet::ternary_forward::{
     forward_qwen_deltanet_ternary_with_hook, qwen_deltanet_ternary_layer_body,
 };
 use riir_infer_core::deltanet::ternary_weights::{
-    DeltaNetTernaryLayerWeights, GateProjWeights, QwenDeltaNetTernaryWeights,
+    DeltaNetTernaryLayerWeights, GateProjWeights, ProjWeights, QwenDeltaNetTernaryWeights,
 };
 use riir_infer_core::gguf_loader::{GgufFile, load_qwen_deltanet_ternary_weights_gguf};
 use riir_infer_core::rope::RopeFreqTable;
@@ -294,21 +294,54 @@ fn build_merged_candidate(
         ArmChoice::SignMajority => MergeOp::Mean,
         ArmChoice::SourceQuant => op,
     };
-    let empty = || TernaryGroupWeights::new(0, 0);
+    let empty = || ProjWeights::empty();
+    // Issue 028 T4 S2: the merge operates on ternary payloads — an audition
+    // block arriving with a q4 arm is not mergeable here (auditions run on
+    // ternary decode files); the getters refuse loud instead.
     if is_gdn {
         Ok(DeltaNetTernaryLayerWeights {
             attn_wq: empty(),
             attn_wk: empty(),
             attn_wv: empty(),
             attn_wo: empty(),
-            in_proj_qkv: merged_ternary_field(members, |l| &l.in_proj_qkv, op, arm)?,
+            in_proj_qkv: ProjWeights::Ternary(merged_ternary_field(
+                members,
+                |l| l.in_proj_qkv.as_ternary().expect("audition merges ternary candidates only"),
+                op,
+                arm,
+            )?),
             in_proj_a: merged_gate_field(members, |l| &l.in_proj_a, dense_op)?,
             in_proj_b: merged_gate_field(members, |l| &l.in_proj_b, dense_op)?,
-            in_proj_z: merged_ternary_field(members, |l| &l.in_proj_z, op, arm)?,
-            out_proj: merged_ternary_field(members, |l| &l.out_proj, op, arm)?,
-            gate_proj: merged_ternary_field(members, |l| &l.gate_proj, op, arm)?,
-            up_proj: merged_ternary_field(members, |l| &l.up_proj, op, arm)?,
-            down_proj: merged_ternary_field(members, |l| &l.down_proj, op, arm)?,
+            in_proj_z: ProjWeights::Ternary(merged_ternary_field(
+                members,
+                |l| l.in_proj_z.as_ternary().expect("audition merges ternary candidates only"),
+                op,
+                arm,
+            )?),
+            out_proj: ProjWeights::Ternary(merged_ternary_field(
+                members,
+                |l| l.out_proj.as_ternary().expect("audition merges ternary candidates only"),
+                op,
+                arm,
+            )?),
+            gate_proj: ProjWeights::Ternary(merged_ternary_field(
+                members,
+                |l| l.gate_proj.as_ternary().expect("audition merges ternary candidates only"),
+                op,
+                arm,
+            )?),
+            up_proj: ProjWeights::Ternary(merged_ternary_field(
+                members,
+                |l| l.up_proj.as_ternary().expect("audition merges ternary candidates only"),
+                op,
+                arm,
+            )?),
+            down_proj: ProjWeights::Ternary(merged_ternary_field(
+                members,
+                |l| l.down_proj.as_ternary().expect("audition merges ternary candidates only"),
+                op,
+                arm,
+            )?),
             attn_q_norm: vec![],
             attn_k_norm: vec![],
             // Never averaged (exp/sigmoid distortion — T3.1): from the
@@ -322,18 +355,53 @@ fn build_merged_candidate(
         })
     } else {
         Ok(DeltaNetTernaryLayerWeights {
-            attn_wq: merged_ternary_field(members, |l| &l.attn_wq, op, arm)?,
-            attn_wk: merged_ternary_field(members, |l| &l.attn_wk, op, arm)?,
-            attn_wv: merged_ternary_field(members, |l| &l.attn_wv, op, arm)?,
-            attn_wo: merged_ternary_field(members, |l| &l.attn_wo, op, arm)?,
+            attn_wq: ProjWeights::Ternary(merged_ternary_field(
+                members,
+                |l| l.attn_wq.as_ternary().expect("audition merges ternary candidates only"),
+                op,
+                arm,
+            )?),
+            attn_wk: ProjWeights::Ternary(merged_ternary_field(
+                members,
+                |l| l.attn_wk.as_ternary().expect("audition merges ternary candidates only"),
+                op,
+                arm,
+            )?),
+            attn_wv: ProjWeights::Ternary(merged_ternary_field(
+                members,
+                |l| l.attn_wv.as_ternary().expect("audition merges ternary candidates only"),
+                op,
+                arm,
+            )?),
+            attn_wo: ProjWeights::Ternary(merged_ternary_field(
+                members,
+                |l| l.attn_wo.as_ternary().expect("audition merges ternary candidates only"),
+                op,
+                arm,
+            )?),
             in_proj_qkv: empty(),
             in_proj_a: GateProjWeights::empty(),
             in_proj_b: GateProjWeights::empty(),
             in_proj_z: empty(),
             out_proj: empty(),
-            gate_proj: merged_ternary_field(members, |l| &l.gate_proj, op, arm)?,
-            up_proj: merged_ternary_field(members, |l| &l.up_proj, op, arm)?,
-            down_proj: merged_ternary_field(members, |l| &l.down_proj, op, arm)?,
+            gate_proj: ProjWeights::Ternary(merged_ternary_field(
+                members,
+                |l| l.gate_proj.as_ternary().expect("audition merges ternary candidates only"),
+                op,
+                arm,
+            )?),
+            up_proj: ProjWeights::Ternary(merged_ternary_field(
+                members,
+                |l| l.up_proj.as_ternary().expect("audition merges ternary candidates only"),
+                op,
+                arm,
+            )?),
+            down_proj: ProjWeights::Ternary(merged_ternary_field(
+                members,
+                |l| l.down_proj.as_ternary().expect("audition merges ternary candidates only"),
+                op,
+                arm,
+            )?),
             attn_q_norm: merged_mean_f32(members, |l| &l.attn_q_norm)?,
             attn_k_norm: merged_mean_f32(members, |l| &l.attn_k_norm)?,
             conv1d_weight: vec![],

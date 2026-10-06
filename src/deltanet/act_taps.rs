@@ -30,7 +30,7 @@ use katgpt_core::{TernaryGroupWeights, TernaryMatvecHook, simd_ternary_group_mat
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
-use super::ternary_weights::QwenDeltaNetTernaryWeights;
+use super::ternary_weights::{ProjWeights, QwenDeltaNetTernaryWeights};
 use crate::types::{Config, DeltaNetLayerType};
 
 /// One refit-able ternary matvec site: the projection role + owning layer.
@@ -170,7 +170,7 @@ impl ActTapPlan {
                 &mut moment_widths,
                 format!("l{l:02}.layer_out"),
                 "layer_out",
-                out_w.cols,
+                out_w.cols(),
             );
             let ffn_in = push_tap(
                 &mut taps,
@@ -184,7 +184,7 @@ impl ActTapPlan {
                 &mut moment_widths,
                 format!("l{l:02}.swiglu"),
                 "swiglu",
-                layer.down_proj.cols,
+                layer.down_proj.cols(),
             );
             if gdn {
                 for (site, w) in [
@@ -194,8 +194,8 @@ impl ActTapPlan {
                     steps.push(ActTapStep {
                         site,
                         tap: attn_in,
-                        rows: w.rows,
-                        cols: w.cols,
+                        rows: w.rows(),
+                        cols: w.cols(),
                     });
                 }
             } else {
@@ -207,8 +207,8 @@ impl ActTapPlan {
                     steps.push(ActTapStep {
                         site,
                         tap: attn_in,
-                        rows: w.rows,
-                        cols: w.cols,
+                        rows: w.rows(),
+                        cols: w.cols(),
                     });
                 }
             }
@@ -219,27 +219,27 @@ impl ActTapPlan {
                     TernarySite::AttnWo(l)
                 },
                 tap: layer_out,
-                rows: out_w.rows,
-                cols: out_w.cols,
+                rows: out_w.rows(),
+                cols: out_w.cols(),
             });
             // FFN trio (both layer types, identical order in the forward).
             steps.push(ActTapStep {
                 site: TernarySite::GateProj(l),
                 tap: ffn_in,
-                rows: layer.gate_proj.rows,
-                cols: layer.gate_proj.cols,
+                rows: layer.gate_proj.rows(),
+                cols: layer.gate_proj.cols(),
             });
             steps.push(ActTapStep {
                 site: TernarySite::UpProj(l),
                 tap: ffn_in,
-                rows: layer.up_proj.rows,
-                cols: layer.up_proj.cols,
+                rows: layer.up_proj.rows(),
+                cols: layer.up_proj.cols(),
             });
             steps.push(ActTapStep {
                 site: TernarySite::DownProj(l),
                 tap: swiglu,
-                rows: layer.down_proj.rows,
-                cols: layer.down_proj.cols,
+                rows: layer.down_proj.rows(),
+                cols: layer.down_proj.cols(),
             });
         }
         let head = push_tap(
@@ -276,12 +276,17 @@ impl ActTapPlan {
     }
 }
 
-/// Visit every refit-able ternary matvec tensor, in `bitlinear` call order —
-/// the SAME order [`ActTapPlan::build`] walks, so `steps[i].site` is the i-th
-/// visited tensor (a shape assert on both sides pins the agreement).
+/// Visit every refit-able per-layer projection tensor, in `bitlinear` call
+/// order — the SAME order [`ActTapPlan::build`] walks, so `steps[i].site` is
+/// the i-th visited tensor (a shape assert on both sides pins the agreement).
+///
+/// Issue 028 T4 S2: the visitor sees [`ProjWeights`] — a q4-arm site arrives
+/// as the Q4K arm (the refit walkers dequantize-and-replace, which reads the
+/// arm themselves; the LmHead stays the bare ternary type, it is not a
+/// per-layer projection and never carries q4).
 pub fn for_each_ternary_site_mut(
     weights: &mut QwenDeltaNetTernaryWeights,
-    mut f: impl FnMut(TernarySite, &mut TernaryGroupWeights),
+    mut f: impl FnMut(TernarySite, &mut ProjWeights),
 ) {
     for l in 0..weights.layers.len() {
         let gdn = weights.layer_types[l] == DeltaNetLayerType::DeltaNet;
@@ -316,13 +321,29 @@ pub fn for_each_ternary_site_mut(
         f(TernarySite::UpProj(l), &mut layer.up_proj);
         f(TernarySite::DownProj(l), &mut layer.down_proj);
     }
-    f(TernarySite::LmHead, &mut weights.lm_head);
+    // LmHead is not a per-layer projection (it stays the bare ternary type —
+    // the globals contract), but the visitor's contract is ALL refit-able
+    // sites, so it arrives wrapped and is unwrapped after. A closure that
+    // swapped the arm to q4 would be a caller bug — refuse loud.
+    let mut head = ProjWeights::Ternary(std::mem::replace(
+        &mut weights.lm_head,
+        katgpt_core::TernaryGroupWeights::new(0, 0),
+    ));
+    f(TernarySite::LmHead, &mut head);
+    weights.lm_head = match head {
+        ProjWeights::Ternary(t) => t,
+        ProjWeights::Q4K(..) => {
+            panic!("for_each_ternary_site_mut: the lm_head site must stay ternary")
+        }
+    };
 }
 
-/// The immutable twin of [`for_each_ternary_site_mut`] (same order).
+/// The immutable twin of [`for_each_ternary_site_mut`] (same order over the
+/// 10 per-layer projection sites; the LmHead visit is mutable-twin-only —
+/// it is the refit walker's contract).
 pub fn for_each_ternary_site(
     weights: &QwenDeltaNetTernaryWeights,
-    mut f: impl FnMut(TernarySite, &TernaryGroupWeights),
+    mut f: impl FnMut(TernarySite, &ProjWeights),
 ) {
     for l in 0..weights.layers.len() {
         let gdn = weights.layer_types[l] == DeltaNetLayerType::DeltaNet;
@@ -347,7 +368,9 @@ pub fn for_each_ternary_site(
         f(TernarySite::UpProj(l), &layer.up_proj);
         f(TernarySite::DownProj(l), &layer.down_proj);
     }
-    f(TernarySite::LmHead, &weights.lm_head);
+    // No LmHead visit: it is not a per-layer projection (bare ternary type,
+    // globals contract) and this twin has no refit caller — the mutable
+    // twin wraps it so the refit contract (ALL sites, same order) holds.
 }
 
 /// The collector's side-band observer: runs the REAL kernel (what the

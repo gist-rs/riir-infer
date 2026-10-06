@@ -1992,10 +1992,64 @@ fn load_ternary_proj(gguf: &GgufFile, name: &str) -> Result<katgpt_core::Ternary
                 .with_context(|| format!("repack failed for tensor '{name}' [{rows}×{cols}]"))?
         }
         other => bail!(
-            "tensor '{name}' is {other:?} — expected Q2_0 (id 42/142) or PTQ1_0 (id 143) for ternary repack"
+            "tensor '{name}' is {other:?} — expected Q2_0 (id 42/142) or PTQ1_0 (id 143) for ternary repack
+             (the globals token_embd/output stay ternary by contract; a q4-class prefill pack quantizes only
+             the per-layer projections — Issue 028 T4 S2)"
         ),
     };
     Ok(tg)
+}
+
+/// Issue 028 T4 S2 — the per-layer projection loader, dispatched on the
+/// tensor's storage type: `Q2_0`/`PTQ1_0` → ternary repack (the decode
+/// copy / any pre-028 file), `Q4_K` → quant-resident blocks (the q4-class
+/// prefill pack — [`ProjWeights::Q4K`], never materialized as f32).
+///
+/// The globals (`token_embd`/`output`) stay on [`load_ternary_proj`] — the
+/// pack byte-copies them, so both copies of a container carry identical
+/// ternary globals by construction.
+#[cfg(feature = "deltanet_ternary_inference")]
+fn load_proj(
+    gguf: &GgufFile,
+    name: &str,
+) -> Result<crate::deltanet::ternary_weights::ProjWeights> {
+    use crate::deltanet::ternary_weights::ProjWeights;
+    use crate::quant::q4k::QK_K;
+
+    let info = gguf
+        .tensor_info(name)
+        .with_context(|| format!("tensor '{name}' not found in GGUF file"))?;
+    match info.ggml_type {
+        GgmlType::Q2_0 | GgmlType::PTQ1_0 => {
+            Ok(ProjWeights::Ternary(load_ternary_proj(gguf, name)?))
+        }
+        GgmlType::Q4_K => {
+            anyhow::ensure!(
+                info.shape.len() == 2,
+                "tensor '{name}' has {} dims, expected 2D for a projection",
+                info.shape.len()
+            );
+            let cols = info.shape[0]; // ne0 = in_features
+            let rows = info.shape[1]; // ne1 = out_features
+            anyhow::ensure!(
+                cols % QK_K == 0,
+                "q4 projection '{name}': cols {cols} not a multiple of {QK_K}"
+            );
+            let blocks = gguf.q4k_tensor_blocks(name)?;
+            anyhow::ensure!(
+                blocks.len() == rows * (cols / QK_K),
+                "q4 projection '{name}': {} blocks, expected {rows}×({cols}/{QK_K})",
+                blocks.len()
+            );
+            // Own the bytes: the mmap borrow dies with the loader; the
+            // weights struct must be self-contained (the ternary arm
+            // repacks into owned Vecs for the same reason).
+            Ok(ProjWeights::Q4K(blocks.to_vec(), rows, cols))
+        }
+        other => bail!(
+            "tensor '{name}' is {other:?} — expected Q2_0/PTQ1_0 (ternary repack) or Q4_K (q4 prefill pack)"
+        ),
+    }
 }
 
 /// Load one `DeltaNet` gate projection (`ssm_alpha`/`ssm_beta` → `in_proj_a`/`b`)
@@ -2082,9 +2136,8 @@ pub fn load_qwen_deltanet_ternary_from_gguf(
     crate::deltanet::ternary_weights::QwenDeltaNetTernaryWeights,
 )> {
     use crate::deltanet::ternary_weights::{
-        DeltaNetTernaryLayerWeights, GateProjWeights, QwenDeltaNetTernaryWeights,
+        DeltaNetTernaryLayerWeights, GateProjWeights, ProjWeights, QwenDeltaNetTernaryWeights,
     };
-    use katgpt_core::TernaryGroupWeights;
 
     // Append the container suffix to a tensor name (identity for the
     // standard spellings — a `///` on a let binding is an unused doc comment).
@@ -2138,17 +2191,18 @@ pub fn load_qwen_deltanet_ternary_from_gguf(
         let layer = if is_linear {
             let ln = qwen35_deltanet_gguf_names(i);
 
-            // Ternary projections (Q2_0 → repack)
-            let in_proj_qkv = load_ternary_proj(gguf, &sfx(&ln.attn_qkv))?;
-            let in_proj_z = load_ternary_proj(gguf, &sfx(&ln.attn_gate))?;
+            // Per-layer projections: ternary repack (Q2_0/PTQ1_0) or q4
+            // blocks (Q4_K, the disaggregated prefill pack) — Issue 028 T4 S2.
+            let in_proj_qkv = load_proj(gguf, &sfx(&ln.attn_qkv))?;
+            let in_proj_z = load_proj(gguf, &sfx(&ln.attn_gate))?;
             // Issue 980 T2: a/b dispatch on storage type (ternary old file /
             // dense BF16 Bonsai 2).
             let in_proj_a = load_gate_proj(gguf, &sfx(&ln.ssm_alpha))?;
             let in_proj_b = load_gate_proj(gguf, &sfx(&ln.ssm_beta))?;
-            let out_proj = load_ternary_proj(gguf, &sfx(&ln.ssm_out))?;
-            let gate_proj = load_ternary_proj(gguf, &sfx(&ln.ffn_gate))?;
-            let up_proj = load_ternary_proj(gguf, &sfx(&ln.ffn_up))?;
-            let down_proj = load_ternary_proj(gguf, &sfx(&ln.ffn_down))?;
+            let out_proj = load_proj(gguf, &sfx(&ln.ssm_out))?;
+            let gate_proj = load_proj(gguf, &sfx(&ln.ffn_gate))?;
+            let up_proj = load_proj(gguf, &sfx(&ln.ffn_up))?;
+            let down_proj = load_proj(gguf, &sfx(&ln.ffn_down))?;
 
             // Dense fields (F32 in GGUF)
             let conv1d_weight = gguf.dequant_f16_to_f32(&sfx(&ln.ssm_conv1d))?;
@@ -2160,10 +2214,10 @@ pub fn load_qwen_deltanet_ternary_from_gguf(
 
             DeltaNetTernaryLayerWeights {
                 // Full attention: empty for DeltaNet layers
-                attn_wq: TernaryGroupWeights::new(0, 0),
-                attn_wk: TernaryGroupWeights::new(0, 0),
-                attn_wv: TernaryGroupWeights::new(0, 0),
-                attn_wo: TernaryGroupWeights::new(0, 0),
+                attn_wq: ProjWeights::empty(),
+                attn_wk: ProjWeights::empty(),
+                attn_wv: ProjWeights::empty(),
+                attn_wo: ProjWeights::empty(),
                 // Linear attention
                 in_proj_qkv,
                 in_proj_a,
@@ -2187,16 +2241,16 @@ pub fn load_qwen_deltanet_ternary_from_gguf(
         } else {
             let ln = qwen35_attention_gguf_names(i);
 
-            // Ternary projections (Q2_0 → repack)
+            // Per-layer projections: ternary repack or q4 blocks — Issue 028 T4 S2.
             // NOTE (Issue 594): blk.N.attn_q is [5120 × 12288] = q concatenated
             // with a gate. The loader loads it as-is; the forward pass splits.
-            let attn_wq = load_ternary_proj(gguf, &sfx(&ln.attn_q))?;
-            let attn_wk = load_ternary_proj(gguf, &sfx(&ln.attn_k))?;
-            let attn_wv = load_ternary_proj(gguf, &sfx(&ln.attn_v))?;
-            let attn_wo = load_ternary_proj(gguf, &sfx(&ln.attn_output))?;
-            let gate_proj = load_ternary_proj(gguf, &sfx(&ln.ffn_gate))?;
-            let up_proj = load_ternary_proj(gguf, &sfx(&ln.ffn_up))?;
-            let down_proj = load_ternary_proj(gguf, &sfx(&ln.ffn_down))?;
+            let attn_wq = load_proj(gguf, &sfx(&ln.attn_q))?;
+            let attn_wk = load_proj(gguf, &sfx(&ln.attn_k))?;
+            let attn_wv = load_proj(gguf, &sfx(&ln.attn_v))?;
+            let attn_wo = load_proj(gguf, &sfx(&ln.attn_output))?;
+            let gate_proj = load_proj(gguf, &sfx(&ln.ffn_gate))?;
+            let up_proj = load_proj(gguf, &sfx(&ln.ffn_up))?;
+            let down_proj = load_proj(gguf, &sfx(&ln.ffn_down))?;
 
             // Dense fields (F32 in GGUF)
             let attn_q_norm = gguf.dequant_f16_to_f32(&sfx(&ln.attn_q_norm))?;
@@ -2211,11 +2265,11 @@ pub fn load_qwen_deltanet_ternary_from_gguf(
                 attn_wv,
                 attn_wo,
                 // Linear attention: empty for attention layers
-                in_proj_qkv: TernaryGroupWeights::new(0, 0),
+                in_proj_qkv: ProjWeights::empty(),
                 in_proj_a: GateProjWeights::empty(),
                 in_proj_b: GateProjWeights::empty(),
-                in_proj_z: TernaryGroupWeights::new(0, 0),
-                out_proj: TernaryGroupWeights::new(0, 0),
+                in_proj_z: ProjWeights::empty(),
+                out_proj: ProjWeights::empty(),
                 // SwiGLU MLP
                 gate_proj,
                 up_proj,
