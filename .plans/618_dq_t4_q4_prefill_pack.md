@@ -196,6 +196,16 @@ En-route repairs (all compile-caught, none semantic):
   the TEST's arm-layout assertion (layer 0 is DeltaNet — `attn_wq` is the
   empty arm; fixed to `layers[0].in_proj_qkv` + `layers[3].attn_wq`), never
   the loader.
+  ⚠ **The real-pair PREFILL smoke did NOT complete** (disclosed): the
+  second attempt printed the load gate then burned the session's entire
+  30-min tool ceiling inside the prefill without finishing the 5-token
+  prompt — consistent with the box PAGING (~20.5 GB resident + the 14.4 GB
+  mmap page-cache pressure against ~24 GB free; the 630–700 s load itself is
+  ~2–3× a clean-copy estimate, the same signature). The forward-path proof
+  at real semantics is carried by the always-on synthetic gate (same code
+  path, all arms); the real prefill smoke re-runs on a quieter box state and
+  its s/token is a curiosity only — CPU host numbers do not price TTFT (the
+  GPU arm / S3's deliverable).
 
 RAM posture (disclosed): load peaks ≈ 20.5 GB owned + the 14.4 GB mmap page
 -cache — fits the 32 GB box; the mmap pages are clean and evict while the
@@ -210,9 +220,24 @@ owned copies materialize.
   with the owner's 026 instrument vocabulary).
 - Instrument: Plan 614's `dq_phase_matrix` family (the DQ phase-sensitivity
   bench) + the accuracy axis; TTFT at 4K/8K prompts once the S2 GPU arm
-  exists (CPU host numbers do not price TTFT).
+  exists (CPU host numbers do not price TTFT — measured this pass: the
+  real-pair host prefill smoke paged before completing 5 tokens; see the
+  S2 gate list).
 - Pre-registered null: recovery ≤ measurement noise ⇒ container shelved,
   T4's decomposition number stands alone (the issue's PoC gate).
+
+## Open at S2 close
+
+1. **The cudarc Q4_K GEMV (S2 item 5)** — the GPU prefill arm. The deltanet
+   cudarc lane has no q4 weight path; the `gemma2_cubecl` lane's
+   `GemvQ4KCubeCL` is the in-repo port reference. This is the TTFT
+   deliverable — on the 4090 box it is the next 4090-first item under the
+   prefill-priority directive.
+2. **S3 itself** (above) — needs the GPU arm for the TTFT half; the accuracy
+   half (per-family recovery vs matched storage) can start design any time
+   against Issue 026's instrument vocabulary.
+3. The real-pair prefill smoke (optional, disclosed above) — a curiosity
+   number on a quiet box, never a gate.
 
 ## Records
 

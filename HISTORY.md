@@ -49,6 +49,11 @@ ternary-lane integration suites green (`bonsai2_rotation_load` 10,
 15, `twt_collapse_writer_gates` 1, `twt_audition_gates` 10); default-posture
 lib 248 green unchanged; clippy clean at default, `deltanet_ternary_inference`,
 and the `+act_scale_refit+twt_bonsai+twt_collapse` bins/examples posture.
+⚠ The real-pair PREFILL smoke did not complete (disclosed in plan 618): the
+second attempt burned the whole 30-min tool ceiling inside the prefill after
+the load gate — the box paging under ~20.5 GB resident + mmap pressure; the
+always-on synthetic gate carries the forward-path proof, and CPU host numbers
+do not price TTFT (the cudarc q4 GEMV is the scoped next item).
 
 **En-route:** `for_each_ternary_site*` walkers hand out `&ProjWeights` (the
 refit bin takes `as_ternary_mut`; q4 sites refuse — refit needs bit-planes; the
