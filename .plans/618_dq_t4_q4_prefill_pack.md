@@ -1,6 +1,6 @@
 # Plan 618 — Issue 028 T4 unblock: the Q4_K prefill pack (S1) + the q4 weight arm (S2) + the dual-PTQ measurement (S3)
 
-**Status:** IN PROGRESS — S1+S2 landed (the pack exists and the container loads + runs it); the cudarc q4 GPU GEMV (S2 item 5) LANDED 2026-10-06; S3 (the measurement) remains.
+**Status:** IN PROGRESS — S1+S2+S2-item-5 landed; S3 substrate LANDED 2026-10-06 (the Q6_K matched-single arm, CPU + GPU + requantizer target axis + the pre-registered run design below); the q6k pack emit + the S3 run remain.
 
 Master: `.issues/028_dual_ptq_disaggregated_serving.md` (T4) + `.research/004_DQ_Disaggregated_Quantization.md`.
 Consumer: `src/disaggregated.rs` (`load_pair` / `load_single_file` / `PhaseHandoff`, T1+T2+T3 landed `09d0dd5`).
@@ -254,20 +254,120 @@ RAM posture (disclosed): load peaks ≈ 20.5 GB owned + the 14.4 GB mmap page
 -cache — fits the 32 GB box; the mmap pages are clean and evict while the
 owned copies materialize.
 
-## S3 — the measurement (the science deliverable)
+## S3 — the measurement (the science deliverable) — **design landed 2026-10-06; substrate landed; pack building; run pending**
 
-- Arms, matched TOTAL storage per the issue: (a) single PQ2_0 (6.7 GB),
-  (b) dual PQ2_0 + Q4_K (20.5 GB) vs a matched-storage single-checkpoint
-  reference (q4_k single ≈ 14 GB + the difference in a deeper/other format —
-  the issue's "matched TOTAL storage" pairing is fixed at run design time
-  with the owner's 026 instrument vocabulary).
-- Instrument: Plan 614's `dq_phase_matrix` family (the DQ phase-sensitivity
-  bench) + the accuracy axis; TTFT at 4K/8K prompts once the S2 GPU arm
-  exists (CPU host numbers do not price TTFT — measured this pass: the
-  real-pair host prefill smoke paged before completing 5 tokens; see the
-  S2 gate list).
-- Pre-registered null: recovery ≤ measurement noise ⇒ container shelved,
-  T4's decomposition number stands alone (the issue's PoC gate).
+### S3.1 — the Q6_K matched-single substrate — **LANDED 2026-10-06**
+
+The matched-storage pairing needs a single-checkpoint control at ~the dual
+pair's total storage. **Q6_K is the arm**: q6_k projects at 210 B/256 w over
+the same 400 requant tensors ≈ 20.4 GB payload vs the dual pair's 21.1 GB
+total (6.7 + 14.43) — matched within ~3%, DISCLOSED (the control is slightly
+CHEAPER — the conservative direction for the container's verdict; a win
+under a cheaper control is a stronger win, a loss is not excused by it).
+Landed (`feat: 028 T4 S3 substrate`):
+
+- **Encoder** — `quantize_row_q6_k` in `quant/q6k.rs`: the llama.cpp
+  `quantize_row_q6_K_ref` port (fetched from ggml-org/llama.cpp
+  ggml-quants.c @ master, 2026-10-06) — per-16-sub-block `make_qx_quants`
+  ±9-step scale search (rmse_type 1, weights x²), `iscale = -128/max_scale`
+  signed int8 sub-block scales under one f16 super-block `d`, a requant pass
+  against the ROUNDED `d·sc` products, then the ql/qh 6-bit packing. The
+  control arm's identity is "Q6_K as llama.cpp defines it" — never a home-
+  grown weaker encoder that would bias the matched verdict toward the
+  container. Round-trip gate: ≤ 2.5% of sub-block amax (measured max 1.6%;
+  the q4 house encoder's simpler form is S1's landed choice — provenance
+  disclosed per pack).
+- **CPU arm** — `ProjWeights::Q6K(Vec<BlockQ6K>, rows, cols)` at every site
+  (matvec rayon twin of `matvec_q4k`, `dequant_to_dense`, `invariants_hold`,
+  `bytes`, `bitlinear`'s quant-arm hook assert, `act_taps`' lm_head refuse,
+  `gguf_loader::q6k_tensor_blocks` + `load_proj` Q6_K arm),
+  `gemv_q6_k_row` fused dequant-dot (matvec == dequant-dot pinned at 1e-5).
+- **GPU arm** — `gemv_q6k_cuda_raw.rs`: `gemv_q6k_dp4a` single + multi-
+  persistent (the q4 module's twin; ql-first 210 B layout — NOT q4k's
+  f16-headers-first; sub-block index = element/16, NO interleaved scale
+  decode; 6-bit nib+2-bit unpack in registers → dp4a; same int8 + ascale
+  activation buffers). Parity: host-mirror exact 1e-5 + CPU-dequantizer
+  layout pin + CPU f32 ref **3.9e-4** magnitude-referenced vs the 2% bound;
+  multi==singles; e2e q6-forward-vs-CPU (argmax 7==7, max|Δlogit| 7.5e-9).
+  Wiring: `WeightFormatCudarc::Q6K` + `q6_blocks` (field-additive —
+  riir-train-gpu's backward reads `.codes`/`.wscale` and stays compiling)
+  + `QuantGemvKernels {q4k, q6k}` — ONE handle through the format-agnostic
+  wrappers (formats dispatch inside; no 14-parameter signatures).
+- **Requantizer** — `requant_q4_prefill --target q6k` (byte-identical q4k
+  default; typed-vec scratch — never an alignment bet on a u8 buffer;
+  per-target read-back bound: q6 = 10% of sub-block amax).
+- **En-route repair (pre-existing at HEAD, found by `--all-features`)**:
+  `profiling.rs` still took `&TernaryGroupWeights` after the S2 enum — 12
+  compile errors at HEAD under all-features (the S2 session disclosed three
+  postures; this was not among them). Its `bitlinear` now dispatches
+  `ProjWeights` (hook refuses quant arms loud) + the fused-hook/ffn-hook
+  lanes `as_ternary`-expect. 0 now.
+
+### S3.2 — the matched-single pack — the run design
+
+`Ternary-Bonsai-2-27B-Q6_K.sg.gguf` (the `.sg` = single q6; NOT `.pf` —
+it is a standalone single-checkpoint control, never a prefill copy): the
+S1 policy at the q6 target — identity block table, 400 projections → Q6_K,
+everything else byte-copied (globals ternary + the whole escape set, so the
+storage comparison isolates the projection planes), blake3 sidecar,
+`--verify-only` re-runnable.
+
+### S3.3 — the arms (fixed at run design time, pre-registered)
+
+| arm | load | storage | prefill | decode |
+|---|---|---|---|---|
+| `base` | `load_qwen_deltanet_ternary_weights_gguf(PQ2_0)` | 6.7 GB | ternary | ternary |
+| `dual` | `load_pair(PQ2_0, Q4_K.pf)` | 21.1 GB | Q4_K | ternary (bit-shared) |
+| `matched` | plain loader over `Q6_K.sg.gguf` | ~20.4 GB | Q6_K | Q6_K |
+| `q4-single` (secondary) | plain loader over `Q4_K.pf` (both phases) | 14.43 GB | Q4_K | Q4_K |
+
+`q4-single` is the DECOMPOSITION control (the issue's science number): it
+shares the dual's prefill copy exactly, so `dual − q4-single` isolates the
+decode-format effect (q2 vs q4 decode) and `q4-single − base` isolates the
+prefill-copy effect at fixed decode format. Cheaper than the dual AND
+uniform — it is expected to beat `dual` on decode-heavy tasks; that is not
+a container refutation, it is the decomposition.
+
+### S3.4 — the lane (fixed) + the task families
+
+- **Lane: the cudarc per-token GEMV forward, ALL ARMS.** Kernel policy held
+  constant across arms (same quantize→GEMV chain, same decode kernels) so
+  arm deltas measure the FORMAT, not a kernel-policy mix. Cross-lane note
+  (disclosed): this is NOT the 614 CubeCL GEMM-prefill lane — the cudarc
+  lane's per-token prefill is the only path that runs q4/q6 weights on the
+  4090 today; the 614 activation-phase cells remain the long-context
+  reference.
+- **Families (614's generators, frozen seeds, same prompts every arm):**
+  (a) decode-heavy — arithmetic-CoT 48 items (`dq_phase_matrix`'s generator,
+  greedy ≤ 256, LAST-integer scoring);
+  (b) prefill-heavy — multi-needle NIAH 16 prompts per length ∈ {1024,
+  2048, 4096-if-VRAM} (8 needles, one queried, FIRST-substring scoring).
+  Lengths lowered from 614's {4K, 8K, 16K} for per-token-GEMV cost; the
+  prefill-KV-quality mechanism shows at 1K+. VRAM gate per length: the dual
+  arm holds 21.1 GB weights + KV + workspace on the 24 GB 4090 — 4096 fits
+  only if KV+workspace ≤ ~2.5 GB; the runner measures free VRAM at arm load
+  and drops the length for the whole arm set (arms stay comparable) with
+  the drop named in the report.
+- **Verdict machinery (026/614 vocabulary):** paired bootstrap 95% CI on
+  (arm − base) pick-accuracy per family per length (10k resamples, paired
+  by item); admissibility `0.25 ≤ acc(base) ≤ 0.95` per family/length;
+  SATURATED guard; HIT/REVERSED/NULL labels.
+- **Pre-registered readings:** PRIMARY (the issue's PoC gate): on the
+  prefill-heavy family, `recovery(dual) ≥ recovery(matched)` at CI > 0 on
+  some length AND no family/length where matched significantly beats dual →
+  **HIT** (the container earns its storage); matched ≥ dual everywhere →
+  **NULL** (container shelved; T4's decomposition number stands alone).
+  Everything between → recorded, owner-gated. TTFT (same runs): prefill
+  wall/prompt per arm — expected ≈ byte ratios at GEMV (2.15×/3.05×) — the
+  honest kernel-maturity disclosure: the paper's TTFT win needs a q4-class
+  GEMM prefill arm; without it the container's TTFT claim rests on the
+  ternary GEMM lane (unchanged), and the GEMV numbers price the
+  decode-format cost only.
+
+### S3.5 — records
+
+- Pack + run artifacts: `.benchmarks/` + the run report; issue 028 T4 row
+  + plan Open-list updates at the landing.
 
 ## Open at S2 close
 
