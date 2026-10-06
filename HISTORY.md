@@ -208,6 +208,8 @@ parent cache self-generated over the REAL forward, glue parity 511/511 byte-iden
   TWT absolute-0.9 bar passed on the M3's corpus (0.9486) and misses by 0.008 on this
   box's chat_probe corpus — corpus-attributed (hit-rate parity both boxes), disclosed.
 
+- **Residual on removal (hygiene, this commit):** issue file removed per the noise-reduction rule; the one open checkbox rides here — **T1.4's REAL parent-vs-quantized ΔS pair run stays deferred** until a quantized laya-class checkpoint + the T1.2 GDN capture half exist (the module `src/twt/delta.rs` + its localization gate are landed; only the real-pair run waits).
+
 Same commit wave: Issue 035 P0+P0.5 — `src/fa_posterior.rs`, the FA-constrained exact
 joint sampler for the dLLM decode lane (Mosaic arXiv:2607.07026 distill; CSR automaton
 tensors + edge-space forward–backward sequential sampler in f32 + the O(log L)
