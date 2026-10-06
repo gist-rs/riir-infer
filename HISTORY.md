@@ -4,6 +4,76 @@ Durable records for resolved questions and closed lanes (the noise-reduction
 convention: the record lands here, hash-pinned; open work lives in `.issues/`
 and `.plans/`). Created 2026-09-23 at the first record.
 
+## 2026-10-06 — Issue 028 T4 S1: the Q4_K prefill pack exists — plus the science premise settled — `94a4e7c`
+
+**The artifact:** `Ternary-Bonsai-2-27B-Q4_K.pf.gguf`, **14.43 GB**, blake3
+`0a7a5605fadc37b482c0fddf6c28334244eea818b1716461bddb412f1a28309c` (sidecar
+beside it). Identity block table over the league PQ2_0 pack through the landed
+collapsed-GGUF writer; 400 block projections dequant→`quantize_row_q4_k`
+(13.68 GB payload), globals + the a/b gate projections + norms/conv/ssm_a/
+ssm_dt byte-copied — **the escape set rides bit-shared by construction**, so
+`verify_escape_set_shared` passes on the pair trivially.
+
+**The science premise (the thing that unblocked T4):** the issue said the q4
+pack must be quantized "on the unfolded source", and no unfolded-f16 source
+exists on this box. It is not needed: the bonsai is TRAINED TERNARY, so the
+PQ2_0 wire is exact up to its f16 group scales — the bridge repack accepts
+every block (zero fourth-state codes, `UnsupportedFourthState` is the
+structural gate) and the raw `dequantize_row_q2_0` decode equals
+`trit × f16 scale` on sampled blocks (the value gate, `--sample-only`).
+Requantizing from the PQ2_0 pack therefore carries **only ε(Q4_K)** — the same
+error a q4 pack from an f16 original would carry. The premise is checked on
+the artifact at every run, never assumed.
+
+**Verification (exit 0, `--verify-only` re-runnable):** geometry plane
+(`general.architecture` + every `qwen35.*` key) equal INCLUDING the
+discriminant-tagged variant encoding — the first run's red: the writer's
+block-count override re-widened to U64 while the parent stores U32, and
+`geometry_fingerprint` is discriminant-tagged, so the decode/prefill pair
+would have REFUSED at T4 load time (`load_pair` runs before the prefill copy
+dequantizes). Fix: mirror the parent's own metadata value verbatim — identity
+requant = identity metadata encoding. Copy-class byte-identity PASS (451
+tensors); all 400 requant tensors structurally Q4_K at the parent's exact
+shapes; sampled read-back max err 1.34–1.44e-3 within the analytic Q4_K
+sub-block bound.
+
+En-route: the GGUF v3 value-type table for the probe scripts (7 = BOOL,
+10/11/12 = U64/I64/F64 — the first hand-rolled table had 7 = F64 and
+desynced the metadata walk; `prism.hadamard.gdn_v_grouped` is a bool).
+Known limit, disclosed: the pack VERIFIES but the container cannot LOAD it
+yet — `load_ternary_proj` refuses Q4_K (plan 618's S2); the accuracy
+measurement is S3. Plan: `.plans/618_dq_t4_q4_prefill_pack.md`.
+
+## 2026-10-06 — the GPU crate is clippy `-D` clean at every posture — `e993eff`
+
+The pre-existing warnings the Issue-035 session disclosed (2 lib clippy + 3
+rustc + 4 bin) are gone, and the interesting half is the posture analysis:
+
+- The rotation quantize pair (`quantize_rotate_q8`/`_permute_rotate_q8`) +
+  their two `*_warp` kernel fields are **test-consumed only** — the sole
+  caller `fused_qrot_bitexact_vs_unfused_chain` is
+  `#[cfg(feature = "prefill_q8_act")]`-gated, so the items are dead at every
+  posture EXCEPT (test AND prefill_q8_act). The allow gate is
+  `not(all(test, feature = "prefill_q8_act"))` — the first
+  `not(any(test, …))` attempt was wrong in exactly the posture that fired
+  (test harness without the feature), the class where a gate reads clean on
+  the lane that compiles and dead on the lane that runs.
+- `DQ_FQ_CUDA_SRC` is dead only without `dq_phase_bench` (its reader
+  `DqFqKernels::new` is feature-gated) — the dq_fakequant.rs cfg_attr idiom,
+  plus `DqFqKernels` + the const moved above the tests module
+  (`items_after_test_module`).
+- Mechanicals: qwen38_pyramid_capture (is_multiple_of / div_ceil /
+  enumerate / let-chain collapse — the cargo-refine healer's apply pass
+  surfaced 0 edits for these, a documented miss feeding the post-mining
+  queue), exl3_pack doc-list indent, `KeyedSpecConfig` derive(Default)
+  (was a hand-rolled identity impl), `KeyedSerialFeats` type alias,
+  `iter().copied().collect()` → clone/move, `rev().find()` for the
+  DoubleEndedIterator last().
+
+Clean: `--workspace --all-targets` at default; `-p riir-infer-gpu
+--all-targets` at `ternary_gemv_cuda_raw` AND `--all-features`; `-p
+riir-infer-core` all-features; lib tests 248 + 56 green unchanged.
+
 ## 2026-10-06 — Issue 035 P2.6 LANDED: real-vocabulary compile + the row-fold — the honest G2 regime — `ddcaeb0`
 
 Two compile/sampler rebuilds, both needed before a real-vocab number could exist:
