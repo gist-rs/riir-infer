@@ -163,15 +163,16 @@ fn eval_standard_precedence(first: i128, ops: &[(char, i128)]) -> Option<i128> {
     Some(sum)
 }
 
-/// The 614 `arith_items_v2` corpus at `hard = false` — same seed, same
-/// operand scales, same prompt spelling. Item i here == item i in a 614 run
-/// at the same n (the decode-heavy pairing is index-exact to 614's base).
-fn arith_items(n: usize) -> Vec<ArithItem> {
+/// The 614 `arith_items_v2` corpus — same seed; `hard` is the 614 Issue-033
+/// posture verbatim (wider operand scales to pull base below the 0.95
+/// admissibility ceiling; the draw stream diverges by construction — a
+/// different, hash-pinned corpus).
+fn arith_items(n: usize, hard: bool) -> Vec<ArithItem> {
     let mut rng = Rng(0x0A71_A614_4847);
     let mut out = Vec::with_capacity(n);
     for _ in 0..n {
-        let n_ops = 2 + (rng.below(3) as usize);
-        let first = 100 + rng.below(9900) as i128;
+        let n_ops = if hard { 3 + (rng.below(4) as usize) } else { 2 + (rng.below(3) as usize) };
+        let first = if hard { 1_000 + rng.below(99_000) as i128 } else { 100 + rng.below(9900) as i128 };
         let mut ops: Vec<(char, i128)> = Vec::with_capacity(n_ops);
         for _ in 0..n_ops {
             let op = match rng.below(3) {
@@ -180,8 +181,8 @@ fn arith_items(n: usize) -> Vec<ArithItem> {
                 _ => '*',
             };
             let operand: i128 = match op {
-                '*' => (3 + rng.below(97)) as i128,
-                _ => (10 + rng.below(990)) as i128,
+                '*' => (if hard { 11 + rng.below(989) } else { 3 + rng.below(97) }) as i128,
+                _ => (if hard { 100 + rng.below(9_900) } else { 10 + rng.below(990) }) as i128,
             };
             ops.push((op, operand));
         }
@@ -620,6 +621,7 @@ fn run() -> Result<(), String> {
     let q6_path = env_or("DQ3_Q6_GGUF", DEFAULT_Q6);
     let out_dir = PathBuf::from(env_or("DQ3_OUT", ".benchmarks/dq_s3_matrix"));
     let arith_n: usize = env_or("DQ3_ARITH_N", "48").parse().map_err(|_| "DQ3_ARITH_N")?;
+    let arith_hard = env_or("DQ3_ARITH_HARD", "0") == "1";
     let ni_per_len: usize = env_or("DQ3_NI_PER_LEN", "16").parse().map_err(|_| "DQ3_NI_PER_LEN")?;
     let ni_needles: usize = env_or("DQ3_NI_NEEDLES", "8").parse().map_err(|_| "DQ3_NI_NEEDLES")?;
     let mut lengths: Vec<usize> = env_or("DQ3_LENGTHS", "1024,2048,4096")
@@ -681,7 +683,7 @@ fn run() -> Result<(), String> {
     let tok = BpeTokenizer::from_gguf(&gguf).map_err(|e| format!("tokenizer: {e}"))?;
     drop(gguf);
 
-    let arith = arith_items(arith_n);
+    let arith = arith_items(arith_n, arith_hard);
     let arith_items_pairs: Vec<(String, String)> = arith
         .iter()
         .map(|a| (a.prompt.clone(), a.gold.to_string()))
@@ -882,6 +884,7 @@ fn run() -> Result<(), String> {
     let report = build_report(
         &cells,
         arith_n,
+        arith_hard,
         ni_per_len,
         ni_needles,
         n_boot,
@@ -910,6 +913,7 @@ fn max_of(lens: &[usize]) -> usize {
 fn build_report(
     cells: &[CellResult],
     arith_n: usize,
+    arith_hard: bool,
     ni_per_len: usize,
     ni_needles: usize,
     n_boot: usize,
@@ -928,7 +932,7 @@ fn build_report(
         "- **Lane (frozen):** cudarc per-token GEMV, ALL arms — kernel policy constant; the lane's int8 activation quantization is COMMON to every arm, so deltas isolate the weight format. NOT the 614 GEMM-prefill lane (cross-lane comparability approximate).\n"
     ));
     md.push_str(&format!(
-        "- **Corpus blake3:** `{corpus_hash}` — arith {arith_n} items (the 614 v2 corpus at hard=false), niah {ni_per_len}/len × {ni_needles} needles, lengths {lengths:?}\n"
+        "- **Corpus blake3:** `{corpus_hash}` — arith {arith_n} items (the 614 v2 corpus, hard={arith_hard}), niah {ni_per_len}/len × {ni_needles} needles, lengths {lengths:?}\n"
     ));
     md.push_str(&format!(
         "- **Gen caps:** arith ≤ {arith_cap}, niah ≤ {ni_cap} · bootstrap {n_boot}\n"
@@ -966,6 +970,12 @@ fn build_report(
     md.push_str("\n## Paired vs base (bootstrap 95% CI on the mean paired difference)\n\n");
     md.push_str("| arm | family | len | recovery | CI lo | CI hi | n | note |\n|---|---|---|---|---|---|---|---|\n");
     let mut paired: Vec<(ArmId, &'static str, usize, f64, f64, f64)> = Vec::new();
+    // The admissibility gate (026/614): 0.25 ≤ acc(base) ≤ 0.95 — a base at
+    // ceiling cannot measure recovery (no headroom); the first run measured
+    // EVERY cell at/above the ceiling and the S3.5 pre-registration binds
+    // the verdict to READ THAT, never a silently-read NULL over inadmissible
+    // cells.
+    let mut admissible_cells = 0usize;
     for c in cells {
         if c.arm == ArmId::Base {
             continue;
@@ -980,6 +990,8 @@ fn build_report(
             ));
             continue;
         }
+        let b_acc = b.correct.iter().sum::<u8>() as f64 / b.correct.len() as f64;
+        let admissible = (0.25..=0.95).contains(&b_acc);
         let d: Vec<i8> = c
             .correct
             .iter()
@@ -988,10 +1000,10 @@ fn build_report(
             .collect();
         let rec = d.iter().map(|&x| f64::from(x)).sum::<f64>() / d.len() as f64;
         let (lo, hi) = paired_bootstrap_ci(&d, n_boot);
-        let b_acc = b.correct.iter().sum::<u8>() as f64 / b.correct.len() as f64;
-        let note = if !(0.25..=0.95).contains(&b_acc) {
-            "INADMISSIBLE base"
+        let note = if !admissible {
+            "INADMISSIBLE base (ceiling/floor) — excluded from the verdict"
         } else {
+            admissible_cells += 1;
             ""
         };
         paired.push((c.arm, c.family, c.length, rec, lo, hi));
@@ -1007,6 +1019,10 @@ fn build_report(
 
     // The pre-registered verdict.
     md.push_str("\n## Verdict (pre-registered, plan 618 §S3.3)\n\n");
+    if admissible_cells == 0 {
+        md.push_str("**RECORD-SATURATED** — zero admissible cells: every base sits at/above the 0.95 admissibility ceiling, so NEITHER pre-registered pole (HIT nor NULL) can fire. The instrument cannot falsify at this difficulty; per the S3.5 pre-registration the honest read is the saturation record plus the exact-zero paired observation, and the shelving decision rides the S3b hard corpus (pre-registered) or parsimony.\n");
+        return Ok(md);
+    }
     let find = |arm: ArmId, family: &str, len: usize| -> Option<(f64, f64, f64)> {
         paired
             .iter()
