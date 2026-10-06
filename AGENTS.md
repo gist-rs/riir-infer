@@ -91,6 +91,12 @@ NEVER allocate `1005–1008` here — riir-ai's own counter has already consumed
 that range (it read 1008 on 2026-09-26; re-check
 `../riir-ai/.issues/.highwater` before touching the inherited range at all).
 
+Self-allocation headings follow the grammar the citation oracle reads —
+`## <date> — Issue NNN: <title> CLOSED — <verdict>` — the number sits
+IMMEDIATELY before its title delimiter; never write a word (CLOSED, resolved,
+follow-up) between the number and the delimiter — that shape is unread to the
+sweep and re-reds the repo (katgpt-rs Issue 921).
+
 ## Branch
 
 `develop` is the working branch. Don't create feature branches; commit

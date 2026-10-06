@@ -115,27 +115,27 @@ RoPE pairing `0b26b9a`: llama.cpp stores llama Q/K rows interleaved; this crate'
 
 The premise was false: upstream `Gemma2Attention` defines no `q_norm`/`k_norm` — it bounds scores with `attn_logit_softcapping` (tanh, cap 50), already applied here (`attention_head_softcap`); per-head QK-norm arrived in Gemma-3. 288 = 11 tensors/layer × 26 + 2 globals is standard; `riir-train/data/gemma-2-2b-it-f16.gguf` is upstream-faithful, nothing re-run (Issue 010 filed `95f52fb`). Corrected in-commit: the `vk_calibration` bin's caveat 1 + `gemma2_calibration.rs`'s tap-law paragraph (for gemma-2 the pre-RoPE K tap IS the cache's K; katgpt-rs Issue 883 trap 1 applies to gemma-3/4-class stacks only). Lesson: check the reference source before filing a fixture-integrity finding.
 
-## 2026-09-25 — Issue 009 CLOSED: software-pipelined narrow staging — NEGATIVE at the gate, and the probe's tiny-op floor exposed
+## 2026-09-25 — Issue 009: software-pipelined narrow staging CLOSED — NEGATIVE at the gate, and the probe's tiny-op floor exposed
 
 `sgemm_narrow_pipe` built, measured, reverted: gate NO-GO (probe −1.5%; forward-level paired env-flip −0.8..−1.6%, reproducible 3/3, under the ≥3% bar; nvcc SINKS register loads — the `asm volatile("" ::: "memory")` fence is load-bearing). The real yield: `sgemm_shape_timing` tiny-op rows are ~90% launch/WDDM floor (FLOPs vary 400×, time 1.06×) — narrow-zone rungs must gate at FORWARD level or add a floor-subtraction arm; `.issues/006`'s head-tail rows were the same floor class. cp.async remains the recorded next lever (priced ≤ ~4%).
 
-## 2026-09-25 — riir-infer Issue 008 CLOSED: the narrow reg4 rung — NEGATIVE, the narrow zone is TLP-bound, not bandwidth-bound
+## 2026-09-25 — Issue 008: the narrow reg4 rung CLOSED — NEGATIVE, the narrow zone is TLP-bound, not bandwidth-bound
 
 `sgemm_narrow_reg4` (4×4 fragments, 32×16 warp tile → 128 threads): every true narrow-served row regressed +41..+177% (`sgemm_shape_timing`, the `LAYA_CUDA_REG4` axis; the wide/xwide rows re-measured the 007 rung at −2.6..−20% both runs — the consistency check). Mechanism: the narrow zone's grids are ≤128 blocks by construction — 1 block/SM, staging latency exposed; the measured ceiling was never the 20% roofline (~5% of fp32 peak at m=106). Reverted byte-identical (the BK48 precedent). Follow-up on record: double-buffered staging / `cp.async` — the right repair for a LATENCY-bound zone.
 
-## 2026-09-25 — riir-infer Issue 007 CLOSED: the register-blocking sgemm rung — 4×4 fragments, −9..−21 % kernel on every wide/xwide shape
+## 2026-09-25 — Issue 007: the register-blocking sgemm rung CLOSED — 4×4 fragments, −9..−21 % kernel on every wide/xwide shape
 
 `sgemm_wide_reg4` + `sgemm_xwide_reg4` (16 accumulators, 2 B smem/FMA vs 3, ceiling 50%; same grids so block-fit cliffs carry over; k-ascending per-output accumulation). Measured: banking77 zone −9.4..−16.1%, packed multi-wave −9.4..−21.4%, m=106/45 n≥2560 −10..−22%; forward english −5.3% / typed −3.9%; the reflex `.benchmarks/031` refresh (15 suites, host 4090-windows) median −6.2% (14/17 rows BIT-IDENTICAL; the typed_decisions wobble is that lane's pre-existing `determinism_ok: false`). Kill-switch `LAYA_CUDA_REG4=0`; gates `cuda_ops_smoke` 4/4, `packed_forward_equiv` 4/4, lib 41/41, G5 cuda 2/2, `laya_batch_parity` 1/1.
 
-## 2026-09-25 — riir-infer Issue 006 CLOSED: the float4 sgemm rung — every instance's B loads collapsed, −7..−17 % on every suite
+## 2026-09-25 — Issue 006: the float4 sgemm rung CLOSED — every instance's B loads collapsed, −7..−17 % on every suite
 
 The packed zone's problem was LOAD-ISSUE THROUGHPUT (12-16.5 TF/s = 15-20% of peak; 6 smem loads per 8 FMAs with the four B loads contiguous). B staging rows pad to a 16 B multiple (65→68, 129→132) and the four B loads → one `reinterpret_cast<float4>` (result-identical by construction, bit-verified). −10.3..−25.2% multi-wave, forward −12.5..−15.2%; the reflex `.benchmarks/030` refresh −6.8..−16.7% p50 incl. the packed suites, 13/16 rows bit-identical. No kill-switch — the float4 form IS the kernels now; `LAYA_CUDA_LADDER=0` still holds the A/B posture.
 
-## 2026-09-25 — Issue 005 CLOSED: CUDA graphs — NEGATIVE, the lane is GPU-bound (submit fully hidden)
+## 2026-09-25 — Issue 005: CUDA graphs CLOSED — NEGATIVE, the lane is GPU-bound (submit fully hidden)
 
 Instrument ships (`LAYA_CUDA_STATS=1`, zero cost unset): `gpu == wall ±0.3%` on every row of every checkpoint — the whole CPU submit path (launches ~15 µs/call, uploads, ~0.2 ms allocs) executes inside the GPU window; a graph replay removes work that is already free (~1-2% bounded, under the noise band) while adding exactly the stale-replay correctness surface. Reopen triggers (both on the instrument): kernels get much faster (submit becomes the wall) or allocs/uploads stop being hidden. Gates: `cuda_ops_smoke` 4/4, `packed_forward_equiv` 3/3, lib 41/41, G5 2/2, `laya_batch_parity` 1/1; stats-off parity byte-stable.
 
-## 2026-09-25 — Issue 004 CLOSED: the sgemm tile ladder — block-fit floors, the narrow single-question win
+## 2026-09-25 — Issue 004: the sgemm tile ladder CLOSED — block-fit floors, the narrow single-question win
 
 Three instances (`sgemm_narrow` 32×64×64, `sgemm_wide`, `sgemm_xwide` 64×128×32) picked by BLOCK-FIT on the SM count — the M3 `m < 256` rule does NOT transfer to the 128-SM 4090 (measured cliff: narrow −15.7% at n=2048 exactly 128 blocks, +46% at n=2560/160 blocks). Narrow −13.7..−19.6%, xwide QKV −6.8..−8.5%, forward −8.4..−14.1%; the reflex `.benchmarks/029` single-question suites −6..−14%. Result-identical by construction (k-ascending per-output); 13/16 rows bit-identical. Kill-switch `LAYA_CUDA_LADDER=0`. Launch defect fixed in passing (dynamic smem over the 48 KB static default → `CUDA_ERROR_INVALID_VALUE`; all instances launch dynamic smem 0).
 
