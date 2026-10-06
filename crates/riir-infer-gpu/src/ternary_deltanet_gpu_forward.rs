@@ -3190,7 +3190,7 @@ impl TernaryDeltanetGpuForward {
                     }
                 }
                 if let Some(ref mut h) = lh.attn_wo {
-                    upload_one(h, &wh.attn_wo);
+                    upload_one(h, q4_refuse(&wh.attn_wo, "attn_wo"));
                 }
             }
             eprintln!("[Plan 534] Metal weight upload complete.");
