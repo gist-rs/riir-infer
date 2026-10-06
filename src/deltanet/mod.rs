@@ -89,6 +89,12 @@ pub mod rotation;
 #[cfg(feature = "deltanet_ternary_inference")]
 pub mod ternary_forward;
 
+// Issue 919 T3 cell 2 — the ternary/GDN forward over a generic quantized KV
+// cache (measurement lane; the G0 control pins bit-identity with the plain
+// forward). Gated with `ternary_forward`, whose code it mirrors.
+#[cfg(feature = "deltanet_ternary_inference")]
+pub mod ternary_kvq;
+
 // Issue 014 — the activation tap plan (linear-INPUT mapping + visit order)
 // shared by the diagonal collector (T1) and the refit/retention-walk
 // instrument (T2/T3). Both instruments must agree on the mapping or the

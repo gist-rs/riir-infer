@@ -110,6 +110,11 @@ vk_p1_g1 = ["vk_calibration", "gemma2_qkv"]
 # (pure quant math over q8kv + the katgpt-types trait) and lib-tested at
 # default features.
 spike_census_t3 = ["vk_calibration", "gemma2_qkv"]
+# Issue 919 T3 cell 2 (2026-10-06): the SAME A/B on the decisive strong-MA
+# cell — Ternary-Bonsai-2-27B-PQ2_0 (qwen35 hybrid). Needs the ternary/GDN
+# forward (deltanet_ternary_inference — `deltanet::ternary_kvq`, the
+# quantized-KV seam) + the folded-file loader (bonsai2_hadamard implies it).
+spike_census_t3_ternary = ["deltanet_ternary_inference", "bonsai2_hadamard"]
 # row_logit_floor (riir-infer Issue 011 T1, 2026-09-25): the opt-in consumer
 # of katgpt-core's sink-exempt row-logit floor + b-bit logit code +
 # exp-table softmax (katgpt-rs Issue 882 P2, Bench 888) —
@@ -339,6 +344,11 @@ required-features = ["vk_p1_g1"]
 name = "spike_census_t3_kv_ab"
 path = "src/bin/spike_census_t3_kv_ab.rs"
 required-features = ["spike_census_t3"]
+
+[[bin]]
+name = "spike_census_t3_kv_ab_ternary"
+path = "src/bin/spike_census_t3_kv_ab_ternary.rs"
+required-features = ["spike_census_t3_ternary"]
 
 [[bin]]
 name = "row_logit_floor_ppl"

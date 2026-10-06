@@ -71,8 +71,11 @@ use crate::deltanet::rotation::{
 /// The GPU path uploads weights once (cached by pointer identity) and
 /// dispatches a `CubeCL` kernel per call. The CPU path uses rayon-parallel
 /// SIMD bit-plane extraction.
+///
+/// `pub(crate)`: also the ternary KV-quant lane's projection helper
+/// (`ternary_kvq`, Issue 919 T3 cell 2 — the seam must run the SAME kernel).
 #[inline(always)]
-fn bitlinear(
+pub(crate) fn bitlinear(
     y: &mut [f32],
     w: &ProjWeights,
     x: &[f32],
@@ -107,10 +110,15 @@ fn bitlinear(
 ///
 /// Mirrors [`super::forward::forward_deltanet_layer`]; see that function for
 /// the recurrence math. Steps 1–3 and 11 use `bitlinear` instead of `matmul`;
+/// Steps 1–3 and 11 use `bitlinear` instead of `matmul`;
 /// steps 4–10 (conv1d, gates, recurrence, norm, `SiLU`) are identical and call
 /// the same helpers.
+///
+/// `pub(crate)`: the ternary KV-quant lane dispatches this unchanged for its
+/// `DeltaNet` layers (`ternary_kvq`, Issue 919 T3 cell 2 — the GDN path must
+/// be the identical code in both arms).
 #[allow(clippy::too_many_arguments)]
-fn forward_deltanet_layer_ternary(
+pub(crate) fn forward_deltanet_layer_ternary(
     x: &mut [f32],
     layer: &DeltaNetTernaryLayerWeights,
     state: &mut [f32],
