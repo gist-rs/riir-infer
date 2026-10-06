@@ -512,6 +512,30 @@ impl GgufFile {
         Ok(blocks)
     }
 
+    /// Get raw `Q6_K` blocks for a tensor (zero-copy from the mmap'd file) —
+    /// the [`q4k_tensor_blocks`] twin (plan 618 S3: the matched-storage
+    /// single-checkpoint control arm).
+    pub fn q6k_tensor_blocks(&self, name: &str) -> Result<&[crate::quant::q6k::BlockQ6K]> {
+        let info = self
+            .tensor_map
+            .get(name)
+            .with_context(|| format!("tensor '{name}' not found in GGUF file"))?;
+        if info.ggml_type != GgmlType::Q6_K {
+            bail!(
+                "tensor '{name}' is {:?}, expected Q6_K for quant-resident load",
+                info.ggml_type
+            );
+        }
+        let slice = self
+            .tensor_slice(name)
+            .with_context(|| format!("tensor '{name}' data out of bounds"))?;
+        // SAFETY: BlockQ6K is #[repr(C)] with no padding (u8 arrays + one u16
+        // before a 2-byte-aligned tail), so bytemuck::cast_slice is sound for
+        // any aligned byte slice.
+        let blocks: &[crate::quant::q6k::BlockQ6K] = bytemuck::cast_slice(slice);
+        Ok(blocks)
+    }
+
     /// Get raw `Q2_0` blocks for a tensor (zero-copy from the mmap'd file).
     ///
     /// Returns the packed `&[BlockQ2_0]` slice pointing directly into the
@@ -2046,8 +2070,31 @@ fn load_proj(
             // repacks into owned Vecs for the same reason).
             Ok(ProjWeights::Q4K(blocks.to_vec(), rows, cols))
         }
+        GgmlType::Q6_K => {
+            // Plan 618 S3 — the matched-storage single-checkpoint control
+            // arm (same quant-resident contract as the Q4K arm).
+            use crate::quant::q6k::QK_K as QK_K6;
+            anyhow::ensure!(
+                info.shape.len() == 2,
+                "tensor '{name}' has {} dims, expected 2D for a projection",
+                info.shape.len()
+            );
+            let cols = info.shape[0];
+            let rows = info.shape[1];
+            anyhow::ensure!(
+                cols % QK_K6 == 0,
+                "q6 projection '{name}': cols {cols} not a multiple of {QK_K6}"
+            );
+            let blocks = gguf.q6k_tensor_blocks(name)?;
+            anyhow::ensure!(
+                blocks.len() == rows * (cols / QK_K6),
+                "q6 projection '{name}': {} blocks, expected {rows}×({cols}/{QK_K6})",
+                blocks.len()
+            );
+            Ok(ProjWeights::Q6K(blocks.to_vec(), rows, cols))
+        }
         other => bail!(
-            "tensor '{name}' is {other:?} — expected Q2_0/PTQ1_0 (ternary repack) or Q4_K (q4 prefill pack)"
+            "tensor '{name}' is {other:?} — expected Q2_0/PTQ1_0 (ternary repack), Q4_K (q4 prefill pack), or Q6_K (q6 matched single)"
         ),
     }
 }

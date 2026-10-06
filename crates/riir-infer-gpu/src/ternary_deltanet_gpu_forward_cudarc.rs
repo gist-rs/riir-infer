@@ -84,7 +84,8 @@ use riir_infer_core::deltanet::minimal_activation_cache::{
 /// (The backward is ternary-only — a Q4K-format handle reaching it is a
 /// caller bug; training never builds q4 weights.)
 /// Storage format of an uploaded projection (plan 618 item 5 — the dual-PTQ
-/// disaggregated container's prefill copy carries Q4_K projections).
+/// disaggregated container's prefill copy carries Q4_K projections; plan 618
+/// S3 adds Q6_K — the matched-storage single-checkpoint control arm).
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum WeightFormatCudarc {
     /// Packed 2-bit ternary codes + f16 group scales (the dp4a kernel).
@@ -92,18 +93,24 @@ pub enum WeightFormatCudarc {
     /// Raw `BlockQ4K` super-blocks, 144 bytes per 256 values (the q4 GEMV,
     /// `gemv_q4k_cuda_raw`). The prefill-copy format of plan 618 S1.
     Q4K,
+    /// Raw `BlockQ6K` super-blocks, 210 bytes per 256 values (the q6 GEMV,
+    /// `gemv_q6k_cuda_raw`). The matched-single control format of plan 618 S3.
+    Q6K,
 }
 
 pub struct WeightBuffersCudarc {
-    /// Ternary arm: packed 2-bit codes `[m · n/8]`. Q4K arm: empty (len 0).
+    /// Ternary arm: packed 2-bit codes `[m · n/8]`. Q4K/Q6K arm: empty (len 0).
     pub codes: CudaSlice<i16>,
     /// Ternary arm: f16 bits of the per-128-weight group scales (Issue 734
     /// T5 — halves the wscale DRAM traffic; exact f16→f32 conversion
-    /// in-kernel). Q4K arm: empty (len 0).
+    /// in-kernel). Q4K/Q6K arm: empty (len 0).
     pub wscale: CudaSlice<u16>,
     /// Q4K arm: raw `BlockQ4K` bytes, row-major `[m · n/256]`, 144 bytes per
-    /// super-block. Ternary arm: empty (len 0).
+    /// super-block. Ternary/Q6K arm: empty (len 0).
     pub q4_blocks: CudaSlice<u8>,
+    /// Q6K arm: raw `BlockQ6K` bytes, row-major `[m · n/256]`, 210 bytes per
+    /// super-block (plan 618 S3). Ternary/Q4K arm: empty (len 0).
+    pub q6_blocks: CudaSlice<u8>,
     pub format: WeightFormatCudarc,
     pub m: usize,
     pub n: usize,
@@ -121,6 +128,7 @@ impl WeightBuffersCudarc {
             codes: stream.clone_htod(&codes).expect("upload ternary codes"),
             wscale: stream.clone_htod(&wscale).expect("upload ternary wscale"),
             q4_blocks: stream.alloc_zeros::<u8>(0).expect("alloc empty q4"),
+            q6_blocks: stream.alloc_zeros::<u8>(0).expect("alloc empty q6"),
             format: WeightFormatCudarc::Ternary,
             m,
             n,
@@ -140,7 +148,29 @@ impl WeightBuffersCudarc {
             q4_blocks: stream
                 .clone_htod(crate::gemv_q4k_cuda_raw::q4k_blocks_as_bytes(blocks))
                 .expect("upload q4 blocks"),
+            q6_blocks: stream.alloc_zeros::<u8>(0).expect("alloc empty q6"),
             format: WeightFormatCudarc::Q4K,
+            m,
+            n,
+        }
+    }
+
+    /// Q6_K arm (plan 618 S3): raw `BlockQ6K` bytes row-major — the
+    /// matched-storage single-checkpoint control arm. The q6 GEMV
+    /// (`gemv_q6k_cuda_raw`) consumes these + the shared int8 activation
+    /// buffers.
+    fn upload_q6k(stream: &Arc<CudaStream>, blocks: &[riir_infer_core::quant::q6k::BlockQ6K], m: usize, n: usize) -> Self {
+        if m == 0 || n == 0 {
+            return Self::empty(WeightFormatCudarc::Q6K, stream);
+        }
+        Self {
+            codes: stream.alloc_zeros::<i16>(0).expect("alloc empty codes"),
+            wscale: stream.alloc_zeros::<u16>(0).expect("alloc empty wscale"),
+            q4_blocks: stream.alloc_zeros::<u8>(0).expect("alloc empty q4"),
+            q6_blocks: stream
+                .clone_htod(crate::gemv_q6k_cuda_raw::q6k_blocks_as_bytes(blocks))
+                .expect("upload q6 blocks"),
+            format: WeightFormatCudarc::Q6K,
             m,
             n,
         }
@@ -151,6 +181,7 @@ impl WeightBuffersCudarc {
             codes: stream.alloc_zeros::<i16>(0).expect("alloc empty codes"),
             wscale: stream.alloc_zeros::<u16>(0).expect("alloc empty wscale"),
             q4_blocks: stream.alloc_zeros::<u8>(0).expect("alloc empty q4"),
+            q6_blocks: stream.alloc_zeros::<u8>(0).expect("alloc empty q6"),
             format,
             m: 0,
             n: 0,
@@ -280,6 +311,15 @@ struct GemvMultiPersistent {
 /// are a training surface and stay engine-side (riir-gpu's residue module
 /// `cudarc_backward_kernels`); the training side holds its own kernel set
 /// beside the forward and constructs it from `infra.ctx`.
+/// The quant-resident GEMV kernel set (plan 618 S3): the q4 + q6 dp4a
+/// modules compiled once per forward instance and passed as ONE handle — the
+/// format-agnostic wrappers stay arg-stable; formats dispatch inside the
+/// launch helpers.
+pub struct QuantGemvKernels {
+    pub q4k: crate::gemv_q4k_cuda_raw::Q4KGemvKernels,
+    pub q6k: crate::gemv_q6k_cuda_raw::Q6KGemvKernels,
+}
+
 pub struct ForwardInfraCudarc {
     pub ctx: Arc<CudaContext>,
     pub stream: Arc<CudaStream>,
@@ -291,11 +331,12 @@ pub struct ForwardInfraCudarc {
     /// Production path. The fused kernel (`gemv_fused`) is kept for
     /// comparison as a documented negative result (Issue 616 T4).
     gemv: CudaFunction,
-    /// Plan 618 item 5 (Issue 028 T4) — the Q4_K GEMV kernels (single +
-    /// multi-persistent): the prefill-copy format of the dual-PTQ container.
-    /// Consumes the SAME int8 activation buffers as the ternary kernels; a
-    /// `WeightBuffersCudarc` in `Q4K` format dispatches here.
-    gemv_q4k: crate::gemv_q4k_cuda_raw::Q4KGemvKernels,
+    /// Plan 618 item 5 (Issue 028 T4) + S3 — the quant-resident GEMV kernels
+    /// (Q4_K + Q6_K, single + multi-persistent): the prefill-copy format of
+    /// the dual-PTQ container + the matched-single control. Consume the SAME
+    /// int8 activation buffers as the ternary kernels; a
+    /// `WeightBuffersCudarc` in `Q4K`/`Q6K` format dispatches here.
+    quant_gemv: QuantGemvKernels,
     /// Issue 697 / Issue 705 — multi-segment dp4a GEMV: one launch for up to 4
     /// weight matrices sharing the same quantized input vector (qkv+z+a+b,
     /// gate+up, q+k+v). Eliminates the m=48 latency-floor a/b launches and
@@ -500,7 +541,7 @@ impl RecStateBuf {
     /// The state as f32 bits on the HOST (the hybrid-cache boundary).
     /// `Half` widens via [`f16_bits_to_f32`]/[`bf16_bits_to_f32`] — the exact
     /// IEEE widen the hardware `cvt.f32.f16`/`cvt.f32.bf16` performs (normals
-    /// AND subnormals — the gemv_q4k Issue-593 lesson). Hand-rolled bit
+    /// AND subnormals — the quant_gemv Issue-593 lesson). Hand-rolled bit
     /// math, not the `half` crate: `half` is gated behind `cubecl_runtime`
     /// and this lane must build under bare `default`.
     fn download_to_f32(
@@ -855,7 +896,10 @@ impl TernaryDeltanetGpuForwardCudarc {
         // Plan 618 item 5 — the Q4_K GEMV module (one NVRTC compile; loaded
         // unconditionally so a mixed ternary/q4 handler costs nothing on the
         // ternary path and a q4 layer never needs a lazy compile).
-        let gemv_q4k = crate::gemv_q4k_cuda_raw::Q4KGemvKernels::compile(&ctx)?;
+        let quant_gemv = QuantGemvKernels {
+            q4k: crate::gemv_q4k_cuda_raw::Q4KGemvKernels::compile(&ctx)?,
+            q6k: crate::gemv_q6k_cuda_raw::Q6KGemvKernels::compile(&ctx)?,
+        };
         // Issue 734 T5 — multi-block rmsnorm scratch, allocated on the forward's
         // stream BEFORE any launch/graph capture (addresses bake into graphs).
         // 512 leaf slots cover dim ≤ 8192 (block_size = next_pow2(dim/16)); the
@@ -1234,7 +1278,7 @@ impl TernaryDeltanetGpuForwardCudarc {
             deltanet,
             embedding,
             gemv,
-            gemv_q4k,
+            quant_gemv,
             gemv_multi,
             gemv_fused,
             gemv_transposed,
@@ -1616,7 +1660,7 @@ impl TernaryDeltanetGpuForwardCudarc {
                 &infra.elementwise,
                 &infra.stream,
                 &infra.gemv_multi,
-                &infra.gemv_q4k,
+                &infra.quant_gemv,
                 &acts.quant_i8_buf,
                 &acts.ascale_buf,
                 &acts.x,
@@ -1753,7 +1797,7 @@ impl TernaryDeltanetGpuForwardCudarc {
                     &infra.elementwise,
                     &infra.stream,
                     &infra.gemv_multi,
-                    &infra.gemv_q4k,
+                    &infra.quant_gemv,
                     &acts.quant_i8_buf,
                     &acts.ascale_buf,
                     &acts.x,
@@ -1769,7 +1813,7 @@ impl TernaryDeltanetGpuForwardCudarc {
                     &infra.elementwise,
                     &infra.stream,
                     &infra.gemv_multi,
-                    &infra.gemv_q4k,
+                    &infra.quant_gemv,
                     &acts.quant_i8_buf,
                     &acts.ascale_buf,
                     &acts.ffn_gate,
@@ -1799,7 +1843,7 @@ impl TernaryDeltanetGpuForwardCudarc {
                 &infra.elementwise,
                 &infra.stream,
                 &infra.gemv_multi,
-                &infra.gemv_q4k,
+                &infra.quant_gemv,
                 &acts.quant_i8_buf,
                 &acts.ascale_buf,
                 &acts.x,
@@ -1918,7 +1962,7 @@ impl TernaryDeltanetGpuForwardCudarc {
                     &infra.elementwise,
                     &infra.stream,
                     &infra.gemv_multi,
-                    &infra.gemv_q4k,
+                    &infra.quant_gemv,
                     &acts.quant_i8_buf,
                     &acts.ascale_buf,
                     &acts.x,
@@ -1934,7 +1978,7 @@ impl TernaryDeltanetGpuForwardCudarc {
                     &infra.elementwise,
                     &infra.stream,
                     &infra.gemv_multi,
-                    &infra.gemv_q4k,
+                    &infra.quant_gemv,
                     &acts.quant_i8_buf,
                     &acts.ascale_buf,
                     &acts.ffn_gate,
@@ -1950,7 +1994,7 @@ impl TernaryDeltanetGpuForwardCudarc {
                 &infra.elementwise,
                 &infra.stream,
                 &infra.gemv_multi,
-                &infra.gemv_q4k,
+                &infra.quant_gemv,
                 &acts.quant_i8_buf,
                 &acts.ascale_buf,
                 &acts.x,
@@ -2210,7 +2254,7 @@ impl TernaryDeltanetGpuForwardCudarc {
                     &infra.elementwise,
                     &infra.stream,
                     &infra.gemv_multi,
-                    &infra.gemv_q4k,
+                    &infra.quant_gemv,
                     &acts.quant_i8_buf,
                     &acts.ascale_buf,
                     &acts.x,
@@ -2226,7 +2270,7 @@ impl TernaryDeltanetGpuForwardCudarc {
                     &infra.elementwise,
                     &infra.stream,
                     &infra.gemv,
-                    &infra.gemv_q4k,
+                    &infra.quant_gemv,
                     &acts.quant_i8_buf,
                     &acts.ascale_buf,
                     &acts.ffn_gate,
@@ -2263,7 +2307,7 @@ impl TernaryDeltanetGpuForwardCudarc {
                 &infra.elementwise,
                 &infra.stream,
                 &infra.gemv_multi,
-                &infra.gemv_q4k,
+                &infra.quant_gemv,
                 &acts.quant_i8_buf,
                 &acts.ascale_buf,
                 &acts.x,
@@ -3085,7 +3129,7 @@ impl TernaryDeltanetGpuForwardCudarc {
                 &infra.elementwise,
                 &infra.stream,
                 &infra.gemv_multi,
-                &infra.gemv_q4k,
+                &infra.quant_gemv,
                 &acts.quant_i8_buf,
                 &acts.ascale_buf,
                 &acts.x,
@@ -3104,7 +3148,7 @@ impl TernaryDeltanetGpuForwardCudarc {
                 &infra.elementwise,
                 &infra.stream,
                 &infra.gemv,
-                &infra.gemv_q4k,
+                &infra.quant_gemv,
                 &acts.quant_i8_buf,
                 &acts.ascale_buf,
                 &acts.ffn_gate,
@@ -3141,7 +3185,7 @@ impl TernaryDeltanetGpuForwardCudarc {
             &infra.elementwise,
             &infra.stream,
             &infra.gemv_multi,
-            &infra.gemv_q4k,
+            &infra.quant_gemv,
             &acts.quant_i8_buf,
             &acts.ascale_buf,
             &acts.x,
@@ -3580,7 +3624,7 @@ fn forward_from_x_with_lora(
             gemv_prequantized_multi(
                 &infra.stream,
                 &infra.gemv_multi,
-                &infra.gemv_q4k,
+                &infra.quant_gemv,
                 &acts.quant_i8_buf,
                 &acts.ascale_buf,
                 &[(&infra.lm_head, &acts.logits)],
@@ -3606,7 +3650,7 @@ fn forward_from_x_with_lora(
                 &infra.elementwise,
                 &infra.stream,
                 &infra.gemv_multi,
-                &infra.gemv_q4k,
+                &infra.quant_gemv,
                 &acts.quant_i8_buf,
                 &acts.ascale_buf,
                 &acts.norm_x,
@@ -3618,7 +3662,7 @@ fn forward_from_x_with_lora(
             &infra.elementwise,
             &infra.stream,
             &infra.gemv_multi,
-            &infra.gemv_q4k,
+            &infra.quant_gemv,
             &acts.quant_i8_buf,
             &acts.ascale_buf,
             &acts.x,
@@ -3751,7 +3795,7 @@ fn forward_layers_with_lora(
                 gemv_prequantized_multi(
                     &infra.stream,
                     &infra.gemv_multi,
-                    &infra.gemv_q4k,
+                    &infra.quant_gemv,
                     &acts.quant_i8_buf,
                     &acts.ascale_buf,
                     &[
@@ -3773,7 +3817,7 @@ fn forward_layers_with_lora(
                 gemv_prequantized_multi(
                     &infra.stream,
                     &infra.gemv_multi,
-                    &infra.gemv_q4k,
+                    &infra.quant_gemv,
                     &acts.quant_i8_buf,
                     &acts.ascale_buf,
                     &[(&layer_w.down_proj, &acts.x)],
@@ -3804,7 +3848,7 @@ fn forward_layers_with_lora(
                 &infra.elementwise,
                 &infra.stream,
                 &infra.gemv_multi,
-                &infra.gemv_q4k,
+                &infra.quant_gemv,
                 &acts.quant_i8_buf,
                 &acts.ascale_buf,
                 &acts.rot_scratch,
@@ -3837,7 +3881,7 @@ fn forward_layers_with_lora(
             gemv_prequantized_multi(
                 &infra.stream,
                 &infra.gemv_multi,
-                &infra.gemv_q4k,
+                &infra.quant_gemv,
                 &acts.quant_i8_buf,
                 &acts.ascale_buf,
                 &[(&layer_w.down_proj, &acts.x)],
@@ -3849,7 +3893,7 @@ fn forward_layers_with_lora(
             &infra.elementwise,
             &infra.stream,
             &infra.gemv_multi,
-            &infra.gemv_q4k,
+            &infra.quant_gemv,
             &acts.quant_i8_buf,
             &acts.ascale_buf,
             &acts.x,
@@ -3869,7 +3913,7 @@ fn forward_layers_with_lora(
             &infra.elementwise,
             &infra.stream,
             &infra.gemv_multi,
-            &infra.gemv_q4k,
+            &infra.quant_gemv,
             &acts.quant_i8_buf,
             &acts.ascale_buf,
             &acts.ffn_gate,
@@ -4013,7 +4057,7 @@ fn forward_deltanet_layer(
             gemv_prequantized_multi(
                 &infra.stream,
                 &infra.gemv_multi,
-                &infra.gemv_q4k,
+                &infra.quant_gemv,
                 &acts.quant_i8_buf,
                 &acts.ascale_buf,
                 &[(qkv_w, &acts.qkv), (z_w, &acts.z_buf)],
@@ -4044,7 +4088,7 @@ fn forward_deltanet_layer(
                 &infra.elementwise,
                 &infra.stream,
                 &infra.gemv_multi,
-                &infra.gemv_q4k,
+                &infra.quant_gemv,
                 &acts.quant_i8_buf,
                 &acts.ascale_buf,
                 &acts.rot_scratch,
@@ -4064,7 +4108,7 @@ fn forward_deltanet_layer(
             &infra.elementwise,
             &infra.stream,
             &infra.gemv_multi,
-            &infra.gemv_q4k,
+            &infra.quant_gemv,
             &acts.quant_i8_buf,
             &acts.ascale_buf,
             &acts.x,
@@ -4105,7 +4149,7 @@ fn forward_deltanet_layer(
             &infra.elementwise,
             &infra.stream,
             &infra.gemv_multi,
-            &infra.gemv_q4k,
+            &infra.quant_gemv,
             &acts.quant_i8_buf,
             &acts.ascale_buf,
             &acts.x,
@@ -4312,7 +4356,7 @@ fn forward_deltanet_layer(
         gemv_prequantized_multi(
             &infra.stream,
             &infra.gemv_multi,
-            &infra.gemv_q4k,
+            &infra.quant_gemv,
             &acts.quant_i8_buf,
             &acts.ascale_buf,
             &[(out_w, if accumulate_out { &acts.x } else { &acts.tmp })],
@@ -4323,7 +4367,7 @@ fn forward_deltanet_layer(
             &infra.elementwise,
             &infra.stream,
             &infra.gemv_multi,
-            &infra.gemv_q4k,
+            &infra.quant_gemv,
             &acts.quant_i8_buf,
             &acts.ascale_buf,
             &acts.recurrent_out,
@@ -4340,7 +4384,7 @@ fn forward_deltanet_layer(
             &infra.elementwise,
             &infra.stream,
             &infra.gemv_multi,
-            &infra.gemv_q4k,
+            &infra.quant_gemv,
             &acts.quant_i8_buf,
             &acts.ascale_buf,
             &acts.recurrent_out,
@@ -4451,7 +4495,7 @@ fn forward_attention_layer(
             gemv_prequantized_multi(
                 &infra.stream,
                 &infra.gemv_multi,
-                &infra.gemv_q4k,
+                &infra.quant_gemv,
                 &acts.quant_i8_buf,
                 &acts.ascale_buf,
                 &[(wq, &acts.attn_qg), (wk, &acts.attn_k), (wv, &acts.attn_v)],
@@ -4482,7 +4526,7 @@ fn forward_attention_layer(
                 &infra.elementwise,
                 &infra.stream,
                 &infra.gemv_multi,
-                &infra.gemv_q4k,
+                &infra.quant_gemv,
                 &acts.quant_i8_buf,
                 &acts.ascale_buf,
                 &acts.rot_scratch,
@@ -4494,7 +4538,7 @@ fn forward_attention_layer(
             &infra.elementwise,
             &infra.stream,
             &infra.gemv_multi,
-            &infra.gemv_q4k,
+            &infra.quant_gemv,
             &acts.quant_i8_buf,
             &acts.ascale_buf,
             &acts.x,
@@ -4654,7 +4698,7 @@ fn forward_attention_layer(
         gemv_prequantized_multi(
             &infra.stream,
             &infra.gemv_multi,
-            &infra.gemv_q4k,
+            &infra.quant_gemv,
             &acts.quant_i8_buf,
             &acts.ascale_buf,
             &[(wo, if accumulate_out { &acts.x } else { &acts.tmp })],
@@ -4665,7 +4709,7 @@ fn forward_attention_layer(
             &infra.elementwise,
             &infra.stream,
             &infra.gemv_multi,
-            &infra.gemv_q4k,
+            &infra.quant_gemv,
             &acts.quant_i8_buf,
             &acts.ascale_buf,
             &acts.attn_out,
@@ -4679,7 +4723,7 @@ fn forward_attention_layer(
             &infra.elementwise,
             &infra.stream,
             &infra.gemv_multi,
-            &infra.gemv_q4k,
+            &infra.quant_gemv,
             &acts.quant_i8_buf,
             &acts.ascale_buf,
             &acts.attn_out,
@@ -4751,7 +4795,7 @@ fn forward_deltanet_layer_training(
         &infra.elementwise,
         &infra.stream,
         &infra.gemv_multi,
-        &infra.gemv_q4k,
+        &infra.quant_gemv,
         &acts.quant_i8_buf,
         &acts.ascale_buf,
         &acts.x,
@@ -4889,7 +4933,7 @@ fn forward_deltanet_layer_training(
         &infra.elementwise,
         &infra.stream,
         &infra.gemv_multi,
-        &infra.gemv_q4k,
+        &infra.quant_gemv,
         &acts.quant_i8_buf,
         &acts.ascale_buf,
         &acts.recurrent_out,
@@ -4940,7 +4984,7 @@ fn forward_attention_layer_training(
         &infra.elementwise,
         &infra.stream,
         &infra.gemv_multi,
-        &infra.gemv_q4k,
+        &infra.quant_gemv,
         &acts.quant_i8_buf,
         &acts.ascale_buf,
         &acts.x,
@@ -5082,7 +5126,7 @@ fn forward_attention_layer_training(
         &infra.elementwise,
         &infra.stream,
         &infra.gemv_multi,
-        &infra.gemv_q4k,
+        &infra.quant_gemv,
         &acts.quant_i8_buf,
         &acts.ascale_buf,
         &acts.attn_out,
@@ -5164,7 +5208,7 @@ fn forward_attention_layer_devpos(
             gemv_prequantized_multi(
                 &infra.stream,
                 &infra.gemv_multi,
-                &infra.gemv_q4k,
+                &infra.quant_gemv,
                 &acts.quant_i8_buf,
                 &acts.ascale_buf,
                 &[(wq, &acts.attn_qg), (wk, &acts.attn_k), (wv, &acts.attn_v)],
@@ -5195,7 +5239,7 @@ fn forward_attention_layer_devpos(
                 &infra.elementwise,
                 &infra.stream,
                 &infra.gemv_multi,
-                &infra.gemv_q4k,
+                &infra.quant_gemv,
                 &acts.quant_i8_buf,
                 &acts.ascale_buf,
                 &acts.rot_scratch,
@@ -5207,7 +5251,7 @@ fn forward_attention_layer_devpos(
             &infra.elementwise,
             &infra.stream,
             &infra.gemv_multi,
-            &infra.gemv_q4k,
+            &infra.quant_gemv,
             &acts.quant_i8_buf,
             &acts.ascale_buf,
             &acts.x,
@@ -5371,7 +5415,7 @@ fn forward_attention_layer_devpos(
         gemv_prequantized_multi(
             &infra.stream,
             &infra.gemv_multi,
-            &infra.gemv_q4k,
+            &infra.quant_gemv,
             &acts.quant_i8_buf,
             &acts.ascale_buf,
             &[(wo, if accumulate_out { &acts.x } else { &acts.tmp })],
@@ -5382,7 +5426,7 @@ fn forward_attention_layer_devpos(
             &infra.elementwise,
             &infra.stream,
             &infra.gemv_multi,
-            &infra.gemv_q4k,
+            &infra.quant_gemv,
             &acts.quant_i8_buf,
             &acts.ascale_buf,
             &acts.attn_out,
@@ -5396,7 +5440,7 @@ fn forward_attention_layer_devpos(
             &infra.elementwise,
             &infra.stream,
             &infra.gemv_multi,
-            &infra.gemv_q4k,
+            &infra.quant_gemv,
             &acts.quant_i8_buf,
             &acts.ascale_buf,
             &acts.attn_out,
@@ -5512,7 +5556,7 @@ fn forward_from_x_devpos(
                 gemv_prequantized_multi(
                     &infra.stream,
                     &infra.gemv_multi,
-                    &infra.gemv_q4k,
+                    &infra.quant_gemv,
                     &acts.quant_i8_buf,
                     &acts.ascale_buf,
                     &[
@@ -5534,7 +5578,7 @@ fn forward_from_x_devpos(
                 gemv_prequantized_multi(
                     &infra.stream,
                     &infra.gemv_multi,
-                    &infra.gemv_q4k,
+                    &infra.quant_gemv,
                     &acts.quant_i8_buf,
                     &acts.ascale_buf,
                     &[(&layer_w.down_proj, &acts.x)],
@@ -5565,7 +5609,7 @@ fn forward_from_x_devpos(
                 &infra.elementwise,
                 &infra.stream,
                 &infra.gemv_multi,
-                &infra.gemv_q4k,
+                &infra.quant_gemv,
                 &acts.quant_i8_buf,
                 &acts.ascale_buf,
                 &acts.rot_scratch,
@@ -5598,7 +5642,7 @@ fn forward_from_x_devpos(
             gemv_prequantized_multi(
                 &infra.stream,
                 &infra.gemv_multi,
-                &infra.gemv_q4k,
+                &infra.quant_gemv,
                 &acts.quant_i8_buf,
                 &acts.ascale_buf,
                 &[(&layer_w.down_proj, &acts.x)],
@@ -5610,7 +5654,7 @@ fn forward_from_x_devpos(
             &infra.elementwise,
             &infra.stream,
             &infra.gemv_multi,
-            &infra.gemv_q4k,
+            &infra.quant_gemv,
             &acts.quant_i8_buf,
             &acts.ascale_buf,
             &acts.x,
@@ -5630,7 +5674,7 @@ fn forward_from_x_devpos(
             &infra.elementwise,
             &infra.stream,
             &infra.gemv_multi,
-            &infra.gemv_q4k,
+            &infra.quant_gemv,
             &acts.quant_i8_buf,
             &acts.ascale_buf,
             &acts.ffn_gate,
@@ -5665,7 +5709,7 @@ fn forward_from_x_devpos(
             gemv_prequantized_multi(
                 &infra.stream,
                 &infra.gemv_multi,
-                &infra.gemv_q4k,
+                &infra.quant_gemv,
                 &acts.quant_i8_buf,
                 &acts.ascale_buf,
                 &[(&infra.lm_head, &acts.logits)],
@@ -5691,7 +5735,7 @@ fn forward_from_x_devpos(
                 &infra.elementwise,
                 &infra.stream,
                 &infra.gemv_multi,
-                &infra.gemv_q4k,
+                &infra.quant_gemv,
                 &acts.quant_i8_buf,
                 &acts.ascale_buf,
                 &acts.norm_x,
@@ -5703,7 +5747,7 @@ fn forward_from_x_devpos(
             &infra.elementwise,
             &infra.stream,
             &infra.gemv_multi,
-            &infra.gemv_q4k,
+            &infra.quant_gemv,
             &acts.quant_i8_buf,
             &acts.ascale_buf,
             &acts.x,
@@ -5784,7 +5828,7 @@ fn gemv_into(
     elementwise: &ElementwiseKernels,
     stream: &Arc<CudaStream>,
     gemv: &CudaFunction,
-    gemv_q4k: &crate::gemv_q4k_cuda_raw::Q4KGemvKernels,
+    quant_gemv: &QuantGemvKernels,
     quant_i8_buf: &CudaSlice<i8>,
     ascale_buf: &CudaSlice<f32>,
     weights: &WeightBuffersCudarc,
@@ -5803,8 +5847,20 @@ fn gemv_into(
         WeightFormatCudarc::Q4K => {
             return crate::gemv_q4k_cuda_raw::launch_gemv_q4k(
                 stream,
-                gemv_q4k,
+                &quant_gemv.q4k,
                 &weights.q4_blocks,
+                quant_i8_buf,
+                ascale_buf,
+                out,
+                weights.m,
+                n,
+            );
+        }
+        WeightFormatCudarc::Q6K => {
+            return crate::gemv_q6k_cuda_raw::launch_gemv_q6k(
+                stream,
+                &quant_gemv.q6k,
+                &weights.q6_blocks,
                 quant_i8_buf,
                 ascale_buf,
                 out,
@@ -5860,7 +5916,7 @@ fn gemv_into(
 fn gemv_prequantized(
     stream: &Arc<CudaStream>,
     gemv: &CudaFunction,
-    gemv_q4k: &crate::gemv_q4k_cuda_raw::Q4KGemvKernels,
+    quant_gemv: &QuantGemvKernels,
     quant_i8_buf: &CudaSlice<i8>,
     ascale_buf: &CudaSlice<f32>,
     weights: &WeightBuffersCudarc,
@@ -5871,14 +5927,26 @@ fn gemv_prequantized(
     }
     let n = weights.n;
 
-    // Plan 618 item 5 — format dispatch: the q4 arm consumes the SAME
-    // quantized int8 + ascale buffers (the quantize step is format-
+    // Plan 618 item 5 + S3 — format dispatch: the q4/q6 arms consume the
+    // SAME quantized int8 + ascale buffers (the quantize step is format-
     // independent); only the weight bytes + kernel differ.
     if weights.format == WeightFormatCudarc::Q4K {
         return crate::gemv_q4k_cuda_raw::launch_gemv_q4k(
             stream,
-            gemv_q4k,
+            &quant_gemv.q4k,
             &weights.q4_blocks,
+            quant_i8_buf,
+            ascale_buf,
+            out,
+            weights.m,
+            n,
+        );
+    }
+    if weights.format == WeightFormatCudarc::Q6K {
+        return crate::gemv_q6k_cuda_raw::launch_gemv_q6k(
+            stream,
+            &quant_gemv.q6k,
+            &weights.q6_blocks,
             quant_i8_buf,
             ascale_buf,
             out,
@@ -5947,7 +6015,7 @@ fn gemv_prequantized(
 fn gemv_prequantized_multi(
     stream: &Arc<CudaStream>,
     gemv_multi: &GemvMultiPersistent,
-    gemv_q4k: &crate::gemv_q4k_cuda_raw::Q4KGemvKernels,
+    quant_gemv: &QuantGemvKernels,
     quant_i8_buf: &CudaSlice<i8>,
     ascale_buf: &CudaSlice<f32>,
     gemvs: &[(&WeightBuffersCudarc, &CudaSlice<f32>)],
@@ -5965,9 +6033,9 @@ fn gemv_prequantized_multi(
         return Ok(());
     }
 
-    // Plan 618 item 5 — format partition: the multi kernels are same-format
-    // (one ternary launch + one q4 launch for a mixed batch). Segments within
-    // a format keep their order; the two launches write disjoint out slices
+    // Plan 618 item 5 + S3 — format partition: the multi kernels are
+    // same-format (one launch per format for a mixed batch). Segments within
+    // a format keep their order; the launches write disjoint out slices
     // (the caller's segment contract), so accumulate semantics are unchanged
     // — each row is added exactly once, by the launch that owns it.
     let ternary_segs: Vec<(&WeightBuffersCudarc, &CudaSlice<f32>)> = gemvs
@@ -5979,6 +6047,11 @@ fn gemv_prequantized_multi(
         .iter()
         .copied()
         .filter(|(w, _)| w.format == WeightFormatCudarc::Q4K)
+        .collect();
+    let q6_segs: Vec<(&WeightBuffersCudarc, &CudaSlice<f32>)> = gemvs
+        .iter()
+        .copied()
+        .filter(|(w, _)| w.format == WeightFormatCudarc::Q6K)
         .collect();
 
     if !ternary_segs.is_empty() {
@@ -5997,7 +6070,16 @@ fn gemv_prequantized_multi(
             .map(|(w, out)| (&w.q4_blocks, *out, w.m))
             .collect();
         crate::gemv_q4k_cuda_raw::launch_gemv_q4k_multi(
-            stream, gemv_q4k, quant_i8_buf, ascale_buf, &segs, accumulate, n,
+            stream, &quant_gemv.q4k, quant_i8_buf, ascale_buf, &segs, accumulate, n,
+        )?;
+    }
+    if !q6_segs.is_empty() {
+        let segs: Vec<(&CudaSlice<u8>, &CudaSlice<f32>, usize)> = q6_segs
+            .iter()
+            .map(|(w, out)| (&w.q6_blocks, *out, w.m))
+            .collect();
+        crate::gemv_q6k_cuda_raw::launch_gemv_q6k_multi(
+            stream, &quant_gemv.q6k, quant_i8_buf, ascale_buf, &segs, accumulate, n,
         )?;
     }
     Ok(())
@@ -6144,7 +6226,7 @@ fn quantize_and_gemv_batch(
     elementwise: &ElementwiseKernels,
     stream: &Arc<CudaStream>,
     gemv: &GemvMultiPersistent,
-    gemv_q4k: &crate::gemv_q4k_cuda_raw::Q4KGemvKernels,
+    quant_gemv: &QuantGemvKernels,
     quant_i8_buf: &CudaSlice<i8>,
     ascale_buf: &CudaSlice<f32>,
     x: &CudaSlice<f32>,
@@ -6166,7 +6248,7 @@ fn quantize_and_gemv_batch(
         );
     }
     // Issue 697 — one multi-segment launch instead of N.
-    gemv_prequantized_multi(stream, gemv, gemv_q4k, quant_i8_buf, ascale_buf, gemvs, false)?;
+    gemv_prequantized_multi(stream, gemv, quant_gemv, quant_i8_buf, ascale_buf, gemvs, false)?;
     Ok(())
 }
 
@@ -6185,7 +6267,7 @@ fn rmsnorm_quantize_and_gemv_batch(
     elementwise: &ElementwiseKernels,
     stream: &Arc<CudaStream>,
     gemv: &GemvMultiPersistent,
-    gemv_q4k: &crate::gemv_q4k_cuda_raw::Q4KGemvKernels,
+    quant_gemv: &QuantGemvKernels,
     quant_i8_buf: &CudaSlice<i8>,
     ascale_buf: &CudaSlice<f32>,
     x: &CudaSlice<f32>,
@@ -6208,7 +6290,7 @@ fn rmsnorm_quantize_and_gemv_batch(
         );
     }
     // Issue 697 — one multi-segment launch instead of N.
-    gemv_prequantized_multi(stream, gemv, gemv_q4k, quant_i8_buf, ascale_buf, gemvs, false)?;
+    gemv_prequantized_multi(stream, gemv, quant_gemv, quant_i8_buf, ascale_buf, gemvs, false)?;
     Ok(())
 }
 
@@ -6224,7 +6306,7 @@ fn rmsnorm_quantize_and_gemv_batch_with_norm_x(
     elementwise: &ElementwiseKernels,
     stream: &Arc<CudaStream>,
     gemv: &GemvMultiPersistent,
-    gemv_q4k: &crate::gemv_q4k_cuda_raw::Q4KGemvKernels,
+    quant_gemv: &QuantGemvKernels,
     quant_i8_buf: &CudaSlice<i8>,
     ascale_buf: &CudaSlice<f32>,
     x: &CudaSlice<f32>,
@@ -6269,7 +6351,7 @@ fn rmsnorm_quantize_and_gemv_batch_with_norm_x(
         );
     }
     // Issue 697 — one multi-segment launch instead of N.
-    gemv_prequantized_multi(stream, gemv, gemv_q4k, quant_i8_buf, ascale_buf, gemvs, false)?;
+    gemv_prequantized_multi(stream, gemv, quant_gemv, quant_i8_buf, ascale_buf, gemvs, false)?;
     Ok(())
 }
 
@@ -6284,7 +6366,7 @@ fn swiglu_quantize_and_gemv(
     elementwise: &ElementwiseKernels,
     stream: &Arc<CudaStream>,
     gemv: &CudaFunction,
-    gemv_q4k: &crate::gemv_q4k_cuda_raw::Q4KGemvKernels,
+    quant_gemv: &QuantGemvKernels,
     quant_i8_buf: &CudaSlice<i8>,
     ascale_buf: &CudaSlice<f32>,
     gate: &CudaSlice<f32>,
@@ -6302,7 +6384,7 @@ fn swiglu_quantize_and_gemv(
     );
     // Fused SwiGLU + quantize — writes int8 + ascale directly.
     elementwise.launch_swiglu_quantize(stream, gate, up, quant_i8_buf, ascale_buf, n)?;
-    gemv_prequantized(stream, gemv, gemv_q4k, quant_i8_buf, ascale_buf, weights, out)?;
+    gemv_prequantized(stream, gemv, quant_gemv, quant_i8_buf, ascale_buf, weights, out)?;
     Ok(())
 }
 
@@ -6323,7 +6405,7 @@ fn gate_silu_quantize_and_gemv(
     elementwise: &ElementwiseKernels,
     stream: &Arc<CudaStream>,
     gemv: &CudaFunction,
-    gemv_q4k: &crate::gemv_q4k_cuda_raw::Q4KGemvKernels,
+    quant_gemv: &QuantGemvKernels,
     quant_i8_buf: &CudaSlice<i8>,
     ascale_buf: &CudaSlice<f32>,
     x: &CudaSlice<f32>,
@@ -6341,7 +6423,7 @@ fn gate_silu_quantize_and_gemv(
     );
     // Fused silu-gate + quantize — writes int8 + ascale directly.
     elementwise.launch_gate_silu_quantize(stream, x, gate, quant_i8_buf, ascale_buf, n)?;
-    gemv_prequantized(stream, gemv, gemv_q4k, quant_i8_buf, ascale_buf, weights, out)?;
+    gemv_prequantized(stream, gemv, quant_gemv, quant_i8_buf, ascale_buf, weights, out)?;
     Ok(())
 }
 
@@ -6364,7 +6446,7 @@ fn gate_sigmoid_quantize_and_gemv(
     elementwise: &ElementwiseKernels,
     stream: &Arc<CudaStream>,
     gemv: &GemvMultiPersistent,
-    gemv_q4k: &crate::gemv_q4k_cuda_raw::Q4KGemvKernels,
+    quant_gemv: &QuantGemvKernels,
     quant_i8_buf: &CudaSlice<i8>,
     ascale_buf: &CudaSlice<f32>,
     x: &CudaSlice<f32>,
@@ -6385,7 +6467,7 @@ fn gate_sigmoid_quantize_and_gemv(
     gemv_prequantized_multi(
         stream,
         gemv,
-        gemv_q4k,
+        quant_gemv,
         quant_i8_buf,
         ascale_buf,
         &[(weights, out)],
@@ -6412,7 +6494,7 @@ fn rmsnorm_gate_silu_quantize_and_gemv(
     elementwise: &ElementwiseKernels,
     stream: &Arc<CudaStream>,
     gemv: &GemvMultiPersistent,
-    gemv_q4k: &crate::gemv_q4k_cuda_raw::Q4KGemvKernels,
+    quant_gemv: &QuantGemvKernels,
     quant_i8_buf: &CudaSlice<i8>,
     ascale_buf: &CudaSlice<f32>,
     x: &CudaSlice<f32>,
@@ -6447,7 +6529,7 @@ fn rmsnorm_gate_silu_quantize_and_gemv(
     gemv_prequantized_multi(
         stream,
         gemv,
-        gemv_q4k,
+        quant_gemv,
         quant_i8_buf,
         ascale_buf,
         &[(weights, out)],
@@ -6466,7 +6548,7 @@ fn swiglu_quantize_and_gemv_accum(
     elementwise: &ElementwiseKernels,
     stream: &Arc<CudaStream>,
     gemv_multi: &GemvMultiPersistent,
-    gemv_q4k: &crate::gemv_q4k_cuda_raw::Q4KGemvKernels,
+    quant_gemv: &QuantGemvKernels,
     quant_i8_buf: &CudaSlice<i8>,
     ascale_buf: &CudaSlice<f32>,
     gate: &CudaSlice<f32>,
@@ -6491,7 +6573,7 @@ fn swiglu_quantize_and_gemv_accum(
     gemv_prequantized_multi(
         stream,
         gemv_multi,
-        gemv_q4k,
+        quant_gemv,
         quant_i8_buf,
         ascale_buf,
         &[(weights, out_x)],
@@ -6507,7 +6589,7 @@ fn rmsnorm_gate_silu_quantize_and_gemv_accum(
     elementwise: &ElementwiseKernels,
     stream: &Arc<CudaStream>,
     gemv_multi: &GemvMultiPersistent,
-    gemv_q4k: &crate::gemv_q4k_cuda_raw::Q4KGemvKernels,
+    quant_gemv: &QuantGemvKernels,
     quant_i8_buf: &CudaSlice<i8>,
     ascale_buf: &CudaSlice<f32>,
     x: &CudaSlice<f32>,
@@ -6546,7 +6628,7 @@ fn rmsnorm_gate_silu_quantize_and_gemv_accum(
     gemv_prequantized_multi(
         stream,
         gemv_multi,
-        gemv_q4k,
+        quant_gemv,
         quant_i8_buf,
         ascale_buf,
         &[(weights, out_x)],
@@ -6562,7 +6644,7 @@ fn gate_sigmoid_quantize_and_gemv_accum(
     elementwise: &ElementwiseKernels,
     stream: &Arc<CudaStream>,
     gemv_multi: &GemvMultiPersistent,
-    gemv_q4k: &crate::gemv_q4k_cuda_raw::Q4KGemvKernels,
+    quant_gemv: &QuantGemvKernels,
     quant_i8_buf: &CudaSlice<i8>,
     ascale_buf: &CudaSlice<f32>,
     x: &CudaSlice<f32>,
@@ -6587,7 +6669,7 @@ fn gate_sigmoid_quantize_and_gemv_accum(
     gemv_prequantized_multi(
         stream,
         gemv_multi,
-        gemv_q4k,
+        quant_gemv,
         quant_i8_buf,
         ascale_buf,
         &[(weights, out_x)],
@@ -6705,11 +6787,12 @@ fn upload_layer_weights_cudarc(
         }
         GateProjWeights::Ternary(_) => None,
     };
-    // Plan 618 item 5 — the projection format dispatch: the Ternary arm rides
-    // the dp4a buffers exactly as before; the Q4K arm uploads the raw
-    // super-block bytes for the q4 GEMV (the disaggregated prefill copy).
-    // (a/b are NOT ProjWeights — the GateProjWeights escape set stays
-    // ternary/dense, byte-shared by the pack.)
+    // Plan 618 item 5 + S3 — the projection format dispatch: the Ternary arm
+    // rides the dp4a buffers exactly as before; the Q4K/Q6K arms upload the
+    // raw super-block bytes for the quant GEMVs (the disaggregated prefill
+    // copy + the matched-single control). (a/b are NOT ProjWeights — the
+    // GateProjWeights escape set stays ternary/dense, byte-shared by the
+    // pack.)
     let proj_of = |p: &riir_infer_core::deltanet::ternary_weights::ProjWeights| match p {
         ProjWeights::Ternary(t) => maybe_upload(stream, t),
         ProjWeights::Q4K(blocks, rows, cols) => {
@@ -6717,6 +6800,13 @@ fn upload_layer_weights_cudarc(
                 None
             } else {
                 Some(WeightBuffersCudarc::upload_q4k(stream, blocks, *rows, *cols))
+            }
+        }
+        ProjWeights::Q6K(blocks, rows, cols) => {
+            if *rows == 0 {
+                None
+            } else {
+                Some(WeightBuffersCudarc::upload_q6k(stream, blocks, *rows, *cols))
             }
         }
     };
@@ -7294,6 +7384,113 @@ mod tests {
             "q4 GPU logits diverged from CPU: max|Δ| {max_abs:.3e}"
         );
         assert!(gpu_logits.iter().all(|l| l.is_finite()), "NaN/Inf in q4 GPU logits");
+    }
+
+    /// Plan 618 S3 e2e — the Q6K twin of the q4 e2e above: every per-layer
+    /// projection converted to the Q6K arm (the matched-single pack's requant
+    /// at toy dims), globals + a/b stay ternary, and one decode token must
+    /// produce the CPU forward's logits within the activation-quantization
+    /// class + argmax agreement. The q6 GEMV's extra precision (6-bit codes,
+    /// no min offset) sits in the same dp4a activation class.
+    #[test]
+    fn q6_matched_single_weights_run_the_gpu_forward_and_match_cpu() {
+        let Some(_) = cuda_or_skip() else {
+            eprintln!("[skip] no CUDA device");
+            return;
+        };
+        use riir_infer_core::deltanet::forward::{HybridCache, HybridForwardScratch};
+        use riir_infer_core::deltanet::ternary_forward::forward_qwen_deltanet_ternary;
+        use riir_infer_core::quant::q6k::{QK_K, quantize_row_q6_k};
+        use bytemuck::Zeroable as _;
+
+        let config = small_test_config();
+        let mut weights = QwenDeltaNetTernaryWeights::zeros(&config);
+        seed_live_backbone(&mut weights);
+
+        for layer in &mut weights.layers {
+            let projections = [
+                &mut layer.attn_wq,
+                &mut layer.attn_wk,
+                &mut layer.attn_wv,
+                &mut layer.attn_wo,
+                &mut layer.in_proj_qkv,
+                &mut layer.in_proj_z,
+                &mut layer.out_proj,
+                &mut layer.gate_proj,
+                &mut layer.up_proj,
+                &mut layer.down_proj,
+            ];
+            for p in projections {
+                let dense = p.dequant_to_dense();
+                let (rows, cols) = (p.rows(), p.cols());
+                if rows == 0 || cols == 0 {
+                    continue;
+                }
+                assert!(cols.is_multiple_of(QK_K), "fixture col {cols} not q6-quantizable");
+                let nb = cols / QK_K;
+                let mut blocks = Vec::with_capacity(rows * nb);
+                let mut row_blocks = vec![riir_infer_core::quant::q6k::BlockQ6K::zeroed(); nb];
+                for r in 0..rows {
+                    quantize_row_q6_k(&dense[r * cols..(r + 1) * cols], &mut row_blocks);
+                    blocks.extend_from_slice(&row_blocks);
+                }
+                *p = ProjWeights::Q6K(blocks, rows, cols);
+            }
+        }
+        assert!(weights.invariants_hold(), "q6 conversion broke invariants");
+
+        // ── CPU reference: the same q6 arms through the CPU forward ──
+        let token = 7usize;
+        let layer_types = vec![DeltaNetLayerType::Attention, DeltaNetLayerType::DeltaNet];
+        let mut cache = HybridCache::with_layer_types(&config, &layer_types);
+        let mut scratch = HybridForwardScratch::new(&config);
+        let rotary_dim = riir_infer_core::deltanet::effective_rotary_dim(&config);
+        let rope_freq = riir_infer_core::rope::RopeFreqTable::new(config.rope_theta, rotary_dim);
+        let mut cpu_x = vec![0.0f32; config.n_embd.max(config.vocab_size)];
+        forward_qwen_deltanet_ternary(
+            &mut cpu_x,
+            &weights,
+            &mut cache,
+            token,
+            0,
+            &config,
+            &mut scratch,
+            &rope_freq,
+        );
+        let v = config.vocab_size;
+        let cpu_logits = &cpu_x[..v];
+        let cpu_argmax = cpu_logits
+            .iter()
+            .enumerate()
+            .max_by(|(_, a), (_, b)| a.partial_cmp(b).unwrap())
+            .map_or(0, |(i, _)| i);
+
+        // ── GPU: the q6 arms through the cudarc forward ──
+        let mut fwd = TernaryDeltanetGpuForwardCudarc::new(&config, &weights)
+            .expect("q6 fwd construct");
+        fwd.set_input_token(token).expect("set_input_token");
+        let gpu_logits = fwd.forward_token().expect("forward_token");
+        let gpu_argmax = gpu_logits
+            .iter()
+            .enumerate()
+            .max_by(|(_, a), (_, b)| a.partial_cmp(b).unwrap())
+            .map_or(0, |(i, _)| i);
+
+        assert_eq!(gpu_argmax, cpu_argmax, "q6 forward argmax diverged from CPU");
+        let max_abs = cpu_logits
+            .iter()
+            .zip(gpu_logits.iter())
+            .map(|(c, g)| f64::from(*c - *g).abs())
+            .fold(0.0f64, f64::max);
+        let mean_mag = cpu_logits.iter().map(|c| f64::from(c.abs())).sum::<f64>() / v as f64;
+        eprintln!(
+            "[q6k e2e] argmax {gpu_argmax}=={cpu_argmax}, max|Δlogit| {max_abs:.3e}, mean |logit| {mean_mag:.3e}"
+        );
+        assert!(
+            max_abs < 0.05,
+            "q6 GPU logits diverged from CPU: max|Δ| {max_abs:.3e}"
+        );
+        assert!(gpu_logits.iter().all(|l| l.is_finite()), "NaN/Inf in q6 GPU logits");
     }
 
     /// Issue 504 T1 G1a — closed-loop non-vacuity: with a non-zero-B adapter

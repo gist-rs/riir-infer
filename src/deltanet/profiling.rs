@@ -33,7 +33,7 @@ use super::forward::{
     causal_conv1d_update, effective_rotary_dim, expand_heads_into, gated_deltanet_step_inplace,
     l2_normalize, softplus,
 };
-use super::ternary_weights::{DeltaNetTernaryLayerWeights, QwenDeltaNetTernaryWeights};
+use super::ternary_weights::{DeltaNetTernaryLayerWeights, ProjWeights, QwenDeltaNetTernaryWeights};
 use crate::rope::RopeFreqTable;
 use crate::simd::fast_sigmoid;
 use crate::types::{Config, DeltaNetLayerType, rmsnorm_with_gamma_eps, swiglu};
@@ -192,9 +192,35 @@ impl ForwardProfiler {
 
 /// Ternary matvec dispatch: CPU SIMD (default) or GPU hook.
 ///
-/// Copy of `ternary_forward::bitlinear` (private in production).
+/// Copy of `ternary_forward::bitlinear` (private in production). The S2
+/// `ProjWeights` enum arrives here too: the quant arms (Q4K/Q6K) carry no
+/// hook payload — refuse loud, then the fused dequant-dot matvec (the
+/// profiler lane serves quant-resident packs the same way the production
+/// forward does).
 #[inline(always)]
 fn bitlinear(
+    y: &mut [f32],
+    w: &ProjWeights,
+    x: &[f32],
+    hook: Option<&dyn TernaryMatvecHook>,
+) {
+    match w {
+        ProjWeights::Ternary(t) => bitlinear_ternary(y, t, x, hook),
+        ProjWeights::Q4K(..) | ProjWeights::Q6K(..) => {
+            assert!(
+                hook.is_none(),
+                "profiler bitlinear: a q4/q6 projection has no ternary payload for the matvec hook — \
+                 the hook lanes are ternary-only (Issue 028 T4 S2)"
+            );
+            w.matvec_into(y, x);
+        }
+    }
+}
+
+/// The bare-ternary body (the lm_head global keeps the bare type — the
+/// globals contract — and the ProjWeights Ternary arm delegates here).
+#[inline(always)]
+fn bitlinear_ternary(
     y: &mut [f32],
     w: &TernaryGroupWeights,
     x: &[f32],
@@ -244,8 +270,14 @@ fn profiled_deltanet_layer(
     let (a_raw, b_raw) = scratch.ab_raw.split_at_mut(n_v_heads);
     if let Some(iph) = input_proj_hook {
         iph.input_projections(
-            &layer.in_proj_qkv,
-            &layer.in_proj_z,
+            layer
+                .in_proj_qkv
+                .as_ternary()
+                .expect("profiler fused-hook lane requires ternary in_proj_qkv"),
+            layer
+                .in_proj_z
+                .as_ternary()
+                .expect("profiler fused-hook lane requires ternary in_proj_z"),
             layer
                 .in_proj_a
                 .as_ternary()
@@ -600,9 +632,18 @@ pub fn profiled_forward_ternary<'a>(
         if let Some(fh) = ffn_hook {
             scratch.hidden_copy[..n].copy_from_slice(&x[..n]);
             fh.ffn(
-                &layer_weights.gate_proj,
-                &layer_weights.up_proj,
-                &layer_weights.down_proj,
+                layer_weights
+                    .gate_proj
+                    .as_ternary()
+                    .expect("profiler ffn-hook lane requires ternary gate_proj"),
+                layer_weights
+                    .up_proj
+                    .as_ternary()
+                    .expect("profiler ffn-hook lane requires ternary up_proj"),
+                layer_weights
+                    .down_proj
+                    .as_ternary()
+                    .expect("profiler ffn-hook lane requires ternary down_proj"),
                 &scratch.hidden_copy[..n],
                 &mut x[..n],
             );
@@ -630,7 +671,7 @@ pub fn profiled_forward_ternary<'a>(
     // 4. LM head
     let t = Instant::now();
     scratch.hidden_copy[..n].copy_from_slice(&x[..n]);
-    bitlinear(
+    bitlinear_ternary(
         &mut x[..config.vocab_size],
         &weights.lm_head,
         &scratch.hidden_copy,

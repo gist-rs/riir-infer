@@ -152,6 +152,10 @@ pub enum ProjWeights {
     /// `Q4_K` blocks, row-major: `rows` rows of `cols / QK_K` 144-byte
     /// super-blocks (the GGUF wire layout, kept quant-resident).
     Q4K(Vec<crate::quant::q4k::BlockQ4K>, usize, usize),
+    /// `Q6_K` blocks, row-major: `rows` rows of `cols / QK_K` 210-byte
+    /// super-blocks (plan 618 S3 — the matched-storage single-checkpoint
+    /// control arm; same quant-resident contract as the Q4K arm).
+    Q6K(Vec<crate::quant::q6k::BlockQ6K>, usize, usize),
 }
 
 impl ProjWeights {
@@ -168,14 +172,14 @@ impl ProjWeights {
     pub fn rows(&self) -> usize {
         match self {
             Self::Ternary(w) => w.rows,
-            Self::Q4K(_, rows, _) => *rows,
+            Self::Q4K(_, rows, _) | Self::Q6K(_, rows, _) => *rows,
         }
     }
 
     pub fn cols(&self) -> usize {
         match self {
             Self::Ternary(w) => w.cols,
-            Self::Q4K(_, _, cols) => *cols,
+            Self::Q4K(_, _, cols) | Self::Q6K(_, _, cols) => *cols,
         }
     }
 
@@ -185,7 +189,7 @@ impl ProjWeights {
     pub fn as_ternary(&self) -> Option<&TernaryGroupWeights> {
         match self {
             Self::Ternary(w) => Some(w),
-            Self::Q4K(..) => None,
+            Self::Q4K(..) | Self::Q6K(..) => None,
         }
     }
 
@@ -193,7 +197,7 @@ impl ProjWeights {
     pub fn as_ternary_mut(&mut self) -> Option<&mut TernaryGroupWeights> {
         match self {
             Self::Ternary(w) => Some(w),
-            Self::Q4K(..) => None,
+            Self::Q4K(..) | Self::Q6K(..) => None,
         }
     }
 
@@ -217,6 +221,11 @@ impl ProjWeights {
                 debug_assert_eq!(y.len(), *rows);
                 matvec_q4k(y, blocks, *rows, *cols, x);
             }
+            Self::Q6K(blocks, rows, cols) => {
+                debug_assert_eq!(x.len(), *cols);
+                debug_assert_eq!(y.len(), *rows);
+                matvec_q6k(y, blocks, *rows, *cols, x);
+            }
         }
     }
 
@@ -237,6 +246,18 @@ impl ProjWeights {
                 }
                 out
             }
+            Self::Q6K(blocks, rows, cols) => {
+                if *rows == 0 {
+                    return Vec::new();
+                }
+                use crate::quant::q6k::{QK_K, dequantize_row_q6_k};
+                let nb = cols / QK_K;
+                let mut out = vec![0.0f32; rows * cols];
+                for r in 0..*rows {
+                    dequantize_row_q6_k(&blocks[r * nb..(r + 1) * nb], &mut out[r * cols..(r + 1) * cols]);
+                }
+                out
+            }
         }
     }
 
@@ -249,6 +270,10 @@ impl ProjWeights {
             Self::Ternary(w) => w.rows == 0 || w.invariant_holds(),
             Self::Q4K(blocks, rows, cols) => {
                 use crate::quant::q4k::QK_K;
+                *rows == 0 || blocks.len() == rows * (cols / QK_K)
+            }
+            Self::Q6K(blocks, rows, cols) => {
+                use crate::quant::q6k::QK_K;
                 *rows == 0 || blocks.len() == rows * (cols / QK_K)
             }
         }
@@ -273,6 +298,7 @@ impl ProjWeights {
                 planes + scales
             }
             Self::Q4K(blocks, _, _) => blocks.len() * std::mem::size_of::<crate::quant::q4k::BlockQ4K>(),
+            Self::Q6K(blocks, _, _) => blocks.len() * std::mem::size_of::<crate::quant::q6k::BlockQ6K>(),
         }
     }
 }
@@ -301,6 +327,34 @@ fn matvec_q4k(y: &mut [f32], blocks: &[crate::quant::q4k::BlockQ4K], rows: usize
     } else {
         for r in 0..rows {
             y[r] = gemv_q4_k_row(&blocks[r * nb..(r + 1) * nb], &x[..cols]);
+        }
+    }
+}
+
+/// The Q6K matvec body — the [`matvec_q4k`] twin over `Q6_K` blocks
+/// (identical contract: rayon across rows at ≥ 256 rows, row-independent
+/// work, bit-stable under any worker count).
+fn matvec_q6k(y: &mut [f32], blocks: &[crate::quant::q6k::BlockQ6K], rows: usize, cols: usize, x: &[f32]) {
+    use crate::quant::q6k::{QK_K, gemv_q6_k_row};
+    assert!(cols.is_multiple_of(QK_K), "q6 projection cols {cols} not a multiple of {QK_K}");
+    let nb = cols / QK_K;
+    debug_assert_eq!(blocks.len(), rows * nb, "q6 block count mismatch");
+    if rows >= 256 {
+        use rayon::prelude::*;
+        const ROWS_PER_CHUNK: usize = 16;
+        y[..rows]
+            .par_chunks_mut(ROWS_PER_CHUNK)
+            .enumerate()
+            .for_each(|(c, chunk)| {
+                let r0 = c * ROWS_PER_CHUNK;
+                for (i, yr) in chunk.iter_mut().enumerate() {
+                    let r = r0 + i;
+                    *yr = gemv_q6_k_row(&blocks[r * nb..(r + 1) * nb], &x[..cols]);
+                }
+            });
+    } else {
+        for r in 0..rows {
+            y[r] = gemv_q6_k_row(&blocks[r * nb..(r + 1) * nb], &x[..cols]);
         }
     }
 }
@@ -839,7 +893,7 @@ fn convert_ternary_layer_to_proj_layer(
     fn convert_proj(w: &ProjWeights, trainable: bool) -> Proj {
         match w {
             ProjWeights::Ternary(t) => convert_ternary_ref(t, trainable),
-            ProjWeights::Q4K(_, rows, cols) => {
+            ProjWeights::Q4K(_, rows, cols) | ProjWeights::Q6K(_, rows, cols) => {
                 if *rows == 0 {
                     Proj::empty()
                 } else {
@@ -1055,6 +1109,77 @@ mod tests {
         katgpt_core::simd_ternary_group_matvec_parallel(&t, &x, &mut a);
         w.matvec_into(&mut b, &x);
         assert_eq!(a, b, "enum ternary arm must be the identical kernel");
+    }
+
+    /// Plan 618 S3 — the Q6K twin of the q4 arm test above: matvec equals a
+    /// dequantize-then-scalar-dot reference (both chunk postures),
+    /// `dequant_to_dense` equals the per-row reference, and the aggregate
+    /// q6-vs-ternary magnitude sanity holds (the matched-single control's
+    /// dots approximate the same source).
+    #[test]
+    fn q6k_arm_matvec_and_dequant_match_reference() {
+        use crate::quant::q6k::{QK_K, dequantize_row_q6_k, quantize_row_q6_k};
+        use bytemuck::Zeroable;
+
+        let (rows, cols) = (320usize, 512usize);
+        let src: Vec<f32> = (0..rows * cols)
+            .map(|i| ((i % 97) as f32 / 97.0 - 0.5) * 2.0)
+            .collect();
+        let nb = cols / QK_K;
+        let mut blocks = vec![crate::quant::q6k::BlockQ6K::zeroed(); rows * nb];
+        for r in 0..rows {
+            quantize_row_q6_k(&src[r * cols..(r + 1) * cols], &mut blocks[r * nb..(r + 1) * nb]);
+        }
+        let blocks_ref = blocks.clone();
+        let w = ProjWeights::Q6K(blocks, rows, cols);
+
+        assert!(w.invariants_hold());
+        assert_eq!((w.rows(), w.cols()), (rows, cols));
+        assert_eq!(w.param_count(), rows * cols);
+        assert_eq!(
+            w.bytes(),
+            rows * nb * std::mem::size_of::<crate::quant::q6k::BlockQ6K>()
+        );
+        assert!(w.as_ternary().is_none());
+
+        let x: Vec<f32> = (0..cols).map(|i| (i % 31) as f32 / 31.0 - 0.5).collect();
+        let ref_dot = |r: usize| -> f32 {
+            let mut row = vec![0.0f32; cols];
+            dequantize_row_q6_k(&blocks_ref[r * nb..(r + 1) * nb], &mut row);
+            row.iter().zip(&x).map(|(wv, xv)| wv * xv).sum()
+        };
+
+        let mut y = vec![0.0f32; rows];
+        w.matvec_into(&mut y, &x);
+        for (r, got) in y.iter().enumerate() {
+            let want = ref_dot(r);
+            let scale = want.abs().max(1.0);
+            assert!(
+                (*got - want).abs() <= 1e-3 * scale,
+                "row {r}: q6 matvec {got} vs reference {want}"
+            );
+        }
+
+        let mut dense = vec![0.0f32; rows * cols];
+        for r in 0..rows {
+            dequantize_row_q6_k(
+                &blocks_ref[r * nb..(r + 1) * nb],
+                &mut dense[r * cols..(r + 1) * cols],
+            );
+        }
+        assert_eq!(w.dequant_to_dense(), dense);
+
+        // Aggregate q6-vs-ternary magnitude sanity (the q4 test's law).
+        let t = katgpt_core::TernaryGroupWeights::quantize_from_f32(&src, rows, cols);
+        let mut y_t = vec![0.0f32; rows];
+        katgpt_core::simd_ternary_group_matvec_parallel(&t, &x, &mut y_t);
+        let sum_q6: f32 = y.iter().sum();
+        let sum_t: f32 = y_t.iter().sum();
+        let denom = y.iter().map(|v| v.abs()).sum::<f32>().max(1.0);
+        assert!(
+            (sum_q6 - sum_t).abs() <= 0.05 * denom,
+            "aggregate q6 vs ternary dots diverge: {sum_q6} vs {sum_t} (Σ|y| {denom})"
+        );
     }
 
     /// A mixed-arm layer (a q4 in_proj_qkv beside ternary siblings) passes

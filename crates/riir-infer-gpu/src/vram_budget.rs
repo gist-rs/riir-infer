@@ -246,13 +246,11 @@ fn gate_proj_bytes(g: &GateProjWeights) -> u64 {
 /// Q4K arm uploads its raw super-block bytes verbatim (144 bytes per 256
 /// values, no staging copy).
 fn proj_gpu_bytes(p: &riir_infer_core::deltanet::ternary_weights::ProjWeights) -> u64 {
+    use riir_infer_core::deltanet::ternary_weights::ProjWeights;
     match p {
-        riir_infer_core::deltanet::ternary_weights::ProjWeights::Ternary(t) => {
-            ternary_handle_bytes(t)
-        }
-        riir_infer_core::deltanet::ternary_weights::ProjWeights::Q4K(blocks, _, _) => {
-            blocks.len() as u64 * 144
-        }
+        ProjWeights::Ternary(t) => ternary_handle_bytes(t),
+        ProjWeights::Q4K(blocks, _, _) => blocks.len() as u64 * 144,
+        ProjWeights::Q6K(blocks, _, _) => blocks.len() as u64 * 210,
     }
 }
 

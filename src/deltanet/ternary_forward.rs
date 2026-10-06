@@ -89,15 +89,16 @@ pub(crate) fn bitlinear(
                 simd_ternary_group_matvec_parallel(t, &x[..t.cols], &mut y[..t.rows]);
             }
         }
-        ProjWeights::Q4K(..) => {
+        ProjWeights::Q4K(..) | ProjWeights::Q6K(..) => {
             // Issue 028 T4 S2: the hooks (the GPU capture lanes + the
-            // act-tap probe) pass `&TernaryGroupWeights` — a q4 projection
+            // act-tap probe) pass `&TernaryGroupWeights` — a q4/q6 projection
             // has no ternary payload. Refuse loud rather than silently
             // dropping the hook (the disaggregated host path runs with no
-            // hook; the q4 GPU arm is its own lane when it lands).
+            // hook; the q4/q6 GPU arm is its own lane). The Q6K arm is plan
+            // 618 S3 — the matched-storage single-checkpoint control.
             assert!(
                 hook.is_none(),
-                "bitlinear: a q4 projection has no ternary payload for the matvec hook — \
+                "bitlinear: a q4/q6 projection has no ternary payload for the matvec hook — \
                  the GPU/act-tap lanes are ternary-only (Issue 028 T4 S2)"
             );
             w.matvec_into(y, x);

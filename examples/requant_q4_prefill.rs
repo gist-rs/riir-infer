@@ -1,22 +1,30 @@
-//! Issue 028 T4 S1 — the Q4_K prefill-pack requantizer (.plans/618).
+//! Issue 028 T4 S1 — the Q4_K prefill-pack requantizer (.plans/618); plan
+//! 618 S3 adds the `--target q6k` arm (the matched-storage single-checkpoint
+//! control pack, same identity-block-table + byte-copy policy).
 //!
 //! Reads the league PQ2_0 pack, requantizes every block projection tensor
-//! to Q4_K, byte-copies everything else (globals, a/b gate projections,
-//! norms/conv/ssm_a/ssm_dt — the escape set rides bit-shared by
-//! construction), and emits the prefill pack through the landed collapsed-
-//! GGUF writer with an IDENTITY block table (all 64 layers, no reduction).
+//! to the target k-quant format, byte-copies everything else (globals, a/b
+//! gate projections, norms/conv/ssm_a/ssm_dt — the escape set rides
+//! bit-shared by construction), and emits the pack through the landed
+//! collapsed-GGUF writer with an IDENTITY block table (all 64 layers, no
+//! reduction).
 //!
 //! The science premise this tool encodes: the bonsai is TRAINED TERNARY, so
 //! `dequant(PQ2_0)` is exact up to f16 group scales and the requant carries
-//! ONLY ε(Q4_K) — the same error a q4 pack made from an f16 original would
-//! carry. The run REFUSES if a sampled tensor fails the ternary-exactness
-//! check (the repack itself also refuses fourth-state codes), so the
-//! premise is checked on the artifact, never assumed.
+//! ONLY ε(target format). The run REFUSES if a sampled tensor fails the
+//! ternary-exactness check (the repack itself also refuses fourth-state
+//! codes), so the premise is checked on the artifact, never assumed.
 //!
 //! Usage (the T4 artifact):
 //!   cargo run --release --features twt_collapse --example requant_q4_prefill -- \
 //!     --parent ../riir-train/data/Ternary-Bonsai-2-27B-PQ2_0.gguf \
 //!     --out ../riir-train/data/Ternary-Bonsai-2-27B-Q4_K.pf.gguf
+//!
+//! The S3 matched-single control (all-projections Q6_K single at ~20.5 GB —
+//! the dual pair's 21.1 GB within ~3%):
+//!   cargo run --release --features twt_collapse --example requant_q4_prefill -- \
+//!     --target q6k \
+//!     --out ../riir-train/data/Ternary-Bonsai-2-27B-Q6_K.sg.gguf
 //!
 //! Gate flags (off = the full run): `--sample-only` runs the exactness +
 //! one-tensor requant gates and exits before the emit (a fast premise
@@ -29,12 +37,121 @@ use std::time::Instant;
 
 use riir_infer_core::gguf_loader::{GgufFile, GgmlType, GgufValue};
 use riir_infer_core::quant::q2_0::repack_q2_0_to_ternary_group;
-use riir_infer_core::quant::q4k::{QK_K, quantize_row_q4_k};
+use riir_infer_core::quant::q4k::QK_K;
 use riir_infer_core::twt::collapse_writer::{
     CollapseSpec, LayerSource, LAYER_TYPES_LEGEND, TensorOut, emit_collapsed_gguf,
     twt_layer_types_value,
 };
 use riir_infer_core::types::DeltaNetLayerType;
+
+/// The requant target format (plan 618 S3 axis). `Q4K` keeps the landed S1
+/// behavior byte-identical (the default); `Q6K` builds the matched-storage
+/// single-checkpoint control.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum Target {
+    Q4K,
+    Q6K,
+}
+
+impl Target {
+    fn parse(s: &str) -> anyhow::Result<Self> {
+        match s {
+            "q4k" | "Q4K" | "q4_k" => Ok(Self::Q4K),
+            "q6k" | "Q6K" | "q6_k" => Ok(Self::Q6K),
+            other => anyhow::bail!("unknown --target '{other}' (q4k | q6k)"),
+        }
+    }
+
+    fn ggml_type(self) -> GgmlType {
+        match self {
+            Self::Q4K => GgmlType::Q4_K,
+            Self::Q6K => GgmlType::Q6_K,
+        }
+    }
+
+    fn bytes_per_block(self) -> usize {
+        match self {
+            Self::Q4K => 144,
+            Self::Q6K => 210,
+        }
+    }
+
+    /// Quantize one row (`row.len() % 256 == 0`) and append the raw block
+    /// bytes to `out`. (A typed scratch per row — the emit is one-off
+    /// artifact tooling; the round trip keeps `bytemuck` on the TYPED vec,
+    /// never an alignment bet on the u8 buffer.)
+    fn quantize_row_into(self, row: &[f32], out: &mut Vec<u8>) {
+        match self {
+            Self::Q4K => {
+                use riir_infer_core::quant::q4k::{BlockQ4K, quantize_row_q4_k};
+                let nb = row.len() / QK_K;
+                let mut blocks = vec![<BlockQ4K as bytemuck::Zeroable>::zeroed(); nb];
+                quantize_row_q4_k(row, &mut blocks);
+                out.extend_from_slice(bytemuck::cast_slice(&blocks));
+            }
+            Self::Q6K => {
+                use riir_infer_core::quant::q6k::{BlockQ6K, quantize_row_q6_k};
+                let nb = row.len() / QK_K;
+                let mut blocks = vec![<BlockQ6K as bytemuck::Zeroable>::zeroed(); nb];
+                quantize_row_q6_k(row, &mut blocks);
+                out.extend_from_slice(bytemuck::cast_slice(&blocks));
+            }
+        }
+    }
+
+    /// Dequantize row `r` of a raw block payload into `out` (the verify
+    /// read-back; the projection's own row-slice is handed in).
+    fn dequant_row(self, row_blocks_bytes: &[u8], out: &mut [f32]) {
+        match self {
+            Self::Q4K => {
+                let blocks: &[riir_infer_core::quant::q4k::BlockQ4K] =
+                    bytemuck::cast_slice(row_blocks_bytes);
+                riir_infer_core::quant::q4k::dequantize_row_q4_k(blocks, out);
+            }
+            Self::Q6K => {
+                let blocks: &[riir_infer_core::quant::q6k::BlockQ6K] =
+                    bytemuck::cast_slice(row_blocks_bytes);
+                riir_infer_core::quant::q6k::dequantize_row_q6_k(blocks, out);
+            }
+        }
+    }
+
+    /// The per-sub-block analytic read-back bound over one 32-element
+    /// segment: q4 = (amax−amin)/15 doubled for f16 rounding slack (the
+    /// landed S1 bound); q6 = the code step (|d·sc| ≤ 1.1·amax/31 — the
+    /// encoder's ±10% scale search) at half a code plus saturation slack,
+    /// rounded up to 10% of the segment amax.
+    fn readback_bound(self, seg: &[f32]) -> f32 {
+        match self {
+            Self::Q4K => {
+                let lo = seg.iter().copied().fold(f32::INFINITY, f32::min);
+                let hi = seg.iter().copied().fold(f32::NEG_INFINITY, f32::max);
+                2.0 * (hi - lo).abs() / 15.0 + 1e-6
+            }
+            Self::Q6K => {
+                let amax = seg.iter().fold(0.0_f32, |m, v| m.max(v.abs()));
+                0.1 * amax + 1e-6
+            }
+        }
+    }
+
+    fn readback_subblock(self) -> usize {
+        match self {
+            Self::Q4K => 32,
+            Self::Q6K => 16,
+        }
+    }
+
+    fn format_note(self) -> &'static str {
+        match self {
+            Self::Q4K => "Q4_K block projections over PQ2_0 (issue 028 T4 S1, plan 618)",
+            Self::Q6K => {
+                "Q6_K block projections over PQ2_0 (plan 618 S3 matched-single control; \
+                 llama.cpp quantize_row_q6_K_ref port)"
+            }
+        }
+    }
+}
 
 /// Projection storage suffixes requantized to Q4_K — exactly the tensors
 /// `load_ternary_proj` reads (attn q/k/v/o for attention layers; the rest
@@ -69,6 +186,7 @@ fn is_copy_suffix(suffix: &str) -> bool {
 struct Args {
     parent: String,
     out: String,
+    target: Target,
     sample_only: bool,
     verify_only: bool,
     hash_only: bool,
@@ -78,6 +196,7 @@ fn parse_args() -> Args {
     let mut a = Args {
         parent: "../riir-train/data/Ternary-Bonsai-2-27B-PQ2_0.gguf".to_owned(),
         out: "../riir-train/data/Ternary-Bonsai-2-27B-Q4_K.pf.gguf".to_owned(),
+        target: Target::Q4K,
         sample_only: false,
         verify_only: false,
         hash_only: false,
@@ -87,6 +206,9 @@ fn parse_args() -> Args {
         match arg.as_str() {
             "--parent" => a.parent = it.next().expect("--parent <path>"),
             "--out" => a.out = it.next().expect("--out <path>"),
+            "--target" => {
+                a.target = Target::parse(&it.next().expect("--target <q4k|q6k>")).expect("--target")
+            }
             "--sample-only" => a.sample_only = true,
             "--verify-only" => a.verify_only = true,
             "--hash-only" => a.hash_only = true,
@@ -230,7 +352,7 @@ fn main() -> anyhow::Result<()> {
     );
 
     if args.verify_only {
-        return verify_pack(&parent, &args.out, &requant_tensors);
+        return verify_pack(&parent, &args.out, &requant_tensors, args.target);
     }
 
     if args.hash_only {
@@ -255,21 +377,20 @@ fn main() -> anyhow::Result<()> {
         t0.elapsed().as_secs_f32()
     );
 
-    // ── divisibility + a one-tensor requant smoke (Q4_K needs rows ÷ 256) ──
+    // ── divisibility + a one-tensor requant smoke (rows must ÷ 256) ──
+    let target = args.target;
+    let bpb = target.bytes_per_block();
     let (dense, _rows, cols) = tensor_dense(&parent, "blk.0.ffn_down.weight")?;
     anyhow::ensure!(
         cols.is_multiple_of(QK_K),
         "row length {cols} not a multiple of QK_K {QK_K}"
     );
-    let mut smoke = vec![
-        <riir_infer_core::quant::q4k::BlockQ4K as bytemuck::Zeroable>::zeroed();
-        cols / QK_K
-    ];
+    let mut smoke = vec![0u8; (cols / QK_K) * bpb];
     // Row-major rows: quantize row 0 only as the smoke.
-    quantize_row_q4_k(&dense[..cols], &mut smoke);
+    target.quantize_row_into(&dense[..cols], &mut smoke);
     eprintln!(
-        "[requant] requant smoke PASS: blk.0.ffn_down row 0 ({cols} elems → {} blocks)",
-        smoke.len()
+        "[requant] requant smoke PASS ({target:?}): blk.0.ffn_down row 0 ({cols} elems → {} blocks)",
+        smoke.len() / bpb
     );
     drop(dense);
     if args.sample_only {
@@ -292,29 +413,26 @@ fn main() -> anyhow::Result<()> {
             if REQUANT_SUFFIXES.contains(&suffix) {
                 let (dense, rows, cols) = tensor_dense(&parent, &info.name)?;
                 debug_assert_eq!(rows * cols, dense.len());
-                let mut out_blocks = Vec::with_capacity(dense.len() / QK_K);
+                let mut out_bytes: Vec<u8> = Vec::with_capacity(rows * (cols / QK_K) * bpb);
                 for r in 0..rows {
-                    let row = &dense[r * cols..(r + 1) * cols];
-                    let start = out_blocks.len();
-                    out_blocks.resize(
-                        start + cols / QK_K,
-                        <riir_infer_core::quant::q4k::BlockQ4K as bytemuck::Zeroable>::zeroed(),
-                    );
-                    quantize_row_q4_k(row, &mut out_blocks[start..]);
+                    target.quantize_row_into(&dense[r * cols..(r + 1) * cols], &mut out_bytes);
                 }
                 let n_elems = rows * cols;
-                let bytes = bytemuck::cast_slice(&out_blocks).to_vec();
                 anyhow::ensure!(
-                    bytes.len() == GgmlType::Q4_K.tensor_bytes(n_elems),
+                    out_bytes.len() == target.ggml_type().tensor_bytes(n_elems),
                     "payload size mismatch for {}: {} vs {}",
                     info.name,
-                    bytes.len(),
-                    GgmlType::Q4_K.tensor_bytes(n_elems)
+                    out_bytes.len(),
+                    target.ggml_type().tensor_bytes(n_elems)
                 );
-                total_requant_bytes += bytes.len() as u64;
+                total_requant_bytes += out_bytes.len() as u64;
                 map.insert(
                     suffix.to_owned(),
-                    TensorOut { ggml_type: GgmlType::Q4_K, shape, data: bytes },
+                    TensorOut {
+                        ggml_type: target.ggml_type(),
+                        shape,
+                        data: out_bytes,
+                    },
                 );
             } else {
                 let raw = parent
@@ -367,7 +485,7 @@ fn main() -> anyhow::Result<()> {
             ),
             (
                 "twt.requant.format".to_owned(),
-                GgufValue::String("Q4_K block projections over PQ2_0 (issue 028 T4 S1, plan 618)".to_owned()),
+                GgufValue::String(target.format_note().to_owned()),
             ),
             (
                 "twt.requant.requantized_suffixes".to_owned(),
@@ -403,7 +521,7 @@ fn main() -> anyhow::Result<()> {
     // ── post-emit verification + the artifact blake3 ──
     drop(out);
     let pack = GgufFile::open(&out_path)?;
-    verify_pack_tensors(&parent, &pack, &requant_tensors)?;
+    verify_pack_tensors(&parent, &pack, &requant_tensors, target)?;
     let t_hash = Instant::now();
     let digest = file_blake3(&out_path)?;
     let sidecar = out_path.with_extension("gguf.blake3");
@@ -464,20 +582,23 @@ fn file_blake3(path: &std::path::Path) -> anyhow::Result<String> {
 }
 
 /// Post-emit gates: geometry fingerprint equality (the loader's own compat
-/// plane) + sampled requant read-back within the analytic Q4_K error bound.
+/// plane) + sampled requant read-back within the target's analytic error
+/// bound.
 fn verify_pack(
     parent: &GgufFile,
     out: &str,
     requant_tensors: &[String],
+    target: Target,
 ) -> anyhow::Result<()> {
     let pack = GgufFile::open(std::path::Path::new(out))?;
-    verify_pack_tensors(parent, &pack, requant_tensors)
+    verify_pack_tensors(parent, &pack, requant_tensors, target)
 }
 
 fn verify_pack_tensors(
     parent: &GgufFile,
     pack: &GgufFile,
     requant_suffixes: &[String],
+    target: Target,
 ) -> anyhow::Result<()> {
     // Geometry: the metadata keys the loader's fingerprint plane reads.
     for (key, a) in &parent.metadata_order {
@@ -499,13 +620,13 @@ fn verify_pack_tensors(
             .map(|(_, suffix)| REQUANT_SUFFIXES.contains(&suffix))
             .unwrap_or(false);
         if is_requant {
-            // Structural: every requant tensor in the pack must be Q4_K at
-            // its parent's exact shape.
+            // Structural: every requant tensor in the pack must be the
+            // target type at its parent's exact shape.
             let pi = pack
                 .tensor_info(&info.name)
                 .ok_or_else(|| anyhow::anyhow!("pack missing requant tensor {}", info.name))?;
             anyhow::ensure!(
-                pi.ggml_type == GgmlType::Q4_K && pi.shape == info.shape,
+                pi.ggml_type == target.ggml_type() && pi.shape == info.shape,
                 "pack tensor {} type/shape drift: {:?} {:?} vs parent Q2_0 {:?}",
                 info.name,
                 pi.ggml_type,
@@ -526,8 +647,9 @@ fn verify_pack_tensors(
     eprintln!("[requant] copy-class byte-identity PASS ({copies_checked} tensors incl. globals + escape set)");
 
     // Requant read-back: one projection per class-suffix, sampled rows,
-    // bounded by the analytic Q4_K error (sub-block amax/15 + min-offset;
-    // the bound f16-scale rounding can inflate by ~2^-11 relative).
+    // bounded by the target's analytic error (the bound f16-scale rounding
+    // can inflate slightly; each bound carries its own slack term).
+    let bpb = target.bytes_per_block();
     let sample_suffix: Vec<&str> = requant_suffixes.iter().map(|s| s.as_str()).collect();
     for suffix in sample_suffix {
         let name = format!("blk.0.{suffix}");
@@ -536,34 +658,32 @@ fn verify_pack_tensors(
             .tensor_info(&name)
             .ok_or_else(|| anyhow::anyhow!("pack missing {name}"))?;
         anyhow::ensure!(
-            info.ggml_type == GgmlType::Q4_K,
-            "{name} in the pack is {:?}, expected Q4_K",
-            info.ggml_type
+            info.ggml_type == target.ggml_type(),
+            "{name} in the pack is {:?}, expected {:?}",
+            info.ggml_type,
+            target.ggml_type()
         );
         let raw = pack
             .tensor_slice(&name)
             .ok_or_else(|| anyhow::anyhow!("pack tensor {name} has no bytes"))?;
-        let blocks: Vec<riir_infer_core::quant::q4k::BlockQ4K> = bytemuck::cast_slice(raw).to_vec();
+        let nb = cols / QK_K;
         let sample_rows = [0usize, rows / 2, rows - 1];
         let mut dq = vec![0f32; cols];
         for &r in &sample_rows {
-            let row_blocks = &blocks[r * (cols / QK_K)..(r + 1) * (cols / QK_K)];
-            riir_infer_core::quant::q4k::dequantize_row_q4_k(row_blocks, &mut dq);
+            let row_bytes = &raw[r * nb * bpb..(r + 1) * nb * bpb];
+            target.dequant_row(row_bytes, &mut dq);
             let orig = &src[r * cols..(r + 1) * cols];
-            // Per-sub-block (32-elem) analytic bound: (amax + amin)/15 over
-            // the super-block, doubled for f16 scale rounding slack.
+            let sb_sz = target.readback_subblock();
             let mut max_err = 0f32;
-            for sb in 0..cols / 32 {
-                let seg = &orig[sb * 32..(sb + 1) * 32];
-                let lo = seg.iter().copied().fold(f32::INFINITY, f32::min);
-                let hi = seg.iter().copied().fold(f32::NEG_INFINITY, f32::max);
-                let bound = 2.0 * (hi - lo).abs() / 15.0 + 1e-6;
+            for sb in 0..cols / sb_sz {
+                let seg = &orig[sb * sb_sz..(sb + 1) * sb_sz];
+                let bound = target.readback_bound(seg);
                 for (j, v) in seg.iter().enumerate() {
-                    let err = (dq[sb * 32 + j] - v).abs();
+                    let err = (dq[sb * sb_sz + j] - v).abs();
                     anyhow::ensure!(
                         err <= bound,
                         "{name} row {r} elem {}: err {err} > bound {bound}",
-                        sb * 32 + j
+                        sb * sb_sz + j
                     );
                     max_err = max_err.max(err);
                 }

@@ -332,7 +332,7 @@ pub fn for_each_ternary_site_mut(
     f(TernarySite::LmHead, &mut head);
     weights.lm_head = match head {
         ProjWeights::Ternary(t) => t,
-        ProjWeights::Q4K(..) => {
+        ProjWeights::Q4K(..) | ProjWeights::Q6K(..) => {
             panic!("for_each_ternary_site_mut: the lm_head site must stay ternary")
         }
     };

@@ -620,6 +620,14 @@ pub mod gemv_q4k_cuda_raw;
 #[cfg(all(feature = "ternary_gemv_cuda_raw", not(target_os = "macos")))]
 pub use gemv_q4k_cuda_raw::{Q4KGemvKernels, launch_gemv_q4k, launch_gemv_q4k_multi, q4k_blocks_as_bytes};
 
+// Plan 618 S3 (Issue 028 T4) — the cudarc Q6_K GEMV: the matched-storage
+// single-checkpoint control arm, the q4 module's twin (same int8 activation
+// buffers, same grid shape, no min offset).
+#[cfg(all(feature = "ternary_gemv_cuda_raw", not(target_os = "macos")))]
+pub mod gemv_q6k_cuda_raw;
+#[cfg(all(feature = "ternary_gemv_cuda_raw", not(target_os = "macos")))]
+pub use gemv_q6k_cuda_raw::{Q6KGemvKernels, launch_gemv_q6k, launch_gemv_q6k_multi, q6k_blocks_as_bytes};
+
 // The whole-prefill cudarc composition (mma/ffn/deltanet/attention kernels).
 // Gate TIGHTENED from the home crate's `all(cubecl_runtime, not(macos))` to
 // the cuda_raw posture its consumers' item re-exports already carry: the
