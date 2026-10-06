@@ -552,6 +552,15 @@ name = "twt_collapse_emit"
 path = "examples/twt_collapse_emit.rs"
 required-features = ["twt_collapse"]
 
+# Issue 028 T4 S1 (plan 618) — the Q4_K prefill-pack requantizer: identity
+# block table over the league PQ2_0 pack, block projections dequant→
+# quantize_row_q4_k, everything else byte-copied (the escape set rides
+# bit-shared by construction). Same reader law: whole-file-gated example.
+[[example]]
+name = "requant_q4_prefill"
+path = "examples/requant_q4_prefill.rs"
+required-features = ["twt_collapse"]
+
 # Issue 022 T5.0 ⚠-finding follow-up — re-derive the kill-rule verdict from
 # the artifact's own stored S under the current rule (T5.5's citation gate).
 [[example]]
