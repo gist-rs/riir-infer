@@ -378,7 +378,38 @@ a container refutation, it is the decomposition.
   ternary GEMM lane (unchanged), and the GEMV numbers price the
   decode-format cost only.
 
-### S3.5 — records
+### S3.5 — the first-run saturation + S3b (the hard-corpus follow-up) — pre-registered BEFORE the first run's verdict read
+
+The first full-matrix run (2026-10-06, `.benchmarks/dq_s3_matrix/`) measured
+EVERY arm at acc 1.000 on every cell (dual arith 48/48 + niah 16/16 ×3
+lengths; matched the same; base/q4single pending at this write) — the
+families SATURATE at 27B with the full gen caps (the 614 precedent: base
+arith read 0.9583 soft at n=48, above the 0.95 admissibility ceiling, and
+the hard posture was designed for exactly this; Issue 033). At ceiling the
+admissibility gate excludes every cell and neither pre-registered pole can
+fire — the honest output is MIXED-recorded (the instrument cannot
+falsify at this difficulty), never a silently-read NULL.
+
+**S3b (pre-registered here, before the first run's verdict was read):**
+the harder corpus, one cell per family, the paired question only (the perf
+axis is complete after the first run):
+- arith: the 614 HARD posture verbatim (ops 3–6, first 1_000–99_999,
+  ± operands 100–9_999, × operands 11–999 — same seed, the draw stream
+  diverges by construction), 48 items, cap 256.
+- niah: nn = 10 (the bank cap — maximum distractors), ONE length (2048),
+  16 prompts, cap 32.
+- Arms: all four (the storage pairing still needs the control).
+- Verdict: the same pre-registered legs over the S3b cells alone. If S3b
+  ALSO saturates (base ≥ 0.95 everywhere), the accuracy axis closes as
+  **RECORD-SATURATED** — the container is task-indistinguishable from the
+  matched single AND the ternary base at every instrumented difficulty,
+  and the shelving decision rides parsimony (3.2× the storage for zero
+  measurable accuracy gain) + the TTFT axis (which the first run prices:
+  the q4/q6 GEMV prefill is 1.57×/2.1× SLOWER per token than ternary on
+  this lane — the container buys nothing on either axis without a q4-class
+  GEMM prefill arm).
+
+### S3.6 — records
 
 - Pack + run artifacts: `.benchmarks/` + the run report; issue 028 T4 row
   + plan Open-list updates at the landing.
