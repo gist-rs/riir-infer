@@ -218,7 +218,7 @@ Instrument `0e0436c` (`PostLayerHook` capture seam on `forward_gemma2_f16_tapped
 
 ## 2026-09-29 — Research 004: Disaggregated Quantization distilled (arXiv:26.26333) — three issues filed, riir-train Plan 430 routed
 
-Distill of arXiv:2609.26333 (DQ/QADD), deepening the riir-clippy arxiv-walk-217 row: Issues 026 (phase-isolated quant sensitivity bench), 027 (T0 encoder-only asymmetric Q2_0 + Lloyd-Max grids), 028 (dual-PTQ resident disaggregated serving) filed; track (c) → riir-train Plan 430 (QADD prefiller pre-registration). Signal-diffs: the GDN escape set (Issue 980 `gate_projections()` + the issue879 f32 recipe) corroborated; `dl_qat.rs` carries no teacher/phase-mask; prior art named (OverFill 2508.08446, Decode-Branch 2608.12385). Verdict gate: claude ping-pong AGREE round 2 (session `c68b3113-bb7f-49d1-853b-ac6e215e46be`). Master: `.research/004_DQ_Disaggregated_Quantization.md`.
+Distill of arXiv:2609.26333 (DQ/QADD), deepening the riir-clippy arxiv-walk-217 row: Issues 026 (phase-isolated quant sensitivity bench), 027 (T0 encoder-only asymmetric Q2_0 + Lloyd-Max grids), 028 (dual-PTQ resident disaggregated serving) filed; track (c) → riir-train Plan 430 (QADD prefiller pre-registration). Signal-diffs: the GDN escape set (riir-ai Issue 980 `gate_projections()` + the issue879 f32 recipe) corroborated; `dl_qat.rs` carries no teacher/phase-mask; prior art named (OverFill 2508.08446, Decode-Branch 2608.12385). Verdict gate: claude ping-pong AGREE round 2 (session `c68b3113-bb7f-49d1-853b-ac6e215e46be`). Master: `.research/004_DQ_Disaggregated_Quantization.md`.
 
 ## 2026-10-01 — Plan 614 LANDED: the DQ phase matrix ran to EXIT0; every axis INADMISSIBLE at the frozen corpora; the instrument (and its defect chain) is the deliverable
 
