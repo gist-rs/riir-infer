@@ -4,6 +4,62 @@ Durable records for resolved questions and closed lanes (the noise-reduction
 convention: the record lands here, hash-pinned; open work lives in `.issues/`
 and `.plans/`). Created 2026-09-23 at the first record.
 
+## 2026-10-06 — Issue 028 T4 S2: the q4 weight arm — the container loads and runs the dual-format pair — (this commit)
+
+**The design (one enum, never a duplicated forward):** `ProjWeights { Ternary(
+TernaryGroupWeights), Q4K(Vec<BlockQ4K>, rows, cols) }` at the 10 per-layer
+projection fields of `DeltaNetTernaryLayerWeights` (the `GateProjWeights`
+precedent). `wte`/`lm_head` and the a/b gate projections keep their own types —
+the pack byte-copies them, so the decode and prefill copies carry byte-identical
+globals/escape fields by construction. Dispatch points: `bitlinear` (the single
+CPU path — Ternary arm = hook-or-SIMD exactly as before, Q4K arm = per-row fused
+`gemv_q4_k_row`, rayon across 16-row chunks at the ternary kernel's ≥256-row
+threshold; row-independent work, bit-stable under any worker count) and
+`load_proj` in the loader (storage-type dispatch: Q2_0/PTQ1_0 → ternary repack,
+Q4_K → owned blocks with shape + block-count checks). The GPU hook paths refuse
+a q4 projection LOUD — hooks pass `&TernaryGroupWeights`, and silently dropping
+a hook would capture a wrong GPU graph; the cudarc q4 GEMV stays a scoped
+follow-up (plan 618 §S2 item 5), not a silent fallback.
+
+**Measured (4090 box, release):**
+- The REAL pair LOADS: `load_pair(PQ2_0, Q4_K.pf)` passed the
+  geometry-fingerprint + escape-set gates at production scale in **630 s / 702 s**
+  across two runs (~20.5 GB resident — the T3 budget table's "at the edge" row,
+  now measured; the cost is the 6.7 GB ternary repack + the 13.7 GB owned q4
+  copy; the mmap pages are clean and evict during it, disclosed).
+- First real-run red was the TEST's arm-layout assertion (layer 0 is DeltaNet —
+  `attn_wq` is the empty arm there; fixed to `layers[0].in_proj_qkv` +
+  `layers[3].attn_wq`), never the loader or the forward.
+- Fixture lesson for the cross-format gate: a per-row q4-vs-ternary 10% envelope
+  FAILED on row 0 — q4 read −2.0775 (== f32 ref −2.0775) against ternary −2.4876,
+  i.e. the TERNARY dot was 19% off the f32 truth on the quant-hostile fixture.
+  The check is now AGGREGATE (Σy within 5% of Σ|y|); per-row dispatch truth is
+  pinned exactly by the dequant-then-dot reference.
+
+**Gates:** lib 318 green at `deltanet_ternary_inference` (new:
+`q4k_arm_matvec_and_dequant_match_reference` incl. both chunk postures,
+`ternary_arm_matvec_is_the_parallel_kernel` — the enum's Ternary arm is the
+pre-enum kernel byte-equal — and `mixed_arm_layer_passes_invariants` with the
+wrong-block-count negative); the issue-028 battery 9/9 incl. the new always-on
+`dual_format_q4_prefill_pair_loads_and_runs` (synthetic dual-format pair:
+PQ2_0 decode + Q4_K prefill off the identical ternary content, escape law at
+load, phase split through the q4 arms, boundary relative-L2 < 5%); all seven
+ternary-lane integration suites green (`bonsai2_rotation_load` 10,
+`twt_gates` 14, `twt_ternarize_gates` 7, `twt_ternarize_g4` 1, `twt_g4_alloc`
+15, `twt_collapse_writer_gates` 1, `twt_audition_gates` 10); default-posture
+lib 248 green unchanged; clippy clean at default, `deltanet_ternary_inference`,
+and the `+act_scale_refit+twt_bonsai+twt_collapse` bins/examples posture.
+
+**En-route:** `for_each_ternary_site*` walkers hand out `&ProjWeights` (the
+refit bin takes `as_ternary_mut`; q4 sites refuse — refit needs bit-planes; the
+mutable walker's LmHead visit preserved via a temporary wrapper, the immutable
+twin has zero callers and drops it, documented); `convert_gate_proj` re-routed
+through a shared `convert_ternary_ref` (no extra clone on `to_hybrid_dense`);
+q4-arm additions to `to_hybrid_dense` (dequantizes in both postures — the dense
+TRAINING container has no q4 arm); the audition example merges ternary
+candidates only, refusing a q4 arm loud; `DeltaNetTernaryLayerWeights` gained
+`#[derive(Clone)]`. Records: plan 618 §S2; issue 028 T4 row.
+
 ## 2026-10-06 — Issue 028 T4 S1: the Q4_K prefill pack exists — plus the science premise settled — `94a4e7c`
 
 **The artifact:** `Ternary-Bonsai-2-27B-Q4_K.pf.gguf`, **14.43 GB**, blake3

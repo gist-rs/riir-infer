@@ -1,6 +1,6 @@
 # Plan 618 — Issue 028 T4 unblock: the Q4_K prefill pack (S1) + the q4 weight arm (S2) + the dual-PTQ measurement (S3)
 
-**Status:** IN PROGRESS — S1 landed this pass; S2/S3 scoped below.
+**Status:** IN PROGRESS — S1+S2 landed (the pack exists and the container loads + runs it); S3 (the measurement) remains.
 
 Master: `.issues/028_dual_ptq_disaggregated_serving.md` (T4) + `.research/004_DQ_Disaggregated_Quantization.md`.
 Consumer: `src/disaggregated.rs` (`load_pair` / `load_single_file` / `PhaseHandoff`, T1+T2+T3 landed `09d0dd5`).
@@ -108,32 +108,98 @@ payload before writing (the writer's `TensorOut.data: Vec<u8>`), so the run
 peaks at ≈ 14 GB owned + the 6.7 GB mmap (page cache) — fits this box's
 32 GB, disclosed as a one-shot artifact cost, not a serving cost.
 
-## S2 — the q4-class weight arm (NEXT)
+## S2 — the q4-class weight arm — **COMPLETE 2026-10-06**
 
-`load_ternary_proj` refuses Q4_K today; the ternary container's projections
-are `katgpt_core::TernaryGroupWeights` (bit-planes). The prefill copy needs a
-q4 arm:
+`load_ternary_proj` refused Q4_K; the ternary container's projections are
+`katgpt_core::TernaryGroupWeights` (bit-planes). Landed as ONE enum at the
+per-layer projection sites (the plan's option 1 — SOLID = one enum + one match
+arm per site, never a duplicated forward):
 
-1. Weight vocabulary: a `ProjWeights`-style enum at the
-   `DeltaNetTernaryLayerWeights` projection sites (ternary | q4k), or a
-   parallel prefill weight struct — decided at implementation time by which
-   touches fewer forward call sites (the host ternary forward's matvec
-   dispatch is the surface; SOLID = one enum + one match arm per site,
-   never a duplicated forward).
-2. Loader: the projection loader gains the `GgmlType::Q4_K` arm (dequant
-   rows are already in `quant::q4k`; the container keeps blocks + does
-   on-the-fly row dequant in the matvec — never materialize f32).
-3. Host matvec: q4 row-dequant fused into the dot (or row-dequant-once per
-   forward — prefill touches each row once per call).
-4. Container widening: `CopySet::Split` prefill side takes the new weight
-   type; `generate_greedy_disaggregated` routes the prefill phase through
-   it. G1's byte-identity gate keeps its same-format arms; a new gate pins
-   q4-prefill ≈ ternary-only within the measured ε4 bound (NOT bit-identity
-   — the formats differ; the T2 bit-compare law applies to the HANDOFF, not
-   across quantizations).
-5. GPU arm (TTFT numbers): the cudarc prefill lane gains a Q4_K GEMV
-   (the gemma2_cubecl lane's `GemvQ4KCubeCL` is the in-repo port
-   reference; the cudarc deltanet lane has no q4 weight path today).
+1. **Weight vocabulary** — `ProjWeights { Ternary(TernaryGroupWeights),
+   Q4K(Vec<BlockQ4K>, rows, cols) }` in `ternary_weights.rs` (the
+   `GateProjWeights` precedent: tuple arm + dispatch methods). The 10
+   per-layer projection fields move to it; `wte`/`lm_head` STAY bare ternary
+   (the pack byte-copies the globals — Issue 980's globals contract) and the
+   a/b gate projections stay `GateProjWeights` (byte-copied too). All the
+   Q4K machinery is in this one file: `matvec_into` (fused dequant-dot
+   `gemv_q4_k_row` per row, rayon across 16-row chunks at the ternary
+   kernel's ≥256-row threshold — row-independent work, bit-stable under any
+   worker count), `dequant_to_dense`, structural `invariants_hold` (block
+   count == rows×cols/256), `bytes`.
+2. **Forward** — `bitlinear` is the single CPU dispatch point (its match:
+   Ternary = hook-or-SIMD exactly as before, Q4K = `matvec_into`); the GPU
+   hook paths (`input_projections`, `ffn`) and the hook arm of `bitlinear`
+   refuse a q4 projection LOUD (`as_ternary().expect(...)` — hooks pass
+   `&TernaryGroupWeights`; silently dropping a hook would capture a wrong
+   GPU graph). The lm_head call left `bitlinear` (it spells the ternary
+   dispatch directly — the globals are never q4).
+3. **Loader** — `load_proj(gguf, name)` dispatches on storage type:
+   `Q2_0|PTQ1_0 → Ternary(load_ternary_proj)`, `Q4_K → Q4K(blocks.to_vec())`
+   (shape + block-count checks; OWNS the bytes — the mmap borrow dies with
+   the loader, mirroring the ternary arm's repack-to-owned). All 10 per-layer
+   load sites moved to it; `load_ternary_proj` stays for the globals with an
+   updated refusal naming the contract.
+4. **Container** — `CopySet::Split` needed NO structural change: both copies
+   are `QwenDeltaNetTernaryWeights`; the prefill copy simply carries Q4K arms
+   where the pack quantized. `load_pair`'s existing gates (geometry
+   fingerprint, layer_types, escape-set byte-identity) all pass unchanged on
+   the dual-format pair.
+5. **GPU arm** — NOT in this pass (the cudarc Q4_K GEMV; S3's TTFT deliverable
+   per the plan's item 5). The host q4 matvec is the functional arm; the
+   hook-refusal keeps a GPU lane from silently mis-serving q4 weights until
+   that lane exists.
+
+En-route repairs (all compile-caught, none semantic):
+- `convert_gate_proj`'s Ternary arm re-routed through a shared
+  `convert_ternary_ref` (no extra clone on the `to_hybrid_dense` path);
+- q4-arm additions to `to_hybrid_dense` (q4 dequantizes in both postures —
+  the dense TRAINING container has no q4 arm);
+- `for_each_ternary_site*` walkers now hand out `&ProjWeights` — the refit
+  bin (`act_retention_walk`) takes `as_ternary_mut` (q4 sites refuse loud:
+  refit needs bit-planes); the LmHead visit is preserved in the mutable
+  walker via a temporary wrapper (the refit contract is ALL sites; the
+  immutable twin — zero callers — drops it, documented);
+- `bonsai2_rotation_load.rs` / `twt_bonsai_audition.rs` updated for the
+  method accessors (`audition merges ternary candidates only` refusals);
+- `DeltaNetTernaryLayerWeights` gained `#[derive(Clone)]` (small handles +
+  dense f32 fields; the mixed-arm test needs one layer).
+
+### S2 gates (all green)
+
+- **Unit (lib, `deltanet_ternary_inference`)** — `q4k_arm_matvec_and_dequant_match_reference`:
+  the Q4K matvec == dequantize-then-dot reference at 1e-3 (both chunk
+  postures: 320 rows crosses the parallel threshold with a ragged tail);
+  `dequant_to_dense` == the same reference; q4-vs-ternary aggregate sanity.
+  **Fixture lesson (measured, not argued):** the first draft asserted a
+  per-row q4-vs-ternary 10% envelope and FAILED — row 0 read q4 −2.0775
+  (== f32 ref −2.0775 ✓) against ternary −2.4876, i.e. the TERNARY dot was
+  19% off the f32 truth on this quant-hostile fixture. The cross-format
+  check is now AGGREGATE (Σy within 5% of Σ|y|) — per-row dispatch truth is
+  pinned by the exact dequant reference, and a row-shift/transpose bug blows
+  the aggregate up. Also `ternary_arm_matvec_is_the_parallel_kernel` (the
+  enum's Ternary arm == the pre-enum kernel, byte-equal) and
+  `mixed_arm_layer_passes_invariants` (+ the wrong-block-count negative).
+- **Always-on integration** — `dual_format_q4_prefill_pair_loads_and_runs`
+  (issue028 battery): a synthetic dual-format pair (decode = PQ2_0 id 142,
+  prefill = the same projections requantized Q4_K id 12 off the identical
+  ternary content — the S1 copy policy at toy dims; new fixture helpers
+  `synth_tensors_bonsai2_q4_prefill` + `q4_k_payload_from_ternary` in the
+  shared kit). Gates: arm layout on both sides, the escape law at load,
+  the phase split through the q4 arms end to end, boundary logits vs the
+  all-ternary reference (relative L2 < 5%), finite decode logits.
+- **Real-artifact load** (`#[ignore]`, release, the 4090 box) —
+  `real_q4_prefill_pair_loads_and_prefills`: `load_pair` over the real
+  6.7 GB PQ2_0 + 14.43 GB Q4_K.pf pair **PASSED the geometry-fingerprint +
+  escape-set gates at production scale, 630 s / 702 s** across two runs
+  (the 6.7 GB ternary repack + the 13.7 GB owned q4 copy; ~20.5 GB resident
+  — the T3 budget table's "at the edge" row, measured). First run's red was
+  the TEST's arm-layout assertion (layer 0 is DeltaNet — `attn_wq` is the
+  empty arm; fixed to `layers[0].in_proj_qkv` + `layers[3].attn_wq`), never
+  the loader.
+
+RAM posture (disclosed): load peaks ≈ 20.5 GB owned + the 14.4 GB mmap page
+-cache — fits the 32 GB box; the mmap pages are clean and evict while the
+owned copies materialize.
 
 ## S3 — the measurement (the science deliverable)
 
