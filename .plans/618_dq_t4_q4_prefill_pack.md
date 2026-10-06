@@ -1,6 +1,6 @@
 # Plan 618 — Issue 028 T4 unblock: the Q4_K prefill pack (S1) + the q4 weight arm (S2) + the dual-PTQ measurement (S3)
 
-**Status:** IN PROGRESS — S1+S2 landed (the pack exists and the container loads + runs it); S3 (the measurement) remains.
+**Status:** IN PROGRESS — S1+S2 landed (the pack exists and the container loads + runs it); the cudarc q4 GPU GEMV (S2 item 5) LANDED 2026-10-06; S3 (the measurement) remains.
 
 Master: `.issues/028_dual_ptq_disaggregated_serving.md` (T4) + `.research/004_DQ_Disaggregated_Quantization.md`.
 Consumer: `src/disaggregated.rs` (`load_pair` / `load_single_file` / `PhaseHandoff`, T1+T2+T3 landed `09d0dd5`).
@@ -144,10 +144,53 @@ arm per site, never a duplicated forward):
    where the pack quantized. `load_pair`'s existing gates (geometry
    fingerprint, layer_types, escape-set byte-identity) all pass unchanged on
    the dual-format pair.
-5. **GPU arm** — NOT in this pass (the cudarc Q4_K GEMV; S3's TTFT deliverable
-   per the plan's item 5). The host q4 matvec is the functional arm; the
-   hook-refusal keeps a GPU lane from silently mis-serving q4 weights until
-   that lane exists.
+5. **GPU arm — LANDED 2026-10-06 (the next pass, plan 618 item 5).** The
+   cudarc Q4_K GEMV: `gemv_q4k_cuda_raw.rs` (new module, `ternary_gemv_cuda_raw`
+   posture) — CUDA `gemv_q4k_dp4a` single + `gemv_q4k_dp4a_multi_persistent`
+   (4-segment, the ternary multi's exact shape), one warp per output row,
+   lane-strided activation blocks, consuming the SAME int8 + ascale buffers
+   the ternary dp4a path quantizes into (the quantize step is format-
+   independent — a q4 layer costs zero extra quantize launches). The
+   min-offset term folds as a dp4a against 0x01010101; the sub-block scale
+   pair decodes per activation block (`sb = (blk>>1)&7`, nibble class by
+   `j` parity — sub-block-granularity, NOT byte-internal like q4_0).
+   Wiring: `WeightBuffersCudarc` carries `format: WeightFormatCudarc
+   {Ternary, Q4K}` + a `q4_blocks` byte payload (field-ADDITIVE — the
+   riir-train-gpu backward reads `.codes`/`.wscale` and stays compiling);
+   `upload_layer_weights_cudarc` dispatches `ProjWeights` per arm; the two
+   GEMV primitives (`gemv_prequantized`, `gemv_prequantized_multi`)
+   dispatch on format — the multi partitions a mixed batch into same-format
+   launches (the dual-format pair is uniform-q4 per layer in practice);
+   all 10 composite helpers pass the q4 handle through; `gemv_fused_into`
+   (the negative-result apparatus) refuses q4 loud; the CubeCL whole-forward
+   refuses q4 at upload (`q4_refuse` — the S2 hook law; the cudarc lane is
+   the q4 GPU path). Also repaired: the S2 enum change had BROKEN this
+   cfg-gated posture (27 compile errors — `ternary_gemv_cuda_raw` is
+   compiled by no default lane; found by running the posture this pass).
+   Gates: kernel parity 3/3 (exact host-mirror match + CPU-dequantizer
+   layout pin on the mirror + CPU f32 reference at a 2% magnitude-
+   referenced bound — measured 4.0e-4, ~50× margin; the value-referenced
+   ratio on cancellation rows is meaningless, the S2 fixture lesson
+   re-learned; multi == singles; accumulate contract), the e2e
+   `q4_prefill_weights_run_the_gpu_forward_and_match_cpu` (all 10
+   projections → Q4K through the GPU forward vs the CPU forward on the same
+   arms: argmax equal, max|Δlogit| 0.0 on the discrete fixture, finite),
+   full cudarc lib suite **357 passed / 0 failed** (5 ignored = the
+   real-artifact arms), root lib 318 (the S2 baseline), issue-028 battery
+   9/9, clippy clean at default + cudarc + cudarc+batched postures. The two
+   macOS-only call-site blocks (metal_tensor_gemm upload, ane_prefill
+   ladder) carry the same `q4_refuse` pattern but are compile-unverifiable
+   on this box (blake3 build script needs a darwin C toolchain) — disclosed.
+   **Fixture lessons (both caught by the structural legs, not by eyeball):**
+   (1) Q4_K nibble alternation is at SUB-BLOCK granularity (sub-block 2p =
+   low nibbles of bytes [32p..32p+32], 2p+1 = high nibbles of the SAME
+   bytes) — the ternary kernel's byte-internal `__byte_perm` interleave is
+   WRONG here; a first draft used it and the mirror-vs-dequantizer leg
+   caught the class. (2) The multi kernel's first draft omitted the local
+   row offset in the segment-mapped `gemv_q4k_row` call — row 1 of every
+   segment silently computed row 0's weights; the multi==singles leg caught
+   it. The structural legs (mirror pinned to `dequantize_row_q4_k`, multi
+   vs singles) are the gate that pays.
 
 En-route repairs (all compile-caught, none semantic):
 - `convert_gate_proj`'s Ternary arm re-routed through a shared
@@ -228,16 +271,16 @@ owned copies materialize.
 
 ## Open at S2 close
 
-1. **The cudarc Q4_K GEMV (S2 item 5)** — the GPU prefill arm. The deltanet
-   cudarc lane has no q4 weight path; the `gemma2_cubecl` lane's
-   `GemvQ4KCubeCL` is the in-repo port reference. This is the TTFT
-   deliverable — on the 4090 box it is the next 4090-first item under the
-   prefill-priority directive.
-2. **S3 itself** (above) — needs the GPU arm for the TTFT half; the accuracy
-   half (per-family recovery vs matched storage) can start design any time
-   against Issue 026's instrument vocabulary.
+1. ~~**The cudarc Q4_K GEMV (S2 item 5)** — the GPU prefill arm.~~ **LANDED
+   2026-10-06 — see S2 item 5 above.** TTFT measurement on the real pair
+   (S3's deliverable) is the remaining consumer of this arm.
+2. **S3 itself** (above) — the accuracy half (per-family recovery vs
+   matched storage) can start design any time against Issue 026's
+   instrument vocabulary; the TTFT half now has its GPU arm.
 3. The real-pair prefill smoke (optional, disclosed above) — a curiosity
-   number on a quiet box, never a gate.
+   number on a quiet box, never a gate. The GPU q4 arm makes a real-pair
+   GPU forward feasible (20.4 GB VRAM at the 4090's edge) — fold into S3's
+   run design rather than running it standalone.
 
 ## Records
 

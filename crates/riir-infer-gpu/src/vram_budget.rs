@@ -241,6 +241,21 @@ fn gate_proj_bytes(g: &GateProjWeights) -> u64 {
     }
 }
 
+/// GPU bytes one uploaded projection occupies — the `ProjWeights` dispatch
+/// (plan 618 item 5): the Ternary arm rides the ternary handle estimate; the
+/// Q4K arm uploads its raw super-block bytes verbatim (144 bytes per 256
+/// values, no staging copy).
+fn proj_gpu_bytes(p: &riir_infer_core::deltanet::ternary_weights::ProjWeights) -> u64 {
+    match p {
+        riir_infer_core::deltanet::ternary_weights::ProjWeights::Ternary(t) => {
+            ternary_handle_bytes(t)
+        }
+        riir_infer_core::deltanet::ternary_weights::ProjWeights::Q4K(blocks, _, _) => {
+            blocks.len() as u64 * 144
+        }
+    }
+}
+
 /// Exact GPU bytes of the weight upload side of the constructor (every
 /// ternary projection once, the actual gate-proj variant, dense f32 slabs).
 ///
@@ -254,7 +269,7 @@ pub fn ternary_weights_gpu_bytes(weights: &QwenDeltaNetTernaryWeights) -> u64 {
     total += weights.final_norm.len() as u64 * 4;
     for l in &weights.layers {
         for p in l.projections() {
-            total += ternary_handle_bytes(p);
+            total += proj_gpu_bytes(p);
         }
         for g in l.gate_projections() {
             total += gate_proj_bytes(g);
