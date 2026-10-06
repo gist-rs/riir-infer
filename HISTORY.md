@@ -1,2045 +1,255 @@
 # HISTORY.md — riir-infer
 
 Durable records for resolved questions and closed lanes (the noise-reduction
-convention: the record lands here, hash-pinned; open work lives in `.issues/`
-and `.plans/`). Created 2026-09-23 at the first record.
+convention: the record lands here hash-pinned; open work lives in `.issues/`
+and `.plans/`). Created 2026-09-23 at the first record. Headings are kept
+verbatim — issue/plan/bench numbers + dates are read by the workspace
+numbering + citation gates; each record below is one compact entry (full
+narratives: `git log --follow -- .issues/<file>` or this file's git history).
 
 ## 2026-10-06 — Issue 028 T4 S2: the q4 weight arm — the container loads and runs the dual-format pair — (this commit)
 
-**The design (one enum, never a duplicated forward):** `ProjWeights { Ternary(
-TernaryGroupWeights), Q4K(Vec<BlockQ4K>, rows, cols) }` at the 10 per-layer
-projection fields of `DeltaNetTernaryLayerWeights` (the `GateProjWeights`
-precedent). `wte`/`lm_head` and the a/b gate projections keep their own types —
-the pack byte-copies them, so the decode and prefill copies carry byte-identical
-globals/escape fields by construction. Dispatch points: `bitlinear` (the single
-CPU path — Ternary arm = hook-or-SIMD exactly as before, Q4K arm = per-row fused
-`gemv_q4_k_row`, rayon across 16-row chunks at the ternary kernel's ≥256-row
-threshold; row-independent work, bit-stable under any worker count) and
-`load_proj` in the loader (storage-type dispatch: Q2_0/PTQ1_0 → ternary repack,
-Q4_K → owned blocks with shape + block-count checks). The GPU hook paths refuse
-a q4 projection LOUD — hooks pass `&TernaryGroupWeights`, and silently dropping
-a hook would capture a wrong GPU graph; the cudarc q4 GEMV stays a scoped
-follow-up (plan 618 §S2 item 5), not a silent fallback.
-
-**Measured (4090 box, release):**
-- The REAL pair LOADS: `load_pair(PQ2_0, Q4_K.pf)` passed the
-  geometry-fingerprint + escape-set gates at production scale in **630 s / 702 s**
-  across two runs (~20.5 GB resident — the T3 budget table's "at the edge" row,
-  now measured; the cost is the 6.7 GB ternary repack + the 13.7 GB owned q4
-  copy; the mmap pages are clean and evict during it, disclosed).
-- First real-run red was the TEST's arm-layout assertion (layer 0 is DeltaNet —
-  `attn_wq` is the empty arm there; fixed to `layers[0].in_proj_qkv` +
-  `layers[3].attn_wq`), never the loader or the forward.
-- Fixture lesson for the cross-format gate: a per-row q4-vs-ternary 10% envelope
-  FAILED on row 0 — q4 read −2.0775 (== f32 ref −2.0775) against ternary −2.4876,
-  i.e. the TERNARY dot was 19% off the f32 truth on the quant-hostile fixture.
-  The check is now AGGREGATE (Σy within 5% of Σ|y|); per-row dispatch truth is
-  pinned exactly by the dequant-then-dot reference.
-
-**Gates:** lib 318 green at `deltanet_ternary_inference` (new:
-`q4k_arm_matvec_and_dequant_match_reference` incl. both chunk postures,
-`ternary_arm_matvec_is_the_parallel_kernel` — the enum's Ternary arm is the
-pre-enum kernel byte-equal — and `mixed_arm_layer_passes_invariants` with the
-wrong-block-count negative); the issue-028 battery 9/9 incl. the new always-on
-`dual_format_q4_prefill_pair_loads_and_runs` (synthetic dual-format pair:
-PQ2_0 decode + Q4_K prefill off the identical ternary content, escape law at
-load, phase split through the q4 arms, boundary relative-L2 < 5%); all seven
-ternary-lane integration suites green (`bonsai2_rotation_load` 10,
-`twt_gates` 14, `twt_ternarize_gates` 7, `twt_ternarize_g4` 1, `twt_g4_alloc`
-15, `twt_collapse_writer_gates` 1, `twt_audition_gates` 10); default-posture
-lib 248 green unchanged; clippy clean at default, `deltanet_ternary_inference`,
-and the `+act_scale_refit+twt_bonsai+twt_collapse` bins/examples posture.
-⚠ The real-pair PREFILL smoke did not complete (disclosed in plan 618): the
-second attempt burned the whole 30-min tool ceiling inside the prefill after
-the load gate — the box paging under ~20.5 GB resident + mmap pressure; the
-always-on synthetic gate carries the forward-path proof, and CPU host numbers
-do not price TTFT (the cudarc q4 GEMV is the scoped next item).
-
-**En-route:** `for_each_ternary_site*` walkers hand out `&ProjWeights` (the
-refit bin takes `as_ternary_mut`; q4 sites refuse — refit needs bit-planes; the
-mutable walker's LmHead visit preserved via a temporary wrapper, the immutable
-twin has zero callers and drops it, documented); `convert_gate_proj` re-routed
-through a shared `convert_ternary_ref` (no extra clone on `to_hybrid_dense`);
-q4-arm additions to `to_hybrid_dense` (dequantizes in both postures — the dense
-TRAINING container has no q4 arm); the audition example merges ternary
-candidates only, refusing a q4 arm loud; `DeltaNetTernaryLayerWeights` gained
-`#[derive(Clone)]`. Records: plan 618 §S2; issue 028 T4 row.
+`ProjWeights { Ternary(TernaryGroupWeights), Q4K(Vec<BlockQ4K>, rows, cols) }` at the 10 per-layer projection fields; `bitlinear` dispatches the Q4_K arm to fused `gemv_q4_k_row` (rayon across 16-row chunks, bit-stable), GPU hooks refuse q4 LOUD, loader `load_proj` storage-type dispatch. Real pair (PQ2_0 + Q4_K.pf) loads at production scale in 630 s / 702 s (~20.5 GB resident); lib 318 green at `deltanet_ternary_inference`, issue-028 battery 9/9 incl. always-on `dual_format_q4_prefill_pair_loads_and_runs`; the real-pair PREFILL smoke did not complete (30-min tool ceiling, plan 618 — the cudarc q4 GEMV is the scoped next item).
 
 ## 2026-10-06 — Issue 028 T4 S1: the Q4_K prefill pack exists — plus the science premise settled — `94a4e7c`
 
-**The artifact:** `Ternary-Bonsai-2-27B-Q4_K.pf.gguf`, **14.43 GB**, blake3
-`0a7a5605fadc37b482c0fddf6c28334244eea818b1716461bddb412f1a28309c` (sidecar
-beside it). Identity block table over the league PQ2_0 pack through the landed
-collapsed-GGUF writer; 400 block projections dequant→`quantize_row_q4_k`
-(13.68 GB payload), globals + the a/b gate projections + norms/conv/ssm_a/
-ssm_dt byte-copied — **the escape set rides bit-shared by construction**, so
-`verify_escape_set_shared` passes on the pair trivially.
-
-**The science premise (the thing that unblocked T4):** the issue said the q4
-pack must be quantized "on the unfolded source", and no unfolded-f16 source
-exists on this box. It is not needed: the bonsai is TRAINED TERNARY, so the
-PQ2_0 wire is exact up to its f16 group scales — the bridge repack accepts
-every block (zero fourth-state codes, `UnsupportedFourthState` is the
-structural gate) and the raw `dequantize_row_q2_0` decode equals
-`trit × f16 scale` on sampled blocks (the value gate, `--sample-only`).
-Requantizing from the PQ2_0 pack therefore carries **only ε(Q4_K)** — the same
-error a q4 pack from an f16 original would carry. The premise is checked on
-the artifact at every run, never assumed.
-
-**Verification (exit 0, `--verify-only` re-runnable):** geometry plane
-(`general.architecture` + every `qwen35.*` key) equal INCLUDING the
-discriminant-tagged variant encoding — the first run's red: the writer's
-block-count override re-widened to U64 while the parent stores U32, and
-`geometry_fingerprint` is discriminant-tagged, so the decode/prefill pair
-would have REFUSED at T4 load time (`load_pair` runs before the prefill copy
-dequantizes). Fix: mirror the parent's own metadata value verbatim — identity
-requant = identity metadata encoding. Copy-class byte-identity PASS (451
-tensors); all 400 requant tensors structurally Q4_K at the parent's exact
-shapes; sampled read-back max err 1.34–1.44e-3 within the analytic Q4_K
-sub-block bound.
-
-En-route: the GGUF v3 value-type table for the probe scripts (7 = BOOL,
-10/11/12 = U64/I64/F64 — the first hand-rolled table had 7 = F64 and
-desynced the metadata walk; `prism.hadamard.gdn_v_grouped` is a bool).
-Known limit, disclosed: the pack VERIFIES but the container cannot LOAD it
-yet — `load_ternary_proj` refuses Q4_K (plan 618's S2); the accuracy
-measurement is S3. Plan: `.plans/618_dq_t4_q4_prefill_pack.md`.
+`Ternary-Bonsai-2-27B-Q4_K.pf.gguf`, 14.43 GB, blake3 `0a7a5605fadc37b482c0fddf6c28334244eea818b1716461bddb412f1a28309c`; the science premise: the bonsai is TRAINED TERNARY, so the PQ2_0 wire is exact up to f16 group scales — requant carries only ε(Q4_K) (`UnsupportedFourthState` is the structural gate). Geometry fix: mirror the parent's own metadata value verbatim (`geometry_fingerprint` is discriminant-tagged; the first run re-widened block count to U64 and would have REFUSED at T4 load). Verifies exit 0; the container could not LOAD until S2. Plan: `.plans/618_dq_t4_q4_prefill_pack.md`.
 
 ## 2026-10-06 — the GPU crate is clippy `-D` clean at every posture — `e993eff`
 
-The pre-existing warnings the Issue-035 session disclosed (2 lib clippy + 3
-rustc + 4 bin) are gone, and the interesting half is the posture analysis:
-
-- The rotation quantize pair (`quantize_rotate_q8`/`_permute_rotate_q8`) +
-  their two `*_warp` kernel fields are **test-consumed only** — the sole
-  caller `fused_qrot_bitexact_vs_unfused_chain` is
-  `#[cfg(feature = "prefill_q8_act")]`-gated, so the items are dead at every
-  posture EXCEPT (test AND prefill_q8_act). The allow gate is
-  `not(all(test, feature = "prefill_q8_act"))` — the first
-  `not(any(test, …))` attempt was wrong in exactly the posture that fired
-  (test harness without the feature), the class where a gate reads clean on
-  the lane that compiles and dead on the lane that runs.
-- `DQ_FQ_CUDA_SRC` is dead only without `dq_phase_bench` (its reader
-  `DqFqKernels::new` is feature-gated) — the dq_fakequant.rs cfg_attr idiom,
-  plus `DqFqKernels` + the const moved above the tests module
-  (`items_after_test_module`).
-- Mechanicals: qwen38_pyramid_capture (is_multiple_of / div_ceil /
-  enumerate / let-chain collapse — the cargo-refine healer's apply pass
-  surfaced 0 edits for these, a documented miss feeding the post-mining
-  queue), exl3_pack doc-list indent, `KeyedSpecConfig` derive(Default)
-  (was a hand-rolled identity impl), `KeyedSerialFeats` type alias,
-  `iter().copied().collect()` → clone/move, `rev().find()` for the
-  DoubleEndedIterator last().
-
-Clean: `--workspace --all-targets` at default; `-p riir-infer-gpu
---all-targets` at `ternary_gemv_cuda_raw` AND `--all-features`; `-p
-riir-infer-core` all-features; lib tests 248 + 56 green unchanged.
+Pre-existing warnings gone; the rotation quantize pair (`quantize_rotate_q8`/`_permute_rotate_q8` + `*_warp` fields) is test-consumed only — allow gate `not(all(test, feature = "prefill_q8_act"))` (the first `not(any(test, …))` was wrong in exactly the firing posture); `DQ_FQ_CUDA_SRC` is dead only without `dq_phase_bench`. Clean at `--workspace --all-targets` default, `-p riir-infer-gpu --all-targets` at `ternary_gemv_cuda_raw` AND `--all-features`; lib tests 248 + 56 green unchanged.
 
 ## 2026-10-06 — Issue 035 P2.6 LANDED: real-vocabulary compile + the row-fold — the honest G2 regime — `ddcaeb0`
 
-Two compile/sampler rebuilds, both needed before a real-vocab number could exist:
-
-1. **The trie-stepped subset construction** (`fa_schema.rs`): tokens live in a
-trie; each source subset walks it once with `(current subset, char)`-memoized
-steps (the memo keys the CONTENT-INTERNED pool subset — the first red run keyed
-the source subset and mid-token subsets collided) and a generation-stamped
-`seen` buffer (the old `closure` allocated a fresh bitmap per char step — the
-compile-time pathology). Cost = trie nodes × subsets-that-reach-them. A 256k
-vocab now compiles the fn-call grammar in 60s (toy 0.13s, object 1.8s).
-Prefix tokens, duplicate-text ids, dead tokens, and a 20k-token scale smoke are
-pinned; all P2 grammar tests unchanged.
-
-2. **The row-fold** (`fa_posterior.rs`, both lanes): one vocab-wide exp row per
-position (`erow` f64, shifted by the vocab max), each edge's fold = `row_max +
-ln Σ erow[v]` with an f64 accumulator. Replaces exp-per-(position, edge, token),
-which recomputed every token's exp once per edge containing it — the 256k-vocab
-string-body edges made that 11.79 s per fn-call draw. The f64 sum keeps the old
-per-edge f32 shift's dynamic range (down to exp(−745)); an all-−INF row folds to
-−INF where the old code produced NaN. Exactness battery unchanged-green (TV,
-1e-9 marginals, carry-over, G4).
-
-The bench gained `--real-vocab <path.gguf>` (GGUF `tokenizer.ggml.tokens`, mmap,
-ids = array index). **gemma-2-2b, 256k vocab, the 4090 box:**
-
-| grammar | raw n/e | min n/e | compile | constrained/unconstrained |
-|---|---|---|---|---|
-| toy-enum | 31/102 | 20/56 | 0.13s | **0.93×** (the floor: both arms pay one vocab exp row) |
-| object-2p | 133/976 | 43/125 | 1.76s | **~1.8×** |
-| fn-call-5p | 2873/27294 | 859/3194 | 60s | **~6.0×** (draw 11.79s → 1.98s at L=256) |
-
-This is the REAL regime (string bodies admit ~every text token), and it is the
-table the P3 owner verdict should read. The fn-call residual ~6× is the Σ|e|
-add pass — the recorded axes are a base+delta fold over near-duplicate body-edge
-sets (compiler+sampler structure change) or the GPU-side fold (P0.5's tree lane
-is the seam). **P3 stays owner-gated.**
+Trie-stepped subset construction in `fa_schema.rs` (256k vocab compiles the fn-call grammar in 60s; toy 0.13s, object 1.8s) + one vocab-wide exp row per position in `fa_posterior.rs` (fn-call draw 11.79s → 1.98s at L=256). Bench gained `--real-vocab <path.gguf>`; gemma-2-2b 256k on the 4090 box: toy-enum 0.93×, object-2p ~1.8×, fn-call-5p ~6.0× — the REAL regime table the P3 owner verdict reads. P3 stays owner-gated.
 
 ## 2026-10-06 — Issue 035 P2.5 LANDED: DFA minimization — the G2 ratio drops ~4.4× — `9e94684`+`672e2b0`
 
-`src/fa_minimize.rs` (UNGATED core, 7 tests): trim (forward-reachable ∧
-co-reachable-to-accept) + partition refinement at BLOCK granularity with
-per-block edge re-merging, applied ALWAYS inside `fa_schema::compile`
-(language-preserving by construction — unlike the NFA-fragment sharing the P2
-soundness laws forbid, which changed the language). New block ids follow
-first-member order → deterministic + idempotent, both pinned. A schema accepting
-no instance now fails at COMPILE time (`InvalidSchema`), not at the first decode
-draw. `SchemaError::InvalidSchema` widened `&'static str` → `String` for the
-formatted refusal (in-repo wildcard matches unaffected).
-
-The exactness carry-over is an ARGUMENT with a measured pin: per-node out-edge
-token sets are disjoint (the builder's ≤1-edge-per-(node,token) law), so a
-token's flow is `e_v·β(dst(e))` raw and `e_v·β(block(dst(e)))` merged —
-identical; continuations land in equivalent states → the joint distribution
-over token sequences is preserved. Pinned distributionally (2×20k seeds, raw vs
-minimized per-sequence counts within 5σ of the binomial difference) and by
-exhaustive language enumeration (3-symbol alphabet, lengths ≤ 6, five shapes).
-
-The bench now prints raw vs minimized (`compile_stats`):
-
-| grammar | raw n/e | minimized n/e | ratio before | ratio now |
-|---|---|---|---|---|
-| toy-enum | 14/37 | 5/7 | 1.6-2.2× | **0.50-0.64×** (now FASTER than unconstrained) |
-| object-2p | 83/316 | 29/56 | ~22× | **~6.2-6.6×** |
-| fn-call-5p | 1473/5997 | 435/940 | ~440× | **~96-111×** |
-
-(same box posture as the P2 table: 24 logical CPUs, release, CPU best-of-5.) The
-subset construction's k!·2^k member orders collapse to the 2^k·k distinct
-futures. The residual ~100× on large grammars is the O(L·Σ|e|) emission fold
-(exp per position × edge-token occurrence) — the next CPU axis if the owner
-wants it before the GPU-side fold (P0.5's tree lane is the seam). **P3 stays
-owner-gated; the GOAT verdict now consumes the minimized table.**
+`src/fa_minimize.rs` (UNGATED, 7 tests): trim + block-granularity partition refinement applied ALWAYS inside `fa_schema::compile` (language-preserving by construction); empty-language schemas now fail at COMPILE time (`SchemaError::InvalidSchema`). Ratios: toy 0.50-0.64× (faster than unconstrained), object ~6.2-6.6×, fn-call ~96-111×; exactness pinned distributionally (2×20k seeds) + exhaustive language enumeration. P3 owner-gated; the GOAT verdict consumes the minimized table.
 
 ## 2026-10-06 — Issue 035 P2 LANDED: the schema front end + the honest overhead table — `1254264`+`5b5c462`
 
-`src/fa_schema.rs` (UNGATED core, 12 tests): JSON-schema subset (six types ·
-properties/required · items · enum · anyOf) → Thompson NFA → subset graph stepped
-ON DEMAND by token-string chars (no alphabet table — the token re-alphabetization
-is the only consumer) → token `Automaton` with (from,to)-merged edges (satisfies
-the segment-tree lane's ≤1-edge-per-pair invariant; merge is semantics-preserving).
-Trailing-whitespace star = the block-padding language. Caps (depth/NFA/subsets/props)
-refuse as named errors. Three grammar-soundness laws the tests paid for (each pinned
-in-doc): fresh ws wrappers (a shared star final leaks ε-exits across positions —
-`[42,]` walked an Integer array); per-(mask,member) member chains (a shared value
-fragment funnels every origin mask into ONE successor subset — `{"age":42}` accepted
-with `name` required — the mask state machine tolerates NO shared subgraph between
-mask states); acceptance = walk ∧ final (an unterminated string walks to a
-non-accepting node).
-
-The bench (`examples/fa_schema_overhead_bench.rs`, CPU best-of-5, PROVENANCE line;
-both arms run the SAME forwards so the delta IS the sampling step):
-
-| grammar | automaton | L=64 | L=128 | L=256 |
-|---|---|---|---|---|
-| toy-enum | 14n/37e | 1.9× | 1.9× | 2.2× |
-| object-2p | 83n/316e | 21.8× | 22.4× | 22.6× |
-| fn-call-5p | 1473n/5997e | 437× | 443× | 454× |
-
-(vs the unconstrained per-position draw: 13-59 µs/step. The constrained joint draw
-is O(L·E), E bloats ∝ the 2^k·k member chains — 1473 nodes for a 5-prop schema is
-the construction's cost, not the grammar's.) **P3's G2 reading: the CPU sequential
-lane meets single-digit-% ONLY on small automata; the axes are automaton
-minimization (non-mask-adjacent subgraph sharing), and the GPU-side fold (the
-paper's own posture — P0.5's tree lane is the seam). The promote/demote verdict is
-owner-gated and consumes this table.**
+`src/fa_schema.rs` (UNGATED, 12 tests): JSON-schema subset (six types · properties/required · items · enum · anyOf) → Thompson NFA → on-demand subset graph → token `Automaton`; three grammar-soundness laws pinned (fresh ws wrappers, per-(mask,member) member chains, acceptance = walk ∧ final). Bench (`examples/fa_schema_overhead_bench.rs`, CPU best-of-5, PROVENANCE line): toy 1.9-2.2×, object ~22×, fn-call ~440× — the CPU sequential lane meets single-digit-% ONLY on small automata; promote/demote owner-gated on this table.
 
 ## 2026-10-06 — Issue 022 T5.4 CLOSED: the equal-FLOP skip-class gate — the lane wins, honestly — `8bd5c2d`+this commit
 
-The lane's one honest comparison debt paid (record
-[`.benchmarks/022_t54_skip_arms.md`](.benchmarks/022_t54_skip_arms.md); instrument
-`src/bin/twt_skip_amputation.rs` at `a7b080c`; overnight detached run on the 4090 box,
-parent cache self-generated over the REAL forward, glue parity 511/511 byte-identical):
-
-**twt 0.8919 > hydra 0.8642 > random floor 0.8437 >> ShortGPT 0.0320** at the equal
-3-layer cut (4088 teacher-forced positions, chat_probe corpus, the league model).
-
-- **The selection disagreement is total** — twt {4,12,15} vs hydra {19,20,21} vs
-  shortgpt {0,1,29}; zero shared layers.
-- **ShortGPT's Block-Influence greedy is 81 points BELOW random** on this class: its
-  BI meter is <5% flat across layers, so the greedy rides noise, and it picked layers
-  {0,1} — first divergence at position 0, babbling. A dense-model removal criterion
-  does not transfer to the quantized ternary GDN/attention hybrid.
-- **The floor is 0.84** — the 4.7% cut is nearly floor-degenerate; the lane's real
-  edge is +4.8 pt over random. Honest framing recorded, not buried.
-- hydra's logit-lens DE is the strongest published-class arm (hit-parity 0.4883); the
-  transcription was pinned against katgpt-rs's own `hydra_budget` module test.
-- XMerge-class: boundary reconstruction is a repair axis, not a selection criterion —
-  scoped in the bench record, not gated.
-- katgpt-rs Research 594 §7 updated — **the public-novelty caveat is discharged**
-  (decoder-LLM × quantized/ternary-GGUF × auditioned zero-training surrogate × DP
-  partition × throughput gate now stands without the T5.4 comparison debt). The
-  TWT absolute-0.9 bar passed on the M3's corpus (0.9486) and misses by 0.008 on this
-  box's chat_probe corpus — corpus-attributed (hit-rate parity both boxes), disclosed.
-
-- **Residual on removal (hygiene, this commit):** issue file removed per the noise-reduction rule; the one open checkbox rides here — **T1.4's REAL parent-vs-quantized ΔS pair run stays deferred** until a quantized laya-class checkpoint + the T1.2 GDN capture half exist (the module `src/twt/delta.rs` + its localization gate are landed; only the real-pair run waits).
-
-Same commit wave: Issue 035 P0+P0.5 — `src/fa_posterior.rs`, the FA-constrained exact
-joint sampler for the dLLM decode lane (Mosaic arXiv:2607.07026 distill; CSR automaton
-tensors + edge-space forward–backward sequential sampler in f32 + the O(log L)
-f64 segment-tree parallel sampler + 1e-9-verified token marginals; 14 lib tests incl.
-brute-force TV exactness on toy/random automata + the G4 allocation-free gate
-`tests/fa_g4_alloc.rs`).
+Record `.benchmarks/022_t54_skip_arms.md` (instrument `src/bin/twt_skip_amputation.rs` at `a7b080c`): twt 0.8919 > hydra 0.8642 > random floor 0.8437 >> ShortGPT 0.0320 at the equal 3-layer cut — selection disagreement total, ShortGPT's BI greedy 81 points below random (a dense-model removal criterion does not transfer to the quantized ternary GDN/attention hybrid). katgpt-rs Research 594 §7 updated — the public-novelty caveat discharged; T1.4's real parent-vs-quantized ΔS pair run stays deferred (`src/twt/delta.rs` landed). Same wave: Issue 035 P0+P0.5 `src/fa_posterior.rs` — the FA-constrained exact joint sampler (Mosaic arXiv:2607.07026 distill; f32 sequential + O(log L) f64 segment-tree parallel, 1e-9-verified marginals, `tests/fa_g4_alloc.rs`).
 
 ## 2026-10-06 — Issue 035 P1 LANDED: the `fa_constraint` decode wiring — exact joint x→0 per denoising step — `304876f`+`f4ffa93`
 
-P0's sampler wired into the `gemma2_d2f` denoising loop behind the opt-in
-`fa_constraint` feature (implies `gemma2_d2f` ⇒ `dllm`). Per step: ONE exact joint
-draw over the generation block (committed positions pinned, masked free), then
-confidence-ordered commit with the fixed threshold or the learned sampler; the rest
-remask. Four lanes beyond the bare wiring:
-
-- **Commit axes** (`FaCommitBy`): `RawTop1` = `P_lm(proposal | position)` from the
-  mask-suppressed softmax (the A/B baseline — same confidence currency as the base
-  loop, read at the proposal); `ConstrainedMarginal` = the constrained posterior
-  marginal of the proposal, its log riding `SamplerFeatures::marginal_log` as the
-  7th input of the new 7-param `ConstrainedSampler` (the 6-slot `to_array` is
-  untouched — the trained `DiffusionSampler` surface is unchanged). The marginal
-  axis normalizes over the ALLOWED set, so confidence is meaningfully scaled where
-  raw top-1 over a 256k vocab is noise (~3.8e-6 on the test fixture).
-- **Block carry-over**: core `sample_joint_from`/`build_tree_from`/`walk_from` +
-  `ParallelTree.start` (carry-over start nodes validated against conditioned
-  brute force: sequential TV + parallel TV + marginals to 1e-9 from a NON-designated
-  start); the decode returns `final_node` and the next block threads it as
-  `start_node`. The two-block GPU test walks the CONCATENATED blocks from the
-  original start to an accepting node.
-- **The mask-free output guarantee** (the lane's product point, beyond the issue
-  text): after the loop, still-masked positions take the final step's x→0 proposal —
-  accepted by construction — so the returned block NEVER carries mask tokens and
-  always walks `start_node → accepting` (`WalkBrokeContract` guard asserts it); the
-  base lane leaves mask placeholders in SemiActivated blocks. `FaDecodeError`
-  refuses mask-in-automaton, bad carry-over start, 0 denoise steps, and
-  ConstrainedMarginal tree-budget overruns at decode entry (fail loud before GPU
-  work, never OOM at step 3 of 8).
-- **Feature-off byte-identical**: the base `d2f_decode_gemma2` +
-  `sample_with_confidence` are untouched — the constrained lane is a separate loop
-  (`d2f_decode_gemma2_constrained`), deliberate-divergence note in the module doc.
-
-Tests: 6 CPU-pure (schedule/lm-prob/sampler-math/validation/propose pins/carry-over)
-+ 4 GPU integration on the Gemma2-2B fixture (chain grammar converges at tau 1e-9
-raw; tau 0.99 final-commit never leaves masks; marginal axis converges at tau 0.05;
-two-block carry-over). Clippy `-D` clean at `fa_constraint`; default and
-`--no-default-features` postures compile; G4 alloc gate re-run green. P2 (the
-JSON-schema → DFA compiler + overhead bench) is the next task; P3 GOAT owner-gated.
+P0's sampler wired into the `gemma2_d2f` denoising loop behind opt-in `fa_constraint` (implies `gemma2_d2f` ⇒ `dllm`): ONE exact joint draw per step; commit axes `RawTop1` / `ConstrainedMarginal` (marginal log rides `SamplerFeatures::marginal_log`, the 7-param `ConstrainedSampler` — the 6-slot `to_array` untouched); block carry-over (`sample_joint_from`/`build_tree_from`/`walk_from` + `ParallelTree.start`); mask-free output guarantee (`WalkBrokeContract` guard); `FaDecodeError` fails loud at decode entry; separate loop `d2f_decode_gemma2_constrained`, feature-off byte-identical. 6 CPU + 4 GPU tests; clippy `-D` clean; P2 next, P3 GOAT owner-gated.
 
 ## 2026-10-01 — riir-ai Issue 1004 R2 LANDED: the fused GDN prework (conv1d + SiLU + q/k L2-norm + head expansion, ONE dispatch) — `929d31e`
 
-The MTPLX `gdn_prefill_prework.py` shape, built and measured (record
-[`.benchmarks/024_deltanet_prework_fused_ab.md`](.benchmarks/024_deltanet_prework_fused_ab.md);
-feature `deltanet_prework_fused`, opt-in, toggle `set_prefill_prework_fused`
-default-on-when-compiled). One workgroup per (token, head-slot) with 512 B
-threadgroup staging + the shared carry-update dispatch: **2 dispatches/layer
-vs the shipping chain's ~69** (P/64 chunked conv × 2 + batched expand), the
-`qkv_conv_b` intermediate never exists (~160 MB/layer less traffic @2048), and
-the `p % 64 == 0` fallback pathology is GONE (odd p no longer drops to P
-sequential dispatches).
-
-- **G1 bit-identical by construction** (conv/silu/sq_sum/guard op-order
-  verbatim; the compact→expanded broadcast inverted) — pinned in-module (6
-  shapes incl. odd p, p=1, p<ks−1; expanded + carry) and e2e: logits FNV
-  `0ec2396fd4627f29` @2048 / `f35280cb95f5d306` @4096, byte-for-byte R1's
-  recorded pins.
-- **Stage-isolated 7.29× @2048 / 9.13× @4096** (11 interleaved pairs,
-  bit-checked every pair) — the issue's ~0.5% traffic-only estimate
-  undercounted the real term: the shipping chain is DISPATCH-OVERHEAD-bound
-  (69 kernels ≈ 10 ms of the 11 ms wall @2048), not traffic-bound.
-- **e2e (production folded Bonsai-2 PQ2_0 file): four positive medians across
-  two runs — loaded 1.045×/1.018×, quiet-box confirmation 1.022×/1.034× —
-  all INSIDE the round spread → NOT promoted (the R1 standard); opt-in
-  stands.** The load asymmetry is mechanistic (dispatch elimination pays more
-  under CPU contention) and the sign cannot invert (strictly less work at
-  bit-identical output).
-- En route: `deltanet_chunked_cubecl`'s carry-update dispatch extracted to
-  `launch_conv1d_carry_update` (DRY — the chunked launcher and the fused
-  launcher now call the same helper); the chunked-conv tests re-run green.
-- The league re-pin bout stays the league loop's job — never a solo claim
-  (riir-ai Issue 1004's own law).
+Feature `deltanet_prework_fused` (toggle `set_prefill_prework_fused`): 2 dispatches/layer vs the shipping chain's ~69; stage-isolated 7.29× @2048 / 9.13× @4096; G1 bit-identical (logits FNV `0ec2396fd4627f29` @2048 / `f35280cb95f5d306` @4096). e2e medians inside the round spread → NOT promoted (the R1 standard), opt-in stands; record `.benchmarks/024_deltanet_prework_fused_ab.md`; carry-update dispatch extracted to `launch_conv1d_carry_update` (DRY); the league re-pin bout stays the league loop's job (riir-ai Issue 1004's own law).
 
 ## 2026-10-01 — Issue 026 CLOSED (hygiene): the DQ phase-matrix instrument landed and ran — every axis INADMISSIBLE at the frozen corpora
 
-Plan 614 delivered the 2×2 phase-matrix instrument (`dq_fakequant` + the
-`dq_phase_matrix` runner; record `.benchmarks/023_dq_phase_matrix.md`) and ran
-it to EXIT0: base arith 0.9583 and NIAH pooled 0.9896 both sit OUTSIDE the
-pre-registered 0.25–0.95 admissibility window, so T3's damage-ratio assertions
-receive NO GATE — the honest no-gate outcome; a gating re-run needs a NEW
-pre-registration on corpora inside the window. The R numbers were still
-reported per axis/grid (a2 prefill-heavy 0.085; a2 decode-heavy 0.733; a4
-decode-heavy 0.000). T5's standing promotion rule — any future weight format
-publishes its per-phase R before default promotion — rides the INSTRUMENT
-(pinned in bench 023), armed by nothing in this run. The runner's defects and
-the twin-session collision narrative: Issue 030's HISTORY row.
-
-**T4 (the KV-axis extension arm) was never in the Plan-614 freeze** — split
-into `.issues/033_kv_axis_extension_arm.md` so the queue keeps surfacing it.
-
-**Numbering repair en route:** `.issues/.highwater_local` read `031` at this
-pass even though Issue 032 had been allocated, landed (`5d0592f`), and its
-file removed (`4f68e5d`) — the counter was never bumped for 032 (the katgpt-rs
-`.issues/121` recycling-bug class; caught because HISTORY's newest row named
-032 while the counter still said 031, which would have handed the next
-allocation a reused number). This commit sets the counter to `033` with this
-issue's allocation.
-
-File removed per the noise-reduction rule — full task narrative:
-`git log --follow -- .issues/026_phase_sensitivity_quant_bench.md`.
-Hygiene session: riir-clippy idle loop (2026-10-01).
+Plan 614's instrument (`dq_fakequant` + the `dq_phase_matrix` runner; record `.benchmarks/023_dq_phase_matrix.md`) ran to EXIT0: base arith 0.9583, NIAH pooled 0.9896 — both OUTSIDE the pre-registered 0.25–0.95 window, so T3's damage-ratio assertions receive NO GATE; T5's promotion rule (any future weight format publishes its per-phase R before default promotion) rides the INSTRUMENT. T4 split to `.issues/033_kv_axis_extension_arm.md`. `.issues/.highwater_local` repaired 031→033 (Issue 032's bump was missed — it landed `5d0592f`, file removed `4f68e5d`; the katgpt-rs `.issues/121` recycling-bug class).
 
 ## 2026-10-01 — Issue 032 DONE: Metal CubeCL prefill computes Hadamard-folded (Bonsai-2) models (`5d0592f`)
 
-- **What was blocked:** `prefill_tokens_chunk` panicked on folded files whenever the cudarc whole-prefill lane was unavailable — always on macOS — so Metal could never batch-prefill the production Bonsai-2 PQ2_0 file (riir-ai Plan 602 Phase C / Plan 607 A4 named it the hard predecessor of every M3 prefill cell; neither owned the task).
-- **What landed:** batched twins of all 8 decode eager rotation sites (Plan 602 B3) in the CubeCL prefill body; dense a/b via the new bit-identical token-grid GEMV (`GemvBatchedCubeCL::launch_token_grid`); the non-macOS cudarc FFN block skipped for folded files (no rotation wiring); the refusal replaced by a marker/tables agreement assert.
-- **Gates (M3 Max, AC):** G1 vs folded decode-eager at P=64/100/128/512 — top-1 equal, top-5/top-20 1.00, worst rel err ≤ 1.5e-5 at the last position and one decode step later; revert probe (site 7 dropped) reds it (top-5 0.00); G3 pre-rotation `Q2_0` pin `99a0733c45a0e663` @2048 exact.
-- **First Bonsai-2 M3 prefill reading (unscored):** 100.9 tok/s @2048 batched vs 15.7 tok/s token-by-token = 6.44× time-to-first-token. The league cell stays riir-ai Plan 602 C4 (Ultra-gated).
-- **Test:** `crates/riir-infer-gpu/tests/g1_032_folded_prefill_metal.rs` (three `#[ignore]` arms: G1, pin, throughput).
-- ⛔ **Correction (same day): the record above was measured only to P=2048, and production chunks reach 4096.** Past ~2730 tokens the folded prefill CRASHED — wgpu `dispatch group size dimension ([98304, 1, 1]) must be <= 65535` — because the rotation launchers and `CopyCubeCL` (the gdn_v staging copy) put every workgroup on the x axis: fine at decode's P=1, over Metal's cap at 4096 × 6144 / 256. Found by the Issue 1004 Bonsai-2 e2e at 4096, not by any 032 gate. Fixed in `5f075ff` (rotation launchers, 2-D grid) + `7e99f34` (`CopyCubeCL` 2-D path with an explicit u32 bound; old callers byte-identical). Both carry unit tests past 65535 workgroups that red on the old code with the identical error. G1 re-run at **P=4096** with both: top-1 equal, top-5/top-20 1.00, worst rel err 1.23e-5 (2.80e-6 one decode step later). Lesson: a G1 that stops below the production chunk size certifies a size nobody ships — run `I032_P=4096`.
+Batched twins of all 8 decode rotation sites in the CubeCL prefill body + `GemvBatchedCubeCL::launch_token_grid`; G1 vs folded decode-eager top-1 equal, worst rel err ≤ 1.5e-5; pre-rotation Q2_0 pin `99a0733c45a0e663` @2048 exact; first Bonsai-2 M3 prefill 6.44× TTFT (100.9 tok/s @2048); test `crates/riir-infer-gpu/tests/g1_032_folded_prefill_metal.rs`. ⛔ Correction: production 4096 chunks CRASHED (>65535 workgroups on Metal's x-axis cap) — fixed `5f075ff` + `7e99f34`, G1 re-run green at P=4096 (`I032_P=4096`): a G1 that stops below the production chunk size certifies a size nobody ships.
 
 ## 2026-09-30 — Issue 054 Part 2 (reflex) REFUTED for this lane: the prefix-state handoff lead — laya is ModernBERT (bidirectional), not GDN; the coupling gate landed
 
-The reflex issue's Part 2 asked the riir-infer-laya owning session to evaluate
-open-jev-fast's `fla_mode="state"` prefix-state handoff (encode a case's shared
-state once, hand its final GDN recurrent state to each question's suffix) for
-`riir-infer-laya` serving. **Verdict: does not transfer — the premise named the
-wrong architecture.** The laya checkpoints are ModernBERT-large / mmBERT-base
-(`encoder_config.json`), a bidirectional encoder: no causal mask anywhere in
-the op stream (the only mask is the symmetric sliding-window band), while GDN's
-causal delta-rule recurrence is exactly what makes the upstream handoff
-lossless. The `deltanet` substrate serves the ternary Bonsai/GDN lane,
-unrelated to laya. Two further structural grounds: the state sits AFTER the
-per-question head span in `build_sequence`'s render (different RoPE offset per
-question — measured 34 vs 35), and the state truncation room is per-question
-(the "shared prefix" is not guaranteed identical tokens).
-
-**The gate** (`crates/riir-infer-laya/tests/prefix_state_coupling.rs` + its
-Cargo `[[test]]` row, feature `laya-riir`): TWO-SIDED — the shared span must
-drift STRICTLY ABOVE 1e-4 (a reading at or below the 1e-5 packed-equivalence
-GEMM budget FAILS the test, so an architecture change that ever makes the span
-independent re-opens the record mechanically). Measured (CPU posture, release
-+ debug agree): real typed checkpoint, two choice questions against one shared
-state — the shared span (283 of 317/318 tokens: the state is ~89% of each
-sequence, so the as-filed ~5× prize was real) drifts **5.1e2**; synthetic
-4-layer geometry arm **2.7e0** over a 16-row shared prefix with a bit-identical
-determinism control. Consequence: the packed per-question pass (reflex issue
-020 T5) stays the exact floor for laya case serving; the lead's shape stays
-valid only for causal serving models (GDN/KV decoders). Full verdict: reflex
-`.issues/054_openjev_lane_and_prefix_state_handoff.md` Part 2 + its HISTORY.
+The premise named the wrong architecture: laya checkpoints are ModernBERT-large / mmBERT-base (no causal mask; the state also sits after the per-question head span — different RoPE offset per question). Gate `crates/riir-infer-laya/tests/prefix_state_coupling.rs` (`[[test]]` row, feature `laya-riir`) is TWO-SIDED at 1e-4 — the shared span measured 5.1e2 (synthetic arm 2.7e0, determinism control bit-identical). The packed per-question pass (reflex issue 020 T5) stays the exact floor; the lead's shape stays valid only for causal serving models. Full verdict: reflex `.issues/054_openjev_lane_and_prefix_state_handoff.md` Part 2.
 
 ## 2026-09-30 — Issue 013 T2 EXECUTED: the K=V+ λ ladder on gemma-2 — G-A PASS vs a catastrophic baseline; K=V+ not viable standalone; G-D overfit; NIAH build crash (029)
 
-Run 2026-09-29 12:51 → 2026-09-30 06:30 (task `riir_infer_t2_ladder`, ~17.7 h
-on a contended box: a sibling python trainer held ~14 cores, cal 3 tok/s vs
-T1's uncontended 9). Record: `.benchmarks/012_t2_kv_ladder_gate.md`; run log
-`012_t2_run.log`; table artifact `012_kv_table_residual.bin` (783,556,688 B,
-sha `3a0f5333d6bafd63…`, reused by T3 — no second calibration).
-
-- **Ladder (held-out eval, 12,276 scored/arm):** f16 **6.0907** (== T1 exactly,
-  cross-run determinism PASS) · k-0.00 1,884,959 (**tax +30,948,056% —
-  catastrophic-class; the issue's cited 2.5–3.1% was another posture, this
-  fixture measures its own**) · k-0.50 11,233 (×1844) · **k-1.00 563.7 (×92.6;
-  λ\* = 1, mean paired ΔNLL vs k-0 −8.11487 < 0 → G-A PASS; 3344× recovery of
-  the destruction)** · k-sched 1238.0 (validation).
-- **G-C PASS** (in-run to_bits λ=0 probe). **G-D OVERFIT**: the 54-pass grid
-  (12/26 layers diverging on the search chunk, composed −0.01643) read 2.20×
-  WORSE than uniform λ=1 on validation — per-layer λ interactions on a
-  1024-token search chunk are noise; the uniform λ\* stands.
-- **G-E MISSING**: NIAH crashed at trial 0 (`token budget 972 < target 1023
-  (grow the filler)` — `build_niah_trial`'s 4.2 chars/token estimate
-  undershoots the pool at ~4.49; shrink path absorbs overshoot only).
-  Pre-registered direction-only, flips no gate. Fix + `--niah-only` rerun:
-  `.issues/029_niah_builder_undershoot_and_phase_d_report.md`.
-- **The verdict substance:** the table refunds a real fraction of the V:=K
-  destruction and the destruction is total — 92.6× off f16 is nowhere near a
-  serve posture. The recorded negative for K=V+ as standalone V-cache
-  elimination on gemma-2 is the finding. P3 (T3, chained, started 06:31 with
-  the table BLAKE3-verified) is a different product: its G1 tolerance is
-  rotation-rounding class vs the STORE arm (1.254e-4 max |Δlogit| at the G3
-  probe — in family with the smoke), not the V:=K destruction class.
-- **Instrument gap:** the report writer runs at Phase D only — a crash loses
-  the structured report + in-memory per-arm detail (win shares, flips, the ρ
-  dashboard); the gates here were adjudicated from log lines. Incremental
-  per-arm report write filed with 029.
+Record `.benchmarks/012_t2_kv_ladder_gate.md` (+ `012_t2_run.log`, table `012_kv_table_residual.bin` sha `3a0f5333d6bafd63…`, reused by T3): f16 6.0907 (== T1, cross-run determinism PASS) vs k-0.00 catastrophic (tax +30,948,056%); k-1.00 λ*=1 G-A PASS (3344× recovery) but still ×92.6 off f16 → K=V+ NOT viable standalone; G-C PASS; G-D OVERFIT (uniform λ stands); G-E missing (NIAH crashed at trial 0 — builder undershoot → `.issues/029_niah_builder_undershoot_and_phase_d_report.md`).
 
 ## 2026-09-30 — Issue 013 T3 EXECUTED: P3 V-cache reconstruction — G1+G3 PASS at every λ; the 50.0% bytes/token law holds; G2 +7.9–8.8% recorded (the promotable P-half)
 
-Chained run 06:31 → 08:25 (rc 0): the `riir_infer_t3_reconstruct` task waited
-399 min for the T2 process, BLAKE3-verified T2's table artifact, and ran the
-prebuilt exe — the chain design held even through T2's crash. Record:
-`.benchmarks/013_t3_p3_reconstruct_gate.md`; run report `013_t3_reconstruct_report.md`
-(incrementally written — the Phase-D defect does not exist here) + `013_t3_run.log`.
-
-- **G3 PASS** (seam identity to_bits; recon-vs-store max |Δlogit| 1.254e-4,
-  the rotation-rounding class). **G1 PASS at every λ: 0 flips in 2046 scored
-  positions** — mean ΔNLL ≤ 8.3e-6, max ≤ 5.0e-5 against the 2e-3/5e-2
-  pre-registered bounds; retention walk clean in every band.
-- **Bytes/token 212,992 → 106,496 = exactly 50.0%** (n_v/(n_kv+n_v) = 1/2;
-  sliding-window layers keep the fraction).
-- **G2 recorded (not gated):** tg64 paired interleave — full-cache 265,772
-  µs/step, recon-λ0 1.079×, recon-λ1 1.088×. Mild at this geometry (seq 129 +
-  64 decode), NOT the primitive-level 14–15×; the long-context re-measure +
-  the kernel levers (deferred restore, block angle-addition) are T4's lane,
-  and these numbers are the baseline they must beat.
-- **The verdict substance:** P3 is the promotable P-half on gemma-2 — the
-  served V is algebraically the stored V up to f32 rotation rounding (the
-  FULL-V quality surface), unlike T2's V:=K destruction. What it buys: the V
-  cache allocation (50%); what it costs today: the +8–9% read-path baseline.
-  T1 (P1) negative, T2 (P2) not viable standalone, T3 (P3) clean — the
-  katgpt-rs-side promotion decision now has its full model-bound input set.
+Chained run rc 0 (waited 399 min for T2, BLAKE3-verified its table artifact). Record `.benchmarks/013_t3_p3_reconstruct_gate.md` (+ `013_t3_reconstruct_report.md` written incrementally, `013_t3_run.log`): G3 max |Δlogit| 1.254e-4 (the rotation-rounding class); G1 PASS 0 flips in 2046 scored positions; bytes/token 212,992 → 106,496 = exactly 50.0%; G2 recorded 1.079×/1.088× (the long-context re-measure is T4's lane). P3 is the promotable P-half — the katgpt-rs-side promotion decision has its full input set.
 
 ## 2026-10-05 — Issue 013 T4 scaling half EXECUTED: the naive read-path cost explodes with context (1.08→1.79→3.82×); the pre-registered rule fired HOLD — katgpt-core `fitted_v_reconstruct` stays opt-in
 
-Bench 016 (`.benchmarks/016_t4_g2_scaling_hold.md`, cells `016a`/`016b`, run
-`016_t4_g2_run.log`): the pre-registered scaling protocol — two chained
-scheduled-task cells (`--skip-g1`, G3 still gating; cache-sizing fix
-`2300457` after both cells segfaulted at exactly one position over — the
-block must hold prefill+BOS+decode, not seq_len+64). The curve (within-cell
-paired ratios; cross-cell absolutes are not comparable — different box
-loads):
-
-- 129 (T3/Bench 013, 12 pairs): **1.079× / 1.088×**
-- 1025 (cell A, 4 pairs): **1.789× / 1.751×**
-- 4097 (cell B, 2 pairs, the gemma-2-2b sliding-window edge): **3.821× /
-  3.957×**
-
-**The decision rule fired:** window-edge ratio ≫ the ≤ 1.20 promotion bar →
-**katgpt-rs-side promotion HELD** (`682936a1c` there: the feature-def comment
-carries the verdict + the re-fire condition; HISTORY § Issue 883 amended;
-feature counts gate green). Quality untouched (G3 PASS both cells at
-1.254e-4; the 50% law re-confirmed in both cells) — the HOLD is a COST
-verdict on the naive read path, worst exactly where the memory win matters.
-**The losers demoted on record:** P1 (Bench 011 negative) and P2 (Bench 012
-non-viable standalone). **The promotion re-fires** when the deferred-restore
-lever (Bench 895 Addenda I/II, +1.5–3.6% primitive-level) or block
-angle-addition lands in a consumer and re-measures ≤ 1.20 at the window edge
-— T4's kernel half is that lane.
+Bench 016 (`.benchmarks/016_t4_g2_scaling_hold.md`, cells `016a`/`016b`, log `016_t4_g2_run.log`; cache-sizing fix `2300457`): 1.079× @129 → 1.789× @1025 → 3.821× @4097 window edge ≫ the ≤1.20 promotion bar → katgpt-rs promotion HELD (`682936a1c` there; HISTORY § Issue 883 amended); quality untouched (G3 PASS both cells at 1.254e-4, the 50% law re-confirmed). Promotion re-fires when the deferred-restore lever (Bench 895 Addenda I/II) or block angle-addition re-measures ≤1.20 at the window edge — T4's kernel half is that lane.
 
 ## 2026-10-05 — Issue 013 COMPLETE (T4 kernel half + the promotion EXECUTED): both levers landed as one read path, the window-edge bar met — `fitted_v_reconstruct` PROMOTED to katgpt-core default
 
-The re-fire lane above EXECUTED same-day (Bench 017,
-`.benchmarks/017_t4_deferred_lever.md`, cells `017a`/`017b`, run log
-`017_t4_deferred_run.log`):
-
-- **Both pre-registered levers landed as one read path** (`fe75497`, extended
-  by katgpt-rs `618d7ec71`'s `FittedTokenTable::row_index_of` +
-  `layer_rows_slab`): the fused deferred-restore attention kernel (pass 3
-  reconstructs v̂_t = G(−θt)·K̂_t from the hot K row; the table part regroups
-  into per-(head,row) weight sums applied once per distinct row;
-  λ=0/all-miss bitwise the eager path) + the bitwise per-position (sin,cos)
-  table (block angle-addition's no-re-anchor limit: same bits, zero
-  transcendental cost). Forward dispatch via `ValueStoreHook::fused_recon`
-  (default None → eager fallback; today's paths untouched).
-- **The curve:** 1.020×/1.053× @1025 and **1.050×/1.123× @4097** (λ0/λ*) —
-  both under the ≤ 1.20 window-edge bar (was 3.82×/3.96× naive); the eager
-  anchor reproduced Bench 016 in-session (1.760×/3.887×); prefill 2.3×
-  faster than eager; λ0/miss bitwise PASS + the regrouping bound 8.011e-5
-  on the real model, all three cells.
-- **The promotion EXECUTED** (katgpt-rs `34145bfd5`):
-  `fitted_v_reconstruct` → katgpt-core **default** per the pre-registered
-  window-edge rule; bench_895's superseded primitive-level ≤1.00× gate
-  flipped to RECORDED with provenance (it joined the default all-targets
-  surface and red-ed it). Default-on = compile availability — zero runtime
-  cost unless a consumer selects `VReadPath::Reconstruct`.
-- **Issue file removed** (noise-reduction) — this entry + the katgpt-rs
-  HISTORY § 883 amendment + the bench record carry the decision. Standing
-  caveat recorded in the bench: the instrument still writes raw V rows (a
-  production P3 KV cache that drops the V allocation is the natural
-  follow-on, not owed by this issue).
+Bench 017 (`.benchmarks/017_t4_deferred_lever.md`, cells `017a`/`017b`, log `017_t4_deferred_run.log`): the fused deferred-restore attention kernel + the bitwise per-position (sin,cos) table landed as ONE read path (`fe75497`, extended by katgpt-rs `618d7ec71`'s `FittedTokenTable::row_index_of` + `layer_rows_slab`; dispatch via `ValueStoreHook::fused_recon`). Curve 1.020×/1.053× @1025 and 1.050×/1.123× @4097 — both under the ≤1.20 bar. Promotion EXECUTED (katgpt-rs `34145bfd5`): `fitted_v_reconstruct` → katgpt-core default (compile availability; bench_895's primitive-level ≤1.00× gate flipped to RECORDED).
 
 ## 2026-10-05 — Issue 033 COMPLETE: the KV-axis extension arm landed and ran — the KV-store axis is NULL (a4-class KV storage accuracy-free), the activation axis dominates; instrument extended with the KV arm + hardened corpora
 
-Bench 033 (`.benchmarks/033_kv_axis_extension/`, report + full run log;
-exe at `ad683a6`): the dq_phase_matrix runner gained the KV-STORE axis
-(`DQ_KV_GRIDS`; every stored K/V row rounded in place at write — the CUDA
-`kv_fill` prefill site + the CubeCL `forward_attention_layer_gpu` decode
-site, the runner's real decode path) + the corpus-hardening knobs the
-admissibility rule demanded (`DQ_ARITH_HARD=1` pulls base arith 0.9583 →
-0.7500 into the window; `DQ_NI_NEEDLES`). Store ≡ read for accuracy
-(idempotence) — the axis is ONE experiment; the record states it.
-
-**The verdict: KV stored/read precision is NULL at BOTH a8 and a4** (Δ =
-0.0000 CI [0,0] at a8; −0.0208 CI [0, 0.0625] at a4; NIAH byte-stable at
-base; the pf×kv interaction adds nothing) — **the activation axis
-dominates catastrophically at a2** (pf 0.2083 / dec 0.1250 arith;
-pf_aq[a2] NIAH collapses to 0.19) and is free at a4. For serving: the
-hybrid's KV cache tolerates a4-class storage (~20–25% of f32 KV bytes)
-with zero measured accuracy cost; the sensitivity lives in the quantized
-GEMM activations. All gates PASS (G-i1/i2-with-the-KV-formula/i4,
-positive controls, dec_a8) across 16 cells × (48 arith + 96 NIAH).
-Disclosures: prefill-heavy rows are INADMISSIBLE by the pre-registered
-rule (base NIAH pooled 1.0000 > 0.95 — the standing boundary of this
-instrument at this model; the raw damage cells sit in the table). Two
-transient rustc 0xc0000005 build crashes cleared on retry (box history).
-Issue file removed (noise-reduction); this entry + the bench carry it.
+Bench 033 (`.benchmarks/033_kv_axis_extension/`, exe at `ad683a6`): the runner gained the KV-STORE axis (`DQ_KV_GRIDS` — every stored K/V row rounded at the CUDA `kv_fill` prefill + CubeCL `forward_attention_layer_gpu` decode sites) + `DQ_ARITH_HARD=1` / `DQ_NI_NEEDLES` corpus hardening. Verdict: KV stored/read precision NULL at a8 AND a4 (Δ = 0.0000 CI [0,0] at a8); the activation axis dominates catastrophically at a2 (pf 0.2083 / dec 0.1250 arith) and is free at a4 — the hybrid's KV cache tolerates a4-class storage. All gates PASS across 16 cells; issue file removed.
 
 ## 2026-09-27 — Issue 014 RESOLVED: activation-aware ternary scale fit — SPLIT BY LANE (born-ternary clean negative; dense-parent mechanism transfer)
 
-Filed 2026-09-25 from katgpt-rs Issue 886 (the per-family conditional
-retention walk's model-bound G1; the substrate landed there at `0fb2254d9`,
-katgpt-rs Bench 896). Issue file removed 2026-09-28 (noise-reduction; this
-is the durable record). Resolution commit `3c2b569`; lane commits `03681e9`
-(T2 prep: `act_taps` to the lib), `fc31777` (T2/T3: the
-`act_retention_walk` bin — born-ternary scale-refit arms + the per-family
-conditional retention walk, 6 arms incl. the ZeroQAT-class comparator at
-default knobs), `28b1566` (T2(b): the dense-parent PTQ lane on gemma-2 f16
-— linear-input tap forward + held-out capture + the Bench-896
-reconstruction metric over the five fits). Benches: `005_act_diagonal_bonsai_first_slice.md`
-(T1) + `007_act_scale_refit_walk_and_ptq.md` (T2/T3/T4).
-
-- **T1 (Bench 005, `act_diagonal_calibration` bin, feature
-  `act_diagonal_calibration`, rides the forward's own `TernaryMatvecHook`
-  seam — post-rotation inputs observed side-band, forward bit-identical):
-  the rotation did NOT flatten the diagonal globally** — layer_out heaviest
-  tap (max/med up to 90.9, top-1% share up to 11.6%), attn_in 6.7/56.9
-  median/worst, final_in 9.3; `swiglu` near-uniform (1.6× / 1.4%) — the
-  null prediction live for down_proj specifically. Artifact digest
-  `5b6aead0901e3133cd7ee28512e75122c788ae9d720dec78d099e6b390d9a9d2`.
-- **Born-ternary (Ternary-Bonsai-2-PQ2): CLEAN NEGATIVE** — the shipped
-  amax payload is the fit family's fixed point: requant controls collapse
-  it (scale ×0.668, 14.3% codes, NLL 2.68→8.78, 96.7% flips uniform across
-  all 6 families) while both search arms recover it (ws_ex2 0.001% delta /
-  31 coin-flip flips / 100% top-8 retention; ws_uniform 0.000% / 2 / 100%)
-  — diagonal-independently, because there is no quantization error to
-  redistribute. ZeroQAT-class at default knobs: structurally stationary on
-  shipped codes; at the requant insertion point its ≈1% GD drift made the
-  model WORSE than its own starting point (NLL 9.10 vs 8.78) — the
-  layer-local surrogate misaligns with model quality on damaged payloads.
-- **Dense-parent (gemma-2-2b f16, layer-level Bench-896 metric on real
-  parents + 48 real activations/tap): the mechanism TRANSFERS** — ws_ex2
-  −34.6% vs mean_abs, −20.1% vs the blind-search control (0.4176 vs
-  0.6383 / 0.5230), ordering exactly as Bench 896. katgpt-rs 886 P1 closed
-  on this evidence.
+From katgpt-rs Issue 886 (substrate `0fb2254d9`, katgpt-rs Bench 896). Resolution `3c2b569`; lanes `03681e9` (`act_taps`), `fc31777` (`act_retention_walk` bin), `28b1566` (dense-parent PTQ); benches `005_act_diagonal_bonsai_first_slice.md` (T1, feature `act_diagonal_calibration` over the `TernaryMatvecHook` seam; artifact digest `5b6aead0901e3133cd7ee28512e75122c788ae9d720dec78d099e6b390d9a9d2`) + `007_act_scale_refit_walk_and_ptq.md`. Born-ternary CLEAN NEGATIVE (the shipped amax payload IS the fit family's fixed point; ZeroQAT-class misaligns on damaged payloads); dense-parent gemma-2 f16 the mechanism TRANSFERS (ws_ex2 −34.6% vs mean_abs) — katgpt-rs 886 P1 closed on this evidence.
 
 ## 2026-09-27 — Issue 020 RESOLVED: the len_derived CAPACITY finding was the classifier's, not ours — and both fixed temp paths are gone
 
-Filed 2026-09-26 from the katgpt-rs drift sweeps (the standing red on this
-repo since the carve). Both findings closed; the issue file removed.
-
-- **Finding 1 — CAPACITY at `encoder_lane_cubecl.rs` was a classifier false
-  positive, closed in the instrument (katgpt-rs `43c14d754`).** The bind
-  `BufferArg::from_raw_parts(rows_handle, rows_host.len())` is exact by
-  construction: `rows_host` is the HOST slice param whose `.len()` IS the
-  live row count (the launcher scans the same slice for per-row bounds and
-  asserts the binding floor from it), and every caller creates the handle
-  exactly-sized (`create_u32` → `create_from_slice`, plus the test). The
-  depth-1 classifier flagged ANY `.len(` in a bind-length position as
-  allocation-as-length; the upstream `classify_pair` already required the
-  receiver to BE the handle. katgpt-rs now shares ONE rule between both
-  classifiers (`length_from_handle_size_method`) and the bind capture is
-  paren-balanced (it truncated `kv_handle.len()` at the first `)`, which the
-  old broad regex matched by accident). The bind now reads UNRESOLVED
-  (reported-and-unpinned by design, Issue 785) and the riir-infer sweep row
-  is green at its `max_findings 0` wall. No riir-infer code changed for this
-  finding — the contract was always right.
-- **Finding 2, site 1 — the ANE compile-cache root (riir-infer `20ea589`).**
-  Default root moved `temp_dir().join("riir-laya-ane-cache")` →
-  `~/Library/Caches/riir-infer/laya-ane` (macOS cache home; this lane is
-  ANE-only): persists across /tmp cleanup, keeps the compile-once-per-
-  process-tree contract across processes, and leaves the
-  `env::temp_dir().join("literal")` shape. `LAYA_ANE_CACHE` override
-  unchanged; pid-suffixed temp only when HOME is unset. Trade-off recorded
-  in the module doc: the persistent root grows one bundle per digest,
-  unbounded — clear it or set the env to reclaim. The cross-process race was
-  already mechanized (pid-unique staging + atomic rename claim) — the pid
-  recipe applied to the ROOT would have defeated the cache for zero safety
-  gain.
-- **Finding 2, site 2 — the exl3 oracle fixture (same commit).**
-  `real_pack_oracle_k_proj`'s fixture moved `/tmp/exl3-pack` →
-  `<manifest>/.raw/exl3-pack` (repo-local, gitignored,
-  `CARGO_MANIFEST_DIR`-rooted). The test never wrote the path and the
-  referenced fetch script (`.raw/exl3_layer_oracle.py`) is gone — both stale
-  references corrected, the skip-loud contract unchanged, the `.raw`-cleanup
-  risk named in the doc. `.docs/001`'s gate parenthetical updated.
-- **Rider — the riir-instinct walk-floor DELEGATION break (katgpt-rs, same
-  commit as the classifier).** Both sweeps red on "no non-zero min_rs_files
-  row for riir-instinct (16 tracked .rs)" — the floors said md-only from
-  birth on 2026-09-26 and the P1–P5 code landed the same day. Re-pinned at
-  measured (clean HEAD `337da41`: 16 rs / 33 cfg sites / 178 cand / 0
-  findings) in orphaned_attr, platform_dead_code and percentile.
-- **Validation:** audit selftest clean; len_derived `--canary` 13/13;
-  len_derived sweep PASSED (riir-infer EXACT-UPSTREAM=3 GUARD-ONLY=4
-  GUARDED=25 PERSISTENT-UPSTREAM=8 UNRESOLVED=129, no CAPACITY);
-  shared_temp_path riir-infer `fixed=0` (was 2). Clippy `-D` clean at
-  `laya-riir-ane` (the module compiles to nothing at default features —
-  feature-aware check done) and `--features exl3 --all-targets`; exl3 lib
-  tests 214 passed / 0 failed. Remaining sweep reds (mmorpg-editor 3>1,
-  riir-ai 5>4 on shared_temp_path) are those repos' own pre-pinned backlogs,
-  each owner's adjudication.
+Finding 1: CAPACITY at `encoder_lane_cubecl.rs` was a classifier false positive, closed in the katgpt-rs instrument (`43c14d754`, the shared `length_from_handle_size_method` rule) — no riir-infer code changed. Finding 2 (riir-infer `20ea589`): the ANE compile-cache root → `~/Library/Caches/riir-infer/laya-ane` (`LAYA_ANE_CACHE` override), the exl3 oracle fixture → `<manifest>/.raw/exl3-pack`; `.docs/001` parenthetical updated. Rider: riir-instinct walk-floor rows re-pinned in katgpt-rs (clean HEAD `337da41`). shared_temp_path riir-infer `fixed=0`; clippy `-D` clean at `laya-riir-ane` and `--features exl3`.
 
 ## 2026-09-26 — Issue 019 RESOLVED: the c0dfa06 Metal barrier REVERTED — A alone was the wobble, and serial dispatches never needed barriers
 
-The 019 verdict (T3), landed by the c0dfa06 author after conceding the
-contested-evidence point (`4205c12`):
-
-- **Necessity (T1) conceded on the timing re-check:** the deep-probe
-  triplet that read "clean ×3 with barriers only" was confounded — runs
-  4/5 carried `2a34bd3` in the working tree (log mtimes 16:07:52 /
-  16:09:22 vs the sibling's 16:07:41 edit); run 3 (mine-only, 7 clean
-  passes) is ~4% luck at the measured 36% base fire rate, and
-  probe_deep_2's single `L3.scores` fire is exactly A's signature
-  (post-softmax corruption, clean q/k), not a between-dispatch race.
-- **Premise refuted on the code:** the fork's `begin_compute_pass`
-  never sets `MTLDispatchType` — Metal defaults to SERIAL, where the
-  GPU does not begin a dispatch until prior dispatches COMPLETE, so
-  memory visibility is implied and the empty transition bodies are
-  upstream-correct behavior, not a defect. The durable artifact is that
-  premise (if a concurrent-dispatch-type encoder ever lands, 019's
-  analysis is the map).
-- **The revert:** the barrier emissions are out of the fork; the probe
-  instruments (repeat loop, deep mode, tracked indices — zero prod
-  cost) STAY. Post-revert validation: smoke 9/9, G5 cubecl ×3
-  bit-identical at the floor (3.092e-6 / 2.233e-6 / 5.187e-6), clippy
-  `-D` clean; G5 wall 22-27 s without the barriers vs 24-31 s with
-  (directional; T2 formally MOOT — nothing ships).
-- 019 marked RESOLVED in-file (kept; it carries the premise record and
-  the re-open trigger).
+Necessity conceded on the timing re-check (the "clean ×3 with barriers" triplet was confounded by `2a34bd3` in the working tree); premise refuted on the code: the fork's `begin_compute_pass` never sets `MTLDispatchType` — Metal defaults to SERIAL, memory visibility implied (the durable map if a concurrent-dispatch encoder ever lands). Barriers out (`4205c12`), probe instruments stay (zero prod cost); smoke 9/9, G5 cubecl ×3 bit-identical (3.092e-6 / 2.233e-6 / 5.187e-6), G5 wall 22-27 s without vs 24-31 s with.
 
 ## 2026-09-26 — Plan 611 DONE: the T7 op-layer unification verdict (Bench 006) — riir-reflex Issue 008 closed
 
-The last open task of the riir-infer consolidation campaign (riir-reflex
-Issue 008 T7, mirrored as 998/610 S8). One portable CubeCL implementation
-of the laya `Backend` trait was built over this repo's op layer (S1–S4) and
-A/B'd against the hand lanes (S5). The verdict rules were pre-registered at
-`fac0dfd`, before any run.
-
-- **The hand Metal lane stays the macOS default.** CubeCL ran 5.1–8.4×
-  slower than Metal, 0/12 wins in every cell of three permutation-balanced
-  runs (Bench 006, results `ac85c8e`; loaded box, preflight refused on load
-  only, GPU canary OK).
-- **The CubeCL arm is KEPT opt-in** (`laya-riir-cubecl`; not default, not
-  in any release set). It beats the CPU lane on the short ladder (seq
-  16/54/128: 0.54–0.72, 12/12) and on the 1-question case (0.75), so the
-  pre-registered delete-if-slower-than-CPU-everywhere rule fails. Its G5
-  gate is armed (riir-reflex `ccb5bd0`). **Nothing was deleted or
-  promoted.**
-- **Engine-side payoff, kept regardless:** the two-pass mean-centered
-  LayerNorm (`LayerNormMeanBatchedCubeCL` — the GAP kernel; the engine's
-  norms were RMS-only), the batched in-place row-softmax, the offset +
-  head-batched tiled matmuls (z-dispatched heads), and the
-  rope/split/merge/gather permutation kernels.
-- **Defects the arm surfaced and fixed on the way:** the `gather_rows`
-  residency class (016); the one-pass LN cancellation at deep layers
-  (two-pass now); the softmax max-read race (018, `2a34bd3`), which is live
-  in the engine's single-row `softmax_f32` too; and the chunked-softmax row
-  offset. 019's contested barrier was reverted (`4205c12`).
-- Harness: `crates/riir-infer-laya/tests/backend_ab.rs` (measurement-only).
-  Re-read on a quiet box with one command (AGENTS.md).
+One portable CubeCL `Backend` over this repo's op layer (S1–S4), A/B'd against the hand lanes (S5; rules pre-registered at `fac0dfd`): CubeCL 5.1–8.4× slower than Metal, 0/12 wins (Bench 006, results `ac85c8e`) — the hand Metal lane stays the macOS default; the CubeCL arm KEPT opt-in (`laya-riir-cubecl`; beats CPU on the short ladder). Engine-side payoffs kept regardless: `LayerNormMeanBatchedCubeCL` (two-pass mean-centered LN), batched in-place row-softmax, tiled matmuls, permutation kernels. Defects fixed en route: `gather_rows` residency (016), one-pass LN cancellation, the softmax race (`2a34bd3`, Issue 018), chunked-softmax row offset; 019's barrier reverted (`4205c12`). Harness: `crates/riir-infer-laya/tests/backend_ab.rs`.
 
 ## 2026-09-26 — Issue 018 CLOSED: the Cubecl-posture drift wobble was a softmax write-after-read race (fix `2a34bd3`)
 
-Plan 611 S4's residual: the laya G5 gate at the cubecl posture held top-1
-1.000000 in every run, but the prob-drift magnitude sporadically read
-10–1000× its per-checkpoint floor, the outlier moving between checkpoints
-and runs (9/20 G5 runs failing). The gate was `#[ignore]`d and every Cubecl
-number held PROVISIONAL.
-
-- **Root cause:** both CubeCL softmax kernels (`softmax_f32`,
-  `softmax_rows_inplace_f32`) read the reduced max from shared slot 0 and
-  then, with **no barrier**, let the sum phase write `smem[tid] =
-  local_sum`, so thread 0 could overwrite slot 0 while a slower SIMD group
-  was still reading the max. Scheduling-dependent, so worse under load.
-  One `sync_cube()` after the read. The same commit fixes a latent chunked
-  launch defect: rows past `MAX_WG_X` re-normalized rows 0.. (the chunk's
-  first row now rides `params[1]`; heads·seq > 32768 only, i.e. long
-  context).
-- **How it was localized:** the issue's own lever 1 (the encoder probe's
-  repeat loop, per-op drains). Every fire FIRST diverged at an `L*.attn`
-  output, and the row-softmax is the only reduction inside the composed
-  attention. A scan of every `let … = smem…[0usize]` read followed by a
-  shared write before the next barrier found exactly the two softmax
-  sites. The deltanet and two-pass-LN hits were false positives: only
-  thread 0 consumes the deltanet value, and LN keeps separate arrays.
-- **Refuted first, measured:** hypothesis 3 / lever 2 (a stream drain per
-  `begin_pass`): 10 interleaved pairs, excursions to 5e-2 in both arms.
-  Zero-filling every write-first slot (`client.empty` recycles pool bytes):
-  excursions to 2.4e-2. Neither the drain nor the pool was the class.
-- **Measured fix (M3, release, AC, load 12.8–16.6):** repeat-loop probe
-  **43/120 fired passes at HEAD vs 0/120** with the fix (same tree,
-  interleaved); G5 cubecl **10/10 PASS, every run bit-identical** at the
-  floor (english 3.092e-6 · typed 2.233e-6 · multilingual 5.187e-6), then
-  3/3 through the re-armed gate (riir-reflex `ccb5bd0`). Regression arms in
-  `elementwise_cubecl::tests` (chunked-offset parity + a 200-rep
-  bit-identical repeat at the 16×400 score geometry) both fail 5/5 with the
-  fix reverted. gpu lib 215/0; clippy `-D` workspace `--all-features
-  --all-targets` green.
-- **The second class is contested (Issue 019).** A concurrent session
-  (`riir-infer-m3-t7c`) landed `c0dfa06`, which emits Metal memory barriers
-  from the vendored `wgpu-hal`, and recorded 018 as two classes (`270740c`).
-  The measurement above was taken in a clean worktree at HEAD plus ONLY
-  `2a34bd3`, with no barrier code present, so **A alone was sufficient for
-  the observed wobble**. Class B's localizing evidence (`scores` diverging
-  with q/k/v clean) is read after the in-place softmax, which is A's site.
-  Its premise also does not match the fork's encoders, which never set a
-  dispatch type and so are serial. Necessity and per-rebind cost are
-  tracked in Issue 019. Nothing reverted.
-- Cubecl numbers are no longer provisional; plan 611 S5 may publish.
-- The issue file is removed; its full text (the pre-resolution trail + the
-  two-class record as written by `riir-infer-m3-t7c`) is at `270740c`.
+Both CubeCL softmax kernels (`softmax_f32`, `softmax_rows_inplace_f32`) read the max from smem slot 0 then wrote the sum over it with NO barrier; one `sync_cube()` after the read (+ chunked-launch fix: rows past `MAX_WG_X` re-normalized row 0 — the chunk's first row now rides `params[1]`). Localized by lever 1 (per-op drains; every fire diverged at `L*.attn`). Measured: 43/120 fired passes at HEAD → 0/120 with the fix; G5 cubecl 10/10 bit-identical, gate re-armed (riir-reflex `ccb5bd0`); regression arms in `elementwise_cubecl::tests` fail 5/5 with the fix reverted. The second class was contested (Issue 019 — resolved: A alone sufficed). Full issue text at `270740c`.
 
 ## 2026-09-26 — the riir-ai carve docs adopted into this repo (Issues 998 + 1003, Plan 610, Proposal 041, Benches 870 + 871, doc 002)
 
-The riir-infer formation records moved home to the subject repo (owner noise-reduction pass on riir-ai), **numbers kept verbatim** so every existing "riir-ai Issue 998 / Plan 610 / Proposal 041" citation resolves to the same document:
-
-- `.issues/998_riir_infer_repo_promotion.md` + `.issues/1003_riir_infer_carve_remains_4090.md` — both OPEN (998: S8 remains, gated on riir-reflex 008 P2/T4; 1003: 4090-executable content done, remains = the owner-gated S6b edge-drop franchise + S8). riir-ai's issue ledger keeps 998/1003 allocated; its `.highwater` is unchanged.
-- `.plans/610_riir_infer_gpu_carve_slice1.md` — IN PROGRESS (S8 remains).
-- `.proposals/041_riir_infer_model_based_inference_split.md` — the founding split proposal (Phase 1 landed; Phase 2 executing via riir-reflex Issue 008). First file in this repo's new `.proposals/` ledger.
-- `.benchmarks/870_ternary_recipe_audit.md` + `.benchmarks/871_issue879_t1_gdn_quant_certification.md` — the Issue 879 GDN quant-survival records (871's harness is `tests/issue879_gdn_quant_certification.rs` here since the carve; Issue 879 itself was resolved in the riir-ai ledger, record in riir-ai HISTORY.md).
-- `.docs/002_riir_infer_core.md` — the crate doc from riir-ai's docs book (renumbered 002 in this repo's `.docs/` ledger).
-
-Cross-repo relative links inside the moved files were re-pointed; prose paths inside them remain written from the riir-ai side at writing time (each file carries a Moved header note saying so). riir-ai side: index rows struck + BOUNDARY.md/AGENTS.md citations re-qualified + HISTORY.md tombstone, same window.
+Moved home with numbers verbatim (every "riir-ai Issue 998 / Plan 610 / Proposal 041" citation resolves to the same document): `.issues/998_riir_infer_repo_promotion.md` + `.issues/1003_riir_infer_carve_remains_4090.md` (OPEN), `.plans/610_riir_infer_gpu_carve_slice1.md` (IN PROGRESS, S8), `.proposals/041_riir_infer_model_based_inference_split.md`, `.benchmarks/870_ternary_recipe_audit.md` + `.benchmarks/871_issue879_t1_gdn_quant_certification.md` (the Issue 879 GDN quant records; harness `tests/issue879_gdn_quant_certification.rs` here since the carve), `.docs/002_riir_infer_core.md`. Cross-repo links re-pointed; each file carries a Moved header.
 
 ## 2026-09-25 — Issue 001 CLOSED: EXL3 (trellis-coded) weight format — reader complete, fused-GEMV lane closed at this tier
 
-The full record (§1–§17, section numbers unchanged, so every `Issue 001 §N`
-citation in `src/quant/exl3*.rs`, `riir-infer-gpu`, the benches and plans
-still resolves) moved to
-[`.docs/001_exl3_trellis_format_support.md`](.docs/001_exl3_trellis_format_support.md).
-
-- **Banked (opt-in `exl3`, not promoted):** the safetensors-side grouped
-  reader + `quant/exl3.rs` (T2 Option A, no `GgmlType` coupling), the CPU
-  reference and LUT+rayon fast arm (`725a8a5`, 10.6–11.4×), the pack loader
-  (`bd93a7b`), the CubeCL GPU decode v1/v2 (Bench 002; 71–87× wall on the
-  4090), the sound bench harness (`9989e9f`), the whole-pack bit-exact
-  gate (`425e0c5`: 573/573 layers, 26.48 G weights, 0 mismatches on CUDA
-  AND Metal), and the fail-closed era gate at open (`55c154f`, known-good
-  `{"1.4.2"}`, `open_unverified_era` escape).
-- **The axis that is real is residency** (Bench 001: 3.4× vs f16; context
-  0 → ~117k on 24 GiB), not decode throughput. Decode runs 21–29 Gw/s and is
-  NOT bandwidth-bound; the binding mechanism is UNMEASURED.
-- **Closed at this tier:** T7c-2a/2b/3 (fused GEMV). By composition,
-  26.5 Gw/step ÷ ~28 Gw/s ≈ 0.95 s/step against a 10–20 ms incumbent, so
-  §14's delivered-gain trigger cannot be met. Reopen triggers r1–r4 are in
-  §17.6. r1 (a serving consumer of the residency axis) is the owner of the
-  "engine serving integration" line, and it needs a NEW issue when it fires.
+Full record (§1–§17 numbers unchanged) in `.docs/001_exl3_trellis_format_support.md`. Banked (opt-in `exl3`): CPU ref + LUT+rayon fast arm (`725a8a5`, 10.6–11.4×), pack loader (`bd93a7b`), CubeCL GPU decode v1/v2 (Bench 002, 71–87× wall on the 4090), sound bench harness (`9989e9f`), whole-pack bit-exact gate (`425e0c5`: 573/573 layers, 26.48 G weights, CUDA AND Metal), era gate (`55c154f`, known-good `{"1.4.2"}`, `open_unverified_era` escape). The real axis is residency (Bench 001: 3.4× vs f16, context 0 → ~117k on 24 GiB), not decode; fused GEMV closed by composition (0.95 s/step vs the 10–20 ms incumbent); reopen triggers §17.6.
 
 ## 2026-09-25 — T10 rung 2 (Metal): the attn_rope hoist pre-pass — default-off, promotion probe pending
 
-`attn_rope` now derives the Q/K rope ONCE per layer into a packed
-`[2, seq, d]` device scratch (`5ef7442`), and `flash_attn`'s staging copies
-the rotated K instead of re-rotating it per (query block × head × key
-tile). Opt-in `LAYA_METAL_ROPE_HOIST=1`; the in-kernel rope arm stays the
-shipped default and is bit-identical by construction (same expressions,
-same order) — promotion follows the quiet-box position-balanced A/B
-(instrument archived: riir-reflex `.benchmarks/033_rope_hoist_ab/`), not a
-flag flip.
-
-The landing's own defect is the reusable lesson: widening the buffer list
-moved the flash staging to `[[threadgroup(11)]]` while the host kept
-binding its length at index 9 — the unbound-pointer class. Small smoke
-shapes passed on allocation luck; full-model G5 failed DEGENERATE (uniform
-probs, agreement 12/26), which is what surfaced it. Fixed (9 → 11) in the
-same commit: a shape-widening edit must move the host bind and the kernel
-binding together.
-
-Gates (both postures, hoist on/off): `metal_ops_smoke` 7/7 ×2,
-`packed_forward_equiv` 4/4 ×2, `packed_same_shape_gate` 1/1 raw-bit,
-lib 41/41; consumer G5 metal top-1 1.000000 ×3 checkpoints, drift ≤ 6.1e-6
-×2; `laya_batch_parity` ×2; clippy `-D` ×3 feature postures.
-
-Session: issue020-metal-lane, 1790285773
+`attn_rope` derives Q/K rope ONCE per layer into packed `[2, seq, d]` device scratch (`5ef7442`); opt-in `LAYA_METAL_ROPE_HOIST=1`, the in-kernel rope arm stays default and bit-identical; promotion via quiet-box position-balanced A/B (instrument archived: riir-reflex `.benchmarks/033_rope_hoist_ab/`). Lesson: widening the buffer list moved flash staging to `[[threadgroup(11)]]` while the host bound its length at index 9 (the unbound-pointer class; full-model G5 DEGENERATE surfaced it) — a shape-widening edit must move the host bind and the kernel binding together. Gates: `metal_ops_smoke` 7/7 ×2, `packed_forward_equiv` 4/4 ×2, `packed_same_shape_gate` 1/1, lib 41/41, G5 metal top-1 1.000000 ×3.
 
 ## 2026-09-25 — two silent MiniCPM5 (llama-arch GGUF) defects, found bringing it up as Issue 011's long-context fixture
 
-Both defects produced finite, plausible output that was wrong, and both were settled against a reference implementation (HF `tokenizers` / `transformers` fp32) rather than by reasoning.
-
-- **RoPE pairing — `0b26b9a`.** llama.cpp's converter (`LlamaModel.permute`) stores llama Q/K rows in the interleaved order (GGUF row `2j+s` = HF row `s·hd/2 + j`). This crate's RoPE, CPU and `riir-infer-gpu` alike, is rotate-half, and `load_llama_weights_gguf` never un-permuted. On MiniCPM5-1B, tinyshakespeare BOS+256, riir ppl went **259.93 → 69.0547**, against **69.0547** from HF fp32 on the same ids. Fix: `rope::unpermute_interleaved_rows`, llama loader only (gemma2/qwen2 GGUFs are NEOX and unpermuted).
-- **BPE digit rule — `175f67f`.** `BpeTokenizer` hard-coded Qwen2's one-digit-per-pre-token rule for every GGUF. llama-bpe groups `\p{N}{1,3}`. Text without numbers tokenizes identically, which is why a 1000/1000 tinyshakespeare diff passed. After the fix, 54 271 of 54 271 ids match on number-dense text. How it was isolated: the passkey needle failed 0/2 at base, and HF `transformers` scoring riir's EXACT prompt ids failed on the same digits, so the fault was in the ids and not the forward. Now 2/2, answer ppl 2.81 → 1.21.
-- **Downstream:** every consumer that re-exports this loader or tokenizer inherits both fixes. The riir-train canon cross-arch benches (422/423/424/426/427/605) paired Gemma-2 with this MiniCPM5 forward, so their verdicts are unverified: riir-train Issue 571.
-- **Instrument kept:** `row_logit_floor_ppl --dump-tokens N`. In ppl mode it prints the corpus ids; in needle mode it prints each prompt as `score_from|ids`. It is the diff against a reference that found both defects.
+RoPE pairing `0b26b9a`: llama.cpp stores llama Q/K rows interleaved; this crate's rotate-half RoPE never un-permuted — `rope::unpermute_interleaved_rows` in `load_llama_weights_gguf` (ppl 259.93 → 69.0547 == HF fp32; gemma2/qwen2 are NEOX, untouched). BPE digit rule `175f67f`: `BpeTokenizer` hard-coded Qwen2's one-digit-per-pre-token rule for every GGUF; llama-bpe groups `\p{N}{1,3}` (54,271/54,271 ids match after; found because passkey needles failed on number-dense text only). Instrument kept: `row_logit_floor_ppl --dump-tokens N`. Downstream consumers inherit; the riir-train canon benches (422/423/424/426/427/605) verdicts are unverified → riir-train Issue 571.
 
 ## 2026-09-25 — Issue 010 CLOSED (REFUTED): Gemma-2 has no QK-norm; the 288-tensor fixture is upstream-faithful
 
-Issue 010 (`95f52fb`) claimed `riir-train/data/gemma-2-2b-it-f16.gguf` was a
-mutated conversion: 288 tensors with no `attn_q_norm`/`attn_k_norm`, against a
-supposed llama.cpp standard of 340 (13/layer), and that upstream Gemma-2 applies
-per-head q/k RMSNorm. **That premise is false.** Checked against upstream
-HuggingFace `models/gemma2/modular_gemma2.py`: `Gemma2Attention` defines no
-`q_norm`/`k_norm`, and bounds scores with `attn_logit_softcapping` (tanh, cap 50),
-which this repo's forward already applies (`attention_head_softcap`). Per-head
-QK-norm arrived in Gemma-3, where it replaced softcapping. The 11 tensors/layer
-(attn_norm, q, k, v, o, post_attention_norm, ffn_norm, gate, up, down,
-post_ffw_norm) × 26 + 2 globals = 288 is the standard shape.
-
-- The fixture and forward are upstream-faithful. Option (a), re-converting, was
-  never needed. Nothing pinned to the old artifact needs a re-run.
-- `transformer/gemma4.rs`'s "q/k norm … NEW vs Gemma 2" doc was **correct** and
-  stays.
-- Corrected in the same commit: the `vk_calibration` bin's caveat 1 (doc and the
-  two printed lines) and the `gemma2_calibration.rs` tap-law paragraph. For
-  gemma-2 the pre-RoPE K tap is exactly the cache's K. Issue 883 trap 1's
-  post-QK-norm wrinkle applies to gemma-3/4-class stacks only.
-- Why it happened: a tensor count was compared against a remembered "standard"
-  rather than against the upstream model definition. Check the reference source
-  before filing a fixture-integrity finding.
+The premise was false: upstream `Gemma2Attention` defines no `q_norm`/`k_norm` — it bounds scores with `attn_logit_softcapping` (tanh, cap 50), already applied here (`attention_head_softcap`); per-head QK-norm arrived in Gemma-3. 288 = 11 tensors/layer × 26 + 2 globals is standard; `riir-train/data/gemma-2-2b-it-f16.gguf` is upstream-faithful, nothing re-run (Issue 010 filed `95f52fb`). Corrected in-commit: the `vk_calibration` bin's caveat 1 + `gemma2_calibration.rs`'s tap-law paragraph (for gemma-2 the pre-RoPE K tap IS the cache's K; katgpt-rs Issue 883 trap 1 applies to gemma-3/4-class stacks only). Lesson: check the reference source before filing a fixture-integrity finding.
 
 ## 2026-09-25 — Issue 009 CLOSED: software-pipelined narrow staging — NEGATIVE at the gate, and the probe's tiny-op floor exposed
 
-The `.issues/008` follow-up ("double-buffered staging / cp.async — latency
-hidden, not bandwidth saved") was built as the REGISTER form and answered
-**NO on the pre-registered gate** — with two findings that outlive the rung.
-
-**The rung** (built, measured, reverted): `sgemm_narrow_pipe` — the same
-32×64×BK64 tile/threads/fragment/grid as `sgemm_narrow`, k-loop software-
-pipelined: tile t+64's guarded loads issue into 12 registers at loop top, a
-compiler fence (`asm volatile("" ::: "memory")` — measured load-bearing,
-see below) pins their issue order, tile t's compute (~1300 cy) hides their
-latency, stores land after the post-compute barrier. Double-buffering both
-operands needs 51 456 B > the 48 KB static cap, so B ping-pongs (`tb[2]`)
-while A register-defers into the single `ta` — 43 136 B total. Bit-identical
-on every probe shape both postures, both runs; all gates green (smoke with
-8 pipe-posture arms incl. the ragged/epilogue paths, packed_equiv 4/4, lib
-41/41).
-
-**Finding 1 — the fence iteration**: the first build measured FLAT (median
-−1.8 % on the narrow rows) because nvcc SINKS the register loads to just
-before their consumers (a register-pressure choice), collapsing the window
-— the fence pins program order and is mandatory for this form. With it the
-probe still read −1.5 % (−1.2..−2.3 on the m=106/45 rows).
-
-**Finding 2 — the probe's tiny-op floor (the real yield)**: across the
-narrow-zone rows, FLOPs vary 400× (1×1028×256 = 0.5 MFLOP at 43.5 µs →
-106×1024×1024 = 222 MFLOP at 45.5 µs) while time varies 1.06× — every
-row is `≈ 40-41 µs launch/WDDM floor + flops/50 TFLOP/s`. The
-`sgemm_shape_timing` tiny-op rows are ~90 % submission floor and CANNOT
-resolve kernel-level rungs in the narrow zone; `.issues/006`'s "head tails
-−13..−17 %" rows were the same floor class (the float4 win was real but the
-row magnitudes were floor-shifted), and 008's reg4 reading only registered
-because a 4× warp cut punched the kernel ~75 µs PAST the floor. Future
-narrow-zone rungs must gate at the FORWARD level (launches amortize in the
-deep queue) or add a same-kernel floor-subtraction arm to the probe.
-
-**The honest instrument**: forward-level paired env-flip (`laya_fixture_timing`,
-english — the narrow-heavy checkpoint, 3 alternating pairs, quiet box):
-off 12.6/12.6/12.6 ms → on 12.4/12.4/12.5 ms row p50 — **−0.8..−1.6 %,
-reproducible 3/3** (p90 and ms/question improve too; the alternation kills
-drift). The pipelined kernel IS genuinely faster — by ~1.6 %, not the
-predicted ~25 %: TLP across 16 warps already hides most of the staging
-convoy at the phase boundary, and the residual (2 barriers + the store
-phase ≈ 1.5-2 % of the loop) is what the pipeline actually recovered.
-
-**Verdict** (the pre-registered gate binds): both instruments read under
-the ≥3 % bar → NO-GO. `cuda.rs` + the smoke arms + the reflex probe env
-dance reverted byte-identical to the pre-rung state; the kernel is not kept
-behind a switch because no posture clears the bar. The cp.async form
-(1 sync/iter, no register round-trip) remains the recorded next lever,
-priced by this record at ≤ ~4 % forward (the barrier + store residual) —
-not worth a rung unless the forward-level instrument shows the narrow share
-growing.
+`sgemm_narrow_pipe` built, measured, reverted: gate NO-GO (probe −1.5%; forward-level paired env-flip −0.8..−1.6%, reproducible 3/3, under the ≥3% bar; nvcc SINKS register loads — the `asm volatile("" ::: "memory")` fence is load-bearing). The real yield: `sgemm_shape_timing` tiny-op rows are ~90% launch/WDDM floor (FLOPs vary 400×, time 1.06×) — narrow-zone rungs must gate at FORWARD level or add a floor-subtraction arm; `.issues/006`'s head-tail rows were the same floor class. cp.async remains the recorded next lever (priced ≤ ~4%).
 
 ## 2026-09-25 — Issue 008 CLOSED: the narrow reg4 rung — NEGATIVE, the narrow zone is TLP-bound, not bandwidth-bound
 
-The `.issues/007` open question ("the NARROW instance (1×4 fragment, ~20 %
-ceiling, m<256 single-wave zone) is the next relative laggard — a narrow
-reg4 arm is the recorded follow-up rung") is answered **NO on measurement**,
-and the measurement's real yield is the mechanism: **the narrow zone's
-binding constraint is thread-level parallelism, not shared-memory
-bandwidth** — register blocking, which trades warps for bytes-per-FMA, is
-the wrong currency exactly where the ladder runs 1 block per SM.
-
-**The rung** (built, measured, reverted): `sgemm_narrow_reg4` — the 007
-family 4×4 fragment (16 accumulators, 4 LDS.32 + 1 LDS.128 per 16 FMAs =
-2 B/FMA vs the 2-acc narrow's 5, ceiling 20 %→ 50 % on the 007 roofline
-arithmetic). The fragment-area law forces a 32×16 warp tile; on the narrow
-32×64×BK64 tile that is a 1×4 warp grid = **128 threads** (vs 512). Same
-tiles, same staging footprints, same grid arithmetic — every block-fit
-property carries over; per-output accumulation k-ascending in one thread
-(bit-identical held on EVERY probe shape, both postures, both runs).
-
-**Measured** (`sgemm_shape_timing`, the `LAYA_CUDA_REG4` A/B axis — the
-narrow rows went live for the first time; two full runs, quiet box, GUI-class
-load only): every true narrow-served row regressed **+41..+177 %** —
-106×1024×1024 50→125 µs (+150/+139 %), 106×2624×1024 119→332 µs
-(+178/+171 %), the n=1536/2048 crossover rows +139/+152 %, short-seq
-45×1024×1024 +151/+157 %, the m=4/1 head tails +118/+41 %, act a0 +113 %.
-Ten times outside the ±8-15 % instrument band — no `--control` arm needed to
-adjudicate. The wide/xwide-class rows (n ≥ 2560 at m=106, banking77, the
-packed zone) re-measured the 007 rung at −2.6..−20 % on both runs — the
-consistency check; the one historically noisy row (packed O 424) flipped
-+12 %→−12 % between runs exactly as the recorded band predicts.
-
-**The mechanism, read off the kernel's own structure**: the narrow zone's
-grids are ≤ 128 blocks BY CONSTRUCTION (the block-fit pick) — 1 block per SM,
-so the SM's latency hiding is the block's warps and nothing else. The
-k-loop is sync→stage→sync→compute: staging is 48 global loads per thread
-per k-tile (A 16 + B 32 at 128 threads), and with 4 warps the DRAM/L2
-latency of a stage is exposed almost fully — 16 warps (512 threads) at
-least keep 4× the loads in flight and 4× the barrier-arrival slack. The
-2 B/FMA bandwidth win is real but irrelevant: the measured narrow ceiling
-was never the 20 % roofline — at m=106 the 2-acc narrow computes at ~5 %
-of fp32 peak (50 µs for 222 MFLOP), i.e. the zone sits ~4× under its own
-bandwidth ceiling already. Cutting warps scaled the wall time almost
-exactly as TLP arithmetic predicts (512→128 threads ≈ 4× offered parallelism
-→ 2.3-2.8× wall on the load-dominated loop).
-
-**Verdict** (the pre-registered gate's NO-GO path): no partial win, no
-carve-out — every true narrow row lost. `cuda.rs` reverted byte-identical
-to the pre-rung state (the BK48 precedent — only the docs carry the
-negative); the kernel is not kept behind a switch because there is no
-posture in which it wins.
-
-**The follow-up rung this record opens** (replacing the 007 pointer):
-the narrow zone needs LATENCY hidden, not bandwidth saved —
-**double-buffered staging / `cp.async`** (prefetch k-tile t+1's A/B while
-computing t, sm_89's async copy path bypassing registers) is the recorded
-next lever. Note the symmetry with the 007 record: double buffering was
-correctly dismissed for the BANDWIDTH-bound wide zone and is exactly the
-right repair for the LATENCY-bound narrow zone — the two zones' rooflines
-diverge, so their rungs must too.
+`sgemm_narrow_reg4` (4×4 fragments, 32×16 warp tile → 128 threads): every true narrow-served row regressed +41..+177% (`sgemm_shape_timing`, the `LAYA_CUDA_REG4` axis; the wide/xwide rows re-measured the 007 rung at −2.6..−20% both runs — the consistency check). Mechanism: the narrow zone's grids are ≤128 blocks by construction — 1 block/SM, staging latency exposed; the measured ceiling was never the 20% roofline (~5% of fp32 peak at m=106). Reverted byte-identical (the BK48 precedent). Follow-up on record: double-buffered staging / `cp.async` — the right repair for a LATENCY-bound zone.
 
 ## 2026-09-25 — Issue 007 CLOSED: the register-blocking sgemm rung — 4×4 fragments, −9..−21 % kernel on every wide/xwide shape
 
-The `.issues/006` follow-up rung ("register blocking / double-buffered
-staging — the instances sit at 25-30 % of fp32 peak") landed as REGISTER
-BLOCKING, and the choice between the two candidates was settled by the
-arithmetic, not taste: after the float4 rung the inner loop is
-**2×LDS.32 (A) + 1×LDS.128 (B) ≈ 6 SM-cycles of shared-memory bandwidth per
-8 FMAs ≈ 2 SM-cycles of FFMA capacity** — a ~33 % shared-bandwidth roofline
-at full occupancy, matching the measured 25-30 %. The lane is BANDWIDTH-
-bound, not latency-bound, so double buffering (a latency repair) buys
-nothing; register blocking raises the ratio.
-
-**The rung**: `sgemm_wide_reg4` + `sgemm_xwide_reg4` — the SAME tiles and
-grids as wide/xwide at HALF the threads (256 / 512), warp tile 32×16 (warp
-grid 2×4 / 2×8), thread fragment **4 rows × 4 cols = 16 accumulators**:
-4 LDS.32 + 1 LDS.128 per 16 FMAs = **2 B of smem reads per FMA (the 2-acc
-instances' 3)** → ceiling 50 %. Same grids mean every measured ladder
-property (block-fit cliffs, straggler tails) carries over untouched; xwide
-additionally rises to 3 blocks/SM = 48 warps (the 1 024-thread instance
-capped at 32). Per-output accumulation stays k-ascending in ONE thread —
-the result-identity law is untouched. Kill-switch `LAYA_CUDA_REG4=0` holds
-the 2-acc posture (the `LAYA_CUDA_LADDER` contract).
-
-**Measured** (`sgemm_shape_timing`, the A/B axis moved to
-`LAYA_CUDA_REG4`; two full runs + `--control`): every wide/xwide-served
-row negative in run 2 — banking77 zone −9.4..−16.1 %, the packed
-multi-wave zone −9.4..−21.4 % (O m=1268 175→151 µs, down 436→345, QKV
-477→387, gate/up 735→637), the m=106/45 n≥2560 rows −10..−22 %. Run-1's
-lone positive (424 QKV +3.5 %) flipped to −9.4 % in run 2 — inside the
-instrument band, which the `--control` arm (SAME-kernel pairs) measured at
-−14.9..+10.1 % on this box this hour (the sibling session's builds — wider
-than the recorded ±8 %, why every row was read against it). Narrow-served
-rows flat on both runs (both postures route narrow — the design's
-consistency check). Live-row median ≈ −12..−13 %, gate was ≥3 %.
-
-Forward level (paired same-binary env-flip, 3 alternating pairs):
-english 13.1→12.4 ms row p50 (−5.3 %), typed 12.9→12.4 (−3.9 %),
-multilingual flat — the dilution is structural: at fixture seqs only the
-n≥2560 projections route wide-class (the rest narrow, unchanged; attention
-and the row kernels untouched).
-
-**Published row refresh** (reflex `.benchmarks/031`, 15 suites PASSED,
-host 4090-windows): every suite ≤ 030's p50 — median −6.2 %, best −9.0 %
-(the packed typed_decisions trio), the short fixed-overhead suites flat.
-Accuracy 14/17 rows BIT-IDENTICAL; the three typed_decisions rows wobble
-3-7 cases in 2000 — that lane's pre-existing `determinism_ok: false`
-variance (false in 026/028/029/030 AND 031, on record since v1).
-
-Gates at the landing: `cuda_ops_smoke` 4/4 (the ladder-boundary + ragged
-arms now route through the reg4 kernels at the default posture) ·
-`packed_forward_equiv` 4/4 · lib 41/41 · consumer G5 at the cuda posture
-2/2 (top-1 1.000000 ×3, prob drift ≤ 3.3e-6 — the lane's own class) ·
-`laya_batch_parity` 1/1 · clippy clean both repos. Remaining upside on
-record: the reg4 instances should now sit near ~40 % of fp32 peak (the
-50 %-ceiling minus overheads), and the NARROW instance (1×4 fragment,
-~20 % ceiling, m<256 single-wave zone) is the next relative laggard — a
-narrow reg4 arm is the recorded follow-up rung, measured before built
-(the `.issues/007` §Open question).
+`sgemm_wide_reg4` + `sgemm_xwide_reg4` (16 accumulators, 2 B smem/FMA vs 3, ceiling 50%; same grids so block-fit cliffs carry over; k-ascending per-output accumulation). Measured: banking77 zone −9.4..−16.1%, packed multi-wave −9.4..−21.4%, m=106/45 n≥2560 −10..−22%; forward english −5.3% / typed −3.9%; the reflex `.benchmarks/031` refresh (15 suites, host 4090-windows) median −6.2% (14/17 rows BIT-IDENTICAL; the typed_decisions wobble is that lane's pre-existing `determinism_ok: false`). Kill-switch `LAYA_CUDA_REG4=0`; gates `cuda_ops_smoke` 4/4, `packed_forward_equiv` 4/4, lib 41/41, G5 cuda 2/2, `laya_batch_parity` 1/1.
 
 ## 2026-09-25 — Issue 006 CLOSED: the float4 sgemm rung — every instance's B loads collapsed, −7..−17 % on every suite
 
-The `.issues/004` open question ("the packed multi-wave zone has no measured
-win — split-K or an occupancy-tuned instance") is closed with the question
-REFRAMED and answered: the zone's problem was never the straggler tail —
-it is LOAD-ISSUE THROUGHPUT. The probe's appended packed-zone population
-(m=424 ≈ 4×106, m=1268 ≈ 4×317) measured the wide instance at **12-16.5
-TFLOP/s = 15-20 % of the 4090's 82.6 fp32 peak** (gate/up at m=1268:
-13.65 GFLOP in 829 µs), 2.5-3× under the cuBLAS-class roofline — and the
-inner loop's own shape explains it: **6 smem loads per 8 FMAs**, with the
-four B-fragment loads CONTIGUOUS in the staging tile.
-
-**The rung**: every instance's B staging row pads to a 16 B multiple
-(wide 65→68, narrow 65→68, xwide 129→132 — col0 is a multiple of 4 at
-every call site, so `&tb[kk*pad + col0]` is float4-aligned BY CONSTRUCTION)
-and the four B loads collapse to ONE `reinterpret_cast<float4>` — 6 loads
-per 8 FMAs becomes 3 (narrow's 1×4 fragment: 5 → 2). float4 loads change
-no arithmetic order, so the instances stay result-identical by construction
-(verified BIT-IDENTICAL on every probe shape, both arms) and every ragged
-edge is staging-side-safe (out-of-range elements stage as 0.0f; stores stay
-guarded per element).
-
-**Measured** (`sgemm_shape_timing`, in-process base/ladder A/B with the
-experiment arm on the would-be-wide slots, two full runs): −10.3..−25.2 %
-on the multi-wave zone rows, −5..−14 % on the single-question wide rows,
-the m=4/m=1 head tails −13..−17 % (those are narrow-served — narrow's own
-float4 win). Landed (both arms new kernels), the absolutes vs the morning
-baseline: gate/up m=1268 839→727 µs (−13 %), QKV m=1268 536→445 (−17 %),
-down m=1268 470→406 (−14 %), m=317 QKV 158→125 (−21 %). Forward level
-(fixture probe, cross-binary same-box same-session): english 15.1→12.9 ms
-row p50 (−14.6 %), multilingual 7.2→6.3 (−12.5 %), typed 15.1→12.8
-(−15.2 %).
-
-**The published row refresh** (reflex `.benchmarks/030`, 15 suites
-PASSED, host 4090-windows): every suite −6.8..−16.7 % p50 — the packed
-suites TOO this time (typed_decisions 109→100/59→55/109→99, banking77
-28→25, code_fixtures 31→28) — the multi-wave zone's first measured win,
-which was the `.issues/004` open question. Accuracy: 13/16 rows
-BIT-IDENTICAL; the three typed_decisions rows wobble 1-4 cases in 2000
-within that lane's pre-existing `determinism_ok: false` variance (false
-in 026, 028, 029 AND 030 — on record since v1, independent of every
-kernel rung).
-
-Gates at the landing: `cuda_ops_smoke` 4/4 (tile-edge + ragged arms on the
-new kernels) · `packed_forward_equiv` 3/3 · lib 41/41 · consumer G5 at the
-cuda posture 2/2 (top-1 1.000000 ×3, drift ≤ 5.1e-5 class) ·
-`laya_batch_parity` 1/1 · clippy clean both repos. No kill-switch added —
-the float4 form IS the wide/narrow/xwide kernels now (same tile geometry,
-same pick, same result chain; `LAYA_CUDA_LADDER=0` still holds the ladder
-A/B posture). Remaining upside on record: the instances still sit at
-~20-24 TFLOP/s ≈ 25-30 % of peak — the next rung (register blocking /
-double-buffered staging) is a bigger redesign, not landed today.
+The packed zone's problem was LOAD-ISSUE THROUGHPUT (12-16.5 TF/s = 15-20% of peak; 6 smem loads per 8 FMAs with the four B loads contiguous). B staging rows pad to a 16 B multiple (65→68, 129→132) and the four B loads → one `reinterpret_cast<float4>` (result-identical by construction, bit-verified). −10.3..−25.2% multi-wave, forward −12.5..−15.2%; the reflex `.benchmarks/030` refresh −6.8..−16.7% p50 incl. the packed suites, 13/16 rows bit-identical. No kill-switch — the float4 form IS the kernels now; `LAYA_CUDA_LADDER=0` still holds the A/B posture.
 
 ## 2026-09-25 — Issue 005 CLOSED: CUDA graphs — NEGATIVE, the lane is GPU-bound (submit fully hidden)
 
-The standing follow-up rung (recorded at the close of 002/003/004: "CUDA
-graphs for per-op dispatch overhead") is closed on measurement, with the
-pre-registered go/no-go gate of `.issues/005` §2 answered NO by a DIRECT
-device-timeline reading rather than by the submit/wall ratio alone.
-
-**The instrument (ships, `LAYA_CUDA_STATS=1`)**: `begin_pass` stamps t0 and
-records a timing event at the head of the now-idle stream; the pass's FIRST
-`download_into` (the pipeline-draining sync) records the end event, syncs,
-and prints `submit` (pre-sync − t0: the whole CPU path — host embedding
-gather, H2D uploads, slot `cuMemAlloc`s, every launch call), `wall`
-(post-sync − t0), `gpu` (the device-timeline elapsed between the two events
-— the GPU critical path of the prefix, inter-kernel gaps and alloc-induced
-stalls INCLUDED), plus the submit-path decomposition (upload count/time/
-bytes, alloc count/time, accumulated at the call sites). Zero cost when the
-env is unset — the events are only created under the flag, and the stats-off
-posture re-measured byte-stable (english 15.1 ms / multilingual 7.2 ms row
-p50, identical to the pre-instrumentation readings).
-
-**The measurement** (fixture probe, all three checkpoints, reps=3, GPU
-exclusive — GUI apps only, the owner-call exemption):
-
-| row class | submit | wall | gpu | uploads | allocs |
-|---|---|---|---|---|---|
-| english p50 | 4.6-5.2 ms | 12-15 ms | **= wall ±0.3 %** | 6x ~0.07 ms | 18-25x ~0.2 ms |
-| multilingual p50 | 1.7-2.8 ms | 6.1-7.2 ms | **= wall ±0.1 %** | 6x ~0.04 ms | 19-24x ~0.13 ms |
-| typed p50 | 4.5-6.5 ms | 12.8-15.7 ms | **= wall ±0.3 %** | 6x ~0.08 ms | 19-24x ~0.2 ms |
-| long rows (63-133 ms) | 16-32 ms | 63-133 ms | **= wall** | ≤0.8 ms | ≤1.9 ms (one 6.8 ms malloc hiccup) |
-
-**`gpu == wall` on every row of every checkpoint.** The device timeline
-fills the entire wall: the CPU submit path — all of it, launches, uploads,
-allocs — executes entirely INSIDE the GPU's execution window. The
-pre-registered GO premise ("the CPU path co-determines the wall") is false
-here, and the ratio arm of the rule (multilingual max 0.46 < 0.5, median
-~0.33) concurs. A graph replay would remove CPU work that is already free;
-the remaining win is bounded at GPU-side inter-kernel gap reduction
-(~300 launches × ~0.5-1 µs ≈ 0.15-0.3 ms ≈ 1-2 % of wall) — under the
-lane's measured noise band (the `sgemm_shape_timing` control's ±8-10 %
-two-context artifact band; the ±6 % idle per-round spread) — while the
-signature-keyed arena + pinned-slot + staging-refresh machinery would add
-exactly the stale-replay correctness surface `.issues/003` exists to
-prevent, and per-signature capture costs more than it saves on novel
-shapes (the serving stream's one-shot signatures). The pass TAIL (act head:
-host math between three data-dependent downloads) is unreachable by graphs
-by construction.
-
-Two observations recorded for the future (the reopen triggers, both on the
-instrument, one command away):
-1. **The launch path costs ~15 µs/call** (submit minus gather/upload/alloc
-   over ~300 launches) — expensive per call but FULLY HIDDEN at every
-   current geometry. If the kernels ever get much faster (the ladder rungs
-   compound, or a bigger GPU), the submit path becomes the wall and the
-   ratio flips — re-run the probe before reopening, the number decides.
-2. **Per-pass allocs are ~0.2 ms and uploads ~0.05-0.1 ms** — both already
-   hidden; no slot-pooling or pinned-staging rung is warranted either (the
-   cheaper remedies the issue §3 pre-identified die by the same evidence).
-
-Gates at the close: `cuda_ops_smoke` 4/4 · `packed_forward_equiv` 3/3 · lib
-41/41 · consumer G5 at the cuda posture 2/2 (top-1 1.0, drift ≤ gate) ·
-`laya_batch_parity` 1/1 · clippy clean both repos · stats-off parity rows
-byte-stable. No published number changes (nothing shipped that moves
-them); the instrument is debug-only.
+Instrument ships (`LAYA_CUDA_STATS=1`, zero cost unset): `gpu == wall ±0.3%` on every row of every checkpoint — the whole CPU submit path (launches ~15 µs/call, uploads, ~0.2 ms allocs) executes inside the GPU window; a graph replay removes work that is already free (~1-2% bounded, under the noise band) while adding exactly the stale-replay correctness surface. Reopen triggers (both on the instrument): kernels get much faster (submit becomes the wall) or allocs/uploads stop being hidden. Gates: `cuda_ops_smoke` 4/4, `packed_forward_equiv` 3/3, lib 41/41, G5 2/2, `laya_batch_parity` 1/1; stats-off parity byte-stable.
 
 ## 2026-09-25 — Issue 004 CLOSED: the sgemm tile ladder — block-fit floors, the narrow single-question win
 
-The `.issues/002` v1 backend ran ONE sgemm instance (64×64×32, 512
-threads) for every GEMM shape. The lane now ships THREE instances —
-`sgemm_narrow` (32×64×64, 512 thr, staging A[32][65]+B[64][65] = 24 960 B),
-`sgemm_wide` (the v1 kernel, renamed) and `sgemm_xwide` (64×128×32,
-1 024 thr, staging A[64][33]+B[32][129] = 24 960 B) — picked per call by
-**BLOCK-FIT on the SM count**, a floor MEASURED on this box, not ported:
-the M3 Metal lane's `m < 256` threshold does NOT transfer to the 128-SM
-4090 (it is subsumed by the block-fit arithmetic on the real population).
-
-**The cliff that sets the floor** (the probe's CUDA arm,
-`sgemm_shape_timing`): at m=106 the narrow instance wins −15.7 % at
-n=2048 — exactly 128 blocks, one per SM — and LOSES +46 % at n=2560 —
-160 blocks: static block scheduling strands 32 SMs at 2× work while 96
-idle after one. Every instance whose grid exceeds the SM count pays that
-straggler tail, so the pick is: narrow iff its grid (× batch) fits one
-wave; xwide iff m≥256 ∧ n≥2048 ∧ its grid fits (the multi-wave zone —
-gate/up at n=5248, 205 blocks — reverts to the proven wide instance:
-readings sat inside the instrument's measured ±8-10 % two-context
-artifact band). Per-output accumulation stays k-ascending in ONE thread
-on every instance, so the ladder is result-identical by construction —
-and measured: 13/16 bench suite-lane rows bit-identical vs the 028 run
-(every single-question suite; the three typed_decisions rows wobble 1
-case in 2000 within that lane's pre-existing `determinism_ok: false`
-variance, on record since the 026 v1 run).
-
-Measured wins: per-shape narrow −13.7..−19.6 % (n=1024/1536/2048, the
-m=4/m=1 head tails −12..−17.5 %); xwide QKV (120 blocks) −6.8..−8.5 %
-across three runs; forward-level A/B on the fixture rows (ABAB,
-single-backend-per-process): english −10.4 % · multilingual −14.1 % ·
-typed −8.4 %. Published row refresh (reflex `.benchmarks/029`): the
-single-question suites −6..−14 % p50, packed suites flat by the
-conservative floor. Kill-switch `LAYA_CUDA_LADDER=0` (wide everywhere —
-the A/B posture, never a silent default).
-
-A launch defect fixed in passing: the v1 form passed the staging
-footprint as DYNAMIC shared memory on top of the kernels' STATIC
-`__shared__` arrays — harmless at wide's 2×16 768 B, but the new
-instances' 2×24 960 B crosses the 48 KB static default and the launch
-dies `CUDA_ERROR_INVALID_VALUE` (caught by the first smoke arm — the
-static-smem constant never reached the launch). All instances now
-launch with dynamic smem 0; the footprint constants live on as
-compile-time bounds.
-
-Gates at the final floors: `cuda_ops_smoke` (with the new boundary arms
-— m=33/255/256, n=65/2047/2048/2080, k=33/63/65, m=321 — every tile
-edge on every instance) · consumer G5 at the cuda posture ·
-`laya_batch_parity` · `packed_forward_equiv` · clippy −D warnings both
-repos. Follow-up rungs stay open: CUDA graphs for per-op dispatch
-overhead; the packed multi-wave zone has NO measured win yet — split-K
-or an occupancy-tuned instance is the open question, not another tile
-size.
+Three instances (`sgemm_narrow` 32×64×64, `sgemm_wide`, `sgemm_xwide` 64×128×32) picked by BLOCK-FIT on the SM count — the M3 `m < 256` rule does NOT transfer to the 128-SM 4090 (measured cliff: narrow −15.7% at n=2048 exactly 128 blocks, +46% at n=2560/160 blocks). Narrow −13.7..−19.6%, xwide QKV −6.8..−8.5%, forward −8.4..−14.1%; the reflex `.benchmarks/029` single-question suites −6..−14%. Result-identical by construction (k-ascending per-output); 13/16 rows bit-identical. Kill-switch `LAYA_CUDA_LADDER=0`. Launch defect fixed in passing (dynamic smem over the 48 KB static default → `CUDA_ERROR_INVALID_VALUE`; all instances launch dynamic smem 0).
 
 ## 2026-09-25 — Issue 003 CLOSED: CUDA flash attention — the packed-path zeros defect fixed + the fused rung
 
-The `.issues/002` v1 posture ran `attention_forward` through the TRAIT
-DEFAULT op sequence on CUDA. That default SLICES host memory
-(`&qkv[qkv_off..]`) — correct at offset zero (the slice IS the parent
-the device op wrote → same `(ptr,len)` chain key → hit → device-current)
-and SILENTLY WRONG at non-zero offsets: the packed multi-question
-forward's slice is a NEW key → chain MISS → uploads the host bytes,
-which under the write-first discipline are STALE (the parent was written
-device-side only; the host vec holds its `resize(.., 0.0)` zeros).
-**Every multi-question case's attention ran on zeros at v1.**
-
-The evidence was the published bench, not the code: reflex
-`.benchmarks/026_4090windows_cuda` vs `018_4090windows_run` (CPU, same
-box) — typed_decisions english 0.3575→0.2690, multilingual 0.3490→0.2690,
-typed **0.7445→0.2690** (−47.5 pt), code_fixtures 0.5417→0.2917 (2
-q/case), while every 1-question-per-case suite was byte-identical
-(ag_news 0.9500, banking77 0.4980). The consumer-side G5 passed green
-because its fixture rows are single-question (offset zero — the correct
-path); `laya_batch_parity` (the multi-question gate) had not been run at
-the cuda posture. The 026 close-out's "accuracy byte-identical on every
-lane" claim was wrong for the multi-question suites — corrected in the
-consumer repo's bench doc the same day.
-
-The fix IS the rung: the Metal lane's one-pass online-softmax flash
-kernel (MSL_FLASH, the reflex Issue 020 T10 rung-3 form) ported to CUDA C
-at plain fp32 FMA — ONE dispatch per layer over the packed qkv (split,
-rope, q-scale, scores, sliding window, softmax, value mix, head merge
-in-kernel; the seq² scores parent never exists; **offsets bind at
-dispatch**, so the packed forward is the unbatched kernel's exact math —
-Metal's design, which is why the Metal lane was immune). 256 threads,
-one block per (32-row query block, head); shared staging
-tq[32][65]/tk[64][33]/tv[32][65]/ts[32][33]/tacc[32][65]+mrow/lrow/arow
-= 38 016 B dynamic smem; the online rescale α = expf(m_old − m_new) is
-exactly 1.0f when the max does not move. Kill-switch `LAYA_CUDA_FLASH=0`
-→ the reference sequence, which now PANICS on non-zero offsets (the
-Metal guard — the silent zeros are now a loud breach, and
-`supports_packed_attention` answers false there so the agent takes the
-per-question loop). `needs_window_mask` mirrors the armed path (the
-encoder stops building `[seq,seq]` masks on the fused lane).
-
-Gates green on this box, CUDA 13.3 / driver 610.62, GPU clear of compute
-consumers (GUI apps only — the exempt class):
-- `cuda_ops_smoke` + 3 new arms: fused full (seq 1/9/37/64/129 — every
-tile edge) drift 1.2–1.8e-7; sliding (w8@64/w4@37/w16@130) 1.2–1.8e-7;
-  the PACKED-offsets arm (two sequences at non-zero qkv/rope/out offsets,
-  the encoder's whole-parent call shape) 1.2e-7 — GREEN FIRST RUN.
-- `packed_forward_equiv` gained a CUDA arm (non-macOS,
-  `laya-riir-cuda`-gated) — the gate class that catches the zeros defect
-  at the substrate level; verified it FAILS LOUD under
-  `LAYA_CUDA_FLASH=0` (the fallback's offset guard panics).
-- Consumer-side at `LAYA_DEVICE=cuda`: `laya_batch_parity` — 26+26+36
-  batched multi-question forwards, top-1 1.000000, drift ≤ 5.1e-5
-  (~20× under the 1e-3 gate) — THE gate that would have caught v1; G5
-  parity english 3.3e-6 · typed 1.3e-6 · multilingual 4.7e-6 (the
-  online-softmax restructure's expected class, ~200× under the gate).
-- Latency (fixture rows, short seqs — flash vs `LAYA_CUDA_FLASH=0`):
-  english 17.5→16.2 ms (−7.4%), multilingual 9.0→8.5 (−5.6%), typed
-  17.6→16.6 (−5.7%). The long-seq suites gain far more (the seq² scores
-  traffic ~6×`heads·seq²·4B` per layer never exists, and the windowed
-  key walk cuts attention FLOPs ~2.4× at window 64) — measured in the
-  consumer repo's refreshed bench.
-
-The bench refresh + the published-numbers correction live in the consumer
-repo (reflex `.issues/028` — renumbered from 027 after a same-window
-dual-allocation; the record is reflex HISTORY §2026-09-25 bench 028).
-Remaining follow-up rungs (open, each G5-gated at the cuda posture): the
-sgemm tile ladder (closed same day as `.issues/004`), CUDA graphs for
-per-op dispatch overhead.
-
-Session: 4090-cuda-flash, 2026-09-25
+v1's trait-default attention sliced host memory at non-zero offsets → `(ptr,len)` chain MISS → stale-zeros upload (typed_decisions 0.7445→0.2690; the evidence was the published bench, reflex `.benchmarks/026_4090windows_cuda` vs `018_4090windows_run`). Fix = the rung: the Metal one-pass online-softmax flash kernel ported to CUDA at fp32 FMA, offsets bind at dispatch; `LAYA_CUDA_FLASH=0` now PANICS on non-zero offsets (`supports_packed_attention` false; `needs_window_mask` mirrors the armed path). Gates: `cuda_ops_smoke` + the packed-offsets arm 1.2e-7, `packed_forward_equiv` CUDA arm (fails loud under the kill-switch), `laya_batch_parity` top-1 1.000000 drift ≤5.1e-5, G5 ~3e-6 class. Latency −5.6..−7.4% short seqs. Bench refresh + the published-numbers correction live in reflex (`.issues/028`, renumbered from 027 after a dual-allocation; reflex HISTORY §2026-09-25 bench 028).
 
 ## 2026-09-25 — CalibrationTables promoted substrate-side (883 P0 Kimi fixture rider)
 
-The gemma-2 harness's layered table builder moved upstream:
-`katgpt_core::fitted_anchor_table::LayeredVkCalibration` (with
-`VkLayerTables`) is now the ONE builder for both 883 P0 fixtures — this
-repo's gemma-2 dashboard and katgpt-rs's new Kimi-K3 dashboard (katgpt-rs
-Bench 889, real weights: ρ(V)≈ρ(K)≈ρ(V−K) per MLA layer — the "coupled
-through one latent" signature; KDA layers = fixture-class null, no KV
-cache). `gemma2_calibration.rs` re-exports it under the historical name
-`CalibrationTables` — zero behavior change, the `vk_calibration` bin
-compiles + clippy-clean unchanged. The tap forward, corpus loader, and
-dashboard format stay here (gemma-specific); the row-map/triplet/scratch
-plumbing is substrate-owned (DRY: one builder, two fixtures).
+`katgpt_core::fitted_anchor_table::LayeredVkCalibration` (+ `VkLayerTables`) is now the ONE builder for both 883 P0 fixtures — this repo's gemma-2 dashboard and katgpt-rs's new Kimi-K3 dashboard (katgpt-rs Bench 889: ρ(V)≈ρ(K)≈ρ(V−K) per MLA layer, the "coupled through one latent" signature; KDA layers = fixture-class null). `gemma2_calibration.rs` re-exports under the historical name `CalibrationTables` — zero behavior change; the tap forward, corpus loader, dashboard format stay here.
 
 ## 2026-09-24 — Issue 002 CLOSED: the CUDA backend for the laya lane (the 4090 bench row, 17–60× the CPU posture)
 
-Landed `9b52cb1`/`99f156e`→rebased `e99d767`: the lane's third compute
-backend, `laya-riir-cuda` — cudarc 0.19 (`driver`+`nvrtc`, `cuda-13030`+
-`fallback-dynamic-loading`, target-scoped `not(macos)`, one workspace version
-with `riir-infer-gpu`'s raw-CUDA lane), CUDA C compiled to PTX at construction
-(NVRTC, arch `sm_89`). The Metal backend's architecture ported verbatim:
-permanent `(ptr,len)` weight cache, epoch-keyed chain slots with `begin_pass`
-invalidation, `download_into` prefix-read barrier (a `CudaView` slice —
-`memcpy_dtoh` asserts on the longer parent slot), lazy async submission on one
-stream. ONE strided batched sgemm (64×64×32 tile, 512 threads, fp32 FMA;
-the weight binds row-major `[n,k]` directly — the B-tile loader maps lanes
-along whichever stride is 1, so NO device transpose cache) + the 14 tail
-kernels at the CPU lane's exact semantics. Attention v1 = the trait DEFAULT
-op sequence, fully device-side (attention <6% of forward FLOPs at the pinned
-geometries — a fused flash kernel is a follow-up rung, tracked below).
-`CudaSlice::clone()` is a device-to-device COPY in cudarc (not a refcount
-bump like Metal's `Buffer`) — the caches hold `Arc<CudaSlice<f32>>`.
-
-Two kernel defects found by the op gate before any G5 run: the staging loops
-loaded 1024 of 2048 tile elements at 512 threads (the Metal kernel's 1024-
-thread q<2 shape copied straight over), and the `b_cs==1` staging branch
-dropped the `n0` column offset (columns ≥ 64 served tile 0's B — the tiny
-shapes passed, n=128 failed from column 64 on; a ones/identity ladder
-localized it in two runs).
-
-Gates (all green on the 4090 box, CUDA 13.3 / driver 610.62):
-- `cuda_ops_smoke`: every backend op vs the CPU free fns — bit-exact data
-  movement, 1e-7…1e-4 reductions;
-- consumer-side G5 at `LAYA_DEVICE=cuda`: english 26/26 top-1 drift 1.863e-6,
-  typed 26/26 2.471e-6, multilingual 36/36 2.894e-6 — the Metal drift class,
-  ~500× under the 1e-3 gate, GREEN FIRST RUN;
-- `packed_forward_equiv` at the cuda posture (the same-day concurrent
-  packed-forward landing composed cleanly — `copy_at` added at the rebase).
-
-Measured (fixture rows, same-session A/B on this box): english 210.4→17.5 ms
-(12.0×), multilingual 95.0→9.0 ms (10.6×), typed 208.4→17.4 ms (12.0×) —
-every checkpoint BELOW the M3 Metal row (28.3/12.2/28.3 ms) at v1. The full
-15-suite bench refresh + the site publish record lives in the consumer repo
-(riir-reflex `.issues/026`, `.benchmarks/026_4090windows_cuda/`). Follow-up
-rungs (open, unordered): flash-attention port (the MSL two-pass online-softmax
-form), tile ladders for the m<64/n≤1024 shapes, CUDA graphs for the
-per-op dispatch overhead — each G5-gated at the cuda posture before any
-number replaces a published one.
+Landed `9b52cb1`/`99f156e`→`e99d767`: `laya-riir-cuda` — cudarc 0.19 (`driver`+`nvrtc`, `cuda-13030`+`fallback-dynamic-loading`, target-scoped `not(macos)`), CUDA C → PTX at construction (NVRTC, sm_89); the Metal architecture ported verbatim (weight cache, epoch-keyed chain slots, `download_into` prefix-read barrier via `CudaView`, lazy async one stream; `CudaSlice::clone()` is a d2d COPY → caches hold `Arc<CudaSlice<f32>>`). Two op-gate kernel defects fixed pre-G5 (staging loaded half the tile; the `b_cs==1` branch dropped the `n0` offset). G5 at `LAYA_DEVICE=cuda`: drift 1.863e-6 / 2.471e-6 / 2.894e-6 GREEN FIRST RUN; english/typed 12.0×, multilingual 10.6×, all below the M3 Metal row. Full bench refresh in riir-reflex `.issues/026`, `.benchmarks/026_4090windows_cuda/`.
 
 ## 2026-09-23 — crates.io publication: keep `publish = false` until the vendor patches upstream (owner-gates menu v2 row 2)
 
-Owner verdict: the crate and `crates/riir-infer-gpu` stay **closed to
-crates.io** — this is a HARD blocker, not a preference. Both vendor forks under
-`vendor/` are load-bearing (`[patch.crates-io]` in the root manifest):
-
-- `cubecl-runtime` — carries the #1359 drop-queue fix.
-- `wgpu-hal` — carries the VRAM accessors the GPU code probes.
-
-A `[patch.crates-io]` section does not survive publication: a crates.io
-consumer would build against the UNPATCHED upstream crates — the drop-queue bug
-and the missing accessors included. Publication becomes available the day the
-vendor deltas land upstream (the forks shrink to zero and the patches drop out
-of the manifest).
-
-Boundary note: this repo stays upstream of the engine regardless — the public
-funnel for the stack's primitives remains `katgpt-rs` (its katgpt-core family
-publishes), not this repo.
-
-Session: owner-gates-m2, 1790121600
+HARD blocker: both `vendor/` forks are load-bearing via `[patch.crates-io]` (`cubecl-runtime` — the #1359 drop-queue fix; `wgpu-hal` — the VRAM accessors) and a `[patch.crates-io]` section does not survive publication. Publication opens the day the vendor deltas land upstream. Boundary note: the public funnel for the stack's primitives remains `katgpt-rs`, not this repo.
 
 ## 2026-09-25 — Issue 020 T6 CLOSED NEGATIVE: the encoder's host side is 1–1.6% of forward wall (measured before building)
 
-T6 proposed pooling the per-forward allocation churn — ~60 MB of host `Vec`s
-rebuilt every forward (`encoder.rs` `Scratch::new()` + `gathered`/`h`/`out`/
-rope tables) plus every activation device buffer freed by the per-pass chain
-clear (`metal.rs` `begin_pass_impl`). The 09-25 head scratch-pool rung (built,
-measured, moved nothing, reverted — the consumer repo's issue-020 follow-up)
-already said the head is dispatch+GPU bound; this measurement settles the
-encoder's half the same way, and it was taken BEFORE building the pool (the
-discipline the head rung paid for).
-
-Instrument: `crates/riir-infer-laya/tests/metal_host_gpu_split.rs` — a
-`#[ignore]`d, `required-features = ["laya-riir-metal"]`-gated, measurement-only
-probe (`--ignored --nocapture`). It splits one `Encoder::forward_packed` at the
-real english geometry (d 1024, 28 layers, intermediate 2624) into `enq` (the
-wall of the forward alone — the body contains no sync, so that is the whole
-host side: MSL dispatch encoding, the chain uploads + destination slots, the
-host `Vec` churn) and `sync` (`download_into`'s commit + wait — the GPU side).
-The decision rule was recorded in the probe doc before measuring: pooling can
-shrink only part of `enq`; if `enq` is a small fraction of the wall, T6 closes
-NEGATIVE; a host-bound reading under load defers to a quiet box.
-
-Measured 2026-09-25, M3, AC, load 11–12 (falling), 88% RAM free, one sibling
-CPU bench (~6 cores, memory-bandwidth pressure — which inflates BOTH the host
-reading and the GPU's unified-memory reads), no GPU consumers, 9 rounds/shape,
-2 warmups:
-
-- seq188: enq p50 **0.80 ms** (min 0.64) · sync p50 **48.7 ms** (min 36.1) — host share **1.6%**
-- seq512: enq p50 **1.45 ms** (min 1.29) · sync p50 **141.6 ms** (min 132.6) — host share **1.0%**
-- packed2x256: enq p50 **1.37 ms** (min 1.22) · sync p50 **135.2 ms** (min 130.7) — host share **1.0%**
-
-The host reading is load-INFLATED (CPU contention inflates the host, never the
-GPU), so the verdict is robust in the recorded direction: a quiet box only
-shrinks the 1.0–1.6%. Allocation pooling can shrink only part of that share —
-dispatch encoding stays — and cannot move case wall. The per-pass chain clear
-STAYS (its staleness guard is load-bearing: host-authored buffers are rebuilt
-per forward at recycled heap addresses, the Issue-015 class). The probe stays
-as the standing instrument for any future host-side rung claim.
-
-Also landed in the same commit: the `[[test]]` required-features row for the
-new target (the T1.1e repo-birth law — the row keeps a feature-less selection
-skipping loudly instead of printing a green zero).
-
-Session: issue020-t6, 1790323200
+Instrument `crates/riir-infer-laya/tests/metal_host_gpu_split.rs` (`#[ignore]`, `required-features = ["laya-riir-metal"]`, measurement-only) splits `Encoder::forward_packed` into `enq` (the whole host side) vs `sync` (`download_into`): seq188 0.80/48.7 ms, seq512 1.45/141.6, packed2x256 1.37/135.2 — host share 1.0–1.6%, load-INFLATED (verdict robust). Allocation pooling cannot move case wall; the per-pass chain clear STAYS (its staleness guard is load-bearing, the Issue-015 class). The `[[test]]` required-features row landed per the T1.1e law.
 
 ## 2026-09-25 — the narrow sgemm's shape is the measured local optimum (T7 occupancy axis refuted, both arms)
 
-The question a future kernel reader will ask: narrow stages A[32][65] +
-B[64][65] = 24 960 B — one threadgroup per core — why not shrink the staging
-so 2–3 co-reside and hide the staging-load latency? Measured from the
-consumer's `sgemm_shape_timing` probe (reflex `ebe667e`, the record lives in
-its issue-020 T7 section): two challengers behind a temporary
-`LAYA_METAL_SGEMM_VAR` flag — **bk32** (BK 32, same 32×64 tile, 12 544 B → 2
-TGs/core) and **bn32** (32×32 tile, 8 448 B → 3 TGs/core), both keeping the
-k-ascending per-element chain (every row bit-identical to `sgemm`).
-
-bk32 LOST 17–33% on every resolvable cell, growing with k exactly as the
-barrier model predicts (BK 32 doubles the k-loop's two barriers); bn32 lost
-harder (15–45% — the same doubling plus halved B reuse). The 2–3× co-residency
-gain is strictly smaller than the barrier cost. At BK 64 a 2-TG fit would
-break the bank-conflict padding (stride 65) or the 8×8 block structure (BN ≤
-24 idles 4 of 16 simdgroups); wide (BM 64) already lost zero-for-zero in the
-band rung. The variant code never landed — this record and the reflex issue
-carry the negative, the BK=48 precedent.
-
-Session: issue020-occ, 1790323200
+Two challengers behind a temporary `LAYA_METAL_SGEMM_VAR` flag (from the consumer's `sgemm_shape_timing` probe, reflex `ebe667e`): bk32 lost 17–33%, bn32 15–45% — the barrier cost beats the 2–3× co-residency gain; at BK 64 a 2-TG fit breaks the bank-conflict padding or the 8×8 block structure. The variant code never landed — this record and the reflex issue carry the negative (the BK=48 precedent).
 
 ## 2026-09-25 — the sgemm MMA-roofline probe: the narrow instance is staging-bandwidth-bound (reflex Issue 020 T7 follow-up)
 
-`crates/riir-infer-laya/examples/sgemm_roofline.rs` (new, measurement-only,
-`[[example]]` required-features row per the T1.1e law): the f16-axis
-discriminator. A verbatim copy of the shipped narrow kernel (CPU-drift-checked
-on the ragged cell) against an MMA-only twin — same inner k-chunk, staged
-ONCE, `reps` iterations of the 8-wide chunk with no re-staging and no
-barriers, FLOPs matched by reps = k/64, position-balanced rounds in one
-process. Measured (AC, load 2.4–3.1): 317×3072×1024 — narrow 3.13 TF/s vs
-roofline 5.11 (+63%); 1024×3072×1024 — 4.88 vs 9.21 (+89%); 1024×8192×1024 —
-4.37 vs 10.24 (+134%). The traffic math closes: per k-tile each threadgroup
-stages 24 KB (A 8 + B 16), so cell 3's B re-reads alone are ≈1.6 GB ≈ the
-measured 3.93 ms wall at ~400 GB/s. Verdict: NOT MMA-bound — the f16 lever
-is the B-OPERAND BYTES (halving staging + device reads; predicted ~1.4–1.7×
-on the hot cells), not the f16 MMA; double-buffering is dead with it
-(bandwidth-bound, not latency-bound). Numerics note for the rung: f16 weight
-rounding is ~4.9e-4 relative per term (< the 1e-3 G5 gate) but promotion is
-an Issue-750-T3 lossy-surface call — per-family retention, never the
-aggregate.
+`crates/riir-infer-laya/examples/sgemm_roofline.rs` (measurement-only, `[[example]]` required-features row per the T1.1e law): the shipped narrow kernel verbatim vs an MMA-only twin (staged once, no re-staging, position-balanced). Narrow 3.13–4.88 TF/s vs roofline 5.11–10.24 (+63..+134%); the traffic math closes (B re-reads ≈1.6 GB ≈ the measured wall at ~400 GB/s). Verdict: NOT MMA-bound — the lever is B-OPERAND BYTES (f16 staging, predicted ~1.4–1.7×), not the f16 MMA; f16 weight rounding ~4.9e-4 is under the 1e-3 G5 gate but promotion is an Issue-750-T3 lossy-surface call (per-family retention, never the aggregate).
 
 ## 2026-09-25 — f16-B staging REFUTED at kernel level (the roofline probe's own follow-up arm)
 
-The roofline verdict (staging-bound, +63..+134% MMA-only headroom) predicted
-the f16-B lever: halve the B-operand bytes (16 of 24 KB staged per k-tile),
-halve the dominant traffic, ~1.4-1.7x on the hot cells. Measured (the probe
-extended with a `sgemm_hb` arm — `device const half*` B, converted to f32 at
-staging, everything after the staging bit-identical; f16 seed via a
-round-to-nearest-even `f32_to_f16`; plumbing verified against the f32 arm
-within the 2e-2 rounding gate): **flat within ±2% on every cell** — 317x3072x1024
-−1.1%, 1024x3072x1024 +1.9%, 1024x8192x1024 −0.8% (the deep-k cell where the
-model predicted the most). Load 8.9-9.5 (sibling resumed) — irrelevant: both
-arms inflate together and the ratios are the decision axis.
-
-Mechanism, now measured rather than modeled: B (1024x3072 f32 = 12.6 MB, f16
-= 6.3 MB) FITS IN L2 on this GPU (~32 MB), so B's per-m-tile re-reads were
-never DRAM traffic — the binding cost is the L1/threadgroup-issue path
-(TG writes + simdgroup loads + the barriers ordering them), which halving
-bytes does not relieve. Same mechanism as the 09-24 coalescing negative
-("sector waste already absorbed by L2/MLP"), one level deeper.
-
-Consequences: the f16-B BACKEND rung (f16 transposed weight cache + dispatch
-+ G5 re-gate + the Issue-750-T3 per-family retention walk) is dead before
-being built — days of lossy-surface work for a measured ±0%. With this, five
-axes are refuted at kernel level (occupancy bk32/bn32, BK=48 barriers,
-coalescing x2, f16-B) and the roofline gap (+63..+134%) is the staging-issue
-path itself, which none of the tried geometries reaches. Narrow's shape is
-the measured local optimum on this hardware/toolchain. Reopen triggers: a
-Metal/toolchain change exposing direct-to-MMA staged layouts, or an L2-
-oversized working set (n > ~4096 changes B's residency class — the packed
-path's n grows with question count, worth re-probing there first).
+The `sgemm_hb` arm (`device const half*` B, RNE `f32_to_f16` seed): flat ±2% on every cell — B (12.6 MB f32) FITS L2 (~32 MB), so the binding cost is the L1/threadgroup-issue path, which halving bytes does not relieve; the f16-B backend rung is dead before being built. Five axes now refuted at kernel level (occupancy bk32/bn32, BK=48, coalescing ×2, f16-B); narrow's shape is the measured local optimum. Reopen triggers: a Metal/toolchain change exposing direct-to-MMA staged layouts, or an L2-oversized working set (n > ~4096 — re-probe the packed path first).
 
 ## 2026-09-27 — Issue 021 CLOSED: the cuda CLS-row corruption — a chain-cache prefix-match
 ## alias, not a kernel race (the fused-GLU temp's slot vs the hidden that reused its address)
 
-The harness banking77 cuda repeat check (`determinism_ok = false`, Bench 052 §4090
-re-run) is fixed at the root: `chain_buf`/`chain_slot_for` now EVICT same-pointer
-different-length entries on bind. Plus a second, independent defect the hunt
-surfaced: `download_into`'s `memcpy_dtoh` is `cuMemcpyDtoHAsync` (cudarc 0.19) —
-stream-ordered but ASYNC — so the pre-copy `synchronize` never guarded the host
-read; a trailing sync now does.
-
-The mechanism, isolated by four probes (all committed under `tests/`):
-
-- `cuda_repeat_probe` (op level, banking77's real shapes ×200–2000 incl. the
-  act-head GEMMs `[1,1028]×[256,1028]` / `[1,256]×[2,256]`): every kernel
-  bit-stable — kernels exonerated.
-- `cuda_packed_repeat_probe` (real english checkpoint, packed forward ×30):
-  bit-stable — the encoder exonerated (and explains why the harness flag
-  carried "picks still match metal": the marker gather never reads row 0).
-- The harness bisect (flash=0 / ladder=0 / reg4=0 / head-defer=0): fires under
-  EVERY posture — posture exonerations; `LAYA_HEAD_DEFER` mechanically cannot
-  reach banking77 (1-question cases never take the packed path; the one clean
-  run was luck — never trust a single clean cell).
-- `cuda_agent_repeat_probe` (full `system_one`, 12 real cases, 30 rounds):
-  RED at round 1 on 6/12 cases — only `act_probability` moves (saturating to
-  1.0 on the bad read), probs/confidence bit-identical.
-
-The `LAYA_DEBUG_ACT_ECHO` instrument (head.rs, env-gated) then split the
-inputs: logits identical, feats identical, **the CLS row's raw-bit checksum
-different**; and the `LAYA_CUDA_TRACE` download-candidate log named the
-collision: the CLS prefix read matched TWO same-epoch slots at the hidden's
-base pointer — the hidden itself (320512 floats) and a 1642624-float slot =
-exactly `total·2·i_sz`, the fused GLU temp inside `matmul_w_glu`'s default
-composition. The temp is allocated+dropped per layer; its DEVICE slot entry
-survives in the epoch map (the map owns the Arc); the hidden Vec then
-allocated at the freed address and bound a second entry; `download_into`'s
-prefix match ties on epoch and `max_by_key` falls through to HashMap
-iteration order — ~50/50 per call, both directions, stable within a process
-for fixed key sets (why every earlier repeat probe was green). Metal is
-clean because it OVERRIDES `matmul_w_glu`/`matmul_w_accum` (the T11 fold
-rungs) — no fused temp, no address churn.
-
-The fix (cuda.rs, both bind sites): `map.retain(|k,_| k.0 != ptr || k.1 ==
-len)` on miss — a different-length slot at a recycled address is provably a
-dead buffer (two LIVE host allocations cannot share an address), so eviction
-is always sound. Acceptance: agent probe 30×12 GREEN (was 6/12 red at round
-1); harness banking77 cuda `determinism_ok = true` ×4/4 (was firing every
-run); accuracy unchanged (0.4220); `cuda_ops_smoke` 4/4; G5 cuda parity
-GREEN; clippy clean at cuda + all-features; the M3 lib tests 41/41.
-
-Rustc side-note (the box, not the code): two reproducible
-STATUS_ACCESS_VIOLATION rustc crashes on the 4090 (the cubecl test closure's
-katgpt-speculative/katgpt-forward, then riir-reflex lib) — both clear at
-`-j 4`; the first blocked the per-op encoder probe (`forward_probe` rides
-the cubecl gate), which is why the isolation went through the agent level.
-
-Instruments kept, env-gated, zero cost when unset: `LAYA_DEBUG_ACT_ECHO`
-(head.rs — CLS bits-sum + act_logits per call), the download-candidate trace
-under the existing `LAYA_CUDA_TRACE`, and the four probe tests (the [[test]]
-rows keep the green-zero rule honest).
-
-Landed at `c64d0b1` (fix + probes + instruments; the issue file is removed with this record — the noise-reduction rule; the docs commit is `9de953c`).
-
-Session: issue021-cuda-determinism
+Fixed at the root: `chain_buf`/`chain_slot_for` now EVICT same-pointer different-length entries on bind; plus `download_into`'s `memcpy_dtoh` is `cuMemcpyDtoHAsync` (stream-ordered but ASYNC) — a trailing sync now guards the host read. Isolated by four committed probes (`cuda_repeat_probe`, `cuda_packed_repeat_probe`, the posture bisect incl. `LAYA_HEAD_DEFER`, `cuda_agent_repeat_probe`): the CLS prefix read tied two same-epoch slots at the recycled address of `matmul_w_glu`'s fused-GLU temp and `max_by_key` fell to HashMap order (~50/50, stable per process — why earlier repeat probes were green). Fix `c64d0b1`: agent probe 30×12 GREEN, harness `determinism_ok = true` ×4/4, accuracy unchanged. Instruments kept env-gated: `LAYA_DEBUG_ACT_ECHO`, `LAYA_CUDA_TRACE`; docs commit `9de953c`.
 
 ## 2026-09-27 — Issue 011 CLOSED: `row_logit_floor` model-bound G1 complete — needle@64K PASS at every arm
 
-The gate katgpt-rs could not run for itself finished measuring and sat
-unread for ~30 h: T3c (MiniCPM5-1B at 64K real dilution) completed
-2026-09-26 03:16 +0700 after a 6.8 h shared-dense-prefix run (196 593
-rows at 8.05 tok/s), and the issue still read "measuring". Harvested
-2026-09-27 (this session), log `/tmp/ri011run/t6_minicpm64k.log`.
-
-**Result: PASS at every arm, b4 included.** 3/3 passkey prompts
-seq-exact, 0.00% top-1 flips over the 12 scored tokens at b8/b6/b6s0/b4;
-m_Y preserved within 0.0007 with the same top head (L15H7); base ppl
-1.0362, all Δppl inside noise. Three readings worth keeping:
-
-- **The tv-budget width holds at 64K.** The floored fraction saturated
-  at 8.4% (16K read 8.9%) — `ln(n/ε)` width growth (16.61 → 18.00 nats)
-  compensates the 4× dilution exactly as `A ≤ n·e^{−w}` predicts. The
-  width-sanity check is load-bearing: mean w = 18.00 = ln(65536/1e-3)
-  confirms the run was genuinely 64K.
-- **The closed-form envelope is vacuous at 4 bits / 64K** (mean env TV
-  1.31 > 1), so b4's 64K row is measured-retrieval evidence, not a
-  bound check. Teeth survive at 6 bits (0.169) and 8 (0.037).
-- **b4's 16K m_Y "switch" was a tie broken, not a perturbation** — at
-  64K the top head is already L15H7 and b4 holds it.
-
-⚠ n = 12 over 3 prompts (same as T3b): Δppl signs are noise (three of
-four arms read negative — sign cancellation, T2's shape). The row
-proves retrieval did not break at 64K; it cannot rank arms. T4's
-exemption verdict rests on T2's 4096-token table.
-
-**Final gate standing:** T2 PASS 8/6-bit (gemma-2, 4096 tok: b8 +0.033%
-ppl / 0.17% flips; b6 +0.066% / 0.90%) · T3 PASS 64K (T3a proxy + T3b
-16K + T3c 64K, 0 flips everywhere) · T4 sink exemption load-bearing
-(s0: floored 1.58×, |ΔNLL| 1.35×, flips 1.49×, aggregate ppl looks
-*better* — the lossy-surface failure shape on real rows). 6-bit is the
-admissibility floor.
-
-**Promotion handoff:** issue 011's last condition ("promotion waits on
-T2 + T3 passing here") is met; the promotion lane itself is owned by
-katgpt-rs and filed there as **Issue 903** (per-family retention walk
-per the lossy-surface rule + full-forward G2 + the 8-vs-6-bit width
-decision). The primitive stays opt-in; `ForwardContext.logit_floor:
-None` is the plain path, bit-identical.
-
-Bench record: `.benchmarks/003_row_logit_floor_ppl_needle.md` (T3c
-section + Verdict added this session). The issue file is removed with
-this record — the noise-reduction rule.
-
-Session: issue011-t3c-harvest
+T3c (MiniCPM5-1B at 64K real dilution, log `/tmp/ri011run/t6_minicpm64k.log`): PASS at every arm b8/b6/b6s0/b4 — 3/3 seq-exact, 0.00% top-1 flips over 12 scored tokens, m_Y preserved within 0.0007 (same top head L15H7), base ppl 1.0362. Standing: T2 PASS 8/6-bit (gemma-2 4096), T3 PASS 64K, the T4 sink exemption load-bearing (the lossy-surface failure shape on real rows); 6-bit is the admissibility floor; n = 12 over 3 prompts — the row proves retrieval did not break, it cannot rank arms. Promotion owned by katgpt-rs Issue 903; the primitive stays opt-in (`ForwardContext.logit_floor: None` bit-identical). Bench `.benchmarks/003_row_logit_floor_ppl_needle.md`.
 
 ## 2026-09-28 — Issue 017 (gpu_transpose dead module) + Issue 023 (fence F2 self-alias FP): both closed
 
-**Issue 017 / owner-gate D7 — deleted.** `gpu_transpose.rs` (286 L) +
-`src/kernels/transpose.wgsl` (57 L) removed; zero callers anywhere
-(grep incl. riir-ai's `riir_gpu::gpu_transpose` re-export consumers —
-none exist). `transpose_cubecl.rs` (Issue 572) covers the reachable use
-with owned `cubecl::server::Handle` in/out. lib.rs mod line removed;
-`transpose_cubecl.rs` relationship note rewritten as provenance;
-BOUNDARY.md riir-infer-gpu line repointed at `transpose_cubecl.rs` in
-the same commit (the D7 recipe). riir-ai's dead re-export dropped in
-the paired commit there (`6c6bf169b`). Clippy clean at
-cubecl_runtime + no-default postures; bench_663 target compiles.
-
-⛔ **Correction (2026-10-03): "zero callers anywhere" was false.** The grep
-covered riir-ai and riir-infer only. riir-train's `riir-train-engine` used
-`riir_gpu::gpu_transpose` behind the default-off `kimi_k3_gpu_backward`
-feature: the Phase 9h LM-head fast path in `kimi_k3_gpu_backward_sequence`,
-wired from `kimi_k3_train`. That feature stopped compiling on 09-28, and
-nothing noticed because no default build selects it. `transpose_cubecl.rs`
-isn't a drop-in there: that path writes into a raw `wgpu` slot buffer at an
-offset. The module + WGSL now live beside that consumer (riir-train
-`04bd961b`). The lesson for the D7 recipe: a dead-module grep has to cover
-every repo that path-depends on the crate, at `--all-features`.
-
-**Issue 023 — fence green.** The third file renamed
-(`cubecl_encoder_probe.rs`, `riir_weights` → `lane_weights`, the
-capture driver's convention; the two siblings landed earlier the same
-day after their fmt edits landed). `fence_gate.py`:
-`✓ PASSED — 0 undefended, 0 pinned`. Compile-checked at the file's
-required-features (`laya-riir-cubecl`).
-
-**Session note (the staged-set hazard, twice in one session):** the
-gpu_transpose deletions were swept by a sibling's index-commit into
-`3bed93f` 27s before this session's own commit (repaired by the
-companion commit `734ef14` — 3bed93f alone does not compile); in
-riir-ai the sibling's staged ambient files were swept into this
-session's first commit (`8330e196b`, repaired by reset + pathspec
-recommit `6c6bf169b`). Standing remedy: in shared checkouts, commit
-via pathspec (`git commit -- <paths>`), never the bare index.
-
-Issue files removed with this record — the noise-reduction rule.
-
-Session: owner-gate-pickup-d7-fence
+017: `gpu_transpose.rs` + `src/kernels/transpose.wgsl` deleted (zero callers then known), `transpose_cubecl.rs` (Issue 572) covers the reachable use, BOUNDARY.md repointed, the riir-ai re-export dropped (`6c6bf169b`). ⛔ Correction 2026-10-03: riir-train's `riir-train-engine` used `riir_gpu::gpu_transpose` behind default-off `kimi_k3_gpu_backward` — the module + WGSL moved beside that consumer (riir-train `04bd961b`); a dead-module grep must cover every path-dep repo at `--all-features`. 023: the third file renamed (`cubecl_encoder_probe.rs`), `fence_gate.py` 0 undefended, 0 pinned. Session hazard (twice): sibling sweeps staged these edits into their commits (`3bed93f` repaired by `734ef14`; riir-ai `8330e196b` repaired by `6c6bf169b`) — commit via pathspec in shared checkouts.
 
 ## 2026-09-28 — Issue 025 (owner-gate pickup) closed: D7/D8 executed, D9/D10 recorded
 
-D7: gpu_transpose deleted + BOUNDARY.md repointed (record above).
-D8: the audio-lane BOUNDARY widening landed — an AUDIO Owns row
-(loader/serving-scoped, published CoreML bundles on `laya-riir-ane`)
-+ the `objc2-core-ml` allowlist row's condition column names the
-reuse (no new dep; the fence did not move). 015's T1–T5 remain the
-PoC's own tasks.
-D9: research 327–332 routing stays deferred with Plan 611 T7/S8
-(tracked in 1004).
-D10: the S6b training-families disposition is ratified into 1003's
-status — riir-gpu-side by design (public repo vs training surface);
-closed absent a real consumer pull.
-
-Issue 025 removed with this record — the noise-reduction rule.
-
-Session: owner-gate-pickup-d7-d8-d10
+D7: gpu_transpose deleted + BOUNDARY.md repointed (record above). D8: the audio-lane BOUNDARY widening landed — an AUDIO Owns row (loader/serving-scoped, published CoreML bundles on `laya-riir-ane`) + the `objc2-core-ml` allowlist condition named (no new dep). D9: research 327–332 routing stays deferred with Plan 611 T7/S8 (tracked in 1004). D10: the S6b training-families disposition ratified into 1003's status — riir-gpu-side by design, closed absent a real consumer pull.
 
 ## 2026-09-29 — Issue 022 Phase 3 complete (audition + zero-training surrogate); Issue 024 closed measured-N/A both mechanisms
 
-**022 Phase 3 (T3.1–T3.3) landed** at `27c9f86`: `src/twt/audition.rs`
-(pure merge operators mean + LaCo RDSC — clone fixed-points gate-tested —
-the per-channel α/β branch-correction fit + the through-origin
-`fit_alpha_only`, and the BLAKE3-pinned selection with its argmin
-cross-check) + `examples/twt_laya_audition.rs` (the driver) + the gated
-`Encoder::layer_weights` borrow accessor. The apply path is a verbatim
-mirror of the forward's per-layer body, proven BIT-IDENTICAL against the
-parent forward EVERY run (the parity arm: layers 5 sliding + 6 full, both
-checkpoints). 15-gate battery (`twt_audition_gates`); the whole
-`twt_profile` surface clippy-clean; pre-existing gated-posture warnings in
-the Phase-1/2 files (unused import, OR-pattern ranges, unused mut)
-repaired in the same landing.
-
-Measured both checkpoints × the full pre-registered grid (corpus:
-typed_decisions states + banking77 texts, 500 prompts → 1484 rows,
-stride-2 fit/held-out pinned in the driver doc before the first run):
-**every block's winner is a member passthrough — the mean/RDSC merges
-never won a single block.** Structural: laya's G-S-S pattern caps
-homogeneous blocks at k=2 (RDSC(k=2) = the last member exactly); the
-merges' room is the Bonsai GDN lane (48-run runs), not laya. The Phase-2
-DP carries no type constraint, so real blocks ARE type-mixed — a merge
-across RoPE thetas/mask types is incoherent (the tier-(i) rule), and
-mixed blocks ran passthrough-only pools, recorded per block. The α/β
-branch correction recovers 13–84% of held-out boundary mapping error on
-small blocks (k ≤ 6) and 6–24% on whole-model blocks (ε=1.2) — the
-recorded No-GD boundary datum for the Phase-5 track split. Two measured
-refinements recorded in-issue: the +α decomposition rung must be its OWN
-through-origin fit (the joint α with β=0 mis-prices it — +12.7% on block
-14..18 typed vs improvement from its own fit), and the +5% pathology
-guard skips zero-raw singleton blocks (a relative guard refuses an exact
-block on its own f64 rounding). Artifacts:
-`.raw/twt/{typed,english}_audition.json` (gitignored, BLAKE3-pinned).
-Phase 4 (ternarize arms + collapsed-GGUF writer) is next.
-
-**Issue 024 CLOSED — both NaiveRT mechanisms measured N/A** (removed
-with this record; the full verdict tables live in git history):
-024a (norm-share upper bound): `LAYA_METAL_PROFILE=1` × 2 checkpoints,
-preflight PASSED (PROVENANCE: power=AC, powermode=2, load 4.25, canary
-118.3 µs) — RMSNorm (`ln_rows_wide`) is 2.1–2.4% of its stage ≈
-1.8–1.9% of end-to-end GPU, an order of magnitude under the ±6% floor
-(the lane's own run-to-run spread measured ~1% — the borrowed floor was
-conservative); a perfect weight-fetch overlap cannot save more than the
-norm's own share → build nothing. 024b (small-m histogram, DERIVED):
-encoder packed sgemm m ∈ [773, 2716]; per-question head ops m ∈ [124,
-576] over 80 real questions — min m = 124 ≈ 4× the narrow tile M=32; the
-lane never runs m < tile M in anger, so the heads-in-n remap has no
-target shape and no kernel_opt rule was filed (a rule needs a measured
-win on our shapes). The generalizing lesson recorded as a distill note,
-not a rule: NaiveRT's intra-kernel wins are tied to TP8-decode shapes
-(8 heads/rank; TMA weight streaming) a single-GPU MSL classification
-encoder never produces — shape-transfer requires the shape, not the
-paper.
-
-Session: owner-gate-pickup-022-p3-024-na
+022 P3 (`27c9f86`): `src/twt/audition.rs` (mean + LaCo RDSC merge operators, the per-channel α/β branch-correction fit, BLAKE3-pinned selection) + `examples/twt_laya_audition.rs`; the apply path proven BIT-IDENTICAL against the parent forward every run. Every block's winner is a member passthrough (G-S-S caps homogeneous blocks at k=2); the α/β correction recovers 13–84% of boundary error on small blocks; artifacts `.raw/twt/{typed,english}_audition.json` (BLAKE3-pinned). 024 closed measured-N/A: 024a norm-share 2.1–2.4% of stage ≈ 1.8–1.9% of GPU (`LAYA_METAL_PROFILE=1`, preflight PASSED) — build nothing; 024b min m = 124 ≈ 4× the narrow tile M — no target shape, no kernel_opt rule filed (shape-transfer requires the shape, not the paper).
 
 ## 2026-09-29 — Issue 022 Phase 4 LANDED (re-ternarization arms + κ budget + collapsed-GGUF writer)
 
-**T4.1–T4.3 landed** at `baeb686` behind the new `twt_collapse` feature
-(`twt_profile` + `deltanet_ternary_inference`). `src/twt/ternarize.rs`:
-the three deterministic re-ternarization arms + the PRE-REGISTERED
-budget (κ = 2.0, τ_code = 1 — the file's git history is the
-pre-registration). Two pinned conventions beyond the issue text: arm B
-is the integer CODE vote (scale-free — the issue's literal scale-weighted
-`sign(Σwᵢ)` was rejected at pre-registration: wildly-different member
-scales let one big-scale member dominate for scale reasons, not
-agreement reasons), and arm C divides by the f16-ROUNDED scale so the
-codes are self-consistent with the emitted wire. Arm C on ternary input
-is BIT-EXACT (gate). `src/twt/collapse_writer.rs`: GGUF v3 collapsed
-emission streamed from the parent mmap — member passthroughs are
-BYTE-COPIES renamed to the new index, merged blocks carry per-suffix
-payloads with completeness enforced against the block's first member
-(a missing suffix refuses loud), the parent's metadata mirrors IN FILE
-ORDER (the reader gained `metadata_order` + `GgmlType::id()`, Q2_0
-emitting the fork-tip relabel 142), the `{arch}.block_count` override is
-REQUIRED to equal the reduced count, and the `twt.*` provenance keys
-(`block_table`, `arm_codes` + legend, `parent_weights_blake3`) are
-standard metadata the train-side probe reads unchanged.
-
-Two real defects the gate batteries caught at landing, both fixed in
-the same commit: the Q2_0 wire pack (`pack_ternary_group_to_q2_0`, the
-repack's new inverse) initially skipped zero weights — a skipped nibble
-IS code 0, which decodes as −1; the bit-exact round-trip gate held it
-(zeros must emit code 1). And the writer's offset plan desynced from
-its own write loop on the first misaligned tensor (the debug assert
-fired before the alignment pad) — caught by the synthetic-parent
-battery.
-
-**First real Phase-4 measurement** (`examples/twt_ternarize_probe`, the
-league model `Ternary-Bonsai-2-27B-PQ2_0.gguf`, GDN triples
-[0,3)/[32,35)/[60,63), `ffn_down` 5120×17408, deterministic LCG
-inputs): **damage_A(f16) ≈ 3.7–3.9e-8; damage_B(majority) ≈ 20 — arm B
-is DESTROYED on cross-scale merges** (the supported-amax scale
-overshoots the typical |f̄| ~3× and the vote destroys the magnitude
-structure; arm B is dead for merged blocks — a same-scale-only arm at
-best); **damage_C(source-quant) ≈ 0.31** — the 5→3 level reduction's
-price, so the κ=2 budget admits arm C only where the audition's own
-surrogate error ≥ ~0.31; on strong merges **arm A (dense f16, one GEMM
-per block) is the only budget-viable arm** — the issue's own arm-A
-framing. Baseline clarification pinned the hard way in the module doc:
-the T4.2 denominator is the SURROGATE's end-to-end error vs the parent
-(the audition's E_dense), never arm A's f16 rounding floor — κ·1e-8
-would be unfailingly tight and every arm would die mechanically.
-
-Gates: `twt_ternarize_gates` 15, `twt_ternarize_g4` 1 (alloc-free
-rel-err loop, own binary per the counting-allocator isolation rule),
-`twt_collapse_writer_gates` 4 (re-open round-trip, byte-identity,
-refusals, determinism over a synthetic ternary parent); lib 291 green
-at the feature; clippy clean at default, twt_collapse, and
-all-targets-at-the-feature. The train-side probe verify waits for a
-REAL collapsed file — which waits on the Bonsai audition (the apply
-path needs GDN cache snapshot/restore threading the laya mirror lacks;
-the Phase-5 prerequisite and the lane's next work).
-
-**Second real measurement (same session, `--compare-members`, the
-operator-level surrogate-pool pre-read):** on the same three GDN
-triples, the mean merge f̄ sits **0.65–0.69 rel-op-dist from EVERY
-member**, and the members sit **1.9–2.07 from each other** —
-consecutive GDN layers inside an S-close triple are near-ORTHOGONAL as
-operators (rel-dist ≈ 2 ⇔ ‖A−B‖² ≈ 2‖B‖², no shared structure), and
-the merge is a genuinely different operator from all of them. The
-Phase-1 S-matrix's STATE similarity does not transfer to OPERATOR
-similarity — the laya audition's S-vs-function gap, now visible
-operator-level without any forward. Pre-read verdict: the merge arms
-will likely lose the Bonsai audition too, so **the collapse lane's
-Bonsai value is (a) passthrough/pruning collapse and (b) arm-A dense
-blocks — reorder Phase 5 to a passthrough-collapsed checkpoint first**
-(the writer is already its deliverable), with the expensive GDN
-apply-path audition gated behind that GOAT result. Caveat kept honest:
-rel-op-dist is not mapping error; the audition remains the decision
-instrument — this pre-read only reorders what to build first.
-
-Session: riir-infer-022-phase4-arms-writer
+`baeb686` behind `twt_collapse`: `src/twt/ternarize.rs` (three deterministic arms; PRE-REGISTERED budget κ = 2.0, τ_code = 1; arm B = integer CODE vote, arm C divides by the f16-ROUNDED scale and is BIT-EXACT on ternary input) + `src/twt/collapse_writer.rs` (GGUF v3 streamed from the parent mmap — passthroughs BYTE-COPIES, metadata mirrored IN FILE ORDER (`metadata_order` + `GgmlType::id()`), the `{arch}.block_count` override required, `twt.*` provenance keys). The gate batteries caught two real defects at landing (the Q2_0 pack skipped zero weights — a skipped nibble IS code 0; the writer's offset plan desynced). Measured on `Ternary-Bonsai-2-27B-PQ2_0.gguf`: arm B DESTROYED on cross-scale merges (damage ≈20), arm C ≈0.31 (κ admits it only where surrogate error ≥ ~0.31), arm A the only budget-viable arm on strong merges; the operator pre-read shows GDN members near-orthogonal (rel-dist ≈2) — Phase 5 reordered to passthrough-collapse first. Gates: `twt_ternarize_gates` 15, `twt_ternarize_g4` 1, `twt_collapse_writer_gates` 4.
 
 ## 2026-09-28 — Issue 015 audio PoC DEFERRED (owner: until M5 Ultra) + 023's missed hunk landed
 
-Owner directive same evening: defer the audio lane until an M5 Ultra is
-available — the PoC targets ANE latency/working-set posture and M5-class
-silicon is the intended measurement box, so a pre-M5 measurement would
-not be the record that matters. Issue 015 stays OPEN with T1–T6
-deferred (`- [-]`) and a turnkey recon recorded IN the issue (exact
-bundle `silero-vad-unified-256ms-v6.2.1.mlmodelc`, the full wire
-contract from FluidAudio's `VadManager` @ `20d4f0bd`, and the T2 shape
-— the generic `ane.rs` load path takes any bundle URL; the audio lane
-bypasses the laya digest/manifest coupling and should REPORT the plan
-verdict rather than reuse the strict laya gate). T0's boundary rows
-stay landed (D8) — the widening is timing-independent.
-
-Follow-through: `e8e17b8` landed the `cubecl_encoder_probe.rs` alias
-rename that Issue 023's closing record (`61ebf9c`, HISTORY row 1047)
-claimed landed but the sweep repair left in the worktree — the
-record-vs-tree divergence class again; caught because HEAD's test file
-still carried the pre-rename spelling.
-
-Session: owner-gate-pickup-audio-defer
+Issue 015 stays OPEN, T1–T6 deferred (`- [-]`), the turnkey recon recorded in-issue (exact bundle `silero-vad-unified-256ms-v6.2.1.mlmodelc`, the wire contract from FluidAudio's `VadManager` @ `20d4f0bd`; the audio lane bypasses the laya digest/manifest coupling and REPORTS the plan verdict). T0's boundary rows (D8) stay landed. `e8e17b8` landed the `cubecl_encoder_probe.rs` alias rename that 023's closing record (`61ebf9c`) claimed but the sweep repair left in the worktree — the record-vs-tree divergence class.
 
 ## 2026-09-29 — Issue 022 T5.0 LANDED: the passthrough-collapsed checkpoint + the first real GOAT numbers (coarse grid FAIL; fine end measured)
 
-**The loader prerequisite (T5.0a `318b9fa` + T5.0b `ceb96c3`).** The stock
-qwen35 loader types layers by `full_attention_interval` INDEX arithmetic —
-a collapsed+renumbered file would type every winner WRONG. Fixed at both
-seams, fail-closed: the writer REFUSES a qwen35 collapse without an
-explicit `twt.layer_types` array (U8 `DeltaNetLayerType` discriminants —
-no second vocabulary; legend in-file) and refuses a stale
-`qwen35.nextn_predict_layers` (MTP blocks are not main-stack layers; the
-override-to-0 heals); the loader (`qwen35_deltanet_config_from_gguf_metadata`,
-now `pub`) REPLACES the derived types when the key is present, refusing
-loud on length/vocabulary mismatch — legacy files keep the interval
-derivation. The second defect surfaced while wiring the real lane: the
-league checkpoint IS Hadamard-folded, so `prism.hadamard.weight_names`
-must renumber with the tensors it names (stale names refuse at load;
-renamed names at the WRONG block would be worse). The writer transforms
-the key in place: kept members rename, dropped members' entries drop, a
-MERGED block keeps its first member's entries (the fold is linear — a
-mean of folded weights IS the folded mean), `sign_widths`/`sign_values`
-are width-keyed and survive untouched. Interlock: every SURVIVING folded
-name must pass `is_known_folded_name` against the collapsed types — a
-GDN-typed attention winner refuses (its rotation would silently skip).
-
-**The emit lane (T5.0c `9905c7c`).** `examples/twt_collapse_emit`: the
-profile artifact's real 64×64 S matrix (`.raw/twt/bonsai_ultrachat_profile.json`,
-51 ultrachat sequences, corpus BLAKE3-pinned) → the crate's own
-`minmax_partition` at a chosen ε → per-block winner = minimax medoid
-member → writer emission, all-member passthrough. Extra provenance keys:
-`twt.partition_eps`, `twt.partition_worst`, `twt.profile_corpus_blake3`;
-`twt.parent_weights_blake3` = BLAKE3 over the parent's tensor payloads in
-file order (the key name says exactly what it commits).
-
-**The artifacts + wire verification.** SEVEN real collapsed checkpoints of
-`Ternary-Bonsai-2-27B-PQ2_0.gguf` in /tmp (ε ∈ {0.015, 0.02, 0.03} fine +
-{0.05, 0.1, 0.2, 0.3} coarse). The ε=0.05 file hand-verified on the wire:
-`twt.layer_types` = the winner table exactly (18 DeltaNet + 7 Attention),
-`prism.hadamard.weight_names` = 158 entries exactly (18×6 GDN + 7×7
-attention + `output.weight`), block_count=25 — and riir-train's
-`plan402_gguf_probe.py` reads every `twt.*` key cross-repo AS-IS
-(T4.3's owed verify DONE, no train-side edit).
-
-**The GOAT (`twt_goat_agreement` bin).** Teacher-forced greedy argmax
-agreement parent-vs-collapsed over frozen corpus tokens (the T5.1
-pre-registered ≥0.9 ABSOLUTE bar); the parent arm runs once and is
-cacheable (`--cache`, params-keyed, loud on replay) — one ~55-min pass
-serves every future sweep point.
-
-**The coarse-sweep negative (4096 positions, 8 × 512-token chunks, M3
-CPU AC): ALL FOUR pre-registered grid points FAIL.** ε=0.05 (25 blocks,
-39% depth): agreement 0.1945; ε=0.1 (14, 22%): 0.0051; ε=0.2 (8,
-12.5%): 0.0029 (collapsed hit rate 0.0022); ε=0.3 (5, 7.8%): 0.0000.
-Parent hit rate 0.7478 — the harness measures a real signal. Reading:
-the grid's finest point already cuts 61% of depth, the known-fatal
-regime in the layer-pruning literature — cosine redundancy (the S
-matrix) is NOT a sufficient license for depth cuts on this model class
-(activation-space redundancy ≠ functional redundancy). This is the
-honest negative that JUSTIFIES the merge/audition question per T5.0's
-own gate. The fine end (ε=0.015 → 11% cut, 0.02 → 23%, 0.03 → 45%) is
-the bar-or-bounded question, measured in-flight (log:
-`.raw/twt/goat_agreement_sweep.log`; the fine results + verdict land in
-the issue row).
-
-**FINDING (kill-rule provenance):** the bonsai profile artifact's
-recorded `SURVIVES` is inconsistent with the current kill rule over its
-own stored S — re-derived: `minmax_partition(S, 1.2)` = ONE block
-(global worst 0.801 ≤ 1.2) against bar = ceil(0.8 × 32) = 26 →
-`KillBlockCount`. The laya SURVIVES verdicts (the Phase-2 record) are
-unaffected; the bonsai capture's `forced` was most plausibly degenerate
-(forced=1 → Survives trivially). Re-derive before any ε-sweep Pareto
-claim cites the artifact (T5.5).
-
-Session: riir-infer-022-phase5-t50
+Loader prerequisites fail-closed (`318b9fa`/`ceb96c3`): the writer REFUSES a qwen35 collapse without `twt.layer_types` (U8 `DeltaNetLayerType`) and refuses a stale `qwen35.nextn_predict_layers`; the loader (`qwen35_deltanet_config_from_gguf_metadata`, now `pub`) replaces derived types on the key; `prism.hadamard.weight_names` renumbers in place (interlock via `is_known_folded_name`). Emit lane `9905c7c` (`examples/twt_collapse_emit` over `.raw/twt/bonsai_ultrachat_profile.json`, `minmax_partition`, `twt.parent_weights_blake3`). SEVEN real collapsed checkpoints of `Ternary-Bonsai-2-27B-PQ2_0.gguf`; riir-train's `plan402_gguf_probe.py` reads every `twt.*` key cross-repo AS-IS. `twt_goat_agreement` (`--cache`, params-keyed): the coarse sweep ALL FOUR grid points FAIL (ε=0.05 → 0.1945 … ε=0.3 → 0.0000; parent hit rate 0.7478) — cosine redundancy is NOT a license for depth cuts. Kill-rule finding: re-derive the bonsai profile's `SURVIVES` before any T5.5 Pareto claim cites it.
 
 ## 2026-09-29 — Issue 022 T5.0 COMPLETE: the agreement cliff mapped — 4.7% depth cut PASSES the GOAT bar, quality parity holds to 11%
 
-Bench record: `.benchmarks/022_t5_collapsed_goat_agreement.md` (full
-table + box state). The complete ε→agreement curve at 4,088 frozen
-positions (8 × 512-token teacher-forced chunks): **ε=0.01 (61/64
-blocks, 4.7% cut) agreement 0.9486 — the FIRST PASS of the
-pre-registered ≥0.9 absolute bar**; ε=0.015 (10.9% cut) 0.8955 (0.0045
-short); ε=0.02 (23.4%) 0.5247; ε=0.03 (45.3%) 0.0301; the four
-pre-registered grid points (0.05/0.1/0.2/0.3 → 61-92% cuts) all FAIL
-(0.19 → 0.00). Parent hit rate 0.7478.
-
-**The two-metrics finding (both recorded):** the collapsed model's own
-top-1 hit rate holds PARITY with the parent to 11% cut (0.7505/0.7495
-vs 0.7478 — the 11%-cut model is marginally BETTER at next-token
-prediction than its parent) while agreeing with the parent on only
-89.6% of argmaxes — trajectory divergence (chaotic stream sensitivity)
-overstates functional damage by one full grid notch. An
-agreement-controlled claim needs the hit-rate column beside it (T5.2's
-separation, one notch finer). Past 11% the hit rate falls off the same
-cliff (0.5076 at 23%, 0.024 at 45%).
-
-Consequences recorded in the issue: the merge/audition question is
-justified ONLY for quality at REAL depth cuts; riir-train 423's
-distillation owns the regime beyond ~11%. The parent arm is cached
-(params-keyed, loud replay) — every future sweep point pays only its
-collapsed arm.
-
-Kill-rule provenance finding (from the same session): the bonsai
-profile artifact's recorded `SURVIVES` is inconsistent with the current
-kill rule over its own stored S (re-derived KillBlockCount; the laya
-SURVIVES verdicts unaffected) — re-derive before any T5.5 Pareto claim
-cites it.
-
-Session: riir-infer-022-phase5-t50
+Bench `.benchmarks/022_t5_collapsed_goat_agreement.md`: ε=0.01 (61/64 blocks, 4.7% cut) agreement 0.9486 — the FIRST pass of the pre-registered ≥0.9 bar; ε=0.015 → 0.8955; ε=0.02 → 0.5247; ε=0.03 → 0.0301; the grid points all FAIL. The two-metrics finding: the collapsed model's top-1 hit rate holds PARITY to 11% cut (0.7505 vs 0.7478) while agreeing on only 89.6% of argmaxes — trajectory divergence overstates functional damage one notch; carry the hit-rate column beside any agreement claim. Past 11% the hit rate falls off the same cliff; riir-train 423's distillation owns the regime beyond. The parent arm is cached (params-keyed, loud replay).
 
 ## 2026-09-29 — Issue 022 T5.1 lane (1) COMPLETE: gemma-2 f16 control — clean negative at every real depth cut; the fine-end bracket is structurally empty
 
-Bench record: `.benchmarks/015_t51_gemma2_control_goat.md` (full table,
-box state, pre-registration). Instrument landed at `0e0436c`
-(`PostLayerHook` capture seam on `forward_gemma2_f16_tapped` — NoHook
-monomorphizes to the unchanged forward; profile driver
-`examples/twt_gemma2_profile` behind feature `twt_gemma2`; gemma2 arch
-arms in `twt_collapse_emit` + `twt_goat_agreement`; the pre-registered
-protocol in the issue in the SAME commit), verdict at `55fa831`.
-
-**The verdict: ε=0.05 identity row 1.0000 (4092/4092 — the pipeline is
-bit-faithful), then EVERY real depth cut FAILS** — 65.4% depth →
-0.2571 agreement, 38.5% → 0.0831, 23.1% → 0.0132, down to 0.0015 at
-3.8% depth with hit rates dying to 0.0002. Parent hit rate 0.4746
-(healthy signal on a no-BOS raw-text stream). **The fine-end bracket
-is structurally EMPTY**: at ε≤0.03 the partition is m=26 with
-worst-block 0.0000 — ZERO merges, no S rung between identity and the
-65.4% cut (unlike bonsai's 4.7% pass). The four bracket arms were
-emitted and their agreements not run — each is a byte-identical
-re-emit of the ε=0.05 identity row, which already measures that point.
-
-**The zero-training passthrough question is closed on TWO
-architectures** (hybrid ternary bonsai + dense f16 gemma-2, same
-meter/DP/writer): cosine redundancy ≠ functional redundancy, and
-gemma-2's phase structure (m=10 at ε=0.2) transfers to merge safety no
-better than bonsai's did. The rescue, if one exists, lives in the
-apply-path (auditioned merges / distillation, riir-train 423) — the
-control lane hands riir-train 423 its baseline artifact + negative
-control. Kill-rule footnote carried in the bench: the single-operator
-stack makes `KillBlockCount` fire on a technicality (bar trivially 1);
-the depth-reduction license on this lane is carried by the S sweep,
-adjudicated by the bench — the T5.5 Pareto report cites the sweep,
-never the kill verdict.
-
-En-route: a live Bench-number collision with the M3 sibling's
-in-flight typed-partition/GDN-audition lane (their Bench 014,
-committed + referenced first) — my bench renumbered 014→015 per the
-collision rule (theirs kept it), highwater 15, ff-merged onto theirs;
-the merged tree verified compile-clean. Collapsed GGUFs (~21 GB)
-deleted post-measurement — regenerable from the kept profile artifact
-(`.raw/twt/gemma2_profile.json`, corpus BLAKE3'd) + the cached parent
-arm in ~20–90 s per point.
-
-Session: riir-infer-022-t51-gemma2-control
+Instrument `0e0436c` (`PostLayerHook` capture seam on `forward_gemma2_f16_tapped`; `examples/twt_gemma2_profile` behind `twt_gemma2`; arch arms in `twt_collapse_emit` + `twt_goat_agreement`), verdict `55fa831`; bench `.benchmarks/015_t51_gemma2_control_goat.md`. ε=0.05 identity 1.0000 (4092/4092 — bit-faithful); EVERY real cut FAILS (65.4% → 0.2571 … 3.8% → 0.0015); the fine-end bracket is structurally EMPTY (ε≤0.03 → zero merges). Zero-training passthrough closed on TWO architectures; the rescue lives in the apply-path (auditioned merges / distillation, riir-train 423 — the control hands it the baseline + negative control). En-route: a live Bench-number collision with the M3 sibling — renumbered 014→015 per the collision rule; the collapsed GGUFs (~21 GB) were deleted post-measurement (regenerable from `.raw/twt/gemma2_profile.json` + the cached parent arm).
 
 ## 2026-09-29 — two Windows batch traps hit by the T2/T3/T5.1 schtask runners (recorded; the deleted wait-loop script's durable note)
 
-Both diagnosed live while landing the Issue-013 T2/T3 chain and the
-T5.1 GOAT pipeline; recorded because the deleted script's header note
-died with it:
-
-1. **`Start-Process`-launched `.cmd` inherits the SPAWNING MSYS session's
-PATH.** Inside such a script, `tasklist | find` resolves `find` to
-`/usr/bin/find` (MSYS), which does not read stdin the way cmd's
-`find.exe` does — a `tasklist /FI ... | find /I "name"` wait-loop then
-wedges forever (the wait loop never observes the process exit). The
-T2/T3 schtask launchers are IMMUNE: Task Scheduler runs with a clean
-system environment, so `find` resolves to `C:\Windows\System32\find.exe`.
-   *Rule: never hand-launch a wait-loop `.cmd` via `Start-Process` from
-an MSYS shell; use `schtasks /Run`, or fully-qualify
-`%SystemRoot%\System32\find.exe` inside the script.*
-2. **A hand-rolled no-wait batch rewrite died silently while identical
-constructs passed in isolation.** Root cause never fully isolated
-(multiple rewrites, all plausible, all dead); bypassed by invoking the
-exes directly from the agent shell. *Rule: for chained measurement
-runs, prefer `schtasks` wrappers (the Issue-012 recipe — clean env,
-survives agent teardown) or PowerShell; never a hand-rolled wait-loop
-batch whose failure mode is silence.*
-3. **A literal `)` in an echo INSIDE a parenthesized block silently turns
-the block's follow-up `exit /b 1` unconditional** (found 2026-09-29
-23:15, the T3 launcher `run_kv_reconstruct_gate.cmd`). cmd's block
-parser treats the echo text's `)` as the block terminator: the guard
-echo `echo ... (%DATE% %TIME%) === >> log` inside the wait-loop's
-`if %ERRORLEVEL% EQU 0 ( ... )` closed the block early, so the
-`exit /b 1` after it executed the MOMENT T2 was found running — the
-chained T3 task fired at 22:30, wrote its header, and died rc=1 in
-seconds, three times (22:30 scheduled, 23:15 manual re-fire, clean-env
-repro), silently. Found by bisection only because Task Scheduler
-history is disabled on this box and the failure mode was silence; the
-`noguard` variant (nested block deleted) was the flip. SAME latent bug
-in `run_twt_gemma2_goat.cmd` (3 in-block echoes) — fixed in the same
-pass. *Rule: inside a `( ... )` block, an echo line must carry NO
-literal `)` — reword to `at %DATE% %TIME%` or escape `^)`.*
-
-Session: riir-infer-022-t51-gemma2-control
+(1) A `Start-Process`-launched `.cmd` inherits the MSYS PATH — `tasklist | find` resolves `/usr/bin/find` and the wait-loop wedges forever; the schtask launchers are immune (clean system env → `C:\Windows\System32\find.exe`). Rule: never hand-launch a wait-loop `.cmd` from MSYS; use `schtasks /Run` or fully-qualify `%SystemRoot%\System32\find.exe`. (2) A hand-rolled no-wait batch rewrite died silently — for chained measurement runs prefer `schtasks` wrappers (the Issue-012 recipe) or PowerShell. (3) A literal `)` in an echo INSIDE a parenthesized block silently makes the follow-up `exit /b 1` unconditional (found in `run_kv_reconstruct_gate.cmd`; the same latent bug fixed in `run_twt_gemma2_goat.cmd`) — in-block echoes must carry NO literal `)`.
 
 ## 2026-09-29 — Research 004: Disaggregated Quantization distilled (arXiv:26.26333) — three issues filed, riir-train Plan 430 routed
 
-Full-read distill of arXiv:2609.26333 (DQ/QADD, NVIDIA+ISTA), deepening the riir-clippy arxiv-walk-217 row. Track (a) Gain: Issues 026 (phase-isolated quant sensitivity bench — the falsifiable damage-ratio instrument), 027 (T0 encoder-only asymmetric Q2_0 — code 3 already decodes as +2d but is encoder-unreachable and bridge-rejected; then offline Lloyd-Max grids + non-uniform Q2_0A which must beat T0; dense-GGUF gain site only), 028 (dual-PTQ resident disaggregated serving — our hardware inverts the paper's ODP premise; the PTQ-vs-trained recovery measurement is the science). Track (c) Gain → riir-train Plan 430 (QADD prefiller pre-registration; secondary by serving-envelope fit; 27B convergence explicitly not priceable). Track (b) Pass. Signal-diffs on record: the GDN escape set (Issue 980 `gate_projections()` + issue879 f32 recipe) is corroborated from the training side; `dl_qat.rs` verified to carry no teacher/phase-mask (grep); landscape prior art named (OverFill 2508.08446, Decode-Branch 2608.12385; no scooper). League: no upstream absorption, no re-arm trigger; ODP fork honesty ≈1.3× released vs 1.78× claimed, Blackwell-only. Verdict gate: claude ping-pong AGREE round 2 (session `c68b3113-bb7f-49d1-853b-ac6e215e46be`; round 1 REVISE caught the reserved-vs-decodable misread + the two-level-scale conflation — both fixed before commit). Session: riir-infer-004-dq-distill, 2026-09-29T10:41Z (unix 1790678474)
+Distill of arXiv:2609.26333 (DQ/QADD), deepening the riir-clippy arxiv-walk-217 row: Issues 026 (phase-isolated quant sensitivity bench), 027 (T0 encoder-only asymmetric Q2_0 + Lloyd-Max grids), 028 (dual-PTQ resident disaggregated serving) filed; track (c) → riir-train Plan 430 (QADD prefiller pre-registration). Signal-diffs: the GDN escape set (Issue 980 `gate_projections()` + the issue879 f32 recipe) corroborated; `dl_qat.rs` carries no teacher/phase-mask; prior art named (OverFill 2508.08446, Decode-Branch 2608.12385). Verdict gate: claude ping-pong AGREE round 2 (session `c68b3113-bb7f-49d1-853b-ac6e215e46be`). Master: `.research/004_DQ_Disaggregated_Quantization.md`.
 
 ## 2026-10-01 — Plan 614 LANDED: the DQ phase matrix ran to EXIT0; every axis INADMISSIBLE at the frozen corpora; the instrument (and its defect chain) is the deliverable
 
-The Issue-026 instrument (`dq_phase_matrix`, Plan 614) completed its 4090 run — v2, `23bbff5`+`3cf9ae9`, EXIT0 12:25 ICT after ~4h40m (log `F:/wt/dq614-matrix2.log`, report `F:/wt/dq614-matrix2/dq_phase_matrix.md`, record `.benchmarks/023_dq_phase_matrix.md`, `.highwater` 15→23). Verdict per the frozen D6 table: **all four axes INADMISSIBLE** (base arith 0.9583 > 0.95 — the a07fffd `reset_state` fix lifted the model's genuine rate from the leak-contaminated 12.5%; NIAH pooled 0.9896 > 0.95) — Issue 026 T3's directional assertions receive NO GATE. The report-only tables carry the signal (a2 prefill-only collapses NIAH to 0.25 pooled vs base 0.99 while decode-only holds 0.93; a2 decode-only halves arith; A4 near-clean — the phenomenon is a 2-bit-tier floor phenomenon); the standing promotion rule (any future weight format publishes its per-phase R before default promotion) is ATTACHED to the instrument. Gates all green: G-i1, G-i2 counts (0 mismatches) + the PHASE-MATCHED positive control, G-i4 byte-stability (incl. decode-phase FNVs), dec_a8 control |Δarith|=0. Determinism double-sourced: the v1 run reproduced v2's every arith item + NIAH cell byte-identically before dying at the final gate.
-
-**The defect chain the lane paid for (all fixed at source):** `a07fffd` the GDN recurrent state leaked across ALL items (M3 session — accumulation, not model behavior); `23bbff5` the G-i2 positive control was PHASE-BLIND (a decode-only arm's prefill is clean by the D1 boundary — structurally unsatisfiable; the v1 run measured every cell then FATALed at the final gate; the control is phase-matched now); `3cf9ae9` the plan-T4 4090-clippy discharge (7 mechanicals; the corpus/bootstrap seed regroups are value-preserving leading-zero pads — the frozen corpus blake3 `6f3c6f02…` reproduces byte-exact). Open follow-up: the FATAL teardown path HANGS (RAM climb, GPU released, process stuck unwinding; the EXIT0 path exits cleanly) — the error-exit needs its own fix.
-
-**The collision class, twice, and the twin-duplicate:** 00:43 an unguarded second chain launch truncated the first lane check's log (~1.5 h destroyed); 07:39 this session's v2 launch died silently (EXIT-1) under the twin session's concurrent worktree reset+rebuild — the shared-worktree-mutation variant. The detached stages carry the ALIVE guard now (`E:/git/_sync/dq614_{chain,matrix}.cmd`, machine-local, live-tested), and the durable lesson is recorded in bench 023: a run lane needs ONE owner at a time — the handoff summary's active-plan section must name the owning session. The twin-duplicate (two idle-loop sessions fixed the same control ~20 min apart; origin `23bbff5` canonical, `5977565` died in the reset per the Batch-169 precedent, its non-overlapping value re-landed as `3cf9ae9`) is the Issue-825 class resolving CORRECTLY: the duplicate was rebase-not-fight, and the merged tip is what ran. Issue 030 (the run handoff) closed + removed per the noise-reduction rule — its evidence trail lives in this row + bench 023. Issue 026 stays open on T4 (the KV-axis arm — deliberately outside the Plan-614 freeze). Session: riir-infer-030-dq-matrix-rerun (+ the twin idle-loop session)
+v2 `23bbff5`+`3cf9ae9`, EXIT0 (log `F:/wt/dq614-matrix2.log`, report `F:/wt/dq614-matrix2/dq_phase_matrix.md`, record `.benchmarks/023_dq_phase_matrix.md`, `.highwater` 15→23): all four axes INADMISSIBLE (base arith 0.9583 — the `a07fffd` `reset_state` fix lifted the genuine rate; NIAH pooled 0.9896) — Issue 026 T3's assertions receive NO GATE; the report-only tables carry the signal (a2 prefill-only collapses NIAH to 0.25 while decode-only holds 0.93). Defect chain fixed at source: `a07fffd` GDN state leak, `23bbff5` phase-blind G-i2 control, `3cf9ae9` the 4090-clippy discharge (the frozen corpus blake3 `6f3c6f02…` reproduces byte-exact). Open follow-up: the FATAL teardown path HANGS (→ Issue 031). Durable lesson (bench 023): a run lane needs ONE owner at a time (the twin-session collision; the twin-duplicate resolved per the Issue-825 class — `5977565` died in the reset, its value re-landed as `3cf9ae9`); ALIVE guards on `E:/git/_sync/dq614_{chain,matrix}.cmd`.
 
 ## 2026-10-01 — Issue 027 CLOSED measured-negative + removed: the offline LUT grid lane (Plan 615) — weight-space wins were real, the 2-bit class is function-destroying on dense artifacts
 
-**Verdict (Plan 615 T6, commit `2cb807d`):** T0's asymmetric encoder (`quantize_row_q2_0_asymmetric`, signed `d = ±amax/2` steering the largest-magnitude element onto code 3 = +2d) measured **+4.9 dB/family** over the symmetric reference on both dense artifacts, and Q2_0A's Lloyd-Max grids added **+0.5–1.2 dB/family** over T0 — but the model-level gate killed the whole class: MiniCPM5-1B ppl **6.8e5–7.0e6 vs base 49.8**, EVERY family (chat + docs), EVERY reachable granularity (per-128/64/32 — the T5 sweep's per-64/per-32 weight-space gains do not transfer). The lane's own pre-registered gate ("a per-family loss at matched bpw = recorded negative, lane closes") fires on the class, not one arm. The paper's 27B dense regime is UNMEASURED here (infeasible with the fakequant harness on both boxes) — the honest limit, recorded in the plan.
-
-**What stays in-tree (tested, ungated tools — Issue 028 may cite them if a dense serving regime re-opens):** `src/quant/q2_0.rs` (`quantize_row_q2_0_asymmetric` + the grid-aware decode `dequantize_row_q2_0_grid`), the Lloyd-Max solver `src/quant/lut_grid.rs` (d²-weighted histogram — the objective must match the metric; unweighted pooling won the histogram and LOST 0.7 dB SNR — + EM from the T0 incumbent + BLAKE3 grid commitment, cross-box determinism proven gemma `b28b3661…` / MiniCPM `642e2d0b…`), bins `lut_grid_solve`/`lut_grid_ppl`. **T2 (the Q2_0A wire format) is MOOT** — no dense-arm operating point to serve, so no grid-aware decode kernel gets built or priced (T4). The **Bonsai ternary lane is untouched by construction** (trained-ternary weights, zero code-3 occurrences; the byte-identity control is now a test: `symmetric_reencode_of_ternary_blocks_is_byte_identical`). Master: `.research/004_DQ_Disaggregated_Quantization.md` (arXiv:2609.26333 §2.3 + A.3). File removed per the noise-reduction rule — full task narrative: `git log --follow -- .issues/027_lut_grid_optimization_lane.md`. Hygiene session: riir-clippy idle loop (2026-10-01).
+`2cb807d`: T0's asymmetric encoder (`quantize_row_q2_0_asymmetric`) +4.9 dB/family and Q2_0A's Lloyd-Max grids +0.5–1.2 dB/family — but MiniCPM5-1B ppl 6.8e5–7.0e6 vs base 49.8 at EVERY reachable granularity; the pre-registered class gate fired. What stays in-tree (tested, ungated): `src/quant/q2_0.rs` (+ `dequantize_row_q2_0_grid`), `src/quant/lut_grid.rs` (d²-weighted histogram — the objective must match the metric; EM + BLAKE3 grid commitment, cross-box determinism gemma `b28b3661…` / MiniCPM `642e2d0b…`), bins `lut_grid_solve`/`lut_grid_ppl`. T2 (the Q2_0A wire) MOOT; the Bonsai lane untouched (`symmetric_reencode_of_ternary_blocks_is_byte_identical`). Master `.research/004_DQ_Disaggregated_Quantization.md`.
 
 ## 2026-10-01 — Issues 998 + 1004 CLOSED (hygiene): the D4 re-narrowing dissolved under the ratified no-migration architecture; the corpus-follows triggers resolved negative
 
-**Issue 998 (repo-promotion mirror, T-B fired 2026-09-22)** — its last open item was the T7/P3 riders row's "D4 re-narrowing only" (riir-ai BOUNDARY.md drift row D4: the time-boxed `pub` widenings whose reversal was bundled into the promotion runbook, "riding P3/T7, never before"). P3/T7 landed 2026-09-26 (Plan 611 / Bench 006) as the ENCODER-lane Backend-over-CubeCL unification under its pre-registered **no-deletion** verdict — no riir-gpu op set migrated into riir-infer-gpu — and D10 (owner-gate, master riir-ai 1016, 2026-09-28) ratified the training families stay riir-gpu-side **BY DESIGN** (reopen = a real consumer pull). Every widening's consumption edge is therefore still live (riir-train → riir-gpu/engine; riir-engine → riir-infer-core's same-path re-export facade) — reversal would break the ratified architecture. The re-narrowing is **resolved-dissolved**, reachable only through D10's reopen trigger. The D4 drift row now carries this resolution (riir-ai BOUNDARY.md, same-day edit); the row's disposition stays by-design, as it was through Issue 741's and reflex 008's closures. Everything else in 998 landed earlier: P0 contract rows, T2 audit, T3 carve (P1), P4/T6 both repos PUBLIC 2026-09-23, T2.3 discharged 2026-09-23, S8 DONE 2026-09-26.
-
-**Issue 1004 (corpus follows the op-layer migration)** — both wait-triggers resolved WITHOUT the migrations they anticipated: task 1's trigger (Plan 611 T7 "lands a migrated op set in riir-infer-gpu") fired as the encoder-lane unification with no op-set migration, and task 2's trigger (998 S8 edge-drop) fired as the no-deletion verdict (the league lane stays riir-ai-side whole — gate pins unchanged). Harness homes re-verified 2026-10-01: `crates/riir-gpu/tests/bench_874_issue879_t3_kv_weight_quant_nll.rs`, the 62-file riir-gpu kernel src tree, `scripts/perf_rematch.sh` + `.docs/09_performance/` all still riir-ai-side → **zero corpus movement** (the 870/871 rule holds: corpus follows the harness, and the harnesses didn't move). The kernel-migration franchise itself is owner-closed by D10 — the same consumer-pull trigger re-opens these moves. Task 3 (research 327–332 routing; katgpt-rs the candidate destination per the notes' own Routing lines) remains an owner Research-003 posture call standing on its own — see the issue's sweep table in git history.
-
-**Issue 1003 stays OPEN deliberately** (owner-gate record of the D10 disposition) — not an oversight of this pass.
-
-Both files removed per the noise-reduction rule — full task narratives: `git log --follow -- .issues/998_riir_infer_repo_promotion.md` / `git log --follow -- .issues/1004_corpus_follows_op_layer_migration.md`. Hygiene session: riir-clippy idle loop (2026-10-01, load-deferred sweep slot).
+998: the D4 re-narrowing is resolved-dissolved — P3/T7 landed as the ENCODER-lane unification under its pre-registered NO-DELETION verdict and D10 (owner-gate, riir-ai 1016) ratified the training families stay riir-gpu-side BY DESIGN; every widening's consumption edge is live, reversal would break the ratified architecture (the riir-ai BOUNDARY.md D4 row carries this resolution). 1004: both triggers fired WITHOUT the migrations — zero corpus movement (`crates/riir-gpu/tests/bench_874_issue879_t3_kv_weight_quant_nll.rs`, the kernel tree, `scripts/perf_rematch.sh` + `.docs/09_performance/` all still riir-ai-side; the 870/871 rule holds). Task 3 (research 327–332 routing; katgpt-rs the candidate destination) stands on its own. Issue 1003 stays OPEN deliberately. Narratives: `git log --follow -- .issues/998_riir_infer_repo_promotion.md` / `.issues/1004_corpus_follows_op_layer_migration.md`.
 
 ## 2026-10-05 — Issue 031 CLOSED measured-non-repro + removed: the dq614 FATAL teardown hang did not reproduce across 6 arms; the A/B instrument is landed as durable
 
-The owed root-cause confirmation for the 2026-10-01 v1-matrix FATAL hang (>10 min inside `std::process::exit`, RAM climbing ~7 MB/s, killed by hand) ran as a dedicated repro lane on the quiet 4090 box. **Verdict: NOT reproducible today — all 6 arms exited clean, including the true engine-state shape.**
+Instrument: `crates/riir-infer-gpu/src/bin/dq614_teardown_repro.rs` (`required-features = ["ternary_gemv_cuda_raw"]`, whole-file `#![cfg]`, dev-profile refusal) with arms `--exit plain|graceful|hard` × `--sticky` × `--alloc-mb` × `--iters` × `--no-cuda`; no-op repro knobs `DQ614_FORCE_FATAL=1` / `DQ614_EXIT_PLAIN=1` in `dq_phase_matrix.rs` (the default stays `hard_exit`). All 6 arms exited clean incl. the full 7.2 GB Bonsai engine-state shape (clean exit at 215 s). Remaining hypotheses recorded, not chased (driver/OS drift, or ~6-hour context wear). Defense double-covered: `hard_exit` + `dq614_watchdog.ps1` (machine-local at `E:/git/_sync/dq614_watchdog.ps1`; narrative `git log --follow -- .issues/031_dq614_fatal_teardown_hang.md`).
 
-**The instrument (landed, durable):** `crates/riir-infer-gpu/src/bin/dq614_teardown_repro.rs` (new bin, `required-features = ["ternary_gemv_cuda_raw"]` + whole-file `#![cfg]`, dev-profile refusal — teardown experiments are release-only) with arms `--exit plain|graceful|hard` × `--sticky` × `--alloc-mb` × `--iters` × `--no-cuda`; the graceful arm is the upstream-sanctioned form (drop refs → `cuDevicePrimaryCtxReset_v2`, NVIDIA forums #49680). Two no-op-by-default repro knobs in `dq_phase_matrix.rs`, never set by the runner: `DQ614_FORCE_FATAL=1` (FATAL after the G-i1/G-i4 base cells — cudarc + CubeCL both warm, the exact v1 error-path shape) and `DQ614_EXIT_PLAIN=1` (restores the v1 plain-exit path; the default stays `hard_exit`, so the hang-capable path is now reachable only behind an explicit opt-in). En-route fix: the repro kernel's own i32 grid-math overflow → i64 indexing.
+## Lessons
 
-**The 6 arms** (machine-local runner `E:/git/riir-refine/.scratch/dq614_repro/run_arm.ps1` — two-phase: wait for the MARK exit point → 180 s grace → 3 RAM samples → comsvcs minidump → kill BY PID; logs `E:/git/_sync/dq614_repro/`): control no-CUDA 5 s clean · plain + healthy 256 MB ctx 5 s clean · plain + STICKY ctx (`CUDA_ERROR_ILLEGAL_ADDRESS` injected, confirmed sticky by a second sync — hypothesis 3's error-state context) 5 s clean · plain + 8 GB/64 iters 5 s clean · **the engine-state repro**: full 7.2 GB Bonsai model boot through `dq_phase_matrix` itself (`DQ614_FORCE_FATAL=1 DQ614_EXIT_PLAIN=1`, tiny cell knobs) → forced FATAL on the v1 plain-exit path with the real resident context → **clean exit at 215 s** (boot ~170 s).
-
-**Remaining hypotheses for the 10-01 event** (recorded, not chased — escalation judged low-yield at ~+20 min box time for one more arm): (a) driver/OS state changed since 2026-10-01; (b) the hang needed the v1 context's ~6-hour wear (full 9-cell matrix ≈ 10⁵ launches, 16K KV) rather than any state reachable at FATAL time. The defense posture is unchanged and now double-covered: `hard_exit` (the 10-01 fix) + the `dq614_watchdog.ps1` FATAL-watcher (landed 10-02; its regeneration copy lives in this file's git history — `git log --follow -- .issues/031_dq614_fatal_teardown_hang.md` — the script itself is machine-local at `E:/git/_sync/dq614_watchdog.ps1`). File removed per the noise-reduction rule. Session: riir-infer-031-teardown-repro
+- Check the reference implementation, not a remembered standard, before filing a fixture-integrity finding (Issue 010).
+- A G1 that stops below the production chunk size certifies a size nobody ships (Issue 032).
+- A dead-module grep must cover every repo that path-depends on the crate, at `--all-features` (Issue 017).
+- In shared checkouts, commit via pathspec (`git commit -- <paths>`), never the bare index.
+- A run lane needs ONE owner at a time; the handoff summary's active-plan section must name the owning session (bench 023).
+- A shape-widening edit must move the host bind and the kernel binding together (T10 rung 2).
+- Tiny-op kernel probes read a ~90% submission floor — narrow-zone rungs must gate at FORWARD level (Issue 009).
+- Bandwidth-bound zones want register blocking; latency-bound zones want cp.async/double-buffering — the rooflines diverge, so the rungs must too (Issues 007/008).
+- The sgemm block-fit floor is MEASURED per GPU (SM count), never ported from another box (Issue 004).
+- Trajectory (argmax-agreement) divergence overstates functional damage — carry the hit-rate column beside any agreement claim (Issue 022 T5.0).
+- Cosine/state redundancy ≠ functional redundancy, on ternary and dense alike (Issue 022 T5.0/T5.1).
+- Weight-space dB wins mean nothing without the model-level gate — the class verdict can kill every arm (Issue 027).
+- Windows batch: no literal `)` in echoes inside `( ... )` blocks; never hand-launch a wait-loop `.cmd` via `Start-Process` from MSYS; prefer `schtasks` wrappers.
+- Feature-gated targets carry their `required-features` row at birth — a whole-file `#![cfg]` target without one prints a green zero forever (the T1.1e law).
+- `[patch.crates-io]` does not survive crates.io publication — `publish = false` until the vendor forks land upstream.

@@ -4,19 +4,17 @@ The global `~/.agents/` rules apply; this file documents repo-local context.
 
 ## Boundary contract — read `BOUNDARY.md` first
 
-[`BOUNDARY.md`](BOUNDARY.md) is the authoritative per-repo contract: what
-this repo owns, what it does not own, the crate-granular allowlist, and the
-drift ledger. On any conflict with prose in this file, BOUNDARY.md wins.
+[`BOUNDARY.md`](BOUNDARY.md) is the authoritative per-repo contract (owns /
+does-not-own / crate allowlist / drift ledger); BOUNDARY.md wins on any
+conflict with prose in this file.
 
 - **Domain test:** is this **LLM inference substrate** (weights, quant,
-  architectures, kernels, loaders)? NO → it belongs in another repo; file
-  there.
+  architectures, kernels, loaders)? NO → another repo; file there.
 - **Zero `riir-*` deps** — upstream of the engine by design; `cargo tree`
   gates it. Enforcement: `../riir-ai/scripts/ci_boundary_contract.sh`
   (run VIA the `boundary-guard` skill, never ad-hoc greps).
 - **Found a violation?** File the issue FIRST (`.issues/NNN_boundary_*.md`),
-  add the drift row, then fix. Closing the issue removes the row in the
-  same commit.
+  add the drift row, then fix; closing the issue removes the row in the same commit.
 
 ## Role
 
@@ -37,55 +35,48 @@ migration.
 cargo check
 cargo clippy --all-targets -- -D warnings
 cargo test --lib
-# The GDN quant-certification + bonsai2 rotation integration tests carry
-# required-features (see Cargo.toml [[test]] rows):
+# GDN quant-certification + bonsai2 rotation integration tests carry required-features (Cargo.toml [[test]] rows):
 cargo test --test issue879_gdn_quant_certification --features deltanet_ternary_inference
 cargo test --test bonsai2_rotation_load --features bonsai2_hadamard
-# Issue 028 disaggregated container + phase handoff (synthetic battery; the
-# real 6.7 GB PQ2_0 arm is #[ignore]d — BONSAI_PQ2_0_GGUF env, release run):
+# Issue 028 disaggregated handoff battery (the 6.7 GB PQ2_0 arm is #[ignore]d — BONSAI_PQ2_0_GGUF env, release run):
 cargo test --test issue028_disaggregated_handoff --features deltanet_ternary_inference
-# BONSAI_GGUF env (defaults to a riir-train data path) names the real
-# checkpoint for the certification test's full-file arm.
-# The EXL3 trellis lane (opt-in; issue 001, closed — record in .docs/001; CPU reference + fast arm here,
-# GPU kernels in riir-infer-gpu; oracle = the CPU reference):
+# BONSAI_GGUF env (defaults to a riir-train data path) names the real checkpoint for the certification test's full-file arm.
+# The EXL3 trellis lane (opt-in; issue 001, closed — record in .docs/001; CPU reference + fast arm here, GPU kernels in riir-infer-gpu; oracle = the CPU reference):
 cargo test --lib --features exl3
 cargo test -p riir-infer-gpu --features exl3_gpu,cuda_backend --lib  # native CUDA arm (release recommended)
 # The encoder-lane crate (features mirror the names consumers forward):
 cargo check -p riir-infer-laya --features laya-riir
 cargo clippy -p riir-infer-laya --all-targets --features laya-riir-metal -- -D warnings
 cargo test -p riir-infer-laya --features laya-riir-metal --test metal_ops_smoke  # macOS only
-# The CubeCL portability arm (opt-in; plan 611 — KEPT, never default; the
-# consumer-side G5 at the cubecl posture is the acceptance gate):
+# The CubeCL portability arm (opt-in; plan 611 — KEPT, never default; the consumer-side G5 at the cubecl posture is the acceptance gate):
 cargo clippy -p riir-infer-laya --all-targets --features laya-riir-cubecl -- -D warnings
 cargo test --release -p riir-infer-laya --features laya-riir-cubecl --test cubecl_ops_smoke
 # The three-backend A/B (measurement-only; Bench 006 — quote box state):
 cargo test --release -p riir-infer-laya --features laya-riir-metal,laya-riir-cubecl --test backend_ab -- --ignored --nocapture
-# The CUDA backend (non-macOS; inert on a Mac — no dep pulled). The op-level
-# gate + the consumer-side G5 (at LAYA_DEVICE=cuda) are the parity pair:
+# The CUDA backend (non-macOS; inert on a Mac — no dep pulled). The op-level gate + the consumer-side G5 (at LAYA_DEVICE=cuda) are the parity pair:
 cargo check -p riir-infer-laya --features laya-riir-cuda
 cargo clippy -p riir-infer-laya --all-targets --features laya-riir-cuda -- -D warnings
 cargo test --release -p riir-infer-laya --features laya-riir-cuda --test cuda_ops_smoke
 ```
 
 Sibling layout: `../katgpt-rs` must exist for every cargo command (path
-deps). `../riir-ai` consumes this repo (its riir-engine re-exports the
-crate's modules at the same paths), and the public decision-engine
-serving repo (`../riir-reflex`) path-deps `crates/riir-infer-laya`.
+deps). `../riir-ai` consumes this repo (riir-engine re-exports at the
+same paths); the public decision-engine serving repo (`../riir-reflex`)
+path-deps `crates/riir-infer-laya`.
 
-Workspace layout: a root-package workspace — `riir-infer-core` at the
-repo root (CPU substrate) + `crates/riir-infer-gpu` (the wgpu/CubeCL GPU
-layer, its own crate so CPU-only consumers never resolve the GPU dep
-tree) + `crates/riir-infer-laya` (the encoder lane, its own crate so
-lane-free consumers never resolve the tokenizers/gemm tree — CPU + the
-macOS Metal + the non-macOS CUDA backends, `laya-riir-cuda` since
-riir-infer Issue 002). Vendored crates.io forks under `vendor/`
-(`[patch.crates-io]` in the root manifest).
+Workspace layout: root-package workspace — `riir-infer-core` at the repo
+root (CPU substrate) + `crates/riir-infer-gpu` (the wgpu/CubeCL GPU layer,
+own crate so CPU-only consumers never resolve the GPU dep tree) +
+`crates/riir-infer-laya` (the encoder lane, own crate so lane-free
+consumers never resolve the tokenizers/gemm tree — CPU + macOS Metal +
+non-macOS CUDA backends, `laya-riir-cuda` since riir-infer Issue 002).
+Vendored crates.io forks under `vendor/` (`[patch.crates-io]` in the root
+manifest).
 
 ## Numbering Discipline
 
 Issue, plan, doc, benchmark, and research numbers are **monotonic and never
-reused**. Read the target dir's `.highwater`, use `value + 1`, write the
-new value back.
+reused**: read the target dir's `.highwater`, use `value + 1`, write back.
 
 ⛔ **`.issues/` carries TWO lanes (carve-era, 2026-09-26) — read before
 allocating.** The files `998/1003/1004` are MOVED documents from the riir-ai
