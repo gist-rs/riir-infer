@@ -44,13 +44,29 @@ pub struct MirrorRefresh {
 }
 
 /// Caller-owned dequant mirror: the attention-visible image of the
-/// quantized cache. One flat buffer pair `[max_seq × kv_dim]`, plus the
+/// quantized cache. One flat buffer pair `[max_seq × kvd]`, plus the
 /// per-layer highest dequantized position (`usize::MAX` = nothing yet —
-/// the chunk-start sentinel, cleared by [`reset`](Self::reset)).
+/// the chunk-start sentinel, cleared by [`reset`](Self::reset)) and the
+/// last layer that refreshed the buffer.
+///
+/// ⚠ The refresh is only incremental when the SAME layer refreshes
+/// consecutively (`last_layer == layer_idx`): the buffer is shared across
+/// layers, so at a layer boundary the rows below `pos` hold the PREVIOUS
+/// layer's values and a full `0..=pos` re-dequant is REQUIRED (the
+/// layer-major-within-position loop clobbers them every position). The
+/// Issue 013 T1 lane ran this forward WITHOUT that guard — every layer
+/// but the last attended over a foreign layer's K/V history — so that
+/// lane's absolute PPLs carry the artifact (its relative gate deltas
+/// compared two arms through the same path and stay apples-to-apples).
+/// Found by the Issue 919 T3 G0 control (plain vs RawF32-mirror: 26.2 vs
+/// 41,634 ppl — the mirror was not "what the cache would serve now").
+/// The production alternative is a per-layer mirror (n_layer × the
+/// buffers) which restores true per-layer incrementality.
 pub struct QuantizedKvMirror {
     pub key: Vec<f32>,
     pub value: Vec<f32>,
     dequant_pos: Vec<usize>,
+    last_layer: usize,
 }
 
 impl QuantizedKvMirror {
@@ -61,12 +77,14 @@ impl QuantizedKvMirror {
             key: vec![0.0; max_seq_len * kvd],
             value: vec![0.0; max_seq_len * kvd],
             dequant_pos: vec![usize::MAX; config.n_layer],
+            last_layer: usize::MAX,
         }
     }
 
     /// Reset for a new chunk (the backend's own `reset` is the caller's).
     pub fn reset(&mut self) {
         self.dequant_pos.fill(usize::MAX);
+        self.last_layer = usize::MAX;
     }
 }
 
@@ -151,7 +169,11 @@ pub fn forward_gemma2_f16_qkv<'a, C: QuantizedKVCache>(
         // its earlier rows changed from exact raw reads to dequantized
         // reads at this store.
         let last = mirror.dequant_pos[layer_idx];
-        let start = if last != usize::MAX && last + 1 == pos && pos > 0 {
+        let start = if last != usize::MAX
+            && last + 1 == pos
+            && pos > 0
+            && mirror.last_layer == layer_idx
+        {
             let flipped = refresh.is_some_and(|r| {
                 r.tile_size > 0
                     && (pos % r.tile_size == r.tile_size - 1 || pos == r.cache_max_seq - 1)
@@ -170,6 +192,7 @@ pub fn forward_gemma2_f16_qkv<'a, C: QuantizedKVCache>(
             cache.dequantize_value_into(layer_idx, t, &mut mirror.value[t * kvd..(t + 1) * kvd]);
         }
         mirror.dequant_pos[layer_idx] = pos;
+        mirror.last_layer = layer_idx;
 
         // g''. Multi-head attention + softcapping over the mirror.
         unsafe {

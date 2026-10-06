@@ -18,3 +18,4 @@ pub mod q4k;
 pub mod q5k;
 pub mod q6k;
 pub mod q8kv;
+pub mod kvq_ab;
