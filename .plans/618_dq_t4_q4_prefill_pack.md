@@ -1,6 +1,6 @@
 # Plan 618 — Issue 028 T4 unblock: the Q4_K prefill pack (S1) + the q4 weight arm (S2) + the dual-PTQ measurement (S3)
 
-**Status:** IN PROGRESS — S1+S2+S2-item-5 landed; S3 substrate LANDED 2026-10-06 (the Q6_K matched-single arm, CPU + GPU + requantizer target axis + the pre-registered run design below); the q6k pack emit + the S3 run remain.
+**Status:** **COMPLETE 2026-10-07** — S1 (the Q4_K prefill pack) + S2 (the q4 weight arm) + S2 item 5 (the cudarc q4 GEMV) + S3 (the Q6_K matched-single substrate + pack + the dual phase-switch GPU forward + the `dq_s3_matrix` instrument) + **the RUN: verdict NULL, container SHELVED per the pre-registered PoC gate** (issue 028 T4 CLOSED — the full record in the T4 row + `.benchmarks/dq_s3_matrix/` + `.benchmarks/dq_s3b_hard/`).
 
 Master: `.issues/028_dual_ptq_disaggregated_serving.md` (T4) + `.research/004_DQ_Disaggregated_Quantization.md`.
 Consumer: `src/disaggregated.rs` (`load_pair` / `load_single_file` / `PhaseHandoff`, T1+T2+T3 landed `09d0dd5`).
@@ -411,8 +411,15 @@ axis is complete after the first run):
 
 ### S3.6 — records
 
-- Pack + run artifacts: `.benchmarks/` + the run report; issue 028 T4 row
-  + plan Open-list updates at the landing.
+- **S3 first run (soft corpus):** `.benchmarks/dq_s3_matrix/` — 16 cells,
+  4 arms, 5.2 h wall. Every cell INADMISSIBLE-at-ceiling; the exact-zero
+  paired observation (dual ≡ base on all 96 items). The auto-verdict's NULL
+  label over inadmissible cells was an instrument defect — corrected
+  in-place (the CORRECTED VERDICT block) + the gate repaired.
+- **S3b (hard corpus):** `.benchmarks/dq_s3b_hard/` — base arith 0.750
+  admissible; all four arms exactly 0.750; paired diffs +0.0000; niah
+  saturated → excluded; **verdict NULL — container SHELVED**. Issue 028 T4
+  CLOSED.
 
 ## Open at S2 close
 
