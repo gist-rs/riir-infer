@@ -176,6 +176,94 @@ pub unsafe fn attention_head_set_causal(
     }
 }
 
+/// Masked attention head — arbitrary per-(query, key) eligibility.
+///
+/// Generalizes [`attention_head`] (prefix eligibility) and
+/// [`attention_head_set_causal`] (position-order eligibility) to a caller-built
+/// boolean mask, row-major `allow[query_pos * seq_len + t]`: query `query_pos`
+/// attends key `t` iff the bit is set. The eligibility primitive for
+/// segment-structured scoring forwards — the eDLM branch mask (state block
+/// bidirectional, branches causal-within-segment, cross-segment keys refused;
+/// `edlm::branch_mask` is the builder).
+///
+/// Eligibility discipline matches `attention_head_set_causal`: exp runs only on
+/// eligible keys, ineligible slots keep stale scores never read again; the
+/// caller guarantees every query row has ≥ 1 eligible key (the mask builder ORs
+/// the diagonal) so the softmax max/sum stay finite.
+///
+/// # Safety
+///
+/// Caller must ensure all indices are in bounds and that
+/// `allow.len() >= seq_len * seq_len`, `scores_buf.len() >= seq_len`.
+#[allow(clippy::too_many_arguments)]
+#[inline]
+pub unsafe fn attention_head_masked(
+    q: &[f32],
+    key_cache: &[f32],
+    value_cache: &[f32],
+    attn_out: &mut [f32],
+    scores_buf: &mut [f32],
+    q_head_offset: usize,
+    kv_group_offset: usize,
+    kv_dim: usize,
+    hd: usize,
+    seq_len: usize,
+    scale: f32,
+    allow: &[bool],
+    query_pos: usize,
+) {
+    let row = allow
+        .get(query_pos * seq_len..(query_pos + 1) * seq_len)
+        .expect("allow mask row out of bounds");
+
+    // Pass 1: compute Q.K scores for ELIGIBLE positions only, find max.
+    let mut max_score = f32::NEG_INFINITY;
+    for t in 0..seq_len {
+        if unsafe { *row.get_unchecked(t) } {
+            let k_off = t * kv_dim + kv_group_offset;
+            let dot = crate::simd::simd_dot_f32(
+                &q[q_head_offset..q_head_offset + hd],
+                &key_cache[k_off..k_off + hd],
+                hd,
+            );
+            let score = dot * scale;
+            unsafe {
+                *scores_buf.get_unchecked_mut(t) = score;
+            }
+            if score > max_score {
+                max_score = score;
+            }
+        }
+    }
+
+    // Pass 2: exp(score - max) for eligible, stale elsewhere, accumulate sum.
+    let mut sum = 0.0f32;
+    for t in 0..seq_len {
+        if unsafe { *row.get_unchecked(t) } {
+            let exp_val = unsafe { (*scores_buf.get_unchecked(t) - max_score).exp() };
+            unsafe {
+                *scores_buf.get_unchecked_mut(t) = exp_val;
+            }
+            sum += exp_val;
+        }
+    }
+
+    // Pass 3: normalize eligible weights + weighted value accumulation.
+    let inv_sum = 1.0 / sum;
+    for t in 0..seq_len {
+        if unsafe { *row.get_unchecked(t) } {
+            let w = unsafe { *scores_buf.get_unchecked(t) * inv_sum };
+            let v_off = t * kv_dim + kv_group_offset;
+            for d in 0..hd {
+                unsafe {
+                    *attn_out.get_unchecked_mut(q_head_offset + d) +=
+                        w * *value_cache.get_unchecked(v_off + d);
+                }
+            }
+        }
+    }
+}
+
 /// Attention head with tanh logit softcapping (Gemma 2).
 /// Identical to `attention_head` except scores are softcapped:
 ///   score = softcap * tanh(score / softcap)

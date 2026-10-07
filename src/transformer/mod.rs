@@ -27,6 +27,11 @@ pub mod attention_floor;
 pub mod attention_probe;
 #[cfg(feature = "dllm")]
 mod dllm;
+// eDLM (Drex DLM) segment-structured scoring lane — riir-infer Issue 1005:
+// `edlm` GGUF arch support + segment branch mask + row form (Phase 1).
+// Opt-in via `edlm`.
+#[cfg(feature = "edlm")]
+pub mod edlm;
 mod gemma2;
 // Gemma 4 unified text model — sliding+full attention baseline loader
 // (Issue 577). Opt-in via `gemma4_inference` feature.
@@ -180,6 +185,14 @@ pub use prefill::{forward_prefill, generate_with_prefill};
 pub use dllm::forward_set_causal;
 #[cfg(feature = "dllm")]
 pub use dllm::{forward_bidirectional, forward_block_causal};
+// eDLM lane exports (Issue 1005 Phase 1) — the mask/row/parity machinery is
+// the lane's vocabulary; the loader + forward join the same surface.
+#[cfg(feature = "edlm")]
+pub use edlm::{
+    branch_mask, forward_edlm_packed, forward_edlm_rows, load_edlm_weights_gguf,
+    row_branch_mask, rows_of, BranchRow, EdlmLayerWeights, EdlmPointerHead, EdlmWeights,
+    PackedEncoding, OPT_DECIDE, OPT_NONE,
+};
 #[cfg(feature = "raven")]
 pub use katgpt_transformer::RavenKVCache;
 #[cfg(feature = "raven")]

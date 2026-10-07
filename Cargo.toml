@@ -71,6 +71,10 @@ sentencepiece = "0.13"
 rotary_value_embedding = []
 hla = []
 raven = []
+# eDLM (Drex DLM) segment-structured scoring lane (riir-infer Issue 1005):
+# `edlm` GGUF arch + branch mask + row form + pointer head. Weights are
+# CC BY-NC — local bench/comparison serving only, never a product lane.
+edlm = []
 gemma_lora = []
 lora_still = []
 # EXL3 (trellis-coded, QTIP-variant) safetensors-side quant — CPU reference

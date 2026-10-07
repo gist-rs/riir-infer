@@ -1,6 +1,6 @@
 # Issue 1005 — eDLM (Drex DLM) inference lane: GGUF arch + segment block-causal mask + pointer head
 
-**Status:** OPEN — filed from reflex `.research/008_Drex_DLM_SystemOne_Lane.md` (owner ask "riir-infer can infer dlm or not — file issue if not", 2026-10-07). Supersedes reflex-issue-073's "riir-infer eDLM out of scope" line (owner opt-in).
+**Status:** OPEN — Phase 1 T1–T3 LANDED 2026-10-08 (this session): `edlm` feature (pure-local, default-off) + `src/transformer/edlm.rs` — T1 `load_edlm_weights_gguf` (arch `edlm`; metadata prefix `edlm.*` header-verified against the real `drex-dlm-Q8_0.gguf` 8.19 GB @ SDXC1TB/models/drex-dlm/q8_0 — 36L/4096/12288/32:8/128/151936/32768/1e-6/1e6; tensor map `token_embd`/`output_norm`/`output`(opt)/`blk.N.{attn_norm,attn_q,attn_k,attn_v,attn_output,attn_q_norm,attn_k_norm,ffn_norm,ffn_gate,ffn_up,ffn_down}`/`pointer.{q,k}.{weight,bias}`/`pointer.temperature.weight` (F16 weights, F32 norms+biases+temp; NE 1); NEOX RoPE ⇒ **NO Q/K unpermute** (the `qwen2` loader posture — the fork maps `LLM_ARCH_EDLM` to `LLAMA_ROPE_TYPE_NEOX`)); T2 `branch_mask` + `row_branch_mask` (the 4-quadrant law + `state_bidir` OR-ed independently of causality — the reference order base→bidir-OR→opts-AND→diag; pads invisible keys/dead queries; option-isolation conjunct) over `attention_head_masked` (new ungated substrate in attention.rs, eligibility discipline mirroring `attention_head_set_causal`); T3 `PackedEncoding`/`rows_of`/`forward_edlm_rows` + `forward_edlm_packed` (Qwen3 block: QK-RMSNorm per head pre-RoPE, SwiGLU, GQA, no KV cache, final-norm hidden states — no lm_head). **Packed-vs-row parity is EXACT** (worst diff 0.0 < 1e-5, both `state_bidir` postures) after two measured catches: the attention residual must be the PRE-norm stream saved per position (the Phase-A-saved normed-`xr` bug made state depend on the sequence's LAST token — single-question parity was blind to it, the two-question diagnostic pinned it; the diagnostic tests STAY as regression pins), and `forward_edlm_rows` must mirror the caller's `state_bidir` (parity holds in each posture, never across). Gates: clippy -D at default/edlm/all-features/no-default postures + `--all-targets`; default lib 257/0; edlm lib 270/0 incl. the env-gated real-GGUF header check (`EDLM_GGUF`, skip-loud unset). Weights fetched to SDXC1TB (CC BY-NC — local bench/comparison only); reference pinned `nace-ai/drex-dlm` @ `6c63df2` + their `llama.cpp` branch `edlm` @ `cdcf65d` cloned under `.raw/` (MIT code — reference reading only; rm when the lane closes). Phase 2 next: T4 marker encode/pack, T5 pointer-head assembly (the `EdlmPointerHead::question_probs` math is landed + unit-pinnable), T6 end-to-end parity vs their published sample outputs.
 
 ## The gap (measured, not guessed)
 
@@ -52,19 +52,19 @@ serving-shaped is ever built here or in reflex.
 
 ### Phase 1 — load + forward (CORE)
 
-- [ ] **T1** `edlm` GGUF arch support in `src/gguf_loader.rs`: config extraction
+- [x] **T1** `edlm` GGUF arch support in `src/gguf_loader.rs`: config extraction
       (block_count, head geometry, rms eps — Qwen3 tensor-name family), weight mapping
       onto the existing transformer structs, pointer-head tensors carried F16 (Q8_0) or
       from `head.pt` (BF16 safetensors path). **Substrate-first: check tensor-name
       overlap against the existing `qwen35` loader arm BEFORE writing anything new —
       the eDLM block tensors follow Qwen3 naming, so T1 may be a variant of that arm,
-      never a parallel loader.**
-- [ ] **T2** Segment-based block-causal attention mask (generalizes
+      never a parallel loader.** *(LANDED 2026-10-08 — loader lives in `src/transformer/edlm.rs` (`load_edlm_weights_gguf` + `edlm_config_from_gguf_metadata`), NOT gguf_loader.rs (that file is already 3.4k lines); reuses `GgufFile::dequant_f16_to_f32` (Q8_0 path) + the llama-layer weight structs by composition (`EdlmLayerWeights { base: LlamaLayerWeights, q_norm, k_norm }`); tensor names header-verified against the real Q8_0 GGUF; pointer tensors carried (`pointer.{q,k}.weight` F16 + F32 biases + `pointer.temperature.weight`); safetensors/`head.pt` path deferred to T5/T6.)*
+- [x] **T2** Segment-based block-causal attention mask (generalizes
       `attention::block_causal_t_n`): segment ids + `state_bidir`; additive mask
       builder usable from both the packed forward and row forms. Unit tests pin the
-      4-quadrant law (state↔state bidir, state∤branches, branch→state, branch∤branch).
-- [ ] **T3** Row-form fallback: per-question causal rows (state + branch), packed-vs-row
-      parity test (their `test_rows_match_packed` analog, our fixtures).
+      4-quadrant law (state↔state bidir, state∤branches, branch→state, branch∤branch). *(LANDED 2026-10-08 — `branch_mask` (bool `[l*l]`) + `row_branch_mask`; the eligibility PRIMITIVE is `attention_head_masked` in attention.rs (ungated substrate); tests pin the 4 quadrants, pads, diagonal, option isolation, buffer asserts; `state_bidir` is an independent OR, not causal-gated — the reference order base→bidir-OR→opts-AND→diag.)*
+- [x] **T3** Row-form fallback: per-question causal rows (state + branch), packed-vs-row
+      parity test (their `test_rows_match_packed` analog, our fixtures). *(LANDED 2026-10-08 — `PackedEncoding`/`BranchRow`/`rows_of` (layout-mismatch refusals) + `forward_edlm_rows`; parity EXACT (diff 0.0) in BOTH `state_bidir` postures on tiny random Qwen3-shape weights; the two diagnostic tests stay as regression pins (single-question = exactness, two-question = the cross-question contamination catch). `forward_edlm_rows` takes `state_bidir` — parity holds per posture, never across.)*
 
 ### Phase 2 — decision readout
 
