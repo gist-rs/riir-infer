@@ -442,6 +442,14 @@ impl BpeTokenizer {
         (byte_to_unicode, unicode_to_byte)
     }
 
+    /// Exact vocabulary lookup of one token string (`convert_tokens_to_ids`
+    /// semantics: the id the vocab assigns to that exact string, no
+    /// tokenization). This is how delimiter/special tokens are resolved by
+    /// callers that assemble token sequences programmatically.
+    pub fn token_to_id(&self, token: &str) -> Option<usize> {
+        self.vocab.get(token).copied()
+    }
+
     /// Encode text to token IDs (without BOS/EOS).
     ///
     /// Special tokens (control, user_defined) are recognized and emitted
@@ -482,7 +490,7 @@ impl BpeTokenizer {
     ///
     /// Pre-tokenizes the text using the GPT-2 regex pattern, then applies
     /// BPE merges to each chunk independently.
-    fn encode_no_special(&self, text: &str) -> Vec<usize> {
+    pub(crate) fn encode_no_special(&self, text: &str) -> Vec<usize> {
         let chunks = gpt2_pretokenize(text, self.max_digit_run);
         let mut result = Vec::with_capacity(chunks.len() * 2);
         for chunk in chunks {

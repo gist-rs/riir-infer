@@ -271,7 +271,7 @@ fn check_ternary_exactness(
         let row = bi / (cols / group);
         let g = bi % (cols / group);
         let scale = tg.group_scale[row * tg.groups_per_row + g].to_f32();
-        for j in 0..group {
+        for (j, &wire) in scratch.iter().enumerate() {
             let byte = blocks[bi].qs[j / 4];
             let code = (byte >> ((j % 4) * 2)) & 0x03;
             let trit: f32 = match code {
@@ -280,7 +280,6 @@ fn check_ternary_exactness(
                 2 => 1.0,
                 _ => anyhow::bail!("code 3 at {name} block {bi}[{j}] — not trained ternary"),
             };
-            let wire = scratch[j];
             let bridge = trit * scale;
             let err = (wire - bridge).abs();
             anyhow::ensure!(

@@ -101,9 +101,9 @@ pub use attention::masked_cross_entropy;
 // is always compiled (gated only at the re-export level in mod.rs).
 pub use attention::block_causal_t_n;
 pub use gemma2::{
-    AttnLayerFeatures, Gemma2ForwardTrace, forward_gemma2, forward_gemma2_attn_capture,
-    forward_gemma2_f16, forward_gemma2_trace, forward_gemma2_with_embedding, generate_gemma2,
-    generate_gemma2_f16, NoHook, NoVQuant, ValueStoreHook,
+    AttnLayerFeatures, Gemma2ForwardTrace, NoHook, NoVQuant, ValueStoreHook, forward_gemma2,
+    forward_gemma2_attn_capture, forward_gemma2_f16, forward_gemma2_trace,
+    forward_gemma2_with_embedding, generate_gemma2, generate_gemma2_f16,
 };
 // Issue 013 T1: the hookable f16 forward (the lossy-V lane's entry point).
 pub use gemma2::forward_gemma2_f16_hk;
@@ -185,13 +185,16 @@ pub use prefill::{forward_prefill, generate_with_prefill};
 pub use dllm::forward_set_causal;
 #[cfg(feature = "dllm")]
 pub use dllm::{forward_bidirectional, forward_block_causal};
-// eDLM lane exports (Issue 1005 Phase 1) — the mask/row/parity machinery is
-// the lane's vocabulary; the loader + forward join the same surface.
+// eDLM lane exports (Issue 1005 Phases 1+2) — the mask/row/parity machinery
+// is the lane's vocabulary; the loader + forwards + encode/pack join the
+// same surface.
 #[cfg(feature = "edlm")]
 pub use edlm::{
-    branch_mask, forward_edlm_packed, forward_edlm_rows, load_edlm_weights_gguf,
-    row_branch_mask, rows_of, BranchRow, EdlmLayerWeights, EdlmPointerHead, EdlmWeights,
-    PackedEncoding, OPT_DECIDE, OPT_NONE,
+    BranchRow, ContextOverflow, EDLM_MARKERS, EdlmEncodeTokenizer, EdlmGgufModel, EdlmLayerWeights,
+    EdlmLimits, EdlmPointerHead, EdlmQuestion, EdlmRecord, EdlmWeights, OPT_DECIDE, OPT_NONE,
+    PackedEncoding, branch_mask, defuse_special_spellings, encode_packed, forward_edlm_packed,
+    forward_edlm_packed_streaming, forward_edlm_rows, forward_edlm_rows_streaming,
+    load_edlm_weights_gguf, row_branch_mask, rows_of, user_tokens,
 };
 #[cfg(feature = "raven")]
 pub use katgpt_transformer::RavenKVCache;
