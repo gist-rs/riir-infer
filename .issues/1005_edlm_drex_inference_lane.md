@@ -31,6 +31,23 @@ but **cannot load or serve Drex DLM** (`nace-ai/drex-dlm`, Efficient-DLM-8B back
 2. T7 closes reflex Research-002's open GAP (candidate-branch prefix reuse on a CAUSAL
    backbone — second reference impl noted in reflex `.research/008`) on OUR substrate.
 
+## Boundary (the rung split — the laya precedent governs)
+
+Drex/eDLM spans the family ladder and each rung has its owner:
+
+| rung | repo | for Drex? |
+|---|---|---|
+| **substrate** (loader, forwards, mask, head mechanics) | `riir-infer` — THIS issue | yes — rethink's out-of-scope row delegates "the encoder forward SUBSTRATE → riir-infer (public)" |
+| **measurement** (harness comparison lane) | `riir-reflex` issue 073 | yes — harness-only, never the release set (the agentjev family law) |
+| **product serving** (weights posture, arsenal seating, ESC arms) | `riir-rethink` (private forever) | **NO — license-blocked**: CC BY-NC weights can never serve the commercial product; reflex's out-of-scope row sends "TRAINED-ENCODER serving arms → riir-rethink" |
+| **open serving stack** (L1 lane seating) | `riir-instinct` (public) | **NO for Drex**: weights barred from any release set (the agentjev family law); NC also blocks downstream commercial users of the open stack |
+
+The pattern is the laya lane's exactly: substrate in `riir-infer-laya` (public), serving
+posture + product in rethink (private), reflex measures. The rethink rung for an
+eDLM-class model opens ONLY when a license-clean model exists (open-licensed or
+self-trained) — that issue is filed THERE and CONSUMES this issue's substrate; nothing
+serving-shaped is ever built here or in reflex.
+
 ## Phases
 
 ### Phase 1 — load + forward (CORE)
