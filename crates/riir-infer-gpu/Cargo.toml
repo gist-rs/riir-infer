@@ -279,6 +279,13 @@ required-features = ["deltanet_prework_fused"]
 name = "bench_663_t5_single_gemm_isolation"
 required-features = ["cubecl_runtime", "ternary_gemm_batched", "metal_tensor_gemm"]
 
+# riir-infer Issue 1005 T8 follow-up — the eDLM f16-B GEMM GOAT lane (scalar
+# vs cooperative-matrix). Whole-file #![cfg] keeps non-edlm_gpu hosts an
+# empty target; this row is the reader protection (the R1 pattern).
+[[test]]
+name = "edlm_matmul_cmma_goat"
+required-features = ["edlm_gpu"]
+
 # riir-infer Issue 032 — G1 of the Metal folded (Bonsai-2) CubeCL prefill vs
 # the folded decode eager path, plus the pre-rotation pin (T5). The
 # whole-file #![cfg] keeps the count honest; this row keeps the reader honest

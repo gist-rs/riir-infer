@@ -579,6 +579,13 @@ pub use edlm_cubecl::{EdlmAttnMultiCubeCL, EdlmAttnMultiParams, EdlmGpuModel, Ed
 pub mod matmul_f16b_cubecl;
 #[cfg(feature = "edlm_gpu")]
 pub use matmul_f16b_cubecl::MatmulF16bCubeCL;
+// The cooperative-matrix (tensor-core) f16-B GEMM — the scalar kernel's
+// drop-in (Issue 1005 T8 follow-up; `EDLM_GPU_CMMA=0` restores scalar at
+// the eDLM dispatch sites).
+#[cfg(feature = "edlm_gpu")]
+pub mod matmul_f16b_cmma_cubecl;
+#[cfg(feature = "edlm_gpu")]
+pub use matmul_f16b_cmma_cubecl::MatmulF16bCmmaCubeCL;
 // Gemma4 CubeCL stack (partial RoPE / QK-Norm / GeGLU / layer output scale).
 #[cfg(feature = "gemma4_gpu")]
 pub mod gemma4_cubecl;

@@ -108,14 +108,18 @@ fn quantize_to_f16_grid(w: &mut EdlmWeights) {
     }
 }
 
-/// state(5) | q1: [instr, opt, decide] | q2: [instr, opt, opt, opt, decide]
-/// — the same layout law the core tests pin.
+/// state(18) | q1: [instr, opt, decide] | q2: [instr, opt, opt, opt, decide]
+/// — the same layout law the core tests pin. The state is 18 tokens ON
+/// PURPOSE: the real published sample's state length, and above the GEMM
+/// dispatch's M≥16 tensor-core threshold — so the mixed-posture pipeline
+/// run exercises cmma (state prefill) AND scalar (the 3/5-token branch
+/// rows) in one pass, exactly the shipped dispatch law.
 fn sample_encoding() -> PackedEncoding {
     let s = 0i32;
     let mut ids = Vec::new();
     let mut pos = Vec::new();
     let mut seg = Vec::new();
-    for i in 0..5 {
+    for i in 0..18 {
         ids.push(i);
         pos.push(i);
         seg.push(s);
@@ -125,22 +129,22 @@ fn sample_encoding() -> PackedEncoding {
     // q1 branch: len 3
     for bi in 0..2 {
         ids.push(10 + bi);
-        pos.push(5 + bi);
+        pos.push(18 + bi);
         seg.push(1);
     }
     ids.push(63);
-    pos.push(5 + 2);
+    pos.push(18 + 2);
     seg.push(1);
     decide_idx.push(ids.len() - 1);
     opt_idx.push(vec![ids.len() - 2]);
     // q2 branch: len 5
     for bi in 0..4 {
         ids.push(20 + bi);
-        pos.push(5 + bi);
+        pos.push(18 + bi);
         seg.push(2);
     }
     ids.push(62);
-    pos.push(5 + 4);
+    pos.push(18 + 4);
     seg.push(2);
     decide_idx.push(ids.len() - 1);
     opt_idx.push(vec![ids.len() - 3, ids.len() - 2]);
@@ -149,7 +153,7 @@ fn sample_encoding() -> PackedEncoding {
         pos,
         seg,
         opt: Vec::new(),
-        state_len: 5,
+        state_len: 18,
         state_truncated: false,
         decide_idx,
         opt_idx,
@@ -365,8 +369,9 @@ fn attn_multi_multi_tile_visibility() {
 
 /// Full-pipeline parity vs the CPU T7 cached path on f16-grid tiny weights,
 /// BOTH state_bidir postures (the core lane's own parity law: parity holds
-/// in each posture, never across).
-fn tiny_pipeline_parity(state_bidir: bool) -> (f32, f32) {
+/// in each posture, never across) × BOTH GEMM postures (the tensor-core
+/// kernel adds the activation-rounding face — the gate re-pins per posture).
+fn tiny_pipeline_parity(state_bidir: bool, use_cmma: bool) -> (f32, f32) {
     let config = tiny_config();
     let mut weights = tiny_weights(&config);
     quantize_to_f16_grid(&mut weights);
@@ -387,8 +392,10 @@ fn tiny_pipeline_parity(state_bidir: bool) -> (f32, f32) {
         forward_edlm_branches_cached(&weights, &config, &enc, &rows, &cpu_cache)
             .expect("cpu branches");
 
-    // GPU: same weights through the f16 upload path.
-    let mut gpu = EdlmGpuModel::from_weights(&weights, &config).expect("gpu model");
+    // GPU: same weights through the f16 upload path, the caller's GEMM
+    // posture (the test seam overrides the process-global env default).
+    let mut gpu =
+        EdlmGpuModel::from_weights(&weights, &config).expect("gpu model").with_matmul_posture(use_cmma);
     gpu.state_prefill(&enc.ids[..sl], &enc.pos[..sl], state_bidir)
         .expect("gpu prefill");
     let gpu_rows = gpu.forward_branches(&enc, &rows).expect("gpu branches");
@@ -411,22 +418,39 @@ fn tiny_pipeline_parity(state_bidir: bool) -> (f32, f32) {
 
 #[test]
 fn tiny_parity_vs_cpu_cached_bidir() {
-    let (kv, hid) = tiny_pipeline_parity(true);
-    assert!(
-        kv < 5e-4 && hid < 2e-3,
-        "bidir parity: kv drift {kv}, hidden drift {hid}"
-    );
-    println!("tiny bidir parity: kv {kv:.3e} hidden {hid:.3e}");
+    for use_cmma in [false, true] {
+        let (kv, hid) = tiny_pipeline_parity(true, use_cmma);
+        // Per-posture kv gates: the scalar kernel's only face is the f32
+        // accumulation order (~6e-5 measured); the tensor-core kernel adds
+        // the ACTIVATION f16 rounding face (~1.5e-3 measured — the input
+        // disclosure in matmul_f16b_cmma_cubecl). The hidden gate is the
+        // binding law for both (the pointer head's input).
+        let kv_gate = if use_cmma { 3e-3 } else { 5e-4 };
+        assert!(
+            kv < kv_gate && hid < 2e-3,
+            "bidir parity (cmma {use_cmma}): kv drift {kv} (gate {kv_gate}), hidden drift {hid}"
+        );
+        println!(
+            "tiny bidir parity ({}): kv {kv:.3e} hidden {hid:.3e}",
+            if use_cmma { "cmma" } else { "scalar" }
+        );
+    }
 }
 
 #[test]
 fn tiny_parity_vs_cpu_cached_causal() {
-    let (kv, hid) = tiny_pipeline_parity(false);
-    assert!(
-        kv < 5e-4 && hid < 2e-3,
-        "causal parity: kv drift {kv}, hidden drift {hid}"
-    );
-    println!("tiny causal parity: kv {kv:.3e} hidden {hid:.3e}");
+    for use_cmma in [false, true] {
+        let (kv, hid) = tiny_pipeline_parity(false, use_cmma);
+        let kv_gate = if use_cmma { 3e-3 } else { 5e-4 };
+        assert!(
+            kv < kv_gate && hid < 2e-3,
+            "causal parity (cmma {use_cmma}): kv drift {kv} (gate {kv_gate}), hidden drift {hid}"
+        );
+        println!(
+            "tiny causal parity ({}): kv {kv:.3e} hidden {hid:.3e}",
+            if use_cmma { "cmma" } else { "scalar" }
+        );
+    }
 }
 
 /// Stale/mismatched caches REFUSE (the T7 law carries to the GPU lane).

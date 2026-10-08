@@ -46,13 +46,17 @@
 //!
 //! - The packed-mask forward (option isolation) — rows/cached semantics only,
 //!   the CPU cached path's own caveat.
-//! - CUDA graphs / CMMA tensor-core GEMM / batched multi-branch dispatch.
+//! - CUDA graphs / batched multi-branch dispatch.
+//!
+//! The CMMA tensor-core GEMM (the first perf follow-up) is IN: the four
+//! projections dispatch through [`crate::matmul_f16b_cmma_cubecl`] unless
+//! `EDLM_GPU_CMMA=0` (the scalar kernel stays the kill-switch posture; the
+//! GOAT evidence: `tests/edlm_matmul_cmma_goat.rs` + the issue row).
 
 #[cfg(feature = "edlm_gpu")]
 use crate::cubecl_runtime::{
     ActiveRuntime, CubeCLContext, assert_binding_derives_units, create_f32, create_u32, read_f32,
 };
-#[cfg(feature = "edlm_gpu")]
 use crate::matmul_f16b_cubecl::MatmulF16bCubeCL;
 #[cfg(feature = "edlm_gpu")]
 use cubecl::prelude::*;
@@ -447,6 +451,13 @@ pub struct EdlmGpuModel {
     /// filled by [`EdlmGpuModel::state_prefill`], consumed by
     /// [`EdlmGpuModel::forward_branches`].
     state: Option<EdlmStateKv>,
+    /// The GEMM posture: `true` routes the four per-layer projections
+    /// through the cooperative-matrix (tensor-core) kernel
+    /// ([`crate::MatmulF16bCmmaCubeCL`]), `false` keeps the scalar tiled
+    /// kernel. Resolved once at construction from `EDLM_GPU_CMMA`
+    /// (`"0"` = scalar; unset/anything else = the measured default),
+    /// overridable per-instance by the test seam.
+    use_cmma: bool,
 }
 
 /// Convert a host f32 slice to f16 bytes (round-to-nearest — the documented
@@ -460,6 +471,18 @@ fn f32_to_f16_bytes(data: &[f32]) -> Vec<u8> {
         data.par_iter().map(|&v| half_f16::from_f32(v)).collect()
     };
     bytemuck::cast_slice::<half_f16, u8>(&f16v).to_vec()
+}
+
+/// The env kill-switch for the tensor-core GEMM posture, read ONCE per
+/// process. `EDLM_GPU_CMMA=0` restores the scalar tiled kernel; unset or
+/// any other value takes the measured default (CMMA — the GOAT lane's
+/// verdict lives in `tests/edlm_matmul_cmma_goat.rs` + the issue row).
+#[cfg(feature = "edlm_gpu")]
+fn cmma_env_default() -> bool {
+    match std::env::var("EDLM_GPU_CMMA") {
+        Ok(v) => v != "0",
+        Err(_) => true,
+    }
 }
 
 #[cfg(feature = "edlm_gpu")]
@@ -516,6 +539,7 @@ impl EdlmGpuModel {
             freq: RopeFreqTable::new(config.rope_theta, config.head_dim),
             scale: 1.0 / (config.head_dim as f32).sqrt(),
             state: None,
+            use_cmma: cmma_env_default(),
         })
     }
 
@@ -585,6 +609,7 @@ impl EdlmGpuModel {
             freq,
             scale,
             state: None,
+            use_cmma: cmma_env_default(),
         })
     }
 
@@ -592,6 +617,46 @@ impl EdlmGpuModel {
     /// beside this lane (box state is part of the claim).
     pub fn runtime_name(&self) -> &'static str {
         ActiveRuntime::name(&self.client)
+    }
+
+    /// The GEMM posture this instance dispatches (provenance for parity
+    /// rows: the two postures are tolerance-equivalent, never identical).
+    pub fn matmul_posture(&self) -> &'static str {
+        if self.use_cmma {
+            "cmma"
+        } else {
+            "scalar"
+        }
+    }
+
+    /// Test seam: pin the GEMM posture explicitly (the env default is
+    /// process-global; parity tests need BOTH postures in one process).
+    #[cfg(test)]
+    fn with_matmul_posture(mut self, use_cmma: bool) -> Self {
+        self.use_cmma = use_cmma;
+        self
+    }
+
+    /// The one dispatch site for the lane's four per-layer projections.
+    /// Shape law (the GOAT lane's interleaved medians, wgpu-spirv, 4090):
+    /// cmma loses at M=8 (0.60× — staging ALU over dead tile rows) and wins
+    /// from M≈16 (1.09×) upward (1.51× at 18, 3.4× at 87, 8× at 512) — so
+    /// short branch rows stay scalar and everything prefill-class goes
+    /// tensor-core. `EDLM_GPU_CMMA=0` forces scalar for ALL m.
+    fn matmul_f16b(
+        &self,
+        a: Handle,
+        b: Handle,
+        out: Handle,
+        m: usize,
+        n: usize,
+        p: usize,
+    ) {
+        if self.use_cmma && m >= 16 {
+            crate::MatmulF16bCmmaCubeCL::launch::<ActiveRuntime>(&self.client, a, b, out, m, n, p);
+        } else {
+            MatmulF16bCubeCL::launch::<ActiveRuntime>(&self.client, a, b, out, m, n, p);
+        }
     }
 
     /// Release fully-free GPU pool pages back to the driver (the Issue-712
@@ -760,15 +825,7 @@ impl EdlmGpuModel {
                 eps,
             );
             let qkv_out = self.client.empty(sq * lq * core::mem::size_of::<f32>());
-            MatmulF16bCubeCL::launch::<ActiveRuntime>(
-                &self.client,
-                hn1,
-                lw.qkv.clone(),
-                qkv_out.clone(),
-                sq,
-                n,
-                lq,
-            );
+            self.matmul_f16b(hn1, lw.qkv.clone(), qkv_out.clone(), sq, n, lq);
             let qkv_h = read_f32(&self.client, qkv_out).map_err(|e| e.to_string())?;
 
             // Host small-ops: split, per-head qk-norm, RoPE — the EXACT core
@@ -817,15 +874,7 @@ impl EdlmGpuModel {
             );
 
             let wo_out = self.client.empty(sq * n * core::mem::size_of::<f32>());
-            MatmulF16bCubeCL::launch::<ActiveRuntime>(
-                &self.client,
-                attn_h,
-                lw.wo.clone(),
-                wo_out.clone(),
-                sq,
-                q_dim,
-                n,
-            );
+            self.matmul_f16b(attn_h, lw.wo.clone(), wo_out.clone(), sq, q_dim, n);
             let wo_h = read_f32(&self.client, wo_out).map_err(|e| e.to_string())?;
             for i in 0..sq * n {
                 h[i] = xr[i] + wo_h[i];
@@ -844,15 +893,7 @@ impl EdlmGpuModel {
                 eps,
             );
             let gu_out = self.client.empty(sq * 2 * mlp * core::mem::size_of::<f32>());
-            MatmulF16bCubeCL::launch::<ActiveRuntime>(
-                &self.client,
-                hn2,
-                lw.gateup.clone(),
-                gu_out.clone(),
-                sq,
-                n,
-                2 * mlp,
-            );
+            self.matmul_f16b(hn2, lw.gateup.clone(), gu_out.clone(), sq, n, 2 * mlp);
             let gu = read_f32(&self.client, gu_out).map_err(|e| e.to_string())?;
             let mut mlp_in = vec![0.0f32; sq * mlp];
             for r in 0..sq {
@@ -865,15 +906,7 @@ impl EdlmGpuModel {
             }
             let mi_h = create_f32(&self.client, &mlp_in);
             let down_out = self.client.empty(sq * n * core::mem::size_of::<f32>());
-            MatmulF16bCubeCL::launch::<ActiveRuntime>(
-                &self.client,
-                mi_h,
-                lw.down.clone(),
-                down_out.clone(),
-                sq,
-                mlp,
-                n,
-            );
+            self.matmul_f16b(mi_h, lw.down.clone(), down_out.clone(), sq, mlp, n);
             let d_h = read_f32(&self.client, down_out).map_err(|e| e.to_string())?;
             for i in 0..sq * n {
                 h[i] += d_h[i];
