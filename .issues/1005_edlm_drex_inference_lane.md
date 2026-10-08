@@ -193,11 +193,28 @@ serving-shaped is ever built here or in reflex.
       the R1 pattern). Gates: clippy -D at edlm_gpu / default /
       no-default (+ all-targets each), fence PASSED (no new deps), core
       default lib 257/0 unchanged, gpu edlm tests 7/0 at dev+release ×
-      wgpu+CUDA. ⚠ PRE-EXISTING at HEAD, not this change: `--all-features
-      --all-targets` is RED on Windows in `dq_s3_matrix` (8× E0308
-      `seed_ternary`/`ProjWeights` in `ternary_deltanet_gpu_forward_cudarc.rs`
-      + lint debt in the cudarc bins) — its feature set is disjoint from this
-      change; unexamined. Remaining T8 perf follow-ups: k-blocked CMMA
+      gpu edlm tests 7/0 at dev+release ×
+      wgpu+CUDA. ⚠ ~~PRE-EXISTING at HEAD, not this change: `--all-features
+      --all-targets` is RED on Windows in `dq_s3_matrix`~~ → **EXAMINED + FIXED
+      2026-10-08 (4090 session):** the 5× E0308 were the S2 `ProjWeights` enum
+      change (`8d92cac`/`91d0823`) missing ONE double-cfg-gated test —
+      `test_speculative_run_invalidates_captured_graph`
+      (`speculative_decode` + `cuda_graphs_forward`) still seeded the layer
+      projections as bare `TernaryGroupWeights`; repaired to the
+      `seed_live_backbone` pattern (`as_ternary_mut().expect("ternary
+      fixture")`), and the test EXECUTES on the 4090: pos2 max_diff 0e0
+      (bit-identical, seeds non-vacuous). The dead `container` binding in
+      `dual_phase_switch_forward_matches_cpu_container` was swallowing the
+      `from_parts` Result — now `.expect("container pairing must hold")` (the
+      layer_types + escape-set laws are load-bearing). The `dq_s3_matrix` bin's
+      8 warnings healed in the same pass (dead `built` init → break-with-value,
+      dead `all_lengths_ok` + the redundant `dc`/`mc` outer guard removed —
+      report text unchanged, the per-length find already skipped missing
+      cells — `useless_format` ×2, `redundant_closure`, `unused_mut`,
+      `#[allow(clippy::too_many_arguments)]` on `run_cell` per house
+      convention). Gates: clippy -p riir-infer-gpu --all-features
+      --all-targets GREEN (0 errors, 0 findings in touched files) + default
+      posture GREEN; both named tests PASS on the 4090.) Remaining T8 perf follow-ups: k-blocked CMMA
       staging (the kb4/sg4 ladder), GPU-resident KV carry, batched
       multi-branch, CUDA graphs.)
 

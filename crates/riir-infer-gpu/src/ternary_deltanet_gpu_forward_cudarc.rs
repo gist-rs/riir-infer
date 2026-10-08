@@ -7639,11 +7639,11 @@ mod tests {
             }
         }
 
-        // ── CPU container reference ──
-        let container = DisaggregatedTernaryWeights::from_parts(
-            decode.clone(),
-            prefill.clone(),
-        );
+        // ── CPU container pairing check (the from_parts laws: layer_types
+        // equality + escape-set sharing — the test's reference is the handoff
+        // below, the container construction only validates the pairing) ──
+        DisaggregatedTernaryWeights::from_parts(decode.clone(), prefill.clone())
+            .expect("container pairing must hold");
         let layer_types = if decode.layer_types.is_empty() {
             vec![DeltaNetLayerType::Attention; config.n_layer]
         } else {
@@ -7992,11 +7992,18 @@ mod tests {
         // test was vacuously green for exactly that reason).
         seed_ternary(&mut weights.wte, 16, 16);
         for layer in &mut weights.layers {
-            seed_ternary(&mut layer.in_proj_qkv, 8, 8);
-            seed_ternary(&mut layer.attn_wq, 8, 8);
-            seed_ternary(&mut layer.attn_wk, 8, 8);
-            seed_ternary(&mut layer.attn_wv, 8, 8);
-            seed_ternary(&mut layer.attn_wo, 8, 8);
+            // The per-layer projections are ProjWeights since 028 T4 S2 — seed
+            // the Ternary arms (fixtures build ternary-only weights).
+            let projections: [&mut katgpt_core::TernaryGroupWeights; 5] = [
+                layer.in_proj_qkv.as_ternary_mut().expect("ternary fixture"),
+                layer.attn_wq.as_ternary_mut().expect("ternary fixture"),
+                layer.attn_wk.as_ternary_mut().expect("ternary fixture"),
+                layer.attn_wv.as_ternary_mut().expect("ternary fixture"),
+                layer.attn_wo.as_ternary_mut().expect("ternary fixture"),
+            ];
+            for p in projections {
+                seed_ternary(p, 8, 8);
+            }
             for g in layer.input_norm.iter_mut() {
                 *g = 1.0;
             }

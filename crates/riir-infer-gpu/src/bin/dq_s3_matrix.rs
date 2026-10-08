@@ -526,6 +526,7 @@ fn cell_jsonl_line(cell: &CellResult, corpus: &str) -> String {
 
 /// Run one family cell end-to-end on `fwd`; returns the result (the caller
 /// appends the JSONL line + keeps it in memory).
+#[allow(clippy::too_many_arguments)] // the 10-arg cell runner: one forward context, per-cell knobs (house convention — see build_report below)
 fn run_cell(
     fwd: &mut TernaryDeltanetGpuForwardCudarc,
     tok: &BpeTokenizer,
@@ -634,7 +635,7 @@ fn run() -> Result<(), String> {
     lengths.sort_unstable();
     let arm_order: Vec<ArmId> = env_or("DQ3_ARMS", "dual,matched,q4single,base")
         .split(',')
-        .filter_map(|s| ArmId::parse(s))
+        .filter_map(ArmId::parse)
         .collect();
     if arm_order.is_empty() {
         return Err("DQ3_ARMS produced no arms".into());
@@ -750,22 +751,18 @@ fn run() -> Result<(), String> {
         // Construction (the dual arm carries the VRAM drop rule: an OOM at
         // the longest length drops it for the WHOLE arm set — the arms stay
         // comparable — and retries down the length list).
-        let (mut config, mut fwd, dual) = match arm {
+        let (config, mut fwd, dual) = match arm {
             ArmId::Dual => {
                 let (mut cfg, container) = DisaggregatedTernaryWeights::load_pair(
                     Path::new(&decode_path),
                     Path::new(&pf_path),
                 )
                 .map_err(|e| format!("load_pair: {e}"))?;
-                let mut built = None;
                 loop {
                     cfg.block_size = cfg.block_size.min(block_for(&lengths));
                     match TernaryDeltanetGpuForwardCudarc::new(&cfg, container.decode()) {
                         Ok(mut f) => match f.attach_prefill_copy(container.prefill()) {
-                            Ok(()) => {
-                                built = Some((cfg.clone(), f, true));
-                                break;
-                            }
+                            Ok(()) => break (cfg.clone(), f, true),
                             Err(e) => return Err(format!("attach prefill: {e}")),
                         },
                         Err(e) => {
@@ -781,7 +778,6 @@ fn run() -> Result<(), String> {
                         }
                     }
                 }
-                built.unwrap()
             }
             ArmId::Matched => {
                 let (mut cfg, w) =
@@ -928,9 +924,7 @@ fn build_report(
 ) -> Result<String, String> {
     let mut md = String::new();
     md.push_str("# dq_s3_matrix — the dual-PTQ measurement (plan 618 S3 / issue 028 T4)\n\n");
-    md.push_str(&format!(
-        "- **Lane (frozen):** cudarc per-token GEMV, ALL arms — kernel policy constant; the lane's int8 activation quantization is COMMON to every arm, so deltas isolate the weight format. NOT the 614 GEMM-prefill lane (cross-lane comparability approximate).\n"
-    ));
+    md.push_str("- **Lane (frozen):** cudarc per-token GEMV, ALL arms — kernel policy constant; the lane's int8 activation quantization is COMMON to every arm, so deltas isolate the weight format. NOT the 614 GEMM-prefill lane (cross-lane comparability approximate).\n");
     md.push_str(&format!(
         "- **Corpus blake3:** `{corpus_hash}` — arith {arith_n} items (the 614 v2 corpus, hard={arith_hard}), niah {ni_per_len}/len × {ni_needles} needles, lengths {lengths:?}\n"
     ));
@@ -939,9 +933,7 @@ fn build_report(
     ));
     md.push_str(&format!("- **GPU:** {gpu_csv}\n"));
     md.push_str(&format!("- **Packs:** decode `{decode_path}` · pf `{pf_path}` · q6 `{q6_path}`\n"));
-    md.push_str(&format!(
-        "- **Storage pairing:** base 6.7 GB · dual 21.1 GB · matched ≈20.7 GB (the control ~2% CHEAPER — the conservative direction, disclosed) · q4single 14.4 GB (the decomposition control)\n\n"
-    ));
+    md.push_str("- **Storage pairing:** base 6.7 GB · dual 21.1 GB · matched ≈20.7 GB (the control ~2% CHEAPER — the conservative direction, disclosed) · q4single 14.4 GB (the decomposition control)\n\n");
 
     // The cells table.
     md.push_str("## Cells\n\n");
@@ -1035,7 +1027,6 @@ fn build_report(
     let mut inadmissible = false;
     let mut legs = String::new();
     if !paired.is_empty() {
-        let mut all_lengths_ok = true;
         let mut any_dual_ci_positive = false;
         let mut matched_sig_beats_dual_anywhere = false;
         let mut dual_ge_matched_all = true;
@@ -1058,20 +1049,16 @@ fn build_report(
                 rd >= rm, dual_ci_pos
             ));
         }
-        // the matched−dual DIRECT paired bootstrap (the honest leg)
-        if let (Some(dc), Some(mc)) = (
-            cells.iter().find(|c| c.arm == ArmId::Dual && c.family == "niah"),
-            cells.iter().find(|c| c.arm == ArmId::Matched && c.family == "niah"),
-        ) {
-            for &len in lengths {
-                let d = dc.correct.len();
-                let _ = d;
-                let (Some(dd), Some(mm)) = (
-                    cells.iter().find(|c| c.arm == ArmId::Dual && c.family == "niah" && c.length == len),
-                    cells.iter().find(|c| c.arm == ArmId::Matched && c.family == "niah" && c.length == len),
-                ) else {
-                    continue;
-                };
+        // the matched−dual DIRECT paired bootstrap (the honest leg); the
+        // per-length find below skips lengths whose cells are missing, so no
+        // outer existence guard is needed
+        for &len in lengths {
+            let (Some(dd), Some(mm)) = (
+                cells.iter().find(|c| c.arm == ArmId::Dual && c.family == "niah" && c.length == len),
+                cells.iter().find(|c| c.arm == ArmId::Matched && c.family == "niah" && c.length == len),
+            ) else {
+                continue;
+            };
                 if dd.correct.len() != mm.correct.len() {
                     continue;
                 }
@@ -1090,14 +1077,12 @@ fn build_report(
                     diffs.iter().map(|&x| f64::from(x)).sum::<f64>() / diffs.len() as f64,
                     lo, hi
                 ));
-            }
         }
         hit = any_dual_ci_positive && dual_ge_matched_all && !matched_sig_beats_dual_anywhere;
         null = matched_ge_dual_all && !any_dual_ci_positive;
         if !hit && !null {
             inadmissible = true; // mixed — recorded, owner-gated
         }
-        let _ = all_lengths_ok;
     } else {
         legs.push_str("- no paired cells (base missing?)\n");
     }
