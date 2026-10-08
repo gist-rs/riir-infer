@@ -116,6 +116,21 @@ serving-shaped is ever built here or in reflex.
       **285/0** (+6 T7 tests), default lib 257/0; the real-weights run is env-gated
       `EDLM_GGUF` (skip-loud unset).)*
 - [ ] **T8** GPU eDLM forward (`riir-infer-gpu`): mask plumbing + parity vs CPU.
+      *(T7-session scoping note for whoever picks this up: the `gemma2_d2f` GPU arm
+      builds on the per-token KV-cache decoder — the WRONG shape for eDLM, which is a
+      full-sequence masked forward with no KV cache. The T7 decomposition maps eDLM to
+      GPU naturally: prefill the state (a dense bidir/causal block — existing attention
+      kernels serve) + per-branch continuations whose eligibility is exactly
+      block-causal over `[state | own branch]` (full-visible prefix + causal within —
+      `prefix`-style plumbing, not a general bool-mask kernel). Two open design
+      decisions to settle FIRST: (1) the Q8_0→GPU upload path — the GPU crate has
+      q4k/q6k/q8kv loaders but no Q8_0 dequant-on-upload; an 8B f16 upload is ~16 GB
+      (4090 24 GB fits, M3 unified memory fits) while quant-resident GPU dequant is a
+      bigger kernel; (2) which backend posture is the parity target — CubeCL (portable,
+      Metal+4090) vs the cudarc raw arm (4090-only, faster). Parity gate: the T7
+      bit-identical CPU rows are the oracle — GPU-vs-CPU needs a TOLERANCE gate
+      (different accumulation order), like the laya G5 (top-1 exact + p-drift ≤ 1e-3
+      class), NOT bit-identity.)*
 
 ## License law
 
