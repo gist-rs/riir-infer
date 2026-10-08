@@ -201,6 +201,81 @@ fn fold_matches_host_arms_mid() {
     fold.memory_cleanup();
 }
 
+/// The launch/submit overhead probe (the CUDA-graphs decision input): time
+/// N back-to-back launches of a small elementwise kernel through the
+/// cubecl submit path — the pure per-launch cost the graphs unit would
+/// amortize — plus measured uploads at the per-layer bulk sizes (the WDDM
+/// `create_from_slice` bandwidth lead from the KV-carry unit). If launches
+/// are ~µs-class, the fold pass's ~90 launches cost < 1 ms of its 12.5 —
+/// graphs are a marginal win and the unit is a recorded negative; if they
+/// are WDDM-taxed (ms-class), graphs are the next GOAT.
+#[test]
+#[ignore]
+fn probe_launch_and_upload_overhead() {
+    use cubecl::Runtime as _;
+    use riir_infer_gpu::elementwise_cubecl::GluSiluGateCubeCL;
+    use riir_infer_gpu::{ActiveRuntime, CubeCLContext, create_f32, read_f32};
+
+    let ctx = CubeCLContext::new().expect("CubeCL should initialize");
+    let client = ctx.client();
+    println!("PROVENANCE: runtime {}", ActiveRuntime::name(&client));
+
+    // ── per-launch cost: the silu gate over a small buffer, back to back.
+    // The drain rides a read_one (the crate's synchronizing read) — no
+    // separate sync API on the client surface this lane uses.
+    let rows = 8usize;
+    let i_sz = 512usize;
+    let fused = create_f32(&client, &vec![0.5f32; rows * 2 * i_sz]);
+    let out = client.empty(rows * i_sz * core::mem::size_of::<f32>());
+    let sentinel = create_f32(&client, &[0.0f32]);
+    // Warmup (kernel compile + pool growth must not ride the measurement).
+    for _ in 0..50 {
+        unsafe {
+            GluSiluGateCubeCL::launch::<ActiveRuntime>(&client, fused.clone(), out.clone(), rows, i_sz)
+        };
+    }
+    let _ = read_f32(&client, sentinel.clone());
+
+    const LAUNCHES: usize = 2000;
+    let start = std::time::Instant::now();
+    for _ in 0..LAUNCHES {
+        unsafe {
+            GluSiluGateCubeCL::launch::<ActiveRuntime>(&client, fused.clone(), out.clone(), rows, i_sz)
+        };
+    }
+    let enqueued = start.elapsed();
+    let _ = read_f32(&client, sentinel); // force the drain
+    let total = start.elapsed();
+    println!(
+        "launch cost ({n} small silu launches): enqueue {enq:.2} µs/launch, \
+         incl. device drain {tot:.2} µs/launch",
+        n = LAUNCHES,
+        enq = enqueued.as_secs_f64() * 1e6 / LAUNCHES as f64,
+        tot = total.as_secs_f64() * 1e6 / LAUNCHES as f64,
+    );
+
+    // ── upload bandwidth at the per-layer bulk sizes: 2.8 MB (one combined
+    // KV at the mid shape) and 1.0 MB (the branch pass's hidden stream).
+    for &mb in &[2.8f64, 1.0] {
+        let elems = (mb * 1e6 / 4.0) as usize;
+        let data = vec![0.0f32; elems];
+        for _ in 0..3 {
+            let _ = create_f32(&client, &data);
+        }
+        let start = std::time::Instant::now();
+        const UPLOADS: usize = 50;
+        for _ in 0..UPLOADS {
+            let _ = create_f32(&client, &data);
+        }
+        let elapsed = start.elapsed().as_secs_f64();
+        println!(
+            "upload {mb} MB × {UPLOADS}: {gbps:.2} GB/s ({ms:.3} ms per upload)",
+            gbps = (mb / 1e3) / elapsed * UPLOADS as f64,
+            ms = elapsed * 1e3 / UPLOADS as f64,
+        );
+    }
+}
+
 /// The GOAT: interleaved fold vs host over the mid shape. PRINTS the table
 /// and verdict; asserts nothing about perf (a loaded-box bar rots) —
 /// promotion evidence is the printed medians, recorded in the issue row and

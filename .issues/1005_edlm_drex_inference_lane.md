@@ -354,6 +354,39 @@ serving-shaped is ever built here or in reflex.
       Remaining T8 follow-up: CUDA graphs — the device-resident forward it
       requires now EXISTS (the fold left exactly two host reads per pass);
       the graphs unit is next.)
+      *(**T8 CUDA-GRAPHS DECISION INPUT, same day, 4090, native CUDA,
+      release:** the `probe_launch_and_upload_overhead` probe (in
+      `tests/edlm_fold_goat.rs`, `--ignored`) measured the ceiling BEFORE
+      building the unit. **Launch cost: 57 µs enqueue / 60 µs with drain**
+      per small-kernel dispatch through the cubecl submit path (2000
+      back-to-back silu launches, warmup excluded) — WDDM-taxed, the
+      riir-ai KB5121794 class. The fold pass runs ~90 launches → **≈ 5.1
+      ms of host enqueue out of the 12.5 ms pass ≈ 41%** — the host, not
+      the GPU, is the bottleneck; projected graphed pass ≈ 7.5 ms (≈
+      1.67×) with the ~6.4 ms of device work + 1.05 MB readback intact.
+      GOAT-worthy. Upload re-confirmed: `create_f32` ≈ 2.0 GB/s (1.0 MB:
+      0.50 ms, 2.8 MB: 1.36 ms) — the WDDM slow path is a persistent box
+      property, not a one-off; serving-critical for every lane that
+      uploads per pass, boot-only where weights upload once.
+      **The unit map (API verified in the vendored cubecl-runtime
+      0.11.0-pre.2):** `client.set_stream(dedicated)` → `graph_prepare()`
+      → ONE warmup pass (primes the persistent pools + compiles kernels)
+      → `start_capture()` → the identical pass (allocation-free — pool
+      reuse; mem-alloc nodes make a graph non-replayable,
+      `count_memory_nodes` refuses) → `stop_capture() -> Graph<R>` → per
+      question-set `client.write(&input_h, rows)` (no alloc — the
+      retained input handle) → `unsafe graph.replay()` →
+      `read_one(output_h)`. Design: `prepare_branch_graph` after
+      `state_prefill` pins the whole workspace (staging + per-layer kv +
+      input/output handles — the liveness law: every captured Handle
+      retained for the graph's lifetime); pos/seg/t_start/t_end are
+      shape-derived constants, uploaded once at capture; the embedding
+      rows are the per-replay input written into the retained `h_dev`; a
+      new state prefill or shape drops the graph (recapture lazily).
+      Hazards named by the API doc: same-stream refreshes only (keep the
+      client pinned to the capture stream or every write/replay/read
+      races), no alloc inside the capture window, replay failures surface
+      at the next sync/read (not at replay).)
 
 ## License law
 
