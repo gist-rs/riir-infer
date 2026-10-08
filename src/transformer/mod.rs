@@ -185,16 +185,19 @@ pub use prefill::{forward_prefill, generate_with_prefill};
 pub use dllm::forward_set_causal;
 #[cfg(feature = "dllm")]
 pub use dllm::{forward_bidirectional, forward_block_causal};
-// eDLM lane exports (Issue 1005 Phases 1+2) — the mask/row/parity machinery
-// is the lane's vocabulary; the loader + forwards + encode/pack join the
-// same surface.
+// eDLM lane exports (Issue 1005 Phases 1+2+T7) — the mask/row/parity
+// machinery is the lane's vocabulary; the loader + forwards + encode/pack
+// join the same surface, and T7 adds the state-prefix KV reuse.
 #[cfg(feature = "edlm")]
 pub use edlm::{
-    BranchRow, ContextOverflow, EDLM_MARKERS, EdlmEncodeTokenizer, EdlmGgufModel, EdlmLayerWeights,
-    EdlmLimits, EdlmPointerHead, EdlmQuestion, EdlmRecord, EdlmWeights, OPT_DECIDE, OPT_NONE,
-    PackedEncoding, branch_mask, defuse_special_spellings, encode_packed, forward_edlm_packed,
-    forward_edlm_packed_streaming, forward_edlm_rows, forward_edlm_rows_streaming,
-    load_edlm_weights_gguf, row_branch_mask, rows_of, user_tokens,
+    BranchRow, ContextOverflow, EDLM_MARKERS, EDLM_PREFIX_MIN_TOKENS, EdlmEncodeTokenizer,
+    EdlmGgufModel, EdlmLayerKv, EdlmLayerWeights, EdlmLimits, EdlmPointerHead, EdlmQuestion,
+    EdlmRecord, EdlmStateKv, EdlmWeights, OPT_DECIDE, OPT_NONE, PackedEncoding, branch_mask,
+    defuse_special_spellings, edlm_state_prefill, edlm_state_prefill_streaming, encode_packed,
+    forward_edlm_branches_cached, forward_edlm_branches_cached_streaming, forward_edlm_packed,
+    forward_edlm_packed_streaming, forward_edlm_rows, forward_edlm_rows_cached,
+    forward_edlm_rows_cached_streaming, forward_edlm_rows_streaming, load_edlm_weights_gguf,
+    row_branch_mask, rows_of, user_tokens,
 };
 #[cfg(feature = "raven")]
 pub use katgpt_transformer::RavenKVCache;

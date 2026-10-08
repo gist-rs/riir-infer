@@ -39,7 +39,10 @@
 //!   one-layer-at-a-time dequant scratch: O(file) RAM) + the env-gated
 //!   sample-request test against their published outputs.
 //!
-//! Phase 3 (separate units): state prefix KV reuse + GPU forward (T7/T8).
+//! Phase 3 (this module, T7): state-prefix KV reuse — the state segment's
+//! per-layer K/V computed once ([`EdlmStateKv`]) and every question's branch
+//! run as a continuation attending the cached prefix, exact by construction
+//! (state never sees branches). T8 (GPU forward) is a separate unit.
 //!
 //! Reference distillation: the subagent note on `nace-ai/drex-dlm` @ `6c63df2`
 //! (`code/kev/model.py::branch_mask_batch` + `rows_of` + `PointerHead`) and
@@ -895,29 +898,37 @@ fn edlm_layer_forward(
     s: &mut EdlmLayerScratch,
 ) {
     let l = pos.len();
+    edlm_layer_kv(layer, config, hidden, pos, 0, s);
+    edlm_layer_attend(layer, config, hidden, pos, allow, l, s);
+}
+
+/// Phase A — K/V for every position (mask-independent), written to cache
+/// slots `kv_base..kv_base + pos.len()`. Split from [`edlm_layer_forward`]
+/// so the state-prefix prefill can capture K/V per layer before the
+/// attention runs (T7); the plain path passes `kv_base = 0`.
+fn edlm_layer_kv(
+    layer: &EdlmLayerWeights,
+    config: &crate::types::Config,
+    hidden: &[f32],
+    pos: &[usize],
+    kv_base: usize,
+    s: &mut EdlmLayerScratch,
+) {
+    let l = pos.len();
     let n = config.n_embd;
     let hd = config.head_dim;
-    let q_dim = config.n_head * hd;
     let kvd = crate::types::kv_dim(config);
     let n_kv = config.n_kv_head;
     let EdlmLayerScratch {
         x,
-        xr,
-        q,
         k,
         v,
-        attn_out,
-        scores,
         key_cache,
         value_cache,
-        gate,
-        up,
-        mlp_out,
         freq,
-        scale,
+        ..
     } = s;
 
-    // Phase A: K/V for every position (mask-independent).
     for p in 0..l {
         x.copy_from_slice(&hidden[p * n..(p + 1) * n]);
         crate::types::rmsnorm_with_gamma_eps(x, &layer.base.input_norm, config.rms_norm_eps);
@@ -927,11 +938,51 @@ fn edlm_layer_forward(
         // K buffer only — an empty second slice applies zero K heads).
         qk_norm_inplace(k, &layer.k_norm, n_kv, hd, config.rms_norm_eps);
         crate::rope::apply_rope_with_freq(k, &mut [], pos[p], hd, freq.as_slice());
-        key_cache[p * kvd..(p + 1) * kvd].copy_from_slice(k);
-        value_cache[p * kvd..(p + 1) * kvd].copy_from_slice(v);
+        let slot = (kv_base + p) * kvd;
+        key_cache[slot..slot + kvd].copy_from_slice(k);
+        value_cache[slot..slot + kvd].copy_from_slice(v);
     }
+}
 
-    // Phase B: Q per position + masked GQA attention.
+/// Phase B — Q per position + masked GQA attention over `key_count` cached
+/// keys, then the SwiGLU MLP, mutating `hidden` in place. Query `p` reads
+/// allow row `p` (`[key_count]` wide); the keys it may see span the whole
+/// cache from slot 0 — including state slots written by a preceding Phase A
+/// at `kv_base > 0` (the T7 continuation), which this half never needs
+/// itself: the plain path passes `key_count = pos.len()`, the continuation
+/// the combined `state_len + branch_len`.
+#[allow(clippy::too_many_arguments)]
+fn edlm_layer_attend(
+    layer: &EdlmLayerWeights,
+    config: &crate::types::Config,
+    hidden: &mut [f32],
+    pos: &[usize],
+    allow: &[bool],
+    key_count: usize,
+    s: &mut EdlmLayerScratch,
+) {
+    let l = pos.len();
+    let n = config.n_embd;
+    let hd = config.head_dim;
+    let q_dim = config.n_head * hd;
+    let kvd = crate::types::kv_dim(config);
+    let n_kv = config.n_kv_head;
+    let EdlmLayerScratch {
+        x,
+        xr,
+        q,
+        attn_out,
+        scores,
+        key_cache,
+        value_cache,
+        gate,
+        up,
+        mlp_out,
+        freq,
+        scale,
+        ..
+    } = s;
+
     for p in 0..l {
         x.copy_from_slice(&hidden[p * n..(p + 1) * n]);
         // Residual saved PRE-norm — the attention block adds back the
@@ -957,7 +1008,7 @@ fn edlm_layer_forward(
                     kv_group * hd,
                     kvd,
                     hd,
-                    l,
+                    key_count,
                     *scale,
                     allow,
                     p,
@@ -1232,6 +1283,366 @@ pub fn forward_edlm_rows(
         out.push(forward_edlm_packed(weights, config, &ids, &pos, &allow));
     }
     out
+}
+
+// ── T7 — state-prefix KV reuse ──────────────────────────────────────
+
+/// The state-prefix reuse crossover (their `prefix_min_tokens` law): cache
+/// the state K/V only from this many state tokens — below it the branch-only
+/// pass is not faster than one whole-sequence pass (per-op overhead; their
+/// MPS measurement, the same per-op class on our CPU lane). Their hybrid
+/// (recurrent-layer) backbones always cache (`0`); this lane is dense
+/// attention-only, so 384 — their training `MAX_STATE`.
+pub const EDLM_PREFIX_MIN_TOKENS: usize = 384;
+
+/// One layer's cached state K/V, each `[state_len * kvd]` row-major (the
+/// slot order matches the state segment's token order).
+#[derive(Debug, Clone)]
+pub struct EdlmLayerKv {
+    pub k: Vec<f32>,
+    pub v: Vec<f32>,
+}
+
+/// The cached state prefix (T7): per-layer K/V for the state segment,
+/// computed once and reused across every question's branch row.
+///
+/// Exact by construction — the state never sees branches (the packed mask
+/// law), so the state's hidden states and K/V are identical with or without
+/// the branches present; the branch continuation attends the cached keys in
+/// the same ascending order the whole-sequence pass would. Cache footprint:
+/// `n_layer * 2 * state_len * kvd * 4` bytes (~113 MB at the 384-token
+/// training posture on the 8B release; ~4.8 GB at a 16K serving state — the
+/// caller's choice via the state length it prefills).
+#[derive(Debug, Clone)]
+pub struct EdlmStateKv {
+    pub state_len: usize,
+    pub kvd: usize,
+    /// The state token ids the cache was built from — the stale-cache
+    /// content check (a same-length different-state cache must REFUSE, never
+    /// silently serve).
+    pub state_ids: Vec<usize>,
+    /// One entry per layer, in layer order.
+    pub layers: Vec<EdlmLayerKv>,
+    /// Post-final-norm state hidden states `[state_len * n_embd]` — the row
+    /// form's state prefix for free (the pointer head reads markers in the
+    /// branches, so this is a caller convenience and the drop-in row shape).
+    pub hidden: Vec<f32>,
+}
+
+impl EdlmStateKv {
+    /// Refuse a stale or mismatched cache: same state token content, same
+    /// geometry, same layer count. A cache that does not match MUST error,
+    /// never silently reuse (wrongness, not a fast path).
+    pub fn check_matches(&self, config: &crate::types::Config, state_ids: &[usize]) -> Result<()> {
+        if self.state_len != state_ids.len() {
+            bail!(
+                "state-prefix cache holds {} state tokens, encoding has {}",
+                self.state_len,
+                state_ids.len()
+            );
+        }
+        if self.kvd != crate::types::kv_dim(config) {
+            bail!(
+                "state-prefix cache kvd {} != config kv_dim {}",
+                self.kvd,
+                crate::types::kv_dim(config)
+            );
+        }
+        if self.state_ids != state_ids {
+            bail!("stale state-prefix cache: state token content differs");
+        }
+        if self.layers.len() != config.n_layer {
+            bail!(
+                "state-prefix cache holds {} layers, config has {}",
+                self.layers.len(),
+                config.n_layer
+            );
+        }
+        Ok(())
+    }
+}
+
+/// Branch-continuation attention eligibility: branch query `p` attends ALL
+/// state keys (they precede every branch query — posture-independent: the
+/// `state_bidir` flag only widens state↔state, and branch rows never contain
+/// state queries) plus its own branch prefix `j <= p`. Row-major
+/// `[branch_len * (state_len + branch_len)]`, one row per branch query.
+fn branch_continuation_allow(state_len: usize, branch_len: usize) -> Vec<bool> {
+    let l = state_len + branch_len;
+    let mut out = vec![false; branch_len * l];
+    for p in 0..branch_len {
+        let row = &mut out[p * l..(p + 1) * l];
+        row[..state_len].fill(true);
+        row[state_len..state_len + p + 1].fill(true);
+    }
+    out
+}
+
+/// Run the state tokens only and capture their per-layer K/V (their
+/// `prefix`): the state-only mask is `branch_mask` over an all-state segment
+/// — causal, widened to state↔state bidirectional when `state_bidir` —
+/// exactly the state block the row form would compute. The returned
+/// [`EdlmStateKv`] feeds [`forward_edlm_branches_cached`].
+pub fn edlm_state_prefill(
+    weights: &EdlmWeights,
+    config: &crate::types::Config,
+    state_ids: &[usize],
+    state_pos: &[usize],
+    state_bidir: bool,
+) -> EdlmStateKv {
+    let sl = state_ids.len();
+    assert_eq!(state_pos.len(), sl, "state_pos must match state_ids");
+    assert!(
+        sl > 0 && sl <= config.block_size,
+        "state len {sl} out of range"
+    );
+    let kvd = crate::types::kv_dim(config);
+    let mut allow = vec![false; sl * sl];
+    branch_mask(&vec![0i32; sl], state_bidir, None, &mut allow);
+    let mut scratch = EdlmLayerScratch::new(config, sl);
+    let mut hidden = edlm_embed(&weights.wte, state_ids, config.n_embd);
+    let mut layers = Vec::with_capacity(weights.layers.len());
+    for layer in &weights.layers {
+        edlm_layer_kv(layer, config, &hidden, state_pos, 0, &mut scratch);
+        layers.push(EdlmLayerKv {
+            k: scratch.key_cache.clone(),
+            v: scratch.value_cache.clone(),
+        });
+        edlm_layer_attend(
+            layer,
+            config,
+            &mut hidden,
+            state_pos,
+            &allow,
+            sl,
+            &mut scratch,
+        );
+    }
+    edlm_final_norm(&mut hidden, &weights.final_norm, config);
+    EdlmStateKv {
+        state_len: sl,
+        kvd,
+        state_ids: state_ids.to_vec(),
+        layers,
+        hidden,
+    }
+}
+
+/// [`edlm_state_prefill`] over a quant-resident model — one layer dequanted
+/// at a time, the same [`EdlmStateKv`].
+pub fn edlm_state_prefill_streaming(
+    model: &EdlmGgufModel,
+    state_ids: &[usize],
+    state_pos: &[usize],
+    state_bidir: bool,
+) -> Result<EdlmStateKv> {
+    let config = &model.config;
+    let sl = state_ids.len();
+    assert_eq!(state_pos.len(), sl, "state_pos must match state_ids");
+    assert!(
+        sl > 0 && sl <= config.block_size,
+        "state len {sl} out of range"
+    );
+    let kvd = crate::types::kv_dim(config);
+    let mut allow = vec![false; sl * sl];
+    branch_mask(&vec![0i32; sl], state_bidir, None, &mut allow);
+    let mut scratch = EdlmLayerScratch::new(config, sl);
+    let mut hidden = edlm_embed(&model.wte, state_ids, config.n_embd);
+    let mut layers = Vec::with_capacity(config.n_layer);
+    for i in 0..config.n_layer {
+        let layer = dequant_edlm_layer(&model.gguf, i, config)?;
+        edlm_layer_kv(&layer, config, &hidden, state_pos, 0, &mut scratch);
+        layers.push(EdlmLayerKv {
+            k: scratch.key_cache.clone(),
+            v: scratch.value_cache.clone(),
+        });
+        edlm_layer_attend(
+            &layer,
+            config,
+            &mut hidden,
+            state_pos,
+            &allow,
+            sl,
+            &mut scratch,
+        );
+    }
+    edlm_final_norm(&mut hidden, &model.final_norm, config);
+    Ok(EdlmStateKv {
+        state_len: sl,
+        kvd,
+        state_ids: state_ids.to_vec(),
+        layers,
+        hidden,
+    })
+}
+
+/// Seed the scratch's combined key/value caches with a layer's cached state
+/// K/V (the continuation writes its own branch K/V after the state slots).
+fn seed_state_kv(scratch: &mut EdlmLayerScratch, kv: &EdlmLayerKv, sl: usize, kvd: usize) {
+    debug_assert_eq!(kv.k.len(), sl * kvd);
+    debug_assert_eq!(kv.v.len(), sl * kvd);
+    scratch.key_cache[..sl * kvd].copy_from_slice(&kv.k);
+    scratch.value_cache[..sl * kvd].copy_from_slice(&kv.v);
+}
+
+/// Branch rows continuing a cached state prefix (their
+/// `_branch_rows_from_prefix`): the plain [`forward_edlm_rows`] layout minus
+/// the per-row state recompute. `cache` must be this encoding's state prefix
+/// ([`EdlmStateKv::check_matches`] refuses a stale one). Returns the same
+/// per-row `[row_len * n_embd]` hidden states as the plain row form — the
+/// state prefix comes from the cache, so the output is a drop-in.
+///
+/// The option-isolation caveat carries from the plain row form: isolation is
+/// a packed-mask posture and cannot be expressed as rows.
+pub fn forward_edlm_branches_cached(
+    weights: &EdlmWeights,
+    config: &crate::types::Config,
+    enc: &PackedEncoding,
+    rows: &[BranchRow],
+    cache: &EdlmStateKv,
+) -> Result<Vec<Vec<f32>>> {
+    let sl = enc.state_len;
+    cache.check_matches(config, &enc.ids[..sl])?;
+    let n = config.n_embd;
+    let kvd = crate::types::kv_dim(config);
+    let mut out = Vec::with_capacity(rows.len());
+    for row in rows {
+        let bl = row.branch_len();
+        let key_count = sl + bl;
+        let allow = branch_continuation_allow(sl, bl);
+        let mut scratch = EdlmLayerScratch::new(config, key_count);
+        let mut hidden = edlm_embed(&weights.wte, &enc.ids[row.start..row.end], n);
+        for (i, layer) in weights.layers.iter().enumerate() {
+            seed_state_kv(&mut scratch, &cache.layers[i], sl, kvd);
+            edlm_layer_kv(
+                layer,
+                config,
+                &hidden,
+                &enc.pos[row.start..row.end],
+                sl,
+                &mut scratch,
+            );
+            edlm_layer_attend(
+                layer,
+                config,
+                &mut hidden,
+                &enc.pos[row.start..row.end],
+                &allow,
+                key_count,
+                &mut scratch,
+            );
+        }
+        edlm_final_norm(&mut hidden, &weights.final_norm, config);
+        let mut full = Vec::with_capacity((sl + bl) * n);
+        full.extend_from_slice(&cache.hidden);
+        full.extend_from_slice(&hidden);
+        out.push(full);
+    }
+    Ok(out)
+}
+
+/// [`forward_edlm_branches_cached`] over a quant-resident model.
+pub fn forward_edlm_branches_cached_streaming(
+    model: &EdlmGgufModel,
+    enc: &PackedEncoding,
+    rows: &[BranchRow],
+    cache: &EdlmStateKv,
+) -> Result<Vec<Vec<f32>>> {
+    let config = &model.config;
+    let sl = enc.state_len;
+    cache.check_matches(config, &enc.ids[..sl])?;
+    let n = config.n_embd;
+    let kvd = crate::types::kv_dim(config);
+    let mut out = Vec::with_capacity(rows.len());
+    for row in rows {
+        let bl = row.branch_len();
+        let key_count = sl + bl;
+        let allow = branch_continuation_allow(sl, bl);
+        let mut scratch = EdlmLayerScratch::new(config, key_count);
+        let mut hidden = edlm_embed(&model.wte, &enc.ids[row.start..row.end], n);
+        for i in 0..config.n_layer {
+            let layer = dequant_edlm_layer(&model.gguf, i, config)?;
+            seed_state_kv(&mut scratch, &cache.layers[i], sl, kvd);
+            edlm_layer_kv(
+                &layer,
+                config,
+                &hidden,
+                &enc.pos[row.start..row.end],
+                sl,
+                &mut scratch,
+            );
+            edlm_layer_attend(
+                &layer,
+                config,
+                &mut hidden,
+                &enc.pos[row.start..row.end],
+                &allow,
+                key_count,
+                &mut scratch,
+            );
+        }
+        edlm_final_norm(&mut hidden, &model.final_norm, config);
+        let mut full = Vec::with_capacity((sl + bl) * n);
+        full.extend_from_slice(&cache.hidden);
+        full.extend_from_slice(&hidden);
+        out.push(full);
+    }
+    Ok(out)
+}
+
+/// The one-call row form with the state-prefix reuse crossover: at or above
+/// `prefix_min_tokens` state tokens the state K/V is prefilled once and the
+/// branches run as continuations; below it the plain [`forward_edlm_rows`]
+/// pass is cheaper (the [`EDLM_PREFIX_MIN_TOKENS`] law). Output is the
+/// plain row form's, bit-identical either way.
+pub fn forward_edlm_rows_cached(
+    weights: &EdlmWeights,
+    config: &crate::types::Config,
+    enc: &PackedEncoding,
+    rows: &[BranchRow],
+    state_bidir: bool,
+    prefix_min_tokens: usize,
+) -> Vec<Vec<f32>> {
+    if rows.is_empty() {
+        return Vec::new();
+    }
+    if enc.state_len >= prefix_min_tokens {
+        let cache = edlm_state_prefill(
+            weights,
+            config,
+            &enc.ids[..enc.state_len],
+            &enc.pos[..enc.state_len],
+            state_bidir,
+        );
+        forward_edlm_branches_cached(weights, config, enc, rows, &cache)
+            .expect("state cache built from this encoding")
+    } else {
+        forward_edlm_rows(weights, config, enc, rows, state_bidir)
+    }
+}
+
+/// [`forward_edlm_rows_cached`] over a quant-resident model.
+pub fn forward_edlm_rows_cached_streaming(
+    model: &EdlmGgufModel,
+    enc: &PackedEncoding,
+    rows: &[BranchRow],
+    state_bidir: bool,
+    prefix_min_tokens: usize,
+) -> Result<Vec<Vec<f32>>> {
+    if rows.is_empty() {
+        return Ok(Vec::new());
+    }
+    if enc.state_len >= prefix_min_tokens {
+        let cache = edlm_state_prefill_streaming(
+            model,
+            &enc.ids[..enc.state_len],
+            &enc.pos[..enc.state_len],
+            state_bidir,
+        )?;
+        forward_edlm_branches_cached_streaming(model, enc, rows, &cache)
+    } else {
+        forward_edlm_rows_streaming(model, enc, rows, state_bidir)
+    }
 }
 
 // ── tests ───────────────────────────────────────────────────────────
@@ -2172,5 +2583,195 @@ mod tests {
                 "question {k}: packed-vs-row prob diff {pdiff}"
             );
         }
+    }
+
+    // ── T7 — state-prefix KV reuse ─────────────────────────────────
+
+    #[test]
+    fn state_prefill_matches_standalone_state_forward() {
+        let config = tiny_config();
+        let weights = tiny_weights(&config);
+        let enc = sample_encoding();
+        let sl = enc.state_len;
+        for bidir in [true, false] {
+            let cache =
+                edlm_state_prefill(&weights, &config, &enc.ids[..sl], &enc.pos[..sl], bidir);
+            let mut s_allow = vec![false; sl * sl];
+            branch_mask(&enc.seg[..sl], bidir, None, &mut s_allow);
+            let standalone =
+                forward_edlm_packed(&weights, &config, &enc.ids[..sl], &enc.pos[..sl], &s_allow);
+            assert_eq!(cache.state_len, sl);
+            assert_eq!(cache.kvd, crate::types::kv_dim(&config));
+            assert_eq!(cache.layers.len(), config.n_layer);
+            assert_eq!(
+                cache.hidden, standalone,
+                "prefill state hiddens must be bit-identical to the standalone state forward \
+                 (bidir={bidir})"
+            );
+        }
+    }
+
+    #[test]
+    fn branch_continuation_allow_law() {
+        let allow = branch_continuation_allow(2, 3);
+        // l = 5; branch queries are rows 0..3 (branch-local), state keys 0..2.
+        let at = |p: usize, j: usize| allow[p * 5 + j];
+        // Every branch query sees every state key.
+        for p in 0..3 {
+            for j in 0..2 {
+                assert!(
+                    at(p, j),
+                    "state key {j} must be visible to branch query {p}"
+                );
+            }
+        }
+        // Causal within the branch: query p sees branch keys ..=p, nothing later.
+        assert!(at(0, 2) && !at(0, 3) && !at(0, 4));
+        assert!(at(1, 2) && at(1, 3) && !at(1, 4));
+        assert!(at(2, 2) && at(2, 3) && at(2, 4));
+    }
+
+    #[test]
+    fn cached_rows_bit_identical_to_plain() {
+        let config = tiny_config();
+        let weights = tiny_weights(&config);
+        let enc = sample_encoding();
+        let rows = rows_of(&enc).expect("rows");
+        for bidir in [true, false] {
+            let plain = forward_edlm_rows(&weights, &config, &enc, &rows, bidir);
+            // Forced cache: the tiny state (5 tokens) is far below the 384
+            // crossover, so prefix_min_tokens = 0 selects the cache path.
+            let cached = forward_edlm_rows_cached(&weights, &config, &enc, &rows, bidir, 0);
+            assert_eq!(
+                cached, plain,
+                "cached rows must be BIT-identical to the plain row form (bidir={bidir})"
+            );
+            // The crossover wiring: below the threshold the one-call form is
+            // the plain path.
+            let below = forward_edlm_rows_cached(&weights, &config, &enc, &rows, bidir, usize::MAX);
+            assert_eq!(
+                below, plain,
+                "below-threshold rows must equal plain (bidir={bidir})"
+            );
+        }
+    }
+
+    #[test]
+    fn stale_state_cache_refuses() {
+        let config = tiny_config();
+        let weights = tiny_weights(&config);
+        let enc = sample_encoding();
+        let sl = enc.state_len;
+        let rows = rows_of(&enc).expect("rows");
+        let cache = edlm_state_prefill(&weights, &config, &enc.ids[..sl], &enc.pos[..sl], true);
+        // Different state CONTENT, same length: must refuse, never serve.
+        let mut swapped = sample_encoding();
+        swapped.ids[0] = (swapped.ids[0] + 1) % config.vocab_size;
+        let r = forward_edlm_branches_cached(&weights, &config, &swapped, &rows, &cache);
+        assert!(
+            r.is_err(),
+            "a same-length different-state cache must refuse"
+        );
+        // Different state LENGTH: must refuse.
+        let mut longer = sample_encoding();
+        longer.ids.insert(0, 7);
+        longer.pos.insert(0, 0);
+        longer.seg.insert(0, 0);
+        longer.state_len += 1;
+        let cache2 = edlm_state_prefill(
+            &weights,
+            &config,
+            &longer.ids[..longer.state_len],
+            &longer.pos[..longer.state_len],
+            true,
+        );
+        let r = forward_edlm_branches_cached(&weights, &config, &enc, &rows, &cache2);
+        assert!(r.is_err(), "a different state_len cache must refuse");
+        // The matching cache passes the check (control arm).
+        let r = forward_edlm_branches_cached(&weights, &config, &enc, &rows, &cache);
+        assert!(r.is_ok(), "the matching cache must be accepted");
+    }
+
+    #[test]
+    fn rows_cached_empty_rows_short_circuit() {
+        let config = tiny_config();
+        let weights = tiny_weights(&config);
+        let enc = sample_encoding();
+        let out = forward_edlm_rows_cached(&weights, &config, &enc, &[], true, 0);
+        assert!(out.is_empty(), "no rows -> no output, no prefill");
+    }
+
+    /// T7 on the REAL Q8_0 weights: cached-vs-plain row parity (bit-identical
+    /// — the exactness claim, proven not tolerated) plus the reuse timing.
+    /// The published sample's state is ~35 tokens — BELOW the 384 crossover —
+    /// so this exercises the small-state posture honestly; the numbers are
+    /// disclosed, never asserted (box state is part of every latency claim).
+    /// Skip-loud without EDLM_GGUF (CC BY-NC weights, local bench only).
+    #[test]
+    fn state_prefix_cache_real_weights_env_gated() {
+        let path = match std::env::var("EDLM_GGUF") {
+            Ok(p) if !p.is_empty() => p,
+            _ => {
+                eprintln!(
+                    "SKIP: EDLM_GGUF unset — set it to drex-dlm-Q8_0.gguf for the T7 parity run"
+                );
+                return;
+            }
+        };
+        let model = EdlmGgufModel::open(std::path::Path::new(&path)).expect("open edlm gguf");
+        let tok = model.tokenizer().expect("gguf tokenizer");
+        let enc = encode_packed(
+            &tok,
+            &published_sample_record(),
+            EdlmLimits::serving(16_384),
+            true,
+            false,
+        )
+        .expect("encode");
+        let rows = rows_of(&enc).expect("rows");
+
+        let t0 = std::time::Instant::now();
+        let plain = forward_edlm_rows_streaming(&model, &enc, &rows, true).expect("plain rows");
+        let plain_t = t0.elapsed();
+
+        let t1 = std::time::Instant::now();
+        let cache = edlm_state_prefill_streaming(
+            &model,
+            &enc.ids[..enc.state_len],
+            &enc.pos[..enc.state_len],
+            true,
+        )
+        .expect("prefill");
+        let prefill_t = t1.elapsed();
+        let t2 = std::time::Instant::now();
+        let cached =
+            forward_edlm_branches_cached_streaming(&model, &enc, &rows, &cache).expect("branches");
+        let branches_t = t2.elapsed();
+
+        for (k, row) in rows.iter().enumerate() {
+            let _ = row;
+            assert_eq!(
+                cached[k], plain[k],
+                "question {k}: cached row hiddens must be BIT-identical to plain"
+            );
+        }
+        let cached_t = prefill_t + branches_t;
+        println!(
+            "state-prefix reuse: state {} tokens x {} questions — plain {:?} vs cached {:?} \
+             (prefill {:?} + branches {:?}, {:.2}x; crossover {} -> {} path)",
+            enc.state_len,
+            rows.len(),
+            plain_t,
+            cached_t,
+            prefill_t,
+            branches_t,
+            plain_t.as_secs_f64() / cached_t.as_secs_f64().max(1e-9),
+            EDLM_PREFIX_MIN_TOKENS,
+            if enc.state_len >= EDLM_PREFIX_MIN_TOKENS {
+                "cache"
+            } else {
+                "plain"
+            },
+        );
     }
 }
