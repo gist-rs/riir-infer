@@ -1098,7 +1098,10 @@ pub fn forward_edlm_packed(
 /// scattered rows, and the one-time whole-table dequant is cheap). Fully
 /// dequantizing the 8B Q8_0 release would hold ~32 GB of f32 instead.
 pub struct EdlmGgufModel {
-    gguf: crate::gguf_loader::GgufFile,
+    /// The open mmap — `pub` for the GPU lane (Issue 1005 T8): the f16
+    /// upload path dequants the same tensors the streaming CPU forward
+    /// reads, from the same handle (one open, two consumers).
+    pub gguf: crate::gguf_loader::GgufFile,
     pub config: crate::types::Config,
     pub wte: Vec<f32>,
     pub final_norm: Vec<f32>,
@@ -1236,7 +1239,11 @@ fn dequant_edlm_layer(
 }
 
 /// Per-head RMSNorm in place over a concatenated multi-head buffer.
-fn qk_norm_inplace(buf: &mut [f32], gamma: &[f32], n_heads: usize, head_dim: usize, eps: f64) {
+///
+/// `pub` for the GPU eDLM lane (riir-infer-gpu Issue 1005 T8): the hybrid
+/// forward runs qk-norm host-side between the qkv readback and the attention
+/// upload — the exact same helper, never a copy.
+pub fn qk_norm_inplace(buf: &mut [f32], gamma: &[f32], n_heads: usize, head_dim: usize, eps: f64) {
     debug_assert_eq!(buf.len(), n_heads * head_dim);
     debug_assert_eq!(gamma.len(), head_dim);
     for h in 0..n_heads {

@@ -1,8 +1,13 @@
 # Issue 1005 — eDLM (Drex DLM) inference lane: GGUF arch + segment block-causal mask + pointer head
 
-**Status:** OPEN — T7 LANDED 2026-10-08 (this session): state-prefix KV reuse — exact
-(bit-identical on the real Q8_0) and **2.93×** on the published sample under load; the
-landing note is on the T7 row. T8 (GPU eDLM forward) remains the phase's open unit.
+**Status:** OPEN — T8 LANDED 2026-10-08 (this session): the GPU eDLM forward (`riir-infer-gpu`,
+`edlm_gpu` feature) — f16-resident weights + multi-query GQA attention with per-row visibility
+bounds; tiny-weights parity vs the CPU T7 cached path green on BOTH CubeCL runtimes
+(wgpu-spirv AND native CUDA on the 4090, same drift class); the real-Q8_0 published-sample
+gate is env-gated `EDLM_GGUF` (skip-loud unset — the 8.19 GB GGUF lives on the M3's SDXC1TB
+today, this box carries only the BF16 shards); the landing note is on the T8 row. T7 LANDED
+2026-10-08: state-prefix KV reuse — exact (bit-identical on the real Q8_0) and **2.93×** on
+the published sample under load; the landing note is on the T7 row.
 Phase 2 LANDED 2026-10-08 (this session): T4 complete; T5's GGUF half complete (`head.pt` torch-pickle reader deferred — the GGUF embeds the same head); T6's published-constants leg PASSED on the real `drex-dlm-Q8_0.gguf` (87 tokens exact, worst drift 0.0103, argmaxes exact), its Python-runner corpus leg deferred (BF16 shards + torch oracle — a separate unit). T4 marker encode/pack — `EDLM_MARKERS` (the five reused Qwen specials, resolved via vocab lookup, never hardcoded ids; the ids pinned env-gated: 151659/151660/151648/151649/151661), `defuse_special_spellings` (the `<|name|>` → `<¦name¦>` anti-forgery rewrite, `[A-Za-z0-9_]+` names only, clean-room scanner), `EdlmLimits` (384/1024/2048 training + `serving(context)` posture), `encode_packed` (branch layout law pinned on a mock tokenizer: markers, seg, branch-local positions, opt_idx ends incl. span markers, strict over-context `ContextOverflow` refusal, non-strict state crop DISCLOSED via `PackedEncoding::state_truncated`, branch overflow refuses in BOTH modes, `option_isolation` shared-position + fixed-decide law); `PackedEncoding` grew `opt` + `state_truncated` (validate extended; hand-built test literals updated); `BpeTokenizer` gained `pub token_to_id` + `pub(crate) encode_no_special` (the `EdlmEncodeTokenizer` trait seams the encode off the concrete tokenizer — mock-tested). T5 pointer head: the GGUF-tensor load path (`edlm_pointer_head_from_gguf`, factored shared with the Phase 1 loader) + `EdlmPointerHead::question_probs` (Phase 1); **`head.pt` torch-pickle reader DEFERRED** — the serving artifact is the GGUF (the conversion embeds the same head); file a follow-up if a BF16-checkpoint path is ever needed. T6 end-to-end parity **PASSES on the real `drex-dlm-Q8_0.gguf`**: `EdlmGgufModel` (quant-resident mmap model — the forward dequants ONE layer at a time into a reused f32 scratch via the same `edlm_layer_forward` body the loaded path uses; O(file) evictable RAM + ~0.8 GB scratch vs ~32 GB fully-dequantized — the M3 box had ~9 GB free) + `forward_edlm_packed_streaming`/`forward_edlm_rows_streaming`; the packed-vs-row refactor is behavior-preserving (Phase 1 parity pins re-run green). Measured (94.8 s release, state_bidir=true = the released checkpoint posture): encode **87 tokens EXACT** (their published input-token count), team [0.9668, 0.0011, 0.0321] vs published [0.9641, 0.001, 0.0349], refund [0.1505, 0.8495] vs [0.1452, 0.8548], urgency [0.1968, 0.2179, 0.5852] vs [0.1876, 0.2169, 0.5955] — **worst drift 0.0103 (urgency), all three argmaxes exact** (billing / yes / Urgent); tolerance law = argmax EXACT + per-option < 0.015 (their own GGUF-vs-BF16 cross-runner spread: 0.0050 sample / 0.0094 255-option — same class; ours is a second compute path over the same Q8_0 blocks: f32-throughout vs their f16 accum). Packed-vs-row on REAL weights: hidden < 1e-4, probs < 1e-3. En-route heal (pre-existing at HEAD, all-features posture): `examples/requant_q4_prefill.rs` needless_range_loop (manual — healer declines the class). Gates: clippy -D at default/edlm/all-features/no-default + --all-targets; edlm lib **279/0** (+9 T4 tests), default lib 257/0; the T6 run is env-gated `EDLM_GGUF` (skip-loud unset).
 
 Phase 1 T1–T3 LANDED 2026-10-08 (prior session): `edlm` feature (pure-local, default-off) + `src/transformer/edlm.rs` — T1 `load_edlm_weights_gguf` (arch `edlm`; metadata prefix `edlm.*` header-verified against the real `drex-dlm-Q8_0.gguf` 8.19 GB @ SDXC1TB/models/drex-dlm/q8_0 — 36L/4096/12288/32:8/128/151936/32768/1e-6/1e6; tensor map `token_embd`/`output_norm`/`output`(opt)/`blk.N.{attn_norm,attn_q,attn_k,attn_v,attn_output,attn_q_norm,attn_k_norm,ffn_norm,ffn_gate,ffn_up,ffn_down}`/`pointer.{q,k}.{weight,bias}`/`pointer.temperature.weight` (F16 weights, F32 norms+biases+temp; NE 1); NEOX RoPE ⇒ **NO Q/K unpermute** (the `qwen2` loader posture — the fork maps `LLM_ARCH_EDLM` to `LLAMA_ROPE_TYPE_NEOX`)); T2 `branch_mask` + `row_branch_mask` (the 4-quadrant law + `state_bidir` OR-ed independently of causality — the reference order base→bidir-OR→opts-AND→diag; pads invisible keys/dead queries; option-isolation conjunct) over `attention_head_masked` (new ungated substrate in attention.rs, eligibility discipline mirroring `attention_head_set_causal`); T3 `PackedEncoding`/`rows_of`/`forward_edlm_rows` + `forward_edlm_packed` (Qwen3 block: QK-RMSNorm per head pre-RoPE, SwiGLU, GQA, no KV cache, final-norm hidden states — no lm_head). **Packed-vs-row parity is EXACT** (worst diff 0.0 < 1e-5, both `state_bidir` postures) after two measured catches: the attention residual must be the PRE-norm stream saved per position (the Phase-A-saved normed-`xr` bug made state depend on the sequence's LAST token — single-question parity was blind to it, the two-question diagnostic pinned it; the diagnostic tests STAY as regression pins), and `forward_edlm_rows` must mirror the caller's `state_bidir` (parity holds in each posture, never across). Gates: clippy -D at default/edlm/all-features/no-default postures + `--all-targets`; default lib 257/0; edlm lib 270/0 incl. the env-gated real-GGUF header check (`EDLM_GGUF`, skip-loud unset). Weights fetched to SDXC1TB (CC BY-NC — local bench/comparison only); reference pinned `nace-ai/drex-dlm` @ `6c63df2` + their `llama.cpp` branch `edlm` @ `cdcf65d` cloned under `.raw/` (MIT code — reference reading only; rm when the lane closes).
@@ -115,22 +120,49 @@ serving-shaped is ever built here or in reflex.
       clippy -D at default/edlm/all-features/no-default + `--all-targets`; edlm lib
       **285/0** (+6 T7 tests), default lib 257/0; the real-weights run is env-gated
       `EDLM_GGUF` (skip-loud unset).)*
-- [ ] **T8** GPU eDLM forward (`riir-infer-gpu`): mask plumbing + parity vs CPU.
-      *(T7-session scoping note for whoever picks this up: the `gemma2_d2f` GPU arm
-      builds on the per-token KV-cache decoder — the WRONG shape for eDLM, which is a
-      full-sequence masked forward with no KV cache. The T7 decomposition maps eDLM to
-      GPU naturally: prefill the state (a dense bidir/causal block — existing attention
-      kernels serve) + per-branch continuations whose eligibility is exactly
-      block-causal over `[state | own branch]` (full-visible prefix + causal within —
-      `prefix`-style plumbing, not a general bool-mask kernel). Two open design
-      decisions to settle FIRST: (1) the Q8_0→GPU upload path — the GPU crate has
-      q4k/q6k/q8kv loaders but no Q8_0 dequant-on-upload; an 8B f16 upload is ~16 GB
-      (4090 24 GB fits, M3 unified memory fits) while quant-resident GPU dequant is a
-      bigger kernel; (2) which backend posture is the parity target — CubeCL (portable,
-      Metal+4090) vs the cudarc raw arm (4090-only, faster). Parity gate: the T7
-      bit-identical CPU rows are the oracle — GPU-vs-CPU needs a TOLERANCE gate
-      (different accumulation order), like the laya G5 (top-1 exact + p-drift ≤ 1e-3
-      class), NOT bit-identity.)*
+- [x] **T8** GPU eDLM forward (`riir-infer-gpu`): mask plumbing + parity vs CPU.
+      *(LANDED 2026-10-08 — `crates/riir-infer-gpu/src/edlm_cubecl/{mod,tests}.rs` +
+      `matmul_f16b_cubecl.rs`, feature `edlm_gpu = ["cubecl_runtime", "riir-infer-core/edlm"]`.
+      **The two design decisions, settled + measured:** (1) **upload path = Q8_0 → f32 EXACT
+      host dequant → f16-resident** (~15.7 GB on the 8B release; fits the 24 GB 4090 and
+      unified-memory M3) — every GEMM accumulates f32 (the f16 GEMV family's law), so the only
+      numerics faces vs the CPU f32 path are the f16 weight rounding (rel ≤ 2^-11/weight) and
+      the attention kernel's online-softmax order; quant-resident GPU dequant kernels stay the
+      documented fallback (a bigger kernel, no measurement-lane need). (2) **parity target =
+      CubeCL** (portable — one kernel set on wgpu-spirv AND native CUDA; the cudarc raw arm is
+      decode-GEMV for quantized weights with no dense/f16 GEMM — building one would duplicate
+      `matmul_cubecl`, the substrate-first refusal). **The decomposition (T7's, unchanged) makes
+      the mask plumbing trivial: every phase is "query i attends keys 0..t_n(i)"** — state
+      prefill `t_n = sl` (bidir) / `i+1` (causal), branch continuations `t_n = sl+i+1` over
+      `[state KV | own branch]` — one kernel shape (`edlm_attn_multi_f32`, grid (n_head, sq),
+      128-thread cubes == head_dim 8B shape, params buffer, combined `[keys | values]` layout,
+      online softmax) serves both; NO general bool-mask kernel needed. Pipeline = the
+      `llama_cubecl` hybrid: GPU GEMMs (`matmul_f16b_cubecl` — `matmul_tiled_f32` verbatim with
+      the f16 cast at the B tile load, buffer-derived dims, `.issues/515` binding guards) + GPU
+      multi-row rmsnorm (`edlm_rmsnorm_rows_f32`); CPU small-ops between the 4 readbacks/layer
+      are the EXACT core helpers (`qk_norm_inplace` — made pub; RoPE, SwiGLU, residuals, the
+      pointer head). Core diffs: `EdlmGgufModel.gguf` made pub (the f16 upload path dequants
+      the same tensors from the same handle) + `qk_norm_inplace` pub. Q|K|V and gate|up are
+      row-concat at upload (one GEMM + one readback each); wte never goes VRAM (host row
+      gather). **Parity measured on f16-GRID tiny weights** (the CPU oracle runs the SAME
+      rounded weights — kernel error isolated from the rounding face): kv drift ≤ 6.9e-5,
+      hidden drift ≤ 1.3e-6, BOTH state_bidir postures, BIT-STABLE across dev/release AND
+      wgpu-spirv/native-CUDA postures; kernel units (rmsnorm vs CPU 1e-5, attention vs plain
+      softmax 2e-4 incl. a >1-tile vis case, GEMM 1e-4 rel) + the no-cache refusal pin. The
+      measured catch: the first cut read V without the values-region offset (`kv_half`) —
+      the single-tile attn unit caught it as ~0.5 drift, and the TINY KV gate caught the
+      poisoning it fed into layer 2's captured cache (0.0011 vs the 5e-4 gate) — two
+      instruments, one defect, both stay. **Real-Q8_0 gate = env-gated `EDLM_GGUF`**
+      (`real_q8_parity_env_gated`: argmax EXACT + per-option < 0.015 vs the CPU streaming
+      lane AND the published constants, drift + timing PRINTED with `runtime_name()`;
+      heavy-test serialization + `memory_cleanup` per Issue 712) — skip-loud unset; this box
+      has only the BF16 shards, the GGUF is M3-side. VRAM/footprint: 15.7 GB weights + ~1.2 GB
+      KV@4096-state + transient activations. Disclosed v1 scope cuts: packed-mask/isolation
+      forward (rows/cached semantics only — the CPU cached path's own caveat), CUDA graphs,
+      CMMA tensor-core GEMM, GPU-resident KV carry, batched multi-branch — each a follow-up
+      with its own bench. Gates: clippy -D at edlm_gpu/default/no-default postures
+      + --all-targets; fence gate PASSED (no new deps); core default lib **257/0** unchanged,
+      edlm lib 28/0 (filter), gpu edlm tests 7/0 dev+release+wgpu+CUDA.)
 
 ## License law
 

@@ -568,6 +568,17 @@ pub mod llama_cubecl;
 // fastrand + infer-core's dllm Config fields).
 #[cfg(feature = "gemma2_d2f")]
 pub mod gemma2_d2f;
+// Issue 1005 T8 — the GPU eDLM lane: f16-resident weights + multi-query GQA
+// attention with per-row visibility bounds, parity vs the CPU T7 cached path.
+#[cfg(feature = "edlm_gpu")]
+pub mod edlm_cubecl;
+#[cfg(feature = "edlm_gpu")]
+pub use edlm_cubecl::{EdlmAttnMultiCubeCL, EdlmAttnMultiParams, EdlmGpuModel, EdlmRmsNormRowsCubeCL};
+// The f16-weight-B tiled GEMM (the lane's projection kernel, generic beyond it).
+#[cfg(feature = "edlm_gpu")]
+pub mod matmul_f16b_cubecl;
+#[cfg(feature = "edlm_gpu")]
+pub use matmul_f16b_cubecl::MatmulF16bCubeCL;
 // Gemma4 CubeCL stack (partial RoPE / QK-Norm / GeGLU / layer output scale).
 #[cfg(feature = "gemma4_gpu")]
 pub mod gemma4_cubecl;

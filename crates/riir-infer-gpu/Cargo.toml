@@ -156,6 +156,10 @@ swap_ab_gemm = ["cubecl_runtime"]
 # dllm forward leg chain: needs fastrand (the sampler RNG) + infer-core's
 # dllm-gated Config fields (AttentionMode/NoiseSchedule) directly.
 gemma2_d2f = ["cubecl_runtime", "dep:fastrand", "riir-infer-core/dllm"]
+# Issue 1005 T8 — the GPU eDLM forward: f16-resident weights (Q8_0 → f32
+# exact dequant → f16 upload), multi-query GQA flash attention with per-row
+# visibility bounds, parity vs the CPU T7 cached path as the gate. Opt-in.
+edlm_gpu = ["cubecl_runtime", "riir-infer-core/edlm"]
 # FA-constrained exact posterior decoding over the gemma2_d2f denoising
 # loop (issue 035 P1; POC). Implies the dllm forward leg transitively via
 # gemma2_d2f; the pure sampler (fa_posterior) is UNGATED in infer-core —
