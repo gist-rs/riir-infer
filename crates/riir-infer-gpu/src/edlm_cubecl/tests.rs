@@ -1058,3 +1058,274 @@ fn real_q8_parity_env_gated() {
 fn gpu_client_for_cleanup() -> ActiveComputeClient {
     CubeCLContext::new().expect("CubeCL context for cleanup").client()
 }
+
+// ── the graphed branch pass (`EDLM_GPU_GRAPHS`) ───────────────────────
+//
+// ⛔ RUN THESE WITH `-- --test-threads=1` (or a `graph` filter that selects
+// only them): a capture window is invalidated by ANY other CUDA work in the
+// process — `CU_STREAM_CAPTURE_MODE_GLOBAL` fails the recording when another
+// thread uploads, syncs, or allocates (measured 2026-10-09: the same tests
+// green sequentially and RED under default libtest parallelism, four
+// `CUDA_ERROR_STREAM_CAPTURE_INVALIDATED`). Sequential = the capture+replay
+// evidence; parallel = a red that means "the window was polluted", never a
+// wrong-answer green (the graphs_live asserts below catch the silent
+// eager-fallback that would otherwise wear the claim).──
+
+/// A tiny model with the graphed lane armed at the FOLD posture (the graphed
+/// lane requires the device-resident pass). `graphs_supported()` gates the
+/// assertions: on a runtime without capture (wgpu) the same call sequence
+/// must stay eager and correct instead of erroring.
+fn tiny_graph_model() -> EdlmGpuModel {
+    let config = tiny_config();
+    let mut weights = tiny_weights(&config);
+    quantize_to_f16_grid(&mut weights);
+    EdlmGpuModel::from_weights(&weights, &config)
+        .expect("gpu model")
+        .with_fold(true)
+        .with_graphs(true)
+}
+
+/// The eager FOLD arm on the same weights — the bit-identity oracle. The
+/// graphed lane records the fold pass, so the oracle is fold-vs-fold (same
+/// kernels, same order → bit-identical); the host small-ops arm differs by
+/// the tree-reduce class (~2e-6) and would be a tolerance comparison.
+fn tiny_eager_fold_outputs(enc: &PackedEncoding) -> Vec<Vec<f32>> {
+
+    let config = tiny_config();
+
+    let mut weights = tiny_weights(&config);
+
+    quantize_to_f16_grid(&mut weights);
+
+    let rows = riir_infer_core::transformer::edlm::rows_of(enc).expect("rows");
+
+    let mut gpu = EdlmGpuModel::from_weights(&weights, &config)
+
+        .expect("gpu model")
+
+        .with_fold(true);
+
+    let sl = enc.state_len;
+
+    gpu.state_prefill(&enc.ids[..sl], &enc.pos[..sl], true)
+
+        .expect("gpu prefill");
+
+    gpu.forward_branches(enc, &rows).expect("eager branches")
+
+}
+
+#[test]
+#[ignore = "capture evidence — run explicitly: cargo test -p riir-infer-gpu --features edlm_gpu --lib graph -- --ignored --test-threads=1 (the capture window requires process-wide CUDA exclusivity; the default parallel run shares stream slots mod 128 and invalidates it)"]
+fn graphed_replay_bit_identical_to_eager() {
+    let enc = sample_encoding();
+    enc.validate().expect("fixture invariants");
+    let rows = riir_infer_core::transformer::edlm::rows_of(&enc).expect("rows");
+    let eager = tiny_eager_fold_outputs(&enc);
+
+    let mut gpu = tiny_graph_model();
+    let sl = enc.state_len;
+    gpu.state_prefill(&enc.ids[..sl], &enc.pos[..sl], true)
+        .expect("gpu prefill");
+
+    // Replay 1: the capture call (primes + records, answers eagerly).
+    let first = gpu.forward_branches(&enc, &rows).expect("first call");
+    if gpu.graphs_supported() {
+        // The evidence law: a bit-identity claim about the graphed path
+        // requires the record to actually be LIVE — a capture that fell
+        // back to eager would produce the right answer (bit-identical, the
+        // eager arm IS the oracle) and prove nothing about replays.
+        assert!(gpu.graphs_live(), "capture call must install a live record");
+    }
+    // Replays 2-3: the same geometry, DISTINCT content (the second encoding
+    // exercises the per-replay input write path).
+    let again = gpu.forward_branches(&enc, &rows).expect("replay 2");
+    let third = gpu.forward_branches(&enc, &rows).expect("replay 3");
+
+    if !gpu.graphs_supported() {
+        // wgpu posture: no capture support — every call must still be the
+        // correct (eager) answer; nothing to assert beyond parity.
+        assert_eq!(rows_max_diff(&first, &eager), 0.0, "wgpu eager parity");
+        return;
+    }
+    // The capture call and BOTH replays are the SAME kernel sequence over
+    // the SAME inputs as the eager fold arm — bit-identity by construction,
+    // asserted by execution (the x86_64-matrix lesson: claimed, not assumed).
+    assert_eq!(rows_max_diff(&first, &eager), 0.0, "capture-call parity");
+    assert_eq!(rows_max_diff(&again, &eager), 0.0, "replay-2 parity");
+    assert_eq!(rows_max_diff(&third, &eager), 0.0, "replay-3 parity");
+}
+
+/// A second branch ENCODING over the same state (same geometry, different
+/// content) must replay bit-identically — the per-replay write path.
+#[test]
+#[ignore = "capture evidence — see graphed_replay_bit_identical_to_eager's run command"]
+fn graphed_replay_varying_content_bit_identical() {
+    let enc = sample_encoding();
+    enc.validate().expect("fixture invariants");
+    let rows = riir_infer_core::transformer::edlm::rows_of(&enc).expect("rows");
+
+    // A content-shifted second encoding: same shape (the tiny fixture's
+    // geometry is fixed), different ids/positions in the BRANCH range only
+    // (the state must keep matching the prefill).
+    let mut enc2 = enc.clone();
+    for i in enc.state_len..enc.ids.len() {
+        enc2.ids[i] = (enc2.ids[i] + 1) % 64;
+        enc2.pos[i] += 1;
+    }
+    enc2.validate().expect("fixture invariants");
+    let eager2 = tiny_eager_fold_outputs(&enc2);
+
+    let mut gpu = tiny_graph_model();
+    let sl = enc.state_len;
+    gpu.state_prefill(&enc.ids[..sl], &enc.pos[..sl], true)
+        .expect("gpu prefill");
+    let _ = gpu.forward_branches(&enc, &rows).expect("capture call");
+    if gpu.graphs_supported() {
+        assert!(gpu.graphs_live(), "the replay must ride a live record");
+    }
+    let replay2 = gpu.forward_branches(&enc2, &rows).expect("replay enc2");
+
+    if !gpu.graphs_supported() {
+        assert_eq!(rows_max_diff(&replay2, &eager2), 0.0);
+        return;
+    }
+    assert_eq!(
+        rows_max_diff(&replay2, &eager2),
+        0.0,
+        "replay with different branch content must be bit-identical to eager"
+    );
+}
+
+/// A geometry change (fewer rows) drops the old record and recaptures —
+/// both geometries bit-identical to their eager arms.
+#[test]
+#[ignore = "capture evidence — see graphed_replay_bit_identical_to_eager's run command"]
+fn graph_recaptures_on_geometry_change() {
+    let enc = sample_encoding();
+    enc.validate().expect("fixture invariants");
+    let rows = riir_infer_core::transformer::edlm::rows_of(&enc).expect("rows");
+    assert!(rows.len() >= 2, "fixture rows");
+    let subset = &rows[..rows.len() - 1];
+
+    let eager_full = tiny_eager_fold_outputs(&enc);
+
+    let mut gpu = tiny_graph_model();
+    let sl = enc.state_len;
+    gpu.state_prefill(&enc.ids[..sl], &enc.pos[..sl], true)
+        .expect("gpu prefill");
+    let _ = gpu.forward_branches(&enc, &rows).expect("capture A");
+    if gpu.graphs_supported() {
+        assert!(gpu.graphs_live(), "geometry A record live");
+    }
+    let sub = gpu.forward_branches(&enc, subset).expect("capture B");
+    let full_again = gpu.forward_branches(&enc, &rows).expect("capture C");
+
+    if !gpu.graphs_supported() {
+        return;
+    }
+    assert_eq!(rows_max_diff(&full_again, &eager_full), 0.0, "A/C parity");
+    // The subset shape's own eager oracle: run the eager FOLD arm on the
+    // subset (fold-vs-fold is the bit-identity comparison).
+
+    let config = tiny_config();
+
+    let mut weights = tiny_weights(&config);
+
+    quantize_to_f16_grid(&mut weights);
+
+    let mut eager_gpu = EdlmGpuModel::from_weights(&weights, &config)
+
+        .expect("gpu model")
+
+        .with_fold(true);
+    eager_gpu
+        .state_prefill(&enc.ids[..sl], &enc.pos[..sl], true)
+        .expect("eager prefill");
+    let eager_sub_out = eager_gpu.forward_branches(&enc, subset).expect("eager sub");
+    assert_eq!(rows_max_diff(&sub, &eager_sub_out), 0.0, "B parity");
+}
+
+/// A new state prefill drops the record (it bound the old KV) — the next
+/// branch pass recaptures against the new state, still bit-identical.
+#[test]
+#[ignore = "capture evidence — see graphed_replay_bit_identical_to_eager's run command"]
+fn graph_drops_on_state_change() {
+    let enc = sample_encoding();
+    enc.validate().expect("fixture invariants");
+    let rows = riir_infer_core::transformer::edlm::rows_of(&enc).expect("rows");
+    let mut enc2 = enc.clone();
+    for i in 0..enc.state_len {
+        enc2.ids[i] = (enc2.ids[i] + 7) % 64;
+    }
+    enc2.validate().expect("fixture invariants");
+
+    let mut gpu = tiny_graph_model();
+    let sl = enc.state_len;
+    gpu.state_prefill(&enc.ids[..sl], &enc.pos[..sl], true)
+        .expect("prefill 1");
+    let _ = gpu.forward_branches(&enc, &rows).expect("capture on state 1");
+    if gpu.graphs_supported() {
+        assert!(gpu.graphs_live(), "state-1 record live");
+    }
+    gpu.state_prefill(&enc2.ids[..sl], &enc2.pos[..sl], true)
+        .expect("prefill 2 (drops the graph)");
+    if gpu.graphs_supported() {
+        assert!(!gpu.graphs_live(), "the record must drop with the state");
+    }
+    let out2 = gpu.forward_branches(&enc2, &rows).expect("recapture on state 2");
+
+    if !gpu.graphs_supported() {
+        return;
+    }
+    let eager2 = {
+
+        let config = tiny_config();
+
+        let mut weights = tiny_weights(&config);
+
+        quantize_to_f16_grid(&mut weights);
+
+        let mut eager_gpu = EdlmGpuModel::from_weights(&weights, &config)
+
+            .expect("gpu model")
+
+            .with_fold(true);
+
+        eager_gpu
+
+            .state_prefill(&enc2.ids[..sl], &enc2.pos[..sl], true)
+
+            .expect("eager prefill 2");
+
+        eager_gpu.forward_branches(&enc2, &rows).expect("eager 2")
+
+    };
+    assert_eq!(rows_max_diff(&out2, &eager2), 0.0, "state-2 parity");
+}
+
+/// The graphed lane requires the fold posture: with `with_fold(false)` the
+/// dispatch stays on the host arm (correct results, no capture attempt).
+#[test]
+fn graphs_require_fold() {
+    let config = tiny_config();
+    let mut weights = tiny_weights(&config);
+    quantize_to_f16_grid(&mut weights);
+    let enc = sample_encoding();
+    enc.validate().expect("fixture invariants");
+    let rows = riir_infer_core::transformer::edlm::rows_of(&enc).expect("rows");
+    let mut gpu = EdlmGpuModel::from_weights(&weights, &config)
+        .expect("gpu model")
+        .with_fold(false)
+        .with_graphs(true);
+    let sl = enc.state_len;
+    gpu.state_prefill(&enc.ids[..sl], &enc.pos[..sl], true)
+        .expect("gpu prefill");
+    let out = gpu.forward_branches(&enc, &rows).expect("host-arm branches");
+    let (_, cpu_rows) = tiny_cpu_outputs(true);
+    let worst = rows_max_diff(&out, &cpu_rows);
+    assert!(
+        worst < 1e-5,
+        "host-arm parity with graphs armed: {worst} (the graphed lane must be inert)"
+    );
+}

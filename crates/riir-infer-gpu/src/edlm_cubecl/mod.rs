@@ -44,6 +44,46 @@
 //! copies) — the parity anchor arm the fold-vs-host arms test exercises.
 //! Both arms consume ONE [`PassGeometry`].
 //!
+//! # The graphed branch pass (`EDLM_GPU_GRAPHS`)
+//!
+//! The fold pass is host-enqueue-bound on Windows (~57 µs/launch through the
+//! cubecl submit path, WDDM-taxed; ~90 launches ≈ 41% of a 12.5 ms pass — the
+//! 2026-10-08 probe in `tests/edlm_fold_goat.rs`). CUDA graphs remove the
+//! per-launch submit: the pass is recorded ONCE per (state, row geometry) and
+//! replayed as a single dispatch per question set. The record flow rides the
+//! backend's capture choreography: `graph_prepare` → the first REAL eager pass
+//! (primes the persistent pool, compiles the kernels, AND answers the first
+//! question set — the pass is not wasted) → `start_capture` → one
+//! allocation-free capture run with EMPTY inputs (a data copy inside the
+//! window would record a memcpy node that re-executes on every replay and
+//! stomps the per-replay input writes) → `stop_capture` → the shape-constant
+//! buffers (seg/t_start/t_end) written once, OUTSIDE the window. Per replay:
+//! `write_many` refreshes the input handles (the gathered embedding rows +
+//! the rope positions), `replay` re-runs the recorded kernels as one
+//! dispatch, `read_one` reads the pass-final hidden. The kernel launchers'
+//! small per-launch params buffers ARE captured — as memcpy nodes re-copying
+//! identical shape-constant bytes per replay (semantically a no-op; the
+//! measured cost is the GOAT lane's replay-vs-projected delta).
+//!
+//! Stream law: the model pins the constructing thread's stream
+//! (`StreamId::current()` captured at construction) and every op — eager or
+//! graphed — submits on it via [`StreamId::executes`]; the write/replay/read
+//! trio is stream-ordered by construction. Liveness: every handle the graph
+//! binds is retained for its lifetime (the capture-run workspace rides
+//! inside the graph record; the weights + state KV ride the model/state). A
+//! new state prefill or a new row geometry drops the graph (recapture is
+//! lazy — the next call for the new geometry primes + records). Capture
+//! needs the native CUDA runtime (wgpu has no graph support): the first
+//! graphed call errors ONCE and the model flags itself eager for the rest
+//! of the process. ⛔ The capture window requires PROCESS-WIDE CUDA
+//! exclusivity (`CU_STREAM_CAPTURE_MODE_GLOBAL`): any other thread that
+//! uploads, syncs, or allocates during the window invalidates the recording
+//! (measured — the graph tests are green sequentially and red under default
+//! libtest parallelism). The single-actor serving law this lane already
+//! assumes provides it in production; tests run the graph filter with
+//! `--test-threads=1`, and a polluted window degrades LOUD (the sticky
+//! eager flag + the `graphs_live` accessor keep every claim honest).
+//!
 //! # State cache posture (the GPU-resident KV carry)
 //!
 //! `state_prefill` retains each layer's combined `[keys | values]` buffer ON
@@ -78,11 +118,17 @@ use crate::cubecl_runtime::{
 };
 use crate::matmul_f16b_cubecl::MatmulF16bCubeCL;
 #[cfg(feature = "edlm_gpu")]
+use cubecl::client::Graph;
+#[cfg(feature = "edlm_gpu")]
+use cubecl_environment::stream::StreamId;
+#[cfg(feature = "edlm_gpu")]
 use cubecl::prelude::*;
 #[cfg(feature = "edlm_gpu")]
 use cubecl::server::Handle;
 #[cfg(feature = "edlm_gpu")]
 use half::f16 as half_f16;
+#[cfg(feature = "edlm_gpu")]
+use std::cell::{Cell, RefCell};
 #[cfg(feature = "edlm_gpu")]
 use riir_infer_core::rope::{RopeFreqTable, apply_rope_with_freq};
 #[cfg(feature = "edlm_gpu")]
@@ -866,6 +912,11 @@ struct PassGeometry {
     sq_total: usize,
     own_total: usize,
     seg: Vec<usize>,
+    /// Per-query KEY-ROW write base `seg[ri] + j` (u32, fold-kernel order) —
+    /// the row base PLUS the in-row offset; the row base alone would stamp
+    /// every query of a row onto the SAME key row (the fold unit's caught
+    /// defect). Shape-derived — one upload per pass, one write per capture.
+    seg_of_q: Vec<u32>,
     t_start: Vec<u32>,
     t_end: Vec<u32>,
     attn_params: EdlmAttnMultiParams,
@@ -924,6 +975,119 @@ pub struct EdlmGpuModel {
     /// construction from `EDLM_GPU_FOLD` (`"0"` = host path; unset = fold,
     /// the measured default), overridable per-instance by [`with_fold`].
     fold: bool,
+    /// The graphed-branch-pass flag: `EDLM_GPU_GRAPHS` (opt-in until the
+    /// GOAT), overridable per-instance by [`with_graphs`]. The graphed lane
+    /// additionally requires `fold` (it records the device-resident pass).
+    graphs: bool,
+    /// The model's pinned stream — the pool slot every handle lives in.
+    /// Captured from the constructing thread at construction; every op wraps
+    /// its client calls in `executes`, so the graphed write/replay/read trio
+    /// is stream-ordered by construction and the model is callable from any
+    /// thread after that.
+    stream: StreamId,
+    /// The captured branch pass for the CURRENT (state, row geometry) —
+    /// `None` until the first graphed branch pass of a geometry, dropped by
+    /// `state_prefill` (the graph binds the old state's KV) and on geometry
+    /// change (recaptured lazily). `RefCell` because `forward_branches`
+    /// takes `&self` and the first call for a shape INSTALLS the record.
+    branch_graph: RefCell<Option<BranchGraph>>,
+    /// Set once a capture attempt fails (unsupported runtime, concurrent
+    /// CUDA work in the window) — the model stays eager for the rest of the
+    /// process instead of paying the attempt on every call.
+    graph_capture_broken: Cell<bool>,
+}
+
+/// The capture-window guard: if the window is still open on drop (an error
+/// path or a panic unwinding through it), close the recording AND drain the
+/// stream — a stream left in capture mode rejects every later submission
+/// with `CUDA_ERROR_STREAM_CAPTURE_UNSUPPORTED` and poisons every later
+/// model on that thread's stream (measured: the parallel-libtest cascade of
+/// 2026-10-09). Best-effort: both calls' errors are swallowed — the caller
+/// reports its own failure, and the sticky eager flag keeps the model
+/// serving.
+#[cfg(feature = "edlm_gpu")]
+struct CaptureWindow<'a> {
+    client: &'a ComputeClient<ActiveRuntime>,
+    open: bool,
+}
+
+#[cfg(feature = "edlm_gpu")]
+impl Drop for CaptureWindow<'_> {
+    fn drop(&mut self) {
+        if !self.open {
+            return;
+        }
+        let _ = self.client.stop_capture();
+        let _ = self.client.flush();
+    }
+}
+
+/// The graph record for the branch pass: the backend graph + the capture
+/// run's workspace (the graph's liveness set — every handle the recorded
+/// kernels bind) + the geometry key. Field order is the drop order: the
+/// graph releases first (the backend syncs the stream, then unpins the
+/// buffers), THEN the handles drop.
+#[cfg(feature = "edlm_gpu")]
+struct BranchGraph {
+    graph: Graph<ActiveRuntime>,
+    ws: PassWorkspace,
+    /// The row-length vector the graph was captured over — the geometry
+    /// key (seg/ts/te are all derived from it + the seed flags).
+    row_lens: Vec<usize>,
+    sq_total: usize,
+}
+
+/// One device-fold pass's workspace: the input handles + the reused
+/// staging. The eager path allocates and drops it per pass; the graph's
+/// capture run allocates it once and the graph keeps it alive.
+#[cfg(feature = "edlm_gpu")]
+struct PassWorkspace {
+    /// The residual stream: input embeddings in, pass-final hidden out.
+    h_dev: Handle,
+    /// Per-query rope position (u32).
+    pos_d: Handle,
+    /// Per-query key-row write base (u32) — `geo.seg_of_q`.
+    seg_d: Handle,
+    ts_d: Handle,
+    te_d: Handle,
+    /// The 1-element dummy the attention kernel binds at `n_seed == 0`.
+    dummy_seed: Handle,
+    staging: PassStaging,
+    /// Per-layer combined `[keys | values]` scratch (state pass: the KV
+    /// carry the model retains).
+    kv: Vec<Handle>,
+}
+
+/// The layer-invariant staging buffers, allocated once per pass.
+#[cfg(feature = "edlm_gpu")]
+struct PassStaging {
+    hn1: Handle,
+    hn2: Handle,
+    qkv: Handle,
+    q_rope: Handle,
+    attn: Handle,
+    wo: Handle,
+    gu: Handle,
+    mi: Handle,
+    down: Handle,
+}
+
+/// The host-side inputs of one pass (see
+/// [`EdlmGpuModel::build_pass_inputs`]).
+#[cfg(feature = "edlm_gpu")]
+struct PassInputs {
+    h: Vec<f32>,
+    pos_flat: Vec<u32>,
+}
+
+/// The workspace allocation's input mode: eager uploads the pass inputs;
+/// the capture run allocates EMPTY inputs (a data copy inside the capture
+/// window would record a memcpy node that re-executes on every replay and
+/// stomps the per-replay writes — the module docs' capture law).
+#[cfg(feature = "edlm_gpu")]
+enum WorkspaceInputs<'a> {
+    Upload(&'a PassInputs),
+    Empty,
 }
 
 /// The GEMM posture for the lane's four per-layer projections.
@@ -995,6 +1159,15 @@ fn fold_env_default() -> bool {
     }
 }
 
+/// The graphed branch pass ships OPT-IN (`EDLM_GPU_GRAPHS`, default off)
+/// until its GOAT lands — same ladder as the fold's `EDLM_GPU_FOLD`.
+fn graphs_env_default() -> bool {
+    match std::env::var("EDLM_GPU_GRAPHS") {
+        Ok(v) => v != "0",
+        Err(_) => false,
+    }
+}
+
 #[cfg(feature = "edlm_gpu")]
 impl EdlmGpuModel {
     /// Open an `edlm`-arch GGUF and upload every layer as f16 (one layer
@@ -1014,35 +1187,40 @@ impl EdlmGpuModel {
                 config.head_dim
             ));
         }
-        let ctx = CubeCLContext::new().map_err(|e| format!("CubeCL context: {e:?}"))?;
-        let client = ctx.client();
+        let client =
+            CubeCLContext::new().map_err(|e| format!("CubeCL context: {e:?}"))?.client();
+        // The model pins its stream at construction (the doc's stream law):
+        // every handle lands in one pool slot, every op submits on this
+        // stream, and the graphed write/replay/read trio is ordered.
+        let stream = StreamId::current();
 
-        let layers = weights
-            .layers
-            .iter()
-            .map(|l| {
-                let mut qkv = l.base.attn_wq.clone();
-                qkv.extend_from_slice(&l.base.attn_wk);
-                qkv.extend_from_slice(&l.base.attn_wv);
-                let mut gateup = l.base.gate_proj.clone();
-                gateup.extend_from_slice(&l.base.up_proj);
-                Ok(EdlmGpuLayerWeights {
-                    qkv: upload_f16(&client, &qkv)?,
-                    wo: upload_f16(&client, &l.base.attn_wo)?,
-                    gateup: upload_f16(&client, &gateup)?,
-                    down: upload_f16(&client, &l.base.down_proj)?,
-                    attn_norm: create_f32(&client, &l.base.input_norm),
-                    post_attn_norm: create_f32(&client, &l.base.post_attn_norm),
-                    q_norm: l.q_norm.clone(),
-                    k_norm: l.k_norm.clone(),
-                    q_norm_d: create_f32(&client, &l.q_norm),
-                    k_norm_d: create_f32(&client, &l.k_norm),
-                })
-            })
-            .collect::<Result<Vec<_>, String>>()?;
+        let layers = stream
+            .executes(|| {
+                weights.layers.iter()
+                    .map(|l| {
+                        let mut qkv = l.base.attn_wq.clone();
+                        qkv.extend_from_slice(&l.base.attn_wk);
+                        qkv.extend_from_slice(&l.base.attn_wv);
+                        let mut gateup = l.base.gate_proj.clone();
+                        gateup.extend_from_slice(&l.base.up_proj);
+                        Ok(EdlmGpuLayerWeights {
+                            qkv: upload_f16(&client, &qkv)?,
+                            wo: upload_f16(&client, &l.base.attn_wo)?,
+                            gateup: upload_f16(&client, &gateup)?,
+                            down: upload_f16(&client, &l.base.down_proj)?,
+                            attn_norm: create_f32(&client, &l.base.input_norm),
+                            post_attn_norm: create_f32(&client, &l.base.post_attn_norm),
+                            q_norm: l.q_norm.clone(),
+                            k_norm: l.k_norm.clone(),
+                            q_norm_d: create_f32(&client, &l.q_norm),
+                            k_norm_d: create_f32(&client, &l.k_norm),
+                        })
+                    })
+                    .collect::<Result<Vec<_>, String>>()
+            })?;
 
         let freq = RopeFreqTable::new(config.rope_theta, config.head_dim);
-        let freq_d = create_f32(&client, freq.as_slice());
+        let freq_d = stream.executes(|| create_f32(&client, freq.as_slice()));
         Ok(Self {
             client,
             config: config.clone(),
@@ -1061,6 +1239,10 @@ impl EdlmGpuModel {
             },
             sg8_armed: cmma_sg8_env_default(),
             fold: fold_env_default(),
+            graphs: graphs_env_default(),
+            stream,
+            branch_graph: RefCell::new(None),
+            graph_capture_broken: Cell::new(false),
         })
     }
 
@@ -1072,57 +1254,63 @@ impl EdlmGpuModel {
                 config.head_dim
             ));
         }
-        let ctx = CubeCLContext::new().map_err(|e| format!("CubeCL context: {e:?}"))?;
-        let client = ctx.client();
+        let client =
+            CubeCLContext::new().map_err(|e| format!("CubeCL context: {e:?}"))?.client();
+        // The model's pinned stream (the stream law in the module docs).
+        let stream = StreamId::current();
 
-        let mut layers = Vec::with_capacity(config.n_layer);
-        for i in 0..config.n_layer {
-            let deq = |name: String| -> Result<Vec<f32>, String> {
-                core.gguf
-                    .dequant_f16_to_f32(&name)
-                    .map_err(|e| format!("tensor {name}: {e}"))
-            };
-            let wq = deq(format!("blk.{i}.attn_q.weight"))?;
-            let wk = deq(format!("blk.{i}.attn_k.weight"))?;
-            let wv = deq(format!("blk.{i}.attn_v.weight"))?;
-            let wo = deq(format!("blk.{i}.attn_output.weight"))?;
-            let gate = deq(format!("blk.{i}.ffn_gate.weight"))?;
-            let up = deq(format!("blk.{i}.ffn_up.weight"))?;
-            let down = deq(format!("blk.{i}.ffn_down.weight"))?;
-            let attn_norm = deq(format!("blk.{i}.attn_norm.weight"))?;
-            let post_attn_norm = deq(format!("blk.{i}.ffn_norm.weight"))?;
-            let q_norm = deq(format!("blk.{i}.attn_q_norm.weight"))?;
-            let k_norm = deq(format!("blk.{i}.attn_k_norm.weight"))?;
-            if q_norm.len() != config.head_dim || k_norm.len() != config.head_dim {
-                return Err(format!(
-                    "layer {i}: QK-norm gamma length {}/{} != head_dim {}",
-                    q_norm.len(),
-                    k_norm.len(),
-                    config.head_dim
-                ));
-            }
-            let mut qkv = wq;
-            qkv.extend_from_slice(&wk);
-            qkv.extend_from_slice(&wv);
-            let mut gateup = gate;
-            gateup.extend_from_slice(&up);
-            layers.push(EdlmGpuLayerWeights {
-                qkv: upload_f16(&client, &qkv)?,
-                wo: upload_f16(&client, &wo)?,
-                gateup: upload_f16(&client, &gateup)?,
-                down: upload_f16(&client, &down)?,
-                attn_norm: create_f32(&client, &attn_norm),
-                post_attn_norm: create_f32(&client, &post_attn_norm),
-                q_norm_d: create_f32(&client, &q_norm),
-                k_norm_d: create_f32(&client, &k_norm),
-                q_norm,
-                k_norm,
-            });
-        }
+        let layers = stream
+            .executes(|| {
+                let mut layers = Vec::with_capacity(config.n_layer);
+                for i in 0..config.n_layer {
+                    let deq = |name: String| -> Result<Vec<f32>, String> {
+                        core.gguf
+                            .dequant_f16_to_f32(&name)
+                            .map_err(|e| format!("tensor {name}: {e}"))
+                    };
+                    let wq = deq(format!("blk.{i}.attn_q.weight"))?;
+                    let wk = deq(format!("blk.{i}.attn_k.weight"))?;
+                    let wv = deq(format!("blk.{i}.attn_v.weight"))?;
+                    let wo = deq(format!("blk.{i}.attn_output.weight"))?;
+                    let gate = deq(format!("blk.{i}.ffn_gate.weight"))?;
+                    let up = deq(format!("blk.{i}.ffn_up.weight"))?;
+                    let down = deq(format!("blk.{i}.ffn_down.weight"))?;
+                    let attn_norm = deq(format!("blk.{i}.attn_norm.weight"))?;
+                    let post_attn_norm = deq(format!("blk.{i}.ffn_norm.weight"))?;
+                    let q_norm = deq(format!("blk.{i}.attn_q_norm.weight"))?;
+                    let k_norm = deq(format!("blk.{i}.attn_k_norm.weight"))?;
+                    if q_norm.len() != config.head_dim || k_norm.len() != config.head_dim {
+                        return Err(format!(
+                            "layer {i}: QK-norm gamma length {}/{} != head_dim {}",
+                            q_norm.len(),
+                            k_norm.len(),
+                            config.head_dim
+                        ));
+                    }
+                    let mut qkv = wq;
+                    qkv.extend_from_slice(&wk);
+                    qkv.extend_from_slice(&wv);
+                    let mut gateup = gate;
+                    gateup.extend_from_slice(&up);
+                    layers.push(EdlmGpuLayerWeights {
+                        qkv: upload_f16(&client, &qkv)?,
+                        wo: upload_f16(&client, &wo)?,
+                        gateup: upload_f16(&client, &gateup)?,
+                        down: upload_f16(&client, &down)?,
+                        attn_norm: create_f32(&client, &attn_norm),
+                        post_attn_norm: create_f32(&client, &post_attn_norm),
+                        q_norm_d: create_f32(&client, &q_norm),
+                        k_norm_d: create_f32(&client, &k_norm),
+                        q_norm,
+                        k_norm,
+                    });
+                }
+                Ok(layers)
+            })?;
 
         let freq = RopeFreqTable::new(config.rope_theta, config.head_dim);
         let scale = 1.0 / (config.head_dim as f32).sqrt();
-        let freq_d = create_f32(&client, freq.as_slice());
+        let freq_d = stream.executes(|| create_f32(&client, freq.as_slice()));
         Ok(Self {
             client,
             config,
@@ -1141,6 +1329,10 @@ impl EdlmGpuModel {
             },
             sg8_armed: cmma_sg8_env_default(),
             fold: fold_env_default(),
+            graphs: graphs_env_default(),
+            stream,
+            branch_graph: RefCell::new(None),
+            graph_capture_broken: Cell::new(false),
         })
     }
 
@@ -1224,7 +1416,34 @@ impl EdlmGpuModel {
     /// Release fully-free GPU pool pages back to the driver (the Issue-712
     /// law: freed slices stay committed inside their pages otherwise).
     pub fn memory_cleanup(&self) {
-        self.client.memory_cleanup();
+        let stream = self.stream;
+        stream.executes(|| self.client.memory_cleanup());
+    }
+
+    /// The graphed-branch-pass A/B seam: pin the flag explicitly (the env
+    /// default is process-global; the GOAT lane needs BOTH arms in one
+    /// process). Clearing graphs drops any live record lazily (the dispatch
+    /// checks the flag first).
+    pub fn with_graphs(mut self, graphs: bool) -> Self {
+        self.graphs = graphs;
+        self
+    }
+
+    /// The runtime's graph-capture support (the CUDA backend implements
+    /// begin/end capture; the wgpu backends don't — the graphed lane
+    /// reports unsupported there instead of attempting a capture).
+    pub fn graphs_supported(&self) -> bool {
+        ActiveRuntime::name(&self.client) == "cuda"
+    }
+
+    /// Whether a branch-pass graph record is LIVE (captured against the
+    /// current state + geometry). The observability half of the graphs
+    /// lane: a bit-identity or perf claim about the graphed path must
+    /// check this — a capture that failed (unsupported runtime, concurrent
+    /// CUDA work invalidating the window) degrades the model to eager
+    /// silently by design, and an eager answer is NOT graphed evidence.
+    pub fn graphs_live(&self) -> bool {
+        self.branch_graph.borrow().is_some()
     }
 
     /// Run the state tokens only and capture their per-layer K/V + the
@@ -1232,7 +1451,8 @@ impl EdlmGpuModel {
     /// per-layer combined `[keys | values]` buffers RETAINED on the device
     /// (the KV carry). The state's own eligibility is `branch_mask` over an
     /// all-state segment: causal, widened to state↔state bidirectional when
-    /// `state_bidir`.
+    /// `state_bidir`. Drops any live branch graph first — the record binds
+    /// the OLD state's KV handles.
     pub fn state_prefill(
         &mut self,
         state_ids: &[usize],
@@ -1245,27 +1465,34 @@ impl EdlmGpuModel {
             sl > 0 && sl <= self.config.block_size,
             "state len {sl} out of range"
         );
-        let pass = [PassRow {
-            ids: state_ids,
-            pos: state_pos,
-        }];
-        let (h, layers, device_kv) = self.forward_rows_batched(&pass, None, state_bidir)?;
-        let mut hidden = h;
-        let n = self.config.n_embd;
-        for chunk in hidden.chunks_exact_mut(n) {
-            rmsnorm_with_gamma_eps(chunk, &self.final_norm, self.config.rms_norm_eps);
-        }
-        self.state = Some(EdlmGpuStateKv {
-            host: EdlmStateKv {
-                state_len: sl,
-                kvd: kv_dim(&self.config),
-                state_ids: state_ids.to_vec(),
-                layers,
-                hidden,
-            },
-            device_kv,
-        });
-        Ok(())
+        // The graph record binds the outgoing state's device KV — drop it
+        // BEFORE those handles drop (recapture is lazy).
+        *self.branch_graph.borrow_mut() = None;
+        let stream = self.stream;
+        stream.executes(|| {
+            let pass = [PassRow {
+                ids: state_ids,
+                pos: state_pos,
+            }];
+            let (h, layers, device_kv) =
+                self.forward_rows_batched(&pass, None, state_bidir)?;
+            let mut hidden = h;
+            let n = self.config.n_embd;
+            for chunk in hidden.chunks_exact_mut(n) {
+                rmsnorm_with_gamma_eps(chunk, &self.final_norm, self.config.rms_norm_eps);
+            }
+            self.state = Some(EdlmGpuStateKv {
+                host: EdlmStateKv {
+                    state_len: sl,
+                    kvd: kv_dim(&self.config),
+                    state_ids: state_ids.to_vec(),
+                    layers,
+                    hidden,
+                },
+                device_kv,
+            });
+            Ok(())
+        })
     }
 
     /// The cached state prefix — parity inspection + the pointer head's
@@ -1284,6 +1511,14 @@ impl EdlmGpuModel {
     /// the CPU `forward_edlm_branches_cached` shape: per-row
     /// `[(state hiddens | branch hiddens)]` post-final-norm, the pointer head
     /// reads markers from it directly.
+    ///
+    /// Sync dispatch: fold (the device-resident pass) → and, when
+    /// [`Self::with_graphs`] is armed, the CUDA-graphed lane — the pass is
+    /// recorded once per (state, row geometry) and replayed as one dispatch
+    /// per question set (the module docs' graphs section). The first call
+    /// for a geometry primes + records and answers eagerly; every replay
+    /// after skips the ~90 per-launch submits. Host-small-ops posture (`with
+    /// _fold(false)`) never graphs — the record would capture the wrong arm.
     pub fn forward_branches(
         &self,
         enc: &PackedEncoding,
@@ -1300,7 +1535,18 @@ impl EdlmGpuModel {
         if rows.is_empty() {
             return Ok(Vec::new());
         }
-        let n = self.config.n_embd;
+        let stream = self.stream;
+        stream.executes(|| self.forward_branches_inner(enc, rows, cache))
+    }
+
+    /// The dispatch body (runs inside the model's stream scope — see
+    /// [`Self::forward_branches`]).
+    fn forward_branches_inner(
+        &self,
+        enc: &PackedEncoding,
+        rows: &[BranchRow],
+        cache: &EdlmGpuStateKv,
+    ) -> Result<Vec<Vec<f32>>, String> {
         let sl = enc.state_len;
         let pass: Vec<PassRow<'_>> = rows
             .iter()
@@ -1309,7 +1555,56 @@ impl EdlmGpuModel {
                 pos: &enc.pos[row.start..row.end],
             })
             .collect();
-        let (h, _, _) = self.forward_rows_batched(&pass, Some((&cache.device_kv, sl)), false)?;
+        let seed = Some((&cache.device_kv[..], sl));
+        let row_lens: Vec<usize> = rows.iter().map(|r| r.branch_len()).collect();
+
+        // The graphed lane: geometry match → replay; first sight of a
+        // geometry → capture (the prime pass IS the first answer); a broken
+        // capture (unsupported runtime / invalidated window) stays eager.
+        if self.graphs && self.fold && !self.graph_capture_broken.get() {
+            {
+                let slot = self.branch_graph.borrow();
+                if let Some(g) = slot.as_ref()
+                    && g.row_lens == row_lens
+                {
+                    let h = self.replay_branch_graph(g, &pass)?;
+                    drop(slot);
+                    return Ok(self.finalize_branch_rows(h, rows, cache, sl));
+                }
+            }
+            match self.capture_branch_graph(&pass, seed, row_lens) {
+                Ok((graph, h_first)) => {
+                    *self.branch_graph.borrow_mut() = Some(graph);
+                    return Ok(self.finalize_branch_rows(h_first, rows, cache, sl));
+                }
+                Err(e) => {
+                    // The prime pass completed (the answer rode back inside
+                    // the error path is dropped only when the failure came
+                    // AFTER it — every failure here does), but the simple
+                    // recovery is one eager pass and a sticky eager flag:
+                    // capture attempts are expensive and the failure modes
+                    // (unsupported runtime, concurrent CUDA work) don't
+                    // clear by retrying.
+                    self.graph_capture_broken.set(true);
+                    eprintln!("[edlm graphs] capture failed, staying eager: {e}");
+                }
+            }
+        }
+
+        let (h, _, _) = self.forward_rows_batched(&pass, seed, false)?;
+        Ok(self.finalize_branch_rows(h, rows, cache, sl))
+    }
+
+    /// The CPU tail both sync postures share: final-norm per row + the
+    /// `[(state hiddens | branch hiddens)]` assembly the pointer head reads.
+    fn finalize_branch_rows(
+        &self,
+        h: Vec<f32>,
+        rows: &[BranchRow],
+        cache: &EdlmGpuStateKv,
+        sl: usize,
+    ) -> Vec<Vec<f32>> {
+        let n = self.config.n_embd;
         let mut out = Vec::with_capacity(rows.len());
         let mut off = 0usize;
         for row in rows {
@@ -1324,7 +1619,7 @@ impl EdlmGpuModel {
             full.extend_from_slice(&hidden);
             out.push(full);
         }
-        Ok(out)
+        out
     }
 
     /// One batched pass over independent row segments with an optional
@@ -1439,10 +1734,19 @@ impl EdlmGpuModel {
             seq_q: sq_total,
             scale: self.scale,
         };
+        // Per-query key-row write base: row base PLUS the in-row offset
+        // (the fold kernel's seg argument — see the field doc).
+        let mut seg_of_q = Vec::with_capacity(sq_total);
+        for (ri, r) in rows.iter().enumerate() {
+            for j in 0..r.ids.len() {
+                seg_of_q.push((seg[ri] + j) as u32);
+            }
+        }
         Ok(PassGeometry {
             sq_total,
             own_total,
             seg,
+            seg_of_q,
             t_start,
             t_end,
             attn_params,
@@ -1639,27 +1943,40 @@ impl EdlmGpuModel {
         seed: Option<(&[Handle], usize)>,
         geo: &PassGeometry,
     ) -> Result<PassOutputs, String> {
-        let config = &self.config;
-        let n = config.n_embd;
-        let hd = config.head_dim;
-        let q_dim = config.n_head * hd;
-        let kvd = kv_dim(config);
-        let mlp = config.mlp_hidden;
-        let n_layer = config.n_layer;
-        let eps = config.rms_norm_eps as f32;
-        let lq = q_dim + 2 * kvd;
-        let f32b = core::mem::size_of::<f32>();
-        let sq_total = geo.sq_total;
-        let own_total = geo.own_total;
-        let (seed_layers, _sl) = match seed {
-            Some((handles, len)) => (Some(handles), len),
-            None => (None, 0usize),
-        };
-        let capture = seed_layers.is_none();
+        let inputs = self.build_pass_inputs(rows, geo.sq_total);
+        let ws = self.alloc_rows_workspace(geo, WorkspaceInputs::Upload(&inputs))?;
+        self.run_rows_device_ws(&ws, seed, geo)?;
 
-        // Embedding rows on the host (no wte upload), uploaded ONCE per
-        // pass — the device hiddens update in place from here on.
+        let config = &self.config;
+        let kvd = kv_dim(config);
+        let own_total = geo.own_total;
+        let capture = seed.is_none();
+        let mut kv_capture: Vec<EdlmLayerKv> = Vec::new();
+        if capture {
+            // Once per prefill: the host cache for parity inspection + the
+            // pointer head (the branch passes never read this). The buffers
+            // are distinct per layer and never rewritten, so the reads can
+            // ride AFTER the whole pass.
+            for kv in &ws.kv {
+                let kv_host = read_f32(&self.client, kv.clone()).map_err(|e| e.to_string())?;
+                kv_capture.push(EdlmLayerKv {
+                    k: kv_host[..own_total * kvd].to_vec(),
+                    v: kv_host[own_total * kvd..2 * own_total * kvd].to_vec(),
+                });
+            }
+        }
+        let h_final = read_f32(&self.client, ws.h_dev.clone()).map_err(|e| e.to_string())?;
+        Ok((h_final, kv_capture, ws.kv))
+    }
+
+    /// The eager pass's host-side inputs: the gathered embedding rows (the
+    /// host gather — the full table never goes VRAM) + the per-query rope
+    /// positions. Shared by the eager upload and the graph replay (the
+    /// graphed lane writes the SAME bytes into the retained handles).
+    fn build_pass_inputs(&self, rows: &[PassRow<'_>], sq_total: usize) -> PassInputs {
+        let n = self.config.n_embd;
         let mut h = vec![0.0f32; sq_total * n];
+        let mut pos_flat = Vec::with_capacity(sq_total);
         let mut g = 0usize;
         for r in rows {
             for &id in r.ids {
@@ -1667,106 +1984,166 @@ impl EdlmGpuModel {
                 h[g * n..(g + 1) * n].copy_from_slice(&self.wte[off..off + n]);
                 g += 1;
             }
+            pos_flat.extend(r.pos.iter().map(|&p| p as u32));
         }
-        let h_dev = create_f32(&self.client, &h);
+        debug_assert_eq!(g, sq_total);
+        PassInputs { h, pos_flat }
+    }
 
-        // Per-query fold inputs: the rope position + the query's own-buffer
-        // KEY-ROW write base — seg[ri] + j (the row base PLUS the in-row
-        // offset, exactly the host arm's `(seg[ri] + j) · kvd` scatter;
-        // the row base alone would stamp every query of a row onto the
-        // SAME key row). Tiny u32 uploads, once per pass.
-        let mut pos_flat = Vec::with_capacity(sq_total);
-        let mut seg_of_q = vec![0u32; sq_total];
-        {
-            let mut g = 0usize;
-            for (ri, r) in rows.iter().enumerate() {
-                for (j, &p) in r.pos.iter().enumerate() {
-                    pos_flat.push(p as u32);
-                    seg_of_q[g] = (geo.seg[ri] + j) as u32;
-                    g += 1;
-                }
-            }
-        }
-        let pos_d = create_u32(&self.client, &pos_flat);
-        let seg_d = create_u32(&self.client, &seg_of_q);
-        let ts_d = create_u32(&self.client, &geo.t_start);
-        let te_d = create_u32(&self.client, &geo.t_end);
-        let dummy_seed = self.client.empty(f32b);
-
+    /// Allocate ONE pass's device workspace. `WorkspaceInputs::Upload`
+    /// (eager) uploads the pass inputs; [`WorkspaceInputs::Empty`] (the
+    /// graph capture run) allocates them EMPTY — a data copy inside the
+    /// capture window would record a memcpy node that re-executes on every
+    /// replay and stomps the per-replay input writes. The shape-constant
+    /// buffers (seg/ts/te) are written by the capture AFTER `stop_capture`.
+    fn alloc_rows_workspace(
+        &self,
+        geo: &PassGeometry,
+        mode: WorkspaceInputs<'_>,
+    ) -> Result<PassWorkspace, String> {
+        let config = &self.config;
+        let n = config.n_embd;
+        let f32b = core::mem::size_of::<f32>();
+        let u32b = core::mem::size_of::<u32>();
+        let sq_total = geo.sq_total;
+        let (h_dev, pos_d) = match mode {
+            WorkspaceInputs::Upload(inputs) => (
+                create_f32(&self.client, &inputs.h),
+                create_u32(&self.client, &inputs.pos_flat),
+            ),
+            WorkspaceInputs::Empty => (
+                self.client.empty(sq_total * n * f32b),
+                self.client.empty(sq_total * u32b),
+            ),
+        };
+        let (seg_d, ts_d, te_d) = match mode {
+            WorkspaceInputs::Upload(_) => (
+                create_u32(&self.client, &geo.seg_of_q),
+                create_u32(&self.client, &geo.t_start),
+                create_u32(&self.client, &geo.t_end),
+            ),
+            WorkspaceInputs::Empty => (
+                self.client.empty(sq_total * u32b),
+                self.client.empty(geo.t_start.len() * u32b),
+                self.client.empty(geo.t_end.len() * u32b),
+            ),
+        };
         // Layer-invariant staging, allocated once per pass (the client queue
         // orders every launch, so reuse is race-free).
-        let hn1_d = self.client.empty(sq_total * n * f32b);
-        let hn2_d = self.client.empty(sq_total * n * f32b);
-        let qkv_d = self.client.empty(sq_total * lq * f32b);
-        let q_rope_d = self.client.empty(sq_total * q_dim * f32b);
-        let attn_d = self.client.empty(sq_total * q_dim * f32b);
-        let wo_d = self.client.empty(sq_total * n * f32b);
-        let gu_d = self.client.empty(sq_total * 2 * mlp * f32b);
-        let mi_d = self.client.empty(sq_total * mlp * f32b);
-        let down_d = self.client.empty(sq_total * n * f32b);
+        let staging = PassStaging {
+            hn1: self.client.empty(sq_total * n * f32b),
+            hn2: self.client.empty(sq_total * n * f32b),
+            qkv: self
+                .client
+                .empty(sq_total * (config.n_head * config.head_dim + 2 * kv_dim(config)) * f32b),
+            q_rope: self
+                .client
+                .empty(sq_total * config.n_head * config.head_dim * f32b),
+            attn: self
+                .client
+                .empty(sq_total * config.n_head * config.head_dim * f32b),
+            wo: self.client.empty(sq_total * n * f32b),
+            gu: self.client.empty(sq_total * 2 * config.mlp_hidden * f32b),
+            mi: self.client.empty(sq_total * config.mlp_hidden * f32b),
+            down: self.client.empty(sq_total * n * f32b),
+        };
+        let dummy_seed = self.client.empty(f32b);
+        // The state pass RETAINS one combined KV buffer per layer (the KV
+        // carry) — a fresh allocation per layer, never a reused one.
+        let kv = (0..config.n_layer)
+            .map(|_| self.client.empty(2 * geo.own_total * kv_dim(config) * f32b))
+            .collect();
+        Ok(PassWorkspace {
+            h_dev,
+            pos_d,
+            seg_d,
+            ts_d,
+            te_d,
+            dummy_seed,
+            staging,
+            kv,
+        })
+    }
+
+    /// Run one device-fold pass over an EXISTING workspace — the launch
+    /// sequence only, zero allocation, zero readback. The ONE copy of the
+    /// kernel order; the eager, prime, and capture runs all ride it (the
+    /// capture records exactly what the eager path runs, so graphed-vs-eager
+    /// is bit-identical by construction).
+    fn run_rows_device_ws(
+        &self,
+        ws: &PassWorkspace,
+        seed: Option<(&[Handle], usize)>,
+        geo: &PassGeometry,
+    ) -> Result<(), String> {
+        let config = &self.config;
+        let n = config.n_embd;
+        let hd = config.head_dim;
+        let q_dim = config.n_head * hd;
+        let kvd = kv_dim(config);
+        let mlp = config.mlp_hidden;
+        let eps = config.rms_norm_eps as f32;
+        let lq = q_dim + 2 * kvd;
+        let sq_total = geo.sq_total;
+        let st = &ws.staging;
         let fold_params = EdlmQkvFoldParams {
             n_head: config.n_head,
             n_kv_head: config.n_kv_head,
             head_dim: hd,
             eps,
-            n_positions: own_total,
+            n_positions: geo.own_total,
             seq_q: sq_total,
         };
 
-        let mut kv_capture: Vec<EdlmLayerKv> = Vec::new();
-        let mut own_handles: Vec<Handle> = Vec::with_capacity(n_layer);
-        for li in 0..n_layer {
+        for (li, kv_d) in ws.kv.iter().enumerate() {
             let lw = &self.layers[li];
-            // The state pass RETAINS one combined KV buffer per layer (the
-            // KV carry) — a fresh allocation per layer, never a reused one.
-            let kv_d = self.client.empty(2 * own_total * kvd * f32b);
-            let seed_h = match seed_layers {
-                Some(handles) => handles[li].clone(),
-                None => dummy_seed.clone(),
+            let seed_h = match seed {
+                Some((handles, _)) => handles[li].clone(),
+                None => ws.dummy_seed.clone(),
             };
 
             // ── attention block (device-resident) ──
             EdlmRmsNormRowsCubeCL::launch::<ActiveRuntime>(
                 &self.client,
-                h_dev.clone(),
+                ws.h_dev.clone(),
                 lw.attn_norm.clone(),
-                hn1_d.clone(),
+                st.hn1.clone(),
                 sq_total,
                 n,
                 eps,
             );
-            self.matmul_f16b(hn1_d.clone(), lw.qkv.clone(), qkv_d.clone(), sq_total, n, lq);
+            self.matmul_f16b(st.hn1.clone(), lw.qkv.clone(), st.qkv.clone(), sq_total, n, lq);
             EdlmQkvFoldCubeCL::launch::<ActiveRuntime>(
                 &self.client,
-                qkv_d.clone(),
+                st.qkv.clone(),
                 lw.q_norm_d.clone(),
                 lw.k_norm_d.clone(),
-                pos_d.clone(),
-                seg_d.clone(),
+                ws.pos_d.clone(),
+                ws.seg_d.clone(),
                 self.freq_d.clone(),
-                q_rope_d.clone(),
+                st.q_rope.clone(),
                 kv_d.clone(),
                 &fold_params,
             );
             EdlmAttnMultiCubeCL::launch::<ActiveRuntime>(
                 &self.client,
-                q_rope_d.clone(),
+                st.q_rope.clone(),
                 kv_d.clone(),
                 seed_h,
-                ts_d.clone(),
-                te_d.clone(),
-                attn_d.clone(),
+                ws.ts_d.clone(),
+                ws.te_d.clone(),
+                st.attn.clone(),
                 &geo.attn_params,
             );
-            self.matmul_f16b(attn_d.clone(), lw.wo.clone(), wo_d.clone(), sq_total, q_dim, n);
+            self.matmul_f16b(st.attn.clone(), lw.wo.clone(), st.wo.clone(), sq_total, q_dim, n);
             // Residual add, in place on the device (the host arm's
             // `h[i] = xr[i] + wo_h[i]`).
             unsafe {
                 crate::elementwise_cubecl::AddCubeCL::launch::<ActiveRuntime>(
                     &self.client,
-                    h_dev.clone(),
+                    ws.h_dev.clone(),
                     sq_total * n,
-                    wo_d.clone(),
+                    st.wo.clone(),
                     sq_total * n,
                     0,
                     0,
@@ -1777,53 +2154,138 @@ impl EdlmGpuModel {
             // ── MLP block (device-resident) ──
             EdlmRmsNormRowsCubeCL::launch::<ActiveRuntime>(
                 &self.client,
-                h_dev.clone(),
+                ws.h_dev.clone(),
                 lw.post_attn_norm.clone(),
-                hn2_d.clone(),
+                st.hn2.clone(),
                 sq_total,
                 n,
                 eps,
             );
-            self.matmul_f16b(hn2_d.clone(), lw.gateup.clone(), gu_d.clone(), sq_total, n, 2 * mlp);
+            self.matmul_f16b(st.hn2.clone(), lw.gateup.clone(), st.gu.clone(), sq_total, n, 2 * mlp);
             // SwiGLU: silu(first half) · second half — the host arm's
             // `swiglu` law, on device.
             unsafe {
                 crate::elementwise_cubecl::GluSiluGateCubeCL::launch::<ActiveRuntime>(
                     &self.client,
-                    gu_d.clone(),
-                    mi_d.clone(),
+                    st.gu.clone(),
+                    st.mi.clone(),
                     sq_total,
                     mlp,
                 )
             };
-            self.matmul_f16b(mi_d.clone(), lw.down.clone(), down_d.clone(), sq_total, mlp, n);
+            self.matmul_f16b(st.mi.clone(), lw.down.clone(), st.down.clone(), sq_total, mlp, n);
             unsafe {
                 crate::elementwise_cubecl::AddCubeCL::launch::<ActiveRuntime>(
                     &self.client,
-                    h_dev.clone(),
+                    ws.h_dev.clone(),
                     sq_total * n,
-                    down_d.clone(),
+                    st.down.clone(),
                     sq_total * n,
                     0,
                     0,
                     sq_total * n,
                 )
             };
-
-            if capture {
-                // Once per prefill: the host cache for parity inspection +
-                // the pointer head (the branch passes never read this).
-                let kv_host = read_f32(&self.client, kv_d.clone()).map_err(|e| e.to_string())?;
-                kv_capture.push(EdlmLayerKv {
-                    k: kv_host[..own_total * kvd].to_vec(),
-                    v: kv_host[own_total * kvd..2 * own_total * kvd].to_vec(),
-                });
-            }
-            own_handles.push(kv_d);
         }
+        Ok(())
+    }
 
-        let h_final = read_f32(&self.client, h_dev).map_err(|e| e.to_string())?;
-        Ok((h_final, kv_capture, own_handles))
+    /// Capture the branch pass ONCE for the current (state, row geometry):
+    /// `graph_prepare` arms the persistent pool → the first REAL eager pass
+    /// primes it AND answers the caller's first question set (returned as
+    /// `h_first`) → `start_capture` → one allocation-free capture run (empty
+    /// inputs) → `stop_capture` → the shape-constant buffers written once,
+    /// outside the window. The capture run's workspace rides inside the
+    /// returned [`BranchGraph`] (the graph's liveness set).
+    fn capture_branch_graph(
+        &self,
+        pass: &[PassRow<'_>],
+        seed: Option<(&[Handle], usize)>,
+        row_lens: Vec<usize>,
+    ) -> Result<(BranchGraph, Vec<f32>), String> {
+        let geo = self.pass_geometry(pass, seed, false)?;
+        self.client
+            .graph_prepare()
+            .map_err(|e| format!("graph_prepare: {e}"))?;
+        // Prime: the real first pass, eagerly — allocations land in the
+        // armed persistent pool (released for reuse by `begin_capture`'s
+        // priming end), the kernels compile, and the answer is real.
+        let (h_first, _, _) = self.forward_rows_batched_device(pass, seed, &geo)?;
+        self.client
+            .start_capture()
+            .map_err(|e| format!("start_capture: {e}"))?;
+        let mut window = CaptureWindow {
+            client: &self.client,
+            open: true,
+        };
+        let captured = self
+            .alloc_rows_workspace(&geo, WorkspaceInputs::Empty)
+            .and_then(|ws| self.run_rows_device_ws(&ws, seed, &geo).map(|_| ws));
+        let ws = match captured {
+            Ok(ws) => ws,
+            Err(e) => {
+                // The window guard closes the recording + drains on the way
+                // out — a stream left capturing poisons every later
+                // submission on it (the parallel-libtest cascade, measured
+                // 2026-10-09).
+                return Err(format!("capture run: {e}"));
+            }
+        };
+        let graph = match self.client.stop_capture() {
+            Ok(graph) => {
+                window.open = false;
+                graph
+            }
+            Err(e) => return Err(format!("stop_capture: {e}")),
+        };
+        // Shape constants, written OUTSIDE the capture window (they ride the
+        // buffers every replay reads; positions are per-replay written).
+        self.client
+            .write(&ws.seg_d, cubecl::bytes::Bytes::from_elems(geo.seg_of_q.clone()));
+        self.client
+            .write(&ws.ts_d, cubecl::bytes::Bytes::from_elems(geo.t_start.clone()));
+        self.client
+            .write(&ws.te_d, cubecl::bytes::Bytes::from_elems(geo.t_end.clone()));
+        let sq_total = geo.sq_total;
+        Ok((
+            BranchGraph {
+                graph,
+                ws,
+                row_lens,
+                sq_total,
+            },
+            h_first,
+        ))
+    }
+
+    /// One graphed replay: refresh the input handles (the gathered embedding
+    /// rows + rope positions — one batched submit), dispatch the recorded
+    /// sequence as ONE launch, read the pass-final hidden.
+    fn replay_branch_graph(
+        &self,
+        g: &BranchGraph,
+        pass: &[PassRow<'_>],
+    ) -> Result<Vec<f32>, String> {
+        let inputs = self.build_pass_inputs(pass, g.sq_total);
+        self.client.write_many(vec![
+            (
+                g.ws.h_dev.clone(),
+                cubecl::bytes::Bytes::from_elems(inputs.h),
+            ),
+            (
+                g.ws.pos_d.clone(),
+                cubecl::bytes::Bytes::from_elems(inputs.pos_flat),
+            ),
+        ]);
+        // SAFETY: every handle the recorded kernels bind is retained for the
+        // graph's lifetime — the capture-run workspace rides in `g.ws`, the
+        // weights ride the model, the seed KV rides the state (a new prefill
+        // drops the graph first). The writes above + this replay + the read
+        // below all submit on the model's pinned stream, so they order
+        // against each other by construction; nothing else submits here
+        // between them (the single-actor serving law).
+        unsafe { g.graph.replay() };
+        read_f32(&self.client, g.ws.h_dev.clone()).map_err(|e| e.to_string())
     }
 }
 

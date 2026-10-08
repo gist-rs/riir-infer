@@ -1,6 +1,17 @@
 # Issue 1005 — eDLM (Drex DLM) inference lane: GGUF arch + segment block-causal mask + pointer head
 
-**Status:** OPEN — T8 SG8 FOLLOW-UP LANDED 2026-10-08 (this session, 4090): the staging
+**Status:** OPEN — T8 CUDA-GRAPHS UNIT LANDED 2026-10-09 (this session, 4090): the graphed
+branch pass (record once per (state, row geometry), replay as one dispatch) shipped OPT-IN
+`EDLM_GPU_GRAPHS=1` + `with_graphs`; measured GOAT VERDICT: NOT PROMOTED — mid 1.04× /
+small 1.01× amortized (the 41%-launch-tax projection REFUTED: enqueue overlaps device work;
+the exposed tax is ~7% at mid, the small cell is actor-read-bound). The unit still ships
+the workspace refactor (one shared kernel sequence for eager/prime/capture), the stream
+pinning (`StreamId::executes`, no unsafe set_stream), and the capture machinery with the
+stream-exclusivity + `CaptureWindow` recovery laws (measured the hard way). Capture-evidence
+lane: `cargo test -p riir-infer-gpu --features edlm_gpu --lib graph -- --ignored
+--test-threads=1` (native CUDA). ⚠ Pre-existing found: the FULL wgpu `--lib` suite loses
+the device mid-run (16 failures, reproduced at HEAD in a clean worktree — follow-up).
+Earlier: T8 SG8 FOLLOW-UP LANDED 2026-10-08: the staging
 ladder resolved by measurement BEFORE the port — Bench 706's ternary-cmma16 verdict (kb4
 0.27× LOSES, sg8 1.64× ships) routed the "k-blocked CMMA staging" follow-up to the
 multi-subgroup big-tile rung. `matmul_f16b_cmma_f32_sg8` (8 subgroups, 128×64 tile, 32
@@ -354,6 +365,70 @@ serving-shaped is ever built here or in reflex.
       Remaining T8 follow-up: CUDA graphs — the device-resident forward it
       requires now EXISTS (the fold left exactly two host reads per pass);
       the graphs unit is next.)
+      *(**T8 CUDA-GRAPHS UNIT, 2026-10-09, 4090:** the graphed branch pass
+      LANDED — opt-in `EDLM_GPU_GRAPHS` (default OFF; `with_graphs` A/B
+      seam). The device-resident pass is RECORDED once per (state, row
+      geometry) and replayed as ONE dispatch per question set: `graph_prepare`
+      → the first REAL eager pass primes the persistent pool AND answers the
+      first question set (the prime is not wasted) → `start_capture` → one
+      allocation-free capture run with EMPTY inputs (a data copy inside the
+      window records a memcpy node that re-stomps per-replay writes) →
+      `stop_capture` → shape-constant buffers (seg_of_q/ts/te) written once
+      outside the window → per replay: `write_many` (gathered rows + rope
+      pos, one submit) → `graph.replay()` → `read_one`. DRY: the pass is ONE
+      launch sequence (`run_rows_device_ws` over a `PassWorkspace`) consumed
+      by the eager, prime, AND capture runs — graphed-vs-eager runs the same
+      kernels by construction. The stream law: the model pins the
+      constructing thread's stream (`StreamId::current()`) and every op —
+      eager or graphed — submits on it via `StreamId::executes` (no
+      `unsafe set_stream`); the write/replay/read trio is stream-ordered by
+      construction, and the model is callable from any thread after
+      construction (cubecl-environment is now a direct =-pinned dep — the
+      umbrella shadows `environment` with its own module). THREE measured
+      laws: (1) the capture window requires PROCESS-WIDE CUDA exclusivity
+      (`CU_STREAM_CAPTURE_MODE_GLOBAL` — any thread's uploads/syncs/allocs
+      invalidate it; measured green sequentially, red under default
+      libtest parallelism) — the four capture lib tests are `#[ignore]`d
+      with the run command in the reason; a polluted window degrades LOUD
+      (sticky eager flag + one eprintln + the `graphs_live` accessor so no
+      claim can ride a silent fallback); (2) a capture aborted mid-window
+      poisons the stream — `CaptureWindow` closes the recording + flushes
+      on ANY unwind (measured: without it one invalidated window cascaded
+      `STREAM_CAPTURE_UNSUPPORTED` through every later test on the thread);
+      (3) stream ids share CUDA slots `value % max_streams (128)` — the
+      full-suite parallel run exceeds 128 ids and slot-mates collide
+      (documented; the evidence lane is `--ignored --test-threads=1`).
+      **GOAT (native CUDA, release, interleaved pairs, K=16 sets/state,
+      trainer-resident box): mid 4×64 amortized 1.04× (12.83 → 12.29 ms/set),
+      small 1×16 amortized 1.01× (5.84 → 5.76 ms/set) — the 41%-launch-tax
+      projection is REFUTED: enqueue OVERLAPS device work in a real pass
+      (the probe's back-to-back launches could not); the exposed tax is
+      ~0.9 ms of ~12.8 ms ≈ 7% at the mid shape, and the small cell is
+      actor-read-bound, not launch-bound. VERDICT: STAYS OPT-IN — not
+      promoted; the unit still ships the workspace refactor (one shared
+      kernel sequence), the stream pinning (thread-safe model ops), and the
+      graphs machinery for any future enqueue-bound flip. Parity: replays
+      sit in the SAME ULP band as the stack's own cross-pass variance
+      (measured: eager same-instance rerun 8.3e-7, cross-instance eager
+      9.5e-7, replay-vs-prime 7.7e-7, graphed-vs-eager ≤ 1.1e-6 — gate =
+      2× control band, printed beside); replay-vs-prime is NOT bit-exact on
+      this stack (the band is the stack's per-call face, not the graph's).
+      Wgpu posture: capture errors ONCE loud, model stays eager, parity
+      carried by the eager-fallback tests (bit-exact at tiny vs the fold
+      oracle). Gates: clippy 0 at edlm_gpu/default/no-default/all-features ×
+      all-targets; edlm lib 17/0 (default posture, dev+release × wgpu+CUDA);
+      capture lane 4/4 at `--ignored --test-threads=1` (native CUDA); GOAT
+      binary PASS both cells; fence PASSED (503 .rs — +1 the GOAT file);
+      core lib 257/0 unchanged. [[test]] row per the R1 pattern.
+      ⚠ PRE-EXISTING, not this change: the FULL `--lib` suite (262 tests)
+      on wgpu loses the device partway (16 gemma2/gemv_q4k/weight_buffer
+      failures incl. the issue-714 device-lost probe) — reproduced at HEAD
+      `9ece055` in a clean worktree, sequential, quiet GPU; never caught
+      because prior sessions ran filtered subsets. Follow-up if the full
+      lane matters: bisect which test kills the wgpu device.)
+      Remaining T8 follow-ups: M3-blocked legs unchanged (real-Q8_0 gate,
+      corpus leg, e2e profile); pp2048 −5% re-measures at the next league
+      bout; decode ≥1.10 re-arms on fork movement.)
       *(**T8 CUDA-GRAPHS DECISION INPUT, same day, 4090, native CUDA,
       release:** the `probe_launch_and_upload_overhead` probe (in
       `tests/edlm_fold_goat.rs`, `--ignored`) measured the ceiling BEFORE

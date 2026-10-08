@@ -67,6 +67,11 @@ thiserror = { version = "2", optional = true }
 
 [target.'cfg(target_os = "macos")'.dependencies]
 cubecl = { version = "=0.11.0-pre.2", features = ["wgpu-msl"], optional = true }
+# The graph lane names `StreamId` directly (the model's pinned-stream law):
+# the umbrella `cubecl` shadows `environment` with its own module, so the
+# crate itself is the only path. Same =-pin as the umbrella — one lockfile
+# entry, already in the tree transitively.
+cubecl-environment = { version = "=0.11.0-pre.2", optional = true }
 # Raw Metal device access for the metal::tensor matmul2d kernel family,
 # macOS-only behind `metal_tensor_gemm`. Target-scoped so enabling the
 # feature on Windows/Linux hosts is inert instead of pulling
@@ -75,6 +80,7 @@ metal = { version = "0.31", optional = true }
 
 [target.'cfg(not(target_os = "macos"))'.dependencies]
 cubecl = { version = "=0.11.0-pre.2", features = ["wgpu-spirv"], optional = true }
+cubecl-environment = { version = "=0.11.0-pre.2", optional = true }
 # Raw CUDA dp4a/mma ternary GEMV + GEMM + the whole-prefill cudarc family
 # (nvrtc-compiled kernels). Only `driver` + `nvrtc` are needed. macOS has
 # no CUDA; `cuda-13030` + `fallback-dynamic-loading` match the engine gpu
@@ -115,7 +121,7 @@ dq_phase_bench = ["cubecl_runtime", "ternary_gemv", "ternary_gemm_batched", "ter
 # fake-quant machinery is out of scope here; this is the WEIGHT-format
 # matrix.
 dq_s3_bench = ["ternary_gemv_cuda_raw", "riir-infer-core/bonsai2_hadamard", "dep:blake3"]
-cubecl_runtime = ["dep:cubecl", "dep:half", "dep:papaya", "dep:blake3"]
+cubecl_runtime = ["dep:cubecl", "dep:cubecl-environment", "dep:half", "dep:papaya", "dep:blake3"]
 cuda_backend = ["cubecl_runtime", "cubecl/cuda"]
 # Ternary bit-plane (Q2_0_g128) GEMV family around the gemv_ternary_cubecl
 # hub (decode path). Mirrors the engine gpu crate's feature MINUS its
@@ -296,6 +302,13 @@ required-features = ["edlm_gpu"]
 # sync posture vs the v1 host small-ops path, interleaved). Same R1 pair.
 [[test]]
 name = "edlm_fold_goat"
+required-features = ["edlm_gpu"]
+
+# Issue 1005 T8 — the CUDA-graphed branch pass: bit-identity sweep
+# (always-on) + the amortized interleaved A/B (#[ignore], release). Same
+# R1 pair as the fold GOAT.
+[[test]]
+name = "edlm_graphs_goat"
 required-features = ["edlm_gpu"]
 
 # riir-infer Issue 032 — G1 of the Metal folded (Bonsai-2) CubeCL prefill vs

@@ -3569,6 +3569,7 @@ dependencies = [
  "blake3",
  "bytemuck",
  "cubecl",
+ "cubecl-environment",
  "cudarc",
  "fastrand",
  "half",
