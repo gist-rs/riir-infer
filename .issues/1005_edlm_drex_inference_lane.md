@@ -255,8 +255,54 @@ serving-shaped is ever built here or in reflex.
       clippy at edlm_gpu/default/no-default/all-features × all-targets
       GREEN; edlm_gpu lib 251/0 (dev, wgpu); kernel parity + pipeline parity
       + always-on real-shape parity GREEN at native CUDA too.)
-      Remaining T8 perf follow-ups: GPU-resident KV carry, batched
-      multi-branch, CUDA graphs.)
+      *(**T8 KV-CARRY + BATCHED MULTI-BRANCH FOLLOW-UP, same day, 4090:**
+      the two remaining follow-ups landed as ONE unit — the seed-segment
+      attention kernel subsumes both. `edlm_attn_multi_f32` is now
+      TWO-SEGMENT: a device-resident `seed_kv` (`[keys | values]` layout,
+      the state KV) + per-query OWN windows `t_start`/`t_end` (replacing
+      the count-only `t_n`; the seed phase visits `[0, n_seed)` first — the
+      T7 law, state keys precede every branch query — then the own window).
+      One shape now serves state prefill (bidir/causal windows), single-row
+      continuations, AND batched rows: each row's keys occupy its own
+      own-buffer segment `[seg, seg+len)` and its queries attend only the
+      seed + that segment — row isolation without any mask. The tile body
+      is spelled twice (seed/own) rather than slice-selected at runtime
+      (codegen safety, the same discipline as the hand-unrolled
+      reductions). Model side: `EdlmGpuStateKv { host, device_kv }` — the
+      prefill RETAINS each layer's combined buffer on the device (the KV
+      carry; the host copy stays for parity + the pointer head), and
+      `forward_branches` runs ALL rows in ONE batched pass (the four
+      per-layer projections at `m = Σ branch_len` once, launches/readbacks
+      ÷ rows; `&self` now — no mutation). The per-row-per-layer host copy
+      + re-upload of the combined `[state | branch]` cache is GONE.
+      **GOAT (native CUDA, release, quiet GPU, interleaved 9 pairs, mid
+      shape n_embd 1024 × 8 layers, 4 rows × 64 tokens, state 384):**
+      batched **1.16×** the per-row median (114.8 vs 133.1 ms/pass — both
+      arms device-resident); the KV-carry disclosure: **29.4 MB/branch-row**
+      of seed re-upload eliminated at the mid shape (one measured upload at
+      1.7 GB/s = 17.2 ms/row, ×4 rows/pass) — vs the v1 shape the arithmetic
+      is **~1.8×**, growing with n_layer × n_embd (8B release ≈ **113
+      MB/row** at 36-layer class). `tests/edlm_branch_batch_goat.rs` (the
+      always-on arms-agree gate, printed drift 0.0e0 — bit-identical, same
+      kernels — gate 1e-4; the `#[ignore]` interleaved table) + [[test]]
+      required-features row (the R1 pattern). **Parity: byte-identical
+      drift vs v1 at all three GEMM postures** (kv 6.485e-5 scalar /
+      1.995e-3 cmma / hidden ≤9.5e-6 — the per-query visit order is
+      unchanged; the segment seam only regroups tiles at the boundary,
+      inside the same tolerance class) — 9/9 edlm lib tests at dev+release
+      × wgpu-spirv+native-CUDA (+2 new kernel units: seed window with a
+      NON-ZERO window start — the shape count-only t_n could not express —
+      and the 200-key seed multi-tile carry across the segment seam; the
+      four kernel units share one `cpu_attn_reference` oracle, DRY).
+      Gates: clippy GREEN at edlm_gpu/default/no-default/all-features ×
+      all-targets (⚠ the "generated 1 warning" summaries on this box are
+      cargo cached-replay artifacts — the JSON diagnostic stream carries
+      ZERO real warnings for every unit after the fixes; verified via
+      `--message-format=json`); fence PASSED (no new deps, 501 tracked
+      .rs); core edlm 28/0 unchanged.)
+      Remaining T8 perf follow-up: CUDA graphs (needs the host small-ops —
+      qk-norm/RoPE/SwiGLU — folded onto the GPU first, each parity-gated;
+      the next unit).)
 
 ## License law
 

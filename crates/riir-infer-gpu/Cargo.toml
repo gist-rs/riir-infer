@@ -286,6 +286,12 @@ required-features = ["cubecl_runtime", "ternary_gemm_batched", "metal_tensor_gem
 name = "edlm_matmul_cmma_goat"
 required-features = ["edlm_gpu"]
 
+# riir-infer Issue 1005 T8 follow-up — the branch-pass GOAT lane (batched
+# multi-branch vs per-row + the KV-carry traffic disclosure). Same R1 pair.
+[[test]]
+name = "edlm_branch_batch_goat"
+required-features = ["edlm_gpu"]
+
 # riir-infer Issue 032 — G1 of the Metal folded (Bonsai-2) CubeCL prefill vs
 # the folded decode eager path, plus the pre-rotation pin (T5). The
 # whole-file #![cfg] keeps the count honest; this row keeps the reader honest

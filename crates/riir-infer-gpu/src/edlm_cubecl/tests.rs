@@ -168,6 +168,64 @@ fn max_abs_diff(a: &[f32], b: &[f32]) -> f32 {
         .fold(0.0f32, f32::max)
 }
 
+/// The plain-softmax CPU oracle for the two-segment attention kernel: query
+/// `i` attends the seed keys `[0, sl)` then own keys `[t_start(i),
+/// t_end(i))`, GQA `kvh = h·n_kv/n_head`. Order-independent (plain softmax),
+/// so it oracles the seed-then-own online accumulation exactly once for all
+/// four kernel units.
+#[allow(clippy::too_many_arguments)]
+fn cpu_attn_reference(
+    q: &[f32],
+    seed_k: &[f32],
+    seed_v: &[f32],
+    own_k: &[f32],
+    own_v: &[f32],
+    sl: usize,
+    t_start: &[u32],
+    t_end: &[u32],
+    n_head: usize,
+    n_kv: usize,
+    hd: usize,
+) -> Vec<f32> {
+    let sq = t_start.len();
+    let kvd = n_kv * hd;
+    let q_dim = n_head * hd;
+    let scale = 1.0 / (hd as f32).sqrt();
+    let mut want = vec![0.0f32; sq * q_dim];
+    for qi in 0..sq {
+        for h in 0..n_head {
+            let kvh = h * n_kv / n_head;
+            let win = (t_end[qi] - t_start[qi]) as usize;
+            let vis = sl + win;
+            let mut scores = Vec::with_capacity(vis);
+            let mut v_rows: Vec<(&[f32], usize)> = Vec::with_capacity(vis);
+            for vk in 0..vis {
+                let (k_row, v_row) = if vk < sl {
+                    (&seed_k[vk * kvd..], &seed_v[vk * kvd..])
+                } else {
+                    let j = t_start[qi] as usize + (vk - sl);
+                    (&own_k[j * kvd..], &own_v[j * kvd..])
+                };
+                let mut dot = 0.0f32;
+                for t in 0..hd {
+                    dot += q[qi * q_dim + h * hd + t] * k_row[kvh * hd + t];
+                }
+                scores.push(dot * scale);
+                v_rows.push((v_row, kvh * hd));
+            }
+            let mx = scores.iter().copied().fold(f32::NEG_INFINITY, f32::max);
+            let exps: Vec<f32> = scores.iter().map(|&s| (s - mx).exp()).collect();
+            let sum: f32 = exps.iter().sum();
+            for (e, (v_row, vo)) in exps.iter().zip(&v_rows) {
+                for d in 0..hd {
+                    want[qi * q_dim + h * hd + d] += e / sum * v_row[vo + d];
+                }
+            }
+        }
+    }
+    want
+}
+
 // ── kernel units ────────────────────────────────────────────────────
 
 #[test]
@@ -220,7 +278,6 @@ fn attn_multi_matches_cpu_reference_with_visibility_bounds() {
     let n_pos = 9usize;
     let kvd = n_kv * hd;
     let q_dim = n_head * hd;
-    let scale = 1.0 / (hd as f32).sqrt();
 
     let mut r = Lcg(0xC0FFEE);
     let q: Vec<f32> = (0..sq * q_dim).map(|_| r.next_f32()).collect();
@@ -228,54 +285,49 @@ fn attn_multi_matches_cpu_reference_with_visibility_bounds() {
     let keys: Vec<f32> = (0..n_pos * kvd).map(|_| 0.2 * r.next_f32()).collect();
     let values: Vec<f32> = (0..n_pos * kvd).map(|_| r.next_f32()).collect();
     // Visibility: some rows causal-with-prefix, some full — the two laws the
-    // model pass emits (branch continuation + bidir state).
-    let t_n: Vec<u32> = vec![1, 3, 5, 9, 9];
+    // model pass emits (branch continuation + bidir state). No seed: the
+    // state-pass form.
+    let t_end: Vec<u32> = vec![1, 3, 5, 9, 9];
+    let t_start: Vec<u32> = vec![0; sq];
 
-    // CPU reference: query row i attends keys 0..t_n(i), GQA kvh = h*n_kv/n_head.
-    let mut want = vec![0.0f32; sq * q_dim];
-    for qi in 0..sq {
-        for h in 0..n_head {
-            let kvh = h * n_kv / n_head;
-            let vis = t_n[qi] as usize;
-            let mut scores = Vec::with_capacity(vis);
-            for j in 0..vis {
-                let mut dot = 0.0f32;
-                for t in 0..hd {
-                    dot += q[qi * q_dim + h * hd + t] * keys[j * kvd + kvh * hd + t];
-                }
-                scores.push(dot * scale);
-            }
-            let mx = scores.iter().copied().fold(f32::NEG_INFINITY, f32::max);
-            let exps: Vec<f32> = scores.iter().map(|&s| (s - mx).exp()).collect();
-            let sum: f32 = exps.iter().sum();
-            for (j, &e) in exps.iter().enumerate() {
-                for d in 0..hd {
-                    want[qi * q_dim + h * hd + d] +=
-                        e / sum * values[j * kvd + kvh * hd + d];
-                }
-            }
-        }
-    }
+    let want = cpu_attn_reference(
+        &q,
+        &[],
+        &[],
+        &keys,
+        &values,
+        0,
+        &t_start,
+        &t_end,
+        n_head,
+        n_kv,
+        hd,
+    );
 
-    let mut kv_combined = keys;
+    let mut kv_combined = keys.clone();
     kv_combined.extend_from_slice(&values);
     let q_h = create_f32(&client, &q);
     let kv_h = create_f32(&client, &kv_combined);
-    let tn_h = create_u32(&client, &t_n);
+    let seed_h = create_f32(&client, &[0.0]);
+    let ts_h = create_u32(&client, &t_start);
+    let te_h = create_u32(&client, &t_end);
     let out_h = client.empty(sq * q_dim * core::mem::size_of::<f32>());
     EdlmAttnMultiCubeCL::launch::<ActiveRuntime>(
         &client,
         q_h,
         kv_h,
-        tn_h,
+        seed_h,
+        ts_h,
+        te_h,
         out_h.clone(),
         &EdlmAttnMultiParams {
             n_head,
             n_kv_head: n_kv,
             head_dim: hd,
             n_positions: n_pos,
+            n_seed: 0,
             seq_q: sq,
-            scale,
+            scale: 1.0 / (hd as f32).sqrt(),
         },
     );
     let got = read_f32(&client, out_h).expect("read");
@@ -304,57 +356,42 @@ fn attn_multi_multi_tile_visibility() {
     let n_pos = 300usize;
     let kvd = n_kv * hd;
     let q_dim = n_head * hd;
-    let scale = 1.0 / (hd as f32).sqrt();
 
     let mut r = Lcg(0xD00D);
     let q: Vec<f32> = (0..sq * q_dim).map(|_| r.next_f32()).collect();
     let keys: Vec<f32> = (0..n_pos * kvd).map(|_| 0.1 * r.next_f32()).collect();
     let values: Vec<f32> = (0..n_pos * kvd).map(|_| r.next_f32()).collect();
-    let t_n: Vec<u32> = vec![129, 300]; // one just over a tile, one 2.34 tiles
+    let t_end: Vec<u32> = vec![129, 300]; // one just over a tile, one 2.34 tiles
+    let t_start: Vec<u32> = vec![0; sq];
 
-    let mut want = vec![0.0f32; sq * q_dim];
-    for qi in 0..sq {
-        for h in 0..n_head {
-            let kvh = h * n_kv / n_head;
-            let vis = t_n[qi] as usize;
-            let mut scores = Vec::with_capacity(vis);
-            for j in 0..vis {
-                let mut dot = 0.0f32;
-                for t in 0..hd {
-                    dot += q[qi * q_dim + h * hd + t] * keys[j * kvd + kvh * hd + t];
-                }
-                scores.push(dot * scale);
-            }
-            let mx = scores.iter().copied().fold(f32::NEG_INFINITY, f32::max);
-            let exps: Vec<f32> = scores.iter().map(|&s| (s - mx).exp()).collect();
-            let sum: f32 = exps.iter().sum();
-            for (j, &e) in exps.iter().enumerate() {
-                for d in 0..hd {
-                    want[qi * q_dim + h * hd + d] += e / sum * values[j * kvd + kvh * hd + d];
-                }
-            }
-        }
-    }
+    let want = cpu_attn_reference(
+        &q, &[], &[], &keys, &values, 0, &t_start, &t_end, n_head, n_kv, hd,
+    );
 
-    let mut kv_combined = keys;
+    let mut kv_combined = keys.clone();
     kv_combined.extend_from_slice(&values);
     let q_h = create_f32(&client, &q);
     let kv_h = create_f32(&client, &kv_combined);
-    let tn_h = create_u32(&client, &t_n);
+    let seed_h = create_f32(&client, &[0.0]);
+    let ts_h = create_u32(&client, &t_start);
+    let te_h = create_u32(&client, &t_end);
     let out_h = client.empty(sq * q_dim * core::mem::size_of::<f32>());
     EdlmAttnMultiCubeCL::launch::<ActiveRuntime>(
         &client,
         q_h,
         kv_h,
-        tn_h,
+        seed_h,
+        ts_h,
+        te_h,
         out_h.clone(),
         &EdlmAttnMultiParams {
             n_head,
             n_kv_head: n_kv,
             head_dim: hd,
             n_positions: n_pos,
+            n_seed: 0,
             seq_q: sq,
-            scale,
+            scale: 1.0 / (hd as f32).sqrt(),
         },
     );
     let got = read_f32(&client, out_h).expect("read");
@@ -362,6 +399,140 @@ fn attn_multi_multi_tile_visibility() {
     assert!(
         worst < 2e-4,
         "multi-tile attention drift {worst} (online carry class)"
+    );
+}
+
+#[test]
+fn attn_multi_seed_segment_window() {
+    // The seed segment (the device-resident state KV) + per-query own
+    // windows — INCLUDING a window whose start is NOT 0 (row isolation in
+    // the batched multi-branch pass: query 2 attends own [2, 5), skipping
+    // own keys 0..2). The shape the old count-only t_n could not express.
+    let ctx = CubeCLContext::new().expect("CubeCL should initialize");
+    let client = ctx.client();
+
+    let n_head = 2usize;
+    let n_kv = 1usize;
+    let hd = 128usize;
+    let sq = 3usize;
+    let sl = 7usize;
+    let n_pos = 5usize;
+    let kvd = n_kv * hd;
+    let q_dim = n_head * hd;
+
+    let mut r = Lcg(0x5EED_5EED);
+    let q: Vec<f32> = (0..sq * q_dim).map(|_| r.next_f32()).collect();
+    let seed_k: Vec<f32> = (0..sl * kvd).map(|_| 0.15 * r.next_f32()).collect();
+    let seed_v: Vec<f32> = (0..sl * kvd).map(|_| r.next_f32()).collect();
+    let keys: Vec<f32> = (0..n_pos * kvd).map(|_| 0.15 * r.next_f32()).collect();
+    let values: Vec<f32> = (0..n_pos * kvd).map(|_| r.next_f32()).collect();
+    let t_start: Vec<u32> = vec![0, 0, 2];
+    let t_end: Vec<u32> = vec![1, 3, 5];
+
+    let want = cpu_attn_reference(
+        &q, &seed_k, &seed_v, &keys, &values, sl, &t_start, &t_end, n_head, n_kv, hd,
+    );
+
+    let mut own = keys.clone();
+    own.extend_from_slice(&values);
+    let mut seed = seed_k.clone();
+    seed.extend_from_slice(&seed_v);
+    let q_h = create_f32(&client, &q);
+    let kv_h = create_f32(&client, &own);
+    let seed_h = create_f32(&client, &seed);
+    let ts_h = create_u32(&client, &t_start);
+    let te_h = create_u32(&client, &t_end);
+    let out_h = client.empty(sq * q_dim * core::mem::size_of::<f32>());
+    EdlmAttnMultiCubeCL::launch::<ActiveRuntime>(
+        &client,
+        q_h,
+        kv_h,
+        seed_h,
+        ts_h,
+        te_h,
+        out_h.clone(),
+        &EdlmAttnMultiParams {
+            n_head,
+            n_kv_head: n_kv,
+            head_dim: hd,
+            n_positions: n_pos,
+            n_seed: sl,
+            seq_q: sq,
+            scale: 1.0 / (hd as f32).sqrt(),
+        },
+    );
+    let got = read_f32(&client, out_h).expect("read");
+    let worst = max_abs_diff(&got, &want);
+    assert!(
+        worst < 2e-4,
+        "seed+window attention drift {worst} (online carry class)"
+    );
+}
+
+#[test]
+fn attn_multi_seed_multi_tile_carry() {
+    // The seed LONGER than one tile (200 keys) + own windows — the online
+    // softmax must carry across the seed→own segment SEAM mid-tile (the
+    // multi-tile rescale class of the second test, one source boundary
+    // added). Query 1 sees 300 keys over the two segments.
+    let ctx = CubeCLContext::new().expect("CubeCL should initialize");
+    let client = ctx.client();
+
+    let n_head = 2usize;
+    let n_kv = 1usize;
+    let hd = 128usize;
+    let sq = 2usize;
+    let sl = 200usize;
+    let n_pos = 100usize;
+    let kvd = n_kv * hd;
+    let q_dim = n_head * hd;
+
+    let mut r = Lcg(0xFA11_1005);
+    let q: Vec<f32> = (0..sq * q_dim).map(|_| r.next_f32()).collect();
+    let seed_k: Vec<f32> = (0..sl * kvd).map(|_| 0.1 * r.next_f32()).collect();
+    let seed_v: Vec<f32> = (0..sl * kvd).map(|_| r.next_f32()).collect();
+    let keys: Vec<f32> = (0..n_pos * kvd).map(|_| 0.1 * r.next_f32()).collect();
+    let values: Vec<f32> = (0..n_pos * kvd).map(|_| r.next_f32()).collect();
+    let t_start: Vec<u32> = vec![0, 0];
+    let t_end: Vec<u32> = vec![50, 100];
+
+    let want = cpu_attn_reference(
+        &q, &seed_k, &seed_v, &keys, &values, sl, &t_start, &t_end, n_head, n_kv, hd,
+    );
+
+    let mut own = keys.clone();
+    own.extend_from_slice(&values);
+    let mut seed = seed_k.clone();
+    seed.extend_from_slice(&seed_v);
+    let q_h = create_f32(&client, &q);
+    let kv_h = create_f32(&client, &own);
+    let seed_h = create_f32(&client, &seed);
+    let ts_h = create_u32(&client, &t_start);
+    let te_h = create_u32(&client, &t_end);
+    let out_h = client.empty(sq * q_dim * core::mem::size_of::<f32>());
+    EdlmAttnMultiCubeCL::launch::<ActiveRuntime>(
+        &client,
+        q_h,
+        kv_h,
+        seed_h,
+        ts_h,
+        te_h,
+        out_h.clone(),
+        &EdlmAttnMultiParams {
+            n_head,
+            n_kv_head: n_kv,
+            head_dim: hd,
+            n_positions: n_pos,
+            n_seed: sl,
+            seq_q: sq,
+            scale: 1.0 / (hd as f32).sqrt(),
+        },
+    );
+    let got = read_f32(&client, out_h).expect("read");
+    let worst = max_abs_diff(&got, &want);
+    assert!(
+        worst < 2e-4,
+        "seed multi-tile carry drift {worst} (online carry class)"
     );
 }
 
@@ -479,7 +650,7 @@ fn forward_branches_refuses_without_prefill() {
     quantize_to_f16_grid(&mut weights);
     let enc = sample_encoding();
     let rows = riir_infer_core::transformer::edlm::rows_of(&enc).expect("rows");
-    let mut gpu = EdlmGpuModel::from_weights(&weights, &config).expect("gpu model");
+    let gpu = EdlmGpuModel::from_weights(&weights, &config).expect("gpu model");
     assert!(gpu.forward_branches(&enc, &rows).is_err(), "no cache yet");
 }
 

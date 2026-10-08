@@ -6,15 +6,17 @@
 //! # The decomposition (T7's, unchanged)
 //!
 //! eDLM never needs a general bool mask on the GPU. The T7 state-prefix
-//! decomposition maps every phase to "query row `i` attends keys `0..t_n(i)`":
+//! decomposition maps every phase to two key segments, visited in order:
 //!
-//! - **state prefill**: `t_n(i) = sl` (state_bidir) or `i + 1` (causal) over
-//!   the state's own keys — `branch_mask` over an all-state segment;
-//! - **branch continuations**: keys `[state KV | own branch KV]`,
-//!   `t_n(i) = sl + i + 1` — `branch_continuation_allow` (all state keys +
-//!   causal within the branch; state keys precede every branch query).
+//! - **state prefill**: no seed; own window `0..own_total` (state_bidir) or
+//!   `0..i + 1` (causal) — `branch_mask` over an all-state segment;
+//! - **branch continuations**: the seed segment `0..sl` (the state KV,
+//!   device-resident) then the pass's own window — all state keys + causal
+//!   within the branch (`branch_continuation_allow`; state keys precede
+//!   every branch query), per-query own windows `[seg, seg + j + 1)` so a
+//!   BATCHED pass over several branch rows isolates each row's keys.
 //!
-//! One kernel shape serves both ([`EdlmAttnMultiCubeCL`]).
+//! One kernel shape serves all three ([`EdlmAttnMultiCubeCL`]).
 //!
 //! # Weights (the upload-path decision)
 //!
@@ -36,22 +38,29 @@
 //! readbacks per layer. The GPU-resident elementwise fold is the perf
 //! follow-up; correctness is the v1 gate.
 //!
-//! # State cache posture (v1)
+//! # State cache posture (the GPU-resident KV carry)
 //!
-//! The state K/V lives CPU-side after the prefill (it was on the host for the
-//! upload anyway) and each branch re-uploads the combined `[state | branch]`
-//! cache per layer. The GPU-resident KV carry is the perf follow-up.
+//! `state_prefill` retains each layer's combined `[keys | values]` buffer ON
+//! THE DEVICE ([`EdlmGpuStateKv::device_kv`]) beside the T7 host cache (the
+//! host copy stays for parity + the pointer head). Branch passes attend the
+//! device seed directly — the per-row-per-layer host copy + re-upload of the
+//! combined `[state | branch]` cache is gone (at the 8B release shape:
+//! ~3.1 MB × n_layer per branch row of traffic eliminated).
 //!
-//! # Out of scope (v1, disclosed)
+//! # Out of scope (disclosed)
 //!
 //! - The packed-mask forward (option isolation) — rows/cached semantics only,
 //!   the CPU cached path's own caveat.
-//! - CUDA graphs / batched multi-branch dispatch.
+//! - CUDA graphs capture (needs the host small-ops folded onto the GPU
+//!   first — qk-norm/RoPE/SwiGLU kernels, each parity-gated; the next unit).
 //!
-//! The CMMA tensor-core GEMM (the first perf follow-up) is IN: the four
-//! projections dispatch through [`crate::matmul_f16b_cmma_cubecl`] unless
-//! `EDLM_GPU_CMMA=0` (the scalar kernel stays the kill-switch posture; the
-//! GOAT evidence: `tests/edlm_matmul_cmma_goat.rs` + the issue row).
+//! The CMMA tensor-core GEMM is IN: the four projections dispatch through
+//! [`crate::matmul_f16b_cmma_cubecl`] unless `EDLM_GPU_CMMA=0` (the scalar
+//! kernel stays the kill-switch posture; the GOAT evidence:
+//! `tests/edlm_matmul_cmma_goat.rs` + the issue row). The GPU-resident KV
+//! carry + the batched multi-branch pass are IN (the seed-segment attention
+//! kernel + [`EdlmGpuModel::forward_branches`] over all rows in one pass;
+//! GOAT: `tests/edlm_branch_batch_goat.rs` + the issue row).
 
 #[cfg(feature = "edlm_gpu")]
 use crate::cubecl_runtime::{
@@ -146,10 +155,20 @@ fn edlm_rmsnorm_rows_f32(x: &[f32], gamma: &[f32], params: &[f32], out: &mut [f3
     }
 }
 
-/// Multi-query GQA flash attention with per-row visibility bounds — the eDLM
-/// eligibility law (see the module doc). One cube per (head, query): grid
-/// `(n_head, seq_q, 1)`, 128-thread cubes == head_dim (the 8B release shape,
-/// asserted at the launcher). `params = [n_head, n_kv_head, head_dim, scale]`.
+/// Multi-query GQA flash attention with a device-resident seed segment and
+/// per-query own-window visibility bounds — the eDLM eligibility law (see
+/// the module doc). One cube per (head, query): grid `(n_head, seq_q, 1)`,
+/// 128-thread cubes == head_dim (the 8B release shape, asserted at the
+/// launcher). `params = [n_head, n_kv_head, head_dim, scale, n_seed]`.
+///
+/// Two source segments, visited IN ORDER (the T7 law — state keys precede
+/// every branch query; the online softmax carries across the seam):
+/// - **seed** `[0, n_seed)` from `seed_kv` — the device-resident state KV
+///   (same `[keys | values]` layout as `kv`; a 1-element dummy when
+///   `n_seed == 0`, the loop body never reads it);
+/// - **own window** `[t_start[qi], t_end[qi])` from `kv` — per-query bounds
+///   express the causal/bidir state pass AND the batched multi-branch row
+///   isolation (`[seg, seg + j + 1)`).
 ///
 /// Online softmax over key tiles of 128 (the `attention_decode` family's
 /// shape): each thread owns one key per tile and computes the full smem-Q dot
@@ -157,18 +176,32 @@ fn edlm_rmsnorm_rows_f32(x: &[f32], gamma: &[f32], params: &[f32], out: &mut [f3
 /// the output dimension `tid` accumulates its own weighted V sum, rescaled by
 /// the running-max correction each tile, normalized by the final running sum.
 /// Accumulation order differs from the CPU plain softmax — tolerance-class.
+/// The tile body is spelled twice (seed / own) rather than selected at
+/// runtime: a slice variable switch is codegen-risk for zero win (the same
+/// discipline as the hand-unrolled reductions).
 #[cfg(feature = "edlm_gpu")]
 #[cube(launch_unchecked)]
-fn edlm_attn_multi_f32(q: &[f32], kv: &[f32], t_n: &[u32], params: &[f32], out: &mut [f32]) {
+fn edlm_attn_multi_f32(
+    q: &[f32],
+    kv: &[f32],
+    seed_kv: &[f32],
+    t_start: &[u32],
+    t_end: &[u32],
+    params: &[f32],
+    out: &mut [f32],
+) {
     let n_head = params[0usize] as u32;
     let n_kv = params[1usize] as u32;
     let hd = params[2usize] as u32;
     let scale = params[3usize];
+    let n_seed = params[4usize] as u32;
     let kvd = n_kv * hd;
-    let n_pos = (kv.len() as u32) / (2u32 * kvd);
     // The combined cache is [keys(n_pos·kvd) | values(n_pos·kvd)] — the V of
-    // key j lives at kv_half + j·kvd (the attention_decode family's layout).
+    // key j lives at kv_half + j·kvd (the attention_decode family's layout);
+    // the seed cache has the SAME layout over n_seed keys.
+    let n_pos = (kv.len() as u32) / (2u32 * kvd);
     let kv_half = (kv.len() as u32) / 2u32;
+    let seed_half = n_seed * kvd;
 
     let h = CUBE_POS_X;
     let qi = CUBE_POS_Y;
@@ -181,18 +214,102 @@ fn edlm_attn_multi_f32(q: &[f32], kv: &[f32], t_n: &[u32], params: &[f32], out: 
     q_smem[tid as usize] = q[((qi * n_head + h) * hd + tid) as usize];
     sync_cube();
 
-    let vis = t_n[qi as usize];
+    let lo = t_start[qi as usize];
+    let hi = t_end[qi as usize];
     let big_neg = f32::new(-1.0e30f32);
     let mut m = big_neg;
     let mut ssum = f32::new(0.0f32);
     let mut acc = f32::new(0.0f32);
 
+    // ── phase 0: the seed keys [0, n_seed) — the device-resident state KV ──
     let mut j0 = 0u32;
-    while j0 < vis {
+    while j0 < n_seed {
         // ── score: thread tid owns key j0 + tid (full smem-Q dot) ──
         let j = j0 + tid;
         let mut s = big_neg;
-        if j < vis && j < n_pos {
+        if j < n_seed {
+            let kro = (j * kvd + kvh * hd) as usize;
+            let mut dot = f32::new(0.0f32);
+            let mut t = 0u32;
+            while t < hd {
+                dot += q_smem[t as usize] * seed_kv[kro + t as usize];
+                t += 1u32;
+            }
+            s = dot * scale;
+        }
+
+        // ── tile max ──
+        red[tid as usize] = s;
+        sync_cube();
+        let mut off = 64u32;
+        while off >= 1u32 {
+            if tid < off {
+                let other = red[(tid + off) as usize];
+                if other > red[tid as usize] {
+                    red[tid as usize] = other;
+                }
+            }
+            sync_cube();
+            off /= 2u32;
+        }
+        let tile_max = red[0usize];
+
+        // ── tile-local weights + sum (0 for masked keys — the guard, not
+        //    the exp, keeps them out) ──
+        let mut my_exp = f32::new(0.0f32);
+        if j < n_seed {
+            my_exp = f32::exp(s - tile_max);
+        }
+        w[tid as usize] = my_exp;
+        red[tid as usize] = my_exp;
+        sync_cube();
+        let mut off = 64u32;
+        while off >= 1u32 {
+            if tid < off {
+                red[tid as usize] = red[tid as usize] + red[(tid + off) as usize];
+            }
+            sync_cube();
+            off /= 2u32;
+        }
+        let tile_sum = red[0usize];
+
+        // ── weighted V accumulation for MY output dimension (tid) ──
+        let mut tile_val = f32::new(0.0f32);
+        let lane_count = n_seed - j0;
+        let mut bound = hd;
+        if lane_count < hd {
+            bound = lane_count;
+        }
+        let v_base = (kvh * hd) as usize;
+        let mut jj = 0u32;
+        while jj < bound {
+            tile_val += w[jj as usize]
+                * seed_kv[(seed_half + (j0 + jj) * kvd) as usize + v_base + tid as usize];
+            jj += 1u32;
+        }
+
+        // ── online softmax update (the family's correction form) ──
+        let mut new_max = m;
+        if tile_max > new_max {
+            new_max = tile_max;
+        }
+        let prev_corr = f32::exp(m - new_max);
+        let curr_corr = f32::exp(tile_max - new_max);
+        ssum = ssum * prev_corr + tile_sum * curr_corr;
+        acc = acc * prev_corr + tile_val * curr_corr;
+        m = new_max;
+
+        sync_cube();
+        j0 += 128u32;
+    }
+
+    // ── phase 1: the pass's own window [lo, hi) ──
+    j0 = lo;
+    while j0 < hi {
+        // ── score: thread tid owns key j0 + tid (full smem-Q dot) ──
+        let j = j0 + tid;
+        let mut s = big_neg;
+        if j < hi && j < n_pos {
             let kro = (j * kvd + kvh * hd) as usize;
             let mut dot = f32::new(0.0f32);
             let mut t = 0u32;
@@ -219,10 +336,10 @@ fn edlm_attn_multi_f32(q: &[f32], kv: &[f32], t_n: &[u32], params: &[f32], out: 
         }
         let tile_max = red[0usize];
 
-        // ── tile-local weights + sum (0 for masked keys — the guard, not the
-        //    exp, keeps them out) ──
+        // ── tile-local weights + sum (0 for masked keys — the guard, not
+        //    the exp, keeps them out) ──
         let mut my_exp = f32::new(0.0f32);
-        if j < vis && j < n_pos {
+        if j < hi && j < n_pos {
             my_exp = f32::exp(s - tile_max);
         }
         w[tid as usize] = my_exp;
@@ -239,10 +356,10 @@ fn edlm_attn_multi_f32(q: &[f32], kv: &[f32], t_n: &[u32], params: &[f32], out: 
         let tile_sum = red[0usize];
 
         // ── weighted V accumulation for MY output dimension (tid) ──
-        // Keys j0..j0+bound, bound = min(vis − j0, hd); vis ≤ n_pos (the
-        // launcher's t_n law) keeps the V reads in range.
+        // Keys j0..j0+bound, bound = min(hi − j0, hd); hi ≤ n_pos (the
+        // launcher's window law) keeps the V reads in range.
         let mut tile_val = f32::new(0.0f32);
-        let lane_count = vis - j0;
+        let lane_count = hi - j0;
         let mut bound = hd;
         if lane_count < hd {
             bound = lane_count;
@@ -250,8 +367,8 @@ fn edlm_attn_multi_f32(q: &[f32], kv: &[f32], t_n: &[u32], params: &[f32], out: 
         let v_base = (kvh * hd) as usize;
         let mut jj = 0u32;
         while jj < bound {
-            tile_val += w[jj as usize]
-                * kv[(kv_half + (j0 + jj) * kvd) as usize + v_base + tid as usize];
+            tile_val +=
+                w[jj as usize] * kv[(kv_half + (j0 + jj) * kvd) as usize + v_base + tid as usize];
             jj += 1u32;
         }
 
@@ -283,8 +400,12 @@ pub struct EdlmAttnMultiParams {
     pub n_head: usize,
     pub n_kv_head: usize,
     pub head_dim: usize,
-    /// Key positions in the combined `[keys | values]` buffer.
+    /// Key positions in the pass's own combined `[keys | values]` buffer.
     pub n_positions: usize,
+    /// Seed (state-prefix) key count in `seed_kv` — the device-resident KV
+    /// carry. `0` = no seed (the state pass); the caller then passes a
+    /// 1-element dummy the kernel never reads.
+    pub n_seed: usize,
     /// Query rows.
     pub seq_q: usize,
     /// `1 / sqrt(head_dim)` — the caller computes it exactly like the CPU
@@ -299,13 +420,18 @@ pub struct EdlmAttnMultiCubeCL;
 #[cfg(feature = "edlm_gpu")]
 impl EdlmAttnMultiCubeCL {
     /// Launch the multi-query attention: `out[sq, n_head·hd]` from
-    /// `q[sq, n_head·hd]`, `kv[2·n_pos·kvd]` (`[keys | values]`), per-row
-    /// visibility `t_n[sq]` (query `i` attends keys `0..t_n(i)`).
+    /// `q[sq, n_head·hd]`, the pass's own `kv[2·n_positions·kvd]`
+    /// (`[keys | values]`), the device-resident seed KV
+    /// `seed_kv[2·n_seed·kvd]` (1-element dummy when `n_seed == 0`), and
+    /// per-query own windows `t_start/t_end[sq]` (query `i` attends the seed
+    /// segment `[0, n_seed)` then own keys `[t_start(i), t_end(i))`).
     pub fn launch<R: Runtime>(
         client: &ComputeClient<R>,
         q: Handle,
         kv: Handle,
-        t_n: Handle,
+        seed_kv: Handle,
+        t_start: Handle,
+        t_end: Handle,
         out: Handle,
         p: &EdlmAttnMultiParams,
     ) {
@@ -330,12 +456,24 @@ impl EdlmAttnMultiCubeCL {
         );
         let kvd = p.n_kv_head * p.head_dim;
         // The kernel derives n_pos from the bound kv buffer (the `.issues/515`
-        // class guard); the other shapes from the params. t_n's own bounds
-        // (vis ≤ n_pos) are the caller's law — the model pass constructs them
-        // from the visibility table, the tests pin the violation.
+        // class guard); the other shapes from the params. The windows' own
+        // bounds (`t_end ≤ n_positions`, `t_start < t_end`) are the caller's
+        // law — the model pass constructs them from the visibility table, the
+        // tests pin the boundary shape.
         assert_binding_derives_units(&kv, 2 * kvd, p.n_positions, "EdlmAttnMulti kv");
         assert_binding_derives_units(&q, p.n_head * p.head_dim, p.seq_q, "EdlmAttnMulti q");
-        assert_binding_derives_units(&t_n, 1, p.seq_q, "EdlmAttnMulti t_n");
+        if p.n_seed > 0 {
+            assert_binding_derives_units(
+                &seed_kv,
+                2 * kvd,
+                p.n_seed,
+                "EdlmAttnMulti seed_kv",
+            );
+        } else {
+            assert_binding_derives_units(&seed_kv, 1, 1, "EdlmAttnMulti seed dummy");
+        }
+        assert_binding_derives_units(&t_start, 1, p.seq_q, "EdlmAttnMulti t_start");
+        assert_binding_derives_units(&t_end, 1, p.seq_q, "EdlmAttnMulti t_end");
         assert_binding_derives_units(&out, p.n_head * p.head_dim, p.seq_q, "EdlmAttnMulti out");
 
         let params_h = create_f32(
@@ -345,10 +483,14 @@ impl EdlmAttnMultiCubeCL {
                 p.n_kv_head as f32,
                 p.head_dim as f32,
                 p.scale,
+                p.n_seed as f32,
             ],
         );
 
-        // SAFETY: buffer sizes asserted above.
+        // SAFETY: buffer sizes asserted above. The dummy seed binds ONE
+        // element (a zero-count raw-part binding is not a valid slice; the
+        // kernel never reads it at n_seed == 0).
+        let seed_count = if p.n_seed > 0 { 2 * p.n_seed * kvd } else { 1 };
         unsafe {
             edlm_attn_multi_f32::launch_unchecked::<R>(
                 client,
@@ -356,8 +498,10 @@ impl EdlmAttnMultiCubeCL {
                 CubeDim::new_1d(128),
                 BufferArg::from_raw_parts(q, p.seq_q * p.n_head * p.head_dim),
                 BufferArg::from_raw_parts(kv, 2 * p.n_positions * kvd),
-                BufferArg::from_raw_parts(t_n, p.seq_q),
-                BufferArg::from_raw_parts(params_h, 4),
+                BufferArg::from_raw_parts(seed_kv, seed_count),
+                BufferArg::from_raw_parts(t_start, p.seq_q),
+                BufferArg::from_raw_parts(t_end, p.seq_q),
+                BufferArg::from_raw_parts(params_h, 5),
                 BufferArg::from_raw_parts(out, p.seq_q * p.n_head * p.head_dim),
             );
         }
@@ -428,9 +572,39 @@ struct EdlmGpuLayerWeights {
     k_norm: Vec<f32>,
 }
 
-/// The GPU eDLM model: f16-resident weights on the CubeCL runtime + the CPU
-/// state-prefix cache (T7's `EdlmStateKv`), serving the SAME API shape the
-/// CPU streaming lane does (`state_prefill` → `forward_branches`).
+/// The GPU-resident state cache: the T7 host cache (parity inspection + the
+/// pointer head's state-side reads) plus each layer's combined
+/// `[keys | values]` device buffer, `state_len` keys each — the branch pass
+/// attends these directly (the KV carry). At the 8B release shape this is
+/// ~3.1 MB × n_layer of VRAM per 384-token state.
+#[cfg(feature = "edlm_gpu")]
+struct EdlmGpuStateKv {
+    host: EdlmStateKv,
+    /// Per-layer combined `[keys | values]` device buffers (f32), in layer
+    /// order — the seed segment [`EdlmAttnMultiCubeCL`] reads.
+    device_kv: Vec<Handle>,
+}
+
+/// One pass segment: an independent `(ids, pos)` token run. The batched
+/// multi-branch pass concatenates the rows; each row's keys occupy its own
+/// own-buffer segment and its queries attend only the seed + that segment.
+#[cfg(feature = "edlm_gpu")]
+struct PassRow<'a> {
+    ids: &'a [usize],
+    pos: &'a [usize],
+}
+
+/// The batched pass's outputs: (concatenated raw hiddens `[Σsq · n_embd]`,
+/// the state pass's captured per-layer K/V — empty on branch passes, the
+/// per-layer own combined `[keys | values]` device handles — the state pass
+/// retains these as the KV carry).
+#[cfg(feature = "edlm_gpu")]
+type PassOutputs = (Vec<f32>, Vec<EdlmLayerKv>, Vec<Handle>);
+
+/// The GPU eDLM model: f16-resident weights on the CubeCL runtime + the
+/// GPU-resident state cache (`EdlmGpuStateKv`: the T7 host K/V + the device
+/// buffers), serving the SAME API shape the CPU streaming lane does
+/// (`state_prefill` → `forward_branches`).
 ///
 /// Construct via [`EdlmGpuModel::open`] (GGUF, one layer dequanted at a
 /// time) or [`EdlmGpuModel::from_weights`] (in-memory — the parity-test
@@ -447,10 +621,12 @@ pub struct EdlmGpuModel {
     layers: Vec<EdlmGpuLayerWeights>,
     freq: RopeFreqTable,
     scale: f32,
-    /// The cached state prefix (CPU K/V + final-normed state hiddens) —
-    /// filled by [`EdlmGpuModel::state_prefill`], consumed by
+    /// The cached state prefix — the T7 host K/V + the device-resident
+    /// per-layer buffers the branch pass attends directly (the KV carry:
+    /// no host copy, no per-row re-upload). Filled by
+    /// [`EdlmGpuModel::state_prefill`], consumed by
     /// [`EdlmGpuModel::forward_branches`].
-    state: Option<EdlmStateKv>,
+    state: Option<EdlmGpuStateKv>,
     /// The GEMM posture: [`GemmPosture::Cmma`] routes the four per-layer
     /// projections through the cooperative-matrix (tensor-core) kernels,
     /// [`GemmPosture::Scalar`] keeps the scalar tiled kernel. Resolved once
@@ -727,9 +903,11 @@ impl EdlmGpuModel {
     }
 
     /// Run the state tokens only and capture their per-layer K/V + the
-    /// final-normed state hiddens — the T7 prefill, on the GPU. The state's
-    /// own eligibility is `branch_mask` over an all-state segment: causal,
-    /// widened to state↔state bidirectional when `state_bidir`.
+    /// final-normed state hiddens — the T7 prefill, on the GPU, with the
+    /// per-layer combined `[keys | values]` buffers RETAINED on the device
+    /// (the KV carry). The state's own eligibility is `branch_mask` over an
+    /// all-state segment: causal, widened to state↔state bidirectional when
+    /// `state_bidir`.
     pub fn state_prefill(
         &mut self,
         state_ids: &[usize],
@@ -742,18 +920,25 @@ impl EdlmGpuModel {
             sl > 0 && sl <= self.config.block_size,
             "state len {sl} out of range"
         );
-        let (h, layers) = self.forward_rows(state_ids, state_pos, None, state_bidir)?;
+        let pass = [PassRow {
+            ids: state_ids,
+            pos: state_pos,
+        }];
+        let (h, layers, device_kv) = self.forward_rows_batched(&pass, None, state_bidir)?;
         let mut hidden = h;
         let n = self.config.n_embd;
         for chunk in hidden.chunks_exact_mut(n) {
             rmsnorm_with_gamma_eps(chunk, &self.final_norm, self.config.rms_norm_eps);
         }
-        self.state = Some(EdlmStateKv {
-            state_len: sl,
-            kvd: kv_dim(&self.config),
-            state_ids: state_ids.to_vec(),
-            layers,
-            hidden,
+        self.state = Some(EdlmGpuStateKv {
+            host: EdlmStateKv {
+                state_len: sl,
+                kvd: kv_dim(&self.config),
+                state_ids: state_ids.to_vec(),
+                layers,
+                hidden,
+            },
+            device_kv,
         });
         Ok(())
     }
@@ -763,15 +948,19 @@ impl EdlmGpuModel {
     pub fn state_kv(&self) -> Result<&EdlmStateKv, String> {
         self.state
             .as_ref()
+            .map(|s| &s.host)
             .ok_or_else(|| "no state cache: call state_prefill first".to_string())
     }
 
-    /// Branch rows continuing the cached state prefix — the T7 continuation,
-    /// on the GPU. Output = the CPU `forward_edlm_branches_cached` shape:
-    /// per-row `[(state hiddens | branch hiddens)]` post-final-norm, the
-    /// pointer head reads markers from it directly.
+    /// Branch rows continuing the cached state prefix — the T7 continuation
+    /// on the GPU, ALL ROWS IN ONE BATCHED PASS (the multi-branch follow-up:
+    /// the four per-layer projections run at `m = Σ branch_len` once, not
+    /// once per row, and the seed KV is attended device-resident). Output =
+    /// the CPU `forward_edlm_branches_cached` shape: per-row
+    /// `[(state hiddens | branch hiddens)]` post-final-norm, the pointer head
+    /// reads markers from it directly.
     pub fn forward_branches(
-        &mut self,
+        &self,
         enc: &PackedEncoding,
         rows: &[BranchRow],
     ) -> Result<Vec<Vec<f32>>, String> {
@@ -779,40 +968,59 @@ impl EdlmGpuModel {
             .state
             .as_ref()
             .ok_or_else(|| "no state cache: call state_prefill first".to_string())?;
-        cache.check_matches(&self.config, &enc.ids[..enc.state_len]).map_err(|e| e.to_string())?;
+        cache
+            .host
+            .check_matches(&self.config, &enc.ids[..enc.state_len])
+            .map_err(|e| e.to_string())?;
+        if rows.is_empty() {
+            return Ok(Vec::new());
+        }
         let n = self.config.n_embd;
         let sl = enc.state_len;
+        let pass: Vec<PassRow<'_>> = rows
+            .iter()
+            .map(|row| PassRow {
+                ids: &enc.ids[row.start..row.end],
+                pos: &enc.pos[row.start..row.end],
+            })
+            .collect();
+        let (h, _, _) = self.forward_rows_batched(&pass, Some((&cache.device_kv, sl)), false)?;
         let mut out = Vec::with_capacity(rows.len());
+        let mut off = 0usize;
         for row in rows {
-            let ids = &enc.ids[row.start..row.end];
-            let pos = &enc.pos[row.start..row.end];
-            let (h, _) = self.forward_rows(ids, pos, Some(&cache.layers), false)?;
-            let mut hidden = h;
+            let bl = row.branch_len();
+            let mut hidden = h[off * n..(off + bl) * n].to_vec();
+            off += bl;
             for chunk in hidden.chunks_exact_mut(n) {
                 rmsnorm_with_gamma_eps(chunk, &self.final_norm, self.config.rms_norm_eps);
             }
-            let mut full = Vec::with_capacity((sl + row.branch_len()) * n);
-            full.extend_from_slice(&cache.hidden);
+            let mut full = Vec::with_capacity((sl + bl) * n);
+            full.extend_from_slice(&cache.host.hidden);
             full.extend_from_slice(&hidden);
             out.push(full);
         }
         Ok(out)
     }
 
-    /// One pass over `ids` (query rows) with optional state-KV seeding.
-    /// Returns the raw (pre-final-norm) hiddens `[sq · n_embd]` and — when
-    /// `seed` is None (the state pass) — THIS pass's own per-layer K/V.
+    /// One batched pass over independent row segments with an optional
+    /// device-resident seed KV. Returns the concatenated raw (pre-final-norm)
+    /// hiddens `[Σsq · n_embd]`, the per-layer own K/V when this is the state
+    /// pass (seed `None` — the capture), and the per-layer own combined
+    /// `[keys | values]` device handles (the state pass retains them as the
+    /// KV carry; branch passes drop them).
     ///
-    /// Eligibility: with a seed, query `i` attends `0..sl + i + 1` over
-    /// `[state | own]` (the continuation law); without one, all `sq` keys
-    /// when `state_bidir` (the state's bidir block) else `i + 1` (causal).
-    fn forward_rows(
+    /// Eligibility (the module doc's segment table):
+    /// - seed present (branch continuation): query `j` of row `r` attends
+    ///   ALL seed keys + own `[seg[r], seg[r] + j + 1)` — state keys precede
+    ///   every branch query, causal within the branch, rows isolated;
+    /// - seed absent (the state pass): every query attends all own keys when
+    ///   `state_bidir`, else own `[0, g + 1)` (causal).
+    fn forward_rows_batched(
         &self,
-        ids: &[usize],
-        pos: &[usize],
-        seed: Option<&[EdlmLayerKv]>,
+        rows: &[PassRow<'_>],
+        seed: Option<(&[Handle], usize)>,
         state_bidir: bool,
-    ) -> Result<(Vec<f32>, Vec<EdlmLayerKv>), String> {
+    ) -> Result<PassOutputs, String> {
         let config = self.config.clone();
         let n = config.n_embd;
         let hd = config.head_dim;
@@ -822,52 +1030,91 @@ impl EdlmGpuModel {
         let mlp = config.mlp_hidden;
         let n_layer = config.n_layer;
         let eps = config.rms_norm_eps as f32;
-        let sq = ids.len();
-        assert_eq!(pos.len(), sq, "pos must match ids");
-        assert!(
-            sq > 0 && sq <= config.block_size,
-            "row len {sq} out of range"
-        );
+        let sq_total: usize = rows.iter().map(|r| r.ids.len()).sum();
+        assert!(sq_total > 0, "empty pass");
+        for (ri, r) in rows.iter().enumerate() {
+            assert_eq!(r.ids.len(), r.pos.len(), "row {ri}: pos must match ids");
+            assert!(
+                !r.ids.is_empty() && r.ids.len() <= config.block_size,
+                "row {ri} len {} out of range",
+                r.ids.len()
+            );
+        }
 
-        let sl = seed.map_or(0, |s| {
-            let first = s.first().map_or(0, |l| l.k.len() / kvd);
-            for (li, l) in s.iter().enumerate() {
-                assert_eq!(l.k.len(), first * kvd, "seed layer {li} length drift");
-            }
-            first
-        });
-        let total = sl + sq;
-
-        // The visibility law (the module doc's t_n table).
-        let t_n: Vec<u32> = if state_bidir && sl == 0 {
-            vec![total as u32; sq]
-        } else {
-            (0..sq).map(|i| (sl + i + 1) as u32).collect()
+        let (seed_layers, sl) = match seed {
+            Some((handles, len)) => (Some(handles), len),
+            None => (None, 0usize),
         };
+        if let Some(handles) = seed_layers {
+            assert_eq!(handles.len(), n_layer, "seed layer count drift");
+        }
+
+        // Own-segment offsets: row r's tokens are own keys [seg[r], seg[r+1]).
+        let mut seg = Vec::with_capacity(rows.len() + 1);
+        let mut acc = 0usize;
+        for r in rows {
+            seg.push(acc);
+            acc += r.ids.len();
+        }
+        seg.push(acc);
+        let own_total = acc;
+
+        // The visibility windows (own-buffer coordinates) + the seed length
+        // (the segment table in this fn's doc).
+        let mut t_start = vec![0u32; sq_total];
+        let mut t_end = vec![0u32; sq_total];
+        {
+            let mut g = 0usize;
+            for (ri, r) in rows.iter().enumerate() {
+                for j in 0..r.ids.len() {
+                    match seed_layers {
+                        Some(_) => {
+                            t_start[g] = seg[ri] as u32;
+                            t_end[g] = (seg[ri] + j + 1) as u32;
+                        }
+                        None if state_bidir => {
+                            t_start[g] = 0;
+                            t_end[g] = own_total as u32;
+                        }
+                        None => {
+                            t_start[g] = 0;
+                            t_end[g] = (seg[ri] + j + 1) as u32;
+                        }
+                    }
+                    g += 1;
+                }
+            }
+        }
         let attn_params = EdlmAttnMultiParams {
             n_head: config.n_head,
             n_kv_head: n_kv,
             head_dim: hd,
-            n_positions: total,
-            seq_q: sq,
+            n_positions: own_total,
+            n_seed: sl,
+            seq_q: sq_total,
             scale: self.scale,
         };
 
         // Embedding rows on the host (no wte upload — only these rows exist
         // on the device).
-        let mut h = vec![0.0f32; sq * n];
-        for (r, &id) in ids.iter().enumerate() {
-            let off = id * n;
-            h[r * n..(r + 1) * n].copy_from_slice(&self.wte[off..off + n]);
+        let mut h = vec![0.0f32; sq_total * n];
+        let mut g = 0usize;
+        for r in rows {
+            for &id in r.ids {
+                let off = id * n;
+                h[g * n..(g + 1) * n].copy_from_slice(&self.wte[off..off + n]);
+                g += 1;
+            }
         }
 
         // Reused staging (allocated once per pass, sized to the pass).
         let lq = q_dim + 2 * kvd;
-        let mut q_rope = vec![0.0f32; sq * q_dim];
-        let mut keys = vec![0.0f32; total * kvd];
-        let mut values = vec![0.0f32; total * kvd];
-        let mut kv_capture: Vec<EdlmLayerKv> = Vec::with_capacity(n_layer);
-        let capture = seed.is_none();
+        let mut q_rope = vec![0.0f32; sq_total * q_dim];
+        let mut keys = vec![0.0f32; own_total * kvd];
+        let mut values = vec![0.0f32; own_total * kvd];
+        let mut kv_capture: Vec<EdlmLayerKv> = Vec::new();
+        let mut own_handles: Vec<Handle> = Vec::with_capacity(n_layer);
+        let capture = seed_layers.is_none();
 
         for li in 0..n_layer {
             let lw = &self.layers[li];
@@ -875,89 +1122,97 @@ impl EdlmGpuModel {
             // ── attention block ──
             let xr = h.clone();
             let h_h = create_f32(&self.client, &h);
-            let hn1 = self.client.empty(sq * n * core::mem::size_of::<f32>());
+            let hn1 = self.client.empty(sq_total * n * core::mem::size_of::<f32>());
             EdlmRmsNormRowsCubeCL::launch::<ActiveRuntime>(
                 &self.client,
                 h_h,
                 lw.attn_norm.clone(),
                 hn1.clone(),
-                sq,
+                sq_total,
                 n,
                 eps,
             );
-            let qkv_out = self.client.empty(sq * lq * core::mem::size_of::<f32>());
-            self.matmul_f16b(hn1, lw.qkv.clone(), qkv_out.clone(), sq, n, lq);
+            let qkv_out = self.client.empty(sq_total * lq * core::mem::size_of::<f32>());
+            self.matmul_f16b(hn1, lw.qkv.clone(), qkv_out.clone(), sq_total, n, lq);
             let qkv_h = read_f32(&self.client, qkv_out).map_err(|e| e.to_string())?;
 
             // Host small-ops: split, per-head qk-norm, RoPE — the EXACT core
             // helpers the CPU path runs (parity carries; no re-derivation).
-            for r in 0..sq {
-                let row = &qkv_h[r * lq..(r + 1) * lq];
-                let mut q_row = row[..q_dim].to_vec();
-                qk_norm_inplace(
-                    &mut q_row,
-                    &lw.q_norm,
-                    config.n_head,
-                    hd,
-                    config.rms_norm_eps,
-                );
-                apply_rope_with_freq(&mut q_row, &mut [], pos[r], hd, self.freq.as_slice());
-                q_rope[r * q_dim..(r + 1) * q_dim].copy_from_slice(&q_row);
+            // Row r's K/V land at its own-buffer segment [seg[r], ..).
+            let mut g = 0usize;
+            for (ri, r) in rows.iter().enumerate() {
+                for (j, &p) in r.pos.iter().enumerate() {
+                    let row = &qkv_h[g * lq..(g + 1) * lq];
+                    let mut q_row = row[..q_dim].to_vec();
+                    qk_norm_inplace(
+                        &mut q_row,
+                        &lw.q_norm,
+                        config.n_head,
+                        hd,
+                        config.rms_norm_eps,
+                    );
+                    apply_rope_with_freq(&mut q_row, &mut [], p, hd, self.freq.as_slice());
+                    q_rope[g * q_dim..(g + 1) * q_dim].copy_from_slice(&q_row);
 
-                let mut k_row = row[q_dim..q_dim + kvd].to_vec();
-                qk_norm_inplace(&mut k_row, &lw.k_norm, n_kv, hd, config.rms_norm_eps);
-                apply_rope_with_freq(&mut k_row, &mut [], pos[r], hd, self.freq.as_slice());
-                keys[(sl + r) * kvd..(sl + r + 1) * kvd].copy_from_slice(&k_row);
+                    let mut k_row = row[q_dim..q_dim + kvd].to_vec();
+                    qk_norm_inplace(&mut k_row, &lw.k_norm, n_kv, hd, config.rms_norm_eps);
+                    apply_rope_with_freq(&mut k_row, &mut [], p, hd, self.freq.as_slice());
+                    let ko = (seg[ri] + j) * kvd;
+                    keys[ko..ko + kvd].copy_from_slice(&k_row);
 
-                // V: untouched by qk-norm and RoPE.
-                values[(sl + r) * kvd..(sl + r + 1) * kvd]
-                    .copy_from_slice(&row[q_dim + kvd..lq]);
+                    // V: untouched by qk-norm and RoPE.
+                    values[ko..ko + kvd].copy_from_slice(&row[q_dim + kvd..lq]);
+                    g += 1;
+                }
             }
-            if let Some(seed_layers) = seed {
-                keys[..sl * kvd].copy_from_slice(&seed_layers[li].k);
-                values[..sl * kvd].copy_from_slice(&seed_layers[li].v);
-            }
 
-            let mut kv_combined = Vec::with_capacity(2 * total * kvd);
+            let mut kv_combined = Vec::with_capacity(2 * own_total * kvd);
             kv_combined.extend_from_slice(&keys);
             kv_combined.extend_from_slice(&values);
             let kv_h = create_f32(&self.client, &kv_combined);
+            let seed_h = match seed_layers {
+                Some(handles) => handles[li].clone(),
+                None => self.client.empty(core::mem::size_of::<f32>()),
+            };
             let q_h = create_f32(&self.client, &q_rope);
-            let tn_h = create_u32(&self.client, &t_n);
-            let attn_h = self.client.empty(sq * q_dim * core::mem::size_of::<f32>());
+            let ts_h = create_u32(&self.client, &t_start);
+            let te_h = create_u32(&self.client, &t_end);
+            let attn_h = self.client.empty(sq_total * q_dim * core::mem::size_of::<f32>());
             EdlmAttnMultiCubeCL::launch::<ActiveRuntime>(
                 &self.client,
                 q_h,
-                kv_h,
-                tn_h,
+                kv_h.clone(),
+                seed_h,
+                ts_h,
+                te_h,
                 attn_h.clone(),
                 &attn_params,
             );
 
-            let wo_out = self.client.empty(sq * n * core::mem::size_of::<f32>());
-            self.matmul_f16b(attn_h, lw.wo.clone(), wo_out.clone(), sq, q_dim, n);
+            let wo_out = self.client.empty(sq_total * n * core::mem::size_of::<f32>());
+            self.matmul_f16b(attn_h, lw.wo.clone(), wo_out.clone(), sq_total, q_dim, n);
             let wo_h = read_f32(&self.client, wo_out).map_err(|e| e.to_string())?;
-            for i in 0..sq * n {
+            for i in 0..sq_total * n {
                 h[i] = xr[i] + wo_h[i];
             }
 
             // ── MLP block ──
             let h2_h = create_f32(&self.client, &h);
-            let hn2 = self.client.empty(sq * n * core::mem::size_of::<f32>());
+            let hn2 = self.client.empty(sq_total * n * core::mem::size_of::<f32>());
             EdlmRmsNormRowsCubeCL::launch::<ActiveRuntime>(
                 &self.client,
                 h2_h,
                 lw.post_attn_norm.clone(),
                 hn2.clone(),
-                sq,
+                sq_total,
                 n,
                 eps,
             );
-            let gu_out = self.client.empty(sq * 2 * mlp * core::mem::size_of::<f32>());
-            self.matmul_f16b(hn2, lw.gateup.clone(), gu_out.clone(), sq, n, 2 * mlp);
+            let gu_out = self.client.empty(sq_total * 2 * mlp * core::mem::size_of::<f32>());
+            self.matmul_f16b(hn2, lw.gateup.clone(), gu_out.clone(), sq_total, n, 2 * mlp);
             let gu = read_f32(&self.client, gu_out).map_err(|e| e.to_string())?;
-            let mut mlp_in = vec![0.0f32; sq * mlp];
-            for r in 0..sq {
+            let mut mlp_in = vec![0.0f32; sq_total * mlp];
+            for r in 0..sq_total {
                 let row = &gu[r * 2 * mlp..(r + 1) * 2 * mlp];
                 swiglu(
                     &mut mlp_in[r * mlp..(r + 1) * mlp],
@@ -966,22 +1221,23 @@ impl EdlmGpuModel {
                 );
             }
             let mi_h = create_f32(&self.client, &mlp_in);
-            let down_out = self.client.empty(sq * n * core::mem::size_of::<f32>());
-            self.matmul_f16b(mi_h, lw.down.clone(), down_out.clone(), sq, mlp, n);
+            let down_out = self.client.empty(sq_total * n * core::mem::size_of::<f32>());
+            self.matmul_f16b(mi_h, lw.down.clone(), down_out.clone(), sq_total, mlp, n);
             let d_h = read_f32(&self.client, down_out).map_err(|e| e.to_string())?;
-            for i in 0..sq * n {
+            for i in 0..sq_total * n {
                 h[i] += d_h[i];
             }
 
             if capture {
                 kv_capture.push(EdlmLayerKv {
-                    k: keys[..sq * kvd].to_vec(),
-                    v: values[..sq * kvd].to_vec(),
+                    k: keys[..own_total * kvd].to_vec(),
+                    v: values[..own_total * kvd].to_vec(),
                 });
             }
+            own_handles.push(kv_h);
         }
 
-        Ok((h, kv_capture))
+        Ok((h, kv_capture, own_handles))
     }
 }
 
