@@ -1188,6 +1188,30 @@ fn glu_gelu_gate_f32(fused: &[f32], out: &mut [f32], params: &[f32]) {
     }
 }
 
+/// `out[r·I + j] = silu(fused[r·2I + j]) · fused[r·2I + I + j]` — the SiLU
+/// gated GLU (the llama/eDLM SwiGLU shape: the fused `[rows × 2I]` buffer's
+/// first half is the gate, second half the up value; the host law is
+/// `katgpt_core::types::swiglu`). The gelu-gated sibling above is
+/// [`glu_gelu_gate_f32`] — same layout, different activation.
+#[cfg(feature = "cubecl_runtime")]
+#[cube(launch_unchecked)]
+fn glu_silu_gate_f32(fused: &[f32], out: &mut [f32], params: &[f32]) {
+    let n = out.len();
+    let tid = ABSOLUTE_POS;
+    if tid < n {
+        let i_sz = params[0usize] as u32;
+        let t = tid as u32;
+        let row = t / i_sz;
+        let j = t % i_sz;
+        let base = row * i_sz * 2u32;
+        let g = fused[(base + j) as usize];
+        let up = fused[(base + i_sz + j) as usize];
+        let one = f32::new(1.0f32);
+        let sig = one / (one + (-g).exp());
+        out[tid] = g * sig * up;
+    }
+}
+
 /// `dst[dst_off + i] = src[src_off + i]` for `i in [0, n)` — the offset
 /// copy over WHOLE parent binds (see [`add_f32`] for why the offsets ride
 /// the params array, not handle views).
@@ -1747,6 +1771,48 @@ impl GluGeluGateCubeCL {
         // SAFETY: caller guarantees the binding sizes above.
         unsafe {
             glu_gelu_gate_f32::launch_unchecked::<R>(
+                client,
+                CubeCount::Static(n_wg, 1, 1),
+                CubeDim::new_1d(256),
+                BufferArg::from_raw_parts(fused_handle, rows * 2 * i_sz),
+                BufferArg::from_raw_parts(out_handle, n),
+                BufferArg::from_raw_parts(params_handle, 1),
+            );
+        }
+    }
+}
+
+/// CubeCL launcher for [`glu_silu_gate_f32`] — the SiLU gated GLU (the
+/// SwiGLU shape beside [`GluGeluGateCubeCL`]).
+#[cfg(feature = "cubecl_runtime")]
+pub struct GluSiluGateCubeCL;
+
+#[cfg(feature = "cubecl_runtime")]
+impl GluSiluGateCubeCL {
+    /// Launch the SiLU gate: `out[r·I + j] = silu(fused[r·2I + j]) ·
+    /// fused[r·2I + I + j]` over `rows × i_sz` outputs.
+    ///
+    /// # Safety
+    ///
+    /// `fused_handle` must back `rows * 2 * i_sz` f32; `out_handle` must back
+    /// `rows * i_sz` f32; `rows`/`i_sz` must be > 0.
+    pub unsafe fn launch<R: Runtime>(
+        client: &ComputeClient<R>,
+        fused_handle: Handle,
+        out_handle: Handle,
+        rows: usize,
+        i_sz: usize,
+    ) {
+        let n = rows * i_sz;
+        debug_assert_binding_at_least(&fused_handle, rows * 2 * i_sz, "GluSiluGate::fused");
+        debug_assert_binding_at_least(&out_handle, n, "GluSiluGate::out");
+        assert!(rows > 0 && i_sz > 0, "glu_silu_gate: rows/i_sz must be > 0");
+        let params: &[f32] = &[i_sz as f32];
+        let params_handle = crate::params_cache::params_handle(client, f32::as_bytes(params));
+        let n_wg = elementwise_wg_count(n);
+        // SAFETY: caller guarantees the binding sizes above.
+        unsafe {
+            glu_silu_gate_f32::launch_unchecked::<R>(
                 client,
                 CubeCount::Static(n_wg, 1, 1),
                 CubeDim::new_1d(256),

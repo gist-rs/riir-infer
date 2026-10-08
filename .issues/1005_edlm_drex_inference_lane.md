@@ -303,6 +303,57 @@ serving-shaped is ever built here or in reflex.
       Remaining T8 perf follow-up: CUDA graphs (needs the host small-ops —
       qk-norm/RoPE/SwiGLU — folded onto the GPU first, each parity-gated;
       the next unit).)
+      *(**T8 GPU ELEMENTWISE FOLD FOLLOW-UP, 2026-10-08, 4090:** the CUDA
+      graphs prerequisite landed as ONE unit — the forward is now
+      DEVICE-RESIDENT end to end. Three pieces: (1) the fused QKV fold
+      kernel `edlm_qkv_fold_f32` (grid `(n_head + 2·n_kv_head, seq_q)`,
+      128-thread cubes) — split + per-head qk-norm (cube-reduce sum of
+      squares) + half-split RoPE + segment-scatter into the `[keys |
+      values]` layout the attention kernel reads, straight from the raw
+      QKV GEMM output (the per-layer raw-qkv READBACK and the folded
+      q/keys/values RE-UPLOAD are gone); (2) the SiLU gated GLU
+      `GluSiluGateCubeCL` in elementwise_cubecl (the gelu-gate sibling's
+      layout, the SwiGLU law); (3) device residual adds via the existing
+      in-place `AddCubeCL` (`h += wo; h += down`) — the hidden stream
+      never touches the host mid-pass. Per-layer sync: FOUR readbacks +
+      ~five uploads → **ZERO mid-pass readbacks**; a branch pass's only
+      reads are the pass-final hidden + the state pass's one-time per-layer
+      KV capture. Both sync postures consume ONE `PassGeometry` (the shared
+      prologue — the A/B cannot diverge by construction); kill-switch
+      `EDLM_GPU_FOLD=0` restores the v1 host small-ops arm (the parity
+      anchor, exercised by the arms test). Per-layer q/k_norm gammas + the
+      rope freq table now ride device handles (uploaded once at open).
+      **GOAT (native CUDA, release, interleaved 9 pairs, mid shape = the
+      branch_batch cell): fold 13.36 ms vs host 111.2 ms per 4×64 branch
+      pass = 8.33×;** sync arithmetic: host ≈ 75.5 MB read back per pass
+      (4 readbacks × 8 layers) vs fold ≈ 1.05 MB (pass-final hidden) — the
+      readback serialization tax, measured. Box state: the sibling
+      riir-train plan437 stage-0 trainer was RESIDENT (util 5–44% during
+      the run) — the margin (733%) is ~34× the measured ±21.7% loaded-box
+      swing, so the verdict stands; a quiet-box re-run is not needed for a
+      margin this wide. The batched branch GOAT re-read on the same box:
+      batched 12.51 ms (now the fold path), per-row 28.95 ms (the fold
+      accelerates BOTH shapes; 2.31× batching ratio intact). Parity: mid
+      fold-vs-host arm drift **8.941e-7** (native CUDA, gate 1e-3); tiny
+      fold-vs-host arms at ALL THREE GEMM postures (kv ≤ 2.2e-5 / hidden ≤
+      2e-6, gate 1e-3); kernel units vs the EXACT host helpers: q 3.412e-4
+      / k 1.377e-4 at pos 2047 (the GPU sin/cos argument-reduction face,
+      deterministic run-to-run, gate 1e-3) and q 2.176e-6 / k 2.384e-6 at
+      the tiny pipeline shapes (tree-reduce class, gate 1e-5); v
+      copy-through bit-exact; CPU-parity bidir/causal suites green THROUGH
+      the fold path at all three postures (kv ≤ 2e-3, hidden ≤ 9.5e-6 —
+      the standing gates, unchanged). 12/12 edlm lib tests at dev+release ×
+      wgpu-spirv+native-CUDA (+2 kernel units; the unit fixture's seg
+      mapping is UNIQUE-per-query by law — a repeated slot is a
+      scheduler-dependent double-write and an unwritten slot reads
+      pool-stale bytes, both now documented on the fixture). Gates: clippy
+      GREEN at edlm_gpu/default/no-default/all-features × all-targets (0
+      real diagnostics via the JSON stream); fence PASSED (no new deps,
+      502 tracked .rs); core lib 257/0; gpu default-posture lib 56/0.
+      PROMOTED default-on (`fold_env_default`, `EDLM_GPU_FOLD=0` restores).
+      Remaining T8 follow-up: CUDA graphs — the device-resident forward it
+      requires now EXISTS (the fold left exactly two host reads per pass);
+      the graphs unit is next.)
 
 ## License law
 

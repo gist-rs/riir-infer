@@ -30,13 +30,19 @@
 //! fallback if the tolerance gate ever reds — a bigger kernel with no
 //! measurement-lane need (this lane is CC BY-NC, local bench only).
 //!
-//! # Sync posture (v1, the `llama_cubecl` hybrid shape)
+//! # Sync posture (the device fold, `EDLM_GPU_FOLD`)
 //!
-//! GPU: the GEMMs ([`MatmulF16bCubeCL`]), the multi-row RMSNorm, the
-//! attention. CPU (between readbacks): per-row split, qk-norm, RoPE, SwiGLU,
-//! residuals, the pointer head — the exact core helpers, never copies. Four
-//! readbacks per layer. The GPU-resident elementwise fold is the perf
-//! follow-up; correctness is the v1 gate.
+//! DEFAULT (fold ON): everything between the pass-final readback runs ON
+//! DEVICE — the GEMMs ([`MatmulF16bCubeCL`] / the CMMA postures), the
+//! multi-row RMSNorm, the fused QKV fold ([`EdlmQkvFoldCubeCL`]: split +
+//! per-head qk-norm + RoPE), the attention, the SiLU gate, and the residual
+//! adds (in place on the device). ZERO mid-pass readbacks; the only reads
+//! are the pass-final hidden (every pass) and the per-layer KV capture
+//! (state prefill only). KILL-SWITCH `EDLM_GPU_FOLD=0` restores the v1
+//! hybrid shape — the GEMMs/norms/attention on GPU and the small-ops on the
+//! host between FOUR per-layer readbacks (the exact core helpers, never
+//! copies) — the parity anchor arm the fold-vs-host arms test exercises.
+//! Both arms consume ONE [`PassGeometry`].
 //!
 //! # State cache posture (the GPU-resident KV carry)
 //!
@@ -51,8 +57,9 @@
 //!
 //! - The packed-mask forward (option isolation) — rows/cached semantics only,
 //!   the CPU cached path's own caveat.
-//! - CUDA graphs capture (needs the host small-ops folded onto the GPU
-//!   first — qk-norm/RoPE/SwiGLU kernels, each parity-gated; the next unit).
+//! - CUDA graphs capture (the fold landed the device-resident forward it
+//!   requires; the graphs unit is next — replay tolerates no host
+//!   readbacks, and the fold left exactly two per pass).
 //!
 //! The CMMA tensor-core GEMM is IN: the four projections dispatch through
 //! [`crate::matmul_f16b_cmma_cubecl`] unless `EDLM_GPU_CMMA=0` (the scalar
@@ -60,7 +67,10 @@
 //! `tests/edlm_matmul_cmma_goat.rs` + the issue row). The GPU-resident KV
 //! carry + the batched multi-branch pass are IN (the seed-segment attention
 //! kernel + [`EdlmGpuModel::forward_branches`] over all rows in one pass;
-//! GOAT: `tests/edlm_branch_batch_goat.rs` + the issue row).
+//! GOAT: `tests/edlm_branch_batch_goat.rs` + the issue row). The GPU-resident
+//! elementwise fold is IN (the fused QKV fold + the SiLU gate + device
+//! residual adds; kill-switch `EDLM_GPU_FOLD=0`; GOAT:
+//! `tests/edlm_fold_goat.rs` + the issue row).
 
 #[cfg(feature = "edlm_gpu")]
 use crate::cubecl_runtime::{
@@ -152,6 +162,164 @@ fn edlm_rmsnorm_rows_f32(x: &[f32], gamma: &[f32], params: &[f32], out: &mut [f3
     while i < n {
         out[base + i as usize] = x[base + i as usize] * inv_rms * gamma[i as usize];
         i += 256u32;
+    }
+}
+
+/// The fused QKV fold — the device-resident half of the sync-posture fold:
+/// per `(head-unit, query)` cube, apply the host small-ops ON DEVICE and
+/// scatter straight into the layouts the downstream kernels read, so the
+/// per-layer readback of the raw QKV (and the re-upload of the folded
+/// q/keys/values) never happens.
+///
+/// Grid `(n_head + 2·n_kv_head, seq_q, 1)`, 128-thread cubes == head_dim
+/// (the 8B release shape, asserted at the launcher). Unit `u` selects the
+/// work: `u < n_head` → q head (qk-norm + RoPE → `q_rope`);
+/// `n_head ≤ u < n_head + n_kv` → k head (qk-norm + RoPE → keys row
+/// `seg[qi]`); else → v copy-through (values row `n_positions + seg[qi]`).
+/// `params = [n_head, n_kv_head, head_dim, eps, n_positions]`.
+///
+/// Numerics: the per-head sum-of-squares rides an unrolled cube reduction
+/// (tree order vs the CPU's sequential sum) and the rotation angles ride
+/// the GPU sin/cos — tolerance-class faces, the same class the rmsnorm and
+/// attention kernels already carry. `pos == 0` needs no fast path: the
+/// general rotation is exact identity there (cos 0 = 1, sin 0 = 0).
+#[cfg(feature = "edlm_gpu")]
+#[cube(launch_unchecked)]
+fn edlm_qkv_fold_f32(
+    qkv: &[f32],
+    q_norm: &[f32],
+    k_norm: &[f32],
+    pos_u32: &[u32],
+    seg_u32: &[u32],
+    freq: &[f32],
+    params: &[f32],
+    q_rope: &mut [f32],
+    kv: &mut [f32],
+) {
+    let n_head = params[0usize] as u32;
+    let n_kv = params[1usize] as u32;
+    let hd = params[2usize] as u32;
+    let eps = params[3usize];
+    let n_pos = params[4usize] as u32;
+    let kvd = n_kv * hd;
+    let q_dim = n_head * hd;
+    let lq = q_dim + 2u32 * kvd;
+    let half = hd / 2u32;
+    let unit = CUBE_POS_X;
+    let qi = CUBE_POS_Y;
+    let tid = UNIT_POS;
+    let row_base = (qi * lq) as usize;
+
+    if unit < n_head {
+        // ── q head: qk-norm + RoPE → q_rope ──
+        let h = unit;
+        let src = row_base + (h * hd) as usize;
+        let v = qkv[src + tid as usize];
+        let mut red = Shared::<[f32]>::new_slice(128usize);
+        red[tid as usize] = v * v;
+        sync_cube();
+        if tid < 64u32 {
+            red[tid as usize] = red[tid as usize] + red[(tid + 64u32) as usize];
+        }
+        sync_cube();
+        if tid < 32u32 {
+            red[tid as usize] = red[tid as usize] + red[(tid + 32u32) as usize];
+        }
+        sync_cube();
+        if tid < 16u32 {
+            red[tid as usize] = red[tid as usize] + red[(tid + 16u32) as usize];
+        }
+        sync_cube();
+        if tid < 8u32 {
+            red[tid as usize] = red[tid as usize] + red[(tid + 8u32) as usize];
+        }
+        sync_cube();
+        if tid < 4u32 {
+            red[tid as usize] = red[tid as usize] + red[(tid + 4u32) as usize];
+        }
+        sync_cube();
+        if tid < 2u32 {
+            red[tid as usize] = red[tid as usize] + red[(tid + 2u32) as usize];
+        }
+        sync_cube();
+        if tid < 1u32 {
+            red[0usize] = red[0usize] + red[1usize];
+        }
+        sync_cube();
+        let inv = f32::new(1.0f32) / (red[0usize] / (hd as f32) + eps).sqrt();
+        // The half-split rotation pair: (i, i + half) — dim `tid < half` is
+        // the "x" element rotating against `tid + half`, dim `tid ≥ half` is
+        // the "y" element of pair `tid - half` (the host rope's
+        // `apply_rope_heads_precomputed` pairing; the table index is the
+        // pair's x index in both cases).
+        let is_x = tid < half;
+        let pidx = if is_x { tid + half } else { tid - half };
+        let fidx = if is_x { tid } else { tid - half };
+        let angle = (pos_u32[qi as usize] as f32) * freq[fidx as usize];
+        let c = angle.cos();
+        let s = angle.sin();
+        let a = v * (inv * q_norm[tid as usize]);
+        let partner = qkv[src + pidx as usize] * (inv * q_norm[pidx as usize]);
+        let x = if is_x { a } else { partner };
+        let y = if is_x { partner } else { a };
+        let out = if is_x { x * c - y * s } else { x * s + y * c };
+        q_rope[(qi * q_dim + h * hd + tid) as usize] = out;
+    } else if unit < n_head + n_kv {
+        // ── k head: qk-norm + RoPE → keys row seg[qi] ──
+        let h = unit - n_head;
+        let src = row_base + (q_dim + h * hd) as usize;
+        let v = qkv[src + tid as usize];
+        let mut red = Shared::<[f32]>::new_slice(128usize);
+        red[tid as usize] = v * v;
+        sync_cube();
+        if tid < 64u32 {
+            red[tid as usize] = red[tid as usize] + red[(tid + 64u32) as usize];
+        }
+        sync_cube();
+        if tid < 32u32 {
+            red[tid as usize] = red[tid as usize] + red[(tid + 32u32) as usize];
+        }
+        sync_cube();
+        if tid < 16u32 {
+            red[tid as usize] = red[tid as usize] + red[(tid + 16u32) as usize];
+        }
+        sync_cube();
+        if tid < 8u32 {
+            red[tid as usize] = red[tid as usize] + red[(tid + 8u32) as usize];
+        }
+        sync_cube();
+        if tid < 4u32 {
+            red[tid as usize] = red[tid as usize] + red[(tid + 4u32) as usize];
+        }
+        sync_cube();
+        if tid < 2u32 {
+            red[tid as usize] = red[tid as usize] + red[(tid + 2u32) as usize];
+        }
+        sync_cube();
+        if tid < 1u32 {
+            red[0usize] = red[0usize] + red[1usize];
+        }
+        sync_cube();
+        let inv = f32::new(1.0f32) / (red[0usize] / (hd as f32) + eps).sqrt();
+        let is_x = tid < half;
+        let pidx = if is_x { tid + half } else { tid - half };
+        let fidx = if is_x { tid } else { tid - half };
+        let angle = (pos_u32[qi as usize] as f32) * freq[fidx as usize];
+        let c = angle.cos();
+        let s = angle.sin();
+        let a = v * (inv * k_norm[tid as usize]);
+        let partner = qkv[src + pidx as usize] * (inv * k_norm[pidx as usize]);
+        let x = if is_x { a } else { partner };
+        let y = if is_x { partner } else { a };
+        let out = if is_x { x * c - y * s } else { x * s + y * c };
+        let krow = seg_u32[qi as usize];
+        kv[(krow * kvd + h * hd + tid) as usize] = out;
+    } else {
+        // ── v copy-through → values row n_pos + seg[qi] ──
+        let h = unit - n_head - n_kv;
+        let src = row_base + (q_dim + kvd + h * hd) as usize;
+        let vrow = n_pos + seg_u32[qi as usize];
+        kv[((vrow * kvd + h * hd) + tid) as usize] = qkv[src + tid as usize];
     }
 }
 
@@ -546,6 +714,97 @@ impl EdlmRmsNormRowsCubeCL {
     }
 }
 
+/// The fused QKV fold's shape bundle (the launcher's assertions + params).
+#[cfg(feature = "edlm_gpu")]
+pub struct EdlmQkvFoldParams {
+    pub n_head: usize,
+    pub n_kv_head: usize,
+    pub head_dim: usize,
+    /// The rmsnorm eps (f32 — the host path casts the f64 config value the
+    /// same way).
+    pub eps: f32,
+    /// Key positions in the pass's own combined `[keys | values]` buffer.
+    pub n_positions: usize,
+    /// Query rows.
+    pub seq_q: usize,
+}
+
+/// Launcher for [`edlm_qkv_fold_f32`].
+#[cfg(feature = "edlm_gpu")]
+pub struct EdlmQkvFoldCubeCL;
+
+#[cfg(feature = "edlm_gpu")]
+impl EdlmQkvFoldCubeCL {
+    /// Launch the fused fold: from the raw QKV GEMM output `qkv[seq_q, lq]`
+    /// (lq = `n_head·hd + 2·n_kv_head·hd`), write `q_rope[seq_q, n_head·hd]`
+    /// (per-head qk-norm + RoPE) and the combined `kv[2·n_positions, kvd]`
+    /// in `[keys | values]` layout — query `g`'s k/v land at row `seg[g]`
+    /// (its row's own-buffer segment base + its in-row offset), values at
+    /// `n_positions + seg[g]`. `pos[g]` drives the RoPE angle; `freq` is the
+    /// model's precomputed table (`hd/2` entries).
+    pub fn launch<R: Runtime>(
+        client: &ComputeClient<R>,
+        qkv: Handle,
+        q_norm: Handle,
+        k_norm: Handle,
+        pos: Handle,
+        seg: Handle,
+        freq: Handle,
+        q_rope: Handle,
+        kv: Handle,
+        p: &EdlmQkvFoldParams,
+    ) {
+        assert_eq!(
+            p.head_dim, 128,
+            "the fold cube is head_dim 128 (the 8B release shape); \
+             a different head_dim needs a kernel variant"
+        );
+        assert!(p.n_head > 0 && p.n_kv_head > 0, "head counts must be positive");
+        let kvd = p.n_kv_head * p.head_dim;
+        let q_dim = p.n_head * p.head_dim;
+        let lq = q_dim + 2 * kvd;
+        let units = p.n_head + 2 * p.n_kv_head;
+        assert!(p.seq_q > 0 && p.n_positions > 0, "empty fold dispatch");
+        assert_binding_derives_units(&qkv, lq, p.seq_q, "EdlmQkvFold qkv");
+        assert_binding_derives_units(&q_norm, p.head_dim, 1, "EdlmQkvFold q_norm");
+        assert_binding_derives_units(&k_norm, p.head_dim, 1, "EdlmQkvFold k_norm");
+        assert_binding_derives_units(&pos, 1, p.seq_q, "EdlmQkvFold pos");
+        assert_binding_derives_units(&seg, 1, p.seq_q, "EdlmQkvFold seg");
+        assert_binding_derives_units(&freq, p.head_dim / 2, 1, "EdlmQkvFold freq");
+        assert_binding_derives_units(&q_rope, q_dim, p.seq_q, "EdlmQkvFold q_rope");
+        assert_binding_derives_units(&kv, 2 * kvd, p.n_positions, "EdlmQkvFold kv");
+
+        let params_h = create_f32(
+            client,
+            &[
+                p.n_head as f32,
+                p.n_kv_head as f32,
+                p.head_dim as f32,
+                p.eps,
+                p.n_positions as f32,
+            ],
+        );
+
+        // SAFETY: buffer sizes asserted above.
+        unsafe {
+            edlm_qkv_fold_f32::launch_unchecked::<R>(
+                client,
+                CubeCount::Static(units as u32, p.seq_q as u32, 1),
+                CubeDim::new_1d(128),
+                BufferArg::from_raw_parts(qkv, p.seq_q * lq),
+                BufferArg::from_raw_parts(q_norm, p.head_dim),
+                BufferArg::from_raw_parts(k_norm, p.head_dim),
+                BufferArg::from_raw_parts(pos, p.seq_q),
+                BufferArg::from_raw_parts(seg, p.seq_q),
+                BufferArg::from_raw_parts(freq, p.head_dim / 2),
+                BufferArg::from_raw_parts(params_h, 5),
+                BufferArg::from_raw_parts(q_rope, p.seq_q * q_dim),
+                BufferArg::from_raw_parts(kv, 2 * p.n_positions * kvd),
+            );
+        }
+    }
+}
+
 // ── the model ───────────────────────────────────────────────────────
 
 /// One layer's GPU-resident weights (f16) + the host-side qk-norm gammas the
@@ -566,10 +825,15 @@ struct EdlmGpuLayerWeights {
     attn_norm: Handle,
     /// `[n_embd]` f32 (ffn_norm — the GPU rmsnorm's gamma).
     post_attn_norm: Handle,
-    /// `[head_dim]` f32 host copy (attn_q_norm — CPU qk-norm between readbacks).
+    /// `[head_dim]` f32 host copy (attn_q_norm — the host-path qk-norm
+    /// between readbacks; the device fold reads the handle below).
     q_norm: Vec<f32>,
     /// `[head_dim]` f32 host copy (attn_k_norm).
     k_norm: Vec<f32>,
+    /// `[head_dim]` f32 device (attn_q_norm — the fold kernel's gamma).
+    q_norm_d: Handle,
+    /// `[head_dim]` f32 device (attn_k_norm).
+    k_norm_d: Handle,
 }
 
 /// The GPU-resident state cache: the T7 host cache (parity inspection + the
@@ -592,6 +856,19 @@ struct EdlmGpuStateKv {
 struct PassRow<'a> {
     ids: &'a [usize],
     pos: &'a [usize],
+}
+
+/// The shared pass prologue's output — the geometry BOTH sync postures
+/// consume ([`EdlmGpuModel::pass_geometry`]; one copy — divergent geometry
+/// between the fold and host arms would void the A/B).
+#[cfg(feature = "edlm_gpu")]
+struct PassGeometry {
+    sq_total: usize,
+    own_total: usize,
+    seg: Vec<usize>,
+    t_start: Vec<u32>,
+    t_end: Vec<u32>,
+    attn_params: EdlmAttnMultiParams,
 }
 
 /// The batched pass's outputs: (concatenated raw hiddens `[Σsq · n_embd]`,
@@ -620,6 +897,9 @@ pub struct EdlmGpuModel {
     pub pointer: Option<EdlmPointerHead>,
     layers: Vec<EdlmGpuLayerWeights>,
     freq: RopeFreqTable,
+    /// The precomputed rope table ON DEVICE (`head_dim/2` f32) — the fold
+    /// kernel reads it per query (uploaded once at construction).
+    freq_d: Handle,
     scale: f32,
     /// The cached state prefix — the T7 host K/V + the device-resident
     /// per-layer buffers the branch pass attends directly (the KV carry:
@@ -638,6 +918,12 @@ pub struct EdlmGpuModel {
     /// `EDLM_GPU_CMMA_SG8=1`, consulted ONLY at the [`GemmPosture::Cmma`]
     /// posture above the [`SG8_MIN_M`] crossover.
     sg8_armed: bool,
+    /// The sync posture: device fold (qk-norm/RoPE/SwiGLU/residuals on the
+    /// GPU, zero mid-pass readbacks) vs the v1 host small-ops path (four
+    /// readbacks per layer — the parity anchor). Resolved once at
+    /// construction from `EDLM_GPU_FOLD` (`"0"` = host path; unset = fold,
+    /// the measured default), overridable per-instance by [`with_fold`].
+    fold: bool,
 }
 
 /// The GEMM posture for the lane's four per-layer projections.
@@ -694,6 +980,21 @@ fn cmma_sg8_env_default() -> bool {
     }
 }
 
+/// The device-fold sync posture, read ONCE per process. DEFAULT ON — the
+/// qk-norm/RoPE/SwiGLU small-ops run ON DEVICE (the fused QKV fold + the
+/// silu gate + device residual adds), so a pass has ZERO mid-pass readbacks
+/// (v1 paid four per layer plus the host round-trips between them; the
+/// GOAT evidence: `tests/edlm_fold_goat.rs` + the issue row).
+/// `EDLM_GPU_FOLD=0` restores the v1 host small-ops path — the parity
+/// anchor arm, still exercised by the fold-vs-host arms test.
+#[cfg(feature = "edlm_gpu")]
+fn fold_env_default() -> bool {
+    match std::env::var("EDLM_GPU_FOLD") {
+        Ok(v) => v != "0",
+        Err(_) => true,
+    }
+}
+
 #[cfg(feature = "edlm_gpu")]
 impl EdlmGpuModel {
     /// Open an `edlm`-arch GGUF and upload every layer as f16 (one layer
@@ -734,10 +1035,14 @@ impl EdlmGpuModel {
                     post_attn_norm: create_f32(&client, &l.base.post_attn_norm),
                     q_norm: l.q_norm.clone(),
                     k_norm: l.k_norm.clone(),
+                    q_norm_d: create_f32(&client, &l.q_norm),
+                    k_norm_d: create_f32(&client, &l.k_norm),
                 })
             })
             .collect::<Result<Vec<_>, String>>()?;
 
+        let freq = RopeFreqTable::new(config.rope_theta, config.head_dim);
+        let freq_d = create_f32(&client, freq.as_slice());
         Ok(Self {
             client,
             config: config.clone(),
@@ -745,7 +1050,8 @@ impl EdlmGpuModel {
             final_norm: weights.final_norm.clone(),
             pointer: weights.pointer.clone(),
             layers,
-            freq: RopeFreqTable::new(config.rope_theta, config.head_dim),
+            freq_d,
+            freq,
             scale: 1.0 / (config.head_dim as f32).sqrt(),
             state: None,
             posture: if cmma_env_default() {
@@ -754,6 +1060,7 @@ impl EdlmGpuModel {
                 GemmPosture::Scalar
             },
             sg8_armed: cmma_sg8_env_default(),
+            fold: fold_env_default(),
         })
     }
 
@@ -806,6 +1113,8 @@ impl EdlmGpuModel {
                 down: upload_f16(&client, &down)?,
                 attn_norm: create_f32(&client, &attn_norm),
                 post_attn_norm: create_f32(&client, &post_attn_norm),
+                q_norm_d: create_f32(&client, &q_norm),
+                k_norm_d: create_f32(&client, &k_norm),
                 q_norm,
                 k_norm,
             });
@@ -813,6 +1122,7 @@ impl EdlmGpuModel {
 
         let freq = RopeFreqTable::new(config.rope_theta, config.head_dim);
         let scale = 1.0 / (config.head_dim as f32).sqrt();
+        let freq_d = create_f32(&client, freq.as_slice());
         Ok(Self {
             client,
             config,
@@ -820,6 +1130,7 @@ impl EdlmGpuModel {
             final_norm: core.final_norm,
             pointer: core.pointer,
             layers,
+            freq_d,
             freq,
             scale,
             state: None,
@@ -829,6 +1140,7 @@ impl EdlmGpuModel {
                 GemmPosture::Scalar
             },
             sg8_armed: cmma_sg8_env_default(),
+            fold: fold_env_default(),
         })
     }
 
@@ -846,6 +1158,19 @@ impl EdlmGpuModel {
             GemmPosture::Cmma => "cmma",
             GemmPosture::CmmaSg8 => "cmma-sg8",
         }
+    }
+
+    /// The sync posture this instance dispatches (provenance for latency
+    /// rows: `true` = device fold, `false` = the v1 host small-ops path).
+    pub fn fold_enabled(&self) -> bool {
+        self.fold
+    }
+
+    /// A/B seam: pin the sync posture explicitly (the env default is
+    /// process-global; the GOAT lane needs BOTH arms in one process).
+    pub fn with_fold(mut self, fold: bool) -> Self {
+        self.fold = fold;
+        self
     }
 
     /// Test seam: pin the GEMM posture explicitly (the env default is
@@ -1015,21 +1340,39 @@ impl EdlmGpuModel {
     ///   every branch query, causal within the branch, rows isolated;
     /// - seed absent (the state pass): every query attends all own keys when
     ///   `state_bidir`, else own `[0, g + 1)` (causal).
+    ///
+    /// The sync posture dispatches on [`Self::fold`]: the device fold (the
+    /// fused QKV fold + silu gate + device residual adds — ZERO mid-pass
+    /// readbacks) or the v1 host small-ops path (four readbacks per layer —
+    /// the parity anchor; both arms consume ONE [`PassGeometry`]).
     fn forward_rows_batched(
         &self,
         rows: &[PassRow<'_>],
         seed: Option<(&[Handle], usize)>,
         state_bidir: bool,
     ) -> Result<PassOutputs, String> {
-        let config = self.config.clone();
-        let n = config.n_embd;
-        let hd = config.head_dim;
-        let q_dim = config.n_head * hd;
-        let kvd = kv_dim(&config);
+        let geo = self.pass_geometry(rows, seed, state_bidir)?;
+        if self.fold {
+            self.forward_rows_batched_device(rows, seed, &geo)
+        } else {
+            self.forward_rows_batched_host(rows, seed, &geo)
+        }
+    }
+
+    /// The shared pass prologue — validation, own-segment offsets, the
+    /// visibility windows, and the attention params. ONE copy consumed by
+    /// BOTH sync postures: if the two arms ever constructed different
+    /// geometry, the fold-vs-host A/B would be meaningless.
+    fn pass_geometry(
+        &self,
+        rows: &[PassRow<'_>],
+        seed: Option<(&[Handle], usize)>,
+        state_bidir: bool,
+    ) -> Result<PassGeometry, String> {
+        let config = &self.config;
         let n_kv = config.n_kv_head;
-        let mlp = config.mlp_hidden;
+        let hd = config.head_dim;
         let n_layer = config.n_layer;
-        let eps = config.rms_norm_eps as f32;
         let sq_total: usize = rows.iter().map(|r| r.ids.len()).sum();
         assert!(sq_total > 0, "empty pass");
         for (ri, r) in rows.iter().enumerate() {
@@ -1048,6 +1391,7 @@ impl EdlmGpuModel {
         if let Some(handles) = seed_layers {
             assert_eq!(handles.len(), n_layer, "seed layer count drift");
         }
+        let has_seed = seed_layers.is_some();
 
         // Own-segment offsets: row r's tokens are own keys [seg[r], seg[r+1]).
         let mut seg = Vec::with_capacity(rows.len() + 1);
@@ -1067,16 +1411,16 @@ impl EdlmGpuModel {
             let mut g = 0usize;
             for (ri, r) in rows.iter().enumerate() {
                 for j in 0..r.ids.len() {
-                    match seed_layers {
-                        Some(_) => {
+                    match (has_seed, state_bidir) {
+                        (true, _) => {
                             t_start[g] = seg[ri] as u32;
                             t_end[g] = (seg[ri] + j + 1) as u32;
                         }
-                        None if state_bidir => {
+                        (false, true) => {
                             t_start[g] = 0;
                             t_end[g] = own_total as u32;
                         }
-                        None => {
+                        (false, false) => {
                             t_start[g] = 0;
                             t_end[g] = (seg[ri] + j + 1) as u32;
                         }
@@ -1085,6 +1429,7 @@ impl EdlmGpuModel {
                 }
             }
         }
+
         let attn_params = EdlmAttnMultiParams {
             n_head: config.n_head,
             n_kv_head: n_kv,
@@ -1093,6 +1438,46 @@ impl EdlmGpuModel {
             n_seed: sl,
             seq_q: sq_total,
             scale: self.scale,
+        };
+        Ok(PassGeometry {
+            sq_total,
+            own_total,
+            seg,
+            t_start,
+            t_end,
+            attn_params,
+        })
+    }
+
+    /// The v1 sync posture (the parity anchor): GEMMs/norms/attention on the
+    /// GPU, the small-ops (split, qk-norm, RoPE, SwiGLU, residuals) on the
+    /// host between FOUR per-layer readbacks. `EDLM_GPU_FOLD=0` selects this
+    /// arm; the fold-vs-host arms test keeps it exercised.
+    fn forward_rows_batched_host(
+        &self,
+        rows: &[PassRow<'_>],
+        seed: Option<(&[Handle], usize)>,
+        geo: &PassGeometry,
+    ) -> Result<PassOutputs, String> {
+        let config = &self.config;
+        let n = config.n_embd;
+        let hd = config.head_dim;
+        let q_dim = config.n_head * hd;
+        let kvd = kv_dim(config);
+        let n_kv = config.n_kv_head;
+        let mlp = config.mlp_hidden;
+        let n_layer = config.n_layer;
+        let eps = config.rms_norm_eps as f32;
+        let sq_total = geo.sq_total;
+        let own_total = geo.own_total;
+        let seg = &geo.seg;
+        let lq = q_dim + 2 * kvd;
+        let t_start = &geo.t_start;
+        let t_end = &geo.t_end;
+        let attn_params = &geo.attn_params;
+        let (seed_layers, _sl) = match seed {
+            Some((handles, len)) => (Some(handles), len),
+            None => (None, 0usize),
         };
 
         // Embedding rows on the host (no wte upload — only these rows exist
@@ -1108,7 +1493,6 @@ impl EdlmGpuModel {
         }
 
         // Reused staging (allocated once per pass, sized to the pass).
-        let lq = q_dim + 2 * kvd;
         let mut q_rope = vec![0.0f32; sq_total * q_dim];
         let mut keys = vec![0.0f32; own_total * kvd];
         let mut values = vec![0.0f32; own_total * kvd];
@@ -1175,8 +1559,8 @@ impl EdlmGpuModel {
                 None => self.client.empty(core::mem::size_of::<f32>()),
             };
             let q_h = create_f32(&self.client, &q_rope);
-            let ts_h = create_u32(&self.client, &t_start);
-            let te_h = create_u32(&self.client, &t_end);
+            let ts_h = create_u32(&self.client, t_start);
+            let te_h = create_u32(&self.client, t_end);
             let attn_h = self.client.empty(sq_total * q_dim * core::mem::size_of::<f32>());
             EdlmAttnMultiCubeCL::launch::<ActiveRuntime>(
                 &self.client,
@@ -1186,7 +1570,7 @@ impl EdlmGpuModel {
                 ts_h,
                 te_h,
                 attn_h.clone(),
-                &attn_params,
+                attn_params,
             );
 
             let wo_out = self.client.empty(sq_total * n * core::mem::size_of::<f32>());
@@ -1238,6 +1622,208 @@ impl EdlmGpuModel {
         }
 
         Ok((h, kv_capture, own_handles))
+    }
+
+    /// The device-fold sync posture (the measured default): the fused QKV
+    /// fold ([`EdlmQkvFoldCubeCL`]) runs split + qk-norm + RoPE ON DEVICE,
+    /// the SwiGLU gate and the residual adds ride the elementwise kernels,
+    /// and the hiddens update IN PLACE on the device (`h += wo; h += down`)
+    /// — a pass has ZERO mid-pass readbacks (v1 paid four per layer plus
+    /// the host round-trips between them). The only readbacks are the
+    /// pass-final hidden (once) and, on the state pass, one per-layer KV
+    /// capture (once per prefill — branch passes attend the device seed
+    /// directly).
+    fn forward_rows_batched_device(
+        &self,
+        rows: &[PassRow<'_>],
+        seed: Option<(&[Handle], usize)>,
+        geo: &PassGeometry,
+    ) -> Result<PassOutputs, String> {
+        let config = &self.config;
+        let n = config.n_embd;
+        let hd = config.head_dim;
+        let q_dim = config.n_head * hd;
+        let kvd = kv_dim(config);
+        let mlp = config.mlp_hidden;
+        let n_layer = config.n_layer;
+        let eps = config.rms_norm_eps as f32;
+        let lq = q_dim + 2 * kvd;
+        let f32b = core::mem::size_of::<f32>();
+        let sq_total = geo.sq_total;
+        let own_total = geo.own_total;
+        let (seed_layers, _sl) = match seed {
+            Some((handles, len)) => (Some(handles), len),
+            None => (None, 0usize),
+        };
+        let capture = seed_layers.is_none();
+
+        // Embedding rows on the host (no wte upload), uploaded ONCE per
+        // pass — the device hiddens update in place from here on.
+        let mut h = vec![0.0f32; sq_total * n];
+        let mut g = 0usize;
+        for r in rows {
+            for &id in r.ids {
+                let off = id * n;
+                h[g * n..(g + 1) * n].copy_from_slice(&self.wte[off..off + n]);
+                g += 1;
+            }
+        }
+        let h_dev = create_f32(&self.client, &h);
+
+        // Per-query fold inputs: the rope position + the query's own-buffer
+        // KEY-ROW write base — seg[ri] + j (the row base PLUS the in-row
+        // offset, exactly the host arm's `(seg[ri] + j) · kvd` scatter;
+        // the row base alone would stamp every query of a row onto the
+        // SAME key row). Tiny u32 uploads, once per pass.
+        let mut pos_flat = Vec::with_capacity(sq_total);
+        let mut seg_of_q = vec![0u32; sq_total];
+        {
+            let mut g = 0usize;
+            for (ri, r) in rows.iter().enumerate() {
+                for (j, &p) in r.pos.iter().enumerate() {
+                    pos_flat.push(p as u32);
+                    seg_of_q[g] = (geo.seg[ri] + j) as u32;
+                    g += 1;
+                }
+            }
+        }
+        let pos_d = create_u32(&self.client, &pos_flat);
+        let seg_d = create_u32(&self.client, &seg_of_q);
+        let ts_d = create_u32(&self.client, &geo.t_start);
+        let te_d = create_u32(&self.client, &geo.t_end);
+        let dummy_seed = self.client.empty(f32b);
+
+        // Layer-invariant staging, allocated once per pass (the client queue
+        // orders every launch, so reuse is race-free).
+        let hn1_d = self.client.empty(sq_total * n * f32b);
+        let hn2_d = self.client.empty(sq_total * n * f32b);
+        let qkv_d = self.client.empty(sq_total * lq * f32b);
+        let q_rope_d = self.client.empty(sq_total * q_dim * f32b);
+        let attn_d = self.client.empty(sq_total * q_dim * f32b);
+        let wo_d = self.client.empty(sq_total * n * f32b);
+        let gu_d = self.client.empty(sq_total * 2 * mlp * f32b);
+        let mi_d = self.client.empty(sq_total * mlp * f32b);
+        let down_d = self.client.empty(sq_total * n * f32b);
+        let fold_params = EdlmQkvFoldParams {
+            n_head: config.n_head,
+            n_kv_head: config.n_kv_head,
+            head_dim: hd,
+            eps,
+            n_positions: own_total,
+            seq_q: sq_total,
+        };
+
+        let mut kv_capture: Vec<EdlmLayerKv> = Vec::new();
+        let mut own_handles: Vec<Handle> = Vec::with_capacity(n_layer);
+        for li in 0..n_layer {
+            let lw = &self.layers[li];
+            // The state pass RETAINS one combined KV buffer per layer (the
+            // KV carry) — a fresh allocation per layer, never a reused one.
+            let kv_d = self.client.empty(2 * own_total * kvd * f32b);
+            let seed_h = match seed_layers {
+                Some(handles) => handles[li].clone(),
+                None => dummy_seed.clone(),
+            };
+
+            // ── attention block (device-resident) ──
+            EdlmRmsNormRowsCubeCL::launch::<ActiveRuntime>(
+                &self.client,
+                h_dev.clone(),
+                lw.attn_norm.clone(),
+                hn1_d.clone(),
+                sq_total,
+                n,
+                eps,
+            );
+            self.matmul_f16b(hn1_d.clone(), lw.qkv.clone(), qkv_d.clone(), sq_total, n, lq);
+            EdlmQkvFoldCubeCL::launch::<ActiveRuntime>(
+                &self.client,
+                qkv_d.clone(),
+                lw.q_norm_d.clone(),
+                lw.k_norm_d.clone(),
+                pos_d.clone(),
+                seg_d.clone(),
+                self.freq_d.clone(),
+                q_rope_d.clone(),
+                kv_d.clone(),
+                &fold_params,
+            );
+            EdlmAttnMultiCubeCL::launch::<ActiveRuntime>(
+                &self.client,
+                q_rope_d.clone(),
+                kv_d.clone(),
+                seed_h,
+                ts_d.clone(),
+                te_d.clone(),
+                attn_d.clone(),
+                &geo.attn_params,
+            );
+            self.matmul_f16b(attn_d.clone(), lw.wo.clone(), wo_d.clone(), sq_total, q_dim, n);
+            // Residual add, in place on the device (the host arm's
+            // `h[i] = xr[i] + wo_h[i]`).
+            unsafe {
+                crate::elementwise_cubecl::AddCubeCL::launch::<ActiveRuntime>(
+                    &self.client,
+                    h_dev.clone(),
+                    sq_total * n,
+                    wo_d.clone(),
+                    sq_total * n,
+                    0,
+                    0,
+                    sq_total * n,
+                )
+            };
+
+            // ── MLP block (device-resident) ──
+            EdlmRmsNormRowsCubeCL::launch::<ActiveRuntime>(
+                &self.client,
+                h_dev.clone(),
+                lw.post_attn_norm.clone(),
+                hn2_d.clone(),
+                sq_total,
+                n,
+                eps,
+            );
+            self.matmul_f16b(hn2_d.clone(), lw.gateup.clone(), gu_d.clone(), sq_total, n, 2 * mlp);
+            // SwiGLU: silu(first half) · second half — the host arm's
+            // `swiglu` law, on device.
+            unsafe {
+                crate::elementwise_cubecl::GluSiluGateCubeCL::launch::<ActiveRuntime>(
+                    &self.client,
+                    gu_d.clone(),
+                    mi_d.clone(),
+                    sq_total,
+                    mlp,
+                )
+            };
+            self.matmul_f16b(mi_d.clone(), lw.down.clone(), down_d.clone(), sq_total, mlp, n);
+            unsafe {
+                crate::elementwise_cubecl::AddCubeCL::launch::<ActiveRuntime>(
+                    &self.client,
+                    h_dev.clone(),
+                    sq_total * n,
+                    down_d.clone(),
+                    sq_total * n,
+                    0,
+                    0,
+                    sq_total * n,
+                )
+            };
+
+            if capture {
+                // Once per prefill: the host cache for parity inspection +
+                // the pointer head (the branch passes never read this).
+                let kv_host = read_f32(&self.client, kv_d.clone()).map_err(|e| e.to_string())?;
+                kv_capture.push(EdlmLayerKv {
+                    k: kv_host[..own_total * kvd].to_vec(),
+                    v: kv_host[own_total * kvd..2 * own_total * kvd].to_vec(),
+                });
+            }
+            own_handles.push(kv_d);
+        }
+
+        let h_final = read_f32(&self.client, h_dev).map_err(|e| e.to_string())?;
+        Ok((h_final, kv_capture, own_handles))
     }
 }
 

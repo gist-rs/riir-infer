@@ -292,6 +292,12 @@ required-features = ["edlm_gpu"]
 name = "edlm_branch_batch_goat"
 required-features = ["edlm_gpu"]
 
+# riir-infer Issue 1005 T8 follow-up — the fold GOAT lane (the device-fold
+# sync posture vs the v1 host small-ops path, interleaved). Same R1 pair.
+[[test]]
+name = "edlm_fold_goat"
+required-features = ["edlm_gpu"]
+
 # riir-infer Issue 032 — G1 of the Metal folded (Bonsai-2) CubeCL prefill vs
 # the folded decode eager path, plus the pre-rotation pin (T5). The
 # whole-file #![cfg] keeps the count honest; this row keeps the reader honest

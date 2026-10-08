@@ -265,6 +265,200 @@ fn rmsnorm_rows_matches_cpu_reference() {
     );
 }
 
+/// The fused QKV fold vs the EXACT host small-ops the v1 path ran between
+/// readbacks (split → per-head qk-norm → RoPE → segment scatter). Two rows
+/// (3 + 2 queries) so the own-buffer segment scatter is exercised across a
+/// row seam; positions include 0 (the host rope's identity fast path — the
+/// kernel's general rotation must be bit-exact identity there) and large
+/// angles. V passes through EXACTLY (no norm, no rotation — bit-equal); q/k
+/// carry the fold's tolerance faces (tree-order sum-of-squares + GPU
+/// sin/cos).
+#[test]
+fn qkv_fold_matches_cpu_reference() {
+    let ctx = CubeCLContext::new().expect("CubeCL should initialize");
+    let client = ctx.client();
+
+    let n_head = 2usize;
+    let n_kv = 1usize;
+    let hd = 128usize;
+    let eps = 1e-6f32;
+    let q_dim = n_head * hd;
+    let kvd = n_kv * hd;
+    let lq = q_dim + 2 * kvd;
+    // Two rows: row A = queries 0..3 (key rows 0..3), row B = queries 3..5
+    // (key rows 3..5). The fold kernel's seg input is PER QUERY = row base
+    // + in-row offset — UNIQUE per query, exactly the invariant the real
+    // passes produce (a repeated slot would be a scheduler-dependent
+    // double-write; an unwritten slot reads pool-stale bytes).
+    let sq = 5usize;
+    let own_total = 5usize;
+    let pos: Vec<u32> = vec![0, 5, 9, 100, 2047];
+    let seg_of_q: Vec<u32> = vec![0, 1, 2, 3, 4];
+
+    let mut r = Lcg(0xF01D);
+    let qkv: Vec<f32> = (0..sq * lq).map(|_| r.next_f32() * 2.0).collect();
+    let q_norm: Vec<f32> = (0..hd).map(|_| 1.0 + 0.1 * r.next_f32()).collect();
+    let k_norm: Vec<f32> = (0..hd).map(|_| 1.0 + 0.1 * r.next_f32()).collect();
+    let freq = RopeFreqTable::new(1_000_000.0, hd);
+
+    // Host oracle — the v1 path's exact helpers, in its exact order.
+    let mut want_q = vec![0.0f32; sq * q_dim];
+    let mut want_kv = vec![0.0f32; 2 * own_total * kvd];
+    for g in 0..sq {
+        let row = &qkv[g * lq..(g + 1) * lq];
+        let mut q_row = row[..q_dim].to_vec();
+        qk_norm_inplace(&mut q_row, &q_norm, n_head, hd, eps as f64);
+        apply_rope_with_freq(&mut q_row, &mut [], pos[g] as usize, hd, freq.as_slice());
+        want_q[g * q_dim..(g + 1) * q_dim].copy_from_slice(&q_row);
+
+        let mut k_row = row[q_dim..q_dim + kvd].to_vec();
+        qk_norm_inplace(&mut k_row, &k_norm, n_kv, hd, eps as f64);
+        apply_rope_with_freq(&mut k_row, &mut [], pos[g] as usize, hd, freq.as_slice());
+        let ko = seg_of_q[g] as usize * kvd;
+        want_kv[ko..ko + kvd].copy_from_slice(&k_row);
+        want_kv[own_total * kvd + ko..own_total * kvd + ko + kvd]
+            .copy_from_slice(&row[q_dim + kvd..lq]);
+    }
+
+    let qkv_h = create_f32(&client, &qkv);
+    let qn_h = create_f32(&client, &q_norm);
+    let kn_h = create_f32(&client, &k_norm);
+    let pos_h = create_u32(&client, &pos);
+    let seg_h = create_u32(&client, &seg_of_q);
+    let freq_h = create_f32(&client, freq.as_slice());
+    let qr_h = client.empty(sq * q_dim * core::mem::size_of::<f32>());
+    let kv_h = client.empty(2 * own_total * kvd * core::mem::size_of::<f32>());
+    EdlmQkvFoldCubeCL::launch::<ActiveRuntime>(
+        &client,
+        qkv_h,
+        qn_h,
+        kn_h,
+        pos_h,
+        seg_h,
+        freq_h,
+        qr_h.clone(),
+        kv_h.clone(),
+        &EdlmQkvFoldParams {
+            n_head,
+            n_kv_head: n_kv,
+            head_dim: hd,
+            eps,
+            n_positions: own_total,
+            seq_q: sq,
+        },
+    );
+    let got_q = read_f32(&client, qr_h).expect("read q_rope");
+    let got_kv = read_f32(&client, kv_h).expect("read kv");
+
+    // V: bit-exact copy-through.
+    let v_worst = got_kv[own_total * kvd..]
+        .iter()
+        .zip(&want_kv[own_total * kvd..])
+        .position(|(a, b)| a.to_bits() != b.to_bits());
+    assert_eq!(v_worst, None, "v copy-through not bit-exact at {v_worst:?}");
+
+    let q_worst = max_abs_diff(&got_q, &want_q);
+    let k_worst = max_abs_diff(&got_kv[..own_total * kvd], &want_kv[..own_total * kvd]);
+    // The gate rides the LARGE-ANGLE face: pos=2047 · freq[0]=1.0 makes the
+    // GPU sin/cos argument-reduction error the dominant term (~1e-4 class
+    // on this backend) — an order above the tree-reduce face. The serving
+    // state lengths (≤ 2048) see the same class; disclosed, never hidden.
+    assert!(
+        q_worst < 1e-3 && k_worst < 1e-3,
+        "fold drift: q {q_worst} k {k_worst} (tree-reduce + sin/cos class)"
+    );
+    println!(
+        "qkv fold drift: q {q_worst:.3e} k {k_worst:.3e} (v bit-exact; gate 1e-3, \
+         pos-2047 sin/cos face dominant)"
+    );
+}
+
+/// The fold kernel at the TINY PIPELINE's exact shapes (n_head 4, n_kv 2 →
+/// kvd 256, lq 1024; a single 18-query row — the state pass; positions
+/// 0..17). This is the scenario the whole-forward parity gates; if the
+/// kernel is clean HERE but the pipeline reds, the defect is in the pass
+/// wiring, not the math.
+#[test]
+fn qkv_fold_matches_cpu_reference_tiny_pipeline_shapes() {
+    let ctx = CubeCLContext::new().expect("CubeCL should initialize");
+    let client = ctx.client();
+
+    let n_head = 4usize;
+    let n_kv = 2usize;
+    let hd = 128usize;
+    let eps = 1e-6f32;
+    let q_dim = n_head * hd;
+    let kvd = n_kv * hd;
+    let lq = q_dim + 2 * kvd;
+    let sq = 18usize;
+    let own_total = sq;
+    let pos: Vec<u32> = (0..sq as u32).collect();
+    // The state pass's actual mapping: one row → query j's key row is
+    // seg[0] + j = j (the fold kernel's seg input is PER QUERY).
+    let seg_of_q: Vec<u32> = (0..sq as u32).collect();
+
+    let mut r = Lcg(0x51CE);
+    let qkv: Vec<f32> = (0..sq * lq).map(|_| r.next_f32() * 2.0).collect();
+    let q_norm: Vec<f32> = (0..hd).map(|_| 1.0 + 0.1 * r.next_f32()).collect();
+    let k_norm: Vec<f32> = (0..hd).map(|_| 1.0 + 0.1 * r.next_f32()).collect();
+    let freq = RopeFreqTable::new(1_000_000.0, hd);
+
+    let mut want_q = vec![0.0f32; sq * q_dim];
+    let mut want_kv = vec![0.0f32; 2 * own_total * kvd];
+    for g in 0..sq {
+        let row = &qkv[g * lq..(g + 1) * lq];
+        let mut q_row = row[..q_dim].to_vec();
+        qk_norm_inplace(&mut q_row, &q_norm, n_head, hd, eps as f64);
+        apply_rope_with_freq(&mut q_row, &mut [], pos[g] as usize, hd, freq.as_slice());
+        want_q[g * q_dim..(g + 1) * q_dim].copy_from_slice(&q_row);
+
+        let mut k_row = row[q_dim..q_dim + kvd].to_vec();
+        qk_norm_inplace(&mut k_row, &k_norm, n_kv, hd, eps as f64);
+        apply_rope_with_freq(&mut k_row, &mut [], pos[g] as usize, hd, freq.as_slice());
+        let ko = seg_of_q[g] as usize * kvd;
+        want_kv[ko..ko + kvd].copy_from_slice(&k_row);
+        want_kv[own_total * kvd + ko..own_total * kvd + ko + kvd]
+            .copy_from_slice(&row[q_dim + kvd..lq]);
+    }
+
+    let qkv_h = create_f32(&client, &qkv);
+    let qr_h = client.empty(sq * q_dim * core::mem::size_of::<f32>());
+    let kv_h = client.empty(2 * own_total * kvd * core::mem::size_of::<f32>());
+    EdlmQkvFoldCubeCL::launch::<ActiveRuntime>(
+        &client,
+        qkv_h,
+        create_f32(&client, &q_norm),
+        create_f32(&client, &k_norm),
+        create_u32(&client, &pos),
+        create_u32(&client, &seg_of_q),
+        create_f32(&client, freq.as_slice()),
+        qr_h.clone(),
+        kv_h.clone(),
+        &EdlmQkvFoldParams {
+            n_head,
+            n_kv_head: n_kv,
+            head_dim: hd,
+            eps,
+            n_positions: own_total,
+            seq_q: sq,
+        },
+    );
+    let got_q = read_f32(&client, qr_h).expect("read q_rope");
+    let got_kv = read_f32(&client, kv_h).expect("read kv");
+
+    let q_worst = max_abs_diff(&got_q, &want_q);
+    let k_worst = max_abs_diff(&got_kv[..own_total * kvd], &want_kv[..own_total * kvd]);
+    // Small positions only (≤ 17): the sin/cos face is ulp-class here, so
+    // the gate is the tree-reduce class, 1e-5.
+    assert!(
+        q_worst < 1e-5 && k_worst < 1e-5,
+        "fold drift (tiny shapes): q {q_worst} k {k_worst}"
+    );
+    println!(
+        "qkv fold drift (tiny shapes): q {q_worst:.3e} k {k_worst:.3e} (gate 1e-5)"
+    );
+}
+
 #[test]
 fn attn_multi_matches_cpu_reference_with_visibility_bounds() {
     let ctx = CubeCLContext::new().expect("CubeCL should initialize");
@@ -543,49 +737,70 @@ fn attn_multi_seed_multi_tile_carry() {
 /// in each posture, never across) × ALL GEMM postures (the tensor-core
 /// kernels add the activation-rounding face — the gate re-pins per posture;
 /// v1 and sg8 are the SAME drift class, sg8 just reassociates k more).
-fn tiny_pipeline_parity(state_bidir: bool, posture: GemmPosture) -> (f32, f32) {
+/// The CPU T7 cached path on the f16-grid tiny weights — the oracle both
+/// sync postures gate against.
+fn tiny_cpu_outputs(state_bidir: bool) -> (EdlmStateKv, Vec<Vec<f32>>) {
     let config = tiny_config();
     let mut weights = tiny_weights(&config);
     quantize_to_f16_grid(&mut weights);
     let enc = sample_encoding();
     enc.validate().expect("fixture invariants");
     let rows = riir_infer_core::transformer::edlm::rows_of(&enc).expect("rows");
-
-    // CPU oracle: the T7 cached path on the SAME f16-grid weights.
     let sl = enc.state_len;
-    let cpu_cache = edlm_state_prefill(
-        &weights,
-        &config,
-        &enc.ids[..sl],
-        &enc.pos[..sl],
-        state_bidir,
-    );
-    let cpu_rows =
-        forward_edlm_branches_cached(&weights, &config, &enc, &rows, &cpu_cache)
-            .expect("cpu branches");
+    let cache = edlm_state_prefill(&weights, &config, &enc.ids[..sl], &enc.pos[..sl], state_bidir);
+    let out = forward_edlm_branches_cached(&weights, &config, &enc, &rows, &cache)
+        .expect("cpu branches");
+    (cache, out)
+}
 
-    // GPU: same weights through the f16 upload path, the caller's GEMM
-    // posture (the test seam overrides the process-global env default).
+/// The GPU pipeline on the same f16-grid tiny weights, at the caller's GEMM
+/// posture and SYNC posture (the fold A/B seam).
+fn tiny_gpu_outputs(
+    state_bidir: bool,
+    posture: GemmPosture,
+    fold: bool,
+) -> (EdlmStateKv, Vec<Vec<f32>>) {
+    let config = tiny_config();
+    let mut weights = tiny_weights(&config);
+    quantize_to_f16_grid(&mut weights);
+    let enc = sample_encoding();
+    enc.validate().expect("fixture invariants");
+    let rows = riir_infer_core::transformer::edlm::rows_of(&enc).expect("rows");
     let mut gpu = EdlmGpuModel::from_weights(&weights, &config)
         .expect("gpu model")
-        .with_posture(posture);
+        .with_posture(posture)
+        .with_fold(fold);
+    let sl = enc.state_len;
     gpu.state_prefill(&enc.ids[..sl], &enc.pos[..sl], state_bidir)
         .expect("gpu prefill");
-    let gpu_rows = gpu.forward_branches(&enc, &rows).expect("gpu branches");
+    let out = gpu.forward_branches(&enc, &rows).expect("gpu branches");
+    (gpu.state_kv().expect("cache").clone(), out)
+}
+
+fn state_kv_max_diff(a: &EdlmStateKv, b: &EdlmStateKv) -> f32 {
+    let mut worst = 0.0f32;
+    for (ca, cb) in a.layers.iter().zip(&b.layers) {
+        worst = worst.max(max_abs_diff(&ca.k, &cb.k));
+        worst = worst.max(max_abs_diff(&ca.v, &cb.v));
+    }
+    worst
+}
+
+fn rows_max_diff(a: &[Vec<f32>], b: &[Vec<f32>]) -> f32 {
+    a.iter()
+        .zip(b.iter())
+        .map(|(ra, rb)| max_abs_diff(ra, rb))
+        .fold(0.0f32, f32::max)
+}
+
+fn tiny_pipeline_parity(state_bidir: bool, posture: GemmPosture) -> (f32, f32) {
+    let (cpu_cache, cpu_rows) = tiny_cpu_outputs(state_bidir);
+    let (gpu_cache, gpu_rows) = tiny_gpu_outputs(state_bidir, posture, fold_env_default());
 
     // State cache K/V parity (the prefill's own output).
-    let gpu_cache = gpu.state_kv().expect("cache").clone();
-    let mut kv_worst = 0.0f32;
-    for (li, (c, g)) in cpu_cache.layers.iter().zip(&gpu_cache.layers).enumerate() {
-        kv_worst = kv_worst.max(max_abs_diff(&c.k, &g.k));
-        kv_worst = kv_worst.max(max_abs_diff(&c.v, &g.v));
-        let _ = li;
-    }
+    let kv_worst = state_kv_max_diff(&cpu_cache, &gpu_cache);
     // Hidden parity (the pointer head's input).
-    let mut hid_worst = 0.0f32;
-    for (c, g) in cpu_rows.iter().zip(&gpu_rows) {
-        hid_worst = hid_worst.max(max_abs_diff(c, g));
-    }
+    let hid_worst = rows_max_diff(&cpu_rows, &gpu_rows);
     (kv_worst, hid_worst)
 }
 
@@ -637,6 +852,33 @@ fn tiny_parity_vs_cpu_cached_causal() {
         );
         println!(
             "tiny causal parity ({}): kv {kv:.3e} hidden {hid:.3e}",
+            posture_name(posture)
+        );
+    }
+}
+
+/// The fold-vs-host ARMS test — the two sync postures of the SAME GPU
+/// pipeline (same f16 weights, same GEMM kernels, ONE shared PassGeometry)
+/// must agree within the small-ops' own tolerance class: the fold's tree
+/// sum-of-squares + GPU sin/cos faces feed the attention, so the drift is
+/// larger than zero but WELL inside the CPU-parity gates above (both arms
+/// carry the same f16 + online-softmax faces, which CANCEL in this
+/// comparison). Runs at every GEMM posture — the fold is posture-agnostic
+/// by construction, and the assertion is what proves it stays that way.
+#[test]
+fn tiny_fold_vs_host_arms() {
+    for posture in ALL_POSTURES {
+        let (host_kv, host_rows) = tiny_gpu_outputs(true, posture, false);
+        let (fold_kv, fold_rows) = tiny_gpu_outputs(true, posture, true);
+        let kv = state_kv_max_diff(&host_kv, &fold_kv);
+        let hid = rows_max_diff(&host_rows, &fold_rows);
+        assert!(
+            kv < 1e-3 && hid < 1e-3,
+            "fold-vs-host arms ({}): kv {kv:.3e} hidden {hid:.3e} (gate 1e-3)",
+            posture_name(posture)
+        );
+        println!(
+            "tiny fold-vs-host arms ({}): kv {kv:.3e} hidden {hid:.3e} (gate 1e-3)",
             posture_name(posture)
         );
     }
