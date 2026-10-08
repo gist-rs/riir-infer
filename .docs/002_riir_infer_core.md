@@ -26,6 +26,7 @@ compiler, not grep).
 | `gguf_loader` / `safetensors_loader` | Weight file loading |
 | `rope` | Rotary position embedding |
 | `gemma_layer/` / `llama_layer/` | Architecture-specific layer defs |
+| `transformer/edlm.rs` | eDLM (Drex DLM) segment-structured scoring lane (Issue 1005, opt-in `edlm`): `edlm` GGUF arch, segment block-causal mask, packed/row forwards, pointer head, state-prefix KV reuse (T7) — the GPU twin lives in `riir-infer-gpu` (`edlm_gpu`, f16-resident + a cooperative-matrix GEMM arm at m≥16) |
 | `spec_types` | Speculative-decode type surface |
 | `dflash` | DFlash forward (Issue 708 made functional) |
 | `types` / `simd` / `wall` | Shared types, SIMD kernels, the wall abstraction |
