@@ -1,14 +1,18 @@
 //! The eDLM f16-B GEMM GOAT lane (Issue 1005 T8 follow-up): the scalar tiled
-//! kernel vs the cooperative-matrix (tensor-core) kernel.
+//! kernel vs the cooperative-matrix (tensor-core) kernels — the v1
+//! (32-thread) CMMA and the sg8 rung (8 subgroups, 128×64; the Bench 706
+//! ladder's shipped shape).
 //!
-//! Two halves:
-//! - **always-on** — real-shape-class parity for BOTH kernels vs the CPU
-//!   reference (the tiny unit tests in `matmul_f16b_cmma_cubecl` cover the
-//!   small-shape correctness; this pins the large-N accumulation depth and
-//!   the multi-row bounds arms at the lane's real dimensions).
-//! - **`#[ignore]` GOAT** — the interleaved A/B timing table (the
-//!   sequential-A/B law: arms alternate in pairs, median per arm — never two
-//!   sequential runs). Run:
+//! Three halves:
+//! - **always-on** — real-shape-class parity for ALL THREE kernels vs the
+//!   CPU reference (the tiny unit tests in `matmul_f16b_cmma_cubecl` cover
+//!   the small-shape correctness; this pins the large-N accumulation depth
+//!   and the multi-row bounds arms at the lane's real dimensions).
+//! - **`#[ignore]` GOAT** — the interleaved A/B timing table scalar-vs-v1
+//!   (the recorded promotion evidence for the CMMA posture).
+//! - **`#[ignore]` GOAT sg8** — the interleaved v1-vs-sg8 table (the
+//!   crossover + promotion evidence for the sg8 arm; T8 follow-up).
+//!   Run:
 //!   `cargo test --release -p riir-infer-gpu --features edlm_gpu
 //!    --test edlm_matmul_cmma_goat -- --ignored --nocapture`
 //!
@@ -23,6 +27,24 @@ use riir_infer_gpu::cubecl_runtime::{ActiveRuntime, CubeCLContext, create_f32, r
 use riir_infer_gpu::{Handle, MatmulF16bCmmaCubeCL, MatmulF16bCubeCL};
 use cubecl::Runtime as _;
 use half::f16 as half_f16;
+
+/// The timing/parity arms (the model-side dispatch mirror).
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Kernel {
+    Scalar,
+    CmmaV1,
+    CmmaSg8,
+}
+
+impl Kernel {
+    fn name(self) -> &'static str {
+        match self {
+            Kernel::Scalar => "scalar",
+            Kernel::CmmaV1 => "cmma",
+            Kernel::CmmaSg8 => "cmma-sg8",
+        }
+    }
+}
 
 struct Lcg(u64);
 impl Lcg {
@@ -56,7 +78,7 @@ fn cpu_matmul(a: &[f32], b_f16: &[half_f16], m: usize, n: usize, p: usize) -> Ve
 }
 
 fn run_kernel(
-    use_cmma: bool,
+    kernel: Kernel,
     ctx: &CubeCLContext,
     a_h: Handle,
     b_h: Handle,
@@ -66,10 +88,14 @@ fn run_kernel(
     p: usize,
 ) {
     let cl = ctx.client();
-    if use_cmma {
-        MatmulF16bCmmaCubeCL::launch::<ActiveRuntime>(&cl, a_h, b_h, out_h, m, n, p);
-    } else {
-        MatmulF16bCubeCL::launch::<ActiveRuntime>(&cl, a_h, b_h, out_h, m, n, p);
+    match kernel {
+        Kernel::CmmaSg8 => {
+            MatmulF16bCmmaCubeCL::launch_sg8::<ActiveRuntime>(&cl, a_h, b_h, out_h, m, n, p)
+        }
+        Kernel::CmmaV1 => {
+            MatmulF16bCmmaCubeCL::launch::<ActiveRuntime>(&cl, a_h, b_h, out_h, m, n, p)
+        }
+        Kernel::Scalar => MatmulF16bCubeCL::launch::<ActiveRuntime>(&cl, a_h, b_h, out_h, m, n, p),
     }
 }
 
@@ -93,9 +119,9 @@ fn real_shape_parity_both_kernels() {
         let a_h = create_f32(&cl, &a);
         let b_h = cl.create_from_slice(bytemuck::cast_slice::<half_f16, u8>(&b_f16));
 
-        for use_cmma in [false, true] {
+        for kernel in [Kernel::Scalar, Kernel::CmmaV1, Kernel::CmmaSg8] {
             let out_h = cl.empty(m * p * core::mem::size_of::<f32>());
-            run_kernel(use_cmma, &ctx, a_h.clone(), b_h.clone(), out_h.clone(), m, n, p);
+            run_kernel(kernel, &ctx, a_h.clone(), b_h.clone(), out_h.clone(), m, n, p);
             let got = read_f32(&cl, out_h).expect("read");
             let worst = got
                 .iter()
@@ -106,11 +132,11 @@ fn real_shape_parity_both_kernels() {
             assert!(
                 rel < 3e-3,
                 "parity ({}): [{m}x{n}]x[{p}x{n}] rel {rel} (abs {worst})",
-                if use_cmma { "cmma" } else { "scalar" }
+                kernel.name()
             );
             println!(
-                "parity {} [{m}x{n}]x[{p}x{n}]: rel {rel:.2e}",
-                if use_cmma { "cmma  " } else { "scalar" }
+                "parity {:>8} [{m}x{n}]x[{p}x{n}]: rel {rel:.2e}",
+                kernel.name()
             );
         }
     }
@@ -120,7 +146,7 @@ fn real_shape_parity_both_kernels() {
 /// readback at the end (the lane's real pipeline runs 4 launches between
 /// readbacks — this measures sustained kernel time, not per-launch sync).
 fn timed_chunk(
-    use_cmma: bool,
+    kernel: Kernel,
     ctx: &CubeCLContext,
     a_h: Handle,
     b_h: Handle,
@@ -132,7 +158,7 @@ fn timed_chunk(
 ) -> std::time::Duration {
     let start = std::time::Instant::now();
     for _ in 0..launches {
-        run_kernel(use_cmma, ctx, a_h.clone(), b_h.clone(), out_h.clone(), m, n, p);
+        run_kernel(kernel, ctx, a_h.clone(), b_h.clone(), out_h.clone(), m, n, p);
     }
     let cl = ctx.client();
     let _ = read_f32(&cl, out_h).expect("read");
@@ -187,8 +213,8 @@ fn goat_interleaved_ab() {
 
         // Warmup BOTH arms (compilation + clocks) before any timing.
         for _ in 0..WARMUP {
-            timed_chunk(false, &ctx, a_h.clone(), b_h.clone(), out_h.clone(), m, n, p, LAUNCHES);
-            timed_chunk(true, &ctx, a_h.clone(), b_h.clone(), out_h.clone(), m, n, p, LAUNCHES);
+            timed_chunk(Kernel::Scalar, &ctx, a_h.clone(), b_h.clone(), out_h.clone(), m, n, p, LAUNCHES);
+            timed_chunk(Kernel::CmmaV1, &ctx, a_h.clone(), b_h.clone(), out_h.clone(), m, n, p, LAUNCHES);
         }
 
         // Interleaved pairs — median per arm (the sequential-A/B law).
@@ -196,11 +222,11 @@ fn goat_interleaved_ab() {
         let mut cmma: Vec<u128> = Vec::with_capacity(PAIRS);
         for _ in 0..PAIRS {
             scalar.push(
-                timed_chunk(false, &ctx, a_h.clone(), b_h.clone(), out_h.clone(), m, n, p, LAUNCHES)
+                timed_chunk(Kernel::Scalar, &ctx, a_h.clone(), b_h.clone(), out_h.clone(), m, n, p, LAUNCHES)
                     .as_micros(),
             );
             cmma.push(
-                timed_chunk(true, &ctx, a_h.clone(), b_h.clone(), out_h.clone(), m, n, p, LAUNCHES)
+                timed_chunk(Kernel::CmmaV1, &ctx, a_h.clone(), b_h.clone(), out_h.clone(), m, n, p, LAUNCHES)
                     .as_micros(),
             );
         }
@@ -229,5 +255,91 @@ fn goat_interleaved_ab() {
         } else {
             "mixed — read the table per shape before any promotion"
         }
+    );
+}
+
+/// The sg8 GOAT (the T8 follow-up): interleaved v1-vs-sg8 over the same
+/// shape set. PRINTS the table + a crossover read; asserts nothing about
+/// perf. The crossover constant (`SG8_MIN_M`) + the arm's env default are
+/// set from this table's medians, recorded in the issue row + commit.
+#[test]
+#[ignore]
+fn goat_interleaved_ab_sg8() {
+    let ctx = CubeCLContext::new().expect("CubeCL should initialize");
+    println!("PROVENANCE: runtime {}", ActiveRuntime::name(&ctx.client()));
+
+    let shapes: Vec<(usize, usize, usize)> = vec![
+        (8, 4096, 6144),
+        (16, 4096, 6144),
+        (18, 4096, 6144),
+        (32, 4096, 6144),
+        (64, 4096, 6144),
+        (87, 4096, 6144),
+        (87, 4096, 4096),
+        (87, 4096, 24576),
+        (87, 12288, 4096),
+        (128, 4096, 6144),
+        (512, 4096, 6144),
+        (1024, 4096, 6144),
+        (2048, 4096, 6144),
+    ];
+
+    const PAIRS: usize = 15;
+    const LAUNCHES: usize = 8;
+    const WARMUP: usize = 2;
+
+    println!(
+        "| {:>18} | {:>10} | {:>10} | {:>7} | {:>8} |",
+        "shape (m×n×p)", "cmma µs", "sg8 µs", "speedup", "sg8 TF"
+    );
+    let mut first_win_m: Option<usize> = None;
+    for &(m, n, p) in &shapes {
+        let mut r = Lcg(0xD00D_2005);
+        let a: Vec<f32> = (0..m * n).map(|_| r.next_f32() * 0.5).collect();
+        let b_f32: Vec<f32> = (0..p * n).map(|_| r.next_f32() * 0.5).collect();
+        let b_f16: Vec<half_f16> = b_f32.iter().map(|&v| half_f16::from_f32(v)).collect();
+        let cl = ctx.client();
+        let a_h = create_f32(&cl, &a);
+        let b_h = cl.create_from_slice(bytemuck::cast_slice::<half_f16, u8>(&b_f16));
+        let out_h = cl.empty(m * p * core::mem::size_of::<f32>());
+
+        for _ in 0..WARMUP {
+            timed_chunk(Kernel::CmmaV1, &ctx, a_h.clone(), b_h.clone(), out_h.clone(), m, n, p, LAUNCHES);
+            timed_chunk(Kernel::CmmaSg8, &ctx, a_h.clone(), b_h.clone(), out_h.clone(), m, n, p, LAUNCHES);
+        }
+
+        let mut v1: Vec<u128> = Vec::with_capacity(PAIRS);
+        let mut sg8: Vec<u128> = Vec::with_capacity(PAIRS);
+        for _ in 0..PAIRS {
+            v1.push(
+                timed_chunk(Kernel::CmmaV1, &ctx, a_h.clone(), b_h.clone(), out_h.clone(), m, n, p, LAUNCHES)
+                    .as_micros(),
+            );
+            sg8.push(
+                timed_chunk(Kernel::CmmaSg8, &ctx, a_h.clone(), b_h.clone(), out_h.clone(), m, n, p, LAUNCHES)
+                    .as_micros(),
+            );
+        }
+        v1.sort_unstable();
+        sg8.sort_unstable();
+        let v1_med = v1[PAIRS / 2] as f64;
+        let sg8_med = sg8[PAIRS / 2] as f64;
+        let speedup = v1_med / sg8_med;
+        let tflops = (2.0 * m as f64 * n as f64 * p as f64) / (sg8_med * 1e-6) / 1e12;
+        if speedup >= 1.05 && first_win_m.is_none() {
+            first_win_m = Some(m);
+        }
+        println!(
+            "| {:>18} | {:>10.1} | {:>10.1} | {:>6.2}x | {:>8.2} |",
+            format!("{m}×{n}×{p}"),
+            v1_med / LAUNCHES as f64,
+            sg8_med / LAUNCHES as f64,
+            speedup,
+            tflops
+        );
+    }
+    println!(
+        "CROSSOVER READ: first m where sg8 ≥ 1.05x v1 = {} (the SG8_MIN_M pin; below it v1 stays)",
+        first_win_m.map_or("never".to_string(), |m| m.to_string())
     );
 }

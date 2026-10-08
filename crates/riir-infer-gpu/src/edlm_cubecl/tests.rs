@@ -369,9 +369,10 @@ fn attn_multi_multi_tile_visibility() {
 
 /// Full-pipeline parity vs the CPU T7 cached path on f16-grid tiny weights,
 /// BOTH state_bidir postures (the core lane's own parity law: parity holds
-/// in each posture, never across) × BOTH GEMM postures (the tensor-core
-/// kernel adds the activation-rounding face — the gate re-pins per posture).
-fn tiny_pipeline_parity(state_bidir: bool, use_cmma: bool) -> (f32, f32) {
+/// in each posture, never across) × ALL GEMM postures (the tensor-core
+/// kernels add the activation-rounding face — the gate re-pins per posture;
+/// v1 and sg8 are the SAME drift class, sg8 just reassociates k more).
+fn tiny_pipeline_parity(state_bidir: bool, posture: GemmPosture) -> (f32, f32) {
     let config = tiny_config();
     let mut weights = tiny_weights(&config);
     quantize_to_f16_grid(&mut weights);
@@ -394,8 +395,9 @@ fn tiny_pipeline_parity(state_bidir: bool, use_cmma: bool) -> (f32, f32) {
 
     // GPU: same weights through the f16 upload path, the caller's GEMM
     // posture (the test seam overrides the process-global env default).
-    let mut gpu =
-        EdlmGpuModel::from_weights(&weights, &config).expect("gpu model").with_matmul_posture(use_cmma);
+    let mut gpu = EdlmGpuModel::from_weights(&weights, &config)
+        .expect("gpu model")
+        .with_posture(posture);
     gpu.state_prefill(&enc.ids[..sl], &enc.pos[..sl], state_bidir)
         .expect("gpu prefill");
     let gpu_rows = gpu.forward_branches(&enc, &rows).expect("gpu branches");
@@ -416,39 +418,55 @@ fn tiny_pipeline_parity(state_bidir: bool, use_cmma: bool) -> (f32, f32) {
     (kv_worst, hid_worst)
 }
 
+const ALL_POSTURES: [GemmPosture; 3] = [
+    GemmPosture::Scalar,
+    GemmPosture::Cmma,
+    GemmPosture::CmmaSg8,
+];
+
+fn posture_name(p: GemmPosture) -> &'static str {
+    match p {
+        GemmPosture::Scalar => "scalar",
+        GemmPosture::Cmma => "cmma",
+        GemmPosture::CmmaSg8 => "cmma-sg8",
+    }
+}
+
 #[test]
 fn tiny_parity_vs_cpu_cached_bidir() {
-    for use_cmma in [false, true] {
-        let (kv, hid) = tiny_pipeline_parity(true, use_cmma);
+    for posture in ALL_POSTURES {
+        let (kv, hid) = tiny_pipeline_parity(true, posture);
         // Per-posture kv gates: the scalar kernel's only face is the f32
-        // accumulation order (~6e-5 measured); the tensor-core kernel adds
+        // accumulation order (~6e-5 measured); the tensor-core kernels add
         // the ACTIVATION f16 rounding face (~1.5e-3 measured — the input
-        // disclosure in matmul_f16b_cmma_cubecl). The hidden gate is the
-        // binding law for both (the pointer head's input).
-        let kv_gate = if use_cmma { 3e-3 } else { 5e-4 };
+        // disclosure in matmul_f16b_cmma_cubecl; sg8 shares the class). The
+        // hidden gate is the binding law for all (the pointer head's input).
+        let kv_gate = if posture == GemmPosture::Scalar { 5e-4 } else { 3e-3 };
         assert!(
             kv < kv_gate && hid < 2e-3,
-            "bidir parity (cmma {use_cmma}): kv drift {kv} (gate {kv_gate}), hidden drift {hid}"
+            "bidir parity ({}): kv drift {kv} (gate {kv_gate}), hidden drift {hid}",
+            posture_name(posture)
         );
         println!(
             "tiny bidir parity ({}): kv {kv:.3e} hidden {hid:.3e}",
-            if use_cmma { "cmma" } else { "scalar" }
+            posture_name(posture)
         );
     }
 }
 
 #[test]
 fn tiny_parity_vs_cpu_cached_causal() {
-    for use_cmma in [false, true] {
-        let (kv, hid) = tiny_pipeline_parity(false, use_cmma);
-        let kv_gate = if use_cmma { 3e-3 } else { 5e-4 };
+    for posture in ALL_POSTURES {
+        let (kv, hid) = tiny_pipeline_parity(false, posture);
+        let kv_gate = if posture == GemmPosture::Scalar { 5e-4 } else { 3e-3 };
         assert!(
             kv < kv_gate && hid < 2e-3,
-            "causal parity (cmma {use_cmma}): kv drift {kv} (gate {kv_gate}), hidden drift {hid}"
+            "causal parity ({}): kv drift {kv} (gate {kv_gate}), hidden drift {hid}",
+            posture_name(posture)
         );
         println!(
             "tiny causal parity ({}): kv {kv:.3e} hidden {hid:.3e}",
-            if use_cmma { "cmma" } else { "scalar" }
+            posture_name(posture)
         );
     }
 }

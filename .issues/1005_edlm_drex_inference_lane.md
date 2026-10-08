@@ -1,15 +1,24 @@
 # Issue 1005 — eDLM (Drex DLM) inference lane: GGUF arch + segment block-causal mask + pointer head
 
-**Status:** OPEN — T8 CMMA FOLLOW-UP LANDED 2026-10-08 (this session, 4090): the tensor-core
-GEMM arm for the four per-layer projections — cooperative-matrix f16×f16→f32 (`MatmulF16bCmmaCubeCL`,
-new `matmul_f16b_cmma_cubecl.rs`), dispatch law **cmma at m ≥ 16, scalar below**, kill-switch
-`EDLM_GPU_CMMA=0`; GOAT interleaved medians on BOTH runtimes: cmma wins 1.5× at m=18, 3.4–3.5×
-at m=87, 7–8× at m≥512, loses 0.6× at m=8 (short branch rows stay scalar); parity green on both
-runtimes with drift BYTE-IDENTICAL cross-backend (cmma kv 1.995e-3 / hidden 9.3e-6 on wgpu-spirv
-AND native cuda); the activation-f16-rounding face (the tensor core consumes f16 A) is disclosed
+**Status:** OPEN — T8 SG8 FOLLOW-UP LANDED 2026-10-08 (this session, 4090): the staging
+ladder resolved by measurement BEFORE the port — Bench 706's ternary-cmma16 verdict (kb4
+0.27× LOSES, sg8 1.64× ships) routed the "k-blocked CMMA staging" follow-up to the
+multi-subgroup big-tile rung. `matmul_f16b_cmma_f32_sg8` (8 subgroups, 128×64 tile, 32
+mma/barrier) WON EVERY CELL on BOTH runtimes (wgpu-spirv 1.19–1.72×, native CUDA
+1.23–2.01×; parity byte-identical cross-backend, drift = v1's exact numbers) — PROMOTED
+default-on (no crossover; `EDLM_GPU_CMMA_SG8=0` restores v1). The tensor-core GEMM arm
+for the four per-layer projections itself (`MatmulF16bCmmaCubeCL`,
+`matmul_f16b_cmma_cubecl.rs`), dispatch law cmma at m ≥ 16 (now sg8 at m ≥ 16),
+kill-switch `EDLM_GPU_CMMA=0`; GOAT interleaved medians on BOTH runtimes: cmma wins 1.5×
+at m=18, 3.4–3.5× at m=87, 7–8× at m≥512, loses 0.6× at m=8 (short branch rows stay
+scalar); parity green on both
+runtimes with drift BYTE-IDENTICAL cross-backend (cmma kv 1.995e-3 / hidden 9.3e-6 on
+wgpu-spirv AND native cuda); the activation-f16-rounding face (the tensor core consumes
+f16 A) is disclosed
 + per-posture gated (scalar kv pin 5e-4 unchanged, cmma pin 3e-3; hidden gate 2e-3 the binding
 law, measured ≤9.5e-6). GOAT lane: `tests/edlm_matmul_cmma_goat.rs` (always-on real-shape parity
-+ `#[ignore]` interleaved-A/B table). Prior T8: the GPU eDLM forward (`edlm_gpu` feature) —
++ `#[ignore]` interleaved-A/B tables, now scalar-vs-v1 AND v1-vs-sg8). Prior T8: the GPU eDLM forward
+(`edlm_gpu` feature) —
 f16-resident weights + multi-query GQA attention with per-row visibility bounds; tiny-weights
 parity vs the CPU T7 cached path green on BOTH CubeCL runtimes (wgpu-spirv AND native CUDA on
 the 4090, same drift class); the real-Q8_0 published-sample gate is env-gated `EDLM_GGUF`
@@ -212,10 +221,41 @@ serving-shaped is ever built here or in reflex.
       report text unchanged, the per-length find already skipped missing
       cells — `useless_format` ×2, `redundant_closure`, `unused_mut`,
       `#[allow(clippy::too_many_arguments)]` on `run_cell` per house
-      convention). Gates: clippy -p riir-infer-gpu --all-features
+      posture). Gates: clippy -p riir-infer-gpu --all-features
       --all-targets GREEN (0 errors, 0 findings in touched files) + default
-      posture GREEN; both named tests PASS on the 4090.) Remaining T8 perf follow-ups: k-blocked CMMA
-      staging (the kb4/sg4 ladder), GPU-resident KV carry, batched
+      posture GREEN; both named tests PASS on the 4090.)
+      *(**T8 SG8 FOLLOW-UP, same day, 4090:** the staging ladder resolved by
+      MEASUREMENT before the port — Bench 706 (riir-ai, Issue 734 T6) already
+      measured the ternary cmma16 ladder: **kb4 LOST 0.27×** ("naive
+      K-blocking SERIALIZES — barriers were NOT the wall, traffic was"), sg8
+      WON 1.64× (shipped). So the "k-blocked CMMA staging" follow-up is
+      answered as the multi-subgroup big-tile rung, NOT a kb4 port (a
+      recorded negative, deliberately not repeated). Landed:
+      `matmul_f16b_cmma_f32_sg8` (`launch_sg8`) — 256-thread workgroup = 8
+      subgroups, **128×64 output tile**, each subgroup owning one 16-row A
+      sub-tile across all 4 B sub-tiles (4 f32 accumulators), 32 mma per
+      barrier pair vs v1's 4; same f32→f16-at-load A + f16-direct B staging,
+      guarded-zero staging + guarded dense writeback (this kernel's laws, not
+      the ternary clamp). **GOAT: sg8 wins EVERY cell on BOTH runtimes** —
+      wgpu-spirv 1.19–1.72× (13 shapes, m 8→2048, 15 interleaved pairs,
+      quiet-GPU release), native CUDA 1.23–2.01× (same shapes; m=18 QKV
+      441→219.5 µs, m=2048 5180→3131 µs, 4.11 TF) — **no crossover exists**
+      (even m=8 wins 1.55×/1.71×: sg8's 8 subgroups stage dead rows in
+      parallel and amortize the B panel per 64 cols, so the v1-m=8 lesson
+      does not bind); parity drift **byte-identical cross-backend** (kv
+      1.995e-3 / hidden 9.298e-6 bidir — v1's exact numbers, same k-order
+      class) and per-posture pipeline gates green on both runtimes.
+      PROMOTED default-on: dispatch law = cmma-eligible m (≥16) → sg8;
+      `SG8_MIN_M = 16` (the eligibility floor — no measured crossover);
+      kill-switches `EDLM_GPU_CMMA_SG8=0` (v1-only) and `EDLM_GPU_CMMA=0`
+      (scalar). Posture disclosure grew `cmma-sg8`; the tiny-pipeline parity
+      now covers ALL THREE postures (scalar/cmma/cmma-sg8) per state_bidir.
+      GOAT lane: `goat_interleaved_ab_sg8` (the v1-vs-sg8 table + crossover
+      read) + the always-on parity now runs all three kernels. Gates:
+      clippy at edlm_gpu/default/no-default/all-features × all-targets
+      GREEN; edlm_gpu lib 251/0 (dev, wgpu); kernel parity + pipeline parity
+      + always-on real-shape parity GREEN at native CUDA too.)
+      Remaining T8 perf follow-ups: GPU-resident KV carry, batched
       multi-branch, CUDA graphs.)
 
 ## License law

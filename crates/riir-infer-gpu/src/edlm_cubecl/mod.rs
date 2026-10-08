@@ -451,13 +451,31 @@ pub struct EdlmGpuModel {
     /// filled by [`EdlmGpuModel::state_prefill`], consumed by
     /// [`EdlmGpuModel::forward_branches`].
     state: Option<EdlmStateKv>,
-    /// The GEMM posture: `true` routes the four per-layer projections
-    /// through the cooperative-matrix (tensor-core) kernel
-    /// ([`crate::MatmulF16bCmmaCubeCL`]), `false` keeps the scalar tiled
-    /// kernel. Resolved once at construction from `EDLM_GPU_CMMA`
-    /// (`"0"` = scalar; unset/anything else = the measured default),
-    /// overridable per-instance by the test seam.
-    use_cmma: bool,
+    /// The GEMM posture: [`GemmPosture::Cmma`] routes the four per-layer
+    /// projections through the cooperative-matrix (tensor-core) kernels,
+    /// [`GemmPosture::Scalar`] keeps the scalar tiled kernel. Resolved once
+    /// at construction from `EDLM_GPU_CMMA` (`"0"` = scalar; unset/anything
+    /// else = the measured default), overridable per-instance by the test
+    /// seam.
+    posture: GemmPosture,
+    /// The sg8 arm (the Bench 706 ladder rung): armed by
+    /// `EDLM_GPU_CMMA_SG8=1`, consulted ONLY at the [`GemmPosture::Cmma`]
+    /// posture above the [`SG8_MIN_M`] crossover.
+    sg8_armed: bool,
+}
+
+/// The GEMM posture for the lane's four per-layer projections.
+#[cfg(feature = "edlm_gpu")]
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum GemmPosture {
+    /// The scalar tiled kernel — the kill-switch arm.
+    Scalar,
+    /// Tensor-core: the v1 (32-thread) kernel below the sg8 crossover, the
+    /// sg8 (8-subgroup, 128×64) kernel above it when armed.
+    Cmma,
+    /// Test/GOAT seam: FORCE the sg8 kernel for every cmma-eligible m.
+    /// Never a construction default — the env resolves to [`GemmPosture::Cmma`].
+    CmmaSg8,
 }
 
 /// Convert a host f32 slice to f16 bytes (round-to-nearest — the documented
@@ -480,6 +498,21 @@ fn f32_to_f16_bytes(data: &[f32]) -> Vec<u8> {
 #[cfg(feature = "edlm_gpu")]
 fn cmma_env_default() -> bool {
     match std::env::var("EDLM_GPU_CMMA") {
+        Ok(v) => v != "0",
+        Err(_) => true,
+    }
+}
+
+/// The sg8 arm of the tensor-core posture, read ONCE per process.
+/// DEFAULT ON (PROMOTED 2026-10-08 — the GOAT interleaved table, 4090:
+/// sg8 ≥ 1.19× v1 at EVERY measured m from 8 to 2048, ≥ 1.40× at 12 of 13
+/// cells — no crossover exists, so `SG8_MIN_M` sits at the cmma-eligibility
+/// floor; the dead-row waste that made v1 LOSE at m=8 does not bind sg8,
+/// whose 8 subgroups stage dead rows in parallel and amortize the B panel
+/// per 64 cols). `EDLM_GPU_CMMA_SG8=0` restores the v1 kernel at every m.
+#[cfg(feature = "edlm_gpu")]
+fn cmma_sg8_env_default() -> bool {
+    match std::env::var("EDLM_GPU_CMMA_SG8") {
         Ok(v) => v != "0",
         Err(_) => true,
     }
@@ -539,7 +572,12 @@ impl EdlmGpuModel {
             freq: RopeFreqTable::new(config.rope_theta, config.head_dim),
             scale: 1.0 / (config.head_dim as f32).sqrt(),
             state: None,
-            use_cmma: cmma_env_default(),
+            posture: if cmma_env_default() {
+                GemmPosture::Cmma
+            } else {
+                GemmPosture::Scalar
+            },
+            sg8_armed: cmma_sg8_env_default(),
         })
     }
 
@@ -609,7 +647,12 @@ impl EdlmGpuModel {
             freq,
             scale,
             state: None,
-            use_cmma: cmma_env_default(),
+            posture: if cmma_env_default() {
+                GemmPosture::Cmma
+            } else {
+                GemmPosture::Scalar
+            },
+            sg8_armed: cmma_sg8_env_default(),
         })
     }
 
@@ -620,22 +663,29 @@ impl EdlmGpuModel {
     }
 
     /// The GEMM posture this instance dispatches (provenance for parity
-    /// rows: the two postures are tolerance-equivalent, never identical).
+    /// rows: the postures are tolerance-equivalent, never identical).
     pub fn matmul_posture(&self) -> &'static str {
-        if self.use_cmma {
-            "cmma"
-        } else {
-            "scalar"
+        match self.posture {
+            GemmPosture::Scalar => "scalar",
+            GemmPosture::Cmma => "cmma",
+            GemmPosture::CmmaSg8 => "cmma-sg8",
         }
     }
 
     /// Test seam: pin the GEMM posture explicitly (the env default is
-    /// process-global; parity tests need BOTH postures in one process).
+    /// process-global; parity tests need EVERY posture in one process).
     #[cfg(test)]
-    fn with_matmul_posture(mut self, use_cmma: bool) -> Self {
-        self.use_cmma = use_cmma;
+    fn with_posture(mut self, posture: GemmPosture) -> Self {
+        self.posture = posture;
         self
     }
+
+    /// The sg8 floor: sg8 measured ≥ 1.19× v1 at EVERY m ≥ 8 (the GOAT
+    /// interleaved table, 4090, 2026-10-08 — no crossover below the
+    /// cmma-eligibility floor of 16), so the pin is the eligibility floor
+    /// itself. Recorded in the issue row.
+    #[cfg(feature = "edlm_gpu")]
+    const SG8_MIN_M: usize = 16;
 
     /// The one dispatch site for the lane's four per-layer projections.
     /// Shape law (the GOAT lane's interleaved medians, wgpu-spirv, 4090):
@@ -652,8 +702,19 @@ impl EdlmGpuModel {
         n: usize,
         p: usize,
     ) {
-        if self.use_cmma && m >= 16 {
-            crate::MatmulF16bCmmaCubeCL::launch::<ActiveRuntime>(&self.client, a, b, out, m, n, p);
+        if self.posture != GemmPosture::Scalar && m >= 16 {
+            let want_sg8 = match self.posture {
+                GemmPosture::CmmaSg8 => true,
+                GemmPosture::Cmma => self.sg8_armed && m >= Self::SG8_MIN_M,
+                GemmPosture::Scalar => false,
+            };
+            if want_sg8 {
+                crate::MatmulF16bCmmaCubeCL::launch_sg8::<ActiveRuntime>(
+                    &self.client, a, b, out, m, n, p,
+                );
+            } else {
+                crate::MatmulF16bCmmaCubeCL::launch::<ActiveRuntime>(&self.client, a, b, out, m, n, p);
+            }
         } else {
             MatmulF16bCubeCL::launch::<ActiveRuntime>(&self.client, a, b, out, m, n, p);
         }
