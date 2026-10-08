@@ -9,6 +9,11 @@
 pub mod exl3;
 #[cfg(feature = "exl3")]
 pub mod exl3_pack;
+// Issue 036 T1/T2 — the LittleBit-derived init-only sub-1-bit PTQ transform
+// (seeded Halko SVD + Dual-SVID init + residual restack). Opt-in (`svd_lbit`);
+// measurement-only per the lossy-surface law, never a serving path.
+#[cfg(feature = "svd_lbit")]
+pub mod svd_lbit;
 pub mod ptq1_0;
 pub mod q2_0;
 pub mod lut_grid;

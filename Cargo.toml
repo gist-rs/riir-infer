@@ -85,6 +85,12 @@ exl3 = []
 # (extraction + weight-space 3-arm eval over the dense GGUF artifacts).
 # Measurement-only; the model-level G1 (Plan 615 T6) is a separate gate.
 lut_grid = []
+# Issue 036 T1/T2: the LittleBit-derived init-only sub-1-bit PTQ lane —
+# `quant::svd_lbit` (seeded Halko truncated SVD + Dual-SVID init + residual
+# restack, deterministic) + the `svd_lbit_eval` PPL-ladder bin. Opt-in per
+# the lossy-surface law: measurement-only, never a serving path; ZERO new
+# deps (fastrand/rayon/half already in the tree).
+svd_lbit = []
 # vk_calibration (katgpt-rs Issue 883 P0, 2026-09-25): the gemma-2 V/K
 # calibration lane — `transformer::gemma2_calibration` (tapped f16
 # forward, no lm_head) + the `vk_calibration` bin (the offline R²
@@ -467,6 +473,18 @@ required-features = ["twt_bonsai"]
 name = "act_ptq_gemma2"
 path = "src/bin/act_ptq_gemma2.rs"
 required-features = ["act_scale_refit"]
+
+# riir-infer Issue 036 T1/T2 — the init-only Dual-SVID PPL ladder bin on
+# gemma-2-2b-it f16 (the T0 eval loop): anchor / lbit1 / lbit2 / rtn / svd
+# arms × BPW targets, rayon-parallel transform + teacher-forced PPL.
+# The module lives behind #[cfg(feature = "svd_lbit")]; this row is the
+# reader protection (the green-zero law). OPT-IN, measurement-only — the
+# bin never writes the model; the lossy-surface law keeps it off every
+# default/serving posture.
+[[bin]]
+name = "svd_lbit_eval"
+path = "src/bin/svd_lbit_eval.rs"
+required-features = ["svd_lbit"]
 
 # riir-infer Issue 012 T2-T5 — the multi-needle@64K differential-KV-eviction
 # gate (the Bench 894 model-bound quality gate): builds a needle-in-haystack
