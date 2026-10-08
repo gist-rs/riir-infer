@@ -179,3 +179,35 @@ pub fn create_factory(
 
     Ok((lib_dxgi, DxgiFactory::Factory4(factory4)))
 }
+
+/// riir-infer issue 037 vendor patch: the GLOBAL video-memory position of
+/// the primary adapter — `(budget, current_usage)` from
+/// `IDXGIAdapter3::QueryVideoMemoryInfo` on the adapter with the most
+/// dedicated memory, without needing a wgpu adapter handle (the caller may
+/// be running on the Vulkan backend, whose `VK_EXT_memory_budget` on
+/// NVIDIA/Windows reports PROCESS-local usage and an unshrunk budget —
+/// measured: 22.8 GiB "free" while 16.9 GiB was truly free under a
+/// co-resident CUDA trainer).
+///
+/// DXGI's `Budget` is the OS's answer to "how much may THIS process commit
+/// given everyone else" — exactly the quantity a co-residency admission
+/// gate needs. `None` = DXGI unavailable / no adapter / query failed —
+/// callers fail open.
+pub fn global_adapter_video_memory_info() -> Option<(u64, u64)> {
+    let (_lib_dxgi, factory) = create_factory(wgt::InstanceFlags::empty()).ok()?;
+    let mut best: Option<(usize, Dxgi::DXGI_QUERY_VIDEO_MEMORY_INFO)> = None;
+    for adapter in enumerate_adapters(factory) {
+        let Ok(desc) = (unsafe { adapter.GetDesc2() }) else {
+            continue;
+        };
+        let Ok(info) = adapter.query_video_memory_info(Dxgi::DXGI_MEMORY_SEGMENT_GROUP_LOCAL)
+        else {
+            continue;
+        };
+        if best.as_ref().is_none_or(|(mem, _)| desc.DedicatedVideoMemory > *mem) {
+            best = Some((desc.DedicatedVideoMemory, info));
+        }
+    }
+    let (_, info) = best?;
+    Some((info.Budget, info.CurrentUsage))
+}

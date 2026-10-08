@@ -720,6 +720,18 @@ impl Adapter {
     }
 }
 
+/// riir-infer issue 037 vendor patch: public re-export of the DXGI global
+/// video-memory probe (`auxil::dxgi` is `pub(super)` upstream, so the crate
+/// path is not reachable from consumers). See
+/// `auxil::dxgi::factory::global_adapter_video_memory_info` for the
+/// contract: `(budget, this-process usage)` for the adapter with the most
+/// dedicated memory — the Windows co-residency signal the
+/// `VK_EXT_memory_budget` adapter query cannot provide (process-local
+/// usage on NVIDIA/Windows).
+pub fn global_adapter_video_memory_info() -> Option<(u64, u64)> {
+    crate::auxil::dxgi::factory::global_adapter_video_memory_info()
+}
+
 struct Event(pub Foundation::HANDLE);
 impl Event {
     pub fn create(manual_reset: bool, initial_state: bool) -> Result<Self, crate::DeviceError> {

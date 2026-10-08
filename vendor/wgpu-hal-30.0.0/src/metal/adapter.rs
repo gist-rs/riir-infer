@@ -76,6 +76,19 @@ impl super::Adapter {
         let size = self.shared.device.recommendedMaxWorkingSetSize();
         (size > 0).then_some(size)
     }
+
+    /// riir-infer issue 037 vendor patch: AVAILABLE video memory —
+    /// `MTLDevice.recommendedMaxWorkingSetSize` minus
+    /// `MTLDevice.currentAllocatedSize` (process-local allocation; on macOS
+    /// the M3-style co-residency pressure comes from THIS process's own
+    /// prior tests, which the pool already releases, so this is the honest
+    /// headroom signal there). `None` = the query returned nonsense —
+    /// callers fail open. See also the DX12 and Vulkan twins.
+    pub fn available_video_memory_bytes(&self) -> Option<u64> {
+        let budget = self.shared.device.recommendedMaxWorkingSetSize();
+        let used = self.shared.device.currentAllocatedSize();
+        (budget > 0).then(|| budget.saturating_sub(used))
+    }
 }
 
 impl crate::Adapter for super::Adapter {

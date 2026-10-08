@@ -1,6 +1,6 @@
 use super::*;
 use crate::context::GpuContext;
-use crate::test_gpu_support::{gpu_release_pages, heavy_model_test_gate};
+use crate::test_gpu_support::{gpu_release_pages, heavy_model_test_gate, heavy_model_vram_guard};
 
 /// Verify CubeCL forward pass initializes and produces correct-shaped output.
 ///
@@ -286,7 +286,9 @@ fn test_cubecl_dispatch_gemv_q4k() {
 /// NOT numerically correct — just for structure/binding validation.
 #[test]
 fn test_cubecl_forward_q4k() {
-    let _heavy = heavy_model_test_gate();
+    let Some(_heavy) = heavy_model_vram_guard("test_cubecl_forward_q4k") else {
+        return;
+    };
     let ctx = GpuContext::new().expect("GpuContext should init");
     let client = ctx.cubecl_client();
     // Start from a clean pool: earlier (parallel, non-gated) tests can
@@ -365,7 +367,9 @@ fn test_cubecl_forward_q4k() {
 /// produce numerically equivalent results to the CPU fallback.
 #[test]
 fn test_cubecl_forward_gpu_matches_forward() {
-    let _heavy = heavy_model_test_gate();
+    let Some(_heavy) = heavy_model_vram_guard("test_cubecl_forward_gpu_matches_forward") else {
+        return;
+    };
     let ctx = GpuContext::new().expect("GpuContext should init");
     let client = ctx.cubecl_client();
     // Start from a clean pool: earlier (parallel, non-gated) tests can
@@ -464,7 +468,9 @@ fn test_cubecl_forward_gpu_matches_forward() {
 /// This test compares Q4K `forward_gpu` vs `forward` to catch any divergence.
 #[test]
 fn test_cubecl_q4k_forward_gpu_matches_forward() {
-    let _heavy = heavy_model_test_gate();
+    let Some(_heavy) = heavy_model_vram_guard("test_cubecl_q4k_forward_gpu_matches_forward") else {
+        return;
+    };
     let ctx = GpuContext::new().expect("GpuContext should init");
     let client = ctx.cubecl_client();
     // Start from a clean pool: earlier (parallel, non-gated) tests can
@@ -568,7 +574,9 @@ fn test_cubecl_q4k_forward_gpu_matches_forward() {
 /// and that logits change between positions.
 #[test]
 fn test_cubecl_q4k_gpu_sequential_decode() {
-    let _heavy = heavy_model_test_gate();
+    let Some(_heavy) = heavy_model_vram_guard("test_cubecl_q4k_gpu_sequential_decode") else {
+        return;
+    };
     let ctx = GpuContext::new().expect("GpuContext should init");
     let client = ctx.cubecl_client();
     // Start from a clean pool: earlier (parallel, non-gated) tests can
@@ -876,7 +884,9 @@ fn test_goat_gpu_argmax_correctness() {
 #[cfg(feature = "gpu_decode_fusion")]
 #[test]
 fn test_goat_forward_gpu_matches_forward() {
-    let _heavy = heavy_model_test_gate();
+    let Some(_heavy) = heavy_model_vram_guard("test_goat_forward_gpu_matches_forward") else {
+        return;
+    };
     let ctx = GpuContext::new().expect("GpuContext should init");
     let client = ctx.cubecl_client();
     // Start from a clean pool: earlier (parallel, non-gated) tests can
@@ -1016,7 +1026,9 @@ fn test_goat_forward_gpu_matches_forward() {
 #[cfg(feature = "gpu_decode_fusion")]
 #[test]
 fn test_goat_full_pipeline_decode() {
-    let _heavy = heavy_model_test_gate();
+    let Some(_heavy) = heavy_model_vram_guard("test_goat_full_pipeline_decode") else {
+        return;
+    };
     let ctx = GpuContext::new().expect("GpuContext should init");
     let client = ctx.cubecl_client();
     // Start from a clean pool: earlier (parallel, non-gated) tests can
@@ -1114,7 +1126,9 @@ fn test_goat_full_pipeline_decode() {
 #[cfg(feature = "gpu_decode_fusion")]
 #[test]
 fn test_goat_early_exit_draft() {
-    let _heavy = heavy_model_test_gate();
+    let Some(_heavy) = heavy_model_vram_guard("test_goat_early_exit_draft") else {
+        return;
+    };
     let ctx = GpuContext::new().expect("GpuContext should init");
     let client = ctx.cubecl_client();
     // Start from a clean pool: earlier (parallel, non-gated) tests can
@@ -1222,7 +1236,9 @@ fn test_goat_early_exit_draft() {
 #[cfg(feature = "gpu_decode_fusion")]
 #[test]
 fn test_goat_q4k_fused_qkv() {
-    let _heavy = heavy_model_test_gate();
+    let Some(_heavy) = heavy_model_vram_guard("test_goat_q4k_fused_qkv") else {
+        return;
+    };
     let ctx = GpuContext::new().expect("GpuContext should init");
     let client = ctx.cubecl_client();
     // Start from a clean pool: earlier (parallel, non-gated) tests can
@@ -1309,7 +1325,9 @@ fn test_goat_q4k_fused_qkv() {
 #[cfg(feature = "gpu_decode_fusion")]
 #[test]
 fn test_goat_q4k_fused_geglu() {
-    let _heavy = heavy_model_test_gate();
+    let Some(_heavy) = heavy_model_vram_guard("test_goat_q4k_fused_geglu") else {
+        return;
+    };
     let ctx = GpuContext::new().expect("GpuContext should init");
     let client = ctx.cubecl_client();
     // Start from a clean pool: earlier (parallel, non-gated) tests can

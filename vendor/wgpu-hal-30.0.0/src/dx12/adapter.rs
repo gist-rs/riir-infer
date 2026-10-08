@@ -77,6 +77,22 @@ impl super::Adapter {
         Some(desc.DedicatedVideoMemory as u64)
     }
 
+    /// riir-infer issue 037 vendor patch: AVAILABLE video memory —
+    /// `IDXGIAdapter3::QueryVideoMemoryInfo` budget minus current usage on
+    /// the LOCAL segment. The usage side is GLOBAL (every process on the
+    /// GPU), which is exactly the quantity a co-residency admission gate
+    /// needs (the full-suite device-loss cascade, issue 037, fired when a
+    /// co-resident CUDA trainer + this suite exhausted the WDDM commit
+    /// budget). `None` = the query failed — callers fail open.
+    /// See also the Vulkan and Metal twins and riir-gpu's `test_gpu_support`.
+    pub fn available_video_memory_bytes(&self) -> Option<u64> {
+        let info = self
+            .raw
+            .query_video_memory_info(Dxgi::DXGI_MEMORY_SEGMENT_GROUP_LOCAL)
+            .ok()?;
+        Some(info.Budget.saturating_sub(info.CurrentUsage))
+    }
+
     #[allow(clippy::too_many_arguments)]
     pub(super) fn expose(
         adapter: DxgiAdapter,

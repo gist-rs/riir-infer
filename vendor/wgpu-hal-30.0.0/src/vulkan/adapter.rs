@@ -2523,6 +2523,51 @@ impl super::Adapter {
         (total > 0).then_some(total)
     }
 
+    /// riir-infer issue 037 vendor patch: AVAILABLE video memory —
+    /// `VK_EXT_memory_budget` heap budget minus heap usage, per
+    /// `DEVICE_LOCAL` heap, taking the LARGEST single-heap figure (the
+    /// working set must fit in one heap; a second small DEVICE_LOCAL heap
+    /// does not help a 16 GiB model).
+    ///
+    /// The usage side is GLOBAL (every process on the GPU), which is exactly
+    /// the quantity a co-residency admission gate needs: the full-suite
+    /// device-loss cascade (issue 037) fired when the box's WDDM commit
+    /// budget was exhausted by a co-resident CUDA trainer + this suite's own
+    /// full-model test, and the OOM-class failure escalated to a process-wide
+    /// device loss (wgpu-core `handle_hal_error` → `lose()`), cascading
+    /// through the Issue-676 shared device.
+    ///
+    /// `None` = the extension/query is unavailable — callers fail open.
+    /// See also the DX12 and Metal twins and riir-gpu's `test_gpu_support`.
+    pub fn available_video_memory_bytes(&self) -> Option<u64> {
+        if !self.phd_capabilities.supports_extension(ext::memory_budget::NAME) {
+            return None;
+        }
+        let get_props = self.instance.get_physical_device_properties.as_ref()?;
+        let mut budget = vk::PhysicalDeviceMemoryBudgetPropertiesEXT::default();
+        let mut props = vk::PhysicalDeviceMemoryProperties2::default().push_next(&mut budget);
+        // SAFETY: read-only physical-device query; `self.raw` is the
+        // physical device this adapter was exposed from.
+        unsafe {
+            get_props.get_physical_device_memory_properties2(self.raw, &mut props);
+        }
+        let heaps = props.memory_properties.memory_heaps_as_slice();
+        let mut largest_free: Option<u64> = None;
+        for (i, heap) in heaps.iter().enumerate() {
+            if !heap.flags.contains(vk::MemoryHeapFlags::DEVICE_LOCAL) {
+                continue;
+            }
+            let heap_free = budget
+                .heap_budget
+                .get(i)
+                .copied()
+                .unwrap_or(heap.size)
+                .saturating_sub(budget.heap_usage.get(i).copied().unwrap_or(0));
+            largest_free = Some(largest_free.map_or(heap_free, |acc| acc.max(heap_free)));
+        }
+        largest_free
+    }
+
     pub fn get_physical_device_features(&self) -> &PhysicalDeviceFeatures {
         &self.phd_features
     }

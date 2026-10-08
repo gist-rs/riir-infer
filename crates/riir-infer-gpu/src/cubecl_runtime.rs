@@ -281,6 +281,15 @@ pub struct CubeCLContext {
     /// `None` on the CUDA backend or when no probe matches — the VRAM
     /// pre-flight then skips (the construction flush-gate still protects).
     total_video_memory: Option<u64>,
+    /// Issue 037: the wgpu adapter, retained so AVAILABLE video memory can
+    /// be probed LIVE (budget − global usage moves as co-resident processes
+    /// come and go; the init-time total probe is static). `None` on the CUDA
+    /// backend.
+    #[cfg(all(
+        feature = "cubecl_runtime",
+        any(not(feature = "cuda_backend"), target_os = "macos")
+    ))]
+    wgpu_adapter: Option<wgpu::Adapter>,
 }
 
 /// Process-wide shared context (Issue 676).
@@ -382,6 +391,7 @@ impl CubeCLContext {
                 wgpu_device: Some(Arc::new(setup.device)),
                 wgpu_queue: Some(Arc::new(setup.queue)),
                 total_video_memory,
+                wgpu_adapter: Some(setup.adapter),
             }
         }
         #[cfg(all(feature = "cuda_backend", not(target_os = "macos")))]
@@ -397,6 +407,7 @@ impl CubeCLContext {
             Self {
                 device,
                 total_video_memory: None,
+                wgpu_adapter: None,
             }
         }
     }
@@ -477,6 +488,20 @@ impl CubeCLContext {
     #[inline]
     pub fn total_video_memory(&self) -> Option<u64> {
         self.total_video_memory
+    }
+
+    /// Issue 037: LIVE available video memory (adapter budget minus global
+    /// in-use), probed through the retained wgpu adapter's vendored accessors
+    /// (Vulkan `VK_EXT_memory_budget` / DX12 `QueryVideoMemoryInfo` / Metal
+    /// recommended-minus-allocated). Unlike [`Self::total_video_memory`] this
+    /// moves as co-resident processes come and go, so admission gates must
+    /// probe at decision time, not at init. `None` = no adapter (CUDA
+    /// backend) or the backend query is unavailable — callers fail open.
+    #[inline]
+    pub fn available_video_memory(&self) -> Option<u64> {
+        self.wgpu_adapter
+            .as_ref()
+            .and_then(adapter_available_video_memory)
     }
 }
 
@@ -753,6 +778,68 @@ pub fn adapter_total_video_memory(adapter: &wgpu::Adapter) -> Option<u64> {
             if let Some(bytes) = adapter
                 .as_hal::<wgpu::hal::vulkan::Api>()
                 .and_then(|a| a.total_video_memory_bytes())
+            {
+                return Some(bytes);
+            }
+        }
+        #[cfg(not(any(target_os = "windows", target_os = "macos", unix)))]
+        {
+            let _ = adapter;
+        }
+        None
+    }
+}
+
+/// Issue 037: probe the adapter's AVAILABLE video memory (budget − global
+/// usage) for co-residency admission. Live quantity — probe at decision time.
+///
+/// On Windows the DXGI GLOBAL probe wins unconditionally: NVIDIA's
+/// Windows `VK_EXT_memory_budget` reports PROCESS-local usage and an
+/// unshrunk budget (measured 22.8 GiB "free" while 16.9 GiB was truly free
+/// under a co-resident CUDA trainer), so the adapter-level Vulkan probe
+/// cannot see sibling GPU work. DXGI's `Budget` already prices co-tenancy,
+/// and `CurrentUsage` is this process's own — `budget − usage` is the
+/// honest "how much may THIS process still commit". Other targets use the
+/// adapter-level probes; `None` = every probe declined — callers fail open.
+pub fn adapter_available_video_memory(adapter: &wgpu::Adapter) -> Option<u64> {
+    #[cfg(target_os = "windows")]
+    {
+        if let Some((budget, usage)) = wgpu::hal::dx12::global_adapter_video_memory_info() {
+            return Some(budget.saturating_sub(usage));
+        }
+    }
+    // SAFETY: read-only descriptor queries on the hal adapter; the returned
+    // value is used immediately and no hal object escapes this function.
+    unsafe {
+        #[cfg(target_os = "windows")]
+        {
+            if let Some(bytes) = adapter
+                .as_hal::<wgpu::hal::dx12::Api>()
+                .and_then(|a| a.available_video_memory_bytes())
+            {
+                return Some(bytes);
+            }
+            if let Some(bytes) = adapter
+                .as_hal::<wgpu::hal::vulkan::Api>()
+                .and_then(|a| a.available_video_memory_bytes())
+            {
+                return Some(bytes);
+            }
+        }
+        #[cfg(target_os = "macos")]
+        {
+            if let Some(bytes) = adapter
+                .as_hal::<wgpu::hal::metal::Api>()
+                .and_then(|a| a.available_video_memory_bytes())
+            {
+                return Some(bytes);
+            }
+        }
+        #[cfg(all(unix, not(target_os = "macos")))]
+        {
+            if let Some(bytes) = adapter
+                .as_hal::<wgpu::hal::vulkan::Api>()
+                .and_then(|a| a.available_video_memory_bytes())
             {
                 return Some(bytes);
             }
