@@ -386,7 +386,18 @@ serving-shaped is ever built here or in reflex.
       Hazards named by the API doc: same-stream refreshes only (keep the
       client pinned to the capture stream or every write/replay/read
       races), no alloc inside the capture window, replay failures surface
-      at the next sync/read (not at replay).)
+      at the next sync/read (not at replay). Session note (2026-10-08,
+      end): the stream model is the unit's real complexity center —
+      `StreamId { value }` maps to pool slot `value % max_streams` and
+      lazily creates; the default is a THREAD-LOCAL override (`StreamId::executes`,
+      per-thread defaults), `set_stream` is `unsafe` and "should probably
+      only be used by CubeCL/Burn" — so the graphed lane needs a
+      dedicated capture stream + the SAME stream for write/replay/read,
+      audited against the actor's multi-thread submits (this repo's
+      pool_poison guard exists for adjacent reasons). Next session: pin
+      one stream for the graphed model (a second `ComputeClient` on the
+      same device or an `executes` scope), verify eager-vs-graphed
+      bit-identity, GOAT vs the eager fold arm.)
 
 ## License law
 
