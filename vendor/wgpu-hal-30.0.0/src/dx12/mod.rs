@@ -729,7 +729,7 @@ impl Adapter {
 /// `VK_EXT_memory_budget` adapter query cannot provide (process-local
 /// usage on NVIDIA/Windows).
 pub fn global_adapter_video_memory_info() -> Option<(u64, u64)> {
-    crate::auxil::dxgi::factory::global_adapter_video_memory_info()
+    auxil::dxgi::factory::global_adapter_video_memory_info()
 }
 
 struct Event(pub Foundation::HANDLE);
