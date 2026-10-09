@@ -1,10 +1,19 @@
 # Bench 034 — LittleBit init-only (Dual-SVID) sub-1-bit PTQ: the PPL ladder verdict — NO-GO for the format+kernel lane
 
-**Status:** RECORD — a measured negative, adjudicated at T5 with the pre-registered
-per-target criterion PLUS the absolute-collapse reasoning (below). The deterministic
-transform + its pins live on behind `svd_lbit` (default-off) as the
-deterministic-initializer record for any future QAT run (riir-train Issue 620).
-2026-10-09, M3 Max (loaded throughout — PROVENANCE below). Issue 036 T3/T5.
+**Status:** RECORD — a measured negative. **The auto-close criterion did NOT fire
+(1 of 4 targets); the issue was closed by POST-HOC REASONED OVERRIDE, and the
+random-guess floor is the deciding evidence** (uniform over the 256,000-token
+vocab ⇒ PPL 2.56e5 — no model, free to compute): every lbit cell (3.1e8–7.4e9)
+and every plain-SVD cell is **3–5 orders of magnitude WORSE THAN RANDOM GUESSING**
+(1.2e3×–5.3e4×) — the models are confidently wrong, and ranking one collapsed
+model above another carries no information. Adjudicated by the pre-registered
+per-target criterion PLUS that floor (the three legs below) and confirmed by a
+Claude verdict round (2026-10-09, AGREE both outcomes; the record amendments it
+required are incorporated here — it also serves as the reviewer round the original
+close lacked, the HISTORY gap now closed). The deterministic transform + its pins
+live on behind `svd_lbit` (default-off) as the deterministic-initializer record
+for any future QAT run (riir-train Issue 620). 2026-10-09, M3 Max (loaded
+throughout — PROVENANCE below). Issue 036 T3/T5.
 
 ## Setup (the T0 record, commit `8d3fd7e`)
 
@@ -48,27 +57,34 @@ with per-pass transform/ppl seconds + loadavg: `lbit_ladder.md` (also
   better than either lbit arm; even plain-SVD beats both. At the ONE target
   where a real training-free method exists, the sophisticated init loses to
   `sign(W)·row-mean`.
-- 0.55 / 0.3 / 0.1: lbit2/lbit1 "win" by 13% / 3.1× / 43× over plain low-rank —
-  **but those baselines are degenerate there** (rank 63/34/11 low-rank is not a
-  method; rtn cannot arm below ~1.03 bpw). Winning among collapsed methods is
-  not "dominating the training-free curve".
+- 0.55 / 0.3 / 0.1: **collapsed, not decidable by the criterion.** lbit2/lbit1
+  read 13% / 3.1× / 43× "better" than plain low-rank there, but (a) that
+  baseline is degenerate at those ranks (63/34/11 — not a method; rtn cannot
+  arm below ~1.03 bpw) and (b) ALL cells at these targets sit 3–5 orders ABOVE
+  the random-guess floor — a ranking among collapsed models is not a win.
 
 **The pre-registered auto-close (NO-GO at ≥2 of 4 targets) does NOT fire** — the
-mechanical count is 1 of 4. The close is therefore T5's reasoned adjudication,
-on three legs:
+mechanical count is 1 of 4. **The close is therefore a post-hoc reasoned
+override**, stated plainly as such, on these legs:
 
-1. **Absolute collapse everywhere.** The best lbit cell anywhere is 3.13e8 at
-   0.1 bpw vs anchor 18.67 — a 7-8.5 order-of-magnitude destruction at every
-   target. Nothing init-only here is usable at any bpw; the paper's own
-   Appendix-F honesty (their QAT 0.55-bpw model is already hallucination-grade
-   at PPL 10.47) puts our init-only 8 orders below THAT.
-2. **The only real comparison loses.** See 1.0 above.
-3. **The mechanism is understood** (the T1 unit-test finding, `b235f4e`): the
-   Dual-SVID magnitude-scale init assumes each factor's |·| is rank-1-like;
-   real LLM weight spectra are flat-and-signed, the |V′| rank-1 misfit is
-   irreducible, and single-path init does not even refine naive scaled-sign
-   binarization on such parents (measured at unit scale, confirmed here at
-   model scale).
+1. **The random-guess floor.** PPL 2.56e5 (uniform over the 256k vocab); the
+   best lbit cell anywhere is 3.13e8 at 0.1 bpw vs anchor 18.67 — collapsed
+   models 3–5 orders worse than random at every sub-1.0 target, and 3.4–3.7
+   orders above random at 1.0 too. Nothing init-only here is usable at any bpw.
+   For context the paper's own QAT 0.55-bpw point reads PPL 10.47 (their
+   Appendix F reports degraded generation quality there) — init-only sits 8
+   orders below even that.
+2. **The only real comparison loses.** See 1.0 above — and stronger baselines
+   (the pre-registration named SVD-LLM/ASVD-class; the bench ran PLAIN
+   truncated SVD, the weaker member of that class — activation-scaled variants
+   were NOT run) could only make lbit look worse by comparison, never better.
+3. **The mechanism is measured** (the T1 unit-test finding, `b235f4e`): the
+   Dual-SVID magnitude-scale init assumes each factor's |·| is rank-1-like; on
+   THIS checkpoint (gemma-2-2b-it) the weight spectra are flat-and-signed, the
+   |V′| rank-1 misfit is irreducible in practice here (expected for
+   flat-spectrum parents generally), and single-path init does not even refine
+   naive scaled-sign binarization on such parents (measured at unit scale,
+   confirmed here at model scale).
 
 **T5: NO-GO for the sub-1-bit format + kernel lane.** T4 (±1 sandwich kernel
 survey, Samsung repo pin) stays unexecuted by its own precondition ("no lane
@@ -97,6 +113,15 @@ reproduces at init-only, 12× amplified.
   but this record is its honest prior: the init it would start from is 7-8
   orders from usable, so the case for QAT-from-Dual-SVID-init (vs QAT from
   scratch/other inits) is now weaker on evidence.
+- **The verdict round.** The original close shipped without a reviewer round
+  (the Claude reviewer was rate-limited); the gap was recorded in HISTORY. On
+  2026-10-09 the round ran (both outcomes AGREE) and required exactly these
+  amendments: the random-guess floor line, the post-hoc-override label, the
+  statement that the pre-registered SVD-LLM/ASVD baselines were not run (plain
+  SVD was), the "collapsed, not decidable" marks, and the two narrowed claims
+  ("irreducible" scoped to this checkpoint; the Appendix-F editorial label
+  dropped, the 10.47 number kept). The floor is named "random-guess floor"
+  everywhere (one name, one number: 2.56e5).
 
 ## PROVENANCE (the Issue-021 law, quoted from the run)
 
