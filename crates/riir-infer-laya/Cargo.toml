@@ -201,6 +201,23 @@ required-features = ["laya-riir-metal"]
 name = "metal_splitk_shape_sweep"
 required-features = ["laya-riir-metal"]
 
+# katgpt-rs Issue 928 (the 10-09 drift census) — three more metal-gated
+# targets that landed without the row (same law as every row above: the
+# whole-file #![cfg] keeps the count honest, this keeps the reader honest;
+# the target_os conjunct lives in-source and stays the documented platform
+# class required-features cannot express).
+[[test]]
+name = "metal_fold_ab"
+required-features = ["laya-riir-metal"]
+
+[[test]]
+name = "metal_fold_bits"
+required-features = ["laya-riir-metal"]
+
+[[test]]
+name = "metal_head_defer_ab"
+required-features = ["laya-riir-metal"]
+
 # The packed-forward equivalence gate is whole-file #![cfg]-gated
 # (feature `laya-riir`; its metal arm re-gates on target_os in-source);
 # this row keeps a feature-less selection skipping the target loudly

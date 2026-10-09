@@ -319,6 +319,13 @@ required-features = ["edlm_gpu"]
 name = "g1_032_folded_prefill_metal"
 required-features = ["cubecl_runtime", "ternary_gemm_batched", "ternary_deltanet_chunked_prefill", "ternary_attention_batched_prefill", "riir-infer-core/bonsai2_hadamard"]
 
+# katgpt-rs Issue 928 (the 10-09 drift census) — the dq fake-quant G1 gate
+# landed without a row; same law as the rows above (the whole-file #![cfg]
+# keeps the count honest, this keeps the reader honest).
+[[test]]
+name = "dq_fakequant_gi3"
+required-features = ["dq_phase_bench"]
+
 # katgpt-rs Issue 908 / Plan 612 T2.1 — the FA-layer Q/K capture bin (the
 # PISA pyramid selection gate's fixture producer; 4090 cudarc lane).
 # Whole-file #![cfg] inside keeps non-CUDA hosts an empty target; this row

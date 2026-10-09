@@ -190,7 +190,7 @@ T3c (MiniCPM5-1B at 64K real dilution, log `/tmp/ri011run/t6_minicpm64k.log`): P
 
 ## 2026-09-28 — Issue 025 (owner-gate pickup) closed: D7/D8 executed, D9/D10 recorded
 
-D7: gpu_transpose deleted + BOUNDARY.md repointed (record above). D8: the audio-lane BOUNDARY widening landed — an AUDIO Owns row (loader/serving-scoped, published CoreML bundles on `laya-riir-ane`) + the `objc2-core-ml` allowlist condition named (no new dep). D9: research 327–332 routing stays deferred with Plan 611 T7/S8 (tracked in 1004). D10: the S6b training-families disposition ratified into 1003's status — riir-gpu-side by design, closed absent a real consumer pull.
+D7: gpu_transpose deleted + BOUNDARY.md repointed (record above). D8: the audio-lane BOUNDARY widening landed — an AUDIO Owns row (loader/serving-scoped, published CoreML bundles on `laya-riir-ane`) + the `objc2-core-ml` allowlist condition named (no new dep). D9: riir-ai Research 327–332 routing stays deferred with Plan 611 T7/S8 (tracked in 1004). D10: the S6b training-families disposition ratified into 1003's status — riir-gpu-side by design, closed absent a real consumer pull.
 
 ## 2026-09-29 — Issue 022 Phase 3 complete (audition + zero-training surrogate); Issue 024 closed measured-N/A both mechanisms
 
@@ -234,7 +234,7 @@ v2 `23bbff5`+`3cf9ae9`, EXIT0 (log `F:/wt/dq614-matrix2.log`, report `F:/wt/dq61
 
 ## 2026-10-01 — Issues 998 + 1004 CLOSED (hygiene): the D4 re-narrowing dissolved under the ratified no-migration architecture; the corpus-follows triggers resolved negative
 
-998: the D4 re-narrowing is resolved-dissolved — P3/T7 landed as the ENCODER-lane unification under its pre-registered NO-DELETION verdict and D10 (owner-gate, riir-ai 1016) ratified the training families stay riir-gpu-side BY DESIGN; every widening's consumption edge is live, reversal would break the ratified architecture (the riir-ai BOUNDARY.md D4 row carries this resolution). 1004: both triggers fired WITHOUT the migrations — zero corpus movement (`crates/riir-gpu/tests/bench_874_issue879_t3_kv_weight_quant_nll.rs`, the kernel tree, `scripts/perf_rematch.sh` + `.docs/09_performance/` all still riir-ai-side; the 870/871 rule holds). Task 3 (research 327–332 routing; katgpt-rs the candidate destination) stands on its own. Issue 1003 stays OPEN deliberately. Narratives: `git log --follow -- .issues/998_riir_infer_repo_promotion.md` / `.issues/1004_corpus_follows_op_layer_migration.md`.
+998: the D4 re-narrowing is resolved-dissolved — P3/T7 landed as the ENCODER-lane unification under its pre-registered NO-DELETION verdict and D10 (owner-gate, riir-ai 1016) ratified the training families stay riir-gpu-side BY DESIGN; every widening's consumption edge is live, reversal would break the ratified architecture (the riir-ai BOUNDARY.md D4 row carries this resolution). 1004: both triggers fired WITHOUT the migrations — zero corpus movement (`crates/riir-gpu/tests/bench_874_issue879_t3_kv_weight_quant_nll.rs`, the kernel tree, `scripts/perf_rematch.sh` + `.docs/09_performance/` all still riir-ai-side; the 870/871 rule holds). Task 3 (riir-ai Research 327–332 routing; katgpt-rs the candidate destination) stands on its own. Issue 1003 stays OPEN deliberately. Narratives: `git log --follow -- .issues/998_riir_infer_repo_promotion.md` / `.issues/1004_corpus_follows_op_layer_migration.md`.
 
 ## 2026-10-05 — Issue 031 CLOSED measured-non-repro + removed: the dq614 FATAL teardown hang did not reproduce across 6 arms; the A/B instrument is landed as durable
 

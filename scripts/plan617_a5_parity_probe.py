@@ -18,8 +18,21 @@ from __future__ import annotations
 import argparse
 import json
 import random
+import sys
 import urllib.request
 from pathlib import Path
+
+# Keep this instrument's verdict printable on a non-UTF-8 console
+# (katgpt-rs Issue 804 / the 928 drift census): it prints non-ASCII glyphs,
+# and print() raises UnicodeEncodeError on e.g. cp874 — the process then dies
+# with NO verdict. backslashreplace degrades the glyph visibly and keeps
+# ASCII exact, so a verdict line stays greppable. Best-effort: a detached or
+# captured stream is left alone rather than made fatal at import.
+for _stream in (sys.stdout, sys.stderr):
+    try:
+        _stream.reconfigure(errors="backslashreplace")
+    except (AttributeError, ValueError):
+        pass
 
 # probe cases: real states pulled from suite dumps (deterministic pick by
 # seed), one suite per question TYPE so all three decoders are exercised
