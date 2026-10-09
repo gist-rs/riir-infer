@@ -50,11 +50,14 @@ use crate::cubecl_runtime::{debug_assert_binding_at_least, f32_exact};
 ///
 /// ## Dispatch
 ///
-/// `CubeCount::Static(ceil(n/256), 1, 1)`, `CubeDim::new_1d(256)`.
+/// `CubeCount::Static(ceil(n/256), 1, 1)`, `CubeDim::new_1d(256)`. The bound
+/// is the EXPLICIT `params[0] = n` (u32), never `input.len()` — the bound
+/// buffer's declared size (the copy_f32_grid2d / riir-ai Issue 511 class:
+/// an oversized handle must not widen the processed range).
 #[cfg(feature = "cubecl_runtime")]
 #[cube(launch_unchecked)]
-fn sigmoid_f32(input: &[f32], output: &mut [f32]) {
-    let n = input.len();
+fn sigmoid_f32(input: &[f32], output: &mut [f32], params: &[u32]) {
+    let n = params[0usize] as usize;
     let tid = ABSOLUTE_POS;
 
     if tid < n {
@@ -84,11 +87,13 @@ fn sigmoid_f32(input: &[f32], output: &mut [f32]) {
 ///
 /// ## Dispatch
 ///
-/// `CubeCount::Static(ceil(n/256), 1, 1)`, `CubeDim::new_1d(256)`.
+/// `CubeCount::Static(ceil(n/256), 1, 1)`, `CubeDim::new_1d(256)`. The bound
+/// is the EXPLICIT `params[0] = n` (u32), never `input.len()` — the same
+/// explicit-shape law as [`sigmoid_f32`] above.
 #[cfg(feature = "cubecl_runtime")]
 #[cube(launch_unchecked)]
-fn silu_f32(input: &[f32], output: &mut [f32]) {
-    let n = input.len();
+fn silu_f32(input: &[f32], output: &mut [f32], params: &[u32]) {
+    let n = params[0usize] as usize;
     let tid = ABSOLUTE_POS;
 
     if tid < n {
@@ -613,6 +618,8 @@ impl SigmoidCubeCL {
         n: usize,
     ) {
         let n_wg = n.div_ceil(256).max(1) as u32;
+        let params: [u32; 1] = [u32::try_from(n).expect("SigmoidCubeCL: n exceeds u32")];
+        let params_handle = crate::params_cache::params_handle(client, u32::as_bytes(&params));
         unsafe {
             sigmoid_f32::launch_unchecked::<R>(
                 client,
@@ -620,6 +627,7 @@ impl SigmoidCubeCL {
                 CubeDim::new_1d(256),
                 BufferArg::from_raw_parts(input_handle, n),
                 BufferArg::from_raw_parts(output_handle, n),
+                BufferArg::from_raw_parts(params_handle, 1),
             );
         }
     }
@@ -648,6 +656,8 @@ impl SiluCubeCL {
         n: usize,
     ) {
         let n_wg = n.div_ceil(256).max(1) as u32;
+        let params: [u32; 1] = [u32::try_from(n).expect("SiluCubeCL: n exceeds u32")];
+        let params_handle = crate::params_cache::params_handle(client, u32::as_bytes(&params));
         unsafe {
             silu_f32::launch_unchecked::<R>(
                 client,
@@ -655,6 +665,7 @@ impl SiluCubeCL {
                 CubeDim::new_1d(256),
                 BufferArg::from_raw_parts(input_handle, n),
                 BufferArg::from_raw_parts(output_handle, n),
+                BufferArg::from_raw_parts(params_handle, 1),
             );
         }
     }
@@ -2083,6 +2094,64 @@ mod tests {
         for i in 0..x.len() {
             assert_eq!(got[i], cpu_x[i], "relu mismatch at {i}");
         }
+    }
+
+    /// sigmoid/silu take their bound from the EXPLICIT `params[0] = n`, never
+    /// the bound buffer's declared size (the len_derived class — root fix for
+    /// the two stability-pin rows, katgpt-rs Issue 928 wave 3): the launch
+    /// below binds OVERSIZED input/output handles and a live `n`, and asserts
+    /// [0, n) computes the CPU reference while [n, n+pad) keeps its sentinel —
+    /// an oversized handle must not widen the processed range.
+    #[test]
+    fn test_sigmoid_silu_explicit_bound_matches_cpu() {
+        let ctx = CubeCLContext::new().expect("CubeCL should initialize");
+        let client = ctx.client();
+
+        let n = 64usize;
+        let pad = 16usize;
+        let x = lcg_vec(n);
+        let sentinel = -7.0f32;
+
+        let sigmoid_ref = |v: f32| -> f32 {
+            if v >= 0.0 {
+                1.0 / (1.0 + (-v).exp())
+            } else {
+                let ev = v.exp();
+                ev / (1.0 + ev)
+            }
+        };
+
+        // Oversized buffers: declared n + pad, bound at the live n only.
+        let mut in_pad = x.clone();
+        in_pad.resize(n + pad, sentinel);
+        let out_vec = vec![sentinel; n + pad];
+        let in_h = client.create_from_slice(f32::as_bytes(&in_pad));
+        let out_h = client.create_from_slice(f32::as_bytes(&out_vec));
+        // SAFETY: bindings bound at the live n; handles carry n+pad.
+        unsafe {
+            SigmoidCubeCL::launch::<ActiveRuntime>(&client, in_h.clone(), out_h.clone(), n);
+        }
+        let got = f32::from_bytes(&client.read_one(out_h).unwrap()).to_vec();
+        for i in 0..n {
+            let want = sigmoid_ref(x[i]);
+            let d = (got[i] - want).abs();
+            assert!(d < 1e-6, "sigmoid mismatch at {i}: {} vs {want}", got[i]);
+        }
+        assert!(got[n..].iter().all(|&v| v == sentinel), "sigmoid wrote past n");
+
+        // silu over the same oversized shape: x * sigmoid(x).
+        let out2_h = client.create_from_slice(f32::as_bytes(&out_vec));
+        // SAFETY: bindings bound at the live n; handles carry n+pad.
+        unsafe {
+            SiluCubeCL::launch::<ActiveRuntime>(&client, in_h, out2_h.clone(), n);
+        }
+        let got2 = f32::from_bytes(&client.read_one(out2_h).unwrap()).to_vec();
+        for i in 0..n {
+            let want = x[i] * sigmoid_ref(x[i]);
+            let d = (got2[i] - want).abs();
+            assert!(d < 1e-6, "silu mismatch at {i}: {} vs {want}", got2[i]);
+        }
+        assert!(got2[n..].iter().all(|&v| v == sentinel), "silu wrote past n");
     }
 
     #[test]

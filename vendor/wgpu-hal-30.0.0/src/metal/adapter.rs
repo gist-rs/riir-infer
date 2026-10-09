@@ -87,7 +87,11 @@ impl super::Adapter {
     pub fn available_video_memory_bytes(&self) -> Option<u64> {
         let budget = self.shared.device.recommendedMaxWorkingSetSize();
         let used = self.shared.device.currentAllocatedSize();
-        (budget > 0).then(|| budget.saturating_sub(used))
+        // `currentAllocatedSize` is NSUInteger (usize); saturate the widening
+        // so a hypothetical >u64 allocation reads as "no headroom" (the
+        // macOS arm of issue 037 never compiled on the author's lane — the
+        // u64/usize mismatch below is what this fix repairs).
+        (budget > 0).then(|| budget.saturating_sub(u64::try_from(used).unwrap_or(u64::MAX)))
     }
 }
 
