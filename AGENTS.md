@@ -48,6 +48,12 @@ cargo test -p riir-infer-gpu --features exl3_gpu,cuda_backend --lib  # native CU
 cargo check -p riir-infer-laya --features laya-riir
 cargo clippy -p riir-infer-laya --all-targets --features laya-riir-metal -- -D warnings
 cargo test -p riir-infer-laya --features laya-riir-metal --test metal_ops_smoke  # macOS only
+# The ANE whole-graph backend (macOS-only; opt-in; artifact tree built by the reflex converter;
+# Plan 612's e8 int8-table stack rides the same feature — LAYA_ANE_TABLE=e8 selects it, fp16 default):
+cargo clippy -p riir-infer-laya --all-targets --features laya-riir-ane -- -D warnings
+cargo test -p riir-infer-laya --features laya-riir-ane --lib
+# G1 parity consumer-side (the env needs no reflex change):
+#   cd ../riir-reflex && LAYA_ANE_TABLE=e8 cargo test --release --features laya-riir-ane --test laya_ane_parity
 # The CubeCL portability arm (opt-in; plan 611 — KEPT, never default; the consumer-side G5 at the cubecl posture is the acceptance gate):
 cargo clippy -p riir-infer-laya --all-targets --features laya-riir-cubecl -- -D warnings
 cargo test --release -p riir-infer-laya --features laya-riir-cubecl --test cubecl_ops_smoke
