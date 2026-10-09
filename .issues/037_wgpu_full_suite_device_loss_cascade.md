@@ -42,9 +42,12 @@ plan437 trainer co-resident at 7.6 GiB):
    `Error in Device::poll: Parent device is lost` (`WaitIdleError::Device` has no
    `to_poll_error` → `handle_error_fatal`). Note the NON-fatal
    `handle_hal_error_with_nonfatal_oom` exists and is used on the user-facing
-   `Device::create_buffer` (`:1104`) — but `StagingBuffer::new` (`resource.rs:1264`)
-   and the poll paths are fatal. An OOM-class failure at one staging buffer must not
-   be a device death; upstream-defect shaped.
+   `Device::create_buffer` (`:1104`) — but `StagingBuffer::new` (actual 30.0.1
+   lines: `src/resource.rs:1268` create + `:1272` map) and the poll paths are
+   fatal. An OOM-class failure at one staging buffer must not be a device death;
+   upstream-defect shaped — **draft for the owner to file upstream:
+   `.research/010_wgpu_fatal_oom_escalation_upstream_draft.md`** (citations
+   re-verified against the crates.io source 2026-10-09).
 4. **Issue-676 OnceLock cascade**: one wgpu device per process — every later
    `GpuContext::new()` clones the dead context; every buffer is a silent invalid
    object; `read_one` fails at `map_async` ("Buffer with '' label is invalid"). 16
