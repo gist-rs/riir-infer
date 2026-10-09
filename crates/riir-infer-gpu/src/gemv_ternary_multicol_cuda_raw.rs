@@ -677,7 +677,9 @@ mod tests {
         let mut hmc = TernaryGemmMultiColCudaRaw::new().expect("mc CUDA init");
         let idxmc = hmc.upload_weights(&w).expect("mc upload");
 
-        for tokens in [MC_TOKENS_MIN, 4, MC_TOKENS_MAX] {
+        // Every entrypoint executes at least once (issue 038 review 2026-10-10:
+        // n5/n6/n7 were compiled-but-never-run under the old {3,4,8} loop).
+        for tokens in MC_TOKENS_MIN..=MC_TOKENS_MAX {
             let xs = lcg_inputs(0xBEEF0000 ^ tokens as u32, tokens * n);
             let mut ref_out = vec![0f32; tokens * m];
             for tok in 0..tokens {

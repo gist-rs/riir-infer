@@ -102,12 +102,20 @@ survives the snapshot.
     sm_89 PTX with all six entrypoints present (NVRTC is a host-side compiler; no GPU
     touched).
   - **NOT production-wired** — opt-in by construction; nothing calls the handler yet.
+- **2026-10-10 — FRESH-EYES REVIEW + CPU gates re-run (pickup session, trainer still holds the GPU):**
+  - **Textual parity analysis: mechanism VERIFIED correct.** The permuted layout pairs element `4j+k` with code `4j+k` exactly (int4 `.x/.y/.z/.w` carry elements `{0,4,8,12}/{1,5,9,13}/{2,6,10,14}/{3,7,11,15}`; `t[k]` byte j is the code of element `4j+k` — all 16 covered once); the digit-bias identity `Σ(c−1)q = Σc·q − Σq` holds exactly in int; the accumulation order (lane-strided chunk walk), the per-block float expression shape (`(float)(sumi−qsum) * ws * ascale`, left-assoc — no fusable add, so FMA contraction cannot reorder it), the full-warp `shfl_down` tree, and the wscale/ascale per-chunk reads are all textually identical to `gemv_ternary_row`'s fast path; the uint32 code-word load is 4-byte-aligned BECAUSE `n % 16 == 0` is enforced at upload (that precondition is load-bearing for alignment, not just chunking — worth keeping in mind if anyone loosens it).
+  - **Compile posture identical**: both NVRTC units compile with `arch: sm_89` + defaults (no fast-math on either side) — the reassociation parity risk is closed by construction.
+  - **CPU-only gates now GREEN in this session's run** (isolated `CARGO_TARGET_DIR`, `-j 6`, GPU untouched): `test_quantize_permute_roundtrip_matches_n1_quantizer` PASS (first execution — the quantizer+permuter matches the n=1 formula element-exactly) + `test_nvrtc_compiles_multicol_src` PASS (re-confirmed). Owed CPU gates: none remaining.
+  - **Coverage gap found (fix at the owed GPU run, before the bench):** the parity loop covers tokens {3,4,8} only — entrypoints **n5/n6/n7 compile but never execute in any test**. Extend the parity loop to `[3,4,5,6,7,8]` (seconds of GPU) so every entrypoint executes at least once before wiring. Also noted (non-blocking): `n % 128 != 0` shapes (e.g. n=144) are admitted by the `% 16` precondition and are untested — group_scale padding is consistent by the type's own convention (`cpu_matvec` indexes the same), and production dims are multiples of 128; add one such shape to the tolerance test only if cheap.
 
 ### Owed on a free 4090 lane (in order)
 
+0. ~~Extend the parity test loop to tokens `[3,4,5,6,7,8]`~~ — **DONE CPU-side
+   2026-10-10** (the loop now spans the full band; execution still owed to the GPU run).
 1. Unit gates: `cargo test -p riir-infer-gpu --features ternary_gemv_cuda_raw --lib
    gemv_ternary_multicol` — bit-parity vs n=1, CPU-reference tolerance (mean_rel < 2%,
-   max_rel < 5%), shape rejections, quantizer round-trip. A parity mismatch = FMA
+   max_rel < 5%), shape rejections, quantizer round-trip (round-trip + nvrtc already
+   green CPU-side 2026-10-10). A parity mismatch = FMA
    contraction divergence between the two NVRTC units: fix the expression shape, never
    weaken the assert.
 2. Task-level argmax agreement at the verify posture (Issue 608 T3a class).
