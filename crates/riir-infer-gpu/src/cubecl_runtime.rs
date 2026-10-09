@@ -364,8 +364,19 @@ impl CubeCLContext {
             // difference is `init_setup` returns the `WgpuSetup` with device +
             // queue clones, while `WgpuRuntime::client` discards them.
             let device = WgpuDevice::DefaultDevice;
-            let setup =
-                init_setup::<AutoGraphicsApi>(&device, cubecl::wgpu::RuntimeOptions::default());
+            // Issue 624: optional graphics-API override for the A/B smoke
+            // (`RIIR_GPU_WGPU_API=dx12|vulkan`). Default path (unset) stays
+            // byte-identical to the pre-624 behavior (AutoGraphicsApi → Vulkan
+            // on native non-macOS). CubeCL's own AUTO_GRAPHICS_BACKEND env is
+            // #[cfg(test)]-gated upstream, so the override must live here.
+            let api_override = std::env::var("RIIR_GPU_WGPU_API").ok();
+            let setup = match api_override.as_deref() {
+                Some("dx12") => init_setup::<cubecl::wgpu::Dx12>(
+                    &device,
+                    cubecl::wgpu::RuntimeOptions::default(),
+                ),
+                _ => init_setup::<AutoGraphicsApi>(&device, cubecl::wgpu::RuntimeOptions::default()),
+            };
             let client = WgpuRuntime::client(&device);
             let runtime_name = WgpuRuntime::name(&client);
             println!("CubeCL runtime initialized: {runtime_name}");
