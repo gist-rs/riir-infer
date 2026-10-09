@@ -1,6 +1,6 @@
 # Plan 612 — the e8 int8-embedding table stack for the laya ANE lane
 
-**Status:** PROPOSED 2026-09-26 — owner directive ("add plan to create new int8 stack"); grounded in `.research/002_FluidUse_e8_Int8_Embedding_Stack.md` (FluidUse `@ 0a5c85e7` / mobius `@ 5beb3400`, scheme + parity evidence pinned there).
+**Status:** PROPOSED 2026-09-26 — owner directive ("add plan to create new int8 stack"); grounded in `.research/002_FluidUse_e8_Int8_Embedding_Stack.md` (FluidUse `@ 0a5c85e7` / mobius `@ 5beb3400`, scheme + parity evidence pinned there). **Never picked up as of 2026-10-09 (13d, zero phases started; the Phase-1 companion riir-reflex `.issues/037` was never filed) — queued, not in flight. Scope note for pickup: a DIFFERENT e8 surface (the KV-table lane's `<model>/table_e8` sidecar rows, `ane.rs:1160`) landed meanwhile; re-adjudicate this plan's embedding-table scope against that lane before starting.**
 
 ## Goal
 
