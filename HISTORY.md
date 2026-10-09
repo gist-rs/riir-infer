@@ -7,6 +7,17 @@ verbatim — issue/plan/bench numbers + dates are read by the workspace
 numbering + citation gates; each record below is one compact entry (full
 narratives: `git log --follow -- .issues/<file>` or this file's git history).
 
+## 2026-10-09 — the elementwise params[0]=n root fix + the vendored metal adapter E0308 — `02e7a65`
+
+Retired katgpt-rs Issue 928's two len_derived stability rows: sigmoid_f32 /
+silu_f32 bound by an EXPLICIT params[0]=n (the copy_f32_grid2d idiom), never
+input.len(); the new oversized-binding sentinel test proves [n, n+pad)
+untouched. Riding the same commit: the vendored wgpu-hal-30 metal adapter's
+available_video_memory_bytes subtracted usize from u64 — E0308 on every
+macOS cubecl_runtime build since 3564a72 (issue 037); the metal arm never
+compiled on the author's CUDA lane (the cross-platform transcription class —
+price the OTHER platform's compile before landing a vendor patch).
+
 ## 2026-10-09 — Issue 036: LittleBit init-only sub-1-bit PTQ CLOSED — NO-GO for the format+kernel lane (Bench 034; T4 closed-by-verdict) — file removed
 The paper's unmeasured point (Dual-SVID init-only, no QAT) measured end-to-end on gemma-2-2b-it (the T0 host decision `8d3fd7e`: local PPL bin over existing substrate — `forward_gemma2_f16` + `nll` + SentencePiece; wikitext-2-raw test sha256 `aca2f467…`, 49,152 tokens; anchor **18.67** validates the loop). Implementation `b235f4e` (feature `svd_lbit`, default-off, zero new deps): seeded Halko truncated SVD (fastrand + Box-Muller, q=1, +16 oversample; symmetric-Jacobi small SVD) + Dual-SVID init (rank-1 via deterministic power iteration) + staged restack + the BPW planner PINNED vs Appendix D (546@0.55/4096², 133@0.1/4096×11008). En-route finds: MGS needs a RELATIVE degeneracy guard (rank-deficient parents: recon 0.76 → 4e-7 after the fix); the flat-signed-spectra |V′| rank-1 misfit means single-path init does NOT refine naive scaled-sign binarization (unit-scale measured; model-scale confirmed). **[Bench 034](.benchmarks/034_littlebit_init_only_ppl_ladder/RESULTS.md)**: lbit1 = 6.9e8/2.5e9/7.4e9/3.1e8 at 1.0/0.55/0.3/0.1 bpw; lbit2 = 4.7e8/1.2e9/8.3e8/3.8e9; rtn@1.0 = **3.45e7** (beats both lbit arms 14-20×); plain-SVD = 3.5e8/1.3e9/2.6e9/1.3e10. Mechanical count: NO-GO at 1 of 4 (1.0) — the ≥2 auto-close did NOT fire; the close is T5's reasoned adjudication: absolute collapse (7-8.5 orders above anchor at EVERY target), the only real-method comparison loses to `sign(W)·row-mean`, and the mechanism is measured. The 0.55/0.3/0.1 "wins" are among degenerate baselines (rank-63/34/11 low-rank; rtn cannot arm below ~1.03 bpw). Corroboration: restack helps at 1.0-0.3, hurts at 0.1 (12×) — the paper's own §1.4 direction reproduced. T4 (±1 kernel survey + Samsung pin) closed by its own precondition. Survivors: the `svd_lbit` transform + pins (the deterministic-initializer record for any future QAT run); riir-train 620 unblocked but inherits this as its honest prior. Cross-box T2 identity holds by construction (std IEEE, fixed orders, seeded fastrand, no BLAS). Verdict round: the Claude reviewer was rate-limited (weekly cap, 3 attempts this session) — the adjudication authority is the pre-registered criterion + the three committed legs; the gap recorded here honestly (the 035 precedent for the shape).
 
