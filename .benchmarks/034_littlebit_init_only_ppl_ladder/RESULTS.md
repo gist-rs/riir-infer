@@ -113,3 +113,41 @@ reproduces at init-only, 12× amplified.
   thrash tax); per-pass ppl 2,685-4,247s; total run ~17 h wall under load.
 - Artifacts: `lbit_ladder.md` + `lbit_ladder.json` (copied here; originals in
   `.raw/`, scratch); corpus digest above; gguf = the riir-train data pin.
+
+## Addendum — independent cross-box replication (4090, same day) — verdict CONFIRMED
+
+A second, independent execution of the same pre-registered protocol ran on the
+**4090 Windows box** (shikuwa; i7-13700K, 24 threads capped to 6 rayon workers
+for RAM — the plan437 trainer resident; free-RAM floor held 1.8-5.2 GB),
+launched BEFORE this record landed here and completed after (the two sessions
+ran concurrently, discovered at close — the Issue-825 cross-run, on the happy
+side: the sibling's verdict is REPLICATED, not contradicted).
+
+- **Different corpus prep, same recipe class:** this box's fetch dropped the
+  1,467 empty separator rows (2,891 non-empty rows kept, 1,290,547 chars,
+  sha256 `4e1fce0451434081dfce26182c4fc7235f295c4133507ef9ae8e573952a5a148`)
+  where the M3 fetch kept all 4,358 rows — so the two runs read DIFFERENT
+  window text despite identical window GEOMETRY (48 × 1024, seed `0x36`). The
+  runs are therefore not byte-comparable and were never claimed to be; they
+  share the protocol, the transform, and the eval shape.
+- **The ladder agrees everywhere within ±25% scatter** (M3 → 4090): anchor
+  18.67 → 18.66 · lbit1@1 6.92e8 → 8.14e8 · lbit1@0.1 3.13e8 → 2.89e8 ·
+  lbit2@1 4.71e8 → 4.20e8 · svd@1 3.47e8 → 3.35e8 · svd@0.1 1.35e10 →
+  1.28e10 · rtn 3.45e7 → 3.27e7. Every arm stays in its band; the ordering
+  (rtn ≪ svd ≈ lbit2 < lbit1 at 1.0; absolute collapse ≥ 7.4 OOM everywhere)
+  is identical. Same PPL from different text at this scatter is the
+  physics-level signal, not noise — and it is the first EXECUTED cross-box
+  datapoint behind the "cross-box identity holds by construction" claim
+  (std-IEEE arithmetic, seeded fastrand, no BLAS — now measured, not just
+  argued).
+- **T4 precondition pin (unexecuted survey — the one open item this run could
+  close for free):** `SamsungLabs/LittleBit` cloned @ `42d658b0c79f76450b34b6a3547462c7cdc3e1a0`,
+  licence **CC BY-NC 4.0** (Attribution-NonCommercial — shapes may be read,
+  no code may ship from it), and the repo is a QAT TRAINING codebase with NO
+  CUDA/OpenCL kernels at all — the popcount/XNOR GEMV shape T4 wanted to read
+  is not in the repo; any future reopen reads the paper's kernel section
+  instead. Clone removed per the `.raw` hygiene law.
+- Replication artifacts: `lbit_ladder_4090.md` + `lbit_ladder_4090.json`
+  (this directory); run log + fetcher stay `.raw/` scratch.
+
+**The NO-GO stands, now cross-box.**
