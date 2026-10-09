@@ -232,6 +232,8 @@ pub mod gemv_ternary_block_contiguous_cubecl;
 pub mod gemv_ternary_cubecl;
 #[cfg(all(feature = "ternary_gemv_cuda_raw", not(target_os = "macos")))]
 pub mod gemv_ternary_cuda_raw;
+#[cfg(all(feature = "ternary_gemv_cuda_raw", not(target_os = "macos")))]
+pub mod gemv_ternary_multicol_cuda_raw;
 #[cfg(feature = "ternary_gemv")]
 pub mod gemv_ternary_fma_cubecl;
 #[cfg(all(feature = "cubecl_runtime", feature = "ternary_gemv_residual"))]
@@ -352,6 +354,10 @@ pub use gemv_ternary_cubecl::{
 #[cfg(all(feature = "ternary_gemv_cuda_raw", not(target_os = "macos")))]
 pub use gemv_ternary_cuda_raw::{
     GpuTernaryMatvecDp4a, TernaryGemmCudaRaw, TernaryGemmCudaRawError, WG_THREADS,
+};
+#[cfg(all(feature = "ternary_gemv_cuda_raw", not(target_os = "macos")))]
+pub use gemv_ternary_multicol_cuda_raw::{
+    MC_TOKENS_MAX, MC_TOKENS_MIN, TernaryGemmMultiColCudaRaw,
 };
 #[cfg(feature = "ternary_gemv")]
 pub use gemv_ternary_fma_cubecl::{
