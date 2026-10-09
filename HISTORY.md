@@ -7,6 +7,34 @@ verbatim — issue/plan/bench numbers + dates are read by the workspace
 numbering + citation gates; each record below is one compact entry (full
 narratives: `git log --follow -- .issues/<file>` or this file's git history).
 
+## 2026-10-10 — Issue 037: wgpu full-suite device-loss cascade CLOSED — root cause + VRAM admission gate landed — `3564a72` (+ upstream draft `dad3e7c`) — file removed
+
+The "which test kills the device" question was a category error: no single killer
+test exists — the full `cubecl_runtime` suite needs ~16 GiB contiguous commit and the
+loss fired at the box's GLOBAL VRAM commit position (trainer 7.6 GiB resident; VRAM
+trajectory 9.0 → 23.8 GiB at the loss second), the 16 failures all downstream victims
+of one dead shared device (the Issue-676 OnceLock cascade). Mechanism chain (file:line
+verified): marginal alloc under exhaustion → Vulkan device-fatal → `cubecl-wgpu`'s
+always-poll thread hits `VK_ERROR_DEVICE_LOST` → wgpu-core 30.0.1 `handle_hal_error`
+escalates `OutOfMemory | Lost | Unexpected` ALL to `lose(...)` on the staging-buffer
+and poll-fence paths (the recoverable-OOM-into-device-death defect — upstream draft
+born-complete at `.research/010_wgpu_fatal_oom_escalation_upstream_draft.md`, OWNER
+files it, agents do not). **Fix (test-side admission gate, three layers):** vendored
+wgpu-hal `available_video_memory_bytes()` (VK_EXT_memory_budget / DXGI /
+Metal recommendedMaxWorkingSetSize) + `CubeCLContext::available_video_memory()` live
+probe + `heavy_model_vram_guard` wired into the 9 full-model tests (loud SKIP/RUN,
+`RIIR_GPU_FORCE_HEAVY_TESTS=1` override); threshold 18 GiB = measured 16.2 GiB working
+set + 1.8 GiB slack; Windows prefers a bounded `nvidia-smi` NVML read (WDDM "budget"
+is a commit allowance, not free VRAM — measured 22.8 "free" against 16.9 true), fails
+OPEN when nothing can read the box (never silently narrows coverage). **Validation:**
+full serialized suite WITH trainer resident 242/0/1 in 16 s (was 226/16 in 796 s);
+clippy `-D` at all three postures; workspace check clean. **Survivors (recorded, not
+owed):** the exclusive-box RUN path unexercised (no exclusive window — trainer is a
+standing task); the Metal vendor arm unverified from the CUDA box (the E0308 ride-along
+fix `02e7a65` above is the entry beside this one). The legacy
+`../riir-ai/scripts/issue_714_device_lost_repro.sh` stays as history (pre-carve crate
+name).
+
 ## 2026-10-09 — the elementwise params[0]=n root fix + the vendored metal adapter E0308 — `02e7a65`
 
 Retired katgpt-rs Issue 928's two len_derived stability rows: sigmoid_f32 /
