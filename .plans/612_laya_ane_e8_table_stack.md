@@ -61,9 +61,17 @@ discipline (100%-ANE load re-gate, digest pins) is untouched by construction.
 
 - [ ] G1 correctness: `tests/laya_ane_parity.rs` at the e8 posture — top-1 ≥ 99.9% + flips only inside the near-tie band, across all three checkpoints, bucket-covered rows; publish max prob err e8-vs-fp16 beside the fp16 posture's published err (their datum: 0.013 → 0.014/0.015 — expect the same noise class; a larger shift is a RED, not a note). **READY: the three real sidecars are on disk at the pinned byte counts; the env knob needs no reflex-side change (read inside `AneEncoder::from_map`).**
 - [ ] G2 perf: position-balanced p50 forward, e8 vs fp16, same box, `scripts/bench_preflight.sh` provenance line quoted (their claim: latency identical; ours measured, never assumed).
-- [ ] G3 no-regression: fp16 posture outputs byte-identical (env unset); CPU/Metal lanes untouched — the riir-infer diff touches only `ane.rs`; the converter change is riir-reflex-owned (`.issues/037`) and lands there.
-- [ ] G4 alloc: gather writes into the pre-allocated buffer (the lane's alloc discipline; counting gate where the lane carries one).
-- [ ] G5 size axis (this plan's gain axis): resident table bytes u16 → i8+scales published per checkpoint (expected exactly ~50% of the table); sidecar bytes on disk published. **G5 is guaranteed by construction (int8 + scales is always ~50% of fp16) — it is a published measurement, never evidence about quality; promotion rides G1 + G2.**
+- [ ] G3 no-regression: fp16 posture outputs byte-identical (env unset); CPU/Metal lanes untouched — the riir-infer diff touches only `ane.rs`; the converter change is riir-reflex-owned (`.issues/037`) and lands there. **Structural half holds post-Phase-2 (2026-10-09): the F16 arm is the verbatim founding code path (resolve → widen → `gather_fp16` unchanged); the `weights::container_header` extraction is behavior-identical (`from_bytes` delegates; the weights test battery passed untouched); default-posture lib tests + clippy green.** The runtime half (a G5-lane fp16 re-run) rides the same window as G1 — one clean box session proves both postures back-to-back.
+- [ ] G4 alloc: gather writes into the pre-allocated buffer (the lane's alloc discipline; counting gate where the lane carries one). **Structural half holds post-Phase-2: `gather_e8` writes only `buf` (plus `copy_within` on it); no allocation inside the gather.**
+- [x] G5 size axis (this plan's gain axis): resident table bytes u16 → i8+scales published per checkpoint (expected exactly ~50% of the table); sidecar bytes on disk published. **G5 is guaranteed by construction (int8 + scales is always ~50% of fp16) — it is a published measurement, never evidence about quality; promotion rides G1 + G2. PUBLISHED 2026-10-09 (computed from the PINNED manifest shapes — exact arithmetic, not a box measurement; the load-time debug_assert verifies the resident figure every e8 load):**
+
+  | checkpoint | vocab × hidden | fp16 resident (u16) | e8 resident (i8 + 4 B/row scales) | ratio | sidecar on disk (manifest-pinned) |
+  |---|---|---|---|---|---|
+  | english | 50,368 × 1,024 | 103,153,664 B | 51,778,304 B | 50.195% | 51,778,464 B (160 B container) |
+  | typed | 50,368 × 1,024 | 103,153,664 B | 51,778,304 B | 50.195% | 51,778,464 B |
+  | multilingual | 256,000 × 768 | 393,216,000 B | 197,632,000 B | 50.262% | 197,632,160 B |
+
+  Per-checkpoint G1 **recipe (zero consumer-side change — the env is read inside `AneEncoder::from_map`):** `cd ../riir-reflex && LAYA_ANE_TABLE=e8 cargo test --release --features laya-riir-ane --test laya_ane_parity` (decision-level gates vs the frozen fp16 goldens; publishes max prob err e8-vs-golden as observation). The fp16 baseline is the same command without the env. Run both in ONE clean-box window (G1 first, G2 after, preflight quoted).
 - [ ] Promotion: e8 becomes the lane DEFAULT iff **G1 + G2 pass** (with G3/G4 holding); else stays opt-in with the failure recorded. The loser (fp16) keeps its env path — demote, never delete.
 
 ## Deferred (recorded, not planned here)
