@@ -1,6 +1,6 @@
 # Issue 038 — the n=3-8 decode band on Ada: adopt the dp4a multi-column mat-vec mechanism (distill Lead 12, prism #306)
 
-**Status:** OPEN — staged distill lead (zero-cargo filing; the CUDA work is a 4090 lane, census-gated per the standing Plan-337 carve until ~2026-10-10 06:30 +07)
+**Status:** OPEN — the port is LANDED (`48d598e`, 2026-10-10: kernel + handler + CPU-only NVRTC compile gate, `cargo clippy -p riir-infer-gpu --features ternary_gemv_cuda_raw --all-targets` clean); the GPU gates remain owed on a free 4090 lane (the plan437 T0.1 trainer holds the box — was step 2050/10000 at ~11 s/step when the port landed, ~24 h to completion at that rate; the 06:30 estimate below was the filer's, overtaken by the measured step time)
 
 ## The lead (provenance)
 
@@ -76,3 +76,43 @@ The snapshot rows scroll; this lane has no standing trigger. The 4090 is current
 the verify/batched-decode band the spec-decode lane needs, and the upstream evidence
 (our model file, our arch) says the win is real. This issue is the pointer that
 survives the snapshot.
+
+## Progress
+
+- **2026-10-10 — PORT LANDED, `48d598e`** (`gemv_ternary_multicol_cuda_raw.rs`, +lib.rs decls):
+  the four mechanism atoms above, ported to our format. Port deltas vs upstream: OUR
+  16-element chunks (T3b accuracy posture — upstream quantizes per 32), separate
+  `ascale`/`actsum` device buffers (not ggml's interleaved half2), host-side
+  quantize+permute that mirrors `TernaryGemmCudaRaw::forward`'s host quantizer
+  formula-identically. Warp structure per upstream: 4 rows/warp, all 32 lanes walking
+  different chunks (act int4 loaded once per lane, reused across 4 rows in registers),
+  clamped-row tight-warp trick, full-warp shfl reduce, `__launch_bounds__(128, 3)`.
+  Weight encoding shared with the n=1 handler (`convert_bitplane_to_packed_codes`) —
+  the same uploaded bytes feed either handler family.
+  - **Bit-parity property** (asserted by `test_multicol_bit_parity_with_n1_kernel`):
+    with identical host quantization the multicol output is BIT-IDENTICAL to the
+    incumbent n=1 `forward` per token — the int dot is order-exact, the per-block
+    float expression has the n=1 shape (`(float)sumi * ws * ascale`), the lane walk
+    (stride 32 over 16-element chunks) and the full-warp reduce tree match. Upstream's
+    accumulation-order drift face (their pplx byte 6.3776→6.3820) does NOT apply to
+    this port by construction.
+  - **Landed validation** (CPU-only, run beside the trainer): `cargo clippy -p
+    riir-infer-gpu --features ternary_gemv_cuda_raw --all-targets` clean;
+    `test_nvrtc_compiles_multicol_src` PASSES — the template/macro source compiles to
+    sm_89 PTX with all six entrypoints present (NVRTC is a host-side compiler; no GPU
+    touched).
+  - **NOT production-wired** — opt-in by construction; nothing calls the handler yet.
+
+### Owed on a free 4090 lane (in order)
+
+1. Unit gates: `cargo test -p riir-infer-gpu --features ternary_gemv_cuda_raw --lib
+   gemv_ternary_multicol` — bit-parity vs n=1, CPU-reference tolerance (mean_rel < 2%,
+   max_rel < 5%), shape rejections, quantizer round-trip. A parity mismatch = FMA
+   contraction divergence between the two NVRTC units: fix the expression shape, never
+   weaken the assert.
+2. Task-level argmax agreement at the verify posture (Issue 608 T3a class).
+3. Paired bench: n∈{3..8}, `gemv_ternary_cuda_raw` vs this arm vs
+   `gemm_ternary_i8_mma_cuda_raw` (plan 612 G2 alternating-run pairing runbook),
+   GPU-exclusive + `scripts/bench_preflight`-class box state.
+4. Wire the dispatch arm (tree-verify driver + batched decode, n∈[3,8]) behind the
+   standing kill-switch pattern; GOAT-promote per the feature-flag discipline.
