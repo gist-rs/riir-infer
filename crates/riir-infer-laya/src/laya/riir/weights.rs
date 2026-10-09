@@ -385,11 +385,20 @@ pub fn load(path: &Path, ckpt: &'static str) -> Result<HashMap<String, Weights>>
     from_bytes(&bytes, ckpt)
 }
 
-/// Parse + widen an in-memory safetensors buffer (the test seam).
-pub fn from_bytes(bytes: &[u8], ckpt: &'static str) -> Result<HashMap<String, Weights>> {
+/// The safetensors container preamble — the ONE home for the layout law
+/// (`.issues/002`): 8-byte LE u64 header length → the JSON header, with
+/// the data section starting at `8 + header_len`. Every reader of a
+/// safetensors-shaped file walks THIS (`from_bytes` for the checkpoint,
+/// the ANE lane's `table_e8` sidecar for Plan 612); nothing re-derives
+/// the offsets. Returns `(data_start, parsed header)`.
+pub(crate) fn container_header(
+    bytes: &[u8],
+    ckpt: &'static str,
+    file: &str,
+) -> Result<(usize, serde_json::Value)> {
     let bad = |detail: String| LayaError::Pin {
         checkpoint: ckpt,
-        file: "model.safetensors".to_string(),
+        file: file.to_string(),
         detail,
     };
     if bytes.len() < 8 {
@@ -407,6 +416,17 @@ pub fn from_bytes(bytes: &[u8], ckpt: &'static str) -> Result<HashMap<String, We
     }
     let header: serde_json::Value =
         serde_json::from_slice(&bytes[8..data_start]).map_err(|e| bad(format!("header: {e}")))?;
+    Ok((data_start, header))
+}
+
+/// Parse + widen an in-memory safetensors buffer (the test seam).
+pub fn from_bytes(bytes: &[u8], ckpt: &'static str) -> Result<HashMap<String, Weights>> {
+    let bad = |detail: String| LayaError::Pin {
+        checkpoint: ckpt,
+        file: "model.safetensors".to_string(),
+        detail,
+    };
+    let (data_start, header) = container_header(bytes, ckpt, "model.safetensors")?;
     let entries = header
         .as_object()
         .ok_or_else(|| bad("header is not a JSON object".into()))?;

@@ -33,6 +33,15 @@
 //! Everything Core ML touches runs inside an autoreleasepool (the
 //! [`super::super`] agent's `pass_pool` wraps one forward; load wraps its
 //! own).
+//!
+//! Table postures (Plan 612): the host-side gather reads a RESIDENT
+//! table whose bytes come in two flavors — fp16 (default, converted
+//! from the checkpoint at load) and the `e8` per-row int8 sidecar
+//! (`LAYA_ANE_TABLE=e8`, BLAKE3-verified against the manifest at load,
+//! dequantized `i8 · scale → f32 → f16 bits` in [`gather_e8`]). The
+//! artifact input contract is unchanged bytes either way — the posture
+//! is invisible downstream of the gather, and a set-but-unavailable
+//! e8 sidecar refuses loud, never falls back.
 
 use std::cell::RefCell;
 use std::collections::HashMap;
@@ -99,6 +108,10 @@ pub struct AneArtifact {
 #[derive(Debug, Clone)]
 pub struct AneManifest {
     artifacts: HashMap<String, AneArtifact>,
+    /// The raw `<model>/table_e8` rows — retained unparsed (the e8
+    /// posture's [`Self::table_e8`] parses + validates on demand, so the
+    /// default fp16 posture never touches the sidecar schema).
+    table_e8_rows: HashMap<String, serde_json::Value>,
 }
 
 impl AneManifest {
@@ -118,15 +131,24 @@ impl AneManifest {
             .and_then(serde_json::Value::as_object)
             .ok_or_else(|| LayaError::Runtime("ane manifest: missing `artifacts`".into()))?;
         let mut artifacts = HashMap::new();
+        let mut table_e8_rows = HashMap::new();
         for (key, a) in arts {
             // The manifest is the conversion tool's file and carries rows
-            // beyond this lane's artifacts (the `<model>/table_e8` int8
-            // embedding sidecars of the KV-table lane share it) with their
-            // own schema — no `bucket_L`, no `outputs`. Only `<dir>/L<n>`
-            // rows are ANE artifacts; foreign rows are skipped, never
-            // validated, honoring the "tool may grow the schema freely"
-            // contract above. A malformed ARTIFACT row still errors below.
+            // beyond this lane's bucket artifacts. `<model>/table_e8` rows
+            // are THIS lane's Plan 612 Phase 1 int8 sidecars (the e8
+            // posture's consumer lives here) — retained RAW and parsed
+            // only when the e8 posture selects them, so the fp16 posture
+            // never validates the sidecar schema (the "tool may grow the
+            // schema freely" contract). Any other foreign row is skipped,
+            // never validated. A malformed ARTIFACT row still errors
+            // below.
             if !is_bucket_artifact_key(key) {
+                if key
+                    .rsplit_once('/')
+                    .is_some_and(|(_, last)| last == "table_e8")
+                {
+                    table_e8_rows.insert(key.clone(), a.clone());
+                }
                 continue;
             }
             let bucket_l = a
@@ -201,7 +223,10 @@ impl AneManifest {
         if artifacts.is_empty() {
             return Err(LayaError::Runtime("ane manifest: no artifacts".into()));
         }
-        Ok(Self { artifacts })
+        Ok(Self {
+            artifacts,
+            table_e8_rows,
+        })
     }
 
     /// The entry for one checkpoint + bucket, erroring with the manifest
@@ -220,15 +245,132 @@ impl AneManifest {
             ))
         })
     }
+
+    /// The `<model>/table_e8` row, parsed + validated — Plan 612 Phase 1
+    /// (converter `ane_convert.py table --model <model> --table-precision
+    /// e8`). Called only by the e8 posture; the fp16 posture never
+    /// validates this schema. Required shape: blake3 file digest, table
+    /// `[vocab, hidden]` int8, scales `[vocab]` f32, per-row (vocab-axis)
+    /// scales — any other axis is a DIFFERENT gather and refuses here.
+    pub fn table_e8(&self, model_dir: &str, hidden: usize) -> Result<TableE8> {
+        let key = format!("{model_dir}/table_e8");
+        let raw = self.table_e8_rows.get(&key).ok_or_else(|| {
+            LayaError::Runtime(format!(
+                "ane manifest: no {key:?} row — generate the sidecar with \
+                 `scripts/ane_convert.py table --model {model_dir} --table-precision e8` \
+                 (riir-reflex, Plan 612 Phase 1)"
+            ))
+        })?;
+        let digest = raw
+            .pointer("/digest/digest")
+            .and_then(serde_json::Value::as_str)
+            .ok_or_else(|| missing(&key, "digest.digest"))?
+            .to_string();
+        let algo = raw
+            .pointer("/digest/algo")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or("blake3");
+        if algo != "blake3" {
+            return Err(LayaError::Runtime(format!(
+                "ane manifest {key}: sidecar digest algo {algo:?} unsupported — only blake3"
+            )));
+        }
+        let bytes = raw
+            .pointer("/digest/bytes")
+            .and_then(serde_json::Value::as_u64)
+            .ok_or_else(|| missing(&key, "digest.bytes"))?;
+        let shape2 = |field: &str| -> Result<Vec<usize>> {
+            raw.pointer(&format!("/{field}/shape"))
+                .and_then(serde_json::Value::as_array)
+                .map(|a| {
+                    a.iter()
+                        .map(|d| d.as_u64().unwrap_or(0) as usize)
+                        .collect::<Vec<_>>()
+                })
+                .ok_or_else(|| missing(&key, &format!("{field}.shape")))
+        };
+        let table_shape = shape2("table")?;
+        let scales_shape = shape2("scales")?;
+        if table_shape.len() != 2 || table_shape[1] != hidden {
+            return Err(LayaError::Runtime(format!(
+                "ane manifest {key}: table shape {table_shape:?} != [vocab, {hidden}] \
+                 (the checkpoint's hidden width)"
+            )));
+        }
+        if scales_shape.len() != 1 || scales_shape[0] != table_shape[0] {
+            return Err(LayaError::Runtime(format!(
+                "ane manifest {key}: scales shape {scales_shape:?} != [{vocab}] \
+                 (one f32 scale per vocab row)",
+                vocab = table_shape[0]
+            )));
+        }
+        let axis = raw
+            .pointer("/quant/axis")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or("per_row_vocab");
+        if axis != "per_row_vocab" {
+            return Err(LayaError::Runtime(format!(
+                "ane manifest {key}: quant axis {axis:?} unsupported — the gather \
+                 dequantizes per-row (vocab-axis); {axis:?} is a different consumer"
+            )));
+        }
+        // The sidecar serves every bucket of its checkpoint — the
+        // manifest's own bucket rows must all be covered.
+        let mut serves = raw
+            .get("serves_buckets")
+            .and_then(serde_json::Value::as_array)
+            .map(|a| {
+                a.iter()
+                    .filter_map(|v| v.as_u64().map(|b| b as usize))
+                    .collect::<Vec<_>>()
+            });
+        if let Some(serves) = serves.as_mut() {
+            serves.sort_unstable();
+            for bucket in self.artifacts.keys().filter_map(|k| {
+                k.strip_prefix(model_dir)
+                    .and_then(|r| r.strip_prefix("/L"))
+                    .and_then(|b| b.parse::<usize>().ok())
+            }) {
+                if !serves.contains(&bucket) {
+                    return Err(LayaError::Runtime(format!(
+                        "ane manifest {key}: serves_buckets {serves:?} does not cover \
+                         the checkpoint's bucket {bucket} — regenerate the sidecar"
+                    )));
+                }
+            }
+        }
+        Ok(TableE8 {
+            digest,
+            bytes,
+            vocab: table_shape[0],
+            hidden,
+        })
+    }
+}
+
+/// One validated `<model>/table_e8` manifest row — the fields the e8
+/// posture's load-time verification consumes.
+#[derive(Debug, Clone)]
+pub struct TableE8 {
+    /// blake3 hex digest of the sidecar file.
+    pub digest: String,
+    /// Pinned byte total (cross-checked against the file on disk).
+    pub bytes: u64,
+    /// Table rows = the checkpoint's vocab.
+    pub vocab: usize,
+    /// Table cols = the checkpoint's hidden width.
+    pub hidden: usize,
 }
 
 fn missing(key: &str, field: &str) -> LayaError {
     LayaError::Runtime(format!("ane manifest {key}: missing {field}"))
 }
 
-/// `"<model_dir>/L<digits>"` — the ANE-lane artifact key shape. Anything
-/// else in the manifest (e.g. `<model>/table_e8`) belongs to another
-/// consumer and must not be parsed against the artifact schema.
+/// `"<model_dir>/L<digits>"` — the ANE-lane artifact key shape. The
+/// `<model>/table_e8` sidecar rows are retained separately (the e8
+/// posture's [`AneManifest::table_e8`]); anything else in the manifest
+/// belongs to another consumer and must not be parsed against the
+/// artifact schema.
 fn is_bucket_artifact_key(key: &str) -> bool {
     let Some((_, l)) = key.rsplit_once('/') else {
         return false;
@@ -471,6 +613,223 @@ fn gather_fp16(table_f16: &[u16], ids: &[u32], pad_id: u32, d: usize, l: usize, 
     }
 }
 
+/// The e8 gather (Plan 612 Phase 2): per-token row dequant `i8 · scale →
+/// f32 → f16 bits` straight into the SAME `[1, L, d]` scratch the fp16
+/// gather fills — the artifact's input contract is unchanged bytes, so
+/// the encoder forward is posture-blind downstream of this call. The
+/// PAD row is dequantized ONCE per forward (into the first pad slot)
+/// and `copy_within`-ed over the rest of the pad tail — never per pad
+/// token. Zero-alloc: writes only into `buf`.
+fn gather_e8(
+    table_i8: &[i8],
+    scales: &[f32],
+    ids: &[u32],
+    pad_id: u32,
+    d: usize,
+    l: usize,
+    buf: &mut [u16],
+) {
+    let dequant_row = |id: usize, dst: &mut [u16]| {
+        let row = id * d;
+        let scale = scales[id];
+        for (o, q) in dst.iter_mut().zip(table_i8[row..row + d].iter()) {
+            *o = super::weights::f32_to_f16_bits(f32::from(*q) * scale);
+        }
+    };
+    for (s, &id) in ids.iter().enumerate() {
+        dequant_row(id as usize, &mut buf[s * d..s * d + d]);
+    }
+    if ids.len() < l {
+        // The pad tail: dequantize the PAD row once, then fan out.
+        let first = ids.len();
+        dequant_row(pad_id as usize, &mut buf[first * d..first * d + d]);
+        for s in first + 1..l {
+            buf.copy_within(first * d..first * d + d, s * d);
+        }
+    }
+}
+
+/// The resident table posture (Plan 612 Phase 2). fp16 is the default
+/// and the always-correct posture; e8 halves the resident table with
+/// the dequant moved into the host gather.
+#[derive(Debug)]
+enum TablePosture {
+    /// The fp16 table, converted from the checkpoint at load (the
+    /// founding posture — byte-identical behavior, pinned by the
+    /// existing gates).
+    F16(Vec<u16>),
+    /// The Plan 612 Phase 1 int8 sidecar: per-row (vocab-axis) int8
+    /// quants + one f32 scale per row, dequantized in [`gather_e8`].
+    E8 { table_i8: Vec<i8>, scales: Vec<f32> },
+}
+
+/// The env selection ([`TablePosture`] minus its payload — the loader
+/// supplies that).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum TablePostureSel {
+    F16,
+    E8,
+}
+
+/// The env value → selection. Unset/empty = fp16; `e8` = the int8
+/// sidecar; anything else refuses LOUD naming the supported set (the
+/// no-silent-fallback law — a typo'd value never demotes to the
+/// default).
+fn resolve_table_posture(env: Option<&str>) -> Result<TablePostureSel> {
+    match env {
+        None | Some("") => Ok(TablePostureSel::F16),
+        Some("e8") => Ok(TablePostureSel::E8),
+        Some(other) => Err(LayaError::Runtime(format!(
+            "LAYA_ANE_TABLE={other:?} is unsupported — supported: unset (fp16 default) \
+             or \"e8\" (the Plan 612 per-row int8 sidecar)"
+        ))),
+    }
+}
+
+/// One sidecar tensor's `(shape, data slice)` from the parsed header —
+/// span length validated against the manifest-derived `expect` (the
+/// byte-span IS the dtype layout wall; a wrong dtype cannot produce the
+/// right span).
+fn tensor_span<'a>(
+    entries: &'a serde_json::Map<String, serde_json::Value>,
+    data: &'a [u8],
+    data_start: usize,
+    name: &str,
+    expect: usize,
+    ckpt: &'static str,
+) -> Result<(Vec<usize>, &'a [u8])> {
+    let err = |detail: String| LayaError::Config {
+        checkpoint: ckpt,
+        detail,
+    };
+    let e = entries.get(name).ok_or_else(|| {
+        err(format!(
+            "table_e8 header: missing tensor {name:?} (has {:?})",
+            entries.keys().collect::<Vec<_>>()
+        ))
+    })?;
+    let dtype = e["dtype"]
+        .as_str()
+        .ok_or_else(|| err(format!("table_e8 {name}: missing dtype")))?;
+    let shape: Vec<usize> = e["shape"]
+        .as_array()
+        .ok_or_else(|| err(format!("table_e8 {name}: missing shape")))?
+        .iter()
+        .map(|d| d.as_u64().unwrap_or(0) as usize)
+        .collect();
+    let offsets = e["data_offsets"]
+        .as_array()
+        .ok_or_else(|| err(format!("table_e8 {name}: missing data_offsets")))?;
+    let begin = offsets.first().and_then(|v| v.as_u64()).unwrap_or(0) as usize;
+    let end = offsets.get(1).and_then(|v| v.as_u64()).unwrap_or(0) as usize;
+    if end < begin || end - begin != expect {
+        return Err(err(format!(
+            "table_e8 {name}: data span {} bytes != the {dtype} layout ({expect})",
+            end.saturating_sub(begin)
+        )));
+    }
+    Ok((shape, &data[data_start + begin..data_start + end]))
+}
+
+/// Load + verify the `<model>/table_e8.safetensors` sidecar (Plan 612
+/// Phase 2): BLAKE3 re-checked against the manifest row, byte total
+/// cross-checked, geometry cross-checked against the CHECKPOINT's own
+/// embedding tensor, scales per-row (vocab-axis) only. A set env with
+/// an absent/invalid sidecar refuses LOUD naming the converter — never
+/// a silent fallback to fp16 (the no-silent-fallback law).
+fn load_table_e8(
+    ane_root: &Path,
+    model_dir: &str,
+    manifest: &AneManifest,
+    tok: &Weights,
+    hidden: usize,
+    ckpt: &'static str,
+) -> Result<TablePosture> {
+    let cfg_err = |detail: String| LayaError::Config {
+        checkpoint: ckpt,
+        detail,
+    };
+    let row = manifest.table_e8(model_dir, hidden)?;
+    let path = ane_root.join(model_dir).join("table_e8.safetensors");
+    let bytes = std::fs::read(&path).map_err(|e| {
+        cfg_err(format!(
+            "LAYA_ANE_TABLE=e8: sidecar unreadable at {}: {e} — generate it with \
+             `scripts/ane_convert.py table --model {model_dir} --table-precision e8` \
+             (riir-reflex, Plan 612 Phase 1); refusing, never a silent fp16 fallback",
+            path.display()
+        ))
+    })?;
+    if bytes.len() as u64 != row.bytes {
+        return Err(cfg_err(format!(
+            "table_e8 sidecar {} bytes != the manifest's pinned {}",
+            bytes.len(),
+            row.bytes
+        )));
+    }
+    let digest = blake3::hash(&bytes).to_string();
+    if digest != row.digest {
+        return Err(cfg_err(format!(
+            "table_e8 sidecar digest {digest} != the manifest's pinned {} — \
+             a stale or swapped sidecar refuses, never loads",
+            row.digest
+        )));
+    }
+    let (data_start, header) =
+        super::weights::container_header(&bytes, ckpt, "table_e8.safetensors")?;
+    let entries = header
+        .as_object()
+        .ok_or_else(|| cfg_err("table_e8 header is not a JSON object".to_string()))?;
+    let (table_shape, table_bytes) = tensor_span(
+        entries,
+        &bytes,
+        data_start,
+        "table",
+        row.vocab * row.hidden,
+        ckpt,
+    )?;
+    if table_shape != vec![row.vocab, row.hidden] {
+        return Err(cfg_err(format!(
+            "table_e8 table shape {table_shape:?} != [{}, {}]",
+            row.vocab, row.hidden
+        )));
+    }
+    let (scales_shape, scales_bytes) =
+        tensor_span(entries, &bytes, data_start, "scales", row.vocab * 4, ckpt)?;
+    if scales_shape != vec![row.vocab] {
+        return Err(cfg_err(format!(
+            "table_e8 scales shape {scales_shape:?} != [{}]",
+            row.vocab
+        )));
+    }
+    // The pairing wall: the sidecar must be THIS checkpoint's table —
+    // same vocab and hidden as the embedding tensor it replaces.
+    if tok.shape != vec![row.vocab, row.hidden] {
+        return Err(cfg_err(format!(
+            "table_e8 sidecar {:?} does not pair with the checkpoint's embedding {:?} — \
+             a wrong-sidecar pairing refuses at load",
+            [row.vocab, row.hidden],
+            tok.shape
+        )));
+    }
+    let table_i8: Vec<i8> = table_bytes.iter().map(|&b| b as i8).collect();
+    let scales: Vec<f32> = scales_bytes
+        .as_chunks::<4>()
+        .0
+        .iter()
+        .map(|c| f32::from_le_bytes(*c))
+        .collect();
+    // Plan 612 Phase 2: the resident halving asserted, never assumed
+    // (u16 table → i8 + f32 scales; the f32 scales are the ~0.5%
+    // overhead the halving must survive).
+    debug_assert!(
+        table_i8.len() + 4 * scales.len() < tok.shape[0] * hidden * 2,
+        "e8 resident table ({}) must be smaller than the fp16 table ({})",
+        table_i8.len() + 4 * scales.len(),
+        tok.shape[0] * hidden * 2
+    );
+    Ok(TablePosture::E8 { table_i8, scales })
+}
+
 /// The `pad_bias` row: `0.0` attend for `[0, n)`, the manifest's fp16 mask
 /// sentinel for `[n, L)` — per KEY position, so padded keys are invisible
 /// to every query (bidirectional attention included).
@@ -487,7 +846,9 @@ pub struct AneEncoder {
     ckpt: &'static str,
     d: usize,
     pad_id: u32,
-    table_f16: Vec<u16>,
+    /// The resident embedding table — fp16 by default, the Plan 612 e8
+    /// int8 sidecar under `LAYA_ANE_TABLE=e8` (the gather dequantizes).
+    table: TablePosture,
     /// Artifact root (the `assets/ane` directory: `<root>/<model>/L<bucket>.mlpackage`).
     ane_root: PathBuf,
     manifest: AneManifest,
@@ -535,19 +896,34 @@ impl AneEncoder {
             file: name.to_string(),
             detail: "tensor missing from checkpoint".into(),
         })?;
-        // The ANE posture refuses the q8 variant at load (agent.rs), so
-        // this payload is always widened F32 — the resolution below is a
-        // compile-shaped no-op on the F16 file.
-        let table_f16: Vec<u16> = tok
-            .wide_f32()
-            .iter()
-            .map(|v| super::weights::f32_to_f16_bits(*v))
-            .collect();
+        // The resident posture comes from `LAYA_ANE_TABLE` (read live at
+        // load — the posture IS which bytes are resident). fp16 (unset)
+        // widens the checkpoint payload exactly as the founding posture;
+        // e8 loads the verified Plan 612 sidecar instead and the payload
+        // drops unread (only its SHAPE pairs it with the sidecar).
+        let env_sel = std::env::var("LAYA_ANE_TABLE").ok();
+        let table = match resolve_table_posture(env_sel.as_deref())? {
+            TablePostureSel::F16 => {
+                // The ANE posture refuses the q8 variant at load
+                // (agent.rs), so this payload is always widened F32 — the
+                // resolution below is a compile-shaped no-op on the F16
+                // file.
+                let table_f16: Vec<u16> = tok
+                    .wide_f32()
+                    .iter()
+                    .map(|v| super::weights::f32_to_f16_bits(*v))
+                    .collect();
+                TablePosture::F16(table_f16)
+            }
+            TablePostureSel::E8 => {
+                load_table_e8(&ane_root, model_dir, &manifest, &tok, cfg.hidden, ckpt)?
+            }
+        };
         Ok(Self {
             ckpt,
             d: cfg.hidden,
             pad_id,
-            table_f16,
+            table,
             ane_root,
             manifest,
             model_dir,
@@ -593,7 +969,12 @@ impl AneEncoder {
         let sentinel_f16 = super::weights::f32_to_f16_bits(entry.mask_sentinel);
         let mut emb = vec![0u16; l * d];
         let mut pb = vec![0u16; l];
-        gather_fp16(&self.table_f16, input_ids, self.pad_id, d, l, &mut emb);
+        match &self.table {
+            TablePosture::F16(t) => gather_fp16(t, input_ids, self.pad_id, d, l, &mut emb),
+            TablePosture::E8 { table_i8, scales } => {
+                gather_e8(table_i8, scales, input_ids, self.pad_id, d, l, &mut emb)
+            }
+        }
         build_pad_bias(n, l, sentinel_f16, &mut pb);
         let mut out_f16 = vec![0u16; l * d];
         rt.predict(&emb, &pb, &mut out_f16)?;
@@ -1157,12 +1538,14 @@ mod fetch_tests {
 
     #[test]
     fn manifest_load_skips_foreign_non_bucket_rows() {
-        // The KV-table lane's `<model>/table_e8` sidecar rows share this
-        // manifest (reflex 6535b75) with their own schema — no `bucket_L`,
-        // no `outputs`. The loader must skip them rather than validate
-        // them against the artifact schema, while real `<model>/L<n>`
-        // rows still parse and absent buckets still error (the regression
-        // that broke the ANE lane at load from 2026-09-26).
+        // The `<model>/table_e8` sidecar rows (this lane's own Plan 612
+        // Phase 1 output, reflex 6535b75) share this manifest with their
+        // own schema — no `bucket_L`, no `outputs`. The loader retains
+        // them RAW (parsed only by the e8 posture's `table_e8`) rather
+        // than validating them against the artifact schema, while real
+        // `<model>/L<n>` rows still parse and absent buckets still error
+        // (the regression that broke the ANE lane at load from
+        // 2026-09-26).
         let tmp = std::env::temp_dir().join(format!("ane_fetch_t6_{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&tmp);
         let root = tmp.join("root");
@@ -1193,6 +1576,273 @@ mod fetch_tests {
             !manifest.artifacts.contains_key("en/table_e8"),
             "foreign row not admitted as an artifact"
         );
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+}
+
+/// Plan 612 Phase 2 — the e8 table posture's own gates (pure-Rust: the
+/// gather arithmetic, the env contract, and the sidecar load/verify
+/// walls against hand-built fixtures; no Core ML, no real artifacts).
+#[cfg(test)]
+mod posture_tests {
+    use super::super::weights::WeightData;
+    use super::*;
+
+    const VOCAB: usize = 4;
+    /// Wide enough that the per-row f32 scales (4 B/row) do not swamp
+    /// the i8 halving — the resident-halving debug assert only holds for
+    /// realistic widths (the real checkpoints run d=768/1024).
+    const D: usize = 8;
+
+    fn fixture_quants() -> Vec<i8> {
+        vec![
+            -127, 0, 127, 1, -2, 3, -64, 32, // row 0
+            16, 10, -10, 5, 20, -20, 30, -30, // row 1
+            -8, 8, -4, 4, -2, 2, -1, 1, // row 2
+            7, -7, 6, -6, 5, -5, 4, -4, // row 3 = the PAD row
+        ]
+    }
+
+    fn fixture_scales() -> Vec<f32> {
+        vec![0.5, 2.0, 0.25, 0.5]
+    }
+
+    fn widen(bits: u16) -> f32 {
+        super::super::weights::f16_bits_to_f32(bits)
+    }
+
+    #[test]
+    fn gather_e8_dequantizes_per_row_and_fans_the_pad_tail() {
+        let table_i8 = fixture_quants();
+        let scales = fixture_scales();
+        let l = 5;
+        let mut buf = vec![0u16; l * D];
+        gather_e8(&table_i8, &scales, &[2, 0], 3, D, l, &mut buf);
+        let expect: [f32; 24] = [
+            -2.0, 2.0, -1.0, 1.0, -0.5, 0.5, -0.25, 0.25, // row 2 × 0.25
+            -63.5, 0.0, 63.5, 0.5, -1.0, 1.5, -32.0, 16.0, // row 0 × 0.5
+            3.5, -3.5, 3.0, -3.0, 2.5, -2.5, 2.0, -2.0, // pad row (once, fanned ×3)
+        ];
+        for (got, &want) in buf.iter().zip(expect.iter()) {
+            assert_eq!(widen(*got), want, "dequant mismatch");
+        }
+    }
+
+    #[test]
+    fn gather_e8_writes_no_pad_slots_when_ids_fill_the_bucket() {
+        let table_i8 = fixture_quants();
+        let scales = fixture_scales();
+        let l = 2;
+        let mut buf = vec![0xABCDu16; l * D];
+        gather_e8(&table_i8, &scales, &[2, 0], 3, D, l, &mut buf);
+        let expect: [f32; 16] = [
+            -2.0, 2.0, -1.0, 1.0, -0.5, 0.5, -0.25, 0.25, // row 2
+            -63.5, 0.0, 63.5, 0.5, -1.0, 1.5, -32.0, 16.0, // row 0
+        ];
+        for (got, &want) in buf.iter().zip(expect.iter()) {
+            assert_eq!(widen(*got), want);
+        }
+    }
+
+    #[test]
+    fn resolve_table_posture_matches_the_env_contract() {
+        assert_eq!(
+            resolve_table_posture(None).unwrap(),
+            TablePostureSel::F16,
+            "unset = fp16 default"
+        );
+        assert_eq!(
+            resolve_table_posture(Some("")).unwrap(),
+            TablePostureSel::F16,
+            "empty = fp16 default"
+        );
+        assert_eq!(
+            resolve_table_posture(Some("e8")).unwrap(),
+            TablePostureSel::E8
+        );
+        let err = resolve_table_posture(Some("fp16")).expect_err("a typo refuses loud");
+        let text = err.to_string();
+        assert!(text.contains("LAYA_ANE_TABLE"), "names the env: {text}");
+        assert!(text.contains("e8"), "names the supported set: {text}");
+    }
+
+    /// Hand-writes the sidecar container exactly as the converter does
+    /// (u64-le header length + JSON header + data) and its manifest row.
+    fn write_sidecar(dir: &Path, table_i8: &[i8], scales: &[f32]) -> u64 {
+        let mut data = Vec::new();
+        for s in scales {
+            data.extend_from_slice(&s.to_le_bytes());
+        }
+        let scales_len = data.len();
+        for q in table_i8 {
+            data.push(*q as u8);
+        }
+        let vocab = scales.len();
+        let d = table_i8.len() / vocab;
+        let header = format!(
+            r#"{{"scales":{{"dtype":"F32","shape":[{vocab}],"data_offsets":[0,{scales_len}]}},"table":{{"dtype":"I8","shape":[{vocab},{d}],"data_offsets":[{scales_len},{}]}}}}"#,
+            data.len()
+        );
+        let mut bytes = Vec::new();
+        bytes.extend_from_slice(&(header.len() as u64).to_le_bytes());
+        bytes.extend_from_slice(header.as_bytes());
+        bytes.extend_from_slice(&data);
+        std::fs::create_dir_all(dir).unwrap();
+        std::fs::write(dir.join("table_e8.safetensors"), &bytes).unwrap();
+        bytes.len() as u64
+    }
+
+    fn e8_manifest_json(table_digest: &str, table_bytes: u64, serves: &str) -> String {
+        format!(
+            r#"{{"artifacts": {{
+                "en/L8": {{
+                    "bucket_L": 8,
+                    "geometry": {{"hidden": {D}}},
+                    "digest": {{"algo": "blake3-dir-v1", "digest": "00", "files": 3, "bytes": 9}},
+                    "outputs": {{"hidden_state": {{"shape": [1, 8, {D}]}}}},
+                    "mask_sentinel_fp16": -10000.0,
+                    "placement": {{"ane_ops": 1, "device_ops": 1, "transitions": 0}}
+                }},
+                "en/table_e8": {{
+                    "path": "assets/ane/en/table_e8.safetensors",
+                    "bytes": {table_bytes},
+                    "digest": {{"algo": "blake3", "digest": "{table_digest}", "files": 1, "bytes": {table_bytes}}},
+                    "table": {{"tensor": "table", "dtype": "int8", "shape": [{VOCAB}, {D}]}},
+                    "scales": {{"tensor": "scales", "dtype": "float32", "shape": [{VOCAB}]}},
+                    "quant": {{"axis": "per_row_vocab"}},
+                    "serves_buckets": {serves}
+                }}
+            }}}}"#
+        )
+    }
+
+    fn fixture_manifest(root: &Path, serves: &str) -> AneManifest {
+        let table_bytes = write_sidecar(&root.join("en"), &fixture_quants(), &fixture_scales());
+        let digest =
+            blake3::hash(&std::fs::read(root.join("en/table_e8.safetensors")).unwrap()).to_string();
+        std::fs::create_dir_all(root).unwrap();
+        std::fs::write(
+            root.join("manifest.json"),
+            e8_manifest_json(&digest, table_bytes, serves),
+        )
+        .unwrap();
+        AneManifest::load(&root.join("manifest.json")).expect("fixture manifest loads")
+    }
+
+    fn fixture_tok() -> Weights {
+        Weights {
+            shape: vec![VOCAB, D],
+            data: WeightData::F32(vec![0.0; VOCAB * D]),
+        }
+    }
+
+    #[test]
+    fn sidecar_loads_verified_and_pairs_with_the_checkpoint() {
+        let tmp = std::env::temp_dir().join(format!("ane_e8_t1_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&tmp);
+        let root = tmp.join("root");
+        let manifest = fixture_manifest(&root, "[8]");
+        let posture = load_table_e8(&root, "en", &manifest, &fixture_tok(), D, "riir")
+            .expect("the verified sidecar loads");
+        let TablePosture::E8 { table_i8, scales } = posture else {
+            panic!("expected the e8 posture");
+        };
+        assert_eq!(table_i8, fixture_quants());
+        assert_eq!(scales, fixture_scales());
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn corrupt_sidecar_refuses_at_the_digest_wall() {
+        let tmp = std::env::temp_dir().join(format!("ane_e8_t2_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&tmp);
+        let root = tmp.join("root");
+        let manifest = fixture_manifest(&root, "[8]");
+        // Tamper AFTER the manifest pinned the digest.
+        let path = root.join("en/table_e8.safetensors");
+        let mut bytes = std::fs::read(&path).unwrap();
+        let last = bytes.len() - 1;
+        bytes[last] ^= 0xFF;
+        std::fs::write(&path, &bytes).unwrap();
+        let err = load_table_e8(&root, "en", &manifest, &fixture_tok(), D, "riir")
+            .expect_err("a tampered sidecar refuses");
+        assert!(err.to_string().contains("digest"), "got: {err}");
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn missing_sidecar_names_the_converter_command() {
+        let tmp = std::env::temp_dir().join(format!("ane_e8_t3_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&tmp);
+        let root = tmp.join("root");
+        let manifest = fixture_manifest(&root, "[8]");
+        std::fs::remove_file(root.join("en/table_e8.safetensors")).unwrap();
+        let err = load_table_e8(&root, "en", &manifest, &fixture_tok(), D, "riir")
+            .expect_err("a set env with no sidecar refuses loud");
+        let text = err.to_string();
+        assert!(
+            text.contains("ane_convert.py"),
+            "names the converter: {text}"
+        );
+        assert!(
+            text.contains("--table-precision e8"),
+            "names the flag: {text}"
+        );
+        assert!(
+            text.contains("fallback"),
+            "says it never falls back: {text}"
+        );
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn missing_manifest_row_names_the_converter_command() {
+        let tmp = std::env::temp_dir().join(format!("ane_e8_t4_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&tmp);
+        let root = tmp.join("root");
+        let _manifest = fixture_manifest(&root, "[8]");
+        // A manifest without the table_e8 row (a pre-Phase-1 tree).
+        let json = r#"{"artifacts": {"en/L8": {
+            "bucket_L": 8, "geometry": {"hidden": 3},
+            "digest": {"algo": "blake3-dir-v1", "digest": "00", "files": 3, "bytes": 9},
+            "outputs": {"hidden_state": {"shape": [1, 8, 3]}},
+            "mask_sentinel_fp16": -10000.0,
+            "placement": {"ane_ops": 1, "device_ops": 1, "transitions": 0}
+        }}}"#;
+        std::fs::write(root.join("manifest.json"), json).unwrap();
+        let manifest = AneManifest::load(&root.join("manifest.json")).unwrap();
+        let err = load_table_e8(&root, "en", &manifest, &fixture_tok(), D, "riir")
+            .expect_err("no row refuses naming the generator");
+        assert!(err.to_string().contains("ane_convert.py"), "got: {err}");
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn wrong_checkpoint_pairing_refuses_at_load() {
+        let tmp = std::env::temp_dir().join(format!("ane_e8_t5_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&tmp);
+        let root = tmp.join("root");
+        let manifest = fixture_manifest(&root, "[8]");
+        // A different checkpoint's embedding tensor — the pairing wall.
+        let tok = Weights {
+            shape: vec![VOCAB + 1, D],
+            data: WeightData::F32(vec![0.0; (VOCAB + 1) * D]),
+        };
+        let err = load_table_e8(&root, "en", &manifest, &tok, D, "riir")
+            .expect_err("a wrong-sidecar pairing refuses");
+        assert!(err.to_string().contains("pair"), "got: {err}");
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn serves_buckets_not_covering_the_checkpoint_refuses() {
+        let tmp = std::env::temp_dir().join(format!("ane_e8_t6_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&tmp);
+        let root = tmp.join("root");
+        let manifest = fixture_manifest(&root, "[64, 128]");
+        let err = load_table_e8(&root, "en", &manifest, &fixture_tok(), D, "riir")
+            .expect_err("a sidecar not serving this checkpoint's bucket refuses");
+        assert!(err.to_string().contains("serves_buckets"), "got: {err}");
         let _ = std::fs::remove_dir_all(&tmp);
     }
 }
