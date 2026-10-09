@@ -72,6 +72,15 @@ discipline (100%-ANE load re-gate, digest pins) is untouched by construction.
   | multilingual | 256,000 × 768 | 393,216,000 B | 197,632,000 B | 50.262% | 197,632,160 B |
 
   Per-checkpoint G1 **recipe (zero consumer-side change — the env is read inside `AneEncoder::from_map`):** `cd ../riir-reflex && LAYA_ANE_TABLE=e8 cargo test --release --features laya-riir-ane --test laya_ane_parity` (decision-level gates vs the frozen fp16 goldens; publishes max prob err e8-vs-golden as observation). The fp16 baseline is the same command without the env. Run both in ONE clean-box window (G1 first, G2 after, preflight quoted).
+
+  **The window runbook (pinned 2026-10-09 23:4x so the session is pure execution — every precondition verified in place: sidecars on disk at pinned bytes + BLAKE3-verified `ebaf93be…`/`1899dcdb…`/`0276e83f…` vs the manifest; census ETA ~06:30 +07):**
+
+  1. **Quiet-box assert first**: `uptime` (1-min load < 6 AND trending down) + `sysctl vm.swapusage` (used near 0, not the 20 GB census pin) + census PID 54022 EXITED with `<model>.t1_bias_delta.json` in `../riir-infer/.raw/hyperthink_t1/` (if the census is still alive, the window is NOT open — reschedule, never share the box).
+  2. `../riir-reflex/scripts/bench_preflight.sh` — quote the `PROVENANCE:` line beside every number below.
+  3. **G3 runtime half + fp16 baseline (one run)**: `cd ../riir-reflex && cargo test --release --features laya-riir-ane --test laya_ane_parity` (env unset) — byte-vs-golden parity at the fp16 posture across `Checkpoint::ALL`.
+  4. **G1**: same command + `LAYA_ANE_TABLE=e8` — top-1 ≥ 99.9%, flips only in the near-tie band, all three checkpoints; record max-prob-err beside the fp16 run's (expect the 0.013 → 0.014/0.015 noise class).
+  5. **G2 (alternating-run pairing — the `laya_fixture_timing` instrument is sequential-arms, so position-balancing comes from run ORDER, never from two concurrent processes)**: `scripts/bench_preflight.sh`, then alternate `cargo run --release --features laya-riir-ane --example laya_fixture_timing -- ane english 8` (×4 reps each, fp16 runs 1st + 3rd, e8 runs 2nd + 4th, `LAYA_ANE_TABLE=e8` exported for the even runs only); repeat the block for `typed`; multilingual optional (largest table, slowest load). Verdict = median of paired row_p50 ratios (run2/run1, run4/run3) — a pair contaminated by any load spike is re-run, never averaged in. Bar: e8 p50 within noise of fp16 (their claim: identical; accept ≤ 3% median delta with both pair medians agreeing in sign).
+  6. Record all five figures + both PROVENANCE lines into this plan (Phase 3 checkboxes), then the promotion call per the checkbox above. ONE commit (`feat: plan 612 phase 3 — …` or the honest negative), push, update `.highwater` files if a bench record is filed.
 - [ ] Promotion: e8 becomes the lane DEFAULT iff **G1 + G2 pass** (with G3/G4 holding); else stays opt-in with the failure recorded. The loser (fp16) keeps its env path — demote, never delete.
 
 ## Deferred (recorded, not planned here)
