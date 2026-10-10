@@ -85,6 +85,12 @@ exl3 = []
 # (extraction + weight-space 3-arm eval over the dense GGUF artifacts).
 # Measurement-only; the model-level G1 (Plan 615 T6) is a separate gate.
 lut_grid = []
+# Issue 040 (riir-infer R011, arXiv:2509.22445 §B.9.3): the description-length
+# (MDL floor) audit — `quant::desc_len` (per-tensor stored-symbol histogram
+# entropy vs stored bits, side-info-split two-part floors) + the
+# `desc_len_audit` report bin + the G1 rANS reference-coder gate. Opt-in,
+# report-only: audit touches no decode path, ships no codec.
+desc_len = []
 # Issue 036 T1/T2: the LittleBit-derived init-only sub-1-bit PTQ lane —
 # `quant::svd_lbit` (seeded Halko truncated SVD + Dual-SVID init + residual
 # restack, deterministic) + the `svd_lbit_eval` PPL-ladder bin. Opt-in per
@@ -432,6 +438,13 @@ name = "lut_grid_solve"
 path = "src/bin/lut_grid_solve.rs"
 required-features = ["lut_grid"]
 
+# Issue 040 — the description-length audit report front: per-tensor table
+# sorted by honest slack + model rollup + measured MB/s (G2).
+[[bin]]
+name = "desc_len_audit"
+path = "src/bin/desc_len_audit.rs"
+required-features = ["desc_len"]
+
 # Issue 027 / Plan 615 T6 — the model-level per-family retention gate
 # (fakequant-at-load over the llama path; MiniCPM5-1B vehicle).
 [[bin]]
@@ -610,6 +623,17 @@ required-features = ["twt_collapse"]
 name = "twt_collapse_writer_gates"
 path = "tests/twt_collapse_writer_gates.rs"
 required-features = ["twt_collapse"]
+
+# Issue 040 — the G1 gate for the description-length audit: a reference
+# rANS entropy coder bit-matches the histogram-entropy floor on synthetic
+# histograms, then on sampled real groups from a named GGUF
+# (RIIR_DESC_LEN_GGUF env; skips LOUD when unset — a deferral, never a
+# green zero). Whole-file #![cfg(feature = "desc_len")] + this row = the
+# reader protection.
+[[test]]
+name = "desc_len_g1_entropy_coder"
+path = "tests/desc_len_g1_entropy_coder.rs"
+required-features = ["desc_len"]
 
 # riir-infer Issue 022 — the laya calibration capture driver (checkpoint →
 # per-layer residual states → S matrices → ε-sweep + kill verdict). The

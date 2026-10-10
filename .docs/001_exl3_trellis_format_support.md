@@ -1299,3 +1299,46 @@ encoder is the wrong model class for a causal-decoder format; exllamav3's
 converter refuses by design) are recorded in Plan 617's own sections. Issue
 034's file is removed per the noise-reduction rule; this section + Plan 617
 + git history are the record.
+
+## 19. The description-length audit (Issue 040, 2026-10-10) — where EXL3 sits in the slack spectrum
+
+The repo now ships a **description-length (MDL floor) audit** —
+`quant::desc_len` (feature `desc_len`) + the `desc_len_audit` report bin:
+for every discretized weight group, `floor = N·H(p)` over the STORED
+symbols (the arXiv:2509.22445 §B.9.3 closed form: optimal delta-prior at
+the stored values with empirical mixing = histogram entropy), reported
+against stored bits with a side-info split — `N·H(p)` (values only) and
+`N·H(p) + scale bits` (honest) are SEPARATE columns, never pooled. G1 is a
+reference rANS entropy coder bit-matching the floor on synthetic histograms
+and on sampled real groups (`tests/desc_len_g1_entropy_coder`, env
+`RIIR_DESC_LEN_GGUF`); the audit path is read-only over the mmap and ships
+no codec.
+
+Example run (the league pack):
+
+```sh
+cargo run --release --features desc_len --bin desc_len_audit -- \
+    --gguf ../riir-train/data/Ternary-Bonsai-2-27B-PQ2_0.gguf
+```
+
+Measured spectrum (2026-10-10, M3 Max, release; PROVENANCE: power=AC
+load=14.38 swap=1643.56M powermode=2(high) — preflight REFUSED, so the
+MB/s figures are provisional-box-loaded):
+
+| pack | format | stored bpw | honest floor | honest slack | floor/stored |
+|---|---|---|---|---|---|
+| Ternary-Bonsai-2-27B-PQ2_0 | Q2_0 | 2.1250 | 1.7098 | +0.4152 | 0.805 |
+| Ternary-Bonsai-27B-Q2_0 | Q2_0 | 2.1250 | 1.7054 | +0.4196 | 0.803 |
+| Ternary-Bonsai-27B-dspark-Q4_1 | Q4_1 | 5.0000 | 3.8300 | +1.1700 | 0.766 |
+| Qwen3.8-27B-DFlash2-Q4_K_M | Q4_K / Q6_K | 4.5000 / 6.5625 | 4.3649 / 6.3563 | +0.135 / +0.206 | 0.970 (model) |
+
+Reading: the ternary Q2_0 alphabet (K=4, but the fourth state unused →
+H ≈ log2 3 = 1.585) carries ~19% real headroom against its stored bits;
+a 4-bit k-quant alphabet is nearly saturated (~3%). This is the
+conversion-lane input the issue asked for: a re-encode of the ternary
+pack at an entropy coder would land ≈5.48 GB vs 6.81 GB shipped —
+EXL3-style trellis packing is the alternative spend of the same budget,
+and any EXL3 audit row needs the safetensors-side reader (the named
+follow-up; the procedural codebook is free, trellis indices are the
+symbols, `suh`/`svh` are side-info). Prior art: EntroLLM
+(arXiv:2505.02380) owns the compressor lane; this repo audits.

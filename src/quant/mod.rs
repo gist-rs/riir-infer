@@ -17,6 +17,11 @@ pub mod svd_lbit;
 pub mod ptq1_0;
 pub mod q2_0;
 pub mod lut_grid;
+// Issue 040 — the description-length (MDL floor) audit lane: per-tensor
+// histogram entropy of the stored symbols vs stored bits, two-part honest
+// (side-info split). Report-only; opt-in per the measurement-only law.
+#[cfg(feature = "desc_len")]
+pub mod desc_len;
 pub mod q2k;
 pub mod q3k;
 pub mod q4k;
