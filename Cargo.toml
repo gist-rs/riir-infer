@@ -304,6 +304,12 @@ deltanet_ternary_inference = ["deltanet_inference", "q2_0_ternary_bridge"]
 # until the GOAT gate passes (G1 token-identity vs the fork, G2 overhead
 # budget, G3 flag-off byte-identity on the old file, G4 alloc-free).
 bonsai2_hadamard = ["deltanet_ternary_inference"]
+# Issue 929 Bonsai-2 loop-alignment probe runner (katgpt-rs Research 614 /
+# arXiv:2607.00341 — the capable-checkpoint leg; the kimi legs' label axis
+# was dead, Benches 927+930). Packs the packed-load + rotation features plus
+# the katgpt-core probe. OPT-IN, measurement-only (report; no shipped-path
+# change).
+issue929_bonsai2_probe = ["bonsai2_hadamard", "katgpt-core/loop_alignment_probe"]
 forward_profiling = ["deltanet_ternary_inference"]
 gemma4_lora = ["gemma4_inference"]
 hla_role_aware = ["hla"]
@@ -499,6 +505,27 @@ required-features = ["svd_lbit"]
 name = "needle_eviction_gate"
 path = "src/bin/needle_eviction_gate.rs"
 required-features = ["kv_eviction"]
+
+# katgpt-rs Issue 929 (Research 614, DiscoLoop) — the Bonsai-2-27B PQ2_0
+# loop-alignment probe runner: the capable-checkpoint leg the kimi legs
+# (Benches 927+930, UNDECIDABLE — dead label axis) could not answer.
+# Packed-load (≈8 GB resident, never f32-dequantized) + K caller-side
+# weight-shared stack re-entries at the answer position + the katgpt-core
+# probe observable. OPT-IN, measurement-only (CSV/JSON report; no shipped
+# forward-path change).
+[[bin]]
+name = "issue929_bonsai2_loop_probe"
+path = "src/bin/issue929_bonsai2_loop_probe.rs"
+required-features = ["issue929_bonsai2_probe"]
+
+# katgpt-rs Issue 929 — the Bonsai-2 loop-probe machinery gates: the K=1
+# bit-identity pin (looped readout == stock forward logits), K-row
+# determinism, and the fixture-consumption shape. Synthetic tiny hybrid
+# weights — NO model file (the real-checkpoint run is the bin's job).
+[[test]]
+name = "issue929_bonsai2_loop_probe_gates"
+path = "tests/issue929_bonsai2_loop_probe_gates.rs"
+required-features = ["issue929_bonsai2_probe"]
 
 # riir-infer Issue 013 T1 — the fitted-V P1 gate bin (calibrate → freeze →
 # the four-gate battery). The module lives behind #[cfg(feature =

@@ -25,6 +25,13 @@
 //! - Cache-friendly: state is stored head-major for sequential access per head
 
 pub mod forward;
+// katgpt-rs Issue 929 / Research 614 (DiscoLoop) — the Bonsai-2
+// loop-alignment probe machinery shared by the runner bin and the machinery
+// gates (K caller-side weight-shared stack re-entries at the answer
+// position + the per-loop cos/margin readout in the decode basis).
+// Measurement-only; OPT-IN behind the root `issue929_bonsai2_probe` feature.
+#[cfg(feature = "issue929_bonsai2_probe")]
+pub mod loop_probe;
 pub mod reference;
 #[cfg(feature = "gdn_tree_verify")]
 pub mod tree_forward;
