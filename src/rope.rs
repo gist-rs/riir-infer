@@ -27,6 +27,70 @@ impl RopeFreqTable {
         Self { freq }
     }
 
+    /// Build a **partial-positional** (`pp-RoPE`) frequency table: pairs whose
+    /// wavelength `2π/freq[i]` exceeds `max_train_len` are masked to `0.0`
+    /// (no rotation — position-invariant dims).
+    ///
+    /// The paper cell (arXiv:2505.17083, App. I.3): θ=10k, head_dim=128,
+    /// train length 1024 → the effective angular base is ≈1024, not θ=10k —
+    /// 36 of 64 pairs keep their rotation. The paper's pairing law: low-frequency
+    /// RoPE components interfere with ANY position-dependent logit transform
+    /// (LogN/SSMax and the scale-invariant schedule alike; si-RoPE FAILS /
+    /// si-NoPE generalizes-but-underperforms / si-ppRoPE wins), so an entropy
+    /// or mass control on attention logits must pair with this mask.
+    ///
+    /// **KERNEL-ONLY posture — the quality claim is DEFERRED to riir-train
+    /// Plan 449** (si-ppRoPE transplant LoRA-CPT): dropping low-frequency
+    /// components on a checkpoint trained with full RoPE changes the position
+    /// representation the weights were trained for, so zero-shot pairing is
+    /// EXPECTED TO REGRESS — Plan 622 Phase 7's G3 pp-RoPE row pre-records
+    /// that expected FAIL. Never ship this table to a serving path without
+    /// the trained artifact (Plan 449's GGUF marks
+    /// `*.attention.si_pprope=1` + `*.rope.pp_effective_base` and loud-fails
+    /// on an unmarked GGUF).
+    ///
+    /// Mechanics: the mask zeroes a CONTIGUOUS SUFFIX of the table (frequencies
+    /// descend when `theta > 1`), the table LENGTH is preserved — every kernel
+    /// that reads [`RopeFreqTable::as_slice`] (CPU or device-uploaded GPU copy)
+    /// keeps indexing pair `i` unchanged — and masked lanes are EXACT identity:
+    /// `angle = pos·0.0 = 0.0`, IEEE `sin(0)=0` / `cos(0)=1`, so the rotation
+    /// algebra returns its inputs bit-exactly on every backend. The zero-GD
+    /// law: this is a deterministic table transform, no training involved.
+    /// The existing rope parity discipline (GPU reads vs the CPU table) covers
+    /// the pp posture unchanged; any published GPU number still runs that
+    /// parity gate first.
+    ///
+    /// Panics when `theta < 1.0` (frequencies would ascend — the suffix-mask
+    /// shape and the wavelength rule both break) or when `max_train_len < 2π`
+    /// (even the fastest pair's wavelength would exceed it — nothing keeps
+    /// rotation).
+    pub fn new_pp(theta: f32, head_dim: usize, max_train_len: usize) -> Self {
+        assert!(
+            theta >= 1.0,
+            "pp-RoPE requires theta >= 1.0 (descending frequencies); got {theta}"
+        );
+        let max_train_len = max_train_len as f32;
+        assert!(
+            max_train_len >= core::f32::consts::TAU,
+            "pp-RoPE requires max_train_len >= 2π (the fastest pair's wavelength) \
+             so at least one pair keeps rotation; got {max_train_len}"
+        );
+        let min_keep_freq = core::f32::consts::TAU / max_train_len;
+        let mut table = Self::new(theta, head_dim);
+        for f in table.freq.iter_mut() {
+            if *f < min_keep_freq {
+                *f = 0.0;
+            }
+        }
+        table
+    }
+
+    /// Number of pairs that keep their rotation (wavelength ≤ `max_train_len`).
+    /// The remaining `head_dim / 2 - kept` pairs are the masked suffix.
+    pub fn kept(&self) -> usize {
+        self.freq.iter().filter(|f| **f != 0.0).count()
+    }
+
     /// Get the frequency table slice.
     #[inline]
     pub fn as_slice(&self) -> &[f32] {
@@ -757,6 +821,167 @@ mod tests {
             v[4],
             expected_h1_0
         );
+    }
+
+    // ── pp-RoPE table variant — Plan 622 Phase 4 (kernel-only) ───────────
+    //
+    // Quality claim is riir-train Plan 449's (the transplant CPT); these
+    // tests pin the TABLE arithmetic only: the wavelength mask, its suffix
+    // shape, and the exact identity of the masked lanes through the real
+    // apply path.
+
+    /// Independent oracle for the kept-pair count, from the closed form:
+    /// pair `i` keeps its rotation iff `2π/freq[i] ≤ max_train_len` iff
+    /// `i ≤ (head_dim/2)·ln(max_train_len/2π)/ln(theta)`. Cells are chosen
+    /// with ≥5% margins at both boundary pairs so f32-vs-f64 rounding can
+    /// never flip the count.
+    fn pp_kept_closed_form(theta: f64, head_dim: usize, max_train_len: usize) -> usize {
+        let half = head_dim / 2;
+        let bound =
+            (half as f64) * (max_train_len as f64 / core::f64::consts::TAU).ln() / theta.ln();
+        ((bound.floor() as usize) + 1).min(half)
+    }
+
+    #[test]
+    fn test_pp_rope_component_count_paper_cell() {
+        // The paper cell: θ=10k, head_dim=128, train length 1024 — effective
+        // angular base ≈1024, not θ=10k. 36 of 64 pairs keep rotation.
+        let pp = RopeFreqTable::new_pp(10_000.0, 128, 1024);
+        let half = 64;
+        assert_eq!(pp.as_slice().len(), half, "table length must be preserved");
+        assert_eq!(pp.kept(), pp_kept_closed_form(10_000.0, 128, 1024));
+        assert_eq!(pp.kept(), 36, "paper cell: 36 kept / 28 masked");
+
+        // Suffix shape: kept prefix ≥ threshold, masked tail exactly 0.0.
+        let min_keep = core::f32::consts::TAU / 1024.0;
+        for (i, f) in pp.as_slice().iter().enumerate() {
+            if i < 36 {
+                assert!(
+                    *f >= min_keep,
+                    "kept pair {i} below threshold: {f} < {min_keep}"
+                );
+            } else {
+                assert_eq!(*f, 0.0, "masked pair {i} must be exactly 0.0");
+            }
+        }
+
+        // A full table masks nothing.
+        assert_eq!(RopeFreqTable::new(10_000.0, 128).kept(), 64);
+    }
+
+    #[test]
+    fn test_pp_rope_suffix_mask_shape_generic() {
+        for (theta, head_dim, max_train_len) in [
+            (10_000.0_f64, 64, 512),
+            (1_000_000.0, 128, 8192),
+            (5_000.0, 32, 256),
+        ] {
+            let pp = RopeFreqTable::new_pp(theta as f32, head_dim, max_train_len);
+            let kept = pp_kept_closed_form(theta, head_dim, max_train_len);
+            assert_eq!(
+                pp.kept(),
+                kept,
+                "kept count: theta={theta} head_dim={head_dim} L={max_train_len}"
+            );
+            // Contiguous suffix: every kept freq precedes every masked one.
+            let min_keep = core::f32::consts::TAU / max_train_len as f32;
+            for (i, f) in pp.as_slice().iter().enumerate() {
+                if i < kept {
+                    assert!(*f >= min_keep, "prefix pair {i} not kept: {f}");
+                } else {
+                    assert_eq!(*f, 0.0, "suffix pair {i} not zeroed: {f}");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn test_pp_rope_kept_lanes_bit_identical_to_full_table() {
+        let theta = 10_000.0_f32;
+        let full = RopeFreqTable::new(theta, 128);
+        let pp = RopeFreqTable::new_pp(theta, 128, 1024);
+        for (i, (f_pp, f_full)) in pp.as_slice().iter().zip(full.as_slice()).enumerate() {
+            if i < pp.kept() {
+                assert_eq!(f_pp, f_full, "kept lane {i} must equal the full table");
+            } else {
+                assert_eq!(*f_pp, 0.0, "masked lane {i} must be exactly 0.0");
+            }
+        }
+    }
+
+    #[test]
+    fn test_pp_rope_masked_pairs_exact_identity() {
+        // head_dim=16 (8 pairs), L=64 → pairs 0..3 kept (freq 1.0, 0.316, 0.1
+        // ≥ 2π/64), pairs 3..8 masked. Rotating at a large position must leave
+        // the masked pair dims BIT-IDENTICAL and the kept pair dims equal to
+        // the full-table rotation.
+        let head_dim = 16;
+        let pos = 777;
+        let full = RopeFreqTable::new(10_000.0, head_dim);
+        let pp = RopeFreqTable::new_pp(10_000.0, head_dim, 64);
+        assert_eq!(pp.kept(), 3);
+
+        // Non-zero magnitudes, both signs, several heads.
+        let orig: Vec<f32> = (0..2 * head_dim)
+            .map(|i| (i as f32 * 0.75 + 1.0) * if i % 3 == 0 { -1.0 } else { 1.0 })
+            .collect();
+        let mut q_pp = orig.clone();
+        let mut k_pp = orig.clone();
+        let mut q_full = orig.clone();
+        let mut k_full = orig.clone();
+
+        apply_rope_with_freq(&mut q_pp, &mut k_pp, pos, head_dim, pp.as_slice());
+        apply_rope_with_freq(&mut q_full, &mut k_full, pos, head_dim, full.as_slice());
+
+        let half = head_dim / 2;
+        for h in 0..2 {
+            let base = h * head_dim;
+            for pair in 0..half {
+                for d in [pair, pair + half] {
+                    if pair < pp.kept() {
+                        assert_eq!(
+                            q_pp[base + d], q_full[base + d],
+                            "kept pair {pair} dim {d}: pp must match the full rotation"
+                        );
+                        assert_eq!(
+                            k_pp[base + d], k_full[base + d],
+                            "kept pair {pair} dim {d} (k): pp must match the full rotation"
+                        );
+                    } else {
+                        assert_eq!(
+                            q_pp[base + d], orig[base + d],
+                            "masked pair {pair} dim {d}: must be exact identity"
+                        );
+                        assert_eq!(
+                            k_pp[base + d], orig[base + d],
+                            "masked pair {pair} dim {d} (k): must be exact identity"
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    #[should_panic(expected = "pp-RoPE requires theta")]
+    fn test_pp_rope_rejects_theta_below_one() {
+        let _ = RopeFreqTable::new_pp(0.5, 8, 1024);
+    }
+
+    #[test]
+    #[should_panic(expected = "pp-RoPE requires max_train_len")]
+    fn test_pp_rope_rejects_train_len_below_tau() {
+        // 6 < 2π ≈ 6.283 — even the fastest pair's wavelength exceeds it.
+        let _ = RopeFreqTable::new_pp(10_000.0, 8, 6);
+    }
+
+    #[test]
+    fn test_pp_rope_minimal_train_len_keeps_one_pair() {
+        // L=7 ≥ 2π: only pair 0 (wavelength 2π) keeps rotation.
+        let pp = RopeFreqTable::new_pp(10_000.0, 8, 7);
+        assert_eq!(pp.kept(), 1);
+        assert_eq!(pp.as_slice()[0], 1.0);
+        assert_eq!(pp.as_slice()[1], 0.0);
     }
 }
 
