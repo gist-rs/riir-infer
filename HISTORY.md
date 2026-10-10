@@ -282,6 +282,10 @@ v2 `23bbff5`+`3cf9ae9`, EXIT0 (log `F:/wt/dq614-matrix2.log`, report `F:/wt/dq61
 
 Instrument: `crates/riir-infer-gpu/src/bin/dq614_teardown_repro.rs` (`required-features = ["ternary_gemv_cuda_raw"]`, whole-file `#![cfg]`, dev-profile refusal) with arms `--exit plain|graceful|hard` × `--sticky` × `--alloc-mb` × `--iters` × `--no-cuda`; no-op repro knobs `DQ614_FORCE_FATAL=1` / `DQ614_EXIT_PLAIN=1` in `dq_phase_matrix.rs` (the default stays `hard_exit`). All 6 arms exited clean incl. the full 7.2 GB Bonsai engine-state shape (clean exit at 215 s). Remaining hypotheses recorded, not chased (driver/OS drift, or ~6-hour context wear). Defense double-covered: `hard_exit` + `dq614_watchdog.ps1` (machine-local at `E:/git/_sync/dq614_watchdog.ps1`; narrative `git log --follow -- .issues/031_dq614_fatal_teardown_hang.md`).
 
+## 2026-10-10 — Issue 040 CLOSED landed + removed: the weight-histogram MDL description-length audit (GGUF lane); the EXL3 rows ride the loader lane
+
+`483f2ec`: `quant::desc_len` (feature `desc_len`) + the `desc_len_audit` report bin — per-tensor entropy / floor / slack sorted by HONEST slack, with the two-part honesty law (`N·H(p)` prices the weight VALUES only; the codebook + block-format side-info is priced separately, advisory rows sink). G1 bit-matches a canonical range coder on synthetic histograms + sampled real groups (`tests/desc_len_g1_entropy_coder`, env-gated); G2 measured 142–335 MB/s across four packs (PROVENANCE on record); G3 read-only (decode-path outputs byte-identical — no write path exists); G4 fixed-size alphabet tables + streaming counters, zero alloc in scan loops. Durable record: `.docs/001` §19 (the measured slack spectrum table + the example run). The EXL3 (trellis) audit rows are deferred WITH the loader (`.plans/617_exl3_openthai_convert_and_infer.md`). Narrative: `git log --follow -- .issues/040_weight_histogram_mdl_audit.md`.
+
 ## Lessons
 
 - Check the reference implementation, not a remembered standard, before filing a fixture-integrity finding (Issue 010).
