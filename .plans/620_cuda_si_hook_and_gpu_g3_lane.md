@@ -137,3 +137,40 @@ real checkpoint; the G3 GPU run's base arm pooled-ppl cross-checked against
 the CPU run's base arm (same corpus, same rungs — the numbers must agree
 within the f32-posture envelope; a divergence beyond that indicts the
 instrument, not the checkpoint — Issue-022 T3.1 law).
+
+## Phase-A bit-identity protocol (the recording instrument, landed 4801622)
+
+The A/B instrument is committed: **`si_flag0_probe`** (bin,
+`ternary_gemv_cuda_raw` + `cuda_graphs_forward` required-features, no si
+surface — it compiles unchanged at any commit). The gate it serves:
+
+1. **Pre-hook recording** — at a PRE-hook sha (e.g. `4801622` itself; the
+   window never closes — a worktree reproduces the incumbent build at any
+   time, the hook landing on develop does not consume it):
+
+   ```sh
+   git -C E:/git/riir-infer worktree add E:/git/wt-si620pre 4801622
+   cd E:/git/wt-si620pre && CARGO_TARGET_DIR=E:/tmp/tgt-si620pre \
+     cargo build --release -p riir-infer-gpu \
+     --features ternary_gemv_cuda_raw,cuda_graphs_forward --bin si_flag0_probe
+   E:/tmp/tgt-si620pre/release/si_flag0_probe.exe --gguf <league gguf> \
+     > E:/tmp/si620-flag0-prehook.txt 2>&1
+   ```
+
+2. **Post-hook recording** — the SAME commands at the hook commit (a second
+   worktree or the same one re-checked out; separate CARGO_TARGET_DIR per
+   checkout) → `E:/tmp/si620-flag0-posthook.txt`.
+
+3. **The gate: `diff` the two stdout streams — must be BYTE-identical**
+   (same box, same env, no knobs touched). Every line is load-bearing:
+   the eager prefill digests @16/@128, the eager greedy ids + rolled digest,
+   the graph-lane twins (the devpos kernels the G3 harness drives), and the
+   `eager==graph ids:` line (its pre/post VALUE must match too, whatever it
+   records). A divergence in ANY line = the hook broke flag-0 — fix before
+   landing, never after.
+
+Notes: the two runs are correctness recordings — GPU-exclusivity is not
+load-bearing for the bytes, but the box-state law prefers a quiet box; the
+build competes for CPU with anything else on the box (bounded `-j` when the
+4090 carries the CPU G3 run). The gguf path is printed in the output —
+record which checkpoint the digests pin.
