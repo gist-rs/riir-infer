@@ -26,8 +26,10 @@ extraction history: **Proposal 041 (local `.proposals/`, moved from
 riir-ai)**. The
 laya/MSL encoder lane LANDED as `crates/riir-infer-laya` (the
 pinned-checkpoint encoder lane, consumed by the public decision-engine
-serving repo); remaining planned work: the CLEAN GPU kernel layer
-migration.
+serving repo); the scale-invariant attention lane LANDED 2026-10-11
+(opt-in `scale_invariant_attn` — `transformer/attention_si.rs` + the
+`si_zero_shot_ppl` G3 harness, katgpt-rs Plan 622's engine vehicle);
+remaining planned work: the CLEAN GPU kernel layer migration.
 
 ## Build Commands
 
@@ -44,6 +46,12 @@ cargo test --test issue028_disaggregated_handoff --features deltanet_ternary_inf
 # The EXL3 trellis lane (opt-in; issue 001, closed — record in .docs/001; CPU reference + fast arm here, GPU kernels in riir-infer-gpu; oracle = the CPU reference):
 cargo test --lib --features exl3
 cargo test -p riir-infer-gpu --features exl3_gpu,cuda_backend --lib  # native CUDA arm (release recommended)
+# The scale-invariant attention lane (opt-in `scale_invariant_attn`, implies
+# `deltanet_ternary_inference`; Plan 622 Phase 7 engine lane — the G3 zero-shot
+# vehicle on the packed Bonsai ternary decode path; canonical status lives in
+# ../katgpt-rs/.plans/622_scale_invariant_attn.md; GPU legs open, GPU-window-gated):
+cargo test --lib --features scale_invariant_attn   # 8 attention_si tests incl. 3 wiring e2e
+cargo build --release --features scale_invariant_attn,bonsai2_hadamard --bin si_zero_shot_ppl  # the G3 harness (its OWN required-features posture — the P43 law)
 # The encoder-lane crate (features mirror the names consumers forward):
 cargo check -p riir-infer-laya --features laya-riir
 cargo clippy -p riir-infer-laya --all-targets --features laya-riir-metal -- -D warnings
