@@ -48,7 +48,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Instant;
 
-use anyhow::{Context, Result, bail};
+use anyhow::{Context, Result, bail, ensure};
 use katgpt_core::scale_invariant::{HeadCalibration, ScaleInvariantLut, SpreadAccumulator};
 
 use riir_infer_core::corpus_text::load_corpus_text;
@@ -140,6 +140,7 @@ impl<'a> Rig<'a> {
     /// Feed `seq[from..=to]`; accumulate the NLL of `seq[p+1]` for scored
     /// positions `p >= score_from`. Zero-alloc hot loop (the buffers ride
     /// the rig).
+    #[allow(clippy::too_many_arguments)]
     fn feed(
         &mut self,
         seq: &[usize],
@@ -194,8 +195,7 @@ impl<'a> Rig<'a> {
     ) -> Vec<usize> {
         let mut out = Vec::with_capacity(steps);
         let mut token = next_token;
-        let mut pos = next_pos;
-        for _ in 0..steps {
+        for pos in next_pos..next_pos + steps {
             let logits = forward_qwen_deltanet_ternary(
                 x,
                 self.weights,
@@ -216,7 +216,6 @@ impl<'a> Rig<'a> {
             }
             out.push(best);
             token = best;
-            pos += 1;
         }
         out
     }
@@ -658,9 +657,7 @@ fn main() -> Result<()> {
                 for (fact, want, question) in FACTS {
                     let fact_tokens = tok.encode(fact);
                     let question_tokens = tok.encode(question);
-                    let budget = l
-                        .saturating_sub(fact_tokens.len() + question_tokens.len() + 1)
-                        .max(0);
+                    let budget = l.saturating_sub(fact_tokens.len() + question_tokens.len() + 1);
                     let k = budget / filler_tokens.len().max(1);
                     let mut prompt = vec![tok.bos_id()];
                     prompt.extend(fact_tokens.iter());
