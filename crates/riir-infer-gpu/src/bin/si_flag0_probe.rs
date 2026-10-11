@@ -1,10 +1,11 @@
 //! `si_flag0_probe` — riir-infer plan 620 Phase A's bit-identity recording.
 //!
-//! The scale-invariant decode hook (plan 620) enters `attention_decode_f32`
-//! + `_devpos` behind a runtime device flag. The plan's law: a flag-0 launch
-//! must reproduce the incumbent kernel's bytes. This bin is the RECORDING
-//! instrument for that gate — it is deliberately INDEPENDENT of the si
-//! feature so it runs unchanged at the PRE-HOOK commit:
+//! The scale-invariant decode hook (plan 620) enters the
+//! `attention_decode_f32` + `_devpos` kernels behind a runtime device flag.
+//! The plan's law: a flag-0 launch must reproduce the incumbent kernel's
+//! bytes. This bin is the RECORDING instrument for that gate — it is
+//! deliberately INDEPENDENT of the si feature so it runs unchanged at the
+//! PRE-HOOK commit:
 //!
 //! 1. At the pre-hook commit (the incumbent build): run, save stdout.
 //! 2. At the post-hook commit (flag 0 = the default posture): run again.
@@ -183,7 +184,7 @@ fn run() -> Result<(), String> {
     );
     println!(
         "graph greedy{greedy_n} rolled digest: {}",
-        hasher.finalize().to_hex().to_string()
+        hasher.finalize().to_hex()
     );
     println!(
         "eager==graph ids: {}",
