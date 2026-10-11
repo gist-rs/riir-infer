@@ -55,6 +55,42 @@ the reproduction is unreliable.
 
 ## Tasks
 
+- [x] **Pre-run substrate analysis (2026-10-11, CPU-side — SHARPENS the
+      hypothesis space before the window run):**
+      1. The file's original "suspected shape" (per-test context create/tear
+         down across parallel threads) is REFUTED by the shipped substrate:
+         `GpuContext::new()` is a process-global `OnceLock` since Issue 714
+         (one device, one CubeCL server, one pool — the comment records the
+         old 46-live-Vulkan-device leak it fixed) and Issue 719 serializes
+         init under `gpu_init_lock` (shared with `CubeCLContext::new`).
+         There is NO per-test adapter/device init or drop anywhere in the
+         suite. The sharing instead EXPLAINS THE TAIL SHAPE: one loss on
+         the shared device → every later test fails on buffers that became
+         silent invalid error objects.
+      2. The OOM-uncaptured path is RULED OUT by evidence already in the
+         tree: `pool_poison::install_uncaptured_handler` (installed on both
+         context paths since Issue 994) RECORDS and then RE-PANICS on every
+         uncaptured wgpu error. The recorded 16 failures were assertion/
+         buffer failures, not panics — so the loss moment did not surface
+         through the uncaptured channel.
+      3. That leaves the wgpu #10027 channel as the only SILENT loss path
+         (consistent with the callback gap found and closed above): a
+         driver-refused pipeline creation (CubeCL JIT/autotune kernel
+         compile — e.g. over-budget per-thread private memory) maps to
+         `DeviceError::Unexpected` → `lose()` → the `DeviceLost` error is
+         dropped, no panic, no uncaptured fire. NOTE for interpretation:
+         #10027's reporter says autotune compiles candidates at context
+         INIT — but CubeCL JIT kernel compilation is also per-shape lazy,
+         which fits a MID-SUITE loss (early tests pass; a later test
+         compiling a new specialization trips the refusal).
+      4. If the `--test-threads=1` A/B reads serial-GREEN, the concurrency
+         axis shifts from "concurrent init" (impossible — see 1) to
+         concurrent SUBMISSIONS/pool interleaving on the one shared device
+         perturbing the driver's compile path. If serial ALSO fails, expect
+         it to fail at the SAME test — a deterministic per-test kernel
+         compile trigger; the callback's `message=` string then names the
+         refused pipeline directly.
+
 - [x] **Callback instrumentation LANDED (2026-10-11, CPU-side):**
       `pool_poison::install_device_lost_handler` — the shared wgpu-30
       `set_device_lost_callback` installer (loud `[issue 039] DEVICE LOST:`
