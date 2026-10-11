@@ -31,12 +31,15 @@
 //! `{CARGO_MANIFEST_DIR}/../riir-train/data/Ternary-Bonsai-2-27B-PQ2_0.gguf`.
 //! Scale knobs (smoke postures): `B929_LOOPS`, `B929_TWO_HOP`,
 //! `B929_ONE_HOP`, `B929_FACTS`, `B929_ANSWER_TOKENS`, `B929_BOOTSTRAP`,
-//! `B929_MAX_QUERIES`, `B929_OUT` (JSON path). Framing knob: `B929_CHAT=1`
-//! wraps the prompt in the qwen chat scaffold (`<|im_start|>user\n…
-//! <|im_end|>\n<|im_start|>assistant\n` — the first smoke measured the
-//! model emitting `<|im_end|> <think> …` against the bare completion
-//! framing, i.e. it wants its chat template and thinks before answering;
-//! default OFF = the original completion posture, byte-identical).
+//! `B929_MAX_QUERIES`, `B929_OUT` (JSON path).
+//!
+//! `B929_CHAT=1` wraps each query in the qwen3 chat template with the
+//! empty-think prefix (`<think>\n\n</think>\n\n`) — the smoke posture that
+//! makes the chat/reasoning-tuned checkpoint answer IN the answer window
+//! instead of closing the document past `<|im_end|>` and opening its own
+//! think block (the 8-query completion-style smoke measured 0/8 two-hop
+//! correct; the special tokens ride the GGUF control-token matcher, one id
+//! each).
 
 use anyhow::{Context, Result};
 use katgpt_core::loop_alignment_probe::{
@@ -47,11 +50,12 @@ use riir_infer_core::deltanet::forward_qwen_deltanet_ternary;
 use riir_infer_core::deltanet::loop_probe::{
     LoopProbeScratch, argmax_of, embed_answer_token, looped_answer_position_probe,
 };
+use riir_infer_core::deltanet::ternary_forward::qwen_deltanet_ternary_layer_body;
 use riir_infer_core::deltanet::ternary_weights::QwenDeltaNetTernaryWeights;
 use riir_infer_core::gguf_loader::{GgufFile, load_qwen_deltanet_ternary_weights_gguf};
 use riir_infer_core::rope::RopeFreqTable;
 use riir_infer_core::tokenizer::BpeTokenizer;
-use riir_infer_core::types::Config;
+use riir_infer_core::types::{Config, DeltaNetLayerType};
 
 /// Caller-side loop depth at the answer position (loop 0 = the first stack
 /// pass over the embedded last token). The kimi legs used K=2; the paper's
@@ -170,38 +174,45 @@ fn run() -> Result<()> {
     );
 
     let max_queries = env_or("B929_MAX_QUERIES", usize::MAX);
-    let chat_framing = std::env::var("B929_CHAT").map(|v| v != "0").unwrap_or(false);
+    let skip_queries = env_or("B929_SKIP", 0);
+    let chat = std::env::var("B929_CHAT").is_ok_and(|v| v == "1");
     let queries: Vec<Query> = fixture
         .items
         .iter()
+        .skip(skip_queries)
         .take(max_queries)
-        .map(|item| Query {
-            is_two_hop: item.is_two_hop,
-            is_ood: item.is_ood,
-            // No BOS prepend — the qwen35 family serves completion-style
-            // without a leading BOS (the llama.cpp convention for qwen) —
-            // unless B929_CHAT=1 wraps the prompt in the chat scaffold the
-            // first smoke measured the model reaching for (<think> emission
-            // against the bare completion framing).
-            tokens: if chat_framing {
-                loaded.tokenizer.encode(&format!(
-                    "<|im_start|>user\n{}<|im_end|>\n<|im_start|>assistant\n",
+        .map(|item| {
+            // Chat-template elicitation (B929_CHAT=1): the completion-style
+            // axis reads 0% on the chat-tuned checkpoint (the model closes
+            // the document and opens <think>). The empty-think prefix is
+            // qwen3's non-thinking convention; specials are single ids via
+            // the GGUF control-token matcher.
+            let prompt = if chat {
+                format!(
+                    "<|im_start|>system\nAnswer with only the short answer. Do not think.<|im_end|>\n<|im_start|>user\n{}<|im_end|>\n<|im_start|>assistant\n<think>\n\n</think>\n\n",
                     item.prompt
-                ))
+                )
             } else {
-                loaded.tokenizer.encode(&item.prompt)
-            },
-            bridge_first: if item.bridge.is_empty() {
-                0
-            } else {
-                loaded
-                    .tokenizer
-                    .encode(&item.bridge)
-                    .first()
-                    .copied()
-                    .unwrap_or(0)
-            },
-            answer: item.answer.clone(),
+                item.prompt.clone()
+            };
+            Query {
+                is_two_hop: item.is_two_hop,
+                is_ood: item.is_ood,
+                // No BOS prepend — the qwen35 family serves completion-style
+                // without a leading BOS (the llama.cpp convention for qwen).
+                tokens: loaded.tokenizer.encode(&prompt),
+                bridge_first: if item.bridge.is_empty() {
+                    0
+                } else {
+                    loaded
+                        .tokenizer
+                        .encode(&item.bridge)
+                        .first()
+                        .copied()
+                        .unwrap_or(0)
+                },
+                answer: item.answer.clone(),
+            }
         })
         .collect();
     let queries_max_prompt = queries.iter().map(|q| q.tokens.len()).max().unwrap_or(0);
@@ -220,19 +231,21 @@ fn run() -> Result<()> {
     // rows[loop] — one Row per query, query order preserved.
     let mut rows: Vec<Vec<Row>> = vec![Vec::new(); loops];
 
-    // Bounded KV capacity (Issue 929, the measured smoke OOM): the GGUF's
-    // block_size IS the model's full context_length, so the unbounded
-    // HybridCache::with_layer_types pre-allocates ~2 GiB × 64 layers and
-    // aborts beside the loaded weights (exact-2^30 alloc failure). This run
-    // writes positions 0..prompt_len + answer_tokens only (the K stack
-    // passes stay AT answer_pos) — cap there plus slack.
-    let kv_cap = queries_max_prompt + answer_tokens + 16;
-
     for (qi, q) in queries.iter().enumerate() {
         // Fresh cache + scratch per query: the GDN recurrent state and the KV
         // cache must not carry across queries (the Bench-930 discipline).
-        let mut cache =
-            HybridCache::with_layer_types_bounded(&loaded.config, &loaded.weights.layer_types, kv_cap);
+        // Bounded KV capacity (the 4090 session's measured smoke OOM, 61fc36f):
+        // the GGUF's block_size IS the model's full context_length, so the
+        // unbounded ctor pre-allocates context-length KV for ALL 64 layers
+        // (>100 GiB commit demand) and aborts beside the loaded weights. This
+        // run writes positions 0..prompt_len + answer_tokens only (the K
+        // stack passes stay AT answer_pos) - cap there plus slack.
+        let kv_cap = queries_max_prompt + answer_tokens + 16;
+        let mut cache = HybridCache::with_layer_types_bounded(
+            &loaded.config,
+            &loaded.weights.layer_types,
+            kv_cap,
+        );
         let mut scratch = HybridForwardScratch::new(&loaded.config);
 
         // Prefill all but the last prompt token through the STOCK forward
@@ -252,10 +265,30 @@ fn run() -> Result<()> {
         let answer_pos = q.tokens.len() - 1;
         let last = *q.tokens.last().expect("non-empty prompt");
 
+        // Label-axis integrity: the loop passes ADVANCE the GDN recurrent/conv
+        // state once per pass and overwrite the answer position's KV rows —
+        // "that IS the loop" (loop_probe.rs). The reinject arm is Phase 2
+        // (closed unbuilt), so the ACCURACY continuation must not read the
+        // K-pass state: snapshot post-prefill, probe, restore, then re-run
+        // ONE stock pass on the original embedding — the exact state a stock
+        // decode of the prompt's last token would hold (K=1 is gate-pinned
+        // bit-identical to the stock forward).
+        let gdn_snapshot: Vec<(Vec<f32>, Vec<f32>)> = cache
+            .deltanet_state
+            .recurrent_states
+            .iter()
+            .zip(&cache.deltanet_state.conv_states)
+            .map(|(r, c)| (r.clone(), c.clone()))
+            .collect();
+        let kv_snapshot = cache
+            .kv_cache
+            .snapshot(answer_pos + 1, &loaded.config);
+
         // Embed once, then K weight-shared stack passes with per-loop probes
         // (the shared machinery — same code the gates test).
         embed_answer_token(&mut x, &loaded.weights, last);
-        let mut current = looped_answer_position_probe(
+        let answer_emb = x[..n].to_vec();
+        let probed_first = looped_answer_position_probe(
             &mut x,
             &loaded.weights,
             &mut cache,
@@ -268,6 +301,35 @@ fn run() -> Result<()> {
             &mut probe_scratch,
             &mut probe_rows,
         );
+
+        // Rebuild the clean stock post-answer-token state: pre-loop GDN/KV
+        // back, original embedding back, ONE stock stack pass.
+        for (li, (r, c)) in gdn_snapshot.iter().enumerate() {
+            cache.deltanet_state.recurrent_states[li].copy_from_slice(r);
+            cache.deltanet_state.conv_states[li].copy_from_slice(c);
+        }
+        cache.kv_cache.restore(&kv_snapshot, &loaded.config);
+        x[..n].copy_from_slice(&answer_emb);
+        for (li, layer_weights) in loaded.weights.layers.iter().enumerate() {
+            let is_linear = loaded.weights.layer_types[li] == DeltaNetLayerType::DeltaNet;
+            qwen_deltanet_ternary_layer_body(
+                &mut x,
+                layer_weights,
+                is_linear,
+                &mut cache.deltanet_state.recurrent_states[li],
+                &mut cache.deltanet_state.conv_states[li],
+                &mut cache.kv_cache.layers[li],
+                answer_pos,
+                &loaded.config,
+                &mut scratch,
+                &loaded.rope_freq,
+                loaded.weights.rotation.as_ref(),
+                None,
+                None,
+                None,
+            );
+        }
+        let mut current = probed_first;
 
         // Greedy continuation from the loop-refined readout, stock forward
         // per token (the loop intervention was answer-position only).
@@ -320,11 +382,11 @@ fn run() -> Result<()> {
     // ── Report ───────────────────────────────────────────────────────────
     println!("# issue929 Bonsai-2-27B (PQ2_0) loop-alignment probe");
     println!(
-        "# model={model_path} | head={} | fixture: {} queries, facts={}, loops={loops} | framing: {}",
+        "# model={model_path} | head={} | fixture: {} queries, facts={}, loops={loops}{}",
         if loaded.untied { "untied" } else { "tied" },
         queries.len(),
         spec.facts_per_prompt,
-        if chat_framing { "chat" } else { "completion" },
+        if chat { " | elicitation=chat" } else { "" },
     );
     println!("# score cells are point/lb95 (stratified bootstrap, {bootstrap_iters} iters)");
     println!("loop,split,n,acc,bridge_top1,auroc_cos_argmax,auroc_margin,auroc_cos_bridge");
