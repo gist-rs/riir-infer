@@ -115,5 +115,19 @@ the reproduction is unreliable.
   pipeline creation to a surfaceable `PipelineError` instead of
   `DeviceError::Unexpected` — a vendor-patch candidate for `wgpu-hal-30.0.0` if
   the fixture-level callback proves insufficient. Related upstream: #9511
-  (map_async callbacks dropped on device loss), #9029 (hal error escalated to
-  device loss too eagerly).
+  (map_async callbacks dropped on device loss), #9029 (hal error escalated
+  to device loss too eagerly).
+- **Static scratch audit (2026-10-11, CPU-side, same session as the callback
+  landing):** the hand-written eDLM kernels carry NO fixed-size per-thread
+  private arrays — `edlm_cubecl/mod.rs` + `attention_cubecl/` grep for
+  `let mut [T; N]` local arrays returns zero kernel-side hits (the only
+  `vec!` matches are host-side test code); every `staging`/`scratch` in the
+  lane is DEVICE-buffer staging (`PassStaging`, allocated through the
+  compute client = workgroup/device memory, not per-thread private). So
+  OUR code has no >16 MiB/thread private face. The remaining exposure is
+  the vendored cubecl-0.11.0-pre.2 matmul autotune codegen (where the
+  #10027 reporter's over-budget candidate lived) — not statically decidable
+  without compiling the candidates; that half is owned at the window by the
+  now-installed callback (the hal trigger string names the refused pipeline)
+  and stays SECONDARY to the concurrency hypothesis the serial A/B tests
+  first.
