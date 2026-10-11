@@ -386,6 +386,12 @@ impl CubeCLContext {
             // after this uncached path ran once.
             crate::pool_poison::ensure_hooks_installed();
             crate::pool_poison::install_uncaptured_handler(&setup.device);
+            // Issue 039: the device-lost callback is a SEPARATE channel from
+            // the uncaptured-error handler above — wgpu-core drops the
+            // DeviceLost error entirely (wgpu #10027), so without this line a
+            // lost device is invisible until later tests fail on buffers
+            // that were never invalidated.
+            crate::pool_poison::install_device_lost_handler(&setup.device);
             apply_optional_memory_config(&client);
             // Issue 994: probe the adapter's video memory once (vendored
             // wgpu-hal accessors). Best-effort — `None` skips the pre-flight

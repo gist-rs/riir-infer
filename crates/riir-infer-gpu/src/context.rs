@@ -245,20 +245,16 @@ impl GpuContext {
 
         // riir-train .issues/511 (the sixth probe): device loss was 100%
         // INVISIBLE in this stack — wgpu's error sink DROPS DeviceLost-class
-        // errors by design ("surfaced via callback"), no callback was
-        // registered, and the only downstream symptom is buffers coming back
-        // as silent invalid error objects that die at `map_async` with a
-        // generic validation error. That is the entire mechanism behind the
-        // dllm-8/gdsd concurrency census rows. Registering the callback makes
-        // the loss moment + its message visible ONCE, loudly, the instant it
-        // happens — `lose()` fires this with the originating hal error string
-        // (e.g. "Out of memory"), which names the real trigger.
-        device.set_device_lost_callback(|reason, message| {
-            eprintln!(
-                "[riir-gpu] DEVICE LOST: reason={reason:?} message={message:?} — every \
-                 buffer created after this point is a silent invalid error object"
-            );
-        });
+        // errors by design ("surfaced via callback"), and the only downstream
+        // symptom is buffers coming back as silent invalid error objects that
+        // die at `map_async` with a generic validation error. That is the
+        // entire mechanism behind the dllm-8/gdsd concurrency census rows.
+        // The shared helper (pool_poison, Issue 039) makes the loss moment +
+        // its message visible ONCE, loudly — `lose()` fires it with the
+        // originating hal error string (e.g. "Out of memory"), which names
+        // the real trigger — and records it into the poison state so no
+        // post-loss result leaves the process as a successful return.
+        crate::pool_poison::install_device_lost_handler(&device);
 
         let limits = device.limits();
         // Issue 714: pin the negotiated binding limit per process — the

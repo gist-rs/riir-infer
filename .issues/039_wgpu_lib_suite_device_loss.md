@@ -42,15 +42,38 @@ cargo test -p riir-infer-gpu --features edlm_gpu --lib
 cargo test -p riir-infer-gpu --features edlm_gpu --lib -- --test-threads=1
 ```
 
+The repro binary now carries the device-lost callback (landed 2026-10-11,
+see Tasks): at the loss moment stderr prints
+`[issue 039] DEVICE LOST: reason=... message=...` — CAPTURE THAT LINE; it
+names the real trigger (the hal error string) and is the reproduction's
+primary evidence, not the 16 failures that follow it. The callback also
+records into the pool_poison state (`poisoned()` → `Some`).
+
 ⚠ 4090-box discipline: run EXCLUSIVE (no trainer/bench alongside) — the device-loss
 class is exactly the one contention can mimic. First run must be a clean-box run or
 the reproduction is unreliable.
 
 ## Tasks
 
+- [x] **Callback instrumentation LANDED (2026-10-11, CPU-side):**
+      `pool_poison::install_device_lost_handler` — the shared wgpu-30
+      `set_device_lost_callback` installer (loud `[issue 039] DEVICE LOST:`
+      line + pool_poison record). The GAP was `CubeCLContext::new_uncached`
+      (the edlm suite's path): it installed the uncaptured-error handler
+      but NOT the device-lost callback — and the wgpu #10027 mechanism
+      routes `lose()` through the callback channel ONLY, so device loss was
+      100% invisible on that path (the uncaptured handler never fires for
+      it). `GpuContext::new_async` (context.rs) already had an inline
+      callback — refactored onto the shared helper, which ALSO adds
+      poison-state recording there (a post-loss result now refuses at the
+      poison reads). Clippy-clean at the edlm_gpu posture; pool_poison unit
+      tests 2/2; the staged repro binary in `E:\tmp\infer038` rebuilt with
+      the callback.
 - [ ] Reproduce at HEAD on a free-4090 window; capture the failure shape (device
       lost vs adapter error vs panic in teardown) — record which of the 16 fail and
-      whether the same 16 fail twice in a row.
+      whether the same 16 fail twice in a row. PRIMARY evidence: the
+      `[issue 039] DEVICE LOST:` line + its `message=` (the driver's
+      originating hal error string).
 - [ ] The `--test-threads=1` A/B (serial vs parallel).
 - [ ] Fix at the root: shared lazily-initialized adapter/context fixture (or the
       root the A/B points at), not per-test retry retries.

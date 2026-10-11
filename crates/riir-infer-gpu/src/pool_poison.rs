@@ -20,6 +20,12 @@
 //!    `create_buffer` is infallible and reports OOM through the handler)
 //!    records the error first, then re-panics with wgpu's default phrase
 //!    so the error site stays exactly as loud as the handler it replaces.
+//! 3. **Device-lost callback** (Issue 039, wgpu #10027 class) — a lost
+//!    device is DROPPED silently by wgpu-core (the `DeviceLost` error
+//!    never reaches the uncaptured-error channel), so it needs its own
+//!    callback. Recorded into the poison state: every buffer created
+//!    after the loss moment is a silent invalid error object, so no
+//!    result this process produces afterwards can be trusted either.
 //!
 //! [`poisoned()`] is the single read: `None` = healthy (one relaxed
 //! atomic load); `Some(detail)` = a pool failure was observed since
@@ -127,6 +133,41 @@ pub fn install_uncaptured_handler(device: &wgpu::Device) {
             panic!("Handling wgpu errors as fatal by default");
         });
     device.on_uncaptured_error(handler);
+}
+
+/// Device-lost callback (Issue 039; mechanism named by gfx-rs/wgpu #10027).
+///
+/// wgpu-hal maps every non-OOM device-side failure (a driver-refused
+/// `vkCreateComputePipelines` among them — e.g. a CubeCL autotune candidate
+/// whose per-thread scratch exceeds the driver budget) to
+/// `DeviceError::Unexpected`, wgpu-core's `handle_hal_error` calls `lose()`
+/// on `Unexpected`, and the resulting `DeviceLost` error is DROPPED with no
+/// error scope, no uncaptured-handler fire — the only witness is this
+/// callback. Without it the loss is invisible until later `map_async` calls
+/// answer "buffer is invalid" for buffers that were never invalidated
+/// (exactly the edlm `--lib` suite's 16-failure tail, Issue 039).
+///
+/// Prints the loss moment + the driver's originating message ONCE (the hal
+/// error string names the real trigger) and records it into the poison
+/// state — every result this process produces after the loss is
+/// untrustworthy. Installed on BOTH device-creation paths
+/// (`GpuContext::new_async` and `CubeCLContext::new_uncached`); wgpu allows
+/// one callback per device and the two paths create distinct devices.
+///
+/// Deliberately does NOT panic (unlike the uncaptured handler): the callback
+/// fires asynchronously on a wgpu-internal thread where a panic would abort
+/// the process and destroy the suite's failure topology — the goal is a
+/// loud, attributable line beside whatever failures follow, not a different
+/// failure shape.
+pub fn install_device_lost_handler(device: &wgpu::Device) {
+    device.set_device_lost_callback(|reason, message| {
+        let detail = format!(
+            "DEVICE LOST: reason={reason:?} message={message:?} — every buffer \
+             created after this point is a silent invalid error object"
+        );
+        eprintln!("[issue 039] {detail}");
+        record(detail);
+    });
 }
 
 #[cfg(test)]
