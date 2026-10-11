@@ -1,6 +1,6 @@
 # Issue 038 — the n=3-8 decode band on Ada: adopt the dp4a multi-column mat-vec mechanism (distill Lead 12, prism #306)
 
-**Status:** OPEN — the port is LANDED (`48d598e`, 2026-10-10: kernel + handler + CPU-only NVRTC compile gate, `cargo clippy -p riir-infer-gpu --features ternary_gemv_cuda_raw --all-targets` clean); the GPU gates remain owed on a free 4090 lane (the plan437 T0.1 trainer holds the box — was step 2050/10000 at ~11 s/step when the port landed, ~24 h to completion at that rate; the 06:30 estimate below was the filer's, overtaken by the measured step time)
+**Status:** OPEN — port LANDED (`48d598e`); **unit gates 5/5 GREEN 2026-10-11** (`04a4f98` — first GPU run caught two harness defects, kernel correct, bit-parity holds; run beside the trainer, safe as deterministic gates); REMAINING on the exclusive window: the real-weight T3a gate (release, `-- --ignored`), the `multicol_ab` bench (record = bench 035), then the 039 repro/A-B legs
 
 ## The lead (provenance)
 
@@ -171,12 +171,29 @@ survives the snapshot.
    repro/A-B legs. The lib code is unchanged (tests-only edit) — the staged
    `multicol_ab` example + the edlm repro binary stay fingerprint-valid.
 
-1. Unit gates: `cargo test -p riir-infer-gpu --features ternary_gemv_cuda_raw --lib
-   gemv_ternary_multicol` — bit-parity vs n=1, CPU-reference tolerance (mean_rel < 2%,
-   max_rel < 5%), shape rejections, quantizer round-trip (round-trip + nvrtc already
-   green CPU-side 2026-10-10). A parity mismatch = FMA
-   contraction divergence between the two NVRTC units: fix the expression shape, never
-   weaken the assert.
+1. Unit gates: ~~`cargo test -p riir-infer-gpu --features ternary_gemv_cuda_raw --lib
+   gemv_ternary_multicol`~~ — **DONE 2026-10-11 20:3x–20:5x, run beside the trainer**
+   (safe: deterministic correctness gates, ~2 GB VRAM vs ~10 free; SM sharing
+   changes latency, never results — and bit-parity would break under any
+   real corruption): **5/5 GREEN** (worktree `04a4f98`). The FIRST run
+   found 2 failures — both **harness defects, not kernel defects** (the
+   diagnostic chain is the commit message): (a) G1's float-input CPU
+   reference is seed-luck-fragile — a token whose true dot cancels to ~4e-5
+   reads mean_rel 1.1e2 against ~1.7e-2 of LEGITIMATE int8 activation
+   noise (max_rel 445 = exactly 0.0168/0.000038); fixed by making the
+   oracle deterministic: reconstruct x_q = round(x/d)·d per 16-block (the
+   quantizer formula the roundtrip test already pins) and gate against
+   THAT — measured mean_rel **3.2e-6**, max_rel 1.2e-5 (float-association
+   class; 10⁴× tighter than the 2% bar — a STRONGER gate, not a weakened
+   one). (b) the shape-rejection probe's `out` buffer was 2·m where the
+   output-mismatch arm slices [..4·m−1] — the probe panicked on its own
+   slice before reaching the handler; buffer now 4·m. Bit-parity with the
+   n=1 kernel held through every run (all tokens 3–8). ⚠ Follow-up noted
+   for the Issue-608 lane: the n=1 module's own G1
+   (`test_dp4a_matches_cpu_within_int8_tolerance`) carries the SAME
+   seed-luck denominator and passes only because 0xCAFEBABE produced no
+   cancellation — same one-line oracle fix applies when that lane touches
+   it next.
 2. Task-level argmax agreement at the verify posture (Issue 608 T3a class).
 3. Paired bench: n∈{3..8}, `gemv_ternary_cuda_raw` vs this arm vs
    `gemm_ternary_i8_mma_cuda_raw` (plan 612 G2 alternating-run pairing runbook),
