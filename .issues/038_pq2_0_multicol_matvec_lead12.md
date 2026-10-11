@@ -150,6 +150,26 @@ survives the snapshot.
    E:/git/wt038infer/Cargo.toml -p riir-infer-gpu --features
    ternary_gemv_cuda_raw --lib gemv_ternary_multicol` (the bench likewise with
    `build --release --example multicol_ab`). Cleanup rides the 039 note.
+0.7. **STEP-2 GATE AUTHORED (2026-10-11 ~18:0x–18:4x, pickup session, trainer
+   still holds the box):** the T3a-class task gate now EXISTS — worktree commit
+   `f1e5319` (on `0767c01`): `test_multicol_real_weights_bit_parity_and_argmax`
+   in the multicol module, `#[ignore]`d (needs BONSAI_GGUF + exclusive GPU).
+   Design: loads the real league GGUF, samples down_proj of layers 0/mid/last
+   (real group scales + real ternary patterns — the classes synthetic weights
+   hide), runs n=1 loop vs `forward_multicol` at tokens {3,5,8}, asserts
+   per-element `to_bits` parity + per-token argmax agreement. Scope note: the
+   argmax-vs-CPU-float-reference question is the n1 family's own open T3a
+   (the dp4a int8-activation class); THIS gate closes 038's task-level claim —
+   swapping n1→multicol changes no task output. Clippy-clean + fmt-clean at
+   the posture (the clippy "1 warning" per unit is cargo's hard-link
+   diagnostic — E: does not hard-link; zero real lints). Pre-built BOTH
+   postures CPU-side: debug unit-gate binary (rebuilt with the gate) + the
+   RELEASE test binary `riir_infer_gpu-d576543fa79350cc.exe` (the 27B load
+   is minutes in release vs far worse in debug — run the gate at
+   `cargo test --release ... -- --ignored`). Window sequence is now:
+   unit gates → real-weight gate (release) → `multicol_ab` bench → the 039
+   repro/A-B legs. The lib code is unchanged (tests-only edit) — the staged
+   `multicol_ab` example + the edlm repro binary stay fingerprint-valid.
 
 1. Unit gates: `cargo test -p riir-infer-gpu --features ternary_gemv_cuda_raw --lib
    gemv_ternary_multicol` — bit-parity vs n=1, CPU-reference tolerance (mean_rel < 2%,
