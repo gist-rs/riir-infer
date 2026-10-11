@@ -126,8 +126,10 @@ is katgpt-rs CPU x86_64) — corrected premises from the survey.
       forward reads rope from device tables" condition is FALSE). The CPU
       run's pre-recorded expected-FAIL row stands as the demonstration; a GPU
       pp lane would need a masked-table rope kernel — its own slice if ever
-      needed. RESIDUE: the `--retrieval` needle probe is not ported yet (the
-      CPU rows cover it; a small follow-up once the rig runs).
+      needed. RESIDUE CLOSED (0929fcb, 2026-10-11): the `--retrieval` needle
+      probe is ported — second pass after the G3 table, the CPU printer's row
+      shape, arm-major grouping (documented divergence), first live exercise
+      rides the GPU G3 run.
       ⚠ The bin requires ONLY `cuda_graphs_forward` + the folded loader — NOT
       `scale_invariant_attn` — so the `base` arm (and `--dump-logits`)
       runs on an UNHOOKED build: the cross-build byte-compare is executable
