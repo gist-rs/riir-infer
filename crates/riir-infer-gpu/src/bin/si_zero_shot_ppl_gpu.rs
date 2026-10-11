@@ -317,9 +317,207 @@ fn run() -> Result<(), String> {
     }
 
     if args.retrieval {
-        println!("# retrieval probe: not ported to the GPU lane yet (Plan 620 Phase C follow-up)");
+        retrieval_probe(&args, &mut fwd, &config, &weights, &tok)?;
     }
     Ok(())
+}
+
+/// The needle probe (the CPU harness's `--retrieval` leg, GPU lane): a fact
+/// at the head of the prompt, filler to the rung length, the question at the
+/// tail, 6 greedy tokens — the CPU printer's exact row shape (`#   L=<n>
+/// <arm>  [want: HIT|MISS]…`), self-describing per row.
+///
+/// Second pass, NOT folded into [`run_arms`]: the CPU probe prints AFTER the
+/// G3 table, and the sessions were consumed there — so this rebuilds its own
+/// (LUT upload + sidecar parse are cheap; attach → recapture ~1 s/arm is
+/// noise against the probe). One DIVERGENCE from the CPU lane, deliberate:
+/// rows group ARM-major (attach once per arm, both rungs inner) where the
+/// CPU re-arms per (rung, arm) and prints rung-major — a session is
+/// consumed by `attach_si`, so per-rung
+/// re-attach would need a second build per arm for no informational gain;
+/// every row names its own L + arm. The final `detach_si` leaves the
+/// incumbent posture behind, the same law run_arms ends under.
+fn retrieval_probe(
+    args: &Args,
+    fwd: &mut TernaryDeltanetGpuForwardCudarc,
+    config: &Config,
+    weights: &QwenDeltaNetTernaryWeights,
+    tok: &BpeTokenizer,
+) -> Result<(), String> {
+    let _ = weights; // used only behind scale_invariant_attn (n_layers)
+
+    println!("\n# retrieval probe (needle at the head, question at the tail, 6 greedy tokens)");
+    const FACTS: [(&str, &str, &str); 2] = [
+        (
+            "The codeword of the amber lantern is ZEBRA.",
+            "zebra",
+            "Question: What is the codeword of the amber lantern? Answer:",
+        ),
+        (
+            "The password of the blue gate is RIVER.",
+            "river",
+            "Question: What is the password of the blue gate? Answer:",
+        ),
+    ];
+    const FILLER: &str =
+        " The merchant walked along the road and counted his coins under the afternoon sun.";
+    const RETRIEVAL_RUNGS: [usize; 2] = [1024, 2048];
+    let filler_tokens = tok.encode(FILLER);
+
+    #[cfg(feature = "scale_invariant_attn")]
+    let lut = katgpt_core::scale_invariant::ScaleInvariantLut::build(args.tau, config.block_size);
+    #[cfg(feature = "scale_invariant_attn")]
+    let calibration = if args.arms.contains(&Arm::SiCal) {
+        let path = args.cal_sidecar.as_ref().expect("checked at parse");
+        let bytes =
+            std::fs::read(path).map_err(|e| format!("cal sidecar {}: {e}", path.display()))?;
+        Some(
+            katgpt_core::scale_invariant::HeadCalibration::from_sidecar(&bytes)
+                .map_err(|e| format!("cal sidecar: {e}"))?,
+        )
+    } else {
+        None
+    };
+    // Sessions built per arm up front, consumed at their loop turn. The
+    // pp-RoPE arm gets `None` — it SKIPs before any attach (no wasted device
+    // buffers, and it must never be mistaken for the base posture).
+    #[cfg(feature = "scale_invariant_attn")]
+    let sessions: Vec<(Arm, Option<riir_infer_gpu::SiGpuSession>)> = {
+        let n_head = config.n_head;
+        let n_layers = weights.layers.len();
+        let stream = fwd.infra.stream.clone();
+        let mut v = Vec::with_capacity(args.arms.len());
+        for arm in &args.arms {
+            let s = match arm {
+                Arm::Base | Arm::SiPprope => None,
+                Arm::Si => Some(
+                    riir_infer_gpu::SiGpuSession::attach(&stream, &lut, None, n_layers, n_head)
+                        .map_err(|e| format!("si session: {e}"))?,
+                ),
+                Arm::SiCal => Some(
+                    riir_infer_gpu::SiGpuSession::attach(
+                        &stream,
+                        &lut,
+                        calibration.as_ref(),
+                        n_layers,
+                        n_head,
+                    )
+                    .map_err(|e| format!("si-cal session: {e}"))?,
+                ),
+            };
+            v.push((*arm, s));
+        }
+        v
+    };
+    #[cfg(not(feature = "scale_invariant_attn"))]
+    let sessions: Vec<(Arm, ())> = args.arms.iter().map(|arm| (*arm, ())).collect();
+
+    for (arm, session) in sessions {
+        // The pp-RoPE arm: the same honest SKIP run_arms prints — no device
+        // rope table on this lane, the CPU row is the record.
+        if arm == Arm::SiPprope {
+            println!(
+                "# arm {}: SKIP — the GPU rope kernels compute inv_freq inline from theta_base; \
+                 there is no device rope table for the pp-RoPE mask to ride (Plan 620). \
+                 The CPU harness's pre-recorded expected-FAIL row stands.",
+                arm.name()
+            );
+            continue;
+        }
+        #[cfg(feature = "scale_invariant_attn")]
+        if let Some(s) = session {
+            fwd.attach_si(s);
+            fwd.arm_si(true).map_err(|e| e.to_string())?;
+        } else {
+            fwd.detach_si();
+        }
+        #[cfg(not(feature = "scale_invariant_attn"))]
+        let _ = &session; // the off-arm tuple's () — no session to consume
+        #[cfg(not(feature = "scale_invariant_attn"))]
+        if arm != Arm::Base {
+            println!(
+                "# arm {}: SKIP — built without scale_invariant_attn (add the feature for the si arms)",
+                arm.name()
+            );
+            continue;
+        }
+        for &l in &RETRIEVAL_RUNGS {
+            let row = probe_row_line(fwd, tok, arm, l, config.block_size, &FACTS, &filler_tokens)?;
+            println!("{row}");
+        }
+    }
+    #[cfg(feature = "scale_invariant_attn")]
+    fwd.detach_si();
+
+    Ok(())
+}
+
+/// One retrieval row — feed the prompt through the graph lane, greedy 6 off
+/// the final prompt token, decode, substring-check. The reset is per FACT
+/// (the CPU probe's `cache.reset()` placement).
+fn probe_row_line(
+    fwd: &mut TernaryDeltanetGpuForwardCudarc,
+    tok: &BpeTokenizer,
+    arm: Arm,
+    l: usize,
+    block_size: usize,
+    facts: &[(&str, &str, &str); 2],
+    filler_tokens: &[usize],
+) -> Result<String, String> {
+    let mut row = format!("#   L={l:>5} {}", arm.name());
+    for &(fact, want, question) in facts {
+        let fact_tokens = tok.encode(fact);
+        let question_tokens = tok.encode(question);
+        let budget = l.saturating_sub(fact_tokens.len() + question_tokens.len() + 1);
+        let k = budget / filler_tokens.len().max(1);
+        let mut prompt = Vec::with_capacity(
+            1 + fact_tokens.len() + k * filler_tokens.len() + question_tokens.len(),
+        );
+        prompt.push(tok.bos_id());
+        prompt.extend_from_slice(&fact_tokens);
+        for _ in 0..k {
+            prompt.extend_from_slice(filler_tokens);
+        }
+        prompt.extend_from_slice(&question_tokens);
+        if prompt.len() > block_size - 8 {
+            row.push_str("  SKIP(prompt>block)");
+            continue;
+        }
+        fwd.reset_state().map_err(|e| e.to_string())?;
+        let feed_to = prompt.len() - 1;
+        // The feed leg's logits are never consumed — only the FINAL prompt
+        // token's forward (below) selects the first generated token (the CPU
+        // rig's `greedy(prompt[feed_to], feed_to, 6, …)` seeding).
+        for &t in &prompt[..feed_to] {
+            fwd.forward_token_graph(t).map_err(|e| e.to_string())?;
+        }
+        let mut logits = fwd
+            .forward_token_graph(prompt[feed_to])
+            .map_err(|e| e.to_string())?;
+        let mut next = argmax(&logits);
+        let mut generated = Vec::with_capacity(6);
+        generated.push(next);
+        while generated.len() < 6 {
+            logits = fwd.forward_token_graph(next).map_err(|e| e.to_string())?;
+            next = argmax(&logits);
+            generated.push(next);
+        }
+        let hit = tok.decode(&generated).to_lowercase().contains(want);
+        row.push_str(&format!("  [{want}: {}]", if hit { "HIT" } else { "MISS" }));
+    }
+    Ok(row)
+}
+
+fn argmax(logits: &[f32]) -> usize {
+    let mut best = 0usize;
+    let mut best_l = f32::NEG_INFINITY;
+    for (i, &l) in logits.iter().enumerate() {
+        if l > best_l {
+            best_l = l;
+            best = i;
+        }
+    }
+    best
 }
 
 /// The arm loop: one session state per arm, the rung ladder per arm. The GPU
