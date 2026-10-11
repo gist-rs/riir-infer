@@ -91,7 +91,9 @@ impl SiDecodeArgs<'_> {
     pub fn window_for(&self, layer_idx: usize, n_head: usize) -> SiDecodeLayerArgs<'_> {
         SiDecodeLayerArgs {
             lut: self.lut,
-            inv_sigma: self.inv_sigma.slice(layer_idx * n_head..(layer_idx + 1) * n_head),
+            inv_sigma: self
+                .inv_sigma
+                .slice(layer_idx * n_head..(layer_idx + 1) * n_head),
             enabled: self.enabled,
         }
     }
@@ -443,7 +445,9 @@ extern "C" __global__ void kv_cache_append_f32(
 // CPU reference is riir-infer `transformer::attention_si::si_head` pass 1):
 //
 //     score = (pos == 0) ? raw : a[dist] * (raw * inv_sigma_h) + m[dist]
-//     dist  = (n_positions - 1) - pos        (decode: query_pos = n_positions-1)
+//     dist  = query_pos - pos                 (decode: query_pos = n_positions-1)
+//                                            (prefill: the FA body passes the
+//                                             element's own absolute query pos)
 //
 // with (a, m) the interleaved LUT pair at `dist` and `inv_sigma_h` the head's
 // measured 1/σ (1.0 = the neutral pass-through). Key 0 is the sink carve-out
@@ -462,12 +466,12 @@ extern "C" __global__ void kv_cache_append_f32(
 // no recapture (the Issue-618 devpos law applied to the si state).
 // ---------------------------------------------------------------------------
 __device__ __forceinline__ float si_transform_score(
-    float raw, int pos, int n_positions, int head_idx,
+    float raw, int pos, int query_pos, int head_idx,
     const float* __restrict__ si_lut,
     const float* __restrict__ si_inv_sigma)
 {
     if (pos == 0) return raw;  // sink carve-out (App. J)
-    const int dist = n_positions - 1 - pos;
+    const int dist = query_pos - pos;
     const float a = si_lut[2 * dist];
     const float m = si_lut[2 * dist + 1];
     return __fadd_rn(__fmul_rn(a, __fmul_rn(raw, si_inv_sigma[head_idx])), m);
@@ -534,10 +538,10 @@ extern "C" __global__ void attention_decode_f32(
             my_score = dot * scale;
             // Plan 620 — the schedule affine, BEFORE the tile-max pass: the
             // max must track the TRANSFORMED row (what the softmax sees; the
-            // CPU si_head contract).
+            // CPU si_head contract). query_pos = n_positions - 1 (decode).
             if (si_on != 0) {
-                my_score = si_transform_score(my_score, pos, n_positions, head_idx,
-                                              si_lut, si_inv_sigma);
+                my_score = si_transform_score(my_score, pos, n_positions - 1,
+                                              head_idx, si_lut, si_inv_sigma);
             }
         }
         smem[tid] = my_score;
@@ -782,8 +786,8 @@ extern "C" __global__ void attention_decode_f32_devpos(
             my_score = dot * scale;
             // Plan 620 — same hook as the scalar twin (shared helper).
             if (si_on != 0) {
-                my_score = si_transform_score(my_score, pos, n_positions, head_idx,
-                                              si_lut, si_inv_sigma);
+                my_score = si_transform_score(my_score, pos, n_positions - 1,
+                                              head_idx, si_lut, si_inv_sigma);
             }
         }
         smem[tid] = my_score;
@@ -6050,8 +6054,16 @@ mod tests {
 
         kernels
             .launch_attention_decode(
-                &stream, &q_dev, &k_dev, &v_dev, &out_dev, head_dim, n_head, n_kv_head,
-                n_positions, None,
+                &stream,
+                &q_dev,
+                &k_dev,
+                &v_dev,
+                &out_dev,
+                head_dim,
+                n_head,
+                n_kv_head,
+                n_positions,
+                None,
             )
             .expect("launch");
         stream.synchronize().expect("sync");
@@ -6135,8 +6147,16 @@ mod tests {
 
         kernels
             .launch_attention_decode(
-                &stream, &q_dev, &k_dev, &v_dev, &out_dev, head_dim, n_head, n_kv_head,
-                n_positions, None,
+                &stream,
+                &q_dev,
+                &k_dev,
+                &v_dev,
+                &out_dev,
+                head_dim,
+                n_head,
+                n_kv_head,
+                n_positions,
+                None,
             )
             .expect("launch");
         stream.synchronize().expect("sync");
@@ -6215,8 +6235,16 @@ mod tests {
         let out_s = stream.alloc_zeros::<f32>(q_len).unwrap();
         kernels
             .launch_attention_decode(
-                &stream, &q_dev, &k_dev, &v_dev, &out_s, head_dim, n_head, n_kv_head,
-                n_positions, None,
+                &stream,
+                &q_dev,
+                &k_dev,
+                &v_dev,
+                &out_s,
+                head_dim,
+                n_head,
+                n_kv_head,
+                n_positions,
+                None,
             )
             .expect("scalar");
 
@@ -6307,17 +6335,21 @@ mod tests {
         // Session-shaped buffers: LUT sized to n_positions distances,
         // inv_sigma one entry per head.
         let lut_identity = stream
-            .clone_htod(&std::iter::repeat_n(1.0f32, n_positions * 2)
-                .enumerate()
-                .map(|(i, one)| if i % 2 == 1 { 0.0 } else { one })
-                .collect::<Vec<f32>>())
+            .clone_htod(
+                &std::iter::repeat_n(1.0f32, n_positions * 2)
+                    .enumerate()
+                    .map(|(i, one)| if i % 2 == 1 { 0.0 } else { one })
+                    .collect::<Vec<f32>>(),
+            )
             .unwrap();
         let inv_identity = stream.clone_htod(&vec![1.0f32; n_head]).unwrap();
         let lut_affine = stream
-            .clone_htod(&std::iter::repeat_n(2.0f32, n_positions * 2)
-                .enumerate()
-                .map(|(i, two)| if i % 2 == 1 { 1.0 } else { two })
-                .collect::<Vec<f32>>())
+            .clone_htod(
+                &std::iter::repeat_n(2.0f32, n_positions * 2)
+                    .enumerate()
+                    .map(|(i, two)| if i % 2 == 1 { 1.0 } else { two })
+                    .collect::<Vec<f32>>(),
+            )
             .unwrap();
         let inv_half = stream.clone_htod(&vec![0.5f32; n_head]).unwrap();
         let disabled = stream.clone_htod(&[0i32]).unwrap();
@@ -6327,7 +6359,15 @@ mod tests {
                       out: &cudarc::driver::safe::CudaSlice<f32>,
                       si: Option<&SiDecodeLayerArgs<'_>>| {
             k.launch_attention_decode(
-                &stream, &q_dev, &k_dev, &v_dev, out, head_dim, n_head, n_kv_head, n_positions,
+                &stream,
+                &q_dev,
+                &k_dev,
+                &v_dev,
+                out,
+                head_dim,
+                n_head,
+                n_kv_head,
+                n_positions,
                 si,
             )
             .expect("launch");

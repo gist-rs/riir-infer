@@ -63,9 +63,9 @@ use crate::elementwise_cubecl::{CopyCubeCL, FillZerosCubeCL, Split2CubeCL};
 use crate::gemv_cubecl::GemvCubeCL;
 // riir-infer Issue 032: the folded prefill's dense a/b (token-grid GEMV).
 #[cfg(feature = "ternary_gemm_batched")]
-use crate::gemv_cubecl::GemvBatchedCubeCL;
-#[cfg(feature = "ternary_gemm_batched")]
 use crate::deltanet_rotation_cubecl::RotationTablesCubeCL;
+#[cfg(feature = "ternary_gemm_batched")]
+use crate::gemv_cubecl::GemvBatchedCubeCL;
 #[cfg(feature = "cubecl_runtime")]
 use crate::gemv_ternary_cubecl::{GemvTernaryCubeCL, TernaryHandle};
 // Issue 637 T3: batched prefill projections. Opt-in — the decode path never
@@ -2163,7 +2163,8 @@ pub fn set_prefill_chunked(on: bool) {
     feature = "ternary_gemm_batched",
     feature = "deltanet_recurrence_smem_staged"
 ))]
-static PREFILL_RECURRENCE_STAGED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(true);
+static PREFILL_RECURRENCE_STAGED: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(true);
 
 /// See [`PREFILL_RECURRENCE_STAGED`].
 #[cfg(all(
@@ -2190,7 +2191,8 @@ pub fn set_prefill_recurrence_staged(on: bool) {
     feature = "ternary_gemm_batched",
     feature = "deltanet_prework_fused"
 ))]
-static PREFILL_PREWORK_FUSED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(true);
+static PREFILL_PREWORK_FUSED: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(true);
 
 /// See [`PREFILL_PREWORK_FUSED`].
 #[cfg(all(
@@ -2618,6 +2620,20 @@ pub struct TernaryDeltanetGpuForward {
     /// input for the ladder's landed-set + accounting pins.
     #[cfg(feature = "ane_prefill")]
     ane_down_report: crate::ane_prefill::AneDownReport,
+
+    /// Plan 620 Phase D — the prefill lane's scale-invariant session (the
+    /// whole-prefill cudarc driver reads it at the FA attention launch).
+    /// SEPARATE from the decode forward's session (the cudarc struct's own
+    /// field): the two lanes are distinct objects and the league G2 harness
+    /// attaches to THIS type. Absent = the incumbent posture. Arm/disarm
+    /// semantics mirror the decode session — a content flip, no recapture
+    /// (the whole-prefill graph bakes the session's pointers at capture).
+    #[cfg(all(
+        feature = "scale_invariant_attn",
+        feature = "ternary_gemv_cuda_raw",
+        not(target_os = "macos")
+    ))]
+    si: Option<crate::si_gpu::SiGpuSession>,
 }
 
 #[cfg(feature = "cubecl_runtime")]
@@ -3371,7 +3387,9 @@ impl TernaryDeltanetGpuForward {
                         // folded files never reach this call (the
                         // `ane_folded_skip` break above); the 4-slot shape is
                         // the pre-rotation contract.
-                        &[q4_refuse(&l.in_proj_qkv, "in_proj_qkv"), q4_refuse(&l.in_proj_z, "in_proj_z"),
+                        &[
+                            q4_refuse(&l.in_proj_qkv, "in_proj_qkv"),
+                            q4_refuse(&l.in_proj_z, "in_proj_z"),
                             l.in_proj_a
                                 .as_ternary()
                                 .expect("Metal register_layer requires ternary in_proj_a"),
@@ -3379,7 +3397,10 @@ impl TernaryDeltanetGpuForward {
                                 .as_ternary()
                                 .expect("Metal register_layer requires ternary in_proj_b"),
                         ],
-                        &[q4_refuse(&l.gate_proj, "gate_proj"), q4_refuse(&l.up_proj, "up_proj")],
+                        &[
+                            q4_refuse(&l.gate_proj, "gate_proj"),
+                            q4_refuse(&l.up_proj, "up_proj"),
+                        ],
                         down_w,
                     );
                     // Early-out: once poisoned, further registers no-op.
@@ -3568,7 +3589,113 @@ impl TernaryDeltanetGpuForward {
             ane_prefill_cfg,
             #[cfg(feature = "ane_prefill")]
             ane_down_report,
+            // Plan 620 Phase D — born detached (the incumbent posture; the
+            // league G2 harness attaches explicitly).
+            #[cfg(all(
+                feature = "scale_invariant_attn",
+                feature = "ternary_gemv_cuda_raw",
+                not(target_os = "macos")
+            ))]
+            si: None,
         }
+    }
+
+    // ── Plan 620 Phase D — the prefill lane's scale-invariant session ──
+    // Mirrors the decode forward's attach/detach/arm API with one
+    // difference: the caller supplies the stream (the wrapper is CubeCL-side
+    // and holds no cudarc stream; the league G2 harness has one). Every
+    // device-visible transition ends in a stream synchronize — the prefill
+    // stack launches on ITS OWN stream, so cross-stream ordering of the
+    // uploads/flag write is asserted here, once per transition, never per
+    // chunk.
+
+    /// Attach the session for the whole-prefill lane. Any captured
+    /// whole-prefill graph is invalidated (the baked si pointers changed —
+    /// the decode lane's `set_lora` law). The session arrives DISARMED.
+    #[cfg(all(
+        feature = "scale_invariant_attn",
+        feature = "ternary_gemv_cuda_raw",
+        not(target_os = "macos")
+    ))]
+    pub fn attach_si(
+        &mut self,
+        stream: &std::sync::Arc<cudarc::driver::safe::CudaStream>,
+        session: crate::si_gpu::SiGpuSession,
+    ) {
+        crate::prefill_cuda_full::prefill_invalidate_graphs();
+        let _ = stream.synchronize();
+        self.si = Some(session);
+    }
+
+    /// Detach the session — the incumbent posture returns. Graph
+    /// invalidated (the dummies' pointers are what a fresh capture bakes).
+    #[cfg(all(
+        feature = "scale_invariant_attn",
+        feature = "ternary_gemv_cuda_raw",
+        not(target_os = "macos")
+    ))]
+    pub fn detach_si(&mut self) {
+        crate::prefill_cuda_full::prefill_invalidate_graphs();
+        self.si = None;
+    }
+
+    /// Arm/disarm by CONTENT flip — a captured graph replays against the
+    /// same pointers (the Plan-620 no-recapture law). The synchronize makes
+    /// the flag write device-visible before the next prefill launches on the
+    /// stack's own stream.
+    ///
+    /// # Errors
+    /// No session attached, or the device write failed.
+    #[cfg(all(
+        feature = "scale_invariant_attn",
+        feature = "ternary_gemv_cuda_raw",
+        not(target_os = "macos")
+    ))]
+    pub fn arm_si(
+        &mut self,
+        stream: &std::sync::Arc<cudarc::driver::safe::CudaStream>,
+        on: bool,
+    ) -> Result<(), crate::CudarcKernelError> {
+        match &mut self.si {
+            Some(session) => {
+                session.set_armed(stream, on)?;
+                let _ = stream.synchronize();
+                Ok(())
+            }
+            None => Err(crate::CudarcKernelError::InvalidArg(
+                "arm_si: no scale-invariant session attached (prefill lane)".into(),
+            )),
+        }
+    }
+
+    /// The attached session's host-side armed mirror, if any.
+    #[cfg(all(
+        feature = "scale_invariant_attn",
+        feature = "ternary_gemv_cuda_raw",
+        not(target_os = "macos")
+    ))]
+    pub fn si_is_armed(&self) -> Option<bool> {
+        self.si.as_ref().map(crate::si_gpu::SiGpuSession::is_armed)
+    }
+
+    /// The si launch args for the whole-prefill driver (the field is
+    /// private; `prefill_cuda_full` reaches it only through here). `None` =
+    /// the incumbent posture. Cfg'd to the CONSUMER's posture — at leaner
+    /// postures the whole-prefill module is compiled out and this would be
+    /// dead code.
+    #[cfg(all(
+        feature = "scale_invariant_attn",
+        feature = "ternary_gemv_cuda_raw",
+        feature = "ternary_gemm_batched",
+        feature = "cubecl_runtime",
+        not(target_os = "macos")
+    ))]
+    pub(crate) fn si_session_args(
+        &self,
+    ) -> Option<crate::cudarc_kernels::attention::SiDecodeArgs<'_>> {
+        self.si
+            .as_ref()
+            .map(crate::si_gpu::SiGpuSession::decode_args)
     }
 
     /// Forward pass for a single decode token (GPU-resident, zero sync between layers).
@@ -5401,7 +5528,15 @@ impl TernaryDeltanetGpuForward {
         // Issue 032 — folded site 5 (batched path): wq/wkv are folded and an
         // attention layer has no primal consumer of the norm — rotate in place.
         if let (Some(cfg), Some(tables)) = (&self.rotation, &self.rot_tables) {
-            self.prefill_rotate(RotDir::Forward, normx_b, None, tables, cfg.block_size, p * n, n);
+            self.prefill_rotate(
+                RotDir::Forward,
+                normx_b,
+                None,
+                tables,
+                cfg.block_size,
+                p * n,
+                n,
+            );
         }
 
         // 2. Q projection (batched GEMM) — attn_wq writes [2*q_dim] per token.
@@ -5784,7 +5919,15 @@ impl TernaryDeltanetGpuForward {
             // Issue 032 — folded site 5b (attn_out): gate already applied.
             if let (Some(cfg), Some(tables)) = (&self.rotation, &self.rot_tables) {
                 let q_dim = n_head * hd;
-                self.prefill_rotate(RotDir::Forward, &scratch.attn_out_b, None, tables, cfg.block_size, p * q_dim, q_dim);
+                self.prefill_rotate(
+                    RotDir::Forward,
+                    &scratch.attn_out_b,
+                    None,
+                    tables,
+                    cfg.block_size,
+                    p * q_dim,
+                    q_dim,
+                );
             }
             self.prefill_project(wo, &scratch.attn_out_b, &scratch.out_proj_b, p);
         }
@@ -7563,7 +7706,15 @@ impl TernaryDeltanetGpuForward {
         if let (Some(cfg), Some(tables)) = (&self.rotation, &self.rot_tables)
             && cfg.inverse_embedding
         {
-            self.prefill_rotate(RotDir::Inverse, &x_b, None, tables, cfg.block_size, p * n, n);
+            self.prefill_rotate(
+                RotDir::Inverse,
+                &x_b,
+                None,
+                tables,
+                cfg.block_size,
+                p * n,
+                n,
+            );
         }
 
         for layer_idx in 0..self.layers.len() {
@@ -7589,7 +7740,8 @@ impl TernaryDeltanetGpuForward {
                 // falls through to the split batched GEMMs, unchanged.
                 #[cfg(feature = "ane_prefill")]
                 let ane_inproj_done = !folded
-                    && self.ane_prefill_try_inproj(layer_idx, &normx_b, &qkv_b, &z_b, &a_b, &b_b, p);
+                    && self
+                        .ane_prefill_try_inproj(layer_idx, &normx_b, &qkv_b, &z_b, &a_b, &b_b, p);
                 #[cfg(not(feature = "ane_prefill"))]
                 let ane_inproj_done = false;
                 if folded {
@@ -7598,7 +7750,15 @@ impl TernaryDeltanetGpuForward {
                     // the PRIMAL norm as one token-grid f32 GEMV each — row t
                     // bit-identical to decode's `GemvCubeCL` on token t.
                     let (cfg, tables) = self.rotation_pair();
-                    self.prefill_rotate(RotDir::Forward, &normx_b, Some(&rotx_b), tables, cfg.block_size, p * n, n);
+                    self.prefill_rotate(
+                        RotDir::Forward,
+                        &normx_b,
+                        Some(&rotx_b),
+                        tables,
+                        cfg.block_size,
+                        p * n,
+                        n,
+                    );
                     self.prefill_project(&layer_w.in_proj_qkv, &rotx_b, &qkv_b, p);
                     self.prefill_project(&layer_w.in_proj_z, &rotx_b, &z_b, p);
                     for (w, out, name) in [
@@ -7682,12 +7842,12 @@ impl TernaryDeltanetGpuForward {
                     feature = "ternary_gemm_batched",
                     feature = "deltanet_prework_fused"
                 ))]
-                let prework_fused_on =
-                    PREFILL_PREWORK_FUSED.load(std::sync::atomic::Ordering::Relaxed)
-                        && crate::deltanet_prework_fused_cubecl::DeltanetPreworkFusedCubeCL::supports(
-                            head_dim, n_k_heads, n_v_heads,
-                        )
-                        && p <= 65535;
+                let prework_fused_on = PREFILL_PREWORK_FUSED
+                    .load(std::sync::atomic::Ordering::Relaxed)
+                    && crate::deltanet_prework_fused_cubecl::DeltanetPreworkFusedCubeCL::supports(
+                        head_dim, n_k_heads, n_v_heads,
+                    )
+                    && p <= 65535;
                 #[cfg(not(all(
                     feature = "cubecl_runtime",
                     feature = "ternary_gemm_batched",
@@ -7702,7 +7862,9 @@ impl TernaryDeltanetGpuForward {
                         feature = "deltanet_prework_fused"
                     ))]
                     unsafe {
-                        crate::deltanet_prework_fused_cubecl::DeltanetPreworkFusedCubeCL::launch::<ActiveRuntime>(
+                        crate::deltanet_prework_fused_cubecl::DeltanetPreworkFusedCubeCL::launch::<
+                            ActiveRuntime,
+                        >(
                             &self.client,
                             qkv_b.clone(),
                             qkvx_b.clone(),
@@ -7865,7 +8027,8 @@ impl TernaryDeltanetGpuForward {
                         // riir-ai Issue 1004 R1: the threadgroup-staged twin
                         // (bit-identical; same handles, same contract).
                         #[cfg(feature = "deltanet_recurrence_smem_staged")]
-                        let staged = PREFILL_RECURRENCE_STAGED.load(std::sync::atomic::Ordering::Relaxed);
+                        let staged =
+                            PREFILL_RECURRENCE_STAGED.load(std::sync::atomic::Ordering::Relaxed);
                         #[cfg(not(feature = "deltanet_recurrence_smem_staged"))]
                         let staged = false;
                         if staged {
@@ -7882,7 +8045,9 @@ impl TernaryDeltanetGpuForward {
                                 p,
                             );
                         } else {
-                            DeltanetRecurrenceMultiTokenCubeCL::launch_with_gpu_handles::<ActiveRuntime>(
+                            DeltanetRecurrenceMultiTokenCubeCL::launch_with_gpu_handles::<
+                                ActiveRuntime,
+                            >(
                                 &self.client,
                                 qkvx_b.clone(),
                                 beta_b.clone(),
@@ -8005,7 +8170,15 @@ impl TernaryDeltanetGpuForward {
                             );
                         }
                     }
-                    self.prefill_rotate(RotDir::Forward, &rec_b, None, tables, cfg.block_size, p * v_dim, v_dim);
+                    self.prefill_rotate(
+                        RotDir::Forward,
+                        &rec_b,
+                        None,
+                        tables,
+                        cfg.block_size,
+                        p * v_dim,
+                        v_dim,
+                    );
                 }
                 // 11. Out projection.
                 self.prefill_project(&layer_w.out_proj, &rec_b, &tmp_b, p);
@@ -8247,7 +8420,15 @@ impl TernaryDeltanetGpuForward {
                     // Issue 032 — folded site 6 (FFN input): gate/up are folded
                     // and the norm has no primal consumer, so rotate in place.
                     if let (Some(cfg), Some(tables)) = (&self.rotation, &self.rot_tables) {
-                        self.prefill_rotate(RotDir::Forward, &normx_b, None, tables, cfg.block_size, p * n, n);
+                        self.prefill_rotate(
+                            RotDir::Forward,
+                            &normx_b,
+                            None,
+                            tables,
+                            cfg.block_size,
+                            p * n,
+                            n,
+                        );
                     }
                     #[cfg(feature = "ane_prefill")]
                     let ane_gate_up_done = !folded
@@ -8272,7 +8453,15 @@ impl TernaryDeltanetGpuForward {
                     // fail-open — skipped entirely when the toggle/bank is off).
                     // Issue 032 — folded site 7 (ffn_hidden): rotate before down.
                     if let (Some(cfg), Some(tables)) = (&self.rotation, &self.rot_tables) {
-                        self.prefill_rotate(RotDir::Forward, &hid_b, None, tables, cfg.block_size, p * mlp, mlp);
+                        self.prefill_rotate(
+                            RotDir::Forward,
+                            &hid_b,
+                            None,
+                            tables,
+                            cfg.block_size,
+                            p * mlp,
+                            mlp,
+                        );
                     }
                     #[cfg(feature = "ane_prefill")]
                     let ane_down_done =
@@ -9218,7 +9407,10 @@ fn upload_layer_weights(
         linear_norm: upload_f32_slice(client, &l.linear_norm),
 
         attn_wq: if l.attn_wq.rows() > 0 {
-            Some(TernaryHandle::from_weights(client, q4_refuse(&l.attn_wq, "attn_wq")))
+            Some(TernaryHandle::from_weights(
+                client,
+                q4_refuse(&l.attn_wq, "attn_wq"),
+            ))
         } else {
             None
         },
@@ -9235,7 +9427,10 @@ fn upload_layer_weights(
             None
         },
         attn_wo: if l.attn_wo.rows() > 0 {
-            Some(TernaryHandle::from_weights(client, q4_refuse(&l.attn_wo, "attn_wo")))
+            Some(TernaryHandle::from_weights(
+                client,
+                q4_refuse(&l.attn_wo, "attn_wo"),
+            ))
         } else {
             None
         },

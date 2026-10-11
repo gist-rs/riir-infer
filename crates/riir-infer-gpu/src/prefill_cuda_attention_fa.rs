@@ -44,6 +44,19 @@
 //! - **agate**: the per-element sigmoid output gate
 //!   `out = (VKQ/rowsum) * sigmoid(gate)` in the epilogue write (the
 //!   incumbent's final phase, verbatim semantics).
+//! - **Plan 620 Phase D — the scale-invariant hook**: the si affine rides the
+//!   causal-mask loop (the one place both the element's absolute key pos and
+//!   its query pos are in register), applied to in-range elements only and
+//!   BEFORE the max pass (the max tracks the TRANSFORMED row — the CPU
+//!   `si_head` contract; the decode precedent). `dist = qp − kv` per element
+//!   with `qp = q_offset + the fragment's position half`; key 0 keeps its raw
+//!   logit (the sink carve-out); per-head `inv_sigma` indexes
+//!   `kv_group*gqa_ratio + lane` where the thread's lane is `threadIdx.x/4`
+//!   (pad lanes 6/7 skip the transform — their rows are discarded at the
+//!   write). Flag-0 (`*si_enabled == 0`) leaves every added branch dead —
+//!   bit-identical incumbent. The kill-switch fallback arms (split-KV,
+//!   prefetch mq8 ladder) stay unhooked by scope (the FA-engaged default
+//!   posture only).
 //! - **No stream-K / no parallel_blocks** (v1): grid = ceil(p/4) x n_kv
 //!   (1024x4 at p=4096) — enough blocks to fill 128 SMs; the causal
 //!   load-imbalance tail is the measured T2 question (the fixup/combine
@@ -133,6 +146,24 @@ pub(crate) const ATTENTION_PREFILL_FA_CUDA_SRC: &str = r#"
 #define FA_KQ_MAX_OFFSET (3.0f * 0.6931f)
 
 namespace fa_mma {
+
+// Plan 620 Phase D — the scale-invariant affine, ONE copy for both FA
+// entries (eager + devpos share the body). Mirrors the decode module's
+// `si_transform_score` (cudarc_kernels/attention.rs) EXACTLY — same
+// expression order, same single-rounding intrinsics; the two compiled
+// modules keep the one transform law in lockstep (the FA source is a
+// separate nvrtc module by construction — no cross-module include).
+__device__ __forceinline__ float si_transform_score(
+    float raw, int pos, int query_pos, int head_idx,
+    const float* __restrict__ si_lut,
+    const float* __restrict__ si_inv_sigma)
+{
+    if (pos == 0) return raw;  // sink carve-out (App. J)
+    const int dist = query_pos - pos;
+    const float a = si_lut[2 * dist];
+    const float m = si_lut[2 * dist + 1];
+    return __fadd_rn(__fmul_rn(a, __fmul_rn(raw, si_inv_sigma[head_idx])), m);
+}
 
 __device__ __forceinline__ unsigned int h2_pack(unsigned short lo, unsigned short hi) {
     return (unsigned int)lo | ((unsigned int)hi << 16);
@@ -414,7 +445,10 @@ __device__ __forceinline__ void att_pf_fa_body(
     const unsigned short* __restrict__ val_h, /* [padded, n_kv, 256] f16 */
     const float* __restrict__ gate,         /* [p, n_head, 256] */
     float* __restrict__ attn_out,           /* [p, n_head, 256] */
-    int n_head, int n_kv, int p, float scale, int q_offset)
+    int n_head, int n_kv, int p, float scale, int q_offset,
+    const float* __restrict__ si_lut,       /* Plan 620: interleaved (a, m) */
+    const float* __restrict__ si_inv_sigma, /* Plan 620: this layer's n_head */
+    const int* __restrict__ si_enabled)     /* Plan 620: 0 = incumbent */
 {
     typedef fa_mma::tile<16, 8, fa_mma::f16x2> T_AB;        /* KQ/VKQ A+B, VKQ C */
     typedef fa_mma::tile<16, 16, float> T_C_KQ;             /* KQ f32 accumulator */
@@ -496,6 +530,18 @@ __device__ __forceinline__ void att_pf_fa_body(
     const int q_pos1 = q_pos0 + 1;                          /* KQ_idx 1 */
     const int kv_half = (threadIdx.y % np) * 16;            /* this warp's rows */
 
+    // Plan 620 Phase D — per-thread si state, computed ONCE (the C-fragment
+    // row algebra: thread t holds the two rows jc = j0 + {t/4, t/4 + 8}, so
+    // BOTH of its positions share the head lane c = t/4 — the +8 stays
+    // within the same 8-lane group). The pad lanes (c >= gqa_ratio, the
+    // zero-filled Q rows) skip the transform: their softmax rows are
+    // discarded at the write, and their si_head index would run past the
+    // last group's window (kv_group*6 + 6 > n_head - 1 at kv_group = n_kv-1).
+    const int si_on = *si_enabled;
+    const int si_lane_i = (int)(threadIdx.x >> 2);          /* [0,8): 6 + 2 pad */
+    const bool si_lane = si_on != 0 && si_lane_i < gqa_ratio;
+    const int si_head = kv_group * gqa_ratio + si_lane_i;
+
     // ---- Preload K tile 0 (cp.async into the tile_K region).
     fa_load_tile(key_h, tile_Q, 0, stride_kv_elems);
 
@@ -533,11 +579,21 @@ __device__ __forceinline__ void att_pf_fa_body(
         // Causal mask (replaces the mask-tensor add): element (m, n) with
         // n = this warp's kv rows: kv = k_VKQ_0 + kv_half + get_j(l); the
         // position = the i-half (l/2)%2. -1e30f underflows expf to 0.
+        //
+        // Plan 620 Phase D — the si affine rides this loop (the one place
+        // both positions are in register), on IN-RANGE elements only: a
+        // masked element's dist = qp - kv would be NEGATIVE — no LUT read —
+        // and it is overwritten to -1e30f right after. Before the max pass:
+        // the max tracks the TRANSFORMED row (the CPU si_head contract).
 #pragma unroll
         for (int l = 0; l < 8; ++l) {
             const int kv = k_VKQ_0 + kv_half + KQ_C.get_j(l);
             const int qi = (l / 2) % 2;
             const int lim = q_offset + (qi ? q_pos1 : q_pos0) + 1;
+            if (si_lane && kv < lim) {
+                KQ_C.x[l] = si_transform_score(KQ_C.x[l], kv, lim - 1,
+                                               si_head, si_lut, si_inv_sigma);
+            }
             if (kv >= lim) KQ_C.x[l] = -1e30f;
         }
 
@@ -722,10 +778,13 @@ extern "C" __global__ void __launch_bounds__(128, 2) att_pf_fa(
     const unsigned short* __restrict__ val_h,
     const float* __restrict__ gate,
     float* __restrict__ attn_out,
-    int n_head, int n_kv, int p, float scale, int q_offset)
+    int n_head, int n_kv, int p, float scale, int q_offset,
+    const float* __restrict__ si_lut,
+    const float* __restrict__ si_inv_sigma,
+    const int* __restrict__ si_enabled)
 {
     att_pf_fa_body(query, key_h, val_h, gate, attn_out, n_head, n_kv, p,
-                   scale, q_offset);
+                   scale, q_offset, si_lut, si_inv_sigma, si_enabled);
 }
 
 // The CUDA-graph twin: q_offset from the 1-element device pos buffer.
@@ -736,10 +795,13 @@ extern "C" __global__ void __launch_bounds__(128, 2) att_pf_fa_dp(
     const float* __restrict__ gate,
     float* __restrict__ attn_out,
     int n_head, int n_kv, int p, float scale,
-    const int* __restrict__ pos_dev)
+    const int* __restrict__ pos_dev,
+    const float* __restrict__ si_lut,
+    const float* __restrict__ si_inv_sigma,
+    const int* __restrict__ si_enabled)
 {
     const int q_offset = *pos_dev;
     att_pf_fa_body(query, key_h, val_h, gate, attn_out, n_head, n_kv, p,
-                   scale, q_offset);
+                   scale, q_offset, si_lut, si_inv_sigma, si_enabled);
 }
 "#;

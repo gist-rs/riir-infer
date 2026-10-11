@@ -25,6 +25,7 @@ use cudarc::driver::safe::{
     CudaContext, CudaFunction, CudaModule, CudaSlice, CudaStream, LaunchConfig,
 };
 
+use crate::cudarc_kernels::attention::SiDecodeLayerArgs;
 use crate::prefill_cuda_deltanet::{LogForm, SigExp};
 
 // ---------------------------------------------------------------------------
@@ -1787,6 +1788,14 @@ pub struct CudaAttnKernels {
     attention_fa: CudaFunction,
     /// Plan 605 T1 — the FA-class graph twin (q_offset from pos_dev).
     attention_fa_dp: CudaFunction,
+    /// Plan 620 Phase D — the si hook's flag-off dummies (the
+    /// `AttentionKernels::si_dummy_*` pattern, owned by the kernel-family
+    /// struct that pushes them): a neutral (a=1, m=0) LUT pair, a 64-float
+    /// inv-sigma runway, and the disabled flag. Never read by the kernel
+    /// while `si_enabled` holds 0 — the launch ABI's `None` arm.
+    si_dummy_lut: CudaSlice<f32>,
+    si_dummy_inv_sigma: CudaSlice<f32>,
+    si_dummy_enabled: CudaSlice<i32>,
     /// Plan 605 T1 — the f32->f16 KV conversion pass (eager).
     kv_f32_to_f16: CudaFunction,
     /// Plan 605 T1 — the f32->f16 KV conversion pass (devpos twin).
@@ -2014,6 +2023,20 @@ impl CudaAttnKernels {
             .load_function("kv_f32_to_f16_dp")
             .map_err(|e| format!("kv_f32_to_f16_dp: {e}"))?;
 
+        // Plan 620 Phase D — the flag-off dummies (one-time tiny allocs on
+        // the context's default stream; the launchers never read them armed
+        // = 0, mirroring AttentionKernels' `si_dummy_*` contents).
+        let stream = ctx.default_stream();
+        let si_dummy_lut = stream
+            .clone_htod(&[1.0f32, 0.0])
+            .map_err(|e| format!("si_dummy_lut: {e}"))?;
+        let si_dummy_inv_sigma = stream
+            .clone_htod(&vec![1.0f32; 64])
+            .map_err(|e| format!("si_dummy_inv_sigma: {e}"))?;
+        let si_dummy_enabled = stream
+            .clone_htod(&[0i32])
+            .map_err(|e| format!("si_dummy_enabled: {e}"))?;
+
         Ok(Self {
             rope,
             rope_dp,
@@ -2041,6 +2064,9 @@ impl CudaAttnKernels {
             attention_mq8g2_dp,
             attention_fa,
             attention_fa_dp,
+            si_dummy_lut,
+            si_dummy_inv_sigma,
+            si_dummy_enabled,
             kv_f32_to_f16,
             kv_f32_to_f16_dp,
             _module: module,
@@ -3373,11 +3399,18 @@ impl CudaAttnKernels {
     /// TOLERANCE-CLASS vs [`Self::launch_attention_mq8`] — f16 operands +
     /// mma accumulation (the opponent's production class; `bench_946`).
     ///
+    /// Plan 620 Phase D — `si` is the scale-invariant hook's per-layer args;
+    /// `None` = the incumbent posture (dummies pushed, kernel branch dead,
+    /// bit-identical).
+    ///
     /// # Safety
     ///
     /// Caller guarantees: `query`/`gate`/`attn_out` cover `p * n_head *
     /// head_dim`; `kh`/`vh` cover `padded_rows * n_kv_head * head_dim`
-    /// f16; `head_dim == 256`; `n_head / n_kv_head == 6`.
+    /// f16; `head_dim == 256`; `n_head / n_kv_head == 6`; with `si` armed,
+    /// `si.inv_sigma` covers this layer's `n_head` entries and `si.lut`
+    /// covers every `dist` the causal shape can reach (`<= q_offset + p -
+    /// 1`, the LUT built at the block size).
     #[allow(clippy::too_many_arguments)]
     pub unsafe fn launch_attention_fa(
         &self,
@@ -3392,9 +3425,19 @@ impl CudaAttnKernels {
         n_kv_head: usize,
         p: usize,
         base_pos: usize,
+        si: Option<&SiDecodeLayerArgs<'_>>,
     ) -> Result<(), String> {
         self.fa_launch_check("att_pf_fa", head_dim, n_head, n_kv_head)?;
         let scale = 1.0f32 / (head_dim as f32).sqrt();
+        // The flag-off view — struct-owned dummies, the decode launcher's
+        // match shape (both arms unify on one pushed type).
+        let dummy_inv = self
+            .si_dummy_inv_sigma
+            .slice(0..self.si_dummy_inv_sigma.len());
+        let (si_lut, si_inv_sigma, si_enabled) = match si {
+            Some(a) => (a.lut, &a.inv_sigma, a.enabled),
+            None => (&self.si_dummy_lut, &dummy_inv, &self.si_dummy_enabled),
+        };
         let cfg = LaunchConfig {
             grid_dim: (p.div_ceil(4) as u32, n_kv_head as u32, 1),
             block_dim: (32, 4, 1), /* (warp_size, nwarps) — threadIdx.y IS the warp index */
@@ -3413,6 +3456,9 @@ impl CudaAttnKernels {
                 .arg(&(p as i32))
                 .arg(&scale)
                 .arg(&(base_pos as i32))
+                .arg(si_lut)
+                .arg(si_inv_sigma)
+                .arg(si_enabled)
                 .launch(cfg)
                 .map_err(|e| e.to_string())?;
         }
@@ -3420,7 +3466,10 @@ impl CudaAttnKernels {
     }
 
     /// Plan 605 T1 — the FA-class graph twin (q_offset from `pos_dev` at
-    /// kernel runtime).
+    /// kernel runtime). Plan 620 Phase D — the si hook rides the same ABI
+    /// (`None` = the incumbent posture); the baked si pointers are the
+    /// session's buffers, so arming flips CONTENT between graph replays
+    /// (no recapture — the decode devpos law).
     ///
     /// # Safety
     ///
@@ -3440,9 +3489,18 @@ impl CudaAttnKernels {
         n_kv_head: usize,
         p: usize,
         pos_dev: &CudaSlice<i32>,
+        si: Option<&SiDecodeLayerArgs<'_>>,
     ) -> Result<(), String> {
         self.fa_launch_check("att_pf_fa_dp", head_dim, n_head, n_kv_head)?;
         let scale = 1.0f32 / (head_dim as f32).sqrt();
+        // The flag-off view — struct-owned dummies (the decode shape).
+        let dummy_inv = self
+            .si_dummy_inv_sigma
+            .slice(0..self.si_dummy_inv_sigma.len());
+        let (si_lut, si_inv_sigma, si_enabled) = match si {
+            Some(a) => (a.lut, &a.inv_sigma, a.enabled),
+            None => (&self.si_dummy_lut, &dummy_inv, &self.si_dummy_enabled),
+        };
         let cfg = LaunchConfig {
             grid_dim: (p.div_ceil(4) as u32, n_kv_head as u32, 1),
             block_dim: (32, 4, 1), /* (warp_size, nwarps) */
@@ -3461,6 +3519,9 @@ impl CudaAttnKernels {
                 .arg(&(p as i32))
                 .arg(&scale)
                 .arg(pos_dev)
+                .arg(si_lut)
+                .arg(si_inv_sigma)
+                .arg(si_enabled)
                 .launch(cfg)
                 .map_err(|e| e.to_string())?;
         }

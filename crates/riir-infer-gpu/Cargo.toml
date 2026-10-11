@@ -318,6 +318,16 @@ required-features = ["edlm_gpu"]
 name = "edlm_graphs_goat"
 required-features = ["edlm_gpu"]
 
+# Plan 620 Phase D — the FA prefill si-hook gate: flag-off + identity-LUT
+# bit-identity, the affine CPU twin (per-element dist + sink + per-head
+# window at the f16 tolerance bar), and the eager/devpos twin pin. The
+# whole-file #![cfg] matches the CudaAttnKernels module posture; this row
+# keeps the reader honest (cuda_or_skip + the module cfg do the rest). The
+# gate executes on a CUDA box (the 4090 lane).
+[[test]]
+name = "plan620_prefill_fa_si_gate"
+required-features = ["ternary_gemv_cuda_raw", "ternary_gemm_batched", "cubecl_runtime"]
+
 # riir-infer Issue 032 — G1 of the Metal folded (Bonsai-2) CubeCL prefill vs
 # the folded decode eager path, plus the pre-rotation pin (T5). The
 # whole-file #![cfg] keeps the count honest; this row keeps the reader honest

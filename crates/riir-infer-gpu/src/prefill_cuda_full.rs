@@ -662,6 +662,16 @@ pub fn set_prefill_gdn_chunked(on: bool) {
     GV_KNOB_GEN.fetch_add(1, Ordering::Relaxed);
 }
 
+/// Plan 620 Phase D — invalidate any captured whole-prefill graph WITHOUT a
+/// knob flip: the si session's attach/detach changes the device pointers the
+/// captured graph baked (the decode lane's `self.graph = None` precedent,
+/// the `set_lora` law). Arm/disarm does NOT call this — it flips the flag's
+/// CONTENT, which a replayed graph re-reads by design (the no-recapture
+/// law).
+pub fn prefill_invalidate_graphs() {
+    GV_KNOB_GEN.fetch_add(1, Ordering::Relaxed);
+}
+
 // ---------------------------------------------------------------------------
 // Canonical numerics forms
 //
@@ -1893,6 +1903,16 @@ fn whole_prefill_inner(
     let qa = n_head * ahd;
     let kvd = n_kv * ahd;
     let eps = cfg.rms_norm_eps as f32;
+    // Plan 620 Phase D — the si session rides the same struct field the
+    // decode lane reads (si_session_args!'s shape; the macro's textual
+    // scope doesn't reach this module): attached = the launchers get its
+    // device pointers; absent (or the feature off) = the incumbent
+    // posture. Training forwards never attach — the flag-0 law holds there
+    // by attachment, exactly as at the decode sites.
+    #[cfg(feature = "scale_invariant_attn")]
+    let si = fwd.si_session_args();
+    #[cfg(not(feature = "scale_invariant_attn"))]
+    let si: Option<crate::cudarc_kernels::attention::SiDecodeArgs<'_>> = None;
     if p == 0 || p > 4096 {
         return None;
     }
@@ -2833,14 +2853,9 @@ fn whole_prefill_inner(
             // the damaged f32 activations).
             #[cfg(feature = "dq_phase_bench")]
             {
-                dq_fq()?.launch_dq_fakequant(
-                    stream,
-                    normx,
-                    n,
-                    p,
-                    crate::dq_fakequant::current_grid(),
-                )
-                .map_err(|e| e.to_string())?;
+                dq_fq()?
+                    .launch_dq_fakequant(stream, normx, n, p, crate::dq_fakequant::current_grid())
+                    .map_err(|e| e.to_string())?;
             };
             // Issue 980 T4-ALT site (f) / C0.5 — on a folded model the
             // FFN is a folded consumer at BOTH ends: gate/up consume
@@ -2881,14 +2896,9 @@ fn whole_prefill_inner(
             // fold rotation, before the down GEMM's quantize (rotated basis).
             #[cfg(feature = "dq_phase_bench")]
             {
-                dq_fq()?.launch_dq_fakequant(
-                    stream,
-                    hid_b,
-                    mlp,
-                    p,
-                    crate::dq_fakequant::current_grid(),
-                )
-                .map_err(|e| e.to_string())?;
+                dq_fq()?
+                    .launch_dq_fakequant(stream, hid_b, mlp, p, crate::dq_fakequant::current_grid())
+                    .map_err(|e| e.to_string())?;
             }
             gemm(down_c, hid_b, ffnout_b, n, mlp)?;
             unsafe {
@@ -2941,14 +2951,15 @@ fn whole_prefill_inner(
                         rot0.kernels
                             .gemm_dense_ab_batched(stream, normx, da, db, a_b, b_b, p, n_v, n)
                             .map_err(|e| e.to_string())?;
-                        dq_fq()?.launch_dq_fakequant(
-                            stream,
-                            normx,
-                            n,
-                            p,
-                            crate::dq_fakequant::current_grid(),
-                        )
-                        .map_err(|e| e.to_string())?;
+                        dq_fq()?
+                            .launch_dq_fakequant(
+                                stream,
+                                normx,
+                                n,
+                                p,
+                                crate::dq_fakequant::current_grid(),
+                            )
+                            .map_err(|e| e.to_string())?;
                         gemm_rot(&qkv_c, normx, qkv_b, qkv_dim, n)?;
                         gemm_pre_rot(&z_c, normx, z_b, v_dim, n)?;
                     } else {
@@ -3132,14 +3143,15 @@ fn whole_prefill_inner(
                 // basis, mirroring the decode site 5.
                 #[cfg(feature = "dq_phase_bench")]
                 {
-                    dq_fq()?.launch_dq_fakequant(
-                        stream,
-                        rec_b,
-                        v_dim,
-                        p,
-                        crate::dq_fakequant::current_grid(),
-                    )
-                    .map_err(|e| e.to_string())?;
+                    dq_fq()?
+                        .launch_dq_fakequant(
+                            stream,
+                            rec_b,
+                            v_dim,
+                            p,
+                            crate::dq_fakequant::current_grid(),
+                        )
+                        .map_err(|e| e.to_string())?;
                 }
                 let out_c = mma_mirror(client, stream, &lw.out_proj).ok_or("out mirror")?;
                 if let Some(rot0) = &rotation {
@@ -3208,14 +3220,15 @@ fn whole_prefill_inner(
                 // in-place quantize is the whole site).
                 #[cfg(feature = "dq_phase_bench")]
                 {
-                    dq_fq()?.launch_dq_fakequant(
-                        stream,
-                        normx,
-                        n,
-                        p,
-                        crate::dq_fakequant::current_grid(),
-                    )
-                    .map_err(|e| e.to_string())?;
+                    dq_fq()?
+                        .launch_dq_fakequant(
+                            stream,
+                            normx,
+                            n,
+                            p,
+                            crate::dq_fakequant::current_grid(),
+                        )
+                        .map_err(|e| e.to_string())?;
                 }
                 let wq = lw.attn_wq.as_ref().ok_or("attn_wq")?;
                 let wkv = lw.attn_wkv.as_ref().ok_or("attn_wkv")?;
@@ -3346,22 +3359,12 @@ fn whole_prefill_inner(
                         let kv_rows = p * kvd;
                         let lo = base_pos * kvd;
                         let hi = lo + kv_rows;
-                        dq_fq()?.launch_dq_kv_quant(
-                            stream,
-                            &kcache.slice(lo..hi),
-                            kvd,
-                            p,
-                            kv_grid,
-                        )
-                        .map_err(|e| e.to_string())?;
-                        dq_fq()?.launch_dq_kv_quant(
-                            stream,
-                            &vcache.slice(lo..hi),
-                            kvd,
-                            p,
-                            kv_grid,
-                        )
-                        .map_err(|e| e.to_string())?;
+                        dq_fq()?
+                            .launch_dq_kv_quant(stream, &kcache.slice(lo..hi), kvd, p, kv_grid)
+                            .map_err(|e| e.to_string())?;
+                        dq_fq()?
+                            .launch_dq_kv_quant(stream, &vcache.slice(lo..hi), kvd, p, kv_grid)
+                            .map_err(|e| e.to_string())?;
                     }
                     // Arm 13 — this chunk's KV rows are final in the mirrors:
                     // stream them now (the attention kernel only READS the
@@ -3389,6 +3392,9 @@ fn whole_prefill_inner(
                             )
                         {
                             let rows = *attn_fa_rows;
+                            // Plan 620 Phase D — this layer's si window (the
+                            // decode-site pattern: slot = li * n_head + head).
+                            let si_layer = si.as_ref().map(|a| a.window_for(li, n_head));
                             let r = if gv {
                                 let pos = pos_dev_ref.expect("gv implies pos_dev");
                                 stack
@@ -3398,8 +3404,18 @@ fn whole_prefill_inner(
                                     )
                                     .and_then(|_| {
                                         stack.at.launch_attention_fa_devpos(
-                                            stream, q_b, kh, vh, agate_b, attn_out_b, ahd, n_head,
-                                            n_kv, p, pos,
+                                            stream,
+                                            q_b,
+                                            kh,
+                                            vh,
+                                            agate_b,
+                                            attn_out_b,
+                                            ahd,
+                                            n_head,
+                                            n_kv,
+                                            p,
+                                            pos,
+                                            si_layer.as_ref(),
                                         )
                                     })
                             } else {
@@ -3417,8 +3433,18 @@ fn whole_prefill_inner(
                                     )
                                     .and_then(|_| {
                                         stack.at.launch_attention_fa(
-                                            stream, q_b, kh, vh, agate_b, attn_out_b, ahd, n_head,
-                                            n_kv, p, base_pos,
+                                            stream,
+                                            q_b,
+                                            kh,
+                                            vh,
+                                            agate_b,
+                                            attn_out_b,
+                                            ahd,
+                                            n_head,
+                                            n_kv,
+                                            p,
+                                            base_pos,
+                                            si_layer.as_ref(),
                                         )
                                     })
                             };
@@ -3626,14 +3652,15 @@ fn whole_prefill_inner(
                 // basis via the fused rotation, mirroring decode site 4).
                 #[cfg(feature = "dq_phase_bench")]
                 {
-                    dq_fq()?.launch_dq_fakequant(
-                        stream,
-                        attn_out_b,
-                        qa,
-                        p,
-                        crate::dq_fakequant::current_grid(),
-                    )
-                    .map_err(|e| e.to_string())?;
+                    dq_fq()?
+                        .launch_dq_fakequant(
+                            stream,
+                            attn_out_b,
+                            qa,
+                            p,
+                            crate::dq_fakequant::current_grid(),
+                        )
+                        .map_err(|e| e.to_string())?;
                 }
                 if rotation.is_some() {
                     gemm_rot(&wo_c, attn_out_b, aproj_b, n, qa)?;
