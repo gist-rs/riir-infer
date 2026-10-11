@@ -53,6 +53,27 @@ records into the pool_poison state (`poisoned()` → `Some`).
 class is exactly the one contention can mimic. First run must be a clean-box run or
 the reproduction is unreliable.
 
+⚠ **RUN FROM THE ISOLATED WORKTREE, not the main checkout (2026-10-11, staged):**
+the main worktree now carries a sibling session's in-flight WIP (24 dirty files
+incl. `edlm_cubecl/mod.rs` + `tests.rs` — the very suite under test — plus `lib.rs`
+and `test_gpu_support.rs`); running from there would measure the sibling's
+half-finished code and corrupt the evidence. All instruments are pre-built from
+the committed tip `0767c01` via `git worktree add --detach E:\git\wt038infer
+0767c01` (sibling path deps resolve from `E:\git\wt*` — the /tmp-worktree trap
+the 1052 session hit). Warm-built 2026-10-11 (CPU-side, isolated
+`CARGO_TARGET_DIR=E:\tmp\infer038`): unit-gate binary
+`riir_infer_gpu-caee6f0c1223abf2.exe` (ternary_gemv_cuda_raw posture, 5 multicol
+tests present), `multicol_ab` release example, and the 039 repro binary
+`riir_infer_gpu-cd1abd68102c9ada.exe` (edlm_gpu posture — 17 edlm tests / 263
+total, posture-identical to the record; the `[issue 039]` device-lost callback
+string verified in the binary). Window commands (all with
+`CARGO_TARGET_DIR=E:\tmp\infer038`, all from `E:\git\wt038infer` via
+`--manifest-path E:/git/wt038infer/Cargo.toml` or `cd`):
+`(cargo test --manifest-path E:/git/wt038infer/Cargo.toml -p riir-infer-gpu
+--features edlm_gpu --lib)` and the serial A/B with `-- --test-threads=1`.
+Cleanup after the window: `git -C E:/git/riir-infer worktree remove
+E:/git/wt038infer` + `rm -rf E:/tmp/infer038`.
+
 ## Tasks
 
 - [x] **Pre-run substrate analysis (2026-10-11, CPU-side — SHARPENS the

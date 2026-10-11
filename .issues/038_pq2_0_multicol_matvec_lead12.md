@@ -138,6 +138,19 @@ survives the snapshot.
    record). Step 2 (task-level argmax gate) correctly sequences AFTER the
    unit gates run green — its design rides the real-weight forward harness;
    the n=1 kernel's own T3a is likewise open (parallel gap, noted).
+0.6. **WORKTREE ISOLATION (2026-10-11, staged):** the main riir-infer worktree
+   now carries sibling WIP (24 dirty files incl. `lib.rs` +
+   `test_gpu_support.rs`); ALL window runs execute from the isolated worktree
+   `E:\git\wt038infer` (detached at the verified tip `0767c01`, created by the
+   039 staging note — same window serves both issues). All three instruments
+   re-warm-built from it CPU-side 2026-10-11 (compile time paid; the window
+   spends measuring): unit-gate binary (5 multicol tests listed), the
+   `multicol_ab` release example, and the 039 edlm repro binary. Run shape:
+   `CARGO_TARGET_DIR=E:\tmp\infer038 cargo test --manifest-path
+   E:/git/wt038infer/Cargo.toml -p riir-infer-gpu --features
+   ternary_gemv_cuda_raw --lib gemv_ternary_multicol` (the bench likewise with
+   `build --release --example multicol_ab`). Cleanup rides the 039 note.
+
 1. Unit gates: `cargo test -p riir-infer-gpu --features ternary_gemv_cuda_raw --lib
    gemv_ternary_multicol` — bit-parity vs n=1, CPU-reference tolerance (mean_rel < 2%,
    max_rel < 5%), shape rejections, quantizer round-trip (round-trip + nvrtc already
