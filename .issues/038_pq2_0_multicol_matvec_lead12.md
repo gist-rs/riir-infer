@@ -112,6 +112,28 @@ survives the snapshot.
 
 0. ~~Extend the parity test loop to tokens `[3,4,5,6,7,8]`~~ — **DONE CPU-side
    2026-10-10** (the loop now spans the full band; execution still owed to the GPU run).
+0.5. **STAGED 2026-10-11 (~09:5x–10:2x, pickup session, trainer still holds the box
+   — plan437 `stage0_eval` AR arm over 200M tokens):** both GPU-run instruments
+   pre-built CPU-side in an isolated `CARGO_TARGET_DIR` so the free window is
+   spent MEASURING, not compiling — (a) the unit-gate lib-test binary
+   (`ternary_gemv_cuda_raw` posture) and (b) **the step-3 paired bench LANDED**:
+   `crates/riir-infer-gpu/examples/multicol_ab.rs` + its `[[example]]` row
+   (`required-features = ["ternary_gemv_cuda_raw"]`), clippy-clean, release
+   binary built. Three arms at the handler contract — `n1_loop` (n sequential
+   `forward` calls) vs `multicol` (one `forward_multicol`) vs `mma` (the
+   shipping prefill `launch_prefill_quantize` + `launch_prefill_gemm` pair,
+   upload→quantize→gemm→download) — Bonsai-2 down_proj (5120×17408) + a
+   sanity-small shape, n∈[3..8], reps order-rotated per rep (plan-612 G2
+   adaptation), verdict = median same-rep paired ratios. ⚠ The numbers are
+   HANDLER-contract wall times (each arm's public API today: the GEMV arms'
+   host quantize + per-call transfers are INSIDE the timed path; the wired
+   GPU-resident A/B is step 4's GOAT surface). MMA env knobs unset at run
+   time = the plain bitplane shipping call. Run:
+   `cargo run --release -p riir-infer-gpu --features ternary_gemv_cuda_raw
+   --example multicol_ab` (quote bench-preflight-class provenance in the
+   record). Step 2 (task-level argmax gate) correctly sequences AFTER the
+   unit gates run green — its design rides the real-weight forward harness;
+   the n=1 kernel's own T3a is likewise open (parallel gap, noted).
 1. Unit gates: `cargo test -p riir-infer-gpu --features ternary_gemv_cuda_raw --lib
    gemv_ternary_multicol` — bit-parity vs n=1, CPU-reference tolerance (mean_rel < 2%,
    max_rel < 5%), shape rejections, quantizer round-trip (round-trip + nvrtc already

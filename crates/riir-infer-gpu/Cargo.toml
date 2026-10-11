@@ -351,6 +351,14 @@ required-features = ["ternary_gemv_cuda_raw"]
 name = "qwen38_pyramid_capture"
 required-features = ["ternary_gemv_cuda_raw"]
 
+# Issue 038 step 3 — the n∈[3,8] paired A/B bench (n1_loop vs multicol vs
+# the shipping prefill MMA pair) at Bonsai-2 layer shapes; plan-612 G2
+# runbook adaptation (order-rotated reps, same-rep paired ratios).
+[[example]]
+name = "multicol_ab"
+path = "examples/multicol_ab.rs"
+required-features = ["ternary_gemv_cuda_raw"]
+
 [dev-dependencies]
 # Test RNG (qwen38_dflash2_gpu determinism fixtures; version matches the
 # engine gpu crate's).
