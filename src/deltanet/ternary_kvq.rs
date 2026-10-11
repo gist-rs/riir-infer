@@ -319,7 +319,11 @@ pub fn forward_qwen_deltanet_ternary_qkv<'a, C: QuantizedKVCache>(
         // hook in this lane): pre-MLP norm → rotated shared input → gate+up →
         // SwiGLU → rotated hidden → down → residual add.
         scratch.residual[..n].copy_from_slice(&x[..n]);
-        rmsnorm_with_gamma_eps(&mut x[..n], &layer_weights.post_attn_norm, config.rms_norm_eps);
+        rmsnorm_with_gamma_eps(
+            &mut x[..n],
+            &layer_weights.post_attn_norm,
+            config.rms_norm_eps,
+        );
         let x_ffn: &[f32] = if let Some(rot) = rotation {
             let signs = rot.signs_for_width(n);
             scratch.rotation_buf[..n].copy_from_slice(&x[..n]);
@@ -633,7 +637,10 @@ mod tests {
                 i += 1;
             }
         }
-        assert!(diffs > 0, "Q8 arm read bit-identical — the quantized store never fed attention");
+        assert!(
+            diffs > 0,
+            "Q8 arm read bit-identical — the quantized store never fed attention"
+        );
     }
 
     /// The mirror resets clean: after `reset`, rows read back zero, so a

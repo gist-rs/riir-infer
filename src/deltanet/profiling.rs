@@ -33,7 +33,9 @@ use super::forward::{
     causal_conv1d_update, effective_rotary_dim, expand_heads_into, gated_deltanet_step_inplace,
     l2_normalize, softplus,
 };
-use super::ternary_weights::{DeltaNetTernaryLayerWeights, ProjWeights, QwenDeltaNetTernaryWeights};
+use super::ternary_weights::{
+    DeltaNetTernaryLayerWeights, ProjWeights, QwenDeltaNetTernaryWeights,
+};
 use crate::rope::RopeFreqTable;
 use crate::simd::fast_sigmoid;
 use crate::types::{Config, DeltaNetLayerType, rmsnorm_with_gamma_eps, swiglu};
@@ -198,12 +200,7 @@ impl ForwardProfiler {
 /// profiler lane serves quant-resident packs the same way the production
 /// forward does).
 #[inline(always)]
-fn bitlinear(
-    y: &mut [f32],
-    w: &ProjWeights,
-    x: &[f32],
-    hook: Option<&dyn TernaryMatvecHook>,
-) {
+fn bitlinear(y: &mut [f32], w: &ProjWeights, x: &[f32], hook: Option<&dyn TernaryMatvecHook>) {
     match w {
         ProjWeights::Ternary(t) => bitlinear_ternary(y, t, x, hook),
         ProjWeights::Q4K(..) | ProjWeights::Q6K(..) => {
