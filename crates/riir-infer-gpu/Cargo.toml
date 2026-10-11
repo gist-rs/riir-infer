@@ -229,6 +229,13 @@ speculative_decode = []
 # CUDA graph capture for the cudarc whole-forward (opt-in; the engine side
 # additionally gates its own graph-replay consumers).
 cuda_graphs_forward = ["ternary_gemv_cuda_raw"]
+# Plan 620 (Plan 622 Phase 7) — the scale-invariant attention decode hook:
+# the cudarc decode-kernel si branch + `SiGpuSession` (the device LUT /
+# inv-sigma / armed-flag state). Forwards katgpt-core's `scale_invariant_attn`
+# (the schedule LUT + HeadCalibration substrate). The hook is ABI-present and
+# INERT without a session (dummies pushed, flag 0, bit-identical); this feature
+# gates the session surface. OPT-IN — the Phase-7 GOAT is open.
+scale_invariant_attn = ["ternary_gemv_cuda_raw", "katgpt-core/scale_invariant_attn"]
 # Row-parallel register-blocked recurrence arm (Issue 619 sibling).
 deltanet_recurrence_parallel = []
 # The dense DeltaNet forward surface (mirrors the engine gpu crate's feature
@@ -350,6 +357,18 @@ required-features = ["ternary_gemv_cuda_raw"]
 [[bin]]
 name = "qwen38_pyramid_capture"
 required-features = ["ternary_gemv_cuda_raw"]
+
+# Plan 620 (Plan 622 Phase 7) — the GPU G3 zero-shot harness: the CPU
+# `si_zero_shot_ppl` port driving `forward_token_graph` (~90 tok/s ⇒ the
+# FAST re-gate lane + the App-H τ-sweep enabler). Deliberately requires ONLY
+# `cuda_graphs_forward` + the folded loader — NOT `scale_invariant_attn` — so
+# the `base` arm runs on an UNHOOKED build too: the Phase-A bit-identity gate
+# is the harness's `--dump-logits` hex rows compared byte-for-byte across the
+# incumbent and hooked builds. The si arms gate on the feature at run time
+# (built without it they refuse loud).
+[[bin]]
+name = "si_zero_shot_ppl_gpu"
+required-features = ["cuda_graphs_forward", "riir-infer-core/bonsai2_hadamard"]
 
 # Plan 620 Phase A — the flag-0 bit-identity RECORDING instrument for the si
 # decode hook: runs unchanged at the pre-hook commit (it names no si surface)

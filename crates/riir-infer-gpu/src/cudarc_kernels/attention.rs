@@ -46,7 +46,7 @@ use std::sync::Arc;
 
 use cudarc::driver::PushKernelArg;
 use cudarc::driver::safe::{
-    CudaContext, CudaFunction, CudaModule, CudaStream, DevicePtr, LaunchConfig,
+    CudaContext, CudaFunction, CudaModule, CudaSlice, CudaStream, CudaView, DevicePtr, LaunchConfig,
 };
 
 /// Issue 754 T6 — the qg rows kernels' row cap. The kernel body owns rows
@@ -59,6 +59,52 @@ use cudarc::driver::safe::{
 /// z-blocks re-stage K from L2 exactly as 4 sequential p=16 chunks would
 /// re-read it — while the T9.9 fallback (QPB=4, grid.z=16) pays 4x that.
 pub const SPLITGQA_QG_ROWS_MAX_P: usize = 64;
+
+/// Plan 620 (Plan 622 Phase 7) — the scale-invariant decode hook's
+/// per-forward ABI. The CPU reference is
+/// `riir_infer_core::transformer::attention_si::si_head` pass 1; the LUT and
+/// calibration vocabulary is `katgpt_core::scale_invariant`.
+///
+/// Device-pointer form end to end: a captured CUDA graph bakes these
+/// pointers once, and arming/disarming flips the `enabled` pointee's
+/// CONTENT — no recapture (the Issue-618 devpos law applied to si state).
+/// `None` at a launch site = the incumbent posture: the launcher pushes the
+/// struct-owned dummies (`AttentionKernels::si_dummy_*`, `enabled` = 0) and
+/// the kernel's added branch is dead — bit-identical to the pre-620 kernel.
+#[derive(Clone, Copy)]
+pub struct SiDecodeArgs<'a> {
+    /// Interleaved schedule pairs `[a_0, m_0, a_1, m_1, …]` (the
+    /// `ScaleInvariantLut::am` layout), shared by every layer.
+    pub lut: &'a CudaSlice<f32>,
+    /// The FULL per-(layer, head) table — slot = `layer_idx * n_head + head`
+    /// (the CPU harness contract); narrowed per layer by [`Self::window_for`].
+    pub inv_sigma: &'a CudaSlice<f32>,
+    /// One i32: 0 = the incumbent (bit-identical) posture, 1 = armed.
+    pub enabled: &'a CudaSlice<i32>,
+}
+
+impl SiDecodeArgs<'_> {
+    /// The per-layer launch view: `inv_sigma` narrowed to THIS layer's
+    /// `n_head` window. Cheap — [`cudarc::driver::safe::CudaView`] borrows
+    /// the parent table (no allocation), and the view's device address is
+    /// what a captured graph bakes (stable for the session's lifetime).
+    pub fn window_for(&self, layer_idx: usize, n_head: usize) -> SiDecodeLayerArgs<'_> {
+        SiDecodeLayerArgs {
+            lut: self.lut,
+            inv_sigma: self.inv_sigma.slice(layer_idx * n_head..(layer_idx + 1) * n_head),
+            enabled: self.enabled,
+        }
+    }
+}
+
+/// The per-layer launch args — what a decode launcher actually pushes. The
+/// kernel indexes `si_inv_sigma[blockIdx.x]` (head_idx), so the window must
+/// carry exactly THIS layer's `n_head` entries.
+pub struct SiDecodeLayerArgs<'a> {
+    pub lut: &'a CudaSlice<f32>,
+    pub inv_sigma: CudaView<'a, f32>,
+    pub enabled: &'a CudaSlice<i32>,
+}
 
 /// Combined CUDA source for all attention-related kernels.
 ///
@@ -390,6 +436,43 @@ extern "C" __global__ void kv_cache_append_f32(
 ///
 /// Issue 612 fix ported: smem sized to head_dim (not a fixed 128), reduction
 /// starts at stride head_dim/2, serial sum replaces destructive parallel sum.
+// ---------------------------------------------------------------------------
+// Plan 622 Phase 7 / riir-infer Plan 620 — the scale-invariant decode hook.
+//
+// The affine-in-logit-space schedule (katgpt-core `scale_invariant` LUT; the
+// CPU reference is riir-infer `transformer::attention_si::si_head` pass 1):
+//
+//     score = (pos == 0) ? raw : a[dist] * (raw * inv_sigma_h) + m[dist]
+//     dist  = (n_positions - 1) - pos        (decode: query_pos = n_positions-1)
+//
+// with (a, m) the interleaved LUT pair at `dist` and `inv_sigma_h` the head's
+// measured 1/σ (1.0 = the neutral pass-through). Key 0 is the sink carve-out
+// (paper App. J): its raw logit never transforms, on every posture.
+//
+// ONE device function serves both decode twins (the scalar and the devpos
+// variant) so the transform exists exactly once. Expression order is the
+// Rust reference's, pinned with single-rounding intrinsics — the Rust ops
+// each round once, and an nvrtc FMA contraction of `a*(raw*inv) + m` would
+// silently skip the product's rounding.
+//
+// Flag-off law: `si_enabled` is a DEVICE POINTER (not a scalar) — 0 makes
+// every added branch dead and the kernel arithmetically identical to the
+// incumbent (the launch ABI gains three args; the math is untouched). The
+// pointer form is what lets a captured CUDA graph arm/disarm by CONTENT —
+// no recapture (the Issue-618 devpos law applied to the si state).
+// ---------------------------------------------------------------------------
+__device__ __forceinline__ float si_transform_score(
+    float raw, int pos, int n_positions, int head_idx,
+    const float* __restrict__ si_lut,
+    const float* __restrict__ si_inv_sigma)
+{
+    if (pos == 0) return raw;  // sink carve-out (App. J)
+    const int dist = n_positions - 1 - pos;
+    const float a = si_lut[2 * dist];
+    const float m = si_lut[2 * dist + 1];
+    return __fadd_rn(__fmul_rn(a, __fmul_rn(raw, si_inv_sigma[head_idx])), m);
+}
+
 extern "C" __global__ void attention_decode_f32(
     const float* __restrict__ query,        // [n_head * head_dim]
     const kv_elt* __restrict__ key_cache,   // [n_positions * n_kv_head * head_dim]
@@ -399,7 +482,10 @@ extern "C" __global__ void attention_decode_f32(
     const int head_dim,
     const int n_head,
     const int n_kv_head,
-    const int n_positions)
+    const int n_positions,
+    const float* __restrict__ si_lut,        // Plan 620: interleaved (a, m) pairs
+    const float* __restrict__ si_inv_sigma,  // Plan 620: this layer's n_head entries
+    const int* __restrict__ si_enabled)      // Plan 620: 0 = the incumbent posture
 {
     const int head_idx = blockIdx.x;
     const int tid = threadIdx.x;
@@ -420,6 +506,8 @@ extern "C" __global__ void attention_decode_f32(
     const int kv_group = head_idx * n_kv_head / n_head;
     const int kv_off = kv_group * head_dim;
     const bool valid_dim = tid < head_dim;
+    // Plan 620 — read ONCE per launch; the Phase-1 branch below is dead at 0.
+    const int si_on = *si_enabled;
 
     // Dynamic shared memory — sized at launch via shared_mem_bytes = head_dim * 4
     extern __shared__ float smem[];
@@ -444,6 +532,13 @@ extern "C" __global__ void attention_decode_f32(
                 dot += query[head_off + d] * KV_RD(&key_cache[k_base + d]);
             }
             my_score = dot * scale;
+            // Plan 620 — the schedule affine, BEFORE the tile-max pass: the
+            // max must track the TRANSFORMED row (what the softmax sees; the
+            // CPU si_head contract).
+            if (si_on != 0) {
+                my_score = si_transform_score(my_score, pos, n_positions, head_idx,
+                                              si_lut, si_inv_sigma);
+            }
         }
         smem[tid] = my_score;
         __syncthreads();
@@ -622,7 +717,9 @@ extern "C" __global__ void kv_cache_append_f32_devpos(
 //
 // Body is IDENTICAL to attention_decode_f32 above — only the n_positions
 // source differs (device pointer dereference vs scalar arg). This keeps the
-// two kernels provably equivalent.
+// two kernels provably equivalent. The Plan-620 si hook rides the SAME
+// shared `si_transform_score` helper in both bodies — the transform exists
+// exactly once.
 extern "C" __global__ void attention_decode_f32_devpos(
     const float* __restrict__ query,
     const kv_elt* __restrict__ key_cache,
@@ -632,7 +729,10 @@ extern "C" __global__ void attention_decode_f32_devpos(
     const int head_dim,
     const int n_head,
     const int n_kv_head,
-    const int* __restrict__ pos_dev)
+    const int* __restrict__ pos_dev,
+    const float* __restrict__ si_lut,        // Plan 620 — see attention_decode_f32
+    const float* __restrict__ si_inv_sigma,  // Plan 620
+    const int* __restrict__ si_enabled)      // Plan 620
 {
     const int n_positions = *pos_dev + 1;
     const int head_idx = blockIdx.x;
@@ -654,6 +754,8 @@ extern "C" __global__ void attention_decode_f32_devpos(
     const int kv_group = head_idx * n_kv_head / n_head;
     const int kv_off = kv_group * head_dim;
     const bool valid_dim = tid < head_dim;
+    // Plan 620 — read ONCE per launch; the Phase-1 branch below is dead at 0.
+    const int si_on = *si_enabled;
 
     // Dynamic shared memory — sized at launch via shared_mem_bytes = head_dim * 4
     extern __shared__ float smem[];
@@ -678,6 +780,11 @@ extern "C" __global__ void attention_decode_f32_devpos(
                 dot += query[head_off + d] * KV_RD(&key_cache[k_base + d]);
             }
             my_score = dot * scale;
+            // Plan 620 — same hook as the scalar twin (shared helper).
+            if (si_on != 0) {
+                my_score = si_transform_score(my_score, pos, n_positions, head_idx,
+                                              si_lut, si_inv_sigma);
+            }
         }
         smem[tid] = my_score;
         __syncthreads();
@@ -2876,6 +2983,16 @@ pub struct AttentionKernels {
     attention_verify2p_merge: CudaFunction,
     attention_verify2p_pv: CudaFunction,
     attention_verify2p_pv_devpos: CudaFunction,
+    /// Plan 620 — the flag-off si ABI dummies: the identity LUT pair
+    /// (a=1, m=0), a neutral inv_sigma runway, and the disarmed flag. A
+    /// launcher with `si: None` pushes these; the kernel's si branch is dead
+    /// at `*enabled == 0`, so the runway is never indexed — it is sized past
+    /// any realistic head count anyway so a stray off-path index cannot go
+    /// out of bounds. Stable device addresses: a captured graph bakes them,
+    /// so they live as long as the kernels struct.
+    si_dummy_lut: CudaSlice<f32>,
+    si_dummy_inv_sigma: CudaSlice<f32>,
+    si_dummy_enabled: CudaSlice<i32>,
     _module: Arc<CudaModule>,
 }
 
@@ -3124,6 +3241,20 @@ impl AttentionKernels {
             .load_function("output_gate_f32")
             .map_err(|e| super::CudarcKernelError::Compile(format!("{e}")))?;
 
+        // Plan 620 — the si flag-off dummies (see the struct field docs).
+        // The default stream's blocking clone_htod completes before any
+        // launch site can observe them.
+        let stream = ctx.default_stream();
+        let si_dummy_lut = stream
+            .clone_htod(&[1.0f32, 0.0])
+            .map_err(|e| super::CudarcKernelError::Launch(e.to_string()))?;
+        let si_dummy_inv_sigma = stream
+            .clone_htod(&[1.0f32; 64])
+            .map_err(|e| super::CudarcKernelError::Launch(e.to_string()))?;
+        let si_dummy_enabled = stream
+            .clone_htod(&[0i32])
+            .map_err(|e| super::CudarcKernelError::Launch(e.to_string()))?;
+
         Ok(Self {
             rope,
             rope_devpos,
@@ -3159,6 +3290,9 @@ impl AttentionKernels {
             attention_verify2p_merge,
             attention_verify2p_pv,
             attention_verify2p_pv_devpos,
+            si_dummy_lut,
+            si_dummy_inv_sigma,
+            si_dummy_enabled,
             _module: module,
         })
     }
@@ -3448,6 +3582,8 @@ impl AttentionKernels {
     /// - `query`: `[n_head * head_dim]`
     /// - `key_cache`, `value_cache`: `[n_positions * n_kv_head * head_dim]`
     /// - `attn_out`: `[n_head * head_dim]`
+    /// - `si`: the Plan-620 scale-invariant hook — `None` = the incumbent
+    ///   posture (dummies pushed, kernel branch dead, bit-identical).
     ///
     /// Dispatch: `n_head` blocks × `head_dim` threads. Dynamic shared memory
     /// = `head_dim * 4` bytes.
@@ -3462,12 +3598,22 @@ impl AttentionKernels {
         n_head: usize,
         n_kv_head: usize,
         n_positions: usize,
+        si: Option<&SiDecodeLayerArgs<'_>>,
     ) -> Result<(), super::CudarcKernelError> {
         let scale = 1.0f32 / (head_dim as f32).sqrt();
         let head_dim_i32 = head_dim as i32;
         let n_head_i32 = n_head as i32;
         let n_kv_head_i32 = n_kv_head as i32;
         let n_positions_i32 = n_positions as i32;
+        // The flag-off view — borrowed from the struct-owned dummies so the
+        // match arms unify on one type (`&CudaView<f32>`).
+        let dummy_inv = self
+            .si_dummy_inv_sigma
+            .slice(0..self.si_dummy_inv_sigma.len());
+        let (si_lut, si_inv_sigma, si_enabled) = match si {
+            Some(a) => (a.lut, &a.inv_sigma, a.enabled),
+            None => (&self.si_dummy_lut, &dummy_inv, &self.si_dummy_enabled),
+        };
         let cfg = LaunchConfig {
             grid_dim: (n_head as u32, 1, 1),
             block_dim: (head_dim as u32, 1, 1),
@@ -3485,6 +3631,9 @@ impl AttentionKernels {
                 .arg(&n_head_i32)
                 .arg(&n_kv_head_i32)
                 .arg(&n_positions_i32)
+                .arg(si_lut)
+                .arg(si_inv_sigma)
+                .arg(si_enabled)
                 .launch(cfg)
                 .map_err(|e| super::CudarcKernelError::Launch(e.to_string()))?;
         }
@@ -3492,7 +3641,8 @@ impl AttentionKernels {
     }
 
     /// Issue 618 — Device-pointer variant of `launch_attention_decode`.
-    /// Reads `n_positions = *pos_dev + 1` at kernel runtime.
+    /// Reads `n_positions = *pos_dev + 1` at kernel runtime. The Plan-620 si
+    /// hook rides the same ABI (`None` = the incumbent posture).
     #[allow(clippy::too_many_arguments)]
     pub fn launch_attention_decode_devpos(
         &self,
@@ -3505,11 +3655,21 @@ impl AttentionKernels {
         n_head: usize,
         n_kv_head: usize,
         pos_dev: &cudarc::driver::safe::CudaSlice<i32>,
+        si: Option<&SiDecodeLayerArgs<'_>>,
     ) -> Result<(), super::CudarcKernelError> {
         let scale = 1.0f32 / (head_dim as f32).sqrt();
         let head_dim_i32 = head_dim as i32;
         let n_head_i32 = n_head as i32;
         let n_kv_head_i32 = n_kv_head as i32;
+        // The flag-off view — borrowed from the struct-owned dummies so the
+        // match arms unify on one type (`&CudaView<f32>`).
+        let dummy_inv = self
+            .si_dummy_inv_sigma
+            .slice(0..self.si_dummy_inv_sigma.len());
+        let (si_lut, si_inv_sigma, si_enabled) = match si {
+            Some(a) => (a.lut, &a.inv_sigma, a.enabled),
+            None => (&self.si_dummy_lut, &dummy_inv, &self.si_dummy_enabled),
+        };
         let cfg = LaunchConfig {
             grid_dim: (n_head as u32, 1, 1),
             block_dim: (head_dim as u32, 1, 1),
@@ -3527,6 +3687,9 @@ impl AttentionKernels {
                 .arg(&n_head_i32)
                 .arg(&n_kv_head_i32)
                 .arg(pos_dev)
+                .arg(si_lut)
+                .arg(si_inv_sigma)
+                .arg(si_enabled)
                 .launch(cfg)
                 .map_err(|e| super::CudarcKernelError::Launch(e.to_string()))?;
         }
@@ -5387,6 +5550,72 @@ mod tests {
         out
     }
 
+    /// Plan 620 — [`cpu_attention_decode`] with the scale-invariant affine
+    /// applied per key (key 0 the sink), in the kernel's own per-op order
+    /// (`a * (raw * inv) + m`, each op rounded once — Rust f32 ops match the
+    /// kernel's `__fmul_rn`/`__fadd_rn`). The CPU twin the si gate asserts
+    /// against.
+    #[allow(clippy::too_many_arguments)]
+    fn cpu_attention_decode_si_affine(
+        query: &[f32],
+        key_cache: &[f32],
+        value_cache: &[f32],
+        n_head: usize,
+        n_kv_head: usize,
+        head_dim: usize,
+        n_positions: usize,
+        a_lut: f32,
+        m_lut: f32,
+        inv_sigma: f32,
+    ) -> Vec<f32> {
+        let scale = 1.0 / (head_dim as f32).sqrt();
+        let kv_stride = n_kv_head * head_dim;
+        let mut out = vec![0.0f32; n_head * head_dim];
+
+        for h in 0..n_head {
+            let head_off = h * head_dim;
+            let kv_group = h * n_kv_head / n_head;
+            let kv_off = kv_group * head_dim;
+
+            let mut scores = vec![0.0f32; n_positions];
+            let mut max_score = f32::NEG_INFINITY;
+            for (j, score) in scores.iter_mut().enumerate() {
+                let k_base = j * kv_stride + kv_off;
+                let mut dot = 0.0f32;
+                for d in 0..head_dim {
+                    dot += query[head_off + d] * key_cache[k_base + d];
+                }
+                let raw = dot * scale;
+                // The schedule affine — sink (key 0) keeps its raw logit;
+                // the LUT pair is constant here (the fixture schedule).
+                *score = if j == 0 {
+                    raw
+                } else {
+                    a_lut * (raw * inv_sigma) + m_lut
+                };
+                if *score > max_score {
+                    max_score = *score;
+                }
+            }
+
+            let mut sum = 0.0f32;
+            for score in scores.iter_mut() {
+                *score = (*score - max_score).exp();
+                sum += *score;
+            }
+
+            for d in 0..head_dim {
+                let mut acc = 0.0f32;
+                for (j, &score) in scores.iter().enumerate() {
+                    let v_idx = j * kv_stride + kv_off + d;
+                    acc += score * value_cache[v_idx];
+                }
+                out[head_off + d] = acc / sum;
+            }
+        }
+        out
+    }
+
     fn cpu_rmsnorm_batched(
         input: &[f32],
         gamma: &[f32],
@@ -5821,15 +6050,8 @@ mod tests {
 
         kernels
             .launch_attention_decode(
-                &stream,
-                &q_dev,
-                &k_dev,
-                &v_dev,
-                &out_dev,
-                head_dim,
-                n_head,
-                n_kv_head,
-                n_positions,
+                &stream, &q_dev, &k_dev, &v_dev, &out_dev, head_dim, n_head, n_kv_head,
+                n_positions, None,
             )
             .expect("launch");
         stream.synchronize().expect("sync");
@@ -5913,15 +6135,8 @@ mod tests {
 
         kernels
             .launch_attention_decode(
-                &stream,
-                &q_dev,
-                &k_dev,
-                &v_dev,
-                &out_dev,
-                head_dim,
-                n_head,
-                n_kv_head,
-                n_positions,
+                &stream, &q_dev, &k_dev, &v_dev, &out_dev, head_dim, n_head, n_kv_head,
+                n_positions, None,
             )
             .expect("launch");
         stream.synchronize().expect("sync");
@@ -6000,15 +6215,8 @@ mod tests {
         let out_s = stream.alloc_zeros::<f32>(q_len).unwrap();
         kernels
             .launch_attention_decode(
-                &stream,
-                &q_dev,
-                &k_dev,
-                &v_dev,
-                &out_s,
-                head_dim,
-                n_head,
-                n_kv_head,
-                n_positions,
+                &stream, &q_dev, &k_dev, &v_dev, &out_s, head_dim, n_head, n_kv_head,
+                n_positions, None,
             )
             .expect("scalar");
 
@@ -6018,6 +6226,7 @@ mod tests {
         kernels
             .launch_attention_decode_devpos(
                 &stream, &q_dev, &k_dev, &v_dev, &out_d, head_dim, n_head, n_kv_head, &pos_dev,
+                None,
             )
             .expect("devpos");
         stream.synchronize().expect("sync");
@@ -6035,6 +6244,183 @@ mod tests {
         assert!(
             max_diff < 1e-4,
             "attention_decode devpos max_diff {max_diff:.4e}"
+        );
+    }
+
+    /// Plan 620 — the si hook's own gate, three assertions in one launch set:
+    ///
+    /// 1. **Flag-off bit-identity (in-build):** a session-shaped launch with
+    ///    `enabled = 0` (real LUT + inv_sigma buffers, the pointers a session
+    ///    would pass) must produce BIT-identical output to the dummy launch
+    ///    (`si: None`) — proves the added branch is dead on the incumbent
+    ///    posture and the arg threading cannot leak a transform when off.
+    /// 2. **Identity-LUT wiring:** armed with the identity schedule
+    ///    (`a = 1, m = 0, inv_sigma = 1.0`) the transform is exact under
+    ///    single-rounding f32 — output must again be BIT-identical. Catches
+    ///    any index/layout mistake in the LUT pair read or the window.
+    /// 3. **Affine math:** armed with `a = 2, m = 1, inv_sigma = 0.5` the
+    ///    schedule is `2·(raw·0.5) + 1 = raw + 1`; the transformed run is
+    ///    compared against a CPU twin of the kernel that applies the same
+    ///    affine in the same per-op order (tolerance class — the softmax
+    ///    exp/sum reassociates across devices).
+    #[test]
+    fn test_attention_decode_si_flag_off_bit_identity_and_affine() {
+        let Some(_) = cuda_or_skip() else {
+            eprintln!("[skip] no CUDA device");
+            return;
+        };
+        let ctx = CudaContext::new(0).unwrap();
+        let stream = ctx.new_stream().unwrap();
+        let kernels = AttentionKernels::new(ctx).expect("compile");
+
+        let n_head = 4usize;
+        let n_kv_head = 2usize;
+        let head_dim = 64usize;
+        let n_positions = 8usize;
+
+        let q_len = n_head * head_dim;
+        let kv_len = n_positions * n_kv_head * head_dim;
+
+        // Values with real spread — the affine must visibly move the logits.
+        let mut query = vec![0.0f32; q_len];
+        let mut key_cache = vec![0.0f32; kv_len];
+        let mut value_cache = vec![0.0f32; kv_len];
+        for h in 0..n_head {
+            for d in 0..head_dim {
+                query[h * head_dim + d] = ((h * 31 + d) % 17) as f32 * 0.05 - 0.4;
+            }
+        }
+        for j in 0..n_positions {
+            for kvh in 0..n_kv_head {
+                for d in 0..head_dim {
+                    let base = j * n_kv_head * head_dim + kvh * head_dim;
+                    key_cache[base + d] = ((j * 7 + kvh * 3 + d) % 23) as f32 * 0.04 - 0.44;
+                    value_cache[base + d] = ((j * 5 + d) % 11) as f32 * 0.09 - 0.45;
+                }
+            }
+        }
+
+        let q_dev = stream.clone_htod(&query).unwrap();
+        let k_dev = stream.clone_htod(&key_cache).unwrap();
+        let v_dev = stream.clone_htod(&value_cache).unwrap();
+
+        // Session-shaped buffers: LUT sized to n_positions distances,
+        // inv_sigma one entry per head.
+        let lut_identity = stream
+            .clone_htod(&std::iter::repeat_n(1.0f32, n_positions * 2)
+                .enumerate()
+                .map(|(i, one)| if i % 2 == 1 { 0.0 } else { one })
+                .collect::<Vec<f32>>())
+            .unwrap();
+        let inv_identity = stream.clone_htod(&vec![1.0f32; n_head]).unwrap();
+        let lut_affine = stream
+            .clone_htod(&std::iter::repeat_n(2.0f32, n_positions * 2)
+                .enumerate()
+                .map(|(i, two)| if i % 2 == 1 { 1.0 } else { two })
+                .collect::<Vec<f32>>())
+            .unwrap();
+        let inv_half = stream.clone_htod(&vec![0.5f32; n_head]).unwrap();
+        let disabled = stream.clone_htod(&[0i32]).unwrap();
+        let enabled = stream.clone_htod(&[1i32]).unwrap();
+
+        let launch = |k: &AttentionKernels,
+                      out: &cudarc::driver::safe::CudaSlice<f32>,
+                      si: Option<&SiDecodeLayerArgs<'_>>| {
+            k.launch_attention_decode(
+                &stream, &q_dev, &k_dev, &v_dev, out, head_dim, n_head, n_kv_head, n_positions,
+                si,
+            )
+            .expect("launch");
+            stream.synchronize().expect("sync");
+            let mut host = vec![0f32; q_len];
+            stream.memcpy_dtoh(out, &mut host).unwrap();
+            host
+        };
+
+        let out_dummy = stream.alloc_zeros::<f32>(q_len).unwrap();
+        let out_disarmed = stream.alloc_zeros::<f32>(q_len).unwrap();
+        let out_identity = stream.alloc_zeros::<f32>(q_len).unwrap();
+        let out_affine = stream.alloc_zeros::<f32>(q_len).unwrap();
+
+        let base = launch(&kernels, &out_dummy, None);
+        // CudaView is not Copy — each construction takes its own borrowed
+        // window (cheap; no device work).
+        let disarmed = launch(
+            &kernels,
+            &out_disarmed,
+            Some(&SiDecodeLayerArgs {
+                lut: &lut_identity,
+                inv_sigma: inv_identity.slice(0..n_head),
+                enabled: &disabled,
+            }),
+        );
+        let identity = launch(
+            &kernels,
+            &out_identity,
+            Some(&SiDecodeLayerArgs {
+                lut: &lut_identity,
+                inv_sigma: inv_identity.slice(0..n_head),
+                enabled: &enabled,
+            }),
+        );
+        let affine = launch(
+            &kernels,
+            &out_affine,
+            Some(&SiDecodeLayerArgs {
+                lut: &lut_affine,
+                inv_sigma: inv_half.slice(0..n_head),
+                enabled: &enabled,
+            }),
+        );
+
+        // (1) Flag-off bit-identity — session-shaped pointers, disabled.
+        for i in 0..q_len {
+            assert_eq!(
+                base[i].to_bits(),
+                disarmed[i].to_bits(),
+                "flag-off bit-identity broke at {i}: {:?} vs {:?}",
+                base[i],
+                disarmed[i]
+            );
+        }
+        // (2) Identity schedule (a=1, m=0, inv=1) — bit-identical too.
+        for i in 0..q_len {
+            assert_eq!(
+                base[i].to_bits(),
+                identity[i].to_bits(),
+                "identity-LUT wiring broke at {i}: {:?} vs {:?}",
+                base[i],
+                identity[i]
+            );
+        }
+        // (3) The affine moved the result somewhere (the fixture has spread).
+        assert!(
+            base.iter()
+                .zip(affine.iter())
+                .any(|(b, a)| b.to_bits() != a.to_bits()),
+            "armed affine schedule produced no output change — the hook is inert"
+        );
+        // And it matches the CPU twin of the kernel with the same affine.
+        let cpu_affine = cpu_attention_decode_si_affine(
+            &query,
+            &key_cache,
+            &value_cache,
+            n_head,
+            n_kv_head,
+            head_dim,
+            n_positions,
+            2.0,
+            1.0,
+            0.5,
+        );
+        let mut max_diff = 0f32;
+        for (g, c) in affine.iter().zip(cpu_affine.iter()) {
+            max_diff = max_diff.max((g - c).abs());
+        }
+        eprintln!("[attention_decode_si_affine] max_diff={max_diff:.4e}");
+        assert!(
+            max_diff <= TOL,
+            "si affine mismatch: max_diff={max_diff:.6}"
         );
     }
 

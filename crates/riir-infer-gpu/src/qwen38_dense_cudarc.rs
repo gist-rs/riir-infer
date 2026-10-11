@@ -4221,6 +4221,9 @@ impl Qwen38DenseForward {
                         cfg.n_head,
                         cfg.n_kv_head,
                         &self.pos_dev,
+                        // Plan 620 — the si lane is the Bonsai hybrid decode;
+                        // the Qwen3.8 dense forward keeps the incumbent path.
+                        None,
                     )
                     .map_err(|e| e.to_string())?;
             }
@@ -4291,6 +4294,9 @@ impl Qwen38DenseForward {
                         cfg.n_head,
                         cfg.n_kv_head,
                         pos + 1,
+                        // Plan 620 — the si lane is the Bonsai hybrid decode;
+                        // the Qwen3.8 dense forward keeps the incumbent path.
+                        None,
                     )
                     .map_err(|e| e.to_string())?;
             }

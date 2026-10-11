@@ -42,6 +42,8 @@
 //!   --corpus <text> [--arms base,si,si-cal,si-pprope] [--max-length 2048]
 //!   [--score-window 128] [--tolerance 0.05] [--probe-tokens 512]
 //!   [--tau 10.0] [--retrieval] [--pp-train-len 1024]
+//!   [--save-cal <path>] [--probe-only]   (Plan 620 — freeze the σ table
+//!   for the GPU G3 lane; e.g. --arms si-cal,base --probe-only --save-cal c.bin)
 //! ```
 
 use std::path::PathBuf;
@@ -304,6 +306,11 @@ fn main() -> Result<()> {
     let mut tau = 10.0f32;
     let mut retrieval = false;
     let mut pp_train_len: Option<usize> = None;
+    // Plan 620 — the GPU G3 lane consumes the frozen σ table: `--save-cal`
+    // writes the HeadCalibration sidecar right after the probe (BLAKE3-checked
+    // format, `HeadCalibration::to_sidecar`), `--probe-only` stops there.
+    let mut save_cal: Option<PathBuf> = None;
+    let mut probe_only = false;
     let mut args = std::env::args().skip(1);
     while let Some(a) = args.next() {
         match a.as_str() {
@@ -329,6 +336,8 @@ fn main() -> Result<()> {
             "--tau" => tau = args.next().expect("x").parse()?,
             "--retrieval" => retrieval = true,
             "--pp-train-len" => pp_train_len = Some(args.next().expect("n").parse()?),
+            "--save-cal" => save_cal = Some(PathBuf::from(args.next().expect("path"))),
+            "--probe-only" => probe_only = true,
             other => bail!("unknown arg {other}"),
         }
     }
@@ -479,6 +488,17 @@ fn main() -> Result<()> {
                 .fold(0u64, |a, b| (a << 8) | u64::from(*b))
                 & 0xffff
         );
+        // Plan 620 — freeze the table for the GPU G3 lane (the sidecar is
+        // BLAKE3-checked on load; quote host + digest beside every row).
+        if let Some(path) = &save_cal {
+            std::fs::write(path, cal.to_sidecar())
+                .with_context(|| format!("write cal sidecar {}", path.display()))?;
+            println!("# cal sidecar written: {}", path.display());
+        }
+        if probe_only {
+            println!("# --probe-only: stopping after the probe (the GPU lane owns the arms)");
+            return Ok(());
+        }
         calibration = Some(cal);
     }
 

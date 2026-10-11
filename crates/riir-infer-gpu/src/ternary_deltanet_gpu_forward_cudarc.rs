@@ -44,6 +44,19 @@
 
 #![allow(clippy::too_many_arguments, clippy::needless_range_loop)]
 
+/// Plan 620 — the si session's launch args, feature-conditional at the CALL
+/// SITE: the `si` field exists only under `scale_invariant_attn`, so the
+/// read is cfg'd here once and every forward path stays one line.
+macro_rules! si_session_args {
+    ($self:expr) => {{
+        #[cfg(feature = "scale_invariant_attn")]
+        let si = si_args(&$self.si);
+        #[cfg(not(feature = "scale_invariant_attn"))]
+        let si = None;
+        si
+    }};
+}
+
 use std::sync::Arc;
 
 use cudarc::driver::PushKernelArg;
@@ -809,6 +822,13 @@ pub struct TernaryDeltanetGpuForwardCudarc {
     /// and every forward — decode and training — runs the frozen backbone
     /// regardless of attached slots.
     lora_forward_enabled: bool,
+    /// Plan 620 (Plan 622 Phase 7) — the GPU scale-invariant session, when
+    /// attached. The decode launchers push its device pointers; arm/disarm
+    /// flips the flag's CONTENT (graph-safe, no recapture), while attach /
+    /// detach change the baked pointers and invalidate the graph (the
+    /// `set_lora` precedent).
+    #[cfg(feature = "scale_invariant_attn")]
+    si: Option<crate::si_gpu::SiGpuSession>,
     /// Issue 717 G3b — speculative-decode seam state (checkpoint backups +
     /// the verify rotation pool). See the speculative section in the impl.
     #[cfg(feature = "speculative_decode")]
@@ -1369,6 +1389,8 @@ impl TernaryDeltanetGpuForwardCudarc {
             lora_kernels,
             lora_norm_x,
             lora_forward_enabled: true,
+            #[cfg(feature = "scale_invariant_attn")]
+            si: None,
             #[cfg(feature = "speculative_decode")]
             spec,
         })
@@ -1589,6 +1611,55 @@ impl TernaryDeltanetGpuForwardCudarc {
         Ok(())
     }
 
+    // ── Plan 620 — the scale-invariant session surface ──────────────
+
+    /// Attach a session (replacing any previous one). The captured graph
+    /// baked the OLD pointer set, so it is invalidated here — the next
+    /// `forward_token_graph` recaptures with the new pointers (the
+    /// `set_lora` precedent). The session arrives DISARMED; arm with
+    /// [`Self::arm_si`].
+    #[cfg(feature = "scale_invariant_attn")]
+    pub fn attach_si(&mut self, session: crate::si_gpu::SiGpuSession) {
+        #[cfg(feature = "cuda_graphs_forward")]
+        {
+            self.graph = None;
+        }
+        self.si = Some(session);
+    }
+
+    /// Detach the session — the incumbent posture returns. Graph invalidated
+    /// (the dummies' pointers were not what the graph baked).
+    #[cfg(feature = "scale_invariant_attn")]
+    pub fn detach_si(&mut self) {
+        #[cfg(feature = "cuda_graphs_forward")]
+        {
+            self.graph = None;
+        }
+        self.si = None;
+    }
+
+    /// Arm/disarm by CONTENT flip — a captured graph replays against the
+    /// same pointers, so this NEVER recaptures (the Plan-620 no-recapture
+    /// law; the Issue-618 devpos pattern).
+    ///
+    /// # Errors
+    /// No session attached, or the device write failed.
+    #[cfg(feature = "scale_invariant_attn")]
+    pub fn arm_si(&mut self, on: bool) -> Result<(), CudarcKernelError> {
+        match &mut self.si {
+            Some(session) => session.set_armed(&self.infra.stream, on),
+            None => Err(CudarcKernelError::InvalidArg(
+                "arm_si: no scale-invariant session attached".into(),
+            )),
+        }
+    }
+
+    /// The attached session's host-side armed mirror, if any.
+    #[cfg(feature = "scale_invariant_attn")]
+    pub fn si_is_armed(&self) -> Option<bool> {
+        self.si.as_ref().map(|s| s.is_armed())
+    }
+
     /// Forward pass for a single decode token.
     ///
     /// Assumes `set_input_token` was called. Returns the logits (downloaded
@@ -1599,6 +1670,7 @@ impl TernaryDeltanetGpuForwardCudarc {
         // fields, so Rust allows borrowing them simultaneously.
         let infra = &self.infra;
         let acts = &mut self.acts;
+        let si = si_session_args!(self);
         let lora_kernels = &self.lora_kernels;
         let lora_norm_x = &self.lora_norm_x;
         let mut lora_ctx = build_lora_ctx_enabled(
@@ -1607,7 +1679,7 @@ impl TernaryDeltanetGpuForwardCudarc {
             lora_norm_x,
             self.lora_forward_enabled,
         );
-        forward_from_x_with_lora(infra, acts, lora_ctx.as_mut())?;
+        forward_from_x_with_lora(infra, acts, lora_ctx.as_mut(), si.as_ref())?;
 
         // Sync + download logits.
         infra
@@ -1658,6 +1730,7 @@ impl TernaryDeltanetGpuForwardCudarc {
         {
             let infra = &self.infra;
             let acts = &mut self.acts;
+            let si = si_session_args!(self);
             // Issue 666/781 — build LoRA ctx from disjoint struct fields.
             let lora_kernels = &self.lora_kernels;
             let lora_norm_x = &self.lora_norm_x;
@@ -1667,7 +1740,7 @@ impl TernaryDeltanetGpuForwardCudarc {
                 lora_norm_x,
                 self.lora_forward_enabled,
             );
-            forward_layers_with_lora(infra, acts, lora_ctx.as_mut())?;
+            forward_layers_with_lora(infra, acts, lora_ctx.as_mut(), si.as_ref())?;
 
             // ── Final RMSNorm + lm_head (fused, with norm_x side write) ──
             // Issue 634 — same as the hot path's `rmsnorm_quantize_and_gemv_batch`
@@ -1778,6 +1851,7 @@ impl TernaryDeltanetGpuForwardCudarc {
         {
             let infra = &self.infra;
             let acts = &mut self.acts;
+            let si = si_session_args!(self);
             let lora_kernels = &self.lora_kernels;
             let lora_norm_x = &self.lora_norm_x;
             let mut lora_ctx = build_lora_ctx_enabled(
@@ -1808,7 +1882,15 @@ impl TernaryDeltanetGpuForwardCudarc {
                         true,
                     )?;
                 } else {
-                    forward_attention_layer(infra, acts, layer_idx, layer_w, eps, true)?;
+                    forward_attention_layer(
+                        infra,
+                        acts,
+                        layer_idx,
+                        layer_w,
+                        eps,
+                        true,
+                        si.as_ref(),
+                    )?;
                 }
                 rmsnorm_quantize_and_gemv_batch(
                     &infra.elementwise,
@@ -1931,6 +2013,7 @@ impl TernaryDeltanetGpuForwardCudarc {
         {
             let infra = &self.infra;
             let acts = &mut self.acts;
+            let si = si_session_args!(self);
             let lora_kernels = &self.lora_kernels;
             let lora_norm_x = &self.lora_norm_x;
             let mut lora_ctx = build_lora_ctx_enabled(
@@ -1973,7 +2056,15 @@ impl TernaryDeltanetGpuForwardCudarc {
                         true,
                     )?;
                 } else {
-                    forward_attention_layer(infra, acts, layer_idx, layer_w, eps, true)?;
+                    forward_attention_layer(
+                        infra,
+                        acts,
+                        layer_idx,
+                        layer_w,
+                        eps,
+                        true,
+                        si.as_ref(),
+                    )?;
                 }
                 rmsnorm_quantize_and_gemv_batch(
                     &infra.elementwise,
@@ -2380,7 +2471,8 @@ impl TernaryDeltanetGpuForwardCudarc {
     pub fn forward_dispatch_only(&mut self) -> Result<(), CudarcKernelError> {
         let infra = &self.infra;
         let acts = &mut self.acts;
-        forward_from_x(infra, acts)
+        let si = si_session_args!(self);
+        forward_from_x(infra, acts, si.as_ref())
     }
 
     /// Read-only access to the logits buffer (post-forward).
@@ -2511,6 +2603,7 @@ impl TernaryDeltanetGpuForwardCudarc {
         // when an adapter is attached.
         let infra = &self.infra;
         let acts = &mut self.acts;
+        let si = si_session_args!(self);
         let lora_kernels = &self.lora_kernels;
         let lora_norm_x = &self.lora_norm_x;
         let mut lora_ctx = build_lora_ctx_enabled(
@@ -2519,7 +2612,7 @@ impl TernaryDeltanetGpuForwardCudarc {
             lora_norm_x,
             self.lora_forward_enabled,
         );
-        if let Err(e) = forward_from_x_devpos(infra, acts, lora_ctx.as_mut()) {
+        if let Err(e) = forward_from_x_devpos(infra, acts, lora_ctx.as_mut(), si.as_ref()) {
             let _ = self.infra.stream.end_capture(
                 cudarc::driver::sys::CUgraphInstantiate_flags::CUDA_GRAPH_INSTANTIATE_FLAG_AUTO_FREE_ON_LAUNCH,
             );
@@ -3119,6 +3212,7 @@ impl TernaryDeltanetGpuForwardCudarc {
         guard_no_rotation(&self.infra, "forward_token_profiled")?;
         let infra = &self.infra;
         let acts = &mut self.acts;
+        let si = si_session_args!(self);
 
         // Create CUDA events for section timing.
         let flags = Some(cudarc::driver::sys::CUevent_flags::CU_EVENT_DEFAULT);
@@ -3177,7 +3271,15 @@ impl TernaryDeltanetGpuForwardCudarc {
             if is_deltanet {
                 forward_deltanet_layer(infra, acts, layer_idx, layer_w, eps, None, false)?;
             } else {
-                forward_attention_layer(infra, acts, layer_idx, layer_w, eps, false)?;
+                forward_attention_layer(
+                    infra,
+                    acts,
+                    layer_idx,
+                    layer_w,
+                    eps,
+                    false,
+                    si.as_ref(),
+                )?;
             }
             infra
                 .elementwise
@@ -3652,22 +3754,36 @@ fn build_lora_ctx_enabled<'a>(
     }
 }
 
+/// Plan 620 — the si launch args off the session OPTION (not `&self`): the
+/// callers' split-borrow pattern (acts `&mut`, lora slots `&mut`) needs this
+/// borrow scoped to the `si` field alone, which a `&self` method cannot
+/// express. Called only under `scale_invariant_attn` (see
+/// `si_session_args!`); other builds never reference the field.
+#[cfg(feature = "scale_invariant_attn")]
+fn si_args(
+    session: &Option<crate::si_gpu::SiGpuSession>,
+) -> Option<crate::cudarc_kernels::attention::SiDecodeArgs<'_>> {
+    session.as_ref().map(crate::si_gpu::SiGpuSession::decode_args)
+}
+
 fn forward_from_x(
     infra: &ForwardInfraCudarc,
     acts: &mut ActivationsCudarc,
+    si: Option<&crate::cudarc_kernels::attention::SiDecodeArgs<'_>>,
 ) -> Result<(), CudarcKernelError> {
-    forward_from_x_with_lora(infra, acts, None)
+    forward_from_x_with_lora(infra, acts, None, si)
 }
 
 fn forward_from_x_with_lora(
     infra: &ForwardInfraCudarc,
     acts: &mut ActivationsCudarc,
     lora_ctx: Option<&mut LoraFwdCtx<'_>>,
+    si: Option<&crate::cudarc_kernels::attention::SiDecodeArgs<'_>>,
 ) -> Result<(), CudarcKernelError> {
     let n = infra.config.n_embd;
     let eps = infra.config.rms_norm_eps as f32;
 
-    forward_layers_with_lora(infra, acts, lora_ctx)?;
+    forward_layers_with_lora(infra, acts, lora_ctx, si)?;
 
     // ── Final RMSNorm + lm_head (fused) ──
     // Issue 623 — fuse the final RMSNorm + quantize, then dispatch lm_head GEMV.
@@ -3774,8 +3890,9 @@ fn forward_from_x_with_lora(
 fn forward_layers(
     infra: &ForwardInfraCudarc,
     acts: &mut ActivationsCudarc,
+    si: Option<&crate::cudarc_kernels::attention::SiDecodeArgs<'_>>,
 ) -> Result<(), CudarcKernelError> {
-    forward_layers_with_lora(infra, acts, None)
+    forward_layers_with_lora(infra, acts, None, si)
 }
 
 #[allow(dead_code)]
@@ -3792,6 +3909,7 @@ fn forward_layers_with_lora(
     infra: &ForwardInfraCudarc,
     acts: &mut ActivationsCudarc,
     mut lora_ctx: Option<&mut LoraFwdCtx<'_>>,
+    si: Option<&crate::cudarc_kernels::attention::SiDecodeArgs<'_>>,
 ) -> Result<(), CudarcKernelError> {
     let n = infra.config.n_embd;
     let eps = infra.config.rms_norm_eps as f32;
@@ -3841,7 +3959,7 @@ fn forward_layers_with_lora(
                 true,
             )?;
         } else {
-            forward_attention_layer(infra, acts, layer_idx, layer_w, eps, true)?;
+            forward_attention_layer(infra, acts, layer_idx, layer_w, eps, true, si)?;
         }
 
         // ── Post-attention RMSNorm + FFN gate/up (fused) ──
@@ -4527,6 +4645,8 @@ fn forward_attention_layer(
     layer_w: &GpuLayerWeightsCudarc,
     eps: f32,
     accumulate_out: bool,
+    // Plan 620 — the scale-invariant session (None = the incumbent posture).
+    si: Option<&crate::cudarc_kernels::attention::SiDecodeArgs<'_>>,
 ) -> Result<(), CudarcKernelError> {
     let n_head = infra.config.n_head;
     let n_kv = infra.config.n_kv_head;
@@ -4721,6 +4841,9 @@ fn forward_attention_layer(
 
     // 6. Flash attention decode.
     let n_positions = pos + 1;
+    // Plan 620 — the si hook: this layer's head window off the full table
+    // (slot = layer_idx * n_head + head, the CPU harness contract).
+    let si_layer = si.map(|a| a.window_for(layer_idx, n_head));
     infra.attention.launch_attention_decode(
         &infra.stream,
         &acts.attn_q,
@@ -4731,6 +4854,7 @@ fn forward_attention_layer(
         n_head,
         n_kv,
         n_positions,
+        si_layer.as_ref(),
     )?;
 
     // 7–8. Output gating + output projection (FUSED with quantize).
@@ -5138,6 +5262,9 @@ fn forward_attention_layer_training(
 
     // 6. Flash attention decode
     let n_positions = pos + 1;
+    // Plan 620 — the si lane is decode-serving; the TRAINING forward keeps
+    // the incumbent path (no session is threaded here — a trained-window
+    // forward must reproduce the backbone the gradients were built on).
     infra.attention.launch_attention_decode(
         &infra.stream,
         &acts.attn_q,
@@ -5148,6 +5275,7 @@ fn forward_attention_layer_training(
         n_head,
         n_kv,
         n_positions,
+        None,
     )?;
 
     // Issue 492 T1 GPU lane - capture tap. Whole k/v cache buffers are
@@ -5239,6 +5367,8 @@ fn forward_attention_layer_devpos(
     layer_w: &GpuLayerWeightsCudarc,
     eps: f32,
     accumulate_out: bool,
+    // Plan 620 — the scale-invariant session (None = the incumbent posture).
+    si: Option<&crate::cudarc_kernels::attention::SiDecodeArgs<'_>>,
 ) -> Result<(), CudarcKernelError> {
     let n_head = infra.config.n_head;
     let n_kv = infra.config.n_kv_head;
@@ -5438,6 +5568,9 @@ fn forward_attention_layer_devpos(
 
     // 6. Flash attention decode — _devpos variant.
     //    (Kernel internally computes n_positions = *pos_dev + 1.)
+    // Plan 620 — the si hook: this layer's head window off the full table
+    // (the graph bakes the window view's address; arm/disarm flips content).
+    let si_layer = si.map(|a| a.window_for(layer_idx, n_head));
     infra.attention.launch_attention_decode_devpos(
         &infra.stream,
         &acts.attn_q,
@@ -5448,6 +5581,7 @@ fn forward_attention_layer_devpos(
         n_head,
         n_kv,
         &acts.pos_dev_buf,
+        si_layer.as_ref(),
     )?;
 
     // 7–8. Output gating + output projection (FUSED with quantize).
@@ -5554,6 +5688,7 @@ fn forward_from_x_devpos(
     infra: &ForwardInfraCudarc,
     acts: &mut ActivationsCudarc,
     mut lora_ctx: Option<&mut LoraFwdCtx<'_>>,
+    si: Option<&crate::cudarc_kernels::attention::SiDecodeArgs<'_>>,
 ) -> Result<(), CudarcKernelError> {
     let n = infra.config.n_embd;
     let eps = infra.config.rms_norm_eps as f32;
@@ -5615,7 +5750,7 @@ fn forward_from_x_devpos(
                 true,
             )?;
         } else {
-            forward_attention_layer_devpos(infra, acts, layer_idx, layer_w, eps, true)?;
+            forward_attention_layer_devpos(infra, acts, layer_idx, layer_w, eps, true, si)?;
         }
 
         // ── Post-attention RMSNorm + FFN gate/up (fused) ──

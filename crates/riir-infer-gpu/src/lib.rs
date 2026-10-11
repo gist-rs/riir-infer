@@ -636,6 +636,22 @@ pub mod speculative_decode;
 #[cfg(all(feature = "ternary_gemv_cuda_raw", not(target_os = "macos")))]
 pub mod ternary_deltanet_gpu_forward_cudarc;
 
+// Plan 620 (Plan 622 Phase 7) — the GPU-side scale-invariant session (the
+// decode-hook state that rides the cudarc attention kernels). Same posture
+// as the forward it arms.
+#[cfg(all(
+    feature = "scale_invariant_attn",
+    feature = "ternary_gemv_cuda_raw",
+    not(target_os = "macos")
+))]
+pub mod si_gpu;
+#[cfg(all(
+    feature = "scale_invariant_attn",
+    feature = "ternary_gemv_cuda_raw",
+    not(target_os = "macos")
+))]
+pub use si_gpu::SiGpuSession;
+
 // Plan 618 item 5 (Issue 028 T4) — the cudarc Q4_K GEMV: the disaggregated
 // container's prefill-copy format on the GPU. Same lane as the whole-forward
 // (consumes its shared int8 activation buffers + WG_THREADS grid shape).
