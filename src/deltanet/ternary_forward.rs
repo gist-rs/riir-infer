@@ -398,7 +398,7 @@ fn forward_attention_layer_ternary(
     layer: &DeltaNetTernaryLayerWeights,
     cache: &mut crate::transformer::KVCache,
     pos: usize,
-    layer_idx: usize,
+    _layer_idx: usize,
     config: &Config,
     rope_freq: &crate::rope::RopeFreqTable,
     scratch: &mut AttentionLayerScratch,
@@ -521,7 +521,7 @@ fn forward_attention_layer_ternary(
                 scale,
                 config.block_size,
                 pos,
-                layer_idx,
+                _layer_idx,
                 &mut *acc,
             );
         },
@@ -540,7 +540,7 @@ fn forward_attention_layer_ternary(
                 scale,
                 config.block_size,
                 pos,
-                layer_idx,
+                _layer_idx,
                 plan,
             );
         },
