@@ -161,6 +161,21 @@ hyperthink_t1 = ["vk_calibration", "dep:katgpt-pruners", "katgpt-pruners/bias_de
 # `row_logit_floor_ppl` bin (the T2/T4 quality gate). OPT-IN: promotion is
 # katgpt-rs-side and waits on T2 + T3.
 row_logit_floor = ["katgpt-core/row_logit_floor"]
+# scale_invariant_attn (Plan 622 Phase 7, 2026-10-11): the scale-invariant
+# attention lane for the riir-infer kernels — `transformer::attention_si`
+# (the affine-in-logit-space kernel + the load-time σ probe + the armed
+# session vocabulary) riding the packed Bonsai ternary decode path, + the
+# `si_zero_shot_ppl` G3 harness bin (the zero-shot split:
+# calibrated / uncalibrated / pp-RoPE-expected-FAIL). Forwards katgpt-core's
+# `scale_invariant_attn` (the schedule LUT + HeadCalibration +
+# SpreadAccumulator substrate). IMPLIES `deltanet_ternary_inference`: the
+# riir-infer vehicle for the lane is the packed Bonsai ternary decode path
+# (the module doc's law — the GDN layers have no per-key logits, the
+# audited discard), so the kernel + the wiring tests + the loader's
+# pp-mark reader all need the ternary stack live (Config::qwen_deltanet /
+# TernaryGroupWeights / ternary_forward ride it). OPT-IN — the Phase-7
+# GOAT (G2 engine cells + G3) is open; promotion is a separate owner call.
+scale_invariant_attn = ["katgpt-core/scale_invariant_attn", "deltanet_ternary_inference"]
 # act_diagonal_calibration (riir-infer Issue 014 T1, 2026-09-26): the
 # activation-diagonal collector over the Bonsai-2 ternary lane — the
 # `vk_calibration` shape at the Issue-886 tap points (linear-layer INPUTS,
@@ -408,6 +423,11 @@ required-features = ["hyperthink_t1"]
 name = "row_logit_floor_ppl"
 path = "src/bin/row_logit_floor_ppl.rs"
 required-features = ["row_logit_floor", "attention_to_answer"]
+
+[[bin]]
+name = "si_zero_shot_ppl"
+path = "src/bin/si_zero_shot_ppl.rs"
+required-features = ["scale_invariant_attn", "bonsai2_hadamard"]
 
 # riir-infer Issue 014 T1 — the activation-diagonal collector bin. The
 # module lives behind #[cfg(feature = "act_diagonal_calibration")]; this

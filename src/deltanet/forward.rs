@@ -951,6 +951,17 @@ pub struct AttentionLayerScratch {
     pub(super) v_buf: Vec<f32>,
     pub(super) attn_out: Vec<f32>,
     pub(super) head_scores: Vec<f32>,
+    /// Scale-invariant attention session (Plan 622 Phase 7,
+    /// `scale_invariant_attn`). `None` = the plain path, bit-identical;
+    /// `Probe` = the load-time σ probe (plain math + per-`(layer, head)`
+    /// observation); `Armed` = the schedule affine in pass 1's logit space.
+    /// It rides the attention scratch because that is the one config-shaped
+    /// struct already threaded into the attention kernels — swapping the
+    /// variant between arms is the G3 A/B, no signature ripple. Deliberately
+    /// `pub` beside the `pub(super)` buffers: it is session CONFIG, not a
+    /// buffer; callers (the si harness, tests) arm it per arm.
+    #[cfg(feature = "scale_invariant_attn")]
+    pub scale_invariant: Option<crate::transformer::attention_si::SiAttentionSession>,
 }
 
 impl AttentionLayerScratch {
@@ -966,6 +977,8 @@ impl AttentionLayerScratch {
             v_buf: vec![0.0; kvd],
             attn_out: vec![0.0; q_dim],
             head_scores: vec![0.0; config.n_head * config.block_size],
+            #[cfg(feature = "scale_invariant_attn")]
+            scale_invariant: None,
         }
     }
 }

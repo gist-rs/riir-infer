@@ -122,6 +122,7 @@ fn forward_amputated(
             &mut cache.deltanet_state.conv_states[layer_idx],
             &mut cache.kv_cache.layers[layer_idx],
             pos,
+            layer_idx,
             config,
             scratch,
             &loaded.rope_freq,

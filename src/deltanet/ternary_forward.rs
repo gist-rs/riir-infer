@@ -40,12 +40,12 @@ use super::forward::{
     causal_conv1d_update, effective_rotary_dim, expand_heads_into, gated_deltanet_step_inplace,
     l2_normalize, softplus,
 };
-use super::ternary_weights::{DeltaNetTernaryLayerWeights, ProjWeights, QwenDeltaNetTernaryWeights};
+use super::ternary_weights::{
+    DeltaNetTernaryLayerWeights, ProjWeights, QwenDeltaNetTernaryWeights,
+};
 use crate::types::{Config, DeltaNetLayerType, rmsnorm_with_gamma_eps, swiglu};
 use katgpt_core::TernaryMatvecHook;
-use katgpt_core::{
-    TernaryFfnHook, TernaryInputProjHook, simd_ternary_group_matvec_parallel,
-};
+use katgpt_core::{TernaryFfnHook, TernaryInputProjHook, simd_ternary_group_matvec_parallel};
 
 use crate::deltanet::rotation::{
     TernaryRotationConfig, permute_gdn_v_grouped_inplace, permute_gdn_v_grouped_inverse_inplace,
@@ -398,6 +398,7 @@ fn forward_attention_layer_ternary(
     layer: &DeltaNetTernaryLayerWeights,
     cache: &mut crate::transformer::KVCache,
     pos: usize,
+    layer_idx: usize,
     config: &Config,
     rope_freq: &crate::rope::RopeFreqTable,
     scratch: &mut AttentionLayerScratch,
@@ -493,10 +494,75 @@ fn forward_attention_layer_ternary(
         );
     }
 
-    // 5. Multi-head attention with GQA
+    // 5. Multi-head attention with GQA. The scale-invariant session
+    //    (Plan 622 Phase 7) rides the forward scratch: `None` = the plain
+    //    path, bit-identical; `Probe` = plain math + per-head σ observation
+    //    (load-time instrument); `Armed` = the schedule affine in pass 1's
+    //    logit space. The dispatch is the ONLY si site on the packed ternary
+    //    decode path — the GDN layers have no per-key logits to transform
+    //    (the Plan-622 audited discard).
     let scale = 1.0 / (hd as f32).sqrt();
     scratch.attn_out[..q_dim].fill(0.0);
     let t_n = pos + 1;
+    #[cfg(feature = "scale_invariant_attn")]
+    match scratch.scale_invariant.as_mut() {
+        Some(crate::transformer::attention_si::SiAttentionSession::Probe(acc)) => unsafe {
+            crate::transformer::attention_si::attention_heads_probe_si(
+                &scratch.q_buf,
+                &cache.key,
+                &cache.value,
+                &mut scratch.attn_out,
+                &mut scratch.head_scores,
+                n_head,
+                n_kv,
+                kvd,
+                hd,
+                t_n,
+                scale,
+                config.block_size,
+                pos,
+                layer_idx,
+                &mut *acc,
+            );
+        },
+        Some(crate::transformer::attention_si::SiAttentionSession::Armed(plan)) => unsafe {
+            crate::transformer::attention_si::attention_heads_parallel_si(
+                &scratch.q_buf,
+                &cache.key,
+                &cache.value,
+                &mut scratch.attn_out,
+                &mut scratch.head_scores,
+                n_head,
+                n_kv,
+                kvd,
+                hd,
+                t_n,
+                scale,
+                config.block_size,
+                pos,
+                layer_idx,
+                plan,
+            );
+        },
+        None => unsafe {
+            crate::transformer::attention_heads_parallel(
+                &scratch.q_buf,
+                &cache.key,
+                &cache.value,
+                &mut scratch.attn_out,
+                &mut scratch.head_scores,
+                n_head,
+                n_kv,
+                kvd,
+                hd,
+                t_n,
+                scale,
+                0.0,
+                config.block_size,
+            );
+        },
+    }
+    #[cfg(not(feature = "scale_invariant_attn"))]
     unsafe {
         crate::transformer::attention_heads_parallel(
             &scratch.q_buf,
@@ -613,7 +679,8 @@ pub fn forward_qwen_deltanet_ternary_with_capture<'a>(
 /// (Issue 022 T3.1: a forward-body drift indicts the instrument, not the
 /// checkpoint; here the parity is structural, not mirrored). The main
 /// loop calls this once per layer; the audition calls it once per
-/// candidate layer.
+/// candidate layer. `layer_idx` names the layer's cache/calibration slot
+/// (the audition mounts its candidate at slot 0).
 #[allow(clippy::too_many_arguments)]
 pub fn qwen_deltanet_ternary_layer_body(
     x: &mut [f32],
@@ -623,6 +690,7 @@ pub fn qwen_deltanet_ternary_layer_body(
     gdn_conv: &mut [f32],
     kv_cache: &mut crate::transformer::KVCache,
     pos: usize,
+    layer_idx: usize,
     config: &Config,
     scratch: &mut HybridForwardScratch,
     rope_freq: &crate::rope::RopeFreqTable,
@@ -661,6 +729,7 @@ pub fn qwen_deltanet_ternary_layer_body(
             layer_weights,
             kv_cache,
             pos,
+            layer_idx,
             config,
             rope_freq,
             &mut scratch.attention,
@@ -703,15 +772,9 @@ pub fn qwen_deltanet_ternary_layer_body(
         scratch.hidden_copy[..n].copy_from_slice(&x[..n]);
         let ternary_missing = "fused ffn hook requires ternary projections — the q4 prefill copy runs the host path (Issue 028 T4 S2)";
         fh.ffn(
-            layer_weights
-                .gate_proj
-                .as_ternary()
-                .expect(ternary_missing),
+            layer_weights.gate_proj.as_ternary().expect(ternary_missing),
             layer_weights.up_proj.as_ternary().expect(ternary_missing),
-            layer_weights
-                .down_proj
-                .as_ternary()
-                .expect(ternary_missing),
+            layer_weights.down_proj.as_ternary().expect(ternary_missing),
             &scratch.hidden_copy[..n],
             &mut x[..n],
         );
@@ -807,6 +870,7 @@ pub fn forward_qwen_deltanet_ternary_with_hook<'a>(
             &mut cache.deltanet_state.conv_states[layer_idx],
             &mut cache.kv_cache.layers[layer_idx],
             pos,
+            layer_idx,
             config,
             scratch,
             rope_freq,

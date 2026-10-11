@@ -2162,6 +2162,102 @@ pub fn load_qwen_deltanet_ternary_weights_gguf(
     load_qwen_deltanet_ternary_from_gguf(&gguf, "")
 }
 
+/// Plan-449 mark reader (Plan 622 Phase 7): the pp-RoPE serving table.
+///
+/// Reads the two Plan-449 GGUF metadata marks — `*.attention.si_pprope`
+/// (must equal 1) and `*.rope.pp_effective_base` (the train length the
+/// wavelength mask is cut at; the paper cell carries 1024) — by suffix
+/// match over the metadata keys (the arch prefix varies; the suffix is the
+/// contract) and builds [`RopeFreqTable::new_pp`] at the checkpoint's own
+/// theta + rotary dim.
+///
+/// **LOUD-FAIL on an unmarked GGUF — the serving precondition.** An
+/// unmarked checkpoint never ships the pp table (zero-shot pairing is the
+/// pre-recorded expected-FAIL; the trained artifact is Plan 449's).
+/// Measurement harnesses driving the diagnostic arm on an UNMARKED
+/// checkpoint bypass this helper with an explicit `--pp-train-len` and
+/// name the bypass in their output.
+///
+/// # Errors
+/// When either mark is absent, `si_pprope != 1`, or the base is not a
+/// positive number ≥ 2π's integer ceiling.
+#[cfg(feature = "scale_invariant_attn")]
+pub fn pp_rope_table_from_marks(gguf: &GgufFile, config: &Config) -> Result<crate::rope::RopeFreqTable> {
+    use crate::deltanet::forward::effective_rotary_dim;
+
+    let flag = gguf
+        .metadata
+        .iter()
+        .filter(|(k, _)| k.ends_with("attention.si_pprope"))
+        .min_by(|a, b| a.0.cmp(b.0))
+        .map(|(_, v)| gguf_value_as_u64(v));
+    let Some(flag) = flag else {
+        bail!("pp-RoPE mark missing: no *.attention.si_pprope key in the GGUF — \
+               an unmarked checkpoint never ships the pp table (Plan 622 G3 (iii), Plan 449)");
+    };
+    if flag != 1 {
+        bail!("pp-RoPE mark *.attention.si_pprope = {flag}, expected 1");
+    }
+    let base = gguf
+        .metadata
+        .iter()
+        .filter(|(k, _)| k.ends_with("rope.pp_effective_base"))
+        .min_by(|a, b| a.0.cmp(b.0))
+        .map(|(_, v)| gguf_value_as_f64(v));
+    let Some(base) = base else {
+        bail!("pp-RoPE mark missing: no *.rope.pp_effective_base key in the GGUF");
+    };
+    if !(base.is_finite() && base >= 8.0) {
+        bail!("pp-RoPE mark *.rope.pp_effective_base = {base} — expected the train \
+               length (paper cell: 1024)");
+    }
+    Ok(crate::rope::RopeFreqTable::new_pp(
+        config.rope_theta,
+        effective_rotary_dim(config),
+        base as usize,
+    ))
+}
+
+/// Coerce a GGUF metadata value to u64 (the integer marks).
+#[cfg(feature = "scale_invariant_attn")]
+fn gguf_value_as_u64(v: &GgufValue) -> u64 {
+    match v {
+        GgufValue::U8(x) => u64::from(*x),
+        GgufValue::I8(x) => *x as u64,
+        GgufValue::U16(x) => u64::from(*x),
+        GgufValue::I16(x) => *x as u64,
+        GgufValue::U32(x) => u64::from(*x),
+        GgufValue::I32(x) => *x as u64,
+        GgufValue::U64(x) => *x,
+        GgufValue::I64(x) => *x as u64,
+        GgufValue::F32(x) => *x as u64,
+        GgufValue::F64(x) => *x as u64,
+        GgufValue::Bool(x) => u64::from(*x),
+        GgufValue::String(s) => s.parse().unwrap_or(0),
+        GgufValue::Array(_) => 0,
+    }
+}
+
+/// Coerce a GGUF metadata value to f64 (the numeric marks).
+#[cfg(feature = "scale_invariant_attn")]
+fn gguf_value_as_f64(v: &GgufValue) -> f64 {
+    match v {
+        GgufValue::F32(x) => f64::from(*x),
+        GgufValue::F64(x) => *x,
+        GgufValue::U8(x) => f64::from(*x),
+        GgufValue::I8(x) => f64::from(*x),
+        GgufValue::U16(x) => f64::from(*x),
+        GgufValue::I16(x) => f64::from(*x),
+        GgufValue::U32(x) => f64::from(*x),
+        GgufValue::I32(x) => f64::from(*x),
+        GgufValue::U64(x) => *x as f64,
+        GgufValue::I64(x) => *x as f64,
+        GgufValue::Bool(x) => f64::from(*x),
+        GgufValue::String(s) => s.parse().unwrap_or(f64::NAN),
+        GgufValue::Array(_) => f64::NAN,
+    }
+}
+
 /// Issue 028 T1 — the suffix-parameterized ternary loader.
 ///
 /// Loads one weight copy from an ALREADY-OPEN GGUF, appending
