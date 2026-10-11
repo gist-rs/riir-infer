@@ -59,7 +59,38 @@ the reproduction is unreliable.
 
 ## Refs
 
-- Issue 1005 status line (the inline finding, 2026-10-09).
+- Issue 1005 status line (the inline finding, 2026-09-09).
 - `crates/riir-infer-gpu/src/edlm_cubecl/tests.rs` (the suite in question).
 - Note: filed during the plan437 T0.3b AR window (the box's GPU is trainer-held);
   every run above is deferred to a free window — do NOT run them under trainer load.
+- **Web-unblock research (2026-10-11, M3 idle-loop unit 9 — the class has a named
+  upstream mechanism): gfx-rs/wgpu #10027 "Vulkan: a failed vkCreateComputePipelines
+  silently loses the whole device" (opened 2026-08-07).** A VALID but
+  driver-uncompilable compute kernel (per-thread private scratch over the driver
+  budget — NVIDIA proprietary refuses >16 MiB/thread) fails `vkCreateComputePipelines`;
+  `wgpu-hal` maps every non-OOM result to `DeviceError::Unexpected`
+  (`map_pipeline_err` → `map_host_device_oom_err` → `get_unexpected_err`),
+  `wgpu-core`'s `handle_hal_error` calls `lose()` on `Unexpected`, and the
+  `DeviceLost` error is DROPPED silently (no error scope, no uncaptured handler) —
+  `create_compute_pipeline` returns a pipeline object as if nothing happened. The
+  reporter hit it THROUGH CUBECL: the over-budget kernel was one autotune candidate
+  among 31, and the first visible symptom was a later `map_async` answering
+  "Buffer with '...' label is invalid" — misleading errors exactly like our
+  16-failure tail. **Verified in our tree:** the vendored
+  `vendor/wgpu-hal-30.0.0/src/vulkan/mod.rs` carries the cited escalation shape
+  (`get_unexpected_err` at L1584/1629/1639/1669) — we are on the exact
+  affected version family (wgpu 30). **Implication for the run recipe:** the
+  `--test-threads=1` A/B remains the concurrency discriminator, but if SERIAL
+  also fails, hypothesis #2 is an over-budget eDLM kernel candidate (CubeCL
+  autotune compiles candidates at context init — one driver-refused candidate
+  kills the shared device for every later test). Add to the reproduction arm:
+  install `wgpu`'s `set_device_lost_callback` (wgpu 30 exposes it; lives in the
+  `wgpu`/`wgpu-core` crates, not the vendored hal) in the test fixture so the
+  silent loss becomes a loud, attributable reason+message, and check whether any
+  edlm_cubecl kernel candidate's scratch exceeds 16 MiB/thread on the 4090's
+  proprietary driver. Upstream fix direction (from the issue): map failed
+  pipeline creation to a surfaceable `PipelineError` instead of
+  `DeviceError::Unexpected` — a vendor-patch candidate for `wgpu-hal-30.0.0` if
+  the fixture-level callback proves insufficient. Related upstream: #9511
+  (map_async callbacks dropped on device loss), #9029 (hal error escalated to
+  device loss too eagerly).
