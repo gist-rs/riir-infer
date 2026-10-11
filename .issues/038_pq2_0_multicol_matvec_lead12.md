@@ -114,9 +114,13 @@ survives the snapshot.
    2026-10-10** (the loop now spans the full band; execution still owed to the GPU run).
 0.5. **STAGED 2026-10-11 (~09:5x–10:2x, pickup session, trainer still holds the box
    — plan437 `stage0_eval` AR arm over 200M tokens):** both GPU-run instruments
-   pre-built CPU-side in an isolated `CARGO_TARGET_DIR` so the free window is
-   spent MEASURING, not compiling — (a) the unit-gate lib-test binary
-   (`ternary_gemv_cuda_raw` posture) and (b) **the step-3 paired bench LANDED**:
+   pre-built CPU-side in an isolated `CARGO_TARGET_DIR` (kept at `E:\tmp\infer038`;
+   rm it after the window run) so the free window is spent MEASURING, not
+   compiling — (a) the unit-gate lib-test binary
+   (`ternary_gemv_cuda_raw` posture; run with
+   `CARGO_TARGET_DIR=E:\tmp\infer038 cargo test -p riir-infer-gpu --features
+   ternary_gemv_cuda_raw --lib gemv_ternary_multicol`) and (b) **the step-3
+   paired bench LANDED**:
    `crates/riir-infer-gpu/examples/multicol_ab.rs` + its `[[example]]` row
    (`required-features = ["ternary_gemv_cuda_raw"]`), clippy-clean, release
    binary built. Three arms at the handler contract — `n1_loop` (n sequential
