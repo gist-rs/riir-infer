@@ -3612,9 +3612,14 @@ impl TernaryDeltanetGpuForward {
     /// Attach the session for the whole-prefill lane. Any captured
     /// whole-prefill graph is invalidated (the baked si pointers changed —
     /// the decode lane's `set_lora` law). The session arrives DISARMED.
+    /// Cfg'd to the consumer's posture (the `si_session_args` rule): the
+    /// `prefill_invalidate_graphs` callee lives in the whole-prefill module,
+    /// so at a leaner posture this API must not exist — not compile to an
+    /// E0433.
     #[cfg(all(
         feature = "scale_invariant_attn",
         feature = "ternary_gemv_cuda_raw",
+        feature = "ternary_gemm_batched",
         not(target_os = "macos")
     ))]
     pub fn attach_si(
@@ -3629,9 +3634,11 @@ impl TernaryDeltanetGpuForward {
 
     /// Detach the session — the incumbent posture returns. Graph
     /// invalidated (the dummies' pointers are what a fresh capture bakes).
+    /// Same consumer-posture gate as `attach_si` (the callee's module).
     #[cfg(all(
         feature = "scale_invariant_attn",
         feature = "ternary_gemv_cuda_raw",
+        feature = "ternary_gemm_batched",
         not(target_os = "macos")
     ))]
     pub fn detach_si(&mut self) {
