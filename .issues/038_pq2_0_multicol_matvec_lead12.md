@@ -1,6 +1,6 @@
 # Issue 038 — the n=3-8 decode band on Ada: adopt the dp4a multi-column mat-vec mechanism (distill Lead 12, prism #306)
 
-**Status:** OPEN — port LANDED (`48d598e`); **unit gates 5/5 GREEN 2026-10-11** (`04a4f98` — first GPU run caught two harness defects, kernel correct, bit-parity holds; run beside the trainer, safe as deterministic gates); REMAINING on the exclusive window: the real-weight T3a gate (release, `-- --ignored`), the `multicol_ab` bench (record = bench 035), then the 039 repro/A-B legs
+**Status:** OPEN — port LANDED (`48d598e`); **steps 1+2 GREEN 2026-10-11, run beside the trainer** (unit gates 5/5 @ `04a4f98` — first GPU run caught two harness defects, kernel correct; real-weight T3a gate 6/6 @ `33d2ef6` — mmap partial load, REAL Bonsai-2 layers 0/32/63, bit-parity + argmax at tokens {3,5,8}); REMAINING: the `multicol_ab` bench on the exclusive window (record = bench 035), then the 039 repro/A-B legs, then step-4 dispatch wiring
 
 ## The lead (provenance)
 
@@ -194,7 +194,26 @@ survives the snapshot.
    seed-luck denominator and passes only because 0xCAFEBABE produced no
    cancellation — same one-line oracle fix applies when that lane touches
    it next.
-2. Task-level argmax agreement at the verify posture (Issue 608 T3a class).
+2. Task-level argmax agreement at the verify posture (Issue 608 T3a class):
+   ~~**DONE 2026-10-11 ~21:0x–21:2x, run beside the trainer**~~
+   (worktree `33d2ef6`) — the gate is `test_multicol_real_weights_bit_parity_and_argmax`,
+   now running by DEFAULT in the filtered suite (no `#[ignore]`; skip-loud
+   without the GGUF or CUDA — never a green zero, and that skip-green was
+   caught live: the first v2 run "passed" in 0.5 s because the
+   `../../riir-train` default resolves one level short of the sibling — a
+   dq-bin convention the env override always papered over; now `../../../`).
+   Design v2 (mmap partial load): `GgufFile::open` parses the header only;
+   the three sampled `ffn_down` tensors (0/mid/last, derived from ACTUAL
+   tensor presence — never `block_count` metadata, which counts MTP layers)
+   are repacked straight from the lazy mmap — ~0.5 GB touched, not the
+   full-loader's ~7 GB, so the gate runs BESIDE a trainer safely. **Measured
+   on the real league file**: 64 layers, layers 0/32/63 [5120×17408], tokens
+   {3,5,8}: bit-parity (`to_bits`) + per-token argmax agreement hold at
+   EVERY layer×token combination; both arms consume the identical repacked
+   tensor, so the checkpoint's hadamard-fold state is irrelevant to the
+   claim. Suite: **6/6 GREEN in 13 s** (worktree `33d2ef6`). Scope note:
+   argmax-vs-CPU-float-reference is the n1 family's own open T3a; this gate
+   closes 038's claim — swapping n1→multicol changes no task output.
 3. Paired bench: n∈{3..8}, `gemv_ternary_cuda_raw` vs this arm vs
    `gemm_ternary_i8_mma_cuda_raw` (plan 612 G2 alternating-run pairing runbook),
    GPU-exclusive + `scripts/bench_preflight`-class box state.
