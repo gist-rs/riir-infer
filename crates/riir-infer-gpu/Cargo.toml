@@ -351,6 +351,16 @@ required-features = ["ternary_gemv_cuda_raw"]
 name = "qwen38_pyramid_capture"
 required-features = ["ternary_gemv_cuda_raw"]
 
+# Plan 620 Phase A — the flag-0 bit-identity RECORDING instrument for the si
+# decode hook: runs unchanged at the pre-hook commit (it names no si surface)
+# so the incumbent build's digests and the hooked build's flag-0 digests are
+# byte-comparable on the same box (the graph lane drives the devpos kernels
+# the G3 harness uses). The whole-file cfg keeps non-CUDA hosts an empty
+# target (the dq614 pattern; this row is the reader protection).
+[[bin]]
+name = "si_flag0_probe"
+required-features = ["ternary_gemv_cuda_raw", "cuda_graphs_forward"]
+
 # Issue 038 step 3 — the n∈[3,8] paired A/B bench (n1_loop vs multicol vs
 # the shipping prefill MMA pair) at Bonsai-2 layer shapes; plan-612 G2
 # runbook adaptation (order-rotated reps, same-rep paired ratios).
