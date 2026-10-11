@@ -31,7 +31,12 @@
 //! `{CARGO_MANIFEST_DIR}/../riir-train/data/Ternary-Bonsai-2-27B-PQ2_0.gguf`.
 //! Scale knobs (smoke postures): `B929_LOOPS`, `B929_TWO_HOP`,
 //! `B929_ONE_HOP`, `B929_FACTS`, `B929_ANSWER_TOKENS`, `B929_BOOTSTRAP`,
-//! `B929_MAX_QUERIES`, `B929_OUT` (JSON path).
+//! `B929_MAX_QUERIES`, `B929_OUT` (JSON path). Framing knob: `B929_CHAT=1`
+//! wraps the prompt in the qwen chat scaffold (`<|im_start|>user\n…
+//! <|im_end|>\n<|im_start|>assistant\n` — the first smoke measured the
+//! model emitting `<|im_end|> <think> …` against the bare completion
+//! framing, i.e. it wants its chat template and thinks before answering;
+//! default OFF = the original completion posture, byte-identical).
 
 use anyhow::{Context, Result};
 use katgpt_core::loop_alignment_probe::{
@@ -165,6 +170,7 @@ fn run() -> Result<()> {
     );
 
     let max_queries = env_or("B929_MAX_QUERIES", usize::MAX);
+    let chat_framing = std::env::var("B929_CHAT").map(|v| v != "0").unwrap_or(false);
     let queries: Vec<Query> = fixture
         .items
         .iter()
@@ -173,8 +179,18 @@ fn run() -> Result<()> {
             is_two_hop: item.is_two_hop,
             is_ood: item.is_ood,
             // No BOS prepend — the qwen35 family serves completion-style
-            // without a leading BOS (the llama.cpp convention for qwen).
-            tokens: loaded.tokenizer.encode(&item.prompt),
+            // without a leading BOS (the llama.cpp convention for qwen) —
+            // unless B929_CHAT=1 wraps the prompt in the chat scaffold the
+            // first smoke measured the model reaching for (<think> emission
+            // against the bare completion framing).
+            tokens: if chat_framing {
+                loaded.tokenizer.encode(&format!(
+                    "<|im_start|>user\n{}<|im_end|>\n<|im_start|>assistant\n",
+                    item.prompt
+                ))
+            } else {
+                loaded.tokenizer.encode(&item.prompt)
+            },
             bridge_first: if item.bridge.is_empty() {
                 0
             } else {
@@ -204,10 +220,19 @@ fn run() -> Result<()> {
     // rows[loop] — one Row per query, query order preserved.
     let mut rows: Vec<Vec<Row>> = vec![Vec::new(); loops];
 
+    // Bounded KV capacity (Issue 929, the measured smoke OOM): the GGUF's
+    // block_size IS the model's full context_length, so the unbounded
+    // HybridCache::with_layer_types pre-allocates ~2 GiB × 64 layers and
+    // aborts beside the loaded weights (exact-2^30 alloc failure). This run
+    // writes positions 0..prompt_len + answer_tokens only (the K stack
+    // passes stay AT answer_pos) — cap there plus slack.
+    let kv_cap = queries_max_prompt + answer_tokens + 16;
+
     for (qi, q) in queries.iter().enumerate() {
         // Fresh cache + scratch per query: the GDN recurrent state and the KV
         // cache must not carry across queries (the Bench-930 discipline).
-        let mut cache = HybridCache::with_layer_types(&loaded.config, &loaded.weights.layer_types);
+        let mut cache =
+            HybridCache::with_layer_types_bounded(&loaded.config, &loaded.weights.layer_types, kv_cap);
         let mut scratch = HybridForwardScratch::new(&loaded.config);
 
         // Prefill all but the last prompt token through the STOCK forward
@@ -295,10 +320,11 @@ fn run() -> Result<()> {
     // ── Report ───────────────────────────────────────────────────────────
     println!("# issue929 Bonsai-2-27B (PQ2_0) loop-alignment probe");
     println!(
-        "# model={model_path} | head={} | fixture: {} queries, facts={}, loops={loops}",
+        "# model={model_path} | head={} | fixture: {} queries, facts={}, loops={loops} | framing: {}",
         if loaded.untied { "untied" } else { "tied" },
         queries.len(),
         spec.facts_per_prompt,
+        if chat_framing { "chat" } else { "completion" },
     );
     println!("# score cells are point/lb95 (stratified bootstrap, {bootstrap_iters} iters)");
     println!("loop,split,n,acc,bridge_top1,auroc_cos_argmax,auroc_margin,auroc_cos_bridge");

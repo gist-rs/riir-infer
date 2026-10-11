@@ -96,6 +96,47 @@ impl HybridCache {
         }
     }
 
+    /// Bounded-capacity construction for fixed-length evaluation runs
+    /// (the Issue-929 lesson): identical to [`with_layer_types`] except the
+    /// KV half is sized `[max_positions × kv_dim]` per FULL-ATTENTION layer
+    /// and EMPTY for DeltaNet layers, instead of the model's full
+    /// `block_size` (the GGUF `context_length`, 128k-class on Bonsai-2).
+    /// [`MultiLayerKVCache::new`] therefore demands ~2 GiB per layer for
+    /// EVERY layer on such configs — on a 64-layer model that is >100 GiB
+    /// of commit beside the loaded weights and aborts with an exact-2^30
+    /// allocation failure once the box commit limit is reached (measured
+    /// 2026-10-11, `issue929_bonsai2_loop_probe` smoke).
+    ///
+    /// The attention forward indexes K/V positionally (`pos * kv_dim`) with
+    /// no growth and no ring, so `max_positions` MUST exceed every position
+    /// the run will write (prompt length + generated tokens). DeltaNet
+    /// layers never touch their KV slots, so their per-layer `kv_dim` is 0.
+    pub fn with_layer_types_bounded(
+        config: &Config,
+        layer_types: &[DeltaNetLayerType],
+        max_positions: usize,
+    ) -> Self {
+        let kvd = types::kv_dim(config);
+        let per_layer_kv_dim: Vec<usize> = layer_types
+            .iter()
+            .map(|lt| match lt {
+                DeltaNetLayerType::Attention => kvd,
+                DeltaNetLayerType::DeltaNet => 0,
+            })
+            .collect();
+        let kv_cache =
+            crate::transformer::MultiLayerKVCache::new_with_per_layer_kv_dim_bounded(
+                config,
+                &per_layer_kv_dim,
+                max_positions,
+            );
+        let deltanet_state = DeltaNetState::new(config, layer_types);
+        Self {
+            kv_cache,
+            deltanet_state,
+        }
+    }
+
     /// Zero both halves in place, restoring the freshly-constructed state
     /// WITHOUT reallocating (buffers keep their capacities — the per-call
     /// reset for embedders/evaluators that run many independent forward
