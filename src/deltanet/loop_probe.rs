@@ -126,6 +126,7 @@ pub fn looped_answer_position_probe(
                 &mut cache.deltanet_state.conv_states[li],
                 &mut cache.kv_cache.layers[li],
                 answer_pos,
+                li,
                 config,
                 scratch,
                 rope_freq,
