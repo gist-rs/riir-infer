@@ -40,10 +40,17 @@
 //! think block (the 8-query completion-style smoke measured 0/8 two-hop
 //! correct; the special tokens ride the GGUF control-token matcher, one id
 //! each).
+//!
+//! `B929_PHRASE=standard` renders fixture facts as `"The {r} of {a} is {b}."`
+//! (standard English composition) instead of the default possessive
+//! `"{a} is the {r} of {b}."` — the Bench-933 phrasing-inversion A/B knob;
+//! labels/bridges/fact windows are phrasing-invariant (same seed → same
+//! queries, paired arms). `B929_OUT` (JSON path) carries per-query rows
+//! (answer/gen/correct/cos-bridge-per-loop) for paired analysis.
 
 use anyhow::{Context, Result};
 use katgpt_core::loop_alignment_probe::{
-    FixtureSpec, bootstrap_auroc_ci, generate_two_hop_fixture,
+    FactPhrase, FixtureSpec, bootstrap_auroc_ci, generate_two_hop_fixture,
 };
 use riir_infer_core::deltanet::forward::{HybridCache, HybridForwardScratch, effective_rotary_dim};
 use riir_infer_core::deltanet::forward_qwen_deltanet_ternary;
@@ -159,10 +166,18 @@ fn run() -> Result<()> {
     };
 
     // ── Fixture (paper §2 shape, deterministic; env-scale knobs) ──────────
+    // B929_PHRASE=standard: the standard-semantics fact template (A/B knob;
+    // default = the as-landed possessive phrasing the 927/930/933/934
+    // records ride — never redefine the shared instrument mid-adjudication).
+    let phrase = match std::env::var("B929_PHRASE") {
+        Ok(v) if v == "standard" => FactPhrase::Standard,
+        _ => FactPhrase::Possessive,
+    };
     let spec = FixtureSpec {
         facts_per_prompt: env_or("B929_FACTS", FACTS_PER_PROMPT),
         two_hop_queries: env_or("B929_TWO_HOP", TWO_HOP_PER_POOL),
         one_hop_queries: env_or("B929_ONE_HOP", ONE_HOP_PER_POOL),
+        phrase,
         ..FixtureSpec::default()
     };
     let fixture = generate_two_hop_fixture(spec);
@@ -230,6 +245,9 @@ fn run() -> Result<()> {
 
     // rows[loop] — one Row per query, query order preserved.
     let mut rows: Vec<Vec<Row>> = vec![Vec::new(); loops];
+    // Per-query generated text (query order preserved) for the B929_OUT
+    // per-query rows — paired A/B analysis reads these.
+    let mut gens: Vec<String> = Vec::with_capacity(queries.len());
 
     for (qi, q) in queries.iter().enumerate() {
         // Fresh cache + scratch per query: the GDN recurrent state and the KV
@@ -320,6 +338,7 @@ fn run() -> Result<()> {
                 &mut cache.deltanet_state.conv_states[li],
                 &mut cache.kv_cache.layers[li],
                 answer_pos,
+                li,
                 &loaded.config,
                 &mut scratch,
                 &loaded.rope_freq,
@@ -351,6 +370,7 @@ fn run() -> Result<()> {
             generated.push(current);
         }
         let text = loaded.tokenizer.decode(&generated);
+        gens.push(text.clone());
         let correct = text.contains(&q.answer);
         for (k, row) in probe_rows.iter().enumerate() {
             rows[k].push(Row {
@@ -382,11 +402,15 @@ fn run() -> Result<()> {
     // ── Report ───────────────────────────────────────────────────────────
     println!("# issue929 Bonsai-2-27B (PQ2_0) loop-alignment probe");
     println!(
-        "# model={model_path} | head={} | fixture: {} queries, facts={}, loops={loops}{}",
+        "# model={model_path} | head={} | fixture: {} queries, facts={}, loops={loops}{}{}",
         if loaded.untied { "untied" } else { "tied" },
         queries.len(),
         spec.facts_per_prompt,
         if chat { " | elicitation=chat" } else { "" },
+        match phrase {
+            FactPhrase::Standard => " | phrase=standard",
+            FactPhrase::Possessive => "",
+        },
     );
     println!("# score cells are point/lb95 (stratified bootstrap, {bootstrap_iters} iters)");
     println!("loop,split,n,acc,bridge_top1,auroc_cos_argmax,auroc_margin,auroc_cos_bridge");
@@ -452,25 +476,48 @@ fn run() -> Result<()> {
         .map(|r| r.iter().filter(|x| x.correct).count())
         .unwrap_or(0);
     let acc_n = rows.last().map_or(0, |r| r.len());
+    let phrase_name = match phrase {
+        FactPhrase::Standard => "standard",
+        FactPhrase::Possessive => "possessive",
+    };
     println!(
-        "json:{{\"model\":\"{model_path}\",\"untied\":{},\"queries\":{},\"loops\":{loops},\"acc_last\":{},\"elapsed_s\":{:.1}}}",
+        "json:{{\"model\":\"{model_path}\",\"untied\":{},\"queries\":{},\"loops\":{loops},\"phrase\":\"{phrase_name}\",\"acc_last\":{},\"elapsed_s\":{:.1}}}",
         loaded.untied,
         queries.len(),
         fmt_frac(acc_last, acc_n),
         t0.elapsed().as_secs_f32(),
     );
     if let Ok(out) = std::env::var("B929_OUT") {
-        std::fs::write(
-            &out,
-            format!(
-                "{{\"model\":\"{model_path}\",\"untied\":{},\"queries\":{},\"loops\":{loops},\"acc_last\":{},\"elapsed_s\":{:.1}}}\n",
-                loaded.untied,
-                queries.len(),
-                fmt_frac(acc_last, acc_n),
-                t0.elapsed().as_secs_f32(),
-            ),
-        )
-        .with_context(|| format!("write {out}"))?;
+        // Per-query rows (paired-analysis surface): answer/gen/correct plus
+        // the cos-bridge readout at every loop — additive reporting, zero
+        // measurement change.
+        let per_query: Vec<serde_json::Value> = (0..queries.len())
+            .map(|qi| {
+                serde_json::json!({
+                    "qi": qi,
+                    "two_hop": queries[qi].is_two_hop,
+                    "ood": queries[qi].is_ood,
+                    "answer": queries[qi].answer,
+                    "gen": gens.get(qi).cloned().unwrap_or_default(),
+                    "correct": rows.last().is_some_and(|r| r[qi].correct),
+                    "cos_bridge": rows.iter().map(|r| r[qi].cos_bridge).collect::<Vec<_>>(),
+                    "cos_argmax": rows.iter().map(|r| r[qi].cos_argmax).collect::<Vec<_>>(),
+                })
+            })
+            .collect();
+        let payload = serde_json::json!({
+            "model": model_path,
+            "untied": loaded.untied,
+            "queries": queries.len(),
+            "loops": loops,
+            "phrase": phrase_name,
+            "chat": chat,
+            "acc_last": fmt_frac(acc_last, acc_n),
+            "elapsed_s": t0.elapsed().as_secs_f32(),
+            "per_query": per_query,
+        });
+        std::fs::write(&out, format!("{payload}\n"))
+            .with_context(|| format!("write {out}"))?;
     }
     Ok(())
 }
