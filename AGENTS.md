@@ -47,7 +47,7 @@ cargo test --test issue028_disaggregated_handoff --features deltanet_ternary_inf
 cargo test --lib --features exl3
 cargo test -p riir-infer-gpu --features exl3_gpu,cuda_backend --lib  # native CUDA arm (release recommended)
 # The scale-invariant attention lane (opt-in `scale_invariant_attn`, implies
-# `deltanet_ternary_inference`; Plan 622 Phase 7 engine lane — the G3 zero-shot
+# `deltanet_ternary_inference`; katgpt-rs Plan 622 Phase 7 engine lane — the G3 zero-shot
 # vehicle on the packed Bonsai ternary decode path; canonical status lives in
 # ../katgpt-rs/.plans/622_scale_invariant_attn.md; GPU legs open, GPU-window-gated):
 cargo test --lib --features scale_invariant_attn   # 8 attention_si tests incl. 3 wiring e2e
