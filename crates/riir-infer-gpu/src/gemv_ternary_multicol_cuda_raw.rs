@@ -56,17 +56,19 @@
 //! GEMV (1 column) or the MMA path (prefill / big batches). `n % 16 == 0`
 //! (exact chunks, same precondition class as the n=1 fast path). sm_89 target.
 //!
-//! ⛔ **Not wired to any production path yet** — opt-in by construction. The
-//! dispatch arm (tree-verify driver + batched decode at n∈[3,8]) lands only
-//! after, on a free 4090 lane: (a) these unit gates (currently skipping for
-//! GPU exclusivity beside the plan437 trainer), (b) task-level argmax
-//! agreement at the verify posture (Issue 608 T3a class), (c) the paired
-//! bench vs `gemv_ternary_cuda_raw` and `gemm_ternary_i8_mma` at n∈{3..8}
-//! (plan 612 G2 runbook pairing), (d) GOAT promotion per the feature-flag
-//! discipline. Upstream's accumulation-order drift face (their pplx byte
-//! moved 6.3776→6.3820) does not apply here — this port is bit-identical to
-//! the incumbent n=1 kernel by construction — but the bench still reads the
-//! league gates before any promotion.
+//! ⛔ **Not wired to any production path yet** — opt-in by construction. Gate
+//! status: (a) unit gates GREEN, (b) task-level argmax agreement GREEN (real
+//! Bonsai-2 layers 0/32/63), (c) the paired bench EXECUTED ([issue 038] /
+//! bench 035: beats the n1 incumbent at every n∈[3,8] cell, 1.03–2.14×) —
+//! all 2026-10-11/13. The dispatch wiring itself is ON STANDBY: the named
+//! consumers do not exist as call sites (the tree-verify driver is the
+//! CubeCL lane, already T-row batched; the cudarc spec verify is a sequential
+//! chain — correctly not batchable; a multi-sequence cudarc decode lane is
+//! the future consumer — see issue 038 step 4's amended scoping). Upstream's
+//! accumulation-order drift face (their pplx byte moved 6.3776→6.3820) does
+//! not apply here — this port is bit-identical to the incumbent n=1 kernel
+//! by construction — but any future wired GOAT still reads the league gates
+//! before promotion.
 
 #![allow(clippy::too_many_arguments)]
 

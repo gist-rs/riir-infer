@@ -1,6 +1,6 @@
 # Issue 038 — the n=3-8 decode band on Ada: adopt the dp4a multi-column mat-vec mechanism (distill Lead 12, prism #306)
 
-**Status:** OPEN — port LANDED (`48d598e`); steps 1+2 GREEN 2026-10-11; **step-3 bench EXECUTED 2026-10-13 ([bench 035](../.benchmarks/035_multicol_ab_n3_8_band.md))** — multicol beats the n1 incumbent at EVERY cell (median paired ratio 0.971 @ big n=3 → 0.766 @ big n=8; 0.707 → 0.467 small, monotone in n); the MMA arm's handler contract dominates both GEMV arms (2.0–3.7×) — wired GPU-resident A/B stays the GOAT decider. REMAINING: step-4 dispatch wiring (the 039 repro/A-B legs CLOSED 2026-10-12 — see 039)
+**Status:** OPEN (standby disposition) — port LANDED (`48d598e`); steps 1+2 GREEN 2026-10-11; **step-3 bench EXECUTED 2026-10-13 ([bench 035](../.benchmarks/035_multicol_ab_n3_8_band.md))** — multicol beats the n1 incumbent at EVERY cell (median paired ratio 0.971 @ big n=3 → 0.766 @ big n=8; 0.707 → 0.467 small, monotone in n); the MMA arm's handler contract dominates both GEMV arms (2.0–3.7×) — wired GPU-resident A/B stays the GOAT decider. **Step 4 AMENDED: the named consumers don't exist yet** (tree-verify driver = CubeCL, already batched; cudarc spec verify = sequential chain, correctly not batchable; no multi-sequence cudarc decode lane exists) — **arm on STANDBY, opt-in by construction, zero production risk**; wiring lands with a future cudarc batched-decode lane (owner-scoped project). The 039 repro/A-B legs CLOSED 2026-10-12 — see 039
 
 ## The lead (provenance)
 
@@ -224,3 +224,18 @@ survives the snapshot.
    processes; CPU 3%; 18.8 GiB free; Tailscale; fresh release rebuild 2m15s).
 4. Wire the dispatch arm (tree-verify driver + batched decode, n∈[3,8]) behind the
    standing kill-switch pattern; GOAT-promote per the feature-flag discipline.
+   **STEP-4 SCOPING AMENDED 2026-10-13 (post-bench consumer mapping):** the two named
+   consumers do NOT exist as call sites today — (a) the tree-verify driver
+   (`ternary_tree_verify_driver`) is the CUBECL lane and already batches T-row
+   projections via `GemmTernaryBatchedCubeCL` (weights read once per layer — the
+   multicol band never arises there); (b) the cudarc lane's spec verify
+   (`spec_verify_dispatch`, `SPEC_MAX_K=8`) processes the draft chain SEQUENTIALLY —
+   each forward conditions on the previous one's state (autoregressive), so the K
+   forwards are correctly NOT batchable; (c) a batched MULTI-SEQUENCE cudarc decode
+   forward (the shape that actually produces n∈[3,8] columns against one weight —
+   upstream's +17/25/+29% was llama-batched-bench, multi-sequence) does not exist on
+   this lane. **Disposition: the arm stays LANDED + opt-in-by-construction + standby**
+   (unit gates 5/5, real-weight gate 6/6, bench 035 all green; zero production risk);
+   its wiring consumer is a FUTURE cudarc batched-decode lane (or a cudarc tree-verify)
+   — building that lane is its own owner-scoped project (the league scored cell is
+   tg128 single-seq, n=1, which this arm deliberately does not touch).
