@@ -184,3 +184,4 @@ runs at roughly 70 GB/s of weight traffic. The one large non-weight section
 is `dn_recurrence` (8%).
 
 katgpt-rs commit for the N-way entry: `9f3f78bf6`.
+CUDA run (only type-checked so far): Issue 044.
