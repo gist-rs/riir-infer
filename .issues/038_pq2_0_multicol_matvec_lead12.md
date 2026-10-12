@@ -1,6 +1,6 @@
 # Issue 038 — the n=3-8 decode band on Ada: adopt the dp4a multi-column mat-vec mechanism (distill Lead 12, prism #306)
 
-**Status:** OPEN — port LANDED (`48d598e`); **steps 1+2 GREEN 2026-10-11, run beside the trainer** (unit gates 5/5 @ `04a4f98` — first GPU run caught two harness defects, kernel correct; real-weight T3a gate 6/6 @ `33d2ef6` — mmap partial load, REAL Bonsai-2 layers 0/32/63, bit-parity + argmax at tokens {3,5,8}); REMAINING: the `multicol_ab` bench on the exclusive window (record = bench 035), then the 039 repro/A-B legs, then step-4 dispatch wiring
+**Status:** OPEN — port LANDED (`48d598e`); steps 1+2 GREEN 2026-10-11; **step-3 bench EXECUTED 2026-10-13 ([bench 035](../.benchmarks/035_multicol_ab_n3_8_band.md))** — multicol beats the n1 incumbent at EVERY cell (median paired ratio 0.971 @ big n=3 → 0.766 @ big n=8; 0.707 → 0.467 small, monotone in n); the MMA arm's handler contract dominates both GEMV arms (2.0–3.7×) — wired GPU-resident A/B stays the GOAT decider. REMAINING: step-4 dispatch wiring (the 039 repro/A-B legs CLOSED 2026-10-12 — see 039)
 
 ## The lead (provenance)
 
@@ -217,5 +217,10 @@ survives the snapshot.
 3. Paired bench: n∈{3..8}, `gemv_ternary_cuda_raw` vs this arm vs
    `gemm_ternary_i8_mma_cuda_raw` (plan 612 G2 alternating-run pairing runbook),
    GPU-exclusive + `scripts/bench_preflight`-class box state.
+   ~~pending~~ — **DONE 2026-10-13 (the staged free window; [bench 035](../.benchmarks/035_multicol_ab_n3_8_band.md)):**
+   full 12-cell grid green, verdict above — mc/n1 wins everywhere (1.03×–2.14×),
+   mc/mma loses everywhere at the handler contract (the doc's own caveat: not a wired
+   comparison). Provenance quoted in the record (GPU-exclusive: zero CUDA compute
+   processes; CPU 3%; 18.8 GiB free; Tailscale; fresh release rebuild 2m15s).
 4. Wire the dispatch arm (tree-verify driver + batched decode, n∈[3,8]) behind the
    standing kill-switch pattern; GOAT-promote per the feature-flag discipline.
