@@ -1,15 +1,19 @@
 # Plan 620: Plan 622 Phase 7 — the CUDA si hook + the GPU G3 lane
 
-**Status:** Active — Phases A–C code LANDED 2026-10-11 (kernel hook + both
-twins via one shared helper, session plumbing + the no-recapture arm law,
-the GPU harness bin); **Phase A bit-identity gate PASSED 2026-10-12**
-(`.benchmarks/872`, three parts green — flag-0 byte-identical on the real
-checkpoint); **Phase D LANDED 2026-10-11** (61eb815, the FA prefill hook —
-see its checkboxes); the retrieval-lane residue CLOSED (0929fcb) and the
-si-posture gate fix (9e3c9e1) landed 2026-10-12. OPEN: the G3 GPU run
-(base-arm cross-check vs bench 936's CPU base arm — the GPU is idle, the
-harness is ready incl. the retrieval lane) + the G2 pp2048/tg128 cells,
-then plan 622's League rows + the owner-gated promotion decision.
+**Status:** COMPLETE — all phases landed and gated. Phases A–C code LANDED
+2026-10-11 (kernel hook + both twins via one shared helper, session plumbing
++ the no-recapture arm law, the GPU harness bin); **Phase A bit-identity gate
+PASSED 2026-10-12** (`.benchmarks/872`, three parts green — flag-0
+byte-identical on the real checkpoint); **Phase D LANDED 2026-10-11**
+(61eb815, the FA prefill hook — see its checkboxes); the retrieval-lane
+residue CLOSED (0929fcb) and the si-posture gate fix (9e3c9e1) landed
+2026-10-12; **the G3 GPU run PASSED 2026-10-13** (bench 873 — base-arm
+cross-check vs bench 936's CPU base arm at 0.07%, si/si-cal FAILs reproduce,
+the FAST re-gate lane operational); **the G2 cells PASSED 2026-10-13**
+(bench 878 — tg128 −0.19%, pp2048 −0.32%, both ≪ ±3%; flag-off pins EXACT in
+the field). REMAINING (all outside this plan's box work): plan 622's League
+rows + the owner-gated promotion decision; the Metal parity leg of G2 is its
+own unit (§out-of-scope).
 
 Source survey (this session, read-only): the per-token CUDA decode for the
 Bonsai-2 hybrid EXISTS — `TernaryDeltanetGpuForwardCudarc`
@@ -201,9 +205,12 @@ forwarding row + the `SiGpuSession` re-export).
       → fragments are post-scale logits = the `logit_scale = 1.0` entry space.
 - [x] Scope: the FA-engaged default posture only (p ≥ 128, `fa_engaged()`);
       the kill-switch fallback arms stay unhooked + bit-identical-off, noted.
-- [ ] Then the G2 cells: pp2048/tg128 ±3% (si-ON vs flag-off) via the league
+- [x] Then the G2 cells: pp2048/tg128 ±3% (si-ON vs flag-off) via the league
       harnesses (`bench_734`/`bench_772`) on the 4090, GPU-exclusive, with
-      box-state provenance per the league law.
+      box-state provenance per the league law. **PASS (bench 878, 2026-10-13):
+      tg128 −0.19% (95.12 vs 95.30 tok/s), pp2048 −0.32% (4062 vs 4075
+      tok/s); flag-off G1 evidence green in the field (decode logits FNV
+      `63496f6688c8f742` = the league pin EXACT; pp pins asserted GREEN).**
 
 ## Explicitly out of scope (here)
 
