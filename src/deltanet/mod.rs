@@ -101,7 +101,6 @@ pub mod ternary_forward;
 /// the closure into the pool and parks the caller on a latch, so a forward
 /// whose projections fork onto the pool does not add a 17th runnable thread
 /// beside 16 spin-yielding workers (see `forward_qwen_deltanet_ternary_with_hook`).
-#[cfg(feature = "deltanet_ternary_inference")]
 pub(crate) fn on_rayon_worker<R: Send>(f: impl FnOnce() -> R + Send) -> R {
     if rayon::current_thread_index().is_some() {
         return f();

@@ -1143,6 +1143,33 @@ pub fn forward_qwen_deltanet<'a>(
     scratch: &'a mut HybridForwardScratch,
     rope_freq: &crate::rope::RopeFreqTable,
 ) -> &'a mut [f32] {
+    // Run on a rayon worker (no 17th thread beside the spinning pool —
+    // Bench 880); arithmetic unchanged.
+    super::on_rayon_worker(move || {
+        forward_qwen_deltanet_body(
+            x,
+            weights,
+            cache,
+            token,
+            pos,
+            config,
+            scratch,
+            rope_freq,
+        )
+    })
+}
+
+#[allow(clippy::too_many_arguments, clippy::needless_range_loop)]
+fn forward_qwen_deltanet_body<'a>(
+    x: &'a mut [f32],
+    weights: &QwenDeltaNetWeights,
+    cache: &mut HybridCache,
+    token: usize,
+    pos: usize,
+    config: &Config,
+    scratch: &'a mut HybridForwardScratch,
+    rope_freq: &crate::rope::RopeFreqTable,
+) -> &'a mut [f32] {
     let n = config.n_embd;
 
     // 1. Embedding lookup (no embedding scale for Qwen3.5 — unlike Gemma 2)
@@ -1235,6 +1262,36 @@ pub fn forward_qwen_deltanet<'a>(
 #[cfg(feature = "kv_eviction")]
 #[allow(clippy::too_many_arguments, clippy::needless_range_loop)]
 pub fn forward_qwen_deltanet_evictable<'a>(
+    x: &'a mut [f32],
+    weights: &QwenDeltaNetWeights,
+    cache: &mut HybridCache,
+    token: usize,
+    pos: usize,
+    config: &Config,
+    scratch: &'a mut HybridForwardScratch,
+    rope_freq: &crate::rope::RopeFreqTable,
+    evictor: &mut crate::deltanet::kv_evict::EvictorState,
+) -> &'a mut [f32] {
+    // Run on a rayon worker (no 17th thread beside the spinning pool —
+    // Bench 880); arithmetic unchanged.
+    super::on_rayon_worker(move || {
+        forward_qwen_deltanet_evictable_body(
+            x,
+            weights,
+            cache,
+            token,
+            pos,
+            config,
+            scratch,
+            rope_freq,
+            evictor,
+        )
+    })
+}
+
+#[cfg(feature = "kv_eviction")]
+#[allow(clippy::too_many_arguments, clippy::needless_range_loop)]
+fn forward_qwen_deltanet_evictable_body<'a>(
     x: &'a mut [f32],
     weights: &QwenDeltaNetWeights,
     cache: &mut HybridCache,

@@ -240,7 +240,38 @@ pub fn forward_attention_layer_ternary_qkv<C: QuantizedKVCache>(
 /// (embedding → inverse-embedding rotation → hybrid layer loop → final norm →
 /// rotated LM head) with the cache plumbing swapped. No hooks, no capture.
 #[allow(clippy::too_many_arguments)]
-pub fn forward_qwen_deltanet_ternary_qkv<'a, C: QuantizedKVCache>(
+pub fn forward_qwen_deltanet_ternary_qkv<'a, C: QuantizedKVCache + Send>(
+    x: &'a mut [f32],
+    weights: &QwenDeltaNetTernaryWeights,
+    state: &mut DeltaNetState,
+    cache: &mut C,
+    mirror: &mut TernaryKvMirror,
+    token: usize,
+    pos: usize,
+    config: &Config,
+    scratch: &'a mut HybridForwardScratch,
+    rope_freq: &crate::rope::RopeFreqTable,
+) -> &'a mut [f32] {
+    // Run on a rayon worker (no 17th thread beside the spinning pool —
+    // Bench 880); arithmetic unchanged.
+    super::on_rayon_worker(move || {
+        forward_qwen_deltanet_ternary_qkv_body(
+            x,
+            weights,
+            state,
+            cache,
+            mirror,
+            token,
+            pos,
+            config,
+            scratch,
+            rope_freq,
+        )
+    })
+}
+
+#[allow(clippy::too_many_arguments)]
+fn forward_qwen_deltanet_ternary_qkv_body<'a, C: QuantizedKVCache>(
     x: &'a mut [f32],
     weights: &QwenDeltaNetTernaryWeights,
     state: &mut DeltaNetState,
