@@ -1,6 +1,6 @@
 # Issue 039 — the wgpu `--lib` suite loses the device mid-run (16 failures, pre-existing at HEAD)
 
-**Status:** OPEN — filed 2026-10-10 (4090 box, trainer-held window). Extracted from
+**Status:** OPEN (state-dependent flake WATCH, downgraded 2026-10-12) — NOT REPRODUCIBLE on exclusive windows, 6 green full-suite runs across 2 sessions (both postures; the native-CUDA combo was compile-broken since `3564a72` — FIXED in `a605571` with its first green run); the flake class stays ARMED for loaded/long-uptime sessions — the `[issue 039]` callback line + before/after wevtutil are the first-response instruments. Filed 2026-10-10 (4090 box, trainer-held window). Extracted from
 issue 1005's T8 status line, where the finding was recorded inline ("⚠ Pre-existing
 found: the FULL wgpu `--lib` suite loses the device mid-run (16 failures, reproduced
 at HEAD in a clean worktree — follow-up)") without its own file. This is that file.
@@ -126,16 +126,30 @@ E:/git/wt038infer` + `rm -rf E:/tmp/infer038`.
       poison reads). Clippy-clean at the edlm_gpu posture; pool_poison unit
       tests 2/2; the staged repro binary in `E:\tmp\infer038` rebuilt with
       the callback.
-- [ ] Reproduce at HEAD on a free-4090 window; capture the failure shape (device
-      lost vs adapter error vs panic in teardown) — record which of the 16 fail and
-      whether the same 16 fail twice in a row. PRIMARY evidence: the
-      `[issue 039] DEVICE LOST:` line + its `message=` (the driver's
-      originating hal error string).
-- [ ] The `--test-threads=1` A/B (serial vs parallel).
-- [ ] Fix at the root: shared lazily-initialized adapter/context fixture (or the
-      root the A/B points at), not per-test retry retries.
-- [ ] Re-run the full `--features edlm_gpu --lib` suite green BOTH postures
-      (wgpu + native CUDA).
+- [x] Reproduce at HEAD on a free-4090 window — EXECUTED 2026-10-12, TWO sessions:
+      the 09:17 post-restart run (33d2ef6, addendum below — 258/258 GREEN, callback
+      never fired, wevtutil zero events both sides) and the ~18:00 second session
+      (FIVE more green runs — see the EVENING WINDOW addendum; ~10h post-boot,
+      extending the green boundary beyond fresh-boot). The 16-failure tail was never
+      captured; the instrument is armed and quiet. Verdict: state-dependent (see the
+      morning addendum's three boundary conditions).
+- [x] The `--test-threads=1` A/B — EXECUTED (evening session; the morning session had
+      skipped it as moot): 33d2ef6 wgpu serial 258/0/5 in 544.79s vs parallel
+      258/0/5 in 539.82s — NO difference, as the OnceLock shared-context design
+      predicts (no thread-count sensitivity).
+- [x] Fix at the root — RESOLVED BY REFUTATION + LANDED FIX: the suspected per-test
+      context churn was refuted by the pre-run analysis (Issue 714/719: one shared
+      process-global device); the A/B points at nothing (no repro on exclusive
+      windows); the one real fixable defect — the silent device-lost channel (wgpu
+      #10027) — LANDED as `450cdfc` and stands as the armed tripwire. No shared
+      fixture is needed: the context has been shared since Issue 714. The
+      state-dependent flake class stays ARMED (loaded/long-uptime), first-response
+      = callback line + wevtutil.
+- [x] Re-run the full `--features edlm_gpu --lib` suite green BOTH postures — DONE
+      2026-10-12: wgpu posture green ×5 (33d2ef6 parallel+serial, 0767c01, and
+      cf0eb80+fix twice); native CUDA posture green ONCE — the FIRST EVER — at
+      cf0eb80+`a605571` (258/0/5, 486.49s). The combo could not compile before
+      `a605571` (see the EVENING WINDOW addendum).
 
 ## Refs
 
@@ -253,3 +267,5 @@ macOS/Metal case, cited for the cross-platform lesson only).
   upstream release.
 
 - **WINDOW RUN EXECUTED 2026-10-12 09:17-09:30 +07 (post-restart exclusive window, claim row `d259a9c4`; fresh-boot run from `E:/git/wt038infer` @ `33d2ef6`, `CARGO_TARGET_DIR=E:/tmp/infer038`, `--features edlm_gpu --lib -- --nocapture`): THE 16-FAILURE TAIL DID **NOT** REPRODUCE — `test result: ok. 258 passed; 0 failed; 5 ignored; 0 measured; 0 filtered out; finished in 547.87s`, exit 0, and the `[issue 039] DEVICE LOST` callback NEVER FIRED. Wevtutil discriminator closed BOTH sides: newest nvlddmkm event unchanged before/after (still 2026-10-10T03:26:52Z ID-153) — ZERO driver events during the 9-minute suite; no 4101 at any point. The serial A/B was SKIPPED as moot (parallel green strictly dominates for a device-loss class — serial stresses less; a serial failure with parallel pass is not a meaningful arm here). **VERDICT: the flake is STATE-DEPENDENT, not deterministic at the current tree** — boundary conditions recorded: (a) FRESH driver state (this box rebooted ~1h before the run; both prior observations rode multi-day uptimes — 10-09/10-10 on a box up since ~10-05/06); (b) EXCLUSIVE GPU (both prior observations had co-tenants — the T8 window beside the trainer, the 10-10 repro on a loaded box); (c) tree position — the observations sat at 10-10 HEAD; `61fc36f`'s bounded-alloc class landed after and cannot be excluded as a contributor to the original symptom cluster. Consequence for the gate law: the edlm_gpu wgpu `--lib` gate may be TRUSTED GREEN on fresh-boot exclusive windows at the current tree; the flake class stays ARMED for loaded / long-uptime sessions — when it next fires, the installed callback line + the before/after wevtutil (the exact queries above) are the first-response instruments. Issue stays OPEN at the downgraded severity: "untrustworthy under load/long-uptime" (was: "cannot be trusted green until fixed"). wt038infer + `E:/tmp/infer038` left INTACT for the 038 lane (their warm instruments; the recipe's cleanup step is THEIRS to run at their close).
+
+- **EVENING WINDOW 2026-10-12 ~18:00-18:50 +07 (second session, exclusive — GPU 5%/343 MiB idle at start, ~10h post-boot; scratch worktree `E:/git/wt039repro` + logs `E:/tmp/infer039/`): FIVE more green runs CONFIRMING + EXTENDING the state-dependent verdict, plus the collateral fix.** Runs: 33d2ef6 wgpu parallel 258/0/5 539.82s · 33d2ef6 wgpu serial (--test-threads=1, the discriminator the morning session skipped) 258/0/5 544.79s — no thread-count sensitivity, matching the OnceLock shared-device design · 0767c01 wgpu parallel 258/0/5 516.99s (the staging-era commit; its wgpu path is byte-equivalent to the finding era — 3564a72 predates the 10-09 finding, so the Issue-037 VRAM gate was already IN at both observations) · cf0eb80+fix wgpu 258/0/5 519.55s · cf0eb80+fix native CUDA 258/0/5 486.49s. Zero `[issue 039] DEVICE LOST` lines anywhere. Boundary extension: green at ~10h uptime exclusive — "fresh-boot" relaxes to "exclusive + same-day uptime" on current evidence. **NEW FINDING (the collateral fix): the `edlm_gpu,cuda_backend` posture has been COMPILE-BROKEN since `3564a72`** — E0560 (the CUDA arm's initializer assigned `wgpu_adapter: None`) + E0609 (`available_video_memory` read the field unconditionally), while the field is cfg'd to the wgpu arm (Issue 949). The BOTH-postures task was unreachable until `a605571` fixed it with the established `wgpu_device`/`wgpu_queue` twin pattern (CUDA arm gets a `None` twin — the documented fail-open contract). Validated: clippy `-D warnings` clean BOTH postures; the native suite then ran green on its first-ever execution. Consequence: the 09:30 verdict's "(native-CUDA posture unaffected as far as recorded" caveat is now a MEASURED row — the native posture is green at cf0eb80+`a605571` too. wt039repro removed after push; wt038infer + `E:/tmp/infer038` remain the 038 lane's.
