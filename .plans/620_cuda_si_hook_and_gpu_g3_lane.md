@@ -2,11 +2,14 @@
 
 **Status:** Active — Phases A–C code LANDED 2026-10-11 (kernel hook + both
 twins via one shared helper, session plumbing + the no-recapture arm law,
-the GPU harness bin; clippy green at three feature postures via the
-x86_64-pc-windows-gnu typecheck lane). OPEN: the Phase-A bit-identity gate +
-the G3 GPU run (4090, after the CPU G3 run drains — schtasks `si622run`, log
-`E:\tmp\si622-run.log`, worktree `E:\git\wt-si622`; its σ sidecar producer
-is the CPU bin's new `--save-cal`/`--probe-only`), then Phase D.
+the GPU harness bin); **Phase A bit-identity gate PASSED 2026-10-12**
+(`.benchmarks/872`, three parts green — flag-0 byte-identical on the real
+checkpoint); **Phase D LANDED 2026-10-11** (61eb815, the FA prefill hook —
+see its checkboxes); the retrieval-lane residue CLOSED (0929fcb) and the
+si-posture gate fix (9e3c9e1) landed 2026-10-12. OPEN: the G3 GPU run
+(base-arm cross-check vs bench 936's CPU base arm — the GPU is idle, the
+harness is ready incl. the retrieval lane) + the G2 pp2048/tg128 cells,
+then plan 622's League rows + the owner-gated promotion decision.
 
 Source survey (this session, read-only): the per-token CUDA decode for the
 Bonsai-2 hybrid EXISTS — `TernaryDeltanetGpuForwardCudarc`
@@ -75,7 +78,7 @@ is katgpt-rs CPU x86_64) — corrected premises from the survey.
       forwards must reproduce the backbone the gradients were built on).
 - [x] Split/gqa/mma variants are NOT on this decode path — leave them
       untouched (record why: consumed by qwen38 f16-KV gates + prefill only).
-- [ ] Bit-identity gate: a flag-0 A/B on the real PQ2_0 checkpoint — 64
+- [x] Bit-identity gate: a flag-0 A/B on the real PQ2_0 checkpoint — 64
       greedy tokens + a 128-token prefill, logits byte-equal vs the incumbent
       build (the G3 posture pin; run on the 4090, GPU-exclusive preflight).
       INSTRUMENT READY: `si_flag0_probe` (the recording bin) + the in-harness
@@ -84,26 +87,19 @@ is katgpt-rs CPU x86_64) — corrected premises from the survey.
       `test_attention_decode_si_flag_off_bit_identity_and_affine` (bit-exact
       disarmed-vs-dummy + identity-LUT wiring + the affine value check),
       (3) the existing matches_cpu tests' max_diff equality across builds.
-      IN FLIGHT (2026-10-12, this session): the 4090 run — pre/post worktrees
-      `E:\git\wt-si620{pre,post}` (4801622 / origin\@develop), probe feature set
-      WIDENED to `ternary_gemv_cuda_raw,cuda_graphs_forward,
-      riir-infer-core/bonsai2_hadamard` (attempt 1 died: the league GGUF is
-      Hadamard-folded, the loader loud-refuses without the feature — the plan's
-      original two-feature command predates the hardening), schtask `si620flag0`
-      + cmd `E:\tmp\si620_flag0.cmd` + log `E:\tmp\si620-flag0.log`, target
-      dirs `E:\tmp\tgt-si620{pre,post}`. Attempt 2 OOMed beside another lane's
-      `plan404_production_rank_ab` (16.8 GB held); attempt 3's wait-gate cmd had
-      a broken `for /f` parse (nounits output is one comma-free token → USED
-      never set); attempt 4 (PowerShell memory check, <8000 MiB bar, ping-sleep)
-      was FIRED and the GPU had already freed (1243 MiB) — then the BOX LEFT THE
-      NETWORK (LAN + Tailscale both dark ~08:30 box time). RESUME: when the box
-      returns, `schtasks /run /tn si620flag0` (the task + cmd + caches are all
-      on the box; builds resume warm). Parts (2)+(3) are the follow-up schtask:
-      `cargo test -p riir-infer-gpu --lib --features ternary_gemv_cuda_raw,
-      cuda_graphs_forward,riir-infer-core/bonsai2_hadamard` at BOTH worktrees
-      (the unit gate + the decode matches_cpu twins live in the lib's test
-      module; cuda_or_skip executes on the 4090), max_diff equality across
-      builds.
+      **GATE PASSED 2026-10-12 (`.benchmarks/872`)** — all three parts: (1)
+      probe stdout BYTE-identical (fc /b clean, MD5 a1f7caa5… both sides,
+      PRE = 4801622 + probe-file overlay, POST = aeae7d2); (2) the unit gate
+      green at POST (affine check 1.7695e-8, one-ULP class); (3) the decode
+      twins' max_diff values IDENTICAL across builds (2.980232e-8 / 5.960464e-8
+      / 0.0). Two probe fixes landed en route: the feature set widened to
+      `riir-infer-core/bonsai2_hadamard` (the loader loud-refuses the
+      Hadamard-folded league GGUF without it — same set both sides,
+      comparability preserved) and the cache-window clamp (aeae7d2: the
+      262144-block workspace OOMed a 24 GB card; the harness's
+      row_logit_floor shape, math-neutral inside the window, applied
+      identically at both commits). Schtask `si620flag0`, log
+      `E:\tmp\si620-flag0.log`.
 
 ## Phase B — session plumbing (`TernaryDeltanetGpuForwardCudarc`)
 
