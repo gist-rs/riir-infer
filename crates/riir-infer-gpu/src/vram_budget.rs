@@ -233,6 +233,16 @@ fn ternary_handle_bytes(w: &katgpt_core::TernaryGroupWeights) -> u64 {
     bits + scales
 }
 
+/// [`ternary_handle_bytes`] from the geometry alone — the plane layout of
+/// `TernaryGroupWeights::new(rows, cols)` (two `rows × ⌈cols/64⌉` u64 planes,
+/// `rows × ⌈cols/128⌉` scales — the shared 128 `GROUP_SIZE`, exported by
+/// katgpt-core as `BINARY_GROUP_SIZE`), without allocating it.
+fn ternary_handle_bytes_of(rows: usize, cols: usize) -> u64 {
+    let bits = 2 * (rows * cols.div_ceil(64)) as u64 * 8;
+    let scales = (rows * cols.div_ceil(katgpt_core::BINARY_GROUP_SIZE)) as u64 * (4 + 2);
+    bits + scales
+}
+
 fn gate_proj_bytes(g: &GateProjWeights) -> u64 {
     match g.as_ternary() {
         Some(t) => ternary_handle_bytes(t),
@@ -251,10 +261,10 @@ fn proj_gpu_bytes(p: &riir_infer_core::deltanet::ternary_weights::ProjWeights) -
         ProjWeights::Ternary(t) => ternary_handle_bytes(t),
         ProjWeights::Q4K(blocks, _, _) => blocks.len() as u64 * 144,
         ProjWeights::Q6K(blocks, _, _) => blocks.len() as u64 * 210,
-        // `ternary_q2_resident` (CPU-only raw-Q2 arm, katgpt-rs Issue 935 T5):
-        // no GPU upload exists for it — refuse rather than under-count.
+        // `ternary_q2_resident`: uploads as its plane view (Issue 043 T1) —
+        // the same handle bytes, priced from the geometry without building it.
         #[allow(unreachable_patterns)]
-        _ => panic!("proj_gpu_bytes: Q2-resident projections are CPU-only (load without ternary_q2_resident)"),
+        other => ternary_handle_bytes_of(other.rows(), other.cols()),
     }
 }
 
@@ -623,5 +633,20 @@ mod ladder_tests {
         assert_eq!(rungs[sel].page_size, 4096 * MIB);
         // Above the binding limit → no rung (BufferTooBig).
         assert!(select_pool_rung(&rungs, 5 * 1024 * MIB).is_none());
+    }
+}
+
+#[cfg(test)]
+mod handle_bytes_tests {
+    use super::*;
+
+    /// The geometry pricing must equal the materialized handle's pricing —
+    /// including ragged widths (cols not a multiple of 64 / 128).
+    #[test]
+    fn handle_bytes_of_matches_materialized() {
+        for (rows, cols) in [(0, 0), (1, 1), (3, 64), (7, 127), (5, 128), (48, 5120), (9, 300)] {
+            let w = katgpt_core::TernaryGroupWeights::new(rows, cols);
+            assert_eq!(ternary_handle_bytes_of(rows, cols), ternary_handle_bytes(&w), "{rows}x{cols}");
+        }
     }
 }

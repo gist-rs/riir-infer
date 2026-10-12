@@ -34,7 +34,8 @@ use super::forward::{
     gated_deltanet_step_par_inplace, softplus,
 };
 use super::ternary_weights::{
-    DeltaNetTernaryLayerWeights, ProjWeights, QwenDeltaNetTernaryWeights, ternary_matvec_parallel,
+    DeltaNetTernaryLayerWeights, ProjWeights, QwenDeltaNetTernaryWeights, matvec_pair_into,
+    ternary_matvec_parallel,
 };
 use crate::rope::RopeFreqTable;
 use crate::simd::fast_sigmoid;
@@ -201,10 +202,10 @@ fn bitlinear(y: &mut [f32], w: &ProjWeights, x: &[f32], hook: Option<&dyn Ternar
     match w {
         ProjWeights::Ternary(t) => bitlinear_ternary(y, t, x, hook),
         #[cfg(feature = "ternary_q2_resident")]
-        ProjWeights::TernaryQ2(_) => {
-            assert!(hook.is_none(), "profiler bitlinear: a Q2-resident projection has no bit-plane hook payload");
-            w.matvec_into(y, x);
-        }
+        ProjWeights::TernaryQ2(q) => match hook {
+            Some(_) => bitlinear_ternary(y, q.planes(), x, hook),
+            None => w.matvec_into(y, x),
+        },
         ProjWeights::Q4K(..) | ProjWeights::Q6K(..) => {
             assert!(
                 hook.is_none(),
@@ -665,8 +666,20 @@ fn profiled_forward_ternary_body<'a>(
                 &mut x[..n],
             );
         } else {
-            bitlinear(&mut scratch.gate, &layer_weights.gate_proj, &x[..n], hook);
-            bitlinear(&mut scratch.up, &layer_weights.up_proj, &x[..n], hook);
+            // The production forward's gate+up dispatch (`bitlinear_pair`).
+            match hook {
+                None => matvec_pair_into(
+                    &layer_weights.gate_proj,
+                    &mut scratch.gate,
+                    &layer_weights.up_proj,
+                    &mut scratch.up,
+                    &x[..n],
+                ),
+                Some(_) => {
+                    bitlinear(&mut scratch.gate, &layer_weights.gate_proj, &x[..n], hook);
+                    bitlinear(&mut scratch.up, &layer_weights.up_proj, &x[..n], hook);
+                }
+            }
             swiglu(&mut scratch.hidden, &scratch.gate, &scratch.up);
             bitlinear(&mut x[..n], &layer_weights.down_proj, &scratch.hidden, hook);
         }

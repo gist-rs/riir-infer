@@ -305,15 +305,24 @@ q2_0_ternary_bridge = ["katgpt-core/ternary_group_scale"]
 # (tests/ternary_q8_act_goat.rs) top-1 agree 256/256 + 510/512, confident
 # 165/165 + 348/348, hit-rate identical, NLL Δ −0.003/−0.019, 32 greedy tokens
 # identical, wall 0.319/0.326× (≈430 → 139 ms/token). f32 arm stays reachable
-# at runtime: `set_ternary_q8_act(false)`. x86_64 runs the f32 kernel (no q8 port).
+# at runtime: `set_ternary_q8_act(false)`. x86_64 runs the AVX2 q8 port (katgpt-rs
+# Issue 935 T4); a CPU with neither dotprod nor avx2 runs the f32 kernel.
 ternary_q8_act = ["q2_0_ternary_bridge", "katgpt-core/ternary_group_q8_act"]
 # katgpt-rs Issue 935 T5: keep Q2_0 projections QUANT-RESIDENT in the GGUF's
 # own 2-bit block layout (`ProjWeights::TernaryQ2`) and run the raw-Q2 q8
 # kernel — shr+and per code byte instead of the two-plane walk. Bit-identical
 # to the ternary_q8_act arm (same integer sums, same accumulation order); only
 # speed moves. Memory-neutral (replaces the planes, 34 B / 128 weights either
-# way). The f32 arm (`set_ternary_q8_act(false)`) and the ternary GPU hooks
-# have no Q2 payload and refuse loud on it.
+# way). PROMOTED 2026-10-13 — implied by deltanet_ternary_inference (Issue
+# 043): Bonsai-2-27B 400/400 projections raw-Q2, 64/64 logit vectors
+# bit-identical, 32 greedy tokens identical, tg 0.934×, load 5.7 → 3.8 s
+# (tests/ternary_q2_resident_goat.rs, Bench 879); Metal pre-rotation prefill
+# pin 99a0733c45a0e663 @2048 reproduced bit-exactly through the GPU
+# uploaders. The f32 arm, the GPU hooks and `as_ternary()` ride a lazy plane
+# view (resident on first ask); one-shot GPU uploads take a TRANSIENT one;
+# `as_ternary_mut()` demotes to planes. The loader declines the layout on a
+# CPU without the raw-Q2 SIMD arm. Opt out at runtime BEFORE a load:
+# `set_ternary_q2_resident(false)`.
 ternary_q2_resident = ["ternary_q8_act", "katgpt-core/ternary_q2_q8"]
 ternary_inference = ["katgpt-core/ternary_inference", "q2_0_ternary_bridge"]
 gdn_tree_verify = ["deltanet_inference", "katgpt-core/gdn_tree_verify"]
@@ -336,7 +345,7 @@ weaver_runtime = ["katgpt-speculative/weaver_runtime"]
 # Inter-feature composition (mirrors engine; hla_role_transport stays
 # engine-local — the moved gated arms reference no engine types, verified
 # by the T1.4 back-edge check).
-deltanet_ternary_inference = ["deltanet_inference", "q2_0_ternary_bridge", "ternary_q8_act"]
+deltanet_ternary_inference = ["deltanet_inference", "q2_0_ternary_bridge", "ternary_q8_act", "ternary_q2_resident"]
 # Bonsai 2 Hadamard-folded ternary runtime (Issue 980 / Plan 600 Phase B).
 # Parses prism.hadamard.* + applies the activation-side rotation. Default-OFF
 # until the GOAT gate passes (G1 token-identity vs the fork, G2 overhead

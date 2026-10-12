@@ -46,7 +46,7 @@ use super::ternary_weights::{
 use crate::types::{Config, DeltaNetLayerType, rmsnorm_with_gamma_eps, swiglu};
 use katgpt_core::TernaryMatvecHook;
 use katgpt_core::{TernaryFfnHook, TernaryInputProjHook};
-use super::ternary_weights::ternary_matvec_parallel;
+use super::ternary_weights::{matvec_pair_into, ternary_matvec_parallel};
 
 use crate::deltanet::rotation::{
     TernaryRotationConfig, permute_gdn_v_grouped_inplace, permute_gdn_v_grouped_inverse_inplace,
@@ -91,14 +91,14 @@ pub(crate) fn bitlinear(
             }
         }
         #[cfg(feature = "ternary_q2_resident")]
-        ProjWeights::TernaryQ2(_) => {
-            // Same fail-closed posture as the q4/q6 arms: the hooks take
-            // `&TernaryGroupWeights`, which a Q2-resident projection lacks.
-            assert!(
-                hook.is_none(),
-                "bitlinear: a Q2-resident projection has no bit-plane payload for the matvec hook"
-            );
-            w.matvec_into(y, x);
+        ProjWeights::TernaryQ2(q) => {
+            // The hooks take `&TernaryGroupWeights`: hand them the RESIDENT
+            // plane view (buffer-stable — their upload caches key on it).
+            if let Some(h) = hook {
+                h.matvec(q.planes(), &x[..q.cols], &mut y[..q.rows]);
+            } else {
+                w.matvec_into(y, x);
+            }
         }
         ProjWeights::Q4K(..) | ProjWeights::Q6K(..) => {
             // Issue 028 T4 S2: the hooks (the GPU capture lanes + the
@@ -113,6 +113,28 @@ pub(crate) fn bitlinear(
                  the GPU/act-tap lanes are ternary-only (Issue 028 T4 S2)"
             );
             w.matvec_into(y, x);
+        }
+    }
+}
+
+/// Two [`bitlinear`]s over one shared `x` (the FFN's gate + up). With no hook,
+/// [`matvec_pair_into`] — one activation prep + one fork-join when both are
+/// Q2-resident on the q8 arm, bit-identical to two calls (Issue 043 T4).
+/// With a hook, the two hooked calls exactly as before.
+#[inline(always)]
+pub(crate) fn bitlinear_pair(
+    ya: &mut [f32],
+    wa: &ProjWeights,
+    yb: &mut [f32],
+    wb: &ProjWeights,
+    x: &[f32],
+    hook: Option<&dyn TernaryMatvecHook>,
+) {
+    match hook {
+        None => matvec_pair_into(wa, ya, wb, yb, x),
+        Some(_) => {
+            bitlinear(ya, wa, x, hook);
+            bitlinear(yb, wb, x, hook);
         }
     }
 }
@@ -784,8 +806,14 @@ pub fn qwen_deltanet_ternary_layer_body(
         } else {
             &x[..n]
         };
-        bitlinear(&mut scratch.gate, &layer_weights.gate_proj, x_ffn, hook);
-        bitlinear(&mut scratch.up, &layer_weights.up_proj, x_ffn, hook);
+        bitlinear_pair(
+            &mut scratch.gate,
+            &layer_weights.gate_proj,
+            &mut scratch.up,
+            &layer_weights.up_proj,
+            x_ffn,
+            hook,
+        );
         swiglu(&mut scratch.hidden, &scratch.gate, &scratch.up);
 
         // h. Down projection (ternary) — folded: rotate `hidden` in place

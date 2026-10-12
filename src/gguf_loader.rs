@@ -2057,7 +2057,9 @@ fn load_q2_resident_proj(
     );
     let w = katgpt_core::TernaryQ2Weights::from_blocks(rows, cols, blocks);
     anyhow::ensure!(w.is_ternary(), "Q2_0 projection '{name}': code 3 (+2) is not ternary");
-    Ok(crate::deltanet::ternary_weights::ProjWeights::TernaryQ2(w))
+    Ok(crate::deltanet::ternary_weights::ProjWeights::TernaryQ2(
+        crate::deltanet::ternary_weights::TernaryQ2Proj::new(w),
+    ))
 }
 
 #[cfg(feature = "deltanet_ternary_inference")]
@@ -2076,10 +2078,14 @@ fn load_proj(
             // katgpt-rs Issue 935 T5: keep Q2_0 quant-resident in its own
             // block layout (the raw-Q2 q8 kernel) instead of splitting it
             // into bit-planes — runtime-selectable so one process can hold
-            // both arms (the bit-identity gate).
+            // both arms (the bit-identity gate). Declined where the raw-Q2
+            // SIMD arm cannot run (no aarch64 dotprod / x86_64 avx2): there
+            // it would be the scalar reference, while the plane q8 entry
+            // falls back to the f32 kernel — keep that path (Issue 043).
             #[cfg(feature = "ternary_q2_resident")]
             if info.ggml_type == GgmlType::Q2_0
                 && crate::deltanet::ternary_weights::ternary_q2_resident()
+                && katgpt_core::q2_fast_path_available()
             {
                 return load_q2_resident_proj(gguf, name, &info.shape);
             }

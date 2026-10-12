@@ -49,7 +49,7 @@ use super::forward::{
     AttentionLayerScratch, DeltaNetState, HybridForwardScratch, effective_rotary_dim,
 };
 use super::rotation::{TernaryRotationConfig, rotate_forward_inplace, rotate_inverse_inplace};
-use super::ternary_forward::{bitlinear, forward_deltanet_layer_ternary};
+use super::ternary_forward::{bitlinear, bitlinear_pair, forward_deltanet_layer_ternary};
 use super::ternary_weights::{
     DeltaNetTernaryLayerWeights, QwenDeltaNetTernaryWeights, ternary_matvec_parallel,
 };
@@ -364,8 +364,14 @@ fn forward_qwen_deltanet_ternary_qkv_body<'a, C: QuantizedKVCache>(
         } else {
             &x[..n]
         };
-        bitlinear(&mut scratch.gate, &layer_weights.gate_proj, x_ffn, None);
-        bitlinear(&mut scratch.up, &layer_weights.up_proj, x_ffn, None);
+        bitlinear_pair(
+            &mut scratch.gate,
+            &layer_weights.gate_proj,
+            &mut scratch.up,
+            &layer_weights.up_proj,
+            x_ffn,
+            None,
+        );
         swiglu(&mut scratch.hidden, &scratch.gate, &scratch.up);
         if let Some(rot) = rotation {
             let signs = rot.signs_for_width(config.mlp_hidden);

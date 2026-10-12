@@ -83,18 +83,135 @@ pub fn ternary_q2_resident() -> bool {
 /// 935 T5): [`katgpt_core::simd_ternary_q2_matvec_q8_parallel`], bit-identical
 /// to the bit-plane q8 arm of [`ternary_matvec_parallel`].
 ///
-/// # Panics
-/// The f32 arm is selected (`set_ternary_q8_act(false)`): a Q2-resident
-/// projection has no f32-activation kernel, and silently running q8 would make
-/// an f32-vs-q8 comparison compare q8 with itself.
+/// The f32 arm (`set_ternary_q8_act(false)`) has no raw-Q2 kernel: it runs
+/// the bit-plane f32 kernel over [`TernaryQ2Proj::planes`] (built once, then
+/// resident) — the exact kernel a plane-loaded model runs, so an f32-vs-q8
+/// comparison never compares q8 with itself (Issue 043 T2).
 #[cfg(feature = "ternary_q2_resident")]
 #[inline]
-pub fn ternary_q2_matvec_parallel(w: &katgpt_core::TernaryQ2Weights, x: &[f32], y: &mut [f32]) {
-    assert!(
-        TERNARY_Q8_ACT.load(std::sync::atomic::Ordering::Relaxed),
-        "ternary_q2_resident projections are q8-only — load without ternary_q2_resident for the f32 arm"
-    );
-    katgpt_core::simd_ternary_q2_matvec_q8_parallel(w, x, y);
+pub fn ternary_q2_matvec_parallel(w: &TernaryQ2Proj, x: &[f32], y: &mut [f32]) {
+    ternary_q2_matvec_arm(w, x, y, TERNARY_Q8_ACT.load(std::sync::atomic::Ordering::Relaxed));
+}
+
+/// [`ternary_q2_matvec_parallel`] with the arm passed in (tests pin both arms
+/// without flipping the process-global switch under concurrent tests).
+#[cfg(feature = "ternary_q2_resident")]
+#[inline]
+fn ternary_q2_matvec_arm(w: &TernaryQ2Proj, x: &[f32], y: &mut [f32], q8: bool) {
+    match q8 {
+        true => katgpt_core::simd_ternary_q2_matvec_q8_parallel(w.q2(), x, y),
+        false => katgpt_core::simd_ternary_group_matvec_parallel(w.planes(), x, y),
+    }
+}
+
+/// `ya = Wa @ x`, `yb = Wb @ x` over ONE shared `x` (the FFN's gate + up) —
+/// [`ProjWeights::matvec_into`] twice, except when both are Q2-resident on
+/// the q8 arm: then one activation quantize+permute and one fork-join
+/// ([`katgpt_core::simd_ternary_q2_matvec_q8_parallel_pair`], bit-identical
+/// to the two single calls; Issue 043 T4).
+pub fn matvec_pair_into(wa: &ProjWeights, ya: &mut [f32], wb: &ProjWeights, yb: &mut [f32], x: &[f32]) {
+    #[cfg(feature = "ternary_q2_resident")]
+    if let (ProjWeights::TernaryQ2(a), ProjWeights::TernaryQ2(b)) = (wa, wb)
+        && a.cols == b.cols
+        && TERNARY_Q8_ACT.load(std::sync::atomic::Ordering::Relaxed)
+    {
+        katgpt_core::simd_ternary_q2_matvec_q8_parallel_pair(
+            a.q2(),
+            b.q2(),
+            &x[..a.cols],
+            &mut ya[..a.rows],
+            &mut yb[..b.rows],
+        );
+        return;
+    }
+    wa.matvec_into(ya, x);
+    wb.matvec_into(yb, x);
+}
+
+/// A Q2-resident projection (`ternary_q2_resident`): the raw `Q2_0` blocks the
+/// CPU q8 kernel reads, plus a LAZY bit-plane view for every consumer that
+/// takes `&TernaryGroupWeights` (Issue 043 T1) — the GPU matvec hooks, the
+/// f32 arm, the act-tap probe.
+///
+/// Two views, two lifetimes, on purpose:
+/// - [`Self::planes`] builds once and stays RESIDENT, so its plane BUFFERS
+///   live as long as the projection (moves included) — the upload caches
+///   (`gemv_ternary_cubecl`, `gemv_ternary_cuda_raw`) key on
+///   `(pos_bits.as_ptr(), neg_bits.as_ptr())` exactly as they do for a
+///   plane-loaded projection. A transient view's freed buffers could be
+///   re-issued to a later one and alias a stale cache entry — hence hooks
+///   take this view. Costs a second copy (same 34 B / 128 weights) only on
+///   the paths that ask.
+/// - [`Self::planes_cow`] borrows the resident view if one exists, else builds
+///   a TRANSIENT one — for one-shot uploaders that copy to device memory and
+///   never key on the address (no permanent second host copy).
+///
+/// Both views are bit-identical to the loader's plane repack (the same
+/// [`crate::quant::q2_0::repack_q2_0_to_ternary_group`]).
+#[cfg(feature = "ternary_q2_resident")]
+#[derive(Debug, Clone)]
+pub struct TernaryQ2Proj {
+    q2: katgpt_core::TernaryQ2Weights,
+    planes: std::sync::OnceLock<TernaryGroupWeights>,
+}
+
+#[cfg(feature = "ternary_q2_resident")]
+impl TernaryQ2Proj {
+    /// # Panics
+    /// A code-3 (`+2`) weight — not ternary (the loader refuses it first).
+    pub fn new(q2: katgpt_core::TernaryQ2Weights) -> Self {
+        assert!(q2.is_ternary(), "TernaryQ2Proj: code 3 (+2) is not ternary");
+        Self { q2, planes: std::sync::OnceLock::new() }
+    }
+
+    /// The raw `Q2_0` blocks (the q8 kernel's operand).
+    pub fn q2(&self) -> &katgpt_core::TernaryQ2Weights {
+        &self.q2
+    }
+
+    /// The resident bit-plane view (built on first call; buffers stable).
+    pub fn planes(&self) -> &TernaryGroupWeights {
+        self.planes.get_or_init(|| self.build_planes())
+    }
+
+    /// The resident view if built, else a transient one (never cached).
+    pub fn planes_cow(&self) -> std::borrow::Cow<'_, TernaryGroupWeights> {
+        match self.planes.get() {
+            Some(p) => std::borrow::Cow::Borrowed(p),
+            None => std::borrow::Cow::Owned(self.build_planes()),
+        }
+    }
+
+    /// The plane arm by value: the resident view if built, else a fresh one
+    /// (the in-place demotion of [`ProjWeights::as_ternary_mut`]).
+    pub fn into_planes(self) -> TernaryGroupWeights {
+        match self.planes.get() {
+            Some(_) => self.planes.into_inner().expect("checked resident"),
+            None => self.build_planes(),
+        }
+    }
+
+    /// Whether the resident view has been built (the residency probe).
+    pub fn planes_resident(&self) -> bool {
+        self.planes.get().is_some()
+    }
+
+    fn build_planes(&self) -> TernaryGroupWeights {
+        crate::quant::q2_0::repack_q2_0_to_ternary_group(
+            crate::quant::q2_0::q2_blocks_as_ggml(&self.q2.blocks),
+            self.q2.rows,
+            self.q2.cols,
+        )
+        .expect("TernaryQ2Proj::new checked ternarity and the block geometry")
+    }
+}
+
+#[cfg(feature = "ternary_q2_resident")]
+impl std::ops::Deref for TernaryQ2Proj {
+    type Target = katgpt_core::TernaryQ2Weights;
+    fn deref(&self) -> &Self::Target {
+        &self.q2
+    }
 }
 
 /// The `DeltaNet` gate projections `in_proj_a` / `in_proj_b` (Issue 980).
@@ -224,9 +341,10 @@ pub enum ProjWeights {
     Q6K(Vec<crate::quant::q6k::BlockQ6K>, usize, usize),
     /// Raw `Q2_0` blocks (the GGUF wire layout, `ternary_q2_resident`,
     /// katgpt-rs Issue 935 T5) — the int8-activation raw-Q2 kernel,
-    /// bit-identical to the bit-plane q8 arm. No f32 arm, no hook payload.
+    /// bit-identical to the bit-plane q8 arm; the f32 arm and the hook /
+    /// GPU-upload payload ride its lazy plane view (Issue 043).
     #[cfg(feature = "ternary_q2_resident")]
-    TernaryQ2(katgpt_core::TernaryQ2Weights),
+    TernaryQ2(TernaryQ2Proj),
 }
 
 impl ProjWeights {
@@ -258,25 +376,54 @@ impl ProjWeights {
         }
     }
 
-    /// The ternary arm, if this projection is ternary. The GPU/act-tap hook
-    /// paths consume `&TernaryGroupWeights` — a q4 projection has no such
+    /// The bit-plane payload, if this projection is ternary. The GPU/act-tap
+    /// hook paths consume `&TernaryGroupWeights` — a q4 projection has no such
     /// payload and refuses there (fail-closed, never a silent hook drop).
+    ///
+    /// A Q2-resident projection IS ternary: it answers with its RESIDENT
+    /// plane view ([`TernaryQ2Proj::planes`] — built on first call, then
+    /// buffer-stable, so the pointer-keyed upload caches stay valid; Issue
+    /// 043). One-shot consumers that only copy should take
+    /// [`Self::planes_cow`] instead and skip the resident second copy.
     pub fn as_ternary(&self) -> Option<&TernaryGroupWeights> {
         match self {
             Self::Ternary(w) => Some(w),
             Self::Q4K(..) | Self::Q6K(..) => None,
             #[cfg(feature = "ternary_q2_resident")]
-            Self::TernaryQ2(..) => None,
+            Self::TernaryQ2(q) => Some(q.planes()),
+        }
+    }
+
+    /// [`Self::as_ternary`] for ONE-SHOT consumers (device uploads that copy
+    /// and never key on the host address): a Q2-resident arm yields a
+    /// TRANSIENT view unless the resident one already exists — no permanent
+    /// second host copy (Issue 043 T1).
+    pub fn planes_cow(&self) -> Option<std::borrow::Cow<'_, TernaryGroupWeights>> {
+        match self {
+            Self::Ternary(w) => Some(std::borrow::Cow::Borrowed(w)),
+            Self::Q4K(..) | Self::Q6K(..) => None,
+            #[cfg(feature = "ternary_q2_resident")]
+            Self::TernaryQ2(q) => Some(q.planes_cow()),
         }
     }
 
     /// Mutable ternary arm (the refit/requant walkers).
+    ///
+    /// A Q2-resident projection is DEMOTED to the plane arm in place first:
+    /// mutating a plane view while the raw blocks still drive the kernel
+    /// would desync the two (Issue 043).
     pub fn as_ternary_mut(&mut self) -> Option<&mut TernaryGroupWeights> {
+        #[cfg(feature = "ternary_q2_resident")]
+        if let Self::TernaryQ2(_) = self
+            && let Self::TernaryQ2(q) = std::mem::replace(self, Self::empty())
+        {
+            *self = Self::Ternary(q.into_planes());
+        }
         match self {
             Self::Ternary(w) => Some(w),
             Self::Q4K(..) | Self::Q6K(..) => None,
             #[cfg(feature = "ternary_q2_resident")]
-            Self::TernaryQ2(..) => None,
+            Self::TernaryQ2(..) => unreachable!("demoted above"),
         }
     }
 
@@ -344,7 +491,7 @@ impl ProjWeights {
                 out
             }
             #[cfg(feature = "ternary_q2_resident")]
-            Self::TernaryQ2(w) => QwenDeltaNetTernaryWeights::dequant_proj_to_dense(&w.to_group()),
+            Self::TernaryQ2(w) => QwenDeltaNetTernaryWeights::dequant_proj_to_dense(&w.planes_cow()),
         }
     }
 
@@ -965,7 +1112,7 @@ fn convert_ternary_layer_to_proj_layer(
         match w {
             ProjWeights::Ternary(t) => convert_ternary_ref(t, trainable),
             #[cfg(feature = "ternary_q2_resident")]
-            ProjWeights::TernaryQ2(q) => convert_ternary_ref(&q.to_group(), trainable),
+            ProjWeights::TernaryQ2(q) => convert_ternary_ref(&q.planes_cow(), trainable),
             ProjWeights::Q4K(_, rows, cols) | ProjWeights::Q6K(_, rows, cols) => {
                 if *rows == 0 {
                     Proj::empty()
@@ -1285,5 +1432,63 @@ mod tests {
             cols,
         );
         assert!(!layer.invariants_hold());
+    }
+
+    /// Issue 043 T1/T2 — the Q2-resident arm's plane views are the loader's
+    /// plane repack bit-for-bit; the transient view never becomes resident;
+    /// the resident view is buffer-stable (the pointer-keyed GPU caches key
+    /// on it); and both matvec arms equal the plane-loaded arms exactly.
+    #[cfg(feature = "ternary_q2_resident")]
+    #[test]
+    fn q2_resident_plane_views_match_plane_load() {
+        let (rows, cols) = (384usize, 512usize);
+        let src: Vec<f32> = (0..rows * cols)
+            .map(|i| match (i * 7 + i / cols) % 5 {
+                0 | 1 => 0.0,
+                2 => 0.9,
+                3 => -0.6,
+                _ => 0.3,
+            })
+            .collect();
+        let t = katgpt_core::TernaryGroupWeights::quantize_from_f32(&src, rows, cols);
+        let q = TernaryQ2Proj::new(katgpt_core::TernaryQ2Weights::from_group(&t));
+        let reference = q.q2().to_group(); // katgpt-core's per-weight converter
+
+        let transient = q.planes_cow();
+        assert!(matches!(transient, std::borrow::Cow::Owned(_)));
+        assert_eq!(transient.pos_bits, t.pos_bits);
+        assert_eq!(transient.neg_bits, t.neg_bits);
+        assert_eq!(transient.group_scale, t.group_scale);
+        assert_eq!(transient.pos_bits, reference.pos_bits);
+        drop(transient);
+        assert!(!q.planes_resident(), "a transient view must not become resident");
+
+        // The GPU caches key on the plane BUFFERS — stable across calls and
+        // across moving the projection.
+        let key = |p: &TernaryGroupWeights| (p.pos_bits.as_ptr(), p.neg_bits.as_ptr());
+        let k1 = key(q.planes());
+        assert!(q.planes_resident());
+        assert_eq!(k1, key(q.planes()), "the resident view must be buffer-stable");
+        assert!(matches!(q.planes_cow(), std::borrow::Cow::Borrowed(p) if key(p) == k1));
+
+        let x: Vec<f32> = (0..cols).map(|i| ((i * 13) % 29) as f32 / 29.0 - 0.5).collect();
+        let (mut a, mut b) = (vec![0.0f32; rows], vec![0.0f32; rows]);
+        katgpt_core::simd_ternary_group_matvec_parallel(&t, &x, &mut a);
+        ternary_q2_matvec_arm(&q, &x, &mut b, false);
+        assert_eq!(a, b, "the Q2 f32 arm must be the plane f32 kernel");
+        katgpt_core::simd_ternary_group_matvec_q8_parallel(&t, &x, &mut a);
+        ternary_q2_matvec_arm(&q, &x, &mut b, true);
+        assert_eq!(a, b, "the Q2 q8 arm must be bit-identical to the plane q8 kernel");
+
+        let mut w = ProjWeights::TernaryQ2(q);
+        assert_eq!(w.as_ternary().map(key), Some(k1), "a move must keep the cache key");
+        assert_eq!(w.dequant_to_dense(), ProjWeights::Ternary(t.clone()).dequant_to_dense());
+
+        // Mutation demotes to the plane arm, carrying the resident buffers.
+        assert_eq!(w.as_ternary_mut().map(|p| key(p)), Some(k1));
+        assert!(matches!(&w, ProjWeights::Ternary(p) if p.pos_bits == t.pos_bits && p.neg_bits == t.neg_bits));
+        // ...and with no resident view, it builds one (same planes).
+        let mut cold = ProjWeights::TernaryQ2(TernaryQ2Proj::new(katgpt_core::TernaryQ2Weights::from_group(&t)));
+        assert_eq!(cold.as_ternary_mut().map(|p| p.pos_bits.clone()), Some(t.pos_bits.clone()));
     }
 }

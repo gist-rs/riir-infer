@@ -260,6 +260,25 @@ pub fn repack_q2_0_to_ternary_group(
     Ok(out)
 }
 
+/// View katgpt-core's [`katgpt_core::Q2Block`] slice as this crate's
+/// [`BlockQ2_0`] — the same ggml `block_q2_0` (34 B: f16 scale bits, then 32
+/// code bytes), so the Q2-resident projection's plane view rides the one fast
+/// repack instead of a second, per-weight converter (Issue 043 T1).
+#[cfg(feature = "ternary_q2_resident")]
+pub fn q2_blocks_as_ggml(blocks: &[katgpt_core::Q2Block]) -> &[BlockQ2_0] {
+    use core::mem::{align_of, offset_of, size_of};
+    const _: () = assert!(
+        size_of::<katgpt_core::Q2Block>() == size_of::<BlockQ2_0>()
+            && align_of::<katgpt_core::Q2Block>() == align_of::<BlockQ2_0>()
+            && offset_of!(katgpt_core::Q2Block, d) == offset_of!(BlockQ2_0, d)
+            && offset_of!(katgpt_core::Q2Block, qs) == offset_of!(BlockQ2_0, qs)
+    );
+    // SAFETY: both are `#[repr(C)] { d: u16, qs: [u8; 32] }` — size, align
+    // and field offsets asserted equal at compile time above; every bit
+    // pattern is valid for both; the lifetime and length carry over.
+    unsafe { core::slice::from_raw_parts(blocks.as_ptr().cast::<BlockQ2_0>(), blocks.len()) }
+}
+
 /// 32 `Q2_0` codes (LSB-first, code j at bits 2j..2j+2 of `word`) → the
 /// (pos, neg, bad) 32-bit planes: code 2 → pos, code 0 → neg, code 1 → none,
 /// code 3 → `bad` (non-zero iff any code is 3; its bits are not positions).

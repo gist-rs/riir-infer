@@ -3111,8 +3111,8 @@ impl TernaryDeltanetGpuForward {
                     // The concat handle (in_proj_concat) is what prefill_project
                     // actually dispatches for the DeltaNet input projection.
                     let pos: Vec<u32> = [
-                        q4_refuse(&wh.in_proj_qkv, "in_proj_qkv"),
-                        q4_refuse(&wh.in_proj_z, "in_proj_z"),
+                        &q4_refuse(&wh.in_proj_qkv, "in_proj_qkv"),
+                        &q4_refuse(&wh.in_proj_z, "in_proj_z"),
                         a_t,
                         b_t,
                     ]
@@ -3120,8 +3120,8 @@ impl TernaryDeltanetGpuForward {
                     .flat_map(|w| cast_u64_to_u32(&w.pos_bits))
                     .collect();
                     let neg: Vec<u32> = [
-                        q4_refuse(&wh.in_proj_qkv, "in_proj_qkv"),
-                        q4_refuse(&wh.in_proj_z, "in_proj_z"),
+                        &q4_refuse(&wh.in_proj_qkv, "in_proj_qkv"),
+                        &q4_refuse(&wh.in_proj_z, "in_proj_z"),
                         a_t,
                         b_t,
                     ]
@@ -3129,8 +3129,8 @@ impl TernaryDeltanetGpuForward {
                     .flat_map(|w| cast_u64_to_u32(&w.neg_bits))
                     .collect();
                     let scale: Vec<f32> = [
-                        q4_refuse(&wh.in_proj_qkv, "in_proj_qkv"),
-                        q4_refuse(&wh.in_proj_z, "in_proj_z"),
+                        &q4_refuse(&wh.in_proj_qkv, "in_proj_qkv"),
+                        &q4_refuse(&wh.in_proj_z, "in_proj_z"),
                         a_t,
                         b_t,
                     ]
@@ -3160,7 +3160,7 @@ impl TernaryDeltanetGpuForward {
                         .collect();
                     lh.in_proj_concat.upload_to_metal(gemm, &pos, &neg, &scale);
                 }
-                upload_one(&mut lh.out_proj, q4_refuse(&wh.out_proj, "out_proj"));
+                upload_one(&mut lh.out_proj, &q4_refuse(&wh.out_proj, "out_proj"));
                 // FFN: the concat gate+up handle is what prefill dispatches.
                 {
                     let gate_t = q4_refuse(&wh.gate_proj, "gate_proj");
@@ -3179,10 +3179,10 @@ impl TernaryDeltanetGpuForward {
                         .collect();
                     lh.gate_up_proj.upload_to_metal(gemm, &pos, &neg, &scale);
                 }
-                upload_one(&mut lh.down_proj, q4_refuse(&wh.down_proj, "down_proj"));
+                upload_one(&mut lh.down_proj, &q4_refuse(&wh.down_proj, "down_proj"));
                 // Attention path GEMMs (if present).
                 if let Some(ref mut h) = lh.attn_wq {
-                    upload_one(h, q4_refuse(&wh.attn_wq, "attn_wq"));
+                    upload_one(h, &q4_refuse(&wh.attn_wq, "attn_wq"));
                 }
                 if q4_refuse(&wh.attn_wk, "attn_wk").rows > 0
                     && q4_refuse(&wh.attn_wv, "attn_wv").rows > 0
@@ -3206,7 +3206,7 @@ impl TernaryDeltanetGpuForward {
                     }
                 }
                 if let Some(ref mut h) = lh.attn_wo {
-                    upload_one(h, q4_refuse(&wh.attn_wo, "attn_wo"));
+                    upload_one(h, &q4_refuse(&wh.attn_wo, "attn_wo"));
                 }
             }
             eprintln!("[Plan 534] Metal weight upload complete.");
@@ -3388,8 +3388,8 @@ impl TernaryDeltanetGpuForward {
                         // `ane_folded_skip` break above); the 4-slot shape is
                         // the pre-rotation contract.
                         &[
-                            q4_refuse(&l.in_proj_qkv, "in_proj_qkv"),
-                            q4_refuse(&l.in_proj_z, "in_proj_z"),
+                            &q4_refuse(&l.in_proj_qkv, "in_proj_qkv"),
+                            &q4_refuse(&l.in_proj_z, "in_proj_z"),
                             l.in_proj_a
                                 .as_ternary()
                                 .expect("Metal register_layer requires ternary in_proj_a"),
@@ -3398,10 +3398,10 @@ impl TernaryDeltanetGpuForward {
                                 .expect("Metal register_layer requires ternary in_proj_b"),
                         ],
                         &[
-                            q4_refuse(&l.gate_proj, "gate_proj"),
-                            q4_refuse(&l.up_proj, "up_proj"),
+                            &q4_refuse(&l.gate_proj, "gate_proj"),
+                            &q4_refuse(&l.up_proj, "up_proj"),
                         ],
-                        down_w,
+                        down_w.as_deref(),
                     );
                     // Early-out: once poisoned, further registers no-op.
                     if !ctx.is_ready() {
@@ -3433,7 +3433,7 @@ impl TernaryDeltanetGpuForward {
                                 bank_bytes,
                                 bytes,
                             ) {
-                                ctx.try_register_down(i, down_t)
+                                ctx.try_register_down(i, &down_t)
                             } else {
                                 false
                             };
@@ -9307,12 +9307,16 @@ pub struct SpeculativeCheckpoint {
 /// dropped hook or a zero-upload would capture a wrong GPU graph. The q4 GPU
 /// path lives in the cudarc lane (`gemv_q4k_cuda_raw`) — a Q4K projection
 /// reaching this uploader is a configuration error, never a downgrade.
+///
+/// A Q2-resident projection (`ternary_q2_resident`) uploads through its
+/// TRANSIENT plane view (Issue 043 T1): the upload copies to device memory
+/// and never keys on the host address, so no permanent second host copy.
 #[cfg(feature = "cubecl_runtime")]
 fn q4_refuse<'a>(
     p: &'a riir_infer_core::deltanet::ternary_weights::ProjWeights,
     site: &str,
-) -> &'a katgpt_core::TernaryGroupWeights {
-    p.as_ternary().unwrap_or_else(|| {
+) -> std::borrow::Cow<'a, katgpt_core::TernaryGroupWeights> {
+    p.planes_cow().unwrap_or_else(|| {
         panic!(
             "plan 618: Q4K projection refuses on the CubeCL whole-forward \
              (site: {site}) — the cudarc lane is the q4 GPU path; \
@@ -9335,9 +9339,9 @@ fn upload_layer_weights(
         // the ternary handles, and the dummy keeps mma-mirror construction
         // (lazy, keyed on use) untouched for the ternary a/b case.
         #[cfg(feature = "ternary_gemm_batched")]
-        in_proj_qkv: TernaryHandle::from_weights(client, q4_refuse(&l.in_proj_qkv, "in_proj_qkv")),
+        in_proj_qkv: TernaryHandle::from_weights(client, &q4_refuse(&l.in_proj_qkv, "in_proj_qkv")),
         #[cfg(feature = "ternary_gemm_batched")]
-        in_proj_z: TernaryHandle::from_weights(client, q4_refuse(&l.in_proj_z, "in_proj_z")),
+        in_proj_z: TernaryHandle::from_weights(client, &q4_refuse(&l.in_proj_z, "in_proj_z")),
         #[cfg(feature = "ternary_gemm_batched")]
         in_proj_a: match l.in_proj_a.as_ternary() {
             Some(t) => TernaryHandle::from_weights(client, t),
@@ -9376,8 +9380,8 @@ fn upload_layer_weights(
             TernaryHandle::from_weights_concat(
                 client,
                 &[
-                    q4_refuse(&l.in_proj_qkv, "in_proj_qkv"),
-                    q4_refuse(&l.in_proj_z, "in_proj_z"),
+                    &q4_refuse(&l.in_proj_qkv, "in_proj_qkv"),
+                    &q4_refuse(&l.in_proj_z, "in_proj_z"),
                     l.in_proj_a.as_ternary().expect("checked above"),
                     l.in_proj_b.as_ternary().expect("checked above"),
                 ],
@@ -9387,23 +9391,23 @@ fn upload_layer_weights(
             // input projection (Plan 602 B2).
             TernaryHandle::from_two_weights(
                 client,
-                q4_refuse(&l.in_proj_qkv, "in_proj_qkv"),
-                q4_refuse(&l.in_proj_z, "in_proj_z"),
+                &q4_refuse(&l.in_proj_qkv, "in_proj_qkv"),
+                &q4_refuse(&l.in_proj_z, "in_proj_z"),
             )
         } else {
             // Attention layer (empty in_proj_*): upload a dummy empty handle
             // to satisfy the struct field. No enabled path reads the concat.
             TernaryHandle::from_weights(client, &katgpt_core::TernaryGroupWeights::new(0, 0))
         },
-        out_proj: TernaryHandle::from_weights(client, q4_refuse(&l.out_proj, "out_proj")),
-        gate_proj: TernaryHandle::from_weights(client, q4_refuse(&l.gate_proj, "gate_proj")),
-        up_proj: TernaryHandle::from_weights(client, q4_refuse(&l.up_proj, "up_proj")),
-        down_proj: TernaryHandle::from_weights(client, q4_refuse(&l.down_proj, "down_proj")),
+        out_proj: TernaryHandle::from_weights(client, &q4_refuse(&l.out_proj, "out_proj")),
+        gate_proj: TernaryHandle::from_weights(client, &q4_refuse(&l.gate_proj, "gate_proj")),
+        up_proj: TernaryHandle::from_weights(client, &q4_refuse(&l.up_proj, "up_proj")),
+        down_proj: TernaryHandle::from_weights(client, &q4_refuse(&l.down_proj, "down_proj")),
         // Issue 642 F2: concatenated gate+up for single-GEMV FFN input path.
         gate_up_proj: TernaryHandle::from_two_weights(
             client,
-            q4_refuse(&l.gate_proj, "gate_proj"),
-            q4_refuse(&l.up_proj, "up_proj"),
+            &q4_refuse(&l.gate_proj, "gate_proj"),
+            &q4_refuse(&l.up_proj, "up_proj"),
         ),
 
         input_norm: upload_f32_slice(client, &l.input_norm),
@@ -9416,7 +9420,7 @@ fn upload_layer_weights(
         attn_wq: if l.attn_wq.rows() > 0 {
             Some(TernaryHandle::from_weights(
                 client,
-                q4_refuse(&l.attn_wq, "attn_wq"),
+                &q4_refuse(&l.attn_wq, "attn_wq"),
             ))
         } else {
             None
@@ -9427,8 +9431,8 @@ fn upload_layer_weights(
         attn_wkv: if l.attn_wk.rows() > 0 && l.attn_wv.rows() > 0 {
             Some(TernaryHandle::from_two_weights(
                 client,
-                q4_refuse(&l.attn_wk, "attn_wk"),
-                q4_refuse(&l.attn_wv, "attn_wv"),
+                &q4_refuse(&l.attn_wk, "attn_wk"),
+                &q4_refuse(&l.attn_wv, "attn_wv"),
             ))
         } else {
             None
@@ -9436,7 +9440,7 @@ fn upload_layer_weights(
         attn_wo: if l.attn_wo.rows() > 0 {
             Some(TernaryHandle::from_weights(
                 client,
-                q4_refuse(&l.attn_wo, "attn_wo"),
+                &q4_refuse(&l.attn_wo, "attn_wo"),
             ))
         } else {
             None
