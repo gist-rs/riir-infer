@@ -188,12 +188,18 @@ is katgpt-rs CPU x86_64) — corrected premises from the survey.
 
 ## Phase D — the G2 prefill cell (SEPARATE unit, lands after A–C)
 
-- [ ] `att_pf_fa_body` (prefill_cuda_attention_fa.rs:409) — the si affine
+The kernel + launcher + session half LANDED `61eb815` (2026-10-11); the
+cells' harness wiring LANDED riir-ai `5f039e886` (2026-10-13 — the env-gated
+`SI620_G2` arm in both league harnesses, one build serves both postures on
+the bench-872 flag-0 law; riir-gpu gains the `scale_invariant_attn`
+forwarding row + the `SiGpuSession` re-export).
+
+- [x] `att_pf_fa_body` (prefill_cuda_attention_fa.rs:409) — the si affine
       beside the causal-mask loop (L536-542, which already derives per-element
       key pos `kv` and query pos in-register); σ_h from the head lane of the
       documented fragment algebra. Scale is folded into Q at staging (L464-466)
       → fragments are post-scale logits = the `logit_scale = 1.0` entry space.
-- [ ] Scope: the FA-engaged default posture only (p ≥ 128, `fa_engaged()`);
+- [x] Scope: the FA-engaged default posture only (p ≥ 128, `fa_engaged()`);
       the kill-switch fallback arms stay unhooked + bit-identical-off, noted.
 - [ ] Then the G2 cells: pp2048/tg128 ±3% (si-ON vs flag-off) via the league
       harnesses (`bench_734`/`bench_772`) on the 4090, GPU-exclusive, with
