@@ -398,6 +398,11 @@ name = "multicol_ab"
 path = "examples/multicol_ab.rs"
 required-features = ["ternary_gemv_cuda_raw"]
 
+[[example]]
+name = "prefix_cache_ab"
+path = "examples/prefix_cache_ab.rs"
+required-features = ["ternary_gemv_cuda_raw"]
+
 [dev-dependencies]
 # Test RNG (qwen38_dflash2_gpu determinism fixtures; version matches the
 # engine gpu crate's).

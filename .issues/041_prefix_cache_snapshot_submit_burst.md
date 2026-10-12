@@ -1,17 +1,24 @@
 # Issue 041: prefix-cache snapshot submit burst — pointer-table gather/scatter (the #29807 analogue)
 
-**Status:** OPEN — **T1+T2 DONE 2026-10-13 (idle-window unit, 4090 `wt038infer`):** the
-pointer-table copy path LANDED in `qwen38_prefix_cache.rs` (module-local engine, not the
-rotation module — it needs `PrefixEntry` knowledge; the divergence is deliberate) — dual
-device pointer tables (live state + per-entry snapshots) + ONE `prefix_table_copy` launch
-per class per direction (grid.y = layer), opt-in `QWEN38_PREFIX_TABLE_COPY=1`, dtod loop
-stays default; NOT the T1-as-written arena (that restructure is T4, still open). Gates
-GREEN on the 4090 (3/3: bit-identity vs the dtod loop — the T2 gate —, refresh + second
-entry + LRU eviction lifecycle, non-uniform shape loud refusal); clippy clean at the
-posture + the feature-OFF posture. Submits per warm cycle: 96 → 2 per direction (state-
-table freshness rides a host-side address compare — zero submits on an unchanged state).
-Remaining: T3 (wall-time A/B at the real 27B shape — the GOAT surface), T4 (arena pool —
-the fresh-insert 96-alloc burst), T5 (graph co-existence re-proof under the full forward).
+**Status:** OPEN — **T1+T2+T3 DONE 2026-10-13:** the pointer-table copy path LANDED in
+`qwen38_prefix_cache.rs` (module-local engine, not the rotation module — it needs
+`PrefixEntry` knowledge; the divergence is deliberate) — dual device pointer tables (live
+state + per-entry snapshots) + ONE `prefix_table_copy` launch per class per direction
+(grid.y = layer), opt-in `QWEN38_PREFIX_TABLE_COPY=1`, dtod loop stays default; NOT the
+T1-as-written arena (that restructure is T4, still open). Gates GREEN on the 4090 (4/4:
+bit-identity vs the dtod loop — the T2 gate —, refresh + second entry + LRU eviction
+lifecycle, non-uniform shape loud refusal, + the T3 submit-count probe regression test);
+clippy clean at both postures. **T3 EXECUTED (bench 036):** the submit probe reads
+`[192,0,4,0]` for a warm refresh+restore cycle (96→2 per direction, exactly as designed);
+wall-time A/B at the real 27B shape (~151 MiB/checkpoint, 41 order-rotated paired reps):
+enqueue **0.054×/0.045×** (18.5–22× less host driver time — the dtod path is HOST-bound
+at ~8 µs/submit), sync-inclusive **0.49×/0.48×**; stable across two runs. The dtod loop
+stays default — promotion is not gated on this bench (serving-lane TTFT only, never a
+scored league lane).
+Remaining: T4 (arena pool — the fresh-insert 96-alloc burst, both paths), T5 (graph
+co-existence re-proof under the full forward — the issue-742 harness is removed, so T5
+needs a rebuilt real-model harness: GGUF load + graph capture + cache hit under the graph
+arm).
 
 ## The surface (measured by Research 397, riir-ai `.research/397`)
 
@@ -82,10 +89,17 @@ never touch the prefix cache. Priority accordingly.
       lifecycle gate (refresh / second entry / LRU eviction) + the non-uniform refusal
       gate (the kernel's grid.y × stride shape cannot express per-layer strides — a
       non-uniform class refuses loudly, never copies wrongly).
-- [ ] T3 — G2: submit-count probe + wall-time A/B at insert/restore (short-suffix
-      scenario FIRST — the only regime where the win is visible). Code-level submits:
-      96 → 2 launches per direction (+1 htod per fresh entry for its dst tables); the
-      A/B needs the real 27B state (~159 MB/checkpoint) through the serving harness.
+- [x] T3 — G2: submit-count probe + wall-time A/B at insert/restore (short-suffix
+      scenario FIRST — the only regime where the win is visible) — **DONE 2026-10-13**:
+      module-level `submit_probe_counts()` counters (dtod memcpies / snap allocs / table
+      launches / table htods; `test_submit_probe_counts` pins the warm-cycle counts at the
+      test shape forever) + `examples/prefix_cache_ab.rs` (the paired instrument) —
+      **bench 036**: probe `[192,0,4,0]` warm (96→2 per direction confirmed); enqueue
+      0.054×/0.045×, sync 0.49×/0.48×, stable across two runs. The A/B used the real 27B
+      STATE SHAPE (48×786,432 f32 rec + 48×40,960 f32 conv — the copies are shape-driven,
+      not content-driven; the GGUF itself adds nothing to a byte copy). Restores targeted
+      the live state object — the production shape, keeping the state-table freshness
+      probe warm.
 - [ ] T4 — arena pool + eviction reuse; no new per-call allocs (G4 posture). The
       fresh-insert 96-alloc burst is untouched by the table path (deliberate — the
       restore path, the TTFT-critical one, carries no allocs in either posture).

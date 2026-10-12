@@ -77,19 +77,61 @@
 //! ever recreated), and one `prefix_table_copy` launch per class that walks
 //! `grid.y` = layer and copies `stride` elements src_table[layer] →
 //! dst_table[layer]. Bit-identical to the dtod loop by construction (pure
+//! Bit-identical to the dtod loop by construction (pure
 //! f32 copies, element order unchanged) — gated by
 //! `test_table_copy_bit_identity_against_dtod_loop`. NOT the T4 arena pool
 //! (fresh inserts still allocate per-layer snapshots; the burst the arena
 //! kills is the alloc side, a follow-up).
+//!
+//! # Issue 041 T3 — the submit-count probe
+//!
+//! [`submit_probe_counts`] reads the four global counters the cache paths
+//! increment per driver submit: dtod memcpies, snapshot allocs, table
+//! launches, table htods. One warm refresh-insert + restore cycle at the
+//! 27B shape reads `[192, 0, 0, 0]` on the dtod path vs `[0, 0, 4, 0]` on
+//! the table path; a fresh insert adds the 96-alloc burst (both paths —
+//! T4's surface) and the table path's one-time table htods. The counters
+//! are plain `Relaxed` adds on a path that runs ≤ ~200 submits per cycle —
+//! unmeasurable against the driver slice they count.
 #![cfg(all(feature = "ternary_gemv_cuda_raw", not(target_os = "macos")))]
 
 use std::collections::HashMap;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use cudarc::driver::{DevicePtr, PushKernelArg};
 use cudarc::driver::safe::{CudaFunction, CudaModule, CudaSlice, CudaStream, LaunchConfig};
 
 use crate::qwen38_dense_cudarc::Qwen38DecodeState;
+
+/// Issue 041 T3 — submit-count probe (see the module doc). Order:
+/// `[dtod_memcpies, snap_allocs, table_launches, table_htods]`.
+static PROBE_DTOD_COPIES: AtomicU64 = AtomicU64::new(0);
+static PROBE_SNAP_ALLOCS: AtomicU64 = AtomicU64::new(0);
+static PROBE_TABLE_LAUNCHES: AtomicU64 = AtomicU64::new(0);
+static PROBE_TABLE_HTODS: AtomicU64 = AtomicU64::new(0);
+
+/// Read the submit-count probe: `[dtod_memcpies, snap_allocs,
+/// table_launches, table_htods]` since process start (or the last
+/// [`submit_probe_reset`]). Counts every driver submit the cache paths
+/// make — the dtod loops, the fresh-insert snapshot allocs, the table
+/// kernel launches, and the pointer-table htods.
+pub fn submit_probe_counts() -> [u64; 4] {
+    [
+        PROBE_DTOD_COPIES.load(Ordering::Relaxed),
+        PROBE_SNAP_ALLOCS.load(Ordering::Relaxed),
+        PROBE_TABLE_LAUNCHES.load(Ordering::Relaxed),
+        PROBE_TABLE_HTODS.load(Ordering::Relaxed),
+    ]
+}
+
+/// Zero the submit-count probe (test/example windowing).
+pub fn submit_probe_reset() {
+    PROBE_DTOD_COPIES.store(0, Ordering::Relaxed);
+    PROBE_SNAP_ALLOCS.store(0, Ordering::Relaxed);
+    PROBE_TABLE_LAUNCHES.store(0, Ordering::Relaxed);
+    PROBE_TABLE_HTODS.store(0, Ordering::Relaxed);
+}
 
 /// One whole-prefix checkpoint: the token prefix, its blake3 key, and the
 /// device-side GDN snapshots (recurrent + conv, same shapes as the live
@@ -276,6 +318,7 @@ impl Qwen38PrefixCache {
         }
         let mut snap_recurrent = Vec::with_capacity(state.recurrent.len());
         for r in &state.recurrent {
+            PROBE_SNAP_ALLOCS.fetch_add(1, Ordering::Relaxed);
             snap_recurrent.push(
                 stream
                     .alloc_zeros::<f32>(r.len())
@@ -284,6 +327,7 @@ impl Qwen38PrefixCache {
         }
         let mut snap_conv = Vec::with_capacity(state.conv.len());
         for c in &state.conv {
+            PROBE_SNAP_ALLOCS.fetch_add(1, Ordering::Relaxed);
             snap_conv.push(
                 stream
                     .alloc_zeros::<f32>(c.len())
@@ -399,11 +443,13 @@ impl Qwen38PrefixCache {
                     )?;
                 } else {
                     for (r, s) in state.recurrent.iter_mut().zip(entry.snap_recurrent.iter()) {
+                        PROBE_DTOD_COPIES.fetch_add(1, Ordering::Relaxed);
                         stream
                             .memcpy_dtod(s, r)
                             .map_err(|e| format!("prefix restore rec: {e}"))?;
                     }
                     for (c, s) in state.conv.iter_mut().zip(entry.snap_conv.iter()) {
+                        PROBE_DTOD_COPIES.fetch_add(1, Ordering::Relaxed);
                         stream
                             .memcpy_dtod(s, c)
                             .map_err(|e| format!("prefix restore conv: {e}"))?;
@@ -440,11 +486,13 @@ fn copy_state_to_snaps(
     snap_conv: &mut [CudaSlice<f32>],
 ) -> Result<(), String> {
     for (s, r) in snap_recurrent.iter_mut().zip(state.recurrent.iter()) {
+        PROBE_DTOD_COPIES.fetch_add(1, Ordering::Relaxed);
         stream
             .memcpy_dtod(r, s)
             .map_err(|e| format!("prefix snap rec: {e}"))?;
     }
     for (s, c) in snap_conv.iter_mut().zip(state.conv.iter()) {
+        PROBE_DTOD_COPIES.fetch_add(1, Ordering::Relaxed);
         stream
             .memcpy_dtod(c, s)
             .map_err(|e| format!("prefix snap conv: {e}"))?;
@@ -573,6 +621,7 @@ impl TableCopyEngine {
         stream
             .memcpy_htod(&addrs, &mut device)
             .map_err(|e| format!("prefix table htod ({label}): {e}"))?;
+        PROBE_TABLE_HTODS.fetch_add(1, Ordering::Relaxed);
         Ok(PtrTable {
             device,
             stride,
@@ -623,6 +672,7 @@ impl TableCopyEngine {
         stream
             .memcpy_htod(&addrs, &mut device)
             .map_err(|e| format!("prefix table htod ({}): {e}", class.label()))?;
+        PROBE_TABLE_HTODS.fetch_add(1, Ordering::Relaxed);
         *slot = Some(PtrTable {
             device,
             stride,
@@ -700,6 +750,7 @@ impl TableCopyEngine {
                 })
                 .map_err(|e| format!("prefix table copy launch ({}): {e}", class.label()))?;
         }
+        PROBE_TABLE_LAUNCHES.fetch_add(1, Ordering::Relaxed);
         Ok(())
     }
 }
@@ -708,6 +759,13 @@ impl TableCopyEngine {
 mod tests {
     use super::*;
     use cudarc::driver::safe::CudaContext;
+    use std::sync::Mutex;
+
+    /// Serializes the tests' cache ops: the T3 probe counters are global,
+    /// so the probe test's count windows are only exact when no other
+    /// test's insert/restore runs inside them. The tests are µs-scale —
+    /// serialization costs nothing.
+    static TEST_SER: Mutex<()> = Mutex::new(());
 
     const REC_LAYERS: usize = 4;
     const REC_LEN: usize = 512;
@@ -786,6 +844,7 @@ mod tests {
     /// the dtod loop's, on identical targets built from identical fills.
     #[test]
     fn test_table_copy_bit_identity_against_dtod_loop() {
+        let _g = TEST_SER.lock().unwrap_or_else(|p| p.into_inner());
         let stream = test_stream();
         let state_a = make_state(&stream, 7);
         let mut c_dtod = Qwen38PrefixCache::with_table_mode(2, TableCopyMode::Off);
@@ -812,6 +871,7 @@ mod tests {
     /// lifecycle, not just one clean round-trip.
     #[test]
     fn test_table_copy_refresh_second_entry_and_eviction() {
+        let _g = TEST_SER.lock().unwrap_or_else(|p| p.into_inner());
         let stream = test_stream();
         let mut c = Qwen38PrefixCache::with_table_mode(2, TableCopyMode::On);
         let s1 = make_state(&stream, 7);
@@ -842,6 +902,7 @@ mod tests {
     /// stride shape cannot express it) — never copied wrongly.
     #[test]
     fn test_table_copy_refuses_nonuniform_layers() {
+        let _g = TEST_SER.lock().unwrap_or_else(|p| p.into_inner());
         let stream = test_stream();
         let mut rec = fill_class(&stream, 2, REC_LEN, 7);
         rec.push(fill_class(&stream, 1, REC_LEN * 2, 9).pop().unwrap());
@@ -856,5 +917,44 @@ mod tests {
             .insert(&stream, &state, &TOKENS)
             .expect_err("non-uniform shapes must refuse");
         assert!(err.contains("non-uniform"), "unexpected error: {err}");
+    }
+
+    /// T3 — the submit-count probe reads the documented counts. Fresh
+    /// insert + warm refresh + restore into the live state (the production
+    /// shape — the state-table freshness probe stays warm): the dtod path
+    /// reads `layers(rec)+layers(conv)` dtod per direction and zero
+    /// launches/htods; the table path reads 2 launches per direction, the
+    /// one-time table htods (2 state + 2 entry) on the fresh insert only,
+    /// and the same alloc burst both paths carry (T4's surface).
+    #[test]
+    fn test_submit_probe_counts() {
+        let _g = TEST_SER.lock().unwrap_or_else(|p| p.into_inner());
+        let stream = test_stream();
+        let mut state = make_state(&stream, 21);
+
+        // dtod arm: fresh insert + warm refresh + restore.
+        submit_probe_reset();
+        let mut c = Qwen38PrefixCache::with_table_mode(2, TableCopyMode::Off);
+        c.insert(&stream, &state, &TOKENS).unwrap();
+        c.insert(&stream, &state, &TOKENS).unwrap(); // warm refresh
+        c.restore(&stream, &mut state, &TOKENS).unwrap();
+        assert_eq!(
+            submit_probe_counts(),
+            [21, 7, 0, 0],
+            "dtod: (4+3) dtod × 3 directions (fresh + refresh + restore), 7 fresh allocs, no table traffic"
+        );
+
+        // table arm: same cycle — into the same live state (warm state
+        // tables on the restore).
+        submit_probe_reset();
+        let mut c2 = Qwen38PrefixCache::with_table_mode(2, TableCopyMode::On);
+        c2.insert(&stream, &state, &TOKENS).unwrap();
+        c2.insert(&stream, &state, &TOKENS).unwrap(); // warm refresh
+        c2.restore(&stream, &mut state, &TOKENS).unwrap();
+        assert_eq!(
+            submit_probe_counts(),
+            [0, 7, 6, 4],
+            "table: 2 launches × 3 directions, 7 fresh allocs, 4 one-time htods"
+        );
     }
 }
