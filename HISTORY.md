@@ -7,6 +7,43 @@ verbatim — issue/plan/bench numbers + dates are read by the workspace
 numbering + citation gates; each record below is one compact entry (full
 narratives: `git log --follow -- .issues/<file>` or this file's git history).
 
+## 2026-10-13 — Issue 042: cubecl #1806 idle-server park fix vendored CLOSED — landed `fa86871` (mirrors: riir-ai `4b86d2003`, riir-refine `f0718269`) — file removed
+
+The idle-queue's "cubecl pin-bump re-gate" lane (queued cycles 38–41, blocked on the
+038 sibling's WIP — cleared when their lane landed in full at `4db9e15`). Upstream
+`tracel-ai/cubecl#1806` @ `6bba5fdf0` (merged 2026-10-11) replaces the idle device
+server's fixed 150 µs sleep (post spin/yield budgets) with `park_timeout` +
+client-side unpark-at-buffer-fill — on submit→wait→submit hosts every buffer-fill
+waited out the rest of a sleep (upstream ~20% decode, M2 Pro, wgpu posture). NO
+release carries it (0.11.0 final published 2026-10-06 predates the merge) — executed
+as the established vendor pattern: `vendor/cubecl-common-0.11.0-pre.2` = the
+published crate + the upstream patch applied verbatim (`git apply -p3`, 8/8 hunks
+cleanly at offset 21 — the custom_channel module is byte-identical pre.2→main at
+every hunk context; verified against the docs.rs pre.2 source before applying).
+Gates: the patched crate's own suite 95/95 standalone; `cargo check` + clippy clean
+at the cubecl_runtime posture (`cargo tree` confirms the vendored path resolves);
+the full lib suite at the posture **243/243** green (490.99 s — every test boots
+device runners through the patched channel); riir-ai `cargo check -p riir-gpu
+--features cubecl_runtime` clean; riir-refine `cargo metadata --features
+ternary_inference` clean; scoped boundary contract CLEAN both repos (ai 82 edges —
+the +1 is this vendor row, declared class). **Deferred leg (pre-existing blocker,
+NOT this patch):** the laya `cubecl_ops_smoke` gate is Windows-link-blocked — LNK2038
+CRT mismatch `MT_StaticRelease` (libesaxx_rs via tokenizers v0.22.2) vs
+`MD_DynamicRelease` (libsentencepiece_sys via riir-infer-core), deterministic
+(survives `cargo clean -p` of both sys crates); every laya-lane exe on this box hits
+it; the M3 lane owes the smoke re-run + the reflex G5 re-run at both postures (the
+standing "any lane dep bump re-runs G5" duty — a vendor bump counts). **Removal
+trigger:** the first cubecl release whose version is > 0.11.0 (or any pre published
+after 2026-10-11) — bump the pin, drop all three patch rows + the vendor tree in one
+commit. En-route (recorded for their lanes): the push-race resolution used the
+temp-worktree cherry-pick recipe over the M3 sibling's Bench-877 promotion landing
+mid-unit (infer `58e7689` — `ternary_q8_act`, CPU decode 1.96→7.86 tok/s); the
+katgpt-rs checkout got the cycle-38 surgical ff (behind-15 → `0c5ed0fe7`, the
+Plan-621 sibling's Cargo.toml WIP + 3 untracked files byte-preserved, backup at
+`E:/git/_sync/plan621_cargo_wip_1013.patch`) — required because 58e7689 depends on
+the `ternary_group_q8_act` katgpt-core feature that only exists at the katgpt-rs
+tip; the merged trees re-validated green on both repos after.
+
 ## 2026-10-10 — Issue 037: wgpu full-suite device-loss cascade CLOSED — root cause + VRAM admission gate landed — `3564a72` (+ upstream draft `dad3e7c`) — file removed
 
 The "which test kills the device" question was a category error: no single killer
