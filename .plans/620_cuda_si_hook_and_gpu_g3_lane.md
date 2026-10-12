@@ -153,15 +153,26 @@ is katgpt-rs CPU x86_64) — corrected premises from the survey.
       `forward_token_graph` dies `CUDA_ERROR_STREAM_CAPTURE_UNSUPPORTED:
       operation not permitted when stream is capturing` (the log holds no
       `# arm base done` — the base arm's first capture already fires it).
-      Suspect class: an ALLOC or SYNC inside the capture window that the
-      si-feature launch path introduced (the `si_session_args!` macro's
-      `CudaView` narrowing per layer, or a dummy-push clone) — the flag0
-      probe's graph lane ran GREEN at `cuda_graphs_forward` WITHOUT the si
-      feature, so the capture-window op is si-gated. NEXT SLICE: read
-      `forward_token_graph`'s capture window + the macro's per-launch arg
-      path (ternary_deltanet_gpu_forward_cudarc.rs + si_gpu.rs), RUST_BACKTRACE
-      the exe on the box, fix, re-run — the reproduction is one schtask (bins
-      + sidecar `E:\tmp\si622-cal-4090.bin` all warm).
+      Suspect NARROWED (code read, this session): the capture window is
+      `ensure_graph_captured` L2591-2639 — begin_capture(GLOBAL) →
+      `si_session_args!` (borrow-only) → `forward_from_x_devpos` →
+      per-attention-layer `forward_attention_layer_devpos` → `window_for`
+      (CudaView borrow, documented no-alloc) → the launcher (None arm borrows
+      struct-owned dummies — no per-call alloc). The dq fake-quant block is
+      cfg'd out at this posture. The "operation not permitted when stream is
+      capturing" class = an op illegal mid-capture: sync memcpy, allocation,
+      or LAZY MODULE LOAD. **Working hypothesis: the lazy-load class** — the
+      G3 harness constructs the forward via `TernaryDeltanetGpuForwardCudarc::new()`
+      while the GREEN-on-this-box flag0 probe uses `new_graph_ready()` (the
+      name says it: everything primed); `ensure_graph_captured` may be the
+      first-ever exercise of `new()` + capture at this kernel set, and a
+      first-use module load (or other lazy init) inside the window kills it.
+      NEXT SLICE: (a) switch the harness to `new_graph_ready` and re-run the
+      schtask (bins + sidecar `E:\tmp\si622-cal-4090.bin` all warm — the
+      reproduction is one command), (b) if that fixes it, decide whether
+      `ensure_graph_captured` should warm/prime defensively for every `new()`
+      consumer, (c) then the G3 rows land (base-arm cross-check vs bench
+      936's base pooled 7.2449 within the f32-posture envelope).
       ⚠ The bin requires ONLY `cuda_graphs_forward` + the folded loader — NOT
       `scale_invariant_attn` — so the `base` arm (and `--dump-logits`)
       runs on an UNHOOKED build: the cross-build byte-compare is executable
