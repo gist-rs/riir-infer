@@ -96,6 +96,22 @@ pub mod rotation;
 #[cfg(feature = "deltanet_ternary_inference")]
 pub mod ternary_forward;
 
+/// Run `f` on a worker of rayon's global pool and return its result; inline
+/// when already on one. Called from a non-pool thread, `rayon::scope` injects
+/// the closure into the pool and parks the caller on a latch, so a forward
+/// whose projections fork onto the pool does not add a 17th runnable thread
+/// beside 16 spin-yielding workers (see `forward_qwen_deltanet_ternary_with_hook`).
+#[cfg(feature = "deltanet_ternary_inference")]
+pub(crate) fn on_rayon_worker<R: Send>(f: impl FnOnce() -> R + Send) -> R {
+    if rayon::current_thread_index().is_some() {
+        return f();
+    }
+    let mut out = None;
+    rayon::scope(|_| out = Some(f()));
+    out.expect("rayon::scope runs its body to completion")
+}
+
+
 // Issue 919 T3 cell 2 — the ternary/GDN forward over a generic quantized KV
 // cache (measurement lane; the G0 control pins bit-identity with the plain
 // forward). Gated with `ternary_forward`, whose code it mirrors.

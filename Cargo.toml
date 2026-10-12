@@ -367,6 +367,11 @@ required-features = ["deltanet_ternary_inference"]
 # #![cfg(feature = "bonsai2_hadamard")] protects the count; this row protects
 # the reader (a --features selection without the union SKIPS loudly instead
 # of printing a green zero).
+# Per-section wall breakdown of the real Bonsai-2-27B CPU decode (measurement).
+[[test]]
+name = "bonsai2_forward_profile"
+required-features = ["forward_profiling", "bonsai2_hadamard"]
+
 # katgpt-rs Issue 935 T5 — raw-Q2 resident vs bit-plane q8: bit identity + wall.
 [[test]]
 name = "ternary_q2_resident_goat"

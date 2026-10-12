@@ -803,8 +803,51 @@ pub fn qwen_deltanet_ternary_layer_body(
     }
 }
 
+/// The ternary forward (decode, single token) — runs ON a rayon worker.
+///
+/// Every projection forks onto the global pool; between forks the idle
+/// workers spin-yield. Called from a non-pool thread, that thread is a 17th
+/// runnable thread on 16 cores, and every serial section (conv1d, gates,
+/// norms, the recurrence's serial glue) gets time-sliced against spinning
+/// workers — measured on Bonsai-2-27B: conv1d 128 µs/layer in decode vs
+/// 17 µs isolated, ~10% of the token. [`super::on_rayon_worker`] moves the
+/// body into the pool (the caller parks), so the pool's threads are the only
+/// runnable ones. Arithmetic unchanged ⇒ bit-identical.
 #[allow(clippy::too_many_arguments)]
 pub fn forward_qwen_deltanet_ternary_with_hook<'a>(
+    x: &'a mut [f32],
+    weights: &QwenDeltaNetTernaryWeights,
+    cache: &mut HybridCache,
+    token: usize,
+    pos: usize,
+    config: &Config,
+    scratch: &'a mut HybridForwardScratch,
+    rope_freq: &crate::rope::RopeFreqTable,
+    layer_capture: Option<&mut [Vec<f32>]>,
+    hook: Option<&dyn TernaryMatvecHook>,
+    input_proj_hook: Option<&dyn TernaryInputProjHook>,
+    ffn_hook: Option<&dyn TernaryFfnHook>,
+) -> &'a mut [f32] {
+    super::on_rayon_worker(move || {
+        forward_qwen_deltanet_ternary_body(
+            x,
+            weights,
+            cache,
+            token,
+            pos,
+            config,
+            scratch,
+            rope_freq,
+            layer_capture,
+            hook,
+            input_proj_hook,
+            ffn_hook,
+        )
+    })
+}
+
+#[allow(clippy::too_many_arguments)]
+fn forward_qwen_deltanet_ternary_body<'a>(
     x: &'a mut [f32],
     weights: &QwenDeltaNetTernaryWeights,
     cache: &mut HybridCache,

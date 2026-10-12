@@ -547,6 +547,29 @@ pub fn profiled_forward_ternary<'a>(
     input_proj_hook: Option<&dyn TernaryInputProjHook>,
     ffn_hook: Option<&dyn TernaryFfnHook>,
 ) -> &'a mut [f32] {
+    // Same pool placement as the production forward (it is the twin).
+    super::on_rayon_worker(move || {
+        profiled_forward_ternary_body(
+            x, weights, cache, token, pos, config, scratch, rope_freq, prof, hook, input_proj_hook, ffn_hook,
+        )
+    })
+}
+
+#[allow(clippy::too_many_arguments)]
+fn profiled_forward_ternary_body<'a>(
+    x: &'a mut [f32],
+    weights: &QwenDeltaNetTernaryWeights,
+    cache: &mut HybridCache,
+    token: usize,
+    pos: usize,
+    config: &Config,
+    scratch: &'a mut HybridForwardScratch,
+    rope_freq: &RopeFreqTable,
+    prof: &mut ForwardProfiler,
+    hook: Option<&dyn TernaryMatvecHook>,
+    input_proj_hook: Option<&dyn TernaryInputProjHook>,
+    ffn_hook: Option<&dyn TernaryFfnHook>,
+) -> &'a mut [f32] {
     let n = config.n_embd;
 
     // 1. Embedding

@@ -352,7 +352,6 @@ pub fn gated_deltanet_step_par_inplace(
 /// * `conv_state` - Sliding window state: `[conv_dim * kernel_size]` (modified in-place)
 /// * `conv_dim` - Number of channels
 /// * `kernel_size` - Conv kernel size (typically 4)
-#[allow(clippy::needless_range_loop)]
 pub fn causal_conv1d_update(
     x: &mut [f32],
     conv_weight: &[f32],
@@ -360,28 +359,58 @@ pub fn causal_conv1d_update(
     conv_dim: usize,
     kernel_size: usize,
 ) {
-    // Single fused pass: shift sliding window, append new sample, then apply
-    // depthwise conv weights + SiLU. Combining the two loops halves the number
-    // of passes over `conv_state` and improves cache locality.
-    for ch in 0..conv_dim {
-        let off = ch * kernel_size;
-        // Shift: state[0..kernel-1] = state[1..kernel]
-        for k in 0..kernel_size - 1 {
-            conv_state[off + k] = conv_state[off + k + 1];
-        }
-        // Append current input
-        conv_state[off + kernel_size - 1] = x[ch];
+    // Serial on purpose: a rayon split over Bonsai-2-27B's ~10k channels
+    // measured 64 µs/call against 17 µs serial (fork-join wake-up dominates
+    // work this small). The win is the kernel-4 specialization below.
+    conv1d_channels(
+        &mut x[..conv_dim],
+        &conv_weight[..conv_dim * kernel_size],
+        &mut conv_state[..conv_dim * kernel_size],
+        kernel_size,
+    );
+}
 
-        // Depthwise conv: dot(state[ch], weight[ch])
-        let mut sum = 0.0f32;
-        for k in 0..kernel_size {
-            sum += conv_state[off + k] * conv_weight[off + k];
+/// The per-channel body of [`causal_conv1d_update`] over a channel range:
+/// shift the window, append the input, depthwise dot, `SiLU`. The dot sums
+/// `0.0 + s0·w0 + s1·w1 + …` left to right in every arm (bit-identical to the
+/// original generic loop; no FMA contraction).
+#[inline]
+fn conv1d_channels(x: &mut [f32], w: &[f32], state: &mut [f32], kernel_size: usize) {
+    #[inline(always)]
+    fn silu(sum: f32) -> f32 {
+        // fast_sigmoid is the Cephes polynomial approximation — same hot-path
+        // primitive every other sigmoid callsite in riir-engine uses
+        // (commits 0470434, 1908f92).
+        sum * crate::simd::fast_sigmoid(sum)
+    }
+    if kernel_size == 4 {
+        for ((xc, s), w) in x
+            .iter_mut()
+            .zip(state.as_chunks_mut::<4>().0)
+            .zip(w.as_chunks::<4>().0)
+        {
+            *s = [s[1], s[2], s[3], *xc];
+            let mut sum = 0.0f32;
+            sum += s[0] * w[0];
+            sum += s[1] * w[1];
+            sum += s[2] * w[2];
+            sum += s[3] * w[3];
+            *xc = silu(sum);
         }
-        // SiLU activation: x * sigmoid(x). fast_sigmoid is the Cephes
-        // polynomial approximation — same hot-path primitive every other
-        // sigmoid callsite in riir-engine uses (commits 0470434, 1908f92).
-        let sig = crate::simd::fast_sigmoid(sum);
-        x[ch] = sum * sig;
+        return;
+    }
+    for ((xc, s), w) in x
+        .iter_mut()
+        .zip(state.chunks_exact_mut(kernel_size))
+        .zip(w.chunks_exact(kernel_size))
+    {
+        s.copy_within(1.., 0);
+        s[kernel_size - 1] = *xc;
+        let mut sum = 0.0f32;
+        for (a, b) in s.iter().zip(w) {
+            sum += a * b;
+        }
+        *xc = silu(sum);
     }
 }
 
@@ -2260,6 +2289,48 @@ pub fn generate_greedy_qwen_deltanet(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The pre-split single-threaded generic loop, verbatim — the oracle for
+    /// the parallel + kernel-4-specialized `causal_conv1d_update`.
+    #[allow(clippy::needless_range_loop)]
+    fn conv1d_reference(x: &mut [f32], w: &[f32], state: &mut [f32], conv_dim: usize, ks: usize) {
+        for ch in 0..conv_dim {
+            let off = ch * ks;
+            for k in 0..ks - 1 {
+                state[off + k] = state[off + k + 1];
+            }
+            state[off + ks - 1] = x[ch];
+            let mut sum = 0.0f32;
+            for k in 0..ks {
+                sum += state[off + k] * w[off + k];
+            }
+            x[ch] = sum * crate::simd::fast_sigmoid(sum);
+        }
+    }
+
+    #[test]
+    fn causal_conv1d_update_bit_identical_to_reference() {
+        let mut seed = 0x935u64;
+        let mut rnd = move || {
+            seed = seed.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+            ((seed >> 40) as f32 / (1u64 << 24) as f32) * 4.0 - 2.0
+        };
+        // Serial (< 2048), parallel kernel-4 (Bonsai shape), parallel generic.
+        for &(dim, ks) in &[(100usize, 4usize), (10240, 4), (5000, 3)] {
+            let w: Vec<f32> = (0..dim * ks).map(|_| rnd()).collect();
+            let mut st_a: Vec<f32> = (0..dim * ks).map(|_| rnd()).collect();
+            let mut st_b = st_a.clone();
+            for step in 0..3 {
+                let x0: Vec<f32> = (0..dim).map(|_| rnd()).collect();
+                let (mut xa, mut xb) = (x0.clone(), x0);
+                conv1d_reference(&mut xa, &w, &mut st_a, dim, ks);
+                causal_conv1d_update(&mut xb, &w, &mut st_b, dim, ks);
+                let bits = |v: &[f32]| v.iter().map(|f| f.to_bits()).collect::<Vec<_>>();
+                assert_eq!(bits(&xa), bits(&xb), "x dim {dim} ks {ks} step {step}");
+                assert_eq!(bits(&st_a), bits(&st_b), "state dim {dim} ks {ks} step {step}");
+            }
+        }
+    }
 
     #[test]
     fn expand_l2_normalized_heads_is_bit_identical_to_expand_then_normalize() {
