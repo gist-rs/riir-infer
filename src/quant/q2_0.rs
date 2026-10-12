@@ -192,40 +192,56 @@ pub fn repack_q2_0_to_ternary_group(
         return Err(Q2oRepackError::ColsNotMultipleOf128 { cols });
     }
 
+    use rayon::prelude::*;
+
     let mut out = TernaryGroupWeights::new(rows, cols);
     let blocks_per_row = cols / Q2_0_BLOCK_SIZE;
+    if rows == 0 || blocks_per_row == 0 {
+        return Ok(out);
+    }
+    let (blocks64, gpr) = (out.blocks64, out.groups_per_row);
 
-    for row in 0..rows {
-        let row_block_base = row * blocks_per_row;
-        for g in 0..blocks_per_row {
-            let block = &blocks[row_block_base + g];
-            // Copy the f16 group scale verbatim.
-            out.group_scale[row * out.groups_per_row + g] = half::f16::from_bits(block.d);
+    // Word-at-a-time, rows in parallel (was one weight per iteration on one
+    // thread: ~125 s for Bonsai-2-27B). GROUP_SIZE = 128 = 2 × 64, so group g
+    // fills plane words [2g, 2g+2) from qs[0..16] and qs[16..32].
+    let any_bad = out
+        .pos_bits
+        .par_chunks_mut(blocks64)
+        .zip(out.neg_bits.par_chunks_mut(blocks64))
+        .zip(out.group_scale.par_chunks_mut(gpr))
+        .zip(blocks.par_chunks(blocks_per_row))
+        .map(|(((pos, neg), scale), row_blocks)| {
+            let mut bad = 0u64;
+            for (g, block) in row_blocks.iter().enumerate() {
+                // Copy the f16 group scale verbatim.
+                scale[g] = half::f16::from_bits(block.d);
+                for half_idx in 0..2 {
+                    let (mut p, mut n) = (0u64, 0u64);
+                    for q in 0..2 {
+                        let off = 16 * half_idx + 8 * q;
+                        let word = u64::from_le_bytes(block.qs[off..off + 8].try_into().expect("8 bytes"));
+                        let (pw, nw, bw) = q2_word_to_planes(word);
+                        p |= pw << (32 * q);
+                        n |= nw << (32 * q);
+                        bad |= bw;
+                    }
+                    pos[2 * g + half_idx] = p;
+                    neg[2 * g + half_idx] = n;
+                }
+            }
+            bad
+        })
+        .reduce(|| 0, |a, b| a | b);
 
-            // Repack the 128 codes into the two bit-planes.
-            // GROUP_SIZE = 128 = 2 × 64, so group g spans blocks64 [2g, 2g+2).
-            let b0 = row * out.blocks64 + g * 2;
-            let b1 = b0 + 1;
-            for j in 0..Q2_0_BLOCK_SIZE {
-                let byte = block.qs[j / 4];
-                let shift = (j % 4) * 2;
-                let code = (byte >> shift) & 0x03;
-                let bit_idx = if j < 64 { b0 } else { b1 };
-                let bit_mask = 1u64 << (j & 63);
-                match code {
-                    0 => {
-                        // -1: neg bit set.
-                        out.neg_bits[bit_idx] |= bit_mask;
-                    }
-                    1 => {
-                        // 0: both clear (no-op).
-                    }
-                    2 => {
-                        // +1: pos bit set.
-                        out.pos_bits[bit_idx] |= bit_mask;
-                    }
-                    _ => {
-                        // Code 3 (+2d): cannot represent — reject loudly.
+    if any_bad != 0 {
+        // Code 3 (+2d) cannot be represented. Re-scan in the original
+        // (row, col) order so the reported site is the FIRST one, exactly as
+        // the sequential repack reported it.
+        for row in 0..rows {
+            for g in 0..blocks_per_row {
+                let block = &blocks[row * blocks_per_row + g];
+                for j in 0..Q2_0_BLOCK_SIZE {
+                    if (block.qs[j / 4] >> ((j % 4) * 2)) & 0x03 == 3 {
                         return Err(Q2oRepackError::UnsupportedFourthState {
                             row,
                             col: g * Q2_0_BLOCK_SIZE + j,
@@ -234,6 +250,7 @@ pub fn repack_q2_0_to_ternary_group(
                 }
             }
         }
+        unreachable!("a code-3 pair was flagged but not found on re-scan");
     }
 
     debug_assert!(
@@ -241,6 +258,29 @@ pub fn repack_q2_0_to_ternary_group(
         "pos & neg == 0 invariant violated after Q2_0 repack"
     );
     Ok(out)
+}
+
+/// 32 `Q2_0` codes (LSB-first, code j at bits 2j..2j+2 of `word`) → the
+/// (pos, neg, bad) 32-bit planes: code 2 → pos, code 0 → neg, code 1 → none,
+/// code 3 → `bad` (non-zero iff any code is 3; its bits are not positions).
+#[cfg(feature = "q2_0_ternary_bridge")]
+#[inline]
+fn q2_word_to_planes(word: u64) -> (u64, u64, u64) {
+    const EVEN: u64 = 0x5555_5555_5555_5555;
+    let lo = word & EVEN;
+    let hi = (word >> 1) & EVEN;
+    (compress_even_bits(hi & !lo), compress_even_bits(!(hi | lo) & EVEN), hi & lo)
+}
+
+/// Gather bits 0, 2, 4, …, 62 of `x` (odd bits must be zero) into bits 0..32.
+#[cfg(feature = "q2_0_ternary_bridge")]
+#[inline]
+fn compress_even_bits(mut x: u64) -> u64 {
+    x = (x | (x >> 1)) & 0x3333_3333_3333_3333;
+    x = (x | (x >> 2)) & 0x0F0F_0F0F_0F0F_0F0F;
+    x = (x | (x >> 4)) & 0x00FF_00FF_00FF_00FF;
+    x = (x | (x >> 8)) & 0x0000_FFFF_0000_FFFF;
+    (x | (x >> 16)) & 0x0000_0000_FFFF_FFFF
 }
 
 /// Errors from the `Q2_0` → `TernaryGroupWeights` repack.
@@ -718,6 +758,58 @@ mod tests {
             Q2oRepackError::UnsupportedFourthState { row, col } => {
                 assert_eq!(row, 0);
                 assert_eq!(col, 3, "code 3 is at weight index 3");
+            }
+            other => panic!("expected UnsupportedFourthState, got {other:?}"),
+        }
+    }
+
+    /// The word-at-a-time parallel repack must equal the original
+    /// one-weight-per-iteration algorithm bit-for-bit, and report the FIRST
+    /// code-3 site in (row, col) order even when a later row also has one.
+    #[cfg(feature = "q2_0_ternary_bridge")]
+    #[test]
+    fn test_repack_word_path_matches_per_bit_reference() {
+        use super::{Q2oRepackError, repack_q2_0_to_ternary_group};
+
+        let (rows, cols) = (37, 5 * Q2_0_BLOCK_SIZE);
+        let mut s = 0x935u64;
+        let mut next = move || {
+            s = s.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+            (s >> 33) as u32
+        };
+        let mut blocks = vec![BlockQ2_0::zeroed(); rows * cols / Q2_0_BLOCK_SIZE];
+        for b in &mut blocks {
+            b.d = f16::from_f32(0.01 * (next() % 100) as f32).to_bits();
+            for q in &mut b.qs {
+                for k in 0..4 {
+                    *q |= ((next() % 3) as u8) << (2 * k);
+                }
+            }
+        }
+        let tg = repack_q2_0_to_ternary_group(&blocks, rows, cols).expect("valid codes");
+        let mut want = katgpt_core::TernaryGroupWeights::new(rows, cols);
+        for r in 0..rows {
+            for c in 0..cols {
+                let b = &blocks[r * (cols / Q2_0_BLOCK_SIZE) + c / Q2_0_BLOCK_SIZE];
+                let j = c % Q2_0_BLOCK_SIZE;
+                want.set(r, c, ((b.qs[j / 4] >> (2 * (j % 4))) & 3) as i8 - 1);
+            }
+            for g in 0..cols / Q2_0_BLOCK_SIZE {
+                want.group_scale[r * want.groups_per_row + g] =
+                    f16::from_bits(blocks[r * (cols / Q2_0_BLOCK_SIZE) + g].d);
+            }
+        }
+        assert_eq!(tg.pos_bits, want.pos_bits);
+        assert_eq!(tg.neg_bits, want.neg_bits);
+        assert_eq!(tg.group_scale, want.group_scale);
+
+        // Two code-3 sites: row 30 and row 5 — the report must be row 5's.
+        let bpr = cols / Q2_0_BLOCK_SIZE;
+        blocks[30 * bpr + 2].qs[9] |= 0b11 << 2;
+        blocks[5 * bpr + 4].qs[31] |= 0b11 << 6;
+        match repack_q2_0_to_ternary_group(&blocks, rows, cols) {
+            Err(Q2oRepackError::UnsupportedFourthState { row, col }) => {
+                assert_eq!((row, col), (5, 4 * Q2_0_BLOCK_SIZE + 127));
             }
             other => panic!("expected UnsupportedFourthState, got {other:?}"),
         }

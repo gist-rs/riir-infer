@@ -1,6 +1,6 @@
 # Bench 879 — raw-Q2 resident projections (`ternary_q2_resident`, katgpt-rs Issue 935 T5)
 
-**Status:** DONE 2026-10-13 — G1 bit-identical, G2 PASS (0.931), load 8.6× faster. Kept OPT-IN (GPU loaders refuse non-plane projections; see Verdict).
+**Status:** DONE 2026-10-13 — G1 bit-identical, G2 PASS (0.931), kept OPT-IN (GPU loaders refuse non-plane projections; see Verdict). Follow-up landed: the bit-plane repack itself is now word-at-a-time + row-parallel — Bonsai-2-27B load 124.9 → 5.8 s for EVERY consumer (§Repack).
 
 ## What
 
@@ -56,7 +56,19 @@ every GPU build that loads through the same loader into a panic. CPU-only
 consumers enable `ternary_q2_resident`; `set_ternary_q2_resident(false)`
 before a load restores planes in the same binary.
 
-## Follow-up
+## Repack (`repack_q2_0_to_ternary_group`) — the broader win
 
-The 125 s load is the bit-plane repack itself (~56 MB/s) — every consumer
-(GPU included) pays it. Repack speed is the broader win; tracked next.
+The 125 s load was the bit-plane repack itself (one weight per iteration, one
+thread, ~56 MB/s) — paid by every consumer, GPU included. Now 32 codes per
+u64 (`lo = w & 0x55…`, `hi = (w>>1) & 0x55…` → pos `hi & !lo`, neg
+`!(hi|lo)`, bad `hi & lo`, then a 5-step even-bit compress) with rows on
+rayon; a code-3 hit re-scans sequentially so the reported (row, col) is the
+same first site as before. Unit gate: equals the per-bit reference on a
+37×640 random fixture and reports row 5 over row 30
+(`test_repack_word_path_matches_per_bit_reference`). Real model (re-run of
+the gate above, load avg ~4.6): **planes load 124.9 → 5.8 s (21.5×)**, raw-Q2
+load 14.5 → 2.8 s (its wte/lm_head globals ride the same repack), 64/64
+logit vectors still bit-identical against the raw-Q2 arm (which never touches
+the repack — an independent oracle), greedy identical, tg ratio 0.928.
+
+katgpt-rs commits: `7032864d0` (ternary_q2_q8 kernel), `2522dc2a9` (AVX2 q8).
