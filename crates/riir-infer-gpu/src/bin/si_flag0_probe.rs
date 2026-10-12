@@ -72,7 +72,9 @@ fn arg_of(args: &[String], name: &str) -> Option<String> {
 }
 
 fn logits_digest(logits: &[f32]) -> String {
-    blake3::hash(bytemuck::cast_slice::<f32, u8>(logits)).to_hex().to_string()
+    blake3::hash(bytemuck::cast_slice::<f32, u8>(logits))
+        .to_hex()
+        .to_string()
 }
 
 /// One greedy run's recording: the argmax ids + the rolled logits digest.
@@ -107,7 +109,7 @@ fn run() -> Result<(), String> {
         .unwrap_or(64);
 
     // ── load once ──
-    let (cfg, weights) = load_qwen_deltanet_ternary_weights_gguf(&gguf)
+    let (mut cfg, weights) = load_qwen_deltanet_ternary_weights_gguf(&gguf)
         .map_err(|e| format!("load {}: {e}", gguf.display()))?;
     let gguf_meta = std::fs::metadata(&gguf).map_err(|e| e.to_string())?;
     println!("model={} bytes={}", gguf.display(), gguf_meta.len());
@@ -135,6 +137,20 @@ fn run() -> Result<(), String> {
     tokens.truncate(prefill_n);
     println!("prompt tokens={} bos={}", tokens.len(), tok.bos_id());
 
+    // The row_logit_floor law (the `si_zero_shot_ppl_gpu` harness's shape):
+    // cap the cache window at what the run needs BEFORE the forward (and its
+    // device caches) is constructed. The league GGUF declares block 262144 —
+    // building the cache at that geometry OOMs a 24 GB card outright. The
+    // clamp is forward-math-neutral for sequences inside the window (the same
+    // law the harness's `--dump-logits` cross-build byte-compare relies on),
+    // and the recording pair applies it IDENTICALLY at both commits — the
+    // instrument must be one instrument.
+    cfg.block_size = prefill_n + greedy_n + 32;
+    println!(
+        "block clamped to {} (prefill {prefill_n} + greedy {greedy_n} + 32)",
+        cfg.block_size
+    );
+
     let mut fwd = TernaryDeltanetGpuForwardCudarc::new_graph_ready(&cfg, &weights)
         .map_err(|e| e.to_string())?;
 
@@ -155,9 +171,17 @@ fn run() -> Result<(), String> {
     let eager = greedy_eager(&mut fwd, &last_logits, greedy_n)?;
     println!(
         "eager greedy{greedy_n} ids: {}",
-        eager.ids.iter().map(|i| i.to_string()).collect::<Vec<_>>().join(":")
+        eager
+            .ids
+            .iter()
+            .map(|i| i.to_string())
+            .collect::<Vec<_>>()
+            .join(":")
     );
-    println!("eager greedy{greedy_n} rolled digest: {}", eager.rolled_digest);
+    println!(
+        "eager greedy{greedy_n} rolled digest: {}",
+        eager.rolled_digest
+    );
 
     // ── GRAPH lane: the same feed + greedy over forward_token_graph ──
     fwd.reset_state().map_err(|e| e.to_string())?;
@@ -180,7 +204,11 @@ fn run() -> Result<(), String> {
     }
     println!(
         "graph greedy{greedy_n} ids: {}",
-        graph_ids.iter().map(|i| i.to_string()).collect::<Vec<_>>().join(":")
+        graph_ids
+            .iter()
+            .map(|i| i.to_string())
+            .collect::<Vec<_>>()
+            .join(":")
     );
     println!(
         "graph greedy{greedy_n} rolled digest: {}",
