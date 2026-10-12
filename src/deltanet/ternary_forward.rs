@@ -4,7 +4,7 @@
 //! Mirrors [`super::forward::forward_qwen_deltanet`] — the architecture,
 //! recurrence, and attention logic are identical. The only difference is that
 //! the 12 projection matvecs per layer (plus the global `wte` and `lm_head`)
-//! call [`simd_ternary_group_matvec_parallel`] on [`TernaryGroupWeights`] instead of
+//! call [`ternary_matvec_parallel`] on [`TernaryGroupWeights`] instead of
 //! dense `matmul` on `Vec<f32>`.
 //!
 //! ## What is reused (not duplicated)
@@ -45,7 +45,8 @@ use super::ternary_weights::{
 };
 use crate::types::{Config, DeltaNetLayerType, rmsnorm_with_gamma_eps, swiglu};
 use katgpt_core::TernaryMatvecHook;
-use katgpt_core::{TernaryFfnHook, TernaryInputProjHook, simd_ternary_group_matvec_parallel};
+use katgpt_core::{TernaryFfnHook, TernaryInputProjHook};
+use super::ternary_weights::ternary_matvec_parallel;
 
 use crate::deltanet::rotation::{
     TernaryRotationConfig, permute_gdn_v_grouped_inplace, permute_gdn_v_grouped_inverse_inplace,
@@ -86,7 +87,7 @@ pub(crate) fn bitlinear(
             if let Some(h) = hook {
                 h.matvec(t, &x[..t.cols], &mut y[..t.rows]);
             } else {
-                simd_ternary_group_matvec_parallel(t, &x[..t.cols], &mut y[..t.rows]);
+                ternary_matvec_parallel(t, &x[..t.cols], &mut y[..t.rows]);
             }
         }
         ProjWeights::Q4K(..) | ProjWeights::Q6K(..) => {
@@ -592,7 +593,7 @@ fn forward_attention_layer_ternary(
 ///
 /// The embedding lookup uses [`QwenDeltaNetTernaryWeights::dequant_wte_row_into`]
 /// (ternary bit-plane read), and the LM head uses
-/// [`simd_ternary_group_matvec_parallel`] directly.
+/// [`ternary_matvec_parallel`] directly.
 #[allow(clippy::too_many_arguments, clippy::needless_range_loop)]
 pub fn forward_qwen_deltanet_ternary<'a>(
     x: &'a mut [f32],
@@ -896,7 +897,7 @@ pub fn forward_qwen_deltanet_ternary_with_hook<'a>(
             &mut x[..config.vocab_size],
         );
     } else {
-        simd_ternary_group_matvec_parallel(
+        ternary_matvec_parallel(
             &weights.lm_head,
             &scratch.hidden_copy[..n],
             &mut x[..config.vocab_size],

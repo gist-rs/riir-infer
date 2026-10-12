@@ -34,15 +34,12 @@ use super::forward::{
     gated_deltanet_step_par_inplace, softplus,
 };
 use super::ternary_weights::{
-    DeltaNetTernaryLayerWeights, ProjWeights, QwenDeltaNetTernaryWeights,
+    DeltaNetTernaryLayerWeights, ProjWeights, QwenDeltaNetTernaryWeights, ternary_matvec_parallel,
 };
 use crate::rope::RopeFreqTable;
 use crate::simd::fast_sigmoid;
 use crate::types::{Config, DeltaNetLayerType, rmsnorm_with_gamma_eps, swiglu};
-use katgpt_core::{
-    TernaryFfnHook, TernaryGroupWeights, TernaryInputProjHook, TernaryMatvecHook,
-    simd_ternary_group_matvec_parallel,
-};
+use katgpt_core::{TernaryFfnHook, TernaryGroupWeights, TernaryInputProjHook, TernaryMatvecHook};
 
 /// Per-component timing accumulator.
 ///
@@ -226,7 +223,7 @@ fn bitlinear_ternary(
     if let Some(h) = hook {
         h.matvec(w, &x[..w.cols], &mut y[..w.rows]);
     } else {
-        simd_ternary_group_matvec_parallel(w, &x[..w.cols], &mut y[..w.rows]);
+        ternary_matvec_parallel(w, &x[..w.cols], &mut y[..w.rows]);
     }
 }
 
@@ -332,8 +329,22 @@ fn profiled_deltanet_layer(
     // 7-8. Expand + L2 normalize
     let t = Instant::now();
     let repeat_factor = n_v_heads / n_k_heads;
-    expand_l2_normalized_heads_into(q_slice, n_k_heads, key_dim, repeat_factor, n_v_heads, &mut scratch.q_normed);
-    expand_l2_normalized_heads_into(k_slice, n_k_heads, key_dim, repeat_factor, n_v_heads, &mut scratch.k_normed);
+    expand_l2_normalized_heads_into(
+        q_slice,
+        n_k_heads,
+        key_dim,
+        repeat_factor,
+        n_v_heads,
+        &mut scratch.q_normed,
+    );
+    expand_l2_normalized_heads_into(
+        k_slice,
+        n_k_heads,
+        key_dim,
+        repeat_factor,
+        n_v_heads,
+        &mut scratch.k_normed,
+    );
     ForwardProfiler::record(&mut prof.dn_expand_norm, t);
 
     // 9. Recurrence

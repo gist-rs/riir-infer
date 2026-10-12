@@ -27,9 +27,9 @@
 //! returned argmax is the greedy decode's first token (one head GEMV saved
 //! per query; pinned bit-identical to the stock forward at K=1 by test).
 
+use super::ternary_weights::ternary_matvec_parallel;
 use katgpt_core::loop_alignment_probe::probe_alignment_with_row;
 use katgpt_core::simd::{simd_dot_f32, simd_sum_sq};
-use katgpt_core::simd_ternary_group_matvec_parallel;
 
 use super::forward::{HybridCache, HybridForwardScratch};
 use super::rotation::{rotate_forward_inplace, rotate_inverse_inplace};
@@ -147,7 +147,7 @@ pub fn looped_answer_position_probe(
             let signs = rot.signs_for_width(n);
             rotate_forward_inplace(&mut probe_scratch.xh, signs, rot.block_size);
         }
-        simd_ternary_group_matvec_parallel(
+        ternary_matvec_parallel(
             &weights.lm_head,
             &probe_scratch.xh,
             &mut probe_scratch.logits,

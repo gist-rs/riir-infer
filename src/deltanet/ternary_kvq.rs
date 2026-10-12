@@ -50,9 +50,10 @@ use super::forward::{
 };
 use super::rotation::{TernaryRotationConfig, rotate_forward_inplace, rotate_inverse_inplace};
 use super::ternary_forward::{bitlinear, forward_deltanet_layer_ternary};
-use super::ternary_weights::{DeltaNetTernaryLayerWeights, QwenDeltaNetTernaryWeights};
+use super::ternary_weights::{
+    DeltaNetTernaryLayerWeights, QwenDeltaNetTernaryWeights, ternary_matvec_parallel,
+};
 use crate::types::{self, Config, DeltaNetLayerType, rmsnorm_with_gamma_eps, swiglu};
-use katgpt_core::simd_ternary_group_matvec_parallel;
 use katgpt_types::QuantizedKVCache;
 
 /// Caller-owned per-layer dequant mirror: the attention-visible image of the
@@ -354,7 +355,7 @@ pub fn forward_qwen_deltanet_ternary_qkv<'a, C: QuantizedKVCache>(
         let signs = rot.signs_for_width(n);
         rotate_forward_inplace(&mut scratch.hidden_copy[..n], signs, rot.block_size);
     }
-    simd_ternary_group_matvec_parallel(
+    ternary_matvec_parallel(
         &weights.lm_head,
         &scratch.hidden_copy[..n],
         &mut x[..config.vocab_size],

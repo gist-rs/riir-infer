@@ -298,6 +298,15 @@ causal_validation = ["katgpt-core/adaptive_causal_calibration"]
 deltanet_inference = ["katgpt-core/deltanet_inference"]
 gemma4_inference = ["katgpt-core/gemma4_inference"]
 q2_0_ternary_bridge = ["katgpt-core/ternary_group_scale"]
+# katgpt-rs Issue 935: int8-activation SDOT ternary matvec on every forward
+# projection + the LM head (one dispatch, `ternary_matvec_parallel`). LOSSY
+# (activation rounding, llama.cpp's CPU Q2_0 regime). PROMOTED 2026-10-13 —
+# implied by deltanet_ternary_inference: real Bonsai-2-27B gate
+# (tests/ternary_q8_act_goat.rs) top-1 agree 256/256 + 510/512, confident
+# 165/165 + 348/348, hit-rate identical, NLL Δ −0.003/−0.019, 32 greedy tokens
+# identical, wall 0.319/0.326× (≈430 → 139 ms/token). f32 arm stays reachable
+# at runtime: `set_ternary_q8_act(false)`. x86_64 runs the f32 kernel (no q8 port).
+ternary_q8_act = ["q2_0_ternary_bridge", "katgpt-core/ternary_group_q8_act"]
 ternary_inference = ["katgpt-core/ternary_inference", "q2_0_ternary_bridge"]
 gdn_tree_verify = ["deltanet_inference", "katgpt-core/gdn_tree_verify"]
 hydra_budget = ["katgpt-core/hydra_budget"]
@@ -319,7 +328,7 @@ weaver_runtime = ["katgpt-speculative/weaver_runtime"]
 # Inter-feature composition (mirrors engine; hla_role_transport stays
 # engine-local — the moved gated arms reference no engine types, verified
 # by the T1.4 back-edge check).
-deltanet_ternary_inference = ["deltanet_inference", "q2_0_ternary_bridge"]
+deltanet_ternary_inference = ["deltanet_inference", "q2_0_ternary_bridge", "ternary_q8_act"]
 # Bonsai 2 Hadamard-folded ternary runtime (Issue 980 / Plan 600 Phase B).
 # Parses prism.hadamard.* + applies the activation-side rotation. Default-OFF
 # until the GOAT gate passes (G1 token-identity vs the fork, G2 overhead
@@ -357,6 +366,12 @@ required-features = ["deltanet_ternary_inference"]
 [[test]]
 name = "dense_ab_simd_goat"
 required-features = ["deltanet_ternary_inference"]
+
+# katgpt-rs Issue 935 — int8-activation ternary matvec, real Bonsai-2-27B
+# f32-vs-q8 quality + interleaved wall gate (one load, two caches).
+[[test]]
+name = "ternary_q8_act_goat"
+required-features = ["ternary_q8_act", "bonsai2_hadamard"]
 
 [[test]]
 name = "bonsai2_rotation_load"

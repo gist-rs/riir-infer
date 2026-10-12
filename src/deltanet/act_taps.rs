@@ -25,8 +25,9 @@
 //! ternary, out of refit scope by construction. `wte` is a row lookup, not a
 //! matvec — no tap, out of refit scope.
 
+use super::ternary_weights::ternary_matvec_parallel;
 use katgpt_core::act_channel_moments::{ActChannelDiagonal, ActChannelMoments};
-use katgpt_core::{TernaryGroupWeights, TernaryMatvecHook, simd_ternary_group_matvec_parallel};
+use katgpt_core::{TernaryGroupWeights, TernaryMatvecHook};
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
@@ -415,7 +416,7 @@ impl TernaryMatvecHook for ActTapHook<'_> {
     fn matvec(&self, w: &TernaryGroupWeights, x: &[f32], y: &mut [f32]) {
         // The REAL kernel, exactly what the unhooked path runs — the forward
         // stays bit-identical; the observation below is side-band.
-        simd_ternary_group_matvec_parallel(w, &x[..w.cols], &mut y[..w.rows]);
+        ternary_matvec_parallel(w, &x[..w.cols], &mut y[..w.rows]);
         let i = self.call.fetch_add(1, Ordering::Relaxed);
         let step = self
             .plan

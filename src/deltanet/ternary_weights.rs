@@ -29,6 +29,37 @@
 use crate::types::Config;
 use katgpt_core::TernaryGroupWeights;
 
+/// Runtime arm switch for [`ternary_matvec_parallel`] (`ternary_q8_act`,
+/// katgpt-rs Issue 935). Defaults ON when the feature is compiled in; the
+/// quality gate flips it to compare the f32 and q8 arms in one process.
+#[cfg(feature = "ternary_q8_act")]
+static TERNARY_Q8_ACT: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(true);
+
+/// Select the int8-activation (`true`) or f32 (`false`) ternary matvec arm.
+#[cfg(feature = "ternary_q8_act")]
+pub fn set_ternary_q8_act(on: bool) {
+    TERNARY_Q8_ACT.store(on, std::sync::atomic::Ordering::Relaxed);
+}
+
+/// The forward's ternary matvec `y = W @ x` — the ONE dispatch point every
+/// production projection (and the LM head) goes through.
+///
+/// With `ternary_q8_act` (implied by `deltanet_ternary_inference` since the
+/// 2026-10-13 promotion): the int8-activation SDOT kernel
+/// ([`katgpt_core::simd_ternary_group_matvec_q8_parallel`], lossy — the
+/// activation rounding; ~3× decode on Bonsai-2-27B) unless
+/// [`set_ternary_q8_act`]`(false)`. Otherwise the f32-activation kernel
+/// ([`katgpt_core::simd_ternary_group_matvec_parallel`]).
+#[inline]
+pub fn ternary_matvec_parallel(w: &TernaryGroupWeights, x: &[f32], y: &mut [f32]) {
+    #[cfg(feature = "ternary_q8_act")]
+    if TERNARY_Q8_ACT.load(std::sync::atomic::Ordering::Relaxed) {
+        katgpt_core::simd_ternary_group_matvec_q8_parallel(w, x, y);
+        return;
+    }
+    katgpt_core::simd_ternary_group_matvec_parallel(w, x, y);
+}
+
 /// The `DeltaNet` gate projections `in_proj_a` / `in_proj_b` (Issue 980).
 ///
 /// Pre-rotation Bonsai-27B stores them ternary (`Q2_0`). Bonsai 2's folded
@@ -95,7 +126,7 @@ impl GateProjWeights {
             Self::Ternary(w) => {
                 debug_assert_eq!(x.len(), w.cols);
                 debug_assert_eq!(y.len(), w.rows);
-                katgpt_core::simd_ternary_group_matvec_parallel(w, &x[..w.cols], &mut y[..w.rows]);
+                ternary_matvec_parallel(w, &x[..w.cols], &mut y[..w.rows]);
             }
             Self::Dense(data, rows, cols) => {
                 debug_assert_eq!(x.len(), *cols);
@@ -212,7 +243,7 @@ impl ProjWeights {
             Self::Ternary(w) => {
                 debug_assert_eq!(x.len(), w.cols);
                 debug_assert_eq!(y.len(), w.rows);
-                katgpt_core::simd_ternary_group_matvec_parallel(w, &x[..w.cols], &mut y[..w.rows]);
+                ternary_matvec_parallel(w, &x[..w.cols], &mut y[..w.rows]);
             }
             Self::Q4K(blocks, rows, cols) => {
                 debug_assert_eq!(x.len(), *cols);
@@ -1070,8 +1101,9 @@ mod tests {
         );
     }
 
-    /// The Ternary arm of the enum dispatches to the same kernel as before
-    /// the enum existed (the old-file byte-identity contract).
+    /// The Ternary arm of the enum dispatches through the forward's ONE
+    /// ternary dispatch point (f32 kernel, or the q8 SDOT kernel under
+    /// `ternary_q8_act`) — the byte-identity contract with the forward.
     #[test]
     fn ternary_arm_matvec_is_the_parallel_kernel() {
         let (rows, cols) = (384usize, 256usize);
@@ -1084,7 +1116,7 @@ mod tests {
         let x: Vec<f32> = (0..cols).map(|i| (i as f32 / cols as f32) - 0.5).collect();
         let mut a = vec![0.0f32; rows];
         let mut b = vec![0.0f32; rows];
-        katgpt_core::simd_ternary_group_matvec_parallel(&t, &x, &mut a);
+        ternary_matvec_parallel(&t, &x, &mut a);
         w.matvec_into(&mut b, &x);
         assert_eq!(a, b, "enum ternary arm must be the identical kernel");
     }
