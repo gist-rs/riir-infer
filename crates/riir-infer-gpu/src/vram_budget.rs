@@ -251,6 +251,10 @@ fn proj_gpu_bytes(p: &riir_infer_core::deltanet::ternary_weights::ProjWeights) -
         ProjWeights::Ternary(t) => ternary_handle_bytes(t),
         ProjWeights::Q4K(blocks, _, _) => blocks.len() as u64 * 144,
         ProjWeights::Q6K(blocks, _, _) => blocks.len() as u64 * 210,
+        // `ternary_q2_resident` (CPU-only raw-Q2 arm, katgpt-rs Issue 935 T5):
+        // no GPU upload exists for it — refuse rather than under-count.
+        #[allow(unreachable_patterns)]
+        _ => panic!("proj_gpu_bytes: Q2-resident projections are CPU-only (load without ternary_q2_resident)"),
     }
 }
 

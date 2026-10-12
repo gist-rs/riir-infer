@@ -307,6 +307,14 @@ q2_0_ternary_bridge = ["katgpt-core/ternary_group_scale"]
 # identical, wall 0.319/0.326× (≈430 → 139 ms/token). f32 arm stays reachable
 # at runtime: `set_ternary_q8_act(false)`. x86_64 runs the f32 kernel (no q8 port).
 ternary_q8_act = ["q2_0_ternary_bridge", "katgpt-core/ternary_group_q8_act"]
+# katgpt-rs Issue 935 T5: keep Q2_0 projections QUANT-RESIDENT in the GGUF's
+# own 2-bit block layout (`ProjWeights::TernaryQ2`) and run the raw-Q2 q8
+# kernel — shr+and per code byte instead of the two-plane walk. Bit-identical
+# to the ternary_q8_act arm (same integer sums, same accumulation order); only
+# speed moves. Memory-neutral (replaces the planes, 34 B / 128 weights either
+# way). The f32 arm (`set_ternary_q8_act(false)`) and the ternary GPU hooks
+# have no Q2 payload and refuse loud on it.
+ternary_q2_resident = ["ternary_q8_act", "katgpt-core/ternary_q2_q8"]
 ternary_inference = ["katgpt-core/ternary_inference", "q2_0_ternary_bridge"]
 gdn_tree_verify = ["deltanet_inference", "katgpt-core/gdn_tree_verify"]
 hydra_budget = ["katgpt-core/hydra_budget"]
@@ -359,6 +367,11 @@ required-features = ["deltanet_ternary_inference"]
 # #![cfg(feature = "bonsai2_hadamard")] protects the count; this row protects
 # the reader (a --features selection without the union SKIPS loudly instead
 # of printing a green zero).
+# katgpt-rs Issue 935 T5 — raw-Q2 resident vs bit-plane q8: bit identity + wall.
+[[test]]
+name = "ternary_q2_resident_goat"
+required-features = ["ternary_q2_resident", "bonsai2_hadamard"]
+
 [[test]]
 name = "gdn_step_parallel_goat"
 required-features = ["deltanet_ternary_inference"]

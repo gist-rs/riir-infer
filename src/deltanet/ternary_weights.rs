@@ -60,6 +60,43 @@ pub fn ternary_matvec_parallel(w: &TernaryGroupWeights, x: &[f32], y: &mut [f32]
     katgpt_core::simd_ternary_group_matvec_parallel(w, x, y);
 }
 
+/// Load-time arm switch for `Q2_0` projections (`ternary_q2_resident`):
+/// `true` (default when compiled in) keeps them as [`ProjWeights::TernaryQ2`],
+/// `false` repacks to bit-planes as before. Read by the loader only — flip it
+/// BEFORE a load; an already-loaded model keeps its representation.
+#[cfg(feature = "ternary_q2_resident")]
+static TERNARY_Q2_RESIDENT: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(true);
+
+/// Select the representation the NEXT load gives `Q2_0` projections.
+#[cfg(feature = "ternary_q2_resident")]
+pub fn set_ternary_q2_resident(on: bool) {
+    TERNARY_Q2_RESIDENT.store(on, std::sync::atomic::Ordering::Relaxed);
+}
+
+/// The loader's current `Q2_0` representation choice.
+#[cfg(feature = "ternary_q2_resident")]
+pub fn ternary_q2_resident() -> bool {
+    TERNARY_Q2_RESIDENT.load(std::sync::atomic::Ordering::Relaxed)
+}
+
+/// The raw-`Q2_0` arm of the dispatch (`ternary_q2_resident`, katgpt-rs Issue
+/// 935 T5): [`katgpt_core::simd_ternary_q2_matvec_q8_parallel`], bit-identical
+/// to the bit-plane q8 arm of [`ternary_matvec_parallel`].
+///
+/// # Panics
+/// The f32 arm is selected (`set_ternary_q8_act(false)`): a Q2-resident
+/// projection has no f32-activation kernel, and silently running q8 would make
+/// an f32-vs-q8 comparison compare q8 with itself.
+#[cfg(feature = "ternary_q2_resident")]
+#[inline]
+pub fn ternary_q2_matvec_parallel(w: &katgpt_core::TernaryQ2Weights, x: &[f32], y: &mut [f32]) {
+    assert!(
+        TERNARY_Q8_ACT.load(std::sync::atomic::Ordering::Relaxed),
+        "ternary_q2_resident projections are q8-only — load without ternary_q2_resident for the f32 arm"
+    );
+    katgpt_core::simd_ternary_q2_matvec_q8_parallel(w, x, y);
+}
+
 /// The `DeltaNet` gate projections `in_proj_a` / `in_proj_b` (Issue 980).
 ///
 /// Pre-rotation Bonsai-27B stores them ternary (`Q2_0`). Bonsai 2's folded
@@ -185,6 +222,11 @@ pub enum ProjWeights {
     /// super-blocks (plan 618 S3 — the matched-storage single-checkpoint
     /// control arm; same quant-resident contract as the Q4K arm).
     Q6K(Vec<crate::quant::q6k::BlockQ6K>, usize, usize),
+    /// Raw `Q2_0` blocks (the GGUF wire layout, `ternary_q2_resident`,
+    /// katgpt-rs Issue 935 T5) — the int8-activation raw-Q2 kernel,
+    /// bit-identical to the bit-plane q8 arm. No f32 arm, no hook payload.
+    #[cfg(feature = "ternary_q2_resident")]
+    TernaryQ2(katgpt_core::TernaryQ2Weights),
 }
 
 impl ProjWeights {
@@ -202,6 +244,8 @@ impl ProjWeights {
         match self {
             Self::Ternary(w) => w.rows,
             Self::Q4K(_, rows, _) | Self::Q6K(_, rows, _) => *rows,
+            #[cfg(feature = "ternary_q2_resident")]
+            Self::TernaryQ2(w) => w.rows,
         }
     }
 
@@ -209,6 +253,8 @@ impl ProjWeights {
         match self {
             Self::Ternary(w) => w.cols,
             Self::Q4K(_, _, cols) | Self::Q6K(_, _, cols) => *cols,
+            #[cfg(feature = "ternary_q2_resident")]
+            Self::TernaryQ2(w) => w.cols,
         }
     }
 
@@ -219,6 +265,8 @@ impl ProjWeights {
         match self {
             Self::Ternary(w) => Some(w),
             Self::Q4K(..) | Self::Q6K(..) => None,
+            #[cfg(feature = "ternary_q2_resident")]
+            Self::TernaryQ2(..) => None,
         }
     }
 
@@ -227,6 +275,8 @@ impl ProjWeights {
         match self {
             Self::Ternary(w) => Some(w),
             Self::Q4K(..) | Self::Q6K(..) => None,
+            #[cfg(feature = "ternary_q2_resident")]
+            Self::TernaryQ2(..) => None,
         }
     }
 
@@ -254,6 +304,12 @@ impl ProjWeights {
                 debug_assert_eq!(x.len(), *cols);
                 debug_assert_eq!(y.len(), *rows);
                 matvec_q6k(y, blocks, *rows, *cols, x);
+            }
+            #[cfg(feature = "ternary_q2_resident")]
+            Self::TernaryQ2(w) => {
+                debug_assert_eq!(x.len(), w.cols);
+                debug_assert_eq!(y.len(), w.rows);
+                ternary_q2_matvec_parallel(w, &x[..w.cols], &mut y[..w.rows]);
             }
         }
     }
@@ -287,6 +343,8 @@ impl ProjWeights {
                 }
                 out
             }
+            #[cfg(feature = "ternary_q2_resident")]
+            Self::TernaryQ2(w) => QwenDeltaNetTernaryWeights::dequant_proj_to_dense(&w.to_group()),
         }
     }
 
@@ -305,6 +363,8 @@ impl ProjWeights {
                 use crate::quant::q6k::QK_K;
                 *rows == 0 || blocks.len() == rows * (cols / QK_K)
             }
+            #[cfg(feature = "ternary_q2_resident")]
+            Self::TernaryQ2(w) => w.rows == 0 || (w.blocks.len() == w.rows * w.groups_per_row && w.is_ternary()),
         }
     }
 
@@ -328,6 +388,8 @@ impl ProjWeights {
             }
             Self::Q4K(blocks, _, _) => blocks.len() * std::mem::size_of::<crate::quant::q4k::BlockQ4K>(),
             Self::Q6K(blocks, _, _) => blocks.len() * std::mem::size_of::<crate::quant::q6k::BlockQ6K>(),
+            #[cfg(feature = "ternary_q2_resident")]
+            Self::TernaryQ2(w) => w.storage_bytes(),
         }
     }
 }
@@ -902,6 +964,8 @@ fn convert_ternary_layer_to_proj_layer(
     fn convert_proj(w: &ProjWeights, trainable: bool) -> Proj {
         match w {
             ProjWeights::Ternary(t) => convert_ternary_ref(t, trainable),
+            #[cfg(feature = "ternary_q2_resident")]
+            ProjWeights::TernaryQ2(q) => convert_ternary_ref(&q.to_group(), trainable),
             ProjWeights::Q4K(_, rows, cols) | ProjWeights::Q6K(_, rows, cols) => {
                 if *rows == 0 {
                     Proj::empty()

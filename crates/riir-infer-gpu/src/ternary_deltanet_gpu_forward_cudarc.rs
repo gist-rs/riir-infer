@@ -7034,6 +7034,9 @@ fn upload_layer_weights_cudarc(
                 Some(WeightBuffersCudarc::upload_q6k(stream, blocks, *rows, *cols))
             }
         }
+        // CPU-only raw-Q2 arm (`ternary_q2_resident`, katgpt-rs Issue 935 T5).
+        #[allow(unreachable_patterns)]
+        _ => panic!("cudarc upload: Q2-resident projections are CPU-only (load without ternary_q2_resident)"),
     };
     GpuLayerWeightsCudarc {
         dense_a: dense_of(&l.in_proj_a),

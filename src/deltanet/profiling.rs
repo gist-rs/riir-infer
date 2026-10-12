@@ -200,6 +200,11 @@ impl ForwardProfiler {
 fn bitlinear(y: &mut [f32], w: &ProjWeights, x: &[f32], hook: Option<&dyn TernaryMatvecHook>) {
     match w {
         ProjWeights::Ternary(t) => bitlinear_ternary(y, t, x, hook),
+        #[cfg(feature = "ternary_q2_resident")]
+        ProjWeights::TernaryQ2(_) => {
+            assert!(hook.is_none(), "profiler bitlinear: a Q2-resident projection has no bit-plane hook payload");
+            w.matvec_into(y, x);
+        }
         ProjWeights::Q4K(..) | ProjWeights::Q6K(..) => {
             assert!(
                 hook.is_none(),

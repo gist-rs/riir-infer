@@ -2032,6 +2032,34 @@ fn load_ternary_proj(gguf: &GgufFile, name: &str) -> Result<katgpt_core::Ternary
 /// The globals (`token_embd`/`output`) stay on [`load_ternary_proj`] — the
 /// pack byte-copies them, so both copies of a container carry identical
 /// ternary globals by construction.
+/// A `Q2_0` projection kept in its GGUF block layout
+/// ([`crate::deltanet::ternary_weights::ProjWeights::TernaryQ2`], katgpt-rs
+/// Issue 935 T5). Owned copy (the mmap borrow dies with the loader), same
+/// accept/refuse contract as the plane repack: code 3 (`+2`) is refused.
+#[cfg(feature = "ternary_q2_resident")]
+fn load_q2_resident_proj(
+    gguf: &GgufFile,
+    name: &str,
+    shape: &[usize],
+) -> Result<crate::deltanet::ternary_weights::ProjWeights> {
+    use crate::quant::q2_0::Q2_0_BLOCK_SIZE;
+    anyhow::ensure!(shape.len() == 2, "tensor '{name}' has {} dims, expected 2D for a projection", shape.len());
+    let (cols, rows) = (shape[0], shape[1]);
+    let blocks: Vec<katgpt_core::Q2Block> = gguf
+        .q2_0_tensor_blocks(name)?
+        .iter()
+        .map(|b| katgpt_core::Q2Block { d: b.d, qs: b.qs })
+        .collect();
+    anyhow::ensure!(
+        cols % Q2_0_BLOCK_SIZE == 0 && blocks.len() == rows * (cols / Q2_0_BLOCK_SIZE),
+        "Q2_0 projection '{name}': {} blocks for {rows}×{cols}",
+        blocks.len()
+    );
+    let w = katgpt_core::TernaryQ2Weights::from_blocks(rows, cols, blocks);
+    anyhow::ensure!(w.is_ternary(), "Q2_0 projection '{name}': code 3 (+2) is not ternary");
+    Ok(crate::deltanet::ternary_weights::ProjWeights::TernaryQ2(w))
+}
+
 #[cfg(feature = "deltanet_ternary_inference")]
 fn load_proj(
     gguf: &GgufFile,
@@ -2045,6 +2073,16 @@ fn load_proj(
         .with_context(|| format!("tensor '{name}' not found in GGUF file"))?;
     match info.ggml_type {
         GgmlType::Q2_0 | GgmlType::PTQ1_0 => {
+            // katgpt-rs Issue 935 T5: keep Q2_0 quant-resident in its own
+            // block layout (the raw-Q2 q8 kernel) instead of splitting it
+            // into bit-planes — runtime-selectable so one process can hold
+            // both arms (the bit-identity gate).
+            #[cfg(feature = "ternary_q2_resident")]
+            if info.ggml_type == GgmlType::Q2_0
+                && crate::deltanet::ternary_weights::ternary_q2_resident()
+            {
+                return load_q2_resident_proj(gguf, name, &info.shape);
+            }
             Ok(ProjWeights::Ternary(load_ternary_proj(gguf, name)?))
         }
         GgmlType::Q4_K => {

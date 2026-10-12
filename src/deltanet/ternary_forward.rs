@@ -90,6 +90,16 @@ pub(crate) fn bitlinear(
                 ternary_matvec_parallel(t, &x[..t.cols], &mut y[..t.rows]);
             }
         }
+        #[cfg(feature = "ternary_q2_resident")]
+        ProjWeights::TernaryQ2(_) => {
+            // Same fail-closed posture as the q4/q6 arms: the hooks take
+            // `&TernaryGroupWeights`, which a Q2-resident projection lacks.
+            assert!(
+                hook.is_none(),
+                "bitlinear: a Q2-resident projection has no bit-plane payload for the matvec hook"
+            );
+            w.matvec_into(y, x);
+        }
         ProjWeights::Q4K(..) | ProjWeights::Q6K(..) => {
             // Issue 028 T4 S2: the hooks (the GPU capture lanes + the
             // act-tap probe) pass `&TernaryGroupWeights` — a q4/q6 projection
