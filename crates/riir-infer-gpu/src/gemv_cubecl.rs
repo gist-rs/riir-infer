@@ -1381,7 +1381,14 @@ mod tests {
         let weight_handle = client.create_from_slice(f32::as_bytes(&weight_gpu));
         let input_handle = client.create_from_slice(f32::as_bytes(&input));
         // OVERSIZED: scratch_rows * out_dim instead of batch * out_dim.
-        let output_handle = client.empty(scratch_rows * out_dim * core::mem::size_of::<f32>());
+        // Zero-initialized ON PURPOSE: `client.empty()` is uninitialized on the
+        // CUDA runtime (cuMallocAsync/cuMalloc recycle dirty pool memory — no
+        // zeroing), while WebGPU spec-guarantees zeroed buffers. Reading the
+        // never-written oversized tail is only a valid write-bounds check if the
+        // tail starts ZERO on EVERY runtime — otherwise the assert fires on
+        // stale allocator contents, not a kernel write.
+        let output_handle =
+            client.create_from_slice(f32::as_bytes(&vec![0.0f32; scratch_rows * out_dim]));
 
         unsafe {
             GemvBatchedCubeCL::launch::<ActiveRuntime>(
