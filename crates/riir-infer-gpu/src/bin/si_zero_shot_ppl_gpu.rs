@@ -131,12 +131,26 @@ fn parse_args() -> Result<Args, String> {
                 }
             }
             "--max-length" => {
-                max_length = args.next().ok_or("--max-length needs n")?.parse().map_err(|_| "--max-length: bad usize")?
+                max_length = args
+                    .next()
+                    .ok_or("--max-length needs n")?
+                    .parse()
+                    .map_err(|_| "--max-length: bad usize")?
             }
             "--min-length" => {
-                min_length = args.next().ok_or("--min-length needs n")?.parse().map_err(|_| "--min-length: bad usize")?
+                min_length = args
+                    .next()
+                    .ok_or("--min-length needs n")?
+                    .parse()
+                    .map_err(|_| "--min-length: bad usize")?
             }
-            "--rungs" => rungs_n = args.next().ok_or("--rungs needs n")?.parse().map_err(|_| "--rungs: bad usize")?,
+            "--rungs" => {
+                rungs_n = args
+                    .next()
+                    .ok_or("--rungs needs n")?
+                    .parse()
+                    .map_err(|_| "--rungs: bad usize")?
+            }
             "--score-window" => {
                 score_window = args
                     .next()
@@ -151,13 +165,25 @@ fn parse_args() -> Result<Args, String> {
                     .parse()
                     .map_err(|_| "--tolerance: bad f64")?
             }
-            "--tau" => tau = args.next().ok_or("--tau needs x")?.parse().map_err(|_| "--tau: bad f32")?,
+            "--tau" => {
+                tau = args
+                    .next()
+                    .ok_or("--tau needs x")?
+                    .parse()
+                    .map_err(|_| "--tau: bad f32")?
+            }
             "--retrieval" => retrieval = true,
             "--cal-sidecar" => {
-                cal_sidecar = Some(PathBuf::from(args.next().ok_or("--cal-sidecar needs a path")?))
+                cal_sidecar = Some(PathBuf::from(
+                    args.next().ok_or("--cal-sidecar needs a path")?,
+                ))
             }
             "--dump-logits" => {
-                dump_logits = args.next().ok_or("--dump-logits needs n")?.parse().map_err(|_| "--dump-logits: bad usize")?
+                dump_logits = args
+                    .next()
+                    .ok_or("--dump-logits needs n")?
+                    .parse()
+                    .map_err(|_| "--dump-logits: bad usize")?
             }
             other => return Err(format!("unknown arg {other}")),
         }
@@ -261,8 +287,19 @@ fn run() -> Result<(), String> {
     );
 
     // ── the GPU forward (one construction, shared by every arm) ──
+    // Plan 620 G3 fix — `new_graph_ready`, never `new`: this harness drives
+    // `forward_token_graph` exclusively, and the graph lane requires the
+    // graph-ready construction — cudarc's multi-stream event tracking (ON
+    // under `new()`) records/waits a bookkeeping event per launch, and a
+    // cuEventRecord pair inside the capture window dies with
+    // CUDA_ERROR_STREAM_CAPTURE_UNSUPPORTED on the FIRST captured launch
+    // (the b51769c "si-gated" attribution was the constructor delta wearing
+    // an si costume: flag0's probe used `new_graph_ready` and captured the
+    // same body green). The base arm's bytes are unchanged — the flag0
+    // three-part gate pinned the graph lane bit-identical at this exact
+    // construction (bench 872).
     let t_gpu = Instant::now();
-    let mut fwd = TernaryDeltanetGpuForwardCudarc::new(&config, &weights)
+    let mut fwd = TernaryDeltanetGpuForwardCudarc::new_graph_ready(&config, &weights)
         .map_err(|e| format!("GPU forward construct: {e}"))?;
     println!("# gpu forward up in {:.1}s", t_gpu.elapsed().as_secs_f32());
 
@@ -275,7 +312,10 @@ fn run() -> Result<(), String> {
     let results = run_arms(&args, &mut fwd, &config, &weights, &tok, &seq, &rungs)?;
 
     // ── the G3 table (the CPU harness's printer, verbatim shape) ──
-    println!("\n# G3 zero-shot split — pooled ppl over {}-token scored spans", args.score_window);
+    println!(
+        "\n# G3 zero-shot split — pooled ppl over {}-token scored spans",
+        args.score_window
+    );
     let base = &results[0].1;
     for (arm, rung_list) in &results {
         let total_nll: f64 = rung_list.iter().map(|r| r.nll_sum).sum();
@@ -551,7 +591,8 @@ fn run_arms(
     #[cfg(feature = "scale_invariant_attn")]
     let calibration = if args.arms.contains(&Arm::SiCal) {
         let path = args.cal_sidecar.as_ref().expect("checked at parse");
-        let bytes = std::fs::read(path).map_err(|e| format!("cal sidecar {}: {e}", path.display()))?;
+        let bytes =
+            std::fs::read(path).map_err(|e| format!("cal sidecar {}: {e}", path.display()))?;
         let cal = katgpt_core::scale_invariant::HeadCalibration::from_sidecar(&bytes)
             .map_err(|e| format!("cal sidecar: {e}"))?;
         println!(
@@ -672,7 +713,11 @@ fn run_arms(
                 targets,
             });
         }
-        println!("# arm {} done in {:.1}s", arm.name(), t.elapsed().as_secs_f32());
+        println!(
+            "# arm {} done in {:.1}s",
+            arm.name(),
+            t.elapsed().as_secs_f32()
+        );
         results.push((arm, rung_results));
     }
 
@@ -691,11 +736,11 @@ fn dump_logits(
     seq: &[usize],
     n_tokens: usize,
 ) -> Result<(), String> {
-    println!("# dump-logits: first 4 logits' f32 bits after each of the first {n_tokens} fed tokens");
+    println!(
+        "# dump-logits: first 4 logits' f32 bits after each of the first {n_tokens} fed tokens"
+    );
     for (pos, &tok_id) in seq.iter().enumerate().take(n_tokens) {
-        let logits = fwd
-            .forward_token_graph(tok_id)
-            .map_err(|e| e.to_string())?;
+        let logits = fwd.forward_token_graph(tok_id).map_err(|e| e.to_string())?;
         let bits: Vec<String> = logits[..4.min(logits.len())]
             .iter()
             .map(|f| format!("{:08x}", f.to_bits()))

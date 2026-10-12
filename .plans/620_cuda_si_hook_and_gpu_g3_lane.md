@@ -218,12 +218,23 @@ on the M3 via the x86_64-pc-windows-gnu typecheck lane (the cudarc family is
 (+bonsai2_hadamard — the harness posture), and the full
 `cuda_graphs_forward,scale_invariant_attn` si posture, `--lib --bins
 --tests`, all green. The CPU-side `si_zero_shot_ppl` bin green at
-`scale_invariant_attn,bonsai2_hadamard`. REMAINING: the Phase-A bit-identity
+`scale_invariant_attn,bonsai2_hadamard`. ~~REMAINING: the Phase-A bit-identity
 A/B on the real checkpoint + the G3 GPU run's base-arm cross-check against
-the CPU base arm (same corpus, same rungs — the numbers must agree within
-the f32-posture envelope; a divergence beyond that indicts the instrument,
-not the checkpoint — Issue-022 T3.1 law) — both on the 4090, after the CPU
-G3 run drains (build contention would pollute its wall-clock rows).
+the CPU base arm~~ **BOTH DONE: the flag-0 A/B three-part GREEN (bench 872,
+2026-10-12) and the G3 GPU run + base-arm cross-check PASS at 0.07% (bench
+873, 2026-10-13 — base pooled 7.2499 GPU vs 7.2449 CPU; si/si-cal FAILs
+reproduce; no promotion, two-lane-consistent).** Box work remaining: Phase D
+(G2 prefill cells) only.
+
+## The harness constructor law (bench 873, 2026-10-13)
+
+**A graph-lane consumer constructs via `new_graph_ready` — `new()` is the
+eager reference lane, and its cudarc event tracking (default ON) cannot cross
+a capture window** (per-arg wait/record event pairs →
+STREAM_CAPTURE_UNSUPPORTED on the first captured launch). The G3 harness's
+`new()` cost the first GPU attempt (b51769c's "si-gated" attribution was this
+delta wearing an si costume — flag0's probe used `new_graph_ready` and
+captured the same body green); fixed in the same breath as bench 873's run.
 
 ## Phase-A bit-identity protocol (the recording instrument, landed 4801622)
 
