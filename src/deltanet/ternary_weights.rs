@@ -100,13 +100,11 @@ impl GateProjWeights {
             Self::Dense(data, rows, cols) => {
                 debug_assert_eq!(x.len(), *cols);
                 debug_assert_eq!(y.len(), *rows);
+                // SIMD dot per row (promoted 2026-10-13, tests/dense_ab_simd_goat.rs):
+                // 12x the serial scalar reduction it replaced on Bonsai 2's
+                // 48x5120 a/b, greedy-token identical, +3% decode tok/s.
                 for (r, yr) in y[..*rows].iter_mut().enumerate() {
-                    let row = &data[r * cols..(r + 1) * cols];
-                    let mut acc = 0.0f32;
-                    for (&wv, &xv) in row.iter().zip(x[..*cols].iter()) {
-                        acc += wv * xv;
-                    }
-                    *yr = acc;
+                    *yr = katgpt_core::simd::simd_dot_f32(&data[r * cols..(r + 1) * cols], &x[..*cols], *cols);
                 }
             }
         }
