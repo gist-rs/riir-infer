@@ -1,6 +1,6 @@
 # Bench 879 — raw-Q2 resident projections (`ternary_q2_resident`, katgpt-rs Issue 935 T5)
 
-**Status:** DONE 2026-10-13 — G1 bit-identical, G2 PASS; **PROMOTED** into `deltanet_ternary_inference` after Issue 043 gave the GPU uploaders a plane view (§Promotion), with a fused FFN gate+up call taking the paired tg ratio 0.931 → 0.845–0.880. Follow-up landed earlier: the bit-plane repack is word-at-a-time + row-parallel — Bonsai-2-27B load 124.9 → 5.8 s for EVERY consumer (§Repack).
+**Status:** DONE 2026-10-13 — G1 bit-identical, G2 PASS; **PROMOTED** into `deltanet_ternary_inference` after Issue 043 gave the GPU uploaders a plane view (§Promotion), with fused shared-input calls (FFN gate+up, then `DeltaNet` qkv+z and attention q/k/v via one N-way kernel) taking the paired tg ratio 0.931 → 0.845–0.880 → **0.798–0.833** (§Shared-input fusion). Follow-up landed earlier: the bit-plane repack is word-at-a-time + row-parallel — Bonsai-2-27B load 124.9 → 5.8 s for EVERY consumer (§Repack).
 
 ## What
 
@@ -113,14 +113,13 @@ resident copy on the upload path:
 | unit: plane views = loader repack = katgpt `to_group`; transient never resident; buffer key stable across a move; f32 + q8 arms = plane arms; `as_ternary_mut` demotes | PASS |
 | Metal pre-rotation prefill pin @2048 (`g1_032_folded_prefill_metal::prerotation_prefill_pin_unchanged`), Q2-resident load → transient-view uploads | `fnv 99a0733c45a0e663` — **bit-exact** (this run would have panicked in `q4_refuse` before) |
 | real-model GOAT before T4 (load avg ~4.3) | 400/400 raw-Q2, 0/64 logit mismatches, greedy identical, ratio **0.934**, load 5.7 → 3.8 s |
-| real-model GOAT after T4 ×3 (load avg 3.1 → 10.4, rising: sibling sessions) | 0/64 mismatches + greedy identical every run; ratio **0.880 / 0.862 / 0.845**; q2 102.2 / 104.4 / 106.2 ms/tok against planes 116.5 / 120.7 / 125.4 |
+| real-model GOAT after T4 ×3 (load avg 3.1 → 10.4, rising — see the load note below) | 0/64 mismatches + greedy identical every run; ratio **0.880 / 0.862 / 0.845**; q2 102.2 / 104.4 / 106.2 ms/tok against planes 116.5 / 120.7 / 125.4 |
 | riir-infer lib, default + `deltanet_ternary_inference,bonsai2_hadamard` | 264 / 342 passed |
 | clippy: core (both arms + `forward_profiling`), riir-infer-gpu `ternary_gemv` (± Metal/ANE/batched), cudarc lane typechecked for `aarch64-unknown-linux-gnu` (11 gated modules proven compiled), riir-train-engine, riir-ai riir-engine + riir-gpu | clean |
 
-The T4 gain (~7 ms/token) came out larger than Issue 043's ≤ 1 ms estimate.
-The likely cause is that one fork-join per layer is saved, not just the
-activation prep, but this was not separately profiled. Per-pair ratios are
-quotable; absolute ms moved with the rising load.
+The T4 gain (~7 ms/token) came out larger than Issue 043's ≤ 1 ms estimate;
+§Shared-input fusion attributes it at the kernel. Per-pair ratios are
+quotable; absolute ms moved with the load.
 
 Downstream fixes in the same change: riir-train-engine's three exhaustive
 `ProjWeights` matches now go through `planes_cow()` / `as_ternary()` /
@@ -131,3 +130,57 @@ call `as_ternary[_mut]()`.
 Opt out per process BEFORE a load: `set_ternary_q2_resident(false)`.
 
 katgpt-rs commits: `8a7fff28a` (pair entry + public fast-path probe).
+
+## Shared-input fusion (2026-10-13, follow-up)
+
+**Kernel attribution** — `katgpt-types --example ternary_q2_pair_ab`
+(17408×5120 gate/up, 16 rayon threads, interleaved rounds, outputs asserted
+bit-identical first). Three runs:
+
+| arm | median | ratio vs two calls |
+|---|---|---|
+| two single calls | 555.6–568.3 µs | 1.000 |
+| pair (one prep, one fork-join) | 431.4–446.9 µs | 0.773–0.780 |
+| one merged 2R-row matrix (control) | 449.9–456.1 µs | 0.808–0.814 |
+
+121–131 µs saved per FFN × 64 layers = 7.7–8.4 ms/token, which accounts
+for the ~7 ms the real-model GOAT showed. The merged control (one prep +
+one fork-join over a single matrix) recovers most of the gain, so the saving
+is the second prep + fork-join + tail, not the pair's layout. Pair beating
+merged by a further ~4% is not explained.
+
+**N-way entry** — `simd_ternary_q2_matvec_q8_parallel_n::<N>` (fixed-size
+arrays, zero-alloc, bit-identical to N single calls; unit gate at N=3 with
+unequal rows, serial + parallel). The pair is now its N=2 wrapper; after the
+change the pair arm reads 0.792–0.796 (control moved 0.81 → 0.82 the same
+runs, so pair/merged shifted ~1%, inside noise). riir-infer: `matvec_n_into`
+/ `bitlinear_n`, used for `DeltaNet` `in_proj_qkv` + `in_proj_z` (48 layers)
+and attention q/k/v (16 layers). The profiler (`forward_profiling`) now calls
+the production `bitlinear` / `bitlinear_n` / `bitlinear_pair` instead of its
+stale private copy, so it times the same dispatch.
+
+**Real model** (`ternary_q2_resident_goat`, launch load ~2.1–2.5, AC, no
+other cargo/rustc running):
+
+| arm | runs | paired ratio | q2 ms/tok |
+|---|---|---|---|
+| FFN pair only (baseline for this step) | 3 | 0.893 / 0.872 / 0.837 | 104.1 / 103.7 / 109.9 |
+| + qkv+z and q/k/v N-way | 3 | **0.833 / 0.808 / 0.798** | 113.4 / 116.9 / 102.5 |
+
+400/400 raw-Q2, 0/64 logit mismatches, greedy identical in all six runs.
+The absolute ms do not separate the two rows, because the planes arm moved
+just as much (117–131 → 129–145 ms) over back-to-back runs. **Load note:** in
+these runs the load average rose from ~2 to ~11 with no other cargo/rustc
+process on the box, so the test's own 16-thread decode drives it. The
+"sibling sessions" attribution in the T4 row above was therefore at least
+partly wrong. Quote the paired ratio, not absolute ms.
+
+**Section breakdown** (`bonsai2_forward_profile`, `ternary_q2_resident`, 32
+tokens): total **100.9 ms/token (9.9 tok/s)** — FFN 54.2 (53.7%),
+`dn_input_proj` 15.8, `dn_out_proj` 8.6, `dn_recurrence` 8.2,
+`attn_qkv` 4.2, `attn_out_proj` 3.4, LM head 3.3, everything else < 1.1
+each. About 7 GB of 2-bit weights are streamed per token, so the decode
+runs at roughly 70 GB/s of weight traffic. The one large non-weight section
+is `dn_recurrence` (8%).
+
+katgpt-rs commit for the N-way entry: `9f3f78bf6`.

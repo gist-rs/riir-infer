@@ -46,7 +46,7 @@ use super::ternary_weights::{
 use crate::types::{Config, DeltaNetLayerType, rmsnorm_with_gamma_eps, swiglu};
 use katgpt_core::TernaryMatvecHook;
 use katgpt_core::{TernaryFfnHook, TernaryInputProjHook};
-use super::ternary_weights::{matvec_pair_into, ternary_matvec_parallel};
+use super::ternary_weights::{matvec_n_into, ternary_matvec_parallel};
 
 use crate::deltanet::rotation::{
     TernaryRotationConfig, permute_gdn_v_grouped_inplace, permute_gdn_v_grouped_inverse_inplace,
@@ -117,10 +117,28 @@ pub(crate) fn bitlinear(
     }
 }
 
-/// Two [`bitlinear`]s over one shared `x` (the FFN's gate + up). With no hook,
-/// [`matvec_pair_into`] — one activation prep + one fork-join when both are
-/// Q2-resident on the q8 arm, bit-identical to two calls (Issue 043 T4).
-/// With a hook, the two hooked calls exactly as before.
+/// `N` [`bitlinear`]s over one shared `x` (FFN gate + up, `DeltaNet` qkv + z,
+/// attention q/k/v). With no hook, [`matvec_n_into`] — one activation prep +
+/// one fork-join when all are Q2-resident on the q8 arm, bit-identical to the
+/// single calls (Issue 043 T4). With a hook, the hooked calls exactly as before.
+#[inline(always)]
+pub(crate) fn bitlinear_n<const N: usize>(
+    ys: [&mut [f32]; N],
+    ws: [&ProjWeights; N],
+    x: &[f32],
+    hook: Option<&dyn TernaryMatvecHook>,
+) {
+    match hook {
+        None => matvec_n_into(ws, ys, x),
+        Some(_) => {
+            for (y, w) in ys.into_iter().zip(ws) {
+                bitlinear(y, w, x, hook);
+            }
+        }
+    }
+}
+
+/// [`bitlinear_n`] at `N = 2` — the FFN's gate + up.
 #[inline(always)]
 pub(crate) fn bitlinear_pair(
     ya: &mut [f32],
@@ -130,13 +148,7 @@ pub(crate) fn bitlinear_pair(
     x: &[f32],
     hook: Option<&dyn TernaryMatvecHook>,
 ) {
-    match hook {
-        None => matvec_pair_into(wa, ya, wb, yb, x),
-        Some(_) => {
-            bitlinear(ya, wa, x, hook);
-            bitlinear(yb, wb, x, hook);
-        }
-    }
+    bitlinear_n([ya, yb], [wa, wb], x, hook);
 }
 
 /// Forward pass for a single `DeltaNet` (linear attention) layer with ternary
@@ -228,10 +240,14 @@ pub(crate) fn forward_deltanet_layer_ternary(
         } else {
             x_in
         };
-        bitlinear(&mut scratch.qkv, &layer.in_proj_qkv, x_qkvz, hook);
-
-        // 2. Z projection — output gate (ternary; folded ⇒ rotated input)
-        bitlinear(&mut scratch.z, &layer.in_proj_z, x_qkvz, hook);
+        // 2. Z projection — output gate (ternary; folded ⇒ rotated input),
+        // fused with QKV: one activation prep + one fork-join.
+        bitlinear_n(
+            [&mut scratch.qkv[..], &mut scratch.z[..]],
+            [&layer.in_proj_qkv, &layer.in_proj_z],
+            x_qkvz,
+            hook,
+        );
 
         // 3. Gate projections: a (decay), b (update rate) — never rotated
         // (Issue 980: the dense escape set consumes the primal input).
@@ -450,7 +466,13 @@ fn forward_attention_layer_ternary(
     } else {
         x_in
     };
-    bitlinear(&mut scratch.qg_buf, &layer.attn_wq, x_qkv, hook);
+    // Q (+gate), K, V share the normed input: one activation prep + one fork-join.
+    bitlinear_n(
+        [&mut scratch.qg_buf[..], &mut scratch.k_buf[..], &mut scratch.v_buf[..]],
+        [&layer.attn_wq, &layer.attn_wk, &layer.attn_wv],
+        x_qkv,
+        hook,
+    );
     // Split qg_buf into q_buf and gate_buf (per-head interleaved layout).
     for h in 0..n_head {
         let src = h * 2 * hd;
@@ -458,8 +480,6 @@ fn forward_attention_layer_ternary(
         scratch.q_buf[dst..dst + hd].copy_from_slice(&scratch.qg_buf[src..src + hd]);
         scratch.gate_buf[dst..dst + hd].copy_from_slice(&scratch.qg_buf[src + hd..src + 2 * hd]);
     }
-    bitlinear(&mut scratch.k_buf, &layer.attn_wk, x_qkv, hook);
-    bitlinear(&mut scratch.v_buf, &layer.attn_wv, x_qkv, hook);
 
     // 2. QK-norm (dense fields: attn_q_norm, attn_k_norm)
     let eps = config.rms_norm_eps;

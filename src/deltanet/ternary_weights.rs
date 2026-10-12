@@ -104,28 +104,39 @@ fn ternary_q2_matvec_arm(w: &TernaryQ2Proj, x: &[f32], y: &mut [f32], q8: bool) 
     }
 }
 
-/// `ya = Wa @ x`, `yb = Wb @ x` over ONE shared `x` (the FFN's gate + up) —
-/// [`ProjWeights::matvec_into`] twice, except when both are Q2-resident on
-/// the q8 arm: then one activation quantize+permute and one fork-join
-/// ([`katgpt_core::simd_ternary_q2_matvec_q8_parallel_pair`], bit-identical
-/// to the two single calls; Issue 043 T4).
-pub fn matvec_pair_into(wa: &ProjWeights, ya: &mut [f32], wb: &ProjWeights, yb: &mut [f32], x: &[f32]) {
+/// `ys[i] = ws[i] @ x` over ONE shared `x` (FFN gate + up, `DeltaNet` qkv + z,
+/// attention q/k/v) — [`ProjWeights::matvec_into`] per projection, except
+/// when ALL are Q2-resident on the q8 arm: then one activation
+/// quantize+permute and one fork-join
+/// ([`katgpt_core::simd_ternary_q2_matvec_q8_parallel_n`], bit-identical to
+/// the single calls; Issue 043 T4). Zero-allocation (fixed-size arrays).
+pub fn matvec_n_into<const N: usize>(ws: [&ProjWeights; N], ys: [&mut [f32]; N], x: &[f32]) {
     #[cfg(feature = "ternary_q2_resident")]
-    if let (ProjWeights::TernaryQ2(a), ProjWeights::TernaryQ2(b)) = (wa, wb)
-        && a.cols == b.cols
-        && TERNARY_Q8_ACT.load(std::sync::atomic::Ordering::Relaxed)
-    {
-        katgpt_core::simd_ternary_q2_matvec_q8_parallel_pair(
-            a.q2(),
-            b.q2(),
-            &x[..a.cols],
-            &mut ya[..a.rows],
-            &mut yb[..b.rows],
-        );
-        return;
+    if TERNARY_Q8_ACT.load(std::sync::atomic::Ordering::Relaxed) {
+        let q2s = ws.map(|w| match w {
+            ProjWeights::TernaryQ2(q) if q.cols == ws[0].cols() => Some(q),
+            _ => None,
+        });
+        if q2s.iter().all(Option::is_some) {
+            let q2s = q2s.map(|q| q.expect("checked: all Q2-resident"));
+            let mut i = 0;
+            let ys = ys.map(|y| {
+                let rows = q2s[i].rows;
+                i += 1;
+                &mut y[..rows]
+            });
+            katgpt_core::simd_ternary_q2_matvec_q8_parallel_n(q2s.map(TernaryQ2Proj::q2), &x[..q2s[0].cols], ys);
+            return;
+        }
     }
-    wa.matvec_into(ya, x);
-    wb.matvec_into(yb, x);
+    for (w, y) in ws.into_iter().zip(ys) {
+        w.matvec_into(y, x);
+    }
+}
+
+/// [`matvec_n_into`] at `N = 2` — the FFN's gate + up.
+pub fn matvec_pair_into(wa: &ProjWeights, ya: &mut [f32], wb: &ProjWeights, yb: &mut [f32], x: &[f32]) {
+    matvec_n_into([wa, wb], [ya, yb], x);
 }
 
 /// A Q2-resident projection (`ternary_q2_resident`): the raw `Q2_0` blocks the
