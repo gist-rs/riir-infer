@@ -789,12 +789,24 @@ members = ["crates/riir-infer-gpu", "crates/riir-infer-laya"]
 katgpt-core = { path = "../katgpt-rs/crates/katgpt-core" }
 
 # ─── Local patches (crates.io forks) ─────────────────────────────────
-# Byte-identical copies of the patched crates.io sources under vendor/.
+# Byte-identical copies of the patched crates.io sources under vendor/
+# (cubecl-common carries exactly ONE upstream commit on top of the published
+# 0.11.0-pre.2 source; everything else is byte-identical to the crate).
 # Remove when upstream lands the fixes:
 #   cubecl-runtime — drop-queue policy fix (upstream tracel-ai/cubecl#1359).
 #   wgpu-hal       — total_video_memory_bytes()/raw_handle() adapter
 #                    accessors (additive API; the VRAM pre-flight probes it).
+#   cubecl-common  — idle device-server park fix (upstream tracel-ai/cubecl
+#                    #1806 @ 6bba5fdf0): the idle loop's fixed 150 µs sleep
+#                    made every buffer-fill wait out the rest of a sleep on
+#                    submit→wait→submit hosts (~20% decode on an M2 Pro);
+#                    now park_timeout + client-side unpark-at-buffer-fill.
+#                    Patch verified upstream at 6bba5fdf0, applied cleanly
+#                    over the published pre.2 source; the crate's own suite
+#                    passes 95/95. No release carries it yet (0.11.0 final
+#                    predates it) — drop this row on the bump past it.
 
 [patch.crates-io]
 cubecl-runtime = { path = "vendor/cubecl-runtime-0.11.0-pre.2" }
+cubecl-common = { path = "vendor/cubecl-common-0.11.0-pre.2" }
 wgpu-hal = { path = "vendor/wgpu-hal-30.0.0" }

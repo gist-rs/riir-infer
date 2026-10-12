@@ -1,0 +1,90 @@
+[package]
+authors = [
+    "Dilshod Tadjibaev (@antimora)",
+    "Nathaniel Simard (@nathanielsimard)",
+]
+categories = ["science", "mathematics", "algorithms"]
+description = "Common crate for CubeCL"
+edition.workspace = true
+keywords = ["gpu", "cuda", "wgpu"]
+license.workspace = true
+name = "cubecl-common"
+readme.workspace = true
+repository = "https://github.com/tracel-ai/cubecl/tree/main/crates/cubecl-common"
+version.workspace = true
+
+
+[lints]
+workspace = true
+
+
+[features]
+default = ["std"]
+fp4 = ["float4"]
+fp8 = ["float8"]
+hash = ["xxhash-rust"]
+serde = []
+shared-bytes = ["cubecl-environment/shared-bytes"]
+std = ["cubecl-environment/std"]
+tracing = ["cubecl-environment/tracing"]
+
+
+[dependencies]
+cubecl-environment = { path = "../cubecl-environment", version = "=0.11.0-pre.2", default-features = false }
+
+# Runtime Deps
+log = { workspace = true }
+tynm = { workspace = true }
+
+# ** Please make sure all dependencies support no_std when std is disabled **
+bytemuck = { workspace = true, features = ["derive"] }
+derive-new = { workspace = true }
+derive_more = { workspace = true, features = [
+    "not",
+    "add",
+    "mul",
+    "add_assign",
+    "mul_assign",
+    "display",
+    "deref",
+    "deref_mut",
+] }
+float4 = { workspace = true, optional = true }
+float8 = { workspace = true, optional = true }
+half = { workspace = true }
+hashbrown = { workspace = true }
+num-traits = { workspace = true }
+serde = { workspace = true }
+
+
+# Hash
+xxhash-rust = { workspace = true, features = [
+    "xxh3",
+    "const_xxh3",
+], optional = true }
+
+[target.'cfg(target_has_atomic = "ptr")'.dependencies]
+spin = { workspace = true, features = ["mutex", "spin_mutex"] }
+
+[target.'cfg(not(target_has_atomic = "ptr"))'.dependencies]
+portable-atomic = { workspace = true }
+portable-atomic-util = { workspace = true }
+spin = { workspace = true, features = [
+    "mutex",
+    "spin_mutex",
+    "portable_atomic",
+] }
+
+[build-dependencies]
+cfg_aliases = { workspace = true }
+
+[dev-dependencies]
+ciborium = { workspace = true, features = ["std"] }
+criterion = { workspace = true }
+dashmap = { workspace = true }
+tempfile = { workspace = true }
+test-log = { workspace = true, features = ["trace"] }
+
+[[bench]]
+harness = false
+name = "device_handle"
