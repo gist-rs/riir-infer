@@ -230,3 +230,24 @@ Sources: local wevtutil queries (this box, 2026-10-12); TDR mechanism + registry
 learn.microsoft.com TDR registry-keys documentation; wgpu #8655 (precedent that
 `Device(Lost)` is a symptom class reported by several distinct underlying failures —
 macOS/Metal case, cited for the cross-platform lesson only).
+
+- **Upstream movement check (2026-10-12, zero-GPU idle unit):** gfx-rs/wgpu
+  #10027 has ZERO movement since filing (2026-08-07): still OPEN, no linked
+  PR/branch, no comments beyond project automation, parked at "Todo" on the
+  WebGPU-for-Firefox project board. No fix to wait for, no backport to pick
+  up — mitigation stays LOCAL. The issue body pins two further
+  corroborations: (a) the reporter hit it in cubecl autotune, the
+  over-budget kernel ONE candidate among 31, with the first visible symptom
+  a misleading `Buffer ... is invalid` map_async error — our exact shape
+  (this issue's 16 failures read as assertion/buffer errors, same
+  misdirection); (b) the NVIDIA proprietary driver refuses at 16 MiB/thread
+  private memory (Mesa ANV 128 KiB) — consistent with the static scratch
+  audit above: our hand-written kernels carry no per-thread private arrays,
+  so the exposure is the vendored cubecl-0.11 autotune codegen only.
+  **Window-run consequence:** if the callback confirms the #10027 channel,
+  the vendored-hal patch already named above is THE fix path, not a
+  fallback — upstream's own suggested direction (map the failed
+  `vkCreateComputePipelines` to a surfaceable `PipelineError` instead of
+  `DeviceError::Unexpected` in `wgpu-hal`'s vulkan backend) is the spec for
+  a `vendor/wgpu-hal-30.0.0/src/vulkan/mod.rs` patch; do not plan around an
+  upstream release.
