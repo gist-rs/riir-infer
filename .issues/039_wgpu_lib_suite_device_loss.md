@@ -188,3 +188,45 @@ E:/git/wt038infer` + `rm -rf E:/tmp/infer038`.
   now-installed callback (the hal trigger string names the refused pipeline)
   and stays SECONDARY to the concurrency hypothesis the serial A/B tests
   first.
+
+## Addendum 2026-10-12 (zero-GPU, idle-cycle item-9 search-advance): the OS event log independently corroborates the #10027 silent-loss channel — no adapter-reset-class events exist in any repro window
+
+Retrospective evidence gathered without touching the GPU (riir-refine idle loop; re-runnable
+from any shell — prefix `MSYS_NO_PATHCONV=1` on Git Bash or the `/q:` args get path-mangled):
+
+1. **Zero classic-TDR events in the entire retained System log.**
+   `wevtutil qe System /q:"*[System[(EventID=4101)]]" /c:10 /rd:true` returns nothing —
+   and retention demonstrably spans back to 2026-09-20 (older nvlddmkm events surface).
+   4101 ("Display driver stopped responding and has successfully recovered") is the
+   classic adapter-reset/TDR signature; its total absence weakens every reset-class
+   hypothesis, including contention/VRAM-pressure resets (a WDDM residency reset logs it).
+2. **No nvlddmkm event on 2026-10-09** — the T8 observation day whose 16-failure tail
+   filed this issue. The full nvlddmkm population (reverse-chron, 50-event window):
+   ONE Event **ID 153, Level: Error, 2026-10-10T03:26:52Z** (= 10:26:52 +07, filing day,
+   empty description — timing ambiguous between the filing session's own runs and the
+   trainer's; recorded with that caveat), one isolated 2026-10-05T18:47Z event, and a
+   ~48-event burst 2026-09-20T13:40:03-46Z (pre-issue box history, outside every repro
+   window). So the device loss that produced the recorded 16-failure tail left NO
+   driver-level trace in the OS log on its observation day.
+3. **Environment facts**: TDR at Windows defaults (no `TdrLevel`/`TdrDelay` overrides
+   under `HKLM\SYSTEM\CurrentControlSet\Control\GraphicsDrivers`) and **HAGS ON**
+   (`HwSchMode = 0x2`).
+
+**Interpretation against the pre-run analysis:** no-OS-trace is exactly the fingerprint of
+the #10027 channel — a driver-refused PIPELINE CREATION surfacing as a process-logical
+`lose()` neither resets the adapter nor logs OS events — while the reset/TDR/contention
+class is expected to leave 4101/nvlddmkm traces. Honest caveats: 4101 logging can be
+disabled by policy, and an empty-description 153 is not fully characterizable, so this
+rules the reset class out only at "no logged trace" strength, not absolutely.
+
+**Expected payoff at the window run:** when the `[issue 039] DEVICE LOST:` callback fires,
+its `reason=`/`message=` should name a pipeline-creation/compile-refusal error (the #10027
+shape), NOT a reset/removed reason. If it names a reset-class reason instead, this
+addendum's inference is wrong — run
+`wevtutil qe System /q:"*[System[Provider[@Name='nvlddmkm']]]" /c:5 /rd:true` before/after
+the run; a fresh driver event settling that question authoritatively costs seconds.
+
+Sources: local wevtutil queries (this box, 2026-10-12); TDR mechanism + registry defaults:
+learn.microsoft.com TDR registry-keys documentation; wgpu #8655 (precedent that
+`Device(Lost)` is a symptom class reported by several distinct underlying failures —
+macOS/Metal case, cited for the cross-platform lesson only).
