@@ -326,6 +326,26 @@ in bench 036's addendum (the verify chunk commits its GDN advance — a checkpoi
 precede the reference verify). Narrative: `git log --follow --
 .issues/041_prefix_cache_snapshot_submit_burst.md`.
 
+## 2026-10-13 — Issue 1005 CLOSED (T1–T8 all landed; defers carry their triggers): the eDLM/Drex inference lane — GGUF arch, block-causal mask, pointer head, marker encode, real-artifact parity, GPU forward, KV reuse, CUDA graphs
+
+Phase 1–3 complete across four sessions: T1–T3 (the `edlm` GGUF arch + segment
+block-causal mask + row-form fallback), T4–T6 (marker encode/pack + the pointer head +
+**T6 parity PASSED on the real `drex-dlm-Q8_0.gguf`** — 87 tokens EXACT vs their
+published count, worst drift 0.0103, all three argmaxes exact, tolerance law = argmax
+EXACT + per-option < 0.015), T7 (the `EdlmStateKv` state-prefix reuse + cached branch
+continuations, `EDLM_PREFIX_MIN_TOKENS = 384`), T8 (the `riir-infer-gpu` GPU forward —
+mask plumbing + CPU parity; the cmma-sg8 staging PROMOTED default-on, every cell both
+runtimes; the CUDA-graphs arm shipped OPT-IN `EDLM_GPU_GRAPS`-read `EDLM_GPU_GRAPHS=1`
+with its measured NOT-PROMOTED verdict — the 41%-launch-tax projection refuted, exposed
+tax ~7% at mid). The full wgpu `--lib` device-loss flake has its own file (issue 039,
+armed state-dependent watch). **Deferred tails (each with its trigger, none blocking):**
+the `head.pt` torch-pickle reader (the GGUF embeds the same head — file a follow-up only
+if a BF16-checkpoint path is ever needed) and the T6 Python-runner corpus leg (BF16
+shards + torch oracle, a separate statistical-hardening unit — the published-constants
+leg already passed on the real artifact; pick it up only if the tolerance law ever
+needs a corpus-grade re-read). Narrative: `git log --follow --
+.issues/1005_edlm_drex_inference_lane.md`.
+
 ## Lessons
 
 - Check the reference implementation, not a remembered standard, before filing a fixture-integrity finding (Issue 010).
