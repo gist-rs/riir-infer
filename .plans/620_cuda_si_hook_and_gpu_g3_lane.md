@@ -140,10 +140,28 @@ is katgpt-rs CPU x86_64) — corrected premises from the survey.
       forward reads rope from device tables" condition is FALSE). The CPU
       run's pre-recorded expected-FAIL row stands as the demonstration; a GPU
       pp lane would need a masked-table rope kernel — its own slice if ever
-      needed. RESIDUE CLOSED (0929fcb, 2026-10-11): the `--retrieval` needle
+      needed. RESIDUE CLOSED (0929fcb, 2026-10-12): the `--retrieval` needle
       probe is ported — second pass after the G3 table, the CPU printer's row
       shape, arm-major grouping (documented divergence), first live exercise
       rides the GPU G3 run.
+      ⚠ FIRST RUN BLOCKED (2026-10-12, schtask `si620g3gpu`): the sidecar
+      stage is SOLVED (the σ probe runs only under `--arms si-cal` — main.rs
+      L456 `arms.contains(&Arm::SiCal)`; `--probe-only` then stops before the
+      arms; the on-box sidecar digest `95ef…` matches the CPU run's 4090
+      digest exactly — deterministic cross-run per host) and the GPU forward
+      boots (16.6s) + the LUT + sidecar load — then the FIRST arm's first
+      `forward_token_graph` dies `CUDA_ERROR_STREAM_CAPTURE_UNSUPPORTED:
+      operation not permitted when stream is capturing` (the log holds no
+      `# arm base done` — the base arm's first capture already fires it).
+      Suspect class: an ALLOC or SYNC inside the capture window that the
+      si-feature launch path introduced (the `si_session_args!` macro's
+      `CudaView` narrowing per layer, or a dummy-push clone) — the flag0
+      probe's graph lane ran GREEN at `cuda_graphs_forward` WITHOUT the si
+      feature, so the capture-window op is si-gated. NEXT SLICE: read
+      `forward_token_graph`'s capture window + the macro's per-launch arg
+      path (ternary_deltanet_gpu_forward_cudarc.rs + si_gpu.rs), RUST_BACKTRACE
+      the exe on the box, fix, re-run — the reproduction is one schtask (bins
+      + sidecar `E:\tmp\si622-cal-4090.bin` all warm).
       ⚠ The bin requires ONLY `cuda_graphs_forward` + the folded loader — NOT
       `scale_invariant_attn` — so the `base` arm (and `--dump-logits`)
       runs on an UNHOOKED build: the cross-build byte-compare is executable
