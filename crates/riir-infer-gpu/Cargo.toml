@@ -368,6 +368,10 @@ required-features = ["ternary_gemv_cuda_raw"]
 name = "qwen38_pyramid_capture"
 required-features = ["ternary_gemv_cuda_raw"]
 
+[[bin]]
+name = "qwen38_prefix_graph_probe"
+required-features = ["ternary_gemv_cuda_raw"]
+
 # Plan 620 (Plan 622 Phase 7) — the GPU G3 zero-shot harness: the CPU
 # `si_zero_shot_ppl` port driving `forward_token_graph` (~90 tok/s ⇒ the
 # FAST re-gate lane + the App-H τ-sweep enabler). Deliberately requires ONLY

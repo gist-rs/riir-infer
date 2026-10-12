@@ -542,6 +542,16 @@ impl Qwen38PrefixCache {
             if self.entries[idx].tokens != prompt[..l] {
                 continue;
             }
+            // T5: an entry born on the dtod path gains its tables HERE —
+            // the same lazy build the refresh path runs. Arming
+            // mid-process no longer strands pre-arm checkpoints (the old
+            // loud refusal was an arming-order artifact, not a shape
+            // hazard — geometry drift still refuses in the table build's
+            // len check and the copy's shape check).
+            if let Some(engine) = self.engine.as_ref() {
+                let entry = &mut self.entries[idx];
+                engine.ensure_entry_tables(stream, entry)?;
+            }
             {
                 let engine = self.engine.as_ref();
                 let entry = &self.entries[idx];
@@ -549,20 +559,8 @@ impl Qwen38PrefixCache {
                     // Table path: the entry's snapshot tables are the copy
                     // SRC; the live-state tables the DST. One launch per
                     // class (issue 041).
-                    let Some(t_rec) = entry.table_rec.as_ref() else {
-                        return Err(
-                            "prefix restore: table path armed but the entry has no tables \
-                             (insert happened on the dtod path)"
-                                .into(),
-                        );
-                    };
-                    let Some(t_conv) = entry.table_conv.as_ref() else {
-                        return Err(
-                            "prefix restore: table path armed but the entry has no tables \
-                             (insert happened on the dtod path)"
-                                .into(),
-                        );
-                    };
+                    let t_rec = entry.table_rec.as_ref().expect("entry tables ensured");
+                    let t_conv = entry.table_conv.as_ref().expect("entry tables ensured");
                     engine.copy(
                         stream,
                         ClassId::Recurrent,
@@ -1189,5 +1187,39 @@ mod tests {
             full_state_bytes(&state, &stream),
             "restore through a pool-reused arena must reproduce the live state"
         );
+    }
+
+    /// T5 — a dtod-born entry restored under the table path gains its
+    /// tables LAZILY (the same build the refresh path runs); arming
+    /// mid-process no longer strands pre-arm checkpoints, and the
+    /// lazy-armed scatter lands the snapshot bytes.
+    #[test]
+    fn test_table_restore_lazily_arms_dtod_entry() {
+        let _g = TEST_SER.lock().unwrap_or_else(|p| p.into_inner());
+        let stream = test_stream();
+        let mut state = make_state(&stream, 55);
+
+        // Env posture, unset: the insert runs the dtod loop.
+        unsafe { std::env::remove_var("QWEN38_PREFIX_TABLE_COPY") };
+        let mut c = Qwen38PrefixCache::new(2);
+        c.insert(&stream, &state, &TOKENS).unwrap();
+        let mut dirty = make_state(&stream, 56);
+        c.restore(&stream, &mut dirty, &TOKENS).unwrap();
+        assert_eq!(
+            full_state_bytes(&dirty, &stream),
+            full_state_bytes(&state, &stream),
+            "dtod restore baseline"
+        );
+
+        // Arm mid-process: the restore must lazily build the tables —
+        // never the old arming-order refusal — and land the same bytes.
+        unsafe { std::env::set_var("QWEN38_PREFIX_TABLE_COPY", "1") };
+        c.restore(&stream, &mut dirty, &TOKENS).unwrap();
+        assert_eq!(
+            full_state_bytes(&dirty, &stream),
+            full_state_bytes(&state, &stream),
+            "lazy-armed table restore must land the snapshot bytes"
+        );
+        unsafe { std::env::remove_var("QWEN38_PREFIX_TABLE_COPY") };
     }
 }

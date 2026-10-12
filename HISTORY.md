@@ -298,6 +298,34 @@ T1–T3 landed `09d0dd5`: the `DisaggregatedTernaryWeights` container (`load_pai
 
 Landed `d1b9bd5` (session katopz-m3-622-continue) + follow-ups `71a0845` (loop_probe stale layer_idx repair) / `47f8f6f` (quiet the posture-dependent unused layer_idx warning) / `9f3b27b` (the harness compiles at its OWN required-features posture — the P43 class: single-feature clippy runs skipped the bin naming only half its row; full-posture findings fixed, clippy 0, release bin builds). Surface: `transformer/attention_si.rs` (opt-in `scale_invariant_attn = ["katgpt-core/scale_invariant_attn", "deltanet_ternary_inference"]`) — the affine in pass 1's LOGIT space (post-scale, pre-max; sink carve-out App. J), bit-identical to katgpt-core `apply_inplace_calibrated` at logit_scale 1.0; `SiAttentionSession` Probe/Armed on the forward scratch (the G3 A/B swap, no signature ripple); seq/par dispatch mirroring the plain kernel. `deltanet`: `layer_idx` threaded to the attention kernels (the calibration slot = layer_idx·n_head + head); the si dispatch (Probe/Armed/None) is the ONLY si site on the ternary decode path — None + flag-off = the plain path, bit-identical. `gguf_loader`: `pp_rope_table_from_marks` — the Plan-449 mark reader (`*.attention.si_pprope=1` + `*.rope.pp_effective_base`) building `RopeFreqTable::new_pp`; loud-fail on an unmarked GGUF (the serving precondition; measurement harnesses bypass with `--pp-train-len`). `bin si_zero_shot_ppl` (required-features `scale_invariant_attn` + `bonsai2_hadamard`): the G3 zero-shot split harness — calibrated / uncalibrated / pp-RoPE-expected-FAIL rows. Wiring-test repairs in the same landing: dense deterministic trits + the three norm/wo fills (the fixture was reading green over nothing — sparse speckle × sparse embedding = exactly-zero dots, σ ≡ 0); the σ-slot contract handles hybrid models (GDN slots ride the neutral 1.0, never read; a shortfall of MEASURED attention slots is loud); katgpt-core `heads()` doc corrected (pre-sized capacity, not an observation count). Validation: wired lib 346/0 (8 attention_si tests incl. 3 wiring e2e); default lib 264/0 unchanged; clippy `-D warnings` 0 at default and wired; katgpt-core wired 2171/0. **GPU legs OPEN** (G3 Bonsai zero-shot split runs, Metal/CUDA parity, real-logit diagnostics, league cells) — gated on the GPU window. Canonical status + phase ledger: `../katgpt-rs/.plans/622_scale_invariant_attn.md` (Phases 1–6 + Phase 7 CPU legs landed; source arXiv:2505.17083). This row closes the doc-sync gap: the lane had code + plan-side records but no in-repo HISTORY/AGENTS anchor.
 
+## 2026-10-13 — Issue 041 CLOSED (T1–T5 all landed): the prefix-cache snapshot submit burst — 96 submits → 2 launches per direction, the serving-lane TTFT lane
+
+Landed `971b842` (T1+T2: the pointer-table copy path — module-local `TableCopyEngine` in
+`qwen38_prefix_cache.rs`, dual device pointer tables (live-state freshness-checked via a
+host address compare + per-entry tables), ONE `prefix_table_copy` launch per class per
+direction, opt-in `QWEN38_PREFIX_TABLE_COPY=1`, bit-identity vs the dtod loop gated),
+`48c2948` (T3: the module-level submit-count probe — four `Relaxed` counters +
+`submit_probe_counts()`/`_reset()`, the count-regression gate that caught its own
+author's miscount on first run — + `examples/prefix_cache_ab.rs` + **bench 036**: probe
+`[192,0,4,0]` warm (96→2 confirmed at the real 27B shape, ~151 MiB/checkpoint); the dtod
+path is HOST-bound at ~8 µs/submit (~770 µs enqueue per direction); the table path
+enqueues 18.5–22× less and halves the sync-inclusive wall (0.49×/0.48×); stable two
+runs), `bb2a4b5` (T4: the snapshot arena pool — per-entry contiguous arenas, one buffer
+per class + `RecycledArena` recycling (cap `max_entries`, evict→take keeps the memory
+bound): fresh insert 96 allocs → 2 cold / 0 pool hit, dtod fresh-insert wall 1.70 ms →
+0.93 ms measured), and the T5 closure commit (this one: `src/bin/qwen38_prefix_graph_probe.rs`
+— the rebuilt real-model graph co-existence gate, ALL PASS on the dbirks 27B under both
+copy paths and both graph arms + the module fix: the restore's arming-order refusal
+replaced by the refresh path's lazy table build, gated by
+`test_table_restore_lazily_arms_dtod_entry`; gates 6/6 GREEN, clippy clean both
+postures). Full records: `.benchmarks/036_prefix_cache_submit_burst_ab.md` (T3 + T4 + T5
+addenda, box-state provenance per the Issue-021 law). The dtod loop stays DEFAULT —
+serving-lane (TTFT) only, never a scored league lane; promotion of the table path stays
+an owner act per the feature-flag discipline. The T5 probe's first failure is recorded
+in bench 036's addendum (the verify chunk commits its GDN advance — a checkpoint must
+precede the reference verify). Narrative: `git log --follow --
+.issues/041_prefix_cache_snapshot_submit_burst.md`.
+
 ## Lessons
 
 - Check the reference implementation, not a remembered standard, before filing a fixture-integrity finding (Issue 010).

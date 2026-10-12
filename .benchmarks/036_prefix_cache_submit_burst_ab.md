@@ -95,3 +95,32 @@ the new `test_arena_pool_reuse_zero_allocs` — pool hit = 0 allocs AND a full b
 restore through a recycled arena); clippy `-D warnings` clean at both postures. The table
 arm's fresh-insert wall (9.1 ms) remains engine-build-dominated (one nvrtc compile per
 process, disclosed).
+
+## T5 addendum — the graph co-existence re-proof (same window, 2026-10-13)
+
+T5 closed the issue: `src/bin/qwen38_prefix_graph_probe.rs` (the rebuilt gate — the
+issue-742 T4 harness is git history) boots the real dbirks 27B, captures BOTH graph arms
+(p=8 verify chunk graph + p=1 decode graph), and requires bit-identical graphed replays
+after prefix-cache restores under BOTH copy paths. ALL PASS: dtod restore → replay `==`
+ref; table scatter restore → replay `==` ref; full table gather+scatter cycle at a second
+base position → replay `==` ref2. The submit probe read exactly as designed at every
+step (`[96,2,0,0]` insert / `[192,2,0,0]` restore+dirty / `[0,0,2,4]` lazy-armed scatter /
+`[0,0,2,0]` warm gather).
+
+Two real findings landed with it:
+
+1. **The probe's own sequence trap (worth recording):** the verify chunk COMMITS its GDN
+   state advance (the conv window + recurrence kernels run in-place over the chunk) — a
+   checkpoint taken after a verify run snapshots the POST-verify state, and restoring it
+   at the pre-verify base position diverges (the gate caught this as its first failure,
+   signature `[271,271,271,96141,…] ≠ ref`). The checkpoint must precede the reference
+   verify. The first failure was the probe's, not the module's — the module behaved
+   exactly as its state semantics dictate.
+2. **A module wart fixed: the restore's arming-order refusal.** An entry born on the
+   dtod path could not be restored after `QWEN38_PREFIX_TABLE_COPY=1` armed mid-process
+   ("insert happened on the dtod path") — while the refresh path lazily built tables for
+   exactly that situation. The restore now runs the same `ensure_entry_tables` lazy
+   build; geometry drift still refuses in the table build's len check and the copy's
+   shape check. Gated by `test_table_restore_lazily_arms_dtod_entry` (env-mode cache,
+   dtod insert, mid-process arm, restore lands snapshot bytes). Gates 6/6 GREEN; clippy
+   `-D warnings` clean at both postures.
