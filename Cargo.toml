@@ -351,6 +351,10 @@ required-features = ["deltanet_ternary_inference"]
 # the reader (a --features selection without the union SKIPS loudly instead
 # of printing a green zero).
 [[test]]
+name = "gdn_step_parallel_goat"
+required-features = ["deltanet_ternary_inference"]
+
+[[test]]
 name = "dense_ab_simd_goat"
 required-features = ["deltanet_ternary_inference"]
 

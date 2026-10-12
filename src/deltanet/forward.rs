@@ -295,6 +295,52 @@ pub fn gated_deltanet_step_inplace(
     }
 }
 
+/// Head-parallel, row-fused [`gated_deltanet_step_inplace`] — BIT-IDENTICAL.
+///
+/// Every V-head's state is independent, and within a head every state row
+/// is: decay the row, `kv = dot(row, k)`, `δ = β(v − kv)`, `row += δ·k`
+/// (FMA), `out = dot(row, q)·scale`. The serial kernel does those as four
+/// whole-head passes; this does them per row in one pass and spreads heads
+/// over rayon. The per-element operations and their order are unchanged
+/// (`simd_outer_product_acc` with `m = 1` is the same per-row FMA loop), so
+/// the result is bit-identical — pinned over a 32-token recurrent stream by
+/// `tests/gdn_step_parallel_goat.rs`. No `kv_mem`/`delta` scratch: δ is a
+/// per-row scalar.
+#[allow(clippy::too_many_arguments)]
+pub fn gated_deltanet_step_par_inplace(
+    q: &[f32],
+    k: &[f32],
+    v: &[f32],
+    state: &mut [f32],
+    beta: &[f32],
+    decay: &[f32],
+    n_v_heads: usize,
+    key_dim: usize,
+    val_dim: usize,
+    output: &mut [f32],
+) {
+    use rayon::prelude::*;
+    let per_head = key_dim * val_dim;
+    let scale = 1.0 / (key_dim as f32).sqrt();
+    state[..n_v_heads * per_head]
+        .par_chunks_mut(per_head)
+        .zip(output[..n_v_heads * val_dim].par_chunks_mut(val_dim))
+        .enumerate()
+        .for_each(|(h, (s, out))| {
+            let (g, b) = (decay[h], beta[h]);
+            let k_head = &k[h * key_dim..(h + 1) * key_dim];
+            let q_head = &q[h * key_dim..(h + 1) * key_dim];
+            let v_head = &v[h * val_dim..(h + 1) * val_dim];
+            for ((s_row, o), &vr) in s.chunks_exact_mut(key_dim).zip(out.iter_mut()).zip(v_head) {
+                crate::simd::simd_scale_inplace(s_row, g);
+                let kv = crate::simd::simd_dot_f32(s_row, k_head, key_dim);
+                let d = b * (vr - kv);
+                crate::simd::simd_outer_product_acc(s_row, std::slice::from_ref(&d), k_head, 1, key_dim);
+                *o = crate::simd::simd_dot_f32(s_row, q_head, key_dim) * scale;
+            }
+        });
+}
+
 /// Causal depthwise conv1d update for a single token (decode mode).
 ///
 /// Updates the conv sliding window state and applies `SiLU` activation.
@@ -505,8 +551,8 @@ pub(super) fn deltanet_layer_recurrent_body(
         l2_normalize(&mut scratch.k_normed[off..off + key_dim]);
     }
 
-    // 9. Gated delta rule recurrence (in-place into scratch — zero allocation).
-    gated_deltanet_step_inplace(
+    // 9. Gated delta rule recurrence (in-place, head-parallel, bit-identical).
+    gated_deltanet_step_par_inplace(
         &scratch.q_normed,
         &scratch.k_normed,
         v_slice,
@@ -517,8 +563,6 @@ pub(super) fn deltanet_layer_recurrent_body(
         key_dim,
         val_dim,
         &mut scratch.recurrent_output,
-        &mut scratch.kv_mem,
-        &mut scratch.delta,
     );
 
     // 10. Gated RMSNorm: per-head RMSNorm (`linear_norm` is `[val_dim]`,
@@ -903,10 +947,6 @@ pub struct DeltaNetLayerScratch {
     pub(super) k_normed: Vec<f32>,
     /// Recurrent output: `[n_v_heads * val_dim]`.
     pub(super) recurrent_output: Vec<f32>,
-    /// Per-head matvec scratch: `[val_dim]`.
-    pub(super) kv_mem: Vec<f32>,
-    /// Per-head delta scratch: `[val_dim]`.
-    pub(super) delta: Vec<f32>,
 }
 
 impl DeltaNetLayerScratch {
@@ -927,8 +967,6 @@ impl DeltaNetLayerScratch {
             q_normed: vec![0.0; n_v_heads * key_dim],
             k_normed: vec![0.0; n_v_heads * key_dim],
             recurrent_output: vec![0.0; n_v_heads * key_dim],
-            kv_mem: vec![0.0; key_dim],
-            delta: vec![0.0; key_dim],
         }
     }
 }

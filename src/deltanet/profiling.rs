@@ -30,7 +30,7 @@ use std::time::{Duration, Instant};
 
 use super::forward::{
     AttentionLayerScratch, DeltaNetLayerScratch, HybridCache, HybridForwardScratch,
-    causal_conv1d_update, effective_rotary_dim, expand_heads_into, gated_deltanet_step_inplace,
+    causal_conv1d_update, effective_rotary_dim, expand_heads_into, gated_deltanet_step_par_inplace,
     l2_normalize, softplus,
 };
 use super::ternary_weights::{
@@ -355,7 +355,7 @@ fn profiled_deltanet_layer(
 
     // 9. Recurrence
     let t = Instant::now();
-    gated_deltanet_step_inplace(
+    gated_deltanet_step_par_inplace(
         &scratch.q_normed,
         &scratch.k_normed,
         v_slice,
@@ -366,8 +366,6 @@ fn profiled_deltanet_layer(
         key_dim,
         val_dim,
         &mut scratch.recurrent_output,
-        &mut scratch.kv_mem,
-        &mut scratch.delta,
     );
     ForwardProfiler::record(&mut prof.dn_recurrence, t);
 

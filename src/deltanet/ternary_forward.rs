@@ -37,7 +37,7 @@
 
 use super::forward::{
     AttentionLayerScratch, DeltaNetLayerScratch, HybridCache, HybridForwardScratch,
-    causal_conv1d_update, effective_rotary_dim, expand_heads_into, gated_deltanet_step_inplace,
+    causal_conv1d_update, effective_rotary_dim, expand_heads_into, gated_deltanet_step_par_inplace,
     l2_normalize, softplus,
 };
 use super::ternary_weights::{
@@ -270,7 +270,7 @@ pub(crate) fn forward_deltanet_layer_ternary(
     }
 
     // 9. Gated delta rule recurrence
-    gated_deltanet_step_inplace(
+    gated_deltanet_step_par_inplace(
         &scratch.q_normed,
         &scratch.k_normed,
         v_slice,
@@ -281,8 +281,6 @@ pub(crate) fn forward_deltanet_layer_ternary(
         key_dim,
         val_dim,
         &mut scratch.recurrent_output,
-        &mut scratch.kv_mem,
-        &mut scratch.delta,
     );
 
     // 10. Gated RMSNorm + SiLU(z) (dense field: linear_norm)
