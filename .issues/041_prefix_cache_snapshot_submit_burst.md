@@ -1,8 +1,17 @@
 # Issue 041: prefix-cache snapshot submit burst — pointer-table gather/scatter (the #29807 analogue)
 
-**Status:** OPEN — design filed 2026-10-11 (Research 397 follow-up); implementation awaits a
-GPU window; deliberately deferred behind the b10770 league bout + katgpt-rs Issue-926
-quiet re-pins this cycle (window economics — the win is ms-class on a non-scored lane).
+**Status:** OPEN — **T1+T2 DONE 2026-10-13 (idle-window unit, 4090 `wt038infer`):** the
+pointer-table copy path LANDED in `qwen38_prefix_cache.rs` (module-local engine, not the
+rotation module — it needs `PrefixEntry` knowledge; the divergence is deliberate) — dual
+device pointer tables (live state + per-entry snapshots) + ONE `prefix_table_copy` launch
+per class per direction (grid.y = layer), opt-in `QWEN38_PREFIX_TABLE_COPY=1`, dtod loop
+stays default; NOT the T1-as-written arena (that restructure is T4, still open). Gates
+GREEN on the 4090 (3/3: bit-identity vs the dtod loop — the T2 gate —, refresh + second
+entry + LRU eviction lifecycle, non-uniform shape loud refusal); clippy clean at the
+posture + the feature-OFF posture. Submits per warm cycle: 96 → 2 per direction (state-
+table freshness rides a host-side address compare — zero submits on an unchanged state).
+Remaining: T3 (wall-time A/B at the real 27B shape — the GOAT surface), T4 (arena pool —
+the fresh-insert 96-alloc burst), T5 (graph co-existence re-proof under the full forward).
 
 ## The surface (measured by Research 397, riir-ai `.research/397`)
 
@@ -61,16 +70,30 @@ never touch the prefix cache. Priority accordingly.
 
 ## Gates
 
-- [ ] T1 — pointer table + gather/scatter kernels (`ternary_gemv_cuda_raw` lane,
-      alongside the rotation kernels; vocab follows `fwht_rotate_copy_batched` precedent
-      for the batched-copy family).
-- [ ] T2 — G1: bit-identity vs the `memcpy_dtod` loop (extend the T4 harness; both
-      directions: snap-then-restore == identity, and snapshot bytes == loop bytes).
+- [x] T1 — pointer table + gather/scatter kernels — **DONE 2026-10-13, adapted**:
+      module-local `TableCopyEngine` in `qwen38_prefix_cache.rs` (the engine needs
+      entry-table lifetime coupling — module-local beats the rotation-module option);
+      ONE kernel (`prefix_table_copy`) serves both directions (table order swapped);
+      dual tables: live-state (freshness-checked per call, rebuilt only on address
+      drift) + per-entry (built at entry creation, lifetime == entry).
+- [x] T2 — G1: bit-identity vs the `memcpy_dtod` loop — **DONE 2026-10-13**:
+      `test_table_copy_bit_identity_against_dtod_loop` (insert+restore through both
+      paths into identical targets, byte-compare via `to_bits` — GREEN) + the entry
+      lifecycle gate (refresh / second entry / LRU eviction) + the non-uniform refusal
+      gate (the kernel's grid.y × stride shape cannot express per-layer strides — a
+      non-uniform class refuses loudly, never copies wrongly).
 - [ ] T3 — G2: submit-count probe + wall-time A/B at insert/restore (short-suffix
-      scenario FIRST — the only regime where the win is visible).
-- [ ] T4 — arena pool + eviction reuse; no new per-call allocs (G4 posture).
+      scenario FIRST — the only regime where the win is visible). Code-level submits:
+      96 → 2 launches per direction (+1 htod per fresh entry for its dst tables); the
+      A/B needs the real 27B state (~159 MB/checkpoint) through the serving harness.
+- [ ] T4 — arena pool + eviction reuse; no new per-call allocs (G4 posture). The
+      fresh-insert 96-alloc burst is untouched by the table path (deliberate — the
+      restore path, the TTFT-critical one, carries no allocs in either posture).
 - [ ] T5 — the graph-capture co-existence re-proof (cache hits under the graph arm —
       the existing T4 gate re-run; the pointer table must not change live addresses).
+      Note: the table path ALIGNS with the capture constraint — it never allocates or
+      moves live buffers; the gather/scatter launch is a plain stream kernel (capturable
+      class) — but the proof is the existing gate re-run, not this argument.
 
 ## Refs
 
