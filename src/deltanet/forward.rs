@@ -531,25 +531,8 @@ pub(super) fn deltanet_layer_recurrent_body(
     // When `repeat_factor > 1`, each k/q head is broadcast to `repeat_factor`
     // v heads (ggml_repeat modulo semantics — see `expand_heads_into`).
     let repeat_factor = n_v_heads / n_k_heads;
-    expand_heads_into(
-        q_slice,
-        n_k_heads,
-        key_dim,
-        repeat_factor,
-        &mut scratch.q_normed,
-    );
-    expand_heads_into(
-        k_slice,
-        n_k_heads,
-        key_dim,
-        repeat_factor,
-        &mut scratch.k_normed,
-    );
-    for h in 0..n_v_heads {
-        let off = h * key_dim;
-        l2_normalize(&mut scratch.q_normed[off..off + key_dim]);
-        l2_normalize(&mut scratch.k_normed[off..off + key_dim]);
-    }
+    expand_l2_normalized_heads_into(q_slice, n_k_heads, key_dim, repeat_factor, n_v_heads, &mut scratch.q_normed);
+    expand_l2_normalized_heads_into(k_slice, n_k_heads, key_dim, repeat_factor, n_v_heads, &mut scratch.k_normed);
 
     // 9. Gated delta rule recurrence (in-place, head-parallel, bit-identical).
     gated_deltanet_step_par_inplace(
@@ -634,6 +617,29 @@ pub fn expand_heads_into(
     let src_block = &src[..block];
     for r in 0..repeat.max(1) {
         dst[r * block..r * block + block].copy_from_slice(src_block);
+    }
+}
+
+/// [`expand_heads_into`] + per-head [`l2_normalize`] of the first
+/// `n_dst_heads` heads, normalizing each SOURCE head once and tiling the
+/// normalized block — bit-identical to expand-then-normalize (every tile is
+/// the same bytes normalized the same way), at `1/repeat` of the norm work
+/// (Bonsai 2: 16 K-heads tiled ×3 → 32 norms per layer instead of 96).
+pub fn expand_l2_normalized_heads_into(
+    src: &[f32],
+    n_src_heads: usize,
+    head_dim: usize,
+    repeat: usize,
+    n_dst_heads: usize,
+    dst: &mut [f32],
+) {
+    let block = n_src_heads * head_dim;
+    dst[..block].copy_from_slice(&src[..block]);
+    for h in 0..n_src_heads.min(n_dst_heads) {
+        l2_normalize(&mut dst[h * head_dim..(h + 1) * head_dim]);
+    }
+    for r in 1..repeat {
+        dst.copy_within(..block, r * block);
     }
 }
 
@@ -2254,6 +2260,25 @@ pub fn generate_greedy_qwen_deltanet(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn expand_l2_normalized_heads_is_bit_identical_to_expand_then_normalize() {
+        let head_dim = 128;
+        for (n_src, repeat, n_dst) in [(16usize, 3usize, 48usize), (4, 1, 4), (4, 0, 2), (2, 2, 4)] {
+            let src: Vec<f32> = (0..n_src * head_dim).map(|i| ((i * 37 % 101) as f32 - 50.0) * 0.013).collect();
+            let len = n_src * head_dim * repeat.max(1);
+            let (mut want, mut got) = (vec![0.0f32; len], vec![0.0f32; len]);
+            expand_heads_into(&src, n_src, head_dim, repeat, &mut want);
+            for h in 0..n_dst {
+                l2_normalize(&mut want[h * head_dim..(h + 1) * head_dim]);
+            }
+            expand_l2_normalized_heads_into(&src, n_src, head_dim, repeat, n_dst, &mut got);
+            assert!(
+                want.iter().zip(&got).all(|(a, b)| a.to_bits() == b.to_bits()),
+                "n_src {n_src} repeat {repeat} n_dst {n_dst}"
+            );
+        }
+    }
 
     /// GOAT proof T1e: Gated `DeltaNet` step produces deterministic output.
     #[test]

@@ -37,8 +37,8 @@
 
 use super::forward::{
     AttentionLayerScratch, DeltaNetLayerScratch, HybridCache, HybridForwardScratch,
-    causal_conv1d_update, effective_rotary_dim, expand_heads_into, gated_deltanet_step_par_inplace,
-    l2_normalize, softplus,
+    causal_conv1d_update, effective_rotary_dim, expand_l2_normalized_heads_into,
+    gated_deltanet_step_par_inplace, softplus,
 };
 use super::ternary_weights::{
     DeltaNetTernaryLayerWeights, ProjWeights, QwenDeltaNetTernaryWeights,
@@ -249,25 +249,8 @@ pub(crate) fn forward_deltanet_layer_ternary(
 
     // 7-8. Expand K/Q heads + L2-normalize
     let repeat_factor = n_v_heads / n_k_heads;
-    expand_heads_into(
-        q_slice,
-        n_k_heads,
-        key_dim,
-        repeat_factor,
-        &mut scratch.q_normed,
-    );
-    expand_heads_into(
-        k_slice,
-        n_k_heads,
-        key_dim,
-        repeat_factor,
-        &mut scratch.k_normed,
-    );
-    for h in 0..n_v_heads {
-        let off = h * key_dim;
-        l2_normalize(&mut scratch.q_normed[off..off + key_dim]);
-        l2_normalize(&mut scratch.k_normed[off..off + key_dim]);
-    }
+    expand_l2_normalized_heads_into(q_slice, n_k_heads, key_dim, repeat_factor, n_v_heads, &mut scratch.q_normed);
+    expand_l2_normalized_heads_into(k_slice, n_k_heads, key_dim, repeat_factor, n_v_heads, &mut scratch.k_normed);
 
     // 9. Gated delta rule recurrence
     gated_deltanet_step_par_inplace(
