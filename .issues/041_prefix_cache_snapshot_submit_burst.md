@@ -1,24 +1,26 @@
 # Issue 041: prefix-cache snapshot submit burst — pointer-table gather/scatter (the #29807 analogue)
 
-**Status:** OPEN — **T1+T2+T3 DONE 2026-10-13:** the pointer-table copy path LANDED in
+**Status:** OPEN — **T1+T2+T3+T4 DONE 2026-10-13:** the pointer-table copy path LANDED in
 `qwen38_prefix_cache.rs` (module-local engine, not the rotation module — it needs
 `PrefixEntry` knowledge; the divergence is deliberate) — dual device pointer tables (live
 state + per-entry snapshots) + ONE `prefix_table_copy` launch per class per direction
-(grid.y = layer), opt-in `QWEN38_PREFIX_TABLE_COPY=1`, dtod loop stays default; NOT the
-T1-as-written arena (that restructure is T4, still open). Gates GREEN on the 4090 (4/4:
-bit-identity vs the dtod loop — the T2 gate —, refresh + second entry + LRU eviction
-lifecycle, non-uniform shape loud refusal, + the T3 submit-count probe regression test);
-clippy clean at both postures. **T3 EXECUTED (bench 036):** the submit probe reads
-`[192,0,4,0]` for a warm refresh+restore cycle (96→2 per direction, exactly as designed);
-wall-time A/B at the real 27B shape (~151 MiB/checkpoint, 41 order-rotated paired reps):
-enqueue **0.054×/0.045×** (18.5–22× less host driver time — the dtod path is HOST-bound
-at ~8 µs/submit), sync-inclusive **0.49×/0.48×**; stable across two runs. The dtod loop
-stays default — promotion is not gated on this bench (serving-lane TTFT only, never a
-scored league lane).
-Remaining: T4 (arena pool — the fresh-insert 96-alloc burst, both paths), T5 (graph
-co-existence re-proof under the full forward — the issue-742 harness is removed, so T5
-needs a rebuilt real-model harness: GGUF load + graph capture + cache hit under the graph
-arm).
+(grid.y = layer), opt-in `QWEN38_PREFIX_TABLE_COPY=1`, dtod loop stays default. Gates
+GREEN on the 4090 (5/5: bit-identity vs the dtod loop — the T2 gate —, refresh + second
+entry + LRU eviction lifecycle, non-uniform shape loud refusal, the T3 submit-count probe
+regression test, + the T4 pool-reuse gate); clippy clean at both postures. **T3 EXECUTED
+(bench 036):** the submit probe reads `[192,0,4,0]` for a warm refresh+restore cycle
+(96→2 per direction, exactly as designed); wall-time A/B at the real 27B shape
+(~151 MiB/checkpoint, 41 order-rotated paired reps): enqueue **0.054×/0.045×** (18.5–22×
+less host driver time — the dtod path is HOST-bound at ~8 µs/submit), sync-inclusive
+**0.49×/0.48×**; stable across two runs. **T4 LANDED (same window):** per-entry snapshot
+arenas (one contiguous buffer per class) + a recycled pool (cap `max_entries`) — fresh
+inserts pay 2 arena allocs cold / 0 on a pool hit (was the 96-alloc burst every insert);
+dtod fresh-insert wall 1.70 ms → **0.93 ms**; the warm path is untouched (bench 036
+addendum). The dtod loop stays default — promotion is not gated on these benches
+(serving-lane TTFT only, never a scored league lane).
+Remaining: T5 (graph co-existence re-proof under the full forward — the issue-742 harness
+is removed, so T5 needs a rebuilt real-model harness: GGUF load + graph capture + cache
+hit under the graph arm).
 
 ## The surface (measured by Research 397, riir-ai `.research/397`)
 
@@ -100,9 +102,18 @@ never touch the prefix cache. Priority accordingly.
       not content-driven; the GGUF itself adds nothing to a byte copy). Restores targeted
       the live state object — the production shape, keeping the state-table freshness
       probe warm.
-- [ ] T4 — arena pool + eviction reuse; no new per-call allocs (G4 posture). The
-      fresh-insert 96-alloc burst is untouched by the table path (deliberate — the
-      restore path, the TTFT-critical one, carries no allocs in either posture).
+- [x] T4 — arena pool + eviction reuse; no new per-call allocs (G4 posture) —
+      **DONE 2026-10-13**: per-entry snapshot arenas (ONE contiguous buffer per class;
+      the uniform-shape insert check now covers BOTH paths — an arena cannot express
+      per-layer strides) + `RecycledArena` pool (cap `max_entries`, evict→take ordering
+      keeps steady-state memory at the pre-T4 bound with one transient arena). Fresh
+      insert: 2 arena allocs cold, 0 on a geometry-matched pool hit
+      (`test_arena_pool_reuse_zero_allocs` pins it + byte-compares a restore through a
+      recycled arena); a pooled arena's stale bytes are fully overwritten before any
+      read. Measured: dtod fresh-insert wall 1.70 ms → 0.93 ms (bench 036 addendum);
+      warm cycle unchanged. The table path's entry-table htods (2 per fresh insert)
+      are deliberately NOT recycled — recycling tables with arenas would save ~2 µs
+      per fresh insert and cost an address-drift hazard.
 - [ ] T5 — the graph-capture co-existence re-proof (cache hits under the graph arm —
       the existing T4 gate re-run; the pointer table must not change live addresses).
       Note: the table path ALIGNS with the capture constraint — it never allocates or

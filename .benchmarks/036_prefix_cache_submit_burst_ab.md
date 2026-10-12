@@ -75,3 +75,23 @@ forever — a future edit that adds a submit reds CI.
 - riir-ai `.research/397` (the 96-submit measurement this A/B confirms)
 - llama.cpp PR #29807 (the same move upstream, merged 2026-10-09)
 - `crates/riir-infer-gpu/examples/prefix_cache_ab.rs` (the instrument)
+
+## T4 addendum — the arena pool (validated same window, 2026-10-13)
+
+The T4 arena pool landed after this bench's T3 read: each entry's snapshots live in ONE
+contiguous buffer per class, recycled through a pool (cap `max_entries`) on eviction and
+lineage prune. Measured on the same box/posture (same instrument, post-T4 build):
+
+| fresh insert | pre-T4 | post-T4 |
+|---|---|---|
+| dtod arm wall | 1,642–1,704 µs | **928 µs** (96 per-layer allocs → 2 arena allocs) |
+| table arm allocs | 96 | **2** (0 on a geometry-matched pool hit) |
+| warm cycle | probe `[192,0,4,0]`, enq 0.054×/0.045×, sync 0.49×/0.48× | **unchanged** (probe `[192,0,4,0]`, enq 0.057×/0.049×, sync 0.511×/0.513×) |
+
+The warm path is untouched by design (the arenas only change WHERE snapshots live); the
+fresh-insert saving is ~0.78 ms of driver slice per new prefix (≈8 µs/alloc × 96 — the
+same µs-class rate the enqueue analysis measured). Gates: 5/5 GREEN (the four T3 gates +
+the new `test_arena_pool_reuse_zero_allocs` — pool hit = 0 allocs AND a full byte-compare
+restore through a recycled arena); clippy `-D warnings` clean at both postures. The table
+arm's fresh-insert wall (9.1 ms) remains engine-build-dominated (one nvrtc compile per
+process, disclosed).

@@ -16,9 +16,11 @@
 //! scopes FIRST: the only regime where the win is visible, a short-suffix
 //! fill's ~10 ms budget). Each op is timed twice: enqueue-only (the host
 //! driver-submit burst the serving loop's CPU pays) and sync-inclusive
-//! (device completion). The FRESH insert (the 96-alloc burst, T4's surface)
-//! is report-only context — it includes the table arm's lazy engine build
-//! (nvrtc compile) and is disclosed as such.
+//! (device completion). The FRESH insert (the T4 arena pool's surface) is
+//! report-only context — a fresh cache pays 2 arena allocs cold (the
+//! pre-T4 path paid 96 per-layer allocs every fresh insert); the table
+//! arm's first cache additionally includes the lazy engine build (nvrtc
+//! compile) and is disclosed as such.
 //!
 //! Restores target the live state object itself (the production shape: one
 //! serving session's state) so the table arm's state-table freshness probe
@@ -40,7 +42,7 @@ use cudarc::driver::safe::{CudaContext, CudaSlice, CudaStream};
 
 use riir_infer_gpu::qwen38_dense_cudarc::Qwen38DecodeState;
 use riir_infer_gpu::qwen38_prefix_cache::{
-    submit_probe_counts, submit_probe_reset, Qwen38PrefixCache,
+    Qwen38PrefixCache, submit_probe_counts, submit_probe_reset,
 };
 
 /// The Bonsai-2 27B GDN geometry (the `qwen38_dense_cudarc` config parse):
@@ -85,7 +87,12 @@ impl Arm {
 
 /// LCG fill — deterministic, every element in [-1, 1) (the test module's
 /// fill, at the 27B shape).
-fn fill_class(stream: &Arc<CudaStream>, layers: usize, len: usize, seed: u64) -> Vec<CudaSlice<f32>> {
+fn fill_class(
+    stream: &Arc<CudaStream>,
+    layers: usize,
+    len: usize,
+    seed: u64,
+) -> Vec<CudaSlice<f32>> {
     let mut lcg = seed.wrapping_mul(0x9E37_79B9_7F4A_7C15) | 1;
     let mut out = Vec::with_capacity(layers);
     for _ in 0..layers {
@@ -139,8 +146,7 @@ fn main() {
         }
     }
 
-    let ctx = CudaContext::new(0)
-        .unwrap_or_else(|e| panic!("CUDA context (the 4090 lane): {e}"));
+    let ctx = CudaContext::new(0).unwrap_or_else(|e| panic!("CUDA context (the 4090 lane): {e}"));
     let stream = ctx.new_stream().expect("stream");
 
     let ckpt_mib = (REC_LAYERS * REC_LEN + CONV_LAYERS * CONV_LEN) * 4 / (1024 * 1024);
@@ -162,10 +168,13 @@ fn main() {
             Arm::Dtod => &mut c_dtod,
             Arm::Table => &mut c_tab,
         };
-        c.insert(&stream, &state, &TOKENS).expect("warm fresh insert");
+        c.insert(&stream, &state, &TOKENS)
+            .expect("warm fresh insert");
         for _ in 0..warmup {
             c.insert(&stream, &state, &TOKENS).expect("warm refresh");
-            let matched = c.restore(&stream, &mut state, &TOKENS).expect("warm restore");
+            let matched = c
+                .restore(&stream, &mut state, &TOKENS)
+                .expect("warm restore");
             assert_eq!(matched, Some(TOKENS.len()));
         }
     }
@@ -180,7 +189,8 @@ fn main() {
             Arm::Table => &mut c_tab,
         };
         c.insert(&stream, &state, &TOKENS).expect("probe refresh");
-        c.restore(&stream, &mut state, &TOKENS).expect("probe restore");
+        c.restore(&stream, &mut state, &TOKENS)
+            .expect("probe restore");
     }
     let counts = submit_probe_counts();
     println!(
@@ -197,13 +207,15 @@ fn main() {
         submit_probe_reset();
         let mut fresh = Qwen38PrefixCache::new(1);
         let t = Instant::now();
-        fresh.insert(&stream, &state, &TOKENS).expect("fresh insert");
+        fresh
+            .insert(&stream, &state, &TOKENS)
+            .expect("fresh insert");
         let wall = t.elapsed();
         stream.synchronize().expect("fresh sync");
         let c = submit_probe_counts();
         println!(
             "fresh insert ({}) — wall {:?} | dtod={} allocs={} launches={} htods={} \
-             (the 96-alloc burst is T4's surface; the table arm's engine build rides this number)",
+             (T4: 2 arena allocs cold / 0 pool hit; the table arm's engine build rides this number)",
             arm.label(),
             wall,
             c[0],
@@ -229,13 +241,16 @@ fn main() {
                 Arm::Table => &mut c_tab,
             };
             let t0 = Instant::now();
-            c.insert(&stream, &state, &TOKENS).expect("timed refresh insert");
+            c.insert(&stream, &state, &TOKENS)
+                .expect("timed refresh insert");
             let enq_ins = t0.elapsed();
             stream.synchronize().expect("timed sync ins");
             let sync_ins = t0.elapsed();
 
             let t1 = Instant::now();
-            let matched = c.restore(&stream, &mut state, &TOKENS).expect("timed restore");
+            let matched = c
+                .restore(&stream, &mut state, &TOKENS)
+                .expect("timed restore");
             let enq_res = t1.elapsed();
             stream.synchronize().expect("timed sync res");
             let sync_res = t1.elapsed();
@@ -288,9 +303,7 @@ fn main() {
     // Same-rep paired ratios (rep i pairs across arms — order-rotated).
     let paired = |get: fn(&Sample) -> Duration| -> f64 {
         let mut rs: Vec<f64> = (0..reps)
-            .map(|i| {
-                us(get(&s_tab[i])) / us(get(&s_dtod[i])).max(1.0)
-            })
+            .map(|i| us(get(&s_tab[i])) / us(get(&s_dtod[i])).max(1.0))
             .collect();
         rs.sort_by(|a, b| a.partial_cmp(b).unwrap());
         rs[rs.len() / 2]

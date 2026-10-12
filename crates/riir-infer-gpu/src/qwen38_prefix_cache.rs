@@ -79,9 +79,20 @@
 //! dst_table[layer]. Bit-identical to the dtod loop by construction (pure
 //! Bit-identical to the dtod loop by construction (pure
 //! f32 copies, element order unchanged) — gated by
-//! `test_table_copy_bit_identity_against_dtod_loop`. NOT the T4 arena pool
-//! (fresh inserts still allocate per-layer snapshots; the burst the arena
-//! kills is the alloc side, a follow-up).
+//! `test_table_copy_bit_identity_against_dtod_loop`.
+//!
+//! # Issue 041 T4 — the snapshot arena pool
+//!
+//! Each entry's snapshots live in ONE contiguous buffer per class (layer
+//! `i` at `[i*stride, (i+1)*stride)` — the uniform-shape insert check
+//! refuses anything else, both paths). Eviction and lineage prunes return
+//! the arenas to a pool (capped at `max_entries`); a geometry-matched
+//! fresh insert takes one instead of paying the per-layer 96-alloc burst
+//! — 2 arena allocs on a cold pool, ZERO on a pool hit (pinned by
+//! `test_arena_pool_reuse_zero_allocs`). A pooled arena carries stale
+//! bytes by design: the copy that follows overwrites every layer before
+//! any read. Steady-state device memory stays at the `max_entries`-checkpoint
+//! bound (one transient arena during the evict→take swap).
 //!
 //! # Issue 041 T3 — the submit-count probe
 //!
@@ -89,8 +100,9 @@
 //! increment per driver submit: dtod memcpies, snapshot allocs, table
 //! launches, table htods. One warm refresh-insert + restore cycle at the
 //! 27B shape reads `[192, 0, 0, 0]` on the dtod path vs `[0, 0, 4, 0]` on
-//! the table path; a fresh insert adds the 96-alloc burst (both paths —
-//! T4's surface) and the table path's one-time table htods. The counters
+//! the table path; a fresh insert pays the T4 arena allocs (2 on a cold
+//! pool, 0 on a geometry-matched pool hit) and the table path's one-time
+//! table htods. The counters
 //! are plain `Relaxed` adds on a path that runs ≤ ~200 submits per cycle —
 //! unmeasurable against the driver slice they count.
 #![cfg(all(feature = "ternary_gemv_cuda_raw", not(target_os = "macos")))]
@@ -99,8 +111,8 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
-use cudarc::driver::{DevicePtr, PushKernelArg};
 use cudarc::driver::safe::{CudaFunction, CudaModule, CudaSlice, CudaStream, LaunchConfig};
+use cudarc::driver::{DevicePtr, PushKernelArg};
 
 use crate::qwen38_dense_cudarc::Qwen38DecodeState;
 
@@ -114,8 +126,9 @@ static PROBE_TABLE_HTODS: AtomicU64 = AtomicU64::new(0);
 /// Read the submit-count probe: `[dtod_memcpies, snap_allocs,
 /// table_launches, table_htods]` since process start (or the last
 /// [`submit_probe_reset`]). Counts every driver submit the cache paths
-/// make — the dtod loops, the fresh-insert snapshot allocs, the table
-/// kernel launches, and the pointer-table htods.
+/// make — the dtod loops, the fresh-insert ARENA allocs (T4: 2 per cold
+/// pool miss, 0 on a geometry-matched pool hit), the table kernel
+/// launches, and the pointer-table htods.
 pub fn submit_probe_counts() -> [u64; 4] {
     [
         PROBE_DTOD_COPIES.load(Ordering::Relaxed),
@@ -134,20 +147,58 @@ pub fn submit_probe_reset() {
 }
 
 /// One whole-prefix checkpoint: the token prefix, its blake3 key, and the
-/// device-side GDN snapshots (recurrent + conv, same shapes as the live
-/// state buffers).
+/// device-side GDN snapshots — T4 arenas: ONE contiguous buffer per class
+/// (all layers back-to-back at the uniform stride; per-layer views are
+/// computed at use time because cudarc views borrow their parent).
 struct PrefixEntry {
     len: usize,
     hash: [u8; 32],
     tokens: Vec<u32>,
-    snap_recurrent: Vec<CudaSlice<f32>>,
-    snap_conv: Vec<CudaSlice<f32>>,
-    /// Issue 041 — device pointer tables over this entry's snapshots (the
-    /// src side of a table-copy restore AND the dst side of a table-copy
-    /// gather). Built once at entry creation when the table path is armed;
-    /// `None` on the dtod path.
+    /// `rec_layers * rec_stride` f32, layer `i` at `[i*rec_stride, (i+1)*rec_stride)`.
+    snap_rec: CudaSlice<f32>,
+    /// `conv_layers * conv_stride` f32, layer `i` at `[i*conv_stride, (i+1)*conv_stride)`.
+    snap_conv: CudaSlice<f32>,
+    /// The arena geometry (the live state's per-class layer count + stride
+    /// at insert time — a pool hit must match all four).
+    rec_layers: usize,
+    rec_stride: usize,
+    conv_layers: usize,
+    conv_stride: usize,
+    /// Issue 041 — device pointer tables over this entry's snapshot layers
+    /// (the src side of a table-copy restore AND the dst side of a
+    /// table-copy gather). Built once at entry creation when the table path
+    /// is armed; `None` on the dtod path. The addresses point into the
+    /// arenas above and stay valid for the entry's lifetime (T4: the arenas
+    /// are recycled only after the entry is dropped).
     table_rec: Option<PtrTable>,
     table_conv: Option<PtrTable>,
+}
+
+/// T4 — a recycled arena pair (the eviction/prune return lane). Reused only
+/// when the geometry matches the next fresh insert's live state exactly;
+/// anything else re-allocates rather than copying wrongly.
+struct RecycledArena {
+    snap_rec: CudaSlice<f32>,
+    snap_conv: CudaSlice<f32>,
+    rec_layers: usize,
+    rec_stride: usize,
+    conv_layers: usize,
+    conv_stride: usize,
+}
+
+impl RecycledArena {
+    fn matches(
+        &self,
+        rec_layers: usize,
+        rec_stride: usize,
+        conv_layers: usize,
+        conv_stride: usize,
+    ) -> bool {
+        self.rec_layers == rec_layers
+            && self.rec_stride == rec_stride
+            && self.conv_layers == conv_layers
+            && self.conv_stride == conv_stride
+    }
 }
 
 /// blake3 of the token sequence (little-endian u32s streamed — zero-alloc).
@@ -199,13 +250,20 @@ pub struct Qwen38PrefixCache {
     engine: Option<TableCopyEngine>,
     /// Arming source (env in production; direct in tests).
     table_mode: TableCopyMode,
+    /// T4 — recycled snapshot arenas (eviction + lineage prunes return
+    /// here; a geometry-matched fresh insert reuses one instead of paying
+    /// the 96-alloc burst). Capped at `max_entries` — the pool never holds
+    /// more device memory than the entries bound already allows.
+    arena_pool: Vec<RecycledArena>,
 }
 
 impl Qwen38PrefixCache {
     /// `max_entries` bounds device memory (~159 MB per checkpoint for the
-    /// 27B: 48×3.1 MB recurrent + 48×160 KB conv). Env knob
-    /// `QWEN38_PREFIX_CACHE_MAX` (default 4). The table-copy path arms via
-    /// `QWEN38_PREFIX_TABLE_COPY=1` (opt-in — issue 041).
+    /// 27B: 48×3.1 MB recurrent + 48×160 KB conv — T4: the arenas recycle
+    /// through a pool capped at `max_entries`, so steady-state memory stays
+    /// at this bound with one transient arena per evict→take swap). Env
+    /// knob `QWEN38_PREFIX_CACHE_MAX` (default 4). The table-copy path arms
+    /// via `QWEN38_PREFIX_TABLE_COPY=1` (opt-in — issue 041).
     pub fn new(max_entries: usize) -> Self {
         Self {
             entries: Vec::new(),
@@ -214,6 +272,7 @@ impl Qwen38PrefixCache {
             pruned: 0,
             engine: None,
             table_mode: TableCopyMode::Env,
+            arena_pool: Vec::new(),
         }
     }
 
@@ -249,6 +308,54 @@ impl Qwen38PrefixCache {
             .enumerate()
             .map(|(i, e)| (e.hash, i))
             .collect();
+    }
+
+    /// T4 — return a dropped entry's arenas to the pool (capped: the pool
+    /// never holds more arenas than `max_entries`, and the eviction→take
+    /// ordering in [`Self::insert`] keeps the steady-state total at
+    /// `max_entries` arenas — the pre-T4 device-memory bound, plus one
+    /// transient arena during the swap).
+    fn recycle_entry(&mut self, entry: PrefixEntry) {
+        if self.arena_pool.len() < self.max_entries {
+            self.arena_pool.push(RecycledArena {
+                snap_rec: entry.snap_rec,
+                snap_conv: entry.snap_conv,
+                rec_layers: entry.rec_layers,
+                rec_stride: entry.rec_stride,
+                conv_layers: entry.conv_layers,
+                conv_stride: entry.conv_stride,
+            });
+        }
+    }
+
+    /// T4 — take a geometry-matched arena pair from the pool, or allocate
+    /// ONE buffer per class (2 allocs — the per-entry 96-alloc burst the
+    /// pre-T4 path paid). A pooled arena carries stale bytes by design:
+    /// every layer is fully overwritten by the copy that follows, before
+    /// any read.
+    fn take_arena(
+        pool: &mut Vec<RecycledArena>,
+        stream: &Arc<CudaStream>,
+        rec_layers: usize,
+        rec_stride: usize,
+        conv_layers: usize,
+        conv_stride: usize,
+    ) -> Result<(CudaSlice<f32>, CudaSlice<f32>), String> {
+        if let Some(pos) = pool
+            .iter()
+            .position(|a| a.matches(rec_layers, rec_stride, conv_layers, conv_stride))
+        {
+            let a = pool.remove(pos);
+            return Ok((a.snap_rec, a.snap_conv));
+        }
+        PROBE_SNAP_ALLOCS.fetch_add(2, Ordering::Relaxed);
+        let snap_rec = stream
+            .alloc_zeros::<f32>(rec_layers * rec_stride)
+            .map_err(|e| format!("prefix alloc rec arena: {e}"))?;
+        let snap_conv = stream
+            .alloc_zeros::<f32>(conv_layers * conv_stride)
+            .map_err(|e| format!("prefix alloc conv arena: {e}"))?;
+        Ok((snap_rec, snap_conv))
     }
 
     /// Snapshot the current GDN state as a checkpoint for `tokens`.
@@ -301,8 +408,10 @@ impl Qwen38PrefixCache {
                     copy_state_to_snaps(
                         stream,
                         state,
-                        &mut entry.snap_recurrent,
+                        &mut entry.snap_rec,
+                        entry.rec_stride,
                         &mut entry.snap_conv,
+                        entry.conv_stride,
                     )?;
                 }
             }
@@ -311,36 +420,50 @@ impl Qwen38PrefixCache {
             self.rebuild_index();
             return Ok(());
         }
-        // Evict LRU while at capacity (drop frees the device slices).
+        // T4 — the arena layout copies one stride per class, so a
+        // non-uniform live state is refused at insert (both paths; the
+        // table build re-checks as defense in depth).
+        let rec_layers = state.recurrent.len();
+        let rec_stride = state.recurrent.first().map(|s| s.len()).unwrap_or(0);
+        if state.recurrent.iter().any(|s| s.len() != rec_stride) {
+            return Err(
+                "prefix insert: non-uniform recurrent layer shapes are unsupported \
+                 (the snapshot arena copies one stride per class)"
+                    .into(),
+            );
+        }
+        let conv_layers = state.conv.len();
+        let conv_stride = state.conv.first().map(|s| s.len()).unwrap_or(0);
+        if state.conv.iter().any(|s| s.len() != conv_stride) {
+            return Err(
+                "prefix insert: non-uniform conv layer shapes are unsupported \
+                 (the snapshot arena copies one stride per class)"
+                    .into(),
+            );
+        }
+        // Evict LRU while at capacity (arenas recycle into the pool).
         while self.entries.len() >= self.max_entries {
-            self.entries.pop();
+            let e = self.entries.pop().expect("entries non-empty in loop");
             self.pruned += 1;
+            self.recycle_entry(e);
         }
-        let mut snap_recurrent = Vec::with_capacity(state.recurrent.len());
-        for r in &state.recurrent {
-            PROBE_SNAP_ALLOCS.fetch_add(1, Ordering::Relaxed);
-            snap_recurrent.push(
-                stream
-                    .alloc_zeros::<f32>(r.len())
-                    .map_err(|e| format!("prefix alloc rec: {e}"))?,
-            );
-        }
-        let mut snap_conv = Vec::with_capacity(state.conv.len());
-        for c in &state.conv {
-            PROBE_SNAP_ALLOCS.fetch_add(1, Ordering::Relaxed);
-            snap_conv.push(
-                stream
-                    .alloc_zeros::<f32>(c.len())
-                    .map_err(|e| format!("prefix alloc conv: {e}"))?,
-            );
-        }
+        let (mut snap_rec, mut snap_conv) = Self::take_arena(
+            &mut self.arena_pool,
+            stream,
+            rec_layers,
+            rec_stride,
+            conv_layers,
+            conv_stride,
+        )?;
         // Table path: build the entry's dst tables BEFORE the gather reads
         // them; dtod path: the loop copy. Mutually exclusive.
         let mut table_rec = None;
         let mut table_conv = None;
         if let Some(engine) = self.engine.as_ref() {
-            let t_rec = engine.upload_table(stream, &snap_recurrent, "rec")?;
-            let t_conv = engine.upload_table(stream, &snap_conv, "conv")?;
+            let t_rec =
+                engine.upload_arena_table(stream, &snap_rec, rec_layers, rec_stride, "rec")?;
+            let t_conv =
+                engine.upload_arena_table(stream, &snap_conv, conv_layers, conv_stride, "conv")?;
             engine.copy(
                 stream,
                 ClassId::Recurrent,
@@ -356,7 +479,14 @@ impl Qwen38PrefixCache {
             table_rec = Some(t_rec);
             table_conv = Some(t_conv);
         } else {
-            copy_state_to_snaps(stream, state, &mut snap_recurrent, &mut snap_conv)?;
+            copy_state_to_snaps(
+                stream,
+                state,
+                &mut snap_rec,
+                rec_stride,
+                &mut snap_conv,
+                conv_stride,
+            )?;
         }
         self.entries.insert(
             0,
@@ -364,8 +494,12 @@ impl Qwen38PrefixCache {
                 len: tokens.len(),
                 hash,
                 tokens: tokens.to_vec(),
-                snap_recurrent,
+                snap_rec,
                 snap_conv,
+                rec_layers,
+                rec_stride,
+                conv_layers,
+                conv_stride,
                 table_rec,
                 table_conv,
             },
@@ -442,16 +576,22 @@ impl Qwen38PrefixCache {
                         engine.state_table(ClassId::Conv)?,
                     )?;
                 } else {
-                    for (r, s) in state.recurrent.iter_mut().zip(entry.snap_recurrent.iter()) {
+                    for (i, r) in state.recurrent.iter_mut().enumerate() {
                         PROBE_DTOD_COPIES.fetch_add(1, Ordering::Relaxed);
+                        let view = entry
+                            .snap_rec
+                            .slice(i * entry.rec_stride..(i + 1) * entry.rec_stride);
                         stream
-                            .memcpy_dtod(s, r)
+                            .memcpy_dtod(&view, r)
                             .map_err(|e| format!("prefix restore rec: {e}"))?;
                     }
-                    for (c, s) in state.conv.iter_mut().zip(entry.snap_conv.iter()) {
+                    for (i, c) in state.conv.iter_mut().enumerate() {
                         PROBE_DTOD_COPIES.fetch_add(1, Ordering::Relaxed);
+                        let view = entry
+                            .snap_conv
+                            .slice(i * entry.conv_stride..(i + 1) * entry.conv_stride);
                         stream
-                            .memcpy_dtod(s, c)
+                            .memcpy_dtod(&view, c)
                             .map_err(|e| format!("prefix restore conv: {e}"))?;
                     }
                 }
@@ -467,10 +607,19 @@ impl Qwen38PrefixCache {
     /// The KV-lineage rule: a state write at `pos` clobbers KV rows
     /// `[pos, ..)` — every checkpoint with `len > pos` may have a stale
     /// tail and is pruned. Checkpoints at `len <= pos` keep byte-valid KV
-    /// by construction (writes never touch rows below `pos`).
+    /// by construction (writes never touch rows below `pos`). T4: pruned
+    /// entries' arenas recycle into the pool.
     pub fn note_write(&mut self, pos: usize) {
         let before = self.entries.len();
-        self.entries.retain(|e| e.len <= pos);
+        let mut i = 0;
+        while i < self.entries.len() {
+            if self.entries[i].len > pos {
+                let e = self.entries.remove(i);
+                self.recycle_entry(e);
+            } else {
+                i += 1;
+            }
+        }
         if self.entries.len() != before {
             self.pruned += before - self.entries.len();
             self.rebuild_index();
@@ -478,23 +627,29 @@ impl Qwen38PrefixCache {
     }
 }
 
-/// state → snapshots (dtod, stream-ordered after any prior fills).
+/// state → snapshot arenas (dtod into per-layer views, stream-ordered
+/// after any prior fills). T4: the destination is ONE contiguous buffer
+/// per class; layer `i` lives at `[i*stride, (i+1)*stride)`.
 fn copy_state_to_snaps(
     stream: &Arc<CudaStream>,
     state: &Qwen38DecodeState,
-    snap_recurrent: &mut [CudaSlice<f32>],
-    snap_conv: &mut [CudaSlice<f32>],
+    snap_rec: &mut CudaSlice<f32>,
+    rec_stride: usize,
+    snap_conv: &mut CudaSlice<f32>,
+    conv_stride: usize,
 ) -> Result<(), String> {
-    for (s, r) in snap_recurrent.iter_mut().zip(state.recurrent.iter()) {
+    for (i, r) in state.recurrent.iter().enumerate() {
         PROBE_DTOD_COPIES.fetch_add(1, Ordering::Relaxed);
+        let mut view = snap_rec.slice_mut(i * rec_stride..(i + 1) * rec_stride);
         stream
-            .memcpy_dtod(r, s)
+            .memcpy_dtod(r, &mut view)
             .map_err(|e| format!("prefix snap rec: {e}"))?;
     }
-    for (s, c) in snap_conv.iter_mut().zip(state.conv.iter()) {
+    for (i, c) in state.conv.iter().enumerate() {
         PROBE_DTOD_COPIES.fetch_add(1, Ordering::Relaxed);
+        let mut view = snap_conv.slice_mut(i * conv_stride..(i + 1) * conv_stride);
         stream
-            .memcpy_dtod(c, s)
+            .memcpy_dtod(c, &mut view)
             .map_err(|e| format!("prefix snap conv: {e}"))?;
     }
     Ok(())
@@ -596,25 +751,35 @@ impl TableCopyEngine {
         })
     }
 
-    /// Collect device addresses of same-shaped slices into a table. The
-    /// uniform-stride precondition is ENFORCED here (the kernel's grid.y ×
-    /// stride shape cannot express per-layer strides; production shapes are
-    /// uniform, and a non-uniform state is refused loudly instead of copied
-    /// wrongly).
-    fn upload_table(
+    /// Collect device addresses of an arena's per-layer views into a
+    /// table (T4: the layers are arena slices at `i*stride`; the
+    /// uniform-stride precondition is ENFORCED at insert — this builder
+    /// re-checks as defense in depth). The addresses stay valid for the
+    /// arena's lifetime, which is the entry's lifetime by construction
+    /// (a recycled arena is overwritten fully before any read).
+    fn upload_arena_table(
         &self,
         stream: &Arc<CudaStream>,
-        slices: &[CudaSlice<f32>],
+        arena: &CudaSlice<f32>,
+        layers: usize,
+        stride: usize,
         label: &str,
     ) -> Result<PtrTable, String> {
-        let stride = slices.first().map(|s| s.len()).unwrap_or(0);
-        if slices.iter().any(|s| s.len() != stride) {
+        if arena.len() != layers * stride {
             return Err(format!(
-                "prefix table copy: non-uniform {label} layer shapes are unsupported \
-                 (the table path copies one stride per class)"
+                "prefix table copy: non-uniform {label} arena geometry \
+                 (len {} != {layers} layers × {stride})",
+                arena.len()
             ));
         }
-        let addrs: Vec<u64> = slices.iter().map(|s| s.device_ptr(stream).0).collect();
+        let addrs: Vec<u64> = (0..layers)
+            .map(|i| {
+                arena
+                    .slice(i * stride..(i + 1) * stride)
+                    .device_ptr(stream)
+                    .0
+            })
+            .collect();
         let mut device = stream
             .alloc_zeros::<u64>(addrs.len())
             .map_err(|e| format!("prefix table alloc ({label}): {e}"))?;
@@ -695,17 +860,30 @@ impl TableCopyEngine {
     }
 
     /// Ensure an entry carries tables (an entry created on the dtod path
-    /// gains them lazily when the table path arms mid-process).
+    /// gains them lazily when the table path arms mid-process). T4: the
+    /// tables point into the entry's arenas.
     fn ensure_entry_tables(
         &self,
         stream: &Arc<CudaStream>,
         entry: &mut PrefixEntry,
     ) -> Result<(), String> {
         if entry.table_rec.is_none() {
-            entry.table_rec = Some(self.upload_table(stream, &entry.snap_recurrent, "rec")?);
+            entry.table_rec = Some(self.upload_arena_table(
+                stream,
+                &entry.snap_rec,
+                entry.rec_layers,
+                entry.rec_stride,
+                "rec",
+            )?);
         }
         if entry.table_conv.is_none() {
-            entry.table_conv = Some(self.upload_table(stream, &entry.snap_conv, "conv")?);
+            entry.table_conv = Some(self.upload_arena_table(
+                stream,
+                &entry.snap_conv,
+                entry.conv_layers,
+                entry.conv_stride,
+                "conv",
+            )?);
         }
         Ok(())
     }
@@ -849,8 +1027,12 @@ mod tests {
         let state_a = make_state(&stream, 7);
         let mut c_dtod = Qwen38PrefixCache::with_table_mode(2, TableCopyMode::Off);
         let mut c_tab = Qwen38PrefixCache::with_table_mode(2, TableCopyMode::On);
-        c_dtod.insert(&stream, &state_a, &TOKENS).expect("dtod insert");
-        c_tab.insert(&stream, &state_a, &TOKENS).expect("table insert");
+        c_dtod
+            .insert(&stream, &state_a, &TOKENS)
+            .expect("dtod insert");
+        c_tab
+            .insert(&stream, &state_a, &TOKENS)
+            .expect("table insert");
 
         // Two identical "dirty" targets — the restores must land the same
         // bytes the snapshot held (== state_a's).
@@ -863,7 +1045,10 @@ mod tests {
         let r1 = full_state_bytes(&b1, &stream);
         let r2 = full_state_bytes(&b2, &stream);
         assert_eq!(r1, a, "dtod round-trip must reproduce state_a");
-        assert_eq!(r2, a, "table round-trip must be BIT-identical to the dtod loop");
+        assert_eq!(
+            r2, a,
+            "table round-trip must be BIT-identical to the dtod loop"
+        );
     }
 
     /// The refresh path (re-insert of an existing prefix), a second entry,
@@ -886,7 +1071,10 @@ mod tests {
         // Restore the OLDER entry — evicting nothing yet (cap 2).
         let mut t = make_state(&stream, 555);
         assert_eq!(c.restore(&stream, &mut t, &TOKENS).unwrap(), Some(4));
-        assert_eq!(full_state_bytes(&t, &stream), full_state_bytes(&s1, &stream));
+        assert_eq!(
+            full_state_bytes(&t, &stream),
+            full_state_bytes(&s1, &stream)
+        );
 
         // A third insert evicts the LRU (tokens2 — restored most recently).
         let tokens3 = [88u32, 99];
@@ -895,7 +1083,10 @@ mod tests {
         assert_eq!(c.len(), 2);
         let mut t3 = make_state(&stream, 777);
         assert_eq!(c.restore(&stream, &mut t3, &tokens3).unwrap(), Some(2));
-        assert_eq!(full_state_bytes(&t3, &stream), full_state_bytes(&s3, &stream));
+        assert_eq!(
+            full_state_bytes(&t3, &stream),
+            full_state_bytes(&s3, &stream)
+        );
     }
 
     /// A non-uniform class shape is refused loudly (the kernel's grid.y ×
@@ -940,8 +1131,9 @@ mod tests {
         c.restore(&stream, &mut state, &TOKENS).unwrap();
         assert_eq!(
             submit_probe_counts(),
-            [21, 7, 0, 0],
-            "dtod: (4+3) dtod × 3 directions (fresh + refresh + restore), 7 fresh allocs, no table traffic"
+            [21, 2, 0, 0],
+            "dtod: (4+3) dtod × 3 directions (fresh + refresh + restore), \
+             2 arena allocs (cold pool), no table traffic"
         );
 
         // table arm: same cycle — into the same live state (warm state
@@ -953,8 +1145,49 @@ mod tests {
         c2.restore(&stream, &mut state, &TOKENS).unwrap();
         assert_eq!(
             submit_probe_counts(),
-            [0, 7, 6, 4],
-            "table: 2 launches × 3 directions, 7 fresh allocs, 4 one-time htods"
+            [0, 2, 6, 4],
+            "table: 2 launches × 3 directions, 2 arena allocs (cold pool), \
+             4 one-time htods (2 state + 2 entry tables)"
+        );
+    }
+
+    /// T4 — the arena pool: a geometry-matched fresh insert after eviction
+    /// allocates NOTHING (the pre-T4 path paid the 96-alloc burst every
+    /// fresh insert), and the recycled arena round-trips bytes correctly
+    /// (stale bytes are fully overwritten by the copy before any read).
+    #[test]
+    fn test_arena_pool_reuse_zero_allocs() {
+        let _g = TEST_SER.lock().unwrap_or_else(|p| p.into_inner());
+        let stream = test_stream();
+        let mut state = make_state(&stream, 41);
+        let tokens2 = [55u32, 66, 77];
+
+        // Cold: first insert allocates the arenas. Second insert (different
+        // prefix) evicts entry A into the pool, then TAKES it back — the
+        // evict→take ordering means every insert after the first is a pool
+        // hit (that is the steady serving cycle this gate pins).
+        let mut c = Qwen38PrefixCache::with_table_mode(1, TableCopyMode::On);
+        c.insert(&stream, &state, &TOKENS).unwrap();
+        c.insert(&stream, &state, &tokens2).unwrap();
+
+        // Steady state: evict + take from the pool → zero snapshot allocs.
+        submit_probe_reset();
+        c.insert(&stream, &state, &TOKENS).unwrap();
+        let counts = submit_probe_counts();
+        assert_eq!(
+            counts[1], 0,
+            "geometry-matched pool hit must not allocate (got {counts:?})"
+        );
+        assert_eq!(c.len(), 1);
+
+        // The recycled arena round-trips: restore must land the snapshot's
+        // bytes in a DIFFERENT dirty target (full byte compare).
+        let mut t = make_state(&stream, 99);
+        assert_eq!(c.restore(&stream, &mut t, &TOKENS).unwrap(), Some(4));
+        assert_eq!(
+            full_state_bytes(&t, &stream),
+            full_state_bytes(&state, &stream),
+            "restore through a pool-reused arena must reproduce the live state"
         );
     }
 }
