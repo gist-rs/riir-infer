@@ -84,8 +84,26 @@ is katgpt-rs CPU x86_64) — corrected premises from the survey.
       `test_attention_decode_si_flag_off_bit_identity_and_affine` (bit-exact
       disarmed-vs-dummy + identity-LUT wiring + the affine value check),
       (3) the existing matches_cpu tests' max_diff equality across builds.
-      BLOCKED on the 4090 until the CPU G3 run finishes (build contention
-      would pollute the CPU arms' wall-clock rows).
+      IN FLIGHT (2026-10-12, this session): the 4090 run — pre/post worktrees
+      `E:\git\wt-si620{pre,post}` (4801622 / origin\@develop), probe feature set
+      WIDENED to `ternary_gemv_cuda_raw,cuda_graphs_forward,
+      riir-infer-core/bonsai2_hadamard` (attempt 1 died: the league GGUF is
+      Hadamard-folded, the loader loud-refuses without the feature — the plan's
+      original two-feature command predates the hardening), schtask `si620flag0`
+      + cmd `E:\tmp\si620_flag0.cmd` + log `E:\tmp\si620-flag0.log`, target
+      dirs `E:\tmp\tgt-si620{pre,post}`. Attempt 2 OOMed beside another lane's
+      `plan404_production_rank_ab` (16.8 GB held); attempt 3's wait-gate cmd had
+      a broken `for /f` parse (nounits output is one comma-free token → USED
+      never set); attempt 4 (PowerShell memory check, <8000 MiB bar, ping-sleep)
+      was FIRED and the GPU had already freed (1243 MiB) — then the BOX LEFT THE
+      NETWORK (LAN + Tailscale both dark ~08:30 box time). RESUME: when the box
+      returns, `schtasks /run /tn si620flag0` (the task + cmd + caches are all
+      on the box; builds resume warm). Parts (2)+(3) are the follow-up schtask:
+      `cargo test -p riir-infer-gpu --lib --features ternary_gemv_cuda_raw,
+      cuda_graphs_forward,riir-infer-core/bonsai2_hadamard` at BOTH worktrees
+      (the unit gate + the decode matches_cpu twins live in the lib's test
+      module; cuda_or_skip executes on the 4090), max_diff equality across
+      builds.
 
 ## Phase B — session plumbing (`TernaryDeltanetGpuForwardCudarc`)
 
