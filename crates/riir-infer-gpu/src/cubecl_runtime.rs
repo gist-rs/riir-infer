@@ -424,7 +424,6 @@ impl CubeCLContext {
             Self {
                 device,
                 total_video_memory: None,
-                wgpu_adapter: None,
             }
         }
     }
@@ -514,11 +513,28 @@ impl CubeCLContext {
     /// moves as co-resident processes come and go, so admission gates must
     /// probe at decision time, not at init. `None` = no adapter (CUDA
     /// backend) or the backend query is unavailable — callers fail open.
+    #[cfg(all(
+        feature = "cubecl_runtime",
+        any(not(feature = "cuda_backend"), target_os = "macos")
+    ))]
     #[inline]
     pub fn available_video_memory(&self) -> Option<u64> {
         self.wgpu_adapter
             .as_ref()
             .and_then(adapter_available_video_memory)
+    }
+
+    /// CUDA-backend twin of [`Self::available_video_memory`] — no wgpu
+    /// adapter is retained there (Issue 994), so the live probe is
+    /// unavailable and callers fail open on `None`.
+    #[cfg(all(
+        feature = "cubecl_runtime",
+        feature = "cuda_backend",
+        not(target_os = "macos")
+    ))]
+    #[inline]
+    pub fn available_video_memory(&self) -> Option<u64> {
+        None
     }
 }
 
