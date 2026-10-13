@@ -129,6 +129,10 @@ cuda_backend = ["cubecl_runtime", "cubecl/cuda"]
 # upstream of every engine and cannot dep one (the fence); consumers that
 # need the engine-side forward enable that feature themselves.
 ternary_gemv = ["cubecl_runtime", "katgpt-core/ternary_group_scale", "riir-infer-core/deltanet_ternary_inference"]
+# katgpt-rs Issue 936 T5 — the spin pool on the GPU-HOOKED decode (Metal):
+# ternary_gemv already carries deltanet_ternary_inference (which implies
+# ternary_q2_resident + decode_spin_pool); this adds the folded loader.
+spin_pool_gpu_goat = ["ternary_gemv", "riir-infer-core/bonsai2_hadamard"]
 # Fused ternary GEMV + in-place ResidualAdd (Issue 616).
 ternary_gemv_residual = ["ternary_gemv"]
 # Batched ternary dequant+GEMM prefill family (Issue 637).
@@ -335,6 +339,12 @@ required-features = ["ternary_gemv_cuda_raw", "ternary_gemm_batched", "cubecl_ru
 [[test]]
 name = "g1_032_folded_prefill_metal"
 required-features = ["cubecl_runtime", "ternary_gemm_batched", "ternary_deltanet_chunked_prefill", "ternary_attention_batched_prefill", "riir-infer-core/bonsai2_hadamard"]
+
+# katgpt-rs Issue 936 T5 — the decode spin pool on the GPU-hooked decode
+# (Metal lane, real Bonsai-2): bit-identity + paired no-harm wall, one load.
+[[test]]
+name = "decode_spin_pool_gpu_goat"
+required-features = ["spin_pool_gpu_goat"]
 
 # katgpt-rs Issue 928 (the 10-09 drift census) — the dq fake-quant G1 gate
 # landed without a row; same law as the rows above (the whole-file #![cfg]
