@@ -184,4 +184,24 @@ runs at roughly 70 GB/s of weight traffic. The one large non-weight section
 is `dn_recurrence` (8%).
 
 katgpt-rs commit for the N-way entry: `9f3f78bf6`.
-CUDA run (only type-checked so far): Issue 044.
+## CUDA lane (Issue 044, closed 2026-10-13)
+
+4090 (i7-13700K + RTX 4090, Windows), `si_flag0_probe` (128-token prefill +
+64 greedy tokens on the eager AND the graph lane, blake3 logit digests),
+built at `995b577` (planes-resident, the parent of the promotion) and at
+`efd66be` (Q2-resident + the N-way fused CPU calls), each in a clean detached
+worktree with katgpt-rs at `9f3f78bf6`. Build features
+`ternary_gemv_cuda_raw,cuda_graphs_forward,riir-infer-core/bonsai2_hadamard`.
+
+| | result |
+|---|---|
+| stdout pre vs post | **byte-identical** (SHA-256 `7FFAEA98…62BCCB`, 1466 bytes each) |
+| eager == graph ids | YES in both builds |
+| prefill digest @128 | `7c406a36…c6ce73eb6` both builds |
+
+Admissibility: the probe does not print the representation. The post build
+enables `ternary_q2_resident` through `deltanet_ternary_inference`, and the
+box's CPU has AVX2, so the loader's fast-path guard keeps raw Q2. That is
+inferred from the features and the CPU, not observed in the output. The first
+attempt (without `bonsai2_hadamard`) refused to load the Hadamard-folded GGUF
+in both builds. The probe's documented build line now names the feature.
