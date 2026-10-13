@@ -40,6 +40,8 @@ cargo test --lib
 # GDN quant-certification + bonsai2 rotation integration tests carry required-features (Cargo.toml [[test]] rows):
 cargo test --test issue879_gdn_quant_certification --features deltanet_ternary_inference
 cargo test --test bonsai2_rotation_load --features bonsai2_hadamard
+# Issue 046 GDN spectral-class spec (kernel-recovered transition vs the closed form; plain deltanet, no model):
+cargo test --test issue046_gdn_spectral_class_spec --features deltanet_inference
 # Issue 028 disaggregated handoff battery (the 6.7 GB PQ2_0 arm is #[ignore]d — BONSAI_PQ2_0_GGUF env, release run):
 cargo test --test issue028_disaggregated_handoff --features deltanet_ternary_inference
 # BONSAI_GGUF env (defaults to a riir-train data path) names the real checkpoint for the certification test's full-file arm.

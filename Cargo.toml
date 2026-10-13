@@ -386,6 +386,16 @@ set_diffusion = ["dllm"]
 name = "issue879_gdn_quant_certification"
 required-features = ["deltanet_ternary_inference"]
 
+# Issue 046 — GDN spectral-class spec test: the transition recovered from
+# the real decode kernel vs the Gated-DeltaNet closed form
+# ({g(1−β) along k̃, g ×(d−1)}) + the expm-of-frozen-generator identity +
+# the aligned steady-state boundedness pin. Plain CPU reference only — the
+# `deltanet_inference` gate compiles the module; whole-file #![cfg] protects
+# the count, this row protects the reader (green-zero law).
+[[test]]
+name = "issue046_gdn_spectral_class_spec"
+required-features = ["deltanet_inference"]
+
 # Issue 980 / Plan 600 Phase B — synthetic Bonsai-2 loader + rotation tests.
 # #![cfg(feature = "bonsai2_hadamard")] protects the count; this row protects
 # the reader (a --features selection without the union SKIPS loudly instead

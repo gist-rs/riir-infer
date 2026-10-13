@@ -118,6 +118,12 @@ pub(crate) fn on_rayon_worker<R: Send>(f: impl FnOnce() -> R + Send) -> R {
 /// Otherwise (switch off, 0-worker pool, or another thread holds the pool)
 /// [`on_rayon_worker`]. Scoped to the ternary forwards: the f32 forward's
 /// kernels are not pool-aware, and idle spinners would compete with rayon.
+///
+/// Gated with its consumers (every call site lives behind a set implying
+/// `deltanet_ternary_inference` — ternary_forward/ternary_kvq/profiling);
+/// compiling it at plain `deltanet_inference` is dead code there (Issue 046
+/// surfaced the posture when the spectral spec test made it a readable build).
+#[cfg(feature = "deltanet_ternary_inference")]
 pub(crate) fn on_decode_pool<R: Send>(f: impl FnOnce() -> R + Send) -> R {
     #[cfg(feature = "decode_spin_pool")]
     let f = match decode_pool::try_run(f) {

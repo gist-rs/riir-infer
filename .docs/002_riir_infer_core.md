@@ -88,6 +88,46 @@ the real arm `#[ignore]`d, `BONSAI_PQ2_0_GGUF` env). T4 (the dual-PTQ
 accuracy measurement — needs a q4-class prefill pack to exist) and T5 (ODP,
 deferred by default) remain open in `.issues/028`.
 
+## The GDN spectral-class spec test (Issue 046, 2026-10-13)
+
+Closed **spec-test-only** (`.issues/046` removed, landing hash in git). The
+issue's original premise — heads with g→1 accumulate `‖S‖` like `1/(1−g)` —
+was corrected at its own verdict round: that bound is the ADDITIVE-write row
+(arXiv:2610.13341 §C.3); the house recurrence is the delta rule with
+L2-normalized keys, whose write is a keyed erase — bounded by construction.
+What landed instead is the primary deliverable,
+`tests/issue046_gdn_spectral_class_spec.rs` (feature `deltanet_inference`,
+`[[test]]` row in Cargo.toml):
+
+- **Recovery, not construction**: the homogeneous transition `T =
+  g·(I − β·k̃k̃ᵀ)` is recovered from the REAL decode kernel
+  (`gated_deltanet_step_inplace`) by basis probing (v = 0, one key-basis
+  column at a time), so a transcription change in the kernel's operation
+  order (kv pre-decay, or the rank-1 write transposed — Issue 594's class)
+  moves the recovered spectrum and reds the file.
+- **Spectral class**: eig(T) = `{g(1−β) along k̃, g ×(d−1)}` (the
+  Gated-DeltaNet row, arXiv:2610.13341 App. A.4 — NOT DeltaNet's `{1−β, 0}`),
+  across a (g, β) grid incl. β = 1 and the 128×128 Bonsai geometry, via a
+  self-contained f64 Jacobi eigensolver.
+- **Generator identity**: `T ≡ expm(−γ·I − b·k̃k̃ᵀ)` entrywise (γ = −ln g,
+  b = −ln(1−β)) — the frozen continuous-time pair {−(γ+b), −γ} integrates to
+  exactly the discrete class, to f32 tolerance.
+- **Boundedness pin** (the corrected premise, through the real kernel):
+  aligned steady-state gain `β/(1−g+gβ) ≤ 1` for EVERY g ≤ 1, β ∈ (0,1] —
+  measured ≤ 0.999896 at the motivating corner (g = 0.9999, β = 0.5, d = 128).
+
+The FV (Lean) half was judged overweight per the issue's own escape hatch (no
+`.proofs/` instance exists in this repo; a numeric spec test carries the
+assertion). The report-only fleet-replay probe (deliverable 2) closed under
+the issue's negative-control clause: the aligned steady state IS the negative
+control and earns the probe nothing — the Non-goals forbid a growth-alarm
+threshold, and the growth class is refuted by execution.
+
+Rider: gating `on_decode_pool` with its consumers (`deltanet_ternary_inference`)
+fixed a dead-code warning the new posture exposed. Side finding (filed):
+`.issues/047` — the plain `deltanet_inference` lib posture crashes at
+parallel-harness teardown (pre-existing, single-thread clean).
+
 ## See also
 
 - [Proposal 041](../.proposals/041_riir_infer_model_based_inference_split.md) — the split decision record (sessions 1–5)
