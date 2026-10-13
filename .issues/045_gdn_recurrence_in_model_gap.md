@@ -1,6 +1,6 @@
 # Issue 045 — GDN recurrence costs 2.3× in-model what it costs in isolation
 
-**Status:** OPEN 2026-10-13 — first-entry cost attributed to rayon worker wake-up (T1b); the obvious bit-identical fix (prefetch-join) REFUTED at +2.1–2.6%. Remaining lever is the pool itself.
+**Status:** OPEN 2026-10-13 — first-entry cost attributed to rayon worker wake-up (T1b); priced at ~14–16% of each token; prefetch-join (+2.1–2.6%) and an in-rayon keepalive (5.7× slower) both REFUTED. Remaining lever: a spin-barrier pool outside rayon (T4).
 
 ## Measurements (M3 Max, AC, `--release`, Bonsai-2-27B PQ2_0, raw-Q2 arm)
 
@@ -43,10 +43,26 @@ through, or a worker wake-up after the serial conv1d/gates sections), and
       logit mismatches every run, but ratio **1.023 / 1.026 / 1.021** (on/off;
       off 107–116 ms/tok). It moves the wake-up cost and adds its own.
       Reverted; nothing committed.
-- [ ] T3: the remaining lever is the pool: a decode-scoped spin-wait barrier
+- [x] T3 pricing (throwaway profiler edit: a timed no-op `rayon::broadcast`
+      before every parallel section): the broadcasts cost **14.2 ms/token**
+      and the sections then drop by ~16 ms (recurrence 8.2→3.4, FFN 54→50,
+      dn_input_proj 15.8→13.5, dn_out_proj 8.6→5.8, attention −1.9); total
+      flat at 98–100 ms. **About 14–16% of each token is parked-worker
+      wake-up.**
+- [-] T3 inside rayon, refuted: per-token keepalive (`spawn_broadcast` puts
+      one job on each worker that spins in `rayon::yield_now` until the
+      forward returns; the forward's own worker returns at once). In-process
+      paired A/B, one load: bit-identical (0 mismatches), but **5.7× slower**
+      (673 vs 97 ms/tok). Adding a 256- or 4096-`spin_loop` backoff between
+      idle steal attempts did not help (8.2×, 7.3×), so steal contention on
+      the forward thread's deque is NOT the mechanism. Root cause not
+      established. Reverted; nothing committed.
+- [ ] T4: the remaining lever is a pool outside rayon: a decode-scoped spin-wait barrier
       pool (llama.cpp's threadpool shape) so the workers never park between
       forks inside one token. Every fork after a serial gap pays this, not just
       the recurrence. Price it first: count the forks per token that follow
       a gap long enough to park the workers, using the broadcast probe per
-      section. Then decide whether a custom pool is worth replacing rayon on
-      the decode path.
+      section. The prize is up to ~14 ms/token (~100 → ~86 ms). It needs the
+      katgpt matvec kernels to take a pool handle instead of calling
+      `par_chunks_mut` directly, so file it in katgpt-rs as a design issue
+      before writing code.
