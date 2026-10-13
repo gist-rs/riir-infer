@@ -33,7 +33,7 @@
 //! path). Flags: `--gguf <path>` · `--prefill N` (128) · `--greedy N` (64).
 //!
 //! ```text
-//! cargo build --release -p riir-infer-gpu --features ternary_gemv_cuda_raw,cuda_graphs_forward \
+//! cargo build --release -p riir-infer-gpu --features ternary_gemv_cuda_raw,cuda_graphs_forward,riir-infer-core/bonsai2_hadamard \
 //!   --bin si_flag0_probe
 //! ./target/release/si_flag0_probe --gguf ../riir-train/data/Ternary-Bonsai-2-27B-PQ2_0.gguf
 //! ```
