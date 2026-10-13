@@ -357,6 +357,12 @@ bonsai2_hadamard = ["deltanet_ternary_inference"]
 # the katgpt-core probe. OPT-IN, measurement-only (report; no shipped-path
 # change).
 issue929_bonsai2_probe = ["bonsai2_hadamard", "katgpt-core/loop_alignment_probe"]
+# katgpt-rs Issue 933 T4 — the fixed-query modelless AttnRes probe on the
+# gemma-2 f16 forward (E5, Research 619 MSAR): deterministic exponential-
+# depth profile replacing the learned `score_weight` for checkpoints
+# WITHOUT AttnRes weights. OPT-IN, measurement-only (the ppl A/B bin + the
+# module gates decide; no shipped-path change).
+issue933_attn_res_probe = ["katgpt-transformer/transformer_attn_res"]
 forward_profiling = ["deltanet_ternary_inference"]
 gemma4_lora = ["gemma4_inference"]
 hla_role_aware = ["hla"]
@@ -609,6 +615,15 @@ required-features = ["issue929_bonsai2_probe"]
 name = "issue929_bonsai2_loop_probe_gates"
 path = "tests/issue929_bonsai2_loop_probe_gates.rs"
 required-features = ["issue929_bonsai2_probe"]
+
+# katgpt-rs Issue 933 T4 — the fixed-query modelless-AttnRes ppl A/B on
+# gemma-2-2b-it-f16: stock forward vs the depth-profile fork (λ sweep,
+# block S layers/block), paired per-token NLL over frozen corpus chunks.
+# OPT-IN, measurement-only (report; the issue's GREEN/RED bars decide).
+[[example]]
+name = "issue933_gemma2_attn_res_ppl"
+path = "examples/issue933_gemma2_attn_res_ppl.rs"
+required-features = ["issue933_attn_res_probe"]
 
 # riir-infer Issue 013 T1 — the fitted-V P1 gate bin (calibrate → freeze →
 # the four-gate battery). The module lives behind #[cfg(feature =

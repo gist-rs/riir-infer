@@ -68,6 +68,15 @@ pub mod gemma2_act_tap;
 // construction — softmax shift-invariance). Opt-in (`hyperthink_t1`).
 #[cfg(feature = "hyperthink_t1")]
 pub mod gemma2_bias_delta;
+
+// katgpt-rs Issue 933 T4 — the fixed-query modelless AttnRes probe (E5,
+// Research 619): the gemma-2 f16 forward re-forked with Block-Attention-
+// Residual wiring at the three Kimi-semantics points, mixing via a
+// deterministic exponential-depth profile (`apply_attn_res_depth_profile`)
+// instead of learned `score_weight`. λ=∞ is bit-identical to stock (pinned
+// by test). Opt-in (`issue933_attn_res_probe`), measurement-only.
+#[cfg(feature = "issue933_attn_res_probe")]
+pub mod gemma2_attn_res;
 // Plan 320 Phase C1: Gemma 4 LoRA forward wiring (weight-delta application
 // at the 7 matmul insertion points). Feature-gated — opt-in.
 #[cfg(feature = "gemma4_lora")]
