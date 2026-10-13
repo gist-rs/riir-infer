@@ -250,6 +250,18 @@ with 11, 2.55 with 15 and 3.86–3.93 with 23. To opt in, set
 `KATGPT_SPIN_POOL_WORKERS`. That configuration is unmeasured with the idle
 window.
 
+**End to end** (`twt_perf_tg_pp`, parent model as both arms, 512-token
+teacher-forced prefill + 128-step greedy decode at context 512–640, where
+attention also takes its pool arm). The arms ran sequentially, not
+interleaved, and launch load rose 3.7 → 14, so the paired GOAT ratios above
+remain the gate:
+
+| run | pp tok/s | tg tok/s |
+|---|---|---|
+| pool (default) | 12.69 / 12.41 | **12.72 / 12.75** |
+| rayon (`KATGPT_SPIN_POOL_WORKERS=0`) | 8.97 / 8.76 | **8.86 / 8.30** |
+| pool again | 12.42 / 12.25 | **12.64 / 12.21** |
+
 Not yet measured: a GPU-hooked decode. The pool is installed there too; its
 workers park after 100 µs idle while the GPU works.
 
