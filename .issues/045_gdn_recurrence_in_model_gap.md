@@ -64,5 +64,5 @@ through, or a worker wake-up after the serial conv1d/gates sections), and
       a gap long enough to park the workers, using the broadcast probe per
       section. The prize is up to ~14 ms/token (~100 → ~86 ms). It needs the
       katgpt matvec kernels to take a pool handle instead of calling
-      `par_chunks_mut` directly, so file it in katgpt-rs as a design issue
-      before writing code.
+      `par_chunks_mut` directly, so it is filed as katgpt-rs Issue 936
+      (katgpt-rs `d6b46ecdd`).
