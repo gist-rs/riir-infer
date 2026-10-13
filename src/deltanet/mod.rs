@@ -110,6 +110,38 @@ pub(crate) fn on_rayon_worker<R: Send>(f: impl FnOnce() -> R + Send) -> R {
     out.expect("rayon::scope runs its body to completion")
 }
 
+/// Unit-test config for this lane (Issue 047): the real Qwen-DeltaNet preset
+/// with only the multi-GiB surfaces shrunk.
+///
+/// The production preset carries `vocab_size` 151936 (embeddings allocated
+/// TWICE by [`crate::deltanet::weights::QwenDeltaNetWeights::zeros`] — the
+/// tied `lm_head` clones `wte`, ~2.3 GiB) and `block_size` 32768 (eager
+/// `KVCache::new` = 512 MiB per attention layer). ~20 unit tests at that
+/// preset run concurrently under the default test-thread count
+/// (`available_parallelism`, 24 here) and exhaust the Windows commit limit;
+/// the resulting `handle_alloc_error` abort surfaces as the misleading
+/// `STATUS_STACK_BUFFER_OVERRUN` (0xc0000409) exit. The property under test
+/// (prefill == sequential, zero-weights argmax, shape-vs-config, KV
+/// population) holds at any dims, so shrink only `vocab_size` / `block_size`
+/// / `mlp_hidden`; `n_embd` and the head geometry stay real. The ignored
+/// `bench_batched_prefill_vs_decode` keeps the full preset as the real-dims
+/// lane.
+#[cfg(test)]
+pub(crate) fn unit_test_config(
+    n_layer: usize,
+    layer_types: Vec<crate::types::DeltaNetLayerType>,
+) -> crate::types::Config {
+    let mut config = crate::types::Config::qwen_deltanet(n_layer, layer_types);
+    // 512 keeps the hardcoded prompt ids in `test_generate_greedy_multi_token_prompt`
+    // (`[bos, 100, 200, 300]`) valid; prompts embed `wte[token * n_embd]`.
+    // (EOS is the `QWEN_DELTANET_EOS` const, not a config field.)
+    config.vocab_size = 512;
+    config.bos_token = 1;
+    config.block_size = 256;
+    config.mlp_hidden = 512;
+    config
+}
+
 
 /// The TERNARY decode forwards' entry: with `decode_spin_pool` compiled in
 /// and switched on, run `f` on THIS thread with the process-wide decode spin

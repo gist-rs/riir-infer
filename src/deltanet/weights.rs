@@ -1656,7 +1656,7 @@ mod tests {
     /// GOAT proof T4: verify weight shapes match config for all-Attention layout.
     #[test]
     fn test_weights_all_attention() {
-        let config = Config::qwen_deltanet(24, vec![]);
+        let config = crate::deltanet::unit_test_config(24, vec![]);
         let weights = QwenDeltaNetWeights::zeros(&config);
         weights.verify_shapes(&config).expect("shapes should match");
     }
@@ -1675,7 +1675,7 @@ mod tests {
             DeltaNet, DeltaNet, DeltaNet, Attention, // 16-19
             DeltaNet, DeltaNet, DeltaNet, Attention, // 20-23
         ];
-        let config = Config::qwen_deltanet(24, layer_types);
+        let config = crate::deltanet::unit_test_config(24, layer_types);
         let weights = QwenDeltaNetWeights::zeros(&config);
         weights.verify_shapes(&config).expect("shapes should match");
     }
@@ -1685,7 +1685,7 @@ mod tests {
     fn test_weights_all_deltanet() {
         use crate::types::DeltaNetLayerType::*;
         let layer_types = vec![DeltaNet; 12];
-        let config = Config::qwen_deltanet(12, layer_types);
+        let config = crate::deltanet::unit_test_config(12, layer_types);
         let weights = QwenDeltaNetWeights::zeros(&config);
         weights.verify_shapes(&config).expect("shapes should match");
     }
@@ -1712,7 +1712,7 @@ mod tests {
     /// Verify tied embeddings: wte and `lm_head` have same length in `zeros()`.
     #[test]
     fn test_tied_embeddings() {
-        let config = Config::qwen_deltanet(8, vec![]);
+        let config = crate::deltanet::unit_test_config(8, vec![]);
         let weights = QwenDeltaNetWeights::zeros(&config);
         assert_eq!(weights.wte.len(), weights.lm_head.len());
         assert_eq!(weights.wte.len(), config.vocab_size * config.n_embd);

@@ -2541,7 +2541,7 @@ mod tests {
     /// pipeline is structurally correct.
     #[test]
     fn test_generate_greedy_zero_weights_all_attention() {
-        let config = Config::qwen_deltanet(4, vec![]);
+        let config = crate::deltanet::unit_test_config(4, vec![]);
         let weights = QwenDeltaNetWeights::zeros(&config);
 
         let generated = generate_greedy_qwen_deltanet(&weights, &config, &[config.bos_token], 4);
@@ -2654,7 +2654,7 @@ mod tests {
     fn test_generate_greedy_zero_weights_hybrid() {
         use crate::types::DeltaNetLayerType::*;
         let layer_types = vec![DeltaNet, DeltaNet, Attention, Attention];
-        let config = Config::qwen_deltanet(4, layer_types);
+        let config = crate::deltanet::unit_test_config(4, layer_types);
         let weights = QwenDeltaNetWeights::zeros(&config);
 
         let generated = generate_greedy_qwen_deltanet(&weights, &config, &[config.bos_token], 4);
@@ -2675,7 +2675,7 @@ mod tests {
     /// loop picks up from the right position.
     #[test]
     fn test_generate_greedy_multi_token_prompt() {
-        let config = Config::qwen_deltanet(2, vec![]);
+        let config = crate::deltanet::unit_test_config(2, vec![]);
         let weights = QwenDeltaNetWeights::zeros(&config);
 
         let prompt = vec![config.bos_token, 100, 200, 300];
@@ -2698,7 +2698,7 @@ mod tests {
     fn test_generate_greedy_all_deltanet() {
         use crate::types::DeltaNetLayerType::*;
         let layer_types = vec![DeltaNet; 4];
-        let config = Config::qwen_deltanet(4, layer_types);
+        let config = crate::deltanet::unit_test_config(4, layer_types);
         let weights = QwenDeltaNetWeights::zeros(&config);
 
         let generated = generate_greedy_qwen_deltanet(&weights, &config, &[config.bos_token], 4);
@@ -2716,7 +2716,7 @@ mod tests {
     /// GOAT proof T14: empty prompt returns empty generated tokens.
     #[test]
     fn test_generate_greedy_empty_prompt() {
-        let config = Config::qwen_deltanet(2, vec![]);
+        let config = crate::deltanet::unit_test_config(2, vec![]);
         let weights = QwenDeltaNetWeights::zeros(&config);
 
         let generated = generate_greedy_qwen_deltanet(&weights, &config, &[], 4);
@@ -2732,7 +2732,7 @@ mod tests {
     /// GOAT proof T15: prefill returns logits of correct size (`vocab_size`).
     #[test]
     fn test_prefill_returns_correct_logit_size() {
-        let config = Config::qwen_deltanet(2, vec![]);
+        let config = crate::deltanet::unit_test_config(2, vec![]);
         let weights = QwenDeltaNetWeights::zeros(&config);
         let layer_types = vec![DeltaNetLayerType::Attention; config.n_layer];
 
@@ -2762,7 +2762,7 @@ mod tests {
     /// GOAT proof T15: prefill with zero weights produces all-zero logits.
     #[test]
     fn test_prefill_zero_weights_zero_logits() {
-        let config = Config::qwen_deltanet(2, vec![]);
+        let config = crate::deltanet::unit_test_config(2, vec![]);
         let weights = QwenDeltaNetWeights::zeros(&config);
         let layer_types = vec![DeltaNetLayerType::Attention; config.n_layer];
 
@@ -2792,7 +2792,7 @@ mod tests {
     fn test_prefill_hybrid_layers() {
         use crate::types::DeltaNetLayerType::*;
         let layer_types = vec![DeltaNet, Attention, DeltaNet, Attention];
-        let config = Config::qwen_deltanet(4, layer_types.clone());
+        let config = crate::deltanet::unit_test_config(4, layer_types.clone());
         let weights = QwenDeltaNetWeights::zeros(&config);
 
         let mut cache = HybridCache::with_layer_types(&config, &layer_types);
@@ -2822,7 +2822,7 @@ mod tests {
     fn test_prefill_all_deltanet() {
         use crate::types::DeltaNetLayerType::*;
         let layer_types = vec![DeltaNet; 4];
-        let config = Config::qwen_deltanet(4, layer_types.clone());
+        let config = crate::deltanet::unit_test_config(4, layer_types.clone());
         let weights = QwenDeltaNetWeights::zeros(&config);
 
         let mut cache = HybridCache::with_layer_types(&config, &layer_types);
@@ -2850,7 +2850,7 @@ mod tests {
     /// GOAT proof T15: single-token prefill works correctly.
     #[test]
     fn test_prefill_single_token() {
-        let config = Config::qwen_deltanet(2, vec![]);
+        let config = crate::deltanet::unit_test_config(2, vec![]);
         let weights = QwenDeltaNetWeights::zeros(&config);
         let layer_types = vec![DeltaNetLayerType::Attention; config.n_layer];
 
@@ -2884,7 +2884,7 @@ mod tests {
     /// equivalent and must produce the same result.
     #[test]
     fn test_prefill_matches_sequential_forward() {
-        let config = Config::qwen_deltanet(4, vec![]);
+        let config = crate::deltanet::unit_test_config(4, vec![]);
         let weights = QwenDeltaNetWeights::zeros(&config);
         let n = config.n_embd;
         let v = config.vocab_size;
@@ -2938,7 +2938,7 @@ mod tests {
     fn test_prefill_matches_sequential_hybrid() {
         use crate::types::DeltaNetLayerType::*;
         let layer_types = vec![DeltaNet, Attention, DeltaNet, Attention];
-        let config = Config::qwen_deltanet(4, layer_types.clone());
+        let config = crate::deltanet::unit_test_config(4, layer_types.clone());
         let weights = QwenDeltaNetWeights::zeros(&config);
         let n = config.n_embd;
         let v = config.vocab_size;
@@ -2999,7 +2999,7 @@ mod tests {
     fn test_prefill_batched_mlp_matches_sequential_seeded() {
         use crate::types::DeltaNetLayerType::*;
         let layer_types = vec![DeltaNet, Attention, DeltaNet, Attention];
-        let config = Config::qwen_deltanet(4, layer_types.clone());
+        let config = crate::deltanet::unit_test_config(4, layer_types.clone());
         let n = config.n_embd;
         let v = config.vocab_size;
         let buf_size = n.max(v);
@@ -3272,7 +3272,7 @@ mod tests {
     /// GOAT proof T16: `generate_greedy` is deterministic (same input → same output).
     #[test]
     fn test_greedy_decode_deterministic() {
-        let config = Config::qwen_deltanet(4, vec![]);
+        let config = crate::deltanet::unit_test_config(4, vec![]);
         let weights = QwenDeltaNetWeights::zeros(&config);
 
         let run1 = generate_greedy_qwen_deltanet(&weights, &config, &[0, 1, 2], 8);
@@ -3300,7 +3300,7 @@ mod tests {
     fn test_hybrid_dispatch_matches_sequential() {
         use crate::types::DeltaNetLayerType::*;
         let layer_types = vec![DeltaNet, Attention, DeltaNet, Attention];
-        let config = Config::qwen_deltanet(4, layer_types.clone());
+        let config = crate::deltanet::unit_test_config(4, layer_types.clone());
         let n = config.n_embd;
         let v = config.vocab_size;
         let buf_size = n.max(v);
@@ -3476,7 +3476,7 @@ mod tests {
     /// been populated for all prompt positions (positions `0..seq_len`).
     #[test]
     fn test_kv_cache_populated_after_prefill() {
-        let config = Config::qwen_deltanet(2, vec![]);
+        let config = crate::deltanet::unit_test_config(2, vec![]);
         let weights = QwenDeltaNetWeights::zeros(&config);
         let layer_types = vec![DeltaNetLayerType::Attention; config.n_layer];
 
@@ -3522,7 +3522,7 @@ mod tests {
     #[test]
     fn test_qk_norm_is_applied() {
         use crate::types::DeltaNetLayerType;
-        let config = Config::qwen_deltanet(1, vec![DeltaNetLayerType::Attention]);
+        let config = crate::deltanet::unit_test_config(1, vec![DeltaNetLayerType::Attention]);
         let n = config.n_embd;
         let hd = config.head_dim;
 

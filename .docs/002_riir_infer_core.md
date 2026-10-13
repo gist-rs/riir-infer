@@ -128,6 +128,42 @@ fixed a dead-code warning the new posture exposed. Side finding (filed):
 `.issues/047` — the plain `deltanet_inference` lib posture crashes at
 parallel-harness teardown (pre-existing, single-thread clean).
 
+## 2026-10-14 — Issue 047: lib test crash at `deltanet_inference` parallel posture CLOSED — OOM abort, not a teardown race; unit-test configs de-bloated
+
+The `0xc0000409` ("STATUS_STACK_BUFFER_OVERRUN") exit was never a stack
+overrun and never a teardown race. Direct-binary runs captured the real
+death message: `memory allocation of 67108864 bytes failed` — Rust's
+`handle_alloc_error` abort, which on Windows funnels through `__fastfail`
+and therefore EXITS as 0xc0000409. The "teardown" attribution was an
+artifact of stdout buffering; direct runs died mid-suite (3–16 s into a
+57 s suite).
+
+**Root cause**: ~20 unit tests built configs from the production preset
+`Config::qwen_deltanet` (vocab 151936, block_size 32768, mlp 8192) and then
+allocated `QwenDeltaNetWeights::zeros` — which holds the embedding table
+TWICE (`wte` + the tied `lm_head` clone = ~2.3 GiB) — plus eager
+`KVCache::new` (512 MiB per attention layer at block_size 32768) plus
+~285 MiB/layer of projection weights. Per-test footprint 2.8–9.1 GiB (the
+weights.rs shape tests used 24 layers → ~9 GiB each). At the default
+test-thread count (`available_parallelism()` = 24 on this box) the
+concurrent set exhausted the Windows commit limit; the observed 64 MiB
+failure (exactly one 2048×8192×4 MLP weight) was the last straw, not the
+culprit. Clean at every fixed thread count ≤16 because fewer giants ran
+concurrently; flaky because overlap is scheduler-dependent.
+
+**Fix** (`#[cfg(test)] crate::deltanet::unit_test_config`): the preset with
+only the multi-GiB surfaces shrunk — vocab 151936→512, bos 151643→1 (bos
+must stay a valid id: prompts embed `wte[bos*n_embd]`), block_size
+32768→256, mlp 8192→512; `n_embd`/head geometry stay real. 21 call sites
+converted (17 in `forward.rs`, 4 in `weights.rs`); kept on the full preset:
+the `#[ignore]`d `bench_batched_prefill_vs_decode` (the real-dims lane),
+the already-small issue-594 test, and the two validate-only tests that never
+allocate.
+
+**Evidence**: 5/10 crash → **0/15** at default threads; suite 57 s → 8.65 s
+(the box was paging); 312 passed (`deltanet_inference`), 342 passed
+(`deltanet_ternary_inference`), clippy clean, default posture unaffected.
+
 ## See also
 
 - [Proposal 041](../.proposals/041_riir_infer_model_based_inference_split.md) — the split decision record (sessions 1–5)
