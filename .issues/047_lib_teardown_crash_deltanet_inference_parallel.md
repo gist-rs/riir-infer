@@ -18,15 +18,20 @@ process didn't exit successfully: riir_infer_core-*.exe (exit code: 0xc0000409)
 | posture | harness | result |
 |---|---|---|
 | default features | parallel (`cargo test --lib`) | **ok. 264 passed; clean exit** |
-| `deltanet_inference` | parallel (`cargo test --lib`) | all pass, then **0xc0000409 at teardown** |
+| `deltanet_inference` | parallel (`cargo test --lib`) | all pass, then **0xc0000409 at teardown** — FLAKY: 2 crashes, 1 clean across 3 runs |
 | `deltanet_inference` | `--test-threads=1` (binary direct) | **ok. 312 passed; exit 0** (184 s) |
+| `deltanet_inference` | `--test-threads=2 / 4 / 8 / 16` | **ok. 312 passed; clean** every run |
 | `deltanet_inference` | parallel, Issue-046 changes stashed | **same crash** — pre-existing |
 
 So: posture-specific (only the plain-deltanet build), concurrency-dependent
-(single-thread is clean), post-test (the harness summary prints before the
-death). Classic shape for a global/static destructor racing another thread's
-cleanup — rayon pool teardown, a `static` buffer freed twice, or a thread-local
-drop after the main thread's globals are gone.
+(clean at every FIXED thread count tried; flaky only at the default count =
+`available_parallelism()`, 24 logical CPUs here), post-test (the harness
+summary prints before the death when it prints at all — one crash lost even
+the summary to the fastfail). Classic shape for a late thread touching freed
+globals at process teardown — rayon pool teardown racing static destruction,
+or a detached test thread outliving its statics. FLAKY, so a filter-bisect
+will not converge cheaply; reproduce first with repeated default-count runs
+before any bisect (expect ~2/3 crash rate).
 
 ## Not caused by
 
