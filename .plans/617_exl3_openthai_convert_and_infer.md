@@ -127,7 +127,7 @@ Verdict: **EXL3 = structural NO for the whole bekko family; the 68M is already s
       GPU state during convert: sibling riir-train plan435 CUDA training active
       (11.3/24.5 GiB VRAM) — convert is quantization compute, not a correctness
       gate; shared-GPU noted per the exclusivity rule's scoping.
-- [ ] A4 — reader parity in-repo: pack opens through `Exl3Pack`, residency report,
+- [-] A4 — reader parity in-repo: pack opens through `Exl3Pack`, residency report,
       full-pack gate on Metal AND CUDA (plan 004's harness shape): **decode-stage
       bit-exact + Hadamard stages at the recorded tolerance gates** (the record's
       two-tier oracle). Coverage floors pinned. Repo test committed.
@@ -142,7 +142,10 @@ Verdict: **EXL3 = structural NO for the whole bekko family; the 68M is already s
       era-gate unit tests 10/10 still green incl. the refuse side;
       post-extension the gate opens the pack through the DEFAULT Verify door.
       METAL HALF: the same test on the M3 — NOT run here (4090 box; M3 session
-      owns that arm, same test name).**
+      owns that arm, same test name).** [DEFERRED-PARTIAL at closure: CUDA half
+      DONE with floors pinned (above); the Metal half never ran before the A5
+      NO-GO closed the lane — if a future pre-registered consumer reopens it,
+      that arm is the first debt]
 - [x] A5 — hybrid board re-run (the cheap falsifier): Python hybrid server on the 4090
       (exllamav3 tower forward → hidden states → their torch head + decide contract,
       `permutations=1`; the 084 disclosed-patch pattern for the dtype/numerics pin).
@@ -278,12 +281,13 @@ Verdict: **EXL3 = structural NO for the whole bekko family; the 68M is already s
 
 ## Phase B — Metal serving arm (gated on Phase-A per-suite PASS; multi-day)
 
-- [ ] B1 — packed-resident load path; measure dequant-in-forward (streamed per-layer)
+- [-] B1 — packed-resident load path; measure dequant-in-forward (streamed per-layer)
       vs dequant-once-at-load for the 0.8B single-shot shape — runtime memory vs
       latency, both measured, **PER LAYER CLASS** (GDN fixed-state vs KV-attention vs
       dense MLP — the GDN hybrid makes one average a lie; §17.6 scope note: never
-      transferred by analogy).
-- [ ] B2 — forward port in Rust over the pack — **substrate-side in riir-infer** (the
+      transferred by analogy). [DEFERRED-SUPERSEDED: Phase B does not fire — the A5
+      NO-GO stands].
+- [-] B2 — forward port in Rust over the pack — **substrate-side in riir-infer** (the
       laya-riir precedent), REUSING the qwen35-deltanet substrate this repo carries
       (`qwen35_deltanet_config_from_gguf_metadata` loader, deltanet forward family,
       GDN chunked-prefill kernels) + the head-side pieces Research 003 pins
@@ -294,15 +298,20 @@ Verdict: **EXL3 = structural NO for the whole bekko family; the 68M is already s
       edge and run the boundary check (`ci_boundary_contract.sh` via the
       boundary-guard skill) before landing; reflex's sibling-layout doc today names
       only `riir-infer-laya`.** G5 parity vs frozen captures from A5's server before
-      any number is quoted.
-- [ ] B3 — reflex lane `openthai-exl3` (comparison-lane family law; lane file filed in
+      any number is quoted. [DEFERRED-SUPERSEDED: Phase B does not fire — the A5
+      NO-GO stands (owner-delegated verdict); the substrate pieces it names remain
+      available for any future pre-registered consumer]
+- [-] B3 — reflex lane `openthai-exl3` (comparison-lane family law; lane file filed in
       riir-reflex); 17-suite board re-run through the Rust path; determinism pin;
-      site republish.
-- [ ] B4 — §14 gate re-run with runtime numbers under the **pre-registered,
+      site republish. [DEFERRED-SUPERSEDED: Phase B does not fire — the A5 NO-GO
+      stands (owner-delegated verdict); re-open only as a NEW pre-registered
+      decision under the C1 conditions]
+- [-] B4 — §14 gate re-run with runtime numbers under the **pre-registered,
       cell-appropriate gain definition** (the records' decode-step metric has no
       decode loop here and no f16/q4 GGUF incumbent exists for OpenThai — define:
       bytes-at-load + runtime residency vs the fp32/bf16 server, and paired latency
       vs the fp32 server on the same box; cite §16's amendment as well as §17.6).
+      [DEFERRED-SUPERSEDED: same NO-GO — Phase B does not fire]
       **Expected posture pre-registered: STAYS OPT-IN even on full success** — a
       lane consumer is not a default-path gain; feature-flag promotion/demotion per
       GOAT.
