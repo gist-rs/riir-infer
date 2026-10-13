@@ -531,7 +531,7 @@ pub fn profiled_forward_ternary<'a>(
     ffn_hook: Option<&dyn TernaryFfnHook>,
 ) -> &'a mut [f32] {
     // Same pool placement as the production forward (it is the twin).
-    super::on_rayon_worker(move || {
+    super::on_decode_pool(move || {
         profiled_forward_ternary_body(
             x, weights, cache, token, pos, config, scratch, rope_freq, prof, hook, input_proj_hook, ffn_hook,
         )

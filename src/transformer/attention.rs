@@ -524,9 +524,64 @@ pub unsafe fn attention_heads_parallel(
             }
         }
     } else {
+        let q_dim = n_head * head_dim;
+        // katgpt-rs Issue 936 T3: on the decode spin pool when one is
+        // installed — same per-head call, one task per head.
+        #[cfg(feature = "decode_spin_pool")]
+        {
+            // SAFETY: head h < heads writes only attn_out[h*head_dim..][..head_dim]
+            // (in bounds: q_dim <= attn_out.len() by contract) and
+            // head_scores[h*block_size..][..block_size] (in bounds by `heads`);
+            // both outlive the run.
+            let (ap, sp) = unsafe {
+                (
+                    katgpt_core::SyncMutPtr::new(attn_out.as_mut_ptr()),
+                    katgpt_core::SyncMutPtr::new(head_scores.as_mut_ptr()),
+                )
+            };
+            // The rayon arm's zip stops at the shorter of the two chunkings;
+            // mirror it exactly rather than trusting the length contract.
+            let heads = n_head.min(head_scores.len() / block_size.max(1));
+            let ran = katgpt_core::spin_pool_run(heads, &|h| {
+                let kv_group_offset = (h * n_kv_head / n_head) * head_dim;
+                unsafe {
+                    let attn_h = std::slice::from_raw_parts_mut(ap.get().add(h * head_dim), head_dim);
+                    let scores_h = std::slice::from_raw_parts_mut(sp.get().add(h * block_size), block_size);
+                    match softcap > 0.0 {
+                        true => attention_head_on_slices(
+                            &q[h * head_dim..],
+                            key_cache,
+                            value_cache,
+                            attn_h,
+                            scores_h,
+                            kv_group_offset,
+                            kv_dim,
+                            head_dim,
+                            t_n,
+                            scale,
+                            softcap,
+                        ),
+                        false => attention_head_on_slices_no_softcap(
+                            &q[h * head_dim..],
+                            key_cache,
+                            value_cache,
+                            attn_h,
+                            scores_h,
+                            kv_group_offset,
+                            kv_dim,
+                            head_dim,
+                            t_n,
+                            scale,
+                        ),
+                    }
+                }
+            });
+            if ran {
+                return;
+            }
+        }
         // Parallel: rayon par_chunks_mut gives each head exclusive &mut [f32].
         // SAFETY: par_chunks_mut guarantees non-overlapping mutable slices per head.
-        let q_dim = n_head * head_dim;
         if softcap > 0.0 {
             attn_out[..q_dim]
                 .par_chunks_mut(head_dim)

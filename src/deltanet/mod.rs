@@ -111,6 +111,70 @@ pub(crate) fn on_rayon_worker<R: Send>(f: impl FnOnce() -> R + Send) -> R {
 }
 
 
+/// The TERNARY decode forwards' entry: with `decode_spin_pool` compiled in
+/// and switched on, run `f` on THIS thread with the process-wide decode spin
+/// pool installed (katgpt-rs Issue 936), so the Q2 / bit-plane q8 kernels and
+/// the GDN / attention-head forks go to spinning workers instead of rayon.
+/// Otherwise (switch off, 0-worker pool, or another thread holds the pool)
+/// [`on_rayon_worker`]. Scoped to the ternary forwards: the f32 forward's
+/// kernels are not pool-aware, and idle spinners would compete with rayon.
+pub(crate) fn on_decode_pool<R: Send>(f: impl FnOnce() -> R + Send) -> R {
+    #[cfg(feature = "decode_spin_pool")]
+    let f = match decode_pool::try_run(f) {
+        Ok(r) => return r,
+        Err(f) => f,
+    };
+    on_rayon_worker(f)
+}
+
+/// The process-wide decode spin pool (katgpt-rs Issue 936 T3).
+#[cfg(feature = "decode_spin_pool")]
+pub mod decode_pool {
+    use std::sync::OnceLock;
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    static POOL: OnceLock<katgpt_core::SpinPool> = OnceLock::new();
+    /// Held by the one thread whose forward currently has the pool installed.
+    static BUSY: AtomicBool = AtomicBool::new(false);
+    static ON: AtomicBool = AtomicBool::new(true);
+
+    thread_local! {
+        /// This thread is inside a pool-installed forward (nested calls run inline).
+        static INSIDE: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    }
+
+    /// Turn the decode spin pool on or off; takes effect on the next forward.
+    pub fn set_decode_spin_pool(on: bool) {
+        ON.store(on, Ordering::Relaxed);
+    }
+
+    /// Run `f` on this thread with the pool installed, or hand `f` back
+    /// (`Err`) when the switch is off or another thread holds the pool.
+    pub(crate) fn try_run<R, F: FnOnce() -> R>(f: F) -> Result<R, F> {
+        if INSIDE.with(|c| c.get()) {
+            return Ok(f());
+        }
+        // A 0-worker pool (the off-macOS default) is never used: hand `f`
+        // back so the forward keeps Bench 880's rayon-worker posture.
+        let pool = POOL.get_or_init(katgpt_core::SpinPool::for_this_machine);
+        if !ON.load(Ordering::Relaxed) || pool.workers() == 0 || BUSY.swap(true, Ordering::Acquire) {
+            return Err(f);
+        }
+        struct Release;
+        impl Drop for Release {
+            fn drop(&mut self) {
+                INSIDE.with(|c| c.set(false));
+                BUSY.store(false, Ordering::Release);
+            }
+        }
+        let _release = Release;
+        INSIDE.with(|c| c.set(true));
+        Ok(katgpt_core::with_spin_pool(pool, f))
+    }
+}
+#[cfg(feature = "decode_spin_pool")]
+pub use decode_pool::set_decode_spin_pool;
+
 // Issue 919 T3 cell 2 — the ternary/GDN forward over a generic quantized KV
 // cache (measurement lane; the G0 control pins bit-identity with the plain
 // forward). Gated with `ternary_forward`, whose code it mirrors.

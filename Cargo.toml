@@ -324,6 +324,14 @@ ternary_q8_act = ["q2_0_ternary_bridge", "katgpt-core/ternary_group_q8_act"]
 # CPU without the raw-Q2 SIMD arm. Opt out at runtime BEFORE a load:
 # `set_ternary_q2_resident(false)`.
 ternary_q2_resident = ["ternary_q8_act", "katgpt-core/ternary_q2_q8"]
+# katgpt-rs Issue 936 T3: run the decode forward's forks on a spin-barrier
+# pool (workers never park mid-token) instead of rayon. Bit-identical
+# (fixed row partitions). Runtime switch `deltanet::set_decode_spin_pool`.
+# PROMOTED into deltanet_ternary_inference 2026-10-13: 5/5 real-model runs
+# bit-identical, 0.68-0.73x rayon quiet, 0.79-0.82x beside a 6-thread CPU
+# burner (Bench 879 §Decode spin pool). Off macOS the pool sizes to 0
+# workers (never used: rayon) unless KATGPT_SPIN_POOL_WORKERS is set.
+decode_spin_pool = ["katgpt-core/decode_spin_pool"]
 ternary_inference = ["katgpt-core/ternary_inference", "q2_0_ternary_bridge"]
 gdn_tree_verify = ["deltanet_inference", "katgpt-core/gdn_tree_verify"]
 hydra_budget = ["katgpt-core/hydra_budget"]
@@ -345,7 +353,7 @@ weaver_runtime = ["katgpt-speculative/weaver_runtime"]
 # Inter-feature composition (mirrors engine; hla_role_transport stays
 # engine-local — the moved gated arms reference no engine types, verified
 # by the T1.4 back-edge check).
-deltanet_ternary_inference = ["deltanet_inference", "q2_0_ternary_bridge", "ternary_q8_act", "ternary_q2_resident"]
+deltanet_ternary_inference = ["deltanet_inference", "q2_0_ternary_bridge", "ternary_q8_act", "ternary_q2_resident", "decode_spin_pool"]
 # Bonsai 2 Hadamard-folded ternary runtime (Issue 980 / Plan 600 Phase B).
 # Parses prism.hadamard.* + applies the activation-side rotation. Default-OFF
 # until the GOAT gate passes (G1 token-identity vs the fork, G2 overhead
@@ -391,6 +399,11 @@ required-features = ["forward_profiling", "bonsai2_hadamard"]
 [[test]]
 name = "ternary_q2_resident_goat"
 required-features = ["ternary_q2_resident", "bonsai2_hadamard"]
+
+# katgpt-rs Issue 936 T3 — decode spin pool vs rayon: bit identity + paired wall, one load.
+[[test]]
+name = "decode_spin_pool_goat"
+required-features = ["ternary_q2_resident", "bonsai2_hadamard", "decode_spin_pool"]
 
 [[test]]
 name = "gdn_step_parallel_goat"

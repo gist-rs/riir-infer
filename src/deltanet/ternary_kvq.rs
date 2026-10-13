@@ -254,7 +254,7 @@ pub fn forward_qwen_deltanet_ternary_qkv<'a, C: QuantizedKVCache + Send>(
 ) -> &'a mut [f32] {
     // Run on a rayon worker (no 17th thread beside the spinning pool —
     // Bench 880); arithmetic unchanged.
-    super::on_rayon_worker(move || {
+    super::on_decode_pool(move || {
         forward_qwen_deltanet_ternary_qkv_body(
             x,
             weights,

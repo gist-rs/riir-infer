@@ -860,7 +860,11 @@ pub fn qwen_deltanet_ternary_layer_body(
 /// workers — measured on Bonsai-2-27B: conv1d 128 µs/layer in decode vs
 /// 17 µs isolated, ~10% of the token. [`super::on_rayon_worker`] moves the
 /// body into the pool (the caller parks), so the pool's threads are the only
-/// runnable ones. Arithmetic unchanged ⇒ bit-identical.
+/// runnable ones. With `decode_spin_pool` on, [`super::on_decode_pool`]
+/// instead runs the body on THIS thread with the decode spin pool installed:
+/// its workers spin (≤ 100 µs idle) between forks instead of parking —
+/// 0.68–0.73× rayon's wall on Bonsai-2-27B (katgpt-rs Issue 936, Bench 879
+/// §Decode spin pool). Arithmetic unchanged ⇒ bit-identical either way.
 #[allow(clippy::too_many_arguments)]
 pub fn forward_qwen_deltanet_ternary_with_hook<'a>(
     x: &'a mut [f32],
@@ -876,7 +880,7 @@ pub fn forward_qwen_deltanet_ternary_with_hook<'a>(
     input_proj_hook: Option<&dyn TernaryInputProjHook>,
     ffn_hook: Option<&dyn TernaryFfnHook>,
 ) -> &'a mut [f32] {
-    super::on_rayon_worker(move || {
+    super::on_decode_pool(move || {
         forward_qwen_deltanet_ternary_body(
             x,
             weights,

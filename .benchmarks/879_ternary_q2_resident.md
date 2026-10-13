@@ -205,3 +205,51 @@ box's CPU has AVX2, so the loader's fast-path guard keeps raw Q2. That is
 inferred from the features and the CPU, not observed in the output. The first
 attempt (without `bonsai2_hadamard`) refused to load the Hadamard-folded GGUF
 in both builds. The probe's documented build line now names the feature.
+
+## Decode spin pool (katgpt-rs Issue 936 T3, PROMOTED 2026-10-13)
+
+Riir-infer Issue 045 priced it: rayon's workers park in the serial gaps
+between a token's forks, and waking them costs ~14–16% of each token. The
+`decode_spin_pool` feature (katgpt-rs `bb3b24f2e`, `65574c5d9`, `9c4f7f9dd`)
+runs the ternary decode forward on the calling thread with a spin-barrier
+pool installed:
+- The Q2 single/N-way and bit-plane q8 kernels, the GDN recurrence and the
+  attention-heads fork all claim fixed tasks from one CAS'd claim word.
+- Workers spin up to 100 µs idle inside the token, then park until the next
+  job.
+- The pool is sized to P-cores − 1 (11 on the M3 Max).
+
+Entry: `deltanet::on_decode_pool`, used by the ternary forward, its profiler
+twin and the ternary-KV forward. The f32 forward keeps `on_rayon_worker`,
+because its kernels are not pool-aware.
+
+**Gate** `tests/decode_spin_pool_goat.rs`: one load, two decode states, pool
+vs rayon flipped per position, 64 positions, M3 Max AC.
+
+| condition | runs | pool ms/tok | rayon ms/tok | paired ratio | logit mismatches |
+|---|---|---|---|---|---|
+| no burner, before the idle window (spin forever) | 1 | 70.7 | 106.4 | 0.679 | 0 |
+| sibling `cargo test` using ~7 cores, spin forever | 2 | 174–181 | 132–140 | **1.22 / 1.35** | 0 |
+| idle window grid, no burner: ∞ / 100 / 30 µs | 1 each | 74.1 / 73.3 / 77.5 | ~100 | 0.740 / 0.735 / 0.757 | 0 |
+| idle window grid, 6× `yes` burner: ∞ / 100 / 30 µs | 1 each | 165.8 / 94.6 / 97.7 | ~121 | **1.339** / 0.794 / 0.834 | 0 |
+| default (100 µs), no burner | 3 | 71.3 / 71.6 / 72.2 | 98–105 | **0.719 / 0.731 / 0.679** | 0 |
+| default (100 µs), 6× burner | 2 | 96.4 / 95.3 | 118–122 | **0.822 / 0.794** | 0 |
+| promoted build (feature via `deltanet_ternary_inference`) | 1 | 73.2 | 100.1 | 0.734 | 0 |
+
+So the CPU decode goes ~100 → ~72 ms/token (≈ 10 → ≈ 14 tok/s), bit-identical.
+Spinning forever is a trap on a shared box (1.2–1.35× slower); the idle
+window is what makes it promotable. Launch load ranged 3–11 across these runs
+(sibling sessions plus the test's own threads), so quote the paired ratios.
+
+**Off macOS the pool is inert by default.** `for_this_machine()` gives 0
+workers there, and a 0-worker pool is never used: the kernels keep rayon and
+`on_decode_pool` keeps Bench 880's rayon-worker posture. Two sessions measured
+the microbench on the 4090 box (i7-13700K, 8P+8E, 24 threads, before the idle
+window). Spin/rayon at the decode posture was 0.97–0.99 with 7 workers, 1.71–1.75
+with 11, 2.55 with 15 and 3.86–3.93 with 23. To opt in, set
+`KATGPT_SPIN_POOL_WORKERS`. That configuration is unmeasured with the idle
+window.
+
+Not yet measured: a GPU-hooked decode. The pool is installed there too; its
+workers park after 100 µs idle while the GPU works.
+

@@ -322,23 +322,46 @@ pub fn gated_deltanet_step_par_inplace(
     use rayon::prelude::*;
     let per_head = key_dim * val_dim;
     let scale = 1.0 / (key_dim as f32).sqrt();
-    state[..n_v_heads * per_head]
-        .par_chunks_mut(per_head)
-        .zip(output[..n_v_heads * val_dim].par_chunks_mut(val_dim))
-        .enumerate()
-        .for_each(|(h, (s, out))| {
-            let (g, b) = (decay[h], beta[h]);
-            let k_head = &k[h * key_dim..(h + 1) * key_dim];
-            let q_head = &q[h * key_dim..(h + 1) * key_dim];
-            let v_head = &v[h * val_dim..(h + 1) * val_dim];
-            for ((s_row, o), &vr) in s.chunks_exact_mut(key_dim).zip(out.iter_mut()).zip(v_head) {
-                crate::simd::simd_scale_inplace(s_row, g);
-                let kv = crate::simd::simd_dot_f32(s_row, k_head, key_dim);
-                let d = b * (vr - kv);
-                crate::simd::simd_outer_product_acc(s_row, std::slice::from_ref(&d), k_head, 1, key_dim);
-                *o = crate::simd::simd_dot_f32(s_row, q_head, key_dim) * scale;
-            }
+    // One head's step — shared by the spin-pool and the rayon arm.
+    let head = |h: usize, s: &mut [f32], out: &mut [f32]| {
+        let (g, b) = (decay[h], beta[h]);
+        let k_head = &k[h * key_dim..(h + 1) * key_dim];
+        let q_head = &q[h * key_dim..(h + 1) * key_dim];
+        let v_head = &v[h * val_dim..(h + 1) * val_dim];
+        for ((s_row, o), &vr) in s.chunks_exact_mut(key_dim).zip(out.iter_mut()).zip(v_head) {
+            crate::simd::simd_scale_inplace(s_row, g);
+            let kv = crate::simd::simd_dot_f32(s_row, k_head, key_dim);
+            let d = b * (vr - kv);
+            crate::simd::simd_outer_product_acc(s_row, std::slice::from_ref(&d), k_head, 1, key_dim);
+            *o = crate::simd::simd_dot_f32(s_row, q_head, key_dim) * scale;
+        }
+    };
+    let (state, output) = (&mut state[..n_v_heads * per_head], &mut output[..n_v_heads * val_dim]);
+    #[cfg(feature = "decode_spin_pool")]
+    {
+        // SAFETY: task h touches only head h's state block and output row
+        // range; both buffers outlive the run (it returns after every task).
+        let (sp, op) = unsafe {
+            (katgpt_core::SyncMutPtr::new(state.as_mut_ptr()), katgpt_core::SyncMutPtr::new(output.as_mut_ptr()))
+        };
+        let ran = katgpt_core::spin_pool_run(n_v_heads, &|h| {
+            let (s, out) = unsafe {
+                (
+                    std::slice::from_raw_parts_mut(sp.get().add(h * per_head), per_head),
+                    std::slice::from_raw_parts_mut(op.get().add(h * val_dim), val_dim),
+                )
+            };
+            head(h, s, out);
         });
+        if ran {
+            return;
+        }
+    }
+    state
+        .par_chunks_mut(per_head)
+        .zip(output.par_chunks_mut(val_dim))
+        .enumerate()
+        .for_each(|(h, (s, out))| head(h, s, out));
 }
 
 /// Causal depthwise conv1d update for a single token (decode mode).
