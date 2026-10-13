@@ -1,6 +1,6 @@
 # Issue 045 — GDN recurrence costs 2.3× in-model what it costs in isolation
 
-**Status:** OPEN 2026-10-13 — measured, cause unattributed; ~3–5 ms/token (3–5%) on the table, bit-identical fixes only.
+**Status:** OPEN 2026-10-13 — first-entry cost attributed to rayon worker wake-up (T1b); the obvious bit-identical fix (prefetch-join) REFUTED at +2.1–2.6%. Remaining lever is the pool itself.
 
 ## Measurements (M3 Max, AC, `--release`, Bonsai-2-27B PQ2_0, raw-Q2 arm)
 
@@ -30,11 +30,23 @@ through, or a worker wake-up after the serial conv1d/gates sections), and
 
 ## Tasks
 
-- [ ] T1: attribute the first-entry 75 µs. Probes, in order: (a) touch the
-      layer's state (prefetch read) inside the preceding `dn_input_proj`
-      fork, then time the step; (b) time a no-op `rayon::join` just before
-      the step to price the wake-up; (c) `xctrace` CPU counters (L2/SLC miss)
-      on the two calls.
-- [ ] T2: if (a) wins, ship a bit-identical prefetch, measured with the
-      real-model paired GOAT (`ternary_q2_resident_goat`, 3 runs), not the
-      profiler alone.
+- [x] T1(b): a no-op `rayon::broadcast` placed just before the step (throwaway
+      profiler edit) costs **4.82 ms/token ≈ 100 µs/layer**, and the step
+      then drops to **4.86 ms ≈ 101 µs/layer** (from ~175). So the
+      first-entry cost is waking the 16 workers, which went to sleep during
+      the serial conv1d/gates/expand gap. It is not the state's cache
+      placement.
+- [-] T1(a) + T2, refuted: `with_state_prefetch` ran steps 4–8 on the caller
+      inside `rayon::join` while the workers read the layer's state, to keep
+      them awake and warm the state. In-process paired A/B (one load, two
+      decode states, switch flipped per position, 64 positions, 3 runs): 0/64
+      logit mismatches every run, but ratio **1.023 / 1.026 / 1.021** (on/off;
+      off 107–116 ms/tok). It moves the wake-up cost and adds its own.
+      Reverted; nothing committed.
+- [ ] T3: the remaining lever is the pool: a decode-scoped spin-wait barrier
+      pool (llama.cpp's threadpool shape) so the workers never park between
+      forks inside one token. Every fork after a serial gap pays this, not just
+      the recurrence. Price it first: count the forks per token that follow
+      a gap long enough to park the workers, using the broadcast probe per
+      section. Then decide whether a custom pool is worth replacing rayon on
+      the decode path.
