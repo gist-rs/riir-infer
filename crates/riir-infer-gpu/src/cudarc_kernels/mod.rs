@@ -911,6 +911,33 @@ extern "C" __global__ void argmax_first_f32(
         atomicMax(result, packed);
     }
 }
+
+// ---------------------------------------------------------------------------
+// Issue 1068 / Plan 633 — the walk-advance kernel: the on-device chain link of
+// the K-token walk graph. ONE thread; runs between captured forwards. Reads
+// the step's packed argmax (argmax_first_f32's encoding: key<<32 | ~index),
+// persists it to walk_out[step], and computes the next feed entirely on
+// device: token = (index + delta) mod vocab, pos += 1. delta=1 reproduces the
+// bench-734 deterministic-walk discipline (input = argmax + 1) exactly;
+// delta=0 is greedy (input = argmax). Integer-only, deterministic; the walk's
+// per-step numerics are therefore IDENTICAL to per-token graph replay (same
+// kernels, same order, same buffers) — the G1 bit-identity contract.
+// ---------------------------------------------------------------------------
+extern "C" __global__ void walk_advance_u64(
+    const unsigned long long* __restrict__ argmax_buf,  // [1] this step's packed argmax
+    unsigned long long* __restrict__ walk_out,          // [steps]; step is a baked scalar
+    int* __restrict__ token_dev,                        // [1]
+    int* __restrict__ pos_dev,                          // [1]
+    int vocab,
+    int delta,
+    int step)
+{
+    const unsigned long long packed = argmax_buf[0];
+    walk_out[step] = packed;
+    const unsigned int idx = ~(unsigned int)(packed & 0xFFFFFFFFull);
+    token_dev[0] = (int)((idx + (unsigned int)delta) % (unsigned int)vocab);
+    pos_dev[0] += 1;
+}
 "#;
 
 /// Error type for cudarc kernel operations.
@@ -974,6 +1001,8 @@ pub struct ElementwiseKernels {
     rmsnorm_gate_silu_quantize: CudaFunction,
     /// Issue 697 — GPU-side argmax (first-index tie-break, CPU-exact).
     argmax_first: CudaFunction,
+    /// Issue 1068 / Plan 633 — the walk-advance chain link (K-token walk graph).
+    walk_advance: CudaFunction,
     _module: Arc<CudaModule>,
 }
 
@@ -1038,6 +1067,10 @@ impl ElementwiseKernels {
         let argmax_first = module
             .load_function("argmax_first_f32")
             .map_err(|e| CudarcKernelError::Compile(format!("{e}")))?;
+        // Issue 1068 / Plan 633 — the walk-advance chain link.
+        let walk_advance = module
+            .load_function("walk_advance_u64")
+            .map_err(|e| CudarcKernelError::Compile(format!("{e}")))?;
         Ok(Self {
             rmsnorm,
             residual_add,
@@ -1053,6 +1086,7 @@ impl ElementwiseKernels {
             gate_sigmoid_quantize,
             rmsnorm_gate_silu_quantize,
             argmax_first,
+            walk_advance,
             _module: module,
         })
     }
@@ -1549,6 +1583,43 @@ impl ElementwiseKernels {
                 .arg(values)
                 .arg(&n_i32)
                 .arg(result)
+                .launch(cfg)
+                .map_err(|e| CudarcKernelError::Launch(e.to_string()))?;
+        }
+        Ok(())
+    }
+
+    /// Issue 1068 / Plan 633 — launch the walk-advance chain link (single
+    /// thread; see the `walk_advance_u64` kernel docs). `step` is baked into
+    /// the captured launch so each step of the K-token walk graph persists
+    /// its packed argmax to `walk_out[step]`.
+    pub fn launch_walk_advance(
+        &self,
+        stream: &CudaStream,
+        argmax_buf: &cudarc::driver::safe::CudaSlice<u64>,
+        walk_out: &cudarc::driver::safe::CudaSlice<u64>,
+        token_dev: &cudarc::driver::safe::CudaSlice<i32>,
+        pos_dev: &cudarc::driver::safe::CudaSlice<i32>,
+        vocab: usize,
+        delta: i32,
+        step: i32,
+    ) -> Result<(), CudarcKernelError> {
+        let vocab_i32 = vocab as i32;
+        let cfg = LaunchConfig {
+            grid_dim: (1, 1, 1),
+            block_dim: (1, 1, 1),
+            shared_mem_bytes: 0,
+        };
+        unsafe {
+            stream
+                .launch_builder(&self.walk_advance)
+                .arg(argmax_buf)
+                .arg(walk_out)
+                .arg(token_dev)
+                .arg(pos_dev)
+                .arg(&vocab_i32)
+                .arg(&delta)
+                .arg(&step)
                 .launch(cfg)
                 .map_err(|e| CudarcKernelError::Launch(e.to_string()))?;
         }

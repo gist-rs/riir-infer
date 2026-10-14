@@ -833,6 +833,26 @@ pub struct TernaryDeltanetGpuForwardCudarc {
     /// the verify rotation pool). See the speculative section in the impl.
     #[cfg(feature = "speculative_decode")]
     spec: SpecStateCudarc,
+    /// Issue 1068 / Plan 633 — the K-token WALK graph: `steps` captured
+    /// [forward; walk_advance] pairs in ONE cudaGraph, replayed once per call
+    /// so the per-token host round-trip (2 htod + 1 launch + 1 dtoh + 1 fenced
+    /// read) amortizes to ~1/K per token. Built lazily on the first
+    /// `forward_tokens_graph_walk` call at the requested `steps`; `None`/
+    /// 0 = not built (the shipping per-token path is untouched). `walk_out`
+    /// holds the steps' packed argmaxes (device), `walk_pinned` the dtoh
+    /// landing (allocated with it — K×8 B, once, G4).
+    #[cfg(feature = "cuda_graphs_forward")]
+    walk_graph: Option<CudaGraph>,
+    #[cfg(feature = "cuda_graphs_forward")]
+    walk_steps: usize,
+    /// The baked advance delta of the current walk graph (1 = bench walk,
+    /// 0 = greedy). Part of the capture key — a delta change rebuilds.
+    #[cfg(feature = "cuda_graphs_forward")]
+    walk_delta: i32,
+    #[cfg(feature = "cuda_graphs_forward")]
+    walk_out: Option<CudaSlice<u64>>,
+    #[cfg(feature = "cuda_graphs_forward")]
+    walk_pinned: Option<PinnedHostSlice<u64>>,
 }
 
 /// Host-side stage timings for one `forward_token_graph` call (µs).
@@ -1385,6 +1405,16 @@ impl TernaryDeltanetGpuForwardCudarc {
             acts,
             #[cfg(feature = "cuda_graphs_forward")]
             graph: None,
+            #[cfg(feature = "cuda_graphs_forward")]
+            walk_graph: None,
+            #[cfg(feature = "cuda_graphs_forward")]
+            walk_steps: 0,
+            #[cfg(feature = "cuda_graphs_forward")]
+            walk_delta: 0,
+            #[cfg(feature = "cuda_graphs_forward")]
+            walk_out: None,
+            #[cfg(feature = "cuda_graphs_forward")]
+            walk_pinned: None,
             lora_layers,
             lora_kernels,
             lora_norm_x,
@@ -2646,6 +2676,13 @@ impl TernaryDeltanetGpuForwardCudarc {
     #[cfg(feature = "cuda_graphs_forward")]
     pub fn invalidate_graph(&mut self) {
         self.graph = None;
+        // Issue 1068 — the walk graph bakes the same addresses (plus its own
+        // walk_out buffer); every invalidate_graph caller (set_lora/clear_lora/
+        // SI attach/speculative rotation) invalidates it identically. The
+        // walk_out/walk_pinned BUFFERS stay allocated (stable addresses, so a
+        // recapture can reuse them; K×8 B).
+        self.walk_graph = None;
+        self.walk_steps = 0;
     }
 
     /// Issue 697 — greedy-decode variant of [`forward_token_graph`]: instead of
@@ -2885,6 +2922,186 @@ impl TernaryDeltanetGpuForwardCudarc {
 
         self.acts.pos += 1;
         Ok(((!(packed as u32)) as usize, t))
+    }
+
+    /// Issue 1068 / Plan 633 — the K-token WALK graph: capture `steps` ×
+    /// [forward; walk_advance] into ONE cudaGraph and replay it once per
+    /// call. The per-token host round-trip of the shipping path (2 htod +
+    /// 1 graph launch + 1 dtoh + 1 fenced read — the 170–570 µs/token slice
+    /// Bench 984 localized) amortizes to ~1/K per token.
+    ///
+    /// - `delta = 1` reproduces the bench-734 deterministic-walk discipline
+    ///   (`input = argmax + 1`) exactly — the G1 gate compares this walk's
+    ///   token stream against `forward_token_graph_argmax` under the same
+    ///   discipline and requires BIT-IDENTITY (same kernels, same order,
+    ///   same buffers; the advance is integer-only).
+    /// - `delta = 0` is greedy (`input = argmax`) — the serving primitive;
+    ///   stop conditions (EOS/max-len) stay CALLER-side between calls (a
+    ///   mid-walk EOS wastes the remaining steps, never corrupts state).
+    ///
+    /// The graph is (re)built lazily when `(steps, delta)` changes; callers
+    /// should hold one posture per decode run (rebuilds re-capture, ~ms).
+    /// `invalidate_graph` invalidates it with the per-token graph (the same
+    /// baked-address law). OPT-IN surface: nothing in the shipping path
+    /// calls this — the league/consumers arm it explicitly (the
+    /// `RIIR_DECODE_WALK_STEPS` knob lives consumer-side).
+    ///
+    /// G4: `out` is CALLER-OWNED — cleared and refilled in place; the replay
+    /// path allocates nothing (the walk buffers were allocated once at
+    /// build).
+    #[cfg(feature = "cuda_graphs_forward")]
+    pub fn forward_tokens_graph_walk(
+        &mut self,
+        steps: usize,
+        token_id: usize,
+        delta: i32,
+        out: &mut Vec<usize>,
+    ) -> Result<(), CudarcKernelError> {
+        if steps == 0 || steps > 256 {
+            return Err(CudarcKernelError::InvalidArg(format!(
+                "walk steps must be in 1..=256 (graph-node budget), got {steps}"
+            )));
+        }
+        // The initial feed pair (pinned WC — the Issue-984 T2(a) pattern; the
+        // event fence is a no-op here, the previous call's transfers completed
+        // before its fenced read returned).
+        {
+            let acts = &mut self.acts;
+            acts.token_host = token_id as i32;
+            acts.pos_host = acts.pos as i32;
+        }
+        let stream = &self.infra.stream;
+        let acts = &mut self.acts;
+        {
+            let feed = acts
+                .feed_pinned
+                .as_mut_slice()
+                .map_err(|e| CudarcKernelError::Launch(e.to_string()))?;
+            feed[0] = acts.token_host;
+            feed[1] = acts.pos_host;
+        }
+        let feed: &[i32] = acts
+            .feed_pinned
+            .as_slice()
+            .map_err(|e| CudarcKernelError::Launch(e.to_string()))?;
+        stream
+            .memcpy_htod(&feed[0..1], &mut acts.token_dev_buf)
+            .map_err(|e| CudarcKernelError::Launch(e.to_string()))?;
+        stream
+            .memcpy_htod(&feed[1..2], &mut acts.pos_dev_buf)
+            .map_err(|e| CudarcKernelError::Launch(e.to_string()))?;
+
+        if self.walk_graph.is_none() || self.walk_steps != steps || self.walk_delta != delta {
+            self.build_walk_graph(steps, delta)?;
+        }
+
+        let graph = self.walk_graph.as_ref().expect("walk graph was just built");
+        graph
+            .launch()
+            .map_err(|e| CudarcKernelError::Launch(e.to_string()))?;
+
+        // One steps×8B pinned dtoh; the event-fenced read (as_slice) waits for
+        // the graph AND the DMA (the Issue-984 T2(a) fence pattern, K-wide).
+        self.infra
+            .stream
+            .memcpy_dtoh(
+                self.walk_out.as_ref().expect("walk out allocated"),
+                self.walk_pinned.as_mut().expect("walk pinned allocated"),
+            )
+            .map_err(|e| CudarcKernelError::Launch(e.to_string()))?;
+        let packed: &[u64] = self
+            .walk_pinned
+            .as_ref()
+            .expect("walk pinned allocated")
+            .as_slice()
+            .map_err(|e| CudarcKernelError::Launch(e.to_string()))?;
+        out.clear();
+        out.extend(packed.iter().map(|&p| (!(p as u32)) as usize));
+        self.acts.pos += steps;
+        Ok(())
+    }
+
+    /// Issue 1068 — capture the K-step walk graph (see
+    /// [`Self::forward_tokens_graph_walk`]). Allocates the walk buffers on
+    /// first use / step-count change (K×8 B device + K×8 B pinned, once —
+    /// G4: zero per-call allocation after the build).
+    #[cfg(feature = "cuda_graphs_forward")]
+    fn build_walk_graph(&mut self, steps: usize, delta: i32) -> Result<(), CudarcKernelError> {
+        let alloc_err = |e: cudarc::driver::DriverError| CudarcKernelError::Launch(e.to_string());
+        if self.walk_out.as_ref().is_none_or(|w| w.len() != steps) {
+            self.walk_out = Some(
+                self.infra
+                    .stream
+                    .alloc_zeros::<u64>(steps)
+                    .map_err(alloc_err)?,
+            );
+            let mut pinned =
+                unsafe { self.infra.ctx.alloc_pinned::<u64>(steps) }.map_err(alloc_err)?;
+            {
+                let s = pinned.as_mut_slice().map_err(alloc_err)?;
+                s.fill(0);
+            }
+            self.walk_pinned = Some(pinned);
+        }
+        self.infra
+            .stream
+            .begin_capture(cudarc::driver::sys::CUstreamCaptureMode::CU_STREAM_CAPTURE_MODE_GLOBAL)
+            .map_err(|e| CudarcKernelError::Launch(e.to_string()))?;
+        // The same split-borrow capture body as `ensure_graph_captured` — the
+        // recorded launches bake the CURRENT buffer addresses (LoRA/SI laws
+        // identical; the Issue-722 H3 abort contract applies verbatim).
+        let infra = &self.infra;
+        let acts = &mut self.acts;
+        let si = si_session_args!(self);
+        let lora_kernels = &self.lora_kernels;
+        let lora_norm_x = &self.lora_norm_x;
+        let mut lora_ctx = build_lora_ctx_enabled(
+            lora_kernels,
+            self.lora_layers.as_mut_slice(),
+            lora_norm_x,
+            self.lora_forward_enabled,
+        );
+        let walk_out = self.walk_out.as_ref().expect("walk out allocated above");
+        let vocab = infra.config.vocab_size;
+        for step in 0..steps {
+            if let Err(e) = forward_from_x_devpos(infra, acts, lora_ctx.as_mut(), si.as_ref()) {
+                let _ = self.infra.stream.end_capture(
+                    cudarc::driver::sys::CUgraphInstantiate_flags::CUDA_GRAPH_INSTANTIATE_FLAG_AUTO_FREE_ON_LAUNCH,
+                );
+                return Err(e);
+            }
+            infra.elementwise.launch_walk_advance(
+                &infra.stream,
+                &acts.argmax_buf,
+                walk_out,
+                &acts.token_dev_buf,
+                &acts.pos_dev_buf,
+                vocab,
+                delta,
+                step as i32,
+            )?;
+        }
+        let graph = self
+            .infra
+            .stream
+            .end_capture(
+                cudarc::driver::sys::CUgraphInstantiate_flags::CUDA_GRAPH_INSTANTIATE_FLAG_AUTO_FREE_ON_LAUNCH,
+            )
+            .map_err(|e| CudarcKernelError::Launch(e.to_string()))?;
+        let graph = graph.ok_or_else(|| {
+            CudarcKernelError::Launch("walk end_capture returned None (no graph captured)".into())
+        })?;
+        graph
+            .upload()
+            .map_err(|e| CudarcKernelError::Launch(e.to_string()))?;
+        self.infra
+            .stream
+            .synchronize()
+            .map_err(|e| CudarcKernelError::Launch(e.to_string()))?;
+        self.walk_graph = Some(graph);
+        self.walk_steps = steps;
+        self.walk_delta = delta;
+        Ok(())
     }
 
     /// Reset all per-layer state for a new sequence.
