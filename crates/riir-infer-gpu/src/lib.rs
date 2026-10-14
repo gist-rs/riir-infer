@@ -295,6 +295,13 @@ pub mod prefill_cuda_gdn_chunked;
     feature = "cubecl_runtime",
     not(target_os = "macos")
 ))]
+pub mod prefill_cuda_gdn_mma;
+#[cfg(all(
+    feature = "ternary_gemv_cuda_raw",
+    feature = "ternary_gemm_batched",
+    feature = "cubecl_runtime",
+    not(target_os = "macos")
+))]
 pub mod prefill_cuda_mma;
 #[cfg(feature = "ternary_gemv")]
 pub mod ternary_ffn_fused;

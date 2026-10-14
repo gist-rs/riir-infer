@@ -112,6 +112,7 @@ use crate::prefill_cuda_attention::{
 use crate::prefill_cuda_deltanet::{ConvFma, CudaDeltanetKernels, LogForm, SigDiv, SigExp};
 use crate::prefill_cuda_ffn::CudaFfnKernels;
 use crate::prefill_cuda_gdn_chunked::CudaGdnChunkedKernels;
+use crate::prefill_cuda_gdn_mma::CudaGdnMmaKernels;
 use crate::prefill_cuda_mma::build_weight_cache;
 use crate::ternary_deltanet_gpu_forward::TernaryDeltanetGpuForward;
 use riir_infer_core::types::DeltaNetLayerType;
@@ -856,6 +857,11 @@ struct FullStack {
     dq_fq: OnceLock<Option<Arc<crate::cudarc_kernels::DqFqKernels>>>,
     /// Arm 12 — None if NVRTC compile fails (falls back to rowpar).
     gdn_chunked: Option<CudaGdnChunkedKernels>,
+    /// Issue 1066 — the MMA-class chunked recurrence (the #29353 port);
+    /// None if NVRTC compile fails or no arm's smem opt-in fits (falls back
+    /// to v3 chunked → rowpar). Takes the `gdn_chunked` slot's lane when
+    /// the admission passes (p ≥ FA_MIN_P, p % 16 == 0, H ladder).
+    gdn_mma: Option<CudaGdnMmaKernels>,
     bufs: Mutex<FullBufs>,
     /// f32 weight mirrors — built once (None on any read/upload failure).
     f32_weights: OnceLock<Option<Arc<Vec<LayerF32>>>>,
@@ -990,6 +996,9 @@ fn build_full_stack() -> Result<FullStack, String> {
     // Arm 12: independent NVRTC module — a compile failure only disables the
     // chunked path (rowpar stays the default).
     let gdn_chunked = CudaGdnChunkedKernels::new(ctx.clone()).ok();
+    // Issue 1066: the MMA class rides the same posture — a compile or smem
+    // opt-in failure only disables the MMA arm (v3 → rowpar stay).
+    let gdn_mma = CudaGdnMmaKernels::new(ctx.clone()).ok();
     let at = CudaAttnKernels::new(ctx).map_err(|e| e.to_string())?;
     Ok(FullStack {
         stream,
@@ -1001,6 +1010,7 @@ fn build_full_stack() -> Result<FullStack, String> {
         #[cfg(feature = "dq_phase_bench")]
         dq_fq: OnceLock::new(),
         gdn_chunked,
+        gdn_mma,
         bufs: Mutex::new(FullBufs {
             x: None,
             normx: None,
@@ -2379,6 +2389,18 @@ fn whole_prefill_inner(
                 Some(_)
             )
         );
+    // Issue 1066 — the MMA admission (constant across the layer loop: p,
+    // n_v, hd fixed per forward). The scope guard: p ≥ FA_MIN_P (the FA-arm
+    // predicate class) and p % 16 == 0 — partial last chunks route to v3
+    // (its in-kernel masking is G1-proven); p < 128 stays incumbent.
+    let gdn_mma_ready = gdn_chunked_wanted
+        && hd == 128
+        && p >= FA_MIN_P
+        && p.is_multiple_of(16)
+        && stack
+            .gdn_mma
+            .as_ref()
+            .is_some_and(|k| k.select_path(p, n_v).is_some());
     let (_, _, scratch) = scratch.as_ref()?;
 
     // Issue 742 T1.5 — materialize the token device reference + (armed) the
@@ -3057,7 +3079,19 @@ fn whole_prefill_inner(
                         gdn_sub.borrow_mut().expand += t_sub.elapsed().as_micros();
                     }
                     t_sub = std::time::Instant::now();
-                    if gdn_chunked_ready {
+                    if gdn_mma_ready {
+                        // Issue 1066 — the MMA-class chunked recurrence: same
+                        // knob, same numerics-policy class as v3 (argmax-
+                        // stability, NOT bit-identity), one rounding step wider
+                        // (double-BF16 residual-pair products).
+                        stack
+                            .gdn_mma
+                            .as_ref()
+                            .expect("gdn_mma_ready implies Some")
+                            .launch(
+                                stream, qkvx_b, beta_b, decay_b, dn_state, rec_b, n_v, p,
+                            )?;
+                    } else if gdn_chunked_ready {
                         // Arm 12 — the chunked recurrence (NOT bit-identical to
                         // rowpar; the llama.cpp numerics class — see the knob doc).
                         stack
@@ -3965,8 +3999,16 @@ fn whole_prefill_inner(
     if gdn_sub_sync {
         let g = gdn_sub.borrow();
         eprintln!(
-            "[734-arm8-trace] gdn sub-stages (us): conv={} carry={} beta={} expand={} rec={} lnorm={} zgate={} (chunked={})",
-            g.conv, g.carry, g.beta, g.expand, g.rec, g.lnorm, g.zgate, gdn_chunked_ready
+            "[734-arm8-trace] gdn sub-stages (us): conv={} carry={} beta={} expand={} rec={} lnorm={} zgate={} (chunked={} mma={})",
+            g.conv,
+            g.carry,
+            g.beta,
+            g.expand,
+            g.rec,
+            g.lnorm,
+            g.zgate,
+            gdn_chunked_ready,
+            gdn_mma_ready
         );
     }
 
