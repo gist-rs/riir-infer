@@ -85,7 +85,13 @@ root (CPU substrate) + `crates/riir-infer-gpu` (the wgpu/CubeCL GPU layer,
 own crate so CPU-only consumers never resolve the GPU dep tree) +
 `crates/riir-infer-laya` (the encoder lane, own crate so lane-free
 consumers never resolve the tokenizers/gemm tree — CPU + macOS Metal +
-non-macOS CUDA backends, `laya-riir-cuda` since riir-infer Issue 002).
+non-macOS CUDA backends, `laya-riir-cuda` since riir-infer Issue 002) +
+`crates/riir-infer-ane` (the SHARED Core ML/ANE host — plan 619 T1.0:
+digest/verify/stage, the compile cache, `MLModel` load with compute
+units + `functionName`, the multi-array predict; macOS-only by contract,
+a zero-dep stub elsewhere; the objc2 family is ITS dep set) +
+`crates/riir-infer-clef` (the clef-text decision lane, plan 619 —
+`clef-ane` opt-in, compiles empty by default, consumes the shared host).
 Vendored crates.io forks under `vendor/` (`[patch.crates-io]` in the root
 manifest).
 
