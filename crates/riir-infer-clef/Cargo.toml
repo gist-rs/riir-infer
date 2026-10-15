@@ -1,0 +1,44 @@
+[package]
+name = "riir-infer-clef"
+version = "0.1.0"
+edition = "2024"
+license = "MIT"
+# Internal substrate leaf — the release surface is the consumer crates.
+publish = false
+
+# riir-infer-clef — the clef-text decision lane (plan 619): seat
+# clef-text-0.6b (Apache-2.0, Qwen3-0.6B + the Clef joint schema head,
+# distilled from clef-flash) as an in-process decision lane on the M3's
+# Neural Engine, ON the shared `riir-infer-ane` host (plan 619 T1.0 —
+# this crate never grows a second copy of the CoreML machinery).
+#
+# The lane is `clef-ane`, opt-in, NEVER a default: the artifact tree is
+# download-on-demand (~GB, sha256-verified per asset), the fidelity
+# authority is the frozen-capture parity gate (T2.2), and every
+# promotion beyond opt-in is owner-gated (plan 619's gate summary).
+# Default build compiles EMPTY (the laya-riir posture); off-macOS the
+# lane module cfg's out (the host stub resolves nothing — never a
+# dep-tree failure).
+
+[dependencies]
+serde = { version = "1", features = ["derive"], optional = true }
+serde_json = { version = "1", optional = true }
+tokenizers = { version = "0.22", optional = true }
+sha2 = { version = "0.10", optional = true }
+blake3 = { version = "1", optional = true }
+riir-infer-ane = { path = "../riir-infer-ane", optional = true }
+
+[features]
+# The clef-text ANE lane (plan 619): implies the shared ANE host +
+# the record-encoder substrate. macOS-only code — the module gates on
+# `all(feature = "clef-ane", target_os = "macos")` (the laya-ane
+# posture); off-macOS the feature resolves the host stub and compiles
+# the lane to nothing (never a dep-tree failure).
+clef-ane = [
+    "dep:serde",
+    "dep:serde_json",
+    "dep:tokenizers",
+    "dep:sha2",
+    "dep:blake3",
+    "dep:riir-infer-ane",
+]

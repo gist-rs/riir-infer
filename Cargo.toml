@@ -845,7 +845,7 @@ riir-infer-laya = { path = "crates/riir-infer-laya", features = [
 # and the pinned-checkpoint encoder lane as a member (it carries the
 # tokenizers/gemm tree, which lane-free consumers never resolve).
 [workspace]
-members = ["crates/riir-infer-gpu", "crates/riir-infer-laya", "crates/riir-infer-ane"]
+members = ["crates/riir-infer-gpu", "crates/riir-infer-laya", "crates/riir-infer-ane", "crates/riir-infer-clef"]
 
 # Shared dep declarations for members (the fence resolves path deps from
 # each manifest's own directory, so member manifests inherit this instead
