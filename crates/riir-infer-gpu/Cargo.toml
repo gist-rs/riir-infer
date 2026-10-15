@@ -175,6 +175,17 @@ edlm_gpu = ["cubecl_runtime", "riir-infer-core/edlm"]
 # gemma2_d2f; the pure sampler (fa_posterior) is UNGATED in infer-core —
 # only the decode-loop wiring gates here.
 fa_constraint = ["gemma2_d2f", "dep:thiserror"]
+# EB-Sampler commit policy over the gemma2_d2f denoising loop (katgpt-rs
+# Issue 917 T2' — the riir-side gemma2_d2f model-forward commit policy, the
+# "future slice if the A/B wants it" that the Phase-0 0.4B A/B now wants).
+# Consumes katgpt-core::entropy_bounded_commit (the T1 reference primitive —
+# never reimplemented). Armed per-config by `Gemma2D2fConfig::eb_gamma >= 0`;
+# the disarmed default (-1.0) keeps every existing config on the incumbent
+# τ/sampler seams, and the feature-off posture compiles the wiring to
+# nothing. Armed, EB takes precedence over both incumbent accept seams
+# (the τ threshold and the learned DiffusionSampler) — the katgpt-forward
+# T2 wiring shape. Implies gemma2_d2f: the policy lives only in that lane.
+entropy_bounded_commit = ["gemma2_d2f", "katgpt-core/entropy_bounded_commit"]
 # Compile the blake3-keyed params-handle cache in (default-off
 # pass-through without it). Mirrors the engine gpu crate's feature.
 params_handle_cache = ["cubecl_runtime"]

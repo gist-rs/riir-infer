@@ -315,6 +315,10 @@ fn fa_decode_config(steps: usize, tau: f32) -> Gemma2D2fConfig {
         temperature: 1.0,
         sampler: None,
         sc_config: D2fScConfig::default(),
+        #[cfg(feature = "entropy_bounded_commit")]
+        eb_gamma: -1.0,
+        #[cfg(feature = "entropy_bounded_commit")]
+        eb_max_commit: usize::MAX,
     }
 }
 

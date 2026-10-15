@@ -33,6 +33,14 @@ use crate::gemma2_d2f_sc::{
     D2fScConfig, D2fScState, init_w_sc_identity_padded, is_identity_padded, project_sc_into,
 };
 
+// EB-Sampler commit policy (katgpt-rs Issue 917 T2'). The T1 reference
+// primitive is CONSUMED, never reimplemented — the same entropy-bounded
+// residual scan the katgpt-forward d2f wiring uses.
+#[cfg(feature = "entropy_bounded_commit")]
+use katgpt_core::entropy_bounded_commit::{
+    EbCommitConfig, ErrorProxy, PositionStats, entropy_bounded_commit_stats, position_stats,
+};
+
 // FA-constrained exact posterior decoding (issue 035 P1) — the `propose_x0`
 // arm of the denoising loop behind the opt-in feature. The default decode
 // path below is untouched (the byte-identical feature-off law).
@@ -271,6 +279,23 @@ pub struct Gemma2D2fConfig {
     /// When enabled, the decode loop tracks the previous step's x̂_0 estimate
     /// and feeds it through W_sc projection into the embedding layer.
     pub sc_config: D2fScConfig,
+    /// EB-Sampler joint-error budget γ (nats) — katgpt-rs Issue 917 T2'.
+    /// `< 0` (default **−1.0**) DISARMED: the decode runs the incumbent
+    /// accept seams (τ threshold / learned sampler) unchanged. `>= 0` arms
+    /// the entropy-bounded commit: each pass fixes its commit set FIRST
+    /// from that pass's mask-suppressed entropies (`Σ H − max H ≤ γ`), and
+    /// ONLY committed positions sample — EB takes precedence over both
+    /// incumbent accept seams (the katgpt-forward T2 wiring shape). NaN
+    /// behaves as disarmed (the arming predicate never routes it to the
+    /// scan, which would commit nothing). Uncalibrated on every lane until
+    /// a real-checkpoint A/B measures it; the DiffusionGemma report's
+    /// default budget is 0.1.
+    #[cfg(feature = "entropy_bounded_commit")]
+    pub eb_gamma: f32,
+    /// Hard per-pass commit cap when EB is armed (`usize::MAX` = uncapped).
+    /// Ignored disarmed.
+    #[cfg(feature = "entropy_bounded_commit")]
+    pub eb_max_commit: usize,
 }
 
 impl Default for Gemma2D2fConfig {
@@ -282,6 +307,10 @@ impl Default for Gemma2D2fConfig {
             temperature: 1.0,
             sampler: None,
             sc_config: D2fScConfig::default(),
+            #[cfg(feature = "entropy_bounded_commit")]
+            eb_gamma: -1.0,
+            #[cfg(feature = "entropy_bounded_commit")]
+            eb_max_commit: usize::MAX,
         }
     }
 }
@@ -1585,6 +1614,30 @@ pub fn d2f_decode_gemma2(
     let vocab = gpu.config().vocab_size;
     let mut probs_scratch: Vec<f32> = Vec::with_capacity(vocab);
 
+    // ── EB pass-set state (Issue 917 T2') ──
+    // Armed, each pass fixes its commit set FIRST from that pass's logits
+    // (mask-suppressed entropies — the same suppressed distribution the τ
+    // confidence reads), then ONLY the committed positions sample, ascending.
+    // All scratch is sized once per decode and reused across passes (G4:
+    // no per-pass allocation). Disarmed, the buffers exist but the scan
+    // never runs; feature-off, none of this compiles.
+    #[cfg(feature = "entropy_bounded_commit")]
+    let eb_armed = decode_config.eb_gamma >= 0.0 && decode_config.eb_max_commit > 0;
+    #[cfg(feature = "entropy_bounded_commit")]
+    let eb_cfg = EbCommitConfig {
+        gamma: decode_config.eb_gamma,
+        max_commit: decode_config.eb_max_commit,
+        proxy: ErrorProxy::Entropy,
+    };
+    #[cfg(feature = "entropy_bounded_commit")]
+    let mut eb_stats: Vec<PositionStats> = vec![PositionStats::default(); seq_len];
+    #[cfg(feature = "entropy_bounded_commit")]
+    let mut eb_candidates: Vec<u32> = Vec::with_capacity(seq_len);
+    #[cfg(feature = "entropy_bounded_commit")]
+    let mut eb_entropy_scratch: Vec<f32> = vec![0.0; seq_len];
+    #[cfg(feature = "entropy_bounded_commit")]
+    let mut eb_key_scratch: Vec<f32> = vec![0.0; seq_len];
+
     for step in 0..max_steps {
         // Run block-causal forward for all positions.
         // Pass SC state if enabled (None on first step, x̂_0 estimate on later steps).
@@ -1593,11 +1646,53 @@ pub fn d2f_decode_gemma2(
             None => gpu.block_causal_forward(&tokens, prompt_len),
         };
 
+        // Armed: build this pass's EB commit set — per-position stats over
+        // the mask-suppressed row, then the T1 residual scan. The commit set
+        // is sorted ascending so the sampling order (and therefore the RNG
+        // draw order) matches the incumbent's position-ascending walk.
+        // `entropy_bounded_commit_stats` reorders `eb_candidates` in place;
+        // the committed prefix `[..k]` is what the pass samples.
+        #[cfg(feature = "entropy_bounded_commit")]
+        let eb_selected: Option<&[u32]> = if eb_armed {
+            eb_candidates.clear();
+            for pos in block_start..seq_len {
+                if !masked[pos] {
+                    continue;
+                }
+                probs_scratch.clear();
+                probs_scratch.extend_from_slice(&all_logits[pos]);
+                if mask_token_id < probs_scratch.len() {
+                    probs_scratch[mask_token_id] = f32::NEG_INFINITY;
+                }
+                eb_stats[pos] = position_stats(&probs_scratch);
+                eb_candidates.push(pos as u32);
+            }
+            let k = entropy_bounded_commit_stats(
+                &mut eb_candidates,
+                &eb_stats,
+                &mut eb_entropy_scratch,
+                &mut eb_key_scratch,
+                &eb_cfg,
+            );
+            eb_candidates[..k].sort_unstable();
+            Some(&eb_candidates[..k])
+        } else {
+            None
+        };
+        #[cfg(not(feature = "entropy_bounded_commit"))]
+        let eb_selected: Option<&[u32]> = None;
+
         let mut n_unmasked = 0usize;
 
         for pos in block_start..seq_len {
             if !masked[pos] {
                 n_unmasked += 1;
+                continue;
+            }
+            // Armed: only this pass's EB-committed positions sample; the rest
+            // stay masked for the next pass. Disarmed, `eb_selected` is None
+            // and every masked position walks the incumbent seam below.
+            if eb_selected.is_some_and(|sel| sel.binary_search(&(pos as u32)).is_err()) {
                 continue;
             }
 
@@ -1609,20 +1704,25 @@ pub fn d2f_decode_gemma2(
 
             final_confidence[pos] = confidence;
 
-            // Accept/reject: use sampler if available, else fixed threshold.
-            let accept = match &decode_config.sampler {
-                Some(sampler) => {
-                    let features = SamplerFeatures::from_logits(
-                        logits,
-                        step,
-                        max_steps,
-                        pos - block_start,
-                        block_size,
-                        mask_token_id,
-                    );
-                    sampler.decide(&features, f64::from(tau_conf))
-                }
-                None => confidence >= tau_conf,
+            // Accept/reject: armed EB positions commit unconditionally (the
+            // budget already spent on them — the mask-token guard below still
+            // applies); disarmed, the incumbent seams decide.
+            let accept = match eb_selected {
+                Some(_) => true,
+                None => match &decode_config.sampler {
+                    Some(sampler) => {
+                        let features = SamplerFeatures::from_logits(
+                            logits,
+                            step,
+                            max_steps,
+                            pos - block_start,
+                            block_size,
+                            mask_token_id,
+                        );
+                        sampler.decide(&features, f64::from(tau_conf))
+                    }
+                    None => confidence >= tau_conf,
+                },
             };
             if accept && sampled_token != mask_token_id {
                 tokens[pos] = sampled_token;

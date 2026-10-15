@@ -10,6 +10,14 @@ fn test_d2f_config_defaults() {
     assert_eq!(config.denoise_steps, 8);
     assert!((config.confidence_threshold - 0.7).abs() < 1e-5);
     assert!((config.temperature - 1.0).abs() < 1e-5);
+    // EB disarmed by default — every existing config stays on the incumbent
+    // τ/sampler seams until a config explicitly arms the budget.
+    #[cfg(feature = "entropy_bounded_commit")]
+    {
+        assert!(config.eb_gamma < 0.0);
+        assert_eq!(config.eb_gamma, -1.0);
+        assert_eq!(config.eb_max_commit, usize::MAX);
+    }
 }
 
 #[test]
@@ -498,6 +506,10 @@ fn test_d2f_decode_produces_valid_tokens() {
         temperature: 1.0,
         sampler: None,
         sc_config: D2fScConfig::default(),
+        #[cfg(feature = "entropy_bounded_commit")]
+        eb_gamma: -1.0,
+        #[cfg(feature = "entropy_bounded_commit")]
+        eb_max_commit: usize::MAX,
     };
 
     let mut d2f = GpuGemmaCubeCLD2F::new(client.clone(), &weights, &config, decode_config);
@@ -577,6 +589,10 @@ fn test_d2f_decode_converges() {
         temperature: 1.0,
         sampler: None,
         sc_config: D2fScConfig::default(),
+        #[cfg(feature = "entropy_bounded_commit")]
+        eb_gamma: -1.0,
+        #[cfg(feature = "entropy_bounded_commit")]
+        eb_max_commit: usize::MAX,
     };
 
     let mut d2f = GpuGemmaCubeCLD2F::new(client.clone(), &weights, &config, decode_config);
@@ -769,6 +785,10 @@ fn test_d2f_decode_with_sampler() {
         temperature: 1.0,
         sampler: Some(sampler),
         sc_config: D2fScConfig::default(),
+        #[cfg(feature = "entropy_bounded_commit")]
+        eb_gamma: -1.0,
+        #[cfg(feature = "entropy_bounded_commit")]
+        eb_max_commit: usize::MAX,
     };
     let mut d2f = GpuGemmaCubeCLD2F::new(client.clone(), &weights, &config, decode_config);
     let mut rng = fastrand::Rng::with_seed(42);
@@ -839,6 +859,10 @@ fn test_d2f_decode_with_sc_enabled_runs() {
         temperature: 1.0,
         sampler: None,
         sc_config: D2fScConfig::enabled(),
+        #[cfg(feature = "entropy_bounded_commit")]
+        eb_gamma: -1.0,
+        #[cfg(feature = "entropy_bounded_commit")]
+        eb_max_commit: usize::MAX,
     };
 
     let mut d2f = GpuGemmaCubeCLD2F::new(client.clone(), &weights, &config, decode_config);
@@ -894,6 +918,10 @@ fn test_d2f_decode_sc_identity_matches_disabled() {
         temperature: 1.0,
         sampler: None,
         sc_config: D2fScConfig::disabled(),
+        #[cfg(feature = "entropy_bounded_commit")]
+        eb_gamma: -1.0,
+        #[cfg(feature = "entropy_bounded_commit")]
+        eb_max_commit: usize::MAX,
     };
     let result_disabled = {
         let mut d2f1 =
@@ -936,4 +964,230 @@ fn test_d2f_decode_sc_identity_matches_disabled() {
         result_disabled.steps_used, result_enabled.steps_used,
         "SC with identity W_sc should use same number of steps"
     );
+}
+
+// ── EB-Sampler commit policy wiring (katgpt-rs Issue 917 T2') ──────
+//
+// The policy primitive itself has its own 11-test G1 battery in
+// katgpt-core (`entropy_bounded_commit`); these pin the DECODE WIRING:
+// arming, seam precedence, budget shape, determinism, and the disarmed
+// identity. The Issue-1001 fixture calibration applies here too — the
+// synthetic weights' max softmax prob is ~2.6e-5, so the incumbent τ
+// seam can be made deliberately unreachable to prove EB precedence.
+
+/// Armed config helper — the disarmed fields are the point of comparison.
+#[cfg(feature = "entropy_bounded_commit")]
+fn eb_decode_config(gamma: f32, max_commit: usize, tau: f32, steps: usize) -> Gemma2D2fConfig {
+    Gemma2D2fConfig {
+        block_size: 4,
+        denoise_steps: steps,
+        confidence_threshold: tau,
+        temperature: 1.0,
+        sampler: None,
+        sc_config: D2fScConfig::default(),
+        eb_gamma: gamma,
+        eb_max_commit: max_commit,
+    }
+}
+
+/// Armed with a generous budget commits the whole eligible set in pass 1
+/// and takes precedence over an UNREACHABLE τ seam (the fixture's max
+/// softmax prob ~2.6e-5 can never clear 0.99 — convergence is EB's doing).
+#[cfg(feature = "entropy_bounded_commit")]
+#[test]
+fn test_d2f_eb_armed_generous_budget_converges_over_unreachable_tau() {
+    let _heavy = heavy_model_test_gate();
+    let ctx = crate::GpuContext::new().expect("GpuContext should init");
+    let client = ctx.cubecl_client();
+    gpu_release_pages(&client);
+
+    let config = Config::gemma2_2b();
+    let weights = create_test_weights(&config);
+    let decode_config = eb_decode_config(f32::MAX, usize::MAX, 0.99, 8);
+
+    let mut d2f = GpuGemmaCubeCLD2F::new(client.clone(), &weights, &config, decode_config);
+    let mut rng = fastrand::Rng::with_seed(42);
+
+    let prompt = vec![42, 7, 123];
+    let mask_token_id = 0;
+    let result = d2f_decode_gemma2(&mut d2f, &prompt, mask_token_id, &decode_config, &mut rng);
+
+    assert!(result.converged, "generous γ must converge");
+    assert_eq!(
+        result.steps_used, 1,
+        "every eligible position committed in pass 1 — exactly one forward"
+    );
+    for pos in prompt.len()..result.tokens.len() {
+        assert!(
+            result.tokens[pos] != mask_token_id,
+            "committed position {pos} must not hold the mask token"
+        );
+        assert!(
+            result.tokens[pos] < config.vocab_size,
+            "committed token must be a valid vocab index"
+        );
+    }
+
+    drop(d2f);
+    gpu_release_pages(&client);
+}
+
+/// γ = 0 commits exactly the per-pass argmin-entropy singleton (the
+/// singleton's residual is exactly 0; the second candidate spends budget).
+/// With block 4 and only 3 denoise steps the block cannot finish — the
+/// tight-budget posture stalls, honestly (SemiActivated).
+#[cfg(feature = "entropy_bounded_commit")]
+#[test]
+fn test_d2f_eb_zero_budget_commits_singleton_per_pass_and_stalls() {
+    let _heavy = heavy_model_test_gate();
+    let ctx = crate::GpuContext::new().expect("GpuContext should init");
+    let client = ctx.cubecl_client();
+    gpu_release_pages(&client);
+
+    let config = Config::gemma2_2b();
+    let weights = create_test_weights(&config);
+    // τ = 0.0 so the incumbent seam would accept EVERYTHING in one pass —
+    // the stall can only come from the EB budget.
+    let decode_config = eb_decode_config(0.0, usize::MAX, 0.0, 3);
+
+    let mut d2f = GpuGemmaCubeCLD2F::new(client.clone(), &weights, &config, decode_config);
+    let mut rng = fastrand::Rng::with_seed(42);
+
+    let prompt = vec![42, 7, 123];
+    let mask_token_id = 0;
+    let result = d2f_decode_gemma2(&mut d2f, &prompt, mask_token_id, &decode_config, &mut rng);
+
+    assert!(!result.converged, "γ=0 commits 1/pass — 3 passes < block 4");
+    assert_eq!(result.steps_used, 3, "capped by denoise_steps");
+
+    drop(d2f);
+    gpu_release_pages(&client);
+}
+
+/// The per-pass cap bounds commits: cap 2 with a generous budget converges
+/// the 4-wide block in exactly two passes.
+#[cfg(feature = "entropy_bounded_commit")]
+#[test]
+fn test_d2f_eb_cap_bounds_commits_per_pass() {
+    let _heavy = heavy_model_test_gate();
+    let ctx = crate::GpuContext::new().expect("GpuContext should init");
+    let client = ctx.cubecl_client();
+    gpu_release_pages(&client);
+
+    let config = Config::gemma2_2b();
+    let weights = create_test_weights(&config);
+    let decode_config = eb_decode_config(f32::MAX, 2, 0.99, 8);
+
+    let mut d2f = GpuGemmaCubeCLD2F::new(client.clone(), &weights, &config, decode_config);
+    let mut rng = fastrand::Rng::with_seed(42);
+
+    let prompt = vec![42, 7, 123];
+    let mask_token_id = 0;
+    let result = d2f_decode_gemma2(&mut d2f, &prompt, mask_token_id, &decode_config, &mut rng);
+
+    assert!(result.converged, "2 commits/pass × 2 passes ≥ block 4");
+    assert_eq!(result.steps_used, 2, "cap 2 over a 4-wide block = two passes");
+
+    drop(d2f);
+    gpu_release_pages(&client);
+}
+
+/// Same seed → bit-identical decode, armed (the scan is deterministic and
+/// the sampling order is ascending-position, so the RNG draw order is
+/// pinned).
+#[cfg(feature = "entropy_bounded_commit")]
+#[test]
+fn test_d2f_eb_armed_deterministic_same_seed() {
+    let _heavy = heavy_model_test_gate();
+    let ctx = crate::GpuContext::new().expect("GpuContext should init");
+    let client = ctx.cubecl_client();
+    gpu_release_pages(&client);
+
+    let config = Config::gemma2_2b();
+    let weights = create_test_weights(&config);
+    let decode_config = eb_decode_config(1.0, usize::MAX, 0.99, 8);
+
+    let prompt = vec![42, 7, 123];
+    let mask_token_id = 0;
+
+    let run = || {
+        let mut d2f = GpuGemmaCubeCLD2F::new(client.clone(), &weights, &config, decode_config);
+        let mut rng = fastrand::Rng::with_seed(42);
+        d2f_decode_gemma2(&mut d2f, &prompt, mask_token_id, &decode_config, &mut rng)
+    };
+    let a = run();
+    let b = run();
+    gpu_release_pages(&client);
+
+    assert_eq!(a.tokens, b.tokens, "same seed must decode identically");
+    assert_eq!(a.steps_used, b.steps_used);
+    assert_eq!(a.converged, b.converged);
+}
+
+/// NaN γ behaves EXACTLY as disarmed — the arming predicate
+/// (`eb_gamma >= 0.0`) never routes NaN to the scan, so the decode takes
+/// the incumbent seams and the result is byte-identical to `eb_gamma: -1`.
+#[cfg(feature = "entropy_bounded_commit")]
+#[test]
+fn test_d2f_eb_nan_gamma_is_disarmed_identical() {
+    let _heavy = heavy_model_test_gate();
+    let ctx = crate::GpuContext::new().expect("GpuContext should init");
+    let client = ctx.cubecl_client();
+    gpu_release_pages(&client);
+
+    let config = Config::gemma2_2b();
+    let weights = create_test_weights(&config);
+    let nan_config = eb_decode_config(f32::NAN, usize::MAX, 0.99, 8);
+    let disarmed_config = eb_decode_config(-1.0, usize::MAX, 0.99, 8);
+
+    let prompt = vec![42, 7, 123];
+    let mask_token_id = 0;
+
+    let run = |cfg: &Gemma2D2fConfig| {
+        let mut d2f = GpuGemmaCubeCLD2F::new(client.clone(), &weights, &config, *cfg);
+        let mut rng = fastrand::Rng::with_seed(42);
+        d2f_decode_gemma2(&mut d2f, &prompt, mask_token_id, cfg, &mut rng)
+    };
+    let via_nan = run(&nan_config);
+    let via_disarmed = run(&disarmed_config);
+    gpu_release_pages(&client);
+
+    assert_eq!(
+        via_nan.tokens, via_disarmed.tokens,
+        "NaN γ must not arm — result identical to disarmed"
+    );
+    assert_eq!(via_nan.steps_used, via_disarmed.steps_used);
+    assert_eq!(via_nan.converged, via_disarmed.converged);
+}
+
+/// Disarmed (γ = −1) preserves the incumbent τ seam semantics: τ = 0.0
+/// accepts every sample in pass 1 → one-pass convergence, the same shape
+/// the pre-wiring decode shows on this fixture.
+#[cfg(feature = "entropy_bounded_commit")]
+#[test]
+fn test_d2f_eb_disarmed_keeps_incumbent_tau_semantics() {
+    let _heavy = heavy_model_test_gate();
+    let ctx = crate::GpuContext::new().expect("GpuContext should init");
+    let client = ctx.cubecl_client();
+    gpu_release_pages(&client);
+
+    let config = Config::gemma2_2b();
+    let weights = create_test_weights(&config);
+    let decode_config = eb_decode_config(-1.0, usize::MAX, 0.0, 8);
+
+    let mut d2f = GpuGemmaCubeCLD2F::new(client.clone(), &weights, &config, decode_config);
+    let mut rng = fastrand::Rng::with_seed(42);
+
+    let prompt = vec![42, 7, 123];
+    let mask_token_id = 0;
+    let result = d2f_decode_gemma2(&mut d2f, &prompt, mask_token_id, &decode_config, &mut rng);
+
+    assert!(
+        result.converged,
+        "τ=0 disarmed accepts everything — incumbent semantics kept"
+    );
+    assert_eq!(result.steps_used, 1, "every masked position sampled pass 1");
+
+    drop(d2f);
+    gpu_release_pages(&client);
 }
