@@ -76,13 +76,13 @@ objc2 = { version = "0.6", optional = true }
 # The Apple Neural Engine backend (`laya-riir-ane`): the whole-graph
 # Core ML executor over the digest-pinned BC1S `.mlpackage` artifacts
 # (reflex Plan 002 P0's offline conversion; the plan gate ran THERE —
-# this runtime re-verifies at load). Same target-scoping rule as metal:
-# inert on every non-macOS host. `block2` is the ObjC block runtime the
-# no-copy input arrays (`initWithDataPointer`), the output reader
-# (`getBytesWithHandler`) and the async `MLComputePlan` loader all need.
-objc2-core-ml = { version = "0.3", optional = true, features = ["block2"] }
-objc2-foundation = { version = "0.3", optional = true }
-block2 = { version = "0.6", optional = true }
+# this runtime re-verifies at load). The Core ML host mechanics (digest
+# verify, compile cache, model load, multi-array predict) live in the
+# SHARED `riir-infer-ane` crate (plan 619 T1.0) — one home, never a
+# second copy; the objc2 family is THAT crate's macOS target-scoped
+# dep set, so this feature resolves it transitively and stays inert on
+# every non-macOS host (the host compiles to a documented stub there).
+riir-infer-ane = { path = "../riir-infer-ane", optional = true }
 
 # ── non-macOS: the CUDA backend (`laya-riir-cuda`, .issues/002) ──────────
 # cudarc 0.19 with driver + nvrtc ONLY (no cublas, no runtime) — the lane
@@ -117,7 +117,7 @@ laya-riir-metal = ["laya-riir", "dep:metal", "dep:objc2"]
 # the existing f32 head consumes the sliced hidden state UNCHANGED. Not
 # in any default set: the artifact tree is local-only (~3 GB) and the
 # lane's parity authority is the consumer-side G5-ANE gate.
-laya-riir-ane = ["laya-riir", "dep:objc2", "dep:objc2-core-ml", "dep:objc2-foundation", "dep:block2"]
+laya-riir-ane = ["laya-riir", "dep:riir-infer-ane"]
 # The CUDA backend of the forward (.issues/002) — non-macOS builds that
 # compile it DEFAULT to it at runtime (the Metal precedent: the build's
 # own posture), `LAYA_DEVICE=cpu` opts out; requesting cuda without the

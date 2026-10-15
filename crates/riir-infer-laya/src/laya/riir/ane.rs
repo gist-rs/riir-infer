@@ -42,32 +42,39 @@
 //! artifact input contract is unchanged bytes either way — the posture
 //! is invisible downstream of the gather, and a set-but-unavailable
 //! e8 sidecar refuses loud, never falls back.
+//!
+//! Core ML host mechanics (digest verify, compile cache, model load,
+//! the multi-array predict) live in the SHARED `riir-infer-ane` crate
+//! (plan 619 T1.0) — this module owns the lane half: the manifest
+//! schema, the table postures, the gather/pad math, and the bucket
+//! encoder.
 
 use std::cell::RefCell;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use std::ptr::NonNull;
 use std::rc::Rc;
 
-use block2::RcBlock;
-use objc2::AnyThread;
-use objc2::rc::Retained;
-use objc2::runtime::{AnyObject, ProtocolObject};
-use objc2_core_ml::{
-    MLComputePlan, MLDictionaryFeatureProvider, MLFeatureProvider, MLFeatureValue, MLModel,
-    MLModelConfiguration, MLModelStructureProgram, MLMultiArray, MLMultiArrayDataType,
-};
-use objc2_foundation::{NSArray, NSDictionary, NSError, NSNumber, NSString, NSURL};
+use riir_infer_ane as ane_host;
 
 use super::super::config::EncoderConfig;
 use super::super::{LayaError, Result};
 use super::weights::Weights;
 
-/// The compute-unit posture every gate in this module runs under — the
+/// The compute-unit posture every gate in this lane runs under — the
 /// conversion gate's `ComputeUnit.CPU_AND_NE` (ANE-preferred, GPU
-/// excluded). `MLComputeUnits` is an NS_OPTIONS bit set over an NSInteger.
-const COMPUTE_UNITS_CPU_AND_NE: objc2_core_ml::MLComputeUnits =
-    objc2_core_ml::MLComputeUnits::CPUAndNeuralEngine;
+/// excluded).
+const COMPUTE_UNITS: ane_host::ComputeUnits = ane_host::ComputeUnits::CpuAndNe;
+
+/// The compile-cache identity this lane's compiled bundles have always
+/// lived at (`LAYA_ANE_CACHE` override, else
+/// `~/Library/Caches/riir-infer/laya-ane`) — unchanged by the plan-619
+/// host extraction, so every previously compiled bundle stays hit.
+const CACHE_ENV: &str = "LAYA_ANE_CACHE";
+const CACHE_SUBDIR: &str = "laya-ane";
+
+/// The missing-artifact remedy this lane names (the reflex converter).
+const MISSING_REMEDY: &str =
+    "run the consumer repo's ane_convert.py first (artifacts are local-only, never committed)";
 
 /// The fp16 stand-in for f32::MIN the conversion baked (the sentinel is a
 /// manifest field — `mask_sentinel_fp16` — and the runtime reads it from
@@ -100,6 +107,17 @@ pub struct AneArtifact {
     pub transitions: usize,
     /// The fp16 mask sentinel the artifact was converted with.
     pub mask_sentinel: f32,
+}
+
+impl AneArtifact {
+    /// The host-side pin this entry verifies its bundle against.
+    fn pin(&self) -> ane_host::ArtifactPin {
+        ane_host::ArtifactPin {
+            digest: self.digest.clone(),
+            files: self.digest_files,
+            bytes: self.digest_bytes,
+        }
+    }
 }
 
 /// The parsed `manifest.json` (committed at `assets/ane/manifest.json` in
@@ -380,10 +398,11 @@ fn is_bucket_artifact_key(key: &str) -> bool {
 }
 
 /// One loaded + verified artifact: the compiled Core ML model plus the
-/// names/shapes one predict needs. Owns its `MLModel` (the compiled
-/// bundle on disk is the content-addressed cache, shared across loads).
+/// names/shapes one predict needs. Owns its host [`LoadedModel`] (the
+/// compiled bundle on disk is the content-addressed cache, shared across
+/// loads).
 pub struct AneRuntime {
-    model: Retained<MLModel>,
+    model: ane_host::LoadedModel,
     pub bucket_l: usize,
     pub hidden: usize,
     input_emb: String,
@@ -391,141 +410,57 @@ pub struct AneRuntime {
     output: String,
 }
 
-/// The load-time plan verdict (the T0.3 gate re-measured at load).
-#[derive(Debug, Clone, Copy)]
-pub struct Placement {
-    pub device_ops: usize,
-    pub ane_ops: usize,
-    pub gpu_ops: usize,
-    pub cpu_ops: usize,
-    pub transitions: usize,
-}
-
-impl Placement {
-    /// The gate: 100% of device-bearing ops ANE-preferred, zero device
-    /// transitions. `false` refuses the load.
-    pub fn passes(&self) -> bool {
-        self.device_ops > 0 && self.ane_ops == self.device_ops && self.transitions == 0
-    }
-}
-
 impl AneRuntime {
     /// Verify the artifact digest, compile (content-addressed cache),
     /// load under `CPU_AND_NE`, and re-run the compute-plan gate. Any
     /// failure is a refused load — never a CPU fallback.
-    #[allow(deprecated)] // the sync compile API; the async twin needs a
-    // semaphore dance for a one-shot load-time call with no win
     pub fn load(artifact_dir: &Path, entry: &AneArtifact) -> Result<Self> {
-        Self::verify_digest(artifact_dir, entry)?;
-        let compiled = compile_cached(artifact_dir, &entry.digest)?;
-
-        unsafe {
-            let url = NSURL::fileURLWithPath_isDirectory(
-                &NSString::from_str(&compiled.to_string_lossy()),
-                true,
+        let (model, placement) = ane_host::load_model(
+            artifact_dir,
+            &entry.pin(),
+            COMPUTE_UNITS,
+            None,
+            CACHE_ENV,
+            CACHE_SUBDIR,
+            MISSING_REMEDY,
+        )
+        .map_err(|e| LayaError::Runtime(e.to_string()))?;
+        if !placement.passes() {
+            return Err(LayaError::Runtime(format!(
+                "ane: compute-plan gate REFUSED for L{} — device_ops={} ane={} gpu={} \
+                 cpu={} transitions={} (the artifact must run 100% on the ANE with 0 \
+                 device transitions; a CPU/GPU number wearing an ANE label is the \
+                 failure mode this gate exists to stop)",
+                entry.bucket_l,
+                placement.device_ops,
+                placement.ane_ops,
+                placement.gpu_ops,
+                placement.cpu_ops,
+                placement.transitions
+            )));
+        }
+        if placement.device_ops != entry.device_ops || placement.ane_ops != entry.ane_ops {
+            // Counts drift when the OS re-plans; the VERDICT above is
+            // the gate, the count equality is disclosure.
+            eprintln!(
+                "ane: L{} plan counts drifted from the manifest (load {} vs \
+                 conversion {} device / {} vs {} ane) — verdict unchanged, disclosed",
+                entry.bucket_l,
+                placement.device_ops,
+                entry.device_ops,
+                placement.ane_ops,
+                entry.ane_ops
             );
-            let config = MLModelConfiguration::new();
-            config.setComputeUnits(COMPUTE_UNITS_CPU_AND_NE);
-            let model = MLModel::modelWithContentsOfURL_configuration_error(&url, &config)
-                .map_err(|e| {
-                    LayaError::Runtime(format!(
-                        "ane: Core ML load failed for {}: {}",
-                        compiled.display(),
-                        ns_error_string(&e)
-                    ))
-                })?;
+        }
 
-            let placement = verify_compute_plan(&compiled, &config)?;
-            if !placement.passes() {
-                return Err(LayaError::Runtime(format!(
-                    "ane: compute-plan gate REFUSED for L{} — device_ops={} ane={} gpu={} \
-                     cpu={} transitions={} (the artifact must run 100% on the ANE with 0 \
-                     device transitions; a CPU/GPU number wearing an ANE label is the \
-                     failure mode this gate exists to stop)",
-                    entry.bucket_l,
-                    placement.device_ops,
-                    placement.ane_ops,
-                    placement.gpu_ops,
-                    placement.cpu_ops,
-                    placement.transitions
-                )));
-            }
-            if placement.device_ops != entry.device_ops || placement.ane_ops != entry.ane_ops {
-                // Counts drift when the OS re-plans; the VERDICT above is
-                // the gate, the count equality is disclosure.
-                eprintln!(
-                    "ane: L{} plan counts drifted from the manifest (load {} vs \
-                     conversion {} device / {} vs {} ane) — verdict unchanged, disclosed",
-                    entry.bucket_l,
-                    placement.device_ops,
-                    entry.device_ops,
-                    placement.ane_ops,
-                    entry.ane_ops
-                );
-            }
-
-            Ok(Self {
-                model,
-                bucket_l: entry.bucket_l,
-                hidden: entry.hidden,
-                input_emb: "embeddings".to_string(),
-                input_pb: "pad_bias".to_string(),
-                output: entry.output_name.clone(),
-            })
-        }
-    }
-
-    /// blake3-dir-v1 over the bundle, byte-for-byte the conversion tool's
-    /// digest (sorted relative path, `rel \0 data \0` per file). Refuses
-    /// on count, size, or digest mismatch — a swapped or stale artifact
-    /// is a hard error (issue 017: download-on-demand, digest-pinned).
-    fn verify_digest(dir: &Path, entry: &AneArtifact) -> Result<()> {
-        if !dir.is_dir() {
-            return Err(LayaError::Runtime(format!(
-                "ane artifact missing: {} — run the consumer repo's ane_convert.py first \
-                 (artifacts are local-only, never committed)",
-                dir.display()
-            )));
-        }
-        let mut files: Vec<(String, PathBuf)> = Vec::new();
-        collect_files(dir, dir, &mut files)?;
-        files.sort_by(|a, b| a.0.cmp(&b.0));
-        let total: u64 = files
-            .iter()
-            .filter_map(|(_, path)| std::fs::metadata(path).ok())
-            .map(|m| m.len())
-            .sum();
-        if files.len() != entry.digest_files || total != entry.digest_bytes {
-            return Err(LayaError::Runtime(format!(
-                "ane artifact shape drift at {}: {} files / {} bytes vs pinned {} / {}",
-                dir.display(),
-                files.len(),
-                total,
-                entry.digest_files,
-                entry.digest_bytes
-            )));
-        }
-        let mut h = blake3::Hasher::new();
-        for (rel, path) in &files {
-            let data = std::fs::read(path).map_err(|e| {
-                LayaError::Runtime(format!("ane artifact file unreadable {path:?}: {e}"))
-            })?;
-            h.update(rel.as_bytes());
-            h.update(b"\0");
-            h.update(&data);
-            h.update(b"\0");
-        }
-        let digest = h.finalize().to_hex().to_string();
-        if digest != entry.digest {
-            return Err(LayaError::Runtime(format!(
-                "ane artifact digest mismatch at {} — got {}, pinned {} \
-                 (the artifact is not the one the manifest verified)",
-                dir.display(),
-                &digest[..16],
-                &entry.digest[..16]
-            )));
-        }
-        Ok(())
+        Ok(Self {
+            model,
+            bucket_l: entry.bucket_l,
+            hidden: entry.hidden,
+            input_emb: "embeddings".to_string(),
+            input_pb: "pad_bias".to_string(),
+            output: entry.output_name.clone(),
+        })
     }
 
     /// One forward: fp16 gather rows `[1, L, d]` + fp16 per-key mask
@@ -547,57 +482,18 @@ impl AneRuntime {
             "pad_bias buffer must be [1, 1, 1, L]"
         );
         assert_eq!(out_f16.len(), l * d, "out buffer must be [1, L, d]");
-        unsafe {
-            // The arrays borrow the caller's buffers (no-copy init, no-op
-            // deallocator); both outlive the prediction call below.
-            let emb = multi_array_zero_copy(emb_f16, &[1, l, d])?;
-            let pb = multi_array_zero_copy(pad_bias_f16, &[1, 1, 1, l])?;
-            let emb_name = NSString::from_str(&self.input_emb);
-            let pb_name = NSString::from_str(&self.input_pb);
-            let emb_val = MLFeatureValue::featureValueWithMultiArray(&emb);
-            let pb_val = MLFeatureValue::featureValueWithMultiArray(&pb);
-            // The provider init erases the value type to AnyObject (the
-            // ObjC dictionary erasure) — upcast both values once. `cast`
-            // is the documented upcast (deprecated name, fine for a root
-            // upcast; `cast_unchecked` would add unsafe for nothing).
-            #[allow(deprecated)]
-            let emb_obj = Retained::cast::<AnyObject>(emb_val);
-            #[allow(deprecated)]
-            let pb_obj = Retained::cast::<AnyObject>(pb_val);
-            let dict: Retained<NSDictionary<NSString, AnyObject>> =
-                NSDictionary::from_retained_objects(&[&*emb_name, &*pb_name], &[emb_obj, pb_obj]);
-            let features = MLDictionaryFeatureProvider::initWithDictionary_error(
-                MLDictionaryFeatureProvider::alloc(),
-                &dict,
+        let emb_shape = [1, l, d];
+        let pb_shape = [1, 1, 1, l];
+        self.model
+            .predict_f16(
+                &[
+                    (&self.input_emb, emb_f16, &emb_shape[..]),
+                    (&self.input_pb, pad_bias_f16, &pb_shape[..]),
+                ],
+                &self.output,
+                out_f16,
             )
-            .map_err(|e| {
-                LayaError::Runtime(format!(
-                    "ane: feature provider failed: {}",
-                    ns_error_string(&e)
-                ))
-            })?;
-            let out = self
-                .model
-                .predictionFromFeatures_error(ProtocolObject::from_ref(&*features))
-                .map_err(|e| {
-                    LayaError::Runtime(format!("ane: prediction failed: {}", ns_error_string(&e)))
-                })?;
-            let name = NSString::from_str(&self.output);
-            let val = out.featureValueForName(&name).ok_or_else(|| {
-                LayaError::Runtime(format!(
-                    "ane: output {:?} missing from the prediction (manifest/ artifact drift?)",
-                    self.output
-                ))
-            })?;
-            let arr = val.multiArrayValue().ok_or_else(|| {
-                LayaError::Runtime(format!(
-                    "ane: output {:?} is not a multi-array",
-                    self.output
-                ))
-            })?;
-            copy_out_f16(&arr, out_f16)?;
-            Ok(())
-        }
+            .map_err(|e| LayaError::Runtime(e.to_string()))
     }
 }
 
@@ -1026,27 +922,6 @@ impl AneEncoder {
 
 // ── internals ────────────────────────────────────────────────────────────
 
-fn collect_files(root: &Path, dir: &Path, out: &mut Vec<(String, PathBuf)>) -> Result<()> {
-    let entries = std::fs::read_dir(dir)
-        .map_err(|e| LayaError::Runtime(format!("ane: readdir {dir:?}: {e}")))?;
-    for e in entries {
-        let e =
-            e.map_err(|err| LayaError::Runtime(format!("ane: readdir entry {dir:?}: {err}")))?;
-        let p = e.path();
-        if p.is_dir() {
-            collect_files(root, &p, out)?;
-        } else if p.is_file() {
-            let rel = p
-                .strip_prefix(root)
-                .expect("walk rooted at `root`")
-                .to_string_lossy()
-                .to_string();
-            out.push((rel, p));
-        }
-    }
-    Ok(())
-}
-
 /// The standard `.mlpackage` bundle layout — the per-file fetch paths for
 /// download-on-demand. coremltools' bundle format is fixed (3 files), but
 /// a future layout change cannot corrupt an install: the staged tree must
@@ -1094,17 +969,23 @@ pub fn ensure_artifacts(ane_root: &Path, base_url: Option<&str>) -> Result<()> {
         let entry = manifest.artifacts.get(key).expect("key from the map");
         let staging = ane_root.join(".staging").join(format!("{key}.mlpackage"));
         let _ = std::fs::remove_dir_all(&staging);
-        let staged = stage_bundle(&staging, base, key)
-            .and_then(|()| AneRuntime::verify_digest(&staging, entry))
-            .and_then(|()| {
-                let parent = dir.parent().expect("key carries a model dir");
-                std::fs::create_dir_all(parent)
-                    .map_err(|e| LayaError::Runtime(format!("create {}: {e}", parent.display())))
-            })
-            .and_then(|()| {
-                std::fs::rename(&staging, &dir)
-                    .map_err(|e| LayaError::Runtime(format!("install {}: {e}", dir.display())))
-            });
+        let staged = ane_host::stage_files(&staging, &BUNDLE_FILES, |rel, dest| {
+            super::super::weights::fetch_file(&format!("{base}/{key}.mlpackage/{rel}"), dest)
+        })
+        .map_err(|e| LayaError::Runtime(e.to_string()))
+        .and_then(|()| {
+            ane_host::verify_dir_digest(&staging, &entry.digest, entry.digest_files, entry.digest_bytes, MISSING_REMEDY)
+                .map_err(|e| LayaError::Runtime(e.to_string()))
+        })
+        .and_then(|()| {
+            let parent = dir.parent().expect("key carries a model dir");
+            std::fs::create_dir_all(parent)
+                .map_err(|e| LayaError::Runtime(format!("create {}: {e}", parent.display())))
+        })
+        .and_then(|()| {
+            std::fs::rename(&staging, &dir)
+                .map_err(|e| LayaError::Runtime(format!("install {}: {e}", dir.display())))
+        });
         // A failed fetch installs nothing: the staging subtree goes, then
         // the emptied parents (best-effort — a concurrent fetch of a
         // sibling key owns its own subtree).
@@ -1135,283 +1016,16 @@ pub fn ensure_artifacts(ane_root: &Path, base_url: Option<&str>) -> Result<()> {
     )))
 }
 
-/// Fetch one bundle's fixed file set into `staging` (per-file `.part` +
-/// rename, the weights precedent). The digest gate is the CALLER's —
-/// this only assembles bytes from the wire.
-fn stage_bundle(staging: &Path, base: &str, key: &str) -> Result<()> {
-    for rel in BUNDLE_FILES {
-        let url = format!("{base}/{key}.mlpackage/{rel}");
-        let dest = staging.join(rel);
-        let parent = dest.parent().expect("rel carries a dir");
-        std::fs::create_dir_all(parent)
-            .map_err(|e| LayaError::Runtime(format!("create {parent:?}: {e}")))?;
-        super::super::weights::fetch_file(&url, &dest)?;
-    }
-    Ok(())
-}
-
-/// Compile the `.mlpackage` into a content-addressed `.mlmodelc` cache
-/// (recompiles never load a stale artifact: the cache key IS the digest)
-/// and return the compiled bundle path. Cache location: `LAYA_ANE_CACHE`,
-/// else `~/Library/Caches/riir-infer/laya-ane` (the macOS cache home —
-/// this lane is ANE-only; a persistent root survives /tmp cleanup and
-/// keeps the compile-once-per-process-tree contract across processes),
-/// else a pid-suffixed temp dir when HOME is unset. Trade-off: the
-/// persistent root grows one bundle per digest, unbounded — acceptable
-/// for compiled model bundles; clear it (or set `LAYA_ANE_CACHE`) to
-/// reclaim.
-fn compile_cached(artifact_dir: &Path, digest: &str) -> Result<PathBuf> {
-    let key = &digest[..16.min(digest.len())];
-    let cache_root = match std::env::var_os("LAYA_ANE_CACHE") {
-        Some(p) => PathBuf::from(p),
-        None => match std::env::var_os("HOME") {
-            Some(h) => PathBuf::from(h).join("Library/Caches/riir-infer/laya-ane"),
-            None => {
-                std::env::temp_dir().join(format!("riir-laya-ane-cache_{}", std::process::id()))
-            }
-        },
-    };
-    let final_dir = cache_root.join(format!("mlmodelc-{key}"));
-    if final_dir.is_dir() {
-        return Ok(final_dir);
-    }
-    std::fs::create_dir_all(&cache_root)
-        .map_err(|e| LayaError::Runtime(format!("ane: cache dir {}: {e}", cache_root.display())))?;
-    // Compile into a process-unique staging dir, then atomically claim
-    // the final name — two processes racing one digest both compile, one
-    // wins the rename, the loser discards (never reads a half-written
-    // bundle — the shared-fixed-path lesson, mechanized).
-    let staging = cache_root.join(format!("staging-{}-{}", key, std::process::id()));
-    let _ = std::fs::remove_dir_all(&staging);
-    let src = NSURL::fileURLWithPath_isDirectory(
-        &NSString::from_str(&artifact_dir.to_string_lossy()),
-        true,
-    );
-    // SAFETY: plain ObjC class call; the deprecated sync twin of the async
-    // compile API — a one-shot load-time call, not worth a semaphore dance.
-    #[allow(deprecated)]
-    let compiled = unsafe { MLModel::compileModelAtURL_error(&src) }.map_err(|e| {
-        LayaError::Runtime(format!(
-            "ane: Core ML compile failed for {}: {}",
-            artifact_dir.display(),
-            ns_error_string(&e)
-        ))
-    })?;
-    let compiled_path = compiled
-        .path()
-        .ok_or_else(|| LayaError::Runtime("ane: compiled model has no file path".into()))?
-        .to_string();
-    move_dir(Path::new(&compiled_path), &final_dir)?;
-    let _ = std::fs::remove_dir_all(&staging);
-    Ok(final_dir)
-}
-
-/// Move `src` into `dst` (rename; same-volume fallback copy), tolerating
-/// `dst` having appeared meanwhile (another process won the claim).
-fn move_dir(src: &Path, dst: &Path) -> Result<()> {
-    if dst.is_dir() {
-        let _ = std::fs::remove_dir_all(src);
-        return Ok(());
-    }
-    if std::fs::rename(src, dst).is_ok() {
-        return Ok(());
-    }
-    std::fs::copy(src, dst)
-        .map_err(|e| LayaError::Runtime(format!("ane: cache move {src:?} → {dst:?}: {e}")))?;
-    let _ = std::fs::remove_dir_all(src);
-    Ok(())
-}
-
-/// Build a zero-copy fp16 `MLMultiArray` over the caller's buffer (the
-/// buffer must outlive the array — in `predict` all three outlive the
-/// prediction call, and the arrays drop first).
-fn multi_array_zero_copy(data: &[u16], shape: &[usize]) -> Result<Retained<MLMultiArray>> {
-    // No-op deallocator: ownership stays with the caller's buffer; the
-    // block signature is Apple's `^(void *bytes) { … }`.
-    let dealloc = RcBlock::new(|_bytes: NonNull<std::ffi::c_void>| {});
-    let shape_arr = number_array(shape);
-    let stride_arr = number_array(&contiguous_strides(shape));
-    let ptr = NonNull::from(data).cast::<std::ffi::c_void>();
-    // SAFETY: `data` covers `shape`'s element count and outlives the
-    // returned array (predict drops the arrays before the buffers); the
-    // deallocator is a no-op so Core ML never frees caller-owned memory.
-    unsafe {
-        MLMultiArray::initWithDataPointer_shape_dataType_strides_deallocator_error(
-            MLMultiArray::alloc(),
-            ptr,
-            &shape_arr,
-            MLMultiArrayDataType::Float16,
-            &stride_arr,
-            Some(&dealloc),
-        )
-    }
-    .map_err(|e| {
-        LayaError::Runtime(format!(
-            "ane: input multi-array rejected: {}",
-            ns_error_string(&e)
-        ))
-    })
-}
-
-fn number_array(values: &[usize]) -> Retained<NSArray<NSNumber>> {
-    let nums: Vec<Retained<NSNumber>> = values.iter().map(|v| NSNumber::new_usize(*v)).collect();
-    NSArray::from_retained_slice(&nums)
-}
-
-/// C-contiguous row-major strides for `shape`.
-fn contiguous_strides(shape: &[usize]) -> Vec<usize> {
-    let mut strides = vec![1usize; shape.len()];
-    for i in (0..shape.len().saturating_sub(1)).rev() {
-        strides[i] = strides[i + 1] * shape[i + 1];
-    }
-    strides
-}
-
-/// Read the fp16 output via `getBytesWithHandler` (the documented reader —
-/// `dataPointer` is deprecated) into the caller's buffer.
-fn copy_out_f16(arr: &MLMultiArray, out: &mut [u16]) -> Result<()> {
-    let expected = out.len();
-    let got = unsafe { arr.count() } as usize;
-    if got != expected {
-        return Err(LayaError::Runtime(format!(
-            "ane: output count {got} != expected {expected} — artifact shape drift"
-        )));
-    }
-    let sink = out.as_mut_ptr();
-    let handler = RcBlock::new(move |bytes: NonNull<std::ffi::c_void>, size: isize| {
-        let src = bytes.as_ptr() as *const u16;
-        let n = (size as usize) / 2;
-        // SAFETY: `sink` points at `expected` elements, live across this
-        // call; Core ML hands us the array's own buffer.
-        unsafe { std::ptr::copy_nonoverlapping(src, sink, n.min(expected)) };
-    });
-    // SAFETY: the handler only reads the array's buffer into `out`.
-    unsafe {
-        arr.getBytesWithHandler(&handler);
-    }
-    Ok(())
-}
-
-/// The T0.3 gate, re-measured at load: walk the ML Program structure of
-/// the COMPILED artifact, ask the plan for every operation's preferred
-/// device, and count the device-bearing ops + device transitions in
-/// program order (exactly the conversion tool's placement table).
-fn verify_compute_plan(compiled: &Path, config: &MLModelConfiguration) -> Result<Placement> {
-    let (tx, rx) = std::sync::mpsc::channel();
-    unsafe {
-        let url = NSURL::fileURLWithPath_isDirectory(
-            &NSString::from_str(&compiled.to_string_lossy()),
-            true,
-        );
-        let handler = RcBlock::new(move |plan: *mut MLComputePlan, err: *mut NSError| {
-            let result = if err.is_null() && !plan.is_null() {
-                // SAFETY: a non-null MLComputePlan just handed to the
-                // block by Core ML (autoreleased — retained here).
-                Ok(Retained::retain_autoreleased(plan.cast::<MLComputePlan>())
-                    .expect("non-null plan"))
-            } else {
-                let msg = if err.is_null() {
-                    "null plan".to_string()
-                } else {
-                    ns_error_string(&*err)
-                };
-                Err(msg)
-            };
-            let _ = tx.send(result);
-        });
-        MLComputePlan::loadContentsOfURL_configuration_completionHandler(&url, config, &handler);
-    }
-    let plan = rx
-        .recv_timeout(std::time::Duration::from_secs(120))
-        .map_err(|_| LayaError::Runtime("ane: compute-plan load timed out".into()))?
-        .map_err(LayaError::Runtime)?;
-
-    let structure = unsafe { plan.modelStructure() };
-    let program = unsafe { structure.program() }
-        .ok_or_else(|| LayaError::Runtime("ane: model structure is not an ML Program".into()))?;
-    let ops = program_operations(&program)?;
-
-    let mut placement = Placement {
-        device_ops: 0,
-        ane_ops: 0,
-        gpu_ops: 0,
-        cpu_ops: 0,
-        transitions: 0,
-    };
-    let mut prev: Option<u8> = None; // 0 ane / 1 gpu / 2 cpu / 3 other
-    for op in &ops {
-        let usage = unsafe { plan.computeDeviceUsageForMLProgramOperation(op) };
-        let Some(usage) = usage else {
-            continue; // const / identity — materialized, no device (the P0 rule)
-        };
-        let device = unsafe { usage.preferredComputeDevice() };
-        // The runtime class name is the device kind (the P0 smoke's
-        // type-name matching — MLComputeDeviceProtocol carries no kind
-        // tag); ProtocolObject reaches the runtime class through its
-        // AnyObject view.
-        let anyobj: &AnyObject = device.as_ref();
-        let class_code = match anyobj.class().name().to_string_lossy().as_ref() {
-            "MLNeuralEngineComputeDevice" => 0,
-            "MLGPUComputeDevice" => 1,
-            "MLCPUComputeDevice" => 2,
-            _ => 3,
-        };
-        placement.device_ops += 1;
-        match class_code {
-            0 => placement.ane_ops += 1,
-            1 => placement.gpu_ops += 1,
-            2 => placement.cpu_ops += 1,
-            _ => {}
-        }
-        if prev.is_some_and(|p| p != class_code) {
-            placement.transitions += 1;
-        }
-        prev = Some(class_code);
-    }
-    Ok(placement)
-}
-
-/// `program.functions["main"].block.operations` — the main function's op
-/// list in program order.
-fn program_operations(
-    program: &MLModelStructureProgram,
-) -> Result<Vec<Retained<objc2_core_ml::MLModelStructureProgramOperation>>> {
-    let main = NSString::from_str("main");
-    let functions = unsafe { program.functions() };
-    let func = functions
-        .objectForKey(&main)
-        .ok_or_else(|| LayaError::Runtime("ane: program has no `main` function".into()))?;
-    let block = unsafe { func.block() };
-    let ops = unsafe { block.operations() };
-    Ok(ops.to_vec())
-}
-
-fn ns_error_string(e: &NSError) -> String {
-    e.localizedDescription().to_string()
-}
-
 #[cfg(test)]
 mod fetch_tests {
     use super::*;
-    use blake3::Hasher;
+    use ane_host::blake3_dir_v1;
 
-    /// blake3-dir-v1 over a bundle dir — the exact algorithm
-    /// [`AneRuntime::verify_digest`] pins (sorted rel, `rel\0bytes\0`).
+    /// blake3-dir-v1 over a bundle dir — the exact algorithm the host
+    /// pins (sorted rel, `rel\0bytes\0`); the load's verify re-derives
+    /// the same digest.
     fn digest_of(dir: &Path) -> (String, usize, u64) {
-        let mut files: Vec<(String, PathBuf)> = Vec::new();
-        collect_files(dir, dir, &mut files).expect("walk");
-        files.sort_by(|a, b| a.0.cmp(&b.0));
-        let mut total = 0u64;
-        let mut h = Hasher::new();
-        for (rel, path) in &files {
-            let data = std::fs::read(path).expect("read");
-            total += data.len() as u64;
-            h.update(rel.as_bytes());
-            h.update(b"\0");
-            h.update(&data);
-            h.update(b"\0");
-        }
-        (h.finalize().to_hex().to_string(), files.len(), total)
+        blake3_dir_v1(dir).expect("digests")
     }
 
     /// One 3-file fixture bundle + the manifest JSON that pins it.
@@ -1485,7 +1099,9 @@ mod fetch_tests {
         // The installed tree passes the SAME gate the load runs.
         let manifest = AneManifest::load(&root.join("manifest.json")).unwrap();
         let entry = manifest.artifacts.get("en/L8").unwrap();
-        AneRuntime::verify_digest(&installed, entry).expect("digest");
+        let pin = entry.pin();
+        ane_host::verify_dir_digest(&installed, &pin.digest, pin.files, pin.bytes, MISSING_REMEDY)
+            .expect("digest");
         // No staging left behind.
         assert!(!root.join(".staging").join("en/L8.mlpackage").exists());
         let _ = std::fs::remove_dir_all(&tmp);

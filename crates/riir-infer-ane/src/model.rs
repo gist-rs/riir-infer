@@ -1,0 +1,391 @@
+//! `MLModel` load with compute units + the multi-function `functionName`
+//! selector, the load-time compute-plan walk, and the zero-copy
+//! `MLMultiArray` predict choreography — plan 619 T1.0 groups 3 + 4,
+//! lifted verbatim from `riir-infer-laya`'s `ane.rs`. No objc2 type
+//! crosses to a lane: the lanes speak [`ComputeUnits`], [`ArtifactPin`],
+//! [`Placement`], [`LoadedModel`] and fp16 buffers only.
+//!
+//! [`load_model`] is the WHOLE load choreography in one call — digest
+//! verify → content-addressed compile → `MLModelConfiguration` load →
+//! compute-plan walk — so the lane keeps only its verdict (the gate
+//! refusal + the drift disclosure name the lane's own manifest entry,
+//! which is lane knowledge).
+
+use std::path::Path;
+use std::ptr::NonNull;
+
+use block2::RcBlock;
+use objc2::AnyThread;
+use objc2::rc::Retained;
+use objc2::runtime::{AnyObject, ProtocolObject};
+use objc2_core_ml::{
+    MLComputePlan, MLDictionaryFeatureProvider, MLFeatureProvider, MLFeatureValue, MLModel,
+    MLModelConfiguration, MLModelStructureProgram, MLMultiArray, MLMultiArrayDataType,
+};
+use objc2_foundation::{NSArray, NSDictionary, NSError, NSNumber, NSString, NSURL};
+
+use super::cache::{compile_cached, ns_error_string};
+use super::digest::verify_dir_digest;
+use super::{Error, Result};
+
+/// The compute-unit posture, lane-facing — the host maps onto
+/// `MLComputeUnits` internally (the conversion gate's `CPU_AND_NE` is
+/// the ANE lanes' posture; `MLComputeUnits` is an NS_OPTIONS bit set
+/// over an NSInteger).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ComputeUnits {
+    /// ANE-preferred, GPU excluded (`CPUAndNeuralEngine`).
+    CpuAndNe,
+    /// `CPUAndGPU`.
+    CpuAndGpu,
+    /// `CPUOnly`.
+    CpuOnly,
+}
+
+impl ComputeUnits {
+    fn to_native(self) -> objc2_core_ml::MLComputeUnits {
+        match self {
+            Self::CpuAndNe => objc2_core_ml::MLComputeUnits::CPUAndNeuralEngine,
+            Self::CpuAndGpu => objc2_core_ml::MLComputeUnits::CPUAndGPU,
+            Self::CpuOnly => objc2_core_ml::MLComputeUnits::CPUOnly,
+        }
+    }
+}
+
+/// The artifact pin a load verifies against — the manifest's digest
+/// walls verbatim. `files == 0 && bytes == 0` disables the shape walls
+/// (digest-only pin, for lanes whose manifest doesn't pin counts); any
+/// other pair enforces both walls exactly.
+#[derive(Debug, Clone)]
+pub struct ArtifactPin {
+    /// blake3-dir-v1 hex digest of the `.mlpackage` bundle contents.
+    pub digest: String,
+    /// Pinned file count inside the bundle (0 = wall disabled).
+    pub files: usize,
+    /// Pinned byte total inside the bundle (0 = wall disabled).
+    pub bytes: u64,
+}
+
+/// The load-time plan verdict (the conversion gate re-measured at
+/// load).
+#[derive(Debug, Clone, Copy)]
+pub struct Placement {
+    pub device_ops: usize,
+    pub ane_ops: usize,
+    pub gpu_ops: usize,
+    pub cpu_ops: usize,
+    pub transitions: usize,
+}
+
+impl Placement {
+    /// The gate: 100% of device-bearing ops ANE-preferred, zero device
+    /// transitions. `false` refuses the load.
+    pub fn passes(&self) -> bool {
+        self.device_ops > 0 && self.ane_ops == self.device_ops && self.transitions == 0
+    }
+}
+
+/// One loaded + verified Core ML model: the compiled bundle lives in
+/// the content-addressed cache (shared across loads); this handle owns
+/// the in-memory `MLModel`. Single-threaded by contract (the lanes'
+/// forwards are single-threaded — the capture's posture).
+pub struct LoadedModel {
+    model: Retained<MLModel>,
+}
+
+/// The WHOLE load choreography: verify the artifact digest against
+/// `pin` (count / byte / digest walls), compile through the
+/// content-addressed cache (`cache_env` + `default_cache_subdir` name
+/// the lane's cache home), load under `units` (+ `function_name` for
+/// multi-function packages — `None` keeps the default `main` function),
+/// and re-walk the compute plan. Any failure is a refused load — never
+/// a CPU fallback.
+#[allow(deprecated)] // the sync compile API inside compile_cached; the
+// async twin needs a semaphore dance for a one-shot load-time call
+pub fn load_model(
+    artifact_dir: &Path,
+    pin: &ArtifactPin,
+    units: ComputeUnits,
+    function_name: Option<&str>,
+    cache_env: &str,
+    default_cache_subdir: &str,
+    missing_remedy: &str,
+) -> Result<(LoadedModel, Placement)> {
+    verify_dir_digest(
+        artifact_dir,
+        &pin.digest,
+        pin.files,
+        pin.bytes,
+        missing_remedy,
+    )?;
+    let compiled = compile_cached(artifact_dir, &pin.digest, cache_env, default_cache_subdir)?;
+
+    unsafe {
+        let url = NSURL::fileURLWithPath_isDirectory(
+            &NSString::from_str(&compiled.to_string_lossy()),
+            true,
+        );
+        let config = MLModelConfiguration::new();
+        config.setComputeUnits(units.to_native());
+        if let Some(fname) = function_name {
+            config.setFunctionName(Some(&NSString::from_str(fname)));
+        }
+        let model = MLModel::modelWithContentsOfURL_configuration_error(&url, &config).map_err(
+            |e| {
+                Error::msg(format!(
+                    "ane: Core ML load failed for {}: {}",
+                    compiled.display(),
+                    ns_error_string(&e)
+                ))
+            },
+        )?;
+
+        let placement = verify_compute_plan(&compiled, &config)?;
+        Ok((LoadedModel { model }, placement))
+    }
+}
+
+impl LoadedModel {
+    /// One forward over named fp16 inputs into the named fp16 output —
+    /// the caller's buffers are borrowed zero-copy for the duration of
+    /// the prediction (no-copy init, no-op deallocator; the arrays drop
+    /// before the buffers). Fixed shapes — a buffer whose length ≠ its
+    /// declared shape is a caller bug and asserts (the historical lane
+    /// contract, unchanged).
+    pub fn predict_f16(
+        &self,
+        inputs: &[(&str, &[u16], &[usize])],
+        output_name: &str,
+        out_f16: &mut [u16],
+    ) -> Result<()> {
+        unsafe {
+            // The arrays borrow the caller's buffers (no-copy init, no-op
+            // deallocator); every borrow lives to the end of this scope,
+            // past the prediction call.
+            let mut arrays: Vec<Retained<MLMultiArray>> = Vec::with_capacity(inputs.len());
+            let mut names: Vec<Retained<NSString>> = Vec::with_capacity(inputs.len());
+            for (name, data, shape) in inputs {
+                let expected: usize = shape.iter().product();
+                assert_eq!(
+                    data.len(),
+                    expected,
+                    "input {name:?} buffer must be {shape:?}"
+                );
+                arrays.push(multi_array_zero_copy(data, shape)?);
+                names.push(NSString::from_str(name));
+            }
+            let values: Vec<Retained<AnyObject>> = arrays
+                .iter()
+                .map(|arr| {
+                    let val = MLFeatureValue::featureValueWithMultiArray(arr);
+                    // The provider init erases the value type to AnyObject
+                    // (the ObjC dictionary erasure) — upcast once. `cast`
+                    // is the documented upcast (deprecated name, fine for
+                    // a root upcast; `cast_unchecked` would add unsafe for
+                    // nothing).
+                    #[allow(deprecated)]
+                    Retained::cast::<AnyObject>(val)
+                })
+                .collect();
+            let name_refs: Vec<&NSString> = names.iter().map(|s| &**s).collect();
+            let value_refs: Vec<Retained<AnyObject>> =
+                values.iter().map(Retained::clone).collect();
+            let dict: Retained<NSDictionary<NSString, AnyObject>> =
+                NSDictionary::from_retained_objects(&name_refs, &value_refs);
+            let features = MLDictionaryFeatureProvider::initWithDictionary_error(
+                MLDictionaryFeatureProvider::alloc(),
+                &dict,
+            )
+            .map_err(|e| {
+                Error::msg(format!(
+                    "ane: feature provider failed: {}",
+                    ns_error_string(&e)
+                ))
+            })?;
+            let out = self
+                .model
+                .predictionFromFeatures_error(ProtocolObject::from_ref(&*features))
+                .map_err(|e| {
+                    Error::msg(format!("ane: prediction failed: {}", ns_error_string(&e)))
+                })?;
+            let name = NSString::from_str(output_name);
+            let val = out.featureValueForName(&name).ok_or_else(|| {
+                Error::msg(format!(
+                    "ane: output {output_name:?} missing from the prediction (manifest/ artifact drift?)"
+                ))
+            })?;
+            let arr = val.multiArrayValue().ok_or_else(|| {
+                Error::msg(format!("ane: output {output_name:?} is not a multi-array"))
+            })?;
+            copy_out_f16(&arr, out_f16)?;
+            Ok(())
+        }
+    }
+}
+
+/// Build a zero-copy fp16 `MLMultiArray` over the caller's buffer (the
+/// buffer must outlive the array — in `predict_f16` all buffers outlive
+/// the prediction call, and the arrays drop first).
+fn multi_array_zero_copy(data: &[u16], shape: &[usize]) -> Result<Retained<MLMultiArray>> {
+    // No-op deallocator: ownership stays with the caller's buffer; the
+    // block signature is Apple's `^(void *bytes) { … }`.
+    let dealloc = RcBlock::new(|_bytes: NonNull<std::ffi::c_void>| {});
+    let shape_arr = number_array(shape);
+    let stride_arr = number_array(&contiguous_strides(shape));
+    let ptr = NonNull::from(data).cast::<std::ffi::c_void>();
+    // SAFETY: `data` covers `shape`'s element count and outlives the
+    // returned array (predict drops the arrays before the buffers); the
+    // deallocator is a no-op so Core ML never frees caller-owned memory.
+    unsafe {
+        MLMultiArray::initWithDataPointer_shape_dataType_strides_deallocator_error(
+            MLMultiArray::alloc(),
+            ptr,
+            &shape_arr,
+            MLMultiArrayDataType::Float16,
+            &stride_arr,
+            Some(&dealloc),
+        )
+    }
+    .map_err(|e| {
+        Error::msg(format!(
+            "ane: input multi-array rejected: {}",
+            ns_error_string(&e)
+        ))
+    })
+}
+
+fn number_array(values: &[usize]) -> Retained<NSArray<NSNumber>> {
+    let nums: Vec<Retained<NSNumber>> = values.iter().map(|v| NSNumber::new_usize(*v)).collect();
+    NSArray::from_retained_slice(&nums)
+}
+
+/// C-contiguous row-major strides for `shape`.
+fn contiguous_strides(shape: &[usize]) -> Vec<usize> {
+    let mut strides = vec![1usize; shape.len()];
+    for i in (0..shape.len().saturating_sub(1)).rev() {
+        strides[i] = strides[i + 1] * shape[i + 1];
+    }
+    strides
+}
+
+/// Read the fp16 output via `getBytesWithHandler` (the documented reader —
+/// `dataPointer` is deprecated) into the caller's buffer.
+fn copy_out_f16(arr: &MLMultiArray, out: &mut [u16]) -> Result<()> {
+    let expected = out.len();
+    let got = unsafe { arr.count() } as usize;
+    if got != expected {
+        return Err(Error::msg(format!(
+            "ane: output count {got} != expected {expected} — artifact shape drift"
+        )));
+    }
+    let sink = out.as_mut_ptr();
+    let handler = RcBlock::new(move |bytes: NonNull<std::ffi::c_void>, size: isize| {
+        let src = bytes.as_ptr() as *const u16;
+        let n = (size as usize) / 2;
+        // SAFETY: `sink` points at `expected` elements, live across this
+        // call; Core ML hands us the array's own buffer.
+        unsafe { std::ptr::copy_nonoverlapping(src, sink, n.min(expected)) };
+    });
+    // SAFETY: the handler only reads the array's buffer into `out`.
+    unsafe {
+        arr.getBytesWithHandler(&handler);
+    }
+    Ok(())
+}
+
+/// The conversion gate, re-measured at load: walk the ML Program structure of
+/// the COMPILED artifact, ask the plan for every operation's preferred
+/// device, and count the device-bearing ops + device transitions in
+/// program order (exactly the conversion tool's placement table).
+pub(crate) fn verify_compute_plan(
+    compiled: &Path,
+    config: &MLModelConfiguration,
+) -> Result<Placement> {
+    let (tx, rx) = std::sync::mpsc::channel();
+    unsafe {
+        let url = NSURL::fileURLWithPath_isDirectory(
+            &NSString::from_str(&compiled.to_string_lossy()),
+            true,
+        );
+        let handler = RcBlock::new(move |plan: *mut MLComputePlan, err: *mut NSError| {
+            let result = if err.is_null() && !plan.is_null() {
+                // SAFETY: a non-null MLComputePlan just handed to the
+                // block by Core ML (autoreleased — retained here).
+                Ok(Retained::retain_autoreleased(plan.cast::<MLComputePlan>())
+                    .expect("non-null plan"))
+            } else {
+                let msg = if err.is_null() {
+                    "null plan".to_string()
+                } else {
+                    ns_error_string(&*err)
+                };
+                Err(msg)
+            };
+            let _ = tx.send(result);
+        });
+        MLComputePlan::loadContentsOfURL_configuration_completionHandler(&url, config, &handler);
+    }
+    let plan = rx
+        .recv_timeout(std::time::Duration::from_secs(120))
+        .map_err(|_| Error::msg("ane: compute-plan load timed out"))?
+        .map_err(Error::msg)?;
+
+    let structure = unsafe { plan.modelStructure() };
+    let program = unsafe { structure.program() }
+        .ok_or_else(|| Error::msg("ane: model structure is not an ML Program"))?;
+    let ops = program_operations(&program)?;
+
+    let mut placement = Placement {
+        device_ops: 0,
+        ane_ops: 0,
+        gpu_ops: 0,
+        cpu_ops: 0,
+        transitions: 0,
+    };
+    let mut prev: Option<u8> = None; // 0 ane / 1 gpu / 2 cpu / 3 other
+    for op in &ops {
+        let usage = unsafe { plan.computeDeviceUsageForMLProgramOperation(op) };
+        let Some(usage) = usage else {
+            continue; // const / identity — materialized, no device (the P0 rule)
+        };
+        let device = unsafe { usage.preferredComputeDevice() };
+        // The runtime class name is the device kind (the P0 smoke's
+        // type-name matching — MLComputeDeviceProtocol carries no kind
+        // tag); ProtocolObject reaches the runtime class through its
+        // AnyObject view.
+        let anyobj: &AnyObject = device.as_ref();
+        let class_code = match anyobj.class().name().to_string_lossy().as_ref() {
+            "MLNeuralEngineComputeDevice" => 0,
+            "MLGPUComputeDevice" => 1,
+            "MLCPUComputeDevice" => 2,
+            _ => 3,
+        };
+        placement.device_ops += 1;
+        match class_code {
+            0 => placement.ane_ops += 1,
+            1 => placement.gpu_ops += 1,
+            2 => placement.cpu_ops += 1,
+            _ => {}
+        }
+        if prev.is_some_and(|p| p != class_code) {
+            placement.transitions += 1;
+        }
+        prev = Some(class_code);
+    }
+    Ok(placement)
+}
+
+/// `program.functions["main"].block.operations` — the main function's op
+/// list in program order.
+fn program_operations(
+    program: &MLModelStructureProgram,
+) -> Result<Vec<Retained<objc2_core_ml::MLModelStructureProgramOperation>>> {
+    let main = NSString::from_str("main");
+    let functions = unsafe { program.functions() };
+    let func = functions
+        .objectForKey(&main)
+        .ok_or_else(|| Error::msg("ane: program has no `main` function"))?;
+    let block = unsafe { func.block() };
+    let ops = unsafe { block.operations() };
+    Ok(ops.to_vec())
+}

@@ -43,6 +43,18 @@ needs BELOW the engine:
   Everything except the writer sits behind `laya-riir`. The lane is a faithful port
   of a pinned reference; the consumer-side parity gate is its correctness
   authority.
+- `riir-infer-ane` (crate, `crates/riir-infer-ane`): the SHARED Core ML /
+  Apple Neural Engine host (plan 619 T1.0) — artifact digest + verify +
+  staging (blake3-dir-v1, the count/byte/digest walls), the
+  content-addressed `.mlmodelc` compile cache (per-lane env + default
+  subtree, existing bundles stay hit), `MLModel` load with compute units +
+  `functionName` (multi-function packages) + the load-time compute-plan
+  walk, and the zero-copy `MLMultiArray` predict helpers. macOS-only by
+  contract — off-macOS a documented stub resolving zero deps (never a
+  dep-tree failure). Zero Core ML machinery outside this crate:
+  `riir-infer-laya`'s `laya-riir-ane` feature consumes it (path dep, the
+  lane keeps the manifest schema + table postures + gather math), and
+  plan 619's `riir-infer-clef` consumes the same host when it lands.
 - AUDIO (lane-widening, `.issues/015` T0 / owner-gate D8): audio model
   LOADERS + streaming serving state for published CoreML bundles
   (silero-vad first) on the existing `laya-riir-ane` path — the domain
@@ -87,7 +99,7 @@ or checkpoints (this repo ships LOADERS, not weights).
 | vendored crates.io forks: `vendor/cubecl-runtime-0.11.0-pre.2` (drop-queue policy fix — upstream tracel-ai/cubecl#1359), `vendor/cubecl-common-0.11.0-pre.2` (idle device-server park fix — upstream tracel-ai/cubecl#1806 @ `6bba5fdf0`, applied verbatim over the published pre.2 source; Issue 042; drop on the first cubecl release past 0.11.0), `vendor/wgpu-hal-30.0.0` (`total_video_memory_bytes()`/`raw_handle()` adapter accessors) | in-repo `vendor/` | `[patch.crates-io]` in the workspace root; byte-identical copies (cubecl-common carries exactly the one upstream commit); remove when upstream lands |
 | lane crate deps: serde (+derive), serde_json (`preserve_order` — JSON object insertion order IS the label order), tokenizers (**0.22, pinned on a measured negative** — the 1.0.0-rc line refuses the pinned BPE files; reopen at 1.0.0 stable), sha2 (the weight pins are SHA-256, an external fact), blake3 (small-file pins), gemm (0.18; any bump re-runs the parity gate), libm (0.2, **numerics pin** — bit-identical erf so the drift budget is spent on op order) | crates.io | `riir-infer-laya` only; serde/tokenizers/sha2/blake3/gemm/libm optional behind `laya-riir` |
 | macOS target-scoped: metal (**0.31 — one workspace version**, shared with `riir-infer-gpu`; the parity gate is the acceptance for any bump), objc2 (0.6) | crates.io | `riir-infer-laya` `laya-riir-metal` feature, `cfg(target_os = "macos")` only — enabling it on Linux/Windows is inert, never a dep-tree failure |
-| macOS target-scoped: objc2-core-ml (0.3, `block2` feature on), objc2-foundation (0.3), objc2 (0.6, shared with the metal lane), block2 (0.6 — the ObjC block runtime the no-copy input arrays, the output reader and the async `MLComputePlan` loader need) | crates.io | `riir-infer-laya` `laya-riir-ane` feature, `cfg(target_os = "macos")` only — inert on every other host; never wasm32, never default. Any bump re-runs the consumer-side G5-ANE gate (the ANE lane's parity authority). REUSED by the audio lane (`.issues/015` / owner-gate D8): external published `.mlmodelc` bundles (silero-vad first) load through the SAME row — no new dep; a first audio code commit rides this row, per the boundary rule |
+| macOS target-scoped: objc2-core-ml (0.3, `block2` feature on), objc2-foundation (0.3), objc2 (0.6, shared with the metal lane), block2 (0.6 — the ObjC block runtime the no-copy input arrays, the output reader and the async `MLComputePlan` loader need), blake3 (the bundle digests) | crates.io | **`riir-infer-ane` only** (the shared ANE host, plan 619 T1.0 — one home, never a second copy; `cfg(target_os = "macos")` target-scoped in ITS Cargo.toml, off-macOS the crate is a stub resolving nothing). `riir-infer-laya` reaches it via the `laya-riir-ane` feature → optional path dep `../riir-infer-ane` — enabling the feature on Linux/Windows resolves the stub, never a dep-tree failure. Never wasm32, never default. Any bump re-runs the consumer-side G5-ANE gate (the ANE lane's parity authority). REUSED by the audio lane (`.issues/015` / owner-gate D8): external published `.mlmodelc` bundles (silero-vad first) load through the SAME row — no new dep; a first audio code commit rides this row, per the boundary rule |
 | non-macOS target-scoped: cudarc (0.19 — `std`, `driver`, `nvrtc`, `cuda-13030`, `fallback-dynamic-loading`; one workspace version, shared with `riir-infer-gpu`'s raw-CUDA lane) | crates.io | `riir-infer-laya` `laya-riir-cuda` feature, `cfg(not(target_os = "macos"))` only — inert on macOS (no dep pulled); the lane compiles its own CUDA C source to PTX at construction (arch sm_89). Any bump re-runs the consumer-side G5 gate at the cuda posture (`.issues/002`) |
 
 Explicitly NOT allowed from any feature combination: any `riir-*` crate

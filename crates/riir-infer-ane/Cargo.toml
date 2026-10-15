@@ -1,0 +1,32 @@
+[package]
+name = "riir-infer-ane"
+version = "0.1.0"
+edition = "2024"
+license = "MIT"
+# Internal substrate leaf — the release surface is the consumer crates.
+publish = false
+
+# riir-infer-ane — the SHARED Core ML / Apple Neural Engine host (plan 619
+# T1.0, the substrate-first extraction): ONE home for the host mechanics
+# `riir-infer-laya`'s `ane.rs` owned — artifact fetch-stage-digest-verify,
+# the content-addressed `.mlmodelc` compile cache, `MLModel` load with
+# compute units + `functionName` (multi-function packages), and the
+# zero-copy `MLMultiArray` input/output helpers. Consumers:
+# `riir-infer-laya` (feature `laya-riir-ane`, migrated onto it — the
+# consumer-side G5-ANE gate is the no-regression authority) and
+# `riir-infer-clef` (plan 619's clef-text lane, which never grows a second
+# copy of this machinery).
+#
+# macOS-only code, macOS-only deps — off-macOS the crate compiles to a
+# documented stub and pulls NOTHING (the target-scoped dep posture the
+# laya-ane/metal lanes established). Never a default feature anywhere;
+# never wasm32.
+
+# macOS-only use (digest of the artifact bundles); target-scoped so a
+# non-macOS build of the stub resolves zero deps at all.
+[target.'cfg(target_os = "macos")'.dependencies]
+blake3 = "1"
+objc2 = { version = "0.6" }
+objc2-core-ml = { version = "0.3", features = ["block2"] }
+objc2-foundation = { version = "0.3" }
+block2 = { version = "0.6" }
