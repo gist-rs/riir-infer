@@ -42,13 +42,19 @@
 //!   lossless byte-level BPE tokenizer.
 //! - **T1.5** host math — RoPE tables fp16, causal+pad mask, embedding
 //!   gather, span-mean head packing (port `ClefTextManager`'s statics).
-//! - **T1.6** the multi-function host — compile-cache both packages,
-//!   per-bucket `functionName("L{bucket}")` + env-selectable compute
-//!   units (`CLEF_COMPUTE_UNITS=ane|gpu|cpu`), one `MLModel` pair per
-//!   runtime instance (the actor/thread law, documented at the type).
-//! - **T1.7** `ClefText::answer` — encode → bucket select → decoder →
-//!   head → per-question softmax over that question's options (the
-//!   artifact's own head convention — fidelity, not our sigmoid law).
+//! - **T1.6** the multi-function host — **LANDED** (`lane/runtime.rs` +
+//!   the shared host): per-bucket `functionName("L{bucket}")` loads over
+//!   the content-addressed compile cache, `CLEF_COMPUTE_UNITS` env,
+//!   decode/head forward legs, the actor thread law at the type; the
+//!   host grew `predict_f32` + stride-aware output readers +
+//!   `PlanWalk::Verify|Skip` (the GB-scale package's plan walk never
+//!   completes at load — the parity gate + latency bench carry the
+//!   placement truth) + the configured-function plan walk.
+//! - **T1.7** `ClefText::answer` — **LANDED**: encode → bucket select →
+//!   decoder → head → per-question softmax over that question's options
+//!   (the artifact's own head convention — fidelity, not our sigmoid
+//!   law); `Answer` + the `choice()`/`noul()`/`score()` readouts;
+//!   `info()` posture disclosure.
 //!
 //! Phase 2 is the parity gate (T2.1 frozen captures, T2.2 the
 //! decision-level gate — zero top-1 disagreements outside the near-tie
