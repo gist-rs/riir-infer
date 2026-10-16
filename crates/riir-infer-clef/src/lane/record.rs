@@ -366,78 +366,8 @@ fn expected_record_text(state: &Value, questions: &[(String, ClefQuestion)]) -> 
 mod tests {
     use super::*;
     use crate::lane::loaders::ClefTokenizer;
+    use crate::lane::test_support::lossless_tokenizer;
     use serde_json::json;
-
-    /// The standard GPT-2 byte→unicode mapping (the same table the
-    /// crate's own `bytes_char` builds — pub(crate), so re-derived
-    /// here for the test vocab).
-    fn byte_unicode_pairs() -> Vec<(u8, char)> {
-        let mut bytes: Vec<u8> = (b'!'..=b'~').collect();
-        bytes.extend(0xA1..=0xAC);
-        bytes.extend(0xAE..=0xFF);
-        let mut chars: Vec<char> = bytes.iter().map(|&b| b as char).collect();
-        let mut next: u32 = 0;
-        for b in 0..=255u8 {
-            if !bytes.contains(&b) {
-                bytes.push(b);
-                chars.push(char::from_u32(256 + next).expect("256+next stays in range"));
-                next += 1;
-            }
-        }
-        bytes.into_iter().zip(chars).collect()
-    }
-
-    /// A lossless in-code tokenizer: byte-level BPE over the full
-    /// 256-char alphabet, empty merge list (each byte its own token),
-    /// the clef specials as added tokens. `decode(encode(x)) == x`
-    /// exactly — the structural tests pin the record layout through
-    /// round-trip legibility, no fixture file needed. Built from a
-    /// tokenizer.json-shaped string (the builder API's vocab type is
-    /// `Into<AHashMap>`, which would drag ahash into the dep tree).
-    fn lossless_tokenizer() -> ClefTokenizer {
-        let vocab: serde_json::Map<String, Value> = byte_unicode_pairs()
-            .into_iter()
-            .enumerate()
-            .map(|(id, (_, c))| (c.to_string(), Value::from(id as u64)))
-            .collect();
-        let added: Vec<Value> = ["<|im_start|>", "<|im_end|>", "<think>", "</think>", "<|image_pad|>"]
-            .iter()
-            .enumerate()
-            .map(|(i, text)| {
-                serde_json::json!({
-                    "id": 256 + i as u64,
-                    "content": text,
-                    "single_word": false,
-                    "lstrip": false,
-                    "rstrip": false,
-                    "normalized": false,
-                    "special": true,
-                })
-            })
-            .collect();
-        let document = serde_json::json!({
-            "version": "1.0",
-            "truncation": null,
-            "padding": null,
-            "added_tokens": added,
-            "normalizer": null,
-            "pre_tokenizer": {
-                "type": "ByteLevel", "add_prefix_space": false, "trim_offsets": true,
-                "use_regex": false,
-            },
-            "post_processor": null,
-            "decoder": {
-                "type": "ByteLevel", "add_prefix_space": false, "trim_offsets": true,
-                "use_regex": false,
-            },
-            "model": {"type": "BPE", "vocab": vocab, "merges": []},
-        });
-        let inner: tokenizers::Tokenizer = document
-            .to_string()
-            .parse()
-            .expect("test tokenizer builds");
-        ClefTokenizer::from_inner(inner)
-    }
 
     fn choice(instructions: Option<&str>, criteria: &[(&str, &str)]) -> ClefQuestion {
         ClefQuestion::Choice {
@@ -697,36 +627,7 @@ mod tests {
         })
     }
 
-    fn parse_question(value: &Value) -> (String, ClefQuestion) {
-        let id = value["id"].as_str().expect("id").to_string();
-        let instructions = value["instructions"].as_str().map(ToOwned::to_owned);
-        let kind = value["kind"].as_str().expect("kind");
-        let question = match kind {
-            "noul" | "choice" => {
-                let criteria: BTreeMap<String, String> = value["criteria"]
-                    .as_object()
-                    .expect("criteria object")
-                    .iter()
-                    .map(|(k, v)| (k.clone(), v.as_str().expect("string").to_string()))
-                    .collect();
-                match kind {
-                    "noul" => ClefQuestion::Noul { instructions, criteria },
-                    _ => ClefQuestion::Choice { instructions, criteria },
-                }
-            }
-            "score" => ClefQuestion::Score {
-                instructions,
-                criteria: value["criteria"]
-                    .as_array()
-                    .expect("criteria array")
-                    .iter()
-                    .map(|v| v.as_str().expect("string").to_string())
-                    .collect(),
-            },
-            other => panic!("unknown fixture kind {other}"),
-        };
-        (id, question)
-    }
+    use crate::lane::test_support::parse_fixture_question as parse_question;
 
     /// The six-plus records the plan names: plain state / nested JSON
     /// with floats+bools / multi-field / score levels / noul + unicode

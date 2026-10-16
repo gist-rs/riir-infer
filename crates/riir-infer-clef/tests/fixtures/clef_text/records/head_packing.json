@@ -1,0 +1,24 @@
+{
+  "bucket": 256,
+  "embeddings": {
+    "hidden": 4,
+    "vocab": 151936
+  },
+  "hashes": {
+    "last": "8946bffa4401a28a02fe34ee14fd0a85e6af2d1cc5c7ad2501178aa2a5542e8b",
+    "lexical": "04c2f75c597060b387b2108b4296ac48001ddfe24413e863f4589c0d62ef7414",
+    "mem_mask": "cd526369f51547ac6182b9ea777abbe662e79a7cdb8c75ed951b1a57e997b8e0",
+    "o2q": "9a77681b74f742e85a89f916de8e760d8974f46009272d58daf7b65b05541bdc",
+    "o_mask": "03bca2e195cdbd83dfd57977039d2820221f295290f4be79289a3b270a94c48c",
+    "o_mean": "e38520aa65627b255b9099e6388098ac65370991f39348c4e24568101b8dbc6b",
+    "q_mask": "61b75e0300007511cbb3669adcef2e7c00fa323aeba6fea11796ec493e5abccf",
+    "q_mean": "9f1a5e9b6c6a57db4fc9d38509c318eca949f2e0714cac8555fce028dba9a9ea",
+    "type_oh": "640af741fce14acbd25f1aca6747dfde6ca92132659929818b5ebd4fac3dd51d"
+  },
+  "max_options": 96,
+  "max_questions": 16,
+  "note": "Plan 619 T1.5 head-packing golden — blake3 over each packed array's f32 bits for the plain_state record (T1.4 goldens) against the deterministic fixture embedding table (vocab 151936, hidden 4). Regenerate with CLEF_GEN_HEAD_FIXTURES=1 cargo test -p riir-infer-clef --features clef-ane -- --ignored generate_head_packing_golden",
+  "option_count": 5,
+  "record": "plain_state",
+  "record_tokens": 228
+}

@@ -57,13 +57,18 @@
 //! (executed in riir-reflex).
 
 pub mod artifacts;
+pub mod host;
 pub mod loaders;
 pub mod py_json;
 pub mod record;
 
+#[cfg(test)]
+pub(crate) mod test_support;
+
 pub use artifacts::{
     ARTIFACT_REPO, ARTIFACT_REVISION, ARTIFACTS, artifacts_dir, ensure_artifacts, hf_fetch,
 };
+pub use host::{HostError, causal_pad_mask, gather_hidden, head_inputs, rope_tables, HeadInputs};
 pub use loaders::{
     BUCKETS_ALLOWED, ClefConfig, ClefModel, ClefTokenizer, EmbeddingTable, PINNED_MAX_OPTIONS,
     PINNED_MAX_QUESTIONS, ensure_and_load, load_from,
