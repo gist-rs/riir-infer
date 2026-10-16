@@ -1,11 +1,9 @@
 # HISTORY.md — riir-infer
 
-Durable records for resolved questions and closed lanes (the noise-reduction
-convention: the record lands here hash-pinned; open work lives in `.issues/`
-and `.plans/`). Created 2026-09-23 at the first record. Headings are kept
-verbatim — issue/plan/bench numbers + dates are read by the workspace
-numbering + citation gates; each record below is one compact entry (full
-narratives: `git log --follow -- .issues/<file>` or this file's git history).
+Compacted 2026-10-16: every `##` heading kept verbatim, one compact entry per
+record; the full pre-compaction text is in git history (pre-compaction HEAD
+0e50c61b69c6). Operational rules live in `AGENTS.md`; removed issue files: git
+history.
 
 ## 2026-10-13 — Issue 042: cubecl #1806 idle-server park fix vendored CLOSED — landed `fa86871` (mirrors: riir-ai `4b86d2003`, riir-refine `f0718269`) — file removed
 
@@ -385,51 +383,7 @@ needs a corpus-grade re-read). Narrative: `git log --follow --
 
 ## 2026-10-13 — Issue 039 CLOSED measured-non-repro + removed: the wgpu `--lib` device-loss tail did NOT reproduce at HEAD on a clean exclusive box (green ×2 parallel + ×1 serial); the CUDA-posture leg surfaced and fixed a posture-biased TEST instead
 
-The free window opened (verified idle: 5% util, 376 MiB, no compute
-apps) and the full recipe ran from a fresh isolated worktree at the then-tip
-`fbd6e6c` (`E:\git\wt039infer`, isolated `CARGO_TARGET_DIR`): wgpu posture
-(parallel) **258/0 in 520.27s**; wgpu posture (parallel again, the issue's own
-twice-in-a-row check) **258/0 in 500.80s**; wgpu posture (serial
-`--test-threads=1`, the A/B arm) **258/0 in 544.17s** — **zero `[issue 039]
-DEVICE LOST:` lines in any run**. The 16-failure tail is NOT reproducible at
-the tip on an exclusive box.
-
-Re-attribution of the 2026-10-09 observation: that repro was clean-TREE, not
-clean-BOX — the 1005-T8 session's own GPU work was live (the filing note's
-"trainer-held window"), and the device-loss class is exactly the one
-contention can mimic (this issue's own warning, internalized 10-11 when the
-staging note mandated clean-box runs). Two explanations remain consistent
-with the evidence and cannot be distinguished: (a) contention mimicry at
-observation time, (b) healed by the T8-follow-on commits (the eDLM lane
-changed the suite's kernels substantially between 10-09 and `fbd6e6c`). What
-the evidence DOES establish: the wgpu `--lib` gate is stable-readable at the
-tip — the issue's unblocks are discharged. The durable instrument stays:
-`pool_poison::install_device_lost_handler` (`450cdfc`) — the permanent
-tripwire for the STILL-OPEN upstream mechanism (gfx-rs/wgpu #10027: a failed
-`vkCreateComputePipelines` silently loses the device; our vendored
-wgpu-hal-30 carries the escalation shape — a future loss prints its
-reason+message and poisons the pool state loudly).
-
-The CUDA-posture leg (the issue's final task, never previously run FULL at
-HEAD — only filtered subsets): **257/258** — and the single failure was NOT
-the 039 class but a posture-biased TEST:
-`gemv_cubecl::tests::test_gemv_batched_plane_oversized_output_weaver_scratch`
-asserted the oversized output tail stays zero after relying on
-`client.empty()` — which is UNINITIALIZED on the CUDA runtime
-(cubecl-cuda `alloc` = `cuMallocAsync`/`cuMalloc` pool memory, no zeroing;
-WebGPU spec-guarantees zeroed buffers — the assert silently depended on the
-wgpu-only guarantee and fired on stale recycled allocator contents
-(`oversized tail [128] = -0.15085804`, in the test LCG's [-1,1) range). The
-kernel's writes are provably bounded (`b < batch && row < out_dim`, max
-legal index `batch*out_dim-1`); probe-confirmed by zero-initializing the
-buffer (`create_from_slice`) — the test then passes CUDA 0.16s AND wgpu
-0.28s. Fix landed in the same commit: the test now zero-initializes its
-oversized output, making the write-bounds check runtime-agnostic. Lesson
-(one-liner rides the Lessons list): a tail-read of never-written buffer
-regions is only a valid bounds check if the buffer STARTS zero on EVERY
-runtime — `client.empty()` promises nothing on CUDA.
-
-Narrative: `git log --follow -- .issues/039_wgpu_lib_suite_device_loss.md`.
+The free window opened (verified idle: 5% util, 376 MiB, no compute apps) and the full recipe ran from a fresh isolated worktree at the then-tip `fbd6e6c` (`E:\git\wt039infer`, isolated `CARGO_TARGET_DIR`): wgpu posture (parallel) **258/0 in 520.27s**; wgpu posture again (the issue's own twice-in-a-row check) **258/0 in 500.80s**; wgpu posture serial `--test-threads=1` (the A/B arm) **258/0 in 544.17s** — **zero `[issue 039] DEVICE LOST:` lines in any run**: the 16-failure tail is NOT reproducible at the tip on an exclusive box. Re-attribution of the 2026-10-09 observation: that repro was clean-TREE, not clean-BOX — the 1005-T8 session's own GPU work was live (the filing note's "trainer-held window"), and the device-loss class is exactly the one contention can mimic (this issue's own warning, internalized 10-11 when the staging note mandated clean-box runs); two explanations remain consistent with the evidence and cannot be distinguished: (a) contention mimicry at observation time, (b) healed by the T8-follow-on commits (the eDLM lane changed the suite's kernels substantially between 10-09 and `fbd6e6c`). What the evidence DOES establish: the wgpu `--lib` gate is stable-readable at the tip — the issue's unblocks are discharged. The durable instrument stays: `pool_poison::install_device_lost_handler` (`450cdfc`) — the permanent tripwire for the STILL-OPEN upstream mechanism (gfx-rs/wgpu #10027: a failed `vkCreateComputePipelines` silently loses the device; our vendored wgpu-hal-30 carries the escalation shape — a future loss prints its reason+message and poisons the pool state loudly). The CUDA-posture leg (the issue's final task, never previously run FULL at HEAD — only filtered subsets): **257/258** — and the single failure was NOT the 039 class but a posture-biased TEST: `gemv_cubecl::tests::test_gemv_batched_plane_oversized_output_weaver_scratch` asserted the oversized output tail stays zero after relying on `client.empty()` — UNINITIALIZED on the CUDA runtime (cubecl-cuda `alloc` = `cuMallocAsync`/`cuMalloc` pool memory, no zeroing; WebGPU spec-guarantees zeroed buffers — the assert silently depended on the wgpu-only guarantee and fired on stale recycled allocator contents (`oversized tail [128] = -0.15085804`, in the test LCG's [-1,1) range)); the kernel's writes are provably bounded (`b < batch && row < out_dim`, max legal index `batch*out_dim-1`); probe-confirmed by zero-initializing the buffer (`create_from_slice`) — the test then passes CUDA 0.16s AND wgpu 0.28s. Fix landed in the same commit: the test now zero-initializes its oversized output, making the write-bounds check runtime-agnostic. Lesson (one-liner rides the Lessons list): a tail-read of never-written buffer regions is only a valid bounds check if the buffer STARTS zero on EVERY runtime — `client.empty()` promises nothing on CUDA. Narrative: `git log --follow -- .issues/039_wgpu_lib_suite_device_loss.md`.
 
 ## Lessons
 
