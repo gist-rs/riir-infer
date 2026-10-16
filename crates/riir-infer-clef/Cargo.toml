@@ -48,3 +48,12 @@ clef-ane = [
     "dep:bytemuck",
     "dep:riir-infer-ane",
 ]
+
+# The T2.2 parity gate (plan 619): replays the frozen FluidUse captures
+# through the lane. Real-wire (the artifact tree + compiled packages),
+# `#[ignore]`d inside; `required-features` keeps the target out of every
+# default-feature run (the repo-birth gate discipline — a gated target
+# always carries its row in the same commit).
+[[test]]
+name = "clef_text_parity"
+required-features = ["clef-ane"]
