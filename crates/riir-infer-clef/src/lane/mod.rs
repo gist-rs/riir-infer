@@ -4,11 +4,14 @@
 //! Landed so far: the skeleton only (T1.1). The task groups below land
 //! in order, each with its own gates — never ahead of its substrate:
 //!
-//! - **T1.2** artifact store — the `ensure_artifacts` law ON the shared
-//!   host (download-on-demand to `~/.cache/riir-infer/
-//!   clef-text-0.6b-coreml/`, env `CLEF_COREML_DIR` overrides; per-asset
-//!   sha256 verify BEFORE use; `.verified-<rev>` marker; refuse loud on
-//!   mismatch). Weights never committed (repo law).
+//! - **T1.2** artifact store — **LANDED** (`lane/artifacts.rs`): the
+//!   `ensure_artifacts` law ON the shared host (download-on-demand to
+//!   `~/.cache/riir-infer/clef-text-0.6b-coreml/`, env `CLEF_COREML_DIR`
+//!   overrides; per-asset sha256 verify BEFORE use; `.verified-<rev>`
+//!   marker; refuse loud on mismatch — never a silent re-download). The
+//!   9-asset sha256/size manifest is FULL (re-derived from the HF tree
+//!   API at the pinned revision, cross-checked vs the FluidUse
+//!   prefixes). Weights never committed (repo law).
 //! - **T1.3** loaders — `config.json` (validated), `tokenizer.json` via
 //!   the `tokenizers` crate (exact-reference), `embeddings.f16` mmap.
 //! - **T1.4** record encoder — `ClefRecordEncoder` + Python-style JSON
@@ -30,3 +33,9 @@
 //! band, counted PER QUESTION — T2.3 the latency bench with the
 //! preflight-quoted box state); Phase 3 is the reflex local posture
 //! (executed in riir-reflex).
+
+pub mod artifacts;
+
+pub use artifacts::{
+    ARTIFACT_REPO, ARTIFACT_REVISION, ARTIFACTS, artifacts_dir, ensure_artifacts, hf_fetch,
+};
