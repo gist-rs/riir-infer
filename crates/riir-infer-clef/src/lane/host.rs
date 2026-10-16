@@ -663,34 +663,3 @@ mod tests {
         let _ = std::fs::remove_dir_all(&scratch_dir);
     }
 }
-
-#[cfg(test)]
-mod pin_derivation {
-    /// Throwaway pin derivation (removed once the pins land in the
-    /// source): blake3-dir-v1 over the two assembled .mlpackage dirs.
-    #[test]
-    fn derive_package_pins() {
-        let dir = crate::lane::artifacts_dir().expect("artifact dir");
-        for name in ["Decoder.mlpackage", "Head.mlpackage"] {
-            let bundle = dir.join(name);
-            let mut files = Vec::new();
-            riir_infer_ane::collect_files(&bundle, &bundle, &mut files).expect("walk");
-            files.sort_by(|a, b| a.0.cmp(&b.0));
-            let mut h = blake3::Hasher::new();
-            let mut total = 0u64;
-            for (rel, path) in &files {
-                let data = std::fs::read(path).expect("read");
-                total += data.len() as u64;
-                h.update(rel.as_bytes());
-                h.update(b"\0");
-                h.update(&data);
-                h.update(b"\0");
-            }
-            println!(
-                "{name}: digest {} files {} bytes {total}",
-                h.finalize().to_hex(),
-                files.len()
-            );
-        }
-    }
-}
