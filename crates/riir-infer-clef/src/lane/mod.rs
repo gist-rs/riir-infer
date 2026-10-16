@@ -23,10 +23,23 @@
 //!   decoder gather + bit-exact f32 widening for the head's lexical
 //!   mean. `ClefModel::ensure_and_load` = the artifact law + all three
 //!   materials in one call.
-//! - **T1.4** record encoder — `ClefRecordEncoder` + Python-style JSON
-//!   rendering (`sort_keys`, `(",",":")`, `ensure_ascii=False`, Python
-//!   `repr(float)`); golden token-id fixtures frozen in
-//!   `tests/fixtures/clef_text/records/`.
+//! - **T1.4** record encoder — **LANDED** (`lane/record.rs` +
+//!   `lane/py_json.rs`): the `ClefRecordEncoder` fidelity port (fixed
+//!   system prompt, `SCHEMA FIELDS` layout, per-field
+//!   ID/TYPE/INSTRUCTION + `ALLOWED OPTIONS` + `OPTION k` JSON + `END
+//!   FIELD`, the `<|im_start|>`/`<think>` prefix and suffix; right
+//!   truncation of state with spans shifted by prefix + truncated
+//!   state; typed `RecordError` walls — `TooLong` / `EmptyOptions` /
+//!   the `<|image_pad|>` placeholder refusal) + the Python-style JSON
+//!   rendering (`py_json`: `sort_keys`, `(",",":")` separators,
+//!   `ensure_ascii=False`, CPython `repr(float)` — validated against
+//!   real-CPython-generated literals) + `ClefQuestion` (noul true/false
+//!   defaults with criteria override, choice sorted ids, score
+//!   `"0".."N"`). Golden token-id fixtures frozen in
+//!   `tests/fixtures/clef_text/records/records.json` — generated
+//!   against the REAL pinned `tokenizer.json` (the `#[ignore]`d
+//!   generator); structural tests run always-on over an in-code
+//!   lossless byte-level BPE tokenizer.
 //! - **T1.5** host math — RoPE tables fp16, causal+pad mask, embedding
 //!   gather, span-mean head packing (port `ClefTextManager`'s statics).
 //! - **T1.6** the multi-function host — compile-cache both packages,
@@ -45,6 +58,8 @@
 
 pub mod artifacts;
 pub mod loaders;
+pub mod py_json;
+pub mod record;
 
 pub use artifacts::{
     ARTIFACT_REPO, ARTIFACT_REVISION, ARTIFACTS, artifacts_dir, ensure_artifacts, hf_fetch,
@@ -52,4 +67,8 @@ pub use artifacts::{
 pub use loaders::{
     BUCKETS_ALLOWED, ClefConfig, ClefModel, ClefTokenizer, EmbeddingTable, PINNED_MAX_OPTIONS,
     PINNED_MAX_QUESTIONS, ensure_and_load, load_from,
+};
+pub use py_json::{dump, python_float, render};
+pub use record::{
+    SYSTEM_PROMPT, ClefEncodedQuestion, ClefEncodedRecord, ClefQuestion, RecordError, encode,
 };

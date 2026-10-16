@@ -158,6 +158,29 @@ impl ClefTokenizer {
     pub fn vocab_size(&self) -> usize {
         self.inner.get_vocab_size(true)
     }
+
+    /// The id for an added/special token's literal text (e.g.
+    /// `"<|image_pad|>"`), if the vocabulary carries it — the record
+    /// encoder's placeholder-refusal looks the id up here.
+    pub fn token_to_id(&self, token: &str) -> Option<u32> {
+        self.inner.token_to_id(token)
+    }
+
+    /// Decode ids back to text. `skip_special_tokens = false` is the
+    /// exact round-trip (the record stream carries its own markers, so
+    /// span/text legibility checks want them rendered).
+    pub fn decode(&self, ids: &[u32], skip_special_tokens: bool) -> std::io::Result<String> {
+        self.inner
+            .decode(ids, skip_special_tokens)
+            .map_err(|e| std::io::Error::other(format!("clef tokenizer: decode failed: {e}")))
+    }
+
+    /// Wrap an already-built [`tokenizers::Tokenizer`] — the programmatic
+    /// seam the in-code lossless test tokenizer uses (`from_dir` is the
+    /// production path).
+    pub fn from_inner(inner: tokenizers::Tokenizer) -> Self {
+        Self { inner }
+    }
 }
 
 /// `embeddings.f16` — the tied fp16 `[vocab, hidden]` matrix, mmapped
