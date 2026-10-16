@@ -535,12 +535,42 @@ fn verify_block_causal_attention(
     block_size: usize,
     tolerance: f32,
 ) {
+    verify_block_causal_attention_shaped(
+        client,
+        (N_HEAD, N_KV_HEAD),
+        query,
+        keys,
+        values,
+        n_positions,
+        pos,
+        prompt_len,
+        block_size,
+        tolerance,
+    );
+}
+
+/// [`verify_block_causal_attention`] at an explicit `(n_head, n_kv_head)`
+/// head geometry (head_dim stays 256).
+#[cfg(feature = "gemma2_d2f")]
+#[allow(clippy::too_many_arguments, reason = "test harness mirrors the kernel's parameter set")]
+fn verify_block_causal_attention_shaped(
+    client: &ComputeClient<ActiveRuntime>,
+    (n_head, n_kv_head): (usize, usize),
+    query: &[f32],
+    keys: &[f32],
+    values: &[f32],
+    n_positions: usize,
+    pos: usize,
+    prompt_len: usize,
+    block_size: usize,
+    tolerance: f32,
+) {
     let expected = attention_block_causal_cpu(
         query,
         keys,
         values,
-        N_HEAD,
-        N_KV_HEAD,
+        n_head,
+        n_kv_head,
         HEAD_DIM,
         n_positions,
         pos,
@@ -550,11 +580,11 @@ fn verify_block_causal_attention(
         SCALE,
     );
 
-    let q_len = N_HEAD * HEAD_DIM;
+    let q_len = n_head * HEAD_DIM;
 
     let params = AttentionBlockCausalParams {
-        n_head: N_HEAD,
-        n_kv_head: N_KV_HEAD,
+        n_head,
+        n_kv_head,
         head_dim: HEAD_DIM,
         n_positions,
         softcap: SOFTCAP,
@@ -728,6 +758,43 @@ fn test_attention_block_causal_generation() {
         block_size,
         1e-2,
     );
+}
+
+/// Non-2B head geometry — the Plan 437 Phase-0 0.4B (`n_head=4, n_kv_head=1`,
+/// GQA 4:1) plus an MHA shape (`2:2`). The head counts were a compile-time
+/// 8:4 pin until katgpt-rs Issue 917's §7 parity gate hit it on load; this
+/// pins the runtime path against the CPU reference across a block-causal
+/// decode canvas (prompt + generation blocks, partial tile).
+#[cfg(feature = "gemma2_d2f")]
+#[test]
+fn test_attention_block_causal_runtime_head_geometry() {
+    let ctx = CubeCLContext::new().expect("CubeCL should initialize");
+    let client = ctx.client();
+
+    let n_positions = 264;
+    let prompt_len = 248;
+    let block_size = 8;
+    for (n_head, n_kv_head) in [(4usize, 1usize), (2, 2)] {
+        let q_len = n_head * HEAD_DIM;
+        let kv_len = n_positions * n_kv_head * HEAD_DIM;
+        let query: Vec<f32> = (0..q_len).map(|i| ((i as f32) * 0.01).sin() * 0.5).collect();
+        let keys: Vec<f32> = (0..kv_len).map(|i| ((i as f32) * 0.02).cos() * 0.3).collect();
+        let values: Vec<f32> = (0..kv_len).map(|i| ((i as f32) * 0.03).sin() * 0.2).collect();
+        for pos in [0, 100, 248, 255, 256, 263] {
+            verify_block_causal_attention_shaped(
+                &client,
+                (n_head, n_kv_head),
+                &query,
+                &keys,
+                &values,
+                n_positions,
+                pos,
+                prompt_len,
+                block_size,
+                1e-2,
+            );
+        }
+    }
 }
 
 /// Partial tile: t_n doesn't align to tile boundary.

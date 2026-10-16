@@ -802,7 +802,10 @@ fn attention_decode_llama_f32(query: &[f32], kv: &[f32], params: &[f32], attn_ou
 /// buffer (matching the `rmsnorm_f32` pattern for CubeCL v0.10 compatibility):
 /// - `query`: `[f32; n_head × head_dim]` — query vectors (all heads).
 /// - `kv`: `[f32; 2 × n_positions × kv_stride]` — combined keys ‖ values.
-/// - `params`: `[f32; 3]` — `[query_pos, prompt_len, block_size]` as f32 integers.
+/// - `params`: `[f32; 5]` — `[query_pos, prompt_len, block_size, n_head, n_kv_head]`
+///   as f32 integers (exact for small integers). The head counts are runtime
+///   (the Plan 437 Phase-0 0.4B is 4:1, Gemma-2-2B is 8:4 — katgpt-rs Issue
+///   917's §7 parity gate caught the former 8:4 compile-time pin on load).
 /// - `attn_out`: `[f32; n_head × head_dim]` — output (all heads).
 ///
 /// # Differences from `attention_decode_f32`
@@ -821,11 +824,9 @@ fn attention_decode_llama_f32(query: &[f32], kv: &[f32], params: &[f32], attn_ou
 )]
 #[cube(launch_unchecked)]
 fn attention_block_causal_f32(query: &[f32], kv: &[f32], params: &[f32], attn_out: &mut [f32]) {
-    // ── Gemma 2 2B constants ──
+    // ── Gemma 2 head geometry pins (one thread per head dim; the launcher
+    // asserts head_dim == 256, the D2F constructor asserts softcap == 50) ──
     let head_dim = 256u32;
-    let n_head = 8u32;
-    let n_kv_head = 4u32;
-    let kv_stride = n_kv_head * head_dim; // 1024
     let softcap = f32::new(50.0f32);
     let scale = f32::new(0.0625f32); // 1/√256
     let cube_size = 256u32;
@@ -834,6 +835,9 @@ fn attention_block_causal_f32(query: &[f32], kv: &[f32], params: &[f32], attn_ou
     let query_pos = params[0usize] as u32;
     let prompt_len = params[1usize] as u32;
     let block_size_param = params[2usize] as u32;
+    let n_head = params[3usize] as u32;
+    let n_kv_head = params[4usize] as u32;
+    let kv_stride = n_kv_head * head_dim;
 
     // ── Derive dimensions from array lengths ──
     let kv_half = kv.len() as u32 / 2u32;
@@ -1155,9 +1159,9 @@ impl Default for AttentionParams {
 #[cfg(feature = "gemma2_d2f")]
 #[derive(Clone, Copy, Debug)]
 pub struct AttentionBlockCausalParams {
-    /// Number of query heads (must be 8 for Gemma 2 2B).
+    /// Number of query heads (8 for Gemma 2 2B; runtime — any multiple of `n_kv_head`).
     pub n_head: usize,
-    /// Number of KV heads (must be 4 for Gemma 2 2B).
+    /// Number of KV heads (4 for Gemma 2 2B; runtime).
     pub n_kv_head: usize,
     /// Head dimension (must be 256 for Gemma 2 2B).
     pub head_dim: usize,
@@ -1476,17 +1480,17 @@ impl AttentionCubeCL {
 /// CubeCL flash attention block-causal decode launcher (Plan 108 T2).
 ///
 /// Launches the `attention_block_causal_f32` kernel for Gemma 2 decode
-/// with block-causal masking. Single dispatch handles all 8 query heads.
+/// with block-causal masking. Single dispatch handles all query heads.
 ///
-/// The kernel receives a 3-element `f32` params buffer:
+/// The kernel receives a 5-element `f32` params buffer:
 /// ```text
-/// [query_pos, prompt_len, block_size]
+/// [query_pos, prompt_len, block_size, n_head, n_kv_head]
 /// ```
 #[cfg(feature = "gemma2_d2f")]
 impl AttentionCubeCL {
     /// Launch flash attention block-causal decode kernel for Gemma 2.
     ///
-    /// Single dispatch for all 8 query heads. Each workgroup (256 threads)
+    /// Single dispatch for all `n_head` query heads. Each workgroup (256 threads)
     /// handles one head with tiled KV scan and online softmax, attending
     /// only to positions `0..t_n` where `t_n = block_causal_t_n(...)`.
     ///
@@ -1498,15 +1502,16 @@ impl AttentionCubeCL {
     /// # Safety
     ///
     /// Buffer handles must have correct sizes:
-    /// - `query_handle`: n_head × head_dim = 2048 f32 elements
+    /// - `query_handle`: n_head × head_dim f32 elements
     /// - `kv_handle`: 2 × n_positions × n_kv_head × head_dim f32 elements
     ///   (keys followed by values)
-    /// - `attn_out_handle`: n_head × head_dim = 2048 f32 elements
+    /// - `attn_out_handle`: n_head × head_dim f32 elements
     ///
     /// # Panics
     ///
-    /// Panics if params don't match Gemma 2 2B constants (n_head=8, n_kv_head=4,
-    /// head_dim=256) or if block_size is 0.
+    /// Panics if `head_dim != 256` (one thread per head dim), if either head
+    /// count is 0, if `n_head` is not a multiple of `n_kv_head` (GQA groups),
+    /// or if block_size is 0.
     pub fn launch_block_causal<R: Runtime>(
         client: &ComputeClient<R>,
         query_handle: Handle,
@@ -1514,11 +1519,19 @@ impl AttentionCubeCL {
         attn_out_handle: Handle,
         params: &AttentionBlockCausalParams,
     ) {
-        assert_eq!(params.n_head, 8, "Only Gemma 2 2B n_head=8 supported");
-        assert_eq!(params.n_kv_head, 4, "Only Gemma 2 2B n_kv_head=4 supported");
+        assert!(
+            params.n_head > 0 && params.n_kv_head > 0,
+            "block-causal: head counts must be > 0"
+        );
+        assert!(
+            params.n_head.is_multiple_of(params.n_kv_head),
+            "block-causal: n_head {} must be a multiple of n_kv_head {} (GQA)",
+            params.n_head,
+            params.n_kv_head
+        );
         assert_eq!(
             params.head_dim, 256,
-            "Only Gemma 2 2B head_dim=256 supported"
+            "block-causal: only head_dim=256 supported (one thread per dim)"
         );
         assert!(params.block_size > 0, "block_size must be > 0");
 
@@ -1537,11 +1550,13 @@ impl AttentionCubeCL {
             "AttentionCubeCL::launch_block_causal kv",
         );
 
-        // Create kernel params buffer: [query_pos, prompt_len, block_size] as f32
+        // Kernel params buffer: [query_pos, prompt_len, block_size, n_head, n_kv_head]
         let kernel_params: &[f32] = &[
             params.pos as f32,
             params.prompt_len as f32,
             params.block_size as f32,
+            params.n_head as f32,
+            params.n_kv_head as f32,
         ];
         let params_handle = client.create_from_slice(f32::as_bytes(kernel_params));
 
@@ -1553,7 +1568,7 @@ impl AttentionCubeCL {
                 CubeDim::new_1d(256),
                 BufferArg::from_raw_parts(query_handle, q_len),
                 BufferArg::from_raw_parts(kv_handle, combined_kv_len),
-                BufferArg::from_raw_parts(params_handle, 3),
+                BufferArg::from_raw_parts(params_handle, 5),
                 BufferArg::from_raw_parts(attn_out_handle, q_len),
             );
         }
