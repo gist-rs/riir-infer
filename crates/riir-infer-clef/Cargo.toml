@@ -57,3 +57,9 @@ clef-ane = [
 [[test]]
 name = "clef_text_parity"
 required-features = ["clef-ane"]
+
+# The T2.3 latency bench (plan 619): one posture per invocation
+# (ane|gpu|cpu), per-bucket decoder/head/total ms on the real artifacts.
+[[example]]
+name = "clef_text_timing"
+required-features = ["clef-ane"]
