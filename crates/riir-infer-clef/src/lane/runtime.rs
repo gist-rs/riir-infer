@@ -27,8 +27,8 @@ use std::collections::HashMap;
 use riir_infer_ane::{ArtifactPin, ComputeUnits, LoadedModel, PlanWalk};
 
 use super::host::{causal_pad_mask, gather_hidden, head_inputs, rope_tables, HeadInputs};
-use super::loaders::{ClefConfig, EmbeddingTable};
-use super::record::ClefEncodedRecord;
+use super::loaders::{ClefConfig, ClefTokenizer, EmbeddingTable};
+use super::record::{ClefEncodedRecord, ClefQuestion, encode};
 
 /// The Decoder bundle pin (blake3-dir-v1; 3 files, 889,044,125 bytes —
 /// the T1.2 sha256-verified tree, digested 2026-10-17).
@@ -104,6 +104,15 @@ pub struct ClefText {
     rope: HashMap<u32, (Vec<u16>, Vec<u16>)>,
     /// The load-time placement disclosures (one line per bucket).
     pub placements: Vec<String>,
+    /// The record tokenizer (the reference manager owns it — T1.7's
+    /// `answer` needs it, the plan's exact signature carries only
+    /// state + questions).
+    tokenizer: ClefTokenizer,
+    /// The tied fp16 table (decoder gather + the head's lexical rows).
+    embeddings: EmbeddingTable,
+    /// The compute-unit posture this instance loaded under (the
+    /// `info()` disclosure).
+    units: ComputeUnits,
 }
 
 impl ClefText {
@@ -117,6 +126,9 @@ impl ClefText {
         buckets: &[u32],
         units: ComputeUnits,
     ) -> Result<Self, ClefError> {
+        // The two non-graph materials ride the same verified tree.
+        let tokenizer = ClefTokenizer::from_dir(dir)?;
+        let embeddings = EmbeddingTable::open(dir, &config)?;
         let decoder_dir = dir.join(&config.decoder);
         let head_dir = dir.join(&config.head);
         let decoder_pin = DECODER_PIN.artifact_pin();
@@ -188,6 +200,9 @@ impl ClefText {
             heads,
             rope,
             placements,
+            tokenizer,
+            embeddings,
+            units,
         })
     }
 
@@ -309,6 +324,110 @@ impl ClefText {
     pub fn config(&self) -> &ClefConfig {
         &self.config
     }
+
+    /// The lane posture disclosure: model, artifact revision, loaded
+    /// buckets, capacities, compute units — one line, for run logs and
+    /// the reflex lane's posture string.
+    pub fn info(&self) -> String {
+        format!(
+            "{} @ {} — buckets {:?} (max_questions {}, max_options {}) compute_units {:?}",
+            self.config.model,
+            super::ARTIFACT_REVISION,
+            self.buckets,
+            self.config.max_questions,
+            self.config.max_options,
+            self.units,
+        )
+    }
+
+    /// Decide `questions` about `state`: encode (the record budget is
+    /// the largest LOADED bucket — the reference posture) → bucket
+    /// select → decoder → head → per-question softmax over that
+    /// question's options (the artifact's own head convention —
+    /// fidelity, not our sigmoid law; our gates apply to OUR
+    /// projections, never this reproduction). Answers follow the
+    /// question order; probabilities follow Clef's option order.
+    pub fn answer(
+        &self,
+        state: &serde_json::Value,
+        questions: &[(String, ClefQuestion)],
+    ) -> Result<Vec<Answer>, ClefError> {
+        let max_loaded = self.buckets.last().copied().unwrap_or(0) as usize;
+        let record = encode(&self.tokenizer, state, questions, max_loaded)?;
+        let (bucket, states) = self.decode_forward(&record, &self.embeddings)?;
+        let (logits, packed) = self.head_forward(bucket, &record, &states, &self.embeddings)?;
+        Ok(answers_from_logits(&record, &logits, packed.option_count))
+    }
+}
+
+/// One question's answer: probability per option id in Clef's option
+/// order (the `ClefAnswer` port).
+#[derive(Debug, Clone, PartialEq)]
+pub struct Answer {
+    pub question_id: String,
+    pub option_ids: Vec<String>,
+    pub logits: Vec<f32>,
+    pub probabilities: Vec<f32>,
+}
+
+impl Answer {
+    /// Highest-probability option id (questions always have at least
+    /// one option — the encoder refuses empty ones).
+    pub fn choice(&self) -> &str {
+        let best = self
+            .probabilities
+            .iter()
+            .enumerate()
+            .max_by(|a, b| a.1.partial_cmp(b.1).unwrap_or(std::cmp::Ordering::Equal))
+            .map(|(i, _)| i)
+            .unwrap_or(0);
+        &self.option_ids[best]
+    }
+
+    /// For `noul` questions: probability of `true`.
+    pub fn noul(&self) -> Option<f32> {
+        self.option_ids
+            .iter()
+            .position(|id| id == "true")
+            .map(|i| self.probabilities[i])
+    }
+
+    /// For `score` questions: the expected index (Σ i·pᵢ).
+    pub fn score(&self) -> f32 {
+        self.probabilities
+            .iter()
+            .enumerate()
+            .map(|(i, p)| i as f32 * p)
+            .sum()
+    }
+}
+
+/// The per-question softmax over the packed logits (peak-subtracted —
+/// the reference's expf walk; slice order = the packing's flattened
+/// option order). Split out pure for the always-on unit test.
+fn answers_from_logits(
+    record: &ClefEncodedRecord,
+    logits: &[f32],
+    option_count: usize,
+) -> Vec<Answer> {
+    let mut answers = Vec::with_capacity(record.questions.len());
+    let mut offset = 0usize;
+    for question in &record.questions {
+        let count = question.option_ids.len();
+        let slice = &logits[offset..offset + count];
+        let peak = slice.iter().copied().fold(f32::NEG_INFINITY, f32::max);
+        let exps: Vec<f32> = slice.iter().map(|v| (v - peak).exp()).collect();
+        let sum: f32 = exps.iter().sum();
+        answers.push(Answer {
+            question_id: question.id.clone(),
+            option_ids: question.option_ids.clone(),
+            logits: slice.to_vec(),
+            probabilities: exps.iter().map(|e| e / sum).collect(),
+        });
+        offset += count;
+    }
+    debug_assert_eq!(offset, option_count);
+    answers
 }
 
 /// The runtime-level errors (T1.7 composes these with the record and
@@ -456,6 +575,7 @@ mod tests {
         for line in &runtime.placements {
             println!("DISCLOSURE: {line}");
         }
+        println!("DISCLOSURE: {}", runtime.info());
         // the reference record forward — bucket select, decode, head
         let record = plain_state_record(&model.tokenizer);
         let (bucket, states) = runtime
@@ -500,5 +620,156 @@ mod tests {
         assert_eq!(offset, packed.option_count);
         let _ = json!({}); // (serde_json in scope for the fixture parse)
         let _ = BTreeMap::<String, String>::new();
+    }
+
+    /// The T1.7 REAL-WIRE answer gate — the full pipeline through the
+    /// plan's exact signature (`answer(state, questions)`): answers
+    /// follow the question order, each probability row sums to 1,
+    /// choice/noul/score readouts are consistent, and a second call is
+    /// bit-identical. `#[ignore]`d (the same real-wire posture).
+    #[test]
+    #[ignore = "real wire: needs the pinned artifact tree + a first compile (cached after)"]
+    fn real_wire_answer_pipeline() {
+        let dir = match crate::lane::artifacts_dir() {
+            Ok(dir) => dir,
+            Err(e) => {
+                println!("SKIP (loud): no artifact dir resolvable: {e}");
+                return;
+            }
+        };
+        if !dir.join("config.json").is_file() {
+            println!(
+                "SKIP (loud): artifact tree not installed under {} — run the T1.3 install once",
+                dir.display()
+            );
+            return;
+        }
+        let runtime = ClefText::load_from(
+            &dir,
+            crate::lane::ClefConfig::from_dir(&dir).expect("config"),
+            &[256, 512],
+            compute_units_from_env(),
+        )
+        .expect("L256+L512 load (the reference default posture)");
+        let state = json!({"tier": "gold", "unread": 3});
+        let questions: Vec<(String, ClefQuestion)> = vec![
+            (
+                "tier_check".into(),
+                ClefQuestion::Noul {
+                    instructions: Some("Is the user gold tier?".into()),
+                    criteria: BTreeMap::new(),
+                },
+            ),
+            (
+                "channel".into(),
+                ClefQuestion::Choice {
+                    instructions: Some("Which channel?".into()),
+                    criteria: BTreeMap::from([
+                        ("email".to_string(), "Email support".to_string()),
+                        ("phone".to_string(), "Phone support".to_string()),
+                        ("chat".to_string(), "Live chat".to_string()),
+                    ]),
+                },
+            ),
+            (
+                "mood".into(),
+                ClefQuestion::Score {
+                    instructions: Some("Rate satisfaction.".into()),
+                    criteria: vec![
+                        "very poor".into(),
+                        "poor".into(),
+                        "ok".into(),
+                        "good".into(),
+                        "very good".into(),
+                    ],
+                },
+            ),
+        ];
+        let answers = runtime.answer(&state, &questions).expect("answers");
+        assert_eq!(answers.len(), 3, "one answer per question, in order");
+        for (answer, (id, _)) in answers.iter().zip(&questions) {
+            assert_eq!(answer.question_id, *id);
+            assert!(answer.logits.iter().all(|v| v.is_finite()));
+            let sum: f32 = answer.probabilities.iter().sum();
+            assert!((sum - 1.0).abs() < 1e-5, "{id}: probabilities sum to 1, got {sum}");
+            assert_eq!(answer.option_ids.len(), answer.probabilities.len());
+        }
+        // the typed readouts are consistent with the probabilities
+        let noul = &answers[0];
+        assert_eq!(noul.option_ids, vec!["true", "false"]);
+        assert_eq!(noul.noul(), Some(noul.probabilities[0]));
+        let choice = &answers[1];
+        assert!(choice.option_ids.contains(&choice.choice().to_string()));
+        let best = choice
+            .probabilities
+            .iter()
+            .enumerate()
+            .max_by(|a, b| a.1.partial_cmp(b.1).unwrap())
+            .map(|(i, _)| i)
+            .unwrap();
+        assert_eq!(choice.option_ids[best], choice.choice());
+        let score = &answers[2];
+        assert_eq!(score.option_ids, vec!["0", "1", "2", "3", "4"]);
+        let expected: f32 = score
+            .probabilities
+            .iter()
+            .enumerate()
+            .map(|(i, p)| i as f32 * p)
+            .sum();
+        assert!((score.score() - expected).abs() < 1e-6, "score readout");
+        println!(
+            "DISCLOSURE: answers = {:?}",
+            answers
+                .iter()
+                .map(|a| (a.question_id.clone(), a.choice().to_string()))
+                .collect::<Vec<_>>()
+        );
+        // determinism: a second identical call is bit-identical
+        let again = runtime.answer(&state, &questions).expect("answers 2");
+        assert_eq!(answers, again, "answer must be deterministic");
+    }
+
+    /// The always-on softmax law (no CoreML): peak subtraction keeps
+    /// the exponentials finite, each row sums to 1, and the option
+    /// order is preserved.
+    #[test]
+    fn softmax_law_on_packed_logits() {
+        let record = crate::lane::record::ClefEncodedRecord {
+            input_ids: Vec::new(),
+            questions: vec![
+                crate::lane::record::ClefEncodedQuestion {
+                    id: "a".into(),
+                    type_index: 0,
+                    span: 0..0,
+                    option_spans: Vec::new(),
+                    option_ids: vec!["true".into(), "false".into()],
+                },
+                crate::lane::record::ClefEncodedQuestion {
+                    id: "b".into(),
+                    type_index: 2,
+                    span: 0..0,
+                    option_spans: Vec::new(),
+                    option_ids: vec!["0".into(), "1".into(), "2".into()],
+                },
+            ],
+        };
+        let logits = vec![0.0, 0.0, 10.0, 20.0, 30.0];
+        let answers = answers_from_logits(&record, &logits, 5);
+        assert_eq!(answers.len(), 2);
+        assert_eq!(answers[0].probabilities, vec![0.5, 0.5], "ties split evenly");
+        let sum: f32 = answers[1].probabilities.iter().sum();
+        assert!((sum - 1.0).abs() < 1e-6);
+        // peak subtraction: huge logits stay finite (10/20/30 in f32
+        // would be e^30 ≈ 1e13 — fine, but e^100 would be inf)
+        let big = vec![0.0, 100.0, 100.0];
+        let record_b = crate::lane::record::ClefEncodedRecord {
+            questions: vec![record.questions[1].clone()],
+            ..record
+        };
+        let answers_b = answers_from_logits(&record_b, &big, 3);
+        assert!(answers_b[0].probabilities.iter().all(|p| p.is_finite()));
+        assert!((answers_b[0].probabilities[1] - 0.5).abs() < 1e-6, "shift invariance");
+        // option order preserved
+        assert_eq!(answers_b[0].option_ids, vec!["0", "1", "2"]);
     }
 }
