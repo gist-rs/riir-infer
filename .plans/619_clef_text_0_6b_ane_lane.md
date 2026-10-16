@@ -5,7 +5,8 @@
 > **Claimed:** Zed-agent-idle-945b, 1792165000, expires 2026-10-18T17:30:00+00:00 — **T1.2 (artifact store) only**; T1.3+ stays unclaimed. **T1.2 LANDED `eb221c6` — claim spent;** T1.3 (loaders) is the next unclaimed unit.
 > **Claimed:** Zed-agent-idle-945c, 1792170629, expires 2026-10-18T17:10:00+00:00 — **T1.3 (loaders) only**. **T1.3 LANDED `4f58844` — claim spent;** T1.4 (record encoder) is the next unclaimed unit.
 > **Claimed:** Zed-agent-idle-945d, 1792171589, expires 2026-10-18T17:26:29+00:00 — **T1.4 (record encoder) only**; T1.5+ stays unclaimed. **T1.4 LANDED `297dbe0` — claim spent;** T1.5 (host math) is the next unclaimed unit.
-> **Claimed:** Zed-agent-idle-945d, 1792173600, expires 2026-10-18T18:00:00+00:00 — **T1.5 (host math) only**; T1.6+ stays unclaimed. **T1.5 LANDED `ee30791` — claim spent;** T1.6 (multi-function host) is the next unclaimed unit.
+> **Claimed:** Zed-agent-idle-945d, 1792173600, expires 2026-10-18T18:00:00+00:00 — **T1.5 (host math) only**; T1.6+ stays unclaimed. **T1.5 LANDED `ee30791` — claim spent.**
+> **Claimed:** Zed-agent-idle-945d, 1792175900, expires 2026-10-18T18:38:20+00:00 — **T1.6 (multi-function host) only**; T1.7+ stays unclaimed.
 **Date:** 2026-10-11 · **Research:** [012](../.research/012_Clef_Text_0_6b_CoreML_ANE_Lane.md) · **Target:** `crates/riir-infer-clef` (new leaf crate, macOS-gated ANE arm) + riir-reflex lane posture (Phase 3) · **Feature:** `clef-ane` (opt-in, never default) — reflex forward feature same name.
 
 ## Goal
