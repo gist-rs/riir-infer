@@ -47,6 +47,8 @@ cargo test --test issue028_disaggregated_handoff --features deltanet_ternary_inf
 # BONSAI_GGUF env (defaults to a riir-train data path) names the real checkpoint for the certification test's full-file arm.
 # The EXL3 trellis lane (opt-in; issue 001, closed — record in .docs/001; CPU reference + fast arm here, GPU kernels in riir-infer-gpu; oracle = the CPU reference):
 cargo test --lib --features exl3
+# The EB-Sampler commit-policy lane (opt-in `entropy_bounded_commit` on riir-infer-gpu; katgpt-rs 917 T2' — armed per-config by `Gemma2D2fConfig::eb_gamma >= 0`, disarmed default −1.0 keeps every config on the incumbent τ seams; A/B blocked on riir-train Plan 437 Phase 0):
+cargo test -p riir-infer-gpu --lib --features entropy_bounded_commit
 cargo test -p riir-infer-gpu --features exl3_gpu,cuda_backend --lib  # native CUDA arm (release recommended)
 # The scale-invariant attention lane (opt-in `scale_invariant_attn`, implies
 # `deltanet_ternary_inference`; katgpt-rs Plan 622 Phase 7 engine lane — the G3 zero-shot
