@@ -12,8 +12,17 @@
 //!   9-asset sha256/size manifest is FULL (re-derived from the HF tree
 //!   API at the pinned revision, cross-checked vs the FluidUse
 //!   prefixes). Weights never committed (repo law).
-//! - **T1.3** loaders — `config.json` (validated), `tokenizer.json` via
-//!   the `tokenizers` crate (exact-reference), `embeddings.f16` mmap.
+//! - **T1.3** loaders — **LANDED** (`lane/loaders.rs`): `config.json`
+//!   parsed typed + validated (buckets sorted ⊆ {256,512,1024,2048},
+//!   max_questions/max_options pinned 16/96, `tied_embeddings` true —
+//!   the head's lexical input is the tied rows; dims positive);
+//!   `tokenizer.json` through the `tokenizers` crate (exact-reference,
+//!   `add_special_tokens = false` — the encoder carries its own
+//!   markers); `embeddings.f16` mmapped fp16 `[vocab, hidden]` with the
+//!   size wall (bytes == vocab·hidden·2), raw-bit row access for the
+//!   decoder gather + bit-exact f32 widening for the head's lexical
+//!   mean. `ClefModel::ensure_and_load` = the artifact law + all three
+//!   materials in one call.
 //! - **T1.4** record encoder — `ClefRecordEncoder` + Python-style JSON
 //!   rendering (`sort_keys`, `(",",":")`, `ensure_ascii=False`, Python
 //!   `repr(float)`); golden token-id fixtures frozen in
@@ -35,7 +44,12 @@
 //! (executed in riir-reflex).
 
 pub mod artifacts;
+pub mod loaders;
 
 pub use artifacts::{
     ARTIFACT_REPO, ARTIFACT_REVISION, ARTIFACTS, artifacts_dir, ensure_artifacts, hf_fetch,
+};
+pub use loaders::{
+    BUCKETS_ALLOWED, ClefConfig, ClefModel, ClefTokenizer, EmbeddingTable, PINNED_MAX_OPTIONS,
+    PINNED_MAX_QUESTIONS, ensure_and_load, load_from,
 };

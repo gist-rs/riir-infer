@@ -26,6 +26,9 @@ serde_json = { version = "1", optional = true }
 tokenizers = { version = "0.22", optional = true }
 sha2 = { version = "0.10", optional = true }
 blake3 = { version = "1", optional = true }
+half = { version = "2", optional = true }
+memmap2 = { version = "0.9", optional = true }
+bytemuck = { version = "1", optional = true }
 riir-infer-ane = { path = "../riir-infer-ane", optional = true }
 
 [features]
@@ -40,5 +43,8 @@ clef-ane = [
     "dep:tokenizers",
     "dep:sha2",
     "dep:blake3",
+    "dep:half",
+    "dep:memmap2",
+    "dep:bytemuck",
     "dep:riir-infer-ane",
 ]

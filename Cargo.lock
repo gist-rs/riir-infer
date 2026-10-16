@@ -3548,6 +3548,9 @@ name = "riir-infer-clef"
 version = "0.1.0"
 dependencies = [
  "blake3",
+ "bytemuck",
+ "half",
+ "memmap2",
  "riir-infer-ane",
  "serde",
  "serde_json",
