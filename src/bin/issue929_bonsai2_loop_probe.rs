@@ -46,7 +46,14 @@
 //! `"{a} is the {r} of {b}."` — the Bench-933 phrasing-inversion A/B knob;
 //! labels/bridges/fact windows are phrasing-invariant (same seed → same
 //! queries, paired arms). `B929_OUT` (JSON path) carries per-query rows
-//! (answer/gen/correct/cos-bridge-per-loop) for paired analysis.
+//! (answer/gen/correct + every probe signal per loop) for paired analysis.
+//!
+//! Sharding: `B929_SKIP` + `B929_MAX_QUERIES` select a contiguous query
+//! range (the fixture is seed-deterministic, so shards partition ONE run);
+//! `B929_MERGE=a.json,b.json,...` skips the model entirely and re-reports
+//! the grid + verdict from the shards' `B929_OUT` rows, ordered by global
+//! query index — the bootstrap is seed-fixed, so a merge of a full
+//! partition prints exactly what the unsharded run would.
 
 use anyhow::{Context, Result};
 use katgpt_core::loop_alignment_probe::{
@@ -97,6 +104,14 @@ struct Row {
     bridge_top1: bool,
 }
 
+/// The split membership the report filters on (shared by the live run and
+/// the `B929_MERGE` re-report).
+#[derive(Clone, Copy, Debug)]
+struct Split {
+    is_two_hop: bool,
+    is_ood: bool,
+}
+
 /// One fixture query with its tokenized prompt.
 struct Query {
     is_two_hop: bool,
@@ -122,6 +137,9 @@ fn main() {
 }
 
 fn run() -> Result<()> {
+    if let Ok(paths) = std::env::var("B929_MERGE") {
+        return merge(&paths);
+    }
     let t0 = std::time::Instant::now();
     let manifest_dir = env!("CARGO_MANIFEST_DIR");
     let model_path = std::env::var("B929_MODEL").unwrap_or_else(|_| {
@@ -413,18 +431,85 @@ fn run() -> Result<()> {
         },
     );
     println!("# score cells are point/lb95 (stratified bootstrap, {bootstrap_iters} iters)");
+    let splits: Vec<Split> = queries
+        .iter()
+        .map(|q| Split {
+            is_two_hop: q.is_two_hop,
+            is_ood: q.is_ood,
+        })
+        .collect();
+    report_grid(&rows, &splits, bootstrap_iters);
+    let acc_last = rows
+        .last()
+        .map(|r| r.iter().filter(|x| x.correct).count())
+        .unwrap_or(0);
+    let acc_n = rows.last().map_or(0, |r| r.len());
+    let phrase_name = match phrase {
+        FactPhrase::Standard => "standard",
+        FactPhrase::Possessive => "possessive",
+    };
+    println!(
+        "json:{{\"model\":\"{model_path}\",\"untied\":{},\"queries\":{},\"loops\":{loops},\"phrase\":\"{phrase_name}\",\"acc_last\":{},\"elapsed_s\":{:.1}}}",
+        loaded.untied,
+        queries.len(),
+        fmt_frac(acc_last, acc_n),
+        t0.elapsed().as_secs_f32(),
+    );
+    if let Ok(out) = std::env::var("B929_OUT") {
+        // Per-query rows (paired-analysis surface): answer/gen/correct plus
+        // the cos-bridge readout at every loop — additive reporting, zero
+        // measurement change.
+        let per_query: Vec<serde_json::Value> = (0..queries.len())
+            .map(|qi| {
+                serde_json::json!({
+                    "qi": qi,
+                    "two_hop": queries[qi].is_two_hop,
+                    "ood": queries[qi].is_ood,
+                    "answer": queries[qi].answer,
+                    "gen": gens.get(qi).cloned().unwrap_or_default(),
+                    "correct": rows.last().is_some_and(|r| r[qi].correct),
+                    "global_qi": skip_queries + qi,
+                    "cos_bridge": rows.iter().map(|r| r[qi].cos_bridge).collect::<Vec<_>>(),
+                    "cos_argmax": rows.iter().map(|r| r[qi].cos_argmax).collect::<Vec<_>>(),
+                    "margin": rows.iter().map(|r| r[qi].margin).collect::<Vec<_>>(),
+                    "bridge_top1": rows.iter().map(|r| r[qi].bridge_top1).collect::<Vec<_>>(),
+                })
+            })
+            .collect();
+        let payload = serde_json::json!({
+            "model": model_path,
+            "untied": loaded.untied,
+            "queries": queries.len(),
+            "loops": loops,
+            "phrase": phrase_name,
+            "chat": chat,
+            "skip": skip_queries,
+            "bootstrap": bootstrap_iters,
+            "acc_last": fmt_frac(acc_last, acc_n),
+            "elapsed_s": t0.elapsed().as_secs_f32(),
+            "per_query": per_query,
+        });
+        std::fs::write(&out, format!("{payload}\n"))
+            .with_context(|| format!("write {out}"))?;
+    }
+    Ok(())
+}
+
+/// The per-(loop, split) AUROC grid + the T1.4 kill-bar verdict line
+/// (report-only; the issue records it). `rows[loop][query]`, `splits[query]`.
+fn report_grid(rows: &[Vec<Row>], splits: &[Split], bootstrap_iters: usize) {
     println!("loop,split,n,acc,bridge_top1,auroc_cos_argmax,auroc_margin,auroc_cos_bridge");
-    type SplitFilter = fn(&Query) -> bool;
-    let splits: [(&str, SplitFilter); 3] = [
+    type SplitFilter = fn(&Split) -> bool;
+    let split_defs: [(&str, SplitFilter); 3] = [
         ("all", |_| true),
-        ("two_hop", |q: &Query| q.is_two_hop),
-        ("ood", |q: &Query| q.is_ood),
+        ("two_hop", |q: &Split| q.is_two_hop),
+        ("ood", |q: &Split| q.is_ood),
     ];
     let mut any_lb_ge_06 = false;
     let mut any_decidable = false;
     for (k, loop_rows) in rows.iter().enumerate() {
-        for (name, keep) in splits {
-            let idx: Vec<usize> = queries
+        for (name, keep) in split_defs {
+            let idx: Vec<usize> = splits
                 .iter()
                 .enumerate()
                 .filter(|(_, q)| keep(q))
@@ -457,68 +542,82 @@ fn run() -> Result<()> {
             );
         }
     }
-    // The T1.4 kill-bar verdict line (report-only; the issue records it).
-    if !any_decidable {
-        println!(
+    match (any_decidable, any_lb_ge_06) {
+        (false, _) => println!(
             "verdict: UNDECIDABLE — every AUROC cell has an empty class (label axis dead; the kimi-leg failure mode)"
-        );
-    } else if any_lb_ge_06 {
-        println!(
+        ),
+        (true, true) => println!(
             "verdict: SIGNAL — at least one (loop, split, signal) AUROC 95% CI LB >= 0.6 — T1.3 G1 gate PASSES; Phase 2 GOAT adjudication re-opens"
-        );
-    } else {
-        println!(
+        ),
+        (true, false) => println!(
             "verdict: KILL — every decidable AUROC 95% CI LB < 0.6 — the T1.4 kill criterion FIRES on a capable checkpoint"
+        ),
+    }
+}
+
+/// `B929_MERGE`: re-report the grid from shard `B929_OUT` files. Refuses a
+/// duplicated or gapped global query range, and shards whose posture
+/// (loops / phrase / chat / bootstrap) disagree — a merge across postures
+/// would report a run that never happened.
+fn merge(paths: &str) -> Result<()> {
+    let mut per_query: Vec<(usize, serde_json::Value)> = Vec::new();
+    let mut posture: Option<(u64, String, bool, u64)> = None;
+    for path in paths.split(',').filter(|p| !p.is_empty()) {
+        let text = std::fs::read_to_string(path).with_context(|| format!("read {path}"))?;
+        let v: serde_json::Value =
+            serde_json::from_str(&text).with_context(|| format!("parse {path}"))?;
+        let this = (
+            v["loops"].as_u64().context("loops")?,
+            v["phrase"].as_str().context("phrase")?.to_string(),
+            v["chat"].as_bool().context("chat")?,
+            v["bootstrap"].as_u64().context("bootstrap (pre-merge shard file?)")?,
         );
+        match &posture {
+            None => posture = Some(this),
+            Some(p) if *p != this => anyhow::bail!("{path}: posture {this:?} != {p:?}"),
+            Some(_) => {}
+        }
+        for q in v["per_query"].as_array().context("per_query")? {
+            let gqi = q["global_qi"].as_u64().context("global_qi")? as usize;
+            per_query.push((gqi, q.clone()));
+        }
     }
-    let acc_last = rows
-        .last()
-        .map(|r| r.iter().filter(|x| x.correct).count())
-        .unwrap_or(0);
-    let acc_n = rows.last().map_or(0, |r| r.len());
-    let phrase_name = match phrase {
-        FactPhrase::Standard => "standard",
-        FactPhrase::Possessive => "possessive",
+    let (loops, phrase, chat, bootstrap_iters) = posture.context("B929_MERGE named no files")?;
+    per_query.sort_by_key(|(g, _)| *g);
+    for (i, (g, _)) in per_query.iter().enumerate() {
+        anyhow::ensure!(*g == i, "global query range not a partition: index {i} holds {g}");
+    }
+    let loops = loops as usize;
+    let mut rows: Vec<Vec<Row>> = vec![Vec::with_capacity(per_query.len()); loops];
+    let mut splits = Vec::with_capacity(per_query.len());
+    let f32_at = |q: &serde_json::Value, key: &str, k: usize| -> Result<f32> {
+        Ok(q[key][k].as_f64().with_context(|| format!("{key}[{k}]"))? as f32)
     };
-    println!(
-        "json:{{\"model\":\"{model_path}\",\"untied\":{},\"queries\":{},\"loops\":{loops},\"phrase\":\"{phrase_name}\",\"acc_last\":{},\"elapsed_s\":{:.1}}}",
-        loaded.untied,
-        queries.len(),
-        fmt_frac(acc_last, acc_n),
-        t0.elapsed().as_secs_f32(),
-    );
-    if let Ok(out) = std::env::var("B929_OUT") {
-        // Per-query rows (paired-analysis surface): answer/gen/correct plus
-        // the cos-bridge readout at every loop — additive reporting, zero
-        // measurement change.
-        let per_query: Vec<serde_json::Value> = (0..queries.len())
-            .map(|qi| {
-                serde_json::json!({
-                    "qi": qi,
-                    "two_hop": queries[qi].is_two_hop,
-                    "ood": queries[qi].is_ood,
-                    "answer": queries[qi].answer,
-                    "gen": gens.get(qi).cloned().unwrap_or_default(),
-                    "correct": rows.last().is_some_and(|r| r[qi].correct),
-                    "cos_bridge": rows.iter().map(|r| r[qi].cos_bridge).collect::<Vec<_>>(),
-                    "cos_argmax": rows.iter().map(|r| r[qi].cos_argmax).collect::<Vec<_>>(),
-                })
-            })
-            .collect();
-        let payload = serde_json::json!({
-            "model": model_path,
-            "untied": loaded.untied,
-            "queries": queries.len(),
-            "loops": loops,
-            "phrase": phrase_name,
-            "chat": chat,
-            "acc_last": fmt_frac(acc_last, acc_n),
-            "elapsed_s": t0.elapsed().as_secs_f32(),
-            "per_query": per_query,
+    for (_, q) in &per_query {
+        let correct = q["correct"].as_bool().context("correct")?;
+        splits.push(Split {
+            is_two_hop: q["two_hop"].as_bool().context("two_hop")?,
+            is_ood: q["ood"].as_bool().context("ood")?,
         });
-        std::fs::write(&out, format!("{payload}\n"))
-            .with_context(|| format!("write {out}"))?;
+        for (k, loop_rows) in rows.iter_mut().enumerate() {
+            loop_rows.push(Row {
+                correct,
+                cos_argmax: f32_at(q, "cos_argmax", k)?,
+                margin: f32_at(q, "margin", k)?,
+                cos_bridge: f32_at(q, "cos_bridge", k)?,
+                bridge_top1: q["bridge_top1"][k].as_bool().context("bridge_top1")?,
+            });
+        }
     }
+    println!(
+        "# issue929 B929_MERGE re-report | {} queries from {} shard file(s), loops={loops}{}{}",
+        per_query.len(),
+        paths.split(',').filter(|p| !p.is_empty()).count(),
+        if chat { " | elicitation=chat" } else { "" },
+        if phrase == "standard" { " | phrase=standard" } else { "" },
+    );
+    println!("# score cells are point/lb95 (stratified bootstrap, {bootstrap_iters} iters)");
+    report_grid(&rows, &splits, bootstrap_iters as usize);
     Ok(())
 }
 
