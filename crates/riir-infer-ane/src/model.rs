@@ -67,7 +67,8 @@ pub struct ArtifactPin {
 }
 
 /// The load-time plan verdict (the conversion gate re-measured at
-/// load).
+/// load). `Placement::SKIPPED` (all zeros) is the honest "not measured"
+/// verdict a [`PlanWalk::Skip`] load carries — never read as a pass.
 #[derive(Debug, Clone, Copy)]
 pub struct Placement {
     pub device_ops: usize,
@@ -83,6 +84,33 @@ impl Placement {
     pub fn passes(&self) -> bool {
         self.device_ops > 0 && self.ane_ops == self.device_ops && self.transitions == 0
     }
+
+    /// The "walk skipped" verdict — all zeros; lanes that skip the walk
+    /// disclose it and never read this as a placement pass.
+    pub const SKIPPED: Self = Self {
+        device_ops: 0,
+        ane_ops: 0,
+        gpu_ops: 0,
+        cpu_ops: 0,
+        transitions: 0,
+    };
+}
+
+/// Whether the load walks the ML Program compute plan (the
+/// no-silent-fallback gate). The walk analyzes the whole program —
+/// seconds on the laya packages, minutes-or-worse on a GB-scale
+/// multi-function package (measured: the clef decoder's walk never
+/// completes inside 120 s on the M3) — so plan-619 loads skip it and
+/// let the parity gate + the latency bench carry the placement truth.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PlanWalk {
+    /// Walk + gate at load (the laya posture).
+    Verify,
+    /// Skip the walk; the returned placement is [`Placement::SKIPPED`]
+    /// (the plan-619 posture — the artifact is GB-scale and
+    /// multi-function; the walk is a load-time cost with no gate to
+    /// enforce there).
+    Skip,
 }
 
 /// One loaded + verified Core ML model: the compiled bundle lives in
@@ -98,8 +126,14 @@ pub struct LoadedModel {
 /// content-addressed cache (`cache_env` + `default_cache_subdir` name
 /// the lane's cache home), load under `units` (+ `function_name` for
 /// multi-function packages — `None` keeps the default `main` function),
-/// and re-walk the compute plan. Any failure is a refused load — never
-/// a CPU fallback.
+/// and — when `plan` is [`PlanWalk::Verify`] — re-walk the compute
+/// plan. Any failure is a refused load — never a CPU fallback.
+///
+/// The eight parameters are the host's own design law — every
+/// lane-specific fact is a parameter, never a host-side constant — so
+/// the count is accepted here rather than bundled into a struct whose
+/// fields would still be one per fact.
+#[allow(clippy::too_many_arguments)]
 #[allow(deprecated)] // the sync compile API inside compile_cached; the
 // async twin needs a semaphore dance for a one-shot load-time call
 pub fn load_model(
@@ -110,6 +144,7 @@ pub fn load_model(
     cache_env: &str,
     default_cache_subdir: &str,
     missing_remedy: &str,
+    plan: PlanWalk,
 ) -> Result<(LoadedModel, Placement)> {
     verify_dir_digest(
         artifact_dir,
@@ -140,7 +175,12 @@ pub fn load_model(
             },
         )?;
 
-        let placement = verify_compute_plan(&compiled, &config)?;
+        let placement = match plan {
+            PlanWalk::Verify => verify_compute_plan(&compiled, &config)?,
+            // The honest "not measured" verdict — the SKIPPED placement
+            // never reads as a pass (device_ops == 0 fails `passes()`).
+            PlanWalk::Skip => Placement::SKIPPED,
+        };
         Ok((LoadedModel { model }, placement))
     }
 }
@@ -159,9 +199,6 @@ impl LoadedModel {
         out_f16: &mut [u16],
     ) -> Result<()> {
         unsafe {
-            // The arrays borrow the caller's buffers (no-copy init, no-op
-            // deallocator); every borrow lives to the end of this scope,
-            // past the prediction call.
             let mut arrays: Vec<Retained<MLMultiArray>> = Vec::with_capacity(inputs.len());
             let mut names: Vec<Retained<NSString>> = Vec::with_capacity(inputs.len());
             for (name, data, shape) in inputs {
@@ -174,52 +211,94 @@ impl LoadedModel {
                 arrays.push(multi_array_zero_copy(data, shape)?);
                 names.push(NSString::from_str(name));
             }
-            let values: Vec<Retained<AnyObject>> = arrays
-                .iter()
-                .map(|arr| {
-                    let val = MLFeatureValue::featureValueWithMultiArray(arr);
-                    // The provider init erases the value type to AnyObject
-                    // (the ObjC dictionary erasure) — upcast once. `cast`
-                    // is the documented upcast (deprecated name, fine for
-                    // a root upcast; `cast_unchecked` would add unsafe for
-                    // nothing).
-                    #[allow(deprecated)]
-                    Retained::cast::<AnyObject>(val)
-                })
-                .collect();
-            let name_refs: Vec<&NSString> = names.iter().map(|s| &**s).collect();
-            let value_refs: Vec<Retained<AnyObject>> =
-                values.iter().map(Retained::clone).collect();
-            let dict: Retained<NSDictionary<NSString, AnyObject>> =
-                NSDictionary::from_retained_objects(&name_refs, &value_refs);
-            let features = MLDictionaryFeatureProvider::initWithDictionary_error(
-                MLDictionaryFeatureProvider::alloc(),
-                &dict,
-            )
-            .map_err(|e| {
-                Error::msg(format!(
-                    "ane: feature provider failed: {}",
-                    ns_error_string(&e)
-                ))
-            })?;
-            let out = self
-                .model
-                .predictionFromFeatures_error(ProtocolObject::from_ref(&*features))
-                .map_err(|e| {
-                    Error::msg(format!("ane: prediction failed: {}", ns_error_string(&e)))
-                })?;
-            let name = NSString::from_str(output_name);
-            let val = out.featureValueForName(&name).ok_or_else(|| {
-                Error::msg(format!(
-                    "ane: output {output_name:?} missing from the prediction (manifest/ artifact drift?)"
-                ))
-            })?;
-            let arr = val.multiArrayValue().ok_or_else(|| {
-                Error::msg(format!("ane: output {output_name:?} is not a multi-array"))
-            })?;
-            copy_out_f16(&arr, out_f16)?;
-            Ok(())
+            let arr = run_prediction(&self.model, &arrays, &names, output_name)?;
+            copy_out_f16(&arr, out_f16)
         }
+    }
+
+    /// The f32 twin — the clef joint-schema head consumes f32 inputs
+    /// (`states` + the packing arrays) and answers logits in the
+    /// artifact's own output dtype (read dtype-agnostically: Float32
+    /// copies directly, Float16 widens). Same zero-copy borrow law as
+    /// [`predict_f16`]; the input arrays are Float32.
+    pub fn predict_f32(
+        &self,
+        inputs: &[(&str, &[f32], &[usize])],
+        output_name: &str,
+        out_f32: &mut [f32],
+    ) -> Result<()> {
+        unsafe {
+            let mut arrays: Vec<Retained<MLMultiArray>> = Vec::with_capacity(inputs.len());
+            let mut names: Vec<Retained<NSString>> = Vec::with_capacity(inputs.len());
+            for (name, data, shape) in inputs {
+                let expected: usize = shape.iter().product();
+                assert_eq!(
+                    data.len(),
+                    expected,
+                    "input {name:?} buffer must be {shape:?}"
+                );
+                arrays.push(multi_array_zero_copy_f32(data, shape)?);
+                names.push(NSString::from_str(name));
+            }
+            let arr = run_prediction(&self.model, &arrays, &names, output_name)?;
+            copy_out_f32(&arr, out_f32)
+        }
+    }
+}
+
+/// The shared prediction choreography: name-keyed feature provider →
+/// sync prediction → the named output's multi-array (both predict
+/// twins; no objc2 type crosses to a lane).
+unsafe fn run_prediction(
+    model: &Retained<MLModel>,
+    arrays: &[Retained<MLMultiArray>],
+    names: &[Retained<NSString>],
+    output_name: &str,
+) -> Result<Retained<MLMultiArray>> {
+    // SAFETY: plain ObjC message sends over live retained objects; every
+    // borrow (arrays, names) outlives the prediction call.
+    unsafe {
+        let values: Vec<Retained<AnyObject>> = arrays
+            .iter()
+            .map(|arr| {
+                let val = MLFeatureValue::featureValueWithMultiArray(arr);
+                // The provider init erases the value type to AnyObject
+                // (the ObjC dictionary erasure) — upcast once. `cast`
+                // is the documented upcast (deprecated name, fine for
+                // a root upcast; `cast_unchecked` would add unsafe for
+                // nothing).
+                #[allow(deprecated)]
+                Retained::cast::<AnyObject>(val)
+            })
+            .collect();
+        let name_refs: Vec<&NSString> = names.iter().map(|s| &**s).collect();
+        let value_refs: Vec<Retained<AnyObject>> = values.iter().map(Retained::clone).collect();
+        let dict: Retained<NSDictionary<NSString, AnyObject>> =
+            NSDictionary::from_retained_objects(&name_refs, &value_refs);
+        let features = MLDictionaryFeatureProvider::initWithDictionary_error(
+            MLDictionaryFeatureProvider::alloc(),
+            &dict,
+        )
+        .map_err(|e| {
+            Error::msg(format!(
+                "ane: feature provider failed: {}",
+                ns_error_string(&e)
+            ))
+        })?;
+        let out = model
+            .predictionFromFeatures_error(ProtocolObject::from_ref(&*features))
+            .map_err(|e| {
+                Error::msg(format!("ane: prediction failed: {}", ns_error_string(&e)))
+            })?;
+        let name = NSString::from_str(output_name);
+        let val = out.featureValueForName(&name).ok_or_else(|| {
+            Error::msg(format!(
+                "ane: output {output_name:?} missing from the prediction (manifest/ artifact drift?)"
+            ))
+        })?;
+        val.multiArrayValue().ok_or_else(|| {
+            Error::msg(format!("ane: output {output_name:?} is not a multi-array"))
+        })
     }
 }
 
@@ -227,13 +306,35 @@ impl LoadedModel {
 /// buffer must outlive the array — in `predict_f16` all buffers outlive
 /// the prediction call, and the arrays drop first).
 fn multi_array_zero_copy(data: &[u16], shape: &[usize]) -> Result<Retained<MLMultiArray>> {
+    multi_array_zero_copy_typed(
+        NonNull::from(data).cast::<std::ffi::c_void>(),
+        shape,
+        MLMultiArrayDataType::Float16,
+    )
+}
+
+/// The f32 twin of [`multi_array_zero_copy`] (`predict_f32`).
+fn multi_array_zero_copy_f32(data: &[f32], shape: &[usize]) -> Result<Retained<MLMultiArray>> {
+    multi_array_zero_copy_typed(
+        NonNull::from(data).cast::<std::ffi::c_void>(),
+        shape,
+        MLMultiArrayDataType::Float32,
+    )
+}
+
+/// The shared no-copy init (no-op deallocator: ownership stays with the
+/// caller's buffer).
+fn multi_array_zero_copy_typed(
+    ptr: NonNull<std::ffi::c_void>,
+    shape: &[usize],
+    dtype: MLMultiArrayDataType,
+) -> Result<Retained<MLMultiArray>> {
     // No-op deallocator: ownership stays with the caller's buffer; the
     // block signature is Apple's `^(void *bytes) { … }`.
     let dealloc = RcBlock::new(|_bytes: NonNull<std::ffi::c_void>| {});
     let shape_arr = number_array(shape);
     let stride_arr = number_array(&contiguous_strides(shape));
-    let ptr = NonNull::from(data).cast::<std::ffi::c_void>();
-    // SAFETY: `data` covers `shape`'s element count and outlives the
+    // SAFETY: the buffer covers `shape`'s element count and outlives the
     // returned array (predict drops the arrays before the buffers); the
     // deallocator is a no-op so Core ML never frees caller-owned memory.
     unsafe {
@@ -241,7 +342,7 @@ fn multi_array_zero_copy(data: &[u16], shape: &[usize]) -> Result<Retained<MLMul
             MLMultiArray::alloc(),
             ptr,
             &shape_arr,
-            MLMultiArrayDataType::Float16,
+            dtype,
             &stride_arr,
             Some(&dealloc),
         )
@@ -268,8 +369,11 @@ fn contiguous_strides(shape: &[usize]) -> Vec<usize> {
     strides
 }
 
-/// Read the fp16 output via `getBytesWithHandler` (the documented reader —
-/// `dataPointer` is deprecated) into the caller's buffer.
+/// Read the fp16 output into the caller's buffer. Contiguous arrays
+/// take the fast `getBytesWithHandler` memcpy; a logically-strided
+/// array (a transposed/reshaped view) is walked by its own strides —
+/// a flat copy of a strided backing store would be silently wrong
+/// bytes (the Swift reference converts with the same stride walk).
 fn copy_out_f16(arr: &MLMultiArray, out: &mut [u16]) -> Result<()> {
     let expected = out.len();
     let got = unsafe { arr.count() } as usize;
@@ -278,19 +382,153 @@ fn copy_out_f16(arr: &MLMultiArray, out: &mut [u16]) -> Result<()> {
             "ane: output count {got} != expected {expected} — artifact shape drift"
         )));
     }
-    let sink = out.as_mut_ptr();
-    let handler = RcBlock::new(move |bytes: NonNull<std::ffi::c_void>, size: isize| {
-        let src = bytes.as_ptr() as *const u16;
-        let n = (size as usize) / 2;
-        // SAFETY: `sink` points at `expected` elements, live across this
-        // call; Core ML hands us the array's own buffer.
-        unsafe { std::ptr::copy_nonoverlapping(src, sink, n.min(expected)) };
-    });
-    // SAFETY: the handler only reads the array's buffer into `out`.
-    unsafe {
-        arr.getBytesWithHandler(&handler);
+    if array_is_contiguous(arr) {
+        let sink = out.as_mut_ptr();
+        let handler = RcBlock::new(move |bytes: NonNull<std::ffi::c_void>, size: isize| {
+            let src = bytes.as_ptr() as *const u16;
+            let n = (size as usize) / 2;
+            // SAFETY: `sink` points at `expected` elements, live across this
+            // call; Core ML hands us the array's own buffer.
+            unsafe { std::ptr::copy_nonoverlapping(src, sink, n.min(expected)) };
+        });
+        // SAFETY: the handler only reads the array's buffer into `out`.
+        unsafe {
+            arr.getBytesWithHandler(&handler);
+        }
+        return Ok(());
+    }
+    // Strided walk (rare; correctness over speed on this path).
+    let (shape, strides) = shape_and_strides(arr);
+    for (flat, index) in multi_indices(&shape).into_iter().enumerate() {
+        let logical: usize = index
+            .iter()
+            .zip(&strides)
+            .map(|(i, s)| i * s)
+            .sum();
+        // SAFETY: in-bounds subscript over the array's own elements.
+        out[flat] = unsafe { element_f16(arr, logical) };
     }
     Ok(())
+}
+
+/// The f32 output reader — dtype-agnostic (the head artifact's logits
+/// dtype is whatever the export chose): Float32 copies directly,
+/// Float16 widens (same stride law as [`copy_out_f16`]).
+fn copy_out_f32(arr: &MLMultiArray, out: &mut [f32]) -> Result<()> {
+    let expected = out.len();
+    let got = unsafe { arr.count() } as usize;
+    if got != expected {
+        return Err(Error::msg(format!(
+            "ane: output count {got} != expected {expected} — artifact shape drift"
+        )));
+    }
+    let dtype = unsafe { arr.dataType() };
+    let contiguous = array_is_contiguous(arr);
+    if contiguous && dtype == MLMultiArrayDataType::Float32 {
+        let sink = out.as_mut_ptr();
+        let handler = RcBlock::new(move |bytes: NonNull<std::ffi::c_void>, size: isize| {
+            let src = bytes.as_ptr() as *const f32;
+            let n = (size as usize) / 4;
+            // SAFETY: `sink` points at `expected` elements, live across this
+            // call; Core ML hands us the array's own buffer.
+            unsafe { std::ptr::copy_nonoverlapping(src, sink, n.min(expected)) };
+        });
+        // SAFETY: the handler only reads the array's buffer into `out`.
+        unsafe {
+            arr.getBytesWithHandler(&handler);
+        }
+        return Ok(());
+    }
+    let (shape, strides) = shape_and_strides(arr);
+    for (flat, index) in multi_indices(&shape).into_iter().enumerate() {
+        let logical: usize = index.iter().zip(&strides).map(|(i, s)| i * s).sum();
+        out[flat] = match dtype {
+            MLMultiArrayDataType::Float32 => unsafe { element_f32(arr, logical) },
+            MLMultiArrayDataType::Float16 => f16_widen(unsafe { element_f16(arr, logical) }),
+            other => {
+                return Err(Error::msg(format!(
+                    "ane: output dtype {other:?} unsupported — artifact drift"
+                )))
+            }
+        };
+    }
+    Ok(())
+}
+
+/// Whether the array's strides are the C-contiguous row-major layout.
+fn array_is_contiguous(arr: &MLMultiArray) -> bool {
+    let (shape, strides) = shape_and_strides(arr);
+    strides == contiguous_strides(&shape)
+}
+
+fn shape_and_strides(arr: &MLMultiArray) -> (Vec<usize>, Vec<usize>) {
+    unsafe {
+        let shape: Vec<usize> = arr.shape().to_vec().iter().map(|n| n.as_usize()).collect();
+        let strides: Vec<usize> = arr
+            .strides()
+            .to_vec()
+            .iter()
+            .map(|n| n.as_usize())
+            .collect();
+        (shape, strides)
+    }
+}
+
+/// All multi-dimensional indices over `shape`, row-major order.
+fn multi_indices(shape: &[usize]) -> Vec<Vec<usize>> {
+    let total: usize = shape.iter().product();
+    let mut indices = Vec::with_capacity(total);
+    let mut current = vec![0usize; shape.len()];
+    for _ in 0..total {
+        indices.push(current.clone());
+        // increment the last dim, carry upwards
+        for d in (0..shape.len()).rev() {
+            current[d] += 1;
+            if current[d] < shape[d] {
+                break;
+            }
+            current[d] = 0;
+        }
+    }
+    indices
+}
+
+unsafe fn element_f16(arr: &MLMultiArray, index: usize) -> u16 {
+    let number = unsafe { arr.objectAtIndexedSubscript(index as isize) };
+    number.as_u16()
+}
+
+unsafe fn element_f32(arr: &MLMultiArray, index: usize) -> f32 {
+    let number = unsafe { arr.objectAtIndexedSubscript(index as isize) };
+    number.as_f32()
+}
+
+/// IEEE-754 binary16 → f32 widening (bit math; the `half` crate stays
+/// out of the host's dep tree).
+fn f16_widen(bits: u16) -> f32 {
+    let sign = u32::from(bits & 0x8000) << 16;
+    let exponent = (bits >> 10) & 0x1f;
+    let mantissa = u32::from(bits & 0x03ff);
+    let bits32 = match exponent {
+        0 => {
+            if mantissa == 0 {
+                sign // ±0
+            } else {
+                // subnormal: normalize
+                let mut e: u32 = 127 - 15 + 1;
+                let mut m = mantissa;
+                while m & 0x0400 == 0 {
+                    m <<= 1;
+                    e -= 1;
+                }
+                m &= 0x03ff;
+                sign | ((e - 1) << 23) | (m << 13)
+            }
+        }
+        0x1f => sign | 0x7f80_0000 | (mantissa << 13), // inf / nan
+        e => sign | ((u32::from(e) + 127 - 15) << 23) | (mantissa << 13),
+    };
+    f32::from_bits(bits32)
 }
 
 /// The conversion gate, re-measured at load: walk the ML Program structure of
@@ -333,7 +571,13 @@ pub(crate) fn verify_compute_plan(
     let structure = unsafe { plan.modelStructure() };
     let program = unsafe { structure.program() }
         .ok_or_else(|| Error::msg("ane: model structure is not an ML Program"))?;
-    let ops = program_operations(&program)?;
+    // Multi-function packages carry one function per name (the clef
+    // `L{bucket}` shape) and NO `main`; walk the function the config
+    // selects, falling back to `main` (the single-function posture).
+    let function_name = unsafe { config.functionName() }
+        .map(|n| n.to_string())
+        .unwrap_or_else(|| "main".to_string());
+    let ops = program_operations(&program, &function_name)?;
 
     let mut placement = Placement {
         device_ops: 0,
@@ -375,16 +619,18 @@ pub(crate) fn verify_compute_plan(
     Ok(placement)
 }
 
-/// `program.functions["main"].block.operations` — the main function's op
-/// list in program order.
+/// `program.functions[name].block.operations` — the selected function's
+/// op list in program order (multi-function packages name their
+/// functions `L{bucket}`; single-function packages keep `main`).
 fn program_operations(
     program: &MLModelStructureProgram,
+    function_name: &str,
 ) -> Result<Vec<Retained<objc2_core_ml::MLModelStructureProgramOperation>>> {
-    let main = NSString::from_str("main");
+    let main = NSString::from_str(function_name);
     let functions = unsafe { program.functions() };
-    let func = functions
-        .objectForKey(&main)
-        .ok_or_else(|| Error::msg("ane: program has no `main` function"))?;
+    let func = functions.objectForKey(&main).ok_or_else(|| {
+        Error::msg(format!("ane: program has no `{function_name}` function"))
+    })?;
     let block = unsafe { func.block() };
     let ops = unsafe { block.operations() };
     Ok(ops.to_vec())

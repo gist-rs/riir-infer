@@ -423,6 +423,7 @@ impl AneRuntime {
             CACHE_ENV,
             CACHE_SUBDIR,
             MISSING_REMEDY,
+            ane_host::PlanWalk::Verify,
         )
         .map_err(|e| LayaError::Runtime(e.to_string()))?;
         if !placement.passes() {

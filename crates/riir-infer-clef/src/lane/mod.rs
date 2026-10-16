@@ -61,6 +61,7 @@ pub mod host;
 pub mod loaders;
 pub mod py_json;
 pub mod record;
+pub mod runtime;
 
 #[cfg(test)]
 pub(crate) mod test_support;
@@ -77,3 +78,4 @@ pub use py_json::{dump, python_float, render};
 pub use record::{
     SYSTEM_PROMPT, ClefEncodedQuestion, ClefEncodedRecord, ClefQuestion, RecordError, encode,
 };
+pub use runtime::{ClefError, ClefText, compute_units_from_env};
