@@ -98,6 +98,67 @@ stack's CpuOnly planner on THIS package family.
    reference floor; the ANE + GPU rows stand as our measurements (fresh re-validation today:
    see the differential table above).
 
+## Evidence addendum (2026-10-17 ~10:2x +07, remedy-1 falsifier lane — the kill site CORRECTED: it is the HEAD, not the Decoder)
+
+Ran remedies 1 + 2's falsifier ladder on this box (throwaway rig in `.raw/clef048_falsifier/`,
+never committed; coremltools 9.0 in a uv venv + a Swift harness + a step-printing objc2 probe
+example). Every cell, one BALLOON cell each (jetsam confirmed in the kernel log each time):
+
+| # | form | host | functionName | posture | result |
+|---|---|---|---|---|---|
+| 1 | source Decoder.mlpackage (multi-fn) | Python/coremltools | none | CpuOnly | LOAD OK 6.87 s |
+| 2 | derived **Decoder.L256** single-fn package | Python | none | CpuOnly | LOAD OK 2.65 s + PREDICT 0.16 s |
+| 3 | source Decoder.mlpackage (multi-fn) | Python | L256 | CpuOnly | LOAD OK 7.27 s |
+| 4 | native `compileModelAtURL` product of the Decoder | Swift | L256 | CpuOnly | LOAD OK 4.71 s + PREDICT 0.14 s |
+| 5 | the live cache bundle `mlmodelc-1d66…` (what the kills loaded) | Swift | L256 | CpuOnly | LOAD OK 4.76 s + PREDICT 0.14 s |
+| 6 | the same cache bundle | **Rust/objc2 probe** | L256 | CpuOnly | LOAD OK 4.94 s (clean) |
+| 7 | **Head cache bundle `mlmodelc-72ed…`** | **Rust/objc2 probe** | L256 | CpuOnly | **BALLOON → jetsam SIGKILL 202,249 MB (kernel log, 10:09:55)** |
+| 8 | the same head bundle | Swift | L256 | CpuOnly | BALLOON (killed under the 5-min wall, load never returned) |
+| 9 | derived **Head.L256** single-fn package (compileModelAtURL product) | Rust/objc2 probe | L256 | CpuOnly | **BALLOON → jetsam SIGKILL 202,363 MB (10:21:56)** |
+| 10 | a fresh full native example run (`clef_text_timing -- cpu`) | Rust | L256 | CpuOnly | BALLOON → SIGKILL 202,183 MB (10:04:43) — reproducibility re-confirmed same-day |
+
+**Findings:**
+
+- **The kill site is the HEAD model load, not the Decoder.** Every native cpu run dies on the
+  second load (`Head.mlpackage`) — the decoder loads fine first (cells 1–6). The issue's
+  original "kill site = Decoder.mlpackage load" premise was an inference from load order, not
+  a measurement (the lane prints nothing between the two loads; the banner only prints after
+  both). The ~90 s window is the balloon's allocation storm, not the load itself (a healthy
+  head load is sub-second: the ane posture loads decoder+head in 1.74 s total).
+- **The balloon is language-host-independent**: Rust/objc2 AND Swift both balloon on the head
+  (cells 7/8) — the earlier Swift-vs-Rust differential existed only because every early cell
+  loaded the DECODER.
+- **Remedy 3 (per-bucket derivative tree) is DEAD for the head**: a derived single-function
+  `Head.L256.mlpackage` balloons identically (cell 9, 202,363 MB). The trigger is the head
+  GRAPH under the CpuOnly planner, not the multi-function layout — so a derivative fork would
+  not even buy the cpu row, and the trust-boundary change is moot. (The decoder's derivative
+  works, cells 2/6 — but the decoder never needed it.)
+- The head graph: 4 functions (L256–L2048), 709 ops each (22 layer_norm, 61 linear, 31 matmul,
+  10 softmax, 391 const; CoreML8 block specializations; io e.g. `states [256,1024] fp16 →
+  logits [96]`). Nothing in the shapes suggests a 202 GB footprint — planner defect, full stop.
+- objc2-core-ml 0.3.2's `MLComputeUnits::CPUOnly = Self(0)` matches Swift's
+  `.cpuOnly.rawValue = 0` byte-for-byte (checked both) — the host's config plumbing is NOT a
+  suspect; cells 6+7 share it and diverge only on the bundle.
+
+**Remedy consequences (the owner call this addendum sets up):**
+
+- **Option A (the unblock, no trust change): the SPLIT-posture cpu row.** The timing example
+  already times decode and head as separate legs over separate `MLModel`s; the DECODER loads
+  and predicts fine CpuOnly (cells 4/5/6 + the 0.14–0.16 s L256 predict = the decode leg is
+  honestly measurable cpu). Load the head in its working `CpuAndNe` posture even on the cpu
+  row, report `decode` as the cpu-leg number and `head/total` labeled mixed
+  (head-cpu = NOT-MEASURABLE-HERE; their 200 ms @512 external floor stays the head reference).
+- **Option B (remedy 5 as written): close the whole cpu row NOT-MEASURABLE-HERE.**
+- Remedy 3 is off the table (above); remedy 2's OS-update watch stays armed (the 27-series
+  Apple bug cluster may fix the head graph's planner path).
+- Remedy 4 (upstream report) is now DRAFTABLE with a sharp signature: "Head.mlpackage
+  (0.6B clef-text student's classification head, fp16, multi-function ML Program, CoreML8
+  blocks) → MLModel load with `.cpuOnly` allocates ~202 GB and is jetsam-killed on macOS
+  26.6.2 (25G83); same package loads fine under `.cpuAndNeuralEngine`/`.cpuAndGPU`; a
+  single-function derivative of the same graph balloons identically; the sibling decoder
+  package (same authoring, same layout) loads fine CpuOnly." Filing is an owner act (public
+  post under the owner's identity).
+
 ## Non-goals
 
 - No retry-on-a-quieter-box posture: the footprint math (190 GB vs 73 GB RAM+swap) closes that
