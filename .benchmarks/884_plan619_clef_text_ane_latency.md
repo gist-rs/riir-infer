@@ -38,7 +38,27 @@ Whole-pipeline `answer()` (short record → L256): 38.6 ms p50.
 
 ### CPU (`cpuOnly`)
 
-**PENDING — blocked by box memory pressure, resume command below.** Four attempts on 2026-10-17 03:1x–03:5x (+07) were **jetsam-killed (SIGKILL, exit 137)** by macOS memory pressure: two full-bucket runs (≈2m42s in, during the CPU-plan compile/load phase — the `CLEF-TIMING` banner never printed), one `--buckets 256,512` run, and one `--buckets 256`-alone run — the box sat at swap 9.9–13.2 GB under sibling-session load bursts (the preflight oscillated PASS at load 3.4–5.0 and REFUSE at 21–36 within minutes). The example now takes `--buckets <csv>` (one process per subset) precisely to shrink the footprint; even one bucket pair died, so the blocker is the box, not the instrument. Their published CPU-only decoder@512 is 200 ms (M5 Pro) — nobody serves this lane on CPU; the row is the reference floor. (Build pre-staged 2026-10-17 ~08:2x +07: the release example compiled cargo-fingerprint-fresh in the repo target dir while the box carried zero sibling cargo — the compile half of the earlier jetsam kills is paid; the load-phase allocation at resume remains the risk the swap bar guards.) **Resume on a quiet box (swap < 5 GB, preflight PASS):**
+**BLOCKED BY A REAL DEFECT — issue 048, NOT box pressure.** The 2026-10-17 03:1x–03:5x jetsam
+kills (four attempts, exit 137, ~2m42s in, during the load phase) and two more the same morning
+(08:52 + 08:55) are ONE unconditional defect: the **CpuOnly** load of the multi-function
+Decoder.mlpackage balloons the process to **~192–194 GB** (kernel `memorystatus:
+killing largest compressed process clef_text_timing … 192577/194688 MB`) — vs 64 GB RAM +
+9 GB swap; no box state can satisfy it. Reproduced on a QUIET box (load 7.4, 0 rustc/cargo,
+31 GB free RAM). The earlier "box memory pressure" diagnosis on this line is REFUTED; the
+swap gate below guarded against a threat that was never the blocker.
+
+**Posture differential (2026-10-17 ~09:0x +07, same box, same cached compile):** `ane` loads
+1.74 s → ROW 32.39/3.00/35.39/35.90 ms @L256 (matches the published row — bonus re-validation);
+`gpu` loads 3.11 s → ROW 35.70/4.25/39.95/39.98 ms @L256; `cpu` jetsam-killed at ~192 GB.
+The compile cache is posture-independent, so the explosion is Core ML's CPU-planner
+specialization at MLModel load. Full evidence + remedies (per-bucket package split first):
+`.issues/048_clef_cpuonly_load_balloons_192gb.md`.
+
+Their published CPU-only decoder@512 is 200 ms (M5 Pro) — nobody serves this lane on CPU; the
+row is the reference floor. It stays PENDING until issue 048's remedies run their course
+(falsifier → per-bucket split → upstream → NOT-MEASURABLE-HERE close with the external
+reference). The resume commands below apply ONLY to a post-split tree (a per-bucket
+`Decoder.L<bucket>.mlpackage` layout or whatever issue 048 lands):
 
 ```sh
 cargo run --release -p riir-infer-clef --features clef-ane --example clef_text_timing -- cpu --reps 10 --buckets 256,512
