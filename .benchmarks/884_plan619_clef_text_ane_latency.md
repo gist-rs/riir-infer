@@ -40,8 +40,8 @@ Whole-pipeline `answer()` (short record → L256): 38.6 ms p50.
 
 **BLOCKED BY A REAL DEFECT — issue 048, NOT box pressure.** The 2026-10-17 03:1x–03:5x jetsam
 kills (four attempts, exit 137, ~2m42s in, during the load phase) and two more the same morning
-(08:52 + 08:55) are ONE unconditional defect: the **CpuOnly** load of the multi-function
-Decoder.mlpackage balloons the process to **~193–204 GB** (kernel `memorystatus:
+(08:52 + 08:55) are ONE unconditional defect: the **CpuOnly** load balloons the process to
+**~193–204 GB** (kernel `memorystatus:
 killing largest compressed process clef_text_timing …` — 14 kills in 24 h: the four overnight
 03:xx at 197.7–204.2 GB, the two 08:5x at 192.6/194.7 GB) — vs 64 GB RAM + 9 GB swap; no box
 state can satisfy it. Reproduced on a QUIET box (load 7.4, 0 rustc/cargo, 31 GB free RAM). The
@@ -53,21 +53,27 @@ against a threat that was never the blocker. (The four 03:xx kills were recorded
 1.74 s → ROW 32.39/3.00/35.39/35.90 ms @L256 (matches the published row — bonus re-validation);
 `gpu` loads 3.11 s → ROW 35.70/4.25/39.95/39.98 ms @L256; `cpu` jetsam-killed at ~192 GB.
 The compile cache is posture-independent, so the explosion is Core ML's CPU-planner
-specialization at MLModel load. Full evidence + remedies (per-bucket package split first):
-`.issues/048_clef_cpuonly_load_balloons_192gb.md`.
+specialization at MLModel load. Full evidence + remedies: `.issues/048_clef_cpuonly_load_balloons_192gb.md`.
 
-Their published CPU-only decoder@512 is 200 ms (M5 Pro) — nobody serves this lane on CPU; the
-row is the reference floor. It stays PENDING until issue 048's remedies run their course
-(falsifier → per-bucket split → upstream → NOT-MEASURABLE-HERE close with the external
-reference). The resume commands below apply ONLY to a post-split tree (a per-bucket
-`Decoder.L<bucket>.mlpackage` layout or whatever issue 048 lands):
+**Kill site CORRECTED (2026-10-17 ~10:2x, the 048 falsifier ladder):** it is the **HEAD**
+load, not the Decoder — the decoder loads + predicts fine CpuOnly in every host (Rust probe
+4.94 s; Python 2.65–7.27 s; Swift 4.71 s), and the balloon reproduces on the head in BOTH
+Rust and Swift (202,249 / killed-under-wall), including on a derived single-function
+`Head.L256` package (202,363 MB — so the per-bucket split remedy is DEAD for the head; the
+differential table above inherited the wrong kill site from load order, never a measurement).
+The standing unblock option is the SPLIT-posture cpu row (decoder CpuOnly + head CpuAndNE,
+the decode leg reported as the honest cpu number) vs closing the row NOT-MEASURABLE-HERE —
+owner call on the issue.
+
+The resume commands still apply to whatever posture the owner picks (the plain cpu row, or
+the split posture with the head leg labeled):
 
 ```sh
 cargo run --release -p riir-infer-clef --features clef-ane --example clef_text_timing -- cpu --reps 10 --buckets 256,512
 cargo run --release -p riir-infer-clef --features clef-ane --example clef_text_timing -- cpu --reps 10 --buckets 1024,2048
 ```
 
-…then paste the ROWs into this section and flip the status line.
+…then paste the ROWs into the published-rows section and flip the status line.
 
 ## Their published rows beside ours — M5 Pro (the chip difference is DISCLOSED, never pooled)
 
@@ -80,7 +86,7 @@ From the HF card / Research 012 §Perf (their benchmark, their hardware):
 | ANE decoder+head @L1024 | 196 ms | 242.8 ms | 1.24× |
 | ANE decoder+head @L2048 | 591 ms | 746.6 ms | 1.26× |
 | GPU decoder @L512 | 35 ms | 68.5 ms | 1.96× (see the load caveat) |
-| CPU-only decoder @L512 | 200 ms | pending (box memory pressure) | — |
+| CPU-only decoder @L512 | 200 ms | pending (head load balloons under CpuOnly — issue 048; decode leg measurable, posture call pending) | — |
 
 - The ANE ratio is **consistent ~1.21–1.26× across all four buckets** — a clean chip-generation story (M5 Pro's newer ANE), not a host overhead smell (which would NOT be bucket-flat; our host adds the gather + packing + softmax legs their manager also pays — the parity gate proves the math is identical, so the delta is the silicon).
 - The GPU cell carries a load caveat: ours was taken at load 7.64 with GPU-contention risk (Unity/Zed exempt by owner rule, but sibling GPU jobs were not exclusivity-checked for this posture). The ANE posture is the serving posture and is the number this lane quotes; the GPU row is context.
