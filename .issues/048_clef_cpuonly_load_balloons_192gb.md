@@ -1,6 +1,7 @@
 # Issue 048 — clef CpuOnly posture balloons to ~192 GB at model load (jetsam SIGKILL): the plan-619 T2.3 cpu-row blocker is a Core ML planner defect, not box pressure
 
 **Status:** OPEN — filed 2026-10-17 ~09:0x +07 (M3 idle lane; the T2.3 blocker re-diagnosed with kernel-log evidence; bench 884 §CPU's box-pressure diagnosis REFUTED)
+**Claimed:** zed-m3-idle-1017a, 1792220000, expires 2026-10-19T10:00:00+00:00 — remedy 1 (the single-function falsifier via coremltools in `.raw/`, throwaway) + remedy 4 prep (upstream report draft); remedies 3/5 stay owner-gated
 
 ## The defect
 
