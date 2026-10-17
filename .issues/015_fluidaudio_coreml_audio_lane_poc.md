@@ -1,6 +1,7 @@
 # Issue 015: FluidAudio/CoreML audio lane PoC — load FluidInference's published models from Rust
 
 **Status:** OPEN — DEFERRED 2026-09-28 (owner directive: audio until **M5 Ultra** is available). T0 boundary stays landed; T1–T6 below deferred with the recon recorded so the pickup is turnkey.
+**UNBLOCK CONDITION MET (recorded 2026-10-17):** M5 Ultra SHIPPED — Mac Studio M5 Ultra announced 2026-08-25, on sale 2026-09-22 (up to 256 GB unified memory, from $5,499). The hardware exists; the pickup is now an owner purchase/decision, not a waiting act. riir-auth `.issues/005` (the voiceprint PoC) unblocks downstream of this lane's T1.
 **Date:** 2026-09-26
 **Filed from:** [`.research/001_FluidInference_OnDevice_Audio_Stack.md`](../.research/001_FluidInference_OnDevice_Audio_Stack.md) (F1)
 **Sources:** FluidAudio `@ 762baf6733ca0f0dbeb1ce335363fc75066bd2c9` (Apache-2.0) ·
