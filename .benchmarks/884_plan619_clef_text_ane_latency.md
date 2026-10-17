@@ -41,11 +41,13 @@ Whole-pipeline `answer()` (short record → L256): 38.6 ms p50.
 **BLOCKED BY A REAL DEFECT — issue 048, NOT box pressure.** The 2026-10-17 03:1x–03:5x jetsam
 kills (four attempts, exit 137, ~2m42s in, during the load phase) and two more the same morning
 (08:52 + 08:55) are ONE unconditional defect: the **CpuOnly** load of the multi-function
-Decoder.mlpackage balloons the process to **~192–194 GB** (kernel `memorystatus:
-killing largest compressed process clef_text_timing … 192577/194688 MB`) — vs 64 GB RAM +
-9 GB swap; no box state can satisfy it. Reproduced on a QUIET box (load 7.4, 0 rustc/cargo,
-31 GB free RAM). The earlier "box memory pressure" diagnosis on this line is REFUTED; the
-swap gate below guarded against a threat that was never the blocker.
+Decoder.mlpackage balloons the process to **~193–204 GB** (kernel `memorystatus:
+killing largest compressed process clef_text_timing …` — 14 kills in 24 h: the four overnight
+03:xx at 197.7–204.2 GB, the two 08:5x at 192.6/194.7 GB) — vs 64 GB RAM + 9 GB swap; no box
+state can satisfy it. Reproduced on a QUIET box (load 7.4, 0 rustc/cargo, 31 GB free RAM). The
+earlier "box memory pressure" diagnosis on this line is REFUTED; the swap gate below guarded
+against a threat that was never the blocker. (The four 03:xx kills were recorded then as
+"≈2m42s in" and attributed to sibling load bursts — same defect, wrong attribution.)
 
 **Posture differential (2026-10-17 ~09:0x +07, same box, same cached compile):** `ane` loads
 1.74 s → ROW 32.39/3.00/35.39/35.90 ms @L256 (matches the published row — bonus re-validation);

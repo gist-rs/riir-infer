@@ -10,8 +10,10 @@ of **~192–194 GB** (kernel `memorystatus` evidence below). The box has 64 GB R
 box state can satisfy a 190 GB load-time footprint. The kill is **unconditional**, reproducible
 on a quiet box (load 7.4, 0 rustc/cargo, 31 GB free RAM at the 08:5x attempts).
 
-Kernel log (both of today's attempts; the four 2026-10-17 03:1x–03:5x attempts recorded in
-`.benchmarks/884_plan619_clef_text_ane_latency.md` §CPU are the same defect, misattributed):
+Kernel log (24-h census, `log show` predicate `killing largest compressed process clef_text_timing`):
+**14 jetsam kills, footprints 192,577–204,183 MB** — the four overnight 03:xx attempts
+(197.7–204.2 GB), today's 08:52/08:55 pair (192.6/194.7 GB), and eight more earlier kills the
+overnight record never counted. Same defect every time:
 
 ```
 08:52:14 kernel: memorystatus: killing largest compressed process clef_text_timing [84104] 192577 MB
