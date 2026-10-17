@@ -59,15 +59,29 @@ cargo run --release -p riir-infer-clef --features clef-ane --example clef_text_t
 
 ## Remedies (in cost order)
 
-1. **Single-function falsifier** — reconvert ONE bucket (e.g. L256 decoder) into its own
-   single-function `.mlpackage` (coremltools, the tree's original Python build lane) and load it
-   CpuOnly. If it loads, the multi-function package is the trigger and a per-bucket split is the
-   fix; if it still balloons, the CPU planner chokes on the ANE-shaped graph itself.
-2. **Per-bucket package split** as the standing remedy: ship `Decoder.L<bucket>.mlpackage` per
-   bucket (smaller packages, posture-independent win: the GB-scale PlanWalk::Skip workaround
-   likely retires too). Wire cost: the loaders' per-function path already keys on `functionName`.
-3. **Upstream Core ML feedback** with the kernel-log lines + the posture differential.
-4. If 1–3 all fail: close the cpu row **NOT-MEASURABLE-HERE** honestly — their published
+Context correction (2026-10-17 ~09:2x): the artifact tree is **FluidInference's own published
+coreml packages** (`FluidInference/clef-text-0.6b-coreml` @ `3c61a609…`, sha256-pinned at
+T0.2/T1.2) — NOT our conversion. There is no in-house conversion lane to fix; the Swift
+reference runtime (FluidUse `ClefTextManager`, the T2.1 capture) loads these same packages fine
+under `cpuAndNeuralEngine`, and their published CPU row (200 ms @512, M5 Pro) implies a working
+`.cpuOnly` load on their stack (newer Core ML, or an M5-specific planner). The defect is OUR
+stack's CpuOnly planner on THIS package family.
+
+1. **Single-function falsifier** — derive ONE single-function package (e.g. the L256 decoder
+   function) via `coremltools` (a THROWAWAY derivative in `.raw/`, never committed, never a
+   sha256-pin replacement) and load it CpuOnly. If it loads, the multi-function layout is the
+   trigger; if it still balloons, the CPU planner chokes on the ANE-shaped graph itself.
+2. **Version probe (cheapest, do FIRST)** — `xcrun coremlcompiler version` / macOS
+   `(CoreML.framework)` build against the log; check FluidAudio/FluidUse issues + Apple release
+   notes for a known CpuOnly multi-function regression. If a newer macOS/Core ML fixes it, the
+   remedy is an OS update, not a fork.
+3. **Per-bucket derivative tree** as the standing remedy IF (2) is dry: fork the packages into
+   `Decoder.L<bucket>.mlpackage` derivatives (a deliberate trust-boundary change: our own
+   sha256 pins would have to move onto the DERIVED tree with the provenance recorded — an
+   owner-visible decision, the upstream-trust law at stake).
+4. **Upstream report** — FluidAudio/FluidUse issue + Apple Feedback with the kernel-log lines
+   and the posture differential.
+5. If 1–4 all fail: close the cpu row **NOT-MEASURABLE-HERE** honestly — their published
    CPU-only decoder@512 = 200 ms (M5 Pro, HF card / Research 012 §Perf) stays the external
    reference floor; the ANE + GPU rows stand as our measurements (fresh re-validation today:
    see the differential table above).
@@ -76,5 +90,6 @@ cargo run --release -p riir-infer-clef --features clef-ane --example clef_text_t
 
 - No retry-on-a-quieter-box posture: the footprint math (190 GB vs 73 GB RAM+swap) closes that
   door by construction.
-- No Python dependency added to the lane: the reconversion rides the existing Python build lane
-  that produced the artifact tree (measurement/conversion-lane subprocess oracle per repo law).
+- No committed derivative packages: any coremltools reconversion is a THROWAWAY in `.raw/`
+  (the §0.5 law); promoting a derived tree over the sha256-pinned upstream one is remedy-3, an
+  owner-visible trust-boundary change, never a side effect of debugging.
