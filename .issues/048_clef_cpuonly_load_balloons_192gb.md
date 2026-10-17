@@ -76,7 +76,16 @@ stack's CpuOnly planner on THIS package family.
 2. **Version probe (cheapest, do FIRST)** — `xcrun coremlcompiler version` / macOS
    `(CoreML.framework)` build against the log; check FluidAudio/FluidUse issues + Apple release
    notes for a known CpuOnly multi-function regression. If a newer macOS/Core ML fixes it, the
-   remedy is an OS update, not a fork.
+   remedy is an OS update, not a fork. Probe result (2026-10-17): macOS 26.6.2 (25G83),
+   `coremlcompiler` 3600.25.1. External context (Apple Developer Forums, Core ML tag, searched
+   same day): a **cluster of multi-function ML Program + load-time-memory regressions across
+   the 27 series** — "macOS 27.0 multifunction ML Program recognized but fails to load" (the
+   multi-function loading path actively regressing), "iOS 27 ML Program pipeline allocates
+   ~2.8 GB at load" (load-time memory explosion; there `.cpuOnly` was the only working posture
+   — the inverse of ours), "Core ML memory dramatically higher with Xcode 27 builds" (NE
+   residency accounting). None is our exact signature (CpuOnly planner balloon on an ANE-first
+   multi-function transformer), but the path we hit sits in an active Apple bug cluster — an
+   OS-update remedy is plausible and the upstream report (4) lands in a receptive window.
 3. **Per-bucket derivative tree** as the standing remedy IF (2) is dry: fork the packages into
    `Decoder.L<bucket>.mlpackage` derivatives (a deliberate trust-boundary change: our own
    sha256 pins would have to move onto the DERIVED tree with the provenance recorded — an
