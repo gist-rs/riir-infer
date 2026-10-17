@@ -54,6 +54,15 @@
 //! the grid + verdict from the shards' `B929_OUT` rows, ordered by global
 //! query index — the bootstrap is seed-fixed, so a merge of a full
 //! partition prints exactly what the unsharded run would.
+//!
+//! Scoring (think-aware, the full-run protocol's prerequisite): generation
+//! stops at `<|im_end|>` (past it is post-answer noise), and the `contains`
+//! correctness check reads only the ANSWER window — the tokens after the
+//! LAST `</think>`, cut back at a `<think>` re-open. A gold-fact quotation
+//! mid-doubt is not an answer, and a generation that opened `<think>` and
+//! never closed it scores nothing. Per-query `B929_OUT` rows carry both the
+//! raw and the scored text (`gen` / `gen_scored`) plus `stopped_im_end` +
+//! `n_gen_tokens`, so a re-report never guesses which surface was scored.
 
 use anyhow::{Context, Result};
 use katgpt_core::loop_alignment_probe::{
@@ -92,6 +101,32 @@ fn env_or(name: &str, default: usize) -> usize {
         .ok()
         .and_then(|v| v.parse().ok())
         .unwrap_or(default)
+}
+
+/// The scored answer window of a greedy generation: the tokens after the
+/// LAST `</think>`, cut back at a `<think>` re-open inside that tail. A
+/// generation that opened `<think>` and never closed it scores nothing (an
+/// answer that never landed is not an answer); a generation with no markers
+/// at all scores whole (the legacy short-budget posture). When `</think>`
+/// is not resolvable as a single vocab id the raw generation is the scored
+/// surface (the fallback the header line discloses).
+fn scored_tail(
+    generated: &[usize],
+    think_open_id: Option<usize>,
+    think_close_id: Option<usize>,
+) -> &[usize] {
+    let Some(close_id) = think_close_id else {
+        return generated;
+    };
+    let tail_start = generated
+        .iter()
+        .rposition(|&t| t == close_id)
+        .map_or(0, |p| p + 1);
+    let rest = &generated[tail_start..];
+    let tail_end = think_open_id
+        .and_then(|open_id| rest.iter().position(|&t| t == open_id))
+        .map_or(rest.len(), |p| tail_start + p);
+    &generated[tail_start..tail_end]
 }
 
 /// One probe row at one loop of one query.
@@ -182,6 +217,12 @@ fn run() -> Result<()> {
         tokenizer,
         untied,
     };
+    // Think-aware scoring ids (None = the marker is not a single vocab
+    // entry on this checkpoint — scoring then falls back to the raw
+    // generation, disclosed in the header line).
+    let im_end_id = loaded.tokenizer.token_to_id("<|im_end|>");
+    let think_open_id = loaded.tokenizer.token_to_id("<think>");
+    let think_close_id = loaded.tokenizer.token_to_id("</think>");
 
     // ── Fixture (paper §2 shape, deterministic; env-scale knobs) ──────────
     // B929_PHRASE=standard: the standard-semantics fact template (A/B knob;
@@ -266,6 +307,9 @@ fn run() -> Result<()> {
     // Per-query generated text (query order preserved) for the B929_OUT
     // per-query rows — paired A/B analysis reads these.
     let mut gens: Vec<String> = Vec::with_capacity(queries.len());
+    let mut gens_scored: Vec<String> = Vec::with_capacity(queries.len());
+    let mut stopped: Vec<bool> = Vec::with_capacity(queries.len());
+    let mut gen_lens: Vec<usize> = Vec::with_capacity(queries.len());
 
     for (qi, q) in queries.iter().enumerate() {
         // Fresh cache + scratch per query: the GDN recurrent state and the KV
@@ -369,8 +413,11 @@ fn run() -> Result<()> {
         let mut current = probed_first;
 
         // Greedy continuation from the loop-refined readout, stock forward
-        // per token (the loop intervention was answer-position only).
+        // per token (the loop intervention was answer-position only). The
+        // chat turn's end token stops generation — past it is post-answer
+        // noise; ANSWER_TOKENS is an upper bound, not a fixed spend.
         let mut generated: Vec<usize> = Vec::with_capacity(answer_tokens);
+        let mut stopped_im_end = false;
         for i in 0..answer_tokens {
             if i > 0 {
                 let logits = forward_qwen_deltanet_ternary(
@@ -385,11 +432,26 @@ fn run() -> Result<()> {
                 );
                 current = argmax_of(logits);
             }
+            if Some(current) == im_end_id {
+                stopped_im_end = true;
+                break;
+            }
             generated.push(current);
         }
+        // Think-aware scoring: `contains` reads the ANSWER window, never the
+        // whole generation — a gold-fact quotation mid-doubt is not an
+        // answer (the scored_tail contract is in the helper's doc).
         let text = loaded.tokenizer.decode(&generated);
+        let scored_text = loaded.tokenizer.decode(scored_tail(
+            &generated,
+            think_open_id,
+            think_close_id,
+        ));
         gens.push(text.clone());
-        let correct = text.contains(&q.answer);
+        gens_scored.push(scored_text.clone());
+        stopped.push(stopped_im_end);
+        gen_lens.push(generated.len());
+        let correct = scored_text.contains(&q.answer);
         for (k, row) in probe_rows.iter().enumerate() {
             rows[k].push(Row {
                 correct,
@@ -420,7 +482,7 @@ fn run() -> Result<()> {
     // ── Report ───────────────────────────────────────────────────────────
     println!("# issue929 Bonsai-2-27B (PQ2_0) loop-alignment probe");
     println!(
-        "# model={model_path} | head={} | fixture: {} queries, facts={}, loops={loops}{}{}",
+        "# model={model_path} | head={} | fixture: {} queries, facts={}, loops={loops}{}{}{}",
         if loaded.untied { "untied" } else { "tied" },
         queries.len(),
         spec.facts_per_prompt,
@@ -428,6 +490,11 @@ fn run() -> Result<()> {
         match phrase {
             FactPhrase::Standard => " | phrase=standard",
             FactPhrase::Possessive => "",
+        },
+        if think_close_id.is_some() {
+            " | score=think-aware"
+        } else {
+            " | score=raw"
         },
     );
     println!("# score cells are point/lb95 (stratified bootstrap, {bootstrap_iters} iters)");
@@ -467,6 +534,9 @@ fn run() -> Result<()> {
                     "ood": queries[qi].is_ood,
                     "answer": queries[qi].answer,
                     "gen": gens.get(qi).cloned().unwrap_or_default(),
+                    "gen_scored": gens_scored.get(qi).cloned().unwrap_or_default(),
+                    "stopped_im_end": stopped.get(qi).copied().unwrap_or(false),
+                    "n_gen_tokens": gen_lens.get(qi).copied().unwrap_or(0),
                     "correct": rows.last().is_some_and(|r| r[qi].correct),
                     "global_qi": skip_queries + qi,
                     "cos_bridge": rows.iter().map(|r| r[qi].cos_bridge).collect::<Vec<_>>(),
