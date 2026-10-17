@@ -48,6 +48,13 @@
 //! queries, paired arms). `B929_OUT` (JSON path) carries per-query rows
 //! (answer/gen/correct + every probe signal per loop) for paired analysis.
 //!
+//! `B929_REINJECT=1` arms the Phase-2 decode-reinject posture: the accuracy
+//! continuation decodes FROM the loop-refined state (the stock posture's
+//! snapshot/restore is skipped). Default = stock (the K=1-bit-identical
+//! decode basis); the header line and the JSON `decode` field disclose the
+//! posture, so a paired stock/reinject adjudication never guesses which arm
+//! a grid came from.
+//!
 //! Sharding: `B929_SKIP` + `B929_MAX_QUERIES` select a contiguous query
 //! range (the fixture is seed-deterministic, so shards partition ONE run);
 //! `B929_MERGE=a.json,b.json,...` skips the model entirely and re-reports
@@ -250,6 +257,15 @@ fn run() -> Result<()> {
     let max_queries = env_or("B929_MAX_QUERIES", usize::MAX);
     let skip_queries = env_or("B929_SKIP", 0);
     let chat = std::env::var("B929_CHAT").is_ok_and(|v| v == "1");
+    // Phase 2 (the decode-reinject arm): with B929_REINJECT=1 the accuracy
+    // continuation decodes FROM the loop-refined state — the snapshot/restore
+    // of the stock posture is skipped, so the GDN recurrent/conv state and the
+    // answer position's KV rows carry the K passes' drift into every generated
+    // token (the first generated token already rides the loop-refined readout
+    // in BOTH postures). The DiscoLoop question this arm answers: does the
+    // loop-refined state IMPROVE the continuation, or only the readout? The
+    // stock posture (default) keeps the K=1-bit-identical decode basis.
+    let reinject = std::env::var("B929_REINJECT").is_ok_and(|v| v == "1");
     let queries: Vec<Query> = fixture
         .items
         .iter()
@@ -345,24 +361,28 @@ fn run() -> Result<()> {
         let answer_pos = q.tokens.len() - 1;
         let last = *q.tokens.last().expect("non-empty prompt");
 
-        // Label-axis integrity: the loop passes ADVANCE the GDN recurrent/conv
-        // state once per pass and overwrite the answer position's KV rows —
-        // "that IS the loop" (loop_probe.rs). The reinject arm is Phase 2
-        // (closed unbuilt), so the ACCURACY continuation must not read the
-        // K-pass state: snapshot post-prefill, probe, restore, then re-run
-        // ONE stock pass on the original embedding — the exact state a stock
-        // decode of the prompt's last token would hold (K=1 is gate-pinned
-        // bit-identical to the stock forward).
-        let gdn_snapshot: Vec<(Vec<f32>, Vec<f32>)> = cache
-            .deltanet_state
-            .recurrent_states
-            .iter()
-            .zip(&cache.deltanet_state.conv_states)
-            .map(|(r, c)| (r.clone(), c.clone()))
-            .collect();
-        let kv_snapshot = cache
-            .kv_cache
-            .snapshot(answer_pos + 1, &loaded.config);
+        // Label-axis integrity (the STOCK posture): the loop passes ADVANCE
+        // the GDN recurrent/conv state once per pass and overwrite the answer
+        // position's KV rows — "that IS the loop" (loop_probe.rs). So the
+        // stock accuracy continuation must not read the K-pass state:
+        // snapshot post-prefill, probe, restore, then re-run ONE stock pass
+        // on the original embedding — the exact state a stock decode of the
+        // prompt's last token would hold (K=1 is gate-pinned bit-identical to
+        // the stock forward). The REINJECT arm (B929_REINJECT=1, Phase 2)
+        // skips the restore: the continuation decodes the loop-refined state.
+        let gdn_snapshot: Vec<(Vec<f32>, Vec<f32>)> = if reinject {
+            Vec::new()
+        } else {
+            cache
+                .deltanet_state
+                .recurrent_states
+                .iter()
+                .zip(&cache.deltanet_state.conv_states)
+                .map(|(r, c)| (r.clone(), c.clone()))
+                .collect()
+        };
+        let kv_snapshot = (!reinject)
+            .then(|| cache.kv_cache.snapshot(answer_pos + 1, &loaded.config));
 
         // Embed once, then K weight-shared stack passes with per-loop probes
         // (the shared machinery — same code the gates test).
@@ -383,32 +403,35 @@ fn run() -> Result<()> {
         );
 
         // Rebuild the clean stock post-answer-token state: pre-loop GDN/KV
-        // back, original embedding back, ONE stock stack pass.
-        for (li, (r, c)) in gdn_snapshot.iter().enumerate() {
-            cache.deltanet_state.recurrent_states[li].copy_from_slice(r);
-            cache.deltanet_state.conv_states[li].copy_from_slice(c);
-        }
-        cache.kv_cache.restore(&kv_snapshot, &loaded.config);
-        x[..n].copy_from_slice(&answer_emb);
-        for (li, layer_weights) in loaded.weights.layers.iter().enumerate() {
-            let is_linear = loaded.weights.layer_types[li] == DeltaNetLayerType::DeltaNet;
-            qwen_deltanet_ternary_layer_body(
-                &mut x,
-                layer_weights,
-                is_linear,
-                &mut cache.deltanet_state.recurrent_states[li],
-                &mut cache.deltanet_state.conv_states[li],
-                &mut cache.kv_cache.layers[li],
-                answer_pos,
-                li,
-                &loaded.config,
-                &mut scratch,
-                &loaded.rope_freq,
-                loaded.weights.rotation.as_ref(),
-                None,
-                None,
-                None,
-            );
+        // back, original embedding back, ONE stock stack pass. The reinject
+        // arm keeps the K-pass state and the loop-refined embedding as-is.
+        if !reinject {
+            for (li, (r, c)) in gdn_snapshot.iter().enumerate() {
+                cache.deltanet_state.recurrent_states[li].copy_from_slice(r);
+                cache.deltanet_state.conv_states[li].copy_from_slice(c);
+            }
+            cache.kv_cache.restore(kv_snapshot.as_ref().expect("stock posture holds a snapshot"), &loaded.config);
+            x[..n].copy_from_slice(&answer_emb);
+            for (li, layer_weights) in loaded.weights.layers.iter().enumerate() {
+                let is_linear = loaded.weights.layer_types[li] == DeltaNetLayerType::DeltaNet;
+                qwen_deltanet_ternary_layer_body(
+                    &mut x,
+                    layer_weights,
+                    is_linear,
+                    &mut cache.deltanet_state.recurrent_states[li],
+                    &mut cache.deltanet_state.conv_states[li],
+                    &mut cache.kv_cache.layers[li],
+                    answer_pos,
+                    li,
+                    &loaded.config,
+                    &mut scratch,
+                    &loaded.rope_freq,
+                    loaded.weights.rotation.as_ref(),
+                    None,
+                    None,
+                    None,
+                );
+            }
         }
         let mut current = probed_first;
 
@@ -482,11 +505,12 @@ fn run() -> Result<()> {
     // ── Report ───────────────────────────────────────────────────────────
     println!("# issue929 Bonsai-2-27B (PQ2_0) loop-alignment probe");
     println!(
-        "# model={model_path} | head={} | fixture: {} queries, facts={}, loops={loops}{}{}{}",
+        "# model={model_path} | head={} | fixture: {} queries, facts={}, loops={loops}{}{}{}{}",
         if loaded.untied { "untied" } else { "tied" },
         queries.len(),
         spec.facts_per_prompt,
         if chat { " | elicitation=chat" } else { "" },
+        if reinject { " | decode=reinject" } else { " | decode=stock" },
         match phrase {
             FactPhrase::Standard => " | phrase=standard",
             FactPhrase::Possessive => "",
@@ -515,8 +539,9 @@ fn run() -> Result<()> {
         FactPhrase::Standard => "standard",
         FactPhrase::Possessive => "possessive",
     };
+    let decode_name = if reinject { "reinject" } else { "stock" };
     println!(
-        "json:{{\"model\":\"{model_path}\",\"untied\":{},\"queries\":{},\"loops\":{loops},\"phrase\":\"{phrase_name}\",\"acc_last\":{},\"elapsed_s\":{:.1}}}",
+        "json:{{\"model\":\"{model_path}\",\"untied\":{},\"queries\":{},\"loops\":{loops},\"phrase\":\"{phrase_name}\",\"decode\":\"{decode_name}\",\"acc_last\":{},\"elapsed_s\":{:.1}}}",
         loaded.untied,
         queries.len(),
         fmt_frac(acc_last, acc_n),
@@ -552,6 +577,7 @@ fn run() -> Result<()> {
             "queries": queries.len(),
             "loops": loops,
             "phrase": phrase_name,
+            "decode": decode_name,
             "chat": chat,
             "skip": skip_queries,
             "bootstrap": bootstrap_iters,
