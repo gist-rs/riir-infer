@@ -41,11 +41,16 @@
 //! correct; the special tokens ride the GGUF control-token matcher, one id
 //! each).
 //!
-//! `B929_PHRASE=standard` renders fixture facts as `"The {r} of {a} is {b}."`
-//! (standard English composition) instead of the default possessive
-//! `"{a} is the {r} of {b}."` — the Bench-933 phrasing-inversion A/B knob;
-//! labels/bridges/fact windows are phrasing-invariant (same seed → same
-//! queries, paired arms). `B929_OUT` (JSON path) carries per-query rows
+//! `B929_PHRASE` selects the fixture fact template. Default = the
+//! standard-semantics composition `"The {r} of {a} is {b}."` — the
+//! Bench-942 read-of-record arm (the flip landed AFTER Bench 943 closed the
+//! reinject leg; the as-landed possessive default's label axis measured DEAD
+//! on both boxes — 0/16 two-hop, every AUROC cell empty — so a default run
+//! on it could not produce a reading). `B929_PHRASE=possessive` restores the
+//! as-landed `"{a} is the {r} of {b}."` phrasing the 927/930/933/934 records
+//! ride (replication); any other value refuses loud. Labels/bridges/fact
+//! windows are phrasing-invariant (same seed → same queries, paired arms).
+//! `B929_OUT` (JSON path) carries per-query rows
 //! (answer/gen/correct + every probe signal per loop) for paired analysis.
 //!
 //! `B929_REINJECT=1` arms the Phase-2 decode-reinject posture: the accuracy
@@ -188,6 +193,25 @@ fn run() -> Result<()> {
         format!("{manifest_dir}/../riir-train/data/Ternary-Bonsai-2-27B-PQ2_0.gguf")
     });
 
+    // B929_PHRASE: the fixture fact template. Default = standard (the
+    // Bench-942 read-of-record arm — flipped after Bench 943 closed the
+    // reinject leg, when the mid-adjudication freeze stopped applying; the
+    // old possessive default's label axis measured DEAD on both boxes).
+    // `possessive` replicates the 927/930/933/934 records; anything else
+    // refuses loud — a typo must never silently run the wrong arm. Parsed
+    // BEFORE the ~7.3 GB model load so a bad value costs nothing.
+    let phrase = match std::env::var("B929_PHRASE") {
+        Err(std::env::VarError::NotPresent) => FactPhrase::Standard,
+        Ok(v) => match v.as_str() {
+            "standard" => FactPhrase::Standard,
+            "possessive" => FactPhrase::Possessive,
+            other => anyhow::bail!(
+                "B929_PHRASE: unknown value {other:?} (expected \"standard\" or \"possessive\")"
+            ),
+        },
+        Err(e) => anyhow::bail!("B929_PHRASE: unreadable ({e})"),
+    };
+
     // ── Load (header mmap for tokenizer + tied check, then packed weights) ──
     let gguf = GgufFile::open(std::path::Path::new(&model_path))
         .with_context(|| format!("open {model_path}"))?;
@@ -232,13 +256,6 @@ fn run() -> Result<()> {
     let think_close_id = loaded.tokenizer.token_to_id("</think>");
 
     // ── Fixture (paper §2 shape, deterministic; env-scale knobs) ──────────
-    // B929_PHRASE=standard: the standard-semantics fact template (A/B knob;
-    // default = the as-landed possessive phrasing the 927/930/933/934
-    // records ride — never redefine the shared instrument mid-adjudication).
-    let phrase = match std::env::var("B929_PHRASE") {
-        Ok(v) if v == "standard" => FactPhrase::Standard,
-        _ => FactPhrase::Possessive,
-    };
     let spec = FixtureSpec {
         facts_per_prompt: env_or("B929_FACTS", FACTS_PER_PROMPT),
         two_hop_queries: env_or("B929_TWO_HOP", TWO_HOP_PER_POOL),
@@ -513,7 +530,7 @@ fn run() -> Result<()> {
         if reinject { " | decode=reinject" } else { " | decode=stock" },
         match phrase {
             FactPhrase::Standard => " | phrase=standard",
-            FactPhrase::Possessive => "",
+            FactPhrase::Possessive => " | phrase=possessive",
         },
         if think_close_id.is_some() {
             " | score=think-aware"
@@ -710,7 +727,7 @@ fn merge(paths: &str) -> Result<()> {
         per_query.len(),
         paths.split(',').filter(|p| !p.is_empty()).count(),
         if chat { " | elicitation=chat" } else { "" },
-        if phrase == "standard" { " | phrase=standard" } else { "" },
+        &format!(" | phrase={phrase}"),
     );
     println!("# score cells are point/lb95 (stratified bootstrap, {bootstrap_iters} iters)");
     report_grid(&rows, &splits, bootstrap_iters as usize);
