@@ -797,6 +797,126 @@ fn test_attention_block_causal_runtime_head_geometry() {
     }
 }
 
+/// Metal tanh tail regression (issue-621 §7 parity catch, 2026-10-18).
+///
+/// Metal's `tanh` NaNs for |x| over ~43 — cubecl's macOS `safe_tanh` guards
+/// the x > 43 side only. The kernels clamp the softcap argument to ±42
+/// (tanh(±42) = ±1.0 exactly in f32, so the clamp is invisible). This test
+/// drives BOTH tails past the break: q·k dots of ±36,864 → raw/softcap =
+/// ±46.08, past 43 on both sides. Before the clamp the negative-tail scores
+/// came back NaN and the whole attention output poisoned (measured: the
+/// Phase-0 0.4B checkpoint's merged q/k deltas did exactly this through the
+/// d2f decode path on M3 Metal, while CUDA and the CPU reference stayed
+/// finite).
+#[cfg(feature = "gemma2_d2f")]
+#[test]
+fn test_attention_block_causal_metal_tanh_tail_regression() {
+    let ctx = CubeCLContext::new().expect("CubeCL should initialize");
+    let client = ctx.client();
+
+    let n_positions = 256;
+    let prompt_len = 248;
+    let block_size = 8;
+    let (n_head, n_kv_head) = (4usize, 1usize);
+
+    // Head 0 queries +200 (positive tail vs +keys, negative tail vs -keys);
+    // head 1 queries -200 (both tails mirrored); heads 2/3 small (control).
+    // q·k = ±200² × 256 = ±1.02e7 → raw = q·k/16 = ±6.4e5 → tanh arg = raw/50
+    // = ±1.28e4 — the magnitude class the real checkpoint produced (its
+    // masked-token dots reached ~2e6, args ~±3e3). At ±46 Metal's tanh is
+    // still finite — the break needs the far tail.
+    let q_len = n_head * HEAD_DIM;
+    let mut query = vec![0.0f32; q_len];
+    for d in 0..HEAD_DIM {
+        query[d] = 200.0; // head 0
+        query[HEAD_DIM + d] = -200.0; // head 1
+        query[2 * HEAD_DIM + d] = 0.01; // head 2 control
+        query[3 * HEAD_DIM + d] = -0.01; // head 3 control
+    }
+    // kv head 0 only: first half of positions keyed +200, second half -200.
+    let kv_stride = n_kv_head * HEAD_DIM;
+    let mut keys = vec![0.0f32; n_positions * kv_stride];
+    let mut values = vec![0.0f32; n_positions * kv_stride];
+    for p in 0..n_positions {
+        let v = if p < n_positions / 2 { 200.0 } else { -200.0 };
+        for d in 0..HEAD_DIM {
+            keys[p * kv_stride + d] = v;
+            values[p * kv_stride + d] = ((p * 7 + d) % 13) as f32 / 32.0 - 0.2;
+        }
+    }
+
+    for pos in [0usize, 100, 248, 255] {
+        let out = run_block_causal_shaped(
+            &client,
+            (n_head, n_kv_head),
+            &query,
+            &keys,
+            &values,
+            n_positions,
+            pos,
+            prompt_len,
+            block_size,
+        );
+        let bad = out.iter().filter(|x| !x.is_finite()).count();
+        assert_eq!(bad, 0, "pos {pos}: {bad} non-finite attention outputs — the tanh tail clamp is not holding");
+    }
+
+    // And the values still match the CPU reference (clamp is invisible in f32).
+    verify_block_causal_attention_shaped(
+        &client,
+        (n_head, n_kv_head),
+        &query,
+        &keys,
+        &values,
+        n_positions,
+        248,
+        prompt_len,
+        block_size,
+        1e-2,
+    );
+}
+
+/// Launch block-causal and return the output (shaped geometry variant of
+/// `run_attention_decode`).
+#[cfg(feature = "gemma2_d2f")]
+fn run_block_causal_shaped(
+    client: &ComputeClient<ActiveRuntime>,
+    (n_head, n_kv_head): (usize, usize),
+    query: &[f32],
+    keys: &[f32],
+    values: &[f32],
+    n_positions: usize,
+    pos: usize,
+    prompt_len: usize,
+    block_size: usize,
+) -> Vec<f32> {
+    let q_len = n_head * HEAD_DIM;
+    let params = AttentionBlockCausalParams {
+        n_head,
+        n_kv_head,
+        head_dim: HEAD_DIM,
+        n_positions,
+        softcap: SOFTCAP,
+        scale: SCALE,
+        pos,
+        prompt_len,
+        block_size,
+    };
+    let combined_kv = params.combine_kv(keys, values);
+    let query_handle = client.create_from_slice(f32::as_bytes(query));
+    let kv_handle = client.create_from_slice(f32::as_bytes(&combined_kv));
+    let attn_out_handle = client.empty(q_len * core::mem::size_of::<f32>());
+    AttentionCubeCL::launch_block_causal::<ActiveRuntime>(
+        client,
+        query_handle,
+        kv_handle,
+        attn_out_handle.clone(),
+        &params,
+    );
+    let bytes = client.read_one(attn_out_handle).expect("should read output");
+    f32::from_bytes(&bytes).to_vec()
+}
+
 /// Partial tile: t_n doesn't align to tile boundary.
 /// Tests the valid_pos guards within a tile.
 #[cfg(feature = "gemma2_d2f")]

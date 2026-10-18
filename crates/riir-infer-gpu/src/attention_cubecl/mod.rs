@@ -175,7 +175,12 @@ fn attention_decode_f32(query: &[f32], kv: &[f32], attn_out: &mut [f32]) {
                 d += 1u32;
             }
             let raw = dot * scale;
-            my_score = softcap * f32::tanh(raw / softcap);
+            // Metal tanh NaNs for |x| over ~43 (cubecl's safe_tanh guards the
+            // x > 43 side only). tanh(±42) = ±1.0 exactly in f32 — the clamp
+            // is invisible. Caught by the issue-621 §7 parity gate 2026-10-18:
+            // the Phase-0 0.4B merged q/k deltas pushed masked-token scores
+            // past the tail and the row poisoned.
+            my_score = softcap * f32::tanh((raw / softcap).clamp(-42.0f32, 42.0f32));
         }
         smem[tid as usize] = my_score;
         sync_cube();
@@ -415,7 +420,8 @@ fn attention_decode_folded_f32(query: &[f32], kv: &[f32], params: &[f32], attn_o
                         d += 1u32;
                     }
                     let raw = dot * scale;
-                    my_score = softcap * f32::tanh(raw / softcap);
+                    // Metal tanh tail clamp — see attention_decode_f32 Phase 1.
+                    my_score = softcap * f32::tanh((raw / softcap).clamp(-42.0f32, 42.0f32));
                 }
                 smem[tid as usize] = my_score;
                 sync_cube();
@@ -650,7 +656,8 @@ fn attention_decode_llama_f32(query: &[f32], kv: &[f32], params: &[f32], attn_ou
             let raw = dot * scale;
             // Conditional softcap: bypass when softcap == 0.0
             if has_softcap {
-                my_score = softcap * f32::tanh(raw / softcap);
+                // Metal tanh tail clamp — see attention_decode_f32 Phase 1.
+                my_score = softcap * f32::tanh((raw / softcap).clamp(-42.0f32, 42.0f32));
             }
             if !has_softcap {
                 my_score = raw;
@@ -920,7 +927,12 @@ fn attention_block_causal_f32(query: &[f32], kv: &[f32], params: &[f32], attn_ou
                 d += 1u32;
             }
             let raw = dot * scale;
-            my_score = softcap * f32::tanh(raw / softcap);
+            // Metal tanh NaNs for |x| over ~43 (cubecl's safe_tanh guards the
+            // x > 43 side only). tanh(±42) = ±1.0 exactly in f32 — the clamp
+            // is invisible. Caught by the issue-621 §7 parity gate 2026-10-18:
+            // the Phase-0 0.4B merged q/k deltas pushed masked-token scores
+            // past the tail and the row poisoned.
+            my_score = softcap * f32::tanh((raw / softcap).clamp(-42.0f32, 42.0f32));
         }
         smem[tid as usize] = my_score;
         sync_cube();
