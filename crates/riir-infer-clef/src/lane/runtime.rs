@@ -21,6 +21,16 @@
 //! `CPUAndNeuralEngine` (default) / `CPUAndGPU` / `CPUOnly` — the plan
 //! T1.6 posture knob; the placement is disclosed at load, never a
 //! silent fallback (the host walks the compute plan on every load).
+//! On `cpu` the load is a DISCLOSED SPLIT (issue 048, 2026-10-17):
+//! the decoder loads `CPUOnly` — the honest cpu leg — while the head
+//! loads `CPUAndNe`, because the head package under `CPUOnly`
+//! balloons to ~202 GB at load (a Core ML CPU-planner defect on the
+//! head graph; jetsam SIGKILL in every host, a derived
+//! single-function package included). The split is named in every
+//! per-bucket placement line, `info()`, and the timing example; on a
+//! cpu row decode is the honest cpu number, head/total are MIXED
+//! numbers, and head-cpu is NOT-MEASURABLE-HERE. `ane`/`gpu` load
+//! both packages under the requested posture (no split).
 
 use std::collections::HashMap;
 
@@ -62,7 +72,9 @@ impl PackagePin {
 }
 
 /// `CLEF_COMPUTE_UNITS` — `ane` (default) / `gpu` / `cpu`; an unknown
-/// value refuses loud (never a silent ANE fallback).
+/// value refuses loud (never a silent ANE fallback). `cpu` is a SPLIT
+/// posture (issue 048): decoder CpuOnly + head CpuAndNe — see the
+/// module docs.
 pub fn compute_units_from_env() -> ComputeUnits {
     match std::env::var("CLEF_COMPUTE_UNITS").as_deref() {
         Ok("ane") | Err(_) => ComputeUnits::CpuAndNe,
@@ -113,6 +125,10 @@ pub struct ClefText {
     /// The compute-unit posture this instance loaded under (the
     /// `info()` disclosure).
     units: ComputeUnits,
+    /// The posture the HEAD packages actually loaded under (issue 048:
+    /// a CpuOnly head load balloons ~202 GB, so a `cpu` request loads
+    /// the head `CpuAndNe` — differs from `units` only on that split).
+    head_units: ComputeUnits,
 }
 
 impl ClefText {
@@ -126,6 +142,24 @@ impl ClefText {
         buckets: &[u32],
         units: ComputeUnits,
     ) -> Result<Self, ClefError> {
+        // Issue 048 (2026-10-17): the HEAD package under CpuOnly balloons to
+        // ~202 GB at load — a Core ML CPU-planner defect on the head graph
+        // (jetsam SIGKILL in every host; a derived single-function package
+        // included) while the sibling decoder loads + predicts fine CpuOnly.
+        // The cpu posture therefore loads the decoder CpuOnly (the honest cpu
+        // leg) and the head at its working CpuAndNe — a DISCLOSED split, never
+        // a silent fallback; head/total on a cpu row are mixed numbers and
+        // head-cpu is NOT-MEASURABLE-HERE.
+        let head_units = match units {
+            ComputeUnits::CpuOnly => ComputeUnits::CpuAndNe,
+            other => other,
+        };
+        let head_note = if head_units != units {
+            "; head loaded CpuAndNe — CpuOnly head load balloons ~202GB \
+             (issue 048, Core ML planner defect); head-cpu NOT-MEASURABLE-HERE"
+        } else {
+            ""
+        };
         // The two non-graph materials ride the same verified tree.
         let tokenizer = ClefTokenizer::from_dir(dir)?;
         let embeddings = EmbeddingTable::open(dir, &config)?;
@@ -165,7 +199,7 @@ impl ClefText {
             let (head, head_placement) = riir_infer_ane::load_model(
                 &head_dir,
                 &head_pin,
-                units,
+                head_units,
                 Some(&function),
                 "CLEF_ANE_CACHE",
                 "clef-ane",
@@ -182,10 +216,11 @@ impl ClefText {
             let cos_bits = cos.iter().map(|v| v.to_bits()).collect::<Vec<_>>();
             let sin_bits = sin.iter().map(|v| v.to_bits()).collect::<Vec<_>>();
             placements.push(format!(
-                "clef: L{bucket} decoder placement {} (head {}) — plan walk skipped \
+                "clef: L{bucket} decoder placement {} (head {}{}) — plan walk skipped \
                  (GB-scale package); placement truth = T2.2 parity + T2.3 latency",
                 placement_words(decoder_placement),
                 placement_words(head_placement),
+                head_note,
             ));
             decoders.insert(bucket, decoder);
             heads.insert(bucket, head);
@@ -203,6 +238,7 @@ impl ClefText {
             tokenizer,
             embeddings,
             units,
+            head_units,
         })
     }
 
@@ -329,14 +365,22 @@ impl ClefText {
     /// buckets, capacities, compute units — one line, for run logs and
     /// the reflex lane's posture string.
     pub fn info(&self) -> String {
+        let units_part = if self.head_units != self.units {
+            format!(
+                "{:?} (head {:?} — issue 048 split; head-cpu not measurable)",
+                self.units, self.head_units
+            )
+        } else {
+            format!("{:?}", self.units)
+        };
         format!(
-            "{} @ {} — buckets {:?} (max_questions {}, max_options {}) compute_units {:?}",
+            "{} @ {} — buckets {:?} (max_questions {}, max_options {}) compute_units {}",
             self.config.model,
             super::ARTIFACT_REVISION,
             self.buckets,
             self.config.max_questions,
             self.config.max_options,
-            self.units,
+            units_part,
         )
     }
 

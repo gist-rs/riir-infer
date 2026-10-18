@@ -3,7 +3,9 @@
 //! Per-bucket decoder/head/total milliseconds for one compute-unit
 //! posture per invocation (`ane` default, `gpu`, `cpu`), over
 //! representative records landed in each bucket's upper band, on the
-//! REAL pinned artifact tree. The bench record quotes the preflight
+//! REAL pinned artifact tree. On `cpu` the runtime is a disclosed
+//! SPLIT (issue 048): decoder CpuOnly + head CpuAndNe — the decode
+//! column is the honest cpu leg; head/total are MIXED numbers. The bench record quotes the preflight
 //! `PROVENANCE:` line beside every number (the box-state law) — run:
 //!
 //! ```text
@@ -139,15 +141,30 @@ fn main() {
     let embeddings = EmbeddingTable::open(&dir, &model.config).expect("embeddings reopen");
     let max_length = *model.config.buckets.last().expect("buckets") as usize;
 
+    // Issue 048: on cpu the runtime is a disclosed split (decoder
+    // CpuOnly, head CpuAndNe) — say so on the banner and in the NOTE
+    // below; the row formats are untouched.
+    let banner_head = if posture == "cpu" { " head_units=CpuAndNe" } else { "" };
     println!(
-        "CLEF-TIMING posture={posture} model=clef-text-0.6b@{} buckets={buckets:?} reps={reps} warm={warm} load={:?}",
+        "CLEF-TIMING posture={posture} model=clef-text-0.6b@{} buckets={buckets:?} reps={reps} warm={warm} load={:?}{}",
         ARTIFACT_REVISION,
-        started.elapsed()
+        started.elapsed(),
+        banner_head
     );
     for line in &runtime.placements {
         println!("PLACEMENT {line}");
     }
-    println!("table: bucket tokens decode_p50 decode_p90 head_p50 head_p90 total_p50 total_p90 answer_p50 (ms)");
+    if posture == "cpu" {
+        println!(
+            "NOTE cpu posture is a SPLIT (issue 048): decoder CpuOnly — the decode \
+             column is the honest cpu leg; head loaded CpuAndNe — head/total are \
+             MIXED numbers; head-cpu NOT-MEASURABLE-HERE (Core ML CpuOnly planner \
+             balloons the head load ~202GB, jetsam-killed)."
+        );
+    }
+    println!(
+        "table: bucket tokens decode_p50 decode_p90 head_p50 head_p90 total_p50 total_p90 answer_p50 (ms)"
+    );
 
     for bucket in &buckets {
         let bucket = *bucket as usize;
