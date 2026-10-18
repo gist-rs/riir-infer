@@ -115,3 +115,19 @@ From the HF card / Research 012 §Perf (their benchmark, their hardware):
 - The `answer()` readout uses a SHORT record, so its flat ~35 ms is the L256 whole-pipeline cost, not a per-bucket answer cost — per-bucket whole costs are the total column + ~1 ms encode.
 - G4: the host path allocates (`MLMultiArray` inputs, the strided reads) — same posture as the laya ANE lane; never claimed alloc-free. Per-decision allocations are bounded and posture-independent of the parity result.
 - Post-bench check: **the parity gate (`4e7e6c1`) is the correctness authority for every number above** — the same binaries' forward path is bit-exact vs the official runtime, so these latencies are the latency of the RIGHT answer, not of an approximation.
+
+## Upstream report draft — owner act pending (the issue-048 remedy-4 material)
+
+The removed issue's evidence addendum (last full copy: `git show 6df6ef6:.issues/048_clef_cpuonly_load_balloons_192gb.md`) ended with a filing-ready signature. Preserved here so the owner can file without git archaeology. Filing is an owner act (public post under the owner's identity); NOT needed to unblock — the split-posture cpu row above is the shipped unblock.
+
+**The signature (quote verbatim):**
+
+> Head.mlpackage (0.6B clef-text student's classification head, fp16, multi-function ML Program, CoreML8 blocks) → MLModel load with `.cpuOnly` allocates ~202 GB and is jetsam-killed on macOS 26.6.2 (25G83); same package loads fine under `.cpuAndNeuralEngine`/`.cpuAndGPU`; a single-function derivative of the same graph balloons identically; the sibling decoder package (same authoring, same layout) loads fine CpuOnly.
+
+**The three load-bearing facts behind it** (cells in the addendum's 10-row ladder):
+
+1. **Language-host-independent** — Rust/objc2-core-ml 0.3.2 AND Swift balloon identically on the head (`MLComputeUnits::CPUOnly = Self(0)` verified byte-equal to Swift's `.cpuOnly.rawValue`); the config plumbing is not a suspect.
+2. **Not the multi-function layout** — a derived single-function `Head.L256.mlpackage` balloons too (202,363 MB); the trigger is the head GRAPH under the CpuOnly planner (4 functions, 709 ops each, io `states [256,1024] fp16 → logits [96]` — nothing suggests a 202 GB footprint).
+3. **The decoder is clean** — same authoring, same layout, loads + predicts fine CpuOnly in every host (that is why the cpu row above is honest: decode leg CpuOnly, head at its working posture).
+
+**Filing targets:** FluidAudio (their `FluidAudio`/clef integration hits the same load path) + Apple Feedback (the planner defect itself). **Re-test trigger (remedy-2 watch):** the Apple 27-series regression cluster — an OS update that fixes the head graph's CpuOnly planner path re-opens the whole-cpu posture; until then `head-cpu` stays NOT-MEASURABLE-HERE with their published M5 Pro number as the external reference.
