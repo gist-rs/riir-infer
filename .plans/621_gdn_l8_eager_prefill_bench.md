@@ -63,6 +63,8 @@ Every quote re-verified at the pins this session, and the ONE carried assumption
 
 **5. Consequence.** T2's expected verdict stands (tree-identical BY CONSTRUCTION); T4's order-pin fallback stays dead unless the mechanical test surprises. Nothing in T3/T5 changes. The window session's remaining work: claim (T0) → transcribe T2's test from §4's map → compile/run → port.
 
+**6. T1 FULLY discharged pre-window.** The last two quote pins verified this session: the incumbent's write pass (deltanet.rs :1259-1270 `partial2` 0.0f-init c-ascending + butterfly 16/8/4/2/1, `:1272-1274` lane-0 store, `:1277-1278` state writeback `c*32 + lane` — the lane-0 convention is the map's "store from the group's base lane" counterpart) and the launcher (`:2056-2093`: `LaunchConfig { grid_dim: (n_head, 128, 1), block_dim: (32,1,1), shared_mem_bytes: 0 }`, DevicePtr-widened args, builder launch — the L8 launcher mirrors it with grid `(n_head, 128/k, 1)`). Every line reference in this plan is now verified at its pin; the window session starts at T0's claim directly.
+
 ## Tasks
 
 - [ ] T0 — window preconditions: verified-idle 4090 (`scripts/bench_preflight` PROVENANCE quoted; GPU exclusivity per the AGENTS.md gate — the plan-436 chain G3 verdict logged by the sibling driver, est. ~Oct-19 midday ICT), `git fetch origin` both repos, claim line on this plan + ai-971 appended BEFORE the port (`Claimed: <session>, <epoch>, expires +48h`).
