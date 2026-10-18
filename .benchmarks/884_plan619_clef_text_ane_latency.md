@@ -1,6 +1,6 @@
 # 884 — Plan 619 T2.3: clef-text-0.6b ANE lane latency (the G2 gate)
 
-**Status:** MEASURED 2026-10-17 — ane + gpu postures complete (both under PASSED preflights at the documented raised ceiling); **cpu posture MEASURED 2026-10-18 via the issue-048 SPLIT (decoder CpuOnly + head CpuAndNe, disclosed; head-cpu NOT-MEASURABLE-HERE — the head's CpuOnly load balloons ~202 GB, a Core ML planner defect; issue 048 resolved, its file removed in the follow-up commit)**. G1 = `4e7e6c1` parity BIT-EXACT (544/544 logits, 0 top-1 disagreements, 102 fixtures) · G2 = this record · G3 = opt-in (`clef-ane` never default, default build compiles empty) · G4 = disclosure (the CoreML host path allocates MLMultiArray inputs — the laya-ane posture; never claimed alloc-free).
+**Status:** MEASURED 2026-10-17 — ane + gpu postures complete (both under PASSED preflights at the documented raised ceiling); **cpu posture MEASURED 2026-10-18 via the issue-048 SPLIT (decoder CpuOnly + head CpuAndNe, disclosed; head-cpu NOT-MEASURABLE-HERE — the head's CpuOnly load balloons ~202 GB, a Core ML planner defect; issue 048 resolved (fix `6df6ef6`), file removed in the follow-up commit)**. G1 = `4e7e6c1` parity BIT-EXACT (544/544 logits, 0 top-1 disagreements, 102 fixtures) · G2 = this record · G3 = opt-in (`clef-ane` never default, default build compiles empty) · G4 = disclosure (the CoreML host path allocates MLMultiArray inputs — the laya-ane posture; never claimed alloc-free).
 
 ## Box state (the preflight law — quoted beside every number)
 
@@ -53,7 +53,7 @@ against a threat that was never the blocker. (The four 03:xx kills were recorded
 1.74 s → ROW 32.39/3.00/35.39/35.90 ms @L256 (matches the published row — bonus re-validation);
 `gpu` loads 3.11 s → ROW 35.70/4.25/39.95/39.98 ms @L256; `cpu` jetsam-killed at ~192 GB.
 The compile cache is posture-independent, so the explosion is Core ML's CPU-planner
-specialization at MLModel load. Full evidence + remedies: `.issues/048_clef_cpuonly_load_balloons_192gb.md`.
+specialization at MLModel load. Full evidence + remedies: the removed issue 048 file (`git log --follow -- .issues/048_clef_cpuonly_load_balloons_192gb.md`; the landed resolution is the LANDED subsection below).
 
 **Kill site CORRECTED (2026-10-17 ~10:2x, the 048 falsifier ladder):** it is the **HEAD**
 load, not the Decoder — the decoder loads + predicts fine CpuOnly in every host (Rust probe
