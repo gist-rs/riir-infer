@@ -142,10 +142,7 @@ pub fn keyed_accept(
     // Full accept: the bonus comes from the LAST row (position pos + p).
     let last = &rows_logits[(p - 1) * vocab..p * vocab];
     let bonus = posture.sample_row(last, pos + p);
-    KeyedAccept {
-        j: p,
-        bonus,
-    }
+    KeyedAccept { j: p, bonus }
 }
 
 /// The serial keyed reference, one step: the token the stream commits at
@@ -206,7 +203,13 @@ mod tests {
     }
 
     impl FakeDrafter {
-        fn chain(&self, ctx: &[u32], pos: usize, posture: &KeyedVerifyPosture, n: usize) -> Vec<u32> {
+        fn chain(
+            &self,
+            ctx: &[u32],
+            pos: usize,
+            posture: &KeyedVerifyPosture,
+            n: usize,
+        ) -> Vec<u32> {
             let mut chain = Vec::with_capacity(n);
             let mut local = ctx.to_vec();
             for i in 0..n {
@@ -226,7 +229,10 @@ mod tests {
                 // The proposal: keyed pick over the perturbed distribution
                 // with the SHARED keys (the keyed drafter's convention).
                 let pick = keyed_gumbel_max_sample(
-                    &mixed.iter().map(|&l| l / posture.temperature).collect::<Vec<_>>(),
+                    &mixed
+                        .iter()
+                        .map(|&l| l / posture.temperature)
+                        .collect::<Vec<_>>(),
                     posture.seed,
                     (pos + 1 + i) as u64,
                 );
@@ -297,7 +303,12 @@ mod tests {
         (stream, js)
     }
 
-    fn serial_stream(model: &FakeModel, posture: &KeyedVerifyPosture, prompt: &[u32], steps: usize) -> Vec<u32> {
+    fn serial_stream(
+        model: &FakeModel,
+        posture: &KeyedVerifyPosture,
+        prompt: &[u32],
+        steps: usize,
+    ) -> Vec<u32> {
         let mut ctx = prompt.to_vec();
         let mut out = Vec::with_capacity(steps);
         for i in 0..steps {
@@ -378,11 +389,28 @@ mod tests {
         // the first ascending disagreement, computed from either verdict
         // ordering.
         for chain in [
-            vec![rev_verdicts[0] ^ 1, rev_verdicts[1], rev_verdicts[2], rev_verdicts[3]],
-            vec![rev_verdicts[0], rev_verdicts[1], rev_verdicts[2] ^ 1, rev_verdicts[3]],
-            vec![rev_verdicts[0], rev_verdicts[1], rev_verdicts[2], rev_verdicts[3]],
+            vec![
+                rev_verdicts[0] ^ 1,
+                rev_verdicts[1],
+                rev_verdicts[2],
+                rev_verdicts[3],
+            ],
+            vec![
+                rev_verdicts[0],
+                rev_verdicts[1],
+                rev_verdicts[2] ^ 1,
+                rev_verdicts[3],
+            ],
+            vec![
+                rev_verdicts[0],
+                rev_verdicts[1],
+                rev_verdicts[2],
+                rev_verdicts[3],
+            ],
         ] {
-            let expected = (0..4).find(|&r| rev_verdicts[r] != chain[r]).map_or(5, |r| r + 1);
+            let expected = (0..4)
+                .find(|&r| rev_verdicts[r] != chain[r])
+                .map_or(5, |r| r + 1);
             let a = keyed_accept(&posture, &flat, vocab, &chain, 50);
             assert_eq!(a.j, expected, "chain {chain:?}");
             // Corrupting a LATER row never moves an earlier verdict.
@@ -466,7 +494,10 @@ mod tests {
                 masked[i] = logits[i];
             }
         }
-        assert_eq!(posture.sample_row(&logits, 3), keyed_gumbel_max_sample(&masked, 7, 3));
+        assert_eq!(
+            posture.sample_row(&logits, 3),
+            keyed_gumbel_max_sample(&masked, 7, 3)
+        );
     }
 
     #[test]

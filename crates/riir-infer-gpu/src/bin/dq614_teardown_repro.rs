@@ -42,10 +42,7 @@
 //! `E:/git/riir-refine/.scratch/dq614_repro/run_arm.ps1` (grace + RAM
 //! sampling + kill by PID).
 
-#![cfg(all(
-    feature = "ternary_gemv_cuda_raw",
-    not(target_os = "macos"),
-))]
+#![cfg(all(feature = "ternary_gemv_cuda_raw", not(target_os = "macos"),))]
 // Dev profile: the refusing main keeps teardown experiments release-only
 // (the same shape as `dq_phase_matrix`).
 #![cfg_attr(debug_assertions, allow(dead_code))]
@@ -115,9 +112,7 @@ fn parse_args() -> Args {
             "--exit" => a.exit_mode = it.next().unwrap_or_else(|| "plain".into()),
             "--sticky" => a.sticky = true,
             "--no-cuda" => a.no_cuda = true,
-            "--alloc-mb" => {
-                a.alloc_mb = it.next().and_then(|v| v.parse().ok()).unwrap_or(256)
-            }
+            "--alloc-mb" => a.alloc_mb = it.next().and_then(|v| v.parse().ok()).unwrap_or(256),
             "--iters" => a.iters = it.next().and_then(|v| v.parse().ok()).unwrap_or(8),
             other => {
                 eprintln!("[repro] unknown arg {other}");
@@ -207,17 +202,20 @@ fn run() -> Result<(), String> {
                 .launch(cfg)
                 .map_err(|e| format!("launch fill #{i}: {e}"))?;
         }
-        stream.synchronize().map_err(|e| format!("sync #{i}: {e}"))?;
+        stream
+            .synchronize()
+            .map_err(|e| format!("sync #{i}: {e}"))?;
     }
     // Verify the last fill landed (the context demonstrably works).
-    let host = stream
-        .clone_dtoh(&buf)
-        .map_err(|e| format!("dtoh: {e}"))?;
+    let host = stream.clone_dtoh(&buf).map_err(|e| format!("dtoh: {e}"))?;
     let want = args.iters as f32;
     if host[0] != want || host[n - 1] != want {
         return Err(format!("fill verify: got {} / {}", host[0], host[n - 1]));
     }
-    mark(&format!("{} fill+sync cycles ok, verify passed", args.iters));
+    mark(&format!(
+        "{} fill+sync cycles ok, verify passed",
+        args.iters
+    ));
 
     if args.sticky {
         unsafe {

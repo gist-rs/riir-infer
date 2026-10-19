@@ -9,9 +9,9 @@
 #![cfg(feature = "twt_profile")]
 
 use riir_infer_core::twt::{
-    brute_force_optimal, forced_min_blocks, kill_verdict, localize_by_block, minmax_partition,
-    partition_worst, planted_corpus, planted_corpus_noisy, delta, Block, Bucket, DeltaMap,
-    KillVerdict, PartitionError, PRE_REGISTERED_EPS_GRID, SMatrix, SMatrixBuilder, SvccaCfg,
+    Block, Bucket, DeltaMap, KillVerdict, PRE_REGISTERED_EPS_GRID, PartitionError, SMatrix,
+    SMatrixBuilder, SvccaCfg, brute_force_optimal, delta, forced_min_blocks, kill_verdict,
+    localize_by_block, minmax_partition, partition_worst, planted_corpus, planted_corpus_noisy,
 };
 use riir_infer_core::twt::{Lcg, TwtError};
 
@@ -124,8 +124,16 @@ fn g1_near_clones_stay_below_the_first_grid_rung() {
     let mut b = SMatrixBuilder::new(5, 16);
     feed(&mut b, &corpus, 128);
     let m = b.finalize().unwrap().cosine().clone();
-    assert!(m.get(1, 2) < PRE_REGISTERED_EPS_GRID[0], "near-clone {}", m.get(1, 2));
-    assert!(m.get(0, 1) > PRE_REGISTERED_EPS_GRID[3], "distinct {}", m.get(0, 1));
+    assert!(
+        m.get(1, 2) < PRE_REGISTERED_EPS_GRID[0],
+        "near-clone {}",
+        m.get(1, 2)
+    );
+    assert!(
+        m.get(0, 1) > PRE_REGISTERED_EPS_GRID[3],
+        "distinct {}",
+        m.get(0, 1)
+    );
 }
 
 #[test]
@@ -151,9 +159,7 @@ fn t2_2_dp_matches_brute_force_and_holds_constraints() {
     for n in [2usize, 3, 6, 9, 12] {
         // Planted-block + noise S matrices — the shape the lane actually
         // reads, with both tight and loose eps.
-        let groups: Vec<Vec<usize>> = (0..n / 3)
-            .map(|g| vec![g * 3, g * 3 + 1])
-            .collect();
+        let groups: Vec<Vec<usize>> = (0..n / 3).map(|g| vec![g * 3, g * 3 + 1]).collect();
         let refs: Vec<&[usize]> = groups.iter().map(|g| g.as_slice()).collect();
         let corpus = planted_corpus_noisy(0xA11CE + n as u64, n, 8, 24, &refs, 0.05);
         let mut b = SMatrixBuilder::new(n, 8);
@@ -212,9 +218,18 @@ fn t2_2_invalid_eps_refused() {
     let s = SMatrix::from_fn(3, |_, _| 0.5);
     // The error type moved with the primitive (Plan 616): PartitionError
     // re-exported at the same twt paths.
-    assert!(matches!(minmax_partition(&s, -0.1), Err(PartitionError::InvalidEps(_))));
-    assert!(matches!(minmax_partition(&s, f32::NAN), Err(PartitionError::InvalidEps(_))));
-    assert!(matches!(minmax_partition(&s, f32::INFINITY), Err(PartitionError::InvalidEps(_))));
+    assert!(matches!(
+        minmax_partition(&s, -0.1),
+        Err(PartitionError::InvalidEps(_))
+    ));
+    assert!(matches!(
+        minmax_partition(&s, f32::NAN),
+        Err(PartitionError::InvalidEps(_))
+    ));
+    assert!(matches!(
+        minmax_partition(&s, f32::INFINITY),
+        Err(PartitionError::InvalidEps(_))
+    ));
 }
 
 // ── T1.6 — the kill-rule arms on synthetic partitions ────────────────────
@@ -224,7 +239,14 @@ fn t1_6_kill_rule_arms() {
     let singles = |m: usize| -> Vec<Vec<Block>> {
         PRE_REGISTERED_EPS_GRID
             .iter()
-            .map(|_| (0..m).map(|k| Block { start: k, end: k + 1 }).collect())
+            .map(|_| {
+                (0..m)
+                    .map(|k| Block {
+                        start: k,
+                        end: k + 1,
+                    })
+                    .collect()
+            })
             .collect()
     };
     // 28 layers, laya's G-S-S forced floor = 19 → bar = ceil(15.2) = 16.
@@ -233,7 +255,10 @@ fn t1_6_kill_rule_arms() {
     // m = 28 ≥ 16 → block-count kill.
     assert!(matches!(
         kill_verdict(&singles(28), forced).unwrap(),
-        KillVerdict::KillBlockCount { m_at_max_eps: 28, bar: 16 }
+        KillVerdict::KillBlockCount {
+            m_at_max_eps: 28,
+            bar: 16
+        }
     ));
     // m = 15 < 16 but the middle band holds only singletons → middle kill.
     assert!(matches!(
@@ -248,7 +273,10 @@ fn t1_6_kill_rule_arms() {
         Block { start: 5, end: 10 },
         Block { start: 10, end: 15 },
     ];
-    assert!(matches!(kill_verdict(&parts, forced).unwrap(), KillVerdict::Survives { .. }));
+    assert!(matches!(
+        kill_verdict(&parts, forced).unwrap(),
+        KillVerdict::Survives { .. }
+    ));
     // Grid arity mismatch refused loud.
     assert!(matches!(
         kill_verdict(&singles(4)[..3], forced),
@@ -316,15 +344,36 @@ fn t1_4_delta_localizes_planted_damage() {
 #[test]
 fn builder_refuses_every_bad_shape() {
     let mut b = SMatrixBuilder::new(3, 4);
-    assert!(matches!(b.push(0, 0, &[0.0; 4]), Err(TwtError::NoForwardOpen)));
+    assert!(matches!(
+        b.push(0, 0, &[0.0; 4]),
+        Err(TwtError::NoForwardOpen)
+    ));
     b.begin_forward(2).unwrap();
-    assert!(matches!(b.begin_forward(2), Err(TwtError::ForwardAlreadyOpen)));
-    assert!(matches!(b.push(3, 0, &[0.0; 4]), Err(TwtError::LayerOutOfRange { .. })));
-    assert!(matches!(b.push(0, 2, &[0.0; 4]), Err(TwtError::RowOutOfRange { .. })));
-    assert!(matches!(b.push(0, 0, &[0.0; 3]), Err(TwtError::DimMismatch { .. })));
-    assert!(matches!(b.push(0, 0, &[f32::NAN; 4]), Err(TwtError::NonFiniteState { .. })));
+    assert!(matches!(
+        b.begin_forward(2),
+        Err(TwtError::ForwardAlreadyOpen)
+    ));
+    assert!(matches!(
+        b.push(3, 0, &[0.0; 4]),
+        Err(TwtError::LayerOutOfRange { .. })
+    ));
+    assert!(matches!(
+        b.push(0, 2, &[0.0; 4]),
+        Err(TwtError::RowOutOfRange { .. })
+    ));
+    assert!(matches!(
+        b.push(0, 0, &[0.0; 3]),
+        Err(TwtError::DimMismatch { .. })
+    ));
+    assert!(matches!(
+        b.push(0, 0, &[f32::NAN; 4]),
+        Err(TwtError::NonFiniteState { .. })
+    ));
     b.push(0, 0, &[0.1; 4]).unwrap();
-    assert!(matches!(b.push(0, 0, &[0.1; 4]), Err(TwtError::DoubleWrite { .. })));
+    assert!(matches!(
+        b.push(0, 0, &[0.1; 4]),
+        Err(TwtError::DoubleWrite { .. })
+    ));
     assert!(matches!(
         b.end_forward(),
         Err(TwtError::IncompleteForward { got: 1, want: 6 })
@@ -376,7 +425,10 @@ fn t2_3_partition_perf_at_n4096() {
 #[test]
 fn svcca_probe_floor_refuses_blind_meter() {
     let corpus = planted_corpus(5, 3, 8, 4, &[&[0, 1]]);
-    let mut b = SMatrixBuilder::new(3, 8).with_svcca(SvccaCfg { stride: 1, cap_rows: 4 });
+    let mut b = SMatrixBuilder::new(3, 8).with_svcca(SvccaCfg {
+        stride: 1,
+        cap_rows: 4,
+    });
     feed(&mut b, &corpus, 4);
     // 4 retained rows ≤ dim 8 → blind meter, loud refusal (never a skip).
     assert!(matches!(b.finalize(), Err(TwtError::ProbeFloor { .. })));

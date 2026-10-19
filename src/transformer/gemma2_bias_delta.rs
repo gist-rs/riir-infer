@@ -37,9 +37,9 @@
 use katgpt_transformer::MultiLayerKVCache;
 
 use crate::gemma_layer::GemmaTransformerWeightsF16;
-use crate::types;
 use crate::transformer::ForwardContext;
 use crate::transformer::RAYON_QKV_THRESHOLD;
+use crate::types;
 
 /// The projection-output windows the bias overlay attaches to (K excluded —
 /// softmax shift-invariance; see module docs).
@@ -84,13 +84,7 @@ impl BiasDeltaSite {
 /// The hook may read or mutate `out`; mutations ARE the overlay.
 pub trait BiasDeltaHook {
     /// `site`'s output window for `layer_idx` at `pos`.
-    fn proj_out(
-        &mut self,
-        layer_idx: usize,
-        pos: usize,
-        site: BiasDeltaSite,
-        out: &mut [f32],
-    ) {
+    fn proj_out(&mut self, layer_idx: usize, pos: usize, site: BiasDeltaSite, out: &mut [f32]) {
         let _ = (layer_idx, pos, site, out);
     }
 }
@@ -255,7 +249,12 @@ pub fn forward_gemma2_f16_bias_hook<H: BiasDeltaHook + ?Sized>(
         }
 
         // ── HOOKS Gate + Up: post-projection, pre GeGLU ──
-        hook.proj_out(layer_idx, pos, BiasDeltaSite::Gate, &mut ctx.gate[..mlp_hidden]);
+        hook.proj_out(
+            layer_idx,
+            pos,
+            BiasDeltaSite::Gate,
+            &mut ctx.gate[..mlp_hidden],
+        );
         hook.proj_out(layer_idx, pos, BiasDeltaSite::Up, &mut ctx.up[..mlp_hidden]);
 
         types::gegelu_tanh(&mut ctx.hidden, &ctx.gate, &ctx.up);

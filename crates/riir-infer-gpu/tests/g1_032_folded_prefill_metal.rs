@@ -47,12 +47,12 @@
 use std::path::PathBuf;
 
 use riir_infer_core::gguf_loader::load_qwen_deltanet_ternary_weights_gguf;
+use riir_infer_gpu::TernaryDeltanetGpuForward;
 use riir_infer_gpu::cubecl_runtime::CubeCLContext;
 use riir_infer_gpu::ternary_deltanet_gpu_forward::{
     set_prefill_attention_batched, set_prefill_batch_elementwise, set_prefill_chunked,
     set_prefill_chunked_conv1d,
 };
-use riir_infer_gpu::TernaryDeltanetGpuForward;
 
 const FOLDED_MODEL: &str = "../../../riir-train/data/Ternary-Bonsai-2-27B-PQ2_0.gguf";
 const PREROT_MODEL: &str = "../../../riir-train/data/Ternary-Bonsai-27B-Q2_0.gguf";
@@ -65,7 +65,9 @@ const TOP20_MIN: f32 = 0.80;
 const REL_ERR_MAX: f32 = 0.02;
 
 fn env_path(var: &str, default: &str) -> PathBuf {
-    std::env::var_os(var).map(PathBuf::from).unwrap_or_else(|| PathBuf::from(default))
+    std::env::var_os(var)
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from(default))
 }
 
 fn top_k(v: &[f32], k: usize) -> Vec<usize> {
@@ -93,7 +95,11 @@ fn worst_rel_err(a: &[f32], b: &[f32], k: usize) -> f32 {
     };
     let (pa, pb) = (probs(a), probs(b));
     pa.iter()
-        .filter_map(|(i, va)| pb.iter().find(|(j, _)| j == i).map(|(_, vb)| (va - vb).abs() / va.abs().max(1e-9)))
+        .filter_map(|(i, va)| {
+            pb.iter()
+                .find(|(j, _)| j == i)
+                .map(|(_, vb)| (va - vb).abs() / va.abs().max(1e-9))
+        })
         .fold(0.0f32, f32::max)
 }
 
@@ -103,15 +109,22 @@ fn argmax(v: &[f32]) -> usize {
 
 fn logits_fnv(v: &[f32]) -> u64 {
     v.iter().fold(0xcbf2_9ce4_8422_2325u64, |h, x| {
-        x.to_bits()
-            .to_le_bytes()
-            .iter()
-            .fold(h, |h, b| (h ^ u64::from(*b)).wrapping_mul(0x0000_0100_0000_01b3))
+        x.to_bits().to_le_bytes().iter().fold(h, |h, b| {
+            (h ^ u64::from(*b)).wrapping_mul(0x0000_0100_0000_01b3)
+        })
     })
 }
 
 fn prompt(p: usize, bos: usize, vocab: usize) -> Vec<usize> {
-    (0..p).map(|i| if i == 0 { bos } else { (bos + i * 7919) % vocab }).collect()
+    (0..p)
+        .map(|i| {
+            if i == 0 {
+                bos
+            } else {
+                (bos + i * 7919) % vocab
+            }
+        })
+        .collect()
 }
 
 /// The shipping prefill knob state (riir-ai `bench_1004_r1_staged_recurrence_e2e`).
@@ -123,13 +136,25 @@ fn shipping_knobs() {
 }
 
 fn gate(label: &str, prefill: &[f32], decode: &[f32]) {
-    let (t5, t20, rel) = (overlap(prefill, decode, 5), overlap(prefill, decode, 20), worst_rel_err(prefill, decode, 20));
+    let (t5, t20, rel) = (
+        overlap(prefill, decode, 5),
+        overlap(prefill, decode, 20),
+        worst_rel_err(prefill, decode, 20),
+    );
     let (ap, ad) = (argmax(prefill), argmax(decode));
-    println!("{label}: argmax prefill {ap} / decode {ad} · top-5 {t5:.2} · top-20 {t20:.2} · worst rel err {rel:.3e}");
+    println!(
+        "{label}: argmax prefill {ap} / decode {ad} · top-5 {t5:.2} · top-20 {t20:.2} · worst rel err {rel:.3e}"
+    );
     assert_eq!(ap, ad, "{label}: top-1 differs (prefill {ap}, decode {ad})");
     assert!(t5 >= TOP5_MIN, "{label}: top-5 overlap {t5} < {TOP5_MIN}");
-    assert!(t20 >= TOP20_MIN, "{label}: top-20 overlap {t20} < {TOP20_MIN}");
-    assert!(rel <= REL_ERR_MAX, "{label}: worst rel err {rel} > {REL_ERR_MAX}");
+    assert!(
+        t20 >= TOP20_MIN,
+        "{label}: top-20 overlap {t20} < {TOP20_MIN}"
+    );
+    assert!(
+        rel <= REL_ERR_MAX,
+        "{label}: worst rel err {rel} > {REL_ERR_MAX}"
+    );
 }
 
 #[test]
@@ -141,14 +166,22 @@ fn folded_prefill_matches_folded_decode() {
         .filter_map(|s| s.trim().parse().ok())
         .collect();
     let model = env_path("BONSAI2_G1_MODEL", FOLDED_MODEL);
-    let (mut config, weights) = load_qwen_deltanet_ternary_weights_gguf(&model).expect("folded model load");
-    assert!(weights.rotation.is_some(), "{}: not a Hadamard-folded file", model.display());
+    let (mut config, weights) =
+        load_qwen_deltanet_ternary_weights_gguf(&model).expect("folded model load");
+    assert!(
+        weights.rotation.is_some(),
+        "{}: not a Hadamard-folded file",
+        model.display()
+    );
     config.block_size = ps.iter().copied().max().unwrap_or(512) + 1;
     shipping_knobs();
 
     let ctx = CubeCLContext::new().expect("GPU init");
     let mut fwd = TernaryDeltanetGpuForward::new(&ctx, &config, &weights);
-    assert!(fwd.is_folded(), "folded constructor did not build rotation tables");
+    assert!(
+        fwd.is_folded(),
+        "folded constructor did not build rotation tables"
+    );
 
     for &p in &ps {
         let tokens = prompt(p, config.bos_token, config.vocab_size);
@@ -177,8 +210,13 @@ fn folded_prefill_matches_folded_decode() {
 #[ignore = "requires the Metal GPU + the pre-rotation Q2_0 model; run explicitly with --release"]
 fn prerotation_prefill_pin_unchanged() {
     let model = env_path("BONSAI1_G3_MODEL", PREROT_MODEL);
-    let (mut config, weights) = load_qwen_deltanet_ternary_weights_gguf(&model).expect("pre-rotation model load");
-    assert!(weights.rotation.is_none(), "{}: expected a pre-rotation file", model.display());
+    let (mut config, weights) =
+        load_qwen_deltanet_ternary_weights_gguf(&model).expect("pre-rotation model load");
+    assert!(
+        weights.rotation.is_none(),
+        "{}: expected a pre-rotation file",
+        model.display()
+    );
     config.block_size = 2048;
     shipping_knobs();
 
@@ -188,8 +226,14 @@ fn prerotation_prefill_pin_unchanged() {
     fwd.reset_state();
     let logits = fwd.prefill(&prompt(2048, config.bos_token, config.vocab_size));
     let fnv = logits_fnv(&logits);
-    println!("pre-rotation P=2048: argmax {} · fnv {fnv:016x}", argmax(&logits));
-    assert_eq!(fnv, PREROT_PIN_P2048, "pre-rotation prefill logits moved (pin {PREROT_PIN_P2048:016x})");
+    println!(
+        "pre-rotation P=2048: argmax {} · fnv {fnv:016x}",
+        argmax(&logits)
+    );
+    assert_eq!(
+        fnv, PREROT_PIN_P2048,
+        "pre-rotation prefill logits moved (pin {PREROT_PIN_P2048:016x})"
+    );
 }
 
 fn sh(cmd: &str, args: &[&str]) -> String {
@@ -208,11 +252,22 @@ fn sh(cmd: &str, args: &[&str]) -> String {
 #[test]
 #[ignore = "requires the Metal GPU + the Bonsai-2 PQ2_0 model; run explicitly with --release"]
 fn folded_prefill_throughput() {
-    let p: usize = std::env::var("I032_TP_P").ok().and_then(|s| s.parse().ok()).unwrap_or(2048);
-    let rounds: usize = std::env::var("I032_ROUNDS").ok().and_then(|s| s.parse().ok()).unwrap_or(3);
+    let p: usize = std::env::var("I032_TP_P")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(2048);
+    let rounds: usize = std::env::var("I032_ROUNDS")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(3);
     let model = env_path("BONSAI2_G1_MODEL", FOLDED_MODEL);
-    let (mut config, weights) = load_qwen_deltanet_ternary_weights_gguf(&model).expect("folded model load");
-    assert!(weights.rotation.is_some(), "{}: not a Hadamard-folded file", model.display());
+    let (mut config, weights) =
+        load_qwen_deltanet_ternary_weights_gguf(&model).expect("folded model load");
+    assert!(
+        weights.rotation.is_some(),
+        "{}: not a Hadamard-folded file",
+        model.display()
+    );
     config.block_size = p;
     shipping_knobs();
     let ctx = CubeCLContext::new().expect("GPU init");
@@ -234,7 +289,11 @@ fn folded_prefill_throughput() {
         let t = std::time::Instant::now();
         let logits = fwd.prefill(&tokens);
         secs.push(t.elapsed().as_secs_f64());
-        assert_eq!(logits_fnv(&logits), logits_fnv(&warm), "folded prefill is not deterministic");
+        assert_eq!(
+            logits_fnv(&logits),
+            logits_fnv(&warm),
+            "folded prefill is not deterministic"
+        );
     }
     secs.sort_by(f64::total_cmp);
     let prefill_tps = p as f64 / secs[secs.len() / 2];

@@ -163,13 +163,19 @@ impl fmt::Display for RecordError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::TooLong { tokens, bucket } => {
-                write!(f, "Record needs {tokens} tokens; the largest bucket holds {bucket}")
+                write!(
+                    f,
+                    "Record needs {tokens} tokens; the largest bucket holds {bucket}"
+                )
             }
             Self::EmptyOptions { question } => {
                 write!(f, "question {question} has no options")
             }
             Self::ImagePlaceholder { count } => {
-                write!(f, "state or schema text contains image placeholder tokens ({count})")
+                write!(
+                    f,
+                    "state or schema text contains image placeholder tokens ({count})"
+                )
             }
             Self::Tokenizer(e) => write!(f, "clef record: tokenizer: {e}"),
         }
@@ -196,9 +202,15 @@ fn tokens(tokenizer: &ClefTokenizer, text: &str) -> Result<Vec<u32>, RecordError
 /// `{"description":…,"option_id":…}` when a description exists).
 fn option_semantics(option_id: &str, description: Option<&str>) -> Value {
     let mut semantics = serde_json::Map::new();
-    semantics.insert("option_id".to_string(), Value::String(option_id.to_string()));
+    semantics.insert(
+        "option_id".to_string(),
+        Value::String(option_id.to_string()),
+    );
     if let Some(description) = description {
-        semantics.insert("description".to_string(), Value::String(description.to_string()));
+        semantics.insert(
+            "description".to_string(),
+            Value::String(description.to_string()),
+        );
     }
     Value::Object(semantics)
 }
@@ -244,10 +256,15 @@ pub fn encode(
         let mut option_ids: Vec<String> = Vec::new();
         let options = question.options();
         if options.is_empty() {
-            return Err(RecordError::EmptyOptions { question: id.clone() });
+            return Err(RecordError::EmptyOptions {
+                question: id.clone(),
+            });
         }
         for (option_index, (option_id, description)) in options.iter().enumerate() {
-            schema.extend(tokens(tokenizer, &format!("OPTION {}: ", option_index + 1))?);
+            schema.extend(tokens(
+                tokenizer,
+                &format!("OPTION {}: ", option_index + 1),
+            )?);
             let option_start = schema.len();
             schema.extend(tokens(
                 tokenizer,
@@ -407,10 +424,17 @@ mod tests {
                 "channel".into(),
                 choice(
                     Some("Which channel?"),
-                    &[("chat", "Live chat"), ("email", "Email support"), ("phone", "Phone")],
+                    &[
+                        ("chat", "Live chat"),
+                        ("email", "Email support"),
+                        ("phone", "Phone"),
+                    ],
                 ),
             ),
-            ("mood".into(), score(Some("Rate it."), &["poor", "ok", "good"])),
+            (
+                "mood".into(),
+                score(Some("Rate it."), &["poor", "ok", "good"]),
+            ),
         ];
         let record = encode(&tokenizer, &state, &questions, 2048).expect("encodes");
 
@@ -427,7 +451,11 @@ mod tests {
             let span_text = tokenizer
                 .decode(&record.input_ids[encoded.span.clone()], false)
                 .expect("span decodes");
-            assert_eq!(span_text, effective_instructions(id, question), "span of {id}");
+            assert_eq!(
+                span_text,
+                effective_instructions(id, question),
+                "span of {id}"
+            );
             assert!(
                 (cursor..encoded.span.end).contains(&encoded.span.start),
                 "span ordering"
@@ -441,10 +469,7 @@ mod tests {
                 "option spans follow the instruction span"
             );
             let options = question.options();
-            for (span, (option_id, description)) in encoded
-                .option_spans
-                .iter()
-                .zip(options.iter())
+            for (span, (option_id, description)) in encoded.option_spans.iter().zip(options.iter())
             {
                 let option_text = tokenizer
                     .decode(&record.input_ids[span.clone()], false)
@@ -474,7 +499,11 @@ mod tests {
             vec!["chat", "email", "phone"],
             "choice ids sorted"
         );
-        assert_eq!(record.questions[2].option_ids, vec!["0", "1", "2"], "score ids index");
+        assert_eq!(
+            record.questions[2].option_ids,
+            vec!["0", "1", "2"],
+            "score ids index"
+        );
     }
 
     /// noul criteria override descriptions (never the order); score
@@ -502,7 +531,10 @@ mod tests {
 
         let levels = score(Some("How confident?"), &["l", "m", "h"]);
         assert_eq!(levels.options().len(), 3);
-        assert_eq!(levels.options()[2], ("2".to_string(), Some("h".to_string())));
+        assert_eq!(
+            levels.options()[2],
+            ("2".to_string(), Some("h".to_string()))
+        );
 
         // empty option sets refuse (empty choice criteria / score list)
         let tokenizer = lossless_tokenizer();
@@ -524,7 +556,10 @@ mod tests {
             2048,
         )
         .expect_err("empty score refuses");
-        assert!(matches!(err, RecordError::EmptyOptions { .. }), "got: {err}");
+        assert!(
+            matches!(err, RecordError::EmptyOptions { .. }),
+            "got: {err}"
+        );
     }
 
     /// The overflow walls: fixed > max_length refuses with the exact
@@ -595,8 +630,8 @@ mod tests {
 
         // image placeholder refuses
         let poisoned = json!({"note": "see <|image_pad|> below"});
-        let err = encode(&tokenizer, &poisoned, &questions, 2048)
-            .expect_err("image placeholder refuses");
+        let err =
+            encode(&tokenizer, &poisoned, &questions, 2048).expect_err("image placeholder refuses");
         assert!(
             matches!(err, RecordError::ImagePlaceholder { count } if count == 1),
             "got: {err}"
@@ -640,10 +675,8 @@ mod tests {
             questions_json: Vec<Value>,
             truncates: bool,
         ) -> FixtureSpec {
-            let questions: Vec<(String, ClefQuestion)> = questions_json
-                .iter()
-                .map(parse_question)
-                .collect();
+            let questions: Vec<(String, ClefQuestion)> =
+                questions_json.iter().map(parse_question).collect();
             FixtureSpec {
                 name,
                 max_length,
@@ -659,7 +692,12 @@ mod tests {
                 Some(2048),
                 serde_json::json!({"tier": "gold", "unread": 3}),
                 vec![
-                    q("tier_check", "noul", Some("Is the user gold tier?"), serde_json::json!({})),
+                    q(
+                        "tier_check",
+                        "noul",
+                        Some("Is the user gold tier?"),
+                        serde_json::json!({}),
+                    ),
                     q(
                         "channel",
                         "choice",
@@ -706,8 +744,18 @@ mod tests {
                         Some("Pick a lane."),
                         serde_json::json!({"b": "Lane B", "a": "Lane A"}),
                     ),
-                    q("f3", "score", None, serde_json::json!(["low", "mid", "high"])),
-                    q("f4", "choice", Some("Final"), serde_json::json!({"z": "Zee", "m": "Emm"})),
+                    q(
+                        "f3",
+                        "score",
+                        None,
+                        serde_json::json!(["low", "mid", "high"]),
+                    ),
+                    q(
+                        "f4",
+                        "choice",
+                        Some("Final"),
+                        serde_json::json!({"z": "Zee", "m": "Emm"}),
+                    ),
                 ],
                 false,
             ),
@@ -719,7 +767,18 @@ mod tests {
                     "confidence",
                     "score",
                     Some("How confident?"),
-                    serde_json::json!(["none", "slight", "low", "lean", "mid", "fair", "good", "high", "very high", "certain"]),
+                    serde_json::json!([
+                        "none",
+                        "slight",
+                        "low",
+                        "lean",
+                        "mid",
+                        "fair",
+                        "good",
+                        "high",
+                        "very high",
+                        "certain"
+                    ]),
                 )],
                 false,
             ),
@@ -730,7 +789,12 @@ mod tests {
                     "note": "héllo — 中文 \n \"quoted\" \\ back\ttab",
                     "amount": 12.25,
                 }),
-                vec![q("valid", "noul", Some("Valid note?"), serde_json::json!({}))],
+                vec![q(
+                    "valid",
+                    "noul",
+                    Some("Valid note?"),
+                    serde_json::json!({}),
+                )],
                 false,
             ),
             // The truncation record: the generator computes fixed+12 so
@@ -749,7 +813,10 @@ mod tests {
     }
 
     fn fixtures_path() -> &'static str {
-        concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/clef_text/records/records.json")
+        concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/tests/fixtures/clef_text/records/records.json"
+        )
     }
 
     /// One-time generator for [`real_wire_record_goldens`]'s frozen
@@ -820,8 +887,11 @@ mod tests {
         });
         let path = std::path::Path::new(fixtures_path());
         std::fs::create_dir_all(path.parent().expect("parent")).expect("fixture dir");
-        std::fs::write(path, serde_json::to_string_pretty(&document).expect("serializes"))
-            .expect("fixtures written");
+        std::fs::write(
+            path,
+            serde_json::to_string_pretty(&document).expect("serializes"),
+        )
+        .expect("fixtures written");
         println!("wrote {}", path.display());
     }
 
@@ -878,7 +948,8 @@ mod tests {
                     type_index: question["type_index"].as_u64().expect("type") as u32,
                     span: {
                         let span = question["span"].as_array().expect("span");
-                        span[0].as_u64().expect("start") as usize..span[1].as_u64().expect("end") as usize
+                        span[0].as_u64().expect("start") as usize
+                            ..span[1].as_u64().expect("end") as usize
                     },
                     option_spans: question["option_spans"]
                         .as_array()
@@ -901,8 +972,14 @@ mod tests {
 
             let encoded = encode(&tokenizer, state, &questions, max_length)
                 .unwrap_or_else(|e| panic!("record {name}: {e}"));
-            assert_eq!(encoded.input_ids, expected_ids, "record {name}: token ids drifted");
-            assert_eq!(encoded.questions, expected_questions, "record {name}: spans drifted");
+            assert_eq!(
+                encoded.input_ids, expected_ids,
+                "record {name}: token ids drifted"
+            );
+            assert_eq!(
+                encoded.questions, expected_questions,
+                "record {name}: spans drifted"
+            );
 
             // legibility against the real BPE: untruncated records
             // decode to the exact reference text; a truncated record
@@ -910,14 +987,18 @@ mod tests {
             // VERBATIM schema+suffix tail, and fills its budget exactly
             // (token truncation cuts mid-word, so the state lead is
             // pinned by the token ids, not by character prefixing).
-            let decoded = tokenizer.decode(&encoded.input_ids, false).expect("decodes");
+            let decoded = tokenizer
+                .decode(&encoded.input_ids, false)
+                .expect("decodes");
             let full = expected_record_text(state, &questions);
             if decoded != full {
                 // the complete-verbatim regions: the prefix (through
                 // `STATE:\n`) leads, the schema+suffix tail follows —
                 // the state between them is the token-cut middle
                 let state_lead_end = full.find("STATE:\n").expect("state lead") + "STATE:\n".len();
-                let schema_head = full.find("\n\nSCHEMA FIELDS:\n").expect("schema head in render");
+                let schema_head = full
+                    .find("\n\nSCHEMA FIELDS:\n")
+                    .expect("schema head in render");
                 assert!(
                     decoded.starts_with(&full[..state_lead_end]),
                     "{name}: truncated record must keep the full prefix"

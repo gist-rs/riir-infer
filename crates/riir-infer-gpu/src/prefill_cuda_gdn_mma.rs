@@ -612,7 +612,9 @@ impl CudaGdnMmaKernels {
             if smem as i32 > smpbo {
                 return Ok(None); // arm doesn't fit this device's opt-in ceiling
             }
-            let f = module.load_function(name).map_err(|e| format!("{name}: {e}"))?;
+            let f = module
+                .load_function(name)
+                .map_err(|e| format!("{name}: {e}"))?;
             f.set_attribute(
                 cudarc::driver::sys::CUfunction_attribute_enum::CU_FUNC_ATTRIBUTE_MAX_DYNAMIC_SHARED_SIZE_BYTES,
                 smem as i32,
@@ -634,7 +636,7 @@ impl CudaGdnMmaKernels {
             smpbo,
             _module: module,
         })
-}
+    }
 
     /// The reference's `select_gdn_mma_path` ladder (single-seq form):
     /// `H ∈ {16,32,48,64}` + `n_tokens ≥ 64` + the occupancy-keyed value

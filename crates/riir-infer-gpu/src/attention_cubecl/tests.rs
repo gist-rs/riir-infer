@@ -552,7 +552,10 @@ fn verify_block_causal_attention(
 /// [`verify_block_causal_attention`] at an explicit `(n_head, n_kv_head)`
 /// head geometry (head_dim stays 256).
 #[cfg(feature = "gemma2_d2f")]
-#[allow(clippy::too_many_arguments, reason = "test harness mirrors the kernel's parameter set")]
+#[allow(
+    clippy::too_many_arguments,
+    reason = "test harness mirrors the kernel's parameter set"
+)]
 fn verify_block_causal_attention_shaped(
     client: &ComputeClient<ActiveRuntime>,
     (n_head, n_kv_head): (usize, usize),
@@ -777,9 +780,15 @@ fn test_attention_block_causal_runtime_head_geometry() {
     for (n_head, n_kv_head) in [(4usize, 1usize), (2, 2)] {
         let q_len = n_head * HEAD_DIM;
         let kv_len = n_positions * n_kv_head * HEAD_DIM;
-        let query: Vec<f32> = (0..q_len).map(|i| ((i as f32) * 0.01).sin() * 0.5).collect();
-        let keys: Vec<f32> = (0..kv_len).map(|i| ((i as f32) * 0.02).cos() * 0.3).collect();
-        let values: Vec<f32> = (0..kv_len).map(|i| ((i as f32) * 0.03).sin() * 0.2).collect();
+        let query: Vec<f32> = (0..q_len)
+            .map(|i| ((i as f32) * 0.01).sin() * 0.5)
+            .collect();
+        let keys: Vec<f32> = (0..kv_len)
+            .map(|i| ((i as f32) * 0.02).cos() * 0.3)
+            .collect();
+        let values: Vec<f32> = (0..kv_len)
+            .map(|i| ((i as f32) * 0.03).sin() * 0.2)
+            .collect();
         for pos in [0, 100, 248, 255, 256, 263] {
             verify_block_causal_attention_shaped(
                 &client,
@@ -858,7 +867,10 @@ fn test_attention_block_causal_metal_tanh_tail_regression() {
             block_size,
         );
         let bad = out.iter().filter(|x| !x.is_finite()).count();
-        assert_eq!(bad, 0, "pos {pos}: {bad} non-finite attention outputs — the tanh tail clamp is not holding");
+        assert_eq!(
+            bad, 0,
+            "pos {pos}: {bad} non-finite attention outputs — the tanh tail clamp is not holding"
+        );
     }
 
     // And the values still match the CPU reference (clamp is invisible in f32).
@@ -913,7 +925,9 @@ fn run_block_causal_shaped(
         attn_out_handle.clone(),
         &params,
     );
-    let bytes = client.read_one(attn_out_handle).expect("should read output");
+    let bytes = client
+        .read_one(attn_out_handle)
+        .expect("should read output");
     f32::from_bytes(&bytes).to_vec()
 }
 

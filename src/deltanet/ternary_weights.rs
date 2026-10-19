@@ -65,7 +65,8 @@ pub fn ternary_matvec_parallel(w: &TernaryGroupWeights, x: &[f32], y: &mut [f32]
 /// `false` repacks to bit-planes as before. Read by the loader only — flip it
 /// BEFORE a load; an already-loaded model keeps its representation.
 #[cfg(feature = "ternary_q2_resident")]
-static TERNARY_Q2_RESIDENT: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(true);
+static TERNARY_Q2_RESIDENT: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(true);
 
 /// Select the representation the NEXT load gives `Q2_0` projections.
 #[cfg(feature = "ternary_q2_resident")]
@@ -90,7 +91,12 @@ pub fn ternary_q2_resident() -> bool {
 #[cfg(feature = "ternary_q2_resident")]
 #[inline]
 pub fn ternary_q2_matvec_parallel(w: &TernaryQ2Proj, x: &[f32], y: &mut [f32]) {
-    ternary_q2_matvec_arm(w, x, y, TERNARY_Q8_ACT.load(std::sync::atomic::Ordering::Relaxed));
+    ternary_q2_matvec_arm(
+        w,
+        x,
+        y,
+        TERNARY_Q8_ACT.load(std::sync::atomic::Ordering::Relaxed),
+    );
 }
 
 /// [`ternary_q2_matvec_parallel`] with the arm passed in (tests pin both arms
@@ -125,7 +131,11 @@ pub fn matvec_n_into<const N: usize>(ws: [&ProjWeights; N], ys: [&mut [f32]; N],
                 i += 1;
                 &mut y[..rows]
             });
-            katgpt_core::simd_ternary_q2_matvec_q8_parallel_n(q2s.map(TernaryQ2Proj::q2), &x[..q2s[0].cols], ys);
+            katgpt_core::simd_ternary_q2_matvec_q8_parallel_n(
+                q2s.map(TernaryQ2Proj::q2),
+                &x[..q2s[0].cols],
+                ys,
+            );
             return;
         }
     }
@@ -135,7 +145,13 @@ pub fn matvec_n_into<const N: usize>(ws: [&ProjWeights; N], ys: [&mut [f32]; N],
 }
 
 /// [`matvec_n_into`] at `N = 2` — the FFN's gate + up.
-pub fn matvec_pair_into(wa: &ProjWeights, ya: &mut [f32], wb: &ProjWeights, yb: &mut [f32], x: &[f32]) {
+pub fn matvec_pair_into(
+    wa: &ProjWeights,
+    ya: &mut [f32],
+    wb: &ProjWeights,
+    yb: &mut [f32],
+    x: &[f32],
+) {
     matvec_n_into([wa, wb], [ya, yb], x);
 }
 
@@ -172,7 +188,10 @@ impl TernaryQ2Proj {
     /// A code-3 (`+2`) weight — not ternary (the loader refuses it first).
     pub fn new(q2: katgpt_core::TernaryQ2Weights) -> Self {
         assert!(q2.is_ternary(), "TernaryQ2Proj: code 3 (+2) is not ternary");
-        Self { q2, planes: std::sync::OnceLock::new() }
+        Self {
+            q2,
+            planes: std::sync::OnceLock::new(),
+        }
     }
 
     /// The raw `Q2_0` blocks (the q8 kernel's operand).
@@ -300,7 +319,11 @@ impl GateProjWeights {
                 // 12x the serial scalar reduction it replaced on Bonsai 2's
                 // 48x5120 a/b, greedy-token identical, +3% decode tok/s.
                 for (r, yr) in y[..*rows].iter_mut().enumerate() {
-                    *yr = katgpt_core::simd::simd_dot_f32(&data[r * cols..(r + 1) * cols], &x[..*cols], *cols);
+                    *yr = katgpt_core::simd::simd_dot_f32(
+                        &data[r * cols..(r + 1) * cols],
+                        &x[..*cols],
+                        *cols,
+                    );
                 }
             }
         }
@@ -485,7 +508,10 @@ impl ProjWeights {
                 let nb = cols / QK_K;
                 let mut out = vec![0.0f32; rows * cols];
                 for r in 0..*rows {
-                    dequantize_row_q4_k(&blocks[r * nb..(r + 1) * nb], &mut out[r * cols..(r + 1) * cols]);
+                    dequantize_row_q4_k(
+                        &blocks[r * nb..(r + 1) * nb],
+                        &mut out[r * cols..(r + 1) * cols],
+                    );
                 }
                 out
             }
@@ -497,12 +523,17 @@ impl ProjWeights {
                 let nb = cols / QK_K;
                 let mut out = vec![0.0f32; rows * cols];
                 for r in 0..*rows {
-                    dequantize_row_q6_k(&blocks[r * nb..(r + 1) * nb], &mut out[r * cols..(r + 1) * cols]);
+                    dequantize_row_q6_k(
+                        &blocks[r * nb..(r + 1) * nb],
+                        &mut out[r * cols..(r + 1) * cols],
+                    );
                 }
                 out
             }
             #[cfg(feature = "ternary_q2_resident")]
-            Self::TernaryQ2(w) => QwenDeltaNetTernaryWeights::dequant_proj_to_dense(&w.planes_cow()),
+            Self::TernaryQ2(w) => {
+                QwenDeltaNetTernaryWeights::dequant_proj_to_dense(&w.planes_cow())
+            }
         }
     }
 
@@ -522,7 +553,9 @@ impl ProjWeights {
                 *rows == 0 || blocks.len() == rows * (cols / QK_K)
             }
             #[cfg(feature = "ternary_q2_resident")]
-            Self::TernaryQ2(w) => w.rows == 0 || (w.blocks.len() == w.rows * w.groups_per_row && w.is_ternary()),
+            Self::TernaryQ2(w) => {
+                w.rows == 0 || (w.blocks.len() == w.rows * w.groups_per_row && w.is_ternary())
+            }
         }
     }
 
@@ -544,8 +577,12 @@ impl ProjWeights {
                 let scales = w.rows * w.groups_per_row * std::mem::size_of::<half::f16>();
                 planes + scales
             }
-            Self::Q4K(blocks, _, _) => blocks.len() * std::mem::size_of::<crate::quant::q4k::BlockQ4K>(),
-            Self::Q6K(blocks, _, _) => blocks.len() * std::mem::size_of::<crate::quant::q6k::BlockQ6K>(),
+            Self::Q4K(blocks, _, _) => {
+                blocks.len() * std::mem::size_of::<crate::quant::q4k::BlockQ4K>()
+            }
+            Self::Q6K(blocks, _, _) => {
+                blocks.len() * std::mem::size_of::<crate::quant::q6k::BlockQ6K>()
+            }
             #[cfg(feature = "ternary_q2_resident")]
             Self::TernaryQ2(w) => w.storage_bytes(),
         }
@@ -555,9 +592,18 @@ impl ProjWeights {
 /// The Q4K matvec body: per-row fused dequant-dot, rayon across rows at the
 /// ternary kernel's ≥ 256-row threshold (row-independent work — bit-stable
 /// under any worker count).
-fn matvec_q4k(y: &mut [f32], blocks: &[crate::quant::q4k::BlockQ4K], rows: usize, cols: usize, x: &[f32]) {
+fn matvec_q4k(
+    y: &mut [f32],
+    blocks: &[crate::quant::q4k::BlockQ4K],
+    rows: usize,
+    cols: usize,
+    x: &[f32],
+) {
     use crate::quant::q4k::{QK_K, gemv_q4_k_row};
-    assert!(cols.is_multiple_of(QK_K), "q4 projection cols {cols} not a multiple of {QK_K}");
+    assert!(
+        cols.is_multiple_of(QK_K),
+        "q4 projection cols {cols} not a multiple of {QK_K}"
+    );
     let nb = cols / QK_K;
     debug_assert_eq!(blocks.len(), rows * nb, "q4 block count mismatch");
     if rows >= 256 {
@@ -583,9 +629,18 @@ fn matvec_q4k(y: &mut [f32], blocks: &[crate::quant::q4k::BlockQ4K], rows: usize
 /// The Q6K matvec body — the [`matvec_q4k`] twin over `Q6_K` blocks
 /// (identical contract: rayon across rows at ≥ 256 rows, row-independent
 /// work, bit-stable under any worker count).
-fn matvec_q6k(y: &mut [f32], blocks: &[crate::quant::q6k::BlockQ6K], rows: usize, cols: usize, x: &[f32]) {
+fn matvec_q6k(
+    y: &mut [f32],
+    blocks: &[crate::quant::q6k::BlockQ6K],
+    rows: usize,
+    cols: usize,
+    x: &[f32],
+) {
     use crate::quant::q6k::{QK_K, gemv_q6_k_row};
-    assert!(cols.is_multiple_of(QK_K), "q6 projection cols {cols} not a multiple of {QK_K}");
+    assert!(
+        cols.is_multiple_of(QK_K),
+        "q6 projection cols {cols} not a multiple of {QK_K}"
+    );
     let nb = cols / QK_K;
     debug_assert_eq!(blocks.len(), rows * nb, "q6 block count mismatch");
     if rows >= 256 {
@@ -1168,7 +1223,9 @@ fn convert_ternary_layer_to_proj_layer(
             super::ternary_weights::GateProjWeights::Dense(data, rows, cols) => {
                 Proj::dense(data.clone(), *rows, *cols)
             }
-            super::ternary_weights::GateProjWeights::Ternary(t) => convert_ternary_ref(t, trainable),
+            super::ternary_weights::GateProjWeights::Ternary(t) => {
+                convert_ternary_ref(t, trainable)
+            }
         }
     }
 
@@ -1255,7 +1312,10 @@ mod tests {
         let nb = cols / QK_K;
         let mut blocks = vec![crate::quant::q4k::BlockQ4K::zeroed(); rows * nb];
         for r in 0..rows {
-            quantize_row_q4_k(&src[r * cols..(r + 1) * cols], &mut blocks[r * nb..(r + 1) * nb]);
+            quantize_row_q4_k(
+                &src[r * cols..(r + 1) * cols],
+                &mut blocks[r * nb..(r + 1) * nb],
+            );
         }
         // Independent reference payload (w owns its own copy).
         let blocks_ref = blocks.clone();
@@ -1275,10 +1335,7 @@ mod tests {
         let x: Vec<f32> = (0..cols).map(|i| (i % 31) as f32 / 31.0 - 0.5).collect();
         let ref_dot = |r: usize| -> f32 {
             let mut row = vec![0.0f32; cols];
-            dequantize_row_q4_k(
-                &blocks_ref[r * nb..(r + 1) * nb],
-                &mut row,
-            );
+            dequantize_row_q4_k(&blocks_ref[r * nb..(r + 1) * nb], &mut row);
             row.iter().zip(&x).map(|(wv, xv)| wv * xv).sum()
         };
 
@@ -1360,7 +1417,10 @@ mod tests {
         let nb = cols / QK_K;
         let mut blocks = vec![crate::quant::q6k::BlockQ6K::zeroed(); rows * nb];
         for r in 0..rows {
-            quantize_row_q6_k(&src[r * cols..(r + 1) * cols], &mut blocks[r * nb..(r + 1) * nb]);
+            quantize_row_q6_k(
+                &src[r * cols..(r + 1) * cols],
+                &mut blocks[r * nb..(r + 1) * nb],
+            );
         }
         let blocks_ref = blocks.clone();
         let w = ProjWeights::Q6K(blocks, rows, cols);
@@ -1472,34 +1532,60 @@ mod tests {
         assert_eq!(transient.group_scale, t.group_scale);
         assert_eq!(transient.pos_bits, reference.pos_bits);
         drop(transient);
-        assert!(!q.planes_resident(), "a transient view must not become resident");
+        assert!(
+            !q.planes_resident(),
+            "a transient view must not become resident"
+        );
 
         // The GPU caches key on the plane BUFFERS — stable across calls and
         // across moving the projection.
         let key = |p: &TernaryGroupWeights| (p.pos_bits.as_ptr(), p.neg_bits.as_ptr());
         let k1 = key(q.planes());
         assert!(q.planes_resident());
-        assert_eq!(k1, key(q.planes()), "the resident view must be buffer-stable");
+        assert_eq!(
+            k1,
+            key(q.planes()),
+            "the resident view must be buffer-stable"
+        );
         assert!(matches!(q.planes_cow(), std::borrow::Cow::Borrowed(p) if key(p) == k1));
 
-        let x: Vec<f32> = (0..cols).map(|i| ((i * 13) % 29) as f32 / 29.0 - 0.5).collect();
+        let x: Vec<f32> = (0..cols)
+            .map(|i| ((i * 13) % 29) as f32 / 29.0 - 0.5)
+            .collect();
         let (mut a, mut b) = (vec![0.0f32; rows], vec![0.0f32; rows]);
         katgpt_core::simd_ternary_group_matvec_parallel(&t, &x, &mut a);
         ternary_q2_matvec_arm(&q, &x, &mut b, false);
         assert_eq!(a, b, "the Q2 f32 arm must be the plane f32 kernel");
         katgpt_core::simd_ternary_group_matvec_q8_parallel(&t, &x, &mut a);
         ternary_q2_matvec_arm(&q, &x, &mut b, true);
-        assert_eq!(a, b, "the Q2 q8 arm must be bit-identical to the plane q8 kernel");
+        assert_eq!(
+            a, b,
+            "the Q2 q8 arm must be bit-identical to the plane q8 kernel"
+        );
 
         let mut w = ProjWeights::TernaryQ2(q);
-        assert_eq!(w.as_ternary().map(key), Some(k1), "a move must keep the cache key");
-        assert_eq!(w.dequant_to_dense(), ProjWeights::Ternary(t.clone()).dequant_to_dense());
+        assert_eq!(
+            w.as_ternary().map(key),
+            Some(k1),
+            "a move must keep the cache key"
+        );
+        assert_eq!(
+            w.dequant_to_dense(),
+            ProjWeights::Ternary(t.clone()).dequant_to_dense()
+        );
 
         // Mutation demotes to the plane arm, carrying the resident buffers.
         assert_eq!(w.as_ternary_mut().map(|p| key(p)), Some(k1));
-        assert!(matches!(&w, ProjWeights::Ternary(p) if p.pos_bits == t.pos_bits && p.neg_bits == t.neg_bits));
+        assert!(
+            matches!(&w, ProjWeights::Ternary(p) if p.pos_bits == t.pos_bits && p.neg_bits == t.neg_bits)
+        );
         // ...and with no resident view, it builds one (same planes).
-        let mut cold = ProjWeights::TernaryQ2(TernaryQ2Proj::new(katgpt_core::TernaryQ2Weights::from_group(&t)));
-        assert_eq!(cold.as_ternary_mut().map(|p| p.pos_bits.clone()), Some(t.pos_bits.clone()));
+        let mut cold = ProjWeights::TernaryQ2(TernaryQ2Proj::new(
+            katgpt_core::TernaryQ2Weights::from_group(&t),
+        ));
+        assert_eq!(
+            cold.as_ternary_mut().map(|p| p.pos_bits.clone()),
+            Some(t.pos_bits.clone())
+        );
     }
 }

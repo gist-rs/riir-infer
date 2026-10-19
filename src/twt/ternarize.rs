@@ -49,7 +49,7 @@
 use half::f16;
 
 use super::TwtError;
-use crate::quant::q2_0::{BlockQ2_0, Q2oRepackError, Q2_0_BLOCK_SIZE};
+use crate::quant::q2_0::{BlockQ2_0, Q2_0_BLOCK_SIZE, Q2oRepackError};
 
 /// The T4.2 budget multiple — PRE-REGISTERED before any real-block
 /// measurement (Issue 022 T4.2). A materialized arm survives only if its
@@ -126,7 +126,9 @@ impl Materialized {
         match self {
             Self::DenseF16(d) => d.data.iter().map(|v| v.to_f32()).collect(),
             Self::Ternary(w) => {
-                crate::deltanet::ternary_weights::QwenDeltaNetTernaryWeights::dequant_proj_to_dense(w)
+                crate::deltanet::ternary_weights::QwenDeltaNetTernaryWeights::dequant_proj_to_dense(
+                    w,
+                )
             }
         }
     }
@@ -174,7 +176,11 @@ fn validate_members(members: &[&[f32]], expected: usize) -> Result<(), TwtError>
 /// (round-to-nearest-even; deterministic). Reuses
 /// [`super::audition::merge_mean`] so the arm materializes EXACTLY the
 /// operator the audition scored.
-pub fn arm_dense_f16(members: &[&[f32]], rows: usize, cols: usize) -> Result<Materialized, TwtError> {
+pub fn arm_dense_f16(
+    members: &[&[f32]],
+    rows: usize,
+    cols: usize,
+) -> Result<Materialized, TwtError> {
     validate_members(members, rows * cols)?;
     let dense = super::audition::merge_mean(members.iter().copied())?;
     let data = dense.iter().map(|&v| f16::from_f32(v)).collect();
@@ -188,7 +194,11 @@ pub fn arm_dense_f16(members: &[&[f32]], rows: usize, cols: usize) -> Result<Mat
 /// Per group of [`Q2_0_BLOCK_SIZE`] (128): `d = amax(|v|)`; codes
 /// `clamp(round(v / d_f16), -1, +1)` where `d_f16` is the f16-ROUNDED
 /// scale. On ternary input this recovers the source container bit-exactly.
-pub fn arm_source_quant(merged: &[f32], rows: usize, cols: usize) -> Result<Materialized, TwtError> {
+pub fn arm_source_quant(
+    merged: &[f32],
+    rows: usize,
+    cols: usize,
+) -> Result<Materialized, TwtError> {
     if rows == 0 || cols == 0 {
         return Err(TwtError::ArmShapeMismatch {
             expected: rows * cols,
@@ -358,11 +368,7 @@ pub fn budget_ok(arm_err: f64, dense_err: f64) -> bool {
 #[inline]
 pub fn budget_ratio(arm_err: f64, dense_err: f64) -> f64 {
     if dense_err == 0.0 {
-        if arm_err == 0.0 {
-            0.0
-        } else {
-            f64::INFINITY
-        }
+        if arm_err == 0.0 { 0.0 } else { f64::INFINITY }
     } else {
         arm_err / dense_err
     }

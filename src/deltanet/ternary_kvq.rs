@@ -256,16 +256,7 @@ pub fn forward_qwen_deltanet_ternary_qkv<'a, C: QuantizedKVCache + Send>(
     // Bench 880); arithmetic unchanged.
     super::on_decode_pool(move || {
         forward_qwen_deltanet_ternary_qkv_body(
-            x,
-            weights,
-            state,
-            cache,
-            mirror,
-            token,
-            pos,
-            config,
-            scratch,
-            rope_freq,
+            x, weights, state, cache, mirror, token, pos, config, scratch, rope_freq,
         )
     })
 }

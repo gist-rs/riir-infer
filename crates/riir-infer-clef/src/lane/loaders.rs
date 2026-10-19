@@ -64,8 +64,9 @@ impl ClefConfig {
     /// Read + parse + validate `config.json` under `dir`.
     pub fn from_dir(dir: &Path) -> std::io::Result<Self> {
         let path = dir.join("config.json");
-        let text = std::fs::read_to_string(&path)
-            .map_err(|e| std::io::Error::other(format!("clef config: read {}: {e}", path.display())))?;
+        let text = std::fs::read_to_string(&path).map_err(|e| {
+            std::io::Error::other(format!("clef config: read {}: {e}", path.display()))
+        })?;
         let cfg: Self = serde_json::from_str(&text).map_err(|e| {
             std::io::Error::other(format!("clef config: parse {}: {e}", path.display()))
         })?;
@@ -80,11 +81,7 @@ impl ClefConfig {
         if self.buckets.is_empty() {
             return Err(std::io::Error::other("clef config: buckets empty"));
         }
-        if !self
-            .buckets
-            .windows(2)
-            .all(|w| w[0] < w[1])
-        {
+        if !self.buckets.windows(2).all(|w| w[0] < w[1]) {
             return Err(std::io::Error::other(format!(
                 "clef config: buckets {:?} not strictly ascending (sorted) — refusing",
                 self.buckets
@@ -148,9 +145,10 @@ impl ClefTokenizer {
     /// (the laya posture: an encode with specials off matches the
     /// reference by construction).
     pub fn encode(&self, text: &str) -> std::io::Result<Vec<u32>> {
-        let encoding = self.inner.encode(text, false).map_err(|e| {
-            std::io::Error::other(format!("clef tokenizer: encode failed: {e}"))
-        })?;
+        let encoding = self
+            .inner
+            .encode(text, false)
+            .map_err(|e| std::io::Error::other(format!("clef tokenizer: encode failed: {e}")))?;
         Ok(encoding.get_ids().to_vec())
     }
 
@@ -200,12 +198,15 @@ impl EmbeddingTable {
     /// file is sha256-verified by the artifact store before this runs.
     pub fn open(dir: &Path, config: &ClefConfig) -> std::io::Result<Self> {
         let path = dir.join("embeddings.f16");
-        let file = std::fs::File::open(&path)
-            .map_err(|e| std::io::Error::other(format!("clef embeddings: open {}: {e}", path.display())))?;
+        let file = std::fs::File::open(&path).map_err(|e| {
+            std::io::Error::other(format!("clef embeddings: open {}: {e}", path.display()))
+        })?;
         let expected = u64::from(config.vocab_size) * u64::from(config.hidden_size) * 2;
         let got = file
             .metadata()
-            .map_err(|e| std::io::Error::other(format!("clef embeddings: stat {}: {e}", path.display())))?
+            .map_err(|e| {
+                std::io::Error::other(format!("clef embeddings: stat {}: {e}", path.display()))
+            })?
             .len();
         if got != expected {
             return Err(std::io::Error::other(format!(
@@ -215,8 +216,9 @@ impl EmbeddingTable {
         }
         // SAFETY: read-only mmap of a sha256-verified artifact file this
         // process never writes; the size wall above ran on the same fd.
-        let mmap = unsafe { Mmap::map(&file) }
-            .map_err(|e| std::io::Error::other(format!("clef embeddings: mmap {}: {e}", path.display())))?;
+        let mmap = unsafe { Mmap::map(&file) }.map_err(|e| {
+            std::io::Error::other(format!("clef embeddings: mmap {}: {e}", path.display()))
+        })?;
         Ok(Self {
             mmap,
             vocab: config.vocab_size,
@@ -356,7 +358,10 @@ mod tests {
         let cases: &[(&str, String, &str)] = &[
             (
                 "unsorted buckets",
-                PINNED_CONFIG.replace("[\n    256,\n    512,\n    1024,\n    2048\n  ]", "[\n    512,\n    256,\n    1024,\n    2048\n  ]"),
+                PINNED_CONFIG.replace(
+                    "[\n    256,\n    512,\n    1024,\n    2048\n  ]",
+                    "[\n    512,\n    256,\n    1024,\n    2048\n  ]",
+                ),
                 "not strictly ascending",
             ),
             (
@@ -383,8 +388,7 @@ mod tests {
         for (name, text, expect) in cases {
             let dir = scratch("wall");
             write_config(&dir, text);
-            let err = ClefConfig::from_dir(&dir)
-                .expect_err(&format!("{name} must refuse"));
+            let err = ClefConfig::from_dir(&dir).expect_err(&format!("{name} must refuse"));
             assert!(
                 err.to_string().contains(expect),
                 "{name}: got {err}, wanted a message naming {expect}"
@@ -406,7 +410,9 @@ mod tests {
         // exactly-representable f16 values; row 2 is the pad-row
         // stand-in.
         let (vocab, hidden) = (4u32, 8u32);
-        let row0: [u16; 8] = [0x3C00, 0x4000, 0x0000, 0xBC00, 0x3800, 0x7BFF, 0x0400, 0x03FF];
+        let row0: [u16; 8] = [
+            0x3C00, 0x4000, 0x0000, 0xBC00, 0x3800, 0x7BFF, 0x0400, 0x03FF,
+        ];
         let row2 = [0xB555u16; 8];
         let mut bits = Vec::new();
         bits.extend_from_slice(&row0);
@@ -524,9 +530,7 @@ mod tests {
         );
         // The pad row gathers: pad_id row is all-finite f32.
         let mut row = vec![0f32; model.embeddings.hidden() as usize];
-        model
-            .embeddings
-            .row_into_f32(model.config.pad_id, &mut row);
+        model.embeddings.row_into_f32(model.config.pad_id, &mut row);
         assert!(row.iter().all(|v| v.is_finite()), "pad row must be finite");
         // A spot encode through the real BPE.
         let ids = model.tokenizer.encode("JOINT SCHEMA DECISIONS:").unwrap();

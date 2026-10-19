@@ -18,10 +18,10 @@
 
 #![cfg(feature = "twt_profile")]
 
-use riir_infer_core::twt::audition::{
-    mean_sq_err, merge_mean, merge_rdsc, selection_pin, CandRow, CorrectionFit,
-};
 use riir_infer_core::twt::TwtError;
+use riir_infer_core::twt::audition::{
+    CandRow, CorrectionFit, mean_sq_err, merge_mean, merge_rdsc, selection_pin,
+};
 
 #[test]
 fn mean_of_clones_is_the_clone() {
@@ -61,7 +61,10 @@ fn shape_mismatch_refused_both_operators() {
     let b = [1.0f32];
     assert_eq!(
         merge_mean([&a[..], &b[..]]).unwrap_err(),
-        TwtError::MergeShapeMismatch { expected: 2, got: 1 }
+        TwtError::MergeShapeMismatch {
+            expected: 2,
+            got: 1
+        }
     );
     assert!(merge_rdsc([&a[..], &b[..]]).is_err());
 }
@@ -88,8 +91,18 @@ fn fit_recovers_an_exact_affine_map() {
     let f = CorrectionFit::fit(&h_in, &h_sur, &h_e, rows, d).unwrap();
     assert_eq!(f.degenerate_channels, 0);
     for c in 0..d {
-        assert!((f.alpha[c] - alpha_star[c]).abs() < 1e-3, "alpha[{c}]: {} vs {}", f.alpha[c], alpha_star[c]);
-        assert!((f.beta[c] - beta_star[c]).abs() < 1e-3, "beta[{c}]: {} vs {}", f.beta[c], beta_star[c]);
+        assert!(
+            (f.alpha[c] - alpha_star[c]).abs() < 1e-3,
+            "alpha[{c}]: {} vs {}",
+            f.alpha[c],
+            alpha_star[c]
+        );
+        assert!(
+            (f.beta[c] - beta_star[c]).abs() < 1e-3,
+            "beta[{c}]: {} vs {}",
+            f.beta[c],
+            beta_star[c]
+        );
     }
 }
 
@@ -172,9 +185,18 @@ fn mean_sq_err_matches_a_hand_count() {
 #[test]
 fn selection_pin_deterministic_and_byte_sensitive() {
     let rows = vec![
-        CandRow { id: "member:3".into(), err_fit: 2.0 },
-        CandRow { id: "mean".into(), err_fit: 1.0 },
-        CandRow { id: "rdsc".into(), err_fit: 3.0 },
+        CandRow {
+            id: "member:3".into(),
+            err_fit: 2.0,
+        },
+        CandRow {
+            id: "mean".into(),
+            err_fit: 1.0,
+        },
+        CandRow {
+            id: "rdsc".into(),
+            err_fit: 3.0,
+        },
     ];
     let p1 = selection_pin(&rows).unwrap();
     assert_eq!(p1.winner, "mean");
@@ -188,8 +210,14 @@ fn selection_pin_deterministic_and_byte_sensitive() {
 #[test]
 fn tie_resolves_to_the_lowest_index() {
     let rows = vec![
-        CandRow { id: "first".into(), err_fit: 1.0 },
-        CandRow { id: "second".into(), err_fit: 1.0 },
+        CandRow {
+            id: "first".into(),
+            err_fit: 1.0,
+        },
+        CandRow {
+            id: "second".into(),
+            err_fit: 1.0,
+        },
     ];
     assert_eq!(selection_pin(&rows).unwrap().winner, "first");
 }

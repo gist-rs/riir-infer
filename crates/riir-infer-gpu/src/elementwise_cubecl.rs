@@ -2137,7 +2137,10 @@ mod tests {
             let d = (got[i] - want).abs();
             assert!(d < 1e-6, "sigmoid mismatch at {i}: {} vs {want}", got[i]);
         }
-        assert!(got[n..].iter().all(|&v| v == sentinel), "sigmoid wrote past n");
+        assert!(
+            got[n..].iter().all(|&v| v == sentinel),
+            "sigmoid wrote past n"
+        );
 
         // silu over the same oversized shape: x * sigmoid(x).
         let out2_h = client.create_from_slice(f32::as_bytes(&out_vec));
@@ -2151,7 +2154,10 @@ mod tests {
             let d = (got2[i] - want).abs();
             assert!(d < 1e-6, "silu mismatch at {i}: {} vs {want}", got2[i]);
         }
-        assert!(got2[n..].iter().all(|&v| v == sentinel), "silu wrote past n");
+        assert!(
+            got2[n..].iter().all(|&v| v == sentinel),
+            "silu wrote past n"
+        );
     }
 
     #[test]

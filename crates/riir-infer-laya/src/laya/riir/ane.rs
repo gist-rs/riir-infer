@@ -975,8 +975,14 @@ pub fn ensure_artifacts(ane_root: &Path, base_url: Option<&str>) -> Result<()> {
         })
         .map_err(|e| LayaError::Runtime(e.to_string()))
         .and_then(|()| {
-            ane_host::verify_dir_digest(&staging, &entry.digest, entry.digest_files, entry.digest_bytes, MISSING_REMEDY)
-                .map_err(|e| LayaError::Runtime(e.to_string()))
+            ane_host::verify_dir_digest(
+                &staging,
+                &entry.digest,
+                entry.digest_files,
+                entry.digest_bytes,
+                MISSING_REMEDY,
+            )
+            .map_err(|e| LayaError::Runtime(e.to_string()))
         })
         .and_then(|()| {
             let parent = dir.parent().expect("key carries a model dir");
@@ -1101,8 +1107,14 @@ mod fetch_tests {
         let manifest = AneManifest::load(&root.join("manifest.json")).unwrap();
         let entry = manifest.artifacts.get("en/L8").unwrap();
         let pin = entry.pin();
-        ane_host::verify_dir_digest(&installed, &pin.digest, pin.files, pin.bytes, MISSING_REMEDY)
-            .expect("digest");
+        ane_host::verify_dir_digest(
+            &installed,
+            &pin.digest,
+            pin.files,
+            pin.bytes,
+            MISSING_REMEDY,
+        )
+        .expect("digest");
         // No staging left behind.
         assert!(!root.join(".staging").join("en/L8.mlpackage").exists());
         let _ = std::fs::remove_dir_all(&tmp);

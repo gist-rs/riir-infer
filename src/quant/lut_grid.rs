@@ -305,7 +305,9 @@ mod tests {
         // Gaussian-ish body + one anchor point per block.
         let mut state: u64 = 0x243F_6A88_85A3_08D3;
         for _ in 0..200_000 {
-            state = state.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+            state = state
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407);
             // Box-Muller-lite: sum of 3 uniforms − 1.5 ≈ N(0, 0.5).
             let mut s = 0.0;
             for _ in 0..3 {
@@ -451,6 +453,9 @@ mod tests {
             h.record(0.1 + (i % 100) as f64 / 1000.0); // strictly positive mass
         }
         let (grid, _) = solve_lloyd_max(&h);
-        assert_eq!(grid.l0, GRID_T0_UNIFORM.l0, "empty region 0 must keep the incumbent l0");
+        assert_eq!(
+            grid.l0, GRID_T0_UNIFORM.l0,
+            "empty region 0 must keep the incumbent l0"
+        );
     }
 }

@@ -42,20 +42,22 @@ use std::io::Write as _;
 use std::path::PathBuf;
 use std::time::Instant;
 
-use anyhow::{bail, Context, Result};
+use anyhow::{Context, Result, bail};
 use katgpt_core::fitted_value_table::FittedTokenTable;
 use katgpt_transformer::MultiLayerKVCache;
 
 use riir_infer_core::corpus_text::load_corpus_text;
 use riir_infer_core::gemma_layer::GemmaTransformerWeightsF16;
-use riir_infer_core::gguf_loader::{config_from_gguf_metadata, GgufFile};
+use riir_infer_core::gguf_loader::{GgufFile, config_from_gguf_metadata};
 use riir_infer_core::tokenizer::SentencePieceGgufTokenizer;
 use riir_infer_core::transformer::gemma2_calibration::load_gemma2_f16_direct;
 use riir_infer_core::transformer::gemma2_ktov::KToVState;
 use riir_infer_core::transformer::gemma2_vrecon::VReconState;
-use riir_infer_core::transformer::vk_harness::{argmax, load_fitted_table, nll, TableMeta};
-use riir_infer_core::transformer::{forward_gemma2_f16, forward_gemma2_f16_hk, ForwardContext, NoVQuant};
-use riir_infer_core::types::{kv_dim, Config};
+use riir_infer_core::transformer::vk_harness::{TableMeta, argmax, load_fitted_table, nll};
+use riir_infer_core::transformer::{
+    ForwardContext, NoVQuant, forward_gemma2_f16, forward_gemma2_f16_hk,
+};
+use riir_infer_core::types::{Config, kv_dim};
 
 /// The G1 tolerance (pre-registered): the reconstruct arm must sit at the
 /// rotation-rounding class, not model level. Mean paired |ΔNLL| ≤ 2e-3 AND
@@ -237,10 +239,7 @@ impl Walk {
         }
         let mut freqs: Vec<usize> = counts.values().copied().collect();
         freqs.sort_unstable();
-        let (q1, q2) = (
-            freqs[freqs.len() / 3],
-            freqs[2 * freqs.len() / 3],
-        );
+        let (q1, q2) = (freqs[freqs.len() / 3], freqs[2 * freqs.len() / 3]);
         for i in 0..n {
             let t = recon.target[i];
             let c = counts[&t];
@@ -381,7 +380,8 @@ fn main() -> Result<()> {
     let mut seq_len: usize = if smoke { 256 } else { 1024 };
     let mut table_path: Option<PathBuf> = None;
     let mut lambdas: Vec<f32> = vec![0.0, 0.5, 1.0];
-    let (mut tg_pairs, mut tg_prefill, mut tg_decode) = if smoke { (2, 64, 16) } else { (12, 128, 64) };
+    let (mut tg_pairs, mut tg_prefill, mut tg_decode) =
+        if smoke { (2, 64, 16) } else { (12, 128, 64) };
     let mut report_path: Option<PathBuf> = None;
     let mut box_note = String::from("4090 workstation i7-13700K, CPU lane, AC");
     let mut skip_g1 = false;
@@ -522,12 +522,7 @@ fn main() -> Result<()> {
         // a measurement posture; the report says so.
         println!("# SYNTHETIC ZERO TABLE (smoke wiring fixture — {table_path:?} not built yet)");
         (
-            FittedTokenTable::from_rows(
-                n_layers,
-                kvd,
-                vec![0],
-                vec![0.0; n_layers * kvd],
-            ),
+            FittedTokenTable::from_rows(n_layers, kvd, vec![0], vec![0.0; n_layers * kvd]),
             meta_placeholder(),
             true,
         )
@@ -597,7 +592,13 @@ fn main() -> Result<()> {
             cache.reset();
             for (pos, &t) in seq.iter().enumerate() {
                 let lg = forward_gemma2_f16_hk(
-                    &mut ctx, &weights, &mut cache, &mut NoVQuant, t, pos, &config,
+                    &mut ctx,
+                    &weights,
+                    &mut cache,
+                    &mut NoVQuant,
+                    t,
+                    pos,
+                    &config,
                 );
                 noop.push(lg.iter().map(|x| x.to_bits()).collect());
             }
@@ -620,7 +621,13 @@ fn main() -> Result<()> {
             for (pos, &t) in seq.iter().enumerate() {
                 st_store.set_token(pos, t as u32);
                 let lg = forward_gemma2_f16_hk(
-                    &mut ctx, &weights, &mut cache, &mut st_store, t, pos, &config,
+                    &mut ctx,
+                    &weights,
+                    &mut cache,
+                    &mut st_store,
+                    t,
+                    pos,
+                    &config,
                 );
                 store_lg.push(lg.to_vec());
             }
@@ -628,7 +635,13 @@ fn main() -> Result<()> {
             for (pos, &t) in seq.iter().enumerate() {
                 st_recon.set_token(pos, t as u32);
                 let lg = forward_gemma2_f16_hk(
-                    &mut ctx, &weights, &mut cache, &mut st_recon, t, pos, &config,
+                    &mut ctx,
+                    &weights,
+                    &mut cache,
+                    &mut st_recon,
+                    t,
+                    pos,
+                    &config,
                 );
                 recon_lg.push(lg.to_vec());
             }
@@ -694,9 +707,8 @@ fn main() -> Result<()> {
                 // u32::MAX is out of vocab — set_token resolves it to the
                 // miss row (MAX), which IS the all-miss arm.
                 st.set_token(pos, if miss { u32::MAX } else { t as u32 });
-                let lg = forward_gemma2_f16_hk(
-                    &mut ctx, &weights, &mut cache, &mut st, t, pos, &config,
-                );
+                let lg =
+                    forward_gemma2_f16_hk(&mut ctx, &weights, &mut cache, &mut st, t, pos, &config);
                 lgs.push(lg.to_vec());
             }
             lgs
@@ -713,9 +725,8 @@ fn main() -> Result<()> {
             let mut lgs: Vec<Vec<f32>> = Vec::with_capacity(seq.len());
             for (pos, &t) in seq.iter().enumerate() {
                 st.set_token(pos, t as u32);
-                let lg = forward_gemma2_f16_hk(
-                    &mut ctx, &weights, &mut cache, &mut st, t, pos, &config,
-                );
+                let lg =
+                    forward_gemma2_f16_hk(&mut ctx, &weights, &mut cache, &mut st, t, pos, &config);
                 lgs.push(lg.to_vec());
             }
             lgs
@@ -780,8 +791,15 @@ fn main() -> Result<()> {
     {
         let mut hook = ArmHook::Plain;
         let po = run_pass(
-            &mut ctx, &weights, &mut cache, &mut hook, &eval_tokens, corpus_per_chunk, n_chunks,
-            bos, &config,
+            &mut ctx,
+            &weights,
+            &mut cache,
+            &mut hook,
+            &eval_tokens,
+            corpus_per_chunk,
+            n_chunks,
+            bos,
+            &config,
         );
         println!(
             "# arm f16: {} scored | ppl {:.4} | {:.0} fwd/s",
@@ -795,56 +813,70 @@ fn main() -> Result<()> {
         ));
     }
     if !skip_g1 {
-    for &lam in lambdas.iter() {
-        let po_store = {
-            let mut st = KToVState::new_uniform(table, lam, n_layers, kvd, seq_len + 32);
-            let mut hook = ArmHook::K(&mut st);
-            run_pass(
-                &mut ctx, &weights, &mut cache, &mut hook, &eval_tokens, corpus_per_chunk,
-                n_chunks, bos, &config,
-            )
-        };
-        let po_recon = {
-            let mut st = VReconState::new_uniform(
-                table,
-                lam,
-                n_layers,
-                kvd,
-                &freq,
-                seq_len + 32,
-                config.n_head,
-                false,
+        for &lam in lambdas.iter() {
+            let po_store = {
+                let mut st = KToVState::new_uniform(table, lam, n_layers, kvd, seq_len + 32);
+                let mut hook = ArmHook::K(&mut st);
+                run_pass(
+                    &mut ctx,
+                    &weights,
+                    &mut cache,
+                    &mut hook,
+                    &eval_tokens,
+                    corpus_per_chunk,
+                    n_chunks,
+                    bos,
+                    &config,
+                )
+            };
+            let po_recon = {
+                let mut st = VReconState::new_uniform(
+                    table,
+                    lam,
+                    n_layers,
+                    kvd,
+                    &freq,
+                    seq_len + 32,
+                    config.n_head,
+                    false,
+                );
+                let mut hook = ArmHook::R(&mut st);
+                run_pass(
+                    &mut ctx,
+                    &weights,
+                    &mut cache,
+                    &mut hook,
+                    &eval_tokens,
+                    corpus_per_chunk,
+                    n_chunks,
+                    bos,
+                    &config,
+                )
+            };
+            let (mean_d, mean_abs, max_abs, flips) = paired(&po_recon, &po_store);
+            let row_pass = mean_abs <= G1_MEAN_ABS_TOL && max_abs <= G1_MAX_ABS_TOL;
+            g1_pass &= row_pass;
+            println!(
+                "# arm λ={lam}: store ppl {:.4} recon ppl {:.4} | mean Δ {mean_d:+.2e} max |Δ| {max_abs:.2e} | {}",
+                ppl_of(&po_store.nll),
+                ppl_of(&po_recon.nll),
+                if row_pass { "PASS" } else { "FAIL" }
             );
-            let mut hook = ArmHook::R(&mut st);
-            run_pass(
-                &mut ctx, &weights, &mut cache, &mut hook, &eval_tokens, corpus_per_chunk,
-                n_chunks, bos, &config,
-            )
-        };
-        let (mean_d, mean_abs, max_abs, flips) = paired(&po_recon, &po_store);
-        let row_pass = mean_abs <= G1_MEAN_ABS_TOL && max_abs <= G1_MAX_ABS_TOL;
-        g1_pass &= row_pass;
-        println!(
-            "# arm λ={lam}: store ppl {:.4} recon ppl {:.4} | mean Δ {mean_d:+.2e} max |Δ| {max_abs:.2e} | {}",
-            ppl_of(&po_store.nll),
-            ppl_of(&po_recon.nll),
-            if row_pass { "PASS" } else { "FAIL" }
-        );
-        g1_rows.push_str(&format!(
+            g1_rows.push_str(&format!(
             "| k-{lam:.2} | {:.4} | {:.4} | {mean_d:+.2e} | {mean_abs:.2e} | {max_abs:.2e} | {flips}/{} | {} |\n",
             ppl_of(&po_store.nll),
             ppl_of(&po_recon.nll),
             po_recon.nll.len(),
             if row_pass { "PASS" } else { "**FAIL**" }
         ));
-        // The walk rides the LARGEST λ (where the refund is biggest and any
-        // band structure would show); tracked probe = layer-0 row presence.
-        if lam == lambdas.iter().copied().fold(f32::NEG_INFINITY, f32::max) && !walk_done {
-            walk.accumulate(&po_recon, &po_store, &|t| table.row(0, t).is_some());
-            walk_done = true;
+            // The walk rides the LARGEST λ (where the refund is biggest and any
+            // band structure would show); tracked probe = layer-0 row presence.
+            if lam == lambdas.iter().copied().fold(f32::NEG_INFINITY, f32::max) && !walk_done {
+                walk.accumulate(&po_recon, &po_store, &|t| table.row(0, t).is_some());
+                walk_done = true;
+            }
+            let _ = std::io::stdout().flush();
         }
-        let _ = std::io::stdout().flush();
-    }
     }
     g1_rows.push_str(&format!(
         "\nTolerances (pre-registered): mean \\|ΔNLL\\| ≤ {G1_MEAN_ABS_TOL}, max ≤ {G1_MAX_ABS_TOL} — the rotation-rounding class.  \n\n"
@@ -857,7 +889,9 @@ fn main() -> Result<()> {
              0 flips at every λ); this run measures the G2 scaling axis only.  \n\n",
         );
     }
-    g1_rows.push_str(&walk.render("Retention walk (recon − store, by target-token frequency band × tracked)"));
+    g1_rows.push_str(
+        &walk.render("Retention walk (recon − store, by target-token frequency band × tracked)"),
+    );
     g1_rows.push('\n');
     report.push(&g1_rows);
 
@@ -913,10 +947,7 @@ fn main() -> Result<()> {
             true,
         );
         let (arm_names, n_arms) = if recon_deferred {
-            (
-                ["full-cache", "eager-λ1", "def-λ0", "def-λ1"],
-                4usize,
-            )
+            (["full-cache", "eager-λ1", "def-λ0", "def-λ1"], 4usize)
         } else {
             (["full-cache", "recon-λ0", "recon-λ1", ""], 3usize)
         };
@@ -937,8 +968,14 @@ fn main() -> Result<()> {
         let mut pairs: Vec<Vec<(f64, f64)>> = Vec::with_capacity(tg_pairs);
         for _ in 0..tg_pairs {
             let triple = timing_triple(
-                &mut ctx, &weights, &mut cache, &mut hooks, &prefill_tokens, &decode_tokens,
-                bos, &config,
+                &mut ctx,
+                &weights,
+                &mut cache,
+                &mut hooks,
+                &prefill_tokens,
+                &decode_tokens,
+                bos,
+                &config,
             );
             pairs.push(triple);
         }
@@ -954,10 +991,7 @@ fn main() -> Result<()> {
             let ratio = if arm_idx == 0 {
                 None
             } else {
-                let mut rs: Vec<f64> = pairs
-                    .iter()
-                    .map(|p| p[arm_idx].0 / p[0].0)
-                    .collect();
+                let mut rs: Vec<f64> = pairs.iter().map(|p| p[arm_idx].0 / p[0].0).collect();
                 rs.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
                 Some(rs[rs.len() / 2])
             };
@@ -1000,7 +1034,11 @@ fn main() -> Result<()> {
             arm_names[..n_arms].join(", "),
             tg_prefill + 1,
             tg_decode,
-            if recon_deferred { "deferred (the T4 fused lane)" } else { "eager (the T3 scratch)" }
+            if recon_deferred {
+                "deferred (the T4 fused lane)"
+            } else {
+                "eager (the T3 scratch)"
+            }
         );
         for a in &arms_out {
             s.push_str(&format!(
@@ -1016,13 +1054,14 @@ fn main() -> Result<()> {
             ));
         }
         s.push_str(&format!(
-            "\nBox: {box_note}. Recorded, not gated{}  \n\n"
-        , if recon_deferred {
-            " — the decision rule reads the WINDOW-EDGE deferred ratio: ≤ 1.20 re-fires the \
+            "\nBox: {box_note}. Recorded, not gated{}  \n\n",
+            if recon_deferred {
+                " — the decision rule reads the WINDOW-EDGE deferred ratio: ≤ 1.20 re-fires the \
              katgpt-core promotion; > 1.20 holds (riir-infer Issue 013 T4 pre-registration)."
-        } else {
-            "."
-        }));
+            } else {
+                "."
+            }
+        ));
         s
     };
     report.push(&tg);
@@ -1057,14 +1096,24 @@ fn main() -> Result<()> {
          - **Bytes/token: 50.0%** (the law, recorded)  \n\n\
          A G1 FAIL means a convention/wiring bug (the wrong rotation subgroup, a stale token \
          map), not a model effect — the reconstruction is deterministic algebra.  \n",
-        if recon_deferred { "deferred (the T4 fused lane)" } else { "eager (the T3 scratch)" },
+        if recon_deferred {
+            "deferred (the T4 fused lane)"
+        } else {
+            "eager (the T3 scratch)"
+        },
         if g3 { "PASS" } else { "FAIL" },
         if recon_deferred {
             if deferred_probe { "PASS" } else { "FAIL" }
         } else {
             "n/a (eager mode)"
         },
-        if skip_g1 { "SKIPPED (--skip-g1; record: Bench 013)" } else if g1_pass { "PASS" } else { "FAIL" },
+        if skip_g1 {
+            "SKIPPED (--skip-g1; record: Bench 013)"
+        } else if g1_pass {
+            "PASS"
+        } else {
+            "FAIL"
+        },
         tg_decode
     ));
     let status = if g3 && deferred_probe && (g1_pass || skip_g1) {
@@ -1076,10 +1125,9 @@ fn main() -> Result<()> {
     } else {
         "**Status:** COMPLETE — GATE FAILURE (see verdicts)"
     };
-    report.buf = report.buf.replace(
-        "**Status:** RUNNING (rewritten after every phase)",
-        status,
-    );
+    report.buf = report
+        .buf
+        .replace("**Status:** RUNNING (rewritten after every phase)", status);
     report.push("");
 
     println!(
@@ -1090,7 +1138,13 @@ fn main() -> Result<()> {
         } else {
             "n/a"
         },
-        if skip_g1 { "SKIPPED" } else if g1_pass { "PASS" } else { "FAIL" }
+        if skip_g1 {
+            "SKIPPED"
+        } else if g1_pass {
+            "PASS"
+        } else {
+            "FAIL"
+        }
     );
     if !(g3 && deferred_probe && (g1_pass || skip_g1)) {
         bail!("gate failure — see the report");

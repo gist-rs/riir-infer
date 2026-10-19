@@ -21,8 +21,8 @@
 
 use riir_infer_ane::ComputeUnits;
 use riir_infer_clef::lane::{
-    ClefQuestion, ClefText, ClefTokenizer, EmbeddingTable, ARTIFACT_REVISION, artifacts_dir, encode,
-    ensure_and_load,
+    ARTIFACT_REVISION, ClefQuestion, ClefText, ClefTokenizer, EmbeddingTable, artifacts_dir,
+    encode, ensure_and_load,
 };
 use std::collections::BTreeMap;
 use std::time::Instant;
@@ -70,9 +70,13 @@ fn record_for_bucket(
     let questions = [healthy_question()];
     let mut state = String::new();
     loop {
-        let record =
-            encode(tokenizer, &serde_json::Value::String(state.clone()), &questions, max_length)
-                .expect("bench record encodes");
+        let record = encode(
+            tokenizer,
+            &serde_json::Value::String(state.clone()),
+            &questions,
+            max_length,
+        )
+        .expect("bench record encodes");
         let n = record.input_ids.len();
         if n + SENTENCE_TOKEN_SLACK >= bucket - 96 {
             if n <= bucket - 8 {
@@ -84,7 +88,10 @@ fn record_for_bucket(
             state.push(' ');
         }
         state.push_str(SENTENCE);
-        assert!(state.len() <= bucket * 24, "cannot land a record in bucket {bucket}");
+        assert!(
+            state.len() <= bucket * 24,
+            "cannot land a record in bucket {bucket}"
+        );
     }
 }
 
@@ -136,15 +143,19 @@ fn main() {
     }
 
     let started = Instant::now();
-    let runtime = ClefText::load_from(&dir, model.config.clone(), &buckets, units)
-        .expect("all buckets load");
+    let runtime =
+        ClefText::load_from(&dir, model.config.clone(), &buckets, units).expect("all buckets load");
     let embeddings = EmbeddingTable::open(&dir, &model.config).expect("embeddings reopen");
     let max_length = *model.config.buckets.last().expect("buckets") as usize;
 
     // Issue 048: on cpu the runtime is a disclosed split (decoder
     // CpuOnly, head CpuAndNe) — say so on the banner and in the NOTE
     // below; the row formats are untouched.
-    let banner_head = if posture == "cpu" { " head_units=CpuAndNe" } else { "" };
+    let banner_head = if posture == "cpu" {
+        " head_units=CpuAndNe"
+    } else {
+        ""
+    };
     println!(
         "CLEF-TIMING posture={posture} model=clef-text-0.6b@{} buckets={buckets:?} reps={reps} warm={warm} load={:?}{}",
         ARTIFACT_REVISION,
@@ -176,10 +187,14 @@ fn main() {
         let mut total = Vec::with_capacity(reps);
         for i in 0..(warm + reps) {
             let t0 = Instant::now();
-            let (b, states) = runtime.decode_forward(&record, &embeddings).expect("decode");
+            let (b, states) = runtime
+                .decode_forward(&record, &embeddings)
+                .expect("decode");
             let decode_ms = t0.elapsed().as_secs_f64() * 1e3;
             let t1 = Instant::now();
-            let _ = runtime.head_forward(b, &record, &states, &embeddings).expect("head");
+            let _ = runtime
+                .head_forward(b, &record, &states, &embeddings)
+                .expect("head");
             let head_ms = t1.elapsed().as_secs_f64() * 1e3;
             if i >= warm {
                 decode.push(decode_ms);

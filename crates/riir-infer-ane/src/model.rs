@@ -165,15 +165,14 @@ pub fn load_model(
         if let Some(fname) = function_name {
             config.setFunctionName(Some(&NSString::from_str(fname)));
         }
-        let model = MLModel::modelWithContentsOfURL_configuration_error(&url, &config).map_err(
-            |e| {
+        let model =
+            MLModel::modelWithContentsOfURL_configuration_error(&url, &config).map_err(|e| {
                 Error::msg(format!(
                     "ane: Core ML load failed for {}: {}",
                     compiled.display(),
                     ns_error_string(&e)
                 ))
-            },
-        )?;
+            })?;
 
         let placement = match plan {
             PlanWalk::Verify => verify_compute_plan(&compiled, &config)?,
@@ -287,18 +286,15 @@ unsafe fn run_prediction(
         })?;
         let out = model
             .predictionFromFeatures_error(ProtocolObject::from_ref(&*features))
-            .map_err(|e| {
-                Error::msg(format!("ane: prediction failed: {}", ns_error_string(&e)))
-            })?;
+            .map_err(|e| Error::msg(format!("ane: prediction failed: {}", ns_error_string(&e))))?;
         let name = NSString::from_str(output_name);
         let val = out.featureValueForName(&name).ok_or_else(|| {
             Error::msg(format!(
                 "ane: output {output_name:?} missing from the prediction (manifest/ artifact drift?)"
             ))
         })?;
-        val.multiArrayValue().ok_or_else(|| {
-            Error::msg(format!("ane: output {output_name:?} is not a multi-array"))
-        })
+        val.multiArrayValue()
+            .ok_or_else(|| Error::msg(format!("ane: output {output_name:?} is not a multi-array")))
     }
 }
 
@@ -400,11 +396,7 @@ fn copy_out_f16(arr: &MLMultiArray, out: &mut [u16]) -> Result<()> {
     // Strided walk (rare; correctness over speed on this path).
     let (shape, strides) = shape_and_strides(arr);
     for (flat, index) in multi_indices(&shape).into_iter().enumerate() {
-        let logical: usize = index
-            .iter()
-            .zip(&strides)
-            .map(|(i, s)| i * s)
-            .sum();
+        let logical: usize = index.iter().zip(&strides).map(|(i, s)| i * s).sum();
         // SAFETY: in-bounds subscript over the array's own elements.
         out[flat] = unsafe { element_f16(arr, logical) };
     }
@@ -448,7 +440,7 @@ fn copy_out_f32(arr: &MLMultiArray, out: &mut [f32]) -> Result<()> {
             other => {
                 return Err(Error::msg(format!(
                     "ane: output dtype {other:?} unsupported — artifact drift"
-                )))
+                )));
             }
         };
     }
@@ -628,9 +620,9 @@ fn program_operations(
 ) -> Result<Vec<Retained<objc2_core_ml::MLModelStructureProgramOperation>>> {
     let main = NSString::from_str(function_name);
     let functions = unsafe { program.functions() };
-    let func = functions.objectForKey(&main).ok_or_else(|| {
-        Error::msg(format!("ane: program has no `{function_name}` function"))
-    })?;
+    let func = functions
+        .objectForKey(&main)
+        .ok_or_else(|| Error::msg(format!("ane: program has no `{function_name}` function")))?;
     let block = unsafe { func.block() };
     let ops = unsafe { block.operations() };
     Ok(ops.to_vec())

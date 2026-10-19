@@ -34,7 +34,7 @@ unsafe impl GlobalAlloc for Counting {
 #[global_allocator]
 static GLOBAL: Counting = Counting;
 
-use riir_infer_core::fa_posterior::{AutomatonBuilder, FaScratch, FREE, SplitMix64};
+use riir_infer_core::fa_posterior::{AutomatonBuilder, FREE, FaScratch, SplitMix64};
 
 #[test]
 fn sample_joint_is_allocation_free_in_steady_state() {
@@ -57,7 +57,9 @@ fn sample_joint_is_allocation_free_in_steady_state() {
     let fa = b.build().unwrap();
 
     let len = 32;
-    let logits: Vec<f32> = (0..len * 64).map(|i| ((i * 7919) % 101) as f32 / 8.0 - 6.0).collect();
+    let logits: Vec<f32> = (0..len * 64)
+        .map(|i| ((i * 7919) % 101) as f32 / 8.0 - 6.0)
+        .collect();
     let forced = [FREE; 32];
 
     // Warm the scratch across several draws of the LARGEST block (ensure()
@@ -66,8 +68,17 @@ fn sample_joint_is_allocation_free_in_steady_state() {
     let mut rng = SplitMix64::new(7);
     let mut out = vec![0u32; len];
     for _ in 0..8u64 {
-        fa.sample_joint(&mut scratch, &logits, len, &forced, 1.0, false, &mut rng, &mut out)
-            .unwrap();
+        fa.sample_joint(
+            &mut scratch,
+            &logits,
+            len,
+            &forced,
+            1.0,
+            false,
+            &mut rng,
+            &mut out,
+        )
+        .unwrap();
     }
 
     // ── the measured phase ──────────────────────────────────────────
@@ -75,8 +86,17 @@ fn sample_joint_is_allocation_free_in_steady_state() {
     for i in 0..64u64 {
         let seed = 1000 + i;
         let mut r = SplitMix64::new(seed);
-        fa.sample_joint(&mut scratch, &logits, len, &forced, 1.0, false, &mut r, &mut out)
-            .unwrap();
+        fa.sample_joint(
+            &mut scratch,
+            &logits,
+            len,
+            &forced,
+            1.0,
+            false,
+            &mut r,
+            &mut out,
+        )
+        .unwrap();
     }
     let after = ALLOCS.load(Ordering::Relaxed);
     assert_eq!(

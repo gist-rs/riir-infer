@@ -1942,7 +1942,8 @@ impl DFlash2GpuDrafter {
 
         // ring position list upload (pad -1 to the full slot count)
         self.rings.ring_pos_host.clear();
-        self.rings.ring_pos_host
+        self.rings
+            .ring_pos_host
             .extend(self.rings.ring_pos.iter().map(|&p| p as i32));
         self.rings.ring_pos_host.resize(cfg.sliding_window, -1);
         let n_ring = self.rings.ring_pos.len();

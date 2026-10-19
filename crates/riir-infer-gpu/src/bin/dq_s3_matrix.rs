@@ -83,7 +83,7 @@ use std::process::Command;
 use std::time::Instant;
 
 use riir_infer_core::disaggregated::DisaggregatedTernaryWeights;
-use riir_infer_core::gguf_loader::{load_qwen_deltanet_ternary_weights_gguf, GgufFile};
+use riir_infer_core::gguf_loader::{GgufFile, load_qwen_deltanet_ternary_weights_gguf};
 use riir_infer_core::tokenizer::BpeTokenizer;
 use riir_infer_gpu::ternary_deltanet_gpu_forward_cudarc::TernaryDeltanetGpuForwardCudarc;
 
@@ -171,8 +171,16 @@ fn arith_items(n: usize, hard: bool) -> Vec<ArithItem> {
     let mut rng = Rng(0x0A71_A614_4847);
     let mut out = Vec::with_capacity(n);
     for _ in 0..n {
-        let n_ops = if hard { 3 + (rng.below(4) as usize) } else { 2 + (rng.below(3) as usize) };
-        let first = if hard { 1_000 + rng.below(99_000) as i128 } else { 100 + rng.below(9900) as i128 };
+        let n_ops = if hard {
+            3 + (rng.below(4) as usize)
+        } else {
+            2 + (rng.below(3) as usize)
+        };
+        let first = if hard {
+            1_000 + rng.below(99_000) as i128
+        } else {
+            100 + rng.below(9900) as i128
+        };
         let mut ops: Vec<(char, i128)> = Vec::with_capacity(n_ops);
         for _ in 0..n_ops {
             let op = match rng.below(3) {
@@ -181,8 +189,20 @@ fn arith_items(n: usize, hard: bool) -> Vec<ArithItem> {
                 _ => '*',
             };
             let operand: i128 = match op {
-                '*' => (if hard { 11 + rng.below(989) } else { 3 + rng.below(97) }) as i128,
-                _ => (if hard { 100 + rng.below(9_900) } else { 10 + rng.below(990) }) as i128,
+                '*' => {
+                    (if hard {
+                        11 + rng.below(989)
+                    } else {
+                        3 + rng.below(97)
+                    }) as i128
+                }
+                _ => {
+                    (if hard {
+                        100 + rng.below(9_900)
+                    } else {
+                        10 + rng.below(990)
+                    }) as i128
+                }
             };
             ops.push((op, operand));
         }
@@ -190,8 +210,8 @@ fn arith_items(n: usize, hard: bool) -> Vec<ArithItem> {
         for &(op, operand) in &ops {
             expr.push_str(&format!(" {op} {operand}"));
         }
-        let gold = eval_standard_precedence(first, &ops)
-            .expect("operand scales cannot overflow i128");
+        let gold =
+            eval_standard_precedence(first, &ops).expect("operand scales cannot overflow i128");
         out.push(ArithItem {
             prompt: format!(
                 "{ARITH_FEW_SHOT}Compute {expr}. Think step by step, then give the final answer after ####.\n"
@@ -206,7 +226,10 @@ fn arith_items(n: usize, hard: bool) -> Vec<ArithItem> {
 fn parse_arith_answer(out: &str) -> Option<i128> {
     let idx = out.rfind("####")?;
     let tail = &out[idx + 4..];
-    let cleaned: String = tail.chars().filter(|c| !c.is_whitespace() && *c != ',').collect();
+    let cleaned: String = tail
+        .chars()
+        .filter(|c| !c.is_whitespace() && *c != ',')
+        .collect();
     let mut num = String::new();
     for (i, c) in cleaned.char_indices() {
         if (i == 0 && c == '-') || c.is_ascii_digit() {
@@ -260,7 +283,13 @@ struct NiahItem {
 }
 
 /// The 614 `niah_item` (verbatim semantics).
-fn niah_item(idx: usize, len_round: usize, target_tokens: usize, tok: &BpeTokenizer, nn: usize) -> NiahItem {
+fn niah_item(
+    idx: usize,
+    len_round: usize,
+    target_tokens: usize,
+    tok: &BpeTokenizer,
+    nn: usize,
+) -> NiahItem {
     let nn = nn.clamp(1, NEEDLE_SERVERS.len());
     let mut rng = Rng(0x61A1_0000 + idx as u64 * 7919 + len_round as u64);
     let needle_off = (idx * 3) % 10;
@@ -505,10 +534,16 @@ struct CellResult {
 /// analysis; machine resume is NOT implemented, disclosed in the module doc).
 fn cell_jsonl_line(cell: &CellResult, corpus: &str) -> String {
     let nums = |v: &[u8]| -> String {
-        v.iter().map(|x| x.to_string()).collect::<Vec<_>>().join(",")
+        v.iter()
+            .map(|x| x.to_string())
+            .collect::<Vec<_>>()
+            .join(",")
     };
     let f64s = |v: &[f64]| -> String {
-        v.iter().map(|x| format!("{x:.6}")).collect::<Vec<_>>().join(",")
+        v.iter()
+            .map(|x| format!("{x:.6}"))
+            .collect::<Vec<_>>()
+            .join(",")
     };
     format!(
         "{{\"corpus\":\"{corpus}\",\"arm\":\"{}\",\"family\":\"{}\",\"length\":{},\"n\":{},\"correct\":[{}],\"prefill_walls\":[{}],\"decode_walls\":[{}],\"n_gen\":[{}],\"n_prefill_tokens\":[{}]}}\n",
@@ -519,8 +554,16 @@ fn cell_jsonl_line(cell: &CellResult, corpus: &str) -> String {
         nums(&cell.correct),
         f64s(&cell.prefill_walls),
         f64s(&cell.decode_walls),
-        cell.n_gen.iter().map(|x| x.to_string()).collect::<Vec<_>>().join(","),
-        cell.n_prefill_tokens.iter().map(|x| x.to_string()).collect::<Vec<_>>().join(","),
+        cell.n_gen
+            .iter()
+            .map(|x| x.to_string())
+            .collect::<Vec<_>>()
+            .join(","),
+        cell.n_prefill_tokens
+            .iter()
+            .map(|x| x.to_string())
+            .collect::<Vec<_>>()
+            .join(","),
     )
 }
 
@@ -621,10 +664,16 @@ fn run() -> Result<(), String> {
     let pf_path = env_or("DQ3_PF_GGUF", DEFAULT_PF);
     let q6_path = env_or("DQ3_Q6_GGUF", DEFAULT_Q6);
     let out_dir = PathBuf::from(env_or("DQ3_OUT", ".benchmarks/dq_s3_matrix"));
-    let arith_n: usize = env_or("DQ3_ARITH_N", "48").parse().map_err(|_| "DQ3_ARITH_N")?;
+    let arith_n: usize = env_or("DQ3_ARITH_N", "48")
+        .parse()
+        .map_err(|_| "DQ3_ARITH_N")?;
     let arith_hard = env_or("DQ3_ARITH_HARD", "0") == "1";
-    let ni_per_len: usize = env_or("DQ3_NI_PER_LEN", "16").parse().map_err(|_| "DQ3_NI_PER_LEN")?;
-    let ni_needles: usize = env_or("DQ3_NI_NEEDLES", "8").parse().map_err(|_| "DQ3_NI_NEEDLES")?;
+    let ni_per_len: usize = env_or("DQ3_NI_PER_LEN", "16")
+        .parse()
+        .map_err(|_| "DQ3_NI_PER_LEN")?;
+    let ni_needles: usize = env_or("DQ3_NI_NEEDLES", "8")
+        .parse()
+        .map_err(|_| "DQ3_NI_NEEDLES")?;
     let mut lengths: Vec<usize> = env_or("DQ3_LENGTHS", "1024,2048,4096")
         .split(',')
         .filter_map(|s| s.trim().parse().ok())
@@ -643,9 +692,15 @@ fn run() -> Result<(), String> {
     if !arm_order.contains(&ArmId::Base) {
         return Err("the arm set must include base (the paired reference)".into());
     }
-    let n_boot: usize = env_or("DQ3_BOOTSTRAP", "10000").parse().map_err(|_| "DQ3_BOOTSTRAP")?;
-    let arith_cap: usize = env_or("DQ3_ARITH_CAP", "256").parse().map_err(|_| "DQ3_ARITH_CAP")?;
-    let ni_cap: usize = env_or("DQ3_NI_CAP", "32").parse().map_err(|_| "DQ3_NI_CAP")?;
+    let n_boot: usize = env_or("DQ3_BOOTSTRAP", "10000")
+        .parse()
+        .map_err(|_| "DQ3_BOOTSTRAP")?;
+    let arith_cap: usize = env_or("DQ3_ARITH_CAP", "256")
+        .parse()
+        .map_err(|_| "DQ3_ARITH_CAP")?;
+    let ni_cap: usize = env_or("DQ3_NI_CAP", "32")
+        .parse()
+        .map_err(|_| "DQ3_NI_CAP")?;
 
     std::fs::create_dir_all(&out_dir).map_err(|e| format!("out dir: {e}"))?;
     let partial_path = out_dir.join("results.partial.jsonl");
@@ -663,7 +718,12 @@ fn run() -> Result<(), String> {
         .lines()
         .filter(|line| {
             let mem = line.rsplit(',').next().unwrap_or("").trim();
-            !mem.is_empty() && mem != "[N/A]" && mem.trim_end_matches(" MiB").parse::<u64>().is_ok_and(|m| m > 0)
+            !mem.is_empty()
+                && mem != "[N/A]"
+                && mem
+                    .trim_end_matches(" MiB")
+                    .parse::<u64>()
+                    .is_ok_and(|m| m > 0)
         })
         .collect();
     if !compute_consumers.is_empty() {
@@ -673,7 +733,10 @@ fn run() -> Result<(), String> {
         ));
     }
     let gpu_info = Command::new("nvidia-smi")
-        .args(["--query-gpu=name,memory.total,memory.free", "--format=csv,noheader"])
+        .args([
+            "--query-gpu=name,memory.total,memory.free",
+            "--format=csv,noheader",
+        ])
         .output()
         .map_err(|e| format!("nvidia-smi: {e}"))?;
     let gpu_csv = String::from_utf8_lossy(&gpu_info.stdout).trim().to_string();
@@ -780,27 +843,24 @@ fn run() -> Result<(), String> {
                 }
             }
             ArmId::Matched => {
-                let (mut cfg, w) =
-                    load_qwen_deltanet_ternary_weights_gguf(Path::new(&q6_path))
-                        .map_err(|e| format!("load {q6_path}: {e}"))?;
+                let (mut cfg, w) = load_qwen_deltanet_ternary_weights_gguf(Path::new(&q6_path))
+                    .map_err(|e| format!("load {q6_path}: {e}"))?;
                 cfg.block_size = cfg.block_size.min(block_for(&lengths));
                 let f = TernaryDeltanetGpuForwardCudarc::new(&cfg, &w)
                     .map_err(|e| format!("construct matched: {e}"))?;
                 (cfg, f, false)
             }
             ArmId::Q4Single => {
-                let (mut cfg, w) =
-                    load_qwen_deltanet_ternary_weights_gguf(Path::new(&pf_path))
-                        .map_err(|e| format!("load {pf_path}: {e}"))?;
+                let (mut cfg, w) = load_qwen_deltanet_ternary_weights_gguf(Path::new(&pf_path))
+                    .map_err(|e| format!("load {pf_path}: {e}"))?;
                 cfg.block_size = cfg.block_size.min(block_for(&lengths));
                 let f = TernaryDeltanetGpuForwardCudarc::new(&cfg, &w)
                     .map_err(|e| format!("construct q4single: {e}"))?;
                 (cfg, f, false)
             }
             ArmId::Base => {
-                let (mut cfg, w) =
-                    load_qwen_deltanet_ternary_weights_gguf(Path::new(&decode_path))
-                        .map_err(|e| format!("load {decode_path}: {e}"))?;
+                let (mut cfg, w) = load_qwen_deltanet_ternary_weights_gguf(Path::new(&decode_path))
+                    .map_err(|e| format!("load {decode_path}: {e}"))?;
                 cfg.block_size = cfg.block_size.min(block_for(&lengths));
                 let f = TernaryDeltanetGpuForwardCudarc::new(&cfg, &w)
                     .map_err(|e| format!("construct base: {e}"))?;
@@ -836,7 +896,9 @@ fn run() -> Result<(), String> {
             t_cell.elapsed().as_secs_f32()
         );
         let line = cell_jsonl_line(&cell, &corpus_hash);
-        partial.write_all(line.as_bytes()).map_err(|e| e.to_string())?;
+        partial
+            .write_all(line.as_bytes())
+            .map_err(|e| e.to_string())?;
         partial.flush().map_err(|e| e.to_string())?;
         cells.push(cell);
 
@@ -846,7 +908,11 @@ fn run() -> Result<(), String> {
             // skip lengths above this arm's clamped block size (they never
             // fit this arm's KV reservation).
             if *len + 64 > config.block_size {
-                eprintln!("[dq3] arm {} skips niah {len} (block_size {})", arm.name(), config.block_size);
+                eprintln!(
+                    "[dq3] arm {} skips niah {len} (block_size {})",
+                    arm.name(),
+                    config.block_size
+                );
                 continue;
             }
             let t_cell = Instant::now();
@@ -868,12 +934,18 @@ fn run() -> Result<(), String> {
                 t_cell.elapsed().as_secs_f32()
             );
             let line = cell_jsonl_line(&cell, &corpus_hash);
-            partial.write_all(line.as_bytes()).map_err(|e| e.to_string())?;
+            partial
+                .write_all(line.as_bytes())
+                .map_err(|e| e.to_string())?;
             partial.flush().map_err(|e| e.to_string())?;
             cells.push(cell);
         }
         drop(fwd);
-        eprintln!("[dq3] arm {} complete ({:.0}s total)", arm.name(), t_arm.elapsed().as_secs_f32());
+        eprintln!(
+            "[dq3] arm {} complete ({:.0}s total)",
+            arm.name(),
+            t_arm.elapsed().as_secs_f32()
+        );
     }
 
     // ── the verdict ──────────────────────────────────────────────────────
@@ -932,7 +1004,9 @@ fn build_report(
         "- **Gen caps:** arith ≤ {arith_cap}, niah ≤ {ni_cap} · bootstrap {n_boot}\n"
     ));
     md.push_str(&format!("- **GPU:** {gpu_csv}\n"));
-    md.push_str(&format!("- **Packs:** decode `{decode_path}` · pf `{pf_path}` · q6 `{q6_path}`\n"));
+    md.push_str(&format!(
+        "- **Packs:** decode `{decode_path}` · pf `{pf_path}` · q6 `{q6_path}`\n"
+    ));
     md.push_str("- **Storage pairing:** base 6.7 GB · dual 21.1 GB · matched ≈20.7 GB (the control ~2% CHEAPER — the conservative direction, disclosed) · q4single 14.4 GB (the decomposition control)\n\n");
 
     // The cells table.
@@ -946,7 +1020,11 @@ fn build_report(
         let p99 = percentile(&mut walls.clone(), 0.99) * 1e3;
         let decode_steps: f64 = (c.n_gen.iter().sum::<usize>() as f64) - n as f64;
         let decode_total: f64 = c.decode_walls.iter().sum();
-        let tps = if decode_total > 0.0 { decode_steps / decode_total } else { 0.0 };
+        let tps = if decode_total > 0.0 {
+            decode_steps / decode_total
+        } else {
+            0.0
+        };
         md.push_str(&format!(
             "| {} | {} | {} | {n} | {acc:.4} | {p50:.1} | {p99:.1} | {tps:.2} |\n",
             c.arm.name(),
@@ -957,7 +1035,9 @@ fn build_report(
 
     // Paired stats vs base.
     let base_of = |family: &str, len: usize| -> Option<&CellResult> {
-        cells.iter().find(|c| c.arm == ArmId::Base && c.family == family && c.length == len)
+        cells
+            .iter()
+            .find(|c| c.arm == ArmId::Base && c.family == family && c.length == len)
     };
     md.push_str("\n## Paired vs base (bootstrap 95% CI on the mean paired difference)\n\n");
     md.push_str("| arm | family | len | recovery | CI lo | CI hi | n | note |\n|---|---|---|---|---|---|---|---|\n");
@@ -978,7 +1058,10 @@ fn build_report(
         if b.correct.len() != c.correct.len() {
             md.push_str(&format!(
                 "| {} | {} | {} | — | — | — | {} | LENGTH MISMATCH vs base |\n",
-                c.arm.name(), c.family, c.length, c.correct.len()
+                c.arm.name(),
+                c.family,
+                c.length,
+                c.correct.len()
             ));
             continue;
         }
@@ -1036,7 +1119,9 @@ fn build_report(
                 find(ArmId::Dual, "niah", len),
                 find(ArmId::Matched, "niah", len),
             ) else {
-                legs.push_str(&format!("- niah {len}: arm cells missing — the length was dropped or not run\n"));
+                legs.push_str(&format!(
+                    "- niah {len}: arm cells missing — the length was dropped or not run\n"
+                ));
                 continue;
             };
             let dual_ci_pos = rd > 0.0 && lod > 0.0;
@@ -1054,29 +1139,34 @@ fn build_report(
         // outer existence guard is needed
         for &len in lengths {
             let (Some(dd), Some(mm)) = (
-                cells.iter().find(|c| c.arm == ArmId::Dual && c.family == "niah" && c.length == len),
-                cells.iter().find(|c| c.arm == ArmId::Matched && c.family == "niah" && c.length == len),
+                cells
+                    .iter()
+                    .find(|c| c.arm == ArmId::Dual && c.family == "niah" && c.length == len),
+                cells
+                    .iter()
+                    .find(|c| c.arm == ArmId::Matched && c.family == "niah" && c.length == len),
             ) else {
                 continue;
             };
-                if dd.correct.len() != mm.correct.len() {
-                    continue;
-                }
-                let diffs: Vec<i8> = dd
-                    .correct
-                    .iter()
-                    .zip(&mm.correct)
-                    .map(|(a, b)| *a as i8 - *b as i8)
-                    .collect();
-                let (lo, hi) = paired_bootstrap_ci(&diffs, n_boot);
-                if lo > 0.0 {
-                    matched_sig_beats_dual_anywhere = true;
-                }
-                legs.push_str(&format!(
-                    "- niah {len} direct dual−matched: mean {:+.4} CI [{:+.4}, {:+.4}]\n",
-                    diffs.iter().map(|&x| f64::from(x)).sum::<f64>() / diffs.len() as f64,
-                    lo, hi
-                ));
+            if dd.correct.len() != mm.correct.len() {
+                continue;
+            }
+            let diffs: Vec<i8> = dd
+                .correct
+                .iter()
+                .zip(&mm.correct)
+                .map(|(a, b)| *a as i8 - *b as i8)
+                .collect();
+            let (lo, hi) = paired_bootstrap_ci(&diffs, n_boot);
+            if lo > 0.0 {
+                matched_sig_beats_dual_anywhere = true;
+            }
+            legs.push_str(&format!(
+                "- niah {len} direct dual−matched: mean {:+.4} CI [{:+.4}, {:+.4}]\n",
+                diffs.iter().map(|&x| f64::from(x)).sum::<f64>() / diffs.len() as f64,
+                lo,
+                hi
+            ));
         }
         hit = any_dual_ci_positive && dual_ge_matched_all && !matched_sig_beats_dual_anywhere;
         null = matched_ge_dual_all && !any_dual_ci_positive;

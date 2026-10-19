@@ -30,15 +30,15 @@
 use std::io::Write as _;
 
 use anyhow::{Context, Result, bail};
+use katgpt_transformer::MultiLayerKVCache;
 use riir_infer_core::corpus_text::load_corpus_text;
 use riir_infer_core::gguf_loader::{GgufFile, config_from_gguf_metadata, load_gemma2_f16_direct};
 use riir_infer_core::tokenizer::SentencePieceGgufTokenizer;
 use riir_infer_core::transformer::gemma2_calibration::{
-    forward_gemma2_f16_tapped, CalibrationTables,
+    CalibrationTables, forward_gemma2_f16_tapped,
 };
 use riir_infer_core::transformer::{ForwardContext, NoHook};
 use riir_infer_core::types::kv_dim;
-use katgpt_transformer::MultiLayerKVCache;
 
 fn main() -> Result<()> {
     let mut gguf_path = String::from("../riir-train/data/gemma-2-2b-it-f16.gguf");
@@ -135,7 +135,14 @@ fn main() -> Result<()> {
         let mut cache = MultiLayerKVCache::new(&config);
         for (pos, &token) in chunk.iter().enumerate() {
             forward_gemma2_f16_tapped(
-                &mut ctx, &weights, &mut cache, &mut tables, token, pos, &config, &mut NoHook,
+                &mut ctx,
+                &weights,
+                &mut cache,
+                &mut tables,
+                token,
+                pos,
+                &config,
+                &mut NoHook,
             );
             // layer-major: for row `pos`, every layer's V row. The dump is
             // therefore [layer][pos-within-chunk] per chunk — the consumer

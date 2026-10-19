@@ -465,8 +465,8 @@ fn dual_format_q4_prefill_pair_loads_and_runs() {
     let (ref_last, _ref_decode, _ref_tokens) = run_single_checkpoint(&config, &ref_weights);
     drop(ref_weights);
 
-    let (config, container) = DisaggregatedTernaryWeights::load_pair(&dpath, &ppath)
-        .expect("load the dual-format pair");
+    let (config, container) =
+        DisaggregatedTernaryWeights::load_pair(&dpath, &ppath).expect("load the dual-format pair");
     let _ = std::fs::remove_file(&dpath);
     let _ = std::fs::remove_file(&ppath);
 
@@ -474,15 +474,9 @@ fn dual_format_q4_prefill_pair_loads_and_runs() {
     //    the a/b escape fields stay GateProjWeights (Dense BF16 arm here).
     let pre = container.prefill();
     let dec = container.decode();
-    assert!(matches!(
-        pre.layers[0].in_proj_qkv,
-        ProjWeights::Q4K(..)
-    ));
+    assert!(matches!(pre.layers[0].in_proj_qkv, ProjWeights::Q4K(..)));
     assert!(matches!(pre.layers[3].attn_wq, ProjWeights::Q4K(..)));
-    assert!(matches!(
-        dec.layers[0].in_proj_qkv,
-        ProjWeights::Ternary(_)
-    ));
+    assert!(matches!(dec.layers[0].in_proj_qkv, ProjWeights::Ternary(_)));
     assert!(matches!(
         pre.layers[0].in_proj_a,
         GateProjWeights::Dense(..)
@@ -532,8 +526,10 @@ fn real_q4_prefill_pair_loads_and_prefills() {
         .unwrap_or_else(|_| "../riir-train/data/Ternary-Bonsai-2-27B-PQ2_0.gguf".to_string());
     let prefill_path = std::env::var("BONSAI_Q4_PF_GGUF")
         .unwrap_or_else(|_| "../riir-train/data/Ternary-Bonsai-2-27B-Q4_K.pf.gguf".to_string());
-    let (decode_path, prefill_path) =
-        (std::path::PathBuf::from(decode_path), std::path::PathBuf::from(prefill_path));
+    let (decode_path, prefill_path) = (
+        std::path::PathBuf::from(decode_path),
+        std::path::PathBuf::from(prefill_path),
+    );
     if !decode_path.exists() || !prefill_path.exists() {
         eprintln!(
             "[skip] pair not found: {} / {}",
@@ -563,12 +559,17 @@ fn real_q4_prefill_pair_loads_and_prefills() {
     let prompt: &[usize] = &PROMPT;
     let mut handoff = PhaseHandoff::begin(&config, &layer_types);
     let t1 = std::time::Instant::now();
-    let last = handoff.prefill(container.prefill(), &config, prompt).to_vec();
+    let last = handoff
+        .prefill(container.prefill(), &config, prompt)
+        .to_vec();
     eprintln!(
         "[real-q4] prefill {} tokens: {:?} ({:.3} s/token)",
         prompt.len(),
         t1.elapsed(),
         t1.elapsed().as_secs_f32() / prompt.len() as f32
     );
-    assert!(last.iter().all(|v| v.is_finite()), "non-finite prefill logits");
+    assert!(
+        last.iter().all(|v| v.is_finite()),
+        "non-finite prefill logits"
+    );
 }

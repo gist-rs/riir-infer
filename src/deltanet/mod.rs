@@ -142,7 +142,6 @@ pub(crate) fn unit_test_config(
     config
 }
 
-
 /// The TERNARY decode forwards' entry: with `decode_spin_pool` compiled in
 /// and switched on, run `f` on THIS thread with the process-wide decode spin
 /// pool installed (katgpt-rs Issue 936), so the Q2 / bit-plane q8 kernels and
@@ -195,7 +194,8 @@ pub mod decode_pool {
         // A 0-worker pool (the off-macOS default) is never used: hand `f`
         // back so the forward keeps Bench 880's rayon-worker posture.
         let pool = POOL.get_or_init(katgpt_core::SpinPool::for_this_machine);
-        if !ON.load(Ordering::Relaxed) || pool.workers() == 0 || BUSY.swap(true, Ordering::Acquire) {
+        if !ON.load(Ordering::Relaxed) || pool.workers() == 0 || BUSY.swap(true, Ordering::Acquire)
+        {
             return Err(f);
         }
         struct Release;

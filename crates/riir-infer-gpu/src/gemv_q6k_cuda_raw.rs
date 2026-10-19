@@ -218,7 +218,11 @@ impl Q6KGemvKernels {
         let multi = module
             .load_function("gemv_q6k_dp4a_multi_persistent")
             .map_err(|e| CudarcKernelError::Compile(format!("{e}")))?;
-        Ok(Self { single, multi, module })
+        Ok(Self {
+            single,
+            multi,
+            module,
+        })
     }
 }
 
@@ -353,7 +357,9 @@ pub fn q6k_blocks_as_bytes(blocks: &[BlockQ6K]) -> &[u8] {
 mod tests {
     use super::*;
     use bytemuck::Zeroable;
-    use riir_infer_core::quant::q6k::{dequantize_row_q6_k, gemv_q6_k_row, quantize_row_q6_k, QK_K};
+    use riir_infer_core::quant::q6k::{
+        QK_K, dequantize_row_q6_k, gemv_q6_k_row, quantize_row_q6_k,
+    };
 
     fn cuda_or_skip() -> Option<Arc<CudaContext>> {
         CudaContext::new(0).ok()
@@ -459,7 +465,9 @@ mod tests {
             quantize_row_q6_k(&src[r * n..(r + 1) * n], &mut blocks[r * nb..(r + 1) * nb]);
         }
 
-        let x: Vec<f32> = (0..n).map(|i| ((i % 23) as f32 / 23.0 - 0.5) * 3.0).collect();
+        let x: Vec<f32> = (0..n)
+            .map(|i| ((i % 23) as f32 / 23.0 - 0.5) * 3.0)
+            .collect();
         let (x8, ascale) = quantize_like_gpu(&x);
 
         // ── (a0) the mirror's layout reading pinned to the CPU dequantizer ──
@@ -497,7 +505,14 @@ mod tests {
         let out_dev = stream.alloc_zeros::<f32>(m).expect("alloc out");
 
         launch_gemv_q6k(
-            &stream, &kernels, &blocks_dev, &x8_dev, &ascale_dev, &out_dev, m, n,
+            &stream,
+            &kernels,
+            &blocks_dev,
+            &x8_dev,
+            &ascale_dev,
+            &out_dev,
+            m,
+            n,
         )
         .expect("launch");
         stream.synchronize().expect("sync");
@@ -530,7 +545,10 @@ mod tests {
         eprintln!("[q6k parity] max |Δ| vs CPU f32 ref (magnitude-referenced): {max_rel:.3e}");
         // Q6_K quantization (≈0.2% RMS) × activation int8 (≈0.4% RMS): 2% of
         // the row magnitude is the honest class bound.
-        assert!(max_rel < 0.02, "activation-quant class blown: {max_rel:.3e}");
+        assert!(
+            max_rel < 0.02,
+            "activation-quant class blown: {max_rel:.3e}"
+        );
     }
 
     /// The multi kernel: 3 segments (2 + 1 + 1 rows) in one launch ==
@@ -551,7 +569,9 @@ mod tests {
         for r in 0..4 {
             quantize_row_q6_k(&src[r * n..(r + 1) * n], &mut blocks[r * nb..(r + 1) * nb]);
         }
-        let x: Vec<f32> = (0..n).map(|i| ((i % 17) as f32 / 17.0 - 0.5) * 4.0).collect();
+        let x: Vec<f32> = (0..n)
+            .map(|i| ((i % 17) as f32 / 17.0 - 0.5) * 4.0)
+            .collect();
         let (x8, ascale) = quantize_like_gpu(&x);
 
         let x8_dev = stream.clone_htod(&x8).expect("htod x8");
@@ -576,7 +596,9 @@ mod tests {
             )
             .expect("launch single");
             stream.synchronize().expect("sync");
-            stream.memcpy_dtoh(&out_dev, &mut want[r..r + 1]).expect("dtoh");
+            stream
+                .memcpy_dtoh(&out_dev, &mut want[r..r + 1])
+                .expect("dtoh");
         }
 
         // Multi: segments (rows 0-1), (row 2), (row 3) — separate device
@@ -614,13 +636,20 @@ mod tests {
         let mut got = [0.0f32; 4];
         let mut row = 0usize;
         for (s, out) in outs.iter().enumerate() {
-            stream.memcpy_dtoh(out, &mut got[row..row + seg_ms[s]]).expect("dtoh");
+            stream
+                .memcpy_dtoh(out, &mut got[row..row + seg_ms[s]])
+                .expect("dtoh");
             row += seg_ms[s];
         }
 
         for r in 0..4 {
             let rel = (got[r] - want[r]).abs() / want[r].abs().max(1e-9);
-            assert!(rel < 1e-5, "row {r}: multi {} vs single {} (rel {rel:.2e})", got[r], want[r]);
+            assert!(
+                rel < 1e-5,
+                "row {r}: multi {} vs single {} (rel {rel:.2e})",
+                got[r],
+                want[r]
+            );
         }
     }
 }

@@ -16,7 +16,9 @@ mod ab_timing;
 
 use std::hint::black_box;
 
-use riir_infer_core::deltanet::forward::{gated_deltanet_step_inplace, gated_deltanet_step_par_inplace};
+use riir_infer_core::deltanet::forward::{
+    gated_deltanet_step_inplace, gated_deltanet_step_par_inplace,
+};
 
 const H: usize = 48;
 const D: usize = 128;
@@ -48,13 +50,21 @@ fn step(seed: u64) -> Step {
         q: fill(seed, H * D, 0.1),
         k: fill(seed + 1, H * D, 0.1),
         v: fill(seed + 2, H * D, 1.0),
-        beta: fill(seed + 3, H, 0.5).into_iter().map(|b| 0.5 + b).collect(),
-        decay: fill(seed + 4, H, 0.05).into_iter().map(|g| 0.95 + g).collect(),
+        beta: fill(seed + 3, H, 0.5)
+            .into_iter()
+            .map(|b| 0.5 + b)
+            .collect(),
+        decay: fill(seed + 4, H, 0.05)
+            .into_iter()
+            .map(|g| 0.95 + g)
+            .collect(),
     }
 }
 
 fn serial(st: &mut [f32], s: &Step, out: &mut [f32], kv: &mut [f32], dl: &mut [f32]) {
-    gated_deltanet_step_inplace(&s.q, &s.k, &s.v, st, &s.beta, &s.decay, H, D, D, out, kv, dl);
+    gated_deltanet_step_inplace(
+        &s.q, &s.k, &s.v, st, &s.beta, &s.decay, H, D, D, out, kv, dl,
+    );
 }
 
 fn par(st: &mut [f32], s: &Step, out: &mut [f32]) {
@@ -72,9 +82,20 @@ fn g1_head_parallel_step_is_bit_identical_over_a_token_stream() {
         let s = step(100 + t * 7);
         serial(&mut st_a, &s, &mut out_a, &mut kv, &mut dl);
         par(&mut st_b, &s, &mut out_b);
-        assert!(out_a.iter().zip(&out_b).all(|(x, y)| x.to_bits() == y.to_bits()), "output differs at token {t}");
+        assert!(
+            out_a
+                .iter()
+                .zip(&out_b)
+                .all(|(x, y)| x.to_bits() == y.to_bits()),
+            "output differs at token {t}"
+        );
     }
-    assert!(st_a.iter().zip(&st_b).all(|(x, y)| x.to_bits() == y.to_bits()), "state differs after 32 tokens");
+    assert!(
+        st_a.iter()
+            .zip(&st_b)
+            .all(|(x, y)| x.to_bits() == y.to_bits()),
+        "state differs after 32 tokens"
+    );
 }
 
 #[test]
@@ -91,7 +112,13 @@ fn g2_head_parallel_step_vs_serial_ab() {
         200,
         50,
         |i| {
-            serial(&mut st_a, black_box(&steps[i % steps.len()]), &mut out_a, &mut kv, &mut dl);
+            serial(
+                &mut st_a,
+                black_box(&steps[i % steps.len()]),
+                &mut out_a,
+                &mut kv,
+                &mut dl,
+            );
             sink.set(sink.get() + out_a[i % out_a.len()]);
         },
         |i| {

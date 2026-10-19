@@ -57,20 +57,20 @@ use std::io::Write as _;
 use std::path::PathBuf;
 use std::time::Instant;
 
-use anyhow::{bail, Context, Result};
+use anyhow::{Context, Result, bail};
 use katgpt_core::fitted_value_table::{FittedTokenTable, VkSignal};
 use katgpt_transformer::MultiLayerKVCache;
 
 use riir_infer_core::corpus_text::load_corpus_text;
-use riir_infer_core::gguf_loader::{config_from_gguf_metadata, GgufFile};
+use riir_infer_core::gguf_loader::{GgufFile, config_from_gguf_metadata};
 use riir_infer_core::tokenizer::SentencePieceGgufTokenizer;
-use riir_infer_core::transformer::{
-    forward_gemma2_f16, forward_gemma2_f16_hk, ForwardContext, NoHook, NoVQuant,
-};
 use riir_infer_core::transformer::gemma2_calibration::{
-    forward_gemma2_f16_tapped, load_gemma2_f16_direct, CalibrationTables,
+    CalibrationTables, forward_gemma2_f16_tapped, load_gemma2_f16_direct,
 };
 use riir_infer_core::transformer::gemma2_vquant::{LayerMse, VQuantState};
+use riir_infer_core::transformer::{
+    ForwardContext, NoHook, NoVQuant, forward_gemma2_f16, forward_gemma2_f16_hk,
+};
 use riir_infer_core::types::kv_dim;
 
 /// Frequency-band edges over the tracked rows (rows are rank-ordered by
@@ -165,7 +165,11 @@ fn main() -> Result<()> {
     let gguf_path = PathBuf::from(&args[1]);
     let corpus_path = PathBuf::from(&args[2]);
     let smoke = args.iter().any(|a| a == "--smoke");
-    let (mut cal_n, mut eval_n) = if smoke { (2048, 2048) } else { (61_440, 12_288) };
+    let (mut cal_n, mut eval_n) = if smoke {
+        (2048, 2048)
+    } else {
+        (61_440, 12_288)
+    };
     let mut bits: Vec<u8> = if smoke { vec![4] } else { vec![2, 3, 4] };
     let mut top_k: usize = 8192;
     let mut dial_k: usize = 1024;
@@ -210,7 +214,9 @@ fn main() -> Result<()> {
         }
     }
     if seq_len > 4096 {
-        bail!("--seq-len must stay <= 4096 (gemma-2 sliding window; see vk_calibration's module doc)");
+        bail!(
+            "--seq-len must stay <= 4096 (gemma-2 sliding window; see vk_calibration's module doc)"
+        );
     }
     if !seq_len.is_multiple_of(TILE) {
         bail!("--seq-len must be a multiple of {TILE} (whole KVarN tiles per chunk)");
@@ -279,7 +285,14 @@ fn main() -> Result<()> {
         cache.reset();
         for (pos, &token) in chunk.iter().enumerate() {
             forward_gemma2_f16_tapped(
-                &mut ctx, &weights, &mut cache, &mut tables, token, pos, &config, &mut NoHook,
+                &mut ctx,
+                &weights,
+                &mut cache,
+                &mut tables,
+                token,
+                pos,
+                &config,
+                &mut NoHook,
             );
         }
         done += chunk.len();
@@ -355,7 +368,10 @@ fn main() -> Result<()> {
     for &b in &bits {
         arms.push(ArmSpec {
             name: format!("mr-b{b}"),
-            kind: ArmKind::MeanRemoved { bits: b, dial: false },
+            kind: ArmKind::MeanRemoved {
+                bits: b,
+                dial: false,
+            },
         });
     }
     arms.push(ArmSpec {
@@ -375,11 +391,18 @@ fn main() -> Result<()> {
             .iter()
             .map(|x| x.to_bits())
             .collect();
-        let b0: Vec<u32> =
-            forward_gemma2_f16_hk(&mut ctx, &weights, &mut cache, &mut NoVQuant, pt0, 0, &config)
-                .iter()
-                .map(|x| x.to_bits())
-                .collect();
+        let b0: Vec<u32> = forward_gemma2_f16_hk(
+            &mut ctx,
+            &weights,
+            &mut cache,
+            &mut NoVQuant,
+            pt0,
+            0,
+            &config,
+        )
+        .iter()
+        .map(|x| x.to_bits())
+        .collect();
         assert_eq!(
             a0, b0,
             "forward_gemma2_f16_hk(NoVQuant) diverged from forward_gemma2_f16 at pos 0"
@@ -388,11 +411,18 @@ fn main() -> Result<()> {
             .iter()
             .map(|x| x.to_bits())
             .collect();
-        let b1: Vec<u32> =
-            forward_gemma2_f16_hk(&mut ctx, &weights, &mut cache, &mut NoVQuant, pt1, 1, &config)
-                .iter()
-                .map(|x| x.to_bits())
-                .collect();
+        let b1: Vec<u32> = forward_gemma2_f16_hk(
+            &mut ctx,
+            &weights,
+            &mut cache,
+            &mut NoVQuant,
+            pt1,
+            1,
+            &config,
+        )
+        .iter()
+        .map(|x| x.to_bits())
+        .collect();
         assert_eq!(
             a1, b1,
             "forward_gemma2_f16_hk(NoVQuant) diverged at pos 1 (store+seam+read path)"
@@ -414,12 +444,7 @@ fn main() -> Result<()> {
         let mut vq = match arm.kind {
             ArmKind::Base => None,
             ArmKind::Plain(b) => Some(VQuantState::new_plain(
-                b,
-                n_layers,
-                kvd,
-                seq_len,
-                TILE,
-                table_full,
+                b, n_layers, kvd, seq_len, TILE, table_full,
             )),
             ArmKind::MeanRemoved { bits: b, dial } => Some(VQuantState::new_mean_removed(
                 b,
@@ -450,9 +475,7 @@ fn main() -> Result<()> {
                     state.set_token(pos, token as u32);
                 }
                 let logits = match vq.as_mut() {
-                    None => {
-                        forward_gemma2_f16(&mut ctx, &weights, &mut cache, token, pos, &config)
-                    }
+                    None => forward_gemma2_f16(&mut ctx, &weights, &mut cache, token, pos, &config),
                     Some(state) => forward_gemma2_f16_hk(
                         &mut ctx, &weights, &mut cache, state, token, pos, &config,
                     ),
@@ -512,8 +535,16 @@ fn main() -> Result<()> {
             "# arm {} done: {} scored | ppl {:.4} | flip {:.2}% | {:.0} fwd/s | {:.0}s",
             arm.name,
             a.k,
-            if a.k > 0 { (a.sum_nll / a.k as f64).exp() } else { 0.0 },
-            if a.k > 0 { 100.0 * a.flips as f64 / a.k as f64 } else { 0.0 },
+            if a.k > 0 {
+                (a.sum_nll / a.k as f64).exp()
+            } else {
+                0.0
+            },
+            if a.k > 0 {
+                100.0 * a.flips as f64 / a.k as f64
+            } else {
+                0.0
+            },
             a.fwd as f64 / a.secs.max(1e-9),
             a.secs
         );
@@ -577,22 +608,14 @@ fn argmax(logits: &[f32]) -> usize {
         .iter()
         .enumerate()
         .fold((0, f32::NEG_INFINITY), |(bi, bv), (i, &v)| {
-            if v > bv {
-                (i, v)
-            } else {
-                (bi, bv)
-            }
+            if v > bv { (i, v) } else { (bi, bv) }
         })
         .0
 }
 
 /// Truncate the frozen table to the top-`k` rows (rows are rank-ordered,
 /// so the dial table is a remap — no second calibration pass).
-fn truncate_table(
-    full: &FittedTokenTable,
-    cal: &CalibrationTables,
-    k: usize,
-) -> FittedTokenTable {
+fn truncate_table(full: &FittedTokenTable, cal: &CalibrationTables, k: usize) -> FittedTokenTable {
     let nl = full.n_layer();
     let width = full.width();
     let k = k.min(full.rows());
@@ -689,9 +712,8 @@ fn sink_norms_report(
 /// Rewritten after every arm (partial) and once final. All thresholds are
 /// echoed so the artifact is self-contained.
 fn render_report(ctx: &ReportCtx, arms: &[ArmSpec], accs: &[Acc], final_report: bool) -> String {
-    let table_mib = |rows: usize| {
-        4.0 * ctx.r2.len() as f64 * rows as f64 * ctx.kvd as f64 / (1 << 20) as f64
-    };
+    let table_mib =
+        |rows: usize| 4.0 * ctx.r2.len() as f64 * rows as f64 * ctx.kvd as f64 / (1 << 20) as f64;
     let mut out = String::new();
     out.push_str("# Issue 013 T1 — fitted-V P1 gate: gemma-2-2b decode (fitted_v_gate)\n\n");
     out.push_str(&format!(
@@ -771,7 +793,9 @@ fn render_report(ctx: &ReportCtx, arms: &[ArmSpec], accs: &[Acc], final_report: 
 
     // ── Gate 1 ────────────────────────────────────────────────────────
     out.push_str("\n## Gate 1 — prediction vs measurement (mr/plain MSE ratio vs 1 − ρ_l(V))\n\n");
-    out.push_str("| layer | 1−ρ (pred) | ratio b2 | ratio b3 | ratio b4 |\n|---|---|---|---|---|\n");
+    out.push_str(
+        "| layer | 1−ρ (pred) | ratio b2 | ratio b3 | ratio b4 |\n|---|---|---|---|---|\n",
+    );
     let mut per_bits: Vec<(u8, Vec<Option<f64>>)> = Vec::new();
     for &b in &bits_present {
         let (Some(pi), Some(mi)) = (plain_of(b), mr_of(b, false)) else {
@@ -871,7 +895,10 @@ fn render_report(ctx: &ReportCtx, arms: &[ArmSpec], accs: &[Acc], final_report: 
             .count();
         let n_pairs = am.chunk_d.len().min(ap.chunk_d.len());
         let share = if n_pairs > 0 {
-            format!("{wins}/{n_pairs} ({:.0}%)", 100.0 * wins as f64 / n_pairs as f64)
+            format!(
+                "{wins}/{n_pairs} ({:.0}%)",
+                100.0 * wins as f64 / n_pairs as f64
+            )
         } else {
             "—".into()
         };

@@ -1216,9 +1216,8 @@ impl DFlash2Drafter {
             // Phase-2 order).
             let position = (anchor_pos + 1 + i) as u64;
             let row_keep = keep.map(|k| &k[i * vocab..(i + 1) * vocab]);
-            let survives = |ki: usize| -> bool {
-                row_keep.is_none_or(|rk| rk[candidates[i][ki] as usize])
-            };
+            let survives =
+                |ki: usize| -> bool { row_keep.is_none_or(|rk| rk[candidates[i][ki] as usize]) };
             let mut best = 0usize;
             let mut best_s = f32::NEG_INFINITY;
             let mut any = false;
@@ -1367,7 +1366,8 @@ impl DFlash2Drafter {
         embed_row: &dyn Fn(u32) -> Vec<f32>,
         lm_head_rows: &dyn Fn(&[f32], usize) -> Result<Vec<f32>, String>,
     ) -> Result<DraftWalk, String> {
-        let (hidden, logits) = self.draft_block_rows(anchor_token, anchor_pos, embed_row, lm_head_rows)?;
+        let (hidden, logits) =
+            self.draft_block_rows(anchor_token, anchor_pos, embed_row, lm_head_rows)?;
         Ok(self.lattice_walk(anchor_token, &hidden, &logits))
     }
 
@@ -1389,7 +1389,8 @@ impl DFlash2Drafter {
         seed: u64,
         temperature: f32,
     ) -> Result<DraftWalk, String> {
-        let (hidden, logits) = self.draft_block_rows(anchor_token, anchor_pos, embed_row, lm_head_rows)?;
+        let (hidden, logits) =
+            self.draft_block_rows(anchor_token, anchor_pos, embed_row, lm_head_rows)?;
         Ok(self.lattice_walk_keyed(
             anchor_token,
             &hidden,
@@ -1416,7 +1417,8 @@ impl DFlash2Drafter {
         top_k: Option<usize>,
         top_p: Option<f32>,
     ) -> Result<DraftWalk, String> {
-        let (hidden, logits) = self.draft_block_rows(anchor_token, anchor_pos, embed_row, lm_head_rows)?;
+        let (hidden, logits) =
+            self.draft_block_rows(anchor_token, anchor_pos, embed_row, lm_head_rows)?;
         Ok(self.lattice_walk_keyed_masked(
             anchor_token,
             &hidden,
@@ -1861,11 +1863,17 @@ mod tests {
         let anchor = vec![1.0f32, 0.0, 0.0, 0.0];
         let mask = vec![0.0f32, 1.0, 1.0, 1.0];
         let embed = |tok: u32| -> Vec<f32> {
-            if tok == 0 { anchor.clone() } else { mask.clone() }
+            if tok == 0 {
+                anchor.clone()
+            } else {
+                mask.clone()
+            }
         };
         let lg = crafted_logits();
         let lm_head = |_rows: &[f32], _n: usize| -> Result<Vec<f32>, String> { Ok(lg.clone()) };
-        let greedy = drafter.draft_block(0, 100, &embed, &lm_head).expect("draft");
+        let greedy = drafter
+            .draft_block(0, 100, &embed, &lm_head)
+            .expect("draft");
         for t in [0.0f32, -1.0] {
             let keyed = drafter
                 .draft_block_keyed(0, 100, &embed, &lm_head, 7, t)
@@ -1883,7 +1891,11 @@ mod tests {
         let anchor = vec![1.0f32, 0.0, 0.0, 0.0];
         let mask = vec![0.0f32, 1.0, 1.0, 1.0];
         let embed = |tok: u32| -> Vec<f32> {
-            if tok == 0 { anchor.clone() } else { mask.clone() }
+            if tok == 0 {
+                anchor.clone()
+            } else {
+                mask.clone()
+            }
         };
         let lg = crafted_logits();
         let lm_head = |_rows: &[f32], _n: usize| -> Result<Vec<f32>, String> { Ok(lg.clone()) };
@@ -1895,16 +1907,8 @@ mod tests {
         // scores == the candidates' logits; the pick is the keyed-Gumbel
         // argmax over the candidate TOKENS (not indices) at absolute
         // positions 101..103; confidence is the chosen's softmax(s/T).
-        let cands = [
-            vec![5u32, 9],
-            vec![3, 7],
-            vec![1, 2],
-        ];
-        let rows = [
-            [2.0f32, 1.9],
-            [1.0, 0.9],
-            [0.5, 0.49],
-        ];
+        let cands = [vec![5u32, 9], vec![3, 7], vec![1, 2]];
+        let rows = [[2.0f32, 1.9], [1.0, 0.9], [0.5, 0.49]];
         for i in 0..3 {
             let scores = rows[i]; // zero selector → unary only (sel_prev is
             // zero, so the chain step's dot term is 0 for ANY pred — the
@@ -1947,7 +1951,11 @@ mod tests {
         let anchor = vec![1.0f32, 0.0, 0.0, 0.0];
         let mask = vec![0.0f32, 1.0, 1.0, 1.0];
         let embed = |tok: u32| -> Vec<f32> {
-            if tok == 0 { anchor.clone() } else { mask.clone() }
+            if tok == 0 {
+                anchor.clone()
+            } else {
+                mask.clone()
+            }
         };
         let lg = crafted_logits();
         let lm_head = |_rows: &[f32], _n: usize| -> Result<Vec<f32>, String> { Ok(lg.clone()) };
@@ -1988,7 +1996,11 @@ mod tests {
         let anchor = vec![1.0f32, 0.0, 0.0, 0.0];
         let mask = vec![0.0f32, 1.0, 1.0, 1.0];
         let embed = |tok: u32| -> Vec<f32> {
-            if tok == 0 { anchor.clone() } else { mask.clone() }
+            if tok == 0 {
+                anchor.clone()
+            } else {
+                mask.clone()
+            }
         };
         let lg = crafted_logits();
         let lm_head = |_rows: &[f32], _n: usize| -> Result<Vec<f32>, String> { Ok(lg.clone()) };
@@ -2024,7 +2036,11 @@ mod tests {
         let anchor = vec![1.0f32, 0.0, 0.0, 0.0];
         let mask = vec![0.0f32, 1.0, 1.0, 1.0];
         let embed = |tok: u32| -> Vec<f32> {
-            if tok == 0 { anchor.clone() } else { mask.clone() }
+            if tok == 0 {
+                anchor.clone()
+            } else {
+                mask.clone()
+            }
         };
         let lg = crafted_logits();
         let lm_head = |_rows: &[f32], _n: usize| -> Result<Vec<f32>, String> { Ok(lg.clone()) };
@@ -2035,7 +2051,10 @@ mod tests {
             let masked = drafter
                 .draft_block_keyed_masked(0, 100, &embed, &lm_head, seed, 0.6, None, None)
                 .expect("masked");
-            assert_eq!(masked.chain, keyed.chain, "seed {seed}: None/None must delegate");
+            assert_eq!(
+                masked.chain, keyed.chain,
+                "seed {seed}: None/None must delegate"
+            );
             assert_eq!(masked.scores, keyed.scores);
             assert_eq!(masked.candidates, keyed.candidates);
             assert_eq!(masked.logits_top1, keyed.logits_top1);
@@ -2055,7 +2074,11 @@ mod tests {
         let anchor = vec![1.0f32, 0.0, 0.0, 0.0];
         let mask = vec![0.0f32, 1.0, 1.0, 1.0];
         let embed = |tok: u32| -> Vec<f32> {
-            if tok == 0 { anchor.clone() } else { mask.clone() }
+            if tok == 0 {
+                anchor.clone()
+            } else {
+                mask.clone()
+            }
         };
         let lg = crafted_logits();
         let lm_head = |_rows: &[f32], _n: usize| -> Result<Vec<f32>, String> { Ok(lg.clone()) };
@@ -2066,9 +2089,15 @@ mod tests {
                 .draft_block_keyed_masked(0, 100, &embed, &lm_head, seed, 0.6, Some(1), None)
                 .expect("masked");
             let picks: Vec<u32> = w.chain.iter().map(|&(t, _)| t).collect();
-            assert_eq!(picks, untrunc_top1, "seed {seed}: pick outside the k=1 nucleus");
+            assert_eq!(
+                picks, untrunc_top1,
+                "seed {seed}: pick outside the k=1 nucleus"
+            );
             for &(_, c) in &w.chain {
-                assert!((c - 1.0).abs() < 1e-6, "single-survivor confidence must be 1.0");
+                assert!(
+                    (c - 1.0).abs() < 1e-6,
+                    "single-survivor confidence must be 1.0"
+                );
                 conf_seen += 1;
             }
             // The walk still records the FULL candidate set + scores
@@ -2093,7 +2122,11 @@ mod tests {
         let anchor = vec![1.0f32, 0.0, 0.0, 0.0];
         let mask = vec![0.0f32, 1.0, 1.0, 1.0];
         let embed = |tok: u32| -> Vec<f32> {
-            if tok == 0 { anchor.clone() } else { mask.clone() }
+            if tok == 0 {
+                anchor.clone()
+            } else {
+                mask.clone()
+            }
         };
         let lg = crafted_logits();
         let lm_head = |_rows: &[f32], _n: usize| -> Result<Vec<f32>, String> { Ok(lg.clone()) };
@@ -2102,7 +2135,10 @@ mod tests {
             let masked = drafter
                 .draft_block_keyed_masked(0, 100, &embed, &lm_head, seed, 0.6, None, Some(0.1))
                 .expect("masked");
-            assert_eq!(masked.chain[0].0, 5, "seed {seed}: row 0 must keep only its top-1");
+            assert_eq!(
+                masked.chain[0].0, 5,
+                "seed {seed}: row 0 must keep only its top-1"
+            );
             assert!(
                 (masked.chain[0].1 - 1.0).abs() < 1e-6,
                 "single-survivor row confidence must be 1.0"
@@ -2126,14 +2162,25 @@ mod tests {
         let anchor = vec![1.0f32, 0.0, 0.0, 0.0];
         let mask = vec![0.0f32, 1.0, 1.0, 1.0];
         let embed = |tok: u32| -> Vec<f32> {
-            if tok == 0 { anchor.clone() } else { mask.clone() }
+            if tok == 0 {
+                anchor.clone()
+            } else {
+                mask.clone()
+            }
         };
         let lg = crafted_logits();
         let lm_head = |_rows: &[f32], _n: usize| -> Result<Vec<f32>, String> { Ok(lg.clone()) };
-        let greedy = drafter.draft_block(0, 100, &embed, &lm_head).expect("draft");
+        let greedy = drafter
+            .draft_block(0, 100, &embed, &lm_head)
+            .expect("draft");
         for t in [0.0f32, -1.0] {
-            let ind = drafter
-                .lattice_walk_independent(0, &drafter_draft_hidden(&drafter, 0, 100, &embed), &lg, 7, t);
+            let ind = drafter.lattice_walk_independent(
+                0,
+                &drafter_draft_hidden(&drafter, 0, 100, &embed),
+                &lg,
+                7,
+                t,
+            );
             assert_eq!(ind.chain, greedy.chain, "T={t} must delegate to greedy");
             assert_eq!(ind.scores, greedy.scores);
         }
@@ -2157,7 +2204,11 @@ mod tests {
         let anchor = vec![1.0f32, 0.0, 0.0, 0.0];
         let mask = vec![0.0f32, 1.0, 1.0, 1.0];
         let embed = |tok: u32| -> Vec<f32> {
-            if tok == 0 { anchor.clone() } else { mask.clone() }
+            if tok == 0 {
+                anchor.clone()
+            } else {
+                mask.clone()
+            }
         };
         let hidden = drafter.draft_block_hidden(0, 100, &embed);
         let lg = crafted_logits();
@@ -2227,7 +2278,11 @@ mod tests {
         let anchor = vec![1.0f32, 0.0, 0.0, 0.0];
         let mask = vec![0.0f32, 1.0, 1.0, 1.0];
         let embed = |tok: u32| -> Vec<f32> {
-            if tok == 0 { anchor.clone() } else { mask.clone() }
+            if tok == 0 {
+                anchor.clone()
+            } else {
+                mask.clone()
+            }
         };
         let hidden = drafter.draft_block_hidden(0, 100, &embed);
         let lg = crafted_logits();
@@ -2246,6 +2301,9 @@ mod tests {
             greedy_first < 160,
             "independent walk collapsed to greedy: {greedy_first}/200 picked the argmax"
         );
-        assert!(greedy_first > 40, "sampler degenerate: only {greedy_first}/200 argmax picks");
+        assert!(
+            greedy_first > 40,
+            "sampler degenerate: only {greedy_first}/200 argmax picks"
+        );
     }
 }

@@ -232,10 +232,10 @@ pub mod gemv_ternary_block_contiguous_cubecl;
 pub mod gemv_ternary_cubecl;
 #[cfg(all(feature = "ternary_gemv_cuda_raw", not(target_os = "macos")))]
 pub mod gemv_ternary_cuda_raw;
-#[cfg(all(feature = "ternary_gemv_cuda_raw", not(target_os = "macos")))]
-pub mod gemv_ternary_multicol_cuda_raw;
 #[cfg(feature = "ternary_gemv")]
 pub mod gemv_ternary_fma_cubecl;
+#[cfg(all(feature = "ternary_gemv_cuda_raw", not(target_os = "macos")))]
+pub mod gemv_ternary_multicol_cuda_raw;
 #[cfg(all(feature = "cubecl_runtime", feature = "ternary_gemv_residual"))]
 pub mod gemv_ternary_residual_cubecl;
 #[cfg(feature = "ternary_gemv")]
@@ -369,14 +369,14 @@ pub use gemv_ternary_cubecl::{
 pub use gemv_ternary_cuda_raw::{
     GpuTernaryMatvecDp4a, TernaryGemmCudaRaw, TernaryGemmCudaRawError, WG_THREADS,
 };
-#[cfg(all(feature = "ternary_gemv_cuda_raw", not(target_os = "macos")))]
-pub use gemv_ternary_multicol_cuda_raw::{
-    MC_TOKENS_MAX, MC_TOKENS_MIN, TernaryGemmMultiColCudaRaw,
-};
 #[cfg(feature = "ternary_gemv")]
 pub use gemv_ternary_fma_cubecl::{
     GemvTernaryFmaCubeCL, TernaryHandleFma, fma_enabled, fma_launch_count, pack_u32_digit_bytes,
     set_gemv_use_fma,
+};
+#[cfg(all(feature = "ternary_gemv_cuda_raw", not(target_os = "macos")))]
+pub use gemv_ternary_multicol_cuda_raw::{
+    MC_TOKENS_MAX, MC_TOKENS_MIN, TernaryGemmMultiColCudaRaw,
 };
 #[cfg(all(feature = "cubecl_runtime", feature = "ternary_gemv_residual"))]
 pub use gemv_ternary_residual_cubecl::GemvTernaryResidualCubeCL;
@@ -593,7 +593,9 @@ pub mod gemma2_d2f;
 #[cfg(feature = "edlm_gpu")]
 pub mod edlm_cubecl;
 #[cfg(feature = "edlm_gpu")]
-pub use edlm_cubecl::{EdlmAttnMultiCubeCL, EdlmAttnMultiParams, EdlmGpuModel, EdlmRmsNormRowsCubeCL};
+pub use edlm_cubecl::{
+    EdlmAttnMultiCubeCL, EdlmAttnMultiParams, EdlmGpuModel, EdlmRmsNormRowsCubeCL,
+};
 // The f16-weight-B tiled GEMM (the lane's projection kernel, generic beyond it).
 #[cfg(feature = "edlm_gpu")]
 pub mod matmul_f16b_cubecl;
@@ -672,7 +674,9 @@ pub use si_gpu::SiGpuSession;
 #[cfg(all(feature = "ternary_gemv_cuda_raw", not(target_os = "macos")))]
 pub mod gemv_q4k_cuda_raw;
 #[cfg(all(feature = "ternary_gemv_cuda_raw", not(target_os = "macos")))]
-pub use gemv_q4k_cuda_raw::{Q4KGemvKernels, launch_gemv_q4k, launch_gemv_q4k_multi, q4k_blocks_as_bytes};
+pub use gemv_q4k_cuda_raw::{
+    Q4KGemvKernels, launch_gemv_q4k, launch_gemv_q4k_multi, q4k_blocks_as_bytes,
+};
 
 // Plan 618 S3 (Issue 028 T4) — the cudarc Q6_K GEMV: the matched-storage
 // single-checkpoint control arm, the q4 module's twin (same int8 activation
@@ -680,7 +684,9 @@ pub use gemv_q4k_cuda_raw::{Q4KGemvKernels, launch_gemv_q4k, launch_gemv_q4k_mul
 #[cfg(all(feature = "ternary_gemv_cuda_raw", not(target_os = "macos")))]
 pub mod gemv_q6k_cuda_raw;
 #[cfg(all(feature = "ternary_gemv_cuda_raw", not(target_os = "macos")))]
-pub use gemv_q6k_cuda_raw::{Q6KGemvKernels, launch_gemv_q6k, launch_gemv_q6k_multi, q6k_blocks_as_bytes};
+pub use gemv_q6k_cuda_raw::{
+    Q6KGemvKernels, launch_gemv_q6k, launch_gemv_q6k_multi, q6k_blocks_as_bytes,
+};
 
 // The whole-prefill cudarc composition (mma/ffn/deltanet/attention kernels).
 // Gate TIGHTENED from the home crate's `all(cubecl_runtime, not(macos))` to
@@ -746,10 +752,10 @@ pub mod qwen38_dflash2_gpu;
 // Plan 614 Phase 2 — the keyed spec-decode lane: the pure decision layer is
 // always-on (M3-testable); the cudarc loop composition rides `qwen38_spec`
 // (implies ternary_gemv_cuda_raw; CUDA-only like its target).
+#[cfg(all(feature = "ternary_gemv_cuda_raw", not(target_os = "macos")))]
+pub mod qwen38_prefix_cache;
 pub mod qwen38_spec;
 #[cfg(all(feature = "qwen38_spec", not(target_os = "macos")))]
 pub mod qwen38_spec_cudarc;
-#[cfg(all(feature = "ternary_gemv_cuda_raw", not(target_os = "macos")))]
-pub mod qwen38_prefix_cache;
 #[cfg(all(feature = "ternary_gemv_cuda_raw", not(target_os = "macos")))]
 pub mod qwen38_verify_mma;

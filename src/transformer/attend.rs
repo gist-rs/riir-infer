@@ -12,7 +12,7 @@
 
 use rayon::prelude::*;
 
-use super::{ForwardContext, attention_heads_parallel, attention::PARALLEL_HEADS_MIN_SEQ};
+use super::{ForwardContext, attention::PARALLEL_HEADS_MIN_SEQ, attention_heads_parallel};
 
 /// The per-row attention geometry (constant across heads).
 #[derive(Clone, Copy)]
@@ -261,10 +261,12 @@ pub(super) unsafe fn attention_head_recon_slices(
         for i in 0..half {
             let sin_a = unsafe { *shared.cs.get_unchecked(cs_off + 2 * i) };
             let cos_a = unsafe { *shared.cs.get_unchecked(cs_off + 2 * i + 1) };
-            let (x0, x1) = unsafe { (
-                *shared.k_cache.get_unchecked(k_off + i),
-                *shared.k_cache.get_unchecked(k_off + half + i),
-            ) };
+            let (x0, x1) = unsafe {
+                (
+                    *shared.k_cache.get_unchecked(k_off + i),
+                    *shared.k_cache.get_unchecked(k_off + half + i),
+                )
+            };
             let v0 = x0 * cos_a + x1 * sin_a;
             let v1 = -x0 * sin_a + x1 * cos_a;
             unsafe {
@@ -417,8 +419,7 @@ pub(crate) unsafe fn attend_row_fused(
     ctx: &mut ForwardContext,
     mut fr: FusedRecon<'_>,
     // `layer_idx` is read by the m_Y probe only.
-    #[cfg_attr(not(feature = "attention_to_answer"), allow(unused_variables))]
-    layer_idx: usize,
+    #[cfg_attr(not(feature = "attention_to_answer"), allow(unused_variables))] layer_idx: usize,
     s: AttnShape,
 ) {
     #[cfg(feature = "attention_to_answer")]
@@ -661,7 +662,9 @@ mod fused_recon_tests {
                 cs.push(cos_a);
             }
         }
-        let e_rows: Vec<f32> = (0..TABLE_ROWS * KVD).map(|i| (i as f32) * 0.125 - 0.75).collect();
+        let e_rows: Vec<f32> = (0..TABLE_ROWS * KVD)
+            .map(|i| (i as f32) * 0.125 - 0.75)
+            .collect();
         // Deterministic tracked pattern: 0, miss, 1, miss, miss, 2, repeat.
         let row_of_pos: Vec<u32> = (0..t_n)
             .map(|t| match t % 6 {

@@ -54,31 +54,35 @@ pub mod ternarize;
 
 pub use accum::PairCosineAccum;
 pub use audition::{
-    mean_sq_err, merge_mean, merge_rdsc, selection_pin, CandRow, CorrectionFit, SelectionPin,
+    CandRow, CorrectionFit, SelectionPin, mean_sq_err, merge_mean, merge_rdsc, selection_pin,
 };
-pub use delta::{delta, localize_by_block, DeltaMap};
 #[cfg(feature = "twt_collapse")]
 pub use collapse_writer::{
-    emit_collapsed_gguf, twt_arm_codes_value, twt_block_table_value, twt_layer_types_value,
-    CollapseSpec, CollapsedStats, LayerSource, LAYER_TYPES_LEGEND, TensorOut,
+    CollapseSpec, CollapsedStats, LAYER_TYPES_LEGEND, LayerSource, TensorOut, emit_collapsed_gguf,
+    twt_arm_codes_value, twt_block_table_value, twt_layer_types_value,
 };
+pub use delta::{DeltaMap, delta, localize_by_block};
+pub use partition::{
+    Block, KILL_FRACTION, KILL_MIN_MIDDLE_BLOCK, KillVerdict, PRE_REGISTERED_EPS_GRID,
+    PartitionError, brute_force_optimal, forced_min_blocks, kill_verdict, minmax_partition,
+    partition_worst,
+};
+pub use smatrix::{Bucket, SMatrices, SMatrix, SMatrixBuilder, SvccaCfg};
+pub use synth::{Lcg, planted_corpus, planted_corpus_noisy};
 #[cfg(feature = "twt_collapse")]
 pub use ternarize::{
-    arm_dense_f16, arm_sign_majority, arm_source_quant, budget_ok, budget_ratio,
-    materialization_rel_err, DenseF16Weights, TwtArm, KAPPA_BUDGET, ARM_B_TAU_CODE,
+    ARM_B_TAU_CODE, DenseF16Weights, KAPPA_BUDGET, TwtArm, arm_dense_f16, arm_sign_majority,
+    arm_source_quant, budget_ok, budget_ratio, materialization_rel_err,
 };
-pub use partition::{
-    brute_force_optimal, forced_min_blocks, kill_verdict, minmax_partition,
-    partition_worst, Block, KillVerdict, PartitionError, KILL_FRACTION, KILL_MIN_MIDDLE_BLOCK,
-    PRE_REGISTERED_EPS_GRID,
-};
-pub use smatrix::{Bucket, SMatrix, SMatrixBuilder, SMatrices, SvccaCfg};
-pub use synth::{planted_corpus, planted_corpus_noisy, Lcg};
 
 /// BLAKE3 of raw bytes — artifact provenance (the corpus digest the
 /// capture driver records so a profile is reproducible bit-for-bit).
 pub fn blake3_of(bytes: &[u8]) -> String {
-    blake3::Hasher::new().update(bytes).finalize().to_hex().to_string()
+    blake3::Hasher::new()
+        .update(bytes)
+        .finalize()
+        .to_hex()
+        .to_string()
 }
 
 /// Error surface of the TWT lane — every refusal is loud and names the
@@ -133,12 +137,20 @@ pub enum TwtError {
     NonFiniteMerged,
     #[error("f16 scale non-finite at (row {row}, group {group}) — merged magnitude overflows f16")]
     NonFiniteScale { row: usize, group: usize },
-    #[error("degenerate baseline: ‖Bx‖ == 0 on every calibration row — the relative error is undefined")]
+    #[error(
+        "degenerate baseline: ‖Bx‖ == 0 on every calibration row — the relative error is undefined"
+    )]
     DegenerateBaseline,
     #[error("block table does not tile [0, n_layer): {reason}")]
     BadBlockTable { reason: &'static str },
-    #[error("collapsed plan for block [{start}, {end}) is incomplete: missing tensor suffixes {missing}")]
-    IncompletePlan { start: usize, end: usize, missing: String },
+    #[error(
+        "collapsed plan for block [{start}, {end}) is incomplete: missing tensor suffixes {missing}"
+    )]
+    IncompletePlan {
+        start: usize,
+        end: usize,
+        missing: String,
+    },
     #[error("GGUF serialize failure: {0}")]
     GgufWrite(String),
 }

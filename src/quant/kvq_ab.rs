@@ -226,9 +226,7 @@ fn rank_f64_rms(v: &[f64], n: u64, s: usize) -> Vec<(usize, f64)> {
     let mut idx: Vec<usize> = (0..v.len()).collect();
     idx.sort_by(|&a, &b| v[b].total_cmp(&v[a]));
     idx.truncate(s);
-    idx.into_iter()
-        .map(|c| (c, (v[c] / n).sqrt()))
-        .collect()
+    idx.into_iter().map(|c| (c, (v[c] / n).sqrt())).collect()
 }
 
 // ── Q8_0 absmax ────────────────────────────────────────────────
@@ -371,19 +369,21 @@ impl ExemptQ8KvCache {
         if is_k { &self.exempt_k } else { &self.exempt_v }
     }
 
-    fn store_row(
-        &mut self,
-        layer: usize,
-        pos: usize,
-        is_k: bool,
-        row: &[f32],
-    ) {
+    fn store_row(&mut self, layer: usize, pos: usize, is_k: bool, row: &[f32]) {
         let bpr = self.blocks_per_row;
         let s = self.s;
         let kvd = self.kvd;
         let (blocks, sidecar, exempt) = match is_k {
-            true => (&mut self.k[layer], &mut self.sidecar_k[layer], &self.exempt_k[layer]),
-            false => (&mut self.v[layer], &mut self.sidecar_v[layer], &self.exempt_v[layer]),
+            true => (
+                &mut self.k[layer],
+                &mut self.sidecar_k[layer],
+                &self.exempt_k[layer],
+            ),
+            false => (
+                &mut self.v[layer],
+                &mut self.sidecar_v[layer],
+                &self.exempt_v[layer],
+            ),
         };
         let sc = &mut sidecar[pos * s..(pos + 1) * s];
         let scratch = &mut self.scratch;
@@ -395,13 +395,7 @@ impl ExemptQ8KvCache {
         quantize_row_q8_0(&scratch[..kvd], &mut blocks[pos * bpr..(pos + 1) * bpr]);
     }
 
-    fn dequant_row_into(
-        &self,
-        layer: usize,
-        pos: usize,
-        is_k: bool,
-        out: &mut [f32],
-    ) {
+    fn dequant_row_into(&self, layer: usize, pos: usize, is_k: bool, out: &mut [f32]) {
         let bpr = self.blocks_per_row;
         let s = self.s;
         let blocks = match is_k {
@@ -490,7 +484,11 @@ mod tests {
         let expect_quiet = (0.25f64).sqrt();
         let top = c.top_channels(0, false, 2, true);
         assert_eq!(top[0].0, 5);
-        assert!((top[0].1 - expect5).abs() < 1e-9, "{} vs {expect5}", top[0].1);
+        assert!(
+            (top[0].1 - expect5).abs() < 1e-9,
+            "{} vs {expect5}",
+            top[0].1
+        );
         // All quiet channels tie; rank 1 is some non-5 channel at the quiet RMS.
         assert_ne!(top[1].0, 5);
         assert!((top[1].1 - expect_quiet).abs() < 1e-9);
@@ -509,7 +507,11 @@ mod tests {
         // dequantizes to 0.0 — the Bench-691 row collapse.
         let mut row = vec![0.0f32; KVD];
         for (i, v) in row.iter_mut().enumerate() {
-            *v = if i == 7 { 300.0 } else { 0.001 + ((i % 7) as f32) * 0.002 };
+            *v = if i == 7 {
+                300.0
+            } else {
+                0.001 + ((i % 7) as f32) * 0.002
+            };
         }
         let mut plain = Q8AbsmaxKvCache::new(1, SEQ, KVD);
         plain.store_value(0, 0, &row);
@@ -520,14 +522,7 @@ mod tests {
         assert_eq!(out_plain[0], 0.0);
         assert!(err_plain > 0.0005, "plain quiet error {err_plain}");
 
-        let mut ex = ExemptQ8KvCache::new(
-            1,
-            SEQ,
-            KVD,
-            vec![vec![0]],
-            vec![vec![7]],
-            1,
-        );
+        let mut ex = ExemptQ8KvCache::new(1, SEQ, KVD, vec![vec![0]], vec![vec![7]], 1);
         ex.store_value(0, 0, &row);
         let mut out_ex = vec![0.0; KVD];
         ex.dequantize_value_into(0, 0, &mut out_ex);
@@ -536,21 +531,21 @@ mod tests {
         // The neighbor's error collapses now that the block scale is set by
         // the quiet channels alone (d = max(quiet)/127):
         let err_ex = (out_ex[0] - row[0]).abs();
-        assert!(err_ex < err_plain * 0.05, "exempt neighbor error {err_ex} vs plain {err_plain}");
+        assert!(
+            err_ex < err_plain * 0.05,
+            "exempt neighbor error {err_ex} vs plain {err_plain}"
+        );
     }
 
     #[test]
     fn exempt_sidecar_roundtrip_multi_position() {
-        let mut ex = ExemptQ8KvCache::new(
-            1,
-            SEQ,
-            KVD,
-            vec![vec![1, 60]],
-            vec![vec![2, 9]],
-            2,
-        );
-        let k0: Vec<f32> = (0..KVD).map(|i| if i == 1 { -123.5 } else { 0.7 }).collect();
-        let v1: Vec<f32> = (0..KVD).map(|i| if i == 9 { 88.25 } else { -0.2 }).collect();
+        let mut ex = ExemptQ8KvCache::new(1, SEQ, KVD, vec![vec![1, 60]], vec![vec![2, 9]], 2);
+        let k0: Vec<f32> = (0..KVD)
+            .map(|i| if i == 1 { -123.5 } else { 0.7 })
+            .collect();
+        let v1: Vec<f32> = (0..KVD)
+            .map(|i| if i == 9 { 88.25 } else { -0.2 })
+            .collect();
         ex.store_key(0, 0, &k0);
         ex.store_value(0, 1, &v1);
         let mut out = vec![0.0; KVD];
@@ -566,6 +561,6 @@ mod tests {
     #[test]
     #[should_panic(expected = "strictly ascending")]
     fn exempt_rejects_unsorted_sets() {
-        let _ = ExemptQ8KvCache::new(1, SEQ, KVD, vec![vec![5, 3]], vec![vec![], ], 2);
+        let _ = ExemptQ8KvCache::new(1, SEQ, KVD, vec![vec![5, 3]], vec![vec![]], 2);
     }
 }

@@ -80,7 +80,10 @@ pub(crate) const ENV_FORCE_HEAVY_TESTS: &str = "RIIR_GPU_FORCE_HEAVY_TESTS";
 #[cfg(all(test, feature = "cubecl_runtime", target_os = "windows"))]
 fn nvml_global_free_bytes() -> Option<u64> {
     let output = std::process::Command::new("nvidia-smi")
-        .args(["--query-gpu=memory.used,memory.total", "--format=csv,noheader,nounits"])
+        .args([
+            "--query-gpu=memory.used,memory.total",
+            "--format=csv,noheader,nounits",
+        ])
         .output()
         .ok()?;
     if !output.status.success() {
@@ -95,8 +98,12 @@ fn nvml_global_free_bytes() -> Option<u64> {
         let (Some(used), Some(total)) = (parts.next(), parts.next()) else {
             continue;
         };
-        let Ok(used) = used.parse::<u64>() else { continue };
-        let Ok(total) = total.parse::<u64>() else { continue };
+        let Ok(used) = used.parse::<u64>() else {
+            continue;
+        };
+        let Ok(total) = total.parse::<u64>() else {
+            continue;
+        };
         if best.is_none_or(|(bt, _)| total > bt) {
             best = Some((total, used));
         }

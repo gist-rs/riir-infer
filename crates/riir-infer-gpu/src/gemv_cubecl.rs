@@ -1255,7 +1255,14 @@ mod tests {
             let xb = client.create_from_slice(f32::as_bytes(&input[b * in_dim..(b + 1) * in_dim]));
             let ob = client.empty(out_dim * f);
             unsafe {
-                GemvCubeCL::launch_plane::<ActiveRuntime>(&client, w.clone(), xb, ob.clone(), out_dim, in_dim);
+                GemvCubeCL::launch_plane::<ActiveRuntime>(
+                    &client,
+                    w.clone(),
+                    xb,
+                    ob.clone(),
+                    out_dim,
+                    in_dim,
+                );
             }
             let single = f32::from_bytes(&client.read_one(ob).expect("read plane")).to_vec();
             for r in 0..out_dim {

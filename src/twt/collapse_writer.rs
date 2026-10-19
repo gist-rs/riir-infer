@@ -29,12 +29,12 @@
 use std::collections::BTreeMap;
 use std::io::Write;
 
-use crate::gguf_loader::{GgufFile, GgmlType, GgufValue};
+use crate::gguf_loader::{GgmlType, GgufFile, GgufValue};
 use crate::quant::q2_0::{BlockQ2_0, Q2_0_BLOCK_SIZE};
 use crate::types::DeltaNetLayerType;
 
-use super::ternarize::TwtArm;
 use super::TwtError;
+use super::ternarize::TwtArm;
 
 /// One emitted tensor's payload (NEW bytes — a copy is expressed as
 /// [`LayerSource::Member`] and never materializes here).
@@ -131,10 +131,12 @@ fn parent_arch(parent: &GgufFile) -> Result<String, TwtError> {
         .get("general.architecture")
         .and_then(|v| v.as_str())
         .map(str::to_owned)
-        .ok_or_else(|| TwtError::GgufWrite(
+        .ok_or_else(|| {
+            TwtError::GgufWrite(
             "parent GGUF has no general.architecture — not a model file this writer can collapse"
                 .to_owned(),
-        ))
+        )
+        })
 }
 
 /// `prism.hadamard.weight_names` rides the block table: a kept member's
@@ -221,7 +223,9 @@ fn plan_tensors<'p, 'q>(
 ) -> Result<(Vec<OutTensor<'p, 'q>>, usize), TwtError> {
     // ── tiling ──
     if spec.blocks.is_empty() {
-        return Err(TwtError::BadBlockTable { reason: "empty block table" });
+        return Err(TwtError::BadBlockTable {
+            reason: "empty block table",
+        });
     }
     let mut expect = 0usize;
     for (i, &(start, end, _)) in spec.blocks.iter().enumerate() {
@@ -231,7 +235,9 @@ fn plan_tensors<'p, 'q>(
             });
         }
         if end <= start {
-            return Err(TwtError::BadBlockTable { reason: "empty block" });
+            return Err(TwtError::BadBlockTable {
+                reason: "empty block",
+            });
         }
         if end > n_layer {
             return Err(TwtError::BadBlockTable {
@@ -392,9 +398,11 @@ impl OutTensor<'_, '_> {
 
     fn data<'a>(&'a self, parent: &'a GgufFile) -> Result<&'a [u8], TwtError> {
         match self {
-            Self::Copy(info) | Self::Renamed(info, _) => parent
-                .tensor_slice(&info.name)
-                .ok_or_else(|| TwtError::GgufWrite(format!("parent tensor vanished: {}", info.name))),
+            Self::Copy(info) | Self::Renamed(info, _) => {
+                parent.tensor_slice(&info.name).ok_or_else(|| {
+                    TwtError::GgufWrite(format!("parent tensor vanished: {}", info.name))
+                })
+            }
             Self::New(_, _, _, data) => Ok(data),
         }
     }
@@ -427,13 +435,13 @@ pub fn emit_collapsed_gguf<W: Write>(
         Some(v) => {
             return Err(TwtError::GgufWrite(format!(
                 "{bc_key} override {v} != collapsed block count {block_count}"
-            )))
+            )));
         }
         None => {
             return Err(TwtError::GgufWrite(format!(
                 "the plan forgot to override {bc_key} to {block_count} — a collapsed file \
                  advertising the parent's layer count is worse than no file"
-            )))
+            )));
         }
     }
 
@@ -449,7 +457,7 @@ pub fn emit_collapsed_gguf<W: Write>(
         Some((_, other)) => {
             return Err(TwtError::GgufWrite(format!(
                 "{types_key} must be a metadata array, got {other:?}"
-            )))
+            )));
         }
         None => None,
     };
@@ -517,7 +525,7 @@ pub fn emit_collapsed_gguf<W: Write>(
             other => {
                 return Err(TwtError::GgufWrite(format!(
                     "{hadamard_key} must be a string array, got {other:?}"
-                )))
+                )));
             }
         };
         let renumbered = renumber_hadamard_names(&names, &spec.blocks, n_layer);
@@ -530,13 +538,9 @@ pub fn emit_collapsed_gguf<W: Write>(
                 .expect("qwen35 collapse requires twt.layer_types (checked above)")
                 .iter()
                 .map(|v| {
-                    let code = v
-                        .as_u64()
-                        .ok_or_else(|| {
-                            TwtError::GgufWrite(
-                                "twt.layer_types element is not an integer".to_owned(),
-                            )
-                        })?;
+                    let code = v.as_u64().ok_or_else(|| {
+                        TwtError::GgufWrite("twt.layer_types element is not an integer".to_owned())
+                    })?;
                     match code {
                         c if c == DeltaNetLayerType::Attention as u64 => {
                             Ok(DeltaNetLayerType::Attention)
@@ -609,7 +613,10 @@ pub fn emit_collapsed_gguf<W: Write>(
             written += need as u64;
             section_pos += need as u64;
         }
-        debug_assert_eq!(section_pos, *off, "offset plan desynced from the write loop");
+        debug_assert_eq!(
+            section_pos, *off,
+            "offset plan desynced from the write loop"
+        );
         let data = t.data(parent)?;
         out.write_all(data).map_err(io_err)?;
         written += data.len() as u64;

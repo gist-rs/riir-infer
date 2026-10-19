@@ -644,9 +644,21 @@ mod handle_bytes_tests {
     /// including ragged widths (cols not a multiple of 64 / 128).
     #[test]
     fn handle_bytes_of_matches_materialized() {
-        for (rows, cols) in [(0, 0), (1, 1), (3, 64), (7, 127), (5, 128), (48, 5120), (9, 300)] {
+        for (rows, cols) in [
+            (0, 0),
+            (1, 1),
+            (3, 64),
+            (7, 127),
+            (5, 128),
+            (48, 5120),
+            (9, 300),
+        ] {
             let w = katgpt_core::TernaryGroupWeights::new(rows, cols);
-            assert_eq!(ternary_handle_bytes_of(rows, cols), ternary_handle_bytes(&w), "{rows}x{cols}");
+            assert_eq!(
+                ternary_handle_bytes_of(rows, cols),
+                ternary_handle_bytes(&w),
+                "{rows}x{cols}"
+            );
         }
     }
 }

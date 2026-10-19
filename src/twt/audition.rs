@@ -124,7 +124,13 @@ const DEGENERATE_VAR: f64 = 1e-12;
 impl CorrectionFit {
     /// Fit over the fit rows. `h_in`, `h_sur` (the surrogate's output
     /// f̄(h_in)), `h_e` are row-major `[rows × d]` slices of EQUAL length.
-    pub fn fit(h_in: &[f32], h_sur: &[f32], h_e: &[f32], rows: usize, d: usize) -> Result<Self, TwtError> {
+    pub fn fit(
+        h_in: &[f32],
+        h_sur: &[f32],
+        h_e: &[f32],
+        rows: usize,
+        d: usize,
+    ) -> Result<Self, TwtError> {
         let len = rows.checked_mul(d).ok_or(TwtError::RowOverflow)?;
         if h_in.len() != len || h_sur.len() != len || h_e.len() != len {
             return Err(TwtError::FitShapeMismatch {
@@ -166,7 +172,11 @@ impl CorrectionFit {
                 beta[c] = (my - a as f64 * mr) as f32;
             }
         }
-        Ok(Self { alpha, beta, degenerate_channels: degenerate })
+        Ok(Self {
+            alpha,
+            beta,
+            degenerate_channels: degenerate,
+        })
     }
 
     /// The β=0 arm of the decomposition, fitted as its OWN least squares:
@@ -212,7 +222,11 @@ impl CorrectionFit {
                 *a = (num / den) as f32;
             }
         }
-        Ok(Self { alpha, beta: vec![0.0; d], degenerate_channels: degenerate })
+        Ok(Self {
+            alpha,
+            beta: vec![0.0; d],
+            degenerate_channels: degenerate,
+        })
     }
 
     /// Apply the correction to a surrogate output: `h_in + α⊙r + β` —
@@ -308,7 +322,10 @@ pub fn selection_pin(rows: &[CandRow]) -> Result<SelectionPin, TwtError> {
         h.update(&[0]);
         h.update(&r.err_fit.to_le_bytes());
     }
-    Ok(SelectionPin { winner: rows[best].id.clone(), table_blake3: h.finalize().to_hex().to_string() })
+    Ok(SelectionPin {
+        winner: rows[best].id.clone(),
+        table_blake3: h.finalize().to_hex().to_string(),
+    })
 }
 
 #[cfg(test)]
@@ -447,9 +464,18 @@ mod tests {
     #[test]
     fn selection_pin_argmin_and_determinism() {
         let rows = vec![
-            CandRow { id: "member:3".into(), err_fit: 2.0 },
-            CandRow { id: "mean".into(), err_fit: 1.0 },
-            CandRow { id: "rdsc".into(), err_fit: 3.0 },
+            CandRow {
+                id: "member:3".into(),
+                err_fit: 2.0,
+            },
+            CandRow {
+                id: "mean".into(),
+                err_fit: 1.0,
+            },
+            CandRow {
+                id: "rdsc".into(),
+                err_fit: 3.0,
+            },
         ];
         let p1 = selection_pin(&rows).unwrap();
         assert_eq!(p1.winner, "mean");
@@ -464,8 +490,14 @@ mod tests {
 
         // A tampered argmin (winner not the min) is REFUSED, not pinned.
         let tampered = vec![
-            CandRow { id: "a".into(), err_fit: 1.0 },
-            CandRow { id: "b".into(), err_fit: 2.0 },
+            CandRow {
+                id: "a".into(),
+                err_fit: 1.0,
+            },
+            CandRow {
+                id: "b".into(),
+                err_fit: 2.0,
+            },
         ];
         let mut lie = tampered;
         // Hand-build a row set whose stated order hides the min: not
@@ -479,8 +511,14 @@ mod tests {
     #[test]
     fn tie_resolves_to_the_lowest_index() {
         let rows = vec![
-            CandRow { id: "first".into(), err_fit: 1.0 },
-            CandRow { id: "second".into(), err_fit: 1.0 },
+            CandRow {
+                id: "first".into(),
+                err_fit: 1.0,
+            },
+            CandRow {
+                id: "second".into(),
+                err_fit: 1.0,
+            },
         ];
         let p = selection_pin(&rows).unwrap();
         assert_eq!(p.winner, "first");

@@ -116,11 +116,7 @@ pub fn dequantize_row_q2_0(src: &[BlockQ2_0], dst: &mut [f32]) {
 /// feeding solved-grid codes to the UNIFORM decode inflates MSE ~35%
 /// (the first run's phantom "solved loses" — the grid never reached the
 /// dequant).
-pub fn dequantize_row_q2_0_grid(
-    src: &[BlockQ2_0],
-    dst: &mut [f32],
-    grid: super::lut_grid::Q2Grid,
-) {
+pub fn dequantize_row_q2_0_grid(src: &[BlockQ2_0], dst: &mut [f32], grid: super::lut_grid::Q2Grid) {
     let n = dst.len();
     assert!(
         n.is_multiple_of(Q2_0_BLOCK_SIZE),
@@ -219,7 +215,8 @@ pub fn repack_q2_0_to_ternary_group(
                     let (mut p, mut n) = (0u64, 0u64);
                     for q in 0..2 {
                         let off = 16 * half_idx + 8 * q;
-                        let word = u64::from_le_bytes(block.qs[off..off + 8].try_into().expect("8 bytes"));
+                        let word =
+                            u64::from_le_bytes(block.qs[off..off + 8].try_into().expect("8 bytes"));
                         let (pw, nw, bw) = q2_word_to_planes(word);
                         p |= pw << (32 * q);
                         n |= nw << (32 * q);
@@ -288,7 +285,11 @@ fn q2_word_to_planes(word: u64) -> (u64, u64, u64) {
     const EVEN: u64 = 0x5555_5555_5555_5555;
     let lo = word & EVEN;
     let hi = (word >> 1) & EVEN;
-    (compress_even_bits(hi & !lo), compress_even_bits(!(hi | lo) & EVEN), hi & lo)
+    (
+        compress_even_bits(hi & !lo),
+        compress_even_bits(!(hi | lo) & EVEN),
+        hi & lo,
+    )
 }
 
 /// Gather bits 0, 2, 4, …, 62 of `x` (odd bits must be zero) into bits 0..32.
@@ -793,7 +794,9 @@ mod tests {
         let (rows, cols) = (37, 5 * Q2_0_BLOCK_SIZE);
         let mut s = 0x935u64;
         let mut next = move || {
-            s = s.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+            s = s
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407);
             (s >> 33) as u32
         };
         let mut blocks = vec![BlockQ2_0::zeroed(); rows * cols / Q2_0_BLOCK_SIZE];
@@ -1006,7 +1009,10 @@ mod tests {
         assert_eq!(re.len(), 1);
         let a = bytemuck::bytes_of(&orig);
         let b = bytemuck::bytes_of(&re[0]);
-        assert_eq!(a, b, "symmetric re-encode must reproduce the original bytes");
+        assert_eq!(
+            a, b,
+            "symmetric re-encode must reproduce the original bytes"
+        );
     }
 
     /// The issue's Bonsai claim, executable: asymmetric re-encode of a
@@ -1096,7 +1102,10 @@ mod tests {
         let ca = (pa[0].qs[0] >> 2) & 0x03; // j=1
         let cb = (pb[0].qs[0] >> 2) & 0x03;
         assert_eq!(ca, 1, "x=0.45 under uniform: round → q=0 → code 1");
-        assert_eq!(cb, 2, "x=0.45 under l2=0.8: boundary 0.4 → level 0.8 → code 2");
+        assert_eq!(
+            cb, 2,
+            "x=0.45 under l2=0.8: boundary 0.4 → level 0.8 → code 2"
+        );
         // The anchor element (j=0) stays code 3 on both — the scale rule is
         // grid-independent.
         assert_eq!((pa[0].qs[0]) & 0x03, 3);
@@ -1124,8 +1133,15 @@ mod tests {
         let mut base = vec![0f32; w.len()];
         dequantize_row_q2_0(&t0_blocks, &mut base);
         let mut via_grid = vec![0f32; w.len()];
-        dequantize_row_q2_0_grid(&t0_blocks, &mut via_grid, super::super::lut_grid::GRID_T0_UNIFORM);
-        assert_eq!(base, via_grid, "uniform-grid decode must equal the base decode");
+        dequantize_row_q2_0_grid(
+            &t0_blocks,
+            &mut via_grid,
+            super::super::lut_grid::GRID_T0_UNIFORM,
+        );
+        assert_eq!(
+            base, via_grid,
+            "uniform-grid decode must equal the base decode"
+        );
 
         // A shrunken uniform-ish grid on the same CODES decodes differently
         // (the format mismatch the first run measured). The grid-encoder +

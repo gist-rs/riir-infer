@@ -8,10 +8,7 @@ use std::path::PathBuf;
 /// A fresh scratch dir under the cargo target temp (unique per test id
 /// via the prefix); the caller removes it when done.
 pub(crate) fn scratch(prefix: &str) -> PathBuf {
-    let dir = std::env::temp_dir().join(format!(
-        "clef_lane_{prefix}_{}",
-        std::process::id()
-    ));
+    let dir = std::env::temp_dir().join(format!("clef_lane_{prefix}_{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).expect("scratch dir");
     dir
@@ -151,7 +148,9 @@ pub(crate) fn write_fixture_embeddings(
 /// The fixture-file question form (`records.json`'s `questions` rows)
 /// → a typed [`ClefQuestion`]. Shared by the record goldens and the
 /// head-packing golden — one parser, one schema.
-pub(crate) fn parse_fixture_question(value: &serde_json::Value) -> (String, crate::lane::record::ClefQuestion) {
+pub(crate) fn parse_fixture_question(
+    value: &serde_json::Value,
+) -> (String, crate::lane::record::ClefQuestion) {
     use crate::lane::record::ClefQuestion;
     use std::collections::BTreeMap;
     let id = value["id"].as_str().expect("id").to_string();
@@ -166,8 +165,14 @@ pub(crate) fn parse_fixture_question(value: &serde_json::Value) -> (String, crat
                 .map(|(k, v)| (k.clone(), v.as_str().expect("string").to_string()))
                 .collect();
             match kind {
-                "noul" => ClefQuestion::Noul { instructions, criteria },
-                _ => ClefQuestion::Choice { instructions, criteria },
+                "noul" => ClefQuestion::Noul {
+                    instructions,
+                    criteria,
+                },
+                _ => ClefQuestion::Choice {
+                    instructions,
+                    criteria,
+                },
             }
         }
         "score" => ClefQuestion::Score {

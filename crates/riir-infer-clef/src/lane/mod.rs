@@ -75,13 +75,13 @@ pub(crate) mod test_support;
 pub use artifacts::{
     ARTIFACT_REPO, ARTIFACT_REVISION, ARTIFACTS, artifacts_dir, ensure_artifacts, hf_fetch,
 };
-pub use host::{HostError, causal_pad_mask, gather_hidden, head_inputs, rope_tables, HeadInputs};
+pub use host::{HeadInputs, HostError, causal_pad_mask, gather_hidden, head_inputs, rope_tables};
 pub use loaders::{
     BUCKETS_ALLOWED, ClefConfig, ClefModel, ClefTokenizer, EmbeddingTable, PINNED_MAX_OPTIONS,
     PINNED_MAX_QUESTIONS, ensure_and_load, load_from,
 };
 pub use py_json::{dump, python_float, render};
 pub use record::{
-    SYSTEM_PROMPT, ClefEncodedQuestion, ClefEncodedRecord, ClefQuestion, RecordError, encode,
+    ClefEncodedQuestion, ClefEncodedRecord, ClefQuestion, RecordError, SYSTEM_PROMPT, encode,
 };
 pub use runtime::{ClefError, ClefText, compute_units_from_env};

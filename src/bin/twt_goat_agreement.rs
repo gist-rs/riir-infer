@@ -34,18 +34,17 @@ use std::time::Instant;
 
 use anyhow::{Context, Result, bail};
 
+use katgpt_transformer::MultiLayerKVCache;
 use riir_infer_core::corpus_text::load_corpus_text;
-use riir_infer_core::deltanet::forward::{
-    HybridCache, HybridForwardScratch, effective_rotary_dim,
-};
+use riir_infer_core::deltanet::forward::{HybridCache, HybridForwardScratch, effective_rotary_dim};
 use riir_infer_core::deltanet::ternary_forward::forward_qwen_deltanet_ternary_with_hook;
 use riir_infer_core::gguf_loader::{
-    GgufFile, config_from_gguf_metadata, load_gemma2_f16_direct, load_qwen_deltanet_ternary_weights_gguf,
+    GgufFile, config_from_gguf_metadata, load_gemma2_f16_direct,
+    load_qwen_deltanet_ternary_weights_gguf,
 };
 use riir_infer_core::rope::RopeFreqTable;
 use riir_infer_core::tokenizer::{BpeTokenizer, SentencePieceGgufTokenizer};
 use riir_infer_core::transformer::{ForwardContext, forward_gemma2_f16};
-use katgpt_transformer::MultiLayerKVCache;
 
 /// The pre-registered absolute agreement bar (T5.1 lane budget).
 const AGREEMENT_BAR: f64 = 0.9;
@@ -90,8 +89,8 @@ enum Family {
 }
 
 fn family_of(gguf_path: &std::path::Path) -> anyhow::Result<Family> {
-    let gguf = GgufFile::open(gguf_path)
-        .with_context(|| format!("open {}", gguf_path.display()))?;
+    let gguf =
+        GgufFile::open(gguf_path).with_context(|| format!("open {}", gguf_path.display()))?;
     match gguf.architecture().unwrap_or("unknown") {
         "qwen35" => Ok(Family::Qwen35),
         "gemma2" => Ok(Family::Gemma2),
@@ -181,8 +180,7 @@ fn run_arm_qwen35(
                 chunks.len(),
                 done,
                 done as f32 / el.max(1e-6),
-                (chunks.len() - ci - 1) as f32
-                    * (seq_len - 1) as f32
+                (chunks.len() - ci - 1) as f32 * (seq_len - 1) as f32
                     / (done as f32 / el.max(1e-6))
                     / 60.0,
             );
@@ -197,7 +195,11 @@ fn run_arm_qwen35(
     drop(cache);
     drop(scratch);
     drop(weights);
-    Ok(ArmOut { argmax, truth, secs })
+    Ok(ArmOut {
+        argmax,
+        truth,
+        secs,
+    })
 }
 
 /// The gemma-2 f16 arm (T5.1 lane 1): the dense production forward over the
@@ -210,7 +212,8 @@ fn run_arm_gemma2(
     seq_len: usize,
 ) -> Result<ArmOut> {
     let t0 = Instant::now();
-    let gguf = GgufFile::open(gguf_path).with_context(|| format!("open {}", gguf_path.display()))?;
+    let gguf =
+        GgufFile::open(gguf_path).with_context(|| format!("open {}", gguf_path.display()))?;
     let mut config = config_from_gguf_metadata(&gguf)
         .with_context(|| format!("config {}", gguf_path.display()))?;
     let weights = load_gemma2_f16_direct(&gguf, &config)
@@ -254,8 +257,7 @@ fn run_arm_gemma2(
                 chunks.len(),
                 done,
                 done as f32 / el.max(1e-6),
-                (chunks.len() - ci - 1) as f32
-                    * (seq_len - 1) as f32
+                (chunks.len() - ci - 1) as f32 * (seq_len - 1) as f32
                     / (done as f32 / el.max(1e-6))
                     / 60.0,
             );
@@ -270,7 +272,11 @@ fn run_arm_gemma2(
     drop(cache);
     drop(ctx);
     drop(weights);
-    Ok(ArmOut { argmax, truth, secs })
+    Ok(ArmOut {
+        argmax,
+        truth,
+        secs,
+    })
 }
 
 fn main() -> Result<()> {
@@ -284,9 +290,7 @@ fn main() -> Result<()> {
     while let Some(a) = args.next() {
         match a.as_str() {
             "--parent" => parent = Some(std::path::PathBuf::from(args.next().expect("path"))),
-            "--collapsed" => {
-                collapsed.push(std::path::PathBuf::from(args.next().expect("path")))
-            }
+            "--collapsed" => collapsed.push(std::path::PathBuf::from(args.next().expect("path"))),
             "--corpus" => corpus = Some(std::path::PathBuf::from(args.next().expect("path"))),
             "--seq-len" => seq_len = args.next().expect("n").parse()?,
             "--max-tokens" => max_tokens = args.next().expect("n").parse()?,
@@ -299,7 +303,10 @@ fn main() -> Result<()> {
         bail!("at least one --collapsed is required (repeatable — the parent arm runs once)");
     }
     let corpus = corpus.context("--corpus is required")?;
-    assert!(seq_len >= 2, "--seq-len must be >= 2 (one scored position min)");
+    assert!(
+        seq_len >= 2,
+        "--seq-len must be >= 2 (one scored position min)"
+    );
 
     // ── the frozen token stream (byte-identical for both arms) ──
     let text = load_corpus_text(&corpus)?;
@@ -313,8 +320,8 @@ fn main() -> Result<()> {
                 Box::new(move |t: &str| tok.encode(t))
             }
             Family::Gemma2 => {
-                let tok =
-                    SentencePieceGgufTokenizer::from_gguf(&gguf).context("sentencepiece tokenizer from gguf")?;
+                let tok = SentencePieceGgufTokenizer::from_gguf(&gguf)
+                    .context("sentencepiece tokenizer from gguf")?;
                 Box::new(move |t: &str| tok.encode(t))
             }
         }
@@ -352,9 +359,18 @@ fn main() -> Result<()> {
                 "[goat] parent: CACHE HIT ({parent:?} @ seq {seq_len} × {max_tokens}) — replaying {} recorded positions",
                 c.argmax.len()
             );
-            let hit = c.argmax.iter().zip(c.truth.iter()).filter(|(a, t)| a == t).count();
+            let hit = c
+                .argmax
+                .iter()
+                .zip(c.truth.iter())
+                .filter(|(a, t)| a == t)
+                .count();
             (
-                ArmOut { argmax: c.argmax, truth: c.truth, secs: 0.0 },
+                ArmOut {
+                    argmax: c.argmax,
+                    truth: c.truth,
+                    secs: 0.0,
+                },
                 hit,
                 0.0,
             )
@@ -414,11 +430,25 @@ fn main() -> Result<()> {
         println!("# twt_goat_agreement — T5.0 collapsed-vs-parent (Issue 022, T5.1 budget)");
         println!("# parent:    {}", parent.display());
         println!("# collapsed: {}", path.display());
-        println!("# corpus: {} ({} tokens, {} chunks × ≤{seq_len})", corpus.display(), tokens.len(), chunks.len());
+        println!(
+            "# corpus: {} ({} tokens, {} chunks × ≤{seq_len})",
+            corpus.display(),
+            tokens.len(),
+            chunks.len()
+        );
         println!("# scored positions: {n}");
-        println!("# parent top-1 hit rate (context):    {:.4}", base_hit as f64 / n as f64);
-        println!("# collapsed top-1 hit rate:           {:.4}", arm2_hit as f64 / n as f64);
-        println!("# parent-vs-collapsed argmax agreement: {:.4} ({agree}/{n})", agreement);
+        println!(
+            "# parent top-1 hit rate (context):    {:.4}",
+            base_hit as f64 / n as f64
+        );
+        println!(
+            "# collapsed top-1 hit rate:           {:.4}",
+            arm2_hit as f64 / n as f64
+        );
+        println!(
+            "# parent-vs-collapsed argmax agreement: {:.4} ({agree}/{n})",
+            agreement
+        );
         println!("# first divergence position: {:?}", first_div);
         println!(
             "# arm wall: parent {:.0}s, collapsed {:.0}s",

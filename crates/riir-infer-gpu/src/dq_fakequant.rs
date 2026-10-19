@@ -256,7 +256,10 @@ pub fn f16_round(x: f32) -> f32 {
 /// the G-i3 oracle; both kernels mirror it exactly.
 pub fn host_quant_dequant(grid: DqGrid, buf: &[f32], out: &mut [f32], dim: usize) {
     assert_eq!(buf.len(), out.len());
-    assert!(buf.len().is_multiple_of(dim), "buffer must be a whole number of rows");
+    assert!(
+        buf.len().is_multiple_of(dim),
+        "buffer must be a whole number of rows"
+    );
     for (src, dst) in buf.chunks(dim).zip(out.chunks_mut(dim)) {
         for (sb, db) in src.chunks(grid.block()).zip(dst.chunks_mut(grid.block())) {
             match grid {
@@ -278,10 +281,8 @@ pub fn host_quant_dequant(grid: DqGrid, buf: &[f32], out: &mut [f32], dim: usize
 
 static FQ_ARM: std::sync::atomic::AtomicU8 = std::sync::atomic::AtomicU8::new(0);
 static FQ_GRID: std::sync::atomic::AtomicU8 = std::sync::atomic::AtomicU8::new(0);
-static FQ_PREFILL_LAUNCHES: std::sync::atomic::AtomicU64 =
-    std::sync::atomic::AtomicU64::new(0);
-static FQ_DECODE_LAUNCHES: std::sync::atomic::AtomicU64 =
-    std::sync::atomic::AtomicU64::new(0);
+static FQ_PREFILL_LAUNCHES: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+static FQ_DECODE_LAUNCHES: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 /// Issue 033 axis 2 — the KV-STORE precision arm: `None` = off (f32 KV,
 /// the shipped posture), `Some(grid)` = round every stored K/V cache row
 /// in place to the grid (the q8kv deployment spelling). NOT gated on the
@@ -409,7 +410,10 @@ pub fn fq_reset_counters() {
         feature = "ternary_gemv_cuda_raw",
         feature = "dq_phase_bench"
     )),
-    allow(dead_code, reason = "the only caller is the cudarc DqFqKernels lane (CUDA-only, dq_phase_bench-gated) — absent on macOS and at non-dq combos")
+    allow(
+        dead_code,
+        reason = "the only caller is the cudarc DqFqKernels lane (CUDA-only, dq_phase_bench-gated) — absent on macOS and at non-dq combos"
+    )
 )]
 pub(crate) fn note_prefill_launch() {
     FQ_PREFILL_LAUNCHES.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
@@ -417,7 +421,10 @@ pub(crate) fn note_prefill_launch() {
 #[inline]
 #[cfg_attr(
     not(feature = "dq_phase_bench"),
-    allow(dead_code, reason = "the only callers are the dq_phase_bench-gated Plan-614 injection sites")
+    allow(
+        dead_code,
+        reason = "the only callers are the dq_phase_bench-gated Plan-614 injection sites"
+    )
 )]
 pub(crate) fn note_decode_launch() {
     FQ_DECODE_LAUNCHES.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
@@ -425,7 +432,10 @@ pub(crate) fn note_decode_launch() {
 #[inline]
 #[cfg_attr(
     not(feature = "dq_phase_bench"),
-    allow(dead_code, reason = "the only callers are the dq_phase_bench-gated KV-store injection sites (Issue 033)")
+    allow(
+        dead_code,
+        reason = "the only callers are the dq_phase_bench-gated KV-store injection sites (Issue 033)"
+    )
 )]
 pub(crate) fn note_kv_launch() {
     FQ_KV_LAUNCHES.fetch_add(1, std::sync::atomic::Ordering::Relaxed);

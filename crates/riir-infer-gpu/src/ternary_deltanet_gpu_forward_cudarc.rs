@@ -151,7 +151,12 @@ impl WeightBuffersCudarc {
     /// Q4_K arm (plan 618 item 5): raw `BlockQ4K` bytes row-major. The q4
     /// GEMV (`gemv_q4k_cuda_raw`) consumes these + the shared int8
     /// activation buffers.
-    fn upload_q4k(stream: &Arc<CudaStream>, blocks: &[riir_infer_core::quant::q4k::BlockQ4K], m: usize, n: usize) -> Self {
+    fn upload_q4k(
+        stream: &Arc<CudaStream>,
+        blocks: &[riir_infer_core::quant::q4k::BlockQ4K],
+        m: usize,
+        n: usize,
+    ) -> Self {
         if m == 0 || n == 0 {
             return Self::empty(WeightFormatCudarc::Q4K, stream);
         }
@@ -172,7 +177,12 @@ impl WeightBuffersCudarc {
     /// matched-storage single-checkpoint control arm. The q6 GEMV
     /// (`gemv_q6k_cuda_raw`) consumes these + the shared int8 activation
     /// buffers.
-    fn upload_q6k(stream: &Arc<CudaStream>, blocks: &[riir_infer_core::quant::q6k::BlockQ6K], m: usize, n: usize) -> Self {
+    fn upload_q6k(
+        stream: &Arc<CudaStream>,
+        blocks: &[riir_infer_core::quant::q6k::BlockQ6K],
+        m: usize,
+        n: usize,
+    ) -> Self {
         if m == 0 || n == 0 {
             return Self::empty(WeightFormatCudarc::Q6K, stream);
         }
@@ -3488,15 +3498,7 @@ impl TernaryDeltanetGpuForwardCudarc {
             if is_deltanet {
                 forward_deltanet_layer(infra, acts, layer_idx, layer_w, eps, None, false)?;
             } else {
-                forward_attention_layer(
-                    infra,
-                    acts,
-                    layer_idx,
-                    layer_w,
-                    eps,
-                    false,
-                    si.as_ref(),
-                )?;
+                forward_attention_layer(infra, acts, layer_idx, layer_w, eps, false, si.as_ref())?;
             }
             infra
                 .elementwise
@@ -3980,7 +3982,9 @@ fn build_lora_ctx_enabled<'a>(
 fn si_args(
     session: &Option<crate::si_gpu::SiGpuSession>,
 ) -> Option<crate::cudarc_kernels::attention::SiDecodeArgs<'_>> {
-    session.as_ref().map(crate::si_gpu::SiGpuSession::decode_args)
+    session
+        .as_ref()
+        .map(crate::si_gpu::SiGpuSession::decode_args)
 }
 
 fn forward_from_x(
@@ -5049,8 +5053,7 @@ fn forward_attention_layer(
                 })?;
             let lo = pos * kvd;
             let hi = lo + kvd;
-            let grid = crate::dq_fakequant::current_kv_grid()
-                .expect("kv_armed() implies a grid");
+            let grid = crate::dq_fakequant::current_kv_grid().expect("kv_armed() implies a grid");
             dq_fq.launch_dq_kv_quant(&infra.stream, &key_cache.slice(lo..hi), kvd, 1, grid)?;
             dq_fq.launch_dq_kv_quant(&infra.stream, &value_cache.slice(lo..hi), kvd, 1, grid)?;
         }
@@ -5776,8 +5779,7 @@ fn forward_attention_layer_devpos(
             let pos_host = acts.pos;
             let lo = pos_host * kvd;
             let hi = lo + kvd;
-            let grid = crate::dq_fakequant::current_kv_grid()
-                .expect("kv_armed() implies a grid");
+            let grid = crate::dq_fakequant::current_kv_grid().expect("kv_armed() implies a grid");
             dq_fq.launch_dq_kv_quant(&infra.stream, &key_cache.slice(lo..hi), kvd, 1, grid)?;
             dq_fq.launch_dq_kv_quant(&infra.stream, &value_cache.slice(lo..hi), kvd, 1, grid)?;
         }
@@ -6512,7 +6514,13 @@ fn gemv_prequantized_multi(
             .map(|(w, out)| (&w.q4_blocks, *out, w.m))
             .collect();
         crate::gemv_q4k_cuda_raw::launch_gemv_q4k_multi(
-            stream, &quant_gemv.q4k, quant_i8_buf, ascale_buf, &segs, accumulate, n,
+            stream,
+            &quant_gemv.q4k,
+            quant_i8_buf,
+            ascale_buf,
+            &segs,
+            accumulate,
+            n,
         )?;
     }
     if !q6_segs.is_empty() {
@@ -6521,7 +6529,13 @@ fn gemv_prequantized_multi(
             .map(|(w, out)| (&w.q6_blocks, *out, w.m))
             .collect();
         crate::gemv_q6k_cuda_raw::launch_gemv_q6k_multi(
-            stream, &quant_gemv.q6k, quant_i8_buf, ascale_buf, &segs, accumulate, n,
+            stream,
+            &quant_gemv.q6k,
+            quant_i8_buf,
+            ascale_buf,
+            &segs,
+            accumulate,
+            n,
         )?;
     }
     Ok(())
@@ -6690,7 +6704,15 @@ fn quantize_and_gemv_batch(
         );
     }
     // Issue 697 — one multi-segment launch instead of N.
-    gemv_prequantized_multi(stream, gemv, quant_gemv, quant_i8_buf, ascale_buf, gemvs, false)?;
+    gemv_prequantized_multi(
+        stream,
+        gemv,
+        quant_gemv,
+        quant_i8_buf,
+        ascale_buf,
+        gemvs,
+        false,
+    )?;
     Ok(())
 }
 
@@ -6732,7 +6754,15 @@ fn rmsnorm_quantize_and_gemv_batch(
         );
     }
     // Issue 697 — one multi-segment launch instead of N.
-    gemv_prequantized_multi(stream, gemv, quant_gemv, quant_i8_buf, ascale_buf, gemvs, false)?;
+    gemv_prequantized_multi(
+        stream,
+        gemv,
+        quant_gemv,
+        quant_i8_buf,
+        ascale_buf,
+        gemvs,
+        false,
+    )?;
     Ok(())
 }
 
@@ -6793,7 +6823,15 @@ fn rmsnorm_quantize_and_gemv_batch_with_norm_x(
         );
     }
     // Issue 697 — one multi-segment launch instead of N.
-    gemv_prequantized_multi(stream, gemv, quant_gemv, quant_i8_buf, ascale_buf, gemvs, false)?;
+    gemv_prequantized_multi(
+        stream,
+        gemv,
+        quant_gemv,
+        quant_i8_buf,
+        ascale_buf,
+        gemvs,
+        false,
+    )?;
     Ok(())
 }
 
@@ -6826,7 +6864,15 @@ fn swiglu_quantize_and_gemv(
     );
     // Fused SwiGLU + quantize — writes int8 + ascale directly.
     elementwise.launch_swiglu_quantize(stream, gate, up, quant_i8_buf, ascale_buf, n)?;
-    gemv_prequantized(stream, gemv, quant_gemv, quant_i8_buf, ascale_buf, weights, out)?;
+    gemv_prequantized(
+        stream,
+        gemv,
+        quant_gemv,
+        quant_i8_buf,
+        ascale_buf,
+        weights,
+        out,
+    )?;
     Ok(())
 }
 
@@ -6865,7 +6911,15 @@ fn gate_silu_quantize_and_gemv(
     );
     // Fused silu-gate + quantize — writes int8 + ascale directly.
     elementwise.launch_gate_silu_quantize(stream, x, gate, quant_i8_buf, ascale_buf, n)?;
-    gemv_prequantized(stream, gemv, quant_gemv, quant_i8_buf, ascale_buf, weights, out)?;
+    gemv_prequantized(
+        stream,
+        gemv,
+        quant_gemv,
+        quant_i8_buf,
+        ascale_buf,
+        weights,
+        out,
+    )?;
     Ok(())
 }
 
@@ -7241,20 +7295,29 @@ fn upload_layer_weights_cudarc(
             if *rows == 0 {
                 None
             } else {
-                Some(WeightBuffersCudarc::upload_q4k(stream, blocks, *rows, *cols))
+                Some(WeightBuffersCudarc::upload_q4k(
+                    stream, blocks, *rows, *cols,
+                ))
             }
         }
         ProjWeights::Q6K(blocks, rows, cols) => {
             if *rows == 0 {
                 None
             } else {
-                Some(WeightBuffersCudarc::upload_q6k(stream, blocks, *rows, *cols))
+                Some(WeightBuffersCudarc::upload_q6k(
+                    stream, blocks, *rows, *cols,
+                ))
             }
         }
         // Raw-Q2 arm (`ternary_q2_resident`): the TRANSIENT plane view rides
         // the dp4a buffers — a one-shot copy to device (Issue 043 T1).
         #[allow(unreachable_patterns)]
-        other => maybe_upload(stream, &other.planes_cow().expect("non-quant arms carry a plane view")),
+        other => maybe_upload(
+            stream,
+            &other
+                .planes_cow()
+                .expect("non-quant arms carry a plane view"),
+        ),
     };
     GpuLayerWeightsCudarc {
         dense_a: dense_of(&l.in_proj_a),
@@ -7284,9 +7347,12 @@ fn upload_layer_weights_cudarc(
         // FFN projections are non-optional (both layer types carry them);
         // an empty placeholder satisfies the field when the layer's source
         // projection is empty (m == 0 → every GEMV helper early-returns).
-        gate_proj: proj_of(&l.gate_proj).unwrap_or_else(|| WeightBuffersCudarc::empty(WeightFormatCudarc::Ternary, stream)),
-        up_proj: proj_of(&l.up_proj).unwrap_or_else(|| WeightBuffersCudarc::empty(WeightFormatCudarc::Ternary, stream)),
-        down_proj: proj_of(&l.down_proj).unwrap_or_else(|| WeightBuffersCudarc::empty(WeightFormatCudarc::Ternary, stream)),
+        gate_proj: proj_of(&l.gate_proj)
+            .unwrap_or_else(|| WeightBuffersCudarc::empty(WeightFormatCudarc::Ternary, stream)),
+        up_proj: proj_of(&l.up_proj)
+            .unwrap_or_else(|| WeightBuffersCudarc::empty(WeightFormatCudarc::Ternary, stream)),
+        down_proj: proj_of(&l.down_proj)
+            .unwrap_or_else(|| WeightBuffersCudarc::empty(WeightFormatCudarc::Ternary, stream)),
         input_norm: upload_f32_slice(stream, &l.input_norm),
         post_attn_norm: upload_f32_slice(stream, &l.post_attn_norm),
         conv1d_weight: if l.conv1d_weight.is_empty() {
@@ -7728,10 +7794,10 @@ mod tests {
             eprintln!("[skip] no CUDA device");
             return;
         };
+        use bytemuck::Zeroable as _;
         use riir_infer_core::deltanet::forward::{HybridCache, HybridForwardScratch};
         use riir_infer_core::deltanet::ternary_forward::forward_qwen_deltanet_ternary;
         use riir_infer_core::quant::q4k::{QK_K, quantize_row_q4_k};
-        use bytemuck::Zeroable as _;
 
         let config = small_test_config();
         let mut weights = QwenDeltaNetTernaryWeights::zeros(&config);
@@ -7759,15 +7825,15 @@ mod tests {
                 if rows == 0 || cols == 0 {
                     continue;
                 }
-                assert!(cols.is_multiple_of(QK_K), "fixture col {cols} not q4-quantizable");
+                assert!(
+                    cols.is_multiple_of(QK_K),
+                    "fixture col {cols} not q4-quantizable"
+                );
                 let nb = cols / QK_K;
                 let mut blocks = Vec::with_capacity(rows * nb);
                 let mut row_blocks = vec![riir_infer_core::quant::q4k::BlockQ4K::zeroed(); nb];
                 for r in 0..rows {
-                    quantize_row_q4_k(
-                        &dense[r * cols..(r + 1) * cols],
-                        &mut row_blocks,
-                    );
+                    quantize_row_q4_k(&dense[r * cols..(r + 1) * cols], &mut row_blocks);
                     blocks.extend_from_slice(&row_blocks);
                 }
                 *p = ProjWeights::Q4K(blocks, rows, cols);
@@ -7802,8 +7868,8 @@ mod tests {
             .map_or(0, |(i, _)| i);
 
         // ── GPU: the q4 arms through the cudarc forward ──
-        let mut fwd = TernaryDeltanetGpuForwardCudarc::new(&config, &weights)
-            .expect("q4 fwd construct");
+        let mut fwd =
+            TernaryDeltanetGpuForwardCudarc::new(&config, &weights).expect("q4 fwd construct");
         fwd.set_input_token(token).expect("set_input_token");
         let gpu_logits = fwd.forward_token().expect("forward_token");
         let gpu_argmax = gpu_logits
@@ -7812,7 +7878,10 @@ mod tests {
             .max_by(|(_, a), (_, b)| a.partial_cmp(b).unwrap())
             .map_or(0, |(i, _)| i);
 
-        assert_eq!(gpu_argmax, cpu_argmax, "q4 forward argmax diverged from CPU");
+        assert_eq!(
+            gpu_argmax, cpu_argmax,
+            "q4 forward argmax diverged from CPU"
+        );
         let max_abs = cpu_logits
             .iter()
             .zip(gpu_logits.iter())
@@ -7829,7 +7898,10 @@ mod tests {
             max_abs < 0.05,
             "q4 GPU logits diverged from CPU: max|Δ| {max_abs:.3e}"
         );
-        assert!(gpu_logits.iter().all(|l| l.is_finite()), "NaN/Inf in q4 GPU logits");
+        assert!(
+            gpu_logits.iter().all(|l| l.is_finite()),
+            "NaN/Inf in q4 GPU logits"
+        );
     }
 
     /// Plan 618 S3 e2e — the Q6K twin of the q4 e2e above: every per-layer
@@ -7844,10 +7916,10 @@ mod tests {
             eprintln!("[skip] no CUDA device");
             return;
         };
+        use bytemuck::Zeroable as _;
         use riir_infer_core::deltanet::forward::{HybridCache, HybridForwardScratch};
         use riir_infer_core::deltanet::ternary_forward::forward_qwen_deltanet_ternary;
         use riir_infer_core::quant::q6k::{QK_K, quantize_row_q6_k};
-        use bytemuck::Zeroable as _;
 
         let config = small_test_config();
         let mut weights = QwenDeltaNetTernaryWeights::zeros(&config);
@@ -7872,7 +7944,10 @@ mod tests {
                 if rows == 0 || cols == 0 {
                     continue;
                 }
-                assert!(cols.is_multiple_of(QK_K), "fixture col {cols} not q6-quantizable");
+                assert!(
+                    cols.is_multiple_of(QK_K),
+                    "fixture col {cols} not q6-quantizable"
+                );
                 let nb = cols / QK_K;
                 let mut blocks = Vec::with_capacity(rows * nb);
                 let mut row_blocks = vec![riir_infer_core::quant::q6k::BlockQ6K::zeroed(); nb];
@@ -7912,8 +7987,8 @@ mod tests {
             .map_or(0, |(i, _)| i);
 
         // ── GPU: the q6 arms through the cudarc forward ──
-        let mut fwd = TernaryDeltanetGpuForwardCudarc::new(&config, &weights)
-            .expect("q6 fwd construct");
+        let mut fwd =
+            TernaryDeltanetGpuForwardCudarc::new(&config, &weights).expect("q6 fwd construct");
         fwd.set_input_token(token).expect("set_input_token");
         let gpu_logits = fwd.forward_token().expect("forward_token");
         let gpu_argmax = gpu_logits
@@ -7922,7 +7997,10 @@ mod tests {
             .max_by(|(_, a), (_, b)| a.partial_cmp(b).unwrap())
             .map_or(0, |(i, _)| i);
 
-        assert_eq!(gpu_argmax, cpu_argmax, "q6 forward argmax diverged from CPU");
+        assert_eq!(
+            gpu_argmax, cpu_argmax,
+            "q6 forward argmax diverged from CPU"
+        );
         let max_abs = cpu_logits
             .iter()
             .zip(gpu_logits.iter())
@@ -7936,7 +8014,10 @@ mod tests {
             max_abs < 0.05,
             "q6 GPU logits diverged from CPU: max|Δ| {max_abs:.3e}"
         );
-        assert!(gpu_logits.iter().all(|l| l.is_finite()), "NaN/Inf in q6 GPU logits");
+        assert!(
+            gpu_logits.iter().all(|l| l.is_finite()),
+            "NaN/Inf in q6 GPU logits"
+        );
     }
 
     /// Plan 618 S3 — the disaggregated DUAL forward: the prefill copy's
@@ -7952,9 +8033,9 @@ mod tests {
             eprintln!("[skip] no CUDA device");
             return;
         };
+        use bytemuck::Zeroable as _;
         use riir_infer_core::disaggregated::{DisaggregatedTernaryWeights, PhaseHandoff};
         use riir_infer_core::quant::q4k::{QK_K, quantize_row_q4_k};
-        use bytemuck::Zeroable as _;
 
         let config = small_test_config();
         let mut decode = QwenDeltaNetTernaryWeights::zeros(&config);
@@ -8015,7 +8096,9 @@ mod tests {
             .map_or(0, |(i, _)| i);
         let mut cpu_tokens = vec![cpu_first];
         for _ in 1..6 {
-            let logits = handoff.decode_step(&decode, &config, *cpu_tokens.last().unwrap()).to_vec();
+            let logits = handoff
+                .decode_step(&decode, &config, *cpu_tokens.last().unwrap())
+                .to_vec();
             let next = logits
                 .iter()
                 .enumerate()
@@ -8025,8 +8108,8 @@ mod tests {
         }
 
         // ── GPU dual: prefill on the prefill copy, phase switch, decode ──
-        let mut fwd = TernaryDeltanetGpuForwardCudarc::new(&config, &decode)
-            .expect("dual fwd construct");
+        let mut fwd =
+            TernaryDeltanetGpuForwardCudarc::new(&config, &decode).expect("dual fwd construct");
         fwd.attach_prefill_copy(&prefill).expect("attach prefill");
         fwd.set_phase_prefill(true).expect("arm prefill phase");
         fwd.reset_state().expect("reset");
@@ -8055,7 +8138,8 @@ mod tests {
         fwd.set_phase_prefill(false).expect("disarm prefill phase");
         let mut gpu_tokens = vec![gpu_first];
         for _ in 1..6 {
-            fwd.set_input_token(*gpu_tokens.last().unwrap()).expect("set decode token");
+            fwd.set_input_token(*gpu_tokens.last().unwrap())
+                .expect("set decode token");
             let l = fwd.forward_token().expect("decode step");
             let next = l
                 .iter()
@@ -8071,8 +8155,13 @@ mod tests {
 
         // The single-copy refusals (the mis-load guards).
         let mut single = TernaryDeltanetGpuForwardCudarc::new(&config, &decode).expect("single");
-        assert!(single.set_phase_prefill(true).is_err(), "arm without prefill set must refuse");
-        single.set_phase_prefill(false).expect("disarm always legal");
+        assert!(
+            single.set_phase_prefill(true).is_err(),
+            "arm without prefill set must refuse"
+        );
+        single
+            .set_phase_prefill(false)
+            .expect("disarm always legal");
     }
 
     /// max|Δ| over the shared prefix (the boundary-logits comparator; the

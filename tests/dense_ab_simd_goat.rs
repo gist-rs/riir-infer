@@ -72,7 +72,12 @@ fn g1_simd_dense_matches_the_scalar_arm_within_reduction_tolerance() {
             let row = &data[r * COLS..(r + 1) * COLS];
             let mag: f32 = row.iter().zip(&x).map(|(a, b)| (a * b).abs()).sum();
             let err = (got[r] - want[r]).abs();
-            assert!(err <= 1e-5 * mag, "seed {seed} row {r}: simd {} scalar {} err {err} mag {mag}", got[r], want[r]);
+            assert!(
+                err <= 1e-5 * mag,
+                "seed {seed} row {r}: simd {} scalar {} err {err} mag {mag}",
+                got[r],
+                want[r]
+            );
         }
     }
 }
@@ -90,7 +95,13 @@ fn g2_simd_dense_vs_scalar_ab() {
         200,
         50,
         |i| {
-            scalar_matvec(&mut ya, black_box(&data), black_box(&xs[i % xs.len()]), ROWS, COLS);
+            scalar_matvec(
+                &mut ya,
+                black_box(&data),
+                black_box(&xs[i % xs.len()]),
+                ROWS,
+                COLS,
+            );
             sink.set(sink.get() + ya[i % ROWS]);
         },
         |i| {
@@ -100,7 +111,13 @@ fn g2_simd_dense_vs_scalar_ab() {
     );
     r.report("dense a/b 48x5120 simd/scalar");
     let per_token_saved_ms = (r.a_ns_per_iter() - r.b_ns_per_iter()) * 2.0 * 48.0 / 1e6;
-    println!("   projected per-token saving (2 projections x 48 GDN layers): {per_token_saved_ms:.2} ms");
+    println!(
+        "   projected per-token saving (2 projections x 48 GDN layers): {per_token_saved_ms:.2} ms"
+    );
     black_box(sink.get());
-    assert!(r.median < 1.0, "the SIMD arm must beat the scalar arm: median ratio {:.4}", r.median);
+    assert!(
+        r.median < 1.0,
+        "the SIMD arm must beat the scalar arm: median ratio {:.4}",
+        r.median
+    );
 }

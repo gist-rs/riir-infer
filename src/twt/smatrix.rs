@@ -32,8 +32,8 @@
 //! bucket). `finalize` emits one S per bucket; the DP runs per bucket (the
 //! conservative-min-across-bands reading is the driver's call).
 
-use super::accum::PairCosineAccum;
 use super::TwtError;
+use super::accum::PairCosineAccum;
 
 /// Position band of a calibration row (T1.2: prompt / head / generation,
 /// deterministic boundaries — causal states are position-dependent).
@@ -187,7 +187,10 @@ impl SMatrixBuilder {
     /// Override a row's position bucket (default [`Bucket::Prompt`]).
     pub fn set_row_bucket(&mut self, row: usize, bucket: Bucket) -> Result<(), TwtError> {
         if row >= self.rows {
-            return Err(TwtError::RowOutOfRange { row, rows: self.rows });
+            return Err(TwtError::RowOutOfRange {
+                row,
+                rows: self.rows,
+            });
         }
         self.frame_bucket[row] = bucket;
         Ok(())
@@ -205,7 +208,10 @@ impl SMatrixBuilder {
             });
         }
         if row >= self.rows {
-            return Err(TwtError::RowOutOfRange { row, rows: self.rows });
+            return Err(TwtError::RowOutOfRange {
+                row,
+                rows: self.rows,
+            });
         }
         if state.len() != self.dim {
             return Err(TwtError::DimMismatch {
@@ -358,11 +364,8 @@ impl SMatrixBuilder {
                     rms_normalize(&mut m[slot * k..(slot + 1) * k]);
                 }
             }
-            let mut scratch = katgpt_core::data_probe::cca::CcaScratch::with_capacity(
-                k,
-                k,
-                probe_rows,
-            );
+            let mut scratch =
+                katgpt_core::data_probe::cca::CcaScratch::with_capacity(k, k, probe_rows);
             // Retained rows carry no bucket split (retention is row-level),
             // so the SVCCA meter pools all buckets — the cosine arm owns
             // the bucketed reading.
@@ -424,7 +427,9 @@ fn rms_normalize(row: &mut [f32]) {
 /// shared by both sides up to the projection's rank).
 fn seeded_projection_basis(d: usize, k: usize) -> Vec<f64> {
     let mut rng = super::synth::Lcg::new(0x7A6F_6E65_5052_4F4Au64); // 'ZoneProJ'
-    (0..d * k).map(|_| (2.0 * rng.next_centered()) as f64).collect()
+    (0..d * k)
+        .map(|_| (2.0 * rng.next_centered()) as f64)
+        .collect()
 }
 
 #[cfg(test)]
@@ -501,7 +506,10 @@ mod tests {
     #[test]
     fn validation_errors() {
         let mut b = SMatrixBuilder::new(3, 4);
-        assert!(matches!(b.push(0, 0, &[0.0; 4]), Err(TwtError::NoForwardOpen)));
+        assert!(matches!(
+            b.push(0, 0, &[0.0; 4]),
+            Err(TwtError::NoForwardOpen)
+        ));
         b.begin_forward(2).unwrap();
         assert!(matches!(
             b.push(3, 0, &[0.0; 4]),
@@ -534,10 +542,7 @@ mod tests {
         b.push(1, 1, &[0.1; 4]).unwrap();
         b.push(2, 1, &[0.1; 4]).unwrap();
         b.end_forward().unwrap();
-        assert!(matches!(
-            b.begin_forward(0),
-            Err(TwtError::EmptyForward)
-        ));
+        assert!(matches!(b.begin_forward(0), Err(TwtError::EmptyForward)));
     }
 
     #[test]
@@ -566,8 +571,10 @@ mod tests {
                     .collect::<Vec<_>>()
             })
             .collect();
-        let mut b = SMatrixBuilder::new(4, 12)
-            .with_svcca(SvccaCfg { stride: 1, cap_rows: 64 });
+        let mut b = SMatrixBuilder::new(4, 12).with_svcca(SvccaCfg {
+            stride: 1,
+            cap_rows: 64,
+        });
         feed(&mut b, &corpus, 64);
         let s = b.finalize().unwrap();
         assert_eq!(s.probe_rows, 64);
@@ -580,8 +587,10 @@ mod tests {
 
     #[test]
     fn svcca_probe_floor_refuses() {
-        let mut b = SMatrixBuilder::new(3, 8)
-            .with_svcca(SvccaCfg { stride: 1, cap_rows: 4 });
+        let mut b = SMatrixBuilder::new(3, 8).with_svcca(SvccaCfg {
+            stride: 1,
+            cap_rows: 4,
+        });
         let c = corpus(4, 3, 8, 7);
         feed(&mut b, &c, 4);
         // 4 retained rows ≤ dim 8 → blind meter, refuse.

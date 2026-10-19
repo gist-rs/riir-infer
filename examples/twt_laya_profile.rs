@@ -22,8 +22,8 @@ use std::collections::HashMap;
 use std::io::Write as _;
 
 use riir_infer_core::twt::{
-    blake3_of, forced_min_blocks, kill_verdict, minmax_partition, Bucket, KillVerdict,
-    SMatrixBuilder, SvccaCfg, PRE_REGISTERED_EPS_GRID,
+    Bucket, KillVerdict, PRE_REGISTERED_EPS_GRID, SMatrixBuilder, SvccaCfg, blake3_of,
+    forced_min_blocks, kill_verdict, minmax_partition,
 };
 use riir_infer_laya::laya::config::Checkpoint;
 use riir_infer_laya::laya::riir::backend::Cpu;
@@ -78,8 +78,8 @@ fn main() {
 
     // Checkpoint: locate → verify (→ download on first use) → parse → load.
     let ckpt_name = checkpoint.subfolder();
-    let dir =
-        ensure_checkpoint(&weights_root(), checkpoint).unwrap_or_else(|e| panic!("checkpoint fetch: {e}"));
+    let dir = ensure_checkpoint(&weights_root(), checkpoint)
+        .unwrap_or_else(|e| panic!("checkpoint fetch: {e}"));
     let (_agent_cfg, enc_cfg) =
         riir_infer_laya::laya::config::load_checkpoint_configs(&dir, ckpt_name)
             .unwrap_or_else(|e| panic!("configs: {e}"));
@@ -96,7 +96,10 @@ fn main() {
     let new_builder = || {
         let mut nb = SMatrixBuilder::new(n_layers, dim);
         if svcca {
-            nb = nb.with_svcca(SvccaCfg { stride, cap_rows: max_rows });
+            nb = nb.with_svcca(SvccaCfg {
+                stride,
+                cap_rows: max_rows,
+            });
         }
         nb
     };
@@ -119,24 +122,25 @@ fn main() {
         }
         builder.begin_forward(ids.len()).unwrap();
         let mut push_err: Option<String> = None;
-        let res = encoder.forward_capture(&backend, &ids, &[ids.len()], &mut |stage, row, state| {
-            // The S matrix pools LAYER OUTPUTS; the embedding state is the
-            // block-input side (Phase 3's audition surface), not a
-            // partitionable layer — recorded by the stage vocabulary, not
-            // pooled.
-            let CaptureStage::AfterLayer(li) = stage else {
-                return;
-            };
-            // Every row of a classification forward is prompt-band; set
-            // explicitly so the artifact says what it does.
-            if let Err(e) = builder
-                .push(li, row, state)
-                .and_then(|_| builder.set_row_bucket(row, Bucket::Prompt))
-                && push_err.is_none()
-            {
-                push_err = Some(e.to_string());
-            }
-        });
+        let res =
+            encoder.forward_capture(&backend, &ids, &[ids.len()], &mut |stage, row, state| {
+                // The S matrix pools LAYER OUTPUTS; the embedding state is the
+                // block-input side (Phase 3's audition surface), not a
+                // partitionable layer — recorded by the stage vocabulary, not
+                // pooled.
+                let CaptureStage::AfterLayer(li) = stage else {
+                    return;
+                };
+                // Every row of a classification forward is prompt-band; set
+                // explicitly so the artifact says what it does.
+                if let Err(e) = builder
+                    .push(li, row, state)
+                    .and_then(|_| builder.set_row_bucket(row, Bucket::Prompt))
+                    && push_err.is_none()
+                {
+                    push_err = Some(e.to_string());
+                }
+            });
         if let Err(e) = res {
             eprintln!("[twt] question {pi} capture failed: {e} — skipped");
             builder = new_builder();

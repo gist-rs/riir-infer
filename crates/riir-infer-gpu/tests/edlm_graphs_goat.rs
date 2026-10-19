@@ -29,7 +29,9 @@
 
 #![cfg(feature = "edlm_gpu")]
 
-use riir_infer_core::transformer::edlm::{BranchRow, EdlmLayerWeights, EdlmWeights, PackedEncoding};
+use riir_infer_core::transformer::edlm::{
+    BranchRow, EdlmLayerWeights, EdlmWeights, PackedEncoding,
+};
 use riir_infer_core::types::Config;
 use riir_infer_gpu::EdlmGpuModel;
 
@@ -179,7 +181,12 @@ fn graph_setup(
     state_len: usize,
     n_rows: usize,
     row_len: usize,
-) -> (Vec<PackedEncoding>, Vec<BranchRow>, EdlmGpuModel, EdlmGpuModel) {
+) -> (
+    Vec<PackedEncoding>,
+    Vec<BranchRow>,
+    EdlmGpuModel,
+    EdlmGpuModel,
+) {
     let config = mid_config();
     let mut weights = mid_weights(&config);
     quantize_to_f16_grid(&mut weights);
@@ -206,7 +213,14 @@ fn graph_setup(
     (encs, rows, eager, graphed)
 }
 
-fn mid_graph_setup(k_sets: usize) -> (Vec<PackedEncoding>, Vec<BranchRow>, EdlmGpuModel, EdlmGpuModel) {
+fn mid_graph_setup(
+    k_sets: usize,
+) -> (
+    Vec<PackedEncoding>,
+    Vec<BranchRow>,
+    EdlmGpuModel,
+    EdlmGpuModel,
+) {
     graph_setup(k_sets, STATE_LEN, N_ROWS, ROW_LEN)
 }
 
@@ -232,17 +246,20 @@ fn graphed_replay_matches_eager_mid() {
     // capture-run buffers reuse the pool slices that prime just freed, so a
     // replay of the SAME set must reproduce the prime answer EXACTLY — the
     // pure graph-vs-eager-same-instance zero gate.
-    let prime0 = graphed.forward_branches(&encs[0], &rows).expect("capture call");
-    assert!(graphed.graphs_live(), "capture call must install a live record");
+    let prime0 = graphed
+        .forward_branches(&encs[0], &rows)
+        .expect("capture call");
+    assert!(
+        graphed.graphs_live(),
+        "capture call must install a live record"
+    );
     let replay0 = graphed.forward_branches(&encs[0], &rows).expect("replay 0");
     let d0 = prime0
         .iter()
         .zip(&replay0)
         .map(|(a, b)| max_abs_diff(a, b))
         .fold(0.0f32, f32::max);
-    println!(
-        "set 0 replay-vs-prime (same instance, same record+buffers): {d0:.3e}"
-    );
+    println!("set 0 replay-vs-prime (same instance, same record+buffers): {d0:.3e}");
     // The same-instance eager rerun — the PASS-to-pass variance control (is
     // the ULP band the graph's, or the stack's per-call face?).
     let e_once = eager.forward_branches(&encs[0], &rows).expect("eager 1");
@@ -331,8 +348,7 @@ fn goat_graphed_amortized_interleaved_ab() {
         ("mid 4×64 (device-bound cell)", STATE_LEN, N_ROWS, ROW_LEN),
         ("small 1×16 (enqueue-bound cell)", 64, 1, 16),
     ] {
-        let (encs, rows, mut eager, mut graphed) =
-            graph_setup(K, state_len, n_rows, row_len);
+        let (encs, rows, mut eager, mut graphed) = graph_setup(K, state_len, n_rows, row_len);
         if !graphed.graphs_supported() {
             eprintln!(
                 "SKIP (loud): graph capture unsupported on {} — no GOAT cells",
@@ -361,7 +377,11 @@ fn goat_graphed_amortized_interleaved_ab() {
         }
         // The evidence law: the measurement means nothing unless replays
         // (not a silent eager fallback) produced it.
-        assert!(graphed.graphs_live(), "{}: the record must be live during the measurement", label);
+        assert!(
+            graphed.graphs_live(),
+            "{}: the record must be live during the measurement",
+            label
+        );
 
         let mut eager_us: Vec<u128> = Vec::with_capacity(PAIRS);
         let mut graphed_us: Vec<u128> = Vec::with_capacity(PAIRS);
@@ -375,11 +395,13 @@ fn goat_graphed_amortized_interleaved_ab() {
         let g_med = graphed_us[PAIRS / 2] as f64;
 
         println!();
-        println!(
-            "=== the graphs GOAT: K={K} question sets / state, {label}, {PAIRS} pairs ==="
-        );
+        println!("=== the graphs GOAT: K={K} question sets / state, {label}, {PAIRS} pairs ===");
         println!("| {:>22} | {:>14} |", "arm", "median µs");
-        println!("| {:>22} | {:>14.1} |", format!("eager fold (K={K})"), e_med);
+        println!(
+            "| {:>22} | {:>14.1} |",
+            format!("eager fold (K={K})"),
+            e_med
+        );
         println!("| {:>22} | {:>14.1} |", "graphed amortized", g_med);
         println!(
             "VERDICT: amortized speedup {:.2}x — {}",

@@ -35,11 +35,11 @@ use std::collections::BTreeMap;
 use std::io::BufWriter;
 use std::time::Instant;
 
-use riir_infer_core::gguf_loader::{GgufFile, GgmlType, GgufValue};
+use riir_infer_core::gguf_loader::{GgmlType, GgufFile, GgufValue};
 use riir_infer_core::quant::q2_0::repack_q2_0_to_ternary_group;
 use riir_infer_core::quant::q4k::QK_K;
 use riir_infer_core::twt::collapse_writer::{
-    CollapseSpec, LayerSource, LAYER_TYPES_LEGEND, TensorOut, emit_collapsed_gguf,
+    CollapseSpec, LAYER_TYPES_LEGEND, LayerSource, TensorOut, emit_collapsed_gguf,
     twt_layer_types_value,
 };
 use riir_infer_core::types::DeltaNetLayerType;
@@ -234,8 +234,7 @@ fn tensor_dense(parent: &GgufFile, name: &str) -> anyhow::Result<(Vec<f32>, usiz
     let raw = parent
         .tensor_slice(name)
         .ok_or_else(|| anyhow::anyhow!("tensor {name} has no bytes"))?;
-    let blocks: Vec<riir_infer_core::quant::q2_0::BlockQ2_0> =
-        bytemuck::cast_slice(raw).to_vec();
+    let blocks: Vec<riir_infer_core::quant::q2_0::BlockQ2_0> = bytemuck::cast_slice(raw).to_vec();
     let tg = repack_q2_0_to_ternary_group(&blocks, rows, cols)?;
     let dense =
         riir_infer_core::deltanet::ternary_weights::QwenDeltaNetTernaryWeights::dequant_proj_to_dense(&tg);
@@ -247,17 +246,13 @@ fn tensor_dense(parent: &GgufFile, name: &str) -> anyhow::Result<(Vec<f32>, usiz
 /// bridge's reconstruction (`trit × f16 group scale`) must agree with the
 /// RAW `dequantize_row_q2_0` decode on sampled values — catching any
 /// wire-vs-bridge divergence, not just illegal codes.
-fn check_ternary_exactness(
-    parent: &GgufFile,
-    name: &str,
-) -> anyhow::Result<()> {
+fn check_ternary_exactness(parent: &GgufFile, name: &str) -> anyhow::Result<()> {
     let info = parent
         .tensor_info(name)
         .ok_or_else(|| anyhow::anyhow!("tensor {name} not found"))?;
     let cols = info.shape[0];
     let rows: usize = info.shape[1..].iter().product();
-    let blocks: &[riir_infer_core::quant::q2_0::BlockQ2_0] =
-        parent.q2_0_tensor_blocks(name)?;
+    let blocks: &[riir_infer_core::quant::q2_0::BlockQ2_0] = parent.q2_0_tensor_blocks(name)?;
     // Arm 1: the bridge repack — refuses fourth-state codes (the trained-
     // ternary premise's structural half).
     let tg = repack_q2_0_to_ternary_group(blocks, rows, cols)?;
@@ -305,9 +300,16 @@ fn main() -> anyhow::Result<()> {
     anyhow::ensure!(arch == "qwen35", "expected qwen35, got {arch}");
     let n_layer = parent.metadata_u64("qwen35.block_count").unwrap_or(0) as usize;
     anyhow::ensure!(n_layer > 0, "qwen35.block_count missing/zero");
-    let interval = parent.metadata_u64("qwen35.full_attention_interval").unwrap_or(4) as usize;
-    let nextn = parent.metadata_u64("qwen35.nextn_predict_layers").unwrap_or(0);
-    anyhow::ensure!(nextn == 0, "nextn parents need their own plan (identity table is main-stack-only)");
+    let interval = parent
+        .metadata_u64("qwen35.full_attention_interval")
+        .unwrap_or(4) as usize;
+    let nextn = parent
+        .metadata_u64("qwen35.nextn_predict_layers")
+        .unwrap_or(0);
+    anyhow::ensure!(
+        nextn == 0,
+        "nextn parents need their own plan (identity table is main-stack-only)"
+    );
 
     let layer_types: Vec<DeltaNetLayerType> = (0..n_layer)
         .map(|i| {
@@ -640,10 +642,16 @@ fn verify_pack_tensors(
         let b = pack
             .tensor_slice(&info.name)
             .ok_or_else(|| anyhow::anyhow!("pack tensor {} missing", info.name))?;
-        anyhow::ensure!(a == b, "copy-class tensor {} differs between parent and pack", info.name);
+        anyhow::ensure!(
+            a == b,
+            "copy-class tensor {} differs between parent and pack",
+            info.name
+        );
         copies_checked += 1;
     }
-    eprintln!("[requant] copy-class byte-identity PASS ({copies_checked} tensors incl. globals + escape set)");
+    eprintln!(
+        "[requant] copy-class byte-identity PASS ({copies_checked} tensors incl. globals + escape set)"
+    );
 
     // Requant read-back: one projection per class-suffix, sampled rows,
     // bounded by the target's analytic error (the bound f16-scale rounding

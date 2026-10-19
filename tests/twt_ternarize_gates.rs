@@ -21,13 +21,13 @@
 #![cfg(feature = "twt_collapse")]
 
 use katgpt_core::TernaryGroupWeights;
-use riir_infer_core::quant::q2_0::{dequantize_row_q2_0, repack_q2_0_to_ternary_group, BlockQ2_0};
-use riir_infer_core::twt::ternarize::{
-    arm_dense_f16, arm_sign_majority, arm_source_quant, budget_ok, budget_ratio,
-    materialization_rel_err, Materialized, KAPPA_BUDGET,
-};
-use riir_infer_core::twt::synth::Lcg;
+use riir_infer_core::quant::q2_0::{BlockQ2_0, dequantize_row_q2_0, repack_q2_0_to_ternary_group};
 use riir_infer_core::twt::TwtError;
+use riir_infer_core::twt::synth::Lcg;
+use riir_infer_core::twt::ternarize::{
+    KAPPA_BUDGET, Materialized, arm_dense_f16, arm_sign_majority, arm_source_quant, budget_ok,
+    budget_ratio, materialization_rel_err,
+};
 
 /// Build a small random-ish ternary container with per-group scales
 /// (deterministic LCG; rows×cols, cols % 128 == 0).
@@ -85,10 +85,18 @@ fn arm_b_majority_known_answers() {
     // position 1: [+1, -1, -1] → vote -1 → sign −
     // position 2: [+1, -1,  0] → vote  0 → zeroed (weak)
     // position 3: [+1,  0,  0] → vote +1 → sign + (lone majority)
-    a[0] = 1.0; b[0] = 1.0; c[0] = -1.0;
-    a[1] = 1.0; b[1] = -1.0; c[1] = -1.0;
-    a[2] = 1.0; b[2] = -1.0; c[2] = 0.0;
-    a[3] = 1.0; b[3] = 0.0; c[3] = 0.0;
+    a[0] = 1.0;
+    b[0] = 1.0;
+    c[0] = -1.0;
+    a[1] = 1.0;
+    b[1] = -1.0;
+    c[1] = -1.0;
+    a[2] = 1.0;
+    b[2] = -1.0;
+    c[2] = 0.0;
+    a[3] = 1.0;
+    b[3] = 0.0;
+    c[3] = 0.0;
     let mat = arm_sign_majority(&[&a, &b, &c], rows, cols).unwrap();
     let Materialized::Ternary(w) = mat else {
         panic!("arm B must produce a ternary container");
@@ -113,11 +121,16 @@ fn arm_b_scale_is_the_supported_amax_of_the_real_sum() {
     // |Σw| = 3.25 still sets the magnitude scale.
     let rows = 1usize;
     let cols = 256usize;
-    let mut am = vec![0f32; rows * cols]; am[0] = 4.0;
-    let mut bm = vec![0f32; rows * cols]; bm[0] = -0.5;
-    let mut cm = vec![0f32; rows * cols]; cm[0] = -0.25;
+    let mut am = vec![0f32; rows * cols];
+    am[0] = 4.0;
+    let mut bm = vec![0f32; rows * cols];
+    bm[0] = -0.5;
+    let mut cm = vec![0f32; rows * cols];
+    cm[0] = -0.25;
     let mat = arm_sign_majority(&[&am, &bm, &cm], rows, cols).unwrap();
-    let Materialized::Ternary(w) = mat else { panic!("ternary") };
+    let Materialized::Ternary(w) = mat else {
+        panic!("ternary")
+    };
     assert_eq!(w.get(0, 0), -1, "the scale-free vote is +1-1-1 = -1");
     let d = w.scale_at(0, 0);
     assert!(
@@ -133,7 +146,9 @@ fn arm_a_round_trips_f16_values_exactly() {
     let b = vec![0.5f32, -2.0, 0.25];
     let c = vec![0.5f32, -2.0, 0.25];
     let mat = arm_dense_f16(&[&a, &b, &c], 1, 3).unwrap();
-    let Materialized::DenseF16(d) = mat else { panic!("dense") };
+    let Materialized::DenseF16(d) = mat else {
+        panic!("dense")
+    };
     let got: Vec<f32> = d.data.iter().map(|v| v.to_f32()).collect();
     assert_eq!(got, vec![0.5, -2.0, 0.25]);
 }
@@ -192,7 +207,9 @@ fn the_q2_0_wire_round_trip_is_lossless() {
     let mut blocks: Vec<BlockQ2_0> = Vec::new();
     mat.pack_q2_0(&mut blocks).unwrap();
     let repacked = repack_q2_0_to_ternary_group(&blocks, 2, 256).unwrap();
-    let Materialized::Ternary(w) = mat else { panic!("ternary") };
+    let Materialized::Ternary(w) = mat else {
+        panic!("ternary")
+    };
     assert_eq!(repacked.pos_bits, w.pos_bits);
     assert_eq!(repacked.neg_bits, w.neg_bits);
     assert_eq!(repacked.group_scale, w.group_scale);
@@ -213,7 +230,10 @@ fn the_budget_machinery_passes_exact_and_refuses_hostile() {
     let dense_err = 0.01f64;
     let arm_err = 3.0 * dense_err;
     assert!(!budget_ok(arm_err, dense_err), "3× must breach κ=2");
-    assert!(budget_ok(2.0 * dense_err, dense_err), "exactly 2× sits AT the ceiling");
+    assert!(
+        budget_ok(2.0 * dense_err, dense_err),
+        "exactly 2× sits AT the ceiling"
+    );
     // NaN refuses both directions.
     assert!(!budget_ok(f64::NAN, 0.01));
     assert!(!budget_ok(0.01, f64::NAN));
@@ -257,14 +277,31 @@ fn the_budget_separates_by_surrogate_strength_not_by_arm_damage_alone() {
     let arm_c = arm_source_quant(&fbar, rows, cols).unwrap();
     let arm_a = arm_dense_f16(&[&fbar.clone()], rows, cols).unwrap();
     let c_damage = materialization_rel_err(
-        &arm_c.to_dense_f32(), &fbar, &xs, rows, cols, n_x, &mut ya, &mut yb,
+        &arm_c.to_dense_f32(),
+        &fbar,
+        &xs,
+        rows,
+        cols,
+        n_x,
+        &mut ya,
+        &mut yb,
     )
     .unwrap();
     let a_damage = materialization_rel_err(
-        &arm_a.to_dense_f32(), &fbar, &xs, rows, cols, n_x, &mut ya, &mut yb,
+        &arm_a.to_dense_f32(),
+        &fbar,
+        &xs,
+        rows,
+        cols,
+        n_x,
+        &mut ya,
+        &mut yb,
     )
     .unwrap();
-    assert!(a_damage < 1e-6, "arm A's f16 rounding floor moved: {a_damage}");
+    assert!(
+        a_damage < 1e-6,
+        "arm A's f16 rounding floor moved: {a_damage}"
+    );
     assert!(
         c_damage > 0.001,
         "arm C damage on a merged f̄ unexpectedly vanished ({c_damage}) — the 5→3 level reduction must be visible"
@@ -289,11 +326,25 @@ fn the_budget_separates_by_surrogate_strength_not_by_arm_damage_alone() {
         }
         let parent_op: Vec<f32> = fbar.iter().zip(&noise).map(|(f, n)| f + n).collect();
         let e_dense = materialization_rel_err(
-            &arm_a.to_dense_f32(), &parent_op, &xs, rows, cols, n_x, &mut ya, &mut yb,
+            &arm_a.to_dense_f32(),
+            &parent_op,
+            &xs,
+            rows,
+            cols,
+            n_x,
+            &mut ya,
+            &mut yb,
         )
         .unwrap();
         let e_arm = materialization_rel_err(
-            &arm_c.to_dense_f32(), &parent_op, &xs, rows, cols, n_x, &mut ya, &mut yb,
+            &arm_c.to_dense_f32(),
+            &parent_op,
+            &xs,
+            rows,
+            cols,
+            n_x,
+            &mut ya,
+            &mut yb,
         )
         .unwrap();
         assert_eq!(
@@ -313,7 +364,10 @@ fn refusals_are_loud() {
         arm_dense_f16(&[&a, &b], 1, 2),
         Err(TwtError::ArmShapeMismatch { .. })
     ));
-    assert!(matches!(arm_dense_f16(&[], 1, 2), Err(TwtError::ArmEmptyPool)));
+    assert!(matches!(
+        arm_dense_f16(&[], 1, 2),
+        Err(TwtError::ArmEmptyPool)
+    ));
     let mut nan = vec![0f32; 256];
     nan[0] = f32::NAN;
     assert!(matches!(

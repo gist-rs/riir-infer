@@ -940,20 +940,24 @@ mod tests {
                 for d in [pair, pair + half] {
                     if pair < pp.kept() {
                         assert_eq!(
-                            q_pp[base + d], q_full[base + d],
+                            q_pp[base + d],
+                            q_full[base + d],
                             "kept pair {pair} dim {d}: pp must match the full rotation"
                         );
                         assert_eq!(
-                            k_pp[base + d], k_full[base + d],
+                            k_pp[base + d],
+                            k_full[base + d],
                             "kept pair {pair} dim {d} (k): pp must match the full rotation"
                         );
                     } else {
                         assert_eq!(
-                            q_pp[base + d], orig[base + d],
+                            q_pp[base + d],
+                            orig[base + d],
                             "masked pair {pair} dim {d}: must be exact identity"
                         );
                         assert_eq!(
-                            k_pp[base + d], orig[base + d],
+                            k_pp[base + d],
+                            orig[base + d],
                             "masked pair {pair} dim {d} (k): must be exact identity"
                         );
                     }

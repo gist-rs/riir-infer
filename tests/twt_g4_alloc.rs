@@ -12,7 +12,7 @@
 use std::alloc::{GlobalAlloc, Layout, System};
 use std::sync::atomic::{AtomicUsize, Ordering};
 
-use riir_infer_core::twt::{planted_corpus, PairCosineAccum, SMatrixBuilder};
+use riir_infer_core::twt::{PairCosineAccum, SMatrixBuilder, planted_corpus};
 
 static ALLOCS: AtomicUsize = AtomicUsize::new(0);
 
@@ -56,6 +56,10 @@ fn g4_accumulate_path_is_alloc_free() {
     for states in &corpus {
         acc.add(&states[1], &states[2]);
     }
-    assert_eq!(before, ALLOCS.load(Ordering::Relaxed), "add must not allocate");
+    assert_eq!(
+        before,
+        ALLOCS.load(Ordering::Relaxed),
+        "add must not allocate"
+    );
     assert_eq!(acc.distance(), 0.0, "clone pairs finalize at exact zero");
 }

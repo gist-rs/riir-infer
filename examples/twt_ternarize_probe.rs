@@ -33,12 +33,12 @@
 
 use std::path::PathBuf;
 
-use riir_infer_core::gguf_loader::{GgufFile, GgmlType};
+use riir_infer_core::gguf_loader::{GgmlType, GgufFile};
 use riir_infer_core::quant::ptq1_0::repack_ptq1_0_to_ternary_group;
 use riir_infer_core::quant::q2_0::repack_q2_0_to_ternary_group;
 use riir_infer_core::twt::ternarize::{
-    arm_dense_f16, arm_sign_majority, arm_source_quant, budget_ratio, materialization_rel_err,
-    KAPPA_BUDGET,
+    KAPPA_BUDGET, arm_dense_f16, arm_sign_majority, arm_source_quant, budget_ratio,
+    materialization_rel_err,
 };
 
 /// Dequantize one parent tensor (Q2_0 | PTQ1_0 | F32) to a
@@ -120,7 +120,9 @@ fn main() {
     println!("# twt_ternarize_probe — operator-level materialization damage");
     println!("# parent: {}", gguf.display());
     println!("# κ (pre-registered budget multiple) = {KAPPA_BUDGET}");
-    println!("# columns: block, tensor, rows×cols, damage_A(f16), damage_B(majority), damage_C(source_quant), ratio_C/A");
+    println!(
+        "# columns: block, tensor, rows×cols, damage_A(f16), damage_B(majority), damage_C(source_quant), ratio_C/A"
+    );
     println!("block\ttensor\tshape\tdamage_A\tdamage_B\tdamage_C\tratio_C_A");
 
     for part in blocks_spec.split(',') {
@@ -130,7 +132,10 @@ fn main() {
         let start: usize = a.parse().unwrap();
         let end: usize = b.parse().unwrap();
         let members: Vec<usize> = (start..end).collect();
-        assert!(members.len() >= 2, "block [{start},{end}) has < 2 members — nothing to merge");
+        assert!(
+            members.len() >= 2,
+            "block [{start},{end}) has < 2 members — nothing to merge"
+        );
 
         // One projection per member (the first tensor matching the suffix).
         let mut member_dense: Vec<Vec<f32>> = Vec::new();
@@ -152,7 +157,11 @@ fn main() {
                 shape = (rows, cols);
                 used_name = name;
             } else {
-                assert_eq!((rows, cols), shape, "{name} shape drift inside block [{start},{end})");
+                assert_eq!(
+                    (rows, cols),
+                    shape,
+                    "{name} shape drift inside block [{start},{end})"
+                );
             }
             member_dense.push(dense);
         }
@@ -225,17 +234,9 @@ fn main() {
         // then keeps the member.
         if compare_members {
             for (i, m) in member_dense.iter().enumerate() {
-                let d_fm = materialization_rel_err(
-                    &fbar,
-                    m,
-                    &xs,
-                    rows,
-                    cols,
-                    n_x,
-                    &mut ya,
-                    &mut yb,
-                )
-                .expect("f̄ vs member");
+                let d_fm =
+                    materialization_rel_err(&fbar, m, &xs, rows, cols, n_x, &mut ya, &mut yb)
+                        .expect("f̄ vs member");
                 println!(
                     "[{start},{end})\tmember[{i}] blk.{}\tf̄→member rel-op-dist\t{d_fm:.4}",
                     members[i]
@@ -261,7 +262,9 @@ fn main() {
         }
     }
     println!("# reading: damage is the arm's OWN price vs the f32 f̄; the T4.2 κ budget reads");
-    println!("# END-TO-END errors (audition), so arm C survives a block only where the surrogate's");
+    println!(
+        "# END-TO-END errors (audition), so arm C survives a block only where the surrogate's"
+    );
     println!("# own error exceeds roughly damage_C/(κ−1). ratio_C_A > κ−1 ⇒ arm C needs a strong");
     println!("# surrogate on that block; ratio_C_A ≤ κ−1 ⇒ arm C is budget-viable even alone.");
 }

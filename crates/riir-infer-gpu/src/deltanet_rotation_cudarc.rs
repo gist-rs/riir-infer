@@ -1229,12 +1229,18 @@ pub struct RotationKernels {
     quantize_permute_rot_q8: CudaFunction,
     #[cfg_attr(
         not(all(test, feature = "prefill_q8_act")),
-        allow(dead_code, reason = "read only by the quantize_rotate_q8 launcher, whose only callers are the prefill_q8_act-gated tests")
+        allow(
+            dead_code,
+            reason = "read only by the quantize_rotate_q8 launcher, whose only callers are the prefill_q8_act-gated tests"
+        )
     )]
     quantize_rot_q8_warp: CudaFunction,
     #[cfg_attr(
         not(all(test, feature = "prefill_q8_act")),
-        allow(dead_code, reason = "read only by the quantize_permute_rotate_q8 launcher, whose only callers are the prefill_q8_act-gated tests")
+        allow(
+            dead_code,
+            reason = "read only by the quantize_permute_rotate_q8 launcher, whose only callers are the prefill_q8_act-gated tests"
+        )
     )]
     quantize_permute_rot_q8_warp: CudaFunction,
     // C0.5 rung-2 isolation probe (see the kernel doc) — test instrument

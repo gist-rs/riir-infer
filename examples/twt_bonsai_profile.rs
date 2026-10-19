@@ -31,14 +31,14 @@
 
 use std::io::Write as _;
 
+use riir_infer_core::deltanet::forward::{HybridCache, HybridForwardScratch, effective_rotary_dim};
 use riir_infer_core::deltanet::ternary_forward::forward_qwen_deltanet_ternary_with_capture;
-use riir_infer_core::deltanet::forward::{effective_rotary_dim, HybridCache, HybridForwardScratch};
 use riir_infer_core::gguf_loader::{GgufFile, load_qwen_deltanet_ternary_weights_gguf};
 use riir_infer_core::rope::RopeFreqTable;
 use riir_infer_core::tokenizer::BpeTokenizer;
 use riir_infer_core::twt::{
-    blake3_of, forced_min_blocks, kill_verdict, minmax_partition, Bucket, KillVerdict,
-    SMatrixBuilder, SvccaCfg, PRE_REGISTERED_EPS_GRID,
+    Bucket, KillVerdict, PRE_REGISTERED_EPS_GRID, SMatrixBuilder, SvccaCfg, blake3_of,
+    forced_min_blocks, kill_verdict, minmax_partition,
 };
 use std::path::Path;
 
@@ -131,7 +131,10 @@ fn main() {
     let new_builder = || {
         let mut nb = SMatrixBuilder::new(n_layers, dim);
         if svcca {
-            nb = nb.with_svcca(SvccaCfg { stride, cap_rows: max_rows });
+            nb = nb.with_svcca(SvccaCfg {
+                stride,
+                cap_rows: max_rows,
+            });
         }
         nb
     };
@@ -218,7 +221,10 @@ fn main() {
         partitions.push(p);
     }
     let verdict = kill_verdict(&partitions, forced).unwrap();
-    println!("checkpoint: {} (layers {n_layers}, hidden {dim})", gguf_path.display());
+    println!(
+        "checkpoint: {} (layers {n_layers}, hidden {dim})",
+        gguf_path.display()
+    );
     println!(
         "type split: {forced} forced blocks (achievable floor — the kill bar reads this, not L)"
     );

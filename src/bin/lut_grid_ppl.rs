@@ -99,7 +99,10 @@ impl Posture {
 fn roundtrip(t: &mut [f32], posture: Posture, grid: Q2Grid) -> Result<()> {
     let group = posture.group();
     if !t.len().is_multiple_of(group) {
-        bail!("weight tensor length {} is not a multiple of {group}", t.len());
+        bail!(
+            "weight tensor length {} is not a multiple of {group}",
+            t.len()
+        );
     }
     let mut blocks = Vec::new();
     let t0_group = |chunk: &[f32], out: &mut Vec<f32>| {
@@ -170,7 +173,9 @@ fn quantize_weights(
             down_proj,
             ..
         } = layer;
-        for t in [attn_wq, attn_wk, attn_wv, attn_wo, gate_proj, up_proj, down_proj] {
+        for t in [
+            attn_wq, attn_wk, attn_wv, attn_wo, gate_proj, up_proj, down_proj,
+        ] {
             roundtrip(t, posture, grid)?;
         }
     }
@@ -248,13 +253,19 @@ fn main() -> Result<()> {
     let mut args = std::env::args().skip(1);
     while let Some(a) = args.next() {
         match a.as_str() {
-            "--gguf" => gguf_path = Some(PathBuf::from(args.next().context("--gguf needs a path")?)),
-            "--corpus" => corpora.push(PathBuf::from(args.next().context("--corpus needs a path")?)),
+            "--gguf" => {
+                gguf_path = Some(PathBuf::from(args.next().context("--gguf needs a path")?))
+            }
+            "--corpus" => {
+                corpora.push(PathBuf::from(args.next().context("--corpus needs a path")?))
+            }
             "--tokens" => n_tokens = args.next().context("--tokens needs N")?.parse()?,
             "--seq-len" => seq_len = args.next().context("--seq-len needs N")?.parse()?,
             "--l0" => l0 = args.next().context("--l0 needs f32")?.parse()?,
             "--l2" => l2 = args.next().context("--l2 needs f32")?.parse()?,
-            "--skip-embed" => skip_embed = args.next().context("--skip-embed needs bool")?.parse()?,
+            "--skip-embed" => {
+                skip_embed = args.next().context("--skip-embed needs bool")?.parse()?
+            }
             "--arms" => {
                 let spec = args.next().context("--arms needs a list")?;
                 postures = spec.split(',').map(Posture::parse).collect::<Result<_>>()?;
@@ -340,7 +351,14 @@ fn main() -> Result<()> {
                 // postures never compound.
                 let mut w = pristine.clone();
                 quantize_weights(&mut w, p, grid, skip_embed)?;
-                run_posture(&w, &cfg, &families, &mut acc, Some(&base_nll), &mut Vec::new())
+                run_posture(
+                    &w,
+                    &cfg,
+                    &families,
+                    &mut acc,
+                    Some(&base_nll),
+                    &mut Vec::new(),
+                )
             }
         };
         println!(
@@ -369,7 +387,9 @@ fn main() -> Result<()> {
             );
         }
     }
-    println!("\n# per-family retention (Δppl% vs base; base row = the family's own ppl) — a family-conditional regression must not hide here");
+    println!(
+        "\n# per-family retention (Δppl% vs base; base row = the family's own ppl) — a family-conditional regression must not hide here"
+    );
     print!("| posture");
     for f in &families {
         print!(" | {}", f.name);

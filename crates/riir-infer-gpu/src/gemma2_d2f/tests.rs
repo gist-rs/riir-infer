@@ -1086,7 +1086,10 @@ fn test_d2f_eb_cap_bounds_commits_per_pass() {
     let result = d2f_decode_gemma2(&mut d2f, &prompt, mask_token_id, &decode_config, &mut rng);
 
     assert!(result.converged, "2 commits/pass × 2 passes ≥ block 4");
-    assert_eq!(result.steps_used, 2, "cap 2 over a 4-wide block = two passes");
+    assert_eq!(
+        result.steps_used, 2,
+        "cap 2 over a 4-wide block = two passes"
+    );
 
     drop(d2f);
     gpu_release_pages(&client);

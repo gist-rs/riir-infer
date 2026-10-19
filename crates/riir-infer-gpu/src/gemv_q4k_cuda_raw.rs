@@ -405,7 +405,7 @@ mod tests {
     use super::*;
     use bytemuck::Zeroable;
     use riir_infer_core::quant::q4k::{
-        dequantize_row_q4_k, gemv_q4_k_row, get_scale_min_k4, quantize_row_q4_k, QK_K,
+        QK_K, dequantize_row_q4_k, gemv_q4_k_row, get_scale_min_k4, quantize_row_q4_k,
     };
 
     fn cuda_or_skip() -> Option<Arc<CudaContext>> {
@@ -516,7 +516,9 @@ mod tests {
             quantize_row_q4_k(&src[r * n..(r + 1) * n], &mut blocks[r * nb..(r + 1) * nb]);
         }
 
-        let x: Vec<f32> = (0..n).map(|i| ((i % 23) as f32 / 23.0 - 0.5) * 3.0).collect();
+        let x: Vec<f32> = (0..n)
+            .map(|i| ((i % 23) as f32 / 23.0 - 0.5) * 3.0)
+            .collect();
         let (x8, ascale) = quantize_like_gpu(&x);
 
         // ── (a0) the mirror's layout reading pinned to the CPU dequantizer ──
@@ -601,7 +603,10 @@ mod tests {
         // Q4_K quantization (≈0.7% RMS per element) × activation int8 (≈0.4%
         // RMS) over a cancellation-heavy random row: 2% of the row magnitude
         // is the honest class bound, measured margin ~3×.
-        assert!(max_rel < 0.02, "activation-quant class blown: {max_rel:.3e}");
+        assert!(
+            max_rel < 0.02,
+            "activation-quant class blown: {max_rel:.3e}"
+        );
     }
 
     /// The multi kernel: 3 segments (2 + 1 + 1 rows) in one launch ==
@@ -626,7 +631,9 @@ mod tests {
         for r in 0..total {
             quantize_row_q4_k(&src[r * n..(r + 1) * n], &mut blocks[r * nb..(r + 1) * nb]);
         }
-        let x: Vec<f32> = (0..n).map(|i| ((i % 17) as f32 / 17.0 - 0.5) * 2.5).collect();
+        let x: Vec<f32> = (0..n)
+            .map(|i| ((i % 17) as f32 / 17.0 - 0.5) * 2.5)
+            .collect();
         let (x8, ascale) = quantize_like_gpu(&x);
         let expected: Vec<f32> = (0..total)
             .map(|r| gemv_q4_k_row(&blocks[r * nb..(r + 1) * nb], &x))
@@ -672,10 +679,7 @@ mod tests {
             for (i, g) in got.iter().enumerate() {
                 let want = expected[row + i];
                 let rel = (f64::from(*g) - f64::from(want)).abs() / f64::from(want).abs().max(1e-9);
-                assert!(
-                    rel < 0.05,
-                    "seg {s} row {i}: {g} vs {want} (rel {rel:.2e})"
-                );
+                assert!(rel < 0.05, "seg {s} row {i}: {g} vs {want} (rel {rel:.2e})");
             }
             row += seg_ms[s];
         }
@@ -697,11 +701,15 @@ mod tests {
         let mut blocks = vec![BlockQ4K::zeroed(); m * nb];
         let src = lcg_src(m * n, 0x0BAD_C0DE_0123_4567, 2.0);
         quantize_row_q4_k(&src, &mut blocks);
-        let x: Vec<f32> = (0..n).map(|i| ((i % 11) as f32 / 11.0 - 0.5) * 2.0).collect();
+        let x: Vec<f32> = (0..n)
+            .map(|i| ((i % 11) as f32 / 11.0 - 0.5) * 2.0)
+            .collect();
         let (x8, ascale) = quantize_like_gpu(&x);
         let want = gemv_q4_k_row(&blocks, &x);
 
-        let blocks_dev = stream.clone_htod(q4k_blocks_as_bytes(&blocks)).expect("htod");
+        let blocks_dev = stream
+            .clone_htod(q4k_blocks_as_bytes(&blocks))
+            .expect("htod");
         let x8_dev = stream.clone_htod(&x8).expect("htod");
         let ascale_dev = stream.clone_htod(&ascale).expect("htod");
         let out_dev = stream.alloc_zeros::<f32>(m).expect("alloc");
@@ -716,8 +724,13 @@ mod tests {
 
         let mut got = vec![0.0f32; m];
         stream.memcpy_dtoh(&out_dev, &mut got).expect("dtoh");
-        let rel = (f64::from(got[0]) - 2.0 * f64::from(want)).abs()
-            / f64::from(want).abs().max(1e-9);
-        assert!(rel < 0.05, "accumulate: {} vs 2×{} (rel {rel:.2e})", got[0], want);
+        let rel =
+            (f64::from(got[0]) - 2.0 * f64::from(want)).abs() / f64::from(want).abs().max(1e-9);
+        assert!(
+            rel < 0.05,
+            "accumulate: {} vs 2×{} (rel {rel:.2e})",
+            got[0],
+            want
+        );
     }
 }

@@ -43,10 +43,10 @@ use super::forward::{
 use super::ternary_weights::{
     DeltaNetTernaryLayerWeights, ProjWeights, QwenDeltaNetTernaryWeights,
 };
+use super::ternary_weights::{matvec_n_into, ternary_matvec_parallel};
 use crate::types::{Config, DeltaNetLayerType, rmsnorm_with_gamma_eps, swiglu};
 use katgpt_core::TernaryMatvecHook;
 use katgpt_core::{TernaryFfnHook, TernaryInputProjHook};
-use super::ternary_weights::{matvec_n_into, ternary_matvec_parallel};
 
 use crate::deltanet::rotation::{
     TernaryRotationConfig, permute_gdn_v_grouped_inplace, permute_gdn_v_grouped_inverse_inplace,
@@ -298,8 +298,22 @@ pub(crate) fn forward_deltanet_layer_ternary(
 
     // 7-8. Expand K/Q heads + L2-normalize
     let repeat_factor = n_v_heads / n_k_heads;
-    expand_l2_normalized_heads_into(q_slice, n_k_heads, key_dim, repeat_factor, n_v_heads, &mut scratch.q_normed);
-    expand_l2_normalized_heads_into(k_slice, n_k_heads, key_dim, repeat_factor, n_v_heads, &mut scratch.k_normed);
+    expand_l2_normalized_heads_into(
+        q_slice,
+        n_k_heads,
+        key_dim,
+        repeat_factor,
+        n_v_heads,
+        &mut scratch.q_normed,
+    );
+    expand_l2_normalized_heads_into(
+        k_slice,
+        n_k_heads,
+        key_dim,
+        repeat_factor,
+        n_v_heads,
+        &mut scratch.k_normed,
+    );
 
     // 9. Gated delta rule recurrence
     gated_deltanet_step_par_inplace(
@@ -468,7 +482,11 @@ fn forward_attention_layer_ternary(
     };
     // Q (+gate), K, V share the normed input: one activation prep + one fork-join.
     bitlinear_n(
-        [&mut scratch.qg_buf[..], &mut scratch.k_buf[..], &mut scratch.v_buf[..]],
+        [
+            &mut scratch.qg_buf[..],
+            &mut scratch.k_buf[..],
+            &mut scratch.v_buf[..],
+        ],
         [&layer.attn_wq, &layer.attn_wk, &layer.attn_wv],
         x_qkv,
         hook,

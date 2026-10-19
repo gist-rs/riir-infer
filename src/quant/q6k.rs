@@ -131,7 +131,10 @@ pub fn quantize_row_q6_k(src: &[f32], dst: &mut [BlockQ6K]) {
         let mut max_scale = 0.0_f32;
         let mut max_abs_scale = 0.0_f32;
         for (ib, sc) in scales.iter_mut().enumerate() {
-            let scale = make_qx_quants_q6(&x[16 * ib..16 * ib + 16], &mut l_codes[16 * ib..16 * ib + 16]);
+            let scale = make_qx_quants_q6(
+                &x[16 * ib..16 * ib + 16],
+                &mut l_codes[16 * ib..16 * ib + 16],
+            );
             *sc = scale;
             let abs_scale = scale.abs();
             if abs_scale > max_abs_scale {
@@ -489,7 +492,10 @@ mod tests {
         let dequant_dot: f32 = dense.iter().zip(x.iter()).map(|(w, xv)| w * xv).sum();
         let fused = gemv_q6_k_row(&blocks, &x);
         let rel = (fused - dequant_dot).abs() / dequant_dot.abs().max(1e-9);
-        assert!(rel < 1e-5, "fused {fused:.4} vs dequant-dot {dequant_dot:.4} (rel {rel:.2e})");
+        assert!(
+            rel < 1e-5,
+            "fused {fused:.4} vs dequant-dot {dequant_dot:.4} (rel {rel:.2e})"
+        );
     }
 
     /// Full GEMV: row 0 and row m-1 of a multi-row payload match the fused
@@ -500,7 +506,10 @@ mod tests {
         let src = lcg_src(m * n, 0xABCDEFu64, 0.8);
         let mut blocks = vec![BlockQ6K::zeroed(); m * (n / QK_K)];
         for r in 0..m {
-            quantize_row_q6_k(&src[r * n..(r + 1) * n], &mut blocks[r * (n / QK_K)..(r + 1) * (n / QK_K)]);
+            quantize_row_q6_k(
+                &src[r * n..(r + 1) * n],
+                &mut blocks[r * (n / QK_K)..(r + 1) * (n / QK_K)],
+            );
         }
         let x = lcg_src(n, 0xF00Du64, 1.2);
         let y = gemv_q6_k(&blocks, &x, m, n);

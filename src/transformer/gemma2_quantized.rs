@@ -26,7 +26,7 @@
 //! cache and the plain `forward_gemma2_f16` is the path (the bin's control
 //! arm).
 
-use super::attend::{attend_row, AttnShape};
+use super::attend::{AttnShape, attend_row};
 use super::{ForwardContext, RAYON_MLP_THRESHOLD, RAYON_QKV_THRESHOLD};
 use crate::gemma_layer::GemmaTransformerWeightsF16;
 use crate::types::{self, Config};
@@ -169,24 +169,21 @@ pub fn forward_gemma2_f16_qkv<'a, C: QuantizedKVCache>(
         // its earlier rows changed from exact raw reads to dequantized
         // reads at this store.
         let last = mirror.dequant_pos[layer_idx];
-        let start = if last != usize::MAX
-            && last + 1 == pos
-            && pos > 0
-            && mirror.last_layer == layer_idx
-        {
-            let flipped = refresh.is_some_and(|r| {
-                r.tile_size > 0
-                    && (pos % r.tile_size == r.tile_size - 1 || pos == r.cache_max_seq - 1)
-            });
-            if flipped {
-                let ts = refresh.map_or(0, |r| r.tile_size);
-                pos + 1 - ts
+        let start =
+            if last != usize::MAX && last + 1 == pos && pos > 0 && mirror.last_layer == layer_idx {
+                let flipped = refresh.is_some_and(|r| {
+                    r.tile_size > 0
+                        && (pos % r.tile_size == r.tile_size - 1 || pos == r.cache_max_seq - 1)
+                });
+                if flipped {
+                    let ts = refresh.map_or(0, |r| r.tile_size);
+                    pos + 1 - ts
+                } else {
+                    pos
+                }
             } else {
-                pos
-            }
-        } else {
-            0
-        };
+                0
+            };
         for t in start..=pos {
             cache.dequantize_key_into(layer_idx, t, &mut mirror.key[t * kvd..(t + 1) * kvd]);
             cache.dequantize_value_into(layer_idx, t, &mut mirror.value[t * kvd..(t + 1) * kvd]);

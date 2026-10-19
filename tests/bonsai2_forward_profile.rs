@@ -38,7 +38,11 @@ fn bonsai2_decode_section_breakdown() {
     let tok = BpeTokenizer::from_gguf(&GgufFile::open(std::path::Path::new(&gguf)).expect("gguf"))
         .expect("tokenizer");
     let ids = tok.encode(&text);
-    assert!(ids.len() > WARMUP + n_tok, "corpus too short: {} tokens", ids.len());
+    assert!(
+        ids.len() > WARMUP + n_tok,
+        "corpus too short: {} tokens",
+        ids.len()
+    );
 
     let (mut config, weights) =
         load_qwen_deltanet_ternary_weights_gguf(std::path::Path::new(&gguf)).expect("load");
@@ -54,9 +58,25 @@ fn bonsai2_decode_section_breakdown() {
     for (pos, &id) in ids.iter().take(WARMUP + n_tok).enumerate() {
         let p = if pos < WARMUP { &mut warm } else { &mut prof };
         if pos == WARMUP {
-            eprintln!("[profile] warm-up {WARMUP} tokens {:.1}s", t0.elapsed().as_secs_f64());
+            eprintln!(
+                "[profile] warm-up {WARMUP} tokens {:.1}s",
+                t0.elapsed().as_secs_f64()
+            );
         }
-        profiled_forward_ternary(&mut x, &weights, &mut cache, id, pos, &config, &mut scratch, &rope, p, None, None, None);
+        profiled_forward_ternary(
+            &mut x,
+            &weights,
+            &mut cache,
+            id,
+            pos,
+            &config,
+            &mut scratch,
+            &rope,
+            p,
+            None,
+            None,
+            None,
+        );
     }
     prof.report();
 }

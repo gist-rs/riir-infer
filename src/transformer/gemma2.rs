@@ -1469,12 +1469,11 @@ pub fn forward_gemma2_f16_hk<'a, H: ValueStoreHook + ?Sized>(
                 super::attend::attend_row_fused(ctx, view, layer_idx, shape);
             }
         } else {
-            let v_read: &[f32] = match
-                vq.values_for_attention(layer_idx, pos, t_n, &layer_cache.key)
-            {
-                Some(v) => v,
-                None => &layer_cache.value,
-            };
+            let v_read: &[f32] =
+                match vq.values_for_attention(layer_idx, pos, t_n, &layer_cache.key) {
+                    Some(v) => v,
+                    None => &layer_cache.value,
+                };
 
             // g. Multi-head attention + softcapping (Plan 096: parallel heads),
             // with the shared m_Y probe / row-logit-floor hooks (Issue 011).

@@ -398,7 +398,8 @@ impl GgufFile {
         // parent's KV list; a HashMap cannot preserve emission order). Keys
         // are unique in a valid GGUF, so order + map always agree.
         let mut metadata = HashMap::with_capacity(metadata_count as usize);
-        let mut metadata_order: Vec<(String, GgufValue)> = Vec::with_capacity(metadata_count as usize);
+        let mut metadata_order: Vec<(String, GgufValue)> =
+            Vec::with_capacity(metadata_count as usize);
         for _ in 0..metadata_count {
             let key = read_gguf_string(&mmap, &mut cursor)?;
             let value = read_gguf_value(&mmap, &mut cursor)?;
@@ -2043,7 +2044,11 @@ fn load_q2_resident_proj(
     shape: &[usize],
 ) -> Result<crate::deltanet::ternary_weights::ProjWeights> {
     use crate::quant::q2_0::Q2_0_BLOCK_SIZE;
-    anyhow::ensure!(shape.len() == 2, "tensor '{name}' has {} dims, expected 2D for a projection", shape.len());
+    anyhow::ensure!(
+        shape.len() == 2,
+        "tensor '{name}' has {} dims, expected 2D for a projection",
+        shape.len()
+    );
     let (cols, rows) = (shape[0], shape[1]);
     let blocks: Vec<katgpt_core::Q2Block> = gguf
         .q2_0_tensor_blocks(name)?
@@ -2056,17 +2061,17 @@ fn load_q2_resident_proj(
         blocks.len()
     );
     let w = katgpt_core::TernaryQ2Weights::from_blocks(rows, cols, blocks);
-    anyhow::ensure!(w.is_ternary(), "Q2_0 projection '{name}': code 3 (+2) is not ternary");
+    anyhow::ensure!(
+        w.is_ternary(),
+        "Q2_0 projection '{name}': code 3 (+2) is not ternary"
+    );
     Ok(crate::deltanet::ternary_weights::ProjWeights::TernaryQ2(
         crate::deltanet::ternary_weights::TernaryQ2Proj::new(w),
     ))
 }
 
 #[cfg(feature = "deltanet_ternary_inference")]
-fn load_proj(
-    gguf: &GgufFile,
-    name: &str,
-) -> Result<crate::deltanet::ternary_weights::ProjWeights> {
+fn load_proj(gguf: &GgufFile, name: &str) -> Result<crate::deltanet::ternary_weights::ProjWeights> {
     use crate::deltanet::ternary_weights::ProjWeights;
     use crate::quant::q4k::QK_K;
 
@@ -2226,7 +2231,10 @@ pub fn load_qwen_deltanet_ternary_weights_gguf(
 /// When either mark is absent, `si_pprope != 1`, or the base is not a
 /// positive number ≥ 2π's integer ceiling.
 #[cfg(feature = "scale_invariant_attn")]
-pub fn pp_rope_table_from_marks(gguf: &GgufFile, config: &Config) -> Result<crate::rope::RopeFreqTable> {
+pub fn pp_rope_table_from_marks(
+    gguf: &GgufFile,
+    config: &Config,
+) -> Result<crate::rope::RopeFreqTable> {
     use crate::deltanet::forward::effective_rotary_dim;
 
     let flag = gguf
@@ -2236,8 +2244,10 @@ pub fn pp_rope_table_from_marks(gguf: &GgufFile, config: &Config) -> Result<crat
         .min_by(|a, b| a.0.cmp(b.0))
         .map(|(_, v)| gguf_value_as_u64(v));
     let Some(flag) = flag else {
-        bail!("pp-RoPE mark missing: no *.attention.si_pprope key in the GGUF — \
-               an unmarked checkpoint never ships the pp table (Plan 622 G3 (iii), Plan 449)");
+        bail!(
+            "pp-RoPE mark missing: no *.attention.si_pprope key in the GGUF — \
+               an unmarked checkpoint never ships the pp table (Plan 622 G3 (iii), Plan 449)"
+        );
     };
     if flag != 1 {
         bail!("pp-RoPE mark *.attention.si_pprope = {flag}, expected 1");
@@ -2252,8 +2262,10 @@ pub fn pp_rope_table_from_marks(gguf: &GgufFile, config: &Config) -> Result<crat
         bail!("pp-RoPE mark missing: no *.rope.pp_effective_base key in the GGUF");
     };
     if !(base.is_finite() && base >= 8.0) {
-        bail!("pp-RoPE mark *.rope.pp_effective_base = {base} — expected the train \
-               length (paper cell: 1024)");
+        bail!(
+            "pp-RoPE mark *.rope.pp_effective_base = {base} — expected the train \
+               length (paper cell: 1024)"
+        );
     }
     Ok(crate::rope::RopeFreqTable::new_pp(
         config.rope_theta,

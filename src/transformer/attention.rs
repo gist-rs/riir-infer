@@ -545,8 +545,10 @@ pub unsafe fn attention_heads_parallel(
             let ran = katgpt_core::spin_pool_run(heads, &|h| {
                 let kv_group_offset = (h * n_kv_head / n_head) * head_dim;
                 unsafe {
-                    let attn_h = std::slice::from_raw_parts_mut(ap.get().add(h * head_dim), head_dim);
-                    let scores_h = std::slice::from_raw_parts_mut(sp.get().add(h * block_size), block_size);
+                    let attn_h =
+                        std::slice::from_raw_parts_mut(ap.get().add(h * head_dim), head_dim);
+                    let scores_h =
+                        std::slice::from_raw_parts_mut(sp.get().add(h * block_size), block_size);
                     match softcap > 0.0 {
                         true => attention_head_on_slices(
                             &q[h * head_dim..],

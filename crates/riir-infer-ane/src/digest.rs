@@ -12,11 +12,10 @@ use super::{Error, Result};
 /// Walk `dir` recursively collecting `(relative path, absolute path)`
 /// pairs — file order is caller-determined (the digest sorts).
 pub fn collect_files(root: &Path, dir: &Path, out: &mut Vec<(String, PathBuf)>) -> Result<()> {
-    let entries = std::fs::read_dir(dir)
-        .map_err(|e| Error::msg(format!("ane: readdir {dir:?}: {e}")))?;
+    let entries =
+        std::fs::read_dir(dir).map_err(|e| Error::msg(format!("ane: readdir {dir:?}: {e}")))?;
     for e in entries {
-        let e =
-            e.map_err(|err| Error::msg(format!("ane: readdir entry {dir:?}: {err}")))?;
+        let e = e.map_err(|err| Error::msg(format!("ane: readdir entry {dir:?}: {err}")))?;
         let p = e.path();
         if p.is_dir() {
             collect_files(root, &p, out)?;
@@ -197,8 +196,7 @@ mod tests {
         let bundle = tmp.join("en/L8.mlpackage");
         write_bundle(&bundle, b"0123456789");
         let (digest, files, bytes) = blake3_dir_v1(&bundle).expect("digests");
-        verify_dir_digest(&bundle, &digest, files, bytes, "remedy text")
-            .expect("truth verifies");
+        verify_dir_digest(&bundle, &digest, files, bytes, "remedy text").expect("truth verifies");
         // A swapped artifact (same shape, different bytes) refuses at the
         // digest wall, never loads.
         std::fs::write(bundle.join("Manifest.json"), b"XXXXXXXXXX").unwrap();
@@ -213,8 +211,8 @@ mod tests {
         assert!(text.contains("run the remedy"), "got: {text}");
         // A count/byte drift refuses at the shape wall.
         std::fs::write(bundle.join("extra.bin"), b"z").unwrap();
-        let err = verify_dir_digest(&bundle, &digest, files, bytes, "remedy")
-            .expect_err("drift refuses");
+        let err =
+            verify_dir_digest(&bundle, &digest, files, bytes, "remedy").expect_err("drift refuses");
         assert!(err.to_string().contains("shape drift"), "got: {err}");
         let _ = std::fs::remove_dir_all(&tmp);
     }
@@ -240,8 +238,10 @@ mod tests {
             assert!(staging.join(rel).is_file(), "{rel} staged");
         }
         // A failing fetch surfaces the error text through the host type.
-        let err = stage_files(&staging, &["X"], |_, _| Err::<(), String>("wire down".into()))
-            .expect_err("fetch error propagates");
+        let err = stage_files(&staging, &["X"], |_, _| {
+            Err::<(), String>("wire down".into())
+        })
+        .expect_err("fetch error propagates");
         assert!(err.to_string().contains("wire down"), "got: {err}");
         let _ = std::fs::remove_dir_all(&tmp);
     }

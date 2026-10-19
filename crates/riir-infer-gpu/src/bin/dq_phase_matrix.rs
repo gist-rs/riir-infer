@@ -70,7 +70,7 @@ use std::process::Command;
 use std::time::Instant;
 
 use riir_infer_core::deltanet::ternary_weights::QwenDeltaNetTernaryWeights;
-use riir_infer_core::gguf_loader::{load_qwen_deltanet_ternary_weights_gguf, GgufFile};
+use riir_infer_core::gguf_loader::{GgufFile, load_qwen_deltanet_ternary_weights_gguf};
 use riir_infer_core::tokenizer::BpeTokenizer;
 use riir_infer_gpu::dq_fakequant::{self as dq, DqGrid, DqPhaseArm};
 use riir_infer_gpu::ternary_deltanet_gpu_forward as tdf;
@@ -184,8 +184,16 @@ fn arith_items_v2(n: usize, hard: bool) -> Vec<ArithItem> {
     for _ in 0..n {
         // 2-4 operations; multiplication operands kept small enough that a
         // 27B has a real but non-trivial shot (GSM8K-class difficulty).
-        let n_ops = if hard { 3 + (rng.below(4) as usize) } else { 2 + (rng.below(3) as usize) };
-        let first = if hard { 1_000 + rng.below(99_000) as i128 } else { 100 + rng.below(9900) as i128 };
+        let n_ops = if hard {
+            3 + (rng.below(4) as usize)
+        } else {
+            2 + (rng.below(3) as usize)
+        };
+        let first = if hard {
+            1_000 + rng.below(99_000) as i128
+        } else {
+            100 + rng.below(9900) as i128
+        };
         let mut ops: Vec<(char, i128)> = Vec::with_capacity(n_ops);
         for _ in 0..n_ops {
             let op = match rng.below(3) {
@@ -194,8 +202,20 @@ fn arith_items_v2(n: usize, hard: bool) -> Vec<ArithItem> {
                 _ => '*',
             };
             let operand: i128 = match op {
-                '*' => (if hard { 11 + rng.below(989) } else { 3 + rng.below(97) }) as i128,
-                _ => (if hard { 100 + rng.below(9_900) } else { 10 + rng.below(990) }) as i128,
+                '*' => {
+                    (if hard {
+                        11 + rng.below(989)
+                    } else {
+                        3 + rng.below(97)
+                    }) as i128
+                }
+                _ => {
+                    (if hard {
+                        100 + rng.below(9_900)
+                    } else {
+                        10 + rng.below(990)
+                    }) as i128
+                }
             };
             ops.push((op, operand));
         }
@@ -203,8 +223,8 @@ fn arith_items_v2(n: usize, hard: bool) -> Vec<ArithItem> {
         for &(op, operand) in &ops {
             expr.push_str(&format!(" {op} {operand}"));
         }
-        let gold = eval_standard_precedence(first, &ops)
-            .expect("operand scales cannot overflow i128");
+        let gold =
+            eval_standard_precedence(first, &ops).expect("operand scales cannot overflow i128");
         out.push(ArithItem {
             prompt: format!(
                 "{ARITH_FEW_SHOT}Compute {expr}. Think step by step, then give the final answer after ####.\n"
@@ -220,7 +240,10 @@ fn arith_items_v2(n: usize, hard: bool) -> Vec<ArithItem> {
 fn parse_arith_answer(out: &str) -> Option<i128> {
     let idx = out.rfind("####")?;
     let tail = &out[idx + 4..];
-    let cleaned: String = tail.chars().filter(|c| !c.is_whitespace() && *c != ',').collect();
+    let cleaned: String = tail
+        .chars()
+        .filter(|c| !c.is_whitespace() && *c != ',')
+        .collect();
     // take the leading run of digits/sign
     let mut num = String::new();
     for (i, c) in cleaned.char_indices() {
@@ -283,7 +306,13 @@ struct NiahItem {
 /// `nn` (DQ_NI_NEEDLES, Issue 033): the default 8 read base pooled 0.9896 —
 /// ABOVE the 0.95 admissibility ceiling; more distractors pull base down.
 /// Capped at the 10-entry needle banks.
-fn niah_item(idx: usize, len_round: usize, target_tokens: usize, tok: &BpeTokenizer, nn: usize) -> NiahItem {
+fn niah_item(
+    idx: usize,
+    len_round: usize,
+    target_tokens: usize,
+    tok: &BpeTokenizer,
+    nn: usize,
+) -> NiahItem {
     let nn = nn.clamp(1, NEEDLE_SERVERS.len());
     let mut rng = Rng(0x61A1_0000 + idx as u64 * 7919 + len_round as u64);
     // rotate needle assignment deterministically; nn needles per prompt
@@ -548,14 +577,20 @@ fn run() -> Result<(), String> {
     if grids.is_empty() {
         return Err("DQ_GRIDS produced no grids".into());
     }
-    let arith_n: usize = env_or("DQ_ARITH_N", "48").parse().map_err(|_| "DQ_ARITH_N")?;
+    let arith_n: usize = env_or("DQ_ARITH_N", "48")
+        .parse()
+        .map_err(|_| "DQ_ARITH_N")?;
     let arith_hard = env_or("DQ_ARITH_HARD", "0") == "1";
     let ni_lengths: Vec<usize> = env_or("DQ_NI_LENGTHS", "4096,8192,16384")
         .split(',')
         .filter_map(|s| s.trim().parse().ok())
         .collect();
-    let ni_per_len: usize = env_or("DQ_NI_PER_LEN", "32").parse().map_err(|_| "DQ_NI_PER_LEN")?;
-    let ni_needles: usize = env_or("DQ_NI_NEEDLES", "8").parse().map_err(|_| "DQ_NI_NEEDLES")?;
+    let ni_per_len: usize = env_or("DQ_NI_PER_LEN", "32")
+        .parse()
+        .map_err(|_| "DQ_NI_PER_LEN")?;
+    let ni_needles: usize = env_or("DQ_NI_NEEDLES", "8")
+        .parse()
+        .map_err(|_| "DQ_NI_NEEDLES")?;
     // Issue 033 — the KV-STORE axis cells. Empty string = no KV cells (the
     // axis-1-only replication posture); "off" entries are skipped like
     // unknown spellings. Default a8,a4: the q8kv-class cell + one sensitivity
@@ -589,7 +624,10 @@ fn run() -> Result<(), String> {
             let mem = line.rsplit(',').next().unwrap_or("").trim();
             !mem.is_empty()
                 && mem != "[N/A]"
-                && mem.trim_end_matches(" MiB").parse::<u64>().is_ok_and(|m| m > 0)
+                && mem
+                    .trim_end_matches(" MiB")
+                    .parse::<u64>()
+                    .is_ok_and(|m| m > 0)
         })
         .collect();
     if !compute_consumers.is_empty() {
@@ -599,7 +637,10 @@ fn run() -> Result<(), String> {
         ));
     }
     let gpu_info = Command::new("nvidia-smi")
-        .args(["--query-gpu=name,memory.total,memory.free", "--format=csv,noheader"])
+        .args([
+            "--query-gpu=name,memory.total,memory.free",
+            "--format=csv,noheader",
+        ])
         .output()
         .map_err(|e| format!("nvidia-smi: {e}"))?;
     let gpu_csv = String::from_utf8_lossy(&gpu_info.stdout).trim().to_string();
@@ -767,7 +808,11 @@ fn run() -> Result<(), String> {
                 prompt_toks.push(tok.encode(&it.prompt).len() + 1);
             }
             ni_correct.insert(*l, v);
-            eprintln!("[dq614] {name} niah@{l}: {}/{}", ni_correct[l].iter().filter(|x| **x).count(), items.len());
+            eprintln!(
+                "[dq614] {name} niah@{l}: {}/{}",
+                ni_correct[l].iter().filter(|x| **x).count(),
+                items.len()
+            );
         }
         // G-i2 (D5, frozen arithmetic): prefill = 256/chunk where chunks =
         // ceil(prompt_toks/4096); decode = 256 × (n_generated − 1) — token 1
@@ -823,9 +868,8 @@ fn run() -> Result<(), String> {
     dq::fq_reset_counters();
     let base1 = run_cell("base(1)", DqPhaseArm::Off, DqGrid::A2, None, &mut fwd)?;
     let base2 = run_cell("base(2)", DqPhaseArm::Off, DqGrid::A2, None, &mut fwd)?;
-    let gi1_counters_zero = base1.prefill_launches == 0
-        && base1.decode_launches == 0
-        && base1.kv_launches == 0;
+    let gi1_counters_zero =
+        base1.prefill_launches == 0 && base1.decode_launches == 0 && base1.kv_launches == 0;
     let gi4_stable = base1.first_fnvs == base2.first_fnvs
         && base1.second_fnvs == base2.second_fnvs
         && base1.arith_correct == base2.arith_correct
@@ -850,8 +894,8 @@ fn run() -> Result<(), String> {
     }
 
     if lane_check_only {
-        let acc = cells["base"].arith_correct.iter().filter(|x| **x).count() as f64
-            / arith_n as f64;
+        let acc =
+            cells["base"].arith_correct.iter().filter(|x| **x).count() as f64 / arith_n as f64;
         let ni_pooled: Vec<bool> = cells["base"]
             .ni_correct
             .values()
@@ -977,11 +1021,17 @@ fn run() -> Result<(), String> {
     md.push_str("## Per-cell accuracy + counters\n\n");
     md.push_str("| cell | arith acc | nih acc per len | prefill launches | decode launches | kv launches |\n|---|---|---|---|---|---|\n");
     for (name, c) in &cells {
-        let a = c.arith_correct.iter().filter(|x| **x).count() as f64 / c.arith_correct.len() as f64;
+        let a =
+            c.arith_correct.iter().filter(|x| **x).count() as f64 / c.arith_correct.len() as f64;
         let nis: Vec<String> = c
             .ni_correct
             .iter()
-            .map(|(l, v)| format!("{l}: {:.3}", v.iter().filter(|x| **x).count() as f64 / v.len() as f64))
+            .map(|(l, v)| {
+                format!(
+                    "{l}: {:.3}",
+                    v.iter().filter(|x| **x).count() as f64 / v.len() as f64
+                )
+            })
             .collect();
         md.push_str(&format!(
             "| {name} | {a:.4} | {} | {} | {} | {} |\n",
@@ -1098,7 +1148,11 @@ fn run() -> Result<(), String> {
     };
     let acc_of = |c: &Vec<bool>| c.iter().filter(|x| **x).count() as f64 / c.len() as f64;
     let suite_acc = |c: &CellResult| -> f64 {
-        let all: Vec<bool> = c.ni_correct.values().flat_map(|v| v.iter().copied()).collect();
+        let all: Vec<bool> = c
+            .ni_correct
+            .values()
+            .flat_map(|v| v.iter().copied())
+            .collect();
         acc_of(&all)
     };
     md.push_str("\n## Issue 033 — KV-store axis + interaction\n\n");
@@ -1132,7 +1186,9 @@ fn run() -> Result<(), String> {
             .iter()
             .zip(base.ni_correct.iter())
             .flat_map(|((_, kv_v), (_, base_v))| {
-                kv_v.iter().zip(base_v.iter()).map(|(a, b)| (*a as i8) - (*b as i8))
+                kv_v.iter()
+                    .zip(base_v.iter())
+                    .map(|(a, b)| (*a as i8) - (*b as i8))
             })
             .collect();
         let (lo2, hi2) = paired_bootstrap_ci(&d_ni, n_boot);
@@ -1183,16 +1239,25 @@ fn run() -> Result<(), String> {
         for g in &grids {
             let gname = format!("{g:?}").to_lowercase();
             if let Some(pf) = cells.get(&format!("pf_aq.{gname}")) {
-                rows.push((format!("prefill-act[{gname}]"), base_acc - acc_of(&pf.arith_correct)));
+                rows.push((
+                    format!("prefill-act[{gname}]"),
+                    base_acc - acc_of(&pf.arith_correct),
+                ));
             }
             if let Some(dec) = cells.get(&format!("dec_aq.{gname}")) {
-                rows.push((format!("decode-act[{gname}]"), base_acc - acc_of(&dec.arith_correct)));
+                rows.push((
+                    format!("decode-act[{gname}]"),
+                    base_acc - acc_of(&dec.arith_correct),
+                ));
             }
         }
         for g in &kv_grids {
             let gname = format!("{g:?}").to_lowercase();
             if let Some(kv) = cells.get(&format!("kv_aq.{gname}")) {
-                rows.push((format!("kv-store[{gname}]"), base_acc - acc_of(&kv.arith_correct)));
+                rows.push((
+                    format!("kv-store[{gname}]"),
+                    base_acc - acc_of(&kv.arith_correct),
+                ));
             }
         }
         rows.sort_by(|a, b| b.1.abs().total_cmp(&a.1.abs()));
@@ -1208,7 +1273,11 @@ fn run() -> Result<(), String> {
             .abs();
         md.push_str(&format!(
             "\n## dec_a8 control (D1 fallback): |Δarith| = {delta} items (gate ≤ 2) → {}\n",
-            if delta <= 2 { "PASS" } else { "INSTRUMENT-FAIL" }
+            if delta <= 2 {
+                "PASS"
+            } else {
+                "INSTRUMENT-FAIL"
+            }
         ));
         if delta > 2 {
             return Err("dec_a8 control FAILED: |Δ| > 2 items".into());
@@ -1238,16 +1307,28 @@ mod tests {
     #[test]
     fn eval_matches_the_few_shot_convention() {
         // The shots' own two examples (both standard precedence).
-        assert_eq!(eval_standard_precedence(23, &[('*', 17), ('+', 45)]), Some(436));
-        assert_eq!(eval_standard_precedence(8842, &[('-', 1907), ('+', 333)]), Some(7268));
-        assert_eq!(eval_standard_precedence(12, &[('*', 12), ('*', 12)]), Some(1728));
+        assert_eq!(
+            eval_standard_precedence(23, &[('*', 17), ('+', 45)]),
+            Some(436)
+        );
+        assert_eq!(
+            eval_standard_precedence(8842, &[('-', 1907), ('+', 333)]),
+            Some(7268)
+        );
+        assert_eq!(
+            eval_standard_precedence(12, &[('*', 12), ('*', 12)]),
+            Some(1728)
+        );
         // The lane-check specimen: standard precedence, NOT left-to-right.
         assert_eq!(
             eval_standard_precedence(4359, &[('+', 592), ('-', 198), ('*', 96), ('*', 8)]),
             Some(-147_113)
         );
         // Precedence-neutral chains agree with left-to-right by construction.
-        assert_eq!(eval_standard_precedence(100, &[('+', 200), ('-', 50)]), Some(250));
+        assert_eq!(
+            eval_standard_precedence(100, &[('+', 200), ('-', 50)]),
+            Some(250)
+        );
         // Multiplicative run binds as one term.
         assert_eq!(
             eval_standard_precedence(1000, &[('*', 3), ('+', 2), ('*', 4), ('-', 1)]),
@@ -1265,7 +1346,12 @@ mod tests {
         // property must hold at BOTH operand scales.
         let hard_items = arith_items(48, true);
         assert_eq!(hard_items.len(), 48);
-        assert!(hard_items.iter().zip(items.iter()).any(|(h, s)| h.gold != s.gold));
+        assert!(
+            hard_items
+                .iter()
+                .zip(items.iter())
+                .any(|(h, s)| h.gold != s.gold)
+        );
         assert_eq!(items.len(), 48);
         for it in &items {
             // Re-parse the rendered expression and re-evaluate independently
@@ -1282,7 +1368,9 @@ mod tests {
                 .expect("Compute line");
             let body = expr_line
                 .strip_prefix("Compute ")
-                .and_then(|s| s.strip_suffix(". Think step by step, then give the final answer after ####."))
+                .and_then(|s| {
+                    s.strip_suffix(". Think step by step, then give the final answer after ####.")
+                })
                 .expect("body");
             let mut tokens = body.split_whitespace();
             let first: i128 = tokens.next().unwrap().parse().unwrap();
@@ -1290,7 +1378,10 @@ mod tests {
             while let Some(op) = tokens.next() {
                 let operand: i128 = tokens.next().unwrap().parse().unwrap();
                 let op = op.chars().next().unwrap();
-                assert!(matches!(op, '+' | '-' | '*'), "v2 generated a division: {body}");
+                assert!(
+                    matches!(op, '+' | '-' | '*'),
+                    "v2 generated a division: {body}"
+                );
                 ops.push((op, operand));
             }
             // Independent RPN evaluation: fold multiplicative runs into

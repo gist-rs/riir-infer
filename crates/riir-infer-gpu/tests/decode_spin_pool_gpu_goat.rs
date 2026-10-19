@@ -33,9 +33,7 @@ use riir_infer_core::corpus_text::load_corpus_text;
 use riir_infer_core::deltanet::forward::{HybridCache, HybridForwardScratch, effective_rotary_dim};
 use riir_infer_core::deltanet::set_decode_spin_pool;
 use riir_infer_core::deltanet::ternary_forward::forward_qwen_deltanet_ternary_with_hook;
-use riir_infer_core::deltanet::ternary_weights::{
-    QwenDeltaNetTernaryWeights, set_ternary_q8_act,
-};
+use riir_infer_core::deltanet::ternary_weights::{QwenDeltaNetTernaryWeights, set_ternary_q8_act};
 use riir_infer_core::gguf_loader::{GgufFile, load_qwen_deltanet_ternary_weights_gguf};
 use riir_infer_core::rope::RopeFreqTable;
 use riir_infer_core::tokenizer::BpeTokenizer;
@@ -137,8 +135,7 @@ fn decode_spin_pool_is_no_harm_on_the_gpu_hooked_lane() {
     );
 
     let text = load_corpus_text(&corpus).expect("corpus");
-    let tok =
-        BpeTokenizer::from_gguf(&GgufFile::open(&model).expect("gguf")).expect("tokenizer");
+    let tok = BpeTokenizer::from_gguf(&GgufFile::open(&model).expect("gguf")).expect("tokenizer");
     let ids = tok.encode(&text);
     assert!(ids.len() > n_pos, "corpus too short: {} tokens", ids.len());
 
@@ -203,26 +200,83 @@ fn decode_spin_pool_is_no_harm_on_the_gpu_hooked_lane() {
         upload.elapsed().as_secs_f64()
     );
 
-    let (mut on, mut off) = (
-        Arm::new(&config, &weights),
-        Arm::new(&config, &weights),
-    );
+    let (mut on, mut off) = (Arm::new(&config, &weights), Arm::new(&config, &weights));
 
     // Warmup: one position per arm, NOT measured (first-call JIT compile of
     // every CubeCL kernel + the handle-cache fills).
-    let _ = on.step(true, &weights, &matvec, &input_proj, &ffn, ids[0], 0, &config, &rope);
-    let _ = off.step(false, &weights, &matvec, &input_proj, &ffn, ids[0], 0, &config, &rope);
+    let _ = on.step(
+        true,
+        &weights,
+        &matvec,
+        &input_proj,
+        &ffn,
+        ids[0],
+        0,
+        &config,
+        &rope,
+    );
+    let _ = off.step(
+        false,
+        &weights,
+        &matvec,
+        &input_proj,
+        &ffn,
+        ids[0],
+        0,
+        &config,
+        &rope,
+    );
 
     let mut ratios = Vec::with_capacity(n_pos);
     let (mut wall_on, mut wall_off, mut mismatched) = (0.0f64, 0.0f64, 0usize);
     for (p, &id) in ids.iter().take(n_pos).enumerate() {
         let (t_on, t_off) = if p % 2 == 0 {
-            let a = on.step(true, &weights, &matvec, &input_proj, &ffn, id, p, &config, &rope);
-            let b = off.step(false, &weights, &matvec, &input_proj, &ffn, id, p, &config, &rope);
+            let a = on.step(
+                true,
+                &weights,
+                &matvec,
+                &input_proj,
+                &ffn,
+                id,
+                p,
+                &config,
+                &rope,
+            );
+            let b = off.step(
+                false,
+                &weights,
+                &matvec,
+                &input_proj,
+                &ffn,
+                id,
+                p,
+                &config,
+                &rope,
+            );
             (a, b)
         } else {
-            let b = off.step(false, &weights, &matvec, &input_proj, &ffn, id, p, &config, &rope);
-            let a = on.step(true, &weights, &matvec, &input_proj, &ffn, id, p, &config, &rope);
+            let b = off.step(
+                false,
+                &weights,
+                &matvec,
+                &input_proj,
+                &ffn,
+                id,
+                p,
+                &config,
+                &rope,
+            );
+            let a = on.step(
+                true,
+                &weights,
+                &matvec,
+                &input_proj,
+                &ffn,
+                id,
+                p,
+                &config,
+                &rope,
+            );
             (a, b)
         };
         wall_on += t_on;
@@ -237,9 +291,7 @@ fn decode_spin_pool_is_no_harm_on_the_gpu_hooked_lane() {
     set_decode_spin_pool(true);
     ratios.sort_by(f64::total_cmp);
     let median = ratios[ratios.len() / 2];
-    println!(
-        "[spin-gpu] positions {n_pos} | logit-vector mismatches {mismatched} (bar 0)"
-    );
+    println!("[spin-gpu] positions {n_pos} | logit-vector mismatches {mismatched} (bar 0)");
     println!(
         "[spin-gpu] hooked lane: rayon {:.1} ms/tok ({:.2} tok/s) · pool {:.1} ms/tok ({:.2} tok/s) | median paired ratio {median:.3} (no-harm bar ≤ {MAX_TIME_RATIO})",
         wall_off / n_pos as f64 * 1e3,

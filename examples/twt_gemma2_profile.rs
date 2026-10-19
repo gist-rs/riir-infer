@@ -37,19 +37,19 @@
 
 use std::io::Write as _;
 
+use katgpt_transformer::MultiLayerKVCache;
 use riir_infer_core::corpus_text::load_corpus_text;
 use riir_infer_core::gguf_loader::{GgufFile, config_from_gguf_metadata, load_gemma2_f16_direct};
 use riir_infer_core::tokenizer::SentencePieceGgufTokenizer;
 use riir_infer_core::transformer::gemma2_calibration::{
-    forward_gemma2_f16_tapped, CalibrationTables,
+    CalibrationTables, forward_gemma2_f16_tapped,
 };
 use riir_infer_core::transformer::{ForwardContext, PostLayerHook};
 use riir_infer_core::twt::{
-    blake3_of, forced_min_blocks, kill_verdict, minmax_partition, Bucket, KillVerdict,
-    SMatrixBuilder, PRE_REGISTERED_EPS_GRID,
+    Bucket, KillVerdict, PRE_REGISTERED_EPS_GRID, SMatrixBuilder, blake3_of, forced_min_blocks,
+    kill_verdict, minmax_partition,
 };
 use riir_infer_core::types::kv_dim;
-use katgpt_transformer::MultiLayerKVCache;
 use std::path::Path;
 
 /// The capture hook: copies the post-layer residual into its own buffer and
@@ -97,7 +97,10 @@ fn main() {
             other => panic!("unknown arg {other}"),
         }
     }
-    assert!((2..=4096).contains(&seq_len), "--seq-len must be in [2, 4096] (the in-repo stack is exact only below the sliding window; see the module doc)");
+    assert!(
+        (2..=4096).contains(&seq_len),
+        "--seq-len must be in [2, 4096] (the in-repo stack is exact only below the sliding window; see the module doc)"
+    );
     assert!(seq_len <= max_tokens, "--max-tokens must cover one chunk");
 
     // ── model + tokenizer from ONE GGUF (the kv_plus_ladder shape) ──
@@ -105,7 +108,10 @@ fn main() {
     let gguf_path_buf = Path::new(&gguf_path).to_path_buf();
     let gguf = GgufFile::open(&gguf_path_buf).unwrap_or_else(|e| panic!("open gguf: {e}"));
     let arch = gguf.architecture().unwrap_or("unknown");
-    assert_eq!(arch, "gemma2", "this lane profiles the gemma2 f16 stack, got {arch}");
+    assert_eq!(
+        arch, "gemma2",
+        "this lane profiles the gemma2 f16 stack, got {arch}"
+    );
     let mut config = config_from_gguf_metadata(&gguf).expect("config");
     let tok = SentencePieceGgufTokenizer::from_gguf(&gguf).expect("tokenizer");
     let corpus_bytes = load_corpus_text(Path::new(&corpus_path))
@@ -162,11 +168,22 @@ fn main() {
         builder.begin_forward(chunk.len()).unwrap();
         let push_err: Option<String>;
         {
-            let mut hook = Capture { builder: &mut builder, row: 0, err: None };
+            let mut hook = Capture {
+                builder: &mut builder,
+                row: 0,
+                err: None,
+            };
             for (pos, &token) in chunk.iter().enumerate() {
                 hook.row = pos;
                 forward_gemma2_f16_tapped(
-                    &mut ctx, &weights, &mut cache, &mut tables, token, pos, &config, &mut hook,
+                    &mut ctx,
+                    &weights,
+                    &mut cache,
+                    &mut tables,
+                    token,
+                    pos,
+                    &config,
+                    &mut hook,
                 );
             }
             push_err = hook.err.take();
@@ -213,7 +230,10 @@ fn main() {
         partitions.push(p);
     }
     let verdict = kill_verdict(&partitions, forced).unwrap();
-    println!("checkpoint: {} (layers {n_layers}, hidden {dim})", gguf_path_buf.display());
+    println!(
+        "checkpoint: {} (layers {n_layers}, hidden {dim})",
+        gguf_path_buf.display()
+    );
     println!("type split: {forced} forced block (single-operator stack — all-attention in-repo)");
     println!("ε sweep (cosine meter):");
     for l in &lines {

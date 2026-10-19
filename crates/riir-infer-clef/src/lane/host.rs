@@ -262,8 +262,16 @@ mod tests {
                 let angle = (position as f64) / 1_000_000f64.powf((2 * i) as f64 / 128.0);
                 let expected_c = f16::from_f64(angle.cos());
                 let expected_s = f16::from_f64(angle.sin());
-                assert_eq!(cos[position * 128 + i], expected_c, "cos pos {position} i {i}");
-                assert_eq!(sin[position * 128 + i], expected_s, "sin pos {position} i {i}");
+                assert_eq!(
+                    cos[position * 128 + i],
+                    expected_c,
+                    "cos pos {position} i {i}"
+                );
+                assert_eq!(
+                    sin[position * 128 + i],
+                    expected_s,
+                    "sin pos {position} i {i}"
+                );
                 assert_eq!(
                     cos[position * 128 + i],
                     cos[position * 128 + 64 + i],
@@ -312,10 +320,13 @@ mod tests {
         let embeddings = write_fixture_embeddings(&dir, 300, 2);
         let tokenizer = lossless_tokenizer();
         let state = json!({"a": 1});
-        let questions = vec![("q".to_string(), ClefQuestion::Noul {
-            instructions: Some("Ready?".into()),
-            criteria: BTreeMap::new(),
-        })];
+        let questions = vec![(
+            "q".to_string(),
+            ClefQuestion::Noul {
+                instructions: Some("Ready?".into()),
+                criteria: BTreeMap::new(),
+            },
+        )];
         let record = encode(&tokenizer, &state, &questions, 2048).expect("encodes");
         let n = record.input_ids.len();
         let length = n + 3; // 3 pad rows
@@ -405,14 +416,18 @@ mod tests {
                 let row = &packed.o_mean[option_index * bucket..(option_index + 1) * bucket];
                 let expected_weight = 1.0 / option_span.len() as f32;
                 for (position, value) in row.iter().enumerate() {
-                    let expected =
-                        if option_span.contains(&position) { expected_weight } else { 0.0 };
+                    let expected = if option_span.contains(&position) {
+                        expected_weight
+                    } else {
+                        0.0
+                    };
                     assert_eq!(*value, expected, "o_mean o{option_index} pos {position}");
                 }
                 for other_q in 0..max_q {
                     let expected = if other_q == question_index { 1.0 } else { 0.0 };
                     assert_eq!(
-                        packed.o2q[option_index * max_q + other_q], expected,
+                        packed.o2q[option_index * max_q + other_q],
+                        expected,
                         "o2q o{option_index} q{other_q}"
                     );
                 }
@@ -422,7 +437,11 @@ mod tests {
         }
         // dead rows stay defaulted
         for index in packed.option_count..max_o {
-            assert!(packed.o_mean[index * bucket..(index + 1) * bucket].iter().all(|v| *v == 0.0));
+            assert!(
+                packed.o_mean[index * bucket..(index + 1) * bucket]
+                    .iter()
+                    .all(|v| *v == 0.0)
+            );
             assert_eq!(packed.o_mask[index], -1e4);
         }
         for index in record.questions.len()..max_q {
@@ -490,14 +509,24 @@ mod tests {
         let err = head_inputs(&record, 2048, 16, 96, &embeddings)
             .expect_err("17 questions over the wall");
         assert!(
-            matches!(err, HostError::TooManyFields { questions: 17, options: 34, .. }),
+            matches!(
+                err,
+                HostError::TooManyFields {
+                    questions: 17,
+                    options: 34,
+                    ..
+                }
+            ),
             "got: {err}"
         );
 
         let record = encode(&tokenizer, &state, &[question()], 2048).expect("encodes");
         let err = head_inputs(&record, record.input_ids.len() - 1, 16, 96, &embeddings)
             .expect_err("bucket below the record refuses");
-        assert!(matches!(err, HostError::RecordLongerThanBucket { .. }), "got: {err}");
+        assert!(
+            matches!(err, HostError::RecordLongerThanBucket { .. }),
+            "got: {err}"
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -536,9 +565,10 @@ mod tests {
     /// table (weights never committed — the packing math is
     /// table-agnostic).
     fn packing_record_from_goldens(tokenizer: &ClefTokenizer) -> (ClefEncodedRecord, usize) {
-        let fixture_text = std::fs::read_to_string(
-            concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/clef_text/records/records.json"),
-        )
+        let fixture_text = std::fs::read_to_string(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/tests/fixtures/clef_text/records/records.json"
+        ))
         .expect("record goldens committed under tests/fixtures/clef_text/records/");
         let document: Value = serde_json::from_str(&fixture_text).expect("fixture parses");
         let record_json = document["records"]
@@ -577,7 +607,10 @@ mod tests {
         }
         let dir = crate::lane::artifacts_dir().expect("artifact dir resolvable");
         if !dir.join("tokenizer.json").is_file() {
-            panic!("tokenizer.json not installed under {} — run the T1.3 install once", dir.display());
+            panic!(
+                "tokenizer.json not installed under {} — run the T1.3 install once",
+                dir.display()
+            );
         }
         let tokenizer = ClefTokenizer::from_dir(&dir).expect("real tokenizer loads");
         let (record, _max_length) = packing_record_from_goldens(&tokenizer);
@@ -609,8 +642,11 @@ mod tests {
             "/tests/fixtures/clef_text/records/head_packing.json"
         ));
         std::fs::create_dir_all(path.parent().expect("parent")).expect("fixture dir");
-        std::fs::write(path, serde_json::to_string_pretty(&document).expect("serializes"))
-            .expect("golden written");
+        std::fs::write(
+            path,
+            serde_json::to_string_pretty(&document).expect("serializes"),
+        )
+        .expect("golden written");
         println!("wrote {}", path.display());
         let _ = std::fs::remove_dir_all(&scratch_dir);
     }
@@ -645,7 +681,11 @@ mod tests {
         let tokenizer = ClefTokenizer::from_dir(&dir).expect("real tokenizer loads");
         let (record, _max_length) = packing_record_from_goldens(&tokenizer);
         let bucket = golden["bucket"].as_u64().expect("bucket") as usize;
-        assert_eq!(bucket, packing_bucket(record.input_ids.len()), "bucket agrees with the record");
+        assert_eq!(
+            bucket,
+            packing_bucket(record.input_ids.len()),
+            "bucket agrees with the record"
+        );
         let scratch_dir = scratch("checkpack");
         let embeddings = write_fixture_embeddings(&scratch_dir, 151_936, 4);
         let packed = head_inputs(&record, bucket, 16, 96, &embeddings).expect("packs");
@@ -657,7 +697,11 @@ mod tests {
         let expected = golden["hashes"].as_object().expect("hashes");
         let got = packing_hashes(&packed);
         for (name, hash) in expected {
-            assert_eq!(got[name].as_str(), Some(hash.as_str().expect("hash")), "array {name} drifted");
+            assert_eq!(
+                got[name].as_str(),
+                Some(hash.as_str().expect("hash")),
+                "array {name} drifted"
+            );
         }
         println!("head-packing golden ok ({} arrays pinned)", expected.len());
         let _ = std::fs::remove_dir_all(&scratch_dir);

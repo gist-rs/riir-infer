@@ -120,15 +120,13 @@ use crate::matmul_f16b_cubecl::MatmulF16bCubeCL;
 #[cfg(feature = "edlm_gpu")]
 use cubecl::client::Graph;
 #[cfg(feature = "edlm_gpu")]
-use cubecl_environment::stream::StreamId;
-#[cfg(feature = "edlm_gpu")]
 use cubecl::prelude::*;
 #[cfg(feature = "edlm_gpu")]
 use cubecl::server::Handle;
 #[cfg(feature = "edlm_gpu")]
-use half::f16 as half_f16;
+use cubecl_environment::stream::StreamId;
 #[cfg(feature = "edlm_gpu")]
-use std::cell::{Cell, RefCell};
+use half::f16 as half_f16;
 #[cfg(feature = "edlm_gpu")]
 use riir_infer_core::rope::{RopeFreqTable, apply_rope_with_freq};
 #[cfg(feature = "edlm_gpu")]
@@ -138,6 +136,8 @@ use riir_infer_core::transformer::edlm::{
 };
 #[cfg(feature = "edlm_gpu")]
 use riir_infer_core::types::{Config, kv_dim, rmsnorm_with_gamma_eps, swiglu};
+#[cfg(feature = "edlm_gpu")]
+use std::cell::{Cell, RefCell};
 
 // ── kernels ─────────────────────────────────────────────────────────
 
@@ -677,12 +677,7 @@ impl EdlmAttnMultiCubeCL {
         assert_binding_derives_units(&kv, 2 * kvd, p.n_positions, "EdlmAttnMulti kv");
         assert_binding_derives_units(&q, p.n_head * p.head_dim, p.seq_q, "EdlmAttnMulti q");
         if p.n_seed > 0 {
-            assert_binding_derives_units(
-                &seed_kv,
-                2 * kvd,
-                p.n_seed,
-                "EdlmAttnMulti seed_kv",
-            );
+            assert_binding_derives_units(&seed_kv, 2 * kvd, p.n_seed, "EdlmAttnMulti seed_kv");
         } else {
             assert_binding_derives_units(&seed_kv, 1, 1, "EdlmAttnMulti seed dummy");
         }
@@ -805,7 +800,10 @@ impl EdlmQkvFoldCubeCL {
             "the fold cube is head_dim 128 (the 8B release shape); \
              a different head_dim needs a kernel variant"
         );
-        assert!(p.n_head > 0 && p.n_kv_head > 0, "head counts must be positive");
+        assert!(
+            p.n_head > 0 && p.n_kv_head > 0,
+            "head counts must be positive"
+        );
         let kvd = p.n_kv_head * p.head_dim;
         let q_dim = p.n_head * p.head_dim;
         let lq = q_dim + 2 * kvd;
@@ -1187,37 +1185,39 @@ impl EdlmGpuModel {
                 config.head_dim
             ));
         }
-        let client =
-            CubeCLContext::new().map_err(|e| format!("CubeCL context: {e:?}"))?.client();
+        let client = CubeCLContext::new()
+            .map_err(|e| format!("CubeCL context: {e:?}"))?
+            .client();
         // The model pins its stream at construction (the doc's stream law):
         // every handle lands in one pool slot, every op submits on this
         // stream, and the graphed write/replay/read trio is ordered.
         let stream = StreamId::current();
 
-        let layers = stream
-            .executes(|| {
-                weights.layers.iter()
-                    .map(|l| {
-                        let mut qkv = l.base.attn_wq.clone();
-                        qkv.extend_from_slice(&l.base.attn_wk);
-                        qkv.extend_from_slice(&l.base.attn_wv);
-                        let mut gateup = l.base.gate_proj.clone();
-                        gateup.extend_from_slice(&l.base.up_proj);
-                        Ok(EdlmGpuLayerWeights {
-                            qkv: upload_f16(&client, &qkv)?,
-                            wo: upload_f16(&client, &l.base.attn_wo)?,
-                            gateup: upload_f16(&client, &gateup)?,
-                            down: upload_f16(&client, &l.base.down_proj)?,
-                            attn_norm: create_f32(&client, &l.base.input_norm),
-                            post_attn_norm: create_f32(&client, &l.base.post_attn_norm),
-                            q_norm: l.q_norm.clone(),
-                            k_norm: l.k_norm.clone(),
-                            q_norm_d: create_f32(&client, &l.q_norm),
-                            k_norm_d: create_f32(&client, &l.k_norm),
-                        })
+        let layers = stream.executes(|| {
+            weights
+                .layers
+                .iter()
+                .map(|l| {
+                    let mut qkv = l.base.attn_wq.clone();
+                    qkv.extend_from_slice(&l.base.attn_wk);
+                    qkv.extend_from_slice(&l.base.attn_wv);
+                    let mut gateup = l.base.gate_proj.clone();
+                    gateup.extend_from_slice(&l.base.up_proj);
+                    Ok(EdlmGpuLayerWeights {
+                        qkv: upload_f16(&client, &qkv)?,
+                        wo: upload_f16(&client, &l.base.attn_wo)?,
+                        gateup: upload_f16(&client, &gateup)?,
+                        down: upload_f16(&client, &l.base.down_proj)?,
+                        attn_norm: create_f32(&client, &l.base.input_norm),
+                        post_attn_norm: create_f32(&client, &l.base.post_attn_norm),
+                        q_norm: l.q_norm.clone(),
+                        k_norm: l.k_norm.clone(),
+                        q_norm_d: create_f32(&client, &l.q_norm),
+                        k_norm_d: create_f32(&client, &l.k_norm),
                     })
-                    .collect::<Result<Vec<_>, String>>()
-            })?;
+                })
+                .collect::<Result<Vec<_>, String>>()
+        })?;
 
         let freq = RopeFreqTable::new(config.rope_theta, config.head_dim);
         let freq_d = stream.executes(|| create_f32(&client, freq.as_slice()));
@@ -1254,59 +1254,59 @@ impl EdlmGpuModel {
                 config.head_dim
             ));
         }
-        let client =
-            CubeCLContext::new().map_err(|e| format!("CubeCL context: {e:?}"))?.client();
+        let client = CubeCLContext::new()
+            .map_err(|e| format!("CubeCL context: {e:?}"))?
+            .client();
         // The model's pinned stream (the stream law in the module docs).
         let stream = StreamId::current();
 
-        let layers = stream
-            .executes(|| {
-                let mut layers = Vec::with_capacity(config.n_layer);
-                for i in 0..config.n_layer {
-                    let deq = |name: String| -> Result<Vec<f32>, String> {
-                        core.gguf
-                            .dequant_f16_to_f32(&name)
-                            .map_err(|e| format!("tensor {name}: {e}"))
-                    };
-                    let wq = deq(format!("blk.{i}.attn_q.weight"))?;
-                    let wk = deq(format!("blk.{i}.attn_k.weight"))?;
-                    let wv = deq(format!("blk.{i}.attn_v.weight"))?;
-                    let wo = deq(format!("blk.{i}.attn_output.weight"))?;
-                    let gate = deq(format!("blk.{i}.ffn_gate.weight"))?;
-                    let up = deq(format!("blk.{i}.ffn_up.weight"))?;
-                    let down = deq(format!("blk.{i}.ffn_down.weight"))?;
-                    let attn_norm = deq(format!("blk.{i}.attn_norm.weight"))?;
-                    let post_attn_norm = deq(format!("blk.{i}.ffn_norm.weight"))?;
-                    let q_norm = deq(format!("blk.{i}.attn_q_norm.weight"))?;
-                    let k_norm = deq(format!("blk.{i}.attn_k_norm.weight"))?;
-                    if q_norm.len() != config.head_dim || k_norm.len() != config.head_dim {
-                        return Err(format!(
-                            "layer {i}: QK-norm gamma length {}/{} != head_dim {}",
-                            q_norm.len(),
-                            k_norm.len(),
-                            config.head_dim
-                        ));
-                    }
-                    let mut qkv = wq;
-                    qkv.extend_from_slice(&wk);
-                    qkv.extend_from_slice(&wv);
-                    let mut gateup = gate;
-                    gateup.extend_from_slice(&up);
-                    layers.push(EdlmGpuLayerWeights {
-                        qkv: upload_f16(&client, &qkv)?,
-                        wo: upload_f16(&client, &wo)?,
-                        gateup: upload_f16(&client, &gateup)?,
-                        down: upload_f16(&client, &down)?,
-                        attn_norm: create_f32(&client, &attn_norm),
-                        post_attn_norm: create_f32(&client, &post_attn_norm),
-                        q_norm_d: create_f32(&client, &q_norm),
-                        k_norm_d: create_f32(&client, &k_norm),
-                        q_norm,
-                        k_norm,
-                    });
+        let layers = stream.executes(|| {
+            let mut layers = Vec::with_capacity(config.n_layer);
+            for i in 0..config.n_layer {
+                let deq = |name: String| -> Result<Vec<f32>, String> {
+                    core.gguf
+                        .dequant_f16_to_f32(&name)
+                        .map_err(|e| format!("tensor {name}: {e}"))
+                };
+                let wq = deq(format!("blk.{i}.attn_q.weight"))?;
+                let wk = deq(format!("blk.{i}.attn_k.weight"))?;
+                let wv = deq(format!("blk.{i}.attn_v.weight"))?;
+                let wo = deq(format!("blk.{i}.attn_output.weight"))?;
+                let gate = deq(format!("blk.{i}.ffn_gate.weight"))?;
+                let up = deq(format!("blk.{i}.ffn_up.weight"))?;
+                let down = deq(format!("blk.{i}.ffn_down.weight"))?;
+                let attn_norm = deq(format!("blk.{i}.attn_norm.weight"))?;
+                let post_attn_norm = deq(format!("blk.{i}.ffn_norm.weight"))?;
+                let q_norm = deq(format!("blk.{i}.attn_q_norm.weight"))?;
+                let k_norm = deq(format!("blk.{i}.attn_k_norm.weight"))?;
+                if q_norm.len() != config.head_dim || k_norm.len() != config.head_dim {
+                    return Err(format!(
+                        "layer {i}: QK-norm gamma length {}/{} != head_dim {}",
+                        q_norm.len(),
+                        k_norm.len(),
+                        config.head_dim
+                    ));
                 }
-                Ok(layers)
-            })?;
+                let mut qkv = wq;
+                qkv.extend_from_slice(&wk);
+                qkv.extend_from_slice(&wv);
+                let mut gateup = gate;
+                gateup.extend_from_slice(&up);
+                layers.push(EdlmGpuLayerWeights {
+                    qkv: upload_f16(&client, &qkv)?,
+                    wo: upload_f16(&client, &wo)?,
+                    gateup: upload_f16(&client, &gateup)?,
+                    down: upload_f16(&client, &down)?,
+                    attn_norm: create_f32(&client, &attn_norm),
+                    post_attn_norm: create_f32(&client, &post_attn_norm),
+                    q_norm_d: create_f32(&client, &q_norm),
+                    k_norm_d: create_f32(&client, &k_norm),
+                    q_norm,
+                    k_norm,
+                });
+            }
+            Ok(layers)
+        })?;
 
         let freq = RopeFreqTable::new(config.rope_theta, config.head_dim);
         let scale = 1.0 / (config.head_dim as f32).sqrt();
@@ -1386,15 +1386,7 @@ impl EdlmGpuModel {
     /// from M≈16 (1.09×) upward (1.51× at 18, 3.4× at 87, 8× at 512) — so
     /// short branch rows stay scalar and everything prefill-class goes
     /// tensor-core. `EDLM_GPU_CMMA=0` forces scalar for ALL m.
-    fn matmul_f16b(
-        &self,
-        a: Handle,
-        b: Handle,
-        out: Handle,
-        m: usize,
-        n: usize,
-        p: usize,
-    ) {
+    fn matmul_f16b(&self, a: Handle, b: Handle, out: Handle, m: usize, n: usize, p: usize) {
         if self.posture != GemmPosture::Scalar && m >= 16 {
             let want_sg8 = match self.posture {
                 GemmPosture::CmmaSg8 => true,
@@ -1403,10 +1395,24 @@ impl EdlmGpuModel {
             };
             if want_sg8 {
                 crate::MatmulF16bCmmaCubeCL::launch_sg8::<ActiveRuntime>(
-                    &self.client, a, b, out, m, n, p,
+                    &self.client,
+                    a,
+                    b,
+                    out,
+                    m,
+                    n,
+                    p,
                 );
             } else {
-                crate::MatmulF16bCmmaCubeCL::launch::<ActiveRuntime>(&self.client, a, b, out, m, n, p);
+                crate::MatmulF16bCmmaCubeCL::launch::<ActiveRuntime>(
+                    &self.client,
+                    a,
+                    b,
+                    out,
+                    m,
+                    n,
+                    p,
+                );
             }
         } else {
             MatmulF16bCubeCL::launch::<ActiveRuntime>(&self.client, a, b, out, m, n, p);
@@ -1474,8 +1480,7 @@ impl EdlmGpuModel {
                 ids: state_ids,
                 pos: state_pos,
             }];
-            let (h, layers, device_kv) =
-                self.forward_rows_batched(&pass, None, state_bidir)?;
+            let (h, layers, device_kv) = self.forward_rows_batched(&pass, None, state_bidir)?;
             let mut hidden = h;
             let n = self.config.n_embd;
             for chunk in hidden.chunks_exact_mut(n) {
@@ -1810,7 +1815,9 @@ impl EdlmGpuModel {
             // ── attention block ──
             let xr = h.clone();
             let h_h = create_f32(&self.client, &h);
-            let hn1 = self.client.empty(sq_total * n * core::mem::size_of::<f32>());
+            let hn1 = self
+                .client
+                .empty(sq_total * n * core::mem::size_of::<f32>());
             EdlmRmsNormRowsCubeCL::launch::<ActiveRuntime>(
                 &self.client,
                 h_h,
@@ -1820,7 +1827,9 @@ impl EdlmGpuModel {
                 n,
                 eps,
             );
-            let qkv_out = self.client.empty(sq_total * lq * core::mem::size_of::<f32>());
+            let qkv_out = self
+                .client
+                .empty(sq_total * lq * core::mem::size_of::<f32>());
             self.matmul_f16b(hn1, lw.qkv.clone(), qkv_out.clone(), sq_total, n, lq);
             let qkv_h = read_f32(&self.client, qkv_out).map_err(|e| e.to_string())?;
 
@@ -1865,7 +1874,9 @@ impl EdlmGpuModel {
             let q_h = create_f32(&self.client, &q_rope);
             let ts_h = create_u32(&self.client, t_start);
             let te_h = create_u32(&self.client, t_end);
-            let attn_h = self.client.empty(sq_total * q_dim * core::mem::size_of::<f32>());
+            let attn_h = self
+                .client
+                .empty(sq_total * q_dim * core::mem::size_of::<f32>());
             EdlmAttnMultiCubeCL::launch::<ActiveRuntime>(
                 &self.client,
                 q_h,
@@ -1877,7 +1888,9 @@ impl EdlmGpuModel {
                 attn_params,
             );
 
-            let wo_out = self.client.empty(sq_total * n * core::mem::size_of::<f32>());
+            let wo_out = self
+                .client
+                .empty(sq_total * n * core::mem::size_of::<f32>());
             self.matmul_f16b(attn_h, lw.wo.clone(), wo_out.clone(), sq_total, q_dim, n);
             let wo_h = read_f32(&self.client, wo_out).map_err(|e| e.to_string())?;
             for i in 0..sq_total * n {
@@ -1886,7 +1899,9 @@ impl EdlmGpuModel {
 
             // ── MLP block ──
             let h2_h = create_f32(&self.client, &h);
-            let hn2 = self.client.empty(sq_total * n * core::mem::size_of::<f32>());
+            let hn2 = self
+                .client
+                .empty(sq_total * n * core::mem::size_of::<f32>());
             EdlmRmsNormRowsCubeCL::launch::<ActiveRuntime>(
                 &self.client,
                 h2_h,
@@ -1896,7 +1911,9 @@ impl EdlmGpuModel {
                 n,
                 eps,
             );
-            let gu_out = self.client.empty(sq_total * 2 * mlp * core::mem::size_of::<f32>());
+            let gu_out = self
+                .client
+                .empty(sq_total * 2 * mlp * core::mem::size_of::<f32>());
             self.matmul_f16b(hn2, lw.gateup.clone(), gu_out.clone(), sq_total, n, 2 * mlp);
             let gu = read_f32(&self.client, gu_out).map_err(|e| e.to_string())?;
             let mut mlp_in = vec![0.0f32; sq_total * mlp];
@@ -1909,7 +1926,9 @@ impl EdlmGpuModel {
                 );
             }
             let mi_h = create_f32(&self.client, &mlp_in);
-            let down_out = self.client.empty(sq_total * n * core::mem::size_of::<f32>());
+            let down_out = self
+                .client
+                .empty(sq_total * n * core::mem::size_of::<f32>());
             self.matmul_f16b(mi_h, lw.down.clone(), down_out.clone(), sq_total, mlp, n);
             let d_h = read_f32(&self.client, down_out).map_err(|e| e.to_string())?;
             for i in 0..sq_total * n {
@@ -2112,7 +2131,14 @@ impl EdlmGpuModel {
                 n,
                 eps,
             );
-            self.matmul_f16b(st.hn1.clone(), lw.qkv.clone(), st.qkv.clone(), sq_total, n, lq);
+            self.matmul_f16b(
+                st.hn1.clone(),
+                lw.qkv.clone(),
+                st.qkv.clone(),
+                sq_total,
+                n,
+                lq,
+            );
             EdlmQkvFoldCubeCL::launch::<ActiveRuntime>(
                 &self.client,
                 st.qkv.clone(),
@@ -2135,7 +2161,14 @@ impl EdlmGpuModel {
                 st.attn.clone(),
                 &geo.attn_params,
             );
-            self.matmul_f16b(st.attn.clone(), lw.wo.clone(), st.wo.clone(), sq_total, q_dim, n);
+            self.matmul_f16b(
+                st.attn.clone(),
+                lw.wo.clone(),
+                st.wo.clone(),
+                sq_total,
+                q_dim,
+                n,
+            );
             // Residual add, in place on the device (the host arm's
             // `h[i] = xr[i] + wo_h[i]`).
             unsafe {
@@ -2161,7 +2194,14 @@ impl EdlmGpuModel {
                 n,
                 eps,
             );
-            self.matmul_f16b(st.hn2.clone(), lw.gateup.clone(), st.gu.clone(), sq_total, n, 2 * mlp);
+            self.matmul_f16b(
+                st.hn2.clone(),
+                lw.gateup.clone(),
+                st.gu.clone(),
+                sq_total,
+                n,
+                2 * mlp,
+            );
             // SwiGLU: silu(first half) · second half — the host arm's
             // `swiglu` law, on device.
             unsafe {
@@ -2173,7 +2213,14 @@ impl EdlmGpuModel {
                     mlp,
                 )
             };
-            self.matmul_f16b(st.mi.clone(), lw.down.clone(), st.down.clone(), sq_total, mlp, n);
+            self.matmul_f16b(
+                st.mi.clone(),
+                lw.down.clone(),
+                st.down.clone(),
+                sq_total,
+                mlp,
+                n,
+            );
             unsafe {
                 crate::elementwise_cubecl::AddCubeCL::launch::<ActiveRuntime>(
                     &self.client,
@@ -2240,12 +2287,18 @@ impl EdlmGpuModel {
         };
         // Shape constants, written OUTSIDE the capture window (they ride the
         // buffers every replay reads; positions are per-replay written).
-        self.client
-            .write(&ws.seg_d, cubecl::bytes::Bytes::from_elems(geo.seg_of_q.clone()));
-        self.client
-            .write(&ws.ts_d, cubecl::bytes::Bytes::from_elems(geo.t_start.clone()));
-        self.client
-            .write(&ws.te_d, cubecl::bytes::Bytes::from_elems(geo.t_end.clone()));
+        self.client.write(
+            &ws.seg_d,
+            cubecl::bytes::Bytes::from_elems(geo.seg_of_q.clone()),
+        );
+        self.client.write(
+            &ws.ts_d,
+            cubecl::bytes::Bytes::from_elems(geo.t_start.clone()),
+        );
+        self.client.write(
+            &ws.te_d,
+            cubecl::bytes::Bytes::from_elems(geo.t_end.clone()),
+        );
         let sq_total = geo.sq_total;
         Ok((
             BranchGraph {

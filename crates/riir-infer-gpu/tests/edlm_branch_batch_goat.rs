@@ -21,12 +21,12 @@
 
 #![cfg(feature = "edlm_gpu")]
 
+use cubecl::Runtime as _;
 use riir_infer_core::transformer::edlm::{
     BranchRow, EdlmLayerWeights, EdlmWeights, PackedEncoding,
 };
 use riir_infer_core::types::Config;
 use riir_infer_gpu::{ActiveRuntime, CubeCLContext, EdlmGpuModel, create_f32};
-use cubecl::Runtime as _;
 
 struct Lcg(u64);
 impl Lcg {
@@ -189,7 +189,10 @@ fn batched_matches_per_row_arms() {
     let batched = gpu.forward_branches(&enc, &rows).expect("batched");
     let mut per_row = Vec::with_capacity(N_ROWS);
     for row in &rows {
-        per_row.extend(gpu.forward_branches(&enc, std::slice::from_ref(row)).expect("per-row"));
+        per_row.extend(
+            gpu.forward_branches(&enc, std::slice::from_ref(row))
+                .expect("per-row"),
+        );
     }
 
     let worst = batched

@@ -56,9 +56,7 @@ use std::time::Instant;
 use anyhow::{Context, Result, bail};
 
 use riir_infer_core::corpus_text::load_corpus_text;
-use riir_infer_core::deltanet::forward::{
-    HybridCache, HybridForwardScratch, effective_rotary_dim,
-};
+use riir_infer_core::deltanet::forward::{HybridCache, HybridForwardScratch, effective_rotary_dim};
 use riir_infer_core::deltanet::rotation::rotate_inverse_inplace;
 use riir_infer_core::deltanet::ternary_forward::{
     forward_qwen_deltanet_ternary_with_hook, qwen_deltanet_ternary_layer_body,
@@ -306,7 +304,11 @@ fn build_merged_candidate(
             attn_wo: empty(),
             in_proj_qkv: ProjWeights::Ternary(merged_ternary_field(
                 members,
-                |l| l.in_proj_qkv.as_ternary().expect("audition merges ternary candidates only"),
+                |l| {
+                    l.in_proj_qkv
+                        .as_ternary()
+                        .expect("audition merges ternary candidates only")
+                },
                 op,
                 arm,
             )?),
@@ -314,31 +316,51 @@ fn build_merged_candidate(
             in_proj_b: merged_gate_field(members, |l| &l.in_proj_b, dense_op)?,
             in_proj_z: ProjWeights::Ternary(merged_ternary_field(
                 members,
-                |l| l.in_proj_z.as_ternary().expect("audition merges ternary candidates only"),
+                |l| {
+                    l.in_proj_z
+                        .as_ternary()
+                        .expect("audition merges ternary candidates only")
+                },
                 op,
                 arm,
             )?),
             out_proj: ProjWeights::Ternary(merged_ternary_field(
                 members,
-                |l| l.out_proj.as_ternary().expect("audition merges ternary candidates only"),
+                |l| {
+                    l.out_proj
+                        .as_ternary()
+                        .expect("audition merges ternary candidates only")
+                },
                 op,
                 arm,
             )?),
             gate_proj: ProjWeights::Ternary(merged_ternary_field(
                 members,
-                |l| l.gate_proj.as_ternary().expect("audition merges ternary candidates only"),
+                |l| {
+                    l.gate_proj
+                        .as_ternary()
+                        .expect("audition merges ternary candidates only")
+                },
                 op,
                 arm,
             )?),
             up_proj: ProjWeights::Ternary(merged_ternary_field(
                 members,
-                |l| l.up_proj.as_ternary().expect("audition merges ternary candidates only"),
+                |l| {
+                    l.up_proj
+                        .as_ternary()
+                        .expect("audition merges ternary candidates only")
+                },
                 op,
                 arm,
             )?),
             down_proj: ProjWeights::Ternary(merged_ternary_field(
                 members,
-                |l| l.down_proj.as_ternary().expect("audition merges ternary candidates only"),
+                |l| {
+                    l.down_proj
+                        .as_ternary()
+                        .expect("audition merges ternary candidates only")
+                },
                 op,
                 arm,
             )?),
@@ -357,25 +379,41 @@ fn build_merged_candidate(
         Ok(DeltaNetTernaryLayerWeights {
             attn_wq: ProjWeights::Ternary(merged_ternary_field(
                 members,
-                |l| l.attn_wq.as_ternary().expect("audition merges ternary candidates only"),
+                |l| {
+                    l.attn_wq
+                        .as_ternary()
+                        .expect("audition merges ternary candidates only")
+                },
                 op,
                 arm,
             )?),
             attn_wk: ProjWeights::Ternary(merged_ternary_field(
                 members,
-                |l| l.attn_wk.as_ternary().expect("audition merges ternary candidates only"),
+                |l| {
+                    l.attn_wk
+                        .as_ternary()
+                        .expect("audition merges ternary candidates only")
+                },
                 op,
                 arm,
             )?),
             attn_wv: ProjWeights::Ternary(merged_ternary_field(
                 members,
-                |l| l.attn_wv.as_ternary().expect("audition merges ternary candidates only"),
+                |l| {
+                    l.attn_wv
+                        .as_ternary()
+                        .expect("audition merges ternary candidates only")
+                },
                 op,
                 arm,
             )?),
             attn_wo: ProjWeights::Ternary(merged_ternary_field(
                 members,
-                |l| l.attn_wo.as_ternary().expect("audition merges ternary candidates only"),
+                |l| {
+                    l.attn_wo
+                        .as_ternary()
+                        .expect("audition merges ternary candidates only")
+                },
                 op,
                 arm,
             )?),
@@ -386,19 +424,31 @@ fn build_merged_candidate(
             out_proj: empty(),
             gate_proj: ProjWeights::Ternary(merged_ternary_field(
                 members,
-                |l| l.gate_proj.as_ternary().expect("audition merges ternary candidates only"),
+                |l| {
+                    l.gate_proj
+                        .as_ternary()
+                        .expect("audition merges ternary candidates only")
+                },
                 op,
                 arm,
             )?),
             up_proj: ProjWeights::Ternary(merged_ternary_field(
                 members,
-                |l| l.up_proj.as_ternary().expect("audition merges ternary candidates only"),
+                |l| {
+                    l.up_proj
+                        .as_ternary()
+                        .expect("audition merges ternary candidates only")
+                },
                 op,
                 arm,
             )?),
             down_proj: ProjWeights::Ternary(merged_ternary_field(
                 members,
-                |l| l.down_proj.as_ternary().expect("audition merges ternary candidates only"),
+                |l| {
+                    l.down_proj
+                        .as_ternary()
+                        .expect("audition merges ternary candidates only")
+                },
                 op,
                 arm,
             )?),
@@ -541,7 +591,10 @@ fn main() -> Result<()> {
         .with_context(|| format!("read {}", profile_path.display()))?;
     let profile: serde_json::Value = serde_json::from_str(&profile_text)?;
     let p_layers = profile["n_layers"].as_u64().context("n_layers")? as usize;
-    assert_eq!(p_layers, n_layer, "profile S is for a different layer count");
+    assert_eq!(
+        p_layers, n_layer,
+        "profile S is for a different layer count"
+    );
     let entries = profile["S_upper"].as_array().context("S_upper")?;
     let s = SMatrix::from_fn(n_layer, |i, j| {
         entries
@@ -572,7 +625,10 @@ fn main() -> Result<()> {
             .collect::<Vec<_>>()
             .join(" "),
     );
-    assert!(!merge_block_idxs.is_empty(), "no mergeable blocks at this ε");
+    assert!(
+        !merge_block_idxs.is_empty(),
+        "no mergeable blocks at this ε"
+    );
     let nb = blocks.len();
 
     // ── 2. corpus + tokens ──
@@ -714,9 +770,16 @@ fn main() -> Result<()> {
             block_recs.push(BlockRec {
                 start: b.start,
                 end: b.end,
-                kind: if types[b.start] { "deltanet" } else { "attention" },
+                kind: if types[b.start] {
+                    "deltanet"
+                } else {
+                    "attention"
+                },
                 n_members: 1,
-                candidates: vec![CandRec { id: format!("member:{}", b.start), err_sq: 0.0 }],
+                candidates: vec![CandRec {
+                    id: format!("member:{}", b.start),
+                    err_sq: 0.0,
+                }],
                 winner: format!("member:{}", b.start),
                 op: None,
                 arm: "member".to_owned(),
@@ -734,7 +797,10 @@ fn main() -> Result<()> {
         // pool: k members + 3 merged constructions
         let mut pool: Vec<(String, CandWeights)> = Vec::with_capacity(k + 3);
         for l in b.start..b.end {
-            pool.push((format!("member:{l}"), CandWeights::Member(&weights.layers[l])));
+            pool.push((
+                format!("member:{l}"),
+                CandWeights::Member(&weights.layers[l]),
+            ));
         }
         for (op, arm) in [
             (MergeOp::Mean, ArmChoice::SignMajority),
@@ -742,14 +808,9 @@ fn main() -> Result<()> {
             (MergeOp::Rdsc, ArmChoice::SourceQuant),
         ] {
             let t_build = Instant::now();
-            let layer = build_merged_candidate(
-                is_gdn,
-                &members,
-                op,
-                arm,
-                &weights.layers[params_member],
-            )
-            .with_context(|| format!("build {op:?}/{arm:?} for [{},{})", b.start, b.end))?;
+            let layer =
+                build_merged_candidate(is_gdn, &members, op, arm, &weights.layers[params_member])
+                    .with_context(|| format!("build {op:?}/{arm:?} for [{},{})", b.start, b.end))?;
             eprintln!(
                 "[audition] built {}:{} for [{},{}) in {:.1}s",
                 op.name(),
@@ -793,7 +854,10 @@ fn main() -> Result<()> {
                     row_len,
                 );
             }
-            recs.push(CandRec { id: id.clone(), err_sq: err });
+            recs.push(CandRec {
+                id: id.clone(),
+                err_sq: err,
+            });
             cand_done += 1;
             eprintln!(
                 "[audition] [{},{}] {id} err {err:.4e} ({:.1}s, {cand_done}/{cand_total})",
@@ -874,8 +938,14 @@ fn main() -> Result<()> {
     };
     let json = serde_json::to_string_pretty(&sel)?;
     std::fs::write(&out_path, &json).with_context(|| format!("write {}", out_path.display()))?;
-    println!("# twt_bonsai_audition — selection written to {}", out_path.display());
-    println!("# ε={eps} typed partition: {nb} blocks, {} mergeable", merge_block_idxs.len());
+    println!(
+        "# twt_bonsai_audition — selection written to {}",
+        out_path.display()
+    );
+    println!(
+        "# ε={eps} typed partition: {nb} blocks, {} mergeable",
+        merge_block_idxs.len()
+    );
     println!("block\tspan\tk\twinner\terr_sq\tparams_member");
     for r in &sel.blocks {
         let werr = r

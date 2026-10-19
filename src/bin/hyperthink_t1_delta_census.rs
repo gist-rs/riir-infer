@@ -105,7 +105,9 @@ struct ProbeCapture {
 impl ProbeCapture {
     fn new(n_layers: usize) -> Self {
         Self {
-            bufs: (0..n_layers * BiasDeltaSite::ALL.len()).map(|_| Vec::new()).collect(),
+            bufs: (0..n_layers * BiasDeltaSite::ALL.len())
+                .map(|_| Vec::new())
+                .collect(),
             target_pos: 0,
             active: false,
         }
@@ -160,10 +162,12 @@ fn parse_args() -> Result<Args> {
             "--probes" => args.probes = it.next().context("--probes needs a value")?.into(),
             "--out" => args.out = it.next().context("--out needs a value")?.into(),
             "--limit" => {
-                args.limit =
-                    Some(it.next().context("--limit needs a value")?.parse().context(
-                        "--limit needs a number",
-                    )?);
+                args.limit = Some(
+                    it.next()
+                        .context("--limit needs a value")?
+                        .parse()
+                        .context("--limit needs a number")?,
+                );
             }
             "--max-q-tokens" => {
                 args.max_q_tokens = it
@@ -221,11 +225,19 @@ fn self_test() -> Result<()> {
             continue;
         };
         if vs.slot() != site_slot(s) {
-            eprintln!("FAIL: slot mismatch for '{}' ({} vs {})", s.name(), vs.slot(), site_slot(s));
+            eprintln!(
+                "FAIL: slot mismatch for '{}' ({} vs {})",
+                s.name(),
+                vs.slot(),
+                site_slot(s)
+            );
             ok = false;
         }
     }
-    println!("# self-test 1/2 site mapping: {}", if ok { "PASS" } else { "FAIL" });
+    println!(
+        "# self-test 1/2 site mapping: {}",
+        if ok { "PASS" } else { "FAIL" }
+    );
 
     // 2. Premise arithmetic on synthetic tables: late-concentrated constant
     //    deltas PASS; front-concentrated FAIL C1; uniform noise fails C2.
@@ -505,11 +517,7 @@ fn main() -> Result<()> {
     let mut per_layer = Vec::with_capacity(n_layer);
     for (l, ls) in table.layer_stats().iter().enumerate() {
         let mut sites = serde_json::Map::new();
-        for w in table
-            .windows()
-            .iter()
-            .filter(|w| w.layer == l)
-        {
+        for w in table.windows().iter().filter(|w| w.layer == l) {
             sites.insert(
                 w.site.name().to_string(),
                 serde_json::json!({
@@ -581,8 +589,7 @@ fn main() -> Result<()> {
         },
     });
     let sidecar_path = args.out.join(format!("{model_name}.t1_bias_delta.json"));
-    std::fs::write(&sidecar_path, serde_json::to_vec_pretty(&sidecar)?)
-        .context("write sidecar")?;
+    std::fs::write(&sidecar_path, serde_json::to_vec_pretty(&sidecar)?).context("write sidecar")?;
     println!(
         "# sidecar: {} | dump: {} (blake3 {dump_blake3}) | capture {run_secs:.0}s",
         sidecar_path.display(),

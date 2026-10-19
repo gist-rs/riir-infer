@@ -85,14 +85,7 @@ const CT: u32 = 2;
 /// are never written back — the guarded writeback makes them invisible).
 #[cfg(feature = "edlm_gpu")]
 #[cube(launch_unchecked)]
-fn matmul_f16b_cmma_f32(
-    a: &[f32],
-    b: &[f16],
-    out: &mut [f32],
-    m: u32,
-    n: u32,
-    p: u32,
-) {
+fn matmul_f16b_cmma_f32(a: &[f32], b: &[f16], out: &mut [f32], m: u32, n: u32, p: u32) {
     // X = M-tiles, Y = P-tiles (the f16b kernel's dispatch convention).
     let base_m = CUBE_POS_X * (RT * CMMA16);
     let base_p = CUBE_POS_Y * (CT * CMMA16);
@@ -360,14 +353,7 @@ impl MatmulF16bCmmaCubeCL {
 /// clamped-read form).
 #[cfg(feature = "edlm_gpu")]
 #[cube(launch_unchecked)]
-fn matmul_f16b_cmma_f32_sg8(
-    a: &[f32],
-    b: &[f16],
-    out: &mut [f32],
-    m: u32,
-    n: u32,
-    p: u32,
-) {
+fn matmul_f16b_cmma_f32_sg8(a: &[f32], b: &[f16], out: &mut [f32], m: u32, n: u32, p: u32) {
     // X = M-tiles (128 rows), Y = P-tiles (64 cols) — the f16b convention.
     let base_m = CUBE_POS_X * 128u32;
     let base_p = CUBE_POS_Y * 64u32;

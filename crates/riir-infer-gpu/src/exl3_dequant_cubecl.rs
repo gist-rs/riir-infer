@@ -2197,7 +2197,11 @@ mod tests {
                     .unwrap();
                     let cpu = layer.decode_w_rot_f32();
                     let trip = |what: &str, a: &[f32], b: &[f32]| -> String {
-                        match a.iter().zip(b).position(|(x, y)| x.to_bits() != y.to_bits()) {
+                        match a
+                            .iter()
+                            .zip(b)
+                            .position(|(x, y)| x.to_bits() != y.to_bits())
+                        {
                             Some(idx) => format!(
                                 "{}: first mismatch at elem {idx} (in {}, out {}): {:#x} vs {:#x}",
                                 what,

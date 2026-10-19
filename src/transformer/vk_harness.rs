@@ -9,7 +9,7 @@
 
 use std::path::Path;
 
-use anyhow::{bail, Context, Result};
+use anyhow::{Context, Result, bail};
 
 /// `log Σ exp(logits) − logits[target]` in f64 (the teacher-forced NLL the
 /// T1 bin established; f64 accumulation over f32 logits).
@@ -27,11 +27,7 @@ pub fn argmax(logits: &[f32]) -> usize {
         .iter()
         .enumerate()
         .fold((0, f32::NEG_INFINITY), |(bi, bv), (i, &v)| {
-            if v > bv {
-                (i, v)
-            } else {
-                (bi, bv)
-            }
+            if v > bv { (i, v) } else { (bi, bv) }
         })
         .0
 }
@@ -146,15 +142,22 @@ pub fn load_fitted_table(
     }
     rd = &rd[8..];
     fn u64at(rd: &[u8]) -> (u64, &[u8]) {
-        (u64::from_le_bytes(rd[..8].try_into().expect("8 bytes")), &rd[8..])
+        (
+            u64::from_le_bytes(rd[..8].try_into().expect("8 bytes")),
+            &rd[8..],
+        )
     }
     let (n_layer, rd) = u64at(rd);
     let (width, rd) = u64at(rd);
     let (rows, rd) = u64at(rd);
     let (vocab, rd) = u64at(rd);
     let (cal_tokens, rd) = u64at(rd);
-    let (n_layer, width, rows, vocab) =
-        (n_layer as usize, width as usize, rows as usize, vocab as usize);
+    let (n_layer, width, rows, vocab) = (
+        n_layer as usize,
+        width as usize,
+        rows as usize,
+        vocab as usize,
+    );
     if let Some((en, ew)) = expect
         && (n_layer, width) != (en, ew)
     {
@@ -186,7 +189,10 @@ pub fn load_fitted_table(
         data.push(f32::from_le_bytes(*c));
     }
     let table = katgpt_core::fitted_value_table::FittedTokenTable::from_rows(
-        n_layer, width, row_of_token, data,
+        n_layer,
+        width,
+        row_of_token,
+        data,
     );
     Ok((
         table,
@@ -291,7 +297,9 @@ pub fn build_niah_trial(
     let p3 = tok.encode(&text[..text.len() - tail_text.len()]).len();
     let total = toks.len();
     if p3 < p2 || p2 < p1 || total < p3 + 1 {
-        bail!("niah build: prefix-encode ranges not monotone (p1 {p1} p2 {p2} p3 {p3} total {total})");
+        bail!(
+            "niah build: prefix-encode ranges not monotone (p1 {p1} p2 {p2} p3 {p3} total {total})"
+        );
     }
     // The password subsequence: locate inside the needle by its own
     // prefix-diff (the password text sits after "The magic password is ").
@@ -307,7 +315,10 @@ pub fn build_niah_trial(
     // VERIFY the subsequence spells the password (the boundary-alignment
     // proof; a re-segmenting tokenizer fails loud here).
     let decoded = tok.decode(&password_tokens);
-    let digits = password.chars().filter(|c| c.is_ascii_digit()).collect::<String>();
+    let digits = password
+        .chars()
+        .filter(|c| c.is_ascii_digit())
+        .collect::<String>();
     if !decoded.replace('▁', " ").contains(&digits) {
         bail!(
             "niah build: password token span decodes to '{decoded}', wants digits '{digits}' — \
@@ -445,8 +456,7 @@ mod tests {
             );
             // The password span verifies (the boundary-alignment proof).
             let pw = tok.decode(&trial.password_tokens);
-            let digits: String =
-                password.chars().filter(|c| c.is_ascii_digit()).collect();
+            let digits: String = password.chars().filter(|c| c.is_ascii_digit()).collect();
             assert!(
                 pw.replace('▁', " ").contains(&digits),
                 "trial {t} password span '{pw}' lacks '{digits}'"

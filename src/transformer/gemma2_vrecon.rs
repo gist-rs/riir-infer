@@ -29,7 +29,7 @@
 //! promotion is katgpt-rs-side and waits on T3's gates; the W_V FLOP claim
 //! and the kernel levers are T4's lane.
 
-use katgpt_core::fitted_value_table::{reconstruct_v_from_rope_k, FittedTokenTable};
+use katgpt_core::fitted_value_table::{FittedTokenTable, reconstruct_v_from_rope_k};
 use katgpt_core::position_group_action::PositionGroupAction;
 
 use crate::transformer::gemma2::ValueStoreHook;
@@ -366,14 +366,16 @@ impl ValueStoreHook for VReconState {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use katgpt_core::fitted_value_table::{v_from_k_plus, VReadPath, read_v};
+    use katgpt_core::fitted_value_table::{VReadPath, read_v, v_from_k_plus};
 
     const HD: usize = 16;
     const N_KV: usize = 4;
     const KVD: usize = N_KV * HD;
 
     fn freq_table() -> Vec<f32> {
-        crate::rope::RopeFreqTable::new(10_000.0, HD).as_slice().to_vec()
+        crate::rope::RopeFreqTable::new(10_000.0, HD)
+            .as_slice()
+            .to_vec()
     }
 
     fn k_pre_row(seed: usize) -> Vec<f32> {
@@ -396,7 +398,9 @@ mod tests {
         let freq = freq_table();
         let action = HalfSplitRopeInverse::new(&freq);
         for pos in [0usize, 1, 3, 17, 255] {
-            let mut x: Vec<f32> = (0..HD).map(|i| ((pos * 13 + i * 5) % 9) as f32 - 4.0).collect();
+            let mut x: Vec<f32> = (0..HD)
+                .map(|i| ((pos * 13 + i * 5) % 9) as f32 - 4.0)
+                .collect();
             if pos == 0 {
                 x[2] = -0.0;
                 x[5] = 0.0;
@@ -414,10 +418,7 @@ mod tests {
                 );
             } else {
                 for (a, b) in back.iter().zip(&orig) {
-                    assert!(
-                        (a - b).abs() < 1e-4,
-                        "pos {pos}: round-trip {a} vs {b}"
-                    );
+                    assert!((a - b).abs() < 1e-4, "pos {pos}: round-trip {a} vs {b}");
                 }
             }
         }
@@ -473,10 +474,7 @@ mod tests {
                 assert_eq!(out, want, "pos 0: P3 == P2 bitwise");
             }
             for (a, b) in out.iter().zip(&want) {
-                assert!(
-                    (a - b).abs() < 1e-3,
-                    "pos {pos} λ{lam}: {a} vs {b}"
-                );
+                assert!((a - b).abs() < 1e-3, "pos {pos} λ{lam}: {a} vs {b}");
             }
         }
     }
@@ -530,15 +528,18 @@ mod tests {
             forward_rotate(&mut k, p, &freq);
             k_cache[p * KVD..(p + 1) * KVD].copy_from_slice(&k);
         }
-        let served: Vec<f32> =
-            ValueStoreHook::values_for_attention(&mut st, 1, 0, 2, &k_cache)
-                .expect("VReconState always overrides")
-                .to_vec();
+        let served: Vec<f32> = ValueStoreHook::values_for_attention(&mut st, 1, 0, 2, &k_cache)
+            .expect("VReconState always overrides")
+            .to_vec();
         assert_eq!(st.rows_served, 2);
         // Row 0: tracked → k̂ + 0.5·row (k̂ == k_pre bitwise at pos 0).
         for i in 0..KVD {
             let want = k_pre_row(4)[i] + 0.5 * row[i];
-            assert!((served[i] - want).abs() < 1e-3, "row0[{i}] {} vs {want}", served[i]);
+            assert!(
+                (served[i] - want).abs() < 1e-3,
+                "row0[{i}] {} vs {want}",
+                served[i]
+            );
         }
         // Row 1: miss → exact recovered k̂ (to rounding).
         for i in 0..KVD {

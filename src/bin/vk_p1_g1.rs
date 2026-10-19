@@ -51,7 +51,7 @@ use riir_infer_core::transformer::gemma2_calibration::{
 use riir_infer_core::transformer::gemma2_quantized::{
     MirrorRefresh, QuantizedKvMirror, forward_gemma2_f16_qkv,
 };
-use riir_infer_core::transformer::{forward_gemma2_f16, NoHook};
+use riir_infer_core::transformer::{NoHook, forward_gemma2_f16};
 use riir_infer_core::types::kv_dim;
 
 /// Chunk positions ≤ this count as "early" (the Gate-4 sink proxy).
@@ -161,7 +161,10 @@ fn main() -> Result<()> {
             "--eval-tokens" => eval_tokens = v.parse()?,
             "--seq-len" => seq_len = v.parse()?,
             "--bits" => {
-                bits_list = v.split(',').map(|s| s.trim().parse()).collect::<Result<_, _>>()?
+                bits_list = v
+                    .split(',')
+                    .map(|s| s.trim().parse())
+                    .collect::<Result<_, _>>()?
             }
             "--top-k" => top_k = v.parse()?,
             "--lambda-js" => lambda_js = v.parse()?,
@@ -340,7 +343,8 @@ fn main() -> Result<()> {
     let mut replay_mean: Vec<MeanRemovedValueCache<KVarNKVCache>> = bits_list
         .iter()
         .map(|&b| {
-            let inner = KVarNKVCache::with_config(&kvarn_config(n_layer, kvd, longest, b, tile_size));
+            let inner =
+                KVarNKVCache::with_config(&kvarn_config(n_layer, kvd, longest, b, tile_size));
             MeanRemovedValueCache::new(inner, &table, longest)
         })
         .collect();
@@ -353,7 +357,8 @@ fn main() -> Result<()> {
         f16_cache.reset();
         let t_n = chunk.len();
         for (pos, &token) in chunk.iter().enumerate() {
-            let logits = forward_gemma2_f16(&mut ctx, &weights, &mut f16_cache, token, pos, &config);
+            let logits =
+                forward_gemma2_f16(&mut ctx, &weights, &mut f16_cache, token, pos, &config);
             if pos + 1 < t_n {
                 f16_acc.score(logits, chunk[pos + 1], &rank, pos);
             }
@@ -385,11 +390,17 @@ fn main() -> Result<()> {
                     let off = (l * longest + pos) * kvd;
                     replay_plain[bi].dequantize_value_into(l, pos, &mut row);
                     for (h, s) in acc.sse_v_plain[l].iter_mut().enumerate() {
-                        *s += sq_diff_sum(&cap_v[off + h * hd..off + (h + 1) * hd], &row[h * hd..(h + 1) * hd]);
+                        *s += sq_diff_sum(
+                            &cap_v[off + h * hd..off + (h + 1) * hd],
+                            &row[h * hd..(h + 1) * hd],
+                        );
                     }
                     replay_mean[bi].dequantize_value_into(l, pos, &mut row);
                     for (h, s) in acc.sse_v_mean[l].iter_mut().enumerate() {
-                        *s += sq_diff_sum(&cap_v[off + h * hd..off + (h + 1) * hd], &row[h * hd..(h + 1) * hd]);
+                        *s += sq_diff_sum(
+                            &cap_v[off + h * hd..off + (h + 1) * hd],
+                            &row[h * hd..(h + 1) * hd],
+                        );
                     }
                     replay_plain[bi].dequantize_key_into(l, pos, &mut row);
                     acc.sse_k_plain[l] += sq_diff_sum(&cap_k[off..off + kvd], &row);
@@ -433,7 +444,13 @@ fn main() -> Result<()> {
                     for (pos, &token) in chunk.iter().enumerate() {
                         cache.set_token(pos, token as u32);
                         let logits = forward_gemma2_f16_qkv(
-                            &mut ctx, &weights, &mut cache, &mut mirror, token, pos, &config,
+                            &mut ctx,
+                            &weights,
+                            &mut cache,
+                            &mut mirror,
+                            token,
+                            pos,
+                            &config,
                             Some(&refresh),
                         );
                         if pos + 1 < chunk.len() {
@@ -448,7 +465,13 @@ fn main() -> Result<()> {
                     mirror.reset();
                     for (pos, &token) in chunk.iter().enumerate() {
                         let logits = forward_gemma2_f16_qkv(
-                            &mut ctx, &weights, &mut cache, &mut mirror, token, pos, &config,
+                            &mut ctx,
+                            &weights,
+                            &mut cache,
+                            &mut mirror,
+                            token,
+                            pos,
+                            &config,
                             Some(&refresh),
                         );
                         if pos + 1 < chunk.len() {
@@ -471,7 +494,9 @@ fn main() -> Result<()> {
 
     // ── Gates + report ──
     let mut out = String::new();
-    out.push_str("# Issue 013 T1 pilot — fitted-token-value P1 on gemma-2-2b (pre-registered gates)\n\n");
+    out.push_str(
+        "# Issue 013 T1 pilot — fitted-token-value P1 on gemma-2-2b (pre-registered gates)\n\n",
+    );
     out.push_str(&format!(
         "fixture: {} | corpus: {} | cal {} tok / eval {} tok (held-out) | seq [BOS]+{} | λ_js={lambda_js} | top_k={top_k} (m={m_cov:.4}) | bits {bits_list:?} | tile {tile_size}\n\n",
         gguf_path.display(),
@@ -505,7 +530,12 @@ fn main() -> Result<()> {
         let acc = &mse[bi];
         let mut mae = 0.0f64;
         let mut rows = String::new();
-        for (l, (sp, sm)) in acc.sse_v_plain.iter().zip(acc.sse_v_mean.iter()).enumerate() {
+        for (l, (sp, sm)) in acc
+            .sse_v_plain
+            .iter()
+            .zip(acc.sse_v_mean.iter())
+            .enumerate()
+        {
             let mp = sp.iter().sum::<f64>();
             let mm = sm.iter().sum::<f64>();
             let drop = if mp > 1e-12 { 1.0 - mm / mp } else { 0.0 };
@@ -531,7 +561,11 @@ fn main() -> Result<()> {
             .sum();
         out.push_str(&format!(
             "\nG0 wiring check bits={bits}: Σ|K SSE plain − mean| = {g0_max:e} — {}\n",
-            if g0_max == 0.0 { "bitwise OK" } else { "MISMATCH (wiring bug)" }
+            if g0_max == 0.0 {
+                "bitwise OK"
+            } else {
+                "MISMATCH (wiring bug)"
+            }
         ));
     }
 
@@ -539,11 +573,7 @@ fn main() -> Result<()> {
     out.push_str("\n## Gate 2/3/4 — PPL + band shares + early-position NLL\n\n| arm | ppl | Δ vs plain | band 0–1k share | band 1k–8k share | band tail share | early(0..7) mean NLL |\n|---|---|---|---|---|---|---|\n");
     let mut arm_rows: Vec<(String, &PplAcc)> = vec![("f16".to_string(), &f16_acc)];
     for q in &quant_results {
-        let name = format!(
-            "{}{}",
-            if q.mean { "mean" } else { "plain" },
-            q.bits
-        );
+        let name = format!("{}{}", if q.mean { "mean" } else { "plain" }, q.bits);
         arm_rows.push((name, &q.acc));
     }
     let ppl_of = |name: &str| -> f64 {
@@ -554,9 +584,7 @@ fn main() -> Result<()> {
     };
     for (name, acc) in &arm_rows {
         let tot = acc.nll.max(1e-12);
-        let delta = if let Some(bits) = name
-            .strip_prefix("mean")
-            .and_then(|s| s.parse::<u8>().ok())
+        let delta = if let Some(bits) = name.strip_prefix("mean").and_then(|s| s.parse::<u8>().ok())
         {
             let plain = ppl_of(&format!("plain{bits}"));
             acc.ppl() - plain
@@ -567,7 +595,11 @@ fn main() -> Result<()> {
             Some(bits_str) => {
                 let bits: u8 = bits_str.parse().unwrap_or(0);
                 let plain = ppl_of(&format!("plain{bits}"));
-                if acc.ppl() <= plain { "G2 PASS" } else { "G2 FAIL" }
+                if acc.ppl() <= plain {
+                    "G2 PASS"
+                } else {
+                    "G2 FAIL"
+                }
             }
             None => "control",
         };
@@ -577,7 +609,11 @@ fn main() -> Result<()> {
             acc.band_nll[0] / tot,
             acc.band_nll[1] / tot,
             acc.band_nll[2] / tot,
-            if acc.early_n > 0 { acc.early_nll / acc.early_n as f64 } else { f64::NAN }
+            if acc.early_n > 0 {
+                acc.early_nll / acc.early_n as f64
+            } else {
+                f64::NAN
+            }
         ));
     }
     out.push_str("\nG3/G4 are pilot-slice readouts (the full per-family retention walk + the kv_sink_window check stay deferred; see the issue). A 2-bit PPL regression beside a Gate-1 pass is the recorded absmax-caveat confirmation, not a contradiction.\n");

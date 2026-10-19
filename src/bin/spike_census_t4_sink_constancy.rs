@@ -177,7 +177,10 @@ fn main() -> Result<()> {
     for (name, piece) in CLASSES {
         let enc = tok.encode(piece);
         if enc.len() != 1 {
-            println!("# class '{name}': piece '{piece}' encodes to {} tokens — ABSENT", enc.len());
+            println!(
+                "# class '{name}': piece '{piece}' encodes to {} tokens — ABSENT",
+                enc.len()
+            );
             continue;
         }
         classes.push(ClassData {
@@ -219,7 +222,10 @@ fn main() -> Result<()> {
             }
             // Record meta now (occurrence committed to this window).
             for &(pos, ci) in &map {
-                classes[ci as usize].meta.push(OccMeta { window: window_idx, pos });
+                classes[ci as usize].meta.push(OccMeta {
+                    window: window_idx,
+                    pos,
+                });
             }
             windows.push((pi, chunk.to_vec(), map));
             window_idx += 1;
@@ -247,7 +253,11 @@ fn main() -> Result<()> {
     let per_layer = vec![kvd; n_layer];
     let mut cache =
         MultiLayerKVCache::new_with_per_layer_kv_dim_bounded(&config, &per_layer, args.seq_len);
-    let mut cap = SinkCapture { kvd, window_map: Vec::new(), classes };
+    let mut cap = SinkCapture {
+        kvd,
+        window_map: Vec::new(),
+        classes,
+    };
     let t1 = std::time::Instant::now();
     for (_, toks, map) in &windows {
         cap.begin_window(map.clone());
@@ -265,8 +275,18 @@ fn main() -> Result<()> {
     // Row/meta alignment is the harness's core invariant.
     for cd in &cap.classes {
         for l in 0..n_layer {
-            assert_eq!(cd.k_rows[l].len(), cd.meta.len(), "k rows misaligned: {} layer {l}", cd.name);
-            assert_eq!(cd.v_rows[l].len(), cd.meta.len(), "v rows misaligned: {} layer {l}", cd.name);
+            assert_eq!(
+                cd.k_rows[l].len(),
+                cd.meta.len(),
+                "k rows misaligned: {} layer {l}",
+                cd.name
+            );
+            assert_eq!(
+                cd.v_rows[l].len(),
+                cd.meta.len(),
+                "v rows misaligned: {} layer {l}",
+                cd.name
+            );
         }
     }
 
@@ -318,8 +338,10 @@ fn main() -> Result<()> {
             for (l, layer_rows) in rows.iter().enumerate() {
                 for h in 0..n_kv {
                     let mut pairs = Vec::with_capacity(n * (n - 1) / 2);
-                    let mut vecs: Vec<Vec<f32>> =
-                        layer_rows.iter().map(|r| slice(r, h, hd).to_vec()).collect();
+                    let mut vecs: Vec<Vec<f32>> = layer_rows
+                        .iter()
+                        .map(|r| slice(r, h, hd).to_vec())
+                        .collect();
                     for i in 0..n {
                         for j in (i + 1)..n {
                             pairs.push(cosine(&vecs[i], &vecs[j]));
@@ -363,8 +385,8 @@ fn main() -> Result<()> {
             }
             let pooled_median = median(pooled);
             let min_cell_median = cell_medians.iter().cloned().fold(f64::INFINITY, f64::min);
-            let cell_pass_frac =
-                cell_medians.iter().filter(|&&m| m > 0.99).count() as f64 / cell_medians.len() as f64;
+            let cell_pass_frac = cell_medians.iter().filter(|&&m| m > 0.99).count() as f64
+                / cell_medians.len() as f64;
             Some(Agg {
                 pooled_median,
                 min_cell_median,
@@ -389,7 +411,19 @@ fn main() -> Result<()> {
     type Formatted = (String, String, String, String, String);
     println!(
         "# {:<10} {:>4} {:>4} | {:>10} {:>10} {:>7} {:>6} {:>6} | {:>10} {:>10} {:>7} {:>6} {:>6}",
-        "class", "occ", "thin", "K pooled", "K mincell", "K cells", "K t1", "K PR", "V pooled", "V mincell", "V cells", "V t1", "V PR"
+        "class",
+        "occ",
+        "thin",
+        "K pooled",
+        "K mincell",
+        "K cells",
+        "K t1",
+        "K PR",
+        "V pooled",
+        "V mincell",
+        "V cells",
+        "V t1",
+        "V PR"
     );
     for v in &verdicts {
         let fmt = |a: &Option<Agg>| -> Formatted {
@@ -414,7 +448,19 @@ fn main() -> Result<()> {
         let (vp, vm, vc, vt1, vpr) = fmt(&v.v);
         println!(
             "# {:<10} {:>4} {:>4} | {:>10} {:>10} {:>7} {:>6} {:>6} | {:>10} {:>10} {:>7} {:>6} {:>6}",
-            v.name, v.n, if v.thin { "Y" } else { "" }, kp, km, kc, kt1, kpr, vp, vm, vc, vt1, vpr
+            v.name,
+            v.n,
+            if v.thin { "Y" } else { "" },
+            kp,
+            km,
+            kc,
+            kt1,
+            kpr,
+            vp,
+            vm,
+            vc,
+            vt1,
+            vpr
         );
     }
     let k_all = verdicts
@@ -436,7 +482,13 @@ fn main() -> Result<()> {
             (None, Some(vv)) => format!("K n/a V {}", if vv.pass { "PASS" } else { "MISS" }),
             (None, None) => "UNMEASURABLE (<2 occurrences)".to_string(),
         };
-        println!("#   {:<10} occ {:>3}{} → {}", v.name, v.n, if v.thin { " THIN" } else { "" }, kv);
+        println!(
+            "#   {:<10} occ {:>3}{} → {}",
+            v.name,
+            v.n,
+            if v.thin { " THIN" } else { "" },
+            kv
+        );
     }
     println!(
         "# T4 overall: K axis {} | V axis {} — {}",
@@ -479,7 +531,12 @@ fn main() -> Result<()> {
         let agg_json = |tag: &str, a: &Option<Agg>| match a {
             Some(a) => format!(
                 "      \"{tag}\": {{\"pooled_median_cos\": {:.6}, \"min_cell_median_cos\": {:.6}, \"cell_pass_frac\": {:.4}, \"median_top1_share\": {:.6}, \"median_pr\": {:.4}, \"pass\": {}}}",
-                a.pooled_median, a.min_cell_median, a.cell_pass_frac, a.median_top1, a.median_pr, a.pass
+                a.pooled_median,
+                a.min_cell_median,
+                a.cell_pass_frac,
+                a.median_top1,
+                a.median_pr,
+                a.pass
             ),
             None => format!("      \"{tag}\": null"),
         };
@@ -504,7 +561,10 @@ fn main() -> Result<()> {
             ));
         }
         j.push_str("      ]\n");
-        j.push_str(&format!("    }}{}\n", if vi + 1 < verdicts.len() { "," } else { "" }));
+        j.push_str(&format!(
+            "    }}{}\n",
+            if vi + 1 < verdicts.len() { "," } else { "" }
+        ));
     }
     j.push_str("  ],\n");
     j.push_str(&format!(
@@ -512,7 +572,9 @@ fn main() -> Result<()> {
     ));
     std::fs::write(&sidecar_path, &j).context("write sidecar")?;
     let digest = blake3::hash(j.as_bytes());
-    let blake_path = args.out.join(format!("{model_name}.sink_constancy.json.blake3"));
+    let blake_path = args
+        .out
+        .join(format!("{model_name}.sink_constancy.json.blake3"));
     std::fs::write(
         &blake_path,
         format!(
@@ -607,7 +669,11 @@ fn cosine(a: &[f32], b: &[f32]) -> f64 {
 
 /// (median, mean, min) of a pair-cosine sample.
 fn triple(v: &[f64]) -> (f64, f64, f64) {
-    (median(v), v.iter().sum::<f64>() / v.len() as f64, v.iter().cloned().fold(f64::INFINITY, f64::min))
+    (
+        median(v),
+        v.iter().sum::<f64>() / v.len() as f64,
+        v.iter().cloned().fold(f64::INFINITY, f64::min),
+    )
 }
 
 fn median(v: &[f64]) -> f64 {
@@ -652,7 +718,11 @@ fn collapse_stats(vecs: &mut [Vec<f32>]) -> (f64, f64) {
     }
     let lam_unc = jacobi_eigenvalues(&mut g, n);
     let sum: f64 = lam_unc.iter().map(|l| l.max(0.0)).sum();
-    let top1 = if sum > 0.0 { lam_unc.iter().cloned().fold(0f64, f64::max) / sum } else { 0.0 };
+    let top1 = if sum > 0.0 {
+        lam_unc.iter().cloned().fold(0f64, f64::max) / sum
+    } else {
+        0.0
+    };
 
     // Centered Gram.
     let mut mean = vec![0f64; dim];
@@ -680,10 +750,13 @@ fn collapse_stats(vecs: &mut [Vec<f32>]) -> (f64, f64) {
     }
     let lam_c = jacobi_eigenvalues(&mut gc, n);
     let s1: f64 = lam_c.iter().map(|l| l.max(0.0)).sum();
-    let s2: f64 = lam_c.iter().map(|l| {
-        let l = l.max(0.0);
-        l * l
-    }).sum();
+    let s2: f64 = lam_c
+        .iter()
+        .map(|l| {
+            let l = l.max(0.0);
+            l * l
+        })
+        .sum();
     let pr = if s2 > 0.0 { s1 * s1 / s2 } else { 1.0 };
     (top1, pr)
 }
@@ -741,7 +814,10 @@ fn self_test() -> Result<()> {
     lam.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
     let r2 = 2.0f64.sqrt();
     for (got, want) in lam.iter().zip([2.0 - r2, 2.0, 2.0 + r2]) {
-        assert!((got - want).abs() < 1e-9, "jacobi eigenvalue {got} != {want}");
+        assert!(
+            (got - want).abs() < 1e-9,
+            "jacobi eigenvalue {got} != {want}"
+        );
     }
     // 2. Cosine known-answers.
     let e1 = vec![1.0f32, 0.0, 0.0];
@@ -765,6 +841,8 @@ fn self_test() -> Result<()> {
     let (t1o, pro) = collapse_stats(&mut orth);
     assert!((t1o - 0.25).abs() < 1e-9, "top1 {t1o}");
     assert!((pro - 3.0).abs() < 1e-6, "pr {pro}");
-    println!("# self-test: 4/4 arms PASS (jacobi, cosine, collapse-identical, collapse-orthogonal)");
+    println!(
+        "# self-test: 4/4 arms PASS (jacobi, cosine, collapse-identical, collapse-orthogonal)"
+    );
     Ok(())
 }

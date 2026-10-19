@@ -71,11 +71,9 @@ use riir_infer_core::quant::kvq_harness::{
 };
 use riir_infer_core::tokenizer::SentencePieceGgufTokenizer;
 use riir_infer_core::transformer::ForwardContext;
-use riir_infer_core::transformer::gemma2_calibration::load_gemma2_f16_direct;
-use riir_infer_core::transformer::gemma2_quantized::{
-    QuantizedKvMirror, forward_gemma2_f16_qkv,
-};
 use riir_infer_core::transformer::forward_gemma2_f16;
+use riir_infer_core::transformer::gemma2_calibration::load_gemma2_f16_direct;
+use riir_infer_core::transformer::gemma2_quantized::{QuantizedKvMirror, forward_gemma2_f16_qkv};
 use riir_infer_core::types::kv_dim;
 
 /// Score the eval set on the PLAIN forward (MultiLayerKVCache).
@@ -141,10 +139,8 @@ fn score_quantized<C: QuantizedKVCache>(
 }
 
 fn main() -> Result<()> {
-    let args = kvq_harness::parse_args(
-        "../riir-train/data/gemma-2-2b-it-f16.gguf",
-        "/tmp/t3_kv_ab",
-    )?;
+    let args =
+        kvq_harness::parse_args("../riir-train/data/gemma-2-2b-it-f16.gguf", "/tmp/t3_kv_ab")?;
 
     // ── Load model + tokenizer from ONE open GGUF (the calib-dump shape) ──
     let t0 = std::time::Instant::now();
@@ -282,10 +278,16 @@ fn main() -> Result<()> {
             "#   layer {l}: k={:?} blocks {:?} max {:?} | v={:?} blocks {:?} max {:?}",
             meas_k[l],
             meas_k[l].iter().map(|c| c / 32).collect::<Vec<_>>(),
-            meas_max_k[l].iter().map(|v| format!("{v:.1}")).collect::<Vec<_>>(),
+            meas_max_k[l]
+                .iter()
+                .map(|v| format!("{v:.1}"))
+                .collect::<Vec<_>>(),
             meas_v[l],
             meas_v[l].iter().map(|c| c / 32).collect::<Vec<_>>(),
-            meas_max_v[l].iter().map(|v| format!("{v:.1}")).collect::<Vec<_>>(),
+            meas_max_v[l]
+                .iter()
+                .map(|v| format!("{v:.1}"))
+                .collect::<Vec<_>>(),
         );
     }
 
@@ -303,13 +305,29 @@ fn main() -> Result<()> {
     ));
     let sets_json = |sets: &[Vec<usize>]| -> String {
         sets.iter()
-            .map(|s| format!("[{}]", s.iter().map(|c| c.to_string()).collect::<Vec<_>>().join(", ")))
+            .map(|s| {
+                format!(
+                    "[{}]",
+                    s.iter()
+                        .map(|c| c.to_string())
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                )
+            })
             .collect::<Vec<_>>()
             .join(", ")
     };
     let row_json = |rows: &[Vec<f32>]| -> String {
         rows.iter()
-            .map(|r| format!("[{}]", r.iter().map(|v| format!("{v:.6}")).collect::<Vec<_>>().join(", ")))
+            .map(|r| {
+                format!(
+                    "[{}]",
+                    r.iter()
+                        .map(|v| format!("{v:.6}"))
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                )
+            })
             .collect::<Vec<_>>()
             .join(", ")
     };
@@ -339,7 +357,8 @@ fn main() -> Result<()> {
 
     let t2 = std::time::Instant::now();
     let mut plain_cache = MultiLayerKVCache::new(&config);
-    let (plain_nlls, en, en_n) = score_plain(&families, &mut ctx, &weights, &mut plain_cache, &config);
+    let (plain_nlls, en, en_n) =
+        score_plain(&families, &mut ctx, &weights, &mut plain_cache, &config);
     let plain = build_arm("plain", &families, plain_nlls, en, en_n);
     println!(
         "# arm plain: ppl {:.4} ({:.1}s)",
@@ -350,29 +369,71 @@ fn main() -> Result<()> {
     let t3 = std::time::Instant::now();
     let mut mirror = QuantizedKvMirror::new(&config, args.seq_len);
     let mut raw_cache = RawF32KvCache::new(n_layer, args.seq_len, kvd);
-    let (nlls, en, en_n) = score_quantized(&families, &mut ctx, &weights, &mut raw_cache, &mut mirror, &config);
+    let (nlls, en, en_n) = score_quantized(
+        &families,
+        &mut ctx,
+        &weights,
+        &mut raw_cache,
+        &mut mirror,
+        &config,
+    );
     let f16 = build_arm("f16", &families, nlls, en, en_n);
-    println!("# arm f16: ppl {:.4} ({:.1}s)", f16.aggregate_ppl(), t3.elapsed().as_secs_f32());
+    println!(
+        "# arm f16: ppl {:.4} ({:.1}s)",
+        f16.aggregate_ppl(),
+        t3.elapsed().as_secs_f32()
+    );
 
     let t4 = std::time::Instant::now();
     let mut q8_cache = Q8AbsmaxKvCache::new(n_layer, args.seq_len, kvd);
-    let (nlls, en, en_n) = score_quantized(&families, &mut ctx, &weights, &mut q8_cache, &mut mirror, &config);
+    let (nlls, en, en_n) = score_quantized(
+        &families,
+        &mut ctx,
+        &weights,
+        &mut q8_cache,
+        &mut mirror,
+        &config,
+    );
     let q8 = build_arm("q8", &families, nlls, en, en_n);
-    println!("# arm q8: ppl {:.4} ({:.1}s)", q8.aggregate_ppl(), t4.elapsed().as_secs_f32());
+    println!(
+        "# arm q8: ppl {:.4} ({:.1}s)",
+        q8.aggregate_ppl(),
+        t4.elapsed().as_secs_f32()
+    );
 
     let t5 = std::time::Instant::now();
-    let mut meas_cache =
-        ExemptQ8KvCache::new(n_layer, args.seq_len, kvd, meas_k, meas_v, args.s);
-    let (nlls, en, en_n) = score_quantized(&families, &mut ctx, &weights, &mut meas_cache, &mut mirror, &config);
+    let mut meas_cache = ExemptQ8KvCache::new(n_layer, args.seq_len, kvd, meas_k, meas_v, args.s);
+    let (nlls, en, en_n) = score_quantized(
+        &families,
+        &mut ctx,
+        &weights,
+        &mut meas_cache,
+        &mut mirror,
+        &config,
+    );
     let meas = build_arm("exempt", &families, nlls, en, en_n);
-    println!("# arm exempt: ppl {:.4} ({:.1}s)", meas.aggregate_ppl(), t5.elapsed().as_secs_f32());
+    println!(
+        "# arm exempt: ppl {:.4} ({:.1}s)",
+        meas.aggregate_ppl(),
+        t5.elapsed().as_secs_f32()
+    );
 
     let t6 = std::time::Instant::now();
-    let mut rand_cache =
-        ExemptQ8KvCache::new(n_layer, args.seq_len, kvd, rand_k, rand_v, args.s);
-    let (nlls, en, en_n) = score_quantized(&families, &mut ctx, &weights, &mut rand_cache, &mut mirror, &config);
+    let mut rand_cache = ExemptQ8KvCache::new(n_layer, args.seq_len, kvd, rand_k, rand_v, args.s);
+    let (nlls, en, en_n) = score_quantized(
+        &families,
+        &mut ctx,
+        &weights,
+        &mut rand_cache,
+        &mut mirror,
+        &config,
+    );
     let rand = build_arm("exempt_rand", &families, nlls, en, en_n);
-    println!("# arm exempt_rand: ppl {:.4} ({:.1}s)", rand.aggregate_ppl(), t6.elapsed().as_secs_f32());
+    println!(
+        "# arm exempt_rand: ppl {:.4} ({:.1}s)",
+        rand.aggregate_ppl(),
+        t6.elapsed().as_secs_f32()
+    );
 
     // ── Report ──
     let g0 = f16.mean_abs_delta(&plain);

@@ -53,7 +53,10 @@ impl Arm {
         let t0 = Instant::now();
         let (mut config, weights) =
             load_qwen_deltanet_ternary_weights_gguf(std::path::Path::new(gguf)).expect("load");
-        eprintln!("[q2-gate] load (q2={q2}) {:.1}s", t0.elapsed().as_secs_f64());
+        eprintln!(
+            "[q2-gate] load (q2={q2}) {:.1}s",
+            t0.elapsed().as_secs_f64()
+        );
         config.block_size = block_size;
         let arm = Self {
             cache: HybridCache::with_layer_types(&config, &weights.layer_types),
@@ -119,17 +122,37 @@ fn q2_resident_is_bit_identical_and_faster_on_bonsai2() {
     let tok = BpeTokenizer::from_gguf(&GgufFile::open(std::path::Path::new(&gguf)).expect("gguf"))
         .expect("tokenizer");
     let ids = tok.encode(&text);
-    assert!(ids.len() > n_pos + 1, "corpus too short: {} tokens", ids.len());
+    assert!(
+        ids.len() > n_pos + 1,
+        "corpus too short: {} tokens",
+        ids.len()
+    );
 
     set_ternary_q8_act(true);
     let block = n_pos + FREE_DECODE_STEPS + 1;
     let (config, mut planes) = Arm::load(&gguf, false, block);
     let (_, mut q2) = Arm::load(&gguf, true, block);
     set_ternary_q2_resident(true);
-    let n_proj = q2.weights.layers.iter().flat_map(|l| l.projections()).filter(|p| p.rows() > 0).count();
-    assert_eq!(planes.q2_projections(), 0, "planes arm must hold no Q2 projections");
-    assert!(q2.q2_projections() > 0, "q2 arm holds no Q2 projections — the switch did nothing");
-    eprintln!("[q2-gate] q2 arm: {}/{n_proj} projections raw-Q2", q2.q2_projections());
+    let n_proj = q2
+        .weights
+        .layers
+        .iter()
+        .flat_map(|l| l.projections())
+        .filter(|p| p.rows() > 0)
+        .count();
+    assert_eq!(
+        planes.q2_projections(),
+        0,
+        "planes arm must hold no Q2 projections"
+    );
+    assert!(
+        q2.q2_projections() > 0,
+        "q2 arm holds no Q2 projections — the switch did nothing"
+    );
+    eprintln!(
+        "[q2-gate] q2 arm: {}/{n_proj} projections raw-Q2",
+        q2.q2_projections()
+    );
 
     let rope = RopeFreqTable::new(config.rope_theta, effective_rotary_dim(&config));
     let vocab = config.vocab_size;
@@ -175,7 +198,13 @@ fn q2_resident_is_bit_identical_and_faster_on_bonsai2() {
     );
     eprintln!("[q2-gate] greedy {FREE_DECODE_STEPS} steps: first divergence {div:?} (bar None)");
 
-    assert_eq!(mismatched, 0, "G1: {mismatched}/{n_pos} positions not bit-identical");
+    assert_eq!(
+        mismatched, 0,
+        "G1: {mismatched}/{n_pos} positions not bit-identical"
+    );
     assert_eq!(div, None, "G1: greedy decode diverged at {div:?}");
-    assert!(ratio <= MAX_TIME_RATIO, "G2 median ratio {ratio:.3} > {MAX_TIME_RATIO}");
+    assert!(
+        ratio <= MAX_TIME_RATIO,
+        "G2 median ratio {ratio:.3} > {MAX_TIME_RATIO}"
+    );
 }

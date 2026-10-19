@@ -131,7 +131,13 @@ pub fn hf_fetch(rel: &str, dest: &Path) -> Result<(), String> {
     let url = format!("https://huggingface.co/{ARTIFACT_REPO}/resolve/{ARTIFACT_REVISION}/{rel}");
     let tmp = dest.with_extension("part");
     let status = std::process::Command::new("curl")
-        .args(["--location", "--silent", "--show-error", "--fail", "--output"])
+        .args([
+            "--location",
+            "--silent",
+            "--show-error",
+            "--fail",
+            "--output",
+        ])
         .arg(&tmp)
         .arg(&url)
         .status()
@@ -173,7 +179,9 @@ pub fn ensure_artifacts_with<E: std::fmt::Display>(
 ) -> std::io::Result<PathBuf> {
     std::fs::create_dir_all(dir)?;
     let marker = marker_path(dir);
-    let all_sized = table.iter().all(|(rel, _, size)| size_ok(&dir.join(rel), *size));
+    let all_sized = table
+        .iter()
+        .all(|(rel, _, size)| size_ok(&dir.join(rel), *size));
     if marker.is_file() && all_sized {
         return Ok(dir.to_path_buf());
     }
@@ -214,9 +222,8 @@ fn install<E: std::fmt::Display>(
         } else {
             dir.join(rel)
         };
-        let meta = std::fs::metadata(&src).map_err(|e| {
-            std::io::Error::other(format!("clef artifacts: {rel} missing: {e}"))
-        })?;
+        let meta = std::fs::metadata(&src)
+            .map_err(|e| std::io::Error::other(format!("clef artifacts: {rel} missing: {e}")))?;
         if meta.len() != *size {
             return Err(std::io::Error::other(format!(
                 "clef artifacts: {rel} size {} vs pinned {size} — refusing (never a silent \
@@ -239,8 +246,9 @@ fn install<E: std::fmt::Display>(
             if let Some(parent) = dest.parent() {
                 std::fs::create_dir_all(parent)?;
             }
-            std::fs::rename(&src, &dest)
-                .map_err(|e| std::io::Error::other(format!("clef artifacts: install {rel}: {e}")))?;
+            std::fs::rename(&src, &dest).map_err(|e| {
+                std::io::Error::other(format!("clef artifacts: install {rel}: {e}"))
+            })?;
         }
     }
     // Everything present and verified — write the marker LAST (tmp +
@@ -274,7 +282,9 @@ mod tests {
     }
 
     fn borrow(t: &[(String, String, u64)]) -> Vec<(&str, &str, u64)> {
-        t.iter().map(|(r, p, s)| (r.as_str(), p.as_str(), *s)).collect()
+        t.iter()
+            .map(|(r, p, s)| (r.as_str(), p.as_str(), *s))
+            .collect()
     }
 
     /// A truthful mock wire: writes the synthetic manifest's exact
@@ -352,7 +362,10 @@ mod tests {
             .filter_map(Result::ok)
             .filter(|e| e.file_name().to_string_lossy().starts_with(".staging-"))
             .collect();
-        assert!(staging.is_empty(), "staging tree must be cleaned: {staging:?}");
+        assert!(
+            staging.is_empty(),
+            "staging tree must be cleaned: {staging:?}"
+        );
 
         let _ = std::fs::remove_dir_all(&tmp);
     }

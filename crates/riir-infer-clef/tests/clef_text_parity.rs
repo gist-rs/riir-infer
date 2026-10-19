@@ -26,7 +26,10 @@
 //! cargo test -p riir-infer-clef --features clef-ane --test clef_text_parity -- --ignored --nocapture
 //! ```
 
-use riir_infer_clef::lane::{ClefConfig, ClefQuestion, ClefText, ClefTokenizer, artifacts_dir, compute_units_from_env, encode};
+use riir_infer_clef::lane::{
+    ClefConfig, ClefQuestion, ClefText, ClefTokenizer, artifacts_dir, compute_units_from_env,
+    encode,
+};
 use std::collections::BTreeMap;
 
 /// The capture file's BLAKE3 (plan 619 T2.1 — the pin the gate asserts).
@@ -126,11 +129,13 @@ fn argmax(values: &[f64]) -> usize {
 #[ignore = "real wire: needs the pinned artifact tree + the compiled packages (cached after the first run)"]
 fn clef_text_parity_vs_frozen_captures() {
     let manifest = env!("CARGO_MANIFEST_DIR");
-    let fixture_path = std::path::Path::new(manifest)
-        .join("tests/fixtures/clef_text/parity.jsonl");
+    let fixture_path = std::path::Path::new(manifest).join("tests/fixtures/clef_text/parity.jsonl");
     let raw = std::fs::read(&fixture_path).expect("parity.jsonl present");
     let digest = blake3_hex(&raw);
-    assert_eq!(digest, PARITY_BLAKE3, "the capture pin drifted — the reference moved, re-derive before trusting any parity verdict");
+    assert_eq!(
+        digest, PARITY_BLAKE3,
+        "the capture pin drifted — the reference moved, re-derive before trusting any parity verdict"
+    );
 
     let text = String::from_utf8(raw).expect("utf8");
     let mut lines = text.lines();
@@ -146,7 +151,10 @@ fn clef_text_parity_vs_frozen_captures() {
     let dir = match artifacts_dir() {
         Ok(dir) if dir.join("config.json").is_file() => dir,
         Ok(dir) => {
-            println!("SKIP (loud): artifact tree not installed under {} — run the T1.3 install once", dir.display());
+            println!(
+                "SKIP (loud): artifact tree not installed under {} — run the T1.3 install once",
+                dir.display()
+            );
             return;
         }
         Err(e) => {
@@ -211,7 +219,8 @@ fn clef_text_parity_vs_frozen_captures() {
         // Pre-check the encoder agreement itself: the same record must
         // hit the same token count (hence the same bucket) before any
         // logit comparison means anything.
-        let encoded = encode(&tokenizer, state, &parsed, max_length).expect("our encoder answers every captured record");
+        let encoded = encode(&tokenizer, state, &parsed, max_length)
+            .expect("our encoder answers every captured record");
         let n = encoded.input_ids.len();
         let expected_tokens = record["output"]["tokens"].as_u64().expect("tokens") as usize;
         assert_eq!(
@@ -224,7 +233,10 @@ fn clef_text_parity_vs_frozen_captures() {
             .find(|b| **b >= n)
             .copied()
             .expect("record fits the largest bucket");
-        assert_eq!(our_bucket, expected_bucket, "{id}: bucket selection diverges");
+        assert_eq!(
+            our_bucket, expected_bucket,
+            "{id}: bucket selection diverges"
+        );
 
         let answers = runtime
             .answer(state, &parsed)
@@ -238,13 +250,11 @@ fn clef_text_parity_vs_frozen_captures() {
         );
         for (ours, theirs) in answers.iter().zip(&captured) {
             questions += 1;
-            assert_eq!(
-                ours.question_id, theirs.id,
-                "{id}: question order diverges"
-            );
+            assert_eq!(ours.question_id, theirs.id, "{id}: question order diverges");
             assert_eq!(
                 ours.option_ids, theirs.option_ids,
-                "{id}/{}: option order diverges (Clef's scoring order is the wire)", theirs.id
+                "{id}/{}: option order diverges (Clef's scoring order is the wire)",
+                theirs.id
             );
             for (o, t) in ours.probabilities.iter().zip(&theirs.probabilities) {
                 drifts.push((*o as f64 - *t).abs());
@@ -253,7 +263,10 @@ fn clef_text_parity_vs_frozen_captures() {
             for (o, t) in ours.logits.iter().zip(
                 record["output"]["answers"]
                     .as_array()
-                    .and_then(|a| a.iter().find(|a| a["id"].as_str() == Some(ours.question_id.as_str())))
+                    .and_then(|a| {
+                        a.iter()
+                            .find(|a| a["id"].as_str() == Some(ours.question_id.as_str()))
+                    })
                     .and_then(|a| a["logits_bits"].as_array())
                     .expect("captured logits for the answer"),
             ) {
@@ -317,9 +330,18 @@ fn clef_text_parity_vs_frozen_captures() {
     // what must NOT happen silently is the walk collapsing to a green
     // zero (the katgpt-rs `#![cfg]` green-zero class). The floors pin
     // the population the plan's bar was measured on.
-    assert!(fixtures >= 64, "fixtures {fixtures} < 64 — the capture walk collapsed");
-    assert!(questions >= 100, "questions {questions} < 100 — the capture walk collapsed");
-    assert!(options >= 450, "options {options} < 450 — the capture walk collapsed");
+    assert!(
+        fixtures >= 64,
+        "fixtures {fixtures} < 64 — the capture walk collapsed"
+    );
+    assert!(
+        questions >= 100,
+        "questions {questions} < 100 — the capture walk collapsed"
+    );
+    assert!(
+        options >= 450,
+        "options {options} < 450 — the capture walk collapsed"
+    );
     for line in disagreements.iter().take(20) {
         println!("DISAGREEMENT: {line}");
     }

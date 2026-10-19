@@ -7,9 +7,9 @@
 //! adjudicate the collapse 2×2 (T5.2 does that). Valuable even if the
 //! collapse lane dies.
 
+use super::TwtError;
 use super::partition::Block;
 use super::smatrix::SMatrix;
-use super::TwtError;
 
 /// Sorted ΔS report (descending magnitude on the upper triangle).
 #[derive(Debug, Clone)]
@@ -42,11 +42,7 @@ pub fn delta(parent: &SMatrix, quant: &SMatrix) -> Result<DeltaMap, TwtError> {
         sum_sq += (d as f64) * (d as f64);
         entries.push((i, j, d));
     }
-    entries.sort_by(|a, b| {
-        b.2.total_cmp(&a.2)
-            .then(a.0.cmp(&b.0))
-            .then(a.1.cmp(&b.1))
-    });
+    entries.sort_by(|a, b| b.2.total_cmp(&a.2).then(a.0.cmp(&b.0)).then(a.1.cmp(&b.1)));
     let cnt = entries.len().max(1) as f64;
     Ok(DeltaMap {
         n,
@@ -90,11 +86,7 @@ mod tests {
         });
         let q = SMatrix::from_fn(6, |i, j| {
             let grp = |l: usize| matches!(l, 2..=4);
-            if grp(i) && grp(j) {
-                0.4
-            } else {
-                1.0
-            }
+            if grp(i) && grp(j) { 0.4 } else { 1.0 }
         });
         let d = delta(&p, &q).unwrap();
         assert_eq!(d.max, 0.4);

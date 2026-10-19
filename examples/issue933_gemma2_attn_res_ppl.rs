@@ -31,22 +31,20 @@ use anyhow::{Context, Result, bail};
 use katgpt_transformer::MultiLayerKVCache;
 
 use riir_infer_core::corpus_text::load_corpus_text;
-use riir_infer_core::gguf_loader::{
-    config_from_gguf_metadata, load_gemma2_f16_direct, GgufFile,
-};
+use riir_infer_core::gguf_loader::{GgufFile, config_from_gguf_metadata, load_gemma2_f16_direct};
 use riir_infer_core::tokenizer::SentencePieceGgufTokenizer;
 use riir_infer_core::transformer::gemma2_attn_res::{
-    forward_gemma2_f16_attn_res, AttnResDepthProbe, GemmaAttnResState,
+    AttnResDepthProbe, GemmaAttnResState, forward_gemma2_f16_attn_res,
 };
-use riir_infer_core::transformer::{forward_gemma2_f16, ForwardContext};
+use riir_infer_core::transformer::{ForwardContext, forward_gemma2_f16};
 
 struct Arm {
     label: String,
     lambda: Option<f32>, // None = base (stock forward)
     nll_sum: f64,
     scored: usize,
-    worse: usize,        // NLL above base for this token
-    delta_sum: f64,      // Σ (nll_arm − nll_base), f64 order-exact bookkeeping
+    worse: usize,   // NLL above base for this token
+    delta_sum: f64, // Σ (nll_arm − nll_base), f64 order-exact bookkeeping
     delta_abs_max: f64,
     wall: std::time::Duration,
 }
@@ -125,11 +123,17 @@ fn main() -> Result<()> {
 
     println!(
         "# issue933_attn_res_ppl: gemma-2 f16 | layers={} n_embd={} vocab={} | block S={block_size} | load {:.1}s",
-        config.n_layer, config.n_embd, config.vocab_size, t0.elapsed().as_secs_f32()
+        config.n_layer,
+        config.n_embd,
+        config.vocab_size,
+        t0.elapsed().as_secs_f32()
     );
     println!(
         "# corpus {} | blake3 {corpus_blake3} | tokens {}/{} | {} chunk(s), longest {longest} | scored {scored_total}",
-        corpus_path.display(), take, all.len(), chunks.len()
+        corpus_path.display(),
+        take,
+        all.len(),
+        chunks.len()
     );
 
     // Arms: base + λ list. Each arm gets its own ctx + KV cache + state
@@ -193,8 +197,7 @@ fn main() -> Result<()> {
             let probe = AttnResDepthProbe { block_size, lambda };
             let mut ctx = ForwardContext::new(&config);
             let mut cache = MultiLayerKVCache::new(&config);
-            let mut state =
-                GemmaAttnResState::new(config.n_layer, config.n_embd, block_size);
+            let mut state = GemmaAttnResState::new(config.n_layer, config.n_embd, block_size);
             for pos in 0..seq.len() - 1 {
                 let logits = forward_gemma2_f16_attn_res(
                     &mut ctx, &weights, &mut cache, seq[pos], pos, &config, &probe, &mut state,
@@ -242,7 +245,14 @@ fn main() -> Result<()> {
         let worse = 100.0 * arm.worse as f64 / arm.scored as f64;
         println!(
             "| λ={} | {:.5} | {:.4} | {:+.2}% | {:+.5} | {:.1} | {:.4} | {:.0} |",
-            arm.label, nll_mean, ppl, dppl, dnll, worse, arm.delta_abs_max, tok_s(arm)
+            arm.label,
+            nll_mean,
+            ppl,
+            dppl,
+            dnll,
+            worse,
+            arm.delta_abs_max,
+            tok_s(arm)
         );
     }
     println!();

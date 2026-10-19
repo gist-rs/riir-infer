@@ -19,8 +19,8 @@
 
 use riir_infer_core::gguf_loader::GgufFile;
 use riir_infer_core::twt::partition::{
-    forced_min_blocks, kill_verdict, minmax_partition, partition_worst, KillVerdict,
-    PRE_REGISTERED_EPS_GRID,
+    KillVerdict, PRE_REGISTERED_EPS_GRID, forced_min_blocks, kill_verdict, minmax_partition,
+    partition_worst,
 };
 use riir_infer_core::twt::smatrix::SMatrix;
 
@@ -30,7 +30,9 @@ fn main() {
     while let Some(a) = args.next() {
         match a.as_str() {
             "--profile" => {
-                profile_path = Some(std::path::PathBuf::from(args.next().expect("--profile needs a path")))
+                profile_path = Some(std::path::PathBuf::from(
+                    args.next().expect("--profile needs a path"),
+                ))
             }
             other => panic!("unknown arg {other}"),
         }
@@ -49,9 +51,8 @@ fn main() {
     // per-layer types — `full_attention_interval` index arithmetic is the
     // parent's truth, `twt.layer_types` is the COLLAPSED file's).
     let parent = GgufFile::open(&std::path::PathBuf::from(
-        std::env::var("TWT_PARENT").unwrap_or_else(|_| {
-            "../riir-train/data/Ternary-Bonsai-2-27B-PQ2_0.gguf".to_owned()
-        }),
+        std::env::var("TWT_PARENT")
+            .unwrap_or_else(|_| "../riir-train/data/Ternary-Bonsai-2-27B-PQ2_0.gguf".to_owned()),
     ))
     .expect("open parent for full_attention_interval");
     let interval = parent
@@ -64,7 +65,10 @@ fn main() {
         entries
             .iter()
             .find_map(|e| {
-                let (a, b) = (e[0].as_u64().unwrap() as usize, e[1].as_u64().unwrap() as usize);
+                let (a, b) = (
+                    e[0].as_u64().unwrap() as usize,
+                    e[1].as_u64().unwrap() as usize,
+                );
                 ((a, b) == (i, j)).then(|| e[2].as_f64().unwrap() as f32)
             })
             .unwrap_or_else(|| panic!("S_upper missing entry ({i},{j})"))
@@ -83,9 +87,17 @@ fn main() {
 
     println!("# twt_kill_rederive — current kill rule over the artifact's own S");
     println!("# profile: {}", profile_path.display());
-    println!("# corpus BLAKE3: {}", profile["corpus_blake3"].as_str().unwrap_or("?"));
-    println!("# forced (re-derived from interval {interval}): {forced}  (recorded: {recorded_forced})");
-    println!("# m at max ε {}: {m_at_max}, partition worst {worst_at_max:.4}", PRE_REGISTERED_EPS_GRID[PRE_REGISTERED_EPS_GRID.len() - 1]);
+    println!(
+        "# corpus BLAKE3: {}",
+        profile["corpus_blake3"].as_str().unwrap_or("?")
+    );
+    println!(
+        "# forced (re-derived from interval {interval}): {forced}  (recorded: {recorded_forced})"
+    );
+    println!(
+        "# m at max ε {}: {m_at_max}, partition worst {worst_at_max:.4}",
+        PRE_REGISTERED_EPS_GRID[PRE_REGISTERED_EPS_GRID.len() - 1]
+    );
     for (eps, p) in PRE_REGISTERED_EPS_GRID.iter().zip(partitions.iter()) {
         println!("#   ε={eps}: m={}", p.len());
     }

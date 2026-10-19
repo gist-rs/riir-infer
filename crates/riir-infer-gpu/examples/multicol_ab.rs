@@ -164,13 +164,13 @@ fn main() {
         "# unix={now} · reps={reps} warmup={warmup} shapes={} · arm order rotated per rep (position-balanced)",
         shapes.iter().map(|s| s.0).collect::<Vec<_>>().join(",")
     );
-    println!("# HANDLER-CONTRACT wall times (host quantize + transfers included per arm's own API) — see module doc");
+    println!(
+        "# HANDLER-CONTRACT wall times (host quantize + transfers included per arm's own API) — see module doc"
+    );
 
     // ---- device + handlers ----
     let ctx = CudaContext::new(0).unwrap_or_else(|e| {
-        eprintln!(
-            "FATAL: no CUDA device 0 ({e}) — this bench needs a free, exclusive GPU window"
-        );
+        eprintln!("FATAL: no CUDA device 0 ({e}) — this bench needs a free, exclusive GPU window");
         std::process::exit(1);
     });
     let mut h_n1 = TernaryGemmCudaRaw::new().expect("n1 handler init");
@@ -201,8 +201,14 @@ fn main() {
             }
             out
         };
-        let pos_dev: CudaSlice<u32> = mma_arm.stream.clone_htod(&to_u32_words(&w.pos_bits)).unwrap();
-        let neg_dev: CudaSlice<u32> = mma_arm.stream.clone_htod(&to_u32_words(&w.neg_bits)).unwrap();
+        let pos_dev: CudaSlice<u32> = mma_arm
+            .stream
+            .clone_htod(&to_u32_words(&w.pos_bits))
+            .unwrap();
+        let neg_dev: CudaSlice<u32> = mma_arm
+            .stream
+            .clone_htod(&to_u32_words(&w.neg_bits))
+            .unwrap();
         let scale_dev: CudaSlice<f32> = mma_arm
             .stream
             .clone_htod(&w.group_scale.iter().map(|s| s.to_f32()).collect::<Vec<_>>())
@@ -307,10 +313,8 @@ fn main() {
             let (p25_mc, p75_mc) = quartiles(&times[1]);
             let (p25_mma, p75_mma) = quartiles(&times[2]);
             let gbps = |i: usize| weight_bytes as f64 / 1e9 / (meds[i] / 1e6);
-            let r_mc_n1: Vec<f64> =
-                (0..reps).map(|r| times[1][r] / times[0][r]).collect();
-            let r_mc_mma: Vec<f64> =
-                (0..reps).map(|r| times[1][r] / times[2][r]).collect();
+            let r_mc_n1: Vec<f64> = (0..reps).map(|r| times[1][r] / times[0][r]).collect();
+            let r_mc_mma: Vec<f64> = (0..reps).map(|r| times[1][r] / times[2][r]).collect();
 
             println!(
                 "\n## {shape_name} m={m} n={n} tokens={tokens} · weight {:.2} MiB",
@@ -320,15 +324,24 @@ fn main() {
             println!("|---|---|---|---|---|");
             println!(
                 "| n1_loop | {:.1} | {:.1} | {:.1} | {:.0} |",
-                meds[0], p25_n1, p75_n1, gbps(0)
+                meds[0],
+                p25_n1,
+                p75_n1,
+                gbps(0)
             );
             println!(
                 "| multicol | {:.1} | {:.1} | {:.1} | {:.0} |",
-                meds[1], p25_mc, p75_mc, gbps(1)
+                meds[1],
+                p25_mc,
+                p75_mc,
+                gbps(1)
             );
             println!(
                 "| mma | {:.1} | {:.1} | {:.1} | {:.0} |",
-                meds[2], p25_mma, p75_mma, gbps(2)
+                meds[2],
+                p25_mma,
+                p75_mma,
+                gbps(2)
             );
             println!(
                 "paired same-rep ratios: mc/n1 median {:.3} · mc/mma median {:.3}",

@@ -26,10 +26,10 @@
 //! stats struct is the consumer's telemetry.
 #![cfg(all(feature = "qwen38_spec", not(target_os = "macos")))]
 
+use crate::qwen38_dense_cudarc::{QWEN38_DFLASH2_TAP_LAYERS, Qwen38DenseForward};
 use crate::qwen38_dflash2::DFlash2Drafter;
 use crate::qwen38_dflash2_gpu::{DFlash2GpuDrafter, DFlash2RingState};
-use crate::qwen38_dense_cudarc::{Qwen38DenseForward, QWEN38_DFLASH2_TAP_LAYERS};
-use crate::qwen38_spec::{keyed_accept, KeyedVerifyPosture};
+use crate::qwen38_spec::{KeyedVerifyPosture, keyed_accept};
 use std::time::Instant;
 
 /// The keyed lane's loop configuration: the sampling posture (the serial
@@ -218,9 +218,12 @@ pub fn run_keyed_spec_loop(
         // plan614_phase2_spec_gates harness.
         if posture.is_greedy() {
             debug_assert_eq!(
-                acc.bonus, am[j - 1],
+                acc.bonus,
+                am[j - 1],
                 "greedy posture: keyed bonus {} != chunk argmax {} at pos {}",
-                acc.bonus, am[j - 1], pos
+                acc.bonus,
+                am[j - 1],
+                pos
             );
         }
 
@@ -232,7 +235,11 @@ pub fn run_keyed_spec_loop(
     st.wall_s = t_loop.elapsed().as_secs_f64();
     st.committed = generated.len();
     st.mean_j = if st.n_chunks > 0 {
-        st.hist.iter().enumerate().map(|(j, &n)| j * n).sum::<usize>() as f64
+        st.hist
+            .iter()
+            .enumerate()
+            .map(|(j, &n)| j * n)
+            .sum::<usize>() as f64
             / st.n_chunks as f64
     } else {
         0.0
@@ -421,13 +428,7 @@ pub fn run_keyed_spec_loop_lanes(
         for l in 0..n {
             let p_l = real_p[l];
             let slice = &logits_flat[(l * k_max) * vocab..(l * k_max + p_l) * vocab];
-            let acc = keyed_accept(
-                &lane_posture[l],
-                slice,
-                vocab,
-                &drafts[l][1..p_l],
-                pos[l],
-            );
+            let acc = keyed_accept(&lane_posture[l], slice, vocab, &drafts[l][1..p_l], pos[l]);
             accepted[l] = acc.j;
             bonuses[l] = acc.bonus;
             let s = &mut st[l];
@@ -446,9 +447,12 @@ pub fn run_keyed_spec_loop_lanes(
             // The greedy-posture cross-check (the solo loop's, per lane).
             if lane_posture[l].is_greedy() {
                 debug_assert_eq!(
-                    acc.bonus, am[l][acc.j - 1],
+                    acc.bonus,
+                    am[l][acc.j - 1],
                     "greedy posture: lane {l} keyed bonus {} != chunk argmax {} at pos {}",
-                    acc.bonus, am[l][acc.j - 1], pos[l]
+                    acc.bonus,
+                    am[l][acc.j - 1],
+                    pos[l]
                 );
             }
         }
@@ -492,7 +496,11 @@ pub fn run_keyed_spec_loop_lanes(
         s.wall_s = t_loop.elapsed().as_secs_f64();
         s.committed = generated[l].len();
         s.mean_j = if s.n_chunks > 0 {
-            s.hist.iter().enumerate().map(|(j, &c)| j * c).sum::<usize>() as f64
+            s.hist
+                .iter()
+                .enumerate()
+                .map(|(j, &c)| j * c)
+                .sum::<usize>() as f64
                 / s.n_chunks as f64
         } else {
             0.0
@@ -582,10 +590,7 @@ pub fn verify_chunk_one_row_parity(
     pos: usize,
 ) -> Result<(), String> {
     if probe.len() < 2 || probe.len() > 8 {
-        return Err(format!(
-            "parity probe: 2..=8 tokens (got {})",
-            probe.len()
-        ));
+        return Err(format!("parity probe: 2..=8 tokens (got {})", probe.len()));
     }
     let vocab = gpu.cfg.vocab_size;
     gpu.verify_snapshot_gdn()?;
@@ -609,7 +614,11 @@ pub fn verify_chunk_one_row_parity(
         let a = &chunk_logits[r * vocab..(r + 1) * vocab];
         let b = &one_logits[r * vocab..(r + 1) * vocab];
         if a != b {
-            let first = a.iter().zip(b).position(|(x, y)| x != y).expect("rows differ");
+            let first = a
+                .iter()
+                .zip(b)
+                .position(|(x, y)| x != y)
+                .expect("rows differ");
             return Err(format!(
                 "parity FAIL row {r}: logits differ at token {first} (chunk {} vs one-row {}) — \
                  drafting must stay OFF on this GPU/driver",

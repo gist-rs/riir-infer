@@ -53,7 +53,9 @@ pub fn dump(value: &Value) -> String {
             } else if n.is_u64() {
                 n.as_u64().expect("is_u64 guarantees as_u64").to_string()
             } else {
-                n.as_i64().expect("i64 is the only remaining store").to_string()
+                n.as_i64()
+                    .expect("i64 is the only remaining store")
+                    .to_string()
             }
         }
         Value::String(s) => quote(s),
@@ -71,8 +73,7 @@ pub fn dump(value: &Value) -> String {
         Value::Object(map) => {
             // BTreeMap: code-point-sorted keys regardless of the
             // serde_json Map's own ordering features (Python sort_keys).
-            let sorted: BTreeMap<&str, &Value> =
-                map.iter().map(|(k, v)| (k.as_str(), v)).collect();
+            let sorted: BTreeMap<&str, &Value> = map.iter().map(|(k, v)| (k.as_str(), v)).collect();
             let mut out = String::from("{");
             for (i, (k, v)) in sorted.iter().enumerate() {
                 if i > 0 {
@@ -142,11 +143,7 @@ pub fn python_float(value: f64) -> String {
         let point = decpt as usize;
         format!("{}.{}", &digits[..point], &digits[point..])
     };
-    if negative {
-        format!("-{body}")
-    } else {
-        body
-    }
+    if negative { format!("-{body}") } else { body }
 }
 
 /// JSON string quoting with `ensure_ascii=False`: the six short escapes,
@@ -263,14 +260,20 @@ mod tests {
         assert_eq!(dump(&Value::Null), "null");
         assert_eq!(dump(&json!([])), "[]");
         assert_eq!(dump(&json!({})), "{}");
-        assert_eq!(dump(&json!([1, "two", false, null])), "[1,\"two\",false,null]");
+        assert_eq!(
+            dump(&json!([1, "two", false, null])),
+            "[1,\"two\",false,null]"
+        );
     }
 
     /// Top-level strings render as themselves (the INSTRUCTION leg —
     /// the reference inserts the instruction text raw, unquoted).
     #[test]
     fn render_top_level_string_is_itself() {
-        assert_eq!(render(&json!("Is the user gold tier?")), "Is the user gold tier?");
+        assert_eq!(
+            render(&json!("Is the user gold tier?")),
+            "Is the user gold tier?"
+        );
         assert_eq!(render(&json!({"a": 1})), "{\"a\":1}");
         assert_eq!(render(&json!(1.5)), "1.5");
         assert_eq!(render(&json!(3)), "3");

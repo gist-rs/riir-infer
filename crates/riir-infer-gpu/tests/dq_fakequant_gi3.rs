@@ -12,8 +12,8 @@
 
 #![cfg(feature = "dq_phase_bench")]
 
-use riir_infer_gpu::cubecl_runtime::{read_f32, ActiveComputeClient};
-use riir_infer_gpu::dq_fakequant::{host_quant_dequant, DqGrid};
+use riir_infer_gpu::cubecl_runtime::{ActiveComputeClient, read_f32};
+use riir_infer_gpu::dq_fakequant::{DqGrid, host_quant_dequant};
 use riir_infer_gpu::dq_fakequant_cubecl::test_support_launch;
 
 use cubecl::prelude::*;
@@ -24,7 +24,9 @@ use riir_infer_gpu::CubeCLContext;
 fn lcg(seed: u64) -> impl Iterator<Item = f32> {
     let mut s = seed;
     std::iter::from_fn(move || {
-        s = s.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+        s = s
+            .wrapping_mul(6364136223846793005)
+            .wrapping_add(1442695040888963407);
         let f = ((s >> 40) as i64 as f64 / (1u64 << 24) as f64) as f32;
         Some((f - 0.5) * 6.0) // ~Uniform(-3, 3) — activation-scale values
     })
@@ -55,7 +57,8 @@ fn check(grid: DqGrid, got: &[f32], expected: &[f32]) {
         }
     }
     assert_eq!(
-        bad, 0,
+        bad,
+        0,
         "{grid:?}: {bad}/{} mismatched, first at {first:?}",
         got.len()
     );
@@ -233,7 +236,8 @@ fn cuda_fakequant_matches_host_reference() {
             }
         }
         assert_eq!(
-            bad, 0,
+            bad,
+            0,
             "CUDA lane {grid:?}: {bad}/{} mismatched, first at {first:?}",
             got.len()
         );

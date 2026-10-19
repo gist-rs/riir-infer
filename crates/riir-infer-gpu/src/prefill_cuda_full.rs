@@ -3139,9 +3139,7 @@ fn whole_prefill_inner(
                             .gdn_mma
                             .as_ref()
                             .expect("gdn_mma_ready implies Some")
-                            .launch(
-                                stream, qkvx_b, beta_b, decay_b, dn_state, rec_b, n_v, p,
-                            )?;
+                            .launch(stream, qkvx_b, beta_b, decay_b, dn_state, rec_b, n_v, p)?;
                     } else if gdn_chunked_ready {
                         // Arm 12 — the chunked recurrence (NOT bit-identical to
                         // rowpar; the llama.cpp numerics class — see the knob doc).

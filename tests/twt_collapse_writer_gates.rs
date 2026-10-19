@@ -23,15 +23,15 @@ use std::collections::BTreeMap;
 
 use katgpt_core::TernaryGroupWeights;
 use riir_infer_core::gguf_loader::{
-    qwen35_deltanet_config_from_gguf_metadata, GgufFile, GgmlType, GgufValue,
+    GgmlType, GgufFile, GgufValue, qwen35_deltanet_config_from_gguf_metadata,
 };
-use riir_infer_core::quant::q2_0::{dequantize_row_q2_0, pack_ternary_group_to_q2_0, BlockQ2_0};
-use riir_infer_core::twt::collapse_writer::{
-    emit_collapsed_gguf, q2_0_wire_bytes, twt_arm_codes_value, twt_block_table_value,
-    twt_layer_types_value, CollapseSpec, LAYER_TYPES_LEGEND, LayerSource, TensorOut,
-};
-use riir_infer_core::twt::ternarize::{arm_source_quant, TwtArm};
+use riir_infer_core::quant::q2_0::{BlockQ2_0, dequantize_row_q2_0, pack_ternary_group_to_q2_0};
 use riir_infer_core::twt::TwtError;
+use riir_infer_core::twt::collapse_writer::{
+    CollapseSpec, LAYER_TYPES_LEGEND, LayerSource, TensorOut, emit_collapsed_gguf, q2_0_wire_bytes,
+    twt_arm_codes_value, twt_block_table_value, twt_layer_types_value,
+};
+use riir_infer_core::twt::ternarize::{TwtArm, arm_source_quant};
 use riir_infer_core::types::DeltaNetLayerType;
 
 /// A minimal ternary layer fixture: one Q2_0 projection (2×256) + one
@@ -61,22 +61,33 @@ fn build_parent() -> FixtureParent {
     for _ in 0..3 {
         let mut blocks: Vec<BlockQ2_0> = Vec::new();
         for _ in 0..4 {
-            let mut b = BlockQ2_0 { d: 0, qs: [0u8; 32] };
+            let mut b = BlockQ2_0 {
+                d: 0,
+                qs: [0u8; 32],
+            };
             let s = next_f32().abs().max(0.01);
             b.d = half::f16::from_f32(s).to_bits();
             for j in 0..128 {
-            let code = (next_f32() * 1e6_f32).abs() as u64 % 3; // 0/1/2 via the same stream
+                let code = (next_f32() * 1e6_f32).abs() as u64 % 3; // 0/1/2 via the same stream
                 b.qs[j / 4] |= (code as u8) << ((j % 4) * 2);
             }
             blocks.push(b);
         }
-        proj_payloads.push(blocks.iter().flat_map(|b| bytemuck::bytes_of(b).to_vec()).collect());
+        proj_payloads.push(
+            blocks
+                .iter()
+                .flat_map(|b| bytemuck::bytes_of(b).to_vec())
+                .collect(),
+        );
     }
     let emb_payload = {
         // 4×256 → 8 groups → 8×34 = 272 bytes.
         let mut out = Vec::new();
         for _ in 0..8 {
-            let mut b = BlockQ2_0 { d: 0, qs: [0u8; 32] };
+            let mut b = BlockQ2_0 {
+                d: 0,
+                qs: [0u8; 32],
+            };
             b.d = half::f16::from_f32(0.05).to_bits();
             out.extend_from_slice(bytemuck::bytes_of(&b));
         }
@@ -89,9 +100,15 @@ fn build_parent() -> FixtureParent {
 
     // Metadata (file order matters for the writer's mirror).
     let kvs: Vec<(String, GgufValue)> = vec![
-        ("general.architecture".to_owned(), GgufValue::String("qwen35twtfx".to_owned())),
+        (
+            "general.architecture".to_owned(),
+            GgufValue::String("qwen35twtfx".to_owned()),
+        ),
         ("qwen35twtfx.block_count".to_owned(), GgufValue::U64(3)),
-        ("qwen35twtfx.embedding_length".to_owned(), GgufValue::U64(256)),
+        (
+            "qwen35twtfx.embedding_length".to_owned(),
+            GgufValue::U64(256),
+        ),
         ("general.file_type".to_owned(), GgufValue::U32(142)),
     ];
 
@@ -99,18 +116,54 @@ fn build_parent() -> FixtureParent {
     let q2 = GgmlType::Q2_0;
     let f32t = GgmlType::F32;
     let tensors: Vec<(String, GgmlType, Vec<usize>, Vec<u8>)> = vec![
-        ("token_embd.weight".to_owned(),
+        (
+            "token_embd.weight".to_owned(),
             q2,
             vec![256, 4],
             emb_payload,
         ),
-        ("output_norm.weight".to_owned(), f32t, vec![256], f32_bytes(&out_norm)),
-        ("blk.0.in_proj.weight".to_owned(), q2, vec![256, 2], proj_payloads[0].clone()),
-        ("blk.0.attn_norm.weight".to_owned(), f32t, vec![256], f32_bytes(&norm_payloads[0])),
-        ("blk.1.in_proj.weight".to_owned(), q2, vec![256, 2], proj_payloads[1].clone()),
-        ("blk.1.attn_norm.weight".to_owned(), f32t, vec![256], f32_bytes(&norm_payloads[1])),
-        ("blk.2.in_proj.weight".to_owned(), q2, vec![256, 2], proj_payloads[2].clone()),
-        ("blk.2.attn_norm.weight".to_owned(), f32t, vec![256], f32_bytes(&norm_payloads[2])),
+        (
+            "output_norm.weight".to_owned(),
+            f32t,
+            vec![256],
+            f32_bytes(&out_norm),
+        ),
+        (
+            "blk.0.in_proj.weight".to_owned(),
+            q2,
+            vec![256, 2],
+            proj_payloads[0].clone(),
+        ),
+        (
+            "blk.0.attn_norm.weight".to_owned(),
+            f32t,
+            vec![256],
+            f32_bytes(&norm_payloads[0]),
+        ),
+        (
+            "blk.1.in_proj.weight".to_owned(),
+            q2,
+            vec![256, 2],
+            proj_payloads[1].clone(),
+        ),
+        (
+            "blk.1.attn_norm.weight".to_owned(),
+            f32t,
+            vec![256],
+            f32_bytes(&norm_payloads[1]),
+        ),
+        (
+            "blk.2.in_proj.weight".to_owned(),
+            q2,
+            vec![256, 2],
+            proj_payloads[2].clone(),
+        ),
+        (
+            "blk.2.attn_norm.weight".to_owned(),
+            f32t,
+            vec![256],
+            f32_bytes(&norm_payloads[2]),
+        ),
     ];
 
     // Serialize.
@@ -212,10 +265,7 @@ fn write_to_temp(name: &str, bytes: &[u8]) -> std::path::PathBuf {
 
 /// A merged winner: re-quantized in_proj (arm C over the mean of the
 /// block's members) + the mean F32 norm.
-fn merged_payloads(
-    parent: &GgufFile,
-    members: [usize; 3],
-) -> BTreeMap<String, TensorOut> {
+fn merged_payloads(parent: &GgufFile, members: [usize; 3]) -> BTreeMap<String, TensorOut> {
     let deq = |li: usize| {
         let name = format!("blk.{li}.in_proj.weight");
         let info = parent
@@ -226,7 +276,10 @@ fn merged_payloads(
         let raw = parent.tensor_slice(&name).unwrap();
         let mut blocks = Vec::new();
         for chunk in raw.as_chunks::<34>().0 {
-            let mut b = BlockQ2_0 { d: 0, qs: [0u8; 32] };
+            let mut b = BlockQ2_0 {
+                d: 0,
+                qs: [0u8; 32],
+            };
             b.d = u16::from_le_bytes([chunk[0], chunk[1]]);
             b.qs.copy_from_slice(&chunk[2..]);
             blocks.push(b);
@@ -250,25 +303,33 @@ fn merged_payloads(
         let raw = parent
             .tensor_slice(&format!("blk.{li}.attn_norm.weight"))
             .unwrap();
-        raw.as_chunks::<4>().0.iter()
+        raw.as_chunks::<4>()
+            .0
+            .iter()
             .map(|c| f32::from_le_bytes(*c))
             .collect::<Vec<_>>()
     };
     let n0 = norm(members[0]);
     let n1 = norm(members[1]);
     let n2 = norm(members[2]);
-    let mean_norm: Vec<f32> = (0..256)
-        .map(|i| (n0[i] + n1[i] + n2[i]) / 3.0)
-        .collect();
+    let mean_norm: Vec<f32> = (0..256).map(|i| (n0[i] + n1[i] + n2[i]) / 3.0).collect();
 
     let mut map = BTreeMap::new();
     map.insert(
         "in_proj.weight".to_owned(),
-        TensorOut { ggml_type: GgmlType::Q2_0, shape: vec![256, 2], data: wire },
+        TensorOut {
+            ggml_type: GgmlType::Q2_0,
+            shape: vec![256, 2],
+            data: wire,
+        },
     );
     map.insert(
         "attn_norm.weight".to_owned(),
-        TensorOut { ggml_type: GgmlType::F32, shape: vec![256], data: f32_bytes(&mean_norm) },
+        TensorOut {
+            ggml_type: GgmlType::F32,
+            shape: vec![256],
+            data: f32_bytes(&mean_norm),
+        },
     );
     map
 }
@@ -286,17 +347,20 @@ fn the_collapsed_file_reopens_with_the_right_shape() {
             (0, 2, LayerSource::Member(1)),
             (2, 3, LayerSource::Merged(merged)),
         ],
-        metadata_overrides: vec![(
-            "qwen35twtfx.block_count".to_owned(),
-            GgufValue::U64(2),
-        )],
+        metadata_overrides: vec![("qwen35twtfx.block_count".to_owned(), GgufValue::U64(2))],
         twt_meta: vec![
-            ("twt.block_table".to_owned(), twt_block_table_value(&[(0, 2), (2, 3)])),
+            (
+                "twt.block_table".to_owned(),
+                twt_block_table_value(&[(0, 2), (2, 3)]),
+            ),
             (
                 "twt.arm_codes".to_owned(),
                 twt_arm_codes_value(&[TwtArm::Member, TwtArm::SourceQuant]),
             ),
-            ("twt.arm_legend".to_owned(), GgufValue::String(TwtArm::LEGEND.to_owned())),
+            (
+                "twt.arm_legend".to_owned(),
+                GgufValue::String(TwtArm::LEGEND.to_owned()),
+            ),
             (
                 "twt.parent_weights_blake3".to_owned(),
                 GgufValue::String(riir_infer_core::twt::blake3_of(&fx.bytes)),
@@ -314,7 +378,10 @@ fn the_collapsed_file_reopens_with_the_right_shape() {
     let collapsed_path = write_to_temp("collapsed.gguf", &out);
     let g = GgufFile::open(&collapsed_path).unwrap();
     assert_eq!(g.version, 3);
-    assert_eq!(g.metadata.get("qwen35twtfx.block_count").unwrap().as_u64(), Some(2));
+    assert_eq!(
+        g.metadata.get("qwen35twtfx.block_count").unwrap().as_u64(),
+        Some(2)
+    );
     assert_eq!(
         g.metadata.get("general.architecture").unwrap().as_str(),
         Some("qwen35twtfx")
@@ -354,7 +421,10 @@ fn the_collapsed_file_reopens_with_the_right_shape() {
     let wire = g.tensor_slice("blk.1.in_proj.weight").unwrap();
     let mut blocks = Vec::new();
     for chunk in wire.as_chunks::<34>().0 {
-        let mut b = BlockQ2_0 { d: 0, qs: [0u8; 32] };
+        let mut b = BlockQ2_0 {
+            d: 0,
+            qs: [0u8; 32],
+        };
         b.d = u16::from_le_bytes([chunk[0], chunk[1]]);
         b.qs.copy_from_slice(&chunk[2..]);
         blocks.push(b);
@@ -428,7 +498,10 @@ fn refusals_are_loud() {
 
     // Non-tiling table (gap).
     let spec = CollapseSpec {
-        blocks: vec![(0, 1, LayerSource::Member(0)), (2, 3, LayerSource::Member(2))],
+        blocks: vec![
+            (0, 1, LayerSource::Member(0)),
+            (2, 3, LayerSource::Member(2)),
+        ],
         metadata_overrides: vec![("qwen35twtfx.block_count".to_owned(), GgufValue::U64(2))],
         twt_meta: vec![],
     };
@@ -497,14 +570,20 @@ fn pack_to_wire_round_trips_through_the_reader() {
     let wire = q2_0_wire_bytes(&w).unwrap();
     let mut blocks = Vec::new();
     for chunk in wire.as_chunks::<34>().0 {
-        let mut b = BlockQ2_0 { d: 0, qs: [0u8; 32] };
+        let mut b = BlockQ2_0 {
+            d: 0,
+            qs: [0u8; 32],
+        };
         b.d = u16::from_le_bytes([chunk[0], chunk[1]]);
         b.qs.copy_from_slice(&chunk[2..]);
         blocks.push(b);
     }
     let mut direct = Vec::new();
     pack_ternary_group_to_q2_0(&w, &mut direct).unwrap();
-    let re_packed: Vec<u8> = direct.iter().flat_map(|b| bytemuck::bytes_of(b).to_vec()).collect();
+    let re_packed: Vec<u8> = direct
+        .iter()
+        .flat_map(|b| bytemuck::bytes_of(b).to_vec())
+        .collect();
     assert_eq!(wire, re_packed);
     // Dequant agrees with the container's eval view.
     let mut deq = vec![0f32; 512];
@@ -537,19 +616,28 @@ fn build_qwen35_parent(extra_kvs: Vec<(String, GgufValue)>) -> FixtureParent {
     let proj_payload: Vec<u8> = {
         let mut blocks: Vec<BlockQ2_0> = Vec::new();
         for _ in 0..4 {
-            let mut b = BlockQ2_0 { d: 0, qs: [0u8; 32] };
+            let mut b = BlockQ2_0 {
+                d: 0,
+                qs: [0u8; 32],
+            };
             b.d = half::f16::from_f32(0.07).to_bits();
             for j in 0..128 {
                 b.qs[j / 4] |= (((next_f32() * 1e6_f32).abs() as u64 % 3) as u8) << ((j % 4) * 2);
             }
             blocks.push(b);
         }
-        blocks.iter().flat_map(|b| bytemuck::bytes_of(b).to_vec()).collect()
+        blocks
+            .iter()
+            .flat_map(|b| bytemuck::bytes_of(b).to_vec())
+            .collect()
     };
     let emb_payload = {
         let mut out = Vec::new();
         for _ in 0..8 {
-            let mut b = BlockQ2_0 { d: 0, qs: [0u8; 32] };
+            let mut b = BlockQ2_0 {
+                d: 0,
+                qs: [0u8; 32],
+            };
             b.d = half::f16::from_f32(0.05).to_bits();
             out.extend_from_slice(bytemuck::bytes_of(&b));
         }
@@ -561,10 +649,16 @@ fn build_qwen35_parent(extra_kvs: Vec<(String, GgufValue)>) -> FixtureParent {
     let out_norm = (0..256).map(|_| 1.0f32).collect::<Vec<_>>();
 
     let mut kvs: Vec<(String, GgufValue)> = vec![
-        ("general.architecture".to_owned(), GgufValue::String("qwen35".to_owned())),
+        (
+            "general.architecture".to_owned(),
+            GgufValue::String("qwen35".to_owned()),
+        ),
         ("qwen35.block_count".to_owned(), GgufValue::U64(4)),
         ("qwen35.embedding_length".to_owned(), GgufValue::U64(256)),
-        ("qwen35.full_attention_interval".to_owned(), GgufValue::U64(4)),
+        (
+            "qwen35.full_attention_interval".to_owned(),
+            GgufValue::U64(4),
+        ),
         ("general.file_type".to_owned(), GgufValue::U32(142)),
     ];
     kvs.extend(extra_kvs);
@@ -572,11 +666,26 @@ fn build_qwen35_parent(extra_kvs: Vec<(String, GgufValue)>) -> FixtureParent {
     let q2 = GgmlType::Q2_0;
     let f32t = GgmlType::F32;
     let mut tensors: Vec<(String, GgmlType, Vec<usize>, Vec<u8>)> = vec![
-        ("token_embd.weight".to_owned(), q2, vec![256, 4], emb_payload),
-        ("output_norm.weight".to_owned(), f32t, vec![256], f32_bytes(&out_norm)),
+        (
+            "token_embd.weight".to_owned(),
+            q2,
+            vec![256, 4],
+            emb_payload,
+        ),
+        (
+            "output_norm.weight".to_owned(),
+            f32t,
+            vec![256],
+            f32_bytes(&out_norm),
+        ),
     ];
     for (i, np) in norm_payloads.iter().enumerate() {
-        tensors.push((format!("blk.{i}.in_proj.weight"), q2, vec![256, 2], proj_payload.clone()));
+        tensors.push((
+            format!("blk.{i}.in_proj.weight"),
+            q2,
+            vec![256, 2],
+            proj_payload.clone(),
+        ));
         tensors.push((
             format!("blk.{i}.attn_norm.weight"),
             f32t,
@@ -651,9 +760,18 @@ fn qwen35_collapse_spec(
 ) -> CollapseSpec {
     let types = [DeltaNetLayerType::DeltaNet, DeltaNetLayerType::Attention];
     let mut twt_meta = vec![
-        ("twt.block_table".to_owned(), twt_block_table_value(&[(0, 3), (3, 4)])),
-        ("twt.arm_codes".to_owned(), twt_arm_codes_value(&[TwtArm::Member, TwtArm::Member])),
-        ("twt.arm_legend".to_owned(), GgufValue::String(TwtArm::LEGEND.to_owned())),
+        (
+            "twt.block_table".to_owned(),
+            twt_block_table_value(&[(0, 3), (3, 4)]),
+        ),
+        (
+            "twt.arm_codes".to_owned(),
+            twt_arm_codes_value(&[TwtArm::Member, TwtArm::Member]),
+        ),
+        (
+            "twt.arm_legend".to_owned(),
+            GgufValue::String(TwtArm::LEGEND.to_owned()),
+        ),
         (
             "twt.parent_weights_blake3".to_owned(),
             GgufValue::String(riir_infer_core::twt::blake3_of(parent_bytes)),
@@ -668,13 +786,14 @@ fn qwen35_collapse_spec(
     }
     twt_meta.extend(extra_twt);
     CollapseSpec {
-        blocks: vec![(0, 3, LayerSource::Member(0)), (3, 4, LayerSource::Member(3))],
-        metadata_overrides: vec![
-            ("qwen35.block_count".to_owned(), GgufValue::U64(2)),
-        ]
-        .into_iter()
-        .chain(extra_overrides)
-        .collect(),
+        blocks: vec![
+            (0, 3, LayerSource::Member(0)),
+            (3, 4, LayerSource::Member(3)),
+        ],
+        metadata_overrides: vec![("qwen35.block_count".to_owned(), GgufValue::U64(2))]
+            .into_iter()
+            .chain(extra_overrides)
+            .collect(),
         twt_meta,
     }
 }
@@ -719,7 +838,10 @@ fn collapsed_qwen35_file_types_layers_explicitly() {
     // wrong for a stack whose second block is an attention winner.
     let hazard = build_meta_only_gguf(vec![
         ("qwen35.block_count".to_owned(), GgufValue::U64(2)),
-        ("qwen35.full_attention_interval".to_owned(), GgufValue::U64(4)),
+        (
+            "qwen35.full_attention_interval".to_owned(),
+            GgufValue::U64(4),
+        ),
     ]);
     let hazard_path = write_to_temp("qwen35_derived_hazard.gguf", &hazard);
     let hazard_file = GgufFile::open(&hazard_path).unwrap();
@@ -780,8 +902,8 @@ fn folded_weight_names_ride_the_block_table() {
     assert_eq!(
         got,
         vec![
-            "output.weight",           // global passes through
-            "blk.0.attn_qkv.weight",   // member 0 → block 0 (GDN names kept)
+            "output.weight",         // global passes through
+            "blk.0.attn_qkv.weight", // member 0 → block 0 (GDN names kept)
             "blk.0.ssm_out.weight",
             "blk.1.attn_output.weight", // member 3 → block 1 (attention names kept)
         ],
@@ -801,10 +923,10 @@ fn folded_weight_names_ride_the_block_table() {
 
     // A WRONG types array (attention winner typed as DeltaNet) makes a
     // surviving folded name unfoldable — the writer must refuse.
-    let wrong_types = vec![
-        ("twt.layer_types".to_owned(),
-         GgufValue::Array(vec![GgufValue::U8(1), GgufValue::U8(1)])),
-    ];
+    let wrong_types = vec![(
+        "twt.layer_types".to_owned(),
+        GgufValue::Array(vec![GgufValue::U8(1), GgufValue::U8(1)]),
+    )];
     let spec = qwen35_collapse_spec(&fx.bytes, false, wrong_types, Vec::new());
     let mut out = Vec::new();
     match emit_collapsed_gguf(&parent, &spec, &mut out) {
@@ -841,8 +963,14 @@ fn twt_layer_types_refusals_are_loud() {
         GgufValue::Array(vec![GgufValue::U8(1)]),
     )];
     let mut out = Vec::new();
-    match emit_collapsed_gguf(&parent, &qwen35_collapse_spec(&fx.bytes, false, short, Vec::new()), &mut out) {
-        Err(TwtError::GgufWrite(msg)) => assert!(msg.contains("every block must be typed"), "{msg}"),
+    match emit_collapsed_gguf(
+        &parent,
+        &qwen35_collapse_spec(&fx.bytes, false, short, Vec::new()),
+        &mut out,
+    ) {
+        Err(TwtError::GgufWrite(msg)) => {
+            assert!(msg.contains("every block must be typed"), "{msg}")
+        }
         other => panic!("short layer_types must refuse, got {other:?}"),
     }
 
@@ -878,7 +1006,10 @@ fn twt_layer_types_refusals_are_loud() {
     // (4) LOADER: out-of-vocabulary code refuses.
     let bad_vocab = build_meta_only_gguf(vec![
         ("qwen35.block_count".to_owned(), GgufValue::U64(2)),
-        ("qwen35.full_attention_interval".to_owned(), GgufValue::U64(4)),
+        (
+            "qwen35.full_attention_interval".to_owned(),
+            GgufValue::U64(4),
+        ),
         (
             "twt.layer_types".to_owned(),
             GgufValue::Array(vec![GgufValue::U8(1), GgufValue::U8(7)]),
@@ -894,7 +1025,10 @@ fn twt_layer_types_refusals_are_loud() {
     // (5) LOADER: wrong length refuses.
     let bad_len = build_meta_only_gguf(vec![
         ("qwen35.block_count".to_owned(), GgufValue::U64(2)),
-        ("qwen35.full_attention_interval".to_owned(), GgufValue::U64(4)),
+        (
+            "qwen35.full_attention_interval".to_owned(),
+            GgufValue::U64(4),
+        ),
         (
             "twt.layer_types".to_owned(),
             GgufValue::Array(vec![GgufValue::U8(1)]),

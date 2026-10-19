@@ -46,13 +46,13 @@
 //!     --out .raw/twt/t54_skip_arms.json
 //! ```
 
-use anyhow::{bail, Context, Result};
+use anyhow::{Context, Result, bail};
 use riir_infer_core::corpus_text::load_corpus_text;
+use riir_infer_core::deltanet::QwenDeltaNetTernaryWeights;
 use riir_infer_core::deltanet::forward::{HybridCache, HybridForwardScratch, effective_rotary_dim};
 use riir_infer_core::deltanet::ternary_forward::{
     forward_qwen_deltanet_ternary_with_hook, qwen_deltanet_ternary_layer_body,
 };
-use riir_infer_core::deltanet::QwenDeltaNetTernaryWeights;
 use riir_infer_core::gguf_loader::{GgufFile, GgufValue, load_qwen_deltanet_ternary_weights_gguf};
 use riir_infer_core::rope::RopeFreqTable;
 use riir_infer_core::tokenizer::BpeTokenizer;
@@ -75,7 +75,11 @@ fn load_parent(path: &std::path::Path) -> Result<Loaded> {
     let (config, weights) = load_qwen_deltanet_ternary_weights_gguf(path)
         .with_context(|| format!("load {}", path.display()))?;
     let rope_freq = RopeFreqTable::new(config.rope_theta, effective_rotary_dim(&config));
-    Ok(Loaded { config, weights, rope_freq })
+    Ok(Loaded {
+        config,
+        weights,
+        rope_freq,
+    })
 }
 
 /// The amputation forward: the parent's own layer loop with `skip` layers
@@ -105,15 +109,19 @@ fn forward_amputated(
         && rot.inverse_embedding
     {
         let signs = rot.signs_for_width(n);
-        riir_infer_core::deltanet::rotation::rotate_inverse_inplace(&mut x[..n], signs, rot.block_size);
+        riir_infer_core::deltanet::rotation::rotate_inverse_inplace(
+            &mut x[..n],
+            signs,
+            rot.block_size,
+        );
     }
     // 2. The layer loop — skipped layers leave state AND stream untouched.
     for (layer_idx, layer_weights) in weights.layers.iter().enumerate() {
         if skip.get(layer_idx).copied().unwrap_or(false) {
             continue;
         }
-        let is_linear = weights.layer_types[layer_idx]
-            == riir_infer_core::types::DeltaNetLayerType::DeltaNet;
+        let is_linear =
+            weights.layer_types[layer_idx] == riir_infer_core::types::DeltaNetLayerType::DeltaNet;
         qwen_deltanet_ternary_layer_body(
             x,
             layer_weights,
@@ -135,7 +143,11 @@ fn forward_amputated(
     // 3. Final norm + the rotated LM head (verbatim hook-tail glue —
     // Issue 980: `output.weight` is folded; the head consumes the rotated
     // copy and logits come out in the primal basis).
-    riir_infer_core::types::rmsnorm_with_gamma_eps(&mut x[..n], &weights.final_norm, loaded.config.rms_norm_eps);
+    riir_infer_core::types::rmsnorm_with_gamma_eps(
+        &mut x[..n],
+        &weights.final_norm,
+        loaded.config.rms_norm_eps,
+    );
     scratch.hidden_copy[..n].copy_from_slice(&x[..n]);
     if let Some(rot) = rotation {
         let signs = rot.signs_for_width(n);
@@ -197,16 +209,32 @@ fn agreement_for_skip(
     let secs = t0.elapsed().as_secs_f32();
     let n = argmax.len();
     assert_eq!(n, parent_argmax.len(), "position counts diverged");
-    let agree = argmax.iter().zip(parent_argmax.iter()).filter(|(a, b)| a == b).count();
-    let hit = argmax.iter().zip(truth.iter()).filter(|(a, b)| a == b).count();
-    let first_div = argmax.iter().zip(parent_argmax.iter()).position(|(a, b)| a != b);
+    let agree = argmax
+        .iter()
+        .zip(parent_argmax.iter())
+        .filter(|(a, b)| a == b)
+        .count();
+    let hit = argmax
+        .iter()
+        .zip(truth.iter())
+        .filter(|(a, b)| a == b)
+        .count();
+    let first_div = argmax
+        .iter()
+        .zip(parent_argmax.iter())
+        .position(|(a, b)| a != b);
     eprintln!(
         "[skip] {label}: {n} positions in {secs:.0}s ({:.2} tok/s) | agreement {:.4} ({agree}/{n}) | hit {:.4} | first div {first_div:?}",
         n as f32 / secs.max(1e-6),
         agree as f64 / n as f64,
         hit as f64 / n as f64,
     );
-    Ok(ArmAgreement { agree, hit, first_div, secs })
+    Ok(ArmAgreement {
+        agree,
+        hit,
+        first_div,
+        secs,
+    })
 }
 
 /// The fused selection pass: ONE capture pass serving BOTH selection
@@ -314,7 +342,10 @@ fn fused_selection_pass(loaded: &Loaded, chunks: &[Vec<usize>]) -> Result<Select
         t0.elapsed().as_secs_f32(),
         lens_tail_logit_delta
     );
-    Ok(SelectionPass { bi: cos_sum, lens_de })
+    Ok(SelectionPass {
+        bi: cos_sum,
+        lens_de,
+    })
 }
 
 /// katgpt-rs `katgpt-pruners::hydra_budget::calibrate_profiles`, transcribed
@@ -432,7 +463,10 @@ fn main() -> Result<()> {
 
     // Box state (the G2 law — accuracy-only arms still record it).
     let loadavg = {
-        let out = std::process::Command::new("sysctl").arg("-n").arg("vm.loadavg").output();
+        let out = std::process::Command::new("sysctl")
+            .arg("-n")
+            .arg("vm.loadavg")
+            .output();
         match out {
             Ok(o) => String::from_utf8_lossy(&o.stdout).trim().to_string(),
             Err(_) => "<unavailable>".to_string(),
@@ -476,8 +510,7 @@ fn main() -> Result<()> {
         let c_max = cached["max_tokens"].as_u64().context("cache: max_tokens")? as usize;
         let same_parent = c_parent.ends_with("Ternary-Bonsai-2-27B-PQ2_0.gguf")
             && parent_display.ends_with("Ternary-Bonsai-2-27B-PQ2_0.gguf");
-        if !(same_parent && c_corpus == corpus_display && c_seq == SEQ_LEN && c_max == MAX_TOKENS)
-        {
+        if !(same_parent && c_corpus == corpus_display && c_seq == SEQ_LEN && c_max == MAX_TOKENS) {
             bail!(
                 "cache params mismatch: ({c_parent}, {c_corpus}, {c_seq}, {c_max}) vs \
                  ({parent_display}, {corpus_display}, {SEQ_LEN}, {MAX_TOKENS})"
@@ -496,7 +529,11 @@ fn main() -> Result<()> {
             "[skip] parent cache absent — generating over the REAL forward (one {MAX_TOKENS}-position pass)..."
         );
         let (argmax, truth, secs) = run_parent_pass(&loaded, &chunks);
-        let hit = argmax.iter().zip(truth.iter()).filter(|(a, t)| a == t).count();
+        let hit = argmax
+            .iter()
+            .zip(truth.iter())
+            .filter(|(a, t)| a == t)
+            .count();
         eprintln!(
             "[skip] parent pass: {} positions in {secs:.0}s ({:.2} tok/s) | hit {:.4}",
             argmax.len(),
@@ -532,8 +569,10 @@ fn main() -> Result<()> {
     // ── GLUE PARITY: the empty skip set is the parent, byte-identically ──
     {
         let none = vec![false; n_layers];
-        let probe_chunks: Vec<Vec<usize>> =
-            tokens[..SEQ_LEN].chunks(SEQ_LEN).map(<[usize]>::to_vec).collect();
+        let probe_chunks: Vec<Vec<usize>> = tokens[..SEQ_LEN]
+            .chunks(SEQ_LEN)
+            .map(<[usize]>::to_vec)
+            .collect();
         let probe = agreement_for_skip(
             &loaded,
             &probe_chunks,
@@ -547,7 +586,10 @@ fn main() -> Result<()> {
             "glue parity FAILED: the empty skip set diverges from the parent forward — \
              the amputation driver's loop glue is wrong; fix the instrument, never the checkpoint"
         );
-        eprintln!("[skip] glue parity: OK ({} positions byte-identical)", SEQ_LEN - 1);
+        eprintln!(
+            "[skip] glue parity: OK ({} positions byte-identical)",
+            SEQ_LEN - 1
+        );
     }
 
     let mut results = serde_json::Map::new();
@@ -577,8 +619,7 @@ fn main() -> Result<()> {
         dropped.sort_unstable();
         let kept: Vec<usize> = (0..n_layers).filter(|l| !dropped.contains(l)).collect();
         let type_name = |l: usize| {
-            if loaded.weights.layer_types[l]
-                == riir_infer_core::types::DeltaNetLayerType::DeltaNet
+            if loaded.weights.layer_types[l] == riir_infer_core::types::DeltaNetLayerType::DeltaNet
             {
                 "gdn"
             } else {
@@ -622,7 +663,10 @@ fn main() -> Result<()> {
             .iter()
             .map(|v| v.as_u64().expect("u32 block table entry") as usize)
             .collect();
-        assert!(pairs.len().is_multiple_of(2), "block table is (start,end) pairs");
+        assert!(
+            pairs.len().is_multiple_of(2),
+            "block table is (start,end) pairs"
+        );
         let mut kept = Vec::new();
         for pair in pairs.chunks(2) {
             let (st, en) = (pair[0], pair[1]);
@@ -640,7 +684,11 @@ fn main() -> Result<()> {
                 );
             }
         }
-        eprintln!("[skip] twt arm: {} kept layers from {}", kept.len(), path.display());
+        eprintln!(
+            "[skip] twt arm: {} kept layers from {}",
+            kept.len(),
+            path.display()
+        );
         let skip: Vec<bool> = (0..n_layers).map(|i| !kept.contains(&i)).collect();
         let a = agreement_for_skip(&loaded, &chunks, &parent_argmax, &skip, "twt (equal cut)")?;
         results.insert(
@@ -679,7 +727,11 @@ fn main() -> Result<()> {
         let bi = &selection.as_ref().expect("selection pass").bi;
         results.insert(
             "block_influence".into(),
-            serde_json::json!(bi.iter().map(|v| (v * 1e4).round() / 1e4).collect::<Vec<f64>>()),
+            serde_json::json!(
+                bi.iter()
+                    .map(|v| (v * 1e4).round() / 1e4)
+                    .collect::<Vec<f64>>()
+            ),
         );
         // Greedy elimination (the ShortGPT pass-2 shape): repeatedly drop
         // the layer whose removal least damages the seeded scan window's
@@ -745,8 +797,16 @@ fn main() -> Result<()> {
         removed.sort_unstable();
         let shortgpt_kept: Vec<usize> = (0..n_layers).filter(|&l| alive[l]).collect();
         let same_set = twt_kept == shortgpt_kept;
-        eprintln!("[skip] shortgpt: kept {k} = {shortgpt_kept:?} (dropped {removed:?}) | same set as twt: {same_set}");
-        let a = agreement_for_skip(&loaded, &chunks, &parent_argmax, &alive, "shortgpt-greedy (equal cut)")?;
+        eprintln!(
+            "[skip] shortgpt: kept {k} = {shortgpt_kept:?} (dropped {removed:?}) | same set as twt: {same_set}"
+        );
+        let a = agreement_for_skip(
+            &loaded,
+            &chunks,
+            &parent_argmax,
+            &alive,
+            "shortgpt-greedy (equal cut)",
+        )?;
         results.insert(
             "shortgpt".into(),
             serde_json::json!({
@@ -768,10 +828,12 @@ fn main() -> Result<()> {
         let profiles = hydra_calibrate_profiles(&sel.lens_de);
         results.insert(
             "hydra_profiles".into(),
-            serde_json::json!(profiles
-                .iter()
-                .map(|(de, b, e)| ((de * 1e4).round() / 1e4, (b * 1e4).round() / 1e4, *e))
-                .collect::<Vec<_>>()),
+            serde_json::json!(
+                profiles
+                    .iter()
+                    .map(|(de, b, e)| ((de * 1e4).round() / 1e4, (b * 1e4).round() / 1e4, *e))
+                    .collect::<Vec<_>>()
+            ),
         );
         // The shipped threshold rule (HydraBudgetConfig::default —
         // skip_threshold 0.01, skip_erasure_draft false): skip = non-backup ∧
@@ -823,7 +885,9 @@ fn main() -> Result<()> {
         // Deterministic LCG (the repo's reproducible-inputs convention).
         let mut s = seed;
         let mut rng = move || {
-            s = s.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+            s = s
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407);
             (s >> 33) as usize
         };
         let mut idxs: Vec<usize> = (0..n_layers).collect();
@@ -855,7 +919,11 @@ fn main() -> Result<()> {
 
     if let Some(path) = out {
         let mut f = std::fs::File::create(&path)?;
-        writeln!(f, "{}", serde_json::to_string_pretty(&serde_json::Value::Object(results))?)?;
+        writeln!(
+            f,
+            "{}",
+            serde_json::to_string_pretty(&serde_json::Value::Object(results))?
+        )?;
         eprintln!("[skip] record → {}", path.display());
     }
     Ok(())

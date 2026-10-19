@@ -338,7 +338,10 @@ pub fn q4_k_payload_from_ternary(n_elements: u64, seed: u64) -> Vec<u8> {
     use riir_infer_core::quant::q4k::{BlockQ4K, QK_K, quantize_row_q4_k};
 
     let n = n_elements as usize;
-    assert!(n.is_multiple_of(QK_K), "fixture size {n} not a multiple of {QK_K}");
+    assert!(
+        n.is_multiple_of(QK_K),
+        "fixture size {n} not a multiple of {QK_K}"
+    );
     let mut src = vec![0.0f32; n];
     for (j, v) in src.iter_mut().enumerate() {
         let b = j / 128;

@@ -375,7 +375,9 @@ impl CubeCLContext {
                     &device,
                     cubecl::wgpu::RuntimeOptions::default(),
                 ),
-                _ => init_setup::<AutoGraphicsApi>(&device, cubecl::wgpu::RuntimeOptions::default()),
+                _ => {
+                    init_setup::<AutoGraphicsApi>(&device, cubecl::wgpu::RuntimeOptions::default())
+                }
             };
             let client = WgpuRuntime::client(&device);
             let runtime_name = WgpuRuntime::name(&client);

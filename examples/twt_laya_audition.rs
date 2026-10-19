@@ -43,8 +43,8 @@
 use std::collections::HashMap;
 
 use riir_infer_core::twt::{
-    blake3_of, mean_sq_err, merge_mean, merge_rdsc, minmax_partition, selection_pin,
-    CandRow, CorrectionFit, SelectionPin, SMatrixBuilder, PRE_REGISTERED_EPS_GRID,
+    CandRow, CorrectionFit, PRE_REGISTERED_EPS_GRID, SMatrixBuilder, SelectionPin, blake3_of,
+    mean_sq_err, merge_mean, merge_rdsc, minmax_partition, selection_pin,
 };
 use riir_infer_laya::laya::config::{Checkpoint, EncoderConfig};
 use riir_infer_laya::laya::riir::backend::{AttnScratch, Backend, Cpu};
@@ -154,7 +154,11 @@ fn apply_layer(
     b.matmul_w(&sc.x, total, d, wqkv, 3 * d, &mut sc.qkv);
     let mut off = 0usize;
     for (si, &seq) in seqs.iter().enumerate() {
-        let mask = if sliding { masks.get(si).and_then(Option::as_deref) } else { None };
+        let mask = if sliding {
+            masks.get(si).and_then(Option::as_deref)
+        } else {
+            None
+        };
         b.attention_forward(
             &sc.qkv,
             off * 3 * d,
@@ -222,7 +226,9 @@ fn main() {
                 checkpoint = Checkpoint::ALL
                     .into_iter()
                     .find(|c| c.subfolder() == v)
-                    .unwrap_or_else(|| panic!("unknown checkpoint {v:?} (english|multilingual|typed)"));
+                    .unwrap_or_else(|| {
+                        panic!("unknown checkpoint {v:?} (english|multilingual|typed)")
+                    });
             }
             "--calib" => calib = args.next().expect("--calib needs a path"),
             "--eps" => eps_arg = args.next().expect("--eps needs all|<float>"),
@@ -258,8 +264,8 @@ fn main() {
     let mut map: HashMap<String, lane_weights::Weights> =
         lane_weights::load(&dir.join("model.safetensors"), ckpt_name)
             .unwrap_or_else(|e| panic!("weights: {e}"));
-    let encoder =
-        Encoder::from_map(&mut map, cfg.clone(), ckpt_name).unwrap_or_else(|e| panic!("encoder: {e}"));
+    let encoder = Encoder::from_map(&mut map, cfg.clone(), ckpt_name)
+        .unwrap_or_else(|e| panic!("encoder: {e}"));
     let tok = Tok::from_dir(&dir, ckpt_name).unwrap_or_else(|e| panic!("tokenizer: {e}"));
     let backend = Cpu;
     encoder.warm(&backend);
@@ -297,8 +303,21 @@ fn main() {
             let mut h = h_prev.clone();
             let mut sc = ApplyScratch::new();
             apply_layer(
-                &backend, &mut h, lw.attn_norm, lw.wqkv, lw.wo, lw.wi, lw.mlp_wo,
-                lw.mlp_norm, lw.sliding, &[len], len, &cfg, &rope, &masks, &mut sc,
+                &backend,
+                &mut h,
+                lw.attn_norm,
+                lw.wqkv,
+                lw.wo,
+                lw.wi,
+                lw.mlp_wo,
+                lw.mlp_norm,
+                lw.sliding,
+                &[len],
+                len,
+                &cfg,
+                &rope,
+                &masks,
+                &mut sc,
             );
             let diffs = h
                 .iter()
@@ -324,7 +343,9 @@ fn main() {
     let mut prompts_ok: Vec<Vec<u32>> = Vec::new();
     let mut rows_total = 0usize;
     'corpus: for prompt in &prompts {
-        let Ok(ids) = tok.encode(prompt) else { continue };
+        let Ok(ids) = tok.encode(prompt) else {
+            continue;
+        };
         if ids.len() < 2 {
             continue;
         }
@@ -445,8 +466,9 @@ fn main() {
             let mut cand_ids: Vec<String> = (s..e).map(|li| format!("member:{li}")).collect();
             let mut cand_w: Vec<CandW> = (s..e).map(CandW::Member).collect();
             if homogeneous {
-                let members: Vec<LayerWeights<'_>> =
-                    (s..e).map(|li| encoder.layer_weights(li).unwrap()).collect();
+                let members: Vec<LayerWeights<'_>> = (s..e)
+                    .map(|li| encoder.layer_weights(li).unwrap())
+                    .collect();
                 let any_no_norm = members.iter().any(|m| m.attn_norm.is_none());
                 // Explicit per-tensor merges — no fn-pointer indirection
                 // (the HRTB coercion through a generic merge fn fights the
@@ -496,16 +518,14 @@ fn main() {
                         CandW::Member(li) => cfg.sliding[*li],
                         CandW::Merged(_) => types[0], // homogeneous only
                     };
-                    let rope = rope_cache
-                        .entry((sliding, len))
-                        .or_insert_with(|| {
-                            let theta = if sliding {
-                                cfg.rope_theta_slide
-                            } else {
-                                cfg.rope_theta_full
-                            };
-                            ops::rope_tables(len, cfg.head_dim(), theta)
-                        });
+                    let rope = rope_cache.entry((sliding, len)).or_insert_with(|| {
+                        let theta = if sliding {
+                            cfg.rope_theta_slide
+                        } else {
+                            cfg.rope_theta_full
+                        };
+                        ops::rope_tables(len, cfg.head_dim(), theta)
+                    });
                     let masks = mask_cache
                         .entry(len)
                         .or_insert_with(|| build_masks(&backend, &[len], &cfg));
@@ -515,16 +535,40 @@ fn main() {
                         CandW::Member(li) => {
                             let lw = encoder.layer_weights(*li).unwrap();
                             apply_layer(
-                                &backend, &mut h, lw.attn_norm, lw.wqkv, lw.wo, lw.wi,
-                                lw.mlp_wo, lw.mlp_norm, lw.sliding, &[len], len, &cfg,
-                                rope, masks, &mut sc,
+                                &backend,
+                                &mut h,
+                                lw.attn_norm,
+                                lw.wqkv,
+                                lw.wo,
+                                lw.wi,
+                                lw.mlp_wo,
+                                lw.mlp_norm,
+                                lw.sliding,
+                                &[len],
+                                len,
+                                &cfg,
+                                rope,
+                                masks,
+                                &mut sc,
                             );
                         }
                         CandW::Merged(w) => {
                             apply_layer(
-                                &backend, &mut h, w.attn_norm.as_deref(), &w.wqkv, &w.wo,
-                                &w.wi, &w.mlp_wo, &w.mlp_norm, sliding, &[len], len, &cfg,
-                                rope, masks, &mut sc,
+                                &backend,
+                                &mut h,
+                                w.attn_norm.as_deref(),
+                                &w.wqkv,
+                                &w.wo,
+                                &w.wi,
+                                &w.mlp_wo,
+                                &w.mlp_norm,
+                                sliding,
+                                &[len],
+                                len,
+                                &cfg,
+                                rope,
+                                masks,
+                                &mut sc,
                             );
                         }
                     }
@@ -546,8 +590,10 @@ fn main() {
                 };
                 let (f_in, f_sur, f_e) = gather(&fit_idx);
                 let err_fit = mean_sq_err(&f_sur, &f_e, fit_rows, d);
-                let corr = CorrectionFit::fit(&f_in, &f_sur, &f_e, fit_rows, d)
-                    .unwrap_or_else(|e| panic!("block {s}..{e} candidate {}: fit: {e}", cand_ids[ci]));
+                let corr =
+                    CorrectionFit::fit(&f_in, &f_sur, &f_e, fit_rows, d).unwrap_or_else(|e| {
+                        panic!("block {s}..{e} candidate {}: fit: {e}", cand_ids[ci])
+                    });
 
                 // Held-out decomposition (the protocol's one touch). Each
                 // arm gets its OWN least-squares fit on the fit rows:
@@ -557,9 +603,10 @@ fn main() {
                 // joint slope, its own through-origin fit improves).
                 let (o_in, o_sur, o_e) = gather(&held_idx);
                 let err_raw = mean_sq_err(&o_sur, &o_e, held_rows, d);
-                let corr_a =
-                    CorrectionFit::fit_alpha_only(&f_in, &f_sur, &f_e, fit_rows, d)
-                        .unwrap_or_else(|e| panic!("block {s}..{e} candidate {}: α-only fit: {e}", cand_ids[ci]));
+                let corr_a = CorrectionFit::fit_alpha_only(&f_in, &f_sur, &f_e, fit_rows, d)
+                    .unwrap_or_else(|e| {
+                        panic!("block {s}..{e} candidate {}: α-only fit: {e}", cand_ids[ci])
+                    });
                 let mut corr_a_buf = vec![0f32; held_rows * d];
                 let mut corr_ab = vec![0f32; held_rows * d];
                 corr_a.apply(&o_in, &o_sur, &mut corr_a_buf);
@@ -590,8 +637,8 @@ fn main() {
                     err_fit: r["err_fit"].as_f64().unwrap(),
                 })
                 .collect();
-            let pin: SelectionPin =
-                selection_pin(&cand_rows).unwrap_or_else(|e| panic!("block {s}..{e}: selection: {e}"));
+            let pin: SelectionPin = selection_pin(&cand_rows)
+                .unwrap_or_else(|e| panic!("block {s}..{e}: selection: {e}"));
 
             // The winner's decomposition, guarded at +5% — RELATIVE to a
             // NON-ZERO raw error. A singleton passthrough's raw error is
@@ -613,7 +660,11 @@ fn main() {
                      (raw {raw} → α {ea} → αβ {eab}) — fit pathology, refused"
                 );
             }
-            let reduction = if raw > 0.0 { (1.0 - eab / raw).clamp(0.0, 1.0) } else { 0.0 };
+            let reduction = if raw > 0.0 {
+                (1.0 - eab / raw).clamp(0.0, 1.0)
+            } else {
+                0.0
+            };
 
             blocks_out.push(serde_json::json!({
                 "start": s, "end": e, "k": k,

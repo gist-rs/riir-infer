@@ -36,7 +36,7 @@ use std::collections::HashMap;
 
 use riir_infer_ane::{ArtifactPin, ComputeUnits, LoadedModel, PlanWalk};
 
-use super::host::{causal_pad_mask, gather_hidden, head_inputs, rope_tables, HeadInputs};
+use super::host::{HeadInputs, causal_pad_mask, gather_hidden, head_inputs, rope_tables};
 use super::loaders::{ClefConfig, ClefTokenizer, EmbeddingTable};
 use super::record::{ClefEncodedRecord, ClefQuestion, encode};
 
@@ -94,10 +94,7 @@ fn placement_words(placement: riir_infer_ane::Placement) -> String {
     } else {
         format!(
             "ane={} gpu={} cpu={} transitions={}",
-            placement.ane_ops,
-            placement.gpu_ops,
-            placement.cpu_ops,
-            placement.transitions
+            placement.ane_ops, placement.gpu_ops, placement.cpu_ops, placement.transitions
         )
     }
 }
@@ -207,11 +204,8 @@ impl ClefText {
                 PlanWalk::Skip,
             )
             .map_err(ClefError::CoreMl)?;
-            let (cos, sin) = rope_tables(
-                bucket as usize,
-                config.head_dim as usize,
-                config.rope_theta,
-            );
+            let (cos, sin) =
+                rope_tables(bucket as usize, config.head_dim as usize, config.rope_theta);
             // fp16 values ride the wire as raw bits (Float16 MLMultiArrays).
             let cos_bits = cos.iter().map(|v| v.to_bits()).collect::<Vec<_>>();
             let sin_bits = sin.iter().map(|v| v.to_bits()).collect::<Vec<_>>();
@@ -327,7 +321,10 @@ impl ClefText {
             self.config.max_options as usize,
             embeddings,
         )?;
-        let head = self.heads.get(&bucket).expect("bucket loaded with its head");
+        let head = self
+            .heads
+            .get(&bucket)
+            .expect("bucket loaded with its head");
         // the head answers the PADDED [maxO] logits array; the packed
         // prefix (option_count entries) is the real answer (the
         // reference reads the same prefix, offset per question)
@@ -337,17 +334,44 @@ impl ClefText {
                 ("states", states, &[l, d]),
                 ("mem_mask", &packed.mem_mask, &[l]),
                 ("last", &packed.last, &[l]),
-                ("q_mean", &packed.q_mean, &[self.config.max_questions as usize, l]),
-                ("o_mean", &packed.o_mean, &[self.config.max_options as usize, l]),
+                (
+                    "q_mean",
+                    &packed.q_mean,
+                    &[self.config.max_questions as usize, l],
+                ),
+                (
+                    "o_mean",
+                    &packed.o_mean,
+                    &[self.config.max_options as usize, l],
+                ),
                 (
                     "o2q",
                     &packed.o2q,
-                    &[self.config.max_options as usize, self.config.max_questions as usize],
+                    &[
+                        self.config.max_options as usize,
+                        self.config.max_questions as usize,
+                    ],
                 ),
-                ("lexical", &packed.lexical, &[self.config.max_options as usize, d]),
-                ("type_oh", &packed.type_oh, &[self.config.max_questions as usize, 3]),
-                ("q_mask", &packed.q_mask, &[self.config.max_questions as usize]),
-                ("o_mask", &packed.o_mask, &[self.config.max_options as usize]),
+                (
+                    "lexical",
+                    &packed.lexical,
+                    &[self.config.max_options as usize, d],
+                ),
+                (
+                    "type_oh",
+                    &packed.type_oh,
+                    &[self.config.max_questions as usize, 3],
+                ),
+                (
+                    "q_mask",
+                    &packed.q_mask,
+                    &[self.config.max_questions as usize],
+                ),
+                (
+                    "o_mask",
+                    &packed.o_mask,
+                    &[self.config.max_options as usize],
+                ),
             ],
             "logits",
             &mut logits_full,
@@ -496,10 +520,16 @@ impl std::fmt::Display for ClefError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::TooLong { tokens, bucket } => {
-                write!(f, "Record needs {tokens} tokens; the largest loaded bucket holds {bucket}")
+                write!(
+                    f,
+                    "Record needs {tokens} tokens; the largest loaded bucket holds {bucket}"
+                )
             }
             Self::UnknownBucket { bucket, available } => {
-                write!(f, "clef: no {bucket}-token bucket in the artifact (config carries {available:?})")
+                write!(
+                    f,
+                    "clef: no {bucket}-token bucket in the artifact (config carries {available:?})"
+                )
             }
             Self::CoreMl(e) => write!(f, "clef: core ml: {e}"),
             Self::Host(e) => write!(f, "clef: host math: {e}"),
@@ -735,7 +765,10 @@ mod tests {
             assert_eq!(answer.question_id, *id);
             assert!(answer.logits.iter().all(|v| v.is_finite()));
             let sum: f32 = answer.probabilities.iter().sum();
-            assert!((sum - 1.0).abs() < 1e-5, "{id}: probabilities sum to 1, got {sum}");
+            assert!(
+                (sum - 1.0).abs() < 1e-5,
+                "{id}: probabilities sum to 1, got {sum}"
+            );
             assert_eq!(answer.option_ids.len(), answer.probabilities.len());
         }
         // the typed readouts are consistent with the probabilities
@@ -800,7 +833,11 @@ mod tests {
         let logits = vec![0.0, 0.0, 10.0, 20.0, 30.0];
         let answers = answers_from_logits(&record, &logits, 5);
         assert_eq!(answers.len(), 2);
-        assert_eq!(answers[0].probabilities, vec![0.5, 0.5], "ties split evenly");
+        assert_eq!(
+            answers[0].probabilities,
+            vec![0.5, 0.5],
+            "ties split evenly"
+        );
         let sum: f32 = answers[1].probabilities.iter().sum();
         assert!((sum - 1.0).abs() < 1e-6);
         // peak subtraction: huge logits stay finite (10/20/30 in f32
@@ -812,7 +849,10 @@ mod tests {
         };
         let answers_b = answers_from_logits(&record_b, &big, 3);
         assert!(answers_b[0].probabilities.iter().all(|p| p.is_finite()));
-        assert!((answers_b[0].probabilities[1] - 0.5).abs() < 1e-6, "shift invariance");
+        assert!(
+            (answers_b[0].probabilities[1] - 0.5).abs() < 1e-6,
+            "shift invariance"
+        );
         // option order preserved
         assert_eq!(answers_b[0].option_ids, vec!["0", "1", "2"]);
     }

@@ -193,7 +193,8 @@ fn parse_args() -> Args {
     let mut it = std::env::args().skip(1);
     while let Some(f) = it.next() {
         let mut val = |name: &str| -> String {
-            it.next().unwrap_or_else(|| panic!("--{name} needs a value"))
+            it.next()
+                .unwrap_or_else(|| panic!("--{name} needs a value"))
         };
         match f.as_str() {
             "--model" => a.model = val("model").into(),
@@ -221,14 +222,7 @@ fn parse_args() -> Args {
             "--seed" => a.seed = val("seed").parse().unwrap(),
             "--chunk" => a.chunk = val("chunk").parse().unwrap(),
             "--defer" => a.defer = val("defer").parse().unwrap(),
-            "--arms" => {
-                a.arms_filter = Some(
-                    val("arms")
-                        .split(',')
-                        .map(str::to_string)
-                        .collect(),
-                )
-            }
+            "--arms" => a.arms_filter = Some(val("arms").split(',').map(str::to_string).collect()),
             "--full-from" => a.full_from = Some(val("full-from").into()),
             "--out" => a.out = Some(val("out").into()),
             other => panic!("unknown arg {other}"),
@@ -453,8 +447,7 @@ fn main() -> Result<()> {
         Ok(HubBlock { toks, code_spans })
     };
     let hub_codes: Vec<u64> = (0..args.hubs).map(|i| 20_000 + i as u64 * 977).collect();
-    let mut hub_blocks: Vec<HubBlock> =
-        Vec::with_capacity(hub_codes.len() * HUB_BLOCKS_PER_CODE);
+    let mut hub_blocks: Vec<HubBlock> = Vec::with_capacity(hub_codes.len() * HUB_BLOCKS_PER_CODE);
     for _b in 0..HUB_BLOCKS_PER_CODE {
         for (c, &code) in hub_codes.iter().enumerate() {
             hub_blocks.push(make_hub_block(c, code)?);
@@ -475,9 +468,9 @@ fn main() -> Result<()> {
     // usable depth apart).
     let needle_budget = needle_sent_toks.iter().map(|s| s.len()).sum::<usize>();
     let hub_budget: usize = hub_blocks.iter().map(|b| b.toks.len()).sum();
-    let usable = args.context.saturating_sub(
-        question_toks.len() + needle_budget + hub_budget + 64,
-    );
+    let usable = args
+        .context
+        .saturating_sub(question_toks.len() + needle_budget + hub_budget + 64);
     enum Splice<'a> {
         Needle(usize),
         Hub(&'a HubBlock),
@@ -488,7 +481,9 @@ fn main() -> Result<()> {
     let n_slots = args.needles + hub_blocks.len();
     let mut slot_of: Vec<Option<Splice>> = (0..n_slots).map(|_| None).collect();
     for i in 0..args.needles {
-        let s = ((i + 1) * n_slots / (args.needles + 1)).saturating_sub(1).min(n_slots - 1);
+        let s = ((i + 1) * n_slots / (args.needles + 1))
+            .saturating_sub(1)
+            .min(n_slots - 1);
         slot_of[s] = Some(Splice::Needle(i));
     }
     {
@@ -513,9 +508,7 @@ fn main() -> Result<()> {
     }
     for (wb, block) in wall_blocks.iter().enumerate() {
         let blen = block.toks.len();
-        let depth = args
-            .context
-            .saturating_sub(16 + blen + wb * (blen + 8));
+        let depth = args.context.saturating_sub(16 + blen + wb * (blen + 8));
         splices.push((depth, Splice::HubWall(block)));
     }
     splices.sort_by_key(|(d, _)| *d);
@@ -566,7 +559,10 @@ fn main() -> Result<()> {
     // shift every depth, so the spans are checked, not assumed.
     for (i, n) in needles.iter().enumerate() {
         if n.prompt_code_span.1 > args.context {
-            bail!("needle {i} code span {:?} truncated (corpus shorter than context?)", n.prompt_code_span);
+            bail!(
+                "needle {i} code span {:?} truncated (corpus shorter than context?)",
+                n.prompt_code_span
+            );
         }
     }
     for (i, (s0, s1)) in hub_spans.iter().enumerate() {
@@ -641,7 +637,9 @@ fn main() -> Result<()> {
             arms.push(Arm {
                 name: format!("diff_l{lambda:.2}@{tag}"),
                 policy: Some(EvictPolicy::Differential(DiffEvictConfig::new(
-                    lambda, args.beta, args.window,
+                    lambda,
+                    args.beta,
+                    args.window,
                 ))),
                 budget,
             });
@@ -721,8 +719,7 @@ fn main() -> Result<()> {
         }
     };
     let have_loaded_full = loaded_full.is_some();
-    let mut full_nll_opt: Option<Vec<f32>> =
-        loaded_full.as_ref().map(|r| r.needle_nll.clone());
+    let mut full_nll_opt: Option<Vec<f32>> = loaded_full.as_ref().map(|r| r.needle_nll.clone());
     let mut reports: Vec<ArmReport> = Vec::with_capacity(arms.len());
     if let Some(mut r) = loaded_full {
         r.reference_loaded = true;
@@ -738,7 +735,11 @@ fn main() -> Result<()> {
         {
             continue;
         }
-        let defer_until = if args.defer != 0 { prompt.len() as u64 } else { 0 };
+        let defer_until = if args.defer != 0 {
+            prompt.len() as u64
+        } else {
+            0
+        };
         let layer_cfg = arm.policy.map(|policy| EvictLayerConfig {
             policy,
             budget: arm.budget,
@@ -808,7 +809,11 @@ fn main() -> Result<()> {
     let full_nll = reports[0].needle_nll.clone();
     let n_needles = args.needles;
     let bar = 1.0 - 1.0 / n_needles as f32;
-    println!("\n# ── retrieval (bar ≥ {}/{} = {bar:.3}, EPS_NATS = {EPS_NATS}) ──", n_needles - 1, n_needles);
+    println!(
+        "\n# ── retrieval (bar ≥ {}/{} = {bar:.3}, EPS_NATS = {EPS_NATS}) ──",
+        n_needles - 1,
+        n_needles
+    );
     println!(
         "# {:<18} {:>9} {:>10} {:>10} {:>10} {:>10} {:>9}",
         "arm", "retrieval", "meanΔnats", "n_surv", "hub_surv", "wall_surv", "genNLL"
@@ -852,7 +857,10 @@ fn main() -> Result<()> {
             .find(|r| r.name.starts_with("diff_") && r.name.ends_with(&format!("@{tag}")))
             .and_then(|r| r.generic_nll);
         if let (Some(b), Some(d)) = (base, d) {
-            println!("# @{tag}: differential/maxrecent = {:.3}  (>1 ⇒ the trap fires on real text)", d / b);
+            println!(
+                "# @{tag}: differential/maxrecent = {:.3}  (>1 ⇒ the trap fires on real text)",
+                d / b
+            );
         }
     }
 
@@ -863,24 +871,35 @@ fn main() -> Result<()> {
             for (i, n) in needles.iter().enumerate() {
                 println!(
                     "# needle {i} depth {:>6}: Δ={:+.3} nats (arm {:.3} / full {:.3})",
-                    n.depth_tokens,
-                    r.delta_nll[i],
-                    r.needle_nll[i],
-                    full_nll[i],
+                    n.depth_tokens, r.delta_nll[i], r.needle_nll[i], full_nll[i],
                 );
             }
         }
     }
 
-    println!("\n# wall total {:.1}s | rig tokens {} | λ={} β={} W={} cadence={} hubs={} sinks={}",
-        t_start.elapsed().as_secs_f32(), prompt.len(),
-        args.lambdas.iter().map(|l| format!("{l}")).collect::<Vec<_>>().join(","),
-        args.beta, args.window, args.cadence, args.hubs, args.sinks);
+    println!(
+        "\n# wall total {:.1}s | rig tokens {} | λ={} β={} W={} cadence={} hubs={} sinks={}",
+        t_start.elapsed().as_secs_f32(),
+        prompt.len(),
+        args.lambdas
+            .iter()
+            .map(|l| format!("{l}"))
+            .collect::<Vec<_>>()
+            .join(","),
+        args.beta,
+        args.window,
+        args.cadence,
+        args.hubs,
+        args.sinks
+    );
 
     if let Some(out) = &args.out {
         std::fs::create_dir_all(out)?;
         upsert_report(&out.join("needle_gate_report.json"), &reports)?;
-        println!("# report: {}", out.join("needle_gate_report.json").display());
+        println!(
+            "# report: {}",
+            out.join("needle_gate_report.json").display()
+        );
     }
     Ok(())
 }
@@ -1059,10 +1078,7 @@ fn run_arm(
             f32::NAN
         }
     }
-    let needle_spans: Vec<(usize, usize)> = needles
-        .iter()
-        .map(|n| n.prompt_code_span)
-        .collect();
+    let needle_spans: Vec<(usize, usize)> = needles.iter().map(|n| n.prompt_code_span).collect();
 
     // ── Teacher-forced answer decode ──
     // `logits` (from the prefill's last position) predict answer_toks[0].
@@ -1100,7 +1116,10 @@ fn run_arm(
         }
     }
     let answer_done = t_arm.elapsed().as_secs_f32();
-    eprintln!("# [{name}] phases: +answer={:.1}s", answer_done - prefill_done);
+    eprintln!(
+        "# [{name}] phases: +answer={:.1}s",
+        answer_done - prefill_done
+    );
 
     // Secondary readout (post-first-eviction — see the prefill note): are
     // the needle / hub / wall-hub code rows still RESIDENT? (policy claim,
@@ -1110,7 +1129,10 @@ fn run_arm(
     let hub_row_survival = row_survival(&mut evictor, &layer_attn, hub_spans);
     let wall_row_survival = row_survival(&mut evictor, &layer_attn, wall_spans);
     let survival_done = t_arm.elapsed().as_secs_f32();
-    eprintln!("# [{name}] phases: +survival={:.1}s", survival_done - answer_done);
+    eprintln!(
+        "# [{name}] phases: +survival={:.1}s",
+        survival_done - answer_done
+    );
 
     // ── T4: generic continuation (teacher-forced, same cache) ──
     let generic_toks = tok.encode(GENERIC_CONTINUATION);
@@ -1131,10 +1153,12 @@ fn run_arm(
         prev_logits.copy_from_slice(&out[..v]);
         seq_len += 1;
     }
-    let generic_nll = (!generic_toks.is_empty())
-        .then(|| generic_acc / generic_toks.len() as f32);
+    let generic_nll = (!generic_toks.is_empty()).then(|| generic_acc / generic_toks.len() as f32);
     let generic_done = t_arm.elapsed().as_secs_f32();
-    eprintln!("# [{name}] phases: +generic={:.1}s", generic_done - answer_done);
+    eprintln!(
+        "# [{name}] phases: +generic={:.1}s",
+        generic_done - answer_done
+    );
 
     // ── Runaway probe: greedy free decode to the cap ──
     let eos = tok.eos_id();

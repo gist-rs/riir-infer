@@ -61,8 +61,8 @@ use riir_infer_core::gemma_layer::GemmaTransformerWeightsF16;
 use riir_infer_core::gguf_loader::{GgufFile, config_from_gguf_metadata, load_gemma2_f16_direct};
 use riir_infer_core::quant::kvq_harness::nll;
 use riir_infer_core::quant::svd_lbit::{
-    TruncSvd, bpw_for_rank, dual_svid_from_svd, mix_seed, plain_rank_for_bpw, rank_for_bpw,
-    rand_trunc_svd, rand_trunc_svd_oversampled, reconstruct, reconstruct_lowrank, rtn_binary_rows,
+    TruncSvd, bpw_for_rank, dual_svid_from_svd, mix_seed, plain_rank_for_bpw, rand_trunc_svd,
+    rand_trunc_svd_oversampled, rank_for_bpw, reconstruct, reconstruct_lowrank, rtn_binary_rows,
 };
 use riir_infer_core::tokenizer::SentencePieceGgufTokenizer;
 use riir_infer_core::transformer::{ForwardContext, forward_gemma2_f16};
@@ -223,7 +223,9 @@ fn main() -> Result<()> {
                 }
                 for &t in &parsed {
                     if !(0.0 < t && t <= 16.0) {
-                        bail!("target {t} outside (0, 16] — sanity ceiling; sub-1-bit ladder expected");
+                        bail!(
+                            "target {t} outside (0, 16] — sanity ceiling; sub-1-bit ladder expected"
+                        );
                     }
                 }
                 targets = parsed;
@@ -374,8 +376,7 @@ fn main() -> Result<()> {
                 .iter()
                 .enumerate()
                 .map(|(ti, &(_, dout, din))| {
-                    let w32: Vec<f32> =
-                        originals[l][ti].iter().map(|&v| v.to_f32()).collect();
+                    let w32: Vec<f32> = originals[l][ti].iter().map(|&v| v.to_f32()).collect();
                     rand_trunc_svd_oversampled(
                         &w32,
                         dout,
@@ -389,7 +390,11 @@ fn main() -> Result<()> {
     println!(
         "# shared bases: {} layers × 7 tensors, k_max {} in {:.0}s (T0: one basis serves all targets + the svd arm)",
         config.n_layer,
-        k_max.iter().map(|k| k.to_string()).collect::<Vec<_>>().join("/"),
+        k_max
+            .iter()
+            .map(|k| k.to_string())
+            .collect::<Vec<_>>()
+            .join("/"),
         t2.elapsed().as_secs_f32(),
     );
 
@@ -409,7 +414,15 @@ fn main() -> Result<()> {
             None => spec.arm_name().to_string(),
         };
         let t3 = Instant::now();
-        transform_weights(&mut weights, &originals, &bases, spec, &shapes, seed, pass_idx as u64);
+        transform_weights(
+            &mut weights,
+            &originals,
+            &bases,
+            spec,
+            &shapes,
+            seed,
+            pass_idx as u64,
+        );
         let transform_s = t3.elapsed().as_secs_f32();
         let t4 = Instant::now();
         let (ppl, nll_count) = eval_ppl(&weights, &config, &kv_dims, &windows, seq_len);
@@ -494,7 +507,10 @@ fn main() -> Result<()> {
                 let bpw: serde_json::Map<String, serde_json::Value> = shapes
                     .iter()
                     .map(|&(name, dout, din)| {
-                        (name.to_string(), serde_json::json!(spec.bpw_for_shape(dout, din)))
+                        (
+                            name.to_string(),
+                            serde_json::json!(spec.bpw_for_shape(dout, din)),
+                        )
                     })
                     .collect();
                 serde_json::json!({
@@ -630,8 +646,7 @@ fn eval_ppl(
                 let mut s = 0.0f64;
                 let mut n = 0usize;
                 for (pos, &token) in win.iter().enumerate() {
-                    let logits =
-                        forward_gemma2_f16(ctx, weights, cache, token, pos, config);
+                    let logits = forward_gemma2_f16(ctx, weights, cache, token, pos, config);
                     if pos + 1 < win.len() {
                         s += nll(logits, win[pos + 1]);
                         n += 1;

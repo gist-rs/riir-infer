@@ -30,7 +30,10 @@ use crate::dq_fakequant::DqGrid;
 /// IEEE-754 binary16 conversion with round-to-nearest-even, then immediate
 /// widening back to f32 — the scale-precision step of every grid (D1).
 #[cfg(feature = "cubecl_runtime")]
-#[allow(clippy::collapsible_if, reason = "CubeCL v0.10: nested-if statement form is required — no conditional expressions as values")]
+#[allow(
+    clippy::collapsible_if,
+    reason = "CubeCL v0.10: nested-if statement form is required — no conditional expressions as values"
+)]
 #[cube]
 pub(crate) fn f16_round_bits(bits: u32) -> f32 {
     // IEEE-754 binary16 RNE round-trip == half::f16::from_f32(x).to_f32().
@@ -125,7 +128,9 @@ pub(crate) fn f16_round_bits(bits: u32) -> f32 {
                                 }
                                 let mant23 = k << (23u32 - p);
                                 let exp32 = p + 127u32 - 24u32;
-                                r = f32::from_bits(sign | (exp32 << 23) | (mant23 & 0x007F_FFFFu32));
+                                r = f32::from_bits(
+                                    sign | (exp32 << 23) | (mant23 & 0x007F_FFFFu32),
+                                );
                             }
                         }
                     }
@@ -419,7 +424,10 @@ pub(crate) fn dq_fq_a8(buf: &mut [f32], params: &[f32]) {
 #[cfg(feature = "cubecl_runtime")]
 #[cfg_attr(
     not(feature = "dq_phase_bench"),
-    allow(dead_code, reason = "the only callers are the dq_phase_bench-gated Plan-614 injection sites")
+    allow(
+        dead_code,
+        reason = "the only callers are the dq_phase_bench-gated Plan-614 injection sites"
+    )
 )]
 pub(crate) fn launch_decode_pass<R: Runtime>(
     client: &ComputeClient<R>,
@@ -482,7 +490,10 @@ pub(crate) fn launch_decode_pass<R: Runtime>(
 #[cfg(feature = "cubecl_runtime")]
 #[cfg_attr(
     not(feature = "dq_phase_bench"),
-    allow(dead_code, reason = "the only callers are the dq_phase_bench-gated KV injection sites (Issue 033)")
+    allow(
+        dead_code,
+        reason = "the only callers are the dq_phase_bench-gated KV injection sites (Issue 033)"
+    )
 )]
 pub(crate) fn launch_kv_pass<R: Runtime>(
     client: &ComputeClient<R>,

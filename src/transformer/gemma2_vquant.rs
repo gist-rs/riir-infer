@@ -216,7 +216,8 @@ impl VQuantState {
     fn flush_row(&mut self, layer: usize, t: usize, layer_values: &mut [f32]) {
         let kvd = self.kvd;
         let off = t * kvd;
-        self.scratch_orig.copy_from_slice(&layer_values[off..off + kvd]);
+        self.scratch_orig
+            .copy_from_slice(&layer_values[off..off + kvd]);
         match &mut self.backing {
             Backing::Plain(q) => q.dequantize_value_into(layer, t, &mut self.scratch_row),
             Backing::MeanRemoved(m) => m.dequantize_value_into(layer, t, &mut self.scratch_row),

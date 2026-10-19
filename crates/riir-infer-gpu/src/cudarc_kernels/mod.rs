@@ -1710,14 +1710,16 @@ impl ElementwiseKernels {
     }
 }
 
-
 /// Plan 614 / Issue 026 — the DQ fake-quant kernel source (compiled as its
 /// own module by [`DqFqKernels`]; mirrors the host reference bit-exactly).
 /// The only reader is [`DqFqKernels::new`] (`dq_phase_bench`-gated) — dead
 /// at non-dq postures, the dq_fakequant.rs idiom.
 #[cfg_attr(
     not(feature = "dq_phase_bench"),
-    allow(dead_code, reason = "the only reader is DqFqKernels::new (dq_phase_bench-gated)")
+    allow(
+        dead_code,
+        reason = "the only reader is DqFqKernels::new (dq_phase_bench-gated)"
+    )
 )]
 pub(crate) const DQ_FQ_CUDA_SRC: &str = r#"
 // ─── Plan 614 / Issue 026 — the DQ fake-quant kernels (prefill lane) ───────

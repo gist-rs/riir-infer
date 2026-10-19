@@ -51,8 +51,7 @@ use cubecl::server::Handle;
 /// this kernel (the R1 `STAGED_LAUNCHES` pattern; a silent fallback would
 /// otherwise make a green run indistinguishable from a no-op).
 #[cfg(feature = "deltanet_prework_fused")]
-static PREWORK_FUSED_LAUNCHES: std::sync::atomic::AtomicU64 =
-    std::sync::atomic::AtomicU64::new(0);
+static PREWORK_FUSED_LAUNCHES: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
 /// Read [`PREWORK_FUSED_LAUNCHES`].
 #[cfg(feature = "deltanet_prework_fused")]
@@ -209,7 +208,10 @@ impl DeltanetPreworkFusedCubeCL {
              (got head_dim={head_dim}, n_k={n_k_heads}, n_v={n_v_heads})",
             Self::HEAD_DIM
         );
-        debug_assert!(p <= 65535, "fused prework: p={p} exceeds the Metal Y grid cap");
+        debug_assert!(
+            p <= 65535,
+            "fused prework: p={p} exceeds the Metal Y grid cap"
+        );
         debug_assert_eq!(
             conv_dim,
             (2 * n_k_heads + n_v_heads) * head_dim,
@@ -357,8 +359,12 @@ mod tests {
                 p,
             );
         }
-        let expanded_ref =
-            f32::from_bytes(&client.read_one(expanded_ref_h.clone()).expect("read expanded ref")).to_vec();
+        let expanded_ref = f32::from_bytes(
+            &client
+                .read_one(expanded_ref_h.clone())
+                .expect("read expanded ref"),
+        )
+        .to_vec();
         let carry_ref_out =
             f32::from_bytes(&client.read_one(carry_ref.clone()).expect("read carry ref")).to_vec();
 
@@ -380,8 +386,12 @@ mod tests {
                 hd,
             );
         }
-        let expanded_fused =
-            f32::from_bytes(&client.read_one(expanded_fused_h).expect("read expanded fused")).to_vec();
+        let expanded_fused = f32::from_bytes(
+            &client
+                .read_one(expanded_fused_h)
+                .expect("read expanded fused"),
+        )
+        .to_vec();
         let carry_fused_out =
             f32::from_bytes(&client.read_one(carry_fused).expect("read carry fused")).to_vec();
 
@@ -396,12 +406,66 @@ mod tests {
         let ctx = CubeCLContext::new().expect("CubeCL should initialize");
         let client = ctx.client();
         for (shape, seed) in [
-            (Shape { n_k: 2, n_v: 4, hd: 128, ks: 4, p: 200 }, 11),
-            (Shape { n_k: 16, n_v: 48, hd: 128, ks: 4, p: 192 }, 12),
-            (Shape { n_k: 16, n_v: 48, hd: 128, ks: 4, p: 1 }, 13),
-            (Shape { n_k: 16, n_v: 48, hd: 128, ks: 4, p: 2 }, 14), // p < ks-1
-            (Shape { n_k: 4, n_v: 8, hd: 128, ks: 4, p: 63 }, 15),  // odd, non-multiple
-            (Shape { n_k: 1, n_v: 3, hd: 128, ks: 4, p: 65 }, 16),
+            (
+                Shape {
+                    n_k: 2,
+                    n_v: 4,
+                    hd: 128,
+                    ks: 4,
+                    p: 200,
+                },
+                11,
+            ),
+            (
+                Shape {
+                    n_k: 16,
+                    n_v: 48,
+                    hd: 128,
+                    ks: 4,
+                    p: 192,
+                },
+                12,
+            ),
+            (
+                Shape {
+                    n_k: 16,
+                    n_v: 48,
+                    hd: 128,
+                    ks: 4,
+                    p: 1,
+                },
+                13,
+            ),
+            (
+                Shape {
+                    n_k: 16,
+                    n_v: 48,
+                    hd: 128,
+                    ks: 4,
+                    p: 2,
+                },
+                14,
+            ), // p < ks-1
+            (
+                Shape {
+                    n_k: 4,
+                    n_v: 8,
+                    hd: 128,
+                    ks: 4,
+                    p: 63,
+                },
+                15,
+            ), // odd, non-multiple
+            (
+                Shape {
+                    n_k: 1,
+                    n_v: 3,
+                    hd: 128,
+                    ks: 4,
+                    p: 65,
+                },
+                16,
+            ),
         ] {
             let (exp_ref, exp_fused, carry_ref, carry_fused) = run_both(&client, &shape, seed);
             let mut diffs = 0usize;
@@ -420,7 +484,10 @@ mod tests {
                     carry_diffs += 1;
                 }
             }
-            assert_eq!(carry_diffs, 0, "carry differs in {carry_diffs} elements at {shape:?}");
+            assert_eq!(
+                carry_diffs, 0,
+                "carry differs in {carry_diffs} elements at {shape:?}"
+            );
             println!(
                 "fused_is_bit_identical_to_the_chain: {:?} OK ({} expanded elems)",
                 shape,
@@ -435,7 +502,13 @@ mod tests {
         let ctx = CubeCLContext::new().expect("CubeCL should initialize");
         let client = ctx.client();
         let before = prework_fused_launches();
-        let s = Shape { n_k: 2, n_v: 4, hd: 128, ks: 4, p: 8 };
+        let s = Shape {
+            n_k: 2,
+            n_v: 4,
+            hd: 128,
+            ks: 4,
+            p: 8,
+        };
         let _ = run_both(&client, &s, 99);
         assert!(prework_fused_launches() > before);
     }

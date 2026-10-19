@@ -19,15 +19,15 @@
 //!     --out .benchmarks/024_lut_grid_tables
 //! ```
 
-use anyhow::{bail, Context, Result};
+use anyhow::{Context, Result, bail};
 use half::f16;
 use riir_infer_core::gguf_loader::{GgmlType, GgufFile};
+use riir_infer_core::quant::lut_grid::WeightHistogram;
 use riir_infer_core::quant::lut_grid::{grid_digest, solve_lloyd_max};
 use riir_infer_core::quant::q2_0::{
-    dequantize_row_q2_0, dequantize_row_q2_0_grid, quantize_row_q2_0_asymmetric,
-    quantize_row_q2_0_grid, quantize_row_q2_0_symmetric, t0_block_scale, Q2_0_BLOCK_SIZE,
+    Q2_0_BLOCK_SIZE, dequantize_row_q2_0, dequantize_row_q2_0_grid, quantize_row_q2_0_asymmetric,
+    quantize_row_q2_0_grid, quantize_row_q2_0_symmetric, t0_block_scale,
 };
-use riir_infer_core::quant::lut_grid::WeightHistogram;
 use serde::Serialize;
 
 #[derive(Serialize)]
@@ -77,12 +77,7 @@ struct GranularityRow {
 /// suffix, normalizes HF-style separators to the llama.cpp-ish short form.
 fn family_of(name: &str) -> String {
     let mut s = name;
-    for p in [
-        "model.layers.",
-        "layers.",
-        "blk.",
-        "encoder.layer.",
-    ] {
+    for p in ["model.layers.", "layers.", "blk.", "encoder.layer."] {
         if let Some(rest) = s.strip_prefix(p) {
             // Skip the numeric segment + the following dot.
             if let Some(dot) = rest.find('.') {
@@ -136,7 +131,9 @@ fn main() -> Result<()> {
             "--gguf" => ggufs.push(args.next().context("--gguf needs a path")?),
             "--out" => out_dir = Some(args.next().context("--out needs a dir")?),
             "--granularity" => granularity_sweep = true,
-            other => bail!("unknown arg {other} (usage: --gguf <p>… [--out <dir>] [--granularity])"),
+            other => {
+                bail!("unknown arg {other} (usage: --gguf <p>… [--out <dir>] [--granularity])")
+            }
         }
     }
     if ggufs.is_empty() {
@@ -164,8 +161,8 @@ fn main() -> Result<()> {
 }
 
 fn solve_one(path: &str, granularity_sweep: bool) -> Result<SolveReport> {
-    let gguf = GgufFile::open(std::path::Path::new(path))
-        .with_context(|| format!("open {path}"))?;
+    let gguf =
+        GgufFile::open(std::path::Path::new(path)).with_context(|| format!("open {path}"))?;
 
     // Eligible tensors: F16, 2-D, name carries "weight", whole blocks.
     let mut eligible: Vec<(String, Vec<usize>)> = Vec::new();
@@ -320,7 +317,11 @@ fn solve_one(path: &str, granularity_sweep: bool) -> Result<SolveReport> {
                 tensors: a.tensors as usize,
                 weights: a.weights,
                 snr_db: [snr(a.err[0]), snr(a.err[1]), snr(a.err[2])],
-                mse: [a.err[0] / a.weights as f64, a.err[1] / a.weights as f64, a.err[2] / a.weights as f64],
+                mse: [
+                    a.err[0] / a.weights as f64,
+                    a.err[1] / a.weights as f64,
+                    a.err[2] / a.weights as f64,
+                ],
                 worst_tensor_snr_db: a.worst,
             }
         })
@@ -328,9 +329,24 @@ fn solve_one(path: &str, granularity_sweep: bool) -> Result<SolveReport> {
 
     let granularity = if granularity_sweep {
         vec![
-            GranularityRow { group: 128, bpw: 2.0 + 16.0 / 128.0, snr_db: gran[0].snr(), mse: gran[0].mse() },
-            GranularityRow { group: 64, bpw: 2.0 + 16.0 / 64.0, snr_db: gran[1].snr(), mse: gran[1].mse() },
-            GranularityRow { group: 32, bpw: 2.0 + 16.0 / 32.0, snr_db: gran[2].snr(), mse: gran[2].mse() },
+            GranularityRow {
+                group: 128,
+                bpw: 2.0 + 16.0 / 128.0,
+                snr_db: gran[0].snr(),
+                mse: gran[0].mse(),
+            },
+            GranularityRow {
+                group: 64,
+                bpw: 2.0 + 16.0 / 64.0,
+                snr_db: gran[1].snr(),
+                mse: gran[1].mse(),
+            },
+            GranularityRow {
+                group: 32,
+                bpw: 2.0 + 16.0 / 32.0,
+                snr_db: gran[2].snr(),
+                mse: gran[2].mse(),
+            },
         ]
     } else {
         Vec::new()
@@ -366,7 +382,11 @@ struct Acc2 {
 
 impl Default for Acc2 {
     fn default() -> Self {
-        Self { sig: 0.0, err: 0.0, n: 0 }
+        Self {
+            sig: 0.0,
+            err: 0.0,
+            n: 0,
+        }
     }
 }
 
@@ -414,10 +434,7 @@ fn hex(b: &[u8]) -> String {
 
 fn render_report(r: &SolveReport) -> String {
     let mut s = String::new();
-    s.push_str(&format!(
-        "═══ LUT grid solve — {} ═══\n",
-        r.gguf
-    ));
+    s.push_str(&format!("═══ LUT grid solve — {} ═══\n", r.gguf));
     s.push_str(&format!(
         "tensors used {} (skipped partial {}), weights {}\n",
         r.tensors_used, r.tensors_skipped, r.weights

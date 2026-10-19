@@ -26,7 +26,9 @@ fn kvdiag_sidecars_match_their_blake3_pins() {
         }
         let pin = std::fs::read_to_string(&path).expect("blake3 pin readable");
         let mut parts = pin.split_whitespace();
-        let digest = parts.next().unwrap_or_else(|| panic!("pin {} malformed", path.display()));
+        let digest = parts
+            .next()
+            .unwrap_or_else(|| panic!("pin {} malformed", path.display()));
         let name = parts.next().expect("pin names its sidecar");
         let sidecar = dir.join(name);
         let data = std::fs::read(&sidecar).unwrap_or_else(|e| panic!("sidecar {name}: {e}"));

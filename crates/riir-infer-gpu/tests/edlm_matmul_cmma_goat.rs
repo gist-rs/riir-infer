@@ -23,10 +23,10 @@
 #![cfg(feature = "edlm_gpu")]
 #![allow(clippy::too_many_arguments)]
 
-use riir_infer_gpu::cubecl_runtime::{ActiveRuntime, CubeCLContext, create_f32, read_f32};
-use riir_infer_gpu::{Handle, MatmulF16bCmmaCubeCL, MatmulF16bCubeCL};
 use cubecl::Runtime as _;
 use half::f16 as half_f16;
+use riir_infer_gpu::cubecl_runtime::{ActiveRuntime, CubeCLContext, create_f32, read_f32};
+use riir_infer_gpu::{Handle, MatmulF16bCmmaCubeCL, MatmulF16bCubeCL};
 
 /// The timing/parity arms (the model-side dispatch mirror).
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -121,7 +121,16 @@ fn real_shape_parity_both_kernels() {
 
         for kernel in [Kernel::Scalar, Kernel::CmmaV1, Kernel::CmmaSg8] {
             let out_h = cl.empty(m * p * core::mem::size_of::<f32>());
-            run_kernel(kernel, &ctx, a_h.clone(), b_h.clone(), out_h.clone(), m, n, p);
+            run_kernel(
+                kernel,
+                &ctx,
+                a_h.clone(),
+                b_h.clone(),
+                out_h.clone(),
+                m,
+                n,
+                p,
+            );
             let got = read_f32(&cl, out_h).expect("read");
             let worst = got
                 .iter()
@@ -158,7 +167,16 @@ fn timed_chunk(
 ) -> std::time::Duration {
     let start = std::time::Instant::now();
     for _ in 0..launches {
-        run_kernel(kernel, ctx, a_h.clone(), b_h.clone(), out_h.clone(), m, n, p);
+        run_kernel(
+            kernel,
+            ctx,
+            a_h.clone(),
+            b_h.clone(),
+            out_h.clone(),
+            m,
+            n,
+            p,
+        );
     }
     let cl = ctx.client();
     let _ = read_f32(&cl, out_h).expect("read");
@@ -213,8 +231,28 @@ fn goat_interleaved_ab() {
 
         // Warmup BOTH arms (compilation + clocks) before any timing.
         for _ in 0..WARMUP {
-            timed_chunk(Kernel::Scalar, &ctx, a_h.clone(), b_h.clone(), out_h.clone(), m, n, p, LAUNCHES);
-            timed_chunk(Kernel::CmmaV1, &ctx, a_h.clone(), b_h.clone(), out_h.clone(), m, n, p, LAUNCHES);
+            timed_chunk(
+                Kernel::Scalar,
+                &ctx,
+                a_h.clone(),
+                b_h.clone(),
+                out_h.clone(),
+                m,
+                n,
+                p,
+                LAUNCHES,
+            );
+            timed_chunk(
+                Kernel::CmmaV1,
+                &ctx,
+                a_h.clone(),
+                b_h.clone(),
+                out_h.clone(),
+                m,
+                n,
+                p,
+                LAUNCHES,
+            );
         }
 
         // Interleaved pairs — median per arm (the sequential-A/B law).
@@ -222,12 +260,32 @@ fn goat_interleaved_ab() {
         let mut cmma: Vec<u128> = Vec::with_capacity(PAIRS);
         for _ in 0..PAIRS {
             scalar.push(
-                timed_chunk(Kernel::Scalar, &ctx, a_h.clone(), b_h.clone(), out_h.clone(), m, n, p, LAUNCHES)
-                    .as_micros(),
+                timed_chunk(
+                    Kernel::Scalar,
+                    &ctx,
+                    a_h.clone(),
+                    b_h.clone(),
+                    out_h.clone(),
+                    m,
+                    n,
+                    p,
+                    LAUNCHES,
+                )
+                .as_micros(),
             );
             cmma.push(
-                timed_chunk(Kernel::CmmaV1, &ctx, a_h.clone(), b_h.clone(), out_h.clone(), m, n, p, LAUNCHES)
-                    .as_micros(),
+                timed_chunk(
+                    Kernel::CmmaV1,
+                    &ctx,
+                    a_h.clone(),
+                    b_h.clone(),
+                    out_h.clone(),
+                    m,
+                    n,
+                    p,
+                    LAUNCHES,
+                )
+                .as_micros(),
             );
         }
         scalar.sort_unstable();
@@ -304,20 +362,60 @@ fn goat_interleaved_ab_sg8() {
         let out_h = cl.empty(m * p * core::mem::size_of::<f32>());
 
         for _ in 0..WARMUP {
-            timed_chunk(Kernel::CmmaV1, &ctx, a_h.clone(), b_h.clone(), out_h.clone(), m, n, p, LAUNCHES);
-            timed_chunk(Kernel::CmmaSg8, &ctx, a_h.clone(), b_h.clone(), out_h.clone(), m, n, p, LAUNCHES);
+            timed_chunk(
+                Kernel::CmmaV1,
+                &ctx,
+                a_h.clone(),
+                b_h.clone(),
+                out_h.clone(),
+                m,
+                n,
+                p,
+                LAUNCHES,
+            );
+            timed_chunk(
+                Kernel::CmmaSg8,
+                &ctx,
+                a_h.clone(),
+                b_h.clone(),
+                out_h.clone(),
+                m,
+                n,
+                p,
+                LAUNCHES,
+            );
         }
 
         let mut v1: Vec<u128> = Vec::with_capacity(PAIRS);
         let mut sg8: Vec<u128> = Vec::with_capacity(PAIRS);
         for _ in 0..PAIRS {
             v1.push(
-                timed_chunk(Kernel::CmmaV1, &ctx, a_h.clone(), b_h.clone(), out_h.clone(), m, n, p, LAUNCHES)
-                    .as_micros(),
+                timed_chunk(
+                    Kernel::CmmaV1,
+                    &ctx,
+                    a_h.clone(),
+                    b_h.clone(),
+                    out_h.clone(),
+                    m,
+                    n,
+                    p,
+                    LAUNCHES,
+                )
+                .as_micros(),
             );
             sg8.push(
-                timed_chunk(Kernel::CmmaSg8, &ctx, a_h.clone(), b_h.clone(), out_h.clone(), m, n, p, LAUNCHES)
-                    .as_micros(),
+                timed_chunk(
+                    Kernel::CmmaSg8,
+                    &ctx,
+                    a_h.clone(),
+                    b_h.clone(),
+                    out_h.clone(),
+                    m,
+                    n,
+                    p,
+                    LAUNCHES,
+                )
+                .as_micros(),
             );
         }
         v1.sort_unstable();

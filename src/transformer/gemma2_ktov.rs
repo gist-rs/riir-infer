@@ -28,7 +28,7 @@
 //! bitwise the value T3's read-path reconstruction serves up to rotation
 //! rounding (1.83ε); promotion is katgpt-rs-side and waits on the gates.
 
-use katgpt_core::fitted_value_table::{v_from_k_plus, FittedTokenTable};
+use katgpt_core::fitted_value_table::{FittedTokenTable, v_from_k_plus};
 
 use crate::transformer::gemma2::ValueStoreHook;
 
@@ -238,7 +238,10 @@ mod tests {
             }
         }
         Box::leak(Box::new(FittedTokenTable::from_rows(
-            LAYERS, KVD, row_of_token, data,
+            LAYERS,
+            KVD,
+            row_of_token,
+            data,
         )))
     }
 
@@ -299,10 +302,10 @@ mod tests {
         let mut copy_state = DirectCopyState::new(KVD);
         for pos in 0..SEQ {
             let tok: u32 = match pos {
-                0 => 1,    // tracked, nonzero row
-                1 => 0,    // tracked, ZERO row
-                2 => 2,    // untracked
-                _ => 999,  // out of table vocab
+                0 => 1,   // tracked, nonzero row
+                1 => 0,   // tracked, ZERO row
+                2 => 2,   // untracked
+                _ => 999, // out of table vocab
             };
             lam_state.set_token(pos, tok);
             copy_state.set_token(pos, tok);

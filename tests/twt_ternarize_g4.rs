@@ -10,7 +10,7 @@
 use std::alloc::{GlobalAlloc, Layout, System};
 use std::sync::atomic::{AtomicUsize, Ordering};
 
-use riir_infer_core::twt::ternarize::{materialization_rel_err, ARM_B_TAU_CODE};
+use riir_infer_core::twt::ternarize::{ARM_B_TAU_CODE, materialization_rel_err};
 
 static ALLOCS: AtomicUsize = AtomicUsize::new(0);
 
@@ -41,7 +41,9 @@ fn g4_the_rel_err_loop_is_alloc_free_with_caller_scratch() {
     // Deterministic operators + inputs.
     let mut seed = 0x12345678u64;
     let mut next = || {
-        seed = seed.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+        seed = seed
+            .wrapping_mul(6364136223846793005)
+            .wrapping_add(1442695040888963407);
         let v = ((seed >> 33) as u32) as f32 / u32::MAX as f32 - 0.5;
         v * 0.1
     };
@@ -52,8 +54,7 @@ fn g4_the_rel_err_loop_is_alloc_free_with_caller_scratch() {
     let mut yb = vec![0f32; rows];
 
     let before = ALLOCS.load(Ordering::Relaxed);
-    let err =
-        materialization_rel_err(&a, &b, &xs, rows, cols, n_x, &mut ya, &mut yb).unwrap();
+    let err = materialization_rel_err(&a, &b, &xs, rows, cols, n_x, &mut ya, &mut yb).unwrap();
     let after = ALLOCS.load(Ordering::Relaxed);
     assert_eq!(before, after, "the rel-err loop must not allocate");
     assert!(err.is_finite());

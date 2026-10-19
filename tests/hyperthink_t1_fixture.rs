@@ -48,10 +48,7 @@ fn t1_sidecar_matches_its_blake3_pin() {
     let dir = fixture_dir();
     let pin = std::fs::read_to_string(dir.join("gemma-2-2b-it-f16.t1_bias_delta.json.blake3"))
         .expect("blake3 pin present");
-    let digest = pin
-        .split_whitespace()
-        .next()
-        .expect("pin names a digest");
+    let digest = pin.split_whitespace().next().expect("pin names a digest");
     let data =
         std::fs::read(dir.join("gemma-2-2b-it-f16.t1_bias_delta.json")).expect("sidecar present");
     assert_eq!(
@@ -69,10 +66,8 @@ fn t1_sidecar_is_the_full_pre_registered_run() {
     if !fixtures_present() {
         return;
     }
-    let j = std::fs::read_to_string(
-        fixture_dir().join("gemma-2-2b-it-f16.t1_bias_delta.json"),
-    )
-    .expect("sidecar present");
+    let j = std::fs::read_to_string(fixture_dir().join("gemma-2-2b-it-f16.t1_bias_delta.json"))
+        .expect("sidecar present");
     for needle in [
         "\"lane\": \"issue920_t1_bias_delta\"",
         "\"probes\": 2000",

@@ -47,20 +47,18 @@
 use std::collections::BTreeMap;
 use std::io::BufWriter;
 
-use riir_infer_core::gguf_loader::{GgufFile, GgmlType, GgufValue};
+use riir_infer_core::gguf_loader::{GgmlType, GgufFile, GgufValue};
 use riir_infer_core::quant::ptq1_0::repack_ptq1_0_to_ternary_group;
 use riir_infer_core::quant::q2_0::repack_q2_0_to_ternary_group;
+use riir_infer_core::twt::audition::{merge_mean, merge_rdsc};
 use riir_infer_core::twt::collapse_writer::{
-    TensorOut, emit_collapsed_gguf, q2_0_wire_bytes, twt_arm_codes_value, twt_block_table_value,
-    twt_layer_types_value, CollapseSpec, LAYER_TYPES_LEGEND, LayerSource,
+    CollapseSpec, LAYER_TYPES_LEGEND, LayerSource, TensorOut, emit_collapsed_gguf, q2_0_wire_bytes,
+    twt_arm_codes_value, twt_block_table_value, twt_layer_types_value,
 };
 use riir_infer_core::twt::partition::{minmax_partition, minmax_partition_typed, partition_worst};
 use riir_infer_core::twt::smatrix::SMatrix;
-use riir_infer_core::twt::ternarize::{
-    Materialized, TwtArm, arm_sign_majority, arm_source_quant,
-};
+use riir_infer_core::twt::ternarize::{Materialized, TwtArm, arm_sign_majority, arm_source_quant};
 use riir_infer_core::types::DeltaNetLayerType;
-use riir_infer_core::twt::audition::{merge_mean, merge_rdsc};
 
 /// Dequantize one parent tensor (Q2_0 | PTQ1_0 | F32 | BF16 | F16) to
 /// dense f32 (row-major, `rows × cols`).
@@ -199,7 +197,11 @@ fn merged_block_payloads(
                     .to_vec();
                 out.insert(
                     suffix.clone(),
-                    TensorOut { ggml_type: info.ggml_type, shape, data },
+                    TensorOut {
+                        ggml_type: info.ggml_type,
+                        shape,
+                        data,
+                    },
                 );
             }
             SuffixMenu::Arm => match info.ggml_type {
@@ -269,13 +271,33 @@ fn main() {
     let mut args = std::env::args().skip(1);
     while let Some(a) = args.next() {
         match a.as_str() {
-            "--parent" => parent_path = Some(std::path::PathBuf::from(args.next().expect("--parent needs a path"))),
-            "--profile" => profile_path = Some(std::path::PathBuf::from(args.next().expect("--profile needs a path"))),
-            "--out" => out_path = Some(std::path::PathBuf::from(args.next().expect("--out needs a path"))),
-            "--eps" => eps = args.next().expect("--eps needs a value").parse().expect("--eps must be f32"),
+            "--parent" => {
+                parent_path = Some(std::path::PathBuf::from(
+                    args.next().expect("--parent needs a path"),
+                ))
+            }
+            "--profile" => {
+                profile_path = Some(std::path::PathBuf::from(
+                    args.next().expect("--profile needs a path"),
+                ))
+            }
+            "--out" => {
+                out_path = Some(std::path::PathBuf::from(
+                    args.next().expect("--out needs a path"),
+                ))
+            }
+            "--eps" => {
+                eps = args
+                    .next()
+                    .expect("--eps needs a value")
+                    .parse()
+                    .expect("--eps must be f32")
+            }
             "--typed" => typed = true,
             "--selection" => {
-                selection_path = Some(std::path::PathBuf::from(args.next().expect("--selection needs a path")))
+                selection_path = Some(std::path::PathBuf::from(
+                    args.next().expect("--selection needs a path"),
+                ))
             }
             other => panic!("unknown arg {other}"),
         }
@@ -288,7 +310,8 @@ fn main() {
     //    gemma2 = the T5.1 lane-1 f16 control — a single-operator stack in
     //    this repo (no SWA), so no index-derived layer typing survives to
     //    break under renumbering and no prism keys exist to renumber) ──
-    let parent = GgufFile::open(&parent_path).unwrap_or_else(|e| panic!("open {}: {e}", parent_path.display()));
+    let parent = GgufFile::open(&parent_path)
+        .unwrap_or_else(|e| panic!("open {}: {e}", parent_path.display()));
     let arch = parent
         .metadata
         .get("general.architecture")
@@ -297,8 +320,9 @@ fn main() {
         .to_owned();
     let (n_layer, block_count_key, parent_types, nextn) = match arch.as_str() {
         "qwen35" => {
-            let n_layer =
-                parent.metadata_u64("qwen35.block_count").expect("qwen35.block_count") as usize;
+            let n_layer = parent
+                .metadata_u64("qwen35.block_count")
+                .expect("qwen35.block_count") as usize;
             let interval = parent
                 .metadata_u64("qwen35.full_attention_interval")
                 .unwrap_or(4) as usize;
@@ -323,8 +347,9 @@ fn main() {
             (n_layer, "qwen35.block_count".to_owned(), types, nextn)
         }
         "gemma2" => {
-            let n_layer =
-                parent.metadata_u64("gemma2.block_count").expect("gemma2.block_count") as usize;
+            let n_layer = parent
+                .metadata_u64("gemma2.block_count")
+                .expect("gemma2.block_count") as usize;
             let types = vec![DeltaNetLayerType::Attention; n_layer];
             (n_layer, "gemma2.block_count".to_owned(), types, 0usize)
         }
@@ -345,10 +370,12 @@ fn main() {
     // ── the profile artifact → S matrix ──
     let profile_text = std::fs::read_to_string(&profile_path)
         .unwrap_or_else(|e| panic!("read {}: {e}", profile_path.display()));
-    let profile: serde_json::Value =
-        serde_json::from_str(&profile_text).expect("profile json");
+    let profile: serde_json::Value = serde_json::from_str(&profile_text).expect("profile json");
     let p_layers = profile["n_layers"].as_u64().expect("n_layers") as usize;
-    assert_eq!(p_layers, n_layer, "profile S is for a different layer count");
+    assert_eq!(
+        p_layers, n_layer,
+        "profile S is for a different layer count"
+    );
     let entries = profile["S_upper"].as_array().expect("S_upper");
     let s = SMatrix::from_fn(n_layer, |i, j| {
         // from_fn only reads i < j in fixed row-major order; scan-linear is
@@ -368,11 +395,12 @@ fn main() {
     });
 
     // ── the three modes ──
-    let selection_text = selection_path
-        .as_ref()
-        .map(|p| std::fs::read_to_string(p).unwrap_or_else(|e| panic!("read {}: {e}", p.display())));
-    let selection: Option<serde_json::Value> =
-        selection_text.as_deref().map(|t| serde_json::from_str(t).expect("selection json"));
+    let selection_text = selection_path.as_ref().map(|p| {
+        std::fs::read_to_string(p).unwrap_or_else(|e| panic!("read {}: {e}", p.display()))
+    });
+    let selection: Option<serde_json::Value> = selection_text
+        .as_deref()
+        .map(|t| serde_json::from_str(t).expect("selection json"));
 
     // (mode 3) merged emit: block table + winners from the audition's
     // selection table; the partition inputs (eps) come from the selection.
@@ -394,9 +422,15 @@ fn main() {
             let arm_str = b["arm"].as_str().expect("arm");
             let winner = b["winner"].as_str().expect("winner");
             if arm_str == "member" {
-                assert!(winner.starts_with("member:"), "member winner id malformed: {winner}");
+                assert!(
+                    winner.starts_with("member:"),
+                    "member winner id malformed: {winner}"
+                );
                 let w: usize = winner["member:".len()..].parse().expect("member idx");
-                assert!((st..en).contains(&w), "winner {w} outside block [{st},{en})");
+                assert!(
+                    (st..en).contains(&w),
+                    "winner {w} outside block [{st},{en})"
+                );
                 arm_list.push(TwtArm::Member);
                 spec_blocks.push((st, en, LayerSource::Member(w)));
             } else {
@@ -406,16 +440,9 @@ fn main() {
                 eprintln!(
                     "[twt-emit] block [{st},{en}): re-materializing {op}/{arm_str} (dense {dense_op}, params from member {params_member})..."
                 );
-                let payloads = merged_block_payloads(
-                    &parent,
-                    st,
-                    en,
-                    op,
-                    arm_str,
-                    dense_op,
-                    params_member,
-                )
-                .unwrap_or_else(|e| panic!("merged payloads for [{st},{en}): {e}"));
+                let payloads =
+                    merged_block_payloads(&parent, st, en, op, arm_str, dense_op, params_member)
+                        .unwrap_or_else(|e| panic!("merged payloads for [{st},{en}): {e}"));
                 arm_list.push(match arm_str {
                     "sign_majority" => TwtArm::SignMajority,
                     "source_quant" => TwtArm::SourceQuant,
@@ -512,21 +539,36 @@ fn main() {
         .map(|t| blake3::hash(t.as_bytes()).to_string());
 
     let mut twt_meta = vec![
-        ("twt.block_table".to_owned(), twt_block_table_value(&pair_list)),
+        (
+            "twt.block_table".to_owned(),
+            twt_block_table_value(&pair_list),
+        ),
         ("twt.arm_codes".to_owned(), twt_arm_codes_value(&arms)),
-        ("twt.arm_legend".to_owned(), GgufValue::String(TwtArm::LEGEND.to_owned())),
-        ("twt.layer_types".to_owned(), twt_layer_types_value(&collapsed_types)),
+        (
+            "twt.arm_legend".to_owned(),
+            GgufValue::String(TwtArm::LEGEND.to_owned()),
+        ),
+        (
+            "twt.layer_types".to_owned(),
+            twt_layer_types_value(&collapsed_types),
+        ),
         (
             "twt.layer_types_legend".to_owned(),
             GgufValue::String(LAYER_TYPES_LEGEND.to_owned()),
         ),
-        ("twt.parent_weights_blake3".to_owned(), GgufValue::String(weights_blake3.clone())),
+        (
+            "twt.parent_weights_blake3".to_owned(),
+            GgufValue::String(weights_blake3.clone()),
+        ),
         ("twt.partition_eps".to_owned(), GgufValue::F32(eps)),
         ("twt.partition_worst".to_owned(), GgufValue::F32(worst)),
         (
             "twt.profile_corpus_blake3".to_owned(),
             GgufValue::String(
-                profile["corpus_blake3"].as_str().expect("corpus_blake3").to_owned(),
+                profile["corpus_blake3"]
+                    .as_str()
+                    .expect("corpus_blake3")
+                    .to_owned(),
             ),
         ),
         (
@@ -544,7 +586,10 @@ fn main() {
         ),
     ];
     if let Some(h) = &selection_blake3 {
-        twt_meta.push(("twt.selection_blake3".to_owned(), GgufValue::String(h.clone())));
+        twt_meta.push((
+            "twt.selection_blake3".to_owned(),
+            GgufValue::String(h.clone()),
+        ));
     }
 
     let spec = CollapseSpec {
@@ -577,14 +622,39 @@ fn main() {
         "passthrough-collapsed"
     };
     println!("# twt_collapse_emit — T5.0 collapsed checkpoint ({mode})");
-    println!("# parent: {} ({} layers, {} tensors)", parent_path.display(), n_layer, parent.tensor_infos.len());
-    println!("# profile: {} (corpus BLAKE3 {})", profile_path.display(), profile["corpus_blake3"].as_str().unwrap_or("?"));
-    println!("# ε = {eps}, partition mode = {}, partition worst = {worst:.4}", if selection.is_some() || typed { "typed" } else { "unconstrained" });
+    println!(
+        "# parent: {} ({} layers, {} tensors)",
+        parent_path.display(),
+        n_layer,
+        parent.tensor_infos.len()
+    );
+    println!(
+        "# profile: {} (corpus BLAKE3 {})",
+        profile_path.display(),
+        profile["corpus_blake3"].as_str().unwrap_or("?")
+    );
+    println!(
+        "# ε = {eps}, partition mode = {}, partition worst = {worst:.4}",
+        if selection.is_some() || typed {
+            "typed"
+        } else {
+            "unconstrained"
+        }
+    );
     if let (Some(sp), Some(h)) = (selection_path.as_ref(), selection_blake3.as_ref()) {
         println!("# selection: {} (blake3 {h})", sp.display());
     }
-    println!("# blocks: {} of {n_layer} layers ({:.1}% depth)", m, 100.0 * m as f32 / n_layer as f32);
-    println!("# output: {} ({} bytes, {} tensors)", out_path.display(), stats.bytes_written, stats.n_tensors);
+    println!(
+        "# blocks: {} of {n_layer} layers ({:.1}% depth)",
+        m,
+        100.0 * m as f32 / n_layer as f32
+    );
+    println!(
+        "# output: {} ({} bytes, {} tensors)",
+        out_path.display(),
+        stats.bytes_written,
+        stats.n_tensors
+    );
     println!("# parent_weights_blake3: {weights_blake3}");
     println!("block\tspan\twinner\twinner_type\tblock_worst\tarm");
     for (i, ((st, en), &w)) in blocks.iter().zip(winners.iter()).enumerate() {

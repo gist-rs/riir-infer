@@ -20,7 +20,9 @@
 
 #![cfg(feature = "edlm_gpu")]
 
-use riir_infer_core::transformer::edlm::{BranchRow, EdlmLayerWeights, EdlmWeights, PackedEncoding};
+use riir_infer_core::transformer::edlm::{
+    BranchRow, EdlmLayerWeights, EdlmWeights, PackedEncoding,
+};
 use riir_infer_core::types::Config;
 use riir_infer_gpu::EdlmGpuModel;
 
@@ -231,7 +233,13 @@ fn probe_launch_and_upload_overhead() {
     // Warmup (kernel compile + pool growth must not ride the measurement).
     for _ in 0..50 {
         unsafe {
-            GluSiluGateCubeCL::launch::<ActiveRuntime>(&client, fused.clone(), out.clone(), rows, i_sz)
+            GluSiluGateCubeCL::launch::<ActiveRuntime>(
+                &client,
+                fused.clone(),
+                out.clone(),
+                rows,
+                i_sz,
+            )
         };
     }
     let _ = read_f32(&client, sentinel.clone());
@@ -240,7 +248,13 @@ fn probe_launch_and_upload_overhead() {
     let start = std::time::Instant::now();
     for _ in 0..LAUNCHES {
         unsafe {
-            GluSiluGateCubeCL::launch::<ActiveRuntime>(&client, fused.clone(), out.clone(), rows, i_sz)
+            GluSiluGateCubeCL::launch::<ActiveRuntime>(
+                &client,
+                fused.clone(),
+                out.clone(),
+                rows,
+                i_sz,
+            )
         };
     }
     let enqueued = start.elapsed();

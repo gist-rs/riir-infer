@@ -124,12 +124,11 @@ impl HybridCache {
                 DeltaNetLayerType::DeltaNet => 0,
             })
             .collect();
-        let kv_cache =
-            crate::transformer::MultiLayerKVCache::new_with_per_layer_kv_dim_bounded(
-                config,
-                &per_layer_kv_dim,
-                max_positions,
-            );
+        let kv_cache = crate::transformer::MultiLayerKVCache::new_with_per_layer_kv_dim_bounded(
+            config,
+            &per_layer_kv_dim,
+            max_positions,
+        );
         let deltanet_state = DeltaNetState::new(config, layer_types);
         Self {
             kv_cache,
@@ -332,17 +331,29 @@ pub fn gated_deltanet_step_par_inplace(
             crate::simd::simd_scale_inplace(s_row, g);
             let kv = crate::simd::simd_dot_f32(s_row, k_head, key_dim);
             let d = b * (vr - kv);
-            crate::simd::simd_outer_product_acc(s_row, std::slice::from_ref(&d), k_head, 1, key_dim);
+            crate::simd::simd_outer_product_acc(
+                s_row,
+                std::slice::from_ref(&d),
+                k_head,
+                1,
+                key_dim,
+            );
             *o = crate::simd::simd_dot_f32(s_row, q_head, key_dim) * scale;
         }
     };
-    let (state, output) = (&mut state[..n_v_heads * per_head], &mut output[..n_v_heads * val_dim]);
+    let (state, output) = (
+        &mut state[..n_v_heads * per_head],
+        &mut output[..n_v_heads * val_dim],
+    );
     #[cfg(feature = "decode_spin_pool")]
     {
         // SAFETY: task h touches only head h's state block and output row
         // range; both buffers outlive the run (it returns after every task).
         let (sp, op) = unsafe {
-            (katgpt_core::SyncMutPtr::new(state.as_mut_ptr()), katgpt_core::SyncMutPtr::new(output.as_mut_ptr()))
+            (
+                katgpt_core::SyncMutPtr::new(state.as_mut_ptr()),
+                katgpt_core::SyncMutPtr::new(output.as_mut_ptr()),
+            )
         };
         let ran = katgpt_core::spin_pool_run(n_v_heads, &|h| {
             let (s, out) = unsafe {
@@ -583,8 +594,22 @@ pub(super) fn deltanet_layer_recurrent_body(
     // When `repeat_factor > 1`, each k/q head is broadcast to `repeat_factor`
     // v heads (ggml_repeat modulo semantics — see `expand_heads_into`).
     let repeat_factor = n_v_heads / n_k_heads;
-    expand_l2_normalized_heads_into(q_slice, n_k_heads, key_dim, repeat_factor, n_v_heads, &mut scratch.q_normed);
-    expand_l2_normalized_heads_into(k_slice, n_k_heads, key_dim, repeat_factor, n_v_heads, &mut scratch.k_normed);
+    expand_l2_normalized_heads_into(
+        q_slice,
+        n_k_heads,
+        key_dim,
+        repeat_factor,
+        n_v_heads,
+        &mut scratch.q_normed,
+    );
+    expand_l2_normalized_heads_into(
+        k_slice,
+        n_k_heads,
+        key_dim,
+        repeat_factor,
+        n_v_heads,
+        &mut scratch.k_normed,
+    );
 
     // 9. Gated delta rule recurrence (in-place, head-parallel, bit-identical).
     gated_deltanet_step_par_inplace(
@@ -1169,16 +1194,7 @@ pub fn forward_qwen_deltanet<'a>(
     // Run on a rayon worker (no 17th thread beside the spinning pool —
     // Bench 880); arithmetic unchanged.
     super::on_rayon_worker(move || {
-        forward_qwen_deltanet_body(
-            x,
-            weights,
-            cache,
-            token,
-            pos,
-            config,
-            scratch,
-            rope_freq,
-        )
+        forward_qwen_deltanet_body(x, weights, cache, token, pos, config, scratch, rope_freq)
     })
 }
 
@@ -1299,15 +1315,7 @@ pub fn forward_qwen_deltanet_evictable<'a>(
     // Bench 880); arithmetic unchanged.
     super::on_rayon_worker(move || {
         forward_qwen_deltanet_evictable_body(
-            x,
-            weights,
-            cache,
-            token,
-            pos,
-            config,
-            scratch,
-            rope_freq,
-            evictor,
+            x, weights, cache, token, pos, config, scratch, rope_freq, evictor,
         )
     })
 }
@@ -2392,7 +2400,9 @@ mod tests {
     fn causal_conv1d_update_bit_identical_to_reference() {
         let mut seed = 0x935u64;
         let mut rnd = move || {
-            seed = seed.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+            seed = seed
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407);
             ((seed >> 40) as f32 / (1u64 << 24) as f32) * 4.0 - 2.0
         };
         // Serial (< 2048), parallel kernel-4 (Bonsai shape), parallel generic.
@@ -2407,7 +2417,11 @@ mod tests {
                 causal_conv1d_update(&mut xb, &w, &mut st_b, dim, ks);
                 let bits = |v: &[f32]| v.iter().map(|f| f.to_bits()).collect::<Vec<_>>();
                 assert_eq!(bits(&xa), bits(&xb), "x dim {dim} ks {ks} step {step}");
-                assert_eq!(bits(&st_a), bits(&st_b), "state dim {dim} ks {ks} step {step}");
+                assert_eq!(
+                    bits(&st_a),
+                    bits(&st_b),
+                    "state dim {dim} ks {ks} step {step}"
+                );
             }
         }
     }
@@ -2415,8 +2429,11 @@ mod tests {
     #[test]
     fn expand_l2_normalized_heads_is_bit_identical_to_expand_then_normalize() {
         let head_dim = 128;
-        for (n_src, repeat, n_dst) in [(16usize, 3usize, 48usize), (4, 1, 4), (4, 0, 2), (2, 2, 4)] {
-            let src: Vec<f32> = (0..n_src * head_dim).map(|i| ((i * 37 % 101) as f32 - 50.0) * 0.013).collect();
+        for (n_src, repeat, n_dst) in [(16usize, 3usize, 48usize), (4, 1, 4), (4, 0, 2), (2, 2, 4)]
+        {
+            let src: Vec<f32> = (0..n_src * head_dim)
+                .map(|i| ((i * 37 % 101) as f32 - 50.0) * 0.013)
+                .collect();
             let len = n_src * head_dim * repeat.max(1);
             let (mut want, mut got) = (vec![0.0f32; len], vec![0.0f32; len]);
             expand_heads_into(&src, n_src, head_dim, repeat, &mut want);
@@ -2425,7 +2442,9 @@ mod tests {
             }
             expand_l2_normalized_heads_into(&src, n_src, head_dim, repeat, n_dst, &mut got);
             assert!(
-                want.iter().zip(&got).all(|(a, b)| a.to_bits() == b.to_bits()),
+                want.iter()
+                    .zip(&got)
+                    .all(|(a, b)| a.to_bits() == b.to_bits()),
                 "n_src {n_src} repeat {repeat} n_dst {n_dst}"
             );
         }

@@ -104,8 +104,7 @@ pub fn rank_for_bpw(bpw: f64, dout: usize, din: usize, paths: usize) -> usize {
 /// The BPW formula forward: bits-per-weight of a rank-`r` factorization.
 pub fn bpw_for_rank(r: usize, dout: usize, din: usize, paths: usize) -> f64 {
     let dsum = (dout + din) as f64;
-    (paths.max(1) as f64 * r as f64 * dsum + 32.0 * dsum + 32.0 * r as f64)
-        / (dout * din) as f64
+    (paths.max(1) as f64 * r as f64 * dsum + 32.0 * dsum + 32.0 * r as f64) / (dout * din) as f64
 }
 
 /// Rank for the plain truncated-SVD baseline (f16 `U`,`V` factors, no
@@ -136,11 +135,7 @@ pub fn mix_seed(seed: u64, a: u64, b: u64, c: u64) -> u64 {
 
 /// `sign(v) ∈ {−1,+1}` with `0 → +1` (the paper's sign convention).
 fn sign_f32(v: f32) -> f32 {
-    if v < 0.0 {
-        -1.0
-    } else {
-        1.0
-    }
+    if v < 0.0 { -1.0 } else { 1.0 }
 }
 
 /// Fill `out` with standard-normal samples: consecutive uniform pairs via
@@ -420,11 +415,7 @@ pub fn rand_trunc_svd_oversampled(
     let mut sigma = vec![0.0f32; k];
     for (si, &lv) in sigma.iter_mut().zip(lambda.iter()) {
         let s = lv.sqrt();
-        *si = if s > eps {
-            s as f32
-        } else {
-            0.0
-        };
+        *si = if s > eps { s as f32 } else { 0.0 };
     }
     // 10. u = Y2·C (column-scaled by 1/σ), v = Q2·C
     let mut u = vec![0.0f32; dout * k];
@@ -598,7 +589,13 @@ pub fn dual_svid_from_svd(svd: &TruncSvd, rank: usize, paths: usize) -> SvdLbitF
 }
 
 /// One-shot Dual-SVID init (own basis at `k = rank + 16`, `paths = 1`).
-pub fn dual_svid_init(w: &[f32], dout: usize, din: usize, rank: usize, seed: u64) -> SvdLbitFactors {
+pub fn dual_svid_init(
+    w: &[f32],
+    dout: usize,
+    din: usize,
+    rank: usize,
+    seed: u64,
+) -> SvdLbitFactors {
     let svd = rand_trunc_svd(w, dout, din, rank, seed);
     dual_svid_from_svd(&svd, rank, 1)
 }
@@ -814,7 +811,10 @@ mod tests {
                 for paths in [1usize, 2usize] {
                     let r = rank_for_bpw(b, dout, din, paths);
                     let back = bpw_for_rank(r, dout, din, paths);
-                    assert!(back <= b, "bpw {b} dims ({dout},{din}) paths {paths} → r {r} → {back}");
+                    assert!(
+                        back <= b,
+                        "bpw {b} dims ({dout},{din}) paths {paths} → r {r} → {back}"
+                    );
                     assert!(
                         (b - back) / b <= 0.01,
                         "bpw {b} dims ({dout},{din}) paths {paths} → r {r} → {back}"
@@ -860,14 +860,22 @@ mod tests {
         // SVD: same seed → bit-identical; different seed → different
         let a = rand_trunc_svd(&w, dout, din, 12, 0xC0FFEE);
         let b = rand_trunc_svd(&w, dout, din, 12, 0xC0FFEE);
-        for (name, (xs, ys)) in [("u", (&a.u, &b.u)), ("sigma", (&a.sigma, &b.sigma)), ("v", (&a.v, &b.v))] {
+        for (name, (xs, ys)) in [
+            ("u", (&a.u, &b.u)),
+            ("sigma", (&a.sigma, &b.sigma)),
+            ("v", (&a.v, &b.v)),
+        ] {
             assert_eq!(xs.len(), ys.len());
             for (x, y) in xs.iter().zip(ys.iter()) {
                 assert_eq!(x.to_bits(), y.to_bits(), "{name} not bit-identical");
             }
         }
         let c = rand_trunc_svd(&w, dout, din, 12, 0xD1FE);
-        assert!(a.u.iter().zip(&c.u).any(|(x, y)| x.to_bits() != y.to_bits()));
+        assert!(
+            a.u.iter()
+                .zip(&c.u)
+                .any(|(x, y)| x.to_bits() != y.to_bits())
+        );
         // Dual path: reconstruct bytes bit-identical / seed-sensitive
         let r1 = reconstruct(&dual_svid_init(&w, dout, din, 12, 0xC0FFEE));
         let r2 = reconstruct(&dual_svid_init(&w, dout, din, 12, 0xC0FFEE));
@@ -949,7 +957,11 @@ mod tests {
                 assert_eq!(f.h.len(), dout);
                 assert_eq!(f.g.len(), din);
                 assert_eq!(f.ell.len(), f.rank);
-                assert!(f.achieved_bpw() <= 1.2, "achieved {} > budget 1.2", f.achieved_bpw());
+                assert!(
+                    f.achieved_bpw() <= 1.2,
+                    "achieved {} > budget 1.2",
+                    f.achieved_bpw()
+                );
             }
         }
     }

@@ -12,7 +12,7 @@ use super::*;
 
 use crate::cubecl_runtime::{ActiveComputeClient, CubeCLContext, create_f32, read_f32};
 use riir_infer_core::transformer::edlm::{
-    EdlmLayerWeights, forward_edlm_branches_cached, edlm_state_prefill,
+    EdlmLayerWeights, edlm_state_prefill, forward_edlm_branches_cached,
 };
 use riir_infer_core::types::Config;
 
@@ -248,15 +248,7 @@ fn rmsnorm_rows_matches_cpu_reference() {
     let x_h = create_f32(&client, &x);
     let g_h = create_f32(&client, &gamma);
     let out_h = client.empty(rows * n * core::mem::size_of::<f32>());
-    EdlmRmsNormRowsCubeCL::launch::<ActiveRuntime>(
-        &client,
-        x_h,
-        g_h,
-        out_h.clone(),
-        rows,
-        n,
-        eps,
-    );
+    EdlmRmsNormRowsCubeCL::launch::<ActiveRuntime>(&client, x_h, g_h, out_h.clone(), rows, n, eps);
     let got = read_f32(&client, out_h).expect("read");
     let worst = max_abs_diff(&got, &want);
     assert!(
@@ -454,9 +446,7 @@ fn qkv_fold_matches_cpu_reference_tiny_pipeline_shapes() {
         q_worst < 1e-5 && k_worst < 1e-5,
         "fold drift (tiny shapes): q {q_worst} k {k_worst}"
     );
-    println!(
-        "qkv fold drift (tiny shapes): q {q_worst:.3e} k {k_worst:.3e} (gate 1e-5)"
-    );
+    println!("qkv fold drift (tiny shapes): q {q_worst:.3e} k {k_worst:.3e} (gate 1e-5)");
 }
 
 #[test]
@@ -559,7 +549,17 @@ fn attn_multi_multi_tile_visibility() {
     let t_start: Vec<u32> = vec![0; sq];
 
     let want = cpu_attn_reference(
-        &q, &[], &[], &keys, &values, 0, &t_start, &t_end, n_head, n_kv, hd,
+        &q,
+        &[],
+        &[],
+        &keys,
+        &values,
+        0,
+        &t_start,
+        &t_end,
+        n_head,
+        n_kv,
+        hd,
     );
 
     let mut kv_combined = keys.clone();
@@ -747,9 +747,15 @@ fn tiny_cpu_outputs(state_bidir: bool) -> (EdlmStateKv, Vec<Vec<f32>>) {
     enc.validate().expect("fixture invariants");
     let rows = riir_infer_core::transformer::edlm::rows_of(&enc).expect("rows");
     let sl = enc.state_len;
-    let cache = edlm_state_prefill(&weights, &config, &enc.ids[..sl], &enc.pos[..sl], state_bidir);
-    let out = forward_edlm_branches_cached(&weights, &config, &enc, &rows, &cache)
-        .expect("cpu branches");
+    let cache = edlm_state_prefill(
+        &weights,
+        &config,
+        &enc.ids[..sl],
+        &enc.pos[..sl],
+        state_bidir,
+    );
+    let out =
+        forward_edlm_branches_cached(&weights, &config, &enc, &rows, &cache).expect("cpu branches");
     (cache, out)
 }
 
@@ -804,11 +810,8 @@ fn tiny_pipeline_parity(state_bidir: bool, posture: GemmPosture) -> (f32, f32) {
     (kv_worst, hid_worst)
 }
 
-const ALL_POSTURES: [GemmPosture; 3] = [
-    GemmPosture::Scalar,
-    GemmPosture::Cmma,
-    GemmPosture::CmmaSg8,
-];
+const ALL_POSTURES: [GemmPosture; 3] =
+    [GemmPosture::Scalar, GemmPosture::Cmma, GemmPosture::CmmaSg8];
 
 fn posture_name(p: GemmPosture) -> &'static str {
     match p {
@@ -827,7 +830,11 @@ fn tiny_parity_vs_cpu_cached_bidir() {
         // the ACTIVATION f16 rounding face (~1.5e-3 measured — the input
         // disclosure in matmul_f16b_cmma_cubecl; sg8 shares the class). The
         // hidden gate is the binding law for all (the pointer head's input).
-        let kv_gate = if posture == GemmPosture::Scalar { 5e-4 } else { 3e-3 };
+        let kv_gate = if posture == GemmPosture::Scalar {
+            5e-4
+        } else {
+            3e-3
+        };
         assert!(
             kv < kv_gate && hid < 2e-3,
             "bidir parity ({}): kv drift {kv} (gate {kv_gate}), hidden drift {hid}",
@@ -844,7 +851,11 @@ fn tiny_parity_vs_cpu_cached_bidir() {
 fn tiny_parity_vs_cpu_cached_causal() {
     for posture in ALL_POSTURES {
         let (kv, hid) = tiny_pipeline_parity(false, posture);
-        let kv_gate = if posture == GemmPosture::Scalar { 5e-4 } else { 3e-3 };
+        let kv_gate = if posture == GemmPosture::Scalar {
+            5e-4
+        } else {
+            3e-3
+        };
         assert!(
             kv < kv_gate && hid < 2e-3,
             "causal parity ({}): kv drift {kv} (gate {kv_gate}), hidden drift {hid}",
@@ -969,10 +980,7 @@ fn real_q8_parity_env_gated() {
     )
     .expect("cpu prefill");
     let cpu_rows = riir_infer_core::transformer::edlm::forward_edlm_branches_cached_streaming(
-        &cpu_core,
-        &enc,
-        &rows,
-        &cpu_cache,
+        &cpu_core, &enc, &rows, &cpu_cache,
     )
     .expect("cpu branches");
     let cpu_s = t_cpu.elapsed().as_secs_f64();
@@ -1028,8 +1036,14 @@ fn real_q8_parity_env_gated() {
         println!(
             "{}: gpu {:?} cpu {:?}",
             names[q],
-            gpu_p.iter().map(|v| (v * 1e4).round() / 1e4).collect::<Vec<_>>(),
-            cpu_p.iter().map(|v| (v * 1e4).round() / 1e4).collect::<Vec<_>>(),
+            gpu_p
+                .iter()
+                .map(|v| (v * 1e4).round() / 1e4)
+                .collect::<Vec<_>>(),
+            cpu_p
+                .iter()
+                .map(|v| (v * 1e4).round() / 1e4)
+                .collect::<Vec<_>>(),
         );
     }
     println!(
@@ -1056,7 +1070,9 @@ fn real_q8_parity_env_gated() {
 /// is private to the module — build the shared one (the same OnceLock'd
 /// context, so this is the SAME client the model used).
 fn gpu_client_for_cleanup() -> ActiveComputeClient {
-    CubeCLContext::new().expect("CubeCL context for cleanup").client()
+    CubeCLContext::new()
+        .expect("CubeCL context for cleanup")
+        .client()
 }
 
 // ── the graphed branch pass (`EDLM_GPU_GRAPHS`) ───────────────────────
@@ -1090,7 +1106,6 @@ fn tiny_graph_model() -> EdlmGpuModel {
 /// kernels, same order → bit-identical); the host small-ops arm differs by
 /// the tree-reduce class (~2e-6) and would be a tolerance comparison.
 fn tiny_eager_fold_outputs(enc: &PackedEncoding) -> Vec<Vec<f32>> {
-
     let config = tiny_config();
 
     let mut weights = tiny_weights(&config);
@@ -1100,19 +1115,15 @@ fn tiny_eager_fold_outputs(enc: &PackedEncoding) -> Vec<Vec<f32>> {
     let rows = riir_infer_core::transformer::edlm::rows_of(enc).expect("rows");
 
     let mut gpu = EdlmGpuModel::from_weights(&weights, &config)
-
         .expect("gpu model")
-
         .with_fold(true);
 
     let sl = enc.state_len;
 
     gpu.state_prefill(&enc.ids[..sl], &enc.pos[..sl], true)
-
         .expect("gpu prefill");
 
     gpu.forward_branches(enc, &rows).expect("eager branches")
-
 }
 
 #[test]
@@ -1235,9 +1246,7 @@ fn graph_recaptures_on_geometry_change() {
     quantize_to_f16_grid(&mut weights);
 
     let mut eager_gpu = EdlmGpuModel::from_weights(&weights, &config)
-
         .expect("gpu model")
-
         .with_fold(true);
     eager_gpu
         .state_prefill(&enc.ids[..sl], &enc.pos[..sl], true)
@@ -1264,7 +1273,9 @@ fn graph_drops_on_state_change() {
     let sl = enc.state_len;
     gpu.state_prefill(&enc.ids[..sl], &enc.pos[..sl], true)
         .expect("prefill 1");
-    let _ = gpu.forward_branches(&enc, &rows).expect("capture on state 1");
+    let _ = gpu
+        .forward_branches(&enc, &rows)
+        .expect("capture on state 1");
     if gpu.graphs_supported() {
         assert!(gpu.graphs_live(), "state-1 record live");
     }
@@ -1273,13 +1284,14 @@ fn graph_drops_on_state_change() {
     if gpu.graphs_supported() {
         assert!(!gpu.graphs_live(), "the record must drop with the state");
     }
-    let out2 = gpu.forward_branches(&enc2, &rows).expect("recapture on state 2");
+    let out2 = gpu
+        .forward_branches(&enc2, &rows)
+        .expect("recapture on state 2");
 
     if !gpu.graphs_supported() {
         return;
     }
     let eager2 = {
-
         let config = tiny_config();
 
         let mut weights = tiny_weights(&config);
@@ -1287,19 +1299,14 @@ fn graph_drops_on_state_change() {
         quantize_to_f16_grid(&mut weights);
 
         let mut eager_gpu = EdlmGpuModel::from_weights(&weights, &config)
-
             .expect("gpu model")
-
             .with_fold(true);
 
         eager_gpu
-
             .state_prefill(&enc2.ids[..sl], &enc2.pos[..sl], true)
-
             .expect("eager prefill 2");
 
         eager_gpu.forward_branches(&enc2, &rows).expect("eager 2")
-
     };
     assert_eq!(rows_max_diff(&out2, &eager2), 0.0, "state-2 parity");
 }
@@ -1321,7 +1328,9 @@ fn graphs_require_fold() {
     let sl = enc.state_len;
     gpu.state_prefill(&enc.ids[..sl], &enc.pos[..sl], true)
         .expect("gpu prefill");
-    let out = gpu.forward_branches(&enc, &rows).expect("host-arm branches");
+    let out = gpu
+        .forward_branches(&enc, &rows)
+        .expect("host-arm branches");
     let (_, cpu_rows) = tiny_cpu_outputs(true);
     let worst = rows_max_diff(&out, &cpu_rows);
     assert!(

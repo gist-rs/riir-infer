@@ -402,7 +402,11 @@ fn profiled_attention_layer(
     // 1. Q/K/V projections
     let t = Instant::now();
     bitlinear_n(
-        [&mut scratch.qg_buf[..], &mut scratch.k_buf[..], &mut scratch.v_buf[..]],
+        [
+            &mut scratch.qg_buf[..],
+            &mut scratch.k_buf[..],
+            &mut scratch.v_buf[..],
+        ],
         [&layer.attn_wq, &layer.attn_wk, &layer.attn_wv],
         x_in,
         hook,
@@ -533,7 +537,18 @@ pub fn profiled_forward_ternary<'a>(
     // Same pool placement as the production forward (it is the twin).
     super::on_decode_pool(move || {
         profiled_forward_ternary_body(
-            x, weights, cache, token, pos, config, scratch, rope_freq, prof, hook, input_proj_hook, ffn_hook,
+            x,
+            weights,
+            cache,
+            token,
+            pos,
+            config,
+            scratch,
+            rope_freq,
+            prof,
+            hook,
+            input_proj_hook,
+            ffn_hook,
         )
     })
 }

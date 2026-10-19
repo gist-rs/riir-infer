@@ -398,8 +398,8 @@ fn run() -> Result<()> {
                 .map(|(r, c)| (r.clone(), c.clone()))
                 .collect()
         };
-        let kv_snapshot = (!reinject)
-            .then(|| cache.kv_cache.snapshot(answer_pos + 1, &loaded.config));
+        let kv_snapshot =
+            (!reinject).then(|| cache.kv_cache.snapshot(answer_pos + 1, &loaded.config));
 
         // Embed once, then K weight-shared stack passes with per-loop probes
         // (the shared machinery — same code the gates test).
@@ -427,7 +427,12 @@ fn run() -> Result<()> {
                 cache.deltanet_state.recurrent_states[li].copy_from_slice(r);
                 cache.deltanet_state.conv_states[li].copy_from_slice(c);
             }
-            cache.kv_cache.restore(kv_snapshot.as_ref().expect("stock posture holds a snapshot"), &loaded.config);
+            cache.kv_cache.restore(
+                kv_snapshot
+                    .as_ref()
+                    .expect("stock posture holds a snapshot"),
+                &loaded.config,
+            );
             x[..n].copy_from_slice(&answer_emb);
             for (li, layer_weights) in loaded.weights.layers.iter().enumerate() {
                 let is_linear = loaded.weights.layer_types[li] == DeltaNetLayerType::DeltaNet;
@@ -482,11 +487,10 @@ fn run() -> Result<()> {
         // whole generation — a gold-fact quotation mid-doubt is not an
         // answer (the scored_tail contract is in the helper's doc).
         let text = loaded.tokenizer.decode(&generated);
-        let scored_text = loaded.tokenizer.decode(scored_tail(
-            &generated,
-            think_open_id,
-            think_close_id,
-        ));
+        let scored_text =
+            loaded
+                .tokenizer
+                .decode(scored_tail(&generated, think_open_id, think_close_id));
         gens.push(text.clone());
         gens_scored.push(scored_text.clone());
         stopped.push(stopped_im_end);
@@ -527,7 +531,11 @@ fn run() -> Result<()> {
         queries.len(),
         spec.facts_per_prompt,
         if chat { " | elicitation=chat" } else { "" },
-        if reinject { " | decode=reinject" } else { " | decode=stock" },
+        if reinject {
+            " | decode=reinject"
+        } else {
+            " | decode=stock"
+        },
         match phrase {
             FactPhrase::Standard => " | phrase=standard",
             FactPhrase::Possessive => " | phrase=possessive",
@@ -602,8 +610,7 @@ fn run() -> Result<()> {
             "elapsed_s": t0.elapsed().as_secs_f32(),
             "per_query": per_query,
         });
-        std::fs::write(&out, format!("{payload}\n"))
-            .with_context(|| format!("write {out}"))?;
+        std::fs::write(&out, format!("{payload}\n")).with_context(|| format!("write {out}"))?;
     }
     Ok(())
 }
@@ -683,7 +690,9 @@ fn merge(paths: &str) -> Result<()> {
             v["loops"].as_u64().context("loops")?,
             v["phrase"].as_str().context("phrase")?.to_string(),
             v["chat"].as_bool().context("chat")?,
-            v["bootstrap"].as_u64().context("bootstrap (pre-merge shard file?)")?,
+            v["bootstrap"]
+                .as_u64()
+                .context("bootstrap (pre-merge shard file?)")?,
         );
         match &posture {
             None => posture = Some(this),
@@ -698,7 +707,10 @@ fn merge(paths: &str) -> Result<()> {
     let (loops, phrase, chat, bootstrap_iters) = posture.context("B929_MERGE named no files")?;
     per_query.sort_by_key(|(g, _)| *g);
     for (i, (g, _)) in per_query.iter().enumerate() {
-        anyhow::ensure!(*g == i, "global query range not a partition: index {i} holds {g}");
+        anyhow::ensure!(
+            *g == i,
+            "global query range not a partition: index {i} holds {g}"
+        );
     }
     let loops = loops as usize;
     let mut rows: Vec<Vec<Row>> = vec![Vec::with_capacity(per_query.len()); loops];

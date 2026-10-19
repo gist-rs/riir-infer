@@ -35,10 +35,10 @@
 //! the issue's pre-registered ppl A/B decides GREEN/RED. Deterministic:
 //! same weights + tokens + λ → byte-identical logits.
 
-use katgpt_transformer::attn_res::{
-    apply_attn_res_depth_profile, AttnResBlockState, AttnResConfig, AttnResScratch,
-};
 use katgpt_transformer::MultiLayerKVCache;
+use katgpt_transformer::attn_res::{
+    AttnResBlockState, AttnResConfig, AttnResScratch, apply_attn_res_depth_profile,
+};
 
 use crate::gemma_layer::GemmaTransformerWeightsF16;
 use crate::transformer::gemma2::{NoVQuant, ValueStoreHook};
@@ -90,12 +90,7 @@ impl GemmaAttnResState {
 /// One depth-profile mix: `x ← out` (the mixed value becomes the residual
 /// base, per the Kimi integration semantics).
 #[inline]
-fn mix_depth(
-    ctx: &mut ForwardContext,
-    state: &mut GemmaAttnResState,
-    lambda: f32,
-    n: usize,
-) {
+fn mix_depth(ctx: &mut ForwardContext, state: &mut GemmaAttnResState, lambda: f32, n: usize) {
     let out = apply_attn_res_depth_profile(&state.block, &mut state.scratch, lambda, &ctx.x[..n]);
     ctx.x[..n].copy_from_slice(out);
 }
@@ -232,11 +227,11 @@ pub fn forward_gemma2_f16_attn_res<'a>(
                 super::attend::attend_row_fused(ctx, view, layer_idx, shape);
             }
         } else {
-            let v_read: &[f32] = match vq.values_for_attention(layer_idx, pos, t_n, &layer_cache.key)
-            {
-                Some(v) => v,
-                None => &layer_cache.value,
-            };
+            let v_read: &[f32] =
+                match vq.values_for_attention(layer_idx, pos, t_n, &layer_cache.key) {
+                    Some(v) => v,
+                    None => &layer_cache.value,
+                };
 
             // g. Multi-head attention + softcapping (Plan 096: parallel heads)
             unsafe {
@@ -378,8 +373,10 @@ mod tests {
         let mlp = config.mlp_hidden;
         let vocab = config.vocab_size;
         let scale = 0.01;
-        let mut f32s = |len: usize| -> Vec<f32> { (0..len).map(|_| rng.normal() * scale).collect() };
-        let f16s = |v: Vec<f32>| -> Vec<half::f16> { v.into_iter().map(half::f16::from_f32).collect() };
+        let mut f32s =
+            |len: usize| -> Vec<f32> { (0..len).map(|_| rng.normal() * scale).collect() };
+        let f16s =
+            |v: Vec<f32>| -> Vec<half::f16> { v.into_iter().map(half::f16::from_f32).collect() };
 
         let layers: Vec<_> = (0..config.n_layer)
             .map(|_| GemmaLayerWeights {
@@ -441,7 +438,10 @@ mod tests {
         let config = test_config(5);
         let mut rng = Rng::new(1234);
         let weights = test_weights_f16(&config, &mut rng);
-        let probe = AttnResDepthProbe { block_size: 2, lambda: f32::INFINITY };
+        let probe = AttnResDepthProbe {
+            block_size: 2,
+            lambda: f32::INFINITY,
+        };
 
         let mut stock_ctx = crate::transformer::ForwardContext::new(&config);
         let mut stock_cache = MultiLayerKVCache::new(&config);
@@ -451,11 +451,27 @@ mod tests {
 
         let tokens = [3usize, 1, 4, 1, 5, 9, 2, 6];
         for (pos, &tok) in tokens.iter().enumerate() {
-            let stock_logits =
-                forward_gemma2_f16(&mut stock_ctx, &weights, &mut stock_cache, tok, pos, &config);
-            let stock_bits: Vec<u32> = stock_logits[..config.vocab_size].iter().map(|v| v.to_bits()).collect();
+            let stock_logits = forward_gemma2_f16(
+                &mut stock_ctx,
+                &weights,
+                &mut stock_cache,
+                tok,
+                pos,
+                &config,
+            );
+            let stock_bits: Vec<u32> = stock_logits[..config.vocab_size]
+                .iter()
+                .map(|v| v.to_bits())
+                .collect();
             let fork_logits = forward_gemma2_f16_attn_res(
-                &mut fork_ctx, &weights, &mut fork_cache, tok, pos, &config, &probe, &mut state,
+                &mut fork_ctx,
+                &weights,
+                &mut fork_cache,
+                tok,
+                pos,
+                &config,
+                &probe,
+                &mut state,
             );
             for (v, &b) in fork_logits[..config.vocab_size].iter().zip(&stock_bits) {
                 assert_eq!(v.to_bits(), b, "λ=∞ drifted from stock at pos {pos}");
@@ -468,7 +484,10 @@ mod tests {
     #[test]
     fn block_boundaries_push_b0_plus_completed_blocks() {
         let config = test_config(5); // 5 layers
-        let probe = AttnResDepthProbe { block_size: 2, lambda: 1.0 };
+        let probe = AttnResDepthProbe {
+            block_size: 2,
+            lambda: 1.0,
+        };
         let mut rng = Rng::new(99);
         let weights = test_weights_f16(&config, &mut rng);
 
@@ -486,7 +505,10 @@ mod tests {
     #[test]
     fn deterministic_across_runs() {
         let config = test_config(4);
-        let probe = AttnResDepthProbe { block_size: 2, lambda: 1.0 };
+        let probe = AttnResDepthProbe {
+            block_size: 2,
+            lambda: 1.0,
+        };
         let mut rng = Rng::new(7);
         let weights = test_weights_f16(&config, &mut rng);
 
@@ -518,7 +540,10 @@ mod tests {
         let tokens = [1usize, 2, 3];
 
         let logits_for = |lambda: f32| -> Vec<u32> {
-            let probe = AttnResDepthProbe { block_size: 2, lambda };
+            let probe = AttnResDepthProbe {
+                block_size: 2,
+                lambda,
+            };
             let mut ctx = crate::transformer::ForwardContext::new(&config);
             let mut cache = MultiLayerKVCache::new(&config);
             let mut state = GemmaAttnResState::new(config.n_layer, config.n_embd, probe.block_size);

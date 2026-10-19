@@ -44,25 +44,25 @@ use std::io::Write as _;
 use std::path::PathBuf;
 use std::time::Instant;
 
-use anyhow::{bail, Context, Result};
+use anyhow::{Context, Result, bail};
 use katgpt_core::fitted_value_table::{FittedTokenTable, VkSignal};
 use katgpt_transformer::MultiLayerKVCache;
 
 use riir_infer_core::corpus_text::load_corpus_text;
 use riir_infer_core::gemma_layer::GemmaTransformerWeightsF16;
-use riir_infer_core::gguf_loader::{config_from_gguf_metadata, GgufFile};
+use riir_infer_core::gguf_loader::{GgufFile, config_from_gguf_metadata};
 use riir_infer_core::tokenizer::SentencePieceGgufTokenizer;
 use riir_infer_core::transformer::gemma2_calibration::{
-    forward_gemma2_f16_tapped, load_gemma2_f16_direct, CalibrationTables,
+    CalibrationTables, forward_gemma2_f16_tapped, load_gemma2_f16_direct,
 };
 use riir_infer_core::transformer::gemma2_ktov::{KToVState, KvLayerTel};
 use riir_infer_core::transformer::vk_harness::{
-    argmax, build_niah_trial, dump_fitted_table, load_fitted_table, nll, rank, NiahTrial,
+    NiahTrial, argmax, build_niah_trial, dump_fitted_table, load_fitted_table, nll, rank,
 };
 use riir_infer_core::transformer::{
-    forward_gemma2_f16, forward_gemma2_f16_hk, ForwardContext, NoHook, NoVQuant, ValueStoreHook,
+    ForwardContext, NoHook, NoVQuant, ValueStoreHook, forward_gemma2_f16, forward_gemma2_f16_hk,
 };
-use riir_infer_core::types::{kv_dim, Config};
+use riir_infer_core::types::{Config, kv_dim};
 
 /// T1's recorded f16 PPL (Bench 011) — the free cross-run determinism check
 /// (same fixture, same slices, same protocol ⇒ the base arm must reproduce).
@@ -295,7 +295,10 @@ impl LadderArm {
         if n == 0 {
             0.0
         } else {
-            (0..n).map(|i| self.nlls[i] - reference.nlls[i]).sum::<f64>() / n as f64
+            (0..n)
+                .map(|i| self.nlls[i] - reference.nlls[i])
+                .sum::<f64>()
+                / n as f64
         }
     }
 
@@ -397,7 +400,9 @@ fn main() -> Result<()> {
         bail!("--seq-len must stay <= 4096 (gemma-2 sliding window)");
     }
     if niah_only && table_path.is_none() {
-        bail!("--niah-only requires --table (the NIAH arms need the frozen table; never a second calibration)");
+        bail!(
+            "--niah-only requires --table (the NIAH arms need the frozen table; never a second calibration)"
+        );
     }
 
     // ── Load model + tokenizer ────────────────────────────────────────
@@ -487,7 +492,13 @@ fn main() -> Result<()> {
                 cache.reset();
                 for (pos, &token) in chunk.iter().enumerate() {
                     forward_gemma2_f16_tapped(
-                        &mut ctx, &weights, &mut cache, &mut tables, token, pos, &config,
+                        &mut ctx,
+                        &weights,
+                        &mut cache,
+                        &mut tables,
+                        token,
+                        pos,
+                        &config,
                         &mut NoHook,
                     );
                 }
@@ -550,14 +561,16 @@ fn main() -> Result<()> {
             cache.reset();
             for (pos, &t) in seq.iter().enumerate() {
                 st_a.set_token(pos, t as u32);
-                let lg =
-                    forward_gemma2_f16_hk(&mut ctx, &weights, &mut cache, &mut st_a, t, pos, &config);
+                let lg = forward_gemma2_f16_hk(
+                    &mut ctx, &weights, &mut cache, &mut st_a, t, pos, &config,
+                );
                 a_logits.push(lg.iter().map(|x| x.to_bits()).collect());
             }
             cache.reset();
             for (pos, &t) in seq.iter().enumerate() {
-                let lg =
-                    forward_gemma2_f16_hk(&mut ctx, &weights, &mut cache, &mut st_b, t, pos, &config);
+                let lg = forward_gemma2_f16_hk(
+                    &mut ctx, &weights, &mut cache, &mut st_b, t, pos, &config,
+                );
                 b_logits.push(lg.iter().map(|x| x.to_bits()).collect());
             }
             ok = a_logits == b_logits;
@@ -572,7 +585,13 @@ fn main() -> Result<()> {
                         .collect();
                 cache.reset();
                 let b: Vec<u32> = forward_gemma2_f16_hk(
-                    &mut ctx, &weights, &mut cache, &mut NoVQuant, t0, 0, &config,
+                    &mut ctx,
+                    &weights,
+                    &mut cache,
+                    &mut NoVQuant,
+                    t0,
+                    0,
+                    &config,
                 )
                 .iter()
                 .map(|x| x.to_bits())
@@ -627,177 +646,261 @@ fn main() -> Result<()> {
         );
     }
     if !niah_only {
-    // f16 base.
-    {
-        let mut hook = ArmHook::Plain;
-        let po = run_pass(
-            &mut ctx, &weights, &mut cache, &mut hook, &eval_tokens, corpus_per_chunk, n_chunks,
-            bos, &config,
-        );
-        println!(
-            "# arm f16 done: {} scored | ppl {:.4} | {:.0} fwd/s",
-            po.nll.len(),
-            (po.nll.iter().sum::<f64>() / po.nll.len().max(1) as f64).exp(),
-            po.fwd as f64 / po.secs.max(1e-9)
-        );
-        arms.push(LadderArm {
-            name: "f16".into(),
-            lam: None,
-            nlls: po.nll,
-            top: po.top,
-            chunk_sums: po.chunk_sums,
-            fwd: po.fwd,
-            secs: po.secs,
-            tel: Vec::new(),
-        });
-        let _ = std::io::stdout().flush();
-        rep.write_incremental(&arms, &niah, &schedule, &grid_note, lam_star, lam_star_d, sched_search_d);
-    }
-
-    // λ arms (0 first — the k-0 pairing base).
-    for &lam in lambdas.iter() {
-        let name = format!("k-{lam:.2}");
-        let mut st = KToVState::new_uniform(table, lam, n_layers, kvd, seq_len + 32);
-        let po = {
-            let mut hook = ArmHook::K(&mut st);
-            run_pass(
-                &mut ctx, &weights, &mut cache, &mut hook, &eval_tokens, corpus_per_chunk,
-                n_chunks, bos, &config,
-            )
-        };
-        let tel: Vec<KvLayerTel> = st.layer_tel().to_vec();
-        println!(
-            "# arm {name} done: {} scored | ppl {:.4} | {:.0} fwd/s",
-            po.nll.len(),
-            (po.nll.iter().sum::<f64>() / po.nll.len().max(1) as f64).exp(),
-            po.fwd as f64 / po.secs.max(1e-9)
-        );
-        arms.push(LadderArm {
-            name,
-            lam: Some(lam),
-            nlls: po.nll,
-            top: po.top,
-            chunk_sums: po.chunk_sums,
-            fwd: po.fwd,
-            secs: po.secs,
-            tel,
-        });
-        let _ = std::io::stdout().flush();
-        rep.write_incremental(&arms, &niah, &schedule, &grid_note, lam_star, lam_star_d, sched_search_d);
-    }
-
-    // λ* — the best-beating λ > 0 (mean paired ΔNLL vs k-0). Computed in a
-    // scoped block so the arm borrows end before the k-sched push below.
-    let star = {
-        let k0 = arms.iter().find(|a| a.lam == Some(0.0)).expect("k-0 arm");
-        let mut best: Option<(f32, f64)> = None;
-        for a in arms.iter().filter(|a| a.lam.is_some_and(|l| l > 0.0)) {
-            let d = a.mean_d(k0);
-            if d < 0.0 && best.is_none_or(|(_, bd)| d < bd) {
-                best = Some((a.lam.expect("filtered"), d));
-            }
-        }
-        match best {
-            Some((l, d)) => {
-                println!("# λ* = {l} (mean ΔNLL vs k-0 {d:+.5}) — grid armed");
-                (Some(l), Some(d))
-            }
-            None => {
-                println!("# no λ > 0 beats k-0 — G-A FAIL, grid skipped (the recorded negative)");
-                (None, None)
-            }
-        }
-    };
-    lam_star = star.0;
-    lam_star_d = star.1;
-    rep.write_incremental(&arms, &niah, &schedule, &grid_note, lam_star, lam_star_d, sched_search_d);
-
-    // ── Phase C2: the schedule grid ───────────────────────────────
-    grid_note = String::from("skipped (no λ > 0 beat k-0)");
-    let grid_armed = lam_star.filter(|_| !smoke);
-    if let Some(ls) = grid_armed {
-        schedule = vec![ls; n_layers];
-        let mut st = KToVState::new(table, schedule.clone(), n_layers, kvd, seq_len + 32);
-        let mut hook = ArmHook::K(&mut st);
-        let inc = run_pass(
-            &mut ctx, &weights, &mut cache, &mut hook, &search_tokens, corpus_per_chunk, 1, bos,
-            &config,
-        );
-        println!(
-            "# grid: incumbent (all λ={ls}) search-chunk ppl {:.4}",
-            (inc.nll.iter().sum::<f64>() / inc.nll.len().max(1) as f64).exp()
-        );
-        for (l, slot) in schedule.iter_mut().enumerate() {
-            let mut best_cand = ls;
-            let mut best_d = 0.0f64;
-            for cand in GRID_CANDIDATES {
-                if (cand - ls).abs() < 1e-9 {
-                    continue;
-                }
-                hook.set_lam(l, cand);
-                let po = run_pass(
-                    &mut ctx, &weights, &mut cache, &mut hook, &search_tokens, corpus_per_chunk,
-                    1, bos, &config,
-                );
-                let n = po.nll.len().min(inc.nll.len());
-                let d = (0..n).map(|i| po.nll[i] - inc.nll[i]).sum::<f64>() / n as f64;
-                if d < best_d - GRID_TIE_EPS {
-                    best_d = d;
-                    best_cand = cand;
-                }
-                hook.set_lam(l, ls);
-            }
-            *slot = best_cand;
-            hook.set_lam(l, best_cand);
-            println!("# grid layer {l}: λ {best_cand} (Δ {best_d:+.5})");
+        // f16 base.
+        {
+            let mut hook = ArmHook::Plain;
+            let po = run_pass(
+                &mut ctx,
+                &weights,
+                &mut cache,
+                &mut hook,
+                &eval_tokens,
+                corpus_per_chunk,
+                n_chunks,
+                bos,
+                &config,
+            );
+            println!(
+                "# arm f16 done: {} scored | ppl {:.4} | {:.0} fwd/s",
+                po.nll.len(),
+                (po.nll.iter().sum::<f64>() / po.nll.len().max(1) as f64).exp(),
+                po.fwd as f64 / po.secs.max(1e-9)
+            );
+            arms.push(LadderArm {
+                name: "f16".into(),
+                lam: None,
+                nlls: po.nll,
+                top: po.top,
+                chunk_sums: po.chunk_sums,
+                fwd: po.fwd,
+                secs: po.secs,
+                tel: Vec::new(),
+            });
             let _ = std::io::stdout().flush();
+            rep.write_incremental(
+                &arms,
+                &niah,
+                &schedule,
+                &grid_note,
+                lam_star,
+                lam_star_d,
+                sched_search_d,
+            );
         }
-        // The CHOSEN schedule, measured (never summed through layers).
-        let chosen = run_pass(
-            &mut ctx, &weights, &mut cache, &mut hook, &search_tokens, corpus_per_chunk, 1, bos,
-            &config,
-        );
-        let n = chosen.nll.len().min(inc.nll.len());
-        let d = (0..n).map(|i| chosen.nll[i] - inc.nll[i]).sum::<f64>() / n as f64;
-        sched_search_d = Some(d);
-        grid_note.clear();
-        println!("# grid done: chosen ΔNLL vs incumbent {d:+.5} on the search chunk");
-    } else if let Some(ls) = lam_star {
-        // Smoke: the grid is priced out; the schedule degenerates to λ*.
-        schedule = vec![ls; n_layers];
-        grid_note = "smoke — grid skipped, schedule = uniform λ*".into();
-    }
-    rep.write_incremental(&arms, &niah, &schedule, &grid_note, lam_star, lam_star_d, sched_search_d);
 
-    // ── Phase C3: schedule validation on the full eval ────────────────
-    if !schedule.is_empty() {
-        let mut st = KToVState::new(table, schedule.clone(), n_layers, kvd, seq_len + 32);
-        let po = {
-            let mut hook = ArmHook::K(&mut st);
-            run_pass(
-                &mut ctx, &weights, &mut cache, &mut hook, &eval_tokens, corpus_per_chunk,
-                n_chunks, bos, &config,
-            )
+        // λ arms (0 first — the k-0 pairing base).
+        for &lam in lambdas.iter() {
+            let name = format!("k-{lam:.2}");
+            let mut st = KToVState::new_uniform(table, lam, n_layers, kvd, seq_len + 32);
+            let po = {
+                let mut hook = ArmHook::K(&mut st);
+                run_pass(
+                    &mut ctx,
+                    &weights,
+                    &mut cache,
+                    &mut hook,
+                    &eval_tokens,
+                    corpus_per_chunk,
+                    n_chunks,
+                    bos,
+                    &config,
+                )
+            };
+            let tel: Vec<KvLayerTel> = st.layer_tel().to_vec();
+            println!(
+                "# arm {name} done: {} scored | ppl {:.4} | {:.0} fwd/s",
+                po.nll.len(),
+                (po.nll.iter().sum::<f64>() / po.nll.len().max(1) as f64).exp(),
+                po.fwd as f64 / po.secs.max(1e-9)
+            );
+            arms.push(LadderArm {
+                name,
+                lam: Some(lam),
+                nlls: po.nll,
+                top: po.top,
+                chunk_sums: po.chunk_sums,
+                fwd: po.fwd,
+                secs: po.secs,
+                tel,
+            });
+            let _ = std::io::stdout().flush();
+            rep.write_incremental(
+                &arms,
+                &niah,
+                &schedule,
+                &grid_note,
+                lam_star,
+                lam_star_d,
+                sched_search_d,
+            );
+        }
+
+        // λ* — the best-beating λ > 0 (mean paired ΔNLL vs k-0). Computed in a
+        // scoped block so the arm borrows end before the k-sched push below.
+        let star = {
+            let k0 = arms.iter().find(|a| a.lam == Some(0.0)).expect("k-0 arm");
+            let mut best: Option<(f32, f64)> = None;
+            for a in arms.iter().filter(|a| a.lam.is_some_and(|l| l > 0.0)) {
+                let d = a.mean_d(k0);
+                if d < 0.0 && best.is_none_or(|(_, bd)| d < bd) {
+                    best = Some((a.lam.expect("filtered"), d));
+                }
+            }
+            match best {
+                Some((l, d)) => {
+                    println!("# λ* = {l} (mean ΔNLL vs k-0 {d:+.5}) — grid armed");
+                    (Some(l), Some(d))
+                }
+                None => {
+                    println!(
+                        "# no λ > 0 beats k-0 — G-A FAIL, grid skipped (the recorded negative)"
+                    );
+                    (None, None)
+                }
+            }
         };
-        let tel: Vec<KvLayerTel> = st.layer_tel().to_vec();
-        println!(
-            "# arm k-sched done: ppl {:.4} | {:.0} fwd/s",
-            (po.nll.iter().sum::<f64>() / po.nll.len().max(1) as f64).exp(),
-            po.fwd as f64 / po.secs.max(1e-9)
+        lam_star = star.0;
+        lam_star_d = star.1;
+        rep.write_incremental(
+            &arms,
+            &niah,
+            &schedule,
+            &grid_note,
+            lam_star,
+            lam_star_d,
+            sched_search_d,
         );
-        arms.push(LadderArm {
-            name: "k-sched".into(),
-            lam: None,
-            nlls: po.nll,
-            top: po.top,
-            chunk_sums: po.chunk_sums,
-            fwd: po.fwd,
-            secs: po.secs,
-            tel,
-        });
-        let _ = std::io::stdout().flush();
-        rep.write_incremental(&arms, &niah, &schedule, &grid_note, lam_star, lam_star_d, sched_search_d);
-    }
+
+        // ── Phase C2: the schedule grid ───────────────────────────────
+        grid_note = String::from("skipped (no λ > 0 beat k-0)");
+        let grid_armed = lam_star.filter(|_| !smoke);
+        if let Some(ls) = grid_armed {
+            schedule = vec![ls; n_layers];
+            let mut st = KToVState::new(table, schedule.clone(), n_layers, kvd, seq_len + 32);
+            let mut hook = ArmHook::K(&mut st);
+            let inc = run_pass(
+                &mut ctx,
+                &weights,
+                &mut cache,
+                &mut hook,
+                &search_tokens,
+                corpus_per_chunk,
+                1,
+                bos,
+                &config,
+            );
+            println!(
+                "# grid: incumbent (all λ={ls}) search-chunk ppl {:.4}",
+                (inc.nll.iter().sum::<f64>() / inc.nll.len().max(1) as f64).exp()
+            );
+            for (l, slot) in schedule.iter_mut().enumerate() {
+                let mut best_cand = ls;
+                let mut best_d = 0.0f64;
+                for cand in GRID_CANDIDATES {
+                    if (cand - ls).abs() < 1e-9 {
+                        continue;
+                    }
+                    hook.set_lam(l, cand);
+                    let po = run_pass(
+                        &mut ctx,
+                        &weights,
+                        &mut cache,
+                        &mut hook,
+                        &search_tokens,
+                        corpus_per_chunk,
+                        1,
+                        bos,
+                        &config,
+                    );
+                    let n = po.nll.len().min(inc.nll.len());
+                    let d = (0..n).map(|i| po.nll[i] - inc.nll[i]).sum::<f64>() / n as f64;
+                    if d < best_d - GRID_TIE_EPS {
+                        best_d = d;
+                        best_cand = cand;
+                    }
+                    hook.set_lam(l, ls);
+                }
+                *slot = best_cand;
+                hook.set_lam(l, best_cand);
+                println!("# grid layer {l}: λ {best_cand} (Δ {best_d:+.5})");
+                let _ = std::io::stdout().flush();
+            }
+            // The CHOSEN schedule, measured (never summed through layers).
+            let chosen = run_pass(
+                &mut ctx,
+                &weights,
+                &mut cache,
+                &mut hook,
+                &search_tokens,
+                corpus_per_chunk,
+                1,
+                bos,
+                &config,
+            );
+            let n = chosen.nll.len().min(inc.nll.len());
+            let d = (0..n).map(|i| chosen.nll[i] - inc.nll[i]).sum::<f64>() / n as f64;
+            sched_search_d = Some(d);
+            grid_note.clear();
+            println!("# grid done: chosen ΔNLL vs incumbent {d:+.5} on the search chunk");
+        } else if let Some(ls) = lam_star {
+            // Smoke: the grid is priced out; the schedule degenerates to λ*.
+            schedule = vec![ls; n_layers];
+            grid_note = "smoke — grid skipped, schedule = uniform λ*".into();
+        }
+        rep.write_incremental(
+            &arms,
+            &niah,
+            &schedule,
+            &grid_note,
+            lam_star,
+            lam_star_d,
+            sched_search_d,
+        );
+
+        // ── Phase C3: schedule validation on the full eval ────────────────
+        if !schedule.is_empty() {
+            let mut st = KToVState::new(table, schedule.clone(), n_layers, kvd, seq_len + 32);
+            let po = {
+                let mut hook = ArmHook::K(&mut st);
+                run_pass(
+                    &mut ctx,
+                    &weights,
+                    &mut cache,
+                    &mut hook,
+                    &eval_tokens,
+                    corpus_per_chunk,
+                    n_chunks,
+                    bos,
+                    &config,
+                )
+            };
+            let tel: Vec<KvLayerTel> = st.layer_tel().to_vec();
+            println!(
+                "# arm k-sched done: ppl {:.4} | {:.0} fwd/s",
+                (po.nll.iter().sum::<f64>() / po.nll.len().max(1) as f64).exp(),
+                po.fwd as f64 / po.secs.max(1e-9)
+            );
+            arms.push(LadderArm {
+                name: "k-sched".into(),
+                lam: None,
+                nlls: po.nll,
+                top: po.top,
+                chunk_sums: po.chunk_sums,
+                fwd: po.fwd,
+                secs: po.secs,
+                tel,
+            });
+            let _ = std::io::stdout().flush();
+            rep.write_incremental(
+                &arms,
+                &niah,
+                &schedule,
+                &grid_note,
+                lam_star,
+                lam_star_d,
+                sched_search_d,
+            );
+        }
     } // end !niah_only (ladder + grid + validation)
 
     // ── Phase C4: NIAH ────────────────────────────────────────────────
@@ -816,14 +919,27 @@ fn main() -> Result<()> {
         {
             let mut hook = ArmHook::Plain;
             let o = run_niah_arm(&mut ctx, &weights, &mut cache, &mut hook, &trials, &config);
-            println!("# niah f16: median rank {:?} | hits {}/{}", {
-                let mut r = o.best_rank.clone();
-                r.sort_unstable();
-                r.get(r.len() / 2).copied().unwrap_or(0)
-            }, o.best_rank.iter().filter(|&&x| x == 1).count(), o.best_rank.len());
+            println!(
+                "# niah f16: median rank {:?} | hits {}/{}",
+                {
+                    let mut r = o.best_rank.clone();
+                    r.sort_unstable();
+                    r.get(r.len() / 2).copied().unwrap_or(0)
+                },
+                o.best_rank.iter().filter(|&&x| x == 1).count(),
+                o.best_rank.len()
+            );
             niah.push(("f16".into(), o));
         }
-        rep.write_incremental(&arms, &niah, &schedule, &grid_note, lam_star, lam_star_d, sched_search_d);
+        rep.write_incremental(
+            &arms,
+            &niah,
+            &schedule,
+            &grid_note,
+            lam_star,
+            lam_star_d,
+            sched_search_d,
+        );
         // λ arms.
         for &lam in lambdas.iter() {
             let mut st = KToVState::new_uniform(table, lam, n_layers, kvd, seq_len + 32);
@@ -832,7 +948,15 @@ fn main() -> Result<()> {
             let name = format!("k-{lam:.2}");
             println!("# niah {name}: done");
             niah.push((name, o));
-            rep.write_incremental(&arms, &niah, &schedule, &grid_note, lam_star, lam_star_d, sched_search_d);
+            rep.write_incremental(
+                &arms,
+                &niah,
+                &schedule,
+                &grid_note,
+                lam_star,
+                lam_star_d,
+                sched_search_d,
+            );
         }
         // The schedule arm (when the grid ran).
         if !schedule.is_empty() {
@@ -841,7 +965,15 @@ fn main() -> Result<()> {
             let o = run_niah_arm(&mut ctx, &weights, &mut cache, &mut hook, &trials, &config);
             println!("# niah k-sched: done");
             niah.push(("k-sched".into(), o));
-            rep.write_incremental(&arms, &niah, &schedule, &grid_note, lam_star, lam_star_d, sched_search_d);
+            rep.write_incremental(
+                &arms,
+                &niah,
+                &schedule,
+                &grid_note,
+                lam_star,
+                lam_star_d,
+                sched_search_d,
+            );
         }
     }
 
@@ -874,10 +1006,7 @@ fn main() -> Result<()> {
 
 /// Base-arm pairing helper (kept at fn granularity so the row loop stays
 /// linear): returns (Δppl%, ΔNLL, flip%, win) of `a` vs `base`.
-fn base_pair(
-    a: &LadderArm,
-    base: &LadderArm,
-) -> Option<(f64, f64, f64, (usize, usize))> {
+fn base_pair(a: &LadderArm, base: &LadderArm) -> Option<(f64, f64, f64, (usize, usize))> {
     if std::ptr::eq(a, base) || a.nlls.is_empty() || base.nlls.is_empty() {
         return None;
     }
@@ -979,8 +1108,7 @@ impl ReportCtx {
                         let dp = 100.0 * ((a.ppl() / k0a.ppl()) - 1.0);
                         let dn = a.mean_d(k0a);
                         let n = a.nlls.len().min(k0a.nlls.len());
-                        let fl = 100.0
-                            * (0..n).filter(|&i| a.top[i] != k0a.top[i]).count() as f64
+                        let fl = 100.0 * (0..n).filter(|&i| a.top[i] != k0a.top[i]).count() as f64
                             / n as f64;
                         let w = a.win_count(k0a);
                         (Some(dp), Some(dn), Some(fl), Some(w))
@@ -1094,10 +1222,9 @@ impl ReportCtx {
                 "- **G-C (bit-identity): {}**\n",
                 if self.g3_pass { "PASS" } else { "FAIL" }
             ));
-            if let (Some(sd), Some(sa)) = (
-                sched_search_d,
-                arms.iter().find(|a| a.name == "k-sched"),
-            ) {
+            if let (Some(sd), Some(sa)) =
+                (sched_search_d, arms.iter().find(|a| a.name == "k-sched"))
+            {
                 // Same mid-run guard as G-A: k-sched runs after k-0, so k0 is
                 // Some in every real state that reaches here.
                 if let Some(k0a) = k0 {
@@ -1181,8 +1308,15 @@ impl ReportCtx {
         let Some(p) = &self.report_path else {
             return;
         };
-        let out =
-            self.snapshot(arms, niah, schedule, grid_note, lam_star, lam_star_d, sched_search_d);
+        let out = self.snapshot(
+            arms,
+            niah,
+            schedule,
+            grid_note,
+            lam_star,
+            lam_star_d,
+            sched_search_d,
+        );
         match std::fs::write(p, &out) {
             Ok(()) => eprintln!(
                 "# report rewritten ({} arms, {} niah): {}",
@@ -1291,7 +1425,10 @@ mod tests {
         assert!(i_ladder < i_gates && i_gates < i_sched && i_sched < i_niah);
         assert!(full.contains("| k-1.00 |"));
         // sorted [1,3,5] → median 3; hits 1/3; mean answer NLL 0.200.
-        assert!(full.contains("| f16 | 3 | 1/3 | 0.200 |"), "niah row: {full}");
+        assert!(
+            full.contains("| f16 | 3 | 1/3 | 0.200 |"),
+            "niah row: {full}"
+        );
         assert!(full.contains("G-A (the claim): PASS"));
         assert!(full.contains("G-D (schedule transfer)"));
     }
@@ -1299,7 +1436,15 @@ mod tests {
     #[test]
     fn niah_only_snapshot_marks_ladder_sections_absent() {
         let rep = ctx(true, None);
-        let out = rep.snapshot(&[], &[niah_f16()], &[], "skipped (niah-only)", None, None, None);
+        let out = rep.snapshot(
+            &[],
+            &[niah_f16()],
+            &[],
+            "skipped (niah-only)",
+            None,
+            None,
+            None,
+        );
         assert!(out.contains("the ladder/grid/validation sections below are ABSENT"));
         assert!(!out.contains("## Ladder"));
         assert!(!out.contains("## Gates"));
