@@ -66,10 +66,10 @@ Seat **clef-text-0.6b** (Apache-2.0, Qwen3-0.6B + Clef joint schema head, distil
 
 ## Phase 4 — family wiring + backlog (the "to Instinct" routing, by rung)
 
-- [ ] **T4.1** Instinct: arena seating rides the reflex runner seam (zero new instinct code for measurement). An arsenal/`EscalateSpec` row for clef-0.6b is **owner-gated** — file the pointer only if the Phase-3 board read justifies a seat; the grammar's one-definition home stays riir-instinct, never a fork here.
-- [ ] **T4.2** Downstream private-trail pointer (owner-gated): whether the lane feeds a downstream serving consumer is an owner decision recorded in the private trail — capability, cost and arming details live rethink-side, NOT in this public repo. Nothing implemented here.
-- [ ] **T4.3** "And more" backlog (recorded in Research 012 §5(e), each its own go/no-go, none ride this plan): clef-vision-0.8b (the multimodal step), clef-flash-9b CoreML as a riir-train-623 teacher posture (owned by 623), decision-2.0, vela-2 span questions, kev, short-reply.
-- [ ] **T4.4** e8-for-clef embeddings sidecar: **deferred by the Plan-612 G1/G2 reds** — only as a separately-gated measured follow-up, never a rider on this plan.
+- [-] **T4.1** Instinct: arena seating rides the reflex runner seam (zero new instinct code for measurement). An arsenal/`EscalateSpec` row for clef-0.6b is **owner-gated** — file the pointer only if the Phase-3 board read justifies a seat; the grammar's one-definition home stays riir-instinct, never a fork here. *Defer-marked 2026-10-19: the Phase-3 board read (bench 152) + second read (`57612a0`/`16d0685`) closed the SURPRISING flag — the seat/no-seat call is the owner's; unblocks on the owner's `EscalateSpec` decision.*
+- [-] **T4.2** Downstream private-trail pointer (owner-gated): whether the lane feeds a downstream serving consumer is an owner decision recorded in the private trail — capability, cost and arming details live rethink-side, NOT in this public repo. Nothing implemented here. *Defer-marked 2026-10-19: unblocks on the owner's rethink-side consumption decision.*
+- [-] **T4.3** "And more" backlog (recorded in Research 012 §5(e), each its own go/no-go, none ride this plan): clef-vision-0.8b (the multimodal step), clef-flash-9b CoreML as a riir-train-623 teacher posture (owned by 623), decision-2.0, vela-2 span questions, kev, short-reply. *Defer-marked 2026-10-19: backlog pointer, not a task — each item opens its own go/no-go when someone picks it up.*
+- [-] **T4.4** e8-for-clef embeddings sidecar: **deferred by the Plan-612 G1/G2 reds** — only as a separately-gated measured follow-up, never a rider on this plan. *Defer-marked 2026-10-19: unblocks on a measured re-open case that survives the Plan-612 gates.*
 
 ## GOAT gate summary
 
