@@ -29,6 +29,13 @@ pinned-checkpoint encoder lane, consumed by the public decision-engine
 serving repo); the scale-invariant attention lane LANDED 2026-10-11
 (opt-in `scale_invariant_attn` — `transformer/attention_si.rs` + the
 `si_zero_shot_ppl` G3 harness, katgpt-rs Plan 622's engine vehicle);
+the GDN L8 eager-prefill arm LANDED 2026-10-19 (plan 621, opt-in env
+`RIIR_PREFILL_GDN_L8=1` — `prefill_cuda_deltanet_l8.rs`, gated on
+ternary_gemv_cuda_raw + ternary_gemm_batched + cubecl_runtime,
+non-macOS; NOT-PROMOTED: kernel-only k4w4 1.26–1.51× but e2e FLAT at
+the DQ-lane posture, bit-identity bytewise vs rowpar — see
+`.benchmarks/884_plan621_gdn_l8_eager_prefill.md`; the re-scoped
+league-posture e2e protocol is pre-registered in the plan);
 remaining planned work: the CLEAN GPU kernel layer migration.
 
 ## Build Commands
