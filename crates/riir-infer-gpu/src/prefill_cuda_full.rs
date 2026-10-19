@@ -110,6 +110,9 @@ use crate::prefill_cuda_attention::{
     AttnAcc, AttnDot, AttnInv, AttnPh3, AttnRes, CudaAttnKernels, RopeRot, SinCosForm,
 };
 use crate::prefill_cuda_deltanet::{ConvFma, CudaDeltanetKernels, LogForm, SigDiv, SigExp};
+use crate::prefill_cuda_deltanet_l8::{
+    CudaDeltanetL8Kernels, GDN_L8_MIN_TOKENS, RECL8_DEFAULT_ARM,
+};
 use crate::prefill_cuda_ffn::CudaFfnKernels;
 use crate::prefill_cuda_gdn_chunked::CudaGdnChunkedKernels;
 use crate::prefill_cuda_gdn_mma::CudaGdnMmaKernels;
@@ -123,6 +126,7 @@ use riir_infer_core::types::DeltaNetLayerType;
 
 static PREFILL_CUDA: AtomicBool = AtomicBool::new(false);
 static GDN_CHUNKED: AtomicBool = AtomicBool::new(false);
+static GDN_L8: AtomicBool = AtomicBool::new(false);
 
 /// Issue 965 — knob generation for the graph replay key: bumped by the one
 /// setter-based knob the captured layer loop consults
@@ -663,6 +667,35 @@ pub fn set_prefill_gdn_chunked(on: bool) {
     GV_KNOB_GEN.fetch_add(1, Ordering::Relaxed);
 }
 
+/// Plan 621 T3 — the GDN L8 eager-prefill recurrence (the Yukon
+/// lane-geometry class, ai-971 item 4). BIT-identical to the rowpar
+/// incumbent by construction: the adjacent-map register fold IS the
+/// `ps_treeup` tree (plan 621 addendum-d; the strided map T2 modeled matches
+/// only the descending `fused_rows` family, never the production path), so
+/// the FNV pin class holds. Admission: `hd == 128` AND `p >= 17`
+/// ([`GDN_L8_MIN_TOKENS`] — the 8-16 verify band stays incumbent) AND the
+/// rowpar path selected (the else-chain routes; never composes with the
+/// chunked/mma arms in v1). DEFAULT OFF; scratch-free.
+/// `RIIR_PREFILL_GDN_L8=1|true|on` (env wins over the setter).
+#[inline]
+fn gdn_l8_enabled() -> bool {
+    static ENV: OnceLock<Option<bool>> = OnceLock::new();
+    let env = *ENV.get_or_init(|| {
+        std::env::var("RIIR_PREFILL_GDN_L8")
+            .ok()
+            .map(|s| matches!(s.trim(), "1" | "true" | "on"))
+    });
+    env.unwrap_or_else(|| GDN_L8.load(Ordering::Relaxed))
+}
+
+/// A/B knob for the L8 recurrence (see [`gdn_l8_enabled`]). A flip changes
+/// the captured layer loop's kernel sequence, so it bumps [`GV_KNOB_GEN`] —
+/// the same law as [`set_prefill_gdn_chunked`].
+pub fn set_prefill_gdn_l8(on: bool) {
+    GDN_L8.store(on, Ordering::Relaxed);
+    GV_KNOB_GEN.fetch_add(1, Ordering::Relaxed);
+}
+
 /// Plan 620 Phase D — invalidate any captured whole-prefill graph WITHOUT a
 /// knob flip: the si session's attach/detach changes the device pointers the
 /// captured graph baked (the decode lane's `self.graph = None` precedent,
@@ -862,6 +895,10 @@ struct FullStack {
     /// to v3 chunked → rowpar). Takes the `gdn_chunked` slot's lane when
     /// the admission passes (p ≥ FA_MIN_P, p % 16 == 0, H ladder).
     gdn_mma: Option<CudaGdnMmaKernels>,
+    /// Plan 621 T3 — the L8 eager recurrence (the Yukon lane-geometry
+    /// class); None if NVRTC compile fails (falls back to rowpar — bit
+    /// -identical to it by construction, so the fallback is silent-safe).
+    l8: Option<CudaDeltanetL8Kernels>,
     bufs: Mutex<FullBufs>,
     /// f32 weight mirrors — built once (None on any read/upload failure).
     f32_weights: OnceLock<Option<Arc<Vec<LayerF32>>>>,
@@ -999,6 +1036,16 @@ fn build_full_stack() -> Result<FullStack, String> {
     // Issue 1066: the MMA class rides the same posture — a compile or smem
     // opt-in failure only disables the MMA arm (v3 → rowpar stay).
     let gdn_mma = CudaGdnMmaKernels::new(ctx.clone()).ok();
+    // Plan 621 T3: the L8 eager arm — a compile failure only disables the
+    // arm (rowpar stays, bit-identical by construction; loud here because
+    // the knob is opt-in and a silent rowpar would read as a lost win).
+    let l8 = match CudaDeltanetL8Kernels::new(ctx.clone()) {
+        Ok(k) => Some(k),
+        Err(e) => {
+            eprintln!("[621-l8] NVRTC compile failed — L8 arm disabled (rowpar fallback): {e}");
+            None
+        }
+    };
     let at = CudaAttnKernels::new(ctx).map_err(|e| e.to_string())?;
     Ok(FullStack {
         stream,
@@ -1011,6 +1058,7 @@ fn build_full_stack() -> Result<FullStack, String> {
         dq_fq: OnceLock::new(),
         gdn_chunked,
         gdn_mma,
+        l8,
         bufs: Mutex::new(FullBufs {
             x: None,
             normx: None,
@@ -2133,6 +2181,9 @@ fn whole_prefill_inner(
     let words = p * (max_gemm_n / 4);
     // Arm-12 knob resolution (single source for grow + dispatch).
     let gdn_chunked_wanted = gdn_chunked_enabled() && stack.gdn_chunked.is_some();
+    // Plan 621 T3 — L8 admission: knob armed AND hd128 AND the 17-token
+    // prefill band AND the module compiled. Scratch-free (nothing to grow).
+    let gdn_l8_wanted = gdn_l8_enabled() && hd == 128 && p >= GDN_L8_MIN_TOKENS;
     let Ok(mut bufs) = stack.bufs.lock() else {
         return None;
     };
@@ -3116,6 +3167,23 @@ fn whole_prefill_inner(
                                 p,
                                 v_dim,
                             )?;
+                    } else if let Some(l8k) = stack.l8.as_ref().filter(|_| gdn_l8_wanted) {
+                        // Plan 621 — the L8 eager recurrence: the rowpar
+                        // class's L8 rung (bit-identical to the rowpar
+                        // incumbent; 3 shuffles per reduction vs 5 at K=4).
+                        l8k.launch_recurrence_l8(
+                            stream,
+                            RECL8_DEFAULT_ARM,
+                            qkvx_b,
+                            beta_b,
+                            decay_b,
+                            dn_state,
+                            rec_b,
+                            hd,
+                            n_v,
+                            p,
+                            v_dim,
+                        )?;
                     } else {
                         stack.dn.launch_recurrence(
                             stream, rd, ru, rp, rsc, qkvx_b, beta_b, decay_b, dn_state, rec_b, hd,

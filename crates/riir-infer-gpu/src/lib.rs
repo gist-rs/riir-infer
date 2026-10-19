@@ -281,6 +281,13 @@ pub mod prefill_cuda_deltanet;
     feature = "cubecl_runtime",
     not(target_os = "macos")
 ))]
+pub mod prefill_cuda_deltanet_l8;
+#[cfg(all(
+    feature = "ternary_gemv_cuda_raw",
+    feature = "ternary_gemm_batched",
+    feature = "cubecl_runtime",
+    not(target_os = "macos")
+))]
 pub mod prefill_cuda_ffn;
 #[cfg(all(
     feature = "ternary_gemv_cuda_raw",
