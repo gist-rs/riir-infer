@@ -1,6 +1,6 @@
 # Issue 049: GDN delta-roll journal — rank-1 unwinding for GDN state checkpoints
 
-**Status:** Open — unclaimed
+**Status:** Open — **Claimed:** riir-refine-idle-4090, 1792515880, expires 2026-10-22T17:04Z
 **Date:** 2026-10-20
 **Source:** [katgpt-rs/.research/629_Depth_Memory_RLS_Depth_Mixing.md](../../katgpt-rs/.research/629_Depth_Memory_RLS_Depth_Mixing.md) (arXiv:2610.18809 "Depth Memory", state-unwinding trick) — distillation-derived fusion idea; novelty TBD, no code.
 
