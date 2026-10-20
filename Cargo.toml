@@ -70,6 +70,14 @@ sentencepiece = "0.13"
 # Pure-local gates (no dep forwards).
 rotary_value_embedding = []
 hla = []
+# Issue 049 — the GDN delta-roll state journal (`deltanet::delta_roll`):
+# post-commit state recovery by rank-1 unwind (final state + per-token
+# (u, k, β, g) contexts, ~64× vs per-token snapshots), under the per-head
+# decay-product conditioning gate. Pure-local, opt-in POC — the consumer
+# seams (spec-decode retry, kv_evict recovery, disaggregated handoff) are
+# named, not yet wired. Gates: tests/gdn_delta_roll_gates.rs (G1 drift pin,
+# Bench 885) + tests/gdn_delta_roll_g4_alloc.rs (G4).
+gdn_delta_roll = ["deltanet_inference"]
 raven = []
 # eDLM (Drex DLM) segment-structured scoring lane (riir-infer Issue 1005):
 # `edlm` GGUF arch + branch mask + row form + pointer head. Weights are
@@ -385,6 +393,23 @@ set_diffusion = ["dllm"]
 [[test]]
 name = "issue879_gdn_quant_certification"
 required-features = ["deltanet_ternary_inference"]
+
+# Issue 049 — GDN delta-roll journal gates: the G1 round-trip drift pin
+# (unwind vs fresh sequential replay, per decay regime), the conditioning
+# gate's fail-closed refusal, the f64 escape hatch, and the storage
+# compression constant. Whole-file #![cfg(feature = "gdn_delta_roll")]
+# protects the count; this row protects the reader (green-zero law).
+[[test]]
+name = "gdn_delta_roll_gates"
+required-features = ["gdn_delta_roll"]
+
+# Issue 049 — G4: record + gate + unwind within a pre-reserved journal is
+# allocation-free. Its OWN test target deliberately: the counting allocator
+# is process-global and sibling tests in one binary would leak allocs into
+# the count (the twt_g4_alloc lesson).
+[[test]]
+name = "gdn_delta_roll_g4_alloc"
+required-features = ["gdn_delta_roll"]
 
 # Issue 046 — GDN spectral-class spec test: the transition recovered from
 # the real decode kernel vs the Gated-DeltaNet closed form

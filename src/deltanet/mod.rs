@@ -47,6 +47,18 @@ pub mod weights;
 #[cfg(feature = "kv_eviction")]
 pub mod kv_evict;
 
+// Issue 049 — the GDN delta-roll state journal (Research 629 E2's
+// riir-infer half): post-commit state recovery by rank-1 unwind from the
+// final state + per-token (u, k, β, g) contexts (~64× vs materialized
+// per-token snapshots at K = V = 128), under the load-bearing per-head
+// decay-product conditioning gate. Complements the rollback-free verify
+// path (verify stays write-free); the named consumer seams are the
+// spec-decode retry paths, kv_evict eviction recovery, and the
+// disaggregated handoff lane. f32 unwind is exact algebra, NOT bit-exact —
+// the G1 drift pin lives in `tests/gdn_delta_roll_gates.rs` (Bench 885).
+#[cfg(feature = "gdn_delta_roll")]
+pub mod delta_roll;
+
 // Issue 741 T10 Phase C (2026-08-22): the training family moved to
 // `riir-train-engine::deltanet` — backward / full_backward / layer_backward /
 // attention_backward / model_backward / model_backward_recompute /
@@ -238,6 +250,8 @@ pub mod profiling;
 #[cfg(feature = "flashmemory_gqa")]
 pub mod flashmemory_gqa;
 
+#[cfg(feature = "gdn_delta_roll")]
+pub use delta_roll::{ConditioningRefusal, GdnStateJournal, MIN_PRODUCT_EPS_DEFAULT};
 pub use forward::{
     DeltaNetState, HybridCache, HybridForwardScratch, PrefillContext, effective_rotary_dim,
     forward_qwen_deltanet, generate_greedy_qwen_deltanet, prefill_qwen_deltanet,
