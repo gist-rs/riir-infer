@@ -481,7 +481,7 @@ fn percentile(walls: &mut [f64], p: f64) -> f64 {
         return 0.0;
     }
     walls.sort_by(|a, b| a.total_cmp(b));
-    let idx = (((p * walls.len() as f64) as usize).min(walls.len() - 1)).min(walls.len() - 1);
+    let idx = (((p * walls.len() as f64).ceil() as usize).max(1) - 1).min(walls.len() - 1);
     walls[idx]
 }
 
