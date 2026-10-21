@@ -2,7 +2,7 @@
 
 **Status:** OPEN — substrate half of riir-reflex `.research/011` + reflex Issue 094 (arXiv:2610.17495 distill); calibration-class readout, never a serving path.
 
-**Number note:** allocated 1106, not 1006 — riir-ai's issue counter has consumed 1005–1105 (its `.highwater` reads 1105 at allocation time, 2026-10-21); skipping the shared carve-era range per the anti-collision rule in this repo's AGENTS.md.
+**Number note:** allocated 1106 and KEPT (pushed numbers are never reused), but it is **not collision-free**: riir-ai's issue counter sits at 1105 (verified locally and on `origin/develop`, 2026-10-21), so 1106 is the next number riir-ai itself will allocate. Skipping cannot outrun a climbing counter — the real protection is that every citation names its repo (`riir-infer Issue 1106`, enforced by the workspace `issue_citation_gate`). The literal reading of this repo's AGENTS.md numbering rule ("reserve 1005–1008, continue from 1006") would have said 1009 — that rule is stale and self-contradictory (riir-ai has long since consumed the whole range); a follow-up may repair the rule text, out of scope here.
 
 ## Context
 
