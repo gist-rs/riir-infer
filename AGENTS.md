@@ -117,18 +117,18 @@ manifest).
 Issue, plan, doc, benchmark, and research numbers are **monotonic and never
 reused**: read the target dir's `.highwater`, use `value + 1`, write back.
 
-⛔ **`.issues/` carries TWO lanes (carve-era, 2026-09-26) — read before
-allocating.** The files `998/1003/1004` are MOVED documents from the riir-ai
-carve (riir-ai's numbers, not allocations made here); `.highwater` reads 1004
-for that reason only and must not be treated as the local counter. LOCAL
-allocations run the small lane and own a dedicated counter:
-**`.issues/.highwater_local`** — read it, allocate value + 1, write the new
-value back in the same commit (a plain max-of-disk rule would REUSE a number
-once a closed issue file is removed, which is the katgpt-rs `.issues/121`
-recycling bug). Lane history: `011` → `012` → `013` → `014` → `015`. And
-NEVER allocate `1005–1008` here — riir-ai's own counter has already consumed
-that range (it read 1008 on 2026-09-26; re-check
+⛔ **One lane only (the carve-era two-lane counter was RETIRED 2026-10-21).**
+The files `998/1003/1004` are MOVED documents from the riir-ai carve
+(riir-ai's numbers, not allocations made here); `.highwater` reads 1005 and
+is the ONLY counter — new allocations continue from it (`1006+`), which sit
+above every number the old local lane (top `049`, retired with its
+`.highwater_local` file) ever used, so no fold collision is possible. Never
+re-allocate `1005–1008` — riir-ai's own counter has already consumed that
+range (it read 1008 on 2026-09-26; re-check
 `../riir-ai/.issues/.highwater` before touching the inherited range at all).
+A plain max-of-disk rule is still wrong — a closed issue file is removed and
+its number would be REUSED (the katgpt-rs `.issues/121` recycling bug):
+always read the counter, never the directory.
 
 Self-allocation headings follow the grammar the citation oracle reads —
 `## <date> — Issue NNN: <title> CLOSED — <verdict>` — the number sits
