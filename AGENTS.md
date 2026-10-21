@@ -34,8 +34,10 @@ the GDN L8 eager-prefill arm LANDED 2026-10-19 (plan 621, opt-in env
 ternary_gemv_cuda_raw + ternary_gemm_batched + cubecl_runtime,
 non-macOS; NOT-PROMOTED: kernel-only k4w4 1.26–1.51× but e2e FLAT at
 the DQ-lane posture, bit-identity bytewise vs rowpar — see
-`.benchmarks/884_plan621_gdn_l8_eager_prefill.md`; the re-scoped
-league-posture e2e protocol is pre-registered in the plan);
+`.benchmarks/884_plan621_gdn_l8_eager_prefill.md`; the league-posture
+e2e re-gate EXECUTED 2026-10-21 (riir-ai Bench 993): G1 bytewise ×4 at
+the league posture and +3.2% pp2048, band-clause gap → opt-in pending
+the owner gate (second-window replication owed));
 the GDN delta-roll state journal LANDED 2026-10-20 (Issue 049, opt-in
 `gdn_delta_roll` — `deltanet/delta_roll.rs`: post-commit state recovery by
 rank-1 unwind from the final state + per-token (u, k, β, g) contexts, ~64×
