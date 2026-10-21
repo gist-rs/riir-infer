@@ -46,6 +46,14 @@ conditioning gate; G1 drift 6.3e-6 worst admitted cell at floor 0.25,
 G4 zero-alloc, drift-vs-replay ~6× cheaper than re-forward — Bench 885;
 consumer seams named: spec-decode retry, kv_evict recovery, disaggregated
 handoff — promotion rides a consumer);
+the HEADLESS stability-depth readout LANDED 2026-10-22 (Issue 1106, rides
+`twt_profile` — `riir/stability.rs` in the laya crate: per-stage
+last-position residual cosine + L2 over the `forward_capture` seam →
+earliest stabilized-suffix stage; sequential-fold deterministic,
+zero-alloc track (`stability_g4_alloc`), brute-force bit-parity gates +
+the real-checkpoint e2e smoke (`issue1106_stability_capture_smoke`, skips
+loud without weights); calibration-class, never a serving path; the
+substrate half of reflex Issue 094 — bands are the consumer's to pin);
 remaining planned work: the CLEAN GPU kernel layer migration.
 
 ## Build Commands
@@ -122,12 +130,14 @@ reused**: read the target dir's `.highwater`, use `value + 1`, write back.
 ⛔ **One lane only (the carve-era two-lane counter was RETIRED 2026-10-21).**
 The files `998/1003/1004` are MOVED documents from the riir-ai carve
 (riir-ai's numbers, not allocations made here); `.highwater` reads 1005 and
-is the ONLY counter — new allocations continue from it (`1006+`), which sit
-above every number the old local lane (top `049`, retired with its
-`.highwater_local` file) ever used, so no fold collision is possible. Never
-re-allocate `1005–1008` — riir-ai's own counter has already consumed that
-range (it read 1008 on 2026-09-26; re-check
-`../riir-ai/.issues/.highwater` before touching the inherited range at all).
+is the ONLY counter — new allocations continue from it, which sit above
+every number the old local lane (top `049`, retired with its
+`.highwater_local` file) ever used, so no fold collision is possible. The
+older "reserve 1005–1008" text was STALE and self-contradictory (riir-ai's
+climbing counter cannot be outrun by skipping a range — it had already
+consumed the whole reserve by 2026-10; Issue 1106 landed under that stale
+reading, kept per pushed-numbers-are-never-reused, with the real protection
+being repo-named citations, enforced by the workspace `issue_citation_gate`).
 A plain max-of-disk rule is still wrong — a closed issue file is removed and
 its number would be REUSED (the katgpt-rs `.issues/121` recycling bug):
 always read the counter, never the directory.

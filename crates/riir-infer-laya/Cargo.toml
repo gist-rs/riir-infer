@@ -278,6 +278,20 @@ required-features = ["laya-riir-cuda"]
 name = "cuda_agent_repeat_probe"
 required-features = ["laya-riir", "laya-riir-cuda"]
 
+# Issue 1106 — the stability tracker's G4 alloc gate (whole-file #![cfg]-gated
+# on twt_profile; the lane itself rides laya-riir — the row carries BOTH so a
+# partial selection skips the target loudly instead of printing a green zero).
+[[test]]
+name = "stability_g4_alloc"
+required-features = ["laya-riir", "twt_profile"]
+
+# Issue 1106 — the end-to-end capture→tracker→depth smoke at a served
+# checkpoint (skips LOUD without the weights; the pure-math gates run in the
+# module's unit tests).
+[[test]]
+name = "issue1106_stability_capture_smoke"
+required-features = ["laya-riir", "twt_profile"]
+
 # The CubeCL op-parity + residency smoke (plan 611 S1b) — whole-file
 # #![cfg]-gated on the feature; the row keeps a feature-less selection
 # skipping the target loudly instead of printing a green zero.

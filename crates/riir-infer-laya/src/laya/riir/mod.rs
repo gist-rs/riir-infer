@@ -77,6 +77,14 @@ pub mod cubecl;
 #[cfg(all(target_os = "macos", feature = "laya-riir-ane"))]
 pub mod ane;
 
+/// The HEADLESS decision-depth readout over the capture seam (riir-infer
+/// Issue 1106, feature `twt_profile`) — per-stage last-position residual
+/// stability (cosine + L2) and the earliest-stage stabilized-suffix depth.
+/// Calibration-class like the seam it consumes; compiles away with
+/// `twt_profile` (G3 feature-off byte-identity).
+#[cfg(feature = "twt_profile")]
+pub mod stability;
+
 pub use agent::{EncodedQuestion, RiirAgent};
 pub use fake_quant::{FakeQuantReport, WeightPosture};
 pub use q4_artifact::Q4ConvertReport;
