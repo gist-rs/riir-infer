@@ -1,6 +1,7 @@
 # Plan 622: TokenGate Substrate Lane — Per-Key-Bias Attention + Exact Pruned Prefill + Deterministic Gate Overlay
 
 **Status:** Active — Phase 0 (not started); SECONDARY/PRIMARY ordering per Research 013 §4: this is the PRIMARY lane (runs in the serving hot path, no training required); riir-train Plan 469 rides this plan's Phase 1 seam.
+**Claimed:** zed-m3-tokengate, 1792677302, expires 2026-10-24T13:55:00Z
 
 **Date:** 2026-10-22
 **Research:** [riir-infer/.research/013_TokenGate_Trainable_Token_Pruning_Prefill.md](../.research/013_TokenGate_Trainable_Token_Pruning_Prefill.md)
