@@ -189,19 +189,20 @@ fn fa_kb_cost_gate_league_shapes() {
         eprintln!(
             "[p={p}] incumbent {m_inc:.3} ms | zero-armed {m_zero:.3} ms (ratio {r_zero:.4}) | varying-armed {m_var:.3} ms (ratio {r_var:.4})"
         );
-        // BOTH cells print BEFORE any assert (a first-cell failure must not
-        // orphan the second cell's measurement).
-        if p == 4096 {
-            // The plan's G2 bar, asserted at both lengths (only on the LAST
-            // iteration of the length loop — every cell has printed by then).
-            assert!(
-                r_zero <= 1.10,
-                "kb cost gate: zero-armed ratio {r_zero:.4} > 1.10 at p={p}"
-            );
-            assert!(
-                r_var <= 1.10,
-                "kb cost gate: varying-armed ratio {r_var:.4} > 1.10 at p={p}"
-            );
-        }
+        // The plan's G2 bar at BOTH lengths. MEASURED VERDICT (2026-10-23,
+        // 4090, this box state): p=4096 GREEN (~1.088) / p=2048 RED (~1.123)
+        // — the armed arm pays per-element global bias loads (~200–800 MB
+        // extra L2 traffic; the shorter kernel carries it as a larger
+        // fraction). The named fix (smem tile staging, 4x fewer loads) is
+        // T1.4's follow-up in the plan; until it lands this bench asserts
+        // honestly and reads RED at 2048 when run.
+        assert!(
+            r_zero <= 1.10,
+            "kb cost gate: zero-armed ratio {r_zero:.4} > 1.10 at p={p}"
+        );
+        assert!(
+            r_var <= 1.10,
+            "kb cost gate: varying-armed ratio {r_var:.4} > 1.10 at p={p}"
+        );
     }
 }
