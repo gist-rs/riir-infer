@@ -181,6 +181,107 @@ fn forward_rotation_wiring_fires_every_layer() {
     }
 }
 
+/// Issue 1111 T3. `forward_qwen_deltanet_ternary_hidden` returns the vector
+/// the LM head reads: on a folded file the FORWARD-ROTATED final-norm state
+/// `R·h`, on an unfolded file `h` itself. `h` is rebuilt independently as
+/// `final_norm(capture[last])` (the post-layer residual stays primal). The
+/// rotated basis is the shipped contract — riir-rag-bonsai's 8-D chunk-mean
+/// is not rotation-invariant, so changing it would silently move persisted
+/// embeddings.
+#[test]
+fn hidden_variant_returns_head_basis() {
+    use riir_infer_core::deltanet::rotation::{rotate_forward_inplace, rotate_inverse_inplace};
+    use riir_infer_core::deltanet::{
+        HybridCache, HybridForwardScratch, QwenDeltaNetTernaryWeights,
+        forward_qwen_deltanet_ternary_hidden, forward_qwen_deltanet_ternary_with_capture,
+    };
+    use riir_infer_core::types::rmsnorm_with_gamma_eps;
+
+    let bytes = build_gguf(&synth_metadata(true), &synth_tensors_bonsai2());
+    let path = write_tmp("riir_b2_hidden_basis", &bytes);
+    let (config, mut weights) = load(&path).expect("load");
+    let _ = std::fs::remove_file(&path);
+    let n = config.n_embd;
+    let rope = riir_infer_core::rope::RopeFreqTable::new(config.rope_theta, config.head_dim);
+    let tokens = [7usize, 3, 11];
+
+    // (returned hidden, primal final-norm state) after the last token.
+    let run = |w: &QwenDeltaNetTernaryWeights| {
+        let fresh = || {
+            (
+                HybridCache::with_layer_types(&config, &w.layer_types),
+                HybridForwardScratch::new(&config),
+                vec![0.0f32; config.vocab_size.max(n)],
+            )
+        };
+        let (mut cache, mut scratch, mut x) = fresh();
+        let mut returned = Vec::new();
+        for (pos, &tok) in tokens.iter().enumerate() {
+            returned = forward_qwen_deltanet_ternary_hidden(
+                &mut x,
+                w,
+                &mut cache,
+                tok,
+                pos,
+                &config,
+                &mut scratch,
+                &rope,
+            )
+            .to_vec();
+        }
+        let (mut cache, mut scratch, mut x) = fresh();
+        let mut captures = vec![vec![0.0f32; n]; config.n_layer];
+        for (pos, &tok) in tokens.iter().enumerate() {
+            forward_qwen_deltanet_ternary_with_capture(
+                &mut x,
+                w,
+                &mut cache,
+                tok,
+                pos,
+                &config,
+                &mut scratch,
+                &rope,
+                Some(&mut captures),
+            );
+        }
+        let mut primal = captures[config.n_layer - 1][..n].to_vec();
+        rmsnorm_with_gamma_eps(&mut primal, &w.final_norm, config.rms_norm_eps);
+        (returned, primal)
+    };
+    let max_abs = |a: &[f32], b: &[f32]| {
+        a.iter()
+            .zip(b)
+            .map(|(x, y)| (x - y).abs())
+            .fold(0.0f32, f32::max)
+    };
+
+    let rot = weights
+        .rotation
+        .clone()
+        .expect("synthetic Bonsai-2 file is folded");
+    let signs = rot.signs_for_width(n);
+    let (returned, primal) = run(&weights);
+    assert_eq!(returned.len(), n, "returns n_embd values");
+    let mut expect = primal.clone();
+    rotate_forward_inplace(&mut expect, signs, rot.block_size);
+    assert_eq!(returned, expect, "folded: returned == R·h bit-for-bit");
+    assert!(
+        max_abs(&returned, &primal) > 1e-3,
+        "folded: the rotated return must differ from the primal state (test discriminates)"
+    );
+    let mut back = returned.clone();
+    rotate_inverse_inplace(&mut back, signs, rot.block_size);
+    assert!(
+        max_abs(&back, &primal) < 1e-5,
+        "folded: R⁻¹ recovers the primal state ({})",
+        max_abs(&back, &primal)
+    );
+
+    weights.rotation = None;
+    let (returned, primal) = run(&weights);
+    assert_eq!(returned, primal, "unfolded: returned == h bit-for-bit");
+}
+
 /// 4. Folded-matmul math vs the fork's OWN construction: explicit ±1/√n
 ///    Hadamard matrix (row&col parity) times the sign-multiplied input, then a
 ///    dense matmul with the dequantized folded weights. Tolerance covers the

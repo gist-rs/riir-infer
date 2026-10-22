@@ -1038,12 +1038,24 @@ fn forward_qwen_deltanet_ternary_body<'a>(
 ///
 /// Runs the same forward pass as [`forward_qwen_deltanet_ternary`] (through
 /// the final `RMSNorm`), then returns `&mut scratch.hidden_copy[..n]` — the
-/// post-final-norm residual stream — instead of the logits.
+/// post-final-norm state **in the basis the LM head reads** — instead of the
+/// logits. `n = config.n_embd` (5120 for Bonsai-27B, 2048 for the 0.8B ref).
+///
+/// **Basis (Issue 1111).** On an unfolded file this is the primal final-norm
+/// state `h`. On a Hadamard-folded file (`weights.rotation = Some`, the
+/// Bonsai-2 `prism.hadamard.*` packs) the folded head reads the
+/// FORWARD-ROTATED vector, so this returns `R·h`; apply
+/// [`rotate_inverse_inplace`] with `rotation.signs_for_width(n)` /
+/// `rotation.block_size` to recover `h`. Inner products and norms are
+/// basis-invariant (`R` is orthogonal); anything that mixes this vector with
+/// primal-basis quantities (input-embedding rows, a primal probe, a
+/// per-coordinate pooling) is not. The rotated return is the shipped
+/// contract: riir-rag-bonsai's 8-D chunk-mean is not rotation-invariant, so
+/// switching bases would silently move persisted embeddings. Pinned by
+/// `tests/bonsai2_rotation_load.rs::hidden_variant_returns_head_basis`.
 ///
 /// Used by embedding extractors (Bonsai dense embedder for `DenseEmbedIndex`
-/// semantic rerank) where logits are not needed. The hidden state is the
-/// pre-LM-head representation: a 12288-D (Bonsai-27B) or 2048-D (0.8B ref)
-/// vector that captures the model's understanding of the input.
+/// semantic rerank) where logits are not needed.
 ///
 /// **Implementation note:** this delegates to the capture variant (which runs
 /// the LM head as a side effect) then returns `scratch.hidden_copy`. The LM
