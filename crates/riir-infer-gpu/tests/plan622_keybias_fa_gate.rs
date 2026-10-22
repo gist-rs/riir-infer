@@ -4,20 +4,22 @@
 //!
 //! Arms over one fixture (mid-context `base_pos = 70` — deliberately NOT
 //! 32-tile-aligned, so the causal limits and the bias table cut through KV
-//! tiles and the last tile stages a partial row + zero tail):
+//! tiles and the last tile's fragment indexes run past the causal limit —
+//! the clamped-index read's inert adds live exactly there):
 //! `base` (kb=None, the dummies) / `flag_off` (session-shaped pointers,
 //! disabled) / `zero_armed` / `moved` (a varying ±1.5 table, run TWICE) /
 //! `moved_pad` (the same values, stride = KV_LEN + 40 with garbage pad) /
 //! `moved_dp` (the devpos graph twin). The sharp teeth are bit-exact:
 //! flag-off == base and zero-armed == base (the softmax collapses the ±0.0
-//! the `+0.0` add can produce), moved run-1 == run-2 (the T1.4 smem stage's
-//! double-buffer race guard), moved_pad == moved (stride independence
-//! THROUGH the stage — a broken stage guard would read the garbage pad),
-//! and the devpos twin == the eager twin (both entries share the staged
-//! body). The coarse teeth are the CPU twins (plain + biased, the same
-//! f16-rounded operands, causally masked like the kernel) at the f16
-//! tolerance bar — a mis-indexed stage row (wrong head, wrong key offset)
-//! moves scores O(1) and blows through it.
+//! the `+0.0` add can produce, and the causal overwrite makes the
+//! out-of-range adds inert), moved run-1 == run-2 (the armed path's
+//! run-to-run race guard — any future smem staging or caching lane shows
+//! here first), moved_pad == moved (stride independence — a broken guard
+//! would read the garbage pad), and the devpos twin == the eager twin
+//! (both entries share the body). The coarse teeth are the CPU twins
+//! (plain + biased, the same f16-rounded operands, causally masked like
+//! the kernel) at the bench_946 calibrated bars — a mis-indexed bias read
+//! (wrong head, wrong key offset) moves scores O(1) and blows through.
 
 #![cfg(all(
     feature = "ternary_gemv_cuda_raw",
@@ -334,16 +336,16 @@ fn test_prefill_fa_kb_flag_off_zero_stage_and_stride() {
                 .any(|(b, m)| b.to_bits() != m.to_bits()),
             "armed varying bias produced no output change — the prefill kb hook is inert"
         );
-        // (4) Run-twice determinism — the staging race guard.
+        // (4) Run-twice determinism — the armed path's race guard.
         for (i, (m, r)) in moved.iter().zip(moved_again.iter()).enumerate() {
             assert_eq!(
                 m.to_bits(),
                 r.to_bits(),
-                "kb staged run-to-run drift at {i} — the smem double buffer races: {m:?} vs {r:?}"
+                "kb armed run-to-run drift at {i} — the read path races: {m:?} vs {r:?}"
             );
         }
-        // (5) Stride independence through the stage — the garbage pad is
-        // never read.
+        // (5) Stride independence — the garbage pad is never read (the
+        // clamped index keeps every read inside [0, kv_len) of the row).
         for (i, (m, p)) in moved.iter().zip(moved_pad.iter()).enumerate() {
             assert_eq!(
                 m.to_bits(),
