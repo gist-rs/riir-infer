@@ -115,6 +115,70 @@ pub fn gemv_f16_scale_launch_count() -> usize {
     F16_SCALE_LAUNCHES.load(std::sync::atomic::Ordering::Relaxed)
 }
 
+// ── Issue 1114: the occupancy wg dispatch toggle (Bench 996 cell 4) ────
+
+/// Runtime toggle for the occupancy workgroup rule (Issue 1114).
+///
+/// `true` ⇒ `GemvTernaryCubeCL::launch()` dispatches `launch_rowtiled8_wg`
+/// with the measured shape rule instead of the fixed 256-thread workgroup.
+/// Dispatch-only (byte-identical output — Bench 996 cell 4 G1 PASS ×3),
+/// **DEFAULT OFF** until its e2e GOAT: env `RIIR_GEMV_WG_OCCUPANCY` arms it
+/// on exact "1"/"on"/"true". `set_gemv_wg_occupancy` is the harness arm
+/// toggle (authoritative over the env, same contract as the f16 lane's).
+static USE_WG_OCCUPANCY: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+static WG_OCCUPANCY_INITIALIZED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+
+/// Launches dispatched through the occupancy wg rule (the vacuous-guard
+/// counter — outputs are byte-identical, so ONLY this counter proves the
+/// toggle reached the dispatch).
+static WG_OCCUPANCY_LAUNCHES: std::sync::atomic::AtomicUsize =
+    std::sync::atomic::AtomicUsize::new(0);
+
+fn wg_occupancy_enabled() -> bool {
+    if WG_OCCUPANCY_INITIALIZED
+        .set(matches!(
+            std::env::var("RIIR_GEMV_WG_OCCUPANCY")
+                .unwrap_or_default()
+                .to_lowercase()
+                .as_str(),
+            "1" | "on" | "true",
+        ))
+        .is_ok()
+    {
+        USE_WG_OCCUPANCY.store(
+            WG_OCCUPANCY_INITIALIZED.get().copied().unwrap_or(false),
+            std::sync::atomic::Ordering::Relaxed,
+        );
+    }
+    USE_WG_OCCUPANCY.load(std::sync::atomic::Ordering::Relaxed)
+}
+
+/// Force the occupancy wg rule on/off (overrides the env var; the bench
+/// harness's arm toggle).
+pub fn set_gemv_wg_occupancy(on: bool) {
+    let _ = WG_OCCUPANCY_INITIALIZED.set(on);
+    USE_WG_OCCUPANCY.store(on, std::sync::atomic::Ordering::Relaxed);
+}
+
+/// Total launches dispatched through the occupancy wg rule so far.
+pub fn gemv_wg_occupancy_launch_count() -> usize {
+    WG_OCCUPANCY_LAUNCHES.load(std::sync::atomic::Ordering::Relaxed)
+}
+
+/// The measured occupancy rule (Bench 996 cell 4, m5ultra): workgroup size
+/// by row count. m=5120/6144 (80 wgs at 256) → 64 threads (320 wgs: ffn_down
+/// 1.45×, ssm_out/attn_output 1.34×, attn_gate 1.22×); m ≥ 8192 → 128
+/// threads (attn_qkv 1.12×, ffn_gate/up 1.09×, lm_head flat); smaller m
+/// keeps 256 — the sweep did not test it, and the latency-floor tiny shapes
+/// are unchanged by construction only under the tested geometry.
+fn occupancy_wg_for(m: u32) -> u32 {
+    match m {
+        x if x >= 8192 => 128,
+        x if x >= 4096 => 64,
+        _ => 256,
+    }
+}
+
 /// Group size for ternary weights (matches katgpt-types::GROUP_SIZE).
 pub(crate) const TERNARY_GROUP_SIZE: u32 = 128;
 
@@ -2426,13 +2490,48 @@ impl GemvTernaryCubeCL {
         // PASS). Dispatched only when the runtime toggle is on AND the handle
         // carries the f16 buffer; the counter is the vacuous guard for the
         // e2e A/B (outputs are bit-identical, so timing alone cannot prove
-        // the toggle reached the kernel).
+        // the toggle reached the kernel). The occupancy wg rule below rides
+        // BOTH arms — see its block for the dispatch-order law.
+        // Issue 1114 (m5ultra Bench 996 cell 4): the occupancy wg rule — the
+        // m=5120/6144 shapes dispatch only 80 workgroups at the 256 default
+        // and the per-shape bandwidth is monotone in workgroup count. The
+        // rule arms 64-thread workgroups for the m=5120/6144 class (80→320
+        // wgs: ffn_down 1.45×, ssm_out/attn_output 1.34×, attn_gate 1.22×
+        // per-launch) and 128 for m ≥ 8192 (attn_qkv 1.12×, ffn_gate/up
+        // 1.09×, lm_head flat). Dispatch-only: BOTH the plain and the
+        // f16-scale kernels address planes globally, so the row→plane mapping
+        // and per-row fold order are BYTE-IDENTICAL at every wg size (cell 4
+        // G1 bit-identity PASS ×3). The rule rides BOTH arms below — the f16
+        // lane is the shipping decode dispatch (default-ON since Bench 771),
+        // so a plain-path-only rule would never reach it (the Bench 996
+        // vacuous-guard catch).
+        // OPT-IN (default OFF) until its e2e GOAT: env
+        // `RIIR_GEMV_WG_OCCUPANCY` (exact "1"/"on"/"true") arms it; the
+        // counter is the vacuous guard, as the f16 lane's.
+        let occupancy_wg = if wg_occupancy_enabled() {
+            WG_OCCUPANCY_LAUNCHES.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            occupancy_wg_for(handle.m as u32)
+        } else {
+            256
+        };
         if let Some(scale_f16) = handle
             .group_scale_f16
             .as_ref()
             .filter(|_| f16_scale_enabled())
         {
             F16_SCALE_LAUNCHES.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            if occupancy_wg != 256 {
+                return unsafe {
+                    crate::gemv_ternary_scale_ab_cubecl::GemvTernaryScaleAbCubeCL::launch_f16scale_wg::<R>(
+                        client,
+                        handle,
+                        scale_f16,
+                        input_handle,
+                        output_handle,
+                        occupancy_wg,
+                    )
+                };
+            }
             return unsafe {
                 crate::gemv_ternary_scale_ab_cubecl::GemvTernaryScaleAbCubeCL::launch_f16scale::<R>(
                     client,
@@ -2452,6 +2551,17 @@ impl GemvTernaryCubeCL {
         // (Issue 607 G5a) and superseded by rowtiled on Metal (Issue 613
         // T1-follow-up). It remains the correctness reference + opt-in
         // escape hatch via `launch_packed`.
+        if occupancy_wg != 256 {
+            return unsafe {
+                Self::launch_rowtiled8_wg::<R>(
+                    client,
+                    handle,
+                    input_handle,
+                    output_handle,
+                    occupancy_wg,
+                )
+            };
+        }
         unsafe {
             Self::launch_rowtiled8::<R>(client, handle, input_handle, output_handle);
         }
@@ -2569,10 +2679,47 @@ impl GemvTernaryCubeCL {
         input_handle: Handle,
         output_handle: Handle,
     ) {
-        let wg_size = 256u32;
+        unsafe {
+            Self::launch_rowtiled8_wg::<R>(client, handle, input_handle, output_handle, 256);
+        }
+    }
+
+    /// [`Self::launch_rowtiled8`] with an explicit workgroup size — the
+    /// Issue-1114 occupancy lever, measured on the m5ultra: the m=5120
+    /// shapes dispatch only m/64 = 80 workgroups at the 256 default, and the
+    /// measured per-shape bandwidth is monotone in workgroup count (lm_head
+    /// 3880 wgs → 496 GB/s vs ffn_down 80 wgs → 271). The kernel is
+    /// workgroup-size-agnostic by construction — planes are addressed
+    /// globally (`plane_id = ABSOLUTE_POS_X / PLANE_DIM`), summed within a
+    /// plane via `plane_sum`, no cross-plane state — so grouping 2 planes
+    /// per workgroup (64 threads) instead of 8 multiplies the workgroup
+    /// count by 4 with a BYTE-IDENTICAL row→plane mapping and per-row
+    /// summation order. Dispatch-only: G1 bit-identity is a construction
+    /// property, asserted (not argued) by the harness sweep.
+    ///
+    /// `wg_size` must be a positive multiple of the 32-lane plane — anything
+    /// else is a loud assert, never a silent remap.
+    ///
+    /// # Safety
+    ///
+    /// Same requirements as [`Self::launch_rowtiled8`]: buffer handles must
+    /// be valid device allocations of at least the lengths derived from
+    /// `handle`'s shape; the caller must ensure no other queue operation
+    /// aliases them while the kernel is in flight.
+    pub unsafe fn launch_rowtiled8_wg<R: Runtime>(
+        client: &ComputeClient<R>,
+        handle: &TernaryHandle,
+        input_handle: Handle,
+        output_handle: Handle,
+        wg_size: u32,
+    ) {
+        assert!(
+            wg_size >= 32 && wg_size.is_multiple_of(32),
+            "wg_size must be a positive multiple of the 32-lane plane"
+        );
         let plane_size = 32u32;
-        let planes_per_wg = wg_size / plane_size; // 8
-        let rows_per_wg = planes_per_wg * TERNARY_ROWS_PER_PLANE_8; // 64
+        let planes_per_wg = wg_size / plane_size;
+        let rows_per_wg = planes_per_wg * TERNARY_ROWS_PER_PLANE_8;
 
         let m = handle.m as u32;
         let n = handle.n as u32;

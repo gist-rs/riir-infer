@@ -851,10 +851,44 @@ impl GemvTernaryScaleAbCubeCL {
         input_handle: Handle,
         output_handle: Handle,
     ) {
-        let wg_size = 256u32;
+        unsafe {
+            Self::launch_f16scale_wg::<R>(
+                client,
+                handle,
+                scale_f16,
+                input_handle,
+                output_handle,
+                256,
+            );
+        }
+    }
+
+    /// [`Self::launch_f16scale`] with an explicit workgroup size — the
+    /// Issue-1114 occupancy lever for the f16 lane (the shipping decode path
+    /// dispatches THIS kernel, default-ON since Bench 771). The f16 kernel is
+    /// plane-global and workgroup-size-agnostic exactly like its plain
+    /// sibling (`plane_id = ABSOLUTE_POS_X / PLANE_DIM`, `row_base =
+    /// plane_id · 8`, `plane_sum` reduction) — the wg remap is dispatch-only
+    /// and byte-identical. Same `wg_size` contract as
+    /// `GemvTernaryCubeCL::launch_rowtiled8_wg`.
+    ///
+    /// # Safety
+    /// Same requirements as [`Self::launch_f16scale`].
+    pub unsafe fn launch_f16scale_wg<R: Runtime>(
+        client: &ComputeClient<R>,
+        handle: &TernaryHandle,
+        scale_f16: &Handle,
+        input_handle: Handle,
+        output_handle: Handle,
+        wg_size: u32,
+    ) {
+        assert!(
+            wg_size >= 32 && wg_size.is_multiple_of(32),
+            "wg_size must be a positive multiple of the 32-lane plane"
+        );
         let plane_size = 32u32;
-        let planes_per_wg = wg_size / plane_size; // 8
-        let rows_per_wg = planes_per_wg * TERNARY_ROWS_PER_PLANE_8; // 64
+        let planes_per_wg = wg_size / plane_size;
+        let rows_per_wg = planes_per_wg * TERNARY_ROWS_PER_PLANE_8;
 
         let m = handle.m as u32;
         let n = handle.n as u32;

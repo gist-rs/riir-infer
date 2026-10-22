@@ -362,8 +362,8 @@ pub use gemv_ternary_block_contiguous_cubecl::{
 #[cfg(feature = "ternary_gemv")]
 pub use gemv_ternary_cubecl::{
     GemvTernaryCubeCL, GpuTernaryMatvec, InterleavedTernaryHandle, TernaryHandle,
-    TernaryTritHandle, gemv_f16_scale_launch_count, prepare_block_contiguous_u32,
-    set_gemv_use_f16_scale,
+    TernaryTritHandle, gemv_f16_scale_launch_count, gemv_wg_occupancy_launch_count,
+    prepare_block_contiguous_u32, set_gemv_use_f16_scale, set_gemv_wg_occupancy,
 };
 #[cfg(all(feature = "ternary_gemv_cuda_raw", not(target_os = "macos")))]
 pub use gemv_ternary_cuda_raw::{
