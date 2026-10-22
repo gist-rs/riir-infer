@@ -1261,16 +1261,18 @@ fn mma_mirror_impl(
     allow_packed_route: bool,
 ) -> Option<Arc<crate::prefill_cuda_mma::CudaMmaWeightCache>> {
     w.cuda_mma_cache
-        .get_or_init(|| match build_weight_cache(client, stream, w, allow_packed_route) {
-            Ok(c) => Some(Arc::new(c)),
-            Err(e) => {
-                // The failure is cached (get_or_init) — print the one lossy
-                // discard the old `.ok()` hid; a poisoned CUDA context reads
-                // here first (every upload fails with the sticky error).
-                eprintln!("[734-arm8] weight-mirror build failed: {e}");
-                None
-            }
-        })
+        .get_or_init(
+            || match build_weight_cache(client, stream, w, allow_packed_route) {
+                Ok(c) => Some(Arc::new(c)),
+                Err(e) => {
+                    // The failure is cached (get_or_init) — print the one lossy
+                    // discard the old `.ok()` hid; a poisoned CUDA context reads
+                    // here first (every upload fails with the sticky error).
+                    eprintln!("[734-arm8] weight-mirror build failed: {e}");
+                    None
+                }
+            },
+        )
         .clone()
 }
 
@@ -2708,7 +2710,10 @@ fn whole_prefill_inner(
                 let _ = stream.synchronize();
                 stages.borrow_mut().rms += t.elapsed().as_micros();
             }
-            r
+            // Stage-naming law (issue 1112): a sticky CUDA error surfaces at the
+            // FIRST launch that returns it — every unnamed launch here once hid
+            // a whole-prefill crash behind an unattributable string.
+            r.map_err(|e| format!("rms/{rows}x{dim}: {e}"))
         };
         // quantize + GEMM pair (one quantize per distinct input buffer use).
         // `quantize=false` (gemm_pre): the input was quantized by the
@@ -2722,7 +2727,8 @@ fn whole_prefill_inner(
                          out: &CudaSlice<f32>,
                          m: usize,
                          n_in: usize,
-                         quantize: bool|
+                         quantize: bool,
+                         tag: &str|
          -> Result<(), String> {
             let t = std::time::Instant::now();
             let r = (|| {
@@ -2732,12 +2738,12 @@ fn whole_prefill_inner(
                     stack
                         .mma
                         .launch_prefill_quantize(stream, input, scratch, n_in, p)
-                        .map_err(|e| e.to_string())?;
+                        .map_err(|e| format!("gemm/{tag}/quantize: {e}"))?;
                 }
                 crate::prefill_cuda_mma::launch_prefill_gemm_cached(
                     &stack.mma, stream, w, scratch, out, m, n_in, p,
                 )
-                .map_err(|e| e.to_string())
+                .map_err(|e| format!("gemm/{tag}: {e}"))
             })();
             if stage_sync {
                 let _ = stream.synchronize();
@@ -2749,16 +2755,19 @@ fn whole_prefill_inner(
                     input: &CudaSlice<f32>,
                     out: &CudaSlice<f32>,
                     m: usize,
-                    n_in: usize|
-         -> Result<(), String> { gemm_pair(w, input, out, m, n_in, true) };
+                    n_in: usize,
+                    tag: &str|
+         -> Result<(), String> { gemm_pair(w, input, out, m, n_in, true, tag) };
         // GEMM on an input already packed in the scratch by the preceding
         // gemm of the same group (same input buffer + same n_in).
-        let gemm_pre = |w: &Arc<crate::prefill_cuda_mma::CudaMmaWeightCache>,
-                        input: &CudaSlice<f32>,
-                        out: &CudaSlice<f32>,
-                        m: usize,
-                        n_in: usize|
-         -> Result<(), String> { gemm_pair(w, input, out, m, n_in, false) };
+        let gemm_pre =
+            |w: &Arc<crate::prefill_cuda_mma::CudaMmaWeightCache>,
+             input: &CudaSlice<f32>,
+             out: &CudaSlice<f32>,
+             m: usize,
+             n_in: usize,
+             tag: &str|
+             -> Result<(), String> { gemm_pair(w, input, out, m, n_in, false, tag) };
         // Plan 614 / Issue 026 — the shared DQ fake-quant handle (lazily
         // compiled ONCE per process; a compile failure is a hard error at the
         // injection site — the instrument must never silently no-op).
@@ -2792,11 +2801,11 @@ fn whole_prefill_inner(
                 stack
                     .mma
                     .launch_prefill_quantize(stream, input, scratch, n_in, p)
-                    .map_err(|e| e.to_string())?;
+                    .map_err(|e| format!("gemm/gate_up/quantize: {e}"))?;
                 crate::prefill_cuda_mma::launch_prefill_gemm_pair_cached(
                     &stack.mma, stream, w0, w1, scratch, out0, out1, m, n_in, p,
                 )
-                .map_err(|e| e.to_string())
+                .map_err(|e| format!("gemm/gate_up: {e}"))
             })();
             if stage_sync {
                 let _ = stream.synchronize();
@@ -2859,17 +2868,18 @@ fn whole_prefill_inner(
                         input: &CudaSlice<f32>,
                         out: &CudaSlice<f32>,
                         m: usize,
-                        n_in: usize|
+                        n_in: usize,
+                        tag: &str|
          -> Result<(), String> {
             let t = std::time::Instant::now();
             let r = (|| {
-                quantize_rot(input, n_in)?;
+                quantize_rot(input, n_in).map_err(|e| format!("gemm/{tag}/rot: {e}"))?;
                 // Fused or unfused, the scratch now holds the ROTATED q8
                 // bytes (quantize_rot dispatched the right arm).
                 crate::prefill_cuda_mma::launch_prefill_gemm_cached(
                     &stack.mma, stream, w, scratch, out, m, n_in, p,
                 )
-                .map_err(|e| e.to_string())
+                .map_err(|e| format!("gemm/{tag}: {e}"))
             })();
             if stage_sync {
                 let _ = stream.synchronize();
@@ -2884,17 +2894,18 @@ fn whole_prefill_inner(
                             input: &CudaSlice<f32>,
                             out: &CudaSlice<f32>,
                             m: usize,
-                            n_in: usize|
+                            n_in: usize,
+                            tag: &str|
          -> Result<(), String> {
             let t = std::time::Instant::now();
             let r = (|| {
                 if !quantize_dedup_enabled() {
-                    quantize_rot(input, n_in)?;
+                    quantize_rot(input, n_in).map_err(|e| format!("gemm/{tag}/rot: {e}"))?;
                 }
                 crate::prefill_cuda_mma::launch_prefill_gemm_cached(
                     &stack.mma, stream, w, scratch, out, m, n_in, p,
                 )
-                .map_err(|e| e.to_string())
+                .map_err(|e| format!("gemm/{tag}: {e}"))
             })();
             if stage_sync {
                 let _ = stream.synchronize();
@@ -2914,11 +2925,11 @@ fn whole_prefill_inner(
          -> Result<(), String> {
             let t = std::time::Instant::now();
             let r = (|| {
-                quantize_rot(input, n_in)?;
+                quantize_rot(input, n_in).map_err(|e| format!("gemm/gate_up/rot: {e}"))?;
                 crate::prefill_cuda_mma::launch_prefill_gemm_pair_cached(
                     &stack.mma, stream, w0, w1, scratch, out0, out1, m, n_in, p,
                 )
-                .map_err(|e| e.to_string())
+                .map_err(|e| format!("gemm/gate_up: {e}"))
             })();
             if stage_sync {
                 let _ = stream.synchronize();
@@ -2959,7 +2970,8 @@ fn whole_prefill_inner(
             unsafe {
                 stack
                     .ffn
-                    .launch_swiglu(stream, se, sr, gate_b, up_b, hid_b, p * mlp)?;
+                    .launch_swiglu(stream, se, sr, gate_b, up_b, hid_b, p * mlp)
+                    .map_err(|e| format!("ffn/swiglu: {e}"))?;
             }
             // C0.5 hybrid: the WIDE hid row (17408 f32 = 68 KB smem → 1
             // block/SM, ~17% occupancy — measured −3.5% pp2048 as
@@ -2977,7 +2989,7 @@ fn whole_prefill_inner(
                         mlp,
                         rot0.block_size,
                     )
-                    .map_err(|e| e.to_string())?;
+                    .map_err(|e| format!("ffn/rot_out: {e}"))?;
             }
             // Plan 614 site 3 (prefill): fake-quant hid_b AFTER the in-place
             // fold rotation, before the down GEMM's quantize (rotated basis).
@@ -2987,9 +2999,12 @@ fn whole_prefill_inner(
                     .launch_dq_fakequant(stream, hid_b, mlp, p, crate::dq_fakequant::current_grid())
                     .map_err(|e| e.to_string())?;
             }
-            gemm(down_c, hid_b, ffnout_b, n, mlp)?;
+            gemm(down_c, hid_b, ffnout_b, n, mlp, "down")?;
             unsafe {
-                stack.ffn.launch_residual(stream, x, ffnout_b, x, p * n)?;
+                stack
+                    .ffn
+                    .launch_residual(stream, x, ffnout_b, x, p * n)
+                    .map_err(|e| format!("ffn/residual: {e}"))?;
             }
             Ok(())
         };
@@ -3047,19 +3062,19 @@ fn whole_prefill_inner(
                                 crate::dq_fakequant::current_grid(),
                             )
                             .map_err(|e| e.to_string())?;
-                        gemm_rot(&qkv_c, normx, qkv_b, qkv_dim, n)?;
-                        gemm_pre_rot(&z_c, normx, z_b, v_dim, n)?;
+                        gemm_rot(&qkv_c, normx, qkv_b, qkv_dim, n, "qkv")?;
+                        gemm_pre_rot(&z_c, normx, z_b, v_dim, n, "z")?;
                     } else {
-                        gemm_rot(&qkv_c, normx, qkv_b, qkv_dim, n)?;
-                        gemm_pre_rot(&z_c, normx, z_b, v_dim, n)?;
+                        gemm_rot(&qkv_c, normx, qkv_b, qkv_dim, n, "qkv")?;
+                        gemm_pre_rot(&z_c, normx, z_b, v_dim, n, "z")?;
                         rot0.kernels
                             .gemm_dense_ab_batched(stream, normx, da, db, a_b, b_b, p, n_v, n)
                             .map_err(|e| e.to_string())?;
                     }
                     #[cfg(not(feature = "dq_phase_bench"))]
                     {
-                        gemm_rot(&qkv_c, normx, qkv_b, qkv_dim, n)?;
-                        gemm_pre_rot(&z_c, normx, z_b, v_dim, n)?;
+                        gemm_rot(&qkv_c, normx, qkv_b, qkv_dim, n, "qkv")?;
+                        gemm_pre_rot(&z_c, normx, z_b, v_dim, n, "z")?;
                         rot0.kernels
                             .gemm_dense_ab_batched(stream, normx, da, db, a_b, b_b, p, n_v, n)
                             .map_err(|e| e.to_string())?;
@@ -3067,10 +3082,10 @@ fn whole_prefill_inner(
                 } else {
                     let a_c = mma_mirror(client, stream, &lw.in_proj_a).ok_or("a mirror")?;
                     let b_c = mma_mirror(client, stream, &lw.in_proj_b).ok_or("b mirror")?;
-                    gemm(&qkv_c, normx, qkv_b, qkv_dim, n)?;
-                    gemm_pre(&z_c, normx, z_b, v_dim, n)?;
-                    gemm_pre(&a_c, normx, a_b, n_v, n)?;
-                    gemm_pre(&b_c, normx, b_b, n_v, n)?;
+                    gemm(&qkv_c, normx, qkv_b, qkv_dim, n, "qkv")?;
+                    gemm_pre(&z_c, normx, z_b, v_dim, n, "z")?;
+                    gemm_pre(&a_c, normx, a_b, n_v, n, "a")?;
+                    gemm_pre(&b_c, normx, b_b, n_v, n, "b")?;
                 }
                 let (Some(conv_state), Some(dn_state)) = (
                     states.conv_states[li].as_ref(),
@@ -3083,20 +3098,22 @@ fn whole_prefill_inner(
                     // accumulate (gated; the `Instant::now()` pairs stay
                     // unconditional — ns-scale, no control-flow change).
                     let mut t_sub = std::time::Instant::now();
-                    stack.dn.launch_conv1d(
-                        stream,
-                        cf,
-                        ce,
-                        cd,
-                        qkv_b,
-                        qkv_conv,
-                        &lw3.conv1d_weight,
-                        conv_state,
-                        p,
-                        conv_dim,
-                        ks,
-                    )
-                    .map_err(|e| format!("gdn/conv: {e}"))?;
+                    stack
+                        .dn
+                        .launch_conv1d(
+                            stream,
+                            cf,
+                            ce,
+                            cd,
+                            qkv_b,
+                            qkv_conv,
+                            &lw3.conv1d_weight,
+                            conv_state,
+                            p,
+                            conv_dim,
+                            ks,
+                        )
+                        .map_err(|e| format!("gdn/conv: {e}"))?;
                     if gdn_sub_sync {
                         let _ = stream.synchronize();
                         gdn_sub.borrow_mut().conv += t_sub.elapsed().as_micros();
@@ -3111,38 +3128,42 @@ fn whole_prefill_inner(
                         gdn_sub.borrow_mut().carry += t_sub.elapsed().as_micros();
                     }
                     t_sub = std::time::Instant::now();
-                    stack.dn.launch_beta_decay(
-                        stream,
-                        bl,
-                        be,
-                        bd,
-                        a_b,
-                        b_b,
-                        &lw3.a_log,
-                        &lw3.dt_bias,
-                        beta_b,
-                        decay_b,
-                        n_v,
-                        p * n_v,
-                    )
-                    .map_err(|e| format!("gdn/beta: {e}"))?;
+                    stack
+                        .dn
+                        .launch_beta_decay(
+                            stream,
+                            bl,
+                            be,
+                            bd,
+                            a_b,
+                            b_b,
+                            &lw3.a_log,
+                            &lw3.dt_bias,
+                            beta_b,
+                            decay_b,
+                            n_v,
+                            p * n_v,
+                        )
+                        .map_err(|e| format!("gdn/beta: {e}"))?;
                     if gdn_sub_sync {
                         let _ = stream.synchronize();
                         gdn_sub.borrow_mut().beta += t_sub.elapsed().as_micros();
                     }
                     t_sub = std::time::Instant::now();
-                    stack.dn.launch_expand_l2(
-                        stream,
-                        ea,
-                        ei,
-                        qkv_conv,
-                        qkvx_b,
-                        n_k,
-                        n_v,
-                        hd,
-                        p * 3 * v_dim,
-                    )
-                    .map_err(|e| format!("gdn/expand: {e}"))?;
+                    stack
+                        .dn
+                        .launch_expand_l2(
+                            stream,
+                            ea,
+                            ei,
+                            qkv_conv,
+                            qkvx_b,
+                            n_k,
+                            n_v,
+                            hd,
+                            p * 3 * v_dim,
+                        )
+                        .map_err(|e| format!("gdn/expand: {e}"))?;
                     if gdn_sub_sync {
                         let _ = stream.synchronize();
                         gdn_sub.borrow_mut().expand += t_sub.elapsed().as_micros();
@@ -3204,11 +3225,13 @@ fn whole_prefill_inner(
                         )
                         .map_err(|e| format!("gdn/rec_l8: {e}"))?;
                     } else {
-                        stack.dn.launch_recurrence(
-                            stream, rd, ru, rp, rsc, qkvx_b, beta_b, decay_b, dn_state, rec_b, hd,
-                            n_v, p, v_dim,
-                        )
-                        .map_err(|e| format!("gdn/rec: {e}"))?;
+                        stack
+                            .dn
+                            .launch_recurrence(
+                                stream, rd, ru, rp, rsc, qkvx_b, beta_b, decay_b, dn_state, rec_b,
+                                hd, n_v, p, v_dim,
+                            )
+                            .map_err(|e| format!("gdn/rec: {e}"))?;
                     }
                     if gdn_sub_sync {
                         let _ = stream.synchronize();
@@ -3216,19 +3239,21 @@ fn whole_prefill_inner(
                     }
                     t_sub = std::time::Instant::now();
                     // Per-head norm, in-place (same-index read/write — safe).
-                    stack.ffn.launch_rmsnorm(
-                        stream,
-                        ra,
-                        rm,
-                        rs,
-                        rec_b,
-                        &lw3.linear_norm,
-                        rec_b,
-                        p * n_v,
-                        hd,
-                        eps,
-                    )
-                    .map_err(|e| format!("gdn/lnorm: {e}"))?;
+                    stack
+                        .ffn
+                        .launch_rmsnorm(
+                            stream,
+                            ra,
+                            rm,
+                            rs,
+                            rec_b,
+                            &lw3.linear_norm,
+                            rec_b,
+                            p * n_v,
+                            hd,
+                            eps,
+                        )
+                        .map_err(|e| format!("gdn/lnorm: {e}"))?;
                     if gdn_sub_sync {
                         let _ = stream.synchronize();
                         gdn_sub.borrow_mut().lnorm += t_sub.elapsed().as_micros();
@@ -3298,7 +3323,7 @@ fn whole_prefill_inner(
                             crate::prefill_cuda_mma::launch_prefill_gemm_cached(
                                 &stack.mma, stream, &out_c, scratch, tmp_b, n, v_dim, p,
                             )
-                            .map_err(|e| e.to_string())?;
+                            .map_err(|e| format!("gemm/out: {e}"))?;
                         } else if let Some(pt) = permute_tmp {
                             // Unfused kill-switch chain (C0).
                             rot0.kernels
@@ -3322,18 +3347,21 @@ fn whole_prefill_inner(
                                     rot0.block_size,
                                 )
                                 .map_err(|e| e.to_string())?;
-                            gemm(&out_c, pt, tmp_b, n, v_dim)?;
+                            gemm(&out_c, pt, tmp_b, n, v_dim, "out")?;
                         } else {
                             return Err("folded gdn-out: permute staging unavailable".into());
                         }
                     } else {
-                        gemm_rot(&out_c, rec_b, tmp_b, n, v_dim)?;
+                        gemm_rot(&out_c, rec_b, tmp_b, n, v_dim, "out")?;
                     }
                 } else {
-                    gemm(&out_c, rec_b, tmp_b, n, v_dim)?;
+                    gemm(&out_c, rec_b, tmp_b, n, v_dim, "out")?;
                 }
                 unsafe {
-                    stack.ffn.launch_residual(stream, x, tmp_b, x, p * n)?;
+                    stack
+                        .ffn
+                        .launch_residual(stream, x, tmp_b, x, p * n)
+                        .map_err(|e| format!("gdn/out_residual: {e}"))?;
                 }
             } else {
                 // Attention block.
@@ -3367,11 +3395,11 @@ fn whole_prefill_inner(
                 // attention core (RoPE, qk-norm, the kernel's gate) stays
                 // primal.
                 if rotation.is_some() {
-                    gemm_rot(&wq_c, normx, qg_b, 2 * qa, n)?;
-                    gemm_pre_rot(&wkv_c, normx, kv_b, 2 * kvd, n)?;
+                    gemm_rot(&wq_c, normx, qg_b, 2 * qa, n, "wq")?;
+                    gemm_pre_rot(&wkv_c, normx, kv_b, 2 * kvd, n, "wkv")?;
                 } else {
-                    gemm(&wq_c, normx, qg_b, 2 * qa, n)?;
-                    gemm_pre(&wkv_c, normx, kv_b, 2 * kvd, n)?;
+                    gemm(&wq_c, normx, qg_b, 2 * qa, n, "wq")?;
+                    gemm_pre(&wkv_c, normx, kv_b, 2 * kvd, n, "wkv")?;
                 }
                 let (Some(q_norm), Some(k_norm)) =
                     (lw3.attn_q_norm.as_ref(), lw3.attn_k_norm.as_ref())
@@ -3391,84 +3419,82 @@ fn whole_prefill_inner(
                 unsafe {
                     stack
                         .at
-                        .launch_split_qg(stream, qg_b, q_b, agate_b, ahd, n_head, p)?;
-                    stack.at.launch_split_kv(stream, kv_b, k_b, v_b, kvd, p)?;
+                        .launch_split_qg(stream, qg_b, q_b, agate_b, ahd, n_head, p)
+                        .map_err(|e| format!("attn/split_qg: {e}"))?;
+                    stack
+                        .at
+                        .launch_split_kv(stream, kv_b, k_b, v_b, kvd, p)
+                        .map_err(|e| format!("attn/split_kv: {e}"))?;
                     // Q/K per-head norms, in-place (2 calls replicate the fused
                     // kernel's per-row math bit-exactly).
-                    stack.ffn.launch_rmsnorm(
-                        stream,
-                        ra,
-                        rm,
-                        rs,
-                        q_b,
-                        q_norm,
-                        q_b,
-                        p * n_head,
-                        ahd,
-                        eps,
-                    )?;
-                    stack.ffn.launch_rmsnorm(
-                        stream,
-                        ra,
-                        rm,
-                        rs,
-                        k_b,
-                        k_norm,
-                        k_b,
-                        p * n_kv,
-                        ahd,
-                        eps,
-                    )?;
+                    stack
+                        .ffn
+                        .launch_rmsnorm(stream, ra, rm, rs, q_b, q_norm, q_b, p * n_head, ahd, eps)
+                        .map_err(|e| format!("attn/qnorm: {e}"))?;
+                    stack
+                        .ffn
+                        .launch_rmsnorm(stream, ra, rm, rs, k_b, k_norm, k_b, p * n_kv, ahd, eps)
+                        .map_err(|e| format!("attn/knorm: {e}"))?;
                     if gv {
-                        stack.at.launch_rope_devpos(
-                            stream,
-                            rl,
-                            re,
-                            rsc2,
-                            rr,
-                            q_b,
-                            k_b,
-                            rotary_dim / 2,
-                            cfg.rope_theta,
-                            ahd,
-                            n_head,
-                            n_kv,
-                            p,
-                            pos_dev_ref.expect("gv implies pos_dev"),
-                        )?;
-                    } else {
-                        stack.at.launch_rope(
-                            stream,
-                            rl,
-                            re,
-                            rsc2,
-                            rr,
-                            q_b,
-                            k_b,
-                            rotary_dim / 2,
-                            cfg.rope_theta,
-                            ahd,
-                            n_head,
-                            n_kv,
-                            p,
-                            base_pos,
-                        )?;
-                    }
-                    if gv {
-                        stack.at.launch_kv_fill_devpos(
-                            stream,
-                            k_b,
-                            v_b,
-                            kcache,
-                            vcache,
-                            kvd,
-                            p,
-                            pos_dev_ref.expect("gv implies pos_dev"),
-                        )?;
+                        stack
+                            .at
+                            .launch_rope_devpos(
+                                stream,
+                                rl,
+                                re,
+                                rsc2,
+                                rr,
+                                q_b,
+                                k_b,
+                                rotary_dim / 2,
+                                cfg.rope_theta,
+                                ahd,
+                                n_head,
+                                n_kv,
+                                p,
+                                pos_dev_ref.expect("gv implies pos_dev"),
+                            )
+                            .map_err(|e| format!("attn/rope_devpos: {e}"))?;
                     } else {
                         stack
                             .at
-                            .launch_kv_fill(stream, k_b, v_b, kcache, vcache, kvd, p, base_pos)?;
+                            .launch_rope(
+                                stream,
+                                rl,
+                                re,
+                                rsc2,
+                                rr,
+                                q_b,
+                                k_b,
+                                rotary_dim / 2,
+                                cfg.rope_theta,
+                                ahd,
+                                n_head,
+                                n_kv,
+                                p,
+                                base_pos,
+                            )
+                            .map_err(|e| format!("attn/rope: {e}"))?;
+                    }
+                    if gv {
+                        stack
+                            .at
+                            .launch_kv_fill_devpos(
+                                stream,
+                                k_b,
+                                v_b,
+                                kcache,
+                                vcache,
+                                kvd,
+                                p,
+                                pos_dev_ref.expect("gv implies pos_dev"),
+                            )
+                            .map_err(|e| format!("attn/kv_fill_devpos: {e}"))?;
+                    } else {
+                        stack
+                            .at
+                            .launch_kv_fill(stream, k_b, v_b, kcache, vcache, kvd, p, base_pos)
+                            .map_err(|e| format!("attn/kv_fill: {e}"))?;
                     }
                     // Plan 614 / Issue 033 — KV-STORE axis (prefill half):
                     // round this chunk's just-written cache rows in place to
@@ -3531,22 +3557,26 @@ fn whole_prefill_inner(
                                     .launch_kv_f32_to_f16_devpos(
                                         stream, kc, vc, kh, vh, p, rows, n_kv, pos,
                                     )
+                                    .map_err(|e| format!("attn/fa_convert_devpos: {e}"))
                                     .and_then(|_| {
-                                        stack.at.launch_attention_fa_devpos(
-                                            stream,
-                                            q_b,
-                                            kh,
-                                            vh,
-                                            agate_b,
-                                            attn_out_b,
-                                            ahd,
-                                            n_head,
-                                            n_kv,
-                                            p,
-                                            pos,
-                                            si_layer.as_ref(),
-                                            kb_layer.as_ref(),
-                                        )
+                                        stack
+                                            .at
+                                            .launch_attention_fa_devpos(
+                                                stream,
+                                                q_b,
+                                                kh,
+                                                vh,
+                                                agate_b,
+                                                attn_out_b,
+                                                ahd,
+                                                n_head,
+                                                n_kv,
+                                                p,
+                                                pos,
+                                                si_layer.as_ref(),
+                                                kb_layer.as_ref(),
+                                            )
+                                            .map_err(|e| format!("attn/fa_devpos: {e}"))
                                     })
                             } else {
                                 stack
@@ -3561,22 +3591,26 @@ fn whole_prefill_inner(
                                         rows,
                                         n_kv,
                                     )
+                                    .map_err(|e| format!("attn/fa_convert: {e}"))
                                     .and_then(|_| {
-                                        stack.at.launch_attention_fa(
-                                            stream,
-                                            q_b,
-                                            kh,
-                                            vh,
-                                            agate_b,
-                                            attn_out_b,
-                                            ahd,
-                                            n_head,
-                                            n_kv,
-                                            p,
-                                            base_pos,
-                                            si_layer.as_ref(),
-                                            kb_layer.as_ref(),
-                                        )
+                                        stack
+                                            .at
+                                            .launch_attention_fa(
+                                                stream,
+                                                q_b,
+                                                kh,
+                                                vh,
+                                                agate_b,
+                                                attn_out_b,
+                                                ahd,
+                                                n_head,
+                                                n_kv,
+                                                p,
+                                                base_pos,
+                                                si_layer.as_ref(),
+                                                kb_layer.as_ref(),
+                                            )
+                                            .map_err(|e| format!("attn/fa: {e}"))
                                     })
                             };
                             r?;
@@ -3770,10 +3804,29 @@ fn whole_prefill_inner(
                         // at every FA-unengaged posture (T1.0 row 7; the same
                         // per-layer narrowing as the FA arm).
                         let kb_layer = kb.as_ref().map(|a| a.window_for(li, n_head));
-                        stack.at.launch_attention(
-                            stream, ad, aa, ae, aph, ars, ai, q_b, kcache, vcache, agate_b,
-                            attn_out_b, ahd, n_head, n_kv, p, base_pos, kb_layer.as_ref(),
-                        )?;
+                        stack
+                            .at
+                            .launch_attention(
+                                stream,
+                                ad,
+                                aa,
+                                ae,
+                                aph,
+                                ars,
+                                ai,
+                                q_b,
+                                kcache,
+                                vcache,
+                                agate_b,
+                                attn_out_b,
+                                ahd,
+                                n_head,
+                                n_kv,
+                                p,
+                                base_pos,
+                                kb_layer.as_ref(),
+                            )
+                            .map_err(|e| format!("attn/core: {e}"))?;
                     }
                 }
                 stage_done!(attn);
@@ -3798,12 +3851,15 @@ fn whole_prefill_inner(
                         .map_err(|e| e.to_string())?;
                 }
                 if rotation.is_some() {
-                    gemm_rot(&wo_c, attn_out_b, aproj_b, n, qa)?;
+                    gemm_rot(&wo_c, attn_out_b, aproj_b, n, qa, "wo")?;
                 } else {
-                    gemm(&wo_c, attn_out_b, aproj_b, n, qa)?;
+                    gemm(&wo_c, attn_out_b, aproj_b, n, qa, "wo")?;
                 }
                 unsafe {
-                    stack.ffn.launch_residual(stream, x, aproj_b, x, p * n)?;
+                    stack
+                        .ffn
+                        .launch_residual(stream, x, aproj_b, x, p * n)
+                        .map_err(|e| format!("attn/out_residual: {e}"))?;
                 }
             }
 
@@ -4076,7 +4132,7 @@ fn whole_prefill_inner(
         if trace {
             eprintln!(
                 "[734-arm8] FALLTHROUGH: layer loop error: {}",
-                run_layers_result.as_ref().err().expect("err checked above")
+                run_layers_result.as_ref().expect_err("err checked above")
             );
         }
         if will_replay {
