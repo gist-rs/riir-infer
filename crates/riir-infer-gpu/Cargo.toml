@@ -251,6 +251,11 @@ cuda_graphs_forward = ["ternary_gemv_cuda_raw"]
 # INERT without a session (dummies pushed, flag 0, bit-identical); this feature
 # gates the session surface. OPT-IN — the Phase-7 GOAT is open.
 scale_invariant_attn = ["ternary_gemv_cuda_raw", "katgpt-core/scale_invariant_attn"]
+# Plan 622 — the TokenGate per-key-bias lane (the T1.5 feature, this crate's
+# copy: pure-local, no dep forwards — the kernel CAPABILITY stays ungated
+# `Option` code, the feature gates the SESSION surface + the lane's targets,
+# the same shape `scale_invariant_attn` gives the si hook). OPT-IN.
+tokengate = []
 # Row-parallel register-blocked recurrence arm (Issue 619 sibling).
 deltanet_recurrence_parallel = []
 # The dense DeltaNet forward surface (mirrors the engine gpu crate's feature
@@ -358,6 +363,27 @@ required-features = ["ternary_gemv_cuda_raw", "ternary_gemm_batched", "cubecl_ru
 [[test]]
 name = "plan622_keybias_fa_gate"
 required-features = ["ternary_gemv_cuda_raw", "ternary_gemm_batched", "cubecl_runtime"]
+
+# Plan 622 T1.3 — the CUDA MODEL-LEVEL kb walk over the synth Bonsai-2 GGUF:
+# incumbent vs flag-off vs zero-armed byte-identity, armed movement + run-twice
+# determinism, NaN-pad independence folded into the zero-armed arm, and the
+# per-layer window selectivity (bias on the DeltaNet layers' rows must be
+# inert — only the Attention layer's window is ever read). Rides the
+# whole-prefill CUDA arm, so the gate's feature set (chunked + batched
+# prefill) joins the row; the whole-file #![cfg] keeps non-CUDA hosts an
+# empty target. Executes on the 4090 lane.
+[[test]]
+name = "plan622_keybias_walk_cuda"
+required-features = ["tokengate", "ternary_gemv_cuda_raw", "ternary_gemm_batched", "cubecl_runtime", "ternary_deltanet_chunked_prefill", "ternary_attention_batched_prefill"]
+
+# Plan 622 T1.3 — the LEAGUE-model walk (the FA attention arm, T1.0 row 6, at
+# the real Bonsai-2 shapes: ahd 256, 24:4 GQA, graphs ON by default so the
+# arm flips are content flips replaying one capture). #[ignore]d — the 4090
+# runs it with --release -- --ignored and BONSAI_GGUF (default the sibling
+# riir-train data path). Same feature row as the synth walk.
+[[test]]
+name = "plan622_keybias_walk_league_cuda"
+required-features = ["tokengate", "ternary_gemv_cuda_raw", "ternary_gemm_batched", "cubecl_runtime", "ternary_deltanet_chunked_prefill", "ternary_attention_batched_prefill"]
 
 # riir-infer Issue 032 — G1 of the Metal folded (Bonsai-2) CubeCL prefill vs
 # the folded decode eager path, plus the pre-rotation pin (T5). The

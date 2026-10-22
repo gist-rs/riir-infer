@@ -1971,6 +1971,15 @@ fn whole_prefill_inner(
     let si = fwd.si_session_args();
     #[cfg(not(feature = "scale_invariant_attn"))]
     let si: Option<crate::cudarc_kernels::attention::SiDecodeArgs<'_>> = None;
+    // Plan 622 — the kb session rides the same shape: attached = the FA +
+    // canonical launchers get its device pointers (the per-layer window is
+    // narrowed at each launch site); absent (or the feature off) = the
+    // incumbent posture — the launchers push their struct-owned dummies and
+    // the kernel branch is dead.
+    #[cfg(feature = "tokengate")]
+    let kb = fwd.kb_session_args();
+    #[cfg(not(feature = "tokengate"))]
+    let kb: Option<crate::cudarc_kernels::attention::KeyBiasDecodeArgs<'_>> = None;
     if p == 0 || p > 4096 {
         return None;
     }
@@ -3495,6 +3504,11 @@ fn whole_prefill_inner(
                             // Plan 620 Phase D — this layer's si window (the
                             // decode-site pattern: slot = li * n_head + head).
                             let si_layer = si.as_ref().map(|a| a.window_for(li, n_head));
+                            // Plan 622 — this layer's kb window (the same
+                            // per-layer narrowing; the view borrows the
+                            // session's table, its device address is what a
+                            // captured graph bakes).
+                            let kb_layer = kb.as_ref().map(|a| a.window_for(li, n_head));
                             let r = if gv {
                                 let pos = pos_dev_ref.expect("gv implies pos_dev");
                                 stack
@@ -3516,7 +3530,7 @@ fn whole_prefill_inner(
                                             p,
                                             pos,
                                             si_layer.as_ref(),
-                                            None,
+                                            kb_layer.as_ref(),
                                         )
                                     })
                             } else {
@@ -3546,7 +3560,7 @@ fn whole_prefill_inner(
                                             p,
                                             base_pos,
                                             si_layer.as_ref(),
-                                            None,
+                                            kb_layer.as_ref(),
                                         )
                                     })
                             };
@@ -3737,9 +3751,13 @@ fn whole_prefill_inner(
                             // graph-verify requires the mq8 arm (ahd==256).
                             return Err("graph-verify requires mq8 (ahd==256)".into());
                         }
+                        // Plan 622 — the canonical arm keeps the bias reachable
+                        // at every FA-unengaged posture (T1.0 row 7; the same
+                        // per-layer narrowing as the FA arm).
+                        let kb_layer = kb.as_ref().map(|a| a.window_for(li, n_head));
                         stack.at.launch_attention(
                             stream, ad, aa, ae, aph, ars, ai, q_b, kcache, vcache, agate_b,
-                            attn_out_b, ahd, n_head, n_kv, p, base_pos, None,
+                            attn_out_b, ahd, n_head, n_kv, p, base_pos, kb_layer.as_ref(),
                         )?;
                     }
                 }

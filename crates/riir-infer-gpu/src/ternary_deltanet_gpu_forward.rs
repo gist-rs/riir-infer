@@ -2638,6 +2638,19 @@ pub struct TernaryDeltanetGpuForward {
         not(target_os = "macos")
     ))]
     si: Option<crate::si_gpu::SiGpuSession>,
+
+    /// Plan 622 T1.3 — the prefill lane's per-key-bias session (the
+    /// whole-prefill cudarc driver reads it at the FA + canonical attention
+    /// launches). Same attachment law as `si`: absent = the incumbent
+    /// posture; arm/disarm and table rewrites are content flips (no
+    /// recapture — the whole-prefill graph bakes the session's pointers at
+    /// capture); attach/detach invalidate the graphs.
+    #[cfg(all(
+        feature = "tokengate",
+        feature = "ternary_gemv_cuda_raw",
+        not(target_os = "macos")
+    ))]
+    kb: Option<crate::tokengate_gpu::KeyBiasGpuSession>,
 }
 
 #[cfg(feature = "cubecl_runtime")]
@@ -3601,6 +3614,14 @@ impl TernaryDeltanetGpuForward {
                 not(target_os = "macos")
             ))]
             si: None,
+            // Plan 622 — born detached (the incumbent posture; the walk gate
+            // and the Phase-2 serving lane attach explicitly).
+            #[cfg(all(
+                feature = "tokengate",
+                feature = "ternary_gemv_cuda_raw",
+                not(target_os = "macos")
+            ))]
+            kb: None,
         }
     }
 
@@ -3707,6 +3728,138 @@ impl TernaryDeltanetGpuForward {
         self.si
             .as_ref()
             .map(crate::si_gpu::SiGpuSession::decode_args)
+    }
+
+    // ── Plan 622 — the prefill lane's per-key-bias session ──
+    // The si session's twin: attach/detach invalidate the whole-prefill
+    // graphs (the baked pointers changed — the `set_lora` law); arm/disarm
+    // and table rewrites are content flips (the captured graph replays
+    // against the same pointers — the Issue-618 law). The synchronize after
+    // every device-visible transition mirrors the si block: the prefill
+    // stack launches on ITS OWN stream.
+
+    /// Attach the session for the whole-prefill lane. Any captured
+    /// whole-prefill graph is invalidated (the baked kb pointers changed).
+    /// The session arrives DISARMED (its own constructor law).
+    /// Consumer-posture cfg (the `prefill_invalidate_graphs` callee's
+    /// module gate) — at a leaner posture this API must not exist.
+    #[cfg(all(
+        feature = "tokengate",
+        feature = "ternary_gemv_cuda_raw",
+        feature = "ternary_gemm_batched",
+        feature = "cubecl_runtime",
+        not(target_os = "macos")
+    ))]
+    pub fn attach_kb(
+        &mut self,
+        stream: &std::sync::Arc<cudarc::driver::safe::CudaStream>,
+        session: crate::tokengate_gpu::KeyBiasGpuSession,
+    ) {
+        crate::prefill_cuda_full::prefill_invalidate_graphs();
+        let _ = stream.synchronize();
+        self.kb = Some(session);
+    }
+
+    /// Detach the session — the incumbent posture returns. Graph
+    /// invalidated (the dummies' pointers are what a fresh capture bakes).
+    /// Same consumer-posture gate as `attach_kb`.
+    #[cfg(all(
+        feature = "tokengate",
+        feature = "ternary_gemv_cuda_raw",
+        feature = "ternary_gemm_batched",
+        feature = "cubecl_runtime",
+        not(target_os = "macos")
+    ))]
+    pub fn detach_kb(&mut self) {
+        crate::prefill_cuda_full::prefill_invalidate_graphs();
+        self.kb = None;
+    }
+
+    /// Arm/disarm by CONTENT flip — a captured graph replays against the
+    /// same pointers (the Plan-620 no-recapture law). The synchronize makes
+    /// the flag write device-visible before the next prefill launches on the
+    /// stack's own stream.
+    ///
+    /// # Errors
+    /// No session attached, or the device write failed.
+    #[cfg(all(
+        feature = "tokengate",
+        feature = "ternary_gemv_cuda_raw",
+        not(target_os = "macos")
+    ))]
+    pub fn arm_kb(
+        &mut self,
+        stream: &std::sync::Arc<cudarc::driver::safe::CudaStream>,
+        on: bool,
+    ) -> Result<(), crate::CudarcKernelError> {
+        match &mut self.kb {
+            Some(session) => {
+                session.set_armed(stream, on)?;
+                let _ = stream.synchronize();
+                Ok(())
+            }
+            None => Err(crate::CudarcKernelError::InvalidArg(
+                "arm_kb: no key-bias session attached (prefill lane)".into(),
+            )),
+        }
+    }
+
+    /// Rewrite the attached session's table CONTENT (pointer-stable — a
+    /// captured graph's next replay reads the new values). The synchronize
+    /// mirrors `arm_kb`.
+    ///
+    /// # Errors
+    /// No session attached, or the device write failed.
+    #[cfg(all(
+        feature = "tokengate",
+        feature = "ternary_gemv_cuda_raw",
+        not(target_os = "macos")
+    ))]
+    pub fn write_kb_table(
+        &mut self,
+        stream: &std::sync::Arc<cudarc::driver::safe::CudaStream>,
+        host_table: &[f32],
+    ) -> Result<(), crate::CudarcKernelError> {
+        match &mut self.kb {
+            Some(session) => {
+                session.write_table(stream, host_table)?;
+                let _ = stream.synchronize();
+                Ok(())
+            }
+            None => Err(crate::CudarcKernelError::InvalidArg(
+                "write_kb_table: no key-bias session attached (prefill lane)".into(),
+            )),
+        }
+    }
+
+    /// The attached session's host-side armed mirror, if any.
+    #[cfg(all(
+        feature = "tokengate",
+        feature = "ternary_gemv_cuda_raw",
+        not(target_os = "macos")
+    ))]
+    pub fn kb_is_armed(&self) -> Option<bool> {
+        self.kb.as_ref().map(crate::tokengate_gpu::KeyBiasGpuSession::is_armed)
+    }
+
+    /// The kb launch args for the whole-prefill driver (the field is
+    /// private; `prefill_cuda_full` reaches it only through here). `None` =
+    /// the incumbent posture. Cfg'd to the CONSUMER's posture — at leaner
+    /// postures the whole-prefill module is compiled out and this would be
+    /// dead code.
+    #[cfg(all(
+        feature = "tokengate",
+        feature = "ternary_gemv_cuda_raw",
+        feature = "ternary_gemm_batched",
+        feature = "cubecl_runtime",
+        not(target_os = "macos")
+    ))]
+    pub(crate) fn kb_session_args(
+        &self,
+    ) -> Option<crate::cudarc_kernels::attention::KeyBiasDecodeArgs<'_>> {
+        self.kb
+            .as_ref()
+            .map(crate::tokengate_gpu::KeyBiasGpuSession::decode_args)
     }
 
     /// Forward pass for a single decode token (GPU-resident, zero sync between layers).

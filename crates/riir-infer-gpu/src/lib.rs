@@ -665,6 +665,17 @@ pub mod ternary_deltanet_gpu_forward_cudarc;
     not(target_os = "macos")
 ))]
 pub mod si_gpu;
+
+// Plan 622 — the TokenGate per-key-bias session (the si session's twin for
+// the attention-logit-bias lane: the full-table buffer + the arming flag,
+// content-flipped under captured graphs). Same posture as the forward it
+// arms, gated by the lane's feature.
+#[cfg(all(
+    feature = "tokengate",
+    feature = "ternary_gemv_cuda_raw",
+    not(target_os = "macos")
+))]
+pub mod tokengate_gpu;
 #[cfg(all(
     feature = "scale_invariant_attn",
     feature = "ternary_gemv_cuda_raw",
