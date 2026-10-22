@@ -4059,7 +4059,10 @@ fn whole_prefill_inner(
     };
     if run_layers_result.is_err() {
         if trace {
-            eprintln!("[734-arm8] FALLTHROUGH: layer loop error");
+            eprintln!(
+                "[734-arm8] FALLTHROUGH: layer loop error: {}",
+                run_layers_result.as_ref().err().expect("err checked above")
+            );
         }
         if will_replay {
             // T1.5 — a replay-error chunk took NO snapshot (the failed
