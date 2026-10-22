@@ -69,10 +69,14 @@ fn fnv(v: &[f32]) -> u64 {
     })
 }
 
-/// Deterministic varying table values (±1.5, slot-derived — no RNG, no
-/// seed drift between runs).
+/// Deterministic varying table values (±12, slot-derived — no RNG, no seed
+/// drift between runs). Amplitude 8× the original ±1.5: the synth model has
+/// ONE attention layer at depth 3/4 (the league has 16 attention layers), so
+/// the per-logit attenuation through the ternary out_proj + residual chain
+/// left the ±1.5 table at max Δ 4.2e-4 — movement, but under the 1e-3 bar.
+/// The bar stays meaningful at ±12 (issue 1112 follow-up run, 2026-10-23).
 fn varying(slot: usize) -> f32 {
-    ((slot % 7) as f32 - 3.0) * 0.5
+    ((slot % 7) as f32 - 3.0) * 4.0
 }
 
 fn table_with(
@@ -115,7 +119,10 @@ fn plan622_cuda_model_walk_kb_session_arms() {
 
     // The synth GGUF → temp file (pid-suffixed — the shared-temp law) → the
     // GPU forward.
-    let bytes = synth::build_gguf(&synth::synth_metadata(false), &synth::synth_tensors_bonsai2());
+    let bytes = synth::build_gguf(
+        &synth::synth_metadata(false),
+        &synth::synth_tensors_bonsai2(),
+    );
     let path = synth::write_tmp("plan622_kb_walk", &bytes);
     let (config, weights) =
         riir_infer_core::gguf_loader::load_qwen_deltanet_ternary_weights_gguf(&path)
@@ -243,7 +250,8 @@ fn plan622_cuda_model_walk_kb_session_arms() {
     let moved_table = table_with(n_layers, n_head, stride, PROMPT_LEN, |l, h, k| {
         varying((l * n_head + h) * PROMPT_LEN + k)
     });
-    fwd.write_kb_table(&stream, &moved_table).expect("write table");
+    fwd.write_kb_table(&stream, &moved_table)
+        .expect("write table");
     let moved1 = run(&mut fwd);
     let moved2 = run(&mut fwd);
     assert_eq!(
@@ -251,7 +259,17 @@ fn plan622_cuda_model_walk_kb_session_arms() {
         fnv(&moved2),
         "moved arm non-deterministic run-to-run — a race or an unstable read path"
     );
-    assert!(moved1.iter().all(|v| v.is_finite()), "non-finite logits under a NaN pad — the pad was read");
+    assert!(
+        moved1.iter().all(|v| v.is_finite()),
+        "non-finite logits under a NaN pad — the pad was read"
+    );
+    // Bit-level movement: the armed table changed the logits EXACTLY (the
+    // same fnv pair every bit-identity arm compares).
+    assert_ne!(
+        fnv(&moved1),
+        fnv(&incumbent),
+        "armed moved table is bit-identical to the incumbent — the bias never reached the logits"
+    );
     let max_delta = moved1
         .iter()
         .zip(incumbent.iter())
@@ -263,7 +281,10 @@ fn plan622_cuda_model_walk_kb_session_arms() {
          consume the bias: check the gate knobs (gemv/seq_rmsnorm/psplit/chunked/batched) and \
          that the forward routed through prefill_cuda_full at all"
     );
-    eprintln!("[622-walk] moved arm: max Δlogit = {max_delta:.4} (fnv {:016x})", fnv(&moved1));
+    eprintln!(
+        "[622-walk] moved arm: max Δlogit = {max_delta:.4} (fnv {:016x})",
+        fnv(&moved1)
+    );
 
     // Arm 5 — per-layer window selectivity: bias on the Attention layer's
     // rows ONLY must reproduce the all-layers arm bit-exactly.
@@ -274,7 +295,8 @@ fn plan622_cuda_model_walk_kb_session_arms() {
             0.0
         }
     });
-    fwd.write_kb_table(&stream, &att_only_table).expect("write att-only table");
+    fwd.write_kb_table(&stream, &att_only_table)
+        .expect("write att-only table");
     let moved_att = run(&mut fwd);
     assert_eq!(
         fnv(&moved_att),
