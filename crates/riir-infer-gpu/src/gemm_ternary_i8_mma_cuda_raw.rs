@@ -5288,6 +5288,43 @@ mod tests {
                 }
             }
         }
+
+        // Pass 2 — EXACT-SIZED buffers (the model posture: the weight mirror
+        // and out slice are allocated at exactly m rows, the sweep's pass-1
+        // buffers are m_max-oversized). Closes the last buffer-size gap
+        // between the green sweep and the in-model fault.
+        for m in [8usize, 9, 16, 127, 128] {
+            let pos_exact = stream.clone_htod(&pos[..m * wpr]).unwrap();
+            let neg_exact = stream.clone_htod(&neg[..m * wpr]).unwrap();
+            let scale_exact = stream.clone_htod(&scale[..m * groups]).unwrap();
+            let out_exact = stream.alloc_zeros::<f32>(p * m).unwrap();
+            let r = kernels.launch_gemm(
+                &stream,
+                &pos_exact,
+                &neg_exact,
+                &scale_exact,
+                &scratch,
+                &out_exact,
+                m,
+                n,
+                p,
+                MmaTile::Tm64,
+                FoldMode::Fused,
+            );
+            let sync = stream.synchronize();
+            match (r, sync) {
+                (Ok(()), Ok(())) => eprintln!("m={m} exact: OK"),
+                (e, s) => {
+                    panic!(
+                        "m={m} exact: launch={e:?} sync={s:?} — the exact-size m-tail fault (issue 1112)"
+                    );
+                }
+            }
+            drop(pos_exact);
+            drop(neg_exact);
+            drop(scale_exact);
+            drop(out_exact);
+        }
     }
 
     /// The PTX fragment mapping is load-bearing and derived from the ISA
