@@ -148,10 +148,27 @@ fn plan622_cuda_model_walk_kb_session_arms() {
         fwd.prefill(&tokens)
     };
 
+    // CUDA health probe — a tiny alloc+copy+sync on the session stream. A
+    // sticky CUDA_ERROR_ILLEGAL_ADDRESS poisons the whole context, so WHERE
+    // this first fails bisects the boot path vs the prefill path.
+    let probe = |tag: &str| {
+        let host = [7.0f32, 9.0];
+        match stream.clone_htod(&host) {
+            Ok(dev) => {
+                let _ = stream.synchronize();
+                eprintln!("[622-walk] cuda probe {tag}: OK");
+                drop(dev);
+            }
+            Err(e) => eprintln!("[622-walk] cuda probe {tag}: FAIL {e:?}"),
+        }
+    };
+    probe("post-boot");
+
     // Arm 1 — incumbent: no session attached.
     let incumbent = run(&mut fwd);
     assert!(!incumbent.is_empty());
     assert!(incumbent.iter().all(|v| v.is_finite()));
+    probe("post-incumbent");
 
     // Attach: zero live table + NaN pad, disarmed (the constructor law).
     let session = KeyBiasGpuSession::attach(

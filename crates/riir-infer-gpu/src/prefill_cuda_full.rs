@@ -1261,10 +1261,15 @@ fn mma_mirror_impl(
     allow_packed_route: bool,
 ) -> Option<Arc<crate::prefill_cuda_mma::CudaMmaWeightCache>> {
     w.cuda_mma_cache
-        .get_or_init(|| {
-            build_weight_cache(client, stream, w, allow_packed_route)
-                .map(Arc::new)
-                .ok()
+        .get_or_init(|| match build_weight_cache(client, stream, w, allow_packed_route) {
+            Ok(c) => Some(Arc::new(c)),
+            Err(e) => {
+                // The failure is cached (get_or_init) — print the one lossy
+                // discard the old `.ok()` hid; a poisoned CUDA context reads
+                // here first (every upload fails with the sticky error).
+                eprintln!("[734-arm8] weight-mirror build failed: {e}");
+                None
+            }
         })
         .clone()
 }
