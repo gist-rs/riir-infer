@@ -369,6 +369,25 @@ extern "C" __global__ void kv_cache_fill_split_dp(
 // dot, smem max tree (stride 128→1, `>`), online softmax rescale, Phase-3
 // exp weights, serial Phase-4 accumulation, final 1/sum + sigmoid gate.
 // ---------------------------------------------------------------------------
+// Plan 622 T1.4 — the kb bias table rides the f16 WIRE; this module needs
+// its own exact decode (separate nvrtc module — no cross-module include;
+// the canonical module has no KV hatch of its own). Textbook bit form,
+// the same expression the decode/FA modules carry.
+__device__ __forceinline__ float kb_f16_to_f32(unsigned short h)
+{
+    const unsigned int sign = ((unsigned int)h & 0x8000u) << 16;
+    const unsigned int exp = ((unsigned int)h >> 10) & 0x1Fu;
+    const unsigned int frac = h & 0x03FFu;
+    if (exp == 0) {
+        if (frac == 0) return __int_as_float(sign);
+        const float v = (float)frac * 5.9604644775390625e-08f;
+        return sign ? -v : v;
+    }
+    if (exp == 31) {
+        return __int_as_float(sign | 0x7F800000u | (frac << 13));
+    }
+    return __int_as_float(sign | ((exp + 112u) << 23) | (frac << 13));
+}
 #define ATTENTION(NAME, DOTF, ACCF, EXPF, PH3, RESF, INVF)                      \
 extern "C" __global__ void NAME(                                               \
     const float* __restrict__ query,   /* [p, n_head, hd] */                   \
@@ -377,7 +396,7 @@ extern "C" __global__ void NAME(                                               \
     const float* __restrict__ gate,    /* [p, n_head, hd] */                   \
     float* __restrict__ attn_out,      /* [p, n_head, hd] */                   \
     int head_dim, int n_head, int n_kv, int p, float scale, int q_offset,      \
-    const float* __restrict__ kb_bias,  /* Plan 622: [n_head * kb_stride] */   \
+    const unsigned short* __restrict__ kb_bias,  /* Plan 622: [n_head * kb_stride] */   \
     const int kb_stride,                /* Plan 622: ≥ live keys */            \
     const int* __restrict__ kb_enabled) /* Plan 622: 0 = incumbent */          \
 {                                                                              \
@@ -411,9 +430,11 @@ extern "C" __global__ void NAME(                                               \
                 dot = DOTF(query[q_token_off + d], key[k_base + d], dot);      \
             }                                                                  \
             my_score = dot * scale;                                            \
-            if (kb_on != 0) { /* Plan 622 — post-scale, pre-max */             \
+            if (kb_on != 0) { /* Plan 622 — post-scale, pre-max; f16 wire */  \
                 my_score = __fadd_rn(                                          \
-                    my_score, kb_bias[(long)head_idx * kb_stride + pos]);      \
+                    my_score,                                                  \
+                    kb_f16_to_f32(kb_bias[(long)head_idx * kb_stride + pos])); \
+            }                                                                  \
             }                                                                  \
         }                                                                      \
         smem[tid] = my_score;                                                  \
@@ -1805,9 +1826,10 @@ pub struct CudaAttnKernels {
     si_dummy_inv_sigma: CudaSlice<f32>,
     si_dummy_enabled: CudaSlice<i32>,
     /// Plan 622 T1.2 — the kb hook's flag-off dummies (the si dummies'
-    /// law, owned by this struct since it pushes them): a 1-float runway
+    /// law, owned by this struct since it pushes them): a 1-element runway
     /// never indexed while `kb_enabled` holds 0, and the disabled flag.
-    kb_dummy_bias: CudaSlice<f32>,
+    /// f16 wire — the T1.4 table.
+    kb_dummy_bias: CudaSlice<u16>,
     kb_dummy_enabled: CudaSlice<i32>,
     /// Plan 605 T1 — the f32->f16 KV conversion pass (eager).
     kv_f32_to_f16: CudaFunction,
@@ -2051,7 +2073,7 @@ impl CudaAttnKernels {
             .map_err(|e| format!("si_dummy_enabled: {e}"))?;
         // Plan 622 — the kb flag-off dummies (the si pair's law).
         let kb_dummy_bias = stream
-            .clone_htod(&[0.0f32])
+            .clone_htod(&[0u16])
             .map_err(|e| format!("kb_dummy_bias: {e}"))?;
         let kb_dummy_enabled = stream
             .clone_htod(&[0i32])

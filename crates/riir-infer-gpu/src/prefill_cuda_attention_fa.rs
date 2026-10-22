@@ -189,7 +189,9 @@ __device__ __forceinline__ float si_transform_score(
 // max pass (the max tracks the BIASED row — the CPU KeyBiasLayout
 // contract); the composition order with the si affine is kb BEFORE si
 // (the decode modules' pinned order). Flag-0 (`*kb_enabled == 0`) leaves
-// every added branch dead — bit-identical incumbent.
+// every added branch dead — bit-identical incumbent. Plan 622 T1.4 —
+// the table rides the f16 WIRE (`unsigned short` halves, RN-even at the
+// host writer); the decode is this module's exact `f16_to_f32_exact`.
 //
 // Plan 622 T1.4 — the read is UNCONDITIONAL on the fragment with a
 // CLAMPED index (`min(kv, kv_len-1)`), not guarded by `kv < lim`: the
@@ -486,7 +488,7 @@ __device__ __forceinline__ void att_pf_fa_body(
     const float* __restrict__ si_lut,       /* Plan 620: interleaved (a, m) */
     const float* __restrict__ si_inv_sigma, /* Plan 620: this layer's n_head */
     const int* __restrict__ si_enabled,     /* Plan 620: 0 = incumbent */
-    const float* __restrict__ kb_bias,      /* Plan 622: [n_head * kb_stride] */
+    const unsigned short* __restrict__ kb_bias,      /* Plan 622: [n_head * kb_stride] */
     const int kb_stride,                    /* Plan 622: ≥ live keys (q_offset+p) */
     const int* __restrict__ kb_enabled)     /* Plan 622: 0 = incumbent */
 {
@@ -647,7 +649,7 @@ __device__ __forceinline__ void att_pf_fa_body(
             if (kb_lane) {
                 const int kv_c = min(kv, kv_len - 1);
                 KQ_C.x[l] = __fadd_rn(
-                    KQ_C.x[l], kb_bias[attn_head * kb_stride + kv_c]);
+                    KQ_C.x[l], f16_to_f32_exact(kb_bias[attn_head * kb_stride + kv_c]));
             }
             if (si_lane && kv < lim) {
                 KQ_C.x[l] = si_transform_score(KQ_C.x[l], kv, lim - 1,
@@ -841,7 +843,7 @@ extern "C" __global__ void __launch_bounds__(128, 2) att_pf_fa(
     const float* __restrict__ si_lut,
     const float* __restrict__ si_inv_sigma,
     const int* __restrict__ si_enabled,
-    const float* __restrict__ kb_bias,
+    const unsigned short* __restrict__ kb_bias,
     const int kb_stride,
     const int* __restrict__ kb_enabled)
 {
@@ -862,7 +864,7 @@ extern "C" __global__ void __launch_bounds__(128, 2) att_pf_fa_dp(
     const float* __restrict__ si_lut,
     const float* __restrict__ si_inv_sigma,
     const int* __restrict__ si_enabled,
-    const float* __restrict__ kb_bias,
+    const unsigned short* __restrict__ kb_bias,
     const int kb_stride,
     const int* __restrict__ kb_enabled)
 {

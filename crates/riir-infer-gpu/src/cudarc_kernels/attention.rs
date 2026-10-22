@@ -126,8 +126,11 @@ pub struct SiDecodeLayerArgs<'a> {
 /// bit-identical to the pre-622 kernel.
 pub struct KeyBiasLayerArgs<'a> {
     /// This layer's bias window — `[n_head][stride]` head-major; only the
-    /// first `live_keys` entries of each row are read.
-    pub bias: CudaView<'a, f32>,
+    /// first `live_keys` entries of each row are read. The wire is f16
+    /// (`u16` IEEE halves — the T1.4 f16 table; the kernels decode with the
+    /// exact `kv_f16_to_f32`; host writers convert with
+    /// `qwen38_dense_cudarc::kv_f16_bits::f32_to_f16`, RN-even).
+    pub bias: CudaView<'a, u16>,
     /// Keys per head row (≥ this launch's live key count).
     pub stride: usize,
     /// One i32: 0 = the incumbent (bit-identical) posture, 1 = armed.
@@ -136,8 +139,9 @@ pub struct KeyBiasLayerArgs<'a> {
 
 /// Plan 622 T1.2 — the full-table form: every layer in one buffer, slot =
 /// `layer_idx * n_head * stride` (the `SiDecodeArgs::window_for` shape).
+/// f16 wire — see [`KeyBiasLayerArgs::bias`].
 pub struct KeyBiasDecodeArgs<'a> {
-    pub bias: &'a CudaSlice<f32>,
+    pub bias: &'a CudaSlice<u16>,
     pub stride: usize,
     pub enabled: &'a CudaSlice<i32>,
 }
@@ -178,7 +182,6 @@ pub const ATTENTION_CUDA_SRC: &str = r#"
 // K/V elements (element rel-err ≤ 2^-11 ≈ 4.9e-4). Tolerance-class change,
 // NOT bit-identity — the Issue-753 gates are declared accordingly.
 // ---------------------------------------------------------------------------
-#ifdef KV_F16
 // Manual f16↔f32 bit conversion (RN-even) — cudarc's nvrtc exposes NO
 // include directories, so <cuda_fp16.h> is unavailable ("no directories in
 // search list", pinned by the t916 compile-smoke gate). These are the
@@ -186,8 +189,10 @@ pub const ATTENTION_CUDA_SRC: &str = r#"
 // like __float2half_rn (subnormal carry into the min-normal encoding and
 // overflow carry into Inf fall out of the +=1). A host-side twin lives in
 // qwen38_dense_cudarc (kv_f16_bits) — the GPU parity gates pin the two
-// implementations to agreement bit-for-bit.
-typedef unsigned short kv_elt;
+// implementations to agreement bit-for-bit. BOTH directions are defined
+// UNCONDITIONALLY: the Plan-622 kb bias wire is always f16 (the T1.4 f16
+// table — half the bytes per element) independent of this hatch; only the
+// KV typedef + macros stay conditional.
 __device__ __forceinline__ float kv_f16_to_f32(unsigned short h)
 {
     const unsigned int sign = ((unsigned int)h & 0x8000u) << 16;
@@ -256,6 +261,8 @@ __device__ __forceinline__ unsigned short kv_f32_to_f16(float f)
     if (rem > 0x1000u || (rem == 0x1000u && (h & 1u))) h += 1u;
     return h;
 }
+#ifdef KV_F16
+typedef unsigned short kv_elt;
 #define KV_RD(p) (kv_f16_to_f32(*(p)))
 #define KV_WR(p, v) (*(p) = kv_f32_to_f16(v))
 #else
@@ -543,14 +550,18 @@ __device__ __forceinline__ float si_transform_score(
 // Layout: kb_bias[head_idx * kb_stride + pos] — head-major [n_head][stride]
 // row-major, slot-indexed (the CPU KeyBiasLayout contract: cache slot IS the
 // key identity). kb_stride ≥ the live key count; in-range `pos` never
-// crosses a row. Single-rounding `__fadd_rn` — the Rust ops each round once,
-// and an nvrtc contraction into a neighbouring op would silently skip it.
+// crosses a row. Plan 622 T1.4 lever — the table rides the f16 WIRE
+// (`unsigned short` IEEE halves, RN-even at the host `write_table`):
+// half the bytes per element on a kernel already streaming K+V tiles; the
+// decode is the shared exact `kv_f16_to_f32` (one converter, both hatches).
+// Single-rounding `__fadd_rn` — the Rust ops each round once, and an nvrtc
+// contraction into a neighbouring op would silently skip it.
 // ---------------------------------------------------------------------------
 __device__ __forceinline__ float kb_bias_score(
     float raw, int pos, int head_idx, int kb_stride,
-    const float* __restrict__ kb_bias)
+    const unsigned short* __restrict__ kb_bias)
 {
-    return __fadd_rn(raw, kb_bias[head_idx * kb_stride + pos]);
+    return __fadd_rn(raw, kv_f16_to_f32(kb_bias[head_idx * kb_stride + pos]));
 }
 
 extern "C" __global__ void attention_decode_f32(
@@ -566,7 +577,7 @@ extern "C" __global__ void attention_decode_f32(
     const float* __restrict__ si_lut,        // Plan 620: interleaved (a, m) pairs
     const float* __restrict__ si_inv_sigma,  // Plan 620: this layer's n_head entries
     const int* __restrict__ si_enabled,      // Plan 620: 0 = the incumbent posture
-    const float* __restrict__ kb_bias,       // Plan 622: [n_head * kb_stride]
+    const unsigned short* __restrict__ kb_bias,       // Plan 622: [n_head * kb_stride]
     const int kb_stride,                     // Plan 622: keys per head row
     const int* __restrict__ kb_enabled)      // Plan 622: 0 = the incumbent posture
 {
@@ -825,7 +836,7 @@ extern "C" __global__ void attention_decode_f32_devpos(
     const float* __restrict__ si_lut,        // Plan 620 — see attention_decode_f32
     const float* __restrict__ si_inv_sigma,  // Plan 620
     const int* __restrict__ si_enabled,      // Plan 620
-    const float* __restrict__ kb_bias,       // Plan 622 — see attention_decode_f32
+    const unsigned short* __restrict__ kb_bias,       // Plan 622 — see attention_decode_f32
     const int kb_stride,                     // Plan 622
     const int* __restrict__ kb_enabled)      // Plan 622
 {
@@ -1018,7 +1029,7 @@ __device__ __forceinline__ void attention_decode_split_partial_body(
     const int n_kv_head,
     const int chunk_len,
     const int n_positions,
-    const float* __restrict__ kb_bias,   // Plan 622 — see kb_bias_score
+    const unsigned short* __restrict__ kb_bias,   // Plan 622 — see kb_bias_score
     const int kb_stride,
     const int kb_on)
 {
@@ -1175,7 +1186,7 @@ extern "C" __global__ void attention_decode_split_partial_f32(
     const int n_kv_head,
     const int chunk_len,
     const int n_positions,
-    const float* __restrict__ kb_bias,   // Plan 622
+    const unsigned short* __restrict__ kb_bias,   // Plan 622
     const int kb_stride,
     const int* __restrict__ kb_enabled)
 {
@@ -1201,7 +1212,7 @@ extern "C" __global__ void attention_decode_split_partial_f32_devpos(
     const int n_kv_head,
     const int chunk_len,
     const int* __restrict__ pos_dev,
-    const float* __restrict__ kb_bias,   // Plan 622
+    const unsigned short* __restrict__ kb_bias,   // Plan 622
     const int kb_stride,
     const int* __restrict__ kb_enabled)
 {
@@ -1272,7 +1283,7 @@ __device__ __forceinline__ void attention_decode_splitgqa_partial_body(
     const int n_kv_head,
     const int chunk_len,
     const int n_positions,
-    const float* __restrict__ kb_bias,   // Plan 622 — see kb_bias_score
+    const unsigned short* __restrict__ kb_bias,   // Plan 622 — see kb_bias_score
     const int kb_stride,
     const int kb_on)
 {
@@ -1438,7 +1449,7 @@ extern "C" __global__ void attention_decode_splitgqa_partial_f32(
     const int n_kv_head,
     const int chunk_len,
     const int n_positions,
-    const float* __restrict__ kb_bias,   // Plan 622
+    const unsigned short* __restrict__ kb_bias,   // Plan 622
     const int kb_stride,
     const int* __restrict__ kb_enabled)
 {
@@ -1464,7 +1475,7 @@ extern "C" __global__ void attention_decode_splitgqa_partial_f32_devpos(
     const int n_kv_head,
     const int chunk_len,
     const int* __restrict__ pos_dev,
-    const float* __restrict__ kb_bias,   // Plan 622
+    const unsigned short* __restrict__ kb_bias,   // Plan 622
     const int kb_stride,
     const int* __restrict__ kb_enabled)
 {
@@ -1741,7 +1752,7 @@ static __device__ void attention_decode_splitgqa_rows_body_t(
     const int base_pos,
     const int p,
     const int k4,
-    const float* __restrict__ kb_bias,   // Plan 622 — see kb_bias_score
+    const unsigned short* __restrict__ kb_bias,   // Plan 622 — see kb_bias_score
     const int kb_stride,
     const int kb_on)
 {
@@ -2038,7 +2049,7 @@ extern "C" __global__ void attention_decode_splitgqa_partial_rows_f32(
     const int base_pos,
     const int p,
     const int k4,
-    const float* __restrict__ kb_bias,   // Plan 622
+    const unsigned short* __restrict__ kb_bias,   // Plan 622
     const int kb_stride,
     const int* __restrict__ kb_enabled)
 {
@@ -2068,7 +2079,7 @@ extern "C" __global__ void attention_decode_splitgqa_partial_rows_f32_devpos(
     const int* __restrict__ pos_dev,
     const int p,
     const int k4,
-    const float* __restrict__ kb_bias,   // Plan 622
+    const unsigned short* __restrict__ kb_bias,   // Plan 622
     const int kb_stride,
     const int* __restrict__ kb_enabled)
 {
@@ -2105,7 +2116,7 @@ extern "C" __global__ void attention_decode_splitgqa_partial_rows_ma_f32(
     const int base_pos,
     const int p,
     const int k4,
-    const float* __restrict__ kb_bias,   // Plan 622
+    const unsigned short* __restrict__ kb_bias,   // Plan 622
     const int kb_stride,
     const int* __restrict__ kb_enabled)
 {
@@ -2133,7 +2144,7 @@ extern "C" __global__ void attention_decode_splitgqa_partial_rows_ma_f32_devpos(
     const int* __restrict__ pos_dev,
     const int p,
     const int k4,
-    const float* __restrict__ kb_bias,   // Plan 622
+    const unsigned short* __restrict__ kb_bias,   // Plan 622
     const int kb_stride,
     const int* __restrict__ kb_enabled)
 {
@@ -2222,7 +2233,7 @@ static __device__ void attention_decode_splitgqa_rows_qg_body_t(
     const int base_pos,
     const int p,
     const int k4,
-    const float* __restrict__ kb_bias,   // Plan 622 — see kb_bias_score
+    const unsigned short* __restrict__ kb_bias,   // Plan 622 — see kb_bias_score
     const int kb_stride,
     const int kb_on)
 {
@@ -2533,7 +2544,7 @@ attention_decode_splitgqa_partial_rows_qg_f32(
     const int base_pos,
     const int p,
     const int k4,
-    const float* __restrict__ kb_bias,   // Plan 622
+    const unsigned short* __restrict__ kb_bias,   // Plan 622
     const int kb_stride,
     const int* __restrict__ kb_enabled)
 {
@@ -2564,7 +2575,7 @@ attention_decode_splitgqa_partial_rows_qg_f32_devpos(
     const int* __restrict__ pos_dev,
     const int p,
     const int k4,
-    const float* __restrict__ kb_bias,   // Plan 622
+    const unsigned short* __restrict__ kb_bias,   // Plan 622
     const int kb_stride,
     const int* __restrict__ kb_enabled)
 {
@@ -2598,7 +2609,7 @@ attention_decode_splitgqa_partial_rows_qgma_f32(
     const int base_pos,
     const int p,
     const int k4,
-    const float* __restrict__ kb_bias,   // Plan 622
+    const unsigned short* __restrict__ kb_bias,   // Plan 622
     const int kb_stride,
     const int* __restrict__ kb_enabled)
 {
@@ -2627,7 +2638,7 @@ attention_decode_splitgqa_partial_rows_qgma_f32_devpos(
     const int* __restrict__ pos_dev,
     const int p,
     const int k4,
-    const float* __restrict__ kb_bias,   // Plan 622
+    const unsigned short* __restrict__ kb_bias,   // Plan 622
     const int kb_stride,
     const int* __restrict__ kb_enabled)
 {
@@ -2673,7 +2684,7 @@ static __device__ void attention_verify2p_stats_body(
     const int n_tiles,            // stride == gridDim.y (pinned or exact)
     const int base_pos,
     const int p,
-    const float* __restrict__ kb_bias,   // Plan 622 — see kb_bias_score
+    const unsigned short* __restrict__ kb_bias,   // Plan 622 — see kb_bias_score
     const int kb_stride,
     const int kb_on)
 {
@@ -2777,7 +2788,7 @@ attention_verify2p_stats_f32(
     const int n_tiles,
     const int base_pos,
     const int p,
-    const float* __restrict__ kb_bias,   // Plan 622
+    const unsigned short* __restrict__ kb_bias,   // Plan 622
     const int kb_stride,
     const int* __restrict__ kb_enabled)
 {
@@ -2803,7 +2814,7 @@ attention_verify2p_stats_f32_devpos(
     const int n_tiles,
     const int* __restrict__ pos_dev,
     const int p,
-    const float* __restrict__ kb_bias,   // Plan 622
+    const unsigned short* __restrict__ kb_bias,   // Plan 622
     const int kb_stride,
     const int* __restrict__ kb_enabled)
 {
@@ -2865,7 +2876,7 @@ static __device__ void attention_verify2p_pv_body(
     const int chunk_len,
     const int base_pos,
     const int p,
-    const float* __restrict__ kb_bias,   // Plan 622 — see kb_bias_score
+    const unsigned short* __restrict__ kb_bias,   // Plan 622 — see kb_bias_score
     const int kb_stride,
     const int kb_on)
 {
@@ -3070,7 +3081,7 @@ attention_verify2p_pv_f32(
     const int chunk_len,
     const int base_pos,
     const int p,
-    const float* __restrict__ kb_bias,   // Plan 622
+    const unsigned short* __restrict__ kb_bias,   // Plan 622
     const int kb_stride,
     const int* __restrict__ kb_enabled)
 {
@@ -3099,7 +3110,7 @@ attention_verify2p_pv_f32_devpos(
     const int chunk_len,
     const int* __restrict__ pos_dev,
     const int p,
-    const float* __restrict__ kb_bias,   // Plan 622
+    const unsigned short* __restrict__ kb_bias,   // Plan 622
     const int kb_stride,
     const int* __restrict__ kb_enabled)
 {
@@ -3229,7 +3240,7 @@ pub struct AttentionKernels {
     /// pushes these; the kernel's kb branch is dead at `*enabled == 0`, so
     /// the runway is never indexed. Stable device addresses (captured
     /// graphs bake them) — they live as long as the kernels struct.
-    kb_dummy_bias: CudaSlice<f32>,
+    kb_dummy_bias: CudaSlice<u16>,
     kb_dummy_enabled: CudaSlice<i32>,
     _module: Arc<CudaModule>,
 }
@@ -3494,7 +3505,7 @@ impl AttentionKernels {
             .map_err(|e| super::CudarcKernelError::Launch(e.to_string()))?;
         // Plan 622 — the kb flag-off dummies (same law as the si pair).
         let kb_dummy_bias = stream
-            .clone_htod(&[0.0f32])
+            .clone_htod(&[0u16])
             .map_err(|e| super::CudarcKernelError::Launch(e.to_string()))?;
         let kb_dummy_enabled = stream
             .clone_htod(&[0i32])
@@ -7071,14 +7082,19 @@ mod tests {
     /// SHIFT-INVARIANT per row, so a bias CONSTANT across a head's keys is a
     /// no-op — the movement arm must VARY within the head row. Head 0's row
     /// is [+B, -B, -B, …]; heads ≥ 1 stay all-zero, so their outputs must be
-    /// BIT-identical to the incumbent (per-head row independence).
-    fn kb_fixture(n_head: usize, keys: usize, bias_mag: f32) -> Vec<f32> {
+    /// BIT-identical to the incumbent (per-head row independence). Emitted
+    /// on the f16 wire (the T1.4 table) — `bias_mag` stays a power-of-two
+    /// multiple so the fixture is exactly representable and the armed
+    /// results are identical to the f32-table runs.
+    fn kb_fixture(n_head: usize, keys: usize, bias_mag: f32) -> Vec<u16> {
         let mut bias = vec![0.0f32; n_head * keys];
         bias[0] = bias_mag;
         for slot in bias.iter_mut().take(keys).skip(1) {
             *slot = -bias_mag;
         }
-        bias
+        bias.iter()
+            .map(|&v| crate::qwen38_dense_cudarc::kv_f16_bits::f32_to_f16(v))
+            .collect()
     }
 
     fn assert_bits_eq(a: &[f32], b: &[f32], what: &str) {
@@ -7133,7 +7149,7 @@ mod tests {
         let disabled = stream.clone_htod(&[0i32]).unwrap();
         let enabled = stream.clone_htod(&[1i32]).unwrap();
         let bias_zero = stream
-            .clone_htod(&vec![0.0f32; n_head * n_positions])
+            .clone_htod(&vec![0u16; n_head * n_positions])
             .unwrap();
         let bias_move = stream
             .clone_htod(&kb_fixture(n_head, n_positions, 3.0))
@@ -7260,7 +7276,7 @@ mod tests {
         let pos_dev = stream.clone_htod(&[pos as i32]).unwrap();
         let enabled = stream.clone_htod(&[1i32]).unwrap();
         let bias_zero = stream
-            .clone_htod(&vec![0.0f32; n_head * n_positions])
+            .clone_htod(&vec![0u16; n_head * n_positions])
             .unwrap();
 
         let out_base = stream.alloc_zeros::<f32>(q_len).unwrap();
@@ -7339,7 +7355,7 @@ mod tests {
         let v_dev = stream.clone_htod(&value_cache).unwrap();
         let enabled = stream.clone_htod(&[1i32]).unwrap();
         let bias_zero = stream
-            .clone_htod(&vec![0.0f32; n_head * n_positions])
+            .clone_htod(&vec![0u16; n_head * n_positions])
             .unwrap();
         let bias_move = stream
             .clone_htod(&kb_fixture(n_head, n_positions, 3.0))
@@ -7460,7 +7476,7 @@ mod tests {
         let v_dev = stream.clone_htod(&value_cache).unwrap();
         let enabled = stream.clone_htod(&[1i32]).unwrap();
         let bias_zero = stream
-            .clone_htod(&vec![0.0f32; n_head * n_positions])
+            .clone_htod(&vec![0u16; n_head * n_positions])
             .unwrap();
         let bias_move = stream
             .clone_htod(&kb_fixture(n_head, n_positions, 3.0))
@@ -7602,7 +7618,7 @@ mod tests {
         let v_dev = stream.clone_htod(&value_cache).unwrap();
         let g_dev = stream.clone_htod(&gate).unwrap();
         let enabled = stream.clone_htod(&[1i32]).unwrap();
-        let bias_zero = stream.clone_htod(&vec![0.0f32; n_head * kv_len]).unwrap();
+        let bias_zero = stream.clone_htod(&vec![0u16; n_head * kv_len]).unwrap();
         let bias_move = stream.clone_htod(&kb_fixture(n_head, kv_len, 3.0)).unwrap();
 
         let launch = |out: &cudarc::driver::safe::CudaSlice<f32>,

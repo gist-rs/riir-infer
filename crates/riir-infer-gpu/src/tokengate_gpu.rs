@@ -27,12 +27,23 @@ use std::sync::Arc;
 use cudarc::driver::safe::{CudaSlice, CudaStream};
 
 use crate::cudarc_kernels::attention::KeyBiasDecodeArgs;
+use crate::qwen38_dense_cudarc::kv_f16_bits;
+
+/// The f16 wire: host f32 rows → IEEE halves, round-to-nearest-even (the
+/// T1.4 f16 table — half the bytes per element on the kernels' bias reads).
+/// The kernel-side decode is the exact textbook `f16_to_f32` form every kb
+/// module carries; the host encode is this crate's round-trip-tested
+/// [`kv_f16_bits::f32_to_f16`] twin.
+fn f16_wire(host: &[f32]) -> Vec<u16> {
+    host.iter().map(|&v| kv_f16_bits::f32_to_f16(v)).collect()
+}
 
 /// Device-resident per-key-bias session — see the module docs.
 pub struct KeyBiasGpuSession {
-    /// The full bias table — `[n_layers][n_head][stride]` f32, head-major
-    /// per layer (the `KeyBiasDecodeArgs::window_for` layout verbatim).
-    table: CudaSlice<f32>,
+    /// The full bias table — `[n_layers][n_head][stride]` head-major per
+    /// layer (the `KeyBiasDecodeArgs::window_for` layout verbatim), on the
+    /// f16 wire (the T1.4 table; the host API above stays f32).
+    table: CudaSlice<u16>,
     /// Keys per head row (≥ every live-key count this session serves).
     stride: usize,
     /// The armed flag — the ONE buffer whose content flips between graph
@@ -70,7 +81,7 @@ impl KeyBiasGpuSession {
             )));
         }
         let table = stream
-            .clone_htod(host_table)
+            .clone_htod(&f16_wire(host_table))
             .map_err(|e| crate::CudarcKernelError::Launch(e.to_string()))?;
         let enabled = stream
             .clone_htod(&[0i32])
@@ -133,7 +144,7 @@ impl KeyBiasGpuSession {
             )));
         }
         stream
-            .memcpy_htod(host_table, &mut self.table)
+            .memcpy_htod(&f16_wire(host_table), &mut self.table)
             .map_err(|e| crate::CudarcKernelError::Launch(e.to_string()))?;
         Ok(())
     }

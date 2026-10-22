@@ -89,6 +89,29 @@ use super::attention::KeyBiasLayerArgs;
 /// (`attention_decode_split_combine_rows_f32`) so this module is
 /// self-contained (G3: no production-module changes).
 pub(crate) const ATTENTION_SCORE_MMA_CUDA_SRC: &str = r#"
+// Plan 622 T1.4 — the kb bias table rides the f16 WIRE, so this module needs
+// an EXACT f16→f32 decode in BOTH KV hatches. Module-local (no cross-module
+// include); deliberately NOT the mma `kv_f16_to_f32` transcription below —
+// that copy's normal branch is the known-broken twin's transcription (see
+// the Plan-551/773 lane's posture); the bias decode must be exact.
+__device__ __forceinline__ float kb_f16_to_f32(unsigned short h)
+{
+    const unsigned int sign = ((unsigned int)h & 0x8000u) << 16;
+    const unsigned int exp = ((unsigned int)h >> 10) & 0x1fu;
+    unsigned int mant = (unsigned int)h & 0x3ffu;
+    if (exp == 0x1fu) {
+        return __uint_as_float(sign | 0x7f800000u
+                               | (mant ? (0x400000u | (mant << 13)) : 0u));
+    }
+    if (exp == 0) {
+        if (mant == 0) return __uint_as_float(sign);
+        int s = 0;
+        while (!(mant & 0x400u)) { mant <<= 1; s++; }
+        return __uint_as_float(sign | ((unsigned int)(113 - s) << 23)
+                               | ((mant & 0x3ffu) << 13));
+    }
+    return __uint_as_float(sign | ((exp + 112u) << 23) | (mant << 13));
+}
 #ifdef KV_F16
 typedef unsigned short kv_elt;
 __device__ __forceinline__ float kv_f16_to_f32(unsigned short h)
@@ -156,7 +179,7 @@ static __device__ void attention_score_mma_body(
     const int chunk_len,
     const int base_pos,
     const int p,
-    const float* __restrict__ kb_bias,   // Plan 622 — see kb_bias_score
+    const unsigned short* __restrict__ kb_bias,   // Plan 622 — see kb_bias_score
     const int kb_stride,
     const int kb_on)
 {
@@ -332,7 +355,7 @@ static __device__ void attention_score_mma_body(
                     float s = d_acc[kf][e] * scale;
                     if (valid && kb_on != 0) {
                         s = __fadd_rn(
-                            s, kb_bias[(kv_group * g + h16_) * kb_stride + pos]);
+                            s, kb_f16_to_f32(kb_bias[(kv_group * g + h16_) * kb_stride + pos]));
                     }
                     d_acc[kf][e] = valid ? s : -1e30f;
                 }
@@ -488,7 +511,7 @@ attention_decode_splitgqa_partial_rows_qg_mma_f32(
     const int chunk_len,
     const int base_pos,
     const int p,
-    const float* __restrict__ kb_bias,   // Plan 622
+    const unsigned short* __restrict__ kb_bias,   // Plan 622
     const int kb_stride,
     const int* __restrict__ kb_enabled)
 {
@@ -523,7 +546,7 @@ static __device__ void attention_score_mma24_body(
     const int chunk_len,
     const int base_pos,
     const int p,
-    const float* __restrict__ kb_bias,   // Plan 622 — see kb_bias_score
+    const unsigned short* __restrict__ kb_bias,   // Plan 622 — see kb_bias_score
     const int kb_stride,
     const int kb_on)
 {
@@ -676,7 +699,7 @@ static __device__ void attention_score_mma24_body(
                 float s = d_acc[e] * scale;
                 if (valid && kb_on != 0) {
                     s = __fadd_rn(
-                        s, kb_bias[(kv_group * g + h16_) * kb_stride + pos]);
+                        s, kb_f16_to_f32(kb_bias[(kv_group * g + h16_) * kb_stride + pos]));
                 }
                 d_acc[e] = valid ? s : -1e30f;
             }
@@ -858,7 +881,7 @@ attention_decode_splitgqa_partial_rows_qg_mma_f32_devpos(
     const int chunk_len,
     const int* __restrict__ pos_dev,
     const int p,
-    const float* __restrict__ kb_bias,   // Plan 622
+    const unsigned short* __restrict__ kb_bias,   // Plan 622
     const int kb_stride,
     const int* __restrict__ kb_enabled)
 {
@@ -886,7 +909,7 @@ attention_decode_splitgqa_partial_rows_qg_mma24_f32(
     const int chunk_len,
     const int base_pos,
     const int p,
-    const float* __restrict__ kb_bias,   // Plan 622
+    const unsigned short* __restrict__ kb_bias,   // Plan 622
     const int kb_stride,
     const int* __restrict__ kb_enabled)
 {
@@ -912,7 +935,7 @@ attention_decode_splitgqa_partial_rows_qg_mma24_f32_devpos(
     const int chunk_len,
     const int* __restrict__ pos_dev,
     const int p,
-    const float* __restrict__ kb_bias,   // Plan 622
+    const unsigned short* __restrict__ kb_bias,   // Plan 622
     const int kb_stride,
     const int* __restrict__ kb_enabled)
 {
@@ -973,8 +996,9 @@ pub struct AttentionScoreMmaKernels {
     score_mma24_devpos: CudaFunction,
     combine: CudaFunction,
     /// Plan 622 T1.2 — the kb flag-off dummies (the si dummies' law; the
-    /// 1-float runway is never indexed at `*enabled == 0`).
-    kb_dummy_bias: CudaSlice<f32>,
+    /// 1-element runway is never indexed at `*enabled == 0`). f16 wire —
+    /// the T1.4 table.
+    kb_dummy_bias: CudaSlice<u16>,
     kb_dummy_enabled: CudaSlice<i32>,
     _module: Arc<cudarc::driver::safe::CudaModule>,
 }
@@ -1034,7 +1058,7 @@ impl AttentionScoreMmaKernels {
         // site can observe them).
         let stream = ctx.default_stream();
         let kb_dummy_bias = stream
-            .clone_htod(&[0.0f32])
+            .clone_htod(&[0u16])
             .map_err(|e| super::CudarcKernelError::Launch(e.to_string()))?;
         let kb_dummy_enabled = stream
             .clone_htod(&[0i32])
@@ -1362,7 +1386,7 @@ mod tests {
         let v_dev = stream.clone_htod(&value_cache).unwrap();
         let enabled = stream.clone_htod(&[1i32]).unwrap();
         let bias_zero = stream
-            .clone_htod(&vec![0.0f32; n_head * n_positions])
+            .clone_htod(&vec![0u16; n_head * n_positions])
             .unwrap();
 
         let rows = p * n_head;

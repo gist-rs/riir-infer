@@ -66,6 +66,15 @@ fn lcg(state: &mut u64) -> f32 {
     ((*state >> 33) as f32 / (u32::MAX >> 1) as f32) * 0.5 - 0.25
 }
 
+/// The kb table's f16 wire (the T1.4 lever): host f32 rows → IEEE halves,
+/// RN-even — the same conversion the session's `write_table` does (`half`
+/// and the crate's `kv_f16_bits::f32_to_f16` agree bit-for-bit).
+fn f16wire(v: &[f32]) -> Vec<u16> {
+    v.iter()
+        .map(|&x| half::f16::from_f32(x).to_bits())
+        .collect()
+}
+
 /// The CPU twin of the FA kernel's output for one posture: f32 softmax over
 /// the f16-rounded operands (`cvt.rn` semantics via the `half` crate), the
 /// kb bias added to every in-range score when armed, CAUSALLY MASKED like
@@ -234,9 +243,9 @@ fn test_prefill_fa_kb_flag_off_zero_stage_and_stride() {
                 moved_pad_tbl[h * pad_stride + k] = lcg(&mut st);
             }
         }
-        let bias_zero = stream.clone_htod(&vec![0.0f32; N_HEAD * KV_LEN]).unwrap();
-        let bias_moved = stream.clone_htod(&moved_tbl).unwrap();
-        let bias_moved_pad = stream.clone_htod(&moved_pad_tbl).unwrap();
+        let bias_zero = stream.clone_htod(&vec![0u16; N_HEAD * KV_LEN]).unwrap();
+        let bias_moved = stream.clone_htod(&f16wire(&moved_tbl)).unwrap();
+        let bias_moved_pad = stream.clone_htod(&f16wire(&moved_pad_tbl)).unwrap();
         let disabled = stream.clone_htod(&[0i32]).unwrap();
         let enabled = stream.clone_htod(&[1i32]).unwrap();
 

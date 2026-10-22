@@ -118,8 +118,15 @@ fn fa_kb_cost_gate_league_shapes() {
                 varying[h * kv_len + k] = ((h * 7 + k) % 11) as f32 * 0.3 - 1.5;
             }
         }
-        let bias_zero = stream.clone_htod(&vec![0.0f32; N_HEAD * kv_len]).unwrap();
-        let bias_var = stream.clone_htod(&varying).unwrap();
+        let bias_zero = stream.clone_htod(&vec![0u16; N_HEAD * kv_len]).unwrap();
+        let bias_var = stream
+            .clone_htod(
+                &varying
+                    .iter()
+                    .map(|&x| half::f16::from_f32(x).to_bits())
+                    .collect::<Vec<_>>(),
+            )
+            .unwrap();
         let enabled = stream.clone_htod(&[1i32]).unwrap();
 
         let launch = |out: &CudaSlice<f32>, kb: Option<&KeyBiasLayerArgs<'_>>| unsafe {
