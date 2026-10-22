@@ -435,7 +435,6 @@ extern "C" __global__ void NAME(                                               \
                     my_score,                                                  \
                     kb_f16_to_f32(kb_bias[(long)head_idx * kb_stride + pos])); \
             }                                                                  \
-            }                                                                  \
         }                                                                      \
         smem[tid] = my_score;                                                  \
         __syncthreads();                                                       \
