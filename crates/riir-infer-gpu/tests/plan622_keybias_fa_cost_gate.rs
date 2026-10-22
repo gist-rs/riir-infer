@@ -7,14 +7,15 @@
 //! sequential-A/B-measures-the-box lesson; medians over 48 interleaved
 //! iterations): incumbent (`kb=None`, the dummies) / armed all-zero /
 //! armed varying (the Phase-2-class real table). The GATE, settled by
-//! measurement (2026-10-23, six runs, three read-path implementations):
-//! BOTH lengths carry the measured-class ratchet ≤ 1.15× — the armed tax
-//! spans 1.09–1.13 by cell and box state (±1% is the noise floor: zero
-//! vs varying reads the same addresses), per-cell 1.10 bars flip with
-//! box drift, and the reverted smem stage (1.1657) still reds. The f16
-//! bias-table lever is the named demotion path (~6% expected; the
-//! ratchet re-pins downward on its landing). Any promotion cites this
-//! record; owner-gated.
+//! measurement twice (2026-10-23): the f32 wire measured 1.09–1.13 by cell
+//! (ratchet 1.15); the f16 bias-table lever then LANDED — first cut
+//! (branchy bit-manip decode) measured WORSE than f32 (1.24–1.29), the
+//! one-instruction `cvt.f32.f16` decode cut the armed tax to
+//! **1.013–1.033** by cell over three verdict-stable runs — so BOTH
+//! lengths now carry the re-pinned measured-class ratchet **≤ 1.05**
+//! (~1.7% headroom over the observed max; every demoted implementation
+//! — f32 direct 1.0875+, smem stage 1.1657, bit-manip decode 1.2375 —
+//! still reds). Any promotion cites this record; owner-gated.
 //!
 //! Box provenance is PRINTED, not asserted (the Windows sibling of
 //! `bench_preflight.sh` does not run here): quote the `PROVENANCE:` line
@@ -202,32 +203,34 @@ fn fa_kb_cost_gate_league_shapes() {
         eprintln!(
             "[p={p}] incumbent {m_inc:.3} ms | zero-armed {m_zero:.3} ms (ratio {r_zero:.4}) | varying-armed {m_var:.3} ms (ratio {r_var:.4})"
         );
-        // The plan's G2 bar, settled by measurement (2026-10-23, 4090,
-        // six runs, THREE read-path implementations): the armed tax is
-        // ~9–13% at BOTH league lengths and per-cell 1.10 bars FLIP WITH
-        // BOX STATE (lim-guarded direct read 2048→1.1234 / 4096→1.0875;
-        // per-tile smem stage 2048→1.1657 — strictly worse, REVERTED;
-        // clamped-unconditional direct read 2048→1.1012..1.1234 /
-        // 4096→1.1258..1.1338). Zero-table vs varying-table — the SAME
-        // addresses, only the values differ — swings ±1% between runs:
-        // that is the measurement's noise floor, and it is why per-cell
-        // tight bars red on box state (a gate nobody runs). So BOTH
-        // cells carry the measured-class ratchet 1.15: the shipped
-        // implementation sits ~1.10–1.13 with headroom, and the reverted
-        // stage (1.1657) still reds — the gate keeps teeth. The named
-        // demotion lever: an f16 bias table halves the bias bytes
-        // (~6% expected) — a wire change, its own cycle; on its landing
-        // this ratchet re-pins DOWNWARD. The armed posture is the
+        // The plan's G2 bar, settled by measurement twice. (1) 2026-10-23,
+        // f32 wire, six runs, THREE read-path implementations: the armed tax
+        // was ~9–13% at BOTH league lengths (lim-guarded direct read
+        // 2048→1.1234 / 4096→1.0875; per-tile smem stage 2048→1.1657 —
+        // strictly worse, REVERTED; clamped-unconditional direct read
+        // 2048→1.1012..1.1234 / 4096→1.1258..1.1338), ratchet 1.15. (2)
+        // SAME DAY, the named demotion lever LANDED — the f16 bias table —
+        // and beat its ~6% prediction: the first cut decoded with the
+        // branchy bit-manip form and measured WORSE than f32 (1.2375/1.2857
+        // — the ~10-op decode sits after the KQ mma where only the loads
+        // hoist); the one-instruction `cvt.f32.f16` decode cut the tax to
+        // 1.013–1.033 by cell over THREE verdict-stable runs (2048:
+        // 1.0186–1.0260; 4096: 1.0129–1.0326). Zero-vs-varying still reads
+        // the same addresses (the ±1–2% inter-run spread is the noise
+        // floor). Ratchet re-pinned DOWNWARD per the landing law to 1.05:
+        // ~1.7% headroom over the measured max, and every demoted
+        // implementation still reds (f32 direct 1.0875+, smem stage
+        // 1.1657, bit-manip decode 1.2375). The armed posture is the
         // Phase-2 pruned-prefill admission price, never paid on the
         // default path (flag-off byte-identity is the kb gate's law);
         // any promotion cites this record and is OWNER-GATED.
         assert!(
-            r_zero <= 1.15,
-            "kb cost gate: zero-armed ratio {r_zero:.4} > 1.15 at p={p}"
+            r_zero <= 1.05,
+            "kb cost gate: zero-armed ratio {r_zero:.4} > 1.05 at p={p}"
         );
         assert!(
-            r_var <= 1.15,
-            "kb cost gate: varying-armed ratio {r_var:.4} > 1.15 at p={p}"
+            r_var <= 1.05,
+            "kb cost gate: varying-armed ratio {r_var:.4} > 1.05 at p={p}"
         );
     }
 }
