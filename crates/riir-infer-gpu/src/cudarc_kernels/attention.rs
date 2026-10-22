@@ -552,16 +552,27 @@ __device__ __forceinline__ float si_transform_score(
 // key identity). kb_stride ≥ the live key count; in-range `pos` never
 // crosses a row. Plan 622 T1.4 lever — the table rides the f16 WIRE
 // (`unsigned short` IEEE halves, RN-even at the host `write_table`):
-// half the bytes per element on a kernel already streaming K+V tiles; the
-// decode is the shared exact `kv_f16_to_f32` (one converter, both hatches).
-// Single-rounding `__fadd_rn` — the Rust ops each round once, and an nvrtc
-// contraction into a neighbouring op would silently skip it.
+// half the bytes per element on a kernel already streaming K+V tiles. The
+// decode is the ONE-INSTRUCTION hardware widen (`cvt.f32.f16`, IEEE-exact
+// identical to the bit form — the FA module's 4090 cost gate measured the
+// branchy bit-manip decode at +0.13 tax; only the loads hoist under the
+// mma, the decode arithmetic does not). Deliberately NOT the shared
+// `kv_f16_to_f32` — that keeps the Issue-753 f16-KV kernels' compiled
+// code byte-identical. Single-rounding `__fadd_rn` — the Rust ops each
+// round once, and an nvrtc contraction into a neighbouring op would
+// silently skip it.
 // ---------------------------------------------------------------------------
+__device__ __forceinline__ float kb_f16_to_f32(unsigned short h)
+{
+    float f;
+    asm("cvt.f32.f16 %0, %1;" : "=f"(f) : "h"(h));
+    return f;
+}
 __device__ __forceinline__ float kb_bias_score(
     float raw, int pos, int head_idx, int kb_stride,
     const unsigned short* __restrict__ kb_bias)
 {
-    return __fadd_rn(raw, kv_f16_to_f32(kb_bias[head_idx * kb_stride + pos]));
+    return __fadd_rn(raw, kb_f16_to_f32(kb_bias[head_idx * kb_stride + pos]));
 }
 
 extern "C" __global__ void attention_decode_f32(

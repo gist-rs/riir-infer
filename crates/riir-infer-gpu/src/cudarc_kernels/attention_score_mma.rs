@@ -90,27 +90,19 @@ use super::attention::KeyBiasLayerArgs;
 /// self-contained (G3: no production-module changes).
 pub(crate) const ATTENTION_SCORE_MMA_CUDA_SRC: &str = r#"
 // Plan 622 T1.4 — the kb bias table rides the f16 WIRE, so this module needs
-// an EXACT f16→f32 decode in BOTH KV hatches. Module-local (no cross-module
-// include); deliberately NOT the mma `kv_f16_to_f32` transcription below —
-// that copy's normal branch is the known-broken twin's transcription (see
-// the Plan-551/773 lane's posture); the bias decode must be exact.
+// an exact f16→f32 decode in BOTH KV hatches. Module-local (no cross-module
+// include). The decode is the ONE-INSTRUCTION hardware widen (`cvt.f32.f16`,
+// IEEE-exact identical to the bit form — the FA module's 4090 cost gate
+// measured the branchy bit-manip decode at +0.13 armed tax; only the loads
+// hoist, the decode arithmetic does not). Deliberately NOT the mma
+// `kv_f16_to_f32` transcription below — that copy's normal branch is the
+// known-broken twin's transcription (see the Plan-551/773 lane's posture);
+// the bias decode must be exact.
 __device__ __forceinline__ float kb_f16_to_f32(unsigned short h)
 {
-    const unsigned int sign = ((unsigned int)h & 0x8000u) << 16;
-    const unsigned int exp = ((unsigned int)h >> 10) & 0x1fu;
-    unsigned int mant = (unsigned int)h & 0x3ffu;
-    if (exp == 0x1fu) {
-        return __uint_as_float(sign | 0x7f800000u
-                               | (mant ? (0x400000u | (mant << 13)) : 0u));
-    }
-    if (exp == 0) {
-        if (mant == 0) return __uint_as_float(sign);
-        int s = 0;
-        while (!(mant & 0x400u)) { mant <<= 1; s++; }
-        return __uint_as_float(sign | ((unsigned int)(113 - s) << 23)
-                               | ((mant & 0x3ffu) << 13));
-    }
-    return __uint_as_float(sign | ((exp + 112u) << 23) | (mant << 13));
+    float f;
+    asm("cvt.f32.f16 %0, %1;" : "=f"(f) : "h"(h));
+    return f;
 }
 #ifdef KV_F16
 typedef unsigned short kv_elt;

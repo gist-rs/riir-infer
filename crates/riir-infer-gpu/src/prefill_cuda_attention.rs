@@ -370,23 +370,17 @@ extern "C" __global__ void kv_cache_fill_split_dp(
 // exp weights, serial Phase-4 accumulation, final 1/sum + sigmoid gate.
 // ---------------------------------------------------------------------------
 // Plan 622 T1.4 — the kb bias table rides the f16 WIRE; this module needs
-// its own exact decode (separate nvrtc module — no cross-module include;
-// the canonical module has no KV hatch of its own). Textbook bit form,
-// the same expression the decode/FA modules carry.
+// its own decode (separate nvrtc module — no cross-module include; the
+// canonical module has no KV hatch of its own). The decode is the
+// ONE-INSTRUCTION hardware widen (`cvt.f32.f16`, IEEE-exact identical to
+// the bit form — the FA module's 4090 cost gate measured the branchy
+// bit-manip decode at +0.13 armed tax; only the loads hoist). Inline PTX
+// is proven in nvrtc by the FA module's `f32_to_f16_rn`.
 __device__ __forceinline__ float kb_f16_to_f32(unsigned short h)
 {
-    const unsigned int sign = ((unsigned int)h & 0x8000u) << 16;
-    const unsigned int exp = ((unsigned int)h >> 10) & 0x1Fu;
-    const unsigned int frac = h & 0x03FFu;
-    if (exp == 0) {
-        if (frac == 0) return __int_as_float(sign);
-        const float v = (float)frac * 5.9604644775390625e-08f;
-        return sign ? -v : v;
-    }
-    if (exp == 31) {
-        return __int_as_float(sign | 0x7F800000u | (frac << 13));
-    }
-    return __int_as_float(sign | ((exp + 112u) << 23) | (frac << 13));
+    float f;
+    asm("cvt.f32.f16 %0, %1;" : "=f"(f) : "h"(h));
+    return f;
 }
 #define ATTENTION(NAME, DOTF, ACCF, EXPF, PH3, RESF, INVF)                      \
 extern "C" __global__ void NAME(                                               \

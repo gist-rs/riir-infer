@@ -203,6 +203,20 @@ __device__ __forceinline__ float si_transform_score(
 // a per-tile smem stage alternative measured WORSE, 1.166, and was
 // reverted). Out-of-range reads land in-allocation by the clamp; their
 // values are never observed.
+//
+// Plan 622 T1.4 lever, landing record: the f16 WIRE's first cut decoded
+// with the branchy bit-manip `f16_to32_exact` and the 4090 cost gate
+// measured the tax WORSE than f32 (1.24–1.29 vs 1.10–1.13) — the decode
+// is ~10 ALU ops per element and sits AFTER the mma where only the loads
+// hoist. The decode below is the single-instruction hardware widen
+// (`cvt.f32.f16`, the exact same IEEE widening — subnormals/Inf/NaN
+// included — as the bit form; inline PTX is proven in this module by
+// `f32_to_f16_rn`'s `cvt.rn.f16.f32`).
+__device__ __forceinline__ float kb_f16_to_f32(unsigned short h) {
+    float f;
+    asm("cvt.f32.f16 %0, %1;" : "=f"(f) : "h"(h));
+    return f;
+}
 
 __device__ __forceinline__ unsigned int h2_pack(unsigned short lo, unsigned short hi) {
     return (unsigned int)lo | ((unsigned int)hi << 16);
@@ -649,7 +663,7 @@ __device__ __forceinline__ void att_pf_fa_body(
             if (kb_lane) {
                 const int kv_c = min(kv, kv_len - 1);
                 KQ_C.x[l] = __fadd_rn(
-                    KQ_C.x[l], f16_to_f32_exact(kb_bias[attn_head * kb_stride + kv_c]));
+                    KQ_C.x[l], kb_f16_to_f32(kb_bias[attn_head * kb_stride + kv_c]));
             }
             if (si_lane && kv < lim) {
                 KQ_C.x[l] = si_transform_score(KQ_C.x[l], kv, lim - 1,
