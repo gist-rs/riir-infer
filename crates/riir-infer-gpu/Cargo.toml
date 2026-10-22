@@ -343,6 +343,13 @@ required-features = ["edlm_gpu"]
 name = "plan620_prefill_fa_si_gate"
 required-features = ["ternary_gemv_cuda_raw", "ternary_gemm_batched", "cubecl_runtime"]
 
+# Plan 622 T1.4 — the kb cost gate at the FA prefill arm (#[ignore]d bench
+# lane; the 4090 runs it with --release -- --ignored). Same posture as the
+# plan620 row above; the whole-file #![cfg] keeps the count honest.
+[[test]]
+name = "plan622_keybias_fa_cost_gate"
+required-features = ["ternary_gemv_cuda_raw", "ternary_gemm_batched", "cubecl_runtime"]
+
 # riir-infer Issue 032 — G1 of the Metal folded (Bonsai-2) CubeCL prefill vs
 # the folded decode eager path, plus the pre-rotation pin (T5). The
 # whole-file #![cfg] keeps the count honest; this row keeps the reader honest

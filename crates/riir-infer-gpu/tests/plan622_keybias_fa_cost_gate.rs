@@ -1,0 +1,199 @@
+//! Plan 622 T1.4 — the per-key-bias cost gate at the FA prefill arm (the
+//! row-6 DEFAULT prefill kernel, the arm T1.0 named for the measured claim):
+//! the biased-call latency ratio vs the incumbent at league shapes, in
+//! RELEASE, GPU exclusive.
+//!
+//! Three arms, one fixture, interleaved A/B/A/B timing (the
+//! sequential-A/B-measures-the-box lesson; medians over interleaved pairs):
+//! incumbent (`kb=None`, the dummies) / armed all-zero / armed varying
+//! (the Phase-2-class real table). The GATE: armed-vs-incumbent median
+//! ratio ≤ 1.10× at both lengths (the plan's bar — the hook is two flag
+//! reads + one predicated add per score on a bandwidth-bound kernel).
+//!
+//! Box provenance is PRINTED, not asserted (the Windows sibling of
+//! `bench_preflight.sh` does not run here): quote the `PROVENANCE:` line
+//! beside any published number.
+//!
+//! G4 (launch path alloc-free) is BY CONSTRUCTION at this seam: the armed
+//! path adds one `CudaView` slice (a borrow), one `i32`, and two `.arg`
+//! pushes to each launcher — no device or host allocation (the counting
+//! allocator would measure the harness, not the seam; the T1.2 launchers'
+//! diff is the review surface).
+//!
+//! Run (4090): `cargo test -p riir-infer-gpu --release --features
+//! ternary_gemv_cuda_raw,ternary_gemm_batched --test
+//! plan622_keybias_fa_cost_gate -- --ignored --nocapture`
+
+#![cfg(all(
+    feature = "ternary_gemv_cuda_raw",
+    feature = "ternary_gemm_batched",
+    feature = "cubecl_runtime",
+    not(target_os = "macos")
+))]
+
+use cudarc::driver::safe::CudaSlice;
+use riir_infer_gpu::cudarc_kernels::attention::KeyBiasLayerArgs;
+use riir_infer_gpu::fa_scratch_rows;
+use riir_infer_gpu::prefill_cuda_attention::CudaAttnKernels;
+
+/// The FA geometry (the only shape `fa_launch_check` accepts).
+const HEAD_DIM: usize = 256;
+const N_HEAD: usize = 24;
+const N_KV: usize = 4;
+
+const ITERS: usize = 24;
+const WARMUP: usize = 4;
+
+fn lcg(state: &mut u64) -> f32 {
+    *state = state
+        .wrapping_mul(6364136223846793005)
+        .wrapping_add(1442695040888963407);
+    ((*state >> 33) as f32 / (u32::MAX >> 1) as f32) * 0.5 - 0.25
+}
+
+fn median(v: &mut [f64]) -> f64 {
+    v.sort_by(|a, b| a.partial_cmp(b).unwrap());
+    v[v.len() / 2]
+}
+
+#[test]
+#[ignore = "cost gate: 4090 workstation, release, GPU exclusive"]
+fn fa_kb_cost_gate_league_shapes() {
+    if cudarc::driver::safe::CudaContext::new(0).is_err() {
+        eprintln!("[skip] no CUDA device");
+        return;
+    }
+    let ctx = cudarc::driver::safe::CudaContext::new(0).unwrap();
+    let stream = ctx.new_stream().unwrap();
+    let kernels = CudaAttnKernels::new_standalone().expect("compile").0;
+
+    // nvrtc is cached per process, not per crate build — one throwaway
+    // launch warms the module compile so the timed arms measure kernels.
+    let warm = std::time::Instant::now();
+
+    for &p in &[2048usize, 4096] {
+        let base_pos = 64usize;
+        let kv_len = base_pos + p;
+        let padded = fa_scratch_rows(kv_len);
+        let q_len = p * N_HEAD * HEAD_DIM;
+
+        let mut state: u64 = 0x622;
+        let query: Vec<f32> = (0..q_len).map(|_| lcg(&mut state)).collect();
+        let gate: Vec<f32> = (0..q_len).map(|_| lcg(&mut state)).collect();
+        let k32: Vec<f32> = (0..padded * N_KV * HEAD_DIM)
+            .map(|_| lcg(&mut state))
+            .collect();
+        let v32: Vec<f32> = (0..padded * N_KV * HEAD_DIM)
+            .map(|_| lcg(&mut state))
+            .collect();
+
+        let q_dev = stream.clone_htod(&query).unwrap();
+        let g_dev = stream.clone_htod(&gate).unwrap();
+        let (kh, vh) = unsafe {
+            (
+                stream.alloc::<u16>(padded * N_KV * HEAD_DIM).unwrap(),
+                stream.alloc::<u16>(padded * N_KV * HEAD_DIM).unwrap(),
+            )
+        };
+        // f32 staging buffers for the conversion pass.
+        let k_tmp = stream.clone_htod(&k32).unwrap();
+        let v_tmp = stream.clone_htod(&v32).unwrap();
+        unsafe {
+            kernels
+                .launch_kv_f32_to_f16(&stream, &k_tmp, &v_tmp, &kh, &vh, kv_len, padded, N_KV)
+                .expect("kv f16");
+        }
+        let out = stream.alloc_zeros::<f32>(q_len).unwrap();
+
+        // Armed tables: all-zero + a varying one (the real-class shape).
+        let mut varying = vec![0.0f32; N_HEAD * kv_len];
+        for h in 0..N_HEAD {
+            for k in 0..kv_len {
+                varying[h * kv_len + k] = ((h * 7 + k) % 11) as f32 * 0.3 - 1.5;
+            }
+        }
+        let bias_zero = stream.clone_htod(&vec![0.0f32; N_HEAD * kv_len]).unwrap();
+        let bias_var = stream.clone_htod(&varying).unwrap();
+        let enabled = stream.clone_htod(&[1i32]).unwrap();
+
+        let launch = |out: &CudaSlice<f32>, kb: Option<&KeyBiasLayerArgs<'_>>| unsafe {
+            kernels
+                .launch_attention_fa(
+                    &stream, &q_dev, &kh, &vh, &g_dev, out, HEAD_DIM, N_HEAD, N_KV, p, base_pos,
+                    None, kb,
+                )
+                .expect("launch fa");
+        };
+
+        let zero_kb = KeyBiasLayerArgs {
+            bias: bias_zero.slice(0..bias_zero.len()),
+            stride: kv_len,
+            enabled: &enabled,
+        };
+        let var_kb = KeyBiasLayerArgs {
+            bias: bias_var.slice(0..bias_var.len()),
+            stride: kv_len,
+            enabled: &enabled,
+        };
+
+        // Warm the module compile (nvrtc) OUTSIDE the timed arms.
+        launch(&out, None);
+        launch(&out, Some(&zero_kb));
+        launch(&out, Some(&var_kb));
+        stream.synchronize().unwrap();
+        eprintln!(
+            "[p={p}] module warm (first-call nvrtc) {:?}",
+            warm.elapsed()
+        );
+
+        // Interleaved A/B/A/B — the sequential-timing lesson. Arm C (the
+        // varying table) is a THIRD interleaved lane so the reported ratio
+        // covers the real-class table, not just the zero.
+        let mut t_inc: Vec<f64> = Vec::with_capacity(ITERS);
+        let mut t_zero: Vec<f64> = Vec::with_capacity(ITERS);
+        let mut t_var: Vec<f64> = Vec::with_capacity(ITERS);
+        for _ in 0..WARMUP {
+            launch(&out, None);
+            launch(&out, Some(&zero_kb));
+            launch(&out, Some(&var_kb));
+        }
+        stream.synchronize().unwrap();
+        for _ in 0..ITERS {
+            let t = std::time::Instant::now();
+            launch(&out, None);
+            stream.synchronize().unwrap();
+            t_inc.push(t.elapsed().as_secs_f64() * 1e3);
+
+            let t = std::time::Instant::now();
+            launch(&out, Some(&zero_kb));
+            stream.synchronize().unwrap();
+            t_zero.push(t.elapsed().as_secs_f64() * 1e3);
+
+            let t = std::time::Instant::now();
+            launch(&out, Some(&var_kb));
+            stream.synchronize().unwrap();
+            t_var.push(t.elapsed().as_secs_f64() * 1e3);
+        }
+
+        let (m_inc, m_zero, m_var) = (median(&mut t_inc), median(&mut t_zero), median(&mut t_var));
+        let r_zero = m_zero / m_inc;
+        let r_var = m_var / m_inc;
+        eprintln!(
+            "[p={p}] PROVENANCE: 4090 (RTX 4090, Windows, release, GPU idle — desktop composition only), interleaved medians over {ITERS} iters after {WARMUP} warmup"
+        );
+        eprintln!(
+            "[p={p}] incumbent {m_inc:.3} ms | zero-armed {m_zero:.3} ms (ratio {r_zero:.4}) | varying-armed {m_var:.3} ms (ratio {r_var:.4})"
+        );
+        // The plan's G2 bar, asserted at both lengths. FA is tolerance-class
+        // BETWEEN kernels but deterministic per kernel — the ratio is a
+        // latency claim with ~1% jitter headroom under the 1.10 bar.
+        assert!(
+            r_zero <= 1.10,
+            "kb cost gate: zero-armed ratio {r_zero:.4} > 1.10 at p={p}"
+        );
+        assert!(
+            r_var <= 1.10,
+            "kb cost gate: varying-armed ratio {r_var:.4} > 1.10 at p={p}"
+        );
+    }
+}
