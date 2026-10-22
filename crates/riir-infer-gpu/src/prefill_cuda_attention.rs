@@ -376,7 +376,7 @@ extern "C" __global__ void kv_cache_fill_split_dp(
 // the bit form — the FA module's 4090 cost gate measured the branchy
 // bit-manip decode at +0.13 armed tax; only the loads hoist). Inline PTX
 // is proven in nvrtc by the FA module's `f32_to_f16_rn`.
-__device__ __forceinline__ float kb_f16_to_f32(unsigned short h)
+__device__ __forceinline__ float kb_f16_canon_to_f32(unsigned short h)
 {
     float f;
     asm("cvt.f32.f16 %0, %1;" : "=f"(f) : "h"(h));
@@ -427,7 +427,7 @@ extern "C" __global__ void NAME(                                               \
             if (kb_on != 0) { /* Plan 622 — post-scale, pre-max; f16 wire */  \
                 my_score = __fadd_rn(                                          \
                     my_score,                                                  \
-                    kb_f16_to_f32(kb_bias[(long)head_idx * kb_stride + pos])); \
+                    kb_f16_canon_to_f32(kb_bias[(long)head_idx * kb_stride + pos])); \
             }                                                                  \
         }                                                                      \
         smem[tid] = my_score;                                                  \
