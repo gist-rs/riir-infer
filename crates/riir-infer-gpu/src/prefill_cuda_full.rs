@@ -3095,7 +3095,8 @@ fn whole_prefill_inner(
                         p,
                         conv_dim,
                         ks,
-                    )?;
+                    )
+                    .map_err(|e| format!("gdn/conv: {e}"))?;
                     if gdn_sub_sync {
                         let _ = stream.synchronize();
                         gdn_sub.borrow_mut().conv += t_sub.elapsed().as_micros();
@@ -3103,7 +3104,8 @@ fn whole_prefill_inner(
                     t_sub = std::time::Instant::now();
                     stack
                         .dn
-                        .launch_carry_update(stream, qkv_b, conv_state, p, conv_dim, ks)?;
+                        .launch_carry_update(stream, qkv_b, conv_state, p, conv_dim, ks)
+                        .map_err(|e| format!("gdn/carry: {e}"))?;
                     if gdn_sub_sync {
                         let _ = stream.synchronize();
                         gdn_sub.borrow_mut().carry += t_sub.elapsed().as_micros();
@@ -3122,7 +3124,8 @@ fn whole_prefill_inner(
                         decay_b,
                         n_v,
                         p * n_v,
-                    )?;
+                    )
+                    .map_err(|e| format!("gdn/beta: {e}"))?;
                     if gdn_sub_sync {
                         let _ = stream.synchronize();
                         gdn_sub.borrow_mut().beta += t_sub.elapsed().as_micros();
@@ -3138,7 +3141,8 @@ fn whole_prefill_inner(
                         n_v,
                         hd,
                         p * 3 * v_dim,
-                    )?;
+                    )
+                    .map_err(|e| format!("gdn/expand: {e}"))?;
                     if gdn_sub_sync {
                         let _ = stream.synchronize();
                         gdn_sub.borrow_mut().expand += t_sub.elapsed().as_micros();
@@ -3153,7 +3157,8 @@ fn whole_prefill_inner(
                             .gdn_mma
                             .as_ref()
                             .expect("gdn_mma_ready implies Some")
-                            .launch(stream, qkvx_b, beta_b, decay_b, dn_state, rec_b, n_v, p)?;
+                            .launch(stream, qkvx_b, beta_b, decay_b, dn_state, rec_b, n_v, p)
+                            .map_err(|e| format!("gdn/rec_mma: {e}"))?;
                     } else if gdn_chunked_ready {
                         // Arm 12 — the chunked recurrence (NOT bit-identical to
                         // rowpar; the llama.cpp numerics class — see the knob doc).
@@ -3178,7 +3183,8 @@ fn whole_prefill_inner(
                                 n_v,
                                 p,
                                 v_dim,
-                            )?;
+                            )
+                            .map_err(|e| format!("gdn/rec_chunked: {e}"))?;
                     } else if let Some(l8k) = stack.l8.as_ref().filter(|_| gdn_l8_wanted) {
                         // Plan 621 — the L8 eager recurrence: the rowpar
                         // class's L8 rung (bit-identical to the rowpar
@@ -3195,12 +3201,14 @@ fn whole_prefill_inner(
                             n_v,
                             p,
                             v_dim,
-                        )?;
+                        )
+                        .map_err(|e| format!("gdn/rec_l8: {e}"))?;
                     } else {
                         stack.dn.launch_recurrence(
                             stream, rd, ru, rp, rsc, qkvx_b, beta_b, decay_b, dn_state, rec_b, hd,
                             n_v, p, v_dim,
-                        )?;
+                        )
+                        .map_err(|e| format!("gdn/rec: {e}"))?;
                     }
                     if gdn_sub_sync {
                         let _ = stream.synchronize();
@@ -3219,7 +3227,8 @@ fn whole_prefill_inner(
                         p * n_v,
                         hd,
                         eps,
-                    )?;
+                    )
+                    .map_err(|e| format!("gdn/lnorm: {e}"))?;
                     if gdn_sub_sync {
                         let _ = stream.synchronize();
                         gdn_sub.borrow_mut().lnorm += t_sub.elapsed().as_micros();
@@ -3227,7 +3236,8 @@ fn whole_prefill_inner(
                     t_sub = std::time::Instant::now();
                     stack
                         .dn
-                        .launch_z_gating(stream, ze, zd, rec_b, z_b, p * v_dim)?;
+                        .launch_z_gating(stream, ze, zd, rec_b, z_b, p * v_dim)
+                        .map_err(|e| format!("gdn/zgate: {e}"))?;
                     if gdn_sub_sync {
                         let _ = stream.synchronize();
                         gdn_sub.borrow_mut().zgate += t_sub.elapsed().as_micros();
