@@ -5205,13 +5205,17 @@ mod tests {
         Some(())
     }
 
-    /// Issue 1112 kernel-level bisection: `launch_gemm` at n=1024, p=137
-    /// sweeping m across the TM=128 tile boundaries. The arm8 whole-prefill
-    /// lane faults at m=8 (the a/b projections — the first sub-tile m the
-    /// lane has ever served; every league m is a 2048+-multiple and dispatches
-    /// v5) while m=1024 is clean in the same process — this sweep pins the
-    /// exact breaking m set on the 4090 and, once the fix lands, is that
-    /// fix's kernel-level regression (run with `-- --ignored --nocapture`).
+    /// Issue 1112 kernel-level bisection record + regression: `launch_gemm`
+    /// at n=1024, p=137 sweeping m across the TM=128 tile boundaries, in
+    /// oversized AND exact-sized buffers. VERDICT (2026-10-23, 4090): every
+    /// m is GREEN in both passes — the kernels were never the fault; the
+    /// in-model `gemm/a` crash was the whole-prefill plain lane mirroring the
+    /// EMPTY dummy `in_proj_a/b` TernaryHandles of an unfolded dense-a/b
+    /// (Bonsai-2 escape-set) file and launching over 0-word weight buffers
+    /// (fixed in prefill_cuda_full's layer loop). This sweep stays as the
+    /// sub-tile-m shape regression for the launch_gemm family (both
+    /// generations ran it during the bisection; run with
+    /// `-- --ignored --nocapture`).
     #[test]
     #[ignore = "4090 lane — issue 1112 m-tail bisection (sync after every launch)"]
     fn gemm_v4_m_tail_sweep_issue1112() {

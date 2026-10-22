@@ -908,6 +908,14 @@ struct FullStack {
     /// model then refuses at the fall-through gate in
     /// `prefill_tokens_chunk`).
     rotation_tables: OnceLock<Option<Arc<crate::deltanet_rotation_cudarc::RotationTables>>>,
+    /// Issue 1112 — the rotation-FREE dense escape-set GEMM kernels, for
+    /// UNFOLDED models whose a/b are dense Bonsai-2 (the synth/escape-set
+    /// file class): their `in_proj_a/b` TernaryHandles are EMPTY dummies by
+    /// upload contract, so the plain in-proj lane must serve a/b through the
+    /// same batched dense GEMM the folded lane uses (the escape set stays
+    /// full-precision). `None` = the compile failed → the caller falls
+    /// through to CubeCL (bit-safe).
+    dense_ab_kernels: OnceLock<Option<Arc<crate::deltanet_rotation_cudarc::RotationKernels>>>,
     /// Persistent state mirrors — allocated once; Mutex for &mut slice views
     /// (the uploads need `try_slice_mut`).
     states: OnceLock<Option<Mutex<StateMirrors>>>,
@@ -1116,6 +1124,7 @@ fn build_full_stack() -> Result<FullStack, String> {
         // field doc on the struct): first-fwd-wins, inner None = build
         // failure → the fall-through gate refuses folded loudly.
         rotation_tables: OnceLock::new(),
+        dense_ab_kernels: OnceLock::new(),
         states: OnceLock::new(),
         mirror_clean: AtomicBool::new(false),
         mirrors_at_reset: AtomicBool::new(false),
@@ -3079,6 +3088,34 @@ fn whole_prefill_inner(
                             .gemm_dense_ab_batched(stream, normx, da, db, a_b, b_b, p, n_v, n)
                             .map_err(|e| e.to_string())?;
                     }
+                } else if let (Some(da), Some(db)) = (lw3.dense_a.as_ref(), lw3.dense_b.as_ref()) {
+                    // Issue 1112 — UNFOLDED dense-a/b (the Bonsai-2 escape set
+                    // without the fold): the `in_proj_a/b` TernaryHandles are
+                    // EMPTY dummies (upload_layer_weights), so mirroring them
+                    // launched the a/b GEMMs over 0-word weight buffers — the
+                    // sticky illegal address. The escape set dispatches through
+                    // the same batched dense GEMM the folded lane uses (the
+                    // ternary handles are never read; `rows <= 48` — a wider
+                    // escape set refuses the whole-prefill arm, falling through
+                    // to CubeCL bit-safely).
+                    if n_v > 48 {
+                        return Err(format!(
+                            "dense a/b rows {n_v} exceed the dense-ab tile (48) — \
+                             the whole-prefill arm refuses unfolded wide escape sets"
+                        ));
+                    }
+                    let dense_ab = stack
+                        .dense_ab_kernels
+                        .get_or_init(|| {
+                            crate::deltanet_rotation_cudarc::RotationKernels::new(stream.context())
+                                .ok()
+                                .map(Arc::new)
+                        })
+                        .as_ref()
+                        .ok_or("dense ab kernels")?;
+                    dense_ab
+                        .gemm_dense_ab_batched(stream, normx, da, db, a_b, b_b, p, n_v, n)
+                        .map_err(|e| format!("gemm/dense_ab: {e}"))?;
                 } else {
                     let a_c = mma_mirror(client, stream, &lw.in_proj_a).ok_or("a mirror")?;
                     let b_c = mma_mirror(client, stream, &lw.in_proj_b).ok_or("b mirror")?;
