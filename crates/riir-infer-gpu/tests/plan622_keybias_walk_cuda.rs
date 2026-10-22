@@ -31,12 +31,15 @@
 //! 6. `disarmed` — flag back to 0 → bit-identical to (1) (the flip-back
 //!    under the same capture).
 //!
-//! ⛔ DISPOSITION (riir-infer Issue 1112): the whole-prefill arm8 lane has a
-//! PRE-EXISTING latent crash on unfolded synth shapes (the incumbent run
-//! poisons the CUDA context before any kb code executes — the bisect is in
-//! the issue), so this walk currently CANNOT run to its kb assertions;
-//! #[ignore]d with the issue ref until the arm8 fix lands, then un-ignored
-//! (the walk IS the regression test for that fix).
+//! ⛔ DISPOSITION (riir-infer Issue 1112): FIXED 2026-10-23 — the arm8 crash
+//! was the whole-prefill plain lane mirroring the EMPTY dummy `in_proj_a/b`
+//! TernaryHandles of an unfolded dense-a/b (Bonsai-2 escape-set) file and
+//! launching over 0-word weight buffers (the plain lane now dispatches the
+//! dense escape set through the same batched dense GEMM the folded lane
+//! uses). This walk runs GREEN and IS that fix's regression test; a second
+//! latent posture trap it surfaced on the way (the graph lane refusing the
+//! canonical ahd!=256 arm) is handled by the walk's explicit graphs-off
+//! knob below.
 
 #![cfg(all(
     feature = "tokengate",
@@ -101,7 +104,6 @@ fn table_with(
 }
 
 #[test]
-#[ignore = "riir-infer Issue 1112 — the arm8 whole-prefill lane crashes on unfolded synth shapes (sticky context poison, pre-existing); un-ignore when the fix lands"]
 fn plan622_cuda_model_walk_kb_session_arms() {
     let Ok(_cl_ctx) = riir_infer_gpu::CubeCLContext::new() else {
         eprintln!("[skip] no GPU (CubeCLContext::new failed) — the walk is a 4090-lane gate");
