@@ -57,6 +57,18 @@
 //!   bit-identical incumbent. The kill-switch fallback arms (split-KV,
 //!   prefetch mq8 ladder) stay unhooked by scope (the FA-engaged default
 //!   posture only).
+//! - **Plan 622 T1.2/T1.4 — the per-key bias hook**: the additive
+//!   attention-logit bias rides the causal-mask loop (the one place both
+//!   the element's absolute key pos and its query pos are in register),
+//!   kb BEFORE si (the pinned scale → kb → si order), pre-max (the max
+//!   tracks the BIASED row — the CPU KeyBiasLayout contract). T1.4: the
+//!   bias values stage into a per-tile smem double buffer (8 head rows x
+//!   32 keys, pitch 40) instead of per-element global reads — the cost
+//!   gate measured the direct-read tax at 1.12x on p=2048 (scattered
+//!   L2 traffic); the stage coalesces it to one 128 B read per head row
+//!   per tile and rides the KV loop's OWN barrier pair (zero added
+//!   __syncthreads). Flag-0 leaves every added branch dead —
+//!   bit-identical incumbent.
 //! - **No stream-K / no parallel_blocks** (v1): grid = ceil(p/4) x n_kv
 //!   (1024x4 at p=4096) — enough blocks to fill 128 SMs; the causal
 //!   load-imbalance tail is the measured T2 question (the fixup/combine
@@ -108,10 +120,13 @@
 #![allow(clippy::too_many_arguments)]
 
 /// Dynamic smem: the two staging regions (tile_Q recycled as tile_K after
-/// the Q registers are loaded, + tile_V) — 2 x 32 x 132 x 4 B = 33,792 B.
-/// Under the 48 KB default budget — no CU_FUNC_ATTRIBUTE opt-in needed
-/// (unlike the gang family's 49,440 B).
-pub(crate) const ATTENTION_FA_SMEM_BYTES: usize = 2 * 32 * 132 * 4;
+/// the Q registers are loaded, + tile_V) — 2 x 32 x 132 x 4 B = 33,792 B —
+/// plus the Plan 622 T1.4 kb-bias double buffer (2 x 8 head rows x 40-pitch
+/// floats = 2,560 B; the pitch-40 lane makes the fragment reads
+/// bank-conflict-free and the stage rides the loop's own barriers).
+/// 36,352 B total — still under the 48 KB default budget, no
+/// CU_FUNC_ATTRIBUTE opt-in needed (unlike the gang family's 49,440 B).
+pub(crate) const ATTENTION_FA_SMEM_BYTES: usize = 2 * 32 * 132 * 4 + 2 * 8 * 40 * 4;
 
 /// ceil to the nbatch_fa=32 row grid — the f16 scratch padding contract.
 pub fn fa_scratch_rows(kv_len: usize) -> usize {
@@ -141,6 +156,16 @@ pub(crate) const ATTENTION_PREFILL_FA_CUDA_SRC: &str = r#"
 #define FA_STRIDE_TILE (FA_NBATCH_K2 + 4) /* 132 u32 — +4 bank pad */
 #define FA_NBATCH_COMBINE FA_NBATCH_V2
 
+// Plan 622 T1.4 — the kb smem stage geometry: 8 head-lane rows (the
+// ncols2 packing: gqa_ratio <= 8 real rows, the pad rows stage 0) x 32
+// keys per KV tile, at a 40-float pitch. Pitch 40 (not 32) makes the
+// fragment reads bank-conflict-free: thread (lane) reads row h = lane>>2
+// at key kv_half + 2*(lane%4) + d, so the bank is (8h + 2lq + d) mod 32 —
+// unique across the warp for every fixed fragment index d.
+#define FA_KB_ROWS 8
+#define FA_KB_PITCH 40
+#define FA_KB_BUF (FA_KB_ROWS * FA_KB_PITCH) /* one buffer, floats */
+
 // The two production softmax traps, verbatim (fattn-common.cuh L11/L19).
 #define FA_FTZ_THRESHOLD -20.0f
 #define FA_KQ_MAX_OFFSET (3.0f * 0.6931f)
@@ -165,24 +190,30 @@ __device__ __forceinline__ float si_transform_score(
     return __fadd_rn(__fmul_rn(a, __fmul_rn(raw, si_inv_sigma[head_idx])), m);
 }
 
-// Plan 622 T1.2 — the per-key × per-head additive attention-logit bias, ONE
-// copy for both FA entries (eager + devpos share the body). Mirrors the
-// decode module's `kb_bias_score` EXACTLY — same expression, same
-// single-rounding intrinsic; the two compiled modules keep the one bias law
-// in lockstep (the FA source is a separate nvrtc module by construction —
-// no cross-module include). Applied in the causal-mask loop (the one place
-// both the element's absolute key pos and its query pos are in register),
-// on in-range elements only and BEFORE the max pass (the max tracks the
-// BIASED row — the CPU KeyBiasLayout contract); the composition order with
-// the si affine is kb BEFORE si (the decode modules' pinned order). Flag-0
+// Plan 622 T1.2 — the per-key × per-head additive attention-logit bias,
+// ONE copy for both FA entries (eager + devpos share the body). Applied
+// in the causal-mask loop (the one place both the element's absolute key
+// pos and its query pos are in register), on in-range elements only and
+// BEFORE the max pass (the max tracks the BIASED row — the CPU
+// KeyBiasLayout contract); the composition order with the si affine is
+// kb BEFORE si (the decode modules' pinned order). Flag-0
 // (`*kb_enabled == 0`) leaves every added branch dead — bit-identical
 // incumbent.
-__device__ __forceinline__ float kb_bias_score(
-    float raw, int pos, int head_idx, int kb_stride,
-    const float* __restrict__ kb_bias)
-{
-    return __fadd_rn(raw, kb_bias[head_idx * kb_stride + pos]);
-}
+//
+// Plan 622 T1.4 — the read SOURCE is the per-tile smem stage, not a
+// per-element global load: the direct form measured a 1.12x armed tax at
+// p=2048 (the cost gate: ~1024 scattered 4 B L2 reads per tile; the
+// zero-table ≡ varying-table pair proved the LOADS are the cost, not the
+// data). The stage gathers each KV tile's rows — 8 heads x 32 keys = 256
+// floats — with each warp's 32 lanes covering ONE head row contiguously
+// (one 128 B coalesced read per row) and serves the mask loop from smem.
+// The staged float is the EXACT global float (plain copy, no arithmetic)
+// — bit-identity is by construction. Double-buffered with the NEXT tile
+// staged right after the loop's top barrier (the loads overlap the V-tile
+// DMA + the KQ mma); the loop's OWN barrier pair publishes each buffer
+// and separates every write from the previous reader — zero added
+// __syncthreads, no WAR race (write buf (k+1)&1 during iter k; the last
+// read of that buffer was iter k-1, two barriers back).
 
 __device__ __forceinline__ unsigned int h2_pack(unsigned short lo, unsigned short hi) {
     return (unsigned int)lo | ((unsigned int)hi << 16);
@@ -454,6 +485,31 @@ __device__ __forceinline__ void fa_load_tile(
     }
 }
 
+// Plan 622 T1.4 — stage KV tile k0's bias rows into `dst` (one [8][40]
+// buffer): 256 elements / 128 threads = 2 per thread, idx = h*32 + kv
+// keeping each warp's 32 lanes inside ONE head row (a coalesced 128 B
+// global read per row; the second pass is the warp's +4 row). Pad head
+// lanes (h >= gqa_ratio) and keys past kv_len stage 0.0f — their mask-loop
+// reads are predicated off anyway, the zero is belt-and-braces. The
+// address arithmetic is the incumbent int form (head*kb_stride + pos),
+// matching the decode module's kb_bias_score expression-for-expression.
+__device__ __forceinline__ void fa_stage_kb(
+    float* dst, const float* __restrict__ kb_bias, int kb_stride,
+    int kv_len, int k0, int H0, int gqa_ratio)
+{
+#pragma unroll
+    for (int idx = fa_tid_flat(); idx < FA_KB_ROWS * FA_NBATCH_FA;
+         idx += FA_NTHREADS) {
+        const int h = idx / FA_NBATCH_FA;
+        const int kv = idx % FA_NBATCH_FA;
+        float v = 0.0f;
+        if (h < gqa_ratio && k0 + kv < kv_len) {
+            v = kb_bias[(H0 + h) * kb_stride + k0 + kv];
+        }
+        dst[h * FA_KB_PITCH + kv] = v;
+    }
+}
+
 // ---------------------------------------------------------------------------
 // The kernel body — the reference's process_tile + iter (wide path),
 // inlined, our tensors + analytic causal + sigmoid gate epilogue.
@@ -491,6 +547,9 @@ __device__ __forceinline__ void att_pf_fa_body(
     extern __shared__ unsigned int fa_smem[];
     unsigned int* tile_Q = fa_smem;                          /* also tile_K */
     unsigned int* tile_V = fa_smem + FA_NCOLS * FA_STRIDE_TILE;
+    /* Plan 622 T1.4 — the kb double buffer lives after the two tiles
+     * (the smem budget grew by exactly this — see the Rust const). */
+    float* kb_tile = (float*)(fa_smem + 2 * FA_NCOLS * FA_STRIDE_TILE);
 
     const int stride_kv_elems = n_kv * 256; /* f16 elems per kv row */
 
@@ -572,6 +631,14 @@ __device__ __forceinline__ void att_pf_fa_body(
     // ---- Preload K tile 0 (cp.async into the tile_K region).
     fa_load_tile(key_h, tile_Q, 0, stride_kv_elems);
 
+    // Plan 622 T1.4 — stage tile 0's bias rows before the loop; the loop's
+    // first top barrier publishes them beside K(0). (kb_on is uniform —
+    // the branch is free, and flag-0 skips every stage load.)
+    if (kb_on != 0) {
+        fa_stage_kb(kb_tile, kb_bias, kb_stride, kv_len, 0,
+                    kv_group * gqa_ratio, gqa_ratio);
+    }
+
     T_AB VKQ_C[16];
 #pragma unroll
     for (int i = 0; i < 16; ++i) {
@@ -588,6 +655,20 @@ __device__ __forceinline__ void att_pf_fa_body(
         fa_mma::cp_async_wait_all();
         __syncthreads();
         fa_load_tile(val_h, tile_V, k_VKQ_0, stride_kv_elems);
+
+        // Plan 622 T1.4 — stage the NEXT tile's bias rows here: the loads
+        // hide under the KQ mma + softmax compute, and the loop's OWN
+        // barriers do all the synchronizing — the bottom barrier publishes
+        // the buffer beside V(kb0) (the last read of it was iter kb0-1,
+        // two barriers back — no WAR race), the next top barrier orders it
+        // before iter kb0+1's mask loop. kb0+1 may sit past the causal
+        // stop — the stage is guarded (zeros past kv_len) and the stale
+        // buffer is never read.
+        if (kb_on != 0) {
+            fa_stage_kb(kb_tile + ((kb0 + 1) & 1) * FA_KB_BUF, kb_bias,
+                        kb_stride, kv_len, (kb0 + 1) * FA_NBATCH_FA,
+                        kv_group * gqa_ratio, gqa_ratio);
+        }
 
         // KQ = Q @ K^T over this warp's 16 KV rows (f32 accumulators).
 #pragma unroll
@@ -619,10 +700,14 @@ __device__ __forceinline__ void att_pf_fa_body(
             const int lim = q_offset + (qi ? q_pos1 : q_pos0) + 1;
             // Plan 622 — the per-key bias, in-range elements only, BEFORE
             // the si affine (the pinned scale → kb → si order) and before
-            // the max pass (the max tracks the BIASED row).
+            // the max pass (the max tracks the BIASED row). T1.4 — the
+            // value reads the per-tile smem stage (the local head row IS
+            // attn_lane_i; the staged float is the exact global float).
             if (kb_lane && kv < lim) {
-                KQ_C.x[l] = kb_bias_score(KQ_C.x[l], kv, attn_head,
-                                          kb_stride, kb_bias);
+                KQ_C.x[l] = __fadd_rn(
+                    KQ_C.x[l],
+                    kb_tile[(kb0 & 1) * FA_KB_BUF + attn_lane_i * FA_KB_PITCH
+                            + (kv - k_VKQ_0)]);
             }
             if (si_lane && kv < lim) {
                 KQ_C.x[l] = si_transform_score(KQ_C.x[l], kv, lim - 1,

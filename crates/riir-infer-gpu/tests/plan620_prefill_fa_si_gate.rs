@@ -56,6 +56,14 @@ fn lcg(state: &mut u64) -> f32 {
 /// si affine per (qp, kv) when armed, the sigmoid gate in the epilogue.
 /// f32 accumulation — the kernel's f16 P/V accumulation is noise the bar
 /// absorbs.
+///
+/// CAUSAL, like the kernel (`lim = q_offset + j + 1`; the twin computes the
+/// base-0 posture only, so the limit is `kv <= j`): keys past the limit are
+/// masked to -inf (exp → 0). The birth version scored every KV_LEN key
+/// unmasked — an O(1) divergence from the kernel at every j > 0 row, caught
+/// by the Plan-622 kb gate's port before this twin had ever executed its
+/// CPU-twin asserts on a CUDA box (the bit-identity arms were unaffected —
+/// they never read this function).
 #[allow(clippy::too_many_arguments)]
 fn cpu_fa_reference(
     query: &[f32],
@@ -83,16 +91,26 @@ fn cpu_fa_reference(
                 }
                 let raw = dot * scale;
                 // Sink carve-out at key 0; dist = (q_offset + j) - kv.
-                *s = match kv {
-                    0 => raw,
-                    _ if armed => a * (raw * inv) + m,
-                    _ => raw,
+                // Causal mask first (the kernel's lim at q_offset = 0 is
+                // j + 1): masked keys underflow exp to exactly 0.
+                *s = if kv > j {
+                    f32::NEG_INFINITY
+                } else {
+                    match kv {
+                        0 => raw,
+                        _ if armed => a * (raw * inv) + m,
+                        _ => raw,
+                    }
                 };
                 max_score = max_score.max(*s);
             }
             let mut sum = 0.0f32;
             for s in scores.iter_mut() {
-                *s = (*s - max_score).exp();
+                *s = if s.is_finite() {
+                    (*s - max_score).exp()
+                } else {
+                    0.0
+                };
                 sum += *s;
             }
             let inv_sum = 1.0 / sum;
