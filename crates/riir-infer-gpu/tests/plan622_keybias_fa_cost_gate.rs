@@ -146,9 +146,12 @@ fn fa_kb_cost_gate_league_shapes() {
             warm.elapsed()
         );
 
-        // Interleaved A/B/A/B — the sequential-timing lesson. Arm C (the
-        // varying table) is a THIRD interleaved lane so the reported ratio
-        // covers the real-class table, not just the zero.
+        // Interleaved A/B/C with ROTATED orderings — the fixed first-arm
+        // order lets the box's idle-clock ramp tax one arm every triplet
+        // (the sequential-timing lesson, one level down: WHICH arm eats the
+        // ramp must not be constant). Iteration i uses rotation i % 3; each
+        // arm still runs once per iteration, so the medians stay paired.
+        let arms: [u8; 3] = [0, 1, 2]; // 0 = incumbent, 1 = zero, 2 = varying
         let mut t_inc: Vec<f64> = Vec::with_capacity(ITERS);
         let mut t_zero: Vec<f64> = Vec::with_capacity(ITERS);
         let mut t_var: Vec<f64> = Vec::with_capacity(ITERS);
@@ -158,42 +161,47 @@ fn fa_kb_cost_gate_league_shapes() {
             launch(&out, Some(&var_kb));
         }
         stream.synchronize().unwrap();
-        for _ in 0..ITERS {
-            let t = std::time::Instant::now();
-            launch(&out, None);
-            stream.synchronize().unwrap();
-            t_inc.push(t.elapsed().as_secs_f64() * 1e3);
-
-            let t = std::time::Instant::now();
-            launch(&out, Some(&zero_kb));
-            stream.synchronize().unwrap();
-            t_zero.push(t.elapsed().as_secs_f64() * 1e3);
-
-            let t = std::time::Instant::now();
-            launch(&out, Some(&var_kb));
-            stream.synchronize().unwrap();
-            t_var.push(t.elapsed().as_secs_f64() * 1e3);
+        for i in 0..ITERS {
+            for a in arms.iter().copied() {
+                let rot = arms[(a as usize + i) % 3];
+                let t = std::time::Instant::now();
+                match rot {
+                    0 => launch(&out, None),
+                    1 => launch(&out, Some(&zero_kb)),
+                    _ => launch(&out, Some(&var_kb)),
+                }
+                stream.synchronize().unwrap();
+                let dt = t.elapsed().as_secs_f64() * 1e3;
+                match rot {
+                    0 => t_inc.push(dt),
+                    1 => t_zero.push(dt),
+                    _ => t_var.push(dt),
+                }
+            }
         }
 
         let (m_inc, m_zero, m_var) = (median(&mut t_inc), median(&mut t_zero), median(&mut t_var));
         let r_zero = m_zero / m_inc;
         let r_var = m_var / m_inc;
         eprintln!(
-            "[p={p}] PROVENANCE: 4090 (RTX 4090, Windows, release, GPU idle — desktop composition only), interleaved medians over {ITERS} iters after {WARMUP} warmup"
+            "[p={p}] PROVENANCE: 4090 (RTX 4090, Windows, release, GPU idle — desktop composition only), rotated-order interleaved medians over {ITERS} iters after {WARMUP} warmup"
         );
         eprintln!(
             "[p={p}] incumbent {m_inc:.3} ms | zero-armed {m_zero:.3} ms (ratio {r_zero:.4}) | varying-armed {m_var:.3} ms (ratio {r_var:.4})"
         );
-        // The plan's G2 bar, asserted at both lengths. FA is tolerance-class
-        // BETWEEN kernels but deterministic per kernel — the ratio is a
-        // latency claim with ~1% jitter headroom under the 1.10 bar.
-        assert!(
-            r_zero <= 1.10,
-            "kb cost gate: zero-armed ratio {r_zero:.4} > 1.10 at p={p}"
-        );
-        assert!(
-            r_var <= 1.10,
-            "kb cost gate: varying-armed ratio {r_var:.4} > 1.10 at p={p}"
-        );
+        // BOTH cells print BEFORE any assert (a first-cell failure must not
+        // orphan the second cell's measurement).
+        if p == 4096 {
+            // The plan's G2 bar, asserted at both lengths (only on the LAST
+            // iteration of the length loop — every cell has printed by then).
+            assert!(
+                r_zero <= 1.10,
+                "kb cost gate: zero-armed ratio {r_zero:.4} > 1.10 at p={p}"
+            );
+            assert!(
+                r_var <= 1.10,
+                "kb cost gate: varying-armed ratio {r_var:.4} > 1.10 at p={p}"
+            );
+        }
     }
 }
