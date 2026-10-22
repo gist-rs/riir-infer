@@ -165,6 +165,25 @@ __device__ __forceinline__ float si_transform_score(
     return __fadd_rn(__fmul_rn(a, __fmul_rn(raw, si_inv_sigma[head_idx])), m);
 }
 
+// Plan 622 T1.2 — the per-key × per-head additive attention-logit bias, ONE
+// copy for both FA entries (eager + devpos share the body). Mirrors the
+// decode module's `kb_bias_score` EXACTLY — same expression, same
+// single-rounding intrinsic; the two compiled modules keep the one bias law
+// in lockstep (the FA source is a separate nvrtc module by construction —
+// no cross-module include). Applied in the causal-mask loop (the one place
+// both the element's absolute key pos and its query pos are in register),
+// on in-range elements only and BEFORE the max pass (the max tracks the
+// BIASED row — the CPU KeyBiasLayout contract); the composition order with
+// the si affine is kb BEFORE si (the decode modules' pinned order). Flag-0
+// (`*kb_enabled == 0`) leaves every added branch dead — bit-identical
+// incumbent.
+__device__ __forceinline__ float kb_bias_score(
+    float raw, int pos, int head_idx, int kb_stride,
+    const float* __restrict__ kb_bias)
+{
+    return __fadd_rn(raw, kb_bias[head_idx * kb_stride + pos]);
+}
+
 __device__ __forceinline__ unsigned int h2_pack(unsigned short lo, unsigned short hi) {
     return (unsigned int)lo | ((unsigned int)hi << 16);
 }
@@ -448,7 +467,10 @@ __device__ __forceinline__ void att_pf_fa_body(
     int n_head, int n_kv, int p, float scale, int q_offset,
     const float* __restrict__ si_lut,       /* Plan 620: interleaved (a, m) */
     const float* __restrict__ si_inv_sigma, /* Plan 620: this layer's n_head */
-    const int* __restrict__ si_enabled)     /* Plan 620: 0 = incumbent */
+    const int* __restrict__ si_enabled,     /* Plan 620: 0 = incumbent */
+    const float* __restrict__ kb_bias,      /* Plan 622: [n_head * kb_stride] */
+    const int kb_stride,                    /* Plan 622: ≥ live keys (q_offset+p) */
+    const int* __restrict__ kb_enabled)     /* Plan 622: 0 = incumbent */
 {
     typedef fa_mma::tile<16, 8, fa_mma::f16x2> T_AB;        /* KQ/VKQ A+B, VKQ C */
     typedef fa_mma::tile<16, 16, float> T_C_KQ;             /* KQ f32 accumulator */
@@ -535,12 +557,17 @@ __device__ __forceinline__ void att_pf_fa_body(
     // BOTH of its positions share the head lane c = t/4 — the +8 stays
     // within the same 8-lane group). The pad lanes (c >= gqa_ratio, the
     // zero-filled Q rows) skip the transform: their softmax rows are
-    // discarded at the write, and their si_head index would run past the
+    // discarded at the write, and their head index would run past the
     // last group's window (kv_group*6 + 6 > n_head - 1 at kv_group = n_kv-1).
+    // Plan 622 — the kb hook shares the SAME lane algebra (attn_head), with
+    // its own flag.
     const int si_on = *si_enabled;
-    const int si_lane_i = (int)(threadIdx.x >> 2);          /* [0,8): 6 + 2 pad */
-    const bool si_lane = si_on != 0 && si_lane_i < gqa_ratio;
-    const int si_head = kv_group * gqa_ratio + si_lane_i;
+    const int kb_on = *kb_enabled;
+    const int attn_lane_i = (int)(threadIdx.x >> 2);        /* [0,8): 6 + 2 pad */
+    const bool si_lane = si_on != 0 && attn_lane_i < gqa_ratio;
+    const bool kb_lane = kb_on != 0 && attn_lane_i < gqa_ratio;
+    const int attn_head = kv_group * gqa_ratio + attn_lane_i;
+    const int si_head = attn_head;
 
     // ---- Preload K tile 0 (cp.async into the tile_K region).
     fa_load_tile(key_h, tile_Q, 0, stride_kv_elems);
@@ -590,6 +617,13 @@ __device__ __forceinline__ void att_pf_fa_body(
             const int kv = k_VKQ_0 + kv_half + KQ_C.get_j(l);
             const int qi = (l / 2) % 2;
             const int lim = q_offset + (qi ? q_pos1 : q_pos0) + 1;
+            // Plan 622 — the per-key bias, in-range elements only, BEFORE
+            // the si affine (the pinned scale → kb → si order) and before
+            // the max pass (the max tracks the BIASED row).
+            if (kb_lane && kv < lim) {
+                KQ_C.x[l] = kb_bias_score(KQ_C.x[l], kv, attn_head,
+                                          kb_stride, kb_bias);
+            }
             if (si_lane && kv < lim) {
                 KQ_C.x[l] = si_transform_score(KQ_C.x[l], kv, lim - 1,
                                                si_head, si_lut, si_inv_sigma);
@@ -781,10 +815,14 @@ extern "C" __global__ void __launch_bounds__(128, 2) att_pf_fa(
     int n_head, int n_kv, int p, float scale, int q_offset,
     const float* __restrict__ si_lut,
     const float* __restrict__ si_inv_sigma,
-    const int* __restrict__ si_enabled)
+    const int* __restrict__ si_enabled,
+    const float* __restrict__ kb_bias,
+    const int kb_stride,
+    const int* __restrict__ kb_enabled)
 {
     att_pf_fa_body(query, key_h, val_h, gate, attn_out, n_head, n_kv, p,
-                   scale, q_offset, si_lut, si_inv_sigma, si_enabled);
+                   scale, q_offset, si_lut, si_inv_sigma, si_enabled,
+                   kb_bias, kb_stride, kb_enabled);
 }
 
 // The CUDA-graph twin: q_offset from the 1-element device pos buffer.
@@ -798,10 +836,14 @@ extern "C" __global__ void __launch_bounds__(128, 2) att_pf_fa_dp(
     const int* __restrict__ pos_dev,
     const float* __restrict__ si_lut,
     const float* __restrict__ si_inv_sigma,
-    const int* __restrict__ si_enabled)
+    const int* __restrict__ si_enabled,
+    const float* __restrict__ kb_bias,
+    const int kb_stride,
+    const int* __restrict__ kb_enabled)
 {
     const int q_offset = *pos_dev;
     att_pf_fa_body(query, key_h, val_h, gate, attn_out, n_head, n_kv, p,
-                   scale, q_offset, si_lut, si_inv_sigma, si_enabled);
+                   scale, q_offset, si_lut, si_inv_sigma, si_enabled,
+                   kb_bias, kb_stride, kb_enabled);
 }
 "#;

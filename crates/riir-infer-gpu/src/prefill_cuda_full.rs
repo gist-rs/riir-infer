@@ -3516,6 +3516,7 @@ fn whole_prefill_inner(
                                             p,
                                             pos,
                                             si_layer.as_ref(),
+                                            None,
                                         )
                                     })
                             } else {
@@ -3545,6 +3546,7 @@ fn whole_prefill_inner(
                                             p,
                                             base_pos,
                                             si_layer.as_ref(),
+                                            None,
                                         )
                                     })
                             };
@@ -3737,7 +3739,7 @@ fn whole_prefill_inner(
                         }
                         stack.at.launch_attention(
                             stream, ad, aa, ae, aph, ars, ai, q_b, kcache, vcache, agate_b,
-                            attn_out_b, ahd, n_head, n_kv, p, base_pos,
+                            attn_out_b, ahd, n_head, n_kv, p, base_pos, None,
                         )?;
                     }
                 }

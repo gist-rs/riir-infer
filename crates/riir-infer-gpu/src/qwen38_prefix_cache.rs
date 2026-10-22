@@ -1157,7 +1157,7 @@ mod tests {
     fn test_arena_pool_reuse_zero_allocs() {
         let _g = TEST_SER.lock().unwrap_or_else(|p| p.into_inner());
         let stream = test_stream();
-        let mut state = make_state(&stream, 41);
+        let state = make_state(&stream, 41);
         let tokens2 = [55u32, 66, 77];
 
         // Cold: first insert allocates the arenas. Second insert (different
@@ -1197,7 +1197,7 @@ mod tests {
     fn test_table_restore_lazily_arms_dtod_entry() {
         let _g = TEST_SER.lock().unwrap_or_else(|p| p.into_inner());
         let stream = test_stream();
-        let mut state = make_state(&stream, 55);
+        let state = make_state(&stream, 55);
 
         // Env posture, unset: the insert runs the dtod loop.
         unsafe { std::env::remove_var("QWEN38_PREFIX_TABLE_COPY") };

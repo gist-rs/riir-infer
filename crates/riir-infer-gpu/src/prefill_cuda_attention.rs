@@ -25,7 +25,7 @@ use cudarc::driver::safe::{
     CudaContext, CudaFunction, CudaModule, CudaSlice, CudaStream, LaunchConfig,
 };
 
-use crate::cudarc_kernels::attention::SiDecodeLayerArgs;
+use crate::cudarc_kernels::attention::{KeyBiasLayerArgs, SiDecodeLayerArgs};
 use crate::prefill_cuda_deltanet::{LogForm, SigExp};
 
 // ---------------------------------------------------------------------------
@@ -376,7 +376,10 @@ extern "C" __global__ void NAME(                                               \
     const float* __restrict__ value,   /* [(base_pos+p), n_kv, hd] */          \
     const float* __restrict__ gate,    /* [p, n_head, hd] */                   \
     float* __restrict__ attn_out,      /* [p, n_head, hd] */                   \
-    int head_dim, int n_head, int n_kv, int p, float scale, int q_offset)      \
+    int head_dim, int n_head, int n_kv, int p, float scale, int q_offset,      \
+    const float* __restrict__ kb_bias,  /* Plan 622: [n_head * kb_stride] */   \
+    const int kb_stride,                /* Plan 622: ≥ live keys */            \
+    const int* __restrict__ kb_enabled) /* Plan 622: 0 = incumbent */          \
 {                                                                              \
     __shared__ float smem[256];                                                \
     const int cube_id = blockIdx.x;                                            \
@@ -390,6 +393,7 @@ extern "C" __global__ void NAME(                                               \
     const int kv_stride = n_kv * head_dim;                                     \
     const int q_token_off = q_pos * q_stride + head_idx * head_dim;            \
     const bool valid_dim = tid < head_dim;                                     \
+    const int kb_on = *kb_enabled; /* Plan 622 — read ONCE; dead at 0 */       \
     float running_max = -1e30f;                                                \
     float running_sum = 0.0f;                                                  \
     float running_out = 0.0f;                                                  \
@@ -407,6 +411,10 @@ extern "C" __global__ void NAME(                                               \
                 dot = DOTF(query[q_token_off + d], key[k_base + d], dot);      \
             }                                                                  \
             my_score = dot * scale;                                            \
+            if (kb_on != 0) { /* Plan 622 — post-scale, pre-max */             \
+                my_score = __fadd_rn(                                          \
+                    my_score, kb_bias[(long)head_idx * kb_stride + pos]);      \
+            }                                                                  \
         }                                                                      \
         smem[tid] = my_score;                                                  \
         __syncthreads();                                                       \
@@ -1796,6 +1804,11 @@ pub struct CudaAttnKernels {
     si_dummy_lut: CudaSlice<f32>,
     si_dummy_inv_sigma: CudaSlice<f32>,
     si_dummy_enabled: CudaSlice<i32>,
+    /// Plan 622 T1.2 — the kb hook's flag-off dummies (the si dummies'
+    /// law, owned by this struct since it pushes them): a 1-float runway
+    /// never indexed while `kb_enabled` holds 0, and the disabled flag.
+    kb_dummy_bias: CudaSlice<f32>,
+    kb_dummy_enabled: CudaSlice<i32>,
     /// Plan 605 T1 — the f32->f16 KV conversion pass (eager).
     kv_f32_to_f16: CudaFunction,
     /// Plan 605 T1 — the f32->f16 KV conversion pass (devpos twin).
@@ -2036,6 +2049,13 @@ impl CudaAttnKernels {
         let si_dummy_enabled = stream
             .clone_htod(&[0i32])
             .map_err(|e| format!("si_dummy_enabled: {e}"))?;
+        // Plan 622 — the kb flag-off dummies (the si pair's law).
+        let kb_dummy_bias = stream
+            .clone_htod(&[0.0f32])
+            .map_err(|e| format!("kb_dummy_bias: {e}"))?;
+        let kb_dummy_enabled = stream
+            .clone_htod(&[0i32])
+            .map_err(|e| format!("kb_dummy_enabled: {e}"))?;
 
         Ok(Self {
             rope,
@@ -2067,6 +2087,8 @@ impl CudaAttnKernels {
             si_dummy_lut,
             si_dummy_inv_sigma,
             si_dummy_enabled,
+            kb_dummy_bias,
+            kb_dummy_enabled,
             kv_f32_to_f16,
             kv_f32_to_f16_dp,
             _module: module,
@@ -2252,7 +2274,8 @@ impl CudaAttnKernels {
     }
 
     /// Causal gated flash attention over all `p` query tokens (absolute
-    /// causal range via `q_offset = base_pos`).
+    /// causal range via `q_offset = base_pos`). Plan 622 — `kb` is the
+    /// per-key-bias hook (`None` = the incumbent posture, the si law).
     ///
     /// # Safety
     ///
@@ -2279,6 +2302,7 @@ impl CudaAttnKernels {
         n_kv_head: usize,
         p: usize,
         base_pos: usize,
+        kb: Option<&KeyBiasLayerArgs<'_>>,
     ) -> Result<(), String> {
         // Host-computed scale, exactly like the CubeCL launcher.
         let scale = 1.0f32 / (head_dim as f32).sqrt();
@@ -2290,6 +2314,12 @@ impl CudaAttnKernels {
             p as i32,
             base_pos as i32,
         );
+        // Plan 622 — the kb flag-off view (the si match shape).
+        let dummy_kb = self.kb_dummy_bias.slice(0..self.kb_dummy_bias.len());
+        let (kb_bias, kb_stride, kb_enabled) = match kb {
+            Some(a) => (&a.bias, a.stride as i32, a.enabled),
+            None => (&dummy_kb, 0i32, &self.kb_dummy_enabled),
+        };
         let cfg = LaunchConfig {
             grid_dim: ((n_head * p) as u32, 1, 1),
             block_dim: (head_dim as u32, 1, 1),
@@ -2309,6 +2339,9 @@ impl CudaAttnKernels {
                 .arg(&p_i)
                 .arg(&scale)
                 .arg(&qo_i)
+                .arg(kb_bias)
+                .arg(&kb_stride)
+                .arg(kb_enabled)
                 .launch(cfg)
                 .map_err(|e| e.to_string())?;
         }
@@ -3426,6 +3459,7 @@ impl CudaAttnKernels {
         p: usize,
         base_pos: usize,
         si: Option<&SiDecodeLayerArgs<'_>>,
+        kb: Option<&KeyBiasLayerArgs<'_>>,
     ) -> Result<(), String> {
         self.fa_launch_check("att_pf_fa", head_dim, n_head, n_kv_head)?;
         let scale = 1.0f32 / (head_dim as f32).sqrt();
@@ -3437,6 +3471,12 @@ impl CudaAttnKernels {
         let (si_lut, si_inv_sigma, si_enabled) = match si {
             Some(a) => (a.lut, &a.inv_sigma, a.enabled),
             None => (&self.si_dummy_lut, &dummy_inv, &self.si_dummy_enabled),
+        };
+        // Plan 622 — the kb flag-off view (the same match shape).
+        let dummy_kb = self.kb_dummy_bias.slice(0..self.kb_dummy_bias.len());
+        let (kb_bias, kb_stride, kb_enabled) = match kb {
+            Some(a) => (&a.bias, a.stride as i32, a.enabled),
+            None => (&dummy_kb, 0i32, &self.kb_dummy_enabled),
         };
         let cfg = LaunchConfig {
             grid_dim: (p.div_ceil(4) as u32, n_kv_head as u32, 1),
@@ -3459,6 +3499,9 @@ impl CudaAttnKernels {
                 .arg(si_lut)
                 .arg(si_inv_sigma)
                 .arg(si_enabled)
+                .arg(kb_bias)
+                .arg(&kb_stride)
+                .arg(kb_enabled)
                 .launch(cfg)
                 .map_err(|e| e.to_string())?;
         }
@@ -3490,6 +3533,7 @@ impl CudaAttnKernels {
         p: usize,
         pos_dev: &CudaSlice<i32>,
         si: Option<&SiDecodeLayerArgs<'_>>,
+        kb: Option<&KeyBiasLayerArgs<'_>>,
     ) -> Result<(), String> {
         self.fa_launch_check("att_pf_fa_dp", head_dim, n_head, n_kv_head)?;
         let scale = 1.0f32 / (head_dim as f32).sqrt();
@@ -3500,6 +3544,12 @@ impl CudaAttnKernels {
         let (si_lut, si_inv_sigma, si_enabled) = match si {
             Some(a) => (a.lut, &a.inv_sigma, a.enabled),
             None => (&self.si_dummy_lut, &dummy_inv, &self.si_dummy_enabled),
+        };
+        // Plan 622 — the kb flag-off view (the same match shape).
+        let dummy_kb = self.kb_dummy_bias.slice(0..self.kb_dummy_bias.len());
+        let (kb_bias, kb_stride, kb_enabled) = match kb {
+            Some(a) => (&a.bias, a.stride as i32, a.enabled),
+            None => (&dummy_kb, 0i32, &self.kb_dummy_enabled),
         };
         let cfg = LaunchConfig {
             grid_dim: (p.div_ceil(4) as u32, n_kv_head as u32, 1),
@@ -3522,6 +3572,9 @@ impl CudaAttnKernels {
                 .arg(si_lut)
                 .arg(si_inv_sigma)
                 .arg(si_enabled)
+                .arg(kb_bias)
+                .arg(&kb_stride)
+                .arg(kb_enabled)
                 .launch(cfg)
                 .map_err(|e| e.to_string())?;
         }

@@ -108,6 +108,55 @@ pub struct SiDecodeLayerArgs<'a> {
     pub enabled: &'a CudaSlice<i32>,
 }
 
+/// Plan 622 T1.2 — the per-key × per-head additive attention-logit-bias
+/// launch args, ONE layer at a time (the Plan-620 si hook's launch shape).
+/// Applied POST-scale PRE-softmax (logit space) at every row-5/6/7 score
+/// site; the tile max tracks the BIASED row (what the softmax sees — the
+/// CPU `KeyBiasLayout` contract, T1.1).
+///
+/// Layout: head-major `[n_head][stride]` row-major, slot-indexed — cache
+/// slot IS the key identity every loop already uses. `stride` MAY exceed
+/// the live key count (a padded-bucket or max-sized table): the kernel
+/// indexes `bias[head * stride + pos]` only for in-range `pos`, so a
+/// captured graph can bake a max-sized stride while `n_positions` shrinks.
+/// Arming is CONTENT (`enabled` = 1): a captured CUDA graph flips posture
+/// without recapture (the Issue-618 law). `None` at a launch site = the
+/// incumbent posture: the launcher pushes the struct-owned dummies
+/// (`*_dummy_*`, enabled = 0) and the kernel's added branch is dead —
+/// bit-identical to the pre-622 kernel.
+pub struct KeyBiasLayerArgs<'a> {
+    /// This layer's bias window — `[n_head][stride]` head-major; only the
+    /// first `live_keys` entries of each row are read.
+    pub bias: CudaView<'a, f32>,
+    /// Keys per head row (≥ this launch's live key count).
+    pub stride: usize,
+    /// One i32: 0 = the incumbent (bit-identical) posture, 1 = armed.
+    pub enabled: &'a CudaSlice<i32>,
+}
+
+/// Plan 622 T1.2 — the full-table form: every layer in one buffer, slot =
+/// `layer_idx * n_head * stride` (the `SiDecodeArgs::window_for` shape).
+pub struct KeyBiasDecodeArgs<'a> {
+    pub bias: &'a CudaSlice<f32>,
+    pub stride: usize,
+    pub enabled: &'a CudaSlice<i32>,
+}
+
+impl KeyBiasDecodeArgs<'_> {
+    /// The per-layer launch view: `bias` narrowed to THIS layer's
+    /// `n_head * stride` window. Cheap — a [`CudaView`] borrows the parent
+    /// table (no allocation), and the view's device address is what a
+    /// captured graph bakes (stable for the session's lifetime).
+    pub fn window_for(&self, layer_idx: usize, n_head: usize) -> KeyBiasLayerArgs<'_> {
+        let rows = self.stride * n_head;
+        KeyBiasLayerArgs {
+            bias: self.bias.slice(layer_idx * rows..(layer_idx + 1) * rows),
+            stride: self.stride,
+            enabled: self.enabled,
+        }
+    }
+}
+
 /// Combined CUDA source for all attention-related kernels.
 ///
 /// Compiled as a single PTX module — each kernel is a `__global__` function.
@@ -477,6 +526,33 @@ __device__ __forceinline__ float si_transform_score(
     return __fadd_rn(__fmul_rn(a, __fmul_rn(raw, si_inv_sigma[head_idx])), m);
 }
 
+// ---------------------------------------------------------------------------
+// Plan 622 T1.2 — the per-key × per-head additive attention-logit bias, ONE
+// copy for every decode-family score site in this module. Applied POST-scale
+// PRE-softmax (logit space) — the tile max tracks the BIASED row (what the
+// softmax sees; the CPU KeyBiasLayout contract). Composition order with the
+// si affine is scale → kb → si at every site (no live caller arms both; the
+// order is pinned so a future composition reasons about ONE rule).
+//
+// Flag-off law: `kb_enabled` is a DEVICE POINTER — 0 makes every added
+// branch dead and the kernel arithmetically identical to the incumbent (the
+// launch ABI gains three args; the math is untouched). The pointer form lets
+// a captured CUDA graph arm/disarm by CONTENT — no recapture (the Issue-618
+// law, the Plan-620 si precedent).
+//
+// Layout: kb_bias[head_idx * kb_stride + pos] — head-major [n_head][stride]
+// row-major, slot-indexed (the CPU KeyBiasLayout contract: cache slot IS the
+// key identity). kb_stride ≥ the live key count; in-range `pos` never
+// crosses a row. Single-rounding `__fadd_rn` — the Rust ops each round once,
+// and an nvrtc contraction into a neighbouring op would silently skip it.
+// ---------------------------------------------------------------------------
+__device__ __forceinline__ float kb_bias_score(
+    float raw, int pos, int head_idx, int kb_stride,
+    const float* __restrict__ kb_bias)
+{
+    return __fadd_rn(raw, kb_bias[head_idx * kb_stride + pos]);
+}
+
 extern "C" __global__ void attention_decode_f32(
     const float* __restrict__ query,        // [n_head * head_dim]
     const kv_elt* __restrict__ key_cache,   // [n_positions * n_kv_head * head_dim]
@@ -489,7 +565,10 @@ extern "C" __global__ void attention_decode_f32(
     const int n_positions,
     const float* __restrict__ si_lut,        // Plan 620: interleaved (a, m) pairs
     const float* __restrict__ si_inv_sigma,  // Plan 620: this layer's n_head entries
-    const int* __restrict__ si_enabled)      // Plan 620: 0 = the incumbent posture
+    const int* __restrict__ si_enabled,      // Plan 620: 0 = the incumbent posture
+    const float* __restrict__ kb_bias,       // Plan 622: [n_head * kb_stride]
+    const int kb_stride,                     // Plan 622: keys per head row
+    const int* __restrict__ kb_enabled)      // Plan 622: 0 = the incumbent posture
 {
     const int head_idx = blockIdx.x;
     const int tid = threadIdx.x;
@@ -512,6 +591,8 @@ extern "C" __global__ void attention_decode_f32(
     const bool valid_dim = tid < head_dim;
     // Plan 620 — read ONCE per launch; the Phase-1 branch below is dead at 0.
     const int si_on = *si_enabled;
+    // Plan 622 — the kb flag, same law.
+    const int kb_on = *kb_enabled;
 
     // Dynamic shared memory — sized at launch via shared_mem_bytes = head_dim * 4
     extern __shared__ float smem[];
@@ -536,6 +617,13 @@ extern "C" __global__ void attention_decode_f32(
                 dot += query[head_off + d] * KV_RD(&key_cache[k_base + d]);
             }
             my_score = dot * scale;
+            // Plan 622 — the per-key bias, BEFORE the si affine (the pinned
+            // scale → kb → si order) and BEFORE the tile-max pass: the max
+            // must track the BIASED row (what the softmax sees).
+            if (kb_on != 0) {
+                my_score = kb_bias_score(my_score, pos, head_idx, kb_stride,
+                                         kb_bias);
+            }
             // Plan 620 — the schedule affine, BEFORE the tile-max pass: the
             // max must track the TRANSFORMED row (what the softmax sees; the
             // CPU si_head contract). query_pos = n_positions - 1 (decode).
@@ -736,7 +824,10 @@ extern "C" __global__ void attention_decode_f32_devpos(
     const int* __restrict__ pos_dev,
     const float* __restrict__ si_lut,        // Plan 620 — see attention_decode_f32
     const float* __restrict__ si_inv_sigma,  // Plan 620
-    const int* __restrict__ si_enabled)      // Plan 620
+    const int* __restrict__ si_enabled,      // Plan 620
+    const float* __restrict__ kb_bias,       // Plan 622 — see attention_decode_f32
+    const int kb_stride,                     // Plan 622
+    const int* __restrict__ kb_enabled)      // Plan 622
 {
     const int n_positions = *pos_dev + 1;
     const int head_idx = blockIdx.x;
@@ -760,6 +851,8 @@ extern "C" __global__ void attention_decode_f32_devpos(
     const bool valid_dim = tid < head_dim;
     // Plan 620 — read ONCE per launch; the Phase-1 branch below is dead at 0.
     const int si_on = *si_enabled;
+    // Plan 622 — the kb flag, same law.
+    const int kb_on = *kb_enabled;
 
     // Dynamic shared memory — sized at launch via shared_mem_bytes = head_dim * 4
     extern __shared__ float smem[];
@@ -784,6 +877,12 @@ extern "C" __global__ void attention_decode_f32_devpos(
                 dot += query[head_off + d] * KV_RD(&key_cache[k_base + d]);
             }
             my_score = dot * scale;
+            // Plan 622 — the per-key bias before the si affine (the pinned
+            // scale → kb → si order; shared helper, same as the scalar twin).
+            if (kb_on != 0) {
+                my_score = kb_bias_score(my_score, pos, head_idx, kb_stride,
+                                         kb_bias);
+            }
             // Plan 620 — same hook as the scalar twin (shared helper).
             if (si_on != 0) {
                 my_score = si_transform_score(my_score, pos, n_positions - 1,
@@ -918,7 +1017,10 @@ __device__ __forceinline__ void attention_decode_split_partial_body(
     const int n_head,
     const int n_kv_head,
     const int chunk_len,
-    const int n_positions)
+    const int n_positions,
+    const float* __restrict__ kb_bias,   // Plan 622 — see kb_bias_score
+    const int kb_stride,
+    const int kb_on)
 {
     const int head_idx = blockIdx.x;
     const int chunk_id = blockIdx.y;
@@ -977,6 +1079,13 @@ __device__ __forceinline__ void attention_decode_split_partial_body(
                 dot += query[head_off + d] * KV_RD(&key_cache[k_base + d]);
             }
             my_score = dot * scale;
+            // Plan 622 — the per-key bias, pre-max (the biased row is what
+            // the softmax sees); no si affine on this kernel (Plan 620
+            // scoped the si hook to the serial decode pair only).
+            if (kb_on != 0) {
+                my_score = kb_bias_score(my_score, pos, head_idx, kb_stride,
+                                         kb_bias);
+            }
         }
         smem[tid] = my_score;
         __syncthreads();
@@ -1065,12 +1174,16 @@ extern "C" __global__ void attention_decode_split_partial_f32(
     const int n_head,
     const int n_kv_head,
     const int chunk_len,
-    const int n_positions)
+    const int n_positions,
+    const float* __restrict__ kb_bias,   // Plan 622
+    const int kb_stride,
+    const int* __restrict__ kb_enabled)
 {
     extern __shared__ float smem[];
+    const int kb_on = *kb_enabled;
     attention_decode_split_partial_body(query, key_cache, value_cache,
         part_m, part_l, part_out, smem, scale, head_dim, n_head, n_kv_head,
-        chunk_len, n_positions);
+        chunk_len, n_positions, kb_bias, kb_stride, kb_on);
 }
 
 // Graph-capture twin: n_positions = *pos_dev + 1 at kernel runtime; the grid
@@ -1087,13 +1200,17 @@ extern "C" __global__ void attention_decode_split_partial_f32_devpos(
     const int n_head,
     const int n_kv_head,
     const int chunk_len,
-    const int* __restrict__ pos_dev)
+    const int* __restrict__ pos_dev,
+    const float* __restrict__ kb_bias,   // Plan 622
+    const int kb_stride,
+    const int* __restrict__ kb_enabled)
 {
     extern __shared__ float smem[];
     const int n_positions = *pos_dev + 1;
+    const int kb_on = *kb_enabled;
     attention_decode_split_partial_body(query, key_cache, value_cache,
         part_m, part_l, part_out, smem, scale, head_dim, n_head, n_kv_head,
-        chunk_len, n_positions);
+        chunk_len, n_positions, kb_bias, kb_stride, kb_on);
 }
 
 
@@ -1154,7 +1271,10 @@ __device__ __forceinline__ void attention_decode_splitgqa_partial_body(
     const int n_head,
     const int n_kv_head,
     const int chunk_len,
-    const int n_positions)
+    const int n_positions,
+    const float* __restrict__ kb_bias,   // Plan 622 — see kb_bias_score
+    const int kb_stride,
+    const int kb_on)
 {
     const int kv_group = blockIdx.x;   // grid.x = n_kv_head
     const int chunk_id = blockIdx.y;
@@ -1236,6 +1356,12 @@ __device__ __forceinline__ void attention_decode_splitgqa_partial_body(
                     dot += qh[d] * k_smem[d * (ATT_SPLIT_GQA_TILE + 1) + lane];
                 }
                 score = dot * scale;
+                // Plan 622 — the per-key bias on this warp's q-head
+                // (kv_group * g + warp), pre-max.
+                if (kb_on != 0) {
+                    score = kb_bias_score(score, pos, kv_group * g + warp,
+                                          kb_stride, kb_bias);
+                }
             }
             // Warp max over lanes (every lane keeps the result).
             float m = score;
@@ -1311,12 +1437,16 @@ extern "C" __global__ void attention_decode_splitgqa_partial_f32(
     const int n_head,
     const int n_kv_head,
     const int chunk_len,
-    const int n_positions)
+    const int n_positions,
+    const float* __restrict__ kb_bias,   // Plan 622
+    const int kb_stride,
+    const int* __restrict__ kb_enabled)
 {
     extern __shared__ float smem[];
+    const int kb_on = *kb_enabled;
     attention_decode_splitgqa_partial_body(query, key_cache, value_cache,
         part_m, part_l, part_out, smem, scale, head_dim, n_head, n_kv_head,
-        chunk_len, n_positions);
+        chunk_len, n_positions, kb_bias, kb_stride, kb_on);
 }
 
 // Graph-capture twin: n_positions = *pos_dev + 1 at kernel runtime; the grid
@@ -1333,13 +1463,17 @@ extern "C" __global__ void attention_decode_splitgqa_partial_f32_devpos(
     const int n_head,
     const int n_kv_head,
     const int chunk_len,
-    const int* __restrict__ pos_dev)
+    const int* __restrict__ pos_dev,
+    const float* __restrict__ kb_bias,   // Plan 622
+    const int kb_stride,
+    const int* __restrict__ kb_enabled)
 {
     extern __shared__ float smem[];
     const int n_positions = *pos_dev + 1;
+    const int kb_on = *kb_enabled;
     attention_decode_splitgqa_partial_body(query, key_cache, value_cache,
         part_m, part_l, part_out, smem, scale, head_dim, n_head, n_kv_head,
-        chunk_len, n_positions);
+        chunk_len, n_positions, kb_bias, kb_stride, kb_on);
 }
 
 // Flash-decode combine: out[d] = sum_c w_c * out_c[d] / sum_c w_c * l_c,
@@ -1606,7 +1740,10 @@ static __device__ void attention_decode_splitgqa_rows_body_t(
     const int chunk_len,
     const int base_pos,
     const int p,
-    const int k4)
+    const int k4,
+    const float* __restrict__ kb_bias,   // Plan 622 — see kb_bias_score
+    const int kb_stride,
+    const int kb_on)
 {
     const int n_positions = base_pos + p;
     const int kv_group = blockIdx.x;   // grid.x = n_kv_head
@@ -1785,6 +1922,13 @@ static __device__ void attention_decode_splitgqa_rows_body_t(
                             }
                         }
                         score = dot * scale;
+                        // Plan 622 — the per-key bias on this row's q-head
+                        // (kv_group * g + warp), pre-max; causal pos only.
+                        if (kb_on != 0) {
+                            score = kb_bias_score(score, pos,
+                                                  kv_group * g + warp,
+                                                  kb_stride, kb_bias);
+                        }
                     }
                     float m = score;
                     for (int off = 16; off > 0; off >>= 1) {
@@ -1893,12 +2037,16 @@ extern "C" __global__ void attention_decode_splitgqa_partial_rows_f32(
     const int chunk_len,
     const int base_pos,
     const int p,
-    const int k4)
+    const int k4,
+    const float* __restrict__ kb_bias,   // Plan 622
+    const int kb_stride,
+    const int* __restrict__ kb_enabled)
 {
     extern __shared__ float smem[];
+    const int kb_on = *kb_enabled;
     attention_decode_splitgqa_rows_body_t<0>(query, key_cache, value_cache,
         part_m, part_l, part_out, smem, scale, head_dim, n_head, n_kv_head,
-        chunk_len, base_pos, p, k4);
+        chunk_len, base_pos, p, k4, kb_bias, kb_stride, kb_on);
 }
 
 // Issue 742 T9.12 - graph-capture twin: base_pos read from a device buffer
@@ -1919,13 +2067,17 @@ extern "C" __global__ void attention_decode_splitgqa_partial_rows_f32_devpos(
     const int chunk_len,
     const int* __restrict__ pos_dev,
     const int p,
-    const int k4)
+    const int k4,
+    const float* __restrict__ kb_bias,   // Plan 622
+    const int kb_stride,
+    const int* __restrict__ kb_enabled)
 {
     extern __shared__ float smem[];
     const int base_pos = *pos_dev;
+    const int kb_on = *kb_enabled;
     attention_decode_splitgqa_rows_body_t<0>(query, key_cache, value_cache,
         part_m, part_l, part_out, smem, scale, head_dim, n_head, n_kv_head,
-        chunk_len, base_pos, p, k4);
+        chunk_len, base_pos, p, k4, kb_bias, kb_stride, kb_on);
 }
 
 // Issue 742 T9.15 - the multi-accumulator dot twins of the T9.9 rows
@@ -1952,12 +2104,16 @@ extern "C" __global__ void attention_decode_splitgqa_partial_rows_ma_f32(
     const int chunk_len,
     const int base_pos,
     const int p,
-    const int k4)
+    const int k4,
+    const float* __restrict__ kb_bias,   // Plan 622
+    const int kb_stride,
+    const int* __restrict__ kb_enabled)
 {
     extern __shared__ float smem[];
+    const int kb_on = *kb_enabled;
     attention_decode_splitgqa_rows_body_t<1>(query, key_cache, value_cache,
         part_m, part_l, part_out, smem, scale, head_dim, n_head, n_kv_head,
-        chunk_len, base_pos, p, k4);
+        chunk_len, base_pos, p, k4, kb_bias, kb_stride, kb_on);
 }
 
 // Issue 742 T9.12/T9.15 - graph-capture twin (base_pos via pos_dev; the
@@ -1976,13 +2132,17 @@ extern "C" __global__ void attention_decode_splitgqa_partial_rows_ma_f32_devpos(
     const int chunk_len,
     const int* __restrict__ pos_dev,
     const int p,
-    const int k4)
+    const int k4,
+    const float* __restrict__ kb_bias,   // Plan 622
+    const int kb_stride,
+    const int* __restrict__ kb_enabled)
 {
     extern __shared__ float smem[];
     const int base_pos = *pos_dev;
+    const int kb_on = *kb_enabled;
     attention_decode_splitgqa_rows_body_t<1>(query, key_cache, value_cache,
         part_m, part_l, part_out, smem, scale, head_dim, n_head, n_kv_head,
-        chunk_len, base_pos, p, k4);
+        chunk_len, base_pos, p, k4, kb_bias, kb_stride, kb_on);
 }
 
 
@@ -2061,7 +2221,10 @@ static __device__ void attention_decode_splitgqa_rows_qg_body_t(
     const int chunk_len,
     const int base_pos,
     const int p,
-    const int k4)
+    const int k4,
+    const float* __restrict__ kb_bias,   // Plan 622 — see kb_bias_score
+    const int kb_stride,
+    const int kb_on)
 {
     const int n_positions = base_pos + p;
     const int kv_group = blockIdx.x;   // grid.x = n_kv_head
@@ -2247,6 +2410,14 @@ static __device__ void attention_decode_splitgqa_rows_qg_body_t(
                                 }
                             }
                             score = dot * scale;
+                            // Plan 622 — the per-key bias on this task's
+                            // q-head (kv_group * g + h), pre-max; causal pos
+                            // only (pos <= base_pos + row_off + r).
+                            if (kb_on != 0) {
+                                score = kb_bias_score(score, pos,
+                                                      kv_group * g + h,
+                                                      kb_stride, kb_bias);
+                            }
                         }
                         float m = score;
                         for (int off = 16; off > 0; off >>= 1) {
@@ -2361,12 +2532,16 @@ attention_decode_splitgqa_partial_rows_qg_f32(
     const int chunk_len,
     const int base_pos,
     const int p,
-    const int k4)
+    const int k4,
+    const float* __restrict__ kb_bias,   // Plan 622
+    const int kb_stride,
+    const int* __restrict__ kb_enabled)
 {
     extern __shared__ float smem[];
+    const int kb_on = *kb_enabled;
     attention_decode_splitgqa_rows_qg_body_t<0>(query, key_cache, value_cache,
         part_m, part_l, part_out, smem, scale, head_dim, n_head, n_kv_head,
-        chunk_len, base_pos, p, k4);
+        chunk_len, base_pos, p, k4, kb_bias, kb_stride, kb_on);
 }
 
 // Issue 742 T9.12 - graph-capture twin: base_pos read from a device buffer
@@ -2388,13 +2563,17 @@ attention_decode_splitgqa_partial_rows_qg_f32_devpos(
     const int chunk_len,
     const int* __restrict__ pos_dev,
     const int p,
-    const int k4)
+    const int k4,
+    const float* __restrict__ kb_bias,   // Plan 622
+    const int kb_stride,
+    const int* __restrict__ kb_enabled)
 {
     extern __shared__ float smem[];
     const int base_pos = *pos_dev;
+    const int kb_on = *kb_enabled;
     attention_decode_splitgqa_rows_qg_body_t<0>(query, key_cache, value_cache,
         part_m, part_l, part_out, smem, scale, head_dim, n_head, n_kv_head,
-        chunk_len, base_pos, p, k4);
+        chunk_len, base_pos, p, k4, kb_bias, kb_stride, kb_on);
 }
 
 // Issue 742 T9.15 - the multi-accumulator dot twins of the T9.11 qg
@@ -2418,12 +2597,16 @@ attention_decode_splitgqa_partial_rows_qgma_f32(
     const int chunk_len,
     const int base_pos,
     const int p,
-    const int k4)
+    const int k4,
+    const float* __restrict__ kb_bias,   // Plan 622
+    const int kb_stride,
+    const int* __restrict__ kb_enabled)
 {
     extern __shared__ float smem[];
+    const int kb_on = *kb_enabled;
     attention_decode_splitgqa_rows_qg_body_t<1>(query, key_cache, value_cache,
         part_m, part_l, part_out, smem, scale, head_dim, n_head, n_kv_head,
-        chunk_len, base_pos, p, k4);
+        chunk_len, base_pos, p, k4, kb_bias, kb_stride, kb_on);
 }
 
 // Issue 742 T9.12/T9.15 - graph-capture twin (same smem geometry - the
@@ -2443,13 +2626,17 @@ attention_decode_splitgqa_partial_rows_qgma_f32_devpos(
     const int chunk_len,
     const int* __restrict__ pos_dev,
     const int p,
-    const int k4)
+    const int k4,
+    const float* __restrict__ kb_bias,   // Plan 622
+    const int kb_stride,
+    const int* __restrict__ kb_enabled)
 {
     extern __shared__ float smem[];
     const int base_pos = *pos_dev;
+    const int kb_on = *kb_enabled;
     attention_decode_splitgqa_rows_qg_body_t<1>(query, key_cache, value_cache,
         part_m, part_l, part_out, smem, scale, head_dim, n_head, n_kv_head,
-        chunk_len, base_pos, p, k4);
+        chunk_len, base_pos, p, k4, kb_bias, kb_stride, kb_on);
 }
 
 // Issue 742 T9.14 — the TWO-PASS flash restructure of the verify-attention
@@ -2485,7 +2672,10 @@ static __device__ void attention_verify2p_stats_body(
     const int n_kv_head,
     const int n_tiles,            // stride == gridDim.y (pinned or exact)
     const int base_pos,
-    const int p)
+    const int p,
+    const float* __restrict__ kb_bias,   // Plan 622 — see kb_bias_score
+    const int kb_stride,
+    const int kb_on)
 {
     const int n_positions = base_pos + p;
     const int kv_group = blockIdx.x;   // grid.x = n_kv_head
@@ -2543,6 +2733,13 @@ static __device__ void attention_verify2p_stats_body(
                         dot += qh[d] * k_smem[d * (ATT_SPLIT_GQA_TILE + 1) + lane];
                     }
                     score = dot * scale;
+                    // Plan 622 — the per-key bias on this task's q-head
+                    // (kv_group * g + h), pre-max. The pv pass applies the
+                    // SAME bias so the frozen max matches pass A.
+                    if (kb_on != 0) {
+                        score = kb_bias_score(score, pos, kv_group * g + h,
+                                              kb_stride, kb_bias);
+                    }
                 }
                 float m = score;
                 for (int off = 16; off > 0; off >>= 1) {
@@ -2579,11 +2776,16 @@ attention_verify2p_stats_f32(
     const int n_kv_head,
     const int n_tiles,
     const int base_pos,
-    const int p)
+    const int p,
+    const float* __restrict__ kb_bias,   // Plan 622
+    const int kb_stride,
+    const int* __restrict__ kb_enabled)
 {
     extern __shared__ float smem[];
+    const int kb_on = *kb_enabled;
     attention_verify2p_stats_body(query, key_cache, stat_m, stat_l, smem,
-        scale, head_dim, n_head, n_kv_head, n_tiles, base_pos, p);
+        scale, head_dim, n_head, n_kv_head, n_tiles, base_pos, p,
+        kb_bias, kb_stride, kb_on);
 }
 
 // T9.14 graph-capture twin: base_pos from pos_dev; the grid (and the
@@ -2600,12 +2802,17 @@ attention_verify2p_stats_f32_devpos(
     const int n_kv_head,
     const int n_tiles,
     const int* __restrict__ pos_dev,
-    const int p)
+    const int p,
+    const float* __restrict__ kb_bias,   // Plan 622
+    const int kb_stride,
+    const int* __restrict__ kb_enabled)
 {
     extern __shared__ float smem[];
     const int base_pos = *pos_dev;
+    const int kb_on = *kb_enabled;
     attention_verify2p_stats_body(query, key_cache, stat_m, stat_l, smem,
-        scale, head_dim, n_head, n_kv_head, n_tiles, base_pos, p);
+        scale, head_dim, n_head, n_kv_head, n_tiles, base_pos, p,
+        kb_bias, kb_stride, kb_on);
 }
 
 // T9.14 pass A→B fold: per (kv_head block, task thread) reduce the tile
@@ -2657,7 +2864,10 @@ static __device__ void attention_verify2p_pv_body(
     const int n_kv_head,
     const int chunk_len,
     const int base_pos,
-    const int p)
+    const int p,
+    const float* __restrict__ kb_bias,   // Plan 622 — see kb_bias_score
+    const int kb_stride,
+    const int kb_on)
 {
     const int n_positions = base_pos + p;
     const int kv_group = blockIdx.x;   // grid.x = n_kv_head
@@ -2759,6 +2969,15 @@ static __device__ void attention_verify2p_pv_body(
                                 dot += qh[d] * k_smem[d * (ATT_SPLIT_GQA_TILE + 1) + lane];
                             }
                             score = dot * scale;
+                            // Plan 622 — the SAME bias pass A applied, so the
+                            // frozen max from the stats pass stays the true max
+                            // of the biased row (mismatch would corrupt the
+                            // frozen-max softmax).
+                            if (kb_on != 0) {
+                                score = kb_bias_score(score, pos,
+                                                      kv_group * g + h,
+                                                      kb_stride, kb_bias);
+                            }
                         }
                         float pv = 0.0f;
                         if (valid) pv = expf(score - m_frozen[u]);
@@ -2850,12 +3069,16 @@ attention_verify2p_pv_f32(
     const int n_kv_head,
     const int chunk_len,
     const int base_pos,
-    const int p)
+    const int p,
+    const float* __restrict__ kb_bias,   // Plan 622
+    const int kb_stride,
+    const int* __restrict__ kb_enabled)
 {
     extern __shared__ float smem[];
+    const int kb_on = *kb_enabled;
     attention_verify2p_pv_body(query, key_cache, value_cache, mrg_m,
         part_m, part_l, part_out, smem, scale, head_dim, n_head, n_kv_head,
-        chunk_len, base_pos, p);
+        chunk_len, base_pos, p, kb_bias, kb_stride, kb_on);
 }
 
 // T9.14 graph-capture twin: base_pos from pos_dev; grid (and the
@@ -2875,13 +3098,17 @@ attention_verify2p_pv_f32_devpos(
     const int n_kv_head,
     const int chunk_len,
     const int* __restrict__ pos_dev,
-    const int p)
+    const int p,
+    const float* __restrict__ kb_bias,   // Plan 622
+    const int kb_stride,
+    const int* __restrict__ kb_enabled)
 {
     extern __shared__ float smem[];
     const int base_pos = *pos_dev;
+    const int kb_on = *kb_enabled;
     attention_verify2p_pv_body(query, key_cache, value_cache, mrg_m,
         part_m, part_l, part_out, smem, scale, head_dim, n_head, n_kv_head,
-        chunk_len, base_pos, p);
+        chunk_len, base_pos, p, kb_bias, kb_stride, kb_on);
 }
 
 "#;
@@ -2997,6 +3224,13 @@ pub struct AttentionKernels {
     si_dummy_lut: CudaSlice<f32>,
     si_dummy_inv_sigma: CudaSlice<f32>,
     si_dummy_enabled: CudaSlice<i32>,
+    /// Plan 622 T1.2 — the kb flag-off dummies (the si dummies' law): a
+    /// 1-float runway and the disarmed flag. A launcher with `kb: None`
+    /// pushes these; the kernel's kb branch is dead at `*enabled == 0`, so
+    /// the runway is never indexed. Stable device addresses (captured
+    /// graphs bake them) — they live as long as the kernels struct.
+    kb_dummy_bias: CudaSlice<f32>,
+    kb_dummy_enabled: CudaSlice<i32>,
     _module: Arc<CudaModule>,
 }
 
@@ -3258,6 +3492,13 @@ impl AttentionKernels {
         let si_dummy_enabled = stream
             .clone_htod(&[0i32])
             .map_err(|e| super::CudarcKernelError::Launch(e.to_string()))?;
+        // Plan 622 — the kb flag-off dummies (same law as the si pair).
+        let kb_dummy_bias = stream
+            .clone_htod(&[0.0f32])
+            .map_err(|e| super::CudarcKernelError::Launch(e.to_string()))?;
+        let kb_dummy_enabled = stream
+            .clone_htod(&[0i32])
+            .map_err(|e| super::CudarcKernelError::Launch(e.to_string()))?;
 
         Ok(Self {
             rope,
@@ -3297,6 +3538,8 @@ impl AttentionKernels {
             si_dummy_lut,
             si_dummy_inv_sigma,
             si_dummy_enabled,
+            kb_dummy_bias,
+            kb_dummy_enabled,
             _module: module,
         })
     }
@@ -3588,6 +3831,8 @@ impl AttentionKernels {
     /// - `attn_out`: `[n_head * head_dim]`
     /// - `si`: the Plan-620 scale-invariant hook — `None` = the incumbent
     ///   posture (dummies pushed, kernel branch dead, bit-identical).
+    /// - `kb`: the Plan-622 per-key × per-head additive attention-logit-bias
+    ///   hook — `None` = the incumbent posture (same law).
     ///
     /// Dispatch: `n_head` blocks × `head_dim` threads. Dynamic shared memory
     /// = `head_dim * 4` bytes.
@@ -3603,6 +3848,7 @@ impl AttentionKernels {
         n_kv_head: usize,
         n_positions: usize,
         si: Option<&SiDecodeLayerArgs<'_>>,
+        kb: Option<&KeyBiasLayerArgs<'_>>,
     ) -> Result<(), super::CudarcKernelError> {
         let scale = 1.0f32 / (head_dim as f32).sqrt();
         let head_dim_i32 = head_dim as i32;
@@ -3617,6 +3863,13 @@ impl AttentionKernels {
         let (si_lut, si_inv_sigma, si_enabled) = match si {
             Some(a) => (a.lut, &a.inv_sigma, a.enabled),
             None => (&self.si_dummy_lut, &dummy_inv, &self.si_dummy_enabled),
+        };
+        // Plan 622 — the kb flag-off view (the si match shape; the dummy
+        // view is a local so the match arms unify on one borrowed type).
+        let dummy_kb = self.kb_dummy_bias.slice(0..self.kb_dummy_bias.len());
+        let (kb_bias, kb_stride, kb_enabled) = match kb {
+            Some(a) => (&a.bias, a.stride as i32, a.enabled),
+            None => (&dummy_kb, 0i32, &self.kb_dummy_enabled),
         };
         let cfg = LaunchConfig {
             grid_dim: (n_head as u32, 1, 1),
@@ -3638,6 +3891,9 @@ impl AttentionKernels {
                 .arg(si_lut)
                 .arg(si_inv_sigma)
                 .arg(si_enabled)
+                .arg(kb_bias)
+                .arg(&kb_stride)
+                .arg(kb_enabled)
                 .launch(cfg)
                 .map_err(|e| super::CudarcKernelError::Launch(e.to_string()))?;
         }
@@ -3646,7 +3902,8 @@ impl AttentionKernels {
 
     /// Issue 618 — Device-pointer variant of `launch_attention_decode`.
     /// Reads `n_positions = *pos_dev + 1` at kernel runtime. The Plan-620 si
-    /// hook rides the same ABI (`None` = the incumbent posture).
+    /// hook and the Plan-622 kb hook ride the same ABI (`None` = the
+    /// incumbent posture).
     #[allow(clippy::too_many_arguments)]
     pub fn launch_attention_decode_devpos(
         &self,
@@ -3660,6 +3917,7 @@ impl AttentionKernels {
         n_kv_head: usize,
         pos_dev: &cudarc::driver::safe::CudaSlice<i32>,
         si: Option<&SiDecodeLayerArgs<'_>>,
+        kb: Option<&KeyBiasLayerArgs<'_>>,
     ) -> Result<(), super::CudarcKernelError> {
         let scale = 1.0f32 / (head_dim as f32).sqrt();
         let head_dim_i32 = head_dim as i32;
@@ -3673,6 +3931,12 @@ impl AttentionKernels {
         let (si_lut, si_inv_sigma, si_enabled) = match si {
             Some(a) => (a.lut, &a.inv_sigma, a.enabled),
             None => (&self.si_dummy_lut, &dummy_inv, &self.si_dummy_enabled),
+        };
+        // Plan 622 — the kb flag-off view (the si match shape).
+        let dummy_kb = self.kb_dummy_bias.slice(0..self.kb_dummy_bias.len());
+        let (kb_bias, kb_stride, kb_enabled) = match kb {
+            Some(a) => (&a.bias, a.stride as i32, a.enabled),
+            None => (&dummy_kb, 0i32, &self.kb_dummy_enabled),
         };
         let cfg = LaunchConfig {
             grid_dim: (n_head as u32, 1, 1),
@@ -3694,6 +3958,9 @@ impl AttentionKernels {
                 .arg(si_lut)
                 .arg(si_inv_sigma)
                 .arg(si_enabled)
+                .arg(kb_bias)
+                .arg(&kb_stride)
+                .arg(kb_enabled)
                 .launch(cfg)
                 .map_err(|e| super::CudarcKernelError::Launch(e.to_string()))?;
         }
@@ -3731,6 +3998,7 @@ impl AttentionKernels {
         n_kv_head: usize,
         chunk_len: usize,
         n_positions: usize,
+        kb: Option<&KeyBiasLayerArgs<'_>>,
     ) -> Result<(), super::CudarcKernelError> {
         let scale = 1.0f32 / (head_dim as f32).sqrt();
         let head_dim_i32 = head_dim as i32;
@@ -3739,6 +4007,13 @@ impl AttentionKernels {
         let chunk_len_i32 = chunk_len as i32;
         let n_positions_i32 = n_positions as i32;
         let n_chunks = n_positions.div_ceil(chunk_len).max(1);
+        // Plan 622 — the kb flag-off view (the si match shape; the dummy is
+        // a launcher-scope local so the borrowed view outlives the launch).
+        let dummy_kb = self.kb_dummy_bias.slice(0..self.kb_dummy_bias.len());
+        let (kb_bias, kb_stride, kb_enabled) = match kb {
+            Some(a) => (&a.bias, a.stride as i32, a.enabled),
+            None => (&dummy_kb, 0i32, &self.kb_dummy_enabled),
+        };
         let cfg = LaunchConfig {
             grid_dim: (n_head as u32, n_chunks as u32, 1),
             block_dim: (head_dim as u32, 1, 1),
@@ -3759,6 +4034,9 @@ impl AttentionKernels {
                 .arg(&n_kv_head_i32)
                 .arg(&chunk_len_i32)
                 .arg(&n_positions_i32)
+                .arg(kb_bias)
+                .arg(&kb_stride)
+                .arg(kb_enabled)
                 .launch(cfg)
                 .map_err(|e| super::CudarcKernelError::Launch(e.to_string()))?;
         }
@@ -3791,12 +4069,19 @@ impl AttentionKernels {
         chunk_len: usize,
         n_chunks_max: usize,
         pos_dev: &cudarc::driver::safe::CudaSlice<i32>,
+        kb: Option<&KeyBiasLayerArgs<'_>>,
     ) -> Result<(), super::CudarcKernelError> {
         let scale = 1.0f32 / (head_dim as f32).sqrt();
         let head_dim_i32 = head_dim as i32;
         let n_head_i32 = n_head as i32;
         let n_kv_head_i32 = n_kv_head as i32;
         let chunk_len_i32 = chunk_len as i32;
+        // Plan 622 — the kb flag-off view (the si match shape).
+        let dummy_kb = self.kb_dummy_bias.slice(0..self.kb_dummy_bias.len());
+        let (kb_bias, kb_stride, kb_enabled) = match kb {
+            Some(a) => (&a.bias, a.stride as i32, a.enabled),
+            None => (&dummy_kb, 0i32, &self.kb_dummy_enabled),
+        };
         let cfg = LaunchConfig {
             grid_dim: (n_head as u32, n_chunks_max as u32, 1),
             block_dim: (head_dim as u32, 1, 1),
@@ -3817,6 +4102,9 @@ impl AttentionKernels {
                 .arg(&n_kv_head_i32)
                 .arg(&chunk_len_i32)
                 .arg(pos_dev)
+                .arg(kb_bias)
+                .arg(&kb_stride)
+                .arg(kb_enabled)
                 .launch(cfg)
                 .map_err(|e| super::CudarcKernelError::Launch(e.to_string()))?;
         }
@@ -3863,6 +4151,7 @@ impl AttentionKernels {
         n_kv_head: usize,
         chunk_len: usize,
         n_positions: usize,
+        kb: Option<&KeyBiasLayerArgs<'_>>,
     ) -> Result<(), super::CudarcKernelError> {
         validate_splitgqa(head_dim, n_head, n_kv_head, chunk_len)?;
         let g = n_head / n_kv_head;
@@ -3875,6 +4164,13 @@ impl AttentionKernels {
         let n_chunks = n_positions.div_ceil(chunk_len).max(1);
         // smem (floats): q[g*head_dim] | k[head_dim*33] | p[g*32] | st[g]
         let smem_floats = g * head_dim + head_dim * 33 + g * 32 + g;
+        // Plan 622 — the kb flag-off view (the si match shape; the dummy is
+        // a launcher-scope local so the borrowed view outlives the launch).
+        let dummy_kb = self.kb_dummy_bias.slice(0..self.kb_dummy_bias.len());
+        let (kb_bias, kb_stride, kb_enabled) = match kb {
+            Some(a) => (&a.bias, a.stride as i32, a.enabled),
+            None => (&dummy_kb, 0i32, &self.kb_dummy_enabled),
+        };
         let cfg = LaunchConfig {
             grid_dim: (n_kv_head as u32, n_chunks as u32, 1),
             block_dim: (256, 1, 1),
@@ -3895,6 +4191,9 @@ impl AttentionKernels {
                 .arg(&n_kv_head_i32)
                 .arg(&chunk_len_i32)
                 .arg(&n_positions_i32)
+                .arg(kb_bias)
+                .arg(&kb_stride)
+                .arg(kb_enabled)
                 .launch(cfg)
                 .map_err(|e| super::CudarcKernelError::Launch(e.to_string()))?;
         }
@@ -3925,6 +4224,7 @@ impl AttentionKernels {
         chunk_len: usize,
         n_chunks_max: usize,
         pos_dev: &cudarc::driver::safe::CudaSlice<i32>,
+        kb: Option<&KeyBiasLayerArgs<'_>>,
     ) -> Result<(), super::CudarcKernelError> {
         validate_splitgqa(head_dim, n_head, n_kv_head, chunk_len)?;
         let g = n_head / n_kv_head;
@@ -3934,6 +4234,11 @@ impl AttentionKernels {
         let n_kv_head_i32 = n_kv_head as i32;
         let chunk_len_i32 = chunk_len as i32;
         let smem_floats = g * head_dim + head_dim * 33 + g * 32 + g;
+        let dummy_kb = self.kb_dummy_bias.slice(0..self.kb_dummy_bias.len());
+        let (kb_bias, kb_stride, kb_enabled) = match kb {
+            Some(a) => (&a.bias, a.stride as i32, a.enabled),
+            None => (&dummy_kb, 0i32, &self.kb_dummy_enabled),
+        };
         let cfg = LaunchConfig {
             grid_dim: (n_kv_head as u32, n_chunks_max as u32, 1),
             block_dim: (256, 1, 1),
@@ -3954,6 +4259,9 @@ impl AttentionKernels {
                 .arg(&n_kv_head_i32)
                 .arg(&chunk_len_i32)
                 .arg(pos_dev)
+                .arg(kb_bias)
+                .arg(&kb_stride)
+                .arg(kb_enabled)
                 .launch(cfg)
                 .map_err(|e| super::CudarcKernelError::Launch(e.to_string()))?;
         }
@@ -4323,6 +4631,7 @@ impl AttentionKernels {
         n_chunks: usize,
         base_pos: usize,
         p: usize,
+        kb: Option<&KeyBiasLayerArgs<'_>>,
     ) -> Result<(), super::CudarcKernelError> {
         validate_splitgqa(head_dim, n_head, n_kv_head, chunk_len)?;
         let g = n_head / n_kv_head;
@@ -4343,6 +4652,12 @@ impl AttentionKernels {
             base_pos as i32,
             p as i32,
         );
+        // Plan 622 — the kb flag-off view (the si match shape).
+        let dummy_kb = self.kb_dummy_bias.slice(0..self.kb_dummy_bias.len());
+        let (kb_bias, kb_stride, kb_enabled) = match kb {
+            Some(a) => (&a.bias, a.stride as i32, a.enabled),
+            None => (&dummy_kb, 0i32, &self.kb_dummy_enabled),
+        };
         // DevicePtr-widened — the lane path passes per-lane views (Plan 556).
         let (q_ptr, _sync_q) = query.device_ptr(stream);
         let (kc_ptr, _sync_kc) = key_cache.device_ptr(stream);
@@ -4368,6 +4683,9 @@ impl AttentionKernels {
                 .arg(&bp_i)
                 .arg(&p_i)
                 .arg(&Self::verify_kf4_for(head_dim))
+                .arg(kb_bias)
+                .arg(&kb_stride)
+                .arg(kb_enabled)
                 .launch(cfg)
                 .map_err(|e| super::CudarcKernelError::Launch(e.to_string()))?;
         }
@@ -4425,6 +4743,7 @@ impl AttentionKernels {
         n_chunks: usize,
         pos_dev: &impl DevicePtr<i32>,
         p: usize,
+        kb: Option<&KeyBiasLayerArgs<'_>>,
     ) -> Result<(), super::CudarcKernelError> {
         validate_splitgqa(head_dim, n_head, n_kv_head, chunk_len)?;
         let g = n_head / n_kv_head;
@@ -4443,7 +4762,13 @@ impl AttentionKernels {
             chunk_len as i32,
             p as i32,
         );
-        // DevicePtr-widened — the lane graph path passes per-lane views (Plan 556).
+        // Plan 622 — the kb flag-off view (the si match shape).
+        let dummy_kb = self.kb_dummy_bias.slice(0..self.kb_dummy_bias.len());
+        let (kb_bias, kb_stride, kb_enabled) = match kb {
+            Some(a) => (&a.bias, a.stride as i32, a.enabled),
+            None => (&dummy_kb, 0i32, &self.kb_dummy_enabled),
+        };
+        // DevicePtr-widened — the lane path passes per-lane views (Plan 556).
         let (q_ptr, _sync_q) = query.device_ptr(stream);
         let (kc_ptr, _sync_kc) = key_cache.device_ptr(stream);
         let (vc_ptr, _sync_vc) = value_cache.device_ptr(stream);
@@ -4469,6 +4794,9 @@ impl AttentionKernels {
                 .arg(&pos_ptr)
                 .arg(&p_i)
                 .arg(&Self::verify_kf4_for(head_dim))
+                .arg(kb_bias)
+                .arg(&kb_stride)
+                .arg(kb_enabled)
                 .launch(cfg)
                 .map_err(|e| super::CudarcKernelError::Launch(e.to_string()))?;
         }
@@ -4534,6 +4862,7 @@ impl AttentionKernels {
         n_chunks: usize,
         base_pos: usize,
         p: usize,
+        kb: Option<&KeyBiasLayerArgs<'_>>,
     ) -> Result<(), super::CudarcKernelError> {
         validate_splitgqa(head_dim, n_head, n_kv_head, chunk_len)?;
         if head_dim != 256 {
@@ -4563,6 +4892,12 @@ impl AttentionKernels {
             base_pos as i32,
             p as i32,
         );
+        // Plan 622 — the kb flag-off view (the si match shape).
+        let dummy_kb = self.kb_dummy_bias.slice(0..self.kb_dummy_bias.len());
+        let (kb_bias, kb_stride, kb_enabled) = match kb {
+            Some(a) => (&a.bias, a.stride as i32, a.enabled),
+            None => (&dummy_kb, 0i32, &self.kb_dummy_enabled),
+        };
         // DevicePtr-widened — the lane path passes per-lane views (Plan 556).
         let (q_ptr, _sync_q) = query.device_ptr(stream);
         let (kc_ptr, _sync_kc) = key_cache.device_ptr(stream);
@@ -4588,6 +4923,9 @@ impl AttentionKernels {
                 .arg(&bp_i)
                 .arg(&p_i)
                 .arg(&Self::verify_kf4_for(head_dim))
+                .arg(kb_bias)
+                .arg(&kb_stride)
+                .arg(kb_enabled)
                 .launch(cfg)
                 .map_err(|e| super::CudarcKernelError::Launch(e.to_string()))?;
         }
@@ -4649,6 +4987,7 @@ impl AttentionKernels {
         n_chunks: usize,
         pos_dev: &impl DevicePtr<i32>,
         p: usize,
+        kb: Option<&KeyBiasLayerArgs<'_>>,
     ) -> Result<(), super::CudarcKernelError> {
         validate_splitgqa(head_dim, n_head, n_kv_head, chunk_len)?;
         if head_dim != 256 {
@@ -4676,6 +5015,12 @@ impl AttentionKernels {
             chunk_len as i32,
             p as i32,
         );
+        // Plan 622 — the kb flag-off view (the si match shape).
+        let dummy_kb = self.kb_dummy_bias.slice(0..self.kb_dummy_bias.len());
+        let (kb_bias, kb_stride, kb_enabled) = match kb {
+            Some(a) => (&a.bias, a.stride as i32, a.enabled),
+            None => (&dummy_kb, 0i32, &self.kb_dummy_enabled),
+        };
         let (pos_ptr, _sync_pos) = pos_dev.device_ptr(stream);
         unsafe {
             stream
@@ -4694,6 +5039,9 @@ impl AttentionKernels {
                 .arg(&pos_ptr)
                 .arg(&p_i)
                 .arg(&Self::verify_kf4_for(head_dim))
+                .arg(kb_bias)
+                .arg(&kb_stride)
+                .arg(kb_enabled)
                 .launch(cfg)
                 .map_err(|e| super::CudarcKernelError::Launch(e.to_string()))?;
         }
@@ -4759,6 +5107,7 @@ impl AttentionKernels {
         n_chunks: usize,
         base_pos: usize,
         p: usize,
+        kb: Option<&KeyBiasLayerArgs<'_>>,
     ) -> Result<(), super::CudarcKernelError> {
         validate_splitgqa(head_dim, n_head, n_kv_head, chunk_len)?;
         if head_dim != 256 {
@@ -4784,6 +5133,12 @@ impl AttentionKernels {
             base_pos as i32,
             p as i32,
         );
+        // Plan 622 — the kb flag-off view (the si match shape).
+        let dummy_kb = self.kb_dummy_bias.slice(0..self.kb_dummy_bias.len());
+        let (kb_bias, kb_stride, kb_enabled) = match kb {
+            Some(a) => (&a.bias, a.stride as i32, a.enabled),
+            None => (&dummy_kb, 0i32, &self.kb_dummy_enabled),
+        };
         unsafe {
             stream
                 .launch_builder(&self.attention_splitgqa_rows_ma)
@@ -4801,6 +5156,9 @@ impl AttentionKernels {
                 .arg(&bp_i)
                 .arg(&p_i)
                 .arg(&Self::verify_kf4_for(head_dim))
+                .arg(kb_bias)
+                .arg(&kb_stride)
+                .arg(kb_enabled)
                 .launch(cfg)
                 .map_err(|e| super::CudarcKernelError::Launch(e.to_string()))?;
         }
@@ -4856,11 +5214,12 @@ impl AttentionKernels {
         n_chunks: usize,
         pos_dev: &cudarc::driver::safe::CudaSlice<i32>,
         p: usize,
+        kb: Option<&KeyBiasLayerArgs<'_>>,
     ) -> Result<(), super::CudarcKernelError> {
         validate_splitgqa(head_dim, n_head, n_kv_head, chunk_len)?;
         if head_dim != 256 {
             return Err(super::CudarcKernelError::InvalidArg(format!(
-                "splitgqa rows ma: head_dim must be 256 (got {head_dim})"
+                "splitgqa rows ma devpos: head_dim must be 256 (got {head_dim})"
             )));
         }
         let g = n_head / n_kv_head;
@@ -4879,6 +5238,12 @@ impl AttentionKernels {
             chunk_len as i32,
             p as i32,
         );
+        // Plan 622 — the kb flag-off view (the si match shape).
+        let dummy_kb = self.kb_dummy_bias.slice(0..self.kb_dummy_bias.len());
+        let (kb_bias, kb_stride, kb_enabled) = match kb {
+            Some(a) => (&a.bias, a.stride as i32, a.enabled),
+            None => (&dummy_kb, 0i32, &self.kb_dummy_enabled),
+        };
         unsafe {
             stream
                 .launch_builder(&self.attention_splitgqa_rows_ma_devpos)
@@ -4896,6 +5261,9 @@ impl AttentionKernels {
                 .arg(pos_dev)
                 .arg(&p_i)
                 .arg(&Self::verify_kf4_for(head_dim))
+                .arg(kb_bias)
+                .arg(&kb_stride)
+                .arg(kb_enabled)
                 .launch(cfg)
                 .map_err(|e| super::CudarcKernelError::Launch(e.to_string()))?;
         }
@@ -4960,6 +5328,7 @@ impl AttentionKernels {
         n_chunks: usize,
         base_pos: usize,
         p: usize,
+        kb: Option<&KeyBiasLayerArgs<'_>>,
     ) -> Result<(), super::CudarcKernelError> {
         validate_splitgqa(head_dim, n_head, n_kv_head, chunk_len)?;
         if head_dim != 256 {
@@ -4989,6 +5358,12 @@ impl AttentionKernels {
             base_pos as i32,
             p as i32,
         );
+        // Plan 622 — the kb flag-off view (the si match shape).
+        let dummy_kb = self.kb_dummy_bias.slice(0..self.kb_dummy_bias.len());
+        let (kb_bias, kb_stride, kb_enabled) = match kb {
+            Some(a) => (&a.bias, a.stride as i32, a.enabled),
+            None => (&dummy_kb, 0i32, &self.kb_dummy_enabled),
+        };
         unsafe {
             stream
                 .launch_builder(&self.attention_splitgqa_rows_qgma)
@@ -5006,6 +5381,9 @@ impl AttentionKernels {
                 .arg(&bp_i)
                 .arg(&p_i)
                 .arg(&Self::verify_kf4_for(head_dim))
+                .arg(kb_bias)
+                .arg(&kb_stride)
+                .arg(kb_enabled)
                 .launch(cfg)
                 .map_err(|e| super::CudarcKernelError::Launch(e.to_string()))?;
         }
@@ -5062,6 +5440,7 @@ impl AttentionKernels {
         n_chunks: usize,
         pos_dev: &cudarc::driver::safe::CudaSlice<i32>,
         p: usize,
+        kb: Option<&KeyBiasLayerArgs<'_>>,
     ) -> Result<(), super::CudarcKernelError> {
         validate_splitgqa(head_dim, n_head, n_kv_head, chunk_len)?;
         if head_dim != 256 {
@@ -5089,6 +5468,12 @@ impl AttentionKernels {
             chunk_len as i32,
             p as i32,
         );
+        // Plan 622 — the kb flag-off view (the si match shape).
+        let dummy_kb = self.kb_dummy_bias.slice(0..self.kb_dummy_bias.len());
+        let (kb_bias, kb_stride, kb_enabled) = match kb {
+            Some(a) => (&a.bias, a.stride as i32, a.enabled),
+            None => (&dummy_kb, 0i32, &self.kb_dummy_enabled),
+        };
         unsafe {
             stream
                 .launch_builder(&self.attention_splitgqa_rows_qgma_devpos)
@@ -5106,6 +5491,9 @@ impl AttentionKernels {
                 .arg(pos_dev)
                 .arg(&p_i)
                 .arg(&Self::verify_kf4_for(head_dim))
+                .arg(kb_bias)
+                .arg(&kb_stride)
+                .arg(kb_enabled)
                 .launch(cfg)
                 .map_err(|e| super::CudarcKernelError::Launch(e.to_string()))?;
         }
@@ -5180,6 +5568,7 @@ impl AttentionKernels {
         n_stat_tiles: usize,
         base_pos: usize,
         p: usize,
+        kb: Option<&KeyBiasLayerArgs<'_>>,
     ) -> Result<(), super::CudarcKernelError> {
         validate_splitgqa(head_dim, n_head, n_kv_head, chunk_len)?;
         if head_dim != 256 {
@@ -5203,6 +5592,14 @@ impl AttentionKernels {
             base_pos as i32,
             p as i32,
         );
+        // Plan 622 — the kb flag-off view (the si match shape). The bias
+        // rides BOTH position-carrying passes (stats + pv); the merge and
+        // the rows combine are position-free and stay unchanged.
+        let dummy_kb = self.kb_dummy_bias.slice(0..self.kb_dummy_bias.len());
+        let (kb_bias, kb_stride, kb_enabled) = match kb {
+            Some(a) => (&a.bias, a.stride as i32, a.enabled),
+            None => (&dummy_kb, 0i32, &self.kb_dummy_enabled),
+        };
         // (1) pass A — tile-parallel stats. smem: k[hd][TILE+1].
         let stats_smem = (head_dim * 33 * core::mem::size_of::<f32>()) as u32;
         let cfg_stats = LaunchConfig {
@@ -5224,6 +5621,9 @@ impl AttentionKernels {
                 .arg(&nt_i)
                 .arg(&bp_i)
                 .arg(&p_i)
+                .arg(kb_bias)
+                .arg(&kb_stride)
+                .arg(kb_enabled)
                 .launch(cfg_stats)
                 .map_err(|e| super::CudarcKernelError::Launch(e.to_string()))?;
         }
@@ -5273,6 +5673,9 @@ impl AttentionKernels {
                 .arg(&ch_i)
                 .arg(&bp_i)
                 .arg(&p_i)
+                .arg(kb_bias)
+                .arg(&kb_stride)
+                .arg(kb_enabled)
                 .launch(cfg_pv)
                 .map_err(|e| super::CudarcKernelError::Launch(e.to_string()))?;
         }
@@ -5334,6 +5737,7 @@ impl AttentionKernels {
         n_stat_tiles: usize,
         pos_dev: &cudarc::driver::safe::CudaSlice<i32>,
         p: usize,
+        kb: Option<&KeyBiasLayerArgs<'_>>,
     ) -> Result<(), super::CudarcKernelError> {
         validate_splitgqa(head_dim, n_head, n_kv_head, chunk_len)?;
         if head_dim != 256 {
@@ -5356,6 +5760,13 @@ impl AttentionKernels {
             n_stat_tiles as i32,
             p as i32,
         );
+        // Plan 622 — the kb flag-off view; both position-carrying passes
+        // carry the bias (stats + pv), merge/combine unchanged.
+        let dummy_kb = self.kb_dummy_bias.slice(0..self.kb_dummy_bias.len());
+        let (kb_bias, kb_stride, kb_enabled) = match kb {
+            Some(a) => (&a.bias, a.stride as i32, a.enabled),
+            None => (&dummy_kb, 0i32, &self.kb_dummy_enabled),
+        };
         let stats_smem = (head_dim * 33 * core::mem::size_of::<f32>()) as u32;
         let cfg_stats = LaunchConfig {
             grid_dim: (n_kv_head as u32, n_stat_tiles as u32, 1),
@@ -5376,6 +5787,9 @@ impl AttentionKernels {
                 .arg(&nt_i)
                 .arg(pos_dev)
                 .arg(&p_i)
+                .arg(kb_bias)
+                .arg(&kb_stride)
+                .arg(kb_enabled)
                 .launch(cfg_stats)
                 .map_err(|e| super::CudarcKernelError::Launch(e.to_string()))?;
         }
@@ -5422,6 +5836,9 @@ impl AttentionKernels {
                 .arg(&ch_i)
                 .arg(pos_dev)
                 .arg(&p_i)
+                .arg(kb_bias)
+                .arg(&kb_stride)
+                .arg(kb_enabled)
                 .launch(cfg_pv)
                 .map_err(|e| super::CudarcKernelError::Launch(e.to_string()))?;
         }
@@ -6064,6 +6481,7 @@ mod tests {
                 n_kv_head,
                 n_positions,
                 None,
+                None,
             )
             .expect("launch");
         stream.synchronize().expect("sync");
@@ -6157,6 +6575,7 @@ mod tests {
                 n_kv_head,
                 n_positions,
                 None,
+                None,
             )
             .expect("launch");
         stream.synchronize().expect("sync");
@@ -6245,6 +6664,7 @@ mod tests {
                 n_kv_head,
                 n_positions,
                 None,
+                None,
             )
             .expect("scalar");
 
@@ -6254,7 +6674,7 @@ mod tests {
         kernels
             .launch_attention_decode_devpos(
                 &stream, &q_dev, &k_dev, &v_dev, &out_d, head_dim, n_head, n_kv_head, &pos_dev,
-                None,
+                None, None,
             )
             .expect("devpos");
         stream.synchronize().expect("sync");
@@ -6369,6 +6789,7 @@ mod tests {
                 n_kv_head,
                 n_positions,
                 si,
+                None,
             )
             .expect("launch");
             stream.synchronize().expect("sync");
@@ -6634,5 +7055,623 @@ mod tests {
         }
         eprintln!("[rope_roundtrip] max_abs_err={rt_err:.4e}");
         assert!(rt_err < 1e-3, "RoPE round-trip err {rt_err:.4e} > 1e-3");
+    }
+
+    // ===========================================================================
+    // Plan 622 T1.2/T1.3 — the per-key-bias (kb) hook's kernel-level gates:
+    // the byte-identity protocol (incumbent `None` vs all-zero armed vs a
+    // varying-row movement arm) over the decode pair, the default verify
+    // kernel (splitgqa rows qg), the two-pass verify pair, the canonical
+    // prefill macro, and the KNOWN-BROKEN mma twin (byte-identity only —
+    // the protocol needs determinism, not correctness). The league-model
+    // arms ride the 4090 session (T1.3's named CUDA rows).
+    // ===========================================================================
+
+    /// One fixture law the kb walk paid for (the CPU twin's): the softmax is
+    /// SHIFT-INVARIANT per row, so a bias CONSTANT across a head's keys is a
+    /// no-op — the movement arm must VARY within the head row. Head 0's row
+    /// is [+B, -B, -B, …]; heads ≥ 1 stay all-zero, so their outputs must be
+    /// BIT-identical to the incumbent (per-head row independence).
+    fn kb_fixture(n_head: usize, keys: usize, bias_mag: f32) -> Vec<f32> {
+        let mut bias = vec![0.0f32; n_head * keys];
+        bias[0] = bias_mag;
+        for slot in bias.iter_mut().take(keys).skip(1) {
+            *slot = -bias_mag;
+        }
+        bias
+    }
+
+    fn assert_bits_eq(a: &[f32], b: &[f32], what: &str) {
+        assert_eq!(a.len(), b.len(), "{what}: length mismatch");
+        for (i, (x, y)) in a.iter().zip(b.iter()).enumerate() {
+            assert_eq!(
+                x.to_bits(),
+                y.to_bits(),
+                "{what}: bit mismatch at {i}: {x:?} vs {y:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_attention_decode_kb_flag_off_and_movement() {
+        let Some(_) = cuda_or_skip() else {
+            eprintln!("[skip] no CUDA device");
+            return;
+        };
+        let ctx = CudaContext::new(0).unwrap();
+        let stream = ctx.new_stream().unwrap();
+        let kernels = AttentionKernels::new(ctx).expect("compile");
+
+        let n_head = 4usize;
+        let n_kv_head = 2usize;
+        let head_dim = 64usize;
+        let n_positions = 8usize;
+        let q_len = n_head * head_dim;
+        let kv_len = n_positions * n_kv_head * head_dim;
+
+        let mut query = vec![0.0f32; q_len];
+        let mut key_cache = vec![0.0f32; kv_len];
+        let mut value_cache = vec![0.0f32; kv_len];
+        for h in 0..n_head {
+            for d in 0..head_dim {
+                query[h * head_dim + d] = ((h * 31 + d) % 17) as f32 * 0.05 - 0.4;
+            }
+        }
+        for j in 0..n_positions {
+            for kvh in 0..n_kv_head {
+                for d in 0..head_dim {
+                    let base = j * n_kv_head * head_dim + kvh * head_dim;
+                    key_cache[base + d] = ((j * 7 + kvh * 3 + d) % 23) as f32 * 0.04 - 0.44;
+                    value_cache[base + d] = ((j * 5 + d) % 11) as f32 * 0.09 - 0.45;
+                }
+            }
+        }
+
+        let q_dev = stream.clone_htod(&query).unwrap();
+        let k_dev = stream.clone_htod(&key_cache).unwrap();
+        let v_dev = stream.clone_htod(&value_cache).unwrap();
+        let disabled = stream.clone_htod(&[0i32]).unwrap();
+        let enabled = stream.clone_htod(&[1i32]).unwrap();
+        let bias_zero = stream
+            .clone_htod(&vec![0.0f32; n_head * n_positions])
+            .unwrap();
+        let bias_move = stream
+            .clone_htod(&kb_fixture(n_head, n_positions, 3.0))
+            .unwrap();
+
+        let launch = |k: &AttentionKernels,
+                      out: &cudarc::driver::safe::CudaSlice<f32>,
+                      kb: Option<&KeyBiasLayerArgs<'_>>| {
+            k.launch_attention_decode(
+                &stream,
+                &q_dev,
+                &k_dev,
+                &v_dev,
+                out,
+                head_dim,
+                n_head,
+                n_kv_head,
+                n_positions,
+                None,
+                kb,
+            )
+            .expect("launch");
+            stream.synchronize().expect("sync");
+            let mut host = vec![0f32; q_len];
+            stream.memcpy_dtoh(out, &mut host).unwrap();
+            host
+        };
+
+        let out_base = stream.alloc_zeros::<f32>(q_len).unwrap();
+        let out_zero = stream.alloc_zeros::<f32>(q_len).unwrap();
+        let out_move = stream.alloc_zeros::<f32>(q_len).unwrap();
+
+        let base = launch(&kernels, &out_base, None);
+        let zero = launch(
+            &kernels,
+            &out_zero,
+            Some(&KeyBiasLayerArgs {
+                bias: bias_zero.slice(0..bias_zero.len()),
+                stride: n_positions,
+                enabled: &enabled,
+            }),
+        );
+        let disarmed = launch(
+            &kernels,
+            &out_zero,
+            Some(&KeyBiasLayerArgs {
+                bias: bias_move.slice(0..bias_move.len()),
+                stride: n_positions,
+                enabled: &disabled,
+            }),
+        );
+        let moved = launch(
+            &kernels,
+            &out_move,
+            Some(&KeyBiasLayerArgs {
+                bias: bias_move.slice(0..bias_move.len()),
+                stride: n_positions,
+                enabled: &enabled,
+            }),
+        );
+
+        // (1) Flag-off bit-identity (armed table, disabled flag).
+        assert_bits_eq(&base, &disarmed, "kb flag-off vs incumbent");
+        // (2) All-zero ARMED bit-identity (the add happens; x + 0.0 == x).
+        assert_bits_eq(&base, &zero, "kb zero-armed vs incumbent");
+        // (3) Movement: head 0's row moves; heads >= 1 stay bit-identical
+        // (per-head row independence).
+        let hd = head_dim;
+        assert!(
+            base[0..hd]
+                .iter()
+                .zip(moved[0..hd].iter())
+                .any(|(b, m)| b.to_bits() != m.to_bits()),
+            "armed varying kb row produced no output change — the hook is inert"
+        );
+        for h in 1..n_head {
+            assert_bits_eq(
+                &base[h * hd..(h + 1) * hd],
+                &moved[h * hd..(h + 1) * hd],
+                &format!("kb row independence head {h}"),
+            );
+        }
+    }
+
+    #[test]
+    fn test_attention_decode_kb_devpos_flag_off() {
+        let Some(_) = cuda_or_skip() else {
+            eprintln!("[skip] no CUDA device");
+            return;
+        };
+        let ctx = CudaContext::new(0).unwrap();
+        let stream = ctx.new_stream().unwrap();
+        let kernels = AttentionKernels::new(ctx).expect("compile");
+
+        let n_head = 4usize;
+        let n_kv_head = 2usize;
+        let head_dim = 64usize;
+        let pos = 7usize;
+        let n_positions = pos + 1;
+        let q_len = n_head * head_dim;
+        let kv_len = n_positions * n_kv_head * head_dim;
+
+        let mut query = vec![0.0f32; q_len];
+        let mut key_cache = vec![0.0f32; kv_len];
+        let mut value_cache = vec![0.0f32; kv_len];
+        for h in 0..n_head {
+            for d in 0..head_dim {
+                query[h * head_dim + d] = ((h * 13 + d) % 19) as f32 * 0.05 - 0.45;
+            }
+        }
+        for j in 0..n_positions {
+            for kvh in 0..n_kv_head {
+                for d in 0..head_dim {
+                    let base = j * n_kv_head * head_dim + kvh * head_dim;
+                    key_cache[base + d] = ((j * 11 + kvh * 5 + d) % 29) as f32 * 0.03 - 0.42;
+                    value_cache[base + d] = ((j * 3 + d) % 13) as f32 * 0.07 - 0.44;
+                }
+            }
+        }
+
+        let q_dev = stream.clone_htod(&query).unwrap();
+        let k_dev = stream.clone_htod(&key_cache).unwrap();
+        let v_dev = stream.clone_htod(&value_cache).unwrap();
+        let pos_dev = stream.clone_htod(&[pos as i32]).unwrap();
+        let enabled = stream.clone_htod(&[1i32]).unwrap();
+        let bias_zero = stream
+            .clone_htod(&vec![0.0f32; n_head * n_positions])
+            .unwrap();
+
+        let out_base = stream.alloc_zeros::<f32>(q_len).unwrap();
+        let out_zero = stream.alloc_zeros::<f32>(q_len).unwrap();
+        let run = |out: &cudarc::driver::safe::CudaSlice<f32>,
+                   kb: Option<&KeyBiasLayerArgs<'_>>| {
+            kernels
+                .launch_attention_decode_devpos(
+                    &stream, &q_dev, &k_dev, &v_dev, out, head_dim, n_head, n_kv_head, &pos_dev,
+                    None, kb,
+                )
+                .expect("launch");
+            stream.synchronize().expect("sync");
+            let mut host = vec![0f32; q_len];
+            stream.memcpy_dtoh(out, &mut host).unwrap();
+            host
+        };
+
+        let base = run(&out_base, None);
+        let zero = run(
+            &out_zero,
+            Some(&KeyBiasLayerArgs {
+                bias: bias_zero.slice(0..bias_zero.len()),
+                stride: n_positions,
+                enabled: &enabled,
+            }),
+        );
+        assert_bits_eq(&base, &zero, "kb devpos zero-armed vs incumbent");
+    }
+
+    #[test]
+    fn test_attention_splitgqa_rows_qg_kb_flag_off_and_movement() {
+        let Some(_) = cuda_or_skip() else {
+            eprintln!("[skip] no CUDA device");
+            return;
+        };
+        let ctx = CudaContext::new(0).unwrap();
+        let stream = ctx.new_stream().unwrap();
+        let kernels = AttentionKernels::new(ctx).expect("compile");
+
+        // The qg contract: head_dim == 256, g <= 8, p <= 64.
+        let n_head = 4usize;
+        let n_kv_head = 2usize;
+        let head_dim = 256usize;
+        let base_pos = 5usize;
+        let p = 3usize;
+        let n_positions = base_pos + p;
+        let chunk_len = 128usize;
+        let n_chunks = n_positions.div_ceil(chunk_len);
+        let q_len = p * n_head * head_dim;
+        let kv_len = n_positions * n_kv_head * head_dim;
+
+        let mut query = vec![0.0f32; q_len];
+        let mut key_cache = vec![0.0f32; kv_len];
+        let mut value_cache = vec![0.0f32; kv_len];
+        for r in 0..p {
+            for h in 0..n_head {
+                for d in 0..head_dim {
+                    query[(r * n_head + h) * head_dim + d] =
+                        ((r * 17 + h * 31 + d) % 23) as f32 * 0.04 - 0.44;
+                }
+            }
+        }
+        for j in 0..n_positions {
+            for kvh in 0..n_kv_head {
+                for d in 0..head_dim {
+                    let base = j * n_kv_head * head_dim + kvh * head_dim;
+                    key_cache[base + d] = ((j * 7 + kvh * 3 + d) % 23) as f32 * 0.04 - 0.44;
+                    value_cache[base + d] = ((j * 5 + d) % 11) as f32 * 0.09 - 0.45;
+                }
+            }
+        }
+
+        let q_dev = stream.clone_htod(&query).unwrap();
+        let k_dev = stream.clone_htod(&key_cache).unwrap();
+        let v_dev = stream.clone_htod(&value_cache).unwrap();
+        let enabled = stream.clone_htod(&[1i32]).unwrap();
+        let bias_zero = stream
+            .clone_htod(&vec![0.0f32; n_head * n_positions])
+            .unwrap();
+        let bias_move = stream
+            .clone_htod(&kb_fixture(n_head, n_positions, 3.0))
+            .unwrap();
+
+        let rows = p * n_head;
+        let pm = stream.alloc_zeros::<f32>(rows * n_chunks).unwrap();
+        let pl = stream.alloc_zeros::<f32>(rows * n_chunks).unwrap();
+        let po = stream
+            .alloc_zeros::<f32>(rows * n_chunks * head_dim)
+            .unwrap();
+
+        let launch = |out: &cudarc::driver::safe::CudaSlice<f32>,
+                      kb: Option<&KeyBiasLayerArgs<'_>>| {
+            kernels
+                .launch_attention_splitgqa_rows_qg(
+                    &stream, &q_dev, &k_dev, &v_dev, &pm, &pl, &po, out, head_dim, n_head,
+                    n_kv_head, chunk_len, n_chunks, base_pos, p, kb,
+                )
+                .expect("launch");
+            stream.synchronize().expect("sync");
+            let mut host = vec![0f32; q_len];
+            stream.memcpy_dtoh(out, &mut host).unwrap();
+            host
+        };
+
+        let out_base = stream.alloc_zeros::<f32>(q_len).unwrap();
+        let out_zero = stream.alloc_zeros::<f32>(q_len).unwrap();
+        let out_move = stream.alloc_zeros::<f32>(q_len).unwrap();
+        let base = launch(&out_base, None);
+        let zero = launch(
+            &out_zero,
+            Some(&KeyBiasLayerArgs {
+                bias: bias_zero.slice(0..bias_zero.len()),
+                stride: n_positions,
+                enabled: &enabled,
+            }),
+        );
+        let moved = launch(
+            &out_move,
+            Some(&KeyBiasLayerArgs {
+                bias: bias_move.slice(0..bias_move.len()),
+                stride: n_positions,
+                enabled: &enabled,
+            }),
+        );
+
+        assert_bits_eq(&base, &zero, "kb qg zero-armed vs incumbent");
+        // Movement: every query row's head-0 segment moves; heads >= 1 are
+        // bit-identical (per-head row independence over the row-major out).
+        let hd = head_dim;
+        for r in 0..p {
+            let row = r * n_head * hd;
+            assert!(
+                base[row..row + hd]
+                    .iter()
+                    .zip(moved[row..row + hd].iter())
+                    .any(|(b, m)| b.to_bits() != m.to_bits()),
+                "kb qg row {r}: head-0 segment did not move"
+            );
+            for h in 1..n_head {
+                let seg = row + h * hd;
+                assert_bits_eq(
+                    &base[seg..seg + hd],
+                    &moved[seg..seg + hd],
+                    &format!("kb qg row {r} head {h} independence"),
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn test_attention_verify2p_kb_flag_off_and_movement() {
+        let Some(_) = cuda_or_skip() else {
+            eprintln!("[skip] no CUDA device");
+            return;
+        };
+        let ctx = CudaContext::new(0).unwrap();
+        let stream = ctx.new_stream().unwrap();
+        let kernels = AttentionKernels::new(ctx).expect("compile");
+
+        // verify2p contract: head_dim == 256, g <= 8, p in 1..=16.
+        let n_head = 4usize;
+        let n_kv_head = 2usize;
+        let head_dim = 256usize;
+        let base_pos = 35usize;
+        let p = 3usize;
+        let n_positions = base_pos + p;
+        let chunk_len = 64usize;
+        let n_chunks = n_positions.div_ceil(chunk_len);
+        let n_stat_tiles = n_positions.div_ceil(32);
+        let q_len = p * n_head * head_dim;
+        let kv_len = n_positions * n_kv_head * head_dim;
+
+        let mut query = vec![0.0f32; q_len];
+        let mut key_cache = vec![0.0f32; kv_len];
+        let mut value_cache = vec![0.0f32; kv_len];
+        for r in 0..p {
+            for h in 0..n_head {
+                for d in 0..head_dim {
+                    query[(r * n_head + h) * head_dim + d] =
+                        ((r * 17 + h * 31 + d) % 23) as f32 * 0.04 - 0.44;
+                }
+            }
+        }
+        for j in 0..n_positions {
+            for kvh in 0..n_kv_head {
+                for d in 0..head_dim {
+                    let base = j * n_kv_head * head_dim + kvh * head_dim;
+                    key_cache[base + d] = ((j * 7 + kvh * 3 + d) % 23) as f32 * 0.04 - 0.44;
+                    value_cache[base + d] = ((j * 5 + d) % 11) as f32 * 0.09 - 0.45;
+                }
+            }
+        }
+
+        let q_dev = stream.clone_htod(&query).unwrap();
+        let k_dev = stream.clone_htod(&key_cache).unwrap();
+        let v_dev = stream.clone_htod(&value_cache).unwrap();
+        let enabled = stream.clone_htod(&[1i32]).unwrap();
+        let bias_zero = stream
+            .clone_htod(&vec![0.0f32; n_head * n_positions])
+            .unwrap();
+        let bias_move = stream
+            .clone_htod(&kb_fixture(n_head, n_positions, 3.0))
+            .unwrap();
+
+        let rows = p * n_head;
+        let stat_m = stream.alloc_zeros::<f32>(rows * n_stat_tiles).unwrap();
+        let stat_l = stream.alloc_zeros::<f32>(rows * n_stat_tiles).unwrap();
+        let mrg_m = stream.alloc_zeros::<f32>(rows).unwrap();
+        let mrg_l = stream.alloc_zeros::<f32>(rows).unwrap();
+        let pm = stream.alloc_zeros::<f32>(rows * n_chunks).unwrap();
+        let pl = stream.alloc_zeros::<f32>(rows * n_chunks).unwrap();
+        let po = stream
+            .alloc_zeros::<f32>(rows * n_chunks * head_dim)
+            .unwrap();
+
+        let launch = |out: &cudarc::driver::safe::CudaSlice<f32>,
+                      kb: Option<&KeyBiasLayerArgs<'_>>| {
+            kernels
+                .launch_attention_verify2p(
+                    &stream,
+                    &q_dev,
+                    &k_dev,
+                    &v_dev,
+                    &stat_m,
+                    &stat_l,
+                    &mrg_m,
+                    &mrg_l,
+                    &pm,
+                    &pl,
+                    &po,
+                    out,
+                    head_dim,
+                    n_head,
+                    n_kv_head,
+                    chunk_len,
+                    n_chunks,
+                    n_stat_tiles,
+                    base_pos,
+                    p,
+                    kb,
+                )
+                .expect("launch");
+            stream.synchronize().expect("sync");
+            let mut host = vec![0f32; q_len];
+            stream.memcpy_dtoh(out, &mut host).unwrap();
+            host
+        };
+
+        let out_base = stream.alloc_zeros::<f32>(q_len).unwrap();
+        let out_zero = stream.alloc_zeros::<f32>(q_len).unwrap();
+        let out_move = stream.alloc_zeros::<f32>(q_len).unwrap();
+        let base = launch(&out_base, None);
+        let zero = launch(
+            &out_zero,
+            Some(&KeyBiasLayerArgs {
+                bias: bias_zero.slice(0..bias_zero.len()),
+                stride: n_positions,
+                enabled: &enabled,
+            }),
+        );
+        let moved = launch(
+            &out_move,
+            Some(&KeyBiasLayerArgs {
+                bias: bias_move.slice(0..bias_move.len()),
+                stride: n_positions,
+                enabled: &enabled,
+            }),
+        );
+
+        // Zero-armed byte-identity (BOTH passes carry the same flag — the
+        // frozen max stays the biased row's true max).
+        assert_bits_eq(&base, &zero, "kb verify2p zero-armed vs incumbent");
+        let hd = head_dim;
+        for r in 0..p {
+            let row = r * n_head * hd;
+            assert!(
+                base[row..row + hd]
+                    .iter()
+                    .zip(moved[row..row + hd].iter())
+                    .any(|(b, m)| b.to_bits() != m.to_bits()),
+                "kb verify2p row {r}: head-0 segment did not move"
+            );
+        }
+    }
+
+    // The canonical prefill launcher lives in `prefill_cuda_attention`,
+    // itself gated on `ternary_gemm_batched` (lib.rs) — the test rides the
+    // same gate (the required-features law: never compile-to-nothing green).
+    #[cfg(feature = "ternary_gemm_batched")]
+    #[test]
+    fn test_attention_canonical_prefill_kb_flag_off_and_movement() {
+        let Some(_) = cuda_or_skip() else {
+            eprintln!("[skip] no CUDA device");
+            return;
+        };
+        let ctx = CudaContext::new(0).unwrap();
+        let stream = ctx.new_stream().unwrap();
+        // The struct-owned kb dummies clone on the standalone default stream
+        // (blocking) — any stream on the same device observes them.
+        let kernels = crate::prefill_cuda_attention::CudaAttnKernels::new_standalone()
+            .expect("compile")
+            .0;
+        use crate::prefill_cuda_attention::{AttnAcc, AttnDot, AttnInv, AttnPh3, AttnRes};
+        use crate::prefill_cuda_deltanet::SigExp;
+
+        let n_head = 2usize;
+        let n_kv_head = 1usize;
+        let head_dim = 64usize;
+        let base_pos = 4usize;
+        let p = 3usize;
+        let kv_len = base_pos + p;
+        let q_len = p * n_head * head_dim;
+        let kv_buf = kv_len * n_kv_head * head_dim;
+
+        let mut query = vec![0.0f32; q_len];
+        let mut key_cache = vec![0.0f32; kv_buf];
+        let mut value_cache = vec![0.0f32; kv_buf];
+        let mut gate = vec![0.0f32; q_len];
+        for r in 0..p {
+            for h in 0..n_head {
+                for d in 0..head_dim {
+                    let o = (r * n_head + h) * head_dim + d;
+                    query[o] = ((r * 17 + h * 31 + d) % 23) as f32 * 0.04 - 0.44;
+                    gate[o] = ((r * 5 + h + d) % 7) as f32 * 0.1 - 0.3;
+                }
+            }
+        }
+        for j in 0..kv_len {
+            for d in 0..head_dim {
+                let base = j * n_kv_head * head_dim + d;
+                key_cache[base] = ((j * 7 + d) % 23) as f32 * 0.04 - 0.44;
+                value_cache[base] = ((j * 5 + d) % 11) as f32 * 0.09 - 0.45;
+            }
+        }
+
+        let q_dev = stream.clone_htod(&query).unwrap();
+        let k_dev = stream.clone_htod(&key_cache).unwrap();
+        let v_dev = stream.clone_htod(&value_cache).unwrap();
+        let g_dev = stream.clone_htod(&gate).unwrap();
+        let enabled = stream.clone_htod(&[1i32]).unwrap();
+        let bias_zero = stream.clone_htod(&vec![0.0f32; n_head * kv_len]).unwrap();
+        let bias_move = stream.clone_htod(&kb_fixture(n_head, kv_len, 3.0)).unwrap();
+
+        let launch = |out: &cudarc::driver::safe::CudaSlice<f32>,
+                      kb: Option<&KeyBiasLayerArgs<'_>>| {
+            unsafe {
+                kernels
+                    .launch_attention(
+                        &stream,
+                        AttnDot::Fma,
+                        AttnAcc::Fma,
+                        SigExp::Fast,
+                        AttnPh3::Fused,
+                        AttnRes::Fma,
+                        AttnInv::Full,
+                        &q_dev,
+                        &k_dev,
+                        &v_dev,
+                        &g_dev,
+                        out,
+                        head_dim,
+                        n_head,
+                        n_kv_head,
+                        p,
+                        base_pos,
+                        kb,
+                    )
+                    .expect("launch");
+            }
+            stream.synchronize().expect("sync");
+            let mut host = vec![0f32; q_len];
+            stream.memcpy_dtoh(out, &mut host).unwrap();
+            host
+        };
+
+        let out_base = stream.alloc_zeros::<f32>(q_len).unwrap();
+        let out_zero = stream.alloc_zeros::<f32>(q_len).unwrap();
+        let out_move = stream.alloc_zeros::<f32>(q_len).unwrap();
+        let base = launch(&out_base, None);
+        let zero = launch(
+            &out_zero,
+            Some(&KeyBiasLayerArgs {
+                bias: bias_zero.slice(0..bias_zero.len()),
+                stride: kv_len,
+                enabled: &enabled,
+            }),
+        );
+        let moved = launch(
+            &out_move,
+            Some(&KeyBiasLayerArgs {
+                bias: bias_move.slice(0..bias_move.len()),
+                stride: kv_len,
+                enabled: &enabled,
+            }),
+        );
+
+        assert_bits_eq(&base, &zero, "kb canonical prefill zero-armed vs incumbent");
+        // Movement: query row r's head-0 segment — the causal window covers
+        // keys 0..=base_pos+r, so a key-0-heavy bias redistributes mass and
+        // the sigmoid gate epilogue carries it through.
+        let hd = head_dim;
+        for r in 0..p {
+            let row = r * n_head * hd;
+            assert!(
+                base[row..row + hd]
+                    .iter()
+                    .zip(moved[row..row + hd].iter())
+                    .any(|(b, m)| b.to_bits() != m.to_bits()),
+                "kb canonical row {r}: head-0 segment did not move"
+            );
+        }
     }
 }

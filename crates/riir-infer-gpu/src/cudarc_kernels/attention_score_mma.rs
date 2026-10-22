@@ -77,8 +77,10 @@
 
 use std::sync::Arc;
 
-use cudarc::driver::safe::{CudaContext, CudaFunction, CudaStream};
+use cudarc::driver::safe::{CudaContext, CudaFunction, CudaSlice, CudaStream};
 use cudarc::driver::{LaunchConfig, PushKernelArg};
+
+use super::attention::KeyBiasLayerArgs;
 
 /// The mma-arm kernel source. `kv_elt`/`KV_RD` are redefined locally (the
 /// f16-KV hatch composes by prepending `#define KV_F16 1` the same way the
@@ -153,7 +155,10 @@ static __device__ void attention_score_mma_body(
     const int n_kv_head,
     const int chunk_len,
     const int base_pos,
-    const int p)
+    const int p,
+    const float* __restrict__ kb_bias,   // Plan 622 — see kb_bias_score
+    const int kb_stride,
+    const int kb_on)
 {
     const int n_positions = base_pos + p;
     const int kv_group = blockIdx.x;
@@ -306,6 +311,11 @@ static __device__ void attention_score_mma_body(
 
             // Scale + causal mask in place (the SIMT body applies scale to
             // the dot before the tile max; invalid keys score -1e30).
+            // Plan 622 — the per-key bias on the valid elements, pre-max
+            // (head = kv_group * g + h; h = t16 % g). The mma arm is
+            // KNOWN-BROKEN at the model level (the header) — the kb seam is
+            // transcription-only and the byte-identity gate (incumbent vs
+            // None vs zero) needs determinism, not correctness.
 #pragma unroll
             for (int kf = 0; kf < 4; kf++) {
 #pragma unroll
@@ -313,12 +323,17 @@ static __device__ void attention_score_mma_body(
                     const int half = e >> 1;
                     const int t16 = mf * 16 + half * 8 + gid;
                     const int r_rel = t16 / g;
+                    const int h16_ = t16 % g;
                     const int col = kf * 8 + tig * 2 + (e & 1);
                     const int pos = tile_base + col;
                     const bool valid = (r_rel < row_lim)
                         && (pos < chunk_end)
                         && (pos <= base_pos + row_off + r_rel);
                     float s = d_acc[kf][e] * scale;
+                    if (valid && kb_on != 0) {
+                        s = __fadd_rn(
+                            s, kb_bias[(kv_group * g + h16_) * kb_stride + pos]);
+                    }
                     d_acc[kf][e] = valid ? s : -1e30f;
                 }
             }
@@ -472,12 +487,16 @@ attention_decode_splitgqa_partial_rows_qg_mma_f32(
     const int n_kv_head,
     const int chunk_len,
     const int base_pos,
-    const int p)
+    const int p,
+    const float* __restrict__ kb_bias,   // Plan 622
+    const int kb_stride,
+    const int* __restrict__ kb_enabled)
 {
     extern __shared__ float smem[];
+    const int kb_on = *kb_enabled;
     attention_score_mma_body(query, key_cache, value_cache, part_m, part_l,
                              part_out, smem, scale, head_dim, n_head, n_kv_head,
-                             chunk_len, base_pos, p);
+                             chunk_len, base_pos, p, kb_bias, kb_stride, kb_on);
 }
 
 // Plan 551 T-a24 — the second pre-declared tiling: warp-per-(m-frag x
@@ -503,7 +522,10 @@ static __device__ void attention_score_mma24_body(
     const int n_kv_head,
     const int chunk_len,
     const int base_pos,
-    const int p)
+    const int p,
+    const float* __restrict__ kb_bias,   // Plan 622 — see kb_bias_score
+    const int kb_stride,
+    const int kb_on)
 {
     const int n_positions = base_pos + p;
     const int kv_group = blockIdx.x;
@@ -637,17 +659,25 @@ static __device__ void attention_score_mma24_body(
 
             // Scale + causal mask in place; quad-max per row-half (this
             // n-frag's contribution) -> red_max exchange.
+            // Plan 622 — the per-key bias on the valid elements, pre-max
+            // (transcription twin of the T-a6 body; KNOWN-BROKEN arm, the
+            // byte-identity gate needs determinism, not correctness).
 #pragma unroll
             for (int e = 0; e < 4; e++) {
                 const int half = e >> 1;
                 const int t16 = mf * 16 + half * 8 + gid;
                 const int r_rel = t16 / g;
+                const int h16_ = t16 % g;
                 const int col = kf_own * 8 + tig * 2 + (e & 1);
                 const int pos = tile_base + col;
                 const bool valid = (r_rel < row_lim)
                     && (pos < chunk_end)
                     && (pos <= base_pos + row_off + r_rel);
                 float s = d_acc[e] * scale;
+                if (valid && kb_on != 0) {
+                    s = __fadd_rn(
+                        s, kb_bias[(kv_group * g + h16_) * kb_stride + pos]);
+                }
                 d_acc[e] = valid ? s : -1e30f;
             }
             // Quad reduce on ALL lanes (the 0xffffffff shuffle mask
@@ -827,13 +857,17 @@ attention_decode_splitgqa_partial_rows_qg_mma_f32_devpos(
     const int n_kv_head,
     const int chunk_len,
     const int* __restrict__ pos_dev,
-    const int p)
+    const int p,
+    const float* __restrict__ kb_bias,   // Plan 622
+    const int kb_stride,
+    const int* __restrict__ kb_enabled)
 {
     extern __shared__ float smem[];
     const int base_pos = *pos_dev;
+    const int kb_on = *kb_enabled;
     attention_score_mma_body(query, key_cache, value_cache, part_m, part_l,
                              part_out, smem, scale, head_dim, n_head, n_kv_head,
-                             chunk_len, base_pos, p);
+                             chunk_len, base_pos, p, kb_bias, kb_stride, kb_on);
 }
 
 // T-a24 entry points (the second pre-declared tiling).
@@ -851,12 +885,16 @@ attention_decode_splitgqa_partial_rows_qg_mma24_f32(
     const int n_kv_head,
     const int chunk_len,
     const int base_pos,
-    const int p)
+    const int p,
+    const float* __restrict__ kb_bias,   // Plan 622
+    const int kb_stride,
+    const int* __restrict__ kb_enabled)
 {
     extern __shared__ float smem[];
+    const int kb_on = *kb_enabled;
     attention_score_mma24_body(query, key_cache, value_cache, part_m, part_l,
                                part_out, smem, scale, head_dim, n_head, n_kv_head,
-                               chunk_len, base_pos, p);
+                               chunk_len, base_pos, p, kb_bias, kb_stride, kb_on);
 }
 
 extern "C" __global__ void __launch_bounds__(1024)
@@ -873,13 +911,17 @@ attention_decode_splitgqa_partial_rows_qg_mma24_f32_devpos(
     const int n_kv_head,
     const int chunk_len,
     const int* __restrict__ pos_dev,
-    const int p)
+    const int p,
+    const float* __restrict__ kb_bias,   // Plan 622
+    const int kb_stride,
+    const int* __restrict__ kb_enabled)
 {
     extern __shared__ float smem[];
     const int base_pos = *pos_dev;
+    const int kb_on = *kb_enabled;
     attention_score_mma24_body(query, key_cache, value_cache, part_m, part_l,
                                part_out, smem, scale, head_dim, n_head, n_kv_head,
-                               chunk_len, base_pos, p);
+                               chunk_len, base_pos, p, kb_bias, kb_stride, kb_on);
 }
 
 // VERBATIM copy of `attention_decode_split_combine_rows_f32` from
@@ -930,6 +972,10 @@ pub struct AttentionScoreMmaKernels {
     score_mma24: CudaFunction,
     score_mma24_devpos: CudaFunction,
     combine: CudaFunction,
+    /// Plan 622 T1.2 — the kb flag-off dummies (the si dummies' law; the
+    /// 1-float runway is never indexed at `*enabled == 0`).
+    kb_dummy_bias: CudaSlice<f32>,
+    kb_dummy_enabled: CudaSlice<i32>,
     _module: Arc<cudarc::driver::safe::CudaModule>,
 }
 
@@ -983,12 +1029,24 @@ impl AttentionScoreMmaKernels {
                 super::CudarcKernelError::Launch(format!("score mma smem opt-in: {e}"))
             })?;
         }
+        // Plan 622 — the kb flag-off dummies (the si dummies' law; the
+        // default stream's blocking clone_htod completes before any launch
+        // site can observe them).
+        let stream = ctx.default_stream();
+        let kb_dummy_bias = stream
+            .clone_htod(&[0.0f32])
+            .map_err(|e| super::CudarcKernelError::Launch(e.to_string()))?;
+        let kb_dummy_enabled = stream
+            .clone_htod(&[0i32])
+            .map_err(|e| super::CudarcKernelError::Launch(e.to_string()))?;
         Ok(Self {
             score_mma,
             score_mma_devpos,
             score_mma24,
             score_mma24_devpos,
             combine,
+            kb_dummy_bias,
+            kb_dummy_enabled,
             _module: module,
         })
     }
@@ -1020,7 +1078,8 @@ impl AttentionScoreMmaKernels {
 
     /// The mma twin of `launch_attention_splitgqa_rows_qg` — same buffers,
     /// grid, smem plan, and the unchanged rows-combine. G4: reuses the
-    /// caller's verify buffers.
+    /// caller's verify buffers. Plan 622 — `kb` is the per-key-bias hook
+    /// (`None` = the incumbent posture, the si law).
     ///
     /// # Safety
     ///
@@ -1044,6 +1103,7 @@ impl AttentionScoreMmaKernels {
         n_chunks: usize,
         base_pos: usize,
         p: usize,
+        kb: Option<&KeyBiasLayerArgs<'_>>,
     ) -> Result<(), super::CudarcKernelError> {
         Self::validate(head_dim, n_head, n_kv_head, p)?;
         if !chunk_len.is_multiple_of(32) {
@@ -1074,6 +1134,12 @@ impl AttentionScoreMmaKernels {
             base_pos as i32,
             p as i32,
         );
+        // Plan 622 — the kb flag-off view (the si match shape).
+        let dummy_kb = self.kb_dummy_bias.slice(0..self.kb_dummy_bias.len());
+        let (kb_bias, kb_stride, kb_enabled) = match kb {
+            Some(a) => (&a.bias, a.stride as i32, a.enabled),
+            None => (&dummy_kb, 0i32, &self.kb_dummy_enabled),
+        };
         unsafe {
             stream
                 .launch_builder(func)
@@ -1090,6 +1156,9 @@ impl AttentionScoreMmaKernels {
                 .arg(&ch_i)
                 .arg(&bp_i)
                 .arg(&p_i)
+                .arg(kb_bias)
+                .arg(&kb_stride)
+                .arg(kb_enabled)
                 .launch(cfg)
                 .map_err(|e| super::CudarcKernelError::Launch(e.to_string()))?;
         }
@@ -1101,7 +1170,8 @@ impl AttentionScoreMmaKernels {
 
     /// The graph-capture twin: `base_pos` read from `pos_dev` at kernel
     /// runtime; the caller pins the FIXED max chunk count (the T9.12
-    /// contract — dead chunks write neutral partials).
+    /// contract — dead chunks write neutral partials). Plan 622 — `kb`
+    /// rides the same ABI (`None` = the incumbent posture).
     ///
     /// # Safety
     ///
@@ -1125,6 +1195,7 @@ impl AttentionScoreMmaKernels {
         n_chunks: usize,
         pos_dev: &cudarc::driver::safe::CudaSlice<i32>,
         p: usize,
+        kb: Option<&KeyBiasLayerArgs<'_>>,
     ) -> Result<(), super::CudarcKernelError> {
         Self::validate(head_dim, n_head, n_kv_head, p)?;
         if !chunk_len.is_multiple_of(32) {
@@ -1153,6 +1224,12 @@ impl AttentionScoreMmaKernels {
             chunk_len as i32,
             p as i32,
         );
+        // Plan 622 — the kb flag-off view (the si match shape).
+        let dummy_kb = self.kb_dummy_bias.slice(0..self.kb_dummy_bias.len());
+        let (kb_bias, kb_stride, kb_enabled) = match kb {
+            Some(a) => (&a.bias, a.stride as i32, a.enabled),
+            None => (&dummy_kb, 0i32, &self.kb_dummy_enabled),
+        };
         unsafe {
             stream
                 .launch_builder(func)
@@ -1169,6 +1246,9 @@ impl AttentionScoreMmaKernels {
                 .arg(&ch_i)
                 .arg(pos_dev)
                 .arg(&p_i)
+                .arg(kb_bias)
+                .arg(&kb_stride)
+                .arg(kb_enabled)
                 .launch(cfg)
                 .map_err(|e| super::CudarcKernelError::Launch(e.to_string()))?;
         }
@@ -1214,5 +1294,116 @@ impl AttentionScoreMmaKernels {
                 .map_err(|e| super::CudarcKernelError::Launch(e.to_string()))?;
         }
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::cudarc_kernels::attention::AttentionKernels;
+    use cudarc::driver::safe::CudaContext;
+
+    /// Plan 622 T1.2/T1.3 — the mma twin's kb byte-identity arm. The mma
+    /// score phase is KNOWN-BROKEN at the model level (the module header);
+    /// the byte-identity protocol (incumbent `None` vs all-zero armed) needs
+    /// DETERMINISM, not correctness — the broken kernel is fixture-gated
+    /// deterministic, so the flag-off/zero law is still decidable here. No
+    /// movement arm: an armed-vs-correctness claim on a broken kernel would
+    /// be noise.
+    #[test]
+    fn test_score_mma_kb_flag_off_bit_identity() {
+        if CudaContext::new(0).is_err() {
+            eprintln!("[skip] no CUDA device");
+            return;
+        }
+        let ctx = CudaContext::new(0).unwrap();
+        let stream = ctx.new_stream().unwrap();
+        let kernels = AttentionScoreMmaKernels::new(ctx.clone(), false).expect("compile");
+        // Touch the decode struct once so a module-level compile break in the
+        // shared kb helper surfaces as THIS test's failure too (the mma
+        // module re-declares its source; the decode module owns the law).
+        let _ = AttentionKernels::new(ctx.clone()).expect("decode compile");
+
+        // mma contract: head_dim == 256, g <= 8, p in 1..=64, chunk % 32.
+        let n_head = 4usize;
+        let n_kv_head = 2usize;
+        let head_dim = 256usize;
+        let base_pos = 6usize;
+        let p = 2usize;
+        let n_positions = base_pos + p;
+        let chunk_len = 64usize;
+        let n_chunks = 1usize;
+        let q_len = p * n_head * head_dim;
+        let kv_len = n_positions * n_kv_head * head_dim;
+
+        let mut query = vec![0.0f32; q_len];
+        let mut key_cache = vec![0.0f32; kv_len];
+        let mut value_cache = vec![0.0f32; kv_len];
+        for r in 0..p {
+            for h in 0..n_head {
+                for d in 0..head_dim {
+                    query[(r * n_head + h) * head_dim + d] =
+                        ((r * 17 + h * 31 + d) % 23) as f32 * 0.04 - 0.44;
+                }
+            }
+        }
+        for j in 0..n_positions {
+            for kvh in 0..n_kv_head {
+                for d in 0..head_dim {
+                    let base = j * n_kv_head * head_dim + kvh * head_dim;
+                    key_cache[base + d] = ((j * 7 + kvh * 3 + d) % 23) as f32 * 0.04 - 0.44;
+                    value_cache[base + d] = ((j * 5 + d) % 11) as f32 * 0.09 - 0.45;
+                }
+            }
+        }
+
+        let q_dev = stream.clone_htod(&query).unwrap();
+        let k_dev = stream.clone_htod(&key_cache).unwrap();
+        let v_dev = stream.clone_htod(&value_cache).unwrap();
+        let enabled = stream.clone_htod(&[1i32]).unwrap();
+        let bias_zero = stream
+            .clone_htod(&vec![0.0f32; n_head * n_positions])
+            .unwrap();
+
+        let rows = p * n_head;
+        let pm = stream.alloc_zeros::<f32>(rows * n_chunks).unwrap();
+        let pl = stream.alloc_zeros::<f32>(rows * n_chunks).unwrap();
+        let po = stream
+            .alloc_zeros::<f32>(rows * n_chunks * head_dim)
+            .unwrap();
+
+        let launch = |out: &cudarc::driver::safe::CudaSlice<f32>,
+                      kb: Option<&KeyBiasLayerArgs<'_>>| {
+            kernels
+                .launch_splitgqa_rows_qg_mma(
+                    false, &stream, &q_dev, &k_dev, &v_dev, &pm, &pl, &po, out, head_dim, n_head,
+                    n_kv_head, chunk_len, n_chunks, base_pos, p, kb,
+                )
+                .expect("launch");
+            stream.synchronize().expect("sync");
+            let mut host = vec![0f32; q_len];
+            stream.memcpy_dtoh(out, &mut host).unwrap();
+            host
+        };
+
+        let out_base = stream.alloc_zeros::<f32>(q_len).unwrap();
+        let out_zero = stream.alloc_zeros::<f32>(q_len).unwrap();
+        let base = launch(&out_base, None);
+        let zero = launch(
+            &out_zero,
+            Some(&KeyBiasLayerArgs {
+                bias: bias_zero.slice(0..bias_zero.len()),
+                stride: n_positions,
+                enabled: &enabled,
+            }),
+        );
+        assert_eq!(base.len(), zero.len());
+        for (i, (b, z)) in base.iter().zip(zero.iter()).enumerate() {
+            assert_eq!(
+                b.to_bits(),
+                z.to_bits(),
+                "kb mma zero-armed vs incumbent: bit mismatch at {i}"
+            );
+        }
     }
 }

@@ -192,6 +192,9 @@ fn test_prefill_fa_si_flag_off_identity_and_affine() {
                     .launch_attention_fa(
                         &stream, &q_dev, &kh, &vh, &gate_dev, out, HEAD_DIM, N_HEAD, N_KV, P,
                         base_pos, si,
+                        // Plan 622 — the kb hook: the incumbent posture (the
+                        // Plan-620 si gate owns this harness).
+                        None,
                     )
                     .expect("launch_attention_fa");
                 stream.synchronize().expect("sync");
@@ -245,6 +248,8 @@ fn test_prefill_fa_si_flag_off_identity_and_affine() {
                 P,
                 &pos_dev,
                 Some(&affine_args()),
+                // Plan 622 — the kb hook: the incumbent posture.
+                None,
             )
             .expect("launch_attention_fa_devpos");
         stream.synchronize().expect("sync");

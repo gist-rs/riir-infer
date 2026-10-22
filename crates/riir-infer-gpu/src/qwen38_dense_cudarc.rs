@@ -4188,6 +4188,7 @@ impl Qwen38DenseForward {
                         self.attn_chunk_len,
                         self.attn_n_chunks,
                         &self.pos_dev,
+                        None,
                     )
                     .map_err(|e| e.to_string())?;
             } else if self.attn_split {
@@ -4207,6 +4208,7 @@ impl Qwen38DenseForward {
                         self.attn_chunk_len,
                         self.attn_n_chunks,
                         &self.pos_dev,
+                        None,
                     )
                     .map_err(|e| e.to_string())?;
             } else {
@@ -4223,6 +4225,7 @@ impl Qwen38DenseForward {
                         &self.pos_dev,
                         // Plan 620 — the si lane is the Bonsai hybrid decode;
                         // the Qwen3.8 dense forward keeps the incumbent path.
+                        None,
                         None,
                     )
                     .map_err(|e| e.to_string())?;
@@ -4262,6 +4265,7 @@ impl Qwen38DenseForward {
                         cfg.n_kv_head,
                         self.attn_chunk_len,
                         pos + 1,
+                        None,
                     )
                     .map_err(|e| e.to_string())?;
             } else if self.attn_split {
@@ -4280,6 +4284,7 @@ impl Qwen38DenseForward {
                         cfg.n_kv_head,
                         self.attn_chunk_len,
                         pos + 1,
+                        None,
                     )
                     .map_err(|e| e.to_string())?;
             } else {
@@ -4296,6 +4301,7 @@ impl Qwen38DenseForward {
                         pos + 1,
                         // Plan 620 — the si lane is the Bonsai hybrid decode;
                         // the Qwen3.8 dense forward keeps the incumbent path.
+                        None,
                         None,
                     )
                     .map_err(|e| e.to_string())?;
@@ -5923,6 +5929,7 @@ impl Qwen38DenseForward {
                     n_chunks,
                     positions[l],
                     1,
+                    None,
                 )
             } else {
                 self.attn.launch_attention_splitgqa_rows(
@@ -5941,6 +5948,7 @@ impl Qwen38DenseForward {
                     self.attn_n_chunks,
                     positions[l],
                     1,
+                    None,
                 )
             };
             attn_res.map_err(|e| e.to_string())?;
@@ -7008,6 +7016,7 @@ impl Qwen38DenseForward {
                             n_chunks,
                             bp,
                             k,
+                            None,
                         )
                     } else {
                         self.attn.launch_attention_splitgqa_rows(
@@ -7026,6 +7035,7 @@ impl Qwen38DenseForward {
                             self.attn_n_chunks,
                             bp,
                             k,
+                            None,
                         )
                     };
                     attn_res.map_err(|e| e.to_string())?;
@@ -7065,6 +7075,7 @@ impl Qwen38DenseForward {
                             self.attn_n_chunks,
                             &pos_dev.slice(l..=l),
                             k,
+                            None,
                         )
                         .map_err(|e| e.to_string())?;
                 }
@@ -7823,6 +7834,9 @@ impl Qwen38DenseForward {
                         n_chunks,
                         bp,
                         p,
+                        // Plan 622 — the kb hook: the incumbent posture (the
+                        // mma arm is KNOWN-BROKEN and env-gated off).
+                        None,
                     )
                 }
                 (true, VerifyPos::Dev) if self.verify_attn_mma => {
@@ -7844,6 +7858,7 @@ impl Qwen38DenseForward {
                         self.verify_attn_n_chunks,
                         &self.pos_dev,
                         p,
+                        None,
                     )
                 }
                 // Issue 742 T9.14 - the two-pass arm (qg regime, default):
@@ -7873,6 +7888,7 @@ impl Qwen38DenseForward {
                         (bp + p).div_ceil(32).max(1),
                         bp,
                         p,
+                        None,
                     )
                 }
                 (true, VerifyPos::Dev) if self.verify_attn_2p => {
@@ -7897,6 +7913,7 @@ impl Qwen38DenseForward {
                         self.verify_stat_n_tiles,
                         &self.pos_dev,
                         p,
+                        None,
                     )
                 }
                 (true, VerifyPos::Live(bp)) if self.verify_attn_dotma => {
@@ -7916,6 +7933,7 @@ impl Qwen38DenseForward {
                         n_chunks,
                         bp,
                         p,
+                        None,
                     )
                 }
                 (true, VerifyPos::Live(bp)) => self.attn.launch_attention_splitgqa_rows_qg(
@@ -7934,6 +7952,7 @@ impl Qwen38DenseForward {
                     n_chunks,
                     bp,
                     p,
+                    None,
                 ),
                 (true, VerifyPos::Dev) if self.verify_attn_dotma => {
                     self.attn.launch_attention_splitgqa_rows_qgma_devpos(
@@ -7952,6 +7971,7 @@ impl Qwen38DenseForward {
                         self.verify_attn_n_chunks,
                         &self.pos_dev,
                         p,
+                        None,
                     )
                 }
                 (true, VerifyPos::Dev) => self.attn.launch_attention_splitgqa_rows_qg_devpos(
@@ -7970,6 +7990,7 @@ impl Qwen38DenseForward {
                     self.verify_attn_n_chunks,
                     &self.pos_dev,
                     p,
+                    None,
                 ),
                 (false, VerifyPos::Live(bp)) if self.verify_attn_dotma => {
                     self.attn.launch_attention_splitgqa_rows_ma(
@@ -7988,6 +8009,7 @@ impl Qwen38DenseForward {
                         n_chunks,
                         bp,
                         p,
+                        None,
                     )
                 }
                 (false, VerifyPos::Live(bp)) => self.attn.launch_attention_splitgqa_rows(
@@ -8006,6 +8028,7 @@ impl Qwen38DenseForward {
                     n_chunks,
                     bp,
                     p,
+                    None,
                 ),
                 (false, VerifyPos::Dev) if self.verify_attn_dotma => {
                     self.attn.launch_attention_splitgqa_rows_ma_devpos(
@@ -8024,6 +8047,7 @@ impl Qwen38DenseForward {
                         self.attn_n_chunks,
                         &self.pos_dev,
                         p,
+                        None,
                     )
                 }
                 (false, VerifyPos::Dev) => self.attn.launch_attention_splitgqa_rows_devpos(
@@ -8042,6 +8066,7 @@ impl Qwen38DenseForward {
                     self.attn_n_chunks,
                     &self.pos_dev,
                     p,
+                    None,
                 ),
             };
             attn_res.map_err(|e| e.to_string())?;

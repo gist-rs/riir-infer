@@ -5075,6 +5075,7 @@ fn forward_attention_layer(
         n_kv,
         n_positions,
         si_layer.as_ref(),
+        None,
     )?;
 
     // 7–8. Output gating + output projection (FUSED with quantize).
@@ -5496,6 +5497,7 @@ fn forward_attention_layer_training(
         n_kv,
         n_positions,
         None,
+        None,
     )?;
 
     // Issue 492 T1 GPU lane - capture tap. Whole k/v cache buffers are
@@ -5801,6 +5803,7 @@ fn forward_attention_layer_devpos(
         n_kv,
         &acts.pos_dev_buf,
         si_layer.as_ref(),
+        None,
     )?;
 
     // 7–8. Output gating + output projection (FUSED with quantize).
