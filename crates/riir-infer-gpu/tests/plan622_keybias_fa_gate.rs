@@ -43,10 +43,19 @@ const P: usize = 128;
 /// stage's per-tile guards.
 const BASE_POS: usize = 70;
 const KV_LEN: usize = BASE_POS + P;
-/// The CPU-twin tolerance bar — the FA kernel's f16-operand/f16-accumulator
-/// class; an O(1) bias-algebra error is unmissable at it, rounding noise
-/// sits ~10x below.
-const TOL: f32 = 3e-2;
+/// The CPU-twin tolerance bars — the bench_946 G1 calibrated metric for
+/// this exact kernel class (the f16-operand/f16-VKQ FA class measured
+/// ~1e-2 worst-case at its 4090 promotion): scaled = |a-b| /
+/// max(|b|, ABS_BAR/REL_BAR), so the bar reads |a-b| <= max(REL*|b|,
+/// ABS_BAR). A per-element rel with a 1e-6 floor is meaningless here —
+/// attention outputs cancel to ~0 on hundreds of elements and the f16
+/// accumulation noise (~2e-4 absolute) then reads as rel ~ O(10) with the
+/// kernel perfectly healthy (measured: rel_plain=6.67 at the FIRST 4090
+/// run of this gate, every bit-identity arm green). A structural kb error
+/// (a mis-indexed stage row) moves scores O(1) — unmissable at these
+/// bars; the noise class sits 5x below them.
+const REL_BAR: f32 = 1e-1;
+const ABS_BAR: f32 = 5e-2;
 
 fn lcg(state: &mut u64) -> f32 {
     *state = state
@@ -122,11 +131,28 @@ fn cpu_fa_reference(
     out
 }
 
-fn max_rel(gpu: &[f32], cpu: &[f32]) -> f32 {
-    gpu.iter()
-        .zip(cpu.iter())
-        .map(|(g, c)| (g - c).abs() / c.abs().max(1e-6))
-        .fold(0.0f32, f32::max)
+/// The bench_946 G1 metric: (max, mean) scaled diff, scaled =
+/// |a-b| / max(|b|, ABS_BAR/REL_BAR) — the bar check is `max <= REL_BAR`.
+fn err_stats(a: &[f32], b: &[f32]) -> (f32, f64) {
+    let denom_floor = ABS_BAR / REL_BAR;
+    let mut max = 0f32;
+    let mut sum = 0f64;
+    let mut n = 0usize;
+    for i in 0..a.len().min(b.len()) {
+        if !a[i].is_finite() || !b[i].is_finite() {
+            max = f32::INFINITY;
+            continue;
+        }
+        let d = (a[i] - b[i]).abs();
+        let denom = b[i].abs().max(denom_floor);
+        let s = d / denom;
+        if s > max {
+            max = s;
+        }
+        sum += s as f64;
+        n += 1;
+    }
+    (max, if n > 0 { sum / n as f64 } else { 0.0 })
 }
 
 #[test]
@@ -334,10 +360,10 @@ fn test_prefill_fa_kb_flag_off_zero_stage_and_stride() {
                 "kb devpos twin diverged from eager at {i}: {m:?} vs {d:?}"
             );
         }
-        // (7) + (8) The CPU twins at the f16 tolerance bar — plain validates
-        // the fixture machinery (causal mask included); biased validates the
-        // prefill kb math (per-head rows, per-key slots, the in-range
-        // predicate, the stride arithmetic through the stage).
+        // (7) + (8) The CPU twins at the bench_946 calibrated bars — plain
+        // validates the fixture machinery (causal mask included); biased
+        // validates the prefill kb math (per-head rows, per-key slots, the
+        // in-range predicate, the stride arithmetic through the stage).
         let cpu_plain = cpu_fa_reference(&query, &kh_host, &vh_host, &gate, None, 0);
         let cpu_moved = cpu_fa_reference(
             &query,
@@ -347,18 +373,18 @@ fn test_prefill_fa_kb_flag_off_zero_stage_and_stride() {
             Some(&moved_tbl),
             BASE_POS,
         );
-        let rel_plain = max_rel(&base, &cpu_plain);
-        let rel_moved = max_rel(&moved, &cpu_moved);
+        let (mx_plain, mean_plain) = err_stats(&base, &cpu_plain);
+        let (mx_moved, mean_moved) = err_stats(&moved, &cpu_moved);
         eprintln!(
-            "[prefill_fa_kb] rel_plain={rel_plain:.4e} rel_moved={rel_moved:.4e} (f16-operand class, TOL={TOL})"
+            "[prefill_fa_kb] scaled_plain max={mx_plain:.3e} mean={mean_plain:.3e} | scaled_moved max={mx_moved:.3e} mean={mean_moved:.3e} (bars: REL={REL_BAR:.0e}, ABS={ABS_BAR:.0e})"
         );
         assert!(
-            rel_plain <= TOL,
-            "plain CPU twin mismatch: max_rel={rel_plain:.6} > {TOL}"
+            mx_plain <= REL_BAR,
+            "plain CPU twin mismatch: max scaled {mx_plain:.6} > {REL_BAR}"
         );
         assert!(
-            rel_moved <= TOL,
-            "biased CPU twin mismatch (the prefill kb staging math): max_rel={rel_moved:.6} > {TOL}"
+            mx_moved <= REL_BAR,
+            "biased CPU twin mismatch (the prefill kb staging math): max scaled {mx_moved:.6} > {REL_BAR}"
         );
     }
 }

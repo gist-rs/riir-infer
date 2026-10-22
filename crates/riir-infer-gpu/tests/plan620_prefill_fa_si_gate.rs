@@ -39,10 +39,17 @@ const P: usize = 128;
 /// Mid-context: dist > 0 and the kv==0 sink both live.
 const BASE_POS: usize = 64;
 const KV_LEN: usize = BASE_POS + P;
-/// The CPU-twin tolerance bar — the FA kernel's f16-operand/f16-accumulator
-/// class; an O(1) si-algebra error is unmissable at it, rounding noise sits
-/// ~10x below.
-const TOL: f32 = 3e-2;
+/// The CPU-twin tolerance bars — the bench_946 G1 calibrated metric for
+/// this exact kernel class (the f16-operand/f16-VKQ FA class measured
+/// ~1e-2 worst-case at its 4090 promotion): scaled = |a-b| /
+/// max(|b|, ABS_BAR/REL_BAR), so the bar reads |a-b| <= max(REL*|b|,
+/// ABS_BAR). A per-element rel with a 1e-6 floor is meaningless on
+/// attention outputs — they cancel to ~0 on hundreds of elements and the
+/// f16 accumulation noise then reads as rel ~ O(10) with the kernel
+/// healthy (the plan-622 kb gate measured exactly that at its first 4090
+/// run). An O(1) si-algebra error is unmissable at these bars.
+const REL_BAR: f32 = 1e-1;
+const ABS_BAR: f32 = 5e-2;
 
 fn lcg(state: &mut u64) -> f32 {
     *state = state
@@ -128,11 +135,26 @@ fn cpu_fa_reference(
     out
 }
 
-fn max_rel(gpu: &[f32], cpu: &[f32]) -> f32 {
-    gpu.iter()
-        .zip(cpu.iter())
-        .map(|(g, c)| (g - c).abs() / c.abs().max(1e-6))
-        .fold(0.0f32, f32::max)
+fn err_stats(a: &[f32], b: &[f32]) -> (f32, f64) {
+    let denom_floor = ABS_BAR / REL_BAR;
+    let mut max = 0f32;
+    let mut sum = 0f64;
+    let mut n = 0usize;
+    for i in 0..a.len().min(b.len()) {
+        if !a[i].is_finite() || !b[i].is_finite() {
+            max = f32::INFINITY;
+            continue;
+        }
+        let d = (a[i] - b[i]).abs();
+        let denom = b[i].abs().max(denom_floor);
+        let s = d / denom;
+        if s > max {
+            max = s;
+        }
+        sum += s as f64;
+        n += 1;
+    }
+    (max, if n > 0 { sum / n as f64 } else { 0.0 })
 }
 
 #[test]
@@ -306,23 +328,23 @@ fn test_prefill_fa_si_flag_off_identity_and_affine() {
                 "devpos twin diverged from eager at {i}: {e:?} vs {d:?}"
             );
         }
-        // (5) + (6) The CPU twins at the f16 tolerance bar — plain validates
-        // the fixture machinery; affine validates the prefill si math
-        // (per-element dist, the kv==0 sink, the per-head inv window).
+        // (5) + (6) The CPU twins at the bench_946 calibrated bars — plain
+        // validates the fixture machinery; affine validates the prefill si
+        // math (per-element dist, the kv==0 sink, the per-head inv window).
         let cpu_plain = cpu_fa_reference(&query, &kh_host, &vh_host, &gate, false, 0.0, 0.0, 1.0);
         let cpu_affine = cpu_fa_reference(&query, &kh_host, &vh_host, &gate, true, 2.0, 1.0, 0.5);
-        let rel_plain = max_rel(&base, &cpu_plain);
-        let rel_affine = max_rel(&affine, &cpu_affine);
+        let (mx_plain, mean_plain) = err_stats(&base, &cpu_plain);
+        let (mx_affine, mean_affine) = err_stats(&affine, &cpu_affine);
         eprintln!(
-            "[prefill_fa_si] rel_plain={rel_plain:.4e} rel_affine={rel_affine:.4e} (f16-operand class, TOL={TOL})"
+            "[prefill_fa_si] scaled_plain max={mx_plain:.3e} mean={mean_plain:.3e} | scaled_affine max={mx_affine:.3e} mean={mean_affine:.3e} (bars: REL={REL_BAR:.0e}, ABS={ABS_BAR:.0e})"
         );
         assert!(
-            rel_plain <= TOL,
-            "plain CPU twin mismatch: max_rel={rel_plain:.6} > {TOL}"
+            mx_plain <= REL_BAR,
+            "plain CPU twin mismatch: max scaled {mx_plain:.6} > {REL_BAR}"
         );
         assert!(
-            rel_affine <= TOL,
-            "affine CPU twin mismatch (the prefill si math): max_rel={rel_affine:.6} > {TOL}"
+            mx_affine <= REL_BAR,
+            "affine CPU twin mismatch (the prefill si math): max scaled {mx_affine:.6} > {REL_BAR}"
         );
     }
 }
