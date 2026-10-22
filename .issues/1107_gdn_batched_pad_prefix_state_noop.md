@@ -1,6 +1,6 @@
 # Issue 1107: Batched recurrent (GDN) prefill right-padding audit — pads-to-front state no-op
 
-**Status:** Open — unclaimed
+**Status:** Open — **Claimed:** riir-refine-idle-m3, 1792674677, expires 2026-10-24T13:11:17Z
 
 **Date:** 2026-10-22
 **Source:** riir-infer Research 013 (arXiv:2610.26754 TokenGate distillation), upstream repo `token-gate-llms/TokenGate` @ `6e51aac5` (Apache-2.0), `tokengate/e2e_gate/gate_module/gate_forward.py::call_layer_padsafe`
