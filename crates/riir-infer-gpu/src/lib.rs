@@ -537,7 +537,11 @@ pub mod deltanet_prework_fused_cubecl;
 #[cfg(all(feature = "cubecl_runtime", feature = "ternary_gemv"))]
 pub mod deltanet_rotation_cubecl;
 #[cfg(all(feature = "cubecl_runtime", feature = "ternary_gemv"))]
-pub use deltanet_rotation_cubecl::{RotationCubeCL, RotationTablesCubeCL};
+pub use deltanet_rotation_cubecl::{
+    RotationCubeCL, RotationTablesCubeCL, gdn_permute_rotate_fused_launch_count,
+    gdn_permute_rotate_ok, set_gdn_permute_rotate_fused, set_swiglu_rotate_fused,
+    swiglu_rotate_fused_launch_count, swiglu_rotate_fused_ok,
+};
 
 // Bonsai-2 ternary weight rotation tables (cudarc arm, CUDA-only).
 #[cfg(all(feature = "ternary_gemv_cuda_raw", not(target_os = "macos")))]

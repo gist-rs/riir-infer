@@ -2450,6 +2450,10 @@ pub struct TernaryDeltanetGpuForward {
     /// Plan 602 B3 — the `gdn_v_grouped` permute staging copy of
     /// `recurrent_out` (the permute kernel reads a staged source — no
     /// in-place race; the CPU twin stages into `rotation_buf` the same way).
+    /// Issue 1113 lever 1: under the K3 fused GDN-out posture this buffer is
+    /// the FUSED kernel's output (the rotated gated grouped vector the
+    /// out_proj GEMV consumes) — the split chain no longer runs to need it
+    /// for its own staging.
     permute_tmp: Handle, // [v_dim]
     /// Issue 860 T3 — `x` holds an input this forward has not consumed yet.
     ///
@@ -4499,29 +4503,63 @@ impl TernaryDeltanetGpuForward {
                         self.ffn_gate_up.clone(),
                     );
                 }
-                unsafe {
-                    DeltanetGatingConcatCubeCL::launch::<ActiveRuntime>(
-                        &self.client,
-                        self.ffn_gate_up.clone(),
-                        self.ffn_hidden.clone(),
-                        mlp,
-                    );
-                }
-                // Plan 602 B3 — folded site 7 of 8: the FFN down projection
-                // is folded — rotate the SwiGLU output in place (its only
-                // consumer is the down GEMV; the CPU twin rotates
-                // `scratch.hidden` at the same site).
-                if let (Some(cfg), Some(tables)) = (&self.rotation, &self.rot_tables) {
+                // Issue 1113 lever 1 rung 2 — the K5 fusion (the cudarc K5
+                // twin, f32 tail): SwiGLU + sign + FWHT in ONE kernel, writing
+                // `ffn_hidden` directly (reads `ffn_gate_up` — different
+                // buffers, no staging race). 2 launches → 1 per layer,
+                // bit-identical (kernel-level G3:
+                // `swiglu_rotate_fused_matches_split_chain_bitexact`). Default
+                // OFF (`RIIR_SWIGLU_ROTATE_FUSED`); the split pair below is the
+                // fallback AND the G1 oracle.
+                let ffn_fused_pair = match (self.rotation.as_ref(), self.rot_tables.as_ref()) {
+                    (Some(cfg), Some(tables))
+                        if crate::deltanet_rotation_cubecl::swiglu_rotate_fused_enabled()
+                            && crate::deltanet_rotation_cubecl::swiglu_rotate_fused_ok(
+                                mlp,
+                                cfg.block_size,
+                            ) =>
+                    {
+                        Some((cfg, tables))
+                    }
+                    _ => None,
+                };
+                if let Some((cfg, tables)) = ffn_fused_pair {
                     let signs = tables.signs_for_width(mlp).clone();
                     unsafe {
-                        RotationCubeCL::launch_forward::<ActiveRuntime>(
+                        RotationCubeCL::launch_swiglu_rotate_fused::<ActiveRuntime>(
                             &self.client,
-                            self.ffn_hidden.clone(),
+                            self.ffn_gate_up.clone(),
                             signs,
-                            mlp,
+                            self.ffn_hidden.clone(),
                             mlp,
                             cfg.block_size,
                         );
+                    }
+                } else {
+                    unsafe {
+                        DeltanetGatingConcatCubeCL::launch::<ActiveRuntime>(
+                            &self.client,
+                            self.ffn_gate_up.clone(),
+                            self.ffn_hidden.clone(),
+                            mlp,
+                        );
+                    }
+                    // Plan 602 B3 — folded site 7 of 8: the FFN down projection
+                    // is folded — rotate the SwiGLU output in place (its only
+                    // consumer is the down GEMV; the CPU twin rotates
+                    // `scratch.hidden` at the same site).
+                    if let (Some(cfg), Some(tables)) = (self.rotation.as_ref(), self.rot_tables.as_ref()) {
+                        let signs = tables.signs_for_width(mlp).clone();
+                        unsafe {
+                            RotationCubeCL::launch_forward::<ActiveRuntime>(
+                                &self.client,
+                                self.ffn_hidden.clone(),
+                                signs,
+                                mlp,
+                                mlp,
+                                cfg.block_size,
+                            );
+                        }
                     }
                 }
                 // Plan 614 site 3 (decode): fake-quant ffn_hidden AFTER the
@@ -5057,53 +5095,98 @@ impl TernaryDeltanetGpuForward {
         // Plan 602 B3 — folded site 4 of 8 (the ssm_out chain): on a folded
         // layer the recurrence output arrives in tiled [hd, nk, rep] head
         // order (`gdn_v_grouped`) and the fold expects the grouped
-        // [hd, rep, nk] order — permute via the staged copy (the CPU twin
-        // stages into `rotation_buf`; `permute_tmp` here), then the shared
-        // sign+FWHT forward rotation runs IN PLACE on `recurrent_out` (its
-        // only consumer is the folded out_proj GEMV). The per-head norm +
-        // SiLU(z) gate above already ran — they are fold-invariant (they
-        // commute with the head-order permute), the CPU step-10/11 order.
-        if let (Some(cfg), Some(tables)) = (&self.rotation, &self.rot_tables) {
-            let v_dim = n_v_heads * head_dim;
-            if cfg.gdn_v_grouped {
-                unsafe {
-                    CopyCubeCL::launch::<ActiveRuntime>(
-                        &self.client,
-                        self.recurrent_out.clone(),
-                        self.permute_tmp.clone(),
-                        v_dim,
-                    );
-                    RotationCubeCL::launch_gdn_v_permute::<ActiveRuntime>(
-                        &self.client,
-                        self.permute_tmp.clone(),
-                        self.recurrent_out.clone(),
-                        v_dim,
-                        v_dim,
-                        head_dim,
-                        cfg.gdn_k_groups,
-                        n_v_heads / cfg.gdn_k_groups,
-                    );
-                }
+        // [hd, rep, nk] order — permute, then the shared sign+FWHT forward
+        // rotation (its only consumer is the folded out_proj GEMV). The
+        // per-head norm + SiLU(z) gate above already ran — they are
+        // fold-invariant (they commute with the head-order permute), the CPU
+        // step-10/11 order.
+        //
+        // Issue 1113 lever 1 — the fused fold tail: ONE kernel gathers the
+        // post-zgate recurrent_out at the source head, applies the sign, and
+        // runs the FWHT into `permute_tmp` (the split chain needed that buffer
+        // only for its own staging copy). Copy + permute + fwht → 1;
+        // −2 per GDN layer; bit-identical BY CONSTRUCTION (movement + single
+        // multiply + the incumbent butterfly — kernel-level G3:
+        // `gdn_permute_rotate_matches_split_chain_bitexact`). Default OFF
+        // (`RIIR_GDN_PERMUTE_ROTATE_FUSED`); the split chain below is the
+        // fallback AND the G1 oracle. ⚠ The earlier full-K3 variant (zgate
+        // folded in too) measured 1-ULP-divergent — the incumbent zgate's
+        // compiled fma contraction is not reproducible across kernel
+        // compilations — so the zgate above stays bit-untouched.
+        let v_dim = n_v_heads * head_dim;
+        let gdn_fused_pair = match (self.rotation.as_ref(), self.rot_tables.as_ref()) {
+            (Some(cfg), Some(tables))
+                if crate::deltanet_rotation_cubecl::gdn_permute_rotate_fused_enabled()
+                    && crate::deltanet_rotation_cubecl::gdn_permute_rotate_ok(v_dim, cfg.block_size) =>
+            {
+                Some((cfg, tables))
             }
+            _ => None,
+        };
+        let gdn_gemv_in = if let Some((cfg, tables)) = gdn_fused_pair {
+            let rep = if cfg.gdn_v_grouped {
+                n_v_heads / cfg.gdn_k_groups
+            } else {
+                1
+            };
             let signs = tables.signs_for_width(v_dim).clone();
             unsafe {
-                RotationCubeCL::launch_forward::<ActiveRuntime>(
+                RotationCubeCL::launch_gdn_permute_rotate::<ActiveRuntime>(
                     &self.client,
                     self.recurrent_out.clone(),
                     signs,
+                    self.permute_tmp.clone(),
                     v_dim,
-                    v_dim,
+                    head_dim,
+                    cfg.gdn_k_groups,
+                    rep,
                     cfg.block_size,
                 );
             }
-        }
-        // Plan 614 site 5 (decode): fake-quant recurrent_out AFTER the fold
-        // rotation (rotated basis — the folded out_proj's actual input),
-        // before the out-projection GEMV.
+            self.permute_tmp.clone()
+        } else {
+            if let (Some(cfg), Some(tables)) = (self.rotation.as_ref(), self.rot_tables.as_ref()) {
+                if cfg.gdn_v_grouped {
+                    unsafe {
+                        CopyCubeCL::launch::<ActiveRuntime>(
+                            &self.client,
+                            self.recurrent_out.clone(),
+                            self.permute_tmp.clone(),
+                            v_dim,
+                        );
+                        RotationCubeCL::launch_gdn_v_permute::<ActiveRuntime>(
+                            &self.client,
+                            self.permute_tmp.clone(),
+                            self.recurrent_out.clone(),
+                            v_dim,
+                            v_dim,
+                            head_dim,
+                            cfg.gdn_k_groups,
+                            n_v_heads / cfg.gdn_k_groups,
+                        );
+                    }
+                }
+                let signs = tables.signs_for_width(v_dim).clone();
+                unsafe {
+                    RotationCubeCL::launch_forward::<ActiveRuntime>(
+                        &self.client,
+                        self.recurrent_out.clone(),
+                        signs,
+                        v_dim,
+                        v_dim,
+                        cfg.block_size,
+                    );
+                }
+            }
+            self.recurrent_out.clone()
+        };
+        // Plan 614 site 5 (decode): fake-quant the out_proj GEMV's ACTUAL input
+        // AFTER the fold rotation (rotated basis) — the fused posture's input
+        // is `permute_tmp`, the split posture's is `recurrent_out`.
         #[cfg(feature = "dq_phase_bench")]
         crate::dq_fakequant_cubecl::launch_decode_pass::<ActiveRuntime>(
             &self.client,
-            self.recurrent_out.clone(),
+            gdn_gemv_in.clone(),
             n_v_heads * head_dim,
             1,
             crate::dq_fakequant::current_grid(),
@@ -5112,7 +5195,7 @@ impl TernaryDeltanetGpuForward {
             GemvTernaryCubeCL::launch::<ActiveRuntime>(
                 &self.client,
                 &layer_w.out_proj,
-                self.recurrent_out.clone(),
+                gdn_gemv_in,
                 self.tmp.clone(),
             );
         }

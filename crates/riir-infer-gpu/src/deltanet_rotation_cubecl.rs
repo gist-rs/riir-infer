@@ -20,6 +20,21 @@
 //! | `fwht_rotate_inverse_f32` | `rotate_inverse_inplace` | token-embedding lookup (FWHT→sign) |
 //! | `fwht_forward_copy_f32` | memcpy + forward | whole-prefill staging (the T4-ALT twin) |
 //! | `gdn_v_permute_f32` | `permute_gdn_v_grouped_inplace` | `ssm_out` input (tiled→grouped heads) |
+//! | `gdn_permute_rotate_f32` | (permute + `rotate_forward_inplace` fused) | Issue 1113 lever 1: GDN fold tail in ONE kernel |
+//! | `swiglu_rotate_fused_f32` | (the cudarc K5 twin, f32 tail) | Issue 1113 lever 1: SwiGLU + sign + FWHT in ONE kernel |
+//!
+//! The two fused kernels are the CubeCL port of the cudarc lane's K-fusion
+//! escalation (Plan 602 B5's named rung) with the quantize tail omitted — the
+//! CubeCL GEMV consumes f32 activations directly. Both are bit-identical to
+//! their split chains BY CONSTRUCTION (the gather/gating feeds the exact
+//! incumbent butterfly; the only arithmetic beyond movement is the sign
+//! multiply), so the only proof the toggle reached the kernel is the launch
+//! counter (the Bench 768 vacuous guard). Default OFF
+//! (`RIIR_GDN_PERMUTE_ROTATE_FUSED` / `RIIR_SWIGLU_ROTATE_FUSED`). ⚠ The
+//! fuller variant that also folded the per-head RMSNorm+z-gate (the cudarc
+//! K3 shape) was built and measured 1-ULP-divergent — the incumbent zgate's
+//! compiled fma contraction does not reproduce across kernel compilations —
+//! so the zgate stays its own bit-untouched launch.
 //!
 //! The single-vector and batched ([p × width]) forms are ONE kernel each:
 //! signs index by `base % width`, so a decode-width vector (total == width)
@@ -258,6 +273,155 @@ fn gdn_v_permute_f32(tmp: &[f32], x: &mut [f32], params: &[f32]) {
     x[i] = tmp[row * v_dim + src_head * hd + off];
 }
 
+/// Issue 1113 lever 1 — the GDN-output fold tail in ONE kernel: tiled→grouped
+/// head permute (a gather — bit-neutral movement) + sign + FWHT, reading the
+/// post-zgate `recurrent_out` at the SOURCE head and writing the rotated
+/// grouped vector to `out` (the wiring passes `permute_tmp`, which the split
+/// chain needed only for its own staging copy). Replaces Copy +
+/// gdn_v_permute + fwht_rotate_forward (3 launches → 1; −2/GDN layer).
+///
+/// Bit-identity is BY CONSTRUCTION, not by modeled arithmetic: the split
+/// chain's copy/permute are movement, the sign is a single multiply, and the
+/// butterfly is this file's `fwht_rotate_forward_f32` body verbatim (the K5
+/// fused test pins that shape against the incumbent kernel). The full-K3
+/// variant that ALSO folded the per-head RMSNorm + z-gate was built first and
+/// measured 1-ULP-divergent against the split chain — the incumbent zgate's
+/// compiled arithmetic carries a compiler contraction (fma-class) that a
+/// second kernel's compilation does not reproduce (the exact-statement-order
+/// CPU mirror agrees with the fused kernel, not the incumbent) — so the
+/// zgate stays its own bit-untouched launch and only the movement+rotation
+/// tail fuses.
+///
+/// One cube per Hadamard window over the DESTINATION (grouped) indices; the
+/// head geometry never constrains the window (heads may straddle it — the
+/// gather resolves any position).
+#[cfg(all(feature = "cubecl_runtime", feature = "ternary_gemv"))]
+#[allow(clippy::approx_constant)] // FRAC_1_SQRT_2 at f32 precision, literal for the cube macro
+#[cube(launch_unchecked)]
+fn gdn_permute_rotate_f32(
+    src: &[f32],   // [v_dim] post-zgate recurrent_out (tiled/source head order)
+    signs: &[f32], // [v_dim]
+    out: &mut [f32], // [v_dim] rotated grouped output (must not alias src)
+    params: &[f32], // [head_dim, n_k, rep, hblock]
+) {
+    let head_dim = params[0usize] as u32;
+    let n_k = params[1usize] as u32;
+    let rep = params[2usize] as u32;
+    let hblock = params[3usize] as u32;
+    let total = out.len() as u32;
+    // 2-D grid (see `split_grid`): rebuild the linear cube index.
+    let base = (CUBE_POS_Y * CUBE_COUNT_X + CUBE_POS_X) * hblock;
+    if base >= total {
+        terminate!();
+    }
+    let tid = UNIT_POS;
+    let threads = 256u32;
+    let mut buf = Shared::<[f32]>::new_slice(MAX_FWHT_BLOCK);
+    // Gather the window's source values (tiled head S = r·n_k + nk per
+    // grouped head H) and apply the sign at the DESTINATION index — the
+    // split chain's permute + fwht sign step, fused.
+    let mut i = tid;
+    while i < hblock {
+        let gj = base + i;
+        let off = gj % head_dim;
+        let h = gj / head_dim;
+        let nk = h / rep;
+        let r = h % rep;
+        let s = ((r * n_k + nk) * head_dim + off) as usize;
+        buf[i as usize] = src[s] * signs[gj as usize];
+        i += threads;
+    }
+    sync_cube();
+    // INLINE butterfly (dedup marker: fwht_butterfly_copy)
+    let inv_sqrt2 = f32::new(0.70710678f32);
+    let mut step = 2u32;
+    while step <= hblock {
+        let half = step / 2u32;
+        let mut bi = tid;
+        while bi < hblock / 2u32 {
+            let blk = (bi / half) * step;
+            let off2 = bi % half;
+            let a = buf[(blk + off2) as usize];
+            let b = buf[(blk + off2 + half) as usize];
+            buf[(blk + off2) as usize] = (a + b) * inv_sqrt2;
+            buf[(blk + off2 + half) as usize] = (a - b) * inv_sqrt2;
+            bi += threads;
+        }
+        sync_cube();
+        step = step * 2u32;
+    }
+    let mut k = tid;
+    while k < hblock {
+        out[(base + k) as usize] = buf[k as usize];
+        k += threads;
+    }
+}
+
+/// K5 — SwiGLU + sign + FWHT in ONE kernel (Issue 1113 lever 1 rung 2; the
+/// CubeCL twin of the cudarc `swiglu_sign_fwht_quantize_f32`, f32 tail): reads
+/// the concatenated `[gate | up]` buffer, computes `g·σ(g)·u` at the
+/// destination window element, applies the sign, and rotates — writing
+/// `ffn_hidden` directly (the split chain's DeltanetGatingConcat wrote it from
+/// `ffn_gate_up` too, so the buffers differ and there is no staging race).
+/// Replaces DeltanetGatingConcat + fwht_rotate_forward (2 launches → 1).
+/// Bit identity: `(g·σ(g)·u)` is the gating kernel's expression verbatim, then
+/// the rotation's `x·sign`, then its exact butterfly.
+#[cfg(all(feature = "cubecl_runtime", feature = "ternary_gemv"))]
+#[allow(clippy::approx_constant)] // FRAC_1_SQRT_2 at f32 precision, literal for the cube macro
+#[cube(launch_unchecked)]
+fn swiglu_rotate_fused_f32(
+    gate_up: &[f32], // [2*n] concatenated gate | up
+    out: &mut [f32], // [n] rotated SwiGLU output
+    signs: &[f32],   // [n]
+    params: &[f32],  // [n, hblock]
+) {
+    let n = params[0usize] as u32;
+    let hblock = params[1usize] as u32;
+    let total = out.len() as u32;
+    // 2-D grid (see `split_grid`): rebuild the linear cube index.
+    let base = (CUBE_POS_Y * CUBE_COUNT_X + CUBE_POS_X) * hblock;
+    if base >= total {
+        terminate!();
+    }
+    let tid = UNIT_POS;
+    let threads = 256u32;
+    let mut buf = Shared::<[f32]>::new_slice(MAX_FWHT_BLOCK);
+    let mut i = tid;
+    while i < hblock {
+        let j = base + i;
+        let g = gate_up[j as usize];
+        let neg_g = f32::new(0.0f32) - g;
+        let sig = f32::new(1.0f32) / (f32::new(1.0f32) + neg_g.exp());
+        let u = gate_up[(n + j) as usize];
+        buf[i as usize] = g * sig * u * signs[j as usize];
+        i += threads;
+    }
+    sync_cube();
+    // INLINE butterfly (dedup marker: fwht_butterfly_copy)
+    let inv_sqrt2 = f32::new(0.70710678f32);
+    let mut step = 2u32;
+    while step <= hblock {
+        let half = step / 2u32;
+        let mut bi = tid;
+        while bi < hblock / 2u32 {
+            let blk = (bi / half) * step;
+            let off2 = bi % half;
+            let a = buf[(blk + off2) as usize];
+            let b = buf[(blk + off2 + half) as usize];
+            buf[(blk + off2) as usize] = (a + b) * inv_sqrt2;
+            buf[(blk + off2 + half) as usize] = (a - b) * inv_sqrt2;
+            bi += threads;
+        }
+        sync_cube();
+        step = step * 2u32;
+    }
+    let mut k = tid;
+    while k < hblock {
+        out[(base + k) as usize] = buf[k as usize];
+        k += threads;
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Launcher
 // ---------------------------------------------------------------------------
@@ -361,6 +525,83 @@ impl RotationCubeCL {
         }
     }
 
+    /// Issue 1113 lever 1 — fused GDN-output fold tail (gather + sign +
+    /// FWHT; Copy + gdn_v_permute + fwht_forward in one launch). Guarded by
+    /// [`gdn_permute_rotate_ok`].
+    ///
+    /// # Safety
+    ///
+    /// - `src_handle` / `out_handle`: `v_dim` f32 elements each (`out` must
+    ///   NOT alias `src` — the wiring passes `permute_tmp`)
+    /// - `signs_handle`: `v_dim` f32
+    /// - [`gdn_permute_rotate_ok`]`(v_dim, hblock)` must hold
+    pub unsafe fn launch_gdn_permute_rotate<R: Runtime>(
+        client: &ComputeClient<R>,
+        src_handle: Handle,
+        signs_handle: Handle,
+        out_handle: Handle,
+        v_dim: usize,
+        head_dim: usize,
+        n_k: usize,
+        rep: usize,
+        hblock: usize,
+    ) {
+        let params: &[f32] = &[
+            head_dim as f32,
+            n_k as f32,
+            rep as f32,
+            hblock as f32,
+        ];
+        let params_handle = crate::params_cache::params_handle(client, f32::as_bytes(params));
+        let n_cubes = (v_dim / hblock.max(1)) as u32;
+        GDN_PERMUTE_ROTATE_LAUNCHES.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        unsafe {
+            gdn_permute_rotate_f32::launch_unchecked::<R>(
+                client,
+                split_grid(n_cubes),
+                CubeDim::new_1d(FWHT_THREADS),
+                BufferArg::from_raw_parts(src_handle, v_dim),
+                BufferArg::from_raw_parts(signs_handle, v_dim),
+                BufferArg::from_raw_parts(out_handle, v_dim),
+                BufferArg::from_raw_parts(params_handle, 4),
+            );
+        }
+    }
+
+    /// K5 fused SwiGLU + sign + FWHT (Issue 1113 lever 1 rung 2). Guarded by
+    /// [`swiglu_rotate_fused_ok`].
+    ///
+    /// # Safety
+    ///
+    /// - `gate_up_handle`: `2 * n` f32; `out_handle`: `n` f32 (must NOT alias
+    ///   `gate_up`)
+    /// - `signs_handle`: `n` f32
+    /// - [`swiglu_rotate_fused_ok`]`(n, hblock)` must hold
+    pub unsafe fn launch_swiglu_rotate_fused<R: Runtime>(
+        client: &ComputeClient<R>,
+        gate_up_handle: Handle,
+        signs_handle: Handle,
+        out_handle: Handle,
+        n: usize,
+        hblock: usize,
+    ) {
+        let params: &[f32] = &[n as f32, hblock as f32];
+        let params_handle = crate::params_cache::params_handle(client, f32::as_bytes(params));
+        let n_cubes = (n / hblock.max(1)) as u32;
+        SWIGLU_ROTATE_FUSED_LAUNCHES.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        unsafe {
+            swiglu_rotate_fused_f32::launch_unchecked::<R>(
+                client,
+                split_grid(n_cubes),
+                CubeDim::new_1d(FWHT_THREADS),
+                BufferArg::from_raw_parts(gate_up_handle, 2 * n),
+                BufferArg::from_raw_parts(out_handle, n),
+                BufferArg::from_raw_parts(signs_handle, n),
+                BufferArg::from_raw_parts(params_handle, 2),
+            );
+        }
+    }
+
     /// `gdn_v_grouped` tiled→grouped head permute over a `[p × v_dim]`
     /// batch (`p == 1` for decode). `tmp_handle` is the staged source copy
     /// of `x`; `x_handle` is the in-place destination.
@@ -411,6 +652,114 @@ fn split_grid(n: u32) -> CubeCount {
     let n = n.max(1);
     let x = n.min(MAX_GRID_DIM);
     CubeCount::Static(x, n.div_ceil(x), 1)
+}
+
+// ---------------------------------------------------------------------------
+// K-fusion runtime toggles (the Bench 768 pattern: env default OFF, a force
+// setter for the bench harness, and a launch counter as the vacuous guard —
+// the fused outputs are bit-identical to the split chains, so ONLY the
+// counter proves the toggle reached the kernel)
+// ---------------------------------------------------------------------------
+
+/// K3 (GDN fold tail: gather+sign+FWHT) armed: env `RIIR_GDN_PERMUTE_ROTATE_FUSED`
+/// ("1"/"on"/"true"), else OFF; [`set_gdn_permute_rotate_fused`] overrides.
+#[cfg(all(feature = "cubecl_runtime", feature = "ternary_gemv"))]
+static USE_GDN_PERMUTE_ROTATE_FUSED: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+#[cfg(all(feature = "cubecl_runtime", feature = "ternary_gemv"))]
+static GDN_PERMUTE_ROTATE_INITIALIZED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+#[cfg(all(feature = "cubecl_runtime", feature = "ternary_gemv"))]
+static GDN_PERMUTE_ROTATE_LAUNCHES: std::sync::atomic::AtomicUsize =
+    std::sync::atomic::AtomicUsize::new(0);
+
+/// K5 (SwiGLU + rotate) armed: env `RIIR_SWIGLU_ROTATE_FUSED`,
+/// else OFF; [`set_swiglu_rotate_fused`] overrides.
+#[cfg(all(feature = "cubecl_runtime", feature = "ternary_gemv"))]
+static USE_SWIGLU_ROTATE_FUSED: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+#[cfg(all(feature = "cubecl_runtime", feature = "ternary_gemv"))]
+static SWIGLU_ROTATE_FUSED_INITIALIZED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+#[cfg(all(feature = "cubecl_runtime", feature = "ternary_gemv"))]
+static SWIGLU_ROTATE_FUSED_LAUNCHES: std::sync::atomic::AtomicUsize =
+    std::sync::atomic::AtomicUsize::new(0);
+
+fn env_flag(name: &str) -> bool {
+    matches!(
+        std::env::var(name).unwrap_or_default().to_lowercase().as_str(),
+        "1" | "on" | "true"
+    )
+}
+
+/// Force the fused GDN fold-tail path on/off (overrides the env; the bench
+/// harness's arm toggle).
+#[cfg(all(feature = "cubecl_runtime", feature = "ternary_gemv"))]
+pub fn set_gdn_permute_rotate_fused(on: bool) {
+    let _ = GDN_PERMUTE_ROTATE_INITIALIZED.set(on);
+    USE_GDN_PERMUTE_ROTATE_FUSED.store(on, std::sync::atomic::Ordering::Relaxed);
+}
+
+/// Force the K5 SwiGLU+rotate fused path on/off (overrides the env).
+#[cfg(all(feature = "cubecl_runtime", feature = "ternary_gemv"))]
+pub fn set_swiglu_rotate_fused(on: bool) {
+    let _ = SWIGLU_ROTATE_FUSED_INITIALIZED.set(on);
+    USE_SWIGLU_ROTATE_FUSED.store(on, std::sync::atomic::Ordering::Relaxed);
+}
+
+/// Whether the fused GDN fold-tail path is currently armed (dispatch check).
+#[cfg(all(feature = "cubecl_runtime", feature = "ternary_gemv"))]
+pub fn gdn_permute_rotate_fused_enabled() -> bool {
+    if GDN_PERMUTE_ROTATE_INITIALIZED
+        .set(env_flag("RIIR_GDN_PERMUTE_ROTATE_FUSED"))
+        .is_ok()
+    {
+        USE_GDN_PERMUTE_ROTATE_FUSED.store(
+            GDN_PERMUTE_ROTATE_INITIALIZED.get().copied().unwrap_or(false),
+            std::sync::atomic::Ordering::Relaxed,
+        );
+    }
+    USE_GDN_PERMUTE_ROTATE_FUSED.load(std::sync::atomic::Ordering::Relaxed)
+}
+
+/// Whether the K5 fused SwiGLU+rotate path is currently armed (dispatch check).
+#[cfg(all(feature = "cubecl_runtime", feature = "ternary_gemv"))]
+pub fn swiglu_rotate_fused_enabled() -> bool {
+    if SWIGLU_ROTATE_FUSED_INITIALIZED
+        .set(env_flag("RIIR_SWIGLU_ROTATE_FUSED"))
+        .is_ok()
+    {
+        USE_SWIGLU_ROTATE_FUSED.store(
+            SWIGLU_ROTATE_FUSED_INITIALIZED.get().copied().unwrap_or(false),
+            std::sync::atomic::Ordering::Relaxed,
+        );
+    }
+    USE_SWIGLU_ROTATE_FUSED.load(std::sync::atomic::Ordering::Relaxed)
+}
+
+/// Launches dispatched through the fused GDN fold-tail path (the vacuous guard).
+#[cfg(all(feature = "cubecl_runtime", feature = "ternary_gemv"))]
+pub fn gdn_permute_rotate_fused_launch_count() -> usize {
+    GDN_PERMUTE_ROTATE_LAUNCHES.load(std::sync::atomic::Ordering::Relaxed)
+}
+
+/// Launches dispatched through the K5 fused path (the vacuous guard).
+#[cfg(all(feature = "cubecl_runtime", feature = "ternary_gemv"))]
+pub fn swiglu_rotate_fused_launch_count() -> usize {
+    SWIGLU_ROTATE_FUSED_LAUNCHES.load(std::sync::atomic::Ordering::Relaxed)
+}
+
+/// Fused GDN fold-tail geometry guard: whole Hadamard windows over the
+/// grouped vector (the head mapping never constrains the window — the gather
+/// resolves any position).
+#[cfg(all(feature = "cubecl_runtime", feature = "ternary_gemv"))]
+pub fn gdn_permute_rotate_ok(v_dim: usize, hblock: usize) -> bool {
+    v_dim.is_multiple_of(hblock) && (2..=MAX_FWHT_BLOCK).contains(&hblock)
+}
+
+/// K5 fused-kernel geometry guard: whole Hadamard windows over the SwiGLU
+/// output width.
+#[cfg(all(feature = "cubecl_runtime", feature = "ternary_gemv"))]
+pub fn swiglu_rotate_fused_ok(n: usize, hblock: usize) -> bool {
+    n.is_multiple_of(hblock) && (2..=MAX_FWHT_BLOCK).contains(&hblock)
 }
 
 // ---------------------------------------------------------------------------
@@ -869,5 +1218,147 @@ mod tests {
             ..cfg
         };
         assert!(RotationTablesCubeCL::build::<ActiveRuntime>(&client, &bad).is_err());
+    }
+
+    /// Fused GDN fold tail (Issue 1113 lever 1): the fused gather+sign+FWHT
+    /// kernel must be BIT-IDENTICAL to the split 3-launch chain (Copy →
+    /// gdn_v_permute → fwht_forward) — the G3 shape at the kernel level, the
+    /// same oracle the wiring falls back to. Bit-exactness is by construction
+    /// (movement + single multiply + the incumbent butterfly), asserted here.
+    #[test]
+    fn gdn_permute_rotate_matches_split_chain_bitexact() {
+        use crate::elementwise_cubecl::CopyCubeCL;
+
+        let ctx = CubeCLContext::new().expect("CubeCL should initialize");
+        let client = ctx.client();
+
+        // Bonsai-2-class geometry at two windows: head_dim 128 inside a 1024
+        // window (8 heads/cube), n_k 4 · rep 4 (grouped), plus an ungrouped
+        // arm (rep = 1 — the permute degenerates to identity).
+        for &(head_dim, n_k, rep) in &[(128usize, 4usize, 4usize), (128usize, 16usize, 1usize)] {
+            let hblock = 1024usize;
+            let heads = n_k * rep;
+            let v_dim = heads * head_dim;
+
+            let mut lcg = Lcg(0x1113 + rep as u64);
+            let x: Vec<f32> = (0..v_dim).map(|_| lcg.next_f32(-2.0, 2.0)).collect();
+            let signs_f32: Vec<f32> = signs_vec(v_dim, 0x5113 + rep as u64)
+                .iter()
+                .map(|&s| s as f32)
+                .collect();
+
+            // ── split chain: copy → permute → in-place FWHT ──
+            let x_handle = client.create_from_slice(f32::as_bytes(&x));
+            let signs_handle = client.create_from_slice(f32::as_bytes(&signs_f32));
+            let tmp_handle = client.create_from_slice(f32::as_bytes(&x)); // staging copy
+            unsafe {
+                CopyCubeCL::launch::<ActiveRuntime>(&client, x_handle.clone(), tmp_handle.clone(), v_dim);
+                RotationCubeCL::launch_gdn_v_permute::<ActiveRuntime>(
+                    &client,
+                    tmp_handle.clone(),
+                    x_handle.clone(),
+                    v_dim,
+                    v_dim,
+                    head_dim,
+                    n_k,
+                    rep,
+                );
+                RotationCubeCL::launch_forward::<ActiveRuntime>(
+                    &client,
+                    x_handle.clone(),
+                    signs_handle.clone(),
+                    v_dim,
+                    v_dim,
+                    hblock,
+                );
+            }
+
+            // ── fused kernel (reads the PRIMAL fixture — the split chain
+            //    mutated its own copy in place) ──
+            let out_handle = client.create_from_slice(f32::as_bytes(&vec![0.0f32; v_dim]));
+            unsafe {
+                RotationCubeCL::launch_gdn_permute_rotate::<ActiveRuntime>(
+                    &client,
+                    client.create_from_slice(f32::as_bytes(&x)),
+                    signs_handle.clone(),
+                    out_handle.clone(),
+                    v_dim,
+                    head_dim,
+                    n_k,
+                    rep,
+                    hblock,
+                );
+            }
+
+            let split_bytes = client.read_one(x_handle).expect("read split");
+            let split = f32::from_bytes(&split_bytes);
+            let fused_bytes = client.read_one(out_handle).expect("read fused");
+            let fused = f32::from_bytes(&fused_bytes);
+            for (i, (a, b)) in split.iter().zip(fused.iter()).enumerate() {
+                assert_eq!(
+                    a.to_bits(),
+                    b.to_bits(),
+                    "hd {head_dim} n_k {n_k} rep {rep} elem {i}: split {a} vs fused {b}"
+                );
+            }
+        }
+    }
+
+    /// K5 (Issue 1113 lever 1 rung 2): fused SwiGLU+sign+FWHT must be
+    /// BIT-IDENTICAL to DeltanetGatingConcat → fwht_forward.
+    #[test]
+    fn swiglu_rotate_fused_matches_split_chain_bitexact() {
+        use crate::deltanet_cubecl::DeltanetGatingConcatCubeCL;
+
+        let ctx = CubeCLContext::new().expect("CubeCL should initialize");
+        let client = ctx.client();
+
+        let (n, hblock) = (2048usize, 1024usize);
+        let mut lcg = Lcg(0x1155);
+        let gate_up: Vec<f32> = (0..2 * n).map(|_| lcg.next_f32(-2.0, 2.0)).collect();
+        let signs_f32: Vec<f32> = signs_vec(n, 0x5115).iter().map(|&s| s as f32).collect();
+
+        let gate_up_handle = client.create_from_slice(f32::as_bytes(&gate_up));
+        let signs_handle = client.create_from_slice(f32::as_bytes(&signs_f32));
+
+        // split chain: gating writes ffn_hidden, then the in-place rotation
+        let split_handle = client.create_from_slice(f32::as_bytes(&vec![0.0f32; n]));
+        unsafe {
+            DeltanetGatingConcatCubeCL::launch::<ActiveRuntime>(
+                &client,
+                gate_up_handle.clone(),
+                split_handle.clone(),
+                n,
+            );
+            RotationCubeCL::launch_forward::<ActiveRuntime>(
+                &client,
+                split_handle.clone(),
+                signs_handle.clone(),
+                n,
+                n,
+                hblock,
+            );
+        }
+
+        // fused kernel
+        let fused_handle = client.create_from_slice(f32::as_bytes(&vec![0.0f32; n]));
+        unsafe {
+            RotationCubeCL::launch_swiglu_rotate_fused::<ActiveRuntime>(
+                &client,
+                gate_up_handle.clone(),
+                signs_handle.clone(),
+                fused_handle.clone(),
+                n,
+                hblock,
+            );
+        }
+
+        let split_bytes = client.read_one(split_handle).expect("read split");
+        let split = f32::from_bytes(&split_bytes);
+        let fused_bytes = client.read_one(fused_handle).expect("read fused");
+        let fused = f32::from_bytes(&fused_bytes);
+        for (i, (a, b)) in split.iter().zip(fused.iter()).enumerate() {
+            assert_eq!(a.to_bits(), b.to_bits(), "elem {i}: split {a} vs fused {b}");
+        }
     }
 }
