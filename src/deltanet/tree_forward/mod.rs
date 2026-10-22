@@ -413,6 +413,7 @@ fn forward_tree_attention_per_branch(
                 config,
                 rope_freq,
                 &mut attn_scratch,
+                None,
             );
         }
     }

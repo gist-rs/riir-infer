@@ -751,6 +751,7 @@ mod tests {
                     &mut pctx_a,
                     &mut logits_armed,
                     Some(&mut evictor),
+                    None,
                 );
             }
             assert_eq!(evictor.total_stats().evicted_rows, 0);
@@ -810,6 +811,7 @@ mod tests {
                 &mut pctx,
                 &mut logits,
                 armed.then_some(&mut evictor),
+                None,
             );
             let mut seq = prompt.clone();
             for step in 0..4 {

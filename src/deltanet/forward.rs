@@ -749,6 +749,7 @@ pub fn forward_attention_layer(
     config: &Config,
     rope_freq: &crate::rope::RopeFreqTable,
     scratch: &mut AttentionLayerScratch,
+    key_bias: Option<(&[f32], crate::transformer::KeyBiasLayout)>,
 ) {
     let n_embd = config.n_embd;
     let n_head = config.n_head;
@@ -832,7 +833,7 @@ pub fn forward_attention_layer(
     scratch.attn_out[..q_dim].fill(0.0);
     let t_n = pos + 1;
     unsafe {
-        crate::transformer::attention_heads_parallel(
+        crate::transformer::attention_heads_parallel_bias(
             &scratch.q_buf,
             &cache.key,
             &cache.value,
@@ -846,6 +847,7 @@ pub fn forward_attention_layer(
             scale,
             0.0, // no logit softcapping for Qwen3.5
             config.block_size,
+            key_bias,
         );
     }
 
@@ -887,6 +889,7 @@ pub fn forward_attention_layer_evictable(
     rope_freq: &crate::rope::RopeFreqTable,
     scratch: &mut AttentionLayerScratch,
     evictor: &mut crate::deltanet::kv_evict::LayerEvict,
+    key_bias: Option<(&[f32], crate::transformer::KeyBiasLayout)>,
 ) {
     let n_embd = config.n_embd;
     let n_head = config.n_head;
@@ -960,7 +963,7 @@ pub fn forward_attention_layer_evictable(
     let t_n = slot + 1;
     let block_size = config.block_size;
     unsafe {
-        crate::transformer::attention_heads_parallel(
+        crate::transformer::attention_heads_parallel_bias(
             &scratch.q_buf,
             &cache.key,
             &cache.value,
@@ -974,6 +977,7 @@ pub fn forward_attention_layer_evictable(
             scale,
             0.0,
             block_size,
+            key_bias,
         );
     }
 
@@ -1247,6 +1251,7 @@ fn forward_qwen_deltanet_body<'a>(
                 config,
                 rope_freq,
                 &mut scratch.attention,
+                None,
             );
         }
 
@@ -1363,6 +1368,7 @@ fn forward_qwen_deltanet_evictable_body<'a>(
                 rope_freq,
                 &mut scratch.attention,
                 evictor.layer(layer_idx),
+                None,
             );
         }
 
@@ -1637,6 +1643,7 @@ pub fn prefill_qwen_deltanet(
         rope_freq,
         prefill_ctx,
         &mut logits,
+        None,
     );
     logits
 }
@@ -1660,6 +1667,7 @@ pub fn prefill_qwen_deltanet_into(
     rope_freq: &crate::rope::RopeFreqTable,
     prefill_ctx: &mut PrefillContext,
     logits_out: &mut [f32],
+    key_bias: Option<(&[f32], crate::transformer::KeyBiasLayout)>,
 ) {
     let n = config.n_embd;
     let v = config.vocab_size;
@@ -1832,13 +1840,15 @@ pub fn prefill_qwen_deltanet_into(
             // Position p attends to K[0..=p] / V[0..=p] (causal mask).
             // Bit-identical to the per-position `forward_attention_layer` path —
             // same `attention_heads_parallel` call, same inputs, same output slot.
+            // Plan 622 T1.1: `key_bias` rides through — per-KEY × per-head, so
+            // every position p indexes the SAME rows (keys at cache slots 0..=p).
             for p in 0..seq_len {
                 let q_off = p * q_dim;
                 let out_off = p * q_dim;
                 prefill_ctx.attn_out[out_off..out_off + q_dim].fill(0.0);
                 let t_n = p + 1;
                 unsafe {
-                    crate::transformer::attention_heads_parallel(
+                    crate::transformer::attention_heads_parallel_bias(
                         &prefill_ctx.attn_q[q_off..q_off + q_dim],
                         &kv_cache.key,
                         &kv_cache.value,
@@ -1852,6 +1862,7 @@ pub fn prefill_qwen_deltanet_into(
                         scale,
                         0.0,
                         config.block_size,
+                        key_bias,
                     );
                 }
             }
@@ -1925,6 +1936,7 @@ pub fn prefill_qwen_deltanet_chunk_into(
     prefill_ctx: &mut PrefillContext,
     logits_out: &mut [f32],
     mut evictor: Option<&mut crate::deltanet::kv_evict::EvictorState>,
+    key_bias: Option<(&[f32], crate::transformer::KeyBiasLayout)>,
 ) {
     let n = config.n_embd;
     let v = config.vocab_size;
@@ -2177,7 +2189,7 @@ pub fn prefill_qwen_deltanet_chunk_into(
                 };
                 prefill_ctx.attn_out[out_off..out_off + q_dim].fill(0.0);
                 unsafe {
-                    crate::transformer::attention_heads_parallel(
+                    crate::transformer::attention_heads_parallel_bias(
                         &prefill_ctx.attn_q[q_off..q_off + q_dim],
                         &kv_cache.key,
                         &kv_cache.value,
@@ -2191,6 +2203,7 @@ pub fn prefill_qwen_deltanet_chunk_into(
                         scale,
                         0.0,
                         block_size,
+                        key_bias,
                     );
                 }
                 if let Some(e) = ev.as_mut() {
@@ -2327,6 +2340,7 @@ pub fn generate_greedy_qwen_deltanet(
         &rope_freq,
         &mut prefill_ctx,
         &mut x[..v],
+        None,
     );
 
     // ── First decode token: argmax from prefill logits ──
@@ -3260,6 +3274,7 @@ mod tests {
                 &rope_freq,
                 &mut prefill_ctx,
                 &mut logits,
+                None,
             );
             // Measure
             let mut cache_pf = HybridCache::with_layer_types(&config, &layer_types);
@@ -3275,6 +3290,7 @@ mod tests {
                 &rope_freq,
                 &mut prefill_ctx,
                 &mut logits,
+                None,
             );
             let prefill_ms = t1.elapsed().as_secs_f64() * 1000.0;
 
@@ -3431,6 +3447,7 @@ mod tests {
                         &config,
                         &rope_freq,
                         &mut scratch_seq.attention,
+                        None,
                     );
                 }
 
@@ -3603,6 +3620,7 @@ mod tests {
                 &config,
                 &rope_freq,
                 &mut scratch_id.attention,
+                None,
             );
 
             // Run with q_norm = twos (scale Q by 2x after norm)
@@ -3614,6 +3632,7 @@ mod tests {
                 &config,
                 &rope_freq,
                 &mut scratch_sc.attention,
+                None,
             );
         }
 

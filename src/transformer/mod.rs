@@ -103,9 +103,11 @@ pub use attention::attention_head;
 // Match that gate here so the re-export isn't dead on wasm32.
 // Proposal 041 T1.1: widened `pub` (was pub(crate)) — causal_validation lives
 // in riir-engine and consumes these cross-crate through the re-export.
+pub use attention::KeyBiasLayout;
 #[cfg(all(not(target_arch = "wasm32"), feature = "causal_validation"))]
 pub use attention::attention_head_softcap;
 pub use attention::attention_heads_parallel;
+pub use attention::attention_heads_parallel_bias;
 // Set-causal attention head (Research 376 Phase 0 T0.3, 2026-07-04).
 #[cfg(feature = "set_diffusion")]
 pub use attention::attention_head_set_causal;

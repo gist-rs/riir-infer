@@ -504,6 +504,7 @@ mod tests {
                 &config,
                 &rope_freq,
                 &mut scratch_dense,
+                None,
             );
         }
 
@@ -647,6 +648,7 @@ mod tests {
                 &config,
                 &rope_freq,
                 &mut scratch_dense,
+                None,
             );
         }
 

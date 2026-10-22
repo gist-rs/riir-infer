@@ -1024,6 +1024,7 @@ fn run_arm(
             &mut pctx,
             &mut logits,
             Some(&mut evictor),
+            None,
         );
         eprintln!(
             "# [{name}] prefill chunk {}/{} at {:.0}s",

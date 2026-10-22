@@ -449,6 +449,7 @@ fn forward_attention_layer_ternary(
     hook: Option<&dyn TernaryMatvecHook>,
     rotation: Option<&TernaryRotationConfig>,
     rotation_buf: &mut [f32],
+    key_bias: Option<(&[f32], crate::transformer::KeyBiasLayout)>,
 ) {
     let n_embd = config.n_embd;
     let n_head = config.n_head;
@@ -597,7 +598,7 @@ fn forward_attention_layer_ternary(
             );
         },
         None => unsafe {
-            crate::transformer::attention_heads_parallel(
+            crate::transformer::attention_heads_parallel_bias(
                 &scratch.q_buf,
                 &cache.key,
                 &cache.value,
@@ -611,12 +612,13 @@ fn forward_attention_layer_ternary(
                 scale,
                 0.0,
                 config.block_size,
+                key_bias,
             );
         },
     }
     #[cfg(not(feature = "scale_invariant_attn"))]
     unsafe {
-        crate::transformer::attention_heads_parallel(
+        crate::transformer::attention_heads_parallel_bias(
             &scratch.q_buf,
             &cache.key,
             &cache.value,
@@ -630,6 +632,7 @@ fn forward_attention_layer_ternary(
             scale,
             0.0,
             config.block_size,
+            key_bias,
         );
     }
 
@@ -788,6 +791,7 @@ pub fn qwen_deltanet_ternary_layer_body(
             hook,
             rotation,
             &mut scratch.rotation_buf,
+            None,
         );
     }
 

@@ -633,6 +633,465 @@ pub unsafe fn attention_heads_parallel(
     }
 }
 
+// ── Plan 622 Phase 1 T1.1 — per-key × per-head additive attention-logit bias ──
+//
+// The TokenGate seam (riir-infer Plan 622): layers past the gate process only
+// kept tokens, so positional logits need a per-key corrective prior. The bias
+// is ADDITIVE in logit space — applied post-scale (post-softcap on the softcap
+// arms: softcap stabilizes the QK product, the bias is a routing prior on the
+// effective logit — squashing it inside tanh would defeat large-magnitude
+// selection) and pre-softmax. `None` takes the IDENTICAL code path: the add is
+// skipped, never `+ 0.0` (that would flip `-0.0` and break byte-identity).
+
+/// Layout of a per-key × per-head additive attention-logit bias buffer.
+///
+/// Row-major `[n_head][head_stride]`: the logit contribution for Q head `h`
+/// at key-cache slot `t` reads `data[h * head_stride + t]`. Keys are addressed
+/// by their CACHE SLOT (the identity every loop here already indexes) — for
+/// the decode/prefix arms that is the absolute kv position; for the
+/// set-causal/masked arms it is the candidate slot the kernel scores.
+#[derive(Clone, Copy, Debug)]
+pub struct KeyBiasLayout {
+    pub head_stride: usize,
+}
+
+/// Bias row for head `h` out of a `(data, layout)` pair — `None` passes
+/// through untouched so call sites keep a single hoisted local.
+#[inline(always)]
+fn key_bias_row(key_bias: Option<(&[f32], KeyBiasLayout)>, head: usize) -> Option<&[f32]> {
+    key_bias.map(move |(data, layout)| {
+        let start = head * layout.head_stride;
+        &data[start..]
+    })
+}
+
+/// [`attention_head`] with an optional per-key × per-head additive logit bias.
+/// Identical loop, arithmetic, and reduction order; `None` = bit-identical to
+/// [`attention_head`].
+///
+/// # Safety
+///
+/// Same contract as [`attention_head`]; with `Some((data, layout))` the caller
+/// further guarantees `data.len() >= (q_head_offset / hd + 1) * layout.head_stride`
+/// and `layout.head_stride >= t_n` (asserted in debug).
+#[allow(clippy::too_many_arguments)]
+#[inline(always)]
+pub unsafe fn attention_head_bias(
+    q: &[f32],
+    key_cache: &[f32],
+    value_cache: &[f32],
+    attn_out: &mut [f32],
+    scores_buf: &mut [f32],
+    q_head_offset: usize,
+    kv_group_offset: usize,
+    kv_dim: usize,
+    hd: usize,
+    t_n: usize,
+    scale: f32,
+    key_bias: Option<(&[f32], KeyBiasLayout)>,
+) {
+    let bias_row = key_bias_row(key_bias, q_head_offset / hd);
+    if let Some(row) = bias_row {
+        debug_assert!(row.len() >= t_n, "key bias row shorter than t_n");
+    }
+    let mut max_score = f32::NEG_INFINITY;
+    for t in 0..t_n {
+        let k_off = t * kv_dim + kv_group_offset;
+        let dot = crate::simd::simd_dot_f32(
+            &q[q_head_offset..q_head_offset + hd],
+            &key_cache[k_off..k_off + hd],
+            hd,
+        );
+        let score = if let Some(row) = bias_row {
+            dot * scale + unsafe { *row.get_unchecked(t) }
+        } else {
+            dot * scale
+        };
+        unsafe {
+            *scores_buf.get_unchecked_mut(t) = score;
+        }
+        max_score = max_score.max(score);
+    }
+
+    let mut sum = 0.0f32;
+    for t in 0..t_n {
+        let exp_val = unsafe { (*scores_buf.get_unchecked(t) - max_score).exp() };
+        unsafe {
+            *scores_buf.get_unchecked_mut(t) = exp_val;
+        }
+        sum += exp_val;
+    }
+
+    let inv_sum = 1.0 / sum;
+    for t in 0..t_n {
+        let w = unsafe { *scores_buf.get_unchecked(t) * inv_sum };
+        let v_off = t * kv_dim + kv_group_offset;
+        for d in 0..hd {
+            unsafe {
+                *attn_out.get_unchecked_mut(q_head_offset + d) +=
+                    w * *value_cache.get_unchecked(v_off + d);
+            }
+        }
+    }
+}
+
+/// [`attention_head_softcap`] with the bias added POST-softcap (pre-softmax).
+///
+/// # Safety
+///
+/// Same contract as [`attention_head_softcap`]; with `Some((data, layout))` the
+/// caller further guarantees `data.len() >= (q_head_offset / hd + 1) * layout.head_stride`
+/// and `layout.head_stride >= t_n` (asserted in debug).
+#[allow(clippy::too_many_arguments)]
+#[inline]
+pub unsafe fn attention_head_softcap_bias(
+    q: &[f32],
+    key_cache: &[f32],
+    value_cache: &[f32],
+    attn_out: &mut [f32],
+    scores_buf: &mut [f32],
+    q_head_offset: usize,
+    kv_group_offset: usize,
+    kv_dim: usize,
+    hd: usize,
+    t_n: usize,
+    scale: f32,
+    softcap: f32,
+    key_bias: Option<(&[f32], KeyBiasLayout)>,
+) {
+    let bias_row = key_bias_row(key_bias, q_head_offset / hd);
+    if let Some(row) = bias_row {
+        debug_assert!(row.len() >= t_n, "key bias row shorter than t_n");
+    }
+    let scale_over_softcap = scale / softcap;
+    let mut max_score = f32::NEG_INFINITY;
+    for t in 0..t_n {
+        let k_off = t * kv_dim + kv_group_offset;
+        let dot = crate::simd::simd_dot_f32(
+            &q[q_head_offset..q_head_offset + hd],
+            &key_cache[k_off..k_off + hd],
+            hd,
+        );
+        let capped = softcap * crate::simd::fast_tanh(dot * scale_over_softcap);
+        let score = if let Some(row) = bias_row {
+            capped + unsafe { *row.get_unchecked(t) }
+        } else {
+            capped
+        };
+        unsafe {
+            *scores_buf.get_unchecked_mut(t) = score;
+        }
+        max_score = max_score.max(score);
+    }
+
+    let mut sum = 0.0f32;
+    for t in 0..t_n {
+        let exp_val = unsafe { (*scores_buf.get_unchecked(t) - max_score).exp() };
+        unsafe {
+            *scores_buf.get_unchecked_mut(t) = exp_val;
+        }
+        sum += exp_val;
+    }
+
+    let inv_sum = 1.0 / sum;
+    for t in 0..t_n {
+        let w = unsafe { *scores_buf.get_unchecked(t) * inv_sum };
+        let v_off = t * kv_dim + kv_group_offset;
+        for d in 0..hd {
+            unsafe {
+                *attn_out.get_unchecked_mut(q_head_offset + d) +=
+                    w * *value_cache.get_unchecked(v_off + d);
+            }
+        }
+    }
+}
+
+/// Per-head slices variant with a PRE-SLICED bias row (the parallel dispatcher
+/// computes the head index once). Softcap form — bias added post-softcap.
+#[allow(clippy::too_many_arguments)]
+#[inline(always)]
+pub(super) unsafe fn attention_head_on_slices_bias(
+    q_head: &[f32],
+    key_cache: &[f32],
+    value_cache: &[f32],
+    attn_out_head: &mut [f32],
+    scores_buf: &mut [f32],
+    kv_group_offset: usize,
+    kv_dim: usize,
+    hd: usize,
+    t_n: usize,
+    scale: f32,
+    softcap: f32,
+    bias_row: Option<&[f32]>,
+) {
+    let scale_over_softcap = scale / softcap;
+    let mut max_score = f32::NEG_INFINITY;
+    for t in 0..t_n {
+        let k_off = t * kv_dim + kv_group_offset;
+        let dot = crate::simd::simd_dot_f32(&q_head[..hd], &key_cache[k_off..k_off + hd], hd);
+        let capped = softcap * crate::simd::fast_tanh(dot * scale_over_softcap);
+        let score = if let Some(row) = bias_row {
+            capped + unsafe { *row.get_unchecked(t) }
+        } else {
+            capped
+        };
+        unsafe {
+            *scores_buf.get_unchecked_mut(t) = score;
+        }
+        max_score = max_score.max(score);
+    }
+
+    let mut sum = 0.0f32;
+    for t in 0..t_n {
+        let exp_val = unsafe { (*scores_buf.get_unchecked(t) - max_score).exp() };
+        unsafe {
+            *scores_buf.get_unchecked_mut(t) = exp_val;
+        }
+        sum += exp_val;
+    }
+
+    let inv_sum = 1.0 / sum;
+    for t in 0..t_n {
+        let w = unsafe { *scores_buf.get_unchecked(t) * inv_sum };
+        let v_off = t * kv_dim + kv_group_offset;
+        for d in 0..hd {
+            unsafe {
+                *attn_out_head.get_unchecked_mut(d) += w * *value_cache.get_unchecked(v_off + d);
+            }
+        }
+    }
+}
+
+/// Per-head slices variant with a pre-sliced bias row — non-softcap form.
+#[allow(clippy::too_many_arguments)]
+#[inline(always)]
+pub(super) unsafe fn attention_head_on_slices_no_softcap_bias(
+    q_head: &[f32],
+    key_cache: &[f32],
+    value_cache: &[f32],
+    attn_out_head: &mut [f32],
+    scores_buf: &mut [f32],
+    kv_group_offset: usize,
+    kv_dim: usize,
+    hd: usize,
+    t_n: usize,
+    scale: f32,
+    bias_row: Option<&[f32]>,
+) {
+    let mut max_score = f32::NEG_INFINITY;
+    for t in 0..t_n {
+        let k_off = t * kv_dim + kv_group_offset;
+        let dot = crate::simd::simd_dot_f32(&q_head[..hd], &key_cache[k_off..k_off + hd], hd);
+        let score = if let Some(row) = bias_row {
+            dot * scale + unsafe { *row.get_unchecked(t) }
+        } else {
+            dot * scale
+        };
+        unsafe {
+            *scores_buf.get_unchecked_mut(t) = score;
+        }
+        max_score = max_score.max(score);
+    }
+
+    let mut sum = 0.0f32;
+    for t in 0..t_n {
+        let exp_val = unsafe { (*scores_buf.get_unchecked(t) - max_score).exp() };
+        unsafe {
+            *scores_buf.get_unchecked_mut(t) = exp_val;
+        }
+        sum += exp_val;
+    }
+
+    let inv_sum = 1.0 / sum;
+    for t in 0..t_n {
+        let w = unsafe { *scores_buf.get_unchecked(t) * inv_sum };
+        let v_off = t * kv_dim + kv_group_offset;
+        for d in 0..hd {
+            unsafe {
+                *attn_out_head.get_unchecked_mut(d) += w * *value_cache.get_unchecked(v_off + d);
+            }
+        }
+    }
+}
+
+/// [`attention_heads_parallel`] with an optional per-key × per-head additive
+/// logit bias (see [`KeyBiasLayout`]). All three dispatch arms (sequential
+/// fallback, decode spin pool, rayon) carry the seam; `None` is bit-identical
+/// to [`attention_heads_parallel`].
+///
+/// # Safety
+/// Same contract as [`attention_heads_parallel`]; with `Some((data, layout))`
+/// the caller further guarantees `data.len() >= n_head * layout.head_stride`
+/// and `layout.head_stride >= t_n` (asserted in debug).
+#[allow(clippy::too_many_arguments)]
+pub unsafe fn attention_heads_parallel_bias(
+    q: &[f32],
+    key_cache: &[f32],
+    value_cache: &[f32],
+    attn_out: &mut [f32],
+    head_scores: &mut [f32],
+    n_head: usize,
+    n_kv_head: usize,
+    kv_dim: usize,
+    head_dim: usize,
+    t_n: usize,
+    scale: f32,
+    softcap: f32,
+    block_size: usize,
+    key_bias: Option<(&[f32], KeyBiasLayout)>,
+) {
+    if let Some((data, layout)) = key_bias {
+        debug_assert!(
+            data.len() >= n_head * layout.head_stride,
+            "key bias buffer smaller than n_head rows"
+        );
+        debug_assert!(layout.head_stride >= t_n, "key bias row shorter than t_n");
+    }
+    if t_n < PARALLEL_HEADS_MIN_SEQ || n_head <= 1 {
+        for h in 0..n_head {
+            let kv_group = h * n_kv_head / n_head;
+            unsafe {
+                if softcap > 0.0 {
+                    attention_head_softcap_bias(
+                        q,
+                        key_cache,
+                        value_cache,
+                        attn_out,
+                        &mut head_scores[..block_size],
+                        h * head_dim,
+                        kv_group * head_dim,
+                        kv_dim,
+                        head_dim,
+                        t_n,
+                        scale,
+                        softcap,
+                        key_bias,
+                    );
+                } else {
+                    attention_head_bias(
+                        q,
+                        key_cache,
+                        value_cache,
+                        attn_out,
+                        &mut head_scores[..block_size],
+                        h * head_dim,
+                        kv_group * head_dim,
+                        kv_dim,
+                        head_dim,
+                        t_n,
+                        scale,
+                        key_bias,
+                    );
+                }
+            }
+        }
+    } else {
+        let q_dim = n_head * head_dim;
+        #[cfg(feature = "decode_spin_pool")]
+        {
+            let (ap, sp) = unsafe {
+                (
+                    katgpt_core::SyncMutPtr::new(attn_out.as_mut_ptr()),
+                    katgpt_core::SyncMutPtr::new(head_scores.as_mut_ptr()),
+                )
+            };
+            let heads = n_head.min(head_scores.len() / block_size.max(1));
+            let ran = katgpt_core::spin_pool_run(heads, &|h| {
+                let kv_group_offset = (h * n_kv_head / n_head) * head_dim;
+                let bias_row = key_bias_row(key_bias, h);
+                unsafe {
+                    let attn_h =
+                        std::slice::from_raw_parts_mut(ap.get().add(h * head_dim), head_dim);
+                    let scores_h =
+                        std::slice::from_raw_parts_mut(sp.get().add(h * block_size), block_size);
+                    match softcap > 0.0 {
+                        true => attention_head_on_slices_bias(
+                            &q[h * head_dim..],
+                            key_cache,
+                            value_cache,
+                            attn_h,
+                            scores_h,
+                            kv_group_offset,
+                            kv_dim,
+                            head_dim,
+                            t_n,
+                            scale,
+                            softcap,
+                            bias_row,
+                        ),
+                        false => attention_head_on_slices_no_softcap_bias(
+                            &q[h * head_dim..],
+                            key_cache,
+                            value_cache,
+                            attn_h,
+                            scores_h,
+                            kv_group_offset,
+                            kv_dim,
+                            head_dim,
+                            t_n,
+                            scale,
+                            bias_row,
+                        ),
+                    }
+                }
+            });
+            if ran {
+                return;
+            }
+        }
+        if softcap > 0.0 {
+            attn_out[..q_dim]
+                .par_chunks_mut(head_dim)
+                .zip(head_scores.par_chunks_mut(block_size))
+                .enumerate()
+                .for_each(|(h, (attn_h, scores_h))| {
+                    let kv_group_offset = (h * n_kv_head / n_head) * head_dim;
+                    let bias_row = key_bias_row(key_bias, h);
+                    unsafe {
+                        attention_head_on_slices_bias(
+                            &q[h * head_dim..],
+                            key_cache,
+                            value_cache,
+                            attn_h,
+                            scores_h,
+                            kv_group_offset,
+                            kv_dim,
+                            head_dim,
+                            t_n,
+                            scale,
+                            softcap,
+                            bias_row,
+                        );
+                    }
+                });
+        } else {
+            attn_out[..q_dim]
+                .par_chunks_mut(head_dim)
+                .zip(head_scores.par_chunks_mut(block_size))
+                .enumerate()
+                .for_each(|(h, (attn_h, scores_h))| {
+                    let kv_group_offset = (h * n_kv_head / n_head) * head_dim;
+                    let bias_row = key_bias_row(key_bias, h);
+                    unsafe {
+                        attention_head_on_slices_no_softcap_bias(
+                            &q[h * head_dim..],
+                            key_cache,
+                            value_cache,
+                            attn_h,
+                            scores_h,
+                            kv_group_offset,
+                            kv_dim,
+                            head_dim,
+                            t_n,
+                            scale,
+                            bias_row,
+                        );
+                    }
+                });
+        }
+    }
+}
+
 // ── D2F: Discrete Diffusion Language Model (Plan 068) ───────────────
 
 /// Compute cross-entropy loss on masked positions only, importance-weighted by `1/p_mask`.

@@ -113,6 +113,7 @@ pub fn forward_attention_layer_ternary_qkv<C: QuantizedKVCache>(
     scratch: &mut AttentionLayerScratch,
     rotation: Option<&TernaryRotationConfig>,
     rotation_buf: &mut [f32],
+    key_bias: Option<(&[f32], crate::transformer::KeyBiasLayout)>,
 ) {
     let n_embd = config.n_embd;
     let n_head = config.n_head;
@@ -196,7 +197,7 @@ pub fn forward_attention_layer_ternary_qkv<C: QuantizedKVCache>(
     scratch.attn_out[..q_dim].fill(0.0);
     let t_n = pos + 1;
     unsafe {
-        crate::transformer::attention_heads_parallel(
+        crate::transformer::attention_heads_parallel_bias(
             &scratch.q_buf,
             &mirror.key[layer_idx],
             &mirror.value[layer_idx],
@@ -210,6 +211,7 @@ pub fn forward_attention_layer_ternary_qkv<C: QuantizedKVCache>(
             scale,
             0.0,
             config.block_size,
+            key_bias,
         );
     }
 
@@ -330,6 +332,7 @@ fn forward_qwen_deltanet_ternary_qkv_body<'a, C: QuantizedKVCache>(
                 &mut scratch.attention,
                 rotation,
                 &mut scratch.rotation_buf,
+                None,
             );
         }
 
