@@ -133,7 +133,10 @@ fn plan622_cuda_model_walk_kb_session_arms() {
     // posture is the EAGER whole-prefill CUDA arm; the moved×2 determinism
     // guard below proves eager determinism (the league walk proves the
     // graph-replay posture at ahd 256).
-    std::env::set_var("RIIR_PREFILL_CUDA_GRAPHS", "0");
+    // SAFETY: single-threaded test startup — no other thread reads the env
+    // (edition-2024 marks set_var unsafe; the knob OnceLocks read at the
+    // first forward, below).
+    unsafe { std::env::set_var("RIIR_PREFILL_CUDA_GRAPHS", "0") };
     use riir_infer_gpu::ternary_deltanet_gpu_forward as tdf;
     tdf::set_prefill_use_gemv(false);
     tdf::set_prefill_seq_rmsnorm(false);
