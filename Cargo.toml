@@ -78,6 +78,17 @@ hla = []
 # named, not yet wired. Gates: tests/gdn_delta_roll_gates.rs (G1 drift pin,
 # Bench 885) + tests/gdn_delta_roll_g4_alloc.rs (G4).
 gdn_delta_roll = ["deltanet_inference"]
+# Plan 622 (2026-10-22) — the TokenGate prompt-skimming lane (per-key-bias
+# attention + the exact pruned-prefill quartet + the deterministically-
+# constructed gate overlay). Pure-local opt-in. The kernel CAPABILITY
+# (Phase 1 `*_bias` attention variants) is deliberately ungated `Option`
+# parameter code — a dispatch identity at `None`; THIS feature gates the
+# LANE: the serving quartet + gate overlay (Phases 2–3, wired through
+# `riir_infer_core::tokengate::runtime_enabled()` at boot) and the lane's
+# harness targets (the required-features rows). Runtime demote inside the
+# feature: `RIIR_TOKENGATE=0|false|off`. The lane stays opt-in forever
+# (lossy-surface law — Plan 622 T4.2 refuses default promotion by policy).
+tokengate = []
 raven = []
 # eDLM (Drex DLM) segment-structured scoring lane (riir-infer Issue 1005):
 # `edlm` GGUF arch + branch mask + row form + pointer head. Weights are
@@ -767,6 +778,21 @@ required-features = ["twt_collapse"]
 name = "desc_len_g1_entropy_coder"
 path = "tests/desc_len_g1_entropy_coder.rs"
 required-features = ["desc_len"]
+
+# Plan 622 T1.3 — the key-bias G1 byte-identity walk (CPU arms): incumbent
+# vs `None` vs all-zero bias across league geometries × multi-window
+# lengths × the 948-class family corpus, both dispatch arms (sequential
+# t<512, rayon t≥512, the n_head≤1 branch) and both softcap postures;
+# plus the layer-level threading walk (slot-scoping law through the full
+# attention layer) and the full-prefill logits walk. Whole-file
+# #![cfg(all(feature = "tokengate", not(wasm32)))] + this row = the reader
+# protection (the desc_len precedent). The CUDA arms (cudarc decode+verify,
+# prefill FA + canonical — T1.0 rows 5–7) join this harness from the 4090
+# session in the same file.
+[[test]]
+name = "plan622_keybias_walk_g1"
+path = "tests/plan622_keybias_walk_g1.rs"
+required-features = ["tokengate", "deltanet_inference"]
 
 # riir-infer Issue 022 — the laya calibration capture driver (checkpoint →
 # per-layer residual states → S matrices → ε-sweep + kill verdict). The

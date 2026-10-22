@@ -92,6 +92,10 @@ pub mod disaggregated;
 /// `chat_probe` HF-pages shape + plain text). One loader, both instruments.
 pub mod corpus_text;
 
+/// Plan 622 TokenGate lane switches (T1.5): the `tokengate` compile-time
+/// feature + the `RIIR_TOKENGATE` runtime demote. See the module doc.
+pub mod tokengate;
+
 /// TWT phase-collapse lane (Issue 022): the S-matrix profiler, the
 /// min-max DP partition, the ΔS quant-damage map. Opt-in — never a
 /// default without the Phase-5 GOAT gate.
