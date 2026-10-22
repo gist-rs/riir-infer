@@ -38,6 +38,16 @@ the DQ-lane posture, bit-identity bytewise vs rowpar — see
 e2e re-gate EXECUTED 2026-10-21 (riir-ai Bench 993): G1 bytewise ×4 at
 the league posture and +3.2% pp2048, band-clause gap → opt-in pending
 the owner gate (second-window replication owed));
+the fused GDN fold-tail + SwiGLU-rotate decode kernels LANDED 2026-10-23
+(riir-ai Issue 1113 lever 1 — `deltanet_rotation_cubecl.rs`, opt-in env
+`RIIR_GDN_PERMUTE_ROTATE_FUSED` / `RIIR_SWIGLU_ROTATE_FUSED`, macOS
+cubecl lane; bit-identical to the split chains BY CONSTRUCTION — the
+full-K3 zgate-folded variant measured 1-ULP-divergent, the incumbent
+zgate's compiled fma contraction does not reproduce across kernel
+compilations, so the zgate stays its own launch; −160 launches/token
+EXACT but e2e +1.40% BELOW the promote bar → opt-in kept — riir-ai
+Bench 995; the kernel-EXEC GEMV campaign continues in riir-ai Issue
+1114);
 the GDN delta-roll state journal LANDED 2026-10-20 (Issue 049, opt-in
 `gdn_delta_roll` — `deltanet/delta_roll.rs`: post-commit state recovery by
 rank-1 unwind from the final state + per-token (u, k, β, g) contexts, ~64×
