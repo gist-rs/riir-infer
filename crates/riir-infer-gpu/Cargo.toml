@@ -380,10 +380,13 @@ required-features = ["tokengate", "ternary_gemv_cuda_raw", "ternary_gemm_batched
 # the real Bonsai-2 shapes: ahd 256, 24:4 GQA, graphs ON by default so the
 # arm flips are content flips replaying one capture). #[ignore]d — the 4090
 # runs it with --release -- --ignored and BONSAI_GGUF (default the sibling
-# riir-train data path). Same feature row as the synth walk.
+# riir-train data path; ABSOLUTE on the box — the cargo cwd does not resolve
+# the ../ spelling). Same feature row as the synth walk + the folded loader
+# (bonsai2_hadamard — the league artifact declares prism.hadamard and the
+# loader refuses loud without it).
 [[test]]
 name = "plan622_keybias_walk_league_cuda"
-required-features = ["tokengate", "ternary_gemv_cuda_raw", "ternary_gemm_batched", "cubecl_runtime", "ternary_deltanet_chunked_prefill", "ternary_attention_batched_prefill"]
+required-features = ["tokengate", "ternary_gemv_cuda_raw", "ternary_gemm_batched", "cubecl_runtime", "ternary_deltanet_chunked_prefill", "ternary_attention_batched_prefill", "riir-infer-core/bonsai2_hadamard"]
 
 # riir-infer Issue 032 — G1 of the Metal folded (Bonsai-2) CubeCL prefill vs
 # the folded decode eager path, plus the pre-rotation pin (T5). The
