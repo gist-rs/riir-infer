@@ -1,7 +1,7 @@
 # Issue 1112: arm8 whole-prefill CUDA crashes on unfolded (pre-rotation) synth shapes — sticky illegal address, poison surfaces downstream
 
 **Status:** CLOSED 2026-10-23 — root-caused + fixed + regression GREEN (`0522312` the fix, `441b78f` the fixture, the walk un-ignored at HEAD+)
-**Claimed:** zed-m3-tokengate, 2026-10-23T04:00Z → closed same session
+**Lease closed:** zed-m3-tokengate, 2026-10-23T04:00Z → closed same session; reshaped 2026-10-23 per the lease-reshape rule (the free-text `Claimed:` form read MALFORMED and made `claim_lease_check` BLIND for every riir-infer item).
 
 ## Symptom (as filed)
 
