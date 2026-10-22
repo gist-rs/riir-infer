@@ -5205,6 +5205,91 @@ mod tests {
         Some(())
     }
 
+    /// Issue 1112 kernel-level bisection: `launch_gemm` at n=1024, p=137
+    /// sweeping m across the TM=128 tile boundaries. The arm8 whole-prefill
+    /// lane faults at m=8 (the a/b projections — the first sub-tile m the
+    /// lane has ever served; every league m is a 2048+-multiple and dispatches
+    /// v5) while m=1024 is clean in the same process — this sweep pins the
+    /// exact breaking m set on the 4090 and, once the fix lands, is that
+    /// fix's kernel-level regression (run with `-- --ignored --nocapture`).
+    #[test]
+    #[ignore = "4090 lane — issue 1112 m-tail bisection (sync after every launch)"]
+    fn gemm_v4_m_tail_sweep_issue1112() {
+        let Some(()) = cuda_or_skip() else {
+            eprintln!("SKIP — no CUDA device");
+            return;
+        };
+        let ctx = CudaContext::new(0).unwrap();
+        let stream = ctx.new_stream().unwrap();
+        let kernels = GemmTernaryI8MmaCuda::new(ctx).expect("compile");
+        let n = 1024usize;
+        let p = 137usize;
+        let wpr = n / 32;
+        let groups = n / 128;
+        // Deterministic pseudo-random ternary bitplanes (both bits set folds
+        // to 0 in the kernel — legal) + scales + q8 scratch filled by the
+        // kernel's own quantize.
+        let lcg = |mut s: u64, k: usize| -> u32 {
+            s = s.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407 + k as u64);
+            (s >> 33) as u32
+        };
+        // The largest m first-class allocations must cover.
+        let m_max = 320usize;
+        let mut pos = Vec::with_capacity(m_max * wpr);
+        let mut neg = Vec::with_capacity(m_max * wpr);
+        let mut scale = Vec::with_capacity(m_max * groups);
+        for r in 0..m_max {
+            for w in 0..wpr {
+                pos.push(lcg(0x9E3779B97F4A7C15, r * wpr + w));
+                neg.push(lcg(0xBF58476D1CE4E5B9, r * wpr + w));
+            }
+            for g in 0..groups {
+                scale.push(((lcg(0x94D049BB133111EB, r * groups + g) % 2000) as f32 / 1000.0) - 1.0);
+            }
+        }
+        let pos_dev = stream.clone_htod(&pos).unwrap();
+        let neg_dev = stream.clone_htod(&neg).unwrap();
+        let scale_dev = stream.clone_htod(&scale).unwrap();
+        // f32 activations [p x n] — the quantize consumes them into the scratch.
+        let input: Vec<f32> = (0..p * n).map(|i| (lcg(0x2545F4914F6CDD1D, i) % 255) as f32 - 127.0).collect();
+        let input_dev = stream.clone_htod(&input).unwrap();
+        let scratch = kernels.alloc_scratch(&stream, n, p).unwrap();
+        let out = stream.alloc_zeros::<f32>(p * m_max).unwrap();
+
+        kernels
+            .launch_quantize(&stream, &input_dev, &scratch, n, p)
+            .expect("quantize");
+        stream.synchronize().unwrap();
+
+        for m in [
+            8usize, 9, 15, 16, 17, 24, 31, 32, 33, 48, 63, 64, 65, 96, 127, 128, 129, 191, 192,
+            255, 256, 257, 319, 320,
+        ] {
+            let r = kernels.launch_gemm(
+                &stream,
+                &pos_dev,
+                &neg_dev,
+                &scale_dev,
+                &scratch,
+                &out,
+                m,
+                n,
+                p,
+                MmaTile::Tm64, // launch_gemm rewrites to Tm128 under v2 (the walk's route)
+                FoldMode::Fused,
+            );
+            let sync = stream.synchronize();
+            match (r, sync) {
+                (Ok(()), Ok(())) => eprintln!("m={m}: OK"),
+                (e, s) => {
+                    panic!(
+                        "m={m}: launch={e:?} sync={s:?} — the m-tail fault (issue 1112)"
+                    );
+                }
+            }
+        }
+    }
+
     /// The PTX fragment mapping is load-bearing and derived from the ISA
     /// doc from memory — pinned here against a CPU reference on an
     /// asymmetric fixture (Bench 709's transpose-asymmetric lesson).
