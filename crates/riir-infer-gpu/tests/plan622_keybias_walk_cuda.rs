@@ -19,10 +19,11 @@
 //!    pad region of EVERY row is NaN, so this arm is simultaneously the
 //!    stride-pad-independence tooth: a single pad read poisons the logits.
 //! 4. `moved` — a ±1.5 varying table, run TWICE: run-1 == run-2 (the race /
-//!    graph-replay determinism guard — when graphs are armed, which is the
-//!    default, both runs REPLAY one capture, so this is also the
-//!    content-visibility-under-replay proof), != incumbent (movement), all
-//!    finite (no pad read).
+//!    determinism guard; this walk's posture is the EAGER arm — graphs off,
+//!    see the knob block — so this is eager run-to-run determinism; the
+//!    league walk `plan622_keybias_walk_league_cuda` proves the
+//!    content-flip-under-graph-replay posture at ahd 256), != incumbent
+//!    (movement), all finite (no pad read).
 //! 5. `moved_att_only` — the same varying values on the Attention layer's
 //!    rows ONLY, zeros elsewhere → bit-identical to `moved` (the DeltaNet
 //!    layers never launch attention; a driver narrowing the WRONG layer's
@@ -124,6 +125,15 @@ fn plan622_cuda_model_walk_kb_session_arms() {
     // The whole-prefill gate's knob posture (the recl8 e2e recipe —
     // defensive in a fresh process; the gate fails LOUD on any drift, so
     // these setters are what make the walk deterministic across boxes).
+    // RIIR_PREFILL_CUDA_GRAPHS=0 is LOAD-BEARING here: graphs_armed() is
+    // default-ON, the graph lane implies the gv posture, and the canonical
+    // attention arm (ahd != 256 — this model) has no devpos twin, so the
+    // graph lane refuses it by design (issue 1112's walk first surfaced the
+    // refusal as a silent all-arms-identical CubeCL fall-through). The walk's
+    // posture is the EAGER whole-prefill CUDA arm; the moved×2 determinism
+    // guard below proves eager determinism (the league walk proves the
+    // graph-replay posture at ahd 256).
+    std::env::set_var("RIIR_PREFILL_CUDA_GRAPHS", "0");
     use riir_infer_gpu::ternary_deltanet_gpu_forward as tdf;
     tdf::set_prefill_use_gemv(false);
     tdf::set_prefill_seq_rmsnorm(false);
