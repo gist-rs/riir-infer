@@ -1487,3 +1487,36 @@ mod turboquant_defork_tests {
         );
     }
 }
+
+/// riir-train Issue 644: an all-zero routing query is the loaders' "untrained"
+/// sentinel and must leave the residual stream untouched at a block boundary
+/// (routing it re-added every block's accumulated delta), while a trained
+/// (nonzero) query still routes.
+#[cfg(feature = "delta_routing")]
+#[test]
+fn delta_routing_zero_query_is_identity_and_trained_query_routes() {
+    let mut config = Config::micro();
+    config.n_layer = 4;
+    let n = config.n_embd;
+    let run = |query: &[f32]| {
+        let mut ctx = ForwardContext::new(&config);
+        let norm = vec![1.0f32; n];
+        let mut seen = Vec::new();
+        for layer in 0..4 {
+            ctx.xr[..n].fill(0.0);
+            ctx.x[..n]
+                .iter_mut()
+                .enumerate()
+                .for_each(|(i, v)| *v = 1.0 + (i + layer) as f32 * 0.01);
+            if layer == 3 {
+                seen = ctx.x[..n].to_vec();
+            }
+            apply_delta_routing_step(&mut ctx, layer, n, Some((query, &norm)));
+        }
+        (seen, ctx.x[..n].to_vec())
+    };
+    let (before, after) = run(&vec![0.0f32; n]);
+    assert_eq!(before, after, "zero query must not touch x");
+    let (before, after) = run(&vec![0.5f32; n]);
+    assert_ne!(before, after, "a trained query still routes");
+}
