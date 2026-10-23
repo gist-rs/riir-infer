@@ -708,3 +708,24 @@ fn program_operations(
     let ops = unsafe { block.operations() };
     Ok(ops.to_vec())
 }
+
+/// Read-only diagnostic: walk the compute plan of ANY compiled bundle
+/// (`.mlmodelc` directory) and report the placement counts — no digest
+/// wall, no load, no gate. The lane loads stay digest-pinned; THIS is
+/// the "does anything place on ANE on this box" instrument (issue 015
+/// T1's follow-up: the M5-Ultra all-CPU verdict needed a control that
+/// isn't the silero graph). `function_name` = `None` keeps `main`.
+pub fn probe_compute_plan(
+    compiled: &Path,
+    units: ComputeUnits,
+    function_name: Option<&str>,
+) -> Result<Placement> {
+    unsafe {
+        let config = MLModelConfiguration::new();
+        config.setComputeUnits(units.to_native());
+        if let Some(fname) = function_name {
+            config.setFunctionName(Some(&NSString::from_str(fname)));
+        }
+        verify_compute_plan(compiled, &config)
+    }
+}
