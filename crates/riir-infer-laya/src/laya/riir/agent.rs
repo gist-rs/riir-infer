@@ -25,14 +25,16 @@
 
 use serde_json::Value;
 
-use super::super::config::{AgentConfig, Checkpoint, load_checkpoint_configs};
+use super::super::config::{load_checkpoint_configs, AgentConfig, Checkpoint};
 use super::super::render::{py_round4, render_options};
-use super::super::temps::{Temperatures, softmax32, temp_bucket};
-use super::super::tokenize::{InternalQuestion, Tok, build_sequence, to_internal};
-use super::super::types::{Answer, Forward, argmax_of, confidence_from_probs, option_keys};
+use super::super::temps::{softmax32, temp_bucket, Temperatures};
+use super::super::tokenize::{build_sequence, to_internal, InternalQuestion, Tok};
+use super::super::types::{argmax_of, confidence_from_probs, option_keys, Answer, Forward};
 use super::super::weights::ensure_checkpoint;
 use super::super::{LayaError, Result};
 use super::backend::{Backend, Cpu};
+#[cfg(feature = "twt_profile")]
+use super::encoder::CaptureStage;
 use super::encoder::Encoder;
 use super::fake_quant::WeightPosture;
 use super::head::{Head, HeadOutput, HeadScratch};
@@ -747,6 +749,55 @@ impl RiirAgent {
             self.cfg.head_max_len,
         )?;
         Ok((ids, markers))
+    }
+
+    /// RESIDUAL-STATE CAPTURE over one rendered question (reflex Issue 094
+    /// T2, feature `twt_profile`): tokenize `state`/`qdef` into the exact
+    /// sequence [`Self::forward_internal`] would build, then run the
+    /// encoder's [`Encoder::forward_capture`] — one packed row, the sink
+    /// receiving [`CaptureStage::Embedding`] and every
+    /// [`CaptureStage::AfterLayer(i)`] residual state. The consumer wraps
+    /// the sink in a [`StabilityTracker`](super::stability::StabilityTracker)
+    /// for the per-layer stability scalars.
+    ///
+    /// The capture path's own protocol rules ride along unchanged: ONE
+    /// `begin_pass` per forward (the `pass_pool` autoreleasepool wrapper,
+    /// Metal posture), and ONE device sync per stage — calibration only,
+    /// never a serving path. LOCAL-ENCODER-ONLY: the ANE posture refuses
+    /// loud (the capture seam does not exist there).
+    #[cfg(feature = "twt_profile")]
+    pub fn encoder_forward_capture(
+        &self,
+        state: &Value,
+        qdef: &Value,
+        sink: &mut dyn FnMut(CaptureStage, usize, &[f32]),
+    ) -> Result<(usize, Vec<usize>)> {
+        let q = to_internal(qdef)?;
+        let (ids, markers) = build_sequence(
+            &self.tok,
+            state,
+            &q,
+            self.cfg.max_len,
+            self.cfg.head_max_len,
+        )?;
+        let seq_len = ids.len();
+        match &self.enc {
+            EncoderStack::Local(e) => {
+                pass_pool(|| {
+                    self.backend.begin_pass();
+                    let mut owned = sink;
+                    e.forward_capture(self.backend.as_ref(), &ids, &[seq_len], &mut owned)
+                })?;
+                Ok((seq_len, markers))
+            }
+            #[cfg(all(target_os = "macos", feature = "laya-riir-ane"))]
+            EncoderStack::Ane(_) => Err(LayaError::Config {
+                checkpoint: self.ckpt,
+                detail: String::from(
+                    "encoder_forward_capture is local-encoder-only; the ANE posture has no capture seam",
+                ),
+            }),
+        }
     }
 
     /// The internal-typed variant (avoids re-parsing per row in the test).
