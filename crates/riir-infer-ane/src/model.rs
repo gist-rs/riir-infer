@@ -154,7 +154,44 @@ pub fn load_model(
         missing_remedy,
     )?;
     let compiled = compile_cached(artifact_dir, &pin.digest, cache_env, default_cache_subdir)?;
+    load_compiled_at(&compiled, units, function_name, plan)
+}
 
+/// Load an ALREADY-COMPILED `.mlmodelc` bundle directory in place —
+/// the audio lane's posture (`.issues/015`): FluidInference publishes
+/// pre-compiled bundles, [`MLModel::compileModelAtURL`] rejects a
+/// compiled bundle as its INPUT (it compiles `.mlpackage`/`.mlmodel`
+/// source), and there is nothing left to compile — so this path
+/// verifies the digest walls and loads the artifact directly, no
+/// compile cache (the cache exists to amortize compilation; a
+/// pre-compiled bundle has none to amortize).
+pub fn load_model_precompiled(
+    artifact_dir: &Path,
+    pin: &ArtifactPin,
+    units: ComputeUnits,
+    function_name: Option<&str>,
+    missing_remedy: &str,
+    plan: PlanWalk,
+) -> Result<(LoadedModel, Placement)> {
+    verify_dir_digest(
+        artifact_dir,
+        &pin.digest,
+        pin.files,
+        pin.bytes,
+        missing_remedy,
+    )?;
+    load_compiled_at(artifact_dir, units, function_name, plan)
+}
+
+/// The shared load choreography over a COMPILED bundle path: `MLModel`
+/// load under `units` (+ `function_name` for multi-function packages),
+/// then the optional compute-plan walk. Both load publics end here.
+fn load_compiled_at(
+    compiled: &Path,
+    units: ComputeUnits,
+    function_name: Option<&str>,
+    plan: PlanWalk,
+) -> Result<(LoadedModel, Placement)> {
     unsafe {
         let url = NSURL::fileURLWithPath_isDirectory(
             &NSString::from_str(&compiled.to_string_lossy()),
@@ -175,7 +212,7 @@ pub fn load_model(
             })?;
 
         let placement = match plan {
-            PlanWalk::Verify => verify_compute_plan(&compiled, &config)?,
+            PlanWalk::Verify => verify_compute_plan(compiled, &config)?,
             // The honest "not measured" verdict — the SKIPPED placement
             // never reads as a pass (device_ops == 0 fails `passes()`).
             PlanWalk::Skip => Placement::SKIPPED,
@@ -226,6 +263,23 @@ impl LoadedModel {
         output_name: &str,
         out_f32: &mut [f32],
     ) -> Result<()> {
+        self.predict_f32_multi(inputs, &mut [(output_name, out_f32)])
+    }
+
+    /// The multi-output f32 forward — the audio lane's shape
+    /// (`.issues/015`): one prediction, N named outputs copied out (the
+    /// silero VAD answers prob + NEW recurrent state, and the state
+    /// tensors must be carried — three separate forwards would re-roll
+    /// the recurrence and be wrong, not just slow). Same zero-copy
+    /// borrow law as the single-output twins: every input buffer
+    /// borrows read-only, every output buffer borrows write-only for
+    /// the duration; output element counts are asserted against the
+    /// artifact at copy time (the `copy_out_f32` walls).
+    pub fn predict_f32_multi(
+        &self,
+        inputs: &[(&str, &[f32], &[usize])],
+        outputs: &mut [(&str, &mut [f32])],
+    ) -> Result<()> {
         unsafe {
             let mut arrays: Vec<Retained<MLMultiArray>> = Vec::with_capacity(inputs.len());
             let mut names: Vec<Retained<NSString>> = Vec::with_capacity(inputs.len());
@@ -239,21 +293,42 @@ impl LoadedModel {
                 arrays.push(multi_array_zero_copy_f32(data, shape)?);
                 names.push(NSString::from_str(name));
             }
-            let arr = run_prediction(&self.model, &arrays, &names, output_name)?;
-            copy_out_f32(&arr, out_f32)
+            let out_names: Vec<&str> = outputs.iter().map(|(n, _)| *n).collect();
+            let out_arrays = run_prediction_multi(&self.model, &arrays, &names, &out_names)?;
+            for ((_, out_buf), arr) in outputs.iter_mut().zip(out_arrays) {
+                copy_out_f32(&arr, out_buf)?;
+            }
         }
+        Ok(())
     }
 }
 
 /// The shared prediction choreography: name-keyed feature provider →
-/// sync prediction → the named output's multi-array (both predict
-/// twins; no objc2 type crosses to a lane).
+/// sync prediction → the named output's multi-array (no objc2 type
+/// crosses to a lane). Single-output form — delegates to
+/// [`run_prediction_multi`].
 unsafe fn run_prediction(
     model: &Retained<MLModel>,
     arrays: &[Retained<MLMultiArray>],
     names: &[Retained<NSString>],
     output_name: &str,
 ) -> Result<Retained<MLMultiArray>> {
+    // SAFETY: the multi twin performs the same ObjC message sends the
+    // single form always did — the caller's unsafe context carries over.
+    let mut outs = unsafe { run_prediction_multi(model, arrays, names, &[output_name])? };
+    Ok(outs.pop().expect("one output requested, one returned"))
+}
+
+/// The multi-output twin (`predict_f32_multi`): ONE prediction, N named
+/// outputs resolved in the caller's order — a second forward would
+/// re-roll a stateful model's recurrence, so multi-output artifacts
+/// must resolve every output from the single prediction.
+unsafe fn run_prediction_multi(
+    model: &Retained<MLModel>,
+    arrays: &[Retained<MLMultiArray>],
+    names: &[Retained<NSString>],
+    output_names: &[&str],
+) -> Result<Vec<Retained<MLMultiArray>>> {
     // SAFETY: plain ObjC message sends over live retained objects; every
     // borrow (arrays, names) outlives the prediction call.
     unsafe {
@@ -287,14 +362,20 @@ unsafe fn run_prediction(
         let out = model
             .predictionFromFeatures_error(ProtocolObject::from_ref(&*features))
             .map_err(|e| Error::msg(format!("ane: prediction failed: {}", ns_error_string(&e))))?;
-        let name = NSString::from_str(output_name);
-        let val = out.featureValueForName(&name).ok_or_else(|| {
-            Error::msg(format!(
-                "ane: output {output_name:?} missing from the prediction (manifest/ artifact drift?)"
-            ))
-        })?;
-        val.multiArrayValue()
-            .ok_or_else(|| Error::msg(format!("ane: output {output_name:?} is not a multi-array")))
+        output_names
+            .iter()
+            .map(|output_name| {
+                let name = NSString::from_str(output_name);
+                let val = out.featureValueForName(&name).ok_or_else(|| {
+                    Error::msg(format!(
+                        "ane: output {output_name:?} missing from the prediction (manifest/ artifact drift?)"
+                    ))
+                })?;
+                val.multiArrayValue().ok_or_else(|| {
+                    Error::msg(format!("ane: output {output_name:?} is not a multi-array"))
+                })
+            })
+            .collect()
     }
 }
 

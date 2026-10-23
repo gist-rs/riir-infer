@@ -1,0 +1,56 @@
+[package]
+name = "riir-infer-audio"
+version = "0.1.0"
+edition = "2024"
+license = "MIT"
+# Internal substrate leaf — the release surface is the consumer crates.
+publish = false
+
+# riir-infer-audio — the audio model lane (`.issues/015`): loaders +
+# streaming serving state for PUBLISHED CoreML audio bundles, ON the
+# shared `riir-infer-ane` host (one home, never a second copy of the
+# CoreML machinery). First lane: silero-vad (FluidInference
+# `silero-vad-coreml`, the pre-compiled `silero-vad-unified-256ms`
+# bundle — Apache-2.0 model weights; this crate ships the LOADER, never
+# weights).
+#
+# The lane is `vad-ane`, opt-in, NEVER a default: the artifact is
+# download-on-demand (`scripts/fetch_silero_vad.sh`, blake3-dir-v1
+# digest pinned in-code), the load refuses a digest mismatch loud, and
+# every promotion beyond opt-in is owner-gated. Default build compiles
+# EMPTY (the clef-ane posture); off-macOS the lane module cfg's out
+# (the host stub resolves nothing — never a dep-tree failure).
+
+[dependencies]
+riir-infer-ane = { path = "../riir-infer-ane", optional = true }
+
+[features]
+# The silero-vad ANE lane (`.issues/015` T2–T6): implies the shared ANE
+# host. macOS-only code — the module gates on
+# `all(feature = "vad-ane", target_os = "macos")` (the clef-ane
+# posture); off-macOS the feature resolves the host stub and compiles
+# the lane to nothing.
+vad-ane = ["dep:riir-infer-ane"]
+
+# The PoC gate suite (`.issues/015` G1–G3): load + synthetic verdicts +
+# per-chunk latency, over the real downloaded bundle. `#[ignore]`d
+# inside (model material, not CI material); `required-features` keeps
+# the target out of every default-feature run (the repo-birth gate
+# discipline — a gated target always carries its row in the same
+# commit).
+[[test]]
+name = "silero_vad_poc"
+required-features = ["vad-ane"]
+
+# The pin-minting instrument: prints the blake3-dir-v1 digest +
+# file/byte counts for a downloaded bundle — the fetch script runs it
+# to produce the in-code pin; never hand-computed.
+[[example]]
+name = "audio_bundle_digest"
+required-features = ["vad-ane"]
+
+# The latency posture (`.issues/015` G3): per-chunk p50/p99 at the
+# 256 ms cadence, box state printed beside every number.
+[[example]]
+name = "vad_timing"
+required-features = ["vad-ane"]

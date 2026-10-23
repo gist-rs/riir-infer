@@ -3544,6 +3544,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "riir-infer-audio"
+version = "0.1.0"
+dependencies = [
+ "riir-infer-ane",
+]
+
+[[package]]
 name = "riir-infer-clef"
 version = "0.1.0"
 dependencies = [

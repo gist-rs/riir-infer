@@ -79,7 +79,9 @@ mod cache;
 mod model;
 
 #[cfg(target_os = "macos")]
-pub use model::{ArtifactPin, ComputeUnits, LoadedModel, Placement, PlanWalk, load_model};
+pub use model::{
+    ArtifactPin, ComputeUnits, LoadedModel, Placement, PlanWalk, load_model, load_model_precompiled,
+};
 
 // Off-macOS: a documented stub that compiles to nothing and resolves zero
 // dependencies — enabling a consumer's ANE feature on a non-macOS host is
