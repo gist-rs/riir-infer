@@ -426,6 +426,111 @@ impl ClefText {
         let (logits, packed) = self.head_forward(bucket, &record, &states, &self.embeddings)?;
         Ok(answers_from_logits(&record, &logits, packed.option_count))
     }
+
+    /// [`Self::answer`] plus the last-position confidence diagnostic
+    /// ([`Self::last_position_entropy`]) from the SAME decode pass — the
+    /// probe lane's entry (riir-reflex issue 094 T3). Deliberately NOT
+    /// folded into `answer`: the entropy is a ~vocab·hidden FLOP sweep
+    /// over the tied table per call and the serving path never pays it
+    /// (the four-line pipeline duplication below is the price of that).
+    pub fn answer_with_entropy(
+        &self,
+        state: &serde_json::Value,
+        questions: &[(String, ClefQuestion)],
+    ) -> Result<AnswerWithEntropy, ClefError> {
+        let max_loaded = self.buckets.last().copied().unwrap_or(0) as usize;
+        let record = encode(&self.tokenizer, state, questions, max_loaded)?;
+        let (bucket, states) = self.decode_forward(&record, &self.embeddings)?;
+        let last_position_entropy = self.last_position_entropy(&record, &states)?;
+        let (logits, packed) = self.head_forward(bucket, &record, &states, &self.embeddings)?;
+        Ok(AnswerWithEntropy {
+            answers: answers_from_logits(&record, &logits, packed.option_count),
+            last_position_entropy,
+        })
+    }
+
+    /// The last REAL position's vocabulary entropy, NATS: the final hidden
+    /// state at `input_ids[n-1]` projected through the tied table
+    /// (`h·Eᵀ`), softmaxed with the answer walk's own peak-subtracted
+    /// convention, then read as `H = ln Z − Σ exp(l−peak)·l / Z` — the
+    /// underflow-safe form of `−Σ p ln p` (an exp underflow to 0 drops its
+    /// term instead of NaN-ing on `0·ln 0`). Case-level by construction:
+    /// the record encodes the whole case (state + every question) in one
+    /// input, so there is ONE last position per case regardless of the
+    /// question count. Report/calibration use only — never a serving
+    /// output (issue 094 T4's cost law prices any arming separately).
+    ///
+    /// Refuses loud on a shape mismatch (empty record, `states` not a
+    /// whole multiple of `hidden`, or fewer than `n` positions) — a
+    /// caller-contract violation, never a silent scalar.
+    pub fn last_position_entropy(
+        &self,
+        record: &ClefEncodedRecord,
+        states: &[f32],
+    ) -> Result<f32, ClefError> {
+        let d = self.config.hidden_size as usize;
+        let n = record.input_ids.len();
+        if n == 0 {
+            return Err(ClefError::Io(std::io::Error::other(
+                "clef entropy: the record carries no tokens — nothing to read",
+            )));
+        }
+        if d == 0 || !states.len().is_multiple_of(d) || n * d > states.len() {
+            return Err(ClefError::Io(std::io::Error::other(format!(
+                "clef entropy: states len {} is not [>= {n}] positions of hidden {d}",
+                states.len()
+            ))));
+        }
+        Ok(tied_entropy(&states[(n - 1) * d..n * d], &self.embeddings))
+    }
+}
+
+/// One `answer_with_entropy` result: the ordinary answers plus the
+/// case-level last-position vocabulary entropy (NATS — the diagnostic's
+/// unit is named on the field so a bits/scale confusion cannot hide).
+#[derive(Debug, Clone, PartialEq)]
+pub struct AnswerWithEntropy {
+    pub answers: Vec<Answer>,
+    pub last_position_entropy: f32,
+}
+
+/// The tied-table entropy read (NATS): one dot per vocab row over the
+/// mmap'd fp16 table, four fixed-lane accumulators over `chunks_exact(4)`
+/// (deterministic — a fixed chunk order, never reassociated beyond the
+/// four lanes; the remainder lane folds last), then the peak-subtracted
+/// softmax walk. Pure so the fixture tests can pin it without Core ML.
+fn tied_entropy(h_last: &[f32], table: &EmbeddingTable) -> f32 {
+    let v = table.vocab() as usize;
+    let mut logits = Vec::with_capacity(v);
+    for id in 0..v as u32 {
+        let bits = table.row_f16(id);
+        let (chunks, rem) = bits.as_chunks::<4>();
+        let (hchunks, hrem) = h_last.as_chunks::<4>();
+        let mut c = [0f32; 4];
+        for (ch, hh) in chunks.iter().zip(hchunks) {
+            c[0] += f32::from(half::f16::from_bits(ch[0])) * hh[0];
+            c[1] += f32::from(half::f16::from_bits(ch[1])) * hh[1];
+            c[2] += f32::from(half::f16::from_bits(ch[2])) * hh[2];
+            c[3] += f32::from(half::f16::from_bits(ch[3])) * hh[3];
+        }
+        let mut acc = c[0] + c[1] + c[2] + c[3];
+        for (b, h) in rem.iter().zip(hrem) {
+            acc += f32::from(half::f16::from_bits(*b)) * h;
+        }
+        logits.push(acc);
+    }
+    let peak = logits.iter().copied().fold(f32::NEG_INFINITY, f32::max);
+    let mut z = 0f32;
+    let mut sum_el = 0f32;
+    for &l in &logits {
+        let e = (l - peak).exp();
+        z += e;
+        sum_el += e * l;
+    }
+    // H = −Σ p·ln p with p = exp(l−peak)/Z expands to peak + ln Z −
+    // Σ exp(l−peak)·l / Z — the peak term is load-bearing (dropping it
+    // reads −peak on sharp distributions; the fixture tests pin it).
+    peak + z.ln() - sum_el / z
 }
 
 /// One question's answer: probability per option id in Clef's option
@@ -855,5 +960,99 @@ mod tests {
         );
         // option order preserved
         assert_eq!(answers_b[0].option_ids, vec!["0", "1", "2"]);
+    }
+
+    /// A controlled fixture table for the entropy read: `vocab × hidden`
+    /// rows written as fp16 bits under a scratch dir, opened through the
+    /// real `EmbeddingTable::open` wall (the same mmap path the runtime
+    /// uses — never a parallel constructor).
+    fn fixture_table(dir: &std::path::Path, rows: &[&[f32]]) -> EmbeddingTable {
+        let vocab = rows.len() as u32;
+        let hidden = rows[0].len() as u32;
+        let mut bytes = Vec::with_capacity(rows.len() * rows[0].len() * 2);
+        for row in rows {
+            for &v in *row {
+                bytes.extend_from_slice(&half::f16::from_f32(v).to_bits().to_le_bytes());
+            }
+        }
+        std::fs::write(dir.join("embeddings.f16"), &bytes).expect("fixture table");
+        let config = crate::lane::loaders::ClefConfig {
+            model: "fixture".into(),
+            base_model: String::new(),
+            teacher: String::new(),
+            hidden_size: hidden,
+            head_dim: 1,
+            rope_theta: 1_000_000.0,
+            pad_id: 0,
+            vocab_size: vocab,
+            buckets: vec![256],
+            max_questions: 16,
+            max_options: 16,
+            decoder: String::new(),
+            head: String::new(),
+            tied_embeddings: true,
+        };
+        EmbeddingTable::open(dir, &config).expect("fixture table opens")
+    }
+
+    /// Uniform rows read equal logits → H = ln(vocab) exactly (up to
+    /// the fp16 round-trip, which is exact for these values).
+    #[test]
+    fn tied_entropy_uniform_rows_is_ln_vocab() {
+        let dir = std::env::temp_dir().join(format!(
+            "clef_entropy_uniform_{}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&dir).expect("scratch");
+        let table = fixture_table(&dir, &[&[1.0, 0.0], &[0.0, 1.0]]);
+        let h = tied_entropy(&[1.0, 1.0], &table);
+        assert!(
+            (h - 2.0f32.ln()).abs() < 1e-5,
+            "uniform rows: {h} vs ln 2 = {}",
+            2.0f32.ln()
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A one-hot winner drives the entropy toward 0; a flat mass keeps it
+    /// high — the monotonicity law the confidence candidate reads
+    /// through (sharper distribution ⇔ lower entropy).
+    #[test]
+    fn tied_entropy_sharpens_downward() {
+        let dir = std::env::temp_dir().join(format!(
+            "clef_entropy_sharp_{}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&dir).expect("scratch");
+        let table = fixture_table(&dir, &[&[10.0, 0.0], &[0.0, 1.0], &[1.0, 0.0]]);
+        // h along row 0's direction: logits [100, 0, 10] → sharp.
+        let sharp = tied_entropy(&[10.0, 0.0], &table);
+        // h along the balanced diagonal: logits [11, 1, 1] → the same
+        // SHAPE but relatively flatter than 100-vs-rest.
+        let flat = tied_entropy(&[1.0, 1.0], &table);
+        assert!(
+            sharp < flat,
+            "sharp {sharp} must sit below flat {flat}"
+        );
+        assert!(sharp >= 0.0, "entropy is non-negative, got {sharp}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The closed form on a hand-computed distribution: h=[1,0] over rows
+    /// {[1,0],[0,1],[1,1]} gives logits [1, 0, 1]; the peak-subtracted
+    /// walk must read H = ln(2 + e^-1) − (1 + 0 + 1)/(2 + e^-1).
+    #[test]
+    fn tied_entropy_closed_form() {
+        let dir = std::env::temp_dir().join(format!(
+            "clef_entropy_closed_{}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&dir).expect("scratch");
+        let table = fixture_table(&dir, &[&[1.0, 0.0], &[0.0, 1.0], &[1.0, 1.0]]);
+        let h = tied_entropy(&[1.0, 0.0], &table);
+        let z = 2.0 + (-1.0f32).exp();
+        let expected = 1.0f32 + z.ln() - 2.0 / z;
+        assert!((h - expected).abs() < 1e-5, "closed form: {h} vs {expected}");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }
