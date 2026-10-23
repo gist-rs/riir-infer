@@ -91,6 +91,14 @@ cargo test -p riir-infer-gpu --features exl3_gpu,cuda_backend --lib  # native CU
 # ../katgpt-rs/.plans/622_scale_invariant_attn.md; GPU legs open, GPU-window-gated):
 cargo test --lib --features scale_invariant_attn   # 8 attention_si tests incl. 3 wiring e2e
 cargo build --release --features scale_invariant_attn,bonsai2_hadamard --bin si_zero_shot_ppl  # the G3 harness (its OWN required-features posture — the P43 law)
+# Issue 959 T6 — the f64 golden-NLL lossy-quant oracle (opt-in `golden_nll`,
+# forwards katgpt-core/fixed_log_softmax; `riir_infer_core::golden_nll` is
+# the reusable oracle, the bin's `--golden-nll` the reference-mode arm:
+# base-only, pooled incumbent-vs-golden Δ + the fp32/f64 confidence-band
+# split + the disagreement census; a build without the feature REFUSES the
+# flag loud). Instrument-grade — never a serving path:
+#   cargo run --release --features scale_invariant_attn,bonsai2_hadamard,golden_nll \
+#     --bin si_zero_shot_ppl -- --gguf <model> --corpus <text> --arms base --golden-nll
 # The encoder-lane crate (features mirror the names consumers forward):
 cargo check -p riir-infer-laya --features laya-riir
 cargo clippy -p riir-infer-laya --all-targets --features laya-riir-metal -- -D warnings

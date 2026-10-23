@@ -52,6 +52,10 @@ use std::time::Instant;
 
 use anyhow::{Context, Result, bail, ensure};
 use katgpt_core::scale_invariant::{HeadCalibration, ScaleInvariantLut, SpreadAccumulator};
+#[cfg(feature = "golden_nll")]
+use katgpt_core::softmax_fix::{FloatFormat, precision_cliff};
+#[cfg(feature = "golden_nll")]
+use riir_infer_core::golden_nll::{GoldenNllScratch, GoldenReading};
 
 use riir_infer_core::corpus_text::load_corpus_text;
 use riir_infer_core::deltanet::forward::{HybridCache, HybridForwardScratch, effective_rotary_dim};
@@ -100,11 +104,104 @@ struct Rung {
     length: usize,
     nll_sum: f64,
     targets: usize,
+    /// Issue 959 T6 golden readout (cfg'd `golden_nll`): the same
+    /// scored positions through the argmax-excluded-LSE f64 oracle.
+    #[cfg(feature = "golden_nll")]
+    golden_sum: f64,
+    /// Positions in the confident band (top-2 margin ≥ the fp32 cliff
+    /// 16.64 nats — where an fp32-consumer readout reads false zeros).
+    #[cfg(feature = "golden_nll")]
+    confident: usize,
+    #[cfg(feature = "golden_nll")]
+    golden_confident_sum: f64,
+    /// Positions in the deep band (margin ≥ the f64 cliff 36.73 — where
+    /// even an f64 max-subtract LSE absorbs the tail).
+    #[cfg(feature = "golden_nll")]
+    deep: usize,
+    #[cfg(feature = "golden_nll")]
+    golden_deep_sum: f64,
+    /// Positions where the golden NLL and the incumbent f64 form disagree
+    /// AT ALL (bit-wise) — the incumbent's resolution-loss census.
+    #[cfg(feature = "golden_nll")]
+    disagrees: usize,
+    #[cfg(feature = "golden_nll")]
+    max_abs_delta: f64,
 }
 
 impl Rung {
     fn ppl(&self) -> f64 {
         (self.nll_sum / self.targets.max(1) as f64).exp()
+    }
+}
+
+/// The golden-NLL accumulation state for one rung (Issue 959 T6).
+/// Under `cfg(not(feature = "golden_nll"))` this is a zero-sized inert
+/// placeholder — the armed path is compile-time unreachable and the
+/// runtime flag refuses loud (the harness law: never a silent skip).
+#[cfg(feature = "golden_nll")]
+#[derive(Debug)]
+struct GoldenAccum {
+    scratch: GoldenNllScratch,
+    sum: f64,
+    confident: usize,
+    confident_sum: f64,
+    deep: usize,
+    deep_sum: f64,
+    disagrees: usize,
+    max_abs_delta: f64,
+}
+
+#[cfg(feature = "golden_nll")]
+impl GoldenAccum {
+    fn new(vocab: usize) -> Self {
+        Self {
+            scratch: GoldenNllScratch::with_vocab(vocab),
+            sum: 0.0,
+            confident: 0,
+            confident_sum: 0.0,
+            deep: 0,
+            deep_sum: 0.0,
+            disagrees: 0,
+            max_abs_delta: 0.0,
+        }
+    }
+
+    fn record(
+        &mut self,
+        logits: &[f32],
+        target: usize,
+        incumbent_nll: f64,
+        fp32_cliff: f64,
+        f64_cliff: f64,
+    ) {
+        let GoldenReading { nll, top2_margin } = self.scratch.read_target(logits, target);
+        self.sum += nll;
+        if top2_margin >= fp32_cliff {
+            self.confident += 1;
+            self.confident_sum += nll;
+        }
+        if top2_margin >= f64_cliff {
+            self.deep += 1;
+            self.deep_sum += nll;
+        }
+        let delta = (nll - incumbent_nll).abs();
+        if nll.to_bits() != incumbent_nll.to_bits() {
+            self.disagrees += 1;
+        }
+        if delta > self.max_abs_delta {
+            self.max_abs_delta = delta;
+        }
+    }
+}
+
+#[cfg(not(feature = "golden_nll"))]
+#[derive(Debug, Default)]
+struct GoldenAccum;
+
+#[cfg(not(feature = "golden_nll"))]
+impl GoldenAccum {
+    fn inert() -> Self {
+        Self
     }
 }
 
@@ -141,7 +238,8 @@ impl<'a> Rig<'a> {
 
     /// Feed `seq[from..=to]`; accumulate the NLL of `seq[p+1]` for scored
     /// positions `p >= score_from`. Zero-alloc hot loop (the buffers ride
-    /// the rig).
+    /// the rig). `golden` accumulates the Issue-959-T6 oracle readout at
+    /// the same scored positions (inert under cfg-off).
     #[allow(clippy::too_many_arguments)]
     fn feed(
         &mut self,
@@ -152,9 +250,16 @@ impl<'a> Rig<'a> {
         x: &mut [f32],
         nll: &mut f64,
         targets: &mut usize,
+        golden: &mut GoldenAccum,
     ) {
         let n = self.config.n_embd;
         let v = self.config.vocab_size;
+        #[cfg(feature = "golden_nll")]
+        let fp32_cliff = precision_cliff(FloatFormat::Fp32);
+        #[cfg(feature = "golden_nll")]
+        let f64_cliff = precision_cliff(FloatFormat::Fp64);
+        #[cfg(not(feature = "golden_nll"))]
+        let _ = golden; // inert ZST under cfg-off (the armed path is compile-time unreachable)
         for pos in from..=to {
             let logits = forward_qwen_deltanet_ternary(
                 x,
@@ -180,8 +285,11 @@ impl<'a> Rig<'a> {
                     sum += (f64::from(l) - f64::from(max_l)).exp();
                 }
                 let lse = f64::from(max_l) + sum.ln();
-                *nll += lse - f64::from(logits[target]);
+                let inc_nll = lse - f64::from(logits[target]);
+                *nll += inc_nll;
                 *targets += 1;
+                #[cfg(feature = "golden_nll")]
+                golden.record(logits, target, inc_nll, fp32_cliff, f64_cliff);
             }
         }
         let _ = (n, v);
@@ -239,7 +347,20 @@ fn run_sigma_probe(
     let to = n_tokens.min(seq.len()) - 1;
     let mut nll = 0.0;
     let mut targets = 0usize;
-    rig.feed(seq, 0, to, usize::MAX, x, &mut nll, &mut targets);
+    #[cfg(feature = "golden_nll")]
+    let mut probe_golden = GoldenAccum::new(0);
+    #[cfg(not(feature = "golden_nll"))]
+    let mut probe_golden = GoldenAccum::inert();
+    rig.feed(
+        seq,
+        0,
+        to,
+        usize::MAX,
+        x,
+        &mut nll,
+        &mut targets,
+        &mut probe_golden,
+    );
     match rig.scratch.attention.scale_invariant.take() {
         Some(SiAttentionSession::Probe(acc)) => Ok(acc),
         _ => bail!("sigma probe: session vanished — internal wiring bug"),
@@ -311,6 +432,9 @@ fn main() -> Result<()> {
     // format, `HeadCalibration::to_sidecar`), `--probe-only` stops there.
     let mut save_cal: Option<PathBuf> = None;
     let mut probe_only = false;
+    // Issue 959 T6 — the f64 golden-NLL readout over the scored spans
+    // (reference-oracle mode: base arm only, one forward, two readouts).
+    let mut golden_nll = false;
     let mut args = std::env::args().skip(1);
     while let Some(a) = args.next() {
         match a.as_str() {
@@ -338,11 +462,32 @@ fn main() -> Result<()> {
             "--pp-train-len" => pp_train_len = Some(args.next().expect("n").parse()?),
             "--save-cal" => save_cal = Some(PathBuf::from(args.next().expect("path"))),
             "--probe-only" => probe_only = true,
+            "--golden-nll" => golden_nll = true,
             other => bail!("unknown arg {other}"),
         }
     }
     let gguf_path = gguf_path.context("--gguf is required")?;
     let corpus = corpus.context("--corpus is required")?;
+    if golden_nll && !cfg!(feature = "golden_nll") {
+        bail!(
+            "--golden-nll needs the golden_nll feature (loud refusal, never a silent skip): \
+             cargo build --release --features scale_invariant_attn,bonsai2_hadamard,golden_nll --bin si_zero_shot_ppl"
+        );
+    }
+    if golden_nll {
+        if arms.len() != 1 || arms[0] != Arm::Base {
+            println!(
+                "# golden-nll: reference-oracle mode — the readout rides the BASE arm's forward \
+                 (one forward, two readouts); overriding --arms to base"
+            );
+            arms = vec![Arm::Base];
+        }
+        println!(
+            "# golden-nll: Issue 959 T6 — per-token NLL via the argmax-excluded-LSE f64 oracle \
+             (katgpt-core fixed_log_softmax_target_f64); confidence bands at the fp32 cliff \
+             16.64 / f64 cliff 36.73 nats"
+        );
+    }
     assert!(min_length >= 4 && max_length > min_length, "4 <= min < max");
     assert!(
         score_window >= 8 && score_window <= min_length,
@@ -539,16 +684,57 @@ fn main() -> Result<()> {
             }
         }
         let mut rung_results = Vec::with_capacity(rungs.len());
+        #[cfg(feature = "golden_nll")]
+        let mut golden = if golden_nll {
+            GoldenAccum::new(config.vocab_size)
+        } else {
+            GoldenAccum::new(0)
+        };
+        #[cfg(not(feature = "golden_nll"))]
+        let mut golden = GoldenAccum::inert();
         for &l in &rungs {
             rig.cache.reset();
             let mut nll = 0.0f64;
             let mut targets = 0usize;
+            #[cfg(feature = "golden_nll")]
+            {
+                golden.sum = 0.0;
+                golden.confident = 0;
+                golden.confident_sum = 0.0;
+                golden.deep = 0;
+                golden.deep_sum = 0.0;
+                golden.disagrees = 0;
+                golden.max_abs_delta = 0.0;
+            }
             let score_from = l.saturating_sub(score_window);
-            rig.feed(&seq, 0, l, score_from, &mut x, &mut nll, &mut targets);
+            rig.feed(
+                &seq,
+                0,
+                l,
+                score_from,
+                &mut x,
+                &mut nll,
+                &mut targets,
+                &mut golden,
+            );
             rung_results.push(Rung {
                 length: l,
                 nll_sum: nll,
                 targets,
+                #[cfg(feature = "golden_nll")]
+                golden_sum: golden.sum,
+                #[cfg(feature = "golden_nll")]
+                confident: golden.confident,
+                #[cfg(feature = "golden_nll")]
+                golden_confident_sum: golden.confident_sum,
+                #[cfg(feature = "golden_nll")]
+                deep: golden.deep,
+                #[cfg(feature = "golden_nll")]
+                golden_deep_sum: golden.deep_sum,
+                #[cfg(feature = "golden_nll")]
+                disagrees: golden.disagrees,
+                #[cfg(feature = "golden_nll")]
+                max_abs_delta: golden.max_abs_delta,
             });
         }
         // Restore the plain rope table for the next arm (the pprope arm's
@@ -620,6 +806,73 @@ fn main() -> Result<()> {
             );
         }
     }
+
+    // ── the golden-NLL report (Issue 959 T6) ──
+    #[cfg(feature = "golden_nll")]
+    if golden_nll {
+        let (base_arm, rung_list) = &results[0];
+        debug_assert_eq!(base_arm, &Arm::Base);
+        let total_t: usize = rung_list.iter().map(|r| r.targets).sum();
+        let total_inc: f64 = rung_list.iter().map(|r| r.nll_sum).sum();
+        let total_golden: f64 = rung_list.iter().map(|r| r.golden_sum).sum();
+        let conf_t: usize = rung_list.iter().map(|r| r.confident).sum();
+        let conf_golden: f64 = rung_list.iter().map(|r| r.golden_confident_sum).sum();
+        let deep_t: usize = rung_list.iter().map(|r| r.deep).sum();
+        let deep_golden: f64 = rung_list.iter().map(|r| r.golden_deep_sum).sum();
+        let disagrees: usize = rung_list.iter().map(|r| r.disagrees).sum();
+        let max_delta: f64 = rung_list
+            .iter()
+            .map(|r| r.max_abs_delta)
+            .fold(0.0f64, f64::max);
+        println!(
+            "\n# golden-NLL readout (Issue 959 T6, arXiv:2610.31642 Eq. 5) — the tail-faithful \
+oracle over the same scored positions; the lossy-quant gates diff THEIR variant \
+checkpoints through this readout"
+        );
+        println!(
+            "#   pooled: incumbent f64-lse ppl {:.6} · golden f64-oracle ppl {:.6} · \
+Δ {:+.3e} nats/token (mean over {total_t} scored)",
+            (total_inc / total_t.max(1) as f64).exp(),
+            (total_golden / total_t.max(1) as f64).exp(),
+            (total_golden - total_inc) / total_t.max(1) as f64
+        );
+        println!(
+            "#   confident band (margin ≥ 16.64 nats, the fp32 cliff): {conf_t}/{total_t} positions, \
+pooled golden ppl {} — the band where an fp32-consumer readout reads false zeros",
+            if conf_t > 0 {
+                format!("{:.6}", (conf_golden / conf_t as f64).exp())
+            } else {
+                "n/a (empty band)".to_string()
+            }
+        );
+        println!(
+            "#   deep band (margin ≥ 36.73 nats, the f64 cliff): {deep_t}/{total_t} positions, \
+pooled golden ppl {} — the band where even an f64 max-subtract LSE absorbs the tail",
+            if deep_t > 0 {
+                format!("{:.6}", (deep_golden / deep_t as f64).exp())
+            } else {
+                "n/a (empty band)".to_string()
+            }
+        );
+        println!(
+            "#   incumbent-vs-golden: {disagrees}/{total_t} positions disagree AT ALL, \
+max |Δnll| {max_delta:.3e} nats — on a healthy model this is f64-composition noise; \
+a lossy variant shows its true deltas here"
+        );
+        for r in rung_list {
+            println!(
+                "#   L={:>5} golden_ppl {:.4} confident {}/{}, deep {}/{}",
+                r.length,
+                (r.golden_sum / r.targets.max(1) as f64).exp(),
+                r.confident,
+                r.targets,
+                r.deep,
+                r.targets
+            );
+        }
+    }
+    #[cfg(not(feature = "golden_nll"))]
+    let _ = golden_nll; // the runtime flag already refused above
 
     // ── the retrieval probe ──
     if retrieval {
@@ -693,6 +946,10 @@ fn main() -> Result<()> {
                     let feed_to = prompt.len() - 1;
                     let mut nll = 0.0;
                     let mut targets = 0usize;
+                    #[cfg(feature = "golden_nll")]
+                    let mut ret_golden = GoldenAccum::new(0);
+                    #[cfg(not(feature = "golden_nll"))]
+                    let mut ret_golden = GoldenAccum::inert();
                     rig.feed(
                         &prompt,
                         0,
@@ -701,6 +958,7 @@ fn main() -> Result<()> {
                         &mut x,
                         &mut nll,
                         &mut targets,
+                        &mut ret_golden,
                     );
                     let generated = rig.greedy(prompt[feed_to], feed_to, 6, &mut x);
                     let text_out = tok.decode(&generated).to_lowercase();

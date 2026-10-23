@@ -92,6 +92,13 @@ pub mod disaggregated;
 /// `chat_probe` HF-pages shape + plain text). One loader, both instruments.
 pub mod corpus_text;
 
+/// f64 golden-NLL readout (Issue 959 T6, opt-in `golden_nll`): the
+/// tail-faithful per-token oracle for lossy-quant gates over
+/// katgpt-core's `fixed_log_softmax_target_f64`. Instrument-grade —
+/// never a serving path.
+#[cfg(feature = "golden_nll")]
+pub mod golden_nll;
+
 /// Plan 622 TokenGate lane switches (T1.5): the `tokengate` compile-time
 /// feature + the `RIIR_TOKENGATE` runtime demote. See the module doc.
 pub mod tokengate;

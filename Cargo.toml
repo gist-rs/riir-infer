@@ -195,6 +195,17 @@ row_logit_floor = ["katgpt-core/row_logit_floor"]
 # TernaryGroupWeights / ternary_forward ride it). OPT-IN — the Phase-7
 # GOAT (G2 engine cells + G3) is open; promotion is a separate owner call.
 scale_invariant_attn = ["katgpt-core/scale_invariant_attn", "deltanet_ternary_inference"]
+# golden_nll (Issue 959 T6, 2026-10-24): the f64 golden-NLL lossy-quant
+# readout — riir-infer_core::golden_nll (the reusable oracle: widen-once
+# scratch + per-token NLL via katgpt-core's fixed_log_softmax_target_f64,
+# the argmax-excluded-LSE softplus form) + the `--golden-nll` arm on
+# `si_zero_shot_ppl` (pooled incumbent-vs-golden Δ, the confidence-band
+# split at the fp32/f64 cliffs, the disagreement census). The tail-faithful
+# readout the lossy-surface gates consume (PQ2_0 / GDN_STATE_HALF
+# arms wire their own two-variant diffs through it). Forwards
+# katgpt-core/fixed_log_softmax. Instrument-grade — never a serving path.
+# OPT-IN measurement lane.
+golden_nll = ["katgpt-core/fixed_log_softmax"]
 # act_diagonal_calibration (riir-infer Issue 014 T1, 2026-09-26): the
 # activation-diagonal collector over the Bonsai-2 ternary lane — the
 # `vk_calibration` shape at the Issue-886 tap points (linear-layer INPUTS,
