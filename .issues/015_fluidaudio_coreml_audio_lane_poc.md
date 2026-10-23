@@ -121,19 +121,26 @@ TFLOPS fp16 · 57 GB/s · dispatch floor 0.11 ms · working set 4.72 MB.
 Working-set/compute/memory predictions all held trivially (the model is
 three orders under every M5 ceiling) — but the headline is:
 
-**THE ANE FINDING: on this M5 Ultra (macOS 27), the FluidInference silero
-bundle reports CPU-preferred for ALL 357 ops — under BOTH the published
-pre-compiled `.mlmodelc` v6.2.1 AND a LOCALLY-COMPILED `.mlpackage` v6.0.0
-(the A/B refutes the cross-machine-specialization hypothesis: local
-compilation changes NOTHING in the plan verdict). The latency is
+**THE ANE FINDING (generalized 2026-10-23, `ane_plan_probe` controls):
+on this M5 Ultra (macOS 27), `MLComputePlan.preferredComputeDevice` reads
+CPU for EVERYTHING testable — the silero bundle (357/357 CPU) AND the
+system `ATXIntentPredictionMLModel` (108/108 CPU), each under BOTH
+`cpuAndNe` AND `cpuAndGpu`; a third system bundle refuses plan
+construction ("model is not supported" — an old-format model). The A/B
+against a locally-compiled `.mlpackage` also reads all-CPU, so the
+cross-machine-specialization hypothesis is refuted too. Consequence:
+the laya strict ANE gate (`ane_ops == device_ops`) would refuse EVERY
+load on this box — the plan walk is not a usable ANE-placement
+authority on M5-class silicon/macOS 27 today; an execution-side
+instrument (what device actually RAN each op — Xcode Core ML perf
+report / inference observation) would be needed. The latency is
 unaffected for THIS model (0.16 ms/chunk = 1500× real-time headroom on
-cPU), so the PoC's serving answer is fully green — but the lane's
-ANE-first framing (and FluidAudio's own published claim) does NOT hold on
-this chip/OS today. Open question for the whole ANE-lane family: does the
-laya placement walk (`verify_compute_plan`) read all-CPU on M5 Ultra too?
-Its strict gate was measured on M3 (2026-09); nobody has run it HERE. If
-the laya bundles also read all-CPU on this box, every ANE placement claim
-in the workspace needs re-measuring on M5-class silicon — flagged as the
+cPU), so the PoC's serving answer is fully green. Owner-visible
+follow-ups: (1) re-run the laya placement walk on this box before
+citing any ANE placement claim on M5-class silicon — the M3-measured
+claims (2026-09) stand on their own boxes; (2) decide whether the
+placement gate gets an execution-side successor or a per-OS-calibration
+posture.**
 PoC's follow-up, owner-visible.**
 
 ### Gate results (2026-10-23)
