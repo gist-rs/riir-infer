@@ -674,7 +674,15 @@ pub(super) fn apply_delta_routing_step(
 
     // At block boundary: route accumulated deltas from all completed blocks
     if pos_in_block == BLOCK_SIZE - 1 && block_idx < ctx.block_deltas.len() {
-        if let Some((query, norm)) = routing_weights {
+        // An all-zero query is the loaders' "no trained routing" sentinel
+        // (GGUF / safetensors zero-init it). Routing it is NOT inert: the
+        // uniform softmax re-adds every completed block's accumulated delta,
+        // double-counting the residual stream. Measured on Gemma-2-2B-it
+        // (riir-train Issue 644): base CE 0.6657 routed vs 0.6065 routing-free,
+        // and an SFT adapter at 0.0004 under the (routing-free) trainers
+        // served at 0.154 — the trainers never route, so serving must not
+        // either until a query is trained. 2304 compares per block boundary.
+        if let Some((query, norm)) = routing_weights.filter(|(q, _)| q.iter().any(|&v| v != 0.0)) {
             depth_route(
                 &mut ctx.x[..n_embd],
                 &ctx.block_deltas,
