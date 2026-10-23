@@ -194,16 +194,43 @@ PoC's follow-up, owner-visible.**
 - [ ] **T6 verdict doc** (`.docs/` numbered slot + the digest-pin
   disclosure) — the substance is in this file; the doc lands with the
   quiet-box latency re-run so the cited numbers are publish-grade.
-- [ ] **The laya-on-M5-Ultra placement check** (the ANE finding's
-  follow-up): run the laya lane's plan walk on this box before trusting
-  ANY ANE placement claim on M5-class silicon.
-- [ ] **Owner decisions surfaced**: (1) the ANE finding (all-CPU plan on
-  M5 Ultra for this model class, both postures) — accept CPU serving for
-  VAD (the latency is already 1500× headroom) or investigate ANE
-  enablement (newer coremltools? different specialization?); (2) any
-  promotion beyond opt-in stays owner-gated per the lane header.
+- [x] **The laya-on-M5-Ultra placement check** (the ANE finding's
+  follow-up): **DONE 2026-10-23 — the answer is VIABLE, and the all-CPU
+  finding is REFINED to silero-bundle-specific, NOT systemic.** Two
+  instruments, agreeing. (1) The canonical T0.3 converter gate
+  (`scripts/ane_convert.py convert --model english --buckets 64,128`,
+  coremltools 9.x / Python 3.12, run in an isolated `/tmp/laya_m5probe`
+  copy — the committed manifest pins stay untouched): english L64
+  **1745/1745 ops ANE, 0 transitions**; L128 **1763/1763, 0
+  transitions** — op counts IDENTICAL to the M3's manifest records
+  (1745/1763), i.e. the M5 Ultra's ANE compiler places the same graph
+  exactly as the M3 did. (2) The Rust-side strict gate
+  (`ane_plan_probe` on the `xcrun coremlcompiler`-produced `.mlmodelc`,
+  `cpuAndNe`): `ane=1745 gpu=0 cpu=0 transitions=0 passes_strict=true`
+  — the lane's own load gate ACCEPTS the artifact on this box.
+  **Operational nuance:** under `ComputeUnit.ALL` this box prefers GPU
+  (obs: ane=0 gpu=1745) — the runtime MUST pin `CPU_AND_NE` (the strict
+  lane gate already does; never boot the ANE lane on the ALL posture
+  here). Contrast stands: silero (an old-format system bundle) reads
+  ALL-CPU under every posture — a bundle property, not a platform one;
+  ANE on M5 Ultra/macOS 27 works for freshly compiled mlprograms.
+  Evidence staged at `/tmp/laya_m5probe` (artifacts + compiled bundles;
+  re-derivable in ~1 min now that the english checkpoint is cached at
+  `~/.cache/riir-reflex/laya/english` and the uv venv is warm). The
+  natural follow-up — an ANE-vs-Metal latency cell on this box (the
+  reflex Plan 002 bench posture) — is latency-class and waits for the
+  same quiet window as the bouts.
+- [ ] **Owner decisions surfaced**: (1) the ANE finding — **REFINED
+  2026-10-23 by the placement check above**: the all-CPU plan is
+  silero-specific (old-format system bundle); the laya encoder places
+  100% ANE on M5 Ultra. So: accept CPU serving for VAD (the latency is
+  already 1500× headroom; ANE enablement for the silero bundle would
+  mean re-converting it, measured-unnecessary) — and the laya ANE lane
+  is placement-viable on this box, with its latency cell pending the
+  quiet window; (2) any promotion beyond opt-in stays owner-gated per
+  the lane header.
 
-- [ ] **T0 — BOUNDARY first (owner-gated, blocks everything else).** This repo's
+- [x] **T0 — BOUNDARY first (owner-gated, blocks everything else).** This repo's
       `BOUNDARY.md` §Owns currently reads "The LLM inference substrate" with no audio
       row, and the allowlist carries no row for any audio consumption path. Before any
       code: widen Owns to cover **audio encoders/loaders/streaming serving state**
