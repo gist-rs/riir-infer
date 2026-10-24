@@ -49,6 +49,19 @@
 //! latency 9.8× (Bench 762). This flat cache remains the correct shape
 //! for single-stream lanes.
 //!
+//! **Persistence delta (riir-infer Issue 1108 T2 — Research 014 §3.2, the
+//! Locals paper's cross-restart prompt cache):** when that lane arms, the
+//! second delta on top of the radix tree is persistence — the cache
+//! outlives the process as a freeze/thaw fusion: entries are
+//! BLAKE3-committed frozen state (radix index + whole-prefix GDN
+//! checkpoints, this module's snapshot shape), thawed at serve time on
+//! boot, never recomputed. The paper measures the payoff: 83% of sent
+//! tokens served from memory, a 138k-token follow-up starts in 2.4 s (vs
+//! ~8 min re-prefill). Class-level prior art exists (llama.cpp
+//! `--prompt-cache` file persistence, the LMCache line) — the value is
+//! the fusion note, a small assembly over substrate this workspace
+//! already owns, not a novelty claim.
+//!
 //! # Correctness contract
 //!
 //! - `insert(tokens)` requires the caller to have filled EXACTLY `tokens`
