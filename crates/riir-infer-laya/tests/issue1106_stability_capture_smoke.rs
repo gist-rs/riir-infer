@@ -17,7 +17,7 @@ use std::collections::HashMap;
 use riir_infer_laya::laya::config::{self, Checkpoint};
 use riir_infer_laya::laya::riir::backend::Cpu;
 use riir_infer_laya::laya::riir::encoder::Encoder;
-use riir_infer_laya::laya::riir::stability::{stage_ordinal, StabilityBand, StabilityTracker};
+use riir_infer_laya::laya::riir::stability::{StabilityBand, StabilityTracker, stage_ordinal};
 use riir_infer_laya::laya::riir::weights as lane_weights;
 use riir_infer_laya::laya::tokenize::Tok;
 use riir_infer_laya::laya::weights::{ensure_checkpoint, weights_root};
@@ -41,20 +41,21 @@ fn issue1106_end_to_end_capture_to_depth_on_real_checkpoint() {
         );
     }
     let dir = ensure_checkpoint(&root, ckpt).expect("checkpoint verify");
-    let (_agent_cfg, enc_cfg) = config::load_checkpoint_configs(&dir, ckpt.subfolder())
-        .expect("checkpoint configs");
+    let (_agent_cfg, enc_cfg) =
+        config::load_checkpoint_configs(&dir, ckpt.subfolder()).expect("checkpoint configs");
     let mut map: HashMap<String, lane_weights::Weights> =
-        lane_weights::load(&dir.join("model.safetensors"), ckpt.subfolder())
-            .expect("weights load");
-    let encoder =
-        Encoder::from_map(&mut map, enc_cfg.clone(), ckpt.subfolder()).expect("encoder");
+        lane_weights::load(&dir.join("model.safetensors"), ckpt.subfolder()).expect("weights load");
+    let encoder = Encoder::from_map(&mut map, enc_cfg.clone(), ckpt.subfolder()).expect("encoder");
     let tok = Tok::from_dir(&dir, ckpt.subfolder()).expect("tokenizer");
     let backend = Cpu;
     encoder.warm(&backend);
 
     let n_stages = enc_cfg.layers + 1;
     let d = enc_cfg.hidden;
-    let band = StabilityBand { cos: 0.999_9, l2: 0.05 };
+    let band = StabilityBand {
+        cos: 0.999_9,
+        l2: 0.05,
+    };
 
     for prompt in PROMPTS {
         let ids = tok.encode(prompt).expect("encode");
@@ -114,7 +115,12 @@ fn issue1106_end_to_end_capture_to_depth_on_real_checkpoint() {
         match tr.stabilization_depth(&band) {
             Some(depth) => {
                 assert!(depth <= n_stages - 2, "depth below the final stage");
-                println!("{prompt:?}: depth {depth}/{max} (band cos {c} l2 {l})", max = n_stages - 1, c = band.cos, l = band.l2);
+                println!(
+                    "{prompt:?}: depth {depth}/{max} (band cos {c} l2 {l})",
+                    max = n_stages - 1,
+                    c = band.cos,
+                    l = band.l2
+                );
             }
             None => {
                 let (at, d) = tr.max_leaving_delta().expect("None names a blocker");

@@ -299,10 +299,10 @@ fn gdn_v_permute_f32(tmp: &[f32], x: &mut [f32], params: &[f32]) {
 #[allow(clippy::approx_constant)] // FRAC_1_SQRT_2 at f32 precision, literal for the cube macro
 #[cube(launch_unchecked)]
 fn gdn_permute_rotate_f32(
-    src: &[f32],   // [v_dim] post-zgate recurrent_out (tiled/source head order)
-    signs: &[f32], // [v_dim]
+    src: &[f32],     // [v_dim] post-zgate recurrent_out (tiled/source head order)
+    signs: &[f32],   // [v_dim]
     out: &mut [f32], // [v_dim] rotated grouped output (must not alias src)
-    params: &[f32], // [head_dim, n_k, rep, hblock]
+    params: &[f32],  // [head_dim, n_k, rep, hblock]
 ) {
     let head_dim = params[0usize] as u32;
     let n_k = params[1usize] as u32;
@@ -546,12 +546,7 @@ impl RotationCubeCL {
         rep: usize,
         hblock: usize,
     ) {
-        let params: &[f32] = &[
-            head_dim as f32,
-            n_k as f32,
-            rep as f32,
-            hblock as f32,
-        ];
+        let params: &[f32] = &[head_dim as f32, n_k as f32, rep as f32, hblock as f32];
         let params_handle = crate::params_cache::params_handle(client, f32::as_bytes(params));
         let n_cubes = (v_dim / hblock.max(1)) as u32;
         GDN_PERMUTE_ROTATE_LAUNCHES.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
@@ -685,7 +680,10 @@ static SWIGLU_ROTATE_FUSED_LAUNCHES: std::sync::atomic::AtomicUsize =
 
 fn env_flag(name: &str) -> bool {
     matches!(
-        std::env::var(name).unwrap_or_default().to_lowercase().as_str(),
+        std::env::var(name)
+            .unwrap_or_default()
+            .to_lowercase()
+            .as_str(),
         "1" | "on" | "true"
     )
 }
@@ -713,7 +711,10 @@ pub fn gdn_permute_rotate_fused_enabled() -> bool {
         .is_ok()
     {
         USE_GDN_PERMUTE_ROTATE_FUSED.store(
-            GDN_PERMUTE_ROTATE_INITIALIZED.get().copied().unwrap_or(false),
+            GDN_PERMUTE_ROTATE_INITIALIZED
+                .get()
+                .copied()
+                .unwrap_or(false),
             std::sync::atomic::Ordering::Relaxed,
         );
     }
@@ -728,7 +729,10 @@ pub fn swiglu_rotate_fused_enabled() -> bool {
         .is_ok()
     {
         USE_SWIGLU_ROTATE_FUSED.store(
-            SWIGLU_ROTATE_FUSED_INITIALIZED.get().copied().unwrap_or(false),
+            SWIGLU_ROTATE_FUSED_INITIALIZED
+                .get()
+                .copied()
+                .unwrap_or(false),
             std::sync::atomic::Ordering::Relaxed,
         );
     }
@@ -1252,7 +1256,12 @@ mod tests {
             let signs_handle = client.create_from_slice(f32::as_bytes(&signs_f32));
             let tmp_handle = client.create_from_slice(f32::as_bytes(&x)); // staging copy
             unsafe {
-                CopyCubeCL::launch::<ActiveRuntime>(&client, x_handle.clone(), tmp_handle.clone(), v_dim);
+                CopyCubeCL::launch::<ActiveRuntime>(
+                    &client,
+                    x_handle.clone(),
+                    tmp_handle.clone(),
+                    v_dim,
+                );
                 RotationCubeCL::launch_gdn_v_permute::<ActiveRuntime>(
                     &client,
                     tmp_handle.clone(),

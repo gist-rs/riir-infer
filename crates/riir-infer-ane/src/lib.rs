@@ -80,8 +80,8 @@ mod model;
 
 #[cfg(target_os = "macos")]
 pub use model::{
-    ArtifactPin, ComputeUnits, LoadedModel, Placement, PlanWalk, load_model, load_model_precompiled,
-    probe_compute_plan,
+    ArtifactPin, ComputeUnits, LoadedModel, Placement, PlanWalk, load_model,
+    load_model_precompiled, probe_compute_plan,
 };
 
 // Off-macOS: a documented stub that compiles to nothing and resolves zero

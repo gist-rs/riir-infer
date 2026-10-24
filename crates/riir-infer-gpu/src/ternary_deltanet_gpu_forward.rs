@@ -3839,7 +3839,9 @@ impl TernaryDeltanetGpuForward {
         not(target_os = "macos")
     ))]
     pub fn kb_is_armed(&self) -> Option<bool> {
-        self.kb.as_ref().map(crate::tokengate_gpu::KeyBiasGpuSession::is_armed)
+        self.kb
+            .as_ref()
+            .map(crate::tokengate_gpu::KeyBiasGpuSession::is_armed)
     }
 
     /// The kb launch args for the whole-prefill driver (the field is
@@ -4701,7 +4703,9 @@ impl TernaryDeltanetGpuForward {
                     // is folded — rotate the SwiGLU output in place (its only
                     // consumer is the down GEMV; the CPU twin rotates
                     // `scratch.hidden` at the same site).
-                    if let (Some(cfg), Some(tables)) = (self.rotation.as_ref(), self.rot_tables.as_ref()) {
+                    if let (Some(cfg), Some(tables)) =
+                        (self.rotation.as_ref(), self.rot_tables.as_ref())
+                    {
                         let signs = tables.signs_for_width(mlp).clone();
                         unsafe {
                             RotationCubeCL::launch_forward::<ActiveRuntime>(
@@ -5270,7 +5274,10 @@ impl TernaryDeltanetGpuForward {
         let gdn_fused_pair = match (self.rotation.as_ref(), self.rot_tables.as_ref()) {
             (Some(cfg), Some(tables))
                 if crate::deltanet_rotation_cubecl::gdn_permute_rotate_fused_enabled()
-                    && crate::deltanet_rotation_cubecl::gdn_permute_rotate_ok(v_dim, cfg.block_size) =>
+                    && crate::deltanet_rotation_cubecl::gdn_permute_rotate_ok(
+                        v_dim,
+                        cfg.block_size,
+                    ) =>
             {
                 Some((cfg, tables))
             }

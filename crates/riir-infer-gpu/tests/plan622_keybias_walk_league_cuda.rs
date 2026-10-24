@@ -71,9 +71,8 @@ fn plan622_league_walk_kb_session_fa_arms() {
     };
     let stream = cuda_ctx.new_stream().expect("cuda stream");
 
-    let model_path = std::env::var("BONSAI_GGUF").unwrap_or_else(|_| {
-        "../../riir-train/data/Ternary-Bonsai-2-27B-PQ2_0.gguf".to_string()
-    });
+    let model_path = std::env::var("BONSAI_GGUF")
+        .unwrap_or_else(|_| "../../riir-train/data/Ternary-Bonsai-2-27B-PQ2_0.gguf".to_string());
     let model_path = std::path::PathBuf::from(model_path);
     eprintln!("[622-league-walk] loading {} …", model_path.display());
     let t0 = std::time::Instant::now();
@@ -143,7 +142,10 @@ fn plan622_league_walk_kb_session_fa_arms() {
             matches!(t, riir_infer_core::types::DeltaNetLayerType::Attention).then_some(i)
         })
         .collect();
-    assert!(!att_layers.is_empty(), "league model carries attention layers");
+    assert!(
+        !att_layers.is_empty(),
+        "league model carries attention layers"
+    );
     eprintln!(
         "[622-league-walk] att layers: {att_layers:?} · stride={stride} · table={} f32",
         n_layers * n_head * stride
@@ -193,7 +195,8 @@ fn plan622_league_walk_kb_session_fa_arms() {
     // Arm 4 — moved (Attention rows carry the varying table — written IN
     // PLACE, pointer-stable), run TWICE: both replays of the same capture.
     let moved_table = table_with(n_layers, n_head, stride, PROMPT_LEN, &att_layers);
-    fwd.write_kb_table(&stream, &moved_table).expect("write table");
+    fwd.write_kb_table(&stream, &moved_table)
+        .expect("write table");
     let moved1 = run(&mut fwd);
     let moved2 = run(&mut fwd);
     assert_eq!(

@@ -46,7 +46,11 @@ fn g4_stability_track_is_alloc_free() {
     // Pre-build the stage states (construction allocations happen
     // BEFORE the counted region — the gate measures the track).
     let states: Vec<Vec<f32>> = (0..stages)
-        .map(|s| (0..d).map(|i| ((s * 31 + i) % 7) as f32 * 0.125 - 0.5).collect())
+        .map(|s| {
+            (0..d)
+                .map(|i| ((s * 31 + i) % 7) as f32 * 0.125 - 0.5)
+                .collect()
+        })
         .collect();
     let stage_at = |s: usize| {
         if s == 0 {
@@ -55,7 +59,10 @@ fn g4_stability_track_is_alloc_free() {
             CaptureStage::AfterLayer(s - 1)
         }
     };
-    let band = StabilityBand { cos: 0.999, l2: 0.01 };
+    let band = StabilityBand {
+        cos: 0.999,
+        l2: 0.01,
+    };
 
     let before = ALLOCS.load(Ordering::Relaxed);
     for (s, st) in states.iter().enumerate() {

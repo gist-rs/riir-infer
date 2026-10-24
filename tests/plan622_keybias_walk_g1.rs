@@ -49,13 +49,13 @@
 ))]
 
 use riir_infer_core::deltanet::forward::{
-    forward_attention_layer, prefill_qwen_deltanet_into, AttentionLayerScratch, HybridCache,
-    HybridForwardScratch, PrefillContext,
+    AttentionLayerScratch, HybridCache, HybridForwardScratch, PrefillContext,
+    forward_attention_layer, prefill_qwen_deltanet_into,
 };
 use riir_infer_core::deltanet::weights::{DeltaNetLayerWeights, Proj, QwenDeltaNetWeights};
 use riir_infer_core::rope::RopeFreqTable;
 use riir_infer_core::transformer::{
-    attention_heads_parallel, attention_heads_parallel_bias, KVCache, KeyBiasLayout,
+    KVCache, KeyBiasLayout, attention_heads_parallel, attention_heads_parallel_bias,
 };
 use riir_infer_core::types::{Config, DeltaNetLayerType};
 
@@ -425,8 +425,19 @@ fn walk_binds_at_league_shape_and_respects_per_head_rows() {
     let mut scores = vec![0.0f32; geom.n_head * SCORE_STRIDE];
     unsafe {
         attention_heads_parallel(
-            &q, &key, &value, &mut out_ref, &mut scores, geom.n_head, geom.n_kv, kv_dim,
-            geom.hd, t_n, scale, softcap, SCORE_STRIDE,
+            &q,
+            &key,
+            &value,
+            &mut out_ref,
+            &mut scores,
+            geom.n_head,
+            geom.n_kv,
+            kv_dim,
+            geom.hd,
+            t_n,
+            scale,
+            softcap,
+            SCORE_STRIDE,
         );
     }
 
@@ -436,8 +447,19 @@ fn walk_binds_at_league_shape_and_respects_per_head_rows() {
     let mut scores_b = vec![0.0f32; geom.n_head * SCORE_STRIDE];
     unsafe {
         attention_heads_parallel_bias(
-            &q, &key, &value, &mut out_biased, &mut scores_b, geom.n_head, geom.n_kv, kv_dim,
-            geom.hd, t_n, scale, softcap, SCORE_STRIDE,
+            &q,
+            &key,
+            &value,
+            &mut out_biased,
+            &mut scores_b,
+            geom.n_head,
+            geom.n_kv,
+            kv_dim,
+            geom.hd,
+            t_n,
+            scale,
+            softcap,
+            SCORE_STRIDE,
             Some((&bias, KeyBiasLayout { head_stride: t_n })),
         );
     }
@@ -451,7 +473,10 @@ fn walk_binds_at_league_shape_and_respects_per_head_rows() {
         "head 0 output must move under a +12 logit bias"
     );
     for h in 1..geom.n_head {
-        let (b, r) = (&out_biased[h * hd..(h + 1) * hd], &out_ref[h * hd..(h + 1) * hd]);
+        let (b, r) = (
+            &out_biased[h * hd..(h + 1) * hd],
+            &out_ref[h * hd..(h + 1) * hd],
+        );
         assert_bits_eq(r, b, &format!("head {h} (zero bias row) vs incumbent"));
     }
 }
@@ -671,26 +696,26 @@ fn synth_hybrid_weights(cfg: &Config, seed: u64) -> QwenDeltaNetWeights {
             *v *= 0.01;
         }
         DeltaNetLayerWeights {
-        attn_wq: Proj::dense(wq, 2 * q_dim, n),
-        attn_wk: Proj::dense(sm.stream_vec(kvd * n), kvd, n),
-        attn_wv: Proj::dense(sm.stream_vec(kvd * n), kvd, n),
-        attn_wo: Proj::dense(wo, n, q_dim),
-        attn_q_norm: sm.gamma_vec(cfg.head_dim),
-        attn_k_norm: sm.gamma_vec(cfg.head_dim),
-        in_proj_qkv: Proj::empty(),
-        in_proj_a: Proj::empty(),
-        in_proj_b: Proj::empty(),
-        in_proj_z: Proj::empty(),
-        out_proj: Proj::empty(),
-        conv1d_weight: Vec::new(),
-        a_log: Vec::new(),
-        dt_bias: Vec::new(),
-        linear_norm: Vec::new(),
-        gate_proj: Proj::dense(sm.stream_vec(mlp * n), mlp, n),
-        up_proj: Proj::dense(sm.stream_vec(mlp * n), mlp, n),
-        down_proj: Proj::dense(sm.stream_vec(n * mlp), n, mlp),
-        input_norm: sm.gamma_vec(n),
-        post_attn_norm: sm.gamma_vec(n),
+            attn_wq: Proj::dense(wq, 2 * q_dim, n),
+            attn_wk: Proj::dense(sm.stream_vec(kvd * n), kvd, n),
+            attn_wv: Proj::dense(sm.stream_vec(kvd * n), kvd, n),
+            attn_wo: Proj::dense(wo, n, q_dim),
+            attn_q_norm: sm.gamma_vec(cfg.head_dim),
+            attn_k_norm: sm.gamma_vec(cfg.head_dim),
+            in_proj_qkv: Proj::empty(),
+            in_proj_a: Proj::empty(),
+            in_proj_b: Proj::empty(),
+            in_proj_z: Proj::empty(),
+            out_proj: Proj::empty(),
+            conv1d_weight: Vec::new(),
+            a_log: Vec::new(),
+            dt_bias: Vec::new(),
+            linear_norm: Vec::new(),
+            gate_proj: Proj::dense(sm.stream_vec(mlp * n), mlp, n),
+            up_proj: Proj::dense(sm.stream_vec(mlp * n), mlp, n),
+            down_proj: Proj::dense(sm.stream_vec(n * mlp), n, mlp),
+            input_norm: sm.gamma_vec(n),
+            post_attn_norm: sm.gamma_vec(n),
         }
     };
 
@@ -715,7 +740,11 @@ fn synth_hybrid_weights(cfg: &Config, seed: u64) -> QwenDeltaNetWeights {
         conv1d_weight: sm.stream_vec(qkv_dim * k), // [conv_dim, kernel] — conv_dim = qkv_dim
         // Decay in (0, 1): a = exp(a_log) < 1 keeps the recurrence bounded.
         a_log: vec![-0.5; n_v],
-        dt_bias: sm.stream_vec(n_k * 2 + n_v).iter().map(|x| x * 0.05).collect(),
+        dt_bias: sm
+            .stream_vec(n_k * 2 + n_v)
+            .iter()
+            .map(|x| x * 0.05)
+            .collect(),
         linear_norm: sm.gamma_vec(lhd),
         gate_proj: Proj::dense(sm.stream_vec(mlp * n), mlp, n),
         up_proj: Proj::dense(sm.stream_vec(mlp * n), mlp, n),
@@ -733,7 +762,11 @@ fn synth_hybrid_weights(cfg: &Config, seed: u64) -> QwenDeltaNetWeights {
         wte: sm.stream_vec(cfg.vocab_size * n),
         final_norm: sm.gamma_vec(n),
         lm_head: Proj::dense(sm.stream_vec(cfg.vocab_size * n), cfg.vocab_size, n),
-        layers: vec![deltanet_layer, attention_layer(&mut sm), attention_layer(&mut sm)],
+        layers: vec![
+            deltanet_layer,
+            attention_layer(&mut sm),
+            attention_layer(&mut sm),
+        ],
         layer_types,
     }
 }
@@ -778,11 +811,12 @@ fn prefill_walk_none_and_zero_bias_logits_bit_identical() {
 
             let none_logits = run_arm(&tokens, None);
             let zeros = vec![0.0f32; cfg.n_head * t_n];
-            let zero_logits = run_arm(
-                &tokens,
-                Some((&zeros, KeyBiasLayout { head_stride: t_n })),
+            let zero_logits = run_arm(&tokens, Some((&zeros, KeyBiasLayout { head_stride: t_n })));
+            assert_bits_eq(
+                &none_logits,
+                &zero_logits,
+                &format!("{cells}: None vs zero"),
             );
-            assert_bits_eq(&none_logits, &zero_logits, &format!("{cells}: None vs zero"));
 
             // The seam binds through the full prefill — EXCEPT at t_n == 1,
             // where the law is the OPPOSITE: a single-key softmax is
@@ -792,10 +826,7 @@ fn prefill_walk_none_and_zero_bias_logits_bit_identical() {
             let slot = t_n / 2;
             let mut bound = vec![0.0f32; cfg.n_head * t_n];
             bound[slot] = 9.0;
-            let bound_logits = run_arm(
-                &tokens,
-                Some((&bound, KeyBiasLayout { head_stride: t_n })),
-            );
+            let bound_logits = run_arm(&tokens, Some((&bound, KeyBiasLayout { head_stride: t_n })));
             let moved = none_logits
                 .iter()
                 .zip(&bound_logits)

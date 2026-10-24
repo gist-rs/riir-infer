@@ -5234,7 +5234,9 @@ mod tests {
         // to 0 in the kernel — legal) + scales + q8 scratch filled by the
         // kernel's own quantize.
         let lcg = |mut s: u64, k: usize| -> u32 {
-            s = s.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407 + k as u64);
+            s = s
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407 + k as u64);
             (s >> 33) as u32
         };
         // The largest m first-class allocations must cover.
@@ -5248,14 +5250,17 @@ mod tests {
                 neg.push(lcg(0xBF58476D1CE4E5B9, r * wpr + w));
             }
             for g in 0..groups {
-                scale.push(((lcg(0x94D049BB133111EB, r * groups + g) % 2000) as f32 / 1000.0) - 1.0);
+                scale
+                    .push(((lcg(0x94D049BB133111EB, r * groups + g) % 2000) as f32 / 1000.0) - 1.0);
             }
         }
         let pos_dev = stream.clone_htod(&pos).unwrap();
         let neg_dev = stream.clone_htod(&neg).unwrap();
         let scale_dev = stream.clone_htod(&scale).unwrap();
         // f32 activations [p x n] — the quantize consumes them into the scratch.
-        let input: Vec<f32> = (0..p * n).map(|i| (lcg(0x2545F4914F6CDD1D, i) % 255) as f32 - 127.0).collect();
+        let input: Vec<f32> = (0..p * n)
+            .map(|i| (lcg(0x2545F4914F6CDD1D, i) % 255) as f32 - 127.0)
+            .collect();
         let input_dev = stream.clone_htod(&input).unwrap();
         let scratch = kernels.alloc_scratch(&stream, n, p).unwrap();
         let out = stream.alloc_zeros::<f32>(p * m_max).unwrap();
@@ -5286,9 +5291,7 @@ mod tests {
             match (r, sync) {
                 (Ok(()), Ok(())) => eprintln!("m={m}: OK"),
                 (e, s) => {
-                    panic!(
-                        "m={m}: launch={e:?} sync={s:?} — the m-tail fault (issue 1112)"
-                    );
+                    panic!("m={m}: launch={e:?} sync={s:?} — the m-tail fault (issue 1112)");
                 }
             }
         }

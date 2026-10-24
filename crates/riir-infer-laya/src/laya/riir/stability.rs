@@ -206,9 +206,7 @@ impl StabilityTracker {
         for (i, d) in self.deltas.iter().enumerate() {
             let better = match best {
                 None => true,
-                Some((_, b)) => {
-                    d.l2 > b.l2 || (d.l2 == b.l2 && (1.0 - d.cos) > (1.0 - b.cos))
-                }
+                Some((_, b)) => d.l2 > b.l2 || (d.l2 == b.l2 && (1.0 - d.cos) > (1.0 - b.cos)),
             };
             if better {
                 best = Some((i, *d));
@@ -262,11 +260,20 @@ mod tests {
     /// all-sub-band suffix starts at stage 1.
     #[test]
     fn depth_is_first_stage_of_the_stable_suffix() {
-        let band = StabilityBand { cos: 0.999, l2: 0.1 };
+        let band = StabilityBand {
+            cos: 0.999,
+            l2: 0.1,
+        };
         let mut tr = StabilityTracker::with_stage_capacity(5, 2);
         feed(
             &mut tr,
-            &[&[1.0, 0.0], &[0.0, 5.0], &[0.0, 5.001], &[0.0, 5.001], &[0.0, 5.001]],
+            &[
+                &[1.0, 0.0],
+                &[0.0, 5.0],
+                &[0.0, 5.001],
+                &[0.0, 5.001],
+                &[0.0, 5.001],
+            ],
         );
         assert_eq!(tr.stabilization_depth(&band), Some(1));
     }
@@ -274,7 +281,10 @@ mod tests {
     /// Depth 0: stable from the embedding itself.
     #[test]
     fn depth_zero_when_stable_from_embedding() {
-        let band = StabilityBand { cos: 0.999, l2: 0.1 };
+        let band = StabilityBand {
+            cos: 0.999,
+            l2: 0.1,
+        };
         let mut tr = StabilityTracker::with_stage_capacity(3, 2);
         feed(&mut tr, &[&[1.0, 1.0], &[1.0, 1.0], &[1.0, 1.0]]);
         assert_eq!(tr.stabilization_depth(&band), Some(0));
@@ -284,7 +294,10 @@ mod tests {
     /// `None`, and the max-leaving disclosure names the blocker.
     #[test]
     fn depth_none_when_no_suffix_qualifies() {
-        let band = StabilityBand { cos: 0.999, l2: 0.1 };
+        let band = StabilityBand {
+            cos: 0.999,
+            l2: 0.1,
+        };
         let mut tr = StabilityTracker::with_stage_capacity(4, 1);
         feed(&mut tr, &[&[0.0], &[1.0], &[0.0], &[1.0]]);
         assert_eq!(tr.stabilization_depth(&band), None);
@@ -297,7 +310,10 @@ mod tests {
     /// no transitions and certifies nothing.
     #[test]
     fn single_stage_certifies_nothing() {
-        let band = StabilityBand { cos: 0.0, l2: f32::MAX };
+        let band = StabilityBand {
+            cos: 0.0,
+            l2: f32::MAX,
+        };
         let mut tr = StabilityTracker::with_stage_capacity(1, 2);
         feed(&mut tr, &[&[1.0, 2.0]]);
         assert_eq!(tr.stabilization_depth(&band), None);
@@ -326,7 +342,9 @@ mod tests {
         // Deterministic LCG (no unseeded global draws).
         let mut seed: u64 = 0x243F_6A88_85A3_08D3;
         let mut next = move || {
-            seed = seed.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+            seed = seed
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407);
             ((seed >> 33) as f32) / (u32::MAX >> 1) as f32 - 1.0
         };
         let (s_count, d) = (7usize, 16usize);
