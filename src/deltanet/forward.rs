@@ -1716,176 +1716,39 @@ pub fn prefill_qwen_deltanet_into(
         let is_linear = weights.layer_types[layer_idx] == DeltaNetLayerType::DeltaNet;
 
         if is_linear {
-            // ── DeltaNet layer ────────────────────────────────────────────
-            // Phase 1 (sequential): residual + input_norm + recurrence + residual.
-            for p in 0..seq_len {
-                let hidden_slice = &mut prefill_ctx.hidden[p * n..(p + 1) * n];
-                scratch.residual[..n].copy_from_slice(hidden_slice);
-                rmsnorm_with_gamma_eps(hidden_slice, &layer_weights.input_norm, eps);
-                forward_deltanet_layer(
-                    hidden_slice,
-                    layer_weights,
+            prefill_deltanet_branch(
+                layer_weights,
+                config,
+                (
                     &mut cache.deltanet_state.recurrent_states[layer_idx],
                     &mut cache.deltanet_state.conv_states[layer_idx],
-                    config,
-                    &mut scratch.deltanet,
-                );
-                for (h, &q) in hidden_slice.iter_mut().zip(&scratch.residual[..n]) {
-                    *h += q;
-                }
-            }
-
-            // Phase 2 (batched MLP) — shared with attention layer below.
-            batched_mlp(prefill_ctx, layer_weights, seq_len, n, mlp, eps);
+                ),
+                scratch,
+                prefill_ctx,
+                seq_len,
+                n,
+                mlp,
+                eps,
+            );
         } else {
-            // ── Attention layer ───────────────────────────────────────────
-            let kv_cache = &mut cache.kv_cache.layers[layer_idx];
-
-            // Phase A (batched): pre-attn residual + input_norm + QKV proj +
-            // QK-norm + RoPE + K,V cache write. All positions at once.
-            prefill_ctx.attn_residual[..seq_len * n]
-                .copy_from_slice(&prefill_ctx.hidden[..seq_len * n]);
-            // Batched input RMSNorm (elementwise, loop over positions).
-            for p in 0..seq_len {
-                let hs = &mut prefill_ctx.hidden[p * n..(p + 1) * n];
-                rmsnorm_with_gamma_eps(hs, &layer_weights.input_norm, eps);
-            }
-            // Batched gated-Q / K / V projections — one weight-reuse GEMM each.
-            layer_weights.attn_wq.matmat(
-                &prefill_ctx.hidden[..seq_len * n],
-                &mut prefill_ctx.attn_qg[..seq_len * 2 * q_dim],
+            prefill_attention_branch(
+                layer_weights,
+                config,
+                &mut cache.kv_cache.layers[layer_idx],
+                prefill_ctx,
+                rope_freq,
                 seq_len,
+                n,
+                q_dim,
+                kvd,
+                hd,
+                mlp,
+                eps,
+                rotary_dim,
+                scale,
+                PrefillPositions::Contiguous,
+                key_bias,
             );
-            layer_weights.attn_wk.matmat(
-                &prefill_ctx.hidden[..seq_len * n],
-                &mut prefill_ctx.attn_k[..seq_len * kvd],
-                seq_len,
-            );
-            layer_weights.attn_wv.matmat(
-                &prefill_ctx.hidden[..seq_len * n],
-                &mut prefill_ctx.attn_v[..seq_len * kvd],
-                seq_len,
-            );
-            // Split qg → q + gate (interleaved per-head layout, same as
-            // `forward_attention_layer` L583-589).
-            for p in 0..seq_len {
-                let qg_off = p * 2 * q_dim;
-                let q_off = p * q_dim;
-                for h in 0..config.n_head {
-                    let src = qg_off + h * 2 * hd;
-                    let dst = q_off + h * hd;
-                    prefill_ctx.attn_q[dst..dst + hd]
-                        .copy_from_slice(&prefill_ctx.attn_qg[src..src + hd]);
-                    prefill_ctx.attn_gate[dst..dst + hd]
-                        .copy_from_slice(&prefill_ctx.attn_qg[src + hd..src + 2 * hd]);
-                }
-            }
-            // Batched QK-norm (per head per position).
-            for p in 0..seq_len {
-                let q_off = p * q_dim;
-                let k_off = p * kvd;
-                for h in 0..config.n_head {
-                    let off = q_off + h * hd;
-                    rmsnorm_with_gamma_eps(
-                        &mut prefill_ctx.attn_q[off..off + hd],
-                        &layer_weights.attn_q_norm,
-                        eps,
-                    );
-                }
-                for h in 0..config.n_kv_head {
-                    let off = k_off + h * hd;
-                    rmsnorm_with_gamma_eps(
-                        &mut prefill_ctx.attn_k[off..off + hd],
-                        &layer_weights.attn_k_norm,
-                        eps,
-                    );
-                }
-            }
-            // Batched partial RoPE (per position — `pos = p`).
-            for p in 0..seq_len {
-                let q_off = p * q_dim;
-                let k_off = p * kvd;
-                if rotary_dim == hd {
-                    crate::rope::apply_rope_with_freq(
-                        &mut prefill_ctx.attn_q[q_off..q_off + q_dim],
-                        &mut prefill_ctx.attn_k[k_off..k_off + kvd],
-                        p,
-                        hd,
-                        rope_freq.as_slice(),
-                    );
-                } else {
-                    crate::rope::apply_partial_rope_with_freq(
-                        &mut prefill_ctx.attn_q[q_off..q_off + q_dim],
-                        &mut prefill_ctx.attn_k[k_off..k_off + kvd],
-                        p,
-                        hd,
-                        rotary_dim,
-                        rope_freq.as_slice(),
-                    );
-                }
-            }
-            // Batched K,V cache write — copy each position's K,V into its slot.
-            // Independent per position (no cross-position dependency).
-            for p in 0..seq_len {
-                let pos_off = p * kvd;
-                let k_src = p * kvd;
-                let v_src = p * kvd;
-                kv_cache.key[pos_off..pos_off + kvd]
-                    .copy_from_slice(&prefill_ctx.attn_k[k_src..k_src + kvd]);
-                kv_cache.value[pos_off..pos_off + kvd]
-                    .copy_from_slice(&prefill_ctx.attn_v[v_src..v_src + kvd]);
-            }
-
-            // Phase B (sequential): attention scoring per position.
-            // Position p attends to K[0..=p] / V[0..=p] (causal mask).
-            // Bit-identical to the per-position `forward_attention_layer` path —
-            // same `attention_heads_parallel` call, same inputs, same output slot.
-            // Plan 622 T1.1: `key_bias` rides through — per-KEY × per-head, so
-            // every position p indexes the SAME rows (keys at cache slots 0..=p).
-            for p in 0..seq_len {
-                let q_off = p * q_dim;
-                let out_off = p * q_dim;
-                prefill_ctx.attn_out[out_off..out_off + q_dim].fill(0.0);
-                let t_n = p + 1;
-                unsafe {
-                    crate::transformer::attention_heads_parallel_bias(
-                        &prefill_ctx.attn_q[q_off..q_off + q_dim],
-                        &kv_cache.key,
-                        &kv_cache.value,
-                        &mut prefill_ctx.attn_out[out_off..out_off + q_dim],
-                        &mut prefill_ctx.head_scores,
-                        config.n_head,
-                        config.n_kv_head,
-                        kvd,
-                        hd,
-                        t_n,
-                        scale,
-                        0.0,
-                        config.block_size,
-                        key_bias,
-                    );
-                }
-            }
-
-            // Phase C (batched): output gate × attn_out + o_proj + residual add.
-            // Output gating: attn_out[p] *= sigmoid(gate[p]). Elementwise.
-            for i in 0..seq_len * q_dim {
-                prefill_ctx.attn_out[i] *= crate::simd::fast_sigmoid(prefill_ctx.attn_gate[i]);
-            }
-            // Batched output projection: hidden = attn_wo @ attn_out.
-            // Overwrites the normalized hidden (no longer needed after QKV proj).
-            layer_weights.attn_wo.matmat(
-                &prefill_ctx.attn_out[..seq_len * q_dim],
-                &mut prefill_ctx.hidden[..seq_len * n],
-                seq_len,
-            );
-            // Residual add: hidden[p] += attn_residual[p] (the PRE-norm hidden).
-            for i in 0..seq_len * n {
-                prefill_ctx.hidden[i] += prefill_ctx.attn_residual[i];
-            }
-
-            // Phase D (batched MLP) — shared with DeltaNet layer above.
-            batched_mlp(prefill_ctx, layer_weights, seq_len, n, mlp, eps);
         }
     }
 
@@ -1906,6 +1769,247 @@ pub fn prefill_qwen_deltanet_into(
         logits_out.len()
     );
     weights.lm_head.matvec(last_hidden, &mut logits_out[..v]);
+}
+
+/// RoPE position source for the whole-prompt prefill branch helpers.
+///
+/// `Contiguous` is the incumbent shape (`pos = p`). `Kept` is the pruned
+/// shape (Plan 622 T2.1): position `p` of the PACKED kept sequence carries
+/// its ORIGINAL absolute position, so K is roped with the exact phase the
+/// token had in the full prompt — the subset-softmax exactness law depends
+/// on it (a compacted run with renumbered positions would compute different
+/// attention logits). Only the RoPE loop reads this; the KV cache write and
+/// the Phase-B causal prefix (`t_n = p + 1`) are PACKED-index based in both
+/// shapes.
+enum PrefillPositions<'a> {
+    Contiguous,
+    Kept(&'a [usize]),
+}
+
+impl PrefillPositions<'_> {
+    #[inline]
+    fn at(&self, p: usize) -> usize {
+        match self {
+            PrefillPositions::Contiguous => p,
+            PrefillPositions::Kept(kept) => kept[p],
+        }
+    }
+}
+
+/// Whole-prompt prefill — DeltaNet branch (Phase 1 sequential recurrence +
+/// Phase 2 batched MLP), extracted verbatim from
+/// [`prefill_qwen_deltanet_into`]'s loop so the pruned variant (Plan 622
+/// T2.1) shares the same body. Pure code motion: callers pass the same
+/// values the inline loop computed.
+#[allow(clippy::too_many_arguments)]
+fn prefill_deltanet_branch(
+    layer_weights: &DeltaNetLayerWeights,
+    config: &Config,
+    state: (&mut Vec<f32>, &mut Vec<f32>),
+    scratch: &mut HybridForwardScratch,
+    prefill_ctx: &mut PrefillContext,
+    seq_len: usize,
+    n: usize,
+    mlp: usize,
+    eps: f64,
+) {
+    let (recurrent_state, conv_state) = state;
+    // Phase 1 (sequential): residual + input_norm + recurrence + residual.
+    for p in 0..seq_len {
+        let hidden_slice = &mut prefill_ctx.hidden[p * n..(p + 1) * n];
+        scratch.residual[..n].copy_from_slice(hidden_slice);
+        rmsnorm_with_gamma_eps(hidden_slice, &layer_weights.input_norm, eps);
+        forward_deltanet_layer(
+            hidden_slice,
+            layer_weights,
+            recurrent_state,
+            conv_state,
+            config,
+            &mut scratch.deltanet,
+        );
+        for (h, &q) in hidden_slice.iter_mut().zip(&scratch.residual[..n]) {
+            *h += q;
+        }
+    }
+
+    // Phase 2 (batched MLP) — shared with attention layer below.
+    batched_mlp(prefill_ctx, layer_weights, seq_len, n, mlp, eps);
+}
+
+/// Whole-prompt prefill — attention branch (Phase A batched QKV + QK-norm +
+/// RoPE + cache write, Phase B sequential scoring, Phase C gate + o_proj +
+/// residual, Phase D batched MLP), extracted verbatim from
+/// [`prefill_qwen_deltanet_into`]'s loop so the pruned variant (Plan 622
+/// T2.1) shares the same body. Pure code motion: callers pass the same
+/// values the inline loop computed, and `pos_at` only reroutes the RoPE
+/// position ([`PrefillPositions::Kept`] — original positions preserved).
+#[allow(clippy::too_many_arguments)]
+fn prefill_attention_branch(
+    layer_weights: &DeltaNetLayerWeights,
+    config: &Config,
+    kv_cache: &mut crate::transformer::KVCache,
+    prefill_ctx: &mut PrefillContext,
+    rope_freq: &crate::rope::RopeFreqTable,
+    seq_len: usize,
+    n: usize,
+    q_dim: usize,
+    kvd: usize,
+    hd: usize,
+    mlp: usize,
+    eps: f64,
+    rotary_dim: usize,
+    scale: f32,
+    pos_at: PrefillPositions<'_>,
+    key_bias: Option<(&[f32], crate::transformer::KeyBiasLayout)>,
+) {
+    // Phase A (batched): pre-attn residual + input_norm + QKV proj +
+    // QK-norm + RoPE + K,V cache write. All positions at once.
+    prefill_ctx.attn_residual[..seq_len * n].copy_from_slice(&prefill_ctx.hidden[..seq_len * n]);
+    // Batched input RMSNorm (elementwise, loop over positions).
+    for p in 0..seq_len {
+        let hs = &mut prefill_ctx.hidden[p * n..(p + 1) * n];
+        rmsnorm_with_gamma_eps(hs, &layer_weights.input_norm, eps);
+    }
+    // Batched gated-Q / K / V projections — one weight-reuse GEMM each.
+    layer_weights.attn_wq.matmat(
+        &prefill_ctx.hidden[..seq_len * n],
+        &mut prefill_ctx.attn_qg[..seq_len * 2 * q_dim],
+        seq_len,
+    );
+    layer_weights.attn_wk.matmat(
+        &prefill_ctx.hidden[..seq_len * n],
+        &mut prefill_ctx.attn_k[..seq_len * kvd],
+        seq_len,
+    );
+    layer_weights.attn_wv.matmat(
+        &prefill_ctx.hidden[..seq_len * n],
+        &mut prefill_ctx.attn_v[..seq_len * kvd],
+        seq_len,
+    );
+    // Split qg → q + gate (interleaved per-head layout, same as
+    // `forward_attention_layer` L583-589).
+    for p in 0..seq_len {
+        let qg_off = p * 2 * q_dim;
+        let q_off = p * q_dim;
+        for h in 0..config.n_head {
+            let src = qg_off + h * 2 * hd;
+            let dst = q_off + h * hd;
+            prefill_ctx.attn_q[dst..dst + hd].copy_from_slice(&prefill_ctx.attn_qg[src..src + hd]);
+            prefill_ctx.attn_gate[dst..dst + hd]
+                .copy_from_slice(&prefill_ctx.attn_qg[src + hd..src + 2 * hd]);
+        }
+    }
+    // Batched QK-norm (per head per position).
+    for p in 0..seq_len {
+        let q_off = p * q_dim;
+        let k_off = p * kvd;
+        for h in 0..config.n_head {
+            let off = q_off + h * hd;
+            rmsnorm_with_gamma_eps(
+                &mut prefill_ctx.attn_q[off..off + hd],
+                &layer_weights.attn_q_norm,
+                eps,
+            );
+        }
+        for h in 0..config.n_kv_head {
+            let off = k_off + h * hd;
+            rmsnorm_with_gamma_eps(
+                &mut prefill_ctx.attn_k[off..off + hd],
+                &layer_weights.attn_k_norm,
+                eps,
+            );
+        }
+    }
+    // Batched partial RoPE (per position — `pos_at.at(p)`; Contiguous gives
+    // the incumbent `pos = p`).
+    for p in 0..seq_len {
+        let pos = pos_at.at(p);
+        let q_off = p * q_dim;
+        let k_off = p * kvd;
+        if rotary_dim == hd {
+            crate::rope::apply_rope_with_freq(
+                &mut prefill_ctx.attn_q[q_off..q_off + q_dim],
+                &mut prefill_ctx.attn_k[k_off..k_off + kvd],
+                pos,
+                hd,
+                rope_freq.as_slice(),
+            );
+        } else {
+            crate::rope::apply_partial_rope_with_freq(
+                &mut prefill_ctx.attn_q[q_off..q_off + q_dim],
+                &mut prefill_ctx.attn_k[k_off..k_off + kvd],
+                pos,
+                hd,
+                rotary_dim,
+                rope_freq.as_slice(),
+            );
+        }
+    }
+    // Batched K,V cache write — copy each position's K,V into its slot.
+    // Independent per position (no cross-position dependency). The slot is
+    // the PACKED index `p` in both shapes: kept tokens pack at 0..K' and the
+    // original-position RoPE phase is already baked into K above.
+    for p in 0..seq_len {
+        let pos_off = p * kvd;
+        let k_src = p * kvd;
+        let v_src = p * kvd;
+        kv_cache.key[pos_off..pos_off + kvd]
+            .copy_from_slice(&prefill_ctx.attn_k[k_src..k_src + kvd]);
+        kv_cache.value[pos_off..pos_off + kvd]
+            .copy_from_slice(&prefill_ctx.attn_v[v_src..v_src + kvd]);
+    }
+
+    // Phase B (sequential): attention scoring per position.
+    // Position p attends to K[0..=p] / V[0..=p] (causal mask) — the PACKED
+    // prefix in the pruned shape, which is exactly the kept-subset softmax.
+    // Bit-identical to the per-position `forward_attention_layer` path —
+    // same `attention_heads_parallel` call, same inputs, same output slot.
+    // Plan 622 T1.1: `key_bias` rides through — per-KEY × per-head, so
+    // every position p indexes the SAME rows (keys at cache slots 0..=p).
+    for p in 0..seq_len {
+        let q_off = p * q_dim;
+        let out_off = p * q_dim;
+        prefill_ctx.attn_out[out_off..out_off + q_dim].fill(0.0);
+        let t_n = p + 1;
+        unsafe {
+            crate::transformer::attention_heads_parallel_bias(
+                &prefill_ctx.attn_q[q_off..q_off + q_dim],
+                &kv_cache.key,
+                &kv_cache.value,
+                &mut prefill_ctx.attn_out[out_off..out_off + q_dim],
+                &mut prefill_ctx.head_scores,
+                config.n_head,
+                config.n_kv_head,
+                kvd,
+                hd,
+                t_n,
+                scale,
+                0.0,
+                config.block_size,
+                key_bias,
+            );
+        }
+    }
+
+    // Phase C (batched): output gate × attn_out + o_proj + residual add.
+    // Output gating: attn_out[p] *= sigmoid(gate[p]). Elementwise.
+    for i in 0..seq_len * q_dim {
+        prefill_ctx.attn_out[i] *= crate::simd::fast_sigmoid(prefill_ctx.attn_gate[i]);
+    }
+    // Batched output projection: hidden = attn_wo @ attn_out.
+    // Overwrites the normalized hidden (no longer needed after QKV proj).
+    layer_weights.attn_wo.matmat(
+        &prefill_ctx.attn_out[..seq_len * q_dim],
+        &mut prefill_ctx.hidden[..seq_len * n],
+        seq_len,
+    );
+    // Residual add: hidden[p] += attn_residual[p] (the PRE-norm hidden).
+    for i in 0..seq_len * n {
+        prefill_ctx.hidden[i] += prefill_ctx.attn_residual[i];
+    }
+
+    // Phase D (batched MLP) — shared with DeltaNet layer above.
+    batched_mlp(prefill_ctx, layer_weights, seq_len, n, mlp, eps);
 }
 
 /// Chunked causal prefill with a logical-position offset and the optional
@@ -2243,6 +2347,223 @@ pub fn prefill_qwen_deltanet_chunk_into(
         &mut prefill_ctx.hidden[last_off..last_off + n],
         &weights.final_norm,
         eps,
+    );
+    let last_hidden = &prefill_ctx.hidden[last_off..last_off + n];
+    assert!(
+        logits_out.len() >= v,
+        "logits_out too short: {} < {v}",
+        logits_out.len()
+    );
+    weights.lm_head.matvec(last_hidden, &mut logits_out[..v]);
+}
+
+// ---------------------------------------------------------------------------
+// Pruned prefill (Plan 622 T2.1 — the `tokengate` lane's CPU reference)
+// ---------------------------------------------------------------------------
+
+/// The caller-owned plan + diagnostics for [`prefill_qwen_deltanet_pruned_into`].
+///
+/// `prune_at_layer` is L: layers `<= L` run the full prompt; the layer-L mixer
+/// output (attention or DeltaNet — any mixer type, per Research 013's hybrid
+/// placement rules) is scored by the caller's scorer closure right after L's
+/// MLP; layers `> L` run only the kept tokens. `n_sink` is the scaffold size
+/// (the `kv_evict` sink convention — original positions `< n_sink` are always
+/// kept) and the final position is ALWAYS kept too (it is the logits source).
+/// `keep_prunable` is K — the number of PRUNABLE tokens kept (scaffold tokens
+/// are on top of K, matching the paper's "top-K keeps K prunable + all
+/// non-prunable"). `scores` and `kept` are OUT diagnostics: the scorer's raw
+/// output at L and the ascending ORIGINAL indices that survived.
+#[cfg(feature = "tokengate")]
+pub struct PrunedPrefillPlan {
+    pub prune_at_layer: usize,
+    pub n_sink: usize,
+    pub keep_prunable: usize,
+    pub scores: Vec<f32>,
+    pub kept: Vec<usize>,
+}
+
+#[cfg(feature = "tokengate")]
+impl PrunedPrefillPlan {
+    pub fn new(prune_at_layer: usize, n_sink: usize, keep_prunable: usize) -> Self {
+        Self {
+            prune_at_layer,
+            n_sink,
+            keep_prunable,
+            scores: Vec::new(),
+            kept: Vec::new(),
+        }
+    }
+}
+
+/// Plan 622 T2.1 — the pruned-prefill CPU reference for the qwen35-hybrid
+/// serving path.
+///
+/// # Exactness laws (what this shape guarantees)
+///
+/// - **K = full is a dispatch identity**: with `keep_prunable >=` the prunable
+///   count, the selection keeps every token, the gather is a pure row move,
+///   `Kept(0..T)` equals `Contiguous`, and the logits are BIT-IDENTICAL to
+///   [`prefill_qwen_deltanet_into`] with the same `key_bias` (pinned by
+///   `tests/plan622_pruned_prefill_g1.rs`).
+/// - **Subset-softmax equivalence**: for layers `> L` the KV cache rows are
+///   PACKED kept tokens (`slot = packed index`), each row roped with its
+///   ORIGINAL position — so a kept query's softmax over the packed prefix is
+///   exactly the full-prefill softmax with the pruned keys masked out. GDN
+///   layers `> L` scan the kept tokens in original order (state built from
+///   kept tokens only — the placement rule, not an approximation of the full
+///   scan).
+/// - **State split**: layers `<= L` accumulate full-prompt GDN state and full
+///   KV; layers `> L` see only kept tokens. For `l <= L` the pruned run's
+///   state is byte-identical to the full run's at ANY K (the compaction
+///   happens strictly after L).
+///
+/// # Scope notes (honest seams, not silent ones)
+///
+/// - **Decode continuation is NOT wired here**: after a pruned prefill, layers
+///   `<= L` hold T prompt rows while layers `> L` hold K' — the shared-`pos`
+///   decode contract of [`forward_qwen_deltanet`] cannot address both. The
+///   per-layer fill divergence is exactly what the serving quartet's decode
+///   side (T2.3 constant fold / T2.4 graph-per-length) resolves; this fn is
+///   the prefill compute reference.
+/// - In the pruned shape, a `key_bias` table is read in PACKED slot order
+///   (row `j` = the kept-rank-`j` token) — Phase 3's gate overlay owns the
+///   kept-order indexing.
+/// - Compaction is a GATHER (in-place row move through `attn_residual`), not
+///   row padding — Issue 1107's pads-to-front law names a future BATCHED
+///   row-pruning shape, not this one.
+///
+/// `scorer` receives the layer-L output hidden rows `[live_len, n_embd]` (the
+/// residual entering layer `L+1`) and writes one importance value per row into
+/// the provided buffer (length `live_len`). Selection ties break FIRST-INDEX
+/// and NaN scores sort worst (the determinism law).
+#[cfg(feature = "tokengate")]
+#[allow(clippy::too_many_arguments)]
+pub fn prefill_qwen_deltanet_pruned_into(
+    weights: &QwenDeltaNetWeights,
+    config: &Config,
+    cache: &mut HybridCache,
+    prompt_tokens: &[usize],
+    scratch: &mut HybridForwardScratch,
+    rope_freq: &crate::rope::RopeFreqTable,
+    prefill_ctx: &mut PrefillContext,
+    logits_out: &mut [f32],
+    key_bias: Option<(&[f32], crate::transformer::KeyBiasLayout)>,
+    prune: &mut PrunedPrefillPlan,
+    scorer: &mut dyn FnMut(&[f32], &mut [f32]),
+) {
+    let n = config.n_embd;
+    let v = config.vocab_size;
+    let seq_len = prompt_tokens.len();
+    assert!(seq_len > 0, "prefill requires at least one token");
+    assert!(
+        seq_len <= prefill_ctx.max_prompt_len,
+        "prompt length {seq_len} exceeds prefill capacity {}",
+        prefill_ctx.max_prompt_len
+    );
+    assert!(
+        prune.prune_at_layer + 1 < weights.layers.len(),
+        "prune_at_layer {} must leave at least one layer above L (have {})",
+        prune.prune_at_layer,
+        weights.layers.len()
+    );
+
+    // 1. Embed all prompt tokens (same as `_into`).
+    for (p, &token) in prompt_tokens.iter().enumerate() {
+        let tok_off = token * n;
+        prefill_ctx.hidden[p * n..(p + 1) * n].copy_from_slice(&weights.wte[tok_off..tok_off + n]);
+    }
+
+    let q_dim = config.n_head * config.head_dim;
+    let kvd = crate::types::kv_dim(config);
+    let hd = config.head_dim;
+    let mlp = config.mlp_hidden;
+    let eps = config.rms_norm_eps;
+    let rotary_dim = effective_rotary_dim(config);
+    let scale = 1.0 / (hd as f32).sqrt();
+
+    let mut live_len = seq_len;
+    for (layer_idx, layer_weights) in weights.layers.iter().enumerate() {
+        let is_linear = weights.layer_types[layer_idx] == DeltaNetLayerType::DeltaNet;
+
+        if is_linear {
+            prefill_deltanet_branch(
+                layer_weights,
+                config,
+                (
+                    &mut cache.deltanet_state.recurrent_states[layer_idx],
+                    &mut cache.deltanet_state.conv_states[layer_idx],
+                ),
+                scratch,
+                prefill_ctx,
+                live_len,
+                n,
+                mlp,
+                eps,
+            );
+        } else {
+            let pos_at = if live_len == seq_len {
+                PrefillPositions::Contiguous
+            } else {
+                PrefillPositions::Kept(&prune.kept)
+            };
+            prefill_attention_branch(
+                layer_weights,
+                config,
+                &mut cache.kv_cache.layers[layer_idx],
+                prefill_ctx,
+                rope_freq,
+                live_len,
+                n,
+                q_dim,
+                kvd,
+                hd,
+                mlp,
+                eps,
+                rotary_dim,
+                scale,
+                pos_at,
+                key_bias,
+            );
+        }
+
+        // The prune point: score the layer-L mixer output (the residual
+        // entering L+1), select, and compact `hidden` in place. Runs exactly
+        // once, while the stream is still the full prompt.
+        if layer_idx == prune.prune_at_layer {
+            assert_eq!(
+                live_len, seq_len,
+                "the prune layer must see the full prompt"
+            );
+            prune.scores.clear();
+            prune.scores.resize(live_len, 0.0);
+            scorer(&prefill_ctx.hidden[..live_len * n], &mut prune.scores);
+            crate::tokengate::select_kept_into(
+                &prune.scores,
+                prune.n_sink,
+                prune.keep_prunable,
+                &mut prune.kept,
+            );
+            let new_len = prune.kept.len();
+            // Gather kept rows through `attn_residual` (sized cap * n >=
+            // live_len * n; clobbering it is safe here — we are between
+            // layers, and the next attention branch overwrites it in Phase A).
+            for (dst, &src) in prune.kept.iter().enumerate() {
+                prefill_ctx.attn_residual[dst * n..(dst + 1) * n]
+                    .copy_from_slice(&prefill_ctx.hidden[src * n..(src + 1) * n]);
+            }
+            prefill_ctx.hidden[..new_len * n]
+                .copy_from_slice(&prefill_ctx.attn_residual[..new_len * n]);
+            live_len = new_len;
+        }
+    }
+
+    // Final RMSNorm + LM head on the LAST KEPT row (scaffold guarantees it is
+    // the original final token).
+    let last_off = (live_len - 1) * n;
+    rmsnorm_with_gamma_eps(
+        &mut prefill_ctx.hidden[last_off..last_off + n],
+        &weights.final_norm,
+        config.rms_norm_eps,
     );
     let last_hidden = &prefill_ctx.hidden[last_off..last_off + n];
     assert!(
