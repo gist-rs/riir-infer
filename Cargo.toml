@@ -813,6 +813,13 @@ name = "plan622_pruned_prefill_g1"
 path = "tests/plan622_pruned_prefill_g1.rs"
 required-features = ["tokengate", "deltanet_inference"]
 
+# Plan 622 T2.2 — the pad-bias bucket shape's G1 battery (bucketed ≡ unpadded
+# byte identity at every width, dead pad slots, the −1e9 full-window law).
+[[test]]
+name = "plan622_bucketed_prefill_g1"
+path = "tests/plan622_bucketed_prefill_g1.rs"
+required-features = ["tokengate", "deltanet_inference"]
+
 # riir-infer Issue 022 — the laya calibration capture driver (checkpoint →
 # per-layer residual states → S matrices → ε-sweep + kill verdict). The
 # module code sits behind #[cfg(feature = "twt_profile")]; this row is

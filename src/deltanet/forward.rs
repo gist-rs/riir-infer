@@ -1726,6 +1726,7 @@ pub fn prefill_qwen_deltanet_into(
                 scratch,
                 prefill_ctx,
                 seq_len,
+                seq_len,
                 n,
                 mlp,
                 eps,
@@ -1787,11 +1788,17 @@ enum PrefillPositions<'a> {
 }
 
 impl PrefillPositions<'_> {
+    /// Position for row `p`. In the `Kept` shape, rows at or above the kept
+    /// count are bucket padding (Plan 622 T2.2): they carry their own slot
+    /// index. That phase lands in a zero K row (pad projections are zero, so
+    /// RoPE rotates zeros) and pad slots are unreachable for every real
+    /// query (causal bound + the T2.2 dead-slot law) — the value is never
+    /// read by anything exact.
     #[inline]
     fn at(&self, p: usize) -> usize {
         match self {
             PrefillPositions::Contiguous => p,
-            PrefillPositions::Kept(kept) => kept[p],
+            PrefillPositions::Kept(kept) => kept.get(p).copied().unwrap_or(p),
         }
     }
 }
@@ -1801,6 +1808,14 @@ impl PrefillPositions<'_> {
 /// [`prefill_qwen_deltanet_into`]'s loop so the pruned variant (Plan 622
 /// T2.1) shares the same body. Pure code motion: callers pass the same
 /// values the inline loop computed.
+///
+/// `real_len <= seq_len` bounds the rows that are REAL: rows
+/// `real_len..seq_len` are bucket padding (Plan 622 T2.2) and MUST NOT
+/// observe or perturb the recurrence — the Phase-1 scan stops at `real_len`
+/// (the Issue-1107 law: a recurrent state never processes a pad; the
+/// pads-to-front zero-state construction is the future BATCHED-row form).
+/// Phase 2's batched MLP runs the full padded width (row-local GEMMs — pad
+/// rows hold finite zeros and their outputs are discarded).
 #[allow(clippy::too_many_arguments)]
 fn prefill_deltanet_branch(
     layer_weights: &DeltaNetLayerWeights,
@@ -1809,13 +1824,16 @@ fn prefill_deltanet_branch(
     scratch: &mut HybridForwardScratch,
     prefill_ctx: &mut PrefillContext,
     seq_len: usize,
+    real_len: usize,
     n: usize,
     mlp: usize,
     eps: f64,
 ) {
     let (recurrent_state, conv_state) = state;
-    // Phase 1 (sequential): residual + input_norm + recurrence + residual.
-    for p in 0..seq_len {
+    debug_assert!(real_len <= seq_len, "real rows exceed the padded width");
+    // Phase 1 (sequential): residual + input_norm + recurrence + residual —
+    // REAL rows only; a pad row must never touch conv or recurrent state.
+    for p in 0..real_len {
         let hidden_slice = &mut prefill_ctx.hidden[p * n..(p + 1) * n];
         scratch.residual[..n].copy_from_slice(hidden_slice);
         rmsnorm_with_gamma_eps(hidden_slice, &layer_weights.input_norm, eps);
@@ -1832,7 +1850,8 @@ fn prefill_deltanet_branch(
         }
     }
 
-    // Phase 2 (batched MLP) — shared with attention layer below.
+    // Phase 2 (batched MLP) — shared with attention layer below. Full padded
+    // width: every row is row-local, pads included (their hidden is zeros).
     batched_mlp(prefill_ctx, layer_weights, seq_len, n, mlp, eps);
 }
 
@@ -2372,7 +2391,25 @@ pub fn prefill_qwen_deltanet_chunk_into(
 /// `keep_prunable` is K — the number of PRUNABLE tokens kept (scaffold tokens
 /// are on top of K, matching the paper's "top-K keeps K prunable + all
 /// non-prunable"). `scores` and `kept` are OUT diagnostics: the scorer's raw
+/// `scores` and `kept` are OUT diagnostics: the scorer's raw
 /// output at L and the ascending ORIGINAL indices that survived.
+///
+/// Plan 622 T2.2 — pad-bias buckets: set `bucket = Some(w)` (w a positive
+/// multiple of 64) to pad the kept sequence up to the next multiple of `w`
+/// after the compaction. Pad rows are zero-hidden rows the layers above L
+/// process as uniform fixed-shape work: the GDN recurrence STOPS at
+/// `real_len` (state provably never observes a pad — the Issue-1107 law's
+/// intent, satisfied by construction for the single-sequence shape; the
+/// pads-to-FRONT machinery is the future BATCHED row-pruning form), the
+/// final logits read the last KEPT row, and the KV slots the pads write
+/// hold the DISCARDED rows' own (finite) evolution — unreachable for every
+/// real query (causal: pads sit above `real_len`) and dead under the
+/// pad-bias table ([`crate::tokengate::pad_bias_rows_into`], the T2.4
+/// fixed-shape arm's law). The caller's decode position after a bucketed
+/// prefill is `real_len`, not `padded_len` (the cut-back contract — pad
+/// slots are never read again). `real_len` / `padded_len` are OUT
+/// diagnostics; at `bucket = None` both equal the kept count and the shape
+/// is the T2.1 incumbent byte-for-byte.
 #[cfg(feature = "tokengate")]
 pub struct PrunedPrefillPlan {
     pub prune_at_layer: usize,
@@ -2380,6 +2417,15 @@ pub struct PrunedPrefillPlan {
     pub keep_prunable: usize,
     pub scores: Vec<f32>,
     pub kept: Vec<usize>,
+    /// Pad-bias bucket width (T2.2). `None` = the unpadded incumbent shape.
+    /// Must be a positive multiple of 64 when set.
+    pub bucket: Option<usize>,
+    /// OUT: the number of REAL (kept) rows after the compaction — the KV/GDN
+    /// state surface a decode continuation consumes (`pos = real_len`).
+    pub real_len: usize,
+    /// OUT: the padded row count the layers above L ran at (`real_len` when
+    /// `bucket = None`, else the next multiple of the bucket width).
+    pub padded_len: usize,
 }
 
 #[cfg(feature = "tokengate")]
@@ -2391,6 +2437,9 @@ impl PrunedPrefillPlan {
             keep_prunable,
             scores: Vec::new(),
             kept: Vec::new(),
+            bucket: None,
+            real_len: 0,
+            padded_len: 0,
         }
     }
 }
@@ -2482,6 +2531,10 @@ pub fn prefill_qwen_deltanet_pruned_into(
     let scale = 1.0 / (hd as f32).sqrt();
 
     let mut live_len = seq_len;
+    // Rows the layers above L may consume as REAL rows (pads live at
+    // `real_len..live_len` once a bucket pads; `real_len == live_len`
+    // everywhere before the prune point and whenever `bucket = None`).
+    let mut real_len = seq_len;
     for (layer_idx, layer_weights) in weights.layers.iter().enumerate() {
         let is_linear = weights.layer_types[layer_idx] == DeltaNetLayerType::DeltaNet;
 
@@ -2496,6 +2549,7 @@ pub fn prefill_qwen_deltanet_pruned_into(
                 scratch,
                 prefill_ctx,
                 live_len,
+                real_len,
                 n,
                 mlp,
                 eps,
@@ -2527,8 +2581,9 @@ pub fn prefill_qwen_deltanet_pruned_into(
         }
 
         // The prune point: score the layer-L mixer output (the residual
-        // entering L+1), select, and compact `hidden` in place. Runs exactly
-        // once, while the stream is still the full prompt.
+        // entering L+1), select, compact `hidden` in place, and pad the kept
+        // run up to the bucket width (T2.2). Runs exactly once, while the
+        // stream is still the full prompt.
         if layer_idx == prune.prune_at_layer {
             assert_eq!(
                 live_len, seq_len,
@@ -2544,6 +2599,7 @@ pub fn prefill_qwen_deltanet_pruned_into(
                 &mut prune.kept,
             );
             let new_len = prune.kept.len();
+            prune.real_len = new_len;
             // Gather kept rows through `attn_residual` (sized cap * n >=
             // live_len * n; clobbering it is safe here — we are between
             // layers, and the next attention branch overwrites it in Phase A).
@@ -2553,13 +2609,41 @@ pub fn prefill_qwen_deltanet_pruned_into(
             }
             prefill_ctx.hidden[..new_len * n]
                 .copy_from_slice(&prefill_ctx.attn_residual[..new_len * n]);
-            live_len = new_len;
+            // T2.2 pad-bias bucket: extend the kept run to the next multiple
+            // of the bucket width with ZERO hidden rows. Every op above L is
+            // row-local for pads (the GDN recurrence stops at `real_len`; the
+            // final logits read the last KEPT row below), so the pads are
+            // provably inert for real rows — their own cache slots evolve
+            // (finite, discarded) but are causally unreachable and dead under
+            // the pad-bias table. `tests/plan622_bucketed_prefill_g1.rs` pins
+            // the byte identity and the kernel-level dead-key law.
+            let padded_len = match prune.bucket {
+                Some(w) => {
+                    assert!(
+                        w > 0 && w % 64 == 0,
+                        "bucket width must be a positive multiple of 64, got {w}"
+                    );
+                    let padded = new_len.div_ceil(w) * w;
+                    assert!(
+                        padded <= prefill_ctx.max_prompt_len,
+                        "bucketed length {padded} exceeds prefill capacity {}",
+                        prefill_ctx.max_prompt_len
+                    );
+                    prefill_ctx.hidden[new_len * n..padded * n].fill(0.0);
+                    padded
+                }
+                None => new_len,
+            };
+            prune.padded_len = padded_len;
+            live_len = padded_len;
+            real_len = new_len;
         }
     }
 
     // Final RMSNorm + LM head on the LAST KEPT row (scaffold guarantees it is
-    // the original final token).
-    let last_off = (live_len - 1) * n;
+    // the original final token). In the bucketed shape `live_len` counts pad
+    // rows too — the logits source is `real_len - 1`, never a pad.
+    let last_off = (real_len - 1) * n;
     rmsnorm_with_gamma_eps(
         &mut prefill_ctx.hidden[last_off..last_off + n],
         &weights.final_norm,

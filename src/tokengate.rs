@@ -90,6 +90,48 @@ pub fn select_kept_into(scores: &[f32], n_sink: usize, k: usize, out: &mut Vec<u
     out.dedup();
 }
 
+/// Logit-space bias that makes a pad key dead under any finite real score:
+/// `exp(-1e9 - max) == 0.0` exactly in f32, so the pad contributes `+0.0` to
+/// the softmax denominator and `+0.0 * v_pad` to the numerator — the real
+/// keys' sums are bitwise unchanged (a real key always supplies the max, and
+/// `+0.0` additions cannot flip a non-negative partial sum).
+pub const PAD_KEY_BIAS: f32 = -1.0e9;
+
+/// Plan 622 T2.2 — the bucketed shape's pad-key bias rows (pure fn).
+///
+/// Writes head-major `[n_head][padded_len]` (the
+/// `crate::transformer::KeyBiasLayout` contract with
+/// `head_stride = padded_len`): slots `< real_len` get `0.0` (inert),
+/// slots `>= real_len` get [`PAD_KEY_BIAS`] (dead key). This is the table the
+/// fixed-shape arm (T2.4's graph-per-padded-length) relies on — its captured
+/// kernel attends the FULL padded window per query, so the pads must be
+/// masked in logit space, not by a per-query causal bound. The bucketed
+/// CPU reference (`prefill_qwen_deltanet_pruned_into` with `bucket`) does NOT
+/// consume this on its own scoring path — its real queries are causally
+/// bounded below `real_len`, so pads are already unreachable and the bias
+/// add would be dead weight; the law it embodies is pinned at kernel level
+/// by `tests/plan622_bucketed_prefill_g1.rs` (full-window + pad bias ≡
+/// causal window, bit-for-bit). When a caller bias table joins (Phase 3's
+/// gate overlay, kept-order rows), the COMPOSED table must extend the same
+/// way: gate rows for the kept slots, [`PAD_KEY_BIAS`] for the pads.
+///
+/// Zero-alloc (`*_into` form); `dst` is `n_head * padded_len`.
+#[cfg(feature = "tokengate")]
+pub fn pad_bias_rows_into(dst: &mut [f32], n_head: usize, real_len: usize, padded_len: usize) {
+    assert!(
+        dst.len() >= n_head * padded_len,
+        "pad-bias buffer {} < {} rows",
+        dst.len(),
+        n_head * padded_len
+    );
+    assert!(real_len <= padded_len, "real rows exceed the padded width");
+    for h in 0..n_head {
+        let row = &mut dst[h * padded_len..][..padded_len];
+        row[..real_len].fill(0.0);
+        row[real_len..].fill(PAD_KEY_BIAS);
+    }
+}
+
 #[cfg(test)]
 mod tests {
     // Feature-off posture: the switch is the constant false, no env read.
