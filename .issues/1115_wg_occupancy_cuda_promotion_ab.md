@@ -1,6 +1,7 @@
-# Issue 1114 — the GEMV occupancy wg rule is default-ON on the wgpu/Metal runtime only — the 4090 CudaRuntime posture is unmeasured (prefill-tail lm_head) — file the CUDA A/B that promotes it there
+# Issue 1115 — the GEMV occupancy wg rule is default-ON on the wgpu/Metal runtime only — the 4090 CudaRuntime posture is unmeasured (prefill-tail lm_head) — file the CUDA A/B that promotes it there
 
 **Status:** OPEN (2026-10-24) — rides the `RIIR_GEMV_WG_OCCUPANCY` default-on promotion (wgpu/Metal runtime; promotion via reviewer verdict round `cd03cea7`, REVISE→fix, 2026-10-24).
+**Claimed:** riir-infer-4090-wgocc, epoch 1792863545, expires 2026-10-26T17:39:00Z
 
 ## The scoped posture (what landed)
 
