@@ -41,8 +41,10 @@ BETWEEN-window band, the paired 2×2 interleave reads ±0.3–0.8%
 within-window and ∓1.3–1.7% between-window common-mode; kill-switch
 `RIIR_PREFILL_GDN_L8=0` (any non-1/true/on value; env wins) restores
 the incumbent; posture gates `recl8_posture_gates` pin both ways
-(unset = ON, `=0` = incumbent); pp4096 e2e re-read OWED non-blocking
-(kernel-only favors the arm at every p ≥ 17 — 0.785× at p4096); prior
+(unset = ON, `=0` = incumbent); pp4096 e2e re-read EXECUTED 2026-10-24
+post-promotion (window 3: +2.62% pooled, G1 bytewise ×4, clean
+interleave — the owed cell CLOSED, every measured posture carries a
+positive replicated read); prior
 record: kernel-only k4w4 1.26–1.51× at the DQ-lane posture
 (`.benchmarks/884_plan621_gdn_l8_eager_prefill.md`), the league
 re-gate opened opt-in 2026-10-21 (riir-ai Bench 993));
