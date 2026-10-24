@@ -87,6 +87,16 @@
 - `random_scores_into` (tokengate.rs): the seeded floor rides the SAME selection machinery (scaffold + top-K); unit test pins determinism, distinctness, scaffold immunity, K=full ≡ all-ones, K=0 ≡ zeros.
 - This session's write_file tooling twice landed NEW files in sibling repos (riir-refine/src/bin/, katgpt-rs/tests/) before the path convention was fixed to root-prefixed paths — both strays MOVED to this repo the same session, both siblings verified clean (`git status`), no sibling WIP touched.
 
+## T4.2 disposition (the verdict write-up, folded here — one record, not two)
+
+**The lane stays OPT-IN forever; promotion to default is REFUSED by policy** (the lossy-surface law — a lossy gate on the deployed serving path gates on deployed-path behavior, and the pre-registered four-arm GOAT failed on its own terms). Disposition components:
+
+1. **The full overlay (selection + steering bias + decode gate) is refused as a default-on posture at ANY workload** — derived ≥ random-K failed on every-cell-both-axes in this harness, and the lossy-surface law requires per-family conditional retention evidence a single NIAH+ppl suite cannot supply.
+2. **The retrieval-axis dominance (9/10 cells; 1.000 from K=0.125) is the measured basis for the lane's scoped value**: retrieval-shaped serving (needle/RAG-style prompts) at aggressive K. That is an OPT-IN deployment shape, not a default — the same table shows the ppl axis paying for it at K ∈ {0.5, 0.75}.
+3. **The bias overlay is safe only when the bias ranking ≡ the selection ranking** (Finding 4: random-score steering hurt random's own retrieval; the derived pair is self-consistent). Any future arm must ship the pair co-designed — a selector cannot ride the T3.2 magnitude law unless its score profile is mass-shaped (FastKV-class collapse is the counterexample).
+4. **The only re-open is the owner re-weighing the lossy law with this table in hand** (the Issue-971 absorption-counter posture). T4.3 (a trained gate via Plan 469) would re-run this harness as a fifth arm under the same gate — the trained-vs-modelless comparison the lane exists to adjudicate; until then the trained-gate accuracy claim stays unmeasured and unclaimed.
+5. **The kernel capability (per-key bias) and the pruned-prefill quartet stay as landed** — the G1/identity batteries pin them byte-identical at the inert posture; the FAIL binds the GATE OVERLAY's promotion, not the substrate (T4.1's break-even row remains open for the quartet's systems value independent of the overlay).
+
 ## Provenance
 
 - Run: `/tmp/p622t/t34_run.md` (stdout) + `t34_run.log` (stderr progress) — reproduced by `cargo run --release --features tokengate,deltanet_inference --bin tokengate_fourarm -- --context 2048 --needles 4` (defaults: k-fracs 0.0625..0.75, fastkv-window 32, ppl-tokens 128, rand-reps 3, posture both) from the riir-infer root with the sibling layout.
