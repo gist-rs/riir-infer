@@ -665,6 +665,18 @@ name = "needle_eviction_gate"
 path = "src/bin/needle_eviction_gate.rs"
 required-features = ["kv_eviction"]
 
+# Plan 622 T2.5 — the layer-choice measurement: acc-vs-K at L ∈ {0, 1, mid}
+# on the NIAH suite (the needle gate's rig, selection-alone), through the
+# pruned prefill + pruned decode. Pins the prune-layer constant for OUR
+# models (upstream used L=1 dense / L=3 hybrid; measured, not copied).
+# Lives behind #[cfg(all(feature = "tokengate", feature =
+# "deltanet_inference"))]; the row is the reader protection (the green-zero
+# law). OPT-IN, measurement-only.
+[[bin]]
+name = "tokengate_layer_choice"
+path = "src/bin/tokengate_layer_choice.rs"
+required-features = ["tokengate", "deltanet_inference"]
+
 # katgpt-rs Issue 929 (Research 614, DiscoLoop) — the Bonsai-2-27B PQ2_0
 # loop-alignment probe runner: the capable-checkpoint leg the kimi legs
 # (Benches 927+930, UNDECIDABLE — dead label axis) could not answer.
