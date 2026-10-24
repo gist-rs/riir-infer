@@ -46,8 +46,14 @@ full-K3 zgate-folded variant measured 1-ULP-divergent, the incumbent
 zgate's compiled fma contraction does not reproduce across kernel
 compilations, so the zgate stays its own launch; −160 launches/token
 EXACT but e2e +1.40% BELOW the promote bar → opt-in kept — riir-ai
-Bench 995; the kernel-EXEC GEMV campaign continues in riir-ai Issue
-1114);
+Bench 995; the kernel-EXEC GEMV campaign RESOLVED 2026-10-23 (riir-ai
+Issue 1114, closed — the calibration re-priced the 767/995 per-shape µs
+as 2–5× overhead-polluted; the class is WORKGROUP-COUNT-limited, not
+shape-cursed; the dispatch-only `launch_rowtiled8_wg`/`launch_f16scale_wg`
+shape rule (m≥8192→128, m≥4096→64, else 256) is byte-identical and won
++4.88/+5.52% e2e GOAT ×2 on the m5ultra — shipped here as `RIIR_GEMV_WG_OCCUPANCY`
+(default OFF, `gemv_ternary_cubecl.rs` + `launch_f16scale_wg`); promotion
+OWNER-GATED; measured basis riir-ai Bench 996, record in riir-ai HISTORY.md);
 the GDN delta-roll state journal LANDED 2026-10-20 (Issue 049, opt-in
 `gdn_delta_roll` — `deltanet/delta_roll.rs`: post-commit state recovery by
 rank-1 unwind from the final state + per-token (u, k, β, g) contexts, ~64×
