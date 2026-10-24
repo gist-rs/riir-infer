@@ -37,7 +37,10 @@ the DQ-lane posture, bit-identity bytewise vs rowpar — see
 `.benchmarks/884_plan621_gdn_l8_eager_prefill.md`; the league-posture
 e2e re-gate EXECUTED 2026-10-21 (riir-ai Bench 993): G1 bytewise ×4 at
 the league posture and +3.2% pp2048, band-clause gap → opt-in pending
-the owner gate (second-window replication owed));
+the owner gate; second window REPLICATED 2026-10-24 (riir-ai Bench 997:
++2.76% pp2048, G1 bytewise ×8, between-window deltas inside the band;
+pp4096 NO-READ — the OFF baseline's own halves moved −8.9%; promotion
+STAYS OWNER-GATED));
 the fused GDN fold-tail + SwiGLU-rotate decode kernels LANDED 2026-10-23
 (riir-ai Issue 1113 lever 1 — `deltanet_rotation_cubecl.rs`, opt-in env
 `RIIR_GDN_PERMUTE_ROTATE_FUSED` / `RIIR_SWIGLU_ROTATE_FUSED`, macOS
