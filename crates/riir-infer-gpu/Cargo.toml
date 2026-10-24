@@ -431,6 +431,12 @@ required-features = ["dq_phase_bench"]
 name = "dq_phase_matrix"
 required-features = ["dq_phase_bench", "ternary_gemv_cuda_raw", "ternary_gemm_batched"]
 
+# Issue 1110 T2 — the β-reopen probe: drift census + flip-vs-resample win
+# rates on the gemma2 d2f decode distribution (CUDA-only instrument, 4090).
+[[bin]]
+name = "issue1110_reopen_probe"
+required-features = ["gemma2_d2f"]
+
 [[bin]]
 name = "dq_s3_matrix"
 required-features = ["dq_s3_bench"]
