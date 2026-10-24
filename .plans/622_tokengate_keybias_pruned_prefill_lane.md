@@ -1,7 +1,8 @@
 # Plan 622: TokenGate Substrate Lane — Per-Key-Bias Attention + Exact Pruned Prefill + Deterministic Gate Overlay
 
 **Status:** Active — Phase 1 T1.0 + T1.1 + T1.2 + T1.3 + T1.4 + T1.5 DONE; **the T1.4 f16 bias-table lever LANDED 2026-10-23 (zed-m3-tokengate): the armed tax is now 1.013–1.033 by cell (was 1.09–1.13 on the f32 wire) — the cost-gate ratchet RE-PINNED DOWNWARD to ≤1.05** (bench 089; the landing beat its ~6% prediction: the first cut's branchy bit-manip decode measured WORSE than f32 at 1.24–1.29 — the ~10-op decode sits after the KQ mma where only the loads hoist — and the one-instruction `cvt.f32.f16` widen recovered it). **T1.3's CUDA MODEL-LEVEL walks COMPLETE + BOTH GREEN at the f16 wire** (league Δlogit 1.0105 and synth Δlogit 0.0831 — both byte-identical to the f32 records: the ±12/±1.5-class fixtures are f16-exact); T1.6 (Metal) remains, then Phases 2–4; SECONDARY/PRIMARY ordering per Research 013 §4: this is the PRIMARY lane (runs in the serving hot path, no training required); riir-train Plan 469 rides this plan's Phase 1 seam.
-**Claimed:** zed-m3-tokengate, 1792677302, expires 2026-10-24T13:55:00Z
+**Lease released:** zed-m3-tokengate claimed 2026-10-21, expired 2026-10-24T13:55Z with no follow-up landing (Phase 1 complete at the f16 wire; Phase 2 unstarted) — expired claims are re-claimable per the 48h rule.
+**Claimed:** zed-m3-continue, 1792864639, expires 2026-10-26T17:57:00Z
 
 **Date:** 2026-10-22
 **Research:** [riir-infer/.research/013_TokenGate_Trainable_Token_Pruning_Prefill.md](../.research/013_TokenGate_Trainable_Token_Pruning_Prefill.md)
