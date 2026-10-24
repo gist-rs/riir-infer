@@ -2105,6 +2105,10 @@ pub fn prefill_qwen_deltanet_into(
 /// shapes.
 enum PrefillPositions<'a> {
     Contiguous,
+    // Constructed only by the tokengate-gated pruned-prefill shape (plan 622
+    // T2.1) — postures without that feature never build it, so the allow is
+    // itself gated: at the armed posture it disappears and the lint stays live.
+    #[cfg_attr(not(feature = "tokengate"), allow(dead_code))]
     Kept(&'a [usize]),
 }
 
