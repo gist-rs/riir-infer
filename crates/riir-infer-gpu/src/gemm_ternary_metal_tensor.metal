@@ -34,14 +34,35 @@ using namespace metal;
 // NRB = 128 (output cols / tokens per workgroup)
 // 4 simdgroups = 128 threads per workgroup
 // ---------------------------------------------------------------------------
-constant constexpr int SZ_SIMD     = 16;
-constant constexpr int NK_CHUNK    = 2;                          // N_MM_NK
-constant constexpr int K_TILE      = SZ_SIMD * NK_CHUNK;         // 32
-constant constexpr int NRA         = 64;                          // M_tile (features)
-constant constexpr int NRB         = 128;                         // N_tile (tokens)
-constant constexpr int NSG         = 4;                           // simdgroups per workgroup
-constant constexpr int NUM_THREADS = 32 * NSG;                    // 128
-constant constexpr int A_WORK_ITEMS = NRA * NK_CHUNK;             // 128 (16 elements each)
+// Issue 1113 lever-3 calibration cell 2 (the .research/400 shape sweep): every
+// tile constant is overridable via a SWEEP_* define that
+// `MetalTensorGemm::new_with_config` prepends at pipeline-compile time. With
+// no defines the source compiles EXACTLY as before (the fork geometry), so the
+// default pipeline — and the two sibling modules that include_str! this file —
+// are bit-untouched.
+#ifndef SWEEP_SZ_SIMD
+#define SWEEP_SZ_SIMD 16
+#endif
+#ifndef SWEEP_NK_CHUNK
+#define SWEEP_NK_CHUNK 2
+#endif
+#ifndef SWEEP_NRA
+#define SWEEP_NRA 64
+#endif
+#ifndef SWEEP_NRB
+#define SWEEP_NRB 128
+#endif
+#ifndef SWEEP_NSG
+#define SWEEP_NSG 4
+#endif
+constant constexpr int SZ_SIMD     = SWEEP_SZ_SIMD;
+constant constexpr int NK_CHUNK    = SWEEP_NK_CHUNK;           // N_MM_NK
+constant constexpr int K_TILE      = SZ_SIMD * NK_CHUNK;       // 32
+constant constexpr int NRA         = SWEEP_NRA;                // M_tile (features)
+constant constexpr int NRB         = SWEEP_NRB;                // N_tile (tokens)
+constant constexpr int NSG         = SWEEP_NSG;                // simdgroups per workgroup
+constant constexpr int NUM_THREADS = 32 * NSG;                 // 128
+constant constexpr int A_WORK_ITEMS = NRA * NK_CHUNK;          // 128 (16 elements each)
 
 // ---------------------------------------------------------------------------
 // Main kernel — matmul2d ternary GEMM

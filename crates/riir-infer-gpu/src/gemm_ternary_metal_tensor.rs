@@ -25,6 +25,18 @@
 //! the CubeCL↔Metal switches entirely) — a major architectural change,
 //! not an integration fix (see Issue 651 §"Update 2026-08-13").
 //!
+//! # Calibration sweep (Issue 1113 lever-3 cell 2, 2026-10-24)
+//!
+//! The M5-Ultra prefill defense re-opened this kernel as the calibration
+//! instrument: [`MetalTileConfig`] + [`MetalTensorGemm::new_with_config`]
+//! compiles the SAME kernel at any tile geometry (the SWEEP_* define guards in
+//! the .metal), so the per-SKU tile calibration the research note demands
+//! (`.research/400` — "measure the smem/simdgroup GEMM shapes against the M5
+//! GPU's limits FIRST, then design") runs against the live kernel instead of
+//! a hard-coded 64×128. The M3-era e2e verdicts above were taken at P=128;
+//! they do NOT answer the pp2048+ postures (per-projection overhead amortizes
+//! ~16× differently) and they do not answer a different box.
+//!
 //! # Architecture
 //!
 //! - **A-matrix** (weights): dequanted from ternary bit-plane format into a
@@ -68,6 +80,63 @@ use metal::{
 const MSL_SOURCE: &str = include_str!("gemm_ternary_metal_tensor.metal");
 
 // ---------------------------------------------------------------------------
+// Tile configuration (Issue 1113 lever-3 calibration cell 2)
+// ---------------------------------------------------------------------------
+
+/// Compile-time tile geometry of the matmul2d kernel.
+///
+/// The default is the fork geometry (`kernel_mul_mm`: 64×128 output tile,
+/// K-tile 32, 4 simdgroups). [`MetalTensorGemm::new_with_config`] compiles a
+/// pipeline with any other geometry by prepending `SWEEP_*` defines to the
+/// MSL source — see the guard block in `gemm_ternary_metal_tensor.metal`.
+/// The sweep instrument (`bench_1113_prefill_tensor_sweep`) walks a config
+/// list; configs the mpp framework refuses surface as a `COMPILE_FAIL` row,
+/// never a panic.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct MetalTileConfig {
+    /// Output features (M) per workgroup. smem cost: `K_TILE * nra * 2` bytes.
+    pub nra: u32,
+    /// Output tokens (N) per workgroup.
+    pub nrb: u32,
+    /// K-tile = `16 * nk_chunk` (SZ_SIMD = 16 is fixed by the hardware).
+    pub nk_chunk: u32,
+    /// Simdgroups per workgroup; threads = `32 * nsg`.
+    pub nsg: u32,
+}
+
+impl Default for MetalTileConfig {
+    fn default() -> Self {
+        Self {
+            nra: 64,
+            nrb: 128,
+            nk_chunk: 2,
+            nsg: 4,
+        }
+    }
+}
+
+impl MetalTileConfig {
+    /// The `#define` preamble for this config, prepended to the MSL source.
+    fn defines(self) -> String {
+        let Self {
+            nra,
+            nrb,
+            nk_chunk,
+            nsg,
+        } = self;
+        format!(
+            "#define SWEEP_NRA {nra}\n#define SWEEP_NRB {nrb}\n#define SWEEP_NK_CHUNK {nk_chunk}\n#define SWEEP_NSG {nsg}\n"
+        )
+    }
+
+    /// Threadgroup memory the dequanted A tile needs: `K_TILE * NRA` halfs.
+    pub fn threadgroup_mem_bytes(self) -> u64 {
+        let k_tile = 16 * self.nk_chunk;
+        u64::from(k_tile * self.nra) * 2
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Ternary bit-plane format constants (must match gemv_ternary_cubecl.rs)
 // ---------------------------------------------------------------------------
 
@@ -91,6 +160,9 @@ pub struct MetalTensorGemm {
     queue: CommandQueue,
     pipeline: ComputePipelineState,
     _library: Library,
+    /// The tile geometry this instance's pipeline was compiled with — the
+    /// launch grid, threadgroup size, and smem length all derive from it.
+    config: MetalTileConfig,
     /// Scratch buffer cache (T8 optimization). Keyed by byte size; reused
     /// across calls to avoid per-projection `new_buffer` allocation overhead.
     /// Stores both input + output scratch buffers.
@@ -104,14 +176,24 @@ impl MetalTensorGemm {
     /// Metal device doesn't support `metal::tensor` (requires Metal 3.1+,
     /// macOS 14+).
     pub fn new() -> Result<Self, String> {
+        Self::new_with_config(MetalTileConfig::default())
+    }
+
+    /// Compile the kernel at a custom [`MetalTileConfig`] (the calibration
+    /// sweep's entry point; [`new`](Self::new) is this with the fork geometry).
+    ///
+    /// A geometry the mpp framework refuses fails HERE, at pipeline compile,
+    /// with the compiler's message — the caller records it and moves on.
+    pub fn new_with_config(config: MetalTileConfig) -> Result<Self, String> {
         let device = Device::system_default().ok_or("No Metal device found")?;
 
         // Check for metal::tensor support (MSL 3.1+, macOS 14+)
         // The compile will fail if the header isn't available.
         let options = CompileOptions::new();
+        let source = format!("{}{}", config.defines(), MSL_SOURCE);
         let library = device
-            .new_library_with_source(MSL_SOURCE, &options)
-            .map_err(|e| format!("MSL compilation failed: {e}"))?;
+            .new_library_with_source(source.as_str(), &options)
+            .map_err(|e| format!("MSL compilation failed ({config:?}): {e}"))?;
 
         let function_name = "gemm_ternary_tensor";
         let function = library
@@ -129,8 +211,14 @@ impl MetalTensorGemm {
             queue,
             pipeline,
             _library: library,
+            config,
             scratch: std::sync::Mutex::new(std::collections::HashMap::new()),
         })
+    }
+
+    /// The tile geometry this instance was compiled with.
+    pub fn config(&self) -> MetalTileConfig {
+        self.config
     }
 
     /// Get or create a scratch buffer of `byte_len` bytes, reused across calls.
@@ -220,8 +308,9 @@ impl MetalTensorGemm {
     /// Computes `output[P × m] = dequant_ternary(weight[m × n]) @ input[P × n]^T`
     /// using the `metal::tensor` matmul2d API.
     ///
-    /// Dispatch: 64×128 output tiles, 4 simdgroups (128 threads) per workgroup.
-    /// Matches llama.cpp's `kernel_mul_mm` tile geometry. Edge tiles that exceed
+    /// Dispatch: one workgroup per 64×128 output tile, 4 simdgroups (128
+    /// threads) — or the geometry this instance was compiled with via
+    /// [`new_with_config`](Self::new_with_config). Edge tiles that exceed
     /// the matrix bounds are handled by the matmul2d tensor extents (bounds
     /// checking is built into the cooperative-tensor store/load).
     ///
@@ -247,27 +336,22 @@ impl MetalTensorGemm {
         m: u32,
         p: u32,
     ) {
-        // matmul2d tile constants (must match the MSL kernel)
-        const NRA: u32 = 64; // features (M) per workgroup
-        const NRB: u32 = 128; // tokens (P) per workgroup
-        const NSG: u32 = 4; // simdgroups per workgroup
-        const THREADS_PER_SG: u32 = 32;
-        const NUM_THREADS: u32 = THREADS_PER_SG * NSG; // 128
-
-        // Threadgroup memory for the dequanted A tile: K_TILE × NRA × sizeof(half)
-        // K_TILE = 32, NRA = 64, sizeof(half) = 2 → 4096 bytes.
-        // Must be explicitly allocated via set_threadgroup_memory_length — an
-        // unsized `threadgroup char*` in the kernel defaults to zero bytes.
-        const THREADGROUP_MEM_BYTES: u64 = 32 * 64 * 2; // 4096
+        // Tile geometry derives from the compiled config (the fork geometry
+        // reproduces the historical constants exactly).
+        let cfg = self.config;
+        let nra = cfg.nra;
+        let nrb = cfg.nrb;
+        let num_threads = u64::from(32 * cfg.nsg);
+        let threadgroup_mem_bytes = cfg.threadgroup_mem_bytes();
 
         // Grid: one workgroup per output tile
         let grid = MTLSize {
-            width: p.div_ceil(NRB) as u64,  // token tiles
-            height: m.div_ceil(NRA) as u64, // feature tiles
+            width: p.div_ceil(nrb) as u64,  // token tiles
+            height: m.div_ceil(nra) as u64, // feature tiles
             depth: 1,
         };
         let threadgroup = MTLSize {
-            width: NUM_THREADS as u64,
+            width: num_threads,
             height: 1,
             depth: 1,
         };
@@ -291,7 +375,7 @@ impl MetalTensorGemm {
         encoder.set_bytes(9, 4, p.to_ne_bytes().as_ptr() as *const _);
 
         // Allocate threadgroup memory for the dequanted weight tile (index 0 = [[threadgroup(0)]])
-        encoder.set_threadgroup_memory_length(0, THREADGROUP_MEM_BYTES);
+        encoder.set_threadgroup_memory_length(0, threadgroup_mem_bytes);
 
         encoder.use_resource(pos_buf, metal::MTLResourceUsage::Read);
         encoder.use_resource(neg_buf, metal::MTLResourceUsage::Read);
