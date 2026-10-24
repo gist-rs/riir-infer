@@ -336,6 +336,194 @@ pub fn derived_magnitudes_into(
     }
 }
 
+/// Plan 622 T3.3 — the scorer family v0 (the deterministic gate overlay's
+/// selection surface). One score per prompt token, consumed by
+/// [`select_kept_into`] at layer L and by [`build_decode_gate_into`] at
+/// prefill end. Default arm = (a); (b)/(c) are ablation rows.
+#[cfg(feature = "tokengate")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum ScorerArm {
+    /// (a) attention-mass received at layer L — the T3.3 default. The scores
+    /// are the per-key causal attention mass the layer-L pass computes
+    /// (upstream's gate substitutes a trained MLP for this statistic).
+    #[default]
+    AttentionMass,
+    /// (b) hidden-state norm at L (ablation row): the residual row RMS —
+    /// works at ANY mixer type (a GDN layer at L has no attention mass).
+    HiddenNorm,
+    /// (c) all-ones (ablation row): no token is distinguished — selection
+    /// degenerates to first-index keeps, the no-information floor.
+    AllOnes,
+}
+
+/// Plan 622 T3.3 arm (a): copy the layer-L mass tap into the scores. Refuses
+/// loud when the tap was not armed (the caller passed no `mass_scratch`).
+#[cfg(feature = "tokengate")]
+pub fn scorer_attention_mass(_hidden: &[f32], mass: Option<&[f32]>, scores: &mut [f32]) {
+    let mass = mass.expect(
+        "arm (a) attention-mass requires the layer-L tap (pass mass_scratch to the pruned prefill)",
+    );
+    assert_eq!(mass.len(), scores.len(), "mass tap width mismatch");
+    scores.copy_from_slice(mass);
+}
+
+/// Plan 622 T3.3 arm (b): per-token residual RMS at L — `scores[i] =
+/// √(mean(row_i²))`, f64 statistics, f32 out (Issue-940). The mixer-agnostic
+/// arm: a GDN layer at L scores through this (its hidden rows exist; its
+/// attention mass does not).
+#[cfg(feature = "tokengate")]
+pub fn scorer_hidden_norm(hidden: &[f32], _mass: Option<&[f32]>, scores: &mut [f32]) {
+    let rows = scores.len();
+    assert!(rows > 0, "no tokens to score");
+    let n = hidden.len() / rows;
+    assert!(n > 0 && hidden.len() == rows * n, "hidden rows mismatch");
+    for (i, dst) in scores.iter_mut().enumerate() {
+        let row = &hidden[i * n..(i + 1) * n];
+        let sum_sq: f64 = row
+            .iter()
+            .map(|v| {
+                let v = *v as f64;
+                v * v
+            })
+            .sum();
+        *dst = (sum_sq / n as f64).sqrt() as f32;
+    }
+}
+
+/// Plan 622 T3.3 arm (c): every token scores 1.0 — selection keeps the
+/// first-index prunable tokens, the no-information ablation floor.
+#[cfg(feature = "tokengate")]
+pub fn scorer_all_ones(_hidden: &[f32], _mass: Option<&[f32]>, scores: &mut [f32]) {
+    scores.fill(1.0);
+}
+
+/// Plan 622 T3.3 — the arm dispatch (the harness and boot pick an arm; the
+/// pruned prefill consumes the plain closure seam).
+#[cfg(feature = "tokengate")]
+pub fn run_scorer(arm: ScorerArm, hidden: &[f32], mass: Option<&[f32]>, scores: &mut [f32]) {
+    match arm {
+        ScorerArm::AttentionMass => scorer_attention_mass(hidden, mass, scores),
+        ScorerArm::HiddenNorm => scorer_hidden_norm(hidden, mass, scores),
+        ScorerArm::AllOnes => scorer_all_ones(hidden, mass, scores),
+    }
+}
+
+/// Plan 622 T3.3 — build the T2.3 decode gate's tables at prefill end, once:
+/// per-(layer, head) bias rows `b[s] = magnitude[l] · seqRMSNorm(score)[kept[s]]`
+/// over the PACKED kept slots (upstream law: the magnitude scales the per-key
+/// BIAS — "the bias starts at about one native logit-sigma" — and the score
+/// is sequence-RMS-normalized per slot, `Qwen3RMSNorm` mechanics), appended
+/// slots ZERO (decode-appended keys are always attended), scaffold slots ZERO
+/// (upstream forces the gate value 0 on non-prunable tokens — sinks + the
+/// final token are kept regardless and are never steering targets), and the
+/// scale table all `1.0` (the v0 decode posture carries the folded MASK only —
+/// the rank cooling is a pruned-PREFILL surface; the ≡1 whole-table check then
+/// skips the decode q-multiply entirely).
+///
+/// Layers that never read their windows are left untouched (caller-zeroed):
+/// layers `<= prune_at_layer` (the gate exists above L only) and GDN layers
+/// (they consume neither gate surface — the T2.3 contract). Only full-attn
+/// layers `> L` get rows; each layer's own [`derived_magnitudes_into`] value
+/// scales its rows (the per-layer degeneracy broadcast to `n_head` — head 0's
+/// row is computed and copied).
+///
+/// The normalized score is order-preserving (positive scalar), so selection
+/// by raw scores (the T2.1 seam) ≡ selection by any layer's bias row — the
+/// upstream selection reads the first phase-2 layer's bias; both orders agree.
+/// The pruned-PREFILL steering window (T3.4's bias arm) derives from the same
+/// packed rows extended with [`PAD_KEY_BIAS`] at the pads (the T2.2 doc law);
+/// this fn builds the DECODE gate. Zero-alloc; `eps` — upstream freezes
+/// `_RMS_EPS = 1e-6` (Qwen3RMSNorm's variance placement).
+#[cfg(feature = "tokengate")]
+#[allow(clippy::too_many_arguments)] // the zero-alloc *_into window shape
+pub fn build_decode_gate_into(
+    bias_dst: &mut [f32],
+    mut scale_dst: Option<&mut [f32]>,
+    scores: &[f32],
+    kept: &[usize],
+    n_sink: usize,
+    magnitudes: &[f32],
+    layer_types: &[crate::types::DeltaNetLayerType],
+    prune_at_layer: usize,
+    n_head: usize,
+    head_stride: usize,
+    eps: f64,
+) {
+    use crate::types::DeltaNetLayerType;
+    let n_layers = layer_types.len();
+    assert!(!kept.is_empty(), "the kept list is never empty (scaffold)");
+    assert!(n_head > 0, "no heads");
+    assert!(
+        head_stride >= kept.len(),
+        "head_stride {} < kept rows {}",
+        head_stride,
+        kept.len()
+    );
+    assert_eq!(
+        magnitudes.len(),
+        n_layers,
+        "magnitude table must be [n_layers]"
+    );
+    assert!(
+        bias_dst.len() >= n_layers * n_head * head_stride,
+        "bias table {} < {} windows",
+        bias_dst.len(),
+        n_layers * n_head * head_stride
+    );
+    if let Some(scale) = scale_dst.as_deref() {
+        assert!(
+            scale.len() >= n_layers * n_head,
+            "scale table {} < {} entries",
+            scale.len(),
+            n_layers * n_head
+        );
+    }
+    if let Some(&last) = kept.last() {
+        assert!(last < scores.len(), "kept index {last} outside the scores");
+    }
+
+    // Sequence-RMS denominator over the FULL score vector (upstream
+    // normalizes the gate output before forcing the scaffold zeros).
+    let t = scores.len();
+    let sum_sq: f64 = scores
+        .iter()
+        .map(|s| {
+            let v = *s as f64;
+            v * v
+        })
+        .sum();
+    let inv_rms = 1.0 / (sum_sq / t.max(1) as f64 + eps).sqrt();
+
+    let kept_len = kept.len();
+    let last_slot = kept_len - 1;
+    for (l, lt) in layer_types.iter().enumerate() {
+        if let Some(scale) = scale_dst.as_deref_mut() {
+            scale[l * n_head..(l + 1) * n_head].fill(1.0);
+        }
+        // Skip the never-read windows: at-or-below L, and GDN layers.
+        if l <= prune_at_layer || *lt == DeltaNetLayerType::DeltaNet {
+            continue;
+        }
+        let mag = magnitudes[l];
+        let base = l * n_head * head_stride;
+        {
+            let row0 = &mut bias_dst[base..base + head_stride];
+            for (s, &orig) in kept.iter().enumerate() {
+                row0[s] = if orig < n_sink || s == last_slot {
+                    0.0
+                } else {
+                    let normed = (scores[orig] as f64 * inv_rms) as f32;
+                    mag * normed
+                };
+            }
+            row0[kept_len..].fill(0.0);
+        }
+        for h in 1..n_head {
+            bias_dst.copy_within(base..base + head_stride, base + h * head_stride);
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     // Feature-off posture: the switch is the constant false, no env read.
@@ -605,5 +793,157 @@ mod tests {
             (16.0f64 / 2.0).sqrt() as f32,
             "peaky derives √(sum_sq/d) = √(16/2)"
         );
+    }
+
+    // ---- build_decode_gate_into (T3.3 gate construction) ----------------
+
+    #[cfg(feature = "tokengate")]
+    #[test]
+    fn decode_gate_rows_carry_magnitude_times_normed_score_with_scaffold_and_appended_zeros() {
+        use crate::types::DeltaNetLayerType;
+        // Hybrid [GDN, Attn, Attn], L = 0: layers 1 and 2 steer.
+        let layer_types = vec![
+            DeltaNetLayerType::DeltaNet,
+            DeltaNetLayerType::Attention,
+            DeltaNetLayerType::Attention,
+        ];
+        let scores = [2.0f32, -1.0, 4.0, 0.5, 1.0, 3.0]; // T = 6
+        let kept = [0usize, 2, 4, 5]; // packed slots; T-1 = 5 kept (last)
+        let n_sink = 1usize; // scaffold: original position 0 + the last token
+        let mags = [0.0f32, 2.0, 3.0];
+        let (n_head, stride) = (2usize, 6usize);
+
+        let mut bias = vec![7.5f32; 3 * n_head * stride]; // poisoned sentinel
+        let mut scale = vec![0.0f32; 3 * n_head];
+        super::build_decode_gate_into(
+            &mut bias,
+            Some(&mut scale),
+            &scores,
+            &kept,
+            n_sink,
+            &mags,
+            &layer_types,
+            0,
+            n_head,
+            stride,
+            1e-6,
+        );
+
+        // seq-RMS over ALL six scores: mean sq = (4+1+16+0.25+1+9)/6 = 31.25/6.
+        let inv = 1.0 / (31.25f64 / 6.0 + 1e-6).sqrt();
+        let normed = |j: usize| (scores[j] as f64 * inv) as f32;
+        // Scaffold packed slots: 0 (original < n_sink) and 3 (the last token).
+        let expected_non_scaffold = [2.0 * normed(2), 2.0 * normed(4)];
+
+        // Layer 0 (at L) untouched: sentinel stands (never read).
+        assert!(bias[..n_head * stride].iter().all(|&v| v == 7.5));
+        // Layer 1: head 0 = head 1 (the degeneracy copy), slots [0]/[3] zero,
+        // slots [1]/[2] = mag × normed, appended slots [4..6] zero.
+        for h in 0..n_head {
+            let row = &bias[(n_head + h) * stride..][..stride];
+            assert_eq!(row[0], 0.0, "scaffold sink slot");
+            assert_eq!(row[1], expected_non_scaffold[0]);
+            assert_eq!(row[2], expected_non_scaffold[1]);
+            assert_eq!(row[3], 0.0, "scaffold last-token slot");
+            assert_eq!(row[4..], [0.0; 2], "appended keys zero");
+        }
+        // Layer 2: same shape × its own magnitude (the per-layer law).
+        for h in 0..n_head {
+            let row = &bias[(2 * n_head + h) * stride..][..stride];
+            assert_eq!(row[1], 3.0 * normed(2));
+            assert_eq!(row[2], 3.0 * normed(4));
+        }
+        // Scale table: 1.0 across EVERY layer (the ≡1 skip law) — including
+        // layers that never steer.
+        assert!(scale.iter().all(|&v| v == 1.0));
+    }
+
+    #[cfg(feature = "tokengate")]
+    #[test]
+    fn decode_gate_skips_gdn_and_below_l_windows_and_refuses_bad_shapes() {
+        use crate::types::DeltaNetLayerType;
+        let layer_types = vec![
+            DeltaNetLayerType::Attention,
+            DeltaNetLayerType::DeltaNet,
+            DeltaNetLayerType::Attention,
+        ];
+        let scores = [1.0f32, 2.0, -1.0, 0.5, 3.0];
+        let kept = [0usize, 2, 4]; // slot 1 is non-scaffold (original 2 ≥ n_sink... n_sink=1)
+        let mags = [5.0f32; 3];
+        let mut bias = vec![0.0f32; 3 * 2 * 5];
+        let stride = 5usize;
+        // L = 1: layer 0 is BELOW L (skip), layer 1 is GDN (skip), layer 2
+        // steers — the only window written.
+        super::build_decode_gate_into(
+            &mut bias,
+            None,
+            &scores,
+            &kept,
+            1,
+            &mags,
+            &layer_types,
+            1,
+            2,
+            stride,
+            1e-6,
+        );
+        assert!(bias[..2 * stride].iter().all(|&v| v == 0.0), "below-L skip");
+        assert!(
+            bias[2 * stride..2 * 2 * stride].iter().all(|&v| v == 0.0),
+            "GDN skip"
+        );
+        // Layer 2 written: scaffold slots 0 (original < n_sink) and 2 (last)
+        // zero; the non-scaffold slot 1 carries mag × normed(2) ≠ 0.
+        // sum_sq = 1+4+1+0.25+9 = 15.25 over T = 5.
+        let inv = 1.0 / (15.25f64 / 5.0 + 1e-6).sqrt();
+        let want = 5.0 * ((scores[2] as f64 * inv) as f32);
+        let row = &bias[2 * 2 * stride..3 * 2 * stride];
+        assert_eq!(row[1], want, "the steering window carries the bias");
+        assert_eq!(row[0], 0.0);
+        assert_eq!(row[2], 0.0);
+        assert!(row[stride..2 * stride] == row[..stride], "head copy");
+
+        // Refusals: short stride, short bias table.
+        let mut small = vec![0.0f32; 3 * 2 * 5];
+        for mut bad in [
+            // (bias, stride): stride < kept_len
+            (vec![0.0; 8], 2usize),
+            // bias table too short
+            (vec![0.0; 1], 5usize),
+        ] {
+            let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                super::build_decode_gate_into(
+                    &mut bad.0,
+                    None,
+                    &scores,
+                    &kept,
+                    4,
+                    &mags,
+                    &layer_types,
+                    1,
+                    2,
+                    bad.1,
+                    1e-6,
+                );
+            }));
+            assert!(r.is_err(), "shape refusal must fire (stride={})", bad.1);
+        }
+        let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let empty_kept: Vec<usize> = Vec::new();
+            super::build_decode_gate_into(
+                &mut small,
+                None,
+                &scores,
+                &empty_kept,
+                4,
+                &mags,
+                &layer_types,
+                1,
+                2,
+                4,
+                1e-6,
+            );
+        }));
+        assert!(r.is_err(), "empty kept refuses");
     }
 }

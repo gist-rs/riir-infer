@@ -83,8 +83,8 @@ fn fresh_run(r: &Rig, cap: usize) -> (HybridCache, HybridForwardScratch, Prefill
 
 /// The case scorer: all-ones, with an optional poisoned victim slot (drops
 /// exactly that one mid-prompt token when `keep_prunable` covers the rest).
-fn make_scorer(victim: Option<usize>) -> impl FnMut(&[f32], &mut [f32]) {
-    move |_hidden: &[f32], scores: &mut [f32]| {
+fn make_scorer(victim: Option<usize>) -> impl FnMut(&[f32], Option<&[f32]>, &mut [f32]) {
+    move |_hidden: &[f32], _mass: Option<&[f32]>, scores: &mut [f32]| {
         scores.fill(1.0);
         if let Some(v) = victim {
             scores[v] = -1e9;
@@ -115,6 +115,7 @@ fn run_pruned(
         &mut logits,
         None,
         &mut plan,
+        None,
         &mut scorer,
     );
     (cache, plan, logits)

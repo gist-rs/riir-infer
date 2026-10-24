@@ -2069,6 +2069,7 @@ pub fn prefill_qwen_deltanet_into(
                 scale,
                 PrefillPositions::Contiguous,
                 key_bias,
+                None,
             );
         }
     }
@@ -2182,6 +2183,72 @@ fn prefill_deltanet_branch(
 /// T2.1) shares the same body. Pure code motion: callers pass the same
 /// values the inline loop computed, and `pos_at` only reroutes the RoPE
 /// position ([`PrefillPositions::Kept`] — original positions preserved).
+/// Plan 622 T3.3 arm (a) — attention mass received per key at one layer:
+/// `mass[k] = Σ_heads Σ_{q ≥ k} α[q][k]` over the layer's causal attention
+/// weights. Reads the branch's Phase-A outputs — the post-QK-norm+RoPE
+/// queries `[seq_len * q_dim]` and the roped keys in cache slots
+/// `[0..seq_len]` — and re-derives each row's softmax in the kernel's exact
+/// form (the same simd dot, max-subtract, exp, inv-sum; sequential f32 fold,
+/// Issue-940). NOT a read of the attention call's `head_scores` scratch:
+/// the sequential dispatch arm reuses `head_scores[..block_size]` for EVERY
+/// head, so its post-call content is the last head's weights —
+/// dispatch-dependent, unusable as a tap. Cost when armed: one extra
+/// QK+softmax pass over the layer (no V reads, no output writes);
+/// `Some` at the prune layer only, `None` everywhere else.
+#[allow(clippy::too_many_arguments)] // the kernel-buffer window shape
+pub(crate) fn attention_mass_received_into(
+    mass: &mut [f32],
+    q: &[f32],
+    key_cache: &[f32],
+    scratch: &mut [f32],
+    n_head: usize,
+    n_kv_head: usize,
+    kv_dim: usize,
+    hd: usize,
+    seq_len: usize,
+    scale: f32,
+) {
+    assert!(n_head > 0, "no heads");
+    assert!(mass.len() >= seq_len, "mass buffer shorter than the prompt");
+    assert!(
+        scratch.len() >= seq_len,
+        "softmax scratch shorter than the prompt"
+    );
+    assert_eq!(q.len(), seq_len * n_head * hd, "q rows mismatch");
+    mass[..seq_len].fill(0.0);
+    for p in 0..seq_len {
+        let t_n = p + 1;
+        for h in 0..n_head {
+            // GQA group mapping — the kernel's own `h * n_kv_head / n_head`.
+            let kvg_off = (h * n_kv_head / n_head) * hd;
+            let q_off = p * n_head * hd + h * hd;
+            let mut max_s = f32::NEG_INFINITY;
+            for (t, slot) in scratch[..t_n].iter_mut().enumerate() {
+                let k_off = t * kv_dim + kvg_off;
+                let s = crate::simd::simd_dot_f32(
+                    &q[q_off..q_off + hd],
+                    &key_cache[k_off..k_off + hd],
+                    hd,
+                ) * scale;
+                *slot = s;
+                if s > max_s {
+                    max_s = s;
+                }
+            }
+            let mut sum = 0.0f32;
+            for slot in scratch[..t_n].iter_mut() {
+                let e = (*slot - max_s).exp();
+                *slot = e;
+                sum += e;
+            }
+            let inv_sum = 1.0 / sum;
+            for (m, w) in mass[..t_n].iter_mut().zip(scratch[..t_n].iter()) {
+                *m += *w * inv_sum;
+            }
+        }
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 fn prefill_attention_branch(
     layer_weights: &DeltaNetLayerWeights,
@@ -2200,6 +2267,7 @@ fn prefill_attention_branch(
     scale: f32,
     pos_at: PrefillPositions<'_>,
     key_bias: Option<(&[f32], crate::transformer::KeyBiasLayout)>,
+    mut mass_tap: Option<&mut [f32]>,
 ) {
     // Phase A (batched): pre-attn residual + input_norm + QKV proj +
     // QK-norm + RoPE + K,V cache write. All positions at once.
@@ -2328,6 +2396,28 @@ fn prefill_attention_branch(
                 key_bias,
             );
         }
+    }
+
+    // Plan 622 T3.3 arm (a): the layer-L attention-mass tap. `mass_tap` is
+    // Some only at the prune layer of the pruned prefill; the probe re-derives
+    // the per-key mass from the Phase-A outputs (post-norm+RoPE Q, cached K)
+    // using `head_scores` as its softmax scratch — dead state between Phase B
+    // and C. The reborrow (not a move) keeps the caller's Option alive for
+    // the scorer's read at the prune point.
+    #[allow(clippy::needless_option_as_deref)] // the REBORROW is load-bearing
+    if let Some(mass) = mass_tap.as_deref_mut() {
+        attention_mass_received_into(
+            mass,
+            &prefill_ctx.attn_q[..seq_len * q_dim],
+            &kv_cache.key[..seq_len * kvd],
+            &mut prefill_ctx.head_scores,
+            config.n_head,
+            config.n_kv_head,
+            kvd,
+            hd,
+            seq_len,
+            scale,
+        );
     }
 
     // Phase C (batched): output gate × attn_out + o_proj + residual add.
@@ -2802,6 +2892,13 @@ impl PrunedPrefillPlan {
 /// residual entering layer `L+1`) and writes one importance value per row into
 /// the provided buffer (length `live_len`). Selection ties break FIRST-INDEX
 /// and NaN scores sort worst (the determinism law).
+/// Plan 622 T3.3 — the scorer seam: `(hidden rows, optional layer-L mass
+/// tap, scores out)`. The tap is `Some` only when the caller armed the
+/// T3.3 arm-(a) mass probe (`mass_scratch`) AND the current layer is the
+/// prune layer; arms (b)/(c) ignore it.
+#[cfg(feature = "tokengate")]
+pub type PrunedScorer<'a> = dyn FnMut(&[f32], Option<&[f32]>, &mut [f32]) + 'a;
+
 #[cfg(feature = "tokengate")]
 #[allow(clippy::too_many_arguments)]
 pub fn prefill_qwen_deltanet_pruned_into(
@@ -2815,7 +2912,8 @@ pub fn prefill_qwen_deltanet_pruned_into(
     logits_out: &mut [f32],
     key_bias: Option<(&[f32], crate::transformer::KeyBiasLayout)>,
     prune: &mut PrunedPrefillPlan,
-    scorer: &mut dyn FnMut(&[f32], &mut [f32]),
+    mut mass_scratch: Option<&mut [f32]>,
+    scorer: &mut PrunedScorer<'_>,
 ) {
     let n = config.n_embd;
     let v = config.vocab_size;
@@ -2832,6 +2930,21 @@ pub fn prefill_qwen_deltanet_pruned_into(
         prune.prune_at_layer,
         weights.layers.len()
     );
+    // The T3.3 arm-(a) contract: a mass tap only makes sense at a
+    // full-attention layer (a GDN layer at L has no attention mass — its tap
+    // would read all zeros and the arm would silently degenerate to
+    // first-index keeps).
+    if let Some(mass) = mass_scratch.as_deref() {
+        assert!(
+            weights.layer_types[prune.prune_at_layer] != DeltaNetLayerType::DeltaNet,
+            "the layer-L mass tap requires a full-attention layer at L"
+        );
+        assert!(
+            mass.len() >= seq_len,
+            "mass scratch {} < prompt {seq_len}",
+            mass.len()
+        );
+    }
 
     // 1. Embed all prompt tokens (same as `_into`).
     for (p, &token) in prompt_tokens.iter().enumerate() {
@@ -2877,6 +2990,12 @@ pub fn prefill_qwen_deltanet_pruned_into(
             } else {
                 PrefillPositions::Kept(&prune.kept)
             };
+            // The mass tap arms at the prune layer ONLY (T3.3 arm (a)).
+            let tap = if layer_idx == prune.prune_at_layer {
+                mass_scratch.as_deref_mut()
+            } else {
+                None
+            };
             prefill_attention_branch(
                 layer_weights,
                 config,
@@ -2894,6 +3013,7 @@ pub fn prefill_qwen_deltanet_pruned_into(
                 scale,
                 pos_at,
                 key_bias,
+                tap,
             );
         }
 
@@ -2908,7 +3028,14 @@ pub fn prefill_qwen_deltanet_pruned_into(
             );
             prune.scores.clear();
             prune.scores.resize(live_len, 0.0);
-            scorer(&prefill_ctx.hidden[..live_len * n], &mut prune.scores);
+            // The mass view is sliced to the prompt: the caller's scratch may
+            // be longer, and the arm fns pin the exact width.
+            let mass_view = mass_scratch.as_deref().map(|m| &m[..seq_len]);
+            scorer(
+                &prefill_ctx.hidden[..live_len * n],
+                mass_view,
+                &mut prune.scores,
+            );
             crate::tokengate::select_kept_into(
                 &prune.scores,
                 prune.n_sink,

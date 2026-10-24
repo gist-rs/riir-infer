@@ -143,7 +143,7 @@ fn run_pruned(
     plan.bucket = bucket;
     // Poison slot 12 when the budget actually prunes (same victim as T2.1's
     // movement cell); all-ones when K = full.
-    let mut scorer = move |_hidden: &[f32], scores: &mut [f32]| {
+    let mut scorer = move |_hidden: &[f32], _mass: Option<&[f32]>, scores: &mut [f32]| {
         scores.fill(1.0);
         if keep_prunable != usize::MAX {
             scores[12] = -1e9;
@@ -160,6 +160,7 @@ fn run_pruned(
         &mut logits,
         None,
         &mut plan,
+        None,
         &mut scorer,
     );
     let mut steps = vec![logits.clone()];
