@@ -190,6 +190,80 @@ pub struct PrunedDecodeGate<'a> {
     pub scale: Option<&'a [f32]>,
 }
 
+/// Plan 622 T3.1 — the rank-ratio law `r = ln(max(2, m)) / ln(max(2, p))`:
+/// the query's rank among KEPT tokens over its rank in the FULL prompt
+/// (both 1-based; `m <= p` always — kept ⊆ full). The `max(2, ·)` guard is
+/// SYMMETRIC on purpose: a denominator-only guard breaks the `r ≡ 1`
+/// identity at rank 1 (ln 1 = 0 over ln 2 = 0 gives r = 0 for the very
+/// token whose m == p) — the unit test pins the identity at p = 1 too.
+/// `m == p` (the K = full posture) short-circuits to exactly 1.0 so the
+/// overlay is an EXACT no-op there for any γ.
+#[cfg(feature = "tokengate")]
+#[inline]
+pub fn rank_ratio(rank_kept: usize, rank_full: usize) -> f32 {
+    debug_assert!(rank_kept >= 1 && rank_full >= 1, "ranks are 1-based");
+    debug_assert!(
+        rank_kept <= rank_full,
+        "kept rank {} exceeds full rank {}",
+        rank_kept,
+        rank_full
+    );
+    if rank_kept == rank_full {
+        return 1.0;
+    }
+    let m = rank_kept.max(2) as f64;
+    let p = rank_full.max(2) as f64;
+    (m.ln() / p.ln()) as f32
+}
+
+/// Plan 622 T3.1 — the rank-ratio cooling `s_eff = 1 + γ·(r − 1)` (the
+/// paper's per-query temperature, the code form the research quotes). γ = 1
+/// is the lane's fixed value (Plan 622 T3.1); any γ is accepted here and
+/// the K = full posture returns exactly 1.0 FOR ANY γ (the identity law —
+/// pinned by the unit test). Consumers: the `> L` decode gate's per-key
+/// scale window (T2.3's `PrunedDecodeGate::scale`), keyed by the KEPT rank
+/// of each packed slot.
+#[cfg(feature = "tokengate")]
+#[inline]
+pub fn rank_cooling(rank_kept: usize, rank_full: usize, gamma: f32) -> f32 {
+    1.0 + gamma * (rank_ratio(rank_kept, rank_full) - 1.0)
+}
+
+/// Plan 622 T3.1 — sequence-RMSNorm scorer normalization, fused with the
+/// readout dot: `scores[i] = readout · (h_i / rms(h_i))`, one pure pass
+/// over the layer-L residual rows `[rows, n]`. Per-TOKEN row norm (the
+/// codebase's own `rmsnorm` reading — each token scale-invariant, so the
+/// readout dot is a pure direction measure comparable across the sequence);
+/// gamma-free (the modelless overlay carries no trained gains — a readout
+/// row applies its own scale by construction). The alternative reading
+/// (one global statistic over the whole [rows × n] buffer) is a named
+/// choice for T3.4's ablation rows, not a second fn. Zero rows are safe
+/// (inv_rms = 1/√eps, score 0 — pinned). f64 statistics, f32 readout;
+/// the dot folds sequentially (the Issue-940 determinism law).
+/// Zero-alloc (`*_into`); `dst` is `rows`, `readout` is `n`.
+#[cfg(feature = "tokengate")]
+pub fn seq_rmsnorm_readout_into(
+    dst: &mut [f32],
+    hidden: &[f32],
+    readout: &[f32],
+    n: usize,
+    eps: f64,
+) {
+    let rows = dst.len();
+    assert_eq!(hidden.len(), rows * n, "hidden rows mismatch");
+    assert_eq!(readout.len(), n, "readout width mismatch");
+    for i in 0..rows {
+        let row = &hidden[i * n..(i + 1) * n];
+        let sum_sq: f64 = row.iter().map(|v| (*v as f64) * (*v as f64)).sum();
+        let inv_rms = 1.0 / (sum_sq / n as f64 + eps).sqrt();
+        let mut acc = 0.0f32;
+        for (v, w) in row.iter().zip(readout.iter()) {
+            acc += ((*v as f64 * inv_rms) as f32) * w;
+        }
+        dst[i] = acc;
+    }
+}
+
 #[cfg(test)]
 mod tests {
     // Feature-off posture: the switch is the constant false, no env read.
@@ -263,5 +337,73 @@ mod tests {
         let scores = vec![1.0, 2.0, 3.0];
         super::select_kept_into(&scores, 8, 5, &mut out);
         assert_eq!(out, vec![0, 1, 2]);
+    }
+
+    #[cfg(feature = "tokengate")]
+    #[test]
+    fn rank_ratio_is_exactly_one_when_ranks_match_including_rank_one() {
+        // The identity law, every posture the asymmetric-guard variant would
+        // have broken: m == p → exactly 1.0, INCLUDING p = 1 (ln 1 = 0 —
+        // the raw formula gives 0/ln2 = 0 there; the symmetric guard + the
+        // short-circuit are what make the claim true).
+        for p in [1usize, 2, 3, 10, 24, 1000] {
+            assert_eq!(super::rank_ratio(p, p), 1.0, "m == p at p={p}");
+        }
+        // And the cooling is therefore an exact no-op at K = full for ANY γ.
+        for gamma in [0.0f32, 1.0, 2.5, -1.0, 100.0] {
+            assert_eq!(super::rank_cooling(7, 7, gamma), 1.0);
+        }
+    }
+
+    #[cfg(feature = "tokengate")]
+    #[test]
+    fn rank_ratio_cools_monotonically_and_saturates_at_the_rank_two_floor() {
+        // Deeper in the kept order → cooler (r strictly decreases in m).
+        let r1 = super::rank_ratio(2, 10);
+        let r2 = super::rank_ratio(5, 10);
+        let r3 = super::rank_ratio(9, 10);
+        assert!(r1 < r2 && r2 < r3 && r3 < 1.0);
+        // The rank-2 floor: m = 1 floors to 2 (ln 2 / ln 10), never 0.
+        let floor = super::rank_ratio(1, 10);
+        assert_eq!(floor, r1, "m=1 and m=2 share the max(2, ·) floor");
+        let expected = (2.0f64.ln() / 10.0f64.ln()) as f32;
+        assert_eq!(floor, expected);
+        // Cooling at γ = 1: s = 1 + (r − 1) by the definition.
+        let s = super::rank_cooling(2, 10, 1.0);
+        assert_eq!(s, 1.0 + 1.0 * (r1 - 1.0));
+        assert!(s < 1.0, "a pruned rank cools below 1");
+    }
+
+    #[cfg(feature = "tokengate")]
+    #[test]
+    fn seq_rmsnorm_readout_known_answer_and_zero_row_safety() {
+        let eps = 1e-6f64;
+        // Hand-computable: row [3, 4], rms = √((9+16)/2) = √12.5, readout
+        // [1, 0] → score = 3/√12.5.
+        let hidden = [3.0f32, 4.0];
+        let readout = [1.0f32, 0.0];
+        let mut scores = [0.0f32; 1];
+        super::seq_rmsnorm_readout_into(&mut scores, &hidden, &readout, 2, eps);
+        let expected = (3.0f64 / 12.5f64.sqrt()) as f32;
+        assert!(
+            (scores[0] - expected).abs() < 1e-6,
+            "{} vs {expected}",
+            scores[0]
+        );
+
+        // Row independence: a second row does not move the first (and the
+        // second row's own score is its direction measure: [100, -100] has
+        // rms 100 → [1, -1], readout [1, 0] → 1.0).
+        let two_rows = [3.0, 4.0, 100.0, -100.0];
+        let mut two_scores = [0.0f32; 2];
+        super::seq_rmsnorm_readout_into(&mut two_scores, &two_rows, &readout, 2, eps);
+        assert_eq!(two_scores[0].to_bits(), scores[0].to_bits());
+        assert!((two_scores[1] - 1.0).abs() < 1e-6);
+
+        // Zero row: inv_rms = 1/√eps, score 0, finite — no NaN.
+        let zeros = [0.0f32; 4];
+        super::seq_rmsnorm_readout_into(&mut two_scores, &zeros, &readout, 2, eps);
+        assert_eq!(two_scores[0], 0.0);
+        assert!(two_scores[0].is_finite());
     }
 }
