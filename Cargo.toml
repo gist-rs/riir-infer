@@ -820,6 +820,14 @@ name = "plan622_bucketed_prefill_g1"
 path = "tests/plan622_bucketed_prefill_g1.rs"
 required-features = ["tokengate", "deltanet_inference"]
 
+# Plan 622 T2.3 — the decode-time constant fold's G1 battery (K=full decode
+# identity, prefix-band invariance, the folded gate's inert/movement/appended
+# laws, the T2.2×T2.3 bucketed composition).
+[[test]]
+name = "plan622_decode_fold_g1"
+path = "tests/plan622_decode_fold_g1.rs"
+required-features = ["tokengate", "deltanet_inference"]
+
 # riir-infer Issue 022 — the laya calibration capture driver (checkpoint →
 # per-layer residual states → S matrices → ε-sweep + kill verdict). The
 # module code sits behind #[cfg(feature = "twt_profile")]; this row is

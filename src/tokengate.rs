@@ -132,6 +132,64 @@ pub fn pad_bias_rows_into(dst: &mut [f32], n_head: usize, real_len: usize, padde
     }
 }
 
+/// Plan 622 T2.3 — the frozen prefill result a pruned DECODE consumes.
+///
+/// `full_rows` = the prefill's full prompt length T (the `<= L` band's row
+/// count and the ORIGINAL-position clock); `kept_rows` = the `> L` band's
+/// PACKED row count (`PrunedPrefillPlan::real_len`); `prune_at_layer` = L.
+/// Invariant: the scaffold keeps the original final token, so the last row
+/// of both bands is original position T-1 — a decode token's RoPE position
+/// is `full_rows + step` on EVERY layer (one position clock), while the KV
+/// write slot is band-local (`full_rows + step` at `<= L`, `kept_rows +
+/// step` above). That slot/phase split is the decode half of the subset-
+/// softmax exactness law (compaction moves storage, never phases — the
+/// `kv_evict` law, same shape).
+#[cfg(feature = "tokengate")]
+pub struct PrunedDecodeLayout {
+    pub prune_at_layer: usize,
+    pub full_rows: usize,
+    pub kept_rows: usize,
+}
+
+#[cfg(feature = "tokengate")]
+impl PrunedDecodeLayout {
+    /// Build from the prefill's own bookkeeping (`prompt_len` = the full T).
+    pub fn from_plan(
+        prompt_len: usize,
+        plan: &crate::deltanet::forward::PrunedPrefillPlan,
+    ) -> Self {
+        Self {
+            prune_at_layer: plan.prune_at_layer,
+            full_rows: prompt_len,
+            kept_rows: plan.real_len,
+        }
+    }
+}
+
+/// Plan 622 T2.3 — the gate FOLDED ONCE at prefill end into per-layer
+/// decode-side surfaces: an additive per-key mask (the bias rows, PACKED
+/// slot order) + the per-head logit scale `s_eff` (applied as a query
+/// multiply — `(s·q)·k = s·(q·k)`, the bias rides AFTER the scale, so the
+/// mask entries are unscaled logits). Dense layout, the T1.2 CUDA wire
+/// shape: layer l's bias window starts at `l * n_head * head_stride`, rows
+/// head-major; layer l's scales sit at `scale[l * n_head ..][..n_head]`.
+/// Layers `<= prune_at_layer` never read their windows (the gate exists
+/// above L only), and GDN layers consume neither surface.
+///
+/// CONTRACT (the constructor's — Phase 3's scorer builds this at prefill
+/// end, once): `head_stride >= kept_rows + every decode step the caller
+/// will run`, slots `< kept_rows` carry the prompt mask, slots `>=
+/// kept_rows` are ZERO (decode-appended keys are always attended — bias
+/// 0, they are never pruned) and scales are exactly `1.0` where the lane
+/// has no opinion (the `≡ 1` whole-table check then skips the q-multiply
+/// entirely — dispatch identity, and `q * 1.0` is a bitwise no-op besides).
+#[cfg(feature = "tokengate")]
+pub struct PrunedDecodeGate<'a> {
+    pub bias: &'a [f32],
+    pub head_stride: usize,
+    pub scale: Option<&'a [f32]>,
+}
+
 #[cfg(test)]
 mod tests {
     // Feature-off posture: the switch is the constant false, no env read.

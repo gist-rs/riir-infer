@@ -863,6 +863,149 @@ pub fn forward_attention_layer(
         .matvec(&scratch.attn_out[..q_dim], &mut x[..n_embd]);
 }
 
+/// [`forward_attention_layer`] for a PRUNED decode step (Plan 622 T2.3,
+/// the `tokengate` lane): the write slot, the RoPE phase, and the causal
+/// window are THREE values here, not one. Deliberately a near-copy of the
+/// incumbent + the [`forward_attention_layer_evictable`] precedent — the
+/// frozen bodies keep their exact arithmetic; the deltas are visible here:
+///
+/// 1. K/V write at `write_slot` (the band's PACKED count + step), while
+///    RoPE uses `rope_pos` (the ORIGINAL position clock — compaction moves
+///    storage, never phases);
+/// 2. `t_n = write_slot + 1` (the causal prefix the packed cache holds);
+/// 3. `gate_scale`: the per-head logit scale `s_eff` applied as a query
+///    multiply AFTER QK-norm + RoPE (after the norm — it would erase a
+///    pre-norm scale; the products re-round, which is the ARMED posture's
+///    own definition — the identity posture never multiplies). `None` or a
+///    window that is exactly `≡ 1` skips the multiply (dispatch identity);
+/// 4. `key_bias`: the folded mask rows for THIS layer's window, PACKED slot
+///    order, already covering the decode-appended zeros (the constructor
+///    contract on [`crate::tokengate::PrunedDecodeGate`]).
+#[cfg(feature = "tokengate")]
+#[allow(clippy::too_many_arguments)]
+pub fn forward_attention_layer_pruned(
+    x: &mut [f32],
+    layer: &DeltaNetLayerWeights,
+    cache: &mut crate::transformer::KVCache,
+    write_slot: usize,
+    rope_pos: usize,
+    config: &Config,
+    rope_freq: &crate::rope::RopeFreqTable,
+    scratch: &mut AttentionLayerScratch,
+    key_bias: Option<(&[f32], crate::transformer::KeyBiasLayout)>,
+    gate_scale: Option<&[f32]>,
+) {
+    let n_embd = config.n_embd;
+    let n_head = config.n_head;
+    let n_kv = config.n_kv_head;
+    let hd = config.head_dim;
+    let q_dim = n_head * hd;
+    let kvd = n_kv * hd;
+    let rotary_dim = effective_rotary_dim(config);
+
+    // 1-4: identical to the incumbent (projection, split, QK-norm, RoPE at
+    // the phase `rope_pos`).
+    layer.attn_wq.matvec(&x[..n_embd], &mut scratch.qg_buf);
+    for h in 0..n_head {
+        let src = h * 2 * hd;
+        let dst = h * hd;
+        scratch.q_buf[dst..dst + hd].copy_from_slice(&scratch.qg_buf[src..src + hd]);
+        scratch.gate_buf[dst..dst + hd].copy_from_slice(&scratch.qg_buf[src + hd..src + 2 * hd]);
+    }
+    layer.attn_wk.matvec(&x[..n_embd], &mut scratch.k_buf);
+    layer.attn_wv.matvec(&x[..n_embd], &mut scratch.v_buf);
+    let eps = config.rms_norm_eps;
+    for h in 0..n_head {
+        let off = h * hd;
+        rmsnorm_with_gamma_eps(&mut scratch.q_buf[off..off + hd], &layer.attn_q_norm, eps);
+    }
+    for h in 0..n_kv {
+        let off = h * hd;
+        rmsnorm_with_gamma_eps(&mut scratch.k_buf[off..off + hd], &layer.attn_k_norm, eps);
+    }
+    if rotary_dim == hd {
+        crate::rope::apply_rope_with_freq(
+            &mut scratch.q_buf,
+            &mut scratch.k_buf,
+            rope_pos,
+            hd,
+            rope_freq.as_slice(),
+        );
+    } else {
+        crate::rope::apply_partial_rope_with_freq(
+            &mut scratch.q_buf,
+            &mut scratch.k_buf,
+            rope_pos,
+            hd,
+            rotary_dim,
+            rope_freq.as_slice(),
+        );
+    }
+
+    // 4b. The s_eff fold: per-head query multiply, skipped entirely when the
+    // window is ≡ 1 (the task's dispatch identity; `q * 1.0` is a bitwise
+    // no-op anyway, but the skip keeps the armed cost at zero for inert
+    // tables).
+    if let Some(scales) = gate_scale {
+        debug_assert!(scales.len() >= n_head, "scale window shorter than n_head");
+        if !scales[..n_head].iter().all(|s| *s == 1.0) {
+            for (h, s) in scales.iter().enumerate().take(n_head) {
+                if *s != 1.0 {
+                    for v in &mut scratch.q_buf[h * hd..(h + 1) * hd] {
+                        *v *= *s;
+                    }
+                }
+            }
+        }
+    }
+
+    // 5. K,V cache write at the PACKED slot.
+    let pos_off = write_slot * kvd;
+    unsafe {
+        std::ptr::copy_nonoverlapping(
+            scratch.k_buf.as_ptr(),
+            cache.key.as_mut_ptr().add(pos_off),
+            kvd,
+        );
+        std::ptr::copy_nonoverlapping(
+            scratch.v_buf.as_ptr(),
+            cache.value.as_mut_ptr().add(pos_off),
+            kvd,
+        );
+    }
+
+    // 6. Attention over the packed causal prefix.
+    let scale = 1.0 / (hd as f32).sqrt();
+    scratch.attn_out[..q_dim].fill(0.0);
+    let t_n = write_slot + 1;
+    unsafe {
+        crate::transformer::attention_heads_parallel_bias(
+            &scratch.q_buf,
+            &cache.key,
+            &cache.value,
+            &mut scratch.attn_out,
+            &mut scratch.head_scores,
+            n_head,
+            n_kv,
+            kvd,
+            hd,
+            t_n,
+            scale,
+            0.0,
+            config.block_size,
+            key_bias,
+        );
+    }
+
+    // 7-8. Output gating + projection — identical to the incumbent.
+    for i in 0..q_dim {
+        scratch.attn_out[i] *= crate::simd::fast_sigmoid(scratch.gate_buf[i]);
+    }
+    layer
+        .attn_wo
+        .matvec(&scratch.attn_out[..q_dim], &mut x[..n_embd]);
+}
+
 /// [`forward_attention_layer`] with an armed [`kv_evict::LayerEvict`]
 /// (Issue 012). Deliberately a near-copy rather than a parameterization:
 /// the original body stays bit-frozen for its existing callers (the
@@ -1290,6 +1433,183 @@ fn forward_qwen_deltanet_body<'a>(
     // 4. LM head (logits) — copy hidden state to avoid aliasing between
     //    the read (`x[..n]`) and the write (`x[..vocab_size]`). The
     //    `hidden_copy` scratch is pre-allocated in `HybridForwardScratch`.
+    scratch.hidden_copy[..n].copy_from_slice(&x[..n]);
+    weights
+        .lm_head
+        .matvec(&scratch.hidden_copy[..n], &mut x[..config.vocab_size]);
+
+    &mut x[..config.vocab_size]
+}
+
+/// [`forward_qwen_deltanet`] for a PRUNED decode step (Plan 622 T2.3, the
+/// `tokengate` lane) — the decode continuation the pruned prefill's doc
+/// names as its unwired seam. Single token, same contract as the incumbent
+/// decode, with the per-band bookkeeping the pruned cache needs:
+///
+/// - layers `<= layout.prune_at_layer` (and every GDN layer): the incumbent
+///   call — the `<= L` band holds the FULL prompt, so `pos = full_rows +
+///   decode_step` is both the write slot and the RoPE phase there; GDN
+///   layers carry no positions (their `> L` state was built from kept
+///   tokens at prefill and simply advances).
+/// - attention layers `> L`: [`forward_attention_layer_pruned`] with the
+///   three-way split (packed slot, original phase, packed window) and the
+///   folded gate surfaces (bias mask rows + the `s_eff` scale, `None` =
+///   incumbent).
+///
+/// The gate FOLDED ONCE at prefill end (the [`PrunedDecodeGate`] contract):
+/// decode-appended keys read zero bias rows, so the mask never needs a
+/// second write. `decode_step` is 0-based (the first decoded token is
+/// step 0, original position `full_rows`). K = full (`kept_rows ==
+/// full_rows`, gate `None`) is byte-identical to the incumbent decode —
+/// pinned by `tests/plan622_decode_fold_g1.rs`.
+#[cfg(feature = "tokengate")]
+#[allow(clippy::too_many_arguments)]
+pub fn forward_qwen_deltanet_pruned<'a>(
+    x: &'a mut [f32],
+    weights: &QwenDeltaNetWeights,
+    cache: &mut HybridCache,
+    token: usize,
+    layout: &crate::tokengate::PrunedDecodeLayout,
+    decode_step: usize,
+    gate: Option<&crate::tokengate::PrunedDecodeGate<'_>>,
+    config: &Config,
+    scratch: &'a mut HybridForwardScratch,
+    rope_freq: &crate::rope::RopeFreqTable,
+) -> &'a mut [f32] {
+    super::on_rayon_worker(move || {
+        forward_qwen_deltanet_pruned_body(
+            x,
+            weights,
+            cache,
+            token,
+            layout,
+            decode_step,
+            gate,
+            config,
+            scratch,
+            rope_freq,
+        )
+    })
+}
+
+#[cfg(feature = "tokengate")]
+#[allow(clippy::too_many_arguments, clippy::needless_range_loop)]
+fn forward_qwen_deltanet_pruned_body<'a>(
+    x: &'a mut [f32],
+    weights: &QwenDeltaNetWeights,
+    cache: &mut HybridCache,
+    token: usize,
+    layout: &crate::tokengate::PrunedDecodeLayout,
+    decode_step: usize,
+    gate: Option<&crate::tokengate::PrunedDecodeGate<'_>>,
+    config: &Config,
+    scratch: &'a mut HybridForwardScratch,
+    rope_freq: &crate::rope::RopeFreqTable,
+) -> &'a mut [f32] {
+    let n = config.n_embd;
+    assert!(
+        layout.kept_rows <= layout.full_rows,
+        "kept rows {} exceed the full prompt {}",
+        layout.kept_rows,
+        layout.full_rows
+    );
+    assert!(
+        layout.prune_at_layer + 1 < weights.layers.len(),
+        "prune_at_layer {} must leave at least one layer above L (have {})",
+        layout.prune_at_layer,
+        weights.layers.len()
+    );
+
+    // 1. Embedding lookup (same as the incumbent decode).
+    let tok_off = token * n;
+    x[..n].copy_from_slice(&weights.wte[tok_off..tok_off + n]);
+
+    let pos = layout.full_rows + decode_step;
+    let slot_high = layout.kept_rows + decode_step;
+
+    // 2. Layer loop with hybrid dispatch (same body shape as the incumbent;
+    // the ONLY deltas sit in the attention layers above L).
+    for (layer_idx, layer_weights) in weights.layers.iter().enumerate() {
+        let is_linear = weights.layer_types[layer_idx] == DeltaNetLayerType::DeltaNet;
+
+        scratch.residual[..n].copy_from_slice(&x[..n]);
+        rmsnorm_with_gamma_eps(&mut x[..n], &layer_weights.input_norm, config.rms_norm_eps);
+
+        if is_linear {
+            forward_deltanet_layer(
+                &mut x[..n],
+                layer_weights,
+                &mut cache.deltanet_state.recurrent_states[layer_idx],
+                &mut cache.deltanet_state.conv_states[layer_idx],
+                config,
+                &mut scratch.deltanet,
+            );
+        } else if layer_idx > layout.prune_at_layer {
+            // The pruned band: packed slot, original phase, packed window,
+            // this layer's gate window (bias rows are head-major from the
+            // layer's offset; scales per-head from the same offset law).
+            let (bias, scales) = match gate {
+                Some(g) => {
+                    let start = layer_idx * config.n_head * g.head_stride;
+                    (
+                        Some((
+                            &g.bias[start..],
+                            crate::transformer::KeyBiasLayout {
+                                head_stride: g.head_stride,
+                            },
+                        )),
+                        g.scale.map(|s| &s[layer_idx * config.n_head..]),
+                    )
+                }
+                None => (None, None),
+            };
+            forward_attention_layer_pruned(
+                &mut x[..n],
+                layer_weights,
+                &mut cache.kv_cache.layers[layer_idx],
+                slot_high,
+                pos,
+                config,
+                rope_freq,
+                &mut scratch.attention,
+                bias,
+                scales,
+            );
+        } else {
+            // The full band: the incumbent call shape (slot == phase == pos).
+            forward_attention_layer(
+                &mut x[..n],
+                layer_weights,
+                &mut cache.kv_cache.layers[layer_idx],
+                pos,
+                config,
+                rope_freq,
+                &mut scratch.attention,
+                None,
+            );
+        }
+
+        // d-i. Residual + MLP — identical to the incumbent decode.
+        for (xi, r) in x[..n].iter_mut().zip(&scratch.residual[..n]) {
+            *xi += *r;
+        }
+        scratch.residual[..n].copy_from_slice(&x[..n]);
+        rmsnorm_with_gamma_eps(
+            &mut x[..n],
+            &layer_weights.post_attn_norm,
+            config.rms_norm_eps,
+        );
+        layer_weights.gate_proj.matvec(&x[..n], &mut scratch.gate);
+        layer_weights.up_proj.matvec(&x[..n], &mut scratch.up);
+        swiglu(&mut scratch.hidden, &scratch.gate, &scratch.up);
+        layer_weights.down_proj.matvec(&scratch.hidden, &mut x[..n]);
+        for (xi, r) in x[..n].iter_mut().zip(&scratch.residual[..n]) {
+            *xi += *r;
+        }
+    }
+
+    // 3-4. Final norm + LM head (same as the incumbent decode).
+    rmsnorm_with_gamma_eps(&mut x[..n], &weights.final_norm, config.rms_norm_eps);
     scratch.hidden_copy[..n].copy_from_slice(&x[..n]);
     weights
         .lm_head
@@ -2468,12 +2788,9 @@ impl PrunedPrefillPlan {
 ///
 /// # Scope notes (honest seams, not silent ones)
 ///
-/// - **Decode continuation is NOT wired here**: after a pruned prefill, layers
-///   `<= L` hold T prompt rows while layers `> L` hold K' — the shared-`pos`
-///   decode contract of [`forward_qwen_deltanet`] cannot address both. The
-///   per-layer fill divergence is exactly what the serving quartet's decode
-///   side (T2.3 constant fold / T2.4 graph-per-length) resolves; this fn is
-///   the prefill compute reference.
+/// - **Decode continuation**: wired by [`forward_qwen_deltanet_pruned`] (Plan
+///   622 T2.3) — the per-layer band divergence is exactly what that entry's
+///   slot/phase split resolves; this fn is the prefill compute reference.
 /// - In the pruned shape, a `key_bias` table is read in PACKED slot order
 ///   (row `j` = the kept-rank-`j` token) — Phase 3's gate overlay owns the
 ///   kept-order indexing.
