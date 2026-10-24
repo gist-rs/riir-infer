@@ -87,6 +87,22 @@
 - `random_scores_into` (tokengate.rs): the seeded floor rides the SAME selection machinery (scaffold + top-K); unit test pins determinism, distinctness, scaffold immunity, K=full ≡ all-ones, K=0 ≡ zeros.
 - This session's write_file tooling twice landed NEW files in sibling repos (riir-refine/src/bin/, katgpt-rs/tests/) before the path convention was fixed to root-prefixed paths — both strays MOVED to this repo the same session, both siblings verified clean (`git status`), no sibling WIP touched.
 
+## The bench-888 Finding-4 ablation: hiddennorm at L=15 (the arm-isolation row)
+
+The confound bench 888 named (mass ran at L=15 while hiddennorm ran only at the GDN layers 0/1) is now isolated — the mixer-agnostic arm at the ATTENTION layer L, sel posture (no tap needed; `--arms hiddennorm`):
+
+| cell (sel) | kept | retrieval | meanΔ nats | ppl | Δppl vs ceiling |
+|---|---|---|---|---|---|
+| hiddennorm K=0.0625 | 133 | **1.000** | 0.338 | 4.002 | +0.786 |
+| hiddennorm K=0.1250 | 260 | **1.000** | 0.332 | 3.518 | +0.303 |
+| hiddennorm K=0.2500 | 516 | **1.000** | 0.229 | 3.442 | +0.227 |
+| hiddennorm K=0.5000 | 1027 | **1.000** | 0.087 | 3.243 | +0.027 |
+| hiddennorm K=0.7500 | 1537 | **1.000** | 0.078 | 3.195 | −0.021 |
+
+**The ablation INVERTS one cell of the bench-888 story and strengthens the refusal:** hiddennorm at L=15 retrieves 1.000 at EVERY K — including K=0.0625, where the mass arm dropped needle 0 (its needle-0 NLL 1.40 vs the mass arm's 3.02, Δ 0.61 vs 2.23 — kept) — and its ppl beats derived at every K (3.195 vs 3.306 at K=0.75; 4.002 vs 3.998 at K=0.0625 ≈ tie). Reading: **the retrieval dominance is the MID-LAYER PLACEMENT, not the mass arm** — any reasonable scorer at L=15 ranks the needles above the filler; mass is not uniquely required, and the hidden-state norm is both more robust at the harshest K and cheaper (no tap pass). The GOAT verdict is UNCHANGED (it failed on the ppl axis and the floor's lucky cell, not on arm choice), but the owner's re-weigh should read the arm story as "place the gate at the mid full-attention layer; the scorer arm is a free parameter" — which also means the bench-888 pin "arm (a) mass" is the DEFAULT choice, not a measured necessity (the T2.5 evidence was confounded exactly as its Finding 4 disclosed; this row un-confounds it).
+
+Run: `/tmp/p622t/t34_hiddennorm_ablation.{md,log}` — same bin at `--posture sel --arms hiddennorm --ppl-tokens 128`; box as the main run (loadavg 3.07, mem 93% free, AC, release).
+
 ## T4.2 disposition (the verdict write-up, folded here — one record, not two)
 
 **The lane stays OPT-IN forever; promotion to default is REFUSED by policy** (the lossy-surface law — a lossy gate on the deployed serving path gates on deployed-path behavior, and the pre-registered four-arm GOAT failed on its own terms). Disposition components:

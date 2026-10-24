@@ -68,7 +68,7 @@ use riir_infer_core::gguf_loader::{GgufFile, load_qwen_deltanet_weights_gguf};
 use riir_infer_core::rope::RopeFreqTable;
 use riir_infer_core::tokengate::{
     PrunedDecodeGate, PrunedDecodeLayout, build_decode_gate_into, derived_magnitudes_into,
-    random_scores_into, scorer_attention_mass,
+    random_scores_into, scorer_attention_mass, scorer_hidden_norm,
 };
 use riir_infer_core::tokenizer::BpeTokenizer;
 use riir_infer_core::transformer::KeyBiasLayout;
@@ -95,6 +95,11 @@ struct Args {
     ppl_tokens: usize,
     rand_reps: usize,
     posture: Posture,
+    /// The selector arms to run (subset of random,derived,fastkv,hiddennorm;
+    /// default the four-arm set). `hiddennorm` is the bench-888 Finding-4
+    /// ablation (the mixer-agnostic arm at the attention layer L) — an
+    /// ablation-only run that excludes derived/random skips the GOAT verdict.
+    arms: Vec<String>,
 }
 
 #[derive(Clone, Copy, PartialEq)]
@@ -119,6 +124,11 @@ fn parse_args() -> Result<Args> {
         ppl_tokens: 128,
         rand_reps: 3,
         posture: Posture::Both,
+        arms: vec![
+            "random".to_string(),
+            "derived".to_string(),
+            "fastkv".to_string(),
+        ],
     };
     let mut it = std::env::args().skip(1);
     while let Some(f) = it.next() {
@@ -142,6 +152,12 @@ fn parse_args() -> Result<Args> {
             "--prune-layer" => a.prune_layer = Some(val("prune-layer")?.parse()?),
             "--ppl-tokens" => a.ppl_tokens = val("ppl-tokens")?.parse()?,
             "--rand-reps" => a.rand_reps = val("rand-reps")?.parse()?,
+            "--arms" => {
+                a.arms = val("arms")?
+                    .split(',')
+                    .map(|s| s.trim().to_string())
+                    .collect();
+            }
             "--posture" => {
                 a.posture = match val("posture")?.as_str() {
                     "sel" => Posture::Sel,
@@ -158,6 +174,14 @@ fn parse_args() -> Result<Args> {
     }
     if a.rand_reps == 0 {
         bail!("--rand-reps needs at least one seed");
+    }
+    if a.arms.is_empty() {
+        bail!("--arms needs at least one arm");
+    }
+    for arm in &a.arms {
+        if !matches!(arm.as_str(), "random" | "derived" | "fastkv" | "hiddennorm") {
+            bail!("--arms: random|derived|fastkv|hiddennorm, got {arm}");
+        }
     }
     if a.ppl_tokens == 0 {
         bail!("--ppl-tokens needs at least one continuation token");
@@ -533,11 +557,13 @@ fn main() -> Result<()> {
             Random,
             Derived,
             FastKv,
+            HiddenNorm,
         }
         let selector = match arm {
             "random" => Selector::Random,
             "derived" => Selector::Derived,
             "fastkv" => Selector::FastKv,
+            "hiddennorm" => Selector::HiddenNorm,
             other => bail!("unknown arm {other}"),
         };
         let tap_window = match selector {
@@ -553,6 +579,11 @@ fn main() -> Result<()> {
                 Selector::Random => {
                     Box::new(move |_h: &[f32], _m: Option<&[f32]>, s: &mut [f32]| {
                         random_scores_into(s, N_SINK, keep, seed)
+                    })
+                }
+                Selector::HiddenNorm => {
+                    Box::new(|_h: &[f32], _m: Option<&[f32]>, s: &mut [f32]| {
+                        scorer_hidden_norm(_h, _m, s)
                     })
                 }
                 _ => Box::new(|_h: &[f32], m: Option<&[f32]>, s: &mut [f32]| {
@@ -710,36 +741,45 @@ fn main() -> Result<()> {
     for &posture in postures {
         for &frac in &args.k_fracs {
             let keep = ((prunable as f32) * frac).round() as usize;
-            // ── random: best-of-R seeds (the most favorable floor) ──
-            let mut best: Option<CellReport> = None;
-            let mut best_retrieval = 0.0f32;
-            let mut best_ppl_nats = f32::INFINITY;
-            for rep in 0..args.rand_reps {
-                let seed = args
-                    .seed
-                    .wrapping_add(0x9E37_79B9_7F4A_7C15u64)
-                    .wrapping_mul((rep as u64) + 1);
-                let c = run_cell(posture, "random", frac, keep, seed)?;
-                best_retrieval = best_retrieval.max(retrieval_of(&c));
-                best_ppl_nats = best_ppl_nats.min(c.cont_nats);
-                let score = c.cont_nats; // the table's rep: lowest ppl wins
-                if best.as_ref().map(|b| score < b.cont_nats).unwrap_or(true) {
-                    best = Some(c);
+            // ── random: best-of-R seeds (the most favorable floor) — only
+            // when the arms list configures it ──
+            if args.arms.iter().any(|a| a == "random") {
+                let mut best: Option<CellReport> = None;
+                let mut best_retrieval = 0.0f32;
+                let mut best_ppl_nats = f32::INFINITY;
+                for rep in 0..args.rand_reps {
+                    let seed = args
+                        .seed
+                        .wrapping_add(0x9E37_79B9_7F4A_7C15u64)
+                        .wrapping_mul((rep as u64) + 1);
+                    let c = run_cell(posture, "random", frac, keep, seed)?;
+                    best_retrieval = best_retrieval.max(retrieval_of(&c));
+                    best_ppl_nats = best_ppl_nats.min(c.cont_nats);
+                    let score = c.cont_nats; // the table's rep: lowest ppl wins
+                    if best.as_ref().map(|b| score < b.cont_nats).unwrap_or(true) {
+                        best = Some(c);
+                    }
                 }
+                rand_axis_best.insert((posture, frac.to_bits()), (best_retrieval, best_ppl_nats));
+                let c = best.expect("at least one random rep");
+                eprintln!(
+                    "# [{posture} random K={frac:.4}] {:.1}s | kept {} | ppl {:.3} | NLL {:?}",
+                    c.wall_s,
+                    c.real_len,
+                    c.cont_nats.exp(),
+                    c.needle_nll
+                );
+                cells.push(c);
             }
-            rand_axis_best.insert((posture, frac.to_bits()), (best_retrieval, best_ppl_nats));
-            let c = best.expect("at least one random rep");
-            eprintln!(
-                "# [{posture} random K={frac:.4}] {:.1}s | kept {} | ppl {:.3} | NLL {:?}",
-                c.wall_s,
-                c.real_len,
-                c.cont_nats.exp(),
-                c.needle_nll
-            );
-            cells.push(c);
 
-            // ── derived + fastkv ──
-            for arm in ["derived", "fastkv"] {
+            // ── the remaining configured arms ──
+            for arm in args.arms.iter().filter(|a| a.as_str() != "random") {
+                let arm: &'static str = match arm.as_str() {
+                    "derived" => "derived",
+                    "fastkv" => "fastkv",
+                    "hiddennorm" => "hiddennorm",
+                    _ => continue,
+                };
                 let c = run_cell(posture, arm, frac, keep, 0)?;
                 eprintln!(
                     "# [{posture} {arm} K={frac:.4}] {:.1}s | kept {} | ppl {:.3} | NLL {:?}",
@@ -794,63 +834,74 @@ fn main() -> Result<()> {
     }
 
     // The GOAT verdict, per posture and per axis: derived ≥ random on
-    // retrieval AND derived ≤ random on ppl, at EVERY K.
-    println!("\n# GOAT gate: derived ≥ random-K on every cell");
-    let mut goat_all = true;
-    for &posture in postures {
-        let mut goat = true;
-        let mut detail: Vec<String> = Vec::new();
-        for &frac in &args.k_fracs {
-            let pick = |arm: &str| -> Option<&CellReport> {
-                cells
-                    .iter()
-                    .find(|c| c.posture == posture && c.arm == arm && c.frac == frac)
-            };
-            let d = match pick("derived") {
-                Some(d) => d,
-                None => {
+    // retrieval AND derived ≤ random on ppl, at EVERY K. An ablation-only
+    // run (no derived/random in --arms) skips the verdict — there is no
+    // pair to compare.
+    let goat_evaluable =
+        args.arms.iter().any(|a| a == "derived") && args.arms.iter().any(|a| a == "random");
+    if goat_evaluable {
+        println!("\n# GOAT gate: derived ≥ random-K on every cell");
+        let mut goat_all = true;
+        for &posture in postures {
+            let mut goat = true;
+            let mut detail: Vec<String> = Vec::new();
+            for &frac in &args.k_fracs {
+                let pick = |arm: &str| -> Option<&CellReport> {
+                    cells
+                        .iter()
+                        .find(|c| c.posture == posture && c.arm == arm && c.frac == frac)
+                };
+                let d = match pick("derived") {
+                    Some(d) => d,
+                    None => {
+                        goat = false;
+                        detail.push(format!("K={frac:.4}: MISSING CELL"));
+                        continue;
+                    }
+                };
+                // The floor reads its per-axis BEST over the random reps.
+                let (r_ret, r_ppl_nats) = match rand_axis_best.get(&(posture, frac.to_bits())) {
+                    Some(v) => *v,
+                    None => {
+                        goat = false;
+                        detail.push(format!("K={frac:.4}: MISSING FLOOR"));
+                        continue;
+                    }
+                };
+                let d_ret = retrieval_of(d);
+                let ret_ok = d_ret >= r_ret;
+                let ppl_ok = d.cont_nats <= r_ppl_nats;
+                if !(ret_ok && ppl_ok) {
                     goat = false;
-                    detail.push(format!("K={frac:.4}: MISSING CELL"));
-                    continue;
                 }
-            };
-            // The floor reads its per-axis BEST over the random reps.
-            let (r_ret, r_ppl_nats) = match rand_axis_best.get(&(posture, frac.to_bits())) {
-                Some(v) => *v,
-                None => {
-                    goat = false;
-                    detail.push(format!("K={frac:.4}: MISSING FLOOR"));
-                    continue;
-                }
-            };
-            let d_ret = retrieval_of(d);
-            let ret_ok = d_ret >= r_ret;
-            let ppl_ok = d.cont_nats <= r_ppl_nats;
-            if !(ret_ok && ppl_ok) {
-                goat = false;
+                detail.push(format!(
+                    "K={frac:.4}: retrieval {d_ret:.3}vs{r_ret:.3} {} ppl {:.4}vs{:.4} {}",
+                    if ret_ok { "≥✓" } else { "≥✗" },
+                    d.cont_nats.exp(),
+                    r_ppl_nats.exp(),
+                    if ppl_ok { "≤✓" } else { "≤✗" },
+                ));
             }
-            detail.push(format!(
-                "K={frac:.4}: retrieval {d_ret:.3}vs{r_ret:.3} {} ppl {:.4}vs{:.4} {}",
-                if ret_ok { "≥✓" } else { "≥✗" },
-                d.cont_nats.exp(),
-                r_ppl_nats.exp(),
-                if ppl_ok { "≤✓" } else { "≤✗" },
-            ));
+            goat_all &= goat;
+            println!("# {posture}: {}", if goat { "PASS" } else { "FAIL" });
+            for d in &detail {
+                println!("#   {d}");
+            }
         }
-        goat_all &= goat;
-        println!("# {posture}: {}", if goat { "PASS" } else { "FAIL" });
-        for d in &detail {
-            println!("#   {d}");
-        }
+        println!(
+            "# GOAT VERDICT: {}",
+            if goat_all {
+                "PASS — derived ≥ random-K on every cell (both axes, both postures)"
+            } else {
+                "FAIL — the lane's promotion is refused; the numbers above are the record"
+            }
+        );
+    } else {
+        println!(
+            "\n# GOAT gate: SKIPPED — ablation run (arms = {:?}); no derived/random pair to compare",
+            args.arms
+        );
     }
-    println!(
-        "# GOAT VERDICT: {}",
-        if goat_all {
-            "PASS — derived ≥ random-K on every cell (both axes, both postures)"
-        } else {
-            "FAIL — the lane's promotion is refused; the numbers above are the record"
-        }
-    );
 
     // The FastKV honesty column: per cell, fastkv vs derived, plus the
     // Pareto-vs-ceiling view (what each arm gives up relative to no prune).

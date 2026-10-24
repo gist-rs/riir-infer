@@ -94,7 +94,9 @@ K∈{0.5,0.75} in both postures and one lucky-seed floor cell at K=0.0625;
 FastKV-class is ppl-competitive selection-only, needle-0-blind at every
 K, and collapses under the derived-magnitude bias overlay — the
 full-overlay promotion REFUSED, opt-in only, T4.2 owns the verdict
-write-up); remaining planned work: T3.5 (league random-K census),
+write-up — the hiddennorm ablation at L=15 retrieves 1.000 at every K
+including the mass arm's one loss (K=0.0625): the retrieval dominance
+is the mid-layer placement, not the mass arm); remaining planned work: T3.5 (league random-K census),
 T4.1–T4.3, T2.4 (GPU graphs), T1.6 (Metal), and the CLEAN GPU kernel
 layer migration.
 
