@@ -172,7 +172,9 @@ fn wg_occupancy_platform_default() -> bool {
 
 fn wg_occupancy_enabled() -> bool {
     if WG_OCCUPANCY_INITIALIZED
-        .set(wg_occupancy_env_semantics(std::env::var("RIIR_GEMV_WG_OCCUPANCY")))
+        .set(wg_occupancy_env_semantics(std::env::var(
+            "RIIR_GEMV_WG_OCCUPANCY",
+        )))
         .is_ok()
     {
         USE_WG_OCCUPANCY.store(
