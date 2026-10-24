@@ -117,7 +117,9 @@ impl Default for MetalTileConfig {
 
 impl MetalTileConfig {
     /// The `#define` preamble for this config, prepended to the MSL source.
-    fn defines(self) -> String {
+    /// Pub for the integration paths ([`crate::gemm_ternary_metal_zero_copy`]
+    /// compiles the same source at the same config).
+    pub fn defines(self) -> String {
         let Self {
             nra,
             nrb,
@@ -134,6 +136,109 @@ impl MetalTileConfig {
         let k_tile = 16 * self.nk_chunk;
         u64::from(k_tile * self.nra) * 2
     }
+
+    /// Issue 1122 gate 2 — the Bench-1113 cell-2 sweep winner
+    /// (`ktile64_64x128x4sg`: K-tile 64, 64×128 output tile, 4 simdgroups),
+    /// leading at 3.02–3.30× per-launch over the incumbent K32 geometry. The
+    /// Bench-998 integration cell ran the DEFAULT geometry only — this const
+    /// is the integration target its closure never executed.
+    pub const KTILE64: Self = Self {
+        nra: 64,
+        nrb: 128,
+        nk_chunk: 4,
+        nsg: 4,
+    };
+}
+
+// ---------------------------------------------------------------------------
+// Issue 1122 gate 2 — the production-geometry selector
+// ---------------------------------------------------------------------------
+// The integration paths (`MetalTensorZeroCopyGemm::new` + the forward's
+// metal-rs context) compiled the kernel at the built-in K32 defaults only —
+// the swept winner was unreachable from any e2e cell, which is exactly the
+// gap Issue 1122 filed. One packed global + one env arm selects the geometry
+// BEFORE context construction (the pipeline is compile-time; a mid-run
+// change cannot re-geometry an existing context).
+
+/// Packed geometry: `nra<<48 | nrb<<32 | nk_chunk<<16 | nsg` — 0 = unset
+/// (fields are ≥ 1, so 0 is not a value).
+static PROD_GEOM: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+fn pack_geom(c: MetalTileConfig) -> u64 {
+    (u64::from(c.nra) << 48)
+        | (u64::from(c.nrb) << 32)
+        | (u64::from(c.nk_chunk) << 16)
+        | u64::from(c.nsg)
+}
+
+fn unpack_geom(v: u64) -> MetalTileConfig {
+    MetalTileConfig {
+        nra: (v >> 48) as u32,
+        nrb: ((v >> 32) & 0xFFFF) as u32,
+        nk_chunk: ((v >> 16) & 0xFFFF) as u32,
+        nsg: (v & 0xFFFF) as u32,
+    }
+}
+
+/// Pin the production geometry for every context constructed AFTER this call.
+/// Explicit setter wins over the env arm (operator intent beats default
+/// derivation); contexts already compiled are unaffected by construction.
+pub fn set_metal_tensor_production_geometry(config: MetalTileConfig) {
+    PROD_GEOM.store(pack_geom(config), std::sync::atomic::Ordering::Relaxed);
+}
+
+/// The `RIIR_METAL_TENSOR_GEOM` env arm, parsed once: `"nra,nrb,nk_chunk,nsg"`
+/// (e.g. `"64,128,4,4"` = [`MetalTileConfig::KTILE64`]). Malformed values
+/// refuse LOUD at first read and are ignored — a silently-wrong geometry
+/// would corrupt every number the cell records.
+static PROD_GEOM_ENV: std::sync::OnceLock<Option<MetalTileConfig>> = std::sync::OnceLock::new();
+
+fn parse_prod_geom_env() -> Option<MetalTileConfig> {
+    let spec = std::env::var("RIIR_METAL_TENSOR_GEOM").ok()?;
+    let parts: Vec<&str> = spec.split(',').map(str::trim).collect();
+    if parts.len() != 4 {
+        eprintln!(
+            "[Issue 1122] RIIR_METAL_TENSOR_GEOM={spec:?} malformed (want \"nra,nrb,nk_chunk,nsg\"); using built-in defaults"
+        );
+        return None;
+    }
+    let parse = |s: &str| s.parse::<u32>().ok().filter(|v| *v >= 1);
+    match (
+        parse(parts[0]),
+        parse(parts[1]),
+        parse(parts[2]),
+        parse(parts[3]),
+    ) {
+        (Some(nra), Some(nrb), Some(nk_chunk), Some(nsg)) => {
+            eprintln!(
+                "[Issue 1122] production geometry = {nra}x{nrb}, K-tile {}, {nsg} simdgroups",
+                16 * nk_chunk
+            );
+            Some(MetalTileConfig {
+                nra,
+                nrb,
+                nk_chunk,
+                nsg,
+            })
+        }
+        _ => {
+            eprintln!(
+                "[Issue 1122] RIIR_METAL_TENSOR_GEOM={spec:?} has non-numeric/zero fields; using built-in defaults"
+            );
+            None
+        }
+    }
+}
+
+/// The geometry the next integration context compiles with: the explicit
+/// setter if pinned, else `RIIR_METAL_TENSOR_GEOM` (parsed once), else the
+/// built-in K32 defaults ([`MetalTileConfig::default`]).
+pub fn production_geometry() -> MetalTileConfig {
+    let pinned = PROD_GEOM.load(std::sync::atomic::Ordering::Relaxed);
+    if pinned != 0 {
+        return unpack_geom(pinned);
+    }
+    (*PROD_GEOM_ENV.get_or_init(parse_prod_geom_env)).unwrap_or_default()
 }
 
 // ---------------------------------------------------------------------------

@@ -127,6 +127,12 @@ pub struct MetalTensorZeroCopyGemm {
     output_cache: Mutex<HashMap<u64, Buffer>>,
     /// Issue 663 T5 profiling: total dispatch count (for overhead analysis).
     dispatch_count: std::sync::atomic::AtomicU64,
+    /// Issue 1122 gate 2: the tile geometry this pipeline was compiled at.
+    /// The launch grid, threadgroup width, and threadgroup-memory length all
+    /// derive from it — a dispatch that disagrees with the compiled kernel
+    /// reads stale tiles (the constants here MUST mirror the `SWEEP_*`
+    /// defines the MSL was compiled with).
+    config: crate::gemm_ternary_metal_tensor::MetalTileConfig,
     /// Hold the wgpu device + queue Arcs alive — the raw Metal handles point
     /// into their internals. Dropping these would invalidate `device` + `queue`.
     _wgpu_device: Arc<WgpuDevice>,
@@ -149,6 +155,24 @@ impl MetalTensorZeroCopyGemm {
     /// - wgpu isn't using the Metal backend (non-macOS without the feature)
     /// - MSL compilation fails (missing `metal::tensor` support — Metal 3.1+)
     pub fn new(wgpu_device: Arc<WgpuDevice>, wgpu_queue: Arc<WgpuQueue>) -> Result<Self, String> {
+        // Issue 1122 gate 2: compile at the production-geometry selector (the
+        // explicit setter or the `RIIR_METAL_TENSOR_GEOM` env arm), so an e2e
+        // cell can seat the Bench-1113 swept winner without a code change.
+        Self::new_with_config(
+            crate::gemm_ternary_metal_tensor::production_geometry(),
+            wgpu_device,
+            wgpu_queue,
+        )
+    }
+
+    /// Compile the zero-copy context at an explicit [`MetalTileConfig`] (the
+    /// calibration-sweep entry point; [`new`](Self::new) is this at the
+    /// production-geometry selector).
+    pub fn new_with_config(
+        config: crate::gemm_ternary_metal_tensor::MetalTileConfig,
+        wgpu_device: Arc<WgpuDevice>,
+        wgpu_queue: Arc<WgpuQueue>,
+    ) -> Result<Self, String> {
         // Extract the raw Metal device + queue (T4 pattern).
         let device_ptr: *mut metal::MTLDevice = unsafe {
             let guard = wgpu_device.as_hal::<wgpu::hal::api::Metal>();
@@ -168,12 +192,15 @@ impl MetalTensorZeroCopyGemm {
             proto as *const _ as *mut metal::MTLCommandQueue
         };
 
-        // Compile the matmul2d kernel on this device.
+        // Compile the matmul2d kernel on this device — at the config's
+        // `SWEEP_*` defines (the same guard block `MetalTensorGemm` uses; a
+        // bare compile rides the kernel's built-in K32 defaults).
         let device_ref: &DeviceRef = unsafe { DeviceRef::from_ptr(device_ptr) };
         let options = CompileOptions::new();
+        let source = format!("{}{}", config.defines(), MSL_SOURCE);
         let library = device_ref
-            .new_library_with_source(MSL_SOURCE, &options)
-            .map_err(|e| format!("MSL compilation failed: {e}"))?;
+            .new_library_with_source(source.as_str(), &options)
+            .map_err(|e| format!("MSL compilation failed ({config:?}): {e}"))?;
         let function = library
             .get_function("gemm_ternary_tensor", None)
             .map_err(|e| format!("Function 'gemm_ternary_tensor' not found: {e}"))?;
@@ -190,6 +217,7 @@ impl MetalTensorZeroCopyGemm {
             pipeline,
             output_cache: Mutex::new(HashMap::new()),
             dispatch_count: std::sync::atomic::AtomicU64::new(0),
+            config,
             _wgpu_device: wgpu_device,
             _wgpu_queue: wgpu_queue,
         })
@@ -347,13 +375,14 @@ impl MetalTensorZeroCopyGemm {
                 .clone()
         };
 
-        // matmul2d tile constants (must match the MSL kernel).
-        const NRA: u32 = 64; // features (M) per workgroup
-        const NRB: u32 = 128; // tokens (P) per workgroup
-        const NSG: u32 = 4; // simdgroups per workgroup
-        const THREADS_PER_SG: u32 = 32;
-        const NUM_THREADS: u32 = THREADS_PER_SG * NSG; // 128
-        const THREADGROUP_MEM_BYTES: u64 = 32 * 64 * 2; // K_TILE × NRA × sizeof(half)
+        // matmul2d tile constants — from THIS context's compiled config
+        // (Issue 1122 gate 2; must mirror the `SWEEP_*` defines above).
+        let nra = u64::from(self.config.nra);
+        let nrb = u64::from(self.config.nrb);
+        let nsg = u64::from(self.config.nsg);
+        let threads_per_sg: u64 = 32;
+        let num_threads = threads_per_sg * nsg;
+        let threadgroup_mem_bytes = self.config.threadgroup_mem_bytes();
 
         // Grid: one workgroup per output tile.
         // NOTE: use `dispatch_thread_groups` (not `dispatch_threads`). The
@@ -363,12 +392,12 @@ impl MetalTensorZeroCopyGemm {
         // which dispatches far too many workgroups + causes out-of-bounds writes.
         // (Issue 656's `MetalTensorGemm::launch` uses `dispatch_thread_groups`.)
         let grid = MTLSize {
-            width: (p as u64).div_ceil(NRB as u64),    // token tiles
-            height: (w.m as u64).div_ceil(NRA as u64), // feature tiles
+            width: (p as u64).div_ceil(nrb),    // token tiles
+            height: (w.m as u64).div_ceil(nra), // feature tiles
             depth: 1,
         };
         let threadgroup = MTLSize {
-            width: NUM_THREADS as u64,
+            width: num_threads,
             height: 1,
             depth: 1,
         };
@@ -406,7 +435,7 @@ impl MetalTensorZeroCopyGemm {
         encoder.set_bytes(9, 4, &p_tokens as *const u32 as *const _);
 
         // Threadgroup memory for the dequanted weight tile (index 0).
-        encoder.set_threadgroup_memory_length(0, THREADGROUP_MEM_BYTES);
+        encoder.set_threadgroup_memory_length(0, threadgroup_mem_bytes);
 
         // Declare resource usage so Metal's hazard tracking is correct. The
         // weights + input are read; the output is written. Without this,

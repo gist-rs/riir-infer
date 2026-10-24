@@ -1659,6 +1659,234 @@ pub fn set_prefill_use_metal_tensor_zerocopy(on: bool) {
     PREFILL_USE_METAL_TENSOR_ZEROCOPY.store(on, std::sync::atomic::Ordering::Relaxed);
 }
 
+// ---------------------------------------------------------------------------
+// Issue 1122 gate 1 — the per-site tensor-path filter + in-pipeline timing
+// ---------------------------------------------------------------------------
+// Bench 998 closed lever 3(a) on a WHOLE-PIPELINE swap (every projection
+// through matmul2d) and could not localize the per-launch→e2e tax. Gate 1 of
+// the re-open asks the site-isolated question: swap ONE projection kind,
+// time that kind's dispatches IN-PIPELINE (flush → extraction → launch →
+// commit — the host-side dispatch window, where a per-projection queue/fence
+// interaction tax would surface), leave everything else shipping.
+
+/// A `prefill_project` call site, identified by the projection it performs.
+/// The site filter + timing slots are indexed by this; layer identity is
+/// recovered through the per-site COUNT (one forward walks its layers in a
+/// fixed order, so occurrence k of a kind is layer k for uniform stacks).
+#[cfg(feature = "ternary_gemm_batched")]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+#[repr(u8)]
+pub enum PrefillSite {
+    AttnQ = 0,
+    AttnKv = 1,
+    AttnOutProj = 2,
+    GdnQkv = 3,
+    GdnZ = 4,
+    GdnA = 5,
+    GdnB = 6,
+    GdnOutProj = 7,
+    FfnGate = 8,
+    FfnUp = 9,
+    FfnDown = 10,
+    /// A site the lane has not named yet (forward-compatible default).
+    Other = 11,
+}
+
+#[cfg(feature = "ternary_gemm_batched")]
+impl PrefillSite {
+    /// Slot index for the mask + timing tables.
+    pub fn slot(self) -> usize {
+        (self as u8) as usize
+    }
+
+    /// The site's bit in a [`PREFILL_SITE_MASK_ALL`] mask.
+    pub fn bit(self) -> u64 {
+        1u64 << self.slot()
+    }
+
+    /// Display name (the timing snapshot's label).
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::AttnQ => "attn_q",
+            Self::AttnKv => "attn_kv",
+            Self::AttnOutProj => "attn_out_proj",
+            Self::GdnQkv => "gdn_in_proj_qkv",
+            Self::GdnZ => "gdn_in_proj_z",
+            Self::GdnA => "gdn_in_proj_a",
+            Self::GdnB => "gdn_in_proj_b",
+            Self::GdnOutProj => "gdn_out_proj",
+            Self::FfnGate => "ffn_gate",
+            Self::FfnUp => "ffn_up",
+            Self::FfnDown => "ffn_down",
+            Self::Other => "other",
+        }
+    }
+}
+
+/// Every site admitted — the byte-identical incumbent posture (the filter
+/// is transparent).
+#[cfg(feature = "ternary_gemm_batched")]
+pub const PREFILL_SITE_MASK_ALL: u64 = u64::MAX;
+
+/// Site-admission mask, consulted by the Metal tensor branches only; any
+/// filtered-out site falls through to the incumbent CubeCL path.
+#[cfg(feature = "ternary_gemm_batched")]
+static PREFILL_TENSOR_SITE_MASK: std::sync::atomic::AtomicU64 =
+    std::sync::atomic::AtomicU64::new(PREFILL_SITE_MASK_ALL);
+
+/// Restrict the Metal tensor paths to `mask` sites (bit `i` = [`PrefillSite`]
+/// slot `i`). `PREFILL_SITE_MASK_ALL` restores the incumbent posture.
+#[cfg(feature = "ternary_gemm_batched")]
+pub fn set_prefill_tensor_site_mask(mask: u64) {
+    PREFILL_TENSOR_SITE_MASK.store(mask, std::sync::atomic::Ordering::Relaxed);
+}
+
+#[cfg(all(
+    feature = "ternary_gemm_batched",
+    feature = "metal_tensor_gemm",
+    target_os = "macos"
+))]
+fn site_admits(site: PrefillSite) -> bool {
+    let mask = PREFILL_TENSOR_SITE_MASK.load(std::sync::atomic::Ordering::Relaxed);
+    mask == PREFILL_SITE_MASK_ALL || mask & site.bit() != 0
+}
+
+/// One site's accumulated in-pipeline dispatch timing.
+#[cfg(feature = "ternary_gemm_batched")]
+struct PrefillSiteTiming {
+    nanos: std::sync::atomic::AtomicU64,
+    count: std::sync::atomic::AtomicU64,
+    max_nanos: std::sync::atomic::AtomicU64,
+}
+
+#[cfg(feature = "ternary_gemm_batched")]
+impl PrefillSiteTiming {
+    const fn new() -> Self {
+        Self {
+            nanos: std::sync::atomic::AtomicU64::new(0),
+            count: std::sync::atomic::AtomicU64::new(0),
+            max_nanos: std::sync::atomic::AtomicU64::new(0),
+        }
+    }
+
+    /// Metal-gated with its only caller ([`prefill_site_timing_record`]) so
+    /// non-Metal builds carry the struct as pure storage.
+    #[cfg(all(
+        feature = "ternary_gemm_batched",
+        feature = "metal_tensor_gemm",
+        target_os = "macos"
+    ))]
+    fn record(&self, d: core::time::Duration) {
+        let n = u64::try_from(d.as_nanos()).unwrap_or(u64::MAX);
+        self.nanos
+            .fetch_add(n, std::sync::atomic::Ordering::Relaxed);
+        self.count
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let mut cur = self.max_nanos.load(std::sync::atomic::Ordering::Relaxed);
+        while n > cur {
+            match self.max_nanos.compare_exchange_weak(
+                cur,
+                n,
+                std::sync::atomic::Ordering::Relaxed,
+                std::sync::atomic::Ordering::Relaxed,
+            ) {
+                Ok(_) => break,
+                Err(actual) => cur = actual,
+            }
+        }
+    }
+}
+
+/// Timing recorder — allocation-free, and a no-op until armed (the tensor
+/// branches pay one `Relaxed` load when the path is taken; instrumentation
+/// never costs the incumbent path anything).
+#[cfg(feature = "ternary_gemm_batched")]
+static PREFILL_SITE_TIMING_ARMED: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+
+#[cfg(feature = "ternary_gemm_batched")]
+static PREFILL_SITE_TIMING: [PrefillSiteTiming; 12] = [
+    PrefillSiteTiming::new(),
+    PrefillSiteTiming::new(),
+    PrefillSiteTiming::new(),
+    PrefillSiteTiming::new(),
+    PrefillSiteTiming::new(),
+    PrefillSiteTiming::new(),
+    PrefillSiteTiming::new(),
+    PrefillSiteTiming::new(),
+    PrefillSiteTiming::new(),
+    PrefillSiteTiming::new(),
+    PrefillSiteTiming::new(),
+    PrefillSiteTiming::new(),
+];
+
+/// Arm the per-site dispatch timer (issue 1122 gate 1). Arming is the
+/// caller's choice; the incumbent path never records.
+#[cfg(feature = "ternary_gemm_batched")]
+pub fn set_prefill_site_timing_armed(on: bool) {
+    PREFILL_SITE_TIMING_ARMED.store(on, std::sync::atomic::Ordering::Relaxed);
+}
+
+/// Zero every site's timing slots (call between postures).
+#[cfg(feature = "ternary_gemm_batched")]
+pub fn prefill_site_timing_reset() {
+    for slot in &PREFILL_SITE_TIMING {
+        slot.nanos.store(0, std::sync::atomic::Ordering::Relaxed);
+        slot.count.store(0, std::sync::atomic::Ordering::Relaxed);
+        slot.max_nanos
+            .store(0, std::sync::atomic::Ordering::Relaxed);
+    }
+}
+
+/// Snapshot the timing slots: `(name, total_nanos, dispatch_count,
+/// max_single_dispatch_nanos)` per site with at least one recorded dispatch.
+#[cfg(feature = "ternary_gemm_batched")]
+pub fn prefill_site_timing_snapshot() -> Vec<(&'static str, u64, u64, u64)> {
+    let mut rows = Vec::new();
+    for (slot, site) in PREFILL_SITE_TIMING.iter().zip(
+        [
+            PrefillSite::AttnQ,
+            PrefillSite::AttnKv,
+            PrefillSite::AttnOutProj,
+            PrefillSite::GdnQkv,
+            PrefillSite::GdnZ,
+            PrefillSite::GdnA,
+            PrefillSite::GdnB,
+            PrefillSite::GdnOutProj,
+            PrefillSite::FfnGate,
+            PrefillSite::FfnUp,
+            PrefillSite::FfnDown,
+            PrefillSite::Other,
+        ]
+        .iter(),
+    ) {
+        let count = slot.count.load(std::sync::atomic::Ordering::Relaxed);
+        if count > 0 {
+            rows.push((
+                site.name(),
+                slot.nanos.load(std::sync::atomic::Ordering::Relaxed),
+                count,
+                slot.max_nanos.load(std::sync::atomic::Ordering::Relaxed),
+            ));
+        }
+    }
+    rows
+}
+
+/// Record one site's dispatch window (called by the Metal tensor branches
+/// on success, only when armed). Metal-gated: its only callers are the
+/// Metal tensor branches.
+#[cfg(all(
+    feature = "ternary_gemm_batched",
+    feature = "metal_tensor_gemm",
+    target_os = "macos"
+))]
+fn prefill_site_timing_record(site: PrefillSite, d: core::time::Duration) {
+    if PREFILL_SITE_TIMING_ARMED.load(std::sync::atomic::Ordering::Relaxed) {
+        PREFILL_SITE_TIMING[site.slot()].record(d);
+    }
+}
+
 // Issue 727 H3: one-time loud warning when a Metal-path flag is ON but its
 // weight cache is unreachable — previously this fell through to CubeCL
 // SILENTLY, so a mis-sequenced A/B (flag flipped after construction without
@@ -2999,9 +3227,18 @@ impl TernaryDeltanetGpuForward {
                 );
                 None
             } else {
-                match crate::gemm_ternary_metal_tensor::MetalTensorGemm::new() {
+                match crate::gemm_ternary_metal_tensor::MetalTensorGemm::new_with_config(
+                    crate::gemm_ternary_metal_tensor::production_geometry(),
+                ) {
                     Ok(g) => {
-                        eprintln!("[Plan 534] Metal tensor GEMM initialized; uploading weights...");
+                        let cfg = g.config();
+                        eprintln!(
+                            "[Plan 534] Metal tensor GEMM initialized ({}x{}, K-tile {}, {} sg); uploading weights...",
+                            cfg.nra,
+                            cfg.nrb,
+                            16 * cfg.nk_chunk,
+                            cfg.nsg
+                        );
                         Some(g)
                     }
                     Err(e) => {
@@ -5797,12 +6034,12 @@ impl TernaryDeltanetGpuForward {
                 .attn_wq
                 .as_ref()
                 .expect("attn_wq for Attention layer");
-            self.prefill_project(wq, normx_b, &scratch.qg_b, p);
+            self.prefill_project(wq, normx_b, &scratch.qg_b, p, PrefillSite::AttnQ);
             let wkv = layer_w
                 .attn_wkv
                 .as_ref()
                 .expect("attn_wkv for Attention layer");
-            self.prefill_project(wkv, normx_b, &scratch.kv_b, p);
+            self.prefill_project(wkv, normx_b, &scratch.kv_b, p, PrefillSite::AttnKv);
         }
 
         // 4. Split QG → Q + gate (batched).
@@ -6179,7 +6416,13 @@ impl TernaryDeltanetGpuForward {
                     q_dim,
                 );
             }
-            self.prefill_project(wo, &scratch.attn_out_b, &scratch.out_proj_b, p);
+            self.prefill_project(
+                wo,
+                &scratch.attn_out_b,
+                &scratch.out_proj_b,
+                p,
+                PrefillSite::AttnOutProj,
+            );
         }
 
         // 11. Residual add: x_b += out_proj_b → residual_out (batched).
@@ -6264,8 +6507,20 @@ impl TernaryDeltanetGpuForward {
     /// host round-trip: read CubeCL input handle → Metal buffer → matmul2d →
     /// write back into the CubeCL output handle via `client.write`.
     #[cfg(feature = "ternary_gemm_batched")]
-    fn prefill_project(&self, w: &TernaryHandle, input: &Handle, output: &Handle, p: usize) {
+    fn prefill_project(
+        &self,
+        w: &TernaryHandle,
+        input: &Handle,
+        output: &Handle,
+        p: usize,
+        site: PrefillSite,
+    ) {
         let client = &self.client;
+
+        // Issue 1122 gate 1: the Metal tensor branches consult the site mask;
+        // builds without them carry the param as identity.
+        #[cfg(not(all(feature = "metal_tensor_gemm", target_os = "macos")))]
+        let _ = site;
 
         // Issue 663 T5: zero-copy RAW-Metal dispatch path. HIGHEST priority —
         // when the flag is on + the zero-copy GEMM context is initialized +
@@ -6275,11 +6530,17 @@ impl TernaryDeltanetGpuForward {
         // Falls through to the other paths on dispatch failure.
         #[cfg(all(feature = "metal_tensor_gemm", target_os = "macos"))]
         if PREFILL_USE_METAL_TENSOR_ZEROCOPY.load(std::sync::atomic::Ordering::Relaxed)
+            && site_admits(site)
             && let (Some(gemm), Some(cache)) = (&self.metal_zerocopy_gemm, &w.zerocopy_cache)
         {
+            let t0 = (PREFILL_SITE_TIMING_ARMED.load(std::sync::atomic::Ordering::Relaxed))
+                .then(std::time::Instant::now);
             if let Err(e) = gemm.dispatch(client, cache, w, input, output, p) {
                 eprintln!("[Issue 663 T5] zero-copy dispatch failed ({e}); falling through");
             } else {
+                if let Some(t0) = t0 {
+                    prefill_site_timing_record(site, t0.elapsed());
+                }
                 return;
             }
         }
@@ -6297,17 +6558,23 @@ impl TernaryDeltanetGpuForward {
         // working because the cache materializes here, not at `new()`.
         #[cfg(all(feature = "metal_tensor_gemm", target_os = "macos"))]
         if PREFILL_USE_METAL_TENSOR_WGPU.load(std::sync::atomic::Ordering::Relaxed)
+            && site_admits(site)
             && let Some(gemm) = &self.metal_wgpu_gemm
         {
             let cache = w
                 .wgpu_cache
                 .get_or_init(|| gemm.cache_weights(client, w).ok());
             if let Some(cache) = cache {
+                let t0 = (PREFILL_SITE_TIMING_ARMED.load(std::sync::atomic::Ordering::Relaxed))
+                    .then(std::time::Instant::now);
                 if let Err(e) = gemm.dispatch(client, cache, w, input, output, p) {
                     // Dispatch failed (e.g., buffer extraction error). Log + fall
                     // through to the next path rather than panicking.
                     eprintln!("[Issue 657] wgpu dispatch failed ({e}); falling through");
                 } else {
+                    if let Some(t0) = t0 {
+                        prefill_site_timing_record(site, t0.elapsed());
+                    }
                     return;
                 }
             } else {
@@ -6329,9 +6596,15 @@ impl TernaryDeltanetGpuForward {
         // mis-configured A/B would measure CubeCL twice without a trace).
         #[cfg(all(feature = "metal_tensor_gemm", target_os = "macos"))]
         if PREFILL_USE_METAL_TENSOR.load(std::sync::atomic::Ordering::Relaxed)
+            && site_admits(site)
             && let (Some(gemm), Some(mw)) = (&self.metal_gemm, &w.metal)
         {
+            let t0 = (PREFILL_SITE_TIMING_ARMED.load(std::sync::atomic::Ordering::Relaxed))
+                .then(std::time::Instant::now);
             self.prefill_project_metal(gemm, mw, w, input, output, p);
+            if let Some(t0) = t0 {
+                prefill_site_timing_record(site, t0.elapsed());
+            }
             return;
         }
         #[cfg(all(
@@ -6887,9 +7160,9 @@ impl TernaryDeltanetGpuForward {
                 &segments,
             )
         {
-            self.prefill_project(&layer_w.in_proj_z, normx_b, z_b, p);
-            self.prefill_project(&layer_w.in_proj_a, normx_b, a_b, p);
-            self.prefill_project(&layer_w.in_proj_b, normx_b, b_b, p);
+            self.prefill_project(&layer_w.in_proj_z, normx_b, z_b, p, PrefillSite::GdnZ);
+            self.prefill_project(&layer_w.in_proj_a, normx_b, a_b, p, PrefillSite::GdnA);
+            self.prefill_project(&layer_w.in_proj_b, normx_b, b_b, p, PrefillSite::GdnB);
             return match job.finish() {
                 Ok(()) => true,
                 Err(e) => {
@@ -6911,9 +7184,9 @@ impl TernaryDeltanetGpuForward {
             return false;
         };
         // GPU complement — concurrent with the ANE worker.
-        self.prefill_project(&layer_w.in_proj_z, normx_b, z_b, p);
-        self.prefill_project(&layer_w.in_proj_a, normx_b, a_b, p);
-        self.prefill_project(&layer_w.in_proj_b, normx_b, b_b, p);
+        self.prefill_project(&layer_w.in_proj_z, normx_b, z_b, p, PrefillSite::GdnZ);
+        self.prefill_project(&layer_w.in_proj_a, normx_b, a_b, p, PrefillSite::GdnA);
+        self.prefill_project(&layer_w.in_proj_b, normx_b, b_b, p, PrefillSite::GdnB);
         match job.finish(&self.client) {
             Ok(()) => true,
             Err(e) => {
@@ -7057,7 +7330,7 @@ impl TernaryDeltanetGpuForward {
                 &segments,
             )
         {
-            self.prefill_project(&layer_w.up_proj, normx_b, up_b, p);
+            self.prefill_project(&layer_w.up_proj, normx_b, up_b, p, PrefillSite::FfnUp);
             return match job.finish() {
                 Ok(()) => true,
                 Err(e) => {
@@ -7078,7 +7351,7 @@ impl TernaryDeltanetGpuForward {
         ) else {
             return false;
         };
-        self.prefill_project(&layer_w.up_proj, normx_b, up_b, p);
+        self.prefill_project(&layer_w.up_proj, normx_b, up_b, p, PrefillSite::FfnUp);
         match job.finish(&self.client) {
             Ok(()) => true,
             Err(e) => {
@@ -8009,8 +8282,14 @@ impl TernaryDeltanetGpuForward {
                         p * n,
                         n,
                     );
-                    self.prefill_project(&layer_w.in_proj_qkv, &rotx_b, &qkv_b, p);
-                    self.prefill_project(&layer_w.in_proj_z, &rotx_b, &z_b, p);
+                    self.prefill_project(
+                        &layer_w.in_proj_qkv,
+                        &rotx_b,
+                        &qkv_b,
+                        p,
+                        PrefillSite::GdnQkv,
+                    );
+                    self.prefill_project(&layer_w.in_proj_z, &rotx_b, &z_b, p, PrefillSite::GdnZ);
                     for (w, out, name) in [
                         (&layer_w.in_proj_a_f32, &a_b, "ssm_alpha"),
                         (&layer_w.in_proj_b_f32, &b_b, "ssm_beta"),
@@ -8031,13 +8310,13 @@ impl TernaryDeltanetGpuForward {
                         }
                     }
                 } else if !ane_inproj_done {
-                    for (w, out) in [
-                        (&layer_w.in_proj_qkv, &qkv_b),
-                        (&layer_w.in_proj_z, &z_b),
-                        (&layer_w.in_proj_a, &a_b),
-                        (&layer_w.in_proj_b, &b_b),
+                    for (w, out, site) in [
+                        (&layer_w.in_proj_qkv, &qkv_b, PrefillSite::GdnQkv),
+                        (&layer_w.in_proj_z, &z_b, PrefillSite::GdnZ),
+                        (&layer_w.in_proj_a, &a_b, PrefillSite::GdnA),
+                        (&layer_w.in_proj_b, &b_b, PrefillSite::GdnB),
                     ] {
-                        self.prefill_project(w, &normx_b, out, p);
+                        self.prefill_project(w, &normx_b, out, p, site);
                     }
                 }
 
@@ -8431,7 +8710,13 @@ impl TernaryDeltanetGpuForward {
                     );
                 }
                 // 11. Out projection.
-                self.prefill_project(&layer_w.out_proj, &rec_b, &tmp_b, p);
+                self.prefill_project(
+                    &layer_w.out_proj,
+                    &rec_b,
+                    &tmp_b,
+                    p,
+                    PrefillSite::GdnOutProj,
+                );
 
                 unsafe {
                     ResidualAddCubeCL::launch::<ActiveRuntime>(
@@ -8686,8 +8971,20 @@ impl TernaryDeltanetGpuForward {
                     #[cfg(not(feature = "ane_prefill"))]
                     let ane_gate_up_done = false;
                     if !ane_gate_up_done {
-                        self.prefill_project(&layer_w.gate_proj, &normx_b, &gate_b, p);
-                        self.prefill_project(&layer_w.up_proj, &normx_b, &up_b, p);
+                        self.prefill_project(
+                            &layer_w.gate_proj,
+                            &normx_b,
+                            &gate_b,
+                            p,
+                            PrefillSite::FfnGate,
+                        );
+                        self.prefill_project(
+                            &layer_w.up_proj,
+                            &normx_b,
+                            &up_b,
+                            p,
+                            PrefillSite::FfnUp,
+                        );
                     }
                     // SwiGLU is elementwise — widening batches it.
                     unsafe {
@@ -8719,7 +9016,13 @@ impl TernaryDeltanetGpuForward {
                     #[cfg(not(feature = "ane_prefill"))]
                     let ane_down_done = false;
                     if !ane_down_done {
-                        self.prefill_project(&layer_w.down_proj, &hid_b, &ffnout_b, p);
+                        self.prefill_project(
+                            &layer_w.down_proj,
+                            &hid_b,
+                            &ffnout_b,
+                            p,
+                            PrefillSite::FfnDown,
+                        );
                     }
                     unsafe {
                         ResidualAddCubeCL::launch::<ActiveRuntime>(
