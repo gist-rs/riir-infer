@@ -48,6 +48,14 @@ use crate::types::{Config, DeltaNetLayerType, rmsnorm_with_gamma_eps, swiglu};
 use katgpt_core::TernaryMatvecHook;
 use katgpt_core::{TernaryFfnHook, TernaryInputProjHook};
 
+#[cfg(feature = "flashmemory_budget")]
+use super::flashmemory_gqa::{
+    CacheUpdate, FlashMemoryDecodeState, GqaBlockSelector, build_kv_resolution_query,
+    refresh_and_select, sparse_attention_accumulate,
+};
+#[cfg(feature = "flashmemory_budget")]
+use katgpt_attn::dash_attn::flashmemory_sparse::GqaFlashMemoryBlockCache;
+
 use crate::deltanet::rotation::{
     TernaryRotationConfig, permute_gdn_v_grouped_inplace, permute_gdn_v_grouped_inverse_inplace,
     rotate_forward_inplace, rotate_inverse_inplace,
@@ -658,6 +666,351 @@ fn forward_attention_layer_ternary(
     );
 }
 
+/// [`forward_attention_layer_ternary`] with the attention READ restricted to
+/// FlashMemory-selected blocks (Issue 1117 T2 — the decode lane's per-layer
+/// forward). The Q/K/V projections, QK-norm, `RoPE`, cache append, output
+/// gating, and folded output projection are IDENTICAL to the dense ternary
+/// path — only the attention scoring + value aggregation run over the
+/// selected blocks, through the SAME shared core the f32 research forward
+/// uses ([`super::flashmemory_gqa::refresh_and_select`] +
+/// [`super::flashmemory_gqa::sparse_attention_accumulate`]).
+///
+/// Named exclusivities (not silent): the scale-invariant session is refused
+/// loud (a full-row logit affine is undefined over a selected-token softmax)
+/// and `key_bias` is not threaded (the selector IS the routing surface — the
+/// Plan-622 bias lane and this lane are disjoint opt-ins).
+#[cfg(feature = "flashmemory_budget")]
+#[allow(clippy::too_many_arguments)]
+fn forward_attention_layer_ternary_flashmemory<S: GqaBlockSelector>(
+    x: &mut [f32],
+    layer: &DeltaNetTernaryLayerWeights,
+    cache: &mut crate::transformer::KVCache,
+    pos: usize,
+    config: &Config,
+    rope_freq: &crate::rope::RopeFreqTable,
+    scratch: &mut AttentionLayerScratch,
+    block_cache: &mut GqaFlashMemoryBlockCache,
+    selector: &mut S,
+    last_n_blocks: &mut usize,
+    step: usize,
+    incremental: bool,
+    rotation: Option<&TernaryRotationConfig>,
+    rotation_buf: &mut [f32],
+    hook: Option<&dyn TernaryMatvecHook>,
+) {
+    let n_embd = config.n_embd;
+    let n_head = config.n_head;
+    let n_kv = config.n_kv_head;
+    let hd = config.head_dim;
+    let q_dim = n_head * hd;
+    let kvd = n_kv * hd;
+    let rotary_dim = effective_rotary_dim(config);
+
+    #[cfg(feature = "scale_invariant_attn")]
+    assert!(
+        scratch.scale_invariant.is_none(),
+        "the scale-invariant session is a full-row logit affine — undefined over FlashMemory's selected-token softmax; do not combine the lanes"
+    );
+
+    let x_in = &x[..n_embd];
+
+    // 1. Gated Q projection + K + V (ternary, folded — identical to dense).
+    let rotated_qkv = rotation.is_some();
+    if rotated_qkv {
+        let rot = rotation.unwrap();
+        let signs = rot.signs_for_width(n_embd);
+        rotation_buf[..n_embd].copy_from_slice(x_in);
+        rotate_forward_inplace(&mut rotation_buf[..n_embd], signs, rot.block_size);
+    }
+    let x_qkv: &[f32] = if rotated_qkv {
+        &rotation_buf[..n_embd]
+    } else {
+        x_in
+    };
+    bitlinear_n(
+        [
+            &mut scratch.qg_buf[..],
+            &mut scratch.k_buf[..],
+            &mut scratch.v_buf[..],
+        ],
+        [&layer.attn_wq, &layer.attn_wk, &layer.attn_wv],
+        x_qkv,
+        hook,
+    );
+    for h in 0..n_head {
+        let src = h * 2 * hd;
+        let dst = h * hd;
+        scratch.q_buf[dst..dst + hd].copy_from_slice(&scratch.qg_buf[src..src + hd]);
+        scratch.gate_buf[dst..dst + hd].copy_from_slice(&scratch.qg_buf[src + hd..src + 2 * hd]);
+    }
+
+    // 2. QK-norm (dense fields) — identical to dense.
+    let eps = config.rms_norm_eps;
+    for h in 0..n_head {
+        let off = h * hd;
+        rmsnorm_with_gamma_eps(&mut scratch.q_buf[off..off + hd], &layer.attn_q_norm, eps);
+    }
+    for h in 0..n_kv {
+        let off = h * hd;
+        rmsnorm_with_gamma_eps(&mut scratch.k_buf[off..off + hd], &layer.attn_k_norm, eps);
+    }
+
+    // 3. RoPE — identical to dense.
+    if rotary_dim == hd {
+        crate::rope::apply_rope_with_freq(
+            &mut scratch.q_buf,
+            &mut scratch.k_buf,
+            pos,
+            hd,
+            rope_freq.as_slice(),
+        );
+    } else {
+        crate::rope::apply_partial_rope_with_freq(
+            &mut scratch.q_buf,
+            &mut scratch.k_buf,
+            pos,
+            hd,
+            rotary_dim,
+            rope_freq.as_slice(),
+        );
+    }
+
+    // 4. Store K, V in cache — identical to dense.
+    let pos_off = pos * kvd;
+    unsafe {
+        std::ptr::copy_nonoverlapping(
+            scratch.k_buf.as_ptr(),
+            cache.key.as_mut_ptr().add(pos_off),
+            kvd,
+        );
+        std::ptr::copy_nonoverlapping(
+            scratch.v_buf.as_ptr(),
+            cache.value.as_mut_ptr().add(pos_off),
+            kvd,
+        );
+    }
+
+    // 5. SPARSE attention — the shared core (refresh → select → accumulate).
+    // `qg_buf` is dead past step 1 (q + gate extracted); reuse its prefix as
+    // the KV-resolution query. G4: alloc-free.
+    let seq_len = pos + 1;
+    let scale = 1.0 / (hd as f32).sqrt();
+    build_kv_resolution_query(&scratch.q_buf, n_head, n_kv, hd, &mut scratch.qg_buf[..kvd]);
+    let selection = refresh_and_select(
+        &cache.key,
+        block_cache,
+        selector,
+        &scratch.qg_buf[..kvd],
+        scale,
+        seq_len,
+        step,
+        if incremental {
+            CacheUpdate::Incremental
+        } else {
+            CacheUpdate::Rebuild
+        },
+        last_n_blocks,
+    );
+    {
+        let s = &mut *scratch;
+        let AttentionLayerScratch {
+            q_buf,
+            attn_out,
+            head_scores,
+            ..
+        } = s;
+        sparse_attention_accumulate(
+            q_buf,
+            &*cache,
+            attn_out,
+            head_scores,
+            selection,
+            block_cache,
+            n_head,
+            n_kv,
+            hd,
+            kvd,
+            seq_len,
+            scale,
+        );
+    }
+
+    // 6. Output gating — identical to dense.
+    for i in 0..q_dim {
+        scratch.attn_out[i] *= crate::simd::fast_sigmoid(scratch.gate_buf[i]);
+    }
+
+    // 7. Output projection (ternary, folded) — identical to dense: rotate
+    // `attn_out` in place, then the matmul.
+    if let Some(rot) = rotation {
+        let signs = rot.signs_for_width(q_dim);
+        rotate_forward_inplace(&mut scratch.attn_out[..q_dim], signs, rot.block_size);
+    }
+    bitlinear(
+        &mut x[..n_embd],
+        &layer.attn_wo,
+        &scratch.attn_out[..q_dim],
+        hook,
+    );
+}
+
+/// [`qwen_deltanet_ternary_layer_body`] for the FlashMemory decode lane
+/// (Issue 1117): residual save + input norm + the SPARSE attention forward +
+/// the shared post-attention tail. Attention layers only — the decode body
+/// routes GDN layers through the incumbent body unchanged.
+#[cfg(feature = "flashmemory_budget")]
+#[allow(clippy::too_many_arguments)]
+fn qwen_deltanet_ternary_layer_body_flashmemory<S: GqaBlockSelector>(
+    x: &mut [f32],
+    layer_weights: &DeltaNetTernaryLayerWeights,
+    kv_cache: &mut crate::transformer::KVCache,
+    pos: usize,
+    config: &Config,
+    scratch: &mut HybridForwardScratch,
+    rope_freq: &crate::rope::RopeFreqTable,
+    rotation: Option<&TernaryRotationConfig>,
+    hook: Option<&dyn TernaryMatvecHook>,
+    block_cache: &mut GqaFlashMemoryBlockCache,
+    selector: &mut S,
+    last_n_blocks: &mut usize,
+    step: usize,
+    incremental: bool,
+) {
+    let n = config.n_embd;
+    let x = &mut x[..n];
+
+    // a. Save residual (MUST NOT be `attention.q_buf` — Issue 594).
+    scratch.residual[..n].copy_from_slice(&x[..n]);
+
+    // b. Pre-attention/input RMSNorm (dense field).
+    rmsnorm_with_gamma_eps(&mut x[..n], &layer_weights.input_norm, config.rms_norm_eps);
+
+    // c. Sparse attention forward.
+    forward_attention_layer_ternary_flashmemory(
+        &mut x[..n],
+        layer_weights,
+        kv_cache,
+        pos,
+        config,
+        rope_freq,
+        &mut scratch.attention,
+        block_cache,
+        selector,
+        last_n_blocks,
+        step,
+        incremental,
+        rotation,
+        &mut scratch.rotation_buf,
+        hook,
+    );
+
+    // d–i. Shared tail (no ffn hook on this lane — CPU reference; the GPU
+    // ffn-hook lane composes only with the dense path).
+    ternary_post_attention_tail(x, layer_weights, config, scratch, rotation, hook, None);
+}
+
+/// The FlashMemory budget decode step for the ternary hybrid stack
+/// (Issue 1117 T2). Mirrors [`forward_qwen_deltanet_ternary`] — same embed,
+/// same GDN layers, same LM head; the full-attention layers route through
+/// [`qwen_deltanet_ternary_layer_body_flashmemory`] with per-layer block
+/// cache + budget selector + block-open tracking from `fm`. Runs ON the
+/// decode pool (same posture as the dense entry; arithmetic unchanged).
+#[cfg(feature = "flashmemory_budget")]
+#[allow(clippy::too_many_arguments)]
+pub fn forward_qwen_deltanet_ternary_flashmemory<'a>(
+    x: &'a mut [f32],
+    weights: &QwenDeltaNetTernaryWeights,
+    cache: &mut HybridCache,
+    fm: &mut FlashMemoryDecodeState,
+    token: usize,
+    pos: usize,
+    config: &Config,
+    scratch: &'a mut HybridForwardScratch,
+    rope_freq: &crate::rope::RopeFreqTable,
+) -> &'a mut [f32] {
+    super::on_decode_pool(move || {
+        forward_qwen_deltanet_ternary_flashmemory_body(
+            x, weights, cache, fm, token, pos, config, scratch, rope_freq,
+        )
+    })
+}
+
+/// The FlashMemory decode body — the incumbent body's shape with the
+/// attention-layer route swapped. No layer-capture tap (the TWT audition
+/// instruments the dense path only; the sparse lane is a serving reference).
+#[cfg(feature = "flashmemory_budget")]
+#[allow(clippy::too_many_arguments)]
+fn forward_qwen_deltanet_ternary_flashmemory_body<'a>(
+    x: &'a mut [f32],
+    weights: &QwenDeltaNetTernaryWeights,
+    cache: &mut HybridCache,
+    fm: &mut FlashMemoryDecodeState,
+    token: usize,
+    pos: usize,
+    config: &Config,
+    scratch: &'a mut HybridForwardScratch,
+    rope_freq: &crate::rope::RopeFreqTable,
+) -> &'a mut [f32] {
+    let n = config.n_embd;
+
+    let rotation = weights.rotation.as_ref();
+
+    // 1. Embedding lookup (shared helper).
+    ternary_embed_token_into(x, weights, n, token);
+
+    // 2. Layer loop: GDN layers run the INCUMBENT body (identical arithmetic);
+    // attention layers run the sparse body.
+    for (layer_idx, layer_weights) in weights.layers.iter().enumerate() {
+        let is_linear = weights.layer_types[layer_idx] == DeltaNetLayerType::DeltaNet;
+        if is_linear {
+            qwen_deltanet_ternary_layer_body(
+                x,
+                layer_weights,
+                true,
+                &mut cache.deltanet_state.recurrent_states[layer_idx],
+                &mut cache.deltanet_state.conv_states[layer_idx],
+                &mut cache.kv_cache.layers[layer_idx],
+                pos,
+                layer_idx,
+                config,
+                scratch,
+                rope_freq,
+                rotation,
+                None,
+                None,
+                None,
+            );
+        } else {
+            let st = fm.layers[layer_idx].as_mut().unwrap_or_else(|| {
+                panic!(
+                    "flashmemory decode state has no entry for full-attention layer {layer_idx} (FlashMemoryDecodeState::new keys on layer_types)"
+                )
+            });
+            qwen_deltanet_ternary_layer_body_flashmemory(
+                x,
+                layer_weights,
+                &mut cache.kv_cache.layers[layer_idx],
+                pos,
+                config,
+                scratch,
+                rope_freq,
+                rotation,
+                None,
+                &mut st.block_cache,
+                &mut st.selector,
+                &mut st.last_n_blocks,
+                pos,
+                fm.incremental,
+            );
+        }
+    }
+
+    // 3-4. Final norm + LM head (shared helper).
+    ternary_lm_head_into(x, weights, config, scratch, rotation, None);
+
+    &mut x[..config.vocab_size]
+}
+
 /// Ternary-weight forward pass for Qwen3.5 hybrid DeltaNet/Attention (decode,
 /// single token).
 ///
@@ -794,6 +1147,28 @@ pub fn qwen_deltanet_ternary_layer_body(
             None,
         );
     }
+
+    ternary_post_attention_tail(x, layer_weights, config, scratch, rotation, hook, ffn_hook);
+}
+
+/// The post-attention per-layer tail — residual add, MLP residual save,
+/// pre-MLP RMSNorm, SwiGLU MLP (ternary, folded), down projection, final
+/// residual add. VERBATIM extraction from [`qwen_deltanet_ternary_layer_body`]
+/// (steps d–i) shared with the FlashMemory decode body (Issue 1117) so the
+/// two bodies cannot drift — the audition parity law (Issue 022 T3.1) holds
+/// structurally: both execute this exact code.
+#[allow(clippy::too_many_arguments)]
+fn ternary_post_attention_tail(
+    x: &mut [f32],
+    layer_weights: &DeltaNetTernaryLayerWeights,
+    config: &Config,
+    scratch: &mut HybridForwardScratch,
+    rotation: Option<&TernaryRotationConfig>,
+    hook: Option<&dyn TernaryMatvecHook>,
+    ffn_hook: Option<&dyn TernaryFfnHook>,
+) {
+    let n = config.n_embd;
+    let x = &mut x[..n];
 
     // d. Residual add
     for (xi, r) in x[..n].iter_mut().zip(&scratch.residual[..n]) {
@@ -948,18 +1323,9 @@ fn forward_qwen_deltanet_ternary_body<'a>(
         scratch.rotation_buf.len()
     );
 
-    // 1. Embedding lookup — ternary wte row dequant
-    weights.dequant_wte_row_into(token, &mut x[..n]);
-    // Issue 980: a Hadamard-latent embedding table stores rotated rows;
-    // restore the primal basis right after the lookup — Hadamard first, sign
-    // second (the inverse of the folded-matmul transform; fork
-    // build_inp_embd: `h = s * (H z)`).
-    if let Some(rot) = rotation
-        && rot.inverse_embedding
-    {
-        let signs = rot.signs_for_width(n);
-        rotate_inverse_inplace(&mut x[..n], signs, rot.block_size);
-    }
+    // 1. Embedding lookup — ternary wte row dequant + folded-basis restore
+    // (shared helper, Issue 1117).
+    ternary_embed_token_into(x, weights, n, token);
 
     // 2. Layer loop with hybrid dispatch
     for (layer_idx, layer_weights) in weights.layers.iter().enumerate() {
@@ -1002,10 +1368,50 @@ fn forward_qwen_deltanet_ternary_body<'a>(
         }
     }
 
-    // 3. Final RMSNorm (dense field)
+    // 3. Final RMSNorm + 4. LM head (shared helper, Issue 1117).
+    ternary_lm_head_into(x, weights, config, scratch, rotation, hook);
+
+    &mut x[..config.vocab_size]
+}
+
+/// Embedding lookup — ternary wte row dequant + folded-basis restore.
+/// VERBATIM extraction from [`forward_qwen_deltanet_ternary_body`] (step 1)
+/// shared with the FlashMemory decode body (Issue 1117). Issue 980: a
+/// Hadamard-latent embedding table stores rotated rows; the primal basis is
+/// restored right after the lookup — Hadamard first, sign second (the
+/// inverse of the folded-matmul transform; fork build_inp_embd:
+/// `h = s * (H z)`).
+fn ternary_embed_token_into(
+    x: &mut [f32],
+    weights: &QwenDeltaNetTernaryWeights,
+    n_embd: usize,
+    token: usize,
+) {
+    weights.dequant_wte_row_into(token, &mut x[..n_embd]);
+    if let Some(rot) = weights.rotation.as_ref()
+        && rot.inverse_embedding
+    {
+        let signs = rot.signs_for_width(n_embd);
+        rotate_inverse_inplace(&mut x[..n_embd], signs, rot.block_size);
+    }
+}
+
+/// Final RMSNorm + ternary LM head. VERBATIM extraction from
+/// [`forward_qwen_deltanet_ternary_body`] (steps 3–4) shared with the
+/// FlashMemory decode body (Issue 1117). Writes logits into
+/// `x[..config.vocab_size]`.
+fn ternary_lm_head_into(
+    x: &mut [f32],
+    weights: &QwenDeltaNetTernaryWeights,
+    config: &Config,
+    scratch: &mut HybridForwardScratch,
+    rotation: Option<&TernaryRotationConfig>,
+    hook: Option<&dyn TernaryMatvecHook>,
+) {
+    let n = config.n_embd;
     rmsnorm_with_gamma_eps(&mut x[..n], &weights.final_norm, config.rms_norm_eps);
 
-    // 4. LM head — ternary matvec (one call, produces all vocab_size logits).
+    // LM head — ternary matvec (one call, produces all vocab_size logits).
     // The globals keep the bare ternary type (Issue 028 T4 S2: the pack
     // byte-copies them; only the PER-LAYER projections carry the q4 arm), so
     // the dispatch is spelled directly here instead of through bitlinear.
@@ -1030,8 +1436,6 @@ fn forward_qwen_deltanet_ternary_body<'a>(
             &mut x[..config.vocab_size],
         );
     }
-
-    &mut x[..config.vocab_size]
 }
 
 /// Hidden-state extraction variant (Plan 524 Phase 7 / Issue 596).

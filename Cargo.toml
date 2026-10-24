@@ -376,6 +376,10 @@ wall_attention = ["katgpt-core/wall_attention", "katgpt-transformer/wall_attenti
 
 # katgpt-attn / katgpt-quant / katgpt-speculative forwards.
 flashmemory_gqa = ["dep:katgpt-attn", "katgpt-attn/flashmemory_sparse"]
+# Issue 1117 — the FlashMemory top-ρ decode lane: the budget SELECTOR comes
+# from katgpt-attn (`with_budget`), the sparse decode wiring is local. Implies
+# `flashmemory_gqa` (the block cache + the f32 research forward).
+flashmemory_budget = ["flashmemory_gqa", "katgpt-attn/flashmemory_budget_select"]
 flashmemory_trained_indexer = ["flashmemory_gqa", "katgpt-attn/trained_indexer"]
 turboquant = ["dep:katgpt-quant", "katgpt-quant/turboquant"]
 weaver_runtime = ["katgpt-speculative/weaver_runtime"]
@@ -442,6 +446,14 @@ required-features = ["gdn_delta_roll"]
 [[test]]
 name = "issue046_gdn_spectral_class_spec"
 required-features = ["deltanet_inference"]
+
+# Issue 1117 — FlashMemory budget decode lane G1: the folded synthetic
+# Bonsai-2 file needs bonsai2_hadamard (the loader refuses unfolded-prism
+# keys without it); the ternary decode path needs deltanet_ternary_inference.
+# #![cfg] protects the count, this row protects the reader (green-zero law).
+[[test]]
+name = "flashmemory_decode_g1"
+required-features = ["flashmemory_budget", "deltanet_ternary_inference", "bonsai2_hadamard"]
 
 # Issue 980 / Plan 600 Phase B — synthetic Bonsai-2 loader + rotation tests.
 # #![cfg(feature = "bonsai2_hadamard")] protects the count; this row protects
@@ -664,6 +676,16 @@ required-features = ["svd_lbit"]
 name = "needle_eviction_gate"
 path = "src/bin/needle_eviction_gate.rs"
 required-features = ["kv_eviction"]
+
+# Issue 1117 — FlashMemory budget (top-rho) decode gate: teacher-forced NLL /
+# top-1 agreement vs dense over a long-context slice, per-position buckets.
+# Lives behind #[cfg(feature = "flashmemory_budget")]; the row is the reader
+# protection (the green-zero law). The ternary loader + the folded synth file
+# need the two extra features.
+[[bin]]
+name = "flashmemory_decode_gate"
+path = "src/bin/flashmemory_decode_gate.rs"
+required-features = ["flashmemory_budget", "deltanet_ternary_inference", "bonsai2_hadamard"]
 
 # Plan 622 T2.5 — the layer-choice measurement: acc-vs-K at L ∈ {0, 1, mid}
 # on the NIAH suite (the needle gate's rig, selection-alone), through the

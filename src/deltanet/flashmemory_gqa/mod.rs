@@ -64,6 +64,15 @@ pub trait GqaBlockSelector {
         attn_scale: f32,
         step: usize,
     ) -> &PerHeadSelection;
+
+    /// Invalidate the cached selection so the next [`select_blocks`](Self::select_blocks)
+    /// re-ranks. The decode lane calls this when a NEW block opens (Issue
+    /// 1117's block-open law): the budget rule forces the CURRENT block in
+    /// at refresh time, so a refresh at the open puts the fresh block into
+    /// the selection — without it, tokens landing in the new block before
+    /// the next periodic refresh would be stranded outside the selection.
+    /// Default: no-op (a stateless selector).
+    fn force_refresh(&mut self) {}
 }
 
 impl GqaBlockSelector for GqaFlashMemorySelector {
@@ -75,6 +84,12 @@ impl GqaBlockSelector for GqaFlashMemorySelector {
         step: usize,
     ) -> &PerHeadSelection {
         self.select(query_keys, block_cache, attn_scale, step)
+    }
+
+    fn force_refresh(&mut self) {
+        // Spell the inherent method — `self.force_refresh()` would recurse
+        // into this trait impl.
+        GqaFlashMemorySelector::force_refresh(self);
     }
 }
 
@@ -126,6 +141,10 @@ impl GqaBlockSelector for TrainedIndexerSelector {
         // No attn_scale: the trained encoders learn their own scale (same
         // contract as DualEncoderIndexer::select).
         self.indexer.select_gqa(query_keys, block_cache, step)
+    }
+
+    fn force_refresh(&mut self) {
+        self.indexer.force_refresh();
     }
 }
 
@@ -226,34 +245,138 @@ pub fn forward_attention_layer_flashmemory<S: GqaBlockSelector>(
         );
     }
 
-    // ── 6: Rebuild block centroids from the key cache ──────────────────────
+    // ── 6-8: refresh → select → sparse attention (shared core, Issue 1117) ─
+    // The centroid refresh, the KV-resolution query, the selection, and the
+    // per-head sparse accumulation live in ONE home (refresh_and_select +
+    // sparse_attention_accumulate) shared with the ternary decode lane — the
+    // Rebuild posture here is this research forward's byte-identical shape.
     let seq_len = pos + 1;
-    block_cache.rebuild_from_keys(&cache.key, seq_len);
-
-    // ── 7: Select blocks per KV head (FlashMemory sigmoid threshold) ───────
-    // Build a query at KV-head resolution by averaging the query heads that
-    // actually attend to each KV head under the block-contiguous GQA mapping
-    // — the same mapping the dense path (`attention_heads_parallel`) and our
-    // own scoring loop (step 8) use: kv_group = q_h * n_kv / n_head, so KV
-    // head g owns query heads [g*group_size, (g+1)*group_size).
-    //
-    // (Bench 457 regression: the original build averaged the interleaved set
-    // {g, g+n_kv, g+2*n_kv, ...}, which mixes heads from different KV groups
-    // — quantified on real Bonsai at −5.1pp recall @ thr 0.5.)
     let scale = 1.0 / (hd as f32).sqrt();
-    // `qg_buf` is dead past step 1 (q + gate were extracted into their own
-    // buffers); reuse its prefix as the KV-resolution query. G4: alloc-free.
     build_kv_resolution_query(&scratch.q_buf, n_head, n_kv, hd, &mut scratch.qg_buf[..kvd]);
+    let mut last_n_blocks_scratch = 0usize;
+    let selection = refresh_and_select(
+        &cache.key,
+        block_cache,
+        selector,
+        &scratch.qg_buf[..kvd],
+        scale,
+        seq_len,
+        step,
+        CacheUpdate::Rebuild,
+        &mut last_n_blocks_scratch,
+    );
+    {
+        let s = &mut *scratch;
+        let AttentionLayerScratch {
+            q_buf,
+            attn_out,
+            head_scores,
+            ..
+        } = s;
+        sparse_attention_accumulate(
+            q_buf,
+            &*cache,
+            attn_out,
+            head_scores,
+            selection,
+            block_cache,
+            n_head,
+            n_kv,
+            hd,
+            kvd,
+            seq_len,
+            scale,
+        );
+    }
 
-    let selection = selector.select_blocks(&scratch.qg_buf[..kvd], block_cache, scale, step);
+    // ── 9: Output gating (identical to dense) ─────────────────────────────
+    for i in 0..q_dim {
+        scratch.attn_out[i] *= fast_sigmoid(scratch.gate_buf[i]);
+    }
 
-    // ── 8: Sparse attention per query head ─────────────────────────────────
-    scratch.attn_out[..q_dim].fill(0.0);
+    // ── 10: Output projection (identical to dense) ─────────────────────────
+    layer
+        .attn_wo
+        .matvec(&scratch.attn_out[..q_dim], &mut x[..n_embd]);
+}
+
+/// How the sparse forward refreshes the block cache before selecting
+/// (Issue 1117 — the two postures the decode lane measures against each
+/// other; the single-layer f32 research forward is always Rebuild).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum CacheUpdate {
+    /// Full `rebuild_from_keys` every call — O(seq_len × kv_dim).
+    Rebuild,
+    /// Append-only decode: `update_last_block_from_keys` — O(block_size ×
+    /// kv_dim); a block OPEN force-refreshes the selector the same step so
+    /// the fresh block is the budget rule's "current block" immediately.
+    /// `last_n_blocks` is the per-layer scratch carrying the previous step's
+    /// active-block count.
+    Incremental,
+}
+
+/// Cache-refresh + selection half of the sparse forward — shared by the f32
+/// research forward ([`CacheUpdate::Rebuild`]) and the ternary decode lane
+/// ([`CacheUpdate::Incremental`]). Returns the selection (borrowed from the
+/// selector; the caller must not touch the selector until it is done with
+/// it). `kv_query` is the KV-resolution query `[n_kv * head_dim]` (the
+/// caller builds it with [`build_kv_resolution_query`]).
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn refresh_and_select<'a, S: GqaBlockSelector>(
+    cache_key: &[f32],
+    block_cache: &mut GqaFlashMemoryBlockCache,
+    selector: &'a mut S,
+    kv_query: &[f32],
+    scale: f32,
+    seq_len: usize,
+    step: usize,
+    update: CacheUpdate,
+    last_n_blocks: &mut usize,
+) -> &'a PerHeadSelection {
+    match update {
+        CacheUpdate::Rebuild => block_cache.rebuild_from_keys(cache_key, seq_len),
+        CacheUpdate::Incremental => {
+            block_cache.update_last_block_from_keys(cache_key, seq_len);
+            let n_blocks = block_cache.n_active_blocks();
+            if n_blocks != *last_n_blocks {
+                selector.force_refresh();
+                *last_n_blocks = n_blocks;
+            }
+        }
+    }
+    selector.select_blocks(kv_query, block_cache, scale, step)
+}
+
+/// Per-head sparse attention accumulation — verbatim from the original
+/// `forward_attention_layer_flashmemory` (one home for the score/softmax/
+/// V-accumulation form; the dense kernel's identical per-head order is what
+/// makes the all-blocks arm bit-comparable to dense). `q_buf` is the
+/// post-norm post-RoPE queries `[n_head * head_dim]`; `attn_out` receives
+/// `[.. n_head * head_dim]`; `scores` is per-head softmax scratch with
+/// capacity ≥ the largest selected-token count (the decode lane passes the
+/// attention scratch's `head_scores`, which is `n_head × cache capacity`).
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn sparse_attention_accumulate(
+    q_buf: &[f32],
+    cache: &KVCache,
+    attn_out: &mut [f32],
+    scores: &mut [f32],
+    selection: &PerHeadSelection,
+    block_cache: &GqaFlashMemoryBlockCache,
+    n_head: usize,
+    n_kv: usize,
+    hd: usize,
+    kvd: usize,
+    seq_len: usize,
+    scale: f32,
+) {
+    let q_dim = n_head * hd;
+    attn_out[..q_dim].fill(0.0);
 
     for q_h in 0..n_head {
         let kv_group = q_h * n_kv / n_head;
-        let q_slice = &scratch.q_buf[q_h * hd..(q_h + 1) * hd];
-        let out_slice = &mut scratch.attn_out[q_h * hd..(q_h + 1) * hd];
+        let q_slice = &q_buf[q_h * hd..(q_h + 1) * hd];
+        let out_slice = &mut attn_out[q_h * hd..(q_h + 1) * hd];
         out_slice.fill(0.0);
 
         let selected = &selection.blocks_per_head[kv_group];
@@ -266,7 +389,6 @@ pub fn forward_attention_layer_flashmemory<S: GqaBlockSelector>(
         };
 
         // First pass: compute scores over selected tokens.
-        let scores = &mut scratch.head_scores[..];
         let mut n_scored = 0usize;
         let mut max_score = f32::NEG_INFINITY;
 
@@ -307,16 +429,6 @@ pub fn forward_attention_layer_flashmemory<S: GqaBlockSelector>(
             }
         }
     }
-
-    // ── 9: Output gating (identical to dense) ──────────────────────────────
-    for i in 0..q_dim {
-        scratch.attn_out[i] *= fast_sigmoid(scratch.gate_buf[i]);
-    }
-
-    // ── 10: Output projection (identical to dense) ─────────────────────────
-    layer
-        .attn_wo
-        .matvec(&scratch.attn_out[..q_dim], &mut x[..n_embd]);
 }
 
 /// Average query heads into a KV-head-resolution query for the selector.
@@ -326,7 +438,11 @@ pub fn forward_attention_layer_flashmemory<S: GqaBlockSelector>(
 /// `[g * group_size, (g+1) * group_size)` where `group_size = n_head / n_kv`.
 ///
 /// `q_heads` is `n_head * head_dim`; `out` must be exactly `n_kv * head_dim`.
-fn build_kv_resolution_query(
+///
+/// (Bench 457 regression: averaging the interleaved set {g, g+n_kv, g+2*n_kv,
+/// ...} instead mixes heads from different KV groups — quantified on real
+/// Bonsai at −5.1pp recall @ thr 0.5.)
+pub(crate) fn build_kv_resolution_query(
     q_heads: &[f32],
     n_head: usize,
     n_kv: usize,
@@ -374,6 +490,89 @@ pub fn kv_reduction_ratio(
     let avg_selected = total_selected / n_kv;
     let reduction = (1.0 - avg_selected as f32 / total as f32) * 100.0;
     (avg_selected, total, reduction)
+}
+
+/// Per-attention-layer decode state for the FlashMemory budget lane
+/// (Issue 1117 T2): the block centroid cache, the budget selector, and the
+/// block-open detector scratch.
+pub struct FlashMemoryLayerState {
+    pub block_cache: GqaFlashMemoryBlockCache,
+    pub selector: GqaFlashMemorySelector,
+    /// The previous decode step's active-block count — a changed count means
+    /// a new block opened and [`refresh_and_select`] force-refreshes the
+    /// selector (the block-open law on [`GqaBlockSelector::force_refresh`]).
+    pub last_n_blocks: usize,
+}
+
+/// Per-layer decode state for the FlashMemory budget decode lane
+/// (Issue 1117 T2). One entry per model layer: `Some` on full-attention
+/// layers, `None` on GDN/DeltaNet layers (they have no KV cache to select
+/// over). Built once at boot, never per tick.
+pub struct FlashMemoryDecodeState {
+    pub layers: Vec<Option<FlashMemoryLayerState>>,
+    /// `false` = full [`GqaFlashMemoryBlockCache::rebuild_from_keys`] every
+    /// decode step — the reference posture the G1 equivalence test and the
+    /// T4 cost comparison measure the incremental path against. Selection
+    /// refreshes IDENTICALLY in both modes (same schedule, bit-identical
+    /// centroids) — only the centroid update cost differs.
+    pub incremental: bool,
+}
+
+impl FlashMemoryDecodeState {
+    /// Build one state entry per layer. `fm_config.block_size` should match
+    /// the serving lane's operating point (the Bench-671 fidelity numbers
+    /// were measured at block size 64). Gated on `flashmemory_budget` — the
+    /// selector is built `.with_budget(rho)` (threshold unused by that rule).
+    #[cfg(feature = "flashmemory_budget")]
+    pub fn new(
+        config: &Config,
+        layer_types: &[crate::types::DeltaNetLayerType],
+        max_positions: usize,
+        fm_config: katgpt_attn::dash_attn::flashmemory_sparse::FlashMemoryConfig,
+        rho: f32,
+    ) -> Self {
+        use katgpt_attn::dash_attn::flashmemory_sparse::GqaFlashMemorySelector;
+        assert!(rho > 0.0 && rho <= 1.0, "budget must be in (0, 1]");
+        let max_blocks = max_positions.div_ceil(fm_config.block_size).max(1);
+        let mut layers = Vec::with_capacity(layer_types.len());
+        let mut attention_layers = 0usize;
+        for lt in layer_types {
+            if *lt == crate::types::DeltaNetLayerType::Attention {
+                layers.push(Some(FlashMemoryLayerState {
+                    block_cache: GqaFlashMemoryBlockCache::new(
+                        config.n_kv_head,
+                        config.head_dim,
+                        &fm_config,
+                        max_positions,
+                    ),
+                    selector: GqaFlashMemorySelector::new(
+                        fm_config.clone(),
+                        config.n_kv_head,
+                        config.head_dim,
+                        max_blocks,
+                    )
+                    .with_budget(rho),
+                    last_n_blocks: 0,
+                }));
+                attention_layers += 1;
+            } else {
+                layers.push(None);
+            }
+        }
+        assert!(
+            attention_layers > 0,
+            "flashmemory decode state on a model with no full-attention layers"
+        );
+        Self {
+            layers,
+            incremental: true,
+        }
+    }
+
+    /// Number of full-attention layers carrying state.
+    pub fn attention_layer_count(&self) -> usize {
+        self.layers.iter().filter(|l| l.is_some()).count()
+    }
 }
 
 #[cfg(test)]
