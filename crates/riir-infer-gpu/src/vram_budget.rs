@@ -131,6 +131,25 @@ pub const DEFAULT_MARGIN_FLOOR_BYTES: u64 = 2 * 1024 * 1024 * 1024;
 /// target stack).
 pub const DEFAULT_KV_LAYER_MAX_BYTES: u64 = 208 * 1024 * 1024;
 
+/// The Metal default for the per-layer KV guard (riir-infer Issue 1114): the
+/// largest per-layer KV validated against an EXTERNAL reference on
+/// `wgpu<msl>` — block 65,600 × kvd 1024 × f32 (riir-train Bench 657, M5
+/// Ultra: the 64K rung's anchor-ref vs an independent 32K artifact exact,
+/// cos 1.000000). A measured point, never a capacity inference: the 4090
+/// failed far below its capacity, so a bound is only ever raised to the next
+/// rung that passes its anchor-ref gate.
+pub const METAL_KV_LAYER_MAX_BYTES: u64 = 65_600 * 1024 * 4;
+
+/// The per-layer KV guard default for the adapter's backend (Issue 1114).
+/// Metal gets its own measured point; every other backend keeps the
+/// Vulkan bisect.
+pub const fn default_kv_layer_max_bytes(metal: bool) -> u64 {
+    match metal {
+        true => METAL_KV_LAYER_MAX_BYTES,
+        false => DEFAULT_KV_LAYER_MAX_BYTES,
+    }
+}
+
 /// Env override for the per-layer KV guard, in bytes.
 pub const ENV_KV_LAYER_MAX_BYTES: &str = "RIIR_GPU_KV_LAYER_MAX_BYTES";
 
@@ -470,16 +489,18 @@ pub fn check_forward_budget(
     // 57,408 device-lost / 65,472+ silent corruption, the latter reproduced
     // with ZERO pool failures — pool exhaustion refuted as the mechanism).
     let kv_bytes = kv_layer_bytes(config);
-    let kv_max = parse_env_bytes(ENV_KV_LAYER_MAX_BYTES).unwrap_or(DEFAULT_KV_LAYER_MAX_BYTES);
+    let kv_max = parse_env_bytes(ENV_KV_LAYER_MAX_BYTES)
+        .unwrap_or_else(|| default_kv_layer_max_bytes(ctx.is_metal_adapter()));
     if kv_bytes > kv_max {
         let kvd = config.n_kv_head as u64 * config.head_dim as u64;
         let block_max = kv_max / (kvd * 4);
         return Err(format!(
             "per-layer attention KV cache {:.2} GiB (block_size {} × kvd {} × f32) exceeds the \
-             bisected safe bound {:.2} GiB — the ≥52K-position class is broken on the \
-             cubecl/wgpu stack (riir-ai Issue 994: block 57,408 lost the device during \
-             construction; block 65,472+ produced DETERMINISTIC silent corruption, cos \
-             0.419531 / top-1 0.0150, with zero allocation failures). Clamp `config.block_size` \
+             measured safe bound {:.2} GiB for this backend — on the 4090/Vulkan stack the \
+             ≥52K-position class is broken (riir-ai Issue 994: block 57,408 lost the device \
+             during construction; block 65,472+ produced DETERMINISTIC silent corruption, cos \
+             0.419531 / top-1 0.0150, with zero allocation failures); on Metal the bound is the \
+             largest anchor-validated rung (riir-infer Issue 1114). Clamp `config.block_size` \
              ≤ {block_max} or raise {ENV_KV_LAYER_MAX_BYTES} ONLY with a fresh bisect + \
              external-reference validation. (riir-ai Issue 994 single-buffer KV gate.)",
             kv_bytes as f64 / GIB_F64,
@@ -513,6 +534,31 @@ pub fn drain_construction_errors(client: &crate::ActiveComputeClient) -> Result<
              over-subscription test, disable the pre-flight with {ENV_CHECK_DISABLE}=0 — this \
              drain gate is correctness and stays on."
         )),
+    }
+}
+
+#[cfg(test)]
+mod kv_guard_default_tests {
+    use super::*;
+
+    /// Issue 1114: the backend → default table. Vulkan/DX12/CUDA keep the
+    /// 4090 bisect; Metal gets the Bench-657 anchor-validated point, which
+    /// must sit ABOVE the bisect (or the split would be pointless) and
+    /// exactly at block 65,600 × kvd 1024 × f32.
+    #[test]
+    fn default_is_keyed_on_backend() {
+        assert_eq!(
+            default_kv_layer_max_bytes(false),
+            DEFAULT_KV_LAYER_MAX_BYTES
+        );
+        assert_eq!(default_kv_layer_max_bytes(true), METAL_KV_LAYER_MAX_BYTES);
+        assert_eq!(METAL_KV_LAYER_MAX_BYTES, 268_697_600);
+        assert!(METAL_KV_LAYER_MAX_BYTES > DEFAULT_KV_LAYER_MAX_BYTES);
+        // The bisect's broken floor (block 57,408) is refused off Metal
+        // and admitted on it.
+        let broken_floor = 57_408u64 * 1024 * 4;
+        assert!(broken_floor > default_kv_layer_max_bytes(false));
+        assert!(broken_floor <= default_kv_layer_max_bytes(true));
     }
 }
 

@@ -538,6 +538,32 @@ impl CubeCLContext {
     pub fn available_video_memory(&self) -> Option<u64> {
         None
     }
+
+    /// riir-infer Issue 1114: whether the retained wgpu adapter is on the
+    /// Metal backend. The Issue-994 single-buffer KV guard keys its default
+    /// on this — its 208 MiB bound is a 4090/Vulkan bisect, and Metal was
+    /// measured clean above it (riir-train Bench 657).
+    #[cfg(all(
+        feature = "cubecl_runtime",
+        any(not(feature = "cuda_backend"), target_os = "macos")
+    ))]
+    #[inline]
+    pub fn is_metal_adapter(&self) -> bool {
+        self.wgpu_adapter
+            .as_ref()
+            .is_some_and(|a| a.get_info().backend == wgpu::Backend::Metal)
+    }
+
+    /// CUDA-backend twin of [`Self::is_metal_adapter`] — never Metal.
+    #[cfg(all(
+        feature = "cubecl_runtime",
+        feature = "cuda_backend",
+        not(target_os = "macos")
+    ))]
+    #[inline]
+    pub fn is_metal_adapter(&self) -> bool {
+        false
+    }
 }
 
 // ---------------------------------------------------------------------------
