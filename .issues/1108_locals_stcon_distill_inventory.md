@@ -1,9 +1,7 @@
 # Issue 1108: Locals / STCON distill inventory — AR grammar-constrained decode + serving follow-ups
 
 **Status:** Open — inventory filed from [Research 014](../.research/014_Locals_Space_Barrier_Constrained_Decoding.md) (arXiv:2610.09139 + `Generated-Computers/Locals` @ `32cf2feb`, MIT). No plan opens until a consumer trigger arms (Track A has no live consumer in this repo today).
-**Claimed:** zed-m3-continue, 1792879560, expires 2026-10-26T22:06:00Z
-**Scope:** T3 only (the distill verdict on the pinned Locals clone) — T1 stays consumer-gated, T4 stays note-only.
-**Lease released:** T3 landed the same session it was claimed (riir-refine `7fa36a9b` + the T3 record below); T1/T4 remain gated/note-only and unclaimed.
+**Lease released:** zed-m3-continue claimed T3 2026-10-25 (epoch 1792879560) and landed it the same session (riir-refine `7fa36a9b` + the T3 record below); T1/T4 remain gated/note-only and unclaimed.
 
 Sources: the paper settles total few-path reachability below Savitch's bound and builds six exact decode mechanisms on the mangrove structure of the DFA×trie product; the repo ships them on MLX/Metal (26k LOC, MIT, pinned sha in the note). Workspace signal-diffs (all read, none covering): `katgpt-speculative::TokenConstraintPruner` is a boolean interface seam only; Research 008 (Mosaic) is the dLLM-side sibling, different model class; `qwen38_prefix_cache` (riir-ai Issue 742) is the single-stream GDN prefix cache whose own doc names the radix serving-lane trigger.
 
