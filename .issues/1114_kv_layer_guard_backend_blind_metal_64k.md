@@ -1,6 +1,9 @@
 # Issue 1114 — the Issue-994 single-buffer KV guard is backend-blind: it refuses a 64K configuration validated clean on Metal
 
 **Status:** OPEN — filed 2026-10-24 from riir-train Bench 657 (the evidence) — a design fix, not urgent: the env override works and the guard fails LOUD (the correct direction).
+**Claimed:** zed-m3-issue1114-guard, 1792858865, expires 2026-10-26T16:21:05+00:00
+
+Scope of the claim: T1 (the backend-keyed default table + the init-time backend capture) + T2 (the unit tests). T3 stays open — it is gated on riir-train Issue 452's next (128K) rung passing its anchor-ref gate, which is a bench-window act, not this one.
 
 ## What was seen
 
