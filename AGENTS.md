@@ -29,18 +29,23 @@ pinned-checkpoint encoder lane, consumed by the public decision-engine
 serving repo); the scale-invariant attention lane LANDED 2026-10-11
 (opt-in `scale_invariant_attn` — `transformer/attention_si.rs` + the
 `si_zero_shot_ppl` G3 harness, katgpt-rs Plan 622's engine vehicle);
-the GDN L8 eager-prefill arm LANDED 2026-10-19 (plan 621, opt-in env
-`RIIR_PREFILL_GDN_L8=1` — `prefill_cuda_deltanet_l8.rs`, gated on
-ternary_gemv_cuda_raw + ternary_gemm_batched + cubecl_runtime,
-non-macOS; NOT-PROMOTED: kernel-only k4w4 1.26–1.51× but e2e FLAT at
-the DQ-lane posture, bit-identity bytewise vs rowpar — see
-`.benchmarks/884_plan621_gdn_l8_eager_prefill.md`; the league-posture
-e2e re-gate EXECUTED 2026-10-21 (riir-ai Bench 993): G1 bytewise ×4 at
-the league posture and +3.2% pp2048, band-clause gap → opt-in pending
-the owner gate; second window REPLICATED 2026-10-24 (riir-ai Bench 997:
-+2.76% pp2048, G1 bytewise ×8, between-window deltas inside the band;
-pp4096 NO-READ — the OFF baseline's own halves moved −8.9%; promotion
-STAYS OWNER-GATED));
+the GDN L8 eager-prefill arm LANDED 2026-10-19 (plan 621,
+`prefill_cuda_deltanet_l8.rs`, gated on ternary_gemv_cuda_raw +
+ternary_gemm_batched + cubecl_runtime, non-macOS; **PROMOTED
+DEFAULT-ON 2026-10-24 (owner call via reviewer verdict)** —
+beyond-window replication ×2: riir-ai Bench 993 +3.22% (10-21) /
+Bench 997 +2.76% pooled (10-24) pp2048, G1 bytewise ×8 (both postures,
+both days, same FNV pins); the pre-registered ±8.4% band clause was
+SUPERSEDED BY MEASUREMENT, never satisfied — it was calibrated as a
+BETWEEN-window band, the paired 2×2 interleave reads ±0.3–0.8%
+within-window and ∓1.3–1.7% between-window common-mode; kill-switch
+`RIIR_PREFILL_GDN_L8=0` (any non-1/true/on value; env wins) restores
+the incumbent; posture gates `recl8_posture_gates` pin both ways
+(unset = ON, `=0` = incumbent); pp4096 e2e re-read OWED non-blocking
+(kernel-only favors the arm at every p ≥ 17 — 0.785× at p4096); prior
+record: kernel-only k4w4 1.26–1.51× at the DQ-lane posture
+(`.benchmarks/884_plan621_gdn_l8_eager_prefill.md`), the league
+re-gate opened opt-in 2026-10-21 (riir-ai Bench 993));
 the fused GDN fold-tail + SwiGLU-rotate decode kernels LANDED 2026-10-23
 (riir-ai Issue 1113 lever 1 — `deltanet_rotation_cubecl.rs`, opt-in env
 `RIIR_GDN_PERMUTE_ROTATE_FUSED` / `RIIR_SWIGLU_ROTATE_FUSED`, macOS

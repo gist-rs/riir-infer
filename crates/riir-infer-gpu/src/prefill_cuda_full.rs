@@ -126,7 +126,12 @@ use riir_infer_core::types::DeltaNetLayerType;
 
 static PREFILL_CUDA: AtomicBool = AtomicBool::new(false);
 static GDN_CHUNKED: AtomicBool = AtomicBool::new(false);
-static GDN_L8: AtomicBool = AtomicBool::new(false);
+/// Plan 621 — PROMOTED DEFAULT-ON 2026-10-24 (owner call; riir-ai Bench 993
+/// +3.22% / Bench 997 +2.76% pp2048 beyond-window replication ×2, G1 bytewise
+/// ×8). The kill-switch is the env (`RIIR_PREFILL_GDN_L8=0` — any
+/// non-1/true/on value wins over this default and bit-restores the
+/// incumbent); the setter remains the in-process A/B lever.
+static GDN_L8: AtomicBool = AtomicBool::new(true);
 
 /// Issue 965 — knob generation for the graph replay key: bumped by the one
 /// setter-based knob the captured layer loop consults
@@ -675,22 +680,39 @@ pub fn set_prefill_gdn_chunked(on: bool) {
 /// the FNV pin class holds. Admission: `hd == 128` AND `p >= 17`
 /// ([`GDN_L8_MIN_TOKENS`] — the 8-16 verify band stays incumbent) AND the
 /// rowpar path selected (the else-chain routes; never composes with the
-/// chunked/mma arms in v1). DEFAULT OFF; scratch-free.
-/// `RIIR_PREFILL_GDN_L8=1|true|on` (env wins over the setter).
+/// chunked/mma arms in v1). Scratch-free.
+/// PROMOTED DEFAULT-ON 2026-10-24 (owner call; Bench 993 window 1 +3.22% /
+/// Bench 997 window 2 +2.76% pp2048 pooled, G1 bytewise ×8 — the replication
+/// trigger fired; the pre-registered ±8.4% band clause was superseded BY
+/// MEASUREMENT: it was calibrated as a BETWEEN-window band, the paired
+/// interleave reads ±0.3–0.8% within-window and ∓1.3–1.7% between-window
+/// common-mode — Bench 997 §verdict).
+/// Kill-switch: `RIIR_PREFILL_GDN_L8=0` (any value outside `1|true|on` —
+/// env wins over this default) bit-restores the incumbent.
 #[inline]
 fn gdn_l8_enabled() -> bool {
     static ENV: OnceLock<Option<bool>> = OnceLock::new();
     let env = *ENV.get_or_init(|| {
         std::env::var("RIIR_PREFILL_GDN_L8")
             .ok()
-            .map(|s| matches!(s.trim(), "1" | "true" | "on"))
+            .map(|s| l8_env_posture(&s))
     });
     env.unwrap_or_else(|| GDN_L8.load(Ordering::Relaxed))
 }
 
+/// The env grammar, extracted for the posture gates: only `1|true|on` keeps
+/// the arm; EVERY other value (including `0` and junk) is the kill-switch —
+/// the same any-non-affirmative-kills shape the `QWEN38_PF_ATTN_FA=0`
+/// precedent ships.
+fn l8_env_posture(s: &str) -> bool {
+    matches!(s.trim(), "1" | "true" | "on")
+}
+
 /// A/B knob for the L8 recurrence (see [`gdn_l8_enabled`]). A flip changes
 /// the captured layer loop's kernel sequence, so it bumps [`GV_KNOB_GEN`] —
-/// the same law as [`set_prefill_gdn_chunked`].
+/// the same law as [`set_prefill_gdn_chunked`]. Post-promotion this is also
+/// the IN-PROCESS demotion lever; the boot-time default is the promoted-ON
+/// atomic (kill-switch env documented at [`gdn_l8_enabled`]).
 pub fn set_prefill_gdn_l8(on: bool) {
     GDN_L8.store(on, Ordering::Relaxed);
     GV_KNOB_GEN.fetch_add(1, Ordering::Relaxed);
@@ -4730,4 +4752,46 @@ pub fn prefill_verify_rollback(base_pos: usize) -> bool {
     }
     stack.spec_pos.store(base_pos, Ordering::Relaxed);
     true
+}
+
+#[cfg(test)]
+mod recl8_posture_gates {
+    use super::{gdn_l8_enabled, l8_env_posture, set_prefill_gdn_l8};
+
+    /// Bench 997 owner-call landing condition 2 — the promoted default
+    /// cannot drift silently: with the env UNSET the shipping posture is the
+    /// L8 arm; the setter (and, on a real boot, the env) demotes back to the
+    /// incumbent. Skip-LOUD under an explicit env (the OnceLock would make
+    /// the in-process assert meaningless there — run the suite clean).
+    #[test]
+    fn l8_default_posture_promoted() {
+        if std::env::var("RIIR_PREFILL_GDN_L8").is_ok() {
+            eprintln!(
+                "SKIP (loud): RIIR_PREFILL_GDN_L8 is set in the invocation env — \
+                 the promoted-default pin needs the clean posture (unset = ON; `=0` = incumbent)"
+            );
+            return;
+        }
+        assert!(
+            gdn_l8_enabled(),
+            "the promoted default must be ON (Bench 993 +3.22% / Bench 997 +2.76% owner call) — the atomic was demoted"
+        );
+        set_prefill_gdn_l8(false);
+        assert!(!gdn_l8_enabled(), "the setter must demote to the incumbent");
+        set_prefill_gdn_l8(true);
+        assert!(gdn_l8_enabled(), "the setter must re-arm");
+    }
+
+    /// The kill-switch grammar: every value outside `1|true|on` demotes —
+    /// `0` is the documented spelling (the `QWEN38_PF_ATTN_FA=0` shape);
+    /// junk kills too (fail-closed toward the incumbent).
+    #[test]
+    fn l8_kill_switch_grammar() {
+        for kill in ["0", "false", "off", "", " 0 ", "junk"] {
+            assert!(!l8_env_posture(kill), "env {kill:?} must demote");
+        }
+        for arm in ["1", "true", "on", " on "] {
+            assert!(l8_env_posture(arm), "env {arm:?} must arm");
+        }
+    }
 }
