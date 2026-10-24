@@ -1,6 +1,7 @@
 # Issue 1117 — run FlashMemory budget (top-ρ) attention in the Bonsai decode loop + the end-to-end quality gate
 
 **Status:** Open — filed 2026-10-25 from riir-train Issue 452 E1 (riir-train Bench 671) + katgpt-rs Issue 962. Not started.
+**Claimed:** zed-m3-continue, 1792880556, expires 2026-10-26T22:22:40Z
 
 ## Why
 
