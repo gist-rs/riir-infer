@@ -1,6 +1,6 @@
 # Issue 1110: β reopen memory on the gemma2_d2f commit path
 
-**Claimed:** zed-4090-1110-t2, epoch 1792870636, expires 2026-10-27T02:17:00Z
+**Claimed:** zed-4090-1110-t2, 1792870636, expires 2026-10-27T02:17:00Z
 **Date:** extracted 2026-10-24 from riir-train Research 480
 
 Premise: the decode loop's confidence commits are an **absorbing-kernel posture** — once a position commits it never reopens. The paper's central evidence (restore-capable > prune-only, concentrated on hard instances; ablation: re-corruption + confidence guidance are worth +18 pts on hard Sudoku for masked kernels) penalizes exactly this shape. This issue adds the minimal restore capability the loop can express without changing the trained model.

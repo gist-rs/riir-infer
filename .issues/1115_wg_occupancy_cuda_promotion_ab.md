@@ -1,7 +1,7 @@
 # Issue 1115 — the GEMV occupancy wg rule is default-ON on the wgpu/Metal runtime only — the 4090 CudaRuntime posture is unmeasured (prefill-tail lm_head) — file the CUDA A/B that promotes it there
 
 **Status:** CLOSED 2026-10-25 — the owed cell measured ([Bench 887](../.benchmarks/887_issue1115_wg_occupancy_cuda_ab.md)): G1 FNV-identical ×6+6 rounds (pp512 + pp4096, CudaRuntime, Bonsai-2 vocab 248320 → the 128-wg bucket), reach exact (+1/±0 across 12/12 rounds via the counter), G3 1.0013× / 1.0000× sub-noise → per this issue's own done-when the platform split is DELETED and `wg_occupancy_platform_default()` is `true` unconditionally; reviewer verdict AGREE (sub-agent `f4e6369c`, 2026-10-25; the request_verdict claude_code channel was auth-unavailable on the box — the independent sub-agent verified the counter semantics, the consumer census, and the harness first-hand). Env-vs-setter deviation, judged faithful by the reviewer: the harness drives `set_gemv_wg_occupancy(false)` vs `(true)` with BOTH envs required UNSET (the same two postures — OFF = the pre-promotion unset resolution — and the env route is unusable in-process: the OnceLock wins over the setter). Unit pin: `the_platform_default_is_on_everywhere` (5/5 green).
-**Claimed:** riir-infer-4090-wgocc, epoch 1792863545, expires 2026-10-26T17:39:00Z
+**Claimed:** riir-infer-4090-wgocc, 1792863545, expires 2026-10-26T17:39:00Z
 
 ## The scoped posture (what landed)
 
