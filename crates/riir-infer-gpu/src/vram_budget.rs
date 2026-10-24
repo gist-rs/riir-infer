@@ -133,12 +133,12 @@ pub const DEFAULT_KV_LAYER_MAX_BYTES: u64 = 208 * 1024 * 1024;
 
 /// The Metal default for the per-layer KV guard (riir-infer Issue 1114): the
 /// largest per-layer KV validated against an EXTERNAL reference on
-/// `wgpu<msl>` — block 65,600 × kvd 1024 × f32 (riir-train Bench 657, M5
-/// Ultra: the 64K rung's anchor-ref vs an independent 32K artifact exact,
-/// cos 1.000000). A measured point, never a capacity inference: the 4090
+/// `wgpu<msl>` — block 131,136 × kvd 1024 × f32 (riir-train Bench 657 + its
+/// 128K addendum, M5 Ultra: the 64K and 128K rungs' anchor-ref vs an
+/// independent 32K artifact exact, cos 1.000000). A measured point, never a capacity inference: the 4090
 /// failed far below its capacity, so a bound is only ever raised to the next
 /// rung that passes its anchor-ref gate.
-pub const METAL_KV_LAYER_MAX_BYTES: u64 = 65_600 * 1024 * 4;
+pub const METAL_KV_LAYER_MAX_BYTES: u64 = 131_136 * 1024 * 4;
 
 /// The per-layer KV guard default for the adapter's backend (Issue 1114).
 /// Metal gets its own measured point; every other backend keeps the
@@ -560,7 +560,7 @@ mod kv_guard_default_tests {
     /// Issue 1114: the backend → default table. Vulkan/DX12/CUDA keep the
     /// 4090 bisect; Metal gets the Bench-657 anchor-validated point, which
     /// must sit ABOVE the bisect (or the split would be pointless) and
-    /// exactly at block 65,600 × kvd 1024 × f32.
+    /// exactly at block 131,136 × kvd 1024 × f32 (the 128K rung).
     #[test]
     fn default_is_keyed_on_backend() {
         assert_eq!(
@@ -568,7 +568,7 @@ mod kv_guard_default_tests {
             DEFAULT_KV_LAYER_MAX_BYTES
         );
         assert_eq!(default_kv_layer_max_bytes(true), METAL_KV_LAYER_MAX_BYTES);
-        assert_eq!(METAL_KV_LAYER_MAX_BYTES, 268_697_600);
+        assert_eq!(METAL_KV_LAYER_MAX_BYTES, 537_133_056);
         // Compile-time pin: the split is only meaningful while Metal's
         // measured point sits strictly above the bisect default.
         const {
