@@ -1,8 +1,8 @@
 # Issue 1113 — mma module's `kv_f16_to_f32` misses the +112 exponent re-bias (reachable under f16-KV + the mma knob)
 
-**Status:** Open — found 2026-10-23 (zed-m3-tokengate) during the Plan 622 T1.4 f16-wire work (bench 886); NOT fixed here (the arm's declared posture, outside that lane's scope).
+**Status:** Fix LANDED 2026-10-24 (zed-m3-docsync-956-close) — the one-line re-bias (`(exp + 112u) << 23`), the KNOWN-BROKEN header note (the arm's verdict is UNCHANGED — its root cause is the tf32 fragment-assembly cross-talk, independent of the KV decode; the arm stays default-off), and the issue's pin (2) landed as TWO device-free tests in the module's tests mod: (a) the TWIN PIN — the mma CUDA `kv_f16_to_f32` body extracted from the source string and held token-identical to the canonical `ATTENTION_CUDA_SRC` copy (mechanical, no device, no transcription — the transcription-time catch); (b) the HOST PARITY PIN — a Rust mirror of the mma decode vs `qwen38_dense_cudarc::kv_f16_bits::f16_to_f32` over the FULL 65_536-pattern lattice. ⚠ VALIDATION PENDING on the 4090 (the module is `#[cfg(all(feature = "ternary_gemv_cuda_raw", not(target_os = "macos")))]` — compiled to nothing on the M3; the green-zero trap, respected): the two pins + the existing kb flag-off bit-identity determinism test + `cargo clippy -p riir-infer-gpu` run there; the pins' M3 execution is structurally impossible, not skipped.
 
-## The defect
+## The defect (pre-fix record)
 
 `crates/riir-infer-gpu/src/cudarc_kernels/attention_score_mma.rs` — `ATTENTION_SCORE_MMA_CUDA_SRC`, the
 `#ifdef KV_F16` block's decoder:

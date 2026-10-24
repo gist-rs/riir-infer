@@ -74,6 +74,15 @@
 //! only guard — production decode/verify paths are untouched without it).
 //! kernels bit-untouched. G4: the launcher reuses the caller's verify
 //! buffers (no new device allocs per chunk).
+//!
+//! Issue 1113 (2026-10-24): this module's `kv_f16_to_f32` transcription had
+//! ALSO dropped the +112 f16→f32 exponent re-bias in its NORMAL branch (the
+//! subnormal/Inf branches were correct) — every normal f16 decoded ~2¹¹²×
+//! too small, reachable only under `QWEN38_KV_DTYPE=f16` + the mma knob (a
+//! doubly-broken posture). Repaired to the canonical `attention.rs` form +
+//! twin-pinned against it (the tests mod). The KNOWN-BROKEN verdict above
+//! is UNCHANGED — its root cause is the tf32 fragment-assembly cross-talk,
+//! independent of the KV decode; the arm stays default-off.
 
 use std::sync::Arc;
 
@@ -94,10 +103,11 @@ pub(crate) const ATTENTION_SCORE_MMA_CUDA_SRC: &str = r#"
 // include). The decode is the ONE-INSTRUCTION hardware widen (`cvt.f32.f16`,
 // IEEE-exact identical to the bit form — the FA module's 4090 cost gate
 // measured the branchy bit-manip decode at +0.13 armed tax; only the loads
-// hoist, the decode arithmetic does not). Deliberately NOT the mma
-// `kv_f16_to_f32` transcription below — that copy's normal branch is the
-// known-broken twin's transcription (see the Plan-551/773 lane's posture);
-// the bias decode must be exact.
+// hoist, the decode arithmetic does not). The module's own bit-manip
+// `kv_f16_to_f32` transcription below is repaired to the canonical form
+// (Issue 1113 — its normal branch had dropped the +112 exponent re-bias;
+// the twin pin in the tests mod holds the two CUDA copies byte-equal),
+// but the kb decode STAYS the hardware widen for the measured cost reason.
 __device__ __forceinline__ float kb_f16_to_f32(unsigned short h)
 {
     float f;
@@ -122,7 +132,7 @@ __device__ __forceinline__ float kv_f16_to_f32(unsigned short h)
         return __uint_as_float(sign | ((unsigned int)(113 - s) << 23)
                                | ((mant & 0x3ffu) << 13));
     }
-    return __uint_as_float(sign | (exp << 23) | (mant << 13));
+    return __uint_as_float(sign | ((exp + 112u) << 23) | (mant << 13));
 }
 #define KV_RD(p) (kv_f16_to_f32(*(p)))
 #else
@@ -1419,6 +1429,112 @@ mod tests {
                 b.to_bits(),
                 z.to_bits(),
                 "kb mma zero-armed vs incumbent: bit mismatch at {i}"
+            );
+        }
+    }
+
+    /// Issue 1113 — the twin pin that would have caught the missing +112
+    /// exponent re-bias at transcription time: this module's CUDA
+    /// `kv_f16_to_f32` body must stay BYTE-EQUAL to the canonical copy in
+    /// `ATTENTION_CUDA_SRC` (both are in-repo strings, so the comparison is
+    /// mechanical — no device, no transcription). Both copies also carry the
+    /// subnormal + Inf branches, so a drift in ANY branch reds, not just the
+    /// normal branch this defect lived in.
+    #[test]
+    fn kv_f16_to_f32_body_is_byte_identical_to_the_canonical_copy() {
+        let extract = |src: &str| {
+            const FN: &str = "__device__ __forceinline__ float kv_f16_to_f32(unsigned short h)";
+            let start = src
+                .find(FN)
+                .unwrap_or_else(|| panic!("kv_f16_to_f32 not found in module source"));
+            let body_start = src[start..]
+                .find('{')
+                .map(|o| start + o)
+                .expect("function body open brace");
+            // Brace-count to the matching close (the body contains no nested
+            // braces outside while/if blocks, all of which are balanced).
+            let bytes = src.as_bytes();
+            let mut depth = 0usize;
+            let mut end = body_start;
+            for (i, b) in bytes[body_start..].iter().enumerate() {
+                match b {
+                    b'{' => depth += 1,
+                    b'}' => {
+                        depth -= 1;
+                        if depth == 0 {
+                            end = body_start + i + 1;
+                            break;
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            assert_ne!(end, body_start, "unbalanced braces — extraction failed");
+            // Whitespace-normalized so a reformat cannot red the pin; the
+            // TOKEN SEQUENCE is the contract.
+            src[body_start..end]
+                .split_whitespace()
+                .collect::<Vec<_>>()
+                .join(" ")
+        };
+        let mma = extract(ATTENTION_SCORE_MMA_CUDA_SRC);
+        let canonical = extract(&super::super::attention::ATTENTION_CUDA_SRC);
+        assert_eq!(
+            mma, canonical,
+            "Issue 1113 class: the mma module's kv_f16_to_f32 transcription \
+             diverged from the canonical attention.rs copy — a twin defect is \
+             back (both copies must stay token-identical)"
+        );
+    }
+
+    /// Issue 1113 — the host parity pin: a faithful Rust mirror of THIS
+    /// module's CUDA decode vs the canonical host twin
+    /// [`crate::qwen38_dense_cudarc::kv_f16_bits::f16_to_f32`] over the FULL
+    /// f16 lattice (the round-trip corpus, 65_536 patterns). The mirror is
+    /// the C body above, line for line — when the C body and the mirror
+    /// agree AND the mirror agrees with the canonical host twin, all three
+    /// copies (mma CUDA, canonical CUDA, host) decode identically. A future
+    /// edit that breaks any one of the three reds here without a device.
+    #[test]
+    fn kv_f16_to_f32_mirror_matches_the_canonical_host_twin_over_the_full_lattice() {
+        // The mma module's decode, transcribed 1:1 from the CUDA string
+        // (post-Issue-1113 form). KEEP IN SYNC with the C body above — the
+        // twin pin guards the C copies; this test guards the semantics.
+        let mma_mirror = |h: u16| -> f32 {
+            let sign = ((h as u32) & 0x8000) << 16;
+            let exp = ((h as u32) >> 10) & 0x1f;
+            let mut mant = (h as u32) & 0x3ff;
+            if exp == 0x1f {
+                return f32::from_bits(
+                    sign | 0x7f80_0000
+                        | if mant != 0 {
+                            0x400_000 | (mant << 13)
+                        } else {
+                            0
+                        },
+                );
+            }
+            if exp == 0 {
+                if mant == 0 {
+                    return f32::from_bits(sign);
+                }
+                let mut s = 0u32;
+                while mant & 0x400 == 0 {
+                    mant <<= 1;
+                    s += 1;
+                }
+                return f32::from_bits(sign | ((113 - s) << 23) | ((mant & 0x3ff) << 13));
+            }
+            f32::from_bits(sign | ((exp + 112) << 23) | (mant << 13))
+        };
+        for h in 0u16..=u16::MAX {
+            assert_eq!(
+                mma_mirror(h).to_bits(),
+                crate::qwen38_dense_cudarc::kv_f16_bits::f16_to_f32(h).to_bits(),
+                "Issue 1113 class: the mma decode's Rust mirror diverges from the \
+                 canonical host twin at h={h:#06x} — either the C body drifted \
+                 from the mirror (update the mirror WITH the C body, in the \
+                 same commit) or the canonical host twin moved"
             );
         }
     }
