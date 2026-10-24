@@ -264,6 +264,78 @@ pub fn seq_rmsnorm_readout_into(
     }
 }
 
+/// Plan 622 T3.2 — the QK-norm-derived magnitude table, derived once from the
+/// loaded weights: `s_l = ‖g_q ∘ g_k‖₂ / √d` per layer (elementwise gain
+/// product, L2 norm, `/√head_dim` — the isotropic-model logit std; upstream
+/// measured 2.05–3.60 across Qwen3-8B's layers, the same range a LEARNED
+/// gate_scale converged to — TokenGate `e2e_gate_module.py::set_qk_norm_scales`
+/// @ `6e51aac5`). The table feeds the gate overlay's per-key BIAS rows (the
+/// upstream law `b_j[l,h] = magnitude[l,h] · RMSNorm_seq(score)_j` — the bias
+/// starts at about one native logit-sigma), NOT the query scale (that is
+/// T3.1's [`rank_cooling`] surface).
+///
+/// PER-LAYER DEGENERACY (pinned, both sides): the plan's formula is per-head
+/// `s_{l,h}`, but the qk-norm gains are `[head_dim]` SHARED across heads in
+/// this codebase (`DeltaNetLayerWeights::attn_q_norm`) — and upstream's are
+/// per-layer too ("Broadcast over heads (qk_norm gains are per-layer)") — so
+/// the table is one scalar per layer and the CONSUMER broadcasts it to
+/// `n_head` when filling per-(layer, head) bias windows. There is no per-head
+/// information to recover here.
+///
+/// LOAD-TIME discipline: derive ONCE at boot (mirrors [`runtime_enabled`] —
+/// call once, never per tick). GDN layers carry EMPTY gains (the weights
+/// contract: unused fields are empty `Vec`); their table slots are `0.0` —
+/// inert by multiplication (a misread zeroes the bias rows, a no-op, never
+/// garbage) and dead by the consumer contract anyway (the gate exists on
+/// full-attention layers above L only; GDN layers read neither gate surface).
+/// A half-populated gain pair is a loader bug — refused loud.
+///
+/// NO softplus inverse: upstream stores `softplus⁻¹(s_l)` in a learnable
+/// parameter; a deterministic construction has no parameter, so the magnitude
+/// IS `s_l`. Statistics in f64, output f32, sequential fold (Issue-940).
+/// Zero-alloc (`*_into`); `dst` is `[n_layers]` aligned by layer index.
+#[cfg(feature = "tokengate")]
+pub fn derived_magnitudes_into(
+    dst: &mut [f32],
+    weights: &crate::deltanet::weights::QwenDeltaNetWeights,
+) {
+    assert_eq!(
+        dst.len(),
+        weights.layers.len(),
+        "magnitude table must be [n_layers], aligned by layer index"
+    );
+    for (l, (dst_l, layer)) in dst.iter_mut().zip(weights.layers.iter()).enumerate() {
+        let (gq, gk) = (&layer.attn_q_norm, &layer.attn_k_norm);
+        match (gq.is_empty(), gk.is_empty()) {
+            (true, true) => *dst_l = 0.0,
+            (true, false) | (false, true) => panic!(
+                "layer {l}: half-populated qk-norm gains (q {} / k {}) — loader bug",
+                gq.len(),
+                gk.len()
+            ),
+            (false, false) => {
+                assert_eq!(
+                    gq.len(),
+                    gk.len(),
+                    "layer {l}: qk-norm gain width mismatch (q {} / k {})",
+                    gq.len(),
+                    gk.len()
+                );
+                let d = gq.len() as f64;
+                let sum_sq: f64 = gq
+                    .iter()
+                    .zip(gk.iter())
+                    .map(|(q, k)| {
+                        let p = (*q as f64) * (*k as f64);
+                        p * p
+                    })
+                    .sum();
+                *dst_l = (sum_sq / d).sqrt() as f32;
+            }
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     // Feature-off posture: the switch is the constant false, no env read.
@@ -405,5 +477,133 @@ mod tests {
         super::seq_rmsnorm_readout_into(&mut two_scores, &zeros, &readout, 2, eps);
         assert_eq!(two_scores[0], 0.0);
         assert!(two_scores[0].is_finite());
+    }
+
+    // ---- derived_magnitudes_into (T3.2 qk-norm magnitude table) ---------
+
+    /// A minimal weights shell: only `layers` matters to the derivation;
+    /// everything else is empty by the weights contract (no Default derive on
+    /// the weights structs — explicit empties).
+    #[cfg(feature = "tokengate")]
+    fn shell_layers(
+        layers: Vec<crate::deltanet::weights::DeltaNetLayerWeights>,
+    ) -> crate::deltanet::weights::QwenDeltaNetWeights {
+        crate::deltanet::weights::QwenDeltaNetWeights {
+            wte: Vec::new(),
+            final_norm: Vec::new(),
+            lm_head: crate::deltanet::weights::Proj::empty(),
+            layers,
+            layer_types: Vec::new(),
+        }
+    }
+
+    #[cfg(feature = "tokengate")]
+    fn attn_layer(gq: Vec<f32>, gk: Vec<f32>) -> crate::deltanet::weights::DeltaNetLayerWeights {
+        use crate::deltanet::weights::Proj;
+        crate::deltanet::weights::DeltaNetLayerWeights {
+            attn_wq: Proj::empty(),
+            attn_wk: Proj::empty(),
+            attn_wv: Proj::empty(),
+            attn_wo: Proj::empty(),
+            attn_q_norm: gq,
+            attn_k_norm: gk,
+            in_proj_qkv: Proj::empty(),
+            in_proj_a: Proj::empty(),
+            in_proj_b: Proj::empty(),
+            in_proj_z: Proj::empty(),
+            out_proj: Proj::empty(),
+            conv1d_weight: Vec::new(),
+            a_log: Vec::new(),
+            dt_bias: Vec::new(),
+            linear_norm: Vec::new(),
+            gate_proj: Proj::empty(),
+            up_proj: Proj::empty(),
+            down_proj: Proj::empty(),
+            input_norm: Vec::new(),
+            post_attn_norm: Vec::new(),
+        }
+    }
+
+    #[cfg(feature = "tokengate")]
+    fn gdn_layer() -> crate::deltanet::weights::DeltaNetLayerWeights {
+        attn_layer(Vec::new(), Vec::new())
+    }
+
+    #[cfg(feature = "tokengate")]
+    #[test]
+    fn derived_magnitudes_known_answer_all_ones_and_hand_case() {
+        // All-ones gains, d = 4: products all 1, sum_sq 4, √(4/4) = exactly 1.
+        let mut w = shell_layers(vec![attn_layer(vec![1.0; 4], vec![1.0; 4])]);
+        let mut table = [7.5f32; 1];
+        super::derived_magnitudes_into(&mut table, &w);
+        assert_eq!(table[0], 1.0, "all-ones gains derive exactly one");
+
+        // Hand case: gq [1,2,3,4], gk all 2 → products [2,4,6,8],
+        // sum_sq = 4+16+36+64 = 120, √(120/4) = √30.
+        w.layers[0] = attn_layer(vec![1.0, 2.0, 3.0, 4.0], vec![2.0; 4]);
+        super::derived_magnitudes_into(&mut table, &w);
+        let expected = (120.0f64 / 4.0).sqrt() as f32;
+        assert_eq!(table[0], expected);
+    }
+
+    #[cfg(feature = "tokengate")]
+    #[test]
+    fn derived_magnitudes_gdn_layers_are_inert_zero_and_half_gains_refuse() {
+        // Hybrid: GDN (empty gains → 0.0), attention (derived), GDN again.
+        let w = shell_layers(vec![
+            gdn_layer(),
+            attn_layer(vec![1.0, 2.0], vec![3.0, 4.0]),
+            gdn_layer(),
+        ]);
+        let mut table = [0.0f32; 3];
+        super::derived_magnitudes_into(&mut table, &w);
+        assert_eq!(table[0], 0.0, "GDN slot inert-zero");
+        assert_eq!(table[2], 0.0, "GDN slot inert-zero");
+        // Layer 1: products [3, 8], sum_sq 9+64=73, √(73/2).
+        assert_eq!(table[1], (73.0f64 / 2.0).sqrt() as f32);
+
+        // Half-populated gains are a loader bug — refused loud, never a
+        // silent 0.0 (which would inert a real layer's bias rows).
+        let bad = shell_layers(vec![attn_layer(vec![1.0, 2.0], Vec::new())]);
+        let mut t = [0.0f32; 1];
+        let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            super::derived_magnitudes_into(&mut t, &bad);
+        }));
+        assert!(r.is_err(), "half-populated gains must refuse");
+
+        // Table length is the layer count — mis-sized dst refuses loud.
+        let mut short = [0.0f32; 2];
+        let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            super::derived_magnitudes_into(&mut short, &w);
+        }));
+        assert!(r.is_err(), "dst length must equal n_layers");
+    }
+
+    #[cfg(feature = "tokengate")]
+    #[test]
+    fn derived_magnitudes_sign_is_squared_away_and_l2_upweights_the_product() {
+        // Negative gains: the product's sign squares away — gq [1,-1],
+        // gk [1,1] → products [1,-1] → √((1+1)/2) = 1.
+        let mut w = shell_layers(vec![attn_layer(vec![1.0, -1.0], vec![1.0, 1.0])]);
+        let mut table = [0.0f32; 1];
+        super::derived_magnitudes_into(&mut table, &w);
+        assert_eq!(table[0], 1.0);
+
+        // The L2 norm reads the SQUARE law: doubling a peaky gain coordinate
+        // quadruples its contribution — [2,0] products weigh 4, [√2,√2]
+        // products weigh 2+2 = 4 (equal here), but [4,0] beats [2,2]
+        // (16 vs 8): peaky gain coordinates upweight, never average away.
+        w.layers[0] = attn_layer(vec![4.0, 0.0], vec![1.0, 1.0]);
+        super::derived_magnitudes_into(&mut table, &w);
+        let peaky = table[0];
+        w.layers[0] = attn_layer(vec![2.0, 2.0], vec![1.0, 1.0]);
+        super::derived_magnitudes_into(&mut table, &w);
+        let flat = table[0];
+        assert!(peaky > flat, "peaky {peaky} must exceed flat {flat}");
+        assert_eq!(
+            peaky,
+            (16.0f64 / 2.0).sqrt() as f32,
+            "peaky derives √(sum_sq/d) = √(16/2)"
+        );
     }
 }
