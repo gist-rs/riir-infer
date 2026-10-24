@@ -122,10 +122,16 @@ pub fn gemv_f16_scale_launch_count() -> usize {
 /// `true` ⇒ `GemvTernaryCubeCL::launch()` dispatches `launch_rowtiled8_wg`
 /// with the measured shape rule instead of the fixed 256-thread workgroup.
 /// Dispatch-only (byte-identical output — Bench 996 cell 4 G1 PASS ×3),
-/// **DEFAULT OFF** until its e2e GOAT: env `RIIR_GEMV_WG_OCCUPANCY` arms it
-/// on exact "1"/"on"/"true". `set_gemv_wg_occupancy` is the harness arm
+/// **DEFAULT-ON on the wgpu/Metal runtime** since 2026-10-24 (Bench 996 e2e
+/// GOAT ×2: +4.88/+5.52% decode on the m5ultra; promotion via reviewer
+/// verdict, the L8 rung's posture). On the `cuda_backend` CudaRuntime the
+/// rule stays OPT-IN (the 4090 prefill tail's lm_head dispatches this same
+/// `launch()`, unmeasured — riir-infer Issue 050 owns that A/B). The env
+/// `RIIR_GEMV_WG_OCCUPANCY` is DEMOTE-ONLY on Metal: unset = ON; ANY set
+/// value that is not "1"/"on"/"true" (empty, "0", a typo) restores the
+/// incumbent fixed-256 dispatch. `set_gemv_wg_occupancy` is the harness arm
 /// toggle (authoritative over the env, same contract as the f16 lane's).
-static USE_WG_OCCUPANCY: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+static USE_WG_OCCUPANCY: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(true);
 static WG_OCCUPANCY_INITIALIZED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
 
 /// Launches dispatched through the occupancy wg rule (the vacuous-guard
@@ -134,15 +140,39 @@ static WG_OCCUPANCY_INITIALIZED: std::sync::OnceLock<bool> = std::sync::OnceLock
 static WG_OCCUPANCY_LAUNCHES: std::sync::atomic::AtomicUsize =
     std::sync::atomic::AtomicUsize::new(0);
 
+fn wg_occupancy_env_semantics(env: Result<String, std::env::VarError>) -> bool {
+    match env {
+        // Unset = ON where the rule is measured (the wgpu/Metal runtime —
+        // Bench 996's surface), opt-in where it is not (the `cuda_backend`
+        // CudaRuntime — the 4090 prefill tail's lm_head dispatches this same
+        // `launch()`, unmeasured there).
+        Err(std::env::VarError::NotPresent) => wg_occupancy_platform_default(),
+        // The kill-switch class: ANY set value that is not 1/on/true (empty,
+        // "0", a typo, non-Unicode) demotes to the incumbent — env wins.
+        Ok(v) => matches!(v.to_lowercase().as_str(), "1" | "on" | "true"),
+        Err(std::env::VarError::NotUnicode(_)) => false,
+    }
+}
+
+/// Where the rule is DEFAULT-ON: the wgpu/Metal runtime only (Bench 996's
+/// measured surface). Mirrors the [`crate::cubecl_runtime::ActiveRuntime`]
+/// split: `cuda_backend` on non-macOS resolves to CudaRuntime, where the
+/// rule stays opt-in until the 4090 prefill A/B (riir-infer Issue 050)
+/// promotes it.
+#[cfg(any(not(feature = "cuda_backend"), target_os = "macos"))]
+fn wg_occupancy_platform_default() -> bool {
+    true
+}
+
+/// CudaRuntime posture: opt-in (unset stays OFF) until measured on the 4090.
+#[cfg(all(feature = "cuda_backend", not(target_os = "macos")))]
+fn wg_occupancy_platform_default() -> bool {
+    false
+}
+
 fn wg_occupancy_enabled() -> bool {
     if WG_OCCUPANCY_INITIALIZED
-        .set(matches!(
-            std::env::var("RIIR_GEMV_WG_OCCUPANCY")
-                .unwrap_or_default()
-                .to_lowercase()
-                .as_str(),
-            "1" | "on" | "true",
-        ))
+        .set(wg_occupancy_env_semantics(std::env::var("RIIR_GEMV_WG_OCCUPANCY")))
         .is_ok()
     {
         USE_WG_OCCUPANCY.store(
@@ -165,12 +195,65 @@ pub fn gemv_wg_occupancy_launch_count() -> usize {
     WG_OCCUPANCY_LAUNCHES.load(std::sync::atomic::Ordering::Relaxed)
 }
 
+#[cfg(test)]
+mod wg_occupancy_semantics_tests {
+    use super::wg_occupancy_env_semantics;
+
+    // The four env postures the promotion verdict pinned (2026-10-24):
+    // unset → the platform default (ON on wgpu/Metal, OFF on CudaRuntime);
+    // armed values → ON on every platform; the kill-switch class (ANY set
+    // value outside 1/on/true, empty included) and a non-Unicode value → OFF.
+    fn platform_default() -> bool {
+        super::wg_occupancy_platform_default()
+    }
+
+    #[test]
+    fn unset_resolves_to_the_platform_default() {
+        assert_eq!(
+            wg_occupancy_env_semantics(Err(std::env::VarError::NotPresent)),
+            platform_default(),
+            "unset must resolve to the platform default, never a fixed bool"
+        );
+    }
+
+    #[test]
+    fn armed_values_are_on_everywhere() {
+        for v in ["1", "on", "true", "TRUE", "On"] {
+            assert!(
+                wg_occupancy_env_semantics(Ok(v.to_string())),
+                "{v} must arm the rule on every runtime"
+            );
+        }
+    }
+
+    #[test]
+    fn the_kill_switch_class_demotes_everywhere() {
+        for v in ["0", "", "off", "false", "yes", " "] {
+            assert!(
+                !wg_occupancy_env_semantics(Ok(v.to_string())),
+                "set-but-not-1/on/true ({v:?}) must DEMOTE, never fall back to the default"
+            );
+        }
+    }
+
+    #[test]
+    fn non_unicode_demotes() {
+        let bad = std::ffi::OsString::from("\u{fffd}");
+        assert!(!wg_occupancy_env_semantics(Err(
+            std::env::VarError::NotUnicode(bad)
+        )));
+    }
+}
+
 /// The measured occupancy rule (Bench 996 cell 4, m5ultra): workgroup size
 /// by row count. m=5120/6144 (80 wgs at 256) → 64 threads (320 wgs: ffn_down
 /// 1.45×, ssm_out/attn_output 1.34×, attn_gate 1.22×); m ≥ 8192 → 128
 /// threads (attn_qkv 1.12×, ffn_gate/up 1.09×, lm_head flat); smaller m
 /// keeps 256 — the sweep did not test it, and the latency-floor tiny shapes
-/// are unchanged by construction only under the tested geometry.
+/// are unchanged by construction only under the tested geometry. The
+/// 4096–5119 bucket is EXTRAPOLATED (only m=5120/6144 were measured; it
+/// cannot break correctness — dispatch-only — but the speed there is an
+/// assumption until a hidden-m=4096-class model is measured).
 fn occupancy_wg_for(m: u32) -> u32 {
     match m {
         x if x >= 8192 => 128,
@@ -2505,8 +2588,12 @@ impl GemvTernaryCubeCL {
         // lane is the shipping decode dispatch (default-ON since Bench 771),
         // so a plain-path-only rule would never reach it (the Bench 996
         // vacuous-guard catch).
-        // OPT-IN (default OFF) until its e2e GOAT: env
-        // `RIIR_GEMV_WG_OCCUPANCY` (exact "1"/"on"/"true") arms it; the
+        // OPT-IN → DEFAULT-ON (wgpu/Metal runtime) since 2026-10-24: Bench 996
+        // e2e GOAT ×2 (+4.88/+5.52% decode, m5ultra), promotion via reviewer
+        // verdict. On the cuda_backend CudaRuntime it stays opt-in (the 4090
+        // prefill-tail lm_head below rides this same `launch()` — unmeasured
+        // there; riir-infer Issue 050). The env is DEMOTE-ONLY on Metal:
+        // unset = ON, any set non-1/on/true value restores the incumbent; the
         // counter is the vacuous guard, as the f16 lane's.
         let occupancy_wg = if wg_occupancy_enabled() {
             WG_OCCUPANCY_LAUNCHES.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
