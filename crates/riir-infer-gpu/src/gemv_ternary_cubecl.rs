@@ -117,20 +117,23 @@ pub fn gemv_f16_scale_launch_count() -> usize {
 
 // ── Issue 1114: the occupancy wg dispatch toggle (Bench 996 cell 4) ────
 
-/// Runtime toggle for the occupancy workgroup rule (Issue 1114).
+/// Runtime toggle for the occupancy workgroup rule (Issue 1114; the CUDA
+/// posture cell is Issue 1115).
 ///
 /// `true` ⇒ `GemvTernaryCubeCL::launch()` dispatches `launch_rowtiled8_wg`
 /// with the measured shape rule instead of the fixed 256-thread workgroup.
-/// Dispatch-only (byte-identical output — Bench 996 cell 4 G1 PASS ×3),
-/// **DEFAULT-ON on the wgpu/Metal runtime** since 2026-10-24 (Bench 996 e2e
-/// GOAT ×2: +4.88/+5.52% decode on the m5ultra; promotion via reviewer
-/// verdict, the L8 rung's posture). On the `cuda_backend` CudaRuntime the
-/// rule stays OPT-IN (the 4090 prefill tail's lm_head dispatches this same
-/// `launch()`, unmeasured — riir-infer Issue 050 owns that A/B). The env
-/// `RIIR_GEMV_WG_OCCUPANCY` is DEMOTE-ONLY on Metal: unset = ON; ANY set
-/// value that is not "1"/"on"/"true" (empty, "0", a typo) restores the
-/// incumbent fixed-256 dispatch. `set_gemv_wg_occupancy` is the harness arm
-/// toggle (authoritative over the env, same contract as the f16 lane's).
+/// Dispatch-only (byte-identical output — Bench 996 cell 4 G1 PASS ×3;
+/// Issue 1115 e2e G1 FNV-identical ×6 rounds at pp512 + ×6 at pp4096 on the
+/// 4090 CudaRuntime). **DEFAULT-ON unconditionally** since 2026-10-25:
+/// default-on on the wgpu/Metal runtime (Bench 996 e2e GOAT ×2: +4.88/+5.52%
+/// decode on the m5ultra; promotion via reviewer verdict, the L8 rung's
+/// posture) and default-on on the `cuda_backend` CudaRuntime (Issue 1115:
+/// the 4090 prefill-tail lm_head A/B — G1 FNV-identical ×6+6, G3 pp512
+/// 1.0013× / pp4096 1.0000×, dispatch-only held cross-runtime). The env
+/// `RIIR_GEMV_WG_OCCUPANCY` is DEMOTE-ONLY on every platform: unset = ON;
+/// ANY set value that is not "1"/"on"/"true" (empty, "0", a typo) restores
+/// the incumbent fixed-256 dispatch. `set_gemv_wg_occupancy` is the harness
+/// arm toggle (authoritative over the env, same contract as the f16 lane's).
 static USE_WG_OCCUPANCY: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(true);
 static WG_OCCUPANCY_INITIALIZED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
 
@@ -142,10 +145,9 @@ static WG_OCCUPANCY_LAUNCHES: std::sync::atomic::AtomicUsize =
 
 fn wg_occupancy_env_semantics(env: Result<String, std::env::VarError>) -> bool {
     match env {
-        // Unset = ON where the rule is measured (the wgpu/Metal runtime —
-        // Bench 996's surface), opt-in where it is not (the `cuda_backend`
-        // CudaRuntime — the 4090 prefill tail's lm_head dispatches this same
-        // `launch()`, unmeasured there).
+        // Unset = ON on every platform (the wgpu/Metal runtime — Bench 996's
+        // surface; the `cuda_backend` CudaRuntime — Issue 1115's measured
+        // 4090 prefill-tail lm_head cell).
         Err(std::env::VarError::NotPresent) => wg_occupancy_platform_default(),
         // The kill-switch class: ANY set value that is not 1/on/true (empty,
         // "0", a typo, non-Unicode) demotes to the incumbent — env wins.
@@ -154,20 +156,13 @@ fn wg_occupancy_env_semantics(env: Result<String, std::env::VarError>) -> bool {
     }
 }
 
-/// Where the rule is DEFAULT-ON: the wgpu/Metal runtime only (Bench 996's
-/// measured surface). Mirrors the [`crate::cubecl_runtime::ActiveRuntime`]
-/// split: `cuda_backend` on non-macOS resolves to CudaRuntime, where the
-/// rule stays opt-in until the 4090 prefill A/B (riir-infer Issue 050)
-/// promotes it.
-#[cfg(any(not(feature = "cuda_backend"), target_os = "macos"))]
+/// DEFAULT-ON on every platform since Issue 1115 (2026-10-25): the rule is
+/// measured on BOTH runtimes now (Bench 996 wgpu/Metal; the Issue 1115 4090
+/// prefill-tail lm_head A/B on the `cuda_backend` CudaRuntime). The old
+/// platform split (Metal true / CudaRuntime false) is deleted — the unset
+/// posture is unconditional ON, and the env stays the demote-only path.
 fn wg_occupancy_platform_default() -> bool {
     true
-}
-
-/// CudaRuntime posture: opt-in (unset stays OFF) until measured on the 4090.
-#[cfg(all(feature = "cuda_backend", not(target_os = "macos")))]
-fn wg_occupancy_platform_default() -> bool {
-    false
 }
 
 fn wg_occupancy_enabled() -> bool {
@@ -201,10 +196,11 @@ pub fn gemv_wg_occupancy_launch_count() -> usize {
 mod wg_occupancy_semantics_tests {
     use super::wg_occupancy_env_semantics;
 
-    // The four env postures the promotion verdict pinned (2026-10-24):
-    // unset → the platform default (ON on wgpu/Metal, OFF on CudaRuntime);
-    // armed values → ON on every platform; the kill-switch class (ANY set
-    // value outside 1/on/true, empty included) and a non-Unicode value → OFF.
+    // The four env postures the promotion verdict pinned (2026-10-24; the
+    // CudaRuntime half re-pinned by Issue 1115, 2026-10-25): unset → the
+    // platform default (ON everywhere since the split deletion); armed
+    // values → ON on every platform; the kill-switch class (ANY set value
+    // outside 1/on/true, empty included) and a non-Unicode value → OFF.
     fn platform_default() -> bool {
         super::wg_occupancy_platform_default()
     }
@@ -215,6 +211,14 @@ mod wg_occupancy_semantics_tests {
             wg_occupancy_env_semantics(Err(std::env::VarError::NotPresent)),
             platform_default(),
             "unset must resolve to the platform default, never a fixed bool"
+        );
+    }
+
+    #[test]
+    fn the_platform_default_is_on_everywhere() {
+        assert!(
+            platform_default(),
+            "the unset posture is ON on every runtime since the Issue-1115 split deletion — if this fires, someone re-introduced a platform split"
         );
     }
 
@@ -2592,11 +2596,13 @@ impl GemvTernaryCubeCL {
         // vacuous-guard catch).
         // OPT-IN → DEFAULT-ON (wgpu/Metal runtime) since 2026-10-24: Bench 996
         // e2e GOAT ×2 (+4.88/+5.52% decode, m5ultra), promotion via reviewer
-        // verdict. On the cuda_backend CudaRuntime it stays opt-in (the 4090
-        // prefill-tail lm_head below rides this same `launch()` — unmeasured
-        // there; riir-infer Issue 050). The env is DEMOTE-ONLY on Metal:
-        // unset = ON, any set non-1/on/true value restores the incumbent; the
-        // counter is the vacuous guard, as the f16 lane's.
+        // verdict. CUDA DEFAULT-ON since 2026-10-25 (Issue 1115): the 4090
+        // prefill-tail lm_head below rides this same `launch()` — measured
+        // G1 FNV-identical ×6+6 (pp512 + pp4096), G3 1.0013× / 1.0000×
+        // (sub-noise), so the platform split is deleted and the unset
+        // posture is ON unconditionally. The env is DEMOTE-ONLY on every
+        // platform: unset = ON, any set non-1/on/true value restores the
+        // incumbent; the counter is the vacuous guard, as the f16 lane's.
         let occupancy_wg = if wg_occupancy_enabled() {
             WG_OCCUPANCY_LAUNCHES.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
             occupancy_wg_for(handle.m as u32)

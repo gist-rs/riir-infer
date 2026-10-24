@@ -396,6 +396,18 @@ required-features = ["tokengate", "ternary_gemv_cuda_raw", "ternary_gemm_batched
 name = "g1_032_folded_prefill_metal"
 required-features = ["cubecl_runtime", "ternary_gemm_batched", "ternary_deltanet_chunked_prefill", "ternary_attention_batched_prefill", "riir-infer-core/bonsai2_hadamard"]
 
+# Issue 1115 — the 4090 prefill-tail lm_head A/B for the GEMV occupancy wg
+# rule: arm-off (today's CudaRuntime unset posture) vs arm-on, pp512 +
+# pp4096, interleaved, G1 per-round FNV + the launch-counter reach proof.
+# `cuda_backend` in the row is the POINT (the platform default under test);
+# the whole-file #![cfg] mirrors it (CudaRuntime + not macOS — the same split
+# `wg_occupancy_platform_default` reads). #[ignore]d — the 4090 runs it with
+# --release -- --ignored, RIIR_PREFILL_CUDA_GRAPHS=0, and BONSAI_GGUF
+# (default the sibling riir-train data path; ABSOLUTE on the box).
+[[test]]
+name = "issue1115_wg_occupancy_prefill_tail_ab"
+required-features = ["cuda_backend", "ternary_gemv_cuda_raw", "ternary_gemm_batched", "ternary_deltanet_chunked_prefill", "ternary_attention_batched_prefill", "riir-infer-core/bonsai2_hadamard"]
+
 # katgpt-rs Issue 936 T5 — the decode spin pool on the GPU-hooked decode
 # (Metal lane, real Bonsai-2): bit-identity + paired no-harm wall, one load.
 [[test]]

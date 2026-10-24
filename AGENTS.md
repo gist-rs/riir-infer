@@ -62,11 +62,12 @@ as 2–5× overhead-polluted; the class is WORKGROUP-COUNT-limited, not
 shape-cursed; the dispatch-only `launch_rowtiled8_wg`/`launch_f16scale_wg`
 shape rule (m≥8192→128, m≥4096→64, else 256) is byte-identical and won
 +4.88/+5.52% e2e GOAT ×2 on the m5ultra — shipped here as `RIIR_GEMV_WG_OCCUPANCY`
-(**PROMOTED DEFAULT-ON 2026-10-24 on the wgpu/Metal runtime** — owner call
-via reviewer verdict; env `RIIR_GEMV_WG_OCCUPANCY=0` demotes byte-identically;
-on the `cuda_backend` CudaRuntime it stays OPT-IN pending the 4090 prefill-tail
-lm_head A/B, riir-infer Issue 1115; measured basis riir-ai Bench 996, record in
-riir-ai HISTORY.md);
+(**PROMOTED DEFAULT-ON UNCONDITIONALLY** — 2026-10-24 on the wgpu/Metal runtime
+(owner call via reviewer verdict) and 2026-10-25 on the `cuda_backend`
+CudaRuntime (Issue 1115 / Bench 887: the 4090 prefill-tail lm_head A/B, G1
+FNV ×6+6, G3 1.0013×/1.0000× — the platform split deleted); env
+`RIIR_GEMV_WG_OCCUPANCY=0` demotes byte-identically on every platform;
+measured basis riir-ai Bench 996, record in riir-ai HISTORY.md);
 the GDN delta-roll state journal LANDED 2026-10-20 (Issue 049, opt-in
 `gdn_delta_roll` — `deltanet/delta_roll.rs`: post-commit state recovery by
 rank-1 unwind from the final state + per-token (u, k, β, g) contexts, ~64×
