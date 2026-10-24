@@ -408,6 +408,37 @@ pub fn run_scorer(arm: ScorerArm, hidden: &[f32], mass: Option<&[f32]>, scores: 
     }
 }
 
+/// Plan 622 T3.4 — the random-K floor's score writer (pure fn): a SEEDED
+/// uniform pick of `keep` prunable tokens, written as 1.0 / 0.0 scores so the
+/// incumbent [`select_kept_into`] machinery (scaffold + top-K, first-index
+/// ties) selects exactly that subset — the random arm rides the SAME seam as
+/// the derived arms, no second selection path. Splitsmix64 (the
+/// `fa_posterior` sampler, no external dep) drives a partial Fisher–Yates
+/// over the prunable index range `(n_sink .. t-1)` — deterministic per seed,
+/// distinct picks, scaffold positions and the final token NEVER selected
+/// (the scorer cannot reach them; selection keeps them structurally).
+/// `keep >=` prunable count → all-ones (≡ K = full). One allocation for the
+/// index shuffle — the [`select_kept_into`] CPU-reference class.
+#[cfg(feature = "tokengate")]
+pub fn random_scores_into(scores: &mut [f32], n_sink: usize, keep: usize, seed: u64) {
+    let t = scores.len();
+    scores.fill(0.0);
+    let prunable = n_sink..t.saturating_sub(1);
+    let prunable_len = prunable.len();
+    if keep == 0 || prunable_len == 0 {
+        return;
+    }
+    let mut sm = crate::fa_posterior::SplitMix64::new(seed);
+    let mut idx: Vec<usize> = prunable.collect();
+    let take = keep.min(prunable_len);
+    // Partial Fisher–Yates: position i draws uniformly from [i, len).
+    for i in 0..take {
+        let j = i + (sm.next_u64() % (idx.len() - i) as u64) as usize;
+        idx.swap(i, j);
+        scores[idx[i]] = 1.0;
+    }
+}
+
 /// Plan 622 T3.3 — build the T2.3 decode gate's tables at prefill end, once:
 /// per-(layer, head) bias rows `b[s] = magnitude[l] · seqRMSNorm(score)[kept[s]]`
 /// over the PACKED kept slots (upstream law: the magnitude scales the per-key
@@ -945,5 +976,44 @@ mod tests {
             );
         }));
         assert!(r.is_err(), "empty kept refuses");
+    }
+
+    // ---- random_scores_into (T3.4 random-K floor) -------------------------
+
+    #[cfg(feature = "tokengate")]
+    #[test]
+    fn random_scores_are_deterministic_distinct_and_scaffold_free() {
+        let t = 64usize;
+        let n_sink = 4usize;
+        let keep = 20usize;
+        let mut a = vec![0.0f32; t];
+        let mut b = vec![0.0f32; t];
+        super::random_scores_into(&mut a, n_sink, keep, 0x6220_0044);
+        super::random_scores_into(&mut b, n_sink, keep, 0x6220_0044);
+        assert_eq!(a, b, "same seed → same bits");
+
+        let picked: Vec<usize> = (0..t).filter(|&i| a[i] == 1.0).collect();
+        assert_eq!(picked.len(), keep, "exactly `keep` picks");
+        assert!(
+            picked.iter().all(|&i| i >= n_sink && i < t - 1),
+            "scaffold + last never picked"
+        );
+        assert!(a.iter().all(|&v| v == 0.0 || v == 1.0), "binary scores");
+
+        // A different seed picks a different subset (overwhelmingly — 20 of
+        // 59 identical picks by chance is ~1e-18; assert at least one differs).
+        super::random_scores_into(&mut b, n_sink, keep, 0x6220_0045);
+        let picked_b: Vec<usize> = (0..t).filter(|&i| b[i] == 1.0).collect();
+        assert_ne!(picked, picked_b, "different seeds → different picks");
+
+        // keep >= prunable → everything prunable is 1.0 (≡ K = full).
+        super::random_scores_into(&mut a, n_sink, usize::MAX, 7);
+        let prunable_ones = (n_sink..t - 1).filter(|&i| a[i] == 1.0).count();
+        assert_eq!(prunable_ones, t - n_sink - 1, "K = full posture all-ones");
+        assert_eq!(a[0], 0.0, "scaffold untouched by the writer");
+
+        // keep = 0 → all zeros (scaffold-only posture).
+        super::random_scores_into(&mut a, n_sink, 0, 7);
+        assert!(a.iter().all(|&v| v == 0.0));
     }
 }

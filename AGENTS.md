@@ -84,7 +84,19 @@ zero-alloc track (`stability_g4_alloc`), brute-force bit-parity gates +
 the real-checkpoint e2e smoke (`issue1106_stability_capture_smoke`, skips
 loud without weights); calibration-class, never a serving path; the
 substrate half of reflex Issue 094 — bands are the consumer's to pin);
-remaining planned work: the CLEAN GPU kernel layer migration.
+the TOKENGATE lane (opt-in `tokengate`, Plan 622) through T3.4: Phase 1
+f16-bias wire + Phase 2 pruned prefill/pad buckets/decode fold + the
+L=mid-attention pin (bench 888) + Phase 3 overlay fns (rank cooling,
+magnitude table, scorer family) + the T3.4 four-arm GOAT gate
+(`tokengate_fourarm` bin, bench 889 — VERDICT FAIL: derived dominates
+needle retrieval 9/10 cells but loses the continuation-ppl axis at
+K∈{0.5,0.75} in both postures and one lucky-seed floor cell at K=0.0625;
+FastKV-class is ppl-competitive selection-only, needle-0-blind at every
+K, and collapses under the derived-magnitude bias overlay — the
+full-overlay promotion REFUSED, opt-in only, T4.2 owns the verdict
+write-up); remaining planned work: T3.5 (league random-K census),
+T4.1–T4.3, T2.4 (GPU graphs), T1.6 (Metal), and the CLEAN GPU kernel
+layer migration.
 
 ## Build Commands
 

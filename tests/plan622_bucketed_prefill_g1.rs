@@ -116,6 +116,7 @@ fn run_pruned(
         None,
         &mut plan,
         None,
+        None,
         &mut scorer,
     );
     (cache, plan, logits)

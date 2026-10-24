@@ -2070,6 +2070,7 @@ pub fn prefill_qwen_deltanet_into(
                 PrefillPositions::Contiguous,
                 key_bias,
                 None,
+                None,
             );
         }
     }
@@ -2180,6 +2181,52 @@ fn prefill_deltanet_branch(
     batched_mlp(prefill_ctx, layer_weights, seq_len, n, mlp, eps);
 }
 
+/// The per-head causal softmax row in the kernel's EXACT form (Plan 622
+/// T3.3/T3.4 taps): `scratch[..t_n]` receives the normalized attention
+/// weights α[h,q,t] for query row `q_row` (head offset `q_off` inside it)
+/// against cached keys `0..t_n` at group offset `kvg_off` — same simd dot,
+/// max-subtract, exp, inv-sum, sequential f32 fold (Issue-940) as
+/// `attention_heads_parallel_bias`'s scoring arm. ONE home for that
+/// arithmetic: both taps ([`attention_mass_received_into`],
+/// [`fastkv_scores_received_into`]) re-derive rows through this, so a
+/// kernel-form change cannot drift between the serving pass and a tap.
+/// Consumes `scratch[..t_n]` (the caller's `head_scores` — dead state
+/// between the branch's Phase B and C).
+#[allow(clippy::too_many_arguments)] // the kernel-buffer window shape
+#[inline]
+fn attention_softmax_row_into(
+    scratch: &mut [f32],
+    q: &[f32],
+    q_off: usize,
+    key_cache: &[f32],
+    kvg_off: usize,
+    kv_dim: usize,
+    hd: usize,
+    t_n: usize,
+    scale: f32,
+) {
+    let mut max_s = f32::NEG_INFINITY;
+    for (t, slot) in scratch[..t_n].iter_mut().enumerate() {
+        let k_off = t * kv_dim + kvg_off;
+        let s = crate::simd::simd_dot_f32(&q[q_off..q_off + hd], &key_cache[k_off..k_off + hd], hd)
+            * scale;
+        *slot = s;
+        if s > max_s {
+            max_s = s;
+        }
+    }
+    let mut sum = 0.0f32;
+    for slot in scratch[..t_n].iter_mut() {
+        let e = (*slot - max_s).exp();
+        *slot = e;
+        sum += e;
+    }
+    let inv_sum = 1.0 / sum;
+    for slot in scratch[..t_n].iter_mut() {
+        *slot *= inv_sum;
+    }
+}
+
 /// Whole-prompt prefill — attention branch (Phase A batched QKV + QK-norm +
 /// RoPE + cache write, Phase B sequential scoring, Phase C gate + o_proj +
 /// residual, Phase D batched MLP), extracted verbatim from
@@ -2192,13 +2239,22 @@ fn prefill_deltanet_branch(
 /// weights. Reads the branch's Phase-A outputs — the post-QK-norm+RoPE
 /// queries `[seq_len * q_dim]` and the roped keys in cache slots
 /// `[0..seq_len]` — and re-derives each row's softmax in the kernel's exact
-/// form (the same simd dot, max-subtract, exp, inv-sum; sequential f32 fold,
+/// form (via [`attention_softmax_row_into`]; sequential f32 fold,
 /// Issue-940). NOT a read of the attention call's `head_scores` scratch:
 /// the sequential dispatch arm reuses `head_scores[..block_size]` for EVERY
 /// head, so its post-call content is the last head's weights —
 /// dispatch-dependent, unusable as a tap. Cost when armed: one extra
 /// QK+softmax pass over the layer (no V reads, no output writes);
 /// `Some` at the prune layer only, `None` everywhere else.
+/// Plan 622 T3.4 — the FastKV-class tap rides the SAME buffer with
+/// `window = Some(w)`: per query in the LAST `w` positions, the per-key
+/// head-sum row; the tap keeps the per-key MAX across those rows
+/// (`fastkv[k] = max_{q ∈ last-w, q ≥ k} Σ_h α[h,q,k]`) — the
+/// paper-described "attention received from a window of the last queries,
+/// max-pooled" selector, measured on the same seam at the same layer L
+/// instead of being an adjective. Window ≥ 1 (0 clamps, pinned); the max
+/// monotone in the window, and every entry ≤ the mass tap's sum at the same
+/// pass (max ≤ Σ) — both pinned by `tests/plan622_fastkv_g1.rs`.
 #[allow(clippy::too_many_arguments)] // the kernel-buffer window shape
 pub(crate) fn attention_mass_received_into(
     mass: &mut [f32],
@@ -2211,6 +2267,7 @@ pub(crate) fn attention_mass_received_into(
     hd: usize,
     seq_len: usize,
     scale: f32,
+    window: Option<usize>,
 ) {
     assert!(n_head > 0, "no heads");
     assert!(mass.len() >= seq_len, "mass buffer shorter than the prompt");
@@ -2219,35 +2276,51 @@ pub(crate) fn attention_mass_received_into(
         "softmax scratch shorter than the prompt"
     );
     assert_eq!(q.len(), seq_len * n_head * hd, "q rows mismatch");
-    mass[..seq_len].fill(0.0);
-    for p in 0..seq_len {
-        let t_n = p + 1;
-        for h in 0..n_head {
-            // GQA group mapping — the kernel's own `h * n_kv_head / n_head`.
-            let kvg_off = (h * n_kv_head / n_head) * hd;
-            let q_off = p * n_head * hd + h * hd;
-            let mut max_s = f32::NEG_INFINITY;
-            for (t, slot) in scratch[..t_n].iter_mut().enumerate() {
-                let k_off = t * kv_dim + kvg_off;
-                let s = crate::simd::simd_dot_f32(
-                    &q[q_off..q_off + hd],
-                    &key_cache[k_off..k_off + hd],
-                    hd,
-                ) * scale;
-                *slot = s;
-                if s > max_s {
-                    max_s = s;
+    match window {
+        None => {
+            mass[..seq_len].fill(0.0);
+            for p in 0..seq_len {
+                let t_n = p + 1;
+                for h in 0..n_head {
+                    // GQA group mapping — the kernel's own `h * n_kv_head / n_head`.
+                    let kvg_off = (h * n_kv_head / n_head) * hd;
+                    let q_off = p * n_head * hd + h * hd;
+                    attention_softmax_row_into(
+                        scratch, q, q_off, key_cache, kvg_off, kv_dim, hd, t_n, scale,
+                    );
+                    for (m, w) in mass[..t_n].iter_mut().zip(scratch[..t_n].iter()) {
+                        *m += *w;
+                    }
                 }
             }
-            let mut sum = 0.0f32;
-            for slot in scratch[..t_n].iter_mut() {
-                let e = (*slot - max_s).exp();
-                *slot = e;
-                sum += e;
-            }
-            let inv_sum = 1.0 / sum;
-            for (m, w) in mass[..t_n].iter_mut().zip(scratch[..t_n].iter()) {
-                *m += *w * inv_sum;
+        }
+        Some(window) => {
+            let window = window.clamp(1, seq_len);
+            mass[..seq_len].fill(0.0);
+            // The pooling needs a SECOND seq_len buffer (the running head-sum
+            // for the query being pooled, while `mass` holds the max and
+            // `scratch` the softmax row). One allocation at the prune layer
+            // per armed run — the select_kept_into CPU-reference class (the
+            // G4 law prices the serving path, not this lane's prune step).
+            let mut headsum = vec![0.0f32; seq_len];
+            for p in (seq_len - window)..seq_len {
+                let t_n = p + 1;
+                headsum[..t_n].fill(0.0);
+                for h in 0..n_head {
+                    let kvg_off = (h * n_kv_head / n_head) * hd;
+                    let q_off = p * n_head * hd + h * hd;
+                    attention_softmax_row_into(
+                        scratch, q, q_off, key_cache, kvg_off, kv_dim, hd, t_n, scale,
+                    );
+                    for (acc, w) in headsum[..t_n].iter_mut().zip(scratch[..t_n].iter()) {
+                        *acc += *w;
+                    }
+                }
+                for (dst, acc) in mass[..t_n].iter_mut().zip(headsum[..t_n].iter()) {
+                    if *acc > *dst {
+                        *dst = *acc;
+                    }
+                }
             }
         }
     }
@@ -2272,6 +2345,7 @@ fn prefill_attention_branch(
     pos_at: PrefillPositions<'_>,
     key_bias: Option<(&[f32], crate::transformer::KeyBiasLayout)>,
     mut mass_tap: Option<&mut [f32]>,
+    tap_window: Option<usize>,
 ) {
     // Phase A (batched): pre-attn residual + input_norm + QKV proj +
     // QK-norm + RoPE + K,V cache write. All positions at once.
@@ -2402,12 +2476,14 @@ fn prefill_attention_branch(
         }
     }
 
-    // Plan 622 T3.3 arm (a): the layer-L attention-mass tap. `mass_tap` is
-    // Some only at the prune layer of the pruned prefill; the probe re-derives
-    // the per-key mass from the Phase-A outputs (post-norm+RoPE Q, cached K)
-    // using `head_scores` as its softmax scratch — dead state between Phase B
-    // and C. The reborrow (not a move) keeps the caller's Option alive for
-    // the scorer's read at the prune point.
+    // Plan 622 T3.3 arm (a) / T3.4 FastKV-class: the layer-L tap. `mass_tap`
+    // is Some only at the prune layer of the pruned prefill; the probe
+    // re-derives the per-key statistic from the Phase-A outputs (post-norm+RoPE
+    // Q, cached K) using `head_scores` as its softmax scratch — dead state
+    // between Phase B and C. `tap_window` picks the pooling: None = the sum
+    // over all queries (the mass), Some(w) = the max over the last-w queries'
+    // head-sum rows (FastKV-class). The reborrow (not a move) keeps the
+    // caller's Option alive for the scorer's read at the prune point.
     #[allow(clippy::needless_option_as_deref)] // the REBORROW is load-bearing
     if let Some(mass) = mass_tap.as_deref_mut() {
         attention_mass_received_into(
@@ -2421,6 +2497,7 @@ fn prefill_attention_branch(
             hd,
             seq_len,
             scale,
+            tap_window,
         );
     }
 
@@ -2896,10 +2973,13 @@ impl PrunedPrefillPlan {
 /// residual entering layer `L+1`) and writes one importance value per row into
 /// the provided buffer (length `live_len`). Selection ties break FIRST-INDEX
 /// and NaN scores sort worst (the determinism law).
-/// Plan 622 T3.3 — the scorer seam: `(hidden rows, optional layer-L mass
-/// tap, scores out)`. The tap is `Some` only when the caller armed the
-/// T3.3 arm-(a) mass probe (`mass_scratch`) AND the current layer is the
-/// prune layer; arms (b)/(c) ignore it.
+/// Plan 622 T3.3 — the scorer seam: `(hidden rows, optional layer-L tap,
+/// scores out)`. The tap is `Some` only when the caller armed the T3.3
+/// arm-(a) mass probe (`mass_scratch`) AND the current layer is the
+/// prune layer; arms (b)/(c) ignore it. `tap_window` (T3.4) picks the tap's
+/// pooling over the same buffer: `None` = the all-query SUM (the mass),
+/// `Some(w)` = the FastKV-class MAX over the last-w queries' head-sum rows
+/// — a measured selector arm on the SAME seam, never a new plumbing.
 #[cfg(feature = "tokengate")]
 pub type PrunedScorer<'a> = dyn FnMut(&[f32], Option<&[f32]>, &mut [f32]) + 'a;
 
@@ -2917,6 +2997,7 @@ pub fn prefill_qwen_deltanet_pruned_into(
     key_bias: Option<(&[f32], crate::transformer::KeyBiasLayout)>,
     prune: &mut PrunedPrefillPlan,
     mut mass_scratch: Option<&mut [f32]>,
+    tap_window: Option<usize>,
     scorer: &mut PrunedScorer<'_>,
 ) {
     let n = config.n_embd;
@@ -2994,7 +3075,8 @@ pub fn prefill_qwen_deltanet_pruned_into(
             } else {
                 PrefillPositions::Kept(&prune.kept)
             };
-            // The mass tap arms at the prune layer ONLY (T3.3 arm (a)).
+            // The tap arms at the prune layer ONLY (T3.3 arm (a) / T3.4
+            // FastKV-class — `tap_window` picks the pooling).
             let tap = if layer_idx == prune.prune_at_layer {
                 mass_scratch.as_deref_mut()
             } else {
@@ -3018,6 +3100,7 @@ pub fn prefill_qwen_deltanet_pruned_into(
                 pos_at,
                 key_bias,
                 tap,
+                tap_window,
             );
         }
 

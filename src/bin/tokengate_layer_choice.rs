@@ -427,6 +427,7 @@ fn main() -> Result<()> {
                 None,
                 &mut plan,
                 mass_tap,
+                None,
                 &mut scorer,
             );
             // Pruned decode, SELECTION-ALONE (gate = None).

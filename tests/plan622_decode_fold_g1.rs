@@ -161,6 +161,7 @@ fn run_pruned(
         None,
         &mut plan,
         None,
+        None,
         &mut scorer,
     );
     let mut steps = vec![logits.clone()];

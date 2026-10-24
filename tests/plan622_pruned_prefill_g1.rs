@@ -124,6 +124,7 @@ fn pruned_kfull_is_bit_identical_to_the_full_prefill_at_both_mixer_kinds() {
             None,
             &mut plan,
             None,
+            None,
             &mut all_ones,
         );
 
@@ -184,6 +185,7 @@ fn pruned_keeps_prefix_state_byte_identical_and_moves_the_rest() {
         None,
         &mut plan,
         None,
+        None,
         &mut poison(victim),
     );
 
@@ -230,6 +232,7 @@ fn pruned_keeps_prefix_state_byte_identical_and_moves_the_rest() {
         None,
         &mut plan2,
         None,
+        None,
         &mut poison(victim),
     );
     synth::assert_bits_eq(&logits_p2, &logits_p, "run-to-run determinism");
@@ -259,6 +262,7 @@ fn selection_laws_at_the_prefill_surface() {
         &mut logits_p,
         None,
         &mut plan,
+        None,
         None,
         &mut scaffold_poisoner,
     );
@@ -296,6 +300,7 @@ fn arm_a_attention_mass_taps_the_layer_l_pass_and_selects() {
         None,
         &mut plan,
         Some(&mut mass),
+        None,
         &mut scorer,
     );
 
@@ -338,6 +343,7 @@ fn arm_a_attention_mass_taps_the_layer_l_pass_and_selects() {
         None,
         &mut plan2,
         Some(&mut mass2),
+        None,
         &mut scorer2,
     );
     synth::assert_bits_eq(&plan.scores, &plan2.scores, "mass run-to-run bits");
@@ -366,6 +372,7 @@ fn arm_a_contract_refusals_are_loud() {
             None,
             &mut plan,
             Some(&mut mass),
+            None,
             &mut scorer,
         );
     }));
@@ -390,6 +397,7 @@ fn arm_a_contract_refusals_are_loud() {
             &mut logits2,
             None,
             &mut plan2,
+            None,
             None,
             &mut scorer_a,
         );
