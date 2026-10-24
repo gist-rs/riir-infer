@@ -1435,7 +1435,8 @@ mod tests {
 
     /// Issue 1113 — the twin pin that would have caught the missing +112
     /// exponent re-bias at transcription time: this module's CUDA
-    /// `kv_f16_to_f32` body must stay BYTE-EQUAL to the canonical copy in
+    /// `kv_f16_to_f32` body must stay CODE-TOKEN-IDENTICAL (comments
+    /// stripped, whitespace-normalized) to the canonical copy in
     /// `ATTENTION_CUDA_SRC` (both are in-repo strings, so the comparison is
     /// mechanical — no device, no transcription). Both copies also carry the
     /// subnormal + Inf branches, so a drift in ANY branch reds, not just the
@@ -1470,12 +1471,21 @@ mod tests {
                 }
             }
             assert_ne!(end, body_start, "unbalanced braces — extraction failed");
-            // Whitespace-normalized so a reformat cannot red the pin; the
-            // TOKEN SEQUENCE is the contract.
-            src[body_start..end]
-                .split_whitespace()
-                .collect::<Vec<_>>()
-                .join(" ")
+            // Strip `//` line comments BEFORE tokenizing: the canonical copy
+            // carries inline comments the mma copy does not (and vice versa);
+            // the contract is CODE-token-identity, comments exempt. A string
+            // literal containing `//` would be mangled by this — this
+            // function body has none (the KV decode is pure bit math).
+            let body = &src[body_start..end];
+            let mut code = String::with_capacity(body.len());
+            for line in body.lines() {
+                match line.find("//") {
+                    Some(idx) => code.push_str(&line[..idx]),
+                    None => code.push_str(line),
+                }
+                code.push('\n');
+            }
+            code.split_whitespace().collect::<Vec<_>>().join(" ")
         };
         let mma = extract(ATTENTION_SCORE_MMA_CUDA_SRC);
         let canonical = extract(&super::super::attention::ATTENTION_CUDA_SRC);
