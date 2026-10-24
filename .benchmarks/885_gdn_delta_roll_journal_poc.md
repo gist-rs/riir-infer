@@ -99,3 +99,15 @@ the spec-decode retry paths, `kv_evict` eviction recovery, and the disaggregated
 lane (issue028); a handoff consumer wanting integrity hashes the state at journal birth
 (BLAKE3 seam, deliberately not wired in v1). Schedule-specificity and local-only (never
 synced raw) are pinned in the module doc.
+
+**External corroboration (2026-10-24, league watch):** vLLM #63045 landed the same
+mechanism class INDEPENDENTLY — Kimi-K3 KDA "RecoverSSM": CuTeDSL verify (526 L) +
+commit (292 L) kernels plus a workspace-split variant (722 L), recovering SSM state
+"outside the KV cache" (records ride with the request, not the cache). Two design points
+worth reading when a consumer seam opens: (a) their SPLIT verify/commit pair prices
+verification separately from commit — our journal is verify-free (deterministic rank-1
+unwind, G1-drift-gated instead); a KV-evict/handoff consumer that cannot afford the
+unwind cost on the recovery path may want the verify-first shape. (b) the workspace
+variant (722 L vs 526 L) is the occupancy-tuned twin — same pattern as our G4 zero-alloc
+tension. Lead row: riir-refine `.distill/001` WATCH PASS 2026-10-24 (lead 2);
+watch artifact riir-ai `b253cc3c2`.
