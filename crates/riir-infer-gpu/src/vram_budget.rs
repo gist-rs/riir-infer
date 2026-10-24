@@ -150,6 +150,20 @@ pub const fn default_kv_layer_max_bytes(metal: bool) -> u64 {
     }
 }
 
+/// The guard's effective bound: the explicit env override WINS on every
+/// backend (the operator takes the risk the refusal message names — in BOTH
+/// directions: tighten as well as raise); otherwise the backend-keyed table.
+/// Split from [`default_kv_layer_max_bytes`] so the precedence is testable as
+/// a pure function — no process-global env mutation, no GPU (T2's
+/// "env override still winning on every backend" arm).
+#[must_use]
+pub const fn resolve_kv_layer_max_bytes(env_bytes: Option<u64>, metal: bool) -> u64 {
+    match env_bytes {
+        Some(v) => v,
+        None => default_kv_layer_max_bytes(metal),
+    }
+}
+
 /// Env override for the per-layer KV guard, in bytes.
 pub const ENV_KV_LAYER_MAX_BYTES: &str = "RIIR_GPU_KV_LAYER_MAX_BYTES";
 
@@ -489,8 +503,10 @@ pub fn check_forward_budget(
     // 57,408 device-lost / 65,472+ silent corruption, the latter reproduced
     // with ZERO pool failures — pool exhaustion refuted as the mechanism).
     let kv_bytes = kv_layer_bytes(config);
-    let kv_max = parse_env_bytes(ENV_KV_LAYER_MAX_BYTES)
-        .unwrap_or_else(|| default_kv_layer_max_bytes(ctx.is_metal_adapter()));
+    let kv_max = resolve_kv_layer_max_bytes(
+        parse_env_bytes(ENV_KV_LAYER_MAX_BYTES),
+        ctx.is_metal_adapter(),
+    );
     if kv_bytes > kv_max {
         let kvd = config.n_kv_head as u64 * config.head_dim as u64;
         let block_max = kv_max / (kvd * 4);
@@ -553,12 +569,37 @@ mod kv_guard_default_tests {
         );
         assert_eq!(default_kv_layer_max_bytes(true), METAL_KV_LAYER_MAX_BYTES);
         assert_eq!(METAL_KV_LAYER_MAX_BYTES, 268_697_600);
-        assert!(METAL_KV_LAYER_MAX_BYTES > DEFAULT_KV_LAYER_MAX_BYTES);
+        // Compile-time pin: the split is only meaningful while Metal's
+        // measured point sits strictly above the bisect default.
+        const {
+            assert!(METAL_KV_LAYER_MAX_BYTES > DEFAULT_KV_LAYER_MAX_BYTES);
+        }
         // The bisect's broken floor (block 57,408) is refused off Metal
         // and admitted on it.
         let broken_floor = 57_408u64 * 1024 * 4;
         assert!(broken_floor > default_kv_layer_max_bytes(false));
         assert!(broken_floor <= default_kv_layer_max_bytes(true));
+    }
+
+    /// T2's second arm: the env override wins on EVERY backend — and in BOTH
+    /// directions (an operator may tighten as well as raise). The unset arm
+    /// must fall through to the backend-keyed table, never a bare default.
+    #[test]
+    fn env_override_wins_on_every_backend() {
+        for metal in [true, false] {
+            // Set → the env value verbatim, even below the table.
+            assert_eq!(resolve_kv_layer_max_bytes(Some(1), metal), 1);
+            // Set above both points → still the env value.
+            assert_eq!(
+                resolve_kv_layer_max_bytes(Some(4 * 1024 * 1024 * 1024), metal),
+                4 * 1024 * 1024 * 1024
+            );
+            // Unset → the backend-keyed table.
+            assert_eq!(
+                resolve_kv_layer_max_bytes(None, metal),
+                default_kv_layer_max_bytes(metal)
+            );
+        }
     }
 }
 
