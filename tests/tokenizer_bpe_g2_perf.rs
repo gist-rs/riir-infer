@@ -85,7 +85,7 @@ fn encode_throughput_probe() {
         best * 1e9,
         bytes as usize,
         ids.len(),
-        if std::env::var("A/B_SIDE").as_deref() == Ok("old") {
+        if std::env::var("AB_SIDE").as_deref() == Ok("old") {
             "old(string-ranks)"
         } else {
             "new(id-pair-ranks)"
