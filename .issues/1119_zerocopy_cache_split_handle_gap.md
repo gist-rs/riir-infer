@@ -1,6 +1,6 @@
 # Issue 1119 — the zero-copy weight cache covers the FUSED handles only; the prefill dispatches read the SPLIT handles — the metal-tensor path is structurally dead at 10 of 12 sites, and the fall-through is SILENT
 
-**Status:** OPEN — filed 2026-10-25 (found live by the i1122 gate1 cell's green-zero; fix LANDED same session, the cell re-run is the acceptance test)
+**Status:** CLOSED 2026-10-26 01:25 — acceptance PASSED: the gate1 cell re-run engaged at n=64 every window (4 reads), the i1122 gate1 clean-window reads are PASS ADMISSIBLE ×2 (v15 00:49 + v16 01:09, ~100ms/dispatch, Δ −293ms), and gate2's clean 1.223×/1.207× re-opened lever 3(a) — the e2e sign flip (Bench-998's 0.51–0.78× → 1.21–1.22× clean) is this fix's causal fingerprint. Fix `7b2fed9`; consumer record riir-ai `.issues/1122` (CLOSED MEASURED-REOPENED). Filed 2026-10-25 (found live by the i1122 gate1 cell's green-zero; fix LANDED same session, the cell re-run is the acceptance test)
 **Claimed:** zed-m5ultra-1122, epoch 1761447191, expires 2026-10-27T03:30:00+00:00
 
 ## The defect (measured, then root-caused in source)
