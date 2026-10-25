@@ -1905,6 +1905,28 @@ fn warn_metal_cache_missing_once(flag: &str, reason: &str) {
     }
 }
 
+// i1122 (2026-10-25): the zero-copy branch's per-site twin — a flagged+admitted
+// site whose weight handle has no zerocopy cache falls through SILENTLY (the
+// gate1 green-zero: n=0 dispatches, bit-identical logits, `ok. 1 passed`).
+// One eprintln per SITE (not per process — the interesting signal is WHICH
+// handle list drifted), still hot-path clean via the per-site swap.
+#[cfg(all(feature = "metal_tensor_gemm", target_os = "macos"))]
+fn warn_zerocopy_cache_missing_once(site: PrefillSite) {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static WARNED: AtomicU64 = AtomicU64::new(0);
+    let bit = site.bit();
+    if WARNED.load(Ordering::Relaxed) & bit == 0 {
+        WARNED.fetch_or(bit, Ordering::Relaxed);
+        eprintln!(
+            "[i1122] PREFILL_USE_METAL_TENSOR_ZEROCOPY admits site '{}' but its \
+             weight has no zerocopy cache (handle missing from the construction \
+             cache list) — falling through to simdgroup. This measurement is NOT \
+             exercising the zero-copy path at this site.",
+            site.name()
+        );
+    }
+}
+
 /// Diagnostic switch: make [`TernaryDeltanetGpuForward::prefill`] apply the
 /// layer input-norm and post-attention norm with P sequential
 /// [`RmsNormCubeCL`] calls (the kernel the decode path uses) instead of one
@@ -3492,6 +3514,19 @@ impl TernaryDeltanetGpuForward {
                 cache_one(&mut lh.out_proj);
                 cache_one(&mut lh.gate_up_proj);
                 cache_one(&mut lh.down_proj);
+                // i1122 (2026-10-25): the PREFILL dispatches read the SPLIT
+                // handles (gate_proj/up_proj at the FfnGate/FfnUp sites,
+                // in_proj_qkv/z/a/b at the GDN sites) — the fused handles
+                // above are different TernaryHandles (from_two_weights),
+                // so an un-split cache list left every site except
+                // out_proj/down_proj silently falling through to simdgroup
+                // (gate1's n=0 green-zero, Bench 998's partial engagement).
+                cache_one(&mut lh.in_proj_qkv);
+                cache_one(&mut lh.in_proj_z);
+                cache_one(&mut lh.in_proj_a);
+                cache_one(&mut lh.in_proj_b);
+                cache_one(&mut lh.gate_proj);
+                cache_one(&mut lh.up_proj);
                 if let Some(ref mut h) = lh.attn_wq {
                     cache_one(h);
                 }
@@ -6531,17 +6566,26 @@ impl TernaryDeltanetGpuForward {
         #[cfg(all(feature = "metal_tensor_gemm", target_os = "macos"))]
         if PREFILL_USE_METAL_TENSOR_ZEROCOPY.load(std::sync::atomic::Ordering::Relaxed)
             && site_admits(site)
-            && let (Some(gemm), Some(cache)) = (&self.metal_zerocopy_gemm, &w.zerocopy_cache)
         {
-            let t0 = (PREFILL_SITE_TIMING_ARMED.load(std::sync::atomic::Ordering::Relaxed))
-                .then(std::time::Instant::now);
-            if let Err(e) = gemm.dispatch(client, cache, w, input, output, p) {
-                eprintln!("[Issue 663 T5] zero-copy dispatch failed ({e}); falling through");
-            } else {
-                if let Some(t0) = t0 {
-                    prefill_site_timing_record(site, t0.elapsed());
+            // i1122 (2026-10-25): a flagged+admitted site with NO cache is a
+            // mis-configured A/B measuring simdgroup twice — the exact silent
+            // class Issue 727 H3 fixed for the host-round-trip path. Warn once
+            // per site, then fall through (behavior unchanged).
+            match (&self.metal_zerocopy_gemm, &w.zerocopy_cache) {
+                (Some(gemm), Some(cache)) => {
+                    let t0 = (PREFILL_SITE_TIMING_ARMED.load(std::sync::atomic::Ordering::Relaxed))
+                        .then(std::time::Instant::now);
+                    if let Err(e) = gemm.dispatch(client, cache, w, input, output, p) {
+                        eprintln!("[Issue 663 T5] zero-copy dispatch failed ({e}); falling through");
+                    } else {
+                        if let Some(t0) = t0 {
+                            prefill_site_timing_record(site, t0.elapsed());
+                        }
+                        return;
+                    }
                 }
-                return;
+                (Some(_), None) => warn_zerocopy_cache_missing_once(site),
+                (None, _) => {}
             }
         }
 
