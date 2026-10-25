@@ -118,7 +118,7 @@ fn score_plain(
 /// Score the eval set on a generic quantized-cache backend through the
 /// ternary mirror path. The GDN state resets per chunk beside the backend.
 #[allow(clippy::too_many_arguments)]
-fn score_quantized<C: QuantizedKVCache>(
+fn score_quantized<C: QuantizedKVCache + Send>(
     families: &[Family],
     x: &mut [f32],
     weights: &riir_infer_core::deltanet::ternary_weights::QwenDeltaNetTernaryWeights,

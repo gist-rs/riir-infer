@@ -718,6 +718,7 @@ mod tests {
                 &mut pctx_c,
                 &mut logits_chunk,
                 None,
+                None,
             );
         }
 
