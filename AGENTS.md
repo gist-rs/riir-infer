@@ -96,9 +96,7 @@ K, and collapses under the derived-magnitude bias overlay — the
 full-overlay promotion REFUSED, opt-in only, T4.2 owns the verdict
 write-up — the hiddennorm ablation at L=15 retrieves 1.000 at every K
 including the mass arm's one loss (K=0.0625): the retrieval dominance
-is the mid-layer placement, not the mass arm); remaining planned work: T3.5 (league random-K census),
-T4.1–T4.3, T2.4 (GPU graphs), T1.6 (Metal), and the CLEAN GPU kernel
-layer migration.
+is the mid-layer placement, not the mass arm); remaining planned work: T3.5 (league random-K census), T4.1 (measured TTFT-vs-K cells — the break-even half is DONE, bench 891: ceiling ~1.5–1.8× at K≤0.25, attention ~linear in p so the prunable share never grows with context; the T2.4 vehicle priced and owner-gated), T2.4 (GPU graphs — priced, owner call), T1.6 (Metal), and the CLEAN GPU kernel layer migration.
 
 ## Build Commands
 
