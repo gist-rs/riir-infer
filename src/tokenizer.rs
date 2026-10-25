@@ -273,9 +273,18 @@ pub struct BpeTokenizer {
     /// Token types: 1=normal, 2=unknown, 3=control, 4=user_defined,
     /// 5=unused, 6=byte.
     token_types: Vec<u32>,
-    /// BPE merge ranks: `(token1, token2) → rank`.
-    /// Lower rank = higher priority (applied first).
-    merge_ranks: HashMap<(String, String), usize>,
+    /// BPE merge ranks keyed by the PACKED token-id pair
+    /// `(left_id << 32) | right_id` — the bbtree inline-key shape (the
+    /// workspace distill Research 322 / riir-infer Issue 1118 Finding 1):
+    /// one fixed 8-byte key, zero per-probe allocation, no heap-string
+    /// hashing. Lower rank = higher priority (applied first). The GGUF
+    /// merges list is the string wire format; it is translated through the
+    /// just-loaded vocab once at load (cold path). A merge whose parts are
+    /// missing from the vocab is skipped: merge rules are defined over
+    /// vocab token pairs, so such a rule can never fire in either keying —
+    /// the skip is what keeps the id-keyed probe exactly equivalent to the
+    /// old `(String, String)` map (G1 gate: bit-identical token output).
+    merge_ranks: HashMap<u64, usize>,
     /// GPT-2 standard byte → unicode character mapping.
     byte_to_unicode: HashMap<u8, String>,
     /// Inverse: unicode character → byte.
@@ -354,7 +363,8 @@ impl BpeTokenizer {
             .and_then(|v| v.as_array())
             .context("BpeTokenizer: missing 'tokenizer.ggml.merges' metadata")?;
 
-        let mut merge_ranks = HashMap::with_capacity(merges_arr.len());
+        let mut merge_ranks: HashMap<u64, usize> = HashMap::with_capacity(merges_arr.len());
+        let mut merges_skipped = 0usize;
         for (rank, val) in merges_arr.iter().enumerate() {
             let merge_str = val
                 .as_str()
@@ -363,10 +373,24 @@ impl BpeTokenizer {
             // Split on the first space only — token strings in byte-to-unicode
             // space never contain literal spaces (space byte 0x20 maps to U+0100).
             if let Some(pos) = merge_str.find(' ') {
-                let left = merge_str[..pos].to_string();
-                let right = merge_str[pos + 1..].to_string();
-                merge_ranks.insert((left, right), rank);
+                let left = &merge_str[..pos];
+                let right = &merge_str[pos + 1..];
+                // Translate to the packed id pair while the vocab is complete;
+                // borrow, don't own — the string list is never retained.
+                if let (Some(&li), Some(&ri)) = (vocab.get(left), vocab.get(right)) {
+                    let key = ((li as u64) << 32) | ri as u64;
+                    merge_ranks.insert(key, rank);
+                } else {
+                    merges_skipped += 1;
+                }
             }
+        }
+        if merges_skipped > 0 {
+            // A valid gpt2 GGUF has none of these; a burst names the broken
+            // vocab instead of silently narrowing the merge table.
+            log::warn!(
+                "BpeTokenizer: {merges_skipped} merges name tokens missing from the vocab — skipped (they could never fire)"
+            );
         }
 
         // ── Build GPT-2 byte-to-unicode mapping ───────────────────────
@@ -397,6 +421,40 @@ impl BpeTokenizer {
             special,
             max_digit_run,
         })
+    }
+
+    /// Doc-hidden test seam (Issue 1118 G4): builds a tokenizer from plain
+    /// parts — no GGUF file — through the SAME merge-translation semantics
+    /// as [`Self::from_gguf`] (string pairs → packed id keys, missing-vocab
+    /// pairs skipped). Lets the allocation gate own its process-global
+    /// counting allocator without loading a 6.7 GB model.
+    #[doc(hidden)]
+    pub fn from_parts_for_test(vocab: Vec<String>, merges: &[(&str, &str)]) -> Self {
+        let mut map: HashMap<String, usize> = HashMap::with_capacity(vocab.len());
+        for (id, s) in vocab.iter().enumerate() {
+            map.insert(s.clone(), id);
+        }
+        let mut merge_ranks: HashMap<u64, usize> = HashMap::with_capacity(merges.len());
+        for (rank, (l, r)) in merges.iter().enumerate() {
+            if let (Some(&li), Some(&ri)) = (map.get(*l), map.get(*r)) {
+                merge_ranks.insert(((li as u64) << 32) | ri as u64, rank);
+            }
+        }
+        let (byte_to_unicode, unicode_to_byte) = Self::build_byte_to_unicode();
+        let token_types = vec![1u32; vocab.len()];
+        let special = SpecialTokenMatcher::from_types(&token_types, &vocab);
+        Self {
+            vocab: map,
+            id_to_token: vocab,
+            token_types,
+            merge_ranks,
+            byte_to_unicode,
+            unicode_to_byte,
+            bos_id: 0,
+            eos_id: 1,
+            special,
+            max_digit_run: 1,
+        }
     }
 
     /// Build the GPT-2 standard byte-to-unicode mapping.
@@ -513,18 +571,27 @@ impl BpeTokenizer {
 
         // Convert bytes to GPT-2 unicode representation, stored in a single
         // String. Token boundaries are tracked as (start, end) byte offsets
-        // into `unicode_str` — merging is O(1) (just extend the end).
+        // into `unicode_str` — merging is O(1) (just extend the end) — plus
+        // each symbol's vocab id, which is what the merge table is keyed by
+        // (Issue 1118 Finding 1: the id pair probes a packed 8-byte key with
+        // zero allocation; the old shape allocated two heap Strings per
+        // adjacent pair per merge iteration).
+        const NO_ID: u32 = u32::MAX;
         let mut unicode_str = String::with_capacity(bytes.len() * 2);
-        let mut word: Vec<(usize, usize)> = Vec::with_capacity(bytes.len());
+        let mut word: Vec<(usize, usize, u32)> = Vec::with_capacity(bytes.len());
 
         for &b in bytes {
             let start = unicode_str.len();
             unicode_str.push_str(&self.byte_to_unicode[&b]);
-            word.push((start, unicode_str.len()));
+            let id = self
+                .vocab
+                .get(&unicode_str[start..])
+                .map_or(NO_ID, |&v| v as u32);
+            word.push((start, unicode_str.len(), id));
         }
 
         if word.len() <= 1 {
-            let (s, e) = word[0];
+            let (s, e, _) = word[0];
             return vec![
                 self.vocab
                     .get(&unicode_str[s..e])
@@ -534,20 +601,21 @@ impl BpeTokenizer {
         }
 
         // BPE merge loop: repeatedly merge the pair with the lowest rank.
+        // Probes are allocation-free: the packed id pair is built in
+        // registers. A NO_ID symbol skips the probe — equivalent to the
+        // string keying, because a merge rule is defined over vocab token
+        // pairs, so a non-vocab symbol string could never match one.
         loop {
             let mut min_rank = usize::MAX;
             let mut min_idx = None;
 
             for i in 0..word.len() - 1 {
-                let left = &unicode_str[word[i].0..word[i].1];
-                let right = &unicode_str[word[i + 1].0..word[i + 1].1];
-                // Construct key for merge_ranks lookup. This allocates two
-                // Strings per pair per iteration — acceptable for the BPE
-                // inner loop (chunks are typically < 20 bytes).
-                //
-                // A future optimization could use `HashMap<(usize, usize), usize>`
-                // keyed by token IDs to avoid allocation.
-                let key = (left.to_string(), right.to_string());
+                let li = word[i].2;
+                let ri = word[i + 1].2;
+                if li == NO_ID || ri == NO_ID {
+                    continue;
+                }
+                let key = ((li as u64) << 32) | ri as u64;
                 if let Some(&rank) = self.merge_ranks.get(&key)
                     && rank < min_rank
                 {
@@ -559,8 +627,19 @@ impl BpeTokenizer {
             match min_idx {
                 None => break,
                 Some(idx) => {
-                    // Merge: extend the left token's end to include the right.
-                    word[idx].1 = word[idx + 1].1;
+                    // Merge: extend the left token's end to include the right
+                    // and refresh its id — one vocab lookup per merge (merges
+                    // are rare next to probes). The merged string is a vocab
+                    // token by construction (the merge rule produced it);
+                    // NO_ID keeps a degenerate vocab unmergeable, which the
+                    // string keying also effectively did (its key could never
+                    // match a non-vocab string).
+                    let end = word[idx + 1].1;
+                    word[idx].1 = end;
+                    word[idx].2 = self
+                        .vocab
+                        .get(&unicode_str[word[idx].0..end])
+                        .map_or(NO_ID, |&v| v as u32);
                     word.remove(idx + 1);
                 }
             }
@@ -568,7 +647,7 @@ impl BpeTokenizer {
 
         // Look up final tokens in vocabulary.
         word.iter()
-            .map(|&(s, e)| {
+            .map(|&(s, e, _)| {
                 self.vocab
                     .get(&unicode_str[s..e])
                     .copied()
@@ -634,6 +713,23 @@ impl BpeTokenizer {
 
     /// Find the unknown token ID (token type 2), defaulting to 0.
     #[inline]
+    /// Doc-hidden test seam: the G1 parity gate's reference needs the SAME
+    /// unk fallback as production.
+    #[doc(hidden)]
+    pub fn unk_for_test(&self) -> usize {
+        self.unk_id()
+    }
+
+    /// Doc-hidden test seam: the G1 parity gate's reference needs the SAME
+    /// byte→unicode table as production — a reimplementation that drifts on
+    /// ANY byte silently changes the reference's symbol strings (measured:
+    /// a test-side copy missing the Latin-1 printable ranges diverged the
+    /// reference on the first multilingual input).
+    #[doc(hidden)]
+    pub fn byte_table_for_test() -> (HashMap<u8, String>, HashMap<String, u8>) {
+        Self::build_byte_to_unicode()
+    }
+
     fn unk_id(&self) -> usize {
         self.token_types.iter().position(|&t| t == 2).unwrap_or(0)
     }
@@ -1345,6 +1441,14 @@ impl SentencePieceGgufTokenizer {
 /// ```
 ///
 /// Rules are tried in order at each position; the first matching rule wins.
+/// Doc-hidden test seam: the G1 parity gate's reference encoder runs the
+/// SAME pretokenizer as production (Issue 1118 Finding 1) — the seam keeps
+/// the reference honest without making the rule a public API.
+#[doc(hidden)]
+pub fn gpt2_pretokenize_for_test(text: &str, max_digit_run: usize) -> Vec<&str> {
+    gpt2_pretokenize(text, max_digit_run)
+}
+
 fn gpt2_pretokenize(text: &str, max_digit_run: usize) -> Vec<&str> {
     // Build (byte_offset, char) pairs for O(1) byte-offset lookup.
     let chars: Vec<(usize, char)> = text.char_indices().collect();
@@ -1566,5 +1670,225 @@ mod digit_run_tests {
             gpt2_pretokenize("key 42980.", 1),
             vec!["key", " ", "4", "2", "9", "8", "0", "."]
         );
+    }
+}
+
+#[cfg(test)]
+mod bpe_idpair_tests {
+    //! Issue 1118 Finding 1 — the packed id-pair merge table. The reference
+    //! in each test is a NAIVE string-keyed BPE (the old `(String, String)`
+    //! shape) built from the SAME vocab + merges: the two keyings must
+    //! produce identical token ids on every input, because a merge rule is
+    //! defined over vocab token pairs and the first-min-rank scan is
+    //! unchanged.
+
+    use super::*;
+
+    /// A test-only constructor: builds the tokenizer from the same parts
+    /// `from_gguf` assembles (no GGUF file needed).
+    fn tok_from(vocab: &[&str], token_types: &[u32], merges: &[(&str, &str)]) -> BpeTokenizer {
+        let mut map = HashMap::with_capacity(vocab.len());
+        let mut id_to_token = Vec::with_capacity(vocab.len());
+        for (id, s) in vocab.iter().enumerate() {
+            map.insert((*s).to_string(), id);
+            id_to_token.push((*s).to_string());
+        }
+        let mut merge_ranks = HashMap::with_capacity(merges.len());
+        for (rank, (l, r)) in merges.iter().enumerate() {
+            if let (Some(&li), Some(&ri)) = (map.get(*l), map.get(*r)) {
+                merge_ranks.insert(((li as u64) << 32) | ri as u64, rank);
+            }
+        }
+        let (byte_to_unicode, unicode_to_byte) = BpeTokenizer::build_byte_to_unicode();
+        let special = SpecialTokenMatcher::from_types(token_types, &id_to_token);
+        BpeTokenizer {
+            vocab: map,
+            id_to_token,
+            token_types: token_types.to_vec(),
+            merge_ranks,
+            byte_to_unicode,
+            unicode_to_byte,
+            bos_id: 0,
+            eos_id: 1,
+            special,
+            max_digit_run: 1,
+        }
+    }
+
+    /// The OLD string-keyed merge, verbatim semantics: adjacency strings,
+    /// two-String key per probe, strict `<` first-min scan.
+    fn reference_encode(t: &BpeTokenizer, chunk: &str) -> Vec<usize> {
+        let bytes = chunk.as_bytes();
+        if bytes.is_empty() {
+            return Vec::new();
+        }
+        let mut unicode_str = String::with_capacity(bytes.len() * 2);
+        let mut word: Vec<(usize, usize)> = Vec::with_capacity(bytes.len());
+        for &b in bytes {
+            let start = unicode_str.len();
+            unicode_str.push_str(&t.byte_to_unicode[&b]);
+            word.push((start, unicode_str.len()));
+        }
+        if word.len() <= 1 {
+            let (s, e) = word[0];
+            return vec![
+                t.vocab
+                    .get(&unicode_str[s..e])
+                    .copied()
+                    .unwrap_or_else(|| t.unk_id()),
+            ];
+        }
+        // The reference keeps its OWN string-keyed table rebuilt from the
+        // id table (the production struct no longer carries one).
+        let mut ranks: HashMap<(String, String), usize> = HashMap::new();
+        for (&key, &rank) in &t.merge_ranks {
+            let li = (key >> 32) as usize;
+            let ri = (key & (u32::MAX as u64)) as usize;
+            let l = t.id_to_token[li].clone();
+            let r = t.id_to_token[ri].clone();
+            ranks.insert((l, r), rank);
+        }
+        loop {
+            let mut min_rank = usize::MAX;
+            let mut min_idx = None;
+            for i in 0..word.len() - 1 {
+                let left = &unicode_str[word[i].0..word[i].1];
+                let right = &unicode_str[word[i + 1].0..word[i + 1].1];
+                let key = (left.to_string(), right.to_string());
+                if let Some(&rank) = ranks.get(&key)
+                    && rank < min_rank
+                {
+                    min_rank = rank;
+                    min_idx = Some(i);
+                }
+            }
+            match min_idx {
+                None => break,
+                Some(idx) => {
+                    word[idx].1 = word[idx + 1].1;
+                    word.remove(idx + 1);
+                }
+            }
+        }
+        word.iter()
+            .map(|&(s, e)| {
+                t.vocab
+                    .get(&unicode_str[s..e])
+                    .copied()
+                    .unwrap_or_else(|| t.unk_id())
+            })
+            .collect()
+    }
+
+    /// The GPT-2 byte→unicode spelling of a byte slice (test-side helper so
+    /// vocab entries can name exact byte tokens).
+    fn ustr(s: &[u8]) -> String {
+        let (b2u, _) = BpeTokenizer::build_byte_to_unicode();
+        s.iter().map(|b| b2u[b].as_str()).collect()
+    }
+
+    fn bpe_vocab() -> Vec<String> {
+        // All 256 byte tokens (as the GPT-2 spelling), then merged tokens.
+        let (b2u, _) = BpeTokenizer::build_byte_to_unicode();
+        let mut v: Vec<String> = (0u8..=255).map(|b| b2u[&b].clone()).collect();
+        v.extend([
+            ustr(b"t"),
+            ustr(b"h"),
+            ustr(b"e"),
+            ustr(b"th"),
+            ustr(b"he"),
+            ustr(b"the"),
+            ustr(b" "),
+            ustr(b" "),
+        ]);
+        v
+    }
+
+    #[test]
+    fn idpair_matches_string_reference_on_adversarial_chunks() {
+        let mut vocab = bpe_vocab();
+        // Duplicates to exercise the vocab insert-overwrite path.
+        vocab.push(ustr(b"th"));
+        let types = vec![1u32; vocab.len()];
+        let (ut, uh, uth, ue, usp) = (ustr(b"t"), ustr(b"h"), ustr(b"th"), ustr(b"e"), ustr(b" "));
+        let merges = [
+            (ut.as_str(), uh.as_str()),
+            (uh.as_str(), ue.as_str()),
+            (uth.as_str(), ue.as_str()),
+            (ut.as_str(), usp.as_str()),
+        ];
+        let t = tok_from(
+            &vocab.iter().map(String::as_str).collect::<Vec<_>>(),
+            &types,
+            &merges,
+        );
+
+        let chunks = [
+            "the",
+            "thethe",
+            "thethe the",
+            "t h e the",
+            "ttthhheee",
+            "he",
+            "e",
+            "the\u{FFFD}", // NO_ID path: a char whose bytes map outside vocab
+            "",
+            "t",
+        ];
+        for chunk in chunks {
+            assert_eq!(
+                t.bpe_encode_chunk(chunk),
+                reference_encode(&t, chunk),
+                "id-pair diverged from the string reference on {chunk:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn rank_ties_resolve_leftmost_in_both_keyings() {
+        let vocab = bpe_vocab();
+        let types = vec![1u32; vocab.len()];
+        // Two DIFFERENT pairs sharing ranks — the strict `<` scan must
+        // pick the same pairs in both keyings.
+        let (ut, uh, ue) = (ustr(b"t"), ustr(b"h"), ustr(b"e"));
+        let merges = [(ut.as_str(), uh.as_str()), (uh.as_str(), ue.as_str())];
+        let t = tok_from(
+            &vocab.iter().map(String::as_str).collect::<Vec<_>>(),
+            &types,
+            &merges,
+        );
+        assert_eq!(t.bpe_encode_chunk("het"), reference_encode(&t, "het"));
+        assert_eq!(t.bpe_encode_chunk("hethe"), reference_encode(&t, "hethe"));
+    }
+
+    #[test]
+    fn long_run_output_matches_and_terminates() {
+        let vocab = bpe_vocab();
+        let types = vec![1u32; vocab.len()];
+        let (ut, uh) = (ustr(b"t"), ustr(b"h"));
+        let merges = [(ut.as_str(), uh.as_str())];
+        let t = tok_from(
+            &vocab.iter().map(String::as_str).collect::<Vec<_>>(),
+            &types,
+            &merges,
+        );
+        let run = "th".repeat(200);
+        assert_eq!(t.bpe_encode_chunk(&run), reference_encode(&t, &run));
+    }
+
+    #[test]
+    fn merge_whose_part_is_missing_from_vocab_never_fires() {
+        // No merges at all: every byte stays its own token id, and the
+        // table stays empty (the load path would skip missing-vocab pairs).
+        let vocab = bpe_vocab();
+        let types = vec![1u32; vocab.len()];
+        let t = tok_from(
+            &vocab.iter().map(String::as_str).collect::<Vec<_>>(),
+            &types,
+            &[],
+        );
+        let ids = t.bpe_encode_chunk("ab");
+        assert_eq!(ids.len(), 2);
+        assert_eq!(t.merge_ranks.len(), 0);
     }
 }
