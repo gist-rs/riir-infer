@@ -1,18 +1,18 @@
 # Plan 623: Multi-host inference lane — layer-range stages, activation frames, TCP→RDMA transport, TP, speculative fill
 
 **Status:** Proposed — 2026-10-22. Phase 0 is decision-free (measurement only) and may
-start once Issue 1109 T0 (seal2 reachable) is done; Phase 1 substrate is decision-free
+start once Issue 1109 T0 (bmo reachable) is done; Phase 1 substrate is decision-free
 (riir-infer-core, no deps); Phase 2+ waits on [Proposal 042](../.proposals/042_multi_mac_distributed_inference.md) D1 (crate home); Phase 3+ on D2 (RDMA enabled).
 **Date:** 2026-10-22
 **Research:** [Research 015](../.research/015_Multi_Host_Inference_exo_llamacpp_MLX_Distill.md)
 **Target:** `src/` (LayerRange + ActivationFrame + state serializer), `crates/riir-infer-gpu/` (range-forward on the Metal/CubeCL paths), `crates/riir-infer-dist/` (D1-a; transport + stage runtime + planner). Cargo feature `multi_host` (opt-in, never default) on core; the dist crate is opt-in as a whole.
-**Hardware:** seal1 (M5 Ultra, 96 GiB, macOS 27.0.1) ⇄ seal2 (`Mac17,15`) — one TB5 cable @ 80 Gb/s + tailnet (seal1 `100.111.186.76`, seal2 `100.100.117.44`).
+**Hardware:** amo (M5 Ultra, 96 GiB, macOS 27.0.1) ⇄ bmo (`Mac17,15`) — one TB5 cable @ 80 Gb/s + tailnet (amo `100.111.186.76`, bmo `100.100.117.44`).
 
 ---
 
 ## Goal
 
-Run one model across seal1 + seal2 from pure Rust, with output byte-identical to the
+Run one model across amo + bmo from pure Rust, with output byte-identical to the
 1-box riir-infer path (PP) or replay-deterministic (TP), and beat exo / llama.cpp RPC /
 mlx-lm on the Proposal-042 scoreboard **measured on the same two boxes**.
 

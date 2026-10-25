@@ -1,17 +1,17 @@
-# Proposal 042 — Multi-Mac distributed inference: seal1 + seal2 over Thunderbolt 5 / Tailscale, on par with or beating exo / llama.cpp RPC / MLX
+# Proposal 042 — Multi-Mac distributed inference: amo + bmo over Thunderbolt 5 / Tailscale, on par with or beating exo / llama.cpp RPC / MLX
 
 > **Status:** PROPOSED — filed 2026-10-22 (owner directive: "if exo, llama.cpp can do it,
 > we must be able to do it too — both riir-train and infer (focus on infer, separate
 > plan for train later) … aim to on par or beat them all"). Owner decisions D1–D3 below
 > are OPEN; Plan 623 Phase 0 (measure the incumbents) is decision-free and may start.
 **Branch:** `develop` · **Distill:** [Research 015](../.research/015_Multi_Host_Inference_exo_llamacpp_MLX_Distill.md) (exo `bc412e2`, llama.cpp `19ab5a5`, mlx `c6abf0d`, mlx-lm `0d4d3d0`, all under `.raw/`)
-**Execution:** [Plan 623](../.plans/623_multi_host_pipeline_inference_lane.md) · **Hardware bring-up + seal2 routing:** [Issue 1109](../.issues/1109_seal2_cluster_bringup_and_routing.md)
+**Execution:** [Plan 623](../.plans/623_multi_host_pipeline_inference_lane.md) · **Hardware bring-up + bmo routing:** [Issue 1109](../.issues/1109_bmo_cluster_bringup_and_routing.md)
 **Training half:** DEFERRED to a separate riir-train plan (owner: "separate plan for train later") — see §Train.
 
 ## TL;DR
 
-Two Mac Studio M5 Ultra boxes (`seal1` = this box, 96 GiB; `seal2` = `Mac17,15`, RAM
-unmeasured) are cabled by ONE Thunderbolt-5 link (negotiated 80 Gb/s, measured on seal1
+Two Mac Studio M5 Ultra boxes (`amo` = this box, 96 GiB; `bmo` = `Mac17,15`, RAM
+unmeasured) are cabled by ONE Thunderbolt-5 link (negotiated 80 Gb/s, measured on amo
 2026-10-22) and also share a tailnet. Every incumbent that pools two Macs (exo, llama.cpp
 RPC, mlx-lm sharded) does it with one of two physics:
 
@@ -78,7 +78,7 @@ and both boxes' state — a latency number without box state is not a measuremen
   - (b) substrate-only here (LayerRange + ActivationFrame + state serializer), transport
     in riir-ai on `riir-net::BinaryTransport`. Cost: riir-infer cannot self-test the lane;
     every public consumer (reflex/instinct) inherits riir-ai.
-- **D2 — RDMA enablement.** `rdma_ctl status` = `disabled` on seal1 (2026-10-22); enabling
+- **D2 — RDMA enablement.** `rdma_ctl status` = `disabled` on amo (2026-10-22); enabling
   needs `rdma_ctl enable` from the **Recovery-mode Terminal** on BOTH boxes + reboot, and
   incumbents require the Thunderbolt Bridge OFF on the RDMA port. A physical, owner-only
   act. Phases 0–2 run on TCP and do not need it; Phase 3–4 do.
@@ -86,7 +86,7 @@ and both boxes' state — a latency number without box state is not a measuremen
   incumbents + riir-infer's CubeCL gemma2 path — the apples-to-apples row); (ii) the
   **league Bonsai/Qwen3.5-hybrid ternary** posture (riir-infer's own moat; llama.cpp
   `qwen35` arch runs it, MLX/exo arm only if they load it); (iii) one **capacity row** —
-  a model that does NOT fit 96 GiB at its quant, chosen after seal2's RAM is measured.
+  a model that does NOT fit 96 GiB at its quant, chosen after bmo's RAM is measured.
 
 ## Train (deferred, recorded so it is not lost)
 
@@ -96,15 +96,15 @@ calibration/capture (activation capture, act-aware fits) and the riir-train Issu
 teacher lane if it outgrows one box. A separate riir-train plan is cut AFTER Plan 623
 Phase 2 lands (the transport must exist and be measured first).
 
-## seal2 and riir-rethink's open issues
+## bmo and riir-rethink's open issues
 
-Asked: "can we use seal2's GPU to solve all issues in riir-rethink/.issues?" — measured
-answer in [Issue 1109 §Routing](../.issues/1109_seal2_cluster_bringup_and_routing.md):
-seal2 directly unblocks the **hardware-gated** items (016 and 025 were "M5-Ultra-gated";
+Asked: "can we use bmo's GPU to solve all issues in riir-rethink/.issues?" — measured
+answer in [Issue 1109 §Routing](../.issues/1109_bmo_cluster_bringup_and_routing.md):
+bmo directly unblocks the **hardware-gated** items (016 and 025 were "M5-Ultra-gated";
 the hardware now exists — the remaining gate is the owner's serve/deploy call, which no
 GPU can make), can host the pplx rig for 035 T4 and the 031 T4 probe, and is the natural
 second node for 032's teacher lane via the deferred train plan. 024 and 034 are **not
-GPU-blocked** (owner gates / a dead candidate lane) — seal2 does not move them.
+GPU-blocked** (owner gates / a dead candidate lane) — bmo does not move them.
 
 ## Risks
 

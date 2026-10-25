@@ -1,6 +1,6 @@
 # Research 015 — Multi-host LLM inference: exo, llama.cpp RPC, MLX distributed — distill + beat-levers
 
-**Date:** 2026-10-22 · **Filed for:** [Proposal 042](../.proposals/042_multi_mac_distributed_inference.md) / [Plan 623](../.plans/623_multi_host_pipeline_inference_lane.md) / [Issue 1109](../.issues/1109_seal2_cluster_bringup_and_routing.md)
+**Date:** 2026-10-22 · **Filed for:** [Proposal 042](../.proposals/042_multi_mac_distributed_inference.md) / [Plan 623](../.plans/623_multi_host_pipeline_inference_lane.md) / [Issue 1109](../.issues/1109_bmo_cluster_bringup_and_routing.md)
 **Sources (checked out to `.raw/`, gitignored, shallow):**
 
 | repo | commit | date | licence |
@@ -18,7 +18,7 @@ Jeff Geerling chart images (4× M3 Ultra) and the README claim "up to 1.8× on 2
 magnitude lower latency than ring" (`mlx/docs/src/usage/distributed.rst:200-203`);
 llama.cpp has no RPC/RDMA figure at all (one tuning note: 128 KiB stride best of
 32/64/128/256, `ggml/src/ggml-rpc/transport-apple.cpp:27`). **The baseline is therefore
-something we MEASURE on seal1+seal2 (Plan 623 Phase 0), never a quoted number.**
+something we MEASURE on amo+bmo (Plan 623 Phase 0), never a quoted number.**
 
 ## 1. The three stacks in one table
 
@@ -100,7 +100,7 @@ something we MEASURE on seal1+seal2 (Plan 623 Phase 0), never a quoted number.**
 
 ## 5. Open measurement questions (owned by Plan 623 Phase 0/3)
 
-- Real RTT of a 16 KB message over the TB5 bridge TCP vs RDMA on seal1↔seal2.
+- Real RTT of a 16 KB message over the TB5 bridge TCP vs RDMA on amo↔bmo.
 - Does macOS `librdma` accept an MR over an `MTLBuffer` `.contents()` pointer
   (shared storage)? If not, the floor is one memcpy per side.
 - Single-box decode tok/s for the target models on riir-infer's Metal path vs MLX vs
