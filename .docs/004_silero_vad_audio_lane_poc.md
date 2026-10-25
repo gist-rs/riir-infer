@@ -1,9 +1,9 @@
 # 004 — the silero-vad audio lane PoC (issue 015)
 
-**Status:** PROVISIONAL on the latency figures (loaded box, preflight-refused
-publish; quiet-box re-run owed) · findings and gate verdicts FINAL as of
-2026-10-23 · issue: `.issues/015_fluidaudio_coreml_audio_lane_poc.md` ·
-research: `.research/001_FluidInference_OnDevice_Audio_Stack.md` (F1)
+**Status:** FINAL (latency re-run 2026-10-26, quiet-ish box, preflight PASSED,
+replicated ×2; findings and gate verdicts FINAL as of 2026-10-23) ·
+issue: closed+removed per the noise rule, record = HISTORY row 2026-10-26 +
+this doc · research: `.research/001_FluidInference_OnDevice_Audio_Stack.md` (F1)
 
 The first lane of the audio substrate: **silero-vad** (FluidInference
 `silero-vad-coreml`, Apache-2.0), seated on the shared
@@ -51,7 +51,7 @@ Digest pins (blake3-dir-v1, minted 2026-10-23, never hand-computed):
 | G1 load | **PASS** (both postures) | precompiled (A) + compile-cached (B) paths |
 | G2 synthetic negatives | **PASS** (after a disclosed re-registration) | silence 0.0308 · tone 0.0171 · speech-shaped 0.0425 — all < 0.1, none false-trigger |
 | G2c real-speech positive control | **PASS** | macOS `say` TTS, 19 chunks, **peak 1.0000** — the pipeline (context, state carry, f32 IO) proven end-to-end |
-| G3 latency | **RECORDED, PROVISIONAL** | p50 0.163 ms / p99 0.276 / max 0.388 ms per 256 ms chunk (A); B at parity (0.162/0.242/0.312). RTF ≈ 0.00064 |
+| G3 latency | **PASS, FINAL** | 2026-10-26 quiet-ish re-run, replicated ×2: p50 **0.166 / 0.166**, p99 0.208→0.181 / 0.200→0.175, max 0.260→0.236 / 0.259→0.239 ms per 256 ms chunk (A, run1→run2); B at parity (p50 0.161/0.166). RTF_p50 ≈ 0.00065 → **≈ 1,540× real-time headroom**. The 10-23 provisional p50s (0.163/0.162) reproduce within ~2%; the loaded-box tails (p99 0.276/0.242, max 0.388/0.312) tighten on the quiet box — the tail inflation was box noise, not model variance. Placement verdict unchanged both runs (device=357 ane=0 gpu=0 cpu=357, transitions=0). |
 | G4 feature-gated default-off | **PASS by construction** | clippy −D warnings green at both postures; zero impact on default builds |
 | State-carry determinism | **PASS** | two identical streams from reset are bit-identical |
 
@@ -114,7 +114,15 @@ cargo run --release -p riir-infer-audio --features vad-ane --example vad_timing 
 cargo run --release -p riir-infer-ane --example ane_plan_probe -- <any>.mlmodelc
 ```
 
-Provenance of the provisional numbers: `power=AC Power load=8.49
-swap=2.38M canary=skipped powermode=0(auto)` (bench_preflight REFUSED a
-published number — plan459 sweep resident at ~800% CPU). Quiet-box re-run
-owed before any league-style citation.
+Provenance of the 2026-10-26 final numbers: `power=AC Power load=2.99→3.12
+swap=6021.94M canary=skipped powermode=0(auto)` — bench_preflight PASSED both
+runs (ceiling 6.0). Disclosed concurrent consumers: the riir-rethink elephant-panel
+capture (MPS/GPU + ~1 core) and ~6 GB swap in use — the VAD path is all-CPU
+(the placement table above), so neither contends with it; the swap warning is
+carried, not hidden. The canary was skipped (the laya-riir-metal example not
+built on this box); powermode=0 (Automatic) is recorded by the preflight's own
+probe, which is the load-bearing check here.
+
+Historical provenance of the 10-23 provisional numbers: `power=AC Power
+load=8.49 swap=2.38M canary=skipped powermode=0(auto)` (bench_preflight
+REFUSED a published number — plan459 sweep resident at ~800% CPU).
