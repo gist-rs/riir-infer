@@ -1,6 +1,7 @@
 # bbtree-class ordered-structure findings — BPE merge-rank lookup allocation (audit; GOAT-gated tasks)
 
-**Status:** OPEN — findings filed by the bbtree distill session (workspace distill Research 322); unclaimed; every fix behind its own GOAT gate
+**Status:** OPEN — findings filed by the bbtree distill session (workspace distill Research 322); Finding 1 IN PROGRESS.
+**Claimed:** zed-amo-glm5, 1769426000, expires 2026-10-26T20:05:00Z — Finding 1 (the BPE merge-rank id-pair re-key) behind its own GOAT gate; the plan: G1/G3/G4 first, G2 quiet-box-venue (box currently held by a sibling 16-core precompute — load-disclosed provisional if it cannot wait)
 
 Origin: the cache-conscious ordered-map distill landed in riir-refine (workspace distill Research 322, riir-refine commit `e9444713`), sourced from the bbtree blog + repo (pin below). A 16-repo workspace audit flagged one hot-path finding in this repo. This issue records it as an optimization task; implementation happens LATER, behind its own GOAT gate. Costs below are STATIC ANALYSIS, not measurements — the GOAT gate is what turns the claim into evidence.
 
