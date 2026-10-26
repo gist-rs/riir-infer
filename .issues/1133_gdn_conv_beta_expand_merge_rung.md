@@ -2,6 +2,7 @@
 
 **Status:** MEASURED-NULL, SHIPPED OPT-IN (Bench 905, 2026-10-27 ~02:2x +07) — G1 bit-identical everywhere (kernel-level at 2 geometries + the edge block; real-model walk/logits/stream FNVs EXACT in every window), G2 **2/4 pairs positive (max +0.48%), pooled ≈ 0% ± 0.5% — sign consistency FAILS the 899 bar; NOT promoted, the T4 staging list gains no row**. Ships `RIIR_GDN_CONV_MERGE=1` default OFF with the record (the 898 disposition shape: the null is kept so the shape is never re-tried blind) + a named re-open trigger (the 512-thread-block variant) that only fires if the ladder budget is still short after T3/T6 land. The mechanism: the ~62 µs/token dispatch saving is offset by the source-block occupancy loss the conv→expand dependency forces (smem staging is the only non-grid-barrier shape; 16 blocks/4096 threads vs the incumbent expand's 72/18432). Dev-iteration lessons (the −25% element-walk serialization; the negative-count clamp) recorded in the bench. Claim scope DISCHARGED for execution; the file stays as the record.
 **Claimed:** shikuwa-4090-i1133convmerge, 1793032572, expires 2026-10-28T16:36:12Z
+**Lease:** work COMPLETE — the rung shipped + measured (Bench 905) + recorded in the same session; the lease line above is kept for the claim-ledger trail and retires at expiry (nothing remains to coordinate).
 
 ## The finding (arithmetic from measured records, no new instrument)
 
