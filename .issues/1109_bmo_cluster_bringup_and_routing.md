@@ -80,6 +80,11 @@
   raw-IP transport, the tailnet fallback is now sub-40 ms direct instead of
   DERP-relayed. (bmo netcheck printed one cosmetic `routerIP/FetchRIB: sysctl:
   cannot allocate memory` line; re-read only if netcheck later fails to report.)
+  **TAILNET ARM MEASURED 2026-10-26 ~23:00 ([Bench 901](../.benchmarks/901_plan623_t02_tailnet_arm.md)):
+  amo⇄bmo over 100.x direct = 0.025–0.028 GB/s, RTT ~9.4 ms @4B — ~340× bandwidth /
+  ~100× RTT worse than the TB5 bridge. VERDICT: tailnet = control-plane/relay-join
+  only, NEVER the activation data plane (3 RTTs ≈ 30 ms > the whole 17 ms decode
+  step). T0.2 is now FULLY DONE both arms.**
 - [x] **T3:** Workspace on bmo: clone the repos Plan 623 needs (`riir-infer`, `katgpt-rs`),
   same `rust-toolchain.toml`; rsync the D3 model artifacts once, BLAKE3-verified.
   **DONE 2026-10-26 ~18:30 (zed-amo):** rustup on bmo with the PINNED toolchain
@@ -97,6 +102,14 @@
   (`/Users/katopz/git/riir-ai/.raw/prismml-llama.cpp`, PQ2_0 in its loader) is the
   Bonsai-capable incumbent — T0.4's 2-box rows need it built `-DGGML_RPC=ON` on
   BOTH boxes. That is the T0.4 session's first step, recorded there.**
+  **T0.4 llama.cpp-RPC arm EXECUTED 2026-10-26 (~22:00–23:00):** fork built on amo
+  (`-DGGML_RPC=ON -DGGML_BLAS=OFF` — BLAS ON aborts the server on `RMS_NORM`),
+  shipped as a rpath-surgered binary bundle (bmo has NO CLT — no native build, no
+  install_name_tool; all load-command fixes happen on amo then ship). Full table +
+  traps: [Bench 900](../.benchmarks/900_plan623_t04_llamacpp_rpc_2box.md). Headline:
+  **2-box PP over TB5/TCP tg128 48.6 t/s = −20% vs bmo solo 60.9** — the incumbent
+  loses single-stream decode on identical boxes; prefill ≈ free (−2.7%); `-sm tensor`
+  over RPC unsupported (server crash). MLX/exo arms remain open in T0.4.**
 - [ ] **T4 (owner, physical — Proposal 042 D2):** RDMA: `rdma_ctl enable` from Recovery
   Terminal on BOTH, reboot; `ibv_devices` shows `rdma_en*`. Only needed from Plan 623
   Phase 3; TB Bridge must be OFF on the RDMA port (use a second TB cable for the TCP

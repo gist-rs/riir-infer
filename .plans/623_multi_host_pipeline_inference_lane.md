@@ -9,7 +9,7 @@ start once Issue 1109 T0 (bmo reachable) is done; Phase 1 substrate is decision-
 Scope: Phase 1 substrate only (T1.1–T1.4, zero-GPU under the elephant-recapture posture); T1.5's Metal arm stays compile-only this window.
 **Date:** 2026-10-22
 **Research:** [Research 015](../.research/015_Multi_Host_Inference_exo_llamacpp_MLX_Distill.md)
-**Session note 2026-10-26 (zed-amo):** T0/T1/T3 DONE + T0.2 DONE ([Bench 896](../.benchmarks/896_plan623_t02_link_probe.md) — TB5 bridge 8.5–8.6 GB/s both ways, RTT ~94 µs @4 B, PP-hop ≈ 1.3–1.8% of the decode step, TP-over-TCP refuted arithmetically). RPC transport smoke over the bridge PASSED (handshake + set_tensor green). ⛔ T0.4 PREREQUISITE FOUND: the pinned research clone `19ab5a5` REFUSES the Bonsai GGUF (`invalid ggml type 142` — PQ2_0); the Bonsai-capable incumbent is the league fork `prismml-llama.cpp` @ `prism-b10787-73bfe6c` (`../riir-ai/.raw/prismml-llama.cpp`, PQ2_0 in its loader) — T0.4 starts by building THAT with `-DGGML_RPC=ON` on both boxes.
+**Session note 2026-10-26 (zed-amo):** T0/T1/T3 DONE + T0.2 DONE ([Bench 896](../.benchmarks/896_plan623_t02_link_probe.md) — TB5 bridge 8.5–8.6 GB/s both ways, RTT ~94 µs @4 B, PP-hop ≈ 1.3–1.8% of the decode step, TP-over-TCP refuted arithmetically). RPC transport smoke over the bridge PASSED (handshake + set_tensor green). ⛔ T0.4 PREREQUISITE FOUND: the pinned research clone `19ab5a5` REFUSES the Bonsai GGUF (`invalid ggml type 142` — PQ2_0); the Bonsai-capable incumbent is the league fork `prismml-llama.cpp` @ `prism-b10787-73bfe6c` (`../riir-ai/.raw/prismml-llama.cpp`, PQ2_0 in its loader) — T0.4 starts by building THAT with `-DGGML_RPC=ON` on both boxes. **Session note 2, 2026-10-26 late (zed-amo): T0.4's llama.cpp-RPC arm EXECUTED — [Bench 900](../.benchmarks/900_plan623_t04_llamacpp_rpc_2box.md): solo amo 1012.9/59.1, bmo 1087.5/60.9 (pp512/tg128 t/s); 2-box layer-split 985.1/48.6 = tg −20% vs bmo solo (PP-over-TCP LOSES single-stream decode on identical boxes); `-ts` doesn't reach RPC; `-sm tensor` over RPC crashes (hadamard-sign view nil-buffer). T0.2 tailnet arm DONE — [Bench 901](../.benchmarks/901_plan623_t02_tailnet_arm.md): 0.025–0.028 GB/s, RTT ~9.4 ms = control-plane only. T0.4 remains open ONLY for the MLX/exo arms (weight-format convert caveat); T0.3 awaits a quiet-GPU window (sibling agent load 4–7 today — amo solo tg already carries ~3% load tax).**
 **Target:** `src/` (LayerRange + ActivationFrame + state serializer), `crates/riir-infer-gpu/` (range-forward on the Metal/CubeCL paths), `crates/riir-infer-dist/` (D1-a; transport + stage runtime + planner). Cargo feature `multi_host` (opt-in, never default) on core; the dist crate is opt-in as a whole.
 **Hardware:** amo (M5 Ultra, 96 GiB, macOS 27.0.1) ⇄ bmo (`Mac17,15`) — one TB5 cable @ 80 Gb/s + tailnet (amo `100.111.186.76`, bmo `100.100.117.44`).
 
@@ -52,8 +52,17 @@ mlx-lm on the Proposal-042 scoreboard **measured on the same two boxes**.
   elephant-panel capture holds the MPS GPU ~26 h (until ~10-27); schedule after.**
 - [-] **T0.4** 2-box incumbent arms: llama.cpp RPC (TCP; RDMA after D2), mlx-lm
   `sharded_generate --pipeline` + TP (ring; jaccl after D2), exo (PP + TP). Every metric
-  of the scoreboard; `.benchmarks/` record with both boxes' provenance. **DEFERRED
-  2026-10-26 — the 1109 bmo blocker.**
+  of the scoreboard; `.benchmarks/` record with both boxes' provenance. **llama.cpp-RPC
+  arm DONE 2026-10-26 — [Bench 900](../.benchmarks/900_plan623_t04_llamacpp_rpc_2box.md):
+  prism-b10787 built `-DGGML_RPC=ON -DGGML_BLAS=OFF` on amo, shipped as a binary bundle
+  to bmo (NO CLT/cmake on bmo — rpath+openssl surgery on amo, ship, run); solo rows amo
+  1012.9/59.1, bmo 1087.5/60.9 (pp512/tg128 t/s); **2-box layer-split 985.1/48.6 = tg
+  −20% vs bmo solo** (per-step RPC round trips + pipeline sequencing — TB5/TCP PP LOSES
+  single-stream decode on identical boxes; prefill −2.7% ≈ free); `-ts` does NOT reach
+  the RPC device in this fork (both ts rows stayed amo-MTL, server-side proven);
+  `-sm tensor` over RPC crashes the server (hadamard-sign view → nil buffer assert) —
+  TP-over-RPC N/A in the incumbent. REMAINING: mlx-lm + exo arms (weight-format convert
+  caveat), T0.3 quiet-GPU cells, RDMA rows behind D2.**
 
 ## Phase 1 — Substrate in riir-infer-core (feature `multi_host`, zero new deps)
 
