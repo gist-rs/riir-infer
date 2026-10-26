@@ -108,6 +108,24 @@ the gemma2 seam stays compile-only, and NO new gemma-2-2b execution cells anywhe
 1-box cells, Phase 0/2+ all qwen/bonsai-scoped). The gemma2 ARCHITECTURE lanes that serve
 LIVE products (laya checkpoints, clef-ANE 0.6b) are NOT this retirement — they keep their
 own gates.** Phase 0 deferred (bmo powered off, 1109); Phase 2+ gated on Proposal 042 D1.
+The GLU-fused ternary prefill FFN arm LANDED 2026-10-26 (Issue 1124 T1, the llama.cpp
+#29948 distill — `1320dda`): gate/up weight rows INTERLEAVED in 8-row chunks at
+mirror-build time (`pack_bitplanes_to_q2_interleaved_gate_up` +
+`interleave_gate_up_group_scales`, `prefill_cuda_mma.rs`) so the v10t MMA body runs
+VERBATIM (single accumulator — each m16n8 fragment's row halves are the gate/up dots of
+the SAME hid row; regs=128 local=0, the Bench-895 spill cliff dodged) and SwiGLU is
+applied IN the transposed staging pass from registers (`GEMM_BODY_V10T_GLU_Q8`,
+`gemm_ternary_i8_mma_v6_src.rs`) with the Bench-721 canonical forms in the standalone
+kernel's op order — bit-identical to (v10t pair + standalone SwiGLU) by construction,
+G1 gate 0 bit-diffs ×2 shapes vs the real standalone kernel. Env
+`RIIR_PREFILL_FFN_GLU` ("1"/"true"/"on", DEFAULT OFF; fmt-route packed mirrors +
+`mlp % 128 == 0` posture; the fused path skips the gate/up f32 staging grows + the
+SwiGLU launch — one launch per FFN gate/up pair; failure degradation to the incumbent
+pair path byte-identical). Kernel probe Bench 897 (`.benchmarks/897_issue1124_v10tglu_kernel_probe.md`):
+**1.258× @p2048 / 1.227× @p4096** at the league FFN shapes (m=17408, n=5120). T2 (e2e
+GOAT) runs ONLY through the league runner — the internal battery never reaches
+`dispatch_ffn_block` (the vehicle note in the issue) — armed on the league window;
+T3 mined via refine Batch 287 (`d871a0fc`, Plan 292 / Research 325).
 
 ## Build Commands
 
