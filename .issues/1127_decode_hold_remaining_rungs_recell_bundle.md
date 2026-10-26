@@ -24,6 +24,19 @@ riir-ai Bench 1004 (2026-10-26): the decode hold broke to **0.9730×** (ours 91.
   - the decode hold re-crossing 1.0× itself (Bench 1004 RED);
   - the census line (`RIIR_QUANTIZE_CENSUS=1`) prints free at every scored cell — the zero re-checked each bout.
   Demote the loser either way (the incumbent chains stay as `=0` hatches). ⛔ Owner-gated per the standing handoff law — a measured-positive opt-in never self-promotes.
+  **Window verdict 2026-10-26 (reviewer sub-agent `e510e3e2`; the claude_code
+  verdict channel was auth-unavailable — the Issue-1115-arc fallback):
+  WAIT_NEXT_WINDOW, no ad-hoc bout.** Verified first-hand: the 4090 idle (4%
+  util / 506 MiB) BUT the bundle cannot re-cross the RED cell this window —
+  the re-cross needs +2.71% (91.68 → 94.16) vs the staged arms' +0.6–1.0%
+  decode class (GLU is prefill-side, decode runs the GEMV path; its pp rows
+  already PASS at 1.1907×/1.0546×); the real re-cross levers are T1–T3 (all
+  unimplemented); batching is the league's recorded law (opponent tag
+  `c96baf4abe` #390 pending; tags have fired ~daily); and Bench 1004's own
+  voided pp4096 cell is the demonstrated cost of squeezing a busy day. The
+  window fires on the next opponent scored tag, the next weekly loop cycle,
+  or as soon as T1–T3 rung results exist to ride the same window — whichever
+  comes first.
 - [-] **T5 (Metal-lane int8 consumer — DEFERRED, owned elsewhere).** The m5ultra decode rows run Metal/CubeCL, which has NO int8 consumer at all (`GemvTernaryCubeCL` consumes f32 rows) — the whole fused-rotation+quantize+dp4a posture is CUDA-lane-only, making the Metal int8 consumer question (NEW substrate, not a launch elimination) the real m5ultra decode lever. Recorded as the riir-ai Issue 1113 defense follow-up — do not duplicate here; pick it up in that lane.
 
 ## G1 pins (every rung in this issue)

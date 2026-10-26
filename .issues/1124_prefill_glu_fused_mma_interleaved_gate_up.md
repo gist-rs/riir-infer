@@ -138,7 +138,15 @@ Honest caveats:
   prints the per-layer `[721-trace]` lines when the block dispatches, each
   naming `route=glu|pair` (added 2026-10-26 — the line's presence proves the
   CUDA block ran, the ROUTE marker proves the fused arm engaged; a missed
-  env or posture would otherwise A/B pair-vs-pair silently).
+  env or posture would A/B pair-vs-pair silently). **Window verdict 2026-10-26
+  (independent reviewer sub-agent `e510e3e2` — the request_verdict claude_code
+  channel was auth-unavailable on the box, the documented Issue-1115-arc
+  fallback): WAIT_NEXT_WINDOW.** The re-cell urgency premise fails on
+  arithmetic: the decode re-cross needs +2.71% (91.68 → 94.16) and the only
+  staged decode arm is +0.6–1.0% class (GLU is prefill-side; its pp rows
+  already PASS), so an ad-hoc bout buys a still-RED decode row; batching with
+  the next opponent scored tag (`c96baf4abe` #390, named next-bout candidate)
+  is the league's own recorded law. Agenda + verdict: issue 1127 T4.
 - [x] **T3 (kernel_opt rider). DONE 2026-10-26 — already mined; dedup caught the
   duplicate before authoring.** The refine mining lane's Batch 287 (riir-refine
   `d871a0fc`, "the llama.cpp fusion trio P81/P82/P83", Plan 292 / Research 325)
