@@ -2,8 +2,14 @@
 
 > **Status:** PROPOSED — filed 2026-10-22 (owner directive: "if exo, llama.cpp can do it,
 > we must be able to do it too — both riir-train and infer (focus on infer, separate
-> plan for train later) … aim to on par or beat them all"). Owner decisions D1–D3 below
-> are OPEN; Plan 623 Phase 0 (measure the incumbents) is decision-free and may start.
+> plan for train later) … aim to on par or beat them all"). **D3 DECIDED 2026-10-26
+> (owner model-priority law, `a2383f3`): qwen/Bonsai-only — gemma-2-2b is RETIRED
+> (riir-train Issue 617) and never a scoreboard cell.** D1 and D2 remain OPEN; Plan
+> 623 Phase 0 is decision-free (measurement only); Phase 1 LANDED 2026-10-26
+> (T1.1–T1.5, incl. the Metal/CubeCL GPU range-forward); Phase 2+ waits on D1;
+> Phase 3+ on D2. Hardware: the TB5 link is LIVE again 2026-10-26 — 80 Gb/s,
+> bridge `192.168.10.1 ⇄ 192.168.10.2` static, measured 0.53 ms; the ONE owner
+> step blocking 2-box work is SSH key auth on bmo (Issue 1109 T0 remainder).
 **Branch:** `develop` · **Distill:** [Research 015](../.research/015_Multi_Host_Inference_exo_llamacpp_MLX_Distill.md) (exo `bc412e2`, llama.cpp `19ab5a5`, mlx `c6abf0d`, mlx-lm `0d4d3d0`, all under `.raw/`)
 **Execution:** [Plan 623](../.plans/623_multi_host_pipeline_inference_lane.md) · **Hardware bring-up + bmo routing:** [Issue 1109](../.issues/1109_bmo_cluster_bringup_and_routing.md)
 **Training half:** DEFERRED to a separate riir-train plan (owner: "separate plan for train later") — see §Train.
@@ -82,11 +88,16 @@ and both boxes' state — a latency number without box state is not a measuremen
   needs `rdma_ctl enable` from the **Recovery-mode Terminal** on BOTH boxes + reboot, and
   incumbents require the Thunderbolt Bridge OFF on the RDMA port. A physical, owner-only
   act. Phases 0–2 run on TCP and do not need it; Phase 3–4 do.
-- **D3 — the scoreboard models.** Recommended: (i) **Gemma-2 9B/27B** (all three
-  incumbents + riir-infer's CubeCL gemma2 path — the apples-to-apples row); (ii) the
-  **league Bonsai/Qwen3.5-hybrid ternary** posture (riir-infer's own moat; llama.cpp
-  `qwen35` arch runs it, MLX/exo arm only if they load it); (iii) one **capacity row** —
-  a model that does NOT fit 96 GiB at its quant, chosen after bmo's RAM is measured.
+- **D3 — the scoreboard models. DECIDED 2026-10-26 (owner model-priority law,
+  `a2383f3`): qwen/Bonsai-only.** (i) the **league Bonsai/Qwen3.5-hybrid ternary
+  posture** (riir-infer's own moat; llama.cpp `qwen35` arch runs it, MLX/exo arm only
+  if they load it); (ii) one **capacity row** — a model that does NOT fit 96 GiB at
+  its quant, chosen after bmo's RAM is measured (needs the T0 SSH remainder).
+  ~~(i) Gemma-2 9B/27B~~ — RESCINDED before any cell ran: gemma-2-2b is RETIRED
+  (riir-train Issue 617), the same-day T1.5 gemma G1 cell was rescinded by the owner,
+  and no gemma-2-2b cell may ever be added (live gemma2-architecture products — laya
+  checkpoints, clef-ANE 0.6b — keep their own gates; that is architecture reuse, not
+  the retired checkpoint).
 
 ## Train (deferred, recorded so it is not lost)
 

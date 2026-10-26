@@ -20,6 +20,19 @@
 
 **Re-check 2026-10-26 ~09:15+07 (zed-amo-idle):** bmo still offline (last seen 12h ago, tailnet row unchanged) — the owner-physical gate stands; no state change since the adjudication.
 
+**Re-check 2026-10-26 ~16:30+07 (zed-amo, readiness probe for Proposal 042):** bmo is BACK and the bridge is LIVE — biggest state jump since the 10-22 baseline:
+
+| check (from amo) | result | reads as |
+|---|---|---|
+| `ping 192.168.10.2` | 2/2 replies, **0.53 ms avg** | the TB bridge now carries STATIC IPs — amo `192.168.10.1/24` (owner's canonical addressing per AGENTS.md, NOT the 10.0.0.x plan below), bmo `192.168.10.2` answering — **T1's verification goal (sub-ms bridge ping) MET at the network layer** |
+| `system_profiler SPThunderboltDataType` | Bus 0: **Device connected, 80 Gb/s, peer `Mac17,15`** (buses 1–5 empty) | the ONE-cable TB5 link is enumerated again — matches the 10-22 record |
+| `ssh katopz@192.168.10.2` / `ssh katop@192.168.10.2` | port answers (host key exchanged OK) but **publickey DENIED for both usernames** — BatchMode prompt → password | **T0 first half DONE (Remote Login ON), second half PENDING: amo's `~/.ssh/id_ed25519.pub` is not in bmo's authorized_keys** — every remote bmo step (T3 workspace, incumbent builds on bmo, any 2-box run) stays blocked on this one owner-physical act |
+| tailscale (`/Applications/Tailscale.app/.../Tailscale status`) | bmo `active; relay "sin"; offline, last seen 4h ago, tx 1248 rx 0`; direct `ping 100.100.117.44` 100% loss | tailnet fallback lane still DOWN (T2 unstartable); does not block the bridge-primary Phase 0/2 posture |
+| `rdma_ctl status` | `disabled` | unchanged — D2 still open, owner-physical (Phase 3+ only) |
+| amo GPU | no elephant/recapture/capture processes live | the T0.3 quiet-GPU window may have arrived EARLY (plan note said ~10-27) — re-verify at bench time |
+
+**Sequencing update:** the unblock chain shortens to ONE owner step — add amo's SSH key on bmo (T0 remainder) → T0.1/T0.2/T0.4 + T3 unblock immediately (bridge already live at 192.168.10.x). bmo's RAM remains UNMEASURED (needs the SSH) — the D3 capacity row cannot be chosen until then.
+
 **Claim reshaped 2026-10-26:** the adjudication is recorded above; the issue stays OPEN with the owner-physical remainder (power bmo on → T0 → T1 → T2 → T3). No lease held.
 
 ## Measured state (from amo, 2026-10-22)
@@ -35,12 +48,18 @@
 
 ## Tasks
 
-- [ ] **T0 (owner, physical, on bmo):** System Settings → General → Sharing → **Remote
+- [-] **T0 (owner, physical, on bmo):** System Settings → General → Sharing → **Remote
   Login ON**; add amo's `~/.ssh/id_ed25519.pub` to bmo's `authorized_keys`.
-- [ ] **T1 (both boxes):** Thunderbolt Bridge static IPv4 — amo `10.0.0.1/24`, bmo
+  **HALF-DONE 2026-10-26 16:30: Remote Login is ON (port 22 answers, host key exchange
+  works) but publickey auth DENIED for `katopz@` and `katop@` — the authorized_keys
+  half remains the ONE owner step blocking all 2-box work.**
+- [-] **T1 (both boxes):** Thunderbolt Bridge static IPv4 — amo `10.0.0.1/24`, bmo
   `10.0.0.2/24` (`networksetup -setmanual "Thunderbolt Bridge" 10.0.0.X 255.255.255.0`);
   verify `ping 10.0.0.2` sub-ms; record bmo's chip/RAM/macOS build (incumbents' RDMA
-  needs IDENTICAL OS builds).
+  needs IDENTICAL OS builds). **NETWORK HALF LIVE 2026-10-26 16:30 — the bridge carries
+  static `192.168.10.1/24` ↔ `192.168.10.2` (owner's canonical addressing, NOT the
+  10.0.0.x plan here) with a measured 0.53 ms RTT; the chip/RAM/OS-build record stays
+  open behind the T0 SSH remainder (bmo RAM is load-bearing for the D3 capacity row).**
 - [ ] **T2:** Tailscale direct path: `tailscale ping bmo` until `via <ip>` (not DERP);
   70–90 ms relayed RTT makes the tailnet a fallback posture only.
 - [ ] **T3:** Workspace on bmo: clone the repos Plan 623 needs (`riir-infer`, `katgpt-rs`),
