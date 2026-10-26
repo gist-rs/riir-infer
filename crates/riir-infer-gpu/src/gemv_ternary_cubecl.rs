@@ -2162,6 +2162,11 @@ impl TernaryHandle {
                 not(target_os = "macos")
             ))]
             cuda_mma_cache: std::sync::OnceLock::new(),
+            #[cfg(all(
+                feature = "ternary_gemv_cuda_raw",
+                feature = "ternary_gemm_batched",
+                not(target_os = "macos")
+            ))]
             cuda_glu_cache: std::sync::OnceLock::new(),
         }
     }
@@ -2218,6 +2223,11 @@ impl TernaryHandle {
                 not(target_os = "macos")
             ))]
             cuda_mma_cache: std::sync::OnceLock::new(),
+            #[cfg(all(
+                feature = "ternary_gemv_cuda_raw",
+                feature = "ternary_gemm_batched",
+                not(target_os = "macos")
+            ))]
             cuda_glu_cache: std::sync::OnceLock::new(),
         }
     }
@@ -2299,6 +2309,11 @@ impl TernaryHandle {
                 not(target_os = "macos")
             ))]
             cuda_mma_cache: std::sync::OnceLock::new(),
+            #[cfg(all(
+                feature = "ternary_gemv_cuda_raw",
+                feature = "ternary_gemm_batched",
+                not(target_os = "macos")
+            ))]
             cuda_glu_cache: std::sync::OnceLock::new(),
         }
     }
