@@ -1,6 +1,7 @@
 # Issue 1109 — bmo cluster bring-up (TB5 link + tailnet) and the bmo routing of riir-rethink's open issues
 
 **Status:** OPEN — filed 2026-10-22. Blocks [Plan 623](../.plans/623_multi_host_pipeline_inference_lane.md) Phase 0. Parent: [Proposal 042](../.proposals/042_multi_mac_distributed_inference.md).
+**Claimed:** zed-amo-idle-015, 1792974614, expires 2026-10-28T00:16:54+00:00 — scope = the item-9 on-box adjudication (amo half: netcheck/tailscale-ping/TB-service state/T0 probe), recorded in-issue
 
 ## Measured state (from amo, 2026-10-22)
 
