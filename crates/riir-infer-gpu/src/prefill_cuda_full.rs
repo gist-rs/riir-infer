@@ -2968,8 +2968,17 @@ fn whole_prefill_inner(
             }
             r
         };
+        #[cfg_attr(
+            not(feature = "prefill_mmq_v2"),
+            allow(clippy::wildcard_imports),
+            allow(unused_variables)
+        )]
         let ffn_block = |x: &CudaSlice<f32>,
                          lw3: &LayerF32,
+                         #[cfg(feature = "prefill_mmq_v2")] gate_h: &TernaryHandle,
+                         #[cfg(feature = "prefill_mmq_v2")] up_h: &TernaryHandle,
+                         #[cfg(not(feature = "prefill_mmq_v2"))] _gate_h: &TernaryHandle,
+                         #[cfg(not(feature = "prefill_mmq_v2"))] _up_h: &TernaryHandle,
                          gate_c: &WCache,
                          up_c: &WCache,
                          down_c: &WCache|
@@ -2993,16 +3002,63 @@ fn whole_prefill_inner(
             // through the same fused rotate+quantize — no standalone
             // rotation passes at either end. The residual chain stays
             // primal (x untouched).
-            if rotation.is_some() {
+            // Issue 1127-glu — the Issue-1124 fused gate+up arm wired into
+            // the FOLDED league lane: `RIIR_PREFILL_FFN_GLU=1` (+ mlp%128,
+            // the mirror posture) replaces (pair GEMM + standalone SwiGLU)
+            // with ONE v10tglu launch over the row-interleaved mirror; the
+            // SwiGLU rides the write-back with the Bench-721 canonical forms
+            // hardcoded, so `hid_b` receives the SAME bits the pair+swiglu
+            // chain wrote (the unit gate: 0 bit-diffs vs the real standalone
+            // kernel). The down-side rotate + fakequant + GEMM consume the
+            // same hid_b untouched. Any mirror/launch failure degrades to
+            // the incumbent pair path bit-safely (the 1124-T1 contract).
+            #[cfg(feature = "prefill_mmq_v2")]
+            let mut glu_routed = false;
+            #[allow(clippy::collapsible_if, unused_variables)]
+            #[cfg(feature = "prefill_mmq_v2")]
+            if rotation.is_some()
+                && crate::gemm_ternary_i8_mma_cuda_raw::ffn_glu_fused_enabled()
+                && mlp.is_multiple_of(128)
+            {
+                if let Some(g) =
+                    crate::prefill_cuda_mma::glu_pair_cache_or_none(client, stream, gate_h, up_h)
+                {
+                    quantize_rot(normx, n)?;
+                    crate::prefill_cuda_mma::launch_prefill_gemm_glu_cached(
+                        &stack.mma, stream, &g, scratch, hid_b, mlp, n, p,
+                    )
+                    .map_err(|e| format!("gemm/gate_up_glu: {e}"))?;
+                    static GLU_REACH: std::sync::atomic::AtomicBool =
+                        std::sync::atomic::AtomicBool::new(false);
+                    if !GLU_REACH.swap(true, Ordering::Relaxed) {
+                        eprintln!(
+                            "[1127-glu] REACH: fused gate+up v10tglu live on the folded lane (mlp={mlp}, n={n}, p={p})"
+                        );
+                    }
+                    glu_routed = true;
+                }
+            }
+            #[cfg(not(feature = "prefill_mmq_v2"))]
+            let glu_routed = false;
+            if glu_routed {
+                // hid_b already holds silu(gate)*up — the SwiGLU launch is
+                // the one the fused arm deletes.
+            } else if rotation.is_some() {
                 gemm_gu_rot(gate_c, up_c, normx, gate_b, up_b, mlp, n)?;
+                unsafe {
+                    stack
+                        .ffn
+                        .launch_swiglu(stream, se, sr, gate_b, up_b, hid_b, p * mlp)
+                        .map_err(|e| format!("ffn/swiglu: {e}"))?;
+                }
             } else {
                 gemm_gu(gate_c, up_c, normx, gate_b, up_b, mlp, n)?;
-            }
-            unsafe {
-                stack
-                    .ffn
-                    .launch_swiglu(stream, se, sr, gate_b, up_b, hid_b, p * mlp)
-                    .map_err(|e| format!("ffn/swiglu: {e}"))?;
+                unsafe {
+                    stack
+                        .ffn
+                        .launch_swiglu(stream, se, sr, gate_b, up_b, hid_b, p * mlp)
+                        .map_err(|e| format!("ffn/swiglu: {e}"))?;
+                }
             }
             // C0.5 hybrid: the WIDE hid row (17408 f32 = 68 KB smem → 1
             // block/SM, ~17% occupancy — measured −3.5% pp2048 as
@@ -3926,7 +3982,7 @@ fn whole_prefill_inner(
             let gate_c = mma_mirror(client, stream, &lw.gate_proj).ok_or("gate mirror")?;
             let up_c = mma_mirror(client, stream, &lw.up_proj).ok_or("up mirror")?;
             let down_c = mma_mirror(client, stream, &lw.down_proj).ok_or("down mirror")?;
-            ffn_block(x, lw3, &gate_c, &up_c, &down_c)?;
+            ffn_block(x, lw3, &lw.gate_proj, &lw.up_proj, &gate_c, &up_c, &down_c)?;
             stage_done!(other);
         }
         Ok(())
