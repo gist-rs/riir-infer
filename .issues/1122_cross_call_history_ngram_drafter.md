@@ -1,6 +1,7 @@
 # 1122 — History-fed n-gram drafter class (cross-call rollout table) in the speculative_decode family
 
 **Status:** Open — filed 2026-10-26 from the NgramRL distillation (riir-train Research 481 / Plan 472, landed riir-train `8d3c1738`; this issue landed `c277be5`). Fusion idea, novelty TBD. Not started. Zero claims of class novelty: SuffixDecoding and prompt-lookup decoding are published prior art for the n-gram/suffix drafter class.
+**Claimed:** zed-amo-sync-1122, 1792979640, expires 2026-10-28T10:00:00Z
 
 ## The gap
 
