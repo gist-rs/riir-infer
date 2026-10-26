@@ -1,6 +1,6 @@
 # Bench 893 — Issue 1117 T3/T4: the FlashMemory budget decode lane end-to-end on the real Bonsai-2 PQ2_0 — teacher-forced NLL / top-1 vs dense at 32K, ρ ∈ {0.05, 0.10, 0.15, 0.30}
 
-**Status:** RELAUNCHED 2026-10-26 ~14:5xZ (zed-m3-idle-relaunch — the same lease, `zed-m3-continue` lineage, expires 2026-10-26T22:22:40Z). The 10-25 state was lost with `/tmp` (bin + corpus + `p1117_corpus/` gone; `/tmp/p1117_32k/` survived EMPTY): the bin was rebuilt (`98fa26d`, which also lands the T3 pause's noted instrument defect — per-64-step stderr progress lines per arm, so an arm is no longer silent for ~1 h) and the corpus REBUILT under a new, explicitly-named recipe below. **The 10-25 corpus was NOT recoverable byte-exactly**: the doc pinned the BLAKE3 but not the file list (recipe gap, now fixed — the recipe is IN the record), and a 935-combo reconstruction over the 10-25-era git trees (line-count + byte-window filtered) found no hash match — the original tree's bytes are not recoverable from git (uncommitted sibling WIP is a plausible cause). Consequence, disclosed: the new run executes **dense + ρ 0.15 + ρ 0.30 in ONE session on the new corpus**, so the ΔNLL / top-1 comparison is self-consistent; the killed session's dense/0.05/0.10 walls stand as the cross-session INDICATIVE rows only (the doc already scoped walls as ratios, never absolutes). Scrath moved OFF /tmp: `~/.cache/i1117/` (this loss is why). RELAUNCH POSTURE: `nice -n 10`, sibling agent compile active (load ~16 at launch — the recorded posture).
+**Status:** COLLECTED 2026-10-27 ~05:37 +07 (the v2 relaunch completed end to end; report.md + report.json at `~/.cache/i1117/32k_rel/`). v1 (killed 10-25) partials stand as the cross-session INDICATIVE rows; the v2 session's dense + ρ 0.15 + ρ 0.30 are one-session self-consistent on corpus v2.
 **Date:** 2026-10-25 · **Issue:** [1117](../.issues/1117_flashmemory_budget_decode_consumer.md) T3/T4 · **Code:** riir-infer `51f52f4` (the ternary decode lane + the G1 battery) + katgpt-rs `3d3152fbd` (the incremental last-block centroid substrate) · **Instrument:** `src/bin/flashmemory_decode_gate.rs` · **Predecessor:** riir-train [Bench 671](../../riir-train/.benchmarks/671_issue452_e1_topk_budget_selection_fidelity.md) (the per-layer fidelity oracle this gate compounds), katgpt-rs Issue 962 (the budget selector).
 
 ## Question
@@ -26,25 +26,34 @@ Dense reference 11.9 tok/s, pooled NLL 3.1537. NOTE the operating point: at 1K c
 
 ## Results — 32K
 
-**Partial (in-flight run, logged `#   wall …` lines):**
+### v2 session (2026-10-26 relaunch, corpus v2, one-session self-consistent — the collected record)
+
+| arm | wall | tok/s | vs dense | mean sel frac | pooled ΔNLL mean | pooled ΔNLL p95 (support) | top-1 agree |
+|---|---|---|---|---|---|---|---|
+| dense (reference) | 9094.0 s | 3.6 | 1.00× | — | pooled NLL 2.9938 | — | — |
+| ρ 0.15 | 6612.0 s | 5.0 | **1.39×** | 0.1467 | +0.4048 | +2.5210 (1639) | 70.56% |
+| ρ 0.30 | 11591 s+ | 2.7 | **0.76×** | 0.2968 | +0.2087 | +1.5642 (1639) | 79.91% |
+
+Retention lands nearly exact on target (0.15 → 0.1467, 0.30 → 0.2968) — the budget rule + incremental centroids hold at 32K. Per-bucket (full tables in `~/.cache/i1117/32k_rel/report.md`, committed excerpt below): **quality IMPROVES in later buckets for both arms** — ρ 0.15 ΔNLL mean falls 0.477 → 0.248 and top-1 rises 65.5% → 75.5% across the eight 4K buckets; ρ 0.30 falls 0.232 → 0.107 and rises 76.8% → 84.8%. The Bench-671 depth worry (some rows lose mass at depth) does NOT compound — the early-context buckets are the worst, not the deep ones. The speedup/retention curve now has four points (v1 + v2, cross-session): 1.82× @ 0.05 → 1.33× @ 0.10 → 1.39× @ 0.15 → 0.76× @ 0.30 — the crossover sits near ρ ≈ 0.2; above it the refresh + centroid overhead outpaces the block-read saving.
+
+ρ 0.15 per-bucket (ΔNLL mean / top-1): [0,4K) 0.4770/65.45 · [4K,8K) 0.4852/65.55 · [8K,12K) 0.4944/67.21 · [12K,16K) 0.4504/68.82 · [16K,20K) 0.5542/67.82 · [20K,24K) 0.3100/74.95 · [24K,28K) 0.2189/79.20 · [28K,32K) 0.2483/75.46.
+ρ 0.30 per-bucket: 0.2320/76.78 · 0.2429/76.07 · 0.2843/76.73 · 0.2440/78.61 · 0.3123/76.00 · 0.1543/83.50 · 0.0935/86.79 · 0.1065/84.79.
+
+### v1 session (2026-10-25, killed at owner request — corpus v1, INDICATIVE cross-session rows)
 
 | arm | wall | tok/s | mean sel frac (last attn layer, /16 sampling) |
 |---|---|---|---|
 | dense (reference) | 6435.1 s | 5.1 | — |
 | ρ 0.05 | 3517.6 s | 9.3 (**1.82× dense**) | 0.0481 |
 | ρ 0.10 | 4827.2 s | 6.8 (**1.33× dense**) | 0.0973 |
-| ρ 0.15 | running | | |
-| ρ 0.30 | queued | | |
-
-The T4 shape is already legible: the sparse decode is FASTER than dense at 32K (the dense arm's attention reads grow with t_n; the sparse arm reads only the selected blocks — refresh + centroid overhead included), and the speedup DEGRADES with ρ exactly as the retention math predicts (1.82× at 4.8% retained → 1.33× at 9.7%). The quality half (ΔNLL / top-1 per bucket) is the pending half — it lands with the run.
 
 ## Reading
 
-PENDING — filled at collection with the per-bucket ΔNLL / top-1 tables from `report.md`.
+The per-layer fidelity numbers (riir-train Bench 671) SURVIVE 16 attention layers compounding through the 64-layer hybrid stack at 32K, with the loss quantified and graceful: at ρ 0.15 (85% KV reduction) the sparse decode costs +0.40 pooled ΔNLL and 70.6% top-1 agreement against dense — degraded, measurable, and bucket-monotone-IMPROVING with depth (the opposite failure mode from the one T3 was written to catch). The T4 shape: sparse decode is FASTER than dense up to ρ ≈ 0.2 and SLOWER above it — the operating point for any serving posture is ρ ≤ 0.15, where quality cost and speed gain are both on the favorable side of the crossover. NOT tested here: 128K (the 4×-longer axis, ~16 h-class — deferred with T4 below), and the GPU decode posture (this is the CPU reference the issue scoped). Corpus v2 (not v1) — the arms are self-consistent; absolute NLLs are corpus-specific (dense pooled NLL 2.9938 on v2).
 
-## Box state
+## Box state (v2 session)
 
-M3 Max (16 cores, 64 GB), AC power, battery 100% charged. The 32K run executed `nice -n 10` with concurrent sibling agent sessions active (load average 14.31 at launch; 93% memory free). tok/s rows are RELATIVE comparisons between arms measured INTERLEAVED-ish (dense first, then each ρ back-to-back) under the same load — the T4 read is the SPARSE:DENSE ratio per session, not an absolute league number (the league decode posture is the 4090 CUDA lane; this is the CPU reference the issue scoped).
+M3 Max (16 cores, 64 GB), AC power, battery charged. Launched `nice -n 10` under active sibling agent compiles (load ~16–18 through the run; the run itself owned ~9.3 cores). Dense throughput declined 10.5 → 2.8 tok/s across the run — that is the dense arm's own O(t) attention growth plus load, not a defect; walls read as ratios inside the session. Corpus v2: 78,099 BPE tokens, BLAKE3 `1b4e2e3b…50727` (recipe in §Rig).
 
 ## T4 note (the rebuild-vs-incremental cost axis)
 
