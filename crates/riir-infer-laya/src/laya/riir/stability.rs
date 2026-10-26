@@ -108,9 +108,11 @@ impl StabilityTracker {
     /// Records ONE stage's chosen row (the consumer selects the
     /// last-position row of the case). The stages MUST arrive in
     /// capture order — strictly increasing ordinal, exactly one call
-    /// per stage (a `debug_assert!` guards it; the release build trusts
+    /// per stage, STARTING at the embedding (ordinal 0: a FULL
+    /// capture) — (a `debug_assert!` guards it; the release build trusts
     /// the capture contract, which [`forward_capture`](super::encoder::Encoder::forward_capture)
-    /// provides by construction).
+    /// provides by construction). A feed that filters or offsets stages
+    /// reports INDEX-space depth — never feed one.
     ///
     /// Panics (debug builds) on a state whose width differs from the
     /// construction width.
@@ -122,6 +124,10 @@ impl StabilityTracker {
             "stages must arrive in capture order"
         );
         if !self.have_prev {
+            debug_assert_eq!(
+                ordinal, 0,
+                "first observed stage must be Embedding (ordinal 0) — a partial-capture feed reports index-space depth"
+            );
             self.prev[..self.d].copy_from_slice(state);
             self.have_prev = true;
             self.last_ordinal = Some(ordinal);
@@ -169,6 +175,9 @@ impl StabilityTracker {
     /// The stabilization depth: the EARLIEST stage ordinal `s` such
     /// that every transition leaving `s` or later is sub-band — first
     /// index over the suffix scan, per the `float_order` convention.
+    /// The returned value is an ORDINAL only when the feed started at
+    /// the embedding (ordinal 0 — the `observe` full-capture
+    /// precondition; a partial feed returns index-space values).
     /// All transitions sub-band ⇒ `Some(0)` (stable from the
     /// embedding); the final stage is NEVER a candidate — its leaving
     /// transition does not exist, so it could only certify vacuously —
@@ -419,7 +428,20 @@ mod tests {
     #[should_panic(expected = "capture order")]
     fn out_of_order_stage_trips_the_debug_guard() {
         let mut tr = StabilityTracker::with_stage_capacity(3, 1);
+        tr.observe(CaptureStage::Embedding, &[1.0]);
+        tr.observe(CaptureStage::AfterLayer(0), &[2.0]);
+        tr.observe(CaptureStage::Embedding, &[3.0]);
+    }
+
+    /// First-ordinal guard (debug builds): the feed must START at the
+    /// embedding — a partial/offset capture (e.g. starting at
+    /// `AfterLayer(30)`) passes the order guard and would report
+    /// index-space depth.
+    #[test]
+    #[cfg(debug_assertions)]
+    #[should_panic(expected = "first observed stage must be Embedding")]
+    fn first_ordinal_must_be_embedding_trips_the_debug_guard() {
+        let mut tr = StabilityTracker::with_stage_capacity(3, 1);
         tr.observe(CaptureStage::AfterLayer(1), &[1.0]);
-        tr.observe(CaptureStage::Embedding, &[2.0]);
     }
 }
