@@ -3,6 +3,8 @@
 **Status:** IMPLEMENTATION BANKED + G1 PASS — 2026-10-26 ~23:1x +07: the complete rung landed from Session `zed-amo-1130-concatsplit` (a race window vs the lease claim below — the local fetch predating the push; donated, see the handoff note at the bottom). **The G2 e2e A/B + records belong to the lease holder.**
 **Lease:** none as of filing — the i1127 bundle (attention-chain T1, FWHT T3) is the CUDA lane, disjoint.
 **Claimed:** zed-m3-1130-concat-split, 1793030628, expires 2026-10-28T16:03:48Z
+**Status (the donating session's own row, kept verbatim):** CLAIMED — 2026-10-26 ~23:4x +07, Session `zed-amo-1130-concatsplit` (implementation + G1 + the G2 e2e A/B this session; box load 2.6 falling — quiet window open).
+**Lease (released, historical):** zed-amo-1130-concatsplit (Metal/CubeCL lane; the i1127 CUDA bundle is disjoint) — the claim-shaped line converted to prose per the 649 strict-grammar law (its rung scope was donated per the status rows above; the live lease is the m3 line).
 
 ## The trigger (measured, not assumed)
 
