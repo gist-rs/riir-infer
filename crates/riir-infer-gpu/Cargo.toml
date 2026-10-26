@@ -133,6 +133,11 @@ ternary_gemv = ["cubecl_runtime", "katgpt-core/ternary_group_scale", "riir-infer
 # ternary_gemv already carries deltanet_ternary_inference (which implies
 # ternary_q2_resident + decode_spin_pool); this adds the folded loader.
 spin_pool_gpu_goat = ["ternary_gemv", "riir-infer-core/bonsai2_hadamard"]
+# Plan 623 T1.5 — the GPU stage seams (LayerRange forward on the Metal/CubeCL
+# paths + the hidden-state handoff read/write). Forwards the core feature
+# (LayerRange/multi_host wire types live there); the ungated body-range
+# refactor compiles to the same code either way — the feature gates the SEAM.
+multi_host = ["riir-infer-core/multi_host"]
 # Fused ternary GEMV + in-place ResidualAdd (Issue 616).
 ternary_gemv_residual = ["ternary_gemv"]
 # Batched ternary dequant+GEMM prefill family (Issue 637).
@@ -413,6 +418,16 @@ required-features = ["cuda_backend", "ternary_gemv_cuda_raw", "ternary_gemm_batc
 [[test]]
 name = "decode_spin_pool_gpu_goat"
 required-features = ["spin_pool_gpu_goat"]
+
+# Plan 623 T1.5 — the GPU range-forward G1 (Metal, real models): the staged
+# composition stage(0..k) ∘ stage(k..n) must be BIT-IDENTICAL to the 1-box
+# full GPU forward, every k, both the qwen deltanet (Bonsai-2) and gemma2
+# (gemma-2-2b f16) paths. Whole-file #![cfg] keeps the count honest; this row
+# keeps the reader honest. #[ignore]d — heavy model loads; run with
+# --release -- --ignored --test-threads=1.
+[[test]]
+name = "plan623_multi_host_g1_metal"
+required-features = ["cubecl_runtime", "ternary_gemv", "multi_host", "riir-infer-core/bonsai2_hadamard"]
 
 # katgpt-rs Issue 928 (the 10-09 drift census) — the dq fake-quant G1 gate
 # landed without a row; same law as the rows above (the whole-file #![cfg]

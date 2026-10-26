@@ -1,7 +1,7 @@
 # Plan 623: Multi-host inference lane — layer-range stages, activation frames, TCP→RDMA transport, TP, speculative fill
 
-**Status:** Phase 1 (T1.1–T1.4) LANDED 2026-10-26 — substrate + range-forward seams
-**Claimed:** m3-idle-623t15, 1793003851, expires 2026-10-28T08:37Z — T1.5 (Metal/CubeCL range-forward + G1), the amo lane's Phase-0 elephant-capture constraint does not bind the M3
+**Status:** Phase 1 (T1.1–T1.5) LANDED 2026-10-26 — substrate + range-forward seams (CPU + Metal)
+**Lease closed:** m3-idle-623t15 landed T1.5 2026-10-26 (48 h lease from the claim; the landing below is its provenance) — the amo lane's Phase-0 elephant-capture constraint does not bind the M3, which is where T1.5 executed
 + the 10-test G1 battery, all gates green (see the Phase 1 checkboxes). Phase 0 is decision-free (measurement only) and may
 start once Issue 1109 T0 (bmo reachable) is done; Phase 1 substrate is decision-free
 (riir-infer-core, no deps); Phase 2+ waits on [Proposal 042](../.proposals/042_multi_mac_distributed_inference.md) D1 (crate home); Phase 3+ on D2 (RDMA enabled).
@@ -88,9 +88,34 @@ mlx-lm on the Proposal-042 scoreboard **measured on the same two boxes**.
   347 passed (gated) / 269 (default); rustfmt clean on every touched file. Found
   (pre-existing, NOT this plan's): the issue028 `dual_format_q4_prefill_pair_loads_and_runs`
   gate red at pristine HEAD — filed as [Issue 1123](../.issues/1123_issue028_q4_prefill_gate_red_on_develop.md).
-- [ ] **T1.5** Range-forward on Metal/CubeCL: `TernaryDeltanetGpuForward::forward_from_x`
+- [x] **T1.5** Range-forward on Metal/CubeCL: `TernaryDeltanetGpuForward::forward_from_x`
   / `mark_x_as_input` (the existing upload-x seam) and gemma2 `forward_layer_gpu` loop with
   `[lo, hi)`; G1 bit-identity vs the full GPU forward.
+  **LANDED 2026-10-26** (m3, Metal/wgpu-msl, real models): the qwen decode funnel refactored to
+  an UNGATED `forward_from_x_body_range(.., lo, hi, advance_pos)` (the full funnel delegates at
+  `(0, n_layers, true)` — no second copy of the loop, the Issue-022 T3.1 structural law); the
+  boundary law mirrors the CPU range contract — a stage's FIRST layer takes the standalone
+  input RMSNorm (`layer_idx == lo` replaces `== 0`) because the producing stage applies its
+  deferred FFN residual explicitly with the SAME `ResidualAddCubeCL` dispatch the full funnel
+  runs after the loop (bit-exact by construction: the fused `residual_add_rmsnorm_f32`
+  Phase-1 add IS `a[i] + b[i]`, one rounding, and the RMSNorm reduction tree is the same
+  strided-256 walk in both kernels); final norm + folded lm_head gated on `hi == n_layers`;
+  `advance_pos` false on stage passes (the stage runtime schedules position via the new
+  `set_pos` seam — the CPU range's `pos` parameter twin). Seams (`multi_host`-gated):
+  `forward_range_dispatch(LayerRange)` + `set_hidden_state(&[f32])` (fresh-mark protocol,
+  width-refusing) + `read_hidden_state()` + `set_pos(usize)`. Gemma2: `forward_gpu_range`
+  (per-layer bodies are self-contained → bit-identity structural; embed/head gated on
+  lo/hi; delta_routing refuses loud — the hybrid CPU-side forward has no range form).
+  **G1 EXECUTED AND GREEN — bit-exact, the expected class:** qwen (Bonsai-2 27B PQ2_0,
+  block_size clamped to the decode bound per the Issue-994 VRAM gate) ALL 63 splits × 4
+  tokens; gemma2 (gemma-2-2b f16, the issue1110 construction) ALL 25 splits × 4 tokens;
+  single-instance design (reference loop → `reset_state` → staged replay; state slots are
+  absolute + ranges disjoint). Independent regression: `g1_032_folded_prefill_metal` green
+  post-refactor (P=64: argmax 702/702, top-5 1.00, worst rel err 4.08e-6 — the decode arm
+  runs the refactored funnel against the INDEPENDENT prefill path); CPU G1 battery 10/10;
+  clippy clean lib+tests at the gated posture; default / no-default / all-features /
+  wasm32 compiles clean. Gate: `tests/plan623_multi_host_g1_metal.rs`
+  (`I623_T` / `I623_K` env overrides; `--ignored --test-threads=1 --release`).
 
 ## Phase 2 — Stage runtime over TCP (needs D1)
 

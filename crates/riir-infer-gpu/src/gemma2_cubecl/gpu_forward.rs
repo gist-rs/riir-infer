@@ -198,6 +198,149 @@ impl GpuGemmaCubeCL {
         }
     }
 
+    /// Plan 623 T1.5 — the multi-host stage entry point: run layers
+    /// `[range.lo, range.hi)` of one decode token as a pipeline stage.
+    ///
+    /// Contract (mirrors the CPU `forward_gemma2_range` / the qwen GPU
+    /// `forward_range_dispatch`):
+    /// - FIRST stage (`range.lo == 0`): `token` is looked up + scaled and
+    ///   uploaded (the Wall gate steps here, exactly as [`Self::forward_gpu`]
+    ///   steps on the embedding).
+    /// - DOWNSTREAM stages (`range.lo > 0`): `token` is IGNORED;
+    ///   `hidden_in` MUST carry the upstream stage's hidden output —
+    ///   refused loud on `None` or a wrong width.
+    /// - LAST stage (`range.hi == n_layer`): final RMSNorm + LM head (+ the
+    ///   final softcap, matching [`Self::forward_gpu`]'s download path) run
+    ///   and the return is logits. Otherwise the return is the post-loop
+    ///   hidden state (the `ActivationFrame` handoff payload).
+    ///
+    /// `pos` is a PARAMETER (no self-advancement) — every stage of one token
+    /// schedules at the same position, exactly like [`Self::forward_gpu`]'s
+    /// own `pos` argument.
+    ///
+    /// Refuses (loud) under `delta_routing`: that feature routes the
+    /// GPU-resident loop to the hybrid CPU-side forward (Issue 718), which
+    /// has no range form — the CPU range lane covers that posture. Refuses a
+    /// bad range loud — a silent zero-layer stage would read as a confident
+    /// pass.
+    ///
+    /// Bit-identity vs [`Self::forward_gpu`] is structural: each gemma2
+    /// layer body is SELF-CONTAINED (both residual adds inside
+    /// `forward_layer_gpu`), so the bounded loop dispatches the same kernels
+    /// in the same order per buffer — the plan-623 G1 gate
+    /// (`tests/plan623_multi_host_g1_metal.rs`) pins it by execution on the
+    /// real model, every split.
+    #[cfg(feature = "multi_host")]
+    pub fn forward_gpu_range(
+        &mut self,
+        token: Option<usize>,
+        pos: usize,
+        hidden_in: Option<&[f32]>,
+        range: riir_infer_core::multi_host::LayerRange,
+    ) -> Vec<f32> {
+        #[cfg(feature = "delta_routing")]
+        {
+            let _ = (token, pos, hidden_in, range);
+            panic!(
+                "forward_gpu_range: no range form under delta_routing (the hybrid CPU-side \
+                 forward has none — use the CPU range lane for that posture)"
+            );
+        }
+        #[cfg(not(feature = "delta_routing"))]
+        {
+            let n_layer = self.config.n_layer;
+            if let Err(e) = range.validate(n_layer as u32) {
+                panic!("forward_gpu_range: {e}");
+            }
+            let n = self.config.n_embd;
+            let embed_scale = (n as f32).sqrt();
+            #[allow(unused_variables)]
+            let eps = self.config.rms_norm_eps as f32;
+            #[allow(unused_variables)]
+            let vocab = self.config.vocab_size;
+
+            // 1. Stage input: embedding lookup (first stage) or the upstream
+            // handoff (downstream stage).
+            let hidden_handle = match (range.lo, hidden_in) {
+                (0, _) => {
+                    let token = token.expect("forward_gpu_range: first stage needs a token");
+                    let mut embed = vec![0.0f32; n];
+                    let tok_off = token * n;
+                    for (i, h) in embed.iter_mut().enumerate() {
+                        *h = self.wte_cpu[tok_off + i] * embed_scale;
+                    }
+                    #[cfg(feature = "wall_attention")]
+                    self.wall_step_if_active(&embed);
+                    self.client.create_from_slice(f32::as_bytes(&embed))
+                }
+                (_, Some(hidden)) => {
+                    assert!(
+                        hidden.len() == n,
+                        "forward_gpu_range: expected n_embd={n} floats, got {}",
+                        hidden.len()
+                    );
+                    assert!(
+                        token.is_none(),
+                        "forward_gpu_range: downstream stage takes a hidden state, not a token"
+                    );
+                    self.client.create_from_slice(f32::as_bytes(hidden))
+                }
+                (_, None) => panic!(
+                    "forward_gpu_range: downstream stage (lo = {}) needs hidden_in",
+                    range.lo
+                ),
+            };
+
+            // 2. Layers [lo, hi), GPU-resident, 0 sync per layer — the same
+            // self-contained per-layer body forward_gpu loops.
+            let mut h = hidden_handle;
+            for layer_idx in range.lo as usize..range.hi as usize {
+                h = self.forward_layer_gpu(h, layer_idx, pos);
+            }
+
+            // 3. Last stage: final RMSNorm + LM head + softcap (the
+            // forward_gpu download-path semantics); a middle stage returns
+            // the hidden handoff payload.
+            if range.hi as usize == n_layer {
+                let h = self.dispatch_rmsnorm_gpu(h, &self.gpu_norm_gammas.final_norm, n, eps);
+                let mut logits: Vec<f32> = {
+                    #[cfg(feature = "lm_head_cpu")]
+                    {
+                        let hidden_cpu = self.read_handle(&h);
+                        let mut out = vec![0.0f32; vocab];
+                        katgpt_core::simd::simd_matmul_rows_parallel(
+                            &mut out,
+                            &self.wte_cpu,
+                            &hidden_cpu,
+                            vocab,
+                            n,
+                        );
+                        out
+                    }
+                    #[cfg(not(feature = "lm_head_cpu"))]
+                    {
+                        let logits_handle = match &self.weights {
+                            CubeCLWeightFormat::F32(w) => {
+                                self.dispatch_gemv_gpu(&w.wte, h, vocab, n)
+                            }
+                            CubeCLWeightFormat::F16(w) => {
+                                self.dispatch_gemv_f16_gpu(&w.wte, h, vocab, n)
+                            }
+                            CubeCLWeightFormat::Q4K(w) => self.dispatch_gemv_q4k_gpu(&w.wte, h),
+                        };
+                        self.read_handle(&logits_handle)
+                    }
+                };
+                if self.config.final_logit_softcapping > 0.0 {
+                    softcap(&mut logits, self.config.final_logit_softcapping);
+                }
+                logits
+            } else {
+                self.read_handle(&h)
+            }
+        }
+    }
+
     /// Fully GPU-resident forward pass returning logits Handle (no download).
     ///
     /// Same as [`forward_gpu`](Self::forward_gpu) but returns the GPU Handle

@@ -4277,6 +4277,106 @@ impl TernaryDeltanetGpuForward {
         f32::from_bytes(&bytes).to_vec()
     }
 
+    // ── Plan 623 T1.5 — multi-host stage seams (feature `multi_host`) ──────
+    //
+    // The GPU twin of the CPU range lane (`forward_qwen_deltanet_ternary_range`):
+    // run decode layers `[range.lo, range.hi)` of one token as a pipeline
+    // stage. The range compute itself is deliberately UNGATED (the
+    // `forward_from_x_body_range` refactor compiles to the same code either
+    // way); these seams are the LANE — the stage runtime (T2) and the G1
+    // gate are what the feature buys.
+
+    /// Run decode layers `[range.lo, range.hi)` for one token. The input is
+    /// whatever is fresh in `x` ([`Self::set_input_token`] on the first
+    /// stage, [`Self::set_hidden_state`] on a downstream stage). The last
+    /// stage (`range.hi == n_layer`) also produces logits (read via
+    /// [`Self::read_logits`]); an earlier stage leaves the post-loop
+    /// residual stream in `x` (read via [`Self::read_hidden_state`]).
+    ///
+    /// Unlike the 1-box funnel this does NOT advance `self.pos` — every
+    /// stage of one token schedules at the same position; the stage runtime
+    /// owns position scheduling via [`Self::set_pos`] (mirroring the CPU
+    /// range's `pos` parameter).
+    ///
+    /// Refuses (loud panic) an empty, inverted, or out-of-bounds range —
+    /// a silent zero-layer stage would read as a confident pass.
+    #[cfg(feature = "multi_host")]
+    pub fn forward_range_dispatch(&mut self, range: riir_infer_core::multi_host::LayerRange) {
+        if let Err(e) = range.validate(self.config.n_layer as u32) {
+            panic!("forward_range_dispatch: {e}");
+        }
+        let n = self.config.n_embd;
+        let eps = self.config.rms_norm_eps as f32;
+        let n_v_heads = self.config.deltanet_linear_n_value_heads;
+        let head_dim = self.config.deltanet_linear_head_dim;
+        let z_dim = n_v_heads * head_dim;
+        let conv_dim = 2 * (self.config.deltanet_linear_n_heads * head_dim) + n_v_heads * head_dim;
+        let kernel_size = self.config.deltanet_conv_kernel_size;
+        let mlp = self.config.mlp_hidden;
+        let vocab = self.config.vocab_size;
+        self.forward_from_x_body_range(
+            n,
+            eps,
+            n_v_heads,
+            head_dim,
+            z_dim,
+            conv_dim,
+            kernel_size,
+            mlp,
+            vocab,
+            range.lo as usize,
+            range.hi as usize,
+            false,
+        );
+    }
+
+    /// Upload a downstream stage's incoming hidden state (the upstream
+    /// stage's residual-stream handoff) into `x` and mark it fresh — the
+    /// wire-side twin of [`Self::set_input_token`]. The next
+    /// [`Self::forward_range_dispatch`] consumes it.
+    ///
+    /// The upload allocates a fresh device buffer per call — this is the
+    /// stage handoff cost (the GPU twin of the CPU `ActivationFrame` bytes);
+    /// the preallocated frame rings that remove it are the T2 runtime's job.
+    ///
+    /// Refuses a wrong-width slice loud — a padded/truncated hidden state
+    /// would decode as plausible garbage.
+    #[cfg(feature = "multi_host")]
+    pub fn set_hidden_state(&mut self, hidden: &[f32]) {
+        Self::refuse_if_pool_poisoned("at hidden-state staging");
+        let n = self.config.n_embd;
+        assert!(
+            hidden.len() == n,
+            "set_hidden_state: expected n_embd={n} floats, got {}",
+            hidden.len()
+        );
+        // Issue 860 T3: same fresh-input protocol as set_input_token — set
+        // before the read so a queued consumer can never observe a stale mark.
+        self.x_input_fresh = true;
+        self.x = self.client.create_from_slice(f32::as_bytes(hidden));
+    }
+
+    /// Download the residual stream out of `x` — the stage handoff payload
+    /// an earlier range stage leaves behind (the bytes an `ActivationFrame`
+    /// wraps).
+    #[cfg(feature = "multi_host")]
+    pub fn read_hidden_state(&mut self) -> Vec<f32> {
+        Self::refuse_if_pool_poisoned("at hidden-state readback");
+        let bytes = self
+            .client
+            .read_one(self.x.clone())
+            .expect("download hidden state");
+        f32::from_bytes(&bytes).to_vec()
+    }
+
+    /// Stage-side position scheduling: every stage of one token must run at
+    /// the same position (attention KV row + GDN step index). The 1-box
+    /// funnel advances `self.pos` itself; the range seams do not.
+    #[cfg(feature = "multi_host")]
+    pub fn set_pos(&mut self, pos: usize) {
+        self.pos = pos;
+    }
+
     /// Forward pass that returns BOTH logits AND the final normed hidden state.
     ///
     /// The hidden state (`norm_x` after the final RMSNorm, before `lm_head`) is
@@ -4770,6 +4870,72 @@ impl TernaryDeltanetGpuForward {
         mlp: usize,
         vocab: usize,
     ) {
+        let n_layers = self.layers.len();
+        self.forward_from_x_body_range(
+            n,
+            eps,
+            n_v_heads,
+            head_dim,
+            z_dim,
+            conv_dim,
+            kernel_size,
+            mlp,
+            vocab,
+            0,
+            n_layers,
+            true,
+        );
+    }
+
+    /// The range-parameterized decode body — the SAME code the full funnel
+    /// ([`Self::forward_from_x`]) runs, with the layer loop bounded to
+    /// `[lo, hi)` (Plan 623 T1.5; the GPU twin of the CPU
+    /// `forward_qwen_deltanet_ternary_body_range`). The full funnel
+    /// delegates here with `(0, n_layers, advance_pos = true)` — there is no
+    /// second copy of the layer loop to drift.
+    ///
+    /// Boundary law (mirrors the CPU range contract):
+    /// - `lo == 0` — the caller staged the embedding into `x` via
+    ///   [`Self::set_input_token`]. `lo > 0` — `x` carries the upstream
+    ///   stage's residual stream (upload via [`Self::set_hidden_state`]);
+    ///   the boundary layer uses a STANDALONE input RMSNorm because the
+    ///   cross-layer residual fusion (Issue 645 T3) belongs to the stage
+    ///   that produced the boundary residual — a range pass ending at
+    ///   `hi < n_layers` applies its own deferred FFN residual explicitly
+    ///   (the same `ResidualAddCubeCL` dispatch the full funnel runs after
+    ///   the loop), so the fused-kernel arithmetic
+    ///   (`rmsnorm(x + r) == rmsnorm_kernel(x += r)`) is reproduced
+    ///   bit-exactly. With `ternary_gemv_residual` the down GEMV already
+    ///   applied every residual in place and every layer used the
+    ///   standalone norm anyway — the boundary is structurally clean.
+    /// - `hi == n_layers` — final RMSNorm + folded lm_head run (the LAST
+    ///   stage produces logits); a middle stage leaves the post-loop
+    ///   residual stream in `x` as the handoff payload (read via
+    ///   [`Self::read_hidden_state`]).
+    /// - `advance_pos` — the 1-box funnel advances `self.pos` per token;
+    ///   a stage pass must NOT (every stage of one token schedules at the
+    ///   same position; the stage runtime owns position scheduling via
+    ///   [`Self::set_pos`], mirroring the CPU range's `pos` parameter).
+    #[allow(clippy::too_many_arguments)]
+    fn forward_from_x_body_range(
+        &mut self,
+        n: usize,
+        eps: f32,
+        n_v_heads: usize,
+        head_dim: usize,
+        z_dim: usize,
+        conv_dim: usize,
+        kernel_size: usize,
+        mlp: usize,
+        vocab: usize,
+        lo: usize,
+        hi: usize,
+        advance_pos: bool,
+    ) {
+        debug_assert!(
+            lo < hi && hi <= self.layers.len(),
+            "bad layer range [{lo},{hi})"
+        );
         // Issue 980 T4-ALT / Plan 602 B3 — the decode funnels CARRY the
         // rotation on folded models now (this is the folded decode lane,
         // mirroring the cudarc eager wiring): every folded projection
@@ -4793,7 +4959,8 @@ impl TernaryDeltanetGpuForward {
         ))]
         crate::prefill_cuda_full::notify_cubcl_mutated();
 
-        for (layer_idx, layer_w) in self.layers.iter().enumerate() {
+        for (i, layer_w) in self.layers[lo..hi].iter().enumerate() {
+            let layer_idx = lo + i;
             let is_deltanet = self.layer_types[layer_idx] == DeltaNetLayerType::DeltaNet;
 
             // ── Input RMSNorm (or fused with previous layer's FFN residual) ──
@@ -4807,7 +4974,14 @@ impl TernaryDeltanetGpuForward {
             // When `ternary_gemv_residual` is enabled, the previous layer's down
             // GEMV already applied the residual (fused into the GEMV writing
             // directly to `self.x`), so standalone RMSNorm suffices.
-            if layer_idx == 0 || cfg!(feature = "ternary_gemv_residual") {
+            //
+            // Plan 623 T1.5: `layer_idx == lo` replaces `== 0` — a stage's
+            // FIRST layer always takes the standalone norm. At `lo == 0` this
+            // is the historical condition unchanged; at `lo > 0` the incoming
+            // `x` already carries the boundary residual (the producing stage
+            // applied it explicitly after its loop), so the standalone norm
+            // reads exactly what the fused kernel would have read.
+            if layer_idx == lo || cfg!(feature = "ternary_gemv_residual") {
                 // Standalone RMSNorm: first layer (no preceding residual), or
                 // ternary_gemv_residual already applied the residual in the down GEMV.
                 if decode_stage_on(0) {
@@ -5039,6 +5213,14 @@ impl TernaryDeltanetGpuForward {
         // When `ternary_gemv_residual` is OFF, the last layer's down GEMV wrote
         // to `self.ffn_out` but the residual add hasn't happened yet (it was
         // deferred for fusion with a next layer that doesn't exist).
+        //
+        // Plan 623 T1.5: the same dispatch is the STAGE-BOUNDARY law — a range
+        // pass ending at `hi < n_layers` applies its own boundary residual
+        // explicitly so `x` leaves as the post-residual stream the next stage's
+        // standalone input norm expects. Same kernel, same arithmetic order the
+        // full funnel's fused kernel would apply it in (bit-exact; the
+        // `residual_add_rmsnorm_f32` Phase-1 add IS `a[i] + b[i]`, one
+        // rounding, identical to `ResidualAddCubeCL`).
         #[cfg(not(feature = "ternary_gemv_residual"))]
         if n_layers > 0 {
             unsafe {
@@ -5052,43 +5234,50 @@ impl TernaryDeltanetGpuForward {
             }
         }
 
-        // Final RMSNorm
-        unsafe {
-            RmsNormCubeCL::launch::<ActiveRuntime>(
-                &self.client,
-                self.x.clone(),
-                self.final_norm.clone(),
-                self.norm_x.clone(),
-                n,
-                eps,
-            );
-        }
+        // Final RMSNorm + folded lm_head — the LAST stage only (Plan 623 T1.5:
+        // a middle stage leaves the post-loop residual stream in `x` as the
+        // handoff payload; the full funnel is the `hi == n_layers` case).
+        if hi == n_layers {
+            // Final RMSNorm
+            unsafe {
+                RmsNormCubeCL::launch::<ActiveRuntime>(
+                    &self.client,
+                    self.x.clone(),
+                    self.final_norm.clone(),
+                    self.norm_x.clone(),
+                    n,
+                    eps,
+                );
+            }
 
-        // Plan 602 B3 — folded site 8 of 8: the lm_head is folded; it
-        // consumes the ROTATED final norm. Staged into `rot_scratch` so
-        // `norm_x` stays PRIMAL — `forward_token_with_final_hidden`'s
-        // hidden-state contract is preserved unchanged.
-        if self.rot_tables.is_some() {
-            self.stage_rotated_norm_x();
-        }
-        let lm_in = if self.rot_tables.is_some() {
-            self.rot_scratch.clone()
-        } else {
-            self.norm_x.clone()
-        };
+            // Plan 602 B3 — folded site 8 of 8: the lm_head is folded; it
+            // consumes the ROTATED final norm. Staged into `rot_scratch` so
+            // `norm_x` stays PRIMAL — `forward_token_with_final_hidden`'s
+            // hidden-state contract is preserved unchanged.
+            if self.rot_tables.is_some() {
+                self.stage_rotated_norm_x();
+            }
+            let lm_in = if self.rot_tables.is_some() {
+                self.rot_scratch.clone()
+            } else {
+                self.norm_x.clone()
+            };
 
-        // LM head: logits = W_lm_head @ (rotated)? norm_x
-        unsafe {
-            GemvTernaryCubeCL::launch::<ActiveRuntime>(
-                &self.client,
-                &self.lm_head,
-                lm_in,
-                self.logits.clone(),
-            );
+            // LM head: logits = W_lm_head @ (rotated)? norm_x
+            unsafe {
+                GemvTernaryCubeCL::launch::<ActiveRuntime>(
+                    &self.client,
+                    &self.lm_head,
+                    lm_in,
+                    self.logits.clone(),
+                );
+            }
         }
 
         let _ = vocab;
-        self.pos += 1;
+        if advance_pos {
+            self.pos += 1;
+        }
         // Issue 994: decode launches reserve uniform buffers from the same
         // pool — a poisoning mid-decode must not leave as a successful tick.
         Self::refuse_if_pool_poisoned("after decode");
@@ -6576,7 +6765,9 @@ impl TernaryDeltanetGpuForward {
                     let t0 = (PREFILL_SITE_TIMING_ARMED.load(std::sync::atomic::Ordering::Relaxed))
                         .then(std::time::Instant::now);
                     if let Err(e) = gemm.dispatch(client, cache, w, input, output, p) {
-                        eprintln!("[Issue 663 T5] zero-copy dispatch failed ({e}); falling through");
+                        eprintln!(
+                            "[Issue 663 T5] zero-copy dispatch failed ({e}); falling through"
+                        );
                     } else {
                         if let Some(t0) = t0 {
                             prefill_site_timing_record(site, t0.elapsed());
