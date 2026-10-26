@@ -8277,7 +8277,9 @@ mod tests {
             .launch_rmsnorm_batched(stream, &k_dev, &kg_g, &k_dev, n_kv, hd, eps)
             .unwrap();
         kernels
-            .launch_rope(stream, &q_dev, &k_dev, rotary, hd, n_head, n_kv, pos, theta_base)
+            .launch_rope(
+                stream, &q_dev, &k_dev, rotary, hd, n_head, n_kv, pos, theta_base,
+            )
             .unwrap();
         kernels
             .launch_kv_cache_append(stream, &k_dev, &v_dev, &kc_dev, &vc_dev, kvd, pos)
@@ -8297,15 +8299,15 @@ mod tests {
         if let Some(pos_dev) = pos_dev {
             kernels
                 .launch_attn_chain_fused_devpos(
-                    stream, &qg2, &k2, &v2, &qg_g, &kg_g, &q2, &gate2, &k2, &kc2, &vc2, rotary,
-                    hd, n_head, n_kv, kvd, pos_dev, theta_base, eps,
+                    stream, &qg2, &k2, &v2, &qg_g, &kg_g, &q2, &gate2, &k2, &kc2, &vc2, rotary, hd,
+                    n_head, n_kv, kvd, pos_dev, theta_base, eps,
                 )
                 .unwrap();
         } else {
             kernels
                 .launch_attn_chain_fused(
-                    stream, &qg2, &k2, &v2, &qg_g, &kg_g, &q2, &gate2, &k2, &kc2, &vc2, rotary,
-                    hd, n_head, n_kv, kvd, pos, theta_base, eps,
+                    stream, &qg2, &k2, &v2, &qg_g, &kg_g, &q2, &gate2, &k2, &kc2, &vc2, rotary, hd,
+                    n_head, n_kv, kvd, pos, theta_base, eps,
                 )
                 .unwrap();
         }
@@ -8330,9 +8332,7 @@ mod tests {
         stream.memcpy_dtoh(&k2, &mut k_b).unwrap();
         stream.memcpy_dtoh(&kc2, &mut kc_b).unwrap();
         stream.memcpy_dtoh(&vc2, &mut vc_b).unwrap();
-        (
-            q_a, gate_a, k_a, kc_a, vc_a, q_b, gate_b, k_b, kc_b, vc_b,
-        )
+        (q_a, gate_a, k_a, kc_a, vc_a, q_b, gate_b, k_b, kc_b, vc_b)
     }
 
     /// Issue 1126 follow-up — the attention-chain merge
@@ -8388,9 +8388,23 @@ mod tests {
 
                 let (q_a, gate_a, k_a, kc_a, vc_a, q_b, gate_b, k_b, kc_b, vc_b) =
                     run_attn_chain_arms(
-                        &kernels, &stream, &qg_host, &k_host, &v_host, &q_gamma_host,
-                        &k_gamma_host, n_head, n_kv, hd, rotary, kvd, pos, None, kvd * max_seq,
-                        theta, eps,
+                        &kernels,
+                        &stream,
+                        &qg_host,
+                        &k_host,
+                        &v_host,
+                        &q_gamma_host,
+                        &k_gamma_host,
+                        n_head,
+                        n_kv,
+                        hd,
+                        rotary,
+                        kvd,
+                        pos,
+                        None,
+                        kvd * max_seq,
+                        theta,
+                        eps,
                     );
                 let what = format!("f32 {n_head}/{n_kv}/{hd}/rot{rotary} pos{pos}");
                 assert_bits_eq(&q_a, &q_b, &format!("{what}: q"));
@@ -8407,9 +8421,23 @@ mod tests {
                     let pos_dev = stream.clone_htod(&[pos as i32]).unwrap();
                     let (q_a, gate_a, k_a, kc_a, vc_a, q_b, gate_b, k_b, kc_b, vc_b) =
                         run_attn_chain_arms(
-                            &kernels, &stream, &qg_host, &k_host, &v_host, &q_gamma_host,
-                            &k_gamma_host, n_head, n_kv, hd, rotary, kvd, pos, Some(&pos_dev),
-                            kvd * max_seq, theta, eps,
+                            &kernels,
+                            &stream,
+                            &qg_host,
+                            &k_host,
+                            &v_host,
+                            &q_gamma_host,
+                            &k_gamma_host,
+                            n_head,
+                            n_kv,
+                            hd,
+                            rotary,
+                            kvd,
+                            pos,
+                            Some(&pos_dev),
+                            kvd * max_seq,
+                            theta,
+                            eps,
                         );
                     let what = "devpos 24/4/256/rot64 pos5";
                     assert_bits_eq(&q_a, &q_b, &format!("{what}: q"));
@@ -8427,9 +8455,23 @@ mod tests {
                     let cache_words = kvd * max_seq / 2;
                     let (q_a, gate_a, k_a, kc_a, vc_a, q_b, gate_b, k_b, kc_b, vc_b) =
                         run_attn_chain_arms(
-                            &kernels_f16, &stream, &qg_host, &k_host, &v_host, &q_gamma_host,
-                            &k_gamma_host, n_head, n_kv, hd, rotary, kvd, pos, None, cache_words,
-                            theta, eps,
+                            &kernels_f16,
+                            &stream,
+                            &qg_host,
+                            &k_host,
+                            &v_host,
+                            &q_gamma_host,
+                            &k_gamma_host,
+                            n_head,
+                            n_kv,
+                            hd,
+                            rotary,
+                            kvd,
+                            pos,
+                            None,
+                            cache_words,
+                            theta,
+                            eps,
                         );
                     let what = "f16 24/4/256/rot64 pos5";
                     assert_bits_eq(&q_a, &q_b, &format!("{what}: q"));

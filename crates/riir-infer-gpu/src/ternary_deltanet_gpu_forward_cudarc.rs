@@ -5109,9 +5109,7 @@ fn forward_attention_layer(
         .value_cache
         .as_ref()
         .expect("value_cache");
-    let chain_fusable = rotary_dim.is_multiple_of(2)
-        && rotary_dim / 2 <= 256
-        && n_kv <= n_head;
+    let chain_fusable = rotary_dim.is_multiple_of(2) && rotary_dim / 2 <= 256 && n_kv <= n_head;
     if chain_fusable && attn_chain_fused_enabled() {
         // The Bench-768 vacuous-guard lesson: bit-identical outputs alone
         // cannot distinguish the fused dispatch from a silently-unread env —
@@ -5875,9 +5873,7 @@ fn forward_attention_layer_devpos(
         .value_cache
         .as_ref()
         .expect("value_cache");
-    let chain_fusable = rotary_dim.is_multiple_of(2)
-        && rotary_dim / 2 <= 256
-        && n_kv <= n_head;
+    let chain_fusable = rotary_dim.is_multiple_of(2) && rotary_dim / 2 <= 256 && n_kv <= n_head;
     if chain_fusable && attn_chain_fused_enabled() {
         // The Bench-768 vacuous-guard lesson — the graph lane's reach proof.
         static REACH: std::sync::OnceLock<()> = std::sync::OnceLock::new();
