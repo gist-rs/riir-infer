@@ -1,6 +1,8 @@
 # Issue 1134 — rung: norm-pair epilogue fold (input_norm + mid_norm into the producer kernels' epilogues)
 
-**Status:** Open — filed 2026-10-27 ~06:4x +07 from the i1132 census (Bench 1008, W1+W2 reproduced). Unclaimed.
+**Status:** Open — filed 2026-10-27 ~06:4x +07 from the i1132 census (Bench 1008, W1+W2 reproduced).
+**Claimed:** zed-m3-1134-normfold, 1793057807, expires 2026-10-28T23:36:47+00:00
+The m3 Metal lane (the norm pair rides the CubeCL decode path — the same lane as the banked 1130/1129 rungs). One 1130-informed pricing caveat the A/B must test, not assume: the 1130 G2 (5 verified-idle runs, closed 2026-10-27) measured that the eliminated Split2 launch was FULLY overlapped by the neighbor GEMV's tail — launch-floor savings alone realized ~0%. The norm pair differs in kind (its 1.11/1.08 ms is census-masked WORK — real RMSNorm exec, not a movement op — so the fold removes launch floor AND redistributes real compute over existing threads; the recovery odds are structurally better), but the G2 bar stays 1.5% e2e and the A/B must be per-run interleaved from birth (`I1130_INTERLEAVE`-class sampling — the block-ABBA instrument measured a ±3-5% mirror confound on this exact box, three runs identical; the banked interleave harness is the pattern).
 The trigger: the census ranks the norm pair as the top un-lane'd floor class — **input_norm 1.11 + mid_norm 1.08 = 2.19 ms/token combined (11.8% of ALL 14.89), 128 launches x ~17 us/launch** (W1/bmo idle), reproduced W2/amo at 1.88 + 1.67 = 3.55 (same launches, +16% common-mode). The pair wraps every layer (64x input_norm + 64x mid_norm), each its own dispatch at ~17 us — squarely the "fewer, fatter launches" lever.
 
 ## The shape (why this is NOT the 905 NULL class)
