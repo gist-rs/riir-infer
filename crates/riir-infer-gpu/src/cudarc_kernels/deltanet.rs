@@ -3518,7 +3518,7 @@ mod tests {
         for &(n_k, n_v, hd) in &geometries {
             let compact_len = 2 * n_k * hd + n_v * hd; // [Q(n_k·hd)|K(n_k·hd)|V(n_v·hd)]
             let expanded_len = 3 * n_v * hd;
-            let mut seed: u64 = 0x1126_bdef_caFE_0002;
+            let mut seed: u64 = 0x1126_bdef_cafe_0002;
             let mut next = || {
                 seed = seed
                     .wrapping_mul(6364136223846793005)

@@ -480,6 +480,352 @@ extern "C" __global__ void kv_cache_append_f32(
 }
 
 // ---------------------------------------------------------------------------
+// Issue 1126 follow-up — the attention-chain rung (5 launches → 1):
+// split_qg → per-head RMSNorm(Q) → per-head RMSNorm(K) → partial RoPE(Q,K)
+// → KV append in ONE launch. Every launch in this chain is launch-bound at
+// decode (24 heads × 256 dims of work per launch, ~µs each), so the win is
+// the removed launch overhead, not the arithmetic.
+//
+// Bit-identity law: every body is VERBATIM from its standalone kernel
+// (split_qg_f32 / rmsnorm_batched_f32 / rope_partial_f32 /
+// kv_cache_append_f32) — same inputs, same instruction sequences, same
+// nvrtc module → identical values. The dataflow re-ordering is confined to
+// block-local barriers:
+//   A1  Q-half RMSNorm reduction (strided + 256-thread tree, verbatim)
+//   A2  K-half RMSNorm reduction — block-uniform branch (`h < n_kv_head`),
+//       so the inner __syncthreads() are legal
+//   B   normalize+write Q, gate copy, normalize+write K, V append
+//   C   RoPE reads into registers (ALL reads pre-barrier — the classic
+//       in-place rope race needs both pair elements read before ANY pair
+//       write) + the k-tail passthrough (k_out tail is never written by
+//       rope, so the copy is race-free vs the same barrier)
+//       → __syncthreads() → rotate+write q, k_out and the key-cache row.
+// The key/value cache rows produced are element-for-element the incumbent's
+// (KV_WR handles the KV_F16 conversion in both postures).
+//
+// Dispatch guards (launcher caller): rotary_dim even AND rotary_dim/2 ≤ 256
+// (one pair per thread) AND n_kv_head ≤ n_head. Outside the guards the
+// incumbent chain stays byte-identical.
+// ---------------------------------------------------------------------------
+
+extern "C" __global__ void attn_chain_fused_f32(
+    const float* __restrict__ qg,        // [n_head * 2 * head_dim] interleaved
+    const float* __restrict__ k_in,      // [n_kv_head * head_dim]
+    const float* __restrict__ v_in,      // [n_kv_head * head_dim]
+    const float* __restrict__ q_gamma,   // [head_dim]
+    const float* __restrict__ k_gamma,   // [head_dim]
+    float* __restrict__ q,               // [n_head * head_dim] out (normed+roped)
+    float* __restrict__ gate,            // [n_head * head_dim] out
+    float* __restrict__ k_out,           // [n_kv_head * head_dim] out (normed+roped)
+    kv_elt* __restrict__ key_cache,      // [max_seq_len * kvd]
+    kv_elt* __restrict__ value_cache,    // [max_seq_len * kvd]
+    const float inv_dim,                 // 1 / head_dim
+    const float eps,
+    const int rotary_dim,
+    const int head_dim,
+    const int n_kv_head,
+    const int kvd,
+    const int pos,
+    const float theta_base)
+{
+    const int h = blockIdx.x;            // one block per Q head
+    const int tid = threadIdx.x;
+    const int block_size = blockDim.x;   // 256
+    const int hd = head_dim;
+    const int rotary_pairs = rotary_dim / 2;
+    const int qg_base = h * 2 * hd;      // q half; gate half at +hd
+
+    // ---- A1: per-head RMSNorm reduction over the Q half (verbatim from
+    // rmsnorm_batched_f32 phases 1–3, reading the qg q-half values the
+    // incumbent's split kernel would have copied). ----
+    float partial_sq = 0.0f;
+    for (int i = tid; i < hd; i += block_size) {
+        float x = qg[qg_base + i];
+        partial_sq += x * x;
+    }
+    __shared__ float smem[256];
+    smem[tid] = partial_sq;
+    __syncthreads();
+    if (tid < 128) smem[tid] += smem[tid + 128]; __syncthreads();
+    if (tid < 64)  smem[tid] += smem[tid + 64];  __syncthreads();
+    if (tid < 32)  smem[tid] += smem[tid + 32];  __syncthreads();
+    if (tid < 16)  smem[tid] += smem[tid + 16];  __syncthreads();
+    if (tid < 8)   smem[tid] += smem[tid + 8];   __syncthreads();
+    if (tid < 4)   smem[tid] += smem[tid + 4];   __syncthreads();
+    if (tid < 2)   smem[tid] += smem[tid + 2];   __syncthreads();
+    if (tid < 1)   smem[0] += smem[1];
+    __syncthreads();
+    if (tid == 0) {
+        float mean_sq = smem[0] * inv_dim;
+        smem[0] = 1.0f / sqrtf(mean_sq + eps);
+    }
+    __syncthreads();
+    const float inv_rms_q = smem[0];
+    __syncthreads();  // smem is reused by A2 — all reads must complete first
+
+    // ---- A2: K-half RMSNorm reduction (blocks h < n_kv_head only; the
+    // branch is block-uniform so the barriers inside are legal). ----
+    float inv_rms_k = 0.0f;
+    if (h < n_kv_head) {
+        const int k_base = h * hd;
+        float partial_k = 0.0f;
+        for (int i = tid; i < hd; i += block_size) {
+            float x = k_in[k_base + i];
+            partial_k += x * x;
+        }
+        smem[tid] = partial_k;
+        __syncthreads();
+        if (tid < 128) smem[tid] += smem[tid + 128]; __syncthreads();
+        if (tid < 64)  smem[tid] += smem[tid + 64];  __syncthreads();
+        if (tid < 32)  smem[tid] += smem[tid + 32];  __syncthreads();
+        if (tid < 16)  smem[tid] += smem[tid + 16];  __syncthreads();
+        if (tid < 8)   smem[tid] += smem[tid + 8];   __syncthreads();
+        if (tid < 4)   smem[tid] += smem[tid + 4];   __syncthreads();
+        if (tid < 2)   smem[tid] += smem[tid + 2];   __syncthreads();
+        if (tid < 1)   smem[0] += smem[1];
+        __syncthreads();
+        if (tid == 0) {
+            float mean_sq = smem[0] * inv_dim;
+            smem[0] = 1.0f / sqrtf(mean_sq + eps);
+        }
+        __syncthreads();
+        inv_rms_k = smem[0];
+    }
+
+    // ---- B: normalize + copies. The multiply chain is PINNED to the
+    // incumbent rmsnorm lowering (mul.rn(mul.rn(x, inv_rms), gamma)) —
+    // nvcc's fma-contraction pairing is NOT stable across program shapes
+    // even for identical expression text (the shared q/k/cache rotation
+    // below flipped the pairing vs the standalone rope kernel, 1-ULP class),
+    // so every arithmetic site here is pinned with single-rounding
+    // intrinsics to the form the incumbent kernels compile to. ----
+    for (int j = tid; j < hd; j += block_size) {
+        q[h * hd + j] = __fmul_rn(__fmul_rn(qg[qg_base + j], inv_rms_q), q_gamma[j]);
+        gate[h * hd + j] = qg[qg_base + hd + j];
+        if (h < n_kv_head) {
+            k_out[h * hd + j] = __fmul_rn(__fmul_rn(k_in[h * hd + j], inv_rms_k), k_gamma[j]);
+        }
+    }
+    if (h < n_kv_head) {
+        // V append — pure copy, no producer dependency (verbatim row split
+        // of kv_cache_append_f32).
+        for (int j = tid; j < hd; j += block_size) {
+            KV_WR(&value_cache[pos * kvd + h * hd + j], v_in[h * hd + j]);
+        }
+    }
+    __syncthreads();
+
+    // ---- C: partial RoPE. ALL pair reads land in registers before the
+    // barrier; the writes happen after (in-place rope is racy otherwise:
+    // thread t reads q[t + rotary_pairs], thread t - rotary_pairs writes
+    // exactly that slot). The k-tail passthrough ([rotary_dim, hd)) rides
+    // the read phase — rope never writes that range, so it is race-free. ----
+    float q0 = 0.0f, q1 = 0.0f, k0 = 0.0f, k1 = 0.0f;
+    float cos_t = 0.0f, sin_t = 0.0f;
+    if (tid < rotary_pairs) {
+        // Verbatim from rope_partial_f32.
+        const float exponent = 2.0f * (float)tid / (float)rotary_dim;
+        const float inv_freq = powf(theta_base, -exponent);
+        const float theta = (float)pos * inv_freq;
+        cos_t = cosf(theta);
+        sin_t = sinf(theta);
+        const int q_i0 = h * hd + tid;
+        q0 = q[q_i0];
+        q1 = q[q_i0 + rotary_pairs];
+        if (h < n_kv_head) {
+            const int k_i0 = h * hd + tid;
+            k0 = k_out[k_i0];
+            k1 = k_out[k_i0 + rotary_pairs];
+        }
+    }
+    if (h < n_kv_head) {
+        // tail passthrough: tid ∈ [0, hd - rotary_dim) ↔ element tid +
+        // rotary_dim — exactly-once coverage, disjoint from the rope writes.
+        const int j = tid + rotary_dim;
+        if (j < hd) {
+            KV_WR(&key_cache[pos * kvd + h * hd + j], k_out[h * hd + j]);
+        }
+    }
+    __syncthreads();
+    if (tid < rotary_pairs) {
+        const int q_i0 = h * hd + tid;
+        // Pinned to the incumbent rope_partial_f32 lowering, EMPIRICALLY per
+        // slot: nvcc's contraction pairing is NOT stable across program
+        // shapes even for identical expression text — measured on this box
+        // (nvrtc sm_89): the shared q/k/cache rotation flips the ADD-form
+        // pairing (~18% of i1 slots 1-ULP off), and the intrinsic-pinned
+        // SUB form also flips vs plain text — so each slot carries the form
+        // measured bit-clean against the incumbent: plain text for the SUB
+        // (lowers mul,mul,sub both sides), explicit fma.rn for the ADD
+        // (fma.rn(first product, mul.rn(second product))). The bit-identity
+        // test is the guard: any future nvrtc pairing flip reds loud.
+        q[q_i0] = q0 * cos_t - q1 * sin_t;
+        q[q_i0 + rotary_pairs] = __fmaf_rn(q0, sin_t, __fmul_rn(q1, cos_t));
+        if (h < n_kv_head) {
+            const int k_i0 = h * hd + tid;
+            const float kr0 = k0 * cos_t - k1 * sin_t;
+            const float kr1 = __fmaf_rn(k0, sin_t, __fmul_rn(k1, cos_t));
+            k_out[k_i0] = kr0;
+            k_out[k_i0 + rotary_pairs] = kr1;
+            KV_WR(&key_cache[pos * kvd + k_i0], kr0);
+            KV_WR(&key_cache[pos * kvd + k_i0 + rotary_pairs], kr1);
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Issue 618 — devpos twin of attn_chain_fused_f32 for CUDA-Graph capture: the
+// body is VERBATIM (the house devpos law — no device-function extraction; a
+// shared body would change nvcc's contraction context) with `pos` read from
+// the device buffer at kernel runtime instead of a baked scalar. The graph
+// decode lane (forward_from_x_devpos) captures THIS entry; the scalar twin
+// serves the eager lane.
+// ---------------------------------------------------------------------------
+
+extern "C" __global__ void attn_chain_fused_f32_devpos(
+    const float* __restrict__ qg,
+    const float* __restrict__ k_in,
+    const float* __restrict__ v_in,
+    const float* __restrict__ q_gamma,
+    const float* __restrict__ k_gamma,
+    float* __restrict__ q,
+    float* __restrict__ gate,
+    float* __restrict__ k_out,
+    kv_elt* __restrict__ key_cache,
+    kv_elt* __restrict__ value_cache,
+    const float inv_dim,
+    const float eps,
+    const int rotary_dim,
+    const int head_dim,
+    const int n_kv_head,
+    const int kvd,
+    const int* __restrict__ pos_dev,
+    const float theta_base)
+{
+    const int pos = *pos_dev;
+    const int h = blockIdx.x;            // one block per Q head
+    const int tid = threadIdx.x;
+    const int block_size = blockDim.x;   // 256
+    const int hd = head_dim;
+    const int rotary_pairs = rotary_dim / 2;
+    const int qg_base = h * 2 * hd;      // q half; gate half at +hd
+
+    // ---- A1: per-head RMSNorm reduction over the Q half (verbatim from
+    // rmsnorm_batched_f32 phases 1–3, reading the qg q-half values the
+    // incumbent's split kernel would have copied). ----
+    float partial_sq = 0.0f;
+    for (int i = tid; i < hd; i += block_size) {
+        float x = qg[qg_base + i];
+        partial_sq += x * x;
+    }
+    __shared__ float smem[256];
+    smem[tid] = partial_sq;
+    __syncthreads();
+    if (tid < 128) smem[tid] += smem[tid + 128]; __syncthreads();
+    if (tid < 64)  smem[tid] += smem[tid + 64];  __syncthreads();
+    if (tid < 32)  smem[tid] += smem[tid + 32];  __syncthreads();
+    if (tid < 16)  smem[tid] += smem[tid + 16];  __syncthreads();
+    if (tid < 8)   smem[tid] += smem[tid + 8];   __syncthreads();
+    if (tid < 4)   smem[tid] += smem[tid + 4];   __syncthreads();
+    if (tid < 2)   smem[tid] += smem[tid + 2];   __syncthreads();
+    if (tid < 1)   smem[0] += smem[1];
+    __syncthreads();
+    if (tid == 0) {
+        float mean_sq = smem[0] * inv_dim;
+        smem[0] = 1.0f / sqrtf(mean_sq + eps);
+    }
+    __syncthreads();
+    const float inv_rms_q = smem[0];
+    __syncthreads();  // smem is reused by A2 — all reads must complete first
+
+    // ---- A2: K-half RMSNorm reduction (blocks h < n_kv_head only; the
+    // branch is block-uniform so the barriers inside are legal). ----
+    float inv_rms_k = 0.0f;
+    if (h < n_kv_head) {
+        const int k_base = h * hd;
+        float partial_k = 0.0f;
+        for (int i = tid; i < hd; i += block_size) {
+            float x = k_in[k_base + i];
+            partial_k += x * x;
+        }
+        smem[tid] = partial_k;
+        __syncthreads();
+        if (tid < 128) smem[tid] += smem[tid + 128]; __syncthreads();
+        if (tid < 64)  smem[tid] += smem[tid + 64];  __syncthreads();
+        if (tid < 32)  smem[tid] += smem[tid + 32];  __syncthreads();
+        if (tid < 16)  smem[tid] += smem[tid + 16];  __syncthreads();
+        if (tid < 8)   smem[tid] += smem[tid + 8];   __syncthreads();
+        if (tid < 4)   smem[tid] += smem[tid + 4];   __syncthreads();
+        if (tid < 2)   smem[tid] += smem[tid + 2];   __syncthreads();
+        if (tid < 1)   smem[0] += smem[1];
+        __syncthreads();
+        if (tid == 0) {
+            float mean_sq = smem[0] * inv_dim;
+            smem[0] = 1.0f / sqrtf(mean_sq + eps);
+        }
+        __syncthreads();
+        inv_rms_k = smem[0];
+    }
+
+    // ---- B: normalize + copies (pinned multiply chain — see the scalar
+    // twin). ----
+    for (int j = tid; j < hd; j += block_size) {
+        q[h * hd + j] = __fmul_rn(__fmul_rn(qg[qg_base + j], inv_rms_q), q_gamma[j]);
+        gate[h * hd + j] = qg[qg_base + hd + j];
+        if (h < n_kv_head) {
+            k_out[h * hd + j] = __fmul_rn(__fmul_rn(k_in[h * hd + j], inv_rms_k), k_gamma[j]);
+        }
+    }
+    if (h < n_kv_head) {
+        // V append — pure copy, no producer dependency.
+        for (int j = tid; j < hd; j += block_size) {
+            KV_WR(&value_cache[pos * kvd + h * hd + j], v_in[h * hd + j]);
+        }
+    }
+    __syncthreads();
+
+    // ---- C: partial RoPE (pinned forms — see the scalar twin). ----
+    float q0 = 0.0f, q1 = 0.0f, k0 = 0.0f, k1 = 0.0f;
+    float cos_t = 0.0f, sin_t = 0.0f;
+    if (tid < rotary_pairs) {
+        const float exponent = 2.0f * (float)tid / (float)rotary_dim;
+        const float inv_freq = powf(theta_base, -exponent);
+        const float theta = (float)pos * inv_freq;
+        cos_t = cosf(theta);
+        sin_t = sinf(theta);
+        const int q_i0 = h * hd + tid;
+        q0 = q[q_i0];
+        q1 = q[q_i0 + rotary_pairs];
+        if (h < n_kv_head) {
+            const int k_i0 = h * hd + tid;
+            k0 = k_out[k_i0];
+            k1 = k_out[k_i0 + rotary_pairs];
+        }
+    }
+    if (h < n_kv_head) {
+        const int j = tid + rotary_dim;
+        if (j < hd) {
+            KV_WR(&key_cache[pos * kvd + h * hd + j], k_out[h * hd + j]);
+        }
+    }
+    __syncthreads();
+    if (tid < rotary_pairs) {
+        const int q_i0 = h * hd + tid;
+        q[q_i0] = q0 * cos_t - q1 * sin_t;
+        q[q_i0 + rotary_pairs] = __fmaf_rn(q0, sin_t, __fmul_rn(q1, cos_t));
+        if (h < n_kv_head) {
+            const int k_i0 = h * hd + tid;
+            const float kr0 = k0 * cos_t - k1 * sin_t;
+            const float kr1 = __fmaf_rn(k0, sin_t, __fmul_rn(k1, cos_t));
+            k_out[k_i0] = kr0;
+            k_out[k_i0 + rotary_pairs] = kr1;
+            KV_WR(&key_cache[pos * kvd + k_i0], kr0);
+            KV_WR(&key_cache[pos * kvd + k_i0 + rotary_pairs], kr1);
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Flash attention decode kernel (online softmax)
 // ---------------------------------------------------------------------------
 
@@ -3183,6 +3529,13 @@ pub struct AttentionKernels {
     split_qg: CudaFunction,
     rmsnorm_batched: CudaFunction,
     kv_cache_append: CudaFunction,
+    /// Issue 1126 follow-up — the attention-chain rung: split_qg + Q/K
+    /// RMSNorm + partial RoPE + KV append in ONE launch. Bit-identical to
+    /// the 5-launch chain — see the kernel comment.
+    attn_chain_fused: CudaFunction,
+    /// Issue 618 devpos twin — CUDA-Graph capture entry (pos from the device
+    /// buffer at kernel runtime).
+    attn_chain_fused_devpos: CudaFunction,
     /// Issue 618 — device-pointer variant.
     kv_cache_append_devpos: CudaFunction,
     attention_decode: CudaFunction,
@@ -3355,6 +3708,12 @@ impl AttentionKernels {
             .map_err(|e| super::CudarcKernelError::Compile(format!("{e}")))?;
         let kv_cache_append = module
             .load_function("kv_cache_append_f32")
+            .map_err(|e| super::CudarcKernelError::Compile(format!("{e}")))?;
+        let attn_chain_fused = module
+            .load_function("attn_chain_fused_f32")
+            .map_err(|e| super::CudarcKernelError::Compile(format!("{e}")))?;
+        let attn_chain_fused_devpos = module
+            .load_function("attn_chain_fused_f32_devpos")
             .map_err(|e| super::CudarcKernelError::Compile(format!("{e}")))?;
         let kv_cache_append_devpos = module
             .load_function("kv_cache_append_f32_devpos")
@@ -3529,6 +3888,8 @@ impl AttentionKernels {
             split_qg,
             rmsnorm_batched,
             kv_cache_append,
+            attn_chain_fused,
+            attn_chain_fused_devpos,
             kv_cache_append_devpos,
             attention_decode,
             attention_decode_devpos,
@@ -3806,6 +4167,154 @@ impl AttentionKernels {
                 .arg(value_cache)
                 .arg(&kvd_i32)
                 .arg(&pos_i32)
+                .launch(cfg)
+                .map_err(|e| super::CudarcKernelError::Launch(e.to_string()))?;
+        }
+        Ok(())
+    }
+
+    /// Issue 1126 follow-up — the attention-chain rung: split_qg + Q/K
+    /// per-head RMSNorm + partial RoPE + KV append in ONE launch
+    /// (`n_head` blocks × 256 threads; shared 256-float reduction
+    /// scratch). Bit-identical to the 5-launch chain — every kernel body
+    /// verbatim, ordering confined to block-local barriers; see the
+    /// kernel comment for the dataflow + the dispatch guards
+    /// (rotary_dim even, rotary_pairs ≤ 256, n_kv_head ≤ n_head).
+    #[allow(clippy::too_many_arguments)]
+    pub fn launch_attn_chain_fused(
+        &self,
+        stream: &CudaStream,
+        qg: &cudarc::driver::safe::CudaSlice<f32>,
+        k_in: &cudarc::driver::safe::CudaSlice<f32>,
+        v_in: &cudarc::driver::safe::CudaSlice<f32>,
+        q_gamma: &cudarc::driver::safe::CudaSlice<f32>,
+        k_gamma: &cudarc::driver::safe::CudaSlice<f32>,
+        q: &cudarc::driver::safe::CudaSlice<f32>,
+        gate: &cudarc::driver::safe::CudaSlice<f32>,
+        k_out: &cudarc::driver::safe::CudaSlice<f32>,
+        key_cache: &cudarc::driver::safe::CudaSlice<f32>,
+        value_cache: &cudarc::driver::safe::CudaSlice<f32>,
+        rotary_dim: usize,
+        head_dim: usize,
+        n_head: usize,
+        n_kv_head: usize,
+        kvd: usize,
+        pos: usize,
+        theta_base: f32,
+        eps: f32,
+    ) -> Result<(), super::CudarcKernelError> {
+        debug_assert!(
+            rotary_dim.is_multiple_of(2) && rotary_dim / 2 <= 256,
+            "attn_chain_fused needs even rotary_dim with ≤ 256 pairs (got {rotary_dim})"
+        );
+        debug_assert!(
+            n_kv_head <= n_head,
+            "attn_chain_fused needs n_kv_head ({n_kv_head}) ≤ n_head ({n_head})"
+        );
+        let cfg = LaunchConfig {
+            grid_dim: (n_head as u32, 1, 1),
+            block_dim: (256, 1, 1),
+            shared_mem_bytes: 256 * 4, // the reduction tree
+        };
+        let inv_dim = 1.0f32 / head_dim as f32;
+        let rotary_dim_i32 = rotary_dim as i32;
+        let head_dim_i32 = head_dim as i32;
+        let n_kv_head_i32 = n_kv_head as i32;
+        let kvd_i32 = kvd as i32;
+        let pos_i32 = pos as i32;
+        unsafe {
+            stream
+                .launch_builder(&self.attn_chain_fused)
+                .arg(qg)
+                .arg(k_in)
+                .arg(v_in)
+                .arg(q_gamma)
+                .arg(k_gamma)
+                .arg(q)
+                .arg(gate)
+                .arg(k_out)
+                .arg(key_cache)
+                .arg(value_cache)
+                .arg(&inv_dim)
+                .arg(&eps)
+                .arg(&rotary_dim_i32)
+                .arg(&head_dim_i32)
+                .arg(&n_kv_head_i32)
+                .arg(&kvd_i32)
+                .arg(&pos_i32)
+                .arg(&theta_base)
+                .launch(cfg)
+                .map_err(|e| super::CudarcKernelError::Launch(e.to_string()))?;
+        }
+        Ok(())
+    }
+
+    /// Issue 618 devpos twin of [`Self::launch_attn_chain_fused`] — reads
+    /// `pos` from `pos_dev` (1-element device buffer) at kernel runtime so a
+    /// captured CUDA graph replays at any position without recapture. Body
+    /// verbatim (the scalar twin's comment applies in full).
+    #[allow(clippy::too_many_arguments)]
+    pub fn launch_attn_chain_fused_devpos(
+        &self,
+        stream: &CudaStream,
+        qg: &cudarc::driver::safe::CudaSlice<f32>,
+        k_in: &cudarc::driver::safe::CudaSlice<f32>,
+        v_in: &cudarc::driver::safe::CudaSlice<f32>,
+        q_gamma: &cudarc::driver::safe::CudaSlice<f32>,
+        k_gamma: &cudarc::driver::safe::CudaSlice<f32>,
+        q: &cudarc::driver::safe::CudaSlice<f32>,
+        gate: &cudarc::driver::safe::CudaSlice<f32>,
+        k_out: &cudarc::driver::safe::CudaSlice<f32>,
+        key_cache: &cudarc::driver::safe::CudaSlice<f32>,
+        value_cache: &cudarc::driver::safe::CudaSlice<f32>,
+        rotary_dim: usize,
+        head_dim: usize,
+        n_head: usize,
+        n_kv_head: usize,
+        kvd: usize,
+        pos_dev: &cudarc::driver::safe::CudaSlice<i32>,
+        theta_base: f32,
+        eps: f32,
+    ) -> Result<(), super::CudarcKernelError> {
+        debug_assert!(
+            rotary_dim.is_multiple_of(2) && rotary_dim / 2 <= 256,
+            "attn_chain_fused needs even rotary_dim with ≤ 256 pairs (got {rotary_dim})"
+        );
+        debug_assert!(
+            n_kv_head <= n_head,
+            "attn_chain_fused needs n_kv_head ({n_kv_head}) ≤ n_head ({n_head})"
+        );
+        let cfg = LaunchConfig {
+            grid_dim: (n_head as u32, 1, 1),
+            block_dim: (256, 1, 1),
+            shared_mem_bytes: 256 * 4, // the reduction tree
+        };
+        let inv_dim = 1.0f32 / head_dim as f32;
+        let rotary_dim_i32 = rotary_dim as i32;
+        let head_dim_i32 = head_dim as i32;
+        let n_kv_head_i32 = n_kv_head as i32;
+        let kvd_i32 = kvd as i32;
+        unsafe {
+            stream
+                .launch_builder(&self.attn_chain_fused_devpos)
+                .arg(qg)
+                .arg(k_in)
+                .arg(v_in)
+                .arg(q_gamma)
+                .arg(k_gamma)
+                .arg(q)
+                .arg(gate)
+                .arg(k_out)
+                .arg(key_cache)
+                .arg(value_cache)
+                .arg(&inv_dim)
+                .arg(&eps)
+                .arg(&rotary_dim_i32)
+                .arg(&head_dim_i32)
+                .arg(&n_kv_head_i32)
+                .arg(&kvd_i32)
+                .arg(pos_dev)
+                .arg(&theta_base)
                 .launch(cfg)
                 .map_err(|e| super::CudarcKernelError::Launch(e.to_string()))?;
         }
@@ -7110,13 +7619,18 @@ mod tests {
 
     fn assert_bits_eq(a: &[f32], b: &[f32], what: &str) {
         assert_eq!(a.len(), b.len(), "{what}: length mismatch");
+        let mut mismatch_idx: Vec<usize> = Vec::new();
         for (i, (x, y)) in a.iter().zip(b.iter()).enumerate() {
-            assert_eq!(
-                x.to_bits(),
-                y.to_bits(),
-                "{what}: bit mismatch at {i}: {x:?} vs {y:?}"
-            );
+            if x.to_bits() != y.to_bits() {
+                mismatch_idx.push(i);
+            }
         }
+        assert!(
+            mismatch_idx.is_empty(),
+            "{what}: {} bit mismatches at {:?}",
+            mismatch_idx.len(),
+            &mismatch_idx[..mismatch_idx.len().min(160)]
+        );
     }
 
     #[test]
@@ -7700,5 +8214,275 @@ mod tests {
                 "kb canonical row {r}: head-0 segment did not move"
             );
         }
+    }
+
+    /// Issue 1126 follow-up — run BOTH arms of the attention-chain merge
+    /// (incumbent 5-launch chain vs `launch_attn_chain_fused`) on fresh
+    /// buffers and return the ten host vectors: q/gate/k + key/value caches
+    /// for each arm. `cache_words` is the caller's cache buffer length in
+    /// f32 words — `kvd*max_seq` on the f32 module, `kvd*max_seq/2` on the
+    /// KV_F16 module (kv_elt halves pack 2-per-word; every tested shape has
+    /// an even kvd·max_seq, so the words bound is exact).
+    #[allow(clippy::too_many_arguments)]
+    #[allow(clippy::type_complexity)]
+    fn run_attn_chain_arms(
+        kernels: &AttentionKernels,
+        stream: &std::sync::Arc<CudaStream>,
+        qg_host: &[f32],
+        k_host: &[f32],
+        v_host: &[f32],
+        q_gamma_host: &[f32],
+        k_gamma_host: &[f32],
+        n_head: usize,
+        n_kv: usize,
+        hd: usize,
+        rotary: usize,
+        kvd: usize,
+        pos: usize,
+        pos_dev: Option<&cudarc::driver::safe::CudaSlice<i32>>,
+        cache_words: usize,
+        theta_base: f32,
+        eps: f32,
+    ) -> (
+        Vec<f32>,
+        Vec<f32>,
+        Vec<f32>,
+        Vec<f32>,
+        Vec<f32>,
+        Vec<f32>,
+        Vec<f32>,
+        Vec<f32>,
+        Vec<f32>,
+        Vec<f32>,
+    ) {
+        let q_dim = n_head * hd;
+
+        // ── Incumbent chain: split → q-norm → k-norm → rope → append. ──
+        let qg_dev = stream.clone_htod(qg_host).unwrap();
+        let k_dev = stream.clone_htod(k_host).unwrap();
+        let v_dev = stream.clone_htod(v_host).unwrap();
+        let qg_g = stream.clone_htod(q_gamma_host).unwrap();
+        let kg_g = stream.clone_htod(k_gamma_host).unwrap();
+        let q_dev = stream.alloc_zeros::<f32>(q_dim).unwrap();
+        let gate_dev = stream.alloc_zeros::<f32>(q_dim).unwrap();
+        let kc_dev = stream.alloc_zeros::<f32>(cache_words).unwrap();
+        let vc_dev = stream.alloc_zeros::<f32>(cache_words).unwrap();
+        kernels
+            .launch_split_qg(stream, &qg_dev, &q_dev, &gate_dev, hd, n_head)
+            .unwrap();
+        kernels
+            .launch_rmsnorm_batched(stream, &q_dev, &qg_g, &q_dev, n_head, hd, eps)
+            .unwrap();
+        kernels
+            .launch_rmsnorm_batched(stream, &k_dev, &kg_g, &k_dev, n_kv, hd, eps)
+            .unwrap();
+        kernels
+            .launch_rope(
+                stream, &q_dev, &k_dev, rotary, hd, n_head, n_kv, pos, theta_base,
+            )
+            .unwrap();
+        kernels
+            .launch_kv_cache_append(stream, &k_dev, &v_dev, &kc_dev, &vc_dev, kvd, pos)
+            .unwrap();
+
+        // Fused arm — fresh buffers, ONE launch. k rides the same
+        // in-place alias the incumbent chain uses (k_in == k_out).
+        // `pos_dev` is Some on the devpos twin (pos rides the device buffer,
+        // the Issue-618 graph-capture law); None = the scalar entry.
+        let qg2 = stream.clone_htod(qg_host).unwrap();
+        let k2 = stream.clone_htod(k_host).unwrap();
+        let v2 = stream.clone_htod(v_host).unwrap();
+        let q2 = stream.alloc_zeros::<f32>(q_dim).unwrap();
+        let gate2 = stream.alloc_zeros::<f32>(q_dim).unwrap();
+        let kc2 = stream.alloc_zeros::<f32>(cache_words).unwrap();
+        let vc2 = stream.alloc_zeros::<f32>(cache_words).unwrap();
+        if let Some(pos_dev) = pos_dev {
+            kernels
+                .launch_attn_chain_fused_devpos(
+                    stream, &qg2, &k2, &v2, &qg_g, &kg_g, &q2, &gate2, &k2, &kc2, &vc2, rotary, hd,
+                    n_head, n_kv, kvd, pos_dev, theta_base, eps,
+                )
+                .unwrap();
+        } else {
+            kernels
+                .launch_attn_chain_fused(
+                    stream, &qg2, &k2, &v2, &qg_g, &kg_g, &q2, &gate2, &k2, &kc2, &vc2, rotary, hd,
+                    n_head, n_kv, kvd, pos, theta_base, eps,
+                )
+                .unwrap();
+        }
+
+        let mut q_a = vec![0f32; q_dim];
+        let mut gate_a = vec![0f32; q_dim];
+        let mut k_a = vec![0f32; kvd];
+        let mut kc_a = vec![0f32; cache_words];
+        let mut vc_a = vec![0f32; cache_words];
+        let mut q_b = vec![0f32; q_dim];
+        let mut gate_b = vec![0f32; q_dim];
+        let mut k_b = vec![0f32; kvd];
+        let mut kc_b = vec![0f32; cache_words];
+        let mut vc_b = vec![0f32; cache_words];
+        stream.memcpy_dtoh(&q_dev, &mut q_a).unwrap();
+        stream.memcpy_dtoh(&gate_dev, &mut gate_a).unwrap();
+        stream.memcpy_dtoh(&k_dev, &mut k_a).unwrap();
+        stream.memcpy_dtoh(&kc_dev, &mut kc_a).unwrap();
+        stream.memcpy_dtoh(&vc_dev, &mut vc_a).unwrap();
+        stream.memcpy_dtoh(&q2, &mut q_b).unwrap();
+        stream.memcpy_dtoh(&gate2, &mut gate_b).unwrap();
+        stream.memcpy_dtoh(&k2, &mut k_b).unwrap();
+        stream.memcpy_dtoh(&kc2, &mut kc_b).unwrap();
+        stream.memcpy_dtoh(&vc2, &mut vc_b).unwrap();
+        (q_a, gate_a, k_a, kc_a, vc_a, q_b, gate_b, k_b, kc_b, vc_b)
+    }
+
+    /// Issue 1126 follow-up — the attention-chain merge
+    /// (`launch_attn_chain_fused`: split_qg + Q/K per-head RMSNorm + partial
+    /// RoPE + KV append in ONE launch) must be BIT-IDENTICAL to the incumbent
+    /// 5-launch chain: q, gate, k AND every cache element `.to_bits()`-equal.
+    /// Covers the Bonsai-2 27B production geometry (24/4/256, rotary 64), an
+    /// off-shape, a full-rotation shape (empty passthrough tail), pos=0 and
+    /// pos>0 cache rows, and the KV_F16 module posture (cache words compared
+    /// bitwise — identical halves ⇒ identical words).
+    #[test]
+    fn test_attn_chain_fused_bit_identical_to_chain() {
+        let Some(_) = cuda_or_skip() else {
+            eprintln!("[skip] no CUDA device");
+            return;
+        };
+        let ctx = CudaContext::new(0).unwrap();
+        let stream = ctx.new_stream().unwrap();
+        let kernels = AttentionKernels::new(ctx.clone()).expect("compile");
+        // The KV_F16 build compiles the SAME source — constructing it proves
+        // the fused kernel loads in that posture too.
+        let kernels_f16 =
+            AttentionKernels::new_with_kv_dtype(ctx.clone(), true).expect("compile f16");
+
+        let eps = 1e-6f32;
+        let theta = 1.0e7f32;
+        // (n_head, n_kv, hd, rotary): production + off-shape + full-rotation.
+        let geometries: [(usize, usize, usize, usize); 3] =
+            [(24, 4, 256, 64), (4, 2, 128, 32), (4, 2, 64, 64)];
+
+        for &(n_head, n_kv, hd, rotary) in &geometries {
+            let q_dim = n_head * hd;
+            let kvd = n_kv * hd;
+            let max_seq = 8usize;
+            for &pos in &[0usize, 5usize] {
+                let mut seed: u64 = 0x1126_a7ca_1afe_0001u64
+                    ^ (n_head as u64)
+                    ^ ((n_kv as u64) << 8)
+                    ^ ((hd as u64) << 16)
+                    ^ ((rotary as u64) << 24)
+                    ^ ((pos as u64) << 32);
+                let mut next = || {
+                    seed = seed
+                        .wrapping_mul(6364136223846793005)
+                        .wrapping_add(1442695040888963407);
+                    ((seed >> 33) as f32 / u32::MAX as f32) * 2.0 - 1.0
+                };
+                let qg_host: Vec<f32> = (0..2 * q_dim).map(|_| next()).collect();
+                let k_host: Vec<f32> = (0..kvd).map(|_| next()).collect();
+                let v_host: Vec<f32> = (0..kvd).map(|_| next()).collect();
+                let q_gamma_host: Vec<f32> = (0..hd).map(|_| 0.5 + next()).collect();
+                let k_gamma_host: Vec<f32> = (0..hd).map(|_| 0.5 + next()).collect();
+
+                let (q_a, gate_a, k_a, kc_a, vc_a, q_b, gate_b, k_b, kc_b, vc_b) =
+                    run_attn_chain_arms(
+                        &kernels,
+                        &stream,
+                        &qg_host,
+                        &k_host,
+                        &v_host,
+                        &q_gamma_host,
+                        &k_gamma_host,
+                        n_head,
+                        n_kv,
+                        hd,
+                        rotary,
+                        kvd,
+                        pos,
+                        None,
+                        kvd * max_seq,
+                        theta,
+                        eps,
+                    );
+                let what = format!("f32 {n_head}/{n_kv}/{hd}/rot{rotary} pos{pos}");
+                assert_bits_eq(&q_a, &q_b, &format!("{what}: q"));
+                assert_bits_eq(&gate_a, &gate_b, &format!("{what}: gate"));
+                assert_bits_eq(&k_a, &k_b, &format!("{what}: k"));
+                assert_bits_eq(&kc_a, &kc_b, &format!("{what}: key_cache"));
+                assert_bits_eq(&vc_a, &vc_b, &format!("{what}: value_cache"));
+                eprintln!("[attn_chain_fused] {what}: f32 posture bit-identical");
+
+                // devpos twin ≡ scalar entry at equal pos (the Issue-618 law
+                // this kernel pair must hold: the graph lane captures the
+                // devpos entry, the eager lane the scalar one — one verdict).
+                if n_head == 24 && pos == 5 {
+                    let pos_dev = stream.clone_htod(&[pos as i32]).unwrap();
+                    let (q_a, gate_a, k_a, kc_a, vc_a, q_b, gate_b, k_b, kc_b, vc_b) =
+                        run_attn_chain_arms(
+                            &kernels,
+                            &stream,
+                            &qg_host,
+                            &k_host,
+                            &v_host,
+                            &q_gamma_host,
+                            &k_gamma_host,
+                            n_head,
+                            n_kv,
+                            hd,
+                            rotary,
+                            kvd,
+                            pos,
+                            Some(&pos_dev),
+                            kvd * max_seq,
+                            theta,
+                            eps,
+                        );
+                    let what = "devpos 24/4/256/rot64 pos5";
+                    assert_bits_eq(&q_a, &q_b, &format!("{what}: q"));
+                    assert_bits_eq(&gate_a, &gate_b, &format!("{what}: gate"));
+                    assert_bits_eq(&k_a, &k_b, &format!("{what}: k"));
+                    assert_bits_eq(&kc_a, &kc_b, &format!("{what}: key_cache"));
+                    assert_bits_eq(&vc_a, &vc_b, &format!("{what}: value_cache"));
+                    eprintln!("[attn_chain_fused] {what}: devpos ≡ scalar (bits)");
+                }
+
+                // KV_F16 posture — production geometry only (the f16 module
+                // compiles the same kernel bodies; cache halves pack 2-per
+                // f32 word and identical halves ⇒ identical words).
+                if n_head == 24 && pos == 5 {
+                    let cache_words = kvd * max_seq / 2;
+                    let (q_a, gate_a, k_a, kc_a, vc_a, q_b, gate_b, k_b, kc_b, vc_b) =
+                        run_attn_chain_arms(
+                            &kernels_f16,
+                            &stream,
+                            &qg_host,
+                            &k_host,
+                            &v_host,
+                            &q_gamma_host,
+                            &k_gamma_host,
+                            n_head,
+                            n_kv,
+                            hd,
+                            rotary,
+                            kvd,
+                            pos,
+                            None,
+                            cache_words,
+                            theta,
+                            eps,
+                        );
+                    let what = "f16 24/4/256/rot64 pos5";
+                    assert_bits_eq(&q_a, &q_b, &format!("{what}: q"));
+                    assert_bits_eq(&gate_a, &gate_b, &format!("{what}: gate"));
+                    assert_bits_eq(&k_a, &k_b, &format!("{what}: k"));
+                    assert_bits_eq(&kc_a, &kc_b, &format!("{what}: key_cache"));
+                    assert_bits_eq(&vc_a, &vc_b, &format!("{what}: value_cache"));
+                    eprintln!("[attn_chain_fused] {what}: KV_F16 posture bit-identical");
+                }
+            }
+        }
+        eprintln!("[attn_chain_fused] all geometries: fused ≡ 5-launch chain (bits)");
     }
 }

@@ -1488,7 +1488,7 @@ mod tests {
             code.split_whitespace().collect::<Vec<_>>().join(" ")
         };
         let mma = extract(ATTENTION_SCORE_MMA_CUDA_SRC);
-        let canonical = extract(&super::super::attention::ATTENTION_CUDA_SRC);
+        let canonical = extract(super::super::attention::ATTENTION_CUDA_SRC);
         assert_eq!(
             mma, canonical,
             "Issue 1113 class: the mma module's kv_f16_to_f32 transcription \

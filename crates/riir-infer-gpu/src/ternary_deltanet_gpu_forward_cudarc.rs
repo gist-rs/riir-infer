@@ -4413,6 +4413,20 @@ fn gdn_beta_expand_fused_enabled() -> bool {
     })
 }
 
+/// Issue 1126 follow-up (the attention-chain rung, Bench 900):
+/// `RIIR_ATTN_CHAIN_FUSED=1` arms the split_qg + Q/K-norm + RoPE + KV-append
+/// merge (FIVE launches → ONE, the attention decode untouched); any other
+/// value (including `=0`) reads OFF.
+fn attn_chain_fused_enabled() -> bool {
+    static ARMED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ARMED.get_or_init(|| {
+        matches!(
+            std::env::var("RIIR_ATTN_CHAIN_FUSED").as_deref(),
+            Ok("1") | Ok("true") | Ok("on")
+        )
+    })
+}
+
 fn gdn_core_fused_enabled() -> bool {
     static ARMED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     *ARMED.get_or_init(|| {
@@ -5077,50 +5091,16 @@ fn forward_attention_layer(
         )?;
     }
 
-    // 2. Split QG into Q and gate.
-    infra.attention.launch_split_qg(
-        &infra.stream,
-        &acts.attn_qg,
-        &acts.attn_q,
-        &acts.attn_gate,
-        hd,
-        n_head,
-    )?;
-
-    // 3. Per-head RMSNorm on Q and K (in-place).
-    infra.attention.launch_rmsnorm_batched(
-        &infra.stream,
-        &acts.attn_q,
-        q_norm,
-        &acts.attn_q,
-        n_head,
-        hd,
-        eps,
-    )?;
-    infra.attention.launch_rmsnorm_batched(
-        &infra.stream,
-        &acts.attn_k,
-        k_norm,
-        &acts.attn_k,
-        n_kv,
-        hd,
-        eps,
-    )?;
-
-    // 4. Partial RoPE on Q and K (in-place).
-    infra.attention.launch_rope(
-        &infra.stream,
-        &acts.attn_q,
-        &acts.attn_k,
-        rotary_dim,
-        hd,
-        n_head,
-        n_kv,
-        pos,
-        theta_base,
-    )?;
-
-    // 5. Append K, V to KV cache.
+    // 2–5. Split QG → Q-norm/K-norm → partial RoPE → KV append.
+    // Issue 1126 follow-up (the attention-chain rung): the FIVE launch-bound
+    // kernels merge into ONE launch (`attn_chain_fused_f32`) — every body
+    // verbatim, ordering confined to block-local barriers → bit-identical
+    // outputs. Gated empirically by the kernel-level bit-identity test + the
+    // real-model walk pin in the A/B (Bench 900).
+    // (env unset) keeps the incumbent 5-launch chain byte-identically;
+    // `RIIR_ATTN_CHAIN_FUSED=1` arms it, any other value (including `=0`)
+    // reads OFF. The training/devpos variants keep the incumbent chain
+    // (decode-only rung, the Bench-899 disposition).
     let key_cache = acts.layer_states[layer_idx]
         .key_cache
         .as_ref()
@@ -5129,15 +5109,93 @@ fn forward_attention_layer(
         .value_cache
         .as_ref()
         .expect("value_cache");
-    infra.attention.launch_kv_cache_append(
-        &infra.stream,
-        &acts.attn_k,
-        &acts.attn_v,
-        key_cache,
-        value_cache,
-        kvd,
-        pos,
-    )?;
+    let chain_fusable = rotary_dim.is_multiple_of(2) && rotary_dim / 2 <= 256 && n_kv <= n_head;
+    if chain_fusable && attn_chain_fused_enabled() {
+        // The Bench-768 vacuous-guard lesson: bit-identical outputs alone
+        // cannot distinguish the fused dispatch from a silently-unread env —
+        // the first-use line is the reach proof in the A/B logs.
+        static REACH: std::sync::OnceLock<()> = std::sync::OnceLock::new();
+        if REACH.set(()).is_ok() {
+            eprintln!(
+                "[attn_chain_fused] REACH: fused dispatch live (n_head={n_head}, n_kv={n_kv}, hd={hd}, rotary={rotary_dim})"
+            );
+        }
+        infra.attention.launch_attn_chain_fused(
+            &infra.stream,
+            &acts.attn_qg,
+            &acts.attn_k,
+            &acts.attn_v,
+            q_norm,
+            k_norm,
+            &acts.attn_q,
+            &acts.attn_gate,
+            &acts.attn_k,
+            key_cache,
+            value_cache,
+            rotary_dim,
+            hd,
+            n_head,
+            n_kv,
+            kvd,
+            pos,
+            theta_base,
+            eps,
+        )?;
+    } else {
+        // 2. Split QG into Q and gate.
+        infra.attention.launch_split_qg(
+            &infra.stream,
+            &acts.attn_qg,
+            &acts.attn_q,
+            &acts.attn_gate,
+            hd,
+            n_head,
+        )?;
+
+        // 3. Per-head RMSNorm on Q and K (in-place).
+        infra.attention.launch_rmsnorm_batched(
+            &infra.stream,
+            &acts.attn_q,
+            q_norm,
+            &acts.attn_q,
+            n_head,
+            hd,
+            eps,
+        )?;
+        infra.attention.launch_rmsnorm_batched(
+            &infra.stream,
+            &acts.attn_k,
+            k_norm,
+            &acts.attn_k,
+            n_kv,
+            hd,
+            eps,
+        )?;
+
+        // 4. Partial RoPE on Q and K (in-place).
+        infra.attention.launch_rope(
+            &infra.stream,
+            &acts.attn_q,
+            &acts.attn_k,
+            rotary_dim,
+            hd,
+            n_head,
+            n_kv,
+            pos,
+            theta_base,
+        )?;
+
+        // 5. Append K, V to KV cache.
+        infra.attention.launch_kv_cache_append(
+            &infra.stream,
+            &acts.attn_k,
+            &acts.attn_v,
+            key_cache,
+            value_cache,
+            kvd,
+            pos,
+        )?;
+    }
     // Plan 614 / Issue 033 — KV-STORE axis (decode half): round this
     // position's just-appended cache row in place to the KV grid (the
     // q8kv deployment spelling) BEFORE the attention kernel reads it.
@@ -5801,50 +5859,12 @@ fn forward_attention_layer_devpos(
         )?;
     }
 
-    // 2. Split QG into Q and gate.
-    infra.attention.launch_split_qg(
-        &infra.stream,
-        &acts.attn_qg,
-        &acts.attn_q,
-        &acts.attn_gate,
-        hd,
-        n_head,
-    )?;
-
-    // 3. Per-head RMSNorm on Q and K (in-place).
-    infra.attention.launch_rmsnorm_batched(
-        &infra.stream,
-        &acts.attn_q,
-        q_norm,
-        &acts.attn_q,
-        n_head,
-        hd,
-        eps,
-    )?;
-    infra.attention.launch_rmsnorm_batched(
-        &infra.stream,
-        &acts.attn_k,
-        k_norm,
-        &acts.attn_k,
-        n_kv,
-        hd,
-        eps,
-    )?;
-
-    // 4. Partial RoPE on Q and K (in-place) — _devpos variant.
-    infra.attention.launch_rope_devpos(
-        &infra.stream,
-        &acts.attn_q,
-        &acts.attn_k,
-        rotary_dim,
-        hd,
-        n_head,
-        n_kv,
-        &acts.pos_dev_buf,
-        theta_base,
-    )?;
-
-    // 5. Append K, V to KV cache — _devpos variant.
+    // 2–5. Split QG → Q-norm/K-norm → partial RoPE → KV append (the devpos
+    // twin of forward_attention_layer's chain — Issue 1127 T1: FIVE launch-
+    // bound kernels merge into ONE launch; same bit-identity law, same env,
+    // the graph-capture entry). Unset/`=0` = the incumbent chain
+    // byte-identically. pos rides pos_dev_buf (the Issue-618 law — the
+    // captured graph replays at any position).
     let key_cache = acts.layer_states[layer_idx]
         .key_cache
         .as_ref()
@@ -5853,15 +5873,91 @@ fn forward_attention_layer_devpos(
         .value_cache
         .as_ref()
         .expect("value_cache");
-    infra.attention.launch_kv_cache_append_devpos(
-        &infra.stream,
-        &acts.attn_k,
-        &acts.attn_v,
-        key_cache,
-        value_cache,
-        kvd,
-        &acts.pos_dev_buf,
-    )?;
+    let chain_fusable = rotary_dim.is_multiple_of(2) && rotary_dim / 2 <= 256 && n_kv <= n_head;
+    if chain_fusable && attn_chain_fused_enabled() {
+        // The Bench-768 vacuous-guard lesson — the graph lane's reach proof.
+        static REACH: std::sync::OnceLock<()> = std::sync::OnceLock::new();
+        if REACH.set(()).is_ok() {
+            eprintln!(
+                "[attn_chain_fused] REACH: fused dispatch live (devpos graph lane, n_head={n_head}, n_kv={n_kv}, hd={hd}, rotary={rotary_dim})"
+            );
+        }
+        infra.attention.launch_attn_chain_fused_devpos(
+            &infra.stream,
+            &acts.attn_qg,
+            &acts.attn_k,
+            &acts.attn_v,
+            q_norm,
+            k_norm,
+            &acts.attn_q,
+            &acts.attn_gate,
+            &acts.attn_k,
+            key_cache,
+            value_cache,
+            rotary_dim,
+            hd,
+            n_head,
+            n_kv,
+            kvd,
+            &acts.pos_dev_buf,
+            theta_base,
+            eps,
+        )?;
+    } else {
+        // 2. Split QG into Q and gate.
+        infra.attention.launch_split_qg(
+            &infra.stream,
+            &acts.attn_qg,
+            &acts.attn_q,
+            &acts.attn_gate,
+            hd,
+            n_head,
+        )?;
+
+        // 3. Per-head RMSNorm on Q and K (in-place).
+        infra.attention.launch_rmsnorm_batched(
+            &infra.stream,
+            &acts.attn_q,
+            q_norm,
+            &acts.attn_q,
+            n_head,
+            hd,
+            eps,
+        )?;
+        infra.attention.launch_rmsnorm_batched(
+            &infra.stream,
+            &acts.attn_k,
+            k_norm,
+            &acts.attn_k,
+            n_kv,
+            hd,
+            eps,
+        )?;
+
+        // 4. Partial RoPE on Q and K (in-place) — _devpos variant.
+        infra.attention.launch_rope_devpos(
+            &infra.stream,
+            &acts.attn_q,
+            &acts.attn_k,
+            rotary_dim,
+            hd,
+            n_head,
+            n_kv,
+            &acts.pos_dev_buf,
+            theta_base,
+        )?;
+
+        // 5. Append K, V to KV cache — _devpos variant.
+        infra.attention.launch_kv_cache_append_devpos(
+            &infra.stream,
+            &acts.attn_k,
+            &acts.attn_v,
+            key_cache,
+            value_cache,
+            kvd,
+            &acts.pos_dev_buf,
+        )?;
+    }
     // Plan 614 / Issue 033 — KV-STORE axis (graphs decode twin; inert under
     // the D5 graphs-off posture, wired for coverage so the graphs lane
     // cannot silently skip the arm).
