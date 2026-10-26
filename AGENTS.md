@@ -107,7 +107,9 @@ gemma-2-2b is RETIRED (riir-train Issue 617): its executed G1 cell was RESCINDED
 the gemma2 seam stays compile-only, and NO new gemma-2-2b execution cells anywhere (T0.3's
 1-box cells, Phase 0/2+ all qwen/bonsai-scoped). The gemma2 ARCHITECTURE lanes that serve
 LIVE products (laya checkpoints, clef-ANE 0.6b) are NOT this retirement — they keep their
-own gates.** Phase 0 deferred (bmo powered off, 1109); Phase 2+ gated on Proposal 042 D1.
+own gates.** Phase 0 UNBLOCKED 2026-10-26 (1109 T0–T3 DONE: bridge live at
+192.168.10.x, bmo workspace + model synced, RPC smoke green; T4 RDMA stays
+owner-physical); Phase 2+ gated on Proposal 042 D1.
 The GLU-fused ternary prefill FFN arm LANDED 2026-10-26 (Issue 1124 T1, the llama.cpp
 #29948 distill — `1320dda`): gate/up weight rows INTERLEAVED in 8-row chunks at
 mirror-build time (`pack_bitplanes_to_q2_interleaved_gate_up` +
@@ -126,6 +128,16 @@ pair path byte-identical). Kernel probe Bench 897 (`.benchmarks/897_issue1124_v1
 GOAT) runs ONLY through the league runner — the internal battery never reaches
 `dispatch_ffn_block` (the vehicle note in the issue) — armed on the league window;
 T3 mined via refine Batch 287 (`d871a0fc`, Plan 292 / Research 325).
+The decode-hold escalation rungs (the Bench-1004 RED response, 2026-10-26) LANDED as
+eval-gated opt-ins with records, zero production change: `RIIR_GDN_CORE_FUSED=1`
+(one-launch GDN core — G1 exact everywhere, G2 −3.5%/−2.1% NEGATIVE, stays opt-in
+default-OFF so the shape is not re-tried blind, Bench 898 `4132d94`) and
+`RIIR_GDN_BETA_EXPAND_FUSED=1` (the 4→3 beta/decay+expand rung — G1 exact ×6 windows,
+G2 direction-positive 3/3 paired windows ~+0.6–1.0% e2e, −1.5% GPU busy, Bench 899
+`8aabe55`; NOT promoted — the league re-cell is owner-gated, agenda in issue 1127).
+`RIIR_QUANTIZE_CENSUS=1` prints the standalone-quantize launch census per capture
+(expected 0 — the K1–K5 fused rotation kernels already eliminate it; the standing
+decode tripwire, falsifier `a2ebb37`). Remaining rungs + the re-cell bundle: issue 1127.
 
 ## Build Commands
 
