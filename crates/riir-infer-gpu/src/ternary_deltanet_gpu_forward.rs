@@ -2133,7 +2133,7 @@ static DECODE_STAGE_MASK: std::sync::atomic::AtomicU32 =
 /// the concat ternary GEMV + its qkv|z split vs the dense f32 escape-set
 /// a/b GEMV pair; both legs also require bit 5, so masking bit 5 still
 /// strips the whole proj region.
-pub const DECODE_STAGE_NAMES: [&str; 11] = [
+pub const DECODE_STAGE_NAMES: [&str; 22] = [
     "input_norm",
     "deltanet",
     "attention",
@@ -2145,10 +2145,32 @@ pub const DECODE_STAGE_NAMES: [&str; 11] = [
     "gdn_outproj",
     "gdn_proj_concat",
     "gdn_proj_dense",
+    // Issue 1132 — the Metal per-dispatch floor census: per-launch-site
+    // refinement bits (the Bench-1006 sub-bit pattern: consulted only when
+    // the parent region bit is on, so masking the parent still strips the
+    // whole region; mask=ALL stays the bit-identical shipping path). One bit
+    // per launch SITE CLASS, so a census row's Δlaunches ÷ Δwall reads that
+    // class's per-launch floor directly. The attention region is NOT
+    // duplicated here — it already carries the Issue-640 per-cluster
+    // instrument (`ATTN_SUBSTAGE_MASK`).
+    "ffn_gate_up",
+    "ffn_swiglu",
+    "ffn_rotate",
+    "ffn_down",
+    "gdn_pre_conv",
+    "gdn_pre_betal2",
+    "gdn_out_zgate",
+    "gdn_out_rot",
+    "gdn_out_gemv",
+    // The decode tail previously ran UNGATED: standalone bits, default-ON
+    // via DECODE_STAGE_ALL (every constant-user posture is unchanged; a
+    // mask without them now honestly excludes the tail).
+    "tail_norm",
+    "tail_lm_head",
 ];
 
 /// All decode stage classes enabled — the shipping path.
-pub const DECODE_STAGE_ALL: u32 = (1u32 << 11) - 1;
+pub const DECODE_STAGE_ALL: u32 = (1u32 << 22) - 1;
 
 /// Deltanet sub-class census bits (bits 5-8; see [`DECODE_STAGE_NAMES`]).
 pub const DECODE_STAGE_GDN_PROJ: u32 = 5;
@@ -2158,6 +2180,27 @@ pub const DECODE_STAGE_GDN_OUTPROJ: u32 = 8;
 /// gdn_proj refinement census bits (bits 9-10; see [`DECODE_STAGE_NAMES`]).
 pub const DECODE_STAGE_GDN_PROJ_CONCAT: u32 = 9;
 pub const DECODE_STAGE_GDN_PROJ_DENSE: u32 = 10;
+/// Issue 1132 — per-launch-site census bits (11-19 refine a parent region;
+/// 20-21 gate the previously-ungated decode tail). See [`DECODE_STAGE_NAMES`].
+pub const DECODE_STAGE_FFN_GATE_UP: u32 = 11;
+pub const DECODE_STAGE_FFN_SWIGLU: u32 = 12;
+pub const DECODE_STAGE_FFN_ROTATE: u32 = 13;
+pub const DECODE_STAGE_FFN_DOWN: u32 = 14;
+pub const DECODE_STAGE_GDN_PRE_CONV: u32 = 15;
+pub const DECODE_STAGE_GDN_PRE_BETAL2: u32 = 16;
+pub const DECODE_STAGE_GDN_OUT_ZGATE: u32 = 17;
+pub const DECODE_STAGE_GDN_OUT_ROT: u32 = 18;
+pub const DECODE_STAGE_GDN_OUT_GEMV: u32 = 19;
+pub const DECODE_STAGE_TAIL_NORM: u32 = 20;
+pub const DECODE_STAGE_TAIL_LM_HEAD: u32 = 21;
+
+/// Issue 1132 — the refinement law for the site bits: a sub-bit is
+/// consulted only when its parent region bit is on (the Bench-1006 pattern;
+/// `gdn_proj_leg_on` generalizes). Masking the parent still strips the
+/// whole region on every caller path.
+fn site_on(parent: u32, bit: u32) -> bool {
+    decode_stage_on(parent) && decode_stage_on(bit)
+}
 
 /// See [`DECODE_STAGE_MASK`]. Bit `i` enables [`DECODE_STAGE_NAMES`]`[i]`.
 pub fn set_decode_stage_mask(mask: u32) {
@@ -5133,20 +5176,27 @@ impl TernaryDeltanetGpuForward {
             // gate from [0..mlp] and up from [mlp..2*mlp]. Saves 1 dispatch
             // per layer (2 GEMVs → 1 GEMV).
             if decode_stage_on(4) {
-                // Plan 602 B3 — folded models read the rotated staging copy;
-                // pre-rotation files read `norm_x` directly (unchanged path).
-                let ffn_in = if self.rot_tables.is_some() {
-                    self.rot_scratch.clone()
-                } else {
-                    self.norm_x.clone()
-                };
-                unsafe {
-                    GemvTernaryCubeCL::launch::<ActiveRuntime>(
-                        &self.client,
-                        &layer_w.gate_up_proj,
-                        ffn_in,
-                        self.ffn_gate_up.clone(),
-                    );
+                // Issue 1132 site bits: the FFN block's four launch classes
+                // (gate_up / swiglu / rotate / down) refine bit 4 — masking
+                // bit 4 still strips the whole block; mask=ALL dispatches
+                // identically.
+                if site_on(4, DECODE_STAGE_FFN_GATE_UP) {
+                    // Plan 602 B3 — folded models read the rotated staging
+                    // copy; pre-rotation files read `norm_x` directly
+                    // (unchanged path).
+                    let ffn_in = if self.rot_tables.is_some() {
+                        self.rot_scratch.clone()
+                    } else {
+                        self.norm_x.clone()
+                    };
+                    unsafe {
+                        GemvTernaryCubeCL::launch::<ActiveRuntime>(
+                            &self.client,
+                            &layer_w.gate_up_proj,
+                            ffn_in,
+                            self.ffn_gate_up.clone(),
+                        );
+                    }
                 }
                 // Issue 1113 lever 1 rung 2 — the K5 fusion (the cudarc K5
                 // twin, f32 tail): SwiGLU + sign + FWHT in ONE kernel, writing
@@ -5169,32 +5219,40 @@ impl TernaryDeltanetGpuForward {
                     _ => None,
                 };
                 if let Some((cfg, tables)) = ffn_fused_pair {
-                    let signs = tables.signs_for_width(mlp).clone();
-                    unsafe {
-                        RotationCubeCL::launch_swiglu_rotate_fused::<ActiveRuntime>(
-                            &self.client,
-                            self.ffn_gate_up.clone(),
-                            signs,
-                            self.ffn_hidden.clone(),
-                            mlp,
-                            cfg.block_size,
-                        );
+                    // The fused arm IS the swiglu class (it carries the
+                    // rotation in the same launch — the rotate site bit has
+                    // no separate launch to gate here).
+                    if site_on(4, DECODE_STAGE_FFN_SWIGLU) {
+                        let signs = tables.signs_for_width(mlp).clone();
+                        unsafe {
+                            RotationCubeCL::launch_swiglu_rotate_fused::<ActiveRuntime>(
+                                &self.client,
+                                self.ffn_gate_up.clone(),
+                                signs,
+                                self.ffn_hidden.clone(),
+                                mlp,
+                                cfg.block_size,
+                            );
+                        }
                     }
                 } else {
-                    unsafe {
-                        DeltanetGatingConcatCubeCL::launch::<ActiveRuntime>(
-                            &self.client,
-                            self.ffn_gate_up.clone(),
-                            self.ffn_hidden.clone(),
-                            mlp,
-                        );
+                    if site_on(4, DECODE_STAGE_FFN_SWIGLU) {
+                        unsafe {
+                            DeltanetGatingConcatCubeCL::launch::<ActiveRuntime>(
+                                &self.client,
+                                self.ffn_gate_up.clone(),
+                                self.ffn_hidden.clone(),
+                                mlp,
+                            );
+                        }
                     }
-                    // Plan 602 B3 — folded site 7 of 8: the FFN down projection
-                    // is folded — rotate the SwiGLU output in place (its only
-                    // consumer is the down GEMV; the CPU twin rotates
-                    // `scratch.hidden` at the same site).
-                    if let (Some(cfg), Some(tables)) =
-                        (self.rotation.as_ref(), self.rot_tables.as_ref())
+                    // Plan 602 B3 — folded site 7 of 8: the FFN down
+                    // projection is folded — rotate the SwiGLU output in
+                    // place (its only consumer is the down GEMV; the CPU twin
+                    // rotates `scratch.hidden` at the same site).
+                    if site_on(4, DECODE_STAGE_FFN_ROTATE)
+                        && let (Some(cfg), Some(tables)) =
+                            (self.rotation.as_ref(), self.rot_tables.as_ref())
                     {
                         let signs = tables.signs_for_width(mlp).clone();
                         unsafe {
@@ -5233,22 +5291,26 @@ impl TernaryDeltanetGpuForward {
                 // layer's input RMSNorm (Issue 645 T3) or applied standalone after
                 // the loop (for the last layer).
                 #[cfg(feature = "ternary_gemv_residual")]
-                unsafe {
-                    GemvTernaryResidualCubeCL::launch::<ActiveRuntime>(
-                        &self.client,
-                        &layer_w.down_proj,
-                        self.ffn_hidden.clone(),
-                        self.x.clone(),
-                    );
+                if site_on(4, DECODE_STAGE_FFN_DOWN) {
+                    unsafe {
+                        GemvTernaryResidualCubeCL::launch::<ActiveRuntime>(
+                            &self.client,
+                            &layer_w.down_proj,
+                            self.ffn_hidden.clone(),
+                            self.x.clone(),
+                        );
+                    }
                 }
                 #[cfg(not(feature = "ternary_gemv_residual"))]
-                unsafe {
-                    GemvTernaryCubeCL::launch::<ActiveRuntime>(
-                        &self.client,
-                        &layer_w.down_proj,
-                        self.ffn_hidden.clone(),
-                        self.ffn_out.clone(),
-                    );
+                if site_on(4, DECODE_STAGE_FFN_DOWN) {
+                    unsafe {
+                        GemvTernaryCubeCL::launch::<ActiveRuntime>(
+                            &self.client,
+                            &layer_w.down_proj,
+                            self.ffn_hidden.clone(),
+                            self.ffn_out.clone(),
+                        );
+                    }
                 }
             }
         }
@@ -5282,39 +5344,48 @@ impl TernaryDeltanetGpuForward {
         // a middle stage leaves the post-loop residual stream in `x` as the
         // handoff payload; the full funnel is the `hi == n_layers` case).
         if hi == n_layers {
+            // Issue 1132: the decode tail previously ran UNGATED — the two
+            // standalone census bits (20 tail_norm / 21 tail_lm_head) gate
+            // it now; both are default-ON via DECODE_STAGE_ALL, so mask=ALL
+            // dispatches identically. The lm_head staging rotate rides the
+            // lm_head bit (it exists only to feed that GEMV).
             // Final RMSNorm
-            unsafe {
-                RmsNormCubeCL::launch::<ActiveRuntime>(
-                    &self.client,
-                    self.x.clone(),
-                    self.final_norm.clone(),
-                    self.norm_x.clone(),
-                    n,
-                    eps,
-                );
+            if decode_stage_on(DECODE_STAGE_TAIL_NORM) {
+                unsafe {
+                    RmsNormCubeCL::launch::<ActiveRuntime>(
+                        &self.client,
+                        self.x.clone(),
+                        self.final_norm.clone(),
+                        self.norm_x.clone(),
+                        n,
+                        eps,
+                    );
+                }
             }
 
             // Plan 602 B3 — folded site 8 of 8: the lm_head is folded; it
             // consumes the ROTATED final norm. Staged into `rot_scratch` so
             // `norm_x` stays PRIMAL — `forward_token_with_final_hidden`'s
             // hidden-state contract is preserved unchanged.
-            if self.rot_tables.is_some() {
-                self.stage_rotated_norm_x();
-            }
-            let lm_in = if self.rot_tables.is_some() {
-                self.rot_scratch.clone()
-            } else {
-                self.norm_x.clone()
-            };
+            if decode_stage_on(DECODE_STAGE_TAIL_LM_HEAD) {
+                if self.rot_tables.is_some() {
+                    self.stage_rotated_norm_x();
+                }
+                let lm_in = if self.rot_tables.is_some() {
+                    self.rot_scratch.clone()
+                } else {
+                    self.norm_x.clone()
+                };
 
-            // LM head: logits = W_lm_head @ (rotated)? norm_x
-            unsafe {
-                GemvTernaryCubeCL::launch::<ActiveRuntime>(
-                    &self.client,
-                    &self.lm_head,
-                    lm_in,
-                    self.logits.clone(),
-                );
+                // LM head: logits = W_lm_head @ (rotated)? norm_x
+                unsafe {
+                    GemvTernaryCubeCL::launch::<ActiveRuntime>(
+                        &self.client,
+                        &self.lm_head,
+                        lm_in,
+                        self.logits.clone(),
+                    );
+                }
             }
         }
 
@@ -5705,29 +5776,35 @@ impl TernaryDeltanetGpuForward {
             }
 
             // 5. Conv1D (in-place on qkv, updates conv_state)
-            unsafe {
-                DeltanetConv1dCubeCL::launch::<ActiveRuntime>(
-                    &self.client,
-                    self.qkv.clone(),
-                    layer_w.conv1d_weight.clone(),
-                    conv_state.clone(),
-                    conv_dim,
-                    kernel_size,
-                );
+            // Issue 1132: conv1d is its own site class (bit 15); beta/decay +
+            // expand/L2 are the second class (bit 16, 2 launches).
+            if site_on(6, DECODE_STAGE_GDN_PRE_CONV) {
+                unsafe {
+                    DeltanetConv1dCubeCL::launch::<ActiveRuntime>(
+                        &self.client,
+                        self.qkv.clone(),
+                        layer_w.conv1d_weight.clone(),
+                        conv_state.clone(),
+                        conv_dim,
+                        kernel_size,
+                    );
+                }
             }
 
             // 6. Beta/decay computation
-            unsafe {
-                DeltanetBetaDecayCubeCL::launch::<ActiveRuntime>(
-                    &self.client,
-                    self.a_raw.clone(),
-                    self.b_raw.clone(),
-                    layer_w.a_log.clone(),
-                    layer_w.dt_bias.clone(),
-                    self.beta_buf.clone(),
-                    self.decay_buf.clone(),
-                    n_v_heads,
-                );
+            if site_on(6, DECODE_STAGE_GDN_PRE_BETAL2) {
+                unsafe {
+                    DeltanetBetaDecayCubeCL::launch::<ActiveRuntime>(
+                        &self.client,
+                        self.a_raw.clone(),
+                        self.b_raw.clone(),
+                        layer_w.a_log.clone(),
+                        layer_w.dt_bias.clone(),
+                        self.beta_buf.clone(),
+                        self.decay_buf.clone(),
+                        n_v_heads,
+                    );
+                }
             }
 
             // 7. Expand Q/K from n_k_heads → n_v_heads + L2-normalize Q/K heads + copy V.
@@ -5735,15 +5812,17 @@ impl TernaryDeltanetGpuForward {
             //    expanded `qkv_expanded` ([Q(n_v×hd) | K(n_v×hd) | V(n_v×hd)]).
             //    This fused kernel replaces the (buggy) in-place L2NormalizeHeadsCubeCL
             //    that assumed Q/K were already n_v_heads wide — Issue 604 T5 + Issue 610.
-            unsafe {
-                ExpandAndL2NormalizeHeadsCubeCL::launch::<ActiveRuntime>(
-                    &self.client,
-                    self.qkv.clone(),
-                    self.qkv_expanded.clone(),
-                    n_k_heads,
-                    n_v_heads,
-                    head_dim,
-                );
+            if site_on(6, DECODE_STAGE_GDN_PRE_BETAL2) {
+                unsafe {
+                    ExpandAndL2NormalizeHeadsCubeCL::launch::<ActiveRuntime>(
+                        &self.client,
+                        self.qkv.clone(),
+                        self.qkv_expanded.clone(),
+                        n_k_heads,
+                        n_v_heads,
+                        head_dim,
+                    );
+                }
             }
         }
 
@@ -5806,16 +5885,20 @@ impl TernaryDeltanetGpuForward {
         //    one fused kernel. Normalizes each head of recurrent_out with
         //    linear_norm gamma, then multiplies by silu(z_buf) — all in-place.
         //    Saves 1 dispatch per DeltaNet layer × 32 = 32 dispatches/token.
-        unsafe {
-            RmsNormZgateFusedCubeCL::launch::<ActiveRuntime>(
-                &self.client,
-                self.recurrent_out.clone(),
-                layer_w.linear_norm.clone(),
-                self.z_buf.clone(),
-                n_v_heads,
-                head_dim,
-                eps,
-            );
+        // Issue 1132 site bits: zgate (17) / permute-rotate chain (18) /
+        // out GEMV (19) refine bit 8.
+        if site_on(8, DECODE_STAGE_GDN_OUT_ZGATE) {
+            unsafe {
+                RmsNormZgateFusedCubeCL::launch::<ActiveRuntime>(
+                    &self.client,
+                    self.recurrent_out.clone(),
+                    layer_w.linear_norm.clone(),
+                    self.z_buf.clone(),
+                    n_v_heads,
+                    head_dim,
+                    eps,
+                );
+            }
         }
 
         // 11. Out projection: tmp = W_out @ recurrent_out
@@ -5860,43 +5943,51 @@ impl TernaryDeltanetGpuForward {
             } else {
                 1
             };
-            let signs = tables.signs_for_width(v_dim).clone();
-            unsafe {
-                RotationCubeCL::launch_gdn_permute_rotate::<ActiveRuntime>(
-                    &self.client,
-                    self.recurrent_out.clone(),
-                    signs,
-                    self.permute_tmp.clone(),
-                    v_dim,
-                    head_dim,
-                    cfg.gdn_k_groups,
-                    rep,
-                    cfg.block_size,
-                );
+            if site_on(8, DECODE_STAGE_GDN_OUT_ROT) {
+                let signs = tables.signs_for_width(v_dim).clone();
+                unsafe {
+                    RotationCubeCL::launch_gdn_permute_rotate::<ActiveRuntime>(
+                        &self.client,
+                        self.recurrent_out.clone(),
+                        signs,
+                        self.permute_tmp.clone(),
+                        v_dim,
+                        head_dim,
+                        cfg.gdn_k_groups,
+                        rep,
+                        cfg.block_size,
+                    );
+                }
             }
             self.permute_tmp.clone()
         } else {
-            if let (Some(cfg), Some(tables)) = (self.rotation.as_ref(), self.rot_tables.as_ref()) {
-                if cfg.gdn_v_grouped {
-                    unsafe {
-                        CopyCubeCL::launch::<ActiveRuntime>(
-                            &self.client,
-                            self.recurrent_out.clone(),
-                            self.permute_tmp.clone(),
-                            v_dim,
-                        );
-                        RotationCubeCL::launch_gdn_v_permute::<ActiveRuntime>(
-                            &self.client,
-                            self.permute_tmp.clone(),
-                            self.recurrent_out.clone(),
-                            v_dim,
-                            v_dim,
-                            head_dim,
-                            cfg.gdn_k_groups,
-                            n_v_heads / cfg.gdn_k_groups,
-                        );
-                    }
+            if site_on(8, DECODE_STAGE_GDN_OUT_ROT)
+                && let (Some(cfg), Some(_)) = (self.rotation.as_ref(), self.rot_tables.as_ref())
+                && cfg.gdn_v_grouped
+            {
+                unsafe {
+                    CopyCubeCL::launch::<ActiveRuntime>(
+                        &self.client,
+                        self.recurrent_out.clone(),
+                        self.permute_tmp.clone(),
+                        v_dim,
+                    );
+                    RotationCubeCL::launch_gdn_v_permute::<ActiveRuntime>(
+                        &self.client,
+                        self.permute_tmp.clone(),
+                        self.recurrent_out.clone(),
+                        v_dim,
+                        v_dim,
+                        head_dim,
+                        cfg.gdn_k_groups,
+                        n_v_heads / cfg.gdn_k_groups,
+                    );
                 }
+            }
+            if site_on(8, DECODE_STAGE_GDN_OUT_ROT)
+                && let (Some(cfg), Some(tables)) =
+                    (self.rotation.as_ref(), self.rot_tables.as_ref())
+            {
                 let signs = tables.signs_for_width(v_dim).clone();
                 unsafe {
                     RotationCubeCL::launch_forward::<ActiveRuntime>(
@@ -5922,13 +6013,15 @@ impl TernaryDeltanetGpuForward {
             1,
             crate::dq_fakequant::current_grid(),
         );
-        unsafe {
-            GemvTernaryCubeCL::launch::<ActiveRuntime>(
-                &self.client,
-                &layer_w.out_proj,
-                gdn_gemv_in,
-                self.tmp.clone(),
-            );
+        if site_on(8, DECODE_STAGE_GDN_OUT_GEMV) {
+            unsafe {
+                GemvTernaryCubeCL::launch::<ActiveRuntime>(
+                    &self.client,
+                    &layer_w.out_proj,
+                    gdn_gemv_in,
+                    self.tmp.clone(),
+                );
+            }
         }
         }
     }
@@ -10465,5 +10558,98 @@ mod tests {
             );
             eprintln!("row {row_idx}: max_diff = {max_diff:.6} ✓");
         }
+    }
+
+    /// Issue 1132 — the census-bit pin (CPU-only, no GPU): every
+    /// DECODE_STAGE_NAMES index has its own bit inside DECODE_STAGE_ALL, the
+    /// refinement constants match their indices, and set_decode_stage_mask
+    /// clamps to ALL (an over-wide mask cannot invent launches). The
+    /// mask=ALL shipping path is bit-identical BY CONSTRUCTION (every gate
+    /// consults the same mask the launch sites always consulted; the tail
+    /// bits are default-ON in ALL), asserted here at the predicate level.
+    #[test]
+    fn test_decode_stage_census_bit_pin() {
+        assert_eq!(
+            DECODE_STAGE_NAMES.len(),
+            DECODE_STAGE_ALL.count_ones() as usize,
+            "every named class needs its own ALL bit"
+        );
+        let named: &[(&str, u32)] = &[
+            ("input_norm", 0),
+            ("deltanet", 1),
+            ("attention", 2),
+            ("mid_norm", 3),
+            ("ffn", 4),
+            ("gdn_proj", DECODE_STAGE_GDN_PROJ),
+            ("gdn_prerec", DECODE_STAGE_GDN_PREREC),
+            ("gdn_recurrence", DECODE_STAGE_GDN_RECURRENCE),
+            ("gdn_outproj", DECODE_STAGE_GDN_OUTPROJ),
+            ("gdn_proj_concat", DECODE_STAGE_GDN_PROJ_CONCAT),
+            ("gdn_proj_dense", DECODE_STAGE_GDN_PROJ_DENSE),
+            ("ffn_gate_up", DECODE_STAGE_FFN_GATE_UP),
+            ("ffn_swiglu", DECODE_STAGE_FFN_SWIGLU),
+            ("ffn_rotate", DECODE_STAGE_FFN_ROTATE),
+            ("ffn_down", DECODE_STAGE_FFN_DOWN),
+            ("gdn_pre_conv", DECODE_STAGE_GDN_PRE_CONV),
+            ("gdn_pre_betal2", DECODE_STAGE_GDN_PRE_BETAL2),
+            ("gdn_out_zgate", DECODE_STAGE_GDN_OUT_ZGATE),
+            ("gdn_out_rot", DECODE_STAGE_GDN_OUT_ROT),
+            ("gdn_out_gemv", DECODE_STAGE_GDN_OUT_GEMV),
+            ("tail_norm", DECODE_STAGE_TAIL_NORM),
+            ("tail_lm_head", DECODE_STAGE_TAIL_LM_HEAD),
+        ];
+        assert_eq!(named.len(), DECODE_STAGE_NAMES.len(), "pin covers every name");
+        for (name, bit) in named {
+            assert_eq!(
+                DECODE_STAGE_NAMES[*bit as usize], *name,
+                "name/bit mismatch at bit {bit}"
+            );
+            assert!(
+                DECODE_STAGE_ALL & (1u32 << bit) != 0,
+                "bit {bit} ({name}) not covered by ALL"
+            );
+        }
+        // Parent/sub refinement law: each site bit refines the parent the
+        // wiring consults (site_on(parent, bit) requires both).
+        let refinements: &[(u32, u32)] = &[
+            (4, DECODE_STAGE_FFN_GATE_UP),
+            (4, DECODE_STAGE_FFN_SWIGLU),
+            (4, DECODE_STAGE_FFN_ROTATE),
+            (4, DECODE_STAGE_FFN_DOWN),
+            (6, DECODE_STAGE_GDN_PRE_CONV),
+            (6, DECODE_STAGE_GDN_PRE_BETAL2),
+            (8, DECODE_STAGE_GDN_OUT_ZGATE),
+            (8, DECODE_STAGE_GDN_OUT_ROT),
+            (8, DECODE_STAGE_GDN_OUT_GEMV),
+        ];
+        for (parent, sub) in refinements {
+            assert_ne!(parent, sub);
+            assert!(
+                DECODE_STAGE_ALL & (1u32 << parent) != 0 && DECODE_STAGE_ALL & (1u32 << sub) != 0,
+                "refinement pair ({parent},{sub}) not inside ALL"
+            );
+        }
+        // set_decode_stage_mask clamps to ALL: an over-wide mask must not
+        // invent launches.
+        set_decode_stage_mask(u32::MAX);
+        assert_eq!(
+            DECODE_STAGE_MASK.load(std::sync::atomic::Ordering::Relaxed),
+            DECODE_STAGE_ALL,
+            "set_decode_stage_mask must clamp to ALL"
+        );
+        set_decode_stage_mask(DECODE_STAGE_ALL);
+        // site_on is the refinement law itself: parent off ⇒ sub never fires
+        // regardless of the sub-bit.
+        set_decode_stage_mask((1u32 << DECODE_STAGE_FFN_SWIGLU) | (1u32 << DECODE_STAGE_TAIL_LM_HEAD));
+        assert!(
+            !site_on(4, DECODE_STAGE_FFN_SWIGLU),
+            "sub-bit without its parent must not fire"
+        );
+        assert!(
+            decode_stage_on(DECODE_STAGE_TAIL_LM_HEAD),
+            "standalone tail bit fires alone"
+        );
+        set_decode_stage_mask(DECODE_STAGE_ALL);
+        assert!(site_on(4, DECODE_STAGE_FFN_SWIGLU));
     }
 }
