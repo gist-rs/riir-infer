@@ -1,6 +1,7 @@
 # 1121 — StabilityTracker: pin the first-observed stage to ordinal 0 (a partial-capture feed silently reports index-space depth)
 
 **Status:** Open — filed 2026-10-26. Hardening finding from the amo idle-cycle read-only smell hunt (`stability.rs` full read, zero-cargo cycle — the elephant window-2 capture held the box). Not started.
+**Claimed:** zed-amo-idle-refine-g cont.5, epoch=1792995755, expires 2026-10-28T06:22Z
 
 ## Why
 
