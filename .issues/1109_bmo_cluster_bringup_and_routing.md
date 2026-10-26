@@ -1,7 +1,6 @@
 # Issue 1109 — bmo cluster bring-up (TB5 link + tailnet) and the bmo routing of riir-rethink's open issues
 
-**Status:** OPEN — filed 2026-10-22. Blocks [Plan 623](../.plans/623_multi_host_pipeline_inference_lane.md) Phase 0. Parent: [Proposal 042](../.proposals/042_multi_mac_distributed_inference.md).
-**Lease released:** zed-amo-idle-015 (2026-10-26, epoch 1792974614) — the amo-half on-box adjudication it covered is recorded below; the issue stays OPEN on the owner-physical remainder (power bmo on → T0 → T1 → T2 → T3).
+**Status:** OPEN — filed 2026-10-22. Blocks [Plan 623](../.plans/623_multi_host_pipeline_inference_lane.md) Phase 0. Parent: [Proposal 042](../.proposals/042_multi_mac_distributed_inference.md). T0/T1/T2/T3 DONE 2026-10-26 — the issue stays OPEN on the owner-physical remainder ONLY (T4 RDMA, Phase 3+ prerequisite).
 
 ## On-box adjudication (amo side EXECUTED 2026-10-26 ~07:00+07 — zed-amo-idle-015; the item-9 desk research above was run against the live boxes)
 
@@ -67,8 +66,20 @@
   requirement is MET). bmo `rdma_ctl status` = disabled (same as amo — T4/D2 both
   boxes still pending). bmo bridge0 static 192.168.10.2/24, status active.
   NOTE: bmo has NO cargo/rustc/cmake yet — T3 installs the toolchain.**
-- [ ] **T2:** Tailscale direct path: `tailscale ping bmo` until `via <ip>` (not DERP);
+- [x] **T2:** Tailscale direct path: `tailscale ping bmo` until `via <ip>` (not DERP);
   70–90 ms relayed RTT makes the tailnet a fallback posture only.
+  **DONE 2026-10-26 ~21:4x+07 (zed-amo, read-only diagnosis subagent): the direct
+  path is LIVE BOTH WAYS — no owner step needed.** amo→bmo: `pong from bmo
+  (100.100.117.44) via 192.168.1.93:41641 in 35ms` (first pong, incl. disco);
+  bmo→amo: `pong from amo (100.111.186.76) via 192.168.1.92:41641 in 19ms`.
+  `tailscale status` shows bmo `active; direct` (the earlier `offline, tx 1248
+  rx 0` degenerate row is GONE — bmo's daemon self-recovered, no config delta
+  visible). `netcheck` UDP:true + easy NAT (MappingVariesByDestIP: false) on
+  BOTH boxes; the direct path rides the WiFi LAN (192.168.1.x), NOT the TB
+  bridge — expected, and fine: the bridge (192.168.10.x) stays the primary
+  raw-IP transport, the tailnet fallback is now sub-40 ms direct instead of
+  DERP-relayed. (bmo netcheck printed one cosmetic `routerIP/FetchRIB: sysctl:
+  cannot allocate memory` line; re-read only if netcheck later fails to report.)
 - [x] **T3:** Workspace on bmo: clone the repos Plan 623 needs (`riir-infer`, `katgpt-rs`),
   same `rust-toolchain.toml`; rsync the D3 model artifacts once, BLAKE3-verified.
   **DONE 2026-10-26 ~18:30 (zed-amo):** rustup on bmo with the PINNED toolchain
@@ -99,7 +110,7 @@ lanes**, which a second GPU does not move. Per issue (read 2026-10-22):
 | rethink issue | blocked on | what bmo does |
 |---|---|---|
 | 016 encoder class on GPU hosts | owner: "M5-Ultra-gated" serve seating (T5–T6) | **hardware gate MET** — bmo is the candidate serving host; the owner GO is still required |
-| 024 Proposal 003 tracker | v1 hosted lane + remote-leg GOAT; re-fits gated on riir-train capacity | hosts `/v1/decide` for the remote-leg GOAT (`RIIR_RETHINK_ESC_REMOTE=http://10.0.0.2:…`); re-fits via the deferred train plan |
+| 024 Proposal 003 tracker | v1 hosted lane + remote-leg GOAT; re-fits gated on riir-train capacity | hosts `/v1/decide` for the remote-leg GOAT (`RIIR_RETHINK_ESC_REMOTE=http://192.168.10.2:…`, the T1 canonical addressing — an older draft of this row said 10.0.0.2, which was never deployed); re-fits via the deferred train plan |
 | 025 v1 billing | M5-Ultra-gated deploy of the hosted lane | hosting only; owner deploy call remains |
 | 031 egemma2-ft seating | T4 optional, owner-gated OOD probe | can run T4 (small encoder read) once the owner arms it |
 | 032 SubQ Snap beat lane | teacher fine-tune = riir-train Issue 629 (4090-queued); T6 hard owner gate | candidate second node for the teacher lane — rides the deferred train plan (Proposal 042 §Train) |
