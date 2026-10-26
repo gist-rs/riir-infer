@@ -28,6 +28,7 @@ riir-ai Bench 1004 (2026-10-26): the decode hold broke to **0.9730×** (ours 91.
   - the decode hold re-crossing 1.0× itself (Bench 1004 RED);
   - the census line (`RIIR_QUANTIZE_CENSUS=1`) prints free at every scored cell — the zero re-checked each bout.
   Demote the loser either way (the incumbent chains stay as `=0` hatches). ⛔ Owner-gated per the standing handoff law — a measured-positive opt-in never self-promotes.
+  **BOUT IN FLIGHT 2026-10-27 ~00:50 +07 (shikuwa-4090, session zed-shikuwa-t4recell):** trigger (3) of the recorded 10-26 window verdict FIRED (T1/2'/2'' rung results exist; tags: b10826 still newest, tip c96baf4abe #390 untagged → no re-pin owed). Claude verdict AGREE (fallback reviewer sub-agent; the claude_code verdict channel auth-unavailable — the Issue-1115-arc fallback): the bout is MEASUREMENT-ONLY, trigger-driven (no session claim — this line is an announcement, not a lease), incumbent-first ×2 interleaved windows per row, expected-RED disclosed up front (staged arms ≈ +1.4–1.8% additive vs the +2.71% re-cross bar); the PROMOTION verdict rides the measured rows as a separate owner-gated call. Opponent stays pinned b10826 (directly comparable to Bench 1004).
   **Window verdict 2026-10-26 (reviewer sub-agent `e510e3e2`; the claude_code
   verdict channel was auth-unavailable — the Issue-1115-arc fallback):
   WAIT_NEXT_WINDOW, no ad-hoc bout.** Verified first-hand: the 4090 idle (4%
