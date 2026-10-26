@@ -28,11 +28,20 @@ mlx-lm on the Proposal-042 scoreboard **measured on the same two boxes**.
   harness lives in `scripts/` as shell + a Rust bench driver. **DEFERRED 2026-10-26 —
   blocked on 1109: bmo is POWERED OFF (tailnet offline 9h, all TB ports no-device;
   adjudication in-issue) — both-box work needs bmo back on the bus first.**
-- [-] **T0.2** Link microbench: TCP RTT + one-way latency for 4 B / 16 KB / 1 MB / 64 MB
+  **UPDATE 2026-10-26 18:20 (bmo back): amo HALF DONE for llama.cpp — `.raw/llama.cpp`
+  @ pinned `19ab5a5`, cmake Release `-DGGML_RPC=ON` → `build-rpc/` (`ggml-rpc-server`,
+  `llama-cli`, `llama-bench`, `test-rpc-multi-server` all present, GGML_RPC=ON in
+  CMakeCache). REMAINING: llama.cpp on bmo (no cmake/brew there yet — T3 toolchain
+  first), mlx + mlx-lm + exo on both.**
+- [x] **T0.2** Link microbench: TCP RTT + one-way latency for 4 B / 16 KB / 1 MB / 64 MB
   frames over (a) TB bridge, (b) tailnet; bandwidth for 64 MB. Rust std-only
   (`examples/link_probe.rs`). After D2: same over RDMA via `ibv_*` / MLX `allreduce_bench`.
-  **DEFERRED 2026-10-26 — same 1109 blocker; the amo half is pre-staged (bridge service
-  enabled, tailscale UDP true) per the in-issue adjudication table.**
+  **DONE 2026-10-26 — bridge arm PASS, both directions: RTT median 94–96 µs @4 B,
+  72–83 µs @16 KiB, ~330 µs @1 MiB, ~16.1 ms @64 MiB; 64 MiB push 8.617 GB/s (amo→bmo)
+  / 8.541 GB/s (bmo→amo), all rounds tight. Record + derivation (PP hop ≈ 0.09–0.10 ms
+  ≈ 1.3–1.8% of the decode step; TP-over-TCP REFUTED arithmetically — Phase 4 stays
+  RDMA-gated): [Bench 896](../.benchmarks/896_plan623_t02_link_probe.md). Tailnet arm
+  DEFERRED (bmo offline); RDMA arm behind D2.**
 - [ ] **T0.3** 1-box arms for the D3 models: riir-infer Metal vs MLX vs llama.cpp Metal —
   decode tok/s, TTFT @4k/32k. **If riir-infer's 1-box arm loses, file the gap as its own
   issue first — the multi-host claim is meaningless on a losing single-box base.**

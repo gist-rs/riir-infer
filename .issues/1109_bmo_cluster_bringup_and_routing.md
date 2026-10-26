@@ -48,18 +48,25 @@
 
 ## Tasks
 
-- [-] **T0 (owner, physical, on bmo):** System Settings → General → Sharing → **Remote
+- [x] **T0 (owner, physical, on bmo):** System Settings → General → Sharing → **Remote
   Login ON**; add amo's `~/.ssh/id_ed25519.pub` to bmo's `authorized_keys`.
-  **HALF-DONE 2026-10-26 16:30: Remote Login is ON (port 22 answers, host key exchange
-  works) but publickey auth DENIED for `katopz@` and `katop@` — the authorized_keys
-  half remains the ONE owner step blocking all 2-box work.**
-- [-] **T1 (both boxes):** Thunderbolt Bridge static IPv4 — amo `10.0.0.1/24`, bmo
+  **DONE 2026-10-26 ~17:00 — owner added the key; passwordless SSH VERIFIED
+  (`ssh katopz@192.168.10.2`). The ONE blocker on all 2-box work is cleared.
+  CORRECTION ~18:30: the account's primary RecordName read `seal2` via whoami
+  (an alias-shaped legacy name, home always `/Users/katopz`) — owner RENAMED it
+  `seal2 → katopz` via `dscl` the same hour; fresh `whoami` = `katopz`. All
+  tooling uses `katopz@192.168.10.2` only.**
+- [x] **T1 (both boxes):** Thunderbolt Bridge static IPv4 — amo `10.0.0.1/24`, bmo
   `10.0.0.2/24` (`networksetup -setmanual "Thunderbolt Bridge" 10.0.0.X 255.255.255.0`);
   verify `ping 10.0.0.2` sub-ms; record bmo's chip/RAM/macOS build (incumbents' RDMA
-  needs IDENTICAL OS builds). **NETWORK HALF LIVE 2026-10-26 16:30 — the bridge carries
-  static `192.168.10.1/24` ↔ `192.168.10.2` (owner's canonical addressing, NOT the
-  10.0.0.x plan here) with a measured 0.53 ms RTT; the chip/RAM/OS-build record stays
-  open behind the T0 SSH remainder (bmo RAM is load-bearing for the D3 capacity row).**
+  needs IDENTICAL OS builds). **DONE 2026-10-26 — sub-ms bridge ping live at the
+  owner's canonical addressing `192.168.10.1/24 ⇄ 192.168.10.2` (NOT the 10.0.0.x
+  plan; AGENTS.md canonical). bmo RECORD (via SSH, 17:00): `Mac17,15`, Apple M5
+  Ultra, hw.memsize 103079215104 B = 96 GiB (SAME as amo), hw.ncpu 30, macOS
+  27.0.1 BuildVersion `26A434` — IDENTICAL build to amo (the RDMA identical-OS
+  requirement is MET). bmo `rdma_ctl status` = disabled (same as amo — T4/D2 both
+  boxes still pending). bmo bridge0 static 192.168.10.2/24, status active.
+  NOTE: bmo has NO cargo/rustc/cmake yet — T3 installs the toolchain.**
 - [ ] **T2:** Tailscale direct path: `tailscale ping bmo` until `via <ip>` (not DERP);
   70–90 ms relayed RTT makes the tailnet a fallback posture only.
 - [ ] **T3:** Workspace on bmo: clone the repos Plan 623 needs (`riir-infer`, `katgpt-rs`),
