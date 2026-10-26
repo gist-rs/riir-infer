@@ -1,6 +1,9 @@
 # Issue 1125 — decode fused-quantize rung: q8_1 written by the fused norm+Hadamard transform (the Bench-1004 escalation rung)
 
 **Status:** OPEN — filed from the Bench-1004 bout; the 971 watch escalation ladder rung 1 (dedup grep + replicate), owner-gated for promotion only.
+**Claimed:** zed-amo-i1125-rung, 1793016251, expires 2026-10-28T12:04:11+00:00
+(scope: the fused-quantize rung implementation + G1 bit-identity / G2 decode e2e / G3 prefill-neutrality validation on amo, feature-gated opt-in; promotion to default-on stays owner-gated per the ask; runs on the same box as the i1113 re-cell lease — the two lanes share quiet-window discipline, measurement rows always preempt dev builds)
+
 
 ## The trigger (measured, not assumed)
 
