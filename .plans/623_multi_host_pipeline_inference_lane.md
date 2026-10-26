@@ -18,19 +18,26 @@ mlx-lm on the Proposal-042 scoreboard **measured on the same two boxes**.
 
 ## Phase 0 — Measure the incumbents and our own 1-box arm (no code in riir-infer)
 
-- [ ] **T0.1** Build/install the incumbents from the pinned `.raw/` commits on BOTH boxes
+- [-] **T0.1** Build/install the incumbents from the pinned `.raw/` commits on BOTH boxes
   (llama.cpp `rpc-server` + `llama-cli`/`llama-bench` with `-DGGML_RPC=ON`; mlx + mlx-lm;
   exo) — record exact commits and build flags. No Python dep enters riir-infer: the
-  harness lives in `scripts/` as shell + a Rust bench driver.
-- [ ] **T0.2** Link microbench: TCP RTT + one-way latency for 4 B / 16 KB / 1 MB / 64 MB
+  harness lives in `scripts/` as shell + a Rust bench driver. **DEFERRED 2026-10-26 —
+  blocked on 1109: bmo is POWERED OFF (tailnet offline 9h, all TB ports no-device;
+  adjudication in-issue) — both-box work needs bmo back on the bus first.**
+- [-] **T0.2** Link microbench: TCP RTT + one-way latency for 4 B / 16 KB / 1 MB / 64 MB
   frames over (a) TB bridge, (b) tailnet; bandwidth for 64 MB. Rust std-only
   (`examples/link_probe.rs`). After D2: same over RDMA via `ibv_*` / MLX `allreduce_bench`.
+  **DEFERRED 2026-10-26 — same 1109 blocker; the amo half is pre-staged (bridge service
+  enabled, tailscale UDP true) per the in-issue adjudication table.**
 - [ ] **T0.3** 1-box arms for the D3 models: riir-infer Metal vs MLX vs llama.cpp Metal —
   decode tok/s, TTFT @4k/32k. **If riir-infer's 1-box arm loses, file the gap as its own
   issue first — the multi-host claim is meaningless on a losing single-box base.**
-- [ ] **T0.4** 2-box incumbent arms: llama.cpp RPC (TCP; RDMA after D2), mlx-lm
+  **NOTE 2026-10-26: the amo 1-box Metal cells need a QUIET-GPU window — the rethink
+  elephant-panel capture holds the MPS GPU ~26 h (until ~10-27); schedule after.**
+- [-] **T0.4** 2-box incumbent arms: llama.cpp RPC (TCP; RDMA after D2), mlx-lm
   `sharded_generate --pipeline` + TP (ring; jaccl after D2), exo (PP + TP). Every metric
-  of the scoreboard; `.benchmarks/` record with both boxes' provenance.
+  of the scoreboard; `.benchmarks/` record with both boxes' provenance. **DEFERRED
+  2026-10-26 — the 1109 bmo blocker.**
 
 ## Phase 1 — Substrate in riir-infer-core (feature `multi_host`, zero new deps)
 
