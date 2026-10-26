@@ -1,7 +1,7 @@
 # Issue 1127 — decode-hold escalation: the remaining rungs + the league re-cell bundle (carried out of the 1125/1126 closeout)
 
 **Status:** Open — filed 2026-10-26 from the 1125/1126 closeout (the Bench-1004 escalation ladder accounting). Rung 1 (fused-quantize) CLOSED negative-already-shipped (riir-infer HISTORY, census tripwire live); rung 2 (GDN core one-launch) CLOSED measured-negative (Bench 898, opt-in default-OFF); rung 2' (4→3 beta/decay+expand) LANDED direction-positive opt-in (Bench 899). **T1: rung LANDED opt-in +0.77% (Bench 900) — both the census and the e2e records kept. T2 CLOSED census-negative (Bench 902). T3 CLOSED measured-negative at the bit-identical boundary (Bench 903: the reclaimable share under the FNV-pin law is ~0.29% e2e; the headroom behind a re-pin is an owner decision).** Remaining: the owner-gated re-cell T4 only — the staged arms (T1 +0.77%, 2' +0.6–1.0%, GLU pp) ride the next league window. All three T1–T3 leases released; no session holds this issue.
-**Claimed:** — (released 2026-10-27 — T1/T2/T3 all closed with records; the T4 re-cell is owner-gated, never a session claim)
+**Lease:** none — released 2026-10-27 (T1/T2/T3 all closed with records; the T4 re-cell is owner-gated, never a session claim)
 Historical note: the T1 e2e rung was executed in parallel by the shikuwa 4090 lane (Bench 900, `44695f1`+`cf89fb2`) while the amo census lane (Bench 902) ran — the reconciliation (both records kept; the e2e instrument decides e2e claims; in-graph node dispatch is NOT ns-class) lives in Bench 900/902. The Bench-900 nvcc contraction-pairing finding was isolated and reproduced by the Bench-903 V4 bisect arm (the reg-tile, common-mode ±1-ULP).
 
 ## Where the ladder stands (the accounting, all measured)
