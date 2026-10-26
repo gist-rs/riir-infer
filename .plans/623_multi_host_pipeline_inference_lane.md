@@ -62,7 +62,19 @@ mlx-lm on the Proposal-042 scoreboard **measured on the same two boxes**.
   the RPC device in this fork (both ts rows stayed amo-MTL, server-side proven);
   `-sm tensor` over RPC crashes the server (hadamard-sign view → nil buffer assert) —
   TP-over-RPC N/A in the incumbent. REMAINING: mlx-lm + exo arms (weight-format convert
-  caveat), T0.3 quiet-GPU cells, RDMA rows behind D2.**
+
+  caveat), T0.3 quiet-GPU cells, RDMA rows behind D2.** ⚠ **MLX-arm prerequisites found
+  RECLAIMED on amo (2026-10-26 late scan): the HF-cache pack
+  `models--prism-ml--Ternary-Bonsai-2-27B-mlx-2bit` carries only 556 KB of blobs — the
+  big safetensors blob is GONE (re-downloadable from `prism-ml/Ternary-Bonsai-2-27B-mlx-2bit`,
+  snapshot `fcba37d21`, integrity via the pack's own files.json 24/24 sha256 gate); the
+  `.raw/mlx-env` venv's python binary is GONE too. AND bmo has NO working python3
+  (`/usr/bin/python3` is the CLT stub — prints the xcode-select note) and no uv. The
+  bmo-side MLX arm therefore needs: uv bootstrap on bmo (static binary, no CLT) →
+  uv-managed CPython + venv (build on amo, rsync to the SAME absolute path — pyvenv.cfg
+  is path-keyed) → `uv pip install mlx mlx-vlm tokenizers` → pack re-download (~10–15 GB).
+  The 2-box PP arm then rides `mx.distributed` (jaccl/grpc ranks over SSH) — a dedicated
+  bench window, priced here so it starts warm.**
 
 ## Phase 1 — Substrate in riir-infer-core (feature `multi_host`, zero new deps)
 
