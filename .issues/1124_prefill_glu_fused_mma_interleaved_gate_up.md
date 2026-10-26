@@ -135,7 +135,10 @@ Honest caveats:
   Bonsai-2 through riir-engine) — which is why this task is gated on the
   league window and the bout owner's protocol, not runnable from this repo
   alone. Engagement proof at run time: `RIIR_PREFILL_CUDA_FFN_TRACE=1`
-  prints the per-layer `[721-trace]` lines when the block dispatches.
+  prints the per-layer `[721-trace]` lines when the block dispatches, each
+  naming `route=glu|pair` (added 2026-10-26 — the line's presence proves the
+  CUDA block ran, the ROUTE marker proves the fused arm engaged; a missed
+  env or posture would otherwise A/B pair-vs-pair silently).
 - [x] **T3 (kernel_opt rider). DONE 2026-10-26 — already mined; dedup caught the
   duplicate before authoring.** The refine mining lane's Batch 287 (riir-refine
   `d871a0fc`, "the llama.cpp fusion trio P81/P82/P83", Plan 292 / Research 325)

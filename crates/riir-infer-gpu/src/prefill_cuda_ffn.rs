@@ -1125,8 +1125,12 @@ pub fn dispatch_ffn_block(
         cubecl::bytes::Bytes::from_bytes_vec(f32::as_bytes(&out_host[..pn]).to_vec()),
     );
     if trace {
+        // The route marker is the T2 engagement proof: the trace naming the
+        // block alone proves the CUDA path ran, not that the fused arm did —
+        // a missed env or posture would silently A/B pair-vs-pair.
         eprintln!(
-            "[721-trace] p={p} n={n} mlp={mlp}: read {}us up {}us(+{}) block {}us(+{}) down {}us(+{}) write {}us",
+            "[721-trace] p={p} n={n} mlp={mlp} route={} read {}us up {}us(+{}) block {}us(+{}) down {}us(+{}) write {}us",
+            if glu_cache.is_some() { "glu" } else { "pair" },
             t_read.as_micros(),
             t_up.as_micros(),
             (t_up - t_read).as_micros(),
