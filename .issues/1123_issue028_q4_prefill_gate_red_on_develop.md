@@ -3,6 +3,8 @@
 **Status:** Open — filed 2026-10-26 from the plan-623 Phase 1 validation sweep (the
 pre-existing-bug note; NOT a plan-623 regression — verified below).
 
+**Claimed:** zed-amo-idle-refine-h, epoch=1792998560, expires=2026-10-28T07:09:00+00:00
+
 ## Finding
 
 `cargo test --test issue028_disaggregated_handoff --features deltanet_ternary_inference`
