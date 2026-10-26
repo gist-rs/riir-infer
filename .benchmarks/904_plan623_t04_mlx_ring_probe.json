@@ -1,0 +1,60 @@
+{
+  "probe": "plan623_mlx_distributed_probe",
+  "backend": "ring",
+  "world_size": 2,
+  "mlx": "0.32.0",
+  "rows": [
+    {
+      "op": "all_sum",
+      "size": "4B",
+      "min_us": 170.0,
+      "median_us": 325.1,
+      "max_us": 1211.4,
+      "algo_gbps": null
+    },
+    {
+      "op": "all_sum",
+      "size": "16KiB",
+      "min_us": 167.9,
+      "median_us": 365.5,
+      "max_us": 473.4,
+      "algo_gbps": null
+    },
+    {
+      "op": "all_sum",
+      "size": "1MiB",
+      "min_us": 691.9,
+      "median_us": 1051.6,
+      "max_us": 1338.0,
+      "algo_gbps": 1.994
+    },
+    {
+      "op": "all_sum",
+      "size": "hidden10KiB",
+      "min_us": 121.5,
+      "median_us": 322.3,
+      "max_us": 475.2,
+      "algo_gbps": null
+    },
+    {
+      "op": "all_sum",
+      "size": "64MiB",
+      "min_us": 33948.4,
+      "median_us": 36242.1,
+      "max_us": 42725.7,
+      "algo_gbps": 3.703
+    },
+    {
+      "op": "all_gather",
+      "size": "1MiB",
+      "min_us": 271.6,
+      "median_us": 831.7,
+      "max_us": 1327.4
+    },
+    {
+      "op": "pp_rtt",
+      "size": "SKIPPED",
+      "verdict": "mlx-0.32.0-ring-p2p-deadlocked-2node"
+    }
+  ]
+}

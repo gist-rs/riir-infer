@@ -50,9 +50,17 @@ mlx-lm on the Proposal-042 scoreboard **measured on the same two boxes**.
   1-box cells run on Bonsai-2-27B-PQ2_0 + qwen3.8-27B ONLY; never add a gemma-2-2b cell.**
   **NOTE 2026-10-26: the amo 1-box Metal cells need a QUIET-GPU window — the rethink
   elephant-panel capture holds the MPS GPU ~26 h (until ~10-27); schedule after.**
-- [-] **T0.4** 2-box incumbent arms: llama.cpp RPC (TCP; RDMA after D2), mlx-lm
-  `sharded_generate --pipeline` + TP (ring; jaccl after D2), exo (PP + TP). Every metric
-  of the scoreboard; `.benchmarks/` record with both boxes' provenance. **llama.cpp-RPC
+- [-] **T0.4** 2-box incumbent arms: llama.cpp RPC (TCP; RDMA after D2), mlx
+  (pack runtime; socket PP — ring p2p deadlocked, see Bench 904) + TP (ring
+  collectives measured; jaccl after D2), exo. Every metric
+  of the scoreboard; `.benchmarks/` record with both boxes' provenance.
+  **exo arm N/A on the D3 models (scoped 2026-10-27, no bench): exo @ bc412e2
+  has no prism_hadamard_qwen35 loader — its mlx engine auto_parallel.py
+  patches the STOCK mlx_lm qwen3_5 classes only; loading the Bonsai-2 2-bit
+  pack (custom model_type + Packed hadamard modules) is impossible without a
+  model conversion that changes the measured artifact (same class as stock
+  mlx-lm, whose load() the pack doc names unsupported). Re-open = exo gains
+  a pack loader or a sanctioned stock-arch Bonsai conversion exists.** **llama.cpp-RPC
   arm DONE 2026-10-26 — [Bench 900](../.benchmarks/900_plan623_t04_llamacpp_rpc_2box.md):
   prism-b10787 built `-DGGML_RPC=ON -DGGML_BLAS=OFF` on amo, shipped as a binary bundle
   to bmo (NO CLT/cmake on bmo — rpath+openssl surgery on amo, ship, run); solo rows amo
@@ -61,9 +69,22 @@ mlx-lm on the Proposal-042 scoreboard **measured on the same two boxes**.
   single-stream decode on identical boxes; prefill −2.7% ≈ free); `-ts` does NOT reach
   the RPC device in this fork (both ts rows stayed amo-MTL, server-side proven);
   `-sm tensor` over RPC crashes the server (hadamard-sign view → nil buffer assert) —
-  TP-over-RPC N/A in the incumbent. REMAINING: mlx-lm + exo arms (weight-format convert
+  TP-over-RPC N/A in the incumbent. REMAINING: exo arm (scoped N/A on the D3
 
-  caveat), T0.3 quiet-GPU cells, RDMA rows behind D2.** ⚠ **MLX-arm prerequisites found
+  models — see the T0.4 note below), T0.3 quiet-GPU cells, RDMA rows behind D2.**
+
+  **MLX ARMS DONE 2026-10-27 — [Bench 904](../.benchmarks/904_plan623_t04_mlx_arms.md):
+  1-box bmo 357.3/58.1 (pp512/tg128; decode PARITY with llama.cpp solo 60.9 =
+  0.95×, prefill 0.33×); 2-box PP 43.0 t/s = −26% vs 1-box (socket exchange,
+  32/32 split; role0 median agrees within noise); **mx.distributed ring p2p
+  (send/recv) DEADLOCKED on 2 nodes in mlx 0.32.0** (zero bytes cross the wire;
+  collectives fine — all_sum 64 MiB 3.7 GB/s vs 8.6 raw, floor 320 µs) —
+  mlx-lm pipeline-over-ring inherits the gap. BOTH incumbents now measured
+  LOSING single-stream decode on 2-box TB5/TCP PP. Pack re-downloaded post
+  disk-clean via direct curl + files.json sha256 24/24; loader gap (pack
+  schema v2 vs bundled v1 reader + language_model prefix + vision_tower
+  weights) fixed OUTSIDE the pack in scripts/plan623_pack_artifact.py.
+  amo 1-box + clean-window re-read: deferred to the T0.3 quiet window.** ⚠ **MLX-arm prerequisites found
   RECLAIMED on amo (2026-10-26 late scan): the HF-cache pack
   `models--prism-ml--Ternary-Bonsai-2-27B-mlx-2bit` carries only 556 KB of blobs — the
   big safetensors blob is GONE (re-downloadable from `prism-ml/Ternary-Bonsai-2-27B-mlx-2bit`,
