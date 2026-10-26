@@ -2,7 +2,7 @@
 
 **Status:** CLOSED — MEASURED NEGATIVE (Bench 898: G1 bit-identical everywhere — kernel-level 5-step compounding + the real-model 512-step ARM-4 FNV exact; G2 FAIL −3.5%/−2.1% decode e2e, both windows agreeing). The kernel + test + env gate SHIP opt-in (`RIIR_GDN_CORE_FUSED=1`, default OFF — zero production change) with the record so the shape is not re-tried blind; the `recurrence_fused_body_impl` body-share refactor STAYS (the DRY win, bit-tested both ways). The census's remaining decode levers are named in the bench record: the 4→3 beta_decay+expand-only fusion (launch-bound with launch-bound, needs the paired-interleaved discipline), the attention-chain fusion, the embedding-dequant+inverse-FWHT fusion. Escalation defense continues there.
 
-**Claimed:** shikuwa-4090-i1126, 1793021000, expires 2026-10-28T13:30:00+00:00 (DISCHARGED same session — lease spent on the implementation + the A/B)
+**Lease closed:** shikuwa-4090-i1126, 1793021000 (was expires 2026-10-28T13:30:00+00:00) — discharged same session: lease spent on the implementation + the A/B
 
 ## Rung-1 adjudication (the dedup grep, CUDA side — measured in code, not assumed)
 
