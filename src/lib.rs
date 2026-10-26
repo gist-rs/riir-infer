@@ -103,6 +103,14 @@ pub mod golden_nll;
 /// feature + the `RIIR_TOKENGATE` runtime demote. See the module doc.
 pub mod tokengate;
 
+/// Multi-host pipeline substrate (Plan 623 Phase 1): the layer-range
+/// vocabulary, the activation wire frame, the stage handshake, and the
+/// per-range HybridCache state-segment serializer. Opt-in — the lane's
+/// wire surface; the range-forward compute lives ungated inside the
+/// forward bodies it splits.
+#[cfg(feature = "multi_host")]
+pub mod multi_host;
+
 /// TWT phase-collapse lane (Issue 022): the S-matrix profiler, the
 /// min-max DP partition, the ΔS quant-damage map. Opt-in — never a
 /// default without the Phase-5 GOAT gate.

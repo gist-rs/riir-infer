@@ -1,6 +1,7 @@
 # Plan 623: Multi-host inference lane — layer-range stages, activation frames, TCP→RDMA transport, TP, speculative fill
 
-**Status:** Proposed — 2026-10-22. Phase 0 is decision-free (measurement only) and may
+**Status:** Phase 1 (T1.1–T1.4) LANDED 2026-10-26 — substrate + range-forward seams
++ the 10-test G1 battery, all gates green (see the Phase 1 checkboxes). Phase 0 is decision-free (measurement only) and may
 start once Issue 1109 T0 (bmo reachable) is done; Phase 1 substrate is decision-free
 (riir-infer-core, no deps); Phase 2+ waits on [Proposal 042](../.proposals/042_multi_mac_distributed_inference.md) D1 (crate home); Phase 3+ on D2 (RDMA enabled).
 **Claimed:** zed-amo-idle-refine-cont, 1793001000, expires 2026-10-28T13:50Z
@@ -43,20 +44,49 @@ mlx-lm on the Proposal-042 scoreboard **measured on the same two boxes**.
 
 ## Phase 1 — Substrate in riir-infer-core (feature `multi_host`, zero new deps)
 
-- [ ] **T1.1** `LayerRange { lo, hi }` + range-forward on the CPU reference paths
+- [x] **T1.1** `LayerRange { lo, hi }` + range-forward on the CPU reference paths
   (`deltanet/ternary_forward.rs` `qwen_deltanet_ternary_layer_body` loop; gemma2
   `forward_gemma2_layers`). Embedding only on the stage with `lo == 0`, final norm +
   lm_head only on the stage with `hi == n_layer`. **G1:** stage(0..k) ∘ stage(k..n) ==
-  full forward, bit-identical, every k, both archs.
-- [ ] **T1.2** `ActivationFrame` (`seq_id u32 | pos u32 | n_tok u16 | dtype u8 | len u32 |
+  full forward, bit-identical, every k, both archs. **LANDED 2026-10-26** (amo,
+  zed-amo-idle-refine-cont): `LayerRange` + the gated stage entry points
+  (`forward_qwen_deltanet_ternary_range`, `forward_gemma2_range`) over an UNGATED
+  internal `*_body_range(lo, hi)` — the full forward DELEGATES to it, one loop, no
+  drift surface. G1 PASS: every k on the 4-layer synth Bonsai-2 (decode loop, logits
+  bit-exact) + through the ActivationFrame wire + gemma2 every k (softcapped, RoPE,
+  GQA). **Design note:** the range compute is deliberately ungated (same compiled
+  code as the full forward; the feature gates the LANE — wire types + public stage
+  seams), matching the Issue-1117 extraction precedent.
+- [x] **T1.2** `ActivationFrame` (`seq_id u32 | pos u32 | n_tok u16 | dtype u8 | len u32 |
   payload`), little-endian, bytemuck-castable payload; bf16 and f32 dtypes; decode-only
   fast path with no allocation (G4 alloc-free). bf16 on the wire is a LOSSY surface —
   f32 is the G1 posture, bf16 rides its own per-family retention gate (lossy-surface law).
-- [ ] **T1.3** Per-range state serializer for `HybridCache` (KV rows + GDN state for the
+  **LANDED 2026-10-26**: 4-byte `MAF1` magic + 16-byte header (20-byte wire prefix),
+  field-wise LE encode (never a host-endian struct cast), RNE bf16 (`f32_to_bf16_rne` —
+  NaN-preserving), decode_into reuses the caller buffer (capacity-stable assert in the
+  battery). bf16 gate = idempotence THROUGH its own rounding (decode(encode(v)) ==
+  decode(encode(decode(encode(v))))), never bit-identity; bf16-exact values survive
+  exactly. Reserved byte refuses non-zero (fail-closed forward compat).
+- [x] **T1.3** Per-range state serializer for `HybridCache` (KV rows + GDN state for the
   range's layers) — closes Issue 028's out-of-process gap; round-trip bit-identity test;
-  wire size matches the `src/disaggregated.rs:44-52` budget.
-- [ ] **T1.4** Stage handshake record: arch, `geometry_fingerprint`, artifact BLAKE3,
+  wire size matches the `src/disaggregated.rs:44-52` budget. **LANDED 2026-10-26**
+  (`HybridStateSegment`, `MHS1` v1): per-layer kind-tagged records (attention =
+  key/value rows with per-layer lengths — sliding-ring layers carry their SHORTER
+  physical buffers, the Issue-683 clamp — deltanet = full recurrent matrix + conv
+  window), header carries `fill_pos` restored via `set_fill_pos` LAST (a refused
+  restore never arms the tracker). G1: encode → FRESH cache → restore mid-run →
+  continued decode logits bit-identical to the uninterrupted run.
+- [x] **T1.4** Stage handshake record: arch, `geometry_fingerprint`, artifact BLAKE3,
   `LayerRange`, dtype — refuse on any mismatch (never a silent wrong-shape stage).
+  **LANDED 2026-10-26** (`StageHandshake::verify_pair`): downstream verifies upstream —
+  arch/geometry/artifact/dtype equality + RANGE TILING (upstream.hi == downstream.lo)
+  + both ranges validate against n_layer. Negative battery covers every mismatch class
+  (arch, geometry, artifact, dtype, gap, out-of-bounds).
+- [x] **T1.4b (validation battery)** `tests/plan623_multi_host_g1.rs` — 10 tests, all
+  green at the gated posture; clippy 0 at default / gated / no-default postures; lib
+  347 passed (gated) / 269 (default); rustfmt clean on every touched file. Found
+  (pre-existing, NOT this plan's): the issue028 `dual_format_q4_prefill_pair_loads_and_runs`
+  gate red at pristine HEAD — filed as [Issue 1123](../.issues/1123_issue028_q4_prefill_gate_red_on_develop.md).
 - [ ] **T1.5** Range-forward on Metal/CubeCL: `TernaryDeltanetGpuForward::forward_from_x`
   / `mark_x_as_input` (the existing upload-x seam) and gemma2 `forward_layer_gpu` loop with
   `[lo, hi)`; G1 bit-identity vs the full GPU forward.

@@ -170,6 +170,8 @@ pub use gemma2::forward_gemma2_block_causal;
     feature = "twt_gemma2"
 ))]
 pub use gemma2::PostLayerHook;
+#[cfg(feature = "multi_host")]
+pub use gemma2::forward_gemma2_range;
 #[cfg(all(not(target_arch = "wasm32"), feature = "causal_validation"))]
 pub use gemma2::{NoLora, forward_gemma2_layers};
 pub use llama::{forward_llama, forward_llama_attn_capture, generate_llama};

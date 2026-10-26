@@ -506,11 +506,61 @@ pub fn forward_gemma2_layers<H: PostLayerHook + ?Sized, L: LoraApplier>(
     hook: &mut H,
     lora: &mut L,
 ) {
+    forward_gemma2_layers_range_impl(
+        ctx,
+        weights,
+        cache,
+        pos,
+        config,
+        n,
+        hd,
+        q_dim,
+        kvd,
+        n_kv,
+        hook,
+        lora,
+        0,
+        config.n_layer,
+    );
+}
+
+/// The range-parameterized layer loop + output head (Plan 623 T1.1) — the
+/// SAME code [`forward_gemma2_layers`] runs, with the layer loop bounded to
+/// `[lo, hi)`. The embedding is the CALLER's (stage 0 sets `ctx.x` before
+/// calling; downstream stages receive the hidden vector in `ctx.x` — the
+/// stage handoff). `hi == config.n_layer` runs the hidden snapshot + final
+/// RMSNorm + tied LM head + final softcap tail; a middle stage leaves the
+/// post-loop hidden state in `ctx.x[..n]`.
+///
+/// The full path delegates with `(0, n_layer)` — one loop, no drift.
+#[allow(clippy::too_many_arguments)]
+#[inline(always)]
+fn forward_gemma2_layers_range_impl<H: PostLayerHook + ?Sized, L: LoraApplier>(
+    ctx: &mut ForwardContext,
+    weights: &GemmaTransformerWeights,
+    cache: &mut MultiLayerKVCache,
+    pos: usize,
+    config: &Config,
+    n: usize,
+    hd: usize,
+    q_dim: usize,
+    kvd: usize,
+    n_kv: usize,
+    hook: &mut H,
+    lora: &mut L,
+    lo: usize,
+    hi: usize,
+) {
     // Loop-invariant attention scale (1/sqrt(hd)) and token count — pure
     // functions of loop-invariant params. Hoisted out of the per-layer loop.
     let scale = 1.0 / (hd as f32).sqrt();
     let t_n = pos + 1;
-    for (layer_idx, layer_weights) in weights.layers.iter().enumerate() {
+    debug_assert!(
+        lo < hi && hi <= config.n_layer,
+        "bad layer range [{lo},{hi})"
+    );
+    for (layer_idx, layer_weights) in weights.layers[lo..hi].iter().enumerate() {
+        let layer_idx = lo + layer_idx;
         let layer_cache = &mut cache.layers[layer_idx];
 
         // a. Save residual BEFORE normalization (un-normalized x)
@@ -694,26 +744,78 @@ pub fn forward_gemma2_layers<H: PostLayerHook + ?Sized, L: LoraApplier>(
         lora.next_layer();
     }
 
-    // Snapshot hidden state
-    ctx.hidden_state[..n].copy_from_slice(&ctx.x[..n]);
+    // Tail — LAST stage only (snapshot + final norm + tied lm_head +
+    // final softcap). A middle stage leaves the post-loop hidden state in
+    // ctx.x as the handoff payload.
+    if hi == config.n_layer {
+        // Snapshot hidden state
+        ctx.hidden_state[..n].copy_from_slice(&ctx.x[..n]);
 
-    // 3. Final RMSNorm with final_norm
-    types::rmsnorm_with_gamma_eps(&mut ctx.x, &weights.final_norm, config.rms_norm_eps);
+        // 3. Final RMSNorm with final_norm
+        types::rmsnorm_with_gamma_eps(&mut ctx.x, &weights.final_norm, config.rms_norm_eps);
 
-    // Tied lm_head: logits = wte @ x
-    types::matmul_parallel(&mut ctx.logits, &weights.wte, &ctx.x, config.vocab_size, n);
+        // Tied lm_head: logits = wte @ x
+        types::matmul_parallel(&mut ctx.logits, &weights.wte, &ctx.x, config.vocab_size, n);
 
-    // 4. Final logit softcapping (Gemma 2): logits = cap * tanh(logits / cap)
-    if config.final_logit_softcapping > 0.0 {
-        let cap = config.final_logit_softcapping;
-        let inv_cap = 1.0 / cap;
-        for i in 0..config.vocab_size {
-            unsafe {
-                *ctx.logits.get_unchecked_mut(i) =
-                    cap * crate::simd::fast_tanh(*ctx.logits.get_unchecked(i) * inv_cap);
+        // 4. Final logit softcapping (Gemma 2): logits = cap * tanh(logits / cap)
+        if config.final_logit_softcapping > 0.0 {
+            let cap = config.final_logit_softcapping;
+            let inv_cap = 1.0 / cap;
+            for i in 0..config.vocab_size {
+                unsafe {
+                    *ctx.logits.get_unchecked_mut(i) =
+                        cap * crate::simd::fast_tanh(*ctx.logits.get_unchecked(i) * inv_cap);
+                }
             }
         }
     }
+}
+
+/// The multi-host stage entry point for the Gemma 2 decode path (Plan 623
+/// T1.1): run layers `range.lo..range.hi` of [`forward_gemma2_layers`] as
+/// one pipeline stage with the production `NoHook`/`NoLora` posture.
+///
+/// Contract (mirrors the ternary seam): the FIRST stage's caller embeds
+/// (or a downstream stage's caller writes the upstream hidden into
+/// `ctx.x[..n]`); the LAST stage returns `&mut ctx.logits`, any other
+/// stage's output is `ctx.x[..config.n_embd]` (read it after the call).
+/// Cache slots index absolutely — each stage can own a full
+/// [`MultiLayerKVCache`] and touch only its own layers. Refuses a bad
+/// range loud. Composed-vs-full bit-identity is the plan-623 G1 gate.
+#[cfg(feature = "multi_host")]
+#[allow(clippy::too_many_arguments)]
+pub fn forward_gemma2_range(
+    ctx: &mut ForwardContext,
+    weights: &GemmaTransformerWeights,
+    cache: &mut MultiLayerKVCache,
+    pos: usize,
+    config: &Config,
+    range: crate::multi_host::LayerRange,
+) {
+    if let Err(e) = range.validate(config.n_layer as u32) {
+        panic!("forward_gemma2_range: {e}");
+    }
+    let n = config.n_embd;
+    let hd = config.head_dim;
+    let q_dim = config.n_head * config.head_dim;
+    let kvd = types::kv_dim(config);
+    let n_kv = config.n_kv_head;
+    forward_gemma2_layers_range_impl(
+        ctx,
+        weights,
+        cache,
+        pos,
+        config,
+        n,
+        hd,
+        q_dim,
+        kvd,
+        n_kv,
+        &mut NoHook,
+        &mut NoLora,
+        range.lo as usize,
+        range.hi as usize,
+    );
 }
 
 /// Multi-token block-causal forward pass for Gemma 2 weights (Plan 108 T1).

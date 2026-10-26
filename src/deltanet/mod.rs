@@ -268,6 +268,8 @@ pub use minimal_activation_cache::{
     DeltanetMinimalActs, MinimalActivationCache, MinimalLayerActivations,
 };
 pub use reference::{RecurrenceOutput, deltanet_recurrence_prefill, deltanet_recurrence_reference};
+#[cfg(all(feature = "deltanet_ternary_inference", feature = "multi_host"))]
+pub use ternary_forward::forward_qwen_deltanet_ternary_range;
 #[cfg(feature = "deltanet_ternary_inference")]
 pub use ternary_forward::{
     forward_qwen_deltanet_ternary, forward_qwen_deltanet_ternary_hidden,

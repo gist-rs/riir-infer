@@ -1305,13 +1305,68 @@ fn forward_qwen_deltanet_ternary_body<'a>(
     config: &Config,
     scratch: &'a mut HybridForwardScratch,
     rope_freq: &crate::rope::RopeFreqTable,
-    mut layer_capture: Option<&mut [Vec<f32>]>,
+    layer_capture: Option<&mut [Vec<f32>]>,
     hook: Option<&dyn TernaryMatvecHook>,
     input_proj_hook: Option<&dyn TernaryInputProjHook>,
     ffn_hook: Option<&dyn TernaryFfnHook>,
 ) -> &'a mut [f32] {
+    forward_qwen_deltanet_ternary_body_range(
+        x,
+        weights,
+        cache,
+        token,
+        pos,
+        config,
+        scratch,
+        rope_freq,
+        layer_capture,
+        hook,
+        input_proj_hook,
+        ffn_hook,
+        0,
+        config.n_layer,
+    )
+}
+
+/// The range-parameterized body — the SAME code the full forward runs, with
+/// the layer loop bounded to `[lo, hi)`. `lo == 0` performs the embedding
+/// lookup; `hi == config.n_layer` performs the final RMSNorm + LM head. A
+/// middle stage consumes the incoming hidden state in `x[..n]` and leaves
+/// the outgoing hidden state in `x[..n]` (the stage handoff is the buffer
+/// itself — the wire copy is the caller's [`crate::multi_host`
+/// `ActivationFrame`]).
+///
+/// The full body ([`forward_qwen_deltanet_ternary_body`]) delegates here
+/// with `(0, n_layer)` — there is no second copy of the layer loop to
+/// drift (the Issue 022 T3.1 parity law, structural).
+///
+/// Returns `&mut x[..config.vocab_size]` on the LAST stage (logits) or
+/// `&mut x[..config.n_embd]` otherwise (hidden out). The caller
+/// distinguishes by the range it asked for.
+#[allow(clippy::too_many_arguments)]
+fn forward_qwen_deltanet_ternary_body_range<'a>(
+    x: &'a mut [f32],
+    weights: &QwenDeltaNetTernaryWeights,
+    cache: &mut HybridCache,
+    token: usize,
+    pos: usize,
+    config: &Config,
+    scratch: &'a mut HybridForwardScratch,
+    rope_freq: &crate::rope::RopeFreqTable,
+    mut layer_capture: Option<&mut [Vec<f32>]>,
+    hook: Option<&dyn TernaryMatvecHook>,
+    input_proj_hook: Option<&dyn TernaryInputProjHook>,
+    ffn_hook: Option<&dyn TernaryFfnHook>,
+    lo: usize,
+    hi: usize,
+) -> &'a mut [f32] {
     let n = config.n_embd;
     let v_dim = config.deltanet_linear_n_value_heads * config.deltanet_linear_head_dim;
+
+    debug_assert!(
+        lo < hi && hi <= config.n_layer,
+        "bad layer range [{lo},{hi})"
+    );
 
     // Rotation state (Issue 980). `None` for pre-rotation files — every
     // branch below then skips and the path is the exact pre-Bonsai-2 one.
@@ -1324,11 +1379,18 @@ fn forward_qwen_deltanet_ternary_body<'a>(
     );
 
     // 1. Embedding lookup — ternary wte row dequant + folded-basis restore
-    // (shared helper, Issue 1117).
-    ternary_embed_token_into(x, weights, n, token);
+    // (shared helper, Issue 1117). FIRST stage only: a downstream stage
+    // receives the hidden vector in `x` (the stage handoff) and must not
+    // overwrite it.
+    if lo == 0 {
+        ternary_embed_token_into(x, weights, n, token);
+    }
 
-    // 2. Layer loop with hybrid dispatch
-    for (layer_idx, layer_weights) in weights.layers.iter().enumerate() {
+    // 2. Layer loop with hybrid dispatch, bounded to [lo, hi). The cache
+    // slots index by ABSOLUTE layer_idx — a stage's state lives at the
+    // same indices it would occupy in the 1-box cache.
+    for (layer_idx, layer_weights) in weights.layers[lo..hi].iter().enumerate() {
+        let layer_idx = lo + layer_idx;
         let is_linear = weights.layer_types[layer_idx] == DeltaNetLayerType::DeltaNet;
 
         // The full per-layer body (norm → attention/DeltaNet → MLP, both
@@ -1368,10 +1430,71 @@ fn forward_qwen_deltanet_ternary_body<'a>(
         }
     }
 
-    // 3. Final RMSNorm + 4. LM head (shared helper, Issue 1117).
-    ternary_lm_head_into(x, weights, config, scratch, rotation, hook);
+    // 3. Final RMSNorm + 4. LM head (shared helper, Issue 1117). LAST
+    // stage only; a middle stage leaves the post-loop hidden state in
+    // `x[..n]` as the handoff payload.
+    if hi == config.n_layer {
+        ternary_lm_head_into(x, weights, config, scratch, rotation, hook);
+        return &mut x[..config.vocab_size];
+    }
+    &mut x[..n]
+}
 
-    &mut x[..config.vocab_size]
+/// The multi-host stage entry point (Plan 623 T1.1): run layers
+/// `range.lo..range.hi` of the ternary forward as one pipeline stage.
+///
+/// Contract (mirrors [`forward_qwen_deltanet_ternary_body_range`]):
+/// - FIRST stage (`range.lo == 0`): reads `token`, performs the embedding
+///   lookup into `x[..n]` (any prior `x` contents are overwritten).
+/// - DOWNSTREAM stages: `token` is IGNORED; `x[..config.n_embd]` must
+///   carry the upstream stage's hidden output (the `ActivationFrame`
+///   decode target).
+/// - LAST stage (`range.hi == n_layer`): final norm + LM head run and the
+///   return is `&mut x[..config.vocab_size]` (logits). Otherwise the
+///   return is `&mut x[..config.n_embd]` (hidden out).
+///
+/// Cache state is indexed absolutely, so each stage can own a full
+/// [`HybridCache`] and touch only its own layers' slots — or restore its
+/// range's segment from the wire ([`crate::multi_host::HybridStateSegment`]).
+/// Bit-identity of the composed pipeline vs the 1-box forward is the
+/// plan-623 G1 gate (`tests/plan623_multi_host_g1.rs`).
+///
+/// Refuses (loud panic) a range that is empty, inverted, or out of bounds
+/// — a silent zero-layer stage would read as a confident pass.
+#[cfg(feature = "multi_host")]
+#[allow(clippy::too_many_arguments)]
+pub fn forward_qwen_deltanet_ternary_range<'a>(
+    x: &'a mut [f32],
+    weights: &QwenDeltaNetTernaryWeights,
+    cache: &mut HybridCache,
+    token: usize,
+    pos: usize,
+    config: &Config,
+    scratch: &'a mut HybridForwardScratch,
+    rope_freq: &crate::rope::RopeFreqTable,
+    range: crate::multi_host::LayerRange,
+) -> &'a mut [f32] {
+    if let Err(e) = range.validate(config.n_layer as u32) {
+        panic!("forward_qwen_deltanet_ternary_range: {e}");
+    }
+    super::on_decode_pool(move || {
+        forward_qwen_deltanet_ternary_body_range(
+            x,
+            weights,
+            cache,
+            token,
+            pos,
+            config,
+            scratch,
+            rope_freq,
+            None,
+            None,
+            None,
+            None,
+            range.lo as usize,
+            range.hi as usize,
+        )
+    })
 }
 
 /// Embedding lookup — ternary wte row dequant + folded-basis restore.

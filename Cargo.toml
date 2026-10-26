@@ -195,6 +195,15 @@ row_logit_floor = ["katgpt-core/row_logit_floor"]
 # TernaryGroupWeights / ternary_forward ride it). OPT-IN — the Phase-7
 # GOAT (G2 engine cells + G3) is open; promotion is a separate owner call.
 scale_invariant_attn = ["katgpt-core/scale_invariant_attn", "deltanet_ternary_inference"]
+# Plan 623 (2026-10-26) — the multi-host pipeline substrate (Phase 1): LayerRange
+# + ActivationFrame wire (f32/bf16 little-endian, RNE bf16 widening, zero-alloc
+# decode fast path), the per-range HybridCache state-segment serializer (closes
+# the Issue-028 out-of-process gap), the stage handshake (refuse-on-mismatch),
+# and the range-forward seams on the qwen-deltanet-ternary + gemma2 CPU
+# reference paths (composed stages bit-identical to the full forward — the G1
+# gate). Opt-in, never default; implies deltanet_inference (the segment
+# serializer reads DeltaNet layer state).
+multi_host = ["deltanet_inference"]
 # golden_nll (Issue 959 T6, 2026-10-24): the f64 golden-NLL lossy-quant
 # readout — riir-infer_core::golden_nll (the reusable oracle: widen-once
 # scratch + per-token NLL via katgpt-core's fixed_log_softmax_target_f64,
@@ -502,6 +511,11 @@ required-features = ["bonsai2_hadamard"]
 name = "issue028_disaggregated_handoff"
 path = "tests/issue028_disaggregated_handoff.rs"
 required-features = ["deltanet_ternary_inference"]
+
+[[test]]
+name = "plan623_multi_host_g1"
+path = "tests/plan623_multi_host_g1.rs"
+required-features = ["multi_host", "deltanet_ternary_inference"]
 
 # katgpt-rs Issue 883 P0 — the V/K calibration dashboard bin. The module
 # lives behind #[cfg(feature = "vk_calibration")]; this row is the reader
