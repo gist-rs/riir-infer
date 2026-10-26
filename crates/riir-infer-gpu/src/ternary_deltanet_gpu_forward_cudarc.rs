@@ -4398,6 +4398,21 @@ fn dn_recurrence_fused_enabled() -> bool {
 /// (env unset) keeps the incumbent 3-launch chain until the GOAT gates pass
 /// and the owner-gated league re-cell promotes it; `RIIR_GDN_CORE_FUSED=1`
 /// arms it, any other value (including `=0`) reads OFF.
+/// Issue 1126 follow-up (Bench 898's named 4→3 rung): `RIIR_GDN_BETA_EXPAND_FUSED=1`
+/// arms the beta/decay + expand/L2 merge (ONE launch, the recurrence
+/// untouched); any other value (including `=0`) reads OFF. The i1126
+/// one-launch core takes precedence when `RIIR_GDN_CORE_FUSED=1` is also
+/// armed (it skips both launches entirely).
+fn gdn_beta_expand_fused_enabled() -> bool {
+    static ARMED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ARMED.get_or_init(|| {
+        matches!(
+            std::env::var("RIIR_GDN_BETA_EXPAND_FUSED").as_deref(),
+            Ok("1") | Ok("true") | Ok("on")
+        )
+    })
+}
+
 fn gdn_core_fused_enabled() -> bool {
     static ARMED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     *ARMED.get_or_init(|| {
@@ -4640,27 +4655,61 @@ fn forward_deltanet_layer(
         && matches!(head_dim, 64 | 128 | 256)
         && n_v_heads.is_multiple_of(n_k_heads);
     if !core_fused {
-        // 6. Beta/decay.
-        infra.deltanet.launch_beta_decay(
-            &infra.stream,
-            &acts.a_raw,
-            &acts.b_raw,
-            a_log,
-            dt_bias,
-            &acts.beta_buf,
-            &acts.decay_buf,
-            n_v_heads,
-        )?;
+        // Issue 1126 follow-up (Bench 898's named 4→3 rung): beta/decay +
+        // expand/L2 in ONE launch — launch-bound fused with launch-bound.
+        // The i1126 core put the L2 INSIDE the recurrence's warp blocks and
+        // lost (Bench 898); this keeps both bodies in the expand kernel's
+        // wide blocks and the recurrence kernel untouched. Bit-identical by
+        // construction (both bodies verbatim, disjoint outputs); gated
+        // empirically by the kernel-level bit-identity test + the real-model
+        // walk pin in the A/B.
+        if gdn_beta_expand_fused_enabled() && n_v_heads.is_multiple_of(n_k_heads) {
+            // The Bench-768 vacuous-guard lesson: bit-identical outputs alone
+            // cannot distinguish the fused dispatch from a silently-unread
+            // env — the first-use line is the reach proof in the A/B logs.
+            static REACH: std::sync::OnceLock<()> = std::sync::OnceLock::new();
+            if REACH.set(()).is_ok() {
+                eprintln!(
+                    "[beta_expand_fused] REACH: fused dispatch live (n_k={n_k_heads}, n_v={n_v_heads}, hd={head_dim})"
+                );
+            }
+            infra.deltanet.launch_beta_decay_expand_fused(
+                &infra.stream,
+                &acts.a_raw,
+                &acts.b_raw,
+                a_log,
+                dt_bias,
+                &acts.beta_buf,
+                &acts.decay_buf,
+                &acts.qkv,
+                &acts.qkv_expanded,
+                n_k_heads,
+                n_v_heads,
+                head_dim,
+            )?;
+        } else {
+            // 6. Beta/decay.
+            infra.deltanet.launch_beta_decay(
+                &infra.stream,
+                &acts.a_raw,
+                &acts.b_raw,
+                a_log,
+                dt_bias,
+                &acts.beta_buf,
+                &acts.decay_buf,
+                n_v_heads,
+            )?;
 
-        // 7. Expand Q/K + L2-norm + copy V.
-        infra.deltanet.launch_expand_and_l2_normalize(
-            &infra.stream,
-            &acts.qkv,
-            &acts.qkv_expanded,
-            n_k_heads,
-            n_v_heads,
-            head_dim,
-        )?;
+            // 7. Expand Q/K + L2-norm + copy V.
+            infra.deltanet.launch_expand_and_l2_normalize(
+                &infra.stream,
+                &acts.qkv,
+                &acts.qkv_expanded,
+                n_k_heads,
+                n_v_heads,
+                head_dim,
+            )?;
+        }
     }
 
     // 8. Recurrence (Plan 603 R1 — Issue 742's fused single-pass, 1R+1W over

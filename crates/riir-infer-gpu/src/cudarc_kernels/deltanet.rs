@@ -178,6 +178,86 @@ extern "C" __global__ void expand_and_l2_normalize_heads_f32(
 }
 
 // ---------------------------------------------------------------------------
+// Issue 1126 follow-up (the Bench-898 4→3 rung): beta/decay + expand/L2 in
+// ONE launch. Launch-bound fused with launch-bound — the expand kernel's
+// wide 256-thread block shape is KEPT and the n_head-wide beta/decay work
+// rides the leading grid threads; the recurrence stays its own kernel (the
+// i1126 core's lesson: pulling the L2 INSIDE the recurrence's warp blocks
+// re-serializes it and loses). Both bodies are VERBATIM from their
+// standalone kernels — same inputs, same instruction sequences → identical
+// values; the beta/decay and expand writes are disjoint buffers, so there
+// is no intra-kernel ordering hazard. Coverage: n_head = n_v_heads ≤
+// total_elems, so the leading threads of the expand grid always cover the
+// beta/decay work.
+// ---------------------------------------------------------------------------
+
+extern "C" __global__ void beta_decay_expand_fused_f32(
+    const float* __restrict__ a_raw,      // [n_head]
+    const float* __restrict__ b_raw,      // [n_head]
+    const float* __restrict__ a_log,      // [n_head]
+    const float* __restrict__ dt_bias,    // [n_head]
+    float* __restrict__ beta_out,         // [n_head]
+    float* __restrict__ decay_out,        // [n_head]
+    const float* __restrict__ compact,    // [Q(n_k×hd) | K(n_k×hd) | V(n_v×hd)]
+    float* __restrict__ expanded,         // [Q(n_v×hd) | K(n_v×hd) | V(n_v×hd)]
+    const int n_head,
+    const int n_k_heads,
+    const int n_v_heads,
+    const int head_dim)
+{
+    const int idx = blockIdx.x * blockDim.x + threadIdx.x;
+
+    // Beta/decay (one thread per head) — expressions verbatim from
+    // beta_decay_f32.
+    if (idx < n_head) {
+        float b_val = b_raw[idx];
+        beta_out[idx] = 1.0f / (1.0f + expf(-b_val));
+
+        float a_val = a_raw[idx] + dt_bias[idx];
+        float sp;
+        if (a_val > 20.0f) {
+            sp = a_val;
+        } else if (a_val < -20.0f) {
+            sp = 0.0f;
+        } else {
+            sp = logf(1.0f + expf(a_val));
+        }
+        decay_out[idx] = expf(a_log[idx] * sp);
+    }
+
+    // Expand + L2 + V copy — verbatim from expand_and_l2_normalize_heads_f32.
+    const int qk_expanded_block = n_v_heads * head_dim;
+    const int total_elems = 3 * qk_expanded_block;
+    if (idx >= total_elems) return;
+
+    const int section = idx / qk_expanded_block;  // 0=Q, 1=K, 2=V
+    const int local_idx = idx % qk_expanded_block;
+    const int out_head = local_idx / head_dim;
+    const int col = local_idx % head_dim;
+
+    if (section < 2) {
+        const int src_head = out_head % n_k_heads;
+        const int compact_section_off = section * n_k_heads * head_dim;
+        const int src_head_off = compact_section_off + src_head * head_dim;
+
+        float sq_sum = 0.0f;
+        for (int c = 0; c < head_dim; c++) {
+            float val = compact[src_head_off + c];
+            sq_sum += val * val;
+        }
+        if (sq_sum > 0.0f) {
+            float inv_norm = 1.0f / sqrtf(sq_sum);
+            expanded[idx] = compact[src_head_off + col] * inv_norm;
+        } else {
+            expanded[idx] = 0.0f;
+        }
+    } else {
+        const int v_compact_off = 2 * n_k_heads * head_dim;
+        expanded[idx] = compact[v_compact_off + local_idx];
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Gated DeltaNet recurrence (the hard part)
 // ---------------------------------------------------------------------------
 
@@ -1407,6 +1487,10 @@ pub struct DeltanetKernels {
     conv1d: CudaFunction,
     beta_decay: CudaFunction,
     expand_l2: CudaFunction,
+    /// Issue 1126 follow-up (the Bench-898 4→3 rung): beta/decay +
+    /// expand/L2 + V copy in ONE launch, the recurrence untouched.
+    /// Bit-identical to the 2-launch chain — see the kernel comment.
+    beta_decay_expand_fused: CudaFunction,
     recurrence: CudaFunction,
     /// Issue 617: row-parallel recurrence. One warp per row, 2D grid.
     /// Bit-identical to `recurrence`; ~4-8× faster (no syncthreads).
@@ -1524,6 +1608,9 @@ impl DeltanetKernels {
         let expand_l2 = module
             .load_function("expand_and_l2_normalize_heads_f32")
             .map_err(|e| super::CudarcKernelError::Compile(format!("{e}")))?;
+        let beta_decay_expand_fused = module
+            .load_function("beta_decay_expand_fused_f32")
+            .map_err(|e| super::CudarcKernelError::Compile(format!("{e}")))?;
         let recurrence = module
             .load_function("recurrence_f32")
             .map_err(|e| super::CudarcKernelError::Compile(format!("{e}")))?;
@@ -1582,6 +1669,7 @@ impl DeltanetKernels {
             conv1d,
             beta_decay,
             expand_l2,
+            beta_decay_expand_fused,
             recurrence,
             recurrence_parallel,
             recurrence_fused_hd64,
@@ -1708,6 +1796,67 @@ impl DeltanetKernels {
                 .launch_builder(&self.expand_l2)
                 .arg(compact)
                 .arg(expanded)
+                .arg(&n_k_i32)
+                .arg(&n_v_i32)
+                .arg(&head_dim_i32)
+                .launch(cfg)
+                .map_err(|e| super::CudarcKernelError::Launch(e.to_string()))?;
+        }
+        Ok(())
+    }
+
+    /// Issue 1126 follow-up (the Bench-898 4→3 rung) — beta/decay +
+    /// expand/L2 + V copy in ONE launch, the recurrence untouched. The
+    /// expand kernel's grid/block shape is kept (wide 256-thread blocks
+    /// over the 3·n_v·hd element space) and the n_head-wide beta/decay
+    /// work rides the leading grid threads: launch-bound fused with
+    /// launch-bound, zero added redundancy. Both bodies verbatim from
+    /// their standalone kernels → bit-identical outputs (disjoint
+    /// write sets, no intra-kernel ordering hazard). `n_head` is the
+    /// v-head count at every call site (beta/decay heads == v heads).
+    #[allow(clippy::too_many_arguments)]
+    pub fn launch_beta_decay_expand_fused(
+        &self,
+        stream: &CudaStream,
+        a_raw: &cudarc::driver::safe::CudaSlice<f32>,
+        b_raw: &cudarc::driver::safe::CudaSlice<f32>,
+        a_log: &cudarc::driver::safe::CudaSlice<f32>,
+        dt_bias: &cudarc::driver::safe::CudaSlice<f32>,
+        beta_out: &cudarc::driver::safe::CudaSlice<f32>,
+        decay_out: &cudarc::driver::safe::CudaSlice<f32>,
+        compact: &cudarc::driver::safe::CudaSlice<f32>,
+        expanded: &cudarc::driver::safe::CudaSlice<f32>,
+        n_k_heads: usize,
+        n_v_heads: usize,
+        head_dim: usize,
+    ) -> Result<(), super::CudarcKernelError> {
+        debug_assert!(
+            n_v_heads.is_multiple_of(n_k_heads),
+            "n_v_heads ({n_v_heads}) must be a multiple of n_k_heads ({n_k_heads})"
+        );
+        let total_elems = 3 * n_v_heads * head_dim;
+        let grid_x = (total_elems as u32).div_ceil(256).max(1);
+        let cfg = LaunchConfig {
+            grid_dim: (grid_x, 1, 1),
+            block_dim: (256, 1, 1),
+            shared_mem_bytes: 0,
+        };
+        let n_head_i32 = n_v_heads as i32;
+        let n_k_i32 = n_k_heads as i32;
+        let n_v_i32 = n_v_heads as i32;
+        let head_dim_i32 = head_dim as i32;
+        unsafe {
+            stream
+                .launch_builder(&self.beta_decay_expand_fused)
+                .arg(a_raw)
+                .arg(b_raw)
+                .arg(a_log)
+                .arg(dt_bias)
+                .arg(beta_out)
+                .arg(decay_out)
+                .arg(compact)
+                .arg(expanded)
+                .arg(&n_head_i32)
                 .arg(&n_k_i32)
                 .arg(&n_v_i32)
                 .arg(&head_dim_i32)
@@ -3344,6 +3493,252 @@ mod tests {
                 );
             }
             eprintln!("[gdn_core_fused] zero-head edge bit-identical at ({n_k},{n_v},{hd})");
+        }
+    }
+
+    /// Issue 1126 follow-up — the 4→3 merge (`launch_beta_decay_expand_fused`:
+    /// beta/decay + expand/L2 + V copy in ONE launch) must be BIT-IDENTICAL
+    /// to the incumbent 2-launch chain (beta_decay →
+    /// expand_and_l2_normalize): beta, decay AND every expanded element
+    /// `.to_bits()`-equal. Covers the Bonsai-2 27B production shape (n_k=16,
+    /// n_v=48, hd=128), an off-shape, the zero-vector-head L2 sq_sum==0
+    /// guard, and all three softplus ±20 branches via extreme a_raw values.
+    #[test]
+    fn test_beta_decay_expand_fused_bit_identical_to_chain() {
+        let Some(_) = cuda_or_skip() else {
+            eprintln!("[skip] no CUDA device");
+            return;
+        };
+        let ctx = CudaContext::new(0).unwrap();
+        let stream = ctx.new_stream().unwrap();
+        let kernels = DeltanetKernels::new(ctx).expect("compile");
+
+        // (n_k, n_v, hd): production Bonsai-2 27B + a small off-shape.
+        let geometries: [(usize, usize, usize); 2] = [(16, 48, 128), (4, 8, 64)];
+        for &(n_k, n_v, hd) in &geometries {
+            let compact_len = 2 * n_k * hd + n_v * hd; // [Q(n_k·hd)|K(n_k·hd)|V(n_v·hd)]
+            let expanded_len = 3 * n_v * hd;
+            let mut seed: u64 = 0x1126_bdef_caFE_0002;
+            let mut next = || {
+                seed = seed
+                    .wrapping_mul(6364136223846793005)
+                    .wrapping_add(1442695040888963407);
+                ((seed >> 33) as f32 / u32::MAX as f32) * 2.0 - 1.0
+            };
+            let qkv_compact: Vec<f32> = (0..compact_len).map(|_| next()).collect();
+            let a_raw: Vec<f32> = (0..n_v).map(|_| next() * 2.0).collect();
+            let b_raw: Vec<f32> = (0..n_v).map(|_| next() * 2.0).collect();
+            let a_log: Vec<f32> = (0..n_v).map(|_| next() * 0.5).collect();
+            let dt_bias: Vec<f32> = (0..n_v).map(|_| next()).collect();
+
+            // INCUMBENT 2-launch chain workspace.
+            let chain_qkv = stream.clone_htod(&qkv_compact).unwrap();
+            let chain_expanded = stream.alloc_zeros::<f32>(expanded_len).unwrap();
+            let chain_beta = stream.alloc_zeros::<f32>(n_v).unwrap();
+            let chain_decay = stream.alloc_zeros::<f32>(n_v).unwrap();
+            let chain_a = stream.clone_htod(&a_raw).unwrap();
+            let chain_b = stream.clone_htod(&b_raw).unwrap();
+            let chain_alog = stream.clone_htod(&a_log).unwrap();
+            let chain_dtb = stream.clone_htod(&dt_bias).unwrap();
+            // FUSED workspace.
+            let fused_qkv = stream.clone_htod(&qkv_compact).unwrap();
+            let fused_expanded = stream.alloc_zeros::<f32>(expanded_len).unwrap();
+            let fused_beta = stream.alloc_zeros::<f32>(n_v).unwrap();
+            let fused_decay = stream.alloc_zeros::<f32>(n_v).unwrap();
+            let fused_a = stream.clone_htod(&a_raw).unwrap();
+            let fused_b = stream.clone_htod(&b_raw).unwrap();
+            let fused_alog = stream.clone_htod(&a_log).unwrap();
+            let fused_dtb = stream.clone_htod(&dt_bias).unwrap();
+
+            kernels
+                .launch_beta_decay(
+                    &stream,
+                    &chain_a,
+                    &chain_b,
+                    &chain_alog,
+                    &chain_dtb,
+                    &chain_beta,
+                    &chain_decay,
+                    n_v,
+                )
+                .expect("launch beta_decay");
+            kernels
+                .launch_expand_and_l2_normalize(&stream, &chain_qkv, &chain_expanded, n_k, n_v, hd)
+                .expect("launch expand");
+            kernels
+                .launch_beta_decay_expand_fused(
+                    &stream,
+                    &fused_a,
+                    &fused_b,
+                    &fused_alog,
+                    &fused_dtb,
+                    &fused_beta,
+                    &fused_decay,
+                    &fused_qkv,
+                    &fused_expanded,
+                    n_k,
+                    n_v,
+                    hd,
+                )
+                .expect("launch beta_decay_expand_fused");
+            stream.synchronize().expect("sync");
+
+            let mut hbeta_chain = vec![0f32; n_v];
+            let mut hdecay_chain = vec![0f32; n_v];
+            let mut hexp_chain = vec![0f32; expanded_len];
+            let mut hbeta_fused = vec![0f32; n_v];
+            let mut hdecay_fused = vec![0f32; n_v];
+            let mut hexp_fused = vec![0f32; expanded_len];
+            stream.memcpy_dtoh(&chain_beta, &mut hbeta_chain).unwrap();
+            stream.memcpy_dtoh(&chain_decay, &mut hdecay_chain).unwrap();
+            stream
+                .memcpy_dtoh(&chain_expanded, &mut hexp_chain)
+                .unwrap();
+            stream.memcpy_dtoh(&fused_beta, &mut hbeta_fused).unwrap();
+            stream.memcpy_dtoh(&fused_decay, &mut hdecay_fused).unwrap();
+            stream
+                .memcpy_dtoh(&fused_expanded, &mut hexp_fused)
+                .unwrap();
+            for i in 0..n_v {
+                assert!(
+                    hbeta_chain[i].to_bits() == hbeta_fused[i].to_bits(),
+                    "beta diverged at geom ({n_k},{n_v},{hd}) head {i}: \
+                     chain={:e} fused={:e}",
+                    hbeta_chain[i],
+                    hbeta_fused[i]
+                );
+                assert!(
+                    hdecay_chain[i].to_bits() == hdecay_fused[i].to_bits(),
+                    "decay diverged at geom ({n_k},{n_v},{hd}) head {i}: \
+                     chain={:e} fused={:e}",
+                    hdecay_chain[i],
+                    hdecay_fused[i]
+                );
+            }
+            for i in 0..expanded_len {
+                assert!(
+                    hexp_chain[i].to_bits() == hexp_fused[i].to_bits(),
+                    "expanded diverged at geom ({n_k},{n_v},{hd}) idx {i}: \
+                     chain={:e} fused={:e}",
+                    hexp_chain[i],
+                    hexp_fused[i]
+                );
+            }
+            eprintln!(
+                "[beta_decay_expand_fused] bit-identical to the 2-launch chain at ({n_k},{n_v},{hd})"
+            );
+        }
+
+        // Edge block: zero-vector heads (the L2 sq_sum==0 guard must stay
+        // exact) + all three softplus branches (a_raw at −25 / +25 / 0) —
+        // both arms share identical inputs and expressions, so any branch
+        // transcription typo diverges loudly here.
+        {
+            let (n_k, n_v, hd) = (4usize, 8usize, 64usize);
+            let compact_len = 2 * n_k * hd + n_v * hd;
+            let expanded_len = 3 * n_v * hd;
+            let mut qkv_compact = vec![0.25f32; compact_len];
+            for i in 0..hd {
+                qkv_compact[i] = 0.0; // Q head 0 → zero source vector
+                qkv_compact[n_k * hd + 2 * hd + i] = 0.0; // K head 2 → zero source vector
+            }
+            let mut a_raw = vec![0.3f32; n_v];
+            a_raw[1] = -25.0; // softplus branch 2 (a_val < −20 → sp = 0)
+            a_raw[2] = 25.0; // softplus branch 1 (a_val > +20 → sp = a_val)
+            a_raw[3] = 0.0; // softplus branch 3 (log1p path)
+            let b_raw = vec![-0.7f32; n_v];
+            let a_log = vec![0.1f32; n_v];
+            let dt_bias = vec![0.05f32; n_v];
+
+            let chain_qkv = stream.clone_htod(&qkv_compact).unwrap();
+            let chain_expanded = stream.alloc_zeros::<f32>(expanded_len).unwrap();
+            let chain_beta = stream.alloc_zeros::<f32>(n_v).unwrap();
+            let chain_decay = stream.alloc_zeros::<f32>(n_v).unwrap();
+            let chain_a = stream.clone_htod(&a_raw).unwrap();
+            let chain_b = stream.clone_htod(&b_raw).unwrap();
+            let chain_alog = stream.clone_htod(&a_log).unwrap();
+            let chain_dtb = stream.clone_htod(&dt_bias).unwrap();
+            let fused_qkv = stream.clone_htod(&qkv_compact).unwrap();
+            let fused_expanded = stream.alloc_zeros::<f32>(expanded_len).unwrap();
+            let fused_beta = stream.alloc_zeros::<f32>(n_v).unwrap();
+            let fused_decay = stream.alloc_zeros::<f32>(n_v).unwrap();
+            let fused_a = stream.clone_htod(&a_raw).unwrap();
+            let fused_b = stream.clone_htod(&b_raw).unwrap();
+            let fused_alog = stream.clone_htod(&a_log).unwrap();
+            let fused_dtb = stream.clone_htod(&dt_bias).unwrap();
+
+            kernels
+                .launch_beta_decay(
+                    &stream,
+                    &chain_a,
+                    &chain_b,
+                    &chain_alog,
+                    &chain_dtb,
+                    &chain_beta,
+                    &chain_decay,
+                    n_v,
+                )
+                .expect("launch beta_decay");
+            kernels
+                .launch_expand_and_l2_normalize(&stream, &chain_qkv, &chain_expanded, n_k, n_v, hd)
+                .expect("launch expand");
+            kernels
+                .launch_beta_decay_expand_fused(
+                    &stream,
+                    &fused_a,
+                    &fused_b,
+                    &fused_alog,
+                    &fused_dtb,
+                    &fused_beta,
+                    &fused_decay,
+                    &fused_qkv,
+                    &fused_expanded,
+                    n_k,
+                    n_v,
+                    hd,
+                )
+                .expect("launch beta_decay_expand_fused");
+            stream.synchronize().expect("sync");
+
+            let mut hbeta_chain = vec![0f32; n_v];
+            let mut hdecay_chain = vec![0f32; n_v];
+            let mut hexp_chain = vec![0f32; expanded_len];
+            let mut hbeta_fused = vec![0f32; n_v];
+            let mut hdecay_fused = vec![0f32; n_v];
+            let mut hexp_fused = vec![0f32; expanded_len];
+            stream.memcpy_dtoh(&chain_beta, &mut hbeta_chain).unwrap();
+            stream.memcpy_dtoh(&chain_decay, &mut hdecay_chain).unwrap();
+            stream
+                .memcpy_dtoh(&chain_expanded, &mut hexp_chain)
+                .unwrap();
+            stream.memcpy_dtoh(&fused_beta, &mut hbeta_fused).unwrap();
+            stream.memcpy_dtoh(&fused_decay, &mut hdecay_fused).unwrap();
+            stream
+                .memcpy_dtoh(&fused_expanded, &mut hexp_fused)
+                .unwrap();
+            for i in 0..n_v {
+                assert!(
+                    hbeta_chain[i].to_bits() == hbeta_fused[i].to_bits(),
+                    "edge beta diverged at head {i}: chain={:e} fused={:e}",
+                    hbeta_chain[i],
+                    hbeta_fused[i]
+                );
+                assert!(
+                    hdecay_chain[i].to_bits() == hdecay_fused[i].to_bits(),
+                    "edge decay diverged at head {i}: chain={:e} fused={:e}",
+                    hdecay_chain[i],
+                    hdecay_fused[i]
+                );
+            }
+            for i in 0..expanded_len {
+                assert!(
+                    hexp_chain[i].to_bits() == hexp_fused[i].to_bits(),
+                    "edge expanded diverged at idx {i}: chain={:e} fused={:e}",
+                    hexp_chain[i],
+                    hexp_fused[i]
+                );
+            }
+            eprintln!("[beta_decay_expand_fused] zero-head + softplus-branch edge bit-identical");
         }
     }
 
