@@ -16,3 +16,6 @@ CLAUDE.md
 .env
 .env.local
 .dev.vars
+
+# macOS Finder noise
+.DS_Store
