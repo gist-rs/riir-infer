@@ -3,6 +3,23 @@
 **Status:** OPEN — filed 2026-10-22. Blocks [Plan 623](../.plans/623_multi_host_pipeline_inference_lane.md) Phase 0. Parent: [Proposal 042](../.proposals/042_multi_mac_distributed_inference.md).
 **Claimed:** zed-amo-idle-015, 1792974614, expires 2026-10-28T00:16:54+00:00 — scope = the item-9 on-box adjudication (amo half: netcheck/tailscale-ping/TB-service state/T0 probe), recorded in-issue
 
+## On-box adjudication (amo side EXECUTED 2026-10-26 ~07:00+07 — zed-amo-idle-015; the item-9 desk research above was run against the live boxes)
+
+| check (from amo) | result | reads as |
+|---|---|---|
+| `tailscale status` | bmo **offline, last seen 9h ago, tx 1248 rx 0**; m3-1 offline 7h; m3 offline 14h | bmo down since ~22:00 +07 10-25 — the CURRENT blocker, upstream of both research hypotheses |
+| `tailscale ping 100.100.117.44` ×5 | all 5 TIMED OUT, "no reply" | the 10-22 DERP-relay posture (71–92 ms) is STALE — today there is no path at all |
+| `tailscale netcheck` (amo) | **UDP: true**, IPv4 yes, IPv6 yes, DERP sin 43.5 ms | amo's tailnet posture HEALTHY — the T2 firewall hypothesis is NOT the live fault on this side |
+| port 22 probe (100.100.117.44) | refused/unreachable | same upstream cause — T0 not adjudicable while bmo is down |
+| `networksetup -listallnetworkservices` | "Thunderbolt Bridge" EXISTS + ENABLED on amo | amo's T1 half is pre-staged correctly |
+| `ifconfig bridge0` | up, RUNNING, link-local `169.254.125.77/16` (unchanged from 10-22) | amo waiting for bmo's side to join |
+| `ping6 ff02::1%bridge0` | only amo's own addresses reply (sub-ms) | no TB peer on the bridge — confirms the 10-22 no-peer read |
+| `system_profiler SPThunderboltDataType` | ALL ports "**No device connected**" (the Mac Studio entries are amo's own buses) | **bmo is absent from the TB bus: powered off, deep-asleep, or unplugged** — the 10-22 "80 Gb/s negotiated" link no longer exists |
+
+**Verdict: the blocker is UPSTREAM of the desk research's two hypotheses — bmo must be powered on / woken FIRST (owner-physical, supersedes T0 in sequence).** The T1 root-cause work (bmo bridge service) and T2 work (direct-path negotiation) are both unstartable until bmo is on the bus and the tailnet. amo's side is fully verified and pre-staged: when bmo returns, run the research's T1/T2 command sequences AS WRITTEN (they were sound — just not yet adjudicable), re-check `tailscale status` for `active; relay` → direct, then `tailscale ping` for `via <ip>`. The tx 1248 rx 0 tailnet row is the wake-confirmation signal to watch (rx > 0 = bmo answering again).
+
+**Claim reshaped 2026-10-26:** the adjudication is recorded above; the issue stays OPEN with the owner-physical remainder (power bmo on → T0 → T1 → T2 → T3). No lease held.
+
 ## Measured state (from amo, 2026-10-22)
 
 | fact | value |
