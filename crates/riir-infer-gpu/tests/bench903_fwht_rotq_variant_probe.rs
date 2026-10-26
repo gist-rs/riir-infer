@@ -336,6 +336,97 @@ __device__ __forceinline__ void rot_butterfly_from_8(float* buf, int hblock)
     }
 }
 
+extern "C" __global__ void v3_rmsnorm_sign_fwht_quantize_f32(
+    const float* __restrict__ x,
+    const float* __restrict__ gamma,
+    const float* __restrict__ signs,
+    signed char* __restrict__ out,
+    float* __restrict__ ascale,
+    float inv_dim, float eps,
+    int dim, int hblock)
+{
+    // V3 = V1 + the shfl_down reduction tail ONLY (full 10-stage smem
+    // butterfly) — the bisect arm that isolates the tail.
+    __shared__ float red[256];
+    __shared__ float buf[1024];
+    const int tid = threadIdx.x;
+    float partial_sq = 0.0f;
+    for (int i = tid; i < dim; i += 256) {
+        float v = x[i];
+        partial_sq += v * v;
+    }
+    red[tid] = partial_sq;
+    __syncthreads();
+    if (tid < 128) red[tid] += red[tid + 128]; __syncthreads();
+    if (tid < 64)  red[tid] += red[tid + 64];  __syncthreads();
+    if (tid < 32)  red[tid] += red[tid + 32];  __syncthreads();
+    float r = red[tid];
+    r += __shfl_down_sync(0xFFFFFFFFu, r, 16);
+    r += __shfl_down_sync(0xFFFFFFFFu, r, 8);
+    r += __shfl_down_sync(0xFFFFFFFFu, r, 4);
+    r += __shfl_down_sync(0xFFFFFFFFu, r, 2);
+    r += __shfl_down_sync(0xFFFFFFFFu, r, 1);
+    if (tid == 0) {
+        float mean_sq = r * inv_dim;
+        red[0] = 1.0f / sqrtf(mean_sq + eps);
+    }
+    __syncthreads();
+    const float inv_rms = red[0];
+
+    const int base = blockIdx.x * hblock;
+    const float4* x4 = reinterpret_cast<const float4*>(x + base);
+    const float4* g4 = reinterpret_cast<const float4*>(gamma + base);
+    const float4* s4 = reinterpret_cast<const float4*>(signs + base);
+    for (int i = tid; i < hblock / 4; i += blockDim.x) {
+        float4 a = x4[i];
+        float4 g = g4[i];
+        float4 s = s4[i];
+        float v0 = (a.x * inv_rms * g.x) * s.x;
+        float v1 = (a.y * inv_rms * g.y) * s.y;
+        float v2 = (a.z * inv_rms * g.z) * s.z;
+        float v3 = (a.w * inv_rms * g.w) * s.w;
+        int b0 = i * 4;
+        buf[b0] = v0; buf[b0 + 1] = v1; buf[b0 + 2] = v2; buf[b0 + 3] = v3;
+    }
+    __syncthreads();
+    rot_butterfly_1024(buf, hblock);
+    rot_quantize_16(buf, base, hblock, out, ascale);
+}
+
+extern "C" __global__ void v4_rmsnorm_sign_fwht_quantize_f32(
+    const float* __restrict__ x,
+    const float* __restrict__ gamma,
+    const float* __restrict__ signs,
+    signed char* __restrict__ out,
+    float* __restrict__ ascale,
+    float inv_dim, float eps,
+    int dim, int hblock)
+{
+    // V4 = V1 + the register-tiled stages 2+4 ONLY (shipped full smem
+    // reduction) — the bisect arm that isolates the reg-tile.
+    __shared__ float red[256];
+    __shared__ float buf[1024];
+    float inv_rms;
+    rot_reduction_inv_rms_256(x, dim, inv_dim, eps, red, &inv_rms);
+    const int base = blockIdx.x * hblock;
+    const float4* x4 = reinterpret_cast<const float4*>(x + base);
+    const float4* g4 = reinterpret_cast<const float4*>(gamma + base);
+    const float4* s4 = reinterpret_cast<const float4*>(signs + base);
+    for (int i = threadIdx.x; i < hblock / 4; i += blockDim.x) {
+        float4 a = x4[i];
+        float4 g = g4[i];
+        float4 s = s4[i];
+        float v0 = (a.x * inv_rms * g.x) * s.x;
+        float v1 = (a.y * inv_rms * g.y) * s.y;
+        float v2 = (a.z * inv_rms * g.z) * s.z;
+        float v3 = (a.w * inv_rms * g.w) * s.w;
+        v2_regtile_stage24_store(buf, i, v0, v1, v2, v3);
+    }
+    __syncthreads();
+    rot_butterfly_from_8(buf, hblock);
+    rot_quantize_16(buf, base, hblock, out, ascale);
+}
+
 extern "C" __global__ void v2_rmsnorm_sign_fwht_quantize_f32(
     const float* __restrict__ x,
     const float* __restrict__ gamma,
@@ -631,6 +722,15 @@ fn bench903_fwht_rotq_variant_probe() {
             Kind::GateSigmoid => "v2_gate_sigmoid_sign_fwht_quantize_f32",
             Kind::Swiglu => "v2_swiglu_sign_fwht_quantize_f32",
         });
+        // bisect arms (rmsnorm only — the shape that drifted first)
+        let (v3, v4) = if kind == Kind::Rmsnorm {
+            (
+                Some(load("v3_rmsnorm_sign_fwht_quantize_f32")),
+                Some(load("v4_rmsnorm_sign_fwht_quantize_f32")),
+            )
+        } else {
+            (None, None)
+        };
 
         let time_arm = |f: &CudaFunction| -> f64 {
             stream.synchronize().expect("sync");
@@ -642,7 +742,7 @@ fn bench903_fwht_rotq_variant_probe() {
             t.elapsed().as_secs_f64() * 1e6 / burst as f64
         };
 
-        // ── bit-identity gate ──
+        // ── bit-identity gate (with drift diagnostics) ──
         let snapshot = |f: &CudaFunction| -> (Vec<i8>, Vec<u32>) {
             launch_arm(kind, f, &stream, &a_d, &b_d, &s_d, &out_d, &ascale_d, dim, hblock);
             stream.synchronize().expect("sync");
@@ -652,20 +752,48 @@ fn bench903_fwht_rotq_variant_probe() {
             stream.memcpy_dtoh(&ascale_d, &mut a).expect("dtoh ascale");
             (o, a.iter().map(|v| v.to_bits()).collect())
         };
-        let (ref_p0, ref_pa) = snapshot(&p0);
-        let (v1_o, v1_a) = snapshot(&v1);
-        let (v2_o, v2_a) = snapshot(&v2);
-        let v1_ok = v1_o == ref_p0 && v1_a == ref_pa;
-        let v2_ok = v2_o == ref_p0 && v2_a == ref_pa;
+        let mut drift_report = |name: &str, s: &(Vec<i8>, Vec<u32>), r: &(Vec<i8>, Vec<u32>)| {
+            let bad_o: Vec<usize> = (0..dim).filter(|&i| s.0[i] != r.0[i]).collect();
+            let bad_a: Vec<usize> = (0..dim / 16).filter(|&i| s.1[i] != r.1[i]).collect();
+            if bad_o.is_empty() && bad_a.is_empty() {
+                eprintln!("[bench903]   {name}: OK (i8 eq + ascale to_bits eq)");
+                true
+            } else {
+                let first = bad_o.first().copied().unwrap_or(bad_a[0] * 16);
+                eprintln!(
+                    "[bench903]   {name}: DRIFT — {} i8 + {} ascale mismatches; first i8 at {first}: p0={} var={}",
+                    bad_o.len(),
+                    bad_a.len(),
+                    s.0[first],
+                    r.0[first]
+                );
+                false
+            }
+        };
+        let reference = snapshot(&p0);
+        let v1_s = snapshot(&v1);
+        let v2_s = snapshot(&v2);
         eprintln!("[bench903] dim={dim} {label}");
-        eprintln!(
-            "[bench903]   identity: v1 {} v2 {} (i8 eq + ascale to_bits eq over {dim} + {}/16)",
-            if v1_ok { "OK" } else { "DRIFT" },
-            if v2_ok { "OK" } else { "DRIFT" },
-            dim
-        );
+        let v1_ok = drift_report("V1 float4-fill", &reference, &v1_s);
+        let v2_ok = drift_report("V2 +regtile+shfltail", &reference, &v2_s);
+        let (v3_ok, v4_ok) = match (&v3, &v4) {
+            (Some(f3), Some(f4)) => {
+                let v3_s = snapshot(f3);
+                let v4_s = snapshot(f4);
+                (
+                    drift_report("V3 shfltail-only", &reference, &v3_s),
+                    drift_report("V4 regtile-only", &reference, &v4_s),
+                )
+            }
+            _ => (true, true),
+        };
         assert!(v1_ok, "V1 drifted from P0 at dim={dim} — the variant is dead");
         assert!(v2_ok, "V2 drifted from P0 at dim={dim} — the variant is dead");
+        if kind == Kind::Rmsnorm {
+            eprintln!(
+                "[bench903]   bisect: v3(shfltail)={v3_ok} v4(regtile)={v4_ok} — the drifter is isolated by this row",
+            );
+        }
 
         // ── interleaved burst A/B ──
         for _ in 0..60 {
