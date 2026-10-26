@@ -413,6 +413,17 @@ required-features = ["cubecl_runtime", "ternary_gemm_batched", "ternary_deltanet
 name = "issue1115_wg_occupancy_prefill_tail_ab"
 required-features = ["cuda_backend", "ternary_gemv_cuda_raw", "ternary_gemm_batched", "ternary_deltanet_chunked_prefill", "ternary_attention_batched_prefill", "riir-infer-core/bonsai2_hadamard"]
 
+# Bench 903 — Issue 1127 T3 probe: bit-identical FWHT-quantize geometry
+# variants (float4 global-load fill / register-tiled butterfly stages 2+4 /
+# shfl_down reduction tail) vs the shipped fused kernels, interleaved-burst
+# A/B at the census shapes + the bit-identity gate + an A/A control. Prices
+# the fix space BEFORE any rung wiring (the Bench-897 precedent). Whole-file
+# #![cfg] keeps non-CUDA hosts empty; this row keeps the reader honest.
+# #[ignore]d — the 4090 runs it --release -- --ignored --nocapture.
+[[test]]
+name = "bench903_fwht_rotq_variant_probe"
+required-features = ["ternary_gemv_cuda_raw"]
+
 # katgpt-rs Issue 936 T5 — the decode spin pool on the GPU-hooked decode
 # (Metal lane, real Bonsai-2): bit-identity + paired no-harm wall, one load.
 [[test]]
