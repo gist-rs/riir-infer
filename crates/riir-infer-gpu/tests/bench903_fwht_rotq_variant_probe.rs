@@ -692,6 +692,7 @@ fn bench903_fwht_rotq_variant_probe() {
 
     let mut family_ratio_sum = 0.0f64;
     let mut family_census_sum = 0.0f64;
+    let mut shipping_ratio = 1.0f64; // per-shape shipping-arm ratio (V3 else V1)
 
     for (si, &(dim, kind, label)) in shapes.iter().enumerate() {
         let mut rng = Lcg(0x9E3779B97F4A7C15 ^ (si as u64 + 1));
@@ -776,29 +777,43 @@ fn bench903_fwht_rotq_variant_probe() {
         eprintln!("[bench903] dim={dim} {label}");
         let v1_ok = drift_report("V1 float4-fill", &reference, &v1_s);
         let v2_ok = drift_report("V2 +regtile+shfltail", &reference, &v2_s);
-        let (v3_ok, v4_ok) = match (&v3, &v4) {
+        // Bisect arms (rmsnorm only): the Bench-902-followup run isolated the
+        // reg-tile as the drifter (V4 DRIFT with 0 i8 + 106 ascale = the
+        // common-mode ±1-ULP signature — i8 is invariant to a group-wide
+        // 1-ULP scale, the stored absmax is not). This is the recorded nvcc
+        // contraction-pairing class: the same math, register-resident
+        // operands, pairs differently than the smem-load form. Dead by the
+        // FNV-pin law; V3 (shfl-tail only) is the shipping candidate.
+        let mut v3_ok = false;
+        let mut v4_ok = false;
+        let (v3_s, v4_s) = match (&v3, &v4) {
             (Some(f3), Some(f4)) => {
-                let v3_s = snapshot(f3);
-                let v4_s = snapshot(f4);
-                (
-                    drift_report("V3 shfltail-only", &reference, &v3_s),
-                    drift_report("V4 regtile-only", &reference, &v4_s),
-                )
+                let s3 = snapshot(f3);
+                let s4 = snapshot(f4);
+                v3_ok = drift_report("V3 shfltail-only", &reference, &s3);
+                v4_ok = drift_report("V4 regtile-only", &reference, &s4);
+                (Some(s3), Some(s4))
             }
-            _ => (true, true),
+            _ => (None, None),
         };
-        assert!(v1_ok, "V1 drifted from P0 at dim={dim} — the variant is dead");
-        assert!(v2_ok, "V2 drifted from P0 at dim={dim} — the variant is dead");
-        if kind == Kind::Rmsnorm {
-            eprintln!(
-                "[bench903]   bisect: v3(shfltail)={v3_ok} v4(regtile)={v4_ok} — the drifter is isolated by this row",
-            );
+        let _ = (v1_s, v2_s, v3_s, v4_s);
+        // A drifted variant is EXCLUDED from the rung set, never a panic —
+        // the probe prices the shipping space (the identity gate IS the
+        // exclusion rule).
+        if !v1_ok || !v2_ok || (kind == Kind::Rmsnorm && (!v3_ok || !v4_ok)) {
+            eprintln!("[bench903]   (drifted arms excluded from timing)");
         }
+        let _ = v2_ok;
 
-        // ── interleaved burst A/B ──
+        // ── interleaved burst A/B (shipping arms only) ──
         for _ in 0..60 {
             launch_arm(kind, &p0, &stream, &a_d, &b_d, &s_d, &out_d, &ascale_d, dim, hblock);
-            launch_arm(kind, &v2, &stream, &a_d, &b_d, &s_d, &out_d, &ascale_d, dim, hblock);
+            if v1_ok {
+                launch_arm(kind, &v1, &stream, &a_d, &b_d, &s_d, &out_d, &ascale_d, dim, hblock);
+            }
+            if v3_ok {
+                launch_arm(kind, v3.as_ref().unwrap(), &stream, &a_d, &b_d, &s_d, &out_d, &ascale_d, dim, hblock);
+            }
         }
         stream.synchronize().expect("sync");
 
@@ -821,7 +836,15 @@ fn bench903_fwht_rotq_variant_probe() {
             );
         }
 
-        for (name, f) in [("V1 float4-fill", &v1), ("V2 +regtile+shfltail", &v2)] {
+        for (name, f, ok) in [
+            ("V1 float4-fill", Some(&v1), v1_ok),
+            ("V3 shfltail", v3.as_ref(), v3_ok),
+        ] {
+            if !ok {
+                eprintln!("[bench903]   {name:<20} DRIFTED — excluded from timing");
+                continue;
+            }
+            let f = f.expect("shipping arm");
             let mut ratios = Vec::with_capacity(pairs);
             let mut base_us = Vec::with_capacity(pairs);
             let mut var_us = Vec::with_capacity(pairs);
@@ -844,18 +867,19 @@ fn bench903_fwht_rotq_variant_probe() {
                 median(var_us),
                 1.0 / mr
             );
-            if name.starts_with("V2") {
-                family_ratio_sum += census_us_per_token(kind) * mr;
-                family_census_sum += census_us_per_token(kind);
-            }
+            // shipping ratio per kind — V3 lands last and wins when present
+            // (more barriers saved); V1 is the fallback
+            shipping_ratio = mr;
         }
+        family_ratio_sum += census_us_per_token(kind) * shipping_ratio;
+        family_census_sum += census_us_per_token(kind);
     }
 
     // ── projected family summary (from measured ratios × census weights) ──
     const TOKEN_US: f64 = 10_907.0; // 91.68 tok/s (Bench 1004 the RED baseline)
     let projected = family_ratio_sum;
     let census_total = family_census_sum;
-    eprintln!("[bench903] ── family projection (V2, census-weighted) ──");
+    eprintln!("[bench903] ── family projection (shipping arms, census-weighted) ──");
     eprintln!(
         "[bench903]   family {:?} µs/token → projected {:.0} µs/token | saves {:.0} µs/token = {:.2}% of the {:.0} µs token (re-cross bar +2.71%)",
         census_total, projected, census_total - projected,
