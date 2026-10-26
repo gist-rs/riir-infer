@@ -125,6 +125,17 @@ Honest caveats:
   the 27B FFN shape) — a promotion would stop building the pair mirrors for
   gate/up (the fused slab replaces them), halving that overhead; measure the
   armed-state cost first.
+  ⛔ **Vehicle note (measured 2026-10-26, so nobody re-burns this):** the
+  riir-infer-internal e2e battery (`tests/issue028_disaggregated_handoff.rs`,
+  the real 7.2 GB PQ2_0) drives `riir_infer_core::deltanet::ternary_forward` —
+  it NEVER reaches `dispatch_ffn_block` (riir-infer-gpu's
+  `ternary_deltanet_gpu_forward::prefill_tokens_chunk`), and its prompt is
+  p=5 (under any meaningful FFN batch anyway). The ONLY e2e vehicle for the
+  fused FFN block is the league runner (riir-ai `scripts/perf_rematch.sh`,
+  Bonsai-2 through riir-engine) — which is why this task is gated on the
+  league window and the bout owner's protocol, not runnable from this repo
+  alone. Engagement proof at run time: `RIIR_PREFILL_CUDA_FFN_TRACE=1`
+  prints the per-layer `[721-trace]` lines when the block dispatches.
 - [ ] **T3 (kernel_opt rider).** The tile-order law (column-tiles-innermost when
   weight footprint > L2) + the single-accumulator GLU write-back are minable as
   kernel_opt rules — route through the refine mining lane (do NOT mine here; this
