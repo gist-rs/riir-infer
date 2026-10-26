@@ -1,6 +1,7 @@
 # Issue 1127 — decode-hold escalation: the remaining rungs + the league re-cell bundle (carried out of the 1125/1126 closeout)
 
 **Status:** Open — filed 2026-10-26 from the 1125/1126 closeout (the Bench-1004 escalation ladder accounting). Rung 1 (fused-quantize) CLOSED negative-already-shipped (riir-infer HISTORY, census tripwire live); rung 2 (GDN core one-launch) CLOSED measured-negative (Bench 898, opt-in default-OFF); rung 2' (4→3 beta/decay+expand) LANDED direction-positive opt-in (Bench 899). This issue owns what remains: three unclaimed fusion levers + the owner-gated re-cell that decides every staged promotion. No implementation opens until a session owns a verified-idle 4090 window.
+**Claimed:** zed-amo-i1127-t1, 1793129600, expires 2026-10-28T17:00:00+00:00
 
 ## Where the ladder stands (the accounting, all measured)
 
