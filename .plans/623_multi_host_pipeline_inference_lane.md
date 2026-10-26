@@ -9,6 +9,7 @@ start once Issue 1109 T0 (bmo reachable) is done; Phase 1 substrate is decision-
 Scope: Phase 1 substrate only (T1.1–T1.4, zero-GPU under the elephant-recapture posture); T1.5's Metal arm stays compile-only this window.
 **Date:** 2026-10-22
 **Research:** [Research 015](../.research/015_Multi_Host_Inference_exo_llamacpp_MLX_Distill.md)
+**Session note 2026-10-26 (zed-amo):** T0/T1/T3 DONE + T0.2 DONE ([Bench 896](../.benchmarks/896_plan623_t02_link_probe.md) — TB5 bridge 8.5–8.6 GB/s both ways, RTT ~94 µs @4 B, PP-hop ≈ 1.3–1.8% of the decode step, TP-over-TCP refuted arithmetically). RPC transport smoke over the bridge PASSED (handshake + set_tensor green). ⛔ T0.4 PREREQUISITE FOUND: the pinned research clone `19ab5a5` REFUSES the Bonsai GGUF (`invalid ggml type 142` — PQ2_0); the Bonsai-capable incumbent is the league fork `prismml-llama.cpp` @ `prism-b10787-73bfe6c` (`../riir-ai/.raw/prismml-llama.cpp`, PQ2_0 in its loader) — T0.4 starts by building THAT with `-DGGML_RPC=ON` on both boxes.
 **Target:** `src/` (LayerRange + ActivationFrame + state serializer), `crates/riir-infer-gpu/` (range-forward on the Metal/CubeCL paths), `crates/riir-infer-dist/` (D1-a; transport + stage runtime + planner). Cargo feature `multi_host` (opt-in, never default) on core; the dist crate is opt-in as a whole.
 **Hardware:** amo (M5 Ultra, 96 GiB, macOS 27.0.1) ⇄ bmo (`Mac17,15`) — one TB5 cable @ 80 Gb/s + tailnet (amo `100.111.186.76`, bmo `100.100.117.44`).
 

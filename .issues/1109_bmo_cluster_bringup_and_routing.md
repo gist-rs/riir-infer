@@ -69,8 +69,23 @@
   NOTE: bmo has NO cargo/rustc/cmake yet — T3 installs the toolchain.**
 - [ ] **T2:** Tailscale direct path: `tailscale ping bmo` until `via <ip>` (not DERP);
   70–90 ms relayed RTT makes the tailnet a fallback posture only.
-- [ ] **T3:** Workspace on bmo: clone the repos Plan 623 needs (`riir-infer`, `katgpt-rs`),
+- [x] **T3:** Workspace on bmo: clone the repos Plan 623 needs (`riir-infer`, `katgpt-rs`),
   same `rust-toolchain.toml`; rsync the D3 model artifacts once, BLAKE3-verified.
+  **DONE 2026-10-26 ~18:30 (zed-amo):** rustup on bmo with the PINNED toolchain
+  (`cargo/rustc 1.98.1` — matches `rust-toolchain.toml` exactly); repos rsynced
+  `~/git/{riir-infer,katgpt-rs}` (target/.raw/.env excluded); the 6.7 GB
+  `Ternary-Bonsai-2-27B-PQ2_0.gguf` at `~/models/` — **sha256-verified identical
+  both boxes** (`3907dc16…2ec1`); amo's BUILT llama.cpp tree shipped to
+  `~/git/riir-infer/.raw/llama.cpp` (same OS/arch → binaries run as-is; skips the
+  missing-cmake problem). **RPC transport smoke PASSED end-to-end:**
+  `ggml-rpc-server` on bmo (:50052, MTL0 79.6 GB free visible) + `llama-cli --rpc`
+  on amo → handshake, buffer setup, and set_tensor over the bridge all green; the
+  model LOAD then refused: pinned research clone `19ab5a5` cannot parse
+  `output.weight` ggml type 142 (PQ2_0) — `invalid ggml type 142. should be in
+  [0, 43)`. EXPECTED: the league fork `prismml-llama.cpp` @ `prism-b10787-73bfe6c`
+  (`/Users/katopz/git/riir-ai/.raw/prismml-llama.cpp`, PQ2_0 in its loader) is the
+  Bonsai-capable incumbent — T0.4's 2-box rows need it built `-DGGML_RPC=ON` on
+  BOTH boxes. That is the T0.4 session's first step, recorded there.**
 - [ ] **T4 (owner, physical — Proposal 042 D2):** RDMA: `rdma_ctl enable` from Recovery
   Terminal on BOTH, reboot; `ibv_devices` shows `rdma_en*`. Only needed from Plan 623
   Phase 3; TB Bridge must be OFF on the RDMA port (use a second TB cable for the TCP
