@@ -106,8 +106,9 @@ use crate::gemv_ternary_residual_cubecl::GemvTernaryResidualCubeCL;
 use crate::norms_cubecl::RmsNormBatchedCubeCL;
 #[cfg(feature = "cubecl_runtime")]
 use crate::norms_cubecl::{
-    ResidualAddCubeCL, ResidualAddRmsNormCubeCL, RmsNormCubeCL, RmsNormQkFusedCubeCL,
-    RmsNormZgateFusedCubeCL,
+    norm_rotate_fused_enabled, norm_rotate_fused_mark_reached, norm_rotate_geometry_ok,
+    ResidualAddCubeCL, ResidualAddRmsNormCubeCL, ResidualAddRmsNormRotateCubeCL, RmsNormCubeCL,
+    RmsNormQkFusedCubeCL, RmsNormZgateFusedCubeCL,
 };
 #[cfg(feature = "cubecl_runtime")]
 use crate::qwen_attention_cubecl::{
@@ -5068,6 +5069,8 @@ impl TernaryDeltanetGpuForward {
             // `x` already carries the boundary residual (the producing stage
             // applied it explicitly after its loop), so the standalone norm
             // reads exactly what the fused kernel would have read.
+            // Issue 1134: set when the fused launch already staged rot_scratch.
+            let mut input_norm_staged = false;
             if layer_idx == lo || cfg!(feature = "ternary_gemv_residual") {
                 // Standalone RMSNorm: first layer (no preceding residual), or
                 // ternary_gemv_residual already applied the residual in the down GEMV.
@@ -5087,16 +5090,50 @@ impl TernaryDeltanetGpuForward {
                 // Issue 645 T3: fused previous FFN residual + this layer's input RMSNorm.
                 // self.ffn_out still holds the previous layer's down GEMV output.
                 if decode_stage_on(0) {
-                    unsafe {
-                        ResidualAddRmsNormCubeCL::launch::<ActiveRuntime>(
-                            &self.client,
-                            self.x.clone(),
-                            self.ffn_out.clone(),
-                            layer_w.input_norm.clone(),
-                            self.norm_x.clone(),
-                            n,
-                            eps,
-                        );
+                    // Issue 1134: when armed + the rotation geometry holds,
+                    // the rotate staging rides the norm launch's epilogue
+                    // (one dispatch replaces norm-then-stage). Unset/default
+                    // is the incumbent chain, byte-identical (demote hatch).
+                    let fused_geom = self
+                        .rotation
+                        .as_ref()
+                        .is_some_and(|cfg| norm_rotate_geometry_ok(n, n, cfg.block_size));
+                    if fused_geom && norm_rotate_fused_enabled() {
+                        let signs = self
+                            .rot_tables
+                            .as_ref()
+                            .expect("rotation armed above")
+                            .signs_for_width(n)
+                            .clone();
+                        let hblock = self.rotation.as_ref().expect("rotation armed above").block_size;
+                        unsafe {
+                            ResidualAddRmsNormRotateCubeCL::launch::<ActiveRuntime>(
+                                &self.client,
+                                self.x.clone(),
+                                self.ffn_out.clone(),
+                                layer_w.input_norm.clone(),
+                                signs,
+                                self.norm_x.clone(),
+                                self.rot_scratch.clone(),
+                                n,
+                                hblock,
+                                eps,
+                            );
+                        }
+                        norm_rotate_fused_mark_reached();
+                        input_norm_staged = true;
+                    } else {
+                        unsafe {
+                            ResidualAddRmsNormCubeCL::launch::<ActiveRuntime>(
+                                &self.client,
+                                self.x.clone(),
+                                self.ffn_out.clone(),
+                                layer_w.input_norm.clone(),
+                                self.norm_x.clone(),
+                                n,
+                                eps,
+                            );
+                        }
                     }
                 }
             }
@@ -5105,7 +5142,8 @@ impl TernaryDeltanetGpuForward {
             // projections (GDN qkv|z, attention q/kv) consume the ROTATED
             // norm; the dense a/b escape set keeps PRIMAL `norm_x`. Staged
             // once here — both layer types read `rot_scratch`.
-            if self.rot_tables.is_some() && decode_stage_on(0) {
+            // Issue 1134: skipped when the fused norm launch staged already.
+            if self.rot_tables.is_some() && decode_stage_on(0) && !input_norm_staged {
                 self.stage_rotated_norm_x();
                 // Plan 614 site 1 (decode): fake-quant the ROTATED staging copy
                 // in place before the folded projections consume it (the
@@ -5142,21 +5180,56 @@ impl TernaryDeltanetGpuForward {
             // Replaces two separate dispatches (ResidualAdd + RmsNorm) with one.
             // Saves 1 dispatch per layer × 64 = 64 dispatches/token.
             if decode_stage_on(3) {
-                unsafe {
-                    ResidualAddRmsNormCubeCL::launch::<ActiveRuntime>(
-                        &self.client,
-                        self.x.clone(),
-                        self.tmp.clone(),
-                        layer_w.post_attn_norm.clone(),
-                        self.norm_x.clone(),
-                        n,
-                        eps,
-                    );
+                // Issue 1134: the same rotate-epilogue fold at the mid-norm
+                // boundary (armed + geometry-gated; default is the incumbent
+                // norm-then-stage chain, byte-identical).
+                let mid_fused_geom = self
+                    .rotation
+                    .as_ref()
+                    .is_some_and(|cfg| norm_rotate_geometry_ok(n, n, cfg.block_size));
+                let mut mid_staged = false;
+                if mid_fused_geom && norm_rotate_fused_enabled() {
+                    let signs = self
+                        .rot_tables
+                        .as_ref()
+                        .expect("rotation armed above")
+                        .signs_for_width(n)
+                        .clone();
+                    let hblock = self.rotation.as_ref().expect("rotation armed above").block_size;
+                    unsafe {
+                        ResidualAddRmsNormRotateCubeCL::launch::<ActiveRuntime>(
+                            &self.client,
+                            self.x.clone(),
+                            self.tmp.clone(),
+                            layer_w.post_attn_norm.clone(),
+                            signs,
+                            self.norm_x.clone(),
+                            self.rot_scratch.clone(),
+                            n,
+                            hblock,
+                            eps,
+                        );
+                    }
+                    norm_rotate_fused_mark_reached();
+                    mid_staged = true;
+                } else {
+                    unsafe {
+                        ResidualAddRmsNormCubeCL::launch::<ActiveRuntime>(
+                            &self.client,
+                            self.x.clone(),
+                            self.tmp.clone(),
+                            layer_w.post_attn_norm.clone(),
+                            self.norm_x.clone(),
+                            n,
+                            eps,
+                        );
+                    }
                 }
                 // Plan 602 B3 — folded site 6 of 8: the FFN's folded
                 // gate|up concat consumes the ROTATED norm (staged fresh
                 // after the post-attn norm; the previous staging is stale).
-                if self.rot_tables.is_some() {
+                // Issue 1134: skipped when the fused launch staged already.
+                if self.rot_tables.is_some() && !mid_staged {
                     self.stage_rotated_norm_x();
                     // Plan 614 site 2 (decode): fake-quant the fresh ROTATED
                     // staging before the gate|up GEMV.
@@ -5603,426 +5676,423 @@ impl TernaryDeltanetGpuForward {
         let n_k_heads = self.config.deltanet_linear_n_heads;
         let folded = self.rot_tables.is_some();
         if gdn_subclass_on(DECODE_STAGE_GDN_PROJ) {
-        if folded {
-            // Issue 1130 — the concat-epilogue split rung: ONE launch
-            // writes the qkv|z rows directly to their consumers (rows
-            // [0, conv_dim) → qkv, [conv_dim, m) → z_buf), eliminating the
-            // input_proj_out staging pass AND the Split2 dispatch (−1
-            // launch per GDN layer, −64 KB/layer round-trip; 32 GDN
-            // layers/token). Bit-identical by construction: same kernel
-            // math, same row→plane mapping — only the destination address
-            // changes. Opt-in `RIIR_GDN_CONCAT_SPLIT_FUSED` until the
-            // Bench-1130 GOAT; `launch_split` returns false when unarmed
-            // (or when the f16-scale lane is unavailable) and the incumbent
-            // staging chain below runs instead — bit 9 strips the GEMV and
-            // the (then-gated) split either way.
-            let mut concat_fired = false;
-            if gdn_proj_leg_on(DECODE_STAGE_GDN_PROJ_CONCAT) {
-            concat_fired = unsafe {
-                GemvTernaryCubeCL::launch_split::<ActiveRuntime>(
-                    &self.client,
-                    &layer_w.in_proj_concat,
-                    self.rot_scratch.clone(),
-                    self.qkv.clone(),
-                    self.z_buf.clone(),
-                    conv_dim,
-                )
-            };
-            if !concat_fired {
-            unsafe {
-                GemvTernaryCubeCL::launch::<ActiveRuntime>(
-                    &self.client,
-                    &layer_w.in_proj_concat,
-                    self.rot_scratch.clone(),
-                    self.input_proj_out.clone(),
-                );
-            }
-            }
-            }
-            if gdn_proj_leg_on(DECODE_STAGE_GDN_PROJ_DENSE) {
-            unsafe {
-                let a_f32 = layer_w.in_proj_a_f32.as_ref().expect(
+            if folded {
+                // Issue 1130 — the concat-epilogue split rung: ONE launch
+                // writes the qkv|z rows directly to their consumers (rows
+                // [0, conv_dim) → qkv, [conv_dim, m) → z_buf), eliminating the
+                // input_proj_out staging pass AND the Split2 dispatch (−1
+                // launch per GDN layer, −64 KB/layer round-trip; 32 GDN
+                // layers/token). Bit-identical by construction: same kernel
+                // math, same row→plane mapping — only the destination address
+                // changes. Opt-in `RIIR_GDN_CONCAT_SPLIT_FUSED` until the
+                // Bench-1130 GOAT; `launch_split` returns false when unarmed
+                // (or when the f16-scale lane is unavailable) and the incumbent
+                // staging chain below runs instead — bit 9 strips the GEMV and
+                // the (then-gated) split either way.
+                let mut concat_fired = false;
+                if gdn_proj_leg_on(DECODE_STAGE_GDN_PROJ_CONCAT) {
+                    concat_fired = unsafe {
+                        GemvTernaryCubeCL::launch_split::<ActiveRuntime>(
+                            &self.client,
+                            &layer_w.in_proj_concat,
+                            self.rot_scratch.clone(),
+                            self.qkv.clone(),
+                            self.z_buf.clone(),
+                            conv_dim,
+                        )
+                    };
+                    if !concat_fired {
+                        unsafe {
+                            GemvTernaryCubeCL::launch::<ActiveRuntime>(
+                                &self.client,
+                                &layer_w.in_proj_concat,
+                                self.rot_scratch.clone(),
+                                self.input_proj_out.clone(),
+                            );
+                        }
+                    }
+                }
+                if gdn_proj_leg_on(DECODE_STAGE_GDN_PROJ_DENSE) {
+                    unsafe {
+                        let a_f32 = layer_w.in_proj_a_f32.as_ref().expect(
                     "folded GDN layer: dense ssm_alpha missing (loader contract guarantees the escape set)",
                 );
-                let b_f32 = layer_w.in_proj_b_f32.as_ref().expect(
+                        let b_f32 = layer_w.in_proj_b_f32.as_ref().expect(
                     "folded GDN layer: dense ssm_beta missing (loader contract guarantees the escape set)",
                 );
-                // Issue 1129: the dense-pair rung — ONE launch for a+b
-                // (bit-identical by construction: the same per-row reduction
-                // order; the census-covered region here is the dense leg, so
-                // `no-gdn_proj_dense` strips the pair either way). DEFAULT-ON
-                // since the Bench-1129 e2e GOAT (+9.9/+9.1% decode ABBA);
-                // RIIR_GDN_DENSE_PAIR_FUSED=0 demotes to the two-launch pair.
-                if crate::gemv_cubecl::dense_pair_fused_enabled() {
-                    crate::gemv_cubecl::GemvCubeCL::launch_pair::<ActiveRuntime>(
-                        &self.client,
-                        a_f32.clone(),
-                        b_f32.clone(),
-                        self.norm_x.clone(),
-                        self.a_raw.clone(),
-                        self.b_raw.clone(),
-                        n_v_heads,
-                        self.config.n_embd,
-                        crate::gemv_cubecl::dense_pair_wg_size(),
-                    );
-                } else {
-                    GemvCubeCL::launch::<ActiveRuntime>(
-                        &self.client,
-                        a_f32.clone(),
-                        self.norm_x.clone(),
-                        self.a_raw.clone(),
-                        n_v_heads,
-                        self.config.n_embd,
-                    );
-                    GemvCubeCL::launch::<ActiveRuntime>(
-                        &self.client,
-                        b_f32.clone(),
-                        self.norm_x.clone(),
-                        self.b_raw.clone(),
-                        n_v_heads,
-                        self.config.n_embd,
-                    );
+                        // Issue 1129: the dense-pair rung — ONE launch for a+b
+                        // (bit-identical by construction: the same per-row reduction
+                        // order; the census-covered region here is the dense leg, so
+                        // `no-gdn_proj_dense` strips the pair either way). DEFAULT-ON
+                        // since the Bench-1129 e2e GOAT (+9.9/+9.1% decode ABBA);
+                        // RIIR_GDN_DENSE_PAIR_FUSED=0 demotes to the two-launch pair.
+                        if crate::gemv_cubecl::dense_pair_fused_enabled() {
+                            crate::gemv_cubecl::GemvCubeCL::launch_pair::<ActiveRuntime>(
+                                &self.client,
+                                a_f32.clone(),
+                                b_f32.clone(),
+                                self.norm_x.clone(),
+                                self.a_raw.clone(),
+                                self.b_raw.clone(),
+                                n_v_heads,
+                                self.config.n_embd,
+                                crate::gemv_cubecl::dense_pair_wg_size(),
+                            );
+                        } else {
+                            GemvCubeCL::launch::<ActiveRuntime>(
+                                &self.client,
+                                a_f32.clone(),
+                                self.norm_x.clone(),
+                                self.a_raw.clone(),
+                                n_v_heads,
+                                self.config.n_embd,
+                            );
+                            GemvCubeCL::launch::<ActiveRuntime>(
+                                &self.client,
+                                b_f32.clone(),
+                                self.norm_x.clone(),
+                                self.b_raw.clone(),
+                                n_v_heads,
+                                self.config.n_embd,
+                            );
+                        }
+                    }
+                }
+                if gdn_proj_leg_on(DECODE_STAGE_GDN_PROJ_CONCAT) && !concat_fired {
+                    unsafe {
+                        Split2CubeCL::launch::<ActiveRuntime>(
+                            &self.client,
+                            self.input_proj_out.clone(),
+                            self.qkv.clone(),
+                            self.z_buf.clone(),
+                            conv_dim,
+                            z_dim,
+                        );
+                    }
+                }
+            } else {
+                if gdn_proj_leg_on(DECODE_STAGE_GDN_PROJ_CONCAT) {
+                    unsafe {
+                        GemvTernaryCubeCL::launch::<ActiveRuntime>(
+                            &self.client,
+                            &layer_w.in_proj_concat,
+                            self.norm_x.clone(),
+                            self.input_proj_out.clone(),
+                        );
+                    }
                 }
             }
-            }
-            if gdn_proj_leg_on(DECODE_STAGE_GDN_PROJ_CONCAT) && !concat_fired {
-            unsafe {
-                Split2CubeCL::launch::<ActiveRuntime>(
-                    &self.client,
-                    self.input_proj_out.clone(),
-                    self.qkv.clone(),
-                    self.z_buf.clone(),
-                    conv_dim,
-                    z_dim,
-                );
-            }
-            }
-        } else {
-            if gdn_proj_leg_on(DECODE_STAGE_GDN_PROJ_CONCAT) {
-            unsafe {
-                GemvTernaryCubeCL::launch::<ActiveRuntime>(
-                    &self.client,
-                    &layer_w.in_proj_concat,
-                    self.norm_x.clone(),
-                    self.input_proj_out.clone(),
-                );
-            }
-            }
-        }
-
         }
         let conv_state = self.conv_states[layer_idx]
             .as_ref()
             .expect("conv_state for DeltaNet layer");
 
         if gdn_subclass_on(DECODE_STAGE_GDN_PREREC) {
-        // Issue 764 T2 (GDN fusion lane): when the runtime toggle is on and
-        // the geometry fits, ONE fused dispatch replaces the four below
-        // (Split4 + Conv1d + BetaDecay + ExpandAndL2) — −3 launches per GDN
-        // layer (−144/token on Bonsai), bit-identical outputs. Default OFF;
-        // the shipping 4-dispatch chain below is the fallback (and the G1 oracle).
-        // Plan 602 B3: folded models NEVER take the fusion — its input layout
-        // expects the 4-region qkv|z|a|b concat, which folded models do not
-        // produce (Split2 already staged qkv/z; a/b arrived via the dense
-        // GEMVs).
-        let fused_pre_rec = !folded
-            && crate::deltanet_pre_rec_fused_cubecl::deltanet_fused_pre_rec_enabled()
-            && crate::deltanet_pre_rec_fused_cubecl::DeltanetPreRecFusedCubeCL::supports(
-                n_k_heads,
-                n_v_heads,
-                head_dim,
-                kernel_size,
-            );
-
-        if fused_pre_rec {
-            unsafe {
-                crate::deltanet_pre_rec_fused_cubecl::DeltanetPreRecFusedCubeCL::launch::<
-                    ActiveRuntime,
-                >(
-                    &self.client,
-                    self.input_proj_out.clone(),
-                    layer_w.conv1d_weight.clone(),
-                    conv_state.clone(),
-                    layer_w.a_log.clone(),
-                    layer_w.dt_bias.clone(),
-                    self.z_buf.clone(),
-                    self.beta_buf.clone(),
-                    self.decay_buf.clone(),
-                    self.qkv_expanded.clone(),
+            // Issue 764 T2 (GDN fusion lane): when the runtime toggle is on and
+            // the geometry fits, ONE fused dispatch replaces the four below
+            // (Split4 + Conv1d + BetaDecay + ExpandAndL2) — −3 launches per GDN
+            // layer (−144/token on Bonsai), bit-identical outputs. Default OFF;
+            // the shipping 4-dispatch chain below is the fallback (and the G1 oracle).
+            // Plan 602 B3: folded models NEVER take the fusion — its input layout
+            // expects the 4-region qkv|z|a|b concat, which folded models do not
+            // produce (Split2 already staged qkv/z; a/b arrived via the dense
+            // GEMVs).
+            let fused_pre_rec = !folded
+                && crate::deltanet_pre_rec_fused_cubecl::deltanet_fused_pre_rec_enabled()
+                && crate::deltanet_pre_rec_fused_cubecl::DeltanetPreRecFusedCubeCL::supports(
                     n_k_heads,
                     n_v_heads,
                     head_dim,
                     kernel_size,
                 );
-            }
-        } else {
-            // Plan 602 B3 — the pre-folded path already staged qkv/z via
-            // Split2CubeCL above; Split4 runs on the 4-region concat only.
-            if !folded {
+
+            if fused_pre_rec {
                 unsafe {
-                    Split4CubeCL::launch::<ActiveRuntime>(
+                    crate::deltanet_pre_rec_fused_cubecl::DeltanetPreRecFusedCubeCL::launch::<
+                        ActiveRuntime,
+                    >(
                         &self.client,
                         self.input_proj_out.clone(),
-                        self.qkv.clone(),   // [0..conv_dim]
-                        self.z_buf.clone(), // [conv_dim..conv_dim+z_dim]
-                        self.a_raw.clone(), // [..+n_v_heads]
-                        self.b_raw.clone(), // [..+n_v_heads]
-                        conv_dim,
-                        z_dim,
-                        n_v_heads,
-                        n_v_heads,
-                    );
-                }
-            }
-
-            // 5. Conv1D (in-place on qkv, updates conv_state)
-            // Issue 1132: conv1d is its own site class (bit 15); beta/decay +
-            // expand/L2 are the second class (bit 16, 2 launches).
-            if site_on(6, DECODE_STAGE_GDN_PRE_CONV) {
-                unsafe {
-                    DeltanetConv1dCubeCL::launch::<ActiveRuntime>(
-                        &self.client,
-                        self.qkv.clone(),
                         layer_w.conv1d_weight.clone(),
                         conv_state.clone(),
-                        conv_dim,
-                        kernel_size,
-                    );
-                }
-            }
-
-            // 6. Beta/decay computation
-            if site_on(6, DECODE_STAGE_GDN_PRE_BETAL2) {
-                unsafe {
-                    DeltanetBetaDecayCubeCL::launch::<ActiveRuntime>(
-                        &self.client,
-                        self.a_raw.clone(),
-                        self.b_raw.clone(),
                         layer_w.a_log.clone(),
                         layer_w.dt_bias.clone(),
+                        self.z_buf.clone(),
                         self.beta_buf.clone(),
                         self.decay_buf.clone(),
-                        n_v_heads,
-                    );
-                }
-            }
-
-            // 7. Expand Q/K from n_k_heads → n_v_heads + L2-normalize Q/K heads + copy V.
-            //    Reads compact `qkv` ([Q(n_k×hd) | K(n_k×hd) | V(n_v×hd)]), writes
-            //    expanded `qkv_expanded` ([Q(n_v×hd) | K(n_v×hd) | V(n_v×hd)]).
-            //    This fused kernel replaces the (buggy) in-place L2NormalizeHeadsCubeCL
-            //    that assumed Q/K were already n_v_heads wide — Issue 604 T5 + Issue 610.
-            if site_on(6, DECODE_STAGE_GDN_PRE_BETAL2) {
-                unsafe {
-                    ExpandAndL2NormalizeHeadsCubeCL::launch::<ActiveRuntime>(
-                        &self.client,
-                        self.qkv.clone(),
                         self.qkv_expanded.clone(),
                         n_k_heads,
                         n_v_heads,
                         head_dim,
+                        kernel_size,
                     );
                 }
-            }
-        }
+            } else {
+                // Plan 602 B3 — the pre-folded path already staged qkv/z via
+                // Split2CubeCL above; Split4 runs on the 4-region concat only.
+                if !folded {
+                    unsafe {
+                        Split4CubeCL::launch::<ActiveRuntime>(
+                            &self.client,
+                            self.input_proj_out.clone(),
+                            self.qkv.clone(),   // [0..conv_dim]
+                            self.z_buf.clone(), // [conv_dim..conv_dim+z_dim]
+                            self.a_raw.clone(), // [..+n_v_heads]
+                            self.b_raw.clone(), // [..+n_v_heads]
+                            conv_dim,
+                            z_dim,
+                            n_v_heads,
+                            n_v_heads,
+                        );
+                    }
+                }
 
+                // 5. Conv1D (in-place on qkv, updates conv_state)
+                // Issue 1132: conv1d is its own site class (bit 15); beta/decay +
+                // expand/L2 are the second class (bit 16, 2 launches).
+                if site_on(6, DECODE_STAGE_GDN_PRE_CONV) {
+                    unsafe {
+                        DeltanetConv1dCubeCL::launch::<ActiveRuntime>(
+                            &self.client,
+                            self.qkv.clone(),
+                            layer_w.conv1d_weight.clone(),
+                            conv_state.clone(),
+                            conv_dim,
+                            kernel_size,
+                        );
+                    }
+                }
+
+                // 6. Beta/decay computation
+                if site_on(6, DECODE_STAGE_GDN_PRE_BETAL2) {
+                    unsafe {
+                        DeltanetBetaDecayCubeCL::launch::<ActiveRuntime>(
+                            &self.client,
+                            self.a_raw.clone(),
+                            self.b_raw.clone(),
+                            layer_w.a_log.clone(),
+                            layer_w.dt_bias.clone(),
+                            self.beta_buf.clone(),
+                            self.decay_buf.clone(),
+                            n_v_heads,
+                        );
+                    }
+                }
+
+                // 7. Expand Q/K from n_k_heads → n_v_heads + L2-normalize Q/K heads + copy V.
+                //    Reads compact `qkv` ([Q(n_k×hd) | K(n_k×hd) | V(n_v×hd)]), writes
+                //    expanded `qkv_expanded` ([Q(n_v×hd) | K(n_v×hd) | V(n_v×hd)]).
+                //    This fused kernel replaces the (buggy) in-place L2NormalizeHeadsCubeCL
+                //    that assumed Q/K were already n_v_heads wide — Issue 604 T5 + Issue 610.
+                if site_on(6, DECODE_STAGE_GDN_PRE_BETAL2) {
+                    unsafe {
+                        ExpandAndL2NormalizeHeadsCubeCL::launch::<ActiveRuntime>(
+                            &self.client,
+                            self.qkv.clone(),
+                            self.qkv_expanded.clone(),
+                            n_k_heads,
+                            n_v_heads,
+                            head_dim,
+                        );
+                    }
+                }
+            }
         }
 
         if gdn_subclass_on(DECODE_STAGE_GDN_RECURRENCE) {
-        // 8. Recurrence: update state, read output
-        let state = self.deltanet_states[layer_idx]
-            .as_ref()
-            .expect("state for DeltaNet layer");
-        // Beta/decay are already on GPU (beta_buf/decay_buf) — pass handles directly.
-        // No CPU sync point.
-        // Reads from qkv_expanded (post head-expansion + L2-norm).
-        // Issue 619: prefer the row-parallel, register-blocked kernel when the
-        // model's head_dim fits its fixed register unroll (128). Otherwise fall
-        // back to the legacy serial-row kernel, which handles any head_dim.
-        #[allow(
-            unused_mut,
-            reason = "only mutated when deltanet_recurrence_rowpar is enabled"
-        )]
-        let mut dispatched = false;
+            // 8. Recurrence: update state, read output
+            let state = self.deltanet_states[layer_idx]
+                .as_ref()
+                .expect("state for DeltaNet layer");
+            // Beta/decay are already on GPU (beta_buf/decay_buf) — pass handles directly.
+            // No CPU sync point.
+            // Reads from qkv_expanded (post head-expansion + L2-norm).
+            // Issue 619: prefer the row-parallel, register-blocked kernel when the
+            // model's head_dim fits its fixed register unroll (128). Otherwise fall
+            // back to the legacy serial-row kernel, which handles any head_dim.
+            #[allow(
+                unused_mut,
+                reason = "only mutated when deltanet_recurrence_rowpar is enabled"
+            )]
+            let mut dispatched = false;
 
-        #[cfg(feature = "deltanet_recurrence_rowpar")]
-        if recurrence_rowpar_enabled() && DeltanetRecurrenceRowParCubeCL::supports(head_dim) {
-            unsafe {
-                DeltanetRecurrenceRowParCubeCL::launch_with_gpu_handles::<ActiveRuntime>(
-                    &self.client,
-                    self.qkv_expanded.clone(),
-                    self.beta_buf.clone(),
-                    self.decay_buf.clone(),
-                    state.clone(),
-                    self.recurrent_out.clone(),
-                    n_v_heads,
-                    head_dim,
-                );
+            #[cfg(feature = "deltanet_recurrence_rowpar")]
+            if recurrence_rowpar_enabled() && DeltanetRecurrenceRowParCubeCL::supports(head_dim) {
+                unsafe {
+                    DeltanetRecurrenceRowParCubeCL::launch_with_gpu_handles::<ActiveRuntime>(
+                        &self.client,
+                        self.qkv_expanded.clone(),
+                        self.beta_buf.clone(),
+                        self.decay_buf.clone(),
+                        state.clone(),
+                        self.recurrent_out.clone(),
+                        n_v_heads,
+                        head_dim,
+                    );
+                }
+                dispatched = true;
             }
-            dispatched = true;
-        }
 
-        if !dispatched {
-            unsafe {
-                DeltanetRecurrenceCubeCL::launch_with_gpu_handles::<ActiveRuntime>(
-                    &self.client,
-                    self.qkv_expanded.clone(),
-                    self.beta_buf.clone(),
-                    self.decay_buf.clone(),
-                    state.clone(),
-                    self.recurrent_out.clone(),
-                    n_v_heads,
-                    head_dim,
-                );
+            if !dispatched {
+                unsafe {
+                    DeltanetRecurrenceCubeCL::launch_with_gpu_handles::<ActiveRuntime>(
+                        &self.client,
+                        self.qkv_expanded.clone(),
+                        self.beta_buf.clone(),
+                        self.decay_buf.clone(),
+                        state.clone(),
+                        self.recurrent_out.clone(),
+                        n_v_heads,
+                        head_dim,
+                    );
+                }
             }
-        }
-
         }
 
         if gdn_subclass_on(DECODE_STAGE_GDN_OUTPROJ) {
-        // 9+10. Fused per-head RMSNorm + z-gating (Issue 642 F6).
-        //    Replaces two separate dispatches (RmsNormBatched + ZGating) with
-        //    one fused kernel. Normalizes each head of recurrent_out with
-        //    linear_norm gamma, then multiplies by silu(z_buf) — all in-place.
-        //    Saves 1 dispatch per DeltaNet layer × 32 = 32 dispatches/token.
-        // Issue 1132 site bits: zgate (17) / permute-rotate chain (18) /
-        // out GEMV (19) refine bit 8.
-        if site_on(8, DECODE_STAGE_GDN_OUT_ZGATE) {
-            unsafe {
-                RmsNormZgateFusedCubeCL::launch::<ActiveRuntime>(
-                    &self.client,
-                    self.recurrent_out.clone(),
-                    layer_w.linear_norm.clone(),
-                    self.z_buf.clone(),
-                    n_v_heads,
-                    head_dim,
-                    eps,
-                );
+            // 9+10. Fused per-head RMSNorm + z-gating (Issue 642 F6).
+            //    Replaces two separate dispatches (RmsNormBatched + ZGating) with
+            //    one fused kernel. Normalizes each head of recurrent_out with
+            //    linear_norm gamma, then multiplies by silu(z_buf) — all in-place.
+            //    Saves 1 dispatch per DeltaNet layer × 32 = 32 dispatches/token.
+            // Issue 1132 site bits: zgate (17) / permute-rotate chain (18) /
+            // out GEMV (19) refine bit 8.
+            if site_on(8, DECODE_STAGE_GDN_OUT_ZGATE) {
+                unsafe {
+                    RmsNormZgateFusedCubeCL::launch::<ActiveRuntime>(
+                        &self.client,
+                        self.recurrent_out.clone(),
+                        layer_w.linear_norm.clone(),
+                        self.z_buf.clone(),
+                        n_v_heads,
+                        head_dim,
+                        eps,
+                    );
+                }
             }
-        }
 
-        // 11. Out projection: tmp = W_out @ recurrent_out
-        //
-        // Plan 602 B3 — folded site 4 of 8 (the ssm_out chain): on a folded
-        // layer the recurrence output arrives in tiled [hd, nk, rep] head
-        // order (`gdn_v_grouped`) and the fold expects the grouped
-        // [hd, rep, nk] order — permute, then the shared sign+FWHT forward
-        // rotation (its only consumer is the folded out_proj GEMV). The
-        // per-head norm + SiLU(z) gate above already ran — they are
-        // fold-invariant (they commute with the head-order permute), the CPU
-        // step-10/11 order.
-        //
-        // Issue 1113 lever 1 — the fused fold tail: ONE kernel gathers the
-        // post-zgate recurrent_out at the source head, applies the sign, and
-        // runs the FWHT into `permute_tmp` (the split chain needed that buffer
-        // only for its own staging copy). Copy + permute + fwht → 1;
-        // −2 per GDN layer; bit-identical BY CONSTRUCTION (movement + single
-        // multiply + the incumbent butterfly — kernel-level G3:
-        // `gdn_permute_rotate_matches_split_chain_bitexact`). Default OFF
-        // (`RIIR_GDN_PERMUTE_ROTATE_FUSED`); the split chain below is the
-        // fallback AND the G1 oracle. ⚠ The earlier full-K3 variant (zgate
-        // folded in too) measured 1-ULP-divergent — the incumbent zgate's
-        // compiled fma contraction is not reproducible across kernel
-        // compilations — so the zgate above stays bit-untouched.
-        let v_dim = n_v_heads * head_dim;
-        let gdn_fused_pair = match (self.rotation.as_ref(), self.rot_tables.as_ref()) {
-            (Some(cfg), Some(tables))
-                if crate::deltanet_rotation_cubecl::gdn_permute_rotate_fused_enabled()
-                    && crate::deltanet_rotation_cubecl::gdn_permute_rotate_ok(
-                        v_dim,
-                        cfg.block_size,
-                    ) =>
-            {
-                Some((cfg, tables))
-            }
-            _ => None,
-        };
-        let gdn_gemv_in = if let Some((cfg, tables)) = gdn_fused_pair {
-            let rep = if cfg.gdn_v_grouped {
-                n_v_heads / cfg.gdn_k_groups
-            } else {
-                1
+            // 11. Out projection: tmp = W_out @ recurrent_out
+            //
+            // Plan 602 B3 — folded site 4 of 8 (the ssm_out chain): on a folded
+            // layer the recurrence output arrives in tiled [hd, nk, rep] head
+            // order (`gdn_v_grouped`) and the fold expects the grouped
+            // [hd, rep, nk] order — permute, then the shared sign+FWHT forward
+            // rotation (its only consumer is the folded out_proj GEMV). The
+            // per-head norm + SiLU(z) gate above already ran — they are
+            // fold-invariant (they commute with the head-order permute), the CPU
+            // step-10/11 order.
+            //
+            // Issue 1113 lever 1 — the fused fold tail: ONE kernel gathers the
+            // post-zgate recurrent_out at the source head, applies the sign, and
+            // runs the FWHT into `permute_tmp` (the split chain needed that buffer
+            // only for its own staging copy). Copy + permute + fwht → 1;
+            // −2 per GDN layer; bit-identical BY CONSTRUCTION (movement + single
+            // multiply + the incumbent butterfly — kernel-level G3:
+            // `gdn_permute_rotate_matches_split_chain_bitexact`). Default OFF
+            // (`RIIR_GDN_PERMUTE_ROTATE_FUSED`); the split chain below is the
+            // fallback AND the G1 oracle. ⚠ The earlier full-K3 variant (zgate
+            // folded in too) measured 1-ULP-divergent — the incumbent zgate's
+            // compiled fma contraction is not reproducible across kernel
+            // compilations — so the zgate above stays bit-untouched.
+            let v_dim = n_v_heads * head_dim;
+            let gdn_fused_pair = match (self.rotation.as_ref(), self.rot_tables.as_ref()) {
+                (Some(cfg), Some(tables))
+                    if crate::deltanet_rotation_cubecl::gdn_permute_rotate_fused_enabled()
+                        && crate::deltanet_rotation_cubecl::gdn_permute_rotate_ok(
+                            v_dim,
+                            cfg.block_size,
+                        ) =>
+                {
+                    Some((cfg, tables))
+                }
+                _ => None,
             };
-            if site_on(8, DECODE_STAGE_GDN_OUT_ROT) {
-                let signs = tables.signs_for_width(v_dim).clone();
+            let gdn_gemv_in = if let Some((cfg, tables)) = gdn_fused_pair {
+                let rep = if cfg.gdn_v_grouped {
+                    n_v_heads / cfg.gdn_k_groups
+                } else {
+                    1
+                };
+                if site_on(8, DECODE_STAGE_GDN_OUT_ROT) {
+                    let signs = tables.signs_for_width(v_dim).clone();
+                    unsafe {
+                        RotationCubeCL::launch_gdn_permute_rotate::<ActiveRuntime>(
+                            &self.client,
+                            self.recurrent_out.clone(),
+                            signs,
+                            self.permute_tmp.clone(),
+                            v_dim,
+                            head_dim,
+                            cfg.gdn_k_groups,
+                            rep,
+                            cfg.block_size,
+                        );
+                    }
+                }
+                self.permute_tmp.clone()
+            } else {
+                if site_on(8, DECODE_STAGE_GDN_OUT_ROT)
+                    && let (Some(cfg), Some(_)) = (self.rotation.as_ref(), self.rot_tables.as_ref())
+                    && cfg.gdn_v_grouped
+                {
+                    unsafe {
+                        CopyCubeCL::launch::<ActiveRuntime>(
+                            &self.client,
+                            self.recurrent_out.clone(),
+                            self.permute_tmp.clone(),
+                            v_dim,
+                        );
+                        RotationCubeCL::launch_gdn_v_permute::<ActiveRuntime>(
+                            &self.client,
+                            self.permute_tmp.clone(),
+                            self.recurrent_out.clone(),
+                            v_dim,
+                            v_dim,
+                            head_dim,
+                            cfg.gdn_k_groups,
+                            n_v_heads / cfg.gdn_k_groups,
+                        );
+                    }
+                }
+                if site_on(8, DECODE_STAGE_GDN_OUT_ROT)
+                    && let (Some(cfg), Some(tables)) =
+                        (self.rotation.as_ref(), self.rot_tables.as_ref())
+                {
+                    let signs = tables.signs_for_width(v_dim).clone();
+                    unsafe {
+                        RotationCubeCL::launch_forward::<ActiveRuntime>(
+                            &self.client,
+                            self.recurrent_out.clone(),
+                            signs,
+                            v_dim,
+                            v_dim,
+                            cfg.block_size,
+                        );
+                    }
+                }
+                self.recurrent_out.clone()
+            };
+            // Plan 614 site 5 (decode): fake-quant the out_proj GEMV's ACTUAL input
+            // AFTER the fold rotation (rotated basis) — the fused posture's input
+            // is `permute_tmp`, the split posture's is `recurrent_out`.
+            #[cfg(feature = "dq_phase_bench")]
+            crate::dq_fakequant_cubecl::launch_decode_pass::<ActiveRuntime>(
+                &self.client,
+                gdn_gemv_in.clone(),
+                n_v_heads * head_dim,
+                1,
+                crate::dq_fakequant::current_grid(),
+            );
+            if site_on(8, DECODE_STAGE_GDN_OUT_GEMV) {
                 unsafe {
-                    RotationCubeCL::launch_gdn_permute_rotate::<ActiveRuntime>(
+                    GemvTernaryCubeCL::launch::<ActiveRuntime>(
                         &self.client,
-                        self.recurrent_out.clone(),
-                        signs,
-                        self.permute_tmp.clone(),
-                        v_dim,
-                        head_dim,
-                        cfg.gdn_k_groups,
-                        rep,
-                        cfg.block_size,
+                        &layer_w.out_proj,
+                        gdn_gemv_in,
+                        self.tmp.clone(),
                     );
                 }
             }
-            self.permute_tmp.clone()
-        } else {
-            if site_on(8, DECODE_STAGE_GDN_OUT_ROT)
-                && let (Some(cfg), Some(_)) = (self.rotation.as_ref(), self.rot_tables.as_ref())
-                && cfg.gdn_v_grouped
-            {
-                unsafe {
-                    CopyCubeCL::launch::<ActiveRuntime>(
-                        &self.client,
-                        self.recurrent_out.clone(),
-                        self.permute_tmp.clone(),
-                        v_dim,
-                    );
-                    RotationCubeCL::launch_gdn_v_permute::<ActiveRuntime>(
-                        &self.client,
-                        self.permute_tmp.clone(),
-                        self.recurrent_out.clone(),
-                        v_dim,
-                        v_dim,
-                        head_dim,
-                        cfg.gdn_k_groups,
-                        n_v_heads / cfg.gdn_k_groups,
-                    );
-                }
-            }
-            if site_on(8, DECODE_STAGE_GDN_OUT_ROT)
-                && let (Some(cfg), Some(tables)) =
-                    (self.rotation.as_ref(), self.rot_tables.as_ref())
-            {
-                let signs = tables.signs_for_width(v_dim).clone();
-                unsafe {
-                    RotationCubeCL::launch_forward::<ActiveRuntime>(
-                        &self.client,
-                        self.recurrent_out.clone(),
-                        signs,
-                        v_dim,
-                        v_dim,
-                        cfg.block_size,
-                    );
-                }
-            }
-            self.recurrent_out.clone()
-        };
-        // Plan 614 site 5 (decode): fake-quant the out_proj GEMV's ACTUAL input
-        // AFTER the fold rotation (rotated basis) — the fused posture's input
-        // is `permute_tmp`, the split posture's is `recurrent_out`.
-        #[cfg(feature = "dq_phase_bench")]
-        crate::dq_fakequant_cubecl::launch_decode_pass::<ActiveRuntime>(
-            &self.client,
-            gdn_gemv_in.clone(),
-            n_v_heads * head_dim,
-            1,
-            crate::dq_fakequant::current_grid(),
-        );
-        if site_on(8, DECODE_STAGE_GDN_OUT_GEMV) {
-            unsafe {
-                GemvTernaryCubeCL::launch::<ActiveRuntime>(
-                    &self.client,
-                    &layer_w.out_proj,
-                    gdn_gemv_in,
-                    self.tmp.clone(),
-                );
-            }
-        }
         }
     }
 
@@ -10598,7 +10668,11 @@ mod tests {
             ("tail_norm", DECODE_STAGE_TAIL_NORM),
             ("tail_lm_head", DECODE_STAGE_TAIL_LM_HEAD),
         ];
-        assert_eq!(named.len(), DECODE_STAGE_NAMES.len(), "pin covers every name");
+        assert_eq!(
+            named.len(),
+            DECODE_STAGE_NAMES.len(),
+            "pin covers every name"
+        );
         for (name, bit) in named {
             assert_eq!(
                 DECODE_STAGE_NAMES[*bit as usize], *name,
@@ -10640,7 +10714,9 @@ mod tests {
         set_decode_stage_mask(DECODE_STAGE_ALL);
         // site_on is the refinement law itself: parent off ⇒ sub never fires
         // regardless of the sub-bit.
-        set_decode_stage_mask((1u32 << DECODE_STAGE_FFN_SWIGLU) | (1u32 << DECODE_STAGE_TAIL_LM_HEAD));
+        set_decode_stage_mask(
+            (1u32 << DECODE_STAGE_FFN_SWIGLU) | (1u32 << DECODE_STAGE_TAIL_LM_HEAD),
+        );
         assert!(
             !site_on(4, DECODE_STAGE_FFN_SWIGLU),
             "sub-bit without its parent must not fire"

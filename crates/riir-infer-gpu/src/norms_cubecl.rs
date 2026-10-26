@@ -988,6 +988,322 @@ impl ResidualAddRmsNormCubeCL {
     }
 }
 
+/// Fused ResidualAdd + RMSNorm + forward-rotate staging (Issue 1134).
+///
+/// Phases 1-4 are line-for-line [`residual_add_rmsnorm_f32`] (the G1
+/// contract: the norm outputs are the same bits the incumbent pair
+/// produces). Phase 5 then stages the Hadamard rotation INTO the same
+/// launch: for each `hblock` chunk, `smem[i] = norm_out[base+i] *
+/// signs[base+i]` (sign FIRST — `rotate_forward_inplace`'s order, the
+/// decode single-row case has `row_off == base`), then the SAME inline
+/// butterfly as `fwht_forward_copy_f32` (same `inv_sqrt2` literal, same
+/// step loop, same sync placement), then a strided write to `rot_out`.
+/// One launch replaces `ResidualAddRmsNormCubeCL::launch` +
+/// `RotationCubeCL::launch_forward_copy`; the single 256-thread workgroup
+/// walks the `dim / hblock` chunks serially (compute-light: the whole
+/// phase-5 is ~n·log2(hblock) fused multiply-adds against a ~17 us saved
+/// dispatch floor).
+///
+/// ## Parameter Layout
+///
+/// - `params`: `[f32; 5]` — `[inv_dim, eps, dim, width, hblock]` (decode
+///   single-row: `width == dim`; the guard refuses otherwise).
+///
+/// ## Dispatch
+///
+/// `CubeCount::Static(1, 1, 1)`, `CubeDim::new_1d(256)` — the same shape
+/// as the norm twin, so the serial chunk walk is the only new cost.
+///
+/// ## Geometry guard (caller-side)
+///
+/// `dim % hblock == 0`, `hblock <= 1024` (MAX_FWHT_BLOCK), `width ==
+/// dim`. A miss falls back to the incumbent two-launch chain.
+#[cfg(feature = "cubecl_runtime")]
+#[cube(launch_unchecked)]
+#[allow(clippy::approx_constant)]
+fn residual_add_rmsnorm_rotate_f32(
+    x: &mut [f32],
+    residual: &[f32],
+    gamma: &[f32],
+    signs: &[f32],
+    params: &[f32],
+    norm_out: &mut [f32],
+    rot_out: &mut [f32],
+) {
+    let inv_dim = params[0usize];
+    let eps = params[1usize];
+    let dim = params[2usize] as u32;
+    let hblock = params[4usize] as u32;
+    let cube_size = 256u32;
+    let tid = UNIT_POS;
+
+    // ── Phase 1: Residual add (in-place) + strided x² accumulation ──
+    // (identical to residual_add_rmsnorm_f32)
+    let mut partial_sq = f32::new(0.0f32);
+    let mut i = tid;
+    while i < dim {
+        let val = x[i as usize] + residual[i as usize];
+        x[i as usize] = val;
+        partial_sq += val * val;
+        i += cube_size;
+    }
+
+    // ── Phase 2: shared-memory tree reduction (identical) ──
+    let mut smem = Shared::<[f32]>::new_slice(256usize);
+    smem[tid as usize] = partial_sq;
+    sync_cube();
+    if tid < 128u32 {
+        smem[tid as usize] = smem[tid as usize] + smem[(tid + 128u32) as usize];
+    }
+    sync_cube();
+    if tid < 64u32 {
+        smem[tid as usize] = smem[tid as usize] + smem[(tid + 64u32) as usize];
+    }
+    sync_cube();
+    if tid < 32u32 {
+        smem[tid as usize] = smem[tid as usize] + smem[(tid + 32u32) as usize];
+    }
+    sync_cube();
+    if tid < 16u32 {
+        smem[tid as usize] = smem[tid as usize] + smem[(tid + 16u32) as usize];
+    }
+    sync_cube();
+    if tid < 8u32 {
+        smem[tid as usize] = smem[tid as usize] + smem[(tid + 8u32) as usize];
+    }
+    sync_cube();
+    if tid < 4u32 {
+        smem[tid as usize] = smem[tid as usize] + smem[(tid + 4u32) as usize];
+    }
+    sync_cube();
+    if tid < 2u32 {
+        smem[tid as usize] = smem[tid as usize] + smem[(tid + 2u32) as usize];
+    }
+    sync_cube();
+    if tid < 1u32 {
+        smem[0usize] = smem[0usize] + smem[1usize];
+    }
+    sync_cube();
+
+    // ── Phase 3: broadcast inv_rms (identical) ──
+    if tid < 1u32 {
+        let mean_sq = smem[0usize] * inv_dim;
+        smem[0usize] = f32::new(1.0f32) / (mean_sq + eps).sqrt();
+    }
+    sync_cube();
+
+    let inv_rms = smem[0usize];
+
+    // ── Phase 4: normalize + gamma (identical) ──
+    let mut j = tid;
+    while j < dim {
+        let val = x[j as usize] * inv_rms * gamma[j as usize];
+        norm_out[j as usize] = val;
+        j += cube_size;
+    }
+
+    // ── Phase 5: the rotate epilogue — sign FIRST, then the inline
+    // butterfly, chunk by chunk (the fwht_forward_copy_f32 twin; the decode
+    // single-row case has row_off == base). MAX_FWHT_BLOCK-sized smem (the
+    // macro slice; 1024 f32 = 4 KB) — the geometry guard keeps hblock
+    // within it. ──
+    let mut smem_rot = Shared::<[f32]>::new_slice(1024usize);
+    let inv_sqrt2 = f32::new(0.70710678f32);
+    let n_chunks = dim / hblock;
+    let mut c = 0u32;
+    while c < n_chunks {
+        let base = c * hblock;
+        let mut i = tid;
+        while i < hblock {
+            smem_rot[i as usize] = norm_out[(base + i) as usize] * signs[(base + i) as usize];
+            i += cube_size;
+        }
+        sync_cube();
+        let mut step = 2u32;
+        while step <= hblock {
+            let half = step / 2u32;
+            let mut bi = tid;
+            while bi < hblock / 2u32 {
+                let blk = (bi / half) * step;
+                let off = bi % half;
+                let a = smem_rot[(blk + off) as usize];
+                let b = smem_rot[(blk + off + half) as usize];
+                smem_rot[(blk + off) as usize] = (a + b) * inv_sqrt2;
+                smem_rot[(blk + off + half) as usize] = (a - b) * inv_sqrt2;
+                bi += cube_size;
+            }
+            sync_cube();
+            step = step * 2u32;
+        }
+        let mut j2 = tid;
+        while j2 < hblock {
+            rot_out[(base + j2) as usize] = smem_rot[j2 as usize];
+            j2 += cube_size;
+        }
+        sync_cube();
+        c += 1u32;
+    }
+}
+
+/// Fused ResidualAdd + RMSNorm + forward-rotate staging launcher (Issue 1134).
+///
+/// Replaces `ResidualAddRmsNormCubeCL::launch` +
+/// `RotationCubeCL::launch_forward_copy` with one dispatch in the folded
+/// (`bonsai2_hadamard`) decode posture. Phases 1-4 are the incumbent norm
+/// bit-for-bit; phase 5 replicates `fwht_forward_copy_f32` exactly (sign
+/// first, same butterfly order) — the fused outputs are to_bits-equal to
+/// the two-launch chain, so only the REACH counter proves the toggle fired
+/// (the Bench-768 vacuous-guard pattern).
+///
+/// # Safety
+///
+/// - `x_handle`: `dim` f32 (modified in-place with the residual add)
+/// - `residual_handle` / `gamma_handle` / `signs_handle`: `dim` f32 each
+///   (read-only; `signs` is the width-`dim` sign vector)
+/// - `norm_out_handle` / `rot_out_handle`: `dim` f32 each (write-only)
+/// - the caller-side geometry guard: `dim % hblock == 0`, `hblock <=
+///   1024`, `width == dim`
+#[cfg(feature = "cubecl_runtime")]
+pub struct ResidualAddRmsNormRotateCubeCL;
+
+#[cfg(feature = "cubecl_runtime")]
+impl ResidualAddRmsNormRotateCubeCL {
+    /// Launch fused ResidualAdd + RMSNorm + forward-rotate staging.
+    ///
+    /// # Safety
+    ///
+    /// - `x_handle`: `dim` f32 (modified in-place with the residual add)
+    /// - `residual_handle` / `gamma_handle` / `signs_handle`: `dim` f32
+    ///   each, read-only (`signs` is the width-`dim` sign vector)
+    /// - `norm_out_handle` / `rot_out_handle`: `dim` f32 each, write-only
+    /// - the caller MUST hold the geometry guard: `dim % hblock == 0`,
+    ///   `hblock <= 1024`, `hblock` a power of two (`norm_rotate_geometry_ok`)
+    #[allow(clippy::too_many_arguments, reason = "fused kernel wiring")]
+    pub unsafe fn launch<R: Runtime>(
+        client: &ComputeClient<R>,
+        x_handle: Handle,
+        residual_handle: Handle,
+        gamma_handle: Handle,
+        signs_handle: Handle,
+        norm_out_handle: Handle,
+        rot_out_handle: Handle,
+        dim: usize,
+        hblock: usize,
+        eps: f32,
+    ) {
+        let inv_dim = 1.0f32 / dim as f32;
+        let params: &[f32] = &[inv_dim, eps, dim as f32, dim as f32, hblock as f32];
+        let params_handle = crate::params_cache::params_handle(client, f32::as_bytes(params));
+
+        debug_assert_binding_at_least(&x_handle, dim, "ResidualAddRmsNormRotateCubeCL::x");
+        debug_assert_binding_at_least(&residual_handle, dim, "ResidualAddRmsNormRotateCubeCL::residual");
+        debug_assert_binding_at_least(&gamma_handle, dim, "ResidualAddRmsNormRotateCubeCL::gamma");
+        debug_assert_binding_at_least(&signs_handle, dim, "ResidualAddRmsNormRotateCubeCL::signs");
+        debug_assert_binding_at_least(&norm_out_handle, dim, "ResidualAddRmsNormRotateCubeCL::norm_out");
+        debug_assert_binding_at_least(&rot_out_handle, dim, "ResidualAddRmsNormRotateCubeCL::rot_out");
+
+        // SAFETY: Caller guarantees correct buffer sizes + the geometry
+        // guard (dim % hblock == 0, hblock <= 1024).
+        unsafe {
+            residual_add_rmsnorm_rotate_f32::launch_unchecked::<R>(
+                client,
+                CubeCount::Static(1, 1, 1),
+                CubeDim::new_1d(256),
+                BufferArg::from_raw_parts(x_handle, dim),
+                BufferArg::from_raw_parts(residual_handle, dim),
+                BufferArg::from_raw_parts(gamma_handle, dim),
+                BufferArg::from_raw_parts(signs_handle, dim),
+                BufferArg::from_raw_parts(params_handle, 5),
+                BufferArg::from_raw_parts(norm_out_handle, dim),
+                BufferArg::from_raw_parts(rot_out_handle, dim),
+            );
+        }
+    }
+}
+
+/// The caller-side geometry guard for [`ResidualAddRmsNormRotateCubeCL`]:
+/// `width == dim`, `dim % hblock == 0`, `hblock <= 1024` (the smem slice),
+/// `hblock` a power of two (the butterfly's step walk assumes it).
+#[cfg(feature = "cubecl_runtime")]
+pub fn norm_rotate_geometry_ok(dim: usize, width: usize, hblock: usize) -> bool {
+    dim == width
+        && dim.is_multiple_of(hblock)
+        && hblock <= 1024
+        && hblock.is_power_of_two()
+        && hblock >= 2
+}
+
+// Issue 1134 runtime toggle (the Bench 768 pattern: env default OFF, a force
+// setter for the bench harness, a launch counter + one-shot REACH line as
+// the vacuous guards — the fused outputs are bit-identical to the
+// norm-then-staging chain, so ONLY the counter proves the toggle reached
+// the kernel).
+
+/// Armed: env `RIIR_NORM_ROT_FUSED` ("1"/"on"/"true"), else OFF;
+/// [`set_norm_rotate_fused`] overrides.
+#[cfg(feature = "cubecl_runtime")]
+static USE_NORM_ROTATE_FUSED: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+#[cfg(feature = "cubecl_runtime")]
+static NORM_ROTATE_FUSED_INITIALIZED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+#[cfg(feature = "cubecl_runtime")]
+static NORM_ROTATE_FUSED_LAUNCHES: std::sync::atomic::AtomicUsize =
+    std::sync::atomic::AtomicUsize::new(0);
+#[cfg(feature = "cubecl_runtime")]
+static NORM_ROTATE_FUSED_REACHED: std::sync::OnceLock<()> = std::sync::OnceLock::new();
+
+/// Force the fused norm+rotate path on/off (overrides the env; the bench
+/// harness's arm toggle).
+#[cfg(feature = "cubecl_runtime")]
+pub fn set_norm_rotate_fused(on: bool) {
+    let _ = NORM_ROTATE_FUSED_INITIALIZED.set(on);
+    USE_NORM_ROTATE_FUSED.store(on, std::sync::atomic::Ordering::Relaxed);
+}
+
+/// Whether the fused norm+rotate path is currently armed (dispatch check).
+#[cfg(feature = "cubecl_runtime")]
+pub fn norm_rotate_fused_enabled() -> bool {
+    if NORM_ROTATE_FUSED_INITIALIZED
+        .set(env_flag("RIIR_NORM_ROT_FUSED"))
+        .is_ok()
+    {
+        USE_NORM_ROTATE_FUSED.store(
+            NORM_ROTATE_FUSED_INITIALIZED
+                .get()
+                .copied()
+                .unwrap_or(false),
+            std::sync::atomic::Ordering::Relaxed,
+        );
+    }
+    USE_NORM_ROTATE_FUSED.load(std::sync::atomic::Ordering::Relaxed)
+}
+
+/// Launches dispatched through the fused norm+rotate path (the vacuous guard).
+#[cfg(feature = "cubecl_runtime")]
+pub fn norm_rotate_fused_launch_count() -> usize {
+    NORM_ROTATE_FUSED_LAUNCHES.load(std::sync::atomic::Ordering::Relaxed)
+}
+
+/// One-shot stderr REACH line (the Bench-768 guard): confirms the fused
+/// path actually dispatched at least once in this process.
+#[cfg(feature = "cubecl_runtime")]
+pub(crate) fn norm_rotate_fused_mark_reached() {
+    if NORM_ROTATE_FUSED_LAUNCHES.fetch_add(1, std::sync::atomic::Ordering::Relaxed) == 0 {
+        let _ = NORM_ROTATE_FUSED_REACHED.set(());
+        eprintln!("[norm_rot_fused] REACH: the fused norm+rotate staging dispatched");
+    }
+}
+
+fn env_flag(name: &str) -> bool {
+    matches!(
+        std::env::var(name)
+            .unwrap_or_default()
+            .to_lowercase()
+            .as_str(),
+        "1" | "on" | "true"
+    )
+}
+
 // ---------------------------------------------------------------------------
 // Mean-centered LayerNorm kernels (plan 611 S1a — the T7 GAP: the norms
 // family was RMS-shaped only; the encoder lane's `layer_norm_nobias_into`
@@ -1203,6 +1519,143 @@ mod tests {
     use crate::cubecl_runtime::CubeCLContext;
 
     use super::*;
+
+    /// Issue 1134 G1 — the fused ResidualAddRmsNorm+rotate is to_bits-equal
+    /// to the incumbent two-launch chain (ResidualAddRmsNorm then
+    /// RotationCubeCL::launch_forward_copy) at the production geometry
+    /// (n=5120, hblock=1024), an off-shape (n=2048, hblock=512), and the
+    /// edge rows (all-zero — inv_rms pins to 1/sqrt(eps); ±large; the
+    /// alternating sign pattern the folded basis stresses).
+    ///
+    /// Correctness is load-independent: safe to run under GPU co-tenants
+    /// (only G2 timing needs the 649-exclusive window).
+    fn norm_rot_g1_case(dim: usize, hblock: usize, x: Vec<f32>, eps: f32) {
+        let ctx = CubeCLContext::new().expect("CubeCL should initialize");
+        let client = ctx.client();
+
+        // The sign vector: the loader's ±1 i8 table rendered as f32 (the
+        // kernels read an f32 sign buffer). Deterministic alternation over
+        // 7-period blocks — not aligned to hblock, so the chunk walks see
+        // mixed signs.
+        let signs: Vec<f32> = (0..dim)
+            .map(|i| if (i / 7) % 2 == 0 { 1.0f32 } else { -1.0f32 })
+            .collect();
+        let gamma: Vec<f32> = (0..dim).map(|i| 1.0f32 + (i % 11) as f32 * 0.031f32).collect();
+        let residual: Vec<f32> = (0..dim)
+            .map(|i| ((i % 23) as f32 - 11.0f32) * 0.37f32)
+            .collect();
+
+        // ── The incumbent chain ──
+        let x_a = client.create_from_slice(f32::as_bytes(&x));
+        let res_a = client.create_from_slice(f32::as_bytes(&residual));
+        let gamma_a = client.create_from_slice(f32::as_bytes(&gamma));
+        let norm_a = client.empty(dim * core::mem::size_of::<f32>());
+        unsafe {
+            ResidualAddRmsNormCubeCL::launch::<ActiveRuntime>(
+                &client, x_a.clone(), res_a.clone(), gamma_a.clone(), norm_a.clone(), dim, eps,
+            );
+        }
+        let signs_a = client.create_from_slice(f32::as_bytes(&signs));
+        let rot_a = client.empty(dim * core::mem::size_of::<f32>());
+        unsafe {
+            crate::deltanet_rotation_cubecl::RotationCubeCL::launch_forward_copy::<ActiveRuntime>(
+                &client, norm_a.clone(), rot_a.clone(), signs_a.clone(), dim, dim, hblock,
+            );
+        }
+
+        // ── The fused launch ──
+        let x_b = client.create_from_slice(f32::as_bytes(&x));
+        let res_b = client.create_from_slice(f32::as_bytes(&residual));
+        let gamma_b = client.create_from_slice(f32::as_bytes(&gamma));
+        let signs_b = client.create_from_slice(f32::as_bytes(&signs));
+        let norm_b = client.empty(dim * core::mem::size_of::<f32>());
+        let rot_b = client.empty(dim * core::mem::size_of::<f32>());
+        unsafe {
+            ResidualAddRmsNormRotateCubeCL::launch::<ActiveRuntime>(
+                &client, x_b.clone(), res_b.clone(), gamma_b.clone(), signs_b.clone(),
+                norm_b.clone(), rot_b.clone(), dim, hblock, eps,
+            );
+        }
+
+        // ── to_bits equality on BOTH outputs (norm + the staged rotation) ──
+        let norm_a_bytes = client.read_one(norm_a).expect("read");
+        let rot_a_bytes = client.read_one(rot_a).expect("read");
+        let norm_b_bytes = client.read_one(norm_b).expect("read");
+        let rot_b_bytes = client.read_one(rot_b).expect("read");
+        let x_a_bytes = client.read_one(x_a).expect("read");
+        let x_b_bytes = client.read_one(x_b).expect("read");
+        let norm_a_v = f32::from_bytes(&norm_a_bytes);
+        let rot_a_v = f32::from_bytes(&rot_a_bytes);
+        let norm_b_v = f32::from_bytes(&norm_b_bytes);
+        let rot_b_v = f32::from_bytes(&rot_b_bytes);
+        let x_a_v = f32::from_bytes(&x_a_bytes);
+        let x_b_v = f32::from_bytes(&x_b_bytes);
+
+        for i in 0..dim {
+            assert_eq!(
+                norm_a_v[i].to_bits(),
+                norm_b_v[i].to_bits(),
+                "norm_out[{i}] bit-mismatch at dim={dim} hblock={hblock}"
+            );
+            assert_eq!(
+                rot_a_v[i].to_bits(),
+                rot_b_v[i].to_bits(),
+                "rot_out[{i}] bit-mismatch at dim={dim} hblock={hblock}"
+            );
+            assert_eq!(
+                x_a_v[i].to_bits(),
+                x_b_v[i].to_bits(),
+                "x-in-place[{i}] bit-mismatch at dim={dim} hblock={hblock}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_norm_rotate_fused_bit_identity_production_geometry() {
+        // The Bonsai-2 production shape: n_embd=5120, Hadamard block 1024.
+        let dim = 5120usize;
+        let hblock = 1024usize;
+        let eps = 1e-6f32;
+        let mixed: Vec<f32> = (0..dim)
+            .map(|i| ((i % 37) as f32 - 18.0f32) * 0.113f32 + ((i % 5) as f32) * 121.7f32)
+            .collect();
+        norm_rot_g1_case(dim, hblock, mixed, eps);
+    }
+
+    #[test]
+    fn test_norm_rotate_fused_bit_identity_off_shape() {
+        // Off-shape: n=2048, hblock=512 (2 chunks, half the smem window).
+        let dim = 2048usize;
+        let hblock = 512usize;
+        let eps = 1e-6f32;
+        let mixed: Vec<f32> = (0..dim)
+            .map(|i| ((i % 13) as f32 - 6.0f32) * 3.71f32)
+            .collect();
+        norm_rot_g1_case(dim, hblock, mixed, eps);
+    }
+
+    #[test]
+    fn test_norm_rotate_fused_bit_identity_edge_rows() {
+        let dim = 1024usize;
+        let hblock = 1024usize;
+        let eps = 1e-6f32;
+        // All-zero row: mean_sq = 0, inv_rms = 1/sqrt(eps) — the pins branch.
+        norm_rot_g1_case(dim, hblock, vec![0.0f32; dim], eps);
+        // ±large (the residual-stream ±4000 regime from the plan-611 note).
+        norm_rot_g1_case(
+            dim,
+            hblock,
+            (0..dim).map(|i| if i % 2 == 0 { 4000.0f32 } else { -4000.0f32 }).collect(),
+            eps,
+        );
+        // Alternating ±1 (the maximal-sign-stress row).
+        norm_rot_g1_case(
+            dim,
+            hblock,
+            (0..dim).map(|i| if i % 2 == 0 { 1.0f32 } else { -1.0f32 }).collect(),
+            eps,
+        );
+    }
 
     /// CPU reference RMSNorm with gamma.
     ///
