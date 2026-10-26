@@ -4393,6 +4393,21 @@ fn dn_recurrence_fused_enabled() -> bool {
     })
 }
 
+/// Issue 1126 — the fused decode core (beta/decay + expand/L2 + the fused
+/// recurrence in ONE launch, riir-infer `.issues/1126`). OPT-IN: the default
+/// (env unset) keeps the incumbent 3-launch chain until the GOAT gates pass
+/// and the owner-gated league re-cell promotes it; `RIIR_GDN_CORE_FUSED=1`
+/// arms it, any other value (including `=0`) reads OFF.
+fn gdn_core_fused_enabled() -> bool {
+    static ARMED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ARMED.get_or_init(|| {
+        matches!(
+            std::env::var("RIIR_GDN_CORE_FUSED").as_deref(),
+            Ok("1") | Ok("true") | Ok("on")
+        )
+    })
+}
+
 fn forward_deltanet_layer(
     infra: &ForwardInfraCudarc,
     acts: &mut ActivationsCudarc,
@@ -4608,27 +4623,45 @@ fn forward_deltanet_layer(
         kernel_size,
     )?;
 
-    // 6. Beta/decay.
-    infra.deltanet.launch_beta_decay(
-        &infra.stream,
-        &acts.a_raw,
-        &acts.b_raw,
-        a_log,
-        dt_bias,
-        &acts.beta_buf,
-        &acts.decay_buf,
-        n_v_heads,
-    )?;
+    // 6–8. Beta/decay, expand+L2, recurrence — the decode core. Issue 1126:
+    // when armed (`RIIR_GDN_CORE_FUSED=1`) and at the fused-recurrence
+    // posture, the F32-fused match arm below collapses the THREE launches
+    // (beta_decay + expand_and_l2_normalize + recurrence_fused) into ONE
+    // (beta/decay + expand/L2 computed inline off the COMPACT qkv;
+    // bit-identical — see the kernel comment in cudarc_kernels/deltanet.rs).
+    // The incumbent chain stays the default and the demote hatch.
+    let state = acts.layer_states[layer_idx]
+        .deltanet_state
+        .as_ref()
+        .expect("deltanet_state");
+    let core_fused = gdn_core_fused_enabled()
+        && dn_recurrence_fused_enabled()
+        && matches!(state, RecStateBuf::F32(_))
+        && matches!(head_dim, 64 | 128 | 256)
+        && n_v_heads.is_multiple_of(n_k_heads);
+    if !core_fused {
+        // 6. Beta/decay.
+        infra.deltanet.launch_beta_decay(
+            &infra.stream,
+            &acts.a_raw,
+            &acts.b_raw,
+            a_log,
+            dt_bias,
+            &acts.beta_buf,
+            &acts.decay_buf,
+            n_v_heads,
+        )?;
 
-    // 7. Expand Q/K + L2-norm + copy V.
-    infra.deltanet.launch_expand_and_l2_normalize(
-        &infra.stream,
-        &acts.qkv,
-        &acts.qkv_expanded,
-        n_k_heads,
-        n_v_heads,
-        head_dim,
-    )?;
+        // 7. Expand Q/K + L2-norm + copy V.
+        infra.deltanet.launch_expand_and_l2_normalize(
+            &infra.stream,
+            &acts.qkv,
+            &acts.qkv_expanded,
+            n_k_heads,
+            n_v_heads,
+            head_dim,
+        )?;
+    }
 
     // 8. Recurrence (Plan 603 R1 — Issue 742's fused single-pass, 1R+1W over
     // the state, DEFAULT here as in the qwen38 lane; bit-identical to the
@@ -4638,10 +4671,10 @@ fn forward_deltanet_layer(
     // Plan 603 R2 — the `Half` state arm dispatches the half-residency twin
     // (same op order, f32 compute; only the state STORE rounds — see the
     // kernel comment in cudarc_kernels/deltanet.rs).
-    let state = acts.layer_states[layer_idx]
-        .deltanet_state
-        .as_ref()
-        .expect("deltanet_state");
+    // Issue 1126 — the armed F32-fused arm dispatches the fused decode core
+    // instead (one launch, the chain skipped above; requires
+    // `dn_recurrence_fused_enabled()` — the core embeds the fused body, so
+    // `RIIR_BONSAI_DN_FUSED=0` demotes the core along with the fused kernel).
     match state {
         RecStateBuf::Half(h) => {
             infra.deltanet.launch_recurrence_fused_half_hd128(
@@ -4653,6 +4686,21 @@ fn forward_deltanet_layer(
                 &acts.recurrent_out,
                 n_v_heads,
                 RecStateBuf::half_fmt_from_env().unwrap_or(HalfStateFmt::F16),
+            )?;
+        }
+        RecStateBuf::F32(state_f32) if core_fused => {
+            infra.deltanet.launch_recurrence_fused_expand(
+                &infra.stream,
+                &acts.qkv,
+                &acts.a_raw,
+                &acts.b_raw,
+                a_log,
+                dt_bias,
+                state_f32,
+                &acts.recurrent_out,
+                head_dim,
+                n_v_heads,
+                n_k_heads,
             )?;
         }
         RecStateBuf::F32(state_f32)

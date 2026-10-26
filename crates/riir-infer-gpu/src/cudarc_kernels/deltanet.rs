@@ -472,82 +472,15 @@ extern "C" __global__ void recurrence_f32_parallel(
 // parallel kernel. The bound is a LAUNCHER fact, not a kernel input:
 // head_dim comes from config at every call site, so the body is a
 // template<int HD> instantiated at 64/128/256 with constexpr COLS ->
-// full unroll, register-resident arrays.
+// full unroll, register-resident arrays. (Issue 1126: the body now lives in
+// `recurrence_fused_body_impl<HD, EXPAND_INLINE>` below — this incumbent arm
+// is `<HD, false>`, the original text verbatim; the wrapper is
+// forward-declared here and defined beside the impl.)
 template <int HD>
 __device__ __forceinline__ void recurrence_fused_body(
-    const float* __restrict__ qkv,       // [3 * n_head * HD]
-    const float* __restrict__ beta,      // [n_head]
-    const float* __restrict__ decay,     // [n_head]
-    float* __restrict__ state,           // [n_head * HD * HD] (persistent)
-    float* __restrict__ output,          // [n_head * HD]
-    const int n_head)
-{
-    constexpr int COLS_PER_LANE = HD / 32;  // compile-time -> full unroll
-    const int head = blockIdx.x;
-    const int row = blockIdx.y;
-    const int lane = threadIdx.x;  // 0..31
-
-    if (head >= n_head) return;
-    if (row >= HD) return;
-
-    const int head_off_q = head * HD;
-    const int head_off_k = n_head * HD + head * HD;
-    const int head_off_v = 2 * n_head * HD + head * HD;
-    const int row_off = (head * HD + row) * HD;  // S[head][row][:]
-
-    const float beta_val = beta[head];
-    const float decay_val = decay[head];
-
-    // k[c] / q[c] per lane — L2-hot across the head's row blocks.
-    float k_c[COLS_PER_LANE];
-    float q_c[COLS_PER_LANE];
-    #pragma unroll
-    for (int c = 0; c < COLS_PER_LANE; c++) {
-        int col = c * 32 + lane;
-        k_c[c] = qkv[head_off_k + col];
-        q_c[c] = qkv[head_off_q + col];
-    }
-
-    // ── Single read pass: decay in registers + kv_mem partial ──
-    float partial = 0.0f;
-    float s_dec[COLS_PER_LANE];
-    #pragma unroll
-    for (int c = 0; c < COLS_PER_LANE; c++) {
-        int col = c * 32 + lane;
-        float s = state[row_off + col];
-        s_dec[c] = s * decay_val;
-        partial += s_dec[c] * k_c[c];
-    }
-    partial += __shfl_xor_sync(0xffffffff, partial, 16);
-    partial += __shfl_xor_sync(0xffffffff, partial, 8);
-    partial += __shfl_xor_sync(0xffffffff, partial, 4);
-    partial += __shfl_xor_sync(0xffffffff, partial, 2);
-    partial += __shfl_xor_sync(0xffffffff, partial, 1);
-    const float kv_mem = partial;
-
-    const float v_row = qkv[head_off_v + row];
-    const float delta_row = beta_val * (v_row - kv_mem);
-
-    // ── Single write pass: updated state + output partial in one sweep ──
-    float partial2 = 0.0f;
-    #pragma unroll
-    for (int c = 0; c < COLS_PER_LANE; c++) {
-        int col = c * 32 + lane;
-        float s_new = s_dec[c] + k_c[c] * delta_row;
-        state[row_off + col] = s_new;
-        partial2 += s_new * q_c[c];
-    }
-    partial2 += __shfl_xor_sync(0xffffffff, partial2, 16);
-    partial2 += __shfl_xor_sync(0xffffffff, partial2, 8);
-    partial2 += __shfl_xor_sync(0xffffffff, partial2, 4);
-    partial2 += __shfl_xor_sync(0xffffffff, partial2, 2);
-    partial2 += __shfl_xor_sync(0xffffffff, partial2, 1);
-
-    const float scale = 1.0f / sqrtf((float)HD);
-    if (lane == 0) {
-        output[head * HD + row] = partial2 * scale;
-    }
-}
+    const float* __restrict__ qkv, const float* __restrict__ beta,
+    const float* __restrict__ decay, float* __restrict__ state,
+    float* __restrict__ output, const int n_head);
 
 extern "C" __global__ void recurrence_f32_fused_hd64(
     const float* __restrict__ qkv, const float* __restrict__ beta,
@@ -571,6 +504,195 @@ extern "C" __global__ void recurrence_f32_fused_hd256(
     float* __restrict__ output, const int n_head)
 {
     recurrence_fused_body<256>(qkv, beta, decay, state, output, n_head);
+}
+
+// ---------------------------------------------------------------------------
+// Issue 1126 — the fused decode core: beta/decay + expand/L2 + the Issue-742
+// fused recurrence in ONE launch. Replaces the 3-launch chain beta_decay →
+// expand_and_l2_normalize → recurrence_fused on the decode F32 arm (conv1d
+// stays its own launch — true in-place data dependency: every qkv consumer
+// must observe the whole conv, and same-kernel fusion would need a grid
+// barrier).
+//
+// The Issue-742 body is SHARED (recurrence_fused_body_impl, one instruction
+// stream for the math): the incumbent arm LOADS beta/decay/k/q (written by
+// the upstream kernels); the EXPAND_INLINE arm COMPUTES them inline from the
+// COMPACT qkv layout [Q(n_k·HD) | K(n_k·HD) | V(n_v·HD)]. Bit-identity by
+// construction: every per-value op is the upstream kernel's expression
+// verbatim (beta_decay's sigmoid + ±20-branch softplus; the expand kernel's
+// sequential c-sum L2 with the sq_sum==0 zeros guard; V verbatim), the f32
+// store→load round-trip the incumbent pays is exact (nvrtc default — no
+// fast-math, no FTZ), and the body after value preparation is the SAME code
+// for both arms. Redundant per-block recompute (the K2 gdn_input precedent:
+// each block re-runs its head's reductions, bit-identical inv values, no
+// cross-block dependency): ~1.6M extra FLOPs/layer at 48×128, traded for 2
+// launches/layer.
+// ---------------------------------------------------------------------------
+template <int HD, bool EXPAND_INLINE>
+__device__ __forceinline__ void recurrence_fused_body_impl(
+    const float* __restrict__ qkv,       // EXPAND_INLINE: compact [Q(n_k·HD)|K(n_k·HD)|V(n_v·HD)]
+                                         // otherwise: expanded [3 * n_head * HD]
+    const float* __restrict__ beta,      // [n_head] (incumbent arm)
+    const float* __restrict__ decay,     // [n_head] (incumbent arm)
+    const float* __restrict__ a_raw,     // [n_head] (expand-inline arm)
+    const float* __restrict__ b_raw,     // [n_head] (expand-inline arm)
+    const float* __restrict__ a_log,     // [n_head] (expand-inline arm)
+    const float* __restrict__ dt_bias,   // [n_head] (expand-inline arm)
+    float* __restrict__ state,           // [n_head * HD * HD] (persistent)
+    float* __restrict__ output,          // [n_head * HD]
+    const int n_head,                    // n_v_heads
+    const int n_k_heads)
+{
+    constexpr int COLS_PER_LANE = HD / 32;  // compile-time -> full unroll
+    const int head = blockIdx.x;
+    const int row = blockIdx.y;
+    const int lane = threadIdx.x;  // 0..31
+
+    if (head >= n_head) return;
+    if (row >= HD) return;
+
+    const int head_off_q = head * HD;
+    const int head_off_k = n_head * HD + head * HD;
+    const int head_off_v = 2 * n_head * HD + head * HD;
+    const int row_off = (head * HD + row) * HD;  // S[head][row][:]
+
+    float beta_val;
+    float decay_val;
+    float k_c[COLS_PER_LANE];
+    float q_c[COLS_PER_LANE];
+    float v_row;
+
+    if (EXPAND_INLINE) {
+        // beta_decay_f32's expressions verbatim (per head).
+        const float b_val = b_raw[head];
+        beta_val = 1.0f / (1.0f + expf(-b_val));
+        const float a_val = a_raw[head] + dt_bias[head];
+        float sp;
+        if (a_val > 20.0f) {
+            sp = a_val;
+        } else if (a_val < -20.0f) {
+            sp = 0.0f;
+        } else {
+            sp = logf(1.0f + expf(a_val));
+        }
+        decay_val = expf(a_log[head] * sp);
+
+        // expand_and_l2_normalize_heads_f32's math verbatim: sequential
+        // c-order L2 sums over the COMPACT source head (out_head % n_k_heads
+        // mapping), the sq_sum==0 guard outputs zeros, V copied verbatim.
+        const int src_head = head % n_k_heads;
+        const int compact_q_off = src_head * HD;
+        const int compact_k_off = n_k_heads * HD + src_head * HD;
+        float sq_q = 0.0f;
+        float sq_k = 0.0f;
+        for (int c = 0; c < HD; c++) {
+            const float qv = qkv[compact_q_off + c];
+            const float kv = qkv[compact_k_off + c];
+            sq_q += qv * qv;
+            sq_k += kv * kv;
+        }
+        const float inv_q = (sq_q > 0.0f) ? (1.0f / sqrtf(sq_q)) : 0.0f;
+        const float inv_k = (sq_k > 0.0f) ? (1.0f / sqrtf(sq_k)) : 0.0f;
+        #pragma unroll
+        for (int c = 0; c < COLS_PER_LANE; c++) {
+            int col = c * 32 + lane;
+            q_c[c] = (sq_q > 0.0f) ? (qkv[compact_q_off + col] * inv_q) : 0.0f;
+            k_c[c] = (sq_k > 0.0f) ? (qkv[compact_k_off + col] * inv_k) : 0.0f;
+        }
+        v_row = qkv[2 * n_k_heads * HD + head * HD + row];
+    } else {
+        beta_val = beta[head];
+        decay_val = decay[head];
+        #pragma unroll
+        for (int c = 0; c < COLS_PER_LANE; c++) {
+            int col = c * 32 + lane;
+            k_c[c] = qkv[head_off_k + col];
+            q_c[c] = qkv[head_off_q + col];
+        }
+        v_row = qkv[head_off_v + row];
+    }
+
+    // ── The Issue-742 fused body (verbatim from here; identical values) ──
+    float partial = 0.0f;
+    float s_dec[COLS_PER_LANE];
+    #pragma unroll
+    for (int c = 0; c < COLS_PER_LANE; c++) {
+        int col = c * 32 + lane;
+        float s = state[row_off + col];
+        s_dec[c] = s * decay_val;
+        partial += s_dec[c] * k_c[c];
+    }
+    partial += __shfl_xor_sync(0xffffffff, partial, 16);
+    partial += __shfl_xor_sync(0xffffffff, partial, 8);
+    partial += __shfl_xor_sync(0xffffffff, partial, 4);
+    partial += __shfl_xor_sync(0xffffffff, partial, 2);
+    partial += __shfl_xor_sync(0xffffffff, partial, 1);
+    const float kv_mem = partial;
+
+    const float delta_row = beta_val * (v_row - kv_mem);
+
+    float partial2 = 0.0f;
+    #pragma unroll
+    for (int c = 0; c < COLS_PER_LANE; c++) {
+        int col = c * 32 + lane;
+        float s_new = s_dec[c] + k_c[c] * delta_row;
+        state[row_off + col] = s_new;
+        partial2 += s_new * q_c[c];
+    }
+    partial2 += __shfl_xor_sync(0xffffffff, partial2, 16);
+    partial2 += __shfl_xor_sync(0xffffffff, partial2, 8);
+    partial2 += __shfl_xor_sync(0xffffffff, partial2, 4);
+    partial2 += __shfl_xor_sync(0xffffffff, partial2, 2);
+    partial2 += __shfl_xor_sync(0xffffffff, partial2, 1);
+
+    const float scale = 1.0f / sqrtf((float)HD);
+    if (lane == 0) {
+        output[head * HD + row] = partial2 * scale;
+    }
+}
+
+template <int HD>
+__device__ __forceinline__ void recurrence_fused_body(
+    const float* __restrict__ qkv, const float* __restrict__ beta,
+    const float* __restrict__ decay, float* __restrict__ state,
+    float* __restrict__ output, const int n_head)
+{
+    recurrence_fused_body_impl<HD, false>(qkv, beta, decay, nullptr, nullptr,
+                                          nullptr, nullptr, state, output,
+                                          n_head, 0);
+}
+
+extern "C" __global__ void recurrence_f32_fused_expand_hd64(
+    const float* __restrict__ qkv, const float* __restrict__ a_raw,
+    const float* __restrict__ b_raw, const float* __restrict__ a_log,
+    const float* __restrict__ dt_bias, float* __restrict__ state,
+    float* __restrict__ output, const int n_head, const int n_k_heads)
+{
+    recurrence_fused_body_impl<64, true>(qkv, nullptr, nullptr, a_raw, b_raw,
+                                         a_log, dt_bias, state, output,
+                                         n_head, n_k_heads);
+}
+
+extern "C" __global__ void recurrence_f32_fused_expand_hd128(
+    const float* __restrict__ qkv, const float* __restrict__ a_raw,
+    const float* __restrict__ b_raw, const float* __restrict__ a_log,
+    const float* __restrict__ dt_bias, float* __restrict__ state,
+    float* __restrict__ output, const int n_head, const int n_k_heads)
+{
+    recurrence_fused_body_impl<128, true>(qkv, nullptr, nullptr, a_raw, b_raw,
+                                          a_log, dt_bias, state, output,
+                                          n_head, n_k_heads);
+}
+
+extern "C" __global__ void recurrence_f32_fused_expand_hd256(
+    const float* __restrict__ qkv, const float* __restrict__ a_raw,
+    const float* __restrict__ b_raw, const float* __restrict__ a_log,
+    const float* __restrict__ dt_bias, float* __restrict__ state,
+    float* __restrict__ output, const int n_head, const int n_k_heads)
+{
+    recurrence_fused_body_impl<256, true>(qkv, nullptr, nullptr, a_raw, b_raw,
+                                          a_log, dt_bias, state, output,
+                                          n_head, n_k_heads);
 }
 
 // ---------------------------------------------------------------------------
@@ -1296,6 +1418,13 @@ pub struct DeltanetKernels {
     recurrence_fused_hd64: CudaFunction,
     recurrence_fused_hd128: CudaFunction,
     recurrence_fused_hd256: CudaFunction,
+    /// Issue 1126: the fused decode core — beta/decay + expand/L2 + the
+    /// fused recurrence in ONE launch off the COMPACT qkv layout.
+    /// Bit-identical to the 3-launch chain (see the kernel comment).
+    /// Template-specialized per head_dim, same as the fused kernel.
+    recurrence_fused_expand_hd64: CudaFunction,
+    recurrence_fused_expand_hd128: CudaFunction,
+    recurrence_fused_expand_hd256: CudaFunction,
     /// Plan 603 R2 — half-precision-state twins of the fused hd128 kernel
     /// (f16 / bf16 state bits; compute f32). Loaded unconditionally; the
     /// ternary decode lane dispatches them under `RIIR_GDN_STATE_HALF`.
@@ -1410,6 +1539,15 @@ impl DeltanetKernels {
         let recurrence_fused_hd256 = module
             .load_function("recurrence_f32_fused_hd256")
             .map_err(|e| super::CudarcKernelError::Compile(format!("{e}")))?;
+        let recurrence_fused_expand_hd64 = module
+            .load_function("recurrence_f32_fused_expand_hd64")
+            .map_err(|e| super::CudarcKernelError::Compile(format!("{e}")))?;
+        let recurrence_fused_expand_hd128 = module
+            .load_function("recurrence_f32_fused_expand_hd128")
+            .map_err(|e| super::CudarcKernelError::Compile(format!("{e}")))?;
+        let recurrence_fused_expand_hd256 = module
+            .load_function("recurrence_f32_fused_expand_hd256")
+            .map_err(|e| super::CudarcKernelError::Compile(format!("{e}")))?;
         let recurrence_half_hd128_f16 = module
             .load_function("recurrence_half_fused_hd128_f16")
             .map_err(|e| super::CudarcKernelError::Compile(format!("{e}")))?;
@@ -1449,6 +1587,9 @@ impl DeltanetKernels {
             recurrence_fused_hd64,
             recurrence_fused_hd128,
             recurrence_fused_hd256,
+            recurrence_fused_expand_hd64,
+            recurrence_fused_expand_hd128,
+            recurrence_fused_expand_hd256,
             recurrence_half_hd128_f16,
             recurrence_half_hd128_bf16,
             z_gating,
@@ -1719,6 +1860,70 @@ impl DeltanetKernels {
                 .arg(state)
                 .arg(output)
                 .arg(&n_head_i32)
+                .launch(cfg)
+                .map_err(|e| super::CudarcKernelError::Launch(e.to_string()))?;
+        }
+        Ok(())
+    }
+
+    /// Issue 1126 — the fused decode core twin of [`launch_recurrence_fused`]:
+    /// beta/decay + expand/L2 + the fused recurrence in ONE launch off the
+    /// COMPACT qkv layout (replaces the three-launch beta_decay /
+    /// expand_and_l2_normalize / fused-recurrence chain on the decode F32
+    /// arm; conv1d stays its own launch — true in-place data dependency).
+    /// Bit-identical to the 3-launch chain (see the kernel comment);
+    /// head_dim template-specialized {64,128,256} exactly as the fused
+    /// kernel.
+    ///
+    /// COMPACT qkv layout: `[Q(n_k·hd) | K(n_k·hd) | V(n_v·hd)]` — the conv1d
+    /// output, post-conv. `n_head` is `n_v_heads`; the Q/K source head is
+    /// `head % n_k_heads`.
+    pub fn launch_recurrence_fused_expand(
+        &self,
+        stream: &CudaStream,
+        qkv_compact: &cudarc::driver::safe::CudaSlice<f32>,
+        a_raw: &cudarc::driver::safe::CudaSlice<f32>,
+        b_raw: &cudarc::driver::safe::CudaSlice<f32>,
+        a_log: &cudarc::driver::safe::CudaSlice<f32>,
+        dt_bias: &cudarc::driver::safe::CudaSlice<f32>,
+        state: &cudarc::driver::safe::CudaSlice<f32>,
+        output: &cudarc::driver::safe::CudaSlice<f32>,
+        head_dim: usize,
+        n_head: usize,
+        n_k_heads: usize,
+    ) -> Result<(), super::CudarcKernelError> {
+        let n_head_i32 = n_head as i32;
+        let n_k_i32 = n_k_heads as i32;
+        let cfg = LaunchConfig {
+            // Same 2D grid as the fused kernel: (n_head, head_dim), one warp
+            // per block, one row per block.
+            grid_dim: (n_head as u32, head_dim as u32, 1),
+            block_dim: (32, 1, 1),
+            shared_mem_bytes: 0, // no smem — registers + __shfl_xor
+        };
+        let f = match head_dim {
+            64 => &self.recurrence_fused_expand_hd64,
+            128 => &self.recurrence_fused_expand_hd128,
+            256 => &self.recurrence_fused_expand_hd256,
+            other => {
+                return Err(super::CudarcKernelError::InvalidArg(format!(
+                    "recurrence_f32_fused_expand is specialized for head_dim \
+                     {{64,128,256}}; got {other}"
+                )));
+            }
+        };
+        unsafe {
+            stream
+                .launch_builder(f)
+                .arg(qkv_compact)
+                .arg(a_raw)
+                .arg(b_raw)
+                .arg(a_log)
+                .arg(dt_bias)
+                .arg(state)
+                .arg(output)
+                .arg(&n_head_i32)
+                .arg(&n_k_i32)
                 .launch(cfg)
                 .map_err(|e| super::CudarcKernelError::Launch(e.to_string()))?;
         }
@@ -2886,6 +3091,259 @@ mod tests {
                 "[recurrence_fused] bit-identical to parallel across 5 steps at \
                  ({n_head},{head_dim})"
             );
+        }
+    }
+
+    /// Issue 1126 — the fused decode core (`launch_recurrence_fused_expand`:
+    /// beta/decay + expand/L2 + fused recurrence in ONE launch off the
+    /// COMPACT qkv) must be BIT-IDENTICAL to the incumbent 3-launch chain
+    /// (beta_decay → expand_and_l2_normalize → recurrence_fused). 5
+    /// sequential steps per geometry — state evolution compounding, every
+    /// state AND output element bit-exact at every step. Includes the
+    /// Bonsai-2 27B production shape (n_k=16, n_v=48, hd=128) and a
+    /// zero-vector head (the L2 sq_sum==0 guard must stay exact).
+    #[test]
+    fn test_recurrence_fused_expand_bit_identical_to_chain() {
+        let Some(_) = cuda_or_skip() else {
+            eprintln!("[skip] no CUDA device");
+            return;
+        };
+        let ctx = CudaContext::new(0).unwrap();
+        let stream = ctx.new_stream().unwrap();
+        let kernels = DeltanetKernels::new(ctx).expect("compile");
+
+        // (n_k, n_v, hd): production Bonsai-2 27B + a small off-shape.
+        let geometries: [(usize, usize, usize); 2] = [(16, 48, 128), (4, 8, 64)];
+        for &(n_k, n_v, hd) in &geometries {
+            let compact_len = 2 * n_k * hd + n_v * hd; // [Q(n_k·hd)|K(n_k·hd)|V(n_v·hd)]
+            let expanded_len = 3 * n_v * hd;
+            let mut seed: u64 = 0x1126_c0de_f00d_0001;
+            let mut next = || {
+                seed = seed
+                    .wrapping_mul(6364136223846793005)
+                    .wrapping_add(1442695040888963407);
+                ((seed >> 33) as f32 / u32::MAX as f32) * 2.0 - 1.0
+            };
+            let qkv_compact: Vec<f32> = (0..compact_len).map(|_| next()).collect();
+            let a_raw: Vec<f32> = (0..n_v).map(|_| next() * 2.0).collect();
+            let b_raw: Vec<f32> = (0..n_v).map(|_| next() * 2.0).collect();
+            let a_log: Vec<f32> = (0..n_v).map(|_| next() * 0.5).collect();
+            let dt_bias: Vec<f32> = (0..n_v).map(|_| next()).collect();
+            let state_len = n_v * hd * hd;
+            let state_init: Vec<f32> = (0..state_len).map(|_| next() * 0.1).collect();
+
+            // INCUMBENT chain workspace.
+            let chain_qkv = stream.clone_htod(&qkv_compact).unwrap();
+            let chain_expanded = stream.alloc_zeros::<f32>(expanded_len).unwrap();
+            let chain_beta = stream.alloc_zeros::<f32>(n_v).unwrap();
+            let chain_decay = stream.alloc_zeros::<f32>(n_v).unwrap();
+            let chain_a = stream.clone_htod(&a_raw).unwrap();
+            let chain_b = stream.clone_htod(&b_raw).unwrap();
+            let chain_alog = stream.clone_htod(&a_log).unwrap();
+            let chain_dtb = stream.clone_htod(&dt_bias).unwrap();
+            let chain_state = stream.clone_htod(&state_init).unwrap();
+            let chain_out = stream.alloc_zeros::<f32>(n_v * hd).unwrap();
+            // FUSED core workspace.
+            let core_qkv = stream.clone_htod(&qkv_compact).unwrap();
+            let core_a = stream.clone_htod(&a_raw).unwrap();
+            let core_b = stream.clone_htod(&b_raw).unwrap();
+            let core_alog = stream.clone_htod(&a_log).unwrap();
+            let core_dtb = stream.clone_htod(&dt_bias).unwrap();
+            let core_state = stream.clone_htod(&state_init).unwrap();
+            let core_out = stream.alloc_zeros::<f32>(n_v * hd).unwrap();
+
+            let mut host_chain = vec![0f32; state_len];
+            let mut host_core = vec![0f32; state_len];
+            let mut ochain = vec![0f32; n_v * hd];
+            let mut ocore = vec![0f32; n_v * hd];
+            for step in 0..5 {
+                // Incumbent: 3 launches (compact qkv mutated in place by nothing
+                // here — the chain kernels are read-only on qkv, so both arms
+                // can share the same input values via their own copies).
+                kernels
+                    .launch_beta_decay(
+                        &stream,
+                        &chain_a,
+                        &chain_b,
+                        &chain_alog,
+                        &chain_dtb,
+                        &chain_beta,
+                        &chain_decay,
+                        n_v,
+                    )
+                    .expect("launch beta_decay");
+                kernels
+                    .launch_expand_and_l2_normalize(
+                        &stream,
+                        &chain_qkv,
+                        &chain_expanded,
+                        n_k,
+                        n_v,
+                        hd,
+                    )
+                    .expect("launch expand");
+                kernels
+                    .launch_recurrence_fused(
+                        &stream,
+                        &chain_expanded,
+                        &chain_beta,
+                        &chain_decay,
+                        &chain_state,
+                        &chain_out,
+                        hd,
+                        n_v,
+                    )
+                    .expect("launch fused recurrence");
+                // Fused core: ONE launch off the compact layout.
+                kernels
+                    .launch_recurrence_fused_expand(
+                        &stream,
+                        &core_qkv,
+                        &core_a,
+                        &core_b,
+                        &core_alog,
+                        &core_dtb,
+                        &core_state,
+                        &core_out,
+                        hd,
+                        n_v,
+                        n_k,
+                    )
+                    .expect("launch fused core");
+                stream.synchronize().expect("sync");
+                stream.memcpy_dtoh(&chain_state, &mut host_chain).unwrap();
+                stream.memcpy_dtoh(&core_state, &mut host_core).unwrap();
+                stream.memcpy_dtoh(&chain_out, &mut ochain).unwrap();
+                stream.memcpy_dtoh(&core_out, &mut ocore).unwrap();
+                for i in 0..state_len {
+                    assert!(
+                        host_chain[i].to_bits() == host_core[i].to_bits(),
+                        "state diverged at step {step} geom ({n_k},{n_v},{hd}) idx {i}: \
+                         chain={:e} core={:e}",
+                        host_chain[i],
+                        host_core[i]
+                    );
+                }
+                for i in 0..n_v * hd {
+                    assert!(
+                        ochain[i].to_bits() == ocore[i].to_bits(),
+                        "output diverged at step {step} geom ({n_k},{n_v},{hd}) idx {i}: \
+                         chain={:e} core={:e}",
+                        ochain[i],
+                        ocore[i]
+                    );
+                }
+            }
+            eprintln!(
+                "[gdn_core_fused] bit-identical to the 3-launch chain across 5 steps at ({n_k},{n_v},{hd})"
+            );
+        }
+
+        // Zero-vector head edge: an all-zero Q head must normalize to exact
+        // zeros (the expand kernel's sq_sum==0 guard) and the core must agree
+        // bit-for-bit through the zeroed k_c/q_c path.
+        {
+            let (n_k, n_v, hd) = (4usize, 8usize, 64usize);
+            let compact_len = 2 * n_k * hd + n_v * hd;
+            let expanded_len = 3 * n_v * hd;
+            let mut qkv_compact = vec![0.25f32; compact_len];
+            // Zero Q head 0 and K head 2 (source-space zeros).
+            for i in 0..hd {
+                qkv_compact[i] = 0.0; // Q head 0
+                qkv_compact[n_k * hd + 2 * hd + i] = 0.0; // K head 2
+            }
+            let a_raw = vec![0.3f32; n_v];
+            let b_raw = vec![-0.7f32; n_v];
+            let a_log = vec![0.1f32; n_v];
+            let dt_bias = vec![0.05f32; n_v];
+            let state_init = vec![0.01f32; n_v * hd * hd];
+
+            let chain_qkv = stream.clone_htod(&qkv_compact).unwrap();
+            let chain_expanded = stream.alloc_zeros::<f32>(expanded_len).unwrap();
+            let chain_beta = stream.alloc_zeros::<f32>(n_v).unwrap();
+            let chain_decay = stream.alloc_zeros::<f32>(n_v).unwrap();
+            let chain_a = stream.clone_htod(&a_raw).unwrap();
+            let chain_b = stream.clone_htod(&b_raw).unwrap();
+            let chain_alog = stream.clone_htod(&a_log).unwrap();
+            let chain_dtb = stream.clone_htod(&dt_bias).unwrap();
+            let chain_state = stream.clone_htod(&state_init).unwrap();
+            let chain_out = stream.alloc_zeros::<f32>(n_v * hd).unwrap();
+            let core_qkv = stream.clone_htod(&qkv_compact).unwrap();
+            let core_a = stream.clone_htod(&a_raw).unwrap();
+            let core_b = stream.clone_htod(&b_raw).unwrap();
+            let core_alog = stream.clone_htod(&a_log).unwrap();
+            let core_dtb = stream.clone_htod(&dt_bias).unwrap();
+            let core_state = stream.clone_htod(&state_init).unwrap();
+            let core_out = stream.alloc_zeros::<f32>(n_v * hd).unwrap();
+
+            kernels
+                .launch_beta_decay(
+                    &stream,
+                    &chain_a,
+                    &chain_b,
+                    &chain_alog,
+                    &chain_dtb,
+                    &chain_beta,
+                    &chain_decay,
+                    n_v,
+                )
+                .expect("launch beta_decay");
+            kernels
+                .launch_expand_and_l2_normalize(&stream, &chain_qkv, &chain_expanded, n_k, n_v, hd)
+                .expect("launch expand");
+            kernels
+                .launch_recurrence_fused(
+                    &stream,
+                    &chain_expanded,
+                    &chain_beta,
+                    &chain_decay,
+                    &chain_state,
+                    &chain_out,
+                    hd,
+                    n_v,
+                )
+                .expect("launch fused recurrence");
+            kernels
+                .launch_recurrence_fused_expand(
+                    &stream,
+                    &core_qkv,
+                    &core_a,
+                    &core_b,
+                    &core_alog,
+                    &core_dtb,
+                    &core_state,
+                    &core_out,
+                    hd,
+                    n_v,
+                    n_k,
+                )
+                .expect("launch fused core");
+            stream.synchronize().expect("sync");
+            let mut host_chain = vec![0f32; n_v * hd * hd];
+            let mut host_core = vec![0f32; n_v * hd * hd];
+            let mut ochain = vec![0f32; n_v * hd];
+            let mut ocore = vec![0f32; n_v * hd];
+            stream.memcpy_dtoh(&chain_state, &mut host_chain).unwrap();
+            stream.memcpy_dtoh(&core_state, &mut host_core).unwrap();
+            stream.memcpy_dtoh(&chain_out, &mut ochain).unwrap();
+            stream.memcpy_dtoh(&core_out, &mut ocore).unwrap();
+            for i in 0..host_chain.len() {
+                assert!(
+                    host_chain[i].to_bits() == host_core[i].to_bits(),
+                    "zero-head state diverged at idx {i}: chain={:e} core={:e}",
+                    host_chain[i],
+                    host_core[i]
+                );
+            }
+            for i in 0..ochain.len() {
+                assert!(
+                    ochain[i].to_bits() == ocore[i].to_bits(),
+                    "zero-head output diverged at idx {i}: chain={:e} core={:e}",
+                    ochain[i],
+                    ocore[i]
+                );
+            }
+            eprintln!("[gdn_core_fused] zero-head edge bit-identical at ({n_k},{n_v},{hd})");
         }
     }
 
