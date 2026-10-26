@@ -13,6 +13,7 @@ riir-ai Bench 1004 (2026-10-26): the decode hold broke to **0.9730×** (ours 91.
 | 1. fused quantize-into-rotation (#395 twin) | NEGATIVE already-shipped — the K1–K5 rotation kernels ARE it (Bench-940, default-on 2026-09-19); census `RIIR_QUANTIZE_CENSUS=1` = 0 on the 4090 | 1125 (closed, HISTORY), falsifier `a2ebb37` |
 | 2. GDN core one-launch (beta/decay + expand/L2 + recurrence) | MEASURED NEGATIVE −3.5%/−2.1% — fused launch-bound neighbors INTO a compute-bound kernel; opt-in `RIIR_GDN_CORE_FUSED=1` default-OFF | Bench 898, `4132d94` |
 | 2'. 4→3 beta/decay + expand/L2 only | DIRECTION-POSITIVE 3/3 paired windows (~+0.6–1.0% e2e, −1.5% GPU busy), G1 exact ×6 windows; opt-in `RIIR_GDN_BETA_EXPAND_FUSED=1`, NOT promoted | Bench 899, `8aabe55` |
+| 2''. conv1d + beta/decay + expand (3→2, the Issue-1133 rung) | MEASURED-NULL 2/4 pairs (max +0.48%, pooled ≈0%), G1 exact everywhere — the dispatch saving is offset by the source-block occupancy loss; opt-in `RIIR_GDN_CONV_MERGE=1` default-OFF, no T4 row | Bench 905 |
 | prefill GLU-fused MMA (sibling lane) | kernel probe 1.258×/1.227×, G1 PASS; e2e owed | Bench 897, issue 1124 T2 |
 
 ## Tasks

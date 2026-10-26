@@ -4403,11 +4403,28 @@ fn dn_recurrence_fused_enabled() -> bool {
 /// untouched); any other value (including `=0`) reads OFF. The i1126
 /// one-launch core takes precedence when `RIIR_GDN_CORE_FUSED=1` is also
 /// armed (it skips both launches entirely).
+/// Issue 1133 rung: `RIIR_GDN_CONV_MERGE=1` arms the conv1d + beta/decay +
+/// expand/L2 merge (ONE launch replacing the conv + beta_expand pair); any
+/// other value (including `=0`) reads OFF. Precedence: the i1126 core skips
+/// everything; conv_merge supersedes the beta_expand arm (it includes the
+/// beta/decay+expand work) and its own posture gate (hd ∈ {64,128,256},
+/// (nk·hd)%256==0, (nv·hd)%256==0, nv%nk==0) falls back to the 899/incumbent
+/// chain when unmet.
 fn gdn_beta_expand_fused_enabled() -> bool {
     static ARMED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     *ARMED.get_or_init(|| {
         matches!(
             std::env::var("RIIR_GDN_BETA_EXPAND_FUSED").as_deref(),
+            Ok("1") | Ok("true") | Ok("on")
+        )
+    })
+}
+
+fn gdn_conv_merge_enabled() -> bool {
+    static ARMED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ARMED.get_or_init(|| {
+        matches!(
+            std::env::var("RIIR_GDN_CONV_MERGE").as_deref(),
             Ok("1") | Ok("true") | Ok("on")
         )
     })
@@ -4638,27 +4655,13 @@ fn forward_deltanet_layer(
         )?;
     }
 
-    // 5. Conv1d + SiLU (in-place on qkv, updates conv_state).
+    // 5. Conv1d + SiLU (in-place on qkv, updates conv_state) — SKIPPED when
+    // the Issue-1133 conv-merge rung owns it (the merged kernel below folds
+    // conv into the beta/decay+expand launch).
     let conv_state = acts.layer_states[layer_idx]
         .conv_state
         .as_ref()
         .expect("conv_state");
-    infra.deltanet.launch_conv1d(
-        &infra.stream,
-        &acts.qkv,
-        conv1d_w,
-        conv_state,
-        conv_dim,
-        kernel_size,
-    )?;
-
-    // 6–8. Beta/decay, expand+L2, recurrence — the decode core. Issue 1126:
-    // when armed (`RIIR_GDN_CORE_FUSED=1`) and at the fused-recurrence
-    // posture, the F32-fused match arm below collapses the THREE launches
-    // (beta_decay + expand_and_l2_normalize + recurrence_fused) into ONE
-    // (beta/decay + expand/L2 computed inline off the COMPACT qkv;
-    // bit-identical — see the kernel comment in cudarc_kernels/deltanet.rs).
-    // The incumbent chain stays the default and the demote hatch.
     let state = acts.layer_states[layer_idx]
         .deltanet_state
         .as_ref()
@@ -4668,16 +4671,67 @@ fn forward_deltanet_layer(
         && matches!(state, RecStateBuf::F32(_))
         && matches!(head_dim, 64 | 128 | 256)
         && n_v_heads.is_multiple_of(n_k_heads);
+    let conv_merge = gdn_conv_merge_enabled()
+        && !core_fused
+        && matches!(head_dim, 64 | 128 | 256)
+        && (n_k_heads * head_dim).is_multiple_of(256)
+        && (n_v_heads * head_dim).is_multiple_of(256)
+        && n_v_heads.is_multiple_of(n_k_heads);
+    if !conv_merge {
+        infra.deltanet.launch_conv1d(
+            &infra.stream,
+            &acts.qkv,
+            conv1d_w,
+            conv_state,
+            conv_dim,
+            kernel_size,
+        )?;
+    }
+
+    // 6–8. Beta/decay, expand+L2, recurrence — the decode core. Issue 1126:
+    // when armed (`RIIR_GDN_CORE_FUSED=1`) and at the fused-recurrence
+    // posture, the F32-fused match arm below collapses the THREE launches
+    // (beta_decay + expand_and_l2_normalize + recurrence_fused) into ONE
+    // (beta/decay + expand/L2 computed inline off the COMPACT qkv;
+    // (bit-identical — see the kernel comment in cudarc_kernels/deltanet.rs).
+    // The incumbent chain stays the default and the demote hatch.
     if !core_fused {
-        // Issue 1126 follow-up (Bench 898's named 4→3 rung): beta/decay +
-        // expand/L2 in ONE launch — launch-bound fused with launch-bound.
-        // The i1126 core put the L2 INSIDE the recurrence's warp blocks and
-        // lost (Bench 898); this keeps both bodies in the expand kernel's
-        // wide blocks and the recurrence kernel untouched. Bit-identical by
-        // construction (both bodies verbatim, disjoint outputs); gated
-        // empirically by the kernel-level bit-identity test + the real-model
-        // walk pin in the A/B.
-        if gdn_beta_expand_fused_enabled() && n_v_heads.is_multiple_of(n_k_heads) {
+        // Issue 1133 rung: conv1d + beta/decay + expand/L2 in ONE launch —
+        // the conv step above was skipped; this kernel consumes the RAW qkv
+        // and leaves it post-conv (in-place, same final buffer state as the
+        // chain). Launch-bound fused with launch-bound (the Bench-899 class);
+        // the recurrence below stays untouched. Bit-identical by construction
+        // (see the kernel comment); gated empirically by the kernel-level
+        // bit-identity test + the real-model walk pin in the A/B.
+        if conv_merge {
+            // The Bench-768 vacuous-guard lesson (the 899 reach line, kept):
+            // bit-identical outputs alone cannot distinguish the fused
+            // dispatch from a silently-unread env.
+            static REACH: std::sync::OnceLock<()> = std::sync::OnceLock::new();
+            if REACH.set(()).is_ok() {
+                eprintln!(
+                    "[conv_merge] REACH: fused dispatch live (n_k={n_k_heads}, n_v={n_v_heads}, hd={head_dim}, conv_dim={conv_dim}, ks={kernel_size})"
+                );
+            }
+            infra.deltanet.launch_conv_beta_decay_expand_fused(
+                &infra.stream,
+                &acts.qkv,
+                conv1d_w,
+                conv_state,
+                &acts.a_raw,
+                &acts.b_raw,
+                a_log,
+                dt_bias,
+                &acts.beta_buf,
+                &acts.decay_buf,
+                &acts.qkv_expanded,
+                conv_dim,
+                kernel_size,
+                n_k_heads,
+                n_v_heads,
+                head_dim,
+            )?;
+        } else if gdn_beta_expand_fused_enabled() && n_v_heads.is_multiple_of(n_k_heads) {
             // The Bench-768 vacuous-guard lesson: bit-identical outputs alone
             // cannot distinguish the fused dispatch from a silently-unread
             // env — the first-use line is the reach proof in the A/B logs.

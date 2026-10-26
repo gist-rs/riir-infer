@@ -258,6 +258,176 @@ extern "C" __global__ void beta_decay_expand_fused_f32(
 }
 
 // ---------------------------------------------------------------------------
+// Issue 1133 rung: conv1d + beta/decay + expand/L2 in ONE launch (the armed
+// chain conv1d -> beta_decay_expand_fused -> recurrence becomes
+// conv_beta_decay_expand -> recurrence). Launch-bound fused with
+// launch-bound — the Bench-899 class; the recurrence stays its own kernel
+// (the i1126 core's lesson kept).
+//
+// Bit-identity by construction (the Issue-940 law):
+// - conv: the incumbent shifts the state window THEN dots ascending k
+//   (state'[KS-1] = input). The identical product sequence accumulates in
+//   the identical order straight from the UNSHIFTED window:
+//   sum_{k<KS-1} state[k+1]*w[k] + input*w[KS-1] — same adds, same order.
+// - SiLU, beta/decay, expand bodies verbatim from their standalone kernels.
+// - The Q/K expand reads are staged through smem: each block computes the
+//   post-conv values of ITS OWN channels first (per-channel-private: own
+//   state row, own input element, own smem slot), one __syncthreads(), then
+//   the source-partitioned Q/K expand reads only the block's OWN staged
+//   channels. An out-head's source head is owned by exactly one block, so
+//   every `expanded` element has exactly one writer — no cross-block hazard.
+// - Requires (for the source partition to be block-local):
+//   head_dim in {64,128,256}, (n_k*hd) % 256 == 0, (n_v*hd) % 256 == 0,
+//   n_v % n_k == 0. The dispatcher refuses otherwise and falls back to the
+//   incumbent chain (the Issue-1124 posture-gate precedent).
+// ---------------------------------------------------------------------------
+
+extern "C" __global__ void conv_beta_decay_expand_fused_f32(
+    float* __restrict__ qkv,            // [conv_dim] raw GEMV output (in-place -> post-conv SiLU)
+    const float* __restrict__ weight,   // [conv_dim * kernel_size]
+    float* __restrict__ conv_state,     // [conv_dim * kernel_size] (sliding window)
+    const float* __restrict__ a_raw,    // [n_head]
+    const float* __restrict__ b_raw,    // [n_head]
+    const float* __restrict__ a_log,    // [n_head]
+    const float* __restrict__ dt_bias,  // [n_head]
+    float* __restrict__ beta_out,       // [n_head]
+    float* __restrict__ decay_out,      // [n_head]
+    float* __restrict__ expanded,       // [Q(n_v*hd) | K(n_v*hd) | V(n_v*hd)]
+    const int conv_dim,
+    const int kernel_size,
+    const int n_head,
+    const int n_k_heads,
+    const int n_v_heads,
+    const int head_dim)
+{
+    const int idx = blockIdx.x * blockDim.x + threadIdx.x;  // channel == thread
+    const int c0 = blockIdx.x * blockDim.x;                 // block's first channel
+    __shared__ float stage[256];
+
+    // Beta/decay on the leading threads (verbatim from beta_decay_f32; the
+    // fused-kernel pattern — n_head <= conv_dim always, so the leading
+    // threads of the conv grid cover it).
+    if (idx < n_head) {
+        float b_val = b_raw[idx];
+        beta_out[idx] = 1.0f / (1.0f + expf(-b_val));
+
+        float a_val = a_raw[idx] + dt_bias[idx];
+        float sp;
+        if (a_val > 20.0f) {
+            sp = a_val;
+        } else if (a_val < -20.0f) {
+            sp = 0.0f;
+        } else {
+            sp = logf(1.0f + expf(a_val));
+        }
+        decay_out[idx] = expf(a_log[idx] * sp);
+    }
+
+    // No early return before the barrier: phase 1 is guarded by `live`, every
+    // thread reaches __syncthreads(), phase 3 is a no-op for threads/blocks
+    // without owned work (the alignment gate makes tail threads impossible in
+    // practice — conv_dim is 256-aligned — but the safe form is free here).
+    const bool live = idx < conv_dim;
+    float raw = 0.0f;
+    int state_off = 0;
+    float post = 0.0f;
+
+    // Phase 1 — per-channel-private conv + state shift + in-place write +
+    // smem stage (+ the V copy, 1:1 channel->out-elem). Reads input[c] into
+    // a register BEFORE any write: the state append needs the RAW pre-conv
+    // value (the incumbent reads it before overwriting too).
+    if (live) {
+        raw = qkv[idx];
+        state_off = idx * kernel_size;
+        const int weight_off = idx * kernel_size;
+
+        // Ascending-k dot over the shifted window WITHOUT shifting first —
+        // identical accumulation order to conv1d_f32 (see the header comment).
+        float sum = 0.0f;
+        for (int k = 0; k < kernel_size - 1; k++) {
+            sum += conv_state[state_off + k + 1] * weight[weight_off + k];
+        }
+        sum += raw * weight[weight_off + kernel_size - 1];
+        post = sum / (1.0f + expf(-sum));  // SiLU verbatim
+
+        // State shift + append (per-channel-private row; ascending in-place
+        // shift reads ahead of its own writes, same as conv1d_f32).
+        for (int k = 0; k < kernel_size - 1; k++) {
+            conv_state[state_off + k] = conv_state[state_off + k + 1];
+        }
+        conv_state[state_off + kernel_size - 1] = raw;
+
+        qkv[idx] = post;
+        stage[threadIdx.x] = post;
+
+        // V copy: section 2 of `expanded` is 1:1 with the V channels.
+        const int vk_base = 2 * n_k_heads * head_dim;   // first V channel
+        const int vout_base = 2 * n_v_heads * head_dim; // first V out elem
+        if (idx >= vk_base) {
+            expanded[vout_base + (idx - vk_base)] = post;
+        }
+    }
+
+    __syncthreads();
+
+    if (!live) return;
+
+    // Phase 3 — Q/K expand, partitioned by SOURCE block: this block owns the
+    // section-σ source heads fully contained in [c0, c0+256) (requires the
+    // alignment gate; see the header comment). Each source head s serves
+    // out-heads {s, s+n_k, s+2*n_k, ...} < n_v. Elements are dealt STATICALLY
+    // (thread t takes e = t, t+256, ...) so all threads work in parallel —
+    // the first draft walked the element list with a counter and serialized
+    // one worker per block (measured −25% e2e, dev iteration 1). Each element
+    // computes its head's sq_sum over the staged values with the incumbent's
+    // per-element loop (same values the incumbent read from post-conv compact
+    // => same adds => same bits; zero-guard verbatim).
+    const int qk_expanded_block = n_v_heads * head_dim;
+    const int per_head = (n_v_heads / n_k_heads) * head_dim;
+    const int sec1_base = n_k_heads * head_dim; // section-1 source channels
+    int h_lo0 = c0 / head_dim;
+    if (h_lo0 < 0) h_lo0 = 0;
+    int h_hi0 = (c0 + 256) / head_dim;
+    if (h_hi0 > n_k_heads) h_hi0 = n_k_heads;
+    int h_lo1 = (c0 - sec1_base) / head_dim;
+    if (h_lo1 < 0) h_lo1 = 0;
+    int h_hi1 = (c0 + 256 - sec1_base) / head_dim;
+    if (h_hi1 > n_k_heads) h_hi1 = n_k_heads;
+    int h_cnt0 = h_hi0 - h_lo0;
+    if (h_cnt0 < 0) h_cnt0 = 0; // block entirely past the Q section
+    int h_cnt1 = h_hi1 - h_lo1;
+    if (h_cnt1 < 0) h_cnt1 = 0; // block entirely past the K section
+    const int total = (h_cnt0 + h_cnt1) * per_head;
+    for (int e = threadIdx.x; e < total; e += blockDim.x) {
+        const int hi = e / per_head;
+        const int within = e - hi * per_head;
+        int section, h;
+        if (hi < h_cnt0) {
+            section = 0;
+            h = h_lo0 + hi;
+        } else {
+            section = 1;
+            h = h_lo1 + hi - h_cnt0;
+        }
+        const int oh_idx = within / head_dim;
+        const int col = within - oh_idx * head_dim;
+        const int oh = h + oh_idx * n_k_heads;
+        const int src_chan = (section == 0 ? 0 : sec1_base) + h * head_dim - c0;
+        float sq_sum = 0.0f;
+        for (int c = 0; c < head_dim; c++) {
+            const float val = stage[src_chan + c];
+            sq_sum += val * val;
+        }
+        const int out_base = section * qk_expanded_block + oh * head_dim;
+        if (sq_sum > 0.0f) {
+            expanded[out_base + col] = stage[src_chan + col] * (1.0f / sqrtf(sq_sum));
+        } else {
+            expanded[out_base + col] = 0.0f;
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Gated DeltaNet recurrence (the hard part)
 // ---------------------------------------------------------------------------
 
@@ -1491,6 +1661,11 @@ pub struct DeltanetKernels {
     /// expand/L2 + V copy in ONE launch, the recurrence untouched.
     /// Bit-identical to the 2-launch chain — see the kernel comment.
     beta_decay_expand_fused: CudaFunction,
+    /// Issue 1133 rung: conv1d + beta/decay + expand/L2 in ONE launch —
+    /// the armed chain conv1d → beta_decay_expand_fused → recurrence
+    /// becomes ONE + recurrence. Bit-identical to the 2-launch chain
+    /// (unshifted-window conv reorder; see the kernel comment).
+    conv_beta_decay_expand_fused: CudaFunction,
     recurrence: CudaFunction,
     /// Issue 617: row-parallel recurrence. One warp per row, 2D grid.
     /// Bit-identical to `recurrence`; ~4-8× faster (no syncthreads).
@@ -1611,6 +1786,9 @@ impl DeltanetKernels {
         let beta_decay_expand_fused = module
             .load_function("beta_decay_expand_fused_f32")
             .map_err(|e| super::CudarcKernelError::Compile(format!("{e}")))?;
+        let conv_beta_decay_expand_fused = module
+            .load_function("conv_beta_decay_expand_fused_f32")
+            .map_err(|e| super::CudarcKernelError::Compile(format!("{e}")))?;
         let recurrence = module
             .load_function("recurrence_f32")
             .map_err(|e| super::CudarcKernelError::Compile(format!("{e}")))?;
@@ -1670,6 +1848,7 @@ impl DeltanetKernels {
             beta_decay,
             expand_l2,
             beta_decay_expand_fused,
+            conv_beta_decay_expand_fused,
             recurrence,
             recurrence_parallel,
             recurrence_fused_hd64,
@@ -1856,6 +2035,78 @@ impl DeltanetKernels {
                 .arg(decay_out)
                 .arg(compact)
                 .arg(expanded)
+                .arg(&n_head_i32)
+                .arg(&n_k_i32)
+                .arg(&n_v_i32)
+                .arg(&head_dim_i32)
+                .launch(cfg)
+                .map_err(|e| super::CudarcKernelError::Launch(e.to_string()))?;
+        }
+        Ok(())
+    }
+
+    /// Issue 1133 rung — conv1d + beta/decay + expand/L2 in ONE launch.
+    ///
+    /// Replaces `launch_conv1d` + `launch_beta_decay_expand_fused` on the
+    /// decode arm (the recurrence stays its own launch). Bit-identical to
+    /// the 2-launch chain — see the kernel comment (the unshifted-window
+    /// conv reorder keeps the exact accumulation order; the Q/K expand is
+    /// staged through smem partitioned by source block).
+    ///
+    /// Caller contract (the dispatch gate): `head_dim ∈ {64,128,256}`,
+    /// `(n_k·hd) % 256 == 0`, `(n_v·hd) % 256 == 0`, `n_v % n_k == 0` —
+    /// misaligned geometries must route to the incumbent chain.
+    #[allow(clippy::too_many_arguments)]
+    pub fn launch_conv_beta_decay_expand_fused(
+        &self,
+        stream: &CudaStream,
+        qkv: &cudarc::driver::safe::CudaSlice<f32>,
+        weight: &cudarc::driver::safe::CudaSlice<f32>,
+        conv_state: &cudarc::driver::safe::CudaSlice<f32>,
+        a_raw: &cudarc::driver::safe::CudaSlice<f32>,
+        b_raw: &cudarc::driver::safe::CudaSlice<f32>,
+        a_log: &cudarc::driver::safe::CudaSlice<f32>,
+        dt_bias: &cudarc::driver::safe::CudaSlice<f32>,
+        beta_out: &cudarc::driver::safe::CudaSlice<f32>,
+        decay_out: &cudarc::driver::safe::CudaSlice<f32>,
+        expanded: &cudarc::driver::safe::CudaSlice<f32>,
+        conv_dim: usize,
+        kernel_size: usize,
+        n_k_heads: usize,
+        n_v_heads: usize,
+        head_dim: usize,
+    ) -> Result<(), super::CudarcKernelError> {
+        debug_assert!(
+            n_v_heads.is_multiple_of(n_k_heads),
+            "n_v_heads ({n_v_heads}) must be a multiple of n_k_heads ({n_k_heads})"
+        );
+        let grid_x = (conv_dim as u32).div_ceil(256).max(1);
+        let cfg = LaunchConfig {
+            grid_dim: (grid_x, 1, 1),
+            block_dim: (256, 1, 1),
+            shared_mem_bytes: 0,
+        };
+        let conv_dim_i32 = conv_dim as i32;
+        let kernel_size_i32 = kernel_size as i32;
+        let n_head_i32 = n_v_heads as i32;
+        let n_k_i32 = n_k_heads as i32;
+        let n_v_i32 = n_v_heads as i32;
+        let head_dim_i32 = head_dim as i32;
+        unsafe {
+            stream
+                .launch_builder(&self.conv_beta_decay_expand_fused)
+                .arg(qkv)
+                .arg(weight)
+                .arg(conv_state)
+                .arg(a_raw)
+                .arg(b_raw)
+                .arg(a_log)
+                .arg(dt_bias)
+                .arg(beta_out)
+                .arg(decay_out)
+                .arg(expanded)
+                .arg(&conv_dim_i32)
+                .arg(&kernel_size_i32)
                 .arg(&n_head_i32)
                 .arg(&n_k_i32)
                 .arg(&n_v_i32)
@@ -3739,6 +3990,337 @@ mod tests {
                 );
             }
             eprintln!("[beta_decay_expand_fused] zero-head + softplus-branch edge bit-identical");
+        }
+    }
+
+    /// Issue 1133 rung — the conv1d + beta/decay + expand/L2 merge (ONE
+    /// launch) must be BIT-IDENTICAL to the incumbent 2-launch chain
+    /// (launch_conv1d → launch_beta_decay_expand_fused): the in-place qkv
+    /// buffer, the conv_state sliding window, beta, decay AND every expanded
+    /// element `.to_bits()`-equal. Covers the Bonsai-2 27B production shape
+    /// (n_k=16, n_v=48, hd=128, ks=4), a ks=8 off-shape (n_k=4, n_v=8,
+    /// hd=64), the zero-vector-head L2 sq_sum==0 guard, and all three
+    /// softplus ±20 branches via extreme a_raw values.
+    #[test]
+    fn test_conv_beta_decay_expand_fused_bit_identical_to_chain() {
+        let Some(_) = cuda_or_skip() else {
+            eprintln!("[skip] no CUDA device");
+            return;
+        };
+        let ctx = CudaContext::new(0).unwrap();
+        let stream = ctx.new_stream().unwrap();
+        let kernels = DeltanetKernels::new(ctx).expect("compile");
+
+        // (n_k, n_v, hd, ks): production Bonsai-2 27B + an off-shape. Both
+        // satisfy the dispatch gate ((nk·hd)%256==0 && (nv·hd)%256==0).
+        let geometries: [(usize, usize, usize, usize); 2] = [(16, 48, 128, 4), (4, 8, 64, 8)];
+        for &(n_k, n_v, hd, ks) in &geometries {
+            let conv_dim = 2 * n_k * hd + n_v * hd;
+            let compact_len = conv_dim; // [Q(n_k·hd)|K(n_k·hd)|V(n_v·hd)]
+            let expanded_len = 3 * n_v * hd;
+            let state_len = conv_dim * ks;
+            let mut seed: u64 = 0x1133_c0de_cafe_0001;
+            let mut next = || {
+                seed = seed
+                    .wrapping_mul(6364136223846793005)
+                    .wrapping_add(1442695040888963407);
+                ((seed >> 33) as f32 / u32::MAX as f32) * 2.0 - 1.0
+            };
+            let qkv_compact: Vec<f32> = (0..compact_len).map(|_| next()).collect();
+            let conv_w: Vec<f32> = (0..state_len).map(|_| next()).collect();
+            let conv_st: Vec<f32> = (0..state_len).map(|_| next()).collect();
+            let a_raw: Vec<f32> = (0..n_v).map(|_| next() * 2.0).collect();
+            let b_raw: Vec<f32> = (0..n_v).map(|_| next() * 2.0).collect();
+            let a_log: Vec<f32> = (0..n_v).map(|_| next() * 0.5).collect();
+            let dt_bias: Vec<f32> = (0..n_v).map(|_| next()).collect();
+
+            // INCUMBENT 2-launch chain workspace.
+            let chain_qkv = stream.clone_htod(&qkv_compact).unwrap();
+            let chain_state = stream.clone_htod(&conv_st).unwrap();
+            let chain_expanded = stream.alloc_zeros::<f32>(expanded_len).unwrap();
+            let chain_beta = stream.alloc_zeros::<f32>(n_v).unwrap();
+            let chain_decay = stream.alloc_zeros::<f32>(n_v).unwrap();
+            let chain_w = stream.clone_htod(&conv_w).unwrap();
+            let chain_a = stream.clone_htod(&a_raw).unwrap();
+            let chain_b = stream.clone_htod(&b_raw).unwrap();
+            let chain_alog = stream.clone_htod(&a_log).unwrap();
+            let chain_dtb = stream.clone_htod(&dt_bias).unwrap();
+            // FUSED workspace.
+            let fused_qkv = stream.clone_htod(&qkv_compact).unwrap();
+            let fused_state = stream.clone_htod(&conv_st).unwrap();
+            let fused_expanded = stream.alloc_zeros::<f32>(expanded_len).unwrap();
+            let fused_beta = stream.alloc_zeros::<f32>(n_v).unwrap();
+            let fused_decay = stream.alloc_zeros::<f32>(n_v).unwrap();
+            let fused_w = stream.clone_htod(&conv_w).unwrap();
+            let fused_a = stream.clone_htod(&a_raw).unwrap();
+            let fused_b = stream.clone_htod(&b_raw).unwrap();
+            let fused_alog = stream.clone_htod(&a_log).unwrap();
+            let fused_dtb = stream.clone_htod(&dt_bias).unwrap();
+
+            kernels
+                .launch_conv1d(&stream, &chain_qkv, &chain_w, &chain_state, conv_dim, ks)
+                .expect("launch chain conv1d");
+            kernels
+                .launch_beta_decay_expand_fused(
+                    &stream,
+                    &chain_a,
+                    &chain_b,
+                    &chain_alog,
+                    &chain_dtb,
+                    &chain_beta,
+                    &chain_decay,
+                    &chain_qkv,
+                    &chain_expanded,
+                    n_k,
+                    n_v,
+                    hd,
+                )
+                .expect("launch chain beta_decay_expand_fused");
+            kernels
+                .launch_conv_beta_decay_expand_fused(
+                    &stream,
+                    &fused_qkv,
+                    &fused_w,
+                    &fused_state,
+                    &fused_a,
+                    &fused_b,
+                    &fused_alog,
+                    &fused_dtb,
+                    &fused_beta,
+                    &fused_decay,
+                    &fused_expanded,
+                    conv_dim,
+                    ks,
+                    n_k,
+                    n_v,
+                    hd,
+                )
+                .expect("launch conv_beta_decay_expand_fused");
+            stream.synchronize().expect("sync");
+
+            let mut hqkv_chain = vec![0f32; compact_len];
+            let mut hstate_chain = vec![0f32; state_len];
+            let mut hbeta_chain = vec![0f32; n_v];
+            let mut hdecay_chain = vec![0f32; n_v];
+            let mut hexp_chain = vec![0f32; expanded_len];
+            let mut hqkv_fused = vec![0f32; compact_len];
+            let mut hstate_fused = vec![0f32; state_len];
+            let mut hbeta_fused = vec![0f32; n_v];
+            let mut hdecay_fused = vec![0f32; n_v];
+            let mut hexp_fused = vec![0f32; expanded_len];
+            stream.memcpy_dtoh(&chain_qkv, &mut hqkv_chain).unwrap();
+            stream.memcpy_dtoh(&chain_state, &mut hstate_chain).unwrap();
+            stream.memcpy_dtoh(&chain_beta, &mut hbeta_chain).unwrap();
+            stream.memcpy_dtoh(&chain_decay, &mut hdecay_chain).unwrap();
+            stream
+                .memcpy_dtoh(&chain_expanded, &mut hexp_chain)
+                .unwrap();
+            stream.memcpy_dtoh(&fused_qkv, &mut hqkv_fused).unwrap();
+            stream.memcpy_dtoh(&fused_state, &mut hstate_fused).unwrap();
+            stream.memcpy_dtoh(&fused_beta, &mut hbeta_fused).unwrap();
+            stream.memcpy_dtoh(&fused_decay, &mut hdecay_fused).unwrap();
+            stream
+                .memcpy_dtoh(&fused_expanded, &mut hexp_fused)
+                .unwrap();
+            for i in 0..compact_len {
+                assert!(
+                    hqkv_chain[i].to_bits() == hqkv_fused[i].to_bits(),
+                    "in-place qkv diverged at geom ({n_k},{n_v},{hd},ks{ks}) ch {i}: \
+                     chain={:e} fused={:e}",
+                    hqkv_chain[i],
+                    hqkv_fused[i]
+                );
+            }
+            for i in 0..state_len {
+                assert!(
+                    hstate_chain[i].to_bits() == hstate_fused[i].to_bits(),
+                    "conv_state diverged at geom ({n_k},{n_v},{hd},ks{ks}) idx {i}: \
+                     chain={:e} fused={:e}",
+                    hstate_chain[i],
+                    hstate_fused[i]
+                );
+            }
+            for i in 0..n_v {
+                assert!(
+                    hbeta_chain[i].to_bits() == hbeta_fused[i].to_bits(),
+                    "beta diverged at geom ({n_k},{n_v},{hd},ks{ks}) head {i}: \
+                     chain={:e} fused={:e}",
+                    hbeta_chain[i],
+                    hbeta_fused[i]
+                );
+                assert!(
+                    hdecay_chain[i].to_bits() == hdecay_fused[i].to_bits(),
+                    "decay diverged at geom ({n_k},{n_v},{hd},ks{ks}) head {i}: \
+                     chain={:e} fused={:e}",
+                    hdecay_chain[i],
+                    hdecay_fused[i]
+                );
+            }
+            for i in 0..expanded_len {
+                assert!(
+                    hexp_chain[i].to_bits() == hexp_fused[i].to_bits(),
+                    "expanded diverged at geom ({n_k},{n_v},{hd},ks{ks}) idx {i}: \
+                     chain={:e} fused={:e}",
+                    hexp_chain[i],
+                    hexp_fused[i]
+                );
+            }
+            eprintln!(
+                "[conv_beta_decay_expand_fused] bit-identical to the 2-launch chain at ({n_k},{n_v},{hd},ks{ks})"
+            );
+        }
+
+        // Edge block: zero-vector heads (the L2 sq_sum==0 guard must stay
+        // exact) + all three softplus branches (a_raw at −25 / +25 / 0) —
+        // both arms share identical inputs and expressions, so any branch
+        // transcription typo diverges loudly here.
+        {
+            let (n_k, n_v, hd, ks) = (4usize, 8usize, 64usize, 4usize);
+            let conv_dim = 2 * n_k * hd + n_v * hd;
+            let expanded_len = 3 * n_v * hd;
+            let state_len = conv_dim * ks;
+            let mut qkv_compact = vec![0.25f32; conv_dim];
+            for i in 0..hd {
+                qkv_compact[i] = 0.0; // Q head 0 → zero source vector
+                qkv_compact[n_k * hd + 2 * hd + i] = 0.0; // K head 2 → zero source vector
+            }
+            let mut a_raw = vec![0.3f32; n_v];
+            a_raw[1] = -25.0; // softplus branch 2 (a_val < −20 → sp = 0)
+            a_raw[2] = 25.0; // softplus branch 1 (a_val > +20 → sp = a_val)
+            a_raw[3] = 0.0; // softplus branch 3 (log1p path)
+            let b_raw = vec![-0.7f32; n_v];
+            let a_log = vec![0.1f32; n_v];
+            let dt_bias = vec![0.05f32; n_v];
+            let conv_w: Vec<f32> = (0..state_len).map(|i| (i as f32 * 0.001) - 0.1).collect();
+            let conv_st: Vec<f32> = (0..state_len).map(|i| (i as f32 * 0.01) - 0.5).collect();
+
+            let chain_qkv = stream.clone_htod(&qkv_compact).unwrap();
+            let chain_state = stream.clone_htod(&conv_st).unwrap();
+            let chain_expanded = stream.alloc_zeros::<f32>(expanded_len).unwrap();
+            let chain_beta = stream.alloc_zeros::<f32>(n_v).unwrap();
+            let chain_decay = stream.alloc_zeros::<f32>(n_v).unwrap();
+            let chain_w = stream.clone_htod(&conv_w).unwrap();
+            let chain_a = stream.clone_htod(&a_raw).unwrap();
+            let chain_b = stream.clone_htod(&b_raw).unwrap();
+            let chain_alog = stream.clone_htod(&a_log).unwrap();
+            let chain_dtb = stream.clone_htod(&dt_bias).unwrap();
+            let fused_qkv = stream.clone_htod(&qkv_compact).unwrap();
+            let fused_state = stream.clone_htod(&conv_st).unwrap();
+            let fused_expanded = stream.alloc_zeros::<f32>(expanded_len).unwrap();
+            let fused_beta = stream.alloc_zeros::<f32>(n_v).unwrap();
+            let fused_decay = stream.alloc_zeros::<f32>(n_v).unwrap();
+            let fused_w = stream.clone_htod(&conv_w).unwrap();
+            let fused_a = stream.clone_htod(&a_raw).unwrap();
+            let fused_b = stream.clone_htod(&b_raw).unwrap();
+            let fused_alog = stream.clone_htod(&a_log).unwrap();
+            let fused_dtb = stream.clone_htod(&dt_bias).unwrap();
+
+            kernels
+                .launch_conv1d(&stream, &chain_qkv, &chain_w, &chain_state, conv_dim, ks)
+                .expect("launch edge chain conv1d");
+            kernels
+                .launch_beta_decay_expand_fused(
+                    &stream,
+                    &chain_a,
+                    &chain_b,
+                    &chain_alog,
+                    &chain_dtb,
+                    &chain_beta,
+                    &chain_decay,
+                    &chain_qkv,
+                    &chain_expanded,
+                    n_k,
+                    n_v,
+                    hd,
+                )
+                .expect("launch edge chain beta_decay_expand_fused");
+            kernels
+                .launch_conv_beta_decay_expand_fused(
+                    &stream,
+                    &fused_qkv,
+                    &fused_w,
+                    &fused_state,
+                    &fused_a,
+                    &fused_b,
+                    &fused_alog,
+                    &fused_dtb,
+                    &fused_beta,
+                    &fused_decay,
+                    &fused_expanded,
+                    conv_dim,
+                    ks,
+                    n_k,
+                    n_v,
+                    hd,
+                )
+                .expect("launch edge conv_beta_decay_expand_fused");
+            stream.synchronize().expect("sync");
+
+            let mut hexp_chain = vec![0f32; expanded_len];
+            let mut hexp_fused = vec![0f32; expanded_len];
+            let mut hqkv_chain = vec![0f32; conv_dim];
+            let mut hqkv_fused = vec![0f32; conv_dim];
+            let mut hstate_chain = vec![0f32; state_len];
+            let mut hstate_fused = vec![0f32; state_len];
+            let mut hbeta_chain = vec![0f32; n_v];
+            let mut hbeta_fused = vec![0f32; n_v];
+            let mut hdecay_chain = vec![0f32; n_v];
+            let mut hdecay_fused = vec![0f32; n_v];
+            stream
+                .memcpy_dtoh(&chain_expanded, &mut hexp_chain)
+                .unwrap();
+            stream
+                .memcpy_dtoh(&fused_expanded, &mut hexp_fused)
+                .unwrap();
+            stream.memcpy_dtoh(&chain_qkv, &mut hqkv_chain).unwrap();
+            stream.memcpy_dtoh(&fused_qkv, &mut hqkv_fused).unwrap();
+            stream.memcpy_dtoh(&chain_state, &mut hstate_chain).unwrap();
+            stream.memcpy_dtoh(&fused_state, &mut hstate_fused).unwrap();
+            stream.memcpy_dtoh(&chain_beta, &mut hbeta_chain).unwrap();
+            stream.memcpy_dtoh(&fused_beta, &mut hbeta_fused).unwrap();
+            stream.memcpy_dtoh(&chain_decay, &mut hdecay_chain).unwrap();
+            stream.memcpy_dtoh(&fused_decay, &mut hdecay_fused).unwrap();
+            for i in 0..conv_dim {
+                assert!(
+                    hqkv_chain[i].to_bits() == hqkv_fused[i].to_bits(),
+                    "edge qkv diverged at ch {i}: chain={:e} fused={:e}",
+                    hqkv_chain[i],
+                    hqkv_fused[i]
+                );
+            }
+            for i in 0..state_len {
+                assert!(
+                    hstate_chain[i].to_bits() == hstate_fused[i].to_bits(),
+                    "edge conv_state diverged at idx {i}: chain={:e} fused={:e}",
+                    hstate_chain[i],
+                    hstate_fused[i]
+                );
+            }
+            for i in 0..n_v {
+                assert!(
+                    hbeta_chain[i].to_bits() == hbeta_fused[i].to_bits(),
+                    "edge beta diverged at head {i}: chain={:e} fused={:e}",
+                    hbeta_chain[i],
+                    hbeta_fused[i]
+                );
+                assert!(
+                    hdecay_chain[i].to_bits() == hdecay_fused[i].to_bits(),
+                    "edge decay diverged at head {i}: chain={:e} fused={:e}",
+                    hdecay_chain[i],
+                    hdecay_fused[i]
+                );
+            }
+            for i in 0..expanded_len {
+                assert!(
+                    hexp_chain[i].to_bits() == hexp_fused[i].to_bits(),
+                    "edge expanded diverged at idx {i}: chain={:e} fused={:e}",
+                    hexp_chain[i],
+                    hexp_fused[i]
+                );
+            }
+            eprintln!(
+                "[conv_beta_decay_expand_fused] zero-head + softplus-branch edge bit-identical"
+            );
         }
     }
 
