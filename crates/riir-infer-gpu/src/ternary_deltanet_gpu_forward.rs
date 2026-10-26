@@ -2126,11 +2126,29 @@ static DECODE_STAGE_MASK: std::sync::atomic::AtomicU32 =
     std::sync::atomic::AtomicU32::new(DECODE_STAGE_ALL);
 
 /// Decode stage class names, indexed by bit position in [`DECODE_STAGE_MASK`].
-pub const DECODE_STAGE_NAMES: [&str; 5] =
-    ["input_norm", "deltanet", "attention", "mid_norm", "ffn"];
+/// Bits 5-8 are the deltanet SUB-class census (Bench 1005's next probe):
+/// they refine stage bit 1 (deltanet) and are only consulted when bit 1 is
+/// set — masking bit 1 still kills the whole stage on every caller path.
+pub const DECODE_STAGE_NAMES: [&str; 9] = [
+    "input_norm",
+    "deltanet",
+    "attention",
+    "mid_norm",
+    "ffn",
+    "gdn_proj",
+    "gdn_prerec",
+    "gdn_recurrence",
+    "gdn_outproj",
+];
 
 /// All decode stage classes enabled — the shipping path.
-pub const DECODE_STAGE_ALL: u32 = (1u32 << 5) - 1;
+pub const DECODE_STAGE_ALL: u32 = (1u32 << 9) - 1;
+
+/// Deltanet sub-class census bits (bits 5-8; see [`DECODE_STAGE_NAMES`]).
+pub const DECODE_STAGE_GDN_PROJ: u32 = 5;
+pub const DECODE_STAGE_GDN_PREREC: u32 = 6;
+pub const DECODE_STAGE_GDN_RECURRENCE: u32 = 7;
+pub const DECODE_STAGE_GDN_OUTPROJ: u32 = 8;
 
 /// See [`DECODE_STAGE_MASK`]. Bit `i` enables [`DECODE_STAGE_NAMES`]`[i]`.
 pub fn set_decode_stage_mask(mask: u32) {
@@ -2144,6 +2162,14 @@ pub fn set_decode_stage_mask(mask: u32) {
 #[inline]
 fn decode_stage_on(bit: u32) -> bool {
     DECODE_STAGE_MASK.load(std::sync::atomic::Ordering::Relaxed) & (1u32 << bit) != 0
+}
+
+/// Whether deltanet sub-class `bit` (bits 5-8) runs: the stage bit (1) must
+/// be on AND the sub-bit. Masking bit 1 alone still strips the whole stage
+/// on every caller path, exactly as before this census existed.
+#[inline]
+fn gdn_subclass_on(bit: u32) -> bool {
+    decode_stage_on(1) && decode_stage_on(bit)
 }
 
 // ── Issue 831 (a): split-K decode attention toggle ───────────────────────
@@ -5487,6 +5513,7 @@ impl TernaryDeltanetGpuForward {
         let z_dim = n_v_heads * head_dim;
         let n_k_heads = self.config.deltanet_linear_n_heads;
         let folded = self.rot_tables.is_some();
+        if gdn_subclass_on(DECODE_STAGE_GDN_PROJ) {
         if folded {
             unsafe {
                 GemvTernaryCubeCL::launch::<ActiveRuntime>(
@@ -5537,10 +5564,12 @@ impl TernaryDeltanetGpuForward {
             }
         }
 
+        }
         let conv_state = self.conv_states[layer_idx]
             .as_ref()
             .expect("conv_state for DeltaNet layer");
 
+        if gdn_subclass_on(DECODE_STAGE_GDN_PREREC) {
         // Issue 764 T2 (GDN fusion lane): when the runtime toggle is on and
         // the geometry fits, ONE fused dispatch replaces the four below
         // (Split4 + Conv1d + BetaDecay + ExpandAndL2) — −3 launches per GDN
@@ -5643,6 +5672,9 @@ impl TernaryDeltanetGpuForward {
             }
         }
 
+        }
+
+        if gdn_subclass_on(DECODE_STAGE_GDN_RECURRENCE) {
         // 8. Recurrence: update state, read output
         let state = self.deltanet_states[layer_idx]
             .as_ref()
@@ -5691,6 +5723,9 @@ impl TernaryDeltanetGpuForward {
             }
         }
 
+        }
+
+        if gdn_subclass_on(DECODE_STAGE_GDN_OUTPROJ) {
         // 9+10. Fused per-head RMSNorm + z-gating (Issue 642 F6).
         //    Replaces two separate dispatches (RmsNormBatched + ZGating) with
         //    one fused kernel. Normalizes each head of recurrent_out with
@@ -5819,6 +5854,7 @@ impl TernaryDeltanetGpuForward {
                 gdn_gemv_in,
                 self.tmp.clone(),
             );
+        }
         }
     }
 
