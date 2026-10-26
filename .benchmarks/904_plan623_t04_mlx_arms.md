@@ -56,8 +56,9 @@ Both boxes run the same copy (rsync twin).
 | arm | pp512 t/s | tg128 t/s | tg ms median | source |
 |---|---|---|---|---|
 | MLX 1-box (bmo) | **357.3** | **58.1** | 17.217 | `plan623_mlx_1box_bench.py`, greedy |
+| MLX 1-box TTFT (bmo) | pp4096 **1005.3** | — | — | same script, I623_PP=4096; **pp32768 REFUSED by Metal** (single-buffer max 62.6 GB < the 103 GB intermediate — stock-MLX 32k prefill N/A without chunked prefill; its own finding) |
 | llama.cpp solo (bmo), Bench 900 | 1087.5 | 60.9 | — | prism-b10787, PQ2_0 |
-| ratio MLX/llama.cpp | 0.33× | **0.95×** | | |
+| ratio MLX/llama.cpp | 0.33× (512) / 0.92× (4k) | **0.95×** | | |
 
 Quant postures DIFFER (2-bit affine+hadamard pack vs PQ2_0 GGUF) — the rows
 are plan-internal comparability, not an equated quant study. Decode parity at
