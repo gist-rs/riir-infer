@@ -1,6 +1,6 @@
 # Issue 1124: prefill GLU-into-GEMM fusion — interleaved gate/up rows, single accumulator, write-back GLU (llama.cpp #29948 distill)
 
-**Status:** Open — filed 2026-10-26 (4090 box, online-distill lane) from
+**Status:** T1 LANDED 2026-10-26 (4090, kernel probe 1.26×/1.23×, bit-identity GATE PASS) — T2 (e2e GOAT) armed; filed 2026-10-26 from
 [llama.cpp #29948](https://github.com/ggml-org/llama.cpp/pull/29948) (merged 2026-10-25,
 `c49edf0a`, "CUDA: fuse FFN gate/up matmuls and GLU in MMQ with interleaved gate/up rows").
 No plan opens until a session can run the build+bench battery on a quiet box; this issue
@@ -80,15 +80,51 @@ Honest caveats:
 
 ## Tasks
 
-- [ ] **T1 (POC, env-gated).** Interleaved gate/up loader + single-accumulator MMA
-  with SwiGLU-in-write-back for the cudarc `mma.sync` prefill path behind a new env
-  (default OFF), gated to the Bench-720 posture (`QuantDiv::Full` + `FoldMode::Fused`
-  + `MmaTile::Tm64`, `n % 128 == 0`, `mlp % 128 == 0`). Bit-identity gate: full-model
-  FNV pins byte-identical (the fused SwiGLU op order must match the standalone
-  kernel's, including the variant-family selection).
+- [x] **T1 (POC, env-gated). LANDED 2026-10-26 — shipped BETTER than filed.** The
+  filed shape (a bespoke fused kernel with a bespoke accumulator pairing) was
+  REPLACED by the truer #29948 port after reading the v11gu prior art: the
+  gate/up weight rows are INTERLEAVED in 8-row chunks at mirror-build time
+  (`pack_bitplanes_to_q2_interleaved_gate_up` +
+  `interleave_gate_up_group_scales`, `prefill_cuda_mma.rs`) so the **v10t body
+  runs VERBATIM** — each m16n8 fragment's row halves (c0/c1 at g_id, c2/c3 at
+  g_id+8) are then the GATE and UP dots of the SAME hid row, which is exactly
+  the single-accumulator trick: no second accumulator set, no Bench-895
+  register cliff. The GLU is applied IN the transposed staging pass from
+  registers (`GEMM_BODY_V10T_GLU_Q8`, `gemm_ternary_i8_mma_v6_src.rs`): the
+  scale multiply hits BOTH projections BEFORE the sigmoid in the standalone
+  kernel's op order, `sig = div.full(1.0f + __expf(0.0f - g))` — the Bench-721
+  canonical forms hardcoded, so the output is bit-identical to (v10t pair +
+  swiglu_ffn_e1_d1) by construction. Env `RIIR_PREFILL_FFN_GLU`
+  ("1"/"true"/"on", DEFAULT OFF) + the dispatch posture (fmt route packed
+  mirrors, `mlp % 128 == 0`); the fused path skips the gate/up f32 staging
+  grows and the SwiGLU launch (one launch per FFN gate/up pair, hid slab
+  direct). Failure degradation: mirror build failure / shape mismatch / env
+  off → the incumbent pair path byte-identical; a mid-block launch error →
+  the whole block falls to CubeCL bit-safe (the existing contract).
+  - **Unit gate (G1)**: `v10tglu_matches_v10t_pair_plus_swiglu_bitwise` —
+    two shapes (256/256/130 ragged; 128/384/257 third-group) × distinct
+    fixtures × the REAL standalone SwiGLU kernel as reference (compiled from
+    FFN_CUDA_SRC): **0 bit-diffs**, PASS. Strict fold refuses loud (only
+    Fused is instantiated — the FFN block's posture).
+  - **Kernel probe (G2, level 0)**: `q8_gemm_v10tglu_perf_ab_ffn`, league FFN
+    shapes (m=17408, n=5120), release, interleaved ×9 medians, 4090,
+    GPU-quiet at launch (11% util, no compute apps — desktop class only,
+    the exempt set): **regs=128, local_bytes=0** (the Bench-895 spill cliff
+    dodged); p=2048: 2.502 → 1.989 ms = **1.258×**; p=4096: 5.255 → 4.283 ms
+    = **1.227×**. The incumbent cell reads ≈ Bench-895's pair (1.867) +
+    SwiGLU (~0.6) ✓ consistent; the win is exactly the filed mechanism
+    (delete the SwiGLU pass + halve output slabs), untouched by the
+    Bench-895 refutation (which priced the B-stage share, not the write-back).
+    Single-window kernel-level probe — the T2 e2e battery owns the promote
+    decision. Bench 897.
 - [ ] **T2 (e2e GOAT).** pp512/pp2048/pp4096 A/B vs the incumbent at the league
-  posture, verified-idle, PROVENANCE quoted, ×2 windows. Promote bar per the
-  Feature Flag Discipline; demote the loser either way.
+  posture (`RIIR_PREFILL_FFN_GLU=1` vs unset, everything else pinned),
+  verified-idle, PROVENANCE quoted, ×2 windows. Promote bar per the
+  Feature Flag Discipline; demote the loser either way. VRAM note: the armed
+  route builds the interleaved slab ALONGSIDE the pair mirrors (+44.6 MB at
+  the 27B FFN shape) — a promotion would stop building the pair mirrors for
+  gate/up (the fused slab replaces them), halving that overhead; measure the
+  armed-state cost first.
 - [ ] **T3 (kernel_opt rider).** The tile-order law (column-tiles-innermost when
   weight footprint > L2) + the single-accumulator GLU write-back are minable as
   kernel_opt rules — route through the refine mining lane (do NOT mine here; this

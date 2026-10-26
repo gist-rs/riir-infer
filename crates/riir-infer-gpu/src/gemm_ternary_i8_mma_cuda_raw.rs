@@ -2397,6 +2397,15 @@ pub struct GemmTernaryI8MmaCuda {
     #[cfg(feature = "prefill_mmq_v2")]
     #[cfg_attr(not(test), allow(dead_code))]
     pub(crate) gemm_tm128v10t_q8_nodecode: CudaFunction,
+    /// Issue 1124 T1 — the SwiGLU-in-write-back fused gate+up GEMM (the
+    /// llama.cpp #29948 distill): the v10t body verbatim over a row-interleaved
+    /// gate+up weight mirror, GLU applied in the transposed staging pass.
+    /// One launch per FFN gate/up pair + hid slab direct; bit-identical to
+    /// (two v10t launches + the standalone SwiGLU kernel) by construction.
+    /// Fused-fold only (the FFN block's bit-identity posture); `m` is the HID
+    /// row count, `m % 64 == 0` at launch.
+    #[cfg(feature = "prefill_mmq_v2")]
+    gemm_tm128v10tglu_q8_fused: CudaFunction,
     #[cfg(feature = "prefill_mmq_v2")]
     _mmq_v2_module: Arc<CudaModule>,
     _module: Arc<CudaModule>,
@@ -2678,6 +2687,24 @@ pub fn mmq_gu_mode() -> u8 {
     })
 }
 
+/// Issue 1124 T1 — the SwiGLU-in-write-back fused gate+up prefill arm:
+/// `RIIR_PREFILL_FFN_GLU` ("1"/"true"/"on"; DEFAULT OFF). When armed AND the
+/// fmt route supplies packed mirrors AND `mlp % 128 == 0`, the FFN block's
+/// gate+up pair + standalone SwiGLU collapse into ONE interleaved-row
+/// `v10tglu` launch (the llama.cpp #29948 distill): single accumulator (the
+/// v10t body verbatim over a row-interleaved weight mirror — no Bench-895
+/// register cliff), GLU applied in the transposed staging pass from
+/// registers, HALF the output slabs written, one launch deleted. Moves no
+/// numerics: bit-identical to the pair+swiglu triple by construction (unit
+/// gate asserts 0 bit-diffs); the knob off is byte-identical routing.
+#[cfg(feature = "prefill_mmq_v2")]
+pub fn ffn_glu_fused_enabled() -> bool {
+    static K: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *K.get_or_init(|| {
+        std::env::var("RIIR_PREFILL_FFN_GLU").is_ok_and(|s| matches!(s.trim(), "1" | "true" | "on"))
+    })
+}
+
 impl GemmTernaryI8MmaCuda {
     /// Own context + stream (the `TernaryGemmCudaRaw::new()` precedent) —
     /// lets integration tests construct the stack without importing cudarc
@@ -2805,6 +2832,7 @@ impl GemmTernaryI8MmaCuda {
             gemm_tm128v11gq_q8_fused,
             gemm_tm128v11gq_q8_strict,
             gemm_tm128v10t_q8_nodecode,
+            gemm_tm128v10tglu_q8_fused,
             _mmq_v2_module,
         ) = {
             let v6_ptx = cudarc::nvrtc::compile_ptx_with_opts(
@@ -2902,6 +2930,7 @@ impl GemmTernaryI8MmaCuda {
                 load_v6("gemm_i8_mma_tm128v11gq_q8_strict")?,
             );
             let v10t_nodecode = load_v6("gemm_i8_mma_tm128v10t_q8_nodecode")?;
+            let v10tglu_fused = load_v6("gemm_i8_mma_tm128v10tglu_q8_fused")?;
             // v6t's B slab is 128 toks: 16384 + 2*128*36*4 = 53,248 B, and
             // v6d adds the second A stage: 69,632 B — both over the 48 KB
             // default (v6's 34,816 B is not). The ldmatrix twins share v6t's
@@ -2969,6 +2998,12 @@ impl GemmTernaryI8MmaCuda {
                     &v10t_nodecode,
                     2 * 128 * 12 * 4 + 2 * 128 * 36 * 4 + 2 * 128 * 4,
                 ),
+                // v10tglu (Issue 1124 T1): v10t's smem exactly — the GLU
+                // epilogue reuses b_buf0 as the single staged slab.
+                (
+                    &v10tglu_fused,
+                    2 * 128 * 12 * 4 + 2 * 128 * 36 * 4 + 2 * 128 * 4,
+                ),
             ] {
                 f.set_attribute(
                     cudarc::driver::sys::CUfunction_attribute_enum::CU_FUNC_ATTRIBUTE_MAX_DYNAMIC_SHARED_SIZE_BYTES,
@@ -3018,6 +3053,7 @@ impl GemmTernaryI8MmaCuda {
                 v11gq_fused,
                 v11gq_strict,
                 v10t_nodecode,
+                v10tglu_fused,
                 v6_module,
             )
         };
@@ -3142,6 +3178,8 @@ impl GemmTernaryI8MmaCuda {
             gemm_tm128v11gq_q8_strict,
             #[cfg(feature = "prefill_mmq_v2")]
             gemm_tm128v10t_q8_nodecode,
+            #[cfg(feature = "prefill_mmq_v2")]
+            gemm_tm128v10tglu_q8_fused,
             #[cfg(feature = "prefill_mmq_v2")]
             _mmq_v2_module,
             _module: module,
@@ -4149,6 +4187,92 @@ impl GemmTernaryI8MmaCuda {
         let cfg = LaunchConfig {
             grid_dim: (m.div_ceil(128) as u32, p.div_ceil(64) as u32, 1),
             block_dim: (256, 1, 1),
+            shared_mem_bytes: smem,
+        };
+        unsafe {
+            stream
+                .launch_builder(func)
+                .arg(packed)
+                .arg(group_scale)
+                .arg(&scratch.q_hi_w)
+                .arg(&scratch.s_t)
+                .arg(out)
+                .arg(&m_i)
+                .arg(&n_i)
+                .arg(&p_i)
+                .arg(&wpr_i)
+                .arg(&groups_i)
+                .launch(cfg)
+                .map_err(|e| GemmI8MmaError::Launch(e.to_string()))?;
+        }
+        Ok(())
+    }
+
+    /// Issue 1124 T1 — the SwiGLU-in-write-back fused gate+up GEMM
+    /// (`gemm_i8_mma_tm128v10tglu_q8_fused`, Fused-fold only — the FFN
+    /// block's bit-identity posture; `Strict` refuses loud rather than
+    /// silently compiling a second numerics twin). `packed`/`group_scale`
+    /// are the ROW-INTERLEAVED gate+up mirror (`m2 = 2·m` rows; gate row r
+    /// at `(r/8)*16 + r%8`, up row r at `+8` — see
+    /// [`crate::prefill_cuda_mma::pack_bitplanes_to_q2_interleaved_gate_up`]);
+    /// `m` is the HID row count, `out` the `[p * m]` hid slab. One launch
+    /// replaces (two v10t launches + the standalone SwiGLU kernel) and is
+    /// bit-identical to that triple by construction (the unit gate pins
+    /// 0 bit-diffs).
+    ///
+    /// # Errors
+    /// `n % 128 != 0`, `m % 64 != 0` (the interleaved block covers 64 hid
+    /// rows), `p == 0`, or a `Strict` fold → [`GemmI8MmaError::Launch`].
+    #[cfg(feature = "prefill_mmq_v2")]
+    #[allow(clippy::too_many_arguments)]
+    pub fn launch_gemm_q8_v10tglu(
+        &self,
+        stream: &CudaStream,
+        packed: &CudaSlice<u32>,
+        group_scale: &CudaSlice<f32>,
+        scratch: &GemmI8MmaScratch,
+        out: &CudaSlice<f32>,
+        m: usize,
+        n: usize,
+        p: usize,
+        fold: FoldMode,
+    ) -> Result<(), GemmI8MmaError> {
+        if !n.is_multiple_of(128) {
+            return Err(GemmI8MmaError::Launch(
+                "q8_v10tglu: n must be a multiple of 128 (GROUP_COLS)".into(),
+            ));
+        }
+        if !m.is_multiple_of(64) {
+            return Err(GemmI8MmaError::Launch(
+                "q8_v10tglu: m (hid) must be a multiple of 64 — the interleaved \
+                 128-row block covers 64 hid rows"
+                    .into(),
+            ));
+        }
+        if p == 0 {
+            return Err(GemmI8MmaError::Launch("q8_v10tglu: p must be >= 1".into()));
+        }
+        let func = match fold {
+            FoldMode::Fused => &self.gemm_tm128v10tglu_q8_fused,
+            FoldMode::Strict => {
+                return Err(GemmI8MmaError::Launch(
+                    "q8_v10tglu: only FoldMode::Fused is instantiated — the fused \
+                     SwiGLU epilogue hardcodes the Bench-721 canonical forms, which \
+                     are the Fused-posture values"
+                        .into(),
+                ));
+            }
+        };
+        let (m_i, n_i, p_i) = (m as i32, n as i32, p as i32);
+        let wpr_i = (n / 16) as i32;
+        let groups_i = (n / 128) as i32;
+        // v10t's smem exactly (the GLU epilogue reuses b_buf0 as the slab).
+        let smem = (2 * 128 * 12 * 4 + 2 * 128 * 36 * 4 + 2 * 128 * 4) as u32;
+        let cfg = LaunchConfig {
+            // grid.x over the HID space: each 128-interleaved-row block
+            // covers 64 hid rows.
+            grid_dim: (m.div_ceil(64) as u32, p.div_ceil(128) as u32, 1),
+            block_dim: (512, 1, 1),
             shared_mem_bytes: smem,
         };
         unsafe {
@@ -6346,6 +6470,400 @@ mod tests {
                     d1, 0,
                     "{fold:?}: {name} slab1 must be bit-identical to v10t"
                 );
+            }
+        }
+    }
+
+    /// Issue 1124 T1 — the fused SwiGLU-in-write-back GEMM differential:
+    /// `launch_gemm_q8_v10tglu` over the ROW-INTERLEAVED gate+up mirror must
+    /// equal (v10t gate slab ‖ v10t up slab → `swiglu_ffn_e1_d1`) BIT-exactly
+    /// per hid element. The reference SwiGLU is the REAL standalone kernel
+    /// (compiled here from the FFN module source — `__expf`/`div.full` are
+    /// not reproducible host-side); the fused epilogue hardcodes the same
+    /// canonical forms in the same op order, so 0 bit-diffs is the
+    /// construction claim under test. Two shapes: the ragged p=130 tail AND
+    /// a third-group n=384 (the tok clamp + the grid.x hid-row mapping).
+    #[cfg(all(
+        feature = "ternary_gemv_cuda_raw",
+        feature = "ternary_gemm_batched",
+        feature = "cubecl_runtime",
+        feature = "prefill_mmq_v2",
+        not(target_os = "macos")
+    ))]
+    #[test]
+    fn v10tglu_matches_v10t_pair_plus_swiglu_bitwise() {
+        let Some(()) = cuda_or_skip() else {
+            eprintln!("SKIP — no CUDA device");
+            return;
+        };
+        let ctx = CudaContext::new(0).unwrap();
+        let stream = ctx.new_stream().unwrap();
+        let kernels = GemmTernaryI8MmaCuda::new(ctx.clone()).expect("compile");
+        // The reference SwiGLU: the standalone FFN kernel at the canonical
+        // forms (FfnExp::Fast + FfnRecip::Full = swiglu_ffn_e1_d1).
+        let ffn_ptx = cudarc::nvrtc::compile_ptx_with_opts(
+            crate::prefill_cuda_ffn::FFN_CUDA_SRC,
+            cudarc::nvrtc::CompileOptions {
+                arch: Some("sm_89"),
+                ..Default::default()
+            },
+        )
+        .expect("compile ffn src");
+        let ffn_module = ctx.load_module(ffn_ptx).expect("load ffn module");
+        let swiglu_fn = ffn_module
+            .load_function("swiglu_ffn_e1_d1")
+            .expect("load swiglu_ffn_e1_d1");
+
+        for (m, n, p) in [
+            (256usize, 256usize, 130usize),
+            (128usize, 384usize, 257usize),
+        ] {
+            let wpr = n / 32;
+            let groups = n / 128;
+            // mat0 = gate, mat1 = up — the v11 test's distinct-fixture rule.
+            let pos0: Vec<u32> = (0..m * wpr)
+                .map(|i| (i as u64).wrapping_mul(0x9E3779B97F4A7C15) as u32)
+                .collect();
+            let neg0: Vec<u32> = (0..m * wpr)
+                .map(|i| (i as u64).wrapping_mul(0xBF58476D1CE4E5B9) as u32)
+                .collect();
+            let sc0: Vec<f32> = (0..m * groups)
+                .map(|i| 0.001 + ((i * 17) % 100) as f32 * 0.0001)
+                .collect();
+            let pos1: Vec<u32> = (0..m * wpr)
+                .map(|i| (i as u64).wrapping_mul(0x94D049BB133111EB) as u32)
+                .collect();
+            let neg1: Vec<u32> = (0..m * wpr)
+                .map(|i| (i as u64).wrapping_mul(0x8D2E4FB5A5B77735) as u32)
+                .collect();
+            let sc1: Vec<f32> = (0..m * groups)
+                .map(|i| 0.002 + ((i * 29) % 100) as f32 * 0.0002)
+                .collect();
+            let input: Vec<f32> = (0..p * n)
+                .map(|i| (((i * 37) % 251) as f32 - 120.0) * 0.02)
+                .collect();
+
+            let _p0_dev = stream.clone_htod(&pos0).unwrap();
+            let _n0_dev = stream.clone_htod(&neg0).unwrap();
+            let s0_dev = stream.clone_htod(&sc0).unwrap();
+            let _p1_dev = stream.clone_htod(&pos1).unwrap();
+            let _n1_dev = stream.clone_htod(&neg1).unwrap();
+            let s1_dev = stream.clone_htod(&sc1).unwrap();
+            let in_dev = stream.clone_htod(&input).unwrap();
+            let packed0 = crate::prefill_cuda_mma::pack_bitplanes_to_q2(&pos0, &neg0, m, n);
+            let packed1 = crate::prefill_cuda_mma::pack_bitplanes_to_q2(&pos1, &neg1, m, n);
+            let pk0_dev = stream.clone_htod(&packed0).unwrap();
+            let pk1_dev = stream.clone_htod(&packed1).unwrap();
+            let inter = crate::prefill_cuda_mma::pack_bitplanes_to_q2_interleaved_gate_up(
+                &pos0, &neg0, &pos1, &neg1, m, n,
+            );
+            let scale_i =
+                crate::prefill_cuda_mma::interleave_gate_up_group_scales(&sc0, &sc1, m, groups);
+            let inter_dev = stream.clone_htod(&inter).unwrap();
+            let si_dev = stream.clone_htod(&scale_i).unwrap();
+            let scratch = kernels.alloc_scratch(&stream, n, p).unwrap();
+            kernels
+                .launch_quantize_q8_div(&stream, &in_dev, &scratch, n, p, QuantDiv::Rn)
+                .unwrap();
+
+            // Reference: two v10t slabs + the standalone SwiGLU kernel.
+            let ref_g = stream.alloc_zeros::<f32>(p * m).unwrap();
+            let ref_u = stream.alloc_zeros::<f32>(p * m).unwrap();
+            let ref_hid = stream.alloc_zeros::<f32>(p * m).unwrap();
+            kernels
+                .launch_gemm_q8_v10t(
+                    &stream,
+                    &pk0_dev,
+                    &s0_dev,
+                    &scratch,
+                    &ref_g,
+                    m,
+                    n,
+                    p,
+                    FoldMode::Fused,
+                )
+                .unwrap();
+            kernels
+                .launch_gemm_q8_v10t(
+                    &stream,
+                    &pk1_dev,
+                    &s1_dev,
+                    &scratch,
+                    &ref_u,
+                    m,
+                    n,
+                    p,
+                    FoldMode::Fused,
+                )
+                .unwrap();
+            let pm_i = (p * m) as i32;
+            let cfg = LaunchConfig {
+                grid_dim: ((p * m).div_ceil(256) as u32, 1, 1),
+                block_dim: (256, 1, 1),
+                shared_mem_bytes: 0,
+            };
+            unsafe {
+                stream
+                    .launch_builder(&swiglu_fn)
+                    .arg(&ref_g)
+                    .arg(&ref_u)
+                    .arg(&ref_hid)
+                    .arg(&pm_i)
+                    .launch(cfg)
+                    .unwrap();
+            }
+
+            // Fused: ONE interleaved launch.
+            let out_hid = stream.alloc_zeros::<f32>(p * m).unwrap();
+            kernels
+                .launch_gemm_q8_v10tglu(
+                    &stream,
+                    &inter_dev,
+                    &si_dev,
+                    &scratch,
+                    &out_hid,
+                    m,
+                    n,
+                    p,
+                    FoldMode::Fused,
+                )
+                .unwrap();
+            let (r, o) = (
+                stream.clone_dtoh(&ref_hid).unwrap(),
+                stream.clone_dtoh(&out_hid).unwrap(),
+            );
+            let d = r
+                .iter()
+                .zip(&o)
+                .filter(|(x, y)| x.to_bits() != y.to_bits())
+                .count();
+            assert_eq!(
+                d, 0,
+                "v10tglu hid at (m={m}, n={n}, p={p}) must be bit-identical \
+                 to (v10t gate ‖ v10t up → swiglu_ffn_e1_d1)"
+            );
+            // Strict fold is not instantiated — it must refuse loud.
+            assert!(
+                kernels
+                    .launch_gemm_q8_v10tglu(
+                        &stream,
+                        &inter_dev,
+                        &si_dev,
+                        &scratch,
+                        &out_hid,
+                        m,
+                        n,
+                        p,
+                        FoldMode::Strict,
+                    )
+                    .is_err()
+            );
+        }
+    }
+
+    /// Issue 1124 T1 G2 — kernel-level A/B at the league FFN shapes
+    /// (m=17408, n=5120; p = 2048 and 4096): the INCUMBENT segment (two
+    /// v10t launches plus the standalone SwiGLU kernel — three launches,
+    /// both slabs materialized) vs the fused v10tglu (one launch, hid slab
+    /// direct). Interleaved ×9, medians; prints the fused kernel's register
+    /// count and local (spill) bytes — local > 0 re-reads the launch bounds
+    /// (the Bench-895 spill rule). Run GPU-exclusive (the Issue 834 rule);
+    /// release profile only.
+    #[cfg(all(
+        feature = "ternary_gemv_cuda_raw",
+        feature = "ternary_gemm_batched",
+        feature = "cubecl_runtime",
+        feature = "prefill_mmq_v2",
+        not(target_os = "macos")
+    ))]
+    #[test]
+    #[ignore = "GPU perf probe: GB-class slab allocations + exclusive GPU; run with --release --ignored --nocapture"]
+    fn q8_gemm_v10tglu_perf_ab_ffn() {
+        let Some(()) = cuda_or_skip() else {
+            eprintln!("SKIP — no CUDA device");
+            return;
+        };
+        let ctx = CudaContext::new(0).unwrap();
+        let stream = ctx.new_stream().unwrap();
+        let kernels = GemmTernaryI8MmaCuda::new(ctx.clone()).expect("compile");
+        let ffn_ptx = cudarc::nvrtc::compile_ptx_with_opts(
+            crate::prefill_cuda_ffn::FFN_CUDA_SRC,
+            cudarc::nvrtc::CompileOptions {
+                arch: Some("sm_89"),
+                ..Default::default()
+            },
+        )
+        .expect("compile ffn src");
+        let ffn_module = ctx.load_module(ffn_ptx).expect("load ffn module");
+        let swiglu_fn = ffn_module
+            .load_function("swiglu_ffn_e1_d1")
+            .expect("load swiglu_ffn_e1_d1");
+
+        let (m, n) = (17408usize, 5120usize);
+        let wpr = n / 32;
+        let groups = n / 128;
+        let pos_bits: Vec<u32> = (0..m * wpr)
+            .map(|i| (i as u64 * 0x9E3779B97F4A7C15) as u32)
+            .collect();
+        let neg_bits: Vec<u32> = (0..m * wpr)
+            .map(|i| (i as u64 * 0xBF58476D1CE4E5B9) as u32)
+            .collect();
+        let group_scale: Vec<f32> = (0..m * groups)
+            .map(|i| 0.001 + ((i * 17) % 100) as f32 * 0.0001)
+            .collect();
+        let pos1_bits: Vec<u32> = (0..m * wpr)
+            .map(|i| (i as u64 * 0x94D049BB133111EB) as u32)
+            .collect();
+        let neg1_bits: Vec<u32> = (0..m * wpr)
+            .map(|i| (i as u64 * 0x8D2E4FB5A5B77735) as u32)
+            .collect();
+        let group1_scale: Vec<f32> = (0..m * groups)
+            .map(|i| 0.002 + ((i * 29) % 100) as f32 * 0.0002)
+            .collect();
+        let packed0 = crate::prefill_cuda_mma::pack_bitplanes_to_q2(&pos_bits, &neg_bits, m, n);
+        let packed1 = crate::prefill_cuda_mma::pack_bitplanes_to_q2(&pos1_bits, &neg1_bits, m, n);
+        let inter = crate::prefill_cuda_mma::pack_bitplanes_to_q2_interleaved_gate_up(
+            &pos_bits, &neg_bits, &pos1_bits, &neg1_bits, m, n,
+        );
+        let scale_i = crate::prefill_cuda_mma::interleave_gate_up_group_scales(
+            &group_scale,
+            &group1_scale,
+            m,
+            groups,
+        );
+        let pk0_dev = stream.clone_htod(&packed0).unwrap();
+        let pk1_dev = stream.clone_htod(&packed1).unwrap();
+        let inter_dev = stream.clone_htod(&inter).unwrap();
+        let s0_dev = stream.clone_htod(&group_scale).unwrap();
+        let s1_dev = stream.clone_htod(&group1_scale).unwrap();
+        let si_dev = stream.clone_htod(&scale_i).unwrap();
+
+        let tglu = &kernels.gemm_tm128v10tglu_q8_fused;
+        eprintln!(
+            "[1124-ab] v10tglu: regs={} local_bytes={}",
+            tglu.num_regs().unwrap_or(-1),
+            tglu.local_size_bytes().unwrap_or(-1),
+        );
+
+        type BenchArm<'a> = (&'a str, Box<dyn Fn() + 'a>);
+        for p in [2048usize, 4096usize] {
+            let input: Vec<f32> = (0..p * n)
+                .map(|i| (((i * 37) % 251) as f32 - 120.0) * 0.02)
+                .collect();
+            let _in_dev = stream.clone_htod(&input).unwrap();
+            let scratch = kernels.alloc_scratch(&stream, n, p).unwrap();
+            let out_g = stream.alloc_zeros::<f32>(p * m).unwrap();
+            let out_u = stream.alloc_zeros::<f32>(p * m).unwrap();
+            let out_hid_pair = stream.alloc_zeros::<f32>(p * m).unwrap();
+            let out_hid_fused = stream.alloc_zeros::<f32>(p * m).unwrap();
+            let pm_i = (p * m) as i32;
+            stream.synchronize().unwrap();
+
+            let swiglu_once = |g: &CudaSlice<f32>, u: &CudaSlice<f32>, o: &CudaSlice<f32>| {
+                let cfg = LaunchConfig {
+                    grid_dim: ((p * m).div_ceil(256) as u32, 1, 1),
+                    block_dim: (256, 1, 1),
+                    shared_mem_bytes: 0,
+                };
+                unsafe {
+                    stream
+                        .launch_builder(&swiglu_fn)
+                        .arg(g)
+                        .arg(u)
+                        .arg(o)
+                        .arg(&pm_i)
+                        .launch(cfg)
+                        .unwrap();
+                }
+            };
+
+            let arms: Vec<BenchArm> = vec![
+                (
+                    "2x v10t + swiglu (incumbent)",
+                    Box::new({
+                        let stream = &stream;
+                        let kernels = &kernels;
+                        let (pk0_dev, s0_dev, pk1_dev, s1_dev) =
+                            (&pk0_dev, &s0_dev, &pk1_dev, &s1_dev);
+                        let (scratch, out_g, out_u, out_hid_pair) =
+                            (&scratch, &out_g, &out_u, &out_hid_pair);
+                        move || {
+                            kernels
+                                .launch_gemm_q8_v10t(
+                                    stream,
+                                    pk0_dev,
+                                    s0_dev,
+                                    scratch,
+                                    out_g,
+                                    m,
+                                    n,
+                                    p,
+                                    FoldMode::Fused,
+                                )
+                                .unwrap();
+                            kernels
+                                .launch_gemm_q8_v10t(
+                                    stream,
+                                    pk1_dev,
+                                    s1_dev,
+                                    scratch,
+                                    out_u,
+                                    m,
+                                    n,
+                                    p,
+                                    FoldMode::Fused,
+                                )
+                                .unwrap();
+                            swiglu_once(out_g, out_u, out_hid_pair);
+                        }
+                    }),
+                ),
+                (
+                    "v10tglu (fused)",
+                    Box::new({
+                        let stream = &stream;
+                        let kernels = &kernels;
+                        let (inter_dev, si_dev) = (&inter_dev, &si_dev);
+                        let (scratch, out_hid_fused) = (&scratch, &out_hid_fused);
+                        move || {
+                            kernels
+                                .launch_gemm_q8_v10tglu(
+                                    stream,
+                                    inter_dev,
+                                    si_dev,
+                                    scratch,
+                                    out_hid_fused,
+                                    m,
+                                    n,
+                                    p,
+                                    FoldMode::Fused,
+                                )
+                                .unwrap();
+                        }
+                    }),
+                ),
+            ];
+
+            // The B884 fairness protocol: boost burn, then interleaved ×9.
+            for _ in 0..3 {
+                for (_, arm) in &arms {
+                    arm();
+                }
+            }
+            stream.synchronize().unwrap();
+            let mut times: [Vec<std::time::Duration>; 2] = [Vec::new(), Vec::new()];
+            for _ in 0..9 {
+                for (ai, (_, arm)) in arms.iter().enumerate() {
+                    let t0 = std::time::Instant::now();
+                    arm();
+                    stream.synchronize().unwrap();
+                    times[ai].push(t0.elapsed());
+                }
+            }
+            for (ai, (name, _)) in arms.iter().enumerate() {
+                let mut ms: Vec<f64> = times[ai].iter().map(|t| t.as_secs_f64() * 1e3).collect();
+                ms.sort_by(|a, b| a.partial_cmp(b).unwrap());
+                eprintln!("[1124-ab] p={p} {name}: median {:.3} ms", ms[ms.len() / 2]);
             }
         }
     }

@@ -2123,4 +2123,260 @@ GEMM_BODY_V11GU_Q8(gemm_i8_mma_tm128v11gs_q8_strict, 0, 64, 8, 2, 1)
 // eliminating the spill at the cost of 8 warps/SM.
 GEMM_BODY_V11GU_Q8(gemm_i8_mma_tm128v11gq_q8_fused, 1, 64, 8, 1, 0)
 GEMM_BODY_V11GU_Q8(gemm_i8_mma_tm128v11gq_q8_strict, 0, 64, 8, 1, 0)
+
+// ---------------------------------------------------------------------------
+// v10tglu (Issue 1124 T1 — the llama.cpp #29948 distill): the v10 body over a
+// ROW-INTERLEAVED gate+up weight mirror (gate row r lands at interleaved row
+// (r/8)*16 + r%8, up row r at +8 — chunks of 8), with SwiGLU applied IN the
+// transposed staging pass. ONE accumulator set — the v10t MMA loop, tile
+// config, and fold are VERBATIM, so there is no Bench-895 register cliff:
+// with interleaved rows each m16n8 fragment's row halves c0/c1 (row g_id) and
+// c2/c3 (row g_id+8) are the GATE and UP dots of the SAME hid row, so the
+// epilogue pairs them in registers, stages silu(g)*u into the same single
+// [TOKS][33] slab, and the store pass is v10t's minus the s_t multiply (the
+// scale is applied to BOTH projections BEFORE the sigmoid, in the standalone
+// kernel's op order). HALF the output slabs written (hid [p*m] instead of
+// gate+up [p*m] x2) and the standalone SwiGLU kernel deleted from the stream.
+// Canonical SwiGLU numerics are HARDCODED: `neg = 0.0f - g;
+// sig = div.full(1.0f + __expf(neg)); out = (g * sig) * u` — the Bench-721
+// canonical_swiglu_forms (FfnExp::Fast + FfnRecip::Full); bit-identical to
+// (v10t pair + swiglu_ffn_e1_d1) by construction (the unit gate asserts
+// 0 bit-diffs). `m` is the HID row count (the interleaved row space is 2m;
+// grid.x = m/64 — the launch gates m % 64 == 0, the FFN dispatch gates
+// mlp % 128 == 0). OOB token slots read s_t clamped to p-1 and are dropped
+// by the store guard exactly as v10t's are.
+// ---------------------------------------------------------------------------
+#define GEMM_BODY_V10T_GLU_Q8(NAME, FUSED, TOKS, NWARP, MINB)                  \
+extern "C" __global__ void __launch_bounds__((NWARP) * 32, (MINB)) NAME(        \
+    const unsigned int* __restrict__ packed_w,   /* [2m * (n/16)] interleaved */\
+    const float* __restrict__ group_scale,       /* [2m * groups] interleaved */\
+    const unsigned int* __restrict__ q_w,        /* [p * (n/4)] */              \
+    const float* __restrict__ s_t,               /* [p] */                      \
+    float* __restrict__ out,                     /* [p * m] hid slab */         \
+    int m, int n, int p,    /* m = HID rows; the weight space is 2m */          \
+    int words_per_row, int groups_per_row)                                      \
+{                                                                              \
+    const int m2 = 2 * m;   /* interleaved weight-row space */                 \
+    extern __shared__ __align__(16) unsigned char v10_smem_raw[];              \
+    unsigned int* const acode0 = (unsigned int*)v10_smem_raw; /* 128*12 */     \
+    unsigned int* const acode1 = acode0 + 128 * 12;                            \
+    unsigned int* const b_buf0 = acode0 + 2 * 128 * 12;                        \
+    unsigned int* const b_buf1 = b_buf0 + (TOKS) * 36;                         \
+    float* const scl0 = (float*)(b_buf1 + (TOKS) * 36);   /* 128 floats */     \
+    float* const scl1 = scl0 + 128;                                            \
+                                                                               \
+    const int tid = threadIdx.x;                                               \
+    const int lane = tid & 31;                                                 \
+    const int wid = tid >> 5;                                                  \
+    const int g_id = lane >> 2;                                                \
+    const int t_id = lane & 3;                                                 \
+    const int warp_row = (wid / ((TOKS) / 32)) * 32; /* 4 row-bands of 32 */   \
+    const int warp_n = wid % ((TOKS) / 32);      /* TOKS/32 tok-warps x 32 */  \
+    const int blk_rows = blockIdx.x * 128;                                     \
+    const int qwpr = n >> 2;                                                   \
+                                                                               \
+    /* B staging: TOKS*8 16-byte chunks at TOKS/(NWARP*4) per thread (v9). */  \
+    const int b_w4 = (tid & 7) << 2;                                           \
+    const int b_t0 = tid >> 3;                                                 \
+    const unsigned int sel = 0x40u + (unsigned int)t_id * 0x11u;               \
+                                                                               \
+    /* accumulators + fold regs (v10t verbatim — ONE set). */                  \
+    int dh[2][4][4];                                                           \
+    float o[2][4][4];                                                          \
+    _Pragma("unroll")                                                      \
+    for (int mf = 0; mf < 2; ++mf) {                                           \
+        _Pragma("unroll")                                                  \
+        for (int nf = 0; nf < 4; ++nf) {                                       \
+            _Pragma("unroll")                                              \
+            for (int c = 0; c < 4; ++c) { o[mf][nf][c] = 0.0f; }               \
+        }                                                                      \
+    }                                                                          \
+                                                                               \
+    /* prologue: B(0) plain LDG/STS; A(0) cp.async 16-B; S(0) cp.async 4-B. */ \
+    _Pragma("unroll")                                                      \
+    for (int si = 0; si < ((TOKS) / ((NWARP) * 4)); ++si) {                    \
+        const int b_tk = b_t0 + si * ((NWARP) * 4);                            \
+        int b_tr = (int)(blockIdx.y * (TOKS)) + b_tk;                          \
+        b_tr = b_tr < p ? b_tr : p - 1;                                        \
+        *(uint4*)(b_buf0 + (unsigned)b_tk * 36u + (unsigned)b_w4) =            \
+            *(const uint4*)(q_w + (long)b_tr * qwpr + b_w4);                   \
+    }                                                                          \
+    for (int c = tid; c < 256; c += (NWARP) * 32) {                            \
+        const int row = c >> 1;                                                \
+        const int half = c & 1;                                                \
+        const int gr = (blk_rows + row < m2) ? blk_rows + row : m2 - 1;        \
+        v6_cp_async16(acode0 + row * 12 + half * 4,                            \
+            packed_w + (long)gr * words_per_row + half * 4);                   \
+    }                                                                          \
+    for (int c = tid; c < 128; c += (NWARP) * 32) {                            \
+        const int gr = (blk_rows + c < m2) ? blk_rows + c : m2 - 1;            \
+        v6_cp_async4(scl0 + c, group_scale + (long)gr * groups_per_row + 0);   \
+    }                                                                          \
+    v6_cp_async_commit();                                                      \
+                                                                               \
+    for (int grp = 0; grp < groups_per_row; ++grp) {                           \
+        v6_cp_async_wait_all();                                                \
+        __syncthreads();   /* A/S(grp)+B(grp) landed & grp-1 compute done */   \
+        unsigned int* const abuf = (grp & 1) ? acode1 : acode0;                \
+        unsigned int* const nabuf = (grp & 1) ? acode0 : acode1;               \
+        unsigned int* const bbuf = (grp & 1) ? b_buf1 : b_buf0;                \
+        unsigned int* const nbbuf = (grp & 1) ? b_buf0 : b_buf1;               \
+        float* const sbuf = (grp & 1) ? scl1 : scl0;                           \
+        float* const nsbuf = (grp & 1) ? scl0 : scl1;                          \
+        const bool has_next = (grp + 1) < groups_per_row;                      \
+        if (has_next) {                                                        \
+            _Pragma("unroll")                                              \
+            for (int si = 0; si < ((TOKS) / ((NWARP) * 4)); ++si) {            \
+                const int b_tk = b_t0 + si * ((NWARP) * 4);                    \
+                int b_tr = (int)(blockIdx.y * (TOKS)) + b_tk;                  \
+                b_tr = b_tr < p ? b_tr : p - 1;                                \
+                v6_cp_async16(nbbuf + (unsigned)b_tk * 36u + (unsigned)b_w4,   \
+                    q_w + (long)b_tr * qwpr + b_w4 + ((long)(grp + 1) << 5));  \
+            }                                                                  \
+            v6_cp_async_commit();                                              \
+            for (int c = tid; c < 256; c += (NWARP) * 32) {                    \
+                const int row = c >> 1;                                        \
+                const int half = c & 1;                                        \
+                const int gr =                                                 \
+                    (blk_rows + row < m2) ? blk_rows + row : m2 - 1;           \
+                v6_cp_async16(nabuf + row * 12 + half * 4,                     \
+                    packed_w + (long)gr * words_per_row                        \
+                        + (long)(grp + 1) * 8 + half * 4);                     \
+            }                                                                  \
+            for (int c = tid; c < 128; c += (NWARP) * 32) {                    \
+                const int gr = (blk_rows + c < m2) ? blk_rows + c : m2 - 1;    \
+                v6_cp_async4(nsbuf + c,                                        \
+                    group_scale + (long)gr * groups_per_row + grp + 1);        \
+            }                                                                  \
+            v6_cp_async_commit();                                              \
+        }                                                                      \
+        _Pragma("unroll")                                                  \
+        for (int mf = 0; mf < 2; ++mf) {                                       \
+            _Pragma("unroll")                                              \
+            for (int nf = 0; nf < 4; ++nf) {                                   \
+                _Pragma("unroll")                                          \
+                for (int c = 0; c < 4; ++c) { dh[mf][nf][c] = 0; }             \
+            }                                                                  \
+        }                                                                      \
+        _Pragma("unroll")                                                  \
+        for (int ks = 0; ks < 4; ++ks) {                                       \
+            unsigned int aw[2][2][2];                                          \
+            _Pragma("unroll")                                              \
+            for (int mf = 0; mf < 2; ++mf) {                                   \
+                _Pragma("unroll")                                          \
+                for (int rp = 0; rp < 2; ++rp) {                               \
+                    const int rs = warp_row + mf * 16 + rp * 8 + g_id;         \
+                    aw[mf][rp][0] = abuf[rs * 12 + ks * 2];                    \
+                    aw[mf][rp][1] = abuf[rs * 12 + ks * 2 + 1];                \
+                }                                                              \
+            }                                                                  \
+            unsigned int bw[4][2];                                             \
+            _Pragma("unroll")                                              \
+            for (int nf = 0; nf < 4; ++nf) {                                   \
+                const unsigned int bn =                                        \
+                    (unsigned int)(warp_n * 32 + nf * 8 + (lane & 7)) * 36u    \
+                    + (unsigned int)(ks * 8 + ((lane >> 3) & 1) * 4);          \
+                v6_ldmatrix_x2(bw[nf][0], bw[nf][1], &bbuf[bn]);               \
+            }                                                                  \
+            _Pragma("unroll")                                              \
+            for (int mf = 0; mf < 2; ++mf) {                                   \
+                unsigned int a0, a1, a2, a3;                                   \
+                v8_decode_pair(aw[mf][0][0], aw[mf][0][1], sel, a0, a2);       \
+                v8_decode_pair(aw[mf][1][0], aw[mf][1][1], sel, a1, a3);       \
+                _Pragma("unroll")                                          \
+                for (int nf = 0; nf < 4; ++nf) {                               \
+                    mma_s8_m16n8k32(dh[mf][nf][0], dh[mf][nf][1],              \
+                        dh[mf][nf][2], dh[mf][nf][3],                          \
+                        a0, a1, a2, a3, bw[nf][0], bw[nf][1]);                 \
+                }                                                              \
+            }                                                                  \
+        }                                                                      \
+        /* fold — v10t op order verbatim (sw0/sw8 = the gate/up rows' own */   \
+        /* group scales from the interleaved slab). */                         \
+        _Pragma("unroll")                                                  \
+        for (int mf = 0; mf < 2; ++mf) {                                       \
+            const float sw0 = sbuf[warp_row + mf * 16 + g_id];                 \
+            const float sw8 = sbuf[warp_row + mf * 16 + 8 + g_id];             \
+            _Pragma("unroll")                                              \
+            for (int nf = 0; nf < 4; ++nf) {                                   \
+                _Pragma("unroll")                                          \
+                for (int c = 0; c < 4; ++c) {                                  \
+                    const float hi = (float)dh[mf][nf][c];                     \
+                    if (FUSED) {                                               \
+                        o[mf][nf][c] = __fmaf_rn(c >= 2 ? sw8 : sw0, hi, o[mf][nf][c]);\
+                    } else {                                                   \
+                        const float t3 = __fmul_rn(c >= 2 ? sw8 : sw0, hi);    \
+                        o[mf][nf][c] = __fadd_rn(o[mf][nf][c], t3);            \
+                    }                                                          \
+                }                                                              \
+            }                                                                  \
+        }                                                                      \
+    }                                                                          \
+                                                                               \
+    /* epilogue (GLU at staging): hid rows per block = 64 (2 bands of 32). */   \
+    /* Band ch covers hid rows [ch*32, ch*32+32) fed by interleaved bands  */   \
+    /* {2ch, 2ch+1}: a warp band spans 32 interleaved rows = 16 hid rows;  */   \
+    /* r_in = (warp_row - 2ch*32)/2 + mf*8 + g_id covers 0..31 per band.   */   \
+    float* stg2 = (float*)b_buf0;                                              \
+    const int tok_blk = blockIdx.y * (TOKS);                                   \
+    _Pragma("unroll")                                                      \
+    for (int ch = 0; ch < 2; ++ch) {                                           \
+        __syncthreads();                                                       \
+        _Pragma("unroll")                                                  \
+        for (int mf = 0; mf < 2; ++mf) {                                       \
+            const int band = warp_row >> 5;                                    \
+            if (band == 2 * ch || band == 2 * ch + 1) {                        \
+                const int r_in =                                               \
+                    (warp_row - 2 * ch * 32) / 2 + mf * 8 + g_id;              \
+                _Pragma("unroll")                                          \
+                for (int nf = 0; nf < 4; ++nf) {                               \
+                    const int tk0 = warp_n * 32 + nf * 8 + t_id * 2;           \
+                    int ta = tok_blk + tk0;                                    \
+                    int tb = ta + 1;                                           \
+                    ta = ta < p ? ta : p - 1;                                  \
+                    tb = tb < p ? tb : p - 1;                                  \
+                    const float sa = s_t[ta];                                  \
+                    const float sb = s_t[tb];                                  \
+                    /* the scale multiply per projection (the standalone */    \
+                    /* kernel's input values), THEN the sigmoid chain —   */    \
+                    /* exactly swiglu_ffn_e1_d1's op order. */              \
+                    const float ga = o[mf][nf][0] * sa;   /* gate(h), tk0  */  \
+                    const float ua = o[mf][nf][2] * sa;   /* up(h),   tk0  */  \
+                    const float gb = o[mf][nf][1] * sb;   /* gate(h), tk0+1 */ \
+                    const float ub = o[mf][nf][3] * sb;   /* up(h),   tk0+1 */ \
+                    const float nea = 0.0f - ga;                               \
+                    const float neb = 0.0f - gb;                               \
+                    const float ea = __expf(nea);                              \
+                    const float eb = __expf(neb);                              \
+                    float ra;                                                  \
+                    float rb;                                                  \
+                    asm("div.full.f32 %0, %1, %2;" : "=f"(ra)                 \
+                        : "f"(1.0f), "f"(1.0f + ea));                          \
+                    asm("div.full.f32 %0, %1, %2;" : "=f"(rb)                 \
+                        : "f"(1.0f), "f"(1.0f + eb));                          \
+                    stg2[tk0 * 33 + r_in] = (ga * ra) * ua;                    \
+                    stg2[(tk0 + 1) * 33 + r_in] = (gb * rb) * ub;              \
+                }                                                              \
+            }                                                                  \
+        }                                                                      \
+        __syncthreads();                                                       \
+        const int row0 = blockIdx.x * 64 + ch * 32;                            \
+        for (int idx = tid; idx < 32 * (TOKS); idx += (NWARP) * 32) {          \
+            const int r = idx & 31;                                            \
+            const int tk = idx >> 5;                                           \
+            const int tok = tok_blk + tk;                                      \
+            if (tok < p && row0 + r < m) {                                     \
+                out[(long)tok * m + row0 + r] = stg2[tk * 33 + r];             \
+            }                                                                  \
+        }                                                                      \
+    }                                                                          \
+}
+
+// v10tglu: v10t's geometry (TOKS=128, 512 threads, 1 block/SM, 50,176 B
+// smem — b_buf0 doubles as the single staged slab exactly as v10t's does).
+// The epilogue's GLU temps live only after the group loop (the o[] set is
+// consumed as it stages), so the register budget should stay at v10t's
+// exactly-128 — the perf probe prints num_regs/local_bytes as the spill
+// canary (the Bench-895 rule: any local > 0 re-reads the launch bounds).
+GEMM_BODY_V10T_GLU_Q8(gemm_i8_mma_tm128v10tglu_q8_fused, 1, 128, 16, 1)
 "#;

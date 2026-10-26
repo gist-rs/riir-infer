@@ -112,6 +112,37 @@ pub struct CudaMmaWeightCache {
     pub(crate) packed: Option<CudaSlice<u32>>,
 }
 
+/// (pos_bit, neg_bit) -> Q2_0 code — the shared code table of
+/// the [`pack_bitplanes_to_q2`] and
+/// [`pack_bitplanes_to_q2_interleaved_gate_up`] ((1,0)=2 (+1), (0,1)=0 (−1),
+/// (0,0)=1 (0), (1,1)=1 (the non-disjoint fold decodes to 0 on the shipping
+/// path too)).
+fn q2_code(p: u32, n: u32) -> u32 {
+    match (p, n) {
+        (1, 0) => 2,
+        (0, 1) => 0,
+        _ => 1,
+    }
+}
+
+/// One row's 32-weight word pair → two packed 16-code words (the inner loop
+/// of both packers).
+fn pack_row_pair(pw: u32, nw: u32) -> (u32, u32) {
+    let mut lo = 0u32;
+    let mut hi = 0u32;
+    for i in 0..16u32 {
+        let bit = 1u32 << i;
+        let c = q2_code(u32::from(pw & bit != 0), u32::from(nw & bit != 0));
+        lo |= c << (2 * i);
+    }
+    for i in 16u32..32u32 {
+        let bit = 1u32 << i;
+        let c = q2_code(u32::from(pw & bit != 0), u32::from(nw & bit != 0));
+        hi |= c << (2 * (i - 16));
+    }
+    (lo, hi)
+}
+
 /// Issue 884 T2b rung 4 (Plan 572) — the format-rung ingest transform:
 /// dual bitplanes → packed-2-bit Q2_0-code words. The code table is
 /// `riir_infer_core::quant::q2_0`'s (`block_q2_0`, the PrismML fork's MMQ
@@ -128,32 +159,14 @@ pub struct CudaMmaWeightCache {
 #[cfg(feature = "prefill_mmq_v2")]
 pub(crate) fn pack_bitplanes_to_q2(pos: &[u32], neg: &[u32], m: usize, n: usize) -> Vec<u32> {
     debug_assert_eq!(pos.len(), neg.len(), "bitplane word counts");
-    // (pos_bit, neg_bit) -> Q2_0 code: (1,0)=2 (+1), (0,1)=0 (−1),
-    // (0,0)=1 (0), (1,1)=1 (fold — the non-disjoint bit case decodes to 0
-    // on the shipping path too).
-    let code = |p: u32, n: u32| -> u32 {
-        match (p, n) {
-            (1, 0) => 2,
-            (0, 1) => 0,
-            _ => 1,
-        }
-    };
     let wpr = n / 32;
     let packed_wpr = n / 16;
     let mut out = vec![0u32; m * packed_wpr];
     for row in 0..m {
         for w in 0..wpr {
-            let (pw, nw) = (pos[row * wpr + w], neg[row * wpr + w]);
-            // 32 codes -> 8 bytes -> 2 packed words (16 weights each).
-            for half in 0..2u32 {
-                let mut acc = 0u32;
-                for i in 0..16u32 {
-                    let bit = 1u32 << (half * 16 + i);
-                    let c = code(u32::from(pw & bit != 0), u32::from(nw & bit != 0));
-                    acc |= c << (2 * i);
-                }
-                out[row * packed_wpr + w * 2 + half as usize] = acc;
-            }
+            let (lo, hi) = pack_row_pair(pos[row * wpr + w], neg[row * wpr + w]);
+            out[row * packed_wpr + w * 2] = lo;
+            out[row * packed_wpr + w * 2 + 1] = hi;
         }
     }
     out
@@ -383,6 +396,233 @@ pub fn build_weight_cache(
         #[cfg(feature = "prefill_mmq_v2")]
         packed: None,
     })
+}
+
+// ---------------------------------------------------------------------------
+// Issue 1124 T1 — the fused gate+up GLU mirror (the llama.cpp #29948
+// row-interleaved loader)
+// ---------------------------------------------------------------------------
+
+/// The interleaved packed-code mirror for the [`
+/// crate::gemm_ternary_i8_mma_cuda_raw::GemmTernaryI8MmaCuda::
+/// launch_gemm_q8_v10tglu`] fused gate+up GEMM: gate row `r` lands at
+/// interleaved row `(r/8)*16 + r%8`, up row `r` at `+8` — chunks of 8, so
+/// each m16n8 fragment's two row halves (g_id and g_id+8) are the gate and
+/// up dots of the SAME hid row and the kernel's epilogue pairs them in
+/// registers (single accumulator — the v10t body verbatim). Output:
+/// `u32[2m * n/16]`, k-contiguous LSB-first, same code table as
+/// [`pack_bitplanes_to_q2`].
+pub fn pack_bitplanes_to_q2_interleaved_gate_up(
+    pos_g: &[u32],
+    neg_g: &[u32],
+    pos_u: &[u32],
+    neg_u: &[u32],
+    m: usize,
+    n: usize,
+) -> Vec<u32> {
+    debug_assert_eq!(pos_g.len(), neg_g.len(), "gate bitplane word counts");
+    debug_assert_eq!(pos_u.len(), neg_u.len(), "up bitplane word counts");
+    debug_assert_eq!(pos_g.len(), pos_u.len(), "gate/up word counts");
+    debug_assert_eq!(m % 8, 0, "row interleave needs m % 8 == 0");
+    let wpr = n / 32;
+    let packed_wpr = n / 16;
+    let mut out = vec![0u32; 2 * m * packed_wpr];
+    for row in 0..m {
+        let dst = (row / 8) * 16 + (row % 8);
+        for w in 0..wpr {
+            let (glo, ghi) = pack_row_pair(pos_g[row * wpr + w], neg_g[row * wpr + w]);
+            out[dst * packed_wpr + w * 2] = glo;
+            out[dst * packed_wpr + w * 2 + 1] = ghi;
+            let (ulo, uhi) = pack_row_pair(pos_u[row * wpr + w], neg_u[row * wpr + w]);
+            out[(dst + 8) * packed_wpr + w * 2] = ulo;
+            out[(dst + 8) * packed_wpr + w * 2 + 1] = uhi;
+        }
+    }
+    out
+}
+
+/// The matching per-row group-scale interleave: interleaved row `(r/8)*16 +
+/// r%8` carries gate row r's `groups` scales, `+8` up row r's.
+pub fn interleave_gate_up_group_scales(
+    sg: &[f32],
+    su: &[f32],
+    m: usize,
+    groups: usize,
+) -> Vec<f32> {
+    debug_assert_eq!(sg.len(), su.len(), "gate/up scale counts");
+    debug_assert_eq!(m % 8, 0, "row interleave needs m % 8 == 0");
+    let mut out = vec![0f32; 2 * m * groups];
+    for row in 0..m {
+        let dst = (row / 8) * 16 + (row % 8);
+        out[dst * groups..(dst + 1) * groups]
+            .copy_from_slice(&sg[row * groups..(row + 1) * groups]);
+        out[(dst + 8) * groups..(dst + 9) * groups]
+            .copy_from_slice(&su[row * groups..(row + 1) * groups]);
+    }
+    out
+}
+
+/// The Issue-1124 fused gate+up weight mirror: ONE interleaved packed-code
+/// slab + ONE interleaved scale slab over the 2m interleaved row space (`m`
+/// = the gate/up projections' shared HID row count). Built lazily alongside
+/// the per-handle `cuda_mma_cache` mirrors when
+/// [`crate::gemm_ternary_i8_mma_cuda_raw::ffn_glu_fused_enabled`] arms the
+/// fused path; the incumbent pair path never pays for it.
+pub struct CudaGluPairCache {
+    /// `u32[2m * n/16]` — the interleaved packed codes.
+    pub packed: CudaSlice<u32>,
+    /// `f32[2m * groups]` — the interleaved group scales.
+    pub scale: CudaSlice<f32>,
+    /// The HID row count (gate/up's shared m; the slab space is 2m).
+    pub m: usize,
+    /// The GEMM k-dim (the model hidden dim).
+    pub n: usize,
+}
+
+/// Build the fused gate+up GLU mirror from the two CubeCL ternary handles
+/// (GPU→host reads of both bitplane pairs + scale slabs, host-side interleave
+/// pack, one upload). Both handles must share m/n (the FFN gate/up pair's
+/// contract).
+pub fn build_glu_pair_cache(
+    client: &ComputeClient<ActiveRuntime>,
+    stream: &Arc<CudaStream>,
+    gate_w: &TernaryHandle,
+    up_w: &TernaryHandle,
+) -> Result<CudaGluPairCache, String> {
+    if gate_w.m != up_w.m || gate_w.n != up_w.n {
+        return Err(format!(
+            "gate/up shape mismatch: gate {}x{} vs up {}x{}",
+            gate_w.m, gate_w.n, up_w.m, up_w.n
+        ));
+    }
+    if !gate_w.m.is_multiple_of(8) {
+        return Err(format!("m = {} is not a multiple of 8", gate_w.m));
+    }
+    let pos_bytes = client
+        .read_one(gate_w.pos_bits_u32.clone())
+        .map_err(|e| format!("read gate pos_bits: {e:?}"))?;
+    let neg_bytes = client
+        .read_one(gate_w.neg_bits_u32.clone())
+        .map_err(|e| format!("read gate neg_bits: {e:?}"))?;
+    let scale_bytes = client
+        .read_one(gate_w.group_scale_f32.clone())
+        .map_err(|e| format!("read gate group_scale: {e:?}"))?;
+    let pos_g = u32::from_bytes(&pos_bytes);
+    let neg_g = u32::from_bytes(&neg_bytes);
+    let scale_g = f32::from_bytes(&scale_bytes);
+    let pos_u_bytes = client
+        .read_one(up_w.pos_bits_u32.clone())
+        .map_err(|e| format!("read up pos_bits: {e:?}"))?;
+    let neg_u_bytes = client
+        .read_one(up_w.neg_bits_u32.clone())
+        .map_err(|e| format!("read up neg_bits: {e:?}"))?;
+    let scale_u_bytes = client
+        .read_one(up_w.group_scale_f32.clone())
+        .map_err(|e| format!("read up group_scale: {e:?}"))?;
+    let pos_u = u32::from_bytes(&pos_u_bytes);
+    let neg_u = u32::from_bytes(&neg_u_bytes);
+    let scale_u = f32::from_bytes(&scale_u_bytes);
+    let (m, n) = (gate_w.m, gate_w.n);
+    debug_assert_eq!(pos_g.len(), m * gate_w.blocks64 * 2, "gate pos words");
+    debug_assert_eq!(scale_g.len(), m * gate_w.groups_per_row, "gate scales");
+    let packed = pack_bitplanes_to_q2_interleaved_gate_up(pos_g, neg_g, pos_u, neg_u, m, n);
+    let scales = interleave_gate_up_group_scales(scale_g, scale_u, m, gate_w.groups_per_row);
+    let packed_dev = stream
+        .clone_htod(&packed)
+        .map_err(|e| format!("upload glu packed: {e}"))?;
+    let scale_dev = stream
+        .clone_htod(&scales)
+        .map_err(|e| format!("upload glu scales: {e}"))?;
+    Ok(CudaGluPairCache {
+        packed: packed_dev,
+        scale: scale_dev,
+        m,
+        n,
+    })
+}
+
+/// The lazy fused gate+up mirror accessor (the `cuda_mma_cache` pattern).
+/// `None` — and the caller keeps the incumbent pair path, bit-safe — when
+/// the env is off, the feature is not compiled, the shapes are not fusable
+/// (`m % 128 != 0`, the dispatch posture; m/n mismatch), or the build fails.
+pub fn glu_pair_cache_or_none(
+    client: &ComputeClient<ActiveRuntime>,
+    stream: &Arc<CudaStream>,
+    gate_w: &TernaryHandle,
+    up_w: &TernaryHandle,
+) -> Option<std::sync::Arc<CudaGluPairCache>> {
+    #[cfg(feature = "prefill_mmq_v2")]
+    {
+        if !crate::gemm_ternary_i8_mma_cuda_raw::ffn_glu_fused_enabled() {
+            return None;
+        }
+        if gate_w.m != up_w.m || gate_w.n != up_w.n || !gate_w.m.is_multiple_of(128) {
+            return None;
+        }
+        gate_w
+            .cuda_glu_cache
+            .get_or_init(
+                || match build_glu_pair_cache(client, stream, gate_w, up_w) {
+                    Ok(c) => Some(Arc::new(c)),
+                    Err(e) => {
+                        eprintln!(
+                            "[1124-glu] fused gate+up mirror failed for m={} n={} ({e}) — \
+                             the FFN block stays on the pair path",
+                            gate_w.m, gate_w.n
+                        );
+                        None
+                    }
+                },
+            )
+            .clone()
+    }
+    #[cfg(not(feature = "prefill_mmq_v2"))]
+    {
+        let _ = (client, stream, gate_w, up_w);
+        None
+    }
+}
+
+/// Dispatch the fused gate+up GEMM behind the mirror (the Issue-902 pair
+/// wrapper's analogue): the v10tglu launch at `FoldMode::Fused` — the only
+/// posture the FFN block runs. Shapes are asserted against the mirror (a
+/// mismatch is a caller bug — the accessor keyed the cache on this pair).
+/// Without `prefill_mmq_v2` this refuses loud — unreachable in practice:
+/// the accessor above returns `None` and the dispatch never calls it.
+#[allow(clippy::too_many_arguments)]
+pub fn launch_prefill_gemm_glu_cached(
+    mma: &GemmTernaryI8MmaCuda,
+    stream: &CudaStream,
+    cache: &CudaGluPairCache,
+    scratch: &GemmI8MmaScratch,
+    hid: &CudaSlice<f32>,
+    m: usize,
+    n: usize,
+    p: usize,
+) -> Result<(), GemmI8MmaError> {
+    #[cfg(feature = "prefill_mmq_v2")]
+    {
+        debug_assert_eq!(cache.m, m, "glu mirror hid rows");
+        debug_assert_eq!(cache.n, n, "glu mirror k-dim");
+        mma.launch_gemm_q8_v10tglu(
+            stream,
+            &cache.packed,
+            &cache.scale,
+            scratch,
+            hid,
+            m,
+            n,
+            p,
+            FoldMode::Fused,
+        )
+    }
+    #[cfg(not(feature = "prefill_mmq_v2"))]
+    {
+        let _ = (mma, stream, cache, scratch, hid, m, n, p);
+        Err(GemmI8MmaError::Launch(
+            "v10tglu not compiled (prefill_mmq_v2 off)".into(),
+        ))
+    }
 }
 
 // ---------------------------------------------------------------------------

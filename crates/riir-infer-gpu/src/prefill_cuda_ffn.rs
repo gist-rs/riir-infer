@@ -922,6 +922,10 @@ pub fn dispatch_ffn_block(
     let Some(down_cache) = mirror(down_w) else {
         return false;
     };
+    // Issue 1124 T1 — the fused gate+up GLU mirror (None keeps the incumbent
+    // pair path byte-identical; a build failure degrades to the pair path,
+    // also bit-safe).
+    let glu_cache = crate::prefill_cuda_mma::glu_pair_cache_or_none(client, stream, gate_w, up_w);
 
     // 1) Read gamma + x_b back to host (gamma rides the same queue drain).
     let Ok(gamma_bytes) = client.read_one(gamma_handle.clone()) else {
@@ -958,8 +962,12 @@ pub fn dispatch_ffn_block(
     }
     grow!(x, pn);
     grow!(normx, pn);
-    grow!(gate, pm);
-    grow!(up, pm);
+    // The fused GLU path writes `hid` directly — the gate/up f32 staging
+    // slabs are never read (the grow is skipped, not just unused).
+    if glu_cache.is_none() {
+        grow!(gate, pm);
+        grow!(up, pm);
+    }
     grow!(hid, pm);
     grow!(ffnout, pn);
     grow!(gamma, n);
@@ -999,10 +1007,20 @@ pub fn dispatch_ffn_block(
         scratch_mlp,
         out_host,
     } = &mut *bufs;
-    let (Some(x), Some(normx), Some(gate), Some(up), Some(hid), Some(ffnout), Some(gamma)) =
-        (x, normx, gate, up, hid, ffnout, gamma)
+    let (Some(x), Some(normx), Some(hid), Some(ffnout), Some(gamma)) =
+        (x, normx, hid, ffnout, gamma)
     else {
         return false;
+    };
+    // The pair path needs its staging slabs; the fused path runs without
+    // them (they were not grown).
+    let gate_up = if glu_cache.is_some() {
+        None
+    } else {
+        match (gate, up) {
+            (Some(g), Some(u)) => Some((g, u)),
+            _ => return false,
+        }
     };
     let (Some((_, _, scr_n)), Some((_, _, scr_m))) = (scratch_n, scratch_mlp) else {
         return false;
@@ -1039,20 +1057,36 @@ pub fn dispatch_ffn_block(
                 .mma
                 .launch_prefill_quantize(stream, normx, scr_n, n, p)
                 .map_err(|e| e.to_string())?;
-            crate::prefill_cuda_mma::launch_prefill_gemm_pair_cached(
-                &stack.mma,
-                stream,
-                &gate_cache,
-                &up_cache,
-                scr_n,
-                gate,
-                up,
-                mlp,
-                n,
-                p,
-            )
-            .map_err(|e| e.to_string())?;
-            stack.ffn.launch_swiglu(stream, se, sr, gate, up, hid, pm)?;
+            match &glu_cache {
+                // Issue 1124 T1 — ONE launch: interleaved gate+up GEMM with
+                // the SwiGLU epilogue writing `hid` directly (the pair
+                // launch + the standalone SwiGLU kernel both deleted).
+                Some(g) => {
+                    crate::prefill_cuda_mma::launch_prefill_gemm_glu_cached(
+                        &stack.mma, stream, g, scr_n, hid, mlp, n, p,
+                    )
+                    .map_err(|e| e.to_string())?;
+                }
+                None => {
+                    let (gate, up) = gate_up
+                        .as_ref()
+                        .ok_or("pair path without gate/up staging")?;
+                    crate::prefill_cuda_mma::launch_prefill_gemm_pair_cached(
+                        &stack.mma,
+                        stream,
+                        &gate_cache,
+                        &up_cache,
+                        scr_n,
+                        gate,
+                        up,
+                        mlp,
+                        n,
+                        p,
+                    )
+                    .map_err(|e| e.to_string())?;
+                    stack.ffn.launch_swiglu(stream, se, sr, gate, up, hid, pm)?;
+                }
+            }
             stack
                 .mma
                 .launch_prefill_quantize(stream, hid, scr_m, mlp, p)

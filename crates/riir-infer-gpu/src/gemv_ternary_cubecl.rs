@@ -2093,6 +2093,19 @@ pub struct TernaryHandle {
     ))]
     pub cuda_mma_cache:
         std::sync::OnceLock<Option<std::sync::Arc<crate::prefill_cuda_mma::CudaMmaWeightCache>>>,
+    /// Issue 1124 T1 — the fused gate+up GLU mirror (the row-interleaved
+    /// v10tglu weight slab) for THIS handle as the GATE side of the FFN pair.
+    /// Populated lazily by `glu_pair_cache_or_none` at first armed dispatch
+    /// (the same pattern); `None` inside = permanent failure (the FFN block
+    /// stays on the pair path). Never paid unless
+    /// `RIIR_PREFILL_FFN_GLU` arms the fused route.
+    #[cfg(all(
+        feature = "ternary_gemv_cuda_raw",
+        feature = "ternary_gemm_batched",
+        not(target_os = "macos")
+    ))]
+    pub cuda_glu_cache:
+        std::sync::OnceLock<Option<std::sync::Arc<crate::prefill_cuda_mma::CudaGluPairCache>>>,
 }
 
 #[cfg(feature = "cubecl_runtime")]
@@ -2149,6 +2162,7 @@ impl TernaryHandle {
                 not(target_os = "macos")
             ))]
             cuda_mma_cache: std::sync::OnceLock::new(),
+            cuda_glu_cache: std::sync::OnceLock::new(),
         }
     }
 
@@ -2204,6 +2218,7 @@ impl TernaryHandle {
                 not(target_os = "macos")
             ))]
             cuda_mma_cache: std::sync::OnceLock::new(),
+            cuda_glu_cache: std::sync::OnceLock::new(),
         }
     }
 
@@ -2284,6 +2299,7 @@ impl TernaryHandle {
                 not(target_os = "macos")
             ))]
             cuda_mma_cache: std::sync::OnceLock::new(),
+            cuda_glu_cache: std::sync::OnceLock::new(),
         }
     }
 
