@@ -701,6 +701,17 @@ name = "flashmemory_decode_gate"
 path = "src/bin/flashmemory_decode_gate.rs"
 required-features = ["flashmemory_budget", "deltanet_ternary_inference", "bonsai2_hadamard"]
 
+# Issue 1122 T2 — the cross-call history n-gram drafter's acceptance-rate
+# probe on a real repeated-prompt workload (Bonsai-27B-PQ2 CPU forward).
+# Same posture as the flashmemory gate minus flashmemory_budget (the probe
+# runs the dense reference forward only). The estimator module
+# (rollout_history) is ungated pure token-math; this row protects the
+# forward-reading driver (the green-zero law).
+[[bin]]
+name = "rollout_history_probe"
+path = "src/bin/rollout_history_probe.rs"
+required-features = ["deltanet_ternary_inference", "bonsai2_hadamard"]
+
 # Plan 622 T2.5 — the layer-choice measurement: acc-vs-K at L ∈ {0, 1, mid}
 # on the NIAH suite (the needle gate's rig, selection-alone), through the
 # pruned prefill + pruned decode. Pins the prune-layer constant for OUR

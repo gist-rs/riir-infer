@@ -138,6 +138,11 @@ pub mod fa_minimize;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod tokenizer;
 
+/// Issue 1122 T2 — the cross-call history n-gram drafter's offline
+/// acceptance-rate estimator (pure token-math over captured decode logs;
+/// the measurement instrument, not the gated T1 drafter arm).
+pub mod rollout_history;
+
 // Upstream re-export the model layer consumes (`crate::turboquant` —
 // transformer/mod.rs + tests). Same gated form as riir-engine's copy;
 // riir-engine keeps its own for its consumers.
