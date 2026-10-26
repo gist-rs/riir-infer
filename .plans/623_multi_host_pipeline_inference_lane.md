@@ -1,6 +1,7 @@
 # Plan 623: Multi-host inference lane — layer-range stages, activation frames, TCP→RDMA transport, TP, speculative fill
 
 **Status:** Phase 1 (T1.1–T1.4) LANDED 2026-10-26 — substrate + range-forward seams
+**Claimed:** m3-idle-623t15, 1793003851, expires 2026-10-28T08:37Z — T1.5 (Metal/CubeCL range-forward + G1), the amo lane's Phase-0 elephant-capture constraint does not bind the M3
 + the 10-test G1 battery, all gates green (see the Phase 1 checkboxes). Phase 0 is decision-free (measurement only) and may
 start once Issue 1109 T0 (bmo reachable) is done; Phase 1 substrate is decision-free
 (riir-infer-core, no deps); Phase 2+ waits on [Proposal 042](../.proposals/042_multi_mac_distributed_inference.md) D1 (crate home); Phase 3+ on D2 (RDMA enabled).
