@@ -1,6 +1,6 @@
 # Issue 1124: prefill GLU-into-GEMM fusion — interleaved gate/up rows, single accumulator, write-back GLU (llama.cpp #29948 distill)
 
-**Status:** T1 LANDED 2026-10-26 (4090, kernel probe 1.26×/1.23×, bit-identity GATE PASS) — T2 (e2e GOAT) armed; filed 2026-10-26 from
+**Status:** T1 LANDED 2026-10-26 (4090, kernel probe 1.26×/1.23×, bit-identity GATE PASS) — T3 DONE 2026-10-26 (mined via refine Batch 287 `d871a0fc`, Plan 292 / Research 325) — T2 (e2e GOAT) armed on the league window; filed 2026-10-26 from
 [llama.cpp #29948](https://github.com/ggml-org/llama.cpp/pull/29948) (merged 2026-10-25,
 `c49edf0a`, "CUDA: fuse FFN gate/up matmuls and GLU in MMQ with interleaved gate/up rows").
 No plan opens until a session can run the build+bench battery on a quiet box; this issue
@@ -136,10 +136,18 @@ Honest caveats:
   league window and the bout owner's protocol, not runnable from this repo
   alone. Engagement proof at run time: `RIIR_PREFILL_CUDA_FFN_TRACE=1`
   prints the per-layer `[721-trace]` lines when the block dispatches.
-- [ ] **T3 (kernel_opt rider).** The tile-order law (column-tiles-innermost when
-  weight footprint > L2) + the single-accumulator GLU write-back are minable as
-  kernel_opt rules — route through the refine mining lane (do NOT mine here; this
-  issue is the pointer).
+- [x] **T3 (kernel_opt rider). DONE 2026-10-26 — already mined; dedup caught the
+  duplicate before authoring.** The refine mining lane's Batch 287 (riir-refine
+  `d871a0fc`, "the llama.cpp fusion trio P81/P82/P83", Plan 292 / Research 325)
+  landed BOTH laws as count-neutral riders: the column-innermost operand-
+  footprint order law rides `l2-grouped-tile-schedule` (Batch 287 rider, with
+  the maintainer's measured GB10/5090 swing table) and the single-accumulator
+  GLU write-back (chunks-of-8 gate/up interleave, unchanged MMA loop, halved
+  store loop, the admission faces incl. the stream-K refusal / wave-efficiency
+  posture) rides `fuse-gate-up-gemv-activation` (the MMQ prefill instance);
+  #30489's mixed-type consumer-fold faces are mined alongside. Verified this
+  session by corpus grep before writing anything (the Issue-825 class, caught
+  at the dedup step this time).
 - [-] **T4 (deferred — CubeCL twin).** The same fusion for the CubeCL ternary GEMM
   family (wg/WG-occupancy arms) is a separate cell; the cudarc lane is the league
   posture, do it first.
