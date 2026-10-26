@@ -1,7 +1,8 @@
 # Issue 1130 — Metal concat-epilogue rung: the folded GDN qkv|z Split2 folded INTO the ternary concat GEMV's epilogue (the Bench-1007 named probe — unclaimed)
 
 **Status:** OPEN — filed 2026-10-26 ~23:0x +07 from the Bench-1007 defense continuation (issue 1113 lane, Metal/CubeCL side).
-**Claimed:** none — unclaimed; the i1127 bundle (attention-chain T1, FWHT T3) is the CUDA lane, disjoint.
+**Lease:** none as of filing — the i1127 bundle (attention-chain T1, FWHT T3) is the CUDA lane, disjoint.
+**Claimed:** zed-m3-1130-concat-split, 1793030628, expires 2026-10-28T16:03:48Z
 
 ## The trigger (measured, not assumed)
 
