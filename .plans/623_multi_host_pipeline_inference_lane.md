@@ -89,7 +89,9 @@ mlx-lm on the Proposal-042 scoreboard **measured on the same two boxes**.
   green at the gated posture; clippy 0 at default / gated / no-default postures; lib
   347 passed (gated) / 269 (default); rustfmt clean on every touched file. Found
   (pre-existing, NOT this plan's): the issue028 `dual_format_q4_prefill_pair_loads_and_runs`
-  gate red at pristine HEAD — filed as [Issue 1123](../.issues/1123_issue028_q4_prefill_gate_red_on_develop.md).
+  gate red at pristine HEAD — filed as [Issue 1123](../HISTORY.md) (closed 2026-10-26, record in
+  HISTORY.md: the TEST was stale — the TernaryQ2 promotion outran the battery; decode gate
+  strengthened to all-sites ternary-arm, `e56dc0f`).
 - [x] **T1.5** Range-forward on Metal/CubeCL: `TernaryDeltanetGpuForward::forward_from_x`
   / `mark_x_as_input` (the existing upload-x seam) and gemma2 `forward_layer_gpu` loop with
   `[lo, hi)`; G1 bit-identity vs the full GPU forward.
