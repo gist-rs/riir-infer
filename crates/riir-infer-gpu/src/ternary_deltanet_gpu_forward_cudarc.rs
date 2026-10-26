@@ -2674,6 +2674,17 @@ impl TernaryDeltanetGpuForwardCudarc {
             .stream
             .synchronize()
             .map_err(|e| CudarcKernelError::Launch(e.to_string()))?;
+        // Issue 1125 rung-1 falsifier — the captured step must contain ZERO
+        // standalone quantize dispatches at fused geometry (the K1-K5 rotation
+        // kernels write i8+ascale directly). RIIR_QUANTIZE_CENSUS=1 prints the
+        // count after every capture; a non-zero count means a split fallback
+        // site ran and the rung-1 verdict needs re-adjudication.
+        if std::env::var("RIIR_QUANTIZE_CENSUS").as_deref() == Ok("1") {
+            let count = crate::cudarc_kernels::quantize_launch_census_count();
+            eprintln!(
+                "RIIR_QUANTIZE_CENSUS: standalone quantize launches in captured graph = {count} (0 = fused everywhere, Issue 1125 rung-1)"
+            );
+        }
         self.graph = Some(graph);
         Ok(())
     }

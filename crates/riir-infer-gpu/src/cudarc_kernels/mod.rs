@@ -38,6 +38,25 @@
 
 #![allow(clippy::too_many_arguments)]
 
+/// Issue 1125 rung-1 falsifier — counts standalone `quantize_f32_to_i8`
+/// dispatches. At Bonsai-2's fused geometry (block 1024) the K1-K5 rotation
+/// kernels write i8+ascale directly, so a full decode step must bump this
+/// exactly zero times; a non-zero count means a split fallback site ran (dead
+/// at that geometry — see the fused_geometry_ok guards). `RIIR_QUANTIZE_CENSUS=1`
+/// prints the per-capture count in `ensure_graph_captured`.
+pub(crate) static QUANTIZE_LAUNCH_CENSUS: AtomicU64 = AtomicU64::new(0);
+
+/// Reset the standalone-quantize launch census (call before a capture or a
+/// measured step).
+pub fn quantize_launch_census_reset() {
+    QUANTIZE_LAUNCH_CENSUS.store(0, Ordering::Relaxed);
+}
+
+/// Standalone-quantize launches since the last reset.
+pub fn quantize_launch_census_count() -> u64 {
+    QUANTIZE_LAUNCH_CENSUS.load(Ordering::Relaxed)
+}
+
 pub mod attention; // Issue 742 T9.2: AttentionKernels consumed by qwen38_dense_cudarc
 pub mod attention_score_mma; // Plan 551 / Issue 773 T2: 3xtf32 score-phase scaffold (unwired, GPU-gated)
 pub mod deltanet; // Issue 742 T9.2: DeltanetKernels consumed by qwen38_dense_cudarc
@@ -51,6 +70,7 @@ pub use embedding::EmbeddingDequantKernels;
 pub use lora::{LoraDecodeKernels, QvLoraGpuCudarc};
 
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use cudarc::driver::PushKernelArg;
 use cudarc::driver::safe::{CudaContext, CudaFunction, CudaModule, CudaStream, LaunchConfig};
@@ -1683,6 +1703,7 @@ impl ElementwiseKernels {
         ascale: &cudarc::driver::safe::CudaSlice<f32>,
         n: usize,
     ) -> Result<(), CudarcKernelError> {
+        QUANTIZE_LAUNCH_CENSUS.fetch_add(1, Ordering::Relaxed);
         // Must match `ACTIVATION_BLOCK` in `gemv_ternary_cuda_raw.rs` (16).
         const ABLOCK: usize = 16;
         let ablocks = n.div_ceil(ABLOCK);
