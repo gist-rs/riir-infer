@@ -5861,50 +5861,12 @@ fn forward_attention_layer_devpos(
         )?;
     }
 
-    // 2. Split QG into Q and gate.
-    infra.attention.launch_split_qg(
-        &infra.stream,
-        &acts.attn_qg,
-        &acts.attn_q,
-        &acts.attn_gate,
-        hd,
-        n_head,
-    )?;
-
-    // 3. Per-head RMSNorm on Q and K (in-place).
-    infra.attention.launch_rmsnorm_batched(
-        &infra.stream,
-        &acts.attn_q,
-        q_norm,
-        &acts.attn_q,
-        n_head,
-        hd,
-        eps,
-    )?;
-    infra.attention.launch_rmsnorm_batched(
-        &infra.stream,
-        &acts.attn_k,
-        k_norm,
-        &acts.attn_k,
-        n_kv,
-        hd,
-        eps,
-    )?;
-
-    // 4. Partial RoPE on Q and K (in-place) — _devpos variant.
-    infra.attention.launch_rope_devpos(
-        &infra.stream,
-        &acts.attn_q,
-        &acts.attn_k,
-        rotary_dim,
-        hd,
-        n_head,
-        n_kv,
-        &acts.pos_dev_buf,
-        theta_base,
-    )?;
-
-    // 5. Append K, V to KV cache — _devpos variant.
+    // 2–5. Split QG → Q-norm/K-norm → partial RoPE → KV append (the devpos
+    // twin of forward_attention_layer's chain — Issue 1127 T1: FIVE launch-
+    // bound kernels merge into ONE launch; same bit-identity law, same env,
+    // the graph-capture entry). Unset/`=0` = the incumbent chain
+    // byte-identically. pos rides pos_dev_buf (the Issue-618 law — the
+    // captured graph replays at any position).
     let key_cache = acts.layer_states[layer_idx]
         .key_cache
         .as_ref()
@@ -5913,15 +5875,93 @@ fn forward_attention_layer_devpos(
         .value_cache
         .as_ref()
         .expect("value_cache");
-    infra.attention.launch_kv_cache_append_devpos(
-        &infra.stream,
-        &acts.attn_k,
-        &acts.attn_v,
-        key_cache,
-        value_cache,
-        kvd,
-        &acts.pos_dev_buf,
-    )?;
+    let chain_fusable = rotary_dim.is_multiple_of(2)
+        && rotary_dim / 2 <= 256
+        && n_kv <= n_head;
+    if chain_fusable && attn_chain_fused_enabled() {
+        // The Bench-768 vacuous-guard lesson — the graph lane's reach proof.
+        static REACH: std::sync::OnceLock<()> = std::sync::OnceLock::new();
+        if REACH.set(()).is_ok() {
+            eprintln!(
+                "[attn_chain_fused] REACH: fused dispatch live (devpos graph lane, n_head={n_head}, n_kv={n_kv}, hd={hd}, rotary={rotary_dim})"
+            );
+        }
+        infra.attention.launch_attn_chain_fused_devpos(
+            &infra.stream,
+            &acts.attn_qg,
+            &acts.attn_k,
+            &acts.attn_v,
+            q_norm,
+            k_norm,
+            &acts.attn_q,
+            &acts.attn_gate,
+            &acts.attn_k,
+            key_cache,
+            value_cache,
+            rotary_dim,
+            hd,
+            n_head,
+            n_kv,
+            kvd,
+            &acts.pos_dev_buf,
+            theta_base,
+            eps,
+        )?;
+    } else {
+        // 2. Split QG into Q and gate.
+        infra.attention.launch_split_qg(
+            &infra.stream,
+            &acts.attn_qg,
+            &acts.attn_q,
+            &acts.attn_gate,
+            hd,
+            n_head,
+        )?;
+
+        // 3. Per-head RMSNorm on Q and K (in-place).
+        infra.attention.launch_rmsnorm_batched(
+            &infra.stream,
+            &acts.attn_q,
+            q_norm,
+            &acts.attn_q,
+            n_head,
+            hd,
+            eps,
+        )?;
+        infra.attention.launch_rmsnorm_batched(
+            &infra.stream,
+            &acts.attn_k,
+            k_norm,
+            &acts.attn_k,
+            n_kv,
+            hd,
+            eps,
+        )?;
+
+        // 4. Partial RoPE on Q and K (in-place) — _devpos variant.
+        infra.attention.launch_rope_devpos(
+            &infra.stream,
+            &acts.attn_q,
+            &acts.attn_k,
+            rotary_dim,
+            hd,
+            n_head,
+            n_kv,
+            &acts.pos_dev_buf,
+            theta_base,
+        )?;
+
+        // 5. Append K, V to KV cache — _devpos variant.
+        infra.attention.launch_kv_cache_append_devpos(
+            &infra.stream,
+            &acts.attn_k,
+            &acts.attn_v,
+            key_cache,
+            value_cache,
+            kvd,
+            &acts.pos_dev_buf,
+        )?;
+    }
     // Plan 614 / Issue 033 — KV-STORE axis (graphs decode twin; inert under
     // the D5 graphs-off posture, wired for coverage so the graphs lane
     // cannot silently skip the arm).
