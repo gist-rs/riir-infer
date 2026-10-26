@@ -435,6 +435,21 @@ fn real_bonsai_phase_split_is_byte_identical() {
 
 use riir_infer_core::deltanet::ternary_weights::{GateProjWeights, ProjWeights};
 
+/// The decode copy must carry a TERNARY arm — the bit-plane repack
+/// ([`ProjWeights::Ternary`]) or the quant-resident raw-Q2 blocks
+/// ([`ProjWeights::TernaryQ2`], katgpt-rs Issue 935 T5, promoted into
+/// `deltanet_ternary_inference` by riir-infer Issue 043; ternarity is
+/// verified at load, code-3 refused). Never q4/q6/empty — a q4 leak into
+/// the decode set would silently swap the serving halves.
+fn is_ternary_arm(w: &ProjWeights) -> bool {
+    match w {
+        ProjWeights::Ternary(_) => true,
+        #[cfg(feature = "ternary_q2_resident")]
+        ProjWeights::TernaryQ2(_) => true,
+        _ => false,
+    }
+}
+
 /// The dual-format container LOADS and RUNS: decode = `PQ2_0` ternary
 /// (id 142), prefill = the same per-layer projections re-quantized to
 /// `Q4_K` (type 12, only ε(Q4_K) on the identical ternary content), with
@@ -444,7 +459,10 @@ use riir_infer_core::deltanet::ternary_weights::{GateProjWeights, ProjWeights};
 /// Gates:
 ///
 /// 1. the prefill copy carries `ProjWeights::Q4K` arms on its projections
-///    while the decode copy stays all-ternary (a/b stay `GateProjWeights`);
+///    while the decode copy stays all-ternary (`Ternary`, or `TernaryQ2`
+///    when the `ternary_q2_resident` selector is on — the promoted default
+///    since riir-infer Issue 043; both arms are ternary content, verified
+///    at load);
 /// 2. the escape-set law passes at load (byte-identical a/b, BF16 on both
 ///    sides — `verify_escape_set_shared` runs inside `load_pair`);
 /// 3. the phase split RUNS through the q4 arms (bitlinear's Q4K path end to
@@ -470,13 +488,22 @@ fn dual_format_q4_prefill_pair_loads_and_runs() {
     let _ = std::fs::remove_file(&dpath);
     let _ = std::fs::remove_file(&ppath);
 
-    // 1. Arm layout: q4 projections on the prefill side, ternary on decode;
-    //    the a/b escape fields stay GateProjWeights (Dense BF16 arm here).
+    // 1. Arm layout: q4 projections on the prefill side, ternary arms on
+    //    decode — EVERY per-layer projection site, not just layer 0 (the
+    //    a/b escape fields stay GateProjWeights; Dense BF16 arm here).
     let pre = container.prefill();
     let dec = container.decode();
     assert!(matches!(pre.layers[0].in_proj_qkv, ProjWeights::Q4K(..)));
     assert!(matches!(pre.layers[3].attn_wq, ProjWeights::Q4K(..)));
-    assert!(matches!(dec.layers[0].in_proj_qkv, ProjWeights::Ternary(_)));
+    for (i, layer) in dec.layers.iter().enumerate() {
+        for (site, p) in layer.projections().into_iter().enumerate() {
+            assert!(
+                is_ternary_arm(p),
+                "decode layer {i} projection site {site} is not a ternary arm — \
+                 q4/q6 leak into the decode set would swap the serving halves"
+            );
+        }
+    }
     assert!(matches!(
         pre.layers[0].in_proj_a,
         GateProjWeights::Dense(..)
