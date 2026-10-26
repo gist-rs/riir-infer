@@ -913,12 +913,6 @@ pub fn dispatch_ffn_block(
             })
             .clone()
     };
-    let Some(gate_cache) = mirror(gate_w) else {
-        return false;
-    };
-    let Some(up_cache) = mirror(up_w) else {
-        return false;
-    };
     let Some(down_cache) = mirror(down_w) else {
         return false;
     };
@@ -926,6 +920,10 @@ pub fn dispatch_ffn_block(
     // pair path byte-identical; a build failure degrades to the pair path,
     // also bit-safe).
     let glu_cache = crate::prefill_cuda_mma::glu_pair_cache_or_none(client, stream, gate_w, up_w);
+    // Issue-1127 mirror-halving: the gate/up PAIR mirrors resolve only on the
+    // pair route (env demote, posture miss, or a cached GLU build failure) —
+    // the armed fused route never dispatches them (−44.6 MB VRAM at the
+    // league shape). `mirror` stays in scope for the pair arm below.
 
     // 1) Read gamma + x_b back to host (gamma rides the same queue drain).
     let Ok(gamma_bytes) = client.read_one(gamma_handle.clone()) else {
@@ -1071,6 +1069,11 @@ pub fn dispatch_ffn_block(
                     let (gate, up) = gate_up
                         .as_ref()
                         .ok_or("pair path without gate/up staging")?;
+                    // Issue-1127 mirror-halving: resolved HERE, on the live
+                    // pair route only — the armed fused route never builds
+                    // the gate/up pair mirrors.
+                    let gate_cache = mirror(gate_w).ok_or("gate mirror")?;
+                    let up_cache = mirror(up_w).ok_or("up mirror")?;
                     crate::prefill_cuda_mma::launch_prefill_gemm_pair_cached(
                         &stack.mma,
                         stream,

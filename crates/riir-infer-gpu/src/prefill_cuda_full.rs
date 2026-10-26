@@ -2975,12 +2975,8 @@ fn whole_prefill_inner(
         )]
         let ffn_block = |x: &CudaSlice<f32>,
                          lw3: &LayerF32,
-                         #[cfg(feature = "prefill_mmq_v2")] gate_h: &TernaryHandle,
-                         #[cfg(feature = "prefill_mmq_v2")] up_h: &TernaryHandle,
-                         #[cfg(not(feature = "prefill_mmq_v2"))] _gate_h: &TernaryHandle,
-                         #[cfg(not(feature = "prefill_mmq_v2"))] _up_h: &TernaryHandle,
-                         gate_c: &WCache,
-                         up_c: &WCache,
+                         gate_h: &TernaryHandle,
+                         up_h: &TernaryHandle,
                          down_c: &WCache|
          -> Result<(), String> {
             rms(x, &lw3.post_attn_norm, normx, p, n)?;
@@ -3044,7 +3040,13 @@ fn whole_prefill_inner(
                 // hid_b already holds silu(gate)*up — the SwiGLU launch is
                 // the one the fused arm deletes.
             } else if rotation.is_some() {
-                gemm_gu_rot(gate_c, up_c, normx, gate_b, up_b, mlp, n)?;
+                // Issue-1127 mirror-halving: the gate/up PAIR mirrors resolve
+                // only on a live pair route (env demote, posture miss, or a
+                // cached GLU build failure) — the armed fused route never
+                // builds them (−44.6 MB VRAM at the league shape).
+                let gate_c = mma_mirror(client, stream, gate_h).ok_or("gate mirror")?;
+                let up_c = mma_mirror(client, stream, up_h).ok_or("up mirror")?;
+                gemm_gu_rot(&gate_c, &up_c, normx, gate_b, up_b, mlp, n)?;
                 unsafe {
                     stack
                         .ffn
@@ -3052,7 +3054,9 @@ fn whole_prefill_inner(
                         .map_err(|e| format!("ffn/swiglu: {e}"))?;
                 }
             } else {
-                gemm_gu(gate_c, up_c, normx, gate_b, up_b, mlp, n)?;
+                let gate_c = mma_mirror(client, stream, gate_h).ok_or("gate mirror")?;
+                let up_c = mma_mirror(client, stream, up_h).ok_or("up mirror")?;
+                gemm_gu(&gate_c, &up_c, normx, gate_b, up_b, mlp, n)?;
                 unsafe {
                     stack
                         .ffn
@@ -3978,11 +3982,12 @@ fn whole_prefill_inner(
                 }
             }
 
-            // FFN block (both layer kinds).
-            let gate_c = mma_mirror(client, stream, &lw.gate_proj).ok_or("gate mirror")?;
-            let up_c = mma_mirror(client, stream, &lw.up_proj).ok_or("up mirror")?;
+            // FFN block (both layer kinds). The gate/up PAIR mirrors resolve
+            // inside ffn_block on the pair route only — the armed GLU route
+            // never dispatches them (Issue-1127 mirror-halving: only the
+            // interleaved slab is resident on the default posture).
             let down_c = mma_mirror(client, stream, &lw.down_proj).ok_or("down mirror")?;
-            ffn_block(x, lw3, &lw.gate_proj, &lw.up_proj, &gate_c, &up_c, &down_c)?;
+            ffn_block(x, lw3, &lw.gate_proj, &lw.up_proj, &down_c)?;
             stage_done!(other);
         }
         Ok(())
