@@ -5,6 +5,12 @@ record; the full pre-compaction text is in git history (pre-compaction HEAD
 0e50c61b69c6). Operational rules live in `AGENTS.md`; removed issue files: git
 history.
 
+## 2026-10-26 — Issue 1121: StabilityTracker first-ordinal pin CLOSED — landed `c34b954` — file removed
+
+Hardening pin (Issue 1106's `stability.rs`): the first observed stage is now `debug_assert_eq!(ordinal, 0)` — a partial/offset capture feed (e.g. starting at `AfterLayer(30)`) passed both shipped guards (width + strictly-increasing) and reported INDEX-space depth, silently wrong by the offset. `observe`/`stabilization_depth` docs name the full-capture precondition; the order-guard test reworked Embedding-first (`Embedding → AfterLayer(0) → Embedding`, trips the ORDER guard) + new `first_ordinal_must_be_embedding_trips_the_debug_guard` (both `#[cfg(debug_assertions)]`, should_panic verified by name in the run). The one consumer (reflex `twt_profile` depth-probe) feeds full captures by construction — no behavior change.
+
+**Gate-posture correction recorded:** the issue's own T3 command (`cargo test -p riir-infer-laya --features laya-riir --lib`) compiles the module to NOTHING — `stability` is `#[cfg(feature = "twt_profile")]` on the laya side (56-test green run at the wrong posture exercised none of the change; caught by `--list`). Correct posture: `--features laya-riir,twt_profile` — 66 passed, both guard tests executed. The green-zero rule (katgpt-rs Issue 856 class) applies to FEATURE gates, not just `#![cfg]` whole-file gates. Lease: claimed+pushed `22afc87` (zed-amo-idle-refine-g cont.5), work landed same session.
+
 ## 2026-10-25 — Issue 1118 Finding 1: BPE merge ranks re-keyed to packed token-id pairs — LANDED (Bench 894: G1 bit-identical, G2 2.03× encode, G4 zero-alloc probes) — `ad7b5a0`+`54a6616`+`ddc7105`+`c5032f6`
 
 The merge loop allocated two heap Strings per adjacent pair per merge iteration (its own comment admitted it, deferring "a future optimization"). Issue 1118 Finding 1 — the bbtree-class finding the workspace distill (Research 322) flagged in the 16-repo audit — is that future optimization: `merge_ranks` is now `HashMap<u64, usize>` keyed by the packed `(left_id << 32) | right_id` pair (the bbtree inline-key shape: one 8-byte key, zero per-probe allocation). The GGUF string merges translate through the just-loaded vocab at load (cold); pairs missing from the vocab are skipped — provably output-neutral, because a merge rule is defined over vocab token pairs, so a non-vocab part could never fire in EITHER keying.
