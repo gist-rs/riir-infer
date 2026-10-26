@@ -1,8 +1,13 @@
 # Issue 1130 — Metal concat-epilogue rung: the folded GDN qkv|z Split2 folded INTO the ternary concat GEMV's epilogue (the Bench-1007 named probe — unclaimed)
 
-**Status:** OPEN — filed 2026-10-26 ~23:0x +07 from the Bench-1007 defense continuation (issue 1113 lane, Metal/CubeCL side).
+<<<<<<< HEAD
+**Status:** IMPLEMENTATION BANKED + G1 PASS — 2026-10-26 ~23:1x +07: the complete rung landed from Session `zed-amo-1130-concatsplit` (a race window vs the lease claim below — the local fetch predating the push; donated, see the handoff note at the bottom). **The G2 e2e A/B + records belong to the lease holder.**
 **Lease:** none as of filing — the i1127 bundle (attention-chain T1, FWHT T3) is the CUDA lane, disjoint.
 **Claimed:** zed-m3-1130-concat-split, 1793030628, expires 2026-10-28T16:03:48Z
+=======
+**Status:** CLAIMED — 2026-10-26 ~23:4x +07, Session `zed-amo-1130-concatsplit` (implementation + G1 + the G2 e2e A/B this session; box load 2.6 falling — quiet window open).
+**Claimed:** `zed-amo-1130-concatsplit` (Metal/CubeCL lane; the i1127 CUDA bundle is disjoint).
+>>>>>>> ee96379 (feat(1130): Metal concat-epilogue split rung — the folded GDN qkv|z Split2 folded INTO the ternary concat GEMV's write epilogue (opt-in RIIR_GDN_CONCAT_SPLIT_FUSED))
 
 ## The trigger (measured, not assumed)
 
@@ -33,3 +38,39 @@ Extend the folded-branch concat GEMV dispatch (ternary_deltanet_gpu_forward.rs, 
 - NOT the Metal int8 consumer (T5-class, owned in the riir-ai 1113 lane).
 
 **Refs:** riir-ai `.benchmarks/1007_issue1129_dense_pair_rung.md` (the per-dispatch floor evidence + this probe named); riir-infer issue 1129 (the promoted precedent + the launch-floor micro read); riir-infer issue 1127 (the sibling bundle — disjoint lanes verified); riir-ai issue 1113 (the defense; post-promotion re-cell 0.685×/0.677×).
+
+## Handoff note (2026-10-26 ~23:2x +07 — Session `zed-amo-1130-concatsplit`, the race-resolution donation)
+
+Race window: this implementation was built ~6 minutes after the lease claim above was filed
+(this session's issue read at ~22:57 still showed `Claimed: none`; the claim push landed
+23:04:07 +07 and the local fetch predating it missed that). Per the lease law + the Bench-649
+GPU exclusivity, the rung's EXECUTION is yielded to the lease holder — the code is donated so
+no work is duplicated:
+
+- The rung is COMPLETE and G1-verified in-tree:
+  - `gemv_ternary_plane_rowtiled8_f16scale_split` (gemv_ternary_scale_ab_cubecl.rs) — verbatim
+    f16scale kernel math, redirected write epilogue (rows `[0, split_row)` → `out_a`/qkv, rows
+    `[split_row, m)` → `out_b`/z_buf at `row - split_row`); branch hoisted to the epilogue,
+    zero cost in the dot loop.
+  - `GemvTernaryCubeCL::launch_split` — f16 lane ONLY (the shipping decode dispatch), occupancy-rule
+    wg default (the same geometry `launch()` picks at this m → the A/B is like-for-like), returns
+    `false` → exact staging-chain fallback; `RIIR_GDN_CONCAT_SPLIT_FUSED` opt-in +
+    `RIIR_GDN_CONCAT_WG` sweep knob + the vacuous-guard counter.
+  - Folded `gdn_proj` wiring: `launch_split` armed gates the Split2 off; bit 9 strips the GEMV
+    and the (then-gated) split either way.
+  - G1 PASS (`test_concat_split_bit_identity`): to_bits EXACT vs the `launch()`+`Split2CubeCL`
+    chain at the real folded shape (16384 = 10240+6144 × 5120) + boundary-straddling (24×128,
+    split 15) + doubly-ragged (13×100, split 5), wg {256,128,64} ×3 repeats, NaN-sentinel full
+    coverage, counter +1/launch, demote hatch OFF→false. Verify:
+    `cargo test -p riir-infer-gpu --features "cubecl_runtime ternary_gemv" --release test_concat_split_bit_identity -- --nocapture`
+- The e2e A/B harness is banked at riir-ai `445cc4e5a`:
+  `crates/riir-gpu/tests/bench_1130_concat_split_e2e_ab.rs` (ABBA, one model load, the
+  bench_1129 pattern, composed-caches regime; the facade re-exports
+  `set_concat_split_fused`/`concat_split_launch_count`).
+- One deliberate divergence from this issue's text: the harness does NOT pin the wg — both
+  arms ride the Issue-1114 occupancy rule (the incumbent dispatches wg 128 at m=16384), so the
+  measured delta is the split elimination alone; `RIIR_GDN_CONCAT_WG` remains the sweep knob.
+  The 1129 micro read's "pin 256" advice applied to THAT rung's geometry.
+- Holder's run: verify G1, then the A/B per the harness header (Bench-649 exclusivity; the
+  census expectation is +2.5-7% from the 1.77 ms/token leg). On GOAT (both rounds ≥1.5%),
+  promotion flips `concat_split_fused_enabled` to the demote-only default + a league re-cell.

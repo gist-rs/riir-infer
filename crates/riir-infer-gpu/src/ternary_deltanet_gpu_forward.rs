@@ -5533,7 +5533,31 @@ impl TernaryDeltanetGpuForward {
         let folded = self.rot_tables.is_some();
         if gdn_subclass_on(DECODE_STAGE_GDN_PROJ) {
         if folded {
+            // Issue 1130 — the concat-epilogue split rung: ONE launch
+            // writes the qkv|z rows directly to their consumers (rows
+            // [0, conv_dim) → qkv, [conv_dim, m) → z_buf), eliminating the
+            // input_proj_out staging pass AND the Split2 dispatch (−1
+            // launch per GDN layer, −64 KB/layer round-trip; 32 GDN
+            // layers/token). Bit-identical by construction: same kernel
+            // math, same row→plane mapping — only the destination address
+            // changes. Opt-in `RIIR_GDN_CONCAT_SPLIT_FUSED` until the
+            // Bench-1130 GOAT; `launch_split` returns false when unarmed
+            // (or when the f16-scale lane is unavailable) and the incumbent
+            // staging chain below runs instead — bit 9 strips the GEMV and
+            // the (then-gated) split either way.
+            let mut concat_fired = false;
             if gdn_proj_leg_on(DECODE_STAGE_GDN_PROJ_CONCAT) {
+            concat_fired = unsafe {
+                GemvTernaryCubeCL::launch_split::<ActiveRuntime>(
+                    &self.client,
+                    &layer_w.in_proj_concat,
+                    self.rot_scratch.clone(),
+                    self.qkv.clone(),
+                    self.z_buf.clone(),
+                    conv_dim,
+                )
+            };
+            if !concat_fired {
             unsafe {
                 GemvTernaryCubeCL::launch::<ActiveRuntime>(
                     &self.client,
@@ -5541,6 +5565,7 @@ impl TernaryDeltanetGpuForward {
                     self.rot_scratch.clone(),
                     self.input_proj_out.clone(),
                 );
+            }
             }
             }
             if gdn_proj_leg_on(DECODE_STAGE_GDN_PROJ_DENSE) {
@@ -5589,7 +5614,7 @@ impl TernaryDeltanetGpuForward {
                 }
             }
             }
-            if gdn_proj_leg_on(DECODE_STAGE_GDN_PROJ_CONCAT) {
+            if gdn_proj_leg_on(DECODE_STAGE_GDN_PROJ_CONCAT) && !concat_fired {
             unsafe {
                 Split2CubeCL::launch::<ActiveRuntime>(
                     &self.client,

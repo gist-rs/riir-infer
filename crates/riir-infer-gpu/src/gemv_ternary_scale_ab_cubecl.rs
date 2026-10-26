@@ -309,6 +309,304 @@ fn gemv_ternary_plane_rowtiled8_f16scale(
     }
 }
 
+// ── Issue 1130: the concat-epilogue split arm ───────────────────────
+
+/// `gemv_ternary_plane_rowtiled8_f16scale` with the GDN qkv|z Split2
+/// folded into the write epilogue (Issue 1130): rows `[0, split_row)`
+/// land in `out_a` (the conv1d's `qkv`), rows `[split_row, m)` land in
+/// `out_b` (the z-gate's `z_buf`) at `row - split_row`.
+///
+/// The dot/sum math is VERBATIM the f16scale kernel — same word loop,
+/// same per-row fold order, same `plane_sum` — so per-row values are
+/// bit-identical by construction; ONLY the destination address changes
+/// (the movement-only discipline of the Issue-1129 dense-pair rung).
+/// This eliminates the `input_proj_out` staging round-trip AND the
+/// Split2 dispatch: −1 launch per GDN layer (−32/token on the 27B) and
+/// −64 KB/layer of redundant read+write. Dispatched only on the f16
+/// lane (the shipping decode dispatch since Bench 771) via
+/// `GemvTernaryCubeCL::launch_split`; the branch is plane-uniform and
+/// hoisted to the write epilogue — zero cost inside the dot loop.
+#[cfg(feature = "cubecl_runtime")]
+#[cube(launch_unchecked)]
+fn gemv_ternary_plane_rowtiled8_f16scale_split(
+    pos_bits_u32: &[u32],
+    neg_bits_u32: &[u32],
+    group_scale_f16: &[half_f16],
+    input: &[f32],
+    out_a: &mut [f32],
+    out_b: &mut [f32],
+    blocks64: u32,
+    groups_per_row: u32,
+    n: u32,
+    m: u32,
+    split_row: u32,
+) {
+    let words_per_row = blocks64 * 2u32;
+
+    let plane_id = ABSOLUTE_POS_X / PLANE_DIM;
+    let lane = UNIT_POS_PLANE;
+    let row_base = plane_id * TERNARY_ROWS_PER_PLANE_8;
+
+    if row_base >= m {
+        terminate!();
+    }
+
+    let r0 = row_base;
+    let mut r1 = m - 1u32;
+    let mut r2 = m - 1u32;
+    let mut r3 = m - 1u32;
+    let mut r4 = m - 1u32;
+    let mut r5 = m - 1u32;
+    let mut r6 = m - 1u32;
+    let mut r7 = m - 1u32;
+    if row_base + 1u32 < m {
+        r1 = row_base + 1u32;
+    }
+    if row_base + 2u32 < m {
+        r2 = row_base + 2u32;
+    }
+    if row_base + 3u32 < m {
+        r3 = row_base + 3u32;
+    }
+    if row_base + 4u32 < m {
+        r4 = row_base + 4u32;
+    }
+    if row_base + 5u32 < m {
+        r5 = row_base + 5u32;
+    }
+    if row_base + 6u32 < m {
+        r6 = row_base + 6u32;
+    }
+    if row_base + 7u32 < m {
+        r7 = row_base + 7u32;
+    }
+
+    let mut acc0 = f32::new(0.0f32);
+    let mut acc1 = f32::new(0.0f32);
+    let mut acc2 = f32::new(0.0f32);
+    let mut acc3 = f32::new(0.0f32);
+    let mut acc4 = f32::new(0.0f32);
+    let mut acc5 = f32::new(0.0f32);
+    let mut acc6 = f32::new(0.0f32);
+    let mut acc7 = f32::new(0.0f32);
+
+    let mut w = lane;
+    while w < words_per_row {
+        let scale_idx = w >> 2u32;
+        let col_base = w * 32u32;
+
+        let p0 = pos_bits_u32[(r0 * words_per_row + w) as usize];
+        let q0 = neg_bits_u32[(r0 * words_per_row + w) as usize];
+        let p1 = pos_bits_u32[(r1 * words_per_row + w) as usize];
+        let q1 = neg_bits_u32[(r1 * words_per_row + w) as usize];
+        let p2 = pos_bits_u32[(r2 * words_per_row + w) as usize];
+        let q2 = neg_bits_u32[(r2 * words_per_row + w) as usize];
+        let p3 = pos_bits_u32[(r3 * words_per_row + w) as usize];
+        let q3 = neg_bits_u32[(r3 * words_per_row + w) as usize];
+        let p4 = pos_bits_u32[(r4 * words_per_row + w) as usize];
+        let q4 = neg_bits_u32[(r4 * words_per_row + w) as usize];
+        let p5 = pos_bits_u32[(r5 * words_per_row + w) as usize];
+        let q5 = neg_bits_u32[(r5 * words_per_row + w) as usize];
+        let p6 = pos_bits_u32[(r6 * words_per_row + w) as usize];
+        let q6 = neg_bits_u32[(r6 * words_per_row + w) as usize];
+        let p7 = pos_bits_u32[(r7 * words_per_row + w) as usize];
+        let q7 = neg_bits_u32[(r7 * words_per_row + w) as usize];
+
+        // f16 loads + exact in-kernel decode — the ONLY delta vs the baseline.
+        let s0 = f32::cast_from(group_scale_f16[(r0 * groups_per_row + scale_idx) as usize]);
+        let s1 = f32::cast_from(group_scale_f16[(r1 * groups_per_row + scale_idx) as usize]);
+        let s2 = f32::cast_from(group_scale_f16[(r2 * groups_per_row + scale_idx) as usize]);
+        let s3 = f32::cast_from(group_scale_f16[(r3 * groups_per_row + scale_idx) as usize]);
+        let s4 = f32::cast_from(group_scale_f16[(r4 * groups_per_row + scale_idx) as usize]);
+        let s5 = f32::cast_from(group_scale_f16[(r5 * groups_per_row + scale_idx) as usize]);
+        let s6 = f32::cast_from(group_scale_f16[(r6 * groups_per_row + scale_idx) as usize]);
+        let s7 = f32::cast_from(group_scale_f16[(r7 * groups_per_row + scale_idx) as usize]);
+
+        // Two-accumulator select-form ternary dot (identical to baseline).
+        let mut a0p = f32::new(0.0f32);
+        let mut a0n = f32::new(0.0f32);
+        let mut a1p = f32::new(0.0f32);
+        let mut a1n = f32::new(0.0f32);
+        let mut a2p = f32::new(0.0f32);
+        let mut a2n = f32::new(0.0f32);
+        let mut a3p = f32::new(0.0f32);
+        let mut a3n = f32::new(0.0f32);
+        let mut a4p = f32::new(0.0f32);
+        let mut a4n = f32::new(0.0f32);
+        let mut a5p = f32::new(0.0f32);
+        let mut a5n = f32::new(0.0f32);
+        let mut a6p = f32::new(0.0f32);
+        let mut a6n = f32::new(0.0f32);
+        let mut a7p = f32::new(0.0f32);
+        let mut a7n = f32::new(0.0f32);
+
+        if col_base + 32u32 <= n {
+            #[unroll]
+            for b in 0u32..32u32 {
+                let x = input[(col_base + b) as usize];
+                let pb0 = (p0 >> b) & 1u32 != 0u32;
+                let nb0 = (q0 >> b) & 1u32 != 0u32;
+                let pb1 = (p1 >> b) & 1u32 != 0u32;
+                let nb1 = (q1 >> b) & 1u32 != 0u32;
+                let pb2 = (p2 >> b) & 1u32 != 0u32;
+                let nb2 = (q2 >> b) & 1u32 != 0u32;
+                let pb3 = (p3 >> b) & 1u32 != 0u32;
+                let nb3 = (q3 >> b) & 1u32 != 0u32;
+                let pb4 = (p4 >> b) & 1u32 != 0u32;
+                let nb4 = (q4 >> b) & 1u32 != 0u32;
+                let pb5 = (p5 >> b) & 1u32 != 0u32;
+                let nb5 = (q5 >> b) & 1u32 != 0u32;
+                let pb6 = (p6 >> b) & 1u32 != 0u32;
+                let nb6 = (q6 >> b) & 1u32 != 0u32;
+                let pb7 = (p7 >> b) & 1u32 != 0u32;
+                let nb7 = (q7 >> b) & 1u32 != 0u32;
+                a0p += select(pb0, x, f32::new(0.0f32));
+                a0n += select(nb0, x, f32::new(0.0f32));
+                a1p += select(pb1, x, f32::new(0.0f32));
+                a1n += select(nb1, x, f32::new(0.0f32));
+                a2p += select(pb2, x, f32::new(0.0f32));
+                a2n += select(nb2, x, f32::new(0.0f32));
+                a3p += select(pb3, x, f32::new(0.0f32));
+                a3n += select(nb3, x, f32::new(0.0f32));
+                a4p += select(pb4, x, f32::new(0.0f32));
+                a4n += select(nb4, x, f32::new(0.0f32));
+                a5p += select(pb5, x, f32::new(0.0f32));
+                a5n += select(nb5, x, f32::new(0.0f32));
+                a6p += select(pb6, x, f32::new(0.0f32));
+                a6n += select(nb6, x, f32::new(0.0f32));
+                a7p += select(pb7, x, f32::new(0.0f32));
+                a7n += select(nb7, x, f32::new(0.0f32));
+            }
+        } else {
+            #[unroll]
+            for b in 0u32..32u32 {
+                let col = col_base + b;
+                if col < n {
+                    let x = input[col as usize];
+                    let pb0 = (p0 >> b) & 1u32 != 0u32;
+                    let nb0 = (q0 >> b) & 1u32 != 0u32;
+                    let pb1 = (p1 >> b) & 1u32 != 0u32;
+                    let nb1 = (q1 >> b) & 1u32 != 0u32;
+                    let pb2 = (p2 >> b) & 1u32 != 0u32;
+                    let nb2 = (q2 >> b) & 1u32 != 0u32;
+                    let pb3 = (p3 >> b) & 1u32 != 0u32;
+                    let nb3 = (q3 >> b) & 1u32 != 0u32;
+                    let pb4 = (p4 >> b) & 1u32 != 0u32;
+                    let nb4 = (q4 >> b) & 1u32 != 0u32;
+                    let pb5 = (p5 >> b) & 1u32 != 0u32;
+                    let nb5 = (q5 >> b) & 1u32 != 0u32;
+                    let pb6 = (p6 >> b) & 1u32 != 0u32;
+                    let nb6 = (q6 >> b) & 1u32 != 0u32;
+                    let pb7 = (p7 >> b) & 1u32 != 0u32;
+                    let nb7 = (q7 >> b) & 1u32 != 0u32;
+                    a0p += select(pb0, x, f32::new(0.0f32));
+                    a0n += select(nb0, x, f32::new(0.0f32));
+                    a1p += select(pb1, x, f32::new(0.0f32));
+                    a1n += select(nb1, x, f32::new(0.0f32));
+                    a2p += select(pb2, x, f32::new(0.0f32));
+                    a2n += select(nb2, x, f32::new(0.0f32));
+                    a3p += select(pb3, x, f32::new(0.0f32));
+                    a3n += select(nb3, x, f32::new(0.0f32));
+                    a4p += select(pb4, x, f32::new(0.0f32));
+                    a4n += select(nb4, x, f32::new(0.0f32));
+                    a5p += select(pb5, x, f32::new(0.0f32));
+                    a5n += select(nb5, x, f32::new(0.0f32));
+                    a6p += select(pb6, x, f32::new(0.0f32));
+                    a6n += select(nb6, x, f32::new(0.0f32));
+                    a7p += select(pb7, x, f32::new(0.0f32));
+                    a7n += select(nb7, x, f32::new(0.0f32));
+                }
+            }
+        }
+
+        let a0 = a0p - a0n;
+        let a1 = a1p - a1n;
+        let a2 = a2p - a2n;
+        let a3 = a3p - a3n;
+        let a4 = a4p - a4n;
+        let a5 = a5p - a5n;
+        let a6 = a6p - a6n;
+        let a7 = a7p - a7n;
+
+        acc0 += a0 * s0;
+        acc1 += a1 * s1;
+        acc2 += a2 * s2;
+        acc3 += a3 * s3;
+        acc4 += a4 * s4;
+        acc5 += a5 * s5;
+        acc6 += a6 * s6;
+        acc7 += a7 * s7;
+
+        w += PLANE_DIM;
+    }
+
+    let t0 = plane_sum(acc0);
+    let t1 = plane_sum(acc1);
+    let t2 = plane_sum(acc2);
+    let t3 = plane_sum(acc3);
+    let t4 = plane_sum(acc4);
+    let t5 = plane_sum(acc5);
+    let t6 = plane_sum(acc6);
+    let t7 = plane_sum(acc7);
+
+    if lane == 0u32 {
+        if r0 < split_row {
+            out_a[r0 as usize] = t0;
+        } else {
+            out_b[(r0 - split_row) as usize] = t0;
+        }
+        if row_base + 1u32 < m {
+            if r1 < split_row {
+                out_a[r1 as usize] = t1;
+            } else {
+                out_b[(r1 - split_row) as usize] = t1;
+            }
+        }
+        if row_base + 2u32 < m {
+            if r2 < split_row {
+                out_a[r2 as usize] = t2;
+            } else {
+                out_b[(r2 - split_row) as usize] = t2;
+            }
+        }
+        if row_base + 3u32 < m {
+            if r3 < split_row {
+                out_a[r3 as usize] = t3;
+            } else {
+                out_b[(r3 - split_row) as usize] = t3;
+            }
+        }
+        if row_base + 4u32 < m {
+            if r4 < split_row {
+                out_a[r4 as usize] = t4;
+            } else {
+                out_b[(r4 - split_row) as usize] = t4;
+            }
+        }
+        if row_base + 5u32 < m {
+            if r5 < split_row {
+                out_a[r5 as usize] = t5;
+            } else {
+                out_b[(r5 - split_row) as usize] = t5;
+            }
+        }
+        if row_base + 6u32 < m {
+            if r6 < split_row {
+                out_a[r6 as usize] = t6;
+            } else {
+                out_b[(r6 - split_row) as usize] = t6;
+            }
+        }
+        if row_base + 7u32 < m {
+            if r7 < split_row {
+                out_a[r7 as usize] = t7;
+            } else {
+                out_b[(r7 - split_row) as usize] = t7;
+            }
+        }
+    }
+}
+
 // ── Variant 3: no-scale diagnostic ───────────────────────────────────
 
 /// `gemv_ternary_plane_rowtiled8` with the scale loads AND multiplies removed
@@ -918,6 +1216,73 @@ impl GemvTernaryScaleAbCubeCL {
         }
     }
 
+    /// Issue 1130 — [`Self::launch_f16scale_wg`] with the qkv|z Split2 folded
+    /// into the write epilogue: rows `[0, split_row)` land in `out_a_handle`
+    /// (`qkv`), rows `[split_row, handle.m)` land in `out_b_handle` (`z_buf`)
+    /// at `row - split_row`. Same geometry law as the wg remap: planes are
+    /// addressed globally and the per-row math is verbatim, so this is
+    /// BYTE-IDENTICAL per row at every wg size — only the destination
+    /// address differs from the staging+Split2 chain.
+    ///
+    /// # Safety
+    /// Same requirements as [`Self::launch_f16scale_wg`], with
+    /// `out_a_handle` holding ≥ `split_row` and `out_b_handle` holding
+    /// ≥ `handle.m - split_row` f32 elements; `split_row <= handle.m`
+    /// (asserted). The caller must ensure no other queue operation aliases
+    /// them while the kernel is in flight.
+    pub unsafe fn launch_f16scale_split_wg<R: Runtime>(
+        client: &ComputeClient<R>,
+        handle: &TernaryHandle,
+        scale_f16: &Handle,
+        input_handle: Handle,
+        out_a_handle: Handle,
+        out_b_handle: Handle,
+        split_row: usize,
+        wg_size: u32,
+    ) {
+        assert!(
+            wg_size >= 32 && wg_size.is_multiple_of(32),
+            "wg_size must be a positive multiple of the 32-lane plane"
+        );
+        assert!(
+            split_row <= handle.m,
+            "split_row {split_row} exceeds handle m {}",
+            handle.m
+        );
+        let plane_size = 32u32;
+        let planes_per_wg = wg_size / plane_size;
+        let rows_per_wg = planes_per_wg * TERNARY_ROWS_PER_PLANE_8;
+
+        let m = handle.m as u32;
+        let n = handle.n as u32;
+        let blocks64 = handle.blocks64 as u32;
+        let groups_per_row = handle.groups_per_row as u32;
+        let num_wg = m.div_ceil(rows_per_wg).max(1);
+
+        let pos_len = handle.m * handle.blocks64 * 2;
+        let neg_len = pos_len;
+        let scale_len = handle.m * handle.groups_per_row;
+
+        unsafe {
+            gemv_ternary_plane_rowtiled8_f16scale_split::launch_unchecked::<R>(
+                client,
+                CubeCount::Static(num_wg, 1, 1),
+                CubeDim::new_1d(wg_size),
+                BufferArg::from_raw_parts(handle.pos_bits_u32.clone(), pos_len),
+                BufferArg::from_raw_parts(handle.neg_bits_u32.clone(), neg_len),
+                BufferArg::from_raw_parts(scale_f16.clone(), scale_len),
+                BufferArg::from_raw_parts(input_handle, n as usize),
+                BufferArg::from_raw_parts(out_a_handle, split_row),
+                BufferArg::from_raw_parts(out_b_handle, handle.m - split_row),
+                blocks64,
+                groups_per_row,
+                n,
+                m,
+                split_row as u32,
+            );
+        }
+    }
+
     /// Word-pair (load-width / ILP probe) arm.
     ///
     /// # Safety
@@ -1001,5 +1366,251 @@ impl GemvTernaryScaleAbCubeCL {
                 m,
             );
         }
+    }
+}
+
+#[cfg(test)]
+mod concat_split_tests {
+    use super::*;
+    use crate::context::GpuContext;
+    use crate::cubecl_runtime::ActiveRuntime;
+    use crate::elementwise_cubecl::Split2CubeCL;
+    use crate::gemv_ternary_cubecl::{
+        GemvTernaryCubeCL, concat_split_launch_count, set_concat_split_fused,
+    };
+
+    /// Deterministic xorshift64 fills — no rand dep, reproducible across
+    /// runs so G1 failures are diffable (the dense-pair test's helper shape).
+    fn pseudo_bits(len: usize, seed: u64) -> Vec<u64> {
+        let mut state = seed | 1;
+        (0..len)
+            .map(|_| {
+                state ^= state << 13;
+                state ^= state >> 7;
+                state ^= state << 17;
+                state
+            })
+            .collect()
+    }
+
+    fn pseudo_scales(len: usize, seed: u64) -> Vec<half_f16> {
+        let mut state = seed | 1;
+        (0..len)
+            .map(|_| {
+                state ^= state << 13;
+                state ^= state >> 7;
+                state ^= state << 17;
+                half_f16::from_f32(0.5 + ((state % 1000) as f32) / 1000.0)
+            })
+            .collect()
+    }
+
+    fn pseudo_f32(len: usize, seed: u64) -> Vec<f32> {
+        let mut state = seed | 1;
+        (0..len)
+            .map(|_| {
+                state ^= state << 13;
+                state ^= state >> 7;
+                state ^= state << 17;
+                ((state % 2000) as f32 - 1000.0) / 1000.0
+            })
+            .collect()
+    }
+
+    fn read_f32(client: &ComputeClient<ActiveRuntime>, h: &Handle) -> Vec<f32> {
+        let bytes = client.read_one(h.clone()).expect("read_one");
+        f32::from_bytes(&bytes).to_vec()
+    }
+
+    /// G1 (Issue 1130): the split-fused launch is BIT-IDENTICAL to the
+    /// incumbent chain (f16-scale GEMV → staging → Split2CubeCL) — same
+    /// per-row values, same reduction order; only the destination address
+    /// changes. Real folded shape (16384 = 10240 + 6144 rows × 5120), a
+    /// boundary-spanning small shape (a plane straddles the split), and a
+    /// doubly-ragged shape (n not a multiple of 32 → the slow path, m not a
+    /// multiple of 8), at every shipping wg size {256, 128, 64} plus the
+    /// production entry (launch_split, occupancy wg rule). Asserts f32
+    /// to_bits equality, never tolerance; ×3 repeats to defeat buffer-pool
+    /// recycling (the Bench-606 sentinel lesson); NaN-sentinel pre-fill
+    /// asserts FULL coverage of both consumer buffers.
+    #[test]
+    fn test_concat_split_bit_identity() {
+        let ctx = GpuContext::new().expect("GpuContext should init");
+        let client = ctx.cubecl_client();
+
+        if !client.features().plane.contains(Plane::Ops) {
+            eprintln!("Skipping: device does not support plane ops");
+            return;
+        }
+
+        // (m, n, split_row): the real folded qkv|z geometry (conv_dim 10240 +
+        // z_dim 6144 = m 16384, n 5120) + two ragged shapes.
+        let shapes: &[(usize, usize, usize)] = &[
+            (16384, 5120, 10240),
+            (24, 128, 15),
+            (13, 100, 5),
+        ];
+
+        // Arm the production entry for launch_split (the env is opt-in; the
+        // setter is the harness override). Restored to OFF at the end — the
+        // shipping default.
+        set_concat_split_fused(true);
+
+        for &(m, n, split_row) in shapes {
+            let blocks64 = n.div_ceil(64);
+            let groups_per_row = n.div_ceil(128);
+            let pos = pseudo_bits(m * blocks64, 0x9E3779B97F4A7C15);
+            let neg = pseudo_bits(m * blocks64, 0xBF58476D1CE4E5B9);
+            let scales = pseudo_scales(m * groups_per_row, 0x94D049BB133111EB);
+            let input = pseudo_f32(n, 0xA24BAED4963EE407);
+
+            let handle = TernaryHandle::from_raw(&client, &pos, &neg, &scales, m, n);
+            // The f16-scale lane is the shipping dispatch (DEFAULT ON since
+            // Bench 771); the split arm rides it. Skip honestly if this
+            // build ran with the f16 upload off.
+            if handle.group_scale_f16.is_none() {
+                eprintln!(
+                    "Skipping ({m}×{n}): f16 scale buffers not uploaded (RIIR_GEMV_F16_SCALE=0 build)"
+                );
+                continue;
+            }
+            let x = client.create_from_slice(f32::as_bytes(&input));
+
+            // Incumbent chain oracle: launch() → staging → Split2CubeCL —
+            // the EXACT production chain (launch() picks the f16scale_wg
+            // kernel at the occupancy wg for this m).
+            let staging = client.empty(m * core::mem::size_of::<f32>());
+            let ref_a = client.empty(split_row * core::mem::size_of::<f32>());
+            let ref_b = client.empty((m - split_row) * core::mem::size_of::<f32>());
+            unsafe {
+                GemvTernaryCubeCL::launch::<ActiveRuntime>(
+                    &client,
+                    &handle,
+                    x.clone(),
+                    staging.clone(),
+                );
+                Split2CubeCL::launch::<ActiveRuntime>(
+                    &client,
+                    staging.clone(),
+                    ref_a.clone(),
+                    ref_b.clone(),
+                    split_row,
+                    m - split_row,
+                );
+            }
+            let ra = read_f32(&client, &ref_a);
+            let rb = read_f32(&client, &ref_b);
+
+            // wg sweep on the split kernel, then the production entry.
+            for wg in [256u32, 128, 64] {
+                for rep in 0..3 {
+                    // NaN sentinel pre-fill — every row MUST be overwritten.
+                    let out_a = client.create_from_slice(f32::as_bytes(
+                        &vec![f32::NAN; split_row],
+                    ));
+                    let out_b = client.create_from_slice(f32::as_bytes(
+                        &vec![f32::NAN; m - split_row],
+                    ));
+                    unsafe {
+                        GemvTernaryScaleAbCubeCL::launch_f16scale_split_wg::<ActiveRuntime>(
+                            &client,
+                            &handle,
+                            handle.group_scale_f16.as_ref().expect("checked above"),
+                            x.clone(),
+                            out_a.clone(),
+                            out_b.clone(),
+                            split_row,
+                            wg,
+                        );
+                    }
+                    let oa = read_f32(&client, &out_a);
+                    let ob = read_f32(&client, &out_b);
+                    assert_eq!(oa.len(), split_row, "({m}×{n}) out_a len");
+                    assert_eq!(ob.len(), m - split_row, "({m}×{n}) out_b len");
+                    for i in 0..split_row {
+                        assert_eq!(
+                            ra[i].to_bits(),
+                            oa[i].to_bits(),
+                            "({m}×{n}) wg {wg} rep {rep}: a-row {i} not bit-identical (ref {} vs split {})",
+                            ra[i],
+                            oa[i]
+                        );
+                    }
+                    for i in 0..(m - split_row) {
+                        assert_eq!(
+                            rb[i].to_bits(),
+                            ob[i].to_bits(),
+                            "({m}×{n}) wg {wg} rep {rep}: b-row {i} not bit-identical (ref {} vs split {})",
+                            rb[i],
+                            ob[i]
+                        );
+                    }
+                }
+                println!("concat-split bit-identity ({m}×{n}, split {split_row}) wg {wg}: EXACT ×3 (both halves)");
+            }
+
+            // The production entry: launch_split at the occupancy wg rule +
+            // the vacuous-guard counter.
+            let counter_before = concat_split_launch_count();
+            let out_a = client.create_from_slice(f32::as_bytes(&vec![f32::NAN; split_row]));
+            let out_b = client.create_from_slice(f32::as_bytes(&vec![f32::NAN; m - split_row]));
+            let fired = unsafe {
+                GemvTernaryCubeCL::launch_split::<ActiveRuntime>(
+                    &client,
+                    &handle,
+                    x.clone(),
+                    out_a.clone(),
+                    out_b.clone(),
+                    split_row,
+                )
+            };
+            assert!(fired, "({m}×{n}) launch_split must fire when armed + f16 present");
+            assert_eq!(
+                concat_split_launch_count(),
+                counter_before + 1,
+                "({m}×{n}) vacuous-guard counter must advance by exactly 1"
+            );
+            let oa = read_f32(&client, &out_a);
+            let ob = read_f32(&client, &out_b);
+            for i in 0..split_row {
+                assert_eq!(ra[i].to_bits(), oa[i].to_bits(), "({m}×{n}) entry a-row {i}");
+            }
+            for i in 0..(m - split_row) {
+                assert_eq!(rb[i].to_bits(), ob[i].to_bits(), "({m}×{n}) entry b-row {i}");
+            }
+            println!("concat-split launch_split entry ({m}×{n}, split {split_row}): EXACT + counter +1");
+        }
+
+        // The demote hatch: unarmed launch_split falls back (returns false)
+        // WITHOUT touching the counter.
+        set_concat_split_fused(false);
+        let counter_before = concat_split_launch_count();
+        let (m, n, split_row) = (24usize, 128usize, 15usize);
+        let handle = TernaryHandle::from_raw(
+            &client,
+            &pseudo_bits(m * 2, 0x9E3779B97F4A7C15),
+            &pseudo_bits(m * 2, 0xBF58476D1CE4E5B9),
+            &pseudo_scales(m, 0x94D049BB133111EB),
+            m,
+            n,
+        );
+        let x = client.create_from_slice(f32::as_bytes(&pseudo_f32(n, 1)));
+        let fired = unsafe {
+            GemvTernaryCubeCL::launch_split::<ActiveRuntime>(
+                &client,
+                &handle,
+                x.clone(),
+                client.empty(split_row * core::mem::size_of::<f32>()),
+                client.empty((m - split_row) * core::mem::size_of::<f32>()),
+                split_row,
+            )
+        };
+        assert!(!fired, "launch_split must NOT fire when unarmed");
+        assert_eq!(
+            concat_split_launch_count(),
+            counter_before,
+            "unarmed launch_split must not advance the counter"
+        );
+        println!("concat-split demote hatch: OFF → false, counter untouched");
     }
 }

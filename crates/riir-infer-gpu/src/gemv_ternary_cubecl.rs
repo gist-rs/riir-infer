@@ -115,6 +115,100 @@ pub fn gemv_f16_scale_launch_count() -> usize {
     F16_SCALE_LAUNCHES.load(std::sync::atomic::Ordering::Relaxed)
 }
 
+// ── Issue 1130: the concat-epilogue split dispatch toggle ───────────
+
+/// Whether the folded GDN `gdn_proj` concat leg dispatches the split-fused
+/// kernel (rows written directly to qkv|z — no `input_proj_out` staging
+/// pass, no `Split2CubeCL`; Issue 1130). **OPT-IN until the Bench-1130
+/// A/B**: unset = OFF (the incumbent staging chain ships); "1"/"on"/"true"
+/// arms it. Outputs are bit-identical by construction (same kernel math,
+/// same row→plane mapping — only the destination address changes), so the
+/// launch counter is the vacuous guard for the e2e A/B, exactly like the
+/// f16-scale and dense-pair rungs before it.
+static USE_GDN_CONCAT_SPLIT: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+static GDN_CONCAT_SPLIT_INITIALIZED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+
+/// Launches dispatched through the split-fused concat path (the
+/// vacuous-guard counter — outputs are bit-identical to the staging chain,
+/// so ONLY this counter proves the toggle reached the dispatch).
+static GDN_CONCAT_SPLIT_LAUNCHES: std::sync::atomic::AtomicUsize =
+    std::sync::atomic::AtomicUsize::new(0);
+
+/// Pinned workgroup override for the split-fused concat launch
+/// (`RIIR_GDN_CONCAT_WG`); 0 = ride the Issue-1114 occupancy rule — the same
+/// geometry `launch()` dispatches the incumbent at for this m, which keeps
+/// the A/B like-for-like (the delta is the split elimination alone).
+static GDN_CONCAT_SPLIT_WG: std::sync::atomic::AtomicU32 =
+    std::sync::atomic::AtomicU32::new(0);
+static GDN_CONCAT_SPLIT_WG_INITIALIZED: std::sync::OnceLock<u32> = std::sync::OnceLock::new();
+
+fn concat_split_env_semantics(env: Result<String, std::env::VarError>) -> bool {
+    match env {
+        // Opt-in rung: unset = OFF (the incumbent staging chain ships until
+        // the Bench-1130 GOAT promotes; the env then flips to demote-only).
+        Err(std::env::VarError::NotPresent) => false,
+        Ok(v) => matches!(v.to_lowercase().as_str(), "1" | "on" | "true"),
+        Err(std::env::VarError::NotUnicode(_)) => false,
+    }
+}
+
+fn concat_split_wg_env(env: Result<String, std::env::VarError>) -> u32 {
+    const ALLOWED: [u32; 3] = [64, 128, 256];
+    match env {
+        Err(_) => 0,
+        Ok(v) => match v.trim().parse::<u32>() {
+            Ok(wg) if ALLOWED.contains(&wg) => wg,
+            _ => 0,
+        },
+    }
+}
+
+#[cfg_attr(not(feature = "ternary_gemv"), allow(dead_code))]
+pub(crate) fn concat_split_fused_enabled() -> bool {
+    if GDN_CONCAT_SPLIT_INITIALIZED
+        .set(concat_split_env_semantics(std::env::var("RIIR_GDN_CONCAT_SPLIT_FUSED")))
+        .is_ok()
+    {
+        USE_GDN_CONCAT_SPLIT.store(
+            GDN_CONCAT_SPLIT_INITIALIZED.get().copied().unwrap_or(false),
+            std::sync::atomic::Ordering::Relaxed,
+        );
+    }
+    USE_GDN_CONCAT_SPLIT.load(std::sync::atomic::Ordering::Relaxed)
+}
+
+/// Force the concat-split fusion on/off (overrides the env var; the bench
+/// harness's arm toggle).
+pub fn set_concat_split_fused(on: bool) {
+    let _ = GDN_CONCAT_SPLIT_INITIALIZED.set(on);
+    USE_GDN_CONCAT_SPLIT.store(on, std::sync::atomic::Ordering::Relaxed);
+}
+
+/// The wg for the split-fused concat launch: the env pin if set, else the
+/// occupancy rule.
+#[cfg_attr(not(feature = "ternary_gemv"), allow(dead_code))]
+pub(crate) fn concat_split_wg_for(m: u32) -> u32 {
+    if GDN_CONCAT_SPLIT_WG_INITIALIZED
+        .set(concat_split_wg_env(std::env::var("RIIR_GDN_CONCAT_WG")))
+        .is_ok()
+    {
+        GDN_CONCAT_SPLIT_WG.store(
+            GDN_CONCAT_SPLIT_WG_INITIALIZED.get().copied().unwrap_or(0),
+            std::sync::atomic::Ordering::Relaxed,
+        );
+    }
+    match GDN_CONCAT_SPLIT_WG.load(std::sync::atomic::Ordering::Relaxed) {
+        0 => occupancy_wg_for(m),
+        wg => wg,
+    }
+}
+
+/// Total launches dispatched through the split-fused concat path so far.
+pub fn concat_split_launch_count() -> usize {
+    GDN_CONCAT_SPLIT_LAUNCHES.load(std::sync::atomic::Ordering::Relaxed)
+}
+
 // ── Issue 1114: the occupancy wg dispatch toggle (Bench 996 cell 4) ────
 
 /// Runtime toggle for the occupancy workgroup rule (Issue 1114; the CUDA
@@ -2691,6 +2785,65 @@ impl GemvTernaryCubeCL {
         unsafe {
             Self::launch_rowtiled8::<R>(client, handle, input_handle, output_handle);
         }
+    }
+
+    /// Issue 1130 — the folded GDN `gdn_proj` concat leg with the qkv|z
+    /// Split2 folded into the write epilogue: rows `[0, split_row)` land in
+    /// `out_a_handle` (`qkv`, the conv1d input), rows `[split_row, m)` land
+    /// in `out_b_handle` (`z_buf`, the z-gate input) at `row - split_row`.
+    ///
+    /// Dispatches ONLY the f16-scale split kernel — the shipping decode
+    /// lane (the f16-scale arm has been the default dispatch since Bench
+    /// 771, and the Issue-1114 occupancy wg rule rides it; the same rule is
+    /// applied here so the A/B is like-for-like). Returns `false` — and the
+    /// caller must fall back to the incumbent staging chain — when the
+    /// toggle is off or the handle carries no f16 scale buffer
+    /// (`RIIR_GEMV_F16_SCALE=0` build). The f32-scale split kernel is
+    /// deliberately not built: it would be dead code at every shipping
+    /// posture, and the staging-chain fallback is exact.
+    ///
+    /// Bit-identical by construction: the kernel math is verbatim
+    /// `gemv_ternary_plane_rowtiled8_f16scale` — same word loop, same
+    /// per-row fold order, same `plane_sum` — and the row→plane mapping is
+    /// unchanged (planes addressed globally), so per-row VALUES are
+    /// identical; only the destination ADDRESS differs (the movement-only
+    /// discipline of the Issue-1129 dense-pair rung).
+    ///
+    /// # Safety
+    ///
+    /// - `input_handle`: `handle.n` f32 elements
+    /// - `out_a_handle`: `split_row` f32 elements
+    /// - `out_b_handle`: `handle.m - split_row` f32 elements
+    /// - `split_row <= handle.m` (asserted)
+    /// - Handles must belong to the same `client`; no aliasing while the
+    ///   kernel is in flight.
+    pub unsafe fn launch_split<R: Runtime>(
+        client: &ComputeClient<R>,
+        handle: &TernaryHandle,
+        input_handle: Handle,
+        out_a_handle: Handle,
+        out_b_handle: Handle,
+        split_row: usize,
+    ) -> bool {
+        if !concat_split_fused_enabled() {
+            return false;
+        }
+        let Some(scale_f16) = handle
+            .group_scale_f16
+            .as_ref()
+            .filter(|_| f16_scale_enabled())
+        else {
+            return false;
+        };
+        GDN_CONCAT_SPLIT_LAUNCHES.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let wg = concat_split_wg_for(handle.m as u32);
+        unsafe {
+            crate::gemv_ternary_scale_ab_cubecl::GemvTernaryScaleAbCubeCL::launch_f16scale_split_wg::<R>(
+                client, handle, scale_f16, input_handle, out_a_handle, out_b_handle, split_row,
+                wg,
+            );
+        }
+        true
     }
 
     /// Launch the subset-sum ("LUT") ternary GEMV (Issue 606 T3c path 1).

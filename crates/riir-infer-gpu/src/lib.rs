@@ -365,6 +365,11 @@ pub use gemv_ternary_cubecl::{
     TernaryTritHandle, gemv_f16_scale_launch_count, gemv_wg_occupancy_launch_count,
     prepare_block_contiguous_u32, set_gemv_use_f16_scale, set_gemv_wg_occupancy,
 };
+// Issue 1130: the concat-split rung's toggle + vacuous-guard counter (the
+// e2e A/B arms; opt-in `RIIR_GDN_CONCAT_SPLIT_FUSED` until the Bench-1130
+// GOAT promotes it).
+#[cfg(feature = "ternary_gemv")]
+pub use gemv_ternary_cubecl::{concat_split_launch_count, set_concat_split_fused};
 #[cfg(all(feature = "ternary_gemv_cuda_raw", not(target_os = "macos")))]
 pub use gemv_ternary_cuda_raw::{
     GpuTernaryMatvecDp4a, TernaryGemmCudaRaw, TernaryGemmCudaRawError, WG_THREADS,
