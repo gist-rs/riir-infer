@@ -120,14 +120,23 @@ applied IN the transposed staging pass from registers (`GEMM_BODY_V10T_GLU_Q8`,
 `gemm_ternary_i8_mma_v6_src.rs`) with the Bench-721 canonical forms in the standalone
 kernel's op order — bit-identical to (v10t pair + standalone SwiGLU) by construction,
 G1 gate 0 bit-diffs ×2 shapes vs the real standalone kernel. Env
-`RIIR_PREFILL_FFN_GLU` ("1"/"true"/"on", DEFAULT OFF; fmt-route packed mirrors +
-`mlp % 128 == 0` posture; the fused path skips the gate/up f32 staging grows + the
-SwiGLU launch — one launch per FFN gate/up pair; failure degradation to the incumbent
-pair path byte-identical). Kernel probe Bench 897 (`.benchmarks/897_issue1124_v10tglu_kernel_probe.md`):
-**1.258× @p2048 / 1.227× @p4096** at the league FFN shapes (m=17408, n=5120). T2 (e2e
-GOAT) runs ONLY through the league runner — the internal battery never reaches
-`dispatch_ffn_block` (the vehicle note in the issue) — armed on the league window;
-T3 mined via refine Batch 287 (`d871a0fc`, Plan 292 / Research 325).
+`RIIR_PREFILL_FFN_GLU` — **PROMOTED DEFAULT-ON 2026-10-27** (Bench 1008 / verdict
+`9ca951de`: paired league windows +6.31/+6.72% pp2048, +7.27/+6.47% pp4096, 4/4
+positive, G1 pins EXACT 4/4; riir-infer `57fa7a7`) — the env is DEMOTE-ONLY
+(exact-literal `0`/`false`/`off` restores the incumbent pair path byte-identically;
+unset = armed; fmt-route packed mirrors + `mlp % 128 == 0` posture; failure
+degradation byte-identical). **T1.5 (2026-10-27, `c60b34d`): the arm was wired ONLY
+into the !folded `dispatch_ffn_block` — the FOLDED league lane
+(`prefill_cuda_full::ffn_block`) had NO v10tglu path; the staged T2 A/B would have
+been pair-vs-pair (caught by the engagement-proof-first protocol — the `[721-trace]`
+line is unreachable at the folded posture; the folded lane's proof is the one-shot
+`[1127-glu] REACH` line). Kernel probe Bench 897
+(`.benchmarks/897_issue1124_v10tglu_kernel_probe.md`): **1.258× @p2048 / 1.227×
+@p4096** at the league FFN shapes (m=17408, n=5120). T2 DONE — Bench 1008
+(`../riir-ai/.benchmarks/1008_issue1127_t4_recell_bundle.md`); follow-ups: the
+mirror-halving commit, the next-bout default-posture confirm (< +3% pooled or any
+negative window → the demote hatch reverts). T3 mined via refine Batch 287
+(`d871a0fc`, Plan 292 / Research 325).
 The decode-hold escalation rungs (the Bench-1004 RED response, 2026-10-26) LANDED as
 eval-gated opt-ins with records, zero production change: `RIIR_GDN_CORE_FUSED=1`
 (one-launch GDN core — G1 exact everywhere, G2 −3.5%/−2.1% NEGATIVE, stays opt-in
