@@ -1,6 +1,6 @@
 //! Plan 623 T1.5 — G1 of the GPU range-forward (Metal/CubeCL): the staged
 //! composition `stage(0..k) ∘ stage(k..n)` must be BIT-IDENTICAL to the 1-box
-//! full GPU forward, for every split k, on the real models.
+//! full GPU forward, for every split k, on the real model.
 //!
 //! This is the GPU twin of the CPU gate (`tests/plan623_multi_host_g1.rs`,
 //! T1.1) and the load-bearing invariant of the whole multi-host lane: a
@@ -12,8 +12,16 @@
 //! same strided-256 walk in both kernels — verified in-source at the T1.5
 //! landing), so any mismatch is a real defect, never a numerics footnote.
 //!
-//! Both arch arms run on ONE forwarder instance (memory: the 27B is ~7 GB):
-//! the reference loop runs first, [`TernaryDeltanetGpuForward::reset_state`]
+//! **Qwen/Bonsai ONLY (owner model-priority law, 2026-10-26):** the gemma2
+//! GPU seam (`forward_gpu_range`) exists as compile-only scaffolding mirroring
+//! the CPU T1.1 symmetry — its EXECUTED G1 cell on the retired gemma-2-2b
+//! checkpoint was RESCINDED by the owner the same day it landed. Gemma2's
+//! per-layer bodies are self-contained, so its range bit-identity is
+//! structural; the executed gate lives on the production lane (ternary
+//! Bonsai-2) alone. No new gemma-2-2b execution cells anywhere.
+//!
+//! The gate runs on ONE forwarder instance (memory: the 27B is ~7 GB): the
+//! reference loop runs first, [`TernaryDeltanetGpuForward::reset_state`]
 //! fully resets (KV bounded by pos, GDN/conv zero-filled, pos = 0), then the
 //! staged loops replay the same tokens through `[0,k)` → hidden handoff →
 //! `[k,n)`. Layer state slots are indexed absolutely and the ranges are
@@ -25,10 +33,9 @@
 //!   --test plan623_multi_host_g1_metal -- --ignored --nocapture --test-threads=1
 //! ```
 //!
-//! Env: `BONSAI2_G1_MODEL` / `GEMMA_G1_MODEL` override the sibling-layout
-//! defaults; `I623_T` overrides the token count (default 4); `I623_K`
-//! (comma list) overrides the every-k split sweep (e.g. `1,32,63` for a
-//! quick posture).
+//! Env: `BONSAI2_G1_MODEL` overrides the sibling-layout default; `I623_T`
+//! overrides the token count (default 4); `I623_K` (comma list) overrides the
+//! every-k split sweep (e.g. `1,32,63` for a quick posture).
 
 #![cfg(all(
     feature = "cubecl_runtime",
@@ -38,16 +45,12 @@
 
 use std::path::PathBuf;
 
-use riir_infer_core::gguf_loader::{
-    load_gemma2_weights_gguf, load_qwen_deltanet_ternary_weights_gguf,
-};
+use riir_infer_core::gguf_loader::load_qwen_deltanet_ternary_weights_gguf;
 use riir_infer_core::multi_host::LayerRange;
+use riir_infer_gpu::TernaryDeltanetGpuForward;
 use riir_infer_gpu::cubecl_runtime::CubeCLContext;
-use riir_infer_gpu::gemma2_cubecl::GpuGemmaCubeCL;
-use riir_infer_gpu::{GpuContext, TernaryDeltanetGpuForward};
 
 const FOLDED_MODEL: &str = "../../../riir-train/data/Ternary-Bonsai-2-27B-PQ2_0.gguf";
-const GEMMA_MODEL: &str = "../../../riir-train/data/gemma-2-2b-it-f16.gguf";
 
 fn env_path(var: &str, default: &str) -> PathBuf {
     std::env::var_os(var)
@@ -178,55 +181,4 @@ fn staged_pipeline(
         out.push(fwd.read_logits());
     }
     out
-}
-
-#[test]
-#[ignore = "requires the Metal GPU + the gemma-2-2b f16 model; run explicitly with --release"]
-fn gemma_range_forward_bit_identical_every_split() {
-    let model = env_path("GEMMA_G1_MODEL", GEMMA_MODEL);
-    if !model.exists() {
-        eprintln!("SKIP: model not found at {}", model.display());
-        return;
-    }
-    let t_count: usize = std::env::var("I623_T")
-        .ok()
-        .and_then(|v| v.parse().ok())
-        .unwrap_or(4);
-
-    let (config, weights) = load_gemma2_weights_gguf(&model).expect("gemma f32 load");
-    let n_layer = config.n_layer;
-    let bos = config.vocab_size / 2;
-    let toks = tokens(t_count, bos, config.vocab_size);
-    println!("gemma arm: n_layer {n_layer}, {t_count} tokens, splits 1..n_layer (every)");
-
-    // The issue1110 probe's construction: GpuContext → client (by value) →
-    // new_f16 builds the f16 GPU buffers from the f32 weights.
-    let ctx = GpuContext::new().expect("GPU init");
-    let client = ctx.cubecl_client();
-    let mut fwd = GpuGemmaCubeCL::new_f16(client, &weights, &config);
-
-    // Reference: the 1-box full forward over the token sequence.
-    let mut reference = Vec::with_capacity(toks.len());
-    for (t, &tok) in toks.iter().enumerate() {
-        reference.push(fwd.forward_gpu(tok, t));
-    }
-
-    for k in 1..n_layer {
-        let mut staged = Vec::with_capacity(toks.len());
-        for (t, &tok) in toks.iter().enumerate() {
-            // First stage: embedding + layers [0, k) → hidden handoff.
-            let hidden = fwd.forward_gpu_range(Some(tok), t, None, LayerRange::new(0, k as u32));
-            // Second stage: layers [k, n) + final norm + lm head → logits.
-            staged.push(fwd.forward_gpu_range(
-                None,
-                t,
-                Some(&hidden),
-                LayerRange::new(k as u32, n_layer as u32),
-            ));
-        }
-        for (t, (r, s)) in reference.iter().zip(staged.iter()).enumerate() {
-            assert_bit_exact("gemma", t, r, s);
-        }
-        println!("gemma split k={k}: bit-identical ×{t_count}");
-    }
 }

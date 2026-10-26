@@ -36,6 +36,8 @@ mlx-lm on the Proposal-042 scoreboard **measured on the same two boxes**.
 - [ ] **T0.3** 1-box arms for the D3 models: riir-infer Metal vs MLX vs llama.cpp Metal —
   decode tok/s, TTFT @4k/32k. **If riir-infer's 1-box arm loses, file the gap as its own
   issue first — the multi-host claim is meaningless on a losing single-box base.**
+  **⛔ MODEL SCOPE (owner, 2026-10-26): gemma-2-2b is RETIRED (riir-train Issue 617) — the
+  1-box cells run on Bonsai-2-27B-PQ2_0 + qwen3.8-27B ONLY; never add a gemma-2-2b cell.**
   **NOTE 2026-10-26: the amo 1-box Metal cells need a QUIET-GPU window — the rethink
   elephant-panel capture holds the MPS GPU ~26 h (until ~10-27); schedule after.**
 - [-] **T0.4** 2-box incumbent arms: llama.cpp RPC (TCP; RDMA after D2), mlx-lm
@@ -108,7 +110,7 @@ mlx-lm on the Proposal-042 scoreboard **measured on the same two boxes**.
   lo/hi; delta_routing refuses loud — the hybrid CPU-side forward has no range form).
   **G1 EXECUTED AND GREEN — bit-exact, the expected class:** qwen (Bonsai-2 27B PQ2_0,
   block_size clamped to the decode bound per the Issue-994 VRAM gate) ALL 63 splits × 4
-  tokens; gemma2 (gemma-2-2b f16, the issue1110 construction) ALL 25 splits × 4 tokens;
+  tokens (gemma2 compile-only per the owner's model-priority law — see below);
   single-instance design (reference loop → `reset_state` → staged replay; state slots are
   absolute + ranges disjoint). Independent regression: `g1_032_folded_prefill_metal` green
   post-refactor (P=64: argmax 702/702, top-5 1.00, worst rel err 4.08e-6 — the decode arm
@@ -116,6 +118,15 @@ mlx-lm on the Proposal-042 scoreboard **measured on the same two boxes**.
   clippy clean lib+tests at the gated posture; default / no-default / all-features /
   wasm32 compiles clean. Gate: `tests/plan623_multi_host_g1_metal.rs`
   (`I623_T` / `I623_K` env overrides; `--ignored --test-threads=1 --release`).
+  **⛔ OWNER RESCISSION (2026-10-26, same-day): the EXECUTED gemma2 G1 cell (gemma-2-2b f16,
+  25 splits × 4 tokens, all bit-identical at the time it ran) was RESCINDED by the owner —
+  gemma-2-2b is the RETIRED model class (riir-train Issue 617) and the workspace pivots on
+  Bonsai/ternary. The gemma2 `forward_gpu_range` SEAM stays as compile-only scaffolding
+  (it mirrors the CPU T1.1 `forward_gemma2_range` the amo lane landed; deleting it would
+  desync the lane's own symmetry — its per-layer bodies are self-contained, so its range
+  bit-identity is structural and needs no executed cell). The gemma arm was REMOVED from
+  the G1 test; no new gemma-2-2b execution cells anywhere — not in this plan, not in any
+  sibling.**
 
 ## Phase 2 — Stage runtime over TCP (needs D1)
 

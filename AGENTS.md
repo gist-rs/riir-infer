@@ -97,6 +97,17 @@ full-overlay promotion REFUSED, opt-in only, T4.2 owns the verdict
 write-up — the hiddennorm ablation at L=15 retrieves 1.000 at every K
 including the mass arm's one loss (K=0.0625): the retrieval dominance
 is the mid-layer placement, not the mass arm); remaining planned work: T3.5 (league random-K census), T4.1 (measured TTFT-vs-K cells — the break-even half is DONE, bench 891: ceiling ~1.5–1.8× at K≤0.25, attention ~linear in p so the prunable share never grows with context; the T2.4 vehicle priced and owner-gated), T2.4 (GPU graphs — priced, owner call), T1.6 (Metal), and the CLEAN GPU kernel layer migration.
+The multi-host pipeline lane LANDED Phase 1 2026-10-26 (plan 623: `LayerRange` +
+`ActivationFrame` wire + `HybridStateSegment` + stage handshake in core; GPU range seams
+`forward_range_dispatch`/`set_hidden_state`/`read_hidden_state`/`set_pos` + gemma2
+`forward_gpu_range` in riir-infer-gpu — feature `multi_host`, opt-in): G1 bit-identity
+every split EXECUTED on Bonsai-2 27B (63/63 qwen splits ×4 tokens, Metal). **MODEL SCOPE
+(owner law, 2026-10-26): the production surface is Bonsai/ternary (+ qwen3.8) ONLY —
+gemma-2-2b is RETIRED (riir-train Issue 617): its executed G1 cell was RESCINDED same-day,
+the gemma2 seam stays compile-only, and NO new gemma-2-2b execution cells anywhere (T0.3's
+1-box cells, Phase 0/2+ all qwen/bonsai-scoped). The gemma2 ARCHITECTURE lanes that serve
+LIVE products (laya checkpoints, clef-ANE 0.6b) are NOT this retirement — they keep their
+own gates.** Phase 0 deferred (bmo powered off, 1109); Phase 2+ gated on Proposal 042 D1.
 
 ## Build Commands
 
