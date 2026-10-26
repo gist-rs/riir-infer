@@ -1,7 +1,8 @@
 # Issue 1131 — T6 rung: GDN rotation-kernel FWHT geometry (the Bench-902 census rows OUTSIDE T3's family)
 
 **Status:** Open — filed 2026-10-26 ~16:1x UTC from a docs-only re-read of the Bench-902 census (no code touched; the scout is complete and read-only against `ROTATION_CUDA_SRC`). The rung is the same geometry-floor class as the leased T3, on the ADJACENT GDN rotation family — a different kernel set but the SAME FILE (`crates/riir-infer-gpu/src/deltanet_rotation_cudarc.rs`), so **execution is BLOCKED-BY-LEASE on file-collision grounds until the T3 lease clears or its rung lands** (whichever first). The filing preserves the finding fully-specified so the post-lease window can execute immediately.
-**Claimed:** shikuwa-4090-i1131t6, 1793030943, expires 2026-10-28T16:09:00+00:00 — the claim covers this SCOUT+FILING (done, docs-only) and the EXECUTION SLOT after the T3 lease boundary; the execution phase re-checks the lease state before its first build (the push-is-the-arbiter rule; a foreign live claim on the execution scope yields).
+**Claimed:** shikuwa-4090-i1131t6, 1793030943, expires 2026-10-28T16:09:00+00:00
+The claim covers this SCOUT+FILING (done, docs-only) and the EXECUTION SLOT after the T3 lease boundary; the execution phase re-checks the lease state before its first build (the push-is-the-arbiter rule; a foreign live claim on the execution scope yields).
 
 ## The finding (from [Bench 902](.benchmarks/902_i1127_attention_chain_fwht_census.md), the census table rows outside T3's scope)
 

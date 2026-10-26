@@ -1,13 +1,8 @@
 # Issue 1130 — Metal concat-epilogue rung: the folded GDN qkv|z Split2 folded INTO the ternary concat GEMV's epilogue (the Bench-1007 named probe — unclaimed)
 
-<<<<<<< HEAD
 **Status:** IMPLEMENTATION BANKED + G1 PASS — 2026-10-26 ~23:1x +07: the complete rung landed from Session `zed-amo-1130-concatsplit` (a race window vs the lease claim below — the local fetch predating the push; donated, see the handoff note at the bottom). **The G2 e2e A/B + records belong to the lease holder.**
 **Lease:** none as of filing — the i1127 bundle (attention-chain T1, FWHT T3) is the CUDA lane, disjoint.
 **Claimed:** zed-m3-1130-concat-split, 1793030628, expires 2026-10-28T16:03:48Z
-=======
-**Status:** CLAIMED — 2026-10-26 ~23:4x +07, Session `zed-amo-1130-concatsplit` (implementation + G1 + the G2 e2e A/B this session; box load 2.6 falling — quiet window open).
-**Claimed:** `zed-amo-1130-concatsplit` (Metal/CubeCL lane; the i1127 CUDA bundle is disjoint).
->>>>>>> ee96379 (feat(1130): Metal concat-epilogue split rung — the folded GDN qkv|z Split2 folded INTO the ternary concat GEMV's write epilogue (opt-in RIIR_GDN_CONCAT_SPLIT_FUSED))
 
 ## The trigger (measured, not assumed)
 
