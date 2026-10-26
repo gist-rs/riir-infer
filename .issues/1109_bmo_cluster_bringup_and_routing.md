@@ -1,7 +1,7 @@
 # Issue 1109 — bmo cluster bring-up (TB5 link + tailnet) and the bmo routing of riir-rethink's open issues
 
 **Status:** OPEN — filed 2026-10-22. Blocks [Plan 623](../.plans/623_multi_host_pipeline_inference_lane.md) Phase 0. Parent: [Proposal 042](../.proposals/042_multi_mac_distributed_inference.md).
-**Claimed:** zed-amo-idle-015, 1792974614, expires 2026-10-28T00:16:54+00:00 — scope = the item-9 on-box adjudication (amo half: netcheck/tailscale-ping/TB-service state/T0 probe), recorded in-issue
+**Lease released:** zed-amo-idle-015 (2026-10-26, epoch 1792974614) — the amo-half on-box adjudication it covered is recorded below; the issue stays OPEN on the owner-physical remainder (power bmo on → T0 → T1 → T2 → T3).
 
 ## On-box adjudication (amo side EXECUTED 2026-10-26 ~07:00+07 — zed-amo-idle-015; the item-9 desk research above was run against the live boxes)
 
@@ -17,6 +17,8 @@
 | `system_profiler SPThunderboltDataType` | ALL ports "**No device connected**" (the Mac Studio entries are amo's own buses) | **bmo is absent from the TB bus: powered off, deep-asleep, or unplugged** — the 10-22 "80 Gb/s negotiated" link no longer exists |
 
 **Verdict: the blocker is UPSTREAM of the desk research's two hypotheses — bmo must be powered on / woken FIRST (owner-physical, supersedes T0 in sequence).** The T1 root-cause work (bmo bridge service) and T2 work (direct-path negotiation) are both unstartable until bmo is on the bus and the tailnet. amo's side is fully verified and pre-staged: when bmo returns, run the research's T1/T2 command sequences AS WRITTEN (they were sound — just not yet adjudicable), re-check `tailscale status` for `active; relay` → direct, then `tailscale ping` for `via <ip>`. The tx 1248 rx 0 tailnet row is the wake-confirmation signal to watch (rx > 0 = bmo answering again).
+
+**Re-check 2026-10-26 ~09:15+07 (zed-amo-idle):** bmo still offline (last seen 12h ago, tailnet row unchanged) — the owner-physical gate stands; no state change since the adjudication.
 
 **Claim reshaped 2026-10-26:** the adjudication is recorded above; the issue stays OPEN with the owner-physical remainder (power bmo on → T0 → T1 → T2 → T3). No lease held.
 
