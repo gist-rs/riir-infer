@@ -117,14 +117,7 @@ Honest caveats:
     Bench-895 refutation (which priced the B-stage share, not the write-back).
     Single-window kernel-level probe — the T2 e2e battery owns the promote
     decision. Bench 897.
-- [ ] **T2 (e2e GOAT).** pp512/pp2048/pp4096 A/B vs the incumbent at the league
-  posture (`RIIR_PREFILL_FFN_GLU=1` vs unset, everything else pinned),
-  verified-idle, PROVENANCE quoted, ×2 windows. Promote bar per the
-  Feature Flag Discipline; demote the loser either way. VRAM note: the armed
-  route builds the interleaved slab ALONGSIDE the pair mirrors (+44.6 MB at
-  the 27B FFN shape) — a promotion would stop building the pair mirrors for
-  gate/up (the fused slab replaces them), halving that overhead; measure the
-  armed-state cost first.
+- [x] **T2 (e2e GOAT). DONE 2026-10-27 (Bench 1008, riir-ai `e3ffd3004`) — LANDED BETTER THAN FILED, with the vehicle gap found + fixed en route.** The e2e A/B measured **+6.31%/+6.72% (pp2048) and +7.27%/+6.47% (pp4096) paired windows, 4/4 positive, G1 pins EXACT 4/4** — armed league rows **1.28× @2048 / 1.23× @4096**, the widest prefill holds on record (incumbent rows re-emitted at 1.202/1.152). ⛔ **En-route finding (the record's reason to exist): the T1 arm was wired ONLY into `dispatch_ffn_block` (`prefill_cuda_ffn.rs`, `!folded`-gated) — the league vehicle (Bonsai-2 folded through riir-engine) runs `prefill_cuda_full::ffn_block`, which had NO v10tglu path; the staged A/B would have measured GLU-ON vs OFF over BYTE-IDENTICAL pair paths. Caught by the engagement-proof-first protocol: `[721-trace] route=glu` printed ZERO lines at the league posture. Fixed by riir-infer `c60b34d` (the folded-lane wiring: `quantize_rot` → `launch_prefill_gemm_glu_cached` → skip the standalone swiglu; down-side rotate/fakequant/GEMM untouched; bit-safe degradation; the one-shot `[1127-glu] REACH` line is the engagement proof at THIS posture — the `[721-trace]` line is unreachable on the folded lane). VRAM: the armed attestation reads 451 MiB at row-write (the +44.6 MB during-run mirror cost is a during-run figure; the promote-side pair-mirror halving note stands). ⛔ **Promotion (default-on) = owner-gated ask, staged in Issue 1127 T4's closeout — measured, not decided.**
   ⛔ **Vehicle note (measured 2026-10-26, so nobody re-burns this):** the
   riir-infer-internal e2e battery (`tests/issue028_disaggregated_handoff.rs`,
   the real 7.2 GB PQ2_0) drives `riir_infer_core::deltanet::ternary_forward` —
