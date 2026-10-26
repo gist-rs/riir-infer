@@ -1,6 +1,6 @@
 # Issue 1135 — rung: attention proj+decode launch cluster (proj + attn_decode per-launch floors)
 
-**Status:** Open — filed 2026-10-27 ~06:4x +07 from the i1132 census (Bench 1008, W1+W2 reproduced). Unclaimed.
+**Status:** Claimed — zed-amo-i1135-attncluster, 1793058841 (claim law: first push wins; G1 feasibility read + kernel work first, G2 per-run-interleaved from birth per the 1130 confound law, gated on a verified-idle window). Filed 2026-10-27 ~06:4x +07 from the i1132 census (Bench 1008, W1+W2 reproduced).
 The trigger: the attention region's two heaviest substages — **attn:proj 0.56 + attn:attn_decode 0.54 = 1.10 ms/token combined @ 64 launches x ~17 us/launch** (W1/bmo; W2/amo 1.03 + 1.06 = 2.09, same launches, rank stable). Each attention layer (16 of them on the folded league file) pays a proj dispatch and a decode dispatch at ~17 us — the same per-launch floor class as the norm pair (i1134), different region.
 
 ## The shape
