@@ -2129,7 +2129,11 @@ static DECODE_STAGE_MASK: std::sync::atomic::AtomicU32 =
 /// Bits 5-8 are the deltanet SUB-class census (Bench 1005's next probe):
 /// they refine stage bit 1 (deltanet) and are only consulted when bit 1 is
 /// set — masking bit 1 still kills the whole stage on every caller path.
-pub const DECODE_STAGE_NAMES: [&str; 9] = [
+/// Bits 9-10 refine the gdn_proj sub-class (Bench 1006's named cut (a)):
+/// the concat ternary GEMV + its qkv|z split vs the dense f32 escape-set
+/// a/b GEMV pair; both legs also require bit 5, so masking bit 5 still
+/// strips the whole proj region.
+pub const DECODE_STAGE_NAMES: [&str; 11] = [
     "input_norm",
     "deltanet",
     "attention",
@@ -2139,16 +2143,21 @@ pub const DECODE_STAGE_NAMES: [&str; 9] = [
     "gdn_prerec",
     "gdn_recurrence",
     "gdn_outproj",
+    "gdn_proj_concat",
+    "gdn_proj_dense",
 ];
 
 /// All decode stage classes enabled — the shipping path.
-pub const DECODE_STAGE_ALL: u32 = (1u32 << 9) - 1;
+pub const DECODE_STAGE_ALL: u32 = (1u32 << 11) - 1;
 
 /// Deltanet sub-class census bits (bits 5-8; see [`DECODE_STAGE_NAMES`]).
 pub const DECODE_STAGE_GDN_PROJ: u32 = 5;
 pub const DECODE_STAGE_GDN_PREREC: u32 = 6;
 pub const DECODE_STAGE_GDN_RECURRENCE: u32 = 7;
 pub const DECODE_STAGE_GDN_OUTPROJ: u32 = 8;
+/// gdn_proj refinement census bits (bits 9-10; see [`DECODE_STAGE_NAMES`]).
+pub const DECODE_STAGE_GDN_PROJ_CONCAT: u32 = 9;
+pub const DECODE_STAGE_GDN_PROJ_DENSE: u32 = 10;
 
 /// See [`DECODE_STAGE_MASK`]. Bit `i` enables [`DECODE_STAGE_NAMES`]`[i]`.
 pub fn set_decode_stage_mask(mask: u32) {
@@ -2170,6 +2179,15 @@ fn decode_stage_on(bit: u32) -> bool {
 #[inline]
 fn gdn_subclass_on(bit: u32) -> bool {
     decode_stage_on(1) && decode_stage_on(bit)
+}
+
+/// Whether a gdn_proj refinement leg (`gdn_proj_concat` / `gdn_proj_dense`,
+/// bits 9-10) runs: the whole-proj bit (5) must also be on, so masking
+/// bit 5 still strips both legs — the region partitions as ALL / concat-leg
+/// only / dense-leg only with the shipping launch order untouched.
+#[inline]
+fn gdn_proj_leg_on(bit: u32) -> bool {
+    gdn_subclass_on(DECODE_STAGE_GDN_PROJ) && decode_stage_on(bit)
 }
 
 // ── Issue 831 (a): split-K decode attention toggle ───────────────────────
@@ -5515,6 +5533,7 @@ impl TernaryDeltanetGpuForward {
         let folded = self.rot_tables.is_some();
         if gdn_subclass_on(DECODE_STAGE_GDN_PROJ) {
         if folded {
+            if gdn_proj_leg_on(DECODE_STAGE_GDN_PROJ_CONCAT) {
             unsafe {
                 GemvTernaryCubeCL::launch::<ActiveRuntime>(
                     &self.client,
@@ -5522,28 +5541,56 @@ impl TernaryDeltanetGpuForward {
                     self.rot_scratch.clone(),
                     self.input_proj_out.clone(),
                 );
+            }
+            }
+            if gdn_proj_leg_on(DECODE_STAGE_GDN_PROJ_DENSE) {
+            unsafe {
                 let a_f32 = layer_w.in_proj_a_f32.as_ref().expect(
                     "folded GDN layer: dense ssm_alpha missing (loader contract guarantees the escape set)",
                 );
                 let b_f32 = layer_w.in_proj_b_f32.as_ref().expect(
                     "folded GDN layer: dense ssm_beta missing (loader contract guarantees the escape set)",
                 );
-                GemvCubeCL::launch::<ActiveRuntime>(
-                    &self.client,
-                    a_f32.clone(),
-                    self.norm_x.clone(),
-                    self.a_raw.clone(),
-                    n_v_heads,
-                    self.config.n_embd,
-                );
-                GemvCubeCL::launch::<ActiveRuntime>(
-                    &self.client,
-                    b_f32.clone(),
-                    self.norm_x.clone(),
-                    self.b_raw.clone(),
-                    n_v_heads,
-                    self.config.n_embd,
-                );
+                // Issue 1129: the dense-pair rung — ONE launch for a+b
+                // (bit-identical by construction: the same per-row reduction
+                // order; the census-covered region here is the dense leg, so
+                // `no-gdn_proj_dense` strips the pair either way). DEFAULT-ON
+                // since the Bench-1129 e2e GOAT (+9.9/+9.1% decode ABBA);
+                // RIIR_GDN_DENSE_PAIR_FUSED=0 demotes to the two-launch pair.
+                if crate::gemv_cubecl::dense_pair_fused_enabled() {
+                    crate::gemv_cubecl::GemvCubeCL::launch_pair::<ActiveRuntime>(
+                        &self.client,
+                        a_f32.clone(),
+                        b_f32.clone(),
+                        self.norm_x.clone(),
+                        self.a_raw.clone(),
+                        self.b_raw.clone(),
+                        n_v_heads,
+                        self.config.n_embd,
+                        crate::gemv_cubecl::dense_pair_wg_size(),
+                    );
+                } else {
+                    GemvCubeCL::launch::<ActiveRuntime>(
+                        &self.client,
+                        a_f32.clone(),
+                        self.norm_x.clone(),
+                        self.a_raw.clone(),
+                        n_v_heads,
+                        self.config.n_embd,
+                    );
+                    GemvCubeCL::launch::<ActiveRuntime>(
+                        &self.client,
+                        b_f32.clone(),
+                        self.norm_x.clone(),
+                        self.b_raw.clone(),
+                        n_v_heads,
+                        self.config.n_embd,
+                    );
+                }
+            }
+            }
+            if gdn_proj_leg_on(DECODE_STAGE_GDN_PROJ_CONCAT) {
+            unsafe {
                 Split2CubeCL::launch::<ActiveRuntime>(
                     &self.client,
                     self.input_proj_out.clone(),
@@ -5553,7 +5600,9 @@ impl TernaryDeltanetGpuForward {
                     z_dim,
                 );
             }
+            }
         } else {
+            if gdn_proj_leg_on(DECODE_STAGE_GDN_PROJ_CONCAT) {
             unsafe {
                 GemvTernaryCubeCL::launch::<ActiveRuntime>(
                     &self.client,
@@ -5561,6 +5610,7 @@ impl TernaryDeltanetGpuForward {
                     self.norm_x.clone(),
                     self.input_proj_out.clone(),
                 );
+            }
             }
         }
 

@@ -82,6 +82,82 @@ fn gemv_plane_f32(weight: &[f32], input: &[f32], output: &mut [f32]) {
 }
 
 // ---------------------------------------------------------------------------
+// Dense-pair plane GEMV — TWO weight matrices, ONE launch (Issue 1129)
+// ---------------------------------------------------------------------------
+
+/// CubeCL dense-pair GEMV: `output_a = weight_a @ input`, `output_b = weight_b
+/// @ input` in a single dispatch (Issue 1129).
+///
+/// The folded GDN layer dispatches this pair per layer at decode (m = 48,
+/// n = 5120, f32) — two launches of a 6-workgroup grid each, 74 µs-class
+/// per launch, 20.1% of the decode token (Bench-1006 census refinement).
+/// ONE launch halves the dispatch count and doubles the grid (12 wgs at the
+/// 256 default, up to 96 at wg 32) with the per-row math VERBATIM
+/// [`gemv_plane_f32`]: planes `0..m` compute the a-rows, planes `m..2m` the
+/// b-rows — same lane-stride loop, same `plane_sum`, so every row's
+/// reduction order is IDENTICAL to the incumbent pair and the outputs are
+/// bit-identical by construction.
+///
+/// The a/b branch is plane-uniform (`row` is uniform per plane), and it is
+/// hoisted OUT of the dot loop on purpose: an in-loop select on the weight
+/// array would issue both weight loads every iteration.
+#[cfg(feature = "cubecl_runtime")]
+#[cfg_attr(
+    feature = "gemv_fma_contract",
+    cube(launch_unchecked, fast_math = FastMath::AllowContraction.into())
+)]
+#[cfg_attr(not(feature = "gemv_fma_contract"), cube(launch_unchecked))]
+fn gemv_plane_f32_pair(
+    weight_a: &[f32],
+    weight_b: &[f32],
+    input: &[f32],
+    output_a: &mut [f32],
+    output_b: &mut [f32],
+) {
+    let n = input.len() as u32;
+    let m_a = output_a.len() as u32;
+    let m_total = m_a + output_b.len() as u32;
+
+    let row = ABSOLUTE_POS_X / PLANE_DIM;
+    let lane = UNIT_POS_PLANE;
+
+    if row >= m_total {
+        terminate!();
+    }
+
+    // Plane-uniform half select. Both halves use the identical dot loop so
+    // the per-row FMA order matches `gemv_plane_f32` exactly.
+    let is_a = row < m_a;
+    let local_row = if is_a { row } else { row - m_a };
+    let row_offset = local_row * n;
+
+    let mut partial = f32::new(0.0f32);
+
+    let mut k = lane;
+    if is_a {
+        while k < n {
+            partial += weight_a[(row_offset + k) as usize] * input[k as usize];
+            k += PLANE_DIM;
+        }
+    } else {
+        while k < n {
+            partial += weight_b[(row_offset + k) as usize] * input[k as usize];
+            k += PLANE_DIM;
+        }
+    }
+
+    let result = plane_sum(partial);
+
+    if lane == 0 {
+        if is_a {
+            output_a[row as usize] = result;
+        } else {
+            output_b[local_row as usize] = result;
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Batched plane GEMV — multiple input vectors, single weight matrix (Plan 436 T2.1)
 // ---------------------------------------------------------------------------
 
@@ -328,6 +404,120 @@ fn add_f32(a: &[f32], b: &[f32], output: &mut [f32]) {
 // Public API: auto-selecting launcher
 // ---------------------------------------------------------------------------
 
+// ── Issue 1129: the dense-pair fusion + wg geometry toggle ──────────────
+
+/// Runtime toggle for the dense-pair fused dispatch (Issue 1129).
+///
+/// `true` ⇒ the folded GDN dense escape-set a/b GEMVs dispatch as ONE
+/// `launch_pair` kernel instead of two `launch_plane` calls. Dispatch-only
+/// (bit-identical output by construction — the same per-row reduction order;
+/// G1 asserts f32 to_bits equality at wg {256,64,32} × shapes {48×5120,
+/// 5×100}, and the e2e A/B's logits compared bit-equal across 4 arm pairs ×
+/// 24 tokens × 248320 floats).
+///
+/// **DEFAULT-ON since 2026-10-26 (Bench 1129 e2e GOAT ×2): +9.88/+9.07%
+/// decode (26.30→23.71 / 26.19→23.81 ms/token, m5ultra, folded league file,
+/// ABBA-interleaved arms) — the census's dense-leg tax (4.73 ms/token,
+/// Bench 1006 refinement) halves with the launch count.** The env
+/// `RIIR_GDN_DENSE_PAIR_FUSED` is DEMOTE-ONLY: unset = ON; ANY set value
+/// that is not "1"/"on"/"true" (empty, "0", a typo) restores the incumbent
+/// two-launch pair. `set_dense_pair_fused` is the harness arm toggle
+/// (authoritative over the env, the f16-lane contract). Scope note: the
+/// scored 4090 decode lane is the cudarc forward (untouched — its K2 already
+/// fuses this pair); the `cuda_backend` CubeCL runtime is unmeasured here,
+/// the Issue-1115-shaped follow-up.
+static USE_DENSE_PAIR: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(true);
+static DENSE_PAIR_INITIALIZED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+
+/// Workgroup size for the dense-pair dispatch (and the wg-parameterized
+/// single-plane launcher). Default 256 = the incumbent geometry; the
+/// Issue-1129 sweep decides the rung. Env `RIIR_GDN_DENSE_PAIR_WG` accepts
+/// {32, 64, 128, 256} — anything else (unset included) keeps 256.
+static DENSE_PAIR_WG: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(256);
+static DENSE_PAIR_WG_INITIALIZED: std::sync::OnceLock<u32> = std::sync::OnceLock::new();
+
+/// Launches dispatched through the fused dense-pair path (the vacuous-guard
+/// counter — outputs are bit-identical, so ONLY this counter proves the
+/// toggle reached the dispatch).
+static DENSE_PAIR_LAUNCHES: std::sync::atomic::AtomicUsize =
+    std::sync::atomic::AtomicUsize::new(0);
+
+fn dense_pair_env_semantics(env: Result<String, std::env::VarError>) -> bool {
+    match env {
+        // Unset = ON (the promoted default; the wg-occupancy posture).
+        Err(std::env::VarError::NotPresent) => true,
+        // The demote class: ANY set value that is not 1/on/true (empty, "0",
+        // a typo, non-Unicode) restores the incumbent two-launch pair.
+        Ok(v) => matches!(v.to_lowercase().as_str(), "1" | "on" | "true"),
+        Err(std::env::VarError::NotUnicode(_)) => false,
+    }
+}
+
+// The only consumer is the folded forward's dense leg, which compiles under
+// `ternary_gemm_batched` — in narrower test builds the fn is legitimately
+// unreached (the env-semantics test covers the predicate itself).
+#[cfg_attr(not(feature = "ternary_gemm_batched"), allow(dead_code))]
+pub(crate) fn dense_pair_fused_enabled() -> bool {
+    if DENSE_PAIR_INITIALIZED
+        .set(dense_pair_env_semantics(std::env::var("RIIR_GDN_DENSE_PAIR_FUSED")))
+        .is_ok()
+    {
+        USE_DENSE_PAIR.store(
+            DENSE_PAIR_INITIALIZED.get().copied().unwrap_or(false),
+            std::sync::atomic::Ordering::Relaxed,
+        );
+    }
+    USE_DENSE_PAIR.load(std::sync::atomic::Ordering::Relaxed)
+}
+
+/// Force the dense-pair fusion on/off (overrides the env var; the bench
+/// harness's arm toggle).
+pub fn set_dense_pair_fused(on: bool) {
+    let _ = DENSE_PAIR_INITIALIZED.set(on);
+    USE_DENSE_PAIR.store(on, std::sync::atomic::Ordering::Relaxed);
+}
+
+fn dense_pair_wg_env(env: Result<String, std::env::VarError>) -> u32 {
+    const ALLOWED: [u32; 4] = [32, 64, 128, 256];
+    match env {
+        Err(_) => 256,
+        Ok(v) => match v.trim().parse::<u32>() {
+            Ok(wg) if ALLOWED.contains(&wg) => wg,
+            _ => 256,
+        },
+    }
+}
+
+pub(crate) fn dense_pair_wg_size() -> u32 {
+    if DENSE_PAIR_WG_INITIALIZED
+        .set(dense_pair_wg_env(std::env::var("RIIR_GDN_DENSE_PAIR_WG")))
+        .is_ok()
+    {
+        DENSE_PAIR_WG.store(
+            DENSE_PAIR_WG_INITIALIZED.get().copied().unwrap_or(256),
+            std::sync::atomic::Ordering::Relaxed,
+        );
+    }
+    DENSE_PAIR_WG.load(std::sync::atomic::Ordering::Relaxed)
+}
+
+/// Force the dense-pair workgroup size (overrides the env var; the sweep
+/// harness's knob). Values outside {32, 64, 128, 256} clamp to 256.
+pub fn set_dense_pair_wg(wg: u32) {
+    let wg = match wg {
+        32 | 64 | 128 => wg,
+        _ => 256,
+    };
+    let _ = DENSE_PAIR_WG_INITIALIZED.set(wg);
+    DENSE_PAIR_WG.store(wg, std::sync::atomic::Ordering::Relaxed);
+}
+
+/// Total launches dispatched through the fused dense-pair path so far.
+pub fn dense_pair_launch_count() -> usize {
+    DENSE_PAIR_LAUNCHES.load(std::sync::atomic::Ordering::Relaxed)
+}
+
 /// CubeCL GEMV launcher with automatic plane/shared-memory selection.
 ///
 /// Selects the plane (subgroup) kernel when the device supports it,
@@ -449,6 +639,99 @@ impl GemvCubeCL {
                 BufferArg::from_raw_parts(weight_handle, m * n),
                 BufferArg::from_raw_parts(input_handle, n),
                 BufferArg::from_raw_parts(output_handle, m),
+            );
+        }
+    }
+
+    /// [`Self::launch_plane`] with an explicit workgroup size — the
+    /// Issue-1129 geometry knob for the small-m dense shapes the Issue-1114
+    /// occupancy rule never reached. Same kernel, planes addressed globally,
+    /// so the row→plane mapping and per-row reduction order are unchanged at
+    /// every wg size (bit-identical by construction, like the ternary rule).
+    ///
+    /// `wg_size` must be a positive multiple of the 32-lane plane — anything
+    /// else is a loud assert, never a silent remap.
+    ///
+    /// # Safety
+    ///
+    /// Same requirements as [`Self::launch_plane`].
+    pub unsafe fn launch_plane_wg<R: Runtime>(
+        client: &ComputeClient<R>,
+        weight_handle: Handle,
+        input_handle: Handle,
+        output_handle: Handle,
+        m: usize,
+        n: usize,
+        wg_size: u32,
+    ) {
+        assert!(
+            wg_size >= 32 && wg_size.is_multiple_of(32),
+            "wg_size must be a positive multiple of the 32-lane plane"
+        );
+        let plane_size = 32u32;
+        let rows_per_wg = wg_size / plane_size;
+        let num_wg = (m as u32).div_ceil(rows_per_wg).max(1);
+
+        // SAFETY: Caller guarantees correct buffer sizes.
+        unsafe {
+            gemv_plane_f32::launch_unchecked::<R>(
+                client,
+                CubeCount::Static(num_wg, 1, 1),
+                CubeDim::new_1d(wg_size),
+                BufferArg::from_raw_parts(weight_handle, m * n),
+                BufferArg::from_raw_parts(input_handle, n),
+                BufferArg::from_raw_parts(output_handle, m),
+            );
+        }
+    }
+
+    /// ONE dispatch for the dense escape-set pair (Issue 1129): computes
+    /// `output_a = weight_a @ input` AND `output_b = weight_b @ input` —
+    /// planes `0..m` take the a-rows, planes `m..2m` the b-rows. Bit-identical
+    /// to two [`Self::launch_plane`] calls by construction (per-row math
+    /// verbatim), so the e2e anchors cannot move; the win is the halved
+    /// dispatch count and the doubled grid on the m=48 shapes.
+    ///
+    /// `m` is the row count of EACH half (both weight matrices are m×n,
+    /// row-major, contiguous); `wg_size` must be a positive multiple of 32.
+    ///
+    /// # Safety
+    ///
+    /// Buffer handles must have correct sizes: `weight_a`/`weight_b` = m·n
+    /// f32 each, `input` = n f32, `output_a`/`output_b` = m f32 each; no
+    /// other queue operation may alias them while the kernel is in flight.
+    pub unsafe fn launch_pair<R: Runtime>(
+        client: &ComputeClient<R>,
+        weight_a: Handle,
+        weight_b: Handle,
+        input_handle: Handle,
+        output_a: Handle,
+        output_b: Handle,
+        m: usize,
+        n: usize,
+        wg_size: u32,
+    ) {
+        assert!(
+            wg_size >= 32 && wg_size.is_multiple_of(32),
+            "wg_size must be a positive multiple of the 32-lane plane"
+        );
+        DENSE_PAIR_LAUNCHES.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let plane_size = 32u32;
+        let rows_per_wg = wg_size / plane_size;
+        let m_total = 2 * m;
+        let num_wg = (m_total as u32).div_ceil(rows_per_wg).max(1);
+
+        // SAFETY: Caller guarantees correct buffer sizes.
+        unsafe {
+            gemv_plane_f32_pair::launch_unchecked::<R>(
+                client,
+                CubeCount::Static(num_wg, 1, 1),
+                CubeDim::new_1d(wg_size),
+                BufferArg::from_raw_parts(weight_a, m * n),
+                BufferArg::from_raw_parts(weight_b, m * n),
+                BufferArg::from_raw_parts(input_handle, n),
+                BufferArg::from_raw_parts(output_a, m),
+                BufferArg::from_raw_parts(output_b, m),
             );
         }
     }
@@ -1444,5 +1727,258 @@ mod tests {
         println!(
             "batched plane GEMV oversized-output ({batch}×{in_dim}×{out_dim} into {scratch_rows} rows): OK, tail clean"
         );
+    }
+
+    // ── Issue 1129: the dense-pair rung ──────────────────────────────────
+
+    /// Deterministic xorshift64 data — no rand dep, reproducible across
+    /// runs so G1 failures are diffable.
+    fn pseudo_random_f32(len: usize, seed: u64) -> Vec<f32> {
+        let mut state = seed | 1;
+        (0..len)
+            .map(|_| {
+                state ^= state << 13;
+                state ^= state >> 7;
+                state ^= state << 17;
+                ((state % 2000) as f32 - 1000.0) / 1000.0
+            })
+            .collect()
+    }
+
+    /// G1 (Issue 1129): the fused pair is BIT-IDENTICAL to the incumbent
+    /// two-launch pair — same per-row reduction order, same plane_sum. Real
+    /// shape (48×5120, the folded a/b geometry) + a small ragged shape, at
+    /// every allowed wg size. Asserts f32 to_bits equality, never tolerance.
+    #[test]
+    fn test_dense_pair_bit_identity() {
+        let ctx = CubeCLContext::new().expect("CubeCL should initialize");
+        let client = ctx.client();
+
+        if !client.features().plane.contains(Plane::Ops) {
+            eprintln!("Skipping: device does not support plane ops");
+            return;
+        }
+
+        let shapes: &[(usize, usize)] = &[(48, 5120), (5, 100)];
+        for &(m, n) in shapes {
+            let weight_a = pseudo_random_f32(m * n, 0x9E3779B97F4A7C15);
+            let weight_b = pseudo_random_f32(m * n, 0xBF58476D1CE4E5B9);
+            let input = pseudo_random_f32(n, 0x94D049BB133111EB);
+
+            let wa = client.create_from_slice(f32::as_bytes(&weight_a));
+            let wb = client.create_from_slice(f32::as_bytes(&weight_b));
+            let x = client.create_from_slice(f32::as_bytes(&input));
+
+            // Incumbent reference: two launch_plane calls at the shipping 256.
+            let ref_a = client.empty(m * core::mem::size_of::<f32>());
+            let ref_b = client.empty(m * core::mem::size_of::<f32>());
+            unsafe {
+                GemvCubeCL::launch_plane::<ActiveRuntime>(
+                    &client, wa.clone(), x.clone(), ref_a.clone(), m, n,
+                );
+                GemvCubeCL::launch_plane::<ActiveRuntime>(
+                    &client, wb.clone(), x.clone(), ref_b.clone(), m, n,
+                );
+            }
+
+            for wg in [256u32, 64, 32] {
+                let out_a = client.empty(m * core::mem::size_of::<f32>());
+                let out_b = client.empty(m * core::mem::size_of::<f32>());
+                unsafe {
+                    GemvCubeCL::launch_pair::<ActiveRuntime>(
+                        &client,
+                        wa.clone(),
+                        wb.clone(),
+                        x.clone(),
+                        out_a.clone(),
+                        out_b.clone(),
+                        m,
+                        n,
+                        wg,
+                    );
+                }
+
+                let bytes_ra = client.read_one(ref_a.clone()).expect("read ref_a");
+                let bytes_rb = client.read_one(ref_b.clone()).expect("read ref_b");
+                let bytes_oa = client.read_one(out_a.clone()).expect("read out_a");
+                let bytes_ob = client.read_one(out_b.clone()).expect("read out_b");
+                let ra = f32::from_bytes(&bytes_ra);
+                let rb = f32::from_bytes(&bytes_rb);
+                let oa = f32::from_bytes(&bytes_oa);
+                let ob = f32::from_bytes(&bytes_ob);
+
+                assert_eq!(oa.len(), m, "({m}×{n}) out_a len");
+                assert_eq!(ob.len(), m, "({m}×{n}) out_b len");
+                for i in 0..m {
+                    assert_eq!(
+                        ra[i].to_bits(),
+                        oa[i].to_bits(),
+                        "({m}×{n}) wg {wg}: a-row {i} not bit-identical (ref {} vs pair {})",
+                        ra[i],
+                        oa[i]
+                    );
+                    assert_eq!(
+                        rb[i].to_bits(),
+                        ob[i].to_bits(),
+                        "({m}×{n}) wg {wg}: b-row {i} not bit-identical (ref {} vs pair {})",
+                        rb[i],
+                        ob[i]
+                    );
+                }
+                println!("dense-pair bit-identity ({m}×{n}) wg {wg}: EXACT (both halves)");
+            }
+        }
+    }
+
+    /// The env semantics (the wg_occupancy_semantics_tests mirror): unset =
+    /// ON (the promoted default), 1/on/true = ON, ANY other set value =
+    /// demote to the incumbent pair.
+    #[test]
+    fn dense_pair_env_semantics_tests() {
+        use super::{dense_pair_env_semantics, dense_pair_wg_env, dense_pair_wg_size, set_dense_pair_wg};
+
+        assert!(dense_pair_env_semantics(Err(std::env::VarError::NotPresent)));
+        assert!(dense_pair_env_semantics(Ok("1".into())));
+        assert!(dense_pair_env_semantics(Ok("on".into())));
+        assert!(dense_pair_env_semantics(Ok("TRUE".into())));
+        assert!(!dense_pair_env_semantics(Ok(String::new())));
+        assert!(!dense_pair_env_semantics(Ok("0".into())));
+        assert!(!dense_pair_env_semantics(Ok("enabled".into())));
+        assert!(!dense_pair_env_semantics(Err(std::env::VarError::NotUnicode(
+            std::ffi::OsString::from("\u{fffd}")
+        ))));
+
+        assert_eq!(dense_pair_wg_env(Err(std::env::VarError::NotPresent)), 256);
+        assert_eq!(dense_pair_wg_env(Ok("64".into())), 64);
+        assert_eq!(dense_pair_wg_env(Ok(" 32 ".into())), 32);
+        assert_eq!(dense_pair_wg_env(Ok("48".into())), 256);
+        assert_eq!(dense_pair_wg_env(Ok(String::new())), 256);
+        assert_eq!(dense_pair_wg_env(Ok("nan".into())), 256);
+
+        // The setter is authoritative and clamps.
+        set_dense_pair_wg(32);
+        assert_eq!(dense_pair_wg_size(), 32);
+        set_dense_pair_wg(48);
+        assert_eq!(dense_pair_wg_size(), 256);
+        set_dense_pair_wg(256);
+    }
+
+    /// Issue-1129 geometry micro-bench: per-launch cost of the dense pair at
+    /// the folded shape (48×5120) across the fusion × wg grid, plus the
+    /// ffn_down shape (5120×17408) as the bandwidth yardstick. Submit-only
+    /// AND drained walls print — the census's 74 µs-class per-launch cost
+    /// disambiguates as exec-geometry (drained ≫ submit) or queue pacing.
+    #[test]
+    #[ignore = "requires GPU; timing sweep — run with --ignored --nocapture"]
+    fn bench_dense_pair_geometry() {
+        use std::time::Instant;
+
+        let ctx = CubeCLContext::new().expect("CubeCL should initialize");
+        let client = ctx.client();
+        if !client.features().plane.contains(Plane::Ops) {
+            eprintln!("Skipping: device does not support plane ops");
+            return;
+        }
+
+        let (m, n) = (48usize, 5120usize);
+        let weight_a = pseudo_random_f32(m * n, 0x9E3779B97F4A7C15);
+        let weight_b = pseudo_random_f32(m * n, 0xBF58476D1CE4E5B9);
+        let input = pseudo_random_f32(n, 0x94D049BB133111EB);
+        let wa = client.create_from_slice(f32::as_bytes(&weight_a));
+        let wb = client.create_from_slice(f32::as_bytes(&weight_b));
+        let x = client.create_from_slice(f32::as_bytes(&input));
+        let out_a = client.empty(m * core::mem::size_of::<f32>());
+        let out_b = client.empty(m * core::mem::size_of::<f32>());
+
+        let warmup = 16usize;
+        let iters = 512usize;
+
+        // (arm, per-iter launch count, per-iter closure)
+        let run = |name: &str, launches_per_iter: u32, iter: &mut dyn FnMut()| {
+            for _ in 0..warmup {
+                iter();
+            }
+            // Drained: launch the batch, ONE completion read at the end.
+            let t = Instant::now();
+            for _ in 0..iters {
+                iter();
+            }
+            let bytes = client.read_one(out_a.clone()).expect("drain");
+            let drained_us = t.elapsed().as_secs_f64() * 1e6;
+            let _ = f32::from_bytes(&bytes);
+            let per_iter = drained_us / iters as f64;
+            let per_launch = per_iter / launches_per_iter as f64;
+            eprintln!(
+                "  {name:<28} drained {per_iter:>9.2} µs/iter  {per_launch:>8.2} µs/launch"
+            );
+        };
+
+        eprintln!("── dense pair (2×{m}×{n}) — {iters} iters, drained ──");
+        run("separate pair wg256", 2, &mut || unsafe {
+            GemvCubeCL::launch_plane::<ActiveRuntime>(
+                &client, wa.clone(), x.clone(), out_a.clone(), m, n,
+            );
+            GemvCubeCL::launch_plane::<ActiveRuntime>(
+                &client, wb.clone(), x.clone(), out_b.clone(), m, n,
+            );
+        });
+        run("separate pair wg64", 2, &mut || unsafe {
+            GemvCubeCL::launch_plane_wg::<ActiveRuntime>(
+                &client, wa.clone(), x.clone(), out_a.clone(), m, n, 64,
+            );
+            GemvCubeCL::launch_plane_wg::<ActiveRuntime>(
+                &client, wb.clone(), x.clone(), out_b.clone(), m, n, 64,
+            );
+        });
+        for wg in [256u32, 128, 64, 32] {
+            run(&format!("fused pair wg{wg}"), 1, &mut || unsafe {
+                GemvCubeCL::launch_pair::<ActiveRuntime>(
+                    &client,
+                    wa.clone(),
+                    wb.clone(),
+                    x.clone(),
+                    out_a.clone(),
+                    out_b.clone(),
+                    m,
+                    n,
+                    wg,
+                );
+            });
+        }
+
+        // Yardstick: the ffn_down shape, the calibration's 1.45×-at-wg64 row.
+        let (fm, fn_) = (5120usize, 17408usize);
+        let fweight = pseudo_random_f32(fm * fn_, 0x2545F4914F6CDD1D);
+        let finput = pseudo_random_f32(fn_, 0x9E3779B1);
+        let fw = client.create_from_slice(f32::as_bytes(&fweight));
+        let fx = client.create_from_slice(f32::as_bytes(&finput));
+        let fout = client.empty(fm * core::mem::size_of::<f32>());
+        let fbytes = (fm * fn_ * 4) as f64;
+        eprintln!("── ffn_down ({fm}×{fn_}) yardstick ──");
+        for wg in [256u32, 64] {
+            for _ in 0..4 {
+                unsafe {
+                    GemvCubeCL::launch_plane_wg::<ActiveRuntime>(
+                        &client, fw.clone(), fx.clone(), fout.clone(), fm, fn_, wg,
+                    );
+                }
+            }
+            let t = Instant::now();
+            let iters_f = 64usize;
+            for _ in 0..iters_f {
+                unsafe {
+                    GemvCubeCL::launch_plane_wg::<ActiveRuntime>(
+                        &client, fw.clone(), fx.clone(), fout.clone(), fm, fn_, wg,
+                    );
+                }
+            }
+            let bytes = client.read_one(fout.clone()).expect("drain f");
+            let us = t.elapsed().as_secs_f64() * 1e6 / iters_f as f64;
+            let _ = f32::from_bytes(&bytes);
+            eprintln!(
+                "  ffn_down wg{wg:<18} {us:>9.2} µs/launch  ({:.0} GB/s)",
+                fbytes / 1e9 / (us / 1e6)
+            );
+        }
     }
 }
