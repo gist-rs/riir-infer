@@ -2697,11 +2697,19 @@ pub fn mmq_gu_mode() -> u8 {
 /// registers, HALF the output slabs written, one launch deleted. Moves no
 /// numerics: bit-identical to the pair+swiglu triple by construction (unit
 /// gate asserts 0 bit-diffs); the knob off is byte-identical routing.
+///
+/// **PROMOTED DEFAULT-ON 2026-10-27** (Bench 1008 / verdict `9ca951de`):
+/// paired league windows +6.31/+6.72% (pp2048) and +7.27/+6.47% (pp4096),
+/// 4/4 positive, G1 pins EXACT 4/4 + the 0-bit-diff unit gate — the env is
+/// DEMOTE-ONLY (exact-literal `0`/`false`/`off` restores the incumbent pair
+/// path byte-identically; unset = armed). Demote = one env flip.
 #[cfg(feature = "prefill_mmq_v2")]
 pub fn ffn_glu_fused_enabled() -> bool {
     static K: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     *K.get_or_init(|| {
-        std::env::var("RIIR_PREFILL_FFN_GLU").is_ok_and(|s| matches!(s.trim(), "1" | "true" | "on"))
+        std::env::var("RIIR_PREFILL_FFN_GLU")
+            .map(|s| !matches!(s.trim(), "0" | "false" | "off"))
+            .unwrap_or(true)
     })
 }
 
