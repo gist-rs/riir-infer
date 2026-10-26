@@ -485,13 +485,15 @@ fn launch_arm(
 ) {
     let grid = (dim / hblock) as u32;
     let hb = hblock as i32;
+    // The builder borrows every arg until `.launch` — all scalar temporaries
+    // live at fn scope so the borrow outlives the match arms (E0597).
+    let inv_dim = 1.0f32 / dim as f32;
+    let eps = 1e-6f32;
+    let dim_i = dim as i32;
     unsafe {
         let mut b = stream.launch_builder(f);
         match kind {
             Kind::Rmsnorm => {
-                let inv_dim = 1.0f32 / dim as f32;
-                let eps = 1e-6f32;
-                let dim_i = dim as i32;
                 b.arg(in_a)
                     .arg(in_b)
                     .arg(signs)
@@ -605,9 +607,9 @@ fn bench903_fwht_rotq_variant_probe() {
         let a_h: Vec<f32> = (0..dim).map(|_| rng.next_f32()).collect();
         let b_h: Vec<f32> = (0..dim).map(|_| 0.5 + rng.next_f32()).collect();
         let s_h: Vec<f32> = (0..dim).map(|i| if i % 2 == 0 { 1.0 } else { -1.0 }).collect();
-        let a_d = stream.clone_htod(&a_h);
-        let b_d = stream.clone_htod(&b_h);
-        let s_d = stream.clone_htod(&s_h);
+        let a_d = stream.clone_htod(&a_h).expect("htod a");
+        let b_d = stream.clone_htod(&b_h).expect("htod b");
+        let s_d = stream.clone_htod(&s_h).expect("htod s");
         let out_d = stream.alloc_zeros::<i8>(dim).expect("out");
         let ascale_d = stream.alloc_zeros::<f32>(dim / 16).expect("ascale");
 
