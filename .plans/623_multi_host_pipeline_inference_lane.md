@@ -325,8 +325,17 @@ mlx-lm on the Proposal-042 scoreboard **measured on the same two boxes**.
   gap).
 - [ ] **T2.5** Planner: boot probe of per-layer cost per host (prefill + decode) and link
   RTT/bw (T0.2 code), split to equalise stage time under memory; manual override.
-- [ ] **T2.6** Tailscale posture: the same runner over the tailnet address; a measured row
+- [x] **T2.6** Tailscale posture: the same runner over the tailnet address; a measured row
   (the WAN/fallback lane exo cannot do — multicast discovery).
+  **MEASURED 2026-10-27** — the unchanged `dist_stage` (no code change: the transport
+  is plain authenticated TCP, so any routable address works). amo head ⇄ bmo tail,
+  scoped GPU stages, P=256 (chunk 128 → 2×128), 32 decode steps, order TB/TS/TS/TB,
+  amo load ~4 (shared — indicative): RTT **TB5 0.45 ms vs Tailscale 5.9 ms**; prefill
+  TB 5.58 / 5.46 s · TS 5.68 / 5.91 s (**+4%** — chunked frames amortise the RTT);
+  decode TB 16.62 / 16.15 · TS 14.82 / 14.94 tok/s (**−10%** ≈ +6 ms/token = the one
+  activation→token round trip per decode step at the tailnet RTT). The WAN lane works
+  and costs exactly its RTT on decode; the per-token round trip is the lever (T2.4's
+  micro-batching / a speculative fill hide it).
 - [ ] **T2.7** G2 scoreboard rows (Phase-0 harness, same models): PP overhead vs 1-box;
   vs llama.cpp RPC-TCP, mlx-lm ring PP, exo PP-ring. `.benchmarks/` record.
 
