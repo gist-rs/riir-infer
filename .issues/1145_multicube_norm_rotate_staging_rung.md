@@ -1,6 +1,7 @@
 # Issue 1145 — rung: multi-cube norm + rotate staging (redundant reduction, double-buffered x)
 
-**Status:** Open — filed 2026-10-27 from Issue 1139 T4. Unclaimed. Ceiling ≈0.71 ms/token (≈4%) on Bonsai-2 PQ2_0, idle bmo.
+**Status:** Open — filed 2026-10-27 from Issue 1139 T4.
+**Claimed:** zed-amo-i1145-multicube, 1793100861, expires 2026-10-29T11:34:21+00:00
 
 ## Trigger (measured, Issue 1139 T4)
 
