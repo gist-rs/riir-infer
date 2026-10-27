@@ -14,7 +14,7 @@ use riir_infer_core::deltanet::{QwenDeltaNetTernaryWeights, WeightScope};
 use riir_infer_core::multi_host::LayerRange;
 use riir_infer_core::types::Config;
 use riir_infer_dist::argmax_first;
-use riir_infer_dist::runner::{run_head, run_local, run_tail};
+use riir_infer_dist::runner::{HeadOptions, run_head_with, run_local, run_local_with, run_tail};
 use riir_infer_dist::stage::{ArtifactIdentity, StageCompute, TernaryCpuStage, stage_scope};
 use riir_infer_dist::transport::{Direction, PeerKey, TcpTransport};
 
@@ -92,7 +92,17 @@ fn run_pair(
     id: ArtifactIdentity,
     tail_id: ArtifactIdentity,
 ) -> PairOutcome {
-    run_pair_split(config, w, w, k, head_key, tail_key, id, tail_id)
+    run_pair_split(
+        config,
+        w,
+        w,
+        k,
+        head_key,
+        tail_key,
+        id,
+        tail_id,
+        HeadOptions::default(),
+    )
 }
 
 /// [`run_pair`] with a separate weights view per stage (scoped loads).
@@ -106,6 +116,7 @@ fn run_pair_split(
     tail_key: [u8; 32],
     id: ArtifactIdentity,
     tail_id: ArtifactIdentity,
+    opts: HeadOptions,
 ) -> PairOutcome {
     let n = config.n_layer as u32;
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
@@ -122,7 +133,7 @@ fn run_pair_split(
         TernaryCpuStage::new(config.clone(), hw.clone(), LayerRange::new(0, k), id).unwrap();
     let sock = TcpStream::connect(addr).unwrap();
     let mut link = TcpTransport::new(sock, PeerKey(head_key), Direction::Downstream).unwrap();
-    let head = run_head(&mut stage, &mut link, &PROMPT, MAX_NEW).map(|r| r.generated);
+    let head = run_head_with(&mut stage, &mut link, &PROMPT, MAX_NEW, opts).map(|r| r.generated);
     drop(link); // a refusing head must not leave the tail blocked on read
     PairOutcome {
         head,
@@ -171,7 +182,17 @@ fn scoped_stage_loads_are_bit_identical_and_refuse_the_wrong_window() {
         // Non-vacuity: the slices really are slices.
         assert!(hw.lm_head.rows == 0 && !hw.layers[k as usize].is_resident());
         assert!(tw.wte.rows == 0 && !tw.layers[0].is_resident());
-        let out = run_pair_split(&config, &hw, &tw, k, key, key, id, id);
+        let out = run_pair_split(
+            &config,
+            &hw,
+            &tw,
+            k,
+            key,
+            key,
+            id,
+            id,
+            HeadOptions::default(),
+        );
         let toks = out.head.expect("head");
         let (_, logits) = out.tail.expect("tail");
         assert_eq!(toks, want_toks, "scoped split@{k}: token stream diverged");
@@ -186,6 +207,50 @@ fn scoped_stage_loads_are_bit_identical_and_refuse_the_wrong_window() {
         assert!(wrong.is_err(), "head slice accepted as tail@{k}");
         let wrong = TernaryCpuStage::new(config.clone(), tw.clone(), LayerRange::full(n), id);
         assert!(wrong.is_err(), "tail slice accepted as the full model@{k}");
+    }
+}
+
+/// Plan 623 T2.3b — chunked prompt frames (`n_tok > 1`) through
+/// `StageCompute::prefill_chunk`. The CPU stage's default is the
+/// per-position loop, so the token stream, the last prompt position's
+/// logits and every decode logit stay bit-identical to the per-position
+/// reference — at every split and chunk width (incl. one wider than the
+/// prompt, and a ragged final chunk).
+#[test]
+fn chunked_prefill_frames_are_bit_identical_every_split() {
+    let (config, w, id) = load("riir_dist_g1_chunked");
+    let (want_toks, want_logits) = reference(&config, &w, id);
+    let n = config.n_layer as u32;
+    let key = [5u8; 32];
+    // Positions the tail reports under chunking: the last prompt position,
+    // then every decode step.
+    let want_tail = &want_logits[PROMPT.len() - 1..];
+    for chunk in [2usize, 3, 7] {
+        let opts = HeadOptions {
+            prefill_chunk: chunk,
+            min_batched: 0,
+        };
+        let mut oracle =
+            TernaryCpuStage::new(config.clone(), w.clone(), LayerRange::full(n), id).unwrap();
+        assert_eq!(
+            run_local_with(&mut oracle, &PROMPT, MAX_NEW, opts),
+            want_toks,
+            "chunk {chunk}: chunked oracle drift"
+        );
+        for k in 1..n {
+            let out = run_pair_split(&config, &w, &w, k, key, key, id, id, opts);
+            let toks = out.head.expect("head");
+            let (steps, logits) = out.tail.expect("tail");
+            assert_eq!(toks, want_toks, "chunk {chunk} split@{k}: stream diverged");
+            assert_eq!(steps, PROMPT.len() + MAX_NEW - 1, "chunk {chunk} split@{k}");
+            assert_eq!(logits.len(), want_tail.len(), "chunk {chunk} split@{k}");
+            for (p, (a, b)) in logits.iter().zip(want_tail).enumerate() {
+                assert!(
+                    a.iter().zip(b).all(|(x, y)| x.to_bits() == y.to_bits()),
+                    "chunk {chunk} split@{k}: tail logits #{p} not bit-identical"
+                );
+            }
+        }
     }
 }
 
@@ -224,4 +289,22 @@ fn peer_key_hex_parses_and_refuses() {
     assert_eq!(k.0, [0x0f; 32]);
     assert!(PeerKey::from_hex("abc").is_err());
     assert!(PeerKey::from_hex(&"zz".repeat(32)).is_err());
+}
+
+#[test]
+fn prefill_width_evens_chunks_and_floors_short_prompts() {
+    use riir_infer_dist::runner::prefill_width;
+    let o = |prefill_chunk, min_batched| HeadOptions {
+        prefill_chunk,
+        min_batched,
+    };
+    assert_eq!(prefill_width(256, o(128, 64)), 128);
+    // A ragged 130 = 128 + 2 is evened to 65 + 65.
+    assert_eq!(prefill_width(130, o(128, 64)), 65);
+    assert_eq!(prefill_width(300, o(128, 64)), 100);
+    // Under the floor, or chunking off: per position.
+    assert_eq!(prefill_width(40, o(128, 64)), 1);
+    assert_eq!(prefill_width(256, o(1, 0)), 1);
+    assert_eq!(prefill_width(5, o(2, 0)), 2);
+    assert_eq!(prefill_width(5, o(7, 0)), 5);
 }

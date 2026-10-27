@@ -6,17 +6,23 @@
 //!    the pair (`verify_pair`: arch / geometry / artifact / dtype / range
 //!    tiling) and replies with its own `Handshake`, which the head checks
 //!    the same way. Any mismatch refuses LOUD before a single activation.
-//! 2. prompt positions `0..len-1`: head → tail `Prefill` (no reply — the
-//!    two stages overlap, T2.3); the last prompt position and every decode
-//!    step: head → tail `Activation` ([`ActivationFrame`], f32, `pos` in
-//!    the header) answered by tail → head `Token` (u32 LE, greedy
+//! 2. head → tail `Begin` (`prompt_len`, the effective chunk width
+//!    [`prefill_width`] — T2.3b).
+//! 3. the prompt, in chunks of that width (1 = per position): every chunk but the last head → tail `Prefill` (no reply —
+//!    the two stages overlap, T2.3a); the last chunk and every decode step:
+//!    head → tail `Activation` ([`ActivationFrame`], f32, base `pos` +
+//!    `n_tok` in the header) answered by tail → head `Token` (u32 LE, greedy
 //!    first-index argmax over the tail's logits).
-//! 3. head → tail `Shutdown`.
+//! 4. head → tail `Shutdown`.
 //!
-//! Scope: one stream, one hop; prefill is pipelined per position (chunked
-//! multi-token frames and T2.4 micro-batching ride the same frames later).
+//! With `prefill_chunk > 1` every prompt chunk rides
+//! [`StageCompute::prefill_chunk`] on both stages (the GPU stage's batched
+//! range prefill); decode steps always ride
+//! [`StageCompute::step`]. Scope: one stream, one hop (T2.4 micro-batching
+//! rides the same frames later).
 
 use std::io;
+use std::ops::Range;
 use std::time::{Duration, Instant};
 
 use riir_infer_core::multi_host::{ActivationFrame, FrameDtype};
@@ -59,6 +65,49 @@ impl HeadReport {
     }
 }
 
+/// Head-side knobs.
+#[derive(Debug, Clone, Copy)]
+pub struct HeadOptions {
+    /// Requested prompt positions per prefill frame. `1` = the
+    /// per-position protocol (T2.3a); `> 1` = chunked frames through
+    /// [`StageCompute::prefill_chunk`] on both stages (T2.3b). The width
+    /// actually used is [`prefill_width`].
+    pub prefill_chunk: usize,
+    /// Prompts shorter than this stay per-position. A batched chunk pays a
+    /// fixed floor (measured on the M5 Ultra Metal stage, Bonsai-2 27B:
+    /// ~0.9 s + 0.018 s/token vs 0.039 s/token per position → break-even
+    /// ≈ 43 tokens), so a short prompt loses by batching.
+    pub min_batched: usize,
+}
+
+impl Default for HeadOptions {
+    fn default() -> Self {
+        Self {
+            prefill_chunk: 1,
+            min_batched: 64,
+        }
+    }
+}
+
+/// The chunk width a prompt of `prompt_len` actually rides: `1` (per
+/// position) when chunking is off or the prompt is under
+/// `min_batched`; else the requested chunk EVENED over the prompt
+/// (`ceil(len / ceil(len / chunk))`), so no ragged tail chunk pays the
+/// batched floor for a handful of tokens. The head sends it in `Begin`;
+/// the oracle uses the same rule.
+pub fn prefill_width(prompt_len: usize, opts: HeadOptions) -> usize {
+    let c = opts.prefill_chunk.max(1);
+    match c == 1 || prompt_len < opts.min_batched.max(2) {
+        true => 1,
+        false => prompt_len.div_ceil(prompt_len.div_ceil(c)),
+    }
+}
+
+/// The prompt's prefill chunks at width `w`.
+fn chunks(len: usize, w: usize) -> impl Iterator<Item = Range<usize>> {
+    (0..len).step_by(w).map(move |lo| lo..(lo + w).min(len))
+}
+
 /// Head role: owns the token stream. Feeds `prompt`, then greedily
 /// generates `max_new` tokens (the tail samples; the head embeds).
 pub fn run_head<S: StageCompute + ?Sized, T: Transport>(
@@ -66,6 +115,17 @@ pub fn run_head<S: StageCompute + ?Sized, T: Transport>(
     link: &mut T,
     prompt: &[u32],
     max_new: usize,
+) -> io::Result<HeadReport> {
+    run_head_with(stage, link, prompt, max_new, HeadOptions::default())
+}
+
+/// [`run_head`] with explicit [`HeadOptions`].
+pub fn run_head_with<S: StageCompute + ?Sized, T: Transport>(
+    stage: &mut S,
+    link: &mut T,
+    prompt: &[u32],
+    max_new: usize,
+    opts: HeadOptions,
 ) -> io::Result<HeadReport> {
     if prompt.is_empty() {
         return Err(proto("empty prompt".into()));
@@ -95,16 +155,41 @@ pub fn run_head<S: StageCompute + ?Sized, T: Transport>(
         ));
     }
 
-    let mut frame = Vec::with_capacity(20 + 4 * stage.hidden_dim());
+    let chunk = prefill_width(prompt.len(), opts);
+    if chunk > u16::MAX as usize {
+        return Err(proto(format!("prefill chunk {chunk} > frame n_tok cap")));
+    }
+    let mut begin = [0u8; 8];
+    begin[..4].copy_from_slice(&(prompt.len() as u32).to_le_bytes());
+    begin[4..].copy_from_slice(&(chunk as u32).to_le_bytes());
+    link.send_frame(FrameKind::Begin, &begin)?;
+
+    let mut frame = Vec::with_capacity(20 + 4 * chunk * stage.hidden_dim());
+    let mut rows = Vec::new();
     let mut report = HeadReport::default();
     let empty: [f32; 0] = [];
+    let prompt_len = prompt.len();
 
-    // One position through this stage → one frame downstream. `kind` is
-    // `Prefill` (no reply) or `Activation` (the tail answers with a token).
-    let mut push = |stage: &mut S, link: &mut T, kind: FrameKind, token: u32, pos: usize| {
-        let hidden = stage.step(token, pos, &empty);
+    // `tokens` at `pos..` through this stage → one frame downstream. `kind`
+    // is `Prefill` (no reply) or `Activation` (the tail answers with a
+    // token). A prompt chunk under `chunk > 1` rides the batched prefill.
+    let mut push = |stage: &mut S, link: &mut T, kind: FrameKind, tokens: &[u32], pos: usize| {
+        let hidden = match (chunk > 1, pos < prompt_len) {
+            (true, true) => {
+                stage.prefill_chunk(tokens, &empty, pos, prompt_len, false, &mut rows);
+                rows.as_slice()
+            }
+            _ => stage.step(tokens[0], pos, &empty),
+        };
         frame.clear();
-        ActivationFrame::encode_into(0, pos as u32, 1, hidden, FrameDtype::F32, &mut frame);
+        ActivationFrame::encode_into(
+            0,
+            pos as u32,
+            tokens.len() as u16,
+            hidden,
+            FrameDtype::F32,
+            &mut frame,
+        );
         link.send_frame(kind, &frame)
     };
     let mut recv_token = |link: &mut T| -> io::Result<u32> {
@@ -117,13 +202,16 @@ pub fn run_head<S: StageCompute + ?Sized, T: Transport>(
         Ok(u32::from_le_bytes(id))
     };
 
-    // Pipelined prefill: no round trip until the last prompt position.
+    // Pipelined prefill: no round trip until the last prompt chunk.
     let t0 = Instant::now();
-    let last = prompt.len() - 1;
-    for (pos, &tok) in prompt[..last].iter().enumerate() {
-        push(stage, link, FrameKind::Prefill, tok, pos)?;
+    let last_lo = (prompt.len() - 1) / chunk * chunk;
+    for c in chunks(prompt.len(), chunk) {
+        let kind = match c.start == last_lo {
+            true => FrameKind::Activation,
+            false => FrameKind::Prefill,
+        };
+        push(stage, link, kind, &prompt[c.clone()], c.start)?;
     }
-    push(stage, link, FrameKind::Activation, prompt[last], last)?;
     let mut next = recv_token(link)?;
     report.prefill = t0.elapsed();
     if max_new > 0 {
@@ -135,7 +223,7 @@ pub fn run_head<S: StageCompute + ?Sized, T: Transport>(
             stage,
             link,
             FrameKind::Activation,
-            next,
+            &[next],
             prompt.len() + i - 1,
         )?;
         next = recv_token(link)?;
@@ -171,7 +259,22 @@ pub fn run_tail<S: StageCompute + ?Sized, T: Transport>(
 
     let hidden_dim = stage.hidden_dim();
     let mut hidden = Vec::with_capacity(hidden_dim);
+    let mut out = Vec::new();
     let mut steps = 0usize;
+    let kind = link.recv_frame_into(&mut buf)?;
+    expect_kind(kind, FrameKind::Begin)?;
+    let (prompt_len, chunk) = match buf.as_slice() {
+        [a, b, c, d, e, f, g, h] => (
+            u32::from_le_bytes([*a, *b, *c, *d]) as usize,
+            u32::from_le_bytes([*e, *f, *g, *h]) as usize,
+        ),
+        _ => return Err(proto(format!("begin frame len {} != 8", buf.len()))),
+    };
+    if prompt_len == 0 || chunk == 0 {
+        return Err(proto(format!(
+            "begin: prompt_len {prompt_len}, chunk {chunk}"
+        )));
+    }
     loop {
         let reply = match link.recv_frame_into(&mut buf)? {
             FrameKind::Shutdown => return Ok(steps),
@@ -180,32 +283,48 @@ pub fn run_tail<S: StageCompute + ?Sized, T: Transport>(
             k => return Err(proto(format!("unexpected {k:?} frame mid-stream"))),
         };
         let hdr = ActivationFrame::decode_into(&buf, &mut hidden).map_err(proto)?;
-        if hidden.len() != hidden_dim || hdr.n_tok != 1 {
+        let pos = hdr.pos as usize;
+        let n_tok = hdr.n_tok as usize;
+        // A prompt chunk spans exactly what the head's chunking produces;
+        // every other frame is one position.
+        let chunked = chunk > 1 && pos < prompt_len;
+        let want_tok = match chunked {
+            true => chunk.min(prompt_len - pos),
+            false => 1,
+        };
+        if n_tok != want_tok || hidden.len() != n_tok * hidden_dim {
             return Err(proto(format!(
-                "activation shape {}×{} != 1×{hidden_dim}",
-                hdr.n_tok,
-                hidden.len()
+                "activation shape {n_tok}×{} != {want_tok}×{hidden_dim} at pos {pos}",
+                hidden.len() / n_tok.max(1)
             )));
         }
-        let pos = hdr.pos as usize;
         // The stage cache is position-ordered: a skipped or repeated pos
         // would silently corrupt the KV/GDN state.
         if pos != steps {
             return Err(proto(format!("activation pos {pos} != expected {steps}")));
         }
-        if pos >= stage.max_positions() {
+        if pos + n_tok > stage.max_positions() {
             return Err(proto(format!(
-                "activation pos {pos} >= stage capacity {}",
+                "activation span {pos}+{n_tok} > stage capacity {}",
                 stage.max_positions()
             )));
         }
-        let logits = stage.step(0, pos, &hidden);
-        on_logits(pos, logits);
+        let logits = match chunked {
+            true => {
+                stage.prefill_chunk(&[], &hidden, pos, prompt_len, reply, &mut out);
+                out.as_slice()
+            }
+            false => stage.step(0, pos, &hidden),
+        };
         if reply {
+            let last = pos + n_tok - 1;
+            on_logits(last, logits);
             let id = argmax_first(logits);
             link.send_frame(FrameKind::Token, &id.to_le_bytes())?;
+        } else if !chunked {
+            on_logits(pos, logits);
         }
-        steps += 1;
+        steps += n_tok;
     }
 }
 
@@ -216,11 +335,42 @@ pub fn run_local<S: StageCompute + ?Sized>(
     prompt: &[u32],
     max_new: usize,
 ) -> Vec<u32> {
+    run_local_with(stage, prompt, max_new, HeadOptions::default())
+}
+
+/// [`run_local`] at the same prefill chunking a [`run_head_with`] uses —
+/// the oracle for a chunked 2-stage run.
+pub fn run_local_with<S: StageCompute + ?Sized>(
+    stage: &mut S,
+    prompt: &[u32],
+    max_new: usize,
+    opts: HeadOptions,
+) -> Vec<u32> {
     let empty: [f32; 0] = [];
+    let chunk = prefill_width(prompt.len(), opts);
     let mut out = Vec::with_capacity(max_new);
     let mut next = 0u32;
-    for (pos, &tok) in prompt.iter().enumerate() {
-        next = argmax_first(stage.step(tok, pos, &empty));
+    match chunk {
+        1 => {
+            for (pos, &tok) in prompt.iter().enumerate() {
+                next = argmax_first(stage.step(tok, pos, &empty));
+            }
+        }
+        _ => {
+            let mut logits = Vec::new();
+            for c in chunks(prompt.len(), chunk) {
+                let last = c.end == prompt.len();
+                stage.prefill_chunk(
+                    &prompt[c.clone()],
+                    &empty,
+                    c.start,
+                    prompt.len(),
+                    last,
+                    &mut logits,
+                );
+            }
+            next = argmax_first(&logits);
+        }
     }
     if max_new > 0 {
         out.push(next);

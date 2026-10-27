@@ -30,6 +30,7 @@ pub struct TernaryGpuStage {
     max_positions: usize,
     handshake: StageHandshake,
     out: Vec<f32>,
+    tok_scratch: Vec<usize>,
 }
 
 impl TernaryGpuStage {
@@ -56,6 +57,7 @@ impl TernaryGpuStage {
             max_positions: config.block_size,
             handshake: ternary_handshake(identity, range),
             out: Vec::new(),
+            tok_scratch: Vec::new(),
         })
     }
 }
@@ -90,5 +92,34 @@ impl StageCompute for TernaryGpuStage {
         };
         self.out = out;
         &self.out[..width]
+    }
+
+    /// The batched range prefill (`prefill_range_chunk`): one dispatch
+    /// chain per chunk instead of one decode step per position — the
+    /// weights stream once per chunk, not once per token.
+    fn prefill_chunk(
+        &mut self,
+        tokens: &[u32],
+        input: &[f32],
+        base_pos: usize,
+        prompt_len: usize,
+        want_logits: bool,
+        out: &mut Vec<f32>,
+    ) {
+        self.tok_scratch.clear();
+        self.tok_scratch.extend(tokens.iter().map(|&t| t as usize));
+        let hidden_in = match self.range.is_first() {
+            true => None,
+            false => Some(input),
+        };
+        // The forwarder hands back an owned readback — move it, no copy.
+        *out = self.fwd.prefill_range_chunk(
+            &self.tok_scratch,
+            hidden_in,
+            base_pos,
+            prompt_len,
+            self.range,
+            want_logits,
+        );
     }
 }

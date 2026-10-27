@@ -1,6 +1,6 @@
 # Plan 623: Multi-host inference lane — layer-range stages, activation frames, TCP→RDMA transport, TP, speculative fill
 
-**Status:** Phase 2 PoC LANDED 2026-10-27 (T2.1 + T2.2 + T2.2b GPU stage + T2.3a pipelined prefill + T2.2c(1) range-scoped weights — each stage holds only its own slice: `crates/riir-infer-dist`, D1 → (a)) — real 2-box TB5 runs, CPU⇄CPU and GPU⇄GPU, streams bit-identical to 1-box; 1-box GPU base gap filed as Issue 1139; Phase 1 (T1.1–T1.5) LANDED 2026-10-26
+**Status:** Phase 2 PoC LANDED 2026-10-27 (T2.1 + T2.2 + T2.2b GPU stage + T2.3a pipelined prefill + T2.2c(1) range-scoped weights + T2.3b chunked batched prefill (promoted) — each stage holds only its own slice: `crates/riir-infer-dist`, D1 → (a)) — real 2-box TB5 runs, CPU⇄CPU and GPU⇄GPU, streams bit-identical to 1-box; 1-box GPU base gap filed as Issue 1139; Phase 1 (T1.1–T1.5) LANDED 2026-10-26
 **Lease closed:** m3-idle-623t15 landed T1.5 2026-10-26 (48 h lease from the claim; the landing below is its provenance) — the amo lane's Phase-0 elephant-capture constraint does not bind the M3, which is where T1.5 executed
 + the 10-test G1 battery, all gates green (see the Phase 1 checkboxes). Phase 0 is decision-free (measurement only) and may
 start once Issue 1109 T0 (bmo reachable) is done; Phase 1 substrate is decision-free
@@ -270,10 +270,38 @@ mlx-lm on the Proposal-042 scoreboard **measured on the same two boxes**.
     interleaved old/new/old/new, amo load ~5): prefill 3.989 / 3.967 s → 1.993 / 2.036 s
     = 2.0×** (the two stages now overlap fully); generated stream identical; decode
     unchanged (16.0–16.2 tok/s). "old" = the `d5f5936` crate built standalone.
-  - [ ] T2.3b chunked multi-token frames (`n_tok > 1`) through a batched range-prefill
-    forward on each stage — the remaining prefill lever; needs a range form of the
-    batched GPU prefill in `ternary_deltanet_gpu_forward.rs` (sibling WIP is live in
-    that file today — wait for it to land, never edit under it).
+  - [x] T2.3b **chunked multi-token frames — LANDED + PROMOTED 2026-10-27.** GPU seam
+    `TernaryDeltanetGpuForward::prefill_range_chunk` (`multi_host` +
+    `ternary_gemm_batched`): the 1-box chunk body `prefill_tokens_chunk` gained a
+    private `StageChunk { lo, hi, hidden_in }` — layer loop `lo..hi`, embedding only
+    when `lo == 0` (else the upstream rows upload into `x_b`), a non-last stage returns
+    every row's hidden instead of the tail; the cudarc whole-prefill arm is skipped for
+    a stage; every pre-623 caller passes `None` (byte-identical). Stage seam
+    `StageCompute::prefill_chunk` (default = the per-position `step` loop; the GPU stage
+    overrides it). Wire: new `Begin` frame (`prompt_len` + effective width — the
+    attention-arm gates key on the WHOLE prompt length, Issue 782, so the tail must know
+    it before chunk 0); prompt chunks ride `Prefill`/`Activation` frames with
+    `n_tok > 1`. Width policy `runner::prefill_width`: chunk EVENED over the prompt
+    (130 @ 128 → 65+65) and per-position under `min_batched = 64` — the measured Metal
+    cost is ~0.9 s/chunk floor + 0.018 s/token vs 0.039 s/token per position
+    (break-even ≈ 43). **G1:** CPU battery 7/7 (chunk 2/3/7 × every split, the
+    `prefill_width` pins); GPU `tests/two_stage_prefill_gpu.rs` on idle bmo, real
+    Bonsai-2 27B, scoped stages: **anchor — the full-range stage's chunked prefill is
+    bit-identical to the PRODUCTION `prefill()` at the same chunk cap**; the 2-stage
+    chunked stream + last-prompt + every decode logit bit-identical at k = 1, 32, 63
+    (P = 64/16, 256/64, 256/256, 200/100). **G2:** 1-box P=256: chunk 16 (P=64)
+    **0.60×** (loses), 64 → **1.34×**, 256 → **1.78–1.83×**; P=200/100 → 1.58×. **Real
+    2-box (amo head ⇄ bmo tail, TB5, scoped GPU, P=256, ABBA, amo load ~3.8):
+    per-position 6.83/6.95 s → chunk 64 5.73/5.49 · 128 5.34/5.30 (**1.30×**) · 256
+    6.73/6.47 s**; `--full-check` G1 PASS on the chunked run. (Less than same-box 2.0×
+    because T2.3a already overlaps the stages per position — chunk 128 balances batch
+    efficiency vs overlap.) **Promoted:** the dist `gpu` feature now carries
+    `ternary_gemm_batched` (the opt-in `gpu_prefill` it shipped behind is folded);
+    `dist_stage --prefill-chunk` defaults to 128 on `--backend gpu`, 1 on cpu (chunking
+    only forfeits the CPU path's per-position overlap). Side observation filed:
+    **[Issue 1140](../.issues/1140_decode_slower_after_batched_prefill.md)** — decode
+    reads 4–6% lower after a batched prefill (order-confounded; the production
+    `prefill()` is the same body).
 - [ ] **T2.4** Micro-batch round-robin for ≥2 streams (fills the PP bubble); continuous
   batching admission; chunked prefill interleaved with decode (exo's prefill-blocks-decode
   gap).

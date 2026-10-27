@@ -33,7 +33,11 @@ default = []
 bonsai2_hadamard = ["riir-infer-core/bonsai2_hadamard"]
 # The GPU stage (Metal on macOS / CubeCL elsewhere) over the T1.5 range
 # seams — TernaryGpuStage.
-gpu = ["dep:riir-infer-gpu"]
+# T2.3b (promoted 2026-10-27 — G1 bit-identical to the production prefill,
+# G2 1.78-1.83x 1-box / 1.30x real 2-box at P=256): the batched range
+# prefill (`prefill_range_chunk` over the `ternary_gemm_batched` body) for
+# chunked prompt frames.
+gpu = ["dep:riir-infer-gpu", "riir-infer-gpu/ternary_gemm_batched"]
 
 [[bin]]
 name = "dist_stage"

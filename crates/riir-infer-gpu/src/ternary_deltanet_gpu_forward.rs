@@ -511,6 +511,16 @@ enum RotDir {
     Inverse,
 }
 
+/// Plan 623 T2.3b — a pipeline stage's slice of one prefill chunk: the
+/// layer window `[lo, hi)` and, on a downstream stage, the upstream rows.
+#[cfg(feature = "ternary_gemm_batched")]
+#[derive(Clone, Copy)]
+struct StageChunk<'a> {
+    lo: usize,
+    hi: usize,
+    hidden_in: Option<&'a [f32]>,
+}
+
 #[cfg(feature = "ternary_gemm_batched")]
 #[derive(Clone, Copy, Debug)]
 enum CaptureRows {
@@ -8336,6 +8346,7 @@ impl TernaryDeltanetGpuForward {
                 CaptureRows::One(capture_token),
                 capture,
                 None,
+                None,
             );
         }
 
@@ -8367,6 +8378,7 @@ impl TernaryDeltanetGpuForward {
                 is_final,
                 CaptureRows::One(local_capture),
                 cap,
+                None,
                 None,
             );
             if is_final {
@@ -8417,7 +8429,15 @@ impl TernaryDeltanetGpuForward {
         let chunk_max = prefill_chunk_max();
         if tokens.len() <= chunk_max {
             self.active_prefill_len = tokens.len();
-            return self.prefill_tokens_chunk(tokens, 0, true, CaptureRows::All, capture, None);
+            return self.prefill_tokens_chunk(
+                tokens,
+                0,
+                true,
+                CaptureRows::All,
+                capture,
+                None,
+                None,
+            );
         }
         self.active_prefill_len = tokens.len();
         let mut logits = Vec::new();
@@ -8435,6 +8455,7 @@ impl TernaryDeltanetGpuForward {
                 is_final,
                 CaptureRows::All,
                 capture.as_deref_mut(),
+                None,
                 None,
             );
             if is_final {
@@ -8518,6 +8539,7 @@ impl TernaryDeltanetGpuForward {
                 CaptureRows::All,
                 None,
                 Some((spec, &mut cap)),
+                None,
             );
             if is_final {
                 logits = out;
@@ -8569,6 +8591,57 @@ impl TernaryDeltanetGpuForward {
         crate::state_readback::manifest(self)
     }
 
+    /// Plan 623 T2.3b — one prefill CHUNK as a pipeline stage over layers
+    /// `[range.lo, range.hi)`: the batched twin of
+    /// [`Self::forward_range_dispatch`]. The first stage embeds `tokens`;
+    /// a downstream stage reads `hidden_in` (`tokens.len()`-free, rows of
+    /// `n_embd`). Returns every row's post-window hidden state on a non-last
+    /// stage; on the last stage the final row's logits when `want_logits`
+    /// (else empty — a mid-prompt chunk skips the lm_head tail).
+    ///
+    /// `prompt_len` is the WHOLE prompt's length — the attention-arm gates
+    /// key on it (Issue 782), so every stage must see the same value the
+    /// 1-box [`Self::prefill`] would. GDN/conv state and the attention KV
+    /// carry across calls exactly as the 1-box chunk driver's do, so chunks
+    /// in ascending `base_pos` order are bit-identical to a 1-box prefill
+    /// run at the same chunk width. Refuses a chunk wider than the
+    /// configured prefill chunk cap (the Bench-709 working-set bound).
+    #[cfg(all(feature = "multi_host", feature = "ternary_gemm_batched"))]
+    pub fn prefill_range_chunk(
+        &mut self,
+        tokens: &[usize],
+        hidden_in: Option<&[f32]>,
+        base_pos: usize,
+        prompt_len: usize,
+        range: riir_infer_core::multi_host::LayerRange,
+        want_logits: bool,
+    ) -> Vec<f32> {
+        if let Err(e) = range.validate(self.config.n_layer as u32) {
+            panic!("prefill_range_chunk: {e}");
+        }
+        let p = hidden_in.map_or(tokens.len(), |h| h.len() / self.config.n_embd);
+        assert!(
+            p <= prefill_chunk_max(),
+            "prefill_range_chunk: chunk {p} > prefill chunk cap {} (RIIR_PREFILL_CHUNK_MAX)",
+            prefill_chunk_max()
+        );
+        self.active_prefill_len = prompt_len;
+        let stage = StageChunk {
+            lo: range.lo as usize,
+            hi: range.hi as usize,
+            hidden_in,
+        };
+        self.prefill_tokens_chunk(
+            tokens,
+            base_pos,
+            want_logits,
+            CaptureRows::One(0),
+            None,
+            None,
+            Some(stage),
+        )
+    }
+
     /// One chunk of a (possibly chunked) prefill — the original
     /// [`Self::prefill_with_layer_capture`] body. `base_pos` is the chunk's
     /// first ABSOLUTE position (0 for single-chunk calls); attention RoPE,
@@ -8586,8 +8659,39 @@ impl TernaryDeltanetGpuForward {
         mut capture: Option<&mut [Vec<f32>]>,
         #[cfg_attr(not(feature = "attn_mass_tap"), allow(unused_mut, unused_variables))]
         mut mass_tap: Option<(&AttnMassTapSpec, &mut AttnMassTapCapture)>,
+        stage: Option<StageChunk<'_>>,
     ) -> Vec<f32> {
-        assert!(!tokens.is_empty(), "prefill requires at least one token");
+        // Plan 623 T2.3b: a pipeline stage runs layers [lo, hi) only, reads
+        // its input rows from the upstream stage instead of the embedding,
+        // and (non-last stage) hands back every row's hidden state instead of
+        // the tail. `None` = the whole model (every pre-623 caller).
+        let n_layers = self.layers.len();
+        let (layer_lo, layer_hi, hidden_in) = match stage {
+            Some(c) => (c.lo, c.hi, c.hidden_in),
+            None => (0, n_layers, None),
+        };
+        assert!(
+            layer_lo < layer_hi && layer_hi <= n_layers,
+            "prefill stage range [{layer_lo}, {layer_hi}) invalid for {n_layers} layers"
+        );
+        let p = match hidden_in {
+            Some(rows) => {
+                let n = self.config.n_embd;
+                assert!(
+                    layer_lo > 0 && tokens.is_empty() && rows.len().is_multiple_of(n),
+                    "prefill stage hidden input: downstream stages only, rows of n_embd={n}"
+                );
+                rows.len() / n
+            }
+            None => {
+                assert!(
+                    layer_lo == 0,
+                    "a downstream prefill stage needs hidden input rows"
+                );
+                tokens.len()
+            }
+        };
+        assert!(p > 0, "prefill requires at least one token");
         // Issue 994: entry AND exit. The entry check is the per-chunk guard
         // in multi-chunk mode (every public prefill drives its chunks through
         // here), catching a mid-prefill poisoning at the earliest chunk
@@ -8597,11 +8701,11 @@ impl TernaryDeltanetGpuForward {
         Self::refuse_if_pool_poisoned("at prefill chunk entry");
         if self.layer_types.contains(&DeltaNetLayerType::Attention) {
             assert!(
-                base_pos + tokens.len() <= self.config.block_size,
+                base_pos + p <= self.config.block_size,
                 "prefill chunk [{base_pos}, {}) exceeds block_size {} — the KV \
                  caches are allocated at block_size rows (raise config.block_size \
                  to cover the full prompt)",
-                base_pos + tokens.len(),
+                base_pos + p,
                 self.config.block_size,
             );
         }
@@ -8633,7 +8737,7 @@ impl TernaryDeltanetGpuForward {
             let tap_blocks_cuda_lane = mass_tap.is_some();
             #[cfg(not(feature = "attn_mass_tap"))]
             let tap_blocks_cuda_lane = false;
-            if capture.is_none() && !tap_blocks_cuda_lane {
+            if capture.is_none() && !tap_blocks_cuda_lane && stage.is_none() {
                 if let Some(logits) = crate::prefill_cuda_full::try_whole_prefill_cuda(
                     self,
                     tokens,
@@ -8687,7 +8791,6 @@ impl TernaryDeltanetGpuForward {
         ))]
         crate::prefill_cuda_full::notify_cubcl_mutated();
 
-        let p = tokens.len();
         let n = self.config.n_embd;
         let eps = self.config.rms_norm_eps as f32;
         let n_v_heads = self.config.deltanet_linear_n_value_heads;
@@ -8724,7 +8827,11 @@ impl TernaryDeltanetGpuForward {
 
         // ── P-width scratch. Allocated per prefill call (once per prompt), so
         //    the decode path's alloc-free steady state is untouched. ──
-        let mut x_b = self.client.empty(p * n * f);
+        let mut x_b = match hidden_in {
+            // A downstream stage's residual stream arrives from the wire.
+            Some(rows) => self.client.create_from_slice(f32::as_bytes(rows)),
+            None => self.client.empty(p * n * f),
+        };
         let pingpong = PREFILL_PINGPONG_RESIDUAL.load(std::sync::atomic::Ordering::Relaxed);
         let dealias_norm = PREFILL_DEALIAS_NORM.load(std::sync::atomic::Ordering::Relaxed);
         // Issue 640 aliasing A/B. The alternates are full-size whenever a
@@ -8885,41 +8992,43 @@ impl TernaryDeltanetGpuForward {
             }
         }
 
-        // ── Embed every prompt token into its row of x_b ──
-        let wte_blocks64 = self.wte_handle.blocks64 as u32;
-        let wte_groups = self.wte_handle.groups_per_row as u32;
-        for (t, &tok) in tokens.iter().enumerate() {
-            unsafe {
-                DequantWteRowCubeCL::launch::<ActiveRuntime>(
-                    &self.client,
-                    self.wte_handle.pos_bits_u32.clone(),
-                    self.wte_handle.neg_bits_u32.clone(),
-                    self.wte_handle.group_scale_f32.clone(),
-                    Self::tok_slice(&x_b, t, n, p),
-                    tok as u32,
-                    wte_blocks64,
-                    wte_groups,
-                    n as u32,
+        // ── Embed every prompt token into its row of x_b (first stage only) ──
+        if hidden_in.is_none() {
+            let wte_blocks64 = self.wte_handle.blocks64 as u32;
+            let wte_groups = self.wte_handle.groups_per_row as u32;
+            for (t, &tok) in tokens.iter().enumerate() {
+                unsafe {
+                    DequantWteRowCubeCL::launch::<ActiveRuntime>(
+                        &self.client,
+                        self.wte_handle.pos_bits_u32.clone(),
+                        self.wte_handle.neg_bits_u32.clone(),
+                        self.wte_handle.group_scale_f32.clone(),
+                        Self::tok_slice(&x_b, t, n, p),
+                        tok as u32,
+                        wte_blocks64,
+                        wte_groups,
+                        n as u32,
+                    );
+                }
+            }
+            // Issue 032 — folded site 1 (embed): restore the primal basis of every
+            // looked-up row (the decode `launch_inverse` over `p` rows at once).
+            if let (Some(cfg), Some(tables)) = (&self.rotation, &self.rot_tables)
+                && cfg.inverse_embedding
+            {
+                self.prefill_rotate(
+                    RotDir::Inverse,
+                    &x_b,
+                    None,
+                    tables,
+                    cfg.block_size,
+                    p * n,
+                    n,
                 );
             }
         }
-        // Issue 032 — folded site 1 (embed): restore the primal basis of every
-        // looked-up row (the decode `launch_inverse` over `p` rows at once).
-        if let (Some(cfg), Some(tables)) = (&self.rotation, &self.rot_tables)
-            && cfg.inverse_embedding
-        {
-            self.prefill_rotate(
-                RotDir::Inverse,
-                &x_b,
-                None,
-                tables,
-                cfg.block_size,
-                p * n,
-                n,
-            );
-        }
 
-        for layer_idx in 0..self.layers.len() {
+        for layer_idx in layer_lo..layer_hi {
             let is_deltanet = self.layer_types[layer_idx] == DeltaNetLayerType::DeltaNet;
 
             // Issue 640 strip-down: a disabled stage class contributes nothing to
@@ -9759,6 +9868,16 @@ impl TernaryDeltanetGpuForward {
 
         // ── Tail: only the final chunk needs logits ──
         self.pos = base_pos + p;
+        if layer_hi < n_layers {
+            // Non-last pipeline stage: every row's residual stream is the
+            // downstream stage's input (the ActivationFrame payload).
+            let bytes = self
+                .client
+                .read_one(x_b.clone())
+                .expect("download stage rows");
+            Self::refuse_if_pool_poisoned("after prefill stage chunk");
+            return f32::from_bytes(&bytes).to_vec();
+        }
         if !is_final_chunk {
             // Non-final chunks skip the tail entirely — same-stream in-order
             // execution carries the pending dispatches into the next chunk's

@@ -66,6 +66,11 @@ pub enum FrameKind {
     /// computes pos t+1 while the tail computes pos t, and no reply
     /// backlog can fill the head's receive buffer on a long prompt).
     Prefill = 4,
+    /// Opens a sequence: `prompt_len` u32 LE · `prefill_chunk` u32 LE
+    /// (T2.3b). The tail needs the WHOLE prompt length before the first
+    /// chunk (the attention-arm gates key on it, Issue 782) and the chunk
+    /// width to know which positions ride the batched prefill.
+    Begin = 5,
 }
 
 impl FrameKind {
@@ -76,6 +81,7 @@ impl FrameKind {
             2 => Ok(Self::Token),
             3 => Ok(Self::Shutdown),
             4 => Ok(Self::Prefill),
+            5 => Ok(Self::Begin),
             _ => Err(invalid(format!("unknown frame kind {v}"))),
         }
     }

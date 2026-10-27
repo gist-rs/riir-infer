@@ -15,7 +15,11 @@
 //! Metal/CubeCL forwarder; `--ctx N` caps the position capacity (default
 //! 4096 — prompt + max-new must fit). Each stage loads ONLY its own slice
 //! of the model (Plan 623 T2.2c); `--full-check` reloads the whole model
-//! for the oracle after the pipeline run.
+//! for the oracle after the pipeline run. `--prefill-chunk N` sends the
+//! prompt in ~N-position frames through the stages' batched prefill (T2.3b;
+//! default 128 on `--backend gpu` — the measured 2-box optimum — and 1 on
+//! cpu, where chunking only forfeits the per-position overlap); the
+//! `--full-check` oracle prefills at the same width.
 
 use std::net::{TcpListener, TcpStream};
 use std::path::PathBuf;
@@ -28,7 +32,7 @@ use riir_infer_core::deltanet::WeightScope;
 use riir_infer_core::gguf_loader::load_qwen_deltanet_ternary_weights_gguf_scoped;
 use riir_infer_core::multi_host::LayerRange;
 use riir_infer_core::types::Config;
-use riir_infer_dist::runner::{run_head, run_local, run_tail};
+use riir_infer_dist::runner::{HeadOptions, run_head_with, run_local_with, run_tail};
 use riir_infer_dist::stage::{ArtifactIdentity, StageCompute, TernaryCpuStage, stage_scope};
 #[cfg(feature = "gpu")]
 use riir_infer_dist::stage_gpu::TernaryGpuStage;
@@ -45,6 +49,7 @@ struct Args {
     full_check: bool,
     backend: String,
     ctx: usize,
+    prefill_chunk: Option<usize>,
 }
 
 fn parse() -> Result<Args, String> {
@@ -60,6 +65,7 @@ fn parse() -> Result<Args, String> {
         full_check: false,
         backend: "cpu".into(),
         ctx: 4096,
+        prefill_chunk: None,
     };
     while let Some(flag) = it.next() {
         let mut val = || it.next().ok_or(format!("{flag} needs a value"));
@@ -83,6 +89,13 @@ fn parse() -> Result<Args, String> {
             "--full-check" => a.full_check = true,
             "--backend" => a.backend = val()?,
             "--ctx" => a.ctx = val()?.parse().map_err(|e| format!("--ctx: {e}"))?,
+            "--prefill-chunk" => {
+                a.prefill_chunk = Some(
+                    val()?
+                        .parse()
+                        .map_err(|e| format!("--prefill-chunk: {e}"))?,
+                )
+            }
             other => return Err(format!("unknown flag {other}")),
         }
     }
@@ -185,7 +198,14 @@ fn run() -> Result<(), String> {
             let sock = TcpStream::connect(&addr).map_err(|e| format!("connect {addr}: {e}"))?;
             let mut link = TcpTransport::new(sock, key, Direction::Downstream)
                 .map_err(|e| format!("socket: {e}"))?;
-            let r = run_head(stage.as_mut(), &mut link, &a.prompt, a.max_new)
+            let opts = HeadOptions {
+                prefill_chunk: a.prefill_chunk.unwrap_or(match a.backend.as_str() {
+                    "gpu" => 128,
+                    _ => 1,
+                }),
+                ..HeadOptions::default()
+            };
+            let r = run_head_with(stage.as_mut(), &mut link, &a.prompt, a.max_new, opts)
                 .map_err(|e| e.to_string())?;
             println!("generated: {:?}", r.generated);
             println!(
@@ -209,7 +229,7 @@ fn run() -> Result<(), String> {
                     identity,
                 )?;
                 let t = Instant::now();
-                let want = run_local(full.as_mut(), &a.prompt, a.max_new);
+                let want = run_local_with(full.as_mut(), &a.prompt, a.max_new, opts);
                 let tok_s = a.max_new.saturating_sub(1) as f64 / t.elapsed().as_secs_f64();
                 println!(
                     "1-box {} oracle: {tok_s:.2} tok/s end-to-end (incl. prefill)",

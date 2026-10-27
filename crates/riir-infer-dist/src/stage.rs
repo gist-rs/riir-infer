@@ -31,6 +31,49 @@ pub trait StageCompute {
     /// (`hidden_dim` wide). Returns the hidden (non-last stage) or the
     /// logits (last stage).
     fn step(&mut self, token: u32, pos: usize, input: &[f32]) -> &[f32];
+
+    /// Run this stage's window over one prefill CHUNK of consecutive
+    /// positions `base_pos..base_pos + n` (T2.3b). The first stage reads
+    /// `tokens` (`n` ids); later stages read `input` (`n` rows of
+    /// `hidden_dim`). Into `out`: every row's hidden (non-last stage), or
+    /// the final row's logits (last stage, only when `want_logits` — else
+    /// `out` is left empty). `prompt_len` is the whole prompt's length.
+    ///
+    /// Default: [`Self::step`] per position (bit-identical to the
+    /// per-position protocol by construction). A backend with a batched
+    /// prefill overrides it — the GPU stage (`prefill_range_chunk`).
+    fn prefill_chunk(
+        &mut self,
+        tokens: &[u32],
+        input: &[f32],
+        base_pos: usize,
+        prompt_len: usize,
+        want_logits: bool,
+        out: &mut Vec<f32>,
+    ) {
+        let _ = prompt_len;
+        let range = self.handshake().range;
+        let (first, last) = (range.is_first(), range.is_last(self.n_layer()));
+        let h = self.hidden_dim();
+        let n = match first {
+            true => tokens.len(),
+            false => input.len() / h,
+        };
+        out.clear();
+        for i in 0..n {
+            let tok = tokens.get(i).copied().unwrap_or(0);
+            let row = match first {
+                true => &input[..0],
+                false => &input[i * h..(i + 1) * h],
+            };
+            let r = self.step(tok, base_pos + i, row);
+            match (last, want_logits && i + 1 == n) {
+                (false, _) => out.extend_from_slice(r),
+                (true, true) => out.extend_from_slice(r),
+                (true, false) => {}
+            }
+        }
+    }
 }
 
 /// Arch tag for the ternary DeltaNet hybrid (Bonsai-2 family).
