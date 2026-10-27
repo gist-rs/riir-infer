@@ -20,3 +20,6 @@ CLAUDE.md
 # macOS Finder noise
 .DS_Store
 .wt/
+
+# Issue 1146 A/B per-cell logs (on-disk evidence, referenced by Bench 914 provenance)
+.benchmarks/i1146_ab/
