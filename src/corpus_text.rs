@@ -30,7 +30,11 @@ pub fn load_corpus_pages(path: &Path) -> Result<Vec<(String, String)>> {
         .filter_map(|e| e.ok().map(|e| e.path()))
         .filter(|p| {
             p.file_name().and_then(|n| n.to_str()).is_some_and(|n| {
-                (n.starts_with("page_") && n.ends_with(".json"))
+                // HF datasets-server pages: the riir-train chat_probe
+                // `page_*.json` naming AND the reflex canonical suites'
+                // split-named pages (`test-*.json`/`train-*.json`/`val-*`).
+                (n.ends_with(".json")
+                    && (n.starts_with("page_") || n.contains('-')))
                     || n.ends_with(".txt")
                     || n.ends_with(".md")
             })
@@ -38,7 +42,10 @@ pub fn load_corpus_pages(path: &Path) -> Result<Vec<(String, String)>> {
         .collect();
     files.sort();
     if files.is_empty() {
-        bail!("no page_*.json (or *.txt/*.md) under {}", path.display());
+        bail!(
+            "no page_*.json / split-*.json (or *.txt/*.md) under {}",
+            path.display()
+        );
     }
     let mut pages = Vec::with_capacity(files.len());
     for f in &files {
@@ -93,6 +100,12 @@ fn extract_page_text(f: &Path) -> Result<String> {
             }
             if let Some(p) = row.pointer("/row/prompt").and_then(|p| p.as_str()) {
                 text.push_str(p);
+                text.push('\n');
+            }
+            // The classification-suite shape (reflex canonical datasets:
+            // ag_news, banking77, …): a single natural-text cell.
+            if let Some(t) = row.pointer("/row/text").and_then(|t| t.as_str()) {
+                text.push_str(t);
                 text.push('\n');
             }
         }

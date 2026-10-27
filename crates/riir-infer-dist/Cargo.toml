@@ -25,6 +25,12 @@ riir-infer-gpu = { path = "../riir-infer-gpu", optional = true, features = ["cub
 # writes f16/bf16 payloads with these — same versions as the root crate.
 half = "2"
 bytemuck = "1"
+# The spec_drafter_floor example walks corpus_text's anyhow errors.
+anyhow = "1"
+
+[[example]]
+name = "spec_drafter_floor"
+path = "examples/spec_drafter_floor.rs"
 
 [features]
 default = []
