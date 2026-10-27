@@ -1,6 +1,8 @@
 # Issue 1144 — rung: cut the FWHT butterfly's barrier stages (Bonsai-2 Metal decode rotations)
 
-**Status:** Open — filed 2026-10-27 from Issue 1143 (closed, `85c4da5`). Unclaimed. Bonsai-2 PQ2_0 residual vs llama.cpp on idle bmo: 18.17 vs 16.4 ms/token (1.11×).
+**Status:** Open — filed 2026-10-27 from Issue 1143 (closed, `85c4da5`). In progress. Bonsai-2 PQ2_0 residual vs llama.cpp on idle bmo: 18.17 vs 16.4 ms/token (1.11×).
+**Claimed:** zed-amo-1143-mlp, 1793103600, expires 2026-10-29T12:00:00Z
+
 
 ## Trigger (measured, Issue 1143)
 
