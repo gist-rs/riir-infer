@@ -237,6 +237,19 @@ mlx-lm on the Proposal-042 scoreboard **measured on the same two boxes**.
 - [ ] **T2.3** Chunked pipelined prefill (chunk c on stage 1 while chunk c+1 on stage 0,
   double-buffered frames) + KV/GDN state lives on its own stage (no state traffic in
   steady state).
+  - [x] T2.3a **per-position pipelined prefill — LANDED 2026-10-27**: new `FrameKind::Prefill`
+    (activation, NO token reply) for prompt positions `0..len-1`; only the last prompt
+    position and decode steps round-trip. The head computes pos t+1 while the tail
+    computes pos t, and a long prompt can no longer back up token replies into a
+    send/send TCP deadlock. CPU G1 battery still 4/4 bit-identical (every split, every
+    position's logits). **2-box A/B (CPU stages, amo ⇄ bmo TB5, 64-token prompt,
+    interleaved old/new/old/new, amo load ~5): prefill 3.989 / 3.967 s → 1.993 / 2.036 s
+    = 2.0×** (the two stages now overlap fully); generated stream identical; decode
+    unchanged (16.0–16.2 tok/s). "old" = the `d5f5936` crate built standalone.
+  - [ ] T2.3b chunked multi-token frames (`n_tok > 1`) through a batched range-prefill
+    forward on each stage — the remaining prefill lever; needs a range form of the
+    batched GPU prefill in `ternary_deltanet_gpu_forward.rs` (sibling WIP is live in
+    that file today — wait for it to land, never edit under it).
 - [ ] **T2.4** Micro-batch round-robin for ≥2 streams (fills the PP bubble); continuous
   batching admission; chunked prefill interleaved with decode (exo's prefill-blocks-decode
   gap).

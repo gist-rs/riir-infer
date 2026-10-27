@@ -61,6 +61,11 @@ pub enum FrameKind {
     Activation = 1,
     Token = 2,
     Shutdown = 3,
+    /// An activation the tail consumes WITHOUT a token reply — every
+    /// prompt position but the last (T2.3 pipelined prefill: the head
+    /// computes pos t+1 while the tail computes pos t, and no reply
+    /// backlog can fill the head's receive buffer on a long prompt).
+    Prefill = 4,
 }
 
 impl FrameKind {
@@ -70,6 +75,7 @@ impl FrameKind {
             1 => Ok(Self::Activation),
             2 => Ok(Self::Token),
             3 => Ok(Self::Shutdown),
+            4 => Ok(Self::Prefill),
             _ => Err(invalid(format!("unknown frame kind {v}"))),
         }
     }

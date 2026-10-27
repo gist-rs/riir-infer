@@ -6,13 +6,15 @@
 //!    the pair (`verify_pair`: arch / geometry / artifact / dtype / range
 //!    tiling) and replies with its own `Handshake`, which the head checks
 //!    the same way. Any mismatch refuses LOUD before a single activation.
-//! 2. per position: head → tail `Activation` ([`ActivationFrame`], f32,
-//!    `pos` in the header); tail → head `Token` (u32 LE, greedy
+//! 2. prompt positions `0..len-1`: head → tail `Prefill` (no reply — the
+//!    two stages overlap, T2.3); the last prompt position and every decode
+//!    step: head → tail `Activation` ([`ActivationFrame`], f32, `pos` in
+//!    the header) answered by tail → head `Token` (u32 LE, greedy
 //!    first-index argmax over the tail's logits).
 //! 3. head → tail `Shutdown`.
 //!
-//! PoC scope: one stream, one hop, prefill token-by-token (T2.3 pipelined
-//! prefill and T2.4 micro-batching ride the same frames later).
+//! Scope: one stream, one hop; prefill is pipelined per position (chunked
+//! multi-token frames and T2.4 micro-batching ride the same frames later).
 
 use std::io;
 use std::time::{Duration, Instant};
@@ -97,11 +99,15 @@ pub fn run_head<S: StageCompute + ?Sized, T: Transport>(
     let mut report = HeadReport::default();
     let empty: [f32; 0] = [];
 
-    let mut push = |stage: &mut S, link: &mut T, token: u32, pos: usize| -> io::Result<u32> {
+    // One position through this stage → one frame downstream. `kind` is
+    // `Prefill` (no reply) or `Activation` (the tail answers with a token).
+    let mut push = |stage: &mut S, link: &mut T, kind: FrameKind, token: u32, pos: usize| {
         let hidden = stage.step(token, pos, &empty);
         frame.clear();
         ActivationFrame::encode_into(0, pos as u32, 1, hidden, FrameDtype::F32, &mut frame);
-        link.send_frame(FrameKind::Activation, &frame)?;
+        link.send_frame(kind, &frame)
+    };
+    let mut recv_token = |link: &mut T| -> io::Result<u32> {
         let kind = link.recv_frame_into(&mut buf)?;
         expect_kind(kind, FrameKind::Token)?;
         let id: [u8; 4] = buf
@@ -111,18 +117,28 @@ pub fn run_head<S: StageCompute + ?Sized, T: Transport>(
         Ok(u32::from_le_bytes(id))
     };
 
+    // Pipelined prefill: no round trip until the last prompt position.
     let t0 = Instant::now();
-    let mut next = 0u32;
-    for (pos, &tok) in prompt.iter().enumerate() {
-        next = push(stage, link, tok, pos)?;
+    let last = prompt.len() - 1;
+    for (pos, &tok) in prompt[..last].iter().enumerate() {
+        push(stage, link, FrameKind::Prefill, tok, pos)?;
     }
+    push(stage, link, FrameKind::Activation, prompt[last], last)?;
+    let mut next = recv_token(link)?;
     report.prefill = t0.elapsed();
     if max_new > 0 {
         report.generated.push(next);
     }
     let t1 = Instant::now();
     for i in 1..max_new {
-        next = push(stage, link, next, prompt.len() + i - 1)?;
+        push(
+            stage,
+            link,
+            FrameKind::Activation,
+            next,
+            prompt.len() + i - 1,
+        )?;
+        next = recv_token(link)?;
         report.generated.push(next);
     }
     report.decode = t1.elapsed();
@@ -157,11 +173,12 @@ pub fn run_tail<S: StageCompute + ?Sized, T: Transport>(
     let mut hidden = Vec::with_capacity(hidden_dim);
     let mut steps = 0usize;
     loop {
-        match link.recv_frame_into(&mut buf)? {
+        let reply = match link.recv_frame_into(&mut buf)? {
             FrameKind::Shutdown => return Ok(steps),
-            FrameKind::Activation => {}
+            FrameKind::Activation => true,
+            FrameKind::Prefill => false,
             k => return Err(proto(format!("unexpected {k:?} frame mid-stream"))),
-        }
+        };
         let hdr = ActivationFrame::decode_into(&buf, &mut hidden).map_err(proto)?;
         if hidden.len() != hidden_dim || hdr.n_tok != 1 {
             return Err(proto(format!(
@@ -184,8 +201,10 @@ pub fn run_tail<S: StageCompute + ?Sized, T: Transport>(
         }
         let logits = stage.step(0, pos, &hidden);
         on_logits(pos, logits);
-        let id = argmax_first(logits);
-        link.send_frame(FrameKind::Token, &id.to_le_bytes())?;
+        if reply {
+            let id = argmax_first(logits);
+            link.send_frame(FrameKind::Token, &id.to_le_bytes())?;
+        }
         steps += 1;
     }
 }
