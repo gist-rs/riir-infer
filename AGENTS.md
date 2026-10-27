@@ -147,6 +147,16 @@ G2 direction-positive 3/3 paired windows ~+0.6–1.0% e2e, −1.5% GPU busy, Ben
 `RIIR_QUANTIZE_CENSUS=1` prints the standalone-quantize launch census per capture
 (expected 0 — the K1–K5 fused rotation kernels already eliminate it; the standing
 decode tripwire, falsifier `a2ebb37`). Remaining rungs + the re-cell bundle: issue 1127.
+The Metal/CubeCL decode dense-pair rung LANDED 2026-10-26 and is **DEFAULT-ON**
+(riir-infer `c400dbc`, issue 1129 / riir-ai Bench 1007): `gemv_plane_f32_pair` — the
+folded GDN a/b f32 escape-set GEMVs (48×5120 each, 64 launches/token) fused into ONE
+launch, per-row math verbatim → bit-identical by construction (G1 to_bits EXACT ×6;
+e2e +9.88/+9.07% decode ABBA); the dense-leg tax halved 4.73→2.56 ms/token. Env
+`RIIR_GDN_DENSE_PAIR_FUSED` is DEMOTE-ONLY (unset = ON; any non-1 set value restores
+the incumbent two-launch pair); `RIIR_GDN_DENSE_PAIR_WG` ships unpromoted (the geometry
+rung measured DEAD — the pair cost is a per-dispatch floor, flat across wg sizes).
+Remaining scope in issue 1129: the `cuda_backend` CubeCL arm (the scored 4090 lane is
+cudarc, whose K2 already fuses this pair — untouched).
 
 ## Build Commands
 
