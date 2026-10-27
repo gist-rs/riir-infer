@@ -45,6 +45,10 @@ fn production_decode_and_readback_ceiling() {
 
     let mut tok = 9707usize;
     let (mut fwd_s, mut read_s, mut argmax_s) = (0f64, 0f64, 0f64);
+    // Issue 1141 cross-posture G1: FNV-1a over every step's logit BITS — the
+    // digest must be identical across builds/kill-switches that claim
+    // bit-identity (uniform cache, params cache, recurrence variants).
+    let mut digest = 0xcbf2_9ce4_8422_2325u64;
     for step in 0..WARMUP + steps {
         fwd.set_input_token(&weights, tok);
         let t = Instant::now();
@@ -57,6 +61,9 @@ fn production_decode_and_readback_ceiling() {
         tok = argmax_first(&logits) as usize;
         let d_argmax = t.elapsed().as_secs_f64();
         assert_eq!(again.len(), logits.len());
+        for v in &logits {
+            digest = (digest ^ u64::from(v.to_bits())).wrapping_mul(0x0100_0000_01b3);
+        }
         if step >= WARMUP {
             fwd_s += d_fwd;
             read_s += d_read;
@@ -72,6 +79,7 @@ fn production_decode_and_readback_ceiling() {
         argmax_s * ms,
         100.0 * (read_s + argmax_s) / fwd_s
     );
+    println!("logits stream digest {digest:016x} · last token {tok}");
 }
 
 /// Issue 1140 T1 — is decode slower after a batched `prefill` than after a

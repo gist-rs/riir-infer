@@ -1,6 +1,6 @@
 # Plan 623: Multi-host inference lane — layer-range stages, activation frames, TCP→RDMA transport, TP, speculative fill
 
-**Status:** Phase 2 PoC LANDED 2026-10-27 (T2.1 + T2.2 + T2.2b GPU stage + T2.3a pipelined prefill + T2.2c(1) range-scoped weights + T2.3b chunked batched prefill (promoted) — each stage holds only its own slice: `crates/riir-infer-dist`, D1 → (a)) — real 2-box TB5 runs, CPU⇄CPU and GPU⇄GPU, streams bit-identical to 1-box; 1-box GPU base gap filed as Issue 1139; Phase 1 (T1.1–T1.5) LANDED 2026-10-26
+**Status:** Phase 2 PoC LANDED 2026-10-27 (T2.1 + T2.2 + T2.2b GPU stage + T2.3a pipelined prefill + T2.2c(1) range-scoped weights + T2.3b chunked batched prefill (promoted) — each stage holds only its own slice: `crates/riir-infer-dist`, D1 → (a)) — real 2-box TB5 runs, CPU⇄CPU and GPU⇄GPU, streams bit-identical to 1-box; 1-box GPU base gap filed as Issue 1139 — mostly BUILD POSTURE, fixed by Issue 1141 (dist `gpu` now carries the production decode posture + the workspace's cubecl-wgpu fork: 1-box stage decode 27.2 → 46.7 tok/s, 2-stage 26.0 → 45.2 tok/s on idle bmo); Phase 1 (T1.1–T1.5) LANDED 2026-10-26
 **Lease closed:** m3-idle-623t15 landed T1.5 2026-10-26 (48 h lease from the claim; the landing below is its provenance) — the amo lane's Phase-0 elephant-capture constraint does not bind the M3, which is where T1.5 executed
 + the 10-test G1 battery, all gates green (see the Phase 1 checkboxes). Phase 0 is decision-free (measurement only) and may
 start once Issue 1109 T0 (bmo reachable) is done; Phase 1 substrate is decision-free
@@ -320,6 +320,11 @@ mlx-lm on the Proposal-042 scoreboard **measured on the same two boxes**.
     reads **−1.35% median (25.52 → 25.17 tok/s), batched lower in 4/4 pairs** — real in
     sign, UNDER the 1.5% G2 bar, so attribution (pool scratch / prefill-left state) is
     not worth a rung; the production `prefill()` carries the same ~1% tax.
+- [ ] **T2.3c** Re-tune `runner::prefill_width`'s `min_batched = 64` break-even under the
+  Issue-1141 posture: the per-position cost dropped more than the chunk floor (bmo, P=64:
+  chunk 16 now **1.44×** 1-box / 1.16× split 32, was 0.60×) — re-measure the cost curve
+  (per-position s/token vs chunk floor + s/token) and re-derive the threshold + the
+  default 128 width; 2-box ABBA confirms.
 - [ ] **T2.4** Micro-batch round-robin for ≥2 streams (fills the PP bubble); continuous
   batching admission; chunked prefill interleaved with decode (exo's prefill-blocks-decode
   gap).

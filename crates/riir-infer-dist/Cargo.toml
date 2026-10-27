@@ -37,7 +37,23 @@ bonsai2_hadamard = ["riir-infer-core/bonsai2_hadamard"]
 # G2 1.78-1.83x 1-box / 1.30x real 2-box at P=256): the batched range
 # prefill (`prefill_range_chunk` over the `ternary_gemm_batched` body) for
 # chunked prompt frames.
-gpu = ["dep:riir-infer-gpu", "riir-infer-gpu/ternary_gemm_batched"]
+#
+# Issue 1141 (promoted 2026-10-27): riir-infer-gpu has NO defaults — the
+# production decode posture lived only in riir-ai's riir-gpu defaults, so
+# the lane ran the bare kernels. The posture rows below + the workspace's
+# cubecl-wgpu fork (uniform-content cache) read, on idle bmo (M5 Ultra,
+# real Bonsai-2 27B, interleaved): 37.24 -> 21.43-21.48 ms/token (1.74x).
+# params_handle_cache is load-bearing HERE: the uniform cache alone reads
+# 33.4-33.9 (a loss vs 31.5-31.7 without it); composed they read 21.4.
+gpu = [
+    "dep:riir-infer-gpu",
+    "riir-infer-gpu/ternary_gemm_batched",
+    "riir-infer-gpu/ternary_gemm_simdgroup",
+    "riir-infer-gpu/deltanet_recurrence_rowpar",
+    "riir-infer-gpu/deltanet_recurrence_parallel",
+    "riir-infer-gpu/delta_routing",
+    "riir-infer-gpu/params_handle_cache",
+]
 
 [[bin]]
 name = "dist_stage"
