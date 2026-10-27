@@ -49,6 +49,15 @@ gpu = [
     "dep:riir-infer-gpu",
     "riir-infer-gpu/ternary_gemm_batched",
     "riir-infer-gpu/ternary_gemm_simdgroup",
+    # Issue 1146 — the prefill-lane features the engine default carries
+    # (riir-ai riir-gpu defaults) and this row omitted — the 1141 class one
+    # list over: without chunked prefill the conv1d/recurrence run the
+    # SEQUENTIAL per-token paths (128 dispatches each per deltanet layer,
+    # ~21.5K dispatches/frame at chunk 128) and without batched-attention
+    # prefill every attention layer runs the per-token loop — the Bench-911
+    # per-frame floor (0.77-0.91 s/frame, 6-8× behind the incumbents).
+    "riir-infer-gpu/ternary_deltanet_chunked_prefill",
+    "riir-infer-gpu/ternary_attention_batched_prefill",
     "riir-infer-gpu/deltanet_recurrence_rowpar",
     "riir-infer-gpu/deltanet_recurrence_parallel",
     "riir-infer-gpu/delta_routing",
