@@ -1,6 +1,6 @@
 # Issue 1139 — riir-infer 1-box GPU decode on M5 Ultra is ~2.2× behind llama.cpp (Bonsai-2-27B PQ2_0)
 
-**Status:** Open (scoreboard pin) — T1, T2 (both parts) and T3 DONE 2026-10-27; Issue 1143 CLOSED 2026-10-27 (`85c4da5`). Bonsai-2 PQ2_0 1-box decode on idle bmo: **37.24 → 18.17 ms/token (55.0 tok/s)** via Issue 1141 (build posture, 1.74×) + Issue 1142 (dense-pair loads-in-flight, +9.9%) + Issue 1143 (decode norm loads-in-flight, +7.3%); Bonsai v1 at the 1142 posture read 16.77–16.88 (≈ llama.cpp parity; not re-measured after 1143, which also runs on v1's norms). Residual vs llama.cpp's 16.4: **1.11×**, routed to Issue 1144 (FWHT barrier stages). Close when 1144 closes (win or honest negative).
+**Status:** Open (scoreboard pin) — T1–T3 DONE 2026-10-27; Issues 1143 (`85c4da5`) and 1144 (`3147164`) CLOSED 2026-10-27; T4 open. Bonsai-2 PQ2_0 1-box decode on idle bmo: **37.24 → 17.57 ms/token (56.9 tok/s)** via Issue 1141 (build posture, 1.74×) + 1142 (dense-pair loads-in-flight, +9.9%) + 1143 (decode norm loads-in-flight, +7.3%) + 1144 (radix-4 FWHT, +3.3%). Residual vs llama.cpp's 16.4: **1.07×**, with no class attributed yet (T4). Close when T4 attributes the residual to a rung or finds none above the 1.5% bar.
 
 ## Why
 
@@ -108,6 +108,27 @@ issue is the M5-Ultra scoreboard pin those rungs are scored against.
     was dropped. The rotations are bound by barrier stages, not by loads, which is routed
     to **Issue 1144**.
   - Both 1143 arms off read 19.59 ms/token, consistent with the 1142 baseline.
+- [x] **Issue 1144 record (filed + CLOSED 2026-10-27, `3147164`) — FWHT barrier stages.**
+  - **Change:** `fwht_rotate_forward_f32_r4` and `fwht_forward_copy_f32_r4` (hblock 1024)
+    run two butterfly stages per pass in registers over a per-thread quad. The lowest
+    pair reads straight from global, the highest writes straight to global, and the
+    middle three ping-pong between two smem halves. That is **4 barriers instead of 11**.
+  - **Trap:** the first build was 1–2 ULP off. Metal compiles MSL with fast math, so a
+    product feeding the next stage's add in a register fuses into an fma; the incumbent
+    escapes this only because every stage round-trips smem. Fencing each product with
+    `select(live, p, 0)` on a runtime-true predicate restores EXACT output.
+  - **G1:** `fwht_radix4_matches_incumbent_bitexact` (both kernels, 5120/6144/17408, a
+    3-row batch, magnitudes 1e4 and 1e-3), the CPU-oracle tests through the launcher, and
+    the real digest `d06bffced92427cb` unchanged.
+  - **G2** (idle bmo, interleaved): **18.15 → 17.57 ms/token (+3.3%, 3/3)**.
+    **PROMOTED DEFAULT-ON**; kill-switch `RIIR_FWHT_R4=0`, harness toggle `set_fwht_r4`.
+  - **Not ported:** the fused default-OFF twins (`gdn_permute_rotate_f32`,
+    `swiglu_rotate_fused_f32`, `residual_add_rmsnorm_rotate_f32`) and the inverse
+    (1 launch/token) keep the 10-stage loop.
+- [ ] **T4 — re-attribute the 1.07× residual.** Re-run riir-ai `bench_763` Phase C for
+  Bonsai-2 and v1 at the 1144 posture (needs the riir-ai `riir-gpu` build to pick up
+  `85c4da5` + `3147164` via the riir-infer path dep), and file a rung for any class whose
+  Bonsai-2 − v1 delta is above the 1.5% bar (≈0.26 ms/token).
 - [x] ~~T2 (original brief)~~ superseded by T2 parts 1+2 above — Per-dispatch census on the M5 Ultra (the Issue-1132
   instrument) vs the llama.cpp Metal graph for the same token: launches/token,
   bytes moved, the top-5 kernels by wall. Name the dominant class (launch floor vs
