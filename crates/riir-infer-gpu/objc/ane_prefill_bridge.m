@@ -365,22 +365,36 @@ void *ane_t0_compile2(const char *mil_path, const char *data_path,
         NSData *milData = [NSData dataWithContentsOfFile:[NSString stringWithUTF8String:mil_path]];
         NSData *data = [NSData dataWithContentsOfFile:[NSString stringWithUTF8String:data_path]];
         NSData *scale = [NSData dataWithContentsOfFile:[NSString stringWithUTF8String:scale_path]];
-        if (!milData || !data || !scale) return NULL;
+        if (!milData || !data || !scale) {
+            set_last_error(@("ane_t0_compile2: blob file read failed"));
+            return NULL;
+        }
 
         Class D = NSClassFromString(@"_ANEInMemoryModelDescriptor");
         Class I = NSClassFromString(@"_ANEInMemoryModel");
         Class AR = NSClassFromString(@"_ANERequest");
         Class AIO = NSClassFromString(@"_ANEIOSurfaceObject");
-        if (!D || !I || !AR || !AIO) return NULL;
+        if (!D || !I || !AR || !AIO) {
+            set_last_error(@("ane_t0_compile2: private ANE classes unavailable"));
+            return NULL;
+        }
 
         id desc = ((id(*)(Class,SEL,id,id,id))objc_msgSend)(D,
             @selector(modelWithMILText:weights:optionsPlist:), milData,
             @{@"@model_path/weights/weight_data.bin": @{@"offset": @0, @"data": data},
               @"@model_path/weights/weight_scale.bin": @{@"offset": @0, @"data": scale}}, nil);
-        if (!desc) { fprintf(stderr, "[bridge] desc2 FAIL\n"); return NULL; }
+        if (!desc) {
+            set_last_error(@("ane_t0_compile2: descriptor construction failed"));
+            fprintf(stderr, "[bridge] desc2 FAIL\n");
+            return NULL;
+        }
 
         id mdl = ((id(*)(Class,SEL,id))objc_msgSend)(I, @selector(inMemoryModelWithDescriptor:), desc);
-        if (!mdl) { fprintf(stderr, "[bridge] model2 FAIL\n"); return NULL; }
+        if (!mdl) {
+            set_last_error(@("ane_t0_compile2: in-memory model construction failed"));
+            fprintf(stderr, "[bridge] model2 FAIL\n");
+            return NULL;
+        }
 
         id hx = ((id(*)(id,SEL))objc_msgSend)(mdl, @selector(hexStringIdentifier));
         NSString *td = [NSTemporaryDirectory() stringByAppendingPathComponent:hx];
@@ -400,12 +414,22 @@ void *ane_t0_compile2(const char *mil_path, const char *data_path,
             ok = ((BOOL(*)(id,SEL,unsigned int,id,NSError**))objc_msgSend)(
                 mdl, @selector(compileWithQoS:options:error:), 0, opts, &e);
             if (!ok) {
+                // Recorded for the Rust-side classifier (ane_prefill bridge
+                // compile_two_blobs): the Code=54-class text embeds
+                // "(transient; retry)" and is the bounded retry's only signal.
+                set_last_error(e ? e.description
+                                 : @("ane_t0_compile2: compileWithQoS failed"));
                 fprintf(stderr, "[bridge] compile2 FAIL: %s\n", e ? e.description.UTF8String : "?");
             }
         }
         if (ok && !((BOOL(*)(id,SEL,unsigned int,id,NSError**))objc_msgSend)(
                 mdl, @selector(loadWithQoS:options:error:), 0, opts, &e)) {
             ok = NO;
+            // The Code=54 class fires HERE (load stage): the ANE pool is
+            // still held by an asynchronously-releasing dropped bank. The
+            // recorded text is the Rust-side bounded retry's classifier.
+            set_last_error(e ? e.description
+                             : @("ane_t0_compile2: loadWithQoS failed"));
             if (restored) {
                 // Corrupt or incompatible store entry: purge it before
                 // compiling exactly once more, otherwise the probe would keep
