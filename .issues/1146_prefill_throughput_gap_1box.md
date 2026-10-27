@@ -1,6 +1,7 @@
 # Issue 1146: 1-box prefill throughput gap — 6–8× behind the incumbents (T0.3 finding)
 
 **Status:** OPEN — gap MEASURED (Bench 911), cause bracketed (per-frame floor, decode-shaped kernels), no fix landed
+**Claimed:** zed-amo-1146-prefill, 1793133500, expires 2026-10-29T20:45:00+00:00
 **Date:** 2026-10-28
 **Found by:** [`.benchmarks/911_plan623_t03_arms.md`](../.benchmarks/911_plan623_t03_arms.md) (Plan 623 T0.3, bmo idle, one session)
 **Session:** zed-amo-i623-t24
