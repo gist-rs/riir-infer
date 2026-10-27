@@ -1,6 +1,6 @@
 # Issue 1139 — riir-infer 1-box GPU decode on M5 Ultra is ~2.2× behind llama.cpp (Bonsai-2-27B PQ2_0)
 
-**Status:** Open (scoreboard pin) — T1–T3 DONE 2026-10-27; Issues 1143 (`85c4da5`) and 1144 (`3147164`) CLOSED 2026-10-27; T4 open. Bonsai-2 PQ2_0 1-box decode on idle bmo: **37.24 → 17.57 ms/token (56.9 tok/s)** via Issue 1141 (build posture, 1.74×) + 1142 (dense-pair loads-in-flight, +9.9%) + 1143 (decode norm loads-in-flight, +7.3%) + 1144 (radix-4 FWHT, +3.3%). Residual vs llama.cpp's 16.4: **1.07×**, with no class attributed yet (T4). Close when T4 attributes the residual to a rung or finds none above the 1.5% bar.
+**Status:** Open (scoreboard pin) — T1–T3 DONE 2026-10-27; Issues 1143 (`85c4da5`) and 1144 (`3147164`) CLOSED 2026-10-27; T4 DONE. Bonsai-2 PQ2_0 1-box decode on idle bmo: **37.24 → 17.57 ms/token (56.9 tok/s)** via Issue 1141 (build posture, 1.74×) + 1142 (dense-pair loads-in-flight, +9.9%) + 1143 (decode norm loads-in-flight, +7.3%) + 1144 (radix-4 FWHT, +3.3%). Residual vs llama.cpp's 16.4: **1.07×** — attributed (T4): 402 extra launches/token; the one rung above the bar is routed to Issue 1145. Close when 1145 closes.
 
 ## Why
 
@@ -125,10 +125,31 @@ issue is the M5-Ultra scoreboard pin those rungs are scored against.
   - **Not ported:** the fused default-OFF twins (`gdn_permute_rotate_f32`,
     `swiglu_rotate_fused_f32`, `residual_add_rmsnorm_rotate_f32`) and the inverse
     (1 launch/token) keep the 10-stage loop.
-- [ ] **T4 — re-attribute the 1.07× residual.** Re-run riir-ai `bench_763` Phase C for
-  Bonsai-2 and v1 at the 1144 posture (needs the riir-ai `riir-gpu` build to pick up
-  `85c4da5` + `3147164` via the riir-infer path dep), and file a rung for any class whose
-  Bonsai-2 − v1 delta is above the 1.5% bar (≈0.26 ms/token).
+- [x] **T4 — re-attribute the 1.07× residual. DONE 2026-10-27.**
+  - **Census:** riir-ai `bench_763` (built from riir-ai develop with riir-infer
+    `3147164`, riir-gpu defaults), idle bmo.
+    - Bonsai-2: synced **18.03 ms/token**; dispatch-only 15.69 at 1254 launches/token.
+    - v1 Q2_0: synced **15.40**; dispatch-only 13.59 at 852 launches/token.
+    - Gap: **2.10 ms/token** over **402 extra launches**.
+  - **Bonsai-2-only classes above the 1.5% bar** (Phase C Δ vs ALL, Bonsai-2 / v1):
+    - norm staging: `input_norm` 0.80/0.46 + `mid_norm` 0.81/0.44 = **+0.71**
+    - `gdn_out_rot` 0.54/0.00
+    - `gdn_proj_dense` 0.54/0.00 (post-1142)
+    - `ffn_rotate` 0.32/0.00
+  - **Existing fusion levers re-measured** on `decode_readback_probe_gpu`, interleaved,
+    digest unchanged in every arm:
+    - `RIIR_GDN_PERMUTE_ROTATE_FUSED=1`: +0.5–0.8%.
+    - `RIIR_SWIGLU_ROTATE_FUSED=1`: +0–0.5%.
+    - Both together: −0.2%.
+    - Radix-4 ports of both fused kernels: G1 EXACT, but still only +0.5% each, so they
+      were NOT shipped.
+    - `RIIR_NORM_ROT_FUSED=1` (1134): **−20%** (17.55 → 21.19, 3/3).
+    - All sub-bar or negative; defaults unchanged.
+  - **Routed:** the norm-staging pool → **Issue 1145** (multi-cube redundant-reduction
+    norm + radix-4 staging, which needs a double-buffered `x`; ceiling ≈0.71 ms ≈ 4%).
+  - **Not routed:** `gdn_out_rot`, `gdn_proj_dense` and `ffn_rotate` each sit at about
+    the launch floor (≈5–11 µs × 48–96 launches); their fusion levers are measured
+    sub-bar above.
 - [x] ~~T2 (original brief)~~ superseded by T2 parts 1+2 above — Per-dispatch census on the M5 Ultra (the Issue-1132
   instrument) vs the llama.cpp Metal graph for the same token: launches/token,
   bytes moved, the top-5 kernels by wall. Name the dominant class (launch floor vs
