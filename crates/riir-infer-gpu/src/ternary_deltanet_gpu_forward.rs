@@ -2953,6 +2953,14 @@ pub struct TernaryDeltanetGpuForward {
     #[cfg(all(feature = "metal_tensor_gemm", target_os = "macos"))]
     metal_zerocopy_gemm: Option<crate::gemm_ternary_metal_zero_copy::MetalTensorZeroCopyGemm>,
 
+    // i1138: the hand-MSL field-GEMV lane's decode caches (gate/up concat + down
+    // + lm_head), built ONCE at construction when the lane is armed (the
+    // env/setter is read-once — the f16-scale posture). `None` = lane off at
+    // construction or the wgpu device/queue was unavailable; the dispatch
+    // sites fall through to the incumbent per matrix.
+    #[cfg(all(feature = "metal_tensor_gemm", target_os = "macos"))]
+    field_ffn: Option<crate::gemv_ternary_msl_field::FieldFfnCaches>,
+
     // Issue 726 T2: ANE hybrid prefill context + config. The ctx is
     // `NotWired` in T2 (see `crate::ane_prefill`) — the gate never fires
     // and prefill runs the GPU batched GEMM unchanged. T3 replaces the
@@ -3131,6 +3139,59 @@ impl TernaryDeltanetGpuForward {
         let mut lm_head = TernaryHandle::from_weights(&client, &weights.lm_head);
         #[allow(unused_mut)]
         let mut wte_handle = TernaryHandle::from_weights(&client, &weights.wte);
+
+        // i1138: build the field-lane decode caches when the lane is armed
+        // AT CONSTRUCTION (env arm; the A/B harness sets it BEFORE new() —
+        // the bench_656 flag posture). The per-run arm flip rides the
+        // explicit setter (gemv_use_field consults it first), so one model
+        // load serves both A/B arms; without construction-time caches the
+        // ON arm would no-op (the vacuous counter catches that).
+        #[cfg(all(feature = "metal_tensor_gemm", target_os = "macos"))]
+        let field_ffn = if crate::gemv_ternary_msl_field::gemv_use_field() {
+            match (ctx.wgpu_device().cloned(), ctx.wgpu_queue().cloned()) {
+                (Some(d), Some(q)) => {
+                    eprintln!(
+                        "[i1138] field lane armed at construction — building zero-copy field caches (gate/up concat + down + lm_head)..."
+                    );
+                    let t0 = std::time::Instant::now();
+                    let caches = crate::gemv_ternary_msl_field::FieldFfnCaches::build(
+                        d,
+                        q,
+                        weights.layers.iter().map(|l| {
+                            (
+                                l.gate_proj.as_ternary(),
+                                l.up_proj.as_ternary(),
+                                l.down_proj.as_ternary(),
+                            )
+                        }),
+                        Some(&weights.lm_head),
+                    );
+                    let built = |v: &[Option<std::sync::Arc<crate::gemv_ternary_msl_field::GemvTernaryFieldMsl>>]| {
+                        v.iter().filter(|c| c.is_some()).count()
+                    };
+                    eprintln!(
+                        "[i1138] field caches built in {:.1}s (gate_up {}/{}, down {}/{}, lm_head {})",
+                        t0.elapsed().as_secs_f64(),
+                        built(&caches.gate_up),
+                        caches.gate_up.len(),
+                        built(&caches.down),
+                        caches.down.len(),
+                        caches.lm_head.is_some(),
+                    );
+                    Some(caches)
+                }
+                _ => {
+                    eprintln!(
+                        "[i1138] field lane armed but the wgpu device/queue is unavailable — lane off"
+                    );
+                    None
+                }
+            }
+        } else {
+            None
+        };
+        #[cfg(not(all(feature = "metal_tensor_gemm", target_os = "macos")))]
+        let field_ffn = None;
 
         // Allocate persistent activation buffers (zero-initialized)
         let zeros_n = vec![0.0f32; n];
@@ -3972,6 +4033,8 @@ impl TernaryDeltanetGpuForward {
             metal_wgpu_gemm,
             #[cfg(all(feature = "metal_tensor_gemm", target_os = "macos"))]
             metal_zerocopy_gemm,
+            #[cfg(all(feature = "metal_tensor_gemm", target_os = "macos"))]
+            field_ffn,
             #[cfg(feature = "ane_prefill")]
             ane_prefill,
             #[cfg(feature = "ane_prefill")]
@@ -5274,13 +5337,29 @@ impl TernaryDeltanetGpuForward {
                     } else {
                         self.norm_x.clone()
                     };
-                    unsafe {
-                        GemvTernaryCubeCL::launch::<ActiveRuntime>(
-                            &self.client,
-                            &layer_w.gate_up_proj,
-                            ffn_in,
-                            self.ffn_gate_up.clone(),
-                        );
+                    // i1138: the field lane's zero-copy dispatch (armed +
+                    // cache present); fail-open to the incumbent otherwise.
+                    #[cfg(all(feature = "metal_tensor_gemm", target_os = "macos"))]
+                    let field_done = match (&self.field_ffn, crate::gemv_ternary_msl_field::gemv_use_field()) {
+                        (Some(caches), true) if layer_idx < caches.gate_up.len() => caches.gate_up[layer_idx]
+                            .as_ref()
+                            .is_some_and(|ctx| {
+                                ctx.dispatch_zero_copy(&self.client, &ffn_in, &self.ffn_gate_up)
+                                    .is_ok()
+                            }),
+                        _ => false,
+                    };
+                    #[cfg(not(all(feature = "metal_tensor_gemm", target_os = "macos")))]
+                    let field_done = false;
+                    if !field_done {
+                        unsafe {
+                            GemvTernaryCubeCL::launch::<ActiveRuntime>(
+                                &self.client,
+                                &layer_w.gate_up_proj,
+                                ffn_in,
+                                self.ffn_gate_up.clone(),
+                            );
+                        }
                     }
                 }
                 // Issue 1113 lever 1 rung 2 — the K5 fusion (the cudarc K5
@@ -5377,24 +5456,56 @@ impl TernaryDeltanetGpuForward {
                 // the loop (for the last layer).
                 #[cfg(feature = "ternary_gemv_residual")]
                 if site_on(4, DECODE_STAGE_FFN_DOWN) {
-                    unsafe {
-                        GemvTernaryResidualCubeCL::launch::<ActiveRuntime>(
-                            &self.client,
-                            &layer_w.down_proj,
-                            self.ffn_hidden.clone(),
-                            self.x.clone(),
-                        );
+                    // i1138: the field lane's zero-copy dispatch (armed +
+                    // cache present); fail-open to the incumbent otherwise.
+                    #[cfg(all(feature = "metal_tensor_gemm", target_os = "macos"))]
+                    let field_done = match (&self.field_ffn, crate::gemv_ternary_msl_field::gemv_use_field()) {
+                        (Some(caches), true) if layer_idx < caches.down.len() => caches.down[layer_idx]
+                            .as_ref()
+                            .is_some_and(|ctx| {
+                                ctx.dispatch_zero_copy(&self.client, &self.ffn_hidden, &self.x)
+                                    .is_ok()
+                            }),
+                        _ => false,
+                    };
+                    #[cfg(not(all(feature = "metal_tensor_gemm", target_os = "macos")))]
+                    let field_done = false;
+                    if !field_done {
+                        unsafe {
+                            GemvTernaryResidualCubeCL::launch::<ActiveRuntime>(
+                                &self.client,
+                                &layer_w.down_proj,
+                                self.ffn_hidden.clone(),
+                                self.x.clone(),
+                            );
+                        }
                     }
                 }
                 #[cfg(not(feature = "ternary_gemv_residual"))]
                 if site_on(4, DECODE_STAGE_FFN_DOWN) {
-                    unsafe {
-                        GemvTernaryCubeCL::launch::<ActiveRuntime>(
-                            &self.client,
-                            &layer_w.down_proj,
-                            self.ffn_hidden.clone(),
-                            self.ffn_out.clone(),
-                        );
+                    // i1138: the field lane's zero-copy dispatch (armed +
+                    // cache present); fail-open to the incumbent otherwise.
+                    #[cfg(all(feature = "metal_tensor_gemm", target_os = "macos"))]
+                    let field_done = match (&self.field_ffn, crate::gemv_ternary_msl_field::gemv_use_field()) {
+                        (Some(caches), true) if layer_idx < caches.down.len() => caches.down[layer_idx]
+                            .as_ref()
+                            .is_some_and(|ctx| {
+                                ctx.dispatch_zero_copy(&self.client, &self.ffn_hidden, &self.ffn_out)
+                                    .is_ok()
+                            }),
+                        _ => false,
+                    };
+                    #[cfg(not(all(feature = "metal_tensor_gemm", target_os = "macos")))]
+                    let field_done = false;
+                    if !field_done {
+                        unsafe {
+                            GemvTernaryCubeCL::launch::<ActiveRuntime>(
+                                &self.client,
+                                &layer_w.down_proj,
+                                self.ffn_hidden.clone(),
+                                self.ffn_out.clone(),
+                            );
+                        }
                     }
                 }
             }
@@ -5463,13 +5574,30 @@ impl TernaryDeltanetGpuForward {
                 };
 
                 // LM head: logits = W_lm_head @ (rotated)? norm_x
-                unsafe {
-                    GemvTernaryCubeCL::launch::<ActiveRuntime>(
-                        &self.client,
-                        &self.lm_head,
-                        lm_in,
-                        self.logits.clone(),
-                    );
+                // i1138: the field lane's zero-copy dispatch (armed + cache
+                // present); fail-open to the incumbent otherwise.
+                #[cfg(all(feature = "metal_tensor_gemm", target_os = "macos"))]
+                let field_done = match (&self.field_ffn, crate::gemv_ternary_msl_field::gemv_use_field()) {
+                    (Some(caches), true) => caches
+                        .lm_head
+                        .as_ref()
+                        .is_some_and(|ctx| {
+                            ctx.dispatch_zero_copy(&self.client, &lm_in, &self.logits)
+                                .is_ok()
+                        }),
+                    _ => false,
+                };
+                #[cfg(not(all(feature = "metal_tensor_gemm", target_os = "macos")))]
+                let field_done = false;
+                if !field_done {
+                    unsafe {
+                        GemvTernaryCubeCL::launch::<ActiveRuntime>(
+                            &self.client,
+                            &self.lm_head,
+                            lm_in,
+                            self.logits.clone(),
+                        );
+                    }
                 }
             }
         }
