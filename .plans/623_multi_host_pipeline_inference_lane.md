@@ -406,7 +406,28 @@ mlx-lm on the Proposal-042 scoreboard **measured on the same two boxes**.
   46.9, pure bubble fill) — and **saturated at s=3 (109.4)**: more streams partition
   the rate (36.5 per-stream), they do not add throughput. OPEN rungs: the admission
   seam (mid-flight join, serve-time shape), kernel-level micro-batching (batch-2 step
-  on the tail — Phase 4's launch-bound finding makes it real), T2.7 scoreboard rows.
+  on the tail — Phase 4's launch-bound finding makes it real), T2.7 scoreboard rows
+  (DONE — Bench 910).
+  **ADMISSION SEAM LANDED 2026-10-28** (zed-amo-i623-admit): `Admission`/
+  `AdmissionSource`/`StageFactory` + `run_head_multi_admit` — one wave engine
+  (`run_waves`) now drives BOTH doors: the static `run_head_multi` (borrowed table,
+  `ClosedAdmission`, unchanged public signature — the 7-test G1 battery green
+  unchanged) and the joining door (a `Vec<S>` pool + factory; an `Admission::Join`
+  appends a factory-built stage at a pass boundary, sends its `BeginStream` there,
+  reserves the joiner's frame bound (the T2.1b posture, joined edition), and refuses
+  loud on empty prompt / over-capacity / foreign handshake). The TAIL needs no
+  change — its loop already accepted a `BeginStream` any time and its static table
+  IS the tail's admission cap (serve posture: prewarm the joiner's slot — the
+  test-side lesson, a cap-1 tail refuses the join mid-run). G1:
+  `tests/multi_stream_admission.rs` 4/4 — a stream joins MID-DECODE (its first
+  tail frame lands after the resident stream began decoding), both streams'
+  tokens bit-identical to the 1-box oracles THROUGH the join, the wire step census
+  exact, Wait inert + Close drains, the three refusal classes, prewarmed slots
+  beyond the initial table legal. Clippy `-D warnings`, rustfmt clean, full dist
+  CPU suite 9+2+8+7+4 green. Honest residue: the idle-table `poll` contract is
+  BLOCK (the engine never sleeps for it — a serve front-end blocks on its
+  listener); a malformed join still refuses the RUN (validation belongs to the
+  caller's admission front-end); kernel micro-batching stays the forwarder rung.
 - [x] **T2.5** Planner: boot probe of per-layer cost per host (prefill + decode) and link
   RTT/bw (T0.2 code), split to equalise stage time under memory; manual override.
   **LANDED 2026-10-27** (zed-amo-i623-t21b) at SPLIT granularity (the honest PoC

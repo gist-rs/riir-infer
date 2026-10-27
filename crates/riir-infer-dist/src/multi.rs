@@ -34,14 +34,16 @@
 //! only sends are 8-byte replies, which never fill a socket buffer, with
 //! a `recv` between them (the same invariant T2.3a rests on).
 //!
-//! Scope notes (honest residue): admission is the static request table —
-//! a stream cannot JOIN mid-flight until a caller-facing admission seam
-//! exists (the scheduler only ever asks "which non-done streams have
-//! work", so a join is a table append at a pass boundary). The waves are
-//! NOT kernel-level micro-batching: two streams' tokens still compute as
-//! two `step` calls on the tail — batching them into one dispatch is a
-//! forwarder rung (Phase 4 measured batch-1 decode launch-bound, so the
-//! rung is real, and it is not this module's).
+//! Scope notes (honest residue): kernel-level micro-batching is NOT
+//! here — two streams' tokens still compute as two `step` calls on the
+//! tail (batching them into one dispatch is a forwarder rung — Phase 4
+//! measured batch-1 decode launch-bound, so the rung is real, and it is
+//! not this module's). Admission: the static door ([`run_head_multi`])
+//! pins the request table; the joining door ([`run_head_multi_admit`],
+//! the T2.4 admission seam) appends factory-built stages at pass
+//! boundaries — the tail side needs no change (its loop already accepts
+//! a `BeginStream` any time and its static table IS the tail's
+//! admission cap).
 
 use std::collections::{HashMap, VecDeque};
 use std::io;
@@ -67,6 +69,56 @@ pub struct MultiRequest {
 impl MultiRequest {
     pub fn new(prompt: Vec<u32>, max_new: usize) -> Self {
         Self { prompt, max_new }
+    }
+}
+
+/// An admission event, polled by the joining runner at pass boundaries
+/// (T2.4 admission seam).
+#[derive(Debug, Clone)]
+pub enum Admission {
+    /// Admit this request as the next stream (`seq_id` = the current
+    /// table length); the stage it runs on is built by the runner's
+    /// [`StageFactory`]. A malformed join (empty prompt, over-capacity,
+    /// handshake mismatch) refuses the RUN loud — validate before
+    /// offering; a serve front-end owns that gate.
+    Join(MultiRequest),
+    /// Nothing to admit right now; keep the pipeline running.
+    Wait,
+    /// No further joins will ever arrive: finish the outstanding
+    /// streams and return.
+    Close,
+}
+
+/// The admission source. Polled at the top of every scheduling pass;
+/// while the table is IDLE (every stream done, [`Admission::Close`]
+/// not yet returned) an implementation should BLOCK in [`Self::poll`]
+/// for its next event — the engine does not sleep for it.
+pub trait AdmissionSource {
+    fn poll(&mut self) -> io::Result<Admission>;
+}
+
+/// The no-join source: the static door's admission (`Close` at once).
+#[derive(Debug, Default, Clone, Copy)]
+pub struct ClosedAdmission;
+
+impl AdmissionSource for ClosedAdmission {
+    fn poll(&mut self) -> io::Result<Admission> {
+        Ok(Admission::Close)
+    }
+}
+
+/// Builds the stage instance a joining stream runs on (the runner owns
+/// the stage table). Weights stay `Arc`-shared; a build allocates the
+/// per-stream cache/scratch only — keep it that way, a join must not
+/// re-read the artifact.
+pub trait StageFactory<S: StageCompute> {
+    /// `seq` is the joining stream's id (its table index).
+    fn build(&mut self, seq: usize) -> io::Result<S>;
+}
+
+impl<S: StageCompute, F: FnMut(usize) -> io::Result<S>> StageFactory<S> for F {
+    fn build(&mut self, seq: usize) -> io::Result<S> {
+        self(seq)
     }
 }
 
@@ -113,10 +165,75 @@ enum Work {
     Feed { pos: usize, tok: u32 },
 }
 
-/// Head role over `s` streams: stage `i` serves request `i` (`seq_id` =
-/// its index). Every head stage must present the SAME handshake (one
-/// window per pipeline side); the tail's is verified once, as in the
-/// single-stream runner.
+/// The stage table as the wave engine sees it: index-addressed compute
+/// plus the admit half of the admission seam. The static door wraps the
+/// caller's borrowed slice; the joining door owns a pool and builds
+/// joiners through a [`StageFactory`].
+trait WaveStages {
+    type Stage: ?Sized + StageCompute;
+    fn table_len(&self) -> usize;
+    fn stage(&mut self, i: usize) -> &mut Self::Stage;
+    /// Build + append the joining stream's stage (its index is the
+    /// pre-append length). Validates the handshake against table 0 and
+    /// the position capacity; the engine has already capped the chunk.
+    fn admit(&mut self, req: &MultiRequest, chunk: usize) -> io::Result<()>;
+}
+
+struct BorrowedTable<'a, 'b, S: ?Sized>(&'a mut [&'b mut S]);
+
+impl<S: ?Sized + StageCompute> WaveStages for BorrowedTable<'_, '_, S> {
+    type Stage = S;
+    fn table_len(&self) -> usize {
+        self.0.len()
+    }
+    fn stage(&mut self, i: usize) -> &mut S {
+        &mut *self.0[i]
+    }
+    fn admit(&mut self, _req: &MultiRequest, _chunk: usize) -> io::Result<()> {
+        Err(proto(
+            "static stream table cannot admit mid-flight — use run_head_multi_admit".into(),
+        ))
+    }
+}
+
+struct PoolTable<'p, 'f, S: StageCompute, F: StageFactory<S>> {
+    pool: &'p mut Vec<S>,
+    factory: &'f mut F,
+}
+
+impl<S: StageCompute, F: StageFactory<S>> WaveStages for PoolTable<'_, '_, S, F> {
+    type Stage = S;
+    fn table_len(&self) -> usize {
+        self.pool.len()
+    }
+    fn stage(&mut self, i: usize) -> &mut S {
+        &mut self.pool[i]
+    }
+    fn admit(&mut self, req: &MultiRequest, _chunk: usize) -> io::Result<()> {
+        let idx = self.pool.len();
+        let stage = self.factory.build(idx)?;
+        let needed = req.prompt.len() + req.max_new.saturating_sub(1);
+        if needed > stage.max_positions() {
+            return Err(proto(format!(
+                "stream {idx} needs {needed} positions > stage capacity {}",
+                stage.max_positions()
+            )));
+        }
+        if *stage.handshake() != *self.pool[0].handshake() {
+            return Err(proto(format!(
+                "stream {idx} handshake differs from stream 0"
+            )));
+        }
+        self.pool.push(stage);
+        Ok(())
+    }
+}
+
+/// Head role over `s` streams (the STATIC door): stage `i` serves
+/// request `i` (`seq_id` = its index); the request table is fixed — no
+/// mid-flight join. Every head stage must present the SAME handshake
+/// (one window per pipeline side); the tail's is verified once, as in
+/// the single-stream runner.
 ///
 /// The per-stream [`HeadReport`] walls overlap other streams' work by
 /// design — `prefill` is wall-to-first-token of THAT stream, `decode`
@@ -135,23 +252,76 @@ pub fn run_head_multi<S: StageCompute + ?Sized, T: Transport>(
             reqs.len()
         )));
     }
-    if stages.is_empty() {
+    run_waves(
+        &mut BorrowedTable(stages),
+        link,
+        reqs,
+        &mut ClosedAdmission,
+        opts,
+    )
+}
+
+/// Head role with the T2.4 admission seam: an [`Admission::Join`]
+/// appends a factory-built stage at a pass boundary (the joining
+/// stream's `BeginStream` rides the same boundary — the tail accepts
+/// one any time; its static table is the TAIL's admission cap). `pool`
+/// owns one stage per stream; pre-warmed slots beyond `initial` are
+/// legal (a join takes `pool.push(factory.build(seq))`). The call
+/// returns once admission closed AND every stream finished — an
+/// [`AdmissionSource`] polled while the table is idle must block; the
+/// engine never sleeps for it. Same report semantics as
+/// [`run_head_multi`]; the vec is in stream order (joiners appended).
+pub fn run_head_multi_admit<S: StageCompute, T: Transport, F: StageFactory<S>>(
+    pool: &mut Vec<S>,
+    link: &mut T,
+    initial: &[MultiRequest],
+    admission: &mut dyn AdmissionSource,
+    factory: &mut F,
+    opts: HeadOptions,
+) -> io::Result<Vec<HeadReport>> {
+    if pool.is_empty() {
         return Err(proto("no streams".into()));
     }
-    let n_layer = stages[0].n_layer();
-    for (i, s) in stages.iter().enumerate().skip(1) {
-        if s.handshake() != stages[0].handshake() {
+    if pool.len() < initial.len() {
+        return Err(proto(format!(
+            "stage pool {} < initial request count {}",
+            pool.len(),
+            initial.len()
+        )));
+    }
+    let mut table = PoolTable { pool, factory };
+    run_waves(&mut table, link, initial, admission, opts)
+}
+
+fn run_waves<T: WaveStages, L: Transport>(
+    table: &mut T,
+    link: &mut L,
+    reqs: &[MultiRequest],
+    admission: &mut dyn AdmissionSource,
+    opts: HeadOptions,
+) -> io::Result<Vec<HeadReport>> {
+    if table.table_len() < reqs.len() {
+        return Err(proto(format!(
+            "stream table {} < request count {}",
+            table.table_len(),
+            reqs.len()
+        )));
+    }
+    let n_layer = table.stage(0).n_layer();
+    let hs0 = table.stage(0).handshake().clone();
+    for i in 1..table.table_len() {
+        if *table.stage(i).handshake() != hs0 {
             return Err(proto(format!("stream {i} handshake differs from stream 0")));
         }
     }
     let mut buf = Vec::new();
-    handshake::encode(stages[0].handshake(), &mut buf);
+    handshake::encode(&hs0, &mut buf);
     link.send_frame(FrameKind::Handshake, &buf)?;
     let kind = link.recv_frame_into(&mut buf)?;
     expect_kind(kind, FrameKind::Handshake)?;
     let tail_hs = handshake::decode(&buf).map_err(proto)?;
     tail_hs
-        .verify_pair(stages[0].handshake(), n_layer)
+        .verify_pair(&hs0, n_layer)
         .map_err(|e| proto(format!("tail handshake refused: {e}")))?;
     if !tail_hs.range.is_last(n_layer) {
         return Err(proto(
@@ -167,10 +337,10 @@ pub fn run_head_multi<S: StageCompute + ?Sized, T: Transport>(
                 return Err(proto(format!("stream {i}: empty prompt")));
             }
             let needed = r.prompt.len() + r.max_new.saturating_sub(1);
-            if needed > stages[i].max_positions() {
+            if needed > table.stage(i).max_positions() {
                 return Err(proto(format!(
                     "stream {i} needs {needed} positions > stage capacity {}",
-                    stages[i].max_positions()
+                    table.stage(i).max_positions()
                 )));
             }
             let chunk = prefill_width(r.prompt.len(), opts);
@@ -194,9 +364,9 @@ pub fn run_head_multi<S: StageCompute + ?Sized, T: Transport>(
         })
         .collect::<io::Result<_>>()?;
 
-    // One BeginStream per stream up front, then the waves. (A stream that
-    // joins later would send its BeginStream at its pass boundary — the
-    // tail accepts one any time.)
+    // One BeginStream per stream up front, then the waves. (A stream
+    // that joins later sends its BeginStream at its pass boundary —
+    // the tail accepts one any time.)
     for (i, st) in streams.iter().enumerate() {
         let mut begin = [0u8; 12];
         begin[..4].copy_from_slice(&(i as u32).to_le_bytes());
@@ -207,18 +377,38 @@ pub fn run_head_multi<S: StageCompute + ?Sized, T: Transport>(
 
     // Buffers sized to the WIDEST stream's chunk — no mid-run realloc
     // (the T2.1b posture).
-    let hidden_dim = stages[0].hidden_dim();
+    let hidden_dim = table.stage(0).hidden_dim();
     let max_chunk = streams.iter().map(|s| s.chunk).max().unwrap_or(1);
     let mut frame = Vec::with_capacity(20 + 4 * max_chunk * hidden_dim);
     let mut rows = Vec::new();
     let mut outstanding: VecDeque<usize> = VecDeque::new();
-    let n = streams.len();
     let empty: [f32; 0] = [];
-
-    while !streams.iter().all(|s| matches!(s.phase, Phase::Done)) {
+    let mut closed = false;
+    loop {
+        // The T2.4 admission seam: joins are table appends at pass
+        // boundaries. The Admitter drains until Wait/Close; while the
+        // table is idle it must block in `poll` (the engine does not
+        // sleep for it).
+        while !closed {
+            match admission.poll()? {
+                Admission::Close => closed = true,
+                Admission::Wait => break,
+                Admission::Join(req) => {
+                    admit_stream(table, link, &mut streams, req, opts, &mut frame, &mut rows)?
+                }
+            }
+        }
+        if closed && streams.iter().all(|s| matches!(s.phase, Phase::Done)) {
+            break;
+        }
         // One work item per stream, round-robin. The immutable view of
         // the work (`tokens`) cannot cross the state mutation — the
         // borrow ends at `send_frame`, the mutation follows it.
+        let n = streams.len();
+        // Indexed on purpose: the body interleaves immutable prompt
+        // slices with `phase` mutation on `streams` AND hands `i` to
+        // `table.stage(i)` — an iterator would fight the borrows.
+        #[allow(clippy::needless_range_loop)]
         for i in 0..n {
             let work = match streams[i].phase {
                 Phase::Prefill => {
@@ -261,10 +451,12 @@ pub fn run_head_multi<S: StageCompute + ?Sized, T: Transport>(
             };
             let hidden = match chunked {
                 true => {
-                    stages[i].prefill_chunk(tokens, &empty, pos, prompt_len, false, &mut rows);
+                    table
+                        .stage(i)
+                        .prefill_chunk(tokens, &empty, pos, prompt_len, false, &mut rows);
                     rows.as_slice()
                 }
-                false => stages[i].step(tokens[0], pos, &empty),
+                false => table.stage(i).step(tokens[0], pos, &empty),
             };
             frame.clear();
             ActivationFrame::encode_into(
@@ -332,6 +524,56 @@ pub fn run_head_multi<S: StageCompute + ?Sized, T: Transport>(
     }
     link.send_frame(FrameKind::Shutdown, &[])?;
     Ok(streams.iter().map(|s| s.report()).collect())
+}
+
+/// One [`Admission::Join`] at a pass boundary: validate the request,
+/// build + append the stage (table side), extend the frame reservations
+/// to the joiner's bound (the T2.1b posture, joined edition — a later
+/// chunked frame never reallocs mid-stream), announce the stream
+/// (`BeginStream`), open its state. Refusing here fails the run loud —
+/// the caller's admission front-end validates first.
+#[allow(clippy::too_many_arguments)]
+fn admit_stream<T: WaveStages>(
+    table: &mut T,
+    link: &mut impl Transport,
+    streams: &mut Vec<StreamState>,
+    req: MultiRequest,
+    opts: HeadOptions,
+    frame: &mut Vec<u8>,
+    rows: &mut Vec<f32>,
+) -> io::Result<()> {
+    if req.prompt.is_empty() {
+        return Err(proto("joining stream: empty prompt".into()));
+    }
+    let chunk = prefill_width(req.prompt.len(), opts);
+    if chunk > u16::MAX as usize {
+        return Err(proto(format!(
+            "joining stream: prefill chunk {chunk} > frame n_tok cap"
+        )));
+    }
+    let idx = streams.len();
+    table.admit(&req, chunk)?;
+    let hidden_dim = table.stage(0).hidden_dim();
+    frame.reserve(crate::runner::frame_bound(chunk, hidden_dim));
+    rows.reserve(chunk.saturating_mul(hidden_dim));
+    let mut begin = [0u8; 12];
+    begin[..4].copy_from_slice(&(idx as u32).to_le_bytes());
+    begin[4..8].copy_from_slice(&(req.prompt.len() as u32).to_le_bytes());
+    begin[8..].copy_from_slice(&(chunk as u32).to_le_bytes());
+    link.send_frame(FrameKind::BeginStream, &begin)?;
+    streams.push(StreamState {
+        prompt: req.prompt,
+        max_new: req.max_new,
+        chunk,
+        prefill_lo: 0,
+        phase: Phase::Prefill,
+        generated: Vec::with_capacity(req.max_new),
+        t0: Instant::now(),
+        prefill: None,
+        decode_t0: None,
+        decode: Duration::ZERO,
+    });
+    Ok(())
 }
 
 /// Tail role over `s` streams: connection-lifetime handshake, then any
