@@ -120,8 +120,18 @@ incumbent comparisons alone.
    unsigned binaries — the uv venv python silently times out on inbound
    connects (Bench 896's `link_probe` works because it is individually
    allowlisted). bmo: firewall OFF. No passwordless sudo on either box →
-   no allowlist path. The lawful pattern used here: **amo always the TCP
-   CLIENT**, bmo the listener; loopback + ssh -R relay where bmo→amo was
+   no allowlist path from an agent. The lawful pattern used here: **amo
+   always the TCP CLIENT**, bmo the listener; loopback + ssh -R relay where
+   bmo→amo was unavoidable (ring init). JACCL/RDMA is the real fix and is
+   D2/owner-gated (recovery-mode `rdma_ctl`).
+   **UPDATE 2026-10-27 (owner gate list, items B+C):** Remote Login ENABLED on
+   amo by the owner — `:22` verified on loopback + the TB IP, bmo's ed25519
+   key appended to amo's `authorized_keys`, `bmo→amo ssh BatchMode OK` — the
+   ssh mesh is symmetric (mlx.launch --hosts both-ways and ssh -L tunnels now
+   available; the -R relay gymnastics are retired). Firewall allowlist
+   commands (socketfilterfw --add/--unblockapp for the uv python + venv shim)
+   HANDED to the owner — pending run; verify probe = the 20 s bmo→amo TCP
+   connect that timed out pre-allowlist.
    unavoidable (ring init). JACCL/RDMA is the real fix and is D2/owner-gated
    (recovery-mode `rdma_ctl`).
 2. **hf download stall + bogus exit-0:** `hf download --force-download`
@@ -151,3 +161,15 @@ incumbent comparisons alone.
   T0.3 quiet window** (elephant capture holds amo MPS until ~10-27); the
   role0 row's median agreeing with role1 within noise is the interim
   cross-check.
+
+## 7. Owner verdicts + follow-ups (2026-10-27 gate list)
+
+| item | verdict | state |
+|---|---|---|
+| B — amo Remote Login | owner DONE | verified: `:22` open both interfaces, bmo→amo ssh keyless OK, key mesh appended |
+| C — amo firewall allowlist (venv python) | GO — commands handed to the owner | pending owner sudo run; verify probe afterwards |
+| A — `rdma_ctl enable` ×2 (recovery) | GO when convenient | recorded in issue 1109 T4; Phase 3+ parked until `rdma_en*` appears |
+| D — Plan 623 Phase 2 scope (D1) | already DECIDED → (a) in the plan (parallel lane) | no action |
+| E — file the mlx 0.32.0 ring p2p 2-node deadlock upstream (ml-explore/mlx) | GO | filing pending; repro = `.raw/min_p2p.py` + §4 (posted send+recv, zero bytes on the wire, ring.cpp recv-order note); zero riir IP in the repro |
+| F — exo re-open | NO action | N/A stands (conversion changes the measured artifact) |
+| G — i1127 re-pin headroom | bundle with the next decode re-pin | not standalone |
