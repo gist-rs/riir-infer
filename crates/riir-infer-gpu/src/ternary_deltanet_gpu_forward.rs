@@ -3885,10 +3885,11 @@ impl TernaryDeltanetGpuForward {
                             down_spent,
                             bank_bytes,
                             bytes,
-                            // This layer's OWN base ops register inside the
-                            // same register_layer call, after the gate — the
-                            // reserve counts from the NEXT layer's base.
-                            base_reserve_suffix[i + 1],
+                            // register_layer runs this layer's OWN in/gate_up
+                            // BEFORE its down — the reserve includes layer i
+                            // (suffix[i], not [i+1]; the [i+1] shape was the
+                            // first run's one-layer shortfall).
+                            base_reserve_suffix[i],
                         ) {
                             Some(down_t)
                         } else {
@@ -3953,7 +3954,7 @@ impl TernaryDeltanetGpuForward {
                                 down_spent,
                                 bank_bytes,
                                 bytes,
-                                base_reserve_suffix[i + 1],
+                                base_reserve_suffix[i],
                             ) {
                                 ctx.try_register_down(i, &down_t)
                             } else {
