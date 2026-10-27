@@ -23,12 +23,14 @@ const BW_ROUNDS: usize = 5;
 /// echoes). Without it the server echoes the 64 MiB back into a client that is
 /// not reading, and the byte stream desyncs (the first ack read consumes the
 /// echo's first bytes as garbage).
-
 fn main() {
     let args: Vec<String> = std::env::args().collect();
     match args.get(1).map(String::as_str) {
         Some("--server") => {
-            let bind: String = args.get(2).cloned().unwrap_or_else(|| "0.0.0.0".to_string());
+            let bind: String = args
+                .get(2)
+                .cloned()
+                .unwrap_or_else(|| "0.0.0.0".to_string());
             let bind = if bind.contains(':') {
                 bind
             } else {
@@ -44,9 +46,7 @@ fn main() {
             run_client(&format!("{addr}:{PORT}"));
         }
         _ => {
-            eprintln!(
-                "usage: link_probe --server [bind] | link_probe --addr <ip>  (port {PORT})"
-            );
+            eprintln!("usage: link_probe --server [bind] | link_probe --addr <ip>  (port {PORT})");
             std::process::exit(2);
         }
     }
@@ -101,7 +101,10 @@ fn run_server(bind: &str) {
             scratch.clear();
             scratch.resize(len, 0);
             if read_exact_n(&mut stream, &mut scratch).is_err() {
-                println!("[link_probe] payload read FAILED at len={len} (push={})", word & PUSH_FLAG != 0);
+                println!(
+                    "[link_probe] payload read FAILED at len={len} (push={})",
+                    word & PUSH_FLAG != 0
+                );
                 break;
             }
             if word & PUSH_FLAG != 0 {
@@ -201,7 +204,12 @@ fn run_client(addr: &str) {
     // Warmup.
     let _ = echo_rtt(&mut stream, 4, 50);
 
-    let sizes: [(usize, usize); 4] = [(4, 2000), (16 * 1024, 1000), (1024 * 1024, 200), (64 * 1024 * 1024, 10)];
+    let sizes: [(usize, usize); 4] = [
+        (4, 2000),
+        (16 * 1024, 1000),
+        (1024 * 1024, 200),
+        (64 * 1024 * 1024, 10),
+    ];
     for (size, iters) in sizes {
         let label = if size >= 1024 * 1024 {
             format!("{}MiB", size / (1024 * 1024))
