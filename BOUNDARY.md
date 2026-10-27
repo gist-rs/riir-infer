@@ -66,6 +66,16 @@ needs BELOW the engine:
   ANE substrate to run them ships here). Loader/serving-scoped only: no
   audio DSP algorithm work, no ASR/TTS model TRAINING, no
   cognition/perception wiring — those stay fenced.
+- `riir-infer-dist` (crate, `crates/riir-infer-dist`): the multi-host
+  pipeline lane (lane-widening, Proposal 042 D1-a / Plan 623 Phase 2) — the
+  std-only authenticated frame transport (TCP now, RDMA via `extern "C"`
+  dlopen after D2), the layer-range stage runtime over the core
+  `multi_host` substrate, and the stage planner. Collective/transport for
+  INFERENCE only (the ggml-rpc-inside-ggml / mlx.distributed-inside-mlx
+  precedent): no async runtime, no RPC surface, no game/chain networking
+  (riir-ai `riir-net` keeps that), zero foreign `riir-*` deps, new deps
+  limited to `blake3` (already a core dep). Opt-in as a whole crate, never
+  a default of any consumer.
 - `riir-infer-clef` (crate, `crates/riir-infer-clef`): the clef-text
   decision lane (plan 619) — seat clef-text-0.6b (Apache-2.0) as an
   in-process ANE lane ON the shared `riir-infer-ane` host (multi-

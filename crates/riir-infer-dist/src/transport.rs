@@ -1,0 +1,193 @@
+//! Authenticated frame transport.
+//!
+//! Envelope (little-endian):
+//!
+//! ```text
+//! body_len u32 | kind u8 | counter u64 | payload[body_len - 9] | mac[32]
+//! mac = blake3::keyed_hash(key, direction u8 | kind | counter | payload)
+//! ```
+//!
+//! `direction` is not on the wire — each side knows which way a frame
+//! flows, so a frame reflected back at its sender fails the MAC. The
+//! receiver requires `counter == expected` (strict, per direction): a
+//! replayed, dropped or reordered frame refuses. The MAC comparison is
+//! blake3's constant-time `Hash` equality.
+
+use std::io::{self, IoSlice, Read, Write};
+use std::net::TcpStream;
+
+/// Shared 32-byte pipeline key (pinned peer key — both stages hold it).
+#[derive(Clone)]
+pub struct PeerKey(pub [u8; 32]);
+
+impl PeerKey {
+    /// Parse 64 hex chars.
+    pub fn from_hex(s: &str) -> Result<Self, String> {
+        let s = s.trim();
+        if s.len() != 64 {
+            return Err(format!("peer key must be 64 hex chars, got {}", s.len()));
+        }
+        let mut k = [0u8; 32];
+        for (i, byte) in k.iter_mut().enumerate() {
+            *byte = u8::from_str_radix(&s[2 * i..2 * i + 2], 16)
+                .map_err(|e| format!("peer key hex at {}: {e}", 2 * i))?;
+        }
+        Ok(Self(k))
+    }
+}
+
+/// Which way a frame flows; mixed into the MAC (anti-reflection).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[repr(u8)]
+pub enum Direction {
+    Downstream = 0,
+    Upstream = 1,
+}
+
+impl Direction {
+    fn flip(self) -> Self {
+        match self {
+            Self::Downstream => Self::Upstream,
+            Self::Upstream => Self::Downstream,
+        }
+    }
+}
+
+/// Frame kinds of the stage protocol.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[repr(u8)]
+pub enum FrameKind {
+    Handshake = 0,
+    Activation = 1,
+    Token = 2,
+    Shutdown = 3,
+}
+
+impl FrameKind {
+    fn from_u8(v: u8) -> io::Result<Self> {
+        match v {
+            0 => Ok(Self::Handshake),
+            1 => Ok(Self::Activation),
+            2 => Ok(Self::Token),
+            3 => Ok(Self::Shutdown),
+            _ => Err(invalid(format!("unknown frame kind {v}"))),
+        }
+    }
+}
+
+/// Upper bound on one frame body — a prefill chunk of a 27B hidden is
+/// ~MBs; anything near this is a malformed or hostile peer.
+pub const MAX_BODY: usize = 256 << 20;
+
+const HDR: usize = 4 + 1 + 8;
+const MAC: usize = 32;
+
+fn invalid(msg: String) -> io::Error {
+    io::Error::new(io::ErrorKind::InvalidData, msg)
+}
+
+/// A bidirectional, ordered, authenticated frame pipe between two stages.
+pub trait Transport {
+    fn send_frame(&mut self, kind: FrameKind, payload: &[u8]) -> io::Result<()>;
+    /// Receive the next frame into `out` (cleared, capacity reused).
+    fn recv_frame_into(&mut self, out: &mut Vec<u8>) -> io::Result<FrameKind>;
+}
+
+/// std TCP transport (`TCP_NODELAY`, vectored writes, no allocation in
+/// steady state beyond the caller's reused buffer).
+pub struct TcpTransport {
+    stream: TcpStream,
+    key: PeerKey,
+    send_dir: Direction,
+    send_ctr: u64,
+    recv_ctr: u64,
+}
+
+impl TcpTransport {
+    /// `send_dir` = the direction THIS side pushes (head: Downstream).
+    pub fn new(stream: TcpStream, key: PeerKey, send_dir: Direction) -> io::Result<Self> {
+        stream.set_nodelay(true)?;
+        Ok(Self {
+            stream,
+            key,
+            send_dir,
+            send_ctr: 0,
+            recv_ctr: 0,
+        })
+    }
+
+    fn mac(&self, dir: Direction, kind: u8, ctr: u64, payload: &[u8]) -> blake3::Hash {
+        let mut h = blake3::Hasher::new_keyed(&self.key.0);
+        h.update(&[dir as u8, kind]);
+        h.update(&ctr.to_le_bytes());
+        h.update(payload);
+        h.finalize()
+    }
+}
+
+impl Transport for TcpTransport {
+    fn send_frame(&mut self, kind: FrameKind, payload: &[u8]) -> io::Result<()> {
+        let body = 1 + 8 + payload.len();
+        if body > MAX_BODY {
+            return Err(invalid(format!("frame body {body} > MAX_BODY")));
+        }
+        let ctr = self.send_ctr;
+        let mac = self.mac(self.send_dir, kind as u8, ctr, payload);
+        let mut hdr = [0u8; HDR];
+        hdr[..4].copy_from_slice(&(body as u32).to_le_bytes());
+        hdr[4] = kind as u8;
+        hdr[5..].copy_from_slice(&ctr.to_le_bytes());
+        let mut bufs = [
+            IoSlice::new(&hdr),
+            IoSlice::new(payload),
+            IoSlice::new(mac.as_bytes()),
+        ];
+        write_all_vectored(&mut self.stream, &mut bufs)?;
+        self.send_ctr += 1;
+        Ok(())
+    }
+
+    fn recv_frame_into(&mut self, out: &mut Vec<u8>) -> io::Result<FrameKind> {
+        let mut hdr = [0u8; HDR];
+        self.stream.read_exact(&mut hdr)?;
+        let body = u32::from_le_bytes(hdr[..4].try_into().unwrap()) as usize;
+        if !(9..=MAX_BODY).contains(&body) {
+            return Err(invalid(format!("frame body length {body} out of range")));
+        }
+        let kind_byte = hdr[4];
+        let ctr = u64::from_le_bytes(hdr[5..].try_into().unwrap());
+        out.clear();
+        out.resize(body - 9, 0);
+        self.stream.read_exact(out)?;
+        let mut mac = [0u8; MAC];
+        self.stream.read_exact(&mut mac)?;
+        // MAC first: never interpret an unauthenticated byte (kind, counter).
+        let want = self.mac(self.send_dir.flip(), kind_byte, ctr, out);
+        if want != blake3::Hash::from(mac) {
+            return Err(invalid(
+                "frame MAC mismatch — refusing unauthenticated frame".into(),
+            ));
+        }
+        if ctr != self.recv_ctr {
+            return Err(invalid(format!(
+                "frame counter {ctr} != expected {} — replay/reorder refused",
+                self.recv_ctr
+            )));
+        }
+        self.recv_ctr += 1;
+        FrameKind::from_u8(kind_byte)
+    }
+}
+
+fn write_all_vectored(w: &mut impl Write, mut bufs: &mut [IoSlice<'_>]) -> io::Result<()> {
+    IoSlice::advance_slices(&mut bufs, 0);
+    while !bufs.is_empty() {
+        match w.write_vectored(bufs) {
+            Ok(0) => return Err(io::ErrorKind::WriteZero.into()),
+            Ok(n) => IoSlice::advance_slices(&mut bufs, n),
+            Err(e) if e.kind() == io::ErrorKind::Interrupted => {}
+            Err(e) => return Err(e),
+        }
+    }
+    Ok(())
+}

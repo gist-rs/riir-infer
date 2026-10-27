@@ -4,10 +4,11 @@
 > we must be able to do it too — both riir-train and infer (focus on infer, separate
 > plan for train later) … aim to on par or beat them all"). **D3 DECIDED 2026-10-26
 > (owner model-priority law, `a2383f3`): qwen/Bonsai-only — gemma-2-2b is RETIRED
-> (riir-train Issue 617) and never a scoreboard cell.** D1 and D2 remain OPEN; Plan
-> 623 Phase 0 is decision-free (measurement only); Phase 1 LANDED 2026-10-26
-> (T1.1–T1.5, incl. the Metal/CubeCL GPU range-forward); Phase 2+ waits on D1;
-> Phase 3+ on D2. Hardware: the TB5 link is LIVE again 2026-10-26 — 80 Gb/s,
+> (riir-train Issue 617) and never a scoreboard cell.** **D1 DECIDED 2026-10-27 → (a)
+> `crates/riir-infer-dist`** (Claude verdict under the owner's delegate-the-gate rule;
+> the T2.1/T2.2 PoC landed the same day — 2-box TB5 CPU stream bit-identical to 1-box).
+> D2 remains OPEN; Plan 623 Phase 0 is decision-free (measurement only); Phase 1 LANDED
+> 2026-10-26 (T1.1–T1.5, incl. the Metal/CubeCL GPU range-forward); Phase 3+ on D2. Hardware: the TB5 link is LIVE again 2026-10-26 — 80 Gb/s,
 > bridge `192.168.10.1 ⇄ 192.168.10.2` static, measured 0.53 ms; the ONE owner
 > step blocking 2-box work is SSH key auth on bmo (Issue 1109 T0 remainder).
 **Branch:** `develop` · **Distill:** [Research 015](../.research/015_Multi_Host_Inference_exo_llamacpp_MLX_Distill.md) (exo `bc412e2`, llama.cpp `19ab5a5`, mlx `c6abf0d`, mlx-lm `0d4d3d0`, all under `.raw/`)
@@ -71,7 +72,11 @@ and both boxes' state — a latency number without box state is not a measuremen
 
 ## Owner decisions (OPEN)
 
-- **D1 — where the transport lives.** riir-infer's BOUNDARY.md owns "weights, quant,
+- **D1 — where the transport lives. DECIDED 2026-10-27 → (a)** (Claude verdict, owner
+  rule "ask Claude for verdict on owner-gated"): (b) makes the lane un-self-testable in
+  the repo that owns the stage compute and drags riir-ai into every public consumer;
+  every incumbent keeps its collective inside the inference substrate. The BOUNDARY.md
+  Owns row landed in the same commit as the crate. riir-infer's BOUNDARY.md owns "weights, quant,
   architectures, kernels, loaders" — not networking; riir-ai owns `riir-net`
   (tokio/axum, game-oriented) and riir-infer may not depend on any foreign `riir-*`.
   - **(a) RECOMMENDED:** new in-repo crate `crates/riir-infer-dist` — std-only (no

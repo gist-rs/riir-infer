@@ -1,6 +1,6 @@
 # Plan 623: Multi-host inference lane — layer-range stages, activation frames, TCP→RDMA transport, TP, speculative fill
 
-**Status:** Phase 1 (T1.1–T1.5) LANDED 2026-10-26 — substrate + range-forward seams (CPU + Metal)
+**Status:** Phase 2 PoC LANDED 2026-10-27 (T2.1 + T2.2: `crates/riir-infer-dist`, D1 → (a)) — real 2-box TB5 run, CPU stages, stream bit-identical to 1-box; Phase 1 (T1.1–T1.5) LANDED 2026-10-26
 **Lease closed:** m3-idle-623t15 landed T1.5 2026-10-26 (48 h lease from the claim; the landing below is its provenance) — the amo lane's Phase-0 elephant-capture constraint does not bind the M3, which is where T1.5 executed
 + the 10-test G1 battery, all gates green (see the Phase 1 checkboxes). Phase 0 is decision-free (measurement only) and may
 start once Issue 1109 T0 (bmo reachable) is done; Phase 1 substrate is decision-free
@@ -182,16 +182,42 @@ mlx-lm on the Proposal-042 scoreboard **measured on the same two boxes**.
   the G1 test; no new gemma-2-2b execution cells anywhere — not in this plan, not in any
   sibling.**
 
-## Phase 2 — Stage runtime over TCP (needs D1)
+## Phase 2 — Stage runtime over TCP (D1 DECIDED 2026-10-27 → (a))
 
-- [ ] **T2.1** `crates/riir-infer-dist`: `Transport` trait (`send_frame`, `recv_frame_into`)
+- [x] **T2.1** `crates/riir-infer-dist`: `Transport` trait (`send_frame`, `recv_frame_into`)
   + std TCP impl (`TCP_NODELAY`, `SO_SNDBUF/RCVBUF` sized for prefill chunks, vectored
   I/O, preallocated rings, bind to a named interface only). Peer authentication: pinned
   peer key (BLAKE3-keyed MAC over the handshake + frame counter) — not an RPC surface.
-- [ ] **T2.2** Two-stage runner: stage 0 = embed + layers [0,k); stage 1 = layers [k,n) +
+  **LANDED 2026-10-27 (PoC scope):** `transport.rs` — every frame MAC'd over
+  `direction | kind | counter | payload` (anti-reflection + strict per-direction counter:
+  replay/reorder/drop refuse; MAC checked BEFORE any header byte is interpreted;
+  `MAX_BODY` cap), `TCP_NODELAY`, vectored writes, caller-reused recv buffer. Handshake
+  wire form `handshake.rs` (LE by field) over the core `StageHandshake::verify_pair`;
+  identity digests reuse `disaggregated::geometry_fingerprint` (no second fingerprint).
+  - [ ] T2.1b remaining knobs: `SO_SNDBUF/RCVBUF` sizing for prefill chunks, bind to a
+    named interface, preallocated frame rings (lands with T2.3, where they matter).
+- [x] **T2.2** Two-stage runner: stage 0 = embed + layers [0,k); stage 1 = layers [k,n) +
   norm + lm_head + sampler → 4-byte token id back to stage 0. PUSH, no hub, one one-way
   hop per boundary per token. **G1:** 2-box greedy output byte-identical to 1-box over
   the Issue-028 battery prompts.
+  **LANDED 2026-10-27 (PoC):** `runner.rs` (`run_head` / `run_tail` / `run_local` oracle)
+  over the `StageCompute` trait (CPU stage `TernaryCpuStage` today; the T1.5 GPU seams
+  plug into the same trait); bin `dist_stage`. G1 battery `crates/riir-infer-dist/tests/
+  two_stage_g1.rs` 4/4 over REAL loopback TCP: token stream + every tail logit
+  BIT-IDENTICAL to 1-box at every split k (synth Bonsai-2), wrong key refuses (MAC),
+  foreign artifact refuses (handshake). **Real 2-box smoke (amo head [0,32) ⇄ bmo tail
+  [32,64), TB5 bridge 192.168.10.x, Bonsai-2-27B PQ2_0, CPU both sides — no GPU, so no
+  quiet-window wait):** handshake PASS (bmo's model file is byte-identical), 32-token
+  greedy stream **byte-identical to amo's local 1-box run (`--full-check` G1 PASS)**,
+  decode 16.3 tok/s, prefill 4 tok 0.28 s, load 6 s per box. SMOKE, not a G2 cell: CPU
+  stages, token-by-token prefill, one shared-box run (amo load ~6, GPU held by the
+  elephant capture), no 1-box CPU baseline timed. bmo binary = amo `--release
+  --features bonsai2_hadamard` build shipped by scp (links only libc++/libiconv/
+  libSystem — no CLT needed on bmo).
+  - [ ] T2.2b the Issue-028 battery prompts with a tokenizer front (PoC used token ids);
+    GPU stage impl of `StageCompute` over the T1.5 seams (`forward_range_dispatch` +
+    `set_hidden_state`/`read_hidden_state`/`set_pos`) — the next step, needs no quiet
+    window for a correctness run.
 - [ ] **T2.3** Chunked pipelined prefill (chunk c on stage 1 while chunk c+1 on stage 0,
   double-buffered frames) + KV/GDN state lives on its own stage (no state traffic in
   steady state).

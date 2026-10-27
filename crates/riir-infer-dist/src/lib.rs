@@ -1,0 +1,46 @@
+//! Multi-host pipeline-parallel inference (Plan 623 Phase 2) — the Rust
+//! rewrite of exo's pipeline path, over the Phase-1 substrate in
+//! [`riir_infer_core::multi_host`].
+//!
+//! Shape (PUSH, no hub, one one-way hop per stage boundary per token):
+//!
+//! ```text
+//!  head (layers [0,k) + embed)  ── ActivationFrame ──▶  tail (layers [k,n) + norm + lm_head + sampler)
+//!        ▲                                                      │
+//!        └──────────────── 4-byte token id ◀────────────────────┘
+//! ```
+//!
+//! - [`transport`] — the [`Transport`](transport::Transport) trait + the
+//!   std TCP impl. Every frame is BLAKE3-keyed-MAC'd over
+//!   `direction | kind | counter | payload` with a strict per-direction
+//!   counter: no unauthenticated, replayed, reordered or reflected frame
+//!   is accepted. NOT an RPC surface — the peer can only push activations
+//!   and token ids.
+//! - [`stage`] — the [`StageCompute`](stage::StageCompute) seam (one layer
+//!   window of one model) + the CPU reference stage over the ternary
+//!   DeltaNet range forward. The GPU stage plugs into the same trait.
+//! - [`runner`] — the head loop (owns the token stream) and the tail
+//!   serve loop (owns the sampler).
+//!
+//! Correctness posture (G1): f32 activations on the wire, greedy
+//! first-index argmax on the tail — the 2-stage token stream is
+//! byte-identical to the 1-box forward (`tests/two_stage_g1.rs`).
+
+pub mod handshake;
+pub mod runner;
+pub mod stage;
+pub mod transport;
+
+/// First-index strict argmax (Issue-940 determinism law: one fixed tie
+/// rule, sequential scan). NaN never wins.
+pub fn argmax_first(logits: &[f32]) -> u32 {
+    let mut best = 0usize;
+    let mut best_v = f32::NEG_INFINITY;
+    for (i, &v) in logits.iter().enumerate() {
+        if v > best_v {
+            best_v = v;
+            best = i;
+        }
+    }
+    best as u32
+}

@@ -1,0 +1,36 @@
+[package]
+name = "riir-infer-dist"
+version = "0.1.0"
+edition = "2024"
+license = "MIT"
+# Internal substrate leaf — the release surface is the consumer crates.
+publish = false
+
+# riir-infer-dist — the multi-host pipeline lane (Plan 623 Phase 2, owner
+# decision D1-a in Proposal 042): the Rust rewrite of exo's PP path.
+# std-only transport (no tokio, no new crates.io dep — blake3 already rides
+# riir-infer-core), authenticated frames, layer-range stage runtime over the
+# Phase-1 substrate (`riir_infer_core::multi_host`). Opt-in as a whole crate,
+# never a default of any consumer. The compute behind a stage is a trait, so
+# the CPU reference stage (this PoC) and the Metal/CubeCL stage (T1.5 seams)
+# ride the same runner.
+
+[dependencies]
+riir-infer-core = { path = "../..", features = ["multi_host", "deltanet_ternary_inference"] }
+blake3 = "1"
+
+[dev-dependencies]
+# The shared synthetic Bonsai-2 fixture kit (tests/common/synth_bonsai2.rs)
+# writes f16/bf16 payloads with these — same versions as the root crate.
+half = "2"
+bytemuck = "1"
+
+[features]
+default = []
+# The folded (Hadamard-rotated) Bonsai-2 loader — the real PQ2_0 artifact
+# needs it; the synthetic G1 fixture does not.
+bonsai2_hadamard = ["riir-infer-core/bonsai2_hadamard"]
+
+[[bin]]
+name = "dist_stage"
+path = "src/bin/dist_stage.rs"

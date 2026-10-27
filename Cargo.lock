@@ -3561,6 +3561,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "riir-infer-dist"
+version = "0.1.0"
+dependencies = [
+ "blake3",
+ "bytemuck",
+ "half",
+ "riir-infer-core",
+]
+
+[[package]]
 name = "riir-infer-gpu"
 version = "0.1.0"
 dependencies = [
