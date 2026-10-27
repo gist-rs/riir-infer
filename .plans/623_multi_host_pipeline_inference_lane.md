@@ -1,7 +1,7 @@
 # Plan 623: Multi-host inference lane — layer-range stages, activation frames, TCP→RDMA transport, TP, speculative fill
 
 **Status:** Phase 2 PoC LANDED 2026-10-27 (T2.1 + T2.2 + T2.2b GPU stage + T2.3a pipelined prefill + T2.2c(1) range-scoped weights + T2.3b chunked batched prefill (promoted) — each stage holds only its own slice: `crates/riir-infer-dist`, D1 → (a)) — real 2-box TB5 runs, CPU⇄CPU and GPU⇄GPU, streams bit-identical to 1-box; 1-box GPU base gap filed as Issue 1139 — mostly BUILD POSTURE, fixed by Issue 1141 (dist `gpu` now carries the production decode posture + the workspace's cubecl-wgpu fork: 1-box stage decode 27.2 → 46.7 tok/s, 2-stage 26.0 → 45.2 tok/s on idle bmo; then Issue 1142's dense-pair loads-in-flight kernel, 1-box 51.4 tok/s; then Issue 1143's decode-norm loads-in-flight (`85c4da5`), 1-box 55.0 tok/s; then Issue 1144's radix-4 FWHT (`3147164`), 1-box 56.9 tok/s; residual 1.07× vs llama.cpp, attributed in Issue 1139 T4, next rung Issue 1145); Phase 1 (T1.1–T1.5) LANDED 2026-10-26
-**Claimed:** zed-amo-i623-admit, 1793129577, expires 2026-10-29T19:33:00+00:00 — T2.4 admission seam (mid-flight join, serve-time shape) + the CPU-testable half of T5.1 scoping; GPU cells stay open (both GPUs held by siblings)
+**Lease closed:** zed-amo-i623-admit landed the T2.4 ADMISSION SEAM 2026-10-28 (`07540f7`) — `Admission`/`AdmissionSource`/`StageFactory` + `run_head_multi_admit`, one wave engine over both doors, G1 4/4 (`tests/multi_stream_admission.rs`); the landing note on the T2.4 task carries the detail. T5.1's V0 design note (same session) is the scoping, not a held slot — the remaining T2.4 kernel micro-batching rung and the T5.1a–d slices stay unclaimed
 **Lease closed:** zed-amo-i623-t21b landed T2.1b 2026-10-27 (the landing note on the task is its provenance) — the GPU cells (T2.3c/T2.4/T2.5/T2.7) stay unclaimed
 **Lease closed:** zed-amo-i623-t21b landed T2.5 2026-10-27 (the landing note on the task is its provenance; T2.1b's lease closed the same day, `00a8858`) — T2.3c/T2.4/T2.7 cells stay unclaimed
 **Lease closed:** m3-idle-623t15 landed T1.5 2026-10-26 (48 h lease from the claim; the landing below is its provenance) — the amo lane's Phase-0 elephant-capture constraint does not bind the M3, which is where T1.5 executed
@@ -524,6 +524,46 @@ mlx-lm on the Proposal-042 scoreboard **measured on the same two boxes**.
 - [ ] **T5.1** Draft on stage 0 (dflash/speculative substrate already in core), verify
   batch rides the pipeline as the micro-batch; acceptance-rate-weighted scoreboard row.
   Lossless by construction (verify is exact) — G1 byte-identity holds.
+  **V0 DESIGN 2026-10-28 (zed-amo-i623-admit — the substrate map is verified, the
+  slices are ready to implement; nothing here needs re-scoping):**
+  - **Why the verify batch is bit-identical (the G1 anchor):** a K-token verify
+    forward IS a chunked-prefill frame — `StageCompute::prefill_chunk` is G1-proven
+    bit-identical to per-position steps (T2.3b, CPU default impl AND the GPU
+    `prefill_range_chunk`), so verifying K drafts through ONE `n_tok=K` frame reads
+    exactly the logits sequential decode would have produced. Lossless by
+    ADJUDICATION: accept the longest prefix of drafts whose argmax match the
+    target's own per-position argmax; the output is the target's own tokens either
+    way.
+  - **T5.1a — wire (additive, `dist/src/spec_fill.rs`, NOT a multi.rs growth —
+    the file-size law):** `VerifyStream` request frame (seq | n_tok | n_tok×u32
+    draft tokens) + `VerifyReply` (seq | n_tok | n_tok×u32 per-position argmax).
+    The TAIL computes the argmax per verify row from its own logits — K u32 cross
+    the wire, never K×vocab logits. New tail loop arm beside the multi loop; the
+    head adjudicates (longest common prefix) + decides commit-or-rewind.
+  - **T5.1b — rewind (the load-bearing substrate question, half-answered):** GDN
+    layers unwind via `GdnStateJournal::unwind_to` (core `deltanet/delta_roll.rs`,
+    opt-in `gdn_delta_roll`, its own G1 drift pin + G4 gates, Bench 885 — the CPU
+    stage does NOT wire the journal yet; wiring it into the stage is this slice).
+    ⛔ ATTENTION KV (1-in-4 layers) has NO truncate today (`HybridCache` has only
+    `reset()`): first verify the cursor-overwrite property (writes at pos j
+    overwrite stale rows → a cursor reset is the truncate); if the length lives in
+    per-layer implicit cursors, add `truncate_to` — EITHER WAY pin it with a test
+    that re-forwards at the rewound position and compares bit-exact to a fresh
+    cache.
+  - **T5.1c — the runner mode + the v0 drafter:** `DraftSource { propose(&mut
+    self, ctx) -> &[u32] }` injected into the head; v0 impl = repeat-last-token
+    (acceptance ≈ 0 — the honest disclosure: this proves the MACHINERY + the
+    lossless G1, it proves NO gain; the acceptance-rate row is meaningless until a
+    real drafter exists). G1 tests on the synth fixture: full-accept path
+    bit-identical; rejection at j<K → unwind → the continued stream == the oracle;
+    dumb-drafter worst case == the sequential stream byte-for-byte; wire refusals.
+  - **T5.1d — the real drafter (the actual T5.1 completion condition):** an
+    MTP/draft head for Bonsai-2 is a riir-train lane (GPU) — file there when
+    T5.1a–c land; the acceptance-rate-weighted scoreboard row rides it. dflash
+    itself (`core/src/dflash.rs`) is wired to the OLD transformer path
+    (`TransformerWeights`/`MultiLayerKVCache`), NOT the ternary DeltaNet stage —
+    "already in core" means the algorithmic cores (`katgpt_speculative`), not a
+    drop-in drafter; do not assume one exists.
 
 ## GOAT gate (promotion = opt-in → default for the lane crate's consumers)
 
