@@ -531,9 +531,28 @@ mlx-lm on the Proposal-042 scoreboard **measured on the same two boxes**.
 
 ## Phase 5 — Speculative fill
 
-- [ ] **T5.1** Draft on stage 0 (dflash/speculative substrate already in core), verify
+- [-] **T5.1** Draft on stage 0 (dflash/speculative substrate already in core), verify
   batch rides the pipeline as the micro-batch; acceptance-rate-weighted scoreboard row.
   Lossless by construction (verify is exact) — G1 byte-identity holds.
+  **T5.1a–c LANDED 2026-10-28 (zed-amo-i623-t24, `6c608dd`): `dist/src/spec_fill.rs` —
+  the VerifyStream/VerifyReply wire (one round trip per K drafts; K argmaxes cross,
+  never K×vocab logits; the pending prediction rides the request so the tail
+  adjudicates the SAME m the head does — a reply m mismatch refuses), the rewind via
+  the Issue-028 `HybridStateSegment` snapshot/restore (T5.1b V0 RESOLVED as
+  snapshot-based — byte-exact by construction, zero forward surgery; the GDN journal's
+  rank-1 unwind stays the FAST-path follow-up rung; the GPU stage has no SpecStage impl
+  — the dyn seat refuses at the type level), the runner pair (`run_head_spec` /
+  `run_tail_spec`, the ordinary arm mirroring `runner`'s loop), the v0
+  `RepeatLastDrafter` (acceptance ≈ 0 — the machinery lane, never a gain claim), and
+  the G1 battery 7/7 (`tests/spec_fill_g1.rs`: full-accept == oracle, partial rewind
+  m=0 AND m≥1 == oracle, repeat-last worst case == sequential byte-for-byte, shifted-
+  alignment unit pins, codec refusals, tampered-m cross-check, snapshot round-trip).
+  Bin: `--spec-k K` (1-stream, CPU-stage only — loud refusals otherwise). Traps paid:
+  the rewind arm's extra recv_token deadlocked the pair (ONE reply per frame — the
+  last in-loop reply IS the bonus); the MAC key is SHARED (mismatched test keys read
+  as a tampered wire). Alignment note: the runner's cursor law makes acceptance
+  SHIFTED (d_0 vs pending, d_j vs argmax_{j-1}) — a full accept commits K+1
+  (drafts[1..] + argmax_{K-1}), a partial commits the re-forwarded prefix + bonus.**
   **V0 DESIGN 2026-10-28 (zed-amo-i623-admit — the substrate map is verified, the
   slices are ready to implement; nothing here needs re-scoping):**
   - **Why the verify batch is bit-identical (the G1 anchor):** a K-token verify
