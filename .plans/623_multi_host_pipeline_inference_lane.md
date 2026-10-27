@@ -11,7 +11,7 @@ start once Issue 1109 T0 (bmo reachable) is done; Phase 1 substrate is decision-
 (riir-infer-core, no deps); Phase 2+ waits on [Proposal 042](../.proposals/042_multi_mac_distributed_inference.md) D1 (crate home); Phase 3+ on D2 (RDMA enabled).
 **Lease closed:** zed-amo-i623-t03 claimed T0.3 2026-10-28T03:06+07 — 99 s AFTER zed-amo-i623-t24 pushed the completed T0.3 (`291d6f1`, Bench 911: all three engines × the four cells measured in one bmo-idle session, gap issue 1146 filed). The claimed unit was already discharged; the t03 lane should re-run `claim_lease_check` + fetch on its next turn and pick from the genuinely-open rungs (T2.4 kernel micro-batching, T5.1a–d). No work was duplicated — the claim predates no measurement.
 **Lease closed:** zed-amo-i623-t24 landed T5.1a–c 2026-10-28 (`6c608dd`) — the landing note on the T5.1 task carries the detail (wire + snapshot rewind + runner mode, G1 7/7). The remaining T5.1d (a real drafter) is a riir-train lane; T2.4 kernel micro-batching stays with its own lane below.
-**Claimed:** zed-amo-i623-mb (T2.4 kernel micro-batching: batch-2 decode on the tail with per-stream bit-identity + GPU cells on idle bmo), 1793132228, expires 2026-10-29T20:17:00+00:00
+**Lease closed:** zed-amo-i623-mb landed the T2.4 fused decode-batch v0 2026-10-28 (`03f0fe6`, Bench 912: G1 PASS ×2 builds, G2 +38.8–39.5% ABBA ×2 on idle bmo) — the claim above is that landing's provenance; the kernel-level batch-2 rung stays open (issue 1147 carries it).
 **Lease closed:** zed-amo-idle-refine-cont landed Phase 1 (T1.1–T1.4) 2026-10-26 (`48b4b0d`) — the claim above is that landing's provenance.
 Scope: Phase 1 substrate only (T1.1–T1.4, zero-GPU under the elephant-recapture posture); T1.5's Metal arm stays compile-only this window.
 **Date:** 2026-10-22
@@ -394,9 +394,23 @@ mlx-lm on the Proposal-042 scoreboard **measured on the same two boxes**.
   at every step. The single-box 48 optimum is recorded for future 1-box stage consumers.
   Residue: the crossover is bracketed in (64, 256), not pinned (P ∈ {96,128,192} cells
   if anyone ever needs the exact bound).
-- [ ] **T2.4** Micro-batch round-robin for ≥2 streams (fills the PP bubble); continuous
+- [x] **T2.4** Micro-batch round-robin for ≥2 streams (fills the PP bubble); continuous
   batching admission; chunked prefill interleaved with decode (exo's prefill-blocks-decode
-  gap).
+  gap). **FUSED DECODE-BATCH v0 LANDED 2026-10-28** (zed-amo-i623-mb, issue 1147,
+  `03f0fe6`, [Bench 912](../.benchmarks/912_plan623_issue1147_fused_decode_batch.md)):
+  the `BatchN {count}` hint + the `StageCompute::step_submit`/`step_finish` seam —
+  the tail submits every ready stream's GPU chain BEFORE any readback (the shared
+  queue runs them back to back, no inter-chain idle); the head hints only when every
+  ready stream is a decode feed and drains its whole pass; `RIIR_DIST_PAIR=0` demotes
+  byte-identically. G1 PASS ×2 builds (per-stream tokens bit-identical to the 1-box
+  GPU oracle through the fused batch; CPU: paired == incumbent captures logit-for-logit,
+  4/4 + 41 green). **G2: +38.8–39.5% aggregate decode window on bmo loopback s=2
+  ABBA ×2 builds (78.2 vs 56.2 tok/s), = 1.68× the 1-box oracle (incumbent 1.20×).**
+  Honest scope: dispatch-level (launches not reduced) — the kernel-level batch-2 rung
+  (grid-dim batch, per-row reduction order pinned) stays OPEN with this +39% as its
+  incumbent bar; the 2-box wire confirmation cell waits on a quiet amo window.
+  Remaining sub-rungs: kernel micro-batching (above), the continuous-batching
+  admission EXCHANGE (wire probe step, the planner's T2.5 residue).
   **CODE LANDED 2026-10-27** (zed-amo-i623-t24, [Bench 908](../.benchmarks/908_plan623_t24_multi_stream_round_robin.md)):
   `dist/src/multi.rs` — `run_head_multi`/`run_tail_multi` over ONE link; wire additions
   ADDITIVE (`BeginStream` seq|len|chunk + `TokenStream` seq|token; the Phase-1
