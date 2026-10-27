@@ -1,12 +1,57 @@
 # Issue 1146: 1-box prefill throughput gap — 6–8× behind the incumbents (T0.3 finding)
 
-**Status:** OPEN — gap MEASURED (Bench 911), cause bracketed (per-frame floor, decode-shaped kernels), no fix landed
+**Status:** OPEN — gap MEASURED (Bench 911); **ROOT CAUSE IDENTIFIED 2026-10-28 ~03:5x +07** (source-level, feature-gate reading + engine-default cross-check): the dist `gpu` feature row carries the decode posture but NOT the prefill-lane features — the 1141 class one list over. A/B confirmation pending (scripts/i1146_ab_session.sh; the amo window is the 641-T5 lane's right now).
 **Claimed:** zed-amo-1146-prefill, 1793133500, expires 2026-10-29T20:45:00+00:00
 **Date:** 2026-10-28
 **Found by:** [`.benchmarks/911_plan623_t03_arms.md`](../.benchmarks/911_plan623_t03_arms.md) (Plan 623 T0.3, bmo idle, one session)
 **Session:** zed-amo-i623-t24
 
 ## The finding
+
+## ⟲ 2026-10-28 ~03:5x +07 zed-amo-1146-prefill — ROOT CAUSE: the dist gpu row omitted the prefill-lane features
+
+Source-level confirmation chain (no GPU needed — every gate is a compile-time feature):
+
+1. **Without `ternary_deltanet_chunked_prefill`** (not in the dist `gpu` row): the chunked-conv
+   static compiles to `false` (the dual-cfg default) → `can_chunk_conv1d=false` → conv1d runs the
+   **SEQUENTIAL per-token path** (p dispatches per deltanet layer), AND `chunked_enabled=false` →
+   the recurrence runs the **SEQUENTIAL per-token path** (p dispatches per layer).
+2. **Without `ternary_attention_batched_prefill`**: `attn_scratch` is `None` → `batched_attn=false`
+   → every attention layer runs the **per-token loop** (~9 dispatches × p tokens).
+3. **Without `deltanet_prework_fused`** (also not in the row): the fused conv+SiLU+L2+expand
+   prework is off — with chunked also off, the sequential conv arm is the only path.
+4. Dispatch arithmetic at chunk 128 (24 deltanet + 8 attention layers, Bonsai-2): sequential
+   conv 3,072 + sequential recurrence 3,072 + per-token attention ~9,216 + per-token beta/expand
+   arm + the batched projections/norms ~500 ≈ **~21,500 dispatches/frame** vs ~500 with the
+   prefill features on. At the Bench-1007/1132 dispatch-floor class (~35 µs/launch) that is
+   **~0.75 s/frame — the measured Bench-911 floor (0.767–0.914 s) is the dispatch count, to the
+   digit.** The gap is NOT decode-shaped GEMM tiles (hypothesis 1 demoted to a secondary, post-fix
+   question) — it is a feature-row omission.
+5. **Cross-check (the 1141 precedent, one list over):** riir-ai's `riir-gpu` default feature set
+   (its Cargo.toml `default =`) carries BOTH `ternary_deltanet_chunked_prefill` AND
+   `ternary_attention_batched_prefill` — the league engine runs the batched/chunked bodies; the
+   dist lane never did. Issue 1141's note says it in full: "riir-infer-gpu has NO defaults — the
+   production posture lived only in riir-ai's riir-gpu defaults". The decode half got fixed
+   (1141); the prefill half was missed.
+
+**Fix landed** `412c887`: the dist `gpu` row gains exactly the engine-default prefill pair
+(`ternary_deltanet_chunked_prefill` + `ternary_attention_batched_prefill` — NOT prework_fused /
+smem_staged, which the engine default also does not carry; those stay their own GOAT lanes).
+G1 is gate-covered (chunked-vs-sequential and batched-vs-sequential are bit-identity-gated per
+feature; `g1_032_folded_prefill_metal` pins the COMPOSITION on the real folded file); the A/B
+(scripts/i1146_ab_session.sh — two worktree builds, the T0.3 cell rig) re-proves e2e token
+exactness + measures the closure; decode tg128 is the G3 row.
+
+**The census instrument landed** `95e5068` (the issue's mandated census, retargeted): the
+PREFILL_STAGE mask grew the parent-gated deltanet-chain sub-bits + standalone embed/tail bits
+(3→12 bits, mask=ALL byte-identical shipping); `bench_1146_prefill_frame_census` strip-down
+attributes the POST-fix residue (the frame floor that remains once the dispatch storm is gone —
+where the W-frame ternary GEMM rung and the recurrence-scan question actually live now).
+Hypothesis 1 (decode-shaped GEMM tiles) re-ranks AGAINST the post-fix residue, not the 6–8× gap.
+
+Original finding text follows.
+
+---
 
 riir-infer's single-box prefill on Bonsai-2-27B (Metal, idle bmo, chunked width 128):
 
