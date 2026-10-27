@@ -1,6 +1,6 @@
 # Issue 1147: T2.4 kernel micro-batching — batch-2 decode step on the tail
 
-**Status:** OPEN
+**Status:** LANDED 2026-10-28 — `03f0fe6` (Bench 912: G1 PASS ×2, G2 +39% ABBA ×2; kernel-level batch-2 stays the forwarder rung)
 **Claimed:** zed-amo-i623-mb (T2.4 kernel micro-batching: batch-2 decode on the tail with per-stream bit-identity + GPU cells on idle bmo), 1793132228, expires 2026-10-29T20:17:00+00:00
 **Plan:** `.plans/623_multi_host_pipeline_inference_lane.md` T2.4 (the plan file's file-level lease stays t24's T5.1a–c claim — this issue is the micro-batching rung's own claim surface)
 
@@ -23,10 +23,20 @@ change — G1 (byte-identity vs 1-box) forbids it.
 
 ## Acceptance
 
-- [ ] Batch-2 decode step implemented on the tail (behind its own gate; the round-robin
-      sequential step stays the default until the GOAT reads).
-- [ ] G1: per-stream tokens through the batched tail bit-identical to the round-robin
-      tail and to the 1-box oracle (synth fixture CPU + real-model bmo loopback GPU).
-- [ ] GPU cell on idle bmo: s=2 aggregate tok/s batched vs the 109.5 round-robin
-      baseline (ABBA, provenance line quoted).
-- [ ] GOAT verdict + plan/bench records updated; demote the loser.
+- [x] Fused decode-batch step implemented on the tail (BatchN hint + the
+      `step_submit`/`step_finish` seam; `RIIR_DIST_PAIR=0` restores the incumbent
+      cadence byte-identically — the A/B arm, default ON after the GOAT read).
+      Dispatch-level v0: the launches are not reduced (kernel-level grid-dim
+      batch-2 remains the forwarder rung).
+- [x] G1: per-stream tokens through the batched tail bit-identical to the
+      round-robin tail (CPU captures logit-for-logit) and to the 1-box oracle
+      (CPU synth 4/4; real-model bmo loopback GPU `--full-check` PASS ×2 builds).
+- [x] GPU cell on idle bmo: s=2 aggregate decode window batched vs the
+      round-robin incumbent on the SAME topology — **78.2 vs 56.2 tok/s
+      (+38.8–39.5%), ABBA ×2 builds** ([Bench 912](../.benchmarks/912_plan623_issue1147_fused_decode_batch.md);
+      the 109.5 2-box row is Bench 908's wire topology — its confirmation cell
+      waits on a quiet amo window).
+- [x] GOAT verdict + plan/bench records updated: G1 PASS, G2 PASS (+39%), G3
+      byte-identity (s=1 + incumbent arm byte-identical, test-pinned), G4
+      unchanged (no new frame-path allocations). The incumbent arm keeps its
+      demote switch; the paired arm promotes as the default.

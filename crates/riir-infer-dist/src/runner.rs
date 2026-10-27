@@ -94,6 +94,12 @@ pub struct HeadOptions {
     /// Stop generating once this id is produced (it is kept in the
     /// output). `None` = always generate `max_new`.
     pub eos: Option<u32>,
+    /// T2.4 fused batch step (issue 1147): when every ready stream in a
+    /// pass is a decode feed, hint the tail (BatchN) so it submits all
+    /// the GPU chains before any readback, and drain the whole pass's
+    /// replies. `false` = the single-drain incumbent cadence, byte-for-
+    /// byte (the A/B arm; the GOAT cell decides the promoted default).
+    pub pair_decode: bool,
 }
 
 impl Default for HeadOptions {
@@ -102,6 +108,7 @@ impl Default for HeadOptions {
             prefill_chunk: 1,
             min_batched: 64,
             eos: None,
+            pair_decode: true,
         }
     }
 }

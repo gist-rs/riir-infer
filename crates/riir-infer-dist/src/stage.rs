@@ -32,6 +32,23 @@ pub trait StageCompute {
     /// logits (last stage).
     fn step(&mut self, token: u32, pos: usize, input: &[f32]) -> &[f32];
 
+    /// Enqueue this stage's decode step WITHOUT waiting for the result
+    /// (T2.4 fused batch step). Async backends (GPU) enqueue the kernel
+    /// chain and return; the CPU default computes it now into the stage's
+    /// own output buffer. Paired with EXACTLY ONE [`Self::step_finish`],
+    /// read back in submission order — the fused batch submits every
+    /// stream's chain first so the queue runs them back to back with no
+    /// inter-chain idle, then finishes each in FIFO order. Per-stream
+    /// arithmetic (kernel order, operands, fold order) is unchanged, so
+    /// `submit`+`finish` == `step` bit-for-bit by construction.
+    fn step_submit(&mut self, token: u32, pos: usize, input: &[f32]);
+
+    /// Complete the step enqueued by [`Self::step_submit`] and return its
+    /// output slice (hidden for a non-last stage, logits for the last),
+    /// exactly as [`Self::step`] would have returned. The slice borrows
+    /// the stage — copy/argmax before the next submit on this stage.
+    fn step_finish(&mut self) -> &[f32];
+
     /// Run this stage's window over one prefill CHUNK of consecutive
     /// positions `base_pos..base_pos + n` (T2.3b). The first stage reads
     /// `tokens` (`n` ids); later stages read `input` (`n` rows of
@@ -200,16 +217,20 @@ impl StageCompute for TernaryCpuStage {
         self.config.block_size
     }
 
+    /// Submit + finish — the fused batch split ([`StageCompute::step_submit`])
+    /// composes back into exactly this call order, so the solo path and the
+    /// batch path are the same computation by construction.
     fn step(&mut self, token: u32, pos: usize, input: &[f32]) -> &[f32] {
+        self.step_submit(token, pos, input);
+        self.step_finish()
+    }
+
+    fn step_submit(&mut self, token: u32, pos: usize, input: &[f32]) {
         let n = self.config.n_embd;
         if !self.range.is_first() {
             self.x[..n].copy_from_slice(&input[..n]);
         }
-        let width = match self.range.is_last(self.config.n_layer as u32) {
-            true => self.config.vocab_size,
-            false => n,
-        };
-        let out = forward_qwen_deltanet_ternary_range(
+        forward_qwen_deltanet_ternary_range(
             &mut self.x,
             &self.weights,
             &mut self.cache,
@@ -220,7 +241,15 @@ impl StageCompute for TernaryCpuStage {
             &self.rope,
             self.range,
         );
-        &out[..width]
+    }
+
+    fn step_finish(&mut self) -> &[f32] {
+        let width = if self.range.is_last(self.config.n_layer as u32) {
+            self.config.vocab_size
+        } else {
+            self.config.n_embd
+        };
+        &self.x[..width]
     }
 }
 
