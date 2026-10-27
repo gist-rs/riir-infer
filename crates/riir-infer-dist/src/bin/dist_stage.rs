@@ -8,7 +8,10 @@
 //!     --prompt 1,2,3 --max-new 16
 //! ```
 //!
-//! Token ids in, token ids out (no tokenizer in the PoC). `--full-check`
+//! Token ids in (`--prompt 1,2,3`) or text in (`--text "..."`, encoded with
+//! the GGUF's own BPE vocab; `--chat` wraps it in the Qwen chat template);
+//! the head prints the generated ids and their decoded text, and stops at
+//! the vocab's EOS (`--no-eos` generates the full `--max-new`). `--full-check`
 //! on the head additionally runs the 1-box forward locally and asserts
 //! the 2-host token stream is byte-identical (the G1 gate, live).
 //! `--backend gpu` (build with `--features gpu`) runs the stage on the
@@ -29,8 +32,10 @@ use std::time::Instant;
 
 use riir_infer_core::deltanet::QwenDeltaNetTernaryWeights;
 use riir_infer_core::deltanet::WeightScope;
+use riir_infer_core::gguf_loader::GgufFile;
 use riir_infer_core::gguf_loader::load_qwen_deltanet_ternary_weights_gguf_scoped;
 use riir_infer_core::multi_host::LayerRange;
+use riir_infer_core::tokenizer::BpeTokenizer;
 use riir_infer_core::types::Config;
 use riir_infer_dist::runner::{HeadOptions, run_head_with, run_local_with, run_tail};
 use riir_infer_dist::stage::{ArtifactIdentity, StageCompute, TernaryCpuStage, stage_scope};
@@ -50,6 +55,9 @@ struct Args {
     backend: String,
     ctx: usize,
     prefill_chunk: Option<usize>,
+    text: Option<String>,
+    chat: bool,
+    no_eos: bool,
 }
 
 fn parse() -> Result<Args, String> {
@@ -66,6 +74,9 @@ fn parse() -> Result<Args, String> {
         backend: "cpu".into(),
         ctx: 4096,
         prefill_chunk: None,
+        text: None,
+        chat: false,
+        no_eos: false,
     };
     while let Some(flag) = it.next() {
         let mut val = || it.next().ok_or(format!("{flag} needs a value"));
@@ -87,6 +98,9 @@ fn parse() -> Result<Args, String> {
             }
             "--max-new" => a.max_new = val()?.parse().map_err(|e| format!("--max-new: {e}"))?,
             "--full-check" => a.full_check = true,
+            "--text" => a.text = Some(val()?),
+            "--chat" => a.chat = true,
+            "--no-eos" => a.no_eos = true,
             "--backend" => a.backend = val()?,
             "--ctx" => a.ctx = val()?.parse().map_err(|e| format!("--ctx: {e}"))?,
             "--prefill-chunk" => {
@@ -149,6 +163,18 @@ fn load(
     Ok((config, Arc::new(weights)))
 }
 
+/// The head's text front: the GGUF's own BPE vocab (T2.2d).
+fn tokenizer(model: &std::path::Path) -> Result<BpeTokenizer, String> {
+    let gguf = GgufFile::open(model).map_err(|e| format!("open {}: {e}", model.display()))?;
+    BpeTokenizer::from_gguf(&gguf).map_err(|e| format!("tokenizer: {e}"))
+}
+
+/// Qwen chat template around one user turn (the tokenizer's special-token
+/// matcher keeps `<|im_start|>` / `<|im_end|>` whole).
+fn chat_turn(user: &str) -> String {
+    format!("<|im_start|>user\n{user}<|im_end|>\n<|im_start|>assistant\n")
+}
+
 fn run() -> Result<(), String> {
     let a = parse()?;
     let key = PeerKey::from_hex(
@@ -194,6 +220,20 @@ fn run() -> Result<(), String> {
             eprintln!("[tail] served {steps} positions, clean shutdown");
         }
         _ => {
+            let tok = tokenizer(&a.model)?;
+            let prompt: Vec<u32> = match &a.text {
+                Some(t) => {
+                    let text = match a.chat {
+                        true => chat_turn(t),
+                        false => t.clone(),
+                    };
+                    tok.encode(&text).into_iter().map(|id| id as u32).collect()
+                }
+                None => a.prompt.clone(),
+            };
+            if prompt.is_empty() {
+                return Err("empty prompt after encoding".into());
+            }
             let addr = a.connect.ok_or("head needs --connect ADDR")?;
             let sock = TcpStream::connect(&addr).map_err(|e| format!("connect {addr}: {e}"))?;
             let mut link = TcpTransport::new(sock, key, Direction::Downstream)
@@ -203,14 +243,21 @@ fn run() -> Result<(), String> {
                     "gpu" => 128,
                     _ => 1,
                 }),
+                eos: match a.no_eos {
+                    true => None,
+                    false => Some(tok.eos_id() as u32),
+                },
                 ..HeadOptions::default()
             };
-            let r = run_head_with(stage.as_mut(), &mut link, &a.prompt, a.max_new, opts)
+            let r = run_head_with(stage.as_mut(), &mut link, &prompt, a.max_new, opts)
                 .map_err(|e| e.to_string())?;
+            println!("prompt: {} tokens", prompt.len());
             println!("generated: {:?}", r.generated);
+            let ids: Vec<usize> = r.generated.iter().map(|&t| t as usize).collect();
+            println!("text: {:?}", tok.decode(&ids));
             println!(
                 "prefill {} tok in {:.3}s · decode {:.2} tok/s ({} steps)",
-                a.prompt.len(),
+                prompt.len(),
                 r.prefill.as_secs_f64(),
                 r.decode_tok_s(),
                 r.generated.len().saturating_sub(1)
@@ -229,7 +276,7 @@ fn run() -> Result<(), String> {
                     identity,
                 )?;
                 let t = Instant::now();
-                let want = run_local_with(full.as_mut(), &a.prompt, a.max_new, opts);
+                let want = run_local_with(full.as_mut(), &prompt, a.max_new, opts);
                 let tok_s = a.max_new.saturating_sub(1) as f64 / t.elapsed().as_secs_f64();
                 println!(
                     "1-box {} oracle: {tok_s:.2} tok/s end-to-end (incl. prefill)",

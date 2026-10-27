@@ -143,6 +143,7 @@ fn pair(
     let opts = HeadOptions {
         prefill_chunk: chunk,
         min_batched: 0,
+        ..HeadOptions::default()
     };
     let r = run_head_with(&mut head, &mut link, prompt, max_new, opts).expect("head");
     (r, tail.join().unwrap().expect("tail"))
@@ -177,6 +178,7 @@ fn gpu_chunked_prefill_bit_identical_and_timed() {
     let opts = HeadOptions {
         prefill_chunk: chunk,
         min_batched: 0,
+        ..HeadOptions::default()
     };
     let chunk = prefill_width(len, opts);
     assert!(chunk > 1, "prefill width collapsed to per-position");

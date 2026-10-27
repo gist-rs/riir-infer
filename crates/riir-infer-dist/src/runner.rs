@@ -78,6 +78,9 @@ pub struct HeadOptions {
     /// ~0.9 s + 0.018 s/token vs 0.039 s/token per position → break-even
     /// ≈ 43 tokens), so a short prompt loses by batching.
     pub min_batched: usize,
+    /// Stop generating once this id is produced (it is kept in the
+    /// output). `None` = always generate `max_new`.
+    pub eos: Option<u32>,
 }
 
 impl Default for HeadOptions {
@@ -85,6 +88,7 @@ impl Default for HeadOptions {
         Self {
             prefill_chunk: 1,
             min_batched: 64,
+            eos: None,
         }
     }
 }
@@ -101,6 +105,11 @@ pub fn prefill_width(prompt_len: usize, opts: HeadOptions) -> usize {
         true => 1,
         false => prompt_len.div_ceil(prompt_len.div_ceil(c)),
     }
+}
+
+/// Generation continues past `tok`?
+fn keep_going(tok: u32, opts: HeadOptions) -> bool {
+    opts.eos != Some(tok)
 }
 
 /// The prompt's prefill chunks at width `w`.
@@ -219,6 +228,9 @@ pub fn run_head_with<S: StageCompute + ?Sized, T: Transport>(
     }
     let t1 = Instant::now();
     for i in 1..max_new {
+        if !keep_going(next, opts) {
+            break;
+        }
         push(
             stage,
             link,
@@ -376,6 +388,9 @@ pub fn run_local_with<S: StageCompute + ?Sized>(
         out.push(next);
     }
     for i in 1..max_new {
+        if !keep_going(next, opts) {
+            break;
+        }
         next = argmax_first(stage.step(next, prompt.len() + i - 1, &empty));
         out.push(next);
     }

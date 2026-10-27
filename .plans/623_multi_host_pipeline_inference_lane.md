@@ -257,7 +257,19 @@ mlx-lm on the Proposal-042 scoreboard **measured on the same two boxes**.
     first-index (strided lanes: a tie between index 1 and index 256 returns 256), so a
     re-open needs a tie-correct kernel to hold the Issue-940 law + the G1 bit bar. The
     stage's per-token lever is the 1-box kernel stack (Issue 1139 T2), not the seam.
-  - [ ] T2.2d the Issue-028 battery prompts with a tokenizer front (PoC used token ids).
+  - [x] T2.2d **tokenizer front — LANDED 2026-10-27.** `dist_stage --text "..."` encodes
+    with the GGUF's own `BpeTokenizer` (head only; the tail never tokenizes), `--chat`
+    wraps the Qwen chat template, the head prints ids + decoded text and stops at the
+    vocab EOS (`HeadOptions::eos`, kept in the output; `--no-eos` restores the full
+    `--max-new`); the oracle (`run_local_with`) stops at the same id. (The Issue-028
+    battery is itself token-id based — `[7, 13, 42, 100, 5]` — so the id path stays the
+    G1 battery; the text front is the usability half.) CPU G1 8/8 incl. the EOS-stop
+    test (pair + oracle cut at the same token, tail serves no position past it). **Real
+    2-box GPU (amo head ⇄ bmo tail, TB5, scoped):** `--chat --text "What is the capital
+    of France? Answer in one sentence."` → 20 prompt tokens, `"<think>\nThe user is
+    asking a simple factual question … The answer is Paris.\n</think>\n\nThe capital of
+    France is Paris.<|im_end|>"`, stopped at EOS after 42 tokens, **`--full-check` G1
+    PASS**, decode 17.3 tok/s (amo shared — indicative).
 - [ ] **T2.3** Chunked pipelined prefill (chunk c on stage 1 while chunk c+1 on stage 0,
   double-buffered frames) + KV/GDN state lives on its own stage (no state traffic in
   steady state).

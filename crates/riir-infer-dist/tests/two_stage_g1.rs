@@ -229,6 +229,7 @@ fn chunked_prefill_frames_are_bit_identical_every_split() {
         let opts = HeadOptions {
             prefill_chunk: chunk,
             min_batched: 0,
+            ..HeadOptions::default()
         };
         let mut oracle =
             TernaryCpuStage::new(config.clone(), w.clone(), LayerRange::full(n), id).unwrap();
@@ -297,6 +298,7 @@ fn prefill_width_evens_chunks_and_floors_short_prompts() {
     let o = |prefill_chunk, min_batched| HeadOptions {
         prefill_chunk,
         min_batched,
+        ..HeadOptions::default()
     };
     assert_eq!(prefill_width(256, o(128, 64)), 128);
     // A ragged 130 = 128 + 2 is evened to 65 + 65.
@@ -307,4 +309,30 @@ fn prefill_width_evens_chunks_and_floors_short_prompts() {
     assert_eq!(prefill_width(256, o(1, 0)), 1);
     assert_eq!(prefill_width(5, o(2, 0)), 2);
     assert_eq!(prefill_width(5, o(7, 0)), 5);
+}
+
+/// T2.2d — `HeadOptions::eos` stops both the 2-stage head and the oracle
+/// right after the EOS id (kept in the output), at the same token.
+#[test]
+fn eos_stops_the_pair_and_the_oracle_at_the_same_token() {
+    let (config, w, id) = load("riir_dist_g1_eos");
+    let (want_toks, _) = reference(&config, &w, id);
+    let n = config.n_layer as u32;
+    // The first decode-produced token that has not appeared earlier.
+    let cut = (1..want_toks.len())
+        .find(|&i| !want_toks[..i].contains(&want_toks[i]))
+        .expect("a fresh token in the reference stream");
+    let opts = HeadOptions {
+        eos: Some(want_toks[cut]),
+        ..HeadOptions::default()
+    };
+    let want = &want_toks[..=cut];
+    let mut oracle =
+        TernaryCpuStage::new(config.clone(), w.clone(), LayerRange::full(n), id).unwrap();
+    assert_eq!(run_local_with(&mut oracle, &PROMPT, MAX_NEW, opts), want);
+    let key = [4u8; 32];
+    let out = run_pair_split(&config, &w, &w, 2, key, key, id, id, opts);
+    assert_eq!(out.head.expect("head"), want, "pair did not stop at EOS");
+    let (steps, _) = out.tail.expect("tail");
+    assert_eq!(steps, PROMPT.len() + cut, "tail served positions past EOS");
 }
