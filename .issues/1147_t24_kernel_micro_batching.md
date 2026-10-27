@@ -1,6 +1,6 @@
 # Issue 1147: T2.4 kernel micro-batching — batch-2 decode step on the tail
 
-**Status:** LANDED 2026-10-28 — `03f0fe6` (Bench 912: G1 PASS ×2, G2 +39% ABBA ×2; kernel-level batch-2 stays the forwarder rung)
+**Status:** CLOSED 2026-10-28 — fused-batch v0 LANDED (`03f0fe6`, Bench 912) then **DEMOTED to opt-in the same day: the 2-box wire confirmation cell REFUTED it on the serving topology** (Bench 913 — ABBA ×2: armed 46.9–52.6 vs incumbent 99.2–108.5 aggregate decode window, −52%; the BatchN wave forfeits the head⇄tail GPU overlap that IS the 2.37× bubble fill). `pair_decode` now defaults OFF; `RIIR_DIST_PAIR=1` arms it for loopback rigs (where the +39% was real and stands). **Kernel-level batch-2 CLOSED for the wire**: under the incumbent cadence the tail never holds two ready decode chains — no engagement window. Residual scope is the loopback rig only; serving-path micro-batching via BatchN is not a direction on this topology.
 **Lease closed:** zed-amo-i623-mb (claimed 2026-10-27 epoch 1793132228 for the T2.4 kernel micro-batching rung — batch-2 decode on the tail with per-stream bit-identity + GPU cells on idle bmo) — released 2026-10-28, work complete (v0 landed + the wire refutation + the demotion)
 **Plan:** `.plans/623_multi_host_pipeline_inference_lane.md` T2.4 (the plan file's file-level lease stays t24's T5.1a–c claim — this issue is the micro-batching rung's own claim surface)
 
