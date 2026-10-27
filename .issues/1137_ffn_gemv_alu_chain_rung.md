@@ -1,6 +1,6 @@
 # Issue 1137 — rung: the FFN decode-GEMV kernel-internal memory pipeline (2-bit select-accumulate ALU chain at 26-35% of stream)
 
-**Status:** Open — filed 2026-10-27 ~09:2x +07 from the i1113 probe-(b) close (Bench 1140, instrument + 3 measurements below). Unclaimed.
+**Status:** Claimed — zed-amo-i1137-ffnalu, 1793066854, expires 2026-10-28T04:00:00+00:00. Sequence: fork q2-K mapping study FIRST (read the vendored metal dot kernel, name the 438 GB/s mechanism in the record — reconnaissance informs the G1 design and is not a variant spend), then the ONE named variant (tensor-GEMM class, or the mapped fork mechanism if the study shows the tensor lineage is the wrong family) under the standard ladder: G1 to_bits vs the incumbent f16scale at both FFN shapes, e2e ABBA >=1.5% per-run interleaved, REACH counter, demote hatch. Filed 2026-10-27 ~09:2x +07 from the i1113 probe-(b) close (Bench 1140, instrument + 3 measurements below).
 
 ## The trigger (measured, not assumed)
 
