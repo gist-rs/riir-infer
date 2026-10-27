@@ -1426,7 +1426,10 @@ impl ResidualAddRmsNormRotateCubeCL {
 
 /// Issue 1145 — the MULTI-CUBE fused ResidualAdd + RMSNorm + forward-rotate
 /// staging (the multi-cube shape that could win where Issue 1134's single
-/// workgroup measured −20% on its serial chunk walk).
+/// workgroup measured −20% on its serial chunk walk). **PROMOTED DEFAULT-ON
+/// 2026-10-27** — the T3 G2 paired ABBA on idle bmo read +2.83% median
+/// (3/3 positive) at the G1 digest pin, over the 1.5% bar;
+/// `RIIR_NORM_ROT_MULTI=0` is the demote hatch.
 ///
 /// One launch of `dim / hblock` cubes (5 at Bonsai-2's 5120/1024) replaces
 /// `ResidualAddRmsNormCubeCL::launch` + `RotationCubeCL::launch_forward_copy`
@@ -1714,7 +1717,13 @@ fn residual_add_rmsnorm_rotate_multi_f32(
 /// cubes in the folded (`bonsai2_hadamard`) decode posture — the multi-cube
 /// shape that could win where Issue 1134's single-workgroup serial walk
 /// measured −20%: the chunks' butterflies run in parallel, and the
-/// redundant whole-vector reduction per cube is cache-resident.
+/// redundant whole-vector reduction per cube is cache-resident. All three
+/// outputs are to_bits-equal to the two-launch chain by construction (mlp4
+/// Phases 1-4 + the r4 body, verbatim), so only the REACH counter proves
+/// the arm fired (the Bench-768 pattern). The caller swaps `x`/`x_alt`
+/// after the launch — the kernel reads `x_src` whole-vector while writing
+/// `x_dst` in-chunk, and the double-buffer is what makes the multi-cube
+/// reduction legal (the Issue-1136 no-owner race, avoided by construction).
 ///
 /// All three outputs are to_bits-equal to the two-launch chain by
 /// construction (mlp4 Phases 1-4 + the r4 body, verbatim), so only the
@@ -1903,17 +1912,25 @@ pub(crate) fn norm_rotate_fused_mark_reached() {
     }
 }
 
-// Issue 1145 runtime toggle (the Bench 768 pattern, same as Issue 1134's:
-// env default OFF, a force setter for the bench harness, a launch counter +
-// one-shot REACH line as the vacuous guards — the multi-cube outputs are
-// bit-identical to the norm-then-staging chain, so ONLY the counter proves
-// the toggle reached the kernel).
+// Issue 1145 runtime toggle (the Bench 768 pattern). **PROMOTED DEFAULT-ON
+// 2026-10-27** (the T3 G2 on idle bmo: paired ABBA ×3 — 17.629/17.458/17.518
+// → 17.035/17.032/17.097 ms/token = +3.49/+2.50/+2.46%, median +2.83% ≥ the
+// 1.5% bar, 3/3 positive; G1 digest `d06bffced92427cb` + last token 279
+// EXACT in all six arms; G4 zero per-token alloc — the x_alt double buffer
+// is one construction-time allocation). The `dense_pair_env_semantics`
+// contract (unset = ON); `RIIR_NORM_ROT_MULTI=0` demotes byte-identically
+// to the incumbent norm + r4-staging pair; [`set_norm_rotate_multi`] is the
+// harness override. A launch counter + one-shot REACH line stay as the
+// vacuous guards — the multi-cube outputs are bit-identical to the
+// norm-then-staging chain, so ONLY the counter proves the toggle reached
+// the kernel).
 
-/// Armed: env `RIIR_NORM_ROT_MULTI` ("1"/"on"/"true"), else OFF;
+/// Armed by default; `RIIR_NORM_ROT_MULTI` set to anything but 1/on/true
+/// demotes (the `dense_pair_env_semantics` contract, unset = ON);
 /// [`set_norm_rotate_multi`] overrides.
 #[cfg(feature = "cubecl_runtime")]
 static USE_NORM_ROTATE_MULTI: std::sync::atomic::AtomicBool =
-    std::sync::atomic::AtomicBool::new(false);
+    std::sync::atomic::AtomicBool::new(true);
 #[cfg(feature = "cubecl_runtime")]
 static NORM_ROTATE_MULTI_INITIALIZED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
 #[cfg(feature = "cubecl_runtime")]
@@ -1931,18 +1948,18 @@ pub fn set_norm_rotate_multi(on: bool) {
 }
 
 /// Whether the multi-cube fused norm+rotate path is currently armed
-/// (dispatch check).
+/// (dispatch check). Default ON (the Issue-1145 T3 promotion);
+/// `RIIR_NORM_ROT_MULTI=0` is DEMOTE-ONLY.
 #[cfg(feature = "cubecl_runtime")]
 pub fn norm_rotate_multi_enabled() -> bool {
     if NORM_ROTATE_MULTI_INITIALIZED
-        .set(env_flag("RIIR_NORM_ROT_MULTI"))
+        .set(crate::gemv_cubecl::dense_pair_env_semantics(std::env::var(
+            "RIIR_NORM_ROT_MULTI",
+        )))
         .is_ok()
     {
         USE_NORM_ROTATE_MULTI.store(
-            NORM_ROTATE_MULTI_INITIALIZED
-                .get()
-                .copied()
-                .unwrap_or(false),
+            NORM_ROTATE_MULTI_INITIALIZED.get().copied().unwrap_or(true),
             std::sync::atomic::Ordering::Relaxed,
         );
     }
