@@ -193,13 +193,13 @@ pub fn set_metal_tensor_production_geometry(config: MetalTileConfig) {
 /// would corrupt every number the cell records.
 static PROD_GEOM_ENV: std::sync::OnceLock<Option<MetalTileConfig>> = std::sync::OnceLock::new();
 
-fn parse_prod_geom_env() -> Option<MetalTileConfig> {
-    let spec = std::env::var("RIIR_METAL_TENSOR_GEOM").ok()?;
+/// The pure parse half of the env arm (unit-testable without touching the
+/// process env or the [`PROD_GEOM_ENV`] OnceLock; pub so the engagement
+/// cell can assert the selector honored the armed spec). `None` = malformed;
+/// the caller prints the loud refusal naming the spec.
+pub fn parse_prod_geom_spec(spec: &str) -> Option<MetalTileConfig> {
     let parts: Vec<&str> = spec.split(',').map(str::trim).collect();
     if parts.len() != 4 {
-        eprintln!(
-            "[Issue 1122] RIIR_METAL_TENSOR_GEOM={spec:?} malformed (want \"nra,nrb,nk_chunk,nsg\"); using built-in defaults"
-        );
         return None;
     }
     let parse = |s: &str| s.parse::<u32>().ok().filter(|v| *v >= 1);
@@ -209,21 +209,33 @@ fn parse_prod_geom_env() -> Option<MetalTileConfig> {
         parse(parts[2]),
         parse(parts[3]),
     ) {
-        (Some(nra), Some(nrb), Some(nk_chunk), Some(nsg)) => {
+        (Some(nra), Some(nrb), Some(nk_chunk), Some(nsg)) => Some(MetalTileConfig {
+            nra,
+            nrb,
+            nk_chunk,
+            nsg,
+        }),
+        _ => None,
+    }
+}
+
+fn parse_prod_geom_env() -> Option<MetalTileConfig> {
+    let spec = std::env::var("RIIR_METAL_TENSOR_GEOM").ok()?;
+    let parsed = parse_prod_geom_spec(&spec);
+    match parsed {
+        Some(c) => {
             eprintln!(
-                "[Issue 1122] production geometry = {nra}x{nrb}, K-tile {}, {nsg} simdgroups",
-                16 * nk_chunk
+                "[Issue 1122] production geometry = {}x{}, K-tile {}, {} simdgroups",
+                c.nra,
+                c.nrb,
+                16 * c.nk_chunk,
+                c.nsg
             );
-            Some(MetalTileConfig {
-                nra,
-                nrb,
-                nk_chunk,
-                nsg,
-            })
+            Some(c)
         }
-        _ => {
+        None => {
             eprintln!(
-                "[Issue 1122] RIIR_METAL_TENSOR_GEOM={spec:?} has non-numeric/zero fields; using built-in defaults"
+                "[Issue 1122] RIIR_METAL_TENSOR_GEOM={spec:?} malformed (want \"nra,nrb,nk_chunk,nsg\", every field >= 1); using built-in defaults"
             );
             None
         }
@@ -530,5 +542,49 @@ impl MetalWeightCache {
     ) -> Self {
         let (pos, neg, scale) = gemm.upload_weights(pos_bits_u32, neg_bits_u32, group_scale_f32);
         Self { pos, neg, scale }
+    }
+}
+
+#[cfg(test)]
+mod production_geometry_tests {
+    use super::*;
+
+    #[test]
+    fn env_spec_golden_parses_to_ktile64() {
+        assert_eq!(
+            parse_prod_geom_spec("64,128,4,4"),
+            Some(MetalTileConfig::KTILE64)
+        );
+    }
+
+    #[test]
+    fn env_spec_tolerates_whitespace() {
+        assert_eq!(
+            parse_prod_geom_spec(" 64, 128 , 4,4 "),
+            Some(MetalTileConfig::KTILE64)
+        );
+    }
+
+    #[test]
+    fn env_spec_malformed_refuses_none() {
+        // wrong field count
+        assert_eq!(parse_prod_geom_spec("64,128,4"), None);
+        assert_eq!(parse_prod_geom_spec("64,128,4,4,2"), None);
+        assert_eq!(parse_prod_geom_spec(""), None);
+        // zero is not a value (fields are >= 1)
+        assert_eq!(parse_prod_geom_spec("0,128,4,4"), None);
+        assert_eq!(parse_prod_geom_spec("64,0,4,4"), None);
+        // non-numeric
+        assert_eq!(parse_prod_geom_spec("64,128,x,4"), None);
+        assert_eq!(parse_prod_geom_spec("64,128,-4,4"), None);
+    }
+
+    #[test]
+    fn k_tile_is_16_chunks_and_default_is_k32() {
+        let kt64 = parse_prod_geom_spec("64,128,4,4").expect("golden spec");
+        assert_eq!(16 * kt64.nk_chunk, 64);
+        let d = MetalTileConfig::default();
+        assert_eq!(16 * d.nk_chunk, 32, "the built-in default is the incumbent K32 geometry");
+        assert_eq!(d, MetalTileConfig { nra: 64, nrb: 128, nk_chunk: 2, nsg: 4 });
     }
 }

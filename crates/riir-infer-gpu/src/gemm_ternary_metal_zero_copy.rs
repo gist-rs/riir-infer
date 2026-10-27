@@ -133,6 +133,14 @@ pub struct MetalTensorZeroCopyGemm {
     /// reads stale tiles (the constants here MUST mirror the `SWEEP_*`
     /// defines the MSL was compiled with).
     config: crate::gemm_ternary_metal_tensor::MetalTileConfig,
+    /// The most recent committed command buffer, retained for
+    /// [`Self::wait_last`](Self::wait_last). The raw dispatches bypass
+    /// wgpu's usage tracking, so a CubeCL-side read of the output can
+    /// otherwise RACE the pending raw work (raw-Metal submissions are
+    /// invisible to wgpu's hazard tracking) — instrument-grade sync for
+    /// tests and timing cells. One retained buffer at a time; replacing it
+    /// releases the previous.
+    last_cmd_buffer: std::sync::Mutex<Option<metal::CommandBuffer>>,
     /// Hold the wgpu device + queue Arcs alive — the raw Metal handles point
     /// into their internals. Dropping these would invalidate `device` + `queue`.
     _wgpu_device: Arc<WgpuDevice>,
@@ -218,6 +226,7 @@ impl MetalTensorZeroCopyGemm {
             output_cache: Mutex::new(HashMap::new()),
             dispatch_count: std::sync::atomic::AtomicU64::new(0),
             config,
+            last_cmd_buffer: std::sync::Mutex::new(None),
             _wgpu_device: wgpu_device,
             _wgpu_queue: wgpu_queue,
         })
@@ -465,6 +474,12 @@ impl MetalTensorZeroCopyGemm {
         blit_encoder.end_encoding();
 
         cmd_buffer.commit();
+        // Retain for wait_last (the one caller class that needs an explicit
+        // wait — see the comment above: non-queued reads of the output).
+        *self
+            .last_cmd_buffer
+            .lock()
+            .expect("last_cmd_buffer lock") = Some(cmd_buffer.to_owned());
 
         // NOTE: we do NOT call `cmd_buffer.wait_until_completed()`. The command
         // buffer runs on the shared Metal queue — CubeCL's subsequent
@@ -496,6 +511,24 @@ impl MetalTensorZeroCopyGemm {
     /// Convenience: get the queue pointer (for diagnostics).
     pub fn queue_ptr(&self) -> usize {
         self.queue as usize
+    }
+
+    /// Wait for the most recent raw dispatch's command buffer to complete
+    /// (instrument-grade sync: tests and timing cells that read the output
+    /// via a non-queued path — `client.read_one` — race the pending raw
+    /// work otherwise, because the raw submissions are invisible to wgpu's
+    /// tracking). Production dispatch loops never call this: the next
+    /// dispatch's `client.flush()` + queue ordering make the pipeline
+    /// self-serializing (the dispatch comment block above).
+    pub fn wait_last(&self) {
+        if let Some(cb) = self
+            .last_cmd_buffer
+            .lock()
+            .expect("last_cmd_buffer lock")
+            .as_ref()
+        {
+            cb.wait_until_completed();
+        }
     }
 }
 
