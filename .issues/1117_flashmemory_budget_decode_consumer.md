@@ -3,6 +3,7 @@
 **Status:** Open — filed 2026-10-25 from riir-train Issue 452 E1 (riir-train Bench 671) + katgpt-rs Issue 962. Not started.
 **Claimed:** zed-m3-continue, 1792880556, expires 2026-10-26T22:22:40Z
 **Lease closed:** 2026-10-27 — T3/T4 (32K) landed under this lease by zed-m3-idle-relaunch (the same lineage); record: Bench 893 v2 session + riir-infer `47268ea` (provenance) + the collection commit
+**Claimed:** zed-m3-641-ktile64, 1793081500, expires 2026-10-29T06:11:40Z (scope: T4's 128K axis ONLY — the 16h-class run on the m3, the same box that carried the 32K half; the lease covers arming + monitoring + the record)
 
 ## Why
 
