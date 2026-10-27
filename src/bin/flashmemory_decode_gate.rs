@@ -152,7 +152,9 @@ struct ArmScore {
 fn percentile_with_support(rows: &mut [f32], p: f64) -> (f32, usize) {
     rows.sort_by(|a, b| a.total_cmp(b));
     let n = rows.len();
-    let idx = (((n as f64) * p) as usize).min(n.saturating_sub(1));
+    // Nearest rank (ceil(p·n) − 1): truncating n·p lands on n − 1 (the MAX)
+    // for every n ≤ 1/(1 − p).
+    let idx = ((p * n as f64).ceil() as usize).clamp(1, n.max(1)) - 1;
     // Tail support = observations at or above the reported order statistic —
     // under ~10 the "p95" is the max wearing a name and is reported as such.
     (rows[idx], n - idx)
