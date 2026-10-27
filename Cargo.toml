@@ -1041,6 +1041,15 @@ katgpt-core = { path = "../katgpt-rs/crates/katgpt-core" }
 #                    cubecl-wgpu — the Issue 1139 posture gap.
 
 [patch.crates-io]
+# katgpt-rs Issue 968 residue: `block` 0.1.6 is TERMINAL upstream (last
+# release 2021-01, abandoned) and carries the static-of-uninhabited-type
+# future-incompat (rust-lang/rust #74840 — hard error in a future rustc).
+# NOT reachable in the current graph at any posture (the lock entry is
+# vestigial); the row ARMS the healed fork so any future metal->block
+# re-edge resolves here, never to registry. Same one-delta fork as
+# katgpt-rs 5e216a761 (inhabited opaque Class struct, MIT, ABI-safe); own
+# in-repo copy so the patch path stays local.
+block = { path = "vendor/block" }
 cubecl-runtime = { path = "vendor/cubecl-runtime-0.11.0-pre.2" }
 cubecl-wgpu = { path = "vendor/cubecl-wgpu-0.11.0-pre.2" }
 cubecl-common = { path = "vendor/cubecl-common-0.11.0-pre.2" }
