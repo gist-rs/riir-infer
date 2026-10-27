@@ -298,10 +298,16 @@ mlx-lm on the Proposal-042 scoreboard **measured on the same two boxes**.
     efficiency vs overlap.) **Promoted:** the dist `gpu` feature now carries
     `ternary_gemm_batched` (the opt-in `gpu_prefill` it shipped behind is folded);
     `dist_stage --prefill-chunk` defaults to 128 on `--backend gpu`, 1 on cpu (chunking
-    only forfeits the CPU path's per-position overlap). Side observation filed:
-    **[Issue 1140](../.issues/1140_decode_slower_after_batched_prefill.md)** — decode
-    reads 4–6% lower after a batched prefill (order-confounded; the production
-    `prefill()` is the same body).
+    only forfeits the CPU path's per-position overlap). Side observation
+    filed + CLOSED the same day as **Issue 1140** (removed per the noise rule; this is
+    its record): decode read 4–6% lower after a batched prefill in the T2.3b cells
+    (order-confounded, batched arm always first) and 10–24% in the 2-box cells (amo
+    contended). The interleaved A/B (`decode_readback_probe_gpu.rs ::
+    decode_after_batched_vs_per_token_prefill_interleaved`: fresh forwarder per arm,
+    alternating order, P=256, 128 timed steps, 4 pairs, idle bmo on AC, load 1.6–3.1)
+    reads **−1.35% median (25.52 → 25.17 tok/s), batched lower in 4/4 pairs** — real in
+    sign, UNDER the 1.5% G2 bar, so attribution (pool scratch / prefill-left state) is
+    not worth a rung; the production `prefill()` carries the same ~1% tax.
 - [ ] **T2.4** Micro-batch round-robin for ≥2 streams (fills the PP bubble); continuous
   batching admission; chunked prefill interleaved with decode (exo's prefill-blocks-decode
   gap).
