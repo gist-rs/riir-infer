@@ -32,11 +32,11 @@ use crate::handshake;
 use crate::stage::StageCompute;
 use crate::transport::{self, FrameKind, Transport};
 
-fn proto(msg: String) -> io::Error {
+pub(crate) fn proto(msg: String) -> io::Error {
     io::Error::new(io::ErrorKind::InvalidData, msg)
 }
 
-fn expect_kind(got: FrameKind, want: FrameKind) -> io::Result<()> {
+pub(crate) fn expect_kind(got: FrameKind, want: FrameKind) -> io::Result<()> {
     match got == want {
         true => Ok(()),
         false => Err(proto(format!("expected {want:?} frame, got {got:?}"))),
@@ -121,8 +121,9 @@ fn chunks(len: usize, w: usize) -> impl Iterator<Item = Range<usize>> {
 /// f32: transport header + MAC + the [`ActivationFrame`] wire prefix + the
 /// payload. The receiver reserves its buffers to this BEFORE the stream
 /// starts (T2.1b preallocated frame buffers: the first chunked frame must
-/// never be a mid-stream multi-MB realloc).
-fn frame_bound(n_rows: usize, hidden: usize) -> usize {
+/// never be a mid-stream multi-MB realloc). Also the multi-stream
+/// reservation bound (`multi.rs`, T2.4).
+pub(crate) fn frame_bound(n_rows: usize, hidden: usize) -> usize {
     use riir_infer_core::multi_host::ActivationFrameHeader;
     transport::HDR_LEN
         + transport::MAC_LEN

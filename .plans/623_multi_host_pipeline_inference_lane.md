@@ -4,8 +4,7 @@
 **Lease closed:** zed-amo-i623-t21b landed T2.1b 2026-10-27 (the landing note on the task is its provenance) — the GPU cells (T2.3c/T2.4/T2.5/T2.7) stay unclaimed
 **Lease closed:** zed-amo-i623-t21b landed T2.5 2026-10-27 (the landing note on the task is its provenance; T2.1b's lease closed the same day, `00a8858`) — T2.3c/T2.4/T2.7 cells stay unclaimed
 **Lease closed:** m3-idle-623t15 landed T1.5 2026-10-26 (48 h lease from the claim; the landing below is its provenance) — the amo lane's Phase-0 elephant-capture constraint does not bind the M3, which is where T1.5 executed
-**Claimed:** zed-amo-i623-t24, 1793123917, expires 2026-10-29T18:00:00+00:00
-  (scope: T2.4 code — multi-stream protocol, stream ids, head scheduler, admission; CPU-verifiable first, GPU cells when the box quiets)
+**Lease closed:** zed-amo-i623-t24 landed T2.4 code 2026-10-27 (Bench 908 is the record; the landing note on the task carries the split — code DONE, GPU cells open) — the remaining T2.3c/T2.7 cells stay unclaimed
 + the 10-test G1 battery, all gates green (see the Phase 1 checkboxes). Phase 0 is decision-free (measurement only) and may
 start once Issue 1109 T0 (bmo reachable) is done; Phase 1 substrate is decision-free
 (riir-infer-core, no deps); Phase 2+ waits on [Proposal 042](../.proposals/042_multi_mac_distributed_inference.md) D1 (crate home); Phase 3+ on D2 (RDMA enabled).
@@ -360,6 +359,23 @@ mlx-lm on the Proposal-042 scoreboard **measured on the same two boxes**.
 - [ ] **T2.4** Micro-batch round-robin for ≥2 streams (fills the PP bubble); continuous
   batching admission; chunked prefill interleaved with decode (exo's prefill-blocks-decode
   gap).
+  **CODE LANDED 2026-10-27** (zed-amo-i623-t24, [Bench 908](../.benchmarks/908_plan623_t24_multi_stream_round_robin.md)):
+  `dist/src/multi.rs` — `run_head_multi`/`run_tail_multi` over ONE link; wire additions
+  ADDITIVE (`BeginStream` seq|len|chunk + `TokenStream` seq|token; the Phase-1
+  `ActivationFrameHeader.seq_id` already carried the stream id). Stream = stage-table
+  index, ONE stage instance per stream (per-stream cache, Arc weights), table length =
+  admission cap. Round-robin waves: one work item per non-done stream per pass, drain
+  exactly one reply (FIFO route verified loud). G1: `tests/multi_stream_g1.rs` 7/7 —
+  per-stream tokens bit-identical to the 1-box oracle at EVERY split, one-stream ==
+  single-stream runner, B's prefill interleaves A's decode (both directions pinned),
+  per-stream position cursors independent, unknown/duplicate-seq refusals; full dist
+  suite 9+2+8 green, clippy `-D`, rustfmt clean, `--features gpu` compiles. Real-model
+  loopback smoke (Bonsai-2 27B CPU, split 32, `--full-check`): G1 PASS both streams,
+  aggregate 18.27 tok/s vs 1-box oracle 11.11 = **1.64×** (contended box, indicative).
+  OPEN (the measurement half): 2-box GPU ABBA cells (aggregate vs 1-stream vs 1-box,
+  TB5 + tailscale) — quiet-GPU-gated; admission seam (mid-flight join) — serve-time
+  rung; kernel-level micro-batching (batch-2 `step` on the tail) — forwarder rung,
+  Phase 4's launch-bound finding makes it real.
 - [x] **T2.5** Planner: boot probe of per-layer cost per host (prefill + decode) and link
   RTT/bw (T0.2 code), split to equalise stage time under memory; manual override.
   **LANDED 2026-10-27** (zed-amo-i623-t21b) at SPLIT granularity (the honest PoC

@@ -71,6 +71,15 @@ pub enum FrameKind {
     /// chunk (the attention-arm gates key on it, Issue 782) and the chunk
     /// width to know which positions ride the batched prefill.
     Begin = 5,
+    /// Opens ONE stream of a multi-stream run (T2.4): `seq_id u32 LE ·
+    /// prompt_len u32 LE · prefill_chunk u32 LE`. The stream-addressed
+    /// twin of [`FrameKind::Begin`] — the single-stream frame is left
+    /// untouched so both protocols coexist on one transport vocabulary.
+    BeginStream = 6,
+    /// The token reply of ONE stream (T2.4): `seq_id u32 LE · token u32
+    /// LE`. [`FrameKind::Token`] carries no id to route by; a multi-stream
+    /// head has up to one reply outstanding per stream and needs the id.
+    TokenStream = 7,
 }
 
 impl FrameKind {
@@ -82,6 +91,8 @@ impl FrameKind {
             3 => Ok(Self::Shutdown),
             4 => Ok(Self::Prefill),
             5 => Ok(Self::Begin),
+            6 => Ok(Self::BeginStream),
+            7 => Ok(Self::TokenStream),
             _ => Err(invalid(format!("unknown frame kind {v}"))),
         }
     }

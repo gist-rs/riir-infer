@@ -24,6 +24,9 @@
 //!   DeltaNet range forward. The GPU stage plugs into the same trait.
 //! - [`runner`] — the head loop (owns the token stream) and the tail
 //!   serve loop (owns the sampler).
+//! - [`multi`] — the multi-stream round-robin runner (T2.4): `s` streams
+//!   over ONE link, one stage instance per stream, the pipeline bubble
+//!   filled and prompt chunks interleaved with other streams' decode.
 //!
 //! - [`planner`] — the split planner (T2.5): per-host boot probes
 //!   ([`planner::probe_decode_spt`]) merge into the chosen split through
@@ -35,6 +38,7 @@
 //! byte-identical to the 1-box forward (`tests/two_stage_g1.rs`).
 
 pub mod handshake;
+pub mod multi;
 pub mod planner;
 pub mod runner;
 pub mod sockopts;

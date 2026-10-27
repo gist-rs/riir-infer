@@ -31,6 +31,11 @@
 //! probes those candidate splits on THIS host (scoped loads, timed
 //! decode) and prints one JSON record line — two records + a link cost
 //! feed `planner::plan_split` (the manual `--split` always overrides).
+//! T2.4 multi-stream: `--streams N` runs N round-robined copies of the
+//! SAME request over one link (one stage instance per stream — per-stream
+//! caches, weights shared), head and tail alike; the head prints per-
+//! stream decode rates and the AGGREGATE tok/s (the pipeline-bubble read).
+//! `--streams 1` (default) is the single-stream runner byte-identically.
 
 use std::net::ToSocketAddrs;
 use std::path::PathBuf;
@@ -45,6 +50,7 @@ use riir_infer_core::gguf_loader::load_qwen_deltanet_ternary_weights_gguf_scoped
 use riir_infer_core::multi_host::LayerRange;
 use riir_infer_core::tokenizer::BpeTokenizer;
 use riir_infer_core::types::Config;
+use riir_infer_dist::multi::{MultiRequest, run_head_multi, run_tail_multi};
 use riir_infer_dist::runner::{HeadOptions, run_head_with, run_local_with, run_tail};
 use riir_infer_dist::sockopts::{self, Applied, LinkOptions};
 use riir_infer_dist::stage::{ArtifactIdentity, StageCompute, TernaryCpuStage, stage_scope};
@@ -69,6 +75,10 @@ struct Args {
     no_eos: bool,
     iface: Option<String>,
     sock_buf: Option<usize>,
+    /// T2.4: stream count for the multi-stream round-robin runner (1 =
+    /// the single-stream path, byte-identical). The request is duplicated
+    /// across streams — the demo of the aggregate bubble fill.
+    streams: usize,
     /// T2.5 boot probe: probe these candidate splits on THIS host's
     /// stage and print the probe record (one JSON line), then exit —
     /// no serving. The record crosses hosts by the operator; the
@@ -96,6 +106,7 @@ fn parse() -> Result<Args, String> {
         no_eos: false,
         iface: None,
         sock_buf: None,
+        streams: 1,
         plan_report: None,
     };
     while let Some(flag) = it.next() {
@@ -134,6 +145,7 @@ fn parse() -> Result<Args, String> {
             "--sock-buf" => {
                 a.sock_buf = Some(val()?.parse().map_err(|e| format!("--sock-buf: {e}"))?)
             }
+            "--streams" => a.streams = val()?.parse().map_err(|e| format!("--streams: {e}"))?,
             "--plan-report" => {
                 a.plan_report = Some(
                     val()?
@@ -291,7 +303,16 @@ fn run() -> Result<(), String> {
         return Ok(());
     }
 
-    let mut stage = build_stage(&a.backend, &config, &weights, range, identity)?;
+    // T2.4: one stage instance per stream (per-stream caches; the weights
+    // Arc-share inside the constructor). 1 = the single-stream runner.
+    let streams = a.streams.max(1);
+    let mut stages: Vec<Box<dyn StageCompute>> = (0..streams)
+        .map(|_| build_stage(&a.backend, &config, &weights, range, identity))
+        .collect::<Result<_, _>>()?;
+    let mut stage_refs: Vec<&mut dyn StageCompute> = stages
+        .iter_mut()
+        .map(|b| b.as_mut() as &mut dyn StageCompute)
+        .collect();
 
     match a.role.as_str() {
         "tail" => {
@@ -306,13 +327,19 @@ fn run() -> Result<(), String> {
             let (l, applied) =
                 sockopts::listen(addr, &link_opts).map_err(|e| format!("listen {addr}: {e}"))?;
             eprintln!("{}", applied_line("tail", applied));
-            eprintln!("[tail] layers [{}, {n_layer}) listening on {addr}", a.split);
+            eprintln!(
+                "[tail] layers [{}, {n_layer}) × {streams} stream(s) listening on {addr}",
+                a.split
+            );
             let (sock, peer) = l.accept().map_err(|e| format!("accept: {e}"))?;
             eprintln!("[tail] head connected from {peer}");
             let mut link = TcpTransport::new(sock, key, Direction::Upstream)
                 .map_err(|e| format!("socket: {e}"))?;
-            let steps =
-                run_tail(stage.as_mut(), &mut link, |_, _| {}).map_err(|e| e.to_string())?;
+            let steps = match streams {
+                1 => run_tail(stage_refs[0], &mut link, |_, _| {}),
+                _ => run_tail_multi(&mut stage_refs, &mut link, |_, _, _| {}),
+            }
+            .map_err(|e| e.to_string())?;
             eprintln!("[tail] served {steps} positions, clean shutdown");
         }
         _ => {
@@ -352,23 +379,62 @@ fn run() -> Result<(), String> {
                 },
                 ..HeadOptions::default()
             };
-            let r = run_head_with(stage.as_mut(), &mut link, &prompt, a.max_new, opts)
-                .map_err(|e| e.to_string())?;
-            println!("prompt: {} tokens", prompt.len());
-            println!("generated: {:?}", r.generated);
-            let ids: Vec<usize> = r.generated.iter().map(|&t| t as usize).collect();
+            let (reports, wall) = match streams {
+                1 => {
+                    let r = run_head_with(stage_refs[0], &mut link, &prompt, a.max_new, opts)
+                        .map_err(|e| e.to_string())?;
+                    (vec![r], None)
+                }
+                _ => {
+                    let reqs: Vec<MultiRequest> = (0..streams)
+                        .map(|_| MultiRequest::new(prompt.clone(), a.max_new))
+                        .collect();
+                    let t = Instant::now();
+                    let rs = run_head_multi(&mut stage_refs, &mut link, &reqs, opts)
+                        .map_err(|e| e.to_string())?;
+                    (rs, Some(t.elapsed()))
+                }
+            };
+            println!("prompt: {} tokens × {streams} stream(s)", prompt.len());
+            for (i, r) in reports.iter().enumerate() {
+                println!(
+                    "stream {i}: decode {:.2} tok/s ({} steps) prefill {:.3}s",
+                    r.decode_tok_s(),
+                    r.generated.len().saturating_sub(1),
+                    r.prefill.as_secs_f64(),
+                );
+            }
+            let first = reports.first().ok_or("no reports")?;
+            println!("generated: {:?}", first.generated);
+            let ids: Vec<usize> = first.generated.iter().map(|&t| t as usize).collect();
             println!("text: {:?}", tok.decode(&ids));
-            println!(
-                "prefill {} tok in {:.3}s · decode {:.2} tok/s ({} steps)",
-                prompt.len(),
-                r.prefill.as_secs_f64(),
-                r.decode_tok_s(),
-                r.generated.len().saturating_sub(1)
-            );
+            match wall {
+                Some(w) => {
+                    let total: usize = reports
+                        .iter()
+                        .map(|r| r.generated.len().saturating_sub(1))
+                        .sum();
+                    println!(
+                        "aggregate: {} tokens in {:.3}s = {:.2} tok/s ({} streams, wall-clock)",
+                        total,
+                        w.as_secs_f64(),
+                        total as f64 / w.as_secs_f64().max(1e-9),
+                        streams
+                    );
+                }
+                None => println!(
+                    "prefill {} tok in {:.3}s · decode {:.2} tok/s ({} steps)",
+                    prompt.len(),
+                    first.prefill.as_secs_f64(),
+                    first.decode_tok_s(),
+                    first.generated.len().saturating_sub(1)
+                ),
+            }
             if a.full_check {
                 // Free the head stage + its scoped weights first, then
                 // load the whole model for the oracle.
-                drop(stage);
+                drop(stage_refs);
+                drop(stages);
                 drop(weights);
                 let (_, full_weights) = load(&a.model, a.ctx, |c| WeightScope::full(c.n_layer))?;
                 let mut full = build_stage(
@@ -385,9 +451,11 @@ fn run() -> Result<(), String> {
                     "1-box {} oracle: {tok_s:.2} tok/s end-to-end (incl. prefill)",
                     a.backend
                 );
-                match want == r.generated {
-                    true => println!("G1 PASS: 2-host stream == 1-box stream"),
-                    false => return Err(format!("G1 FAIL: 1-box {want:?}")),
+                for (i, r) in reports.iter().enumerate() {
+                    match want == r.generated {
+                        true => println!("G1 PASS: stream {i} == 1-box stream"),
+                        false => return Err(format!("G1 FAIL: stream {i} 1-box {want:?}")),
+                    }
                 }
             }
         }
