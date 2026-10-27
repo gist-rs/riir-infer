@@ -351,11 +351,24 @@ mlx-lm on the Proposal-042 scoreboard **measured on the same two boxes**.
     reads **−1.35% median (25.52 → 25.17 tok/s), batched lower in 4/4 pairs** — real in
     sign, UNDER the 1.5% G2 bar, so attribution (pool scratch / prefill-left state) is
     not worth a rung; the production `prefill()` carries the same ~1% tax.
-- [ ] **T2.3c** Re-tune `runner::prefill_width`'s `min_batched = 64` break-even under the
+- [-] **T2.3c** Re-tune `runner::prefill_width`'s `min_batched = 64` break-even under the
   Issue-1141 posture: the per-position cost dropped more than the chunk floor (bmo, P=64:
   chunk 16 now **1.44×** 1-box / 1.16× split 32, was 0.60×) — re-measure the cost curve
   (per-position s/token vs chunk floor + s/token) and re-derive the threshold + the
   default 128 width; 2-box ABBA confirms.
+  **CURVE MEASURED + RETUNE LANDED 2026-10-28** (zed-amo-i623-t24,
+  [Bench 909](../.benchmarks/909_plan623_t23c_prefill_width_curve.md)): the grid
+  (`tests/two_stage_prefill_gpu.rs :: prefill_width_curve_grid`, amo Metal, real 27B,
+  GPU-exclusive, best-of-2 after warm-up) reads per-position **17.8 ms/tok** (was 39),
+  chunk floor ~0.49 s @ w=16 — chunking wins at EVERY measured P with the right width
+  (1.17× @ P=32 w=16, 1.35× @ P=48 single-chunk, 1.73× @ 64, 1.96× @ 96, 2.35× @ 128,
+  2.30× @ 256); w=8 always loses, w=32 is a dead zone, **the default width 128 is the
+  winner at every P ≥ 48** (evened = one whole-prompt chunk below 128). Retune:
+  `min_batched` **64 → 48** (P=48's 1.35× was on the table; P=32 stays per-position —
+  the policy width there loses 0.965×); pins extended (`prefill_width_evens…`); full
+  dist suite green post-change. **OPEN: the 2-box ABBA confirm** (the task's own
+  acceptance) — needs the binary shipped to bmo + a coordination window; the single-box
+  curve is per-stage physics, the ABBA re-weights it through the wire hop.
 - [ ] **T2.4** Micro-batch round-robin for ≥2 streams (fills the PP bubble); continuous
   batching admission; chunked prefill interleaved with decode (exo's prefill-blocks-decode
   gap).

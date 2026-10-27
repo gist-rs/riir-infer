@@ -74,9 +74,15 @@ pub struct HeadOptions {
     /// actually used is [`prefill_width`].
     pub prefill_chunk: usize,
     /// Prompts shorter than this stay per-position. A batched chunk pays a
-    /// fixed floor (measured on the M5 Ultra Metal stage, Bonsai-2 27B:
-    /// ~0.9 s + 0.018 s/token vs 0.039 s/token per position → break-even
-    /// ≈ 43 tokens), so a short prompt loses by batching.
+    /// fixed floor (re-measured on the M5 Ultra Metal stage, Bonsai-2 27B,
+    /// Issue-1141+ posture — Bench 909's grid: per-position 17.8 ms/token,
+    /// chunk floor ~0.49 s @ w=16 + 15.2 ms/token, single-chunk wall
+    /// 0.589 @ 32 / 0.629 @ 48 / 0.657 @ 64), so a short prompt loses by
+    /// batching — but only just: chunking already WINS at P = 48 (single
+    /// chunk, 1.35×) and loses at P = 32 at the width the policy picks
+    /// (0.965×), hence 48 (was 64 in the T2.3b posture, break-even ≈ 43
+    /// then; the 1141+ kernel wins more than halved the per-position cost
+    /// and moved the break-even BELOW every P the grid measured).
     pub min_batched: usize,
     /// Stop generating once this id is produced (it is kept in the
     /// output). `None` = always generate `max_new`.
@@ -87,7 +93,7 @@ impl Default for HeadOptions {
     fn default() -> Self {
         Self {
             prefill_chunk: 1,
-            min_batched: 64,
+            min_batched: 48,
             eos: None,
         }
     }
@@ -98,7 +104,10 @@ impl Default for HeadOptions {
 /// `min_batched`; else the requested chunk EVENED over the prompt
 /// (`ceil(len / ceil(len / chunk))`), so no ragged tail chunk pays the
 /// batched floor for a handful of tokens. The head sends it in `Begin`;
-/// the oracle uses the same rule.
+/// the oracle uses the same rule. (The measured width curve — Bench 909 —
+/// keeps the default requested width at 128: evened, that is a single
+/// whole-prompt chunk at P < 128 and 128-chunks above, the winner at
+/// every measured P ≥ 48.)
 pub fn prefill_width(prompt_len: usize, opts: HeadOptions) -> usize {
     let c = opts.prefill_chunk.max(1);
     match c == 1 || prompt_len < opts.min_batched.max(2) {

@@ -261,3 +261,100 @@ fn gpu_chunked_prefill_bit_identical_and_timed() {
         );
     }
 }
+
+/// Plan 623 T2.3c — the prefill_width cost curve on ONE full-range Metal
+/// stage: per-position wall vs chunked wall across (P × width), best-of-2
+/// after a warm-up of BOTH kernel sets (first-call Metal compiles would
+/// otherwise read as the chunk floor). The rows are the raw material for
+/// re-deriving `min_batched` (the per-position↔chunked break-even) and
+/// the dist bin's default width — the derivation itself lives in the
+/// bench record, not here.
+///
+/// ```sh
+/// CARGO_TARGET_DIR=/tmp/i623_dist cargo test -p riir-infer-dist --release \
+///   --features gpu,bonsai2_hadamard --test two_stage_prefill_gpu \
+///   prefill_width_curve_grid -- --ignored --nocapture
+/// ```
+#[test]
+#[ignore = "requires the Metal GPU + the Bonsai-2 PQ2_0 model; run explicitly with --release"]
+fn prefill_width_curve_grid() {
+    let model = std::env::var_os("BONSAI2_G1_MODEL")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from(FOLDED_MODEL));
+    if !model.exists() {
+        eprintln!("SKIP: model not found at {}", model.display());
+        return;
+    }
+    let ps: Vec<usize> = std::env::var("I623_CURVE_P")
+        .unwrap_or_else(|_| "32,48,64,96,128,256".into())
+        .split(',')
+        .filter_map(|v| v.trim().parse().ok())
+        .collect();
+    let ws: Vec<usize> = std::env::var("I623_CURVE_W")
+        .unwrap_or_else(|_| "8,16,32,64,128".into())
+        .split(',')
+        .filter_map(|v| v.trim().parse().ok())
+        .collect();
+    let identity = ArtifactIdentity::of_gguf(&model).expect("identity");
+    let ctx = ps.iter().max().copied().unwrap_or(256) + 8;
+    let (config, weights) = load(&model, ctx, |c| WeightScope::full(c.n_layer));
+    let n = config.n_layer as u32;
+    let mut stage = TernaryGpuStage::new(&config, weights, LayerRange::full(n), identity).unwrap();
+    let empty: [f32; 0] = [];
+
+    // Warm-up: one per-position pass + one chunked pass at the smallest
+    // P (compiles every kernel set both paths touch).
+    let warm = prompt(32);
+    for (pos, &tok) in warm.iter().enumerate() {
+        let _ = stage.step(tok, pos, &empty);
+    }
+    let mut sink = Vec::new();
+    stage.prefill_chunk(&warm, &empty, 0, warm.len(), true, &mut sink);
+    assert!(!sink.is_empty(), "warm-up produced no logits");
+
+    let timed_prefill = |stage: &mut TernaryGpuStage, p: usize, w: usize| -> f64 {
+        let toks = prompt(p);
+        // Best-of-2; position state is overwritten from 0 each pass.
+        let mut best = f64::INFINITY;
+        for _ in 0..2 {
+            let t = Instant::now();
+            match w {
+                1 => {
+                    for (pos, &tok) in toks.iter().enumerate() {
+                        let _ = stage.step(tok, pos, &empty);
+                    }
+                }
+                _ => {
+                    let mut last = Vec::new();
+                    for lo in (0..p).step_by(w) {
+                        let hi = (lo + w).min(p);
+                        let fin = hi == p;
+                        stage.prefill_chunk(&toks[lo..hi], &empty, lo, p, fin, &mut last);
+                    }
+                }
+            }
+            best = best.min(t.elapsed().as_secs_f64());
+        }
+        best
+    };
+
+    println!("P,width,wall_s,s_per_tok,note",);
+    for &p in &ps {
+        let pos_wall = timed_prefill(&mut stage, p, 1);
+        println!(
+            "{p},1,{pos_wall:.4},{:.6},per-position",
+            pos_wall / p as f64
+        );
+        for &w in &ws {
+            if w >= p * 2 {
+                continue; // a width wider than 2P is the same single chunk
+            }
+            let wall = timed_prefill(&mut stage, p, w);
+            println!(
+                "{p},{w},{wall:.4},{:.6},chunked ratio_vs_pos {:.3}",
+                wall / p as f64,
+                pos_wall / wall
+            );
+        }
+    }
+}
