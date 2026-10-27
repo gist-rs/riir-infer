@@ -1,6 +1,6 @@
 # Issue 1139 — riir-infer 1-box GPU decode on M5 Ultra is ~2.2× behind llama.cpp (Bonsai-2-27B PQ2_0)
 
-**Status:** Open (scoreboard pin) — T1, T2 (both parts) and T3 DONE 2026-10-27. Bonsai-2 PQ2_0 1-box decode on idle bmo: **37.24 → 19.45 ms/token (51.4 tok/s)** via Issue 1141 (build posture, 1.74×) + Issue 1142 (dense-pair loads-in-flight, +9.9%); Bonsai v1 at the same posture reads 16.77–16.88 (≈ llama.cpp parity). Residual vs llama.cpp's 16.4: **1.19×**, attributed to the Bonsai-2-only rotation + norm classes and routed to Issue 1143. Close when 1143 closes (win or honest negative).
+**Status:** Open (scoreboard pin) — T1, T2 (both parts) and T3 DONE 2026-10-27; Issue 1143 CLOSED 2026-10-27 (`85c4da5`). Bonsai-2 PQ2_0 1-box decode on idle bmo: **37.24 → 18.17 ms/token (55.0 tok/s)** via Issue 1141 (build posture, 1.74×) + Issue 1142 (dense-pair loads-in-flight, +9.9%) + Issue 1143 (decode norm loads-in-flight, +7.3%); Bonsai v1 at the 1142 posture read 16.77–16.88 (≈ llama.cpp parity; not re-measured after 1143, which also runs on v1's norms). Residual vs llama.cpp's 16.4: **1.11×**, routed to Issue 1144 (FWHT barrier stages). Close when 1144 closes (win or honest negative).
 
 ## Why
 
@@ -86,6 +86,28 @@ issue is the M5-Ultra scoreboard pin those rungs are scored against.
   measured an e2e LOSS on Metal). They are routed to **Issue 1143**: apply the 1142
   loads-in-flight pattern (bit-identical, no fusion) to the rotation/norm/small-grid
   GEMV kernels. No other open rung covers them; 1130/1133–1137 are closed.
+- [x] **Issue 1143 record (filed + CLOSED 2026-10-27, `85c4da5`) — loads-in-flight on the
+  remaining small-grid classes.** T1 read the kernels:
+  - **Decode norm** (`residual_add_rmsnorm_f32`, 127 of 128 norm launches, both models):
+    ONE 256-thread workgroup over dim 5120, so each lane walks 20 strided pairs, one
+    DRAM round trip at a time. This is the 1142 shape, and the strongest candidate.
+  - **FWHT forward and copy kernels:** 5–17 cubes, 4 fill loads per lane, then 10
+    `sync_cube` butterfly stages.
+  - **`gdn_out_gemv`:** the shared ternary GEMV over 5120 rows. Large grid, already at
+    v1 parity, so not a candidate.
+
+  Results:
+  - **Norm:** `residual_add_rmsnorm_f32_mlp4` hoists 4 iterations' loads ahead of the
+    unchanged fold. G1: unit `test_residual_add_rmsnorm_mlp4_bit_identity` to_bits EXACT
+    (5120, ragged 5669, 768), and the real Bonsai-2 digest `d06bffced92427cb` is unchanged
+    in every arm. G2 (idle bmo, interleaved): **19.52 → 18.17 ms/token (+7.3%, 3/3)**.
+    Depth 8 is 0.4% slower than 4 (3/3), so 4 stays. **PROMOTED DEFAULT-ON**;
+    kill-switch `RIIR_NORM_MLP=0`, harness toggle `set_norm_mlp`.
+  - **FWHT fill hoist:** bit-identical (unit test plus the CPU-oracle tests), but only
+    **+0.9% (18.21 → 18.04, 3/3)**. That is sub-bar, so it was NOT shipped and the code
+    was dropped. The rotations are bound by barrier stages, not by loads, which is routed
+    to **Issue 1144**.
+  - Both 1143 arms off read 19.59 ms/token, consistent with the 1142 baseline.
 - [x] ~~T2 (original brief)~~ superseded by T2 parts 1+2 above — Per-dispatch census on the M5 Ultra (the Issue-1132
   instrument) vs the llama.cpp Metal graph for the same token: launches/token,
   bytes moved, the top-5 kernels by wall. Name the dominant class (launch floor vs
