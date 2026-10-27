@@ -21,6 +21,10 @@ pub trait StageCompute {
     /// Width of the hidden activation crossing a stage boundary.
     fn hidden_dim(&self) -> usize;
     fn vocab_size(&self) -> usize;
+    /// Position capacity (`config.block_size` at construction): a step at
+    /// `pos >= max_positions()` refuses in the runner, never overruns a
+    /// KV row.
+    fn max_positions(&self) -> usize;
     /// Run this stage's window at `pos`. The first stage reads `token`
     /// (embedding) and ignores `input`; later stages read `input`
     /// (`hidden_dim` wide). Returns the hidden (non-last stage) or the
@@ -30,6 +34,20 @@ pub trait StageCompute {
 
 /// Arch tag for the ternary DeltaNet hybrid (Bonsai-2 family).
 pub const ARCH_QWEN35_DELTANET_TERNARY: &str = "qwen35-deltanet-ternary";
+
+/// The handshake a ternary-DeltaNet stage presents. Backend-agnostic: a
+/// CPU and a GPU stage of one artifact tile legally (the pipeline is then
+/// token-correct but not bit-identical to either 1-box backend — the G1
+/// bit bar holds per backend).
+pub fn ternary_handshake(identity: ArtifactIdentity, range: LayerRange) -> StageHandshake {
+    StageHandshake {
+        arch: ARCH_QWEN35_DELTANET_TERNARY.into(),
+        geometry_fingerprint: identity.geometry,
+        artifact_blake3: identity.artifact,
+        range,
+        dtype: FrameDtype::F32,
+    }
+}
 
 /// The two identity digests a stage handshake carries, for one artifact.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -81,13 +99,7 @@ impl TernaryCpuStage {
         let scratch = HybridForwardScratch::new(&config);
         let rope = RopeFreqTable::new(config.rope_theta, effective_rotary_dim(&config));
         let x = vec![0.0f32; config.vocab_size.max(config.n_embd)];
-        let handshake = StageHandshake {
-            arch: ARCH_QWEN35_DELTANET_TERNARY.into(),
-            geometry_fingerprint: identity.geometry,
-            artifact_blake3: identity.artifact,
-            range,
-            dtype: FrameDtype::F32,
-        };
+        let handshake = ternary_handshake(identity, range);
         Ok(Self {
             weights,
             config,
@@ -113,6 +125,9 @@ impl StageCompute for TernaryCpuStage {
     }
     fn vocab_size(&self) -> usize {
         self.config.vocab_size
+    }
+    fn max_positions(&self) -> usize {
+        self.config.block_size
     }
 
     fn step(&mut self, token: u32, pos: usize, input: &[f32]) -> &[f32] {

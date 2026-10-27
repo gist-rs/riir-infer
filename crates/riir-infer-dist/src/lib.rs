@@ -29,6 +29,8 @@
 pub mod handshake;
 pub mod runner;
 pub mod stage;
+#[cfg(feature = "gpu")]
+pub mod stage_gpu;
 pub mod transport;
 
 /// First-index strict argmax (Issue-940 determinism law: one fixed tie

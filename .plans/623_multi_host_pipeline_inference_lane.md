@@ -1,6 +1,6 @@
 # Plan 623: Multi-host inference lane — layer-range stages, activation frames, TCP→RDMA transport, TP, speculative fill
 
-**Status:** Phase 2 PoC LANDED 2026-10-27 (T2.1 + T2.2: `crates/riir-infer-dist`, D1 → (a)) — real 2-box TB5 run, CPU stages, stream bit-identical to 1-box; Phase 1 (T1.1–T1.5) LANDED 2026-10-26
+**Status:** Phase 2 PoC LANDED 2026-10-27 (T2.1 + T2.2 + T2.2b GPU stage: `crates/riir-infer-dist`, D1 → (a)) — real 2-box TB5 runs, CPU⇄CPU and GPU⇄GPU, streams bit-identical to 1-box; 1-box GPU base gap filed as Issue 1139; Phase 1 (T1.1–T1.5) LANDED 2026-10-26
 **Lease closed:** m3-idle-623t15 landed T1.5 2026-10-26 (48 h lease from the claim; the landing below is its provenance) — the amo lane's Phase-0 elephant-capture constraint does not bind the M3, which is where T1.5 executed
 + the 10-test G1 battery, all gates green (see the Phase 1 checkboxes). Phase 0 is decision-free (measurement only) and may
 start once Issue 1109 T0 (bmo reachable) is done; Phase 1 substrate is decision-free
@@ -214,10 +214,26 @@ mlx-lm on the Proposal-042 scoreboard **measured on the same two boxes**.
   elephant capture), no 1-box CPU baseline timed. bmo binary = amo `--release
   --features bonsai2_hadamard` build shipped by scp (links only libc++/libiconv/
   libSystem — no CLT needed on bmo).
-  - [ ] T2.2b the Issue-028 battery prompts with a tokenizer front (PoC used token ids);
-    GPU stage impl of `StageCompute` over the T1.5 seams (`forward_range_dispatch` +
-    `set_hidden_state`/`read_hidden_state`/`set_pos`) — the next step, needs no quiet
-    window for a correctness run.
+  - [x] T2.2b GPU stage `TernaryGpuStage` (`src/stage_gpu.rs`, feature `gpu`) over the
+    T1.5 seams (`set_pos` + `set_input_token`/`set_hidden_state` →
+    `forward_range_dispatch` → `read_logits`/`read_hidden_state`); `dist_stage --backend
+    cpu|gpu --ctx N` (one generic role loop over `Box<dyn StageCompute>`; runner refuses
+    `pos >= max_positions` on both sides). **LANDED 2026-10-27.** G1 gate
+    `tests/two_stage_g1_gpu.rs` (`#[ignore]`, real model) executed on **bmo's idle GPU**
+    (test binary shipped — no toolchain there): GPU⇄GPU over loopback TCP **bit-identical
+    to the 1-box GPU forward at k = 1, 32, 63** (19 positions each), and the GPU token
+    stream equals the CPU stream. **Real 2-box GPU run** (amo GPU head [0,32) ⇄ bmo GPU
+    tail [32,64), TB5): `--full-check` **G1 PASS**, 32 tokens, 20.3 tok/s (amo's GPU
+    was contended by the elephant capture — indicative only). Idle-bmo overhead read:
+    2-stage 26.0 vs 1-box stage path 27.2 tok/s = **~4% pipeline cost** — but the 1-box
+    base is ~0.45× llama.cpp's 60.9 on the same box → **[Issue 1139](../.issues/1139_m5_ultra_decode_gap_vs_llamacpp.md)**
+    (the T0.3 rule: file the losing-base gap first).
+  - [ ] T2.2c stage perf/capacity: (1) **range-scoped weight upload** — each GPU stage
+    still uploads the WHOLE model, so the lane buys no capacity yet (the D3 capacity
+    row depends on this); (2) tail-side on-GPU argmax (skip the ~1 MB logits download
+    per token); (3) preallocated device hidden buffer (`set_hidden_state` allocates per
+    call). Score (2)+(3) against Issue 1139 T1's production-funnel number.
+  - [ ] T2.2d the Issue-028 battery prompts with a tokenizer front (PoC used token ids).
 - [ ] **T2.3** Chunked pipelined prefill (chunk c on stage 1 while chunk c+1 on stage 0,
   double-buffered frames) + KV/GDN state lives on its own stage (no state traffic in
   steady state).

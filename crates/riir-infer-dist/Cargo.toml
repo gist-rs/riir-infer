@@ -18,6 +18,7 @@ publish = false
 [dependencies]
 riir-infer-core = { path = "../..", features = ["multi_host", "deltanet_ternary_inference"] }
 blake3 = "1"
+riir-infer-gpu = { path = "../riir-infer-gpu", optional = true, features = ["cubecl_runtime", "ternary_gemv", "multi_host"] }
 
 [dev-dependencies]
 # The shared synthetic Bonsai-2 fixture kit (tests/common/synth_bonsai2.rs)
@@ -30,6 +31,9 @@ default = []
 # The folded (Hadamard-rotated) Bonsai-2 loader — the real PQ2_0 artifact
 # needs it; the synthetic G1 fixture does not.
 bonsai2_hadamard = ["riir-infer-core/bonsai2_hadamard"]
+# The GPU stage (Metal on macOS / CubeCL elsewhere) over the T1.5 range
+# seams — TernaryGpuStage.
+gpu = ["dep:riir-infer-gpu"]
 
 [[bin]]
 name = "dist_stage"

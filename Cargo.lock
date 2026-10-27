@@ -3568,6 +3568,7 @@ dependencies = [
  "bytemuck",
  "half",
  "riir-infer-core",
+ "riir-infer-gpu",
 ]
 
 [[package]]

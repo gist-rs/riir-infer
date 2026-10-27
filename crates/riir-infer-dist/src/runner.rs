@@ -59,7 +59,7 @@ impl HeadReport {
 
 /// Head role: owns the token stream. Feeds `prompt`, then greedily
 /// generates `max_new` tokens (the tail samples; the head embeds).
-pub fn run_head<S: StageCompute, T: Transport>(
+pub fn run_head<S: StageCompute + ?Sized, T: Transport>(
     stage: &mut S,
     link: &mut T,
     prompt: &[u32],
@@ -67,6 +67,15 @@ pub fn run_head<S: StageCompute, T: Transport>(
 ) -> io::Result<HeadReport> {
     if prompt.is_empty() {
         return Err(proto("empty prompt".into()));
+    }
+    // The last generated token is never fed back, so the sequence occupies
+    // prompt + max_new - 1 positions.
+    let needed = prompt.len() + max_new.saturating_sub(1);
+    if needed > stage.max_positions() {
+        return Err(proto(format!(
+            "sequence needs {needed} positions > stage capacity {}",
+            stage.max_positions()
+        )));
     }
     let n_layer = stage.n_layer();
     let mut buf = Vec::new();
@@ -124,7 +133,7 @@ pub fn run_head<S: StageCompute, T: Transport>(
 /// Tail role: serves one head connection until `Shutdown`. `on_logits`
 /// sees every position's logits (the G1 gate captures them; the CLI
 /// passes a no-op).
-pub fn run_tail<S: StageCompute, T: Transport>(
+pub fn run_tail<S: StageCompute + ?Sized, T: Transport>(
     stage: &mut S,
     link: &mut T,
     mut on_logits: impl FnMut(usize, &[f32]),
@@ -167,6 +176,12 @@ pub fn run_tail<S: StageCompute, T: Transport>(
         if pos != steps {
             return Err(proto(format!("activation pos {pos} != expected {steps}")));
         }
+        if pos >= stage.max_positions() {
+            return Err(proto(format!(
+                "activation pos {pos} >= stage capacity {}",
+                stage.max_positions()
+            )));
+        }
         let logits = stage.step(0, pos, &hidden);
         on_logits(pos, logits);
         let id = argmax_first(logits);
@@ -177,7 +192,11 @@ pub fn run_tail<S: StageCompute, T: Transport>(
 
 /// The 1-box reference: the same greedy loop over ONE full-range stage
 /// (`LayerRange::full`), no wire. The G1 oracle for [`run_head`].
-pub fn run_local<S: StageCompute>(stage: &mut S, prompt: &[u32], max_new: usize) -> Vec<u32> {
+pub fn run_local<S: StageCompute + ?Sized>(
+    stage: &mut S,
+    prompt: &[u32],
+    max_new: usize,
+) -> Vec<u32> {
     let empty: [f32; 0] = [];
     let mut out = Vec::with_capacity(max_new);
     let mut next = 0u32;
