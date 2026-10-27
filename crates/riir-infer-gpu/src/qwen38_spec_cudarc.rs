@@ -54,6 +54,17 @@ pub struct KeyedSpecConfig {
     /// the A/B numbers, not a default.
     pub draft_top_k: Option<usize>,
     pub draft_top_p: Option<f32>,
+    /// Issue-966 premise-gate read (katgpt-rs 966: the DCOCO-class corrector
+    /// needs "the grid has the right tokens; per-slot argmax fails to select
+    /// them"). When `true`, every REWIND cycle records one event: the
+    /// committed correction token (the target's keyed sample at the first
+    /// mismatch depth — the only depth past the accepted picks whose logits
+    /// condition on the REAL accepted prefix) is ranked against the
+    /// drafter's own slot grid (the `selector_top_k` candidate set the walk
+    /// picked from). Pure observation — never touches the stream, the state,
+    /// or any decision; the read rides [`KeyedLoopStats::premise`]. The solo
+    /// loop only (the lanes variant does not record).
+    pub premise_gate: bool,
 }
 
 /// The keyed loop's telemetry (the Bench-759 `LoopStats` shape, keyed).
@@ -81,6 +92,109 @@ pub struct KeyedLoopStats {
     pub committed: usize,
     /// Mean accepted fed positions per chunk (the L_eff proxy per cycle).
     pub mean_j: f64,
+    /// The Issue-966 premise-gate read (present iff [`KeyedSpecConfig::premise_gate`]).
+    pub premise: Option<KeyedPremiseRead>,
+}
+
+/// The Issue-966 premise-gate read over one keyed-loop run (katgpt-rs 966:
+/// "the grid has the right tokens; per-slot argmax fails to select them").
+///
+/// # What is measured, and why only rewind cycles
+///
+/// On an ACCEPTED depth the committed token IS the walk's pick — trivially
+/// inside its own grid at selection rank 1; those depths carry no coverage
+/// information (they are the existing [`KeyedLoopStats::hist`]). The
+/// informative depth is the FIRST MISMATCH: its verify row conditions on the
+/// real accepted prefix (every later row conditions on tokens the serial
+/// decode never commits — counterfactual, never recorded), and the loop
+/// commits the target's own keyed sample there as the correction bonus. Each
+/// such cycle records ONE event at drafter slot `i = j-1`:
+///
+/// - `pool_hits` / `events`: the correction token ∈ the drafter's slot grid
+///   (the `selector_top_k` lm_head top-K set). This is the DCOCO pool-coverage
+///   analog; the random floor is `1/grid_k`.
+/// - `sel_rank_hist`: WHEN in-grid, the token's rank under the walk's OWN
+///   selection scores, PLAIN order (1 = the grid's top selection-score
+///   candidate; ties-earlier; the keyed pick adds the shared noise, so the
+///   pick's own plain rank may differ). A low rank = a score-order
+///   re-selector over the same grid reaches the token.
+/// - `lm_head_rank_*`: the token's vocab-wide rank in the DRAFTER's lm_head
+///   row (strictly-greater count + 1, ties-earlier) — how far outside (or
+///   inside) the grid the target's token sat, i.e. whether the miss is a
+///   GRID-SIZE miss (larger `selector_top_k` fixes it) or a SELECTION miss.
+///
+/// # Interpretation contract (pre-registered before the run)
+///
+/// Pool-hit materially above the `1/k` floor (and sel-ranks reachable, not
+/// pinned at k) ⇒ the grid-reselection premise is alive on this posture.
+/// Pool-hit ≈ floor ⇒ the class is dead HERE — the honest-negative clause
+/// closes katgpt-rs 966; the instrument survives.
+#[derive(Debug, Default)]
+pub struct KeyedPremiseRead {
+    /// The drafter's grid size (`selector_top_k`).
+    pub grid_k: usize,
+    pub n_chunks: usize,
+    pub n_rewind: usize,
+    /// Rewind cycles that produced an event (== `n_rewind`: every rewind has
+    /// a chain slot; kept explicit for cross-checking).
+    pub events: usize,
+    /// Events where the correction token was inside the slot grid.
+    pub pool_hits: usize,
+    /// Selection-rank histogram over in-grid events: index 0 unused,
+    /// `1..=grid_k` = rank under the walk's scores (ties-earlier).
+    pub sel_rank_hist: Vec<usize>,
+    /// Sum + count of the vocab-wide lm_head rank over ALL events, and the
+    /// best (smallest) rank seen (0 = no events) — the
+    /// grid-size-vs-selection split.
+    pub lm_head_rank_sum: u64,
+    pub lm_head_rank_n: u64,
+    pub lm_head_rank_best: usize,
+    /// Per-slot event / hit counts (index = drafter slot `i = j-1`).
+    pub slot_events: Vec<usize>,
+    pub slot_hits: Vec<usize>,
+}
+
+impl KeyedPremiseRead {
+    /// Pool-coverage rate over events (the DCOCO analog; random floor `1/k`).
+    pub fn pool_rate(&self) -> f64 {
+        if self.events == 0 {
+            0.0
+        } else {
+            self.pool_hits as f64 / self.events as f64
+        }
+    }
+
+    /// Mean vocab-wide lm_head rank of the correction token (all events).
+    pub fn mean_lm_head_rank(&self) -> f64 {
+        if self.lm_head_rank_n == 0 {
+            0.0
+        } else {
+            self.lm_head_rank_sum as f64 / self.lm_head_rank_n as f64
+        }
+    }
+}
+
+/// Selection rank of `token` inside the walk's slot grid under its own
+/// scores (1-based, ties-earlier — the same first-strict-max comparator the
+/// keyed walk argmaxes with). `None` = outside the grid.
+fn premise_sel_rank(scores: &[f32], candidates: &[u32], token: u32) -> Option<usize> {
+    let ki = candidates.iter().position(|&c| c == token)?;
+    let s = scores[ki];
+    // strictly-greater count + 1 == the first-index rank under ties.
+    let rank = 1 + scores.iter().filter(|&&x| x > s).count();
+    Some(rank)
+}
+
+/// Vocab-wide rank of `token` in one logits row (strictly-greater count + 1;
+/// ties resolve to the FIRST occurrence, matching `top_k_desc`'s order).
+fn premise_lm_head_rank(row: &[f32], token: u32) -> usize {
+    let t = token as usize;
+    let s = row[t];
+    1 + row
+        .iter()
+        .enumerate()
+        .filter(|&(i, &x)| x > s || (x == s && i < t))
+        .count()
 }
 
 /// The keyed spec loop. `mask_emb` is the mask token's embedding row
@@ -115,6 +229,16 @@ pub fn run_keyed_spec_loop(
         hist: vec![0usize; bs + 2],
         ..Default::default()
     };
+    if cfg.premise_gate {
+        let k = cpu.cfg.selector_top_k;
+        st.premise = Some(KeyedPremiseRead {
+            grid_k: k,
+            sel_rank_hist: vec![0usize; k + 1],
+            slot_events: vec![0usize; bs - 1],
+            slot_hits: vec![0usize; bs - 1],
+            ..Default::default()
+        });
+    }
     let t_loop = Instant::now();
     while generated.len() < n_gen {
         // ── draft: anchor embedding (device dequant) + the noise block
@@ -198,6 +322,51 @@ pub fn run_keyed_spec_loop(
             // gates pin the replay-vs-chunk bit-identity).
             gpu.verify_advance_gdn_replay(j)?;
             st.rewind_ms.push(t.elapsed().as_secs_f64() * 1e3);
+        }
+
+        // ── Issue-966 premise-gate event (observation only; see
+        //    KeyedPremiseRead). Rewind cycles only: the correction token is
+        //    the target's keyed sample at the first-mismatch depth, whose
+        //    row conditions on the REAL accepted prefix. ──
+        if j < p {
+            if let Some(pre) = st.premise.as_mut() {
+                let i = j - 1; // the drafter slot (0-based); j < p ⇒ i < chain len
+                pre.n_chunks += 1;
+                pre.n_rewind += 1;
+                pre.events += 1;
+                let (cands, sels) = (&walk.candidates[i], &walk.scores[i]);
+                let in_grid = cands.contains(&acc.bonus);
+                if in_grid {
+                    pre.pool_hits += 1;
+                    if let Some(r) = premise_sel_rank(sels, cands, acc.bonus)
+                        && r < pre.sel_rank_hist.len()
+                    {
+                        pre.sel_rank_hist[r] += 1;
+                    }
+                }
+                let lrow = &logits_n[i * vocab..(i + 1) * vocab];
+                let lr = premise_lm_head_rank(lrow, acc.bonus);
+                pre.lm_head_rank_sum += lr as u64;
+                pre.lm_head_rank_n += 1;
+                pre.lm_head_rank_best = if pre.lm_head_rank_best == 0 {
+                    lr
+                } else {
+                    pre.lm_head_rank_best.min(lr)
+                };
+                if i < pre.slot_events.len() {
+                    pre.slot_events[i] += 1;
+                    if in_grid {
+                        pre.slot_hits[i] += 1;
+                    }
+                }
+            }
+        } else if st.premise.is_some() {
+            // Full-accept cycle: no correction depth exists (the bonus sits
+            // past the block — the next cycle's anchor row). Denominators
+            // still advance so the rates stay honest.
+            if let Some(pre) = st.premise.as_mut() {
+                pre.n_chunks += 1;
+            }
         }
 
         // ── inject the accepted prefix's taps (rows 0..j-1 = positions

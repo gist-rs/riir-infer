@@ -786,7 +786,7 @@ fn bench903_fwht_rotq_variant_probe() {
             stream.memcpy_dtoh(&ascale_d, &mut a).expect("dtoh ascale");
             (o, a.iter().map(|v| v.to_bits()).collect())
         };
-        let mut drift_report = |name: &str, s: &(Vec<i8>, Vec<u32>), r: &(Vec<i8>, Vec<u32>)| {
+        let drift_report = |name: &str, s: &(Vec<i8>, Vec<u32>), r: &(Vec<i8>, Vec<u32>)| {
             let bad_o: Vec<usize> = (0..dim).filter(|&i| s.0[i] != r.0[i]).collect();
             let bad_a: Vec<usize> = (0..dim / 16).filter(|&i| s.1[i] != r.1[i]).collect();
             if bad_o.is_empty() && bad_a.is_empty() {
