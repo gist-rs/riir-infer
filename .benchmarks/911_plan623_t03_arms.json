@@ -1,0 +1,44 @@
+{
+  "bench": "911_plan623_t03_arms",
+  "plan": "623 T0.3",
+  "date": "2026-10-28",
+  "session": "zed-amo-i623-t24 (amo) / bmo via ssh",
+  "box": "bmo (Mac17,15, Apple M5 Ultra, 96 GiB, macOS 27.0.1 26A434), load 0.82-1.30 across segments, GPU-quiet gate enforced by the harness",
+  "model_gguf": "Ternary-Bonsai-2-27B-PQ2_0.gguf sha256 3907dc1658db1f78a9826bf8d5bcb8dc65db0d466388937af57f2294fae62ec1 (league pin, exact)",
+  "model_mlx_pack": "prism-ml/Ternary-Bonsai-2-27B-mlx-2bit @ fcba37d21 (2-bit affine+hadamard - quant posture DIFFERS from PQ2_0, disclosed not equalized)",
+  "harness": "scripts/plan623_t03_session.sh (one session, four selective reruns for cells; cell logs under bmo:~/t03/<ts>/cells/)",
+  "engines": {
+    "llama_cpp": "prism-b10787 bundle (Bench 900 shipment) llama-bench -ngl 99 -t 8, 5 reps",
+    "mlx": "venv /Users/katopz/git/riir-infer/.raw/mlx-env (mlx 0.32.0, mlx_lm 0.31.3), plan623_mlx_1box_bench.py",
+    "riir_infer": "dist_stage @ 3a8abae84620 (sha256 9fdae0c855b18ae5..., toolchain 1.98.1-era pin, pre 31fd00a), --backend gpu --split 32, loopback 127.0.0.1:17631, chunked prefill width 128"
+  },
+  "cells": {
+    "tg128": {
+      "llama_cpp_tps": 60.62, "llama_cpp_sd": 0.74,
+      "mlx_tps": 57.9, "mlx_ms_median": 17.268,
+      "riir_pipeline_tps": 56.65, "riir_pipeline_steps": 127,
+      "riir_oracle_tps": 52.64, "riir_oracle_note": "end-to-end incl. 4-token prefill; G1 PASS stream==oracle",
+      "ratio_ours_llama_pipeline": 0.934, "ratio_ours_llama_oracle": 0.868
+    },
+    "pp512": {
+      "llama_cpp_tps": 1087.36, "llama_cpp_sd": 1.26,
+      "mlx_tps": 1058.1, "mlx_supersedes_bench904": "904 recorded 357.3 - first-call compile cost inside a 0.48 s cell; today's post-llama.cpp warm-cache read is the clean posture (tg agrees: 57.9 vs 904's 58.1)",
+      "riir_pipeline_tps": 140.2, "riir_wall_s": 3.655,
+      "ratio_ours_llama": 0.129
+    },
+    "pp4096": {
+      "llama_cpp_tps": 1046.10, "llama_cpp_sd": 0.10,
+      "mlx_tps": 1026.1,
+      "riir_pipeline_tps": 166.9, "riir_wall_s": 24.534,
+      "ratio_ours_llama": 0.160
+    },
+    "pp32768": {
+      "llama_cpp_tps": 771.99, "llama_cpp_sd": 0.08,
+      "mlx": "REFUSED - metal::malloc 103079215104 B > max buffer 62620631040 B (stock-MLX 32k prefill N/A without chunked prefill; Bench 904 refusal reproduced in-session)",
+      "riir_pipeline_tps": 96.1, "riir_wall_s": 340.789, "riir_warm_wall_s": 340.900,
+      "ratio_ours_llama": 0.124
+    }
+  },
+  "per_frame_floor_s": {"pp512": 0.914, "pp4096": 0.767, "pp32768": 1.331},
+  "verdict": "decode competitive (0.87-0.98x), prefill LOSES 6-8x vs llama.cpp at every width - the T0.3 gap clause fires: .issues/1146_prefill_throughput_gap_1box.md"
+}

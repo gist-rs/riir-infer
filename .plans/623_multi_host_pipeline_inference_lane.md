@@ -49,24 +49,31 @@ mlx-lm on the Proposal-042 scoreboard **measured on the same two boxes**.
   ≈ 1.3–1.8% of the decode step; TP-over-TCP REFUTED arithmetically — Phase 4 stays
   RDMA-gated): [Bench 896](../.benchmarks/896_plan623_t02_link_probe.md). Tailnet arm
   DEFERRED (bmo offline); RDMA arm behind D2.**
-- [ ] **T0.3** 1-box arms for the D3 models: riir-infer Metal vs MLX vs llama.cpp Metal —
+- [x] **T0.3** 1-box arms for the D3 models: riir-infer Metal vs MLX vs llama.cpp Metal —
   decode tok/s, TTFT @4k/32k. **If riir-infer's 1-box arm loses, file the gap as its own
   issue first — the multi-host claim is meaningless on a losing single-box base.**
+  **DONE 2026-10-28 — [Bench 911](../.benchmarks/911_plan623_t03_arms.md): one bmo-idle
+  session (four selective reruns of one harness, `scripts/plan623_t03_session.sh`),
+  all three engines × {tg128, pp512, pp4096, pp32768}. Decode competitive: 56.65
+  pipeline / 52.64 oracle vs llama.cpp 60.6 (0.93×/0.87×) and MLX 57.9 (0.98×);
+  G1 PASS (oracle == stream, token-exact). Prefill LOSES 6–8× at every width
+  (140/167/96 t/s vs 1087/1046/772) → the gap clause FIRED:
+  `.issues/1146_prefill_throughput_gap_1box.md` (per-frame floor ≈ 6 ms/token,
+  decode-shaped kernels at prefill shapes — fix directions + GOAT acceptance in-issue).
+  Only-we-complete-32k: MLX REFUSED (Metal 62.6 GB buffer cap, the 904 refusal
+  reproduced), riir-infer completes at 96 t/s. MLX pp512 supersession: 1058.1 here
+  vs 904's 357.3 (904 carried first-call compile inside a 0.48 s cell; tg agrees
+  57.9 vs 58.1) — 911 is the correction of record. Session traps pinned in the
+  harness: nc -z eats the tail's single accept; --ctx must reach BOTH stages;
+  bash 3.2 comma-splitting.**
   **Row inventory 2026-10-28 (zed-amo-i623-t24 — what exists, what the closing lane
   still owes):** decode tg128 rows exist per engine but NOT under one posture: llama.cpp
   solo bmo 60.9 (Bench 900), MLX 1-box bmo 58.1 + pp512 357.3 + pp4096 1005.3 +
   pp32768 REFUSED-by-Metal (Bench 904), riir-infer idle-bmo stage-path 56.9 (Issue-1144
-  posture) + the league cells (amo, 0.978× llama.cpp at the league pin). **Owed:** one
-  bmo-idle session running all three engines through {tg128, pp512, pp4096, pp32768}
-  cells with one harness + box-state provenance (the llama.cpp bundle shipped for
-  Bench 900 and the mlx-env venv rsynced for Bench 904 should still be on bmo — verify
-  alive before trusting; our side rides the league binary or dist_stage's planner
-  probe for decode + a chunked-prefill cell for TTFT). T0.3's bmo-GPU-quiet window is
-  the only gate; no 2-box coordination needed.
+  posture) + the league cells (amo, 0.978× llama.cpp at the league pin). ~~Owed: one
+  bmo-idle session~~ DISCHARGED by Bench 911 (above).
   **⛔ MODEL SCOPE (owner, 2026-10-26): gemma-2-2b is RETIRED (riir-train Issue 617) — the
   1-box cells run on Bonsai-2-27B-PQ2_0 + qwen3.8-27B ONLY; never add a gemma-2-2b cell.**
-  **NOTE 2026-10-26: the amo 1-box Metal cells need a QUIET-GPU window — the rethink
-  elephant-panel capture holds the MPS GPU ~26 h (until ~10-27); schedule after.**
 - [-] **T0.4** 2-box incumbent arms: llama.cpp RPC (TCP; RDMA after D2), mlx
   (pack runtime; socket PP — ring p2p deadlocked, see Bench 904) + TP (ring
   collectives measured; jaccl after D2), exo. Every metric
