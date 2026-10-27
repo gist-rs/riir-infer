@@ -19,6 +19,7 @@
 //! | `fwht_rotate_forward_f32` | `rotate_forward_inplace` | every folded matmul input (sign→FWHT) |
 //! | `fwht_rotate_inverse_f32` | `rotate_inverse_inplace` | token-embedding lookup (FWHT→sign) |
 //! | `fwht_forward_copy_f32` | memcpy + forward | whole-prefill staging (the T4-ALT twin) |
+//! | `fwht_rotate_forward_f32_r4` / `fwht_forward_copy_f32_r4` | (radix-4 schedule of the two above) | Issue 1144: hblock 1024, 4 barriers instead of 11 — DEFAULT-ON, `RIIR_FWHT_R4=0` kill-switch |
 //! | `gdn_v_permute_f32` | `permute_gdn_v_grouped_inplace` | `ssm_out` input (tiled→grouped heads) |
 //! | `gdn_permute_rotate_f32` | (permute + `rotate_forward_inplace` fused) | Issue 1113 lever 1: GDN fold tail in ONE kernel |
 //! | `swiglu_rotate_fused_f32` | (the cudarc K5 twin, f32 tail) | Issue 1113 lever 1: SwiGLU + sign + FWHT in ONE kernel |
@@ -243,6 +244,224 @@ fn fwht_forward_copy_f32(src: &[f32], dst: &mut [f32], signs: &[f32], params: &[
     }
 }
 
+/// Issue 1144 — radix-4 schedule of [`fwht_rotate_forward_f32`] at hblock == 1024.
+///
+/// The incumbent runs a fill pass then 10 butterfly stages, each behind a
+/// `sync_cube` (11 barriers). Here each of the 256 threads owns one quad per
+/// pass and runs TWO stages on it in registers — the lowest pair straight
+/// from global (no fill barrier), the highest pair straight to global (no
+/// write-back barrier), the middle three ping-ponging two smem halves — so
+/// 1024 = 4^5 needs 5 passes and 4 barriers. Every element sees the
+/// same `(a ± b) * inv_sqrt2` at the same half, in the same order, from the
+/// same operands: bit-identical by construction
+/// (`fwht_radix4_matches_incumbent_bitexact` + the CPU-oracle tests).
+/// INLINE butterfly (dedup marker: fwht_butterfly_copy — radix-4 form).
+#[cfg(all(feature = "cubecl_runtime", feature = "ternary_gemv"))]
+#[allow(clippy::approx_constant)] // FRAC_1_SQRT_2 at f32 precision, literal for the cube macro
+#[cube(launch_unchecked)]
+fn fwht_rotate_forward_f32_r4(x: &mut [f32], signs: &[f32], params: &[f32]) {
+    let total = x.len() as u32;
+    let width = params[0usize] as u32;
+    // 2-D grid (see `split_grid`): rebuild the linear cube index. The
+    // launcher only selects this kernel at hblock == 1024 == 4·threads.
+    let base = (CUBE_POS_Y * CUBE_COUNT_X + CUBE_POS_X) * 1024u32;
+    if base >= total {
+        terminate!();
+    }
+    let row_off = base % width;
+    let tid = UNIT_POS;
+    let inv_sqrt2 = f32::new(0.70710678f32);
+    let mut smem = Shared::<[f32]>::new_slice(2 * MAX_FWHT_BLOCK);
+    // Contraction fence: Metal compiles with fast math, so a product that
+    // feeds the next stage's add IN A REGISTER may fuse into an fma (the
+    // incumbent never sees that — every stage round-trips smem). `select`
+    // on a runtime-true predicate (width > 0) the compiler cannot fold
+    // keeps each product a rounded f32 value.
+    let live = width > 0u32;
+    let zero = f32::new(0.0f32);
+
+    // Pass 1 (halves 1, 2): the thread's contiguous quad, straight from
+    // global — sign first, then the two lowest butterfly stages in registers.
+    let q = tid * 4u32;
+    let mut v0 = select(
+        live,
+        x[(base + q) as usize] * signs[(row_off + q) as usize],
+        zero,
+    );
+    let mut v1 = select(
+        live,
+        x[(base + q + 1u32) as usize] * signs[(row_off + q + 1u32) as usize],
+        zero,
+    );
+    let mut v2 = select(
+        live,
+        x[(base + q + 2u32) as usize] * signs[(row_off + q + 2u32) as usize],
+        zero,
+    );
+    let mut v3 = select(
+        live,
+        x[(base + q + 3u32) as usize] * signs[(row_off + q + 3u32) as usize],
+        zero,
+    );
+    let mut t0 = select(live, (v0 + v1) * inv_sqrt2, zero);
+    let mut t1 = select(live, (v0 - v1) * inv_sqrt2, zero);
+    let mut t2 = select(live, (v2 + v3) * inv_sqrt2, zero);
+    let mut t3 = select(live, (v2 - v3) * inv_sqrt2, zero);
+    smem[q as usize] = (t0 + t2) * inv_sqrt2;
+    smem[(q + 2u32) as usize] = (t0 - t2) * inv_sqrt2;
+    smem[(q + 1u32) as usize] = (t1 + t3) * inv_sqrt2;
+    smem[(q + 3u32) as usize] = (t1 - t3) * inv_sqrt2;
+    sync_cube();
+
+    // Passes 2-4 (halves 4·8, 16·32, 64·128): quad {e, e+h, e+2h, e+3h}.
+    // Ping-pong halves of `smem` (read `rd`, write `wr`), so each pass needs
+    // ONE barrier — no thread overwrites a slot another thread still reads.
+    let mut rd = 0u32;
+    let mut h = 4u32;
+    while h < 256u32 {
+        let wr = 1024u32 - rd;
+        let e = (tid / h) * (4u32 * h) + tid % h;
+        v0 = smem[(rd + e) as usize];
+        v1 = smem[(rd + e + h) as usize];
+        v2 = smem[(rd + e + 2u32 * h) as usize];
+        v3 = smem[(rd + e + 3u32 * h) as usize];
+        t0 = select(live, (v0 + v1) * inv_sqrt2, zero);
+        t1 = select(live, (v0 - v1) * inv_sqrt2, zero);
+        t2 = select(live, (v2 + v3) * inv_sqrt2, zero);
+        t3 = select(live, (v2 - v3) * inv_sqrt2, zero);
+        smem[(wr + e) as usize] = (t0 + t2) * inv_sqrt2;
+        smem[(wr + e + 2u32 * h) as usize] = (t0 - t2) * inv_sqrt2;
+        smem[(wr + e + h) as usize] = (t1 + t3) * inv_sqrt2;
+        smem[(wr + e + 3u32 * h) as usize] = (t1 - t3) * inv_sqrt2;
+        sync_cube();
+        rd = wr;
+        h = h * 4u32;
+    }
+
+    // Pass 5 (halves 256, 512): quad {tid + k·256} — straight to global.
+    v0 = smem[(rd + tid) as usize];
+    v1 = smem[(rd + tid + 256u32) as usize];
+    v2 = smem[(rd + tid + 512u32) as usize];
+    v3 = smem[(rd + tid + 768u32) as usize];
+    t0 = select(live, (v0 + v1) * inv_sqrt2, zero);
+    t1 = select(live, (v0 - v1) * inv_sqrt2, zero);
+    t2 = select(live, (v2 + v3) * inv_sqrt2, zero);
+    t3 = select(live, (v2 - v3) * inv_sqrt2, zero);
+    x[(base + tid) as usize] = (t0 + t2) * inv_sqrt2;
+    x[(base + tid + 512u32) as usize] = (t0 - t2) * inv_sqrt2;
+    x[(base + tid + 256u32) as usize] = (t1 + t3) * inv_sqrt2;
+    x[(base + tid + 768u32) as usize] = (t1 - t3) * inv_sqrt2;
+}
+
+/// Issue 1144 — radix-4 schedule of [`fwht_forward_copy_f32`] at hblock == 1024.
+///
+/// The incumbent runs a fill pass then 10 butterfly stages, each behind a
+/// `sync_cube` (11 barriers). Here each of the 256 threads owns one quad per
+/// pass and runs TWO stages on it in registers — the lowest pair straight
+/// from global (no fill barrier), the highest pair straight to global (no
+/// write-back barrier), the middle three ping-ponging two smem halves — so
+/// 1024 = 4^5 needs 5 passes and 4 barriers. Every element sees the
+/// same `(a ± b) * inv_sqrt2` at the same half, in the same order, from the
+/// same operands: bit-identical by construction
+/// (`fwht_radix4_matches_incumbent_bitexact` + the CPU-oracle tests).
+/// INLINE butterfly (dedup marker: fwht_butterfly_copy — radix-4 form).
+#[cfg(all(feature = "cubecl_runtime", feature = "ternary_gemv"))]
+#[allow(clippy::approx_constant)] // FRAC_1_SQRT_2 at f32 precision, literal for the cube macro
+#[cube(launch_unchecked)]
+fn fwht_forward_copy_f32_r4(src: &[f32], dst: &mut [f32], signs: &[f32], params: &[f32]) {
+    let total = dst.len() as u32;
+    let width = params[0usize] as u32;
+    // 2-D grid (see `split_grid`): rebuild the linear cube index. The
+    // launcher only selects this kernel at hblock == 1024 == 4·threads.
+    let base = (CUBE_POS_Y * CUBE_COUNT_X + CUBE_POS_X) * 1024u32;
+    if base >= total {
+        terminate!();
+    }
+    let row_off = base % width;
+    let tid = UNIT_POS;
+    let inv_sqrt2 = f32::new(0.70710678f32);
+    let mut smem = Shared::<[f32]>::new_slice(2 * MAX_FWHT_BLOCK);
+    // Contraction fence: Metal compiles with fast math, so a product that
+    // feeds the next stage's add IN A REGISTER may fuse into an fma (the
+    // incumbent never sees that — every stage round-trips smem). `select`
+    // on a runtime-true predicate (width > 0) the compiler cannot fold
+    // keeps each product a rounded f32 value.
+    let live = width > 0u32;
+    let zero = f32::new(0.0f32);
+
+    // Pass 1 (halves 1, 2): the thread's contiguous quad, straight from
+    // global — sign first, then the two lowest butterfly stages in registers.
+    let q = tid * 4u32;
+    let mut v0 = select(
+        live,
+        src[(base + q) as usize] * signs[(row_off + q) as usize],
+        zero,
+    );
+    let mut v1 = select(
+        live,
+        src[(base + q + 1u32) as usize] * signs[(row_off + q + 1u32) as usize],
+        zero,
+    );
+    let mut v2 = select(
+        live,
+        src[(base + q + 2u32) as usize] * signs[(row_off + q + 2u32) as usize],
+        zero,
+    );
+    let mut v3 = select(
+        live,
+        src[(base + q + 3u32) as usize] * signs[(row_off + q + 3u32) as usize],
+        zero,
+    );
+    let mut t0 = select(live, (v0 + v1) * inv_sqrt2, zero);
+    let mut t1 = select(live, (v0 - v1) * inv_sqrt2, zero);
+    let mut t2 = select(live, (v2 + v3) * inv_sqrt2, zero);
+    let mut t3 = select(live, (v2 - v3) * inv_sqrt2, zero);
+    smem[q as usize] = (t0 + t2) * inv_sqrt2;
+    smem[(q + 2u32) as usize] = (t0 - t2) * inv_sqrt2;
+    smem[(q + 1u32) as usize] = (t1 + t3) * inv_sqrt2;
+    smem[(q + 3u32) as usize] = (t1 - t3) * inv_sqrt2;
+    sync_cube();
+
+    // Passes 2-4 (halves 4·8, 16·32, 64·128): quad {e, e+h, e+2h, e+3h}.
+    // Ping-pong halves of `smem` (read `rd`, write `wr`), so each pass needs
+    // ONE barrier — no thread overwrites a slot another thread still reads.
+    let mut rd = 0u32;
+    let mut h = 4u32;
+    while h < 256u32 {
+        let wr = 1024u32 - rd;
+        let e = (tid / h) * (4u32 * h) + tid % h;
+        v0 = smem[(rd + e) as usize];
+        v1 = smem[(rd + e + h) as usize];
+        v2 = smem[(rd + e + 2u32 * h) as usize];
+        v3 = smem[(rd + e + 3u32 * h) as usize];
+        t0 = select(live, (v0 + v1) * inv_sqrt2, zero);
+        t1 = select(live, (v0 - v1) * inv_sqrt2, zero);
+        t2 = select(live, (v2 + v3) * inv_sqrt2, zero);
+        t3 = select(live, (v2 - v3) * inv_sqrt2, zero);
+        smem[(wr + e) as usize] = (t0 + t2) * inv_sqrt2;
+        smem[(wr + e + 2u32 * h) as usize] = (t0 - t2) * inv_sqrt2;
+        smem[(wr + e + h) as usize] = (t1 + t3) * inv_sqrt2;
+        smem[(wr + e + 3u32 * h) as usize] = (t1 - t3) * inv_sqrt2;
+        sync_cube();
+        rd = wr;
+        h = h * 4u32;
+    }
+
+    // Pass 5 (halves 256, 512): quad {tid + k·256} — straight to global.
+    v0 = smem[(rd + tid) as usize];
+    v1 = smem[(rd + tid + 256u32) as usize];
+    v2 = smem[(rd + tid + 512u32) as usize];
+    v3 = smem[(rd + tid + 768u32) as usize];
+    t0 = select(live, (v0 + v1) * inv_sqrt2, zero);
+    t1 = select(live, (v0 - v1) * inv_sqrt2, zero);
+    t2 = select(live, (v2 + v3) * inv_sqrt2, zero);
+    t3 = select(live, (v2 - v3) * inv_sqrt2, zero);
+    dst[(base + tid) as usize] = (t0 + t2) * inv_sqrt2;
+    dst[(base + tid + 512u32) as usize] = (t0 - t2) * inv_sqrt2;
+    dst[(base + tid + 256u32) as usize] = (t1 + t3) * inv_sqrt2;
+    dst[(base + tid + 768u32) as usize] = (t1 - t3) * inv_sqrt2;
+}
+
 /// `gdn_v_grouped` head permute, tiled `[hd, nk, rep]` → grouped
 /// `[hd, rep, nk]` (`permute_gdn_v_grouped_inplace`'s whole-head-block
 /// gather, expressed per element). `tmp` is the source copy (the caller
@@ -453,8 +672,13 @@ impl RotationCubeCL {
         let params: &[f32] = &[width as f32, hblock as f32];
         let params_handle = crate::params_cache::params_handle(client, f32::as_bytes(params));
         let n_cubes = (total / hblock.max(1)) as u32;
+        // Issue 1144: the radix-4 schedule at hblock 1024 (bit-identical).
+        let kernel = match hblock == MAX_FWHT_BLOCK && fwht_r4_enabled() {
+            true => fwht_rotate_forward_f32_r4::launch_unchecked::<R>,
+            false => fwht_rotate_forward_f32::launch_unchecked::<R>,
+        };
         unsafe {
-            fwht_rotate_forward_f32::launch_unchecked::<R>(
+            kernel(
                 client,
                 split_grid(n_cubes),
                 CubeDim::new_1d(FWHT_THREADS),
@@ -512,8 +736,13 @@ impl RotationCubeCL {
         let params: &[f32] = &[width as f32, hblock as f32];
         let params_handle = crate::params_cache::params_handle(client, f32::as_bytes(params));
         let n_cubes = (total / hblock.max(1)) as u32;
+        // Issue 1144: the radix-4 schedule at hblock 1024 (bit-identical).
+        let kernel = match hblock == MAX_FWHT_BLOCK && fwht_r4_enabled() {
+            true => fwht_forward_copy_f32_r4::launch_unchecked::<R>,
+            false => fwht_forward_copy_f32::launch_unchecked::<R>,
+        };
         unsafe {
-            fwht_forward_copy_f32::launch_unchecked::<R>(
+            kernel(
                 client,
                 split_grid(n_cubes),
                 CubeDim::new_1d(FWHT_THREADS),
@@ -655,6 +884,38 @@ fn split_grid(n: u32) -> CubeCount {
 // the fused outputs are bit-identical to the split chains, so ONLY the
 // counter proves the toggle reached the kernel)
 // ---------------------------------------------------------------------------
+
+/// Issue 1144: the forward FWHT launchers take the radix-4 kernels at
+/// hblock 1024 (bit-identical) unless `RIIR_FWHT_R4` is set to anything but
+/// 1/on/true — the `dense_pair_env_semantics` contract (unset = ON).
+/// [`set_fwht_r4`] is the harness toggle.
+#[cfg(all(feature = "cubecl_runtime", feature = "ternary_gemv"))]
+static USE_FWHT_R4: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(true);
+#[cfg(all(feature = "cubecl_runtime", feature = "ternary_gemv"))]
+static FWHT_R4_INITIALIZED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+
+#[cfg(all(feature = "cubecl_runtime", feature = "ternary_gemv"))]
+fn fwht_r4_enabled() -> bool {
+    if FWHT_R4_INITIALIZED
+        .set(crate::gemv_cubecl::dense_pair_env_semantics(std::env::var(
+            "RIIR_FWHT_R4",
+        )))
+        .is_ok()
+    {
+        USE_FWHT_R4.store(
+            FWHT_R4_INITIALIZED.get().copied().unwrap_or(true),
+            std::sync::atomic::Ordering::Relaxed,
+        );
+    }
+    USE_FWHT_R4.load(std::sync::atomic::Ordering::Relaxed)
+}
+
+/// Force the radix-4 FWHT schedule on/off (overrides `RIIR_FWHT_R4`).
+#[cfg(all(feature = "cubecl_runtime", feature = "ternary_gemv"))]
+pub fn set_fwht_r4(on: bool) {
+    let _ = FWHT_R4_INITIALIZED.set(on);
+    USE_FWHT_R4.store(on, std::sync::atomic::Ordering::Relaxed);
+}
 
 /// K3 (GDN fold tail: gather+sign+FWHT) armed: env `RIIR_GDN_PERMUTE_ROTATE_FUSED`
 /// ("1"/"on"/"true"), else OFF; [`set_gdn_permute_rotate_fused`] overrides.
@@ -993,6 +1254,90 @@ mod tests {
                 c.to_bits() == g.to_bits(),
                 "batched elem {i}: cpu {c} vs gpu {g}"
             );
+        }
+    }
+
+    /// Issue 1144 G1 — the radix-4 kernels are to_bits-equal to the
+    /// incumbents (both forward forms) at the Bonsai decode widths (5120,
+    /// 6144, 17408), a 3-row batch, and adversarial magnitudes.
+    #[test]
+    fn fwht_radix4_matches_incumbent_bitexact() {
+        let ctx = CubeCLContext::new().expect("CubeCL should initialize");
+        let client = ctx.client();
+        let hblock = MAX_FWHT_BLOCK;
+        for &(width, rows, lo, hi) in &[
+            (5120usize, 1usize, -3.0f32, 3.0f32),
+            (6144, 1, -2.0, 2.0),
+            (17408, 1, -1.0e4, 1.0e4),
+            (5120, 3, -1.0e-3, 1.0e-3),
+        ] {
+            let total = rows * width;
+            let mut lcg = Lcg(0x1144 + width as u64 + rows as u64);
+            let x: Vec<f32> = (0..total).map(|_| lcg.next_f32(lo, hi)).collect();
+            let signs: Vec<f32> = signs_vec(width, 0x5eed).iter().map(|&v| v as f32).collect();
+            let sh = client.create_from_slice(f32::as_bytes(&signs));
+            let params = [width as f32, hblock as f32];
+            let ph = client.create_from_slice(f32::as_bytes(&params));
+            let n_cubes = (total / hblock) as u32;
+            let run = |r4: bool, copy: bool| -> Vec<f32> {
+                let xh = client.create_from_slice(f32::as_bytes(&x));
+                let dh = client.empty(total * core::mem::size_of::<f32>());
+                // SAFETY: handles sized exactly above (total / width / 2 f32).
+                unsafe {
+                    let (grid, dim) = (split_grid(n_cubes), CubeDim::new_1d(FWHT_THREADS));
+                    let sa = BufferArg::from_raw_parts(sh.clone(), width);
+                    let pa = BufferArg::from_raw_parts(ph.clone(), 2);
+                    let xa = BufferArg::from_raw_parts(xh.clone(), total);
+                    match (r4, copy) {
+                        (true, true) => {
+                            fwht_forward_copy_f32_r4::launch_unchecked::<ActiveRuntime>(
+                                &client,
+                                grid,
+                                dim,
+                                xa,
+                                BufferArg::from_raw_parts(dh.clone(), total),
+                                sa,
+                                pa,
+                            )
+                        }
+                        (false, true) => fwht_forward_copy_f32::launch_unchecked::<ActiveRuntime>(
+                            &client,
+                            grid,
+                            dim,
+                            xa,
+                            BufferArg::from_raw_parts(dh.clone(), total),
+                            sa,
+                            pa,
+                        ),
+                        (true, false) => fwht_rotate_forward_f32_r4::launch_unchecked::<
+                            ActiveRuntime,
+                        >(&client, grid, dim, xa, sa, pa),
+                        (false, false) => {
+                            fwht_rotate_forward_f32::launch_unchecked::<ActiveRuntime>(
+                                &client, grid, dim, xa, sa, pa,
+                            )
+                        }
+                    }
+                }
+                let out = if copy { dh } else { xh };
+                f32::from_bytes(&client.read_one(out).expect("read")).to_vec()
+            };
+            for copy in [false, true] {
+                let a = run(false, copy);
+                let b = run(true, copy);
+                // Loud zero: the rotation must have run and changed the vector.
+                assert!(
+                    a.iter().zip(&x).any(|(p, q)| p != q),
+                    "incumbent did not run"
+                );
+                for i in 0..total {
+                    assert_eq!(
+                        a[i].to_bits(),
+                        b[i].to_bits(),
+                        "elem {i} width={width} rows={rows} copy={copy}"
+                    );
+                }
+            }
         }
     }
 
