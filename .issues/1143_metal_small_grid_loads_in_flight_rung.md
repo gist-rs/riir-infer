@@ -1,6 +1,8 @@
 # Issue 1143 — rung: loads-in-flight (the Issue-1142 pattern) for the remaining small-grid Metal decode kernels (Bonsai-2 rotations, norms, gdn_out_gemv)
 
-**Status:** Open — filed 2026-10-27 from Issue 1139 T3. Unclaimed. Bonsai-2 PQ2_0 residual vs llama.cpp: 19.45 vs 16.4 ms/token (1.19×) on idle bmo.
+**Status:** Open — filed 2026-10-27 from Issue 1139 T3. In progress. Bonsai-2 PQ2_0 residual vs llama.cpp: 19.45 vs 16.4 ms/token (1.19×) on idle bmo.
+**Claimed:** zed-amo-1143-mlp, 1793100000, expires 2026-10-29T12:00:00Z
+
 
 ## Trigger (measured, Issue 1139 T2 part 2)
 
