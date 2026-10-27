@@ -58,3 +58,18 @@ gpu = [
 [[bin]]
 name = "dist_stage"
 path = "src/bin/dist_stage.rs"
+
+# The GPU tests open with `#![cfg(feature = "gpu")]` — without these rows a
+# plain `cargo test` compiles each to an EMPTY binary and prints `ok. 0 passed`
+# (the cfg-gated green-zero class). The row makes cargo SKIP them loudly.
+[[test]]
+name = "two_stage_g1_gpu"
+required-features = ["gpu"]
+
+[[test]]
+name = "two_stage_prefill_gpu"
+required-features = ["gpu"]
+
+[[test]]
+name = "decode_readback_probe_gpu"
+required-features = ["gpu"]
