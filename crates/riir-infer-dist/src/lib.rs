@@ -16,6 +16,9 @@
 //!   counter: no unauthenticated, replayed, reordered or reflected frame
 //!   is accepted. NOT an RPC surface — the peer can only push activations
 //!   and token ids.
+//! - [`sockopts`] — [`dial`](sockopts::dial) / [`listen`](sockopts::listen):
+//!   the std-equivalent socket setup with the T2.1b knobs (`SO_SNDBUF`/
+//!   `SO_RCVBUF` sizing, named-interface bind), read-back verified.
 //! - [`stage`] — the [`StageCompute`](stage::StageCompute) seam (one layer
 //!   window of one model) + the CPU reference stage over the ternary
 //!   DeltaNet range forward. The GPU stage plugs into the same trait.
@@ -28,6 +31,7 @@
 
 pub mod handshake;
 pub mod runner;
+pub mod sockopts;
 pub mod stage;
 #[cfg(feature = "gpu")]
 pub mod stage_gpu;

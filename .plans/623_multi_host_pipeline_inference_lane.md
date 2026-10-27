@@ -1,7 +1,7 @@
 # Plan 623: Multi-host inference lane — layer-range stages, activation frames, TCP→RDMA transport, TP, speculative fill
 
 **Status:** Phase 2 PoC LANDED 2026-10-27 (T2.1 + T2.2 + T2.2b GPU stage + T2.3a pipelined prefill + T2.2c(1) range-scoped weights + T2.3b chunked batched prefill (promoted) — each stage holds only its own slice: `crates/riir-infer-dist`, D1 → (a)) — real 2-box TB5 runs, CPU⇄CPU and GPU⇄GPU, streams bit-identical to 1-box; 1-box GPU base gap filed as Issue 1139 — mostly BUILD POSTURE, fixed by Issue 1141 (dist `gpu` now carries the production decode posture + the workspace's cubecl-wgpu fork: 1-box stage decode 27.2 → 46.7 tok/s, 2-stage 26.0 → 45.2 tok/s on idle bmo; then Issue 1142's dense-pair loads-in-flight kernel, 1-box 51.4 tok/s; then Issue 1143's decode-norm loads-in-flight (`85c4da5`), 1-box 55.0 tok/s; then Issue 1144's radix-4 FWHT (`3147164`), 1-box 56.9 tok/s; residual 1.07× vs llama.cpp, attributed in Issue 1139 T4, next rung Issue 1145); Phase 1 (T1.1–T1.5) LANDED 2026-10-26
-**Claimed:** zed-amo-i623-t21b, 1793118554, expires 2026-10-29T16:29:14Z — scope: T2.1b only (SO_SNDBUF/RCVBUF sizing, named-interface bind, preallocated frame buffers); GPU cells stay unclaimed
+**Lease closed:** zed-amo-i623-t21b landed T2.1b 2026-10-27 (the landing note on the task is its provenance) — the GPU cells (T2.3c/T2.4/T2.5/T2.7) stay unclaimed
 **Lease closed:** m3-idle-623t15 landed T1.5 2026-10-26 (48 h lease from the claim; the landing below is its provenance) — the amo lane's Phase-0 elephant-capture constraint does not bind the M3, which is where T1.5 executed
 + the 10-test G1 battery, all gates green (see the Phase 1 checkboxes). Phase 0 is decision-free (measurement only) and may
 start once Issue 1109 T0 (bmo reachable) is done; Phase 1 substrate is decision-free
@@ -200,8 +200,31 @@ mlx-lm on the Proposal-042 scoreboard **measured on the same two boxes**.
   `MAX_BODY` cap), `TCP_NODELAY`, vectored writes, caller-reused recv buffer. Handshake
   wire form `handshake.rs` (LE by field) over the core `StageHandshake::verify_pair`;
   identity digests reuse `disaggregated::geometry_fingerprint` (no second fingerprint).
-  - [ ] T2.1b remaining knobs: `SO_SNDBUF/RCVBUF` sizing for prefill chunks, bind to a
-    named interface, preallocated frame rings (lands with T2.3, where they matter).
+  - [x] T2.1b remaining knobs — **LANDED 2026-10-27** (zed-amo-i623-t21b):
+    `dist/src/sockopts.rs` — `dial`/`listen`, the std-equivalent socket
+    setup with `SO_SNDBUF`/`SO_RCVBUF` sizing (read back via `getsockopt`,
+    the kernel's truth returned in `Applied`) and named-interface bind
+    (macOS `IP_BOUND_IF`/`IPV6_BOUND_IF` via `if_nametoindex`, Linux
+    `SO_BINDTODEVICE` — applied BEFORE bind/connect so the route is
+    actually pinned; unknown interface refuses `NotFound`; non-unix
+    targets fail closed on any knob). No new crates.io dep: the ~9 libc
+    symbols are `unsafe extern "C"` declarations (edition-2024).
+    CLI: `dist_stage --sock-buf BYTES` / `--iface NAME` (both roles; the
+    applied values print; hostname resolution kept — `ToSocketAddrs`,
+    std-equivalent). Frame buffers: the tail reserves its receive buffer
+    + hidden staging to `frame_bound(chunk, hidden)` right after `Begin`
+    — no mid-stream multi-MB realloc on the first chunked frame (the
+    head's send path was already `with_capacity`-sized). G1: 4 new unit
+    tests (buffer read-backs ≥ 512 KiB both sides + frames carry through
+    the MAC'd transport; `lo0`-bound listener+dial round-trip on macOS —
+    ifindex 1 read back both sides; bogus iface refuses both entry
+    points; default options == std posture) + the CPU two-stage battery
+    still 8/8 bit-identical. Clippy `-D warnings` at default +
+    `bonsai2_hadamard` postures; rustfmt clean. Honest residue: the
+    `gpu`-feature compile of the bin is cfg-neutral (edited lines ungated;
+    the next 2-box cell rebuilds that posture anyway) and the G2 benefit
+    of `--sock-buf` on 2-box prefill is UNMEASURED — that cell belongs to
+    T2.7/T2.3c's measurement lane.
 - [x] **T2.2** Two-stage runner: stage 0 = embed + layers [0,k); stage 1 = layers [k,n) +
   norm + lm_head + sampler → 4-byte token id back to stage 0. PUSH, no hub, one one-way
   hop per boundary per token. **G1:** 2-box greedy output byte-identical to 1-box over

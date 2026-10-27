@@ -30,7 +30,7 @@ use riir_infer_core::multi_host::{ActivationFrame, FrameDtype};
 use crate::argmax_first;
 use crate::handshake;
 use crate::stage::StageCompute;
-use crate::transport::{FrameKind, Transport};
+use crate::transport::{self, FrameKind, Transport};
 
 fn proto(msg: String) -> io::Error {
     io::Error::new(io::ErrorKind::InvalidData, msg)
@@ -115,6 +115,19 @@ fn keep_going(tok: u32, opts: HeadOptions) -> bool {
 /// The prompt's prefill chunks at width `w`.
 fn chunks(len: usize, w: usize) -> impl Iterator<Item = Range<usize>> {
     (0..len).step_by(w).map(move |lo| lo..(lo + w).min(len))
+}
+
+/// Wire bound of one activation frame carrying `n_rows` rows of `hidden`
+/// f32: transport header + MAC + the [`ActivationFrame`] wire prefix + the
+/// payload. The receiver reserves its buffers to this BEFORE the stream
+/// starts (T2.1b preallocated frame buffers: the first chunked frame must
+/// never be a mid-stream multi-MB realloc).
+fn frame_bound(n_rows: usize, hidden: usize) -> usize {
+    use riir_infer_core::multi_host::ActivationFrameHeader;
+    transport::HDR_LEN
+        + transport::MAC_LEN
+        + ActivationFrameHeader::WIRE_PREFIX
+        + 4 * n_rows * hidden
 }
 
 /// Head role: owns the token stream. Feeds `prompt`, then greedily
@@ -287,6 +300,12 @@ pub fn run_tail<S: StageCompute + ?Sized, T: Transport>(
             "begin: prompt_len {prompt_len}, chunk {chunk}"
         )));
     }
+    // T2.1b: the activation frames are bounded by `chunk × hidden` —
+    // preallocate the receive buffer and the hidden staging to the bound
+    // so no frame reallocs mid-stream.
+    let bound = frame_bound(chunk, hidden_dim);
+    buf.reserve(bound);
+    hidden.reserve(chunk.saturating_mul(hidden_dim));
     loop {
         let reply = match link.recv_frame_into(&mut buf)? {
             FrameKind::Shutdown => return Ok(steps),

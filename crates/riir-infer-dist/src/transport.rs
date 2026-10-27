@@ -91,8 +91,10 @@ impl FrameKind {
 /// ~MBs; anything near this is a malformed or hostile peer.
 pub const MAX_BODY: usize = 256 << 20;
 
-const HDR: usize = 4 + 1 + 8;
-const MAC: usize = 32;
+/// Frame header on the wire: body_len u32 + kind u8 + counter u64.
+pub const HDR_LEN: usize = 4 + 1 + 8;
+/// Trailing BLAKE3 MAC bytes.
+pub const MAC_LEN: usize = 32;
 
 fn invalid(msg: String) -> io::Error {
     io::Error::new(io::ErrorKind::InvalidData, msg)
@@ -145,7 +147,7 @@ impl Transport for TcpTransport {
         }
         let ctr = self.send_ctr;
         let mac = self.mac(self.send_dir, kind as u8, ctr, payload);
-        let mut hdr = [0u8; HDR];
+        let mut hdr = [0u8; HDR_LEN];
         hdr[..4].copy_from_slice(&(body as u32).to_le_bytes());
         hdr[4] = kind as u8;
         hdr[5..].copy_from_slice(&ctr.to_le_bytes());
@@ -160,7 +162,7 @@ impl Transport for TcpTransport {
     }
 
     fn recv_frame_into(&mut self, out: &mut Vec<u8>) -> io::Result<FrameKind> {
-        let mut hdr = [0u8; HDR];
+        let mut hdr = [0u8; HDR_LEN];
         self.stream.read_exact(&mut hdr)?;
         let body = u32::from_le_bytes(hdr[..4].try_into().unwrap()) as usize;
         if !(9..=MAX_BODY).contains(&body) {
@@ -171,7 +173,7 @@ impl Transport for TcpTransport {
         out.clear();
         out.resize(body - 9, 0);
         self.stream.read_exact(out)?;
-        let mut mac = [0u8; MAC];
+        let mut mac = [0u8; MAC_LEN];
         self.stream.read_exact(&mut mac)?;
         // MAC first: never interpret an unauthenticated byte (kind, counter).
         let want = self.mac(self.send_dir.flip(), kind_byte, ctr, out);

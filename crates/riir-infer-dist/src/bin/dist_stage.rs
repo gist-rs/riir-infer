@@ -19,12 +19,17 @@
 //! 4096 — prompt + max-new must fit). Each stage loads ONLY its own slice
 //! of the model (Plan 623 T2.2c); `--full-check` reloads the whole model
 //! for the oracle after the pipeline run. `--prefill-chunk N` sends the
-//! prompt in ~N-position frames through the stages' batched prefill (T2.3b;
-//! default 128 on `--backend gpu` — the measured 2-box optimum — and 1 on
-//! cpu, where chunking only forfeits the per-position overlap); the
-//! `--full-check` oracle prefills at the same width.
+//! `--prefill-chunk N` sends the prompt in ~N-position frames through the
+//! stages' batched prefill (T2.3b; default 128 on `--backend gpu` — the
+//! measured 2-box optimum — and 1 on cpu, where chunking only forfeits the
+//! per-position overlap); the `--full-check` oracle prefills at the same
+//! width. T2.1b socket knobs: `--sock-buf BYTES` sets `SO_SNDBUF`/`RCVBUF`
+//! on the stage link (read-back printed); `--iface NAME` pins the link to
+//! that interface (macOS `IP_BOUND_IF`, Linux `SO_BINDTODEVICE`) — applied
+//! before bind/connect so the route is actually pinned. Both default to
+//! std behavior (byte-identical).
 
-use std::net::{TcpListener, TcpStream};
+use std::net::ToSocketAddrs;
 use std::path::PathBuf;
 use std::process::ExitCode;
 use std::sync::Arc;
@@ -38,6 +43,7 @@ use riir_infer_core::multi_host::LayerRange;
 use riir_infer_core::tokenizer::BpeTokenizer;
 use riir_infer_core::types::Config;
 use riir_infer_dist::runner::{HeadOptions, run_head_with, run_local_with, run_tail};
+use riir_infer_dist::sockopts::{self, Applied, LinkOptions};
 use riir_infer_dist::stage::{ArtifactIdentity, StageCompute, TernaryCpuStage, stage_scope};
 #[cfg(feature = "gpu")]
 use riir_infer_dist::stage_gpu::TernaryGpuStage;
@@ -58,6 +64,8 @@ struct Args {
     text: Option<String>,
     chat: bool,
     no_eos: bool,
+    iface: Option<String>,
+    sock_buf: Option<usize>,
 }
 
 fn parse() -> Result<Args, String> {
@@ -77,6 +85,8 @@ fn parse() -> Result<Args, String> {
         text: None,
         chat: false,
         no_eos: false,
+        iface: None,
+        sock_buf: None,
     };
     while let Some(flag) = it.next() {
         let mut val = || it.next().ok_or(format!("{flag} needs a value"));
@@ -109,6 +119,10 @@ fn parse() -> Result<Args, String> {
                         .parse()
                         .map_err(|e| format!("--prefill-chunk: {e}"))?,
                 )
+            }
+            "--iface" => a.iface = Some(val()?),
+            "--sock-buf" => {
+                a.sock_buf = Some(val()?.parse().map_err(|e| format!("--sock-buf: {e}"))?)
             }
             other => return Err(format!("unknown flag {other}")),
         }
@@ -180,6 +194,21 @@ fn run() -> Result<(), String> {
     let key = PeerKey::from_hex(
         &std::env::var("RIIR_DIST_KEY").map_err(|_| "RIIR_DIST_KEY (64 hex) not set")?,
     )?;
+    let link_opts = LinkOptions {
+        sock_buf: a.sock_buf,
+        iface: a.iface.clone(),
+    };
+    let applied_line = |what: &str, ap: Applied| {
+        format!(
+            "[{what}] sock-buf snd {} rcv {}{}",
+            ap.snd,
+            ap.rcv,
+            match ap.iface {
+                Some(idx) => format!(" iface#{idx}"),
+                None => String::new(),
+            }
+        )
+    };
 
     let t = Instant::now();
     let identity = ArtifactIdentity::of_gguf(&a.model)?;
@@ -209,7 +238,16 @@ fn run() -> Result<(), String> {
     match a.role.as_str() {
         "tail" => {
             let addr = a.listen.ok_or("tail needs --listen ADDR")?;
-            let l = TcpListener::bind(&addr).map_err(|e| format!("bind {addr}: {e}"))?;
+            // std-equivalent resolution: TcpListener::bind accepted both
+            // IP literals and hostnames — keep both.
+            let addr: std::net::SocketAddr = addr
+                .to_socket_addrs()
+                .map_err(|e| format!("--listen {addr}: {e}"))?
+                .next()
+                .ok_or(format!("--listen {addr}: no address"))?;
+            let (l, applied) =
+                sockopts::listen(addr, &link_opts).map_err(|e| format!("listen {addr}: {e}"))?;
+            eprintln!("{}", applied_line("tail", applied));
             eprintln!("[tail] layers [{}, {n_layer}) listening on {addr}", a.split);
             let (sock, peer) = l.accept().map_err(|e| format!("accept: {e}"))?;
             eprintln!("[tail] head connected from {peer}");
@@ -235,7 +273,14 @@ fn run() -> Result<(), String> {
                 return Err("empty prompt after encoding".into());
             }
             let addr = a.connect.ok_or("head needs --connect ADDR")?;
-            let sock = TcpStream::connect(&addr).map_err(|e| format!("connect {addr}: {e}"))?;
+            let addr: std::net::SocketAddr = addr
+                .to_socket_addrs()
+                .map_err(|e| format!("--connect {addr}: {e}"))?
+                .next()
+                .ok_or(format!("--connect {addr}: no address"))?;
+            let (sock, applied) =
+                sockopts::dial(addr, &link_opts).map_err(|e| format!("connect {addr}: {e}"))?;
+            eprintln!("{}", applied_line("head", applied));
             let mut link = TcpTransport::new(sock, key, Direction::Downstream)
                 .map_err(|e| format!("socket: {e}"))?;
             let opts = HeadOptions {
