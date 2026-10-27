@@ -1,6 +1,6 @@
 # Plan 623: Multi-host inference lane — layer-range stages, activation frames, TCP→RDMA transport, TP, speculative fill
 
-**Status:** Phase 2 PoC LANDED 2026-10-27 (T2.1 + T2.2 + T2.2b GPU stage: `crates/riir-infer-dist`, D1 → (a)) — real 2-box TB5 runs, CPU⇄CPU and GPU⇄GPU, streams bit-identical to 1-box; 1-box GPU base gap filed as Issue 1139; Phase 1 (T1.1–T1.5) LANDED 2026-10-26
+**Status:** Phase 2 PoC LANDED 2026-10-27 (T2.1 + T2.2 + T2.2b GPU stage + T2.3a pipelined prefill + T2.2c(1) range-scoped weights — each stage holds only its own slice: `crates/riir-infer-dist`, D1 → (a)) — real 2-box TB5 runs, CPU⇄CPU and GPU⇄GPU, streams bit-identical to 1-box; 1-box GPU base gap filed as Issue 1139; Phase 1 (T1.1–T1.5) LANDED 2026-10-26
 **Lease closed:** m3-idle-623t15 landed T1.5 2026-10-26 (48 h lease from the claim; the landing below is its provenance) — the amo lane's Phase-0 elephant-capture constraint does not bind the M3, which is where T1.5 executed
 + the 10-test G1 battery, all gates green (see the Phase 1 checkboxes). Phase 0 is decision-free (measurement only) and may
 start once Issue 1109 T0 (bmo reachable) is done; Phase 1 substrate is decision-free
@@ -228,11 +228,29 @@ mlx-lm on the Proposal-042 scoreboard **measured on the same two boxes**.
     2-stage 26.0 vs 1-box stage path 27.2 tok/s = **~4% pipeline cost** — but the 1-box
     base is ~0.45× llama.cpp's 60.9 on the same box → **[Issue 1139](../.issues/1139_m5_ultra_decode_gap_vs_llamacpp.md)**
     (the T0.3 rule: file the losing-base gap first).
-  - [ ] T2.2c stage perf/capacity: (1) **range-scoped weight upload** — each GPU stage
-    still uploads the WHOLE model, so the lane buys no capacity yet (the D3 capacity
-    row depends on this); (2) tail-side on-GPU argmax (skip the ~1 MB logits download
-    per token); (3) preallocated device hidden buffer (`set_hidden_state` allocates per
-    call). Score (2)+(3) against Issue 1139 T1's production-funnel number.
+  - [x] T2.2c(1) **range-scoped weights — LANDED 2026-10-27.** `WeightScope` (core
+    `deltanet::ternary_weights`) + `load_qwen_deltanet_ternary_weights_gguf_scoped`: a
+    stage reads ONLY its layer window from the mmap (+ `wte` iff first, `final_norm` +
+    `lm_head` iff last; a tied `lm_head` still reads `token_embd`); out-of-scope layers
+    are `DeltaNetTernaryLayerWeights::empty()`. The GPU forwarder needs no new
+    constructor — empty layers upload as the existing 0-row dummies, and per-layer
+    GDN/conv/KV state is now allocated for RESIDENT layers only (a dispatch reaching a
+    skipped layer `expect`s on `None` — loud); `vram_budget` charges resident layers
+    only. Guard: `QwenDeltaNetTernaryWeights::covers(&scope)` → `require_coverage` in
+    both stage constructors (a slice handed to the wrong window refuses). Side fix:
+    `invariants_hold` precedence — a 0-row `wte` used to short-circuit the per-layer
+    check. **G1:** CPU battery 5/5 incl. the new scoped test (every split, head/tail
+    slices bit-identical, wrong-window refusal, non-vacuity asserts); GPU G1 on **bmo's
+    idle GPU, real Bonsai-2 27B, scoped per stage: bit-identical ×19 positions at
+    k = 1, 32, 63**; working set (`forward_working_set_bytes`, ctx 20) **full 7.68 GiB →
+    head 3.84 + tail 3.84 GiB at k=32** (0.46 + 7.22 at k=1). **Real 2-box GPU via
+    `dist_stage` (amo head [0,32) ⇄ bmo tail [32,64), TB5, scoped): `--full-check` G1
+    PASS**, 32 tokens, load 5.1 / 4.5 s per box, decode 18.2 tok/s (amo load ~7 —
+    indicative only). The lane now buys capacity: a model up to ~2× one box's budget
+    splits across two.
+  - [ ] T2.2c(2)+(3) stage per-token cost: tail-side on-GPU argmax (skip the ~1 MB
+    logits download per token); preallocated device hidden buffer (`set_hidden_state`
+    allocates per call). Score against Issue 1139 T1's production-funnel number.
   - [ ] T2.2d the Issue-028 battery prompts with a tokenizer front (PoC used token ids).
 - [ ] **T2.3** Chunked pipelined prefill (chunk c on stage 1 while chunk c+1 on stage 0,
   double-buffered frames) + KV/GDN state lives on its own stage (no state traffic in

@@ -276,7 +276,7 @@ pub use ternary_forward::{
     forward_qwen_deltanet_ternary_with_capture, forward_qwen_deltanet_ternary_with_hook,
 };
 #[cfg(feature = "deltanet_ternary_inference")]
-pub use ternary_weights::{DeltaNetTernaryLayerWeights, QwenDeltaNetTernaryWeights};
+pub use ternary_weights::{DeltaNetTernaryLayerWeights, QwenDeltaNetTernaryWeights, WeightScope};
 pub use weights::{DeltaNetLayerWeights, Proj, QwenDeltaNetWeights};
 // The model_backward_recompute root re-export (qwen_deltanet_model_backward_with_recomputation
 // + the 2 recompute_* fns) moved with the module to

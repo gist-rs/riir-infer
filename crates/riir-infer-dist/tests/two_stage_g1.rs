@@ -10,12 +10,12 @@ use std::net::{TcpListener, TcpStream};
 use std::sync::Arc;
 use std::thread;
 
-use riir_infer_core::deltanet::QwenDeltaNetTernaryWeights;
+use riir_infer_core::deltanet::{QwenDeltaNetTernaryWeights, WeightScope};
 use riir_infer_core::multi_host::LayerRange;
 use riir_infer_core::types::Config;
 use riir_infer_dist::argmax_first;
 use riir_infer_dist::runner::{run_head, run_local, run_tail};
-use riir_infer_dist::stage::{ArtifactIdentity, StageCompute, TernaryCpuStage};
+use riir_infer_dist::stage::{ArtifactIdentity, StageCompute, TernaryCpuStage, stage_scope};
 use riir_infer_dist::transport::{Direction, PeerKey, TcpTransport};
 
 const PROMPT: [u32; 5] = [7, 13, 42, 100, 5];
@@ -24,13 +24,22 @@ const MAX_NEW: usize = 6;
 /// `name` must be unique per call site: `write_tmp` keys on pid only, and
 /// the tests in this binary run concurrently (the shared-temp-path class).
 fn load(name: &str) -> (Config, Arc<QwenDeltaNetTernaryWeights>, ArtifactIdentity) {
+    load_scoped(name, |c| WeightScope::full(c.n_layer))
+}
+
+/// [`load`] restricted to `scope` (Plan 623 T2.2c — a stage's own slice).
+fn load_scoped(
+    name: &str,
+    scope: impl FnOnce(&Config) -> WeightScope,
+) -> (Config, Arc<QwenDeltaNetTernaryWeights>, ArtifactIdentity) {
     let bytes = synth::build_gguf(
         &synth::synth_metadata(false),
         &synth::synth_tensors_bonsai2(),
     );
     let path = synth::write_tmp(name, &bytes);
-    let (c, w) = riir_infer_core::gguf_loader::load_qwen_deltanet_ternary_weights_gguf(&path)
-        .expect("load synth");
+    let (c, w) =
+        riir_infer_core::gguf_loader::load_qwen_deltanet_ternary_weights_gguf_scoped(&path, scope)
+            .expect("load synth");
     let id = ArtifactIdentity::of_gguf(&path).expect("identity");
     let _ = std::fs::remove_file(&path);
     (c, Arc::new(w), id)
@@ -83,10 +92,25 @@ fn run_pair(
     id: ArtifactIdentity,
     tail_id: ArtifactIdentity,
 ) -> PairOutcome {
+    run_pair_split(config, w, w, k, head_key, tail_key, id, tail_id)
+}
+
+/// [`run_pair`] with a separate weights view per stage (scoped loads).
+#[allow(clippy::too_many_arguments)]
+fn run_pair_split(
+    config: &Config,
+    hw: &Arc<QwenDeltaNetTernaryWeights>,
+    tw: &Arc<QwenDeltaNetTernaryWeights>,
+    k: u32,
+    head_key: [u8; 32],
+    tail_key: [u8; 32],
+    id: ArtifactIdentity,
+    tail_id: ArtifactIdentity,
+) -> PairOutcome {
     let n = config.n_layer as u32;
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     let addr = listener.local_addr().unwrap();
-    let (tc, tw) = (config.clone(), w.clone());
+    let (tc, tw) = (config.clone(), tw.clone());
     let tail = thread::spawn(move || {
         let mut stage = TernaryCpuStage::new(tc, tw, LayerRange::new(k, n), tail_id).unwrap();
         let (sock, _) = listener.accept().unwrap();
@@ -95,7 +119,7 @@ fn run_pair(
         run_tail(&mut stage, &mut link, |_, l| seen.push(l.to_vec())).map(|s| (s, seen))
     });
     let mut stage =
-        TernaryCpuStage::new(config.clone(), w.clone(), LayerRange::new(0, k), id).unwrap();
+        TernaryCpuStage::new(config.clone(), hw.clone(), LayerRange::new(0, k), id).unwrap();
     let sock = TcpStream::connect(addr).unwrap();
     let mut link = TcpTransport::new(sock, PeerKey(head_key), Direction::Downstream).unwrap();
     let head = run_head(&mut stage, &mut link, &PROMPT, MAX_NEW).map(|r| r.generated);
@@ -124,6 +148,44 @@ fn two_stage_tcp_stream_is_bit_identical_to_one_box_every_split() {
                 "split@{k}: logits at pos {p} not bit-identical"
             );
         }
+    }
+}
+
+/// Plan 623 T2.2c — each stage loads ONLY its own slice of the model and
+/// the pipeline stays bit-identical to the full 1-box forward at every
+/// split; a slice handed to the wrong window refuses at construction.
+#[test]
+fn scoped_stage_loads_are_bit_identical_and_refuse_the_wrong_window() {
+    let (config, w, id) = load("riir_dist_g1_scoped_full");
+    let (want_toks, want_logits) = reference(&config, &w, id);
+    let n = config.n_layer as u32;
+    let key = [9u8; 32];
+    for k in 1..n {
+        let (_, hw, hid) = load_scoped(&format!("riir_dist_g1_scoped_h{k}"), |c| {
+            stage_scope(LayerRange::new(0, k), c.n_layer as u32)
+        });
+        let (_, tw, tid) = load_scoped(&format!("riir_dist_g1_scoped_t{k}"), |c| {
+            stage_scope(LayerRange::new(k, n), c.n_layer as u32)
+        });
+        assert_eq!((hid, tid), (id, id), "scoping must not move the identity");
+        // Non-vacuity: the slices really are slices.
+        assert!(hw.lm_head.rows == 0 && !hw.layers[k as usize].is_resident());
+        assert!(tw.wte.rows == 0 && !tw.layers[0].is_resident());
+        let out = run_pair_split(&config, &hw, &tw, k, key, key, id, id);
+        let toks = out.head.expect("head");
+        let (_, logits) = out.tail.expect("tail");
+        assert_eq!(toks, want_toks, "scoped split@{k}: token stream diverged");
+        for (p, (a, b)) in logits.iter().zip(&want_logits).enumerate() {
+            assert!(
+                a.iter().zip(b).all(|(x, y)| x.to_bits() == y.to_bits()),
+                "scoped split@{k}: logits at pos {p} not bit-identical"
+            );
+        }
+        // A head slice cannot serve as the tail (nor the full model).
+        let wrong = TernaryCpuStage::new(config.clone(), hw.clone(), LayerRange::new(k, n), id);
+        assert!(wrong.is_err(), "head slice accepted as tail@{k}");
+        let wrong = TernaryCpuStage::new(config.clone(), tw.clone(), LayerRange::full(n), id);
+        assert!(wrong.is_err(), "tail slice accepted as the full model@{k}");
     }
 }
 

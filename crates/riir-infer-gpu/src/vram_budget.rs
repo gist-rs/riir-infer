@@ -404,7 +404,15 @@ pub fn forward_working_set_bytes(config: &Config, weights: &QwenDeltaNetTernaryW
     } else {
         weights.layer_types.clone()
     };
-    ternary_weights_gpu_bytes(weights) + forward_activation_bytes(config, &layer_types)
+    // Plan 623 T2.2c: a scoped (pipeline-stage) load allocates per-layer
+    // state for its RESIDENT layers only — charge exactly those.
+    let resident: Vec<DeltaNetLayerType> = layer_types
+        .iter()
+        .enumerate()
+        .filter(|(i, _)| weights.layers.get(*i).is_none_or(|l| l.is_resident()))
+        .map(|(_, &t)| t)
+        .collect();
+    ternary_weights_gpu_bytes(weights) + forward_activation_bytes(config, &resident)
 }
 
 /// The budget decision. Pure over its inputs; this form exists so tests can

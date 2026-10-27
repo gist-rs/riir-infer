@@ -5,7 +5,8 @@ use std::sync::Arc;
 
 use riir_infer_core::deltanet::ternary_forward::forward_qwen_deltanet_ternary_range;
 use riir_infer_core::deltanet::{
-    HybridCache, HybridForwardScratch, QwenDeltaNetTernaryWeights, effective_rotary_dim,
+    HybridCache, HybridForwardScratch, QwenDeltaNetTernaryWeights, WeightScope,
+    effective_rotary_dim,
 };
 use riir_infer_core::disaggregated::geometry_fingerprint;
 use riir_infer_core::gguf_loader::GgufFile;
@@ -46,6 +47,31 @@ pub fn ternary_handshake(identity: ArtifactIdentity, range: LayerRange) -> Stage
         artifact_blake3: identity.artifact,
         range,
         dtype: FrameDtype::F32,
+    }
+}
+
+/// The weight scope a stage over `range` needs (Plan 623 T2.2c): its layer
+/// window, the embedding iff first, `final_norm` + `lm_head` iff last.
+/// Feed it to `load_qwen_deltanet_ternary_weights_gguf_scoped` so a stage
+/// holds only its own slice of the model.
+pub fn stage_scope(range: LayerRange, n_layer: u32) -> WeightScope {
+    WeightScope::stage(range.lo as usize, range.hi as usize, n_layer as usize)
+}
+
+/// Refuse a weights view that does not hold every tensor `range` reads —
+/// a scoped load for a different window would otherwise dispatch empty
+/// layers and compute plausible garbage.
+pub fn require_coverage(
+    weights: &QwenDeltaNetTernaryWeights,
+    range: LayerRange,
+    n_layer: u32,
+) -> Result<(), String> {
+    let scope = stage_scope(range, n_layer);
+    match weights.covers(&scope) {
+        true => Ok(()),
+        false => Err(format!(
+            "weights do not cover stage {range:?} (needs {scope:?}) — load with that scope or the full model"
+        )),
     }
 }
 
@@ -95,6 +121,7 @@ impl TernaryCpuStage {
         identity: ArtifactIdentity,
     ) -> Result<Self, String> {
         range.validate(config.n_layer as u32)?;
+        require_coverage(&weights, range, config.n_layer as u32)?;
         let cache = HybridCache::with_layer_types(&config, &weights.layer_types);
         let scratch = HybridForwardScratch::new(&config);
         let rope = RopeFreqTable::new(config.rope_theta, effective_rotary_dim(&config));

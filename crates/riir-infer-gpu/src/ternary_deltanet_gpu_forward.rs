@@ -3245,14 +3245,19 @@ impl TernaryDeltanetGpuForward {
         let zeros_vocab = vec![0.0f32; vocab];
         let logits = client.create_from_slice(f32::as_bytes(&zeros_vocab));
 
-        // Allocate per-layer persistent state
+        // Allocate per-layer persistent state — only for RESIDENT layers:
+        // a scoped (pipeline-stage) load leaves out-of-window layers empty
+        // (Plan 623 T2.2c), and their recurrent/conv/KV state would be dead
+        // residency. A dispatch that reaches a skipped layer `expect`s on
+        // the `None` handle — a loud refusal, never garbage.
+        let resident = |i: usize| weights.layers[i].is_resident();
         let state_dim = n_v_heads * head_dim * head_dim;
         let state_zeros = vec![0.0f32; state_dim];
         let conv_zeros = vec![0.0f32; conv_dim * kernel_size];
 
         let deltanet_states: Vec<Option<Handle>> = (0..config.n_layer)
             .map(|i| {
-                if layer_types[i] == DeltaNetLayerType::DeltaNet {
+                if resident(i) && layer_types[i] == DeltaNetLayerType::DeltaNet {
                     Some(client.create_from_slice(f32::as_bytes(&state_zeros)))
                 } else {
                     None
@@ -3262,7 +3267,7 @@ impl TernaryDeltanetGpuForward {
 
         let conv_states: Vec<Option<Handle>> = (0..config.n_layer)
             .map(|i| {
-                if layer_types[i] == DeltaNetLayerType::DeltaNet {
+                if resident(i) && layer_types[i] == DeltaNetLayerType::DeltaNet {
                     Some(client.create_from_slice(f32::as_bytes(&conv_zeros)))
                 } else {
                     None
@@ -3276,7 +3281,7 @@ impl TernaryDeltanetGpuForward {
         #[cfg(feature = "speculative_decode")]
         let deltanet_state_backups: Vec<Option<Handle>> = (0..config.n_layer)
             .map(|i| {
-                if layer_types[i] == DeltaNetLayerType::DeltaNet {
+                if resident(i) && layer_types[i] == DeltaNetLayerType::DeltaNet {
                     Some(client.create_from_slice(f32::as_bytes(&state_zeros)))
                 } else {
                     None
@@ -3286,7 +3291,7 @@ impl TernaryDeltanetGpuForward {
         #[cfg(feature = "speculative_decode")]
         let conv_state_backups: Vec<Option<Handle>> = (0..config.n_layer)
             .map(|i| {
-                if layer_types[i] == DeltaNetLayerType::DeltaNet {
+                if resident(i) && layer_types[i] == DeltaNetLayerType::DeltaNet {
                     Some(client.create_from_slice(f32::as_bytes(&conv_zeros)))
                 } else {
                     None
@@ -3336,9 +3341,8 @@ impl TernaryDeltanetGpuForward {
         let max_seq = config.block_size;
         let kv_cache_size = max_seq * kvd_attn;
         let kv_cache_zeros = vec![0.0f32; kv_cache_size];
-        let n_attn_layers = layer_types
-            .iter()
-            .filter(|&&t| t == DeltaNetLayerType::Attention)
+        let n_attn_layers = (0..config.n_layer)
+            .filter(|&i| resident(i) && layer_types[i] == DeltaNetLayerType::Attention)
             .count();
         // Issue 864 T2: one warn per process when the KV working set is
         // block_size-proportional AND large — the measured signature of the
@@ -3361,7 +3365,7 @@ impl TernaryDeltanetGpuForward {
         }
         let kv_key_caches: Vec<Option<Handle>> = (0..config.n_layer)
             .map(|i| {
-                if layer_types[i] == DeltaNetLayerType::Attention {
+                if resident(i) && layer_types[i] == DeltaNetLayerType::Attention {
                     Some(client.create_from_slice(f32::as_bytes(&kv_cache_zeros)))
                 } else {
                     None
@@ -3370,7 +3374,7 @@ impl TernaryDeltanetGpuForward {
             .collect();
         let kv_value_caches: Vec<Option<Handle>> = (0..config.n_layer)
             .map(|i| {
-                if layer_types[i] == DeltaNetLayerType::Attention {
+                if resident(i) && layer_types[i] == DeltaNetLayerType::Attention {
                     Some(client.create_from_slice(f32::as_bytes(&kv_cache_zeros)))
                 } else {
                     None

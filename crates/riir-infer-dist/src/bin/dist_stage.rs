@@ -13,7 +13,9 @@
 //! the 2-host token stream is byte-identical (the G1 gate, live).
 //! `--backend gpu` (build with `--features gpu`) runs the stage on the
 //! Metal/CubeCL forwarder; `--ctx N` caps the position capacity (default
-//! 4096 — prompt + max-new must fit).
+//! 4096 — prompt + max-new must fit). Each stage loads ONLY its own slice
+//! of the model (Plan 623 T2.2c); `--full-check` reloads the whole model
+//! for the oracle after the pipeline run.
 
 use std::net::{TcpListener, TcpStream};
 use std::path::PathBuf;
@@ -22,11 +24,12 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use riir_infer_core::deltanet::QwenDeltaNetTernaryWeights;
-use riir_infer_core::gguf_loader::load_qwen_deltanet_ternary_weights_gguf;
+use riir_infer_core::deltanet::WeightScope;
+use riir_infer_core::gguf_loader::load_qwen_deltanet_ternary_weights_gguf_scoped;
 use riir_infer_core::multi_host::LayerRange;
 use riir_infer_core::types::Config;
 use riir_infer_dist::runner::{run_head, run_local, run_tail};
-use riir_infer_dist::stage::{ArtifactIdentity, StageCompute, TernaryCpuStage};
+use riir_infer_dist::stage::{ArtifactIdentity, StageCompute, TernaryCpuStage, stage_scope};
 #[cfg(feature = "gpu")]
 use riir_infer_dist::stage_gpu::TernaryGpuStage;
 use riir_infer_dist::transport::{Direction, PeerKey, TcpTransport};
@@ -118,6 +121,21 @@ fn build_stage(
     }
 }
 
+/// Scoped load + the position-capacity clamp. The GPU forwarder sizes its
+/// KV to `block_size` (the Issue-994 VRAM gate refuses the loader's
+/// context-sized default); the CPU cache follows the same bound so both
+/// backends refuse identically.
+fn load(
+    model: &std::path::Path,
+    ctx: usize,
+    scope: impl FnOnce(&Config) -> WeightScope,
+) -> Result<(Config, Arc<QwenDeltaNetTernaryWeights>), String> {
+    let (mut config, weights) = load_qwen_deltanet_ternary_weights_gguf_scoped(model, scope)
+        .map_err(|e| format!("load: {e}"))?;
+    config.block_size = ctx;
+    Ok((config, Arc::new(weights)))
+}
+
 fn run() -> Result<(), String> {
     let a = parse()?;
     let key = PeerKey::from_hex(
@@ -126,28 +144,27 @@ fn run() -> Result<(), String> {
 
     let t = Instant::now();
     let identity = ArtifactIdentity::of_gguf(&a.model)?;
-    let (mut config, weights) =
-        load_qwen_deltanet_ternary_weights_gguf(&a.model).map_err(|e| format!("load: {e}"))?;
-    // Position capacity: the GPU forwarder sizes its KV to block_size (the
-    // Issue-994 VRAM gate refuses the context-sized default); the CPU
-    // cache follows the same bound so both backends refuse identically.
-    config.block_size = a.ctx;
+    let (split, head) = (a.split, a.role == "head");
+    let range_of = |n_layer: u32| match head {
+        true => LayerRange::new(0, split),
+        false => LayerRange::new(split, n_layer),
+    };
+    let (config, weights) = load(&a.model, a.ctx, |c| {
+        stage_scope(range_of(c.n_layer as u32), c.n_layer as u32)
+    })?;
     let n_layer = config.n_layer as u32;
+    let range = range_of(n_layer);
     eprintln!(
-        "[{}] loaded {} layers, n_embd {}, vocab {} in {:.1}s (backend {}, ctx {})",
+        "[{}] loaded layers [{}, {}) of {n_layer}, n_embd {}, vocab {} in {:.1}s (backend {}, ctx {})",
         a.role,
-        n_layer,
+        range.lo,
+        range.hi,
         config.n_embd,
         config.vocab_size,
         t.elapsed().as_secs_f64(),
         a.backend,
         a.ctx
     );
-    let weights = Arc::new(weights);
-    let range = match a.role.as_str() {
-        "head" => LayerRange::new(0, a.split),
-        _ => LayerRange::new(a.split, n_layer),
-    };
     let mut stage = build_stage(&a.backend, &config, &weights, range, identity)?;
 
     match a.role.as_str() {
@@ -179,13 +196,15 @@ fn run() -> Result<(), String> {
                 r.generated.len().saturating_sub(1)
             );
             if a.full_check {
-                // Free the head stage first: a GPU stage holds a full model
-                // upload, the oracle needs its own.
+                // Free the head stage + its scoped weights first, then
+                // load the whole model for the oracle.
                 drop(stage);
+                drop(weights);
+                let (_, full_weights) = load(&a.model, a.ctx, |c| WeightScope::full(c.n_layer))?;
                 let mut full = build_stage(
                     &a.backend,
                     &config,
-                    &weights,
+                    &full_weights,
                     LayerRange::full(n_layer),
                     identity,
                 )?;

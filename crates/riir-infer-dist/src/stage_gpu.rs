@@ -4,10 +4,11 @@
 //! dispatches the same kernels in the same order as the 1-box funnel, so a
 //! GPU-GPU pipeline is bit-identical to the 1-box GPU forward (T1.5 G1).
 //!
-//! PoC limits (tracked in Plan 623 T2.2c): the forwarder uploads the WHOLE
-//! model on every stage (no range-scoped weight upload yet — so the lane
-//! does not yet buy capacity), and each handoff round-trips the hidden via
-//! a host `Vec` (T1.5's documented per-call upload cost).
+//! Capacity (Plan 623 T2.2c): hand it a SCOPED load
+//! ([`crate::stage::stage_scope`]) and the forwarder uploads — and
+//! allocates recurrent/KV state for — only this stage's layers (+ embed on
+//! the first stage, `lm_head` on the last). Remaining PoC cost: each
+//! handoff round-trips the hidden via a host `Vec`.
 
 use std::sync::Arc;
 
@@ -17,7 +18,7 @@ use riir_infer_core::types::Config;
 use riir_infer_gpu::TernaryDeltanetGpuForward;
 use riir_infer_gpu::cubecl_runtime::CubeCLContext;
 
-use crate::stage::{ArtifactIdentity, StageCompute, ternary_handshake};
+use crate::stage::{ArtifactIdentity, StageCompute, require_coverage, ternary_handshake};
 
 pub struct TernaryGpuStage {
     fwd: TernaryDeltanetGpuForward,
@@ -42,6 +43,7 @@ impl TernaryGpuStage {
         identity: ArtifactIdentity,
     ) -> Result<Self, String> {
         range.validate(config.n_layer as u32)?;
+        require_coverage(&weights, range, config.n_layer as u32)?;
         let ctx = CubeCLContext::new().map_err(|e| format!("GPU init: {e:?}"))?;
         let fwd = TernaryDeltanetGpuForward::new(&ctx, config, &weights);
         Ok(Self {

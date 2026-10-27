@@ -721,6 +721,40 @@ pub struct DeltaNetTernaryLayerWeights {
 }
 
 impl DeltaNetTernaryLayerWeights {
+    /// A layer a scoped load did not materialise (Plan 623 T2.2c) — every
+    /// projection empty, every dense field empty. Distinguished from a real
+    /// layer by [`Self::is_resident`] (`input_norm` is non-empty on BOTH
+    /// layer types of every loaded layer).
+    pub fn empty() -> Self {
+        Self {
+            attn_wq: ProjWeights::empty(),
+            attn_wk: ProjWeights::empty(),
+            attn_wv: ProjWeights::empty(),
+            attn_wo: ProjWeights::empty(),
+            in_proj_qkv: ProjWeights::empty(),
+            in_proj_a: GateProjWeights::empty(),
+            in_proj_b: GateProjWeights::empty(),
+            in_proj_z: ProjWeights::empty(),
+            out_proj: ProjWeights::empty(),
+            gate_proj: ProjWeights::empty(),
+            up_proj: ProjWeights::empty(),
+            down_proj: ProjWeights::empty(),
+            attn_q_norm: Vec::new(),
+            attn_k_norm: Vec::new(),
+            conv1d_weight: Vec::new(),
+            a_log: Vec::new(),
+            dt_bias: Vec::new(),
+            linear_norm: Vec::new(),
+            input_norm: Vec::new(),
+            post_attn_norm: Vec::new(),
+        }
+    }
+
+    /// `false` for a layer a scoped load skipped ([`Self::empty`]).
+    pub fn is_resident(&self) -> bool {
+        !self.input_norm.is_empty()
+    }
+
     /// The 10 per-layer projections in forward-pass order.
     ///
     /// For a `DeltaNet` layer, the attention fields are empty (rows=0); for an
@@ -796,13 +830,70 @@ pub struct QwenDeltaNetTernaryWeights {
     pub rotation: Option<crate::deltanet::rotation::TernaryRotationConfig>,
 }
 
+/// Which slice of a model a scoped load materialises (Plan 623 T2.2c) — a
+/// pipeline stage holds only its own layer window, plus the embedding on
+/// the first stage and `final_norm` + `lm_head` on the last. Everything
+/// outside the scope is left EMPTY ([`DeltaNetTernaryLayerWeights::empty`],
+/// a 0-row `wte`/`lm_head`), so a stage's host and device residency scale
+/// with its window instead of the whole model.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct WeightScope {
+    pub layers: core::ops::Range<usize>,
+    pub embed: bool,
+    pub lm_head: bool,
+}
+
+impl WeightScope {
+    /// The whole model (the unscoped load).
+    pub fn full(n_layer: usize) -> Self {
+        Self {
+            layers: 0..n_layer,
+            embed: true,
+            lm_head: true,
+        }
+    }
+
+    /// The scope a pipeline stage running layers `[lo, hi)` needs: the
+    /// embedding iff it is the first stage, `lm_head` iff the last.
+    pub fn stage(lo: usize, hi: usize, n_layer: usize) -> Self {
+        Self {
+            layers: lo..hi,
+            embed: lo == 0,
+            lm_head: hi == n_layer,
+        }
+    }
+
+    /// Refuses an empty, inverted or out-of-bounds window.
+    pub fn validate(&self, n_layer: usize) -> Result<(), String> {
+        match self.layers.start < self.layers.end && self.layers.end <= n_layer {
+            true => Ok(()),
+            false => Err(format!(
+                "weight scope layers {:?} invalid for n_layer {n_layer}",
+                self.layers
+            )),
+        }
+    }
+}
+
 impl QwenDeltaNetTernaryWeights {
     /// G1 corruption check across every layer + the global ternary tensors.
+    /// Empty tensors (a scoped load's skipped `wte`/`lm_head`/layers) pass.
     pub fn invariants_hold(&self) -> bool {
-        self.wte.rows == 0
-            || self.wte.invariant_holds()
-                && (self.lm_head.rows == 0 || self.lm_head.invariant_holds())
-                && self.layers.iter().all(|l| l.invariants_hold())
+        (self.wte.rows == 0 || self.wte.invariant_holds())
+            && (self.lm_head.rows == 0 || self.lm_head.invariant_holds())
+            && self.layers.iter().all(|l| l.invariants_hold())
+    }
+
+    /// `true` iff every tensor `scope` needs is resident — the guard a
+    /// stage runs before it ever dispatches a scoped model: an empty layer
+    /// or a 0-row embedding would otherwise compute plausible garbage.
+    pub fn covers(&self, scope: &WeightScope) -> bool {
+        scope.layers.end <= self.layers.len()
+            && self.layers[scope.layers.clone()]
+                .iter()
+                .all(DeltaNetTernaryLayerWeights::is_resident)
+            && (!scope.embed || self.wte.rows > 0)
+            && (!scope.lm_head || (self.lm_head.rows > 0 && !self.final_norm.is_empty()))
     }
 
     /// Create zero-initialized ternary weights for testing.

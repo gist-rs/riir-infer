@@ -2211,6 +2211,23 @@ pub fn load_qwen_deltanet_ternary_weights_gguf(
     load_qwen_deltanet_ternary_from_gguf(&gguf, "")
 }
 
+/// Plan 623 T2.2c — load only the slice of the model `scope` names (a
+/// pipeline stage's layer window; see
+/// [`crate::deltanet::ternary_weights::WeightScope`]). `scope` is computed
+/// from the returned config's `n_layer`, so the caller need not parse the
+/// header first.
+#[cfg(feature = "deltanet_ternary_inference")]
+pub fn load_qwen_deltanet_ternary_weights_gguf_scoped(
+    path: &Path,
+    scope: impl FnOnce(&Config) -> crate::deltanet::ternary_weights::WeightScope,
+) -> Result<(
+    Config,
+    crate::deltanet::ternary_weights::QwenDeltaNetTernaryWeights,
+)> {
+    let gguf = GgufFile::open(path)?;
+    load_qwen_deltanet_ternary_from_gguf_scoped(&gguf, "", scope)
+}
+
 /// Plan-449 mark reader (Plan 622 Phase 7): the pp-RoPE serving table.
 ///
 /// Reads the two Plan-449 GGUF metadata marks — `*.attention.si_pprope`
@@ -2334,6 +2351,26 @@ pub fn load_qwen_deltanet_ternary_from_gguf(
     Config,
     crate::deltanet::ternary_weights::QwenDeltaNetTernaryWeights,
 )> {
+    load_qwen_deltanet_ternary_from_gguf_scoped(gguf, tensor_suffix, |c| {
+        crate::deltanet::ternary_weights::WeightScope::full(c.n_layer)
+    })
+}
+
+/// [`load_qwen_deltanet_ternary_from_gguf`] restricted to `scope` (Plan 623
+/// T2.2c): out-of-scope layers load as
+/// [`DeltaNetTernaryLayerWeights::empty`](crate::deltanet::ternary_weights::DeltaNetTernaryLayerWeights::empty),
+/// `wte` / `lm_head` as 0-row tensors when the scope does not need them.
+/// Nothing is read from the mmap for a skipped tensor, so host residency
+/// tracks the scope. The full scope is byte-identical to the unscoped load.
+#[cfg(feature = "deltanet_ternary_inference")]
+pub fn load_qwen_deltanet_ternary_from_gguf_scoped(
+    gguf: &GgufFile,
+    tensor_suffix: &str,
+    scope: impl FnOnce(&Config) -> crate::deltanet::ternary_weights::WeightScope,
+) -> Result<(
+    Config,
+    crate::deltanet::ternary_weights::QwenDeltaNetTernaryWeights,
+)> {
     use crate::deltanet::ternary_weights::{
         DeltaNetTernaryLayerWeights, GateProjWeights, ProjWeights, QwenDeltaNetTernaryWeights,
     };
@@ -2349,6 +2386,8 @@ pub fn load_qwen_deltanet_ternary_from_gguf(
 
     let (config, layer_types) = qwen35_deltanet_config_from_gguf_metadata(gguf)?;
     let n_layer = config.n_layer;
+    let scope = scope(&config);
+    scope.validate(n_layer).map_err(anyhow::Error::msg)?;
 
     // Issue 980 (T1): a file declaring prism.hadamard must be honored or
     // refused LOUDLY. Without the bonsai2_hadamard feature we cannot apply
@@ -2372,22 +2411,38 @@ pub fn load_qwen_deltanet_ternary_from_gguf(
 
     // Global weights — token_embd.weight and output.weight are Q2_0 (type 42).
     // Staying ternary saves ~10 GB vs dequantizing to f32.
-    let wte = load_ternary_proj(gguf, &sfx("token_embd.weight"))?;
-    let final_norm = gguf.dequant_f16_to_f32(&sfx("output_norm.weight"))?;
+    // A scope without them (Plan 623 T2.2c) leaves them 0-row; a tied
+    // lm_head still reads token_embd (its only source).
+    let tied = gguf.tensor_info(&sfx("output.weight")).is_none();
+    let empty_ternary = || katgpt_core::TernaryGroupWeights::new(0, 0);
+    let wte = match scope.embed || (scope.lm_head && tied) {
+        true => load_ternary_proj(gguf, &sfx("token_embd.weight"))?,
+        false => empty_ternary(),
+    };
+    let final_norm = match scope.lm_head {
+        true => gguf.dequant_f16_to_f32(&sfx("output_norm.weight"))?,
+        false => Vec::new(),
+    };
     // output.weight may be absent if tied; check before loading.
-    let lm_head = if gguf.tensor_info(&sfx("output.weight")).is_some() {
-        load_ternary_proj(gguf, &sfx("output.weight"))?
-    } else {
+    let lm_head = match (scope.lm_head, tied) {
+        (false, _) => empty_ternary(),
+        (true, false) => load_ternary_proj(gguf, &sfx("output.weight"))?,
         // Tied embeddings — clone the bit-plane layout. TernaryGroupWeights is
         // all-Vec, so this is a deep copy of the bit-planes + scales.
-        wte.clone()
+        (true, true) => wte.clone(),
+    };
+    let wte = match scope.embed {
+        true => wte,
+        false => empty_ternary(),
     };
 
     let mut layers = Vec::with_capacity(n_layer);
     for (i, lt) in layer_types.iter().enumerate() {
         let is_linear = *lt == DeltaNetLayerType::DeltaNet;
 
-        let layer = if is_linear {
+        let layer = if !scope.layers.contains(&i) {
+            DeltaNetTernaryLayerWeights::empty()
+        } else if is_linear {
             let ln = qwen35_deltanet_gguf_names(i);
 
             // Per-layer projections: ternary repack (Q2_0/PTQ1_0) or q4
