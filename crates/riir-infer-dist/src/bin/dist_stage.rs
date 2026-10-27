@@ -19,15 +19,18 @@
 //! 4096 — prompt + max-new must fit). Each stage loads ONLY its own slice
 //! of the model (Plan 623 T2.2c); `--full-check` reloads the whole model
 //! for the oracle after the pipeline run. `--prefill-chunk N` sends the
-//! `--prefill-chunk N` sends the prompt in ~N-position frames through the
-//! stages' batched prefill (T2.3b; default 128 on `--backend gpu` — the
-//! measured 2-box optimum — and 1 on cpu, where chunking only forfeits the
-//! per-position overlap); the `--full-check` oracle prefills at the same
-//! width. T2.1b socket knobs: `--sock-buf BYTES` sets `SO_SNDBUF`/`RCVBUF`
-//! on the stage link (read-back printed); `--iface NAME` pins the link to
-//! that interface (macOS `IP_BOUND_IF`, Linux `SO_BINDTODEVICE`) — applied
-//! before bind/connect so the route is actually pinned. Both default to
-//! std behavior (byte-identical).
+//! prompt in ~N-position frames through the stages' batched prefill
+//! (T2.3b; default 128 on `--backend gpu` — the measured 2-box optimum —
+//! and 1 on cpu, where chunking only forfeits the per-position overlap);
+//! the `--full-check` oracle prefills at the same width. T2.1b socket
+//! knobs: `--sock-buf BYTES` sets `SO_SNDBUF`/`RCVBUF` on the stage link
+//! (read-back printed); `--iface NAME` pins the link to that interface
+//! (macOS `IP_BOUND_IF`, Linux `SO_BINDTODEVICE`) — applied before
+//! bind/connect so the route is actually pinned. Both default to std
+//! behavior (byte-identical). T2.5 boot probe: `--plan-report 1,16,32`
+//! probes those candidate splits on THIS host (scoped loads, timed
+//! decode) and prints one JSON record line — two records + a link cost
+//! feed `planner::plan_split` (the manual `--split` always overrides).
 
 use std::net::ToSocketAddrs;
 use std::path::PathBuf;
@@ -66,6 +69,12 @@ struct Args {
     no_eos: bool,
     iface: Option<String>,
     sock_buf: Option<usize>,
+    /// T2.5 boot probe: probe these candidate splits on THIS host's
+    /// stage and print the probe record (one JSON line), then exit —
+    /// no serving. The record crosses hosts by the operator; the
+    /// planner (`riir_infer_dist::planner::plan_split`) merges two
+    /// records + the link cost into the split choice.
+    plan_report: Option<Vec<u32>>,
 }
 
 fn parse() -> Result<Args, String> {
@@ -87,6 +96,7 @@ fn parse() -> Result<Args, String> {
         no_eos: false,
         iface: None,
         sock_buf: None,
+        plan_report: None,
     };
     while let Some(flag) = it.next() {
         let mut val = || it.next().ok_or(format!("{flag} needs a value"));
@@ -123,6 +133,18 @@ fn parse() -> Result<Args, String> {
             "--iface" => a.iface = Some(val()?),
             "--sock-buf" => {
                 a.sock_buf = Some(val()?.parse().map_err(|e| format!("--sock-buf: {e}"))?)
+            }
+            "--plan-report" => {
+                a.plan_report = Some(
+                    val()?
+                        .split(',')
+                        .map(|t| {
+                            t.trim()
+                                .parse::<u32>()
+                                .map_err(|e| format!("--plan-report: {e}"))
+                        })
+                        .collect::<Result<_, _>>()?,
+                )
             }
             other => return Err(format!("unknown flag {other}")),
         }
@@ -233,6 +255,42 @@ fn run() -> Result<(), String> {
         a.backend,
         a.ctx
     );
+
+    // T2.5 boot probe: per-candidate scoped loads, timed decode, one
+    // JSON record line, exit. `k == n_layer` on the head probes the
+    // FULL range — the 1-box reference row the planner needs.
+    if let Some(splits) = &a.plan_report {
+        let steps = 8usize;
+        let rounds = 3usize;
+        let mut rows = String::new();
+        for (i, &k) in splits.iter().enumerate() {
+            if k == 0 || k > n_layer {
+                return Err(format!("--plan-report: split {k} outside 1..={n_layer}"));
+            }
+            let cand = match head {
+                true => LayerRange::new(0, k),
+                false => LayerRange::new(k, n_layer),
+            };
+            let (c2, w2) = load(&a.model, a.ctx, |c| stage_scope(cand, c.n_layer as u32))?;
+            let mut st = build_stage(&a.backend, &c2, &w2, cand, identity)?;
+            let spt = riir_infer_dist::planner::probe_decode_spt(st.as_mut(), 0, steps, rounds)
+                .map_err(|e| format!("probe split {k}: {e}"))?;
+            if i > 0 {
+                rows.push(',');
+            }
+            rows.push_str(&format!("[{k},{spt:.6}]"));
+            eprintln!(
+                "[plan] {} split {k}: {spt:.6} s/tok (decode, {steps}x{rounds})",
+                a.role
+            );
+        }
+        println!(
+            "{{\"host\":\"{}\",\"n_layer\":{},\"hidden\":{},\"rows\":[{rows}]}}",
+            a.role, n_layer, config.n_embd
+        );
+        return Ok(());
+    }
+
     let mut stage = build_stage(&a.backend, &config, &weights, range, identity)?;
 
     match a.role.as_str() {

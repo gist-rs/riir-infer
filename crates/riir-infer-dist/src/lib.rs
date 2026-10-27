@@ -25,11 +25,17 @@
 //! - [`runner`] — the head loop (owns the token stream) and the tail
 //!   serve loop (owns the sampler).
 //!
+//! - [`planner`] — the split planner (T2.5): per-host boot probes
+//!   ([`planner::probe_decode_spt`]) merge into the chosen split through
+//!   the pure [`planner::plan_split`] (max stage time + link hop; the
+//!   memory axis refuses before timing; manual `--split` overrides).
+//!
 //! Correctness posture (G1): f32 activations on the wire, greedy
 //! first-index argmax on the tail — the 2-stage token stream is
 //! byte-identical to the 1-box forward (`tests/two_stage_g1.rs`).
 
 pub mod handshake;
+pub mod planner;
 pub mod runner;
 pub mod sockopts;
 pub mod stage;

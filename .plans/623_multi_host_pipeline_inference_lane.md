@@ -2,7 +2,7 @@
 
 **Status:** Phase 2 PoC LANDED 2026-10-27 (T2.1 + T2.2 + T2.2b GPU stage + T2.3a pipelined prefill + T2.2c(1) range-scoped weights + T2.3b chunked batched prefill (promoted) — each stage holds only its own slice: `crates/riir-infer-dist`, D1 → (a)) — real 2-box TB5 runs, CPU⇄CPU and GPU⇄GPU, streams bit-identical to 1-box; 1-box GPU base gap filed as Issue 1139 — mostly BUILD POSTURE, fixed by Issue 1141 (dist `gpu` now carries the production decode posture + the workspace's cubecl-wgpu fork: 1-box stage decode 27.2 → 46.7 tok/s, 2-stage 26.0 → 45.2 tok/s on idle bmo; then Issue 1142's dense-pair loads-in-flight kernel, 1-box 51.4 tok/s; then Issue 1143's decode-norm loads-in-flight (`85c4da5`), 1-box 55.0 tok/s; then Issue 1144's radix-4 FWHT (`3147164`), 1-box 56.9 tok/s; residual 1.07× vs llama.cpp, attributed in Issue 1139 T4, next rung Issue 1145); Phase 1 (T1.1–T1.5) LANDED 2026-10-26
 **Lease closed:** zed-amo-i623-t21b landed T2.1b 2026-10-27 (the landing note on the task is its provenance) — the GPU cells (T2.3c/T2.4/T2.5/T2.7) stay unclaimed
-**Claimed:** zed-amo-i623-t21b, 1793119900, expires 2026-10-29T17:18:20Z — scope: T2.5 only (the split planner); T2.3c/T2.4/T2.7 cells stay unclaimed
+**Lease closed:** zed-amo-i623-t21b landed T2.5 2026-10-27 (the landing note on the task is its provenance; T2.1b's lease closed the same day, `00a8858`) — T2.3c/T2.4/T2.7 cells stay unclaimed
 **Lease closed:** m3-idle-623t15 landed T1.5 2026-10-26 (48 h lease from the claim; the landing below is its provenance) — the amo lane's Phase-0 elephant-capture constraint does not bind the M3, which is where T1.5 executed
 + the 10-test G1 battery, all gates green (see the Phase 1 checkboxes). Phase 0 is decision-free (measurement only) and may
 start once Issue 1109 T0 (bmo reachable) is done; Phase 1 substrate is decision-free
@@ -358,8 +358,29 @@ mlx-lm on the Proposal-042 scoreboard **measured on the same two boxes**.
 - [ ] **T2.4** Micro-batch round-robin for ≥2 streams (fills the PP bubble); continuous
   batching admission; chunked prefill interleaved with decode (exo's prefill-blocks-decode
   gap).
-- [ ] **T2.5** Planner: boot probe of per-layer cost per host (prefill + decode) and link
+- [x] **T2.5** Planner: boot probe of per-layer cost per host (prefill + decode) and link
   RTT/bw (T0.2 code), split to equalise stage time under memory; manual override.
+  **LANDED 2026-10-27** (zed-amo-i623-t21b) at SPLIT granularity (the honest PoC
+  scope — per-LAYER hooks would touch the contended forwarder internals; candidate
+  splits are what the cells measure anyway): `dist/src/planner.rs` —
+  `probe_decode_spt` (timed decode on any `StageCompute`: warm-up + best-of-rounds
+  median, capacity-refusing, logits-wide last stages safe) + `plan_split` (pure:
+  per-token time at k = `max(head, tail) + hop`; hop = RTT + activation_bytes/bw —
+  matches the T2.6 measured rows: TB5 +6 ms decode ≈ its RTT; memory axis runs
+  BEFORE timing — head needs k layers of state, tail n_layer−k, either host
+  over-budget refuses the candidate; a broken probe row (non-finite/≤0/out-of-range
+  k) refuses, never trusted) + `LinkCost`/`HostProbe`/`SplitPlan` records.
+  Bin: `dist_stage --plan-report 1,16,32,64` — per-candidate SCOPED loads, timed
+  decode, one JSON record line (`host`/`n_layer`/`hidden`/rows), exit; the head's
+  `k == n_layer` row IS the 1-box reference the T2.7 scoreboard needs. Two records
+  + a link cost cross by operator/file; `--split N` stays the manual override and
+  never consults the planner. G1: 5 planner unit tests (equaliser choice, RTT
+  floor, both-host memory refusals, no-common-candidate, broken rows) + 2 e2e
+  tests (`tests/planner_probe.rs`: real CPU-stage probes → plan → the formula
+  exact; capacity/zero-step refusals). Clippy `-D warnings`, rustfmt clean,
+  full dist suite 9+2+8 green. Honest residue: the automatic two-host probe
+  EXCHANGE (wire step) is T2.4's territory (the multi-stream protocol work);
+  real-box probe cells (GPU postures) are T2.7's measurement lane.
 - [x] **T2.6** Tailscale posture: the same runner over the tailnet address; a measured row
   (the WAN/fallback lane exo cannot do — multicast discovery).
   **MEASURED 2026-10-27** — the unchanged `dist_stage` (no code change: the transport
