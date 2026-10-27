@@ -428,8 +428,18 @@ mlx-lm on the Proposal-042 scoreboard **measured on the same two boxes**.
   activation→token round trip per decode step at the tailnet RTT). The WAN lane works
   and costs exactly its RTT on decode; the per-token round trip is the lever (T2.4's
   micro-batching / a speculative fill hide it).
-- [ ] **T2.7** G2 scoreboard rows (Phase-0 harness, same models): PP overhead vs 1-box;
+- [x] **T2.7** G2 scoreboard rows (Phase-0 harness, same models): PP overhead vs 1-box;
   vs llama.cpp RPC-TCP, mlx-lm ring PP, exo PP-ring. `.benchmarks/` record.
+  **DONE 2026-10-28** (zed-amo-i623-t24,
+  [Bench 910](../.benchmarks/910_plan623_t27_scoreboard.md)): the scoreboard assembled
+  from the measured rows — our PP s1 46–48 t/s (≈ −15% vs the Issue-1144 1-box 56.9),
+  **s2 aggregate 109.5 t/s = 2.37× s1 (saturated at s3)** — vs llama.cpp-RPC 2-box
+  −20% (Bench 900), mlx-socket PP −26% (Bench 904), mlx ring DEADLOCKED at 2 nodes
+  (0.32.0), exo BLOCKED on the PQ2_0 weight format (Phase 0 note, unchanged). Verdict:
+  single-stream PP loses 15–26% on EVERY family that measured it; round-robin
+  multi-stream is the differentiator and no opponent row measures ≥2 streams (honest
+  cross-family comparison stays at s1). Scope: the s2/s3 cells are duplicated-request
+  rows (the T2.4 admission is the static table).
 
 ## Phase 3 — RDMA transport (needs D2)
 
