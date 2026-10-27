@@ -157,6 +157,126 @@ fn gemv_plane_f32_pair(
     }
 }
 
+/// Issue 1142 — [`gemv_plane_f32_pair`] with 8 loads in flight per lane.
+///
+/// The pair launches only `2m` planes (96 at m=48) over n=5120, so each lane
+/// walks ~160 strided loads one at a time and the launch is load-LATENCY
+/// bound (~52 µs per launch on the M5 Ultra ≈ 160 × a DRAM round trip). This
+/// variant issues the next eight strided loads before folding them, then
+/// folds them into `partial` in the SAME k order with the SAME `+=` — every
+/// lane's accumulation sequence is unchanged, so the result is bit-identical
+/// to the incumbent by construction (logits-stream digest equal, real
+/// Bonsai-2). Depth measured on idle bmo: 4 → +8.3%, 8 → +10.0%, 16 → +0.75%
+/// over 8 (sub-bar). DEFAULT-ON; kill-switch `RIIR_DENSE_PAIR_MLP=0` (see `set_dense_pair_mlp`).
+#[cfg(feature = "cubecl_runtime")]
+#[cfg_attr(
+    feature = "gemv_fma_contract",
+    cube(launch_unchecked, fast_math = FastMath::AllowContraction.into())
+)]
+#[cfg_attr(not(feature = "gemv_fma_contract"), cube(launch_unchecked))]
+fn gemv_plane_f32_pair_mlp8(
+    weight_a: &[f32],
+    weight_b: &[f32],
+    input: &[f32],
+    output_a: &mut [f32],
+    output_b: &mut [f32],
+) {
+    let n = input.len() as u32;
+    let m_a = output_a.len() as u32;
+    let m_total = m_a + output_b.len() as u32;
+
+    let row = ABSOLUTE_POS_X / PLANE_DIM;
+    let lane = UNIT_POS_PLANE;
+
+    if row >= m_total {
+        terminate!();
+    }
+
+    let is_a = row < m_a;
+    let local_row = if is_a { row } else { row - m_a };
+    let row_offset = local_row * n;
+    let stride8 = PLANE_DIM * 8;
+
+    let mut partial = f32::new(0.0f32);
+
+    let mut k = lane;
+    if is_a {
+        while k + 7 * PLANE_DIM < n {
+            let w0 = weight_a[(row_offset + k + 0 * PLANE_DIM) as usize];
+            let w1 = weight_a[(row_offset + k + 1 * PLANE_DIM) as usize];
+            let w2 = weight_a[(row_offset + k + 2 * PLANE_DIM) as usize];
+            let w3 = weight_a[(row_offset + k + 3 * PLANE_DIM) as usize];
+            let w4 = weight_a[(row_offset + k + 4 * PLANE_DIM) as usize];
+            let w5 = weight_a[(row_offset + k + 5 * PLANE_DIM) as usize];
+            let w6 = weight_a[(row_offset + k + 6 * PLANE_DIM) as usize];
+            let w7 = weight_a[(row_offset + k + 7 * PLANE_DIM) as usize];
+            let x0 = input[(k + 0 * PLANE_DIM) as usize];
+            let x1 = input[(k + 1 * PLANE_DIM) as usize];
+            let x2 = input[(k + 2 * PLANE_DIM) as usize];
+            let x3 = input[(k + 3 * PLANE_DIM) as usize];
+            let x4 = input[(k + 4 * PLANE_DIM) as usize];
+            let x5 = input[(k + 5 * PLANE_DIM) as usize];
+            let x6 = input[(k + 6 * PLANE_DIM) as usize];
+            let x7 = input[(k + 7 * PLANE_DIM) as usize];
+            partial += w0 * x0;
+            partial += w1 * x1;
+            partial += w2 * x2;
+            partial += w3 * x3;
+            partial += w4 * x4;
+            partial += w5 * x5;
+            partial += w6 * x6;
+            partial += w7 * x7;
+            k += stride8;
+        }
+        while k < n {
+            partial += weight_a[(row_offset + k) as usize] * input[k as usize];
+            k += PLANE_DIM;
+        }
+    } else {
+        while k + 7 * PLANE_DIM < n {
+            let w0 = weight_b[(row_offset + k + 0 * PLANE_DIM) as usize];
+            let w1 = weight_b[(row_offset + k + 1 * PLANE_DIM) as usize];
+            let w2 = weight_b[(row_offset + k + 2 * PLANE_DIM) as usize];
+            let w3 = weight_b[(row_offset + k + 3 * PLANE_DIM) as usize];
+            let w4 = weight_b[(row_offset + k + 4 * PLANE_DIM) as usize];
+            let w5 = weight_b[(row_offset + k + 5 * PLANE_DIM) as usize];
+            let w6 = weight_b[(row_offset + k + 6 * PLANE_DIM) as usize];
+            let w7 = weight_b[(row_offset + k + 7 * PLANE_DIM) as usize];
+            let x0 = input[(k + 0 * PLANE_DIM) as usize];
+            let x1 = input[(k + 1 * PLANE_DIM) as usize];
+            let x2 = input[(k + 2 * PLANE_DIM) as usize];
+            let x3 = input[(k + 3 * PLANE_DIM) as usize];
+            let x4 = input[(k + 4 * PLANE_DIM) as usize];
+            let x5 = input[(k + 5 * PLANE_DIM) as usize];
+            let x6 = input[(k + 6 * PLANE_DIM) as usize];
+            let x7 = input[(k + 7 * PLANE_DIM) as usize];
+            partial += w0 * x0;
+            partial += w1 * x1;
+            partial += w2 * x2;
+            partial += w3 * x3;
+            partial += w4 * x4;
+            partial += w5 * x5;
+            partial += w6 * x6;
+            partial += w7 * x7;
+            k += stride8;
+        }
+        while k < n {
+            partial += weight_b[(row_offset + k) as usize] * input[k as usize];
+            k += PLANE_DIM;
+        }
+    }
+
+    let result = plane_sum(partial);
+
+    if lane == 0 {
+        if is_a {
+            output_a[row as usize] = result;
+        } else {
+            output_b[local_row as usize] = result;
+        }
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Batched plane GEMV — multiple input vectors, single weight matrix (Plan 436 T2.1)
 // ---------------------------------------------------------------------------
@@ -513,6 +633,35 @@ pub fn set_dense_pair_wg(wg: u32) {
     DENSE_PAIR_WG.store(wg, std::sync::atomic::Ordering::Relaxed);
 }
 
+/// Issue 1142: the fused pair dispatches [`gemv_plane_f32_pair_mlp8`] (8 loads
+/// in flight per lane, bit-identical) unless `RIIR_DENSE_PAIR_MLP` is set to
+/// anything but 1/on/true — the [`dense_pair_env_semantics`] contract (unset =
+/// the promoted default ON). `set_dense_pair_mlp` is the harness arm toggle.
+static USE_DENSE_PAIR_MLP: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(true);
+static DENSE_PAIR_MLP_INITIALIZED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+
+#[cfg(feature = "cubecl_runtime")]
+fn dense_pair_mlp_enabled() -> bool {
+    if DENSE_PAIR_MLP_INITIALIZED
+        .set(dense_pair_env_semantics(std::env::var(
+            "RIIR_DENSE_PAIR_MLP",
+        )))
+        .is_ok()
+    {
+        USE_DENSE_PAIR_MLP.store(
+            DENSE_PAIR_MLP_INITIALIZED.get().copied().unwrap_or(true),
+            std::sync::atomic::Ordering::Relaxed,
+        );
+    }
+    USE_DENSE_PAIR_MLP.load(std::sync::atomic::Ordering::Relaxed)
+}
+
+/// Force the 8-deep dense-pair kernel on/off (overrides the env var).
+pub fn set_dense_pair_mlp(on: bool) {
+    let _ = DENSE_PAIR_MLP_INITIALIZED.set(on);
+    USE_DENSE_PAIR_MLP.store(on, std::sync::atomic::Ordering::Relaxed);
+}
+
 /// Total launches dispatched through the fused dense-pair path so far.
 pub fn dense_pair_launch_count() -> usize {
     DENSE_PAIR_LAUNCHES.load(std::sync::atomic::Ordering::Relaxed)
@@ -721,18 +870,27 @@ impl GemvCubeCL {
         let m_total = 2 * m;
         let num_wg = (m_total as u32).div_ceil(rows_per_wg).max(1);
 
+        let count = CubeCount::Static(num_wg, 1, 1);
+        let dim = CubeDim::new_1d(wg_size);
         // SAFETY: Caller guarantees correct buffer sizes.
         unsafe {
-            gemv_plane_f32_pair::launch_unchecked::<R>(
-                client,
-                CubeCount::Static(num_wg, 1, 1),
-                CubeDim::new_1d(wg_size),
+            let (wa, wb) = (
                 BufferArg::from_raw_parts(weight_a, m * n),
                 BufferArg::from_raw_parts(weight_b, m * n),
-                BufferArg::from_raw_parts(input_handle, n),
+            );
+            let x = BufferArg::from_raw_parts(input_handle, n);
+            let (oa, ob) = (
                 BufferArg::from_raw_parts(output_a, m),
                 BufferArg::from_raw_parts(output_b, m),
             );
+            match dense_pair_mlp_enabled() {
+                true => gemv_plane_f32_pair_mlp8::launch_unchecked::<R>(
+                    client, count, dim, wa, wb, x, oa, ob,
+                ),
+                false => gemv_plane_f32_pair::launch_unchecked::<R>(
+                    client, count, dim, wa, wb, x, oa, ob,
+                ),
+            }
         }
     }
 }
@@ -1759,8 +1917,10 @@ mod tests {
             return;
         }
 
-        let shapes: &[(usize, usize)] = &[(48, 5120), (5, 100)];
-        for &(m, n) in shapes {
+        // (7, 5000): 8-deep main loop + a ragged tail (Issue 1142).
+        let shapes: &[(usize, usize)] = &[(48, 5120), (5, 100), (7, 5000)];
+        for (&(m, n), mlp) in shapes.iter().flat_map(|s| [(s, false), (s, true)]) {
+            super::set_dense_pair_mlp(mlp);
             let weight_a = pseudo_random_f32(m * n, 0x9E3779B97F4A7C15);
             let weight_b = pseudo_random_f32(m * n, 0xBF58476D1CE4E5B9);
             let input = pseudo_random_f32(n, 0x94D049BB133111EB);
@@ -1835,7 +1995,9 @@ mod tests {
                         ob[i]
                     );
                 }
-                println!("dense-pair bit-identity ({m}×{n}) wg {wg}: EXACT (both halves)");
+                println!(
+                    "dense-pair bit-identity ({m}×{n}) wg {wg} mlp8 {mlp}: EXACT (both halves)"
+                );
             }
         }
     }
