@@ -9,6 +9,7 @@ start once Issue 1109 T0 (bmo reachable) is done; Phase 1 substrate is decision-
 Scope: Phase 1 substrate only (T1.1–T1.4, zero-GPU under the elephant-recapture posture); T1.5's Metal arm stays compile-only this window.
 **Date:** 2026-10-22
 **Research:** [Research 015](../.research/015_Multi_Host_Inference_exo_llamacpp_MLX_Distill.md)
+**Issue 1109 CLOSED 2026-10-27** (file removed per the noise rule; T0–T4 all DONE — T4 = the owner's `rdma_ctl enable` ×2, verified by [Bench 905](../.benchmarks/905_plan623_phase3_jaccl_probe.md); the bring-up narrative lives in git history + `HISTORY.md`).
 **Session note 2026-10-26 (zed-amo):** T0/T1/T3 DONE + T0.2 DONE ([Bench 896](../.benchmarks/896_plan623_t02_link_probe.md) — TB5 bridge 8.5–8.6 GB/s both ways, RTT ~94 µs @4 B, PP-hop ≈ 1.3–1.8% of the decode step, TP-over-TCP refuted arithmetically). RPC transport smoke over the bridge PASSED (handshake + set_tensor green). ⛔ T0.4 PREREQUISITE FOUND: the pinned research clone `19ab5a5` REFUSES the Bonsai GGUF (`invalid ggml type 142` — PQ2_0); the Bonsai-capable incumbent is the league fork `prismml-llama.cpp` @ `prism-b10787-73bfe6c` (`../riir-ai/.raw/prismml-llama.cpp`, PQ2_0 in its loader) — T0.4 starts by building THAT with `-DGGML_RPC=ON` on both boxes. **Session note 2, 2026-10-26 late (zed-amo): T0.4's llama.cpp-RPC arm EXECUTED — [Bench 900](../.benchmarks/900_plan623_t04_llamacpp_rpc_2box.md): solo amo 1012.9/59.1, bmo 1087.5/60.9 (pp512/tg128 t/s); 2-box layer-split 985.1/48.6 = tg −20% vs bmo solo (PP-over-TCP LOSES single-stream decode on identical boxes); `-ts` doesn't reach RPC; `-sm tensor` over RPC crashes (hadamard-sign view nil-buffer). T0.2 tailnet arm DONE — [Bench 901](../.benchmarks/901_plan623_t02_tailnet_arm.md): 0.025–0.028 GB/s, RTT ~9.4 ms = control-plane only. T0.4 remains open ONLY for the MLX/exo arms (weight-format convert caveat); T0.3 awaits a quiet-GPU window (sibling agent load 4–7 today — amo solo tg already carries ~3% load tax).**
 **Target:** `src/` (LayerRange + ActivationFrame + state serializer), `crates/riir-infer-gpu/` (range-forward on the Metal/CubeCL paths), `crates/riir-infer-dist/` (D1-a; transport + stage runtime + planner). Cargo feature `multi_host` (opt-in, never default) on core; the dist crate is opt-in as a whole.
 **Hardware:** amo (M5 Ultra, 96 GiB, macOS 27.0.1) ⇄ bmo (`Mac17,15`) — one TB5 cable @ 80 Gb/s + tailnet (amo `100.111.186.76`, bmo `100.100.117.44`).
@@ -84,7 +85,11 @@ mlx-lm on the Proposal-042 scoreboard **measured on the same two boxes**.
   disk-clean via direct curl + files.json sha256 24/24; loader gap (pack
   schema v2 vs bundled v1 reader + language_model prefix + vision_tower
   weights) fixed OUTSIDE the pack in scripts/plan623_pack_artifact.py.
-  amo 1-box + clean-window re-read: deferred to the T0.3 quiet window.** ⚠ **MLX-arm prerequisites found
+  amo 1-box + clean-window re-read: deferred to the T0.3 quiet window.
+  **DISCHARGED 2026-10-27 ([Bench 906](../.benchmarks/906_plan623_t41_tp2_cell.md)
+  §6): amo MLX 1-box pp 335.2 / tg 50.8 t/s (amo is the slower box; bmo 58.1
+  stays the reference); clean-window socket-PP re-read 45.2 t/s — the −22..−26%
+  PP loss HOLDS quiet (not load).** ⚠ **MLX-arm prerequisites found
   RECLAIMED on amo (2026-10-26 late scan): the HF-cache pack
   `models--prism-ml--Ternary-Bonsai-2-27B-mlx-2bit` carries only 556 KB of blobs — the
   big safetensors blob is GONE (re-downloadable from `prism-ml/Ternary-Bonsai-2-27B-mlx-2bit`,
@@ -359,15 +364,34 @@ mlx-lm on the Proposal-042 scoreboard **measured on the same two boxes**.
   layer command-buffer commit on the critical path.
 - [ ] **T3.5** Scoreboard rows vs llama.cpp RPC-RDMA and exo/MLX jaccl.
 
-## Phase 4 — Tensor-parallel (gate MET 2026-10-27 — [Bench 905](../.benchmarks/905_plan623_phase3_jaccl_probe.md): jaccl RTT ~16-20 µs → 2·L·RTT ≈ 2-2.5 ms < ½ the ~16-17 ms decode step; the RTT input is measured, the phase is GO on paper — EXO-TP comparison caveat: mlx p2p broken on both backends at 0.32.0, collectives-only)
+## Phase 4 — Tensor-parallel (gate REFUTED 2026-10-27 by the T4.1/T4.2 cell — [Bench 906](../.benchmarks/906_plan623_t41_tp2_cell.md): the [Bench 905](../.benchmarks/905_plan623_phase3_jaccl_probe.md) RTT was the PIPELINED all_sum rate (16–22 µs); the TP dependency chain pays the SYNCHRONIZED per-exchange cost (183–277 µs measured) → 128 serialized exchanges/token ≈ +27 ms → TP-2 decode 18.2 t/s vs 1-box 58.1/50.8 (−69/−64%). Sharding correctness PROVEN (token-exact ×6 produce paths, replay-deterministic). Independent second negative: batch-1 decode is launch-bound (COMM_OFF floor −11..−14% from halving ~90% of weight bytes) — the TP memory thesis does not apply at batch-1 on this model/box class. Prefill parity (−1..−9%). TP stays a bench-lane harness, not a serving posture; the multi-host single-stream win path is PP (Phase 2) + RDMA (Phase 3) + speculative fill (Phase 5). Re-open triggers recorded in Bench 906 §9.)
 
-- [ ] **T4.1** Generic sharder from the arch layer table: column (q,k,v,gate,up), row
+- [x] **T4.1** Generic sharder from the arch layer table: column (q,k,v,gate,up), row
   (o,down) + allreduce; kv-heads divisibility check; ternary/quant packs split on
-  block boundaries.
-- [ ] **T4.2** Allreduce: fixed-order 2-rank sum (identical on both ranks → deterministic,
+  block boundaries. **DONE 2026-10-27 (`scripts/plan623_mlx_tp2_bench.py`, mlx
+  bench-lane harness over the pack runtime — NOT riir-infer-core Rust): column
+  q/k/v(+fused per-head gate)/gate/up/GDN-in_proj; row o_proj/down_proj/out_proj;
+  lm_head vocab-split + all_gather; embed/norms/GDN-small replicated. Hadamard
+  block-locality law pinned: in-dim slices must be 1024-aligned → the MLP
+  intermediate splits BLOCK-ALIGNED UNEVEN 9216+8192 (17408 = 17 blocks, odd
+  count; the even split cuts block 8 across ranks). kv/GDN head divisibility ✓
+  (12+2 / 8+24 per rank). N=1 arm = the no-comms sanity posture through the same
+  code path (token-identical to the stock forward).**
+- [x] **T4.2** Allreduce: fixed-order 2-rank sum (identical on both ranks → deterministic,
   Issue 940); overlap the o_proj allreduce with the MLP column matmuls; fuse residual add.
-- [ ] **T4.3** Scoreboard: single-stream decode vs exo TP-jaccl (claims "up to 1.8×") and
-  llama.cpp `-sm tensor` RDMA.
+  **DONE 2026-10-27 (measured, Bench 906): 2-rank all_sum = one IEEE-commutative
+  pairwise add → deterministic (held: token-exact, replay-identical ×2 runs ×2
+  ranks). The OVERLAP lever is UNATTAINABLE at the mlx level — the jaccl op blocks
+  the stream (comm-diag arm C: 277 µs with independent GPU work in-flight vs 21.9
+  pipelined); overlap needs a side-thread p2p transport = Phase 3's own verbs lane
+  (mlx p2p itself deadlocked, Bench 904 §4 + 905). Residual-add fusion moot at
+  −69% decode.**
+- [x] **T4.3** Scoreboard: single-stream decode vs exo TP-jaccl (claims "up to 1.8×") and
+  llama.cpp `-sm tensor` RDMA. **DONE 2026-10-27 (Bench 906 §7): TP-2 jaccl 18.2
+  t/s (−69%) — the exo claim reads 0.31× on mlx 0.32.0 collectives; `-sm tensor`
+  unsupported over RPC (Bench 900); PP lanes: llama.cpp-RPC 48.6 (−16%), MLX
+  socket 43.0–45.2 (−22..−26%). Multi-host single-stream verdict: PP + RDMA +
+  speculative fill.**
 
 ## Phase 5 — Speculative fill
 
@@ -377,7 +401,11 @@ mlx-lm on the Proposal-042 scoreboard **measured on the same two boxes**.
 
 ## GOAT gate (promotion = opt-in → default for the lane crate's consumers)
 
-- G1 PP byte-identity vs 1-box (every phase); TP replay-determinism.
+- G1 PP byte-identity vs 1-box (every phase); TP replay-determinism. **TP half
+  VERDICT 2026-10-27 (Bench 906): G1 PASS (token-exact ×6 produce paths,
+  replay-identical); G2 FAIL (−69% decode) → NOT promoted; the TP harness stays
+  bench-lane. The Phase-4 gate REFUTATION also corrects the Bench-905 paper
+  gate: pipelined ≠ synchronized exchange latency.**
 - G2 `--release`, both boxes' provenance; beats the best incumbent on at least the
   capacity row and the aggregate-throughput row; never > 5% PP overhead on the fits-one-box row.
 - G3 feature-off byte-identity of riir-infer-core (the `multi_host` feature compiles away).

@@ -1,0 +1,60 @@
+{
+  "bench": "906_plan623_t41_tp2_cell",
+  "date": "2026-10-27",
+  "session": "zed-amo-tp2",
+  "mlx": "0.32.0 (mlx-lm 0.31.3)",
+  "model": "prism-ml/Ternary-Bonsai-2-27B-mlx-2bit @ fcba37d21 (64 L, hidden 5120, inter 17408, fa interval 4)",
+  "posture": {
+    "boxes": "amo 192.168.10.1 (rank0) + bmo 192.168.10.2 (rank1), TB5 one cable",
+    "comm": "mx.distributed backend=jaccl (RDMA over TB, rdma_en2), coordinator on rank0 :50100",
+    "provenance": "both boxes idle this session (amo quiet window: elephant capture ended 04:18Z; no GPU consumers either box, ps-verified)"
+  },
+  "gen_pin_16": [29, 197, 197, 1, 197, 197, 1, 197, 197, 1, 197, 197, 1, 197, 197, 1],
+  "gen_pin_note": "greedy over the deterministic ramp prompt at PP=512; IDENTICAL across: stock 1-box forward, harness N=1 (amo), TP run1 rank0+rank1, TP run2 rank0+rank1, and the socket-PP harness (Bench 904 harness, rank1 head) — 6 independent produce-paths, one token stream",
+  "runs": {
+    "stock_1box_bmo_bench904": {"pp_tps": 357.3, "tg_ms_median": 17.217, "tg_tps": 58.1, "source": "cited Bench 904"},
+    "harness_n1_amo": {"pp_tps": 335.2, "tg_ms_median": 19.677, "tg_tps": 50.8,
+      "note": "amo quiet-window 1-box row — discharges the Bench-904 §6 amo deferral; amo is the slower box (bmo remains the 1-box reference row)"},
+    "tp2_run1_r0_amo": {"pp_tps": 324.0, "tg_ms_median": 54.911, "tg_ms_min": 38.645, "tg_ms_max": 76.032, "tg_tps": 18.2},
+    "tp2_run1_r1_bmo": {"pp_tps": 324.4, "tg_ms_median": 54.965, "tg_ms_min": 38.634, "tg_ms_max": 75.944, "tg_tps": 18.2},
+    "tp2_run2_r0_amo": {"pp_tps": 350.3, "tg_ms_median": 54.939, "tg_tps": 18.2},
+    "tp2_run2_r1_bmo": {"pp_tps": 354.0, "tg_ms_median": 54.981, "tg_ms_min": 38.662, "tg_ms_max": 76.025, "tg_tps": 18.2},
+    "tp2_smoke_pp64_tg8": {"r0_tg_ms_median": 42.784, "r1_tg_ms_median": 42.259},
+    "tp2_comm_off_diag_pp64_tg8": {"r0_tg_ms_median": 16.572, "r1_tg_ms_median": 15.306,
+      "note": "comms skipped (WRONG tokens, timing only) — the per-rank sharded compute floor"},
+    "harness_n1_amo_pp64_tg8": {"tg_ms_median": 19.314, "tg_tps": 51.8},
+    "pp2_socket_recheck_quiet_window": {"role0_tg_ms_median": 22.129, "role1_tg_ms_median": 22.106, "role1_tg_tps": 45.2,
+      "note": "Bench 904 clean row was 23.236 ms / 43.0 t/s — agrees within ~5%; -22% vs bmo 1-box holds in the quiet window"}
+  },
+  "comm_diag": {
+    "script": "scripts/plan623_tp_comm_diag.py",
+    "shape": "(1,1,5120) f16 = the decode per-exchange payload; jaccl, 30 reps + 3 warmup",
+    "A_pipelined_back_to_back": {"median_us": 21.9, "min_us": 17.6, "max_us": 39.1,
+      "note": "matches Bench 905's 16-23 us rows — that number is the PIPELINED per-op rate"},
+    "B_synchronized_eval_wait_each_rep": {"median_us": 183.2, "min_us": 17.5, "max_us": 230.1,
+      "note": "cold-pipeline per-exchange latency: ~8.4x the pipelined number"},
+    "C_interleaved_gpu_work_same_stream": {"median_us": 277.4, "min_us": 167.0, "max_us": 64141.0,
+      "note": "the decode-in-context shape; the outlier max is a first-rep compile/sync spike"},
+    "D_pipelined_1x64x5120_prefill_class": {"median_us": 147.4,
+      "note": "bulk payloads amortize — why TP prefill is near-parity while decode pays full freight"}
+  },
+  "arithmetic": {
+    "exchanges_per_token": 128,
+    "breakdown": "2 row-parallel mats per layer (attn o_proj/out_proj + mlp down_proj) x 64 layers, strictly serialized by the residual dependency; + 1 lm_head all_gather",
+    "synchronized_cost": "128 x 183-277 us = 23-35 ms/token — matches the measured 54.9 - 15.3 compute-floor = ~27-40 ms comm share",
+    "bench905_paper_gate_error": "the Phase-4 gate (2*L*RTT ~ 2-2.5 ms) multiplied L by the PIPELINED 16-20 us rate; the dependency chain pays the SYNCHRONIZED exchange"
+  },
+  "launch_bound_finding": {
+    "claim": "halving EVERY big matmul (q/k/v/o/gate/up/down/in_proj_qkv/z, ~90% of weight bytes) yields only -11..-14% decode: bmo 17.2 -> 15.3 ms; amo 19.3 -> 16.6 ms (COMM_OFF floor)",
+    "reading": "batch-1 decode on this model/box class is LAUNCH-BOUND (~240 us fixed per layer x 64), not weight-bandwidth-bound — the TP memory-halving thesis does not apply at batch-1 even with free comms",
+    "tie_in": "same launch-tax fight as the riir-infer CUDA decode lane (fusion/graph rungs, Bench 1004/1008)"
+  },
+  "verdicts": {
+    "sharding_correctness": "PASS — token-exact vs the unsharded forward, replay-deterministic, cross-rank identical (Issue 940 law held: 2-rank all_sum = one IEEE-commutative pairwise add; all_gather in fixed rank order)",
+    "phase4_tp_decode": "REFUTED — 18.2 t/s vs 50.8 (amo 1-box) = -64%; vs bmo 1-box 58.1 = -69%",
+    "phase4_tp_prefill": "PARITY — 324-354 t/s vs 357.3 1-box (-1..-9%): bulk exchanges amortize",
+    "exo_tp_jaccl_claim": "NOT REPRODUCIBLE on mlx 0.32.0 collectives — the 'up to 1.8x' claim reads 0.31x here",
+    "llamacpp_sm_tensor": "unsupported over RPC (Bench 900)",
+    "plan623_phase4_disposition": "T4.1/T4.2 built + measured + correct — the cell is the deliverable; TP is NOT a single-stream decode win on this stack; the lane rides PP (Phase 2) + RDMA (Phase 3) + speculative fill (Phase 5)"
+  }
+}

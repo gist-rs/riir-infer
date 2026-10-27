@@ -74,6 +74,12 @@ owner (Bench 904 §7, item E) — repro: `.raw/min_p2p.py` (ring) +
   paper**. TP over jaccl is now a measured-feasible posture — a first real
   TP cell (two half-model ranks, all_sum after each block) is the next
   ungated measurement.
+  ⛔ **CORRECTION 2026-10-27 ([Bench 906](../.benchmarks/906_plan623_t41_tp2_cell.md)):
+  the cell REFUTED this gate — the 16–20 µs here is the PIPELINED per-op
+  rate; the TP dependency chain pays the SYNCHRONIZED per-exchange cost
+  (183–277 µs measured), so 128 exchanges/token ≈ +27 ms and TP-2 decode
+  lands at −69%. The gate verdict is REFUTED, not GO; this paragraph's
+  arithmetic stands as the recorded error class (pipelined ≠ synchronized).**
 - **PP hop cost**: the socket hop (0.1–0.3 ms) was already small vs the
   +6 ms pipeline serialization cost (Bench 904 §4); jaccl shaves the hop
   further but does NOT move the serialization wall — the 2-box PP decode
