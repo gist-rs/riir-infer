@@ -601,8 +601,10 @@ mlx-lm on the Proposal-042 scoreboard **measured on the same two boxes**.
     bit-identical; rejection at j<K → unwind → the continued stream == the oracle;
     dumb-drafter worst case == the sequential stream byte-for-byte; wire refusals.
   - **T5.1d — the real drafter (the actual T5.1 completion condition):** an
-    MTP/draft head for Bonsai-2 is a riir-train lane (GPU) — file there when
-    T5.1a–c land; the acceptance-rate-weighted scoreboard row rides it. dflash
+    MTP/draft head for Bonsai-2 is a riir-train lane (GPU) — **FILED as riir-train
+    Issue 654** (`654_mtp_draft_head_bonsai2_651d.md`, unclaimed; the v0 zero-shot
+    tied-projection calibration floor is its suggested first cell); the
+    acceptance-rate-weighted scoreboard row rides it. dflash
     itself (`core/src/dflash.rs`) is wired to the OLD transformer path
     (`TransformerWeights`/`MultiLayerKVCache`), NOT the ternary DeltaNet stage —
     "already in core" means the algorithmic cores (`katgpt_speculative`), not a

@@ -45,6 +45,35 @@
 - MLX pp512 supersession (finding 2) means Bench 904's 1-box table is stale on ONE cell; 904 stays as recorded — this bench is the correction of record.
 -amo was NOT measured this session (its GPU lanes were live — the rethink elephant capture class); T0.3 asked for bmo-idle only.
 
+## Replication addendum (zed-amo-i623-t03, same night, ~2 h after the primary session)
+
+The t03 lane (unaware the record had landed — the plan checkbox lagged the bench by
+99 s, see the lease ledger) re-ran the llama.cpp + MLX cells and a decode anchor in a
+second bmo-idle window (`~/t03/20261028T040725Z` + `~/t03/20261028T041751Z`, same
+harness, same bundle/venv/pack; raw cell logs on bmo, box preamble in
+`session_lm_stdout.log`). Every re-read CONFIRMS the primary session:
+
+| cell | primary (t24, 02:2x) | replication (t03, 04:07) | Δ |
+|---|---:|---:|---:|
+| llama.cpp tg128 | 60.62 ± 0.74 | 60.74 ± 0.56 | +0.2% |
+| llama.cpp pp512 | 1087.36 ± 1.26 | 1087.62 ± 0.84 | +0.02% |
+| llama.cpp pp4096 | 1046.10 ± 0.10 | 1045.72 ± 0.22 | −0.04% |
+| llama.cpp pp32768 | 771.99 ± 0.08 | 771.92 ± 0.09 | −0.01% |
+| MLX tg128 (median) | 57.9 | 57.8 (pp512 cell) / 55.7 (pp4096 cell) | ≤ −0.4% |
+| MLX pp512 | 1058.1 | 1067.3 | +0.9% |
+| MLX pp4096 | 1026.1 | 1001.4 | −2.4% |
+| MLX pp32768 | REFUSED | REFUSED (same `metal::malloc` 103 GB > 62.6 GB class) | ✓ |
+| riir-infer decode anchor | 56.65 / oracle 52.64 | 56.70 / oracle 52.67, **G1 PASS** (fresh boot, 04:17) | +0.09% |
+
+The riir-infer prefill rows (140.2 / 166.9 / 96.1) are the SAME run files as the
+primary table (02:28 / 02:45 sessions) — not re-measured, listed for completeness.
+**Posture caveat, resolved upstream:** those prefill cells measure the PRE-`412c887`
+floor (the missing prefill-lane feature row, ~21.5K sequential dispatches/frame) —
+Issue 1146's fix landed after this session; the A/B re-read lane (`6a80b4f`) and the
+1147 fused decode-batch (+38.8–39.5% s=2 aggregate, Bench 912) supersede the
+riir-infer rows above. The incumbent rows (llama.cpp / MLX) are posture-stable and
+stand as the comparison baseline.
+
 ## Session traps (paid for, pinned in the harness)
 
 - **`nc -z` probe consumes the tail's single accept** — the tail serves ONE connection then exits; a port probe connects, gets accepted, EOFs the handshake ("failed to fill whole buffer"), and exits the tail before the real head arrives. Fix: poll the tail's own log for `listening on`.
