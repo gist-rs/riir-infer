@@ -3191,7 +3191,11 @@ impl TernaryDeltanetGpuForward {
             None
         };
         #[cfg(not(all(feature = "metal_tensor_gemm", target_os = "macos")))]
-        let field_ffn = None;
+        // The ON arm above types this as Option<FieldFfnCaches>; here the field
+        // lane is compiled out entirely (the struct field + every dispatch site
+        // carry the matching #[cfg]), so any placeholder type works — this one
+        // makes the never-read property structural.
+        let field_ffn: Option<std::convert::Infallible> = None;
 
         // Allocate persistent activation buffers (zero-initialized)
         let zeros_n = vec![0.0f32; n];
