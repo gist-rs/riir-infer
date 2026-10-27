@@ -258,7 +258,8 @@ fn main() -> Result<()> {
     if args.len() < 3 {
         eprintln!(
             "usage: spec_drafter_floor <model.gguf> <corpus-dir-or-txt> \
-             [--k 2,4,8] [--split 0.5] [--max-tokens N] [--report PATH]"
+             [--k 2,4,8] [--split 0.5] [--max-tokens N] [--report PATH] \
+             [--dump-tokens PREFIX]"
         );
         std::process::exit(2);
     }
@@ -268,6 +269,7 @@ fn main() -> Result<()> {
     let mut split: f64 = 0.5;
     let mut max_tokens: usize = 400_000;
     let mut report_path: Option<PathBuf> = None;
+    let mut dump_prefix: Option<PathBuf> = None;
     let mut i = 3;
     while i < args.len() {
         match args[i].as_str() {
@@ -288,6 +290,10 @@ fn main() -> Result<()> {
             }
             "--report" => {
                 report_path = Some(PathBuf::from(&args[i + 1]));
+                i += 2;
+            }
+            "--dump-tokens" => {
+                dump_prefix = Some(PathBuf::from(&args[i + 1]));
                 i += 2;
             }
             other => bail!("unknown arg {other}"),
@@ -345,6 +351,37 @@ fn main() -> Result<()> {
         tokens.len(),
         tokens.len() - read_lo
     );
+
+    // ── riir-train Issue 654 GPU-rung feeder: dump the FROZEN split verbatim ──
+    // Writes u32-LE token files so the 4090 capture consumes the byte-identical
+    // stream this floor run measured (same tokenizer, same split point). The
+    // digests printed here are the cross-check the capture run quotes.
+    if let Some(prefix) = dump_prefix {
+        let write_side = |p: PathBuf, rows: &[u32]| -> Result<String> {
+            let mut bytes = Vec::with_capacity(rows.len() * 4);
+            for t in rows {
+                bytes.extend_from_slice(&t.to_le_bytes());
+            }
+            let digest = blake3::hash(&bytes).to_hex();
+            std::fs::write(&p, &bytes).with_context(|| format!("write {}", p.display()))?;
+            Ok(digest[..16].to_string())
+        };
+        let fit_p = prefix.with_extension("fit.tokens");
+        let read_p = prefix.with_extension("read.tokens");
+        let fit_digest = write_side(fit_p.clone(), &tokens[..read_lo])?;
+        let read_digest = write_side(read_p.clone(), &tokens[read_lo..])?;
+        println!(
+            "# dump: {} ({} tok, blake3 {}) | {} ({} tok, blake3 {})",
+            fit_p.display(),
+            read_lo,
+            fit_digest,
+            read_p.display(),
+            tokens.len() - read_lo,
+            read_digest
+        );
+        return Ok(());
+    }
+
     println!(
         "# box: {} cores, load {:#.2}; read {}",
         std::thread::available_parallelism().map(|n| n.get()).unwrap_or(1),

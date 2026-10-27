@@ -2797,6 +2797,29 @@ impl TernaryDeltanetGpuForwardCudarc {
         Ok((!(packed[0] as u32)) as usize)
     }
 
+    /// riir-train Issue 654 (Plan 623 T5.1d) — download the post-loop residual
+    /// stream (`acts.x`): the final RMSNorm's INPUT, i.e. the last layer's
+    /// output in the folded-runtime (Hadamard) basis, pre-final-norm. This is
+    /// the same value the spec_fill verify path carries as per-position hidden
+    /// rows, so a draft head fit on it consumes the serving wire verbatim —
+    /// no basis or norm reconstruction at the consumer.
+    ///
+    /// Read-only, rotation-agnostic (no guard): valid after any
+    /// `forward_token` / `forward_token_graph*` call (each syncs before
+    /// returning, so the stream is idle and the dtoh is exact). The sided
+    /// capture variants (`forward_token_with_final_hidden`) stay
+    /// `guard_no_rotation`-refused on the folded runtime — this accessor is
+    /// the folded-safe read.
+    pub fn read_residual_x(&self) -> Result<Vec<f32>, CudarcKernelError> {
+        let n = self.infra.config.n_embd;
+        let mut x = vec![0.0f32; n];
+        self.infra
+            .stream
+            .memcpy_dtoh(&self.acts.x, &mut x)
+            .map_err(|e| CudarcKernelError::Launch(e.to_string()))?;
+        Ok(x)
+    }
+
     /// Issue 696 follow-up — `forward_token_graph` with host-side stage
     /// timings (see [`GraphStageTimings`]). Identical behavior to
     /// [`forward_token_graph`]; use for profiling only.
