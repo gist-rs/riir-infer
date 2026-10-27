@@ -2,7 +2,7 @@
 
 **Status:** LANDED (llama.cpp-RPC arm of T0.4; MLX/exo arms open — see §Remaining)
 **Date:** 2026-10-26
-**Plan:** [623](../.plans/623_multi_host_pipeline_inference_lane.md) T0.4 · **Issue:** [1109](../.issues/1109_bmo_cluster_bringup_and_routing.md) T0.4
+**Plan:** [623](../.plans/623_multi_host_pipeline_inference_lane.md) T0.4 · **Issue:** [1109](../HISTORY.md) T0.4
 **Fork:** `prismml-llama.cpp` @ `prism-b10787-73bfe6c` (`../riir-ai/.raw/prismml-llama.cpp`, shallow clone) — the PQ2_0-capable league fork; the pinned research clone `19ab5a5` cannot parse type-142.
 **Build:** `cmake -B build-rpc -DGGML_RPC=ON -DGGML_BLAS=OFF` (BLAS OFF — see Trap 1), Release, arm64, ggml 0.21.0.
 

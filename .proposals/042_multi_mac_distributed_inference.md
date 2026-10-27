@@ -12,7 +12,7 @@
 > bridge `192.168.10.1 ⇄ 192.168.10.2` static, measured 0.53 ms; the ONE owner
 > step blocking 2-box work is SSH key auth on bmo (Issue 1109 T0 remainder).
 **Branch:** `develop` · **Distill:** [Research 015](../.research/015_Multi_Host_Inference_exo_llamacpp_MLX_Distill.md) (exo `bc412e2`, llama.cpp `19ab5a5`, mlx `c6abf0d`, mlx-lm `0d4d3d0`, all under `.raw/`)
-**Execution:** [Plan 623](../.plans/623_multi_host_pipeline_inference_lane.md) · **Hardware bring-up + bmo routing:** [Issue 1109](../.issues/1109_bmo_cluster_bringup_and_routing.md)
+**Execution:** [Plan 623](../.plans/623_multi_host_pipeline_inference_lane.md) · **Hardware bring-up + bmo routing:** [Issue 1109](../HISTORY.md)
 **Training half:** DEFERRED to a separate riir-train plan (owner: "separate plan for train later") — see §Train.
 
 ## TL;DR
@@ -115,7 +115,7 @@ Phase 2 lands (the transport must exist and be measured first).
 ## bmo and riir-rethink's open issues
 
 Asked: "can we use bmo's GPU to solve all issues in riir-rethink/.issues?" — measured
-answer in [Issue 1109 §Routing](../.issues/1109_bmo_cluster_bringup_and_routing.md):
+answer in [Issue 1109 §Routing](../HISTORY.md):
 bmo directly unblocks the **hardware-gated** items (016 and 025 were "M5-Ultra-gated";
 the hardware now exists — the remaining gate is the owner's serve/deploy call, which no
 GPU can make), can host the pplx rig for 035 T4 and the 031 T4 probe, and is the natural

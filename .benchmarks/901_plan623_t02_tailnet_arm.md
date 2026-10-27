@@ -2,7 +2,7 @@
 
 **Status:** LANDED (completes T0.2 — the bridge arm is [Bench 896](896_plan623_t02_link_probe.md))
 **Date:** 2026-10-26 ~23:00+07
-**Plan:** [623](../.plans/623_multi_host_pipeline_inference_lane.md) T0.2 · **Issue:** [1109](../.issues/1109_bmo_cluster_bringup_and_routing.md) T2
+**Plan:** [623](../.plans/623_multi_host_pipeline_inference_lane.md) T0.2 · **Issue:** [1109](../HISTORY.md) T2
 **Instrument:** `link_probe` @ the Bench-896 build ( amo `target/release` 18:07 == bmo `~/link_probe` 18:08, 518176 B; amo's copy was mid-rebuild by a sibling session, so the bmo byte-identical copy ran from `/tmp/link_probe_896` on amo — same instrument, both ends). Port 46230, TCP_NODELAY, 64 MiB push best-of-5.
 
 ## Box state

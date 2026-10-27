@@ -57,4 +57,4 @@ Multi-block / wider-parallelism restructuring toward roofline — the Issue-734-
 - NOT the GEMV family (72.6% of the token) — near-roofline bandwidth-bound (the league's k4w4/KB-era history); no rung without new physics.
 - NOT attention_decode (10.5%) — KV-read-bound at league ctx; launch-class savings only, sub-bar.
 
-**Refs:** Bench 902 (the census this re-reads), [Issue 1127](1127_decode_hold_remaining_rungs_recell_bundle.md) (the ladder + T4 window), Issue 734-T5 (`rmsnorm_quantize_mb` pattern), Bench 898/899/900 (the rung records + discipline), Issue 940 (reduction-order law), prism #396 (the opponent's wider-FWHT-blocks analogue).
+**Refs:** Bench 902 (the census this re-reads), [Issue 1127](../HISTORY.md) (the ladder + T4 window), Issue 734-T5 (`rmsnorm_quantize_mb` pattern), Bench 898/899/900 (the rung records + discipline), Issue 940 (reduction-order law), prism #396 (the opponent's wider-FWHT-blocks analogue).

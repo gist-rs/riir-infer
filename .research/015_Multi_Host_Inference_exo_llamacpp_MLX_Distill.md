@@ -1,6 +1,6 @@
 # Research 015 — Multi-host LLM inference: exo, llama.cpp RPC, MLX distributed — distill + beat-levers
 
-**Date:** 2026-10-22 · **Filed for:** [Proposal 042](../.proposals/042_multi_mac_distributed_inference.md) / [Plan 623](../.plans/623_multi_host_pipeline_inference_lane.md) / [Issue 1109](../.issues/1109_bmo_cluster_bringup_and_routing.md)
+**Date:** 2026-10-22 · **Filed for:** [Proposal 042](../.proposals/042_multi_mac_distributed_inference.md) / [Plan 623](../.plans/623_multi_host_pipeline_inference_lane.md) / [Issue 1109](../HISTORY.md)
 **Sources (checked out to `.raw/`, gitignored, shallow):**
 
 | repo | commit | date | licence |
