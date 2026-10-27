@@ -2102,11 +2102,63 @@ static PREFILL_STAGE_MASK: std::sync::atomic::AtomicU32 =
 /// each contributes to the residual stream `x_b` only through its own residual
 /// add, so skipping one leaves `x_b` valid rather than uninitialised.
 #[cfg(all(feature = "cubecl_runtime", feature = "ternary_gemm_batched"))]
-pub const PREFILL_STAGE_NAMES: [&str; 3] = ["deltanet", "attention", "ffn"];
+pub const PREFILL_STAGE_NAMES: [&str; 12] = [
+    "deltanet",
+    "attention",
+    "ffn",
+    // Issue 1146 — the prefill frame census sub-bits (the decode census's
+    // parent-gated pattern, Bench 1006): bits 3-9 refine stage bit 0
+    // (deltanet) and are consulted only when bit 0 is on, so masking bit 0
+    // still strips the whole region on every caller path; mask=ALL stays the
+    // bit-identical shipping path. One bit per GDN-chain class, so a census
+    // row's Δwall reads that class's frame cost directly. The attention
+    // region is NOT duplicated here — it already carries the Issue-640
+    // per-substage instrument (`ATTN_SUBSTAGE_MASK`), and the FFN
+    // projections carry the Issue-1122 site timing (`PREFILL_SITE_TIMING`).
+    "gdn_norm",
+    "gdn_rotin",
+    "gdn_prework",
+    "gdn_beta",
+    "gdn_rec",
+    "gdn_post",
+    "gdn_residual",
+    // Standalone (no parent): previously ungated tail classes.
+    "embed",
+    "tail",
+];
 
 /// All stage classes enabled — the shipping path.
 #[cfg(all(feature = "cubecl_runtime", feature = "ternary_gemm_batched"))]
-pub const PREFILL_STAGE_ALL: u32 = (1u32 << 3) - 1;
+pub const PREFILL_STAGE_ALL: u32 = (1u32 << 12) - 1;
+
+/// The coarse stage bits (the original Issue-661 trio).
+#[cfg(all(feature = "cubecl_runtime", feature = "ternary_gemm_batched"))]
+pub const PREFILL_STAGE_DELTANET: u32 = 0;
+#[cfg(all(feature = "cubecl_runtime", feature = "ternary_gemm_batched"))]
+pub const PREFILL_STAGE_ATTENTION: u32 = 1;
+#[cfg(all(feature = "cubecl_runtime", feature = "ternary_gemm_batched"))]
+pub const PREFILL_STAGE_FFN: u32 = 2;
+
+/// Issue 1146 — deltanet-chain census sub-bits (bits 3-9; parent = bit 0).
+#[cfg(all(feature = "cubecl_runtime", feature = "ternary_gemm_batched"))]
+pub const PREFILL_STAGE_GDN_NORM: u32 = 3;
+#[cfg(all(feature = "cubecl_runtime", feature = "ternary_gemm_batched"))]
+pub const PREFILL_STAGE_GDN_ROTIN: u32 = 4;
+#[cfg(all(feature = "cubecl_runtime", feature = "ternary_gemm_batched"))]
+pub const PREFILL_STAGE_GDN_PREWORK: u32 = 5;
+#[cfg(all(feature = "cubecl_runtime", feature = "ternary_gemm_batched"))]
+pub const PREFILL_STAGE_GDN_BETA: u32 = 6;
+#[cfg(all(feature = "cubecl_runtime", feature = "ternary_gemm_batched"))]
+pub const PREFILL_STAGE_GDN_REC: u32 = 7;
+#[cfg(all(feature = "cubecl_runtime", feature = "ternary_gemm_batched"))]
+pub const PREFILL_STAGE_GDN_POST: u32 = 8;
+#[cfg(all(feature = "cubecl_runtime", feature = "ternary_gemm_batched"))]
+pub const PREFILL_STAGE_GDN_RESIDUAL: u32 = 9;
+/// Issue 1146 — standalone census bits (no parent).
+#[cfg(all(feature = "cubecl_runtime", feature = "ternary_gemm_batched"))]
+pub const PREFILL_STAGE_EMBED: u32 = 10;
+#[cfg(all(feature = "cubecl_runtime", feature = "ternary_gemm_batched"))]
+pub const PREFILL_STAGE_TAIL: u32 = 11;
 
 /// See [`PREFILL_STAGE_MASK`]. Bit `i` enables `PREFILL_STAGE_NAMES[i]`.
 #[cfg(all(feature = "cubecl_runtime", feature = "ternary_gemm_batched"))]
@@ -2122,6 +2174,15 @@ pub fn set_prefill_stage_mask(mask: u32) {
 #[inline]
 fn stage_on(bit: u32) -> bool {
     PREFILL_STAGE_MASK.load(std::sync::atomic::Ordering::Relaxed) & (1u32 << bit) != 0
+}
+
+/// Issue 1146 — whether a deltanet-chain sub-bit (bits 3-9) runs: the stage
+/// bit (0) must be on AND the sub-bit (the Bench-1006 refinement law).
+/// Masking bit 0 alone still strips the whole stage on every caller path.
+#[cfg(all(feature = "cubecl_runtime", feature = "ternary_gemm_batched"))]
+#[inline]
+fn gdn_site_on(bit: u32) -> bool {
+    stage_on(0) && stage_on(bit)
 }
 
 // ── Decode stage mask (Issue 661 T1 — decode stage breakdown profiling) ──
@@ -3810,9 +3871,8 @@ impl TernaryDeltanetGpuForward {
                     let mut suffix = vec![0u64; config.n_layer + 1];
                     for i in (0..config.n_layer).rev() {
                         let l = &weights.layers[i];
-                        let group_bytes = |g: &katgpt_core::TernaryGroupWeights| {
-                            (g.rows * g.cols) as u64
-                        };
+                        let group_bytes =
+                            |g: &katgpt_core::TernaryGroupWeights| (g.rows * g.cols) as u64;
                         let is_gdn = layer_types[i] == DeltaNetLayerType::DeltaNet;
                         let this_layer = if is_gdn {
                             // Same resolution the registration path uses
@@ -9129,7 +9189,7 @@ impl TernaryDeltanetGpuForward {
         }
 
         // ── Embed every prompt token into its row of x_b (first stage only) ──
-        if hidden_in.is_none() {
+        if hidden_in.is_none() && stage_on(PREFILL_STAGE_EMBED) {
             let wte_blocks64 = self.wte_handle.blocks64 as u32;
             let wte_groups = self.wte_handle.groups_per_row as u32;
             for (t, &tok) in tokens.iter().enumerate() {
@@ -9176,7 +9236,17 @@ impl TernaryDeltanetGpuForward {
             } else if is_deltanet {
                 let layer_w = &self.layers[layer_idx];
 
-                Self::prefill_norm(&self.client, &x_b, &layer_w.input_norm, &normx_b, p, n, eps);
+                if gdn_site_on(PREFILL_STAGE_GDN_NORM) {
+                    Self::prefill_norm(
+                        &self.client,
+                        &x_b,
+                        &layer_w.input_norm,
+                        &normx_b,
+                        p,
+                        n,
+                        eps,
+                    );
+                }
 
                 // 1-4. Input projections — one dispatch each instead of P.
                 //
@@ -9197,15 +9267,17 @@ impl TernaryDeltanetGpuForward {
                     // the PRIMAL norm as one token-grid f32 GEMV each — row t
                     // bit-identical to decode's `GemvCubeCL` on token t.
                     let (cfg, tables) = self.rotation_pair();
-                    self.prefill_rotate(
-                        RotDir::Forward,
-                        &normx_b,
-                        Some(&rotx_b),
-                        tables,
-                        cfg.block_size,
-                        p * n,
-                        n,
-                    );
+                    if gdn_site_on(PREFILL_STAGE_GDN_ROTIN) {
+                        self.prefill_rotate(
+                            RotDir::Forward,
+                            &normx_b,
+                            Some(&rotx_b),
+                            tables,
+                            cfg.block_size,
+                            p * n,
+                            n,
+                        );
+                    }
                     self.prefill_project(
                         &layer_w.in_proj_qkv,
                         &rotx_b,
@@ -9308,7 +9380,7 @@ impl TernaryDeltanetGpuForward {
                 )))]
                 let prework_fused_on = false;
 
-                if prework_fused_on {
+                if prework_fused_on && gdn_site_on(PREFILL_STAGE_GDN_PREWORK) {
                     #[cfg(all(
                         feature = "cubecl_runtime",
                         feature = "ternary_gemm_batched",
@@ -9331,7 +9403,7 @@ impl TernaryDeltanetGpuForward {
                             head_dim,
                         );
                     }
-                } else if can_chunk_conv1d {
+                } else if can_chunk_conv1d && gdn_site_on(PREFILL_STAGE_GDN_PREWORK) {
                     #[cfg(all(
                         feature = "cubecl_runtime",
                         feature = "ternary_gemm_batched",
@@ -9369,7 +9441,7 @@ impl TernaryDeltanetGpuForward {
                         // Swap so qkv_b holds the SiLU outputs for the expand step.
                         std::mem::swap(&mut qkv_b, &mut qkv_conv_b);
                     }
-                } else {
+                } else if gdn_site_on(PREFILL_STAGE_GDN_PREWORK) {
                     // Sequential conv1d path (default + partial-chunk fallback).
                     for t in 0..p {
                         unsafe {
@@ -9393,20 +9465,22 @@ impl TernaryDeltanetGpuForward {
                 //      the expansion ran INSIDE the fused dispatch — only the
                 //      beta/decay dispatch below executes.
                 if PREFILL_BATCH_ELEMENTWISE.load(std::sync::atomic::Ordering::Relaxed) {
-                    unsafe {
-                        DeltanetBetaDecayBatchedCubeCL::launch::<ActiveRuntime>(
-                            &self.client,
-                            a_b.clone(),
-                            b_b.clone(),
-                            layer_w.a_log.clone(),
-                            layer_w.dt_bias.clone(),
-                            beta_b.clone(),
-                            decay_b.clone(),
-                            n_v_heads,
-                            p,
-                        );
+                    if gdn_site_on(PREFILL_STAGE_GDN_BETA) {
+                        unsafe {
+                            DeltanetBetaDecayBatchedCubeCL::launch::<ActiveRuntime>(
+                                &self.client,
+                                a_b.clone(),
+                                b_b.clone(),
+                                layer_w.a_log.clone(),
+                                layer_w.dt_bias.clone(),
+                                beta_b.clone(),
+                                decay_b.clone(),
+                                n_v_heads,
+                                p,
+                            );
+                        }
                     }
-                    if !prework_fused_on {
+                    if !prework_fused_on && gdn_site_on(PREFILL_STAGE_GDN_PREWORK) {
                         unsafe {
                             ExpandAndL2NormalizeHeadsBatchedCubeCL::launch::<ActiveRuntime>(
                                 &self.client,
@@ -9421,19 +9495,21 @@ impl TernaryDeltanetGpuForward {
                     }
                 } else {
                     for t in 0..p {
-                        unsafe {
-                            DeltanetBetaDecayCubeCL::launch::<ActiveRuntime>(
-                                &self.client,
-                                Self::tok_slice(&a_b, t, n_v_heads, p),
-                                Self::tok_slice(&b_b, t, n_v_heads, p),
-                                layer_w.a_log.clone(),
-                                layer_w.dt_bias.clone(),
-                                Self::tok_slice(&beta_b, t, n_v_heads, p),
-                                Self::tok_slice(&decay_b, t, n_v_heads, p),
-                                n_v_heads,
-                            );
+                        if gdn_site_on(PREFILL_STAGE_GDN_BETA) {
+                            unsafe {
+                                DeltanetBetaDecayCubeCL::launch::<ActiveRuntime>(
+                                    &self.client,
+                                    Self::tok_slice(&a_b, t, n_v_heads, p),
+                                    Self::tok_slice(&b_b, t, n_v_heads, p),
+                                    layer_w.a_log.clone(),
+                                    layer_w.dt_bias.clone(),
+                                    Self::tok_slice(&beta_b, t, n_v_heads, p),
+                                    Self::tok_slice(&decay_b, t, n_v_heads, p),
+                                    n_v_heads,
+                                );
+                            }
                         }
-                        if !prework_fused_on {
+                        if !prework_fused_on && gdn_site_on(PREFILL_STAGE_GDN_PREWORK) {
                             unsafe {
                                 ExpandAndL2NormalizeHeadsCubeCL::launch::<ActiveRuntime>(
                                     &self.client,
@@ -9464,66 +9540,68 @@ impl TernaryDeltanetGpuForward {
                 let chunked_enabled = false;
 
                 if chunked_enabled {
-                    // ── Multi-token recurrence (Issue 734 T4) ──
-                    // ONE dispatch per layer replaces p sequential rowpar
-                    // dispatches — same per-token arithmetic in the same order
-                    // (bit-identical output), no extract/scratch plumbing, no
-                    // GPU-side inter-kernel gaps. Reads the token-major
-                    // qkvx_b/beta_b/decay_b directly, writes rec_b token-major,
-                    // updates the persistent state handle in place.
-                    #[cfg(all(
-                        feature = "cubecl_runtime",
-                        feature = "ternary_gemm_batched",
-                        feature = "ternary_deltanet_chunked_prefill"
-                    ))]
-                    unsafe {
-                        // riir-ai Issue 1004 R1: the threadgroup-staged twin
-                        // (bit-identical; same handles, same contract).
-                        #[cfg(feature = "deltanet_recurrence_smem_staged")]
-                        let staged =
-                            PREFILL_RECURRENCE_STAGED.load(std::sync::atomic::Ordering::Relaxed);
-                        #[cfg(not(feature = "deltanet_recurrence_smem_staged"))]
-                        let staged = false;
-                        if staged {
+                    if gdn_site_on(PREFILL_STAGE_GDN_REC) {
+                        // ── Multi-token recurrence (Issue 734 T4) ──
+                        // ONE dispatch per layer replaces p sequential rowpar
+                        // dispatches — same per-token arithmetic in the same order
+                        // (bit-identical output), no extract/scratch plumbing, no
+                        // GPU-side inter-kernel gaps. Reads the token-major
+                        // qkvx_b/beta_b/decay_b directly, writes rec_b token-major,
+                        // updates the persistent state handle in place.
+                        #[cfg(all(
+                            feature = "cubecl_runtime",
+                            feature = "ternary_gemm_batched",
+                            feature = "ternary_deltanet_chunked_prefill"
+                        ))]
+                        unsafe {
+                            // riir-ai Issue 1004 R1: the threadgroup-staged twin
+                            // (bit-identical; same handles, same contract).
                             #[cfg(feature = "deltanet_recurrence_smem_staged")]
-                            crate::deltanet_recurrence_staged_cubecl::DeltanetRecurrenceStagedCubeCL::launch_with_gpu_handles::<ActiveRuntime>(
-                                &self.client,
-                                qkvx_b.clone(),
-                                beta_b.clone(),
-                                decay_b.clone(),
-                                state.clone(),
-                                rec_b.clone(),
-                                n_v_heads,
-                                head_dim,
-                                p,
-                            );
-                        } else {
-                            DeltanetRecurrenceMultiTokenCubeCL::launch_with_gpu_handles::<
-                                ActiveRuntime,
-                            >(
-                                &self.client,
-                                qkvx_b.clone(),
-                                beta_b.clone(),
-                                decay_b.clone(),
-                                state.clone(),
-                                rec_b.clone(),
-                                n_v_heads,
-                                head_dim,
-                                p,
-                            );
+                            let staged = PREFILL_RECURRENCE_STAGED
+                                .load(std::sync::atomic::Ordering::Relaxed);
+                            #[cfg(not(feature = "deltanet_recurrence_smem_staged"))]
+                            let staged = false;
+                            if staged {
+                                #[cfg(feature = "deltanet_recurrence_smem_staged")]
+                                crate::deltanet_recurrence_staged_cubecl::DeltanetRecurrenceStagedCubeCL::launch_with_gpu_handles::<ActiveRuntime>(
+                                    &self.client,
+                                    qkvx_b.clone(),
+                                    beta_b.clone(),
+                                    decay_b.clone(),
+                                    state.clone(),
+                                    rec_b.clone(),
+                                    n_v_heads,
+                                    head_dim,
+                                    p,
+                                );
+                            } else {
+                                DeltanetRecurrenceMultiTokenCubeCL::launch_with_gpu_handles::<
+                                    ActiveRuntime,
+                                >(
+                                    &self.client,
+                                    qkvx_b.clone(),
+                                    beta_b.clone(),
+                                    decay_b.clone(),
+                                    state.clone(),
+                                    rec_b.clone(),
+                                    n_v_heads,
+                                    head_dim,
+                                    p,
+                                );
+                            }
                         }
+                        // Without `ternary_deltanet_chunked_prefill` the dual-cfg
+                        // `chunked_enabled` binding above compiles to `false`, so
+                        // this arm is unreachable — the block must still compile
+                        // without the (feature-gated) type.
+                        #[cfg(not(all(
+                            feature = "cubecl_runtime",
+                            feature = "ternary_gemm_batched",
+                            feature = "ternary_deltanet_chunked_prefill"
+                        )))]
+                        unreachable!();
                     }
-                    // Without `ternary_deltanet_chunked_prefill` the dual-cfg
-                    // `chunked_enabled` binding above compiles to `false`, so
-                    // this arm is unreachable — the block must still compile
-                    // without the (feature-gated) type.
-                    #[cfg(not(all(
-                        feature = "cubecl_runtime",
-                        feature = "ternary_gemm_batched",
-                        feature = "ternary_deltanet_chunked_prefill"
-                    )))]
-                    unreachable!();
-                } else {
+                } else if gdn_site_on(PREFILL_STAGE_GDN_REC) {
                     // ── Sequential recurrence (the existing path) ──
                     for t in 0..p {
                         #[allow(
@@ -9571,38 +9649,44 @@ impl TernaryDeltanetGpuForward {
                 // 9. Per-head RMSNorm over all tokens at once: the single-token
                 //    call normalizes n_v_heads rows of head_dim, so P tokens is
                 //    just p * n_v_heads rows of the same width.
-                unsafe {
-                    RmsNormBatchedCubeCL::launch::<ActiveRuntime>(
-                        &self.client,
-                        rec_b.clone(),
-                        layer_w.linear_norm.clone(),
-                        if dealias_norm {
-                            rec_alt.clone()
-                        } else {
-                            rec_b.clone()
-                        },
-                        p * n_v_heads,
-                        head_dim,
-                        eps,
-                    );
-                }
-                if dealias_norm {
-                    std::mem::swap(&mut rec_b, &mut rec_alt);
+                if gdn_site_on(PREFILL_STAGE_GDN_POST) {
+                    unsafe {
+                        RmsNormBatchedCubeCL::launch::<ActiveRuntime>(
+                            &self.client,
+                            rec_b.clone(),
+                            layer_w.linear_norm.clone(),
+                            if dealias_norm {
+                                rec_alt.clone()
+                            } else {
+                                rec_b.clone()
+                            },
+                            p * n_v_heads,
+                            head_dim,
+                            eps,
+                        );
+                    }
+                    if dealias_norm {
+                        std::mem::swap(&mut rec_b, &mut rec_alt);
+                    }
                 }
                 // 10. Z gating is pure elementwise — widening n batches it.
-                unsafe {
-                    DeltanetZGatingCubeCL::launch::<ActiveRuntime>(
-                        &self.client,
-                        rec_b.clone(),
-                        z_b.clone(),
-                        p * z_dim,
-                    );
+                if gdn_site_on(PREFILL_STAGE_GDN_POST) {
+                    unsafe {
+                        DeltanetZGatingCubeCL::launch::<ActiveRuntime>(
+                            &self.client,
+                            rec_b.clone(),
+                            z_b.clone(),
+                            p * z_dim,
+                        );
+                    }
                 }
                 // Issue 032 — folded site 4 (ssm_out): gdn_v tiled→grouped head
                 // permute, then the forward rotation, in place on `rec_b` (its
                 // only consumer is the folded out_proj). After norm + z-gate —
                 // both commute with the permute — the decode order.
-                if let (Some(cfg), Some(tables)) = (&self.rotation, &self.rot_tables) {
+                if let (Some(cfg), Some(tables)) = (&self.rotation, &self.rot_tables)
+                    && gdn_site_on(PREFILL_STAGE_GDN_POST)
+                {
                     if cfg.gdn_v_grouped {
                         unsafe {
                             CopyCubeCL::launch::<ActiveRuntime>(
@@ -9642,14 +9726,16 @@ impl TernaryDeltanetGpuForward {
                     PrefillSite::GdnOutProj,
                 );
 
-                unsafe {
-                    ResidualAddCubeCL::launch::<ActiveRuntime>(
-                        &self.client,
-                        x_b.clone(),
-                        tmp_b.clone(),
-                        if pingpong { x_alt.clone() } else { x_b.clone() },
-                        p * n,
-                    );
+                if gdn_site_on(PREFILL_STAGE_GDN_RESIDUAL) {
+                    unsafe {
+                        ResidualAddCubeCL::launch::<ActiveRuntime>(
+                            &self.client,
+                            x_b.clone(),
+                            tmp_b.clone(),
+                            if pingpong { x_alt.clone() } else { x_b.clone() },
+                            p * n,
+                        );
+                    }
                 }
                 if pingpong {
                     std::mem::swap(&mut x_b, &mut x_alt);
@@ -10021,31 +10107,33 @@ impl TernaryDeltanetGpuForward {
             // driver keeps only the final chunk's logits.
             return Vec::new();
         }
-        unsafe {
-            RmsNormCubeCL::launch::<ActiveRuntime>(
-                &self.client,
-                Self::tok_slice(&x_b, p - 1, n, p),
-                self.final_norm.clone(),
-                self.norm_x.clone(),
-                n,
-                eps,
-            );
-        }
-        // Issue 032 — folded site 8 (lm_head): the decode form — `norm_x`
-        // stays PRIMAL (the hidden-state handoff), lm_head reads the rotated
-        // staging copy.
-        self.stage_rotated_norm_x();
-        unsafe {
-            GemvTernaryCubeCL::launch::<ActiveRuntime>(
-                &self.client,
-                &self.lm_head,
-                if folded {
-                    self.rot_scratch.clone()
-                } else {
-                    self.norm_x.clone()
-                },
-                self.logits.clone(),
-            );
+        if stage_on(PREFILL_STAGE_TAIL) {
+            unsafe {
+                RmsNormCubeCL::launch::<ActiveRuntime>(
+                    &self.client,
+                    Self::tok_slice(&x_b, p - 1, n, p),
+                    self.final_norm.clone(),
+                    self.norm_x.clone(),
+                    n,
+                    eps,
+                );
+            }
+            // Issue 032 — folded site 8 (lm_head): the decode form — `norm_x`
+            // stays PRIMAL (the hidden-state handoff), lm_head reads the rotated
+            // staging copy.
+            self.stage_rotated_norm_x();
+            unsafe {
+                GemvTernaryCubeCL::launch::<ActiveRuntime>(
+                    &self.client,
+                    &self.lm_head,
+                    if folded {
+                        self.rot_scratch.clone()
+                    } else {
+                        self.norm_x.clone()
+                    },
+                    self.logits.clone(),
+                );
+            }
         }
 
         // Hand the decode loop the last token's hidden state — the second

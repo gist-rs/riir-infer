@@ -424,6 +424,16 @@ required-features = ["cuda_backend", "ternary_gemv_cuda_raw", "ternary_gemm_batc
 name = "bench903_fwht_rotq_variant_probe"
 required-features = ["ternary_gemv_cuda_raw"]
 
+# Issue 1146 — the prefill frame census (Metal, real Bonsai-2): strip-down
+# Δwall attribution over the prefill stage bits (the decode census's
+# Bench-1005/1006 law, the Issue-1132 instrument's prefill twin). The row
+# names the ARMED run posture (chunked + batched-attention prefill on); the
+# whole-file #![cfg] trio is the compile floor. #[ignore]d — heavy model
+# load; run with --release -- --ignored --test-threads=1.
+[[test]]
+name = "bench_1146_prefill_frame_census"
+required-features = ["cubecl_runtime", "ternary_gemm_batched", "multi_host", "ternary_deltanet_chunked_prefill", "ternary_attention_batched_prefill", "riir-infer-core/bonsai2_hadamard"]
+
 # katgpt-rs Issue 936 T5 — the decode spin pool on the GPU-hooked decode
 # (Metal lane, real Bonsai-2): bit-identity + paired no-harm wall, one load.
 [[test]]
