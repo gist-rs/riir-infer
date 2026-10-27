@@ -188,7 +188,8 @@ pub fn set_metal_tensor_production_geometry(config: MetalTileConfig) {
 }
 
 /// The `RIIR_METAL_TENSOR_GEOM` env arm, parsed once: `"nra,nrb,nk_chunk,nsg"`
-/// (e.g. `"64,128,4,4"` = [`MetalTileConfig::KTILE64`]). Malformed values
+/// (e.g. `"64,128,4,4"` = [`MetalTileConfig::KTILE64`], the promoted default;
+/// `"64,128,2,4"` = the K32 demote). Malformed values
 /// refuse LOUD at first read and are ignored — a silently-wrong geometry
 /// would corrupt every number the cell records.
 static PROD_GEOM_ENV: std::sync::OnceLock<Option<MetalTileConfig>> = std::sync::OnceLock::new();
@@ -243,14 +244,21 @@ fn parse_prod_geom_env() -> Option<MetalTileConfig> {
 }
 
 /// The geometry the next integration context compiles with: the explicit
-/// setter if pinned, else `RIIR_METAL_TENSOR_GEOM` (parsed once), else the
-/// built-in K32 defaults ([`MetalTileConfig::default`]).
+/// setter if pinned, else `RIIR_METAL_TENSOR_GEOM` (parsed once, now the
+/// DEMOTE-ONLY arm), else the **PROMOTED ktile64 default**
+/// ([`MetalTileConfig::KTILE64`] — Plan 641 T4, delegated owner verdict
+/// session `d4135f15` criterion commit riir-ai `48c464e25`, promotion
+/// recorded Bench 1009/1010: three replication windows every posture-read
+/// ≥1.163× (pp2048 1.223/1.238/1.253, pp16k 1.203/1.217, pp32k 1.163/1.170)
+/// plus the M3 pp2048 no-regression cell reading 1.258× — the gain holds on
+/// BOTH Metal box classes). Demote to the incumbent K32 byte-path via
+/// `RIIR_METAL_TENSOR_GEOM=64,128,2,4`.
 pub fn production_geometry() -> MetalTileConfig {
     let pinned = PROD_GEOM.load(std::sync::atomic::Ordering::Relaxed);
     if pinned != 0 {
         return unpack_geom(pinned);
     }
-    (*PROD_GEOM_ENV.get_or_init(parse_prod_geom_env)).unwrap_or_default()
+    (*PROD_GEOM_ENV.get_or_init(parse_prod_geom_env)).unwrap_or(MetalTileConfig::KTILE64)
 }
 
 // ---------------------------------------------------------------------------
@@ -580,11 +588,28 @@ mod production_geometry_tests {
     }
 
     #[test]
-    fn k_tile_is_16_chunks_and_default_is_k32() {
+    fn k_tile_is_16_chunks_and_default_is_ktile64() {
         let kt64 = parse_prod_geom_spec("64,128,4,4").expect("golden spec");
         assert_eq!(16 * kt64.nk_chunk, 64);
-        let d = MetalTileConfig::default();
-        assert_eq!(16 * d.nk_chunk, 32, "the built-in default is the incumbent K32 geometry");
-        assert_eq!(d, MetalTileConfig { nra: 64, nrb: 128, nk_chunk: 2, nsg: 4 });
+        // Plan 641 T4 promotion: the env-unset fallback is the PROMOTED ktile64
+        // (verdict session d4135f15, criterion commit riir-ai 48c464e25; three
+        // windows + the M3 no-regression cell). The lib test process has no env
+        // armed and no setter pinned, so this reads the fallback directly.
+        assert_eq!(
+            production_geometry(),
+            MetalTileConfig::KTILE64,
+            "the promoted default is ktile64 (Plan 641 T4); the env is DEMOTE-ONLY"
+        );
+        // the K32 demote spelling stays reachable and parses to the incumbent config
+        assert_eq!(
+            parse_prod_geom_spec("64,128,2,4"),
+            Some(MetalTileConfig {
+                nra: 64,
+                nrb: 128,
+                nk_chunk: 2,
+                nsg: 4
+            }),
+            "the K32 demote via RIIR_METAL_TENSOR_GEOM stays byte-reachable"
+        );
     }
 }
