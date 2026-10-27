@@ -51,10 +51,10 @@ def save_model(model, info, tokenizer_path, directory):
         dict(tree_flatten(model.parameters())),
         metadata={"format": "mlx"},
     )
-    (directory / "config.json").write_text(json.dumps(config, indent=2))
+    (directory / "config.json").write_text(json.dumps(config, indent=2), encoding="utf-8")
     shutil.copyfile(tokenizer_path, directory / "tokenizer.json")
     (directory / "README.md").write_text(
-        "# Experimental folded MLX pack\n\nRequires the accompanying Hadamard-aware loader. Do not load as an ordinary affine Qwen checkpoint: that would omit activation and inverse-embedding transforms. The source numerical and performance reports are separate from serialization integrity.\n"
+        "# Experimental folded MLX pack\n\nRequires the accompanying Hadamard-aware loader. Do not load as an ordinary affine Qwen checkpoint: that would omit activation and inverse-embedding transforms. The source numerical and performance reports are separate from serialization integrity.\n", encoding="utf-8"
     )
     return config
 
@@ -91,7 +91,7 @@ def load_model(directory):
     if runtime_dir not in sys.path:
         sys.path.insert(0, runtime_dir)
     from runtime import Packed as _Packed
-    config = json.loads((directory / "config.json").read_text())
+    config = json.loads((directory / "config.json").read_text(encoding="utf-8"))
     if (
         config.get("schema_version") not in (1, 2)
         or config.get("model_type") != "prism_hadamard_qwen35"
@@ -170,5 +170,5 @@ def save_and_verify(model, info, tokenizer_path, directory, input_ids):
         "checked_logits": actual.size,
         "packed_modules": len(config["modules"]),
     }
-    Path(directory, "reload-validation.json").write_text(json.dumps(result, indent=2))
+    Path(directory, "reload-validation.json").write_text(json.dumps(result, indent=2), encoding="utf-8")
     return result

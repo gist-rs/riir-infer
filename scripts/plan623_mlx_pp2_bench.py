@@ -35,6 +35,15 @@ from pathlib import Path
 import mlx.core as mx
 import numpy as np
 
+# A non-UTF-8 console (cp874) would kill this script on its first
+# non-ASCII glyph; degrade the glyph, never the verdict (katgpt-rs
+# Issue 804). A captured stream without reconfigure is left alone.
+for _stream in (sys.stdout, sys.stderr):
+    try:
+        _stream.reconfigure(errors="backslashreplace")
+    except (AttributeError, ValueError):
+        pass
+
 REPO = Path(__file__).resolve().parent.parent
 PACK = Path(os.environ.get("I623_PACK", REPO / ".raw" / "bonsai2-mlx-2bit"))
 SPLIT = int(os.environ.get("I623_SPLIT", "32"))
@@ -222,7 +231,7 @@ def main():
         print(json.dumps(out), flush=True)
         dst = os.environ.get("I623_OUT")
         if dst:
-            Path(dst).write_text(json.dumps(out, indent=2))
+            Path(dst).write_text(json.dumps(out, indent=2), encoding="utf-8")
 
 
 if __name__ == "__main__":
