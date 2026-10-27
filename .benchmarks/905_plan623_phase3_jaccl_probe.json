@@ -1,0 +1,60 @@
+{
+  "probe": "plan623_jaccl_probe",
+  "backend": "jaccl",
+  "mlx": "0.32.0",
+  "rows": [
+    {
+      "op": "all_sum",
+      "size": "4B",
+      "min_us": 18.9,
+      "median_us": 22.5,
+      "max_us": 37.4,
+      "algo_gbps": null
+    },
+    {
+      "op": "all_sum",
+      "size": "16KiB",
+      "min_us": 20.1,
+      "median_us": 24.4,
+      "max_us": 42.7,
+      "algo_gbps": null
+    },
+    {
+      "op": "all_sum",
+      "size": "hidden10KiB",
+      "min_us": 19.7,
+      "median_us": 22.8,
+      "max_us": 28.5,
+      "algo_gbps": null
+    },
+    {
+      "op": "all_sum",
+      "size": "1MiB",
+      "min_us": 153.0,
+      "median_us": 166.0,
+      "max_us": 176.0,
+      "algo_gbps": 12.633
+    },
+    {
+      "op": "all_sum",
+      "size": "64MiB",
+      "min_us": 7253.0,
+      "median_us": 7256.7,
+      "max_us": 7265.4,
+      "algo_gbps": 18.496
+    },
+    {
+      "op": "all_gather",
+      "size": "1MiB",
+      "min_us": 150.3,
+      "median_us": 159.8,
+      "max_us": 171.7
+    },
+    {
+      "op": "pp_rtt",
+      "size": "5KiB-bf16",
+      "verdict": "DEADLOCKED on jaccl too (jaccl::MeshImpl::recv -> tbt_poll_qp_recv spin, sampled); collectives fine. Same class as ring: mlx-0.32.0 2-node p2p broken on both backends."
+    }
+  ],
+  "note": "run2: all_sum medians 16-19us small, 7.26ms 64MiB = 18.5 GB/s; pp_rtt hung and was killed; verdict row hand-updated from the sampled stack."
+}

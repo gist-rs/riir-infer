@@ -110,13 +110,12 @@
   **2-box PP over TB5/TCP tg128 48.6 t/s = −20% vs bmo solo 60.9** — the incumbent
   loses single-stream decode on identical boxes; prefill ≈ free (−2.7%); `-sm tensor`
   over RPC unsupported (server crash). MLX/exo arms remain open in T0.4.**
-- [-] **T4 (owner, physical — Proposal 042 D2):** RDMA: `rdma_ctl enable` from Recovery
-  Terminal on BOTH, reboot; `ibv_devices` shows `rdma_en*`. Only needed from Plan 623
-  Phase 3; TB Bridge must be OFF on the RDMA port (use a second TB cable for the TCP
-  bridge if both postures are wanted at once).
-  **Owner verdict 2026-10-27 (zed-amo-t04-mlx gate list, item A): GO when convenient —
-  the recovery cycles are sanctioned; until both boxes carry `rdma_en*`, Phase 3+ stays
-  parked and Bench 904's ring-TCP rows are the standing transport baseline.**
+- [x] **T4 (owner, physical — Proposal 042 D2): DONE 2026-10-27** — `rdma_ctl enable`
+  from Recovery on BOTH boxes (owner act), `ibv_devices` shows 6× `rdma_en*` per box;
+  TB bridge IPs intact post-reboot (bridge + RDMA coexist on the one cable's stack).
+  First JACCL measurement: [Bench 905](../.benchmarks/905_plan623_phase3_jaccl_probe.md)
+  (all_sum 64 MiB 18.5 GB/s, RTT-class 16-20 µs; p2p send/recv deadlocks on jaccl TOO —
+  mlx 0.32.0 2-node p2p broken on both backends, upstream filing GO'd).
 
 ## Routing — "can bmo's GPU solve all of riir-rethink/.issues?"
 

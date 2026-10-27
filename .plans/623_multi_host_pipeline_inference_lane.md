@@ -359,7 +359,7 @@ mlx-lm on the Proposal-042 scoreboard **measured on the same two boxes**.
   layer command-buffer commit on the critical path.
 - [ ] **T3.5** Scoreboard rows vs llama.cpp RPC-RDMA and exo/MLX jaccl.
 
-## Phase 4 — Tensor-parallel (gated on T3.5's measured RDMA RTT: go only if 2·L·RTT < ½ the 1-box decode step)
+## Phase 4 — Tensor-parallel (gate MET 2026-10-27 — [Bench 905](../.benchmarks/905_plan623_phase3_jaccl_probe.md): jaccl RTT ~16-20 µs → 2·L·RTT ≈ 2-2.5 ms < ½ the ~16-17 ms decode step; the RTT input is measured, the phase is GO on paper — EXO-TP comparison caveat: mlx p2p broken on both backends at 0.32.0, collectives-only)
 
 - [ ] **T4.1** Generic sharder from the arch layer table: column (q,k,v,gate,up), row
   (o,down) + allreduce; kv-heads divisibility check; ternary/quant packs split on
