@@ -414,12 +414,24 @@ fn run() -> Result<(), String> {
                         .iter()
                         .map(|r| r.generated.len().saturating_sub(1))
                         .sum();
+                    // The decode-window aggregate — tokens past each
+                    // stream's first over the slowest stream's first-to-
+                    // last window — is the pipeline-rate metric the
+                    // single-stream decode column compares against; the
+                    // wall figure includes prefill + begins and dilutes it.
+                    let dec_wall = reports
+                        .iter()
+                        .map(|r| r.decode)
+                        .max()
+                        .unwrap_or_default()
+                        .as_secs_f64();
                     println!(
-                        "aggregate: {} tokens in {:.3}s = {:.2} tok/s ({} streams, wall-clock)",
+                        "aggregate: {} tokens in {:.3}s = {:.2} tok/s wall ({} streams) · decode window {:.2} tok/s",
                         total,
                         w.as_secs_f64(),
                         total as f64 / w.as_secs_f64().max(1e-9),
-                        streams
+                        streams,
+                        total as f64 / dec_wall.max(1e-9),
                     );
                 }
                 None => println!(

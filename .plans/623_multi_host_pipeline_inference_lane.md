@@ -387,10 +387,13 @@ mlx-lm on the Proposal-042 scoreboard **measured on the same two boxes**.
   suite 9+2+8 green, clippy `-D`, rustfmt clean, `--features gpu` compiles. Real-model
   loopback smoke (Bonsai-2 27B CPU, split 32, `--full-check`): G1 PASS both streams,
   aggregate 18.27 tok/s vs 1-box oracle 11.11 = **1.64×** (contended box, indicative).
-  OPEN (the measurement half): 2-box GPU ABBA cells (aggregate vs 1-stream vs 1-box,
-  TB5 + tailscale) — quiet-GPU-gated; admission seam (mid-flight join) — serve-time
-  rung; kernel-level micro-batching (batch-2 `step` on the tail) — forwarder rung,
-  Phase 4's launch-bound finding makes it real.
+  **2-box GPU G2 cell 2026-10-28** (the box freed; same session, ABBA, medians):
+  amo⇄bmo TB5 split-32 GPU both, `--max-new 32`: aggregate decode window **109.5 tok/s
+  = 2.37× single-stream (46.9)** at s=2 — per-stream rate unchanged-to-better (54.6 vs
+  46.9, pure bubble fill) — and **saturated at s=3 (109.4)**: more streams partition
+  the rate (36.5 per-stream), they do not add throughput. OPEN rungs: the admission
+  seam (mid-flight join, serve-time shape), kernel-level micro-batching (batch-2 step
+  on the tail — Phase 4's launch-bound finding makes it real), T2.7 scoreboard rows.
 - [x] **T2.5** Planner: boot probe of per-layer cost per host (prefill + decode) and link
   RTT/bw (T0.2 code), split to equalise stage time under memory; manual override.
   **LANDED 2026-10-27** (zed-amo-i623-t21b) at SPLIT granularity (the honest PoC

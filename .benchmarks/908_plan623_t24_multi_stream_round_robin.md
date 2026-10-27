@@ -1,7 +1,7 @@
 # Bench 908 — Plan 623 T2.4: multi-stream round-robin (the PP-bubble fill)
 
-**Status:** RECORD — T2.4 code LANDED (CPU-verifiable arms); G2 GPU/2-box cells stay open (box contention)
-**Date:** 2026-10-27
+**Status:** RECORD — T2.4 LANDED (code + G1 + the 2-box GPU G2 cell); admission seam + kernel micro-batching stay open
+**Date:** 2026-10-27 (code + G1 + CPU smoke); 2026-10-28 (the 2-box GPU G2 cell)
 **Session:** zed-amo-i623-t24, 1793123917
 **Plan:** [`.plans/623_multi_host_pipeline_inference_lane.md`](../.plans/623_multi_host_pipeline_inference_lane.md) T2.4
 
@@ -105,9 +105,39 @@ contended box): serial 352.9 ms vs interleaved 284.0 ms = **0.805** (bar
   lanes on amo (886-t5 device gates + the 1122 ktile64 re-cell) and the
   2-box coordination cost; the CPU-verifiable arms landed first by design.
 
+## The 2-box GPU G2 cell (2026-10-28, same session — the box freed)
+
+amo head (GPU) ⇄ bmo tail (GPU), TB5, split 32/32, Bonsai-2 27B,
+`--max-new 32 --no-eos --prompt 7,13,42,100`, ABBA-ordered (warmup
+first; medians of two runs per posture; clean shutdown every cell):
+
+| streams | per-stream decode | aggregate decode window |
+|---|---|---|
+| 1 | 46.0 / 47.7 tok/s | (= per-stream) |
+| 2 | 54.6 / 54.9 tok/s | **109.3 / 109.8 tok/s = 2.37×** |
+| 3 | 36.5 tok/s | 109.4 tok/s = 2.38× (saturated) |
+
+- **The PP bubble is filled: aggregate decode DOUBLES at s = 2**
+  (~109.5 vs ~46.9 tok/s single) — the head computes stream B while the
+  tail computes stream A, hiding both the wire hop and the stage
+  alternation. Per-stream rate at s = 2 is UNCHANGED-to-better (54.6 vs
+  46.9 — the hand-off cadence regularises under round-robin), so the
+  aggregate is pure bubble fill, not a per-stream tax.
+- **Saturation at s = 2:** the s = 3 aggregate is the same ~109.4 —
+  the pipeline has no bubble left to fill; a third stream only
+  partitions the rate (per-stream 36.5). More streams buy capacity
+  sharing, not throughput.
+- Prefill in these cells is P = 4 (round-robin overhead negligible:
+  0.39 s single vs 0.47 s multi — the Begin frames + per-stream state).
+- The single-box loopback CPU smoke's 1.64× and this 2.37× measure the
+  same scheduler at two wire/compute ratios; the GPU⇄GPU cell is the
+  one T2.4's thesis was about.
+
 ## Verdict
 
-**LANDED (code + G1)** — the multi-stream protocol is real, bit-identical
-per stream, and the bubble fill measures on both the synth fixture and the
-real 27B checkpoint over loopback. G2 GPU/2-box cells OPEN, gated on a
-quiet amo GPU + bmo coordination.
+**LANDED (code + G1 + the 2-box G2 cell)** — the multi-stream protocol
+is real, bit-identical per stream, and the bubble fill measures **2.37×
+aggregate decode** on the real 27B checkpoint over TB5 at s = 2,
+saturating there. Open rungs (none block the lane): the admission seam
+(mid-flight join), kernel-level micro-batching (batch-2 step on the
+tail), and the T2.7 scoreboard rows.
