@@ -3797,6 +3797,38 @@ impl TernaryDeltanetGpuForward {
                 // (each re-measure costs the 0.5 s T2 settle; per-layer
                 // would add ~24 s at 48 layers).
                 let mut measured_gate: Option<u64> = None;
+                // Issue 886 T5 G2 (M5, 2026-10-27): the base-reservation
+                // suffix sum — the down ambition shares the bank's one
+                // budget with the base programs still to come, and without
+                // the reserve it starves them (the layer-48 GateUpProj
+                // poison). Same rows*cols measure as every other ladder
+                // term; in split-overlap mode this OVER-reserves (the full
+                // group is summed where only the prefix registers) — the
+                // safe direction: downs refuse early, the base always
+                // completes.
+                let base_reserve_suffix: Vec<u64> = {
+                    let mut suffix = vec![0u64; config.n_layer + 1];
+                    for i in (0..config.n_layer).rev() {
+                        let l = &weights.layers[i];
+                        let group_bytes = |g: &katgpt_core::TernaryGroupWeights| {
+                            (g.rows * g.cols) as u64
+                        };
+                        let is_gdn = layer_types[i] == DeltaNetLayerType::DeltaNet;
+                        let this_layer = if is_gdn {
+                            // Same resolution the registration path uses
+                            // (q4_refuse: ternary arm, loud refusal else;
+                            // the Cow derefs to the group weights).
+                            group_bytes(&q4_refuse(&l.in_proj_qkv, "in_proj_qkv"))
+                                + group_bytes(&q4_refuse(&l.in_proj_z, "in_proj_z"))
+                                + group_bytes(&q4_refuse(&l.gate_proj, "gate_proj"))
+                                + group_bytes(&q4_refuse(&l.up_proj, "up_proj"))
+                        } else {
+                            0
+                        };
+                        suffix[i] = suffix[i + 1] + this_layer;
+                    }
+                    suffix
+                };
                 if down_enabled && ctx.is_ready() && !gdn_layers.is_empty() {
                     // T2: settle before EVERY headroom (re-)measure —
                     // including the first (oMLX measures the same way).
@@ -3853,6 +3885,10 @@ impl TernaryDeltanetGpuForward {
                             down_spent,
                             bank_bytes,
                             bytes,
+                            // This layer's OWN base ops register inside the
+                            // same register_layer call, after the gate — the
+                            // reserve counts from the NEXT layer's base.
+                            base_reserve_suffix[i + 1],
                         ) {
                             Some(down_t)
                         } else {
@@ -3917,6 +3953,7 @@ impl TernaryDeltanetGpuForward {
                                 down_spent,
                                 bank_bytes,
                                 bytes,
+                                base_reserve_suffix[i + 1],
                             ) {
                                 ctx.try_register_down(i, &down_t)
                             } else {

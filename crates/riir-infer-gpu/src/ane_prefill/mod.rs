@@ -601,6 +601,13 @@ pub struct AneDownReport {
 /// effective ceiling the whole bank already enforces; `ladder_byte_cap`
 /// (0 = uncapped) bounds CUMULATIVE down bytes (`down_spent`), the
 /// operator's deliberate narrowing of the down lane alone.
+/// `reserve_bytes` is the Issue-886-T5-G2 finding (M5, 2026-10-27): the
+/// bytes of BASE programs not yet registered — the down ambition shares
+/// the bank's one budget with them, and without the reservation the
+/// ladder starves the base bank (a strict registration poisons the ctx —
+/// all-or-nothing, Issue 066 — exactly the cascade G2 exists to catch;
+/// measured: 36 downs ate the reserve, layer-48 GateUpProj refused,
+/// ane_ready false). Same measure as every other term here (`rows*cols`).
 #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
 pub fn down_admits(
     budget_ceiling: u64,
@@ -609,11 +616,15 @@ pub fn down_admits(
     down_spent: u64,
     bank_bytes: u64,
     down_bytes: u64,
+    reserve_bytes: u64,
 ) -> bool {
     // Overflow at any term REFUSES (the sum exceeds every representable
     // ceiling; saturation would collapse u64::MAX-boundary cases into a
     // false admit — pinned by the extremes row of the test table).
-    let Some(after) = bank_bytes.checked_add(down_bytes) else {
+    let Some(after) = bank_bytes
+        .checked_add(down_bytes)
+        .and_then(|v| v.checked_add(reserve_bytes))
+    else {
         return false;
     };
     if after > budget_ceiling {
@@ -1269,22 +1280,27 @@ mod tests {
 
     /// Issue 886 T3: the per-attempt admissibility arithmetic — every cap
     /// must admit: two-sided budget, measured gate, cumulative ladder cap.
+    /// Issue 886 T5 G2 (M5, 2026-10-27): the base-reservation term — a down
+    /// op must also admit against `bank + down + reserve` (the base
+    /// programs still to come), else the ambition starves the base bank
+    /// into the strict-registration poison the G2 arm measured.
     #[test]
     #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
     fn down_admits_requires_every_cap() {
         let ceiling = 1000u64;
-        // Budget admits, gate admits, no ladder cap.
-        assert!(down_admits(ceiling, Some(900), 0, 0, 500, 300));
+        let reserve = 0u64;
+        // Budget admits, gate admits, no ladder cap, no reserve.
+        assert!(down_admits(ceiling, Some(900), 0, 0, 500, 300, reserve));
         // Two-sided budget refuses: 500 + 300 + 300 > 1000.
-        assert!(!down_admits(ceiling, Some(900), 0, 0, 500 + 300, 300));
+        assert!(!down_admits(ceiling, Some(900), 0, 0, 500 + 300, 300, reserve));
         // Measured gate refuses though budget admits.
-        assert!(!down_admits(ceiling, Some(700), 0, 0, 500, 300));
+        assert!(!down_admits(ceiling, Some(700), 0, 0, 500, 300, reserve));
         // Gate measurement unavailable (None): the gate term abstains —
         // the two-sided ceiling already carries the conservative default.
-        assert!(down_admits(ceiling, None, 0, 0, 500, 300));
+        assert!(down_admits(ceiling, None, 0, 0, 500, 300, reserve));
         // Cumulative ladder cap refuses: spent + bytes > cap.
-        assert!(!down_admits(ceiling, Some(900), 500, 400, 0, 300));
-        assert!(down_admits(ceiling, Some(900), 500, 200, 0, 300));
+        assert!(!down_admits(ceiling, Some(900), 500, 400, 0, 300, reserve));
+        assert!(down_admits(ceiling, Some(900), 500, 200, 0, 300, reserve));
         // Saturation safety: no panic at extremes.
         assert!(!down_admits(
             u64::MAX,
@@ -1292,7 +1308,22 @@ mod tests {
             0,
             u64::MAX - 10,
             u64::MAX - 10,
-            30
+            30,
+            reserve
         ));
+
+        // ── the T5-G2 reservation rows ──
+        // The finding's exact shape: bank + down fits the budget, but the
+        // base programs still to come do not → REFUSE (the old arithmetic
+        // admitted this and starved layer-48's GateUpProj).
+        assert!(!down_admits(1000, Some(900), 0, 0, 500, 300, 300));
+        // With the reserve, the same down admits once bank is smaller.
+        assert!(down_admits(1000, Some(900), 0, 0, 300, 300, 300));
+        // The reserve binds against the measured gate too (same starvation
+        // argument — the gate term guards the machine, the reserve guards
+        // the rest of the bank).
+        assert!(!down_admits(1000, Some(950), 0, 0, 300, 300, 400));
+        // Overflow through the reserve term refuses.
+        assert!(!down_admits(u64::MAX, None, 0, 0, u64::MAX - 5, 30, u64::MAX - 10));
     }
 }
