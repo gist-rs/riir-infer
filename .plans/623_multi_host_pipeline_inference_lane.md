@@ -258,7 +258,7 @@ mlx-lm on the Proposal-042 scoreboard **measured on the same two boxes**.
     tail [32,64), TB5): `--full-check` **G1 PASS**, 32 tokens, 20.3 tok/s (amo's GPU
     was contended by the elephant capture — indicative only). Idle-bmo overhead read:
     2-stage 26.0 vs 1-box stage path 27.2 tok/s = **~4% pipeline cost** — but the 1-box
-    base is ~0.45× llama.cpp's 60.9 on the same box → **[Issue 1139](../.issues/1139_m5_ultra_decode_gap_vs_llamacpp.md)**
+    base is ~0.45× llama.cpp's 60.9 on the same box → **`Issue 1139`**
     (the T0.3 rule: file the losing-base gap first).
   - [x] T2.2c(1) **range-scoped weights — LANDED 2026-10-27.** `WeightScope` (core
     `deltanet::ternary_weights`) + `load_qwen_deltanet_ternary_weights_gguf_scoped`: a
@@ -281,7 +281,7 @@ mlx-lm on the Proposal-042 scoreboard **measured on the same two boxes**.
     indicative only). The lane now buys capacity: a model up to ~2× one box's budget
     splits across two.
   - [-] T2.2c(2)+(3) stage per-token cost — **DECLINED 2026-10-27 on measurement**
-    ([Issue 1139](../.issues/1139_m5_ultra_decode_gap_vs_llamacpp.md) T1, idle bmo,
+    (`Issue 1139` T1, idle bmo,
     3 runs): the whole logits readback + host argmax is **0.92–0.94% of the token**
     (0.23–0.28 + 0.11 ms of 36.7–43.2 ms) — the ceiling for an on-GPU argmax before its
     own kernel cost, under the 1.5% G2 bar; the 20 KB `set_hidden_state` alloc is
