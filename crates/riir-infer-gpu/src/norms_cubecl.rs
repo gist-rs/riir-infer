@@ -932,6 +932,146 @@ fn residual_add_rmsnorm_f32(
     }
 }
 
+/// Issue 1143 — [`residual_add_rmsnorm_f32`] with 4 loads in flight per lane.
+///
+/// The decode norm is ONE 256-thread workgroup over `dim` (5120 on Bonsai):
+/// each lane walks `dim / 256` = 20 strided element pairs, one DRAM round
+/// trip at a time — the Issue-1142 load-latency shape on a tiny grid. This
+/// variant issues four iterations' loads before folding them into
+/// `partial_sq` in the SAME i order with the SAME `+=` (Phase 1), and hoists
+/// four `x`/`gamma` pairs ahead of the stores (Phase 4). Phases 2-3 are
+/// line-for-line the incumbent, so every lane's accumulation sequence and
+/// every output expression is unchanged — bit-identical by construction
+/// (`test_residual_add_rmsnorm_mlp4_bit_identity`). Depth measured on idle
+/// bmo (Bonsai-2): 4 → +7.3% e2e (3/3); 8 → 0.4% SLOWER than 4 (3/3, not
+/// taken). Each hoisted index is
+/// distinct from every stored index in its group, so hoisting the `x` loads
+/// over the `x` stores reads the same values.
+#[cfg(feature = "cubecl_runtime")]
+#[cube(launch_unchecked)]
+fn residual_add_rmsnorm_f32_mlp4(
+    x: &mut [f32],
+    residual: &[f32],
+    gamma: &[f32],
+    params: &[f32],
+    norm_out: &mut [f32],
+) {
+    let inv_dim = params[0usize];
+    let eps = params[1usize];
+    let dim = params[2usize] as u32;
+    let cube_size = 256u32;
+    let tid = UNIT_POS;
+
+    // ── Phase 1: residual add + x², four iterations' loads in flight ──
+    let mut partial_sq = f32::new(0.0f32);
+    let mut i = tid;
+    while i + 3u32 * cube_size < dim {
+        let i1 = i + cube_size;
+        let i2 = i + 2u32 * cube_size;
+        let i3 = i + 3u32 * cube_size;
+        let x0 = x[i as usize];
+        let x1 = x[i1 as usize];
+        let x2 = x[i2 as usize];
+        let x3 = x[i3 as usize];
+        let r0 = residual[i as usize];
+        let r1 = residual[i1 as usize];
+        let r2 = residual[i2 as usize];
+        let r3 = residual[i3 as usize];
+        let v0 = x0 + r0;
+        let v1 = x1 + r1;
+        let v2 = x2 + r2;
+        let v3 = x3 + r3;
+        x[i as usize] = v0;
+        x[i1 as usize] = v1;
+        x[i2 as usize] = v2;
+        x[i3 as usize] = v3;
+        partial_sq += v0 * v0;
+        partial_sq += v1 * v1;
+        partial_sq += v2 * v2;
+        partial_sq += v3 * v3;
+        i += 4u32 * cube_size;
+    }
+    while i < dim {
+        let val = x[i as usize] + residual[i as usize];
+        x[i as usize] = val;
+        partial_sq += val * val;
+        i += cube_size;
+    }
+
+    // ── Phase 2: shared-memory tree reduction (identical) ──
+    let mut smem = Shared::<[f32]>::new_slice(256usize);
+    smem[tid as usize] = partial_sq;
+    sync_cube();
+    if tid < 128u32 {
+        smem[tid as usize] = smem[tid as usize] + smem[(tid + 128u32) as usize];
+    }
+    sync_cube();
+    if tid < 64u32 {
+        smem[tid as usize] = smem[tid as usize] + smem[(tid + 64u32) as usize];
+    }
+    sync_cube();
+    if tid < 32u32 {
+        smem[tid as usize] = smem[tid as usize] + smem[(tid + 32u32) as usize];
+    }
+    sync_cube();
+    if tid < 16u32 {
+        smem[tid as usize] = smem[tid as usize] + smem[(tid + 16u32) as usize];
+    }
+    sync_cube();
+    if tid < 8u32 {
+        smem[tid as usize] = smem[tid as usize] + smem[(tid + 8u32) as usize];
+    }
+    sync_cube();
+    if tid < 4u32 {
+        smem[tid as usize] = smem[tid as usize] + smem[(tid + 4u32) as usize];
+    }
+    sync_cube();
+    if tid < 2u32 {
+        smem[tid as usize] = smem[tid as usize] + smem[(tid + 2u32) as usize];
+    }
+    sync_cube();
+    if tid < 1u32 {
+        smem[0usize] = smem[0usize] + smem[1usize];
+    }
+    sync_cube();
+
+    // ── Phase 3: broadcast inv_rms (identical) ──
+    if tid < 1u32 {
+        let mean_sq = smem[0usize] * inv_dim;
+        smem[0usize] = f32::new(1.0f32) / (mean_sq + eps).sqrt();
+    }
+    sync_cube();
+
+    let inv_rms = smem[0usize];
+
+    // ── Phase 4: normalize + gamma, four x/gamma pairs in flight ──
+    let mut j = tid;
+    while j + 3u32 * cube_size < dim {
+        let j1 = j + cube_size;
+        let j2 = j + 2u32 * cube_size;
+        let j3 = j + 3u32 * cube_size;
+        let a0 = x[j as usize];
+        let a1 = x[j1 as usize];
+        let a2 = x[j2 as usize];
+        let a3 = x[j3 as usize];
+        let g0 = gamma[j as usize];
+        let g1 = gamma[j1 as usize];
+        let g2 = gamma[j2 as usize];
+        let g3 = gamma[j3 as usize];
+        norm_out[j as usize] = a0 * inv_rms * g0;
+        norm_out[j1 as usize] = a1 * inv_rms * g1;
+        norm_out[j2 as usize] = a2 * inv_rms * g2;
+        norm_out[j3 as usize] = a3 * inv_rms * g3;
+        j += 4u32 * cube_size;
+    }
+    while j < dim {
+        let val = x[j as usize];
+        let g = gamma[j as usize];
+        norm_out[j as usize] = val * inv_rms * g;
+        j += cube_size;
+    }
+}
+
 /// Fused ResidualAdd + RMSNorm launcher (Issue 645).
 ///
 /// Computes `x[i] += residual[i]` then `norm_out = rmsnorm(x, gamma, eps)`
@@ -972,20 +1112,71 @@ impl ResidualAddRmsNormCubeCL {
         debug_assert_binding_at_least(&residual_handle, dim, "ResidualAddRmsNormCubeCL::residual");
         debug_assert_binding_at_least(&norm_out_handle, dim, "ResidualAddRmsNormCubeCL::norm_out");
 
-        // SAFETY: Caller guarantees correct buffer sizes.
+        // SAFETY: Caller guarantees correct buffer sizes. Issue 1143: the
+        // 4-deep variant is bit-identical; `RIIR_NORM_MLP` selects it.
         unsafe {
-            residual_add_rmsnorm_f32::launch_unchecked::<R>(
-                client,
-                CubeCount::Static(1, 1, 1),
-                CubeDim::new_1d(256),
-                BufferArg::from_raw_parts(x_handle, dim),
-                BufferArg::from_raw_parts(residual_handle, dim),
-                BufferArg::from_raw_parts(gamma_handle, dim),
-                BufferArg::from_raw_parts(params_handle, 3),
-                BufferArg::from_raw_parts(norm_out_handle, dim),
-            );
+            let x_arg = BufferArg::from_raw_parts(x_handle, dim);
+            let residual_arg = BufferArg::from_raw_parts(residual_handle, dim);
+            let gamma_arg = BufferArg::from_raw_parts(gamma_handle, dim);
+            let params_arg = BufferArg::from_raw_parts(params_handle, 3);
+            let norm_out_arg = BufferArg::from_raw_parts(norm_out_handle, dim);
+            match norm_mlp_enabled() {
+                true => residual_add_rmsnorm_f32_mlp4::launch_unchecked::<R>(
+                    client,
+                    CubeCount::Static(1, 1, 1),
+                    CubeDim::new_1d(256),
+                    x_arg,
+                    residual_arg,
+                    gamma_arg,
+                    params_arg,
+                    norm_out_arg,
+                ),
+                false => residual_add_rmsnorm_f32::launch_unchecked::<R>(
+                    client,
+                    CubeCount::Static(1, 1, 1),
+                    CubeDim::new_1d(256),
+                    x_arg,
+                    residual_arg,
+                    gamma_arg,
+                    params_arg,
+                    norm_out_arg,
+                ),
+            }
         }
     }
+}
+
+/// Issue 1143: the decode `ResidualAddRmsNormCubeCL` dispatches
+/// [`residual_add_rmsnorm_f32_mlp4`] (4 loads in flight per lane,
+/// bit-identical) unless `RIIR_NORM_MLP` is set to anything but 1/on/true —
+/// the `dense_pair_env_semantics` contract (unset = ON).
+/// [`set_norm_mlp`] is the harness arm toggle.
+#[cfg(feature = "cubecl_runtime")]
+static USE_NORM_MLP: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(true);
+#[cfg(feature = "cubecl_runtime")]
+static NORM_MLP_INITIALIZED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+
+#[cfg(feature = "cubecl_runtime")]
+fn norm_mlp_enabled() -> bool {
+    if NORM_MLP_INITIALIZED
+        .set(crate::gemv_cubecl::dense_pair_env_semantics(std::env::var(
+            "RIIR_NORM_MLP",
+        )))
+        .is_ok()
+    {
+        USE_NORM_MLP.store(
+            NORM_MLP_INITIALIZED.get().copied().unwrap_or(true),
+            std::sync::atomic::Ordering::Relaxed,
+        );
+    }
+    USE_NORM_MLP.load(std::sync::atomic::Ordering::Relaxed)
+}
+
+/// Force the 4-deep residual-add norm on/off (overrides `RIIR_NORM_MLP`).
+#[cfg(feature = "cubecl_runtime")]
+pub fn set_norm_mlp(on: bool) {
+    let _ = NORM_MLP_INITIALIZED.set(on);
+    USE_NORM_MLP.store(on, std::sync::atomic::Ordering::Relaxed);
 }
 
 /// Fused ResidualAdd + RMSNorm + forward-rotate staging (Issue 1134).
@@ -1642,6 +1833,93 @@ mod tests {
                 "x-in-place[{i}] bit-mismatch at dim={dim} hblock={hblock}"
             );
         }
+    }
+
+    /// Issue 1143 G1 — the 4-deep residual-add norm is to_bits-equal to the
+    /// incumbent on all three outputs' worth of state (x in place, norm_out)
+    /// at the Bonsai decode width, a ragged tail (dim not a multiple of
+    /// 4·256 nor of 256), and a sub-group width (dim < 1024 — the hoisted
+    /// loop never runs).
+    fn norm_mlp4_g1_case(dim: usize) {
+        let ctx = CubeCLContext::new().expect("CubeCL should initialize");
+        let client = ctx.client();
+        let eps = 1e-6f32;
+        let x: Vec<f32> = (0..dim)
+            .map(|i| ((i % 37) as f32 - 18.0f32) * 0.113f32 + ((i % 5) as f32) * 121.7f32)
+            .collect();
+        let residual: Vec<f32> = (0..dim)
+            .map(|i| ((i % 23) as f32 - 11.0f32) * 0.37f32)
+            .collect();
+        let gamma: Vec<f32> = (0..dim)
+            .map(|i| 1.0f32 + (i % 11) as f32 * 0.031f32)
+            .collect();
+        let params: &[f32] = &[1.0f32 / dim as f32, eps, dim as f32];
+        let run = |mlp: bool| -> (Vec<f32>, Vec<f32>) {
+            let xh = client.create_from_slice(f32::as_bytes(&x));
+            let rh = client.create_from_slice(f32::as_bytes(&residual));
+            let gh = client.create_from_slice(f32::as_bytes(&gamma));
+            let ph = client.create_from_slice(f32::as_bytes(params));
+            let oh = client.empty(dim * core::mem::size_of::<f32>());
+            // SAFETY: every handle was created above with exactly `dim` (params: 3) f32.
+            unsafe {
+                let args = (
+                    BufferArg::from_raw_parts(xh.clone(), dim),
+                    BufferArg::from_raw_parts(rh, dim),
+                    BufferArg::from_raw_parts(gh, dim),
+                    BufferArg::from_raw_parts(ph, 3),
+                    BufferArg::from_raw_parts(oh.clone(), dim),
+                );
+                match mlp {
+                    true => residual_add_rmsnorm_f32_mlp4::launch_unchecked::<ActiveRuntime>(
+                        &client,
+                        CubeCount::Static(1, 1, 1),
+                        CubeDim::new_1d(256),
+                        args.0,
+                        args.1,
+                        args.2,
+                        args.3,
+                        args.4,
+                    ),
+                    false => residual_add_rmsnorm_f32::launch_unchecked::<ActiveRuntime>(
+                        &client,
+                        CubeCount::Static(1, 1, 1),
+                        CubeDim::new_1d(256),
+                        args.0,
+                        args.1,
+                        args.2,
+                        args.3,
+                        args.4,
+                    ),
+                }
+            }
+            let xb = client.read_one(xh).expect("read");
+            let ob = client.read_one(oh).expect("read");
+            (f32::from_bytes(&xb).to_vec(), f32::from_bytes(&ob).to_vec())
+        };
+        let (x_a, o_a) = run(false);
+        let (x_b, o_b) = run(true);
+        let mut nonzero = 0usize;
+        for i in 0..dim {
+            assert_eq!(x_a[i].to_bits(), x_b[i].to_bits(), "x[{i}] dim={dim}");
+            assert_eq!(
+                o_a[i].to_bits(),
+                o_b[i].to_bits(),
+                "norm_out[{i}] dim={dim}"
+            );
+            nonzero += usize::from(o_b[i] != 0.0);
+        }
+        // Loud-zero guard: an unlaunched kernel leaves both outputs equal zeros.
+        assert!(
+            nonzero > dim / 2,
+            "norm_out mostly zero — kernel did not run (dim={dim})"
+        );
+    }
+
+    #[test]
+    fn test_residual_add_rmsnorm_mlp4_bit_identity() {
+        norm_mlp4_g1_case(5120); // Bonsai decode width: 20 trips, 5 hoisted groups
+        norm_mlp4_g1_case(5120 + 2 * 256 + 37); // ragged: 2 single-step tail trips + partial lanes
+        norm_mlp4_g1_case(768); // < 4·256: the hoisted loop never runs
     }
 
     #[test]

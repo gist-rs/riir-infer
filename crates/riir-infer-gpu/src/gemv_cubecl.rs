@@ -561,7 +561,7 @@ static DENSE_PAIR_WG_INITIALIZED: std::sync::OnceLock<u32> = std::sync::OnceLock
 /// toggle reached the dispatch).
 static DENSE_PAIR_LAUNCHES: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
 
-fn dense_pair_env_semantics(env: Result<String, std::env::VarError>) -> bool {
+pub(crate) fn dense_pair_env_semantics(env: Result<String, std::env::VarError>) -> bool {
     match env {
         // Unset = ON (the promoted default; the wg-occupancy posture).
         Err(std::env::VarError::NotPresent) => true,
