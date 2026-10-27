@@ -120,7 +120,7 @@ applied IN the transposed staging pass from registers (`GEMM_BODY_V10T_GLU_Q8`,
 `gemm_ternary_i8_mma_v6_src.rs`) with the Bench-721 canonical forms in the standalone
 kernel's op order — bit-identical to (v10t pair + standalone SwiGLU) by construction,
 G1 gate 0 bit-diffs ×2 shapes vs the real standalone kernel. Env
-`RIIR_PREFILL_FFN_GLU` — **PROMOTED DEFAULT-ON 2026-10-27** (Bench 1008 / verdict
+`RIIR_PREFILL_FFN_GLU` — **PROMOTED DEFAULT-ON 2026-10-27** (riir-ai Bench 1008 / verdict
 `9ca951de`: paired league windows +6.31/+6.72% pp2048, +7.27/+6.47% pp4096, 4/4
 positive, G1 pins EXACT 4/4; riir-infer `57fa7a7`) — the env is DEMOTE-ONLY
 (exact-literal `0`/`false`/`off` restores the incumbent pair path byte-identically;
@@ -132,11 +132,11 @@ been pair-vs-pair (caught by the engagement-proof-first protocol — the `[721-t
 line is unreachable at the folded posture; the folded lane's proof is the one-shot
 `[1127-glu] REACH` line). Kernel probe Bench 897
 (`.benchmarks/897_issue1124_v10tglu_kernel_probe.md`): **1.258× @p2048 / 1.227×
-@p4096** at the league FFN shapes (m=17408, n=5120). T2 DONE — Bench 1008
+@p4096** at the league FFN shapes (m=17408, n=5120). T2 DONE — riir-ai Bench 1008
 (`../riir-ai/.benchmarks/1008_issue1127_t4_recell_bundle.md`); follow-ups: the
 mirror-halving commit, the next-bout default-posture confirm (< +3% pooled or any
 negative window → the demote hatch reverts). T3 mined via refine Batch 287
-(`d871a0fc`, Plan 292 / Research 325).
+(`d871a0fc`, riir-refine Plan 292 / Research 325).
 The decode-hold escalation rungs (the Bench-1004 RED response, 2026-10-26) LANDED as
 eval-gated opt-ins with records, zero production change: `RIIR_GDN_CORE_FUSED=1`
 (one-launch GDN core — G1 exact everywhere, G2 −3.5%/−2.1% NEGATIVE, stays opt-in
@@ -183,7 +183,7 @@ cargo test -p riir-infer-gpu --features exl3_gpu,cuda_backend --lib  # native CU
 # ../katgpt-rs/.plans/622_scale_invariant_attn.md; GPU legs open, GPU-window-gated):
 cargo test --lib --features scale_invariant_attn   # 8 attention_si tests incl. 3 wiring e2e
 cargo build --release --features scale_invariant_attn,bonsai2_hadamard --bin si_zero_shot_ppl  # the G3 harness (its OWN required-features posture — the P43 law)
-# Issue 959 T6 — the f64 golden-NLL lossy-quant oracle (opt-in `golden_nll`,
+# katgpt-rs Issue 959 T6 — the f64 golden-NLL lossy-quant oracle (opt-in `golden_nll`,
 # forwards katgpt-core/fixed_log_softmax; `riir_infer_core::golden_nll` is
 # the reusable oracle, the bin's `--golden-nll` the reference-mode arm:
 # base-only, pooled incumbent-vs-golden Δ + the fp32/f64 confidence-band
