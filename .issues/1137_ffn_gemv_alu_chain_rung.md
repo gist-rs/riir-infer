@@ -36,4 +36,22 @@ G1 to_bits vs `gemv_ternary_plane_rowtiled8_f16scale` at both FFN shapes (the Be
 - NOT the attention/gdn kernels (i1135/i1136 territory, closed).
 - NOT lm_head-first: it reads 51% of stream already; the FFN pair is the pool.
 
+## The mapping study (2026-10-27 ~10:0x +07, zed-amo-i1137-ffnalu) — the fork mechanism NAMED
+
+Source read: `vendor/prismml-llama.cpp/ggml/src/ggml-metal/kernels/mul_mv.metal` `kernel_mul_mv_tq2_0_f32_impl` (the fork carries a NATIVE ternary type `GGML_TYPE_TQ2_0`; dispatch constants `N_R0_TQ2_0=4` rows/simdgroup, `N_SG_TQ2_0=2` simdgroups/threadgroup = 64 threads, 8 rows/threadgroup; geometry from `ggml-metal-impl.h` + `ggml-metal-device.cpp`).
+
+The mechanism (GGML PR #26980 algebra), four parts:
+1. **Layout**: 2-bit codes packed 4-per-byte, row-major byte stream (`qs`), per-block (QK_K=256) f16 super-scale `d`. NOT bit-planes.
+2. **Offset-encoding algebra**: each thread owns 4 bytes per 32-value block (`htg = tiisg % 8`); per block it hoists `coef[4]` from the y-vector (y-differences) + `sumy = Σy` ONCE, shared across the 4 rows; the row loop is then `sum = −sumy + Σ_j coef[j]·f_j(v)` with `f_j` the 2-bit fields extracted by exact float floor ops (`floor(v·0.25)` = `v>>2`, etc.) — **pure float ops, no selects, no per-bit integer work**: 1 cvt + 3 floor + 4 fma per byte per row ≈ 3 ops/weight/row vs our 4 int select+add ops/weight/row.
+3. **The zero-weight offset fold** (`sum = −sumy + …`): the code offset lands as ONE subtract per block per row instead of per-weight branching.
+4. **float4 y loads** (16B) and 4-byte weight reads per row — denser coalescing than our per-lane 16 scattered u32 loads per word-iteration (row-major stride = words_per_row×4B apart, uncoalesced across the 8 rows).
+
+**Mapping to OUR format** (the repack design): our pos/neg planes → byte fields `c = (p − n) + 2 ∈ {1,2,3}` packed 4-per-byte (`v = c0 | c1<<2 | c2<<4 | c3<<6`; the (1,1) alias encodes as 2 — both mean w=0). Then `d = c − 2 ∈ {−1,0,+1}` recovers our weights EXACTLY (value-identical, not approximate), and `dot = Σ s_g (Σ f_j·x_j − 2 Σ x_j)` with the `−2Σx` folding per block exactly like the fork's `sumy`. Repack rides `TernaryHandle::from_weights` as a new arm (upload bytes ≈ same: 4 weights/byte vs 2 planes×1bit).
+
+**G1 class**: NOT to_bits — the offset fold changes f32 accumulation order (pre-authorized in this issue's gate: fall to the Bench-742 law — unit max-abs tolerance + greedy-token loop-stream identity e2e).
+
+**Prize arithmetic** (exec-pricing per the correction): reaching the fork's ~53%-of-stream class at the FFN shapes (~418 GB/s) takes gate/up 46.2→~30 µs and down 60.4→~41 µs → **≈ −3.2 ms/tok ≈ +13% e2e** — the largest single-rung prize left on the decode board; even 45%-of-stream ≈ +8%.
+
+**Next session body (this lease stays armed, expires 2026-10-28T04:00Z)**: (a) the repack arm in `from_weights`; (b) the CubeCL kernel (start at the fork geometry 4 rows/sg × 2 sg, sweep later); (c) the unit gate: max-abs + greedy-token vs the incumbent f16scale (bench_1140's rig builder is the harness base); (d) bench_1141 e2e A/B per the standard ladder (per-run interleave, REACH counter, demote hatch, RIIR_GEMV_TQ2_FIELD toggle default-OFF).
+
 **Refs:** riir-ai `.issues/1113` (the ⟲ 2026-10-27 probe-(b) note + the released ffnbw lease), `crates/riir-gpu/tests/bench_1140_ffn_gemv_bw_curve.rs` (the instrument: G1 + BW curve + asymmetry verdict cells), Bench 1008 (the census), Bench 1114 (the roofline + wg sweep), Bench 611 (the LUT negative), riir-infer Issue 771/1115.
