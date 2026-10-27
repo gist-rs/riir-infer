@@ -48,8 +48,8 @@ use riir_infer_core::multi_host::LayerRange;
 use riir_infer_gpu::TernaryDeltanetGpuForward;
 use riir_infer_gpu::cubecl_runtime::CubeCLContext;
 use riir_infer_gpu::ternary_deltanet_gpu_forward::{
-    PREFILL_STAGE_ALL, PREFILL_STAGE_ATTENTION, PREFILL_STAGE_BETA, PREFILL_STAGE_DELTANET,
-    PREFILL_STAGE_EMBED, PREFILL_STAGE_FFN, PREFILL_STAGE_GDN_NORM, PREFILL_STAGE_GDN_POST,
+    PREFILL_STAGE_ALL, PREFILL_STAGE_ATTENTION, PREFILL_STAGE_DELTANET, PREFILL_STAGE_EMBED,
+    PREFILL_STAGE_FFN, PREFILL_STAGE_GDN_BETA, PREFILL_STAGE_GDN_NORM, PREFILL_STAGE_GDN_POST,
     PREFILL_STAGE_GDN_PREWORK, PREFILL_STAGE_GDN_REC, PREFILL_STAGE_GDN_RESIDUAL,
     PREFILL_STAGE_GDN_ROTIN, PREFILL_STAGE_TAIL, prefill_site_timing_reset,
     prefill_site_timing_snapshot, set_prefill_site_timing_armed, set_prefill_stage_mask,
@@ -62,10 +62,14 @@ const FOLDED_MODEL: &str = "../../../riir-train/data/Ternary-Bonsai-2-27B-PQ2_0.
 const CHUNK: usize = 128;
 /// Frames per pass (total prompt = CHUNK × FRAMES tokens).
 const FRAMES: usize = 8;
-/// Untimed compile pass per posture (kernel JIT + cache warm).
-const WARMUP_PASSES: usize = 1;
+/// Untimed compile passes per posture (kernel JIT + cache warm). Two: the
+/// first pass compiles the posture's kernel set, the second settles the
+/// CubeCL pipeline caches — the census's first run measured the ALL baseline
+/// JIT-polluted (1711 ms/frame vs ~870 steady) because ALL ran first and its
+/// timed passes still carried one-time compiles.
+const WARMUP_PASSES: usize = 2;
 /// Timed passes per posture; the per-frame wall is the pass total / FRAMES.
-const TIMED_PASSES: usize = 4;
+const TIMED_PASSES: usize = 5;
 
 struct Posture {
     name: &'static str,
@@ -74,11 +78,10 @@ struct Posture {
 }
 
 fn postures() -> Vec<Posture> {
-    vec![
-        Posture {
-            name: "ALL",
-            strip: 0,
-        },
+    // ALL runs LAST: every strip is a subset of ALL's kernel set, so ALL is
+    // the warmest posture in the room and its baseline cannot carry JIT the
+    // strips never paid (the first-run lesson — see WARMUP_PASSES).
+    let mut v = vec![
         Posture {
             name: "-deltanet",
             strip: 1 << PREFILL_STAGE_DELTANET,
@@ -127,7 +130,12 @@ fn postures() -> Vec<Posture> {
             name: "-tail",
             strip: 1 << PREFILL_STAGE_TAIL,
         },
-    ]
+    ];
+    v.push(Posture {
+        name: "ALL",
+        strip: 0,
+    });
+    v
 }
 
 fn tokens(count: usize, bos: usize, vocab: usize) -> Vec<usize> {
@@ -280,7 +288,11 @@ fn bench_1146_prefill_frame_census() {
     let wide_per_tok = wide.as_secs_f64() * 1e3 / (TIMED_PASSES * prompt_len) as f64;
 
     // ── The table. Δ = ALL − strip = the class's frame cost. ──
-    let all_ms = results[0].1;
+    let all_ms = results
+        .iter()
+        .find(|(n, _)| *n == "ALL")
+        .map(|(_, ms)| *ms)
+        .expect("ALL posture present");
     println!(
         "\n=== i1146 prefill frame census (ms/frame, {}×{}) ===",
         FRAMES, CHUNK

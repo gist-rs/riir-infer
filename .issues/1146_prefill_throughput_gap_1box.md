@@ -1,12 +1,33 @@
 # Issue 1146: 1-box prefill throughput gap — 6–8× behind the incumbents (T0.3 finding)
 
-**Status:** OPEN — gap MEASURED (Bench 911); **ROOT CAUSE IDENTIFIED 2026-10-28 ~03:5x +07** (source-level, feature-gate reading + engine-default cross-check): the dist `gpu` feature row carries the decode posture but NOT the prefill-lane features — the 1141 class one list over. A/B confirmation pending (scripts/i1146_ab_session.sh; the amo window is the 641-T5 lane's right now).
+**Status:** OPEN — gap MEASURED (Bench 911); root-cause chain CORRECTED BY MEASUREMENT (Bench 914): the feature-row omission was real but MINOR (fix engaged, G1 pass, 1.09×) — the dispatch-storm hypothesis REFUTED; the census (914) attributes the floor to the M=128 ternary batch GEMM classes (FFN 65% + DeltaNet 25%) with a live 1.55× wide-chunk lever; ladder = width re-curve + W-frame rung
 **Claimed:** zed-amo-1146-prefill, 1793133500, expires 2026-10-29T20:45:00+00:00
 **Date:** 2026-10-28
 **Found by:** [`.benchmarks/911_plan623_t03_arms.md`](../.benchmarks/911_plan623_t03_arms.md) (Plan 623 T0.3, bmo idle, one session)
 **Session:** zed-amo-i623-t24
 
 ## The finding
+
+## ⟲ 2026-10-28 ~06:4x +07 zed-amo-1146-prefill — MEASURED CORRECTION (Bench 914): the A/B + the census
+
+The A/B ran (both postures build, G1 CROSS-POSTURE PASS, incumbent reproduces Bench 911): the
+feature-row fix ENGAGED (binary +1.7 MB of batched kernels) but delivered **1.09×** (pp4096
+24.579 → 22.504 s) — **the dispatch-storm arithmetic is REFUTED as the floor mechanism**
+(CubeCL/Metal submission is µs-class at these shapes, not the cudarc 50–105 µs class). The fix
+stays (correct engine-default posture, G1-clean).
+
+The census (the landed instrument, clean run v3) then attributes the 873.36 ms/frame 1-box
+floor: **FFN ternary batch GEMMs 569.7 (65%) + DeltaNet ternary batch GEMMs 220.8 (25%)** —
+hypothesis 1 (decode-shaped M=128 kernels) CONFIRMED with the alternative eliminated — embed
+55.1, attention 80.0, the whole GDN chain ~29.7 (3%; the sequential-chain class is CLOSED as a
+floor), tail ~0; coarse additivity +6% (closed). **Wide-chunk control: 4.413 vs 6.823 ms/token
+at 512 vs 128 = 1.55× per-token from width alone** (Bench 909's curve re-opens under the
+batched posture).
+
+Ladder (each its own GOAT): (1) chunk-width re-curve (config-class, 1.55× already read at 512);
+(2) the W-frame ternary GEMM rung (90% of the frame; Bench-895 spill cliff is the design
+constraint); (3) batched embed dequant (55 ms, mechanical); (4) GDN chain CLOSED — no rung owed.
+Full tables + honesty notes (v1 JIT pollution, v2 host-load pollution — both harness-corrected): **[Bench 914](../.benchmarks/914_issue1146_feature_row_ab_and_prefill_frame_census.md)**.
 
 ## ⟲ 2026-10-28 ~03:5x +07 zed-amo-1146-prefill — ROOT CAUSE: the dist gpu row omitted the prefill-lane features
 
