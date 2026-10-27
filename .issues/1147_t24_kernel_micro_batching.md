@@ -1,7 +1,7 @@
 # Issue 1147: T2.4 kernel micro-batching — batch-2 decode step on the tail
 
 **Status:** LANDED 2026-10-28 — `03f0fe6` (Bench 912: G1 PASS ×2, G2 +39% ABBA ×2; kernel-level batch-2 stays the forwarder rung)
-**Claimed:** zed-amo-i623-mb (T2.4 kernel micro-batching: batch-2 decode on the tail with per-stream bit-identity + GPU cells on idle bmo), 1793132228, expires 2026-10-29T20:17:00+00:00
+**Lease closed:** zed-amo-i623-mb (claimed 2026-10-27 epoch 1793132228 for the T2.4 kernel micro-batching rung — batch-2 decode on the tail with per-stream bit-identity + GPU cells on idle bmo) — released 2026-10-28, work complete (v0 landed + the wire refutation + the demotion)
 **Plan:** `.plans/623_multi_host_pipeline_inference_lane.md` T2.4 (the plan file's file-level lease stays t24's T5.1a–c claim — this issue is the micro-batching rung's own claim surface)
 
 ## The unit
