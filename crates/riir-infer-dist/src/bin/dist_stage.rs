@@ -53,6 +53,7 @@ use riir_infer_core::types::Config;
 use riir_infer_dist::multi::{MultiRequest, run_head_multi, run_tail_multi};
 use riir_infer_dist::runner::{HeadOptions, run_head_with, run_local_with, run_tail};
 use riir_infer_dist::sockopts::{self, Applied, LinkOptions};
+use riir_infer_dist::spec_fill::{RepeatLastDrafter, run_head_spec, run_tail_spec};
 use riir_infer_dist::stage::{ArtifactIdentity, StageCompute, TernaryCpuStage, stage_scope};
 #[cfg(feature = "gpu")]
 use riir_infer_dist::stage_gpu::TernaryGpuStage;
@@ -85,6 +86,12 @@ struct Args {
     /// planner (`riir_infer_dist::planner::plan_split`) merges two
     /// records + the link cost into the split choice.
     plan_report: Option<Vec<u32>>,
+    /// T5.1 v0: speculative fill with K drafts per verify round (head
+    /// and tail — the tail's loop must speak the verify arm). 1-stream
+    /// only; the CPU stage is the v0 posture (SpecStage = snapshot /
+    /// restore), the drafter is repeat-last (acceptance ≈ 0 — the
+    /// machinery lane, never a gain claim).
+    spec_k: Option<usize>,
 }
 
 fn parse() -> Result<Args, String> {
@@ -108,6 +115,7 @@ fn parse() -> Result<Args, String> {
         sock_buf: None,
         streams: 1,
         plan_report: None,
+        spec_k: None,
     };
     while let Some(flag) = it.next() {
         let mut val = || it.next().ok_or(format!("{flag} needs a value"));
@@ -146,6 +154,7 @@ fn parse() -> Result<Args, String> {
                 a.sock_buf = Some(val()?.parse().map_err(|e| format!("--sock-buf: {e}"))?)
             }
             "--streams" => a.streams = val()?.parse().map_err(|e| format!("--streams: {e}"))?,
+            "--spec-k" => a.spec_k = Some(val()?.parse().map_err(|e| format!("--spec-k: {e}"))?),
             "--plan-report" => {
                 a.plan_report = Some(
                     val()?
@@ -335,8 +344,27 @@ fn run() -> Result<(), String> {
             eprintln!("[tail] head connected from {peer}");
             let mut link = TcpTransport::new(sock, key, Direction::Upstream)
                 .map_err(|e| format!("socket: {e}"))?;
-            let steps = match streams {
-                1 => run_tail(stage_refs[0], &mut link, |_, _| {}),
+            let steps = match (streams, a.spec_k) {
+                (1, None) => run_tail(stage_refs[0], &mut link, |_, _| {}),
+                (1, Some(k)) => {
+                    // The verify arm needs SpecStage (snapshot/restore) —
+                    // the dyn stage_refs cannot carry the bound, so spec
+                    // mode seats its own CONCRETE CPU stage (the v0
+                    // posture; the GPU rewind surface is a later rung).
+                    if a.backend != "cpu" {
+                        return Err(format!(
+                            "--spec-k v0 is CPU-stage only (backend {} has no SpecStage impl)",
+                            a.backend
+                        ));
+                    }
+                    let mut stage =
+                        TernaryCpuStage::new(config.clone(), weights.clone(), range, identity)?;
+                    eprintln!("[tail] spec mode: verify arm armed (k={k})");
+                    run_tail_spec(&mut stage, &mut link, |_, _| {})
+                }
+                (_, Some(_)) => {
+                    return Err("--spec-k rides the single-stream loop only".into());
+                }
                 _ => run_tail_multi(&mut stage_refs, &mut link, |_, _, _| {}),
             }
             .map_err(|e| e.to_string())?;
@@ -379,11 +407,38 @@ fn run() -> Result<(), String> {
                 },
                 ..HeadOptions::default()
             };
-            let (reports, wall) = match streams {
-                1 => {
+            let (reports, wall) = match (streams, a.spec_k) {
+                (1, None) => {
                     let r = run_head_with(stage_refs[0], &mut link, &prompt, a.max_new, opts)
                         .map_err(|e| e.to_string())?;
                     (vec![r], None)
+                }
+                (1, Some(k)) => {
+                    // Same SpecStage seating as the tail arm: a concrete
+                    // CPU stage (v0 posture), never the dyn box.
+                    if a.backend != "cpu" {
+                        return Err(format!(
+                            "--spec-k v0 is CPU-stage only (backend {} has no SpecStage impl)",
+                            a.backend
+                        ));
+                    }
+                    let mut stage =
+                        TernaryCpuStage::new(config.clone(), weights.clone(), range, identity)?;
+                    let mut drafter = RepeatLastDrafter;
+                    let r = run_head_spec(
+                        &mut stage,
+                        &mut link,
+                        &prompt,
+                        a.max_new,
+                        opts,
+                        &mut drafter,
+                        k,
+                    )
+                    .map_err(|e| e.to_string())?;
+                    (vec![r], None)
+                }
+                (_, Some(_)) => {
+                    return Err("--spec-k rides the single-stream loop only".into());
                 }
                 _ => {
                     let reqs: Vec<MultiRequest> = (0..streams)

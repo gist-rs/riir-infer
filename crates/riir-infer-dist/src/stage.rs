@@ -223,3 +223,31 @@ impl StageCompute for TernaryCpuStage {
         &out[..width]
     }
 }
+
+/// Byte-exact state snapshot/restore over the Issue-028 handoff segment
+/// (`HybridStateSegment`): the T5.1 v0 rewind. The GDN journal's rank-1
+/// unwind is the FAST path for a later rung — this is the CORRECT path,
+/// existing substrate, zero forward surgery. Unbounded (non-sliding) KV
+/// only: the segment captures rows `[0..fill_pos)` and restores the fill
+/// marker, so a snapshot at the pre-verify cursor + restore is the
+/// rewind, bit-exact.
+impl crate::spec_fill::SpecStage for TernaryCpuStage {
+    fn snapshot_state(&self, out: &mut Vec<u8>) -> Result<(), String> {
+        out.clear();
+        riir_infer_core::multi_host::HybridStateSegment::encode_into(
+            &self.cache,
+            &self.weights.layer_types,
+            self.range,
+            out,
+        )
+    }
+
+    fn restore_state(&mut self, bytes: &[u8]) -> Result<(), String> {
+        riir_infer_core::multi_host::HybridStateSegment::restore_into(
+            bytes,
+            &mut self.cache,
+            &self.weights.layer_types,
+            self.range,
+        )
+    }
+}

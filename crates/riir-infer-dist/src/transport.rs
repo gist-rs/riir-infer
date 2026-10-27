@@ -80,6 +80,21 @@ pub enum FrameKind {
     /// LE`. [`FrameKind::Token`] carries no id to route by; a multi-stream
     /// head has up to one reply outstanding per stream and needs the id.
     TokenStream = 7,
+    /// One speculative VERIFY round (T5.1a): `seq_id u32 LE · n_tok u32 LE
+    /// · n_tok×u32 draft tokens · n_tok×hidden f32 rows` — the head's half
+    /// for the K drafted positions, so the tail verifies all K in ONE round
+    /// trip (the per-token round trip is the decode lever, T2.6). The tail
+    /// computes each row's argmax on its own logits — K u32 cross the wire,
+    /// never K×vocab — and adjudicates the accepted prefix itself (both
+    /// sides derive the same `m` from the same inputs; the reply carries it
+    /// as a cross-check).
+    VerifyStream = 8,
+    /// The verify reply (T5.1a): `seq_id u32 LE · n_tok u32 LE · m u32 LE
+    /// · n_tok×u32 per-position argmax`. Sent AFTER the tail's own rewind
+    /// bookkeeping: on a partial accept the tail has already restored its
+    /// pre-verify state, so the ordinary frame sequence resumes at the
+    /// verify's base position with no extra round trip.
+    VerifyReply = 9,
 }
 
 impl FrameKind {
@@ -93,6 +108,8 @@ impl FrameKind {
             5 => Ok(Self::Begin),
             6 => Ok(Self::BeginStream),
             7 => Ok(Self::TokenStream),
+            8 => Ok(Self::VerifyStream),
+            9 => Ok(Self::VerifyReply),
             _ => Err(invalid(format!("unknown frame kind {v}"))),
         }
     }
