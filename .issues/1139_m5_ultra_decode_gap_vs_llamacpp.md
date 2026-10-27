@@ -1,6 +1,6 @@
 # Issue 1139 — riir-infer 1-box GPU decode on M5 Ultra is ~2.2× behind llama.cpp (Bonsai-2-27B PQ2_0)
 
-**Status:** Open — filed 2026-10-27 from Plan 623 T2.2b (indicative, NOT the formal T0.3 cell). Unclaimed.
+**Status:** Open — T1 DONE 2026-10-27 (the production funnel is ALSO ~27 tok/s on idle bmo → the gap is the kernel stack, not the stage path); T2/T3 open. Filed 2026-10-27 from Plan 623 T2.2b (indicative, NOT the formal T0.3 cell). Unclaimed.
 
 ## Why
 
@@ -24,7 +24,17 @@ issue is the M5-Ultra scoreboard pin those rungs are scored against.
 
 ## Tasks
 
-- [ ] **T1 — confirm on the production funnel.** Re-measure with the 1-box
+- [x] **T1 — confirm on the production funnel. DONE 2026-10-27:** instrument
+  `crates/riir-infer-dist/tests/decode_readback_probe_gpu.rs` (1-box `forward_token`,
+  `--release`, full model, ctx 72, 8 warm-up + 64 timed steps). **bmo, AC power, load
+  1.2–1.7, no sibling GPU work, 3 runs: 36.67 / 43.19 / 37.37 ms per token = 27.27 /
+  23.15 / 26.76 tok/s** — the same ~27 as the stage seam, so the gap is the kernel
+  stack (T2), not the stage path. Stage-only costs PRICED in the same run: idle logits
+  readback 0.225–0.284 ms + host argmax over 248,320 logits 0.114–0.117 ms = **0.92–0.94%
+  of the token** — the ceiling for an on-GPU argmax, BEFORE its own kernel cost; under
+  the 1.5% G2 bar, so Plan 623 T2.2c(2)+(3) are DECLINED on this measurement (the
+  production funnel pays the same readback, so the same verdict covers it).
+  *Original brief:* re-measure with the 1-box
   `forward_token` decode loop (not the stage seam) on bmo, `--release`, box state
   recorded per the G2 law; rule out the stage-path-only costs (1 MB logits
   download + host argmax per step, `set_hidden_state`'s per-call device alloc).

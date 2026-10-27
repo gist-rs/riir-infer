@@ -248,9 +248,15 @@ mlx-lm on the Proposal-042 scoreboard **measured on the same two boxes**.
     PASS**, 32 tokens, load 5.1 / 4.5 s per box, decode 18.2 tok/s (amo load ~7 —
     indicative only). The lane now buys capacity: a model up to ~2× one box's budget
     splits across two.
-  - [ ] T2.2c(2)+(3) stage per-token cost: tail-side on-GPU argmax (skip the ~1 MB
-    logits download per token); preallocated device hidden buffer (`set_hidden_state`
-    allocates per call). Score against Issue 1139 T1's production-funnel number.
+  - [-] T2.2c(2)+(3) stage per-token cost — **DECLINED 2026-10-27 on measurement**
+    ([Issue 1139](../.issues/1139_m5_ultra_decode_gap_vs_llamacpp.md) T1, idle bmo,
+    3 runs): the whole logits readback + host argmax is **0.92–0.94% of the token**
+    (0.23–0.28 + 0.11 ms of 36.7–43.2 ms) — the ceiling for an on-GPU argmax before its
+    own kernel cost, under the 1.5% G2 bar; the 20 KB `set_hidden_state` alloc is
+    smaller still. Note for any successor: the shipped `ArgmaxCubeCL` tie rule is NOT
+    first-index (strided lanes: a tie between index 1 and index 256 returns 256), so a
+    re-open needs a tie-correct kernel to hold the Issue-940 law + the G1 bit bar. The
+    stage's per-token lever is the 1-box kernel stack (Issue 1139 T2), not the seam.
   - [ ] T2.2d the Issue-028 battery prompts with a tokenizer front (PoC used token ids).
 - [ ] **T2.3** Chunked pipelined prefill (chunk c on stage 1 while chunk c+1 on stage 0,
   double-buffered frames) + KV/GDN state lives on its own stage (no state traffic in
