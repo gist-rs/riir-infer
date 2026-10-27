@@ -9,5 +9,5 @@
 # Raising this is a deliberate act: bump `channel` in its own reviewed
 # commit and fix the new lints there.
 [toolchain]
-channel = "1.98.1"
+channel = "1.99.0"
 components = ["clippy", "rustfmt"]

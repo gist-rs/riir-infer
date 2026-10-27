@@ -199,6 +199,10 @@ mod imp {
     // entry points fall back to std.
 }
 
+// Unix-impl helper: every use sits inside the macos/linux regions, so the
+// item is cfg'd to match (the platform-dead-code rule — ungated here reads
+// dead on every other target).
+#[cfg(any(target_os = "macos", target_os = "linux"))]
 fn last_err(what: &str) -> io::Error {
     let e = io::Error::last_os_error();
     io::Error::new(e.kind(), format!("{what}: {e}"))
@@ -484,7 +488,7 @@ pub fn dial(addr: SocketAddr, o: &LinkOptions) -> io::Result<(TcpStream, Applied
         if !o.is_noop() {
             return Err(knob_unsupported("dial"));
         }
-        return Ok((TcpStream::connect(addr)?, Applied::untouched()));
+        Ok((TcpStream::connect(addr)?, Applied::untouched()))
     }
     #[cfg(any(target_os = "macos", target_os = "linux"))]
     {
@@ -508,7 +512,7 @@ pub fn listen(addr: SocketAddr, o: &LinkOptions) -> io::Result<(TcpListener, App
         if !o.is_noop() {
             return Err(knob_unsupported("listen"));
         }
-        return Ok((TcpListener::bind(addr)?, Applied::untouched()));
+        Ok((TcpListener::bind(addr)?, Applied::untouched()))
     }
     #[cfg(any(target_os = "macos", target_os = "linux"))]
     {
