@@ -1013,6 +1013,10 @@ members = ["crates/riir-infer-gpu", "crates/riir-infer-laya", "crates/riir-infer
 # of spelling the sibling path one level deeper).
 [workspace.dependencies]
 katgpt-core = { path = "../katgpt-rs/crates/katgpt-core" }
+# Shared DDTree/speculative substrate (the root package declares it
+# directly above; members inherit from here — riir-infer-gpu's Issue-966
+# grid_reselect arm is the first member consumer).
+katgpt-speculative = { path = "../katgpt-rs/crates/katgpt-speculative" }
 
 # ─── Local patches (crates.io forks) ─────────────────────────────────
 # Byte-identical copies of the patched crates.io sources under vendor/

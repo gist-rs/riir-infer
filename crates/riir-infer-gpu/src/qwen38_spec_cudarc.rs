@@ -65,7 +65,38 @@ pub struct KeyedSpecConfig {
     /// or any decision; the read rides [`KeyedLoopStats::premise`]. The solo
     /// loop only (the lanes variant does not record).
     pub premise_gate: bool,
+    /// Issue-966 / plan 632 — the grid-RESELECTION drafter arm
+    /// ([`DFlash2Drafter::lattice_walk_reselect`]). When armed, the solo
+    /// loop's draft phase runs the prefix-first scored law over each slot's
+    /// own candidate grid instead of the keyed sample. λ = 0 IS the argmax
+    /// baseline (the pre-registered control — the re-selected picks reduce
+    /// exactly to the greedy walk's). LOSSLESS by the keyed contract: the
+    /// acceptance rule reads only the target's own keyed samples, so the
+    /// committed stream is proposal-independent — the arm moves mean_j
+    /// (cost), never the stream (pinned by the harness's byte-identity
+    /// tripwire). The lanes variant does not compose the arm. Feature
+    /// `grid_reselect`.
+    #[cfg(feature = "grid_reselect")]
+    pub reselect: Option<KeyedReselectArm>,
 }
+
+/// The grid-reselection arm's payload (katgpt-rs plan 632): the corpus
+/// bigram markov table (built once offline from tokenized corpus text —
+/// `BigramMarkovBuilder::add_sequence` + `build(vocab, top_m)`, same corpus
+/// → bit-identical table) and the law's λ. Feature `grid_reselect`.
+#[cfg(feature = "grid_reselect")]
+#[derive(Debug, Clone)]
+pub struct KeyedReselectArm {
+    pub table: std::sync::Arc<katgpt_speculative::bigram_markov::BigramMarkovTable>,
+    pub lambda: f32,
+}
+
+/// The corpus-bigram substrate the arm consumes, re-exported at this
+/// module's paths (the carve law — consumers never name the upstream crate
+/// directly; riir-gpu does not dep katgpt-speculative). Feature
+/// `grid_reselect`.
+#[cfg(feature = "grid_reselect")]
+pub use katgpt_speculative::bigram_markov::{BigramMarkovBuilder, BigramMarkovTable};
 
 /// The keyed loop's telemetry (the Bench-759 `LoopStats` shape, keyed).
 #[derive(Debug, Default)]
@@ -208,6 +239,85 @@ fn premise_lm_head_rank(row: &[f32], token: u32) -> usize {
 /// degrade posture is the CALLER's parity check, see
 /// [`verify_chunk_one_row_parity`]).
 #[allow(clippy::too_many_lines)]
+/// The solo loop's drafter-arm dispatch (plan 632): the reselection arm
+/// when armed, else the base keyed/greedy/masked dispatch. The arm's knob
+/// only exists under `grid_reselect`, so builds compiled without the
+/// feature dispatch straight to the base — the knob cannot be armed there
+/// by construction.
+#[cfg(feature = "grid_reselect")]
+fn dispatch_walk(
+    cpu: &DFlash2Drafter,
+    posture: &KeyedVerifyPosture,
+    cfg: &KeyedSpecConfig,
+    pending: u32,
+    hidden: &[f32],
+    logits_n: &[f32],
+    pos: usize,
+) -> crate::qwen38_dflash2::DraftWalk {
+    if let Some(arm) = cfg.reselect.as_ref() {
+        return cpu.lattice_walk_reselect(
+            pending,
+            hidden,
+            logits_n,
+            &arm.table,
+            arm.lambda,
+            posture.temperature,
+        );
+    }
+    dispatch_walk_base(cpu, posture, cfg, pending, hidden, logits_n, pos)
+}
+
+/// The no-feature posture: the knob cannot exist, dispatch straight to
+/// the base.
+#[cfg(not(feature = "grid_reselect"))]
+fn dispatch_walk(
+    cpu: &DFlash2Drafter,
+    posture: &KeyedVerifyPosture,
+    cfg: &KeyedSpecConfig,
+    pending: u32,
+    hidden: &[f32],
+    logits_n: &[f32],
+    pos: usize,
+) -> crate::qwen38_dflash2::DraftWalk {
+    dispatch_walk_base(cpu, posture, cfg, pending, hidden, logits_n, pos)
+}
+
+/// The base dispatch (greedy / masked-keyed / keyed) — the pre-plan-632
+/// walk family, byte-identical to the inline form it replaces.
+fn dispatch_walk_base(
+    cpu: &DFlash2Drafter,
+    posture: &KeyedVerifyPosture,
+    cfg: &KeyedSpecConfig,
+    pending: u32,
+    hidden: &[f32],
+    logits_n: &[f32],
+    pos: usize,
+) -> crate::qwen38_dflash2::DraftWalk {
+    if posture.is_greedy() {
+        cpu.lattice_walk(pending, hidden, logits_n)
+    } else if cfg.draft_top_k.is_some() || cfg.draft_top_p.is_some() {
+        cpu.lattice_walk_keyed_masked(
+            pending,
+            hidden,
+            logits_n,
+            posture.seed,
+            pos,
+            posture.temperature,
+            cfg.draft_top_k,
+            cfg.draft_top_p,
+        )
+    } else {
+        cpu.lattice_walk_keyed(
+            pending,
+            hidden,
+            logits_n,
+            posture.seed,
+            pos,
+            posture.temperature,
+        )
+    }
+}
+
 pub fn run_keyed_spec_loop(
     gpu: &mut Qwen38DenseForward,
     drafter_gpu: &mut DFlash2GpuDrafter,
@@ -253,30 +363,9 @@ pub fn run_keyed_spec_loop(
         // noise arithmetic for the incumbent-exact A/B posture. The
         // masked arm (`draft_top_k`/`draft_top_p` set) filters the
         // drafter's own nucleus before the pick — the Phase-2 contract's
-        // drafter half.
-        let walk = if posture.is_greedy() {
-            cpu.lattice_walk(pending, &hidden, &logits_n)
-        } else if cfg.draft_top_k.is_some() || cfg.draft_top_p.is_some() {
-            cpu.lattice_walk_keyed_masked(
-                pending,
-                &hidden,
-                &logits_n,
-                posture.seed,
-                pos,
-                posture.temperature,
-                cfg.draft_top_k,
-                cfg.draft_top_p,
-            )
-        } else {
-            cpu.lattice_walk_keyed(
-                pending,
-                &hidden,
-                &logits_n,
-                posture.seed,
-                pos,
-                posture.temperature,
-            )
-        };
+        // drafter half. Under `grid_reselect`, an armed `reselect` knob
+        // replaces the pick with the prefix-first scored law (plan 632).
+        let walk = dispatch_walk(cpu, posture, cfg, pending, &hidden, &logits_n, pos);
         // The p-min gate: the chain is truncated BEFORE the first
         // unconfident position (the PR's semantics — a cut, not a skip).
         let chain: Vec<(u32, f32)> = match cfg.p_min {

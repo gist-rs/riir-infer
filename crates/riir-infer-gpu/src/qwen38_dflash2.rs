@@ -1180,6 +1180,114 @@ impl DFlash2Drafter {
         )
     }
 
+    /// The grid-RESELECTION chain walk (katgpt-rs Issue 966 / plan 632 —
+    /// the DCOCO-class arm the premise gate certified on this lane:
+    /// riir-ai Bench 1012 read pool_rate 0.6174 vs the 1/16 floor). The
+    /// keyed/greedy walks' per-slot argmax/sample is replaced by the
+    /// prefix-first scored law
+    ///
+    /// ```text
+    /// pick_i = argmax_b [ ln softmax(s_i(b)/T) + lambda · ln P(b | a) ]
+    /// ```
+    ///
+    /// over slot `i`'s own candidate grid, where `a` is the RE-SELECTED
+    /// pick at slot `i−1` and `P` is the corpus bigram markov table
+    /// (missing pairs at the substrate's documented floor). THE SCORES ARE
+    /// RE-SCORED PER SLOT along the re-selected prefix —
+    /// [`Self::chain_step_scores`] conditions on `pred_tok`, so a grid
+    /// built along the keyed walk's picks is stale off its own path; this
+    /// walk recomputes `chain_step_scores(pred_tok, …)` exactly like the
+    /// greedy/keyed bodies do, which is why the cost class is the walks'
+    /// (G2: the compose adds the table lookups, µs against the walk's
+    /// top-k/gemv phase).
+    ///
+    /// λ = 0 reduces EXACTLY to [`Self::lattice_walk`]: the ln-softmax is
+    /// monotone in the selector score, both bodies chain `pred_tok` the
+    /// same way, and both pick by first-strict-max over the same candidate
+    /// order — so the λ = 0 sweep row IS the argmax baseline (plan 632
+    /// T1's control; pinned by the CPU test
+    /// `reselect_lambda_zero_matches_the_greedy_walk`).
+    ///
+    /// The grid SETS (`candidates`) are prefix-independent (per-row lm_head
+    /// top-k + sel_hidden, fixed per cycle by `walk_rows`) — only the
+    /// scores move with the prefix. The returned `DraftWalk` carries the
+    /// RE-SELECT path's scores, so the Issue-966 premise read (which ranks
+    /// the correction token against `candidates`/`scores`) stays valid
+    /// under the arm. `chain[i].1` is the picked candidate's
+    /// `softmax(s/T)` — the same confidence semantic the keyed arm records
+    /// (the p-min gate reads it unchanged).
+    ///
+    /// `temperature <= 0` is refused (the law is a sampled-posture arm; the
+    /// greedy posture IS the λ = 0 limit, reached by the caller passing
+    /// `lambda = 0` at the sampled temperature or by not arming the knob).
+    /// Allocation: one pool buffer per CALL, reused across slots (zero
+    /// per-slot allocation beyond what `chain_step_scores` already does).
+    #[cfg(feature = "grid_reselect")]
+    pub fn lattice_walk_reselect(
+        &self,
+        anchor_token: u32,
+        hidden_rows: &[f32],
+        logits: &[f32],
+        table: &katgpt_speculative::bigram_markov::BigramMarkovTable,
+        lambda: f32,
+        temperature: f32,
+    ) -> DraftWalk {
+        assert!(
+            temperature > 0.0,
+            "lattice_walk_reselect is a sampled-posture arm (temperature > 0); \
+             the greedy posture is lambda = 0's own limit"
+        );
+        let (candidates, unary, logits_top1, codes) = self.walk_rows(hidden_rows, logits);
+
+        let mut chain: Vec<(u32, f32)> = Vec::with_capacity(candidates.len());
+        let mut walk_scores: Vec<Vec<f32>> = Vec::with_capacity(candidates.len());
+        // One pool buffer reused across slots (zero-alloc steady state per
+        // slot beyond chain_step_scores' own scores vec).
+        let mut pool: Vec<(u32, f32)> = Vec::with_capacity(candidates.first().map_or(16, Vec::len));
+        let mut pred_tok = anchor_token;
+        for i in 0..candidates.len() {
+            let scores = self.chain_step_scores(pred_tok, &candidates[i], &unary[i], &codes[i]);
+            // Stable softmax(s/T) over the slot's grid — the proposal
+            // distribution U the law consumes (ln U enters the score).
+            let mut max = f32::NEG_INFINITY;
+            for &s in &scores {
+                max = max.max(s);
+            }
+            let mut sum = 0.0f32;
+            pool.clear();
+            for (ki, &s) in scores.iter().enumerate() {
+                let e = ((s - max) / temperature).exp();
+                sum += e;
+                pool.push((candidates[i][ki], e));
+            }
+            for p in pool.iter_mut() {
+                p.1 /= sum;
+            }
+            // The prefix-first scored pick (the substrate's own core —
+            // first-strict-max, missing pairs at the documented floor).
+            let picked = katgpt_speculative::pair_select::pick_pair_scored(
+                &pool,
+                pred_tok,
+                table,
+                lambda,
+            );
+            let idx = pool
+                .iter()
+                .position(|&(t, _)| t == picked)
+                .expect("pick_pair_scored returns a pool member");
+            chain.push((picked, pool[idx].1));
+            walk_scores.push(scores);
+            pred_tok = picked;
+        }
+
+        DraftWalk {
+            chain,
+            logits_top1,
+            candidates,
+            scores: walk_scores,
+        }
+    }
+
     /// The keyed walk's shared body: `keep == None` is the untruncated
     /// [`Self::lattice_walk_keyed`]; `Some(flat [n_out * vocab])` filters
     /// both the pick and the confidence's softmax to the surviving
@@ -2305,5 +2413,82 @@ mod tests {
             greedy_first > 40,
             "sampler degenerate: only {greedy_first}/200 argmax picks"
         );
+    }
+
+    // ── Issue 966 / plan 632 — the grid-reselection walk (feature
+    //    `grid_reselect`). The zero-selector fixture makes the slot
+    //    scores collapse to the candidates' own lm_head logits, so the
+    //    walks are fully controlled by `crafted_logits` and the table. ──
+
+    #[cfg(feature = "grid_reselect")]
+    fn reselect_table() -> katgpt_speculative::bigram_markov::BigramMarkovTable {
+        // One strong corpus pair: 0 → 9. Everything else the fixture's
+        // grids touch is missing (the documented floor).
+        let mut b = katgpt_speculative::bigram_markov::BigramMarkovBuilder::new();
+        for _ in 0..4 {
+            b.add_sequence(&[0, 9]);
+        }
+        b.add_sequence(&[9, 3]);
+        b.build(32, 16)
+    }
+
+    #[cfg(feature = "grid_reselect")]
+    #[test]
+    fn reselect_lambda_zero_matches_the_greedy_walk() {
+        let drafter = zero_selector_drafter();
+        let hidden = vec![0.0f32; 16]; // bs 4 × e 4; zero selector ignores it
+        let lg = crafted_logits();
+        let table = reselect_table();
+        let greedy = drafter.lattice_walk(0, &hidden, &lg);
+        let re = drafter.lattice_walk_reselect(0, &hidden, &lg, &table, 0.0, 0.6);
+        let toks = |w: &DraftWalk| -> Vec<u32> { w.chain.iter().map(|&(t, _)| t).collect() };
+        assert_eq!(toks(&re), toks(&greedy), "lambda = 0 must reduce to argmax");
+        // Same path ⇒ same per-slot selector scores.
+        assert_eq!(re.scores, greedy.scores);
+        // Candidates are path-independent (per-row lm_head top-k).
+        assert_eq!(re.candidates, greedy.candidates);
+        // Confidence semantic: the picked candidate's softmax(s/T) — the
+        // argmax at T = 0.6, sharpened.
+        let want = {
+            let m = re.scores[0][0];
+            let e0 = ((re.scores[0][0] - m) / 0.6).exp();
+            let e1 = ((re.scores[0][1] - m) / 0.6).exp();
+            e0 / (e0 + e1)
+        };
+        assert!((re.chain[0].1 - want).abs() < 1e-6);
+    }
+
+    #[cfg(feature = "grid_reselect")]
+    #[test]
+    fn reselect_pair_term_flips_the_pick_and_moves_the_path() {
+        let drafter = zero_selector_drafter();
+        let hidden = vec![0.0f32; 16];
+        let lg = crafted_logits();
+        let table = reselect_table();
+        // λ = 1: slot 0's U gap is ln(softmax(2.0/.6)) − ln(softmax(1.9/.6))
+        // ≈ 0.17, while the pair gap is ln P(9|0) = 0 vs the −20.72 floor —
+        // the table term dominates and the pick flips to 9.
+        let re = drafter.lattice_walk_reselect(0, &hidden, &lg, &table, 1.0, 0.6);
+        assert_eq!(re.chain[0].0, 9, "the pair term must flip slot 0 to 9");
+        // The flipped slot-0 pick re-scores slot 1 along the NEW path —
+        // the table carries 9 → 3, so slot 1 stays at 3 even harder, and
+        // the chain remains a legal prefix-first walk.
+        assert_eq!(re.chain[1].0, 3);
+        // λ = 0 on the SAME table ignores the pair term entirely.
+        let re0 = drafter.lattice_walk_reselect(0, &hidden, &lg, &table, 0.0, 0.6);
+        assert_eq!(re0.chain[0].0, 5);
+    }
+
+    #[cfg(feature = "grid_reselect")]
+    #[test]
+    fn reselect_is_deterministic() {
+        let drafter = zero_selector_drafter();
+        let hidden = vec![0.0f32; 16];
+        let lg = crafted_logits();
+        let table = reselect_table();
+        let a = drafter.lattice_walk_reselect(0, &hidden, &lg, &table, 0.4, 0.6);
+        let b = drafter.lattice_walk_reselect(0, &hidden, &lg, &table, 0.4, 0.6);
+        assert_eq!(a.chain, b.chain);
+        assert_eq!(a.scores, b.scores);
     }
 }

@@ -33,6 +33,14 @@ riir-infer-core = { path = "../.." }
 # katgpt-rs being the one sanctioned public upstream. Inherited from the
 # workspace table so this manifest never spells the deeper sibling path.
 katgpt-core = { workspace = true }
+# Issue 966 / plan 632 — the grid-reselection arm's corpus bigram prior
+# (BigramMarkovTable + the pick_pair_scored selection core, both behind the
+# upstream's `bigram_markov` feature). OPTIONAL: the default build (every
+# consumer posture) resolves no katgpt-speculative code — the arm exists
+# only under the crate's own `grid_reselect` feature below. katgpt-rs is
+# the one sanctioned public upstream; the workspace table already carries
+# the path, so no deeper sibling path is spelled here.
+katgpt-speculative = { workspace = true, optional = true }
 # The gpu crate speaks wgpu directly (the runtime's adapter probes + the
 # context selection). The VENDORED `wgpu-hal-30.0.0` ([patch] in the root
 # manifest) is the only hal whose adapter carries
@@ -156,6 +164,13 @@ ternary_gemv_cuda_raw = ["ternary_gemv", "dep:cudarc"]
 # that produces its rows. CUDA-only like its target (implies the cudarc
 # family; the module is additionally cfg(not(target_os = "macos"))).
 qwen38_spec = ["ternary_gemv_cuda_raw"]
+# katgpt-rs Issue 966 / plan 632 — the grid-reselection drafter arm
+# (lattice_walk_reselect + the keyed-loop `reselect` knob). Implies
+# qwen38_spec (the loop is the arm's only consumer). The upstream edge is
+# the `bigram_markov` feature pair (the table + the shared pick core —
+# pair_select rides bigram_markov upstream, so no grid_reselect feature
+# forward is needed and the substrate's pool-extraction half stays out).
+grid_reselect = ["qwen38_spec", "dep:katgpt-speculative", "katgpt-speculative/bigram_markov"]
 # The single-plane activation-quant prefill arm (Issue 884 T2a).
 prefill_q8_act = []
 # The fork-config utilization arm; implies the q8 arm (Issue 884 T2b).
