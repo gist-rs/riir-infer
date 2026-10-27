@@ -1732,6 +1732,7 @@ mod tests {
     ///
     /// Correctness is load-independent: safe to run under GPU co-tenants
     /// (only G2 timing needs the 649-exclusive window).
+    #[cfg(feature = "ternary_gemv")] // RotationCubeCL (the incumbent arm) is ternary_gemv-gated
     fn norm_rot_g1_case(dim: usize, hblock: usize, x: Vec<f32>, eps: f32) {
         let ctx = CubeCLContext::new().expect("CubeCL should initialize");
         let client = ctx.client();
@@ -1922,6 +1923,7 @@ mod tests {
         norm_mlp4_g1_case(768); // < 4·256: the hoisted loop never runs
     }
 
+    #[cfg(feature = "ternary_gemv")] // RotationCubeCL (the incumbent arm) is ternary_gemv-gated
     #[test]
     fn test_norm_rotate_fused_bit_identity_production_geometry() {
         // The Bonsai-2 production shape: n_embd=5120, Hadamard block 1024.
@@ -1934,6 +1936,7 @@ mod tests {
         norm_rot_g1_case(dim, hblock, mixed, eps);
     }
 
+    #[cfg(feature = "ternary_gemv")] // RotationCubeCL (the incumbent arm) is ternary_gemv-gated
     #[test]
     fn test_norm_rotate_fused_bit_identity_off_shape() {
         // Off-shape: n=2048, hblock=512 (2 chunks, half the smem window).
@@ -1946,6 +1949,7 @@ mod tests {
         norm_rot_g1_case(dim, hblock, mixed, eps);
     }
 
+    #[cfg(feature = "ternary_gemv")] // RotationCubeCL (the incumbent arm) is ternary_gemv-gated
     #[test]
     fn test_norm_rotate_fused_bit_identity_edge_rows() {
         let dim = 1024usize;
