@@ -106,9 +106,11 @@ use crate::gemv_ternary_residual_cubecl::GemvTernaryResidualCubeCL;
 use crate::norms_cubecl::RmsNormBatchedCubeCL;
 #[cfg(feature = "cubecl_runtime")]
 use crate::norms_cubecl::{
-    ResidualAddCubeCL, ResidualAddRmsNormCubeCL, ResidualAddRmsNormRotateCubeCL, RmsNormCubeCL,
-    RmsNormQkFusedCubeCL, RmsNormZgateFusedCubeCL, norm_rotate_fused_enabled,
-    norm_rotate_fused_mark_reached, norm_rotate_geometry_ok,
+    ResidualAddCubeCL, ResidualAddRmsNormCubeCL, ResidualAddRmsNormRotateCubeCL,
+    ResidualAddRmsNormRotateMultiCubeCL, RmsNormCubeCL, RmsNormQkFusedCubeCL,
+    RmsNormZgateFusedCubeCL, norm_rotate_fused_enabled, norm_rotate_fused_mark_reached,
+    norm_rotate_geometry_ok, norm_rotate_multi_enabled, norm_rotate_multi_geometry_ok,
+    norm_rotate_multi_mark_reached,
 };
 #[cfg(feature = "cubecl_runtime")]
 use crate::qwen_attention_cubecl::{
@@ -2778,6 +2780,16 @@ pub struct TernaryDeltanetGpuForward {
     // pub(crate) (x, logits) — consumed by the Issue 734 Arm 8 whole-prefill
     // cudarc driver's tail (sibling module).
     pub(crate) x: Handle, // [n_embd] — hidden state
+    /// Issue 1145 — the decode double-buffer for the multi-cube fused
+    /// norm+rotate ([`ResidualAddRmsNormRotateMultiCubeCL`]): the kernel
+    /// reads the whole `x` (every cube's redundant reduction) while writing
+    /// only its own chunk, so the in-place residual add needs a second
+    /// n-sized buffer — read `x`, write `x_alt`, swap after the launch so
+    /// `x` stays canonical for every reader (the prefill ping-pong
+    /// precedent, `prefill_tokens_chunk`'s `x_alt`). Host-side handle swap
+    /// only — zero per-token allocation; the prefill/training lanes never
+    /// touch it.
+    pub(crate) x_alt: Handle, // [n_embd]
     /// Issue 980 T4-ALT — the Bonsai-2 Hadamard-folded marker + Plan 602 B3:
     /// `Some` whenever the loaded file declares `prism.hadamard` (the DEFAULT
     /// constructor accepts folded models since B2/B3 — the decode eager path
@@ -3211,6 +3223,10 @@ impl TernaryDeltanetGpuForward {
         // Allocate persistent activation buffers (zero-initialized)
         let zeros_n = vec![0.0f32; n];
         let x = client.create_from_slice(f32::as_bytes(&zeros_n));
+        // Issue 1145: the decode double-buffer twin of `x` (multi-cube fused
+        // norm+rotate reads x / writes x_alt, the caller swaps). Never
+        // dispatched on the other lanes.
+        let x_alt = client.create_from_slice(f32::as_bytes(&zeros_n));
         let norm_x = client.create_from_slice(f32::as_bytes(&zeros_n));
         let tmp = client.create_from_slice(f32::as_bytes(&zeros_n));
         let ffn_out = client.create_from_slice(f32::as_bytes(&zeros_n));
@@ -3996,6 +4012,7 @@ impl TernaryDeltanetGpuForward {
             final_norm,
             lm_head,
             x,
+            x_alt,
             norm_x,
             qkv,
             qkv_expanded,
@@ -5188,11 +5205,55 @@ impl TernaryDeltanetGpuForward {
                     // the rotate staging rides the norm launch's epilogue
                     // (one dispatch replaces norm-then-stage). Unset/default
                     // is the incumbent chain, byte-identical (demote hatch).
+                    // Issue 1145: the MULTI-cube arm (one launch of dim/hblock
+                    // cubes, double-buffered x) takes priority when armed —
+                    // the same one-launch shape with the chunks' butterflies
+                    // in parallel (the serial single-workgroup walk measured
+                    // −20%, Bench 906-era re-read of Issue 1134).
+                    let multi_geom = self
+                        .rotation
+                        .as_ref()
+                        .is_some_and(|cfg| norm_rotate_multi_geometry_ok(n, cfg.block_size));
                     let fused_geom = self
                         .rotation
                         .as_ref()
                         .is_some_and(|cfg| norm_rotate_geometry_ok(n, n, cfg.block_size));
-                    if fused_geom && norm_rotate_fused_enabled() {
+                    if multi_geom && norm_rotate_multi_enabled() {
+                        let signs = self
+                            .rot_tables
+                            .as_ref()
+                            .expect("rotation armed above")
+                            .signs_for_width(n)
+                            .clone();
+                        let hblock = self
+                            .rotation
+                            .as_ref()
+                            .expect("rotation armed above")
+                            .block_size;
+                        unsafe {
+                            ResidualAddRmsNormRotateMultiCubeCL::launch::<ActiveRuntime>(
+                                &self.client,
+                                self.x.clone(),
+                                self.x_alt.clone(),
+                                self.ffn_out.clone(),
+                                layer_w.input_norm.clone(),
+                                signs,
+                                self.norm_x.clone(),
+                                self.rot_scratch.clone(),
+                                n,
+                                hblock,
+                                eps,
+                            );
+                        }
+                        // The double-buffer swap: `x` now names the post-add
+                        // stream the kernel wrote to `x_alt`; the old buffer
+                        // becomes the next site's scratch. Host-side handle
+                        // swap — stream order retires the kernel's reads of
+                        // the old `x` before anything else reuses it.
+                        std::mem::swap(&mut self.x, &mut self.x_alt);
+                        norm_rotate_multi_mark_reached();
+                        input_norm_staged = true;
+                    } else if fused_geom && norm_rotate_fused_enabled() {
                         let signs = self
                             .rot_tables
                             .as_ref()
@@ -5281,12 +5342,49 @@ impl TernaryDeltanetGpuForward {
                 // Issue 1134: the same rotate-epilogue fold at the mid-norm
                 // boundary (armed + geometry-gated; default is the incumbent
                 // norm-then-stage chain, byte-identical).
+                // Issue 1145: the MULTI-cube arm takes priority when armed
+                // (the input site's rationale, at the post-attn norm; the
+                // double-buffer swap keeps `x` canonical).
+                let mid_multi_geom = self
+                    .rotation
+                    .as_ref()
+                    .is_some_and(|cfg| norm_rotate_multi_geometry_ok(n, cfg.block_size));
                 let mid_fused_geom = self
                     .rotation
                     .as_ref()
                     .is_some_and(|cfg| norm_rotate_geometry_ok(n, n, cfg.block_size));
                 let mut mid_staged = false;
-                if mid_fused_geom && norm_rotate_fused_enabled() {
+                if mid_multi_geom && norm_rotate_multi_enabled() {
+                    let signs = self
+                        .rot_tables
+                        .as_ref()
+                        .expect("rotation armed above")
+                        .signs_for_width(n)
+                        .clone();
+                    let hblock = self
+                        .rotation
+                        .as_ref()
+                        .expect("rotation armed above")
+                        .block_size;
+                    unsafe {
+                        ResidualAddRmsNormRotateMultiCubeCL::launch::<ActiveRuntime>(
+                            &self.client,
+                            self.x.clone(),
+                            self.x_alt.clone(),
+                            self.tmp.clone(),
+                            layer_w.post_attn_norm.clone(),
+                            signs,
+                            self.norm_x.clone(),
+                            self.rot_scratch.clone(),
+                            n,
+                            hblock,
+                            eps,
+                        );
+                    }
+                    std::mem::swap(&mut self.x, &mut self.x_alt);
+                    norm_rotate_multi_mark_reached();
+                    mid_staged = true;
+                } else if mid_fused_geom && norm_rotate_fused_enabled() {
                     let signs = self
                         .rot_tables
                         .as_ref()

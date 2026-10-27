@@ -1424,6 +1424,412 @@ impl ResidualAddRmsNormRotateCubeCL {
     }
 }
 
+/// Issue 1145 — the MULTI-CUBE fused ResidualAdd + RMSNorm + forward-rotate
+/// staging (the multi-cube shape that could win where Issue 1134's single
+/// workgroup measured −20% on its serial chunk walk).
+///
+/// One launch of `dim / hblock` cubes (5 at Bonsai-2's 5120/1024) replaces
+/// `ResidualAddRmsNormCubeCL::launch` + `RotationCubeCL::launch_forward_copy`
+/// — two dispatches per norm site, the 128 staging launches/token the
+/// bench_763 census priced at +0.71 ms/token. Each cube:
+///
+/// 1. Redundantly runs the incumbent's Phase 1 + tree reduction over the
+///    WHOLE vector — the same per-lane strided order, the same Issue-1143
+///    4-deep hoist, the same `+=` sequence, the same tree — so every cube
+///    computes the SAME bits for `inv_rms` (the reads are 2×20 KB at
+///    Bonsai-2, cache-resident after the first cube).
+/// 2. Normalizes ITS chunk into `norm_out[chunk]` (the incumbent's
+///    `a * inv_rms * g` order, values read from the thread's own Phase-1
+///    stores — no barrier needed), then stages the rotated chunk with the
+///    Issue-1144 radix-4 schedule into `rot_out[chunk]` (the r4 body
+///    verbatim, fast-math fence included).
+///
+/// ## The double-buffer contract (the point of `x_src` / `x_dst`)
+///
+/// The incumbent adds the residual IN PLACE (`x += residual`). A cube
+/// writing its own chunk of `x` would race the other cubes still reading
+/// `x` for their redundant reductions (the Issue-1136 no-owner class). This
+/// kernel therefore READS `x_src` (the pre-add stream — whole vector, every
+/// cube) and WRITES `x_dst` (its own chunk only); the caller swaps the two
+/// handles after the launch so `x` stays canonical for every later reader
+/// (the prefill ping-pong precedent, `prefill_tokens_chunk`'s `x_alt`).
+///
+/// ## Geometry guard (caller-side — the launcher's only posture)
+///
+/// `hblock == 1024 == 4·256` — the radix-4 schedule AND the Phase-1
+/// group-aligned in-chunk test both require it (the same launcher-only
+/// trust the r4 staging kernel carries) — and `dim % hblock == 0`. A miss
+/// must fall back to the incumbent chain
+/// (see [`norm_rotate_multi_geometry_ok`]).
+///
+/// ## Parameter Layout
+///
+/// - `params`: `[f32; 4]` — `[inv_dim, eps, dim, hblock]` (decode
+///   single-row: the sign row offset is `base % dim == base`).
+///
+/// ## Dispatch
+///
+/// `dim / hblock` cubes (the r4 launcher's 2-D layout),
+/// `CubeDim::new_1d(256)`.
+#[cfg(feature = "cubecl_runtime")]
+#[cube(launch_unchecked)]
+#[allow(clippy::approx_constant)]
+fn residual_add_rmsnorm_rotate_multi_f32(
+    x_src: &[f32],
+    x_dst: &mut [f32],
+    residual: &[f32],
+    gamma: &[f32],
+    signs: &[f32],
+    params: &[f32],
+    norm_out: &mut [f32],
+    rot_out: &mut [f32],
+) {
+    let inv_dim = params[0usize];
+    let eps = params[1usize];
+    let dim = params[2usize] as u32;
+    let hblock = params[3usize] as u32;
+    let cube_size = 256u32;
+    let tid = UNIT_POS;
+    // 2-D grid (`split_grid`'s layout): rebuild the linear cube index — one
+    // cube per hblock chunk, the r4 staging launcher's own mapping.
+    let cube = CUBE_POS_Y * CUBE_COUNT_X + CUBE_POS_X;
+    let base = cube * hblock;
+    let chunk_end = base + hblock;
+
+    // ── Phase 1: residual add (redundant over the whole vector — the mlp4
+    // 4-deep hoist, same strided order, same `+=` sequence) + x² ──
+    // In-chunk stores are GROUP-aligned: one hoisted group spans
+    // [i, i + 768] ⊂ one 1024-block, so `i >= base` decides the whole
+    // group (holds only at hblock == 4·256 — the launcher's guard).
+    let mut partial_sq = f32::new(0.0f32);
+    let mut i = tid;
+    while i + 3u32 * cube_size < dim {
+        let i1 = i + cube_size;
+        let i2 = i + 2u32 * cube_size;
+        let i3 = i + 3u32 * cube_size;
+        let x0 = x_src[i as usize];
+        let x1 = x_src[i1 as usize];
+        let x2 = x_src[i2 as usize];
+        let x3 = x_src[i3 as usize];
+        let r0 = residual[i as usize];
+        let r1 = residual[i1 as usize];
+        let r2 = residual[i2 as usize];
+        let r3 = residual[i3 as usize];
+        let v0 = x0 + r0;
+        let v1 = x1 + r1;
+        let v2 = x2 + r2;
+        let v3 = x3 + r3;
+        if i >= base && i < chunk_end {
+            x_dst[i as usize] = v0;
+            x_dst[i1 as usize] = v1;
+            x_dst[i2 as usize] = v2;
+            x_dst[i3 as usize] = v3;
+        }
+        partial_sq += v0 * v0;
+        partial_sq += v1 * v1;
+        partial_sq += v2 * v2;
+        partial_sq += v3 * v3;
+        i += 4u32 * cube_size;
+    }
+    while i < dim {
+        let val = x_src[i as usize] + residual[i as usize];
+        if i >= base && i < chunk_end {
+            x_dst[i as usize] = val;
+        }
+        partial_sq += val * val;
+        i += cube_size;
+    }
+
+    // ── Phase 2: shared-memory tree reduction (identical) ──
+    let mut smem = Shared::<[f32]>::new_slice(256usize);
+    smem[tid as usize] = partial_sq;
+    sync_cube();
+    if tid < 128u32 {
+        smem[tid as usize] = smem[tid as usize] + smem[(tid + 128u32) as usize];
+    }
+    sync_cube();
+    if tid < 64u32 {
+        smem[tid as usize] = smem[tid as usize] + smem[(tid + 64u32) as usize];
+    }
+    sync_cube();
+    if tid < 32u32 {
+        smem[tid as usize] = smem[tid as usize] + smem[(tid + 32u32) as usize];
+    }
+    sync_cube();
+    if tid < 16u32 {
+        smem[tid as usize] = smem[tid as usize] + smem[(tid + 16u32) as usize];
+    }
+    sync_cube();
+    if tid < 8u32 {
+        smem[tid as usize] = smem[tid as usize] + smem[(tid + 8u32) as usize];
+    }
+    sync_cube();
+    if tid < 4u32 {
+        smem[tid as usize] = smem[tid as usize] + smem[(tid + 4u32) as usize];
+    }
+    sync_cube();
+    if tid < 2u32 {
+        smem[tid as usize] = smem[tid as usize] + smem[(tid + 2u32) as usize];
+    }
+    sync_cube();
+    if tid < 1u32 {
+        smem[0usize] = smem[0usize] + smem[1usize];
+    }
+    sync_cube();
+
+    // ── Phase 3: broadcast inv_rms (identical) ──
+    if tid < 1u32 {
+        let mean_sq = smem[0usize] * inv_dim;
+        smem[0usize] = f32::new(1.0f32) / (mean_sq + eps).sqrt();
+    }
+    sync_cube();
+
+    let inv_rms = smem[0usize];
+
+    // ── Phase 4: normalize + gamma, IN-CHUNK (the mlp4 4-deep hoist over
+    // x_dst + gamma — the thread's own Phase-1 stores, so no barrier) ──
+    let mut j = tid;
+    while j + 3u32 * cube_size < hblock {
+        let j1 = j + cube_size;
+        let j2 = j + 2u32 * cube_size;
+        let j3 = j + 3u32 * cube_size;
+        let a0 = x_dst[(base + j) as usize];
+        let a1 = x_dst[(base + j1) as usize];
+        let a2 = x_dst[(base + j2) as usize];
+        let a3 = x_dst[(base + j3) as usize];
+        let g0 = gamma[(base + j) as usize];
+        let g1 = gamma[(base + j1) as usize];
+        let g2 = gamma[(base + j2) as usize];
+        let g3 = gamma[(base + j3) as usize];
+        norm_out[(base + j) as usize] = a0 * inv_rms * g0;
+        norm_out[(base + j1) as usize] = a1 * inv_rms * g1;
+        norm_out[(base + j2) as usize] = a2 * inv_rms * g2;
+        norm_out[(base + j3) as usize] = a3 * inv_rms * g3;
+        j += 4u32 * cube_size;
+    }
+    while j < hblock {
+        let a = x_dst[(base + j) as usize];
+        let g = gamma[(base + j) as usize];
+        norm_out[(base + j) as usize] = a * inv_rms * g;
+        j += cube_size;
+    }
+    // Phase 5 reads norm_out CROSS-thread (the radix-4 pass-1 quads), so the
+    // chunk's Phase-4 stores need one barrier before the butterfly.
+    sync_cube();
+
+    // ── Phase 5: the rotate epilogue — the Issue-1144 radix-4 schedule
+    // (fwht_forward_copy_f32_r4's body verbatim, reading THIS cube's chunk
+    // of norm_out as src and writing rot_out as dst; sign first, the
+    // fast-math fence included). ──
+    let mut smem_rot = Shared::<[f32]>::new_slice(2048usize);
+    let inv_sqrt2 = f32::new(0.70710678f32);
+    // Contraction fence: Metal compiles with fast math, so a product that
+    // feeds the next stage's add IN A REGISTER may fuse into an fma (the
+    // incumbent never sees that — every stage round-trips smem). `select`
+    // on a runtime-true predicate (dim > 0) the compiler cannot fold keeps
+    // each product a rounded f32 value.
+    let live = dim > 0u32;
+    let zero = f32::new(0.0f32);
+
+    // Pass 1 (halves 1, 2): the thread's contiguous quad, straight from
+    // norm_out — sign first, then the two lowest butterfly stages in
+    // registers.
+    let q = tid * 4u32;
+    let mut v0 = select(
+        live,
+        norm_out[(base + q) as usize] * signs[(base + q) as usize],
+        zero,
+    );
+    let mut v1 = select(
+        live,
+        norm_out[(base + q + 1u32) as usize] * signs[(base + q + 1u32) as usize],
+        zero,
+    );
+    let mut v2 = select(
+        live,
+        norm_out[(base + q + 2u32) as usize] * signs[(base + q + 2u32) as usize],
+        zero,
+    );
+    let mut v3 = select(
+        live,
+        norm_out[(base + q + 3u32) as usize] * signs[(base + q + 3u32) as usize],
+        zero,
+    );
+    let mut t0 = select(live, (v0 + v1) * inv_sqrt2, zero);
+    let mut t1 = select(live, (v0 - v1) * inv_sqrt2, zero);
+    let mut t2 = select(live, (v2 + v3) * inv_sqrt2, zero);
+    let mut t3 = select(live, (v2 - v3) * inv_sqrt2, zero);
+    smem_rot[q as usize] = (t0 + t2) * inv_sqrt2;
+    smem_rot[(q + 2u32) as usize] = (t0 - t2) * inv_sqrt2;
+    smem_rot[(q + 1u32) as usize] = (t1 + t3) * inv_sqrt2;
+    smem_rot[(q + 3u32) as usize] = (t1 - t3) * inv_sqrt2;
+    sync_cube();
+
+    // Passes 2-4 (halves 4·8, 16·32, 64·128): quad {e, e+h, e+2h, e+3h}.
+    // Ping-pong halves of `smem_rot` (read `rd`, write `wr`), so each pass
+    // needs ONE barrier — no thread overwrites a slot another thread still
+    // reads.
+    let mut rd = 0u32;
+    let mut h = 4u32;
+    while h < 256u32 {
+        let wr = 1024u32 - rd;
+        let e = (tid / h) * (4u32 * h) + tid % h;
+        v0 = smem_rot[(rd + e) as usize];
+        v1 = smem_rot[(rd + e + h) as usize];
+        v2 = smem_rot[(rd + e + 2u32 * h) as usize];
+        v3 = smem_rot[(rd + e + 3u32 * h) as usize];
+        t0 = select(live, (v0 + v1) * inv_sqrt2, zero);
+        t1 = select(live, (v0 - v1) * inv_sqrt2, zero);
+        t2 = select(live, (v2 + v3) * inv_sqrt2, zero);
+        t3 = select(live, (v2 - v3) * inv_sqrt2, zero);
+        smem_rot[(wr + e) as usize] = (t0 + t2) * inv_sqrt2;
+        smem_rot[(wr + e + 2u32 * h) as usize] = (t0 - t2) * inv_sqrt2;
+        smem_rot[(wr + e + h) as usize] = (t1 + t3) * inv_sqrt2;
+        smem_rot[(wr + e + 3u32 * h) as usize] = (t1 - t3) * inv_sqrt2;
+        sync_cube();
+        rd = wr;
+        h = h * 4u32;
+    }
+
+    // Pass 5 (halves 256, 512): quad {tid + k·256} — straight to rot_out.
+    v0 = smem_rot[(rd + tid) as usize];
+    v1 = smem_rot[(rd + tid + 256u32) as usize];
+    v2 = smem_rot[(rd + tid + 512u32) as usize];
+    v3 = smem_rot[(rd + tid + 768u32) as usize];
+    t0 = select(live, (v0 + v1) * inv_sqrt2, zero);
+    t1 = select(live, (v0 - v1) * inv_sqrt2, zero);
+    t2 = select(live, (v2 + v3) * inv_sqrt2, zero);
+    t3 = select(live, (v2 - v3) * inv_sqrt2, zero);
+    rot_out[(base + tid) as usize] = (t0 + t2) * inv_sqrt2;
+    rot_out[(base + tid + 512u32) as usize] = (t0 - t2) * inv_sqrt2;
+    rot_out[(base + tid + 256u32) as usize] = (t1 + t3) * inv_sqrt2;
+    rot_out[(base + tid + 768u32) as usize] = (t1 - t3) * inv_sqrt2;
+}
+
+/// Fused multi-cube ResidualAdd + RMSNorm + forward-rotate staging launcher
+/// (Issue 1145).
+///
+/// Replaces `ResidualAddRmsNormCubeCL::launch` +
+/// `RotationCubeCL::launch_forward_copy` with ONE dispatch of `dim / hblock`
+/// cubes in the folded (`bonsai2_hadamard`) decode posture — the multi-cube
+/// shape that could win where Issue 1134's single-workgroup serial walk
+/// measured −20%: the chunks' butterflies run in parallel, and the
+/// redundant whole-vector reduction per cube is cache-resident.
+///
+/// All three outputs are to_bits-equal to the two-launch chain by
+/// construction (mlp4 Phases 1-4 + the r4 body, verbatim), so only the
+/// REACH counter proves the toggle fired (the Bench-768 pattern).
+/// Default OFF (`RIIR_NORM_ROT_MULTI`); the caller swaps `x`/`x_alt` after
+/// the launch — the kernel reads `x_src` whole-vector while writing `x_dst`
+/// in-chunk, and the double-buffer is what makes the multi-cube reduction
+/// legal (the Issue-1136 no-owner race, avoided by construction).
+#[cfg(feature = "cubecl_runtime")]
+pub struct ResidualAddRmsNormRotateMultiCubeCL;
+
+#[cfg(feature = "cubecl_runtime")]
+impl ResidualAddRmsNormRotateMultiCubeCL {
+    /// Launch the multi-cube fused ResidualAdd + RMSNorm + rotate staging.
+    ///
+    /// # Safety
+    ///
+    /// - `x_src_handle`: `dim` f32 (read-only — the pre-add stream)
+    /// - `x_dst_handle`: `dim` f32 (write-only — the post-add stream; MUST
+    ///   NOT alias `x_src_handle` — the caller passes the double-buffer)
+    /// - `residual_handle` / `gamma_handle` / `signs_handle`: `dim` f32
+    ///   each, read-only (`signs` is the width-`dim` sign vector)
+    /// - `norm_out_handle` / `rot_out_handle`: `dim` f32 each (write-only)
+    /// - the caller MUST hold [`norm_rotate_multi_geometry_ok`]`(dim,
+    ///   hblock)`: `hblock == 1024` (the radix-4 schedule + the
+    ///   group-aligned in-chunk test) and `dim % hblock == 0`
+    #[allow(clippy::too_many_arguments, reason = "fused kernel wiring")]
+    pub unsafe fn launch<R: Runtime>(
+        client: &ComputeClient<R>,
+        x_src_handle: Handle,
+        x_dst_handle: Handle,
+        residual_handle: Handle,
+        gamma_handle: Handle,
+        signs_handle: Handle,
+        norm_out_handle: Handle,
+        rot_out_handle: Handle,
+        dim: usize,
+        hblock: usize,
+        eps: f32,
+    ) {
+        let inv_dim = 1.0f32 / dim as f32;
+        let params: &[f32] = &[inv_dim, eps, dim as f32, hblock as f32];
+        let params_handle = crate::params_cache::params_handle(client, f32::as_bytes(params));
+
+        debug_assert_binding_at_least(
+            &x_src_handle,
+            dim,
+            "ResidualAddRmsNormRotateMultiCubeCL::x_src",
+        );
+        debug_assert_binding_at_least(
+            &x_dst_handle,
+            dim,
+            "ResidualAddRmsNormRotateMultiCubeCL::x_dst",
+        );
+        debug_assert_binding_at_least(
+            &residual_handle,
+            dim,
+            "ResidualAddRmsNormRotateMultiCubeCL::residual",
+        );
+        debug_assert_binding_at_least(
+            &gamma_handle,
+            dim,
+            "ResidualAddRmsNormRotateMultiCubeCL::gamma",
+        );
+        debug_assert_binding_at_least(
+            &signs_handle,
+            dim,
+            "ResidualAddRmsNormRotateMultiCubeCL::signs",
+        );
+        debug_assert_binding_at_least(
+            &norm_out_handle,
+            dim,
+            "ResidualAddRmsNormRotateMultiCubeCL::norm_out",
+        );
+        debug_assert_binding_at_least(
+            &rot_out_handle,
+            dim,
+            "ResidualAddRmsNormRotateMultiCubeCL::rot_out",
+        );
+
+        // The r4 launcher's 2-D grid layout (`split_grid`): decode n_cubes =
+        // dim/1024 is tiny, the split is overflow hygiene only.
+        let n_cubes = (dim / hblock.max(1)) as u32;
+        let gx = n_cubes.clamp(1, 65_535);
+        // SAFETY: Caller guarantees correct buffer sizes + the geometry
+        // guard (hblock == 1024, dim % hblock == 0).
+        unsafe {
+            residual_add_rmsnorm_rotate_multi_f32::launch_unchecked::<R>(
+                client,
+                CubeCount::Static(gx, n_cubes.div_ceil(gx).max(1), 1),
+                CubeDim::new_1d(256),
+                BufferArg::from_raw_parts(x_src_handle, dim),
+                BufferArg::from_raw_parts(x_dst_handle, dim),
+                BufferArg::from_raw_parts(residual_handle, dim),
+                BufferArg::from_raw_parts(gamma_handle, dim),
+                BufferArg::from_raw_parts(signs_handle, dim),
+                BufferArg::from_raw_parts(params_handle, 4),
+                BufferArg::from_raw_parts(norm_out_handle, dim),
+                BufferArg::from_raw_parts(rot_out_handle, dim),
+            );
+        }
+    }
+}
+
+/// The caller-side geometry guard for [`ResidualAddRmsNormRotateMultiCubeCL`]:
+/// `hblock == 1024` — the Issue-1144 radix-4 schedule AND the Phase-1
+/// group-aligned in-chunk test both require exactly 4·256 — and
+/// `dim % hblock == 0`. The rest of [`norm_rotate_geometry_ok`] is implied
+/// (1024 is a power of two within its bound; the decode launch is
+/// single-row so `width == dim`).
+#[cfg(feature = "cubecl_runtime")]
+pub fn norm_rotate_multi_geometry_ok(dim: usize, hblock: usize) -> bool {
+    hblock == 1024 && dim.is_multiple_of(hblock)
+}
+
 /// The caller-side geometry guard for [`ResidualAddRmsNormRotateCubeCL`]:
 /// `width == dim`, `dim % hblock == 0`, `hblock <= 1024` (the smem slice),
 /// `hblock` a power of two (the butterfly's step walk assumes it).
@@ -1494,6 +1900,69 @@ pub(crate) fn norm_rotate_fused_mark_reached() {
     if NORM_ROTATE_FUSED_LAUNCHES.fetch_add(1, std::sync::atomic::Ordering::Relaxed) == 0 {
         let _ = NORM_ROTATE_FUSED_REACHED.set(());
         eprintln!("[norm_rot_fused] REACH: the fused norm+rotate staging dispatched");
+    }
+}
+
+// Issue 1145 runtime toggle (the Bench 768 pattern, same as Issue 1134's:
+// env default OFF, a force setter for the bench harness, a launch counter +
+// one-shot REACH line as the vacuous guards — the multi-cube outputs are
+// bit-identical to the norm-then-staging chain, so ONLY the counter proves
+// the toggle reached the kernel).
+
+/// Armed: env `RIIR_NORM_ROT_MULTI` ("1"/"on"/"true"), else OFF;
+/// [`set_norm_rotate_multi`] overrides.
+#[cfg(feature = "cubecl_runtime")]
+static USE_NORM_ROTATE_MULTI: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+#[cfg(feature = "cubecl_runtime")]
+static NORM_ROTATE_MULTI_INITIALIZED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+#[cfg(feature = "cubecl_runtime")]
+static NORM_ROTATE_MULTI_LAUNCHES: std::sync::atomic::AtomicUsize =
+    std::sync::atomic::AtomicUsize::new(0);
+#[cfg(feature = "cubecl_runtime")]
+static NORM_ROTATE_MULTI_REACHED: std::sync::OnceLock<()> = std::sync::OnceLock::new();
+
+/// Force the multi-cube fused norm+rotate path on/off (overrides the env;
+/// the bench harness's arm toggle).
+#[cfg(feature = "cubecl_runtime")]
+pub fn set_norm_rotate_multi(on: bool) {
+    let _ = NORM_ROTATE_MULTI_INITIALIZED.set(on);
+    USE_NORM_ROTATE_MULTI.store(on, std::sync::atomic::Ordering::Relaxed);
+}
+
+/// Whether the multi-cube fused norm+rotate path is currently armed
+/// (dispatch check).
+#[cfg(feature = "cubecl_runtime")]
+pub fn norm_rotate_multi_enabled() -> bool {
+    if NORM_ROTATE_MULTI_INITIALIZED
+        .set(env_flag("RIIR_NORM_ROT_MULTI"))
+        .is_ok()
+    {
+        USE_NORM_ROTATE_MULTI.store(
+            NORM_ROTATE_MULTI_INITIALIZED
+                .get()
+                .copied()
+                .unwrap_or(false),
+            std::sync::atomic::Ordering::Relaxed,
+        );
+    }
+    USE_NORM_ROTATE_MULTI.load(std::sync::atomic::Ordering::Relaxed)
+}
+
+/// Launches dispatched through the multi-cube fused norm+rotate path (the
+/// vacuous guard).
+#[cfg(feature = "cubecl_runtime")]
+pub fn norm_rotate_multi_launch_count() -> usize {
+    NORM_ROTATE_MULTI_LAUNCHES.load(std::sync::atomic::Ordering::Relaxed)
+}
+
+/// One-shot stderr REACH line (the Bench-768 guard): confirms the multi-cube
+/// path actually dispatched at least once in this process.
+#[cfg(feature = "cubecl_runtime")]
+pub(crate) fn norm_rotate_multi_mark_reached() {
+    if NORM_ROTATE_MULTI_LAUNCHES.fetch_add(1, std::sync::atomic::Ordering::Relaxed) == 0 {
+        let _ = NORM_ROTATE_MULTI_REACHED.set(());
+        eprintln!("[norm_rot_multi] REACH: the multi-cube fused norm+rotate staging dispatched");
     }
 }
 
@@ -1968,6 +2437,183 @@ mod tests {
         );
         // Alternating ±1 (the maximal-sign-stress row).
         norm_rot_g1_case(
+            dim,
+            hblock,
+            (0..dim)
+                .map(|i| if i % 2 == 0 { 1.0f32 } else { -1.0f32 })
+                .collect(),
+            eps,
+        );
+    }
+
+    /// Issue 1145 G1 — the MULTI-CUBE fused ResidualAddRmsNorm+rotate is
+    /// to_bits-equal to the incumbent two-launch chain
+    /// (ResidualAddRmsNorm then RotationCubeCL::launch_forward_copy) on ALL
+    /// THREE outputs — the post-add stream (read back from the kernel's
+    /// `x_dst`, not in-place `x`), `norm_out`, and the staged rotation — at
+    /// the production geometry (n=5120, hblock=1024, 5 cubes), an off-shape
+    /// (n=2048, hblock=1024, 2 cubes), and the edge rows (all-zero —
+    /// inv_rms pins to 1/sqrt(eps); ±large; the alternating sign pattern the
+    /// folded basis stresses). The multi lane's launcher-only posture is
+    /// hblock == 1024 (the radix-4 schedule + the group-aligned in-chunk
+    /// test), so every case pins that shape.
+    ///
+    /// Correctness is load-independent: safe to run under GPU co-tenants
+    /// (only G2 timing needs the 649-exclusive window).
+    #[cfg(feature = "ternary_gemv")] // RotationCubeCL (the incumbent arm) is ternary_gemv-gated
+    fn norm_rot_multi_g1_case(dim: usize, hblock: usize, x: Vec<f32>, eps: f32) {
+        let ctx = CubeCLContext::new().expect("CubeCL should initialize");
+        let client = ctx.client();
+
+        // The sign vector: the loader's ±1 i8 table rendered as f32 (the
+        // kernels read an f32 sign buffer). Deterministic alternation over
+        // 7-period blocks — not aligned to hblock, so the chunk walks see
+        // mixed signs.
+        let signs: Vec<f32> = (0..dim)
+            .map(|i| if (i / 7) % 2 == 0 { 1.0f32 } else { -1.0f32 })
+            .collect();
+        let gamma: Vec<f32> = (0..dim)
+            .map(|i| 1.0f32 + (i % 11) as f32 * 0.031f32)
+            .collect();
+        let residual: Vec<f32> = (0..dim)
+            .map(|i| ((i % 23) as f32 - 11.0f32) * 0.37f32)
+            .collect();
+
+        // ── The incumbent chain ──
+        let x_a = client.create_from_slice(f32::as_bytes(&x));
+        let res_a = client.create_from_slice(f32::as_bytes(&residual));
+        let gamma_a = client.create_from_slice(f32::as_bytes(&gamma));
+        let norm_a = client.empty(dim * core::mem::size_of::<f32>());
+        unsafe {
+            ResidualAddRmsNormCubeCL::launch::<ActiveRuntime>(
+                &client,
+                x_a.clone(),
+                res_a.clone(),
+                gamma_a.clone(),
+                norm_a.clone(),
+                dim,
+                eps,
+            );
+        }
+        let signs_a = client.create_from_slice(f32::as_bytes(&signs));
+        let rot_a = client.empty(dim * core::mem::size_of::<f32>());
+        unsafe {
+            crate::deltanet_rotation_cubecl::RotationCubeCL::launch_forward_copy::<ActiveRuntime>(
+                &client,
+                norm_a.clone(),
+                rot_a.clone(),
+                signs_a.clone(),
+                dim,
+                dim,
+                hblock,
+            );
+        }
+
+        // ── The multi-cube launch (the double-buffer split) ──
+        let x_src = client.create_from_slice(f32::as_bytes(&x));
+        let x_dst = client.create_from_slice(f32::as_bytes(&x));
+        let res_b = client.create_from_slice(f32::as_bytes(&residual));
+        let gamma_b = client.create_from_slice(f32::as_bytes(&gamma));
+        let signs_b = client.create_from_slice(f32::as_bytes(&signs));
+        let norm_b = client.empty(dim * core::mem::size_of::<f32>());
+        let rot_b = client.empty(dim * core::mem::size_of::<f32>());
+        unsafe {
+            ResidualAddRmsNormRotateMultiCubeCL::launch::<ActiveRuntime>(
+                &client,
+                x_src.clone(),
+                x_dst.clone(),
+                res_b.clone(),
+                gamma_b.clone(),
+                signs_b.clone(),
+                norm_b.clone(),
+                rot_b.clone(),
+                dim,
+                hblock,
+                eps,
+            );
+        }
+
+        // ── to_bits equality on ALL THREE outputs (post-add x via x_dst,
+        // norm, the staged rotation) ──
+        let norm_a_bytes = client.read_one(norm_a).expect("read");
+        let rot_a_bytes = client.read_one(rot_a).expect("read");
+        let norm_b_bytes = client.read_one(norm_b).expect("read");
+        let rot_b_bytes = client.read_one(rot_b).expect("read");
+        let x_a_bytes = client.read_one(x_a).expect("read");
+        let x_b_bytes = client.read_one(x_dst).expect("read");
+        let norm_a_v = f32::from_bytes(&norm_a_bytes);
+        let rot_a_v = f32::from_bytes(&rot_a_bytes);
+        let norm_b_v = f32::from_bytes(&norm_b_bytes);
+        let rot_b_v = f32::from_bytes(&rot_b_bytes);
+        let x_a_v = f32::from_bytes(&x_a_bytes);
+        let x_b_v = f32::from_bytes(&x_b_bytes);
+
+        for i in 0..dim {
+            assert_eq!(
+                norm_a_v[i].to_bits(),
+                norm_b_v[i].to_bits(),
+                "norm_out[{i}] bit-mismatch at dim={dim} hblock={hblock}"
+            );
+            assert_eq!(
+                rot_a_v[i].to_bits(),
+                rot_b_v[i].to_bits(),
+                "rot_out[{i}] bit-mismatch at dim={dim} hblock={hblock}"
+            );
+            assert_eq!(
+                x_a_v[i].to_bits(),
+                x_b_v[i].to_bits(),
+                "x-post-add[{i}] bit-mismatch at dim={dim} hblock={hblock}"
+            );
+        }
+    }
+
+    #[cfg(feature = "ternary_gemv")] // RotationCubeCL (the incumbent arm) is ternary_gemv-gated
+    #[test]
+    fn test_norm_rotate_multi_bit_identity_production_geometry() {
+        // The Bonsai-2 production shape: n_embd=5120, Hadamard block 1024
+        // (5 cubes — the census's actual posture).
+        let dim = 5120usize;
+        let hblock = 1024usize;
+        let eps = 1e-6f32;
+        let mixed: Vec<f32> = (0..dim)
+            .map(|i| ((i % 37) as f32 - 18.0f32) * 0.113f32 + ((i % 5) as f32) * 121.7f32)
+            .collect();
+        norm_rot_multi_g1_case(dim, hblock, mixed, eps);
+    }
+
+    #[cfg(feature = "ternary_gemv")] // RotationCubeCL (the incumbent arm) is ternary_gemv-gated
+    #[test]
+    fn test_norm_rotate_multi_bit_identity_off_shape() {
+        // Off-shape: n=2048, hblock=1024 (2 cubes — fewer chunks than the
+        // production 5, same launcher-only hblock posture).
+        let dim = 2048usize;
+        let hblock = 1024usize;
+        let eps = 1e-6f32;
+        let mixed: Vec<f32> = (0..dim)
+            .map(|i| ((i % 13) as f32 - 6.0f32) * 3.71f32)
+            .collect();
+        norm_rot_multi_g1_case(dim, hblock, mixed, eps);
+    }
+
+    #[cfg(feature = "ternary_gemv")] // RotationCubeCL (the incumbent arm) is ternary_gemv-gated
+    #[test]
+    fn test_norm_rotate_multi_bit_identity_edge_rows() {
+        let dim = 1024usize;
+        let hblock = 1024usize;
+        let eps = 1e-6f32;
+        // All-zero row: mean_sq = 0, inv_rms = 1/sqrt(eps) — the pins branch.
+        norm_rot_multi_g1_case(dim, hblock, vec![0.0f32; dim], eps);
+        // ±large (the residual-stream ±4000 regime from the plan-611 note).
+        norm_rot_multi_g1_case(
+            dim,
+            hblock,
+            (0..dim)
+                .map(|i| if i % 2 == 0 { 4000.0f32 } else { -4000.0f32 })
+                .collect(),
+            eps,
+        );
+        // Alternating ±1 (the maximal-sign-stress row).
+        norm_rot_multi_g1_case(
             dim,
             hblock,
             (0..dim)
