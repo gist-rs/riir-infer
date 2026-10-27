@@ -309,13 +309,14 @@ fn prefill_width_evens_chunks_and_floors_short_prompts() {
     assert_eq!(prefill_width(256, o(1, 0)), 1);
     assert_eq!(prefill_width(5, o(2, 0)), 2);
     assert_eq!(prefill_width(5, o(7, 0)), 5);
-    // The DEFAULT floor is the Bench-909 measured break-even (48): P = 48
-    // chunks to a single whole-prompt chunk (1.35x measured); P = 32 stays
-    // per-position (the policy width there loses, 0.965x).
-    assert_eq!(HeadOptions::default().min_batched, 48);
-    assert_eq!(prefill_width(48, o(128, 48)), 48);
-    assert_eq!(prefill_width(47, o(128, 48)), 1);
-    assert_eq!(prefill_width(96, o(128, 48)), 96);
+    // The DEFAULT floor is 64 — the 2-box ABBA verdict (Bench 909 §ABBA):
+    // the single-box curve said 48, but on the wire per-position WINS ~8%
+    // at P = 64 (T2.3a's per-position overlap), so the pipeline default
+    // stays 64. The evening law itself:
+    assert_eq!(HeadOptions::default().min_batched, 64);
+    assert_eq!(prefill_width(64, o(128, 64)), 64);
+    assert_eq!(prefill_width(63, o(128, 64)), 1);
+    assert_eq!(prefill_width(96, o(128, 64)), 96);
 }
 
 /// T2.2d — `HeadOptions::eos` stops both the 2-stage head and the oracle

@@ -74,15 +74,22 @@ pub struct HeadOptions {
     /// actually used is [`prefill_width`].
     pub prefill_chunk: usize,
     /// Prompts shorter than this stay per-position. A batched chunk pays a
-    /// fixed floor (re-measured on the M5 Ultra Metal stage, Bonsai-2 27B,
-    /// Issue-1141+ posture — Bench 909's grid: per-position 17.8 ms/token,
-    /// chunk floor ~0.49 s @ w=16 + 15.2 ms/token, single-chunk wall
-    /// 0.589 @ 32 / 0.629 @ 48 / 0.657 @ 64), so a short prompt loses by
-    /// batching — but only just: chunking already WINS at P = 48 (single
-    /// chunk, 1.35×) and loses at P = 32 at the width the policy picks
-    /// (0.965×), hence 48 (was 64 in the T2.3b posture, break-even ≈ 43
-    /// then; the 1141+ kernel wins more than halved the per-position cost
-    /// and moved the break-even BELOW every P the grid measured).
+    /// fixed floor, but the right threshold depends on WHERE the stages
+    /// run — Bench 909 measured both:
+    ///
+    /// - **Single box (one full-range Metal stage, Issue-1141+ posture):**
+    ///   per-position 17.8 ms/token vs chunk floor ~0.49 s + 15.2 ms/tok;
+    ///   chunking wins at EVERY measured P with the right width (1.17× at
+    ///   P = 32, w = 16) — a single-box optimum would sit at 48 or below.
+    /// - **The 2-box pipeline this runner serves (amo ⇄ bmo TB5, split
+    ///   32, GPU both, ABBA):** at P = 64 per-position WINS ~8%
+    ///   (per-position overlaps the stages per position, T2.3a; a whole-
+    ///   prompt chunk serialises head-then-tail), while at P = 256
+    ///   chunk-128 wins 1.47×. The crossover sits in (64, 256).
+    ///
+    /// 64 is therefore the pipeline-correct default: the single-box 48
+    /// was MEASURED and DEMOTED (Bench 909 §ABBA) — a 48 default would
+    /// lose the P ∈ [48, 64) cells on the wire.
     pub min_batched: usize,
     /// Stop generating once this id is produced (it is kept in the
     /// output). `None` = always generate `max_new`.
@@ -93,7 +100,7 @@ impl Default for HeadOptions {
     fn default() -> Self {
         Self {
             prefill_chunk: 1,
-            min_batched: 48,
+            min_batched: 64,
             eos: None,
         }
     }
@@ -104,10 +111,9 @@ impl Default for HeadOptions {
 /// `min_batched`; else the requested chunk EVENED over the prompt
 /// (`ceil(len / ceil(len / chunk))`), so no ragged tail chunk pays the
 /// batched floor for a handful of tokens. The head sends it in `Begin`;
-/// the oracle uses the same rule. (The measured width curve — Bench 909 —
-/// keeps the default requested width at 128: evened, that is a single
-/// whole-prompt chunk at P < 128 and 128-chunks above, the winner at
-/// every measured P ≥ 48.)
+/// the oracle uses the same rule. (The default requested width 128 is
+/// the Bench-909 winner at every measured P on both postures: evened,
+/// a single whole-prompt chunk at P < 128, 128-chunks above.)
 pub fn prefill_width(prompt_len: usize, opts: HeadOptions) -> usize {
     let c = opts.prefill_chunk.max(1);
     match c == 1 || prompt_len < opts.min_batched.max(2) {
