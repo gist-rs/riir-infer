@@ -36,6 +36,8 @@
 //! caches, weights shared), head and tail alike; the head prints per-
 //! stream decode rates and the AGGREGATE tok/s (the pipeline-bubble read).
 //! `--streams 1` (default) is the single-stream runner byte-identically.
+//! The fused decode batch is OPT-IN (`RIIR_DIST_PAIR=1`, loopback rigs
+//! only — Bench 913: it forfeits the 2-box head⇄tail GPU overlap).
 
 use std::net::ToSocketAddrs;
 use std::path::PathBuf;
@@ -405,12 +407,17 @@ fn run() -> Result<(), String> {
                     true => None,
                     false => Some(tok.eos_id() as u32),
                 },
-                // T2.4 fused batch step: `RIIR_DIST_PAIR=0` demotes to the
-                // single-drain incumbent cadence byte-identically (the A/B
-                // arm for the issue-1147 GOAT cell).
-                pair_decode: !matches!(
+                // T2.4 fused batch step — OPT-IN since the 2-box wire
+                // refutation (Bench 913): `RIIR_DIST_PAIR=1` arms it for
+                // LOOPBACK rigs (one GPU — the shared queue's inter-chain
+                // idle removal measured +39%, Bench 912). On the 2-box wire
+                // the BatchN wave forfeits the head⇄tail GPU overlap that is
+                // the pipeline's whole s=2 win (ABBA ×2: 46.9–52.6 armed vs
+                // 99.2–108.5 incumbent aggregate decode window) — the
+                // incumbent single-drain cadence is the serving default.
+                pair_decode: matches!(
                     std::env::var("RIIR_DIST_PAIR").as_deref(),
-                    Ok("0") | Ok("false") | Ok("off")
+                    Ok("1") | Ok("true") | Ok("on")
                 ),
                 ..HeadOptions::default()
             };

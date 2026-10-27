@@ -404,8 +404,11 @@ fn run_waves<T: WaveStages, L: Transport>(
         // T2.4 fused batch step: when EVERY ready stream is a decode feed,
         // hint the tail (BatchN) so it submits all the chains BEFORE any
         // readback — the shared queue runs them back to back with no
-        // inter-chain idle (the launch-bound gap, Phase 4). Prefill-bearing
-        // passes and solo passes ride the ordinary frames byte-identically.
+        // inter-chain idle. OPT-IN (Bench 913): on a 2-box pipeline the
+        // wave forfeits the head⇄tail GPU overlap (the s=2 bubble fill —
+        // measured −52% on the wire); the gain is a co-located-queue one.
+        // Prefill-bearing passes and solo passes ride the ordinary frames
+        // byte-identically.
         let n = streams.len();
         let ready_ct = streams
             .iter()
@@ -501,8 +504,10 @@ fn run_waves<T: WaveStages, L: Transport>(
         // Drain the pass's replies, then re-rotate: a stream whose token
         // just landed feeds its next step while other streams' replies
         // are still in flight. The fused batch drains its WHOLE pass (the
-        // tail already ran the chains back to back); `pair_decode = false`
-        // keeps the single-drain incumbent cadence byte-identical.
+        // tail already ran the chains back to back); the incumbent
+        // single-drain cadence (the default) pipelines the two GPUs — the
+        // head computes stream B's head-half under the tail's stream-A
+        // chain, which IS the 2-box win (Bench 913).
         // Termination: a non-done stream is either outstanding (this drain
         // or a later one pops it) or has work (the next pass sends it),
         // and total work is finite.

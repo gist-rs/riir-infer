@@ -97,8 +97,11 @@ pub struct HeadOptions {
     /// T2.4 fused batch step (issue 1147): when every ready stream in a
     /// pass is a decode feed, hint the tail (BatchN) so it submits all
     /// the GPU chains before any readback, and drain the whole pass's
-    /// replies. `false` = the single-drain incumbent cadence, byte-for-
-    /// byte (the A/B arm; the GOAT cell decides the promoted default).
+    /// replies. **Default OFF since the Bench-913 wire refutation**: on a
+    /// 2-box pipeline the wave forfeits the head⇄tail GPU overlap that is
+    /// the s=2 bubble-fill win (−52% aggregate decode window measured);
+    /// the +39% loopback gain was single-GPU inter-chain idle removal.
+    /// Arm it only for co-located (loopback) rigs.
     pub pair_decode: bool,
 }
 
@@ -108,7 +111,7 @@ impl Default for HeadOptions {
             prefill_chunk: 1,
             min_batched: 64,
             eos: None,
-            pair_decode: true,
+            pair_decode: false,
         }
     }
 }

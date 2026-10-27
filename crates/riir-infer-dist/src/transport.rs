@@ -95,13 +95,16 @@ pub enum FrameKind {
     /// pre-verify state, so the ordinary frame sequence resumes at the
     /// verify's base position with no extra round trip.
     VerifyReply = 9,
-    /// Decode-batch hint (T2.4 micro-batching): `count u32 LE`. The head
-    /// says the NEXT `count` frames are one-token decode steps of DISTINCT
-    /// streams, so the tail submits every chain BEFORE any readback — the
-    /// fused batch step (the shared queue runs the chains back to back
-    /// with no inter-chain idle, the launch-bound gap T2.4 targets).
-    /// Solo and prefill passes never send it: those frames process exactly
-    /// as before, byte-identical (G3 at s=1 by construction).
+    /// Decode-batch hint (T2.4 micro-batching, OPT-IN since Bench 913):
+    /// `count u32 LE`. The head says the NEXT `count` frames are one-token
+    /// decode steps of DISTINCT streams, so the tail submits every chain
+    /// BEFORE any readback — the shared queue runs the chains back to
+    /// back with no inter-chain idle. A co-located (loopback) win only:
+    /// on a 2-box pipeline the wave forfeits the head⇄tail GPU overlap
+    /// that is the s=2 bubble fill (−52% measured), so the serving
+    /// default is the incumbent cadence and this frame is never sent.
+    /// Solo and prefill passes never send it: those frames process
+    /// exactly as before, byte-identical (G3 at s=1 by construction).
     BatchN = 10,
 }
 
