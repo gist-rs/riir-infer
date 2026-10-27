@@ -139,8 +139,7 @@ static GDN_CONCAT_SPLIT_LAUNCHES: std::sync::atomic::AtomicUsize =
 /// (`RIIR_GDN_CONCAT_WG`); 0 = ride the Issue-1114 occupancy rule — the same
 /// geometry `launch()` dispatches the incumbent at for this m, which keeps
 /// the A/B like-for-like (the delta is the split elimination alone).
-static GDN_CONCAT_SPLIT_WG: std::sync::atomic::AtomicU32 =
-    std::sync::atomic::AtomicU32::new(0);
+static GDN_CONCAT_SPLIT_WG: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
 static GDN_CONCAT_SPLIT_WG_INITIALIZED: std::sync::OnceLock<u32> = std::sync::OnceLock::new();
 
 fn concat_split_env_semantics(env: Result<String, std::env::VarError>) -> bool {
@@ -167,7 +166,9 @@ fn concat_split_wg_env(env: Result<String, std::env::VarError>) -> u32 {
 #[cfg_attr(not(feature = "ternary_gemv"), allow(dead_code))]
 pub(crate) fn concat_split_fused_enabled() -> bool {
     if GDN_CONCAT_SPLIT_INITIALIZED
-        .set(concat_split_env_semantics(std::env::var("RIIR_GDN_CONCAT_SPLIT_FUSED")))
+        .set(concat_split_env_semantics(std::env::var(
+            "RIIR_GDN_CONCAT_SPLIT_FUSED",
+        )))
         .is_ok()
     {
         USE_GDN_CONCAT_SPLIT.store(
@@ -2838,8 +2839,16 @@ impl GemvTernaryCubeCL {
         GDN_CONCAT_SPLIT_LAUNCHES.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         let wg = concat_split_wg_for(handle.m as u32);
         unsafe {
-            crate::gemv_ternary_scale_ab_cubecl::GemvTernaryScaleAbCubeCL::launch_f16scale_split_wg::<R>(
-                client, handle, scale_f16, input_handle, out_a_handle, out_b_handle, split_row,
+            crate::gemv_ternary_scale_ab_cubecl::GemvTernaryScaleAbCubeCL::launch_f16scale_split_wg::<
+                R,
+            >(
+                client,
+                handle,
+                scale_f16,
+                input_handle,
+                out_a_handle,
+                out_b_handle,
+                split_row,
                 wg,
             );
         }

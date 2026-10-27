@@ -426,8 +426,7 @@ fn add_f32(a: &[f32], b: &[f32], output: &mut [f32]) {
 /// scored 4090 decode lane is the cudarc forward (untouched — its K2 already
 /// fuses this pair); the `cuda_backend` CubeCL runtime is unmeasured here,
 /// the Issue-1115-shaped follow-up.
-static USE_DENSE_PAIR: std::sync::atomic::AtomicBool =
-    std::sync::atomic::AtomicBool::new(true);
+static USE_DENSE_PAIR: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(true);
 static DENSE_PAIR_INITIALIZED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
 
 /// Workgroup size for the dense-pair dispatch (and the wg-parameterized
@@ -440,8 +439,7 @@ static DENSE_PAIR_WG_INITIALIZED: std::sync::OnceLock<u32> = std::sync::OnceLock
 /// Launches dispatched through the fused dense-pair path (the vacuous-guard
 /// counter — outputs are bit-identical, so ONLY this counter proves the
 /// toggle reached the dispatch).
-static DENSE_PAIR_LAUNCHES: std::sync::atomic::AtomicUsize =
-    std::sync::atomic::AtomicUsize::new(0);
+static DENSE_PAIR_LAUNCHES: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
 
 fn dense_pair_env_semantics(env: Result<String, std::env::VarError>) -> bool {
     match env {
@@ -460,7 +458,9 @@ fn dense_pair_env_semantics(env: Result<String, std::env::VarError>) -> bool {
 #[cfg_attr(not(feature = "ternary_gemm_batched"), allow(dead_code))]
 pub(crate) fn dense_pair_fused_enabled() -> bool {
     if DENSE_PAIR_INITIALIZED
-        .set(dense_pair_env_semantics(std::env::var("RIIR_GDN_DENSE_PAIR_FUSED")))
+        .set(dense_pair_env_semantics(std::env::var(
+            "RIIR_GDN_DENSE_PAIR_FUSED",
+        )))
         .is_ok()
     {
         USE_DENSE_PAIR.store(
@@ -1774,10 +1774,20 @@ mod tests {
             let ref_b = client.empty(m * core::mem::size_of::<f32>());
             unsafe {
                 GemvCubeCL::launch_plane::<ActiveRuntime>(
-                    &client, wa.clone(), x.clone(), ref_a.clone(), m, n,
+                    &client,
+                    wa.clone(),
+                    x.clone(),
+                    ref_a.clone(),
+                    m,
+                    n,
                 );
                 GemvCubeCL::launch_plane::<ActiveRuntime>(
-                    &client, wb.clone(), x.clone(), ref_b.clone(), m, n,
+                    &client,
+                    wb.clone(),
+                    x.clone(),
+                    ref_b.clone(),
+                    m,
+                    n,
                 );
             }
 
@@ -1835,18 +1845,22 @@ mod tests {
     /// demote to the incumbent pair.
     #[test]
     fn dense_pair_env_semantics_tests() {
-        use super::{dense_pair_env_semantics, dense_pair_wg_env, dense_pair_wg_size, set_dense_pair_wg};
+        use super::{
+            dense_pair_env_semantics, dense_pair_wg_env, dense_pair_wg_size, set_dense_pair_wg,
+        };
 
-        assert!(dense_pair_env_semantics(Err(std::env::VarError::NotPresent)));
+        assert!(dense_pair_env_semantics(Err(
+            std::env::VarError::NotPresent
+        )));
         assert!(dense_pair_env_semantics(Ok("1".into())));
         assert!(dense_pair_env_semantics(Ok("on".into())));
         assert!(dense_pair_env_semantics(Ok("TRUE".into())));
         assert!(!dense_pair_env_semantics(Ok(String::new())));
         assert!(!dense_pair_env_semantics(Ok("0".into())));
         assert!(!dense_pair_env_semantics(Ok("enabled".into())));
-        assert!(!dense_pair_env_semantics(Err(std::env::VarError::NotUnicode(
-            std::ffi::OsString::from("\u{fffd}")
-        ))));
+        assert!(!dense_pair_env_semantics(Err(
+            std::env::VarError::NotUnicode(std::ffi::OsString::from("\u{fffd}"))
+        )));
 
         assert_eq!(dense_pair_wg_env(Err(std::env::VarError::NotPresent)), 256);
         assert_eq!(dense_pair_wg_env(Ok("64".into())), 64);
@@ -1908,26 +1922,46 @@ mod tests {
             let _ = f32::from_bytes(&bytes);
             let per_iter = drained_us / iters as f64;
             let per_launch = per_iter / launches_per_iter as f64;
-            eprintln!(
-                "  {name:<28} drained {per_iter:>9.2} µs/iter  {per_launch:>8.2} µs/launch"
-            );
+            eprintln!("  {name:<28} drained {per_iter:>9.2} µs/iter  {per_launch:>8.2} µs/launch");
         };
 
         eprintln!("── dense pair (2×{m}×{n}) — {iters} iters, drained ──");
         run("separate pair wg256", 2, &mut || unsafe {
             GemvCubeCL::launch_plane::<ActiveRuntime>(
-                &client, wa.clone(), x.clone(), out_a.clone(), m, n,
+                &client,
+                wa.clone(),
+                x.clone(),
+                out_a.clone(),
+                m,
+                n,
             );
             GemvCubeCL::launch_plane::<ActiveRuntime>(
-                &client, wb.clone(), x.clone(), out_b.clone(), m, n,
+                &client,
+                wb.clone(),
+                x.clone(),
+                out_b.clone(),
+                m,
+                n,
             );
         });
         run("separate pair wg64", 2, &mut || unsafe {
             GemvCubeCL::launch_plane_wg::<ActiveRuntime>(
-                &client, wa.clone(), x.clone(), out_a.clone(), m, n, 64,
+                &client,
+                wa.clone(),
+                x.clone(),
+                out_a.clone(),
+                m,
+                n,
+                64,
             );
             GemvCubeCL::launch_plane_wg::<ActiveRuntime>(
-                &client, wb.clone(), x.clone(), out_b.clone(), m, n, 64,
+                &client,
+                wb.clone(),
+                x.clone(),
+                out_b.clone(),
+                m,
+                n,
+                64,
             );
         });
         for wg in [256u32, 128, 64, 32] {
@@ -1959,7 +1993,13 @@ mod tests {
             for _ in 0..4 {
                 unsafe {
                     GemvCubeCL::launch_plane_wg::<ActiveRuntime>(
-                        &client, fw.clone(), fx.clone(), fout.clone(), fm, fn_, wg,
+                        &client,
+                        fw.clone(),
+                        fx.clone(),
+                        fout.clone(),
+                        fm,
+                        fn_,
+                        wg,
                     );
                 }
             }
@@ -1968,7 +2008,13 @@ mod tests {
             for _ in 0..iters_f {
                 unsafe {
                     GemvCubeCL::launch_plane_wg::<ActiveRuntime>(
-                        &client, fw.clone(), fx.clone(), fout.clone(), fm, fn_, wg,
+                        &client,
+                        fw.clone(),
+                        fx.clone(),
+                        fout.clone(),
+                        fm,
+                        fn_,
+                        wg,
                     );
                 }
             }

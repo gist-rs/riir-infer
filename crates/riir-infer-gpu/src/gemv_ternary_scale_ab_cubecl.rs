@@ -1445,11 +1445,7 @@ mod concat_split_tests {
 
         // (m, n, split_row): the real folded qkv|z geometry (conv_dim 10240 +
         // z_dim 6144 = m 16384, n 5120) + two ragged shapes.
-        let shapes: &[(usize, usize, usize)] = &[
-            (16384, 5120, 10240),
-            (24, 128, 15),
-            (13, 100, 5),
-        ];
+        let shapes: &[(usize, usize, usize)] = &[(16384, 5120, 10240), (24, 128, 15), (13, 100, 5)];
 
         // Arm the production entry for launch_split (the env is opt-in; the
         // setter is the harness override). Restored to OFF at the end — the
@@ -1505,12 +1501,9 @@ mod concat_split_tests {
             for wg in [256u32, 128, 64] {
                 for rep in 0..3 {
                     // NaN sentinel pre-fill — every row MUST be overwritten.
-                    let out_a = client.create_from_slice(f32::as_bytes(
-                        &vec![f32::NAN; split_row],
-                    ));
-                    let out_b = client.create_from_slice(f32::as_bytes(
-                        &vec![f32::NAN; m - split_row],
-                    ));
+                    let out_a = client.create_from_slice(f32::as_bytes(&vec![f32::NAN; split_row]));
+                    let out_b =
+                        client.create_from_slice(f32::as_bytes(&vec![f32::NAN; m - split_row]));
                     unsafe {
                         GemvTernaryScaleAbCubeCL::launch_f16scale_split_wg::<ActiveRuntime>(
                             &client,
@@ -1546,7 +1539,9 @@ mod concat_split_tests {
                         );
                     }
                 }
-                println!("concat-split bit-identity ({m}×{n}, split {split_row}) wg {wg}: EXACT ×3 (both halves)");
+                println!(
+                    "concat-split bit-identity ({m}×{n}, split {split_row}) wg {wg}: EXACT ×3 (both halves)"
+                );
             }
 
             // The production entry: launch_split at the occupancy wg rule +
@@ -1564,7 +1559,10 @@ mod concat_split_tests {
                     split_row,
                 )
             };
-            assert!(fired, "({m}×{n}) launch_split must fire when armed + f16 present");
+            assert!(
+                fired,
+                "({m}×{n}) launch_split must fire when armed + f16 present"
+            );
             assert_eq!(
                 concat_split_launch_count(),
                 counter_before + 1,
@@ -1573,12 +1571,22 @@ mod concat_split_tests {
             let oa = read_f32(&client, &out_a);
             let ob = read_f32(&client, &out_b);
             for i in 0..split_row {
-                assert_eq!(ra[i].to_bits(), oa[i].to_bits(), "({m}×{n}) entry a-row {i}");
+                assert_eq!(
+                    ra[i].to_bits(),
+                    oa[i].to_bits(),
+                    "({m}×{n}) entry a-row {i}"
+                );
             }
             for i in 0..(m - split_row) {
-                assert_eq!(rb[i].to_bits(), ob[i].to_bits(), "({m}×{n}) entry b-row {i}");
+                assert_eq!(
+                    rb[i].to_bits(),
+                    ob[i].to_bits(),
+                    "({m}×{n}) entry b-row {i}"
+                );
             }
-            println!("concat-split launch_split entry ({m}×{n}, split {split_row}): EXACT + counter +1");
+            println!(
+                "concat-split launch_split entry ({m}×{n}, split {split_row}): EXACT + counter +1"
+            );
         }
 
         // The demote hatch: unarmed launch_split falls back (returns false)

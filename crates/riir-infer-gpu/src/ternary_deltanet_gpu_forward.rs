@@ -106,9 +106,9 @@ use crate::gemv_ternary_residual_cubecl::GemvTernaryResidualCubeCL;
 use crate::norms_cubecl::RmsNormBatchedCubeCL;
 #[cfg(feature = "cubecl_runtime")]
 use crate::norms_cubecl::{
-    norm_rotate_fused_enabled, norm_rotate_fused_mark_reached, norm_rotate_geometry_ok,
     ResidualAddCubeCL, ResidualAddRmsNormCubeCL, ResidualAddRmsNormRotateCubeCL, RmsNormCubeCL,
-    RmsNormQkFusedCubeCL, RmsNormZgateFusedCubeCL,
+    RmsNormQkFusedCubeCL, RmsNormZgateFusedCubeCL, norm_rotate_fused_enabled,
+    norm_rotate_fused_mark_reached, norm_rotate_geometry_ok,
 };
 #[cfg(feature = "cubecl_runtime")]
 use crate::qwen_attention_cubecl::{
@@ -3166,9 +3166,10 @@ impl TernaryDeltanetGpuForward {
                         }),
                         Some(&weights.lm_head),
                     );
-                    let built = |v: &[Option<std::sync::Arc<crate::gemv_ternary_msl_field::GemvTernaryFieldMsl>>]| {
-                        v.iter().filter(|c| c.is_some()).count()
-                    };
+                    let built =
+                        |v: &[Option<
+                            std::sync::Arc<crate::gemv_ternary_msl_field::GemvTernaryFieldMsl>,
+                        >]| { v.iter().filter(|c| c.is_some()).count() };
                     eprintln!(
                         "[i1138] field caches built in {:.1}s (gate_up {}/{}, down {}/{}, lm_head {})",
                         t0.elapsed().as_secs_f64(),
@@ -5184,7 +5185,11 @@ impl TernaryDeltanetGpuForward {
                             .expect("rotation armed above")
                             .signs_for_width(n)
                             .clone();
-                        let hblock = self.rotation.as_ref().expect("rotation armed above").block_size;
+                        let hblock = self
+                            .rotation
+                            .as_ref()
+                            .expect("rotation armed above")
+                            .block_size;
                         unsafe {
                             ResidualAddRmsNormRotateCubeCL::launch::<ActiveRuntime>(
                                 &self.client,
@@ -5274,7 +5279,11 @@ impl TernaryDeltanetGpuForward {
                         .expect("rotation armed above")
                         .signs_for_width(n)
                         .clone();
-                    let hblock = self.rotation.as_ref().expect("rotation armed above").block_size;
+                    let hblock = self
+                        .rotation
+                        .as_ref()
+                        .expect("rotation armed above")
+                        .block_size;
                     unsafe {
                         ResidualAddRmsNormRotateCubeCL::launch::<ActiveRuntime>(
                             &self.client,
@@ -5344,13 +5353,16 @@ impl TernaryDeltanetGpuForward {
                     // i1138: the field lane's zero-copy dispatch (armed +
                     // cache present); fail-open to the incumbent otherwise.
                     #[cfg(all(feature = "metal_tensor_gemm", target_os = "macos"))]
-                    let field_done = match (&self.field_ffn, crate::gemv_ternary_msl_field::gemv_use_field()) {
-                        (Some(caches), true) if layer_idx < caches.gate_up.len() => caches.gate_up[layer_idx]
-                            .as_ref()
-                            .is_some_and(|ctx| {
+                    let field_done = match (
+                        &self.field_ffn,
+                        crate::gemv_ternary_msl_field::gemv_use_field(),
+                    ) {
+                        (Some(caches), true) if layer_idx < caches.gate_up.len() => {
+                            caches.gate_up[layer_idx].as_ref().is_some_and(|ctx| {
                                 ctx.dispatch_zero_copy(&self.client, &ffn_in, &self.ffn_gate_up)
                                     .is_ok()
-                            }),
+                            })
+                        }
                         _ => false,
                     };
                     #[cfg(not(all(feature = "metal_tensor_gemm", target_os = "macos")))]
@@ -5463,13 +5475,16 @@ impl TernaryDeltanetGpuForward {
                     // i1138: the field lane's zero-copy dispatch (armed +
                     // cache present); fail-open to the incumbent otherwise.
                     #[cfg(all(feature = "metal_tensor_gemm", target_os = "macos"))]
-                    let field_done = match (&self.field_ffn, crate::gemv_ternary_msl_field::gemv_use_field()) {
-                        (Some(caches), true) if layer_idx < caches.down.len() => caches.down[layer_idx]
-                            .as_ref()
-                            .is_some_and(|ctx| {
+                    let field_done = match (
+                        &self.field_ffn,
+                        crate::gemv_ternary_msl_field::gemv_use_field(),
+                    ) {
+                        (Some(caches), true) if layer_idx < caches.down.len() => {
+                            caches.down[layer_idx].as_ref().is_some_and(|ctx| {
                                 ctx.dispatch_zero_copy(&self.client, &self.ffn_hidden, &self.x)
                                     .is_ok()
-                            }),
+                            })
+                        }
                         _ => false,
                     };
                     #[cfg(not(all(feature = "metal_tensor_gemm", target_os = "macos")))]
@@ -5490,13 +5505,20 @@ impl TernaryDeltanetGpuForward {
                     // i1138: the field lane's zero-copy dispatch (armed +
                     // cache present); fail-open to the incumbent otherwise.
                     #[cfg(all(feature = "metal_tensor_gemm", target_os = "macos"))]
-                    let field_done = match (&self.field_ffn, crate::gemv_ternary_msl_field::gemv_use_field()) {
-                        (Some(caches), true) if layer_idx < caches.down.len() => caches.down[layer_idx]
-                            .as_ref()
-                            .is_some_and(|ctx| {
-                                ctx.dispatch_zero_copy(&self.client, &self.ffn_hidden, &self.ffn_out)
-                                    .is_ok()
-                            }),
+                    let field_done = match (
+                        &self.field_ffn,
+                        crate::gemv_ternary_msl_field::gemv_use_field(),
+                    ) {
+                        (Some(caches), true) if layer_idx < caches.down.len() => {
+                            caches.down[layer_idx].as_ref().is_some_and(|ctx| {
+                                ctx.dispatch_zero_copy(
+                                    &self.client,
+                                    &self.ffn_hidden,
+                                    &self.ffn_out,
+                                )
+                                .is_ok()
+                            })
+                        }
                         _ => false,
                     };
                     #[cfg(not(all(feature = "metal_tensor_gemm", target_os = "macos")))]
@@ -5581,14 +5603,14 @@ impl TernaryDeltanetGpuForward {
                 // i1138: the field lane's zero-copy dispatch (armed + cache
                 // present); fail-open to the incumbent otherwise.
                 #[cfg(all(feature = "metal_tensor_gemm", target_os = "macos"))]
-                let field_done = match (&self.field_ffn, crate::gemv_ternary_msl_field::gemv_use_field()) {
-                    (Some(caches), true) => caches
-                        .lm_head
-                        .as_ref()
-                        .is_some_and(|ctx| {
-                            ctx.dispatch_zero_copy(&self.client, &lm_in, &self.logits)
-                                .is_ok()
-                        }),
+                let field_done = match (
+                    &self.field_ffn,
+                    crate::gemv_ternary_msl_field::gemv_use_field(),
+                ) {
+                    (Some(caches), true) => caches.lm_head.as_ref().is_some_and(|ctx| {
+                        ctx.dispatch_zero_copy(&self.client, &lm_in, &self.logits)
+                            .is_ok()
+                    }),
                     _ => false,
                 };
                 #[cfg(not(all(feature = "metal_tensor_gemm", target_os = "macos")))]

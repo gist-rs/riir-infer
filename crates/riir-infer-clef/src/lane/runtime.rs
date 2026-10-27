@@ -999,10 +999,7 @@ mod tests {
     /// the fp16 round-trip, which is exact for these values).
     #[test]
     fn tied_entropy_uniform_rows_is_ln_vocab() {
-        let dir = std::env::temp_dir().join(format!(
-            "clef_entropy_uniform_{}",
-            std::process::id()
-        ));
+        let dir = std::env::temp_dir().join(format!("clef_entropy_uniform_{}", std::process::id()));
         std::fs::create_dir_all(&dir).expect("scratch");
         let table = fixture_table(&dir, &[&[1.0, 0.0], &[0.0, 1.0]]);
         let h = tied_entropy(&[1.0, 1.0], &table);
@@ -1019,10 +1016,7 @@ mod tests {
     /// through (sharper distribution ⇔ lower entropy).
     #[test]
     fn tied_entropy_sharpens_downward() {
-        let dir = std::env::temp_dir().join(format!(
-            "clef_entropy_sharp_{}",
-            std::process::id()
-        ));
+        let dir = std::env::temp_dir().join(format!("clef_entropy_sharp_{}", std::process::id()));
         std::fs::create_dir_all(&dir).expect("scratch");
         let table = fixture_table(&dir, &[&[10.0, 0.0], &[0.0, 1.0], &[1.0, 0.0]]);
         // h along row 0's direction: logits [100, 0, 10] → sharp.
@@ -1030,10 +1024,7 @@ mod tests {
         // h along the balanced diagonal: logits [11, 1, 1] → the same
         // SHAPE but relatively flatter than 100-vs-rest.
         let flat = tied_entropy(&[1.0, 1.0], &table);
-        assert!(
-            sharp < flat,
-            "sharp {sharp} must sit below flat {flat}"
-        );
+        assert!(sharp < flat, "sharp {sharp} must sit below flat {flat}");
         assert!(sharp >= 0.0, "entropy is non-negative, got {sharp}");
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -1043,16 +1034,16 @@ mod tests {
     /// walk must read H = ln(2 + e^-1) − (1 + 0 + 1)/(2 + e^-1).
     #[test]
     fn tied_entropy_closed_form() {
-        let dir = std::env::temp_dir().join(format!(
-            "clef_entropy_closed_{}",
-            std::process::id()
-        ));
+        let dir = std::env::temp_dir().join(format!("clef_entropy_closed_{}", std::process::id()));
         std::fs::create_dir_all(&dir).expect("scratch");
         let table = fixture_table(&dir, &[&[1.0, 0.0], &[0.0, 1.0], &[1.0, 1.0]]);
         let h = tied_entropy(&[1.0, 0.0], &table);
         let z = 2.0 + (-1.0f32).exp();
         let expected = 1.0f32 + z.ln() - 2.0 / z;
-        assert!((h - expected).abs() < 1e-5, "closed form: {h} vs {expected}");
+        assert!(
+            (h - expected).abs() < 1e-5,
+            "closed form: {h} vs {expected}"
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

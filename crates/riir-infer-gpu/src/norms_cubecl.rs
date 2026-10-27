@@ -1196,11 +1196,23 @@ impl ResidualAddRmsNormRotateCubeCL {
         let params_handle = crate::params_cache::params_handle(client, f32::as_bytes(params));
 
         debug_assert_binding_at_least(&x_handle, dim, "ResidualAddRmsNormRotateCubeCL::x");
-        debug_assert_binding_at_least(&residual_handle, dim, "ResidualAddRmsNormRotateCubeCL::residual");
+        debug_assert_binding_at_least(
+            &residual_handle,
+            dim,
+            "ResidualAddRmsNormRotateCubeCL::residual",
+        );
         debug_assert_binding_at_least(&gamma_handle, dim, "ResidualAddRmsNormRotateCubeCL::gamma");
         debug_assert_binding_at_least(&signs_handle, dim, "ResidualAddRmsNormRotateCubeCL::signs");
-        debug_assert_binding_at_least(&norm_out_handle, dim, "ResidualAddRmsNormRotateCubeCL::norm_out");
-        debug_assert_binding_at_least(&rot_out_handle, dim, "ResidualAddRmsNormRotateCubeCL::rot_out");
+        debug_assert_binding_at_least(
+            &norm_out_handle,
+            dim,
+            "ResidualAddRmsNormRotateCubeCL::norm_out",
+        );
+        debug_assert_binding_at_least(
+            &rot_out_handle,
+            dim,
+            "ResidualAddRmsNormRotateCubeCL::rot_out",
+        );
 
         // SAFETY: Caller guarantees correct buffer sizes + the geometry
         // guard (dim % hblock == 0, hblock <= 1024).
@@ -1540,7 +1552,9 @@ mod tests {
         let signs: Vec<f32> = (0..dim)
             .map(|i| if (i / 7) % 2 == 0 { 1.0f32 } else { -1.0f32 })
             .collect();
-        let gamma: Vec<f32> = (0..dim).map(|i| 1.0f32 + (i % 11) as f32 * 0.031f32).collect();
+        let gamma: Vec<f32> = (0..dim)
+            .map(|i| 1.0f32 + (i % 11) as f32 * 0.031f32)
+            .collect();
         let residual: Vec<f32> = (0..dim)
             .map(|i| ((i % 23) as f32 - 11.0f32) * 0.37f32)
             .collect();
@@ -1552,14 +1566,26 @@ mod tests {
         let norm_a = client.empty(dim * core::mem::size_of::<f32>());
         unsafe {
             ResidualAddRmsNormCubeCL::launch::<ActiveRuntime>(
-                &client, x_a.clone(), res_a.clone(), gamma_a.clone(), norm_a.clone(), dim, eps,
+                &client,
+                x_a.clone(),
+                res_a.clone(),
+                gamma_a.clone(),
+                norm_a.clone(),
+                dim,
+                eps,
             );
         }
         let signs_a = client.create_from_slice(f32::as_bytes(&signs));
         let rot_a = client.empty(dim * core::mem::size_of::<f32>());
         unsafe {
             crate::deltanet_rotation_cubecl::RotationCubeCL::launch_forward_copy::<ActiveRuntime>(
-                &client, norm_a.clone(), rot_a.clone(), signs_a.clone(), dim, dim, hblock,
+                &client,
+                norm_a.clone(),
+                rot_a.clone(),
+                signs_a.clone(),
+                dim,
+                dim,
+                hblock,
             );
         }
 
@@ -1572,8 +1598,16 @@ mod tests {
         let rot_b = client.empty(dim * core::mem::size_of::<f32>());
         unsafe {
             ResidualAddRmsNormRotateCubeCL::launch::<ActiveRuntime>(
-                &client, x_b.clone(), res_b.clone(), gamma_b.clone(), signs_b.clone(),
-                norm_b.clone(), rot_b.clone(), dim, hblock, eps,
+                &client,
+                x_b.clone(),
+                res_b.clone(),
+                gamma_b.clone(),
+                signs_b.clone(),
+                norm_b.clone(),
+                rot_b.clone(),
+                dim,
+                hblock,
+                eps,
             );
         }
 
@@ -1645,14 +1679,18 @@ mod tests {
         norm_rot_g1_case(
             dim,
             hblock,
-            (0..dim).map(|i| if i % 2 == 0 { 4000.0f32 } else { -4000.0f32 }).collect(),
+            (0..dim)
+                .map(|i| if i % 2 == 0 { 4000.0f32 } else { -4000.0f32 })
+                .collect(),
             eps,
         );
         // Alternating ±1 (the maximal-sign-stress row).
         norm_rot_g1_case(
             dim,
             hblock,
-            (0..dim).map(|i| if i % 2 == 0 { 1.0f32 } else { -1.0f32 }).collect(),
+            (0..dim)
+                .map(|i| if i % 2 == 0 { 1.0f32 } else { -1.0f32 })
+                .collect(),
             eps,
         );
     }

@@ -228,7 +228,10 @@ fn main() -> Result<()> {
     for pos in 0..steps {
         if pos > 0 && pos % 64 == 0 {
             let el = t0.elapsed().as_secs_f64();
-            eprintln!("# progress dense {pos}/{steps} — {el:.0}s — {:.2} tok/s", pos as f64 / el);
+            eprintln!(
+                "# progress dense {pos}/{steps} — {el:.0}s — {:.2} tok/s",
+                pos as f64 / el
+            );
         }
         let logits = forward_qwen_deltanet_ternary(
             &mut x,
@@ -287,7 +290,10 @@ fn main() -> Result<()> {
         for pos in 0..steps {
             if pos > 0 && pos % 64 == 0 {
                 let el = t0.elapsed().as_secs_f64();
-                eprintln!("# progress rho={rho} {pos}/{steps} — {el:.0}s — {:.2} tok/s", pos as f64 / el);
+                eprintln!(
+                    "# progress rho={rho} {pos}/{steps} — {el:.0}s — {:.2} tok/s",
+                    pos as f64 / el
+                );
             }
             let logits = forward_qwen_deltanet_ternary_flashmemory(
                 &mut x,

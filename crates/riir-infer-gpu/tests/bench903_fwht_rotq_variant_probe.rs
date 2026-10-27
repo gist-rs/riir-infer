@@ -596,10 +596,20 @@ fn launch_arm(
                     .arg(&hb);
             }
             Kind::GateSigmoid => {
-                b.arg(in_a).arg(in_b).arg(signs).arg(out).arg(ascale).arg(&hb);
+                b.arg(in_a)
+                    .arg(in_b)
+                    .arg(signs)
+                    .arg(out)
+                    .arg(ascale)
+                    .arg(&hb);
             }
             Kind::Swiglu => {
-                b.arg(in_a).arg(in_b).arg(signs).arg(out).arg(ascale).arg(&hb);
+                b.arg(in_a)
+                    .arg(in_b)
+                    .arg(signs)
+                    .arg(out)
+                    .arg(ascale)
+                    .arg(&hb);
             }
         }
         b.launch(LaunchConfig {
@@ -626,7 +636,10 @@ fn median(mut v: Vec<f64>) -> f64 {
 fn bench903_fwht_rotq_variant_probe() {
     // ── box-state provenance + the exclusivity refusal ──
     if let Ok(out) = std::process::Command::new("nvidia-smi")
-        .args(["--query-gpu=utilization.gpu,memory.used", "--format=csv,noheader"])
+        .args([
+            "--query-gpu=utilization.gpu,memory.used",
+            "--format=csv,noheader",
+        ])
         .output()
     {
         eprintln!(
@@ -635,14 +648,20 @@ fn bench903_fwht_rotq_variant_probe() {
         );
     }
     if let Ok(out) = std::process::Command::new("nvidia-smi")
-        .args(["--query-compute-apps=pid,process_name", "--format=csv,noheader"])
+        .args([
+            "--query-compute-apps=pid,process_name",
+            "--format=csv,noheader",
+        ])
         .output()
     {
         let busy: Vec<String> = String::from_utf8_lossy(&out.stdout)
             .lines()
             .filter(|l| {
                 let l = l.to_lowercase();
-                l.contains("riir") || l.contains("cargo") || l.contains("python") || l.contains("llama")
+                l.contains("riir")
+                    || l.contains("cargo")
+                    || l.contains("python")
+                    || l.contains("llama")
             })
             .map(str::to_string)
             .collect();
@@ -675,8 +694,16 @@ fn bench903_fwht_rotq_variant_probe() {
     assert!(pairs >= 3, "need at least 3 pairs for a median");
 
     let shapes: [(usize, Kind, &str); 3] = [
-        (5120, Kind::Rmsnorm, "rmsnorm(K1: 64 FFN + 16 attn inputs + final)/token=81"),
-        (5120, Kind::GateSigmoid, "gate_sigmoid(K4, attention wo input)/token=16"),
+        (
+            5120,
+            Kind::Rmsnorm,
+            "rmsnorm(K1: 64 FFN + 16 attn inputs + final)/token=81",
+        ),
+        (
+            5120,
+            Kind::GateSigmoid,
+            "gate_sigmoid(K4, attention wo input)/token=16",
+        ),
         (17408, Kind::Swiglu, "swiglu(K5, FFN down input)/token=64"),
     ];
     let hblock = 1024usize;
@@ -698,7 +725,9 @@ fn bench903_fwht_rotq_variant_probe() {
         let mut rng = Lcg(0x9E3779B97F4A7C15 ^ (si as u64 + 1));
         let a_h: Vec<f32> = (0..dim).map(|_| rng.next_f32()).collect();
         let b_h: Vec<f32> = (0..dim).map(|_| 0.5 + rng.next_f32()).collect();
-        let s_h: Vec<f32> = (0..dim).map(|i| if i % 2 == 0 { 1.0 } else { -1.0 }).collect();
+        let s_h: Vec<f32> = (0..dim)
+            .map(|i| if i % 2 == 0 { 1.0 } else { -1.0 })
+            .collect();
         let a_d = stream.clone_htod(&a_h).expect("htod a");
         let b_d = stream.clone_htod(&b_h).expect("htod b");
         let s_d = stream.clone_htod(&s_h).expect("htod s");
@@ -737,7 +766,9 @@ fn bench903_fwht_rotq_variant_probe() {
             stream.synchronize().expect("sync");
             let t = Instant::now();
             for _ in 0..burst {
-                launch_arm(kind, f, &stream, &a_d, &b_d, &s_d, &out_d, &ascale_d, dim, hblock);
+                launch_arm(
+                    kind, f, &stream, &a_d, &b_d, &s_d, &out_d, &ascale_d, dim, hblock,
+                );
             }
             stream.synchronize().expect("sync");
             t.elapsed().as_secs_f64() * 1e6 / burst as f64
@@ -745,7 +776,9 @@ fn bench903_fwht_rotq_variant_probe() {
 
         // ── bit-identity gate (with drift diagnostics) ──
         let snapshot = |f: &CudaFunction| -> (Vec<i8>, Vec<u32>) {
-            launch_arm(kind, f, &stream, &a_d, &b_d, &s_d, &out_d, &ascale_d, dim, hblock);
+            launch_arm(
+                kind, f, &stream, &a_d, &b_d, &s_d, &out_d, &ascale_d, dim, hblock,
+            );
             stream.synchronize().expect("sync");
             let mut o = vec![0i8; dim];
             let mut a = vec![0f32; dim / 16];
@@ -807,12 +840,27 @@ fn bench903_fwht_rotq_variant_probe() {
 
         // ── interleaved burst A/B (shipping arms only) ──
         for _ in 0..60 {
-            launch_arm(kind, &p0, &stream, &a_d, &b_d, &s_d, &out_d, &ascale_d, dim, hblock);
+            launch_arm(
+                kind, &p0, &stream, &a_d, &b_d, &s_d, &out_d, &ascale_d, dim, hblock,
+            );
             if v1_ok {
-                launch_arm(kind, &v1, &stream, &a_d, &b_d, &s_d, &out_d, &ascale_d, dim, hblock);
+                launch_arm(
+                    kind, &v1, &stream, &a_d, &b_d, &s_d, &out_d, &ascale_d, dim, hblock,
+                );
             }
             if v3_ok {
-                launch_arm(kind, v3.as_ref().unwrap(), &stream, &a_d, &b_d, &s_d, &out_d, &ascale_d, dim, hblock);
+                launch_arm(
+                    kind,
+                    v3.as_ref().unwrap(),
+                    &stream,
+                    &a_d,
+                    &b_d,
+                    &s_d,
+                    &out_d,
+                    &ascale_d,
+                    dim,
+                    hblock,
+                );
             }
         }
         stream.synchronize().expect("sync");
@@ -882,7 +930,10 @@ fn bench903_fwht_rotq_variant_probe() {
     eprintln!("[bench903] ── family projection (shipping arms, census-weighted) ──");
     eprintln!(
         "[bench903]   family {:?} µs/token → projected {:.0} µs/token | saves {:.0} µs/token = {:.2}% of the {:.0} µs token (re-cross bar +2.71%)",
-        census_total, projected, census_total - projected,
-        (census_total - projected) / TOKEN_US * 100.0, TOKEN_US
+        census_total,
+        projected,
+        census_total - projected,
+        (census_total - projected) / TOKEN_US * 100.0,
+        TOKEN_US
     );
 }

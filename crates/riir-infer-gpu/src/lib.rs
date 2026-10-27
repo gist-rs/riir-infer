@@ -234,14 +234,18 @@ pub mod gemv_ternary_cubecl;
 pub mod gemv_ternary_cuda_raw;
 #[cfg(feature = "ternary_gemv")]
 pub mod gemv_ternary_fma_cubecl;
+#[cfg(all(
+    feature = "metal_tensor_gemm",
+    feature = "ternary_gemv",
+    target_os = "macos"
+))]
+pub mod gemv_ternary_msl_field;
 #[cfg(all(feature = "ternary_gemv_cuda_raw", not(target_os = "macos")))]
 pub mod gemv_ternary_multicol_cuda_raw;
 #[cfg(all(feature = "cubecl_runtime", feature = "ternary_gemv_residual"))]
 pub mod gemv_ternary_residual_cubecl;
 #[cfg(feature = "ternary_gemv")]
 pub mod gemv_ternary_scale_ab_cubecl;
-#[cfg(all(feature = "metal_tensor_gemm", feature = "ternary_gemv", target_os = "macos"))]
-pub mod gemv_ternary_msl_field;
 #[cfg(all(
     feature = "ternary_gemv_cuda_raw",
     feature = "ternary_gemm_batched",
@@ -381,6 +385,15 @@ pub use gemv_ternary_fma_cubecl::{
     GemvTernaryFmaCubeCL, TernaryHandleFma, fma_enabled, fma_launch_count, pack_u32_digit_bytes,
     set_gemv_use_fma,
 };
+#[cfg(all(
+    feature = "metal_tensor_gemm",
+    feature = "ternary_gemv",
+    target_os = "macos"
+))]
+pub use gemv_ternary_msl_field::{
+    GemvTernaryFieldMsl, TernaryFieldWeights, field_launch_count, gemv_use_field,
+    set_gemv_use_field,
+};
 #[cfg(all(feature = "ternary_gemv_cuda_raw", not(target_os = "macos")))]
 pub use gemv_ternary_multicol_cuda_raw::{
     MC_TOKENS_MAX, MC_TOKENS_MIN, TernaryGemmMultiColCudaRaw,
@@ -389,11 +402,6 @@ pub use gemv_ternary_multicol_cuda_raw::{
 pub use gemv_ternary_residual_cubecl::GemvTernaryResidualCubeCL;
 #[cfg(feature = "ternary_gemv")]
 pub use gemv_ternary_scale_ab_cubecl::GemvTernaryScaleAbCubeCL;
-#[cfg(all(feature = "metal_tensor_gemm", feature = "ternary_gemv", target_os = "macos"))]
-pub use gemv_ternary_msl_field::{
-    GemvTernaryFieldMsl, TernaryFieldWeights, field_launch_count, gemv_use_field,
-    set_gemv_use_field,
-};
 #[cfg(all(
     feature = "ternary_gemv_cuda_raw",
     feature = "ternary_gemm_batched",

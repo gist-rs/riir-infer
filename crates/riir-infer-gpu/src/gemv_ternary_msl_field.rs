@@ -40,7 +40,11 @@
 //!   Issue-670 T4 submission ordering), NO wait (shared-queue in-order
 //!   execution). The e2e posture.
 
-#![cfg(all(feature = "metal_tensor_gemm", feature = "ternary_gemv", target_os = "macos"))]
+#![cfg(all(
+    feature = "metal_tensor_gemm",
+    feature = "ternary_gemv",
+    target_os = "macos"
+))]
 
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU8, AtomicUsize, Ordering};
@@ -717,15 +721,13 @@ impl FieldFfnCaches {
                 _ => None,
             });
             down.push(match d {
-                Some(d) => {
-                    GemvTernaryFieldMsl::new_zero_copy_plain(
-                        d,
-                        wgpu_device.clone(),
-                        wgpu_queue.clone(),
-                    )
-                    .ok()
-                    .map(Arc::new)
-                }
+                Some(d) => GemvTernaryFieldMsl::new_zero_copy_plain(
+                    d,
+                    wgpu_device.clone(),
+                    wgpu_queue.clone(),
+                )
+                .ok()
+                .map(Arc::new),
                 None => None,
             });
         }
