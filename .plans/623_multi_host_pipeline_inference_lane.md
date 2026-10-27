@@ -50,6 +50,17 @@ mlx-lm on the Proposal-042 scoreboard **measured on the same two boxes**.
 - [ ] **T0.3** 1-box arms for the D3 models: riir-infer Metal vs MLX vs llama.cpp Metal —
   decode tok/s, TTFT @4k/32k. **If riir-infer's 1-box arm loses, file the gap as its own
   issue first — the multi-host claim is meaningless on a losing single-box base.**
+  **Row inventory 2026-10-28 (zed-amo-i623-t24 — what exists, what the closing lane
+  still owes):** decode tg128 rows exist per engine but NOT under one posture: llama.cpp
+  solo bmo 60.9 (Bench 900), MLX 1-box bmo 58.1 + pp512 357.3 + pp4096 1005.3 +
+  pp32768 REFUSED-by-Metal (Bench 904), riir-infer idle-bmo stage-path 56.9 (Issue-1144
+  posture) + the league cells (amo, 0.978× llama.cpp at the league pin). **Owed:** one
+  bmo-idle session running all three engines through {tg128, pp512, pp4096, pp32768}
+  cells with one harness + box-state provenance (the llama.cpp bundle shipped for
+  Bench 900 and the mlx-env venv rsynced for Bench 904 should still be on bmo — verify
+  alive before trusting; our side rides the league binary or dist_stage's planner
+  probe for decode + a chunked-prefill cell for TTFT). T0.3's bmo-GPU-quiet window is
+  the only gate; no 2-box coordination needed.
   **⛔ MODEL SCOPE (owner, 2026-10-26): gemma-2-2b is RETIRED (riir-train Issue 617) — the
   1-box cells run on Bonsai-2-27B-PQ2_0 + qwen3.8-27B ONLY; never add a gemma-2-2b cell.**
   **NOTE 2026-10-26: the amo 1-box Metal cells need a QUIET-GPU window — the rethink
@@ -301,9 +312,10 @@ mlx-lm on the Proposal-042 scoreboard **measured on the same two boxes**.
     asking a simple factual question … The answer is Paris.\n</think>\n\nThe capital of
     France is Paris.<|im_end|>"`, stopped at EOS after 42 tokens, **`--full-check` G1
     PASS**, decode 17.3 tok/s (amo shared — indicative).
-- [ ] **T2.3** Chunked pipelined prefill (chunk c on stage 1 while chunk c+1 on stage 0,
+- [x] **T2.3** Chunked pipelined prefill (chunk c on stage 1 while chunk c+1 on stage 0,
   double-buffered frames) + KV/GDN state lives on its own stage (no state traffic in
-  steady state).
+  steady state). (T2.3a + T2.3b landed 2026-10-27; T2.3c closed at the demotion
+  2026-10-28 — the parent is complete.)
   - [x] T2.3a **per-position pipelined prefill — LANDED 2026-10-27**: new `FrameKind::Prefill`
     (activation, NO token reply) for prompt positions `0..len-1`; only the last prompt
     position and decode steps round-trip. The head computes pos t+1 while the tail
