@@ -1911,7 +1911,11 @@ fn warn_metal_cache_missing_once(flag: &str, reason: &str) {
 // gate1 green-zero: n=0 dispatches, bit-identical logits, `ok. 1 passed`).
 // One eprintln per SITE (not per process — the interesting signal is WHICH
 // handle list drifted), still hot-path clean via the per-site swap.
-#[cfg(all(feature = "metal_tensor_gemm", target_os = "macos"))]
+#[cfg(all(
+    feature = "ternary_gemm_batched",
+    feature = "metal_tensor_gemm",
+    target_os = "macos"
+))]
 fn warn_zerocopy_cache_missing_once(site: PrefillSite) {
     use std::sync::atomic::{AtomicU64, Ordering};
     static WARNED: AtomicU64 = AtomicU64::new(0);
@@ -3609,10 +3613,18 @@ impl TernaryDeltanetGpuForward {
                 // so an un-split cache list left every site except
                 // out_proj/down_proj silently falling through to simdgroup
                 // (gate1's n=0 green-zero, Bench 998's partial engagement).
-                cache_one(&mut lh.in_proj_qkv);
-                cache_one(&mut lh.in_proj_z);
-                cache_one(&mut lh.in_proj_a);
-                cache_one(&mut lh.in_proj_b);
+                // The split GDN handles exist only under `ternary_gemm_batched`
+                // (the Issue-727-H2a field gate) while this zero-copy cache
+                // block lights under `metal_tensor_gemm` alone too — gate the
+                // split sites on their own feature (the i1138 lane builds this
+                // combo and found origin broken here).
+                #[cfg(feature = "ternary_gemm_batched")]
+                {
+                    cache_one(&mut lh.in_proj_qkv);
+                    cache_one(&mut lh.in_proj_z);
+                    cache_one(&mut lh.in_proj_a);
+                    cache_one(&mut lh.in_proj_b);
+                }
                 cache_one(&mut lh.gate_proj);
                 cache_one(&mut lh.up_proj);
                 if let Some(ref mut h) = lh.attn_wq {
