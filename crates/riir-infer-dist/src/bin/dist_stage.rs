@@ -405,6 +405,13 @@ fn run() -> Result<(), String> {
                     true => None,
                     false => Some(tok.eos_id() as u32),
                 },
+                // T2.4 fused batch step: `RIIR_DIST_PAIR=0` demotes to the
+                // single-drain incumbent cadence byte-identically (the A/B
+                // arm for the issue-1147 GOAT cell).
+                pair_decode: !matches!(
+                    std::env::var("RIIR_DIST_PAIR").as_deref(),
+                    Ok("0") | Ok("false") | Ok("off")
+                ),
                 ..HeadOptions::default()
             };
             let (reports, wall) = match (streams, a.spec_k) {

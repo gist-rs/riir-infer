@@ -401,10 +401,25 @@ fn run_waves<T: WaveStages, L: Transport>(
         if closed && streams.iter().all(|s| matches!(s.phase, Phase::Done)) {
             break;
         }
-        // One work item per stream, round-robin. The immutable view of
-        // the work (`tokens`) cannot cross the state mutation — the
-        // borrow ends at `send_frame`, the mutation follows it.
+        // T2.4 fused batch step: when EVERY ready stream is a decode feed,
+        // hint the tail (BatchN) so it submits all the chains BEFORE any
+        // readback — the shared queue runs them back to back with no
+        // inter-chain idle (the launch-bound gap, Phase 4). Prefill-bearing
+        // passes and solo passes ride the ordinary frames byte-identically.
         let n = streams.len();
+        let ready_ct = streams
+            .iter()
+            .filter(|s| matches!(s.phase, Phase::Prefill | Phase::Feed))
+            .count();
+        let all_feed = ready_ct > 1
+            && streams
+                .iter()
+                .filter(|s| matches!(s.phase, Phase::Feed))
+                .count()
+                == ready_ct;
+        if all_feed && opts.pair_decode {
+            link.send_frame(FrameKind::BatchN, &(ready_ct as u32).to_le_bytes())?;
+        }
         // Indexed on purpose: the body interleaves immutable prompt
         // slices with `phase` mutation on `streams` AND hands `i` to
         // `table.stage(i)` — an iterator would fight the borrows.
@@ -483,12 +498,19 @@ fn run_waves<T: WaveStages, L: Transport>(
                 }
             }
         }
-        // Drain exactly one reply, then re-rotate: a stream whose token
+        // Drain the pass's replies, then re-rotate: a stream whose token
         // just landed feeds its next step while other streams' replies
-        // are still in flight. Termination: a non-done stream is either
-        // outstanding (this drain or a later one pops it) or has work
-        // (the next pass sends it), and total work is finite.
-        if let Some(expect) = outstanding.pop_front() {
+        // are still in flight. The fused batch drains its WHOLE pass (the
+        // tail already ran the chains back to back); `pair_decode = false`
+        // keeps the single-drain incumbent cadence byte-identical.
+        // Termination: a non-done stream is either outstanding (this drain
+        // or a later one pops it) or has work (the next pass sends it),
+        // and total work is finite.
+        let max_drain = if opts.pair_decode { usize::MAX } else { 1 };
+        for _ in 0..max_drain {
+            let Some(expect) = outstanding.pop_front() else {
+                break;
+            };
             let kind = link.recv_frame_into(&mut buf)?;
             expect_kind(kind, FrameKind::TokenStream)?;
             let body: [u8; 8] = buf
@@ -616,6 +638,11 @@ pub fn run_tail_multi<T: Transport>(
     let mut hidden = Vec::new();
     let mut out = Vec::new();
     let mut steps = 0usize;
+    // T2.4 fused batch: the hinted batch's (seq, pos) rows and their
+    // flattened hidden rows — preallocated here, reused every batch.
+    let mut batch_rows: Vec<(u32, usize)> = Vec::new();
+    let mut batch_hidden: Vec<f32> = Vec::new();
+    let mut batch_seen: Vec<bool> = vec![false; stages.len()];
     loop {
         let kind = link.recv_frame_into(&mut buf)?;
         match kind {
@@ -711,6 +738,100 @@ pub fn run_tail_multi<T: Transport>(
                 }
                 track.next_pos += n_tok;
                 steps += n_tok;
+            }
+            FrameKind::BatchN => {
+                // T2.4 fused batch step: `count u32 LE`, then `count`
+                // one-token Activation frames of DISTINCT streams. All
+                // rows validate BEFORE any chain runs, then every chain
+                // submits, then each finishes in FIFO order (the head's
+                // outstanding order) — the shared queue runs the chains
+                // back to back with no inter-chain idle.
+                let count = u32::from_le_bytes(
+                    buf.as_slice()
+                        .try_into()
+                        .map_err(|_| proto(format!("batch-n frame len {} != 4", buf.len())))?,
+                ) as usize;
+                if count == 0 || count > stages.len() {
+                    return Err(proto(format!(
+                        "BatchN count {count} outside 1..={}",
+                        stages.len()
+                    )));
+                }
+                batch_rows.clear();
+                batch_hidden.clear();
+                batch_seen.iter_mut().for_each(|v| *v = false);
+                for row in 0..count {
+                    let kind = link.recv_frame_into(&mut buf)?;
+                    expect_kind(kind, FrameKind::Activation)?;
+                    let hdr = ActivationFrame::decode_into(&buf, &mut hidden).map_err(proto)?;
+                    let seq = hdr.seq_id;
+                    let pos = hdr.pos as usize;
+                    if hdr.n_tok != 1 || hidden.len() != hidden_dim {
+                        return Err(proto(format!(
+                            "batch row {row}: n_tok {} / {} floats != 1×{hidden_dim} — the fused batch carries decode feeds only",
+                            hdr.n_tok,
+                            hidden.len()
+                        )));
+                    }
+                    if seq as usize >= stages.len() {
+                        return Err(proto(format!(
+                            "batch row {row}: seq {seq} >= {}",
+                            stages.len()
+                        )));
+                    }
+                    if stages[seq as usize].hidden_dim() != hidden_dim {
+                        return Err(proto(format!(
+                            "batch row {row}: stream {seq} hidden {} != table {hidden_dim}",
+                            stages[seq as usize].hidden_dim()
+                        )));
+                    }
+                    if batch_seen[seq as usize] {
+                        return Err(proto(format!(
+                            "batch row {row}: seq {seq} duplicated in one batch"
+                        )));
+                    }
+                    batch_seen[seq as usize] = true;
+                    let Some(track) = tracks.get_mut(&seq) else {
+                        return Err(proto(format!(
+                            "batch row {row}: stream {seq} with no BeginStream"
+                        )));
+                    };
+                    if track.chunk > 1 && pos < track.prompt_len {
+                        return Err(proto(format!(
+                            "batch row {row}: stream {seq} still prefilling at pos {pos}"
+                        )));
+                    }
+                    if pos != track.next_pos {
+                        return Err(proto(format!(
+                            "batch row {row}: stream {seq} activation pos {pos} != expected {}",
+                            track.next_pos
+                        )));
+                    }
+                    if pos >= stages[seq as usize].max_positions() {
+                        return Err(proto(format!(
+                            "batch row {row}: stream {seq} activation pos {pos} > stage capacity {}",
+                            stages[seq as usize].max_positions()
+                        )));
+                    }
+                    batch_rows.push((seq, pos));
+                    batch_hidden.extend_from_slice(&hidden);
+                    track.next_pos += 1;
+                    steps += 1;
+                }
+                for (row, &(seq, pos)) in batch_rows.iter().enumerate() {
+                    let stage: &mut dyn StageCompute = &mut *stages[seq as usize];
+                    let lo = row * hidden_dim;
+                    stage.step_submit(0, pos, &batch_hidden[lo..lo + hidden_dim]);
+                }
+                for &(seq, pos) in batch_rows.iter() {
+                    let logits = stages[seq as usize].step_finish();
+                    on_logits(seq, pos, logits);
+                    let id = argmax_first(logits);
+                    let mut reply_buf = [0u8; 8];
+                    reply_buf[..4].copy_from_slice(&seq.to_le_bytes());
+                    reply_buf[4..].copy_from_slice(&id.to_le_bytes());
+                    link.send_frame(FrameKind::TokenStream, &reply_buf)?;
+                }
             }
             k => return Err(proto(format!("unexpected {k:?} frame mid-stream"))),
         }

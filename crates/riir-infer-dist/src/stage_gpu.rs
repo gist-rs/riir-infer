@@ -79,13 +79,28 @@ impl StageCompute for TernaryGpuStage {
         self.max_positions
     }
 
+    /// Submit + finish — the fused batch split ([`StageCompute::step_submit`])
+    /// composes back into exactly this call order, so the solo path and the
+    /// batch path are the same kernel sequence by construction.
     fn step(&mut self, token: u32, pos: usize, input: &[f32]) -> &[f32] {
+        self.step_submit(token, pos, input);
+        self.step_finish()
+    }
+
+    fn step_submit(&mut self, token: u32, pos: usize, input: &[f32]) {
         self.fwd.set_pos(pos);
         match self.range.is_first() {
             true => self.fwd.set_input_token(&self.weights, token as usize),
             false => self.fwd.set_hidden_state(&input[..self.n_embd]),
         }
+        // Enqueue only — the readback happens in `step_finish`. The fused
+        // batch submits every stream's chain before any readback, so the
+        // shared queue runs the chains back to back with no inter-chain
+        // idle (T2.4).
         self.fwd.forward_range_dispatch(self.range);
+    }
+
+    fn step_finish(&mut self) -> &[f32] {
         let (out, width) = match self.range.is_last(self.n_layer) {
             true => (self.fwd.read_logits(), self.vocab),
             false => (self.fwd.read_hidden_state(), self.n_embd),
