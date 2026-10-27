@@ -11,6 +11,7 @@ start once Issue 1109 T0 (bmo reachable) is done; Phase 1 substrate is decision-
 (riir-infer-core, no deps); Phase 2+ waits on [Proposal 042](../.proposals/042_multi_mac_distributed_inference.md) D1 (crate home); Phase 3+ on D2 (RDMA enabled).
 **Lease closed:** zed-amo-i623-t03 claimed T0.3 2026-10-28T03:06+07 — 99 s AFTER zed-amo-i623-t24 pushed the completed T0.3 (`291d6f1`, Bench 911: all three engines × the four cells measured in one bmo-idle session, gap issue 1146 filed). The claimed unit was already discharged; the t03 lane should re-run `claim_lease_check` + fetch on its next turn and pick from the genuinely-open rungs (T2.4 kernel micro-batching, T5.1a–d). No work was duplicated — the claim predates no measurement.
 **Claimed:** zed-amo-i623-t24 (T5.1a–c: wire + rewind + runner mode with the v0 drafter per the V0 design below), 1793131719, expires 2026-10-29T20:08:00+00:00
+**Claimed:** zed-amo-i623-mb (T2.4 kernel micro-batching: batch-2 decode on the tail with per-stream bit-identity + GPU cells on idle bmo), 1793132228, expires 2026-10-29T20:17:00+00:00
 **Lease closed:** zed-amo-idle-refine-cont landed Phase 1 (T1.1–T1.4) 2026-10-26 (`48b4b0d`) — the claim above is that landing's provenance.
 Scope: Phase 1 substrate only (T1.1–T1.4, zero-GPU under the elephant-recapture posture); T1.5's Metal arm stays compile-only this window.
 **Date:** 2026-10-22
