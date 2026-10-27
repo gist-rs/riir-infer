@@ -308,6 +308,19 @@ fn bridge_fns() -> &'static BridgeFns {
     })
 }
 
+/// The shim's last NSError text ("" when none recorded). The compile-load
+/// retry's classifier: the driver's Code=54-class failure text embeds
+/// "(transient; retry)" — a bounded backoff can see the pool reclaimed
+/// (async program release still in flight); anything else is a real
+/// failure and must surface immediately.
+fn last_bridge_error(fns: &BridgeFns) -> String {
+    let p = unsafe { (fns.last_error)() };
+    if p.is_null() {
+        return String::new();
+    }
+    unsafe { std::ffi::CStr::from_ptr(p).to_string_lossy().into_owned() }
+}
+
 // ── Probe 779: runtime-driven private-API surface (free functions — the
 //    receivers are raw retained pointers, not BridgeKernels). Retained-
 //    pointer discipline: every fn returning an object returns +1 (wrap in
@@ -588,7 +601,7 @@ impl BridgeKernel {
         let m = CString::new(mil_path.to_str().unwrap()).unwrap();
         let d = CString::new(data_path.to_str().unwrap()).unwrap();
         let s = CString::new(scale_path.to_str().unwrap()).unwrap();
-        let handle = unsafe {
+        let submit = || unsafe {
             (fns.compile2)(
                 m.as_ptr(),
                 d.as_ptr(),
@@ -599,6 +612,36 @@ impl BridgeKernel {
                 1, // single-procedure programs (T0 P6: banks rejected)
             )
         };
+        let mut handle = submit();
+        if handle.is_null() {
+            // Issue 886 T5 (M5, 2026-10-27): the LOAD stage can fail
+            // transiently — Code=54 "no ANE resources (transient; retry)"
+            // fired at the second in-process bank construction: the
+            // just-dropped bank's programs release ASYNCHRONOUSLY and the
+            // ANE pool is still held when the next bank compiles (oMLX's
+            // settle rule generalized from headroom re-measures — 886 T2 —
+            // to program loads). Classify through the shim's last error; a
+            // transient gets a bounded 1s/2s/4s backoff and a re-submit of
+            // the IDENTICAL compile (the temp files stay on disk until the
+            // outcome resolves); a non-transient — or still-failing — load
+            // errors below exactly as before.
+            const TRANSIENT_BACKOFF_MS: [u64; 3] = [1_000, 2_000, 4_000];
+            for (attempt, &ms) in TRANSIENT_BACKOFF_MS.iter().enumerate() {
+                let err = last_bridge_error(fns);
+                if !err.contains("transient") {
+                    break;
+                }
+                eprintln!(
+                    "[ane_pf] compile2/load transient (attempt {}): {err} — re-submitting in {ms} ms",
+                    attempt + 1
+                );
+                std::thread::sleep(std::time::Duration::from_millis(ms));
+                handle = submit();
+                if !handle.is_null() {
+                    break;
+                }
+            }
+        }
         let _ = std::fs::remove_file(&mil_path);
         let _ = std::fs::remove_file(&data_path);
         let _ = std::fs::remove_file(&scale_path);
