@@ -1,6 +1,6 @@
 # Issue 1136 — rung: gdn_out_gemv (the out-project GEMV class at the gdn chain's exit)
 
-**Status:** Open — filed 2026-10-27 ~06:4x +07 from the i1132 census (Bench 1008, W1+W2 reproduced). Unclaimed. **Carries the chain-budget caveat hardest** — read the caveat before claiming.
+**Status:** Claimed — zed-amo-i1135-attncluster (the i1135 lane continues here; its probe instrument is the template), 1793065034+. Sequence: ceiling-gate strip probe FIRST (3 verified-idle windows; after the morning i1130 ~0 + i1134 negative + i1135 sub-bar, the ceiling gate is the cheapest honest kill-or-proceed), kernel only if the ceiling clears. Filed 2026-10-27 ~06:4x +07 from the i1132 census (Bench 1008, W1+W2 reproduced). **Carries the chain-budget caveat hardest** — read the caveat before claiming.
 The trigger: **gdn_out_gemv 0.68 ms/token @ 48 launches x 14.2 us/launch** (W1/bmo; W2/amo 1.27, same launches). The gdn out-project GEMV is the chain's exit boundary launch class (after zgate 0.14 / rot -0.02 noise-floor).
 
 ## The caveat (why this files LAST and A/Bs FIRST)
