@@ -76,14 +76,15 @@ gpu = [
     "riir-infer-gpu/deltanet_recurrence_parallel",
     "riir-infer-gpu/delta_routing",
     "riir-infer-gpu/params_handle_cache",
+    # Issue 1146 rung 2a (promoted 2026-10-28, Bench 920): the Metal tensor
+    # (matmul2d) zero-copy prefill GEMM at the promoted ktile64 geometry —
+    # the league harness armed it (riir-ai Bench 1009/1011, 1.16-1.24x) and
+    # no serving binary did. Dist A/B 1.21-1.29x prefill, G1 identical token
+    # stream once the cold-pool zero-init hazard was fixed (3bbf275).
+    # TernaryGpuStage arms it on macOS (`RIIR_DIST_METAL_TENSOR=0` demotes);
+    # the code is target_os-gated, so non-macOS builds are unchanged.
+    "riir-infer-gpu/metal_tensor_gemm",
 ]
-# Issue 1146 rung 2a: the Metal tensor (matmul2d) zero-copy prefill GEMM at
-# the promoted ktile64 geometry (riir-ai Bench 1009/1011: 1.16-1.24x e2e over
-# the simdgroup body the `gpu` row runs, G1 exact). The league harness arms it
-# via the setter; no serving binary did. This feature compiles it in and
-# TernaryGpuStage arms it at construction (macOS only; a no-op elsewhere).
-# Opt-in until the dist A/B — then folded into `gpu`.
-gpu_metal_tensor = ["gpu", "riir-infer-gpu/metal_tensor_gemm"]
 
 [[bin]]
 name = "dist_stage"

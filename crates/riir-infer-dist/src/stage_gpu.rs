@@ -46,10 +46,13 @@ impl TernaryGpuStage {
         range.validate(config.n_layer as u32)?;
         require_coverage(&weights, range, config.n_layer as u32)?;
         let ctx = CubeCLContext::new().map_err(|e| format!("GPU init: {e:?}"))?;
-        // Issue 1146 rung 2a: route the prefill GEMMs through the tensor
-        // zero-copy path (falls through to simdgroup per site on failure).
-        #[cfg(all(feature = "gpu_metal_tensor", target_os = "macos"))]
-        riir_infer_gpu::set_prefill_use_metal_tensor_zerocopy(true);
+        // Issue 1146 rung 2a (promoted, Bench 920): route the prefill GEMMs
+        // through the tensor zero-copy path (falls through to simdgroup per
+        // site on failure). `RIIR_DIST_METAL_TENSOR=0` demotes for A/Bs.
+        #[cfg(target_os = "macos")]
+        riir_infer_gpu::set_prefill_use_metal_tensor_zerocopy(
+            std::env::var("RIIR_DIST_METAL_TENSOR").as_deref() != Ok("0"),
+        );
         let fwd = TernaryDeltanetGpuForward::new(&ctx, config, &weights);
         Ok(Self {
             fwd,

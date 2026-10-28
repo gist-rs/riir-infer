@@ -33,7 +33,8 @@ BIN_B="${I1146W_BIN_B:-}"
 REPS="${I1146W_REPS:-1}"
 MODEL="${I1146W_MODEL:?set I1146W_MODEL}"
 WIDTHS="${I1146W_WIDTHS:-128 256 512 1024}"
-LENS="${I1146W_LENS:-512 4096 32768}"
+# `-` not `:-`: an EMPTY I1146W_LENS means G1 cells only (no timing).
+LENS="${I1146W_LENS-512 4096 32768}"
 for b in $BIN_A $BIN_B; do [ -e "$b" ] || { say "REFUSED: missing $b"; exit 2; }; done
 ARMS="a"; [ -n "$BIN_B" ] && ARMS="a b"
 bin_of() { case "$1" in a) echo "$BIN_A" ;; b) echo "$BIN_B" ;; esac; }

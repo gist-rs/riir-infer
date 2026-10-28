@@ -3,7 +3,7 @@
 //! (`prefill_range_chunk`), against the simdgroup incumbent.
 //!
 //! The league harness (riir-ai Bench 1009) proved the zerocopy arm G1-exact
-//! through the whole-prompt `prefill()` API; the dist `gpu_metal_tensor`
+//! through the whole-prompt `prefill()` API; the dist tensor-armed
 //! build then generated a DIFFERENT first token on the same model. This gate
 //! localises the break: three postures on ONE instance, last-position logits
 //! compared BIT-EXACT (argmax + max_abs == 0 — the Bench-1009 class), the
