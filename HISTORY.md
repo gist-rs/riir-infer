@@ -485,6 +485,10 @@ The T1 rung (`attn_chain_fused_f32` + the Issue-618 devpos twin for the graph-ca
 
 Issue 1131 (filed `86e419d`, shikuwa-4090-i1131t6): the Bench-902 census rows OUTSIDE T3's family — `gdn_input_rotabq` 301.6 µs/token + `gdn_out_norm_gate_permute_rotq` 262.5 µs/token ≈ **5.2% of the token combined** — carry the SAME tight per-launch floor and barrier-chain geometry as T3's leased family (256-thread norm tree + 1024-wide butterfly at 5-block under-occupied grids; honest rooflines: K3 ~66× over, K2 ~7–12× — the dense a/b GEMV arm bounds it). Headroom ~2.6% e2e at 2×, compounding with T1 (+0.77%) / Bench-899 (+0.6–1.0%) / T3 (≥3.5%) toward the +2.71% decode re-cross. Docs-only scout; execution BLOCKED-BY-LEASE on same-file grounds (`deltanet_rotation_cudarc.rs`) until the T3 lease clears; the rung builds on whatever MB pattern T3 lands (DRY, never a fork).
 
+## 2026-10-28 — Issue 1147 CLOSED + removed: the T2.4 kernel micro-batching rung — fused-batch v0 LANDED (`03f0fe6`, Bench 912) then DEMOTED same-day on the 2-box wire refutation (Bench 913: armed 46.9–52.6 vs incumbent 99.2–108.5 aggregate decode window, −52% — the BatchN wave forfeits the head⇄tail GPU overlap that IS the 2.37× bubble fill)
+
+`pair_decode` ships default-OFF (`RIIR_DIST_PAIR=1` arms it for loopback rigs only, where the +39% was real and stands). VERDICT: kernel-level batch-2 is CLOSED for the wire — under the incumbent cadence the tail never holds two ready decode chains, so there is no engagement window; serving-path micro-batching via BatchN is not a direction on this topology. Records: `.benchmarks/912_plan623_issue1147_fused_decode_batch.md` + `.benchmarks/913_plan623_issue1147_wire_refutation.md`. Lease zed-amo-i623-mb released on completion (claimed 2026-10-27 epoch 1793132228 for the plan-623 T2.4 rung).
+
 ## Lessons
 
 - Check the reference implementation, not a remembered standard, before filing a fixture-integrity finding (Issue 010).
