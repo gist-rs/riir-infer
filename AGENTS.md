@@ -156,7 +156,14 @@ e2e +9.88/+9.07% decode ABBA); the dense-leg tax halved 4.73→2.56 ms/token. En
 the incumbent two-launch pair); `RIIR_GDN_DENSE_PAIR_WG` ships unpromoted (the geometry
 rung measured DEAD — the pair cost is a per-dispatch floor, flat across wg sizes).
 Remaining scope in issue 1129: the `cuda_backend` CubeCL arm (the scored 4090 lane is
-cudarc, whose K2 already fuses this pair — untouched).
+cudarc, whose K2 already fuses this pair — untouched) — **MEASURED + CLOSED 2026-10-28**
+(riir-ai Bench 1014): the CudaRuntime decode A/B validates the promoted default — G1
+EXACT 18/18 kernel cells + 24/24 model-level FNV pairs, reach EXACT (+6000/+6000 =
+48 dense-carrying layers × 5 × 25), e2e +1.54% (0.9846×, above the 1.5% Bench-995 bar,
+marginal as the mechanism predicts — native CUDA launches are cheaper than Metal's);
+the dense-layer count derives from the weights, never a constant (`GateProjWeights::Dense`
+on DeltaNet, empty on Attention). Test `crates/riir-infer-gpu/tests/issue1129_dense_pair_decode_ab.rs`
+(head `0e509e4`); argmax-walk FNV pin `4a455e57493bcf72`.
 The GDN prework-fused rung (riir-ai Issue 1004 R2, Bench 024) is **PROMOTED DEFAULT-ON,
 Metal/wgpu-scoped 2026-10-28** (riir-infer `e2edf61`+`2581fdd`, riir-ai `d25c7c460`;
 delegated owner verdict): conv1d+SiLU+q/k L2-norm+head-expand in ONE dispatch per
