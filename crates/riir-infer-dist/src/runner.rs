@@ -53,6 +53,12 @@ pub struct HeadReport {
     pub prefill: Duration,
     /// Wall time of the decode loop (`generated.len() - 1` steps).
     pub decode: Duration,
+    /// Speculative-fill instrumentation (T5.1): verify rounds executed and
+    /// accepted-prefix tokens committed (sum of per-round m — the d_0 echo
+    /// counts, so E[m] ≥ 1 whenever the echo holds). Zero on the ordinary
+    /// runner path. Drives the acceptance-rate-weighted scoreboard row.
+    pub spec_rounds: u64,
+    pub spec_accepted: u64,
 }
 
 impl HeadReport {

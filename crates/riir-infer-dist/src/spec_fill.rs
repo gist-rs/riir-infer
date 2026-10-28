@@ -88,10 +88,28 @@ pub struct DraftCtx<'a> {
     pub k: usize,
 }
 
-/// The draft source (T5.1c). V0 ships [`RepeatLastDrafter`]; a real
-/// drafter (MTP/draft head) is T5.1d — a riir-train lane.
+/// The draft source (T5.1c). V0 ships [`RepeatLastDrafter`]; the trained
+/// MTP-head drafter is T5.1d ([`crate::spec_mtp::MtpHeadDrafter`]).
 pub trait DraftSource {
     fn propose(&mut self, ctx: &DraftCtx<'_>) -> Vec<u32>;
+
+    /// Roll-aware proposal (T5.1d). The runner has ALREADY snapshotted the
+    /// stage when this runs; `roll(tok, pos, out)` steps the REAL stage at
+    /// `pos` and writes the resulting hidden row into `out` (hidden_dim
+    /// wide), appending it to the verify request's rows. A roll drafter
+    /// MUST invoke the closure exactly `ctx.k` times — its own drafts at
+    /// `cursor + j` — so the rolled rows ARE the verify payload (no second
+    /// forward; the rewind restores from the pre-propose snapshot). The
+    /// default ignores the closure and falls back to [`DraftSource::propose`]
+    /// (token-level drafters; the runner then steps the drafts itself — the
+    /// legacy path, byte-identical).
+    fn propose_with_roll(
+        &mut self,
+        ctx: &DraftCtx<'_>,
+        _roll: &mut dyn FnMut(u32, usize, &mut [f32]),
+    ) -> Vec<u32> {
+        self.propose(ctx)
+    }
 }
 
 /// The v0 drafter: repeat the last committed token. Acceptance ≈ 0 — the
@@ -409,17 +427,61 @@ where
         let cursor = committed.len() - 1;
         let pending = *committed.last().expect("nonempty");
         let k_round = k.min(stage.max_positions().saturating_sub(cursor)).max(1);
-        let drafts = drafter.propose(&DraftCtx {
-            committed: &committed,
-            k: k_round,
-        });
 
-        // Head consumes the drafts (hypothetical positions), snapshot first.
+        // Snapshot BEFORE drafting: a roll drafter (T5.1d) advances the
+        // stage inside propose_with_roll, so the pre-verify snapshot has to
+        // precede it. Token-level drafters never touch the stage, so the
+        // snapshot content is identical to the old post-propose order —
+        // the legacy path stays byte-identical.
         stage.snapshot_state(&mut snap).map_err(proto)?;
         rows.clear();
-        for (j, &d) in drafts.iter().enumerate() {
-            let out = stage.step(d, cursor + j, &empty);
-            rows.extend_from_slice(out);
+        let mut rolled = 0usize;
+        let mut roll_fault: Option<String> = None;
+        let hidden_dim = stage.hidden_dim();
+        let drafts: Vec<u32> = {
+            let mut roll = |tok: u32, pos: usize, out: &mut [f32]| {
+                if roll_fault.is_some() {
+                    return;
+                }
+                if pos != cursor + rolled {
+                    roll_fault = Some(format!("roll contract: pos {pos} != cursor + {rolled}"));
+                    return;
+                }
+                if out.len() != hidden_dim {
+                    roll_fault = Some(format!(
+                        "roll contract: out len {} != hidden_dim {hidden_dim}",
+                        out.len()
+                    ));
+                    return;
+                }
+                let r = stage.step(tok, pos, &empty);
+                out.copy_from_slice(r);
+                rows.extend_from_slice(r);
+                rolled += 1;
+            };
+            drafter.propose_with_roll(
+                &DraftCtx {
+                    committed: &committed,
+                    k: k_round,
+                },
+                &mut roll,
+            )
+        };
+        if let Some(e) = roll_fault {
+            return Err(proto(e));
+        }
+        if rolled == 0 {
+            // Token-level drafter: the runner consumes the drafts itself
+            // (the legacy path — the rows the tail verifies).
+            for (j, &d) in drafts.iter().enumerate() {
+                let out = stage.step(d, cursor + j, &empty);
+                rows.extend_from_slice(out);
+            }
+        } else if rolled != drafts.len() {
+            return Err(proto(format!(
+                "roll drafter contract: {rolled} rolls for {} drafts",
+                drafts.len()
+            )));
         }
 
         // One round trip.
@@ -447,6 +509,8 @@ where
                 reply.m
             )));
         }
+        report.spec_rounds += 1;
+        report.spec_accepted += m as u64;
         if m == drafts.len() {
             // Full accept: state already sits at cursor+K on both stages.
             // d_0 == pending is ALREADY committed — push d_1..d_{K-1} plus

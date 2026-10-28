@@ -153,6 +153,8 @@ impl StreamState {
             generated: self.generated.clone(),
             prefill: self.prefill.unwrap_or_default(),
             decode: self.decode,
+            spec_rounds: 0,
+            spec_accepted: 0,
         }
     }
 }

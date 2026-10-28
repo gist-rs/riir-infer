@@ -63,6 +63,35 @@ use riir_infer_dist::multi::{MultiRequest, run_head_multi, run_tail_multi};
 use riir_infer_dist::runner::{HeadOptions, run_head_with, run_local_with_report, run_tail};
 use riir_infer_dist::sockopts::{self, Applied, LinkOptions};
 use riir_infer_dist::spec_fill::{RepeatLastDrafter, run_head_spec, run_tail_spec};
+use riir_infer_dist::spec_mtp::{BmthHead, MtpHeadDrafter};
+
+/// The bin's drafter seat (T5.1d): a concrete enum — `run_head_spec` is
+/// generic over a SIZED drafter, and both arms delegate the roll seam
+/// (repeat-last ignores it; the MTP head drafts through it).
+enum BinDrafter {
+    Repeat(RepeatLastDrafter),
+    Mtp(MtpHeadDrafter),
+}
+
+impl riir_infer_dist::spec_fill::DraftSource for BinDrafter {
+    fn propose(&mut self, ctx: &riir_infer_dist::spec_fill::DraftCtx<'_>) -> Vec<u32> {
+        match self {
+            BinDrafter::Repeat(d) => d.propose(ctx),
+            BinDrafter::Mtp(d) => d.propose(ctx),
+        }
+    }
+
+    fn propose_with_roll(
+        &mut self,
+        ctx: &riir_infer_dist::spec_fill::DraftCtx<'_>,
+        roll: &mut dyn FnMut(u32, usize, &mut [f32]),
+    ) -> Vec<u32> {
+        match self {
+            BinDrafter::Repeat(d) => d.propose_with_roll(ctx, roll),
+            BinDrafter::Mtp(d) => d.propose_with_roll(ctx, roll),
+        }
+    }
+}
 use riir_infer_dist::stage::{ArtifactIdentity, StageCompute, TernaryCpuStage, stage_scope};
 #[cfg(feature = "gpu")]
 use riir_infer_dist::stage_gpu::TernaryGpuStage;
@@ -118,9 +147,15 @@ struct Args {
     /// T5.1 v0: speculative fill with K drafts per verify round (head
     /// and tail — the tail's loop must speak the verify arm). 1-stream
     /// only; the CPU stage is the v0 posture (SpecStage = snapshot /
-    /// restore), the drafter is repeat-last (acceptance ≈ 0 — the
-    /// machinery lane, never a gain claim).
+    /// restore). The drafter is repeat-last by default; `--drafter mtp`
+    /// seats the trained BMTH head (T5.1d, Bench 677/917) from
+    /// `--head PATH` — split-63 seat ONLY (Bench 917's basis curve).
     spec_k: Option<usize>,
+    /// The spec drafter: `repeat` (default) or `mtp` (the trained head).
+    drafter: String,
+    /// The BMTH v1 artifact path for `--drafter mtp` (verified against
+    /// its `.blake3` sidecar at boot; refuses loud on drift).
+    head: Option<PathBuf>,
 }
 
 fn parse() -> Result<Args, String> {
@@ -148,6 +183,8 @@ fn parse() -> Result<Args, String> {
         answer_probe: false,
         link_bw: None,
         spec_k: None,
+        drafter: "repeat".to_string(),
+        head: None,
     };
     while let Some(flag) = it.next() {
         let mut val = || it.next().ok_or(format!("{flag} needs a value"));
@@ -187,6 +224,8 @@ fn parse() -> Result<Args, String> {
             }
             "--streams" => a.streams = val()?.parse().map_err(|e| format!("--streams: {e}"))?,
             "--spec-k" => a.spec_k = Some(val()?.parse().map_err(|e| format!("--spec-k: {e}"))?),
+            "--drafter" => a.drafter = val()?,
+            "--head" => a.head = Some(PathBuf::from(val()?)),
             "--plan-report" => {
                 a.plan_report = Some(
                     val()?
@@ -661,7 +700,47 @@ fn run() -> Result<(), String> {
                     }
                     let mut stage =
                         TernaryCpuStage::new(config.clone(), weights.clone(), range, identity)?;
-                    let mut drafter = RepeatLastDrafter;
+                    // The drafter (T5.1d): repeat-last is the machinery
+                    // baseline; `--drafter mtp` seats the trained BMTH
+                    // head (Bench 677 artifact, sidecar-verified). Bench
+                    // 917's basis curve: the head reads 0.68 per-slot at
+                    // split 63 and 0.03 at the production split 32 — a
+                    // split-63 boot prints the seat note, anything lower
+                    // refuses (the seat is part of the contract).
+                    let mut drafter: BinDrafter = match a.drafter.as_str() {
+                        "repeat" => BinDrafter::Repeat(RepeatLastDrafter),
+                        "mtp" => {
+                            let head_path = a
+                                .head
+                                .as_ref()
+                                .ok_or("--drafter mtp needs --head PATH (the BMTH v1 artifact)")?;
+                            let split = a.split;
+                            if split + 8 < config.n_layer as u32 {
+                                return Err(format!(
+                                    "--drafter mtp at split {split}: Bench 917's basis curve reads \
+                                         0.03 per-slot at split 32 — the viable seat is split {} (head owns \
+                                         all but the last layer); pass --split {}",
+                                    config.n_layer - 1,
+                                    config.n_layer - 1
+                                ));
+                            }
+                            let head = BmthHead::load_verified(head_path)
+                                .map_err(|e| format!("--head: {e}"))?;
+                            let d = MtpHeadDrafter::seat(head, config.n_embd)
+                                .map_err(|e| format!("--head: {e}"))?;
+                            eprintln!(
+                                "[head] mtp drafter seated (support {}, d {}) — Bench 917 seat: split {split}",
+                                d.head().support(),
+                                d.head().d()
+                            );
+                            BinDrafter::Mtp(d)
+                        }
+                        other => {
+                            return Err(format!(
+                                "--drafter {other}: known drafters are repeat | mtp"
+                            ));
+                        }
+                    };
                     let r = run_head_spec(
                         &mut stage,
                         &mut link,

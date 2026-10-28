@@ -44,6 +44,7 @@ pub mod probe;
 pub mod runner;
 pub mod sockopts;
 pub mod spec_fill;
+pub mod spec_mtp;
 pub mod stage;
 #[cfg(feature = "gpu")]
 pub mod stage_gpu;

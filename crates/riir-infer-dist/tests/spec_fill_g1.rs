@@ -29,6 +29,7 @@ use riir_infer_dist::spec_fill::{
     RepeatLastDrafter, SpecStage, VerifyReplyData, VerifyRequest, accepted_prefix,
     decode_verify_reply, encode_verify_reply, run_head_spec, run_tail_spec,
 };
+use riir_infer_dist::spec_mtp::{BmthHead, MtpHeadDrafter};
 use riir_infer_dist::stage::{ArtifactIdentity, StageCompute, TernaryCpuStage};
 use riir_infer_dist::transport::{Direction, PeerKey, TcpTransport};
 
@@ -325,4 +326,124 @@ fn spec_cpu_stage_round_trips_state() {
         branch_a, branch_b,
         "restore returns the stage to the snapshot cursor"
     );
+}
+
+// ───────────────────── T5.1d: the roll-drafter path ─────────────────────
+
+/// The oracle as a ROLL drafter: same drafts as `OracleDrafter` (so every
+/// round fully accepts) but delivered through `propose_with_roll` — the
+/// runner's roll integration (snapshot-before-propose, rows built by the
+/// drafter's own rolls, full-accept commit with NO rewind) must stay
+/// byte-identical to the sequential oracle.
+struct RollOracleDrafter {
+    truth: Vec<u32>,
+}
+
+impl riir_infer_dist::spec_fill::DraftSource for RollOracleDrafter {
+    fn propose(&mut self, ctx: &riir_infer_dist::spec_fill::DraftCtx<'_>) -> Vec<u32> {
+        let idx = ctx.committed.len() - 1 - PROMPT.len();
+        (0..ctx.k)
+            .map(|j| self.truth.get(idx + j).copied().unwrap_or(0))
+            .collect()
+    }
+
+    fn propose_with_roll(
+        &mut self,
+        ctx: &riir_infer_dist::spec_fill::DraftCtx<'_>,
+        roll: &mut dyn FnMut(u32, usize, &mut [f32]),
+    ) -> Vec<u32> {
+        let cursor = ctx.committed.len() - 1;
+        let idx = cursor - PROMPT.len();
+        let pending = ctx.committed[cursor];
+        let mut drafts = Vec::with_capacity(ctx.k);
+        drafts.push(pending);
+        let mut row = vec![0f32; synth::N_EMBD as usize];
+        roll(pending, cursor, &mut row);
+        for j in 1..ctx.k {
+            let d = self.truth.get(idx + j).copied().unwrap_or(0);
+            drafts.push(d);
+            roll(d, cursor + j, &mut row);
+        }
+        drafts
+    }
+}
+
+#[test]
+fn spec_roll_oracle_full_accept_equals_oracle() {
+    let (config, w, id) = load("spec_g1_rollo");
+    let truth = oracle(&config, &w, id);
+    let out = run_pair_spec(
+        &config,
+        &w,
+        2,
+        [7u8; 32],
+        [7u8; 32],
+        id,
+        id,
+        RollOracleDrafter {
+            truth: truth.clone(),
+        },
+        K,
+    );
+    out.tail.as_ref().expect("tail ok");
+    let head = out.head.unwrap_or_else(|e| panic!("head ok: {e}"));
+    assert_eq!(
+        head, truth,
+        "the roll-drafter full-accept path is byte-identical to the oracle"
+    );
+    assert!(out.tail.as_ref().expect("tail ok") >= &0);
+}
+
+/// Deterministic LCG f32 in [0, 1) — no unseeded global draws.
+struct TestLcg(u64);
+impl TestLcg {
+    fn next_f32(&mut self) -> f32 {
+        self.0 = self
+            .0
+            .wrapping_mul(6364136223846793005)
+            .wrapping_add(1442695040888963407);
+        ((self.0 >> 33) as f32) / (u32::MAX as f32)
+    }
+}
+
+/// Build BMTH v1 bytes (the documented layout — a doc-only cross-check).
+fn build_bmth(d: usize, vocab: u32, support: usize, rng: &mut TestLcg) -> Vec<u8> {
+    let mut b = Vec::new();
+    b.extend_from_slice(b"BMTH");
+    b.extend_from_slice(&1u32.to_le_bytes());
+    b.extend_from_slice(&(d as u32).to_le_bytes());
+    b.extend_from_slice(&vocab.to_le_bytes());
+    b.extend_from_slice(&(support as u32).to_le_bytes());
+    for _ in 0..support * d {
+        b.extend_from_slice(&rng.next_f32().to_le_bytes());
+    }
+    for _ in 0..support {
+        b.extend_from_slice(&rng.next_f32().to_le_bytes());
+    }
+    for v in 0..support {
+        b.extend_from_slice(&(v as u32).to_le_bytes());
+    }
+    b
+}
+
+#[test]
+fn spec_mtp_drafter_lossless_on_synth() {
+    // The trained head over synth weights drafts pseudo-random ids: the
+    // echo (d_0) still always accepts, d_1.. usually reject — the m ≥ 1
+    // partial-accept + rewind path through the ROLL integration. The G1
+    // property is drafter-independent: the stream equals the oracle.
+    let (config, w, id) = load("spec_g1_mtp");
+    let truth = oracle(&config, &w, id);
+    let n_embd = config.n_embd;
+    let vocab = synth::VOCAB as u32;
+    let bytes = build_bmth(n_embd, vocab, 16, &mut TestLcg(0xE11));
+    let head = BmthHead::from_bytes(&bytes).expect("synth head");
+    let drafter = MtpHeadDrafter::seat(head, n_embd).expect("seat at the stage width");
+    let out = run_pair_spec(&config, &w, 2, [9u8; 32], [9u8; 32], id, id, drafter, K);
+    let head_out = out.head.unwrap_or_else(|e| panic!("head ok: {e}"));
+    assert_eq!(
+        head_out, truth,
+        "the trained-head drafter stays lossless regardless of acceptance"
+    );
+    assert!(out.tail.is_ok(), "tail clean shutdown");
 }

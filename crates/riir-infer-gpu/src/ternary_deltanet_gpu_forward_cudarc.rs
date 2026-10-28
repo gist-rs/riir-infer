@@ -2799,10 +2799,14 @@ impl TernaryDeltanetGpuForwardCudarc {
 
     /// riir-train Issue 654 (Plan 623 T5.1d) — download the post-loop residual
     /// stream (`acts.x`): the final RMSNorm's INPUT, i.e. the last layer's
-    /// output in the folded-runtime (Hadamard) basis, pre-final-norm. This is
-    /// the same value the spec_fill verify path carries as per-position hidden
-    /// rows, so a draft head fit on it consumes the serving wire verbatim —
-    /// no basis or norm reconstruction at the consumer.
+    /// output in the folded-runtime (Hadamard) basis, pre-final-norm — the
+    /// distribution the BMTH draft head was FIT on (riir-train Bench 677).
+    /// ⚠ The serving wire does NOT carry this stream at a 2-stage split:
+    /// the spec_fill verify path carries the HEAD STAGE's own layer-window
+    /// output, which is this same VALUE only when the stage owns every
+    /// layer. The consumer seats the head against the stage width and
+    /// MEASURES the in-posture acceptance (`examples/mtp_head_acceptance` —
+    /// the honest-basis law) instead of inheriting the fit-split number.
     ///
     /// Read-only, rotation-agnostic (no guard): valid after any
     /// `forward_token` / `forward_token_graph*` call (each syncs before

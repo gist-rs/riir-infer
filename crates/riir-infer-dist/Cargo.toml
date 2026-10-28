@@ -32,6 +32,14 @@ anyhow = "1"
 name = "spec_drafter_floor"
 path = "examples/spec_drafter_floor.rs"
 
+# The T5.1d in-posture acceptance harness loads the REAL folded artifact —
+# without the required-features row a feature-less run compiles it against
+# a loader that refuses the folded GGUF (the loud-skip law instead).
+[[example]]
+name = "mtp_head_acceptance"
+path = "examples/mtp_head_acceptance.rs"
+required-features = ["bonsai2_hadamard"]
+
 [features]
 default = []
 # The folded (Hadamard-rotated) Bonsai-2 loader — the real PQ2_0 artifact

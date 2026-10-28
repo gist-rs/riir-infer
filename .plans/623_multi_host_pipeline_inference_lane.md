@@ -2,9 +2,8 @@
 
 **Status:** Phase 2 PoC LANDED 2026-10-27 (T2.1 + T2.2 + T2.2b GPU stage + T2.3a pipelined prefill + T2.2c(1) range-scoped weights + T2.3b chunked batched prefill (promoted) — each stage holds only its own slice: `crates/riir-infer-dist`, D1 → (a)) — real 2-box TB5 runs, CPU⇄CPU and GPU⇄GPU, streams bit-identical to 1-box; 1-box GPU base gap filed as Issue 1139 — mostly BUILD POSTURE, fixed by Issue 1141 (dist `gpu` now carries the production decode posture + the workspace's cubecl-wgpu fork: 1-box stage decode 27.2 → 46.7 tok/s, 2-stage 26.0 → 45.2 tok/s on idle bmo; then Issue 1142's dense-pair loads-in-flight kernel, 1-box 51.4 tok/s; then Issue 1143's decode-norm loads-in-flight (`85c4da5`), 1-box 55.0 tok/s; then Issue 1144's radix-4 FWHT (`3147164`), 1-box 56.9 tok/s; residual 1.07× vs llama.cpp, attributed in Issue 1139 T4, next rung Issue 1145); Phase 1 (T1.1–T1.5) LANDED 2026-10-26
 
-**Claimed:** zed-amo-i623-mtpcons, 1793149690, expires 2026-10-30T01:08:10+00:00
-
-*(the T5.1d consumer half: `impl DraftSource` over the BMTH v1 bytes in riir-infer-dist + the acceptance scoreboard row.)*
+**Lease closed:** zed-amo-i623-mtpcons, 1793149690, expires 2026-10-30T01:08:10+00:00 — LANDED the T5.1d consumer half 2026-10-28 (Bench 917): `spec_mtp.rs` (`BmthHead` BMTH v1 reader + `MtpHeadDrafter`) + the runner roll seam (`DraftSource::propose_with_roll`, additive, token-level drafters byte-identical; G1 battery 11/11 incl. two new roll-path tests); in-posture acceptance MEASURED — teacher-forced per-slot 0.6841 at split 63 / 0.0591 at 48 / 0.0332 at the production 32 (fit basis 0.7929): the seat is split-63 ONLY; free-run stream degenerate (raw-text greedy collapse — the caveat and the follow-ups live in Bench 917); snapshot cost ~70× filed as Issue 1148; `--drafter mtp` wired into dist_stage.
+(feat(plan-623 T5.1d): the trained MTP-head consumer — spec_mtp + the roll seam, in-posture acceptance MEASURED (Bench 917))
 **Lease closed:** zed-amo-i623-t25residue landed the T2.5 residue 2026-10-28 (`a260b62` — the landing note on the T2.5 task carries the detail: measured link bw + tail probe rows; the commit was first made as `f610afc` and re-hashed onto the pushed claim by the manual rebase — same tree, new parent)
 **Lease closed:** zed-amo-i623-g2fitsbox measured the G2 fits-one-box row 2026-10-28 (Bench 916; the instrument commit `3b286c8` carries the decode-only oracle window)
   (the two disclosed T2.5 residues, Bench 915 honest-notes: the tail answer-posture probe rows print + the link bw MEASURED on the wire (echo-ack bulk — the tail does zero compute, the v0 conflation concern does not apply); CPU-only, no GPU cells)
@@ -678,7 +677,22 @@ mlx-lm on the Proposal-042 scoreboard **measured on the same two boxes**.
     (60.7 MB, support 2963) on the 4090 box; remaining = the consumer (`impl
     DraftSource` over the BMTH bytes here, G1 battery re-runs unchanged) + the
     owner-gated promotion; the acceptance-rate-weighted scoreboard row rides
-    the consumer lane.** dflash
+    the consumer lane.** **THE CONSUMER LANDED 2026-10-28 (Bench 917,
+    `spec_mtp.rs` + the roll seam): in-posture acceptance MEASURED, not
+    inherited — teacher-forced per-slot 0.6841 at split 63 (vs the 0.7929
+    post-final fit basis), 0.0591 at 48, 0.0332 at the production split 32:
+    the viable seat is SPLIT 63 ONLY (the basis cliff sits between 48 and
+    63 — linear decodability lives in the final layers); projected serving
+    E[m] ≈ 1.68 at k=2 there. The free-run E[m] (1.10) is stream-polluted —
+    the model's raw-text greedy decode collapses into a (0, 271) period-2
+    attractor (state-path cross-checked TF==pair; a model property, not a
+    consumer defect); the serving-shaped row needs chat-shaped prompts
+    (follow-up). The spec machinery's wall-clock is snapshot-bound (~70× vs
+    the ordinary pair; k=1 == k=2 isolates the per-round HybridStateSegment
+    snapshot ≈ 4 s — filed as Issue 1148, the fast path is the plan-named
+    GDN journal unwind + KV truncate). `--drafter mtp --head PATH` wired
+    into dist_stage (split guard refuses low seats loud). Promotion NOT
+    claimed — owner-gated.** dflash
     itself (`core/src/dflash.rs`) is wired to the OLD transformer path
     (`TransformerWeights`/`MultiLayerKVCache`), NOT the ternary DeltaNet stage —
     "already in core" means the algorithmic cores (`katgpt_speculative`), not a
