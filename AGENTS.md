@@ -118,14 +118,27 @@ pins (`tests/verbs_layout.rs`), the four inline verbs riding Apple's 32-slot
 both sides pre-QP); FIRST RDMA TRAFFIC amo⇄bmo: UC QP pair, RTT p50 **7.7 µs**
 (TCP was 94–96 µs, 12×) and **9.368 GiB/s** one-way sustained 1 GiB. Provider
 laws measured: UC RTS mask is STATE|SQ_PSN only; posted-recv budget 4 MB OK /
-5 MB rc=-12; UC credit flow-control stalls a dead peer's SQ as a poll TIMEOUT
+5 MB rc=-12 (**CORRECTED by Bench 928**: the cliff is MTU-independent +
+box-load-dependent — 3.75 PASS / 4.0 FAIL under bmo's ~66 GB wired; new law:
+recv rings ≤3 MB or runtime-probe, never hard-coded); UC credit flow-control
+stalls a dead peer's SQ as a poll TIMEOUT
 (never a WC error); GIDs are NOT IPv4-mapped on TB (index-0 fallback is the
-working path). T3.2 heap leg (67 MB MR lkey granted; rkey granted 0x0 —
-RDMA WRITE untested until rkey semantics are clarified, SEND/RECV is the
-measured shape) + T3.3 rows (64 B inline 7.7 µs; striped best 128 KiB
-8.76/9.368 GiB/s) landed same pass; OPEN: T3.2's MTLBuffer leg + rkey
-semantics, T3.3's MTU ladder (1024/2048 cells + the posted-recv cliff vs MTU),
-T3.4 GPU↔comm sync, T3.5 scoreboard (needs T3.4).
+working path). T3.2 heap leg (67 MB MR lkey granted) + T3.3 rows (64 B inline
+7.7 µs; striped best 128 KiB 8.76/9.368 GiB/s) landed same pass.
+**Phase 3 state 2026-10-29** (Bench 928, zed-m3-i623-t32t33 `570ee79`+`f9c4803`):
+T3.3 MTU ladder CLOSED — the `--mtu` override engages cleanly and is
+performance-invisible (9.342/9.337/9.294 GiB/s at MTU 4096/2048/1024); T3.2
+rkey half CLOSED NEGATIVE — RC refused at create, rkey 0x0 under every
+access-flag combination, UC RDMA WRITE accepted-then-never-completes
+(SEND/RECV is the wire shape on this provider); T3.2 MTLBuffer leg
+code-complete (`verbs_metal`, opt-in `rdma_metal`) blocked e2e by amo's
+Application Firewall ([issue 1152](.issues/1152_plan623_t32_verbs_metal_fw.md) —
+owner sudo/codesign or the bmo-target workaround); T3.4 GPU↔comm sync LANDED
+(zed-m3-i623-t34gpucomm `9f3c0f7`: the decode-feed async-finish arm —
+`schedule_async_finish` + the staged-copy read future, all-feed-pass deferral,
+demote-only `RIIR_DIST_ASYNC_FINISH=0`; hidden-bit identity exact, s=2
+decode window ~5% faster armed); OPEN: T3.5 scoreboard only (needs the T3.4
+serving integration).
 The GLU-fused ternary prefill FFN arm LANDED 2026-10-26 (Issue 1124 T1, the llama.cpp
 #29948 distill — `1320dda`): gate/up weight rows INTERLEAVED in 8-row chunks at
 mirror-build time (`pack_bitplanes_to_q2_interleaved_gate_up` +
