@@ -1,6 +1,6 @@
 # Bench 024 — Issue 1004 R2: the fused GDN prework (conv1d + SiLU + q/k L2-norm + head expansion, ONE dispatch)
 
-**Status:** RECORD (R2 BUILT, opt-in `deltanet_prework_fused`; e2e verdict: real but small — four positive medians across two runs, ALL inside the round spread → NOT promoted, opt-in stands; the structural case is the dispatch-count elimination, the league bout owns any promotion)
+**Status:** RECORD (R2 BUILT, opt-in `deltanet_prework_fused`; e2e verdict: real but small — four positive medians across two runs, ALL inside the round spread → NOT promoted, opt-in stands; the structural case is the dispatch-count elimination, the league bout owns any promotion). **⟲ PROMOTION ADDENDUM 2026-10-28: R2 PROMOTED DEFAULT-ON, Metal/wgpu-scoped** — see §Promotion at the end of this record; the opt-in verdict above is the history.
 
 **Date:** 2026-10-01 · **Box:** M3 Max (AC, powermode 2) · **Load class:** LOADED (loadavg 28–34 — the riir-refine sibling's all-features test suite at ~594% CPU throughout; ratios are interleave-paired so drift lands on both arms, but ABSOLUTE tok/s are load-deflated)
 
@@ -108,3 +108,15 @@ drop to P sequential dispatches).
 - `crates/riir-infer-gpu/src/ternary_deltanet_gpu_forward.rs` (the prework branch + toggle)
 - `crates/riir-infer-gpu/tests/bench_1004_r2_prework_fused_ab.rs` (stage A/B)
 - riir-ai: feature forward + re-exports + `bench_1004_r2_prework_fused_e2e.rs`
+
+## Promotion (2026-10-28, Metal/wgpu-scoped — delegated owner verdict)
+
+Evidence: the m5ultra re-cell (riir-ai Issue 1113, 2026-10-26 20:45 entry, session zed-amo-1113-recell) read R2 at **pp2048 1.043× / pp4096 1.045×** e2e, bit-identical ×8 every read, FNV/argmax anchors EXACT all four reads (248046 / `0ec2396fd4627f29` @2048; 99125 / `f35280cb95f5d306` @4096) — the ≥1.5% promote-if bar cleared decisively (4.3–4.5%); the M3's four positive medians (inside the round spread) are the no-regression half; G4 ~67 fewer dispatches/layer + ~160 MB/layer less traffic, bit-identical by construction; modelless gain.
+
+The delegated verdict (reviewer session `c928c408`, 2026-10-28): **promote R2, scoped to the Metal/wgpu posture; the cuda_backend path needs its own measured cell (filed `.issues/1149`, 4090-queued); R1 stays opt-in pending one more M5 window (pre-authorized: a second ≥1.5% read promotes it under the same Metal-only scope without asking again).**
+
+Landed shape (riir-infer `e2edf61` + the riir-ai default-set commit):
+- `PREFILL_PREWORK_FUSED`'s initial value is now env+platform-derived: `cfg!(target_os = "macos")` = ON (the promoted posture); elsewhere OFF until the Issue-1149 cell. `RIIR_PREFILL_PREWORK_FUSED`: demote-only on Metal, promote-only elsewhere; `set_prefill_prework_fused` stays the authoritative harness arm toggle. Four-case env-semantics unit pin landed (`prework_fused_semantics_tests`).
+- riir-ai `crates/riir-gpu/Cargo.toml`: `deltanet_prework_fused` joined the default set (dated NOTE in-file).
+- **Post-promotion G1 executed on the M5 at the league posture** (the promotion session, default build — no feature additions — through the prewarmed league target dir): @2048 `0ec2396fd4627f29` / argmax 248046 EXACT; @4096 `f35280cb95f5d306` / argmax 99125 EXACT, ×2 passes each. Box under concurrent sibling load — a correctness-class read, contention-immune (bit-compute does not move with load; no tok/s claim is made here).
+- League note: the next M5 prefill cells measure THIS default posture; anchors UNCHANGED expected (bit-identical rung), tok/s re-pins only; the league re-pin stays the league loop's job.
