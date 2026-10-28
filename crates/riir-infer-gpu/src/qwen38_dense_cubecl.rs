@@ -125,13 +125,18 @@ impl Qwen38WgpuConfig {
             });
         }
 
-        let vocab_size = gguf
+        // GGUF dims are ne-order (fastest first): token_embd is [n_embd, vocab].
+        // The first element is n_embd — the vocab is the PRODUCT over the rest.
+        let info = gguf
             .tensor_info("token_embd.weight")
-            .ok_or("config: missing token_embd.weight")?
-            .shape
-            .first()
-            .copied()
-            .ok_or("config: token_embd.weight has no dims")?;
+            .ok_or("config: missing token_embd.weight")?;
+        if info.shape.first() != Some(&n_embd) {
+            return Err(format!(
+                "config: token_embd.weight first dim {} != n_embd {n_embd}",
+                info.shape.first().unwrap_or(&0)
+            ));
+        }
+        let vocab_size: usize = info.shape.iter().product::<usize>() / n_embd;
 
         Ok(Self {
             n_embd,
