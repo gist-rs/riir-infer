@@ -2597,10 +2597,35 @@ pub fn set_prefill_recurrence_staged(on: bool) {
 /// batched-expand pair.
 ///
 /// Bit-identical by construction (pinned at kernel level against the shipping
-/// chain). Default **on** whenever `deltanet_prework_fused` is compiled; the
+/// chain). Default **on whenever `deltanet_prework_fused` is compiled**; the
 /// toggle exists so the e2e A/B measures both arms in one process (mandatory
 /// per Issue 642). The beta/decay dispatch is unchanged either way (it reads
 /// the a/b projection stream, not qkv).
+///
+/// **PROMOTED DEFAULT-ON on the Metal/wgpu posture 2026-10-28** (riir-ai
+/// Issue 1004; delegated owner verdict — G1 bit-identical ×8 + anchors EXACT,
+/// G2 e2e pp2048 1.043× / pp4096 1.045× on the m5ultra re-cell, M3 medians
+/// positive inside spread, G4 ~67 fewer dispatches/layer + ~160 MB/layer
+/// less traffic, modelless gain). The initial default is therefore
+/// **macOS-scoped**: on macOS (the Metal/wgpu serving surface — the league's
+/// m5ultra/m3 boxes) the fused kernel is the shipping prework; on every
+/// other platform the incumbent chunked-conv + batched-expand pair stays
+/// the shipping posture until its own measured cell lands (the 4090 CUDA
+/// cell: riir-infer Issue .issues/NNN, queue-owned — cuda needs its own
+/// bit-identity + no-regression evidence before the default moves there).
+/// The env `RIIR_PREFILL_PREWORK_FUSED` is the per-platform switch, DEMOTE
+/// on macOS / PROMOTE elsewhere: on macOS ANY set value that is not
+/// "1"/"on"/"true" (empty, "0", a typo) restores the incumbent pair;
+/// elsewhere only "1"/"on"/"true" arms the fused kernel. `set_prefill_prework_fused`
+/// stays the harness arm toggle (authoritative over the env, same contract
+/// as the GEMV-occupancy lane).
+#[cfg(all(
+    feature = "cubecl_runtime",
+    feature = "ternary_gemm_batched",
+    feature = "deltanet_prework_fused"
+))]
+static PREFILL_PREWORK_FUSED_INIT: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+
 #[cfg(all(
     feature = "cubecl_runtime",
     feature = "ternary_gemm_batched",
@@ -2609,6 +2634,57 @@ pub fn set_prefill_recurrence_staged(on: bool) {
 static PREFILL_PREWORK_FUSED: std::sync::atomic::AtomicBool =
     std::sync::atomic::AtomicBool::new(true);
 
+#[cfg(all(
+    feature = "cubecl_runtime",
+    feature = "ternary_gemm_batched",
+    feature = "deltanet_prework_fused"
+))]
+fn prefill_prework_fused_env_default(env: Result<String, std::env::VarError>) -> bool {
+    let armed_on_metal = cfg!(target_os = "macos");
+    match env {
+        // Unset: platform verdict (Metal = the promoted ON; other backends =
+        // incumbent OFF until their own cell lands).
+        Err(std::env::VarError::NotPresent) => armed_on_metal,
+        // Explicit value wins on every platform: "1"/"on"/"true" arms the
+        // fused kernel; anything else ("0", empty, a typo, non-Unicode)
+        // restores the incumbent pair.
+        Ok(v) => matches!(v.to_lowercase().as_str(), "1" | "on" | "true"),
+        Err(std::env::VarError::NotUnicode(_)) => false,
+    }
+}
+
+#[cfg(all(
+    feature = "cubecl_runtime",
+    feature = "ternary_gemm_batched",
+    feature = "deltanet_prework_fused"
+))]
+fn prefill_prework_fused_effective() -> bool {
+    if PREFILL_PREWORK_FUSED_INIT
+        .set(prefill_prework_fused_env_default(std::env::var(
+            "RIIR_PREFILL_PREWORK_FUSED",
+        )))
+        .is_err()
+    {
+        // set_prefill_prework_fused already ran (or ran concurrently): keep
+        // the harness toggle's verdict, never clobber it with the env read.
+        return PREFILL_PREWORK_FUSED.load(std::sync::atomic::Ordering::Relaxed);
+    }
+    PREFILL_PREWORK_FUSED.store(
+        PREFILL_PREWORK_FUSED_INIT.get().copied().unwrap_or(true),
+        std::sync::atomic::Ordering::Relaxed,
+    );
+    PREFILL_PREWORK_FUSED.load(std::sync::atomic::Ordering::Relaxed)
+}
+
+#[cfg(all(
+    feature = "cubecl_runtime",
+    feature = "ternary_gemm_batched",
+    feature = "deltanet_prework_fused"
+))]
+fn prefill_prework_fused_default_now() -> bool {
+    prefill_prework_fused_effective()
+}
+
 /// See [`PREFILL_PREWORK_FUSED`].
 #[cfg(all(
     feature = "cubecl_runtime",
@@ -2616,7 +2692,62 @@ static PREFILL_PREWORK_FUSED: std::sync::atomic::AtomicBool =
     feature = "deltanet_prework_fused"
 ))]
 pub fn set_prefill_prework_fused(on: bool) {
+    let _ = PREFILL_PREWORK_FUSED_INIT.set(on);
     PREFILL_PREWORK_FUSED.store(on, std::sync::atomic::Ordering::Relaxed);
+}
+
+#[cfg(all(
+    test,
+    feature = "cubecl_runtime",
+    feature = "ternary_gemm_batched",
+    feature = "deltanet_prework_fused"
+))]
+mod prework_fused_semantics_tests {
+    use super::prefill_prework_fused_env_default;
+
+    // The four env postures the promotion verdict pinned (2026-10-28,
+    // Metal-scoped): unset resolves to the PLATFORM default (macOS = ON —
+    // the promoted posture; elsewhere = OFF, the incumbent pair, until a
+    // measured cell lands there); armed values arm the fused kernel on EVERY
+    // platform; the demote class (ANY set value outside 1/on/true, empty
+    // included) restores the incumbent pair on every platform; non-Unicode
+    // demotes.
+    #[test]
+    fn unset_resolves_to_the_platform_default() {
+        assert_eq!(
+            prefill_prework_fused_env_default(Err(std::env::VarError::NotPresent)),
+            cfg!(target_os = "macos"),
+            "unset must resolve to the platform verdict (macOS = promoted ON, elsewhere = incumbent OFF)"
+        );
+    }
+
+    #[test]
+    fn armed_values_arm_on_every_platform() {
+        for v in ["1", "on", "true", "TRUE", "On"] {
+            assert!(
+                prefill_prework_fused_env_default(Ok(v.to_string())),
+                "{v} must arm the fused kernel on every runtime"
+            );
+        }
+    }
+
+    #[test]
+    fn the_demote_class_restores_the_incumbent_everywhere() {
+        for v in ["0", "", "off", "false", "yes", " "] {
+            assert!(
+                !prefill_prework_fused_env_default(Ok(v.to_string())),
+                "set-but-not-1/on/true ({v:?}) must DEMOTE, never fall back to the platform default"
+            );
+        }
+    }
+
+    #[test]
+    fn non_unicode_demotes() {
+        let bad = std::ffi::OsString::from("\u{fffd}");
+        assert!(!prefill_prework_fused_env_default(Err(
+            std::env::VarError::NotUnicode(bad)
+        )));
+    }
 }
 
 /// The chunk size C for chunked prefill. 64 is the standard DeltaNet choice
@@ -9367,8 +9498,7 @@ impl TernaryDeltanetGpuForward {
                     feature = "ternary_gemm_batched",
                     feature = "deltanet_prework_fused"
                 ))]
-                let prework_fused_on = PREFILL_PREWORK_FUSED
-                    .load(std::sync::atomic::Ordering::Relaxed)
+                let prework_fused_on = prefill_prework_fused_default_now()
                     && crate::deltanet_prework_fused_cubecl::DeltanetPreworkFusedCubeCL::supports(
                         head_dim, n_k_heads, n_v_heads,
                     )
