@@ -15,6 +15,10 @@
 #     bash i1146_width_recurve.sh
 # Env: I1146W_WIDTHS (default "128 256 512 1024"), I1146W_LENS (default
 #      "512 4096 32768"), I1146W_OUT (default /tmp/i1146w/<ts>).
+#      I1146W_BIN_B (optional): a second binary — every cell then runs A and
+#      B back to back (interleaved A/B, cells named a_/b_), and G1 compares
+#      the generated ids across BOTH binaries too. I1146W_REPS (default 1)
+#      repeats the timed pass.
 set -u
 
 TS=$(date +%Y%m%dT%H%M%SZ)
@@ -24,11 +28,15 @@ mkdir -p "$CELLS"
 LOG="$OUT/session.log"
 say() { echo "[$(date +%H:%M:%S)] $*" | tee -a "$LOG"; }
 
-BIN="${I1146W_BIN:?set I1146W_BIN}"
+BIN_A="${I1146W_BIN:?set I1146W_BIN}"
+BIN_B="${I1146W_BIN_B:-}"
+REPS="${I1146W_REPS:-1}"
 MODEL="${I1146W_MODEL:?set I1146W_MODEL}"
 WIDTHS="${I1146W_WIDTHS:-128 256 512 1024}"
 LENS="${I1146W_LENS:-512 4096 32768}"
-[ -e "$BIN" ] || { say "REFUSED: missing $BIN"; exit 2; }
+for b in $BIN_A $BIN_B; do [ -e "$b" ] || { say "REFUSED: missing $b"; exit 2; }; done
+ARMS="a"; [ -n "$BIN_B" ] && ARMS="a b"
+bin_of() { case "$1" in a) echo "$BIN_A" ;; b) echo "$BIN_B" ;; esac; }
 [ -e "$MODEL" ] || { say "REFUSED: missing $MODEL"; exit 2; }
 
 say "=== i1146 width re-curve start (ts $TS) ==="
@@ -38,7 +46,7 @@ if [ -n "$QUIET" ] && [ "${I1146W_FORCE:-0}" != "1" ]; then
   say "REFUSED: GPU not quiet:"; echo "$QUIET" | tee -a "$LOG"; exit 2
 fi
 {
-  echo "bin: $BIN"; /usr/bin/shasum -a 256 "$BIN" | awk '{print "bin_sha256:", $1}'
+  for x in $ARMS; do b=$(bin_of $x); echo "bin_$x: $b"; /usr/bin/shasum -a 256 "$b" | awk -v x="$x" '{print "bin_" x "_sha256:", $1}'; done
   echo "model: $MODEL"; /usr/bin/shasum -a 256 "$MODEL" | awk '{print "model_sha256:", $1}'
   echo "widths: $WIDTHS"; echo "lens: $LENS"
 } > "$OUT/provenance.txt"
@@ -46,7 +54,8 @@ fi
 PORT=17643
 export RIIR_DIST_KEY=$(od -An -tx1 -N32 /dev/urandom | tr -d ' \n')
 
-run_cell() { # $1 name $2 ids $3 max-new $4 ctx $5+ extra
+run_cell() { # $1 arm $2 name $3 ids $4 max-new $5 ctx $6+ extra
+  local BIN; BIN=$(bin_of "$1"); shift
   local name="$1" ids="$2" n="$3" ctx="$4"; shift 4
   "$BIN" --role tail --model "$MODEL" --split 32 --backend gpu \
     --listen "127.0.0.1:$PORT" --ctx "$ctx" > "$CELLS/${name}_tail.log" 2>&1 &
@@ -71,16 +80,18 @@ ids_of() { python3 -c "print(','.join(str(7+(i*7919)%50000) for i in range($1)))
 # ── G1: pp1024 + 16 decode tokens per width ──
 IDS=$(ids_of 1024)
 for W in $WIDTHS; do
-  run_cell "g1_w${W}" "$IDS" 16 1280 --prefill-chunk "$W"
+  for x in $ARMS; do run_cell "$x" "${x}_g1_w${W}" "$IDS" 16 1280 --prefill-chunk "$W"; done
 done
 REF=""
 G1=PASS
 for W in $WIDTHS; do
-  GEN=$(grep -o 'generated: \[.*\]' "$CELLS/g1_w${W}_head.log" | head -1)
-  say "g1 w=$W $GEN"
-  [ -z "$GEN" ] && G1=FAIL
-  [ -z "$REF" ] && REF="$GEN"
-  [ "$GEN" != "$REF" ] && G1=FAIL
+  for x in $ARMS; do
+    GEN=$(grep -o 'generated: \[.*\]' "$CELLS/${x}_g1_w${W}_head.log" | head -1)
+    say "g1 $x w=$W $GEN"
+    [ -z "$GEN" ] && G1=FAIL
+    [ -z "$REF" ] && REF="$GEN"
+    [ "$GEN" != "$REF" ] && G1=FAIL
+  done
 done
 say "G1 CROSS-WIDTH $G1"
 
@@ -89,18 +100,23 @@ for P in $LENS; do
   IDS=$(ids_of "$P")
   for W in $WIDTHS; do
     [ "$W" -gt "$P" ] && continue
-    run_cell "pp${P}_w${W}_warm" "$IDS" 1 $((P + 256)) --prefill-chunk "$W"
-    run_cell "pp${P}_w${W}" "$IDS" 1 $((P + 256)) --prefill-chunk "$W"
+    for x in $ARMS; do run_cell "$x" "${x}_pp${P}_w${W}_warm" "$IDS" 1 $((P + 256)) --prefill-chunk "$W"; done
+    r=1
+    while [ $r -le "$REPS" ]; do
+      for x in $ARMS; do run_cell "$x" "${x}_pp${P}_w${W}_r${r}" "$IDS" 1 $((P + 256)) --prefill-chunk "$W"; done
+      r=$((r+1))
+    done
   done
 done
 
 say "=== summary (timed cells) ==="
 for P in $LENS; do
   for W in $WIDTHS; do
-    f="$CELLS/pp${P}_w${W}_head.log"
-    [ -e "$f" ] || continue
-    s=$(grep -o 'prefill [0-9]* tok in [0-9.]*s' "$f" | tail -1 | awk '{print $5}' | tr -d s)
-    [ -n "$s" ] && say "pp$P w$W ${s}s $(python3 -c "print(f'{$P/$s:.1f} tok/s')")"
+    for f in "$CELLS"/?_pp${P}_w${W}_r*_head.log; do
+      [ -e "$f" ] || continue
+      s=$(grep -o 'prefill [0-9]* tok in [0-9.]*s' "$f" | tail -1 | awk '{print $5}' | tr -d s)
+      [ -n "$s" ] && say "$(basename "$f" _head.log) ${s}s $(python3 -c "print(f'{$P/$s:.1f} tok/s')")"
+    done
   done
 done
 say "=== COMPLETE: $OUT ==="

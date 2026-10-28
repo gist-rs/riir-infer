@@ -21,7 +21,7 @@ head⇄tail overlap on the wire (the reason 128 was chosen, Bench 909). Record: 
 - [x] 1-box width curve 128/256/512/1024 × pp512/4096/32768 + G1 cross-width (Bench 919)
 - [ ] 2-box TB5 leg 128 vs 512 (ABAB) → flip the `dist_stage` GPU default + `runner.rs` doc if it holds
 - [ ] Ladder 2: W-frame ternary GEMM rung (the remaining ~4.5×)
-- [ ] Ladder 3: batched embed dequant (55 ms/frame)
+- [ ] Ladder 3: batched embed dequant (55 ms/frame) — CODE LANDED `3f657d0` opt-in `prefill_embed_batched` (`DequantWteRowsCubeCL`, one launch/frame; kernel G1 `issue1146_embed_batched_g1` PASS to_bits); e2e A/B queued (`I1146W_BIN_B` arm of `scripts/i1146_width_recurve.sh`) → promote into the dist `gpu` row if it gains
 
 ## ⟲ 2026-10-28 ~06:4x +07 zed-amo-1146-prefill — MEASURED CORRECTION (Bench 914): the A/B + the census
 
