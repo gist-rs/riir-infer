@@ -1,7 +1,7 @@
 # Plan 623: Multi-host inference lane — layer-range stages, activation frames, TCP→RDMA transport, TP, speculative fill
 
 **Lease closed:** zed-m3-i623-t3verbs, 1793220893, was expires 2026-10-30T20:54:53+00:00 — LANDED T3.1 + the T3.2 heap leg + the T3.3 small-message/striped rows 2026-10-29 (Bench 927; the landing note on T3.1 carries the detail). The open residues ride their task rows: T3.2's MTLBuffer leg + rkey semantics, T3.3's MTU ladder, T3.4, T3.5. (claim record: zed-m3-i623-t3verbs, epoch 1793220893, was expires 2026-10-30T20:54:53+00:00)
-**Claimed:** zed-m3-i623-t32t33, 1793225492, expires 2026-10-30T22:11:32+00:00
+**Lease closed:** zed-m3-i623-t34gpucomm, 1793255400, was expires 2026-10-31T22:30:00+00:00 — LANDED T3.4 2026-10-29 (unit issue 1151 carries the full landing note: async-finish arm, all-feed-only deferral, G1 exact, s=2 decode window ~5%; open residues ride T3.5).
 **Status:** Phase 2 PoC LANDED 2026-10-27 (T2.1 + T2.2 + T2.2b GPU stage + T2.3a pipelined prefill + T2.2c(1) range-scoped weights + T2.3b chunked batched prefill (promoted) — each stage holds only its own slice: `crates/riir-infer-dist`, D1 → (a)) — real 2-box TB5 runs, CPU⇄CPU and GPU⇄GPU, streams bit-identical to 1-box; 1-box GPU base gap filed as Issue 1139 — mostly BUILD POSTURE, fixed by Issue 1141 (dist `gpu` now carries the production decode posture + the workspace's cubecl-wgpu fork: 1-box stage decode 27.2 → 46.7 tok/s, 2-stage 26.0 → 45.2 tok/s on idle bmo; then Issue 1142's dense-pair loads-in-flight kernel, 1-box 51.4 tok/s; then Issue 1143's decode-norm loads-in-flight (`85c4da5`), 1-box 55.0 tok/s; then Issue 1144's radix-4 FWHT (`3147164`), 1-box 56.9 tok/s; residual 1.07× vs llama.cpp, attributed in Issue 1139 T4, next rung Issue 1145); Phase 1 (T1.1–T1.5) LANDED 2026-10-26
 
 **Lease closed:** shikuwa-4090-i922-chattok, epoch 1793193000, was expires 2026-10-29T12:30:00+00:00 — LANDED Bench-917 follow-up 2 2026-10-28 (Bench 924): chat-shaped acceptance re-read, all THREE heads one session — plain head does NOT transfer (0.684→0.085 TF, dead for serving); mix/balanced transfers on TF (0.67/0.44); the FREERUN head (the 655 promotion candidate) is the best chat DRAFTER: E[m] 1.8725, spec 6.207 tok/s = 0.808× of ordinary, beating its own raw row — TF and draft-usefulness DECOUPLE cross-regime, rank by E[m] only; the offline `mtp_chat_tokens` tokenizer example ships; follow-up ladder re-ordered (re-fit = chat-trajectory capture, the 679 recipe; 2-box drafter = freerun head).
@@ -605,12 +605,17 @@ mlx-lm on the Proposal-042 scoreboard **measured on the same two boxes**.
   all measured (best 128 KiB 8.76 GiB/s short / 9.368 sustained). MTU LADDER OPEN (every row
   ran at the active 4096; the 1024/2048 override cells + the provider's posted-recv budget
   cliff band [4, 5] MB as a function of MTU are the remaining legs).**
-- [ ] **T3.4** GPU↔comm sync: CPU comm thread on `MTLSharedEvent` signal values; no per-
+- [x] **T3.4** GPU↔comm sync: CPU comm thread on `MTLSharedEvent` signal values; no per-
   layer command-buffer commit on the critical path. (Unit issue
-  [1151](../.issues/1151_plan623_t34_gpu_comm_sync.md) — the file-level claim lives
-  there; the plan file carries the sibling T3.2/T3.3 claim. Substrate correction
-  recorded in the issue: the signal surface is the staged-copy read future through
-  CubeCL/wgpu, with MTLSharedEvent an optional follow-up.)
+  [1151](../.issues/1151_plan623_t34_gpu_comm_sync.md) — LANDED 2026-10-29
+  zed-m3-i623-t34gpucomm: the decode-feed async-finish arm (staged-copy read future
+  through CubeCL/wgpu — the MTLSharedEvent correction recorded in the issue),
+  all-feed-passes-only deferral (the Bench-913 wire-order class), demote-only env
+  `RIIR_DIST_ASYNC_FINISH=0`; G1 hidden-bits exact ×6, s=2 all-feed decode window
+  ~5% faster armed; per-layer commits: no such cadence exists in the wgpu encoder
+  (≤32-task batches), the uniform-write flush analog left instrumented. Open
+  residues: the literal comm-THREAD split + the tail logits arm ride T3.5's
+  scoreboard harness.)
 - [ ] **T3.5** Scoreboard rows vs llama.cpp RPC-RDMA and exo/MLX jaccl. (jaccl prose
   comparison exists — Bench 905's 16–22 µs pipelined collective rate vs our 7.7 µs
   ping-pong RTT — but a like-for-like scoreboard row needs the T3.4 serving integration.)

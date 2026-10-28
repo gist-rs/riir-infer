@@ -428,6 +428,9 @@ fn run_waves<T: WaveStages, L: Transport>(
         // Indexed on purpose: the body interleaves immutable prompt
         // slices with `phase` mutation on `streams` AND hands `i` to
         // `table.stage(i)` — an iterator would fight the borrows.
+        // decode_enqueued: the T3.4 arm — streams whose chain is submitted
+        // + signal armed this pass, finished/sent in the drain below.
+        let mut decode_enqueued: Vec<usize> = Vec::new();
         #[allow(clippy::needless_range_loop)]
         for i in 0..n {
             let work = match streams[i].phase {
@@ -443,40 +446,62 @@ fn run_waves<T: WaveStages, L: Transport>(
                 }
                 Phase::Await | Phase::Done => continue,
             };
-            let (kind, chunked, tokens, pos, prompt_len, n_tok) = match &work {
-                Work::PrefillChunk { lo, hi } => {
-                    let last = *hi == streams[i].prompt.len();
-                    (
-                        match last {
-                            true => FrameKind::Activation,
-                            false => FrameKind::Prefill,
-                        },
-                        streams[i].chunk > 1,
-                        &streams[i].prompt[*lo..*hi],
-                        *lo,
-                        streams[i].prompt.len(),
-                        hi - lo,
-                    )
+            // Plan-623 T3.4: decode feeds defer to the T3.4 drain ONLY on
+            // an all-feed pass — the decode steady state, where the win
+            // lives (stream i's readback+send overlaps stream i+1's chain
+            // on the shared queue; send order stays index order, so the
+            // wire order is byte-identical to the incumbent). Mixed passes
+            // (a prefill chunk still working) and s=1 keep the incumbent
+            // inline cadence exactly — the tail capture-order pin is the
+            // contract. The demote posture and the CPU stage reduce to the
+            // incumbent cadence too (schedule is a no-op; the drain's
+            // step_finish then reads synchronously).
+            if let Work::Feed { pos, tok } = work {
+                if all_feed {
+                    table.stage(i).step_submit(tok, pos, &empty);
+                    table.stage(i).schedule_async_finish();
+                    decode_enqueued.push(i);
+                    continue;
                 }
-                // `prompt_len` is only read by the batched-prefill arm;
-                // a decode step is always one position.
-                Work::Feed { pos, tok } => (
-                    FrameKind::Activation,
-                    false,
-                    std::slice::from_ref(tok),
-                    *pos,
-                    0,
+                // Mixed pass: the incumbent inline cadence.
+                let hidden = table.stage(i).step(tok, pos, &empty).to_vec();
+                frame.clear();
+                ActivationFrame::encode_into(
+                    i as u32,
+                    pos as u32,
                     1,
-                ),
+                    &hidden,
+                    FrameDtype::F32,
+                    &mut frame,
+                );
+                link.send_frame(FrameKind::Activation, &frame)?;
+                outstanding.push_back(i);
+                streams[i].phase = Phase::Await;
+                continue;
+            }
+            let Work::PrefillChunk { lo, hi } = work else {
+                unreachable!("the Feed arm continues above")
             };
-            let hidden = match chunked {
-                true => {
-                    table
-                        .stage(i)
-                        .prefill_chunk(tokens, &empty, pos, prompt_len, false, &mut rows);
-                    rows.as_slice()
-                }
-                false => table.stage(i).step(tokens[0], pos, &empty),
+            let last = hi == streams[i].prompt.len();
+            let kind = match last {
+                true => FrameKind::Activation,
+                false => FrameKind::Prefill,
+            };
+            let prompt_len = streams[i].prompt.len();
+            let pos = lo;
+            let n_tok = hi - lo;
+            let tokens: &[u32] = &streams[i].prompt[lo..hi];
+            let hidden = if streams[i].chunk > 1 {
+                table
+                    .stage(i)
+                    .prefill_chunk(tokens, &empty, pos, prompt_len, false, &mut rows);
+                rows.as_slice()
+            } else {
+                // Single-position prefill chunk rides the same
+                // submit+finish pair — the composition law makes it the
+                // exact `step` the incumbent inline path ran.
+                table.stage(i).step_submit(tokens[0], pos, &empty);
+                table.stage(i).step_finish()
             };
             frame.clear();
             ActivationFrame::encode_into(
@@ -488,21 +513,36 @@ fn run_waves<T: WaveStages, L: Transport>(
                 &mut frame,
             );
             link.send_frame(kind, &frame)?;
-            match work {
-                Work::PrefillChunk { hi, .. } => {
-                    if hi == streams[i].prompt.len() {
-                        outstanding.push_back(i);
-                        streams[i].phase = Phase::Await;
-                    } else {
-                        streams[i].prefill_lo = hi;
-                    }
-                }
-                Work::Feed { .. } => {
-                    outstanding.push_back(i);
-                    streams[i].phase = Phase::Await;
-                }
+            if last {
+                outstanding.push_back(i);
+                streams[i].phase = Phase::Await;
+            } else {
+                streams[i].prefill_lo = hi;
             }
         }
+        // The T3.4 drain: finish each enqueued decode stream in enqueue
+        // order (the future resolves = the chain-done signal), then encode
+        // + send. With the async arm DISARMED this is still correct —
+        // step_finish takes the synchronous read, and the send order
+        // matches the old inline cadence's outstanding order (prefill
+        // frames sent above, decode frames now, indexed ascending).
+        for &i in &decode_enqueued {
+            let pos = streams[i].prompt.len() + streams[i].generated.len() - 1;
+            let hidden = table.stage(i).step_finish().to_vec();
+            frame.clear();
+            ActivationFrame::encode_into(
+                i as u32,
+                pos as u32,
+                1,
+                &hidden,
+                FrameDtype::F32,
+                &mut frame,
+            );
+            link.send_frame(FrameKind::Activation, &frame)?;
+            outstanding.push_back(i);
+            streams[i].phase = Phase::Await;
+        }
+        drop(decode_enqueued);
         // Drain the pass's replies, then re-rotate: a stream whose token
         // just landed feeds its next step while other streams' replies
         // are still in flight. The fused batch drains its WHOLE pass (the

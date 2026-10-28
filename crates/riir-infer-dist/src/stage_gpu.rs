@@ -15,8 +15,11 @@ use std::sync::Arc;
 use riir_infer_core::deltanet::QwenDeltaNetTernaryWeights;
 use riir_infer_core::multi_host::{LayerRange, StageHandshake};
 use riir_infer_core::types::Config;
-use riir_infer_gpu::TernaryDeltanetGpuForward;
+// Plan-623 T3.4: the async readback surface (block_on + DynFut re-exported
+// from riir-infer-gpu — the future resolves to the f32 vector directly, so
+// this crate never names a cubecl type).
 use riir_infer_gpu::cubecl_runtime::CubeCLContext;
+use riir_infer_gpu::{DynFut, TernaryDeltanetGpuForward, block_on};
 
 use crate::stage::{ArtifactIdentity, StageCompute, require_coverage, ternary_handshake};
 
@@ -31,6 +34,12 @@ pub struct TernaryGpuStage {
     handshake: StageHandshake,
     out: Vec<f32>,
     tok_scratch: Vec<usize>,
+    /// Plan-623 T3.4: the readback future armed by
+    /// [`StageCompute::schedule_async_finish`] right after this stage's
+    /// chain enqueue — its resolution IS the "chain done" signal value.
+    /// `None` (the demote posture, `RIIR_DIST_ASYNC_FINISH=0`) makes
+    /// `step_finish` take the synchronous read.
+    pending_read: Option<DynFut<Vec<f32>>>,
 }
 
 impl TernaryGpuStage {
@@ -77,8 +86,16 @@ impl TernaryGpuStage {
             handshake: ternary_handshake(identity, range),
             out: Vec::new(),
             tok_scratch: Vec::new(),
+            pending_read: None,
         })
     }
+}
+
+/// Plan-623 T3.4 demote hatch: any non-1 value restores the synchronous
+/// readback cadence byte-identically (the repo's env convention — unset is
+/// ARMED).
+fn async_finish_armed() -> bool {
+    std::env::var("RIIR_DIST_ASYNC_FINISH").as_deref() != Ok("0")
 }
 
 impl StageCompute for TernaryGpuStage {
@@ -120,12 +137,31 @@ impl StageCompute for TernaryGpuStage {
     }
 
     fn step_finish(&mut self) -> &[f32] {
+        // T3.4: resolve the future armed at enqueue time when present — the
+        // wait is the same GPU-completion wait the sync read would do, but
+        // the staged copy was enqueued FIFO-after THIS stage's chain (not
+        // after every later chain), and the next stream's chain runs under
+        // the convert work below. Same kernel sequence, same bytes —
+        // scheduling only.
+        if let Some(fut) = self.pending_read.take() {
+            self.out = block_on(fut);
+            return &self.out[..self.n_embd];
+        }
         let (out, width) = match self.range.is_last(self.n_layer) {
             true => (self.fwd.read_logits(), self.vocab),
             false => (self.fwd.read_hidden_state(), self.n_embd),
         };
         self.out = out;
         &self.out[..width]
+    }
+
+    fn schedule_async_finish(&mut self) {
+        // The demote posture (and the LAST stage — logits have no async arm
+        // in this unit) keep the synchronous read.
+        if !async_finish_armed() || self.range.is_last(self.n_layer) {
+            return;
+        }
+        self.pending_read = Some(self.fwd.read_hidden_state_fut());
     }
 
     /// The batched range prefill (`prefill_range_chunk`): one dispatch

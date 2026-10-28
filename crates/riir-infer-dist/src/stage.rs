@@ -50,6 +50,17 @@ pub trait StageCompute {
     /// the stage — copy/argmax before the next submit on this stage.
     fn step_finish(&mut self) -> &[f32];
 
+    /// Plan-623 T3.4: arm the signal-driven readback — the async backend
+    /// creates its staged-copy completion future NOW (right after this
+    /// stage's chain enqueue, so the copy rides FIFO-after this chain and
+    /// the future's resolution is the "chain done" signal value); the
+    /// later [`Self::step_finish`] resolves it instead of a synchronous
+    /// read, and the GPU runs the NEXT stream's chain under the host's
+    /// convert+send work. No-op by default (the CPU stage has nothing to
+    /// defer); pairing with [`Self::step_finish`] stays EXACTLY ONE — the
+    /// same bit-for-bit law as `submit`+`finish`.
+    fn schedule_async_finish(&mut self) {}
+
     /// Run this stage's window over one prefill CHUNK of consecutive
     /// positions `base_pos..base_pos + n` (T2.3b). The first stage reads
     /// `tokens` (`n` ids); later stages read `input` (`n` rows of

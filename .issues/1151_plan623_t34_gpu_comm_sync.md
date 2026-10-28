@@ -73,4 +73,34 @@ read this session:
 
 ## Resolution
 
-(landing note goes here)
+**LANDED 2026-10-29** (zed-m3-i623-t34gpucomm): the decode-feed async-finish arm —
+`riir-infer-gpu` re-exports `{block_on, DynFut}` + `read_hidden_state_fut()` (the
+staged-copy future, 'static via a client clone, resolving to the f32 vector);
+`TernaryGpuStage::pending_read` + `StageCompute::schedule_async_finish()` (default
+no-op — the CPU stage unchanged); `run_waves` defers decode feeds to a finish→send
+drain **on all-feed passes only** (the decode steady state) — mixed passes and s=1
+keep the incumbent inline cadence byte-identically (the tail capture-order pin in
+`multi_stream_batch` is the contract — the first cut deferred unconditionally and
+that pin caught the wire-order change). Demote-only env `RIIR_DIST_ASYNC_FINISH=0`
+(plus the all-feed gate itself, see below). Gates: hidden-bit identity EXACT ×6
+positions at split 0..32 on the real 27B (`t34_async_finish_gpu`);
+dist suites all green (24 lib + 31 integration incl. the CPU multi-stream G1/admission/
+batch); `two_stage_g1_gpu` bit-identical ×19 positions; `decode_readback_probe_gpu`
+OK (idle readback 0.354 ms/token — the cost class the arm hides). G2 read: s=2
+all-feed decode window demote [433.8, 422.0] ms vs armed [413.6, 402.6] ms — **~5%
+faster per stream armed** (loopback 2×GPU-stage rig, both stages' tails on the same
+M3 queue; whole-run wall carries per-phase load/JIT noise — the decode window is
+the honest read). MECHANISM CORRECTION recorded (the T3.1 pattern): the plan's
+"MTLSharedEvent signal values" ships as the staged-copy read future through
+CubeCL/wgpu — the future resolving IS the chain-done signal; a literal MTLSharedEvent
+arm is an optional follow-up only if the future path shows overhead. AND the
+"per-layer command-buffer commit" premise: the wgpu encoder already batches ≤32
+tasks per submit (`CUBECL_WGPU_MAX_TASKS`) — per-layer commits do not exist to
+remove; the uniform-write flush-before-write shape (the closest live analog) is
+instrumented by the Issue-761 atomics and left to a follow-up if a bench shows a
+storm. SCOPE NOTES: (a) the all-feed-only gate follows Bench 913's measured class —
+the fused-style submission forfeits the head⇄tail bubble fill on mixed passes, so
+the deferral rides exactly the posture the fused batch already owns; (b) the literal
+comm THREAD split (network I/O off the main thread) stays T3.5-gated — it needs the
+stage state split across threads (Send+Sync surface) and the scoreboard harness to
+justify it; (c) the tail's logits readback (993 KB) keeps the sync arm.

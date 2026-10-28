@@ -43,13 +43,13 @@ pub use buffer::{
     download_u32, download_u32_reuse, upload_f32,
 };
 pub use context::{GpuContext, GpuError};
-pub use production_posture::{
-    PRODUCTION_RUNGS, missing_production_rungs, production_posture_complete,
-};
 #[cfg(feature = "cubecl_runtime")]
 pub use cubecl_runtime::{
     ActiveComputeClient, ActiveDevice, ActiveRuntime, CubeCLContext, Handle, create_f32,
     create_u32, read_f32,
+};
+pub use production_posture::{
+    PRODUCTION_RUNGS, missing_production_rungs, production_posture_complete,
 };
 
 // ---------------------------------------------------------------------------
@@ -199,6 +199,8 @@ pub use transpose_cubecl::TransposeCubeCL;
 // live in `prefill_cuda_deltanet`).
 // ---------------------------------------------------------------------------
 
+#[cfg(all(feature = "metal_tensor_gemm", target_os = "macos"))]
+pub mod attention_prefill_metal_tensor;
 #[cfg(feature = "ternary_gemv")]
 pub mod deltanet_input_proj_fused;
 #[cfg(feature = "ternary_gemm_batched")]
@@ -225,8 +227,6 @@ pub mod gemm_ternary_i8_mma_cuda_raw;
 pub mod gemm_ternary_i8_mma_v6_src;
 #[cfg(all(feature = "metal_tensor_gemm", target_os = "macos"))]
 pub mod gemm_ternary_metal_tensor;
-#[cfg(all(feature = "metal_tensor_gemm", target_os = "macos"))]
-pub mod attention_prefill_metal_tensor;
 #[cfg(all(feature = "metal_tensor_gemm", target_os = "macos"))]
 pub mod gemm_ternary_metal_wgpu;
 #[cfg(all(feature = "metal_tensor_gemm", target_os = "macos"))]
@@ -328,6 +328,11 @@ pub mod prefill_cuda_mma;
 #[cfg(feature = "ternary_gemv")]
 pub mod ternary_ffn_fused;
 
+#[cfg(all(feature = "metal_tensor_gemm", target_os = "macos"))]
+pub use attention_prefill_metal_tensor::{
+    MetalTensorAttentionPrefill, prefill_attn_metal_tensor_enabled,
+    prefill_attn_metal_tensor_launch_count, set_prefill_attn_metal_tensor,
+};
 #[cfg(feature = "ternary_gemv")]
 pub use deltanet_input_proj_fused::{
     GpuTernaryInputProj, InputProjOutputs, LayerInputProjWeightsRef, TernaryInputProjFused,
@@ -364,11 +369,6 @@ pub use gemm_ternary_metal_tensor::MetalTensorGemm;
 pub use gemm_ternary_metal_wgpu::MetalTensorWgpuGemm;
 #[cfg(all(feature = "metal_tensor_gemm", target_os = "macos"))]
 pub use gemm_ternary_metal_zero_copy::{MetalTensorZeroCopyGemm, ZeroCopyWeightCache};
-#[cfg(all(feature = "metal_tensor_gemm", target_os = "macos"))]
-pub use attention_prefill_metal_tensor::{
-    MetalTensorAttentionPrefill, prefill_attn_metal_tensor_enabled,
-    prefill_attn_metal_tensor_launch_count, set_prefill_attn_metal_tensor,
-};
 #[cfg(feature = "ternary_gemm_simdgroup")]
 pub use gemm_ternary_simdgroup_cubecl::GemmTernarySimdgroupCubeCL;
 #[cfg(feature = "ternary_gemm_batched")]
@@ -668,6 +668,8 @@ pub mod ternary_deltanet_gpu_forward;
 // Root item surface (mirrors the engine gpu crate's root re-exports, so a
 // retargeted consumer swaps `riir_gpu::` for `riir_infer_gpu::` with no
 // other path changes).
+#[cfg(feature = "prefill_embed_batched")]
+pub use ternary_deltanet_gpu_forward::DequantWteRowsCubeCL;
 #[cfg(all(
     feature = "ternary_gemm_batched",
     feature = "metal_tensor_gemm",
@@ -677,9 +679,9 @@ pub use ternary_deltanet_gpu_forward::set_prefill_use_metal_tensor_zerocopy;
 #[cfg(all(feature = "ternary_gemm_batched", feature = "ternary_gemm_simdgroup"))]
 pub use ternary_deltanet_gpu_forward::set_prefill_use_simdgroup;
 #[cfg(all(feature = "cubecl_runtime", feature = "ternary_gemv"))]
-pub use ternary_deltanet_gpu_forward::{DequantWteRowCubeCL, TernaryDeltanetGpuForward};
-#[cfg(feature = "prefill_embed_batched")]
-pub use ternary_deltanet_gpu_forward::DequantWteRowsCubeCL;
+pub use ternary_deltanet_gpu_forward::{
+    DequantWteRowCubeCL, DynFut, TernaryDeltanetGpuForward, block_on,
+};
 
 // The speculative-decode drafting family (Issue 665) — modelless CPU-side
 // draft models + the routing half, moved from the engine gpu crate (its
@@ -800,9 +802,9 @@ pub mod qwen38_dense_cudarc;
 // Issue 1150 — the dense-qwen3.8 wgpu/Metal twin (the uzu/MLX same-model
 // comparison unblock). Composes runtime-generic kernels + the Q4_K tiled GEMM.
 #[cfg(feature = "qwen38_wgpu")]
-pub mod qwen38_dense_cubecl;
-#[cfg(feature = "qwen38_wgpu")]
 pub mod gemm_q4k_tile_cubecl;
+#[cfg(feature = "qwen38_wgpu")]
+pub mod qwen38_dense_cubecl;
 pub mod qwen38_dflash2;
 #[cfg(all(feature = "ternary_gemv_cuda_raw", not(target_os = "macos")))]
 pub mod qwen38_dflash2_gpu;

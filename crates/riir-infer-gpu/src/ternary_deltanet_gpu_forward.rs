@@ -31,10 +31,13 @@
 
 #![allow(clippy::too_many_arguments, clippy::needless_range_loop)]
 
-#[cfg(feature = "cubecl_runtime")]
 use cubecl::prelude::*;
 #[cfg(feature = "cubecl_runtime")]
 use cubecl::server::Handle;
+// Plan-623 T3.4: the async readback surface (the crate direct-deps
+// cubecl-environment — the umbrella shadows its `environment` module).
+#[cfg(all(feature = "cubecl_runtime", feature = "multi_host"))]
+pub use cubecl_environment::future::{DynFut, block_on};
 
 #[cfg(feature = "cubecl_runtime")]
 use crate::cubecl_runtime::{ActiveRuntime, CubeCLContext};
@@ -4901,6 +4904,33 @@ impl TernaryDeltanetGpuForward {
             .read_one(self.x.clone())
             .expect("download hidden state");
         f32::from_bytes(&bytes).to_vec()
+    }
+
+    /// Plan-623 T3.4: the ASYNC arm of [`Self::read_hidden_state`] — the
+    /// staged-copy future, created at ENQUEUE time. The copy encodes
+    /// FIFO-after the just-enqueued chain (before any later chain), so the
+    /// future resolving is the "GPU done with this chain" signal value; the
+    /// caller blocks on it only when it needs the floats, and the GPU runs
+    /// the next chain under the host's convert+send work. Creating the
+    /// future flushes the encoder (the staging copy submits the chain with
+    /// it) — one submit per chain, never per kernel. The failure posture
+    /// matches the sync arm (`download hidden state` panic). `&self` by
+    /// design — the future owns clones of the client and the handle, never
+    /// the forwarder's state.
+    #[cfg(feature = "multi_host")]
+    pub fn read_hidden_state_fut(&self) -> DynFut<Vec<f32>> {
+        Self::refuse_if_pool_poisoned("at hidden-state readback");
+        // The client clone makes the future 'static — it owns its staging
+        // machinery (the map-wait channel), never the forwarder's state.
+        let client = self.client.clone();
+        let handle = self.x.clone();
+        Box::pin(async move {
+            let mut bytes = client
+                .read_async(vec![handle])
+                .await
+                .expect("download hidden state");
+            f32::from_bytes(&bytes.remove(0)).to_vec()
+        })
     }
 
     /// Stage-side position scheduling: every stage of one token must run at

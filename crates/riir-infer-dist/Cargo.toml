@@ -115,6 +115,12 @@ required-features = ["gpu"]
 name = "decode_readback_probe_gpu"
 required-features = ["gpu"]
 
+# Plan-623 T3.4 (issue 1151) — the decode-feed async-finish gates: hidden-bit
+# identity vs the sync arm + the all-feed s=2 A/B on the real 27B.
+[[test]]
+name = "t34_async_finish_gpu"
+required-features = ["gpu", "bonsai2_hadamard"]
+
 # Issue 1151 — the posture floor: reds NAMING any promoted rung this
 # posture fails to compile (the guard against re-introducing a hand-typed
 # rung list here) and against a drained PRODUCTION_RUNGS manifest (the
