@@ -213,8 +213,14 @@ pub struct Qwen38WgpuForward {
     client: ComputeClient<ActiveRuntime>,
     pub config: Qwen38WgpuConfig,
     layers: Vec<Qwen38WgpuLayerWeights>,
-    wte: Handle,
-    lm_head: Handle,
+    /// Host-resident embedding table (Metal per-buffer limits forbid a 5 GB
+    /// f32 wte buffer; embedding rows upload directly — 20 KB per decode
+    /// token, ~10 MB per ingest chunk, both noise vs the weight stream).
+    wte_host: Vec<f32>,
+    /// lm_head in per-chunk f32 buffers (lm_chunk_rows rows each — under the
+    /// Metal buffer limit); the tail GEMV runs per chunk into offset logits.
+    lm_head_chunks: Vec<Handle>,
+    lm_chunk_rows: usize,
     output_norm: Handle,
     /// Prompt-ingest chunk (tokens per batched pass); multiple of 64.
     chunk: usize,
@@ -458,9 +464,9 @@ impl Qwen38WgpuForward {
                 wte[r * e..(r + 1) * e].copy_from_slice(&row);
             }
         }
-        let wte_h = upload_f32(&client, &wte);
         let big_gb = (wte.len() + vocab * e) as f64 * 4.0 / 1e9;
-        drop(wte);
+        // wte stays on the host (module doc); lm_head uploads in chunks.
+        let wte_host = wte;
 
         let lm_blocks = gguf
             .q6k_tensor_blocks("output.weight")
@@ -477,7 +483,17 @@ impl Qwen38WgpuForward {
                 lm[r * e..(r + 1) * e].copy_from_slice(&row);
             }
         }
-        let lm_h = upload_f32(&client, &lm);
+        let lm_chunk_rows = 32768usize;
+        let mut lm_head_chunks = Vec::new();
+        {
+            let mut c0 = 0usize;
+            while c0 < vocab {
+                let rows = lm_chunk_rows.min(vocab - c0);
+                lm_head_chunks.push(upload_f32(&client, &lm[c0 * e..(c0 + rows) * e]));
+                c0 += rows;
+            }
+        }
+        let lm_chunks = lm_head_chunks.len();
         drop(lm);
 
         let output_norm = upload_f32(&client, &f32_from_gguf(&gguf, "output_norm.weight")?);
@@ -632,7 +648,8 @@ impl Qwen38WgpuForward {
             .count();
         println!(
             "[qwen38-wgpu] loaded: {} layers ({gdn_count} GDN / {} attn), vocab {vocab}, \
-             wte+lm_head f32 {big_gb:.1} GB, ctx {ctx_len}, chunk {chunk}",
+             wte host {big_gb:.1} GB, lm_head {lm_chunks} chunks of {lm_chunk_rows} rows, \
+             ctx {ctx_len}, chunk {chunk}",
             config.n_layer,
             config.n_layer - gdn_count,
         );
@@ -641,8 +658,9 @@ impl Qwen38WgpuForward {
             client,
             config,
             layers,
-            wte: wte_h,
-            lm_head: lm_h,
+            wte_host,
+            lm_head_chunks,
+            lm_chunk_rows,
             output_norm,
             chunk,
             max_ctx: ctx_len,
@@ -770,19 +788,18 @@ impl Qwen38WgpuForward {
         let e = self.config.n_embd;
         let eps = self.config.rms_norm_eps;
 
-        // x = wte[token] — per-token gather through a fresh 1-entry index.
-        let idx = self.client.create_from_slice(bytemuck::bytes_of(&token));
-        unsafe {
-            crate::gemm_q4k_tile_cubecl::GatherRowsF32CubeCL::launch::<ActiveRuntime>(
-                &self.client,
-                self.wte.clone(),
-                idx,
-                self.x.clone(),
-                vocab,
-                1,
-                e,
-            );
+        // x = wte[token] — host lookup + row upload (module doc: Metal buffer
+        // limits forbid the 5 GB f32 wte buffer).
+        let t = token as usize;
+        if t >= vocab {
+            return Err(format!("token {t} out of vocab {vocab}"));
         }
+        self.client.write(
+            &self.x,
+            cubecl::bytes::Bytes::from_bytes_vec(
+                bytemuck::cast_slice(&self.wte_host[t * e..(t + 1) * e]).to_vec(),
+            ),
+        );
 
         for li in 0..self.layers.len() {
             let lw = self.layers[li].clone();
@@ -802,14 +819,19 @@ impl Qwen38WgpuForward {
                 e,
                 eps,
             );
-            crate::gemv_cubecl::GemvCubeCL::launch::<ActiveRuntime>(
-                &self.client,
-                self.lm_head.clone(),
-                self.norm_x.clone(),
-                self.logits.clone(),
-                vocab,
-                e,
-            );
+            for (ci, chunk_handle) in self.lm_head_chunks.iter().enumerate() {
+                let c0 = ci * self.lm_chunk_rows;
+                let rows = self.lm_chunk_rows.min(vocab - c0);
+                let out = self.logits.clone().offset_start((c0 * 4) as u64);
+                crate::gemv_cubecl::GemvCubeCL::launch::<ActiveRuntime>(
+                    &self.client,
+                    chunk_handle.clone(),
+                    self.norm_x.clone(),
+                    out,
+                    rows,
+                    e,
+                );
+            }
         }
         let logits = self.read_logits(&self.logits);
         self.pos = pos + 1;
@@ -1044,12 +1066,13 @@ impl Qwen38WgpuForward {
                 self.max_ctx
             ));
         }
+        let mut last = 0u32;
         let mut p = 0usize;
         while tokens.len() - p >= self.chunk {
             self.ingest_chunk_gpu(&tokens[p..p + self.chunk], base_pos + p);
+            last = self.read_chunk_argmax();
             p += self.chunk;
         }
-        let mut last = 0u32;
         for (i, &t) in tokens[p..].iter().enumerate() {
             last = self.forward_token(t, base_pos + p + i)?;
         }
@@ -1060,28 +1083,27 @@ impl Qwen38WgpuForward {
     /// One batched pass over exactly `self.chunk` tokens (a multiple of 64 —
     /// GEMM tiles 32, chunked conv walks 64-token sub-chunks).
     fn ingest_chunk_gpu(&mut self, tokens: &[u32], base_pos: usize) {
-        let c = &self.config;
-        let e = c.n_embd;
-        let vocab = c.vocab_size;
+        let e = self.config.n_embd;
+        let vocab = self.config.vocab_size;
         let p = self.chunk;
 
-        // x_b <- wte[tokens].
-        let idx_handle = self
-            .client
-            .create_from_slice(bytemuck::cast_slice::<u32, u8>(tokens));
-        unsafe {
-            crate::gemm_q4k_tile_cubecl::GatherRowsF32CubeCL::launch::<ActiveRuntime>(
-                &self.client,
-                self.wte.clone(),
-                idx_handle,
-                self.x_b.clone(),
-                c.vocab_size,
-                p,
-                e,
+        // x_b <- wte[tokens] — host gather + one block upload (~10 MB).
+        {
+            let mut block = vec![0.0f32; p * e];
+            for (i, &t) in tokens.iter().enumerate() {
+                let t = t as usize;
+                if t >= vocab {
+                    panic!("token {t} out of vocab {vocab}");
+                }
+                block[i * e..(i + 1) * e].copy_from_slice(&self.wte_host[t * e..(t + 1) * e]);
+            }
+            self.client.write(
+                &self.x_b,
+                cubecl::bytes::Bytes::from_bytes_vec(bytemuck::cast_slice(&block).to_vec()),
             );
         }
 
-        let eps = eps_of(c);
+        let eps = self.config.rms_norm_eps;
         for li in 0..self.layers.len() {
             let lw = self.layers[li].clone();
             match lw.kind {
@@ -1090,37 +1112,37 @@ impl Qwen38WgpuForward {
             }
         }
 
-        // Last-row logits: gather row p-1, norm, f32 GEMV, (argmax by caller).
-        let last_idx = self
-            .client
-            .create_from_slice(bytemuck::bytes_of(&(p as u32 - 1)));
+        // Last-row logits: offset slice row p-1, norm, per-chunk GEMV.
         unsafe {
-            crate::gemm_q4k_tile_cubecl::GatherRowsF32CubeCL::launch::<ActiveRuntime>(
-                &self.client,
-                self.x_b.clone(),
-                last_idx,
-                self.norm_x_b.clone(),
-                p,
-                1,
-                e,
-            );
+            let last = self.x_b.clone().offset_start(((p - 1) * e * 4) as u64);
             crate::norms_cubecl::RmsNormCubeCL::launch::<ActiveRuntime>(
                 &self.client,
-                self.norm_x_b.clone(),
+                last,
                 self.output_norm.clone(),
                 self.tmp_b.clone(),
                 e,
                 eps,
             );
-            crate::gemv_cubecl::GemvCubeCL::launch::<ActiveRuntime>(
-                &self.client,
-                self.lm_head.clone(),
-                self.tmp_b.clone(),
-                self.logits_b.clone(),
-                vocab,
-                e,
-            );
+            for (ci, chunk_handle) in self.lm_head_chunks.iter().enumerate() {
+                let c0 = ci * self.lm_chunk_rows;
+                let rows = self.lm_chunk_rows.min(vocab - c0);
+                let out = self.logits_b.clone().offset_start((c0 * 4) as u64);
+                crate::gemv_cubecl::GemvCubeCL::launch::<ActiveRuntime>(
+                    &self.client,
+                    chunk_handle.clone(),
+                    self.tmp_b.clone(),
+                    out,
+                    rows,
+                    e,
+                );
+            }
         }
+    }
+
+    /// Greedy argmax over the chunk path's logits (after `ingest_chunk_gpu`).
+    fn read_chunk_argmax(&self) -> u32 {
+        let logits = self.read_logits(&self.logits_b);
+        Self::argmax_first(&logits)
     }
 
     fn prefill_gdn_layer(&mut self, li: usize, lw: &Qwen38WgpuLayerWeights, eps: f32) {
@@ -1391,8 +1413,4 @@ impl Qwen38WgpuForward {
             );
         }
     }
-}
-
-fn eps_of(c: &Qwen38WgpuConfig) -> f32 {
-    c.rms_norm_eps
 }
