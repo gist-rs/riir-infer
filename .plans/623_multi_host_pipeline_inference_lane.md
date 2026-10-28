@@ -6,7 +6,7 @@
 **Lease closed:** zed-amo-i623-t21b landed T2.5 2026-10-27 (the landing note on the task is its provenance; T2.1b's lease closed the same day, `00a8858`) — T2.3c/T2.4/T2.7 cells stay unclaimed
 **Lease closed:** m3-idle-623t15 landed T1.5 2026-10-26 (48 h lease from the claim; the landing below is its provenance) — the amo lane's Phase-0 elephant-capture constraint does not bind the M3, which is where T1.5 executed
 **Lease closed:** zed-amo-i623-t24 landed T2.4 code 2026-10-27 (Bench 908 is the record; the landing note on the task carries the split — code DONE, GPU cells open) — the remaining T2.3c/T2.7 cells stay unclaimed
-**Claimed:** zed-amo-i623-exchange, 1793143154, expires 2026-10-29T23:19:14+00:00
+**Lease closed:** zed-amo-i623-exchange landed the T2.5 probe EXCHANGE 2026-10-28 (`22eb298`, wire-verified Bench 915 — the landing note on the T2.5 task carries the detail)
 (the T2.5 admission EXCHANGE — the wire probe step: head asks the tail for its probe record at boot + the measured RTT, `plan_split` composes live; CPU-only, no GPU cells)
 + the 10-test G1 battery, all gates green (see the Phase 1 checkboxes). Phase 0 is decision-free (measurement only) and may
 start once Issue 1109 T0 (bmo reachable) is done; Phase 1 substrate is decision-free
@@ -489,6 +489,34 @@ mlx-lm on the Proposal-042 scoreboard **measured on the same two boxes**.
   full dist suite 9+2+8 green. Honest residue: the automatic two-host probe
   EXCHANGE (wire step) is T2.4's territory (the multi-stream protocol work);
   real-box probe cells (GPU postures) are T2.7's measurement lane.
+  **RESIDUE LANDED 2026-10-28 (zed-amo-i623-exchange, `22eb298`): the probe
+  EXCHANGE is its own posture pair, not a serving-protocol entanglement —
+  `dist/src/probe.rs`: strict-LE wire forms (`ProbeRequest`/`ProbeReply`, kinds
+  13/14 additive; `ProbePing`/`ProbePong` 11/12 for the RTT), `measure_rtt`
+  (median ping/pong over the SAME authenticated transport the serving session
+  will use), tail `serve_probe_session` (answers until Shutdown; candidates
+  validated 1..n_layer at the source; MAX rows/requests bounds) + head
+  `run_probe_exchange` (measure → ask → model cross-check → `plan_split` →
+  quote every input). Bin: `--answer-probe` (tail plan posture, never serves)
+  + `--plan-wire CANDIDATES` (head: probes self, asks, prints the plan +
+  `PLAN: --split K`) + `--link-bw` (carried — the T0.2 TB5 8.6 GB/s default,
+  ~0.5% of the decode hop, disclosed; RTT is the measured half). The
+  per-candidate probe loop is ONE shared `probe_candidates` (file arm + both
+  wire postures — never three copies). G1: 5 module tests (strict decode
+  arms, model-mismatch refusal, in-memory session) + `tests/probe_exchange.rs`
+  3 loopback-TCP e2e (formula exact over the two live records, out-of-range
+  candidate refused, lying-model reply refused); the lib hang the landing once
+  had (missing Shutdown → serve recv blocks forever) is itself pinned by the
+  test now sending it. **WIRE VERIFIED (Bench 915, CPU-only by design — the
+  amo GPU held by sibling lanes): amo⇄bmo TB5, RTT 0.166 ms measured on the
+  serving link, the tail's record crossed + cross-checked (n_layer 64 / hidden
+  5120), plan composed live → `PLAN: --split 32` — the equaliser lands on the
+  exact posture every measured 2-box cell runs (902/908/910/913). A serving
+  tail refuses every probe frame at its Handshake expectation by construction
+  (plan-mode postures only).** Residual: the memory axis stays planner-level
+  (budgets None on the wire — additive field if a v1 wants it); tail-side raw
+  probe rows are quiet in the answer posture (derived exactly in the bench
+  record); real-box GPU probe cells remain T2.7's measurement lane.
 - [x] **T2.6** Tailscale posture: the same runner over the tailnet address; a measured row
   (the WAN/fallback lane exo cannot do — multicast discovery).
   **MEASURED 2026-10-27** — the unchanged `dist_stage` (no code change: the transport
