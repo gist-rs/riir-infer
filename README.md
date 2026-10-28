@@ -67,7 +67,7 @@ cargo test --lib             # unit tests
 cargo tree | grep -c 'riir-' # must print 0 — zero riir-* deps, by contract
 ```
 
-Toolchain pinned by `rust-toolchain.toml` (1.98.1).
+Toolchain pinned by `rust-toolchain.toml` (1.99.0, the katgpt-rs issue-963 anchor).
 
 ## Contract
 
