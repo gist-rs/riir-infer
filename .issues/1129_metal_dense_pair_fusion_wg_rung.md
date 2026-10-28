@@ -1,6 +1,7 @@
 # Issue 1129 — Metal dense-pair rung: the folded GDN a/b f32 GEMVs fused into ONE launch + the wg-occupancy geometry the dense path never rode (the Bench-1006 census cut)
 
 **Status:** OPEN — filed 2026-10-26 ~21:4x +07 from the Bench-1006 census follow-up (issue 1113 defense lane).
+**Claimed:** zed-amo-i1129-cuda, 1793173331, expires 2026-10-30T07:42:11+00:00
 **Lease released:** zed-amo-i1129-pair (claimed 2026-10-26, epoch 1793024895, would have expired 2026-10-28T14:28:15+00:00) — RELEASED 2026-10-26 ~22:5x +07 on the riir-ai [1113](../../riir-ai/.issues/1113_m5ultra_decode_prefill_defense.md) side (the same lease, same epoch, recorded there as "nothing left under this lease": the census split + the dense-pair rung + the promotion + the league pair-recell all landed — Bench 1007 + the pair-recell record). This line is the infer-side RESHAPE of that release (the file was left Claimed:-shaped at release — the katgpt-rs Issue-943 blind-repair class); reshaped 2026-10-27, Session: zed-amo-idle-loop, 1793082754. The remaining `cuda_backend` CubeCL arm is NOT under any lease — run `claim_lease_check --item 1129` clean, then append a fresh `**Claimed:**` line before executing it.
 Same session as the 1113-gemvrung lease; the two scopes are one lane.
 
