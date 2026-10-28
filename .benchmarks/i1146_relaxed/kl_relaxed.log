@@ -1,0 +1,17 @@
+
+running 1 test
+test relaxed_precision_per_family_kl ... CubeCL runtime initialized: wgpu<msl>
+[Issue 727] metal-rs GEMM cache skipped (PREFILL_USE_METAL_TENSOR off at construction; set it BEFORE new() to A/B this path)
+[Issue 657] wgpu MSL passthrough GEMM initialized (zero-copy)
+[Issue 1146] matmul2d relaxed_precision = true
+[Issue 663 T5] zero-copy raw-Metal GEMM initialized (device=0x10183ffd0, queue=0x1018461d0)
+[Issue 663 T5] zero-copy raw-Metal weight cache complete.
+# issue1146_relaxed_kl: posture RELAXED · P=256 · K=16 · ref = simdgroup, cand = tensor
+code   n=16 · KL mean 2.968e-7 max 2.673e-6 nats · top1 16/16 · ΔNLL mean +1.754e-4 · NLL(ref) mean 0.316
+math   n=16 · KL mean 3.361e-8 max 3.040e-7 nats · top1 16/16 · ΔNLL mean +2.774e-4 · NLL(ref) mean 0.546
+prose  n=16 · KL mean 1.078e-6 max 2.733e-6 nats · top1 16/16 · ΔNLL mean -2.718e-4 · NLL(ref) mean 2.407
+zh     n=16 · KL mean 9.988e-7 max 3.831e-6 nats · top1 16/16 · ΔNLL mean +3.279e-4 · NLL(ref) mean 2.489
+ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 2 filtered out; finished in 267.87s
+

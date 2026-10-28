@@ -1,0 +1,10 @@
+bin_a: /tmp/dist_v5
+env_a: 
+bin_a_sha256: 61527e80bf352d972d0fe1cba89c497f779fa43d9fd610c0788e7fe0e5578d12
+bin_b: /tmp/dist_v5
+env_b: RIIR_METAL_TENSOR_RELAXED=1
+bin_b_sha256: 61527e80bf352d972d0fe1cba89c497f779fa43d9fd610c0788e7fe0e5578d12
+model: /Users/katopz/models/Ternary-Bonsai-2-27B-PQ2_0.gguf
+model_sha256: 3907dc1658db1f78a9826bf8d5bcb8dc65db0d466388937af57f2294fae62ec1
+widths: 512
+lens: 512 4096

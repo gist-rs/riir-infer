@@ -1,0 +1,14 @@
+[head] loaded layers [0, 32) of 64, n_embd 5120, vocab 248320 in 6.0s (backend gpu, ctx 2048)
+CubeCL runtime initialized: wgpu<msl>
+[Issue 727] metal-rs GEMM cache skipped (PREFILL_USE_METAL_TENSOR off at construction; set it BEFORE new() to A/B this path)
+[Issue 657] wgpu MSL passthrough GEMM initialized (zero-copy)
+[Issue 1146] matmul2d relaxed_precision = true
+[Issue 663 T5] zero-copy raw-Metal GEMM initialized (device=0x103e36690, queue=0x103e41a20)
+[Issue 663 T5] zero-copy raw-Metal weight cache complete.
+[head] sock-buf snd 0 rcv 0
+[norm_rot_multi] REACH: the multi-cube fused norm+rotate staging dispatched
+prompt: 38 tokens × 1 stream(s)
+stream 0: decode 17.74 tok/s (255 steps) prefill 9.782s
+generated: [248068, 271, 248069, 271, 1206, 1423, 279, 5289, 4478, 303, 19434, 791, 2018, 318, 76, 2600, 681, 567, 1144, 310, 5335, 279, 2574, 5821, 321, 854, 1083, 279, 8053, 7896, 318, 76, 2345, 321, 6283, 8, 321, 1179, 3668, 279, 4478, 14377, 13, 271, 332, 8046, 220, 16, 25, 62366, 279, 2574, 2663, 332, 198, 9, 256, 30116, 1651, 67, 3, 8, 283, 393, 16, 23, 15, 1088, 1272, 90, 12754, 30675, 198, 9, 256, 3984, 1651, 83, 3, 8, 283, 393, 17, 13, 20, 1088, 1272, 90, 3979, 30675, 271, 332, 8046, 220, 17, 25, 6943, 5821, 494, 39229, 310, 19434, 332, 198, 12189, 393, 16, 1088, 1272, 90, 12754, 92, 283, 220, 16, 11, 15, 15, 15, 1088, 1272, 90, 19434, 30675, 25, 198, 13682, 67, 283, 220, 16, 23, 15, 1088, 14695, 220, 16, 11, 15, 15, 15, 283, 220, 16, 23, 15, 11, 15, 15, 15, 1088, 1272, 90, 19434, 92, 13682, 271, 332, 8046, 220, 18, 25, 6943, 854, 494, 3979, 310, 6283, 332, 198, 12189, 393, 16, 1088, 1272, 90, 6258, 92, 283, 220, 21, 15, 1088, 1272, 90, 4276, 30675, 321, 393, 16, 1088, 1272, 90, 9104, 92, 283, 220, 21, 15, 1088, 1272, 90, 6283, 30675, 11, 1179, 393, 16, 1088, 1272, 90, 6258, 92, 283, 220, 18, 11, 21, 15, 15, 1088, 1272, 90, 6283, 92, 12576, 198, 13682, 83, 283, 220, 17, 13, 20, 1088, 14695, 220, 18, 11, 21, 15, 15, 13682, 271, 45593, 2820, 25, 198, 13682, 17, 13, 20, 1088, 14695, 220, 18]
+text: "<think>\n\n</think>\n\nTo find the average speed in meters per second (m/s), we need to convert the given distance and time into the appropriate units (meters and seconds) and then apply the speed formula.\n\n**Step 1: Identify the given values**\n*   Distance ($d$) = $180 \\text{ km}$\n*   Time ($t$) = $2.5 \\text{ hours}$\n\n**Step 2: Convert distance from kilometers to meters**\nSince $1 \\text{ km} = 1,000 \\text{ meters}$:\n$$d = 180 \\times 1,000 = 180,000 \\text{ meters}$$\n\n**Step 3: Convert time from hours to seconds**\nSince $1 \\text{ hour} = 60 \\text{ minutes}$ and $1 \\text{ minute} = 60 \\text{ seconds}$, then $1 \\text{ hour} = 3,600 \\text{ seconds}$.\n$$t = 2.5 \\times 3,600$$\n\nCalculation:\n$$2.5 \\times 3"
+prefill 38 tok in 9.782s · decode 17.74 tok/s (255 steps)

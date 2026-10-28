@@ -53,6 +53,18 @@ impl TernaryGpuStage {
         riir_infer_gpu::set_prefill_use_metal_tensor_zerocopy(
             std::env::var("RIIR_DIST_METAL_TENSOR").as_deref() != Ok("0"),
         );
+        // Issue 1146 rung 2b (promoted, Bench 923): compile the tensor GEMM's
+        // matmul2d with relaxed precision — a LOSSY surface, so it is scoped
+        // to the dist stage where its quality read was taken (per-family KL
+        // max <= 3.83e-6 nats, top-1 16/16 x4, 256-token greedy streams
+        // identical x4); the substrate default stays OFF so the league
+        // harness and every bit-exact gate keep the incumbent bytes. Must run
+        // BEFORE the forwarder compiles its pipelines.
+        // `RIIR_DIST_METAL_TENSOR_RELAXED=0` demotes.
+        #[cfg(target_os = "macos")]
+        riir_infer_gpu::gemm_ternary_metal_tensor::set_metal_tensor_relaxed_precision(
+            std::env::var("RIIR_DIST_METAL_TENSOR_RELAXED").as_deref() != Ok("0"),
+        );
         let fwd = TernaryDeltanetGpuForward::new(&ctx, config, &weights);
         Ok(Self {
             fwd,

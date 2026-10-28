@@ -1,0 +1,16 @@
+== LOGIT relaxed P=512 W=512
+prefill() whole: argmax off 13 on 13 · max_abs 4.032e-3 · len 248320
+range full: argmax off 13 on 13 · max_abs 4.032e-3 · len 248320
+range split: argmax off 13 on 13 · max_abs 4.032e-3 · len 248320
+== LOGIT relaxed P=1024 W=512
+prefill() whole: argmax off 261 on 261 · max_abs 5.998e-3 · len 248320
+range full: argmax off 261 on 261 · max_abs 5.998e-3 · len 248320
+range split: argmax off 261 on 261 · max_abs 5.998e-3 · len 248320
+== LOGIT relaxed P=4096 W=512
+prefill() whole: argmax off 248046 on 248046 · max_abs 5.566e-3 · len 248320
+range full: argmax off 248046 on 248046 · max_abs 5.566e-3 · len 248320
+range split: argmax off 248046 on 248046 · max_abs 5.566e-3 · len 248320
+BEHAV code: len off 256 on 256 first_divergence NONE
+BEHAV math: len off 256 on 256 first_divergence NONE
+BEHAV prose: len off 256 on 256 first_divergence NONE
+BEHAV zh: len off 256 on 256 first_divergence NONE
