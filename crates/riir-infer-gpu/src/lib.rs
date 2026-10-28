@@ -664,6 +664,8 @@ pub use ternary_deltanet_gpu_forward::set_prefill_use_metal_tensor_zerocopy;
 pub use ternary_deltanet_gpu_forward::set_prefill_use_simdgroup;
 #[cfg(all(feature = "cubecl_runtime", feature = "ternary_gemv"))]
 pub use ternary_deltanet_gpu_forward::{DequantWteRowCubeCL, TernaryDeltanetGpuForward};
+#[cfg(feature = "prefill_embed_batched")]
+pub use ternary_deltanet_gpu_forward::DequantWteRowsCubeCL;
 
 // The speculative-decode drafting family (Issue 665) — modelless CPU-side
 // draft models + the routing half, moved from the engine gpu crate (its

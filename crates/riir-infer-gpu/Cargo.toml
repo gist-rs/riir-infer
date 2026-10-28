@@ -252,6 +252,11 @@ speculative_tree_verify = ["cubecl_runtime", "katgpt-core/gdn_tree_verify"]
 # Batched attention prefill cfg key (Issue 653) - gates the q8-KV prefill
 # arm's internals alongside ternary_gemm_batched.
 ternary_attention_batched_prefill = []
+# Issue 1146 ladder 3: the prefill frame's embed as ONE batched wte-dequant
+# launch (`DequantWteRowsCubeCL`) instead of p per-token launches. Row t is
+# bit-identical to the per-token arm by construction (same per-element body);
+# the G1 test is `issue1146_embed_batched_g1`. Opt-in until its GOAT.
+prefill_embed_batched = ["cubecl_runtime", "ternary_gemv"]
 # Dual ANE/GPU hybrid prefill (Issue 726). The ANE executor's Metal surface
 # is macOS+aarch64-gated inside the module; on other targets the feature
 # compiles the (platform-independent) eligibility gate only. Pulls the metal
@@ -573,3 +578,8 @@ fastrand = "2"
 # the same crate + version the laya lane's prod gelu calls, so the test
 # compares the GPU kernel against the lane's own reference exactly.
 libm = "0.2"
+
+[[test]]
+name = "issue1146_embed_batched_g1"
+path = "tests/issue1146_embed_batched_g1.rs"
+required-features = ["prefill_embed_batched"]

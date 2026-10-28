@@ -315,6 +315,102 @@ impl DequantWteRowCubeCL {
     }
 }
 
+/// CubeCL kernel: dequantize `p` wte rows (one per prompt token) into a
+/// token-major `[p, n]` output in ONE launch (Issue 1146 ladder 3).
+///
+/// The per-token [`dequant_wte_row_f32`] body with the row taken from
+/// `toks[t]` and `t = CUBE_POS_Y` — the same per-element arithmetic, so row
+/// `t` is bit-identical to a `dequant_wte_row_f32(row_idx = toks[t])` launch
+/// into row `t`'s slice. Replaces `p` dispatches per prefill frame with one.
+#[cfg(all(feature = "cubecl_runtime", feature = "prefill_embed_batched"))]
+#[cube(launch_unchecked)]
+fn dequant_wte_rows_f32(
+    pos_bits_u32: &[u32],
+    neg_bits_u32: &[u32],
+    group_scale_f32: &[f32],
+    toks: &[u32],
+    out: &mut [f32],
+    blocks64: u32,
+    groups_per_row: u32,
+    n: u32,
+) {
+    let col = ABSOLUTE_POS_X;
+    if col >= n {
+        terminate!();
+    }
+    let t = CUBE_POS_Y;
+    let row_idx = toks[t as usize];
+
+    let words_per_row = blocks64 * 2u32;
+    let block_idx = col / BITS_PER_BLOCK_DW;
+    let word_in_block = (col % BITS_PER_BLOCK_DW) / 32u32;
+    let bit_pos = col % 32u32;
+
+    let word_idx = (row_idx * words_per_row + block_idx * 2u32 + word_in_block) as usize;
+    let pos_bit = (pos_bits_u32[word_idx] >> bit_pos) & 1u32;
+    let neg_bit = (neg_bits_u32[word_idx] >> bit_pos) & 1u32;
+
+    let sign_f = pos_bit as f32 - neg_bit as f32;
+
+    let group = col / GROUP_SIZE_DW;
+    let scale = group_scale_f32[(row_idx * groups_per_row + group) as usize];
+
+    out[(t * n + col) as usize] = sign_f * scale;
+}
+
+/// Launcher for [`dequant_wte_rows_f32`] — the batched prefill embed.
+#[cfg(all(feature = "cubecl_runtime", feature = "prefill_embed_batched"))]
+pub struct DequantWteRowsCubeCL;
+
+#[cfg(all(feature = "cubecl_runtime", feature = "prefill_embed_batched"))]
+impl DequantWteRowsCubeCL {
+    /// Launch the batched wte dequant: `toks` holds `p` u32 row ids, `out`
+    /// receives `p * n` f32 (row `t` at `t * n`).
+    ///
+    /// # Safety
+    ///
+    /// Caller must ensure:
+    /// - `pos_bits_u32` / `neg_bits_u32` have `rows * blocks64 * 2` u32 elements
+    /// - `group_scale_f32` has `rows * groups_per_row` f32 elements
+    /// - `toks` has `p` u32 elements, each `< rows`
+    /// - `out` has `p * n` f32 elements allocated
+    #[allow(clippy::too_many_arguments)]
+    pub unsafe fn launch<R: Runtime>(
+        client: &ComputeClient<R>,
+        pos_bits_u32: Handle,
+        neg_bits_u32: Handle,
+        group_scale_f32: Handle,
+        toks: Handle,
+        out: Handle,
+        rows: u32,
+        p: u32,
+        blocks64: u32,
+        groups_per_row: u32,
+        n: u32,
+    ) {
+        let wg_size = 256u32;
+        let num_wg = n.div_ceil(wg_size);
+        let plane_len = rows as usize * blocks64 as usize * 2;
+        let scale_len = rows as usize * groups_per_row as usize;
+
+        unsafe {
+            dequant_wte_rows_f32::launch_unchecked::<R>(
+                client,
+                CubeCount::Static(num_wg, p, 1),
+                CubeDim::new_1d(wg_size),
+                BufferArg::from_raw_parts(pos_bits_u32, plane_len),
+                BufferArg::from_raw_parts(neg_bits_u32, plane_len),
+                BufferArg::from_raw_parts(group_scale_f32, scale_len),
+                BufferArg::from_raw_parts(toks, p as usize),
+                BufferArg::from_raw_parts(out, p as usize * n as usize),
+                blocks64,
+                groups_per_row,
+                n,
+            );
+        }
+    }
+}
+
 /// Per-layer pre-uploaded GPU weight handles.
 #[cfg(feature = "cubecl_runtime")]
 /// Per-layer GPU weight handles. `pub(crate)` — consumed by the Issue 721
@@ -9323,6 +9419,29 @@ impl TernaryDeltanetGpuForward {
         if hidden_in.is_none() && stage_on(PREFILL_STAGE_EMBED) {
             let wte_blocks64 = self.wte_handle.blocks64 as u32;
             let wte_groups = self.wte_handle.groups_per_row as u32;
+            // Issue 1146 ladder 3: ONE launch for the whole frame (row t
+            // bit-identical to the per-token arm below).
+            #[cfg(feature = "prefill_embed_batched")]
+            {
+                let toks: Vec<u32> = tokens.iter().map(|&t| t as u32).collect();
+                let toks_h = self.client.create_from_slice(u32::as_bytes(&toks));
+                unsafe {
+                    DequantWteRowsCubeCL::launch::<ActiveRuntime>(
+                        &self.client,
+                        self.wte_handle.pos_bits_u32.clone(),
+                        self.wte_handle.neg_bits_u32.clone(),
+                        self.wte_handle.group_scale_f32.clone(),
+                        toks_h,
+                        x_b.clone(),
+                        self.wte_handle.m as u32,
+                        p as u32,
+                        wte_blocks64,
+                        wte_groups,
+                        n as u32,
+                    );
+                }
+            }
+            #[cfg(not(feature = "prefill_embed_batched"))]
             for (t, &tok) in tokens.iter().enumerate() {
                 unsafe {
                     DequantWteRowCubeCL::launch::<ActiveRuntime>(
