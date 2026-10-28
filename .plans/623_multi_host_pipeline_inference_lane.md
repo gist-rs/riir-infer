@@ -2,7 +2,7 @@
 
 **Status:** Phase 2 PoC LANDED 2026-10-27 (T2.1 + T2.2 + T2.2b GPU stage + T2.3a pipelined prefill + T2.2c(1) range-scoped weights + T2.3b chunked batched prefill (promoted) — each stage holds only its own slice: `crates/riir-infer-dist`, D1 → (a)) — real 2-box TB5 runs, CPU⇄CPU and GPU⇄GPU, streams bit-identical to 1-box; 1-box GPU base gap filed as Issue 1139 — mostly BUILD POSTURE, fixed by Issue 1141 (dist `gpu` now carries the production decode posture + the workspace's cubecl-wgpu fork: 1-box stage decode 27.2 → 46.7 tok/s, 2-stage 26.0 → 45.2 tok/s on idle bmo; then Issue 1142's dense-pair loads-in-flight kernel, 1-box 51.4 tok/s; then Issue 1143's decode-norm loads-in-flight (`85c4da5`), 1-box 55.0 tok/s; then Issue 1144's radix-4 FWHT (`3147164`), 1-box 56.9 tok/s; residual 1.07× vs llama.cpp, attributed in Issue 1139 T4, next rung Issue 1145); Phase 1 (T1.1–T1.5) LANDED 2026-10-26
 **Lease closed:** zed-amo-i623-t25residue landed the T2.5 residue 2026-10-28 (`a260b62` — the landing note on the T2.5 task carries the detail: measured link bw + tail probe rows; the commit was first made as `f610afc` and re-hashed onto the pushed claim by the manual rebase — same tree, new parent)
-**Claimed:** zed-amo-i623-g2fitsbox, 1793148942, expires 2026-10-30T00:55:42+00:00
+**Lease closed:** zed-amo-i623-g2fitsbox measured the G2 fits-one-box row 2026-10-28 (Bench 916; the instrument commit `3b286c8` carries the decode-only oracle window)
   (the two disclosed T2.5 residues, Bench 915 honest-notes: the tail answer-posture probe rows print + the link bw MEASURED on the wire (echo-ack bulk — the tail does zero compute, the v0 conflation concern does not apply); CPU-only, no GPU cells)
 **Lease closed:** zed-amo-i623-admit landed the T2.4 ADMISSION SEAM 2026-10-28 (`07540f7`) — `Admission`/`AdmissionSource`/`StageFactory` + `run_head_multi_admit`, one wave engine over both doors, G1 4/4 (`tests/multi_stream_admission.rs`); the landing note on the T2.4 task carries the detail. T5.1's V0 design note (same session) is the scoping, not a held slot — the remaining T2.4 kernel micro-batching rung and the T5.1a–d slices stay unclaimed
 **Lease closed:** zed-amo-i623-t21b landed T2.1b 2026-10-27 (the landing note on the task is its provenance) — the GPU cells (T2.3c/T2.4/T2.5/T2.7) stay unclaimed
@@ -689,6 +689,11 @@ mlx-lm on the Proposal-042 scoreboard **measured on the same two boxes**.
   gate: pipelined ≠ synchronized exchange latency.**
 - G2 `--release`, both boxes' provenance; beats the best incumbent on at least the
   capacity row and the aggregate-throughput row; never > 5% PP overhead on the fits-one-box row.
+  **FULLY EVIDENCED 2026-10-28 (Bench 916): the fits-one-box row measured — loopback PP s=1
+  vs the same-process 1-box oracle (GPU both postures, split 32, ctx 4096, amo, GPU-quiet):
+  overhead −1.4..−1.6% across 3 runs (G1 PASS ×3) — ≤5% with margin, point estimate at/below
+  zero (the negative sign is a posture note: two 3.6 GB stage instances vs one 7.2 GB, no
+  win claimed); the capacity + aggregate clauses are Bench 910's scoreboard rows.**
 - G3 feature-off byte-identity of riir-infer-core (the `multi_host` feature compiles away).
 - G4 decode frame path alloc-free.
 - Security: no unauthenticated frame accepted (negative test with a wrong key).
