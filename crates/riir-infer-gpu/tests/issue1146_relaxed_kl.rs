@@ -63,6 +63,7 @@ use riir_infer_core::tokenizer::BpeTokenizer;
 use riir_infer_gpu::TernaryDeltanetGpuForward;
 use riir_infer_gpu::cubecl_runtime::CubeCLContext;
 use riir_infer_gpu::set_prefill_use_metal_tensor_zerocopy;
+use riir_infer_gpu::{prefill_attn_metal_tensor_launch_count, set_prefill_attn_metal_tensor};
 
 const FOLDED_MODEL: &str = "../../../riir-train/data/Ternary-Bonsai-2-27B-PQ2_0.gguf";
 
@@ -279,6 +280,23 @@ fn relaxed_precision_per_family_kl() {
         .ok()
         .and_then(|v| v.parse().ok());
     let relaxed = std::env::var("RIIR_METAL_TENSOR_RELAXED").as_deref() == Ok("1");
+    // The A/B axis: `gemm` (default) = tensor GEMM ON vs the simdgroup
+    // incumbent; `attn` = the matmul2d attention arm (Issue 1146 ladder
+    // 4(c)) ON vs the production CubeCL attention chain, the tensor GEMM ON
+    // in both arms (the serving posture). `attn` is always a tolerance
+    // measurement, so the strict-control gate applies to `gemm` only.
+    let attn_axis = match std::env::var("I1146K_AXIS").as_deref() {
+        Ok("attn") => true,
+        Ok("gemm") | Err(_) => false,
+        Ok(other) => panic!("I1146K_AXIS must be gemm|attn, got {other}"),
+    };
+    let set_cand = |on: bool| match attn_axis {
+        true => {
+            set_prefill_use_metal_tensor_zerocopy(true);
+            set_prefill_attn_metal_tensor(on);
+        }
+        false => set_prefill_use_metal_tensor_zerocopy(on),
+    };
 
     let tok = {
         let gguf = GgufFile::open(&model).expect("open gguf for tokenizer");
@@ -291,10 +309,20 @@ fn relaxed_precision_per_family_kl() {
     let mut fwd = TernaryDeltanetGpuForward::new(&ctx, &config, &weights);
 
     println!(
-        "# issue1146_relaxed_kl: posture {} · P={p} · K={k} · ref = simdgroup, cand = tensor",
-        match relaxed {
-            true => "RELAXED",
-            false => "STRICT (control — KL must be 0)",
+        "# issue1146_relaxed_kl: axis {} · posture {} · P={p} · K={k} · {}",
+        match attn_axis {
+            true => "ATTN",
+            false => "GEMM",
+        },
+        match (attn_axis, relaxed) {
+            (true, true) => "RELAXED",
+            (true, false) => "STRICT GEMM",
+            (false, true) => "RELAXED",
+            (false, false) => "STRICT (control — KL must be 0)",
+        },
+        match attn_axis {
+            true => "ref = CubeCL attention chain, cand = matmul2d attention",
+            false => "ref = simdgroup, cand = tensor",
         }
     );
     let mut over: Vec<String> = Vec::new();
@@ -308,10 +336,10 @@ fn relaxed_precision_per_family_kl() {
         let mut row = FamilyRow::default();
         for len in scored_lengths(p, k) {
             let prefix = &toks[..len];
-            set_prefill_use_metal_tensor_zerocopy(true);
+            set_cand(true);
             fwd.reset_state();
             let cand = fwd.prefill(prefix);
-            set_prefill_use_metal_tensor_zerocopy(false);
+            set_cand(false);
             fwd.reset_state();
             let reference = fwd.prefill(prefix);
             assert!(
@@ -334,7 +362,7 @@ fn relaxed_precision_per_family_kl() {
         // The strict control is a HARD gate: the tensor path is G1-exact, so
         // any non-zero KL here is the instrument (or a pool hazard), never the
         // lever — a relaxed number is only attributable once this reads 0.
-        if !relaxed && (row.kl_max != 0.0 || row.top1_agree != row.n) {
+        if !attn_axis && !relaxed && (row.kl_max != 0.0 || row.top1_agree != row.n) {
             over.push(format!(
                 "{family} STRICT control not exact: max KL {:.3e}, top1 {}/{}",
                 row.kl_max, row.top1_agree, row.n
@@ -345,6 +373,14 @@ fn relaxed_precision_per_family_kl() {
         {
             over.push(format!("{family} max KL {:.3e} > {bar:.3e}", row.kl_max));
         }
+    }
+    if attn_axis {
+        let n = prefill_attn_metal_tensor_launch_count();
+        println!("# tensor-attention launches: {n}");
+        assert!(
+            n > 0,
+            "vacuous: the attn axis never routed the tensor attention arm"
+        );
     }
     assert!(over.is_empty(), "KL gate failed: {over:?}");
 }

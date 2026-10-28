@@ -80,6 +80,14 @@ const THREADGROUP_BYTES: u64 = ((Q_PER_TG * HEAD_DIM * 2
 const _: () = assert!(THREADGROUP_BYTES == 28_816 && THREADGROUP_BYTES <= 32 * 1024);
 
 static ENABLED: AtomicBool = AtomicBool::new(false);
+/// Process-wide launches through this arm (the vacuous-guard counter for
+/// callers that cannot see the forward's private instance).
+static LAUNCHES: AtomicU64 = AtomicU64::new(0);
+
+/// Total tensor-attention dispatches in this process.
+pub fn prefill_attn_metal_tensor_launch_count() -> u64 {
+    LAUNCHES.load(Ordering::Relaxed)
+}
 static INITIALIZED: OnceLock<()> = OnceLock::new();
 
 /// Whether the matmul2d attention arm is selected. Env
@@ -281,6 +289,7 @@ impl MetalTensorAttentionPrefill {
         // No wait: the next CubeCL consumer is ordered after this command
         // buffer on the shared queue (the GEMM dispatch's contract).
         self.dispatch_count.fetch_add(1, Ordering::Relaxed);
+        LAUNCHES.fetch_add(1, Ordering::Relaxed);
         Ok(())
     }
 }

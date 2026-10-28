@@ -366,7 +366,8 @@ pub use gemm_ternary_metal_wgpu::MetalTensorWgpuGemm;
 pub use gemm_ternary_metal_zero_copy::{MetalTensorZeroCopyGemm, ZeroCopyWeightCache};
 #[cfg(all(feature = "metal_tensor_gemm", target_os = "macos"))]
 pub use attention_prefill_metal_tensor::{
-    MetalTensorAttentionPrefill, prefill_attn_metal_tensor_enabled, set_prefill_attn_metal_tensor,
+    MetalTensorAttentionPrefill, prefill_attn_metal_tensor_enabled,
+    prefill_attn_metal_tensor_launch_count, set_prefill_attn_metal_tensor,
 };
 #[cfg(feature = "ternary_gemm_simdgroup")]
 pub use gemm_ternary_simdgroup_cubecl::GemmTernarySimdgroupCubeCL;
