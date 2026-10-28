@@ -1,6 +1,6 @@
 # Issue 1146: 1-box prefill throughput gap — 6–8× behind the incumbents (T0.3 finding)
 
-**Status:** OPEN — gap MEASURED (Bench 911) → census (914) → rung 1 width 512 = 1.39–1.42× (919, default flip pending the 2-box leg) → rung 2a tensor zero-copy GEMM PROMOTED into the dist `gpu` row (920, `54f0dce`; 1.21–1.34×, G1 exact after the wgpu zero-init root-cause fix `3bbf275`). Stacked: 0.13–0.16× → ~0.26–0.27× of llama.cpp. Remaining ~3.7× = rung 2b (kernel), rung 3 (embed A/B queued)
+**Status:** OPEN — gap MEASURED (Bench 911) → census (914) → rung 1 width 512 = 1.39–1.42× (919, default flip pending the 2-box leg) → rung 2a tensor zero-copy GEMM PROMOTED (920, `54f0dce`, 1.21–1.34×; wgpu zero-init root-cause fix `3bbf275`) → rung 2b H4 hoisted-load dequant PROMOTED (921, `29be9a0`, +9%, bit-exact). Stacked at w512: 0.13–0.16× → **0.28–0.29×** of llama.cpp. Queued on bmo: relaxed_precision A/B, embed A/B, pp32k tensor confirm
 **Claimed:** zed-amo-1146-prefill, 1793133500, expires 2026-10-29T20:45:00+00:00
 **Date:** 2026-10-28
 **Found by:** [`.benchmarks/911_plan623_t03_arms.md`](../.benchmarks/911_plan623_t03_arms.md) (Plan 623 T0.3, bmo idle, one session)
@@ -22,7 +22,9 @@ head⇄tail overlap on the wire (the reason 128 was chosen, Bench 909). Record: 
 - [ ] 2-box TB5 leg 128 vs 512 (ABAB) → flip the `dist_stage` GPU default + `runner.rs` doc if it holds
 - [x] Ladder 2a: arm the promoted Metal tensor (ktile64 matmul2d) zero-copy prefill GEMM in dist — PROMOTED `54f0dce` (Bench 920); root-caused + fixed the cold-pool corruption it carried (wgpu lazy zero-init, `3bbf275`, the Issue-670-T5 residual) + `FillZerosCubeCL` grid-cap chunking
 - [ ] Ladder 2a confirm: dist pp32768 cell with tensor (`RIIR_DIST_METAL_TENSOR=0` A/B, one binary) in a quiet window
-- [ ] Ladder 2b: the remaining kernel gap (~3.7× vs llama.cpp at w512+tensor) — the tensor GEMM's own efficiency at prefill shapes; census it under the promoted posture before choosing a rung — instrument armed `3cde142` (`I1146C_CHUNK=512 I1146C_FRAMES=4 I1146C_TENSOR=1` on `bench_1146_prefill_frame_census`); the census cell is chained behind the measurement queue on amo
+- [x] Ladder 2b H4: hoisted-load tensor-GEMM dequant (katgpt-rs-31 `cff3fda`) — PROMOTED `29be9a0` (Bench 921: 1.089×/1.092× pp512/pp4096, G1 max_abs 0 cold-pool + identical dist streams)
+- [ ] Ladder 2b relaxed_precision (`6125f9e`, lossy surface — per-family quality read before any promotion): A/B queued on bmo
+- [ ] Ladder 2b (remaining): the remaining kernel gap (~3.7× vs llama.cpp at w512+tensor) — the tensor GEMM's own efficiency at prefill shapes; census it under the promoted posture before choosing a rung — instrument armed `3cde142` (`I1146C_CHUNK=512 I1146C_FRAMES=4 I1146C_TENSOR=1` on `bench_1146_prefill_frame_census`); the census cell is chained behind the measurement queue on amo
   - Rung-2b static candidates (read 2026-10-28 from `gemm_ternary_metal_tensor.metal` + `gemm_ternary_metal_zero_copy.rs`; UNMEASURED — the census decides which, if any, is the floor):
     - **H1 per-GEMM submission tax**: every zero-copy GEMM does `client.flush()` + its own raw command buffer + a blit copy-back of the full P×M f32 output from a dedicated buffer (the aliasing workaround) — one extra write+read of the output per projection, ×~7 projections ×64 layers per frame.
     - H1 static bound (arithmetic, not a measurement): FFN copy-back ≈ 10.5 GB/frame at w512 ≈ 15 ms at 700 GB/s, + ~12 ms submission at ~20 µs × ~576 dispatches, vs ~1905 ms/frame (pp4096 w512+tensor dist) → **≤ ~2%: H1 DEMOTED to last**. The frame runs ~14.5 TFLOPS effective, so the gap is inside the kernel body (H2–H4); the census + a per-shape kernel cell decide among them.
