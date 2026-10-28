@@ -132,7 +132,7 @@ rkey half CLOSED NEGATIVE — RC refused at create, rkey 0x0 under every
 access-flag combination, UC RDMA WRITE accepted-then-never-completes
 (SEND/RECV is the wire shape on this provider); T3.2 MTLBuffer leg
 code-complete (`verbs_metal`, opt-in `rdma_metal`) blocked e2e by amo's
-Application Firewall ([issue 1152](.issues/1152_plan623_t32_verbs_metal_fw.md) —
+Application Firewall ([issue 1152](.issues/1152_verbsmetal_firewall_gate.md) —
 owner sudo/codesign or the bmo-target workaround); T3.4 GPU↔comm sync LANDED
 (zed-m3-i623-t34gpucomm `9f3c0f7`: the decode-feed async-finish arm —
 `schedule_async_finish` + the staged-copy read future, all-feed-pass deferral,
