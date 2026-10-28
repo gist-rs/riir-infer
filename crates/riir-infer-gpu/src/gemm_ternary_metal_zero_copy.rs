@@ -45,7 +45,7 @@
 
 #![cfg(all(feature = "metal_tensor_gemm", target_os = "macos"))]
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex};
 
 use metal::foreign_types::ForeignTypeRef;
@@ -125,6 +125,11 @@ pub struct MetalTensorZeroCopyGemm {
     /// aliasing; after the kernel writes, we copy back to the CubeCL handle.
     /// This is ONE GPU→GPU copy (not a host round-trip).
     output_cache: Mutex<HashMap<u64, Buffer>>,
+    /// Issue 1146: CubeCL output ranges wgpu has already marked initialized
+    /// (`(pool buffer, offset, bytes)`) — see [`Self::ensure_wgpu_initialized`].
+    /// Holding the `wgpu::Buffer` clone keeps its identity from being reused
+    /// by a later allocation while it is remembered here.
+    wgpu_initialized: Mutex<HashSet<(wgpu::Buffer, u64, u64)>>,
     /// Issue 663 T5 profiling: total dispatch count (for overhead analysis).
     dispatch_count: std::sync::atomic::AtomicU64,
     /// Issue 1122 gate 2: the tile geometry this pipeline was compiled at.
@@ -224,6 +229,7 @@ impl MetalTensorZeroCopyGemm {
             queue: queue_ptr,
             pipeline,
             output_cache: Mutex::new(HashMap::new()),
+            wgpu_initialized: Mutex::new(HashSet::new()),
             dispatch_count: std::sync::atomic::AtomicU64::new(0),
             config,
             last_cmd_buffer: std::sync::Mutex::new(None),
@@ -300,6 +306,53 @@ impl MetalTensorZeroCopyGemm {
         }
     }
 
+    /// Issue 1146 — the first-use zero-init hazard (Issue 670 T5's
+    /// "first-prefill pool-state" residual, root-caused).
+    ///
+    /// wgpu zero-initializes buffer memory LAZILY: the first wgpu pass that
+    /// binds a never-initialized range gets a clear inserted ahead of it. The
+    /// raw-Metal blit below writes the CubeCL output range BEHIND wgpu's back,
+    /// so when that range is fresh pool memory, the next CubeCL kernel that
+    /// reads it triggers the clear and the GEMM result becomes zeros. A warm
+    /// pool hid it (every later prefill reuses initialized pages), which is why
+    /// warmed A/Bs (riir-ai Bench 1009) read exact while a cold first prefill
+    /// (every dist stage) did not.
+    ///
+    /// The cure: the first time an output range is seen, have CubeCL write it
+    /// (one fill, submitted ahead of the raw command buffer on the same
+    /// queue), so wgpu marks it initialized before the raw write lands. Steady
+    /// state pays nothing: a seen range is a set lookup.
+    fn ensure_wgpu_initialized(
+        &self,
+        client: &ComputeClient<ActiveRuntime>,
+        output: &Handle,
+        len: usize,
+    ) -> Result<(), String> {
+        let managed = client
+            .get_resource(output.clone())
+            .map_err(|e| format!("get_resource failed: {e:?}"))?;
+        let resource = managed.resource();
+        let key = (
+            resource.buffer.clone(),
+            resource.offset,
+            (len * std::mem::size_of::<f32>()) as u64,
+        );
+        let mut seen = self.wgpu_initialized.lock().unwrap();
+        if seen.contains(&key) {
+            return Ok(());
+        }
+        unsafe {
+            crate::elementwise_cubecl::FillZerosCubeCL::launch::<ActiveRuntime>(
+                client,
+                output.clone(),
+                len,
+            );
+        }
+        let _ = client.flush();
+        seen.insert(key);
+        Ok(())
+    }
+
     /// Dispatch the ternary GEMM via raw Metal on the shared CubeCL queue.
     ///
     /// **Zero copy, zero host round-trip.** Reads input from the CubeCL input
@@ -341,9 +394,11 @@ impl MetalTensorZeroCopyGemm {
         // was tried and does NOT cure the residual first-prefill corruption
         // (case-order A/B: only the FIRST zerocopy prefill after init reads
         // wrong state; later prefills are bit-identical to simdgroup). The
-        // corruption is not a submission-visibility hazard — see the issue's
-        // T5 close-out for the pool-reservation characterization.
+        // corruption is not a submission-visibility hazard — ROOT-CAUSED in
+        // Issue 1146 as wgpu's lazy zero-init clearing the raw-written output
+        // on its first wgpu use; cured by `ensure_wgpu_initialized`.
         let _ = client.flush();
+        self.ensure_wgpu_initialized(client, output, p * w.m)?;
 
         // Extract raw weight + input buffer handles fresh on every dispatch.
         let (pos_ptr, pos_off) = Self::extract_raw_buffer(client, &weights.pos)?;

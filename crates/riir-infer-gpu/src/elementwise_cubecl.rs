@@ -820,22 +820,43 @@ pub struct FillZerosCubeCL;
 
 #[cfg(feature = "cubecl_runtime")]
 impl FillZerosCubeCL {
+    /// Elements one launch may cover: the 1D grid caps at 65535 workgroups
+    /// per dimension (wgpu/Metal), × 256 threads. The chunk's byte size
+    /// (65535 × 1024) is a multiple of 256, the storage-offset alignment.
+    const MAX_ELEMS_PER_LAUNCH: usize = 65_535 * 256;
+
     /// Launch fill-zeros kernel: `output[i] = 0.0` for all `i` in `[0, n)`.
     ///
-    /// Dispatch: `ceil(n/256)` workgroups of 256 threads.
+    /// Dispatch: `ceil(n/256)` workgroups of 256 threads, split into
+    /// [`Self::MAX_ELEMS_PER_LAUNCH`]-element launches over offset slices of
+    /// the handle when `n` exceeds the grid cap (Issue 1146: a p=1024 FFN
+    /// output is 1024 × 17408 = 69632 workgroups).
     ///
     /// # Safety
     ///
     /// - `output_handle`: `n` f32 elements (modified in-place)
     pub unsafe fn launch<R: Runtime>(client: &ComputeClient<R>, output_handle: Handle, n: usize) {
-        let n_wg = n.div_ceil(256).max(1) as u32;
-        unsafe {
-            fill_zeros_f32::launch_unchecked::<R>(
-                client,
-                CubeCount::Static(n_wg, 1, 1),
-                CubeDim::new_1d(256),
-                BufferArg::from_raw_parts(output_handle, n),
-            );
+        let f = core::mem::size_of::<f32>();
+        let mut start = 0usize;
+        loop {
+            let len = (n - start).min(Self::MAX_ELEMS_PER_LAUNCH);
+            let handle = match start {
+                0 => output_handle.clone(),
+                _ => output_handle.clone().offset_start((start * f) as u64),
+            };
+            let n_wg = len.div_ceil(256).max(1) as u32;
+            unsafe {
+                fill_zeros_f32::launch_unchecked::<R>(
+                    client,
+                    CubeCount::Static(n_wg, 1, 1),
+                    CubeDim::new_1d(256),
+                    BufferArg::from_raw_parts(handle, len),
+                );
+            }
+            start += len;
+            if start >= n {
+                break;
+            }
         }
     }
 }
