@@ -1,7 +1,8 @@
 # Issue 1146: 1-box prefill throughput gap — 6–8× behind the incumbents (T0.3 finding)
 
 **Status:** OPEN — gap MEASURED (Bench 911) → census (914) → rung 1 width 512 = 1.39–1.42× (919, default flip pending the 2-box leg) → rung 2a tensor zero-copy GEMM PROMOTED (920, `54f0dce`, 1.21–1.34×; wgpu zero-init root-cause fix `3bbf275`) → rung 2b H4 hoisted-load dequant PROMOTED (921, `29be9a0`, +9%, bit-exact). Stacked at w512: 0.13–0.16× → **0.28–0.29×** of llama.cpp. Queued on bmo: relaxed_precision A/B, embed A/B, pp32k tensor confirm
-**Claimed:** zed-amo-1146-prefill, 1793133500, expires 2026-10-29T20:45:00+00:00
+**Lease closed:** zed-amo-1146-prefill, 1793133500, expires 2026-10-29T20:45:00+00:00 — holder (pipe katgpt-rs-bd) yielded the 1146 GPU queue + sole-writer role to katgpt-rs-71 on 2026-10-28 ~19:57 +07, not renewed
+**Claimed:** katgpt-rs-71, 1793178290, expires 2026-10-30T13:00:00Z
 **Date:** 2026-10-28
 **Found by:** [`.benchmarks/911_plan623_t03_arms.md`](../.benchmarks/911_plan623_t03_arms.md) (Plan 623 T0.3, bmo idle, one session)
 **Session:** zed-amo-i623-t24
