@@ -101,10 +101,12 @@ count-based and stands independent of them.
    BOTH axes even on the degenerate stream (tok/s 0.975 vs 0.863, E[m] 1.124 vs 1.061, rounds 170
    vs 180 over 192 tokens) — the trained head is net-positive per-round. The structural half
    (journal unwind + KV truncate — no serialize at all) owns the remaining ~15×.
-2. Chat-shaped-prompt acceptance re-read (the dflash chat lane's prompts) — the free-stream
-   degeneracy above is a raw-text artifact; the serving prompts are chat-shaped, and the head's
-   E[m] there is the real scoreboard row.
+2. Chat-shaped-prompt acceptance re-read (the dflash chat lane's prompts) — **DONE 2026-10-28, [Bench 924](../.benchmarks/924_mtp_head_chat_transfer.md): the answer SPLITS BY HEAD — the plain head does NOT transfer (0.684 raw → 0.085 chat); the balanced-mode mix head DOES (0.6705 raw / 0.4353 chat, E[m] 1.73 vs the chat repeat floor 1.00, spec 5.35 vs ordinary 7.69 tok/s = 0.695×)**. The chat token file ships as the offline `mtp_chat_tokens` example (dist_stage `chat_turn` template, 8 tiles of 38 hand-written turns, disclosed). Serving-follow-up re-ordered: the re-fit (4) is chat-shaped capture + balanced mode; the plain head is DEAD for serving.
 3. The 2-box GPU cell at split 63 (amo ⇄ bmo) once 1148's structural half lands — the
-   RTT-amortization axis (rounds/token = 1/E[m]) is the pipeline's real win shape.
+   RTT-amortization axis (rounds/token = 1/E[m]) is the pipeline's real win shape. The drafter
+   for that cell is the MIX head (Bench 924), never the plain one.
 4. Re-fit consideration: a head fit on the split-63 stream directly (riir-train) would close the
-   remaining 10.9-point basis gap; rides owner call after 1148.
+   remaining 10.9-point basis gap; rides owner call after 1148. **Bench 924 sharpens the ask:
+   chat-SHAPED capture + BALANCED-mode fit — the balanced head's cross-regime transfer (0.67
+   raw / 0.44 chat, un-fit) is the measured evidence; the plain head's 0.684→0.085 collapse
+   disqualifies modal-heavy solving for serving.**
