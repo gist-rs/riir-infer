@@ -30,7 +30,12 @@ needs BELOW the engine:
   the adapter VRAM probe, and the
   EXL3 trellis GPU dequant kernels (feature `exl3_gpu`; decode bit-exact
   vs the CPU reference, block-Hadamard gated in the FMA-contraction
-  class — Issue 001 T7b). The
+  class — Issue 001 T7b). The crate also owns the **promoted serving
+  posture contract** (Issue 1151): the `production` aggregate feature is
+  the ONE home of the GOAT-passed serving rungs — joining it is the
+  promotion act, consumers forward one name, `production_posture.rs`
+  mirrors it as data and a consumer-side floor test reds on drift.
+  The
   kernel-set migration from the engine's GPU layer is ongoing (tracked
   in the private workspace campaign that carved this repo).
 - `riir-infer-laya` (crate, `crates/riir-infer-laya`): the pinned-checkpoint

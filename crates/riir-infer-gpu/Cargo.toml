@@ -104,6 +104,32 @@ cudarc = { version = "0.19", default-features = false, features = ["std", "drive
 windows-sys = { version = "0.61", features = ["Win32_System_Threading", "Win32_Foundation"] }
 
 [features]
+# Issue 1151 — the promoted serving posture, ONE home. This aggregate IS
+# the contract: joining it is the promotion act (GOAT-gated G1-G4 + e2e);
+# leaving it is the demotion act; opt-in rungs never join. Consumers
+# forward ONE name (`riir-infer-gpu/production`) instead of hand-typing
+# the rung set — the 1141/1146/1146-2a class (a consumer list omitting a
+# promoted rung; three fires in nine days, worst cell 1.74x, one cell
+# WRONG LOGITS per the dq_phase_bench note below) is structurally dead.
+# Runtime demotion stays env kill-switches (cargo features are
+# additive-only — the house demote-only law). Platform note:
+# metal_tensor_gemm's dep leg is macOS-target-scoped and INERT elsewhere
+# (the dep row below), and the rung's own code is target_os-gated — safe
+# on every host. `src/production_posture.rs` mirrors this row as DATA and
+# its tests pin the two together in both directions.
+production = [
+    "ternary_gemv",
+    "ternary_gemm_batched",
+    "ternary_gemm_simdgroup",
+    "ternary_deltanet_chunked_prefill",
+    "ternary_attention_batched_prefill",
+    "deltanet_recurrence_rowpar",
+    "deltanet_recurrence_parallel",
+    "delta_routing",
+    "params_handle_cache",
+    "metal_tensor_gemm",
+]
+
 # The DQ phase-sensitivity fake-quant instrument (riir-infer Plan 614 /
 # Issue 026): on-device activation quantize→dequantize at five linear-input
 # sites per layer, per phase, on the folded ternary forward. Default-off —

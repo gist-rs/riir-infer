@@ -52,38 +52,34 @@ bonsai2_hadamard = ["riir-infer-core/bonsai2_hadamard"]
 # prefill (`prefill_range_chunk` over the `ternary_gemm_batched` body) for
 # chunked prompt frames.
 #
-# Issue 1141 (promoted 2026-10-27): riir-infer-gpu has NO defaults — the
-# production decode posture lived only in riir-ai's riir-gpu defaults, so
-# the lane ran the bare kernels. The posture rows below + the workspace's
-# cubecl-wgpu fork (uniform-content cache) read, on idle bmo (M5 Ultra,
-# real Bonsai-2 27B, interleaved): 37.24 -> 21.43-21.48 ms/token (1.74x).
-# params_handle_cache is load-bearing HERE: the uniform cache alone reads
-# 33.4-33.9 (a loss vs 31.5-31.7 without it); composed they read 21.4.
+# Issue 1151 — Production posture: the promoted serving rungs live ONE
+# place now, the substrate's `production` aggregate (GOAT-gated; joining
+# it IS the promotion act). This row forwards that ONE name and no longer
+# hand-types the set. History of the class that killed the hand-typed
+# list: Issue 1141 (promoted 2026-10-27) — riir-infer-gpu has NO defaults,
+# the production decode posture lived only in riir-ai's riir-gpu defaults,
+# and the lane ran the bare kernels: 37.24 -> 21.43-21.48 ms/token (1.74x)
+# once repaired (params_handle_cache load-bearing: alone a loss 33.4-33.9
+# vs 31.5-31.7 without it; composed 21.4). Issue 1146 — the prefill-lane
+# features the engine default carries (riir-ai riir-gpu defaults) and this
+# row omitted — the 1141 class one list over: without chunked prefill the
+# conv1d/recurrence run the SEQUENTIAL per-token paths (128 dispatches each
+# per deltanet layer, ~21.5K dispatches/frame at chunk 128) and without
+# batched-attention prefill every attention layer runs the per-token loop
+# — the Bench-911 per-frame floor (0.77-0.91 s/frame, 6-8× behind the
+# incumbents). Issue 1146 rung 2a (promoted 2026-10-28, Bench 920) — the
+# Metal tensor (matmul2d) zero-copy prefill GEMM at the promoted ktile64
+# geometry was league-armed (riir-ai Bench 1009/1011, 1.16-1.24x) and no
+# serving binary carried it; dist A/B 1.21-1.29x prefill, G1 identical
+# token stream once the cold-pool zero-init hazard was fixed (3bbf275);
+# `RIIR_DIST_METAL_TENSOR=0` demotes; the code is target_os-gated, so
+# non-macOS builds are unchanged. The posture floor
+# tests/gpu_production_posture_floor.rs reds if a hand-typed list returns
+# here or the substrate manifest drains. Lane-specific seams stay on the
+# base dep row above (multi_host range runtime).
 gpu = [
     "dep:riir-infer-gpu",
-    "riir-infer-gpu/ternary_gemm_batched",
-    "riir-infer-gpu/ternary_gemm_simdgroup",
-    # Issue 1146 — the prefill-lane features the engine default carries
-    # (riir-ai riir-gpu defaults) and this row omitted — the 1141 class one
-    # list over: without chunked prefill the conv1d/recurrence run the
-    # SEQUENTIAL per-token paths (128 dispatches each per deltanet layer,
-    # ~21.5K dispatches/frame at chunk 128) and without batched-attention
-    # prefill every attention layer runs the per-token loop — the Bench-911
-    # per-frame floor (0.77-0.91 s/frame, 6-8× behind the incumbents).
-    "riir-infer-gpu/ternary_deltanet_chunked_prefill",
-    "riir-infer-gpu/ternary_attention_batched_prefill",
-    "riir-infer-gpu/deltanet_recurrence_rowpar",
-    "riir-infer-gpu/deltanet_recurrence_parallel",
-    "riir-infer-gpu/delta_routing",
-    "riir-infer-gpu/params_handle_cache",
-    # Issue 1146 rung 2a (promoted 2026-10-28, Bench 920): the Metal tensor
-    # (matmul2d) zero-copy prefill GEMM at the promoted ktile64 geometry —
-    # the league harness armed it (riir-ai Bench 1009/1011, 1.16-1.24x) and
-    # no serving binary did. Dist A/B 1.21-1.29x prefill, G1 identical token
-    # stream once the cold-pool zero-init hazard was fixed (3bbf275).
-    # TernaryGpuStage arms it on macOS (`RIIR_DIST_METAL_TENSOR=0` demotes);
-    # the code is target_os-gated, so non-macOS builds are unchanged.
-    "riir-infer-gpu/metal_tensor_gemm",
+    "riir-infer-gpu/production",
 ]
 
 [[bin]]
@@ -103,4 +99,13 @@ required-features = ["gpu"]
 
 [[test]]
 name = "decode_readback_probe_gpu"
+required-features = ["gpu"]
+
+# Issue 1151 — the posture floor: reds NAMING any promoted rung this
+# posture fails to compile (the guard against re-introducing a hand-typed
+# rung list here) and against a drained PRODUCTION_RUNGS manifest (the
+# green-zero defense). See the test's own doc for what it does and does
+# not claim.
+[[test]]
+name = "gpu_production_posture_floor"
 required-features = ["gpu"]

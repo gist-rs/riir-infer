@@ -22,6 +22,10 @@ pub mod buffer;
 pub mod context;
 pub mod pool_poison;
 
+// Issue 1151 — the promoted serving posture as DATA (ungated, zero deps;
+// the feature gates nothing here — the cfg! flags report the compilation).
+pub mod production_posture;
+
 // GPU-side persistent weight buffer cache + the CubeCL runtime
 // (JIT-compiled #[cube] kernels; the type aliases at the crate root keep
 // backend-agnostic kernel dispatch readable). The wgpu-side transpose
@@ -39,6 +43,9 @@ pub use buffer::{
     download_u32, download_u32_reuse, upload_f32,
 };
 pub use context::{GpuContext, GpuError};
+pub use production_posture::{
+    PRODUCTION_RUNGS, missing_production_rungs, production_posture_complete,
+};
 #[cfg(feature = "cubecl_runtime")]
 pub use cubecl_runtime::{
     ActiveComputeClient, ActiveDevice, ActiveRuntime, CubeCLContext, Handle, create_f32,
