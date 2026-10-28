@@ -1,5 +1,6 @@
 # Plan 623: Multi-host inference lane — layer-range stages, activation frames, TCP→RDMA transport, TP, speculative fill
 
+**Lease closed:** zed-m3-i623-t32t33, 1793225492, was expires 2026-10-30T22:11:32+00:00 — LANDED the T3.3 MTU ladder + the T3.2 rkey semantics 2026-10-29 (`570ee79`+`5304716`, the landing note on T3.2 carries the detail; the T3.3 payload below on its task row). T3.2's MTLBuffer leg is code-complete (`verbs_metal`) and blocked on an amo-local Application-Firewall gate (owner sudo) — the residue rides the T3.2 task row.
 **Lease closed:** zed-m3-i623-t3verbs, 1793220893, was expires 2026-10-30T20:54:53+00:00 — LANDED T3.1 + the T3.2 heap leg + the T3.3 small-message/striped rows 2026-10-29 (Bench 927; the landing note on T3.1 carries the detail). The open residues ride their task rows: T3.2's MTLBuffer leg + rkey semantics, T3.3's MTU ladder, T3.4, T3.5. (claim record: zed-m3-i623-t3verbs, epoch 1793220893, was expires 2026-10-30T20:54:53+00:00)
 **Lease closed:** zed-m3-i623-t34gpucomm, 1793255400, was expires 2026-10-31T22:30:00+00:00 — LANDED T3.4 2026-10-29 (unit issue 1151 carries the full landing note: async-finish arm, all-feed-only deferral, G1 exact, s=2 decode window ~5%; open residues ride T3.5).
 **Status:** Phase 2 PoC LANDED 2026-10-27 (T2.1 + T2.2 + T2.2b GPU stage + T2.3a pipelined prefill + T2.2c(1) range-scoped weights + T2.3b chunked batched prefill (promoted) — each stage holds only its own slice: `crates/riir-infer-dist`, D1 → (a)) — real 2-box TB5 runs, CPU⇄CPU and GPU⇄GPU, streams bit-identical to 1-box; 1-box GPU base gap filed as Issue 1139 — mostly BUILD POSTURE, fixed by Issue 1141 (dist `gpu` now carries the production decode posture + the workspace's cubecl-wgpu fork: 1-box stage decode 27.2 → 46.7 tok/s, 2-stage 26.0 → 45.2 tok/s on idle bmo; then Issue 1142's dense-pair loads-in-flight kernel, 1-box 51.4 tok/s; then Issue 1143's decode-norm loads-in-flight (`85c4da5`), 1-box 55.0 tok/s; then Issue 1144's radix-4 FWHT (`3147164`), 1-box 56.9 tok/s; residual 1.07× vs llama.cpp, attributed in Issue 1139 T4, next rung Issue 1145); Phase 1 (T1.1–T1.5) LANDED 2026-10-26
@@ -591,20 +592,41 @@ mlx-lm on the Proposal-042 scoreboard **measured on the same two boxes**.
   error); GIDs are NOT IPv4-mapped on TB (index-0 fallback is the working path — the plan's
   "IPv4-mapped GID" assumption corrected in place). macOS-only by contract (the vtable is
   Apple's; rdma-core's evolved vtable is not claimed).**
-- [-] **T3.2** Zero-copy probe: register an MR over a shared-storage `MTLBuffer.contents()`
+- [x] **T3.2** Zero-copy probe: register an MR over a shared-storage `MTLBuffer.contents()`
   — if accepted, frames go GPU-buffer → wire with no memcpy (both incumbents bounce-copy
   twice); if refused, record the refusal and keep one memcpy per side.
-  **HEAP LEG DONE (Bench 927): 67 MB registered, lkey granted. ⚠ rkey granted 0x0 with
-  REMOTE_WRITE|REMOTE_READ requested — RDMA WRITE (the actual zero-copy shape) untested
-  until rkey semantics are clarified; SEND/RECV is the measured shape. The MTLBuffer leg is
-  OPEN (Metal-context probe on the boxes; contents() of a shared MTLBuffer is ordinary
-  pages on Apple silicon so acceptance is EXPECTED — measure, don't assume).**
-- [-] **T3.3** Small-message decode path (single WR, inline header) vs striped large frames
+  **HEAP LEG DONE (Bench 927): 67 MB registered, lkey granted. ✅ CLOSED NEGATIVE ON THE RKEY HALF
+  2026-10-29 (`570ee79`, `verbs_write` probe, amo⇄bmo): RC is REFUSED AT CREATE (`ibv_create_qp(type 2)`
+  returns NULL — the TB provider does not build the RC type, so RDMA READ is unreachable at any
+  mask); rkey is granted **0x0 under EVERY access-flag combination** (the full grant matrix —
+  LW, LW|RR, LW|RW, LW|RW|RR, even spec-invalid REMOTE_* alone — all register without refusal and
+  all read rkey 0x0, lkey 0x01000000); and a UC RDMA WRITE ladder **STALLS AT THE FIRST POLL** —
+  the WR is accepted (`post_send` rc=0) and no completion EVER arrives (no error WC either — the
+  provider swallows the WRITE opcode in silence; SEND ops on the same QP complete normally). The
+  zero-copy one-way shape is refused-by-silence at the provider: **SEND/RECV is the wire shape**;
+  a heap bounce on each side is the measured cost of this provider posture. The MTLBuffer leg is
+  CODE-COMPLETE (`verbs_metal`, `rdma_metal` feature — registration + GPU→wire + wire→GPU
+  byte-identity with inline MSL fill/sum kernels) and UNBLOCKED the moment the binary is
+  allowlisted: the macOS Application Firewall on amo silently drops the initiator's TCP SYNs to
+  the unsigned target binary (nc/python/ssh connect to the same port; the Rust bin's accept never
+  fires; samples show both sides healthy — initiator in read_exact, target in accept). Owner
+  gate: `sudo socketfilterfw --add <bin> --unblockapp <bin>` (or sign it); the Metal-side premise
+  verified independently (ObjC shared MTLBuffer + blit fill reads back through contents()).**
+- [x] **T3.3** Small-message decode path (single WR, inline header) vs striped large frames
   for prefill; MTU probe (incumbents fix 1024 / 128 KiB strides).
-  **ROWS LANDED (Bench 927): 64 B inline ping-pong 7.7 µs p50; striped one-way 4 KiB→1 MiB
-  all measured (best 128 KiB 8.76 GiB/s short / 9.368 sustained). MTU LADDER OPEN (every row
-  ran at the active 4096; the 1024/2048 override cells + the provider's posted-recv budget
-  cliff band [4, 5] MB as a function of MTU are the remaining legs).**
+  **✅ CLOSED 2026-10-29 (zed-m3-i623-t32t33, the `--mtu` override ladder on amo⇄bmo): the
+  override ENGAGES cleanly (path_mtu=1024/2048 confirmed in the RTS line) and is
+  PERFORMANCE-NEUTRAL at every shape — 128 KiB-stripe BW 9.342 / 9.337 / 9.294 GiB/s and
+  1 MiB-stripe 9.229 / 9.295 / 9.277 GiB/s at MTU 4096/2048/1024 (−0.5% at the floor, within
+  run noise); 64 B inline RTT is MTU-INSENSITIVE (single packet at every MTU; per-run spread
+  6.0–10.1 µs at FIXED MTU — round 1's apparent MTU trend was order/variance artifact,
+  refuted by repeats). **The posted-recv budget law is CORRECTED — the cliff is MTU-INDEPENDENT
+  and BOX-LOAD-DEPENDENT**: identical outcomes at every MTU; today's edge = 3.75 MB PASS /
+  4.0 MB FAIL under bmo's ~70 GB wired (flash_cmma bench + mammoth capture resident), vs
+  Bench 927's 4 MB PASS / 5 MB FAIL the same day under quieter load; bytes-shaped (128 KiB×28
+  = 3.5 MB/28 WRs passes at the edge), not count-shaped. THE LAW: never hard-code "4 MB is
+  safe" — size the recv ring ≤3 MB, or runtime-probe the budget before sizing; the cliff
+  moves with co-tenant wired memory.** (Small-message + striped rows: Bench 927.)
 - [x] **T3.4** GPU↔comm sync: CPU comm thread on `MTLSharedEvent` signal values; no per-
   layer command-buffer commit on the critical path. (Unit issue
   [1151](../.issues/1151_plan623_t34_gpu_comm_sync.md) — LANDED 2026-10-29
