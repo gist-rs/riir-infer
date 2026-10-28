@@ -376,6 +376,7 @@ impl ProtDom {
             Qp {
                 ctx: self.ctx.clone(),
                 ptr: qp,
+                qp_ty: qp_type::UC,
                 // Owned CQ handles: the QP cannot outlive its CQs. Drop
                 // order is enforced by the Arc chain — destroy_qp (the
                 // struct's own Drop) runs first; the CQs, PD and context
@@ -510,6 +511,10 @@ impl Drop for CompQ {
 pub struct Qp {
     ctx: Arc<DevCtx>,
     ptr: *mut IbvQp,
+    /// The QP's transport type — RTS's attr mask is type-aware (the
+    /// provider rejects the RC-only TIMEOUT attr on a UC QP: EINVAL,
+    /// measured on the amo⇄bmo bring-up).
+    qp_ty: i32,
     // Owned CQ handles — lifetime via the Arc chain, not field order:
     // the struct's Drop (destroy_qp) runs before any field drops, so the
     // CQs are still alive when the QP is destroyed.
@@ -583,13 +588,21 @@ impl Qp {
         )
     }
 
-    /// RTR → RTS (own SQ PSN + a response timeout).
+    /// RTR → RTS (own SQ PSN). The response TIMEOUT attr is RC-only —
+    /// the TB provider rejects it on UC with EINVAL (measured on the
+    /// amo⇄bmo bring-up, 2026-10-29) — so a UC QP moves with
+    /// STATE|SQ_PSN alone.
     pub fn to_rts(&self, sq_psn: u32) -> Result<(), String> {
         let mut a: IbvQpAttr = unsafe { std::mem::zeroed() };
         a.qp_state = qp_state::RTS;
         a.sq_psn = sq_psn & 0x00ff_ffff;
         a.timeout = 14; // ~67 ms responder timeout (log scale, 4.096 µs · 2^n)
-        self.modify(&a, attr_mask::STATE | attr_mask::SQ_PSN | attr_mask::TIMEOUT)
+        let mask = if self.qp_ty == qp_type::UC {
+            attr_mask::STATE | attr_mask::SQ_PSN
+        } else {
+            attr_mask::STATE | attr_mask::SQ_PSN | attr_mask::TIMEOUT
+        };
+        self.modify(&a, mask)
     }
 
     /// Post one SEND from a registered slice. `inline` requires
