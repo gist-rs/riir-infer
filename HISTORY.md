@@ -493,6 +493,38 @@ Issue 1131 (filed `86e419d`, shikuwa-4090-i1131t6): the Bench-902 census rows OU
 
 `pair_decode` ships default-OFF (`RIIR_DIST_PAIR=1` arms it for loopback rigs only, where the +39% was real and stands). VERDICT: kernel-level batch-2 is CLOSED for the wire — under the incumbent cadence the tail never holds two ready decode chains, so there is no engagement window; serving-path micro-batching via BatchN is not a direction on this topology. Records: `.benchmarks/912_plan623_issue1147_fused_decode_batch.md` + `.benchmarks/913_plan623_issue1147_wire_refutation.md`. Lease zed-amo-i623-mb released on completion (claimed 2026-10-27 epoch 1793132228 for the plan-623 T2.4 rung).
 
+## 2026-10-28 — Issue 1130 CLOSED G2-FAIL + removed: the Metal concat-epilogue split rung (folded GDN qkv|z Split2 into the ternary concat GEMV epilogue)
+
+Rung `b635a43` (`gemv_ternary_plane_rowtiled8_f16scale_split` + `GemvTernaryCubeCL::launch_split`); G1 to_bits EXACT 13/13 on amo + m3 (`9f1b2ba`). G2 five verified-idle runs (riir-ai harness `bench_1130_concat_split_e2e_ab`, `445cc4e5a`): the per-run position-balanced interleave (`I1130_INTERLEAVE=1`, the issue's second product — block ABBA's R1-neg/R2-pos mirror was a within-test throttle drift) reads **−0.8..−1.0% e2e**, not the census-priced +2.5-7%: the Split2 was already overlapped by the neighbouring GEMV tail (the Bench-995 lesson at the launch-boundary class). Stays opt-in `RIIR_GDN_CONCAT_SPLIT_FUSED` (+ `RIIR_GDN_CONCAT_WG`); nothing demoted. Close `760265d`. Re-open (owner-gated): a wg sweep or a vectorized dual-destination epilogue (best case ~+0.3%, under the 1.5% bar).
+
+## 2026-10-28 — Issue 1131 CLOSED + removed: the T6 GDN rotation-FWHT geometry rung (CUDA) re-priced sub-bar, re-pin adjudicated NO-GO
+
+Filed `86e419d` (Bench 902 rows `gdn_input_rotabq` + `gdn_out_norm_gate_permute_rotq`, 564 µs/token). The T3 measured close (Bench 903) put the bit-clean fix space of the same barrier-chain class at ~0.29% on 788 µs → **~0.2-0.4% expected here**, below the staging bar; the roofline headroom sits behind the bit-identity wall (the reg-tile butterfly drifts ±1 ULP). Re-priced + claim released `8d204ba`; re-pin NO-GO (`194b952`, verdict session zed-amo-msllane-gate). Any future lane executes the V1/V3 bit-clean variants only. Re-open: an owner re-pin carrying a NEW measurement that overturns the 903-scaled pricing.
+
+## 2026-10-28 — Issue 1132 CENSUS COMPLETE + removed: the Metal per-dispatch floor census (whole-graph launch attribution on the folded decode)
+
+Instrument `3d95ff9`: `DECODE_STAGE_MASK` 11→22 bits (per-launch-site refinement classes + the previously-ungated decode tail; mask=ALL bit-identical) + riir-ai `b864dc936` Phase E — the census rides the stage-instrument plumbing, no xctrace. The census lives in riir-ai `.benchmarks/1008_issue1132_metal_launch_floor_census_w1.md` (W1 bmo, W1-repeat, W2/W2b amo + raw logs + `1008_issue1132_w2_reduce.py`): G-C1 ffn 99.7% / gdn_proj 97.7% / joint 100.1%; G-C2 rank PASS (top-10 identical across four runs, launches bit-identical); common-mode law idle +0.5% / load~6 +16% / load~18 +30% (cite ratios). W1 ladder: norm pairs 2.19 ms/tok, gdn_proj_concat 1.70 (i1130), attn proj+decode 1.10, gdn_out_gemv 0.68 → filed as i1134/i1135/i1136 (all since closed, below). Commits `772c8bf`, `1a28511`, `800d7b4`, lease fold `c38d28f`.
+
+## 2026-10-28 — Issue 1133 CLOSED measured-null + removed: GDN conv+beta/decay+expand merge rung (row above, 2026-10-27)
+
+Rung `0eaebad`, record Bench 905 (`.benchmarks/905_i1133_conv_merge_ab.md`): G1 exact everywhere, G2 2/4 pairs, pooled ≈0% ± 0.5%; ships opt-in `RIIR_GDN_CONV_MERGE=1`, default OFF. Leftover Claimed line folded into a Lease-closed row (`537ca18`, the katgpt-rs Issue-943 fold law) before removal. Re-open: the 512-thread-block variant, only if the ladder budget is still short.
+
+## 2026-10-28 — Issue 1134 CLOSED G2-FAIL + removed: the norm-pair epilogue fold rung (input_norm + mid_norm)
+
+Donated kernel `ResidualAddRmsNormRotateCubeCL` (`cbb5bf1`; G1 to_bits 3/3 + REACH PASS) is an e2e LOSS in **7/7** A/B runs (riir-ai `bench_1137_normrot_e2e_ab`): −2.96/−2.23 … −8.90/−9.48%. Strip ceiling was real (+8.23%, `b02f379`, instrument `bench_1134_norm_pair_strip_ceiling`), but the fold serializes the hblock butterfly into one workgroup (5 chunk walks vs the incumbent's 20-way grid) — **a vertical fold must preserve the incumbent's grid parallelism**. Producer-epilogue fold structurally dead (no workgroup owns the 5120-vector reduction). Stays opt-in `RIIR_NORM_ROT_FUSED`. Close `4aed461` + `f44c740` + `ffb07bf`. Successor: the multi-cube variant shipped as Issue 1145 (Bench 907, PROMOTED, row above).
+
+## 2026-10-28 — Issue 1135 CLOSED ceiling-gate NULL + removed: the attention proj+decode launch-cluster rung
+
+Three verified-idle interleaved windows on amo (riir-ai `bench_1138_attn_proj_decode_strip_ceiling` + raw log `.benchmarks/1138_issue1135_attn_cluster_strip_ceiling_amo.raw.log`): proj 32 la/tok × 13.4-20.5 µs (pool 0.43-0.66 ms/tok); the only legal shape (648-F9 wq+wkv row-concat, −16 la/tok) recovers ≤0.22-0.33 ms/tok = **0.89-1.36% < the 1.5% bar** in every window; decode already per-head parallel (census over-counted it 2×), decode-into-proj dead by the 4-stage chain. No kernel written. Close `eafd97d`. Re-open: a token base below ~22 ms/tok flips the arithmetic.
+
+## 2026-10-28 — Issue 1136 CLOSED + removed: the gdn_out_gemv rung — ceiling real, G1 structurally dead; GDN chain launch budget CLOSED BY MEASUREMENT
+
+Ceiling (riir-ai `bench_1139_gdn_outproj_strip_ceiling`, raw log `.benchmarks/1139_issue1136_gdn_outproj_strip_ceiling_amo.raw.log`): +0.524/+0.592 ms/tok (+2.16/+2.46%) @ 48 la/tok. The named producer-epilogue fold dies at the no-owner wall (input spans zgate + permute-rotate across workgroups); any zgate replumb inherits the riir-ai Issue-1113 1-ULP fma landmine. Chain budget closed: 905 + i1131 + i1130 + i1134 + i1135 + this. Accounting find: the folded exit strips 240 la/tok at ~6 µs (staging pool ~0.95 ms/tok) — the quantified pool for the parked consumer-prologue lever. Close `afc1f43`.
+
+## 2026-10-28 — Issue 1137 CLOSED NULL + removed: the FFN decode-GEMV ALU-chain rung (and its hand-MSL lane i1138, Bench 1149)
+
+Fork mapping study (`0cc47fa`: `kernel_mul_mv_tq2_0_f32`, PR-26980 algebra) found its in-tree twin `gemv_ternary_fma_cubecl` (Plan 563 / Bench 847, `RIIR_GEMV_FMA` default-OFF); riir-ai `bench_1141_fma_aspect_probe` on M5 Ultra: FMA loses ~3× on every aspect (gate/up 156.8 vs 47.9 µs, down 178.3 vs 60.1, lm_head 1416.7 vs 475.0). Shipping f16scale rowtiled8 is the argmin of the CubeCL family (close `6277cd2`). Lever (a) adjudicated GO → lane i1138 (`194b952`), which closed MEASURED-NEGATIVE: riir-ai `.benchmarks/1149_i1138_field_e2e_ab_amo.md` (G1 PASS, G2 −8.21% mean; token-batched v2 NO-GO). `RIIR_GEMV_TQ2_FIELD` stays default-OFF. Re-open: a CubeCL-channel custom-op escape hatch (owner-gated).
+
 ## Lessons
 
 - Check the reference implementation, not a remembered standard, before filing a fixture-integrity finding (Issue 010).
