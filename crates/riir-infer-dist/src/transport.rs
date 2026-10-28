@@ -121,6 +121,17 @@ pub enum FrameKind {
     /// probe record plus the model cross-check fields. See
     /// [`crate::probe`].
     ProbeReply = 14,
+    /// The probe EXCHANGE's bandwidth bulk (T2.5 residue): a payload
+    /// bulk the head sends and the tail answers with
+    /// [`FrameKind::ProbeBwAck`] carrying the received byte length — the
+    /// tail does PURE I/O, zero compute, so the timing is wire time (the
+    /// v0 "a bw probe would conflate tail compute" concern does not
+    /// apply to the echo-ack shape). Plan-mode postures only.
+    ProbeBw = 15,
+    /// The bandwidth bulk's reply: `received_len u32 LE` — the tail
+    /// echoes what it received; the head refuses a length that does not
+    /// match what it sent (a truncating/lying peer).
+    ProbeBwAck = 16,
 }
 
 impl FrameKind {
@@ -141,6 +152,8 @@ impl FrameKind {
             12 => Ok(Self::ProbePong),
             13 => Ok(Self::ProbeRequest),
             14 => Ok(Self::ProbeReply),
+            15 => Ok(Self::ProbeBw),
+            16 => Ok(Self::ProbeBwAck),
             _ => Err(invalid(format!("unknown frame kind {v}"))),
         }
     }

@@ -94,7 +94,7 @@ fn exchange_over_loopback_plans_the_common_split() {
         own,
         n_layer,
         hidden,
-        bw_bps: 1e9,
+        bw_bps: Some(1e9),
         n_positions: 64,
         state_bytes_per_position_per_layer: 1,
         rtt_rounds: 4,
@@ -123,6 +123,58 @@ fn exchange_over_loopback_plans_the_common_split() {
         .min_by(|a, b| a.1.partial_cmp(&b.1).unwrap())
         .unwrap();
     assert_eq!(out.plan.k, want_k);
+}
+
+/// The MEASURED-bw posture over REAL loopback TCP: `bw_bps: None`
+/// pushes the echo-ack bulk through the authenticated transport (the
+/// same MAC-per-frame cost a serving frame pays), the tail's ack
+/// length verifies, and the resolved bandwidth lands in the plumbing
+/// band. The band is a SANITY floor+ceiling, never a perf claim: a
+/// healthy link measures MB/s-class even in a debug build (the bulk
+/// pays blake3 + allocs unoptimized — measured 48 MB/s debug-class,
+/// GB/s-class in release), and `payload/rtt` bounds the top.
+#[test]
+fn exchange_measures_bw_over_loopback() {
+    let (config, w, id) = load("riir_dist_probe_exchange_bw");
+    let n_layer = config.n_layer as u32;
+    let key = [24u8; 32];
+
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let addr = listener.local_addr().unwrap();
+    let (tc, tw) = (config.clone(), w.clone());
+    let tail = thread::spawn(move || {
+        let (sock, _) = listener.accept().unwrap();
+        let mut link = TcpTransport::new(sock, PeerKey(key), Direction::Upstream).unwrap();
+        let mut probe_one = make_probe_one(&tc, &tw, id);
+        serve_probe_session(&mut link, n_layer, tc.n_embd as u32, &mut probe_one)
+    });
+
+    let sock = TcpStream::connect(addr).unwrap();
+    let mut link = TcpTransport::new(sock, PeerKey(key), Direction::Downstream).unwrap();
+    let own = HostProbe {
+        host: "head".into(),
+        rows: vec![(1, 0.02)],
+        state_budget: None,
+    };
+    let ctx = ExchangeCtx {
+        own,
+        n_layer,
+        hidden: config.n_embd,
+        bw_bps: None,
+        n_positions: 64,
+        state_bytes_per_position_per_layer: 1,
+        rtt_rounds: 1,
+    };
+    let out = run_probe_exchange(&mut link, &[1], &ctx, &addr.to_string()).expect("exchange");
+    link.send_frame(riir_infer_dist::transport::FrameKind::Shutdown, &[])
+        .unwrap();
+    tail.join().unwrap().expect("tail session clean");
+
+    assert!(
+        out.bw_bps.is_finite() && out.bw_bps > 1e6 && out.bw_bps < 1e11,
+        "measured loopback bw inside the plumbing band, got {}",
+        out.bw_bps
+    );
 }
 
 #[test]
@@ -203,7 +255,7 @@ fn head_refuses_a_wrong_model_reply_over_the_wire() {
         own,
         n_layer,
         hidden,
-        bw_bps: 1e9,
+        bw_bps: Some(1e9),
         n_positions: 64,
         state_bytes_per_position_per_layer: 1,
         rtt_rounds: 1,

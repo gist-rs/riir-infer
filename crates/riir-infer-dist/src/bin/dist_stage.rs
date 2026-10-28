@@ -107,11 +107,14 @@ struct Args {
     /// memory shape); the probes load their own scoped candidates.
     answer_probe: bool,
     /// The link's payload bandwidth for the plan's hop term (bytes/s).
-    /// RTT is MEASURED live; bw is carried — the T0.2 TB5 row (8.6
-    /// GB/s) is the default, and at decode-hop sizes the bw term is
-    /// ~0.5% of the hop. `--link-bw` pins a measured number (e.g. the
-    /// tailnet posture's).
-    link_bw: f64,
+    /// `None` MEASURES it live (the echo-ack bulk — the tail does pure
+    /// I/O, so the timing is wire time); `--link-bw` carries the
+    /// operator's override for a link the measurement cannot cross.
+    /// At decode-hop sizes (~20 KB on a 27B hidden) the bw term is
+    /// ~0.5% of the TB5 hop — the measurement exists so a WRONG link
+    /// (WiFi, a different fabric) can never silently price a plan with
+    /// the TB5 default.
+    link_bw: Option<f64>,
     /// T5.1 v0: speculative fill with K drafts per verify round (head
     /// and tail — the tail's loop must speak the verify arm). 1-stream
     /// only; the CPU stage is the v0 posture (SpecStage = snapshot /
@@ -143,7 +146,7 @@ fn parse() -> Result<Args, String> {
         plan_report: None,
         plan_wire: None,
         answer_probe: false,
-        link_bw: 8.6e9,
+        link_bw: None,
         spec_k: None,
     };
     while let Some(flag) = it.next() {
@@ -209,7 +212,7 @@ fn parse() -> Result<Args, String> {
                 )
             }
             "--answer-probe" => a.answer_probe = true,
-            "--link-bw" => a.link_bw = val()?.parse().map_err(|e| format!("--link-bw: {e}"))?,
+            "--link-bw" => a.link_bw = Some(val()?.parse().map_err(|e| format!("--link-bw: {e}"))?),
             other => return Err(format!("unknown flag {other}")),
         }
     }
@@ -469,10 +472,14 @@ fn run() -> Result<(), String> {
         link.send_frame(riir_infer_dist::transport::FrameKind::Shutdown, &[])
             .map_err(|e| format!("shutdown: {e}"))?;
         println!(
-            "link: rtt {:.3} ms (median of {}), bw {} B/s (carried, not measured)",
+            "link: rtt {:.3} ms (median of {}), bw {} B/s ({})",
             out.rtt_s * 1e3,
             riir_infer_dist::probe::RTT_ROUNDS,
-            a.link_bw
+            out.bw_bps,
+            match a.link_bw {
+                Some(_) => "carried (--link-bw)",
+                None => "measured, echo-ack bulk",
+            }
         );
         println!(
             "tail record: {} rows · n_layer {n_layer} · hidden {} (cross-checked)",
@@ -510,7 +517,16 @@ fn run() -> Result<(), String> {
         let t0 = Instant::now();
         let mut probe_one = |k: u32| -> std::io::Result<f64> {
             probe_candidates(&a, identity, n_layer, &[k], true)
-                .map(|mut r| r.remove(0).1)
+                .map(|mut r| {
+                    let (k, spt) = r.remove(0);
+                    // The tail's own row on ITS stderr (the head prints
+                    // the combined predictions; the Bench-915 residue:
+                    // an operator watching the tail wants the raw lines
+                    // too). The answer posture is a boot tool — stderr
+                    // is its log, two lines per request cost nothing.
+                    eprintln!("[tail] probe split {k}: {spt:.6} s/tok");
+                    spt
+                })
                 .map_err(std::io::Error::other)
         };
         riir_infer_dist::probe::serve_probe_session(

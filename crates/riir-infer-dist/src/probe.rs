@@ -21,10 +21,11 @@
 //!
 //! The RTT is MEASURED here (median ping/pong over the same
 //! authenticated transport the serving session will use); the payload
-//! bandwidth stays an operator input — at decode-hop sizes (~20 KB on
-//! a 27B hidden) the bw term is ~0.5% of the TB5 hop, and a sized-frame
-//! bw probe would conflate tail compute with wire time (honest v0:
-//! carry it, disclose it, never guess it).
+//! bandwidth is MEASURED too (the T2.5 residue): the head pushes a bulk
+//! frame the tail answers with a length-echo ack — the tail does PURE
+//! I/O, zero compute, so `payload / (elapsed − rtt)` is wire time, and
+//! `--link-bw` stays as the operator's carried override for a link the
+//! measurement cannot cross (e.g. a peer that predates the frame).
 
 use std::io;
 
@@ -42,6 +43,17 @@ pub const MAX_PROBE_REQUESTS: usize = 8;
 
 /// Default ping/pong round trips for the RTT median.
 pub const RTT_ROUNDS: usize = 8;
+
+/// Bulk-frame round trips behind the bw median — 3 is enough on a quiet
+/// link and keeps the probe bounded on a slow one (4 MiB at 10 MB/s is
+/// ~1.2 s total).
+pub const BW_ROUNDS: usize = 3;
+
+/// The bw probe's bulk payload size — large enough that the wire (not
+/// the frame overhead) dominates at TB5-class bandwidth (~0.5 ms of
+/// payload against a 0.17 ms RTT), small enough to keep the whole
+/// exchange sub-second on any link that could plausibly serve.
+pub const BW_PAYLOAD_BYTES: usize = 4 << 20;
 
 /// The probe request's wire form (see the module doc).
 pub fn encode_request(candidates: &[u32], out: &mut Vec<u8>) {
@@ -194,6 +206,61 @@ pub fn measure_rtt(link: &mut dyn Transport, rounds: usize) -> io::Result<f64> {
     Ok(trips[rounds / 2])
 }
 
+/// Median payload bandwidth over `rounds` bulk/ack round trips on
+/// `link`, timed against `rtt_s` (the SAME link's measured RTT — the
+/// bulk elapsed time is `payload/bw + propagation + stack`, and the
+/// ping/pong median prices the non-payload part of that). The tail
+/// echoes the received length; a length that does not match the bulk is
+/// a lying/truncating peer and refuses. If `elapsed <= rtt` (a
+/// loopback-class link where the subtraction under-flows), the fallback
+/// `payload / elapsed` UNDER-estimates the bandwidth — the conservative
+/// direction for the plan (it can only inflate the hop term, never
+/// shrink it).
+pub fn measure_bw(
+    link: &mut dyn Transport,
+    rtt_s: f64,
+    payload_bytes: usize,
+    rounds: usize,
+) -> io::Result<f64> {
+    assert!(payload_bytes > 0, "bw probe payload must be non-empty");
+    let rounds = rounds.max(1);
+    let bulk = vec![0u8; payload_bytes];
+    let mut rates = Vec::with_capacity(rounds);
+    let mut ack = Vec::new();
+    for _ in 0..rounds {
+        let t0 = std::time::Instant::now();
+        link.send_frame(crate::transport::FrameKind::ProbeBw, &bulk)?;
+        let kind = link.recv_frame_into(&mut ack)?;
+        if kind != crate::transport::FrameKind::ProbeBwAck {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!("probe bw: expected ProbeBwAck, got {kind:?}"),
+            ));
+        }
+        if ack.len() != 4 {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!("probe bw ack truncated: {} bytes", ack.len()),
+            ));
+        }
+        let got = u32::from_le_bytes(ack[..4].try_into().unwrap()) as usize;
+        if got != payload_bytes {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!("probe bw ack: tail received {got} bytes, head sent {payload_bytes}"),
+            ));
+        }
+        let elapsed = t0.elapsed().as_secs_f64();
+        // The denominator is floored at the measured RTT: a loopback-
+        // class link where the subtraction would under-flow reads a
+        // conservative (under-estimated) bandwidth, never an inflated
+        // one — the plan's hop term can only grow, never shrink.
+        rates.push(payload_bytes as f64 / elapsed.max(rtt_s));
+    }
+    rates.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+    Ok(rates[rounds / 2])
+}
+
 /// Tail side of the exchange: answer pings and probe requests until
 /// `Shutdown`. `probe_one(k)` times candidate `k` on THIS host (the
 /// scoped-load + timed-decode loop lives with the caller — it is the
@@ -215,6 +282,12 @@ pub fn serve_probe_session(
         match kind {
             crate::transport::FrameKind::ProbePing => {
                 link.send_frame(crate::transport::FrameKind::ProbePong, &[])?;
+            }
+            crate::transport::FrameKind::ProbeBw => {
+                // Pure I/O: echo the received byte length — no compute,
+                // so the head's timing is wire time (the module doc).
+                let len = buf.len() as u32;
+                link.send_frame(crate::transport::FrameKind::ProbeBwAck, &len.to_le_bytes())?;
             }
             crate::transport::FrameKind::ProbeRequest => {
                 if answered >= MAX_PROBE_REQUESTS {
@@ -265,6 +338,10 @@ pub struct ExchangeOutcome {
     pub plan: SplitPlan,
     /// The RTT measured on THIS connection (the hop's floor).
     pub rtt_s: f64,
+    /// The payload bandwidth the plan priced: MEASURED on this
+    /// connection when [`ExchangeCtx::bw_bps`] was `None`, otherwise the
+    /// carried override verbatim (the boot line discloses which).
+    pub bw_bps: f64,
     /// The tail-side record as adopted (host label carries the peer).
     pub tail: HostProbe,
 }
@@ -281,10 +358,12 @@ pub struct ExchangeCtx {
     pub own: HostProbe,
     pub n_layer: u32,
     pub hidden: usize,
-    /// Payload bandwidth (bytes/s) — carried, not measured (the module
-    /// doc: a sized-frame bw probe would conflate tail compute with
-    /// wire time).
-    pub bw_bps: f64,
+    /// Payload bandwidth (bytes/s): `None` MEASURES it on this
+    /// connection (the echo-ack bulk — the tail does pure I/O, the
+    /// module doc); `Some(v)` carries the operator's value verbatim
+    /// (`--link-bw`, the override for a link the measurement cannot
+    /// cross).
+    pub bw_bps: Option<f64>,
     /// Session position capacity — the memory axis's `n_positions`.
     pub n_positions: usize,
     /// Per-position per-layer stage-state bytes (the memory axis).
@@ -293,9 +372,9 @@ pub struct ExchangeCtx {
     pub rtt_rounds: usize,
 }
 
-/// Head side of the exchange: measure the RTT, ask for the tail's
-/// record, compose the plan from the two live records + the measured
-/// link.
+/// Head side of the exchange: measure the RTT + the payload bw, ask
+/// for the tail's record, compose the plan from the two live records +
+/// the measured link (bw only carried when the operator overrode it).
 pub fn run_probe_exchange(
     link: &mut dyn Transport,
     candidates: &[u32],
@@ -315,20 +394,27 @@ pub fn run_probe_exchange(
     }
     let reply = decode_reply(&buf)?;
     let tail = tail_record(reply, ctx.n_layer, ctx.hidden, peer)?;
+    let bw_bps = match ctx.bw_bps {
+        Some(carried) => carried,
+        None => measure_bw(link, rtt_s, BW_PAYLOAD_BYTES, BW_ROUNDS)
+            .map_err(|e| format!("probe bw: {e}"))?,
+    };
     let plan = plan_split(
         &ctx.own,
         &tail,
-        LinkCost {
-            rtt_s,
-            bw_bps: ctx.bw_bps,
-        },
+        LinkCost { rtt_s, bw_bps },
         ctx.hidden,
         ctx.n_layer,
         ctx.n_positions,
         ctx.state_bytes_per_position_per_layer,
     )
     .map_err(|e| format!("plan: {e:?}"))?;
-    Ok(ExchangeOutcome { plan, rtt_s, tail })
+    Ok(ExchangeOutcome {
+        plan,
+        rtt_s,
+        bw_bps,
+        tail,
+    })
 }
 
 #[cfg(test)]
@@ -466,7 +552,7 @@ mod tests {
             own,
             n_layer: 4,
             hidden: 64,
-            bw_bps: 1e9,
+            bw_bps: Some(1e9),
             n_positions: 64,
             state_bytes_per_position_per_layer: 1,
             rtt_rounds: 2,
@@ -483,6 +569,7 @@ mod tests {
         let tail_rows = times_rx.recv().unwrap();
         assert_eq!(tail_rows.len(), 2);
         assert!(out.rtt_s.is_finite() && out.rtt_s >= 0.0);
+        assert_eq!(out.bw_bps, 1e9, "carried bw passes through verbatim");
         // The plan's formula, exactly, over the two live records.
         for (k, s) in &out.plan.table {
             let h = ctx.own.get(*k).unwrap();
@@ -492,6 +579,118 @@ mod tests {
         }
         // k=1: max(0.02, 0.01) = 0.02; k=3: max(0.05, 0.03) = 0.05 → k=1 wins.
         assert_eq!(out.plan.k, 1);
+    }
+
+    /// The MEASURED-bw posture end to end: `bw_bps: None` makes the
+    /// exchange push the echo-ack bulk through the same session (the
+    /// tail's ProbeBw arm does pure I/O), the ack length verifies, and
+    /// the resolved bandwidth is finite and positive.
+    #[test]
+    fn exchange_measures_bw_in_memory() {
+        use std::sync::mpsc;
+
+        struct Pipe {
+            rx: std::sync::mpsc::Receiver<(FrameKind, Vec<u8>)>,
+            tx: std::sync::mpsc::Sender<(FrameKind, Vec<u8>)>,
+        }
+        impl Transport for Pipe {
+            fn send_frame(&mut self, kind: FrameKind, payload: &[u8]) -> io::Result<()> {
+                self.tx
+                    .send((kind, payload.to_vec()))
+                    .map_err(|_| io::Error::new(io::ErrorKind::BrokenPipe, "peer gone"))
+            }
+            fn recv_frame_into(&mut self, out: &mut Vec<u8>) -> io::Result<FrameKind> {
+                let (kind, body) = self
+                    .rx
+                    .recv()
+                    .map_err(|_| io::Error::new(io::ErrorKind::UnexpectedEof, "peer gone"))?;
+                out.clear();
+                out.extend_from_slice(&body);
+                Ok(kind)
+            }
+        }
+        let (a_tx, b_rx) = mpsc::channel::<(FrameKind, Vec<u8>)>();
+        let (b_tx, a_rx) = mpsc::channel::<(FrameKind, Vec<u8>)>();
+        let mut head_link = Pipe { rx: a_rx, tx: a_tx };
+        let mut tail_link = Pipe { rx: b_rx, tx: b_tx };
+
+        let tail = std::thread::spawn(move || {
+            let mut probe_one = |_k: u32| -> io::Result<f64> { Ok(0.01) };
+            serve_probe_session(&mut tail_link, 4, 64, &mut probe_one)
+        });
+
+        let own = HostProbe {
+            host: "head".into(),
+            rows: vec![(1, 0.02)],
+            state_budget: None,
+        };
+        let ctx = ExchangeCtx {
+            own,
+            n_layer: 4,
+            hidden: 64,
+            bw_bps: None,
+            n_positions: 64,
+            state_bytes_per_position_per_layer: 1,
+            rtt_rounds: 1,
+        };
+        let out = run_probe_exchange(&mut head_link, &[1], &ctx, "mem").expect("exchange");
+        head_link
+            .send_frame(FrameKind::Shutdown, &[])
+            .expect("shutdown");
+        tail.join().unwrap().expect("tail session clean");
+
+        assert!(
+            out.bw_bps.is_finite() && out.bw_bps > 0.0,
+            "measured bw finite+positive, got {}",
+            out.bw_bps
+        );
+        // The plan priced the MEASURED bandwidth, not a carried value.
+        let h = 0.02_f64;
+        let t = 0.01_f64;
+        let hop = out.rtt_s + (4usize * 64 + 4) as f64 / out.bw_bps;
+        assert!((out.plan.table[0].1 - (h.max(t) + hop)).abs() < 1e-12);
+    }
+
+    /// The bw probe refuses a lying/truncating/malformed ack — the echo
+    /// length is a check, never decoration.
+    #[test]
+    fn measure_bw_refuses_bad_acks() {
+        struct Scripted(std::collections::VecDeque<(FrameKind, Vec<u8>)>);
+        impl Transport for Scripted {
+            fn send_frame(&mut self, _: FrameKind, _: &[u8]) -> io::Result<()> {
+                Ok(())
+            }
+            fn recv_frame_into(&mut self, out: &mut Vec<u8>) -> io::Result<FrameKind> {
+                match self.0.pop_front() {
+                    Some((k, b)) => {
+                        out.clear();
+                        out.extend_from_slice(&b);
+                        Ok(k)
+                    }
+                    None => Err(io::Error::new(io::ErrorKind::UnexpectedEof, "script done")),
+                }
+            }
+        }
+        let mut link = Scripted(std::collections::VecDeque::from(vec![(
+            FrameKind::ProbeBwAck,
+            (99u32).to_le_bytes().to_vec(),
+        )]));
+        let e = measure_bw(&mut link, 0.001, 1024, 1).unwrap_err();
+        assert!(e.to_string().contains("received 99"), "{e}");
+
+        let mut link = Scripted(std::collections::VecDeque::from(vec![(
+            FrameKind::ProbePong,
+            Vec::new(),
+        )]));
+        let e = measure_bw(&mut link, 0.001, 1024, 1).unwrap_err();
+        assert!(e.to_string().contains("expected ProbeBwAck"), "{e}");
+
+        let mut link = Scripted(std::collections::VecDeque::from(vec![(
+            FrameKind::ProbeBwAck,
+            vec![1, 2],
+        )]));
+        let e = measure_bw(&mut link, 0.001, 1024, 1).unwrap_err();
+        assert!(e.to_string().contains("truncated"), "{e}");
     }
 
     #[test]
