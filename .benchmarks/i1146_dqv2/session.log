@@ -1,0 +1,33 @@
+[18:52:20] === i1146 width re-curve start (ts 20261028T185220Z) ===
+Mac17,15
+30
+103079215104
+18:52  up 1 day,  1:08, 2 users, load averages: 0.66 1.06 1.23
+Now drawing from 'AC Power'
+[18:52:50] a_g1_w512 rc=0 :: prefill 1024 tok in 3.439s
+[18:53:08] b_g1_w512 rc=0 :: prefill 1024 tok in 3.098s
+[18:53:08] g1 a w=512 generated: [261, 248046, 198, 248045, 198, 2, 220, 16, 13, 220, 96304, 99172, 271, 95772, 8253, 220]
+[18:53:08] g1 b w=512 generated: [261, 248046, 198, 248045, 198, 2, 220, 16, 13, 220, 96304, 99172, 271, 95772, 8253, 220]
+[18:53:08] G1 CROSS-WIDTH PASS
+[18:53:24] a_pp512_w512_warm rc=0 :: prefill 512 tok in 1.740s
+[18:53:40] b_pp512_w512_warm rc=0 :: prefill 512 tok in 1.581s
+[18:53:56] a_pp512_w512_r1 rc=0 :: prefill 512 tok in 1.747s
+[18:54:12] b_pp512_w512_r1 rc=0 :: prefill 512 tok in 1.635s
+[18:54:28] a_pp512_w512_r2 rc=0 :: prefill 512 tok in 1.803s
+[18:54:44] b_pp512_w512_r2 rc=0 :: prefill 512 tok in 1.624s
+[18:55:13] a_pp4096_w512_warm rc=0 :: prefill 4096 tok in 15.204s
+[18:55:42] b_pp4096_w512_warm rc=0 :: prefill 4096 tok in 13.919s
+[18:56:11] a_pp4096_w512_r1 rc=0 :: prefill 4096 tok in 15.250s
+[18:56:39] b_pp4096_w512_r1 rc=0 :: prefill 4096 tok in 13.957s
+[18:57:09] a_pp4096_w512_r2 rc=0 :: prefill 4096 tok in 15.238s
+[18:57:37] b_pp4096_w512_r2 rc=0 :: prefill 4096 tok in 13.960s
+[18:57:37] === summary (timed cells) ===
+[18:57:37] a_pp512_w512_r1 1.747s 293.1 tok/s
+[18:57:37] a_pp512_w512_r2 1.803s 284.0 tok/s
+[18:57:37] b_pp512_w512_r1 1.635s 313.1 tok/s
+[18:57:37] b_pp512_w512_r2 1.624s 315.3 tok/s
+[18:57:37] a_pp4096_w512_r1 15.250s 268.6 tok/s
+[18:57:37] a_pp4096_w512_r2 15.238s 268.8 tok/s
+[18:57:37] b_pp4096_w512_r1 13.957s 293.5 tok/s
+[18:57:37] b_pp4096_w512_r2 13.960s 293.4 tok/s
+[18:57:37] === COMPLETE: /tmp/i1146q/dqv2 ===

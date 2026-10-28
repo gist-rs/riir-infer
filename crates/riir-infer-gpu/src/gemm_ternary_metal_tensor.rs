@@ -285,14 +285,16 @@ pub fn production_relaxed_precision() -> bool {
 static PROD_DEQUANT_V2_ENV: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
 
 /// Issue 1146 rung 2b (H4): whether the next context compiles the hoisted-load
-/// dequant (`SWEEP_DEQUANT_V2`). `RIIR_METAL_TENSOR_DEQUANT_V2=1` arms it
-/// (parsed once, announced on stderr); OFF = the incumbent per-element body.
+/// dequant (`SWEEP_DEQUANT_V2`). PROMOTED default-ON (Bench 921: +9% e2e dist
+/// prefill at pp512/pp4096, G1 max_abs 0 cold-pool at P=512/1024 + identical
+/// dist token streams); `RIIR_METAL_TENSOR_DEQUANT_V2=0` demotes to the
+/// incumbent per-element body (parsed once, announced on stderr).
 /// Bit-identical staged tile by construction — G1 is exactness, not tolerance.
 pub fn production_dequant_v2() -> bool {
     *PROD_DEQUANT_V2_ENV.get_or_init(|| {
-        let on = std::env::var("RIIR_METAL_TENSOR_DEQUANT_V2").as_deref() == Ok("1");
-        if on {
-            eprintln!("[Issue 1146] tensor GEMM dequant = hoisted-load v2");
+        let on = std::env::var("RIIR_METAL_TENSOR_DEQUANT_V2").as_deref() != Ok("0");
+        if !on {
+            eprintln!("[Issue 1146] tensor GEMM dequant DEMOTED to the per-element body");
         }
         on
     })
@@ -306,9 +308,10 @@ pub fn compose_msl_source(config: MetalTileConfig, body: &str) -> String {
         true => "#define SWEEP_RELAXED true\n",
         false => "",
     };
+    // Explicit on BOTH branches, so the .metal fallback can never disagree.
     let dequant = match production_dequant_v2() {
         true => "#define SWEEP_DEQUANT_V2 1\n",
-        false => "",
+        false => "#define SWEEP_DEQUANT_V2 0\n",
     };
     format!("{}{relaxed}{dequant}{body}", config.defines())
 }

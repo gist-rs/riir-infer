@@ -1,0 +1,13 @@
+[head] loaded layers [0, 32) of 64, n_embd 5120, vocab 248320 in 5.0s (backend gpu, ctx 4352)
+CubeCL runtime initialized: wgpu<msl>
+[Issue 864] attention KV working set = 272 MiB (block_size 4352 × kvd 1024 × K+V × 8 attention layers) — above the 256 MiB warn line. If the workload never drives this many positions, clamp `config.block_size` to the real sequence bound BEFORE construction (the riir-train driver pattern); the unbounded variant measured a ~50 s first-touch burst at a 262,144-token context (riir-train Bench 573). Steady-state throughput is unaffected.
+[Issue 727] metal-rs GEMM cache skipped (PREFILL_USE_METAL_TENSOR off at construction; set it BEFORE new() to A/B this path)
+[Issue 657] wgpu MSL passthrough GEMM initialized (zero-copy)
+[Issue 663 T5] zero-copy raw-Metal GEMM initialized (device=0x101ceec10, queue=0x101cf82c0)
+[Issue 663 T5] zero-copy raw-Metal weight cache complete.
+[head] sock-buf snd 0 rcv 0
+prompt: 4096 tokens × 1 stream(s)
+stream 0: decode 0.00 tok/s (0 steps) prefill 15.204s
+generated: [248046]
+text: "<|im_end|>"
+prefill 4096 tok in 15.204s · decode 0.00 tok/s (0 steps)

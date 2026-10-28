@@ -1,0 +1,13 @@
+[head] loaded layers [0, 32) of 64, n_embd 5120, vocab 248320 in 4.9s (backend gpu, ctx 1280)
+CubeCL runtime initialized: wgpu<msl>
+[Issue 727] metal-rs GEMM cache skipped (PREFILL_USE_METAL_TENSOR off at construction; set it BEFORE new() to A/B this path)
+[Issue 657] wgpu MSL passthrough GEMM initialized (zero-copy)
+[Issue 663 T5] zero-copy raw-Metal GEMM initialized (device=0x103bc9660, queue=0x103bd3420)
+[Issue 663 T5] zero-copy raw-Metal weight cache complete.
+[head] sock-buf snd 0 rcv 0
+[norm_rot_multi] REACH: the multi-cube fused norm+rotate staging dispatched
+prompt: 1024 tokens × 1 stream(s)
+stream 0: decode 26.60 tok/s (15 steps) prefill 3.439s
+generated: [261, 248046, 198, 248045, 198, 2, 220, 16, 13, 220, 96304, 99172, 271, 95772, 8253, 220]
+text: "er<|im_end|>\n<|im_start|>\n# 1. 问题描述\n\n在 Android "
+prefill 1024 tok in 3.439s · decode 26.60 tok/s (15 steps)

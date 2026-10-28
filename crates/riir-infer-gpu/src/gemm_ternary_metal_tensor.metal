@@ -62,13 +62,13 @@ using namespace metal;
 #ifndef SWEEP_RELAXED
 #define SWEEP_RELAXED false
 #endif
-// Issue 1146 rung 2b (H4): the hoisted-load dequant. 0 = the incumbent
-// per-element body (byte-untouched); 1 = one pos/neg word + one scale load per
+// Issue 1146 rung 2b (H4): the hoisted-load dequant — PROMOTED default 1
+// (Bench 921). 0 = the incumbent per-element body; 1 = one pos/neg word + one scale load per
 // 16-element work item, bounds check hoisted to a full-tile fast path, half4
 // stores — the SAME (pos - neg) * scale -> half arithmetic per element, so the
-// staged A tile is bit-identical. `RIIR_METAL_TENSOR_DEQUANT_V2=1` arms it.
+// staged A tile is bit-identical. `RIIR_METAL_TENSOR_DEQUANT_V2=0` demotes.
 #ifndef SWEEP_DEQUANT_V2
-#define SWEEP_DEQUANT_V2 0
+#define SWEEP_DEQUANT_V2 1
 #endif
 constant constexpr int SZ_SIMD     = SWEEP_SZ_SIMD;
 constant constexpr int NK_CHUNK    = SWEEP_NK_CHUNK;           // N_MM_NK
