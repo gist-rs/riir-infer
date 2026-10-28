@@ -135,3 +135,83 @@ fn gather_rows_basic() {
         }
     }
 }
+
+// ---------------------------------------------------------------------------
+// A/B timing — the Issue-1150 prefill engine pick. Naive-v1 vs the in-crate
+// tiled matmuls at the production ffn shape. `--ignored` (needs the feature).
+// ---------------------------------------------------------------------------
+#[test]
+#[ignore]
+fn gemm_ab_timing_production_shapes() {
+    use std::time::Instant;
+
+    let ctx = CubeCLContext::new().expect("gpu context");
+    let client = ctx.client();
+    let (m, n, p) = (17_408usize, 5_120usize, 512usize);
+
+    let mut seed: u64 = 0xABCD;
+    let mut lcg = move || {
+        seed = seed
+            .wrapping_mul(6_364_136_223_846_793_005)
+            .wrapping_add(1_442_695_040_888_940_7);
+        ((seed >> 33) as f32 / (u64::MAX >> 33) as f32) * 2.0 - 1.0
+    };
+    let x: Vec<f32> = (0..p * n).map(|_| lcg()).collect();
+    let x_h = client.create_from_slice(bytemuck::cast_slice(&x));
+    let out_h = client.create_from_slice(&vec![0u8; p * m * 4]);
+
+    // 1. my q4k tile kernel (weights quantized on host)
+    let w: Vec<f32> = (0..m * n).map(|_| lcg() * 0.05).collect();
+    let blocks = quantize_matrix(&w, m, n);
+    let q4 = Q4KHandle::from_blocks(&client, &blocks, m, n);
+    unsafe {
+        GemmQ4KTileCubeCL::launch::<riir_infer_gpu::cubecl_runtime::ActiveRuntime>(
+            &client, &q4, x_h.clone(), out_h.clone(), p,
+        );
+    }
+    let t0 = Instant::now();
+    for _ in 0..3 {
+        unsafe {
+            GemmQ4KTileCubeCL::launch::<riir_infer_gpu::cubecl_runtime::ActiveRuntime>(
+                &client, &q4, x_h.clone(), out_h.clone(), p,
+            );
+        }
+    }
+    let dt = t0.elapsed().as_secs_f64() / 3.0;
+    println!(
+        "[ab] q4k-tile: {dt:.3}s  -> {:.0} tok/s-equivalent (single tensor)",
+        p as f64 / dt
+    );
+
+    // 2. MatmulCubeCL f32
+    let w_h = client.create_from_slice(bytemuck::cast_slice(&w));
+    riir_infer_gpu::matmul_cubecl::MatmulCubeCL::launch::<riir_infer_gpu::cubecl_runtime::ActiveRuntime>(
+        &client, w_h.clone(), x_h.clone(), out_h.clone(), m, n, p,
+    );
+    let t0 = Instant::now();
+    for _ in 0..3 {
+        riir_infer_gpu::matmul_cubecl::MatmulCubeCL::launch::<riir_infer_gpu::cubecl_runtime::ActiveRuntime>(
+            &client, w_h.clone(), x_h.clone(), out_h.clone(), m, n, p,
+        );
+    }
+    let dt2 = t0.elapsed().as_secs_f64() / 3.0;
+    println!("[ab] matmul-f32: {dt2:.3}s -> {:.0} tok/s-equiv", p as f64 / dt2);
+
+    // 3. MatmulF16bCubeCL (f16 weights)
+    #[cfg(feature = "edlm_gpu")]
+    {
+        let w_f16: Vec<half::f16> = w.iter().map(|&v| half::f16::from_f32(v)).collect();
+        let w16_h = client.create_from_slice(bytemuck::cast_slice(&w_f16));
+        riir_infer_gpu::matmul_f16b_cubecl::MatmulF16bCubeCL::launch::<riir_infer_gpu::cubecl_runtime::ActiveRuntime>(
+            &client, x_h.clone(), w16_h.clone(), out_h.clone(), p, n, m,
+        );
+        let t0 = Instant::now();
+        for _ in 0..3 {
+            riir_infer_gpu::matmul_f16b_cubecl::MatmulF16bCubeCL::launch::<riir_infer_gpu::cubecl_runtime::ActiveRuntime>(
+                &client, x_h.clone(), w16_h.clone(), out_h.clone(), p, n, m,
+            );
+        }
+        let dt3 = t0.elapsed().as_secs_f64() / 3.0;
+        println!("[ab] matmul-f16b: {dt3:.3}s -> {:.0} tok/s-equiv", p as f64 / dt3);
+    }
+}
