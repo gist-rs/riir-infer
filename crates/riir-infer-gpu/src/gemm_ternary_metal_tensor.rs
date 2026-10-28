@@ -243,6 +243,56 @@ fn parse_prod_geom_env() -> Option<MetalTileConfig> {
     }
 }
 
+// ---------------------------------------------------------------------------
+// Issue 1146 rung 2b — the relaxed-precision selector
+// ---------------------------------------------------------------------------
+// The fork's tensor `kernel_mul_mm` compiles `matmul2d` with
+// relaxed_precision = true; ours pinned false. A process-wide selector (like
+// the geometry one) so an e2e cell A/Bs it from ONE binary; contexts compile
+// it at construction.
+
+/// 0 = unset (fall through to the env arm), 1 = off, 2 = on.
+static PROD_RELAXED: std::sync::atomic::AtomicU8 = std::sync::atomic::AtomicU8::new(0);
+static PROD_RELAXED_ENV: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+
+/// Pin relaxed precision for every context constructed AFTER this call
+/// (wins over `RIIR_METAL_TENSOR_RELAXED`).
+pub fn set_metal_tensor_relaxed_precision(on: bool) {
+    let v = match on {
+        true => 2,
+        false => 1,
+    };
+    PROD_RELAXED.store(v, std::sync::atomic::Ordering::Relaxed);
+}
+
+/// Whether the next context compiles `matmul2d` with relaxed precision: the
+/// explicit setter if pinned, else `RIIR_METAL_TENSOR_RELAXED=1` (parsed
+/// once, announced on stderr), else OFF (the incumbent bit-exact posture).
+pub fn production_relaxed_precision() -> bool {
+    match PROD_RELAXED.load(std::sync::atomic::Ordering::Relaxed) {
+        1 => false,
+        2 => true,
+        _ => *PROD_RELAXED_ENV.get_or_init(|| {
+            let on = std::env::var("RIIR_METAL_TENSOR_RELAXED").as_deref() == Ok("1");
+            if on {
+                eprintln!("[Issue 1146] matmul2d relaxed_precision = true");
+            }
+            on
+        }),
+    }
+}
+
+/// The one composition of the tensor-GEMM MSL: geometry defines + the
+/// relaxed-precision define + the kernel body. Every compile site goes
+/// through here so a posture axis cannot reach one context and not another.
+pub fn compose_msl_source(config: MetalTileConfig, body: &str) -> String {
+    let relaxed = match production_relaxed_precision() {
+        true => "#define SWEEP_RELAXED true\n",
+        false => "",
+    };
+    format!("{}{relaxed}{body}", config.defines())
+}
+
 /// The geometry the next integration context compiles with: the explicit
 /// setter if pinned, else `RIIR_METAL_TENSOR_GEOM` (parsed once, now the
 /// DEMOTE-ONLY arm), else the **PROMOTED ktile64 default**
@@ -315,7 +365,7 @@ impl MetalTensorGemm {
         // Check for metal::tensor support (MSL 3.1+, macOS 14+)
         // The compile will fail if the header isn't available.
         let options = CompileOptions::new();
-        let source = format!("{}{}", config.defines(), MSL_SOURCE);
+        let source = compose_msl_source(config, MSL_SOURCE);
         let library = device
             .new_library_with_source(source.as_str(), &options)
             .map_err(|e| format!("MSL compilation failed ({config:?}): {e}"))?;

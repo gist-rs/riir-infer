@@ -18,7 +18,9 @@
 #      I1146W_BIN_B (optional): a second binary — every cell then runs A and
 #      B back to back (interleaved A/B, cells named a_/b_), and G1 compares
 #      the generated ids across BOTH binaries too. I1146W_REPS (default 1)
-#      repeats the timed pass.
+#      repeats the timed pass. I1146W_ENV_A / I1146W_ENV_B (optional,
+#      space-separated KEY=VAL): per-arm env for BOTH stages — an env-armed
+#      A/B from ONE binary (set I1146W_BIN_B to the same path).
 set -u
 
 TS=$(date +%Y%m%dT%H%M%SZ)
@@ -38,6 +40,7 @@ LENS="${I1146W_LENS-512 4096 32768}"
 for b in $BIN_A $BIN_B; do [ -e "$b" ] || { say "REFUSED: missing $b"; exit 2; }; done
 ARMS="a"; [ -n "$BIN_B" ] && ARMS="a b"
 bin_of() { case "$1" in a) echo "$BIN_A" ;; b) echo "$BIN_B" ;; esac; }
+env_of() { case "$1" in a) echo "${I1146W_ENV_A:-}" ;; b) echo "${I1146W_ENV_B:-}" ;; esac; }
 [ -e "$MODEL" ] || { say "REFUSED: missing $MODEL"; exit 2; }
 
 say "=== i1146 width re-curve start (ts $TS) ==="
@@ -47,7 +50,7 @@ if [ -n "$QUIET" ] && [ "${I1146W_FORCE:-0}" != "1" ]; then
   say "REFUSED: GPU not quiet:"; echo "$QUIET" | tee -a "$LOG"; exit 2
 fi
 {
-  for x in $ARMS; do b=$(bin_of $x); echo "bin_$x: $b"; /usr/bin/shasum -a 256 "$b" | awk -v x="$x" '{print "bin_" x "_sha256:", $1}'; done
+  for x in $ARMS; do b=$(bin_of $x); echo "bin_$x: $b"; echo "env_$x: $(env_of $x)"; /usr/bin/shasum -a 256 "$b" | awk -v x="$x" '{print "bin_" x "_sha256:", $1}'; done
   echo "model: $MODEL"; /usr/bin/shasum -a 256 "$MODEL" | awk '{print "model_sha256:", $1}'
   echo "widths: $WIDTHS"; echo "lens: $LENS"
 } > "$OUT/provenance.txt"
@@ -56,9 +59,10 @@ PORT=17643
 export RIIR_DIST_KEY=$(od -An -tx1 -N32 /dev/urandom | tr -d ' \n')
 
 run_cell() { # $1 arm $2 name $3 ids $4 max-new $5 ctx $6+ extra
-  local BIN; BIN=$(bin_of "$1"); shift
+  local BIN ARM_ENV; BIN=$(bin_of "$1"); ARM_ENV=$(env_of "$1"); shift
   local name="$1" ids="$2" n="$3" ctx="$4"; shift 4
-  "$BIN" --role tail --model "$MODEL" --split 32 --backend gpu \
+  # shellcheck disable=SC2086 # ARM_ENV is a word-split KEY=VAL list
+  env $ARM_ENV "$BIN" --role tail --model "$MODEL" --split 32 --backend gpu \
     --listen "127.0.0.1:$PORT" --ctx "$ctx" > "$CELLS/${name}_tail.log" 2>&1 &
   local tail_pid=$! i=0
   while [ $i -lt 240 ]; do
@@ -66,7 +70,8 @@ run_cell() { # $1 arm $2 name $3 ids $4 max-new $5 ctx $6+ extra
     grep -q "listening on" "$CELLS/${name}_tail.log" 2>/dev/null && break
     i=$((i+1)); sleep 1
   done
-  "$BIN" --role head --model "$MODEL" --split 32 --backend gpu \
+  # shellcheck disable=SC2086
+  env $ARM_ENV "$BIN" --role head --model "$MODEL" --split 32 --backend gpu \
     --connect "127.0.0.1:$PORT" --prompt "$ids" --max-new "$n" --no-eos --ctx "$ctx" "$@" \
     > "$CELLS/${name}_head.log" 2>&1
   local rc=$?

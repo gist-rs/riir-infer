@@ -210,7 +210,7 @@ impl MetalTensorZeroCopyGemm {
         // bare compile rides the kernel's built-in K32 defaults).
         let device_ref: &DeviceRef = unsafe { DeviceRef::from_ptr(device_ptr) };
         let options = CompileOptions::new();
-        let source = format!("{}{}", config.defines(), MSL_SOURCE);
+        let source = crate::gemm_ternary_metal_tensor::compose_msl_source(config, MSL_SOURCE);
         let library = device_ref
             .new_library_with_source(source.as_str(), &options)
             .map_err(|e| format!("MSL compilation failed ({config:?}): {e}"))?;
@@ -531,10 +531,7 @@ impl MetalTensorZeroCopyGemm {
         cmd_buffer.commit();
         // Retain for wait_last (the one caller class that needs an explicit
         // wait — see the comment above: non-queued reads of the output).
-        *self
-            .last_cmd_buffer
-            .lock()
-            .expect("last_cmd_buffer lock") = Some(cmd_buffer.to_owned());
+        *self.last_cmd_buffer.lock().expect("last_cmd_buffer lock") = Some(cmd_buffer.to_owned());
 
         // NOTE: we do NOT call `cmd_buffer.wait_until_completed()`. The command
         // buffer runs on the shared Metal queue — CubeCL's subsequent

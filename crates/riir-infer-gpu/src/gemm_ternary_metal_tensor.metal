@@ -55,6 +55,13 @@ using namespace metal;
 #ifndef SWEEP_NSG
 #define SWEEP_NSG 4
 #endif
+// Issue 1146 rung 2b: the matmul2d relaxed_precision flag. The fork's
+// tensor kernel_mul_mm compiles it TRUE; ours was pinned false for bit-level
+// G1. Default false keeps the incumbent byte-path; `RIIR_METAL_TENSOR_RELAXED=1`
+// (see `production_relaxed_precision`) prepends `#define SWEEP_RELAXED true`.
+#ifndef SWEEP_RELAXED
+#define SWEEP_RELAXED false
+#endif
 constant constexpr int SZ_SIMD     = SWEEP_SZ_SIMD;
 constant constexpr int NK_CHUNK    = SWEEP_NK_CHUNK;           // N_MM_NK
 constant constexpr int K_TILE      = SZ_SIMD * NK_CHUNK;       // 32
@@ -114,11 +121,11 @@ kernel void gemm_ternary_tensor(
     // ---- Configure the matmul2d operation ----
     // descriptor(NRB, NRA, K_TILE, transpose_left=false, transpose_right=true,
     //            relaxed_precision=false, mode=multiply_accumulate)
-    // relaxed_precision=false for max accuracy (we need bit-level G1 correctness).
-    // Matching llama.cpp's dispatch geometry with stricter precision.
+    // relaxed_precision defaults false for max accuracy (bit-level G1);
+    // SWEEP_RELAXED=true is the fork's setting (Issue 1146 rung 2b A/B).
     mpp::tensor_ops::matmul2d<
         mpp::tensor_ops::matmul2d_descriptor(
-            NRB, NRA, K_TILE, false, true, false,
+            NRB, NRA, K_TILE, false, true, SWEEP_RELAXED,
             mpp::tensor_ops::matmul2d_descriptor::mode::multiply_accumulate),
         execution_simdgroups<NSG>> mm;
 
