@@ -666,9 +666,15 @@ mlx-lm on the Proposal-042 scoreboard **measured on the same two boxes**.
     dumb-drafter worst case == the sequential stream byte-for-byte; wire refusals.
   - **T5.1d — the real drafter (the actual T5.1 completion condition):** an
     MTP/draft head for Bonsai-2 is a riir-train lane (GPU) — **FILED as riir-train
-    Issue 654** (`654_mtp_draft_head_bonsai2_651d.md`, unclaimed; the v0 zero-shot
-    tied-projection calibration floor is its suggested first cell); the
-    acceptance-rate-weighted scoreboard row rides it. dflash
+    Issue 654** (`654_mtp_draft_head_bonsai2_651d.md`); the v0 zero-shot
+    tied-projection calibration floor LANDED (`5dbb0a3`); **the trained-head GPU
+    rung LANDED 2026-10-28 (riir-train Bench 677): the head beats repeat_last
+    (0.7929 vs 0.4150) and the modal drafter (0.7929 vs 0.6368) on the frozen
+    read and clears the content GOAT-class bar (0.4333 ≥ 0.4); BMTH v1 artifact
+    (60.7 MB, support 2963) on the 4090 box; remaining = the consumer (`impl
+    DraftSource` over the BMTH bytes here, G1 battery re-runs unchanged) + the
+    owner-gated promotion; the acceptance-rate-weighted scoreboard row rides
+    the consumer lane.** dflash
     itself (`core/src/dflash.rs`) is wired to the OLD transformer path
     (`TransformerWeights`/`MultiLayerKVCache`), NOT the ternary DeltaNet stage —
     "already in core" means the algorithmic cores (`katgpt_speculative`), not a
