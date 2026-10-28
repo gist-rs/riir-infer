@@ -173,26 +173,33 @@ pub struct Qwen38WgpuLayerWeights {
     pub kind: Qwen38WgpuLayerType,
     pub attn_norm: Handle,
     pub post_attention_norm: Handle,
-    pub ffn_gate: Q4KHandle,
-    pub ffn_up: Q4KHandle,
-    pub ffn_down: Q4KHandle,
+    pub ffn_gate: QuantWeight,
+    pub ffn_up: QuantWeight,
+    pub ffn_down: QuantWeight,
     // GDN-only
-    pub qkv: Option<Q4KHandle>,
-    pub z: Option<Q4KHandle>,
-    pub ssm_alpha: Option<Q4KHandle>,
-    pub ssm_beta: Option<Q4KHandle>,
+    pub qkv: Option<QuantWeight>,
+    pub z: Option<QuantWeight>,
+    pub ssm_alpha: Option<QuantWeight>,
+    pub ssm_beta: Option<QuantWeight>,
     pub ssm_conv1d: Option<Handle>,
     pub ssm_a: Option<Handle>,
     pub ssm_dt_bias: Option<Handle>,
     pub ssm_norm: Option<Handle>,
-    pub ssm_out: Option<Q4KHandle>,
+    pub ssm_out: Option<QuantWeight>,
     // Attention-only
-    pub attn_q: Option<Q4KHandle>,
-    pub attn_k: Option<Q4KHandle>,
-    pub attn_v: Option<Q4KHandle>,
-    pub attn_output: Option<Q4KHandle>,
+    pub attn_q: Option<QuantWeight>,
+    pub attn_k: Option<QuantWeight>,
+    pub attn_v: Option<QuantWeight>,
+    pub attn_output: Option<QuantWeight>,
     pub attn_q_norm: Option<Handle>,
     pub attn_k_norm: Option<Handle>,
+}
+
+/// Size (f32 elements) of every state buffer, per layer kind.
+struct StateDims {
+    gdn: usize,
+    conv: usize,
+    kv: usize,
 }
 
 /// The forward. Construct with [`Qwen38WgpuForward::new`]; ingest prompts with
@@ -295,31 +302,119 @@ fn upload_f32(client: &ComputeClient<ActiveRuntime>, v: &[f32]) -> Handle {
     client.create_from_slice(bytemuck::cast_slice(v))
 }
 
-fn q4k_from_gguf(
-    client: &ComputeClient<ActiveRuntime>,
-    gguf: &GgufFile,
-    name: &str,
-    m: usize,
-    n: usize,
-) -> Result<Q4KHandle, String> {
-    let blocks = gguf
-        .q4k_tensor_blocks(name)
-        .map_err(|e| format!("weights: {name}: {e}"))?;
-    let expect = m * (n / 256);
-    if blocks.len() != expect {
-        return Err(format!(
-            "weights: {name} has {} blocks, expected {expect} ({m}×{n})",
-            blocks.len()
-        ));
-    }
-    Ok(Q4KHandle::from_blocks(client, blocks, m, n))
+/// A layer weight matrix: packed Q4_K (dequant in-kernel) or f32 (Q6_K
+/// tensors host-dequanted for v1 - the cudarc `QuantW { q4 }` pattern; the
+/// Q6K-native GPU kernel is the Issue-1150 follow-up).
+#[derive(Clone)]
+pub enum QuantWeight {
+    Q4(Q4KHandle),
+    F32(Handle, usize, usize), // handle, m, n
 }
 
-/// Size (f32 elements) of every state buffer, per layer kind.
-struct StateDims {
-    gdn: usize,
-    conv: usize,
-    kv: usize,
+impl QuantWeight {
+    fn from_gguf(
+        client: &ComputeClient<ActiveRuntime>,
+        gguf: &GgufFile,
+        name: &str,
+        m: usize,
+        n: usize,
+    ) -> Result<Self, String> {
+        let info = gguf
+            .tensor_info(name)
+            .ok_or_else(|| format!("weights: missing {name}"))?;
+        match info.ggml_type {
+            GgmlType::Q4_K => {
+                let blocks = gguf
+                    .q4k_tensor_blocks(name)
+                    .map_err(|e| format!("weights: {name}: {e}"))?;
+                let expect = m * (n / 256);
+                if blocks.len() != expect {
+                    return Err(format!(
+                        "weights: {name} has {} blocks, expected {expect} ({m}x{n})",
+                        blocks.len()
+                    ));
+                }
+                Ok(QuantWeight::Q4(Q4KHandle::from_blocks(
+                    client, blocks, m, n,
+                )))
+            }
+            GgmlType::Q6_K => {
+                let blocks = gguf
+                    .q6k_tensor_blocks(name)
+                    .map_err(|e| format!("weights: {name}: {e}"))?;
+                let bpr = n / 256;
+                if blocks.len() != m * bpr {
+                    return Err(format!(
+                        "weights: {name} has {} blocks, expected {} ({m}x{n})",
+                        blocks.len(),
+                        m * bpr
+                    ));
+                }
+                let mut host = vec![0.0f32; m * n];
+                let mut row = vec![0.0f32; n];
+                for r in 0..m {
+                    riir_infer_core::quant::q6k::dequantize_row_q6_k(
+                        &blocks[r * bpr..(r + 1) * bpr],
+                        &mut row,
+                    );
+                    host[r * n..(r + 1) * n].copy_from_slice(&row);
+                }
+                Ok(QuantWeight::F32(upload_f32(client, &host), m, n))
+            }
+            other => Err(format!(
+                "weights: {name} is {other:?} - expected Q4_K or Q6_K (the Q4_K_M \
+                 recipe mixes both; Q6K-native GPU kernels are the Issue-1150 \
+                 follow-up)"
+            )),
+        }
+    }
+
+    /// Decode GEMV dispatch (batch is always 1 on the decode path).
+    fn gemv(&self, client: &ComputeClient<ActiveRuntime>, input: Handle, output: Handle) {
+        unsafe {
+            match self {
+                QuantWeight::Q4(h) => {
+                    crate::gemv_q4k_batched_cubecl::GemvQ4KBatchedCubeCL::launch::<ActiveRuntime>(
+                        client, h, input, output, 1,
+                    );
+                }
+                QuantWeight::F32(w, m, n) => {
+                    crate::gemv_cubecl::GemvCubeCL::launch::<ActiveRuntime>(
+                        client,
+                        w.clone(),
+                        input,
+                        output,
+                        *m,
+                        *n,
+                    );
+                }
+            }
+        }
+    }
+
+    /// Prefill GEMM dispatch (p must be a multiple of the 32-token tile).
+    fn gemm(&self, client: &ComputeClient<ActiveRuntime>, x: Handle, out: Handle, p: usize) {
+        unsafe {
+            match self {
+                QuantWeight::Q4(h) => {
+                    crate::gemm_q4k_tile_cubecl::GemmQ4KTileCubeCL::launch::<ActiveRuntime>(
+                        client, h, x, out, p,
+                    );
+                }
+                QuantWeight::F32(w, m, n) => {
+                    crate::gemm_q4k_tile_cubecl::GemmF32TileCubeCL::launch::<ActiveRuntime>(
+                        client,
+                        w.clone(),
+                        x,
+                        out,
+                        *m,
+                        *n,
+                        p,
+                    );
+                }
+            }
+        }
+    }
 }
 
 impl Qwen38WgpuForward {
@@ -388,8 +483,8 @@ impl Qwen38WgpuForward {
             let kind = config.layer_types[i];
             let gdn = kind == Qwen38WgpuLayerType::Deltanet;
             let attn = !gdn;
-            let g = |name: String, m: usize, n: usize| -> Result<Q4KHandle, String> {
-                q4k_from_gguf(&client, &gguf, &name, m, n)
+            let g = |name: String, m: usize, n: usize| -> Result<QuantWeight, String> {
+                QuantWeight::from_gguf(&client, &gguf, &name, m, n)
             };
             let f = |name: &str| -> Result<Handle, String> {
                 Ok(upload_f32(&client, &f32_from_gguf(&gguf, name)?))
@@ -743,34 +838,10 @@ impl Qwen38WgpuForward {
                 e,
                 eps,
             );
-            crate::gemv_q4k_batched_cubecl::GemvQ4KBatchedCubeCL::launch::<ActiveRuntime>(
-                &self.client,
-                &qkv,
-                self.norm_x.clone(),
-                self.qkv.clone(),
-                1,
-            );
-            crate::gemv_q4k_batched_cubecl::GemvQ4KBatchedCubeCL::launch::<ActiveRuntime>(
-                &self.client,
-                &z_w,
-                self.norm_x.clone(),
-                self.z.clone(),
-                1,
-            );
-            crate::gemv_q4k_batched_cubecl::GemvQ4KBatchedCubeCL::launch::<ActiveRuntime>(
-                &self.client,
-                &alpha,
-                self.norm_x.clone(),
-                self.a_raw.clone(),
-                1,
-            );
-            crate::gemv_q4k_batched_cubecl::GemvQ4KBatchedCubeCL::launch::<ActiveRuntime>(
-                &self.client,
-                &beta_w,
-                self.norm_x.clone(),
-                self.b_raw.clone(),
-                1,
-            );
+            qkv.gemv(&self.client, self.norm_x.clone(), self.qkv.clone());
+            z_w.gemv(&self.client, self.norm_x.clone(), self.z.clone());
+            alpha.gemv(&self.client, self.norm_x.clone(), self.a_raw.clone());
+            beta_w.gemv(&self.client, self.norm_x.clone(), self.b_raw.clone());
             crate::deltanet_cubecl::DeltanetBetaDecayCubeCL::launch::<ActiveRuntime>(
                 &self.client,
                 self.a_raw.clone(),
@@ -818,13 +889,7 @@ impl Qwen38WgpuForward {
                 hd_v,
                 eps,
             );
-            crate::gemv_q4k_batched_cubecl::GemvQ4KBatchedCubeCL::launch::<ActiveRuntime>(
-                &self.client,
-                &ssm_out,
-                self.rec.clone(),
-                self.tmp.clone(),
-                1,
-            );
+            ssm_out.gemv(&self.client, self.rec.clone(), self.tmp.clone());
             crate::norms_cubecl::ResidualAddCubeCL::launch::<ActiveRuntime>(
                 &self.client,
                 self.x.clone(),
@@ -859,27 +924,9 @@ impl Qwen38WgpuForward {
                 e,
                 eps,
             );
-            crate::gemv_q4k_batched_cubecl::GemvQ4KBatchedCubeCL::launch::<ActiveRuntime>(
-                &self.client,
-                &wq,
-                self.norm_x.clone(),
-                self.qg.clone(),
-                1,
-            );
-            crate::gemv_q4k_batched_cubecl::GemvQ4KBatchedCubeCL::launch::<ActiveRuntime>(
-                &self.client,
-                &wk,
-                self.norm_x.clone(),
-                self.k.clone(),
-                1,
-            );
-            crate::gemv_q4k_batched_cubecl::GemvQ4KBatchedCubeCL::launch::<ActiveRuntime>(
-                &self.client,
-                &wv,
-                self.norm_x.clone(),
-                self.v.clone(),
-                1,
-            );
+            wq.gemv(&self.client, self.norm_x.clone(), self.qg.clone());
+            wk.gemv(&self.client, self.norm_x.clone(), self.k.clone());
+            wv.gemv(&self.client, self.norm_x.clone(), self.v.clone());
             crate::qwen_attention_cubecl::QwenSplitQgCubeCL::launch::<ActiveRuntime>(
                 &self.client,
                 self.qg.clone(),
@@ -931,13 +978,7 @@ impl Qwen38WgpuForward {
                 c.n_kv_head,
                 pos + 1,
             );
-            crate::gemv_q4k_batched_cubecl::GemvQ4KBatchedCubeCL::launch::<ActiveRuntime>(
-                &self.client,
-                &wo,
-                self.attn_out.clone(),
-                self.tmp.clone(),
-                1,
-            );
+            wo.gemv(&self.client, self.attn_out.clone(), self.tmp.clone());
             crate::norms_cubecl::ResidualAddCubeCL::launch::<ActiveRuntime>(
                 &self.client,
                 self.x.clone(),
@@ -966,20 +1007,8 @@ impl Qwen38WgpuForward {
                 e,
                 eps,
             );
-            crate::gemv_q4k_batched_cubecl::GemvQ4KBatchedCubeCL::launch::<ActiveRuntime>(
-                &self.client,
-                gate,
-                self.norm_x.clone(),
-                self.mlp_gate.clone(),
-                1,
-            );
-            crate::gemv_q4k_batched_cubecl::GemvQ4KBatchedCubeCL::launch::<ActiveRuntime>(
-                &self.client,
-                up,
-                self.norm_x.clone(),
-                self.mlp_up.clone(),
-                1,
-            );
+            gate.gemv(&self.client, self.norm_x.clone(), self.mlp_gate.clone());
+            up.gemv(&self.client, self.norm_x.clone(), self.mlp_up.clone());
             crate::deltanet_cubecl::DeltanetGatingCubeCL::launch::<ActiveRuntime>(
                 &self.client,
                 self.mlp_gate.clone(),
@@ -987,13 +1016,7 @@ impl Qwen38WgpuForward {
                 self.mlp_hidden.clone(),
                 mlp,
             );
-            crate::gemv_q4k_batched_cubecl::GemvQ4KBatchedCubeCL::launch::<ActiveRuntime>(
-                &self.client,
-                down,
-                self.mlp_hidden.clone(),
-                self.tmp.clone(),
-                1,
-            );
+            down.gemv(&self.client, self.mlp_hidden.clone(), self.tmp.clone());
             crate::norms_cubecl::ResidualAddCubeCL::launch::<ActiveRuntime>(
                 &self.client,
                 self.x.clone(),
@@ -1124,34 +1147,10 @@ impl Qwen38WgpuForward {
                 e,
                 eps,
             );
-            crate::gemm_q4k_tile_cubecl::GemmQ4KTileCubeCL::launch::<ActiveRuntime>(
-                &self.client,
-                &qkv,
-                self.norm_x_b.clone(),
-                self.qkv_b.clone(),
-                p,
-            );
-            crate::gemm_q4k_tile_cubecl::GemmQ4KTileCubeCL::launch::<ActiveRuntime>(
-                &self.client,
-                &z_w,
-                self.norm_x_b.clone(),
-                self.z_b.clone(),
-                p,
-            );
-            crate::gemm_q4k_tile_cubecl::GemmQ4KTileCubeCL::launch::<ActiveRuntime>(
-                &self.client,
-                &alpha,
-                self.norm_x_b.clone(),
-                self.a_b.clone(),
-                p,
-            );
-            crate::gemm_q4k_tile_cubecl::GemmQ4KTileCubeCL::launch::<ActiveRuntime>(
-                &self.client,
-                &beta_w,
-                self.norm_x_b.clone(),
-                self.b_b.clone(),
-                p,
-            );
+            qkv.gemm(&self.client, self.norm_x_b.clone(), self.qkv_b.clone(), p);
+            z_w.gemm(&self.client, self.norm_x_b.clone(), self.z_b.clone(), p);
+            alpha.gemm(&self.client, self.norm_x_b.clone(), self.a_b.clone(), p);
+            beta_w.gemm(&self.client, self.norm_x_b.clone(), self.b_b.clone(), p);
             crate::deltanet_cubecl::DeltanetBetaDecayBatchedCubeCL::launch::<ActiveRuntime>(
                 &self.client,
                 self.a_b.clone(),
@@ -1228,13 +1227,7 @@ impl Qwen38WgpuForward {
                 self.z_b.clone(),
                 p * n_v * hd_v,
             );
-            crate::gemm_q4k_tile_cubecl::GemmQ4KTileCubeCL::launch::<ActiveRuntime>(
-                &self.client,
-                &ssm_out,
-                self.rec_n_b.clone(),
-                self.tmp_b.clone(),
-                p,
-            );
+            ssm_out.gemm(&self.client, self.rec_n_b.clone(), self.tmp_b.clone(), p);
             crate::norms_cubecl::ResidualAddCubeCL::launch::<ActiveRuntime>(
                 &self.client,
                 self.x_b.clone(),
@@ -1277,27 +1270,9 @@ impl Qwen38WgpuForward {
                 e,
                 eps,
             );
-            crate::gemm_q4k_tile_cubecl::GemmQ4KTileCubeCL::launch::<ActiveRuntime>(
-                &self.client,
-                &wq,
-                self.norm_x_b.clone(),
-                self.qg_b.clone(),
-                p,
-            );
-            crate::gemm_q4k_tile_cubecl::GemmQ4KTileCubeCL::launch::<ActiveRuntime>(
-                &self.client,
-                &wk,
-                self.norm_x_b.clone(),
-                self.k_b.clone(),
-                p,
-            );
-            crate::gemm_q4k_tile_cubecl::GemmQ4KTileCubeCL::launch::<ActiveRuntime>(
-                &self.client,
-                &wv,
-                self.norm_x_b.clone(),
-                self.v_b.clone(),
-                p,
-            );
+            wq.gemm(&self.client, self.norm_x_b.clone(), self.qg_b.clone(), p);
+            wk.gemm(&self.client, self.norm_x_b.clone(), self.k_b.clone(), p);
+            wv.gemm(&self.client, self.norm_x_b.clone(), self.v_b.clone(), p);
             crate::qwen_attention_cubecl::QwenSplitQgBatchedCubeCL::launch::<ActiveRuntime>(
                 &self.client,
                 self.qg_b.clone(),
@@ -1358,13 +1333,7 @@ impl Qwen38WgpuForward {
                 p,
                 base_pos,
             );
-            crate::gemm_q4k_tile_cubecl::GemmQ4KTileCubeCL::launch::<ActiveRuntime>(
-                &self.client,
-                &wo,
-                self.attn_out_b.clone(),
-                self.tmp_b.clone(),
-                p,
-            );
+            wo.gemm(&self.client, self.attn_out_b.clone(), self.tmp_b.clone(), p);
             crate::norms_cubecl::ResidualAddCubeCL::launch::<ActiveRuntime>(
                 &self.client,
                 self.x_b.clone(),
@@ -1393,20 +1362,13 @@ impl Qwen38WgpuForward {
                 e,
                 eps,
             );
-            crate::gemm_q4k_tile_cubecl::GemmQ4KTileCubeCL::launch::<ActiveRuntime>(
+            gate.gemm(
                 &self.client,
-                gate,
                 self.norm_x_b.clone(),
                 self.gateup_b.clone(),
                 p,
             );
-            crate::gemm_q4k_tile_cubecl::GemmQ4KTileCubeCL::launch::<ActiveRuntime>(
-                &self.client,
-                up,
-                self.norm_x_b.clone(),
-                self.up_b.clone(),
-                p,
-            );
+            up.gemm(&self.client, self.norm_x_b.clone(), self.up_b.clone(), p);
             crate::deltanet_cubecl::DeltanetGatingCubeCL::launch::<ActiveRuntime>(
                 &self.client,
                 self.gateup_b.clone(),
@@ -1414,13 +1376,7 @@ impl Qwen38WgpuForward {
                 self.hidden_b.clone(),
                 p * mlp,
             );
-            crate::gemm_q4k_tile_cubecl::GemmQ4KTileCubeCL::launch::<ActiveRuntime>(
-                &self.client,
-                down,
-                self.hidden_b.clone(),
-                self.tmp_b.clone(),
-                p,
-            );
+            down.gemm(&self.client, self.hidden_b.clone(), self.tmp_b.clone(), p);
             crate::norms_cubecl::ResidualAddCubeCL::launch::<ActiveRuntime>(
                 &self.client,
                 self.x_b.clone(),

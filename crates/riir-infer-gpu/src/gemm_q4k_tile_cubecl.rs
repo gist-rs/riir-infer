@@ -251,3 +251,119 @@ impl GatherRowsF32CubeCL {
         }
     }
 }
+
+// ---------------------------------------------------------------------------
+// gemm_f32_tile_f32 — the f32-weight twin (Q6_K tensors land host-dequanted
+// to f32 for v1; the Q6K-native kernel is the Issue-1150 follow-up). Same
+// tiling/decomposition as the Q4_K kernel, minus the dequant.
+// ---------------------------------------------------------------------------
+
+#[cfg(feature = "cubecl_runtime")]
+#[cube(launch_unchecked)]
+fn gemm_f32_tile_f32(weight: &[f32], x: &[f32], out: &mut [f32], params: &[f32]) {
+    let n = params[0usize] as usize;
+    let p = params[1usize] as usize;
+    let m = params[2usize] as usize;
+
+    let base_m = CUBE_POS_X as usize * TM;
+    let base_p = CUBE_POS_Y as usize * TP;
+    let tid = UNIT_POS as usize;
+
+    let tok = tid / 8;
+    let row0 = (tid % 8) * 4;
+
+    let mut x_tile = Shared::<[f32]>::new_slice(X_TILE_LEN);
+    let mut acc_tile = Shared::<[f32]>::new_slice(ACC_TILE_LEN);
+
+    let acc_base = tok * TM;
+    acc_tile[acc_base + row0] = f32::new(0.0f32);
+    acc_tile[acc_base + row0 + 1usize] = f32::new(0.0f32);
+    acc_tile[acc_base + row0 + 2usize] = f32::new(0.0f32);
+    acc_tile[acc_base + row0 + 3usize] = f32::new(0.0f32);
+    sync_cube();
+
+    let mut k0 = 0usize;
+    while k0 < n {
+        let mut idx = tid;
+        while idx < X_TILE_LEN {
+            let t = idx / KTILE;
+            let c = idx % KTILE;
+            let global_t = base_p + t;
+            if global_t < p {
+                x_tile[idx] = x[global_t * n + k0 + c];
+            } else {
+                x_tile[idx] = f32::new(0.0f32);
+            }
+            idx += THREADS;
+        }
+        sync_cube();
+
+        let mut kk = 0usize;
+        while kk < KTILE {
+            let xv = x_tile[tok * KTILE + kk];
+            let mut r = 0usize;
+            while r < 4usize {
+                let row = base_m + row0 + r;
+                let mut w = f32::new(0.0f32);
+                if row < m {
+                    w = weight[(row) * n + k0 + kk];
+                }
+                acc_tile[acc_base + row0 + r] += w * xv;
+                r += 1usize;
+            }
+            kk += 1usize;
+        }
+        sync_cube();
+        k0 += KTILE;
+    }
+
+    let mut idx = tid;
+    while idx < ACC_TILE_LEN {
+        let t = idx / TM;
+        let row = idx % TM;
+        let global_t = base_p + t;
+        let global_row = base_m + row;
+        if global_t < p && global_row < m {
+            out[global_t * m + global_row] = acc_tile[idx];
+        }
+        idx += THREADS;
+    }
+}
+
+/// Launcher for the f32-weight twin (same contract as [`GemmQ4KTileCubeCL`]).
+#[cfg(feature = "cubecl_runtime")]
+pub struct GemmF32TileCubeCL;
+
+#[cfg(feature = "cubecl_runtime")]
+impl GemmF32TileCubeCL {
+    /// # Safety
+    /// - `weight_handle`: `handle.m * handle.n` f32
+    /// - `x_handle`: `p * handle.n` f32; `out_handle`: `p * handle.m` f32
+    pub unsafe fn launch<R: Runtime>(
+        client: &ComputeClient<R>,
+        weight_handle: Handle,
+        x_handle: Handle,
+        out_handle: Handle,
+        m: usize,
+        n: usize,
+        p: usize,
+    ) {
+        assert!(p.is_multiple_of(TP), "p ({p}) must be a multiple of {TP}");
+        assert!(n.is_multiple_of(KTILE), "n must be a multiple of {KTILE}");
+        let n_wg_x = (m as u32).div_ceil(TM as u32).max(1);
+        let n_wg_y = (p as u32).div_ceil(TP as u32).max(1);
+        let params: [f32; 3] = [n as f32, p as f32, m as f32];
+        let params_handle = crate::params_cache::params_handle(client, f32::as_bytes(&params));
+        unsafe {
+            gemm_f32_tile_f32::launch_unchecked::<R>(
+                client,
+                CubeCount::Static(n_wg_x, n_wg_y, 1),
+                CubeDim::new_1d(THREADS as u32),
+                BufferArg::from_raw_parts(weight_handle, m * n),
+                BufferArg::from_raw_parts(x_handle, p * n),
+                BufferArg::from_raw_parts(out_handle, p * m),
+                BufferArg::from_raw_parts(params_handle, 3),
+            );
+        }
+    }
+}
