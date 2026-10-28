@@ -45,7 +45,7 @@
 
 #![cfg(all(feature = "metal_tensor_gemm", target_os = "macos"))]
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
 use metal::foreign_types::ForeignTypeRef;
@@ -125,11 +125,16 @@ pub struct MetalTensorZeroCopyGemm {
     /// aliasing; after the kernel writes, we copy back to the CubeCL handle.
     /// This is ONE GPU→GPU copy (not a host round-trip).
     output_cache: Mutex<HashMap<u64, Buffer>>,
-    /// Issue 1146: CubeCL output ranges wgpu has already marked initialized
-    /// (`(pool buffer, offset, bytes)`) — see [`Self::ensure_wgpu_initialized`].
+    /// Issue 1146: CubeCL output ranges wgpu has already marked initialized,
+    /// per pool buffer, as SORTED, MERGED `[start, end)` intervals — see
+    /// [`Self::ensure_wgpu_initialized`]. Containment (not exact-key match):
+    /// a new handle whose range lies inside an initialized region costs
+    /// nothing, so a drifting pool layout (long contexts) does not re-fill.
     /// Holding the `wgpu::Buffer` clone keeps its identity from being reused
     /// by a later allocation while it is remembered here.
-    wgpu_initialized: Mutex<HashSet<(wgpu::Buffer, u64, u64)>>,
+    wgpu_initialized: Mutex<HashMap<wgpu::Buffer, Vec<(u64, u64)>>>,
+    /// Issue 1146: first-use fills issued (`RIIR_ZC_FILL_TRACE=1` prints).
+    init_fills: std::sync::atomic::AtomicU64,
     /// Issue 663 T5 profiling: total dispatch count (for overhead analysis).
     dispatch_count: std::sync::atomic::AtomicU64,
     /// Issue 1122 gate 2: the tile geometry this pipeline was compiled at.
@@ -229,7 +234,8 @@ impl MetalTensorZeroCopyGemm {
             queue: queue_ptr,
             pipeline,
             output_cache: Mutex::new(HashMap::new()),
-            wgpu_initialized: Mutex::new(HashSet::new()),
+            wgpu_initialized: Mutex::new(HashMap::new()),
+            init_fills: std::sync::atomic::AtomicU64::new(0),
             dispatch_count: std::sync::atomic::AtomicU64::new(0),
             config,
             last_cmd_buffer: std::sync::Mutex::new(None),
@@ -332,13 +338,11 @@ impl MetalTensorZeroCopyGemm {
             .get_resource(output.clone())
             .map_err(|e| format!("get_resource failed: {e:?}"))?;
         let resource = managed.resource();
-        let key = (
-            resource.buffer.clone(),
-            resource.offset,
-            (len * std::mem::size_of::<f32>()) as u64,
-        );
+        let start = resource.offset;
+        let end = start + (len * std::mem::size_of::<f32>()) as u64;
         let mut seen = self.wgpu_initialized.lock().unwrap();
-        if seen.contains(&key) {
+        let ranges = seen.entry(resource.buffer.clone()).or_default();
+        if covered(ranges, start, end) {
             return Ok(());
         }
         unsafe {
@@ -349,8 +353,20 @@ impl MetalTensorZeroCopyGemm {
             );
         }
         let _ = client.flush();
-        seen.insert(key);
+        insert_merged(ranges, start, end);
+        let n = self
+            .init_fills
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+            + 1;
+        if n.is_power_of_two() && std::env::var("RIIR_ZC_FILL_TRACE").as_deref() == Ok("1") {
+            eprintln!("[Issue 1146] zero-copy first-use fills: {n}");
+        }
         Ok(())
+    }
+
+    /// First-use fills issued so far (the zero-init cure's cost meter).
+    pub fn init_fill_count(&self) -> u64 {
+        self.init_fills.load(std::sync::atomic::Ordering::Relaxed)
     }
 
     /// Dispatch the ternary GEMM via raw Metal on the shared CubeCL queue.
@@ -591,5 +607,55 @@ impl Drop for MetalTensorZeroCopyGemm {
         // invalidate the pointers — but Drop runs before the Arcs drop, so
         // the borrow is still valid here. We don't need to release anything
         // (foreign-types doesn't own these borrowed refs).
+    }
+}
+
+/// Whether `[start, end)` lies inside one of the sorted, merged `ranges`.
+fn covered(ranges: &[(u64, u64)], start: u64, end: u64) -> bool {
+    let i = ranges.partition_point(|&(s, _)| s <= start);
+    i > 0 && ranges[i - 1].1 >= end
+}
+
+/// Insert `[start, end)` into sorted, merged `ranges`, merging overlaps and
+/// adjacent intervals.
+fn insert_merged(ranges: &mut Vec<(u64, u64)>, start: u64, end: u64) {
+    let (mut s, mut e) = (start, end);
+    let lo = ranges.partition_point(|&(_, re)| re < s);
+    let mut hi = lo;
+    while hi < ranges.len() && ranges[hi].0 <= e {
+        s = s.min(ranges[hi].0);
+        e = e.max(ranges[hi].1);
+        hi += 1;
+    }
+    ranges.splice(lo..hi, std::iter::once((s, e)));
+}
+
+#[cfg(test)]
+mod init_range_tests {
+    use super::{covered, insert_merged};
+
+    #[test]
+    fn containment_merge_and_gaps() {
+        let mut r = Vec::new();
+        assert!(!covered(&r, 0, 1));
+        insert_merged(&mut r, 100, 200);
+        assert!(covered(&r, 100, 200) && covered(&r, 120, 180));
+        assert!(!covered(&r, 90, 150) && !covered(&r, 150, 210));
+        // Disjoint insert keeps order; a gap stays uncovered.
+        insert_merged(&mut r, 300, 400);
+        assert_eq!(r, vec![(100, 200), (300, 400)]);
+        assert!(!covered(&r, 150, 350));
+        // Adjacent intervals merge (end == start).
+        insert_merged(&mut r, 200, 300);
+        assert_eq!(r, vec![(100, 400)]);
+        assert!(covered(&r, 150, 350));
+        // An insert spanning several intervals collapses them.
+        insert_merged(&mut r, 500, 600);
+        insert_merged(&mut r, 700, 800);
+        insert_merged(&mut r, 50, 750);
+        assert_eq!(r, vec![(50, 800)]);
+        // Inserting inside an existing interval is a no-op.
+        insert_merged(&mut r, 60, 70);
+        assert_eq!(r, vec![(50, 800)]);
     }
 }

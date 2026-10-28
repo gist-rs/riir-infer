@@ -1,0 +1,16 @@
+[22:22:41] === i1146 width re-curve start (ts 20261028T222241Z) ===
+Mac17,15
+30
+103079215104
+22:22  up 1 day,  4:39, 2 users, load averages: 3.24 3.66 3.10
+Now drawing from 'AC Power'
+[22:23:15] a_g1_w512 rc=0 :: prefill 1024 tok in 4.055s
+[22:23:32] b_g1_w512 rc=0 :: prefill 1024 tok in 2.921s
+[22:23:32] g1 a w=512 generated: [261, 248046, 198, 248045, 198, 2, 220, 16, 13, 220, 96304, 99172, 271, 95772, 8253, 220]
+[22:23:32] g1 b w=512 generated: [261, 248046, 198, 248045, 198, 2, 220, 16, 13, 220, 96304, 99172, 271, 95772, 8253, 220]
+[22:23:32] G1 CROSS-WIDTH PASS
+[22:27:30] a_pp32768_w512_warm rc=0 :: prefill 32768 tok in 221.151s
+[22:30:37] b_pp32768_w512_warm rc=0 :: prefill 32768 tok in 169.020s
+[23:10:39] a_pp32768_w512_r1 rc=0 :: prefill 32768 tok in 186.400s
+[23:13:34] b_pp32768_w512_r1 rc=0 :: prefill 32768 tok in 157.277s
+[23:13:34] CONTAM pp32768_w512_r1 (try 1) — foreign GPU process during the pair; re-running
