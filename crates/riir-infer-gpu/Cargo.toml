@@ -430,6 +430,16 @@ required-features = ["cubecl_runtime", "ternary_gemm_batched", "ternary_deltanet
 name = "issue1115_wg_occupancy_prefill_tail_ab"
 required-features = ["cuda_backend", "ternary_gemv_cuda_raw", "ternary_gemm_batched", "ternary_deltanet_chunked_prefill", "ternary_attention_batched_prefill", "riir-infer-core/bonsai2_hadamard"]
 
+# Issue 1129 — the cuda_backend CubeCL DECODE A/B for the dense-pair fused
+# GEMV (the Issue-1115 pattern on the decode path; the Metal arm is
+# Bench 1007). #[ignore]d — the 4090 runs it with --release -- --ignored
+# (BONSAI_GGUF defaults the sibling riir-train data path; ABSOLUTE on the
+# box). The env trio (RIIR_GDN_DENSE_PAIR_FUSED/_WG/RIIR_DENSE_PAIR_MLP)
+# must be UNSET — the test drives the arms through their setters.
+[[test]]
+name = "issue1129_dense_pair_decode_ab"
+required-features = ["cuda_backend", "ternary_gemv_cuda_raw", "ternary_gemm_batched", "ternary_deltanet_chunked_prefill", "ternary_attention_batched_prefill", "riir-infer-core/bonsai2_hadamard"]
+
 # Issue 1149 — the R2 prework-fused CUDA ROUTING proof (the N/A cell's
 # engagement evidence): the whole-prefill GDN prework is four native cudarc
 # dispatches (conv1d/carry/beta/expand), so the CudaRuntime serving lane must
