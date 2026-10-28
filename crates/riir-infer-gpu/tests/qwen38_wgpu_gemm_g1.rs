@@ -166,17 +166,26 @@ fn gemm_ab_timing_production_shapes() {
     let q4 = Q4KHandle::from_blocks(&client, &blocks, m, n);
     unsafe {
         GemmQ4KTileCubeCL::launch::<riir_infer_gpu::cubecl_runtime::ActiveRuntime>(
-            &client, &q4, x_h.clone(), out_h.clone(), p,
+            &client,
+            &q4,
+            x_h.clone(),
+            out_h.clone(),
+            p,
         );
     }
     let t0 = Instant::now();
     for _ in 0..3 {
         unsafe {
             GemmQ4KTileCubeCL::launch::<riir_infer_gpu::cubecl_runtime::ActiveRuntime>(
-                &client, &q4, x_h.clone(), out_h.clone(), p,
+                &client,
+                &q4,
+                x_h.clone(),
+                out_h.clone(),
+                p,
             );
         }
     }
+    let _ = client.read_one(out_h.clone());
     let dt = t0.elapsed().as_secs_f64() / 3.0;
     println!(
         "[ab] q4k-tile: {dt:.3}s  -> {:.0} tok/s-equivalent (single tensor)",
@@ -185,33 +194,41 @@ fn gemm_ab_timing_production_shapes() {
 
     // 2. MatmulCubeCL f32
     let w_h = client.create_from_slice(bytemuck::cast_slice(&w));
-    riir_infer_gpu::matmul_cubecl::MatmulCubeCL::launch::<riir_infer_gpu::cubecl_runtime::ActiveRuntime>(
-        &client, w_h.clone(), x_h.clone(), out_h.clone(), m, n, p,
-    );
+    riir_infer_gpu::matmul_cubecl::MatmulCubeCL::launch::<
+        riir_infer_gpu::cubecl_runtime::ActiveRuntime,
+    >(&client, w_h.clone(), x_h.clone(), out_h.clone(), m, n, p);
     let t0 = Instant::now();
     for _ in 0..3 {
-        riir_infer_gpu::matmul_cubecl::MatmulCubeCL::launch::<riir_infer_gpu::cubecl_runtime::ActiveRuntime>(
-            &client, w_h.clone(), x_h.clone(), out_h.clone(), m, n, p,
-        );
+        riir_infer_gpu::matmul_cubecl::MatmulCubeCL::launch::<
+            riir_infer_gpu::cubecl_runtime::ActiveRuntime,
+        >(&client, w_h.clone(), x_h.clone(), out_h.clone(), m, n, p);
     }
+    let _ = client.read_one(out_h.clone());
     let dt2 = t0.elapsed().as_secs_f64() / 3.0;
-    println!("[ab] matmul-f32: {dt2:.3}s -> {:.0} tok/s-equiv", p as f64 / dt2);
+    println!(
+        "[ab] matmul-f32: {dt2:.3}s -> {:.0} tok/s-equiv",
+        p as f64 / dt2
+    );
 
     // 3. MatmulF16bCubeCL (f16 weights)
     #[cfg(feature = "edlm_gpu")]
     {
         let w_f16: Vec<half::f16> = w.iter().map(|&v| half::f16::from_f32(v)).collect();
         let w16_h = client.create_from_slice(bytemuck::cast_slice(&w_f16));
-        riir_infer_gpu::matmul_f16b_cubecl::MatmulF16bCubeCL::launch::<riir_infer_gpu::cubecl_runtime::ActiveRuntime>(
-            &client, x_h.clone(), w16_h.clone(), out_h.clone(), p, n, m,
-        );
+        riir_infer_gpu::matmul_f16b_cubecl::MatmulF16bCubeCL::launch::<
+            riir_infer_gpu::cubecl_runtime::ActiveRuntime,
+        >(&client, x_h.clone(), w16_h.clone(), out_h.clone(), p, n, m);
         let t0 = Instant::now();
         for _ in 0..3 {
-            riir_infer_gpu::matmul_f16b_cubecl::MatmulF16bCubeCL::launch::<riir_infer_gpu::cubecl_runtime::ActiveRuntime>(
-                &client, x_h.clone(), w16_h.clone(), out_h.clone(), p, n, m,
-            );
+            riir_infer_gpu::matmul_f16b_cubecl::MatmulF16bCubeCL::launch::<
+                riir_infer_gpu::cubecl_runtime::ActiveRuntime,
+            >(&client, x_h.clone(), w16_h.clone(), out_h.clone(), p, n, m);
         }
+        let _ = client.read_one(out_h.clone());
         let dt3 = t0.elapsed().as_secs_f64() / 3.0;
-        println!("[ab] matmul-f16b: {dt3:.3}s -> {:.0} tok/s-equiv", p as f64 / dt3);
+        println!(
+            "[ab] matmul-f16b: {dt3:.3}s -> {:.0} tok/s-equiv",
+            p as f64 / dt3
+        );
     }
 }
