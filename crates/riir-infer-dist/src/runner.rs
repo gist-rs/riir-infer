@@ -396,17 +396,34 @@ pub fn run_local<S: StageCompute + ?Sized>(
 }
 
 /// [`run_local`] at the same prefill chunking a [`run_head_with`] uses —
-/// the oracle for a chunked 2-stage run.
-pub fn run_local_with<S: StageCompute + ?Sized>(
+/// the oracle for a chunked 2-stage run. Timing-only sibling of
+/// [`run_local_with`]: the report carries the prefill/decode windows so
+/// the fits-one-box comparator is the DECODE rate (the same window the
+/// pipeline arm prints), never the prefill-diluted end-to-end number.
+#[derive(Debug, Clone)]
+pub struct LocalReport {
+    pub generated: Vec<u32>,
+    pub prefill: std::time::Duration,
+    pub decode: std::time::Duration,
+}
+
+impl LocalReport {
+    pub fn decode_tok_s(&self) -> f64 {
+        self.generated.len().saturating_sub(1) as f64 / self.decode.as_secs_f64().max(1e-9)
+    }
+}
+
+pub fn run_local_with_report<S: StageCompute + ?Sized>(
     stage: &mut S,
     prompt: &[u32],
     max_new: usize,
     opts: HeadOptions,
-) -> Vec<u32> {
+) -> LocalReport {
     let empty: [f32; 0] = [];
     let chunk = prefill_width(prompt.len(), opts);
     let mut out = Vec::with_capacity(max_new);
     let mut next = 0u32;
+    let prefill_t = std::time::Instant::now();
     match chunk {
         1 => {
             for (pos, &tok) in prompt.iter().enumerate() {
@@ -429,6 +446,8 @@ pub fn run_local_with<S: StageCompute + ?Sized>(
             next = argmax_first(&logits);
         }
     }
+    let prefill = prefill_t.elapsed();
+    let decode_t = std::time::Instant::now();
     if max_new > 0 {
         out.push(next);
     }
@@ -439,5 +458,19 @@ pub fn run_local_with<S: StageCompute + ?Sized>(
         next = argmax_first(stage.step(next, prompt.len() + i - 1, &empty));
         out.push(next);
     }
-    out
+    let decode = decode_t.elapsed();
+    LocalReport {
+        generated: out,
+        prefill,
+        decode,
+    }
+}
+
+pub fn run_local_with<S: StageCompute + ?Sized>(
+    stage: &mut S,
+    prompt: &[u32],
+    max_new: usize,
+    opts: HeadOptions,
+) -> Vec<u32> {
+    run_local_with_report(stage, prompt, max_new, opts).generated
 }

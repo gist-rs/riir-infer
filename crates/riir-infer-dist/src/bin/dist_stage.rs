@@ -60,7 +60,7 @@ use riir_infer_core::multi_host::LayerRange;
 use riir_infer_core::tokenizer::BpeTokenizer;
 use riir_infer_core::types::Config;
 use riir_infer_dist::multi::{MultiRequest, run_head_multi, run_tail_multi};
-use riir_infer_dist::runner::{HeadOptions, run_head_with, run_local_with, run_tail};
+use riir_infer_dist::runner::{HeadOptions, run_head_with, run_local_with_report, run_tail};
 use riir_infer_dist::sockopts::{self, Applied, LinkOptions};
 use riir_infer_dist::spec_fill::{RepeatLastDrafter, run_head_spec, run_tail_spec};
 use riir_infer_dist::stage::{ArtifactIdentity, StageCompute, TernaryCpuStage, stage_scope};
@@ -749,16 +749,26 @@ fn run() -> Result<(), String> {
                     identity,
                 )?;
                 let t = Instant::now();
-                let want = run_local_with(full.as_mut(), &prompt, a.max_new, opts);
-                let tok_s = a.max_new.saturating_sub(1) as f64 / t.elapsed().as_secs_f64();
+                let want = run_local_with_report(full.as_mut(), &prompt, a.max_new, opts);
+                let wall = t.elapsed().as_secs_f64();
+                let tok_s = a.max_new.saturating_sub(1) as f64 / wall;
+                // The decode-only window + prefill beside the end-to-end
+                // figure: the fits-one-box G2 row's comparator is the
+                // DECODE rate (the same window the pipeline arm prints),
+                // never the prefill-diluted end-to-end number.
                 println!(
-                    "1-box {} oracle: {tok_s:.2} tok/s end-to-end (incl. prefill)",
-                    a.backend
+                    "1-box {} oracle: {tok_s:.2} tok/s end-to-end (incl. prefill) · decode {:.2} tok/s ({} steps) · prefill {:.3}s",
+                    a.backend,
+                    want.decode_tok_s(),
+                    want.generated.len().saturating_sub(1),
+                    want.prefill.as_secs_f64(),
                 );
                 for (i, r) in reports.iter().enumerate() {
-                    match want == r.generated {
+                    match want.generated == r.generated {
                         true => println!("G1 PASS: stream {i} == 1-box stream"),
-                        false => return Err(format!("G1 FAIL: stream {i} 1-box {want:?}")),
+                        false => {
+                            return Err(format!("G1 FAIL: stream {i} 1-box {:?}", want.generated));
+                        }
                     }
                 }
             }
