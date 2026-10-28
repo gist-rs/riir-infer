@@ -21,11 +21,16 @@
 //! round degenerates to one ordinary step plus a wasted round trip). The
 //! G1 battery pins all three regimes.
 //!
-//! Rewind (T5.1b V0) rides the Issue-028 handoff substrate:
-//! [`HybridStateSegment`](riir_infer_core::multi_host::HybridStateSegment)
-//! snapshot at the pre-verify cursor, restore on a partial accept. The
-//! GDN journal's rank-1 unwind is the fast path for a later rung — this
-//! is the correct path, existing substrate, zero forward surgery.
+//! Rewind (T5.1b, Issue 1148 rung 2) rides an in-process exact
+//! [`StageCheckpoint`]: retained-buffer copies of the live state (attention
+//! rows bounded by the runner's cursor + the full GDN recurrence/conv
+//! state) — memcpy-class, zero steady-state allocation, byte-exact by
+//! construction, no serialization. The GDN journal's rank-1 unwind stays
+//! UNWIRED here by design: it carries a measured ~6e-6 reconstruction
+//! drift (Bench 885) and the lane's lossless G1 is byte-exact — an
+//! approximate rewind would give up the defining property (the stream ==
+//! sequential byte-for-byte, any drafter). The `HybridStateSegment`
+//! codec remains the cross-process handoff format (Issue 028).
 //!
 //! **V0 posture (honest scope):** the verify forward rides per-position
 //! [`StageCompute::step`] on both stages — bit-identical to the chunked
@@ -39,11 +44,11 @@
 //! Protocol shape (one stream, after the ordinary prompt prefill):
 //!
 //! ```text
-//! head: snapshot ── consume d_0..d_{K-1} at c..c+K-1 ──┐
+//! head: checkpoint ─ consume d_0..d_{K-1} at c..c+K-1 ─┐
 //!                                                      ▼
 //!                    VerifyStream { pending, drafts, rows }
 //!                                                      ▼
-//! tail: snapshot ── consume rows ── argmax ×K ── m<K? restore, steps=c
+//! tail: checkpoint ─ consume rows ── argmax ×K ── m<K? restore, steps=c
 //!                                                      ▼
 //!                       VerifyReply { m, argmax ×K }  (one round trip)
 //!                                                      ▼
@@ -66,11 +71,57 @@ use crate::transport::{FrameKind, Transport};
 /// Upper bound on one verify round — a sanity cap, not a tuning knob.
 pub const MAX_VERIFY_K: usize = 64;
 
+/// One layer's retained checkpoint buffer (Issue 1148 rung 2). Kinds are
+/// matched to the model's layer types at checkpoint time and never
+/// renegotiated — a rebuilt stage (different geometry) refuses against a
+/// stale checkpoint at restore.
+#[derive(Debug, Clone)]
+pub enum CheckpointLayer {
+    /// Attention: the LIVE rows only, `cursor * kv_dim` wide each — the
+    /// rows a rewind will overwrite are stale-but-unread (the forward
+    /// reads/writes positionally), so they are neither captured nor
+    /// restored.
+    Attention { key: Vec<f32>, value: Vec<f32> },
+    /// GDN: the full fixed-size recurrence matrix + conv window
+    /// (position-independent — there is nothing to shrink).
+    DeltaNet { rec: Vec<f32>, conv: Vec<f32> },
+}
+
+impl CheckpointLayer {
+    /// Diagnostic name for refusal messages — the kinds never renegotiate.
+    pub fn kind_name(&self) -> &'static str {
+        match self {
+            Self::Attention { .. } => "Attention",
+            Self::DeltaNet { .. } => "DeltaNet",
+        }
+    }
+}
+
+/// An in-process exact state checkpoint (Issue 1148 rung 2): the rewind
+/// WITHOUT serialization. [`SpecStage::checkpoint_state`] fills (and
+/// reuses) the retained buffers — memcpy-class, zero steady-state
+/// allocation, byte-exact by construction — and
+/// [`SpecStage::restore_checkpoint`] copies them back. This is the
+/// spec-lane fast path; the `HybridStateSegment` codec stays the
+/// cross-process handoff format (Issue 028) and the exactness oracle the
+/// G1 pins compare against.
+#[derive(Debug, Default, Clone)]
+pub struct StageCheckpoint {
+    /// Live KV row count carried by the attention buffers (positions
+    /// `[0..cursor)` written). The ternary forward never advances the
+    /// cache's `fill_pos` tracker (it reads/writes rows positionally), so
+    /// the runner's cursor is the ONLY live bound — passed in explicitly.
+    pub cursor: usize,
+    pub layers: Vec<CheckpointLayer>,
+}
+
 /// A stage whose full pipeline state can be snapshotted and restored
 /// byte-exactly. The CPU stage implements it over the
-/// `HybridStateSegment` codec; a backend without it simply does not
-/// implement the trait, and the spec runners refuse to seat it
-/// (capability discovery at the type level — never a runtime maybe).
+/// `HybridStateSegment` codec (the wire/handoff path) and over
+/// [`StageCheckpoint`] (the in-process fast path); a backend without them
+/// simply does not implement the trait, and the spec runners refuse to
+/// seat it (capability discovery at the type level — never a runtime
+/// maybe).
 pub trait SpecStage: StageCompute {
     /// Encode this stage's full state (KV rows + GDN recurrence + conv
     /// windows + fill marker) into `out` (cleared first).
@@ -78,6 +129,17 @@ pub trait SpecStage: StageCompute {
     /// Restore state from a [`SpecStage::snapshot_state`] encoding. A
     /// shape mismatch refuses; nothing is resized.
     fn restore_state(&mut self, bytes: &[u8]) -> Result<(), String>;
+
+    /// Fill `ck` with this stage's exact state at `cursor` (the count of
+    /// written KV positions). Retained buffers: calling this again REUSES
+    /// `ck`'s allocations (memcpy-class; zero steady-state alloc). A
+    /// sliding-window (ring) layer refuses — the spec rewind is
+    /// unbounded-only, the same contract the segment codec documents.
+    fn checkpoint_state(&self, cursor: usize, ck: &mut StageCheckpoint) -> Result<(), String>;
+    /// Copy a [`SpecStage::checkpoint_state`] checkpoint back. Byte-exact
+    /// on every restored row; rows beyond `ck.cursor` are left stale (the
+    /// forward never reads past the positions it has rewritten).
+    fn restore_checkpoint(&mut self, ck: &StageCheckpoint) -> Result<(), String>;
 }
 
 /// What a drafter sees: the committed sequence so far (prompt +
@@ -93,13 +155,13 @@ pub struct DraftCtx<'a> {
 pub trait DraftSource {
     fn propose(&mut self, ctx: &DraftCtx<'_>) -> Vec<u32>;
 
-    /// Roll-aware proposal (T5.1d). The runner has ALREADY snapshotted the
+    /// Roll-aware proposal (T5.1d). The runner has ALREADY checkpointed the
     /// stage when this runs; `roll(tok, pos, out)` steps the REAL stage at
     /// `pos` and writes the resulting hidden row into `out` (hidden_dim
     /// wide), appending it to the verify request's rows. A roll drafter
     /// MUST invoke the closure exactly `ctx.k` times — its own drafts at
     /// `cursor + j` — so the rolled rows ARE the verify payload (no second
-    /// forward; the rewind restores from the pre-propose snapshot). The
+    /// forward; the rewind restores from the pre-propose checkpoint). The
     /// default ignores the closure and falls back to [`DraftSource::propose`]
     /// (token-level drafters; the runner then steps the drafts itself — the
     /// legacy path, byte-identical).
@@ -340,7 +402,9 @@ where
     // committed = prompt + generated, the pending prediction INCLUDED as
     // the last entry (the cursor is committed.len() - 1).
     let mut committed: Vec<u32> = prompt.to_vec();
-    let mut snap: Vec<u8> = Vec::new();
+    // The pre-verify checkpoint (Issue 1148 rung 2): in-process, exact,
+    // retained buffers — no serialization on the rewind path.
+    let mut ck = StageCheckpoint::default();
     let mut rows: Vec<f32> = Vec::new();
     let mut chunk_rows: Vec<f32> = Vec::new();
 
@@ -387,8 +451,8 @@ where
 
     // ── verify rounds. Invariants at the top of every round:
     //   cursor        = committed.len() - 1  (the pending token is last)
-    //   snap          = a pre-verify snapshot of THIS round's cursor when
-    //                   a rewind is pending
+    //   ck            = the pre-verify checkpoint of THIS round's cursor
+    //                   when a rewind is pending
     //   pending_rewind= Some((cursor, tokens to re-forward)) after a
     //                   partial accept — served before the next draft.
     let t1 = std::time::Instant::now();
@@ -403,7 +467,7 @@ where
             // re-forwards the accepted drafts (pushed). Every reply is the
             // prediction after the fed token; the LAST one becomes the new
             // pending.
-            stage.restore_state(&snap).map_err(proto)?;
+            stage.restore_checkpoint(&ck).map_err(proto)?;
             let mut last_reply = 0u32;
             for (i, &tok) in reforward.iter().enumerate() {
                 let p = pos + i;
@@ -428,12 +492,13 @@ where
         let pending = *committed.last().expect("nonempty");
         let k_round = k.min(stage.max_positions().saturating_sub(cursor)).max(1);
 
-        // Snapshot BEFORE drafting: a roll drafter (T5.1d) advances the
-        // stage inside propose_with_roll, so the pre-verify snapshot has to
-        // precede it. Token-level drafters never touch the stage, so the
-        // snapshot content is identical to the old post-propose order —
-        // the legacy path stays byte-identical.
-        stage.snapshot_state(&mut snap).map_err(proto)?;
+        // Checkpoint BEFORE drafting (Issue 1148 rung 2): a roll drafter
+        // (T5.1d) advances the stage inside propose_with_roll, so the
+        // pre-verify checkpoint has to precede it. Token-level drafters
+        // never touch the stage, so the checkpoint content is identical to
+        // the old post-propose order — the legacy path stays byte-identical.
+        // Live rows = cursor: the head has forwarded positions [0..cursor).
+        stage.checkpoint_state(cursor, &mut ck).map_err(proto)?;
         rows.clear();
         let mut rolled = 0usize;
         let mut roll_fault: Option<String> = None;
@@ -550,7 +615,7 @@ fn recv_token<T: Transport>(link: &mut T, buf: &mut Vec<u8>) -> io::Result<u32> 
 /// Tail role, speculative mode (T5.1a/c): the ordinary serve loop PLUS
 /// the [`FrameKind::VerifyStream`] arm. The ordinary arm mirrors
 /// `runner::run_tail`'s loop (the G1 battery pins both loops); the verify
-/// arm snapshots, consumes the K rows per-position, computes every row's
+/// arm checkpoints, consumes the K rows per-position, computes every row's
 /// argmax, adjudicates `m` (it holds `pending` from the wire), and — on a
 /// partial accept — restores its pre-verify state BEFORE replying, so the
 /// ordinary sequence resumes at the verify's base position with no extra
@@ -585,6 +650,9 @@ where
     let mut hidden: Vec<f32> = Vec::with_capacity(hidden_dim);
     let mut out: Vec<f32> = Vec::new();
     let mut wire: Vec<u8> = Vec::new();
+    // The pre-verify checkpoint (Issue 1148 rung 2): in-process, exact,
+    // retained buffers.
+    let mut ck = StageCheckpoint::default();
     let mut steps = 0usize;
     let kind = link.recv_frame_into(&mut buf)?;
     crate::runner::expect_kind(kind, FrameKind::Begin)?;
@@ -618,7 +686,7 @@ where
                         stage.max_positions()
                     )));
                 }
-                stage.snapshot_state(&mut wire).map_err(proto)?;
+                stage.checkpoint_state(pos, &mut ck).map_err(proto)?;
                 let mut argmaxes: Vec<u32> = Vec::with_capacity(drafts.len());
                 for (j, row) in hidden.chunks_exact(hidden_dim).enumerate() {
                     let logits = stage.step(0, pos + j, row);
@@ -630,7 +698,7 @@ where
                     // Partial accept: rewind BEFORE replying — the head
                     // resumes the ordinary path at `pos` right after the
                     // reply, and this loop's `steps` must expect it.
-                    stage.restore_state(&wire).map_err(proto)?;
+                    stage.restore_checkpoint(&ck).map_err(proto)?;
                     steps = pos;
                 } else {
                     steps = pos + drafts.len();

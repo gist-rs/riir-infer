@@ -123,12 +123,17 @@ struct Pair {
 }
 
 fn load_pair(model: &std::path::Path) -> Result<Pair, String> {
-    let (config, weights) =
+    let (mut config, weights) =
         riir_infer_core::gguf_loader::load_qwen_deltanet_ternary_weights_gguf_scoped(
             model,
             |cfg| WeightScope::full(cfg.n_layer),
         )
         .map_err(|e| format!("load model: {e}"))?;
+    // The Bench 917 posture (ctx 4096): the artifact now declares a 256k
+    // context and the unbounded stage cache would allocate 256k KV rows
+    // per layer (the Issue-929 class — >100 GiB of commit). The ctx
+    // clamp mirrors dist_stage's `load()`.
+    config.block_size = 4096;
     let id = ArtifactIdentity::of_gguf(model).map_err(|e| format!("identity: {e}"))?;
     Ok(Pair {
         config,

@@ -659,7 +659,23 @@ mlx-lm on the Proposal-042 scoreboard **measured on the same two boxes**.
     overwrite stale rows → a cursor reset is the truncate); if the length lives in
     per-layer implicit cursors, add `truncate_to` — EITHER WAY pin it with a test
     that re-forwards at the rewound position and compares bit-exact to a fresh
-    cache.
+    cache. **LANDED 2026-10-28, MECHANISM SUPERSEDED (riir-infer Issue 1148 close,
+    [Bench 918](../.benchmarks/918_issue1148_exact_checkpoint_rewind.md)): the
+    rewind is an in-process EXACT checkpoint (`SpecStage::checkpoint_state`/
+    `restore_checkpoint`, retained buffers, live KV rows bounded by the runner
+    cursor — the ternary forward never advances `fill_pos`, so the cursor is the
+    only live bound), byte-exact by construction, zero steady-state alloc — no
+    serialization. THE JOURNAL IS NOT WIRED: its measured 6.3e-6 unwind drift
+    (Bench 885) fails Issue 1148's byte-exact ground rule — the wall outranks the
+    mechanism named here (the wall is the lane's lossless G1: stream == sequential
+    byte-for-byte, any drafter). The cursor-overwrite truncate law is PINNED at
+    NaN-poison strength (`kv_cursor_overwrite_truncate_law_nan_poison`: rows past
+    the rewound cursor are stale-but-unread, never restored). Re-cell: E[m] 1.6754
+    (Bench 917's ≈1.68 reproduced), spec pair 5.03 tok/s vs ordinary 7.62 (0.66×;
+    was ≈0.06×) — the 70× snapshot tax is O(1×) dead; the remaining 0.34× is the
+    checkpoint + re-forward structure on a CPU pair whose hidden RTT is ~0.3 ms
+    (the linked-pair posture — Tailscale/RDMA, T2.6's ~10 ms RTT — is where the
+    lane's round-trip hiding pays).**
   - **T5.1c — the runner mode + the v0 drafter:** `DraftSource { propose(&mut
     self, ctx) -> &[u32] }` injected into the head; v0 impl = repeat-last-token
     (acceptance ≈ 0 — the honest disclosure: this proves the MACHINERY + the

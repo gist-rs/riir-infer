@@ -13,6 +13,7 @@ use riir_infer_core::gguf_loader::GgufFile;
 use riir_infer_core::multi_host::{FrameDtype, LayerRange, StageHandshake};
 use riir_infer_core::rope::RopeFreqTable;
 use riir_infer_core::types::Config;
+use riir_infer_core::types::DeltaNetLayerType;
 
 /// One layer window of one model. The runner owns the wire; the stage
 /// owns its weights view, cache and scratch.
@@ -278,5 +279,210 @@ impl crate::spec_fill::SpecStage for TernaryCpuStage {
             &self.weights.layer_types,
             self.range,
         )
+    }
+
+    /// In-process exact checkpoint (Issue 1148 rung 2): live attention rows
+    /// `[0..cursor * kv_dim)` + the full GDN recurrence/conv state, copied
+    /// into `ck`'s retained buffers. Byte-exact by construction (pure
+    /// copies); zero allocation once the buffers are warm. `cursor` is the
+    /// runner's count of written KV positions — the ternary forward never
+    /// advances the cache's `fill_pos` tracker, so the tracker is NOT a
+    /// live bound; the runner's cursor is.
+    fn checkpoint_state(
+        &self,
+        cursor: usize,
+        ck: &mut crate::spec_fill::StageCheckpoint,
+    ) -> Result<(), String> {
+        let kvd = self.config.n_kv_head * self.config.head_dim;
+        let live = cursor
+            .checked_mul(kvd)
+            .ok_or("checkpoint: cursor * kv_dim overflow")?;
+        let window = (self.range.hi - self.range.lo) as usize;
+        if ck.layers.is_empty() {
+            // First call: build the kind-matched slots (their buffers grow
+            // into retained capacity on this and every later round).
+            ck.layers.reserve(window);
+            ck.layers.extend(
+                self.weights.layer_types[self.range.lo as usize..self.range.hi as usize]
+                    .iter()
+                    .map(|lt| match lt {
+                        DeltaNetLayerType::Attention => {
+                            crate::spec_fill::CheckpointLayer::Attention {
+                                key: Vec::new(),
+                                value: Vec::new(),
+                            }
+                        }
+                        DeltaNetLayerType::DeltaNet => {
+                            crate::spec_fill::CheckpointLayer::DeltaNet {
+                                rec: Vec::new(),
+                                conv: Vec::new(),
+                            }
+                        }
+                    }),
+            );
+        } else if ck.layers.len() != window {
+            return Err(format!(
+                "checkpoint: ck has {} layers, stage window has {} — a checkpoint cannot move between stages",
+                ck.layers.len(),
+                self.weights.layer_types.len()
+            ));
+        }
+        for (i, lt) in self.weights.layer_types[self.range.lo as usize..self.range.hi as usize]
+            .iter()
+            .enumerate()
+        {
+            let gi = self.range.lo as usize + i;
+            let slot = &mut ck.layers[i];
+            match (*lt, slot) {
+                (
+                    DeltaNetLayerType::Attention,
+                    crate::spec_fill::CheckpointLayer::Attention { key, value },
+                ) => {
+                    if self.cache.kv_cache.sliding_capacity[gi] != 0 {
+                        return Err(format!(
+                            "checkpoint: layer {gi} is sliding-window (ring layout) — the spec rewind is unbounded-only"
+                        ));
+                    }
+                    let layer = &self.cache.kv_cache.layers[gi];
+                    if layer.key.len() < live || layer.value.len() < live {
+                        return Err(format!(
+                            "checkpoint: cursor {cursor} × kv_dim {kvd} = {live} rows > layer {gi} buffer ({})",
+                            layer.key.len()
+                        ));
+                    }
+                    copy_retained(key, &layer.key[..live]);
+                    copy_retained(value, &layer.value[..live]);
+                }
+                (
+                    DeltaNetLayerType::DeltaNet,
+                    crate::spec_fill::CheckpointLayer::DeltaNet { rec, conv },
+                ) => {
+                    copy_retained(rec, &self.cache.deltanet_state.recurrent_states[gi]);
+                    copy_retained(conv, &self.cache.deltanet_state.conv_states[gi]);
+                }
+                (lt, slot) => {
+                    return Err(format!(
+                        "checkpoint: layer {gi} is {lt:?} but the checkpoint slot is {:?} — kinds never renegotiate",
+                        slot.kind_name()
+                    ));
+                }
+            }
+        }
+        ck.cursor = cursor;
+        Ok(())
+    }
+
+    /// Copy a checkpoint back (byte-exact on every restored row; rows
+    /// beyond `ck.cursor` stay stale — the forward reads/writes rows
+    /// positionally and never touches them before rewrite). The `fill_pos`
+    /// tracker is re-armed to `ck.cursor` for consistency with the codec
+    /// path's observable state (the ternary forward itself ignores it).
+    fn restore_checkpoint(&mut self, ck: &crate::spec_fill::StageCheckpoint) -> Result<(), String> {
+        let window = (self.range.hi - self.range.lo) as usize;
+        if ck.layers.len() != window {
+            return Err(format!(
+                "restore_checkpoint: ck has {} layers, stage window has {window}",
+                ck.layers.len()
+            ));
+        }
+        let kvd = self.config.n_kv_head * self.config.head_dim;
+        let live = ck
+            .cursor
+            .checked_mul(kvd)
+            .ok_or("restore_checkpoint: cursor * kv_dim overflow")?;
+        for (i, lt) in self.weights.layer_types[self.range.lo as usize..self.range.hi as usize]
+            .iter()
+            .enumerate()
+        {
+            let gi = self.range.lo as usize + i;
+            match (&ck.layers[i], *lt) {
+                (
+                    crate::spec_fill::CheckpointLayer::Attention { key, value },
+                    DeltaNetLayerType::Attention,
+                ) => {
+                    let layer = &mut self.cache.kv_cache.layers[gi];
+                    if key.len() != live || value.len() != live {
+                        return Err(format!(
+                            "restore_checkpoint: ck rows ({},{}) != cursor {} × kv_dim {kvd}",
+                            key.len(),
+                            value.len(),
+                            ck.cursor
+                        ));
+                    }
+                    if layer.key.len() < live || layer.value.len() < live {
+                        return Err(format!(
+                            "restore_checkpoint: layer {gi} buffer too small for {} live rows",
+                            live
+                        ));
+                    }
+                    layer.key[..live].copy_from_slice(key);
+                    layer.value[..live].copy_from_slice(value);
+                }
+                (
+                    crate::spec_fill::CheckpointLayer::DeltaNet { rec, conv },
+                    DeltaNetLayerType::DeltaNet,
+                ) => {
+                    let dst_rec = &mut self.cache.deltanet_state.recurrent_states[gi];
+                    let dst_conv = &mut self.cache.deltanet_state.conv_states[gi];
+                    if dst_rec.len() != rec.len() || dst_conv.len() != conv.len() {
+                        return Err(format!(
+                            "restore_checkpoint: layer {gi} gdn shape ({},{}) != ck ({},{})",
+                            dst_rec.len(),
+                            dst_conv.len(),
+                            rec.len(),
+                            conv.len()
+                        ));
+                    }
+                    dst_rec.copy_from_slice(rec);
+                    dst_conv.copy_from_slice(conv);
+                }
+                (slot, lt) => {
+                    return Err(format!(
+                        "restore_checkpoint: layer {gi} is {lt:?} but the checkpoint slot is {:?}",
+                        slot.kind_name()
+                    ));
+                }
+            }
+        }
+        self.cache.kv_cache.set_fill_pos(ck.cursor);
+        Ok(())
+    }
+}
+
+/// Copy `src` into a retained buffer: one realloc-free memcpy once warm
+/// (clear keeps the capacity; extend only grows on a genuine shape
+/// change). This is the whole checkpoint cost — Issue 1148's point.
+fn copy_retained(dst: &mut Vec<f32>, src: &[f32]) {
+    dst.clear();
+    dst.extend_from_slice(src);
+}
+
+impl TernaryCpuStage {
+    /// TEST SEAM (#[doc(hidden)]): NaN-poison every attention layer's KV
+    /// rows `[from_pos..to_pos)` — the instrument behind the
+    /// cursor-overwrite truncate-law pin (the G1 battery's
+    /// `kv_cursor_overwrite_truncate_law_nan_poison`). Never called by
+    /// production code.
+    #[doc(hidden)]
+    pub fn poison_kv_rows_beyond(&mut self, from_pos: usize, to_pos: usize) {
+        let kvd = self.config.n_kv_head * self.config.head_dim;
+        for (i, lt) in self.weights.layer_types[self.range.lo as usize..self.range.hi as usize]
+            .iter()
+            .enumerate()
+        {
+            let gi = self.range.lo as usize + i;
+            if *lt != DeltaNetLayerType::Attention {
+                continue;
+            }
+            let layer = &mut self.cache.kv_cache.layers[gi];
+            let lo = from_pos * kvd;
+            let hi = (to_pos * kvd).min(layer.key.len());
+            for v in layer.key[lo..hi].iter_mut() {
+                *v = f32::NAN;
+            }
+            for v in layer.value[lo..hi].iter_mut() {
+                *v = f32::NAN;
+            }
+        }
     }
 }

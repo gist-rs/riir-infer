@@ -26,8 +26,8 @@ use riir_infer_core::types::Config;
 use riir_infer_dist::argmax_first;
 use riir_infer_dist::runner::{HeadOptions, run_local};
 use riir_infer_dist::spec_fill::{
-    RepeatLastDrafter, SpecStage, VerifyReplyData, VerifyRequest, accepted_prefix,
-    decode_verify_reply, encode_verify_reply, run_head_spec, run_tail_spec,
+    CheckpointLayer, RepeatLastDrafter, SpecStage, StageCheckpoint, VerifyReplyData, VerifyRequest,
+    accepted_prefix, decode_verify_reply, encode_verify_reply, run_head_spec, run_tail_spec,
 };
 use riir_infer_dist::spec_mtp::{BmthHead, MtpHeadDrafter};
 use riir_infer_dist::stage::{ArtifactIdentity, StageCompute, TernaryCpuStage};
@@ -326,6 +326,186 @@ fn spec_cpu_stage_round_trips_state() {
         branch_a, branch_b,
         "restore returns the stage to the snapshot cursor"
     );
+}
+
+// ───────── Issue 1148 rung 2: the exact checkpoint fast path ─────────
+
+/// The checkpoint rewind is byte-exact AND equivalent to the codec
+/// rewind: two stages advance identically past a shared cursor, then
+/// rewind — one via [`StageCheckpoint`] (in-process), one via the
+/// `HybridStateSegment` codec — and their next full hidden rows must
+/// match bit-for-bit (f32 bits, not argmax: the pin is the STATE, and the
+/// next row is its observable).
+#[test]
+fn spec_checkpoint_restore_matches_codec_restore_bit_exact() {
+    let (config, w, id) = load("spec_g1_ckcodec");
+    let n = config.n_layer as u32;
+    let empty: [f32; 0] = [];
+    // Extra tokens past the prompt (values are arbitrary — deterministic
+    // forwards on identical states are what the pin needs).
+    let tail = [PROMPT[0], PROMPT[2], PROMPT[4]];
+
+    // Stage A — checkpoint path.
+    let mut a = TernaryCpuStage::new(config.clone(), w.clone(), LayerRange::full(n), id).unwrap();
+    for (pos, &t) in PROMPT.iter().enumerate() {
+        a.step(t, pos, &empty);
+    }
+    let mut ck = StageCheckpoint::default();
+    a.checkpoint_state(PROMPT.len(), &mut ck)
+        .expect("checkpoint");
+    assert_eq!(ck.cursor, PROMPT.len());
+    for (j, &t) in tail.iter().enumerate() {
+        a.step(t, PROMPT.len() + j, &empty);
+    }
+    a.restore_checkpoint(&ck).expect("restore_checkpoint");
+    let a_out = a.step(tail[0], PROMPT.len(), &empty).to_vec();
+
+    // Stage B — codec path, same arc.
+    let mut b = TernaryCpuStage::new(config.clone(), w.clone(), LayerRange::full(n), id).unwrap();
+    for (pos, &t) in PROMPT.iter().enumerate() {
+        b.step(t, pos, &empty);
+    }
+    let mut snap = Vec::new();
+    b.snapshot_state(&mut snap).expect("snapshot");
+    for (j, &t) in tail.iter().enumerate() {
+        b.step(t, PROMPT.len() + j, &empty);
+    }
+    b.restore_state(&snap).expect("restore_state");
+    let b_out = b.step(tail[0], PROMPT.len(), &empty).to_vec();
+
+    assert_eq!(a_out.len(), b_out.len());
+    for (i, (x, y)) in a_out.iter().zip(b_out.iter()).enumerate() {
+        assert_eq!(
+            x.to_bits(),
+            y.to_bits(),
+            "row {i}: checkpoint rewind != codec rewind"
+        );
+    }
+
+    // The retained-buffer reuse arm: a SECOND checkpoint into the same
+    // `ck` (the steady-state posture — every verify round) must restore
+    // identically too. ck2 captures cursor 6 (post-step@5); after its
+    // restore the continuation is the step at POSITION 6 — compared
+    // against b's identical arc (restore → step@5 → step@6).
+    a.checkpoint_state(PROMPT.len() + 1, &mut ck)
+        .expect("checkpoint 2");
+    a.step(tail[1], PROMPT.len() + 1, &empty);
+    a.restore_checkpoint(&ck).expect("restore_checkpoint 2");
+    let a2 = a.step(tail[1], PROMPT.len() + 1, &empty);
+    let b2 = b.step(tail[1], PROMPT.len() + 1, &empty);
+    assert_eq!(a2.len(), b2.len());
+    for (i, (x, y)) in a2.iter().zip(b2.iter()).enumerate() {
+        assert_eq!(
+            x.to_bits(),
+            y.to_bits(),
+            "row {i}: reused-checkpoint rewind diverged"
+        );
+    }
+}
+
+/// THE CURSOR-OVERWRITE TRUNCATE LAW (T5.1b, the plan's named pin, in its
+/// strongest form): rows beyond the rewound cursor are stale-but-unread —
+/// the re-forward rewrites them before any read, so even a NaN POISON
+/// planted past the cursor cannot leak into the continuation. The
+/// checkpoint path restores only rows `[0..cursor)` by design, so this is
+/// the law its correctness rides on: restore_checkpoint + re-forward at
+/// the rewound position must equal a FRESH cache bit-for-bit.
+#[test]
+fn kv_cursor_overwrite_truncate_law_nan_poison() {
+    let (config, w, id) = load("spec_g1_cursorlaw");
+    let n = config.n_layer as u32;
+    let empty: [f32; 0] = [];
+    let poison = 3usize; // the rewound cursor
+    let span = PROMPT.len();
+
+    // Fresh reference: forward the whole prompt on one stage, recording
+    // the full output rows (logits — the last stage's step output) from
+    // `poison` on.
+    let mut fresh =
+        TernaryCpuStage::new(config.clone(), w.clone(), LayerRange::full(n), id).unwrap();
+    let mut reference: Vec<Vec<f32>> = Vec::new();
+    for (pos, &t) in PROMPT.iter().enumerate() {
+        let out = fresh.step(t, pos, &empty);
+        if pos >= poison {
+            reference.push(out.to_vec());
+        }
+    }
+
+    // The rewind arc: forward to `poison`, checkpoint, advance past the
+    // cursor (the verify-shaped writes), POISON every attention layer's
+    // rows [poison..span) with NaN, rewind via the checkpoint (restores
+    // rows [0..poison) + the GDN state, LEAVES the NaN rows stale), then
+    // re-forward — outputs must equal the reference bit-for-bit.
+    let mut a = TernaryCpuStage::new(config.clone(), w.clone(), LayerRange::full(n), id).unwrap();
+    for (pos, &t) in PROMPT.iter().enumerate().take(poison) {
+        a.step(t, pos, &empty);
+    }
+    let mut ck = StageCheckpoint::default();
+    a.checkpoint_state(poison, &mut ck).expect("checkpoint");
+    for (pos, &t) in PROMPT.iter().enumerate().skip(poison) {
+        a.step(t, pos, &empty);
+    }
+    a.poison_kv_rows_beyond(poison, span);
+    a.restore_checkpoint(&ck).expect("restore_checkpoint");
+    for ((i, &t), want) in PROMPT.iter().enumerate().skip(poison).zip(reference.iter()) {
+        let out = a.step(t, i, &empty);
+        for (j, (x, y)) in out.iter().zip(want.iter()).enumerate() {
+            assert_eq!(
+                x.to_bits(),
+                y.to_bits(),
+                "row {i} elem {j}: NaN poison past the cursor leaked into the continuation"
+            );
+        }
+    }
+}
+
+/// Checkpoint refusal arms: kinds never renegotiate; a checkpoint cannot
+/// move between differently-shaped stages; restore validates the cursor
+/// against the captured rows.
+#[test]
+fn spec_checkpoint_shape_refusals() {
+    let (config, w, id) = load("spec_g1_ckrefuse");
+    let n = config.n_layer as u32;
+    let empty: [f32; 0] = [];
+    let mut s = TernaryCpuStage::new(config.clone(), w.clone(), LayerRange::full(n), id).unwrap();
+    for (pos, &t) in PROMPT.iter().enumerate() {
+        s.step(t, pos, &empty);
+    }
+    let mut ck = StageCheckpoint::default();
+    s.checkpoint_state(PROMPT.len(), &mut ck)
+        .expect("checkpoint");
+    // Kind corruption is refused at checkpoint AND restore.
+    let mut bad = StageCheckpoint {
+        cursor: ck.cursor,
+        layers: ck
+            .layers
+            .iter()
+            .map(|l| match l {
+                CheckpointLayer::Attention { .. } => CheckpointLayer::DeltaNet {
+                    rec: Vec::new(),
+                    conv: Vec::new(),
+                },
+                CheckpointLayer::DeltaNet { .. } => CheckpointLayer::Attention {
+                    key: Vec::new(),
+                    value: Vec::new(),
+                },
+            })
+            .collect(),
+    };
+    assert!(s.checkpoint_state(PROMPT.len(), &mut bad).is_err());
+    assert!(s.restore_checkpoint(&bad).is_err());
+    // Cursor/row mismatch at restore.
+    let mut mismatched = StageCheckpoint::default();
+    s.checkpoint_state(PROMPT.len(), &mut mismatched)
+        .expect("ck2");
+    mismatched.cursor += 1;
+    assert!(s.restore_checkpoint(&mismatched).is_err());
+    // A checkpoint from a different-shaped window refuses.
+    let mut other = StageCheckpoint::default();
+    let half =
+        TernaryCpuStage::new(config.clone(), w.clone(), LayerRange::new(0, n / 2), id).unwrap();
+    half.checkpoint_state(1, &mut other).expect("half ck");
+    assert!(s.restore_checkpoint(&other).is_err());
 }
 
 // ───────────────────── T5.1d: the roll-drafter path ─────────────────────
