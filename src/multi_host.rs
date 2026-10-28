@@ -457,10 +457,20 @@ impl HybridStateSegment {
                     let layer = &cache.kv_cache.layers[i];
                     out.extend_from_slice(&[Self::KIND_ATTENTION, 0, 0, 0]);
                     out.extend_from_slice(&(layer.key.len() as u32).to_le_bytes());
+                    // Issue 1148: the KV payload is the snapshot's bulk —
+                    // one cast-slice copy, never a per-f32 append loop (the
+                    // Bench 917 posture measured ~4 s/round here; the wire
+                    // bytes are identical on little-endian).
+                    #[cfg(target_endian = "little")]
+                    out.extend_from_slice(bytemuck::cast_slice(&layer.key));
+                    #[cfg(not(target_endian = "little"))]
                     for v in &layer.key {
                         out.extend_from_slice(&v.to_le_bytes());
                     }
                     out.extend_from_slice(&(layer.value.len() as u32).to_le_bytes());
+                    #[cfg(target_endian = "little")]
+                    out.extend_from_slice(bytemuck::cast_slice(&layer.value));
+                    #[cfg(not(target_endian = "little"))]
                     for v in &layer.value {
                         out.extend_from_slice(&v.to_le_bytes());
                     }
@@ -470,10 +480,16 @@ impl HybridStateSegment {
                     let conv = &cache.deltanet_state.conv_states[i];
                     out.extend_from_slice(&[Self::KIND_DELTANET, 0, 0, 0]);
                     out.extend_from_slice(&(rec.len() as u32).to_le_bytes());
+                    #[cfg(target_endian = "little")]
+                    out.extend_from_slice(bytemuck::cast_slice(rec));
+                    #[cfg(not(target_endian = "little"))]
                     for v in rec {
                         out.extend_from_slice(&v.to_le_bytes());
                     }
                     out.extend_from_slice(&(conv.len() as u32).to_le_bytes());
+                    #[cfg(target_endian = "little")]
+                    out.extend_from_slice(bytemuck::cast_slice(conv));
+                    #[cfg(not(target_endian = "little"))]
                     for v in conv {
                         out.extend_from_slice(&v.to_le_bytes());
                     }
@@ -551,11 +567,25 @@ impl HybridStateSegment {
                             layer.value.len()
                         ));
                     }
-                    for (dst, chunk) in layer.key.iter_mut().zip(key_bytes.as_chunks::<4>().0) {
-                        *dst = f32::from_le_bytes(*chunk);
+                    // Issue 1148 restore half: one bulk copy per buffer
+                    // (the wire bytes are the native LE representation).
+                    #[cfg(target_endian = "little")]
+                    {
+                        layer.key.copy_from_slice(bytemuck::cast_slice(key_bytes));
+                        layer
+                            .value
+                            .copy_from_slice(bytemuck::cast_slice(value_bytes));
                     }
-                    for (dst, chunk) in layer.value.iter_mut().zip(value_bytes.as_chunks::<4>().0) {
-                        *dst = f32::from_le_bytes(*chunk);
+                    #[cfg(not(target_endian = "little"))]
+                    {
+                        for (dst, chunk) in layer.key.iter_mut().zip(key_bytes.as_chunks::<4>().0) {
+                            *dst = f32::from_le_bytes(*chunk);
+                        }
+                        for (dst, chunk) in
+                            layer.value.iter_mut().zip(value_bytes.as_chunks::<4>().0)
+                        {
+                            *dst = f32::from_le_bytes(*chunk);
+                        }
                     }
                 }
                 (Self::KIND_DELTANET, DeltaNetLayerType::DeltaNet) => {
@@ -572,11 +602,19 @@ impl HybridStateSegment {
                             conv.len()
                         ));
                     }
-                    for (dst, chunk) in rec.iter_mut().zip(rec_bytes.as_chunks::<4>().0) {
-                        *dst = f32::from_le_bytes(*chunk);
+                    #[cfg(target_endian = "little")]
+                    {
+                        rec.copy_from_slice(bytemuck::cast_slice(rec_bytes));
+                        conv.copy_from_slice(bytemuck::cast_slice(conv_bytes));
                     }
-                    for (dst, chunk) in conv.iter_mut().zip(conv_bytes.as_chunks::<4>().0) {
-                        *dst = f32::from_le_bytes(*chunk);
+                    #[cfg(not(target_endian = "little"))]
+                    {
+                        for (dst, chunk) in rec.iter_mut().zip(rec_bytes.as_chunks::<4>().0) {
+                            *dst = f32::from_le_bytes(*chunk);
+                        }
+                        for (dst, chunk) in conv.iter_mut().zip(conv_bytes.as_chunks::<4>().0) {
+                            *dst = f32::from_le_bytes(*chunk);
+                        }
                     }
                 }
                 (kind, lt) => {

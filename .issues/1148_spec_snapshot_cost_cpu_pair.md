@@ -1,6 +1,6 @@
 # Issue 1148 — the spec-lane hybrid-state snapshot costs ~4 s/round on the CPU pair (~70× the ordinary decode)
 
-**Status:** OPEN — filed from Bench 917's wall-clock cells; investigation rung, no fix claimed yet
+**Status:** PARTIALLY LANDED 2026-10-28 — the CODEC half is fixed (the per-f32 append loops in `HybridStateSegment::encode_into`/`restore_into` → `bytemuck` bulk copies, byte-identical wire on LE; the same-process re-cell reads 0.86–0.95 tok/s vs 0.23 before — **17–18×**; segment round-trip tests 10/10 + the G1 battery green). The structural half stays OPEN: the fast path is still the plan-named GDN journal rank-1 unwind + an attention KV truncate — a rewind should not serialize state at all
 
 ## The finding
 
@@ -28,13 +28,13 @@ windows + fill marker ≈ tens of MB; ~4 s means the codec is orders off a memcp
 
 ## The rungs
 
-1. Profile one `snapshot_state` at the Bench 917 posture (split 63, 600 positions): where do the
-   4 s go (encode vs alloc vs copy)?
+1. ~~Profile one `snapshot_state`~~ **DONE 2026-10-28** — the 4 s was the per-f32 `extend_from_slice(&v.to_le_bytes())` append loops (encode) and the `as_chunks::<4>` zip loops (restore) over ~46M KV elements at the Bench 917 posture; fixed by `bytemuck::cast_slice` bulk copies (`src/multi_host.rs`, byte-identical LE wire).
 2. The attention KV truncate seam (`truncate_to`) — the T5.1b plan text already named it as the
    alternative to cursor-overwrite; a rewind then only unwinds GDN (journal, rank-1) and truncates
-   KV — no full serialize.
+   KV — no full serialize. **STILL OPEN** (the remaining ~15× to the ordinary pair).
 3. Re-run the Bench 917 tok/s cells at the fast posture; the 70× must fall to O(1×) before any
-   spec-lane perf claim.
+   spec-lane perf claim. **Post-codec-fix re-cell: 0.86–0.95 tok/s (from 0.23) — the structural
+   rungs above own the rest.**
 
 ## Ground rule
 

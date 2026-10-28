@@ -95,11 +95,16 @@ count-based and stands independent of them.
 ## 5. Follow-ups (in yield order)
 
 1. **riir-infer Issue 1148** — the snapshot codec + rewind fast path (journal unwind + KV truncate):
-   unblocks ANY tok/s row for the spec lane.
+   unblocks ANY tok/s row for the spec lane. **CODEC HALF LANDED SAME-DAY** (the per-f32 append
+   loops → bytemuck bulk copies, byte-identical LE wire): the same-process re-cell reads
+   **0.86–0.95 tok/s (from 0.23, ~17–18×)**; and at k=2 the mtp_head row now beats repeat_last on
+   BOTH axes even on the degenerate stream (tok/s 0.975 vs 0.863, E[m] 1.124 vs 1.061, rounds 170
+   vs 180 over 192 tokens) — the trained head is net-positive per-round. The structural half
+   (journal unwind + KV truncate — no serialize at all) owns the remaining ~15×.
 2. Chat-shaped-prompt acceptance re-read (the dflash chat lane's prompts) — the free-stream
    degeneracy above is a raw-text artifact; the serving prompts are chat-shaped, and the head's
    E[m] there is the real scoreboard row.
-3. The 2-box GPU cell at split 63 (amo ⇄ bmo) once 1148 lands — the RTT-amortization axis
-   (rounds/token = 1/E[m]) is the pipeline's real win shape.
+3. The 2-box GPU cell at split 63 (amo ⇄ bmo) once 1148's structural half lands — the
+   RTT-amortization axis (rounds/token = 1/E[m]) is the pipeline's real win shape.
 4. Re-fit consideration: a head fit on the split-63 stream directly (riir-train) would close the
    remaining 10.9-point basis gap; rides owner call after 1148.
