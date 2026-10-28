@@ -23,6 +23,11 @@ head⇄tail overlap on the wire (the reason 128 was chosen, Bench 909). Record: 
 - [x] Ladder 2a: arm the promoted Metal tensor (ktile64 matmul2d) zero-copy prefill GEMM in dist — PROMOTED `54f0dce` (Bench 920); root-caused + fixed the cold-pool corruption it carried (wgpu lazy zero-init, `3bbf275`, the Issue-670-T5 residual) + `FillZerosCubeCL` grid-cap chunking
 - [ ] Ladder 2a confirm: dist pp32768 cell with tensor (`RIIR_DIST_METAL_TENSOR=0` A/B, one binary) in a quiet window
 - [ ] Ladder 2b: the remaining kernel gap (~3.7× vs llama.cpp at w512+tensor) — the tensor GEMM's own efficiency at prefill shapes; census it under the promoted posture before choosing a rung — instrument armed `3cde142` (`I1146C_CHUNK=512 I1146C_FRAMES=4 I1146C_TENSOR=1` on `bench_1146_prefill_frame_census`); the census cell is chained behind the measurement queue on amo
+  - Rung-2b static candidates (read 2026-10-28 from `gemm_ternary_metal_tensor.metal` + `gemm_ternary_metal_zero_copy.rs`; UNMEASURED — the census decides which, if any, is the floor):
+    - **H1 per-GEMM submission tax**: every zero-copy GEMM does `client.flush()` + its own raw command buffer + a blit copy-back of the full P×M f32 output from a dedicated buffer (the aliasing workaround) — one extra write+read of the output per projection, ×~7 projections ×64 layers per frame.
+    - **H2 f32 B operand**: activations enter `matmul2d` as f32 straight from device memory (A is half in threadgroup memory) — mixed-precision tiles, 2× the B bytes of an f16-staged operand (llama.cpp stages f16 in threadgroup memory).
+    - **H3 redundant dequant**: each token-tile workgroup (NRB=128) re-dequantizes the same weight tile — P/128 = 4× redundancy at w512, and dequant + MMA are serialized by two barriers per K-tile (no double buffer).
+    - **H4 scalar dequant**: per element: bit extract + float scale multiply + a bounds check inside the unrolled loop.
 - [ ] Ladder 3: batched embed dequant (55 ms/frame) — CODE LANDED `3f657d0` opt-in `prefill_embed_batched` (`DequantWteRowsCubeCL`, one launch/frame; kernel G1 `issue1146_embed_batched_g1` PASS to_bits); e2e A/B queued (`I1146W_BIN_B` arm of `scripts/i1146_width_recurve.sh`) → promote into the dist `gpu` row if it gains
 
 ## ⟲ 2026-10-28 ~06:4x +07 zed-amo-1146-prefill — MEASURED CORRECTION (Bench 914): the A/B + the census
