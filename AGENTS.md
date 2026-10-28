@@ -164,8 +164,14 @@ layer (~67 fewer dispatches, ~160 MB/layer less traffic), bit-identical by
 construction — G2 e2e pp2048 1.043× / pp4096 1.045× on the m5ultra re-cell,
 post-promotion G1 anchors EXACT at the league posture both lengths. The initial
 toggle value derives from `cfg!(target_os = "macos")` — the `cuda_backend` posture
-keeps the incumbent pair until its own 4090 cell (riir-infer Issue 1149, 4090-queued;
-the GEMV-occupancy per-backend scoping precedent). Env `RIIR_PREFILL_PREWORK_FUSED`
+keeps the incumbent pair until its own 4090 cell — **CLOSED N/A 2026-10-28** (issue 1149,
+`.benchmarks/i1149_prework_cuda_routing`: the toggle is fn-private to the CubeCL forward while
+the cudarc whole-prefill does its GDN prework through four native dispatches —
+conv1d/carry/beta/expand — and structurally never consults it; runtime routing proof `69e7d8e`:
+whole-prefill +0 launches at p=2048+4096 with the arm setter-armed vs the CubeCL fall-through
+lane's +48 — the macOS scoping is PERMANENT, the env stays the fall-through lane's only arm; no
+promotion owed, the Issue-1115 G1/G2 cells subsumed); the GEMV-occupancy per-backend scoping
+precedent. Env `RIIR_PREFILL_PREWORK_FUSED`
 is DEMOTE-only on Metal / promote-only elsewhere; `set_prefill_prework_fused` stays
 the harness arm toggle. R1 (`deltanet_recurrence_smem_staged`) stays opt-in pending
 its pre-authorized second M5 window (riir-ai Issue 1004).
