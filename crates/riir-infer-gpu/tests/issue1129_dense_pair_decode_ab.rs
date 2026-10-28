@@ -47,7 +47,6 @@
     feature = "ternary_gemm_batched",
     feature = "ternary_deltanet_chunked_prefill",
     feature = "ternary_attention_batched_prefill",
-    feature = "riir-infer-core/bonsai2_hadamard",
     not(target_os = "macos")
 ))]
 
