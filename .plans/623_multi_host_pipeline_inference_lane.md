@@ -659,7 +659,7 @@ mlx-lm on the Proposal-042 scoreboard **measured on the same two boxes**.
     overwrite stale rows → a cursor reset is the truncate); if the length lives in
     per-layer implicit cursors, add `truncate_to` — EITHER WAY pin it with a test
     that re-forwards at the rewound position and compares bit-exact to a fresh
-    cache. **LANDED 2026-10-28, MECHANISM SUPERSEDED (riir-infer Issue 1148 close,
+    cache. **LANDED 2026-10-28, MECHANISM SUPERSEDED (riir-infer `ddf4be0`, Issue 1148 close,
     [Bench 918](../.benchmarks/918_issue1148_exact_checkpoint_rewind.md)): the
     rewind is an in-process EXACT checkpoint (`SpecStage::checkpoint_state`/
     `restore_checkpoint`, retained buffers, live KV rows bounded by the runner
