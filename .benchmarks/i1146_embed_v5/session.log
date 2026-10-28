@@ -1,0 +1,27 @@
+[20:03:36] === i1146 width re-curve start (ts 20261028T200336Z) ===
+Mac17,15
+30
+103079215104
+20:03  up 1 day,  2:20, 2 users, load averages: 1.55 1.56 1.65
+Now drawing from 'AC Power'
+[20:04:06] a_g1_w512 rc=0 :: prefill 1024 tok in 3.106s
+[20:04:25] b_g1_w512 rc=0 :: prefill 1024 tok in 3.134s
+[20:04:25] g1 a w=512 generated: [261, 248046, 198, 248045, 198, 2, 220, 16, 13, 220, 96304, 99172, 271, 95772, 8253, 220]
+[20:04:25] g1 b w=512 generated: [261, 248046, 198, 248045, 198, 2, 220, 16, 13, 220, 96304, 99172, 271, 95772, 8253, 220]
+[20:04:25] G1 CROSS-WIDTH PASS
+[20:04:54] a_pp4096_w512_warm rc=0 :: prefill 4096 tok in 13.932s
+[20:05:22] b_pp4096_w512_warm rc=0 :: prefill 4096 tok in 13.888s
+[20:05:50] a_pp4096_w512_r1 rc=0 :: prefill 4096 tok in 13.955s
+[20:06:19] b_pp4096_w512_r1 rc=0 :: prefill 4096 tok in 13.915s
+[20:06:47] a_pp4096_w512_r2 rc=0 :: prefill 4096 tok in 14.001s
+[20:07:15] b_pp4096_w512_r2 rc=0 :: prefill 4096 tok in 13.881s
+[20:07:43] a_pp4096_w512_r3 rc=0 :: prefill 4096 tok in 13.957s
+[20:08:12] b_pp4096_w512_r3 rc=0 :: prefill 4096 tok in 13.927s
+[20:08:12] === summary (timed cells) ===
+[20:08:12] a_pp4096_w512_r1 13.955s 293.5 tok/s
+[20:08:12] a_pp4096_w512_r2 14.001s 292.6 tok/s
+[20:08:12] a_pp4096_w512_r3 13.957s 293.5 tok/s
+[20:08:12] b_pp4096_w512_r1 13.915s 294.4 tok/s
+[20:08:12] b_pp4096_w512_r2 13.881s 295.1 tok/s
+[20:08:12] b_pp4096_w512_r3 13.927s 294.1 tok/s
+[20:08:12] === COMPLETE: /tmp/i1146q/embed_v5 ===
