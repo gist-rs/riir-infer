@@ -606,7 +606,11 @@ mlx-lm on the Proposal-042 scoreboard **measured on the same two boxes**.
   ran at the active 4096; the 1024/2048 override cells + the provider's posted-recv budget
   cliff band [4, 5] MB as a function of MTU are the remaining legs).**
 - [ ] **T3.4** GPU↔comm sync: CPU comm thread on `MTLSharedEvent` signal values; no per-
-  layer command-buffer commit on the critical path.
+  layer command-buffer commit on the critical path. (Unit issue
+  [1151](../.issues/1151_plan623_t34_gpu_comm_sync.md) — the file-level claim lives
+  there; the plan file carries the sibling T3.2/T3.3 claim. Substrate correction
+  recorded in the issue: the signal surface is the staged-copy read future through
+  CubeCL/wgpu, with MTLSharedEvent an optional follow-up.)
 - [ ] **T3.5** Scoreboard rows vs llama.cpp RPC-RDMA and exo/MLX jaccl. (jaccl prose
   comparison exists — Bench 905's 16–22 µs pipelined collective rate vs our 7.7 µs
   ping-pong RTT — but a like-for-like scoreboard row needs the T3.4 serving integration.)
