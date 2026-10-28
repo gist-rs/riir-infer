@@ -1,0 +1,31 @@
+[21:33:07] === i1146 width re-curve start (ts 20261028T213307Z) ===
+Mac17,15
+30
+103079215104
+21:33  up 1 day,  3:49, 2 users, load averages: 0.44 0.92 0.99
+Now drawing from 'AC Power'
+[21:33:36] a_g1_w512 rc=0 :: prefill 1024 tok in 1.366s
+[21:33:52] b_g1_w512 rc=0 :: prefill 1024 tok in 1.639s
+[21:33:52] g1 a w=512 generated: [261, 248046, 198, 248045, 198, 2, 220, 16, 13, 220, 96304, 99172, 271, 95772, 8253, 220]
+[21:33:52] g1 b w=512 generated: [261, 248046, 198, 248045, 198, 2, 220, 16, 13, 220, 96304, 99172, 271, 95772, 8253, 220]
+[21:33:52] G1 CROSS-WIDTH PASS
+[21:34:14] a_pp4096_w512_warm rc=0 :: prefill 4096 tok in 7.085s
+[21:34:35] b_pp4096_w512_warm rc=0 :: prefill 4096 tok in 6.712s
+[21:34:56] a_pp4096_w512_r1 rc=0 :: prefill 4096 tok in 7.094s
+[21:35:17] b_pp4096_w512_r1 rc=0 :: prefill 4096 tok in 6.804s
+[21:37:23] a_pp32768_w512_warm rc=0 :: prefill 32768 tok in 109.887s
+[21:41:56] b_pp32768_w512_warm rc=0 :: prefill 32768 tok in 247.873s
+[21:52:19] a_pp32768_w512_r1 rc=0 :: prefill 32768 tok in 94.700s
+[21:56:17] b_pp32768_w512_r1 rc=0 :: prefill 32768 tok in 221.623s
+[21:56:17] CONTAM pp32768_w512_r1 (try 1) — foreign GPU process during the pair; re-running
+[22:09:40] a_pp32768_w512_r1 rc=0 :: prefill 32768 tok in 93.846s
+[22:12:57] b_pp32768_w512_r1 rc=0 :: prefill 32768 tok in 179.205s
+[22:12:57] CONTAM pp32768_w512_r1 (try 2) — foreign GPU process during the pair; re-running
+[22:16:31] a_pp32768_w512_r1 rc=0 :: prefill 32768 tok in 97.542s
+[22:19:30] b_pp32768_w512_r1 rc=0 :: prefill 32768 tok in 161.117s
+[22:19:30] === summary (timed cells) ===
+[22:19:30] a_pp4096_w512_r1 7.094s 577.4 tok/s
+[22:19:30] b_pp4096_w512_r1 6.804s 602.0 tok/s
+[22:19:30] a_pp32768_w512_r1 97.542s 335.9 tok/s
+[22:19:30] b_pp32768_w512_r1 161.117s 203.4 tok/s
+[22:19:30] === COMPLETE: /tmp/i1146q/attn_cmma ===

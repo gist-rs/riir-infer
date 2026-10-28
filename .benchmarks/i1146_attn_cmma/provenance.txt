@@ -1,0 +1,10 @@
+bin_a: /tmp/dist_v6
+env_a: 
+bin_a_sha256: 3138705fe4683eff2610e2d704001a8a6ebd786905c50ea0e444fe7a39322c88
+bin_b: /tmp/dist_v6
+env_b: RIIR_PREFILL_TILED_FLASH_CMMA=1 RIIR_PREFILL_TILED_FLASH_CMMA_PV=1
+bin_b_sha256: 3138705fe4683eff2610e2d704001a8a6ebd786905c50ea0e444fe7a39322c88
+model: /Users/katopz/models/Ternary-Bonsai-2-27B-PQ2_0.gguf
+model_sha256: 3907dc1658db1f78a9826bf8d5bcb8dc65db0d466388937af57f2294fae62ec1
+widths: 512
+lens: 4096 32768
