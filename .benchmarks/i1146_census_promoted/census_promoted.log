@@ -1,0 +1,44 @@
+
+running 1 test
+test bench_1146_prefill_frame_census ... i1146 census: n_layer 64, prompt 4096 = 8×512, gemm tensor-zerocopy, postures 13
+CubeCL runtime initialized: wgpu<msl>
+[Issue 864] attention KV working set = 512 MiB (block_size 4097 × kvd 1024 × K+V × 16 attention layers) — above the 256 MiB warn line. If the workload never drives this many positions, clamp `config.block_size` to the real sequence bound BEFORE construction (the riir-train driver pattern); the unbounded variant measured a ~50 s first-touch burst at a 262,144-token context (riir-train Bench 573). Steady-state throughput is unaffected.
+[Issue 727] metal-rs GEMM cache skipped (PREFILL_USE_METAL_TENSOR off at construction; set it BEFORE new() to A/B this path)
+[Issue 657] wgpu MSL passthrough GEMM initialized (zero-copy)
+[Issue 1146] matmul2d relaxed_precision = true
+[Issue 663 T5] zero-copy raw-Metal GEMM initialized (device=0x1019f2930, queue=0x101a03cc0)
+[Issue 663 T5] zero-copy raw-Metal weight cache complete.
+never-touched ALL pass: 7.322307168s (915.3 ms/frame)
+bit-identity: never-touched == ALL-first == ALL-after ✓
+
+=== i1146 prefill frame census (ms/frame, 8×512, gemm tensor-zerocopy) ===
+     -deltanet    647.17  Δ   264.63
+    -attention    577.31  Δ   334.48
+          -ffn    604.65  Δ   307.15
+     -gdn_norm    915.97  Δ    -4.17
+    -gdn_rotin    911.93  Δ    -0.14
+  -gdn_prework    839.92  Δ    71.87
+     -gdn_beta    909.51  Δ     2.28
+      -gdn_rec    851.78  Δ    60.01
+     -gdn_post    900.85  Δ    10.94
+ -gdn_residual    911.17  Δ     0.63
+        -embed    903.28  Δ     8.52
+         -tail    911.22  Δ     0.57
+           ALL    911.79  (baseline)
+G-C1 coarse additivity: 915.34 of 911.79 ms/frame attributed; residue -3.55 (scratch alloc + sync + unattributed)
+wide-chunk control: 4×2048 frames read    1.654 ms/token vs    1.781 at 512
+
+projection site timing (submission-side, ALL posture):
+          attn_q      25.24 ms/frame-total  n   179  max   0.256 ms
+         attn_kv       6.22 ms/frame-total  n   179  max   0.082 ms
+   attn_out_proj      61.28 ms/frame-total  n   179  max   0.537 ms
+  gdn_in_proj_qkv     151.96 ms/frame-total  n   537  max  10.967 ms
+   gdn_in_proj_z      18.23 ms/frame-total  n   537  max   0.098 ms
+    gdn_out_proj    2625.53 ms/frame-total  n   537  max 270.889 ms
+        ffn_gate     101.54 ms/frame-total  n   716  max   1.221 ms
+          ffn_up      24.79 ms/frame-total  n   716  max   0.168 ms
+        ffn_down    2380.93 ms/frame-total  n   716  max 282.577 ms
+ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 678.04s
+
