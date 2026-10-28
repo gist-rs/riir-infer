@@ -126,6 +126,21 @@ fn run_arm(
     }
 }
 
+/// The per-arm reach assertion (the vacuous guard): OFF moves the counter by
+/// exactly ZERO, ON by exactly n_layer per `forward_token` call.
+fn assert_reach(tag: &str, arm: &ArmResult, n_layer: usize, pair_on: bool) {
+    let expected = if pair_on {
+        (n_layer * RUNS * (TOKENS + 1)) as u64
+    } else {
+        0
+    };
+    assert_eq!(
+        arm.pair_launches, expected,
+        "{tag}: dense-pair counter moved {} (expected {expected}) — the toggle did not reach exactly the dense-leg dispatch",
+        arm.pair_launches
+    );
+}
+
 #[test]
 #[ignore = "league-model GPU lane — run explicitly on an idle 4090 (load ~6 min + A/B ~4 min)"]
 fn issue1129_dense_pair_decode_ab() {
@@ -190,21 +205,13 @@ fn issue1129_dense_pair_decode_ab() {
     // Leave the promoted default in place (the global posture stays ON).
     riir_infer_gpu::gemv_cubecl::set_dense_pair_fused(true);
 
-    // Reach — the vacuous guard. OFF arms must move the counter by exactly
-    // ZERO; ON arms by exactly n_layer per forward_token call.
+    // Reach — the vacuous guard, per arm (OFF exactly zero; ON exactly
+    // n_layer per forward_token call).
+    assert_reach("off1", &off1, n_layer, false);
+    assert_reach("on1", &on1, n_layer, true);
+    assert_reach("on2", &on2, n_layer, true);
+    assert_reach("off2", &off2, n_layer, false);
     let expected_on = (n_layer * RUNS * (TOKENS + 1)) as u64;
-    for (tag, arm, expected) in [
-        ("off1", &off1, 0u64),
-        ("on1", &on1, expected_on),
-        ("on2", &on2, expected_on),
-        ("off2", &off2, 0u64),
-    ] {
-        assert_eq!(
-            arm.pair_launches, expected,
-            "{tag}: dense-pair counter moved {} (expected {expected}) — the toggle did not reach exactly the dense-leg dispatch",
-            arm.pair_launches
-        );
-    }
 
     // G1 — bit-identity at the model level: run 1's per-token FNV equal
     // across every arm pair (to_bits fold, never tolerance).
