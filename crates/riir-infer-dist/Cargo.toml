@@ -19,6 +19,11 @@ publish = false
 riir-infer-core = { path = "../..", features = ["multi_host", "deltanet_ternary_inference"] }
 blake3 = "1"
 riir-infer-gpu = { path = "../riir-infer-gpu", optional = true, features = ["cubecl_runtime", "ternary_gemv", "multi_host"] }
+# T3.2's MTLBuffer probe ONLY (`verbs_metal` example, `rdma_metal` feature):
+# a shared-storage MTLBuffer's contents() registered as an RDMA MR. One
+# workspace version shared with riir-infer-gpu (the BOUNDARY.md metal row);
+# inert unless the feature is named.
+metal = { version = "0.31", optional = true }
 
 [dev-dependencies]
 # The shared synthetic Bonsai-2 fixture kit (tests/common/synth_bonsai2.rs)
@@ -48,6 +53,23 @@ name = "verbs_ping"
 path = "examples/verbs_ping.rs"
 required-features = ["rdma"]
 
+# T3.2 — the rkey-semantics probe: an RC/UC QP pair exercising RDMA WRITE
+# (+ RDMA READ over RC) against a target-registered MR, plus the per-
+# access-flag rkey grant matrix. macOS only (rides the rdma lane).
+[[example]]
+name = "verbs_write"
+path = "examples/verbs_write.rs"
+required-features = ["rdma"]
+
+# T3.2 — the MTLBuffer registration probe: a shared-storage MTLBuffer's
+# contents() as an RDMA MR, with the GPU↔wire byte-identity checks (GPU
+# blit-filled bytes cross the wire; wire-written bytes are read back by a
+# GPU compute kernel). macOS only; needs Metal + the rdma lane.
+[[example]]
+name = "verbs_metal"
+path = "examples/verbs_metal.rs"
+required-features = ["rdma_metal"]
+
 [features]
 default = []
 # Plan 623 Phase 3 T3.1 — the verbs FFI lane. macOS-ONLY by contract: the
@@ -56,6 +78,10 @@ default = []
 # the feature compiles to nothing — that scoping is deliberate and
 # documented, not a lane.
 rdma = []
+# T3.2's MTLBuffer probe — implies the verbs lane, adds the metal crate
+# (macOS target-scoped by the BOUNDARY.md row; on non-macOS the feature
+# compiles the metal dep to nothing, same inert law as laya-riir-metal).
+rdma_metal = ["dep:metal", "rdma"]
 # The folded (Hadamard-rotated) Bonsai-2 loader — the real PQ2_0 artifact
 # needs it; the synthetic G1 fixture does not.
 bonsai2_hadamard = ["riir-infer-core/bonsai2_hadamard"]

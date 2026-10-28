@@ -96,6 +96,7 @@ pub mod attr_mask {
 pub mod wr_opcode {
     pub const RDMA_WRITE: u32 = 0;
     pub const SEND: u32 = 2;
+    pub const RDMA_READ: u32 = 4;
 }
 
 /// `enum ibv_send_flags`
@@ -110,6 +111,7 @@ pub mod send_flags {
 pub mod wc_opcode {
     pub const SEND: u32 = 0;
     pub const RDMA_WRITE: u32 = 1;
+    pub const RDMA_READ: u32 = 2;
     /// `(opcode & IBV_WC_RECV) != 0` ⇒ a receive.
     pub const RECV: u32 = 1 << 7;
 }
@@ -550,8 +552,7 @@ fn last_dlerror() -> String {
 /// The typed symbol table. Every entry is dlsym'd at open; a missing
 /// symbol is a loud named error (never a null deref later).
 pub struct Syms {
-    pub get_device_list:
-        unsafe extern "C" fn(num_devices: *mut c_int) -> *mut *mut IbvDevice,
+    pub get_device_list: unsafe extern "C" fn(num_devices: *mut c_int) -> *mut *mut IbvDevice,
     pub free_device_list: unsafe extern "C" fn(list: *mut *mut IbvDevice),
     pub get_device_name: unsafe extern "C" fn(device: *mut IbvDevice) -> *const c_char,
     pub get_device_guid: unsafe extern "C" fn(device: *mut IbvDevice) -> u64,
@@ -577,12 +578,8 @@ pub struct Syms {
     pub destroy_cq: unsafe extern "C" fn(*mut IbvCq) -> c_int,
     pub create_qp: unsafe extern "C" fn(*mut IbvPd, *mut IbvQpInitAttr) -> *mut IbvQp,
     pub modify_qp: unsafe extern "C" fn(*mut IbvQp, *mut IbvQpAttr, c_int) -> c_int,
-    pub query_qp: unsafe extern "C" fn(
-        *mut IbvQp,
-        *mut IbvQpAttr,
-        c_int,
-        *mut IbvQpInitAttr,
-    ) -> c_int,
+    pub query_qp:
+        unsafe extern "C" fn(*mut IbvQp, *mut IbvQpAttr, c_int, *mut IbvQpInitAttr) -> c_int,
     pub destroy_qp: unsafe extern "C" fn(*mut IbvQp) -> c_int,
     pub wc_status_str: unsafe extern "C" fn(i32) -> *const c_char,
     /// Keep the dlopen handle alive for the process lifetime. Never

@@ -23,9 +23,9 @@ pub mod ffi;
 
 use core::ffi::c_int;
 use ffi::{
-    attr_mask, link_layer, mtu, port_state, qp_state, qp_type, send_flags, wc_status,
-    IbvContext, IbvCq, IbvDevice, IbvGid, IbvMr, IbvPd, IbvPortAttr, IbvQp,
-    IbvQpAttr, IbvQpCap, IbvQpInitAttr, IbvRecvWr, IbvSge, IbvSendWr, IbvWc, Syms,
+    IbvContext, IbvCq, IbvDevice, IbvGid, IbvMr, IbvPd, IbvPortAttr, IbvQp, IbvQpAttr, IbvQpCap,
+    IbvQpInitAttr, IbvRecvWr, IbvSendWr, IbvSge, IbvWc, Syms, attr_mask, link_layer, mtu,
+    port_state, qp_state, qp_type, send_flags, wc_status,
 };
 
 // ---------------------------------------------------------------------------
@@ -64,7 +64,9 @@ impl Rdma {
                 let s = if name.is_null() {
                     format!("dev{i}")
                 } else {
-                    std::ffi::CStr::from_ptr(name).to_string_lossy().into_owned()
+                    std::ffi::CStr::from_ptr(name)
+                        .to_string_lossy()
+                        .into_owned()
                 };
                 out.push(s);
             }
@@ -222,7 +224,10 @@ impl DevCtx {
     ) -> Result<(u32, [u8; 16]), String> {
         let len = self.query_port(port)?.gid_tbl_len;
         if len <= 0 {
-            return Err(format!("device {} port {port} has an empty GID table", self.dev_name));
+            return Err(format!(
+                "device {} port {port} has an empty GID table",
+                self.dev_name
+            ));
         }
         let mut any_mapped: Option<(u32, [u8; 16])> = None;
         for idx in 0..len as u32 {
@@ -320,8 +325,7 @@ impl ProtDom {
         if len == 0 {
             return Err("reg_mr: zero-length registration refused".into());
         }
-        let mr =
-            unsafe { (self.ctx.rdma.syms.reg_mr)(self.ptr, addr.cast(), len, acc as c_int) };
+        let mr = unsafe { (self.ctx.rdma.syms.reg_mr)(self.ptr, addr.cast(), len, acc as c_int) };
         if mr.is_null() {
             return Err(format!("ibv_reg_mr(len {len}) failed"));
         }
@@ -340,8 +344,13 @@ impl ProtDom {
     /// Create a completion queue with at least `cqe` entries.
     pub fn create_cq(self: &Arc<Self>, cqe: u32) -> Result<CompQ, String> {
         let cq = unsafe {
-            (self.ctx.rdma.syms.create_cq)(self.ctx.ptr, cqe as c_int, std::ptr::null_mut(),
-                std::ptr::null_mut(), 0)
+            (self.ctx.rdma.syms.create_cq)(
+                self.ctx.ptr,
+                cqe as c_int,
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+                0,
+            )
         };
         if cq.is_null() {
             return Err(format!("ibv_create_cq({cqe}) failed"));
@@ -362,21 +371,43 @@ impl ProtDom {
         recv_cq: &Arc<CompQ>,
         cap: IbvQpCap,
     ) -> Result<(Qp, IbvQpCap), String> {
+        Self::create_qp_typed(qp_type::UC, self, send_cq, recv_cq, cap)
+    }
+
+    /// Create an RC queue pair on this PD. Same contract as
+    /// [`ProtDom::create_uc_qp`]; the T3.2 write probe is the first
+    /// consumer (RDMA READ is RC-only, so the probe needs the type).
+    pub fn create_rc_qp(
+        self: &Arc<Self>,
+        send_cq: &Arc<CompQ>,
+        recv_cq: &Arc<CompQ>,
+        cap: IbvQpCap,
+    ) -> Result<(Qp, IbvQpCap), String> {
+        Self::create_qp_typed(qp_type::RC, self, send_cq, recv_cq, cap)
+    }
+
+    fn create_qp_typed(
+        ty: i32,
+        pd: &Arc<ProtDom>,
+        send_cq: &Arc<CompQ>,
+        recv_cq: &Arc<CompQ>,
+        cap: IbvQpCap,
+    ) -> Result<(Qp, IbvQpCap), String> {
         let mut init: IbvQpInitAttr = unsafe { std::mem::zeroed() };
         init.send_cq = send_cq.ptr;
         init.recv_cq = recv_cq.ptr;
         init.cap = cap;
-        init.qp_type = qp_type::UC;
+        init.qp_type = ty;
         init.sq_sig_all = 0;
-        let qp = unsafe { (self.ctx.rdma.syms.create_qp)(self.ptr, &mut init) };
+        let qp = unsafe { (pd.ctx.rdma.syms.create_qp)(pd.ptr, &mut init) };
         if qp.is_null() {
-            return Err("ibv_create_qp(UC) failed".into());
+            return Err(format!("ibv_create_qp(type {ty}) failed"));
         }
         Ok((
             Qp {
-                ctx: self.ctx.clone(),
+                ctx: pd.ctx.clone(),
                 ptr: qp,
-                qp_ty: qp_type::UC,
+                qp_ty: ty,
                 // Owned CQ handles: the QP cannot outlive its CQs. Drop
                 // order is enforced by the Arc chain — destroy_qp (the
                 // struct's own Drop) runs first; the CQs, PD and context
@@ -448,7 +479,9 @@ impl CompQ {
         if out.is_empty() {
             return Ok(0);
         }
-        let n = unsafe { (self.pd.ctx.raw_ctx_ops().poll_cq)(self.ptr, out.len() as c_int, out.as_mut_ptr()) };
+        let n = unsafe {
+            (self.pd.ctx.raw_ctx_ops().poll_cq)(self.ptr, out.len() as c_int, out.as_mut_ptr())
+        };
         if n < 0 {
             let why = if out[0].status != wc_status::SUCCESS {
                 self.pd.ctx.rdma.syms.wc_status(out[0].status)
@@ -535,7 +568,8 @@ impl Qp {
     }
 
     fn modify(&self, attr: &IbvQpAttr, mask: c_int) -> Result<(), String> {
-        let rc = unsafe { (self.ctx.rdma.syms.modify_qp)(self.ptr, attr as *const _ as *mut _, mask) };
+        let rc =
+            unsafe { (self.ctx.rdma.syms.modify_qp)(self.ptr, attr as *const _ as *mut _, mask) };
         if rc != 0 {
             return Err(format!("ibv_modify_qp(mask {mask:#x}) rc={rc}"));
         }
@@ -565,9 +599,7 @@ impl Qp {
         a.dest_qp_num = peer.qpn;
         a.rq_psn = peer.psn & 0x00ff_ffff;
         a.path_mtu = peer.mtu;
-        a.ah_attr.grh.dgid = IbvGid {
-            raw: peer.gid,
-        };
+        a.ah_attr.grh.dgid = IbvGid { raw: peer.gid };
         a.ah_attr.grh.flow_label = 0;
         a.ah_attr.grh.sgid_index = sgid_index;
         a.ah_attr.grh.hop_limit = 64;
@@ -591,29 +623,33 @@ impl Qp {
     /// RTR → RTS (own SQ PSN). The response TIMEOUT attr is RC-only —
     /// the TB provider rejects it on UC with EINVAL (measured on the
     /// amo⇄bmo bring-up, 2026-10-29) — so a UC QP moves with
-    /// STATE|SQ_PSN alone.
+    /// STATE|SQ_PSN alone. An RC QP tries WITH TIMEOUT first and falls
+    /// back to the minimal mask when the provider refuses it (the T3.2
+    /// write probe measured the provider's RC posture; the first error
+    /// is preserved when the fallback also fails).
     pub fn to_rts(&self, sq_psn: u32) -> Result<(), String> {
         let mut a: IbvQpAttr = unsafe { std::mem::zeroed() };
         a.qp_state = qp_state::RTS;
         a.sq_psn = sq_psn & 0x00ff_ffff;
         a.timeout = 14; // ~67 ms responder timeout (log scale, 4.096 µs · 2^n)
-        let mask = if self.qp_ty == qp_type::UC {
-            attr_mask::STATE | attr_mask::SQ_PSN
-        } else {
-            attr_mask::STATE | attr_mask::SQ_PSN | attr_mask::TIMEOUT
-        };
-        self.modify(&a, mask)
+        if self.qp_ty == qp_type::UC {
+            return self.modify(&a, attr_mask::STATE | attr_mask::SQ_PSN);
+        }
+        match self.modify(
+            &a,
+            attr_mask::STATE | attr_mask::SQ_PSN | attr_mask::TIMEOUT,
+        ) {
+            Ok(()) => Ok(()),
+            Err(first) => self
+                .modify(&a, attr_mask::STATE | attr_mask::SQ_PSN)
+                .map_err(|_| first),
+        }
     }
 
     /// Post one SEND from a registered slice. `inline` requires
     /// `len <= granted max_inline_data` (caller checks); with inline the
     /// buffer is consumed by the call and reusable immediately.
-    pub fn post_send(
-        &self,
-        sge: &IbvSge,
-        wr_id: u64,
-        inline: bool,
-    ) -> Result<(), String> {
+    pub fn post_send(&self, sge: &IbvSge, wr_id: u64, inline: bool) -> Result<(), String> {
         let mut wr: IbvSendWr = unsafe { std::mem::zeroed() };
         let mut sge = *sge;
         wr.wr_id = wr_id;
@@ -626,6 +662,62 @@ impl Qp {
         let rc = unsafe { (self.ctx.raw_ctx_ops().post_send)(self.ptr, &mut wr, &mut bad) };
         if rc != 0 {
             return Err(format!("ibv_post_send rc={rc}"));
+        }
+        Ok(())
+    }
+
+    /// Post one RDMA WRITE from a registered local slice to the remote
+    /// range (`remote_addr`, `rkey`). Legal on RC and UC; the completion
+    /// carries `wc_opcode::RDMA_WRITE`. `inline` requires
+    /// `len <= granted max_inline_data`.
+    pub fn post_rdma_write(
+        &self,
+        sge: &IbvSge,
+        remote_addr: u64,
+        rkey: u32,
+        wr_id: u64,
+        inline: bool,
+    ) -> Result<(), String> {
+        let mut wr: IbvSendWr = unsafe { std::mem::zeroed() };
+        let mut sge = *sge;
+        wr.wr_id = wr_id;
+        wr.next = std::ptr::null_mut();
+        wr.sg_list = &mut sge;
+        wr.num_sge = 1;
+        wr.opcode = ffi::wr_opcode::RDMA_WRITE;
+        wr.send_flags = send_flags::SIGNALED | if inline { send_flags::INLINE } else { 0 };
+        wr.wr.rdma = ffi::IbvRdmaPart { remote_addr, rkey };
+        let mut bad: *mut IbvSendWr = std::ptr::null_mut();
+        let rc = unsafe { (self.ctx.raw_ctx_ops().post_send)(self.ptr, &mut wr, &mut bad) };
+        if rc != 0 {
+            return Err(format!("ibv_post_send(RDMA_WRITE) rc={rc}"));
+        }
+        Ok(())
+    }
+
+    /// Post one RDMA READ pulling the remote range (`remote_addr`,
+    /// `rkey`) into a LOCAL_WRITE-registered slice. RC-only (UC has no
+    /// READ responder); the completion carries `wc_opcode::RDMA_READ`.
+    pub fn post_rdma_read(
+        &self,
+        sge: &IbvSge,
+        remote_addr: u64,
+        rkey: u32,
+        wr_id: u64,
+    ) -> Result<(), String> {
+        let mut wr: IbvSendWr = unsafe { std::mem::zeroed() };
+        let mut sge = *sge;
+        wr.wr_id = wr_id;
+        wr.next = std::ptr::null_mut();
+        wr.sg_list = &mut sge;
+        wr.num_sge = 1;
+        wr.opcode = ffi::wr_opcode::RDMA_READ;
+        wr.send_flags = send_flags::SIGNALED;
+        wr.wr.rdma = ffi::IbvRdmaPart { remote_addr, rkey };
+        let mut bad: *mut IbvSendWr = std::ptr::null_mut();
+        let rc = unsafe { (self.ctx.raw_ctx_ops().post_send)(self.ptr, &mut wr, &mut bad) };
+        if rc != 0 {
+            return Err(format!("ibv_post_send(RDMA_READ) rc={rc}"));
         }
         Ok(())
     }
@@ -718,7 +810,8 @@ pub fn random_psn() -> Result<u32, String> {
     use std::io::Read;
     let mut f = std::fs::File::open("/dev/urandom").map_err(|e| format!("open urandom: {e}"))?;
     let mut b = [0u8; 4];
-    f.read_exact(&mut b).map_err(|e| format!("read urandom: {e}"))?;
+    f.read_exact(&mut b)
+        .map_err(|e| format!("read urandom: {e}"))?;
     Ok((u32::from_le_bytes(b)) & 0x00ff_ffff)
 }
 
@@ -769,9 +862,8 @@ pub fn exchange_endpoint(
             "endpoint MAC mismatch — refusing unauthenticated RDMA endpoint",
         ));
     }
-    Endpoint::decode(&p_nonce_ep[32..]).map_err(|e| {
-        std::io::Error::new(std::io::ErrorKind::InvalidData, e)
-    })
+    Endpoint::decode(&p_nonce_ep[32..])
+        .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))
 }
 
 /// Clamp the local path MTU choice: `min(active, override)` with the
@@ -794,9 +886,7 @@ mod tests {
     #[test]
     fn endpoint_round_trip() {
         let ep = Endpoint {
-            gid: [
-                0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0xff, 0xff, 192, 168, 10, 2,
-            ],
+            gid: [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0xff, 0xff, 192, 168, 10, 2],
             qpn: 0x1234_5678,
             psn: 0x00ab_cdef,
             mtu: mtu::MTU_4096,
@@ -843,7 +933,14 @@ mod tests {
         assert_eq!(qp_state::RTR, 2);
         assert_eq!(qp_state::RTS, 3);
         assert_eq!(qp_type::UC, 3);
+        assert_eq!(qp_type::RC, 2);
         assert_eq!(ffi::wc_opcode::RECV, 128);
+        assert_eq!(ffi::wc_opcode::SEND, 0);
+        assert_eq!(ffi::wc_opcode::RDMA_WRITE, 1);
+        assert_eq!(ffi::wc_opcode::RDMA_READ, 2);
+        assert_eq!(ffi::wr_opcode::RDMA_WRITE, 0);
+        assert_eq!(ffi::wr_opcode::SEND, 2);
+        assert_eq!(ffi::wr_opcode::RDMA_READ, 4);
         assert_eq!(send_flags::INLINE, 8);
         assert_eq!(ffi::access::LOCAL_WRITE, 1);
         assert_eq!(link_layer::THUNDERBOLT, 100);
