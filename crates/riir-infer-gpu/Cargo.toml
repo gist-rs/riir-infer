@@ -631,6 +631,11 @@ path = "tests/issue1146_embed_batched_g1.rs"
 required-features = ["prefill_embed_batched"]
 
 [[test]]
+name = "issue1146_attn_tensor_g1"
+path = "tests/issue1146_attn_tensor_g1.rs"
+required-features = ["metal_tensor_gemm", "cubecl_runtime", "ternary_gemm_batched", "ternary_attention_batched_prefill"]
+
+[[test]]
 name = "issue1146_tensor_range_g1"
 path = "tests/issue1146_tensor_range_g1.rs"
 required-features = ["metal_tensor_gemm", "cubecl_runtime", "ternary_gemv", "multi_host", "ternary_gemm_batched", "riir-infer-core/bonsai2_hadamard"]

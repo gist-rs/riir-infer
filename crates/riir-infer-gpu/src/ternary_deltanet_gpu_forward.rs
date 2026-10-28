@@ -3262,6 +3262,14 @@ pub struct TernaryDeltanetGpuForward {
     // device/queue.
     #[cfg(all(feature = "metal_tensor_gemm", target_os = "macos"))]
     metal_zerocopy_gemm: Option<crate::gemm_ternary_metal_zero_copy::MetalTensorZeroCopyGemm>,
+    // Issue 1146 ladder 4(c): the matmul2d flash-attention pipeline, compiled
+    // on first routed use against `metal_zerocopy_gemm`'s device (which also
+    // supplies the shared raw-buffer extraction + wgpu zero-init tracker).
+    // `Some(None)` = compile failed once; the chain falls through for good.
+    #[cfg(all(feature = "metal_tensor_gemm", target_os = "macos"))]
+    metal_tensor_attn: std::sync::OnceLock<
+        Option<crate::attention_prefill_metal_tensor::MetalTensorAttentionPrefill>,
+    >,
 
     // i1138: the hand-MSL field-GEMV lane's decode caches (gate/up concat + down
     // + lm_head), built ONCE at construction when the lane is armed (the
@@ -4394,6 +4402,8 @@ impl TernaryDeltanetGpuForward {
             metal_wgpu_gemm,
             #[cfg(all(feature = "metal_tensor_gemm", target_os = "macos"))]
             metal_zerocopy_gemm,
+            #[cfg(all(feature = "metal_tensor_gemm", target_os = "macos"))]
+            metal_tensor_attn: std::sync::OnceLock::new(),
             #[cfg(all(feature = "metal_tensor_gemm", target_os = "macos"))]
             field_ffn,
             #[cfg(feature = "ane_prefill")]
@@ -7035,6 +7045,65 @@ impl TernaryDeltanetGpuForward {
         }
     }
 
+    /// Issue 1146 ladder 4(c): route one layer's causal gated attention
+    /// through the matmul2d tensor arm when selected and routable. Returns
+    /// whether it dispatched; `false` (deselected, unroutable, no zero-copy
+    /// context, compile or dispatch failure) leaves the CubeCL chain to run.
+    #[cfg(all(feature = "metal_tensor_gemm", target_os = "macos"))]
+    #[allow(clippy::too_many_arguments, reason = "the attn_decode handle set")]
+    fn try_prefill_attn_metal_tensor(
+        &self,
+        query: &cubecl::server::Handle,
+        key: &cubecl::server::Handle,
+        value: &cubecl::server::Handle,
+        gate: &cubecl::server::Handle,
+        out: &cubecl::server::Handle,
+        head_dim: usize,
+        n_head: usize,
+        n_kv: usize,
+        p: usize,
+        base_pos: usize,
+    ) -> bool {
+        use crate::attention_prefill_metal_tensor::{
+            MetalTensorAttentionPrefill, prefill_attn_metal_tensor_enabled,
+        };
+        if !prefill_attn_metal_tensor_enabled()
+            || !MetalTensorAttentionPrefill::routable(head_dim, base_pos, p)
+        {
+            return false;
+        }
+        let Some(gemm) = self.metal_zerocopy_gemm.as_ref() else {
+            return false;
+        };
+        let attn = self.metal_tensor_attn.get_or_init(|| {
+            MetalTensorAttentionPrefill::new(gemm)
+                .inspect_err(|e| eprintln!("[Issue 1146] tensor attention disabled: {e}"))
+                .ok()
+        });
+        let Some(attn) = attn.as_ref() else {
+            return false;
+        };
+        match attn.dispatch(
+            gemm,
+            &self.client,
+            query,
+            key,
+            value,
+            gate,
+            out,
+            n_head,
+            n_kv,
+            p,
+            base_pos,
+        ) {
+            Ok(()) => true,
+            Err(e) => {
+                eprintln!("[Issue 1146] tensor attention dispatch failed ({e}); falling through");
+                false
+            }
+        }
+    }
+
     /// Issue 771 T2c-a / Plan 562: lazily allocate (once) and return the
     /// shared Q8-KV prefill scratch. Sized for `block_size` rows at the
     /// instance's fixed KV geometry; reused across layers within a forward.
@@ -7305,8 +7374,28 @@ impl TernaryDeltanetGpuForward {
                 && hd == 256
                 && self.active_prefill_len >= TILED_FLASH_M32_PIPE_MIN_P;
             let use_tiled = prefill_tiled_flash_enabled() && hd == 256;
+            // Issue 1146 ladder 4(c): the matmul2d tensor arm (OPT-IN,
+            // `RIIR_PREFILL_ATTN_METAL_TENSOR=1`) takes precedence over every
+            // CubeCL arm for routable shapes; any failure falls through.
+            #[cfg(all(feature = "metal_tensor_gemm", target_os = "macos"))]
+            let tensor_attn_done = self.try_prefill_attn_metal_tensor(
+                &scratch.q_b,
+                &kv_read,
+                &vv_read,
+                &scratch.gate_b,
+                &scratch.attn_out_b,
+                hd,
+                n_head,
+                n_kv,
+                p,
+                base_pos,
+            );
+            #[cfg(not(all(feature = "metal_tensor_gemm", target_os = "macos")))]
+            let tensor_attn_done = false;
             unsafe {
-                if use_q8kv {
+                if tensor_attn_done {
+                    // Dispatched on the shared queue by the tensor arm.
+                } else if use_q8kv {
                     // Issue 771 T2c-a / Plan 562: the Q8-KV prefill flash arm
                     // (DEFAULT-OFF tolerance arm; env `RIIR_Q8KV_PREFILL=1`
                     // or the setter). Quantize the full [0, base_pos+p) cache

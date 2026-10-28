@@ -226,6 +226,8 @@ pub mod gemm_ternary_i8_mma_v6_src;
 #[cfg(all(feature = "metal_tensor_gemm", target_os = "macos"))]
 pub mod gemm_ternary_metal_tensor;
 #[cfg(all(feature = "metal_tensor_gemm", target_os = "macos"))]
+pub mod attention_prefill_metal_tensor;
+#[cfg(all(feature = "metal_tensor_gemm", target_os = "macos"))]
 pub mod gemm_ternary_metal_wgpu;
 #[cfg(all(feature = "metal_tensor_gemm", target_os = "macos"))]
 pub mod gemm_ternary_metal_zero_copy;
@@ -362,6 +364,10 @@ pub use gemm_ternary_metal_tensor::MetalTensorGemm;
 pub use gemm_ternary_metal_wgpu::MetalTensorWgpuGemm;
 #[cfg(all(feature = "metal_tensor_gemm", target_os = "macos"))]
 pub use gemm_ternary_metal_zero_copy::{MetalTensorZeroCopyGemm, ZeroCopyWeightCache};
+#[cfg(all(feature = "metal_tensor_gemm", target_os = "macos"))]
+pub use attention_prefill_metal_tensor::{
+    MetalTensorAttentionPrefill, prefill_attn_metal_tensor_enabled, set_prefill_attn_metal_tensor,
+};
 #[cfg(feature = "ternary_gemm_simdgroup")]
 pub use gemm_ternary_simdgroup_cubecl::GemmTernarySimdgroupCubeCL;
 #[cfg(feature = "ternary_gemm_batched")]
