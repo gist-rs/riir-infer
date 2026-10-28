@@ -8,6 +8,21 @@
 
 ## The finding
 
+## ⟲ 2026-10-28 ~16:4x +07 katgpt-rs-71 — rung 1 MEASURED (Bench 919): width 512 = 1.39–1.42× prefill, G1 PASS; default flip pending the 2-box leg
+
+The lease above had been idle for 10 h (last commit 9d2e8a8) and no live session matched it, so this
+session took the next ladder rung (config-class, no kernel overlap with a W-frame lane). The 1-box
+curve on idle bmo, at Bench-914's armed posture: **w512 vs w128 = 1.39× (pp512), 1.40× (pp4096),
+1.42× (pp32768)**. w256 sits between them; w1024 is flat (+1.4% at pp4096). G1: identical generated ids at
+128/256/512/1024. vs llama.cpp: 0.13–0.16× → **0.21–0.23×**. The `dist_stage` GPU default stays 128 until
+the 2-box TB5 cells (`scripts/i1146_width_2box.sh`) show the wider frame does not lose its
+head⇄tail overlap on the wire (the reason 128 was chosen, Bench 909). Record: **[Bench 919](../.benchmarks/919_issue1146_prefill_width_recurve.md)**.
+
+- [x] 1-box width curve 128/256/512/1024 × pp512/4096/32768 + G1 cross-width (Bench 919)
+- [ ] 2-box TB5 leg 128 vs 512 (ABAB) → flip the `dist_stage` GPU default + `runner.rs` doc if it holds
+- [ ] Ladder 2: W-frame ternary GEMM rung (the remaining ~4.5×)
+- [ ] Ladder 3: batched embed dequant (55 ms/frame)
+
 ## ⟲ 2026-10-28 ~06:4x +07 zed-amo-1146-prefill — MEASURED CORRECTION (Bench 914): the A/B + the census
 
 The A/B ran (both postures build, G1 CROSS-POSTURE PASS, incumbent reproduces Bench 911): the

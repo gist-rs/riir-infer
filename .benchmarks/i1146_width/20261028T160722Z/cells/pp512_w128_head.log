@@ -1,0 +1,8 @@
+[head] loaded layers [0, 32) of 64, n_embd 5120, vocab 248320 in 4.8s (backend gpu, ctx 768)
+CubeCL runtime initialized: wgpu<msl>
+[head] sock-buf snd 0 rcv 0
+prompt: 512 tokens × 1 stream(s)
+stream 0: decode 0.00 tok/s (0 steps) prefill 3.039s
+generated: [13]
+text: "."
+prefill 512 tok in 3.039s · decode 0.00 tok/s (0 steps)

@@ -1,0 +1,35 @@
+[16:07:22] === i1146 width re-curve start (ts 20261028T160722Z) ===
+Mac17,15
+30
+103079215104
+16:07  up 22:23, 2 users, load averages: 0.11 0.24 0.28
+Now drawing from 'AC Power'
+[16:07:55] g1_w128 rc=0 :: prefill 1024 tok in 6.331s
+[16:08:14] g1_w256 rc=0 :: prefill 1024 tok in 4.658s
+[16:08:33] g1_w512 rc=0 :: prefill 1024 tok in 4.268s
+[16:08:52] g1_w1024 rc=0 :: prefill 1024 tok in 4.313s
+[16:08:52] g1 w=128 generated: [261, 248046, 198, 248045, 198, 2, 220, 16, 13, 220, 96304, 99172, 271, 95772, 8253, 220]
+[16:08:52] g1 w=256 generated: [261, 248046, 198, 248045, 198, 2, 220, 16, 13, 220, 96304, 99172, 271, 95772, 8253, 220]
+[16:08:52] g1 w=512 generated: [261, 248046, 198, 248045, 198, 2, 220, 16, 13, 220, 96304, 99172, 271, 95772, 8253, 220]
+[16:08:52] g1 w=1024 generated: [261, 248046, 198, 248045, 198, 2, 220, 16, 13, 220, 96304, 99172, 271, 95772, 8253, 220]
+[16:08:52] G1 CROSS-WIDTH PASS
+[16:09:09] pp512_w128_warm rc=0 :: prefill 512 tok in 3.101s
+[16:09:26] pp512_w128 rc=0 :: prefill 512 tok in 3.039s
+[16:09:42] pp512_w256_warm rc=0 :: prefill 512 tok in 2.295s
+[16:09:59] pp512_w256 rc=0 :: prefill 512 tok in 2.320s
+[16:10:15] pp512_w512_warm rc=0 :: prefill 512 tok in 2.252s
+[16:10:31] pp512_w512 rc=0 :: prefill 512 tok in 2.185s
+[16:11:11] pp4096_w128_warm rc=0 :: prefill 4096 tok in 25.620s
+[16:11:50] pp4096_w128 rc=0 :: prefill 4096 tok in 25.696s
+[16:12:25] pp4096_w256_warm rc=0 :: prefill 4096 tok in 20.257s
+[16:12:59] pp4096_w256 rc=0 :: prefill 4096 tok in 20.311s
+[16:13:31] pp4096_w512_warm rc=0 :: prefill 4096 tok in 18.359s
+[16:14:04] pp4096_w512 rc=0 :: prefill 4096 tok in 18.400s
+[16:14:36] pp4096_w1024_warm rc=0 :: prefill 4096 tok in 18.200s
+[16:15:08] pp4096_w1024 rc=0 :: prefill 4096 tok in 18.140s
+[16:19:44] pp32768_w128_warm rc=0 :: prefill 32768 tok in 260.724s
+[16:24:21] pp32768_w128 rc=0 :: prefill 32768 tok in 260.564s
+[16:28:07] pp32768_w256_warm rc=0 :: prefill 32768 tok in 210.718s
+[16:31:52] pp32768_w256 rc=0 :: prefill 32768 tok in 209.835s
+[16:35:11] pp32768_w512_warm rc=0 :: prefill 32768 tok in 183.896s
+[16:40:27] pp32768_w512 rc=0 :: prefill 32768 tok in 300.899s

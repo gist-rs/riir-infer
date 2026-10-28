@@ -1,0 +1,9 @@
+[head] loaded layers [0, 32) of 64, n_embd 5120, vocab 248320 in 4.8s (backend gpu, ctx 1280)
+CubeCL runtime initialized: wgpu<msl>
+[head] sock-buf snd 0 rcv 0
+[norm_rot_multi] REACH: the multi-cube fused norm+rotate staging dispatched
+prompt: 1024 tokens × 1 stream(s)
+stream 0: decode 27.79 tok/s (15 steps) prefill 4.268s
+generated: [261, 248046, 198, 248045, 198, 2, 220, 16, 13, 220, 96304, 99172, 271, 95772, 8253, 220]
+text: "er<|im_end|>\n<|im_start|>\n# 1. 问题描述\n\n在 Android "
+prefill 1024 tok in 4.268s · decode 27.79 tok/s (15 steps)

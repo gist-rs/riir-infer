@@ -1,0 +1,6 @@
+bin: /tmp/dist_stage
+bin_sha256: 40647de5549f6b53c49c72689ac4dd959c7856d15cc665b78e396b724c5d4c78
+model: /Users/katopz/models/Ternary-Bonsai-2-27B-PQ2_0.gguf
+model_sha256: 3907dc1658db1f78a9826bf8d5bcb8dc65db0d466388937af57f2294fae62ec1
+widths: 128 256 512 1024
+lens: 512 4096 32768
