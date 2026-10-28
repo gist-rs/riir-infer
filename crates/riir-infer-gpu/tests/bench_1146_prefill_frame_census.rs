@@ -32,7 +32,11 @@
 //! ```
 //!
 //! Env: `BONSAI2_G1_MODEL` overrides the sibling-layout default (the same
-//! override the plan-623 G1 gate uses).
+//! override the plan-623 G1 gate uses). Rung-2b posture knobs (Issue 1146):
+//! `I1146C_CHUNK` (frame width, default 128), `I1146C_FRAMES` (default 8),
+//! `I1146C_TENSOR=1` arms the promoted Metal-tensor zero-copy prefill GEMM
+//! (the dist `gpu` row's posture since `54f0dce`; needs `metal_tensor_gemm`
+//! on macOS — refused loud otherwise, never silently measured as simdgroup).
 
 #![cfg(all(
     feature = "cubecl_runtime",
@@ -57,11 +61,41 @@ use riir_infer_gpu::ternary_deltanet_gpu_forward::{
 
 const FOLDED_MODEL: &str = "../../../riir-train/data/Ternary-Bonsai-2-27B-PQ2_0.gguf";
 
-/// Chunk width — the shipped serving width (Bench 911's per-frame floor
-/// posture). The wide-chunk comparison re-runs the ALL posture at 4× this.
+/// Default chunk width — the Bench-911 per-frame floor posture
+/// (`I1146C_CHUNK` overrides). The wide-chunk comparison re-runs the ALL
+/// posture at 4× the chosen width.
 const CHUNK: usize = 128;
-/// Frames per pass (total prompt = CHUNK × FRAMES tokens).
+/// Default frames per pass (total prompt = chunk × frames; `I1146C_FRAMES`).
 const FRAMES: usize = 8;
+
+fn env_usize(key: &str, default: usize) -> usize {
+    match std::env::var(key) {
+        Ok(v) => v
+            .parse()
+            .unwrap_or_else(|_| panic!("{key}={v}: not a positive integer")),
+        Err(_) => default,
+    }
+}
+
+/// Arms the tensor zero-copy GEMM when `I1146C_TENSOR=1`; returns the posture
+/// label. A build that cannot arm it REFUSES rather than measuring the
+/// simdgroup body under a tensor label.
+fn arm_tensor_posture() -> &'static str {
+    let want = std::env::var("I1146C_TENSOR").as_deref() == Ok("1");
+    #[cfg(all(feature = "metal_tensor_gemm", target_os = "macos"))]
+    {
+        riir_infer_gpu::set_prefill_use_metal_tensor_zerocopy(want);
+    }
+    #[cfg(not(all(feature = "metal_tensor_gemm", target_os = "macos")))]
+    assert!(
+        !want,
+        "I1146C_TENSOR=1 needs --features metal_tensor_gemm on macOS"
+    );
+    match want {
+        true => "tensor-zerocopy",
+        false => "simdgroup",
+    }
+}
 /// Untimed compile passes per posture (kernel JIT + cache warm). Two: the
 /// first pass compiles the posture's kernel set, the second settles the
 /// CubeCL pipeline caches — the census's first run measured the ALL baseline
@@ -206,15 +240,22 @@ fn bench_1146_prefill_frame_census() {
         "{}: not a Hadamard-folded file",
         model.display()
     );
-    let prompt_len = CHUNK * FRAMES;
+    let chunk = env_usize("I1146C_CHUNK", CHUNK);
+    let frames = env_usize("I1146C_FRAMES", FRAMES);
+    assert!(
+        chunk > 0 && frames > 0,
+        "I1146C_CHUNK/I1146C_FRAMES must be > 0"
+    );
+    let gemm = arm_tensor_posture();
+    let prompt_len = chunk * frames;
     let mut config = config;
     config.block_size = prompt_len + 1;
     let n_layer = config.n_layer;
     let bos = config.vocab_size / 2;
     let toks = tokens(prompt_len, bos, config.vocab_size);
     println!(
-        "i1146 census: n_layer {n_layer}, prompt {prompt_len} = {FRAMES}×{CHUNK}, \
-         postures {}",
+        "i1146 census: n_layer {n_layer}, prompt {prompt_len} = {frames}×{chunk}, \
+         gemm {gemm}, postures {}",
         postures().len()
     );
 
@@ -223,11 +264,11 @@ fn bench_1146_prefill_frame_census() {
 
     // ── Bit-identity anchor: the never-touched run, before any mask call. ──
     fwd.reset_state();
-    let (w0, bits_never) = run_pass(&mut fwd, &toks, CHUNK, n_layer);
+    let (w0, bits_never) = run_pass(&mut fwd, &toks, chunk, n_layer);
     println!(
         "never-touched ALL pass: {:?} ({:.1} ms/frame)",
         w0,
-        w0.as_secs_f64() * 1e3 / FRAMES as f64
+        w0.as_secs_f64() * 1e3 / frames as f64
     );
 
     // The all-bits baseline + the strips. First ALL run doubles as the
@@ -244,13 +285,13 @@ fn bench_1146_prefill_frame_census() {
         }
         fwd.reset_state();
         for _ in 0..WARMUP_PASSES {
-            run_pass(&mut fwd, &toks, CHUNK, n_layer);
+            run_pass(&mut fwd, &toks, chunk, n_layer);
         }
         let mut total = Duration::ZERO;
         let mut last_bits = Vec::new();
         for _ in 0..TIMED_PASSES {
             fwd.reset_state();
-            let (w, bits) = run_pass(&mut fwd, &toks, CHUNK, n_layer);
+            let (w, bits) = run_pass(&mut fwd, &toks, chunk, n_layer);
             total += w;
             last_bits = bits;
         }
@@ -258,14 +299,14 @@ fn bench_1146_prefill_frame_census() {
             set_prefill_site_timing_armed(false);
             all_bits_first = last_bits;
         }
-        let per_frame = total.as_secs_f64() * 1e3 / (TIMED_PASSES * FRAMES) as f64;
+        let per_frame = total.as_secs_f64() * 1e3 / (TIMED_PASSES * frames) as f64;
         results.push((posture.name, per_frame));
     }
     set_prefill_stage_mask(PREFILL_STAGE_ALL);
 
     // ── Third identity anchor: ALL again AFTER every strip ran. ──
     fwd.reset_state();
-    let (_, bits_after) = run_pass(&mut fwd, &toks, CHUNK, n_layer);
+    let (_, bits_after) = run_pass(&mut fwd, &toks, chunk, n_layer);
     assert!(
         bits_never == all_bits_first && all_bits_first == bits_after,
         "i1146: the mask machinery moved a token — bit-identity anchors disagree"
@@ -277,12 +318,12 @@ fn bench_1146_prefill_frame_census() {
     set_prefill_stage_mask(PREFILL_STAGE_ALL);
     fwd.reset_state();
     for _ in 0..WARMUP_PASSES {
-        run_pass(&mut fwd, &toks, CHUNK * 4, n_layer);
+        run_pass(&mut fwd, &toks, chunk * 4, n_layer);
     }
     let mut wide = Duration::ZERO;
     for _ in 0..TIMED_PASSES {
         fwd.reset_state();
-        let (w, _) = run_pass(&mut fwd, &toks, CHUNK * 4, n_layer);
+        let (w, _) = run_pass(&mut fwd, &toks, chunk * 4, n_layer);
         wide += w;
     }
     let wide_per_tok = wide.as_secs_f64() * 1e3 / (TIMED_PASSES * prompt_len) as f64;
@@ -294,8 +335,8 @@ fn bench_1146_prefill_frame_census() {
         .map(|(_, ms)| *ms)
         .expect("ALL posture present");
     println!(
-        "\n=== i1146 prefill frame census (ms/frame, {}×{}) ===",
-        FRAMES, CHUNK
+        "\n=== i1146 prefill frame census (ms/frame, {}×{}, gemm {}) ===",
+        frames, chunk, gemm
     );
     for (name, ms) in &results {
         if *name == "ALL" {
@@ -318,10 +359,10 @@ fn bench_1146_prefill_frame_census() {
     );
     println!(
         "wide-chunk control: 4×{} frames read {:8.3} ms/token vs {:8.3} at {}",
-        CHUNK * 4,
+        chunk * 4,
         wide_per_tok,
-        all_ms / CHUNK as f64,
-        CHUNK
+        all_ms / chunk as f64,
+        chunk
     );
 
     let rows = prefill_site_timing_snapshot();
