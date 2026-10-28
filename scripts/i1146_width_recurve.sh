@@ -45,7 +45,14 @@ env_of() { case "$1" in a) echo "${I1146W_ENV_A:-}" ;; b) echo "${I1146W_ENV_B:-
 
 say "=== i1146 width re-curve start (ts $TS) ==="
 { sysctl -n hw.model hw.ncpu hw.memsize; uptime; pmset -g batt | head -1; } 2>/dev/null | tee -a "$LOG"
-QUIET=$(ps aux | grep -Ei 'llama|mlx|dist_stage|ggml|bench_' | grep -v grep | grep -v i1146_width || true)
+# Foreign GPU users: everything matching the GPU pattern except this rig and
+# its own binaries (perf_rematch.sh's idle wrapper is deliberately NOT a
+# match — only the processes that actually hold the GPU are).
+foreign_gpu() {
+  ps aux | grep -Ei 'llama|mlx|dist_stage|ggml|bench_' | grep -v grep | grep -v i1146_ \
+    | grep -vF "$BIN_A" | { [ -n "$BIN_B" ] && grep -vF "$BIN_B" || cat; } || true
+}
+QUIET=$(foreign_gpu)
 if [ -n "$QUIET" ] && [ "${I1146W_FORCE:-0}" != "1" ]; then
   say "REFUSED: GPU not quiet:"; echo "$QUIET" | tee -a "$LOG"; exit 2
 fi
@@ -81,6 +88,32 @@ run_cell() { # $1 arm $2 name $3 ids $4 max-new $5 ctx $6+ extra
   say "$name rc=$rc :: $pf"
 }
 
+# Per-pair contention guard: a 90 s quiet window at step start cannot protect
+# an ~8-min A/B from a foreign GPU job that starts mid-run (measured: a league
+# bench_809 row landed 30 s in and inflated every later cell 4-10x). Each timed
+# a/b PAIR waits for GPU-quiet, a sampler watches it, and a pair a foreign GPU
+# process touched is logged CONTAM and re-run (I1146W_RETRIES, default 3).
+# I1146W_FORCE=1 disables the guard (G1-only runs).
+timed_pair() { # $1 cell-name-suffix $2 ids $3 ctx $4+ extra
+  local suffix="$1" ids="$2" ctx="$3"; shift 3
+  local try=1 flag="$OUT/.contam"
+  while :; do
+    if [ "${I1146W_FORCE:-0}" != "1" ]; then
+      until [ -z "$(foreign_gpu)" ]; do sleep 15; done
+    fi
+    rm -f "$flag"
+    ( while :; do [ -n "$(foreign_gpu)" ] && touch "$flag"; sleep 3; done ) &
+    local sampler=$!
+    for x in $ARMS; do run_cell "$x" "${x}_${suffix}" "$ids" 1 "$ctx" "$@"; done
+    kill $sampler 2>/dev/null; wait $sampler 2>/dev/null
+    if [ ! -e "$flag" ] || [ "${I1146W_FORCE:-0}" = "1" ]; then return 0; fi
+    say "CONTAM ${suffix} (try $try) — foreign GPU process during the pair; re-running"
+    for x in $ARMS; do mv -f "$CELLS/${x}_${suffix}_head.log" "$CELLS/${x}_${suffix}_contam${try}_head.log.x" 2>/dev/null; done
+    try=$((try+1))
+    [ $try -gt "${I1146W_RETRIES:-3}" ] && { say "CONTAM ${suffix}: retries exhausted — pair DISCARDED"; for x in $ARMS; do rm -f "$CELLS/${x}_${suffix}_head.log"; done; return 1; }
+  done
+}
+
 ids_of() { python3 -c "print(','.join(str(7+(i*7919)%50000) for i in range($1)))"; }
 
 # ── G1: pp1024 + 16 decode tokens per width ──
@@ -109,7 +142,7 @@ for P in $LENS; do
     for x in $ARMS; do run_cell "$x" "${x}_pp${P}_w${W}_warm" "$IDS" 1 $((P + 256)) --prefill-chunk "$W"; done
     r=1
     while [ $r -le "$REPS" ]; do
-      for x in $ARMS; do run_cell "$x" "${x}_pp${P}_w${W}_r${r}" "$IDS" 1 $((P + 256)) --prefill-chunk "$W"; done
+      timed_pair "pp${P}_w${W}_r${r}" "$IDS" $((P + 256)) --prefill-chunk "$W"
       r=$((r+1))
     done
   done
