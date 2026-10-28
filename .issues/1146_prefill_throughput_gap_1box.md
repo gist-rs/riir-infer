@@ -1,6 +1,6 @@
 # Issue 1146: 1-box prefill throughput gap — 6–8× behind the incumbents (T0.3 finding)
 
-**Status:** OPEN — gap MEASURED (Bench 911); root-cause chain CORRECTED BY MEASUREMENT (Bench 914): the feature-row omission was real but MINOR (fix engaged, G1 pass, 1.09×) — the dispatch-storm hypothesis REFUTED; the census (914) attributes the floor to the M=128 ternary batch GEMM classes (FFN 65% + DeltaNet 25%) with a live 1.55× wide-chunk lever; ladder = width re-curve + W-frame rung
+**Status:** OPEN — gap MEASURED (Bench 911) → census (914) → rung 1 width 512 = 1.39–1.42× (919, default flip pending the 2-box leg) → rung 2a tensor zero-copy GEMM PROMOTED into the dist `gpu` row (920, `54f0dce`; 1.21–1.34×, G1 exact after the wgpu zero-init root-cause fix `3bbf275`). Stacked: 0.13–0.16× → ~0.26–0.27× of llama.cpp. Remaining ~3.7× = rung 2b (kernel), rung 3 (embed A/B queued)
 **Claimed:** zed-amo-1146-prefill, 1793133500, expires 2026-10-29T20:45:00+00:00
 **Date:** 2026-10-28
 **Found by:** [`.benchmarks/911_plan623_t03_arms.md`](../.benchmarks/911_plan623_t03_arms.md) (Plan 623 T0.3, bmo idle, one session)
@@ -20,7 +20,9 @@ head⇄tail overlap on the wire (the reason 128 was chosen, Bench 909). Record: 
 
 - [x] 1-box width curve 128/256/512/1024 × pp512/4096/32768 + G1 cross-width (Bench 919)
 - [ ] 2-box TB5 leg 128 vs 512 (ABAB) → flip the `dist_stage` GPU default + `runner.rs` doc if it holds
-- [ ] Ladder 2: W-frame ternary GEMM rung (the remaining ~4.5×)
+- [x] Ladder 2a: arm the promoted Metal tensor (ktile64 matmul2d) zero-copy prefill GEMM in dist — PROMOTED `54f0dce` (Bench 920); root-caused + fixed the cold-pool corruption it carried (wgpu lazy zero-init, `3bbf275`, the Issue-670-T5 residual) + `FillZerosCubeCL` grid-cap chunking
+- [ ] Ladder 2a confirm: dist pp32768 cell with tensor (`RIIR_DIST_METAL_TENSOR=0` A/B, one binary) in a quiet window
+- [ ] Ladder 2b: the remaining kernel gap (~3.7× vs llama.cpp at w512+tensor) — the tensor GEMM's own efficiency at prefill shapes; census it under the promoted posture before choosing a rung
 - [ ] Ladder 3: batched embed dequant (55 ms/frame) — CODE LANDED `3f657d0` opt-in `prefill_embed_batched` (`DequantWteRowsCubeCL`, one launch/frame; kernel G1 `issue1146_embed_batched_g1` PASS to_bits); e2e A/B queued (`I1146W_BIN_B` arm of `scripts/i1146_width_recurve.sh`) → promote into the dist `gpu` row if it gains
 
 ## ⟲ 2026-10-28 ~06:4x +07 zed-amo-1146-prefill — MEASURED CORRECTION (Bench 914): the A/B + the census

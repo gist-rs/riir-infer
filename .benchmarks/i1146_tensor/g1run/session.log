@@ -1,0 +1,32 @@
+[17:27:11] === i1146 width re-curve start (ts 20261028T172711Z) ===
+Mac17,15
+30
+103079215104
+17:27  up 23:43, 2 users, load averages: 0.40 1.27 1.37
+Now drawing from 'AC Power'
+[17:28:16] a_g1_w128 rc=0 :: prefill 1024 tok in 25.128s
+[17:29:04] b_g1_w128 rc=0 :: prefill 1024 tok in 24.928s
+[17:29:54] a_g1_w512 rc=0 :: prefill 1024 tok in 22.325s
+[17:30:50] b_g1_w512 rc=0 :: prefill 1024 tok in 24.446s
+[17:30:51] g1 a w=128 generated: [261, 248046, 198, 248045, 198, 2, 220, 16, 13, 220, 96304, 99172, 271, 95772, 8253, 220]
+[17:30:51] g1 b w=128 generated: [261, 248046, 198, 248045, 198, 2, 220, 16, 13, 220, 96304, 99172, 271, 95772, 8253, 220]
+[17:30:51] g1 a w=512 generated: [261, 248046, 198, 248045, 198, 2, 220, 16, 13, 220, 96304, 99172, 271, 95772, 8253, 220]
+[17:30:51] g1 b w=512 generated: [261, 248046, 198, 248045, 198, 2, 220, 16, 13, 220, 96304, 99172, 271, 95772, 8253, 220]
+[17:30:51] G1 CROSS-WIDTH PASS
+[17:31:24] a_pp512_w128_warm rc=0 :: prefill 512 tok in 10.676s
+[17:31:48] b_pp512_w128_warm rc=0 :: prefill 512 tok in 4.691s
+[17:32:21] a_pp512_w128_r1 rc=0 :: prefill 512 tok in 15.976s
+[17:32:56] b_pp512_w128_r1 rc=0 :: prefill 512 tok in 15.360s
+[17:33:32] a_pp512_w512_warm rc=0 :: prefill 512 tok in 16.941s
+[17:34:04] b_pp512_w512_warm rc=0 :: prefill 512 tok in 14.474s
+[17:34:31] a_pp512_w512_r1 rc=0 :: prefill 512 tok in 9.096s
+[17:35:02] b_pp512_w512_r1 rc=0 :: prefill 512 tok in 11.904s
+[17:36:11] a_pp4096_w128_warm rc=0 :: prefill 4096 tok in 49.237s
+[17:37:33] b_pp4096_w128_warm rc=0 :: prefill 4096 tok in 63.700s
+[17:38:33] a_pp4096_w128_r1 rc=0 :: prefill 4096 tok in 41.180s
+[17:39:07] b_pp4096_w128_r1 rc=0 :: prefill 4096 tok in 20.020s
+[17:39:40] a_pp4096_w512_warm rc=0 :: prefill 4096 tok in 18.398s
+[17:40:09] b_pp4096_w512_warm rc=0 :: prefill 4096 tok in 15.240s
+[17:40:42] a_pp4096_w512_r1 rc=0 :: prefill 4096 tok in 18.469s
+[17:41:11] b_pp4096_w512_r1 rc=0 :: prefill 4096 tok in 15.214s
+[17:45:47] a_pp32768_w128_warm rc=0 :: prefill 32768 tok in 260.765s

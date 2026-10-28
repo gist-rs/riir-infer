@@ -1,0 +1,8 @@
+bin_a: /tmp/dist_stage
+bin_a_sha256: 40647de5549f6b53c49c72689ac4dd959c7856d15cc665b78e396b724c5d4c78
+bin_b: /tmp/dist_stage_tensor
+bin_b_sha256: 4c9e6f6445f9afa6438721ac327f5a7e3220973e718a2aa4fa7895b8b2dc89e0
+model: /Users/katopz/models/Ternary-Bonsai-2-27B-PQ2_0.gguf
+model_sha256: 3907dc1658db1f78a9826bf8d5bcb8dc65db0d466388937af57f2294fae62ec1
+widths: 128 512
+lens: 512 4096 32768

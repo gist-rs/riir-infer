@@ -1,0 +1,38 @@
+[16:56:05] === i1146 width re-curve start (ts 20261028T165605Z) ===
+Mac17,15
+30
+103079215104
+16:56  up 23:12, 2 users, load averages: 0.14 0.55 1.17
+Now drawing from 'AC Power'
+[16:56:39] a_g1_w128 rc=0 :: prefill 1024 tok in 6.075s
+[16:57:00] b_g1_w128 rc=0 :: prefill 1024 tok in 4.565s
+[16:57:19] a_g1_w512 rc=0 :: prefill 1024 tok in 4.364s
+[16:57:37] b_g1_w512 rc=0 :: prefill 1024 tok in 3.427s
+[16:57:37] g1 a w=128 generated: [261, 248046, 198, 248045, 198, 2, 220, 16, 13, 220, 96304, 99172, 271, 95772, 8253, 220]
+[16:57:37] g1 b w=128 generated: [68, 13, 197, 197, 13, 197, 13, 197, 13, 197, 13, 197, 13, 197, 13, 197]
+[16:57:37] g1 a w=512 generated: [261, 248046, 198, 248045, 198, 2, 220, 16, 13, 220, 96304, 99172, 271, 95772, 8253, 220]
+[16:57:37] g1 b w=512 generated: [68, 62, 197, 197, 62, 197, 62, 197, 62, 197, 62, 197, 62, 197, 62, 197]
+[16:57:37] G1 CROSS-WIDTH FAIL
+[16:57:54] a_pp512_w128_warm rc=0 :: prefill 512 tok in 3.046s
+[16:58:11] b_pp512_w128_warm rc=0 :: prefill 512 tok in 2.289s
+[16:58:28] a_pp512_w128_r1 rc=0 :: prefill 512 tok in 3.030s
+[16:58:44] b_pp512_w128_r1 rc=0 :: prefill 512 tok in 2.274s
+[16:59:02] a_pp512_w128_r2 rc=0 :: prefill 512 tok in 3.052s
+[16:59:18] b_pp512_w128_r2 rc=0 :: prefill 512 tok in 2.272s
+[16:59:35] a_pp512_w512_warm rc=0 :: prefill 512 tok in 2.248s
+[16:59:51] b_pp512_w512_warm rc=0 :: prefill 512 tok in 1.748s
+[17:00:07] a_pp512_w512_r1 rc=0 :: prefill 512 tok in 2.259s
+[17:00:23] b_pp512_w512_r1 rc=0 :: prefill 512 tok in 1.750s
+[17:00:39] a_pp512_w512_r2 rc=0 :: prefill 512 tok in 2.238s
+[17:00:55] b_pp512_w512_r2 rc=0 :: prefill 512 tok in 1.752s
+[17:01:35] a_pp4096_w128_warm rc=0 :: prefill 4096 tok in 25.623s
+[17:02:10] b_pp4096_w128_warm rc=0 :: prefill 4096 tok in 20.003s
+[17:02:50] a_pp4096_w128_r1 rc=0 :: prefill 4096 tok in 25.644s
+[17:03:24] b_pp4096_w128_r1 rc=0 :: prefill 4096 tok in 19.971s
+[17:04:04] a_pp4096_w128_r2 rc=0 :: prefill 4096 tok in 25.618s
+[17:04:38] b_pp4096_w128_r2 rc=0 :: prefill 4096 tok in 20.000s
+[17:05:11] a_pp4096_w512_warm rc=0 :: prefill 4096 tok in 18.501s
+[17:05:40] b_pp4096_w512_warm rc=0 :: prefill 4096 tok in 15.203s
+[17:06:13] a_pp4096_w512_r1 rc=0 :: prefill 4096 tok in 18.440s
+[17:06:42] b_pp4096_w512_r1 rc=0 :: prefill 4096 tok in 15.265s
+[17:07:15] a_pp4096_w512_r2 rc=0 :: prefill 4096 tok in 18.477s
