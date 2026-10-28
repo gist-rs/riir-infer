@@ -5,6 +5,10 @@ record; the full pre-compaction text is in git history (pre-compaction HEAD
 0e50c61b69c6). Operational rules live in `AGENTS.md`; removed issue files: git
 history.
 
+## 2026-10-28 — the grid-reselection drafter arm LANDED (katgpt-rs 966/plan-632; the arc closed NEGATIVE on the lane read, the arm stays opt-in)
+
+`lattice_walk_reselect` (feature `grid_reselect`, `c04e3fa`): the keyed-walk body with the pick replaced by the prefix-first scored law `argmax_b [ln softmax(s/T) + λ·ln P(b|a)]` over each slot's own selector grid — re-scored along the re-selected prefix (`chain_step_scores` conditions on `pred_tok`; a stale-grid compose over stored `walk.scores` is wrong by construction). λ = 0 reduces exactly to `lattice_walk` (CPU-pinned by `reselect_lambda_zero_matches_the_greedy_walk` + the flip/determinism tests, 3/3; the dflash2 suite 19/19). Loop knob `KeyedSpecConfig::reselect` (solo loop only; the lanes variant unwired) + `dispatch_walk` split keeps the base dispatch byte-identical (clippy `-D` clean at default + qwen38_spec + grid_reselect postures). Upstream edge: `katgpt-speculative` optional (workspace table), `bigram_markov` feature pair, table types re-exported at this module's paths (riir-gpu never names the upstream crate). THE LANE READ (riir-ai Bench 1013, plan 632): **G1 FAIL 1/2 cells — prose best-λ +0.00%, code +5.26% exactly tied with the keyed incumbent; coverage ≠ conversion (pool_rate rises with λ while mean_j falls)**; the honest-negative clause closed katgpt-rs 966. The arm stays opt-in and unpromoted (the keyed coupling owns the registered posture); a greedy-target-posture re-cell is the parked regime-untested observation. Session: zed-m3-632-lambda-g1, 1793146935.
+
 ## 2026-10-27 — Issues 1145 + 1139 CLOSED + removed: the M5 Ultra decode-gap campaign closes at 1.04× vs llama.cpp (Bench 907: multi-cube norm+rotate PROMOTED DEFAULT-ON, +2.83%)
 
 Issue 1145 (the campaign's last routed rung, filed from the 1139 T4 census):
