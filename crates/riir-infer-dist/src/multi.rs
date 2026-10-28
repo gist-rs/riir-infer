@@ -57,6 +57,86 @@ use crate::runner::{HeadOptions, HeadReport, expect_kind, prefill_width, proto};
 use crate::stage::StageCompute;
 use crate::transport::{FrameKind, Transport};
 
+/// T3.5 scoreboard instrument (`RIIR_DIST_STEP_TIMING=1`): per-phase decode-wall
+/// decomposition on each role — head {submit, finish, send, recv}, tail {recv,
+/// fwd, pfwd, send} — accumulated over a 64-step window and flushed as one stderr
+/// line per window (plus a forced final flush). Disarmed the only cost is one
+/// `bool` load per site; `Instant::now` runs only when armed. The buckets are
+/// the honest adjudication surface for the two T3.4 residues (comm-THREAD split,
+/// tail logits async readback): whichever leg the scoreboard shows binding is the
+/// one a follow-up arm may target.
+struct StepTiming {
+    armed: bool,
+    t0: Instant,
+    submit_ns: u64,
+    finish_ns: u64,
+    send_ns: u64,
+    recv_ns: u64,
+    fwd_ns: u64,
+    pfwd_ns: u64,
+    steps: u64,
+}
+
+impl StepTiming {
+    fn new() -> Self {
+        static ARMED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+        let armed = *ARMED.get_or_init(|| {
+            matches!(
+                std::env::var("RIIR_DIST_STEP_TIMING").as_deref(),
+                Ok("1") | Ok("true") | Ok("on")
+            )
+        });
+        Self {
+            armed,
+            t0: Instant::now(),
+            submit_ns: 0,
+            finish_ns: 0,
+            send_ns: 0,
+            recv_ns: 0,
+            fwd_ns: 0,
+            pfwd_ns: 0,
+            steps: 0,
+        }
+    }
+
+    fn flush(&self, role: &str, force: bool) {
+        if !self.armed || self.steps == 0 || (!force && !self.steps.is_multiple_of(64)) {
+            return;
+        }
+        let n = self.steps as f64;
+        let ms = |ns: u64| ns as f64 / 1e6;
+        let per = |ns: u64| ms(ns) / n;
+        eprintln!(
+            "step-timing[{role}]: n={} wall={:.1}ms submit={:.1} finish={:.1} send={:.1} recv={:.1} fwd={:.1} pfwd={:.1} | per-step ms: submit {:.3} finish {:.3} send {:.3} recv {:.3} fwd {:.3}",
+            self.steps,
+            ms(self.t0.elapsed().as_nanos() as u64),
+            ms(self.submit_ns),
+            ms(self.finish_ns),
+            ms(self.send_ns),
+            ms(self.recv_ns),
+            ms(self.fwd_ns),
+            ms(self.pfwd_ns),
+            per(self.submit_ns),
+            per(self.finish_ns),
+            per(self.send_ns),
+            per(self.recv_ns),
+            per(self.fwd_ns),
+        );
+    }
+}
+
+#[inline]
+fn t_now(armed: bool) -> Option<Instant> {
+    armed.then(Instant::now)
+}
+
+#[inline]
+fn t_add(t: Option<Instant>, bucket: &mut u64) {
+    if let Some(t0) = t {
+        *bucket += t0.elapsed().as_nanos() as u64;
+    }
+}
+
 /// One request of a multi-stream run.
 #[derive(Debug, Clone)]
 pub struct MultiRequest {
@@ -385,6 +465,7 @@ fn run_waves<T: WaveStages, L: Transport>(
     let mut rows = Vec::new();
     let mut outstanding: VecDeque<usize> = VecDeque::new();
     let empty: [f32; 0] = [];
+    let mut st = StepTiming::new();
     let mut closed = false;
     loop {
         // The T2.4 admission seam: joins are table appends at pass
@@ -458,7 +539,9 @@ fn run_waves<T: WaveStages, L: Transport>(
             // step_finish then reads synchronously).
             if let Work::Feed { pos, tok } = work {
                 if all_feed {
+                    let t = t_now(st.armed);
                     table.stage(i).step_submit(tok, pos, &empty);
+                    t_add(t, &mut st.submit_ns);
                     table.stage(i).schedule_async_finish();
                     decode_enqueued.push(i);
                     continue;
@@ -528,7 +611,10 @@ fn run_waves<T: WaveStages, L: Transport>(
         // frames sent above, decode frames now, indexed ascending).
         for &i in &decode_enqueued {
             let pos = streams[i].prompt.len() + streams[i].generated.len() - 1;
+            let t = t_now(st.armed);
             let hidden = table.stage(i).step_finish().to_vec();
+            t_add(t, &mut st.finish_ns);
+            let t = t_now(st.armed);
             frame.clear();
             ActivationFrame::encode_into(
                 i as u32,
@@ -539,6 +625,7 @@ fn run_waves<T: WaveStages, L: Transport>(
                 &mut frame,
             );
             link.send_frame(FrameKind::Activation, &frame)?;
+            t_add(t, &mut st.send_ns);
             outstanding.push_back(i);
             streams[i].phase = Phase::Await;
         }
@@ -558,7 +645,9 @@ fn run_waves<T: WaveStages, L: Transport>(
             let Some(expect) = outstanding.pop_front() else {
                 break;
             };
+            let t = t_now(st.armed);
             let kind = link.recv_frame_into(&mut buf)?;
+            t_add(t, &mut st.recv_ns);
             expect_kind(kind, FrameKind::TokenStream)?;
             let body: [u8; 8] = buf
                 .as_slice()
@@ -589,8 +678,11 @@ fn run_waves<T: WaveStages, L: Transport>(
             } else {
                 s.phase = Phase::Feed;
             }
+            st.steps += 1;
+            st.flush("head", false);
         }
     }
+    st.flush("head", true);
     link.send_frame(FrameKind::Shutdown, &[])?;
     Ok(streams.iter().map(|s| s.report()).collect())
 }
@@ -690,10 +782,16 @@ pub fn run_tail_multi<T: Transport>(
     let mut batch_rows: Vec<(u32, usize)> = Vec::new();
     let mut batch_hidden: Vec<f32> = Vec::new();
     let mut batch_seen: Vec<bool> = vec![false; stages.len()];
+    let mut st = StepTiming::new();
     loop {
+        let t = t_now(st.armed);
         let kind = link.recv_frame_into(&mut buf)?;
+        t_add(t, &mut st.recv_ns);
         match kind {
-            FrameKind::Shutdown => return Ok(steps),
+            FrameKind::Shutdown => {
+                st.flush("tail", true);
+                return Ok(steps);
+            }
             FrameKind::BeginStream => {
                 let body: [u8; 12] = buf
                     .as_slice()
@@ -767,10 +865,17 @@ pub fn run_tail_multi<T: Transport>(
                 }
                 let logits = match chunked {
                     true => {
+                        let t = t_now(st.armed);
                         stage.prefill_chunk(&[], &hidden, pos, track.prompt_len, reply, &mut out);
+                        t_add(t, &mut st.pfwd_ns);
                         out.as_slice()
                     }
-                    false => stage.step(0, pos, &hidden),
+                    false => {
+                        let t = t_now(st.armed);
+                        let l = stage.step(0, pos, &hidden);
+                        t_add(t, &mut st.fwd_ns);
+                        l
+                    }
                 };
                 if reply {
                     let last = pos + n_tok - 1;
@@ -779,7 +884,11 @@ pub fn run_tail_multi<T: Transport>(
                     let mut reply_buf = [0u8; 8];
                     reply_buf[..4].copy_from_slice(&seq.to_le_bytes());
                     reply_buf[4..].copy_from_slice(&id.to_le_bytes());
+                    let t = t_now(st.armed);
                     link.send_frame(FrameKind::TokenStream, &reply_buf)?;
+                    t_add(t, &mut st.send_ns);
+                    st.steps += 1;
+                    st.flush("tail", false);
                 } else if !chunked {
                     on_logits(seq, pos, logits);
                 }
