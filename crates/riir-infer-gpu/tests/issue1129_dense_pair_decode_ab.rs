@@ -20,8 +20,10 @@
 //! - **Reach (the vacuous-guard law)** — outputs are bit-identical by
 //!   design, so ONLY the counter proves the toggle reached the dispatch: the
 //!   OFF arm must advance `dense_pair_launch_count()` by exactly ZERO and
-//!   the ON arm by exactly `n_layer * RUNS * (TOKENS + 1)` (one fused launch
-//!   per layer per `forward_token` call).
+//!   the ON arm by exactly `dense_layers * RUNS * (TOKENS + 1)` (one fused
+//!   launch per dense-carrying layer per `forward_token` call — the hybrid
+//!   league model is 48 of 64; the count derives from the weights, never a
+//!   constant).
 //! - **G2/G3 (paired medians)** — the fusion is a launch-count cut on a
 //!   per-dispatch-floor path (Bench 1006/1007), so the expected delta is
 //!   positive-or-noise on CUDA (native driver launches are cheaper than the
@@ -51,6 +53,8 @@
 ))]
 
 use std::time::Instant;
+
+use riir_infer_core::deltanet::ternary_weights::GateProjWeights;
 
 /// The decode schedule the Metal A/B pinned: 24 measured tokens, 5 runs
 /// (run 0 = warm-up), a per-run token stride keeping every position-carrying
@@ -127,10 +131,13 @@ fn run_arm(
 }
 
 /// The per-arm reach assertion (the vacuous guard): OFF moves the counter by
-/// exactly ZERO, ON by exactly n_layer per `forward_token` call.
-fn assert_reach(tag: &str, arm: &ArmResult, n_layer: usize, pair_on: bool) {
+/// exactly ZERO, ON by exactly one fused launch per GDN layer per
+/// `forward_token` call. The dense layer count is derived from the weights
+/// (`in_proj_a` is `Dense` on every DeltaNet layer and empty on Attention
+/// layers — the hybrid league model has 48 of 64), never from a constant.
+fn assert_reach(tag: &str, arm: &ArmResult, dense_layers: usize, pair_on: bool) {
     let expected = if pair_on {
-        (n_layer * RUNS * (TOKENS + 1)) as u64
+        (dense_layers * RUNS * (TOKENS + 1)) as u64
     } else {
         0
     };
@@ -178,12 +185,17 @@ fn issue1129_dense_pair_decode_ab() {
             .map_err(|e| format!("load: {e}"))
             .unwrap();
     config.block_size = config.block_size.min(4096);
-    let n_layer = config.n_layer;
+    let dense_layers = weights
+        .layers
+        .iter()
+        .filter(|l| matches!(l.in_proj_a, GateProjWeights::Dense(..)))
+        .count();
     let vocab = config.vocab_size;
     let mut fwd = riir_infer_gpu::TernaryDeltanetGpuForward::new(&ctx, &config, &weights);
     eprintln!(
-        "[1129-cuda-decode-ab] forward ready ({:.0}s) · n_layer={n_layer} · vocab={vocab}",
+        "[1129-cuda-decode-ab] forward ready ({:.0}s) · layers={dense_layers} dense-carrying of {} · vocab={vocab}",
         t0.elapsed().as_secs_f32(),
+        config.n_layer,
     );
 
     // The full decode stage mask — every census leg on, the shipping decode
@@ -205,13 +217,13 @@ fn issue1129_dense_pair_decode_ab() {
     // Leave the promoted default in place (the global posture stays ON).
     riir_infer_gpu::gemv_cubecl::set_dense_pair_fused(true);
 
-    // Reach — the vacuous guard, per arm (OFF exactly zero; ON exactly
-    // n_layer per forward_token call).
-    assert_reach("off1", &off1, n_layer, false);
-    assert_reach("on1", &on1, n_layer, true);
-    assert_reach("on2", &on2, n_layer, true);
-    assert_reach("off2", &off2, n_layer, false);
-    let expected_on = (n_layer * RUNS * (TOKENS + 1)) as u64;
+    // Reach — the vacuous guard, per arm (OFF exactly zero; ON exactly one
+    // fused launch per dense-carrying layer per forward_token call).
+    assert_reach("off1", &off1, dense_layers, false);
+    assert_reach("on1", &on1, dense_layers, true);
+    assert_reach("on2", &on2, dense_layers, true);
+    assert_reach("off2", &off2, dense_layers, false);
+    let expected_on = (dense_layers * RUNS * (TOKENS + 1)) as u64;
 
     // G1 — bit-identity at the model level: run 1's per-token FNV equal
     // across every arm pair (to_bits fold, never tolerance).
