@@ -236,11 +236,18 @@ pub fn headroom_fraction_effective() -> f64 {
 /// flipped after construction changed which splits were registered) must be
 /// LOUD once per process, not once per prefill — every subsequent dispatch
 /// cleanly fail-opens to the GPU.
+///
+/// The consumers live in the forward body (`ternary_deltanet_gpu_forward`
+/// rider sites), so at postures that compile this module without the forward
+/// (e.g. the bare `ane_prefill` probe posture, plan 643 T-R0) these read as
+/// dead — posture-local, by construction.
 #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+#[allow(dead_code)]
 static WIDTH_MISMATCH_WARNED: AtomicBool = AtomicBool::new(false);
 
 /// See [`WIDTH_MISMATCH_WARNED`].
 #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+#[allow(dead_code)]
 pub(crate) fn warn_width_mismatch_once(what: &str, needed: usize, have: usize) {
     if !WIDTH_MISMATCH_WARNED.swap(true, Ordering::Relaxed) {
         eprintln!(

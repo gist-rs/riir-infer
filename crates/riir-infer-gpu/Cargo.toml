@@ -255,8 +255,10 @@ ternary_attention_batched_prefill = []
 # Dual ANE/GPU hybrid prefill (Issue 726). The ANE executor's Metal surface
 # is macOS+aarch64-gated inside the module; on other targets the feature
 # compiles the (platform-independent) eligibility gate only. Pulls the metal
-# dep for the macOS arm.
-ane_prefill = ["dep:metal"]
+# dep for the macOS arm and half for the requant/bridge f16 wire (the row
+# previously built only alongside cubecl_runtime, which supplied dep:half —
+# the bare posture failed E0433 until plan 643 T-R0's probe exposed it).
+ane_prefill = ["dep:metal", "dep:half", "dep:cubecl", "katgpt-core/ternary_group_scale"]
 # Attention-mass capture tap (diagnostics).
 attn_mass_tap = ["ternary_gemm_batched", "ternary_attention_batched_prefill"]
 # Speculative-decode dispatch cfg key (the tree-verify + draft arms).
