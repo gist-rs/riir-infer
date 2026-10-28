@@ -282,15 +282,35 @@ pub fn production_relaxed_precision() -> bool {
     }
 }
 
+static PROD_DEQUANT_V2_ENV: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+
+/// Issue 1146 rung 2b (H4): whether the next context compiles the hoisted-load
+/// dequant (`SWEEP_DEQUANT_V2`). `RIIR_METAL_TENSOR_DEQUANT_V2=1` arms it
+/// (parsed once, announced on stderr); OFF = the incumbent per-element body.
+/// Bit-identical staged tile by construction — G1 is exactness, not tolerance.
+pub fn production_dequant_v2() -> bool {
+    *PROD_DEQUANT_V2_ENV.get_or_init(|| {
+        let on = std::env::var("RIIR_METAL_TENSOR_DEQUANT_V2").as_deref() == Ok("1");
+        if on {
+            eprintln!("[Issue 1146] tensor GEMM dequant = hoisted-load v2");
+        }
+        on
+    })
+}
+
 /// The one composition of the tensor-GEMM MSL: geometry defines + the
-/// relaxed-precision define + the kernel body. Every compile site goes
+/// relaxed-precision and dequant-v2 defines + the kernel body. Every compile site goes
 /// through here so a posture axis cannot reach one context and not another.
 pub fn compose_msl_source(config: MetalTileConfig, body: &str) -> String {
     let relaxed = match production_relaxed_precision() {
         true => "#define SWEEP_RELAXED true\n",
         false => "",
     };
-    format!("{}{relaxed}{body}", config.defines())
+    let dequant = match production_dequant_v2() {
+        true => "#define SWEEP_DEQUANT_V2 1\n",
+        false => "",
+    };
+    format!("{}{relaxed}{dequant}{body}", config.defines())
 }
 
 /// The geometry the next integration context compiles with: the explicit

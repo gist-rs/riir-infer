@@ -62,6 +62,14 @@ using namespace metal;
 #ifndef SWEEP_RELAXED
 #define SWEEP_RELAXED false
 #endif
+// Issue 1146 rung 2b (H4): the hoisted-load dequant. 0 = the incumbent
+// per-element body (byte-untouched); 1 = one pos/neg word + one scale load per
+// 16-element work item, bounds check hoisted to a full-tile fast path, half4
+// stores — the SAME (pos - neg) * scale -> half arithmetic per element, so the
+// staged A tile is bit-identical. `RIIR_METAL_TENSOR_DEQUANT_V2=1` arms it.
+#ifndef SWEEP_DEQUANT_V2
+#define SWEEP_DEQUANT_V2 0
+#endif
 constant constexpr int SZ_SIMD     = SWEEP_SZ_SIMD;
 constant constexpr int NK_CHUNK    = SWEEP_NK_CHUNK;           // N_MM_NK
 constant constexpr int K_TILE      = SZ_SIMD * NK_CHUNK;       // 32
@@ -154,6 +162,32 @@ kernel void gemm_ternary_tensor(
 
             const int row_global = ra + row_local;
 
+#if SWEEP_DEQUANT_V2
+            // A 16-aligned run of SZ_SIMD columns sits inside ONE u32 bit-plane
+            // word and ONE 128-column scale group (k_pos is a multiple of 16).
+            static_assert(SZ_SIMD == 16, "DEQUANT_V2 assumes 16-column work items");
+            if (row_global < (int)m_features && k_pos + SZ_SIMD <= (int)k_input_dim) {
+                const uint word_idx = (uint)row_global * words_per_row + (uint)(k_pos / 32);
+                const uint shift    = (uint)(k_pos % 32);
+                const uint pw       = pos_bits_u32[word_idx] >> shift;
+                const uint nw       = neg_bits_u32[word_idx] >> shift;
+                const float scale   = group_scale_f32[(uint)row_global * groups_per_row + (uint)(k_pos / 128)];
+                threadgroup half4* dst =
+                    (threadgroup half4*)(sa + (size_t)k_base + (size_t)row_local * K_TILE);
+                #pragma clang loop unroll(full)
+                for (short q = 0; q < SZ_SIMD / 4; ++q) {
+                    half4 v;
+                    #pragma clang loop unroll(full)
+                    for (short j = 0; j < 4; ++j) {
+                        const uint b = (uint)(q * 4 + j);
+                        const float sign = (float)((pw >> b) & 1u) - (float)((nw >> b) & 1u);
+                        v[j] = (half)(sign * scale);
+                    }
+                    dst[q] = v;
+                }
+            } else
+#endif
+            {
             #pragma clang loop unroll(full)
             for (short i = 0; i < SZ_SIMD; ++i) {
                 const int col = k_pos + i;
@@ -171,6 +205,7 @@ kernel void gemm_ternary_tensor(
                 // tA = tensor(sa, dextents(K_TILE, NRA)) → element (k, row) at sa[k + row*K_TILE].
                 // This matches llama.cpp's sa[row * N_MM_NK_TOTAL + k] indexing.
                 sa[(size_t)(k_base + i) + (size_t)row_local * K_TILE] = val;
+            }
             }
         }
 
