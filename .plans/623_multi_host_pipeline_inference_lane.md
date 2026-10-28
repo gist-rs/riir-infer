@@ -1,7 +1,6 @@
 # Plan 623: Multi-host inference lane — layer-range stages, activation frames, TCP→RDMA transport, TP, speculative fill
 
-**Claimed:** zed-m3-i623-t3verbs, 1793220893, expires 2026-10-30T20:54:53+00:00
-(scope: Phase 3 T3.1 verbs FFI + UC QP bring-up + TCP bootstrap + the T3.2/T3.3 probe legs; T3.5's scoreboard row stays with its own lane until wire cells exist)
+**Lease closed:** zed-m3-i623-t3verbs, 1793220893, was expires 2026-10-30T20:54:53+00:00 — LANDED T3.1 + the T3.2 heap leg + the T3.3 small-message/striped rows 2026-10-29 (Bench 927; the landing note on T3.1 carries the detail). The open residues ride their task rows: T3.2's MTLBuffer leg + rkey semantics, T3.3's MTU ladder, T3.4, T3.5. (claim record: zed-m3-i623-t3verbs, epoch 1793220893, was expires 2026-10-30T20:54:53+00:00)
 **Status:** Phase 2 PoC LANDED 2026-10-27 (T2.1 + T2.2 + T2.2b GPU stage + T2.3a pipelined prefill + T2.2c(1) range-scoped weights + T2.3b chunked batched prefill (promoted) — each stage holds only its own slice: `crates/riir-infer-dist`, D1 → (a)) — real 2-box TB5 runs, CPU⇄CPU and GPU⇄GPU, streams bit-identical to 1-box; 1-box GPU base gap filed as Issue 1139 — mostly BUILD POSTURE, fixed by Issue 1141 (dist `gpu` now carries the production decode posture + the workspace's cubecl-wgpu fork: 1-box stage decode 27.2 → 46.7 tok/s, 2-stage 26.0 → 45.2 tok/s on idle bmo; then Issue 1142's dense-pair loads-in-flight kernel, 1-box 51.4 tok/s; then Issue 1143's decode-norm loads-in-flight (`85c4da5`), 1-box 55.0 tok/s; then Issue 1144's radix-4 FWHT (`3147164`), 1-box 56.9 tok/s; residual 1.07× vs llama.cpp, attributed in Issue 1139 T4, next rung Issue 1145); Phase 1 (T1.1–T1.5) LANDED 2026-10-26
 
 **Lease closed:** shikuwa-4090-i922-chattok, epoch 1793193000, was expires 2026-10-29T12:30:00+00:00 — LANDED Bench-917 follow-up 2 2026-10-28 (Bench 924): chat-shaped acceptance re-read, all THREE heads one session — plain head does NOT transfer (0.684→0.085 TF, dead for serving); mix/balanced transfers on TF (0.67/0.44); the FREERUN head (the 655 promotion candidate) is the best chat DRAFTER: E[m] 1.8725, spec 6.207 tok/s = 0.808× of ordinary, beating its own raw row — TF and draft-usefulness DECOUPLE cross-regime, rank by E[m] only; the offline `mtp_chat_tokens` tokenizer example ships; follow-up ladder re-ordered (re-fit = chat-trajectory capture, the 679 recipe; 2-box drafter = freerun head).
@@ -572,18 +571,44 @@ mlx-lm on the Proposal-042 scoreboard **measured on the same two boxes**.
 
 ## Phase 3 — RDMA transport (needs D2)
 
-- [ ] **T3.1** Verbs FFI: `dlopen("librdma.dylib")` + the ~16 `ibv_*` symbols, the inline
+- [x] **T3.1** Verbs FFI: `dlopen("librdma.dylib")` + the ~16 `ibv_*` symbols, the inline
   `post_send/post_recv/poll_cq` re-implemented via `ctx->ops` against the macOS 26.2+ SDK
   header; UC QP bring-up INIT→RTR→RTS with IPv4-mapped GID; bootstrap over the TCP
   side channel. Std-only.
-- [ ] **T3.2** Zero-copy probe: register an MR over a shared-storage `MTLBuffer.contents()`
+  **LANDED 2026-10-29 (zed-m3-i623-t3verbs, `226cace`+`16fb64a`+two verbs_ping fixes;
+  [Bench 927](../.benchmarks/927_plan623_phase3_verbs_bringup.md) is the record):
+  `crates/riir-infer-dist/src/verbs/{ffi,mod}.rs` behind the opt-in `rdma` feature — the SDK
+  header mirrored repr(C) with layout pins held to the C compiler's measured offsets
+  (`tests/verbs_layout.rs`, 6/6 on the device-less m3 too); the four inline verbs ride the
+  32-slot `ibv_context_ops` vtable (typed slots, poll_cq@88/post_send@200/post_recv@208);
+  Arc ownership chain destroys child-before-parent by construction; MAC'd endpoint bootstrap
+  (`no unauthenticated frame accepted` — the wrong-key negative REFUSES both sides before any
+  QP traffic). FIRST RDMA TRAFFIC amo⇄bmo: UC QP pair, RTT p50 7.7 µs (TCP was 94–96 µs,
+  12×) and 9.368 GiB/s one-way sustained 1 GiB (TCP bulk 8.6 GB/s). Provider laws measured:
+  UC RTS mask is STATE|SQ_PSN only (TIMEOUT → EINVAL); posted-recv budget 4 MB OK / 5 MB
+  rc=-12; UC credit flow-control stalls a dead peer's SQ as a poll TIMEOUT (never a WC
+  error); GIDs are NOT IPv4-mapped on TB (index-0 fallback is the working path — the plan's
+  "IPv4-mapped GID" assumption corrected in place). macOS-only by contract (the vtable is
+  Apple's; rdma-core's evolved vtable is not claimed).**
+- [-] **T3.2** Zero-copy probe: register an MR over a shared-storage `MTLBuffer.contents()`
   — if accepted, frames go GPU-buffer → wire with no memcpy (both incumbents bounce-copy
   twice); if refused, record the refusal and keep one memcpy per side.
-- [ ] **T3.3** Small-message decode path (single WR, inline header) vs striped large frames
+  **HEAP LEG DONE (Bench 927): 67 MB registered, lkey granted. ⚠ rkey granted 0x0 with
+  REMOTE_WRITE|REMOTE_READ requested — RDMA WRITE (the actual zero-copy shape) untested
+  until rkey semantics are clarified; SEND/RECV is the measured shape. The MTLBuffer leg is
+  OPEN (Metal-context probe on the boxes; contents() of a shared MTLBuffer is ordinary
+  pages on Apple silicon so acceptance is EXPECTED — measure, don't assume).**
+- [-] **T3.3** Small-message decode path (single WR, inline header) vs striped large frames
   for prefill; MTU probe (incumbents fix 1024 / 128 KiB strides).
+  **ROWS LANDED (Bench 927): 64 B inline ping-pong 7.7 µs p50; striped one-way 4 KiB→1 MiB
+  all measured (best 128 KiB 8.76 GiB/s short / 9.368 sustained). MTU LADDER OPEN (every row
+  ran at the active 4096; the 1024/2048 override cells + the provider's posted-recv budget
+  cliff band [4, 5] MB as a function of MTU are the remaining legs).**
 - [ ] **T3.4** GPU↔comm sync: CPU comm thread on `MTLSharedEvent` signal values; no per-
   layer command-buffer commit on the critical path.
-- [ ] **T3.5** Scoreboard rows vs llama.cpp RPC-RDMA and exo/MLX jaccl.
+- [ ] **T3.5** Scoreboard rows vs llama.cpp RPC-RDMA and exo/MLX jaccl. (jaccl prose
+  comparison exists — Bench 905's 16–22 µs pipelined collective rate vs our 7.7 µs
+  ping-pong RTT — but a like-for-like scoreboard row needs the T3.4 serving integration.)
 
 ## Phase 4 — Tensor-parallel (gate REFUTED 2026-10-27 by the T4.1/T4.2 cell — [Bench 906](../.benchmarks/906_plan623_t41_tp2_cell.md): the [Bench 905](../.benchmarks/905_plan623_phase3_jaccl_probe.md) RTT was the PIPELINED all_sum rate (16–22 µs); the TP dependency chain pays the SYNCHRONIZED per-exchange cost (183–277 µs measured) → 128 serialized exchanges/token ≈ +27 ms → TP-2 decode 18.2 t/s vs 1-box 58.1/50.8 (−69/−64%). Sharding correctness PROVEN (token-exact ×6 produce paths, replay-deterministic). Independent second negative: batch-1 decode is launch-bound (COMM_OFF floor −11..−14% from halving ~90% of weight bytes) — the TP memory thesis does not apply at batch-1 on this model/box class. Prefill parity (−1..−9%). TP stays a bench-lane harness, not a serving posture; the multi-host single-stream win path is PP (Phase 2) + RDMA (Phase 3) + speculative fill (Phase 5). Re-open triggers recorded in Bench 906 §9.)
 
