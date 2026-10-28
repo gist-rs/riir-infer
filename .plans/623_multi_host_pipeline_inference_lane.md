@@ -1,6 +1,10 @@
 # Plan 623: Multi-host inference lane — layer-range stages, activation frames, TCP→RDMA transport, TP, speculative fill
 
 **Status:** Phase 2 PoC LANDED 2026-10-27 (T2.1 + T2.2 + T2.2b GPU stage + T2.3a pipelined prefill + T2.2c(1) range-scoped weights + T2.3b chunked batched prefill (promoted) — each stage holds only its own slice: `crates/riir-infer-dist`, D1 → (a)) — real 2-box TB5 runs, CPU⇄CPU and GPU⇄GPU, streams bit-identical to 1-box; 1-box GPU base gap filed as Issue 1139 — mostly BUILD POSTURE, fixed by Issue 1141 (dist `gpu` now carries the production decode posture + the workspace's cubecl-wgpu fork: 1-box stage decode 27.2 → 46.7 tok/s, 2-stage 26.0 → 45.2 tok/s on idle bmo; then Issue 1142's dense-pair loads-in-flight kernel, 1-box 51.4 tok/s; then Issue 1143's decode-norm loads-in-flight (`85c4da5`), 1-box 55.0 tok/s; then Issue 1144's radix-4 FWHT (`3147164`), 1-box 56.9 tok/s; residual 1.07× vs llama.cpp, attributed in Issue 1139 T4, next rung Issue 1145); Phase 1 (T1.1–T1.5) LANDED 2026-10-26
+
+**Claimed:** zed-amo-i623-mtpcons, 1793149690, expires 2026-10-30T01:08:10+00:00
+
+*(the T5.1d consumer half: `impl DraftSource` over the BMTH v1 bytes in riir-infer-dist + the acceptance scoreboard row.)*
 **Lease closed:** zed-amo-i623-t25residue landed the T2.5 residue 2026-10-28 (`a260b62` — the landing note on the T2.5 task carries the detail: measured link bw + tail probe rows; the commit was first made as `f610afc` and re-hashed onto the pushed claim by the manual rebase — same tree, new parent)
 **Lease closed:** zed-amo-i623-g2fitsbox measured the G2 fits-one-box row 2026-10-28 (Bench 916; the instrument commit `3b286c8` carries the decode-only oracle window)
   (the two disclosed T2.5 residues, Bench 915 honest-notes: the tail answer-posture probe rows print + the link bw MEASURED on the wire (echo-ack bulk — the tail does zero compute, the v0 conflation concern does not apply); CPU-only, no GPU cells)
