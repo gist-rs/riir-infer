@@ -1,6 +1,6 @@
 # Issue 1150 — Metal dense-qwen3.8 forward (`qwen38_dense_wgpu`): the only road to same-model comparisons vs uzu and MLX
 
-**Status:** OPEN — proposal, unclaimed
+**Status:** IN PROGRESS — decode + parity G1 LANDED (465c1d8..63c8847, 2026-10-28); prefill engine = the named follow-up (see `.benchmarks/i1150_qwen38_wgpu_session.md`: all in-crate CubeCL GEMMs measure ~110 GFLOP/s on Metal — the matmul2d dense-f16 route is the speed unlock)
 
 ## Problem
 
