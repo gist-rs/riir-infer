@@ -50,6 +50,13 @@ pub mod stage;
 pub mod stage_gpu;
 pub mod transport;
 
+/// The RDMA verbs lane (Plan 623 Phase 3 T3.1) — macOS only: the ops
+/// vtable layout is Apple's `librdma.dylib` header's, and rdma-core on
+/// Linux has evolved its own. Off-macOS the `rdma` feature compiles to
+/// nothing by contract (the feature row documents it).
+#[cfg(all(feature = "rdma", target_os = "macos"))]
+pub mod verbs;
+
 /// First-index strict argmax (Issue-940 determinism law: one fixed tie
 /// rule, sequential scan). NaN never wins.
 pub fn argmax_first(logits: &[f32]) -> u32 {

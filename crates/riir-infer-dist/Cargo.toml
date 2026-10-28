@@ -40,8 +40,22 @@ name = "mtp_head_acceptance"
 path = "examples/mtp_head_acceptance.rs"
 required-features = ["bonsai2_hadamard"]
 
+# Plan 623 Phase 3 — the RDMA ping/MTU/bandwidth probe over the TB
+# bridge (T3.1 bring-up + T3.2/T3.3 rows). macOS only (see the rdma
+# feature row).
+[[example]]
+name = "verbs_ping"
+path = "examples/verbs_ping.rs"
+required-features = ["rdma"]
+
 [features]
 default = []
+# Plan 623 Phase 3 T3.1 — the verbs FFI lane. macOS-ONLY by contract: the
+# ibv_context ops vtable layout is Apple's librdma.dylib header's
+# (rdma-core on Linux evolved its own and is not claimed). On non-macOS
+# the feature compiles to nothing — that scoping is deliberate and
+# documented, not a lane.
+rdma = []
 # The folded (Hadamard-rotated) Bonsai-2 loader — the real PQ2_0 artifact
 # needs it; the synthetic G1 fixture does not.
 bonsai2_hadamard = ["riir-infer-core/bonsai2_hadamard"]
@@ -109,3 +123,9 @@ required-features = ["gpu"]
 [[test]]
 name = "gpu_production_posture_floor"
 required-features = ["gpu"]
+
+# The verbs FFI layout pins + endpoint codec + dlopen resolution
+# (feature-gated with its required-features row — the green-zero law).
+[[test]]
+name = "verbs_layout"
+required-features = ["rdma"]
