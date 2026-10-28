@@ -106,6 +106,21 @@ pub enum FrameKind {
     /// Solo and prefill passes never send it: those frames process
     /// exactly as before, byte-identical (G3 at s=1 by construction).
     BatchN = 10,
+    /// Probe-EXCHANGE RTT ping (T2.5 wire step): empty payload; the
+    /// answering side reflects [`FrameKind::ProbePong`]. Plan-mode
+    /// postures only — a serving tail refuses it at its `Handshake`
+    /// expectation.
+    ProbePing = 11,
+    /// The RTT ping's reply: empty payload.
+    ProbePong = 12,
+    /// The probe EXCHANGE request (T2.5): `n u32 LE · n×k u32 LE` — the
+    /// candidate splits (tail-side layer index) the head wants probed.
+    ProbeRequest = 13,
+    /// The probe EXCHANGE reply (T2.5): `n u32 LE · n×(k u32 LE ·
+    /// spt f64 LE) · n_layer u32 LE · hidden u32 LE` — the tail's boot
+    /// probe record plus the model cross-check fields. See
+    /// [`crate::probe`].
+    ProbeReply = 14,
 }
 
 impl FrameKind {
@@ -122,6 +137,10 @@ impl FrameKind {
             8 => Ok(Self::VerifyStream),
             9 => Ok(Self::VerifyReply),
             10 => Ok(Self::BatchN),
+            11 => Ok(Self::ProbePing),
+            12 => Ok(Self::ProbePong),
+            13 => Ok(Self::ProbeRequest),
+            14 => Ok(Self::ProbeReply),
             _ => Err(invalid(format!("unknown frame kind {v}"))),
         }
     }

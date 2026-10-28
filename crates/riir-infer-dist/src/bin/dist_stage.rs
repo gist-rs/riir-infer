@@ -31,6 +31,13 @@
 //! probes those candidate splits on THIS host (scoped loads, timed
 //! decode) and prints one JSON record line — two records + a link cost
 //! feed `planner::plan_split` (the manual `--split` always overrides).
+//! T2.5 probe EXCHANGE (the wire step — no hand-carried JSON): the
+//! tail runs `--answer-probe` (answers ping/probe frames, never
+//! serves), the head runs `--plan-wire 1,16,32` (probes itself, asks
+//! the tail over the wire, MEASURES the RTT on the same link, composes
+//! `plan_split` live, prints the plan, exits). The link's payload bw
+//! is carried (`--link-bw BPS`, default the T0.2 TB5 row 8.6 GB/s — at
+//! decode-hop sizes it is ~0.5% of the hop); the RTT is measured.
 //! T2.4 multi-stream: `--streams N` runs N round-robined copies of the
 //! SAME request over one link (one stage instance per stream — per-stream
 //! caches, weights shared), head and tail alike; the head prints per-
@@ -59,7 +66,7 @@ use riir_infer_dist::spec_fill::{RepeatLastDrafter, run_head_spec, run_tail_spec
 use riir_infer_dist::stage::{ArtifactIdentity, StageCompute, TernaryCpuStage, stage_scope};
 #[cfg(feature = "gpu")]
 use riir_infer_dist::stage_gpu::TernaryGpuStage;
-use riir_infer_dist::transport::{Direction, PeerKey, TcpTransport};
+use riir_infer_dist::transport::{Direction, PeerKey, TcpTransport, Transport};
 
 struct Args {
     role: String,
@@ -88,6 +95,23 @@ struct Args {
     /// planner (`riir_infer_dist::planner::plan_split`) merges two
     /// records + the link cost into the split choice.
     plan_report: Option<Vec<u32>>,
+    /// T2.5 probe EXCHANGE (the wire step — the landing residue): the
+    /// head probes its own candidates, asks the TAIL for its record
+    /// over the wire (an `--answer-probe` tail), measures the RTT on
+    /// the same link, composes `plan_split` live and prints the plan;
+    /// then exits. Candidates are strictly 2-stage (`1..n_layer`).
+    plan_wire: Option<Vec<u32>>,
+    /// T2.5 probe EXCHANGE tail posture: listen, answer ping/probe
+    /// frames until Shutdown, exit — never serves. `--split` still
+    /// names the slice the boot load takes (the serving posture's
+    /// memory shape); the probes load their own scoped candidates.
+    answer_probe: bool,
+    /// The link's payload bandwidth for the plan's hop term (bytes/s).
+    /// RTT is MEASURED live; bw is carried — the T0.2 TB5 row (8.6
+    /// GB/s) is the default, and at decode-hop sizes the bw term is
+    /// ~0.5% of the hop. `--link-bw` pins a measured number (e.g. the
+    /// tailnet posture's).
+    link_bw: f64,
     /// T5.1 v0: speculative fill with K drafts per verify round (head
     /// and tail — the tail's loop must speak the verify arm). 1-stream
     /// only; the CPU stage is the v0 posture (SpecStage = snapshot /
@@ -117,6 +141,9 @@ fn parse() -> Result<Args, String> {
         sock_buf: None,
         streams: 1,
         plan_report: None,
+        plan_wire: None,
+        answer_probe: false,
+        link_bw: 8.6e9,
         spec_k: None,
     };
     while let Some(flag) = it.next() {
@@ -169,13 +196,62 @@ fn parse() -> Result<Args, String> {
                         .collect::<Result<_, _>>()?,
                 )
             }
+            "--plan-wire" => {
+                a.plan_wire = Some(
+                    val()?
+                        .split(',')
+                        .map(|t| {
+                            t.trim()
+                                .parse::<u32>()
+                                .map_err(|e| format!("--plan-wire: {e}"))
+                        })
+                        .collect::<Result<_, _>>()?,
+                )
+            }
+            "--answer-probe" => a.answer_probe = true,
+            "--link-bw" => a.link_bw = val()?.parse().map_err(|e| format!("--link-bw: {e}"))?,
             other => return Err(format!("unknown flag {other}")),
         }
     }
     match a.role.as_str() {
-        "head" | "tail" => Ok(a),
-        _ => Err("--role head|tail required".into()),
+        "head" | "tail" => {}
+        _ => return Err("--role head|tail required".into()),
     }
+    if a.answer_probe {
+        if a.role != "tail" {
+            return Err("--answer-probe is a tail posture".into());
+        }
+        if a.plan_wire.is_some() || a.plan_report.is_some() {
+            return Err(
+                "--answer-probe composes with neither --plan-wire nor --plan-report".into(),
+            );
+        }
+    }
+    if let Some(cands) = &a.plan_wire {
+        if a.role != "head" {
+            return Err("--plan-wire is a head posture".into());
+        }
+        if a.plan_report.is_some() {
+            return Err(
+                "--plan-wire composes with neither --plan-report nor --answer-probe".into(),
+            );
+        }
+        if cands.is_empty() {
+            return Err("--plan-wire needs at least one candidate".into());
+        }
+        if cands.contains(&0) {
+            return Err("--plan-wire candidates are strictly 1..n_layer (0 is not a split)".into());
+        }
+        if a.split == 0 {
+            return Err(
+                "--plan-wire needs --split (the provisional boot slice; the plan overrides)".into(),
+            );
+        }
+    }
+    if a.plan_report.is_some() && a.plan_wire.is_some() {
+        return Err("--plan-report and --plan-wire are exclusive".into());
+    }
+    Ok(a)
 }
 
 /// Backend-specific stage construction, behind one signature so the role
@@ -234,6 +310,54 @@ fn chat_turn(user: &str) -> String {
     format!("<|im_start|>user\n{user}<|im_end|>\n<|im_start|>assistant\n")
 }
 
+/// std-equivalent address resolution (both IP literals and hostnames).
+fn resolve_addr(addr: &str, what: &str) -> Result<std::net::SocketAddr, String> {
+    addr.to_socket_addrs()
+        .map_err(|e| format!("{what} {addr}: {e}"))?
+        .next()
+        .ok_or(format!("{what} {addr}: no address"))
+}
+
+/// The per-candidate scoped-load + timed-decode probe loop — ONE probe
+/// implementation shared by `--plan-report`, the `--answer-probe` tail
+/// and the `--plan-wire` head (the T2.5 landing's probe, never a
+/// forked copy). `k` is the tail-side split index; the head's own
+/// range is `[0, k)`, the tail's `[k, n_layer)`.
+fn probe_candidates(
+    a: &Args,
+    identity: ArtifactIdentity,
+    n_layer: u32,
+    splits: &[u32],
+    quiet: bool,
+) -> Result<Vec<(u32, f64)>, String> {
+    const PROBE_STEPS: usize = 8;
+    const PROBE_ROUNDS: usize = 3;
+    let head = a.role == "head";
+    let mut rows = Vec::with_capacity(splits.len());
+    for &k in splits {
+        if k == 0 || k > n_layer {
+            return Err(format!("probe candidate {k} outside 1..={n_layer}"));
+        }
+        let cand = match head {
+            true => LayerRange::new(0, k),
+            false => LayerRange::new(k, n_layer),
+        };
+        let (c2, w2) = load(&a.model, a.ctx, |c| stage_scope(cand, c.n_layer as u32))?;
+        let mut st = build_stage(&a.backend, &c2, &w2, cand, identity)?;
+        let spt =
+            riir_infer_dist::planner::probe_decode_spt(st.as_mut(), 0, PROBE_STEPS, PROBE_ROUNDS)
+                .map_err(|e| format!("probe split {k}: {e}"))?;
+        if !quiet {
+            eprintln!(
+                "[plan] {} split {k}: {spt:.6} s/tok (decode, {PROBE_STEPS}x{PROBE_ROUNDS})",
+                a.role
+            );
+        }
+        rows.push((k, spt));
+    }
+    Ok(rows)
+}
+
 fn run() -> Result<(), String> {
     let a = parse()?;
     let key = PeerKey::from_hex(
@@ -283,33 +407,122 @@ fn run() -> Result<(), String> {
     // JSON record line, exit. `k == n_layer` on the head probes the
     // FULL range — the 1-box reference row the planner needs.
     if let Some(splits) = &a.plan_report {
-        let steps = 8usize;
-        let rounds = 3usize;
-        let mut rows = String::new();
-        for (i, &k) in splits.iter().enumerate() {
-            if k == 0 || k > n_layer {
-                return Err(format!("--plan-report: split {k} outside 1..={n_layer}"));
-            }
-            let cand = match head {
-                true => LayerRange::new(0, k),
-                false => LayerRange::new(k, n_layer),
-            };
-            let (c2, w2) = load(&a.model, a.ctx, |c| stage_scope(cand, c.n_layer as u32))?;
-            let mut st = build_stage(&a.backend, &c2, &w2, cand, identity)?;
-            let spt = riir_infer_dist::planner::probe_decode_spt(st.as_mut(), 0, steps, rounds)
-                .map_err(|e| format!("probe split {k}: {e}"))?;
-            if i > 0 {
-                rows.push(',');
-            }
-            rows.push_str(&format!("[{k},{spt:.6}]"));
-            eprintln!(
-                "[plan] {} split {k}: {spt:.6} s/tok (decode, {steps}x{rounds})",
-                a.role
-            );
-        }
+        let rows = probe_candidates(&a, identity, n_layer, splits, false)?;
+        let cells: Vec<String> = rows.iter().map(|(k, s)| format!("[{k},{s:.6}]")).collect();
         println!(
-            "{{\"host\":\"{}\",\"n_layer\":{},\"hidden\":{},\"rows\":[{rows}]}}",
-            a.role, n_layer, config.n_embd
+            "{{\"host\":\"{}\",\"n_layer\":{},\"hidden\":{},\"rows\":[{}]}}",
+            a.role,
+            n_layer,
+            config.n_embd,
+            cells.join(",")
+        );
+        return Ok(());
+    }
+
+    // T2.5 probe EXCHANGE head posture: probe self, ask the tail over
+    // the wire, MEASURE the RTT on the same link, compose the plan,
+    // print it, exit clean. Candidates are strictly 2-stage
+    // (1..n_layer — plan_split's domain; the 1-box reference row is a
+    // --plan-report file convention, never a 2-stage candidate).
+    if let Some(cands) = &a.plan_wire {
+        for &k in cands {
+            if k >= n_layer {
+                return Err(format!("--plan-wire candidate {k} outside 1..{n_layer}"));
+            }
+        }
+        let rows = probe_candidates(&a, identity, n_layer, cands, false)?;
+        let own = riir_infer_dist::planner::HostProbe {
+            host: "head".into(),
+            rows,
+            state_budget: None,
+        };
+        let addr = resolve_addr(
+            a.connect
+                .as_deref()
+                .ok_or("--plan-wire needs --connect ADDR")?,
+            "--connect",
+        )?;
+        let (sock, applied) =
+            sockopts::dial(addr, &link_opts).map_err(|e| format!("connect {addr}: {e}"))?;
+        eprintln!("{}", applied_line("head", applied));
+        let mut link = TcpTransport::new(sock, key, Direction::Downstream)
+            .map_err(|e| format!("socket: {e}"))?;
+        let ctx = riir_infer_dist::probe::ExchangeCtx {
+            own,
+            n_layer,
+            hidden: config.n_embd,
+            bw_bps: a.link_bw,
+            n_positions: a.ctx,
+            // Conservative per-position figure (the attention layers'
+            // KV row; the hybrid's GDN layers hold none). Inert at the
+            // v0 posture — neither record carries a budget — and the
+            // safe direction if one ever does.
+            state_bytes_per_position_per_layer: riir_infer_dist::planner::state_bytes_per_position(
+                riir_infer_core::types::kv_dim(&config),
+                0,
+            ),
+            rtt_rounds: riir_infer_dist::probe::RTT_ROUNDS,
+        };
+        let out =
+            riir_infer_dist::probe::run_probe_exchange(&mut link, cands, &ctx, &addr.to_string())
+                .map_err(|e| format!("probe exchange: {e}"))?;
+        link.send_frame(riir_infer_dist::transport::FrameKind::Shutdown, &[])
+            .map_err(|e| format!("shutdown: {e}"))?;
+        println!(
+            "link: rtt {:.3} ms (median of {}), bw {} B/s (carried, not measured)",
+            out.rtt_s * 1e3,
+            riir_infer_dist::probe::RTT_ROUNDS,
+            a.link_bw
+        );
+        println!(
+            "tail record: {} rows · n_layer {n_layer} · hidden {} (cross-checked)",
+            out.tail.rows.len(),
+            config.n_embd
+        );
+        for (k, s) in &out.plan.table {
+            println!("  split {k}: {s:.6} s/tok predicted");
+        }
+        println!("PLAN: --split {}", out.plan.k);
+        return Ok(());
+    }
+
+    // T2.5 probe EXCHANGE tail posture: answer pings and probe
+    // requests until Shutdown, exit clean — never serves. The boot
+    // slice (the operator's --split) stays resident; the probes load
+    // their own scoped candidates.
+    if a.answer_probe {
+        let addr = resolve_addr(
+            a.listen
+                .as_deref()
+                .ok_or("--answer-probe needs --listen ADDR")?,
+            "--listen",
+        )?;
+        let (l, applied) =
+            sockopts::listen(addr, &link_opts).map_err(|e| format!("listen {addr}: {e}"))?;
+        eprintln!("{}", applied_line("tail", applied));
+        eprintln!(
+            "[tail] probe-answer posture on {addr} (candidates 1..{n_layer}); serving NOT armed"
+        );
+        let (sock, peer) = l.accept().map_err(|e| format!("accept: {e}"))?;
+        eprintln!("[tail] probe head connected from {peer}");
+        let mut link = TcpTransport::new(sock, key, Direction::Upstream)
+            .map_err(|e| format!("socket: {e}"))?;
+        let t0 = Instant::now();
+        let mut probe_one = |k: u32| -> std::io::Result<f64> {
+            probe_candidates(&a, identity, n_layer, &[k], true)
+                .map(|mut r| r.remove(0).1)
+                .map_err(std::io::Error::other)
+        };
+        riir_infer_dist::probe::serve_probe_session(
+            &mut link,
+            n_layer,
+            config.n_embd as u32,
+            &mut probe_one,
+        )
+        .map_err(|e| format!("probe session: {e}"))?;
+        eprintln!(
+            "[tail] probe session answered in {:.1}s, clean shutdown",
+            t0.elapsed().as_secs_f64()
         );
         return Ok(());
     }
@@ -327,14 +540,10 @@ fn run() -> Result<(), String> {
 
     match a.role.as_str() {
         "tail" => {
-            let addr = a.listen.ok_or("tail needs --listen ADDR")?;
-            // std-equivalent resolution: TcpListener::bind accepted both
-            // IP literals and hostnames — keep both.
-            let addr: std::net::SocketAddr = addr
-                .to_socket_addrs()
-                .map_err(|e| format!("--listen {addr}: {e}"))?
-                .next()
-                .ok_or(format!("--listen {addr}: no address"))?;
+            let addr = resolve_addr(
+                a.listen.as_deref().ok_or("tail needs --listen ADDR")?,
+                "--listen",
+            )?;
             let (l, applied) =
                 sockopts::listen(addr, &link_opts).map_err(|e| format!("listen {addr}: {e}"))?;
             eprintln!("{}", applied_line("tail", applied));
@@ -387,12 +596,10 @@ fn run() -> Result<(), String> {
             if prompt.is_empty() {
                 return Err("empty prompt after encoding".into());
             }
-            let addr = a.connect.ok_or("head needs --connect ADDR")?;
-            let addr: std::net::SocketAddr = addr
-                .to_socket_addrs()
-                .map_err(|e| format!("--connect {addr}: {e}"))?
-                .next()
-                .ok_or(format!("--connect {addr}: no address"))?;
+            let addr = resolve_addr(
+                a.connect.as_deref().ok_or("head needs --connect ADDR")?,
+                "--connect",
+            )?;
             let (sock, applied) =
                 sockopts::dial(addr, &link_opts).map_err(|e| format!("connect {addr}: {e}"))?;
             eprintln!("{}", applied_line("head", applied));

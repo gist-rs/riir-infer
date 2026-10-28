@@ -40,6 +40,7 @@
 pub mod handshake;
 pub mod multi;
 pub mod planner;
+pub mod probe;
 pub mod runner;
 pub mod sockopts;
 pub mod spec_fill;
