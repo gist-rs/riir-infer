@@ -244,6 +244,13 @@ deltanet_prework_fused = ["ternary_deltanet_chunked_prefill", "ternary_gemv"]
 # chunked kernels' row-parallel internals. Mirrors the engine crate's empty
 # feature.
 deltanet_recurrence_rowpar = []
+
+# Issue 1150 — the dense-qwen3.8 wgpu/Metal lane (the uzu/MLX comparison unblock):
+# composes the runtime-generic GDN/attention/norm kernels with the new Q4_K tiled
+# GEMM (gemm_q4k_tile_cubecl). ternary_gemv gates the batched GDN kernels the
+# prefill path composes; chunked prefill + batched prefill are the state-safe
+# prefill kernel set.
+qwen38_wgpu = ["cubecl_runtime", "ternary_gemv", "ternary_deltanet_chunked_prefill", "ternary_attention_batched_prefill", "deltanet_recurrence_rowpar", "deltanet_recurrence_parallel"]
 # Tree-masked batched verify kernels for DeltaNet layers (Issue 721). Mirrors
 # the engine gpu crate's feature (which additionally pulls the
 # speculative-decode dispatch there). The katgpt-core leg supplies the
@@ -534,6 +541,19 @@ required-features = ["ternary_gemv_cuda_raw"]
 [[bin]]
 name = "qwen38_prefix_graph_probe"
 required-features = ["ternary_gemv_cuda_raw"]
+
+# Issue 1150 — the Metal dense-qwen3.8 bench + parity harness: pp/decode cells
+# + a greedy-argmax walk whose token ids feed the llama.cpp same-GGUF parity
+# check (the G1; the CUDA lane is not runnable on the comparison boxes).
+[[bin]]
+name = "qwen38_wgpu_bench"
+required-features = ["qwen38_wgpu"]
+
+# Issue 1150 G1 — the tiled Q4_K GEMM unit gate: kernel vs a CPU reference on
+# random shapes (tiny, GPU-required, no model).
+[[test]]
+name = "qwen38_wgpu_gemm_g1"
+required-features = ["qwen38_wgpu"]
 
 # Plan 620 (Plan 622 Phase 7) — the GPU G3 zero-shot harness: the CPU
 # `si_zero_shot_ppl` port driving `forward_token_graph` (~90 tok/s ⇒ the

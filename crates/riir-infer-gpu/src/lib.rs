@@ -783,6 +783,12 @@ pub use cudarc_kernels::{
 // The qwen38 dense cudarc forward family (Issue 742; CUDA-only).
 #[cfg(all(feature = "ternary_gemv_cuda_raw", not(target_os = "macos")))]
 pub mod qwen38_dense_cudarc;
+// Issue 1150 — the dense-qwen3.8 wgpu/Metal twin (the uzu/MLX same-model
+// comparison unblock). Composes runtime-generic kernels + the Q4_K tiled GEMM.
+#[cfg(feature = "qwen38_wgpu")]
+pub mod qwen38_dense_cubecl;
+#[cfg(feature = "qwen38_wgpu")]
+pub mod gemm_q4k_tile_cubecl;
 pub mod qwen38_dflash2;
 #[cfg(all(feature = "ternary_gemv_cuda_raw", not(target_os = "macos")))]
 pub mod qwen38_dflash2_gpu;
