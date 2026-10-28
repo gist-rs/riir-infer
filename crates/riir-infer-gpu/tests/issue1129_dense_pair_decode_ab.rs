@@ -94,7 +94,6 @@ fn run_arm(
     fwd: &mut riir_infer_gpu::TernaryDeltanetGpuForward,
     weights: &riir_infer_core::deltanet::ternary_weights::QwenDeltaNetTernaryWeights,
     vocab: usize,
-    n_layer: usize,
     pair_on: bool,
 ) -> ArmResult {
     riir_infer_gpu::gemv_cubecl::set_dense_pair_fused(pair_on);
@@ -210,10 +209,10 @@ fn issue1129_dense_pair_decode_ab() {
 
     // ABBA: OFF, ON, ON, OFF — arm order alternates so any monotone box
     // drift lands in BOTH arms' medians.
-    let off1 = run_arm(&mut fwd, &weights, vocab, n_layer, false);
-    let on1 = run_arm(&mut fwd, &weights, vocab, n_layer, true);
-    let on2 = run_arm(&mut fwd, &weights, vocab, n_layer, true);
-    let off2 = run_arm(&mut fwd, &weights, vocab, n_layer, false);
+    let off1 = run_arm(&mut fwd, &weights, vocab, false);
+    let on1 = run_arm(&mut fwd, &weights, vocab, true);
+    let on2 = run_arm(&mut fwd, &weights, vocab, true);
+    let off2 = run_arm(&mut fwd, &weights, vocab, false);
     // Leave the promoted default in place (the global posture stays ON).
     riir_infer_gpu::gemv_cubecl::set_dense_pair_fused(true);
 
