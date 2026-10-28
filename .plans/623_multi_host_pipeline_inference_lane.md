@@ -1,7 +1,7 @@
 # Plan 623: Multi-host inference lane — layer-range stages, activation frames, TCP→RDMA transport, TP, speculative fill
 
 **Status:** Phase 2 PoC LANDED 2026-10-27 (T2.1 + T2.2 + T2.2b GPU stage + T2.3a pipelined prefill + T2.2c(1) range-scoped weights + T2.3b chunked batched prefill (promoted) — each stage holds only its own slice: `crates/riir-infer-dist`, D1 → (a)) — real 2-box TB5 runs, CPU⇄CPU and GPU⇄GPU, streams bit-identical to 1-box; 1-box GPU base gap filed as Issue 1139 — mostly BUILD POSTURE, fixed by Issue 1141 (dist `gpu` now carries the production decode posture + the workspace's cubecl-wgpu fork: 1-box stage decode 27.2 → 46.7 tok/s, 2-stage 26.0 → 45.2 tok/s on idle bmo; then Issue 1142's dense-pair loads-in-flight kernel, 1-box 51.4 tok/s; then Issue 1143's decode-norm loads-in-flight (`85c4da5`), 1-box 55.0 tok/s; then Issue 1144's radix-4 FWHT (`3147164`), 1-box 56.9 tok/s; residual 1.07× vs llama.cpp, attributed in Issue 1139 T4, next rung Issue 1145); Phase 1 (T1.1–T1.5) LANDED 2026-10-26
-**Claimed:** zed-amo-i623-t25residue, 1793147836, expires 2026-10-30T00:37:16+00:00
+**Lease closed:** zed-amo-i623-t25residue landed the T2.5 residue 2026-10-28 (`f610afc` — the landing note on the T2.5 task carries the detail: measured link bw + tail probe rows)
   (the two disclosed T2.5 residues, Bench 915 honest-notes: the tail answer-posture probe rows print + the link bw MEASURED on the wire (echo-ack bulk — the tail does zero compute, the v0 conflation concern does not apply); CPU-only, no GPU cells)
 **Lease closed:** zed-amo-i623-admit landed the T2.4 ADMISSION SEAM 2026-10-28 (`07540f7`) — `Admission`/`AdmissionSource`/`StageFactory` + `run_head_multi_admit`, one wave engine over both doors, G1 4/4 (`tests/multi_stream_admission.rs`); the landing note on the T2.4 task carries the detail. T5.1's V0 design note (same session) is the scoping, not a held slot — the remaining T2.4 kernel micro-batching rung and the T5.1a–d slices stay unclaimed
 **Lease closed:** zed-amo-i623-t21b landed T2.1b 2026-10-27 (the landing note on the task is its provenance) — the GPU cells (T2.3c/T2.4/T2.5/T2.7) stay unclaimed
@@ -501,8 +501,9 @@ mlx-lm on the Proposal-042 scoreboard **measured on the same two boxes**.
   `run_probe_exchange` (measure → ask → model cross-check → `plan_split` →
   quote every input). Bin: `--answer-probe` (tail plan posture, never serves)
   + `--plan-wire CANDIDATES` (head: probes self, asks, prints the plan +
-  `PLAN: --split K`) + `--link-bw` (carried — the T0.2 TB5 8.6 GB/s default,
-  ~0.5% of the decode hop, disclosed; RTT is the measured half). The
+  `PLAN: --split K`) + `--link-bw` (the operator's CARRIED override — the
+  default MEASURES the bw live, see the residue note below; RTT is always
+  the measured half). The
   per-candidate probe loop is ONE shared `probe_candidates` (file arm + both
   wire postures — never three copies). G1: 5 module tests (strict decode
   arms, model-mismatch refusal, in-memory session) + `tests/probe_exchange.rs`
@@ -515,10 +516,28 @@ mlx-lm on the Proposal-042 scoreboard **measured on the same two boxes**.
   5120), plan composed live → `PLAN: --split 32` — the equaliser lands on the
   exact posture every measured 2-box cell runs (902/908/910/913). A serving
   tail refuses every probe frame at its Handshake expectation by construction
-  (plan-mode postures only).** Residual: the memory axis stays planner-level
-  (budgets None on the wire — additive field if a v1 wants it); tail-side raw
-  probe rows are quiet in the answer posture (derived exactly in the bench
-  record); real-box GPU probe cells remain T2.7's measurement lane.
+  (plan-mode postures only).** **RESIDUE 2 LANDED 2026-10-28
+  (zed-amo-i623-t25residue): the two Bench-915 honest-notes — (1) the link bw
+  is MEASURED on the wire by default (echo-ack bulk: `ProbeBw`/`ProbeBwAck`
+  kinds 15/16 additive plan-mode; the tail echoes the received byte length —
+  PURE I/O, zero compute, so the v0 "a bw probe would conflate tail compute
+  with wire time" concern does not apply to the echo-ack shape; `bw = payload
+  / max(elapsed, rtt)`, median of 3 rounds, 4 MiB bulk — the denominator
+  floor keeps a loopback-class reading conservative, never inflated; the
+  measured figure INCLUDES the transport's MAC cost per frame, i.e. it
+  prices what a frame actually costs — the honest serving-path input);
+  `--link-bw` stays the carried override (a peer predating kind 15 refuses
+  loud — never a silent fallback); `ExchangeCtx.bw_bps` is `Option<f64>`
+  (None = measure), the outcome carries the resolved value, and the boot
+  line discloses measured-vs-carried. (2) the tail's answer posture prints
+  its own per-candidate rows (`[tail] probe split k: …`) — both sides' raw
+  lines on record. G1: +2 module tests (the measured in-memory exchange is
+  formula-exact over the MEASURED bw; lying/truncated/wrong-kind ack
+  refusals) + `tests/probe_exchange.rs` 4th loopback e2e (the measured-bw
+  posture over real TCP; sanity band, never a perf claim). Full dist suite
+  16+4+4+7+2 green, clippy `-D` clean.** Residual: the memory axis stays
+  planner-level (budgets None on the wire — additive field if a v1 wants it);
+  real-box GPU probe cells remain T2.7's measurement lane.
 - [x] **T2.6** Tailscale posture: the same runner over the tailnet address; a measured row
   (the WAN/fallback lane exo cannot do — multicast discovery).
   **MEASURED 2026-10-27** — the unchanged `dist_stage` (no code change: the transport

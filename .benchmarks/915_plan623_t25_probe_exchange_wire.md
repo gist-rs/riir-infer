@@ -100,6 +100,12 @@ this box-state) are the planner's intended read.
 - The tail's per-candidate `[plan]` stderr is suppressed in the answer posture
   (`quiet`) — its rows are derived above, exact by the max-side structure. A later
   one-liner can print them if operators want both sides' raw lines.
+  **UPDATE 2026-10-28: both honest-notes RESOLVED (zed-amo-i623-t25residue) —
+  the bw is measured live (echo-ack bulk, kinds 15/16; `--link-bw` stays the
+  carried override) and the tail prints its own rows. Landing note: plan 623
+  T2.5. The numbers above were taken at the carried-bw posture; the measured
+  value prices the transport's MAC cost too, so a re-run reads slightly lower
+  than 8.6 GB/s carried — expected, disclosed by the tool line.**
 - amo was NOT quiet (load 2.66–3.08, sibling GPU lanes); the head probe rows carry
   that state. bmo was idle. RTT is network-bound and load-robust (median of 8).
 - The probe timing posture is best-of-3-rounds (the landed `probe_decode_spt`
