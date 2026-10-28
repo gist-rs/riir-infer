@@ -428,6 +428,17 @@ required-features = ["cubecl_runtime", "ternary_gemm_batched", "ternary_deltanet
 name = "issue1115_wg_occupancy_prefill_tail_ab"
 required-features = ["cuda_backend", "ternary_gemv_cuda_raw", "ternary_gemm_batched", "ternary_deltanet_chunked_prefill", "ternary_attention_batched_prefill", "riir-infer-core/bonsai2_hadamard"]
 
+# Issue 1149 — the R2 prework-fused CUDA ROUTING proof (the N/A cell's
+# engagement evidence): the whole-prefill GDN prework is four native cudarc
+# dispatches (conv1d/carry/beta/expand), so the CudaRuntime serving lane must
+# show ZERO CubeCL prework launches even with the arm setter armed, while the
+# CubeCL fall-through lane advances the counter (instrument liveness).
+# #[ignore]d — the 4090 runs it with --release -- --ignored,
+# RIIR_PREFILL_CUDA_GRAPHS=0, BONSAI_GGUF absolute, the issue1115 contract.
+[[test]]
+name = "issue1149_prework_fused_cuda_routing"
+required-features = ["cuda_backend", "ternary_gemv_cuda_raw", "ternary_gemm_batched", "ternary_deltanet_chunked_prefill", "ternary_attention_batched_prefill", "deltanet_prework_fused", "riir-infer-core/bonsai2_hadamard"]
+
 # Bench 903 — Issue 1127 T3 probe: bit-identical FWHT-quantize geometry
 # variants (float4 global-load fill / register-tiled butterfly stages 2+4 /
 # shfl_down reduction tail) vs the shipped fused kernels, interleaved-burst
