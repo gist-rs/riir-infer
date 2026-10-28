@@ -109,7 +109,23 @@ the gemma2 seam stays compile-only, and NO new gemma-2-2b execution cells anywhe
 LIVE products (laya checkpoints, clef-ANE 0.6b) are NOT this retirement — they keep their
 own gates.** Phase 0 UNBLOCKED 2026-10-26 (1109 T0–T3 DONE: bridge live at
 192.168.10.x, bmo workspace + model synced, RPC smoke green; T4 RDMA stays
-owner-physical); Phase 2+ gated on Proposal 042 D1.
+owner-physical); Phase 2+ gated on Proposal 042 D1. Phase 3 T3.1 verbs FFI
+LANDED 2026-10-29 (`226cace`+`16fb64a`+ two verbs_ping fixes;
+[Bench 927](.benchmarks/927_plan623_phase3_verbs_bringup.md)): `crates/riir-infer-dist/src/verbs/`
+behind the opt-in `rdma` feature — the SDK header mirrored repr(C) with layout
+pins (`tests/verbs_layout.rs`), the four inline verbs riding Apple's 32-slot
+`ibv_context_ops` vtable, MAC'd endpoint bootstrap (wrong-key negative refuses
+both sides pre-QP); FIRST RDMA TRAFFIC amo⇄bmo: UC QP pair, RTT p50 **7.7 µs**
+(TCP was 94–96 µs, 12×) and **9.368 GiB/s** one-way sustained 1 GiB. Provider
+laws measured: UC RTS mask is STATE|SQ_PSN only; posted-recv budget 4 MB OK /
+5 MB rc=-12; UC credit flow-control stalls a dead peer's SQ as a poll TIMEOUT
+(never a WC error); GIDs are NOT IPv4-mapped on TB (index-0 fallback is the
+working path). T3.2 heap leg (67 MB MR lkey granted; rkey granted 0x0 —
+RDMA WRITE untested until rkey semantics are clarified, SEND/RECV is the
+measured shape) + T3.3 rows (64 B inline 7.7 µs; striped best 128 KiB
+8.76/9.368 GiB/s) landed same pass; OPEN: T3.2's MTLBuffer leg + rkey
+semantics, T3.3's MTU ladder (1024/2048 cells + the posted-recv cliff vs MTU),
+T3.4 GPU↔comm sync, T3.5 scoreboard (needs T3.4).
 The GLU-fused ternary prefill FFN arm LANDED 2026-10-26 (Issue 1124 T1, the llama.cpp
 #29948 distill — `1320dda`): gate/up weight rows INTERLEAVED in 8-row chunks at
 mirror-build time (`pack_bitplanes_to_q2_interleaved_gate_up` +
