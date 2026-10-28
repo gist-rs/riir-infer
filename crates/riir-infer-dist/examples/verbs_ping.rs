@@ -316,15 +316,19 @@ fn host_loop(
 ) {
     let deadline = || Instant::now() + lat;
 
-    // Phase 1: echo until the bulk header (length dispatch).
-    qp.post_recv(&mr.slice_at(0, rtt_msg as u32), 1).expect("host recv");
+    // Phase 1: echo until the bulk header (length dispatch). The recv
+    // buffer is offset 0 — the header is read THERE, never from the
+    // bulk area. Length ≥ HDR_LEN so the 16-byte header cannot truncate
+    // (a UC truncation is a QP error, not a short read).
+    let recv_len = rtt_msg.max(HDR_LEN);
+    qp.post_recv(&mr.slice_at(0, recv_len as u32), 1).expect("host recv");
     let (stripe, stripes, total) = loop {
         let wc = recv_cq.poll_one(deadline()).expect("host recv");
         let n = wc.byte_len as usize;
         if n == HDR_LEN {
             unsafe {
                 let p = mr.addr as *const u8;
-                let b = std::slice::from_raw_parts(p.add(rtt_area), HDR_LEN);
+                let b = std::slice::from_raw_parts(p, HDR_LEN);
                 let stripe = u32::from_le_bytes(b[0..4].try_into().unwrap()) as usize;
                 let stripes = u32::from_le_bytes(b[4..8].try_into().unwrap()) as usize;
                 let total = u32::from_le_bytes(b[8..12].try_into().unwrap()) as usize;
@@ -335,7 +339,7 @@ fn host_loop(
         qp.post_send(&mr.slice_at(0, n as u32), 0, n <= 224)
             .expect("host echo send");
         send_cq.poll_one(deadline()).expect("host echo completion");
-        qp.post_recv(&mr.slice_at(0, rtt_msg as u32), 1).expect("host recv re-post");
+        qp.post_recv(&mr.slice_at(0, recv_len as u32), 1).expect("host recv re-post");
     };
     eprintln!("[host] bulk header: stripe={stripe} stripes={stripes} total={total}");
 
