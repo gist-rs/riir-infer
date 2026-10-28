@@ -311,7 +311,7 @@ fn host_loop(
     rtt_area: usize,
     _bulk_len: usize,
     _stripe_hint: usize,
-    _window_hint: usize,
+    window_hint: usize,
     lat: Duration,
 ) {
     let deadline = || Instant::now() + lat;
@@ -343,20 +343,28 @@ fn host_loop(
     };
     eprintln!("[host] bulk header: stripe={stripe} stripes={stripes} total={total}");
 
-    // Phase 2: pre-post the receive window over the bulk area, then
-    // answer ready.
+    // Phase 2: pre-post the RECEIVE WINDOW (a ring of `window` slots —
+    // the sender never has more than `window` stripes in flight, so the
+    // ring always covers them; pre-posting all `stripes` recvs measured
+    // post_recv rc=-12 on the TB provider at 255×256 KiB), then answer
+    // ready.
     let base = rtt_area + BULK_HDR_ROOM;
     assert!(base + stripes * stripe <= mr.len, "host bulk area undersized");
-    for i in 0..stripes {
-        qp.post_recv(&mr.slice_at(base + i * stripe, stripe as u32), 10)
+    let window = window_hint.min(stripes).max(1);
+    let mut posted = 0usize;
+    for _ in 0..window {
+        let slot = posted % window;
+        qp.post_recv(&mr.slice_at(base + slot * stripe, stripe as u32), 10)
             .expect("host window post");
+        posted += 1;
     }
     qp.post_send(&mr.slice_at(0, MARK_LEN as u32), 0, true)
         .expect("host ready send");
     send_cq.poll_one(deadline()).expect("host ready completion");
 
-    // Phase 3: drain exactly `stripes` completions, replenishing past
-    // the window.
+    // Phase 3: drain exactly `stripes` completions; each reaped slot is
+    // re-posted for the next unreceived stripe until the count is fully
+    // covered.
     let mut reaped = 0usize;
     while reaped < stripes {
         let wc = recv_cq.poll_one(deadline()).expect("host bulk recv");
@@ -364,6 +372,12 @@ fn host_loop(
             panic!("host bulk recv wc status {}", wc.status);
         }
         reaped += 1;
+        if posted < stripes {
+            let slot = posted % window;
+            qp.post_recv(&mr.slice_at(base + slot * stripe, stripe as u32), 10)
+                .expect("host bulk re-post");
+            posted += 1;
+        }
     }
     let got = reaped * stripe;
     if got != total {
