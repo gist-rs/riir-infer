@@ -2,6 +2,10 @@
 
 **Status:** PARTIALLY LANDED 2026-10-28 — the CODEC half is fixed (the per-f32 append loops in `HybridStateSegment::encode_into`/`restore_into` → `bytemuck` bulk copies, byte-identical wire on LE; the same-process re-cell reads 0.86–0.95 tok/s vs 0.23 before — **17–18×**; segment round-trip tests 10/10 + the G1 battery green). The structural half stays OPEN: the fast path is still the plan-named GDN journal rank-1 unwind + an attention KV truncate — a rewind should not serialize state at all
 
+**Claimed:** shikuwa-4090-i1148ckrewind, 1793161056, expires 2026-10-30T04:17:36Z
+
+(scope: the structural rewind rung — an in-process exact live-state checkpoint seam (no serialize, byte-exact copies, live KV rows bounded by the runner cursor) + the cursor-law truncate pin + the same-process re-cell. NOTE on the plan-named mechanism: the GDN journal rank-1 unwind carries a measured 6.3e-6 drift (Bench 885) and this issue's ground rule is byte-exact — the journal is NOT wired for the spec rewind; the exact checkpoint is the fast path that satisfies both the wall and the no-serialize goal.)
+
 ## The finding
 
 Plan 623 T5.1's speculative-fill rewind (T5.1b V0) snapshots and restores the full pipeline state
