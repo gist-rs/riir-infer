@@ -157,6 +157,18 @@ the incumbent two-launch pair); `RIIR_GDN_DENSE_PAIR_WG` ships unpromoted (the g
 rung measured DEAD — the pair cost is a per-dispatch floor, flat across wg sizes).
 Remaining scope in issue 1129: the `cuda_backend` CubeCL arm (the scored 4090 lane is
 cudarc, whose K2 already fuses this pair — untouched).
+The GDN prework-fused rung (riir-ai Issue 1004 R2, Bench 024) is **PROMOTED DEFAULT-ON,
+Metal/wgpu-scoped 2026-10-28** (riir-infer `e2edf61`+`2581fdd`, riir-ai `d25c7c460`;
+delegated owner verdict): conv1d+SiLU+q/k L2-norm+head-expand in ONE dispatch per
+layer (~67 fewer dispatches, ~160 MB/layer less traffic), bit-identical by
+construction — G2 e2e pp2048 1.043× / pp4096 1.045× on the m5ultra re-cell,
+post-promotion G1 anchors EXACT at the league posture both lengths. The initial
+toggle value derives from `cfg!(target_os = "macos")` — the `cuda_backend` posture
+keeps the incumbent pair until its own 4090 cell (riir-infer Issue 1149, 4090-queued;
+the GEMV-occupancy per-backend scoping precedent). Env `RIIR_PREFILL_PREWORK_FUSED`
+is DEMOTE-only on Metal / promote-only elsewhere; `set_prefill_prework_fused` stays
+the harness arm toggle. R1 (`deltanet_recurrence_smem_staged`) stays opt-in pending
+its pre-authorized second M5 window (riir-ai Issue 1004).
 
 ## Build Commands
 
