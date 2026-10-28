@@ -267,7 +267,7 @@ impl MetalTensorZeroCopyGemm {
     ///
     /// Returns a raw pointer into the CubeCL-managed GPU memory. The pointer
     /// is valid for as long as the CubeCL handle is alive.
-    fn extract_raw_buffer(
+    pub(crate) fn extract_raw_buffer(
         client: &ComputeClient<ActiveRuntime>,
         handle: &Handle,
     ) -> Result<(*mut metal::MTLBuffer, u64), String> {
@@ -322,7 +322,7 @@ impl MetalTensorZeroCopyGemm {
     /// (one fill, submitted ahead of the raw command buffer on the same
     /// queue), so wgpu marks it initialized before the raw write lands. Steady
     /// state pays nothing: a seen range is a set lookup.
-    fn ensure_wgpu_initialized(
+    pub(crate) fn ensure_wgpu_initialized(
         &self,
         client: &ComputeClient<ActiveRuntime>,
         output: &Handle,
