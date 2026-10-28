@@ -46,7 +46,7 @@ post-promotion (window 3: +2.62% pooled, G1 bytewise ×4, clean
 interleave — the owed cell CLOSED, every measured posture carries a
 positive replicated read); prior
 record: kernel-only k4w4 1.26–1.51× at the DQ-lane posture
-(`.benchmarks/884_plan621_gdn_l8_eager_prefill.md`), the league
+(`.benchmarks/926_plan621_gdn_l8_eager_prefill.md`), the league
 re-gate opened opt-in 2026-10-21 (riir-ai Bench 993));
 the fused GDN fold-tail + SwiGLU-rotate decode kernels LANDED 2026-10-23
 (riir-ai Issue 1113 lever 1 — `deltanet_rotation_cubecl.rs`, opt-in env
@@ -120,7 +120,7 @@ applied IN the transposed staging pass from registers (`GEMM_BODY_V10T_GLU_Q8`,
 `gemm_ternary_i8_mma_v6_src.rs`) with the Bench-721 canonical forms in the standalone
 kernel's op order — bit-identical to (v10t pair + standalone SwiGLU) by construction,
 G1 gate 0 bit-diffs ×2 shapes vs the real standalone kernel. Env
-`RIIR_PREFILL_FFN_GLU` — **PROMOTED DEFAULT-ON 2026-10-27** (riir-ai Bench 1008 / verdict
+`RIIR_PREFILL_FFN_GLU` — **PROMOTED DEFAULT-ON 2026-10-27** (riir-ai Bench 1018 / verdict
 `9ca951de`: paired league windows +6.31/+6.72% pp2048, +7.27/+6.47% pp4096, 4/4
 positive, G1 pins EXACT 4/4; riir-infer `57fa7a7`) — the env is DEMOTE-ONLY
 (exact-literal `0`/`false`/`off` restores the incumbent pair path byte-identically;
@@ -132,8 +132,8 @@ been pair-vs-pair (caught by the engagement-proof-first protocol — the `[721-t
 line is unreachable at the folded posture; the folded lane's proof is the one-shot
 `[1127-glu] REACH` line). Kernel probe Bench 897
 (`.benchmarks/897_issue1124_v10tglu_kernel_probe.md`): **1.258× @p2048 / 1.227×
-@p4096** at the league FFN shapes (m=17408, n=5120). T2 DONE — riir-ai Bench 1008
-(`../riir-ai/.benchmarks/1008_issue1127_t4_recell_bundle.md`); follow-ups: the
+@p4096** at the league FFN shapes (m=17408, n=5120). T2 DONE — riir-ai Bench 1018
+(`../riir-ai/.benchmarks/1018_issue1127_t4_recell_bundle.md`); follow-ups: the
 mirror-halving commit, the next-bout default-posture confirm (< +3% pooled or any
 negative window → the demote hatch reverts). T3 mined via refine Batch 287
 (`d871a0fc`, riir-refine Plan 292 / Research 325).

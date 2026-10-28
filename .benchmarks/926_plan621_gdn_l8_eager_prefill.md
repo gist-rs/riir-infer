@@ -1,4 +1,4 @@
-# Bench 884 — Plan 621 T3/T4/T5: the GDN L8 eager-prefill recurrence (the Yukon lane-geometry class)
+# Bench 926 — Plan 621 T3/T4/T5: the GDN L8 eager-prefill recurrence (the Yukon lane-geometry class)
 
 **Date:** 2026-10-19 · **Box:** shikuwa / 4090 RTX (sm_89), Windows 11, AC power, i7-13700K ·
 **GPU state at bench:** idle compute (3% util desktop residue, 43°C, ~9.7 GiB graphics-resident, no compute apps) ·
