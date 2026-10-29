@@ -71,7 +71,14 @@ quantization and model architectures on top. From it (path deps
   IMPROVES with depth (ΔNLL 0.477→0.248 across the 4K buckets at ρ 0.15) —
   the Bench-671 depth worry does not compound. The speedup/retention
   crossover sits near ρ ≈ 0.2, so the serving operating point is ρ ≤ 0.15;
-  the 128K perf+quality axis is in flight (issue 1117 T4).
+  the 128K perf+quality axis is in flight (issue 1117 T4). The block-sparse
+  prefill attention arm (env `RIIR_PREFILL_SPARSE=1`, issue 1156 T2 —
+  XAttention-class diagonal-band + pooled-centroid block scoring into a
+  bisect τ-mass select over 64-row blocks, sink {0,1} always; τ=1.0 is
+  bit-identical to the dense m32 prefill 12/12 e2e; τ=0.9 reads 1.166× @16K
+  / 1.310× @32K e2e with 0 perf-item flips — the win grows with P exactly as
+  the stage decomposition predicted, 24.6%→39.3% attention share) is
+  OPT-IN, not promoted: T3's per-family ΩMSR floors bind any default move.
 - **CPU references** — the reference paths the GPU kernels are validated
   against.
 
