@@ -96,7 +96,7 @@ Read at the research pin `bc412e2` (`.raw/exo`, rm at lane end): `generate.py:16
 2. Stale per-cell tail logs satisfy the readiness poll instantly → head connect-refused against a still-loading tail. Clear the log before boot (harness now does).
 3. A stale listener holds the port and cascades every following cell — pre-kill per cell (harness now does).
 4. macOS `seq -s,` emits a TRAILING comma → `--prompt` parse error "empty string" from the trailing empty element. Strip it at generation.
-5. The launch-context discriminator (PROVENANCE): foreground cells are the only valid posture until explained.
+5. The launch-context discriminator (PROVENANCE): foreground cells are the only valid posture until explained. *(Superseded 2026-10-29 by the addendum below: the class was refuted on re-test; foreground stays the discipline for the sequential-drift law.)*
 
 ## Verdicts (one line each)
 
@@ -105,3 +105,23 @@ Read at the research pin `bc412e2` (`.raw/exo`, rm at lane end): `generate.py:16
 - Prefill: overlap bar **PASSES at c128 (1.76×)**; chunk default **stands**; exo's chunk heuristic **does not transfer**.
 - Residues: comm-THREAD split **DECLINED** (<1%); tail-logits arm **DECLINED** (≤3%).
 - RDMA serving swap: **not justified by this decomposition** (the link leg is not the binding cost at this split).
+
+## Addendum (2026-10-29, ~10:00 +07, zed-m3-idle1029b) — the launch-context discriminator RE-TESTED: class refuted as deterministic; mechanism unproven; harness hardened
+
+The PROVENANCE discriminator ("detached-matrix spawns EHOSTUNREACH 6/6 while foreground connects") was re-tested on demand the next morning, every leg, both boxes:
+
+| probe | posture | result |
+|---|---|---|
+| amo detached shell → bmo TB:22 (ssh + raw TCP + prov-style ssh, the exact matrix launch shape `ssh amo "nohup … &"`) | fully reparented | **all errno 0, sub-ms** |
+| amo detached **dist_stage head** (adhoc/linker-signed, the incident binary), full boot → connect 192.168.10.2:17632, no listener | fully reparented | **ECONNREFUSED (os error 61)** — path fine, correct no-listener errno |
+| amo foreground dist_stage (unchanged control) | ssh session | connects (the 07:57+ rerun, all cells green) |
+| m3 detached → tailscale IPs (100.111.186.76 / 100.100.117.44):22 | fully reparented | errno 0 — after a **6 s cold first-touch** (timeout), instant (0.07 s) on retry |
+| amo provenance polls DURING the incident window (07:17–07:39 +07, in `~/git/riir-infer/.wt/i623_t35_matrix/provenance.log`) | ssh from m3 | **all 9 polls succeeded** — the TB link was up the whole window |
+
+Findings, in strength order:
+
+1. **The launch-context class is REFUTED as a deterministic posture property.** Detached shells, detached adhoc-signed dist_stage, and detached ssh all reach the TB subnet and the tailscale paths today. A detached matrix run is not invalid *by construction*.
+2. **The errno signature belongs to the issue-1152 class.** amo's Application Firewall is ON (State = 1) and `dist_stage` is adhoc/linker-signed; issue 1152 measured EXACTLY `EHOSTUNREACH "No route to host"` from specific adhoc binaries on amo→bmo while nc/python3/ssh connect — a network-posture SYN drop wearing a routing errno. The discriminator is most plausibly the same dropper, context-attribution-dependent (a detached tree attributes differently than a session), but this is INFERENCE, not measurement — see (4).
+3. **A cold-path failure mode is measured and now healed in the harness**: a first-touch connect on an idle path can stall seconds (m3→tailscale: 6 s timeout, then 0.07 s). `plan623_wire_cell.sh`'s tail-spawn ssh was single-shot with no ConnectTimeout — one cold instant killed the cell and the readiness loop could not heal a spawn that never delivered. The harness now carries `ConnectTimeout=10` on the delivery-critical ssh legs and retries the spawn leg up to 3× on dead-ssh + EMPTY-log (the never-delivered signature); a real boot failure (log has content) is surfaced immediately, never retried (smoke-tested with a bogus bin path: surfaces in seconds, no retry spin). The retry is on the SSH leg only — no model load happens on a failed spawn, so a retry costs seconds.
+4. **The original incident is honest-unknown.** The failing run's artifacts are destroyed: the matrix `cells.log` never survived (absent), the failing head logs were overwritten by the 07:57+ foreground rerun (same cell names), no tail logs from the window survive on bmo, and `log show` on both boxes has no sshd visibility. The binary has been rebuilt twice since. The "macOS per-app local-network posture of the reparented tree" suspect in the original record stands as the named-but-unproven class, now linked to 1152.
+5. **The discipline stands, with its reason corrected**: plan-623 wire cells stay foreground-chunked — for the sequential-drift law (the real perf reason, unchanged), and because a detached matrix requires a SIGNED binary to be trustworthy on these boxes (issue 1152's owner gate). A detached run may be attempted after dist_stage is signed; the hardened spawn retry makes transient cold-path failures self-heal either way.

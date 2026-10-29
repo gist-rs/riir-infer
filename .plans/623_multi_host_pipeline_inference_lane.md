@@ -659,8 +659,11 @@ mlx-lm on the Proposal-042 scoreboard **measured on the same two boxes**.
   swap is NOT justified (the link leg is not binding at this split). Incumbents:
   llama.cpp RPC is TCP-only ("RPC-RDMA" N/A), exo N/A (PQ2_0), jaccl stays prose
   (serving forms dead by Benches 904/906). Harness lessons: foreground-chunked cells
-  are the only valid launch posture (detached-matrix spawns EHOSTUNREACH while manual
-  probes connect — discriminator unexplained, PROVENANCE section), four `set -u`
+  are the discipline (sequential-drift law; the detached-spawn EHOSTUNREACH class
+  was RE-TESTED 2026-10-29 and refuted as a deterministic launch-context property —
+  the signature is the issue-1152 posture drop, unproven for the incident; the harness
+  now retries the spawn leg on the never-delivered empty-log signature — Bench 929
+  addendum), four `set -u`
   unset-expansion deaths on bash 3.2, stale-log readiness race, macOS `seq -s,`
   trailing comma.)
 

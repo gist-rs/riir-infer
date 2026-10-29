@@ -151,8 +151,14 @@ the `RIIR_DIST_STEP_TIMING` decomposition declines both T3.4 residues (tail
 fwd+logits 78% of the wall, head-local <1%) and shows the link leg is NOT binding
 (no verbs-Transport serving swap justified at this split); llama.cpp "RPC-RDMA" N/A
 (TCP-only upstream), exo N/A (PQ2_0), jaccl stays prose. Harness law: plan-623 wire
-cells run FOREGROUND-chunked — detached-matrix spawns EHOSTUNREACH on these boxes
-while manual probes connect (discriminator unexplained, Bench 929 PROVENANCE).**
+cells run FOREGROUND-chunked — for the sequential-drift law; the detached-spawn
+EHOSTUNREACH discriminator was RE-TESTED 2026-10-29 and REFUTED as a deterministic
+launch-context class (detached shells + a detached adhoc-signed dist_stage all reach
+the TB subnet; the signature is the issue-1152 network-posture SYN-drop class,
+unproven for the incident — artifacts destroyed), and the harness now carries
+ConnectTimeout + a 3× spawn-leg retry on the never-delivered (empty-log) signature
+(Bench 929 addendum); detached runs need a SIGNED dist_stage (issue 1152's owner
+gate) before they are trusted.**
 The GLU-fused ternary prefill FFN arm LANDED 2026-10-26 (Issue 1124 T1, the llama.cpp
 #29948 distill — `1320dda`): gate/up weight rows INTERLEAVED in 8-row chunks at
 mirror-build time (`pack_bitplanes_to_q2_interleaved_gate_up` +
