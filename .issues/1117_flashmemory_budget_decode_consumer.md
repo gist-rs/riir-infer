@@ -1,9 +1,9 @@
 # Issue 1117 — run FlashMemory budget (top-ρ) attention in the Bonsai decode loop + the end-to-end quality gate
 
 **Status:** Open — filed 2026-10-25 from riir-train Issue 452 E1 (riir-train Bench 671) + katgpt-rs Issue 962. T3 + T4 (32K) landed; T4's 128K axis is the open item (armed below).
-**Lease closed:** 2026-10-27 — T3/T4 (32K) landed under the zed-m3-continue lease by zed-m3-idle-relaunch (the same lineage); record: Bench 893 v2 session + riir-infer `47268ea` (provenance) + the collection commit
-**Claimed:** zed-m3-641-ktile64, 1793081500, expires 2026-10-29T06:11:40Z
-(scope: T4's 128K axis ONLY — the ~41h-class decode run on the m3, the same box that carried the 32K half; the lease covers arming + monitoring + the record)
+**Lease closed:** zed-m3-641-ktile64, 1793081500, was expires 2026-10-29T06:11:40Z — the 128K trio LAUNCHED under it 2026-10-27 ~06:5x +07 but **DIED 2026-10-27 20:35 +07** (unattributed external kill: log + load trace both stop mid-dense at 53760/131072 = 41%, no `gate exit rc=` line, no reboot since 10-24, no jetsam record — the whole tree died at once); the gate wrote NO durable results (report is end-of-run only), so the ~7.6 h dense prefix is lost. Observation recorded 2026-10-30 by the m3 collection lane.
+**Claimed:** zed-m3-i1117-collect, 1793298727, expires 2026-11-02T00:00:00Z
+(scope: T4 128K collection + RELAUNCH — the resilience half first: per-arm durable persistence in the gate bin, dense-arm load-in so the legs split; rebuild at the SAME claim commit `8b3306e` for forward-path comparability with the 32K record; the lease covers rebuild + arming + monitoring + the record)
 
 ## Why
 
