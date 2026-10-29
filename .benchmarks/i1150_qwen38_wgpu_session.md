@@ -175,11 +175,11 @@ bmo M5 Ultra — opponents' rows recorded 2026-10-28, riir-ai
 
 | P (in-tokens) | uzu mirai-m:4 | fork `73bfe6cc4` Q4_K_M | MLX-LM 4bit | OURS (dense-f16 mm2d) |
 |---:|---:|---:|---:|---:|
-| 2484 | 1009.7 | 525.23 ±101 | 1395.0 | — |
-| 4954 | 1156.9 | 898.26 | 1410.8 | — |
-| 9856 | 536.0 | 855.12 | 1418.7 | — |
-| 16392 | 392.7 | 799.71 | 629.7 ⚠ declining | — |
-| decode ctx2048 | (none recorded) | (none recorded) | (none recorded) | — |
+| 2484 | 1009.7 | 525.23 ±101 | 1395.0 | **18** (clean median) |
+| 4954 | 1156.9 | 898.26 | 1410.8 | **3** (poisoned median; the clean read is pass-1 **19**, disclosed) |
+| 9856 | 536.0 | 855.12 | 1418.7 | no median (run stopped; warm-up + pass 1 read **5**) |
+| 16392 | 392.7 | 799.71 | 629.7 ⚠ declining | not reached |
+| decode ctx2048 | (none recorded) | (none recorded) | (none recorded) | not reached |
 
 Cells to beat per the issue-1150 G2: MLX is the prefill bar at every cell
 (1395–1419 through 10k). The kernel-level A/B (50.22×) predicts the dense-f16
@@ -282,3 +282,62 @@ bmo resolved who that owner is — and it is the capture itself:
   ETA) or ag_news-paced (~3.1 s/row -> ~21:16 +07 ETA); both inside the
   deadline. After the serve dies, wired MPS memory returns to the OS and
   gate 4 (free RAM >=55%) re-verifies before anything fires.
+
+## The bmo four-way RUN — measured, FAIL-honest, stopped early (2026-10-29 15:54–19:51 +07, zed-m3-i1150-fourway)
+
+The auto-runner executed end to end exactly as designed: capture completed
+("PASSED — 1 suite(s) dumped", xnli_en 20000/20000, teacher acc ~0.899),
+`retire_serve_when_safe.sh` retired the capture's own rig (all three gates
+held; reversal command in the log), five gates passed (free RAM **81%** at
+fire), and the run started 15:54 +07 (`fourway_20261029_1554.log` on bmo).
+The bench loaded in 36.8 s with the dense arm engaged (`[Issue 1150]
+dense-f16 matmul2d arm armed`). Then the numbers:
+
+| cell | warm-up | pass 1 | pass 2 | pass 3 | MEDIAN |
+|---|---:|---:|---:|---:|---:|
+| pp 2484 | 1312.8 s = 2 t/s | 140.5 s = **18 t/s** | 2860.6 s = 1 t/s | 140.7 s = **18 t/s** | **18** |
+| pp 4954 | 1716.8 s = 3 t/s | 255.3 s = **19 t/s** | 1997.4 s = 2 t/s | 1754.0 s = 3 t/s | 3 (poisoned) |
+| pp 9856 | 1926.6 s = 5 t/s | 1908.0 s = 5 t/s | — stopped — | — | — |
+
+Stopped 19:51 +07 (SIGTERM, rc=143, runner logged and exited single-shot).
+**The verdict is FAIL-honest against the issue-1150 G2 bar**: the best clean
+read is **18–19 tok/s** (~0.9 TFLOP/s aggregate) vs MLX 1395–1419 — the
+kernel-level 50× did NOT transfer e2e. What DID transfer: the incumbent
+packed-path wall (4 tok/s / 216 GFLOP/s aggregate, the session record's
+measured wall) moved ~4.5× to ~18 tok/s / ~0.9 TFLOP/s — the scalar-dequant
+GEMM class is measured gone, and what remains is everything the arm does
+NOT route.
+
+**Three findings, each the next lane's raw material:**
+
+1. **The e2e bottleneck has moved off the routed GEMM sites.** The dense-f16
+   matmul2d arm routes the dense gemm/gemv sites only; the forward's other
+   stages are now the cost: the **f32 lm_head** (32768-row chunked f32
+   matmuls, ~2×248320×5120×tokens FLOPs at the OLD ~110 GFLOP/s class ≈ the
+   whole pass budget at pp 2484), the **GDN chunked scan** (48 of 64 layers;
+   conv + carry + multi-token recurrence, never routed), and per-chunk
+   orchestration. Named follow-up: route lm_head through the f16 path (or
+   measure it standalone) — it is the first suspect by FLOP arithmetic.
+2. **Progressive memory-pressure degradation, alternating passes.** Pass 1
+   of pp 2484/4954 ran at pace (140/255 s); pass 2 degraded 8–20× (2860/
+   1997 s); pp 2484's pass 3 recovered (140 s) but pp 4954's pass 3 did not
+   (1754 s), and pp 9856's pass 1 never ran at pace (1908 s = 5 t/s).
+   Free RAM fell 81% → 35% as the 54 GB posture landed; the slow-pass
+   magnitudes match a host-page re-fault storm (~10 GB host wte staging at
+   ~5 GB/s compressed/swap read). The gate floor (55% at fire) ensured the
+   load FITS, not that it STAYS resident. Named follow-up: a re-run protocol
+   with a single pass per cell, a memory watchdog (free% + swap sampled per
+   pass), and a purge between passes; the fast passes are the honest reads.
+3. **First-shape warm-up costs ~20–32 min each** (1312–1927 s: CubeCL
+   pipeline compile/autotune per new m-shape — 2484→m 512, 4954→m 346,
+   9856→m 176). One-time per shape, excluded by the median convention, but
+   it triples a four-cell run's wall time; a warm-shape sweep (one compile
+   per tile class, cells built from compiled-class shapes) is the cheap fix.
+
+**Provenance**: bmo M5 Ultra, quiet box at fire (census in the log:
+co-tenants none, free 81%, load 0.41); bin built 09:13 +07 at efeb527
+(`--features qwen38_wgpu` release); GGUF qwen3.8-27b-Q4_K_M 16.8 GB (the
+opponents' same file), f16 load posture; `RIIR_QWEN38_DENSE_MM2D=1`; run
+window 15:54–19:51 +07 with `caffeinate` holding the box. The capture lane's
+xnli_en numbers (teacher acc ~0.899, 20000 rows, ~2.2 s/row) landed before
+the run — both lanes' artifacts intact (`distill.json` + `DISTILL.md`).
