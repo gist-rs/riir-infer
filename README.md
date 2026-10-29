@@ -18,7 +18,9 @@ quantization and model architectures on top. From it (path deps
 - `katgpt-speculative` — the DDTree / DFlash / Weaver speculative substrate.
 - `katgpt-forward` — canonical clustered + standard LM head, top-k select.
 - `katgpt-quant` (opt-in `turboquant`) — TurboQuant.
-- `katgpt-attn` (opt-in `flashmemory_gqa`) — FlashMemory sparse GQA.
+- `katgpt-attn` (opt-in `flashmemory_gqa` / `flashmemory_budget` /
+  `flashmemory_trained_indexer`) — FlashMemory sparse GQA: the absolute-rule
+  selector, the top-ρ budget selector, and the trained-indexer arm.
 
 ## The crate
 
@@ -52,7 +54,24 @@ quantization and model architectures on top. From it (path deps
   transformer, rope, speculative-decoding types (dflash); the dLLM decode
   lane (`gemma2_d2f`) + the FA-constrained exact-posterior sampler (opt-in
   `fa_constraint`, issue 035 P3 verdict NOT PROMOTED — stays opt-in, record
-  in HISTORY).
+  in HISTORY); the FlashMemory top-ρ budget decode lane (opt-in
+  `flashmemory_budget`, issue 1117): the Bonsai ternary decode routes its 16
+  attention layers through sparse FlashMemory attention — per-layer top-
+  `ρ·n` block selection by the centroid-dot score (the Bench-671 selector,
+  katgpt-attn `flashmemory_budget_select`), an incremental per-layer block
+  cache whose last-block update is bit-identical to a fresh rebuild, and the
+  block-open force-refresh law (a newly opened block force-refreshes the
+  selector that step, or tokens landing in it stay outside the selection
+  until the next periodic refresh); projections/norm/rope/cache/gating/folded
+  output projection stay verbatim dense, and ρ=1.0 decode is bit-identical
+  to dense over 700 synth steps. End-to-end quality gate PASSED at 32K
+  (Bench 893): per-layer fidelity survives 16 attention layers compounding
+  through the 64-layer hybrid stack — ρ 0.15 (85% KV reduction): pooled
+  ΔNLL +0.4048, top-1 70.56%; ρ 0.30: +0.2087, 79.91%; per-bucket quality
+  IMPROVES with depth (ΔNLL 0.477→0.248 across the 4K buckets at ρ 0.15) —
+  the Bench-671 depth worry does not compound. The speedup/retention
+  crossover sits near ρ ≈ 0.2, so the serving operating point is ρ ≤ 0.15;
+  the 128K perf+quality axis is in flight (issue 1117 T4).
 - **CPU references** — the reference paths the GPU kernels are validated
   against.
 
