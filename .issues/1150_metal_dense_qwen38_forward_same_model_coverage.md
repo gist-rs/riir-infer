@@ -1,8 +1,8 @@
 # Issue 1150 — Metal dense-qwen3.8 forward (`qwen38_dense_wgpu`): the only road to same-model comparisons vs uzu and MLX
 
 **Status:** IN PROGRESS — decode + parity G1 LANDED (465c1d8..63c8847, 2026-10-28); **prefill unlock LANDED 2026-10-29** (dense-f16 matmul2d + f16 load posture + f16 gemv, `RIIR_QWEN38_DENSE_MM2D=1` opt-in; G1 unit gate green, A/B @ production FFN shape 50.22× kernel-level — 173 → 8678 GFLOP/s, see `.benchmarks/i1150_qwen38_wgpu_session.md`; the bmo four-way pp/decode cells = the remaining lane, 54 GB bmo-only, mammoth co-tenant disclosed)
-**Claimed:** zed-m3-i1150-densef16, 1793272600, expires 2026-10-30T02:40:00Z
 **Claim scope:** the dense-f16 matmul2d prefill arm (session-record step 1, the speed unlock) + the f16 gemv completing the F16 load posture for both paths; bmo four-way re-run stays the named follow-up, co-tenant-disclosed
+**Lease closed:** zed-m3-i1150-densef16, epoch 1793272600 (claimed for 48 h, folded at landing same-day) — landed `7e20540`
 
 ## Problem
 
