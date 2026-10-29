@@ -37,6 +37,10 @@ run_cell() {
   local name="$1" pair="$2" streams="$3"; shift 3
   eval "extra=($*)" 2>/dev/null || extra=()
   echo "=== cell $name (pair=$pair streams=$streams) $(date +%H:%M:%S) ==="
+  # A stale tail from a dead session holds the port and every subsequent
+  # cell dies at bind (measured 00:19 matrix cascade) — clear it first.
+  ssh "$BMO" "pkill -f 'dist_stage --role tail' 2>/dev/null" || true
+  sleep 1
   ssh "$BMO" "${I623_TAIL_ENV:-} RIIR_DIST_KEY='$KEY' '$BMO_BIN' --role tail \
       --model '$BMO_MODEL' --split $SPLIT --backend gpu --streams $streams \
       --listen 192.168.10.2:$PORT --ctx $CTX > $OUT_R/${name}_tail.log 2>&1" &
