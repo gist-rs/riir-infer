@@ -58,3 +58,7 @@ The bmo-target rows ran ([Bench 928 addendum](../.benchmarks/928_plan623_t32_rke
 ## Re-probe (2026-10-29 ~10:47 local, the claimed lane — plane STILL gated)
 
 verbs_ping amo→bmo re-run post-hardening (`d4604b0`/`874330c` — amo checkout at `ae72224` already carries both; the binary used was the pre-existing instrument build, byte-identical for this path): **the regression reproduces byte-for-byte** — amo initiator panics `to RTR: ibv_modify_qp(mask 0x101181) rc=14` while the bmo host reaches RTS cleanly (RTS line in its log) — the differential is exactly as recorded, NOT a GID-table issue (both sides picked gid[0], the working fallback; agrees with the i928 dating probe, `cd0783f`). amo firewall still ENABLED (state=1). Nothing lane-side moved in ~9 h: the owner gate stands; no further probes until a heal signal (owner act or a box reboot) to avoid noise.
+
+## Runway prepped (2026-10-29 ~11:0x local — the re-run needs NO build)
+
+Both boxes' `/tmp/vm_target` verbs binaries rebuilt fresh at `76564d9` (amo 10:55, bmo 11:01; bmo's checkout fast-forwarded `efeb5273` → `76564d9` by fetching from amo's checkout over the bridge — bmo has no GitHub ssh key, provenance disclosed). The plane-heal re-run is now: one `verbs_ping` canary (consequence-1), then the remedy-3 rows directly. Claim stays live (expires 2026-10-31T01:30Z) for that re-run.
