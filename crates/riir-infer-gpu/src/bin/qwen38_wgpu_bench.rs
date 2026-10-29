@@ -4,6 +4,9 @@
 //! - `--pp 512,2048,...`   prefill cells (median of 3, warm-up first) — the
 //!   four-way table row (vs uzu / llama.cpp / MLX on the same GGUF family).
 //! - `--decode 32`         decode steps after the prompt (tok/s).
+//! - `--decode-ctx 2048`   decode steps after a prompt PADDED to N tokens
+//!   (`--decode N` supplies the step count) — the league's decode-at-context
+//!   convention (ctx512/ctx2048 cells), not the raw short-prompt shape.
 //! - `--walk <text>`       greedy-generate N tokens (`--walk-tokens`), print
 //!   the token ids + detokenized text — the ids feed the llama.cpp parity
 //!   check on the same GGUF (the G1 acceptance; f32-activation class, module doc).
@@ -23,6 +26,7 @@ fn main() {
     let mut gguf = DEFAULT_GGUF.to_string();
     let mut pp: Vec<usize> = vec![];
     let mut decode_steps = 0usize;
+    let mut decode_ctx: Option<usize> = None;
     let mut prompt = "The harbor town woke slowly under a grey sky,".to_string();
     let mut ctx = 24_576usize;
     let mut chunk = 512usize;
@@ -45,6 +49,10 @@ fn main() {
             "--decode" => {
                 i += 1;
                 decode_steps = args[i].parse().expect("decode n");
+            }
+            "--decode-ctx" => {
+                i += 1;
+                decode_ctx = Some(args[i].parse().expect("decode-ctx n"));
             }
             "--prompt" => {
                 i += 1;
@@ -135,6 +143,37 @@ fn main() {
         println!(
             "[decode] {decode_steps} steps in {dt:.2}s = {:.2} tok/s",
             decode_steps as f64 / dt
+        );
+    }
+
+    // Decode cell at context depth (the league's decode convention): pad the
+    // prompt to N tokens, prefill, then step — tok/s is decode-at-ctx-N, the
+    // shape the league's ctx512/ctx2048 decode cells measure.
+    if let (Some(ctx_n), &steps) = (decode_ctx, &decode_steps) {
+        if steps == 0 {
+            eprintln!("[decode-ctx] needs --decode N for the step count");
+            std::process::exit(2);
+        }
+        let mut toks = ids.clone();
+        while toks.len() < ctx_n {
+            toks.extend_from_slice(&ids);
+        }
+        toks.truncate(ctx_n);
+        fwd.zero_state();
+        fwd.ingest(&toks, 0)
+            .unwrap_or_else(|e| panic!("decode-ctx ingest: {e}"));
+        let mut next = 0u32;
+        let t = std::time::Instant::now();
+        for s in 0..steps {
+            let pos = toks.len() + s;
+            next = fwd
+                .forward_token(if s == 0 { *toks.last().unwrap() } else { next }, pos)
+                .unwrap_or_else(|e| panic!("decode-ctx: {e}"));
+        }
+        let dt = t.elapsed().as_secs_f64();
+        println!(
+            "[decode-ctx {ctx_n}] {steps} steps in {dt:.2}s = {:.2} tok/s",
+            steps as f64 / dt
         );
     }
 
