@@ -348,3 +348,43 @@ the run — both lanes' artifacts intact (`distill.json` + `DISTILL.md`).
 Verdict on this record: Claude REVISE round 1 (2026-10-29) — the two-outcome
 split, the stage-timer-first order, and the residency audit are its
 amendments; lm_head last-row-only verified in source same day.
+
+## Stage timers + the pure-prefill re-measurement (2026-10-29 evening, zed-m3-i1150-stagetimer)
+
+Follow-up task 1 executed (`306540e` timers, `5b41121` bench pad fix),
+runs on bmo 20:20–21:45 +07, box quiet (free 93% before load, 80% after).
+
+**The synchronized stage breakdown** (`RIIR_QWEN38_STAGE_TIMERS=1`, pp 2484,
+TWO passes, shares reproducible warm-up-vs-pass-1): ragged tail **40–42%**,
+GDN scan (48 layers) **31–32%**, tail_logits (8 f32 GEMV sweeps per chunk,
+last-row-only — verified in source) **15–16%**, attention (16 layers)
+**10.7%**, wte upload 0.3–0.5%, argmax read ~0%. Three consequences:
+
+1. **The four-way pp cells were not pure prefill.** pp 2484 at chunk 512
+   left a 436-token ragged tail through SEQUENTIAL decode — ~40–42% of the
+   pass — while the opponents' cells are pure prefill. Fixed in the bench:
+   targets round UP to the chunk multiple (`2484→2560`), padded count
+   disclosed on every line (`5b41121`). The morning's OURS column is a MIXED
+   cell and must be re-read; its 18 tok/s is not comparable to uzu/fork/MLX.
+2. **GEMMs are no longer the bottleneck** — GDN + lm_head tail + attention
+   own ~57–59% of the synchronized pass; the routed dense GEMM sites are
+   the minority. GDN routing is the named optimization lead, gated on (3).
+3. **Decode regresses 28× on the f16 posture**: raw 32-step decode
+   **1.86 tok/s**, decode-ctx 2048 **1.23 tok/s** (vs the incumbent packed
+   ~52 tok/s class, issue-1153 cells). 54 GB/token vs ~16 GB/token plus an
+   untuned gemv. The f16 posture is a PREFILL experiment — it must never
+   serve decode; recorded so nobody presents it as a serving posture.
+
+**The stability finding (upgrades the residency audit):** the pure-prefill
+re-read (free-running, no timers, warm compile cache, quiet box) reads
+**6 tok/s stable — 451/461/455 s across three 2560-token passes** — while
+the morning four-way process read 18 tok/s on comparable work in the same
+posture. Same box, same bin lineage, same env: the e2e dense prefill is
+**bimodal across processes (~3×) and neither mode is explained yet**. The
+residency audit task absorbs this: explain the 18-vs-6 split or neither
+number pins. (Also measured tonight: no autotune re-payment — the CubeCL
+compile cache persisted across processes; the 20–32 min first-shape cost is
+first-ever-compile only.)
+
+Raw logs: bmo `/tmp/i1150/stagetimer.log`, `/tmp/i1150/pureprefill.log`,
+`/tmp/i1150/decodeonly.log` (all /tmp — the numbers above are the record).
