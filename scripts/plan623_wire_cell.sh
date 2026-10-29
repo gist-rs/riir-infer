@@ -52,6 +52,7 @@ run_cell() {
     i=$((i+1)); sleep 2
   done
   [ $i -ge 300 ] && { echo "tail never listened"; return 1; }
+  local env_prefix=""
   [ "$pair" = "1" ] && env_prefix="RIIR_DIST_PAIR=1"
   env $env_prefix RIIR_DIST_KEY="$KEY" ${I623_HEAD_ENV:-} "$AMO_BIN" --role head \
       --model "$AMO_MODEL" --split $SPLIT --backend gpu --streams $streams \
