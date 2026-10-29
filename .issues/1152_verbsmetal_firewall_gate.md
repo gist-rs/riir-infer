@@ -1,7 +1,8 @@
 # Issue 1152: verbs_metal end-to-end is gated by amo's macOS Application Firewall (unsigned-bin SYN drop)
 
 **Status:** OPEN — mechanism fully measured 2026-10-29 ~00:2xZ (m3 idle lane, read-only ssh probes; no box writes, the amo⇄bmo lane belongs to the live T3.5 session): the posture row below pins amo's exact fw state, the differential is fully explained (Apple-signed builtins auto-allowed + past GUI accepts per-binary-path), and remedy 3 is upgraded to PREFERRED — the plan-623 wire-cell rig ITSELF already runs tail-on-bmo/head-on-amo live (`plan623_wire_cell.sh` L34–49: `--role tail --listen 192.168.10.2:$PORT` on bmo, `--connect` from amo), so the verbs_metal rows can ride the same posture with ZERO fw interaction. The one-line remedies for the owner are unchanged.
-**Claimed:** zed-m3-idle1029a, 1793264000, expires 2026-10-31T01:30:00+00:00 — the remedy-3 bmo-target rows (T3.5 lane handed the rows over unclaimed 2026-10-29 ~01:1xZ; deliverable = a Bench-928 addendum, issue STAYS OPEN for the owner gate)
+**Claimed:** zed-m3-idle1029a, 1793264000, expires 2026-10-31T01:30:00+00:00
+  — the remedy-3 bmo-target rows: T3.5 lane (zed-m3-i971-housekeeping) handed the rows over unclaimed 2026-10-29 ~01:1xZ; deliverable = a Bench-928 addendum, issue STAYS OPEN for the owner gate
 **Date:** 2026-10-29
 **Lane:** Plan 623 T3.2's MTLBuffer leg ([Bench 928](../.benchmarks/928_plan623_t32_rkey_mtu.md)) — the code is landed (`570ee79`, `examples/verbs_metal.rs`, feature `rdma_metal`); the measurement is blocked by a box gate, not the lane.
 
