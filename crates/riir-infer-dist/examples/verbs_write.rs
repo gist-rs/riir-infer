@@ -211,14 +211,21 @@ fn bring_up(
         qp.to_init(vp, acc).map_err(|e| format!("INIT: {e}"))?;
         let psn = random_psn().map_err(|e| format!("psn: {e}"))?;
         // The GID index-0 fallback is the working path on the TB bridge
-        // (GIDs are NOT IPv4-mapped there — Bench 927).
+        // (GIDs are NOT IPv4-mapped there — Bench 927). The peer's v4 is
+        // passed anyway — verbs_ping's differential posture: a bare `None`
+        // would take "any IPv4-mapped GID" (possibly the wrong link) where
+        // ping takes the peer-matched one.
+        let peer_v4 = match stream.peer_addr() {
+            Ok(SocketAddr::V4(a)) => Some(*a.ip()),
+            _ => None,
+        };
         let (sgid_idx, sgid) = match gid_index {
             Some(idx) => (
                 idx,
                 ctx.gid(vp, idx).map_err(|e| format!("gid {idx}: {e}"))?,
             ),
             None => ctx
-                .pick_gid(vp, None)
+                .pick_gid(vp, peer_v4)
                 .map_err(|e| format!("pick gid: {e}"))?,
         };
         let mine = Endpoint {
