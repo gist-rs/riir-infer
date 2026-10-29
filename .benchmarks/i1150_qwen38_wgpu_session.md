@@ -300,39 +300,43 @@ dense-f16 matmul2d arm armed`). Then the numbers:
 | pp 9856 | 1926.6 s = 5 t/s | 1908.0 s = 5 t/s | — stopped — | — | — |
 
 Stopped 19:51 +07 (SIGTERM, rc=143, runner logged and exited single-shot).
-**The verdict is FAIL-honest against the issue-1150 G2 bar**: the best clean
-read is **18–19 tok/s** (~0.9 TFLOP/s aggregate) vs MLX 1395–1419 — the
-kernel-level 50× did NOT transfer e2e. What DID transfer: the incumbent
-packed-path wall (4 tok/s / 216 GFLOP/s aggregate, the session record's
-measured wall) moved ~4.5× to ~18 tok/s / ~0.9 TFLOP/s — the scalar-dequant
-GEMM class is measured gone, and what remains is everything the arm does
-NOT route.
+**Two outcomes, recorded separately (they are not the same claim):**
 
-**Three findings, each the next lane's raw material:**
+- **The GEMM-wall hypothesis: CONFIRMED and removed.** The incumbent
+  packed-path wall (4 tok/s / 216 GFLOP/s aggregate) moved to ~18–19 tok/s
+  / ~0.9 TFLOP/s — the dense arm transferred at the sites it routes; the
+  scalar-dequant GEMM class is measured gone e2e, not just kernel-level.
+- **G2 against the MLX bar: FAIL** — best clean read 18–19 tok/s vs MLX
+  1395–1419 (~75× behind). The end-to-end claim failed because other costs
+  now dominate the pass.
 
-1. **The e2e bottleneck has moved off the routed GEMM sites.** The dense-f16
-   matmul2d arm routes the dense gemm/gemv sites only; the forward's other
-   stages are now the cost: the **f32 lm_head** (32768-row chunked f32
-   matmuls, ~2×248320×5120×tokens FLOPs at the OLD ~110 GFLOP/s class ≈ the
-   whole pass budget at pp 2484), the **GDN chunked scan** (48 of 64 layers;
-   conv + carry + multi-token recurrence, never routed), and per-chunk
-   orchestration. Named follow-up: route lm_head through the f16 path (or
-   measure it standalone) — it is the first suspect by FLOP arithmetic.
-2. **Progressive memory-pressure degradation, alternating passes.** Pass 1
-   of pp 2484/4954 ran at pace (140/255 s); pass 2 degraded 8–20× (2860/
-   1997 s); pp 2484's pass 3 recovered (140 s) but pp 4954's pass 3 did not
-   (1754 s), and pp 9856's pass 1 never ran at pace (1908 s = 5 t/s).
-   Free RAM fell 81% → 35% as the 54 GB posture landed; the slow-pass
-   magnitudes match a host-page re-fault storm (~10 GB host wte staging at
-   ~5 GB/s compressed/swap read). The gate floor (55% at fire) ensured the
-   load FITS, not that it STAYS resident. Named follow-up: a re-run protocol
-   with a single pass per cell, a memory watchdog (free% + swap sampled per
-   pass), and a purge between passes; the fast passes are the honest reads.
-3. **First-shape warm-up costs ~20–32 min each** (1312–1927 s: CubeCL
-   pipeline compile/autotune per new m-shape — 2484→m 512, 4954→m 346,
-   9856→m 176). One-time per shape, excluded by the median convention, but
-   it triples a four-cell run's wall time; a warm-shape sweep (one compile
-   per tile class, cells built from compiled-class shapes) is the cheap fix.
+**Findings + the revised follow-up order (verdict-revised: measure before
+routing — the 50×-transfer surprise is exactly what a guess costs):**
+
+1. **Step 0 — per-stage timers on one clean pass** (pp 2484, the 140 s
+   cell): coarse timers around lm_head, GDN scan, routed GEMMs, attention,
+   rest. Replaces FLOP-arithmetic guessing with a ~3-minute measured
+   breakdown. (Source read 2026-10-29: lm_head is ALREADY last-row-only per
+   chunk — `ingest_chunk_gpu` slices row p-1 before the GEMV sweeps — so
+   the lm_head FLOP suspect is WEAKENED to ~1–2 s of a 140 s pass, at the
+   old f32 GEMV pace, ~8 chunk GEMVs per 512-token chunk. Worth routing
+   eventually; not the presumptive dominator.)
+2. **Residency audit — is the box carrying two weight copies?** The f16
+   device copy is 54 GB; beside it live the ~10 GB host `wte_host` Vec, the
+   lm_head host dequant staging, and the 16.8 GB mmapped GGUF during load
+   (dropped at `new()`'s end, but its file-cache pages persist). The
+   alternating 8–20× slow passes match a re-fault storm over host-backed
+   pages; gate 4 checked that the load FITS, not the steady state. Test
+   what is resident per pass (footprint + purge), and free/de-stage what
+   is not load-bearing — a structural fix, not just a re-run protocol.
+3. **GDN chunked scan routing** (48/64 layers), IF the stage timer points
+   there.
+4. **Re-run protocol**: single pass per cell, per-pass memory watchdog
+   (free% + swap + footprint), persisted/pre-warmed CubeCL autotune cache
+   so the 20–32 min first-shape warm-ups aren't paid during the measured
+   run.
+5. **Warm-shape sweep** (from 4): one compile per tile class, cells built
+   from compiled-class shapes.
 
 **Provenance**: bmo M5 Ultra, quiet box at fire (census in the log:
 co-tenants none, free 81%, load 0.41); bin built 09:13 +07 at efeb527
@@ -341,3 +345,6 @@ opponents' same file), f16 load posture; `RIIR_QWEN38_DENSE_MM2D=1`; run
 window 15:54–19:51 +07 with `caffeinate` holding the box. The capture lane's
 xnli_en numbers (teacher acc ~0.899, 20000 rows, ~2.2 s/row) landed before
 the run — both lanes' artifacts intact (`distill.json` + `DISTILL.md`).
+Verdict on this record: Claude REVISE round 1 (2026-10-29) — the two-outcome
+split, the stage-timer-first order, and the residency audit are its
+amendments; lm_head last-row-only verified in source same day.

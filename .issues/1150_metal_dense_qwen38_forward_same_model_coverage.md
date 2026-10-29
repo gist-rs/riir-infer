@@ -1,7 +1,16 @@
 # Issue 1150 — Metal dense-qwen3.8 forward (`qwen38_dense_wgpu`): the only road to same-model comparisons vs uzu and MLX
 
-**Status:** IN PROGRESS — decode + parity G1 LANDED (465c1d8..63c8847, 2026-10-28); prefill unlock LANDED 2026-10-29 (dense-f16 matmul2d, `RIIR_QWEN38_DENSE_MM2D=1` opt-in, A/B 50.22× kernel-level); **bmo four-way RUN EXECUTED 2026-10-29, FAIL-honest — stopped early**: best clean read pp 2484/4954 pass-1 = **18–19 tok/s** (~0.9 TFLOP/s aggregate, ~4.5× the incumbent packed wall of 4 t/s, but ~75× behind MLX 1395–1419); the GEMM wall is gone, e2e is dominated by the NON-routed stages (f32 lm_head chunks first suspect, then the GDN scan) + a progressive memory-pressure degradation poisoning later passes; full table + findings + re-run protocol: `.benchmarks/i1150_qwen38_wgpu_session.md` §"the bmo four-way RUN"
-**Claimed:** zed-m3-i1150-fourway, 1793237775, expires 2026-10-31T01:36:15+00:00
+**Status:** IN PROGRESS — decode + parity G1 LANDED (465c1d8..63c8847, 2026-10-28); prefill unlock LANDED 2026-10-29 (dense-f16 matmul2d, `RIIR_QWEN38_DENSE_MM2D=1` opt-in, A/B 50.22× kernel-level); **bmo four-way RUN EXECUTED 2026-10-29, two outcomes recorded separately**: (a) the GEMM-wall hypothesis CONFIRMED AND REMOVED — e2e moved 4 → 18–19 tok/s (~0.9 TFLOP/s aggregate; the dense arm transferred at the sites it routes); (b) G2 vs the MLX bar FAIL — 18–19 vs 1395–1419 (~75×), other costs now dominate; run stopped early (progressive memory-pressure degradation poisoning later passes; rc=143 logged). Follow-ups below, verdict-revised order (stage timers FIRST, then residency audit); full table + findings: `.benchmarks/i1150_qwen38_wgpu_session.md` §"the bmo four-way RUN" (`e8af37b`)
+
+**Follow-ups (Claude verdict REVISE round 1, 2026-10-29 — measure before routing):**
+
+- [ ] Stage timers on one clean pp 2484 pass — coarse timers around lm_head / GDN scan / routed GEMMs / attention / rest; replaces FLOP guessing with a ~3-min measured breakdown (source read same day: lm_head is ALREADY last-row-only per chunk — the FLOP suspect is weakened to ~1–2 s of a 140 s pass)
+- [ ] Residency audit — is the steady state carrying two weight copies (54 GB f16 device + ~10 GB host wte + lm staging + the 16.8 GB mmap's file-cache pages)? The alternating 8–20× slow passes match a re-fault storm; gate 4 checked fit-at-fire, not steady state — structural fix, not just protocol
+- [ ] GDN chunked scan routing (48/64 layers), IF the stage timer points there
+- [ ] Re-run protocol: single pass per cell, per-pass memory watchdog (free% + swap + footprint), persisted/pre-warmed CubeCL autotune cache (the 20–32 min first-shape warm-ups must not be paid during the measured run)
+- [ ] Warm-shape sweep (from the protocol row): one compile per tile class, cells built from compiled-class shapes
+
+**Lease closed:** zed-m3-i1150-fourway, epoch 1793237775 (claimed 2026-10-29T01:36Z for 48 h, folded at the four-way run's landing same day; claim record: zed-m3-i1150-fourway, epoch 1793237775, was expires 2026-10-31T01:36:15+00:00) — recorded `e8af37b`
 **Claim scope:** the dense-f16 matmul2d prefill arm (session-record step 1, the speed unlock) + the f16 gemv completing the F16 load posture for both paths; bmo four-way re-run stays the named follow-up, co-tenant-disclosed
 **Lease closed:** zed-m3-i1150-densef16, epoch 1793272600 (claimed for 48 h, folded at landing same-day) — landed `7e20540`
 
