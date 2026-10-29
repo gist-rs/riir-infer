@@ -50,3 +50,7 @@ Both Rust processes were healthy mid-stall (sampled): target in `TcpListener::ac
 ## Acceptance
 
 `verbs_metal --listen` on amo accepts the bmo initiator; Bench 928's "unblocked" addendum records REGISTRATION/GPU→wire/wire→GPU rows; issue closes with the addendum ref.
+
+## Remedy-3 run result (2026-10-29 ~01:5xZ, the claimed lane — issue STAYS OPEN)
+
+The bmo-target rows ran ([Bench 928 addendum](../.benchmarks/928_plan623_t32_rkey_mtu.md)): **REGISTRATION row MEASURED PASS ×2** (shared-storage MTLBuffer pages registered as an RDMA MR on bmo's M5 Ultra, 105.7/99.25 µs, lkey granted, rkey=0x0 per the provider law) — the leg's primary question is answered. The GPU→wire / wire→GPU byte-identity rows are blocked by a NEW plane-level regression: **the amo initiator's `ibv_modify_qp(RTR)` EINVALs (`mask 0x101181 rc=14`), reproduced byte-for-byte by verbs_ping** — the instrument that landed Bench 927/928's rows fails identically today, bmo's RTR succeeds, neither box rebooted since the working rows: an amo-side provider/link state change, not a code defect and not the firewall. Owner-gated remedies (GUI session on amo / TB re-plug / reboot) now gate BOTH the amo-listener acceptance AND the plane heal; the acceptance clause is unchanged.
