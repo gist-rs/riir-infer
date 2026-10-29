@@ -26,12 +26,18 @@ IDS4="7,13,42,100"
 SPLIT=32
 CTX=4096
 MAXNEW=32
+# Optional env passthrough (T3.5): I623_HEAD_ENV / I623_TAIL_ENV land verbatim
+# in the head's / tail's environment (e.g. RIIR_DIST_STEP_TIMING=1); the
+# per-cell extra head flags arrive as ONE quoted string, eval-split here so
+# multi-flag extras (e.g. "--prefill-chunk 512 --prompt 1,2,3 --ctx 4096")
+# parse as separate argv (last flag wins in the hand-rolled parser).
 
 # $1 name  $2 pair(0|1)  $3 streams  $4+ extra head flags (e.g. --full-check)
 run_cell() {
   local name="$1" pair="$2" streams="$3"; shift 3
+  eval "extra=($*)" 2>/dev/null || extra=()
   echo "=== cell $name (pair=$pair streams=$streams) $(date +%H:%M:%S) ==="
-  ssh "$BMO" "RIIR_DIST_KEY='$KEY' '$BMO_BIN' --role tail \
+  ssh "$BMO" "$I623_TAIL_ENV RIIR_DIST_KEY='$KEY' '$BMO_BIN' --role tail \
       --model '$BMO_MODEL' --split $SPLIT --backend gpu --streams $streams \
       --listen 192.168.10.2:$PORT --ctx $CTX > $OUT_R/${name}_tail.log 2>&1" &
   local tail_ssh=$!
@@ -42,12 +48,11 @@ run_cell() {
     i=$((i+1)); sleep 2
   done
   [ $i -ge 300 ] && { echo "tail never listened"; return 1; }
-  local env_prefix=""
   [ "$pair" = "1" ] && env_prefix="RIIR_DIST_PAIR=1"
-  env $env_prefix RIIR_DIST_KEY="$KEY" "$AMO_BIN" --role head \
+  env $env_prefix RIIR_DIST_KEY="$KEY" $I623_HEAD_ENV "$AMO_BIN" --role head \
       --model "$AMO_MODEL" --split $SPLIT --backend gpu --streams $streams \
       --connect "192.168.10.2:$PORT" --prompt "$IDS4" --max-new $MAXNEW --no-eos \
-      --ctx $CTX "$@" > "$OUT_L/${name}_head.log" 2>&1
+      --ctx $CTX "${extra[@]}" > "$OUT_L/${name}_head.log" 2>&1
   local rc=$?
   wait $tail_ssh 2>/dev/null
   echo "cell $name: head rc=$rc $(date +%H:%M:%S)"
@@ -57,10 +62,10 @@ run_cell() {
 
 case "${1:-}" in
   abba)
-    run_cell ab_p1_a 1 "${3:-2}"; run_cell ab_p0_b 0 "${3:-2}"
-    run_cell ab_p1_b 1 "${3:-2}"; run_cell ab_p0_a 0 "${3:-2}" ;;
+    run_cell ab_p1_a 1 "${3:-2}" "${4:-}"; run_cell ab_p0_b 0 "${3:-2}" "${4:-}"
+    run_cell ab_p1_b 1 "${3:-2}" "${4:-}"; run_cell ab_p0_a 0 "${3:-2}" "${4:-}" ;;
   g1)
-    run_cell g1_p0 0 "${3:-2}" --full-check ;;
+    run_cell g1_p0 0 "${3:-2}" "${4:-} --full-check" ;;
   one)
     run_cell "$2" "$3" "${4:-2}" "${5:-}" ;;
   *)
