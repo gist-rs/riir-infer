@@ -497,6 +497,10 @@ pub mod qwen_attention_prefill_m32_cubecl;
 // Issue 1156 T2 / Plan 624: the block-sparse prefill attention arm (opt-in).
 #[cfg(feature = "cubecl_runtime")]
 pub mod qwen_attention_prefill_sparse_cubecl;
+// Issue 1156 T3 / Plan 625: the per-family ΩMSR manifest + knee calculator
+// (the arm's binding quality floors; knee calc ungated, blake3/manifest I/O
+// ride `cubecl_runtime` — the arm's posture).
+pub mod sparse_omega_msr;
 // Issue 844 T5: the M=64 eight-rows-per-plane arm (opt-in).
 #[cfg(feature = "cubecl_runtime")]
 pub mod qwen_attention_prefill_m64_cubecl;
