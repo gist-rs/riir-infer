@@ -568,6 +568,11 @@ struct BatchedAttentionScratch {
     attn_out_b: Handle,
     /// Output projection result: `[P, n_embd]` (before residual add)
     out_proj_b: Handle,
+    /// Issue 1156 T2 / Plan 624 — the block-sparse lane's pool/score/mask
+    /// scratch. `None` (the default posture: env unset or prompt < the
+    /// length gate) allocates nothing and the dispatch chain is untouched —
+    /// the G3 posture.
+    sparse: Option<crate::qwen_attention_prefill_sparse_cubecl::SparsePrefillScratch>,
 }
 
 #[cfg(all(feature = "cubecl_runtime", feature = "ternary_gemm_batched"))]
@@ -7422,8 +7427,70 @@ impl TernaryDeltanetGpuForward {
             );
             #[cfg(not(all(feature = "metal_tensor_gemm", target_os = "macos")))]
             let tensor_attn_done = false;
+            // Issue 1156 T2 / Plan 624 — the block-sparse arm (OPT-IN,
+            // lossy-class; env `RIIR_PREFILL_SPARSE=1`, τ
+            // `RIIR_PREFILL_SPARSE_TAU`). Pool → score → select → the sparse
+            // m32 body. Takes the WHOLE dense ladder when engaged; the
+            // scratch is `None` whenever the arm is disengaged (env unset or
+            // prompt below the length gate) — zero alloc, zero branches, the
+            // G3 posture. The scratch's existence IS the engagement predicate
+            // (it was gated on enabled + active_prefill_len + hd==256 at
+            // chunk build).
+            let mut sparse_done = false;
+            if let Some(sp) = scratch.sparse.as_ref() {
+                let tau = crate::qwen_attention_prefill_sparse_cubecl::prefill_sparse_tau();
+                unsafe {
+                    crate::qwen_attention_prefill_sparse_cubecl::SparsePrefillPoolCubeCL::launch::<
+                        ActiveRuntime,
+                    >(&self.client, kv_read.clone(), sp.kpool.clone(), hd, n_kv, sp.cache_rows);
+                    crate::qwen_attention_prefill_sparse_cubecl::SparsePrefillScoreCubeCL::launch::<
+                        ActiveRuntime,
+                    >(
+                        &self.client,
+                        scratch.q_b.clone(),
+                        kv_read.clone(),
+                        sp.kpool.clone(),
+                        sp.scores.clone(),
+                        hd,
+                        n_head,
+                        n_kv,
+                        sp.cache_rows,
+                        base_pos,
+                    );
+                    crate::qwen_attention_prefill_sparse_cubecl::SparsePrefillSelectCubeCL::launch::<
+                        ActiveRuntime,
+                    >(
+                        &self.client,
+                        sp.scores.clone(),
+                        sp.mask.clone(),
+                        n_head,
+                        sp.cache_rows,
+                        tau,
+                        base_pos,
+                    );
+                    crate::qwen_attention_prefill_sparse_cubecl::SparsePrefillSparseM32CubeCL::launch::<
+                        ActiveRuntime,
+                    >(
+                        &self.client,
+                        scratch.q_b.clone(),
+                        kv_read.clone(),
+                        vv_read.clone(),
+                        scratch.gate_b.clone(),
+                        scratch.attn_out_b.clone(),
+                        sp.mask.clone(),
+                        hd,
+                        n_head,
+                        n_kv,
+                        p,
+                        base_pos,
+                    );
+                }
+                sparse_done = true;
+            }
             unsafe {
-                if tensor_attn_done {
+                if sparse_done {
+                    // Dispatched by the block-sparse arm above.
+                } else if tensor_attn_done {
                     // Dispatched on the shared queue by the tensor arm.
                 } else if use_q8kv {
                     // Issue 771 T2c-a / Plan 562: the Q8-KV prefill flash arm
@@ -9493,6 +9560,26 @@ impl TernaryDeltanetGpuForward {
                     v_b: self.client.empty(p * kvd * f),
                     attn_out_b: self.client.empty(p * q_dim * f),
                     out_proj_b: self.client.empty(p * n * f),
+                    // Issue 1156 T2 / Plan 624 — the block-sparse lane's
+                    // scratch: engaged only when the env arm is on AND the
+                    // prompt-level length gate passes AND the shape is the
+                    // head_dim-256 specialized one. `None` = zero cost, the
+                    // dense ladder untouched (G3). `cache_rows = base_pos +
+                    // p` is the same row count the attention kernels read.
+                    sparse: if hd == 256
+                        && crate::qwen_attention_prefill_sparse_cubecl::prefill_sparse_engaged(
+                            self.active_prefill_len,
+                        ) {
+                        crate::qwen_attention_prefill_sparse_cubecl::alloc_sparse_scratch(
+                            &self.client,
+                            n_head,
+                            n_kv,
+                            hd,
+                            base_pos + p,
+                        )
+                    } else {
+                        None
+                    },
                 })
             } else {
                 None

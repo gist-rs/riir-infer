@@ -494,6 +494,9 @@ pub mod qwen_attention_prefill_m16_cubecl;
 // Issue 844 T2: the M=32 four-rows-per-plane tiled flash arm.
 #[cfg(feature = "cubecl_runtime")]
 pub mod qwen_attention_prefill_m32_cubecl;
+// Issue 1156 T2 / Plan 624: the block-sparse prefill attention arm (opt-in).
+#[cfg(feature = "cubecl_runtime")]
+pub mod qwen_attention_prefill_sparse_cubecl;
 // Issue 844 T5: the M=64 eight-rows-per-plane arm (opt-in).
 #[cfg(feature = "cubecl_runtime")]
 pub mod qwen_attention_prefill_m64_cubecl;
