@@ -1,6 +1,6 @@
 # Issue 1152: verbs_metal end-to-end is gated by amo's macOS Application Firewall (unsigned-bin SYN drop)
 
-**Status:** OPEN
+**Status:** OPEN — mechanism fully measured 2026-10-29 ~00:2xZ (m3 idle lane, read-only ssh probes; no box writes, the amo⇄bmo lane belongs to the live T3.5 session): the posture row below pins amo's exact fw state, the differential is fully explained (Apple-signed builtins auto-allowed + past GUI accepts per-binary-path), and remedy 3 is upgraded to PREFERRED — the plan-623 wire-cell rig ITSELF already runs tail-on-bmo/head-on-amo live (`plan623_wire_cell.sh` L34–49: `--role tail --listen 192.168.10.2:$PORT` on bmo, `--connect` from amo), so the verbs_metal rows can ride the same posture with ZERO fw interaction. The one-line remedies for the owner are unchanged.
 **Date:** 2026-10-29
 **Lane:** Plan 623 T3.2's MTLBuffer leg ([Bench 928](../.benchmarks/928_plan623_t32_rkey_mtu.md)) — the code is landed (`570ee79`, `examples/verbs_metal.rs`, feature `rdma_metal`); the measurement is blocked by a box gate, not the lane.
 
@@ -27,6 +27,23 @@ Both Rust processes were healthy mid-stall (sampled): target in `TcpListener::ac
 1. **Owner (one line):** `sudo /usr/libexec/ApplicationFirewall/socketfilterfw --add <bin> --unblockapp <bin>` for the shipped verbs binaries — or disable the fw for bridge0 (owner's box policy call).
 2. **Sign the probe binaries** (codesign identity; the windows-build/biometric lanes have the recipe shape) — signed binaries pass the fw unsigned-app heuristic.
 3. **Lane-side workaround if another window needs the row before the gate lifts:** run the TARGET role on bmo (amo initiates — the fw gate is amo's inbound direction only; every amo→bmo probe ran clean).
+
+## Firewall posture — MEASURED 2026-10-29 (read-only, unprivileged ssh; amo macOS 27.0.1)
+
+`socketfilterfw --getglobalstate --getblockall --getallowsigned --getstealthmode --listapps` all work WITHOUT sudo over ssh — future lanes can re-verify this posture read-only at any time.
+
+- Firewall ENABLED (state=1) · blockall **disabled** · stealth off — rule-based mode, per-app rule table evaluated.
+- **"Automatically allow built-in signed software" ENABLED** — every Apple-signed builtin passes inbound with no rule (the differential explained: `nc`, `ssh`, `/usr/bin/python3`, `ruby` …).
+- **"Automatically allow downloaded signed software" ENABLED** — nominal quarantine+signed path; a locally built binary carries no quarantine bit, so this knob does not reach cargo output.
+- The app table (16 rows, each `Allow incoming connections`) — **non-Apple binaries DO hold rules**: `link_probe` (`target/release/examples/link_probe`), the uv cpython 3.12, Xcode's Python.app, and `.raw/llama.cpp/build-rpc/bin/ggml-rpc-server`. `codesign -dv` on the allowlisted `link_probe`: `flags=0x20002(adhoc,linker-signed)` — the SAME signature class as cargo output. **An Apple-issued identity is NOT required for the allowlist path**; each row got there via one GUI prompt accept (or sudo) for that exact binary.
+- The verbs binaries: NO table row → the fw's default for an unlisted app is a GUI "accept incoming connections?" prompt; in an unattended ssh session the prompt is never answered and the kernel silently drops the SYN (listener's `accept` never returns — exactly the measured stall).
+
+## Remedy refinement (supersedes remedy 2's guess)
+
+- **Remedy 2 as written is wrong in both directions.** An Apple identity is unnecessary (linker-adhoc binaries hold rules fine), and explicit ad-hoc codesign does NOT auto-allow either — the qBittorrent precedent (issue #3885, verified through macOS 14+) shows an explicitly ad-hoc-signed app still prompts ONCE; the signature's only value is making the accept STICKY (stable CDHash — the prompt stops repeating for that binary). The gate lifts with exactly one of:
+  1. **One GUI accept per built verbs binary at amo's screen** (amo has a live GUI session): run the listener once, accept the prompt; the rule then holds for re-RUNS of the same bytes. A REBUILD changes the CDHash and re-prompts — accept on the final binary of the measurement session, or
+  2. **Owner one-liner** (unchanged): `sudo /usr/libexec/ApplicationFirewall/socketfilterfw --add <bin> --unblockapp <bin>` — also per-binary-path; byte changes likely invalidate the row the same way, or
+  3. **Remedy 3 — now PREFERRED** (was "lane-side workaround"): the wire-cell harness already proves the tail-on-bmo posture live on this bridge; run `verbs_metal --listen` on bmo and the initiator from amo (bmo has Metal; its inbound accepts amo today — the cells run green). Reuse the rig's readiness pattern: poll the tail's log for the listening line, never a TCP probe (the single-accept EOF trap is documented in the script header). Coordination notes: the T3.5 session owns the amo⇄bmo lane this window, and bmo carries the riir-train 640 T3b capture — a seconds-class buffer probe is negligible load, but pick a between-cells window and stay off their stage binaries (`dist_stage`) — build the probe to a separate target dir.
 
 ## Acceptance
 
