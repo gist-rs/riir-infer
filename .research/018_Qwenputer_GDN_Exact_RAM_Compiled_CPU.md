@@ -94,3 +94,37 @@ Everything is public (MIT code, Apache-2.0 model); the note lives in the public 
 - **P1 (unclaimed):** Issue 1155 G1a/G1b/G4/G3 cells — cheap, test-level, no kernel changes expected.
 - **P2 (trigger-gated):** journal-interplay hypothesis cell inside a `gdn_delta_roll` posture; F1 design note if a durable-scratch consumer appears.
 - **P3 (owner-gated):** GPU parity cell; ternary-quant survival probe; any F1 implementation.
+
+## Resolution addendum (2026-10-29, zed-amo-i1155-exactslot)
+
+**P1 + P2 LANDED — the hypothesis CONFIRMED.** Commit `cdeeda9` (develop):
+`tests/issue1155_exact_slot_gdn.rs` (7 tests, required-features
+`deltanet_inference`, journal mod under `gdn_delta_roll`) +
+`tests/issue1155_exact_slot_g4_alloc.rs` (G4 counting-allocator own binary).
+
+- **G1a PASS:** one-hot column + gate=1 + β=1 + grid payloads round-trip
+  bit-exactly on the REAL kernel; non-addressed cells bit-unchanged; sweep
+  (1,16,8)/(2,64,16)/(8,128,128); grid edges ±2^23/±2^24/0; readout
+  bit-exact at K ∈ {16,64} (scale = 2^-2/2^-3, the power-of-two leg).
+- **G1b PASS (must-fail direction):** a=1e8, v=1 collapses to exactly 0.0;
+  overflow rows poison via inf·0 = NaN across kd−1 columns; random
+  arbitrary-f32 battery mismatches > 0 asserted.
+- **Decay selectors:** keep bit-stable; halve exact down to 2^-149 where
+  2^-149·0.5 ties-to-even into 0.0, and odd-mantissa subnormals round to
+  even (3·2^-149 → 2^-148); clear lands on +0 UNIFORMLY — x·0's ±0 sign is
+  rewritten by the delta=+0 addend in the same step, so sign(x) is not
+  observable post-step.
+- **Journal hypothesis CONFIRMED (the headline):** keep/halve in-domain
+  unwind to EVERY target restores BIT-EXACTLY (schedule [1,0.5,1] at the
+  default eps 0.25; 8×0.5 at eps 2^-8, the gate passing AT equality).
+  delta_roll law 2's "algebraically exact, NOT bit-exact" is REFUTED
+  IN-DOMAIN — the reassociation rounds nothing when every intermediate is
+  on the exact grid and every scaling a power of two. The law's general
+  case is unchanged (out-of-domain still drifts). Law 1's fail-closed g=0
+  refusal re-verified (Err + state bits untouched).
+- **G4 PASS:** 256 writes + records + unwind, 0 allocations (release).
+- **G3 HOLDS:** zero production source touched (two test files + one
+  [[test]] block).
+
+Issue 1155 file REMOVED (resolve rule); this addendum is the record.
+P3 (wgpu parity + PQ2 survival) stays owner-gated/deferred.
