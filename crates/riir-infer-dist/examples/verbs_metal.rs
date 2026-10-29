@@ -137,6 +137,14 @@ fn bring_up(
         | verbs::ffi::access::REMOTE_READ;
     qp.to_init(vp, acc).unwrap_or_else(|e| panic!("INIT: {e}"));
     let psn = random_psn().unwrap_or_else(|e| panic!("psn: {e}"));
+    // Same-link GID pick, identical to verbs_ping's differential posture:
+    // a bare `None` would take "any IPv4-mapped GID" (possibly the wrong
+    // link) where ping takes the peer-matched one — a GID-table change
+    // could silently split the two instruments' verdicts.
+    let peer_v4 = match stream.peer_addr() {
+        Ok(SocketAddr::V4(a)) => Some(*a.ip()),
+        _ => None,
+    };
     let (sgid_idx, sgid) = match gid_index {
         Some(idx) => (
             idx,
@@ -144,7 +152,7 @@ fn bring_up(
                 .unwrap_or_else(|e| panic!("gid {idx}: {e}")),
         ),
         None => ctx
-            .pick_gid(vp, None)
+            .pick_gid(vp, peer_v4)
             .unwrap_or_else(|e| panic!("pick gid: {e}")),
     };
     let mine = Endpoint {
