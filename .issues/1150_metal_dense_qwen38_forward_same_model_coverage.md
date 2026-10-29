@@ -11,6 +11,8 @@
 - [ ] Warm-shape sweep (from the protocol row): one compile per tile class, cells built from compiled-class shapes
 
 **Lease closed:** zed-m3-i1150-fourway, epoch 1793237775 (claimed 2026-10-29T01:36Z for 48 h, folded at the four-way run's landing same day; claim record: zed-m3-i1150-fourway, epoch 1793237775, was expires 2026-10-31T01:36:15+00:00) — recorded `e8af37b`
+**Claimed:** zed-m3-i1150-stagetimer, 1793411000, expires 2026-10-31T06:23:40+00:00
+**Claim scope:** follow-up task 1 (stage timers) + the one timed pp 2484 pass on bmo
 **Claim scope:** the dense-f16 matmul2d prefill arm (session-record step 1, the speed unlock) + the f16 gemv completing the F16 load posture for both paths; bmo four-way re-run stays the named follow-up, co-tenant-disclosed
 **Lease closed:** zed-m3-i1150-densef16, epoch 1793272600 (claimed for 48 h, folded at landing same-day) — landed `7e20540`
 
