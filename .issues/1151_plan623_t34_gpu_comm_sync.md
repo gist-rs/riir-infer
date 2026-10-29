@@ -1,7 +1,7 @@
 # Issue 1151 — plan-623 T3.4: GPU↔comm sync — signal-driven readback+send on the decode path
 
-**Status:** OPEN — unit of [Plan 623](../.plans/623_multi_host_pipeline_inference_lane.md) T3.4 (file-level claim lives HERE; the plan file is held by the sibling T3.2/T3.3 claim, one-claim-per-file per the P92 grammar).
-**Claimed:** zed-m3-i623-t34gpucomm, 1793255400, expires 2026-10-31T22:30:00+00:00
+**Status:** RESOLVED 2026-10-29 — the async-finish arm landed `9f3c0f7` (Resolution below), then the T3.5 scoreboard [Bench 929](../.benchmarks/929_plan623_t35_scoreboard.md) WIRE-REFUTED it 2-box (−48.5% decode window at s=2 — the in-file ~5% was a single-queue loopback artifact) and the demotion residue landed as [Issue 1154](1154_plan623_t34_async_finish_demote.md) `6a1c524`: `RIIR_DIST_ASYNC_FINISH` is PROMOTE-ONLY, unset = the incumbent inline cadence byte-identical. Scope note (b)'s literal comm-THREAD split was DECLINED by T3.5's `RIIR_DIST_STEP_TIMING` decomposition (tail fwd+logits 78% of the wall, head-local <1%, link leg not binding); scope note (c)'s sync tail readback stands.
+**Lease closed:** zed-m3-i623-t34gpucomm, 1793255400, was expires 2026-10-31T22:30:00+00:00 — the T3.4 unit landed the same day as the claim (Resolution below is the full landing note; the plan file's lease row carries the summary).
 **Date:** 2026-10-29
 **Type:** optimization (multi-host pipeline serving integration)
 
