@@ -77,6 +77,21 @@ struct StepTiming {
     steps: u64,
 }
 
+/// T3.4 async-finish arm, PROMOTE-ONLY since the Bench-929 wire refutation
+/// (demote was the old default; the ABBA cells measured −48.5% decode window
+/// armed at s=2 — the drain serializes the pass, forfeiting the head⇄tail
+/// pipeline). Exact-literal arm; unset or any other value = the incumbent
+/// inline cadence, byte-identical to the pre-T3.4 posture.
+fn async_finish_armed() -> bool {
+    static ARMED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ARMED.get_or_init(|| {
+        matches!(
+            std::env::var("RIIR_DIST_ASYNC_FINISH").as_deref(),
+            Ok("1") | Ok("true") | Ok("on")
+        )
+    })
+}
+
 impl StepTiming {
     fn new() -> Self {
         static ARMED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
@@ -538,7 +553,17 @@ fn run_waves<T: WaveStages, L: Transport>(
             // incumbent cadence too (schedule is a no-op; the drain's
             // step_finish then reads synchronously).
             if let Work::Feed { pos, tok } = work {
-                if all_feed {
+                // Wire-refuted default (Bench 929 Row 2, −48.5% decode window
+                // ABBA ×2 at s=2): the deferred drain serializes each pass —
+                // both head chains submit before any activation leaves, so
+                // the two GPUs never overlap. PROMOTE-ONLY now: the env must
+                // be the exact literal 1/true/on (the loopback rig keeps its
+                // +5% single-queue class; the wire serving posture is the
+                // incumbent inline cadence). The demoted path is the
+                // incumbent by construction (schedule is a no-op; step_finish
+                // reads synchronously), so this is byte-identical to the
+                // pre-T3.4 serving posture.
+                if all_feed && async_finish_armed() {
                     let t = t_now(st.armed);
                     table.stage(i).step_submit(tok, pos, &empty);
                     t_add(t, &mut st.submit_ns);
