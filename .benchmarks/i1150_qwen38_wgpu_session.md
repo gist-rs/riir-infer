@@ -239,3 +239,46 @@ State executed this morning:
   gate) stays owner-gated — out of scope here. The decode ctx2048 row stays
   ours-only; the opponent decode legs were NOT armed (separate lane, own
   claim).
+
+## The bmo runbook rev 3 — gate 3 resolved: the serve is the capture's OWN rig (2026-10-29 ~11:05 +07, zed-m3-i1150-fourway)
+
+Rev 2 left gate 3 (mammoth serve residency) as a wait-forever: "retiring it
+is 640-T3b's or an operator's call, never this lane's." The timeline read on
+bmo resolved who that owner is — and it is the capture itself:
+
+- **Serve provenance (measured, not assumed)**: `serve_mammoth.py` pid 23553
+  started **2026-10-28 11:16:12 +07** (PPID 1). `distill.json` records
+  ag_news at **61,197 s ~= 17 h** — i.e. the ag_news capture began when the
+  serve booted and completed 04:16 +07 Oct 29, writing `ag_news_teacher.bin`
+  + `.blake3` + the manifest (teacher acc 0.8786, p50 1790 ms). The CURRENT
+  harness (pid 56901, `--suites xnli_en`, also PPID 1) started 04:16:25 +07,
+  rewrote the manifest with the ag_news row, and is mid-xnli_en. One
+  established `:8793` connection: harness <-> serve.
+- **Verdict**: the serve is the capture lane's own temporary rig — stood up
+  with the capture, one purpose, canonical rig home is amo per riir-reflex
+  AGENTS.md (bmo's copy is a stand-up, file dates Oct 24-28). After the
+  capture's artifacts flush and the harness exits with zero consumers, an
+  idle ~55 GB resident defeats the owner-queued four-way (55+54 > 96 GB).
+  This SUPERSEDES rev 2's "never this lane's": retiring the capture's own
+  rig post-completion is this lane's call, taken and logged. Reversal is
+  one command (in the script header on bmo).
+- **Runner rev 4 armed** (pid 20411 in `wait.pid`, deadline **+20 h** ~=
+  06:04 +07 Oct 30 — the old +14 h left only ~2 h margin against an
+  ag_news-paced xnli_en at ~21:16 +07 ETA; the lease 2026-10-31T01:36Z
+  covers the window): each poll now runs `retire_serve_when_safe.sh`
+  BEFORE the gate probe. The script no-ops unless ALL hold — (1) capture
+  harness NOT live (never touches a live capture), (2)
+  `xnli_en_teacher.bin` + `.blake3` flushed (the flush-complete marker,
+  not just the `.bin`), (3) zero ESTABLISHED `:8793` connections — then
+  SIGTERM -> 20 s -> SIGKILL, every step logged to `autofourway.log` with
+  the provenance + the one-command reversal. If the harness exits WITHOUT
+  the xnli artifacts (a crash), the serve is left resident and the log
+  says "capture may have CRASHED" every poll — the capture lane's retry
+  outranks the four-way, and the runner expires at deadline rather than
+  guessing. Script copies: bmo `/tmp/i1150/retire_serve_when_safe.sh` +
+  m3 `/tmp/i1150_local/` (both /tmp — ephemeral; the decision record
+  lives in this file and in the script header).
+- **Pace note**: xnli_en at 8000/20000 by 08:38 (~2.0 s/row -> ~15:10 +07
+  ETA) or ag_news-paced (~3.1 s/row -> ~21:16 +07 ETA); both inside the
+  deadline. After the serve dies, wired MPS memory returns to the OS and
+  gate 4 (free RAM >=55%) re-verifies before anything fires.
