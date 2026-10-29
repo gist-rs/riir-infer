@@ -1,6 +1,7 @@
 # riir-infer Issue 1156 — Sparse prefill attention evaluation for the pp16k/pp32k league rows
 
 **Status:** Open — POC/evaluation task; profile first; no serving-path change until a quality-gated arm wins its gate.
+**Claimed:** zed-amo-i1156, 1793294557, expires 2026-10-31T17:22:37+00:00
 
 **Source:** riir-infer Research 019 (Elastic Attention, arXiv:2601.17367) Track A. Training-recipe half lives in riir-train Plan 476 (SECONDARY).
 
