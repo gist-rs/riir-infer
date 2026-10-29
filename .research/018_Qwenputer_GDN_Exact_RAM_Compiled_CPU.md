@@ -97,7 +97,8 @@ Everything is public (MIT code, Apache-2.0 model); the note lives in the public 
 
 ## Resolution addendum (2026-10-29, zed-amo-i1155-exactslot)
 
-**P1 + P2 LANDED — the hypothesis CONFIRMED.** Commit `cdeeda9` (develop):
+**P1 + P2 LANDED — the hypothesis CONFIRMED.** Commit `36c71f6` (develop;
+authored as `cdeeda9`, rehashed by the rebase onto the i1150/i1152 wave):
 `tests/issue1155_exact_slot_gdn.rs` (7 tests, required-features
 `deltanet_inference`, journal mod under `gdn_delta_roll`) +
 `tests/issue1155_exact_slot_g4_alloc.rs` (G4 counting-allocator own binary).
