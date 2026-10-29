@@ -191,3 +191,51 @@ three-way was prefill-only) — it is ours-only context until a decode leg is
 run for the opponents (a separate lane; the fork's `-tg` at ctx2048 and
 MLX's decode TPS are the two rows that would join it). Do not present the
 decode row as a four-way cell until those legs exist.
+
+## The bmo runbook rev 2 — built, gated, auto-runner armed (2026-10-29 ~09:30 +07, zed-m3-i1150-fourway)
+
+State executed this morning:
+
+- **Sync**: bmo's `git fetch origin` FAILS (access rights — its origin/develop
+  ref was stale at the plan-623 T0 era, `39af44c`). Fixed per-run with a git
+  bundle over the existing scp path: m3 `git bundle create … origin/develop`
+  (21 MB) → bmo `git fetch <bundle> origin/develop:refs/remotes/origin/develop`
+  → `git checkout --detach origin/develop`. bmo detached at **`efeb527`**
+  (T3.5-closed HEAD ⊇ `dc81b96` `--decode-ctx`). bmo is branch `develop` with
+  only an untracked `scripts/.bmo_local_bak/` — the detached posture is safe.
+- **Build DONE**: `cargo build --release -p riir-infer-gpu --features
+  qwen38_wgpu,metal_tensor_gemm --bin qwen38_wgpu_bench --target-dir
+  /tmp/i1150 -j 8` → **35.7 s incremental** against the 10-28 cache (nice 15,
+  co-tenant-safe); bin `/tmp/i1150/release/qwen38_wgpu_bench` stamped
+  2026-10-29 09:13. `--decode-ctx` verified at source level (the parse arm +
+  the `needs --decode N` guard); NO GPU probe was run to verify it (see the
+  incident below).
+- **Runner rev 2** (`/tmp/i1150/run_fourway.sh`): five gates now —
+  1 capture harness live → refuse · 2 plan-623 `dist_stage` live → refuse ·
+  **3 NEW mammoth SERVE RESIDENCY → refuse**: the serve holds ~55 GB wired via
+  MPS in unified memory; the dense-f16 bench needs ~54 GB + KV; 55+54 > 96 GB
+  = swap thrash — the harness-only gate was INSUFFICIENT (the serve stays
+  resident after the capture ends; current free RAM 36% while it lives) ·
+  **4 NEW free-RAM floor ≥55%** (of 96 GB ≈ the 54 GB load; parse tested —
+  reads 36 today, refuses as intended) · 5 bin freshness (must be ≥ the
+  09:13 build). The census (commit-ranked, per the house law) prints on every
+  invocation, dry or real.
+- **Auto-runner ARMED**: `/tmp/i1150/run_fourway_wait.sh` (pid in
+  `/tmp/i1150/wait.pid`), polls every 600 s, single-shot, deadline +14 h
+  (~23:25 +07) — fires the real run when all gates pass; logs to
+  `/tmp/i1150/autofourway.log` with the per-poll refusal reason. If the
+  capture ends but the serve lingers, the log names gate 3 — retiring the
+  serve is the capture owner's (640-T3b) or an operator's call, never this
+  lane's.
+- **INCIDENT (recorded, ~09:15 +07)**: a ctx64 `--decode-ctx` parse probe was
+  run alongside the LIVE capture — ~3 min of GPU co-tenancy before the kill.
+  Capture artifact UNHARMED (distill captures record deterministic outputs,
+  not latencies — a few rows ran slower, nothing corrupted). Lesson: the
+  gates exist for the RUNNER, not as optional etiquette — NO GPU probe of any
+  size runs while any tenant is live; flag-parse verification is a source
+  grep, not a model load.
+- **T3.5 closed** (`efeb527`, Bench 929): gate 2 is permanently clear (the
+  `dist_stage` census stays as a tripwire). i1152 (`verbs_metal` firewall
+  gate) stays owner-gated — out of scope here. The decode ctx2048 row stays
+  ours-only; the opponent decode legs were NOT armed (separate lane, own
+  claim).
