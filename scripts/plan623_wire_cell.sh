@@ -39,6 +39,10 @@ run_cell() {
   echo "=== cell $name (pair=$pair streams=$streams) $(date +%H:%M:%S) ==="
   ssh "$BMO" "pkill -f 'dist_stage --role tail' 2>/dev/null" || true
   sleep 1
+  # Stale per-cell logs from a previous matrix run satisfy the readiness
+  # poll instantly (measured 00:33: head connect-refused against a tail
+  # still loading) — clear this cell's log before booting.
+  ssh "$BMO" "rm -f $OUT_R/${name}_tail.log"
   ssh "$BMO" "${I623_TAIL_ENV:-} RIIR_DIST_KEY='$KEY' '$BMO_BIN' --role tail \
       --model '$BMO_MODEL' --split $SPLIT --backend gpu --streams $streams \
       --listen 192.168.10.2:$PORT --ctx $CTX > $OUT_R/${name}_tail.log 2>&1" &
