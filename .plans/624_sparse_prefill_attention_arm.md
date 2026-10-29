@@ -96,8 +96,8 @@ eager postures only — recorded limitation, league harness is eager).
 - [x] **T2.5** Perf A/B cells: dense vs τ=0.9 e2e interleaved median-of-ratios —
       **1.166× @16K / 1.310× @32K, 0 argmax flips on the perf items, G2 PASS**; box
       state disclosed (load ~2.0, AC, within-round pairing). Same bench 1151 record.
-- [ ] **T2.6** Issue 1156 T2 record (verdict + numbers), commit + push riir-infer
-      and riir-ai.
+- [x] **T2.6** Issue 1156 T2 record (verdict + numbers), commit + push riir-infer
+      and riir-ai. (riir-infer `198d245`; riir-ai `f92f0d6ed`)
 
 - [-] CUDA-lane sparse port (the 4090's `att_pf_fa` family) — T6 scope, only if the
       Metal GOAT passes; the 4090 rows are the healthy ones (1.19×/1.14×).
