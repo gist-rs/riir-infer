@@ -47,6 +47,40 @@ The missing rows are OURS at the T3.4 posture on the real wire:
 - No TP re-cells (Bench 906's refutation stands), no M3-loopback re-reads (T3.4's
   landing carries them; the scoreboard rows are M5-class wire rows).
 
+## Claude verdict (round 1, 2026-10-29, session 584ad1df) — REVISE, applied
+
+The owner asked for source-level research on how exo does 2-box prefill plus a Claude
+verdict; exo @ the research pin `bc412e2` cloned to `.raw/exo` (rm at lane end).
+Findings + corrections now binding for Bench 929:
+
+1. **COMPUTE-CLAIM CORRECTION (the verdict caught my error):** exo's dummy/placeholder
+   iterations run NO model compute (`generate.py:236-247` — the leading/trailing loops
+   call only the progress callback). Every rank runs the full prompt through its own
+   layer shard — pipeline parallelism, identical total FLOPs to ours. "Ours pays half
+   exo's compute" is FALSE and must not appear in the record. The honest difference is
+   control/cadence: their blocking `recv_like` + lockstep placeholder slots (MLX's
+   collectives need matched send/recv on every rank) vs our async chunk streaming.
+   Same systolic schedule both sides; latency ≈ (N+R−1) × chunk-time in both.
+2. **Chunk-size rule is the transferable lesson:** `prefill_step_size // min(4,
+   world_size)` (`generate.py:194`) is a pipeline-bubble heuristic (idle fraction ≈
+   (R−1)/(N+R−1) traded against per-chunk overhead). Their 2-rank chunk = 2048 vs our
+   default 128 — and T2.3b's 128–256 optimum predates the Issue-1146 prefill rungs →
+   chunk re-cell rides THIS unit (interleaved arms, ≥2 prompt lengths: 512/2048/8192).
+3. **Warmth law:** the G1-cell 0.714 s prefill figure is COLD-START (two fresh GPU
+   stages' JIT); the 0.131 s oracle was post-warmup — the pair is NOT comparable and is
+   withdrawn as a prefill row. Every prefill row in Bench 929 carries its warmth label;
+   the in-run oracle is the comparator.
+4. **The overlap bar (falsifiable G2):** warm long-prompt 2-box prefill should
+   approach ~2× the 1-box oracle minus the bubble (both stages work different chunks
+   concurrently). If it lands ≈1×, the head/tail chunk overlap does NOT exist on the
+   wire — that is a REAL finding (exo forces overlap with `mx.async_eval`; we must
+   measure ours, not assume it).
+5. **Scope splits:** a chunk-default CHANGE (if the re-cell's winner ≠ 128) is a
+   separate unit (code + G1–G4 + promotion) — never in T3.5's record commit. exo's
+   disaggregated prefill (`remote_prefill.py`, msgpack KV chunks over TCP) is prior
+   art for a future prefill/decode split lane; out of scope here. The "routed
+   TokenStream beats per-token all_gather" claim stays DECODE-ONLY (T2.7-backed).
+
 ## Acceptance
 
 Bench record (929) with: the wire G1 line, ABBA rows (armed/demoted × s1/s2) with
