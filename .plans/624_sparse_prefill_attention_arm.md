@@ -78,19 +78,24 @@ eager postures only — recorded limitation, league harness is eager).
 
 ## Tasks
 
-- [ ] **T2.1** Kernel file `qwen_attention_prefill_sparse_cubecl.rs`: score + select
+- [x] **T2.1** Kernel file `qwen_attention_prefill_sparse_cubecl.rs`: score + select
       + sparse-attention kernels, launchers, counters, env fns, consts; `pub mod` row
-      in `riir-infer-gpu/src/lib.rs`.
-- [ ] **T2.2** Dispatch wiring in `ternary_deltanet_gpu_forward.rs`
-      (`prefill_attention_layer_batched` ladder top) + grow-only mask/score scratch.
-- [ ] **T2.3** Kernel tests green: τ=1.0 bit-identity vs m32 (exact-tile + ragged +
-      chunked-cache shapes), select determinism/tie rule, sink-always, grammar
-      tests; `cargo clippy -p riir-infer-gpu --all-targets --features cubecl_runtime -- -D warnings`.
-- [ ] **T2.4** Quality walk instrument in riir-ai (`bench_948` pattern, macOS lane,
-      16K, 6 families × 2 items, dense vs τ=0.9 vs τ=0.7, depth probes) + bench doc
-      (riir-ai number ≥ 1151).
-- [ ] **T2.5** Perf A/B cells: dense vs sparse τ=0.9 e2e @16K + @32K, interleaved
-      rounds, preflight provenance + box state; bench doc.
+      in `riir-infer-gpu/src/lib.rs`. (riir-infer `03838f0`)
+- [x] **T2.2** Dispatch wiring in `ternary_deltanet_gpu_forward.rs`
+      (`prefill_attention_layer_batched` ladder top) + per-chunk scratch
+      (`BatchedAttentionScratch.sparse: Option<_>` — None = zero cost, G3). (same commit)
+- [x] **T2.3** Kernel tests green: τ=1.0 bit-identity vs m32 (ragged + sub-cube +
+      chunked-cache shapes), select semantics (threshold/sink/identity/horizon), scorer
+      structural ranking, grammar; lib 330/0 + clippy -D at the
+      `qwen38_wgpu,ternary_gemm_batched,metal_tensor_gemm` posture. (same commit)
+- [x] **T2.4** Quality walk instrument in riir-ai (`bench_948` corpus verbatim, macOS
+      lane, p=16384, 6 families × 2 items × 4 arms interleaved per item) — **G1 PASS:
+      τ=1.0 FNV/argmax/NLL identical to dense 12/12 e2e; positive control PASS; 11/12
+      argmax-stable at τ=0.9, 9/12 at τ=0.7; math is the weak axis**. Record:
+      `../riir-ai/.benchmarks/1151_issue1156_sparse_prefill_quality.md` (bench 1151).
+- [x] **T2.5** Perf A/B cells: dense vs τ=0.9 e2e interleaved median-of-ratios —
+      **1.166× @16K / 1.310× @32K, 0 argmax flips on the perf items, G2 PASS**; box
+      state disclosed (load ~2.0, AC, within-round pairing). Same bench 1151 record.
 - [ ] **T2.6** Issue 1156 T2 record (verdict + numbers), commit + push riir-infer
       and riir-ai.
 
