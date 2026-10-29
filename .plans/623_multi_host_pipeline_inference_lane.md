@@ -794,7 +794,21 @@ mlx-lm on the Proposal-042 scoreboard **measured on the same two boxes**.
     snapshot ≈ 4 s — filed as Issue 1148, the fast path is the plan-named
     GDN journal unwind + KV truncate). `--drafter mtp --head PATH` wired
     into dist_stage (split guard refuses low seats loud). Promotion NOT
-    claimed — owner-gated.** dflash
+    claimed — owner-gated.** **T5.1d COMPLETE 2026-10-29 — the owner-gated
+    promotion e2e EXECUTED (owner GO "654 lgtm"; riir-infer [Bench
+    931](../.benchmarks/931_i654_promotion_e2e.md)): promotion REFUSED per
+    the pre-registered gate — every replicated cell loses to plain decode
+    (k=2 0.846×/0.946× paired, k=4 0.745×) with the CUDA-placed head
+    (`BmthHeadCuda`, the gate's placement precondition satisfied + the
+    placement delta measured small: 924's 0.808× CPU → 0.846–0.946×); the
+    residual is STRUCTURAL (exact rolls = full steps ⇒ ~K× ordinary stage
+    time per round; deeper K worse) and the head BEATS the modal comparator
+    at every k. E[m] bit-stable across scorers (1.9592@k2 / 3.8400@k4 == the
+    682 reads). The arm stays opt-in (`--drafter mtp`, `--head-device
+    cuda|cpu`); the win-capable next rung (real-RTT linked posture + GPU
+    stages + a GPU-resident checkpoint) is named in the bench record,
+    machinery unbuilt. The head remains the serving-chat drafter candidate
+    (riir-train Bench 682).** dflash
     itself (`core/src/dflash.rs`) is wired to the OLD transformer path
     (`TransformerWeights`/`MultiLayerKVCache`), NOT the ternary DeltaNet stage —
     "already in core" means the algorithmic cores (`katgpt_speculative`), not a
