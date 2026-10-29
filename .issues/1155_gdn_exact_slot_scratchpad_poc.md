@@ -1,5 +1,6 @@
 # Issue 1155 — POC: exact slot-addressable GDN state (the Qwenputer identity on our kernels)
 **Status:** Open — POC filed from riir-infer Research 018 (Qwenputer distill, 2026-10-29); unclaimed. Premise corrected in verdict round 1: exactness is a value-domain contract, NOT delta-rule algebra (G1 split into G1a/G1b accordingly).
+**Claimed:** zed-amo-i1155-exactslot, 1793239863, expires 2026-10-31T02:11:03+00:00
 
 ## Premise
 
