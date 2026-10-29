@@ -627,3 +627,31 @@ fn spec_mtp_drafter_lossless_on_synth() {
     );
     assert!(out.tail.is_ok(), "tail clean shutdown");
 }
+
+#[test]
+fn modal_drafter_fit_is_first_seen_deterministic() {
+    // The 654 gate's "cheapest real alternative": the fit tie-break is
+    // FIRST-SEEN — a later token reaching the same count never replaces
+    // the earlier winner, and the winner is the token that first reached
+    // the highest count in stream order.
+    use riir_infer_dist::spec_fill::ModalDrafter;
+    // counts: 7→3, 9→3, 42→2 — first to reach 3 wins (7, seen first).
+    let tokens = [7u32, 7, 9, 7, 9, 42, 9, 42];
+    let d = ModalDrafter::fit(&tokens);
+    assert_eq!(d.token(), 7, "first-seen tie-break picks 7, not 9");
+    // strict majority: a later higher count wins outright.
+    let tokens = [7u32, 7, 42, 42, 42, 9];
+    assert_eq!(ModalDrafter::fit(&tokens).token(), 42);
+}
+
+#[test]
+fn modal_drafter_proposes_echo_then_modal() {
+    use riir_infer_dist::spec_fill::{DraftCtx, DraftSource, ModalDrafter};
+    let mut d = ModalDrafter::fit(&[5u32, 5, 5, 2]);
+    let committed = [3u32, 8, 11];
+    let out = d.propose(&DraftCtx {
+        committed: &committed,
+        k: 3,
+    });
+    assert_eq!(out, vec![11u32, 5, 5], "d_0 echoes pending, d_1.. are modal");
+}

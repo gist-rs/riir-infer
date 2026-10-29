@@ -37,7 +37,7 @@ use std::time::Instant;
 use riir_infer_core::deltanet::{QwenDeltaNetTernaryWeights, WeightScope};
 use riir_infer_core::multi_host::LayerRange;
 use riir_infer_dist::runner::{HeadOptions, run_head_with};
-use riir_infer_dist::spec_fill::{DraftSource, RepeatLastDrafter, run_head_spec};
+use riir_infer_dist::spec_fill::{DraftSource, ModalDrafter, RepeatLastDrafter, run_head_spec};
 use riir_infer_dist::spec_mtp::{BmthHead, MtpHeadDrafter};
 use riir_infer_dist::stage::{ArtifactIdentity, StageCompute, TernaryCpuStage};
 use riir_infer_dist::transport::{Direction, PeerKey, TcpTransport};
@@ -59,6 +59,16 @@ struct Args {
     /// (mid-pipeline at --split vs the post-final fit stream). No spec
     /// machinery, no snapshots — the pure basis effect.
     teacher_forced: Option<usize>,
+    /// Where the head score runs: `cpu` (default) or `cuda` (the 654
+    /// gate's GPU-placement precondition on the 4090 — a synchronous CPU
+    /// head makes the e2e measure PLACEMENT, not the drafter). A cuda
+    /// arm without the feature/device refuses loud, never a silent
+    /// fallback. Disclosed on every row via the SCORER line.
+    head_device: String,
+    /// Fit + run the modal drafter (the 654 gate's "cheapest real
+    /// alternative" comparator) over this token file, same k/prompt/gen
+    /// posture as the head arms.
+    modal_from: Option<PathBuf>,
 }
 
 fn parse_args() -> Args {
@@ -72,6 +82,8 @@ fn parse_args() -> Args {
         k: 2,
         dump_gen: None,
         teacher_forced: None,
+        head_device: "cpu".to_string(),
+        modal_from: None,
     };
     let mut it = std::env::args().skip(1);
     while let Some(arg) = it.next() {
@@ -85,10 +97,12 @@ fn parse_args() -> Args {
             "--gen-tokens" => a.gen_tokens = val().parse().expect("usize"),
             "--k" => a.k = val().parse().expect("usize"),
             "--teacher-forced" => a.teacher_forced = Some(val().parse().expect("usize")),
+            "--head-device" => a.head_device = val().to_string(),
+            "--modal-from" => a.modal_from = Some(PathBuf::from(val())),
             "--dump-gen" => a.dump_gen = Some(PathBuf::from(val())),
             "--help" | "-h" => {
                 println!(
-                    "--model P --head P --tokens P --split N --prompt-tokens N --gen-tokens N --k N [--teacher-forced N]"
+                    "--model P --head P --tokens P --split N --prompt-tokens N --gen-tokens N --k N [--teacher-forced N] [--head-device cpu|cuda] [--modal-from P] [--dump-gen P]"
                 );
                 std::process::exit(0);
             }
@@ -96,6 +110,11 @@ fn parse_args() -> Args {
         }
     }
     assert!(a.k >= 1 && a.k <= 64, "--k sits in 1..=64");
+    assert!(
+        a.head_device == "cpu" || a.head_device == "cuda",
+        "--head-device sits in {{cpu, cuda}} (got {})",
+        a.head_device
+    );
     a
 }
 
@@ -316,15 +335,30 @@ fn main() {
 
     // ── the trained head ──
     let t1 = Instant::now();
-    let head = BmthHead::load_verified(&args.head).unwrap_or_else(|e| {
+    let mut head = BmthHead::load_verified(&args.head).unwrap_or_else(|e| {
         eprintln!("mtp_head_acceptance: {e}");
         std::process::exit(1);
     });
     let hidden_dim = pair.config.n_embd;
+    if args.head_device == "cuda" {
+        head.place_on_cuda_device(0).unwrap_or_else(|e| {
+            eprintln!("mtp_head_acceptance: {e}");
+            std::process::exit(1);
+        });
+    }
     let drafter = MtpHeadDrafter::seat(head, hidden_dim).unwrap_or_else(|e| {
         eprintln!("mtp_head_acceptance: {e}");
         std::process::exit(1);
     });
+    println!(
+        "SCORER: {} — {} placement (the 654 gate's placement precondition: a CPU head makes the e2e measure placement, not the drafter)",
+        args.head.display(),
+        if drafter.head().on_cuda_device() {
+            "CUDA"
+        } else {
+            "CPU"
+        },
+    );
     println!(
         "# head {} seated (d {}, support {}) in {:.1}s",
         args.head.display(),
@@ -472,6 +506,36 @@ fn main() {
         std::process::exit(1);
     });
     print_row("ordinary pair (incumbent)", &ord, args.k);
+
+    // ── the modal drafter (the 654 gate's second comparator) ──
+    if let Some(modal_tokens_path) = &args.modal_from {
+        let bytes = std::fs::read(modal_tokens_path).unwrap_or_else(|e| {
+            eprintln!("mtp_head_acceptance: read {}: {e}", modal_tokens_path.display());
+            std::process::exit(1);
+        });
+        let fit_tokens: Vec<u32> = bytes
+            .as_chunks::<4>()
+            .0
+            .iter()
+            .map(|c| u32::from_le_bytes(*c))
+            .collect();
+        if fit_tokens.is_empty() {
+            eprintln!("mtp_head_acceptance: {} carries no tokens", modal_tokens_path.display());
+            std::process::exit(1);
+        }
+        let modal = ModalDrafter::fit(&fit_tokens);
+        println!(
+            "# modal drafter fitted on {} ({} tokens) — the cheapest real alternative (zero model cost, zero training)",
+            modal_tokens_path.display(),
+            fit_tokens.len()
+        );
+        let mrow = run_spec_pair(&pair, args.split, prompt, args.gen_tokens, modal, args.k)
+            .unwrap_or_else(|e| {
+                eprintln!("mtp_head_acceptance: {e}");
+                std::process::exit(1);
+            });
+        print_row("modal (comparator)", &mrow, args.k);
+    }
 }
 
 fn whoami_fallback() -> String {

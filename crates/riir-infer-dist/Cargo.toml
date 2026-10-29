@@ -121,6 +121,11 @@ gpu = [
     "dep:riir-infer-gpu",
     "riir-infer-gpu/production",
 ]
+# Issue 654 promotion e2e — the head score placed on the CUDA device (the
+# 654 gate's GPU-placement precondition on the 4090; CUDA-only — the code
+# is cfg'd out on macOS like its host module, and an arm request without
+# the feature refuses LOUD at the seat, never a silent CPU fallback).
+spec_mtp_cuda = ["dep:riir-infer-gpu", "riir-infer-gpu/bmth_cuda"]
 
 [[bin]]
 name = "dist_stage"

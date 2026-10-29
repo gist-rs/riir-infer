@@ -55,6 +55,13 @@ pub struct BmthHead {
     /// Reused per-`score` scratch (support wide) — the serving hot path
     /// allocates nothing.
     scores: Vec<f32>,
+    /// The CUDA-placed scorer (the 654 gate's GPU-placement precondition
+    /// on the 4090). `None` = the CPU sequential fold. Cfg'd out on macOS
+    /// (the host module is CUDA-only); `place_on_cuda_device` refuses loud
+    /// when the feature is off — an armed arm that silently fell back to
+    /// CPU would make the e2e measure PLACEMENT, not the drafter.
+    #[cfg(all(feature = "spec_mtp_cuda", not(target_os = "macos")))]
+    device: Option<riir_infer_gpu::BmthHeadCuda>,
 }
 
 impl BmthHead {
@@ -122,6 +129,8 @@ impl BmthHead {
             bias,
             ids,
             scores: vec![0.0; support],
+            #[cfg(all(feature = "spec_mtp_cuda", not(target_os = "macos")))]
+            device: None,
         })
     }
 
@@ -173,10 +182,21 @@ impl BmthHead {
     /// Score one raw residual row: per-slot `bias[v] + Σ_c w[v][c]·x[c]`,
     /// ascending-c sequential fold (the trainer's dot order — consumer and
     /// fit eval stay bit-comparable), first-index argmax over the support
-    /// slots. Returns the predicted vocab id.
+    /// slots. Returns the predicted vocab id. With the head placed on the
+    /// CUDA device ([`Self::place_on_cuda_device`]) the fold runs on the
+    /// GPU and the argmax is the CPU-exact first-index kernel — the fold
+    /// ORDER differs (block reduce vs sequential), which is safe because a
+    /// draft only PROPOSES: acceptance is adjudicated model-side on exact
+    /// verify rows, so numerics change efficiency, never correctness
+    /// (LOCAL classification per the Issue-940 determinism law).
     pub fn score(&mut self, x: &[f32]) -> Result<u32, String> {
         if x.len() != self.d {
             return Err(format!("bmth: row width {} != d {}", x.len(), self.d));
+        }
+        #[cfg(all(feature = "spec_mtp_cuda", not(target_os = "macos")))]
+        if let Some(dev) = &mut self.device {
+            let slot = dev.score(x)?;
+            return Ok(self.ids[slot]);
         }
         for v in 0..self.support {
             let wr = &self.w[v * self.d..(v + 1) * self.d];
@@ -187,6 +207,49 @@ impl BmthHead {
             self.scores[v] = s;
         }
         Ok(self.ids[crate::argmax_first(&self.scores) as usize])
+    }
+
+    /// Place the scoring on a CUDA device (the 654 promotion gate's
+    /// GPU-placement precondition: "the head as a GPU matvec or at least
+    /// overlapped with verify"). Idempotent. Refuses loud — never a
+    /// silent CPU fallback — when the feature is off, the target is
+    /// macOS, or no CUDA device answers.
+    #[cfg(all(feature = "spec_mtp_cuda", not(target_os = "macos")))]
+    pub fn place_on_cuda_device(&mut self, device_idx: usize) -> Result<(), String> {
+        if self.device.is_some() {
+            return Ok(());
+        }
+        self.device = Some(riir_infer_gpu::BmthHeadCuda::new_device(
+            device_idx, &self.w, &self.bias, self.d, self.support,
+        )?);
+        Ok(())
+    }
+
+    /// Same refusal, non-CUDA postures (feature off or macOS build): the
+    /// harness calls this unconditionally on `--head-device cuda`, and the
+    /// refusal is the contract — the gate counts no CPU-fallback read.
+    #[cfg(not(all(feature = "spec_mtp_cuda", not(target_os = "macos"))))]
+    pub fn place_on_cuda_device(&mut self, _device_idx: usize) -> Result<(), String> {
+        let _ = (&self.w, &self.bias, self.d, self.support);
+        Err(
+            "bmth cuda: built without spec_mtp_cuda (or on macOS) — rebuild with \
+             --features spec_mtp_cuda on a CUDA box; refusing, never a silent CPU fallback"
+                .to_string(),
+        )
+    }
+
+    /// Is the scorer placed on the CUDA device? (The harness prints this
+    /// beside every row — the posture disclosure.)
+    #[cfg(all(feature = "spec_mtp_cuda", not(target_os = "macos")))]
+    pub fn on_cuda_device(&self) -> bool {
+        self.device.is_some()
+    }
+
+    /// Non-CUDA postures: always false.
+    #[cfg(not(all(feature = "spec_mtp_cuda", not(target_os = "macos"))))]
+    pub fn on_cuda_device(&self) -> bool {
+        let _ = (&self.w, &self.bias);
+        false
     }
 }
 

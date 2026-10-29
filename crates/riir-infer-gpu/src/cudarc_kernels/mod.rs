@@ -59,12 +59,14 @@ pub fn quantize_launch_census_count() -> u64 {
 
 pub mod attention; // Issue 742 T9.2: AttentionKernels consumed by qwen38_dense_cudarc
 pub mod attention_score_mma; // Plan 551 / Issue 773 T2: 3xtf32 score-phase scaffold (unwired, GPU-gated)
+pub mod bmth; // Issue 654 promotion e2e: the BMTH draft-head CUDA scorer
 pub mod deltanet; // Issue 742 T9.2: DeltanetKernels consumed by qwen38_dense_cudarc
 mod embedding;
 mod lora;
 
 pub use attention::{AttentionKernels, SPLITGQA_QG_ROWS_MAX_P};
 pub use attention_score_mma::AttentionScoreMmaKernels;
+pub use bmth::BmthHeadCuda;
 pub use deltanet::{DeltanetKernels, HalfStateFmt};
 pub use embedding::EmbeddingDequantKernels;
 pub use lora::{LoraDecodeKernels, QvLoraGpuCudarc};

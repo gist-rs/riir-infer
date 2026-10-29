@@ -791,7 +791,7 @@ pub mod ane_prefill;
 pub mod cudarc_kernels;
 #[cfg(all(feature = "ternary_gemv_cuda_raw", not(target_os = "macos")))]
 pub use cudarc_kernels::{
-    AttentionKernels, AttentionScoreMmaKernels, CudarcKernelError, DeltanetKernels,
+    AttentionKernels, AttentionScoreMmaKernels, BmthHeadCuda, CudarcKernelError, DeltanetKernels,
     ElementwiseKernels, EmbeddingDequantKernels, LoraDecodeKernels, QvLoraGpuCudarc,
     SPLITGQA_QG_ROWS_MAX_P,
 };

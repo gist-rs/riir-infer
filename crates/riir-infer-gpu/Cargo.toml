@@ -184,6 +184,11 @@ ternary_gemm_simdgroup_f16 = ["ternary_gemm_simdgroup"]
 ternary_lut_gemv = ["ternary_gemv"]
 # Raw CUDA dp4a/mma ternary GEMV/GEMM + the whole-prefill cudarc family.
 ternary_gemv_cuda_raw = ["ternary_gemv", "dep:cudarc"]
+# Issue 654 promotion e2e — the BMTH draft-head CUDA scorer (nvrtc; the
+# 654 gate's GPU-placement precondition on the 4090). Implies the cudarc
+# kernel lane the module lives in; the module is additionally
+# cfg(not(target_os = "macos")) like its host.
+bmth_cuda = ["ternary_gemv_cuda_raw"]
 # Plan 614 Phase 2 — the keyed spec-decode lane's cudarc composition (the
 # keyed verify loop over the dense forward + the DFlash2 GPU drafter). The
 # pure decision layer (qwen38_spec.rs) is always-on; this gates the loop
@@ -580,6 +585,13 @@ required-features = ["qwen38_wgpu"]
 [[test]]
 name = "qwen38_wgpu_gemm_g1"
 required-features = ["qwen38_wgpu"]
+
+# Issue 1150 follow-up — the dense-f16 matmul2d unit gate: the zero-copy raw
+# Metal GEMM (and its p=1 GEMV shape) vs an f16-rounded CPU reference (tiny,
+# GPU-required, Metal-only, no model).
+[[test]]
+name = "qwen38_dense_f16_matmul2d_g1"
+required-features = ["qwen38_wgpu", "metal_tensor_gemm"]
 
 # Plan 620 (Plan 622 Phase 7) — the GPU G3 zero-shot harness: the CPU
 # `si_zero_shot_ppl` port driving `forward_token_graph` (~90 tok/s ⇒ the

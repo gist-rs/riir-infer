@@ -187,6 +187,54 @@ impl DraftSource for RepeatLastDrafter {
     }
 }
 
+/// The corpus-modal drafter — the 654 promotion gate's "cheapest real
+/// alternative" comparator: the most frequent token of a fit corpus
+/// (first-seen tie-break, deterministic), proposed with zero model cost
+/// and zero training. Semantics mirror the v0 floor instrument's
+/// `UnigramModal` (`spec_drafter_floor`, Bench 654's provenance): d_0
+/// echoes pending (the accepted_prefix law), every other slot proposes
+/// the modal token. A token-level drafter — the runner steps its drafts
+/// itself (the legacy path, byte-identical).
+#[derive(Debug, Clone, Copy)]
+pub struct ModalDrafter {
+    token: u32,
+}
+
+impl ModalDrafter {
+    /// Fit on a token slice in stream order: strict `>` on the running
+    /// best keeps the FIRST token to reach the winning count — the same
+    /// first-seen tie-break the floor instrument pins.
+    pub fn fit(tokens: &[u32]) -> Self {
+        let mut counts: std::collections::HashMap<u32, u32> = std::collections::HashMap::new();
+        let mut best = (0u32, 0u32); // (count, token)
+        for &t in tokens {
+            let c = counts.entry(t).and_modify(|c| *c += 1).or_insert(1);
+            if *c > best.0 {
+                best = (*c, t);
+            }
+        }
+        Self { token: best.1 }
+    }
+
+    /// The fitted modal token (the harness discloses it beside the row —
+    /// a modal form is artifact (whitespace runs) vs content, the floor
+    /// instrument's read).
+    pub fn token(&self) -> u32 {
+        self.token
+    }
+}
+
+impl DraftSource for ModalDrafter {
+    fn propose(&mut self, ctx: &DraftCtx<'_>) -> Vec<u32> {
+        let last = ctx.committed.last().copied().unwrap_or(0);
+        let mut out = vec![self.token; ctx.k];
+        if ctx.k > 0 {
+            out[0] = last;
+        }
+        out
+    }
+}
+
 /// Verify-round wire codec (T5.1a). The pending prediction rides the
 /// request so the tail adjudicates the SAME `m` the head does — it has no
 /// other way to check `d_0`.
