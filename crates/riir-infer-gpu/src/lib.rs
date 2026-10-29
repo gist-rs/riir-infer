@@ -203,6 +203,8 @@ pub use transpose_cubecl::TransposeCubeCL;
 pub mod attention_prefill_metal_tensor;
 #[cfg(feature = "ternary_gemv")]
 pub mod deltanet_input_proj_fused;
+#[cfg(all(feature = "metal_tensor_gemm", target_os = "macos"))]
+pub mod gemm_dense_f16_metal_zero_copy;
 #[cfg(feature = "ternary_gemm_batched")]
 pub mod gemm_ternary_batched_cubecl;
 #[cfg(feature = "ternary_gemm_simdgroup")]
@@ -679,9 +681,16 @@ pub use ternary_deltanet_gpu_forward::set_prefill_use_metal_tensor_zerocopy;
 #[cfg(all(feature = "ternary_gemm_batched", feature = "ternary_gemm_simdgroup"))]
 pub use ternary_deltanet_gpu_forward::set_prefill_use_simdgroup;
 #[cfg(all(feature = "cubecl_runtime", feature = "ternary_gemv"))]
-pub use ternary_deltanet_gpu_forward::{
-    DequantWteRowCubeCL, DynFut, TernaryDeltanetGpuForward, block_on,
-};
+pub use ternary_deltanet_gpu_forward::{DequantWteRowCubeCL, TernaryDeltanetGpuForward};
+// T3.4's async readback pair only EXISTS under multi_host (the module's own
+// pub use is gated identically); the wider ternary_gemv cfg alone would
+// green-zero the names and break every non-multi_host posture at link time.
+#[cfg(all(
+    feature = "cubecl_runtime",
+    feature = "ternary_gemv",
+    feature = "multi_host"
+))]
+pub use ternary_deltanet_gpu_forward::{DynFut, block_on};
 
 // The speculative-decode drafting family (Issue 665) — modelless CPU-side
 // draft models + the routing half, moved from the engine gpu crate (its

@@ -313,13 +313,86 @@ fn upload_f32(client: &ComputeClient<ActiveRuntime>, v: &[f32]) -> Handle {
     client.create_from_slice(bytemuck::cast_slice(v))
 }
 
-/// A layer weight matrix: packed Q4_K (dequant in-kernel) or f32 (Q6_K
-/// tensors host-dequanted for v1 - the cudarc `QuantW { q4 }` pattern; the
-/// Q6K-native GPU kernel is the Issue-1150 follow-up).
+/// A layer weight matrix: packed Q4_K (dequant in-kernel), f32 (Q6_K
+/// tensors host-dequanted for v1 — the cudarc `QuantW { q4 }` pattern; the
+/// Q6K-native GPU kernel is the Issue-1150 follow-up), or dense f16 (the
+/// `RIIR_QWEN38_DENSE_MM2D=1` arm: host-dequanted once at load, uploaded as
+/// f16 bit patterns, dispatched through the raw-Metal matmul2d path — 16 bpw
+/// vs Q4_K's ~4.5, the posture's disclosed memory/bandwidth trade).
 #[derive(Clone)]
 pub enum QuantWeight {
     Q4(Q4KHandle),
     F32(Handle, usize, usize), // handle, m, n
+    F16(Handle, usize, usize), // handle (u16 f16 bit patterns), m, n
+}
+
+/// Host-dequant one Q4_K / Q6_K tensor to a plain f32 row-major matrix —
+/// the shared body of both load postures (the packed variants keep the
+/// blocks; the f16 posture rounds this to f16 next).
+fn dequant_host_f32(gguf: &GgufFile, name: &str, m: usize, n: usize) -> Result<Vec<f32>, String> {
+    let info = gguf
+        .tensor_info(name)
+        .ok_or_else(|| format!("weights: missing {name}"))?;
+    let bpr = n / 256;
+    match info.ggml_type {
+        GgmlType::Q4_K => {
+            let blocks = gguf
+                .q4k_tensor_blocks(name)
+                .map_err(|e| format!("weights: {name}: {e}"))?;
+            let expect = m * bpr;
+            if blocks.len() != expect {
+                return Err(format!(
+                    "weights: {name} has {} blocks, expected {expect} ({m}x{n})",
+                    blocks.len()
+                ));
+            }
+            let mut host = vec![0.0f32; m * n];
+            let mut row = vec![0.0f32; n];
+            for r in 0..m {
+                riir_infer_core::quant::q4k::dequantize_row_q4_k(
+                    &blocks[r * bpr..(r + 1) * bpr],
+                    &mut row,
+                );
+                host[r * n..(r + 1) * n].copy_from_slice(&row);
+            }
+            Ok(host)
+        }
+        GgmlType::Q6_K => {
+            let blocks = gguf
+                .q6k_tensor_blocks(name)
+                .map_err(|e| format!("weights: {name}: {e}"))?;
+            if blocks.len() != m * bpr {
+                return Err(format!(
+                    "weights: {name} has {} blocks, expected {} ({m}x{n})",
+                    blocks.len(),
+                    m * bpr
+                ));
+            }
+            let mut host = vec![0.0f32; m * n];
+            let mut row = vec![0.0f32; n];
+            for r in 0..m {
+                riir_infer_core::quant::q6k::dequantize_row_q6_k(
+                    &blocks[r * bpr..(r + 1) * bpr],
+                    &mut row,
+                );
+                host[r * n..(r + 1) * n].copy_from_slice(&row);
+            }
+            Ok(host)
+        }
+        other => Err(format!(
+            "weights: {name} is {other:?} - expected Q4_K or Q6_K (the Q4_K_M \
+             recipe mixes both; Q6K-native GPU kernels are the Issue-1150 \
+             follow-up)"
+        )),
+    }
+}
+
+fn upload_f16_bits(client: &ComputeClient<ActiveRuntime>, host: &[f32]) -> Handle {
+    let bits: Vec<u16> = host
+        .iter()
+        .map(|&x| half::f16::from_f32(x).to_bits())
+        .collect();
+    client.create_from_slice(bytemuck::cast_slice(&bits))
 }
 
 impl QuantWeight {
@@ -349,29 +422,11 @@ impl QuantWeight {
                     client, blocks, m, n,
                 )))
             }
-            GgmlType::Q6_K => {
-                let blocks = gguf
-                    .q6k_tensor_blocks(name)
-                    .map_err(|e| format!("weights: {name}: {e}"))?;
-                let bpr = n / 256;
-                if blocks.len() != m * bpr {
-                    return Err(format!(
-                        "weights: {name} has {} blocks, expected {} ({m}x{n})",
-                        blocks.len(),
-                        m * bpr
-                    ));
-                }
-                let mut host = vec![0.0f32; m * n];
-                let mut row = vec![0.0f32; n];
-                for r in 0..m {
-                    riir_infer_core::quant::q6k::dequantize_row_q6_k(
-                        &blocks[r * bpr..(r + 1) * bpr],
-                        &mut row,
-                    );
-                    host[r * n..(r + 1) * n].copy_from_slice(&row);
-                }
-                Ok(QuantWeight::F32(upload_f32(client, &host), m, n))
-            }
+            GgmlType::Q6_K => Ok(QuantWeight::F32(
+                upload_f32(client, &dequant_host_f32(gguf, name, m, n)?),
+                m,
+                n,
+            )),
             other => Err(format!(
                 "weights: {name} is {other:?} - expected Q4_K or Q6_K (the Q4_K_M \
                  recipe mixes both; Q6K-native GPU kernels are the Issue-1150 \
@@ -380,7 +435,29 @@ impl QuantWeight {
         }
     }
 
+    /// The dense-f16 load posture (`RIIR_QWEN38_DENSE_MM2D=1`): host-dequant
+    /// once, round to f16, upload the bit patterns. Only called on the
+    /// matmul2d-capable posture (the forward refuses the arm elsewhere).
+    #[cfg(all(feature = "metal_tensor_gemm", target_os = "macos"))]
+    fn from_gguf_f16(
+        client: &ComputeClient<ActiveRuntime>,
+        gguf: &GgufFile,
+        name: &str,
+        m: usize,
+        n: usize,
+    ) -> Result<Self, String> {
+        Ok(QuantWeight::F16(
+            upload_f16_bits(client, &dequant_host_f32(gguf, name, m, n)?),
+            m,
+            n,
+        ))
+    }
+
     /// Decode GEMV dispatch (batch is always 1 on the decode path).
+    ///
+    /// Under the f16 posture decode rides the plain f16 GEMV kernel — the
+    /// matmul2d path cannot serve a (K × 1) activation view (measured: the
+    /// cooperative load/store silently produce nothing at tiny p).
     fn gemv(&self, client: &ComputeClient<ActiveRuntime>, input: Handle, output: Handle) {
         unsafe {
             match self {
@@ -398,6 +475,26 @@ impl QuantWeight {
                         *m,
                         *n,
                     );
+                }
+                QuantWeight::F16(w, m, n) => {
+                    #[cfg(all(feature = "metal_tensor_gemm", target_os = "macos"))]
+                    if let Some(mm) = crate::gemm_dense_f16_metal_zero_copy::dense_mm() {
+                        mm.dispatch_gemv(client, w, *m, *n, &input, &output)
+                            .expect("dense-f16 gemv dispatch");
+                    } else {
+                        panic!(
+                            "F16 weight reached gemv() without the dense mm2d context — \
+                             the RIIR_QWEN38_DENSE_MM2D load/install invariant broke"
+                        );
+                    }
+                    #[cfg(not(all(feature = "metal_tensor_gemm", target_os = "macos")))]
+                    {
+                        let _ = (w, m, n);
+                        panic!(
+                            "F16 weights require macOS + the metal_tensor_gemm feature \
+                             (the load gate refuses this posture earlier)"
+                        );
+                    }
                 }
             }
         }
@@ -423,6 +520,26 @@ impl QuantWeight {
                         p,
                     );
                 }
+                QuantWeight::F16(w, m, n) => {
+                    #[cfg(all(feature = "metal_tensor_gemm", target_os = "macos"))]
+                    if let Some(mm) = crate::gemm_dense_f16_metal_zero_copy::dense_mm() {
+                        mm.dispatch(client, w, *m, *n, &x, &out, p)
+                            .expect("dense-f16 gemm dispatch");
+                    } else {
+                        panic!(
+                            "F16 weight reached gemm() without the dense mm2d context — \
+                             the RIIR_QWEN38_DENSE_MM2D load/install invariant broke"
+                        );
+                    }
+                    #[cfg(not(all(feature = "metal_tensor_gemm", target_os = "macos")))]
+                    {
+                        let _ = (w, m, n);
+                        panic!(
+                            "F16 weights require macOS + the metal_tensor_gemm feature \
+                             (the load gate refuses this posture earlier)"
+                        );
+                    }
+                }
             }
         }
     }
@@ -439,6 +556,38 @@ impl Qwen38WgpuForward {
         let client = crate::cubecl_runtime::CubeCLContext::new()
             .map_err(|e| format!("gpu context: {e}"))?
             .client();
+
+        // The dense-f16 matmul2d arm (Issue 1150 follow-up): opt-in env,
+        // loud-refusing where the posture can't run. Off = the incumbent
+        // packed-load path byte-identical (G3).
+        let dense_armed = std::env::var("RIIR_QWEN38_DENSE_MM2D").as_deref() == Ok("1");
+        #[cfg(all(feature = "metal_tensor_gemm", target_os = "macos"))]
+        if dense_armed {
+            let ctx = crate::cubecl_runtime::CubeCLContext::new()
+                .map_err(|e| format!("gpu context: {e}"))?;
+            let (dev, queue) = match (ctx.wgpu_device(), ctx.wgpu_queue()) {
+                (Some(d), Some(q)) => (d.clone(), q.clone()),
+                _ => {
+                    return Err(
+                        "RIIR_QWEN38_DENSE_MM2D=1 requires the Metal wgpu CubeCL backend".into(),
+                    );
+                }
+            };
+            let mm =
+                crate::gemm_dense_f16_metal_zero_copy::MetalDenseF16ZeroCopyGemm::new(dev, queue)?;
+            eprintln!(
+                "[Issue 1150] dense-f16 matmul2d arm armed (device={:#x}, queue={:#x})",
+                mm.device_ptr(),
+                mm.queue_ptr()
+            );
+            crate::gemm_dense_f16_metal_zero_copy::install_dense_mm(mm);
+        }
+        #[cfg(not(all(feature = "metal_tensor_gemm", target_os = "macos")))]
+        if dense_armed {
+            return Err(
+                "RIIR_QWEN38_DENSE_MM2D=1 requires macOS + the metal_tensor_gemm feature".into(),
+            );
+        }
 
         let e = config.n_embd;
         let vocab = config.vocab_size;
@@ -504,6 +653,15 @@ impl Qwen38WgpuForward {
             let kind = config.layer_types[i];
             let gdn = kind == Qwen38WgpuLayerType::Deltanet;
             let attn = !gdn;
+            #[cfg(all(feature = "metal_tensor_gemm", target_os = "macos"))]
+            let g = |name: String, m: usize, n: usize| -> Result<QuantWeight, String> {
+                if dense_armed {
+                    QuantWeight::from_gguf_f16(&client, &gguf, &name, m, n)
+                } else {
+                    QuantWeight::from_gguf(&client, &gguf, &name, m, n)
+                }
+            };
+            #[cfg(not(all(feature = "metal_tensor_gemm", target_os = "macos")))]
             let g = |name: String, m: usize, n: usize| -> Result<QuantWeight, String> {
                 QuantWeight::from_gguf(&client, &gguf, &name, m, n)
             };

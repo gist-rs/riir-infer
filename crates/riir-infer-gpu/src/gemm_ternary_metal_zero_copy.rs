@@ -611,14 +611,14 @@ impl Drop for MetalTensorZeroCopyGemm {
 }
 
 /// Whether `[start, end)` lies inside one of the sorted, merged `ranges`.
-fn covered(ranges: &[(u64, u64)], start: u64, end: u64) -> bool {
+pub(crate) fn covered(ranges: &[(u64, u64)], start: u64, end: u64) -> bool {
     let i = ranges.partition_point(|&(s, _)| s <= start);
     i > 0 && ranges[i - 1].1 >= end
 }
 
 /// Insert `[start, end)` into sorted, merged `ranges`, merging overlaps and
 /// adjacent intervals.
-fn insert_merged(ranges: &mut Vec<(u64, u64)>, start: u64, end: u64) {
+pub(crate) fn insert_merged(ranges: &mut Vec<(u64, u64)>, start: u64, end: u64) {
     let (mut s, mut e) = (start, end);
     let lo = ranges.partition_point(|&(_, re)| re < s);
     let mut hi = lo;

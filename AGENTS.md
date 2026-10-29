@@ -176,6 +176,20 @@ G2 direction-positive 3/3 paired windows ~+0.6–1.0% e2e, −1.5% GPU busy, Ben
 `RIIR_QUANTIZE_CENSUS=1` prints the standalone-quantize launch census per capture
 (expected 0 — the K1–K5 fused rotation kernels already eliminate it; the standing
 decode tripwire, falsifier `a2ebb37`). Remaining rungs + the re-cell bundle: issue 1127.
+The dense-qwen3.8 Metal prefill unlock LANDED 2026-10-29 (Issue 1150 follow-up, opt-in
+`RIIR_QWEN38_DENSE_MM2D=1` — the f16 load posture): `gemm_dense_f16_metal_tensor.metal` +
+`gemm_dense_f16_metal_zero_copy.rs` — the dense twin of the ternary zero-copy lane, the
+matmul2d cooperative path with the A operand as a strided device f16 tensor view (no
+dequant, no staging) + `gemv_dense_f16` (plain kernel) for decode; `QuantWeight::F16`
+routes the dense forward's gemm/gemv sites when the env is armed (env-off = the packed
+incumbent byte-path). A/B @ [17408×5120]×512 kernel-level: q4-tile 528 ms (173 GFLOP/s)
+vs dense-f16 mm2d 10.5 ms (**8678 GFLOP/s, 50.22×**) — the session record's ~110 GFLOP/s
+scalar-dequant wall is measured GONE on the dense path. G1 unit gate green across all
+shape classes (rel-to-mag ≤ 1.6e-7); the deferred-upload race finding (three fake shape
+laws minted from racy negatives, then retracted; `client.sync()` after uploads is the
+cure) is recorded in `.benchmarks/i1150_qwen38_wgpu_session.md`. 16 bpw ≈ 54 GB for the
+27B — the four-way pp/decode cells (vs fork/MLX/uzu) are the bmo follow-up, mammoth
+co-tenant disclosed.
 The Metal/CubeCL decode dense-pair rung LANDED 2026-10-26 and is **DEFAULT-ON**
 (riir-infer `c400dbc`, issue 1129 / riir-ai Bench 1007): `gemv_plane_f32_pair` — the
 folded GDN a/b f32 escape-set GEMVs (48×5120 each, 64 launches/token) fused into ONE
