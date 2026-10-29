@@ -100,12 +100,17 @@ fn main() {
     );
 
     // Prefill cells: pad/truncate the prompt to each target by repetition.
+    // Issue 1150: the target rounds UP to a full ingest chunk — a ragged
+    // tail runs the remainder through SEQUENTIAL decode (measured 40–42% of
+    // a pp 2484 pass: the cell was not pure prefill, and the opponents'
+    // cells are). The padded count is disclosed on every line.
     for &target in &pp {
+        let padded = target.div_ceil(chunk) * chunk;
         let mut toks = ids.clone();
-        while toks.len() < target {
+        while toks.len() < padded {
             toks.extend_from_slice(&ids);
         }
-        toks.truncate(target);
+        toks.truncate(padded);
         let mut readings = Vec::new();
         for pass in 0..passes + 1 {
             fwd.zero_state();
@@ -115,15 +120,15 @@ fn main() {
             let dt = t.elapsed().as_secs_f64();
             let tps = toks.len() as f64 / dt;
             if pass == 0 {
-                println!("[pp {target}] warm-up: {dt:.2}s = {tps:.0} tok/s");
+                println!("[pp {target}→{padded}] warm-up: {dt:.2}s = {tps:.0} tok/s");
                 continue;
             }
             readings.push(tps);
-            println!("[pp {target}] pass {pass}: {dt:.2}s = {tps:.0} tok/s");
+            println!("[pp {target}→{padded}] pass {pass}: {dt:.2}s = {tps:.0} tok/s");
         }
         readings.sort_by(|a, b| a.partial_cmp(b).unwrap());
         let med = readings[readings.len() / 2];
-        println!("[pp {target}] MEDIAN {med:.0} tok/s");
+        println!("[pp {target}→{padded}] MEDIAN {med:.0} tok/s (padded {padded}, pure prefill)");
     }
 
     // Decode cell: prefill the prompt then step.
