@@ -27,7 +27,6 @@ use std::sync::Arc;
 use cudarc::driver::PushKernelArg;
 use cudarc::driver::safe::{CudaContext, CudaFunction, CudaModule, CudaStream, LaunchConfig};
 
-use super::CudarcKernelError;
 use super::ElementwiseKernels;
 
 const BMTH_CUDA_SRC: &str = r#"
@@ -90,7 +89,9 @@ impl BmthHeadCuda {
         support: usize,
     ) -> Result<Self, String> {
         if d == 0 || support == 0 {
-            return Err(format!("bmth cuda: degenerate shape d {d} support {support}"));
+            return Err(format!(
+                "bmth cuda: degenerate shape d {d} support {support}"
+            ));
         }
         if w.len() != support * d {
             return Err(format!(
@@ -99,9 +100,12 @@ impl BmthHeadCuda {
             ));
         }
         if bias.len() != support {
-            return Err(format!("bmth cuda: bias len {} != support {support}", bias.len()));
+            return Err(format!(
+                "bmth cuda: bias len {} != support {support}",
+                bias.len()
+            ));
         }
-        let ctx = CudaContext::new(device_idx as u32)
+        let ctx = CudaContext::new(device_idx)
             .map_err(|e| format!("bmth cuda: device {device_idx} init failed: {e}"))?;
         let stream: Arc<CudaStream> = ctx.default_stream();
         let ptx = cudarc::nvrtc::compile_ptx_with_opts(
@@ -124,7 +128,9 @@ impl BmthHeadCuda {
         let mut w_dev = stream.alloc_zeros::<f32>(support * d).map_err(device_err)?;
         stream.memcpy_htod(w, &mut w_dev).map_err(device_err)?;
         let mut bias_dev = stream.alloc_zeros::<f32>(support).map_err(device_err)?;
-        stream.memcpy_htod(bias, &mut bias_dev).map_err(device_err)?;
+        stream
+            .memcpy_htod(bias, &mut bias_dev)
+            .map_err(device_err)?;
         let x_dev = stream.alloc_zeros::<f32>(d).map_err(device_err)?;
         let scores_dev = stream.alloc_zeros::<f32>(support).map_err(device_err)?;
         let argmax_res = stream.alloc_zeros::<u64>(1).map_err(device_err)?;
@@ -162,7 +168,9 @@ impl BmthHeadCuda {
         self.stream
             .memcpy_htod(ZERO_U64.as_slice(), &mut self.argmax_res)
             .map_err(device_err)?;
-        self.stream.memcpy_htod(x, &mut self.x).map_err(device_err)?;
+        self.stream
+            .memcpy_htod(x, &mut self.x)
+            .map_err(device_err)?;
         let d_i32 = self.d as i32;
         let cfg = LaunchConfig {
             grid_dim: (self.support as u32, 1, 1),
@@ -202,7 +210,9 @@ mod tests {
 
     /// Deterministic pseudo-random f32 in [-1, 1) — no external RNG dep.
     fn lcg_f32(state: &mut u64) -> f32 {
-        *state = state.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+        *state = state
+            .wrapping_mul(6364136223846793005)
+            .wrapping_add(1442695040888963407);
         let bits = (*state >> 40) as u32; // 24 bits of mantissa
         (bits as f32 / (1u32 << 24) as f32) * 2.0 - 1.0
     }
@@ -237,8 +247,7 @@ mod tests {
         let mut st = 0x654u64;
         let w: Vec<f32> = (0..support * d).map(|_| lcg_f32(&mut st)).collect();
         let bias: Vec<f32> = (0..support).map(|_| lcg_f32(&mut st)).collect();
-        let mut dev = BmthHeadCuda::new_device(0, &w, &bias, d, support)
-            .expect("bmth cuda build");
+        let mut dev = BmthHeadCuda::new_device(0, &w, &bias, d, support).expect("bmth cuda build");
         // Several rows — the fold-order delta is ~1e-5; random draws
         // separate the top-2 by far more on every one of these.
         for _ in 0..8 {
