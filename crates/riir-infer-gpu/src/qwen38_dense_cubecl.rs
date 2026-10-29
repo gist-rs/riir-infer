@@ -545,6 +545,63 @@ impl QuantWeight {
     }
 }
 
+/// Synchronized per-stage wall-clock breakdown for one `ingest` call
+/// (issue 1150 follow-up 1). Armed by `RIIR_QWEN38_STAGE_TIMERS` = exact
+/// `"1"`. Diagnostic-only: every timed stage ends in a blocking
+/// `client.sync()`, so the stage sum EXCEEDS the free-running pass time —
+/// read the SHARES, never the total. Env-off = no timers, byte-path
+/// unchanged.
+#[derive(Default)]
+struct StageTimers {
+    chunks: usize,
+    wte_upload_ms: f64,
+    gdn_ms: f64,
+    attn_ms: f64,
+    tail_logits_ms: f64,
+    read_argmax_ms: f64,
+    ragged_tail_ms: f64,
+}
+
+impl StageTimers {
+    fn enabled() -> bool {
+        std::env::var("RIIR_QWEN38_STAGE_TIMERS").as_deref() == Ok("1")
+    }
+
+    fn print(&self, tokens: usize) {
+        let total = self.wte_upload_ms
+            + self.gdn_ms
+            + self.attn_ms
+            + self.tail_logits_ms
+            + self.read_argmax_ms
+            + self.ragged_tail_ms;
+        let pct = |ms: f64| {
+            if total > 0.0 { 100.0 * ms / total } else { 0.0 }
+        };
+        println!(
+            "[stage-timers] {} chunks + ragged tail, {} tokens — SYNCHRONIZED stages \
+             (sum > free-running pass; compare shares): \
+             wte_upload {:.0} ms ({:.1}%) | gdn {:.0} ms ({:.1}%) | attn {:.0} ms ({:.1}%) | \
+             tail_logits {:.0} ms ({:.1}%) | read_argmax {:.0} ms ({:.1}%) | \
+             ragged_tail {:.0} ms ({:.1}%) | stage total {:.0} ms",
+            self.chunks,
+            tokens,
+            self.wte_upload_ms,
+            pct(self.wte_upload_ms),
+            self.gdn_ms,
+            pct(self.gdn_ms),
+            self.attn_ms,
+            pct(self.attn_ms),
+            self.tail_logits_ms,
+            pct(self.tail_logits_ms),
+            self.read_argmax_ms,
+            pct(self.read_argmax_ms),
+            self.ragged_tail_ms,
+            pct(self.ragged_tail_ms),
+            total
+        );
+    }
+}
+
 impl Qwen38WgpuForward {
     /// Open the GGUF, build the config, upload all weights (host-dequants the
     /// embedding + lm_head to f32 — ~10 GB of host work + buffers), allocate
@@ -1215,6 +1272,12 @@ impl Qwen38WgpuForward {
     /// Prompt ingest: batched chunk passes of `self.chunk` tokens (state-safe),
     /// ragged tail through the decode path. Returns the last row's greedy
     /// argmax (the decode seed).
+    ///
+    /// With `RIIR_QWEN38_STAGE_TIMERS=1` (exact literal), prints a
+    /// synchronized per-stage breakdown after the pass — issue 1150
+    /// follow-up 1. Diagnostic-only: every stage ends in a `client.sync()`,
+    /// so the sum EXCEEDS the free-running pass time; read the shares, not
+    /// the total. Env-off = the production byte-path, no timers.
     pub fn ingest(&mut self, tokens: &[u32], base_pos: usize) -> Result<u32, String> {
         if base_pos + tokens.len() > self.max_ctx {
             return Err(format!(
@@ -1224,15 +1287,38 @@ impl Qwen38WgpuForward {
                 self.max_ctx
             ));
         }
+        let mut timers = if StageTimers::enabled() {
+            Some(StageTimers::default())
+        } else {
+            None
+        };
         let mut last = 0u32;
         let mut p = 0usize;
         while tokens.len() - p >= self.chunk {
-            self.ingest_chunk_gpu(&tokens[p..p + self.chunk], base_pos + p);
-            last = self.read_chunk_argmax();
+            self.ingest_chunk_gpu(&tokens[p..p + self.chunk], base_pos + p, timers.as_mut());
+            if let Some(t) = timers.as_mut() {
+                let t0 = std::time::Instant::now();
+                last = self.read_chunk_argmax();
+                t.read_argmax_ms += t0.elapsed().as_secs_f64() * 1e3;
+                t.chunks += 1;
+            } else {
+                last = self.read_chunk_argmax();
+            }
             p += self.chunk;
         }
-        for (i, &t) in tokens[p..].iter().enumerate() {
-            last = self.forward_token(t, base_pos + p + i)?;
+        if !tokens[p..].is_empty() {
+            let t0 = std::time::Instant::now();
+            for (i, &t) in tokens[p..].iter().enumerate() {
+                last = self.forward_token(t, base_pos + p + i)?;
+            }
+            if let Some(st) = timers.as_mut() {
+                // forward_token syncs internally (its logits read); the
+                // wall time around the loop is honest without extra syncs.
+                st.ragged_tail_ms += t0.elapsed().as_secs_f64() * 1e3;
+            }
+        }
+        if let Some(t) = timers.as_ref() {
+            t.print(tokens.len());
         }
         self.pos = base_pos + tokens.len();
         Ok(last)
@@ -1240,12 +1326,22 @@ impl Qwen38WgpuForward {
 
     /// One batched pass over exactly `self.chunk` tokens (a multiple of 64 —
     /// GEMM tiles 32, chunked conv walks 64-token sub-chunks).
-    fn ingest_chunk_gpu(&mut self, tokens: &[u32], base_pos: usize) {
+    ///
+    /// Timer mode (`timers = Some`): each stage ends in a blocking
+    /// `client.sync()` before its clock stops — real GPU wall per stage,
+    /// at the cost of serializing the queue (diagnostic-only).
+    fn ingest_chunk_gpu(
+        &mut self,
+        tokens: &[u32],
+        base_pos: usize,
+        mut timers: Option<&mut StageTimers>,
+    ) {
         let e = self.config.n_embd;
         let vocab = self.config.vocab_size;
         let p = self.chunk;
 
         // x_b <- wte[tokens] — host gather + one block upload (~10 MB).
+        let wte_t0 = timers.is_some().then(std::time::Instant::now);
         {
             let mut block = vec![0.0f32; p * e];
             for (i, &t) in tokens.iter().enumerate() {
@@ -1260,17 +1356,31 @@ impl Qwen38WgpuForward {
                 cubecl::bytes::Bytes::from_bytes_vec(bytemuck::cast_slice(&block).to_vec()),
             );
         }
+        if let (Some(t), Some(t0)) = (timers.as_mut(), wte_t0) {
+            pollster::block_on(self.client.sync()).ok();
+            t.wte_upload_ms += t0.elapsed().as_secs_f64() * 1e3;
+        }
 
         let eps = self.config.rms_norm_eps;
         for li in 0..self.layers.len() {
             let lw = self.layers[li].clone();
+            let layer_t0 = timers.is_some().then(std::time::Instant::now);
             match lw.kind {
                 Qwen38WgpuLayerType::Deltanet => self.prefill_gdn_layer(li, &lw, eps),
                 Qwen38WgpuLayerType::Attention => self.prefill_attn_layer(li, &lw, base_pos, eps),
             }
+            if let (Some(t), Some(t0)) = (timers.as_mut(), layer_t0) {
+                pollster::block_on(self.client.sync()).ok();
+                let ms = t0.elapsed().as_secs_f64() * 1e3;
+                match lw.kind {
+                    Qwen38WgpuLayerType::Deltanet => t.gdn_ms += ms,
+                    Qwen38WgpuLayerType::Attention => t.attn_ms += ms,
+                }
+            }
         }
 
         // Last-row logits: offset slice row p-1, norm, per-chunk GEMV.
+        let tail_t0 = timers.is_some().then(std::time::Instant::now);
         unsafe {
             let last = self.x_b.clone().offset_start(((p - 1) * e * 4) as u64);
             crate::norms_cubecl::RmsNormCubeCL::launch::<ActiveRuntime>(
@@ -1294,6 +1404,10 @@ impl Qwen38WgpuForward {
                     e,
                 );
             }
+        }
+        if let (Some(t), Some(t0)) = (timers.as_mut(), tail_t0) {
+            pollster::block_on(self.client.sync()).ok();
+            t.tail_logits_ms += t0.elapsed().as_secs_f64() * 1e3;
         }
     }
 
