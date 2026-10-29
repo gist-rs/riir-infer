@@ -1,7 +1,7 @@
 # Bench 929 — plan-623 T3.5: the Phase-3 scoreboard (decode, the T3.4 arm verdict, prefill, the decomposition)
 
 **Date:** 2026-10-29 (00:33–01:58 UTC window)
-**Lane:** [Plan 623](../.plans/623_multi_host_pipeline_inference_lane.md) T3.5 / [Issue 1153](../.issues/1153_plan623_t35_scoreboard.md) (file-level claim, 48 h)
+**Lane:** [Plan 623](../.plans/623_multi_host_pipeline_inference_lane.md) T3.5 / Issue 1153 (file-level claim, 48 h)
 **Session:** zed-m3-i971-housekeeping, epoch 1793262200
 **Boxes:** amo (`Mac17,5`-class M5 Ultra 96 GiB, HEAD box) ⇄ bmo (`Mac17,15` M5 Ultra 96 GiB, tail) over the TB5 bridge (192.168.10.1⇄192.168.10.2, `bridge0`), amo=HEAD / bmo=TAIL (the firewall-clean direction per [Issue 1152](../.issues/1152_verbsmetal_firewall_gate.md))
 **Code:** riir-infer `6b525ed` (the T3.4 async-finish arm + the step-timing instrument) on BOTH boxes; harness commits up to `94bed9f` (harness-only, binaries unchanged after the 06:48 `gpu,bonsai2_hadamard` rebuild on both boxes)

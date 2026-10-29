@@ -629,7 +629,7 @@ mlx-lm on the Proposal-042 scoreboard **measured on the same two boxes**.
   moves with co-tenant wired memory.** (Small-message + striped rows: Bench 927.)
 - [x] **T3.4** GPU↔comm sync: CPU comm thread on `MTLSharedEvent` signal values; no per-
   layer command-buffer commit on the critical path. (Unit issue
-  [1151](../.issues/1151_plan623_t34_gpu_comm_sync.md) — LANDED 2026-10-29
+  Issue 1151 — LANDED 2026-10-29
   zed-m3-i623-t34gpucomm: the decode-feed async-finish arm (staged-copy read future
   through CubeCL/wgpu — the MTLSharedEvent correction recorded in the issue),
   all-feed-passes-only deferral (the Bench-913 wire-order class), demote-only env
