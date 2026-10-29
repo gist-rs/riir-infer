@@ -638,9 +638,31 @@ mlx-lm on the Proposal-042 scoreboard **measured on the same two boxes**.
   (≤32-task batches), the uniform-write flush analog left instrumented. Open
   residues: the literal comm-THREAD split + the tail logits arm ride T3.5's
   scoreboard harness.)
-- [ ] **T3.5** Scoreboard rows vs llama.cpp RPC-RDMA and exo/MLX jaccl. (jaccl prose
+- [x] **T3.5** Scoreboard rows vs llama.cpp RPC-RDMA and exo/MLX jaccl. (jaccl prose
   comparison exists — Bench 905's 16–22 µs pipelined collective rate vs our 7.7 µs
   ping-pong RTT — but a like-for-like scoreboard row needs the T3.4 serving integration.)
+  **LANDED 2026-10-29 (zed-m3-i971-housekeeping, [Bench 929](../.benchmarks/929_plan623_t35_scoreboard.md),
+  issue 1153 carries the Claude-verdict fold + corrections): decode row — ours 2-box s1
+  52.3–52.6 tok/s BEATS llama.cpp-RPC 2-box 48.6 (+7.6%, the Issue-1141..1146 rungs
+  flipped T2.7's −20% reading); the ≤5% PP-overhead gate FAILS honest at −7.1% vs the
+  in-run 1-box oracle 56.29 (localized: second-hop RTT + second dispatch, not host
+  serialization). T3.4 arm WIRE-REFUTED (ABBA ×2, −48.5% decode window armed at s=2 —
+  the drain serializes the pass; the +5% was a single-queue loopback artifact) →
+  DEMOTED to promote-only (issue 1154, `6a1c524`). Prefill (the exo verdict fold):
+  long-prompt warm cells — the ~2× overlap bar PASSES at the incumbent chunk (1.76×
+  aggregate at c128), single-chunk postures land the serial 1.1–1.25× prediction, and
+  exo's chunk-size bubble heuristic (`prefill_step_size // min(4, world_size)`,
+  `generate.py:194`) does NOT transfer — finer chunks pipeline better on the
+  activation pipeline; the 128 default stands. Decomposition (`RIIR_DIST_STEP_TIMING`):
+  tail fwd+logits = 78% of the 19.05 ms/token wall, head-local <1% → BOTH T3.4
+  residues DECLINED (comm-THREAD split, tail-logits arm); the verbs-Transport serving
+  swap is NOT justified (the link leg is not binding at this split). Incumbents:
+  llama.cpp RPC is TCP-only ("RPC-RDMA" N/A), exo N/A (PQ2_0), jaccl stays prose
+  (serving forms dead by Benches 904/906). Harness lessons: foreground-chunked cells
+  are the only valid launch posture (detached-matrix spawns EHOSTUNREACH while manual
+  probes connect — discriminator unexplained, PROVENANCE section), four `set -u`
+  unset-expansion deaths on bash 3.2, stale-log readiness race, macOS `seq -s,`
+  trailing comma.)
 
 ## Phase 4 — Tensor-parallel (gate REFUTED 2026-10-27 by the T4.1/T4.2 cell — [Bench 906](../.benchmarks/906_plan623_t41_tp2_cell.md): the [Bench 905](../.benchmarks/905_plan623_phase3_jaccl_probe.md) RTT was the PIPELINED all_sum rate (16–22 µs); the TP dependency chain pays the SYNCHRONIZED per-exchange cost (183–277 µs measured) → 128 serialized exchanges/token ≈ +27 ms → TP-2 decode 18.2 t/s vs 1-box 58.1/50.8 (−69/−64%). Sharding correctness PROVEN (token-exact ×6 produce paths, replay-deterministic). Independent second negative: batch-1 decode is launch-bound (COMM_OFF floor −11..−14% from halving ~90% of weight bytes) — the TP memory thesis does not apply at batch-1 on this model/box class. Prefill parity (−1..−9%). TP stays a bench-lane harness, not a serving posture; the multi-host single-stream win path is PP (Phase 2) + RDMA (Phase 3) + speculative fill (Phase 5). Re-open triggers recorded in Bench 906 §9.)
 

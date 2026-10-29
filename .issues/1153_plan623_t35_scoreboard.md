@@ -1,7 +1,7 @@
 # Issue 1153 — plan-623 T3.5: Phase-3 scoreboard rows (incumbents vs ours at the T3.4 posture)
 
-**Status:** OPEN
-**Claimed:** zed-m3-i971-housekeeping, 1793262200, expires 2026-10-31T23:50:00+00:00
+**Status:** RESOLVED 2026-10-29 — [Bench 929](../.benchmarks/929_plan623_t35_scoreboard.md) is the record; the demotion residue filed + landed as [Issue 1154](1154_plan623_t34_async_finish_demote.md) (`6a1c524`); plan T3.5 marked landed.
+**Lease closed:** zed-m3-i971-housekeeping, 1793262200, was expires 2026-10-31T23:50:00+00:00 — LANDED the T3.5 scoreboard 2026-10-29 (Bench 929: decode row beats llama.cpp-RPC 2-box +7.6%, PP-overhead gate honest FAIL −7.1%, T3.4 arm wire-refuted → demoted via 1154, prefill overlap bar PASSES at c128, exo chunk heuristic does not transfer, both T3.4 residues declined on the decomposition; the plan-file T3.5 row carries the full landing note).
 **Date:** 2026-10-29
 **Type:** measurement + record (plan-623 unit; file-level claim lives HERE — the plan file is unclaimed, kept on the unit-issue pattern for one-claim-per-file hygiene while the sibling lane finishes its push)
 

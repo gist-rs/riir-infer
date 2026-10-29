@@ -136,9 +136,23 @@ Application Firewall ([issue 1152](.issues/1152_verbsmetal_firewall_gate.md) —
 owner sudo/codesign or the bmo-target workaround); T3.4 GPU↔comm sync LANDED
 (zed-m3-i623-t34gpucomm `9f3c0f7`: the decode-feed async-finish arm —
 `schedule_async_finish` + the staged-copy read future, all-feed-pass deferral,
-demote-only `RIIR_DIST_ASYNC_FINISH=0`; hidden-bit identity exact, s=2
-decode window ~5% faster armed); OPEN: T3.5 scoreboard only (needs the T3.4
-serving integration).
+hidden-bit identity exact — then **WIRE-REFUTED and DEMOTED to PROMOTE-ONLY
+2026-10-29** ([Bench 929](.benchmarks/929_plan623_t35_scoreboard.md) Row 2 / issue 1154
+`6a1c524`: amo⇄bmo ABBA ×2 at s=2 measured −48.5% decode window armed — the deferred
+drain serializes the pass, forfeiting the head⇄tail pipeline; the +5% was a
+single-queue loopback artifact; `RIIR_DIST_ASYNC_FINISH` now arms only on exact
+`1`/`true`/`on`)); **T3.5 LANDED 2026-10-29 (Bench 929, issue 1153 — Phase 3
+COMPLETE): decode row ours 2-box s1 52.3–52.6 tok/s beats llama.cpp-RPC 2-box 48.6
+(+7.6%) with the ≤5% PP-overhead gate an honest FAIL at −7.1% vs the in-run oracle
+56.29; prefill overlap bar PASSES at the incumbent chunk (1.76× aggregate at c128;
+single-chunk postures land the serial prediction) and exo's chunk-size bubble
+heuristic does NOT transfer (finer chunks pipeline better — the 128 default stands);
+the `RIIR_DIST_STEP_TIMING` decomposition declines both T3.4 residues (tail
+fwd+logits 78% of the wall, head-local <1%) and shows the link leg is NOT binding
+(no verbs-Transport serving swap justified at this split); llama.cpp "RPC-RDMA" N/A
+(TCP-only upstream), exo N/A (PQ2_0), jaccl stays prose. Harness law: plan-623 wire
+cells run FOREGROUND-chunked — detached-matrix spawns EHOSTUNREACH on these boxes
+while manual probes connect (discriminator unexplained, Bench 929 PROVENANCE).**
 The GLU-fused ternary prefill FFN arm LANDED 2026-10-26 (Issue 1124 T1, the llama.cpp
 #29948 distill — `1320dda`): gate/up weight rows INTERLEAVED in 8-row chunks at
 mirror-build time (`pack_bitplanes_to_q2_interleaved_gate_up` +

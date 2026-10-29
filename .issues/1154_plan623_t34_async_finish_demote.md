@@ -1,7 +1,7 @@
 # Issue 1154 — plan-623 T3.4 residue: demote the async-finish arm's wire default (ABBA-refuted)
 
-**Status:** OPEN — claimed by the T3.5 lane in the same session; the one-line flip + suite re-run rides the Bench-929 landing commit series (kept a separate unit per the promotion discipline: a default-posture change is a code+gate act, never a bench-record rider).
-**Claimed:** zed-m3-i971-housekeeping, 1793262200, expires 2026-10-31T23:50:00+00:00
+**Status:** RESOLVED 2026-10-29 — the flip landed `6a1c524` (PROMOTE-ONLY: `RIIR_DIST_ASYNC_FINISH` arms on exact `1`/`true`/`on`; unset = the incumbent inline cadence, byte-identical to pre-T3.4 by construction). Gates: clippy clean, 24 lib + 7 CPU suites green, `t34_async_finish_gpu` ×2 release on the M3 rig both postures. Record: [Bench 929](../.benchmarks/929_plan623_t35_scoreboard.md) Row 2.
+**Lease closed:** zed-m3-i971-housekeeping, 1793262200, was expires 2026-10-31T23:50:00+00:00 — the demotion was implemented in the same session as the filing (one-line gate + the env helper; the arm stays opt-in for the loopback rig's +5% single-queue class).
 **Date:** 2026-10-29
 **Type:** demotion (default-posture flip; the arm stays opt-in)
 
