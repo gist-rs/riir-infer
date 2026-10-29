@@ -37,7 +37,7 @@ run_cell() {
   local name="$1" pair="$2" streams="$3"; shift 3
   eval "extra=($*)" 2>/dev/null || extra=()
   echo "=== cell $name (pair=$pair streams=$streams) $(date +%H:%M:%S) ==="
-  ssh "$BMO" "$I623_TAIL_ENV RIIR_DIST_KEY='$KEY' '$BMO_BIN' --role tail \
+  ssh "$BMO" "${I623_TAIL_ENV:-} RIIR_DIST_KEY='$KEY' '$BMO_BIN' --role tail \
       --model '$BMO_MODEL' --split $SPLIT --backend gpu --streams $streams \
       --listen 192.168.10.2:$PORT --ctx $CTX > $OUT_R/${name}_tail.log 2>&1" &
   local tail_ssh=$!
@@ -49,7 +49,7 @@ run_cell() {
   done
   [ $i -ge 300 ] && { echo "tail never listened"; return 1; }
   [ "$pair" = "1" ] && env_prefix="RIIR_DIST_PAIR=1"
-  env $env_prefix RIIR_DIST_KEY="$KEY" $I623_HEAD_ENV "$AMO_BIN" --role head \
+  env $env_prefix RIIR_DIST_KEY="$KEY" ${I623_HEAD_ENV:-} "$AMO_BIN" --role head \
       --model "$AMO_MODEL" --split $SPLIT --backend gpu --streams $streams \
       --connect "192.168.10.2:$PORT" --prompt "$IDS4" --max-new $MAXNEW --no-eos \
       --ctx $CTX "${extra[@]}" > "$OUT_L/${name}_head.log" 2>&1
