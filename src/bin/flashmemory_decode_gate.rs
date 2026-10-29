@@ -18,6 +18,19 @@
 //! ρ arm (`forward_qwen_deltanet_ternary_flashmemory`, block 64, refresh 64,
 //! incremental centroids) runs against its own fresh cache + state.
 //!
+//! # Arm persistence (2026-10-30 — the killed-run lesson)
+//!
+//! The first 128K launch (2026-10-27) died mid-dense to an unattributed kill
+//! at 41% with the report still end-of-run-only: ~7.6 h of compute, zero
+//! durable output. Each arm now persists to `<out>/<name>.bin` the moment it
+//! completes (the dense arm also rewrites its bin every `--bucket` steps as a
+//! complete=0 prefix, so a mid-dense kill keeps the counted prefix), and on
+//! startup a bin whose digest matches the current inputs is LOADED instead of
+//! recomputed. The digest pins ctx/steps/block/refresh/rho/compare-from + the
+//! corpus bytes + the first 64 MiB of the gguf — a changed corpus or model at
+//! the same paths refuses the stale bin loud (`--fresh` recomputes anyway).
+//! Forward code paths are untouched by this layer.
+//!
 //! # Metrics (per position, bucketed)
 //!
 //! - `ΔNLL = NLL_sparse − NLL_dense` per position (mean / p95 / max, with the
@@ -74,6 +87,7 @@ struct Args {
     max_steps: usize,
     retain_every: usize,
     out: PathBuf,
+    fresh: bool,
 }
 
 fn parse_args() -> Result<Args> {
@@ -91,12 +105,14 @@ fn parse_args() -> Result<Args> {
         max_steps: 0,
         retain_every: 16,
         out: PathBuf::from("/tmp/fm_decode_gate"),
+        fresh: false,
     };
     let args: Vec<String> = std::env::args().collect();
     let mut i = 1;
     while i < args.len() {
         let name: &str = &args[i];
         let value = || args[i + 1].clone();
+        let mut step = 2usize; // `--flag value` pairs; valueless flags step 1
         match name {
             "--gguf" => a.gguf = value().into(),
             "--corpus-file" => a.corpus_file = value().into(),
@@ -114,9 +130,13 @@ fn parse_args() -> Result<Args> {
             "--max-steps" => a.max_steps = value().parse().unwrap(),
             "--retain-every" => a.retain_every = value().parse().unwrap(),
             "--out" => a.out = value().into(),
+            "--fresh" => {
+                a.fresh = true;
+                step = 1;
+            }
             _ => anyhow::bail!("unknown arg {name} (see the module doc)"),
         }
-        i += 2;
+        i += step;
     }
     if a.corpus_file.as_os_str().is_empty() {
         anyhow::bail!("--corpus-file is required (plain text, >= ctx+1 tokens)");
@@ -147,6 +167,132 @@ struct ArmScore {
     /// Sampled mean selected-token fraction (sparse arms only; dense = 1.0).
     mean_selected_fraction: f64,
     wall_secs: f64,
+}
+
+// ── Arm persistence (the killed-run lesson; see the module doc) ────────────
+
+const ARM_BIN_MAGIC: &[u8; 4] = b"FMG1";
+
+fn inputs_digest(args: &Args) -> Result<[u8; 32]> {
+    let mut h = blake3::Hasher::new();
+    h.update(ARM_BIN_MAGIC);
+    h.update(&args.ctx.to_le_bytes());
+    h.update(&args.max_steps.to_le_bytes());
+    h.update(&args.block.to_le_bytes());
+    h.update(&args.refresh.to_le_bytes());
+    h.update(&args.bucket.to_le_bytes());
+    h.update(&args.compare_from.to_le_bytes());
+    h.update(
+        &args
+            .rho_list
+            .iter()
+            .flat_map(|r| r.to_le_bytes())
+            .collect::<Vec<u8>>(),
+    );
+    let corpus = std::fs::read(&args.corpus_file)
+        .with_context(|| format!("digest corpus {}", args.corpus_file.display()))?;
+    h.update(&(corpus.len() as u64).to_le_bytes());
+    h.update(&corpus);
+    // First 64 MiB of the gguf: catches a swapped model without hashing ~5 GB.
+    let mut gguf = std::fs::File::open(&args.gguf)
+        .with_context(|| format!("digest gguf {}", args.gguf.display()))?;
+    let mut head = vec![0u8; 64 * 1024 * 1024];
+    let n = std::io::Read::read(&mut gguf, &mut head)?;
+    h.update(&(n as u64).to_le_bytes());
+    h.update(&head[..n]);
+    Ok(*h.finalize().as_bytes())
+}
+
+/// Serializes one completed (or in-flight dense prefix) arm.
+///
+/// Layout: magic[4] · digest[32] · steps u64 · complete u8 · n_written u64 ·
+/// mean_selected_fraction f64 · wall_secs f64 · n_written × (nll f32 · argmax u64).
+struct ArmBinMeta {
+    expected_steps: usize,
+    complete: bool,
+    mean_selected_fraction: f64,
+    wall_secs: f64,
+}
+
+fn write_arm_bin(
+    path: &std::path::Path,
+    digest: &[u8; 32],
+    meta: &ArmBinMeta,
+    nll: &[f32],
+    argmax: &[usize],
+) -> Result<()> {
+    let mut buf = Vec::with_capacity(4 + 32 + 8 + 1 + 8 + 8 + 8 + nll.len() * 12);
+    buf.extend_from_slice(ARM_BIN_MAGIC);
+    buf.extend_from_slice(digest);
+    buf.extend_from_slice(&(meta.expected_steps as u64).to_le_bytes());
+    buf.push(u8::from(meta.complete));
+    buf.extend_from_slice(&(nll.len() as u64).to_le_bytes());
+    buf.extend_from_slice(&meta.mean_selected_fraction.to_le_bytes());
+    buf.extend_from_slice(&meta.wall_secs.to_le_bytes());
+    for (n, a) in nll.iter().zip(argmax) {
+        buf.extend_from_slice(&n.to_le_bytes());
+        buf.extend_from_slice(&(*a as u64).to_le_bytes());
+    }
+    // Temp + rename: a kill mid-write never truncates the previous bin.
+    let tmp = path.with_extension("bin.tmp");
+    std::fs::write(&tmp, &buf).with_context(|| format!("write {}", tmp.display()))?;
+    std::fs::rename(&tmp, path).with_context(|| format!("rename into {}", path.display()))?;
+    Ok(())
+}
+
+fn load_arm_bin(
+    path: &std::path::Path,
+    digest: &[u8; 32],
+    expected_steps: usize,
+) -> Result<ArmScore> {
+    let bytes = std::fs::read(path).with_context(|| format!("read {}", path.display()))?;
+    let bad = |why: &str| anyhow::anyhow!("{}: {}", path.display(), why);
+    if bytes.len() < 4 + 32 + 8 + 1 + 8 + 8 + 8 {
+        return Err(bad("truncated header"));
+    }
+    if &bytes[..4] != ARM_BIN_MAGIC {
+        return Err(bad("bad magic"));
+    }
+    if &bytes[4..36] != digest as &[u8] {
+        return Err(bad("inputs digest mismatch (corpus/model/args changed)"));
+    }
+    let steps = u64::from_le_bytes(bytes[36..44].try_into().unwrap()) as usize;
+    if steps != expected_steps {
+        return Err(bad(&format!("steps {steps} != expected {expected_steps}")));
+    }
+    if bytes[44] != 1 {
+        return Err(bad("in-flight prefix (complete=0)"));
+    }
+    let n = u64::from_le_bytes(bytes[45..53].try_into().unwrap()) as usize;
+    if n != steps {
+        return Err(bad(&format!("n_written {n} != steps {steps}")));
+    }
+    let mean_sel = f64::from_le_bytes(bytes[53..61].try_into().unwrap());
+    let wall = f64::from_le_bytes(bytes[61..69].try_into().unwrap());
+    let body = &bytes[69..];
+    if body.len() != n * 12 {
+        return Err(bad(&format!("body {} != {} rows", body.len(), n)));
+    }
+    let (chunks, rest) = body.as_chunks::<12>();
+    if !rest.is_empty() {
+        return Err(bad("trailing bytes"));
+    }
+    let mut nll = Vec::with_capacity(n);
+    let mut argmax = Vec::with_capacity(n);
+    for row in chunks {
+        nll.push(f32::from_le_bytes(row[..4].try_into().unwrap()));
+        argmax.push(u64::from_le_bytes(row[4..12].try_into().unwrap()) as usize);
+    }
+    Ok(ArmScore {
+        nll,
+        argmax,
+        mean_selected_fraction: mean_sel,
+        wall_secs: wall,
+    })
+}
+
+fn arm_bin_path(out: &std::path::Path, name: &str) -> std::path::PathBuf {
+    out.join(format!("{name}.bin"))
 }
 
 fn percentile_with_support(rows: &mut [f32], p: f64) -> (f32, usize) {
@@ -219,52 +365,104 @@ fn main() -> Result<()> {
     let steps = args.max_steps;
     let x_len = config.vocab_size.max(config.n_embd);
 
-    // ── Dense reference arm ────────────────────────────────────────────────
-    println!("# arm: dense (reference)");
-    let t0 = Instant::now();
-    let mut cache = HybridCache::with_layer_types_bounded(&config, &weights.layer_types, steps + 2);
-    let mut scratch = HybridForwardScratch::new(&config);
-    let mut x = vec![0.0f32; x_len];
-    let mut dense_nll = vec![0f32; steps];
-    let mut dense_argmax = vec![0usize; steps];
-    for pos in 0..steps {
-        if pos > 0 && pos % 64 == 0 {
-            let el = t0.elapsed().as_secs_f64();
-            eprintln!(
-                "# progress dense {pos}/{steps} — {el:.0}s — {:.2} tok/s",
-                pos as f64 / el
-            );
-        }
-        let logits = forward_qwen_deltanet_ternary(
-            &mut x,
-            &weights,
-            &mut cache,
-            tokens[pos],
-            pos,
-            &config,
-            &mut scratch,
-            &rope,
+    let digest = inputs_digest(&args)?;
+
+    // ── Dense reference arm (load-or-compute; the bin persists progressively) ─
+    let dense_bin = arm_bin_path(&args.out, "dense");
+    let dense = if !args.fresh
+        && let Ok(loaded) = load_arm_bin(&dense_bin, &digest, steps)
+    {
+        println!(
+            "# arm: dense (reference) — LOADED {} ({:.1}s wall recorded)",
+            dense_bin.display(),
+            loaded.wall_secs
         );
-        dense_nll[pos] = nll(logits, tokens[pos + 1]) as f32;
-        dense_argmax[pos] = argmax(logits);
-    }
-    let dense_wall = t0.elapsed().as_secs_f64();
-    drop(cache);
-    let dense = ArmScore {
-        nll: dense_nll,
-        argmax: dense_argmax,
-        mean_selected_fraction: 1.0,
-        wall_secs: dense_wall,
+        loaded
+    } else {
+        println!("# arm: dense (reference)");
+        let t0 = Instant::now();
+        let mut cache =
+            HybridCache::with_layer_types_bounded(&config, &weights.layer_types, steps + 2);
+        let mut scratch = HybridForwardScratch::new(&config);
+        let mut x = vec![0.0f32; x_len];
+        let mut dense_nll = vec![0f32; steps];
+        let mut dense_argmax = vec![0usize; steps];
+        for pos in 0..steps {
+            if pos > 0 && pos % 64 == 0 {
+                let el = t0.elapsed().as_secs_f64();
+                eprintln!(
+                    "# progress dense {pos}/{steps} — {el:.0}s — {:.2} tok/s",
+                    pos as f64 / el
+                );
+            }
+            let logits = forward_qwen_deltanet_ternary(
+                &mut x,
+                &weights,
+                &mut cache,
+                tokens[pos],
+                pos,
+                &config,
+                &mut scratch,
+                &rope,
+            );
+            dense_nll[pos] = nll(logits, tokens[pos + 1]) as f32;
+            dense_argmax[pos] = argmax(logits);
+            // Progressive prefix: a mid-dense kill keeps the counted rows.
+            if pos > 0 && pos % args.bucket == 0 {
+                let meta = ArmBinMeta {
+                    expected_steps: steps,
+                    complete: false,
+                    mean_selected_fraction: 1.0,
+                    wall_secs: t0.elapsed().as_secs_f64(),
+                };
+                let _ = write_arm_bin(
+                    &dense_bin,
+                    &digest,
+                    &meta,
+                    &dense_nll[..pos],
+                    &dense_argmax[..pos],
+                );
+            }
+        }
+        let dense_wall = t0.elapsed().as_secs_f64();
+        drop(cache);
+        let meta = ArmBinMeta {
+            expected_steps: steps,
+            complete: true,
+            mean_selected_fraction: 1.0,
+            wall_secs: dense_wall,
+        };
+        write_arm_bin(&dense_bin, &digest, &meta, &dense_nll, &dense_argmax)?;
+        println!("#   dense arm persisted → {}", dense_bin.display());
+        ArmScore {
+            nll: dense_nll,
+            argmax: dense_argmax,
+            mean_selected_fraction: 1.0,
+            wall_secs: dense_wall,
+        }
     };
     println!(
-        "#   wall {:.1}s — {:.1} tok/s",
-        dense_wall,
-        steps as f64 / dense_wall
+        "#   dense wall {:.1}s — {:.1} tok/s",
+        dense.wall_secs,
+        steps as f64 / dense.wall_secs
     );
 
-    // ── Sparse arms ────────────────────────────────────────────────────────
+    // ── Sparse arms (load-or-compute; each persists the moment it completes) ─
     let mut arms: Vec<(f32, ArmScore)> = Vec::new();
     for &rho in &args.rho_list {
+        let rho_bin = arm_bin_path(&args.out, &format!("rho_{rho:.2}"));
+        if !args.fresh
+            && let Ok(loaded) = load_arm_bin(&rho_bin, &digest, steps)
+        {
+            println!(
+                "# arm: flashmemory rho={rho} — LOADED {} ({:.1}s wall recorded, sel frac {:.4})",
+                rho_bin.display(),
+                loaded.wall_secs,
+                loaded.mean_selected_fraction
+            );
+            arms.push((rho, loaded));
+            continue;
+        }
         println!(
             "# arm: flashmemory rho={rho} (block {} refresh {})",
             args.block, args.refresh
@@ -336,6 +534,19 @@ fn main() -> Result<()> {
             mean_frac,
             args.retain_every
         );
+        write_arm_bin(
+            &rho_bin,
+            &digest,
+            &ArmBinMeta {
+                expected_steps: steps,
+                complete: true,
+                mean_selected_fraction: mean_frac,
+                wall_secs: wall,
+            },
+            &arm_nll,
+            &arm_argmax,
+        )?;
+        println!("#   rho={rho} arm persisted → {}", rho_bin.display());
         arms.push((
             rho,
             ArmScore {
