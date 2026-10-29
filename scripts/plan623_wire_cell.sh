@@ -24,7 +24,11 @@ OUT_L="$(pwd)/.wt/i623_wire_cell/cells"         # head logs live here
 mkdir -p "$OUT_L" && ssh "$BMO" "mkdir -p $OUT_R"
 IDS4="7,13,42,100"
 SPLIT=32
-CTX=4096
+# Both roles share one ctx (the tail's ctx is a hard pin — a head at a higher
+# ctx than the tail resets the wire mid-prefill, measured: the p8192 cells died
+# "Connection reset by peer" against a 4096 tail). I623_CTX lifts both sides
+# together (e.g. I623_CTX=16384 for the p8192 prefill arm).
+CTX=${I623_CTX:-4096}
 MAXNEW=32
 # Optional env passthrough (T3.5): I623_HEAD_ENV / I623_TAIL_ENV land verbatim
 # in the head's / tail's environment (e.g. RIIR_DIST_STEP_TIMING=1); the
