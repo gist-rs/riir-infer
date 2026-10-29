@@ -446,6 +446,19 @@ required-features = ["gdn_delta_roll"]
 name = "gdn_delta_roll_g4_alloc"
 required-features = ["gdn_delta_roll"]
 
+# Issue 1155 — the exact-slot GDN state PoC. BOTH targets are #![cfg]-
+# gated: the deltanet module itself lives behind deltanet_inference, and
+# the journal halves need gdn_delta_roll (which implies it). Whole-file
+# #![cfg] protects the count; these rows protect the reader (green-zero
+# law).
+[[test]]
+name = "issue1155_exact_slot_gdn"
+required-features = ["deltanet_inference"]
+
+[[test]]
+name = "issue1155_exact_slot_g4_alloc"
+required-features = ["gdn_delta_roll"]
+
 # Issue 046 — GDN spectral-class spec test: the transition recovered from
 # the real decode kernel vs the Gated-DeltaNet closed form
 # ({g(1−β) along k̃, g ×(d−1)}) + the expm-of-frozen-generator identity +
