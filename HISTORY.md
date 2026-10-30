@@ -13,7 +13,7 @@ Compacted 2026-10-30: every `##` heading kept verbatim, one compact entry per re
 
 ## 2026-10-29 — Issue 654 promotion e2e EXECUTED + the gate REFUSED: the CUDA-placed head measured, the roll-chain loss priced structural (Bench 931)
 
-The owner-GO'd promotion rung ("654 lgtm", claimed zed-m3-i654-promo) executed on the 4090 primary platform per the pinned posture-B gate — promotion REFUSED, the arm stays opt-in default-off: every replicated cell loses to plain decode (k=2: 0.846×/0.946× paired ratios; k=4: 0.745× — Bench 682's …)
+The owner-GO'd promotion rung ("654 lgtm", claimed zed-m3-i654-promo) executed on the 4090 primary platform per the pinned posture-B gate — promotion REFUSED, the arm stays opt-in default-off: every replicated cell loses to plain decode (k=2: 0.846×/0.946× paired ratios; k=4: 0.745× — riir-train Bench 682's …)
 Commits: `06c184a`, `4c77521`, `7e20540`, `b769ccc`.
 
 ## 2026-10-29 — Bench 929 follow-up: the plan-623 launch-context discriminator RE-TESTED — class refuted, harness spawn-retry landed
@@ -26,7 +26,7 @@ The Qwenputer identity PROVED on our kernels (the divagr18/qwenputer distill, Re
 
 ## 2026-10-29 — Issue 1150 follow-up LANDED: the dense-f16 matmul2d prefill arm — the Metal scalar-GEMM wall broken on the dense lane (A/B 50.22× kernel-level, claim `2c6dfaa`+`049d3ce`, this commit)
 
-The Issue-1150 session record's named follow-up (all in-crate CubeCL GEMMs at ~110 GFLOP/s on Metal — the wall the Bonsai league's 0.249× prefill row shares): `gemm_dense_f16_metal_tensor.metal` + `gemm_dense_f16_metal_zero_copy.rs` — the dense twin of the ternary zero-copy lane (Issue 663 T5 …)
+The Issue-1150 session record's named follow-up (all in-crate CubeCL GEMMs at ~110 GFLOP/s on Metal — the wall the Bonsai league's 0.249× prefill row shares): `gemm_dense_f16_metal_tensor.metal` + `gemm_dense_f16_metal_zero_copy.rs` — the dense twin of the ternary zero-copy lane (riir-ai Issue 663 T5 …)
 
 ## 2026-10-29 — Plan 623 Phase 3 COMPLETE: T3.5 scoreboard LANDED + the T3.4 arm wire-refuted and demoted (Bench 929, issue 1153 `ed10f14`+record, issue 1154 `6a1c524`)
 
