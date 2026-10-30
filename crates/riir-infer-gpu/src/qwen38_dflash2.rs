@@ -1265,12 +1265,8 @@ impl DFlash2Drafter {
             }
             // The prefix-first scored pick (the substrate's own core —
             // first-strict-max, missing pairs at the documented floor).
-            let picked = katgpt_speculative::pair_select::pick_pair_scored(
-                &pool,
-                pred_tok,
-                table,
-                lambda,
-            );
+            let picked =
+                katgpt_speculative::pair_select::pick_pair_scored(&pool, pred_tok, table, lambda);
             let idx = pool
                 .iter()
                 .position(|&(t, _)| t == picked)

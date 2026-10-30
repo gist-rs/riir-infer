@@ -19,8 +19,14 @@
 /// selected it. Order follows the Cargo.toml `production` row.
 pub const PRODUCTION_RUNGS: &[(&str, bool)] = &[
     ("ternary_gemv", cfg!(feature = "ternary_gemv")),
-    ("ternary_gemm_batched", cfg!(feature = "ternary_gemm_batched")),
-    ("ternary_gemm_simdgroup", cfg!(feature = "ternary_gemm_simdgroup")),
+    (
+        "ternary_gemm_batched",
+        cfg!(feature = "ternary_gemm_batched"),
+    ),
+    (
+        "ternary_gemm_simdgroup",
+        cfg!(feature = "ternary_gemm_simdgroup"),
+    ),
     (
         "ternary_deltanet_chunked_prefill",
         cfg!(feature = "ternary_deltanet_chunked_prefill"),

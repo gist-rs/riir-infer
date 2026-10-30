@@ -1299,7 +1299,15 @@ mod tests {
         // Budget admits, gate admits, no ladder cap, no reserve.
         assert!(down_admits(ceiling, Some(900), 0, 0, 500, 300, reserve));
         // Two-sided budget refuses: 500 + 300 + 300 > 1000.
-        assert!(!down_admits(ceiling, Some(900), 0, 0, 500 + 300, 300, reserve));
+        assert!(!down_admits(
+            ceiling,
+            Some(900),
+            0,
+            0,
+            500 + 300,
+            300,
+            reserve
+        ));
         // Measured gate refuses though budget admits.
         assert!(!down_admits(ceiling, Some(700), 0, 0, 500, 300, reserve));
         // Gate measurement unavailable (None): the gate term abstains —
@@ -1331,6 +1339,14 @@ mod tests {
         // the rest of the bank).
         assert!(!down_admits(1000, Some(950), 0, 0, 300, 300, 400));
         // Overflow through the reserve term refuses.
-        assert!(!down_admits(u64::MAX, None, 0, 0, u64::MAX - 5, 30, u64::MAX - 10));
+        assert!(!down_admits(
+            u64::MAX,
+            None,
+            0,
+            0,
+            u64::MAX - 5,
+            30,
+            u64::MAX - 10
+        ));
     }
 }
