@@ -68,7 +68,9 @@ pub const OMEGA_PPL_BAND: f32 = 0.25;
 pub const OMEGA_MANIFEST_VERSION: u32 = 2;
 
 /// The block scorer a manifest's floors were measured under (protocol v2).
-/// Version-1 manifests are implicitly [`OmegaScorer::Mean`].
+/// Version-1 manifests are implicitly [`OmegaScorer::Mean`]. This is THE
+/// canonical enum (one source of truth): the sparse arm re-exports it as
+/// `SparseScorer`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum OmegaScorer {
     Mean,
@@ -76,6 +78,15 @@ pub enum OmegaScorer {
 }
 
 impl OmegaScorer {
+    /// The kernel-mode encoding packed into the params buffer.
+    pub const fn as_u32(self) -> u32 {
+        match self {
+            Self::Mean => 0,
+            Self::Envelope => 1,
+        }
+    }
+
+    /// The manifest / env spelling.
     pub const fn as_str(self) -> &'static str {
         match self {
             Self::Mean => "mean",
@@ -88,6 +99,16 @@ impl OmegaScorer {
             "mean" => Some(Self::Mean),
             "envelope" => Some(Self::Envelope),
             _ => None,
+        }
+    }
+
+    /// The inverse of [`OmegaScorer::as_u32`] (any non-0 reads as
+    /// `Envelope` — the caller's bits come from `as_u32`, never the wire).
+    pub const fn from_bits(bits: u32) -> Self {
+        if bits == Self::Mean.as_u32() {
+            Self::Mean
+        } else {
+            Self::Envelope
         }
     }
 }

@@ -187,58 +187,17 @@ pub fn prefill_sparse_tau() -> f32 {
     parsed
 }
 
-/// The block scorer family (Issue 1156 T3-v2, plan 625 §Protocol v2).
-///
-/// - [`SparseScorer::Mean`] — the v1 pooled-centroid scorer (T3 verdict: 6/7
-///   families ΩMSR = None; the demote posture, its floors live in the
-///   committed v1 manifest).
-/// - [`SparseScorer::Envelope`] — the Quest-class min/max envelope: kernel 1
-///   pools per-dim max + min K per block, kernel 2 scores
-///   `band + Σ_d q̄_d·(q̄_d ≥ 0 ? kmax_d : kmin_d)` — an upper bound on
-///   `max_r(q̄·k_r)` over the block's rows, tight exactly on single-fact rows
-///   (the facts-first fix for the T3 finding: a single needle row carries no
-///   pooled-centroid mass and was dropped first at every τ ≤ 0.95).
-#[cfg(feature = "cubecl_runtime")]
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum SparseScorer {
-    Mean,
-    Envelope,
-}
-
-#[cfg(feature = "cubecl_runtime")]
-impl SparseScorer {
-    /// The kernel-mode encoding packed into the params buffer.
-    pub const fn as_u32(self) -> u32 {
-        match self {
-            Self::Mean => 0,
-            Self::Envelope => 1,
-        }
-    }
-
-    /// The manifest / env spelling.
-    pub const fn as_str(self) -> &'static str {
-        match self {
-            Self::Mean => "mean",
-            Self::Envelope => "envelope",
-        }
-    }
-
-    pub fn parse(s: &str) -> Option<Self> {
-        match s {
-            "mean" => Some(Self::Mean),
-            "envelope" => Some(Self::Envelope),
-            _ => None,
-        }
-    }
-
-    fn from_bits(bits: u32) -> Self {
-        if bits == Self::Mean.as_u32() {
-            Self::Mean
-        } else {
-            Self::Envelope
-        }
-    }
-}
+/// The block scorer family (Issue 1156 T3-v2, plan 625 §Protocol v2) —
+/// [`OmegaScorer`] re-exported under the arm's historical name. `Mean` is
+/// the v1 pooled-centroid scorer (T3 verdict: 6/7 families ΩMSR = None; the
+/// demote posture, its floors live in the committed v1 manifest);
+/// `Envelope` is the Quest-class min/max envelope: kernel 1 pools per-dim
+/// max + min K per block, kernel 2 scores
+/// `band + Σ_d q̄_d·(q̄_d ≥ 0 ? kmax_d : kmin_d)` — an upper bound on
+/// `max_r(q̄·k_r)` over the block's rows, tight exactly on single-fact rows
+/// (the facts-first fix for the T3 finding: a single needle row carries no
+/// pooled-centroid mass and was dropped first at every τ ≤ 0.95).
+pub use crate::sparse_omega_msr::OmegaScorer as SparseScorer;
 
 #[cfg(feature = "cubecl_runtime")]
 static SPARSE_SCORER_BITS: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
