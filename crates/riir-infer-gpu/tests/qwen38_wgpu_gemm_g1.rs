@@ -153,7 +153,7 @@ fn gemm_ab_timing_production_shapes() {
     let mut lcg = move || {
         seed = seed
             .wrapping_mul(6_364_136_223_846_793_005)
-            .wrapping_add(1_442_695_040_888_940_7);
+            .wrapping_add(14_426_950_408_889_407);
         ((seed >> 33) as f32 / (u64::MAX >> 33) as f32) * 2.0 - 1.0
     };
     let x: Vec<f32> = (0..p * n).map(|_| lcg()).collect();
