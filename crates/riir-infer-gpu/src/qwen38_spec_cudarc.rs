@@ -65,6 +65,14 @@ pub struct KeyedSpecConfig {
     /// or any decision; the read rides [`KeyedLoopStats::premise`]. The solo
     /// loop only (the lanes variant does not record).
     pub premise_gate: bool,
+    /// riir-ai Issue 1142 — the quality lane's embedder read. When `true`,
+    /// the loop sums the LAST DFlash2 tap layer's hidden row
+    /// (`QWEN38_DFLASH2_TAP_LAYERS[4]`) over every committed FED position
+    /// into [`KeyedLoopStats::tap_pool`] — the rows the loop already downloads
+    /// for ring injection, so the read costs zero extra forwards. Pure
+    /// observation; never touches the stream. The final bonus token is never
+    /// fed, so it is not pooled.
+    pub embed_pool: bool,
     /// Issue-966 / plan 632 — the grid-RESELECTION drafter arm
     /// ([`DFlash2Drafter::lattice_walk_reselect`]). When armed, the solo
     /// loop's draft phase runs the prefix-first scored law over each slot's
@@ -78,6 +86,15 @@ pub struct KeyedSpecConfig {
     /// `grid_reselect`.
     #[cfg(feature = "grid_reselect")]
     pub reselect: Option<KeyedReselectArm>,
+    /// riir-ai Issue 1142 — the PLM relaxed acceptance rule
+    /// ([`crate::qwen38_spec::keyed_accept_relaxed`]). `None` (the default)
+    /// and `Some(RelaxedAccept::EXACT)` are the lossless keyed walk; any
+    /// looser rule is LOSSY — the committed stream leaves the serial keyed
+    /// decode, so the byte-identity gates do not apply to that arm. The solo
+    /// loop only (the lanes variant does not compose it). Feature
+    /// `relaxed_accept`.
+    #[cfg(feature = "relaxed_accept")]
+    pub relax: Option<crate::qwen38_spec::RelaxedAccept>,
 }
 
 /// The grid-reselection arm's payload (katgpt-rs plan 632): the corpus
@@ -125,6 +142,14 @@ pub struct KeyedLoopStats {
     pub mean_j: f64,
     /// The Issue-966 premise-gate read (present iff [`KeyedSpecConfig::premise_gate`]).
     pub premise: Option<KeyedPremiseRead>,
+    /// riir-ai Issue 1142: chain tokens accepted by the relaxed terms while
+    /// differing from the keyed stream's sample (0 on the exact walk).
+    pub n_relaxed: usize,
+    /// Sum of the last tap layer's hidden rows over pooled positions
+    /// (present iff [`KeyedSpecConfig::embed_pool`]); divide by
+    /// `tap_pool_n` for the mean-pooled sample embedding.
+    pub tap_pool: Option<Vec<f32>>,
+    pub tap_pool_n: usize,
 }
 
 /// The Issue-966 premise-gate read over one keyed-loop run (katgpt-rs 966:
@@ -349,6 +374,12 @@ pub fn run_keyed_spec_loop(
             ..Default::default()
         });
     }
+    if cfg.embed_pool {
+        st.tap_pool = Some(vec![0.0f32; gpu.cfg.n_embd]);
+    }
+    // The relaxed rule's per-row law scratch (one allocation per run).
+    #[cfg(feature = "relaxed_accept")]
+    let mut relax_law = vec![0.0f32; if cfg.relax.is_some() { vocab } else { 0 }];
     let t_loop = Instant::now();
     while generated.len() < n_gen {
         // ── draft: anchor embedding (device dequant) + the noise block
@@ -389,6 +420,24 @@ pub fn run_keyed_spec_loop(
         gpu.verify_snapshot_gdn()?;
         let (am, logits_flat) = gpu.forward_verify_chunk_taps_logits(&draft, pos)?;
         st.verify_ms.push(t.elapsed().as_secs_f64() * 1e3);
+        #[cfg(feature = "relaxed_accept")]
+        let acc = match cfg.relax {
+            Some(rule) => {
+                let (acc, r) = crate::qwen38_spec::keyed_accept_relaxed(
+                    posture,
+                    rule,
+                    &logits_flat,
+                    vocab,
+                    &draft[1..],
+                    pos,
+                    &mut relax_law,
+                );
+                st.n_relaxed += r;
+                acc
+            }
+            None => keyed_accept(posture, &logits_flat, vocab, &draft[1..], pos),
+        };
+        #[cfg(not(feature = "relaxed_accept"))]
         let acc = keyed_accept(posture, &logits_flat, vocab, &draft[1..], pos);
         let j = acc.j;
         st.hist[j] += 1;
@@ -465,6 +514,18 @@ pub fn run_keyed_spec_loop(
         let taps = gpu.verify_taps_download(j)?;
         drafter_gpu.inject_positions(&taps, pos)?;
         st.inject_ms.push(t.elapsed().as_secs_f64() * 1e3);
+        if let Some(pool) = st.tap_pool.as_mut() {
+            // Row layout: [j][TAP_LAYERS.len() · e]; the last tap is the tail.
+            let te = gpu.cfg.n_embd;
+            let inp = QWEN38_DFLASH2_TAP_LAYERS.len() * te;
+            for r in 0..j {
+                let last = &taps[r * inp + inp - te..(r + 1) * inp];
+                for (a, &x) in pool.iter_mut().zip(last) {
+                    *a += x;
+                }
+            }
+            st.tap_pool_n += j;
+        }
 
         // The greedy-posture cross-check: at T<=0 the keyed sampler IS the
         // argmax over survivors, which equals the chunk argmax whenever the
@@ -507,7 +568,9 @@ pub fn run_keyed_spec_loop(
     // 2026-10-03). The returned stream is exactly `n_gen`: the committed
     // stream IS the serial keyed decode, so its first `n_gen` tokens are
     // the serial decode's first `n_gen` — truncation is semantically exact,
-    // never a repair. `st.committed` keeps the raw count.
+    // never a repair. `st.committed` keeps the raw count. (Under a lossy
+    // `relax` rule the stream is not the serial decode; truncation is then
+    // just the length cap.)
     generated.truncate(n_gen);
     Ok((generated, st))
 }

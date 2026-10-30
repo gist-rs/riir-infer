@@ -195,6 +195,11 @@ bmth_cuda = ["ternary_gemv_cuda_raw"]
 # that produces its rows. CUDA-only like its target (implies the cudarc
 # family; the module is additionally cfg(not(target_os = "macos"))).
 qwen38_spec = ["ternary_gemv_cuda_raw"]
+# riir-ai Issue 1142 — PLM relaxed acceptance on the keyed lane
+# (qwen38_spec::{RelaxedAccept, keyed_accept_relaxed}; the cudarc loop's
+# `relax` knob when qwen38_spec is also on). LOSSY away from the EXACT corner;
+# the quality budget is fitted by the 1142 calibration lane. Opt-in.
+relaxed_accept = ["katgpt-core/relaxed_accept"]
 # katgpt-rs Issue 966 / plan 632 — the grid-reselection drafter arm
 # (lattice_walk_reselect + the keyed-loop `reselect` knob). Implies
 # qwen38_spec (the loop is the arm's only consumer). The upstream edge is

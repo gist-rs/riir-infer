@@ -155,6 +155,138 @@ pub fn serial_keyed_step(posture: &KeyedVerifyPosture, logits: &[f32], position:
     posture.sample_row(logits, position)
 }
 
+// ── riir-ai Issue 1142: relaxed acceptance on the keyed lane ─────────
+
+/// The PLM relaxed-acceptance knob for the keyed lane (riir-ai Issue 1142,
+/// katgpt-rs Issue 973, arXiv:2610.26693 Alg. 1): a drafted token `d` at a
+/// verify row is accepted iff `d == s` (the keyed stream's own sample — the
+/// verifier-side draw, the exact term) `∨ d ∈ ρ-nucleus(q) ∨ q(d) ≥ ε`, where
+/// `q` is the posture's deployed law at that row (truncation keep-mask, then
+/// `softmax(logits / T)` over survivors). Rejection commits `s` — no residual.
+///
+/// LOSSY BY DESIGN away from [`RelaxedAccept::EXACT`]: an admitted `d ≠ s`
+/// leaves the serial keyed stream, so the committed stream stops being the
+/// serial decode. The quality budget (MAUVE within 1% of exact) is fitted by
+/// the riir-ai 1142 calibration lane, never assumed. `q(d) = 0` outside the
+/// keep-mask, so a relaxed accept never emits outside the deployed truncation.
+/// Feature `relaxed_accept`.
+#[cfg(feature = "relaxed_accept")]
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct RelaxedAccept {
+    pub rho: f32,
+    pub eps: f32,
+}
+
+#[cfg(feature = "relaxed_accept")]
+impl RelaxedAccept {
+    /// Admits nothing (`ρ = 0`, `ε = ∞`): [`keyed_accept_relaxed`] is then
+    /// bit-identical to [`keyed_accept`] — the lossless corner. (The paper's
+    /// `ε = 1` corner differs only where f32 rounds a survivor's `q` to 1.0.)
+    pub const EXACT: Self = Self {
+        rho: 0.0,
+        eps: f32::INFINITY,
+    };
+
+    pub fn is_exact(&self) -> bool {
+        self.rho <= 0.0 && self.eps > 1.0
+    }
+}
+
+#[cfg(feature = "relaxed_accept")]
+impl KeyedVerifyPosture {
+    /// The posture's deployed law at one row, written into `out` (len =
+    /// vocab): the keep-mask survivors' `softmax(logits / T)`, zero
+    /// elsewhere. The greedy posture (T ≤ 0) has no sampled law; it reads the
+    /// untempered (T = 1) survivor softmax so the relaxed terms stay defined.
+    /// Max-subtracted, sequential ascending folds (Issue 940 order pin).
+    pub fn row_law_into(&self, logits: &[f32], out: &mut [f32]) {
+        assert_eq!(logits.len(), out.len(), "row_law_into: len mismatch");
+        let keep = self.keep_mask(logits);
+        let t = if self.is_greedy() {
+            1.0
+        } else {
+            self.temperature
+        };
+        let mut max = f32::NEG_INFINITY;
+        for (&l, &k) in logits.iter().zip(&keep) {
+            if k && l > max {
+                max = l;
+            }
+        }
+        let mut sum = 0.0f32;
+        for ((o, &l), &k) in out.iter_mut().zip(logits).zip(&keep) {
+            *o = if k { ((l - max) / t).exp() } else { 0.0 };
+            sum += *o;
+        }
+        if sum > 0.0 {
+            let inv = 1.0 / sum;
+            for o in out.iter_mut() {
+                *o *= inv;
+            }
+        }
+    }
+}
+
+/// [`keyed_accept`] under a [`RelaxedAccept`] rule. Returns the verdict plus
+/// the number of RELAXED admits (chain tokens accepted while `≠ s`) — the
+/// lossy-acceptance count the calibration lane reports beside accepted/call.
+///
+/// Row `r`'s verdict is a pure function of that row's logits, position, key
+/// and the rule (the [`keyed_accept`] order-invariance carries over). The
+/// law `q` is computed only on rows where the exact term fails. `law` is a
+/// caller-owned scratch of length `vocab` (reused across cycles).
+///
+/// Monotone: loosening (`ρ↑` or `ε↓`) grows every row's admit set, so the
+/// first rejected row can only move later — `j` never decreases.
+#[cfg(feature = "relaxed_accept")]
+pub fn keyed_accept_relaxed(
+    posture: &KeyedVerifyPosture,
+    rule: RelaxedAccept,
+    rows_logits: &[f32],
+    vocab: usize,
+    chain: &[u32],
+    pos: usize,
+    law: &mut [f32],
+) -> (KeyedAccept, usize) {
+    assert!(vocab > 0, "vocab must be nonzero");
+    assert_eq!(law.len(), vocab, "law scratch must be vocab-sized");
+    assert!(
+        rows_logits.len().is_multiple_of(vocab),
+        "rows_logits {} not a multiple of vocab {vocab}",
+        rows_logits.len()
+    );
+    let p = rows_logits.len() / vocab;
+    assert!(
+        chain.len() + 1 == p,
+        "chain len {} must be p−1 for p rows (got p {p})",
+        chain.len()
+    );
+    let mut relaxed = 0usize;
+    for r in 0..chain.len() {
+        let row = &rows_logits[r * vocab..(r + 1) * vocab];
+        let s = posture.sample_row(row, pos + r + 1);
+        if s == chain[r] {
+            continue;
+        }
+        if !rule.is_exact() {
+            posture.row_law_into(row, law);
+            if katgpt_core::relaxed_accept::relaxed_admit(
+                law,
+                chain[r] as usize,
+                rule.rho,
+                rule.eps,
+            ) {
+                relaxed += 1;
+                continue;
+            }
+        }
+        return (KeyedAccept { j: r + 1, bonus: s }, relaxed);
+    }
+    let last = &rows_logits[(p - 1) * vocab..p * vocab];
+    let bonus = posture.sample_row(last, pos + p);
+    (KeyedAccept { j: p, bonus }, relaxed)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -251,6 +383,34 @@ mod tests {
         steps: usize,
         block: usize,
     ) -> (Vec<u32>, Vec<usize>) {
+        spec_stream_with(
+            model,
+            drafter,
+            posture,
+            posture,
+            prompt,
+            steps,
+            block,
+            &mut |flat, chain, pos| keyed_accept(posture, flat, model.vocab, chain, pos),
+        )
+    }
+
+    /// One verify cycle's acceptance walk: `(flat rows, chain, pos)`.
+    type AcceptFn<'a> = dyn FnMut(&[f32], &[u32], usize) -> KeyedAccept + 'a;
+
+    /// [`spec_stream`] with the acceptance walk and the drafter's key
+    /// posture injected (the relaxed rule's tests drive the same loop).
+    #[allow(clippy::too_many_arguments)]
+    fn spec_stream_with(
+        model: &FakeModel,
+        drafter: &FakeDrafter,
+        posture: &KeyedVerifyPosture,
+        draft_posture: &KeyedVerifyPosture,
+        prompt: &[u32],
+        steps: usize,
+        block: usize,
+        accept: &mut AcceptFn<'_>,
+    ) -> (Vec<u32>, Vec<usize>) {
         // Serial prefix: teacher-force the prompt, then seed the stream
         // with the FIRST pending (the stream's token at pos — the 759-loop
         // `generated = vec![first]` shape: the pending is a real stream
@@ -267,7 +427,7 @@ mod tests {
             let pending = *stream.last().expect("seeded stream");
             let mut chain_ctx = ctx.clone();
             chain_ctx.push(pending);
-            let chain = drafter.chain(&chain_ctx, pos, posture, block - 1);
+            let chain = drafter.chain(&chain_ctx, pos, draft_posture, block - 1);
             // Verify rows: the IDEAL chunk — row r = the one-row logits at
             // pos+r (the chunk-identity contract holds by construction).
             let mut rows: Vec<Vec<f32>> = Vec::with_capacity(block);
@@ -282,7 +442,7 @@ mod tests {
             for r in &rows {
                 flat.extend_from_slice(r);
             }
-            let acc = keyed_accept(posture, &flat, model.vocab, &chain, pos);
+            let acc = accept(&flat, &chain, pos);
             // Commit. STREAM: the accepted chain tokens + the bonus (the
             // pending is already on the stream from the previous cycle's
             // bonus — or the seed above). MODEL CONTEXT: the chunk
@@ -519,6 +679,206 @@ mod tests {
         for p in 0..200u64 {
             let g = keyed_gumbel_noise(9, p, 11);
             assert!(g.is_finite() && g.abs() < 64.0);
+        }
+    }
+
+    #[cfg(feature = "relaxed_accept")]
+    mod relaxed {
+        use super::*;
+
+        fn posture() -> KeyedVerifyPosture {
+            KeyedVerifyPosture {
+                temperature: 0.8,
+                top_k: Some(16),
+                top_p: Some(0.95),
+                seed: 0x1142,
+            }
+        }
+
+        fn run(rule: RelaxedAccept, quality: f32) -> (Vec<u32>, Vec<usize>, usize) {
+            run_seeded(Some(rule), quality, posture().seed)
+        }
+
+        /// `rule = None` drives the plain [`keyed_accept`] walk over the
+        /// same drafter (the corner test's reference).
+        fn run_seeded(
+            rule: Option<RelaxedAccept>,
+            quality: f32,
+            seed: u64,
+        ) -> (Vec<u32>, Vec<usize>, usize) {
+            let model = FakeModel { vocab: 64 };
+            let drafter = FakeDrafter {
+                model: FakeModel { vocab: 64 },
+                quality,
+            };
+            let posture = KeyedVerifyPosture { seed, ..posture() };
+            // INDEPENDENT drafter keys: the fake logits are flat (span 0.1),
+            // so a shared-key drafter's pick is the Gumbel argmax on both
+            // sides — every in-mask draft equals the stream's sample and the
+            // rule has nothing to admit. Independent keys give in-mask
+            // mismatches (the real drafter's case: its own distribution).
+            let draft_posture = KeyedVerifyPosture {
+                seed: seed ^ 0xD4AF_7000,
+                ..posture.clone()
+            };
+            let prompt: Vec<u32> = (3..28).collect();
+            let mut law = vec![0.0f32; 64];
+            let mut n_relaxed = 0usize;
+            let (stream, js) = spec_stream_with(
+                &model,
+                &drafter,
+                &posture,
+                &draft_posture,
+                &prompt,
+                120,
+                6,
+                &mut |f, c, p| {
+                    let Some(rule) = rule else {
+                        return keyed_accept(&posture, f, 64, c, p);
+                    };
+                    let (acc, r) = keyed_accept_relaxed(&posture, rule, f, 64, c, p, &mut law);
+                    n_relaxed += r;
+                    acc
+                },
+            );
+            (stream, js, n_relaxed)
+        }
+
+        #[test]
+        fn exact_corner_is_bit_identical_to_keyed_accept_and_lossless() {
+            for quality in [1.0f32, 0.6, 0.35, 0.0] {
+                let (stream, js, n_relaxed) = run(RelaxedAccept::EXACT, quality);
+                let (exact, exact_js, _) = run_seeded(None, quality, posture().seed);
+                let model = FakeModel { vocab: 64 };
+                let prompt: Vec<u32> = (3..28).collect();
+                assert_eq!(
+                    stream, exact,
+                    "q={quality}: corner stream != keyed_accept stream"
+                );
+                assert_eq!(
+                    js, exact_js,
+                    "q={quality}: corner verdicts != keyed_accept verdicts"
+                );
+                assert_eq!(n_relaxed, 0);
+                assert_eq!(stream, serial_stream(&model, &posture(), &prompt, 120));
+            }
+        }
+
+        #[test]
+        fn row_law_is_the_truncated_tempered_softmax() {
+            let posture = KeyedVerifyPosture {
+                temperature: 0.5,
+                top_k: Some(2),
+                top_p: None,
+                seed: 1,
+            };
+            let logits = [1.0f32, 3.0, 2.0, -4.0];
+            let mut q = [0.0f32; 4];
+            posture.row_law_into(&logits, &mut q);
+            let (a, b) = ((0.0f32).exp(), ((2.0f32 - 3.0) / 0.5).exp());
+            assert_eq!(q[0], 0.0);
+            assert_eq!(q[3], 0.0);
+            assert!((q[1] - a / (a + b)).abs() < 1e-6);
+            assert!((q[2] - b / (a + b)).abs() < 1e-6);
+        }
+
+        /// Per-cycle monotonicity on identical verify rows: loosening never
+        /// lowers `j` (checked row-by-row on fixed fixtures, so the claim is
+        /// the walk's, not an artefact of diverging streams).
+        #[test]
+        fn loosening_never_lowers_j_on_fixed_rows() {
+            let posture = posture();
+            let vocab = 32usize;
+            let mut law = vec![0.0f32; vocab];
+            let grid = [
+                RelaxedAccept::EXACT,
+                RelaxedAccept { rho: 0.5, eps: 0.5 },
+                RelaxedAccept { rho: 0.8, eps: 0.1 },
+                RelaxedAccept {
+                    rho: 0.95,
+                    eps: 0.02,
+                },
+                RelaxedAccept { rho: 1.0, eps: 0.0 },
+            ];
+            let mut loosest_gain = 0usize;
+            for case in 0..400u64 {
+                let rows: Vec<f32> = (0..6 * vocab as u64)
+                    .map(|i| {
+                        let z =
+                            FakeModel::fin(case.wrapping_mul(0x9E37) ^ i.wrapping_mul(0xBF58_476D));
+                        (((z >> 40) as f32) / 16777216.0 - 128.0) * 0.08
+                    })
+                    .collect();
+                let chain: Vec<u32> = (0..5u64)
+                    .map(|i| (FakeModel::fin(case ^ (i << 32)) % vocab as u64) as u32)
+                    .collect();
+                let js: Vec<usize> = grid
+                    .iter()
+                    .map(|&g| {
+                        keyed_accept_relaxed(&posture, g, &rows, vocab, &chain, 40, &mut law)
+                            .0
+                            .j
+                    })
+                    .collect();
+                for w in js.windows(2) {
+                    assert!(w[1] >= w[0], "case {case}: loosening lowered j: {js:?}");
+                }
+                loosest_gain += js[4] - js[0];
+            }
+            assert!(
+                loosest_gain >= 200,
+                "non-vacuity: loosest rule gained only {loosest_gain}"
+            );
+        }
+
+        /// The ρ = 1, ε = 0 extreme admits every survivor: a chain drawn
+        /// inside the keep-mask is accepted in full.
+        #[test]
+        fn loosest_rule_accepts_any_survivor_and_never_a_masked_token() {
+            let posture = posture();
+            let vocab = 32usize;
+            let rows: Vec<f32> = (0..3 * vocab)
+                .map(|i| ((i * 37 % 101) as f32) * 0.05)
+                .collect();
+            let mut law = vec![0.0f32; vocab];
+            let loose = RelaxedAccept { rho: 1.0, eps: 0.0 };
+            let keep0 = posture.keep_mask(&rows[..vocab]);
+            let in_mask = keep0.iter().position(|&k| k).unwrap() as u32;
+            let out_mask = keep0.iter().position(|&k| !k).unwrap() as u32;
+            let keep1 = posture.keep_mask(&rows[vocab..2 * vocab]);
+            let in1 = keep1.iter().position(|&k| k).unwrap() as u32;
+            let (acc, _) =
+                keyed_accept_relaxed(&posture, loose, &rows, vocab, &[in_mask, in1], 7, &mut law);
+            assert_eq!(acc.j, 3);
+            let (acc, _) =
+                keyed_accept_relaxed(&posture, loose, &rows, vocab, &[out_mask, in1], 7, &mut law);
+            assert_eq!(acc.j, 1, "a masked token must never be admitted");
+        }
+
+        /// Lossy away from the corner, and that is the point: a weak drafter
+        /// gains accepted positions per cycle, and the stream leaves the serial
+        /// decode (the quality budget for that departure is the 1142 lane's).
+        #[test]
+        fn relaxed_rule_gains_acceptance_and_is_lossy() {
+            let (_, exact_js, _) = run(RelaxedAccept::EXACT, 0.35);
+            let (stream, js, n_relaxed) = run(
+                RelaxedAccept {
+                    rho: 0.9,
+                    eps: 0.02,
+                },
+                0.35,
+            );
+            let mean = |v: &[usize]| v.iter().sum::<usize>() as f64 / v.len() as f64;
+            assert!(n_relaxed > 0);
+            assert!(
+                mean(&js) > mean(&exact_js) * 1.25,
+                "relaxed mean_j {} vs exact {}",
+                mean(&js),
+                mean(&exact_js)
+            );
+            let model = FakeModel { vocab: 64 };
+            let prompt: Vec<u32> = (3..28).collect();
+            assert_ne!(stream, serial_stream(&model, &posture(), &prompt, 120));
         }
     }
 }
