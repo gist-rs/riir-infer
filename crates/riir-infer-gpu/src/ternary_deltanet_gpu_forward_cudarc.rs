@@ -265,7 +265,10 @@ pub struct GpuLayerWeightsCudarc {
 /// exact-1-wave launch measured 706 GB/s vs lm_head's 854 — tails were never
 /// the differentiator). The kernel + `RIIR_GEMV_PERSISTENT_GRID` override are
 /// retained as the measurement apparatus; the cap is opt-in only.
-struct GemvMultiPersistent {
+/// Pub for the plan-474 R1 training replay (riir-train-gpu): the widened
+/// dispatch helpers name this type in their signatures. Opaque — no pub
+/// fields; the replay only passes `&infra.gemv_multi` through.
+pub struct GemvMultiPersistent {
     function: CudaFunction,
     /// Grid cap. `u32::MAX` = uncapped (one-warp-per-row — the measured-best
     /// default). A finite value caps the launch at full-residency-style grids;
