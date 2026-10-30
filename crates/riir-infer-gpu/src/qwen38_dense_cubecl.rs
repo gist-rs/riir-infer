@@ -387,6 +387,9 @@ fn dequant_host_f32(gguf: &GgufFile, name: &str, m: usize, n: usize) -> Result<V
     }
 }
 
+/// Only the dense-f16 posture (`from_gguf_f16`) uploads f16 bit patterns;
+/// gated with its sole caller so non-macOS builds carry no dead item.
+#[cfg(all(feature = "metal_tensor_gemm", target_os = "macos"))]
 fn upload_f16_bits(client: &ComputeClient<ActiveRuntime>, host: &[f32]) -> Handle {
     let bits: Vec<u16> = host
         .iter()
