@@ -113,3 +113,53 @@ default move (the Issue-750-T3 lossy law).
 - [-] Per-family floors at 32K for the non-continuation families — T6's
       league-cell lane re-verifies if promotion ever needs 32K per-family
       evidence (today only the killer axis is dual-length).
+
+## Protocol v2 — the scorer re-open (the T3 named lever)
+
+**Status:** In progress — zed-amo-i1156 (same lease, expires 2026-10-31T17:22:37Z)
+
+T3's verdict refused blanket promotion and named the re-open lever: the
+pooled-centroid scorer is blind to single fact rows (mean dilution — the T2
+design doc's own named risk, measured). Protocol v2 swaps the scorer, keeps
+EVERY floor constant (grid/ε/band), and re-runs the SAME sweep (same holdouts,
+same corpus digest, same model pin) so the v1↔v2 read is paired:
+
+- **The fix (Quest-class min/max envelope):** kernel 1 pools per-dim **max +
+  min** K per block (a fact lives in the extremes, not the mean); kernel 2
+  scores `band + envelope` where `envelope = Σ_d q̄_d·(q̄_d ≥ 0 ? kmax_d :
+  kmin_d)` — an upper bound on `max_r(q̄·k_r)` over the block's rows, tight
+  exactly on single-fact rows. The band (diagonal) and the select kernel are
+  untouched; τ=1.0 stays score-independent (the bit-identity contract holds
+  BY CONSTRUCTION).
+- **Posture:** `RIIR_PREFILL_SPARSE_SCORER` — `envelope` (v2 DEFAULT),
+  `mean` (v1 demote, exact literal; junk/unset → envelope). The committed v1
+  manifest stays the MEAN scorer's binding floors; v2 lands its own manifest
+  (`sparse_omega_msr_manifest_v2.json`) and `verify_posture` binds
+  scorer == manifest scorer — a floor never blesses the other scorer.
+- **GOAT:** the v2 sweep IS the gate — G1 per-family ΩMSR floors
+  (pre-registered, unchanged); G2 the sweep's wall reads at τ=0.9 vs dense
+  (envelope costs one extra pool butterfly + same-shape score FLOPs —
+  expected ≈ 0 e2e); τ=1.0 anchors must stay bit-identical.
+
+### Tasks
+
+- [ ] **V2.1** substrate: `SparseScorer` posture (env + setter + grammar
+      tests); pool kernel min/max mode (finite sentinels f32::MAX/MIN — no
+      infinity literals in kernel bodies); score kernel envelope mode;
+      scratch kpool 2× (max | min halves); launchers + the dispatch caller.
+- [ ] **V2.2** omega substrate: `OMEGA_MANIFEST_VERSION` 2 (reader accepts
+      {1, 2}: v1 = scorer `mean` implicit — the demote posture's floors stay
+      verifiable; v2 REQUIRES the `scorer` field); `verify_posture(..,
+      scorer)` binding; self-tests for both versions + mismatch refusals.
+- [ ] **V2.3** instrument v2 (riir-ai): scorer pin (`OMEGA_SWEEP_SCORER`,
+      default `envelope`), manifest `scorer` field, v2 fixture + v2 rows
+      paths (the v1 artifact pair is never overwritten).
+- [ ] **V2.4** kernel tests green at the arm posture — incl. the planted
+      single-row needle test (a needle block score ≥ 16× its mean-mode
+      self — the mechanism proof) and hot-block dominance in BOTH scorers.
+- [ ] **V2.5** run the sweep (~2.5 h, GPU-exclusivity preflight) → per-family
+      verdict.
+- [ ] **V2.6** land manifest v2 + digest sidecar + record + issue/plan
+      updates; the DEFAULT-scorer call rides the verdict (envelope ≥ as many
+      families with no regression on `math` → stays default; otherwise
+      demote to `mean` + the negative recorded).
