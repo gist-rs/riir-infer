@@ -3,6 +3,7 @@
 > **Source:** "LittleBit: Ultra Low-Bit Quantization via Latent Factorization" — Banseok Lee*, Dongkyu Kim*, Youngcheon You, Youngmin Kim (Samsung Research), [arXiv:2506.13771](https://arxiv.org/abs/2506.13771) (v1 2025-05-30, v5 2026-02-05), code `github.com/SamsungLabs/LittleBit`
 > **Date:** 2026-10-08
 > **Status:** Closed negative (2026-10-09) — the init-only PTQ point is measured NO-GO: riir-infer local-lane Issue 036 → Bench 034 (`.benchmarks/034_littlebit_init_only_ppl_ladder/`, M3) + the 4090 cross-box replication addendum therein (verdict confirmed, ±25% scatter). The transform lives on default-off as the deterministic-initializer record for any future QAT run; riir-train Issue 620 owns the QAT half.
+> **QAT-half addendum (2026-10-30):** riir-train 620 T1 (SmoothSign surrogate A/B, Bench 676) closed **NULL** — deployment PPL ste 78,363 vs k50 78,749 / k100 80,234 / k200 80,560 (monotone worse in k) at 0.4B / 600 steps / TWN-ternary; every arm beat the ptq_floor 1.45×+ (QAT-vs-PTQ is the real gap; the surrogate is not the lever at this scale). T2 (KD shape) remains open in 620 — the paper's recipe transfer is not yet exhausted.
 > **Related Research (local):** 004 (DQ disaggregated quantization), 006 (bekko shared-prefix KV reuse), 007 (Triadic GDN tensor state)
 > **Related Research (katgpt-rs):** 577 (BITCOS ternary layout — the 1.58–2.13 bpw tier family), 568 (.cact 2.125-bpw archive), 418 (StreamDQ SIMD LUT), 083 (Asymmetric KV cache)
 > **Classification:** Public
