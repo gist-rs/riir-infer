@@ -261,14 +261,16 @@ impl RegimeCentroids {
 }
 
 /// Stable sigmoid — never softmax (the latent-space rule). Local decision
-/// arithmetic, not a synced value.
+/// arithmetic, not a synced value. Delegates to the substrate's
+/// [`katgpt_core::exact_sigmoid`] — the bit-stable two-branch reference form
+/// this gate was authored with, body-identical (Issue 1157; the delegation is
+/// pinned bit-for-bit against the frozen legacy body by
+/// `sigmoid_delegation_matches_frozen_legacy_body`). The Cephes
+/// [`katgpt_core::sigmoid`] is deliberately NOT consumed here: a gate
+/// decision must not inherit its ±40 clamp or its ~1.2e-7 polynomial drift.
+#[inline]
 fn sigmoid(x: f32) -> f32 {
-    if x >= 0.0 {
-        1.0 / (1.0 + (-x).exp())
-    } else {
-        let e = x.exp();
-        e / (1.0 + e)
-    }
+    katgpt_core::exact_sigmoid(x)
 }
 
 /// Cosine over f64 accumulation (a 2·5120-dim mean; f64 keeps the pooled
@@ -883,6 +885,40 @@ mod tests {
         assert!(sigmoid(-100.0) < 0.01);
         // The stable halves agree at the seam.
         assert!((sigmoid(0.5) - 1.0 / (1.0 + (-0.5f32).exp())).abs() < 1e-6);
+    }
+
+    #[test]
+    fn sigmoid_delegation_matches_frozen_legacy_body() {
+        // Issue 1157: `sigmoid` is a thin delegation to the substrate's
+        // `katgpt_core::exact_sigmoid`. Pin the delegation bit-for-bit
+        // against the frozen legacy body (the two-branch stable form this
+        // gate was authored with) — substrate drift fails HERE, not in a
+        // chunk's sparse-vs-dense decision.
+        fn frozen_legacy(x: f32) -> f32 {
+            if x >= 0.0 {
+                1.0 / (1.0 + (-x).exp())
+            } else {
+                let e = x.exp();
+                e / (1.0 + e)
+            }
+        }
+        let mut x = -100.0f32;
+        while x <= 100.0 {
+            assert_eq!(sigmoid(x).to_bits(), frozen_legacy(x).to_bits(), "x = {x}");
+            x += 0.25;
+        }
+        // The seam, signed zero, and the ±40 band fast_sigmoid would clamp —
+        // the exact form must keep the representable tails.
+        for x in [-40.0f32, -0.0, 0.0, 40.0, f32::MIN_POSITIVE] {
+            assert_eq!(sigmoid(x).to_bits(), frozen_legacy(x).to_bits(), "x = {x}");
+        }
+        assert_eq!(sigmoid(-40.0), frozen_legacy(-40.0));
+        assert!(sigmoid(-40.0) > 0.0, "exact form keeps the far-tail mass");
+        assert_eq!(sigmoid(40.0), frozen_legacy(40.0));
+        // σ(40) = 1 − 4.2e-18 is not representable in f32 — the reference
+        // form's honest answer rounds to exactly 1.0 (the distinguishing
+        // tail is the negative one, pinned above).
+        assert_eq!(sigmoid(40.0), 1.0);
     }
 
     #[test]

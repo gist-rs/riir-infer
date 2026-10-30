@@ -2,6 +2,10 @@
 
 Compacted 2026-10-30: every `##` heading kept verbatim, one compact entry per record (≤2 short lines); the full pre-compaction text is in git history. Operational rules live in `AGENTS.md`; removed issue files: git history.
 
+## 2026-10-30 — Issue 1157 CLOSED + removed: regime_gate inline sigmoid delegated to the substrate — bit-preserving, pinned
+
+- `crates/riir-infer-gpu/src/regime_gate.rs` `fn sigmoid` is now a thin delegation to `katgpt_core::exact_sigmoid` (the bit-stable two-branch reference form, body-identical — NOT the Cephes `sigmoid`, whose ±40 clamp / ~1.2e-7 drift a gate decision must not inherit); delegation pinned bit-for-bit against the frozen legacy body over a fixed grid (`sigmoid_delegation_matches_frozen_legacy_body`, this commit). Copy-gate class finding from the substrate-first audit; 20/20 regime_gate tests green, clippy clean.
+
 ## 2026-10-30 — AGENTS.md compaction: the Role section's lane-landing narratives moved here (switches + postures stay in AGENTS.md's lane table)
 
 - GDN L8 eager prefill (plan 621): PROMOTED DEFAULT-ON 2026-10-24 — riir-ai Bench 993 +3.22% / Bench 997 +2.76% pp2048, pp4096 +2.62% post-promotion, G1 bytewise; the ±8.4% band clause superseded by measurement.
