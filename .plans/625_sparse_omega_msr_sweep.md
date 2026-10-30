@@ -273,3 +273,61 @@ to consume. T5 gives the floors' decisions a mixed-mode execution wire.
       cell from the T3-v2 verdict table; verified-idle protocol, both box
       classes, preflight provenance; promotion owner-gated on the GOAT
       (perf AND per-family quality).
+
+### T6 runbook (pre-registered — the idle-window cell plan)
+
+**Preconditions:** verified-idle (`scripts/bench_preflight.sh` → quote the
+`PROVENANCE:` line beside every number); no sibling serving lanes co-tenant
+(the rethink sweep's mammoth/rethink serves are the known occupants — `ps`
+before every cell); both boxes gitsync'd; league model pin
+(`BONSAI_GGUF` → `Ternary-Bonsai-2-27B-PQ2_0.gguf`).
+
+**Lane scoping (the i1149 routing-proof pattern):** the sparse arm is wired
+in the wgpu/CubeCL forward (macOS lane — `prefill_attention_layer_batched`).
+The 4090's scored prefill is the cudarc whole-prefill lane — a DIFFERENT
+forward. Routing is proven by the launch counters, never assumed: on any
+lane claiming to run the arm, `sparse_attn_launch_count` MUST move.
+Expected: structurally N/A on the cudarc lane — any CUDA cell is a separate
+wiring lane, NOT a T6 cell. The "both box classes" clause of the original
+T6 row reads as: Metal cells here; the CUDA half is recorded N/A (or opened
+as its own lane) with the routing proof, never silently skipped.
+
+**Cell order (amo, --release):**
+
+0. **T4.4 freeze first** (dense, calibration — quiet-box preferred, not
+   strictly idle-gated): `bench_1156_regime_feature_dump` →
+   `regime_centroid_freeze` → commit the sidecar pair → calibrate
+   gain/margin on the dump's cosine spread. Cell E needs it; nothing else
+   does — run it first so the window is not blocked on calibration later.
+1. **Cell A — dense baseline** (`RIIR_PREFILL_SPARSE` unset): the pp16k /
+   pp32k reference wall every other cell divides by.
+2. **Cell B — τ=0.9** · **Cell C — τ=0.85**: 3 interleaved rounds
+   median-of-ratios vs Cell A (the T2 thermal-order protocol); a τ=1.0
+   anchor FNV fail-fast per cell (the G1 contract); counters engaged
+   (pool/score/select/attn + regime counters for E).
+3. **Cell D — mixed-mode** (`RIIR_PREFILL_SPARSE_DENSE_HEADS=0-4`, a
+   quarter dense, τ=0.85): **REPORT-ONLY perf** — mixed-mode quality is
+   UNMEASURED (the sweep pinned uniform-τ floors); its quality claim rides
+   a follow-up mini-sweep or the gate's belt, never a perf cell. Do not
+   read Cell D as a promotion candidate on perf alone.
+4. **Cell E — the regime gate** (only if the freeze landed):
+   `RIIR_PREFILL_REGIME_GATE=1` + the sidecar pair + `RIIR_OMSR_MANIFEST`
+   at the v2 fixture; engagement proof = `regime_gate_counters()` decisions
+   move AND every served τ carries its `verify_posture_at_len` belt green.
+
+**Acceptance (pre-registered; promotion owner-gated):**
+
+- **G2 (perf):** the served posture ≥ 1.02× @16K / ≥ 1.04× @32K
+   verified-idle vs Cell A — the T3-v2 under-load reads (1.025×/1.049× at
+   τ=0.85) are the FLOOR: idle must not read worse; a worse idle read is a
+   demote signal, not a rounding note.
+- **G1 (quality):** the served τ passes `verify_posture` 7/7 (0.85 and 0.9
+   both do per the v2 manifest); a gate-driven lower τ carries its class
+   belt green at the served length.
+- **G3/G4:** env-off byte-identity (already anchored:
+   `sparse_tau1_is_bit_identical_to_m32` + the T5 mode anchors) and disarm
+   = no scratch alloc (structural: `sparse: None`). Re-asserted, not
+   assumed, at the landed HEAD before the cells run.
+- **The call:** τ=0.85 vs τ=0.9 (and any mixed/gate promotion) is the
+   owner's on the GOAT — perf AND per-family quality together; demote the
+   loser per the standing rule.
