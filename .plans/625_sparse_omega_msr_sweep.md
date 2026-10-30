@@ -81,26 +81,34 @@ default move (the Issue-750-T3 lossy law).
 
 ## Tasks
 
-- [ ] **T3.1** `sparse_omega_msr.rs`: consts (grid/ε/band), manifest types
+- [x] **T3.1** `sparse_omega_msr.rs`: consts (grid/ε/band), manifest types
       (serde_json), `omega_msr` knee calc (top-contiguous rule),
       `blake3_hex`/`blake3_file_hex`, `manifest_body_json`,
       `load_and_verify_manifest` (digest + consts drift refusal),
       `verify_posture`; `pub mod` row in lib.rs; self-tests
       (planted-knee both directions + boundaries + tamper) green at lib
-      posture.
-- [ ] **T3.2** Sweep instrument `bench_1152_sparse_omega_msr_sweep.rs`:
+      posture. (riir-infer `56068a3`; 12 ungated + 14 gated green)
+- [x] **T3.2** Sweep instrument `bench_1152_sparse_omega_msr_sweep.rs`:
       holdout corpus (7 families, new seeds), 16K block (7×2 items ×
       [dense + 6 τ] + τ=1.0 anchors), 32K continuation block, decode-probe
       protocol, JSONL progress rows (env `OMEGA_SWEEP_ROWS`), manifest
       writer + in-run round-trip verify. Compiles green at the
       `qwen38_wgpu,ternary_gemm_batched,metal_tensor_gemm` posture.
-- [ ] **T3.3** Run the sweep (GPU-exclusivity preflight; box state
-      disclosed; ~2–2.5 h on amo; league model pin).
-- [ ] **T3.4** Manifest digest-pinned at the fixture path + committed.
-- [ ] **T3.5** Record `1152_issue1156_t3_omega_sweep.md` (per-family table,
+      (riir-ai `7e004561f`; clippy -D clean at `ternary_gemm_batched`;
+      note: the grid is 7 τ points [0.95..0.5] matching the substrate
+      grid, and continuations were lengthened ≥65 tokens after the first
+      dry run refused short-tokenized ones)
+- [x] **T3.3** Run the sweep (GPU-exclusivity preflight; box state
+      disclosed; ~2–2.5 h on amo; league model pin). (136 passes / 9520.6 s;
+      anchors 8/8; counters +8640/+17280; rows at
+      `/tmp/sparse_omega_sweep_rows.jsonl`)
+- [x] **T3.4** Manifest digest-pinned at the fixture path + committed.
+      (digest `a47b96e46557335a…`; in-run round-trip verified; sidecar
+      `.blake3` alongside)
+- [x] **T3.5** Record `1152_issue1156_t3_omega_sweep.md` (per-family table,
       ΩMSR, the continuation-ppl axis vs the bench-889 killer, honest
       verdicts); issue 1156 T3 row; plan checkboxes; commit + push both
-      repos.
+      repos. (riir-ai `585b19cdd`)
 
 - [-] Per-family floors at 32K for the non-continuation families — T6's
       league-cell lane re-verifies if promotion ever needs 32K per-family
