@@ -21,6 +21,16 @@ import time
 
 import mlx.core as mx
 
+import sys
+# A non-UTF-8 console (cp874) would kill this script on its first
+# non-ASCII glyph; degrade the glyph, never the verdict (katgpt-rs
+# Issue 804). A captured stream without reconfigure is left alone.
+for _stream in (sys.stdout, sys.stderr):
+    try:
+        _stream.reconfigure(errors="backslashreplace")
+    except (AttributeError, ValueError):
+        pass
+
 HIDDEN_F16_BYTES = 5120 * 2
 SIZES = [
     ("4B", 1),
@@ -109,7 +119,7 @@ def main():
         print(json.dumps(out, indent=2), flush=True)
         dst = os.environ.get("I623_PROBE_OUT")
         if dst:
-            with open(dst, "w") as f:
+            with open(dst, "w", encoding="utf-8") as f:
                 json.dump(out, f, indent=2)
 
 
