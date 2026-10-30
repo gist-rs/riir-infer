@@ -10116,7 +10116,28 @@ impl TernaryDeltanetGpuForward {
                                 .load(std::sync::atomic::Ordering::Relaxed);
                             #[cfg(not(feature = "deltanet_recurrence_smem_staged"))]
                             let staged = false;
-                            if staged {
+                            // riir-ai Plan 607 C1 (T2): the multi-plane arm —
+                            // B1's env ladder, default OFF. Wins over the staged
+                            // twin when armed (the two are orthogonal probes; MR
+                            // is the narrower rung and its vacuous guard is the
+                            // one the plan's G1 pins).
+                            let rec_mr = crate::deltanet_recurrence_mr_cubecl::rec_mr_planes();
+                            if let Some(planes) = rec_mr {
+                                crate::deltanet_recurrence_mr_cubecl::DeltanetRecurrenceMultiTokenMRCubeCL::launch_with_gpu_handles::<
+                                    ActiveRuntime,
+                                >(
+                                    &self.client,
+                                    qkvx_b.clone(),
+                                    beta_b.clone(),
+                                    decay_b.clone(),
+                                    state.clone(),
+                                    rec_b.clone(),
+                                    n_v_heads,
+                                    head_dim,
+                                    p,
+                                    planes,
+                                );
+                            } else if staged {
                                 #[cfg(feature = "deltanet_recurrence_smem_staged")]
                                 crate::deltanet_recurrence_staged_cubecl::DeltanetRecurrenceStagedCubeCL::launch_with_gpu_handles::<ActiveRuntime>(
                                     &self.client,

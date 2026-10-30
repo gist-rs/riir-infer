@@ -575,6 +575,21 @@ pub use deltanet_cubecl::DeltaNetStateBuffers;
 // k/q/v (bit-identical to `DeltanetRecurrenceMultiTokenCubeCL`, opt-in).
 #[cfg(feature = "deltanet_recurrence_smem_staged")]
 pub mod deltanet_recurrence_staged_cubecl;
+// riir-ai Plan 607 C1 (T2): the multi-plane DeltaNet recurrence — the 4090
+// r4w4-class rung's CubeCL twin (rows-per-cube launch-geometry ladder,
+// bit-identical by construction, env `RIIR_GDN_REC_MR` default-OFF).
+#[cfg(all(
+    feature = "cubecl_runtime",
+    feature = "ternary_deltanet_chunked_prefill"
+))]
+pub mod deltanet_recurrence_mr_cubecl;
+#[cfg(all(
+    feature = "cubecl_runtime",
+    feature = "ternary_deltanet_chunked_prefill"
+))]
+pub use deltanet_recurrence_mr_cubecl::{
+    DeltanetRecurrenceMultiTokenMRCubeCL, rec_mr_launch_count, set_rec_mr,
+};
 // riir-ai Issue 1004 R2: the fused GDN prework — conv1d + SiLU + q/k L2-norm
 // + head expansion in ONE dispatch (bit-identical to the chunked-conv +
 // batched-expand chain by construction, opt-in).
