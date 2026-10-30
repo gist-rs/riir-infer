@@ -346,20 +346,21 @@ pub struct QuantGemvKernels {
 pub struct ForwardInfraCudarc {
     pub ctx: Arc<CudaContext>,
     pub stream: Arc<CudaStream>,
-    elementwise: ElementwiseKernels,
     pub attention: AttentionKernels,
     pub deltanet: DeltanetKernels,
     embedding: EmbeddingDequantKernels,
+    /// Issue 624 — the fused RMSNorm+quantize / elementwise dispatch set
+    /// (also gate+sigmoid+quantize, residual add, swiglu). Pub for the
+    /// plan-474 R1 training replay (riir-train-gpu): the backward's
+    /// layer-local device recompute must call the forward's own dispatch
+    /// helpers over the forward's own kernel set — the own-forward
+    /// bit-identity law — and cannot reach them through private fields.
+    /// Inert without that caller; the forward's own paths are unchanged.
+    pub elementwise: ElementwiseKernels,
     /// Split-path dp4a kernel (takes pre-quantized int8 + ascale).
     /// Production path. The fused kernel (`gemv_fused`) is kept for
-    /// Pub for the plan-474 R1 training replay (riir-train-gpu): the
-    /// backward's layer-local device recompute must call the forward's own
-    /// dispatch helpers over the forward's own kernel set — the
-    /// own-forward bit-identity law — and cannot reach them through
-    /// private fields. Inert without that caller; the forward's own
-    /// paths are unchanged.
-    pub elementwise: ElementwiseKernels,
     /// comparison as a documented negative result (Issue 616 T4).
+    /// Pub for the plan-474 R1 training replay (see `elementwise`).
     pub gemv: CudaFunction,
     /// Plan 618 item 5 (Issue 028 T4) + S3 — the quant-resident GEMV kernels
     /// (Q4_K + Q6_K, single + multi-persistent): the prefill-copy format of
