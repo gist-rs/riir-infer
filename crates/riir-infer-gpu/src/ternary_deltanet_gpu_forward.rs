@@ -9723,9 +9723,14 @@ impl TernaryDeltanetGpuForward {
             feature = "ternary_gemm_batched",
             feature = "ternary_attention_batched_prefill"
         ))]
+        let x_staged =
+            hidden_in.is_some() || (hidden_in.is_none() && stage_on(PREFILL_STAGE_EMBED));
+        #[cfg(all(
+            feature = "cubecl_runtime",
+            feature = "ternary_gemm_batched",
+            feature = "ternary_attention_batched_prefill"
+        ))]
         let _regime_engaged = {
-            let x_staged =
-                hidden_in.is_some() || (hidden_in.is_none() && stage_on(PREFILL_STAGE_EMBED));
             match attn_scratch.as_mut().and_then(|s| s.sparse.as_mut()) {
                 Some(sp) if x_staged => {
                     crate::qwen_attention_prefill_sparse_cubecl::run_regime_gate(
@@ -9740,6 +9745,40 @@ impl TernaryDeltanetGpuForward {
                 _ => true,
             }
         };
+
+        // ── Issue 1156 T4.4 — the freeze-pass feature capture. Independent of
+        // the sparse arm (the dump runs DENSE); same gather + pooling the
+        // gate consumes, so the frozen centroids train on the EXACT features
+        // the gate reads at serving. Calibration-time lane: env/setter-armed
+        // only, zero work disarmed (G3).
+        #[cfg(all(
+            feature = "cubecl_runtime",
+            feature = "ternary_gemm_batched",
+            feature = "ternary_attention_batched_prefill"
+        ))]
+        if crate::regime_gate::regime_capture_armed() && x_staged {
+            let pool = crate::regime_gate::REGIME_POOL_TOKENS.min(p).max(1);
+            let bnd = self.client.empty(2 * pool * n * 4);
+            let tail_start = p - pool;
+            unsafe {
+                crate::qwen_attention_prefill_sparse_cubecl::BoundaryGatherRowsCubeCL::launch::<
+                    ActiveRuntime,
+                >(
+                    &self.client,
+                    x_b.clone(),
+                    bnd.clone(),
+                    n,
+                    pool,
+                    tail_start,
+                    pool,
+                );
+            }
+            if let Ok(bytes) = self.client.read_one(bnd) {
+                let gathered = f32::from_bytes(&bytes);
+                let feats = crate::regime_gate::boundary_pool(gathered, 2 * pool, n, pool);
+                crate::regime_gate::regime_capture_append(self.active_prefill_len, p, &feats);
+            }
+        }
 
         for layer_idx in layer_lo..layer_hi {
             let is_deltanet = self.layer_types[layer_idx] == DeltaNetLayerType::DeltaNet;

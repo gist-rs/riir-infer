@@ -594,6 +594,228 @@ pub fn decide_chunk(
 }
 
 // ---------------------------------------------------------------------------
+// The freeze-pass capture + centroid computation (T4.4's machinery)
+// ---------------------------------------------------------------------------
+
+/// One parsed capture row (the JSONL the forward's capture seam writes;
+/// `tag` is `<family>` or `<family>#<item>` — the runner names it per item).
+#[derive(Clone, Debug)]
+pub struct FreezeRow {
+    pub tag: String,
+    pub prompt_len: usize,
+    pub p: usize,
+    pub features: Vec<f32>,
+}
+
+/// Parse one capture row (ungated — the freeze bin and the tests share it).
+pub fn parse_freeze_row(line: &str) -> Result<FreezeRow, String> {
+    let v: serde_json::Value =
+        serde_json::from_str(line).map_err(|e| format!("capture row not JSON: {e}"))?;
+    let tag = v
+        .get("tag")
+        .and_then(|x| x.as_str())
+        .ok_or("capture row field `tag` missing")?
+        .to_string();
+    if tag.is_empty() {
+        return Err("capture row `tag` is empty".into());
+    }
+    let prompt_len = v
+        .get("prompt_len")
+        .and_then(|x| x.as_u64())
+        .ok_or("capture row field `prompt_len` missing")? as usize;
+    let p = v
+        .get("p")
+        .and_then(|x| x.as_u64())
+        .ok_or("capture row field `p` missing")? as usize;
+    let features = v
+        .get("features")
+        .and_then(|x| x.as_array())
+        .ok_or("capture row field `features` missing")?;
+    let mut feats = Vec::with_capacity(features.len());
+    for x in features {
+        feats.push(
+            x.as_f64()
+                .map(|y| y as f32)
+                .ok_or("capture row `features` entry not a number")?,
+        );
+    }
+    Ok(FreezeRow {
+        tag,
+        prompt_len,
+        p,
+        features: feats,
+    })
+}
+
+/// `"needle#1"` → `"needle"` (the item suffix is the runner's bookkeeping).
+pub fn family_of_tag(tag: &str) -> &str {
+    match tag.split_once('#') {
+        Some((family, _)) => family,
+        None => tag,
+    }
+}
+
+/// Which centroid side a capture family feeds: `Some(true)` = retrieval,
+/// `Some(false)` = flow, `None` = a family this build does not classify —
+/// the freeze refuses it (a mislabeled run must not become a centroid).
+pub fn class_of_family(family: &str) -> Option<bool> {
+    if RETRIEVAL_FAMILIES.contains(&family) {
+        Some(true)
+    } else if FLOW_FAMILIES.contains(&family) {
+        Some(false)
+    } else {
+        None
+    }
+}
+
+/// The freeze computation: per-class f64-accumulated means over every row's
+/// features. Fails closed on: empty input, feature-dim disagreement, an
+/// unknown family tag, or a class with zero rows. `gain`/`margin` ride in
+/// (the calibration knobs — the CLI passes the operator's values, defaulting
+/// to the named consts).
+pub fn compute_centroids(
+    rows: &[FreezeRow],
+    gain: f32,
+    margin: f32,
+) -> Result<RegimeCentroids, String> {
+    if rows.is_empty() {
+        return Err("no capture rows — run the feature dump first".into());
+    }
+    let dim = rows[0].features.len();
+    if dim == 0 || !dim.is_multiple_of(2) {
+        return Err(format!(
+            "feature dim {dim} is not a positive even (2·d) value"
+        ));
+    }
+    let mut retr_count = 0usize;
+    let mut flow_count = 0usize;
+    let mut retr = vec![0f64; dim];
+    let mut flow = vec![0f64; dim];
+    for row in rows {
+        if row.features.len() != dim {
+            return Err(format!(
+                "capture row `{}` has {} features, the first row has {dim} — dim drift",
+                row.tag,
+                row.features.len()
+            ));
+        }
+        let retrieval_side = class_of_family(family_of_tag(&row.tag))
+            .ok_or_else(|| format!("capture tag `{}` names no known family — refuse", row.tag))?;
+        let acc = if retrieval_side {
+            retr_count += 1;
+            &mut retr
+        } else {
+            flow_count += 1;
+            &mut flow
+        };
+        for (a, f) in acc.iter_mut().zip(row.features.iter()) {
+            *a += f64::from(*f);
+        }
+    }
+    if retr_count == 0 {
+        return Err("no retrieval-family rows — the retrieval centroid would be invented".into());
+    }
+    if flow_count == 0 {
+        return Err("no flow-family rows — the flow centroid would be invented".into());
+    }
+    let to_f32 = |acc: &[f64], count: usize| -> Vec<f32> {
+        acc.iter().map(|s| (*s / count as f64) as f32).collect()
+    };
+    Ok(RegimeCentroids {
+        pool_tokens: REGIME_POOL_TOKENS,
+        dim,
+        gain,
+        margin,
+        retrieval: to_f32(&retr, retr_count),
+        flow: to_f32(&flow, flow_count),
+    })
+}
+
+/// Serialize the centroids body (the reader's exact shape —
+/// [`parse_centroids_body`] round-trips it; pinned by test).
+pub fn centroids_body_json(c: &RegimeCentroids) -> serde_json::Value {
+    serde_json::json!({
+        "kind": "sparse_prefill_regime_centroids",
+        "version": 1,
+        "pool_tokens": c.pool_tokens,
+        "dim": c.dim,
+        "gain": c.gain,
+        "margin": c.margin,
+        "retrieval": c.retrieval,
+        "flow": c.flow,
+    })
+}
+
+#[cfg(feature = "cubecl_runtime")]
+static CAPTURE_PATH: std::sync::OnceLock<Option<std::path::PathBuf>> = std::sync::OnceLock::new();
+#[cfg(feature = "cubecl_runtime")]
+static CAPTURE_TAG: std::sync::Mutex<String> = std::sync::Mutex::new(String::new());
+static REGIME_CAPTURE_ROWS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
+/// Whether the freeze-pass capture is armed (env `RIIR_REGIME_CAPTURE_OUT`,
+/// read once — first caller wins; calibration-time lane, never a serving
+/// posture).
+#[cfg(feature = "cubecl_runtime")]
+pub fn regime_capture_armed() -> bool {
+    CAPTURE_PATH
+        .get_or_init(|| {
+            std::env::var("RIIR_REGIME_CAPTURE_OUT")
+                .ok()
+                .map(|p| std::path::PathBuf::from(p.trim()))
+        })
+        .as_ref()
+        .is_some_and(|p| !p.as_os_str().is_empty())
+}
+
+/// Test/runner setter — arms the capture at an explicit path (beats the env;
+/// first caller wins like every arm in this lane).
+#[cfg(feature = "cubecl_runtime")]
+pub fn set_regime_capture_path(path: &str) {
+    let _ = CAPTURE_PATH.set(Some(std::path::PathBuf::from(path)));
+}
+
+/// The runner names each item's rows (the freeze groups by it).
+#[cfg(feature = "cubecl_runtime")]
+pub fn set_regime_capture_tag(tag: &str) {
+    *CAPTURE_TAG.lock().expect("capture tag mutex poisoned") = tag.to_string();
+}
+
+/// Append one capture row (JSONL). The runner owns truncation (delete the
+/// file before a fresh dump); the seam always appends — an interrupted run
+/// keeps its rows (the sweep-rows law).
+#[cfg(feature = "cubecl_runtime")]
+pub(crate) fn regime_capture_append(prompt_len: usize, p: usize, features: &[f32]) {
+    let Some(path) = CAPTURE_PATH.get().and_then(|o| o.as_ref()) else {
+        return;
+    };
+    let tag = CAPTURE_TAG
+        .lock()
+        .expect("capture tag mutex poisoned")
+        .clone();
+    let row = serde_json::json!({
+        "tag": tag,
+        "prompt_len": prompt_len,
+        "p": p,
+        "features": features,
+    });
+    if let Ok(mut f) = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(path)
+    {
+        use std::io::Write;
+        let _ = writeln!(f, "{row}");
+        REGIME_CAPTURE_ROWS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    }
+}
+
+/// Capture rows written this process (the vacuous-guard read: a dump that
+/// wrote nothing must never freeze).
+pub fn regime_capture_row_count() -> usize {
+    REGIME_CAPTURE_ROWS.load(std::sync::atomic::Ordering::Relaxed)
+}
+
+// ---------------------------------------------------------------------------
 // Self-tests — pure CPU, ungated (the file-pair loader test rides
 // `cubecl_runtime` like the manifest pair's)
 // ---------------------------------------------------------------------------
@@ -861,5 +1083,87 @@ mod tests {
         // Margin outside the sane band.
         let bad = centroids_body(4).replace("\"margin\": 0.1", "\"margin\": 0.9");
         assert!(parse_centroids_body(bad.as_bytes()).is_err());
+    }
+
+    // -- the freeze machinery (T4.4) ------------------------------------------
+
+    fn freeze_row(tag: &str, feats: &[f32]) -> FreezeRow {
+        FreezeRow {
+            tag: tag.to_string(),
+            prompt_len: 16_384,
+            p: 4_096,
+            features: feats.to_vec(),
+        }
+    }
+
+    #[test]
+    fn freeze_row_parses_and_fails_closed() {
+        let line = r#"{"tag":"needle#1","prompt_len":16384,"p":4096,"features":[1.0,2.0,3.0,4.0]}"#;
+        let r = parse_freeze_row(line).expect("parse");
+        assert_eq!(r.tag, "needle#1");
+        assert_eq!(r.features, vec![1.0, 2.0, 3.0, 4.0]);
+        assert!(
+            parse_freeze_row("{\"tag\":\"\",\"p\":1,\"prompt_len\":1,\"features\":[]}").is_err()
+        );
+        assert!(parse_freeze_row("not json").is_err());
+        assert!(parse_freeze_row(r#"{"tag":"x","prompt_len":1,"p":1}"#).is_err());
+    }
+
+    #[test]
+    fn family_of_tag_splits_at_the_hash() {
+        assert_eq!(family_of_tag("needle#1"), "needle");
+        assert_eq!(family_of_tag("needle"), "needle");
+        assert_eq!(family_of_tag("a#b#c"), "a");
+    }
+
+    #[test]
+    fn class_of_family_covers_the_manifest_set_only() {
+        for f in RETRIEVAL_FAMILIES {
+            assert_eq!(class_of_family(f), Some(true));
+        }
+        for f in FLOW_FAMILIES {
+            assert_eq!(class_of_family(f), Some(false));
+        }
+        assert_eq!(class_of_family("poetry"), None);
+    }
+
+    #[test]
+    fn compute_centroids_means_and_refusals() {
+        // retrieval rows: needle#0 + qa#1; flow rows: code#0. Exact means.
+        let rows = vec![
+            freeze_row("needle#0", &[2.0, 4.0, 0.0, 0.0]),
+            freeze_row("qa#1", &[4.0, 6.0, 0.0, 0.0]),
+            freeze_row("code#0", &[0.0, 0.0, 10.0, 20.0]),
+        ];
+        let c = compute_centroids(&rows, REGIME_GAIN, REGIME_MARGIN).expect("centroids");
+        assert_eq!(c.retrieval, vec![3.0, 5.0, 0.0, 0.0]);
+        assert_eq!(c.flow, vec![0.0, 0.0, 10.0, 20.0]);
+        assert_eq!(c.dim, 4);
+        assert_eq!(c.pool_tokens, REGIME_POOL_TOKENS);
+        // The body round-trips through the reader.
+        let body = centroids_body_json(&c).to_string();
+        let back = parse_centroids_body(body.as_bytes()).expect("round-trip");
+        assert_eq!(back.retrieval, c.retrieval);
+        assert_eq!(back.flow, c.flow);
+        // Refusals: unknown family, dim drift, a missing class, empty input,
+        // an odd (non-2·d) dim.
+        let bad = vec![
+            freeze_row("poetry", &[1.0, 2.0, 3.0, 4.0]),
+            freeze_row("code", &[0.0; 4]),
+        ];
+        assert!(compute_centroids(&bad, 1.0, 0.1).is_err());
+        let bad = vec![
+            freeze_row("needle", &[1.0, 2.0, 3.0, 4.0]),
+            freeze_row("code", &[0.0, 0.0]),
+        ];
+        assert!(compute_centroids(&bad, 1.0, 0.1).is_err());
+        let only_flow = vec![freeze_row("code", &[0.0, 0.0, 1.0, 2.0])];
+        assert!(compute_centroids(&only_flow, 1.0, 0.1).is_err());
+        assert!(compute_centroids(&[], 1.0, 0.1).is_err());
+        let odd = vec![
+            freeze_row("needle", &[1.0, 2.0, 3.0]),
+            freeze_row("code", &[0.0, 0.0, 0.0]),
+        ];
+        assert!(compute_centroids(&odd, 1.0, 0.1).is_err());
     }
 }

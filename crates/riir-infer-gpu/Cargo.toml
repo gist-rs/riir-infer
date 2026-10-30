@@ -558,6 +558,12 @@ required-features = ["gemma2_d2f"]
 name = "dq_s3_matrix"
 required-features = ["dq_s3_bench"]
 
+# Issue 1156 T4.4 — the regime-centroid freeze CLI (the capture JSONL -> the
+# digest-pinned centroids sidecar pair; blake3 rides cubecl_runtime).
+[[bin]]
+name = "regime_centroid_freeze"
+required-features = ["cubecl_runtime"]
+
 # Issue 031 T-root-cause — the Windows CUDA teardown-hang repro harness
 # (the whole-file #![cfg] keeps non-CUDA hosts an empty target; this row is
 # the reader protection).
