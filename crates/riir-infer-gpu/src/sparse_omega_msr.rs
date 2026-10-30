@@ -60,9 +60,37 @@ pub const OMEGA_EPS: f32 = 0.05;
 /// bench-889 continuation axis; absolute-ppl units).
 pub const OMEGA_PPL_BAND: f32 = 0.25;
 
-/// Manifest protocol version (grid/ε/band/row-shape changes bump this and
-/// invalidate older manifests — the reader refuses other versions).
-pub const OMEGA_MANIFEST_VERSION: u32 = 1;
+/// Manifest protocol version (grid/ε/band/row-shape/SCORER changes bump
+/// this and invalidate older manifests — the reader refuses other versions).
+/// Version 2 (T3-v2): the scorer became part of the protocol — a v2 manifest
+/// REQUIRES the `scorer` field; the committed v1 manifests are the MEAN
+/// scorer's floors and stay verifiable (scorer implicit `mean`).
+pub const OMEGA_MANIFEST_VERSION: u32 = 2;
+
+/// The block scorer a manifest's floors were measured under (protocol v2).
+/// Version-1 manifests are implicitly [`OmegaScorer::Mean`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum OmegaScorer {
+    Mean,
+    Envelope,
+}
+
+impl OmegaScorer {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Mean => "mean",
+            Self::Envelope => "envelope",
+        }
+    }
+
+    pub fn parse(s: &str) -> Option<Self> {
+        match s {
+            "mean" => Some(Self::Mean),
+            "envelope" => Some(Self::Envelope),
+            _ => None,
+        }
+    }
+}
 
 /// Float compare slack for grid/ε/band equality (all values are
 /// shortest-roundtrip exact in JSON, but the slack keeps the read honest
@@ -84,10 +112,7 @@ pub struct KneeRow {
 }
 
 fn row_passes(row: &KneeRow) -> bool {
-    row.retention >= 1.0 - OMEGA_EPS
-        && row
-            .ppl_excess
-            .is_none_or(|excess| excess <= OMEGA_PPL_BAND)
+    row.retention >= 1.0 - OMEGA_EPS && row.ppl_excess.is_none_or(|excess| excess <= OMEGA_PPL_BAND)
 }
 
 /// The ΩMSR knee over an ascending grid (see the module doc for the rule).
@@ -130,13 +155,28 @@ pub fn omega_msr(grid: &[f32], rows: &[KneeRow]) -> Option<f32> {
     floor
 }
 
-/// The posture verdict one gate run needs: is `tau` safe for `family`?
+/// The posture verdict one gate run needs: is `tau` safe for `family` when
+/// the runtime runs `scorer`?
 ///
 /// τ ≥ 1.0 is the identity posture — always safe (the T2 G3 bit-identity
-/// contract). Below that, the family's binding ΩMSR (the min across
-/// measured lengths) must be ≤ τ; a family with no floor refuses every
-/// τ < 1.0 loud.
-pub fn verify_posture(manifest: &OmegaManifest, family: &str, tau: f32) -> Result<(), String> {
+/// contract; scores are never consulted). Below that, the manifest's scorer
+/// must MATCH the runtime's (a floor never blesses the other scorer), the
+/// family must be present, and its binding ΩMSR (the min across measured
+/// lengths) must be ≤ τ; a family with no floor refuses every τ < 1.0 loud.
+pub fn verify_posture(
+    manifest: &OmegaManifest,
+    family: &str,
+    tau: f32,
+    scorer: OmegaScorer,
+) -> Result<(), String> {
+    if manifest.scorer != scorer {
+        return Err(format!(
+            "OMSR posture check: manifest floors are for scorer `{}`, \
+             runtime runs `{}` — a floor never blesses the other scorer",
+            manifest.scorer.as_str(),
+            scorer.as_str()
+        ));
+    }
     if tau >= 1.0 {
         return Ok(());
     }
@@ -197,6 +237,8 @@ pub struct OmegaFamilyVerified {
 pub struct OmegaManifest {
     pub model_blake3: String,
     pub corpus_blake3: String,
+    /// The scorer these floors were measured under (v1 manifests: `Mean`).
+    pub scorer: OmegaScorer,
     pub families: Vec<OmegaFamilyVerified>,
 }
 
@@ -327,9 +369,10 @@ fn verify_length_rows(
     let recomputed = omega_msr(grid, &knee_rows(&records));
     let stored = rows_json.get("omega_msr").map_or(Ok(None), |v| match v {
         serde_json::Value::Null => Ok(None),
-        other => other.as_f64().map(|x| Some(x as f32)).ok_or_else(|| {
-            format!("family `{family}` length `{len}`: `omega_msr` not a number")
-        }),
+        other => other
+            .as_f64()
+            .map(|x| Some(x as f32))
+            .ok_or_else(|| format!("family `{family}` length `{len}`: `omega_msr` not a number")),
     })?;
     match (stored, recomputed) {
         (Some(a), Some(b)) => {
@@ -357,23 +400,52 @@ fn verify_length_rows(
 /// The body is re-derived, not trusted: retentions are recomputed from
 /// probes/agreements, per-length ΩMSRs from the knee calc, family floors as
 /// the min across lengths, and the protocol constants must match this
-/// build's ([`OMEGA_GRID`], [`OMEGA_EPS`], [`OMEGA_PPL_BAND`],
-/// [`OMEGA_MANIFEST_VERSION`]). The DIGEST check lives wholly in the gated
-/// file reader ([`load_and_verify_manifest`]) — this function is pure
-/// content verification and never sees a filesystem.
+/// build's ([`OMEGA_GRID`], [`OMEGA_EPS`], [`OMEGA_PPL_BAND`]). Versions ≤
+/// [`OMEGA_MANIFEST_VERSION`] parse (v1 = the MEAN scorer implicitly); a
+/// NEWER version refuses — floors this build cannot re-derive are never
+/// trusted. The DIGEST check lives wholly in the gated file reader
+/// ([`load_and_verify_manifest`]) — this function is pure content
+/// verification and never sees a filesystem.
 pub fn parse_and_verify_body(body: &[u8]) -> Result<OmegaManifest, String> {
     let body: serde_json::Value =
         serde_json::from_slice(body).map_err(|e| format!("manifest body not JSON: {e}"))?;
     let version = body_u32(&body, "manifest_version")?;
-    if version != OMEGA_MANIFEST_VERSION {
+    if version > OMEGA_MANIFEST_VERSION {
         return Err(format!(
-            "manifest version {version} != this build's protocol {OMEGA_MANIFEST_VERSION} — \
-             re-run the sweep, never reuse floors across protocols"
+            "manifest version {version} is NEWER than this build's protocol \
+             {OMEGA_MANIFEST_VERSION} — upgrade the reader, never trust \
+             floors this build cannot re-derive"
         ));
     }
+    // Protocol v2 made the scorer part of the manifest (T3-v2); v1 bodies
+    // are implicitly the MEAN scorer's floors. A v1 body that CARRIES a
+    // scorer field must agree (mean) — anything else is drift.
+    let scorer = if version == 1 {
+        match body.get("scorer") {
+            None | Some(serde_json::Value::Null) => OmegaScorer::Mean,
+            Some(serde_json::Value::String(s)) => {
+                let parsed = OmegaScorer::parse(s)
+                    .ok_or_else(|| format!("manifest scorer `{s}` is not mean|envelope"))?;
+                if parsed != OmegaScorer::Mean {
+                    return Err(format!(
+                        "version-1 manifest carries scorer `{s}` — v1 floors are \
+                         implicitly mean; a newer scorer needs manifest_version 2"
+                    ));
+                }
+                parsed
+            }
+            Some(_) => return Err("manifest field `scorer` not a string".to_string()),
+        }
+    } else {
+        let s = body_string(&body, "scorer")?;
+        OmegaScorer::parse(&s)
+            .ok_or_else(|| format!("manifest scorer `{s}` is not mean|envelope"))?
+    };
     let kind = body_string(&body, "kind")?;
     if kind != "sparse_prefill_omega_msr" {
-        return Err(format!("manifest kind `{kind}` is not `sparse_prefill_omega_msr`"));
+        return Err(format!(
+            "manifest kind `{kind}` is not `sparse_prefill_omega_msr`"
+        ));
     }
     let grid_json = body
         .get("grid")
@@ -383,8 +455,7 @@ pub fn parse_and_verify_body(body: &[u8]) -> Result<OmegaManifest, String> {
     for v in grid_json {
         grid.push(
             v.as_f64()
-                .ok_or_else(|| "manifest grid entry not a number".to_string())?
-                as f32,
+                .ok_or_else(|| "manifest grid entry not a number".to_string())? as f32,
         );
     }
     if grid.len() != OMEGA_GRID.len() {
@@ -466,6 +537,7 @@ pub fn parse_and_verify_body(body: &[u8]) -> Result<OmegaManifest, String> {
     Ok(OmegaManifest {
         model_blake3: body_string(&body, "model_blake3")?,
         corpus_blake3: body_string(&body, "corpus_blake3")?,
+        scorer,
         families,
     })
 }
@@ -493,7 +565,8 @@ pub fn blake3_hex(data: &[u8]) -> String {
 #[cfg(feature = "cubecl_runtime")]
 pub fn blake3_file_hex(path: &std::path::Path) -> Result<String, String> {
     use std::io::Read;
-    let mut file = std::fs::File::open(path).map_err(|e| format!("open {}: {e}", path.display()))?;
+    let mut file =
+        std::fs::File::open(path).map_err(|e| format!("open {}: {e}", path.display()))?;
     let mut hasher = blake3::Hasher::new();
     let mut buf = vec![0u8; 1 << 20];
     loop {
@@ -510,9 +583,7 @@ pub fn blake3_file_hex(path: &std::path::Path) -> Result<String, String> {
 
 /// Pretty body + its BLAKE3 hex — the writer half of the pair.
 #[cfg(feature = "cubecl_runtime")]
-pub fn manifest_body_and_digest(
-    manifest: &serde_json::Value,
-) -> Result<(String, String), String> {
+pub fn manifest_body_and_digest(manifest: &serde_json::Value) -> Result<(String, String), String> {
     let body = serde_json::to_string_pretty(manifest).map_err(|e| format!("serialize: {e}"))?;
     let digest = blake3_hex(body.as_bytes());
     Ok((body, digest))
@@ -522,7 +593,8 @@ pub fn manifest_body_and_digest(
 /// re-derive every floor ([`parse_and_verify_body`]).
 #[cfg(feature = "cubecl_runtime")]
 pub fn load_and_verify_manifest(json_path: &std::path::Path) -> Result<OmegaManifest, String> {
-    let body = std::fs::read(json_path).map_err(|e| format!("read {}: {e}", json_path.display()))?;
+    let body =
+        std::fs::read(json_path).map_err(|e| format!("read {}: {e}", json_path.display()))?;
     let sidecar_path = digest_sidecar_path(json_path);
     let sidecar = std::fs::read_to_string(&sidecar_path)
         .map_err(|e| format!("read {}: {e}", sidecar_path.display()))?;
@@ -644,6 +716,15 @@ mod tests {
     }
 
     fn manifest_fixture_value() -> serde_json::Value {
+        fixture_body(OMEGA_MANIFEST_VERSION, Some(OmegaScorer::Envelope))
+    }
+
+    /// A v1 body (implicitly the MEAN scorer's floors — no scorer field).
+    fn manifest_v1_fixture_value() -> serde_json::Value {
+        fixture_body(1, None)
+    }
+
+    fn fixture_body(version: u32, scorer: Option<OmegaScorer>) -> serde_json::Value {
         let grid = OMEGA_GRID.iter().map(|t| serde_json::json!(t));
         let row = |tau: f32, agreements: u64, ppl_excess: Option<f64>| {
             serde_json::json!({
@@ -680,8 +761,8 @@ mod tests {
                 })
                 .collect::<Vec<_>>(),
         );
-        serde_json::json!({
-            "manifest_version": OMEGA_MANIFEST_VERSION,
+        let mut body = serde_json::json!({
+            "manifest_version": version,
             "kind": "sparse_prefill_omega_msr",
             "issue": "riir-infer 1156 T3",
             "plan": "riir-infer 625",
@@ -700,7 +781,11 @@ mod tests {
             }],
             "box_state": "fixture",
             "notes": [],
-        })
+        });
+        if let Some(s) = scorer {
+            body["scorer"] = serde_json::json!(s.as_str());
+        }
+        body
     }
 
     fn temp_manifest_paths(tag: &str) -> (std::path::PathBuf, std::path::PathBuf) {
@@ -719,8 +804,7 @@ mod tests {
     fn parse_and_verify_roundtrips_a_honest_body() {
         let value = manifest_fixture_value();
         let body = serde_json::to_string_pretty(&value).expect("serialize");
-        let manifest =
-            parse_and_verify_body(body.as_bytes()).expect("honest fixture verifies");
+        let manifest = parse_and_verify_body(body.as_bytes()).expect("honest fixture verifies");
         let needle = manifest
             .families
             .iter()
@@ -739,7 +823,8 @@ mod tests {
         let (body, digest) = manifest_body_and_digest(&value).expect("body+digest");
         let (json_path, dir) = temp_manifest_paths("roundtrip");
         std::fs::write(&json_path, &body).expect("write body");
-        std::fs::write(digest_sidecar_path(&json_path), format!("{digest}\n")).expect("write sidecar");
+        std::fs::write(digest_sidecar_path(&json_path), format!("{digest}\n"))
+            .expect("write sidecar");
         let manifest = load_and_verify_manifest(&json_path).expect("round-trip verifies");
         assert_eq!(manifest.model_blake3, "deadbeef");
         assert_eq!(manifest.families.len(), 1);
@@ -753,8 +838,11 @@ mod tests {
 
         // Tamper the SIDECAR — same refusal, named direction.
         std::fs::write(&json_path, &body).expect("restore body");
-        std::fs::write(digest_sidecar_path(&json_path), format!("{}\n", "f".repeat(64)))
-            .expect("write tampered sidecar");
+        std::fs::write(
+            digest_sidecar_path(&json_path),
+            format!("{}\n", "f".repeat(64)),
+        )
+        .expect("write tampered sidecar");
         let err = load_and_verify_manifest(&json_path).expect_err("tampered sidecar refuses");
         assert!(err.contains("digest mismatch"), "got: {err}");
 
@@ -796,17 +884,67 @@ mod tests {
         let value = manifest_fixture_value();
         let (body, _digest) = manifest_body_and_digest(&value).expect("body+digest");
         let manifest = parse_and_verify_body(body.as_bytes()).expect("verify");
+        assert_eq!(manifest.scorer, OmegaScorer::Envelope);
         // Identity always safe — even on a family the manifest omits.
-        verify_posture(&manifest, "unheard_of_family", 1.0).expect("identity is unconditionally safe");
+        verify_posture(&manifest, "unheard_of_family", 1.0, OmegaScorer::Envelope)
+            .expect("identity is unconditionally safe");
         // At the floor: 0.85 passes.
-        verify_posture(&manifest, "needle", 0.85).expect("floor passes");
-        verify_posture(&manifest, "needle", 0.95).expect("above floor passes");
+        verify_posture(&manifest, "needle", 0.85, OmegaScorer::Envelope).expect("floor passes");
+        verify_posture(&manifest, "needle", 0.95, OmegaScorer::Envelope)
+            .expect("above floor passes");
         // Below the floor refuses, naming both numbers.
-        let err = verify_posture(&manifest, "needle", 0.8).expect_err("below floor refuses");
+        let err = verify_posture(&manifest, "needle", 0.8, OmegaScorer::Envelope)
+            .expect_err("below floor refuses");
         assert!(err.contains("0.8") && err.contains("0.85"), "got: {err}");
         // Unknown family refuses below identity.
-        let err =
-            verify_posture(&manifest, "unheard_of_family", 0.9).expect_err("unknown family refuses");
+        let err = verify_posture(&manifest, "unheard_of_family", 0.9, OmegaScorer::Envelope)
+            .expect_err("unknown family refuses");
         assert!(err.contains("not in the manifest"), "got: {err}");
+        // A floor never blesses the other scorer.
+        let err = verify_posture(&manifest, "needle", 0.85, OmegaScorer::Mean)
+            .expect_err("scorer mismatch refuses");
+        assert!(err.contains("never blesses"), "got: {err}");
+    }
+
+    #[test]
+    fn v1_manifest_is_implicitly_the_mean_scorer() {
+        let value = manifest_v1_fixture_value();
+        let body = serde_json::to_string_pretty(&value).expect("serialize");
+        let manifest = parse_and_verify_body(body.as_bytes()).expect("v1 body verifies");
+        assert_eq!(manifest.scorer, OmegaScorer::Mean);
+        verify_posture(&manifest, "needle", 0.85, OmegaScorer::Mean).expect("mean floor passes");
+        let err = verify_posture(&manifest, "needle", 0.85, OmegaScorer::Envelope)
+            .expect_err("envelope cannot use mean floors");
+        assert!(err.contains("never blesses"), "got: {err}");
+    }
+
+    #[test]
+    fn v1_body_carrying_envelope_scorer_refuses() {
+        let mut value = manifest_v1_fixture_value();
+        value["scorer"] = serde_json::json!("envelope");
+        let body = serde_json::to_string_pretty(&value).expect("serialize");
+        let err = parse_and_verify_body(body.as_bytes()).expect_err("v1+envelope drift refuses");
+        assert!(err.contains("implicitly mean"), "got: {err}");
+    }
+
+    #[test]
+    fn v2_body_without_scorer_refuses() {
+        let mut value = manifest_fixture_value();
+        value["scorer"] = serde_json::Value::Null;
+        let body = serde_json::to_string_pretty(&value).expect("serialize");
+        let err = parse_and_verify_body(body.as_bytes()).expect_err("v2 needs a scorer");
+        assert!(
+            err.contains("scorer") && err.contains("missing"),
+            "got: {err}"
+        );
+    }
+
+    #[test]
+    fn future_manifest_version_refuses() {
+        let mut value = manifest_fixture_value();
+        value["manifest_version"] = serde_json::json!(OMEGA_MANIFEST_VERSION + 1);
+        let body = serde_json::to_string_pretty(&value).expect("serialize");
+        let err = parse_and_verify_body(body.as_bytes()).expect_err("newer protocol refuses");
+        assert!(err.contains("NEWER"), "got: {err}");
     }
 }
