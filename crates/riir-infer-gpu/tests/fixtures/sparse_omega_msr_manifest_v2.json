@@ -1,0 +1,842 @@
+{
+  "box_state": "10:23  up 2 days, 16:52, 3 users, load averages: 3.72 2.58 2.08 | Now drawing from 'AC Power'",
+  "cont_tokens": 64,
+  "corpus_blake3": "1c0b9382cc34d3d0f89d0601b5eb5812725ca684c06d2054f5f958a68ab02031",
+  "epsilon": 0.05000000074505806,
+  "families": [
+    {
+      "family": "needle",
+      "lengths": {
+        "16k": {
+          "omega_msr": 0.8500000238418579,
+          "rows": [
+            {
+              "agreements": 116,
+              "final_flips": 1,
+              "len": "16k",
+              "mean_abs_dnll": 0.24908928871154784,
+              "ppl_dense": 8.641495172133542,
+              "ppl_excess": 0.6284015420214928,
+              "ppl_sparse": 9.269896714155035,
+              "probes": 130,
+              "retention": 0.8923076923076924,
+              "sparse_routed": true,
+              "tau": 0.5
+            },
+            {
+              "agreements": 117,
+              "final_flips": 1,
+              "len": "16k",
+              "mean_abs_dnll": 0.15611707614018366,
+              "ppl_dense": 8.641495172133542,
+              "ppl_excess": 0.3188771143334801,
+              "ppl_sparse": 8.960372286467022,
+              "probes": 130,
+              "retention": 0.9,
+              "sparse_routed": true,
+              "tau": 0.6000000238418579
+            },
+            {
+              "agreements": 118,
+              "final_flips": 0,
+              "len": "16k",
+              "mean_abs_dnll": 0.12970526401813215,
+              "ppl_dense": 8.641495172133542,
+              "ppl_excess": 0.1793839491706546,
+              "ppl_sparse": 8.820879121304197,
+              "probes": 130,
+              "retention": 0.9076923076923077,
+              "sparse_routed": true,
+              "tau": 0.699999988079071
+            },
+            {
+              "agreements": 122,
+              "final_flips": 0,
+              "len": "16k",
+              "mean_abs_dnll": 0.07852149743300219,
+              "ppl_dense": 8.641495172133542,
+              "ppl_excess": 0.15894618904489377,
+              "ppl_sparse": 8.800441361178436,
+              "probes": 130,
+              "retention": 0.9384615384615385,
+              "sparse_routed": true,
+              "tau": 0.800000011920929
+            },
+            {
+              "agreements": 126,
+              "final_flips": 0,
+              "len": "16k",
+              "mean_abs_dnll": 0.05761000193082369,
+              "ppl_dense": 8.641495172133542,
+              "ppl_excess": 0.1260878895777715,
+              "ppl_sparse": 8.767583061711314,
+              "probes": 130,
+              "retention": 0.9692307692307692,
+              "sparse_routed": true,
+              "tau": 0.8500000238418579
+            },
+            {
+              "agreements": 128,
+              "final_flips": 0,
+              "len": "16k",
+              "mean_abs_dnll": 0.043811790759746845,
+              "ppl_dense": 8.641495172133542,
+              "ppl_excess": 0.08649254347579749,
+              "ppl_sparse": 8.72798771560934,
+              "probes": 130,
+              "retention": 0.9846153846153847,
+              "sparse_routed": true,
+              "tau": 0.8999999761581421
+            },
+            {
+              "agreements": 126,
+              "final_flips": 0,
+              "len": "16k",
+              "mean_abs_dnll": 0.021510887145996093,
+              "ppl_dense": 8.641495172133542,
+              "ppl_excess": 0.024986266138530056,
+              "ppl_sparse": 8.666481438272072,
+              "probes": 130,
+              "retention": 0.9692307692307692,
+              "sparse_routed": true,
+              "tau": 0.949999988079071
+            }
+          ]
+        }
+      },
+      "omega_msr": 0.8500000238418579
+    },
+    {
+      "family": "qa",
+      "lengths": {
+        "16k": {
+          "omega_msr": 0.8500000238418579,
+          "rows": [
+            {
+              "agreements": 115,
+              "final_flips": 0,
+              "len": "16k",
+              "mean_abs_dnll": 0.226524961911715,
+              "ppl_dense": 11.227782837192136,
+              "ppl_excess": 0.9579852442809376,
+              "ppl_sparse": 12.185768081473073,
+              "probes": 130,
+              "retention": 0.8846153846153846,
+              "sparse_routed": true,
+              "tau": 0.5
+            },
+            {
+              "agreements": 120,
+              "final_flips": 1,
+              "len": "16k",
+              "mean_abs_dnll": 0.19959866817180927,
+              "ppl_dense": 11.227782837192136,
+              "ppl_excess": 0.8887278798757894,
+              "ppl_sparse": 12.116510717067925,
+              "probes": 130,
+              "retention": 0.9230769230769231,
+              "sparse_routed": true,
+              "tau": 0.6000000238418579
+            },
+            {
+              "agreements": 124,
+              "final_flips": 0,
+              "len": "16k",
+              "mean_abs_dnll": 0.13156202389643742,
+              "ppl_dense": 11.227782837192136,
+              "ppl_excess": 0.4223655448784882,
+              "ppl_sparse": 11.650148382070624,
+              "probes": 130,
+              "retention": 0.9538461538461539,
+              "sparse_routed": true,
+              "tau": 0.699999988079071
+            },
+            {
+              "agreements": 125,
+              "final_flips": 0,
+              "len": "16k",
+              "mean_abs_dnll": 0.09667521990262545,
+              "ppl_dense": 11.227782837192136,
+              "ppl_excess": 0.42245646862033226,
+              "ppl_sparse": 11.650239305812468,
+              "probes": 130,
+              "retention": 0.9615384615384616,
+              "sparse_routed": true,
+              "tau": 0.800000011920929
+            },
+            {
+              "agreements": 127,
+              "final_flips": 0,
+              "len": "16k",
+              "mean_abs_dnll": 0.07720468594477727,
+              "ppl_dense": 11.227782837192136,
+              "ppl_excess": 0.16208780186976668,
+              "ppl_sparse": 11.389870639061902,
+              "probes": 130,
+              "retention": 0.9769230769230769,
+              "sparse_routed": true,
+              "tau": 0.8500000238418579
+            },
+            {
+              "agreements": 127,
+              "final_flips": 0,
+              "len": "16k",
+              "mean_abs_dnll": 0.07515358924865723,
+              "ppl_dense": 11.227782837192136,
+              "ppl_excess": -0.06480703994182946,
+              "ppl_sparse": 11.162975797250306,
+              "probes": 130,
+              "retention": 0.9769230769230769,
+              "sparse_routed": true,
+              "tau": 0.8999999761581421
+            },
+            {
+              "agreements": 125,
+              "final_flips": 0,
+              "len": "16k",
+              "mean_abs_dnll": 0.04131407737731933,
+              "ppl_dense": 11.227782837192136,
+              "ppl_excess": -0.016008264328585042,
+              "ppl_sparse": 11.21177457286355,
+              "probes": 130,
+              "retention": 0.9615384615384616,
+              "sparse_routed": true,
+              "tau": 0.949999988079071
+            }
+          ]
+        }
+      },
+      "omega_msr": 0.8500000238418579
+    },
+    {
+      "family": "summarization",
+      "lengths": {
+        "16k": {
+          "omega_msr": 0.8500000238418579,
+          "rows": [
+            {
+              "agreements": 111,
+              "final_flips": 2,
+              "len": "16k",
+              "mean_abs_dnll": 0.2933559637803298,
+              "ppl_dense": 6.363445704996064,
+              "ppl_excess": -0.1544635854142431,
+              "ppl_sparse": 6.208982119581821,
+              "probes": 130,
+              "retention": 0.8538461538461538,
+              "sparse_routed": true,
+              "tau": 0.5
+            },
+            {
+              "agreements": 115,
+              "final_flips": 1,
+              "len": "16k",
+              "mean_abs_dnll": 0.2416097200833834,
+              "ppl_dense": 6.363445704996064,
+              "ppl_excess": -0.06376891939265583,
+              "ppl_sparse": 6.299676785603408,
+              "probes": 130,
+              "retention": 0.8846153846153846,
+              "sparse_routed": true,
+              "tau": 0.6000000238418579
+            },
+            {
+              "agreements": 119,
+              "final_flips": 0,
+              "len": "16k",
+              "mean_abs_dnll": 0.18748965630164513,
+              "ppl_dense": 6.363445704996064,
+              "ppl_excess": 0.10157275141789679,
+              "ppl_sparse": 6.465018456413961,
+              "probes": 130,
+              "retention": 0.9153846153846154,
+              "sparse_routed": true,
+              "tau": 0.699999988079071
+            },
+            {
+              "agreements": 121,
+              "final_flips": 0,
+              "len": "16k",
+              "mean_abs_dnll": 0.15748525032630334,
+              "ppl_dense": 6.363445704996064,
+              "ppl_excess": 0.14782789322540246,
+              "ppl_sparse": 6.511273598221466,
+              "probes": 130,
+              "retention": 0.9307692307692308,
+              "sparse_routed": true,
+              "tau": 0.800000011920929
+            },
+            {
+              "agreements": 124,
+              "final_flips": 0,
+              "len": "16k",
+              "mean_abs_dnll": 0.1059690915621244,
+              "ppl_dense": 6.363445704996064,
+              "ppl_excess": 0.10663286713405196,
+              "ppl_sparse": 6.470078572130116,
+              "probes": 130,
+              "retention": 0.9538461538461539,
+              "sparse_routed": true,
+              "tau": 0.8500000238418579
+            },
+            {
+              "agreements": 124,
+              "final_flips": 0,
+              "len": "16k",
+              "mean_abs_dnll": 0.07937503961416391,
+              "ppl_dense": 6.363445704996064,
+              "ppl_excess": -0.1389712090414239,
+              "ppl_sparse": 6.22447449595464,
+              "probes": 130,
+              "retention": 0.9538461538461539,
+              "sparse_routed": true,
+              "tau": 0.8999999761581421
+            },
+            {
+              "agreements": 129,
+              "final_flips": 0,
+              "len": "16k",
+              "mean_abs_dnll": 0.0367464358990009,
+              "ppl_dense": 6.363445704996064,
+              "ppl_excess": -0.028998314856393925,
+              "ppl_sparse": 6.33444739013967,
+              "probes": 130,
+              "retention": 0.9923076923076923,
+              "sparse_routed": true,
+              "tau": 0.949999988079071
+            }
+          ]
+        }
+      },
+      "omega_msr": 0.8500000238418579
+    },
+    {
+      "family": "code",
+      "lengths": {
+        "16k": {
+          "omega_msr": 0.800000011920929,
+          "rows": [
+            {
+              "agreements": 123,
+              "final_flips": 0,
+              "len": "16k",
+              "mean_abs_dnll": 0.1382789391737718,
+              "ppl_dense": 12.761027420934248,
+              "ppl_excess": -0.408202501407537,
+              "ppl_sparse": 12.35282491952671,
+              "probes": 130,
+              "retention": 0.9461538461538461,
+              "sparse_routed": true,
+              "tau": 0.5
+            },
+            {
+              "agreements": 122,
+              "final_flips": 0,
+              "len": "16k",
+              "mean_abs_dnll": 0.11615032049325796,
+              "ppl_dense": 12.761027420934248,
+              "ppl_excess": -0.3472831584017726,
+              "ppl_sparse": 12.413744262532475,
+              "probes": 130,
+              "retention": 0.9384615384615385,
+              "sparse_routed": true,
+              "tau": 0.6000000238418579
+            },
+            {
+              "agreements": 123,
+              "final_flips": 0,
+              "len": "16k",
+              "mean_abs_dnll": 0.08392873910757212,
+              "ppl_dense": 12.761027420934248,
+              "ppl_excess": -0.20046490506555337,
+              "ppl_sparse": 12.560562515868694,
+              "probes": 130,
+              "retention": 0.9461538461538461,
+              "sparse_routed": true,
+              "tau": 0.699999988079071
+            },
+            {
+              "agreements": 129,
+              "final_flips": 0,
+              "len": "16k",
+              "mean_abs_dnll": 0.057890077737661506,
+              "ppl_dense": 12.761027420934248,
+              "ppl_excess": -0.2540671243045711,
+              "ppl_sparse": 12.506960296629677,
+              "probes": 130,
+              "retention": 0.9923076923076923,
+              "sparse_routed": true,
+              "tau": 0.800000011920929
+            },
+            {
+              "agreements": 128,
+              "final_flips": 0,
+              "len": "16k",
+              "mean_abs_dnll": 0.05478036587054913,
+              "ppl_dense": 12.761027420934248,
+              "ppl_excess": -0.21929997983723126,
+              "ppl_sparse": 12.541727441097017,
+              "probes": 130,
+              "retention": 0.9846153846153847,
+              "sparse_routed": true,
+              "tau": 0.8500000238418579
+            },
+            {
+              "agreements": 129,
+              "final_flips": 0,
+              "len": "16k",
+              "mean_abs_dnll": 0.0371607046860915,
+              "ppl_dense": 12.761027420934248,
+              "ppl_excess": -0.10042183649017922,
+              "ppl_sparse": 12.660605584444069,
+              "probes": 130,
+              "retention": 0.9923076923076923,
+              "sparse_routed": true,
+              "tau": 0.8999999761581421
+            },
+            {
+              "agreements": 129,
+              "final_flips": 0,
+              "len": "16k",
+              "mean_abs_dnll": 0.025170538975642278,
+              "ppl_dense": 12.761027420934248,
+              "ppl_excess": -0.04107710834458089,
+              "ppl_sparse": 12.719950312589667,
+              "probes": 130,
+              "retention": 0.9923076923076923,
+              "sparse_routed": true,
+              "tau": 0.949999988079071
+            }
+          ]
+        }
+      },
+      "omega_msr": 0.800000011920929
+    },
+    {
+      "family": "math",
+      "lengths": {
+        "16k": {
+          "omega_msr": 0.5,
+          "rows": [
+            {
+              "agreements": 126,
+              "final_flips": 0,
+              "len": "16k",
+              "mean_abs_dnll": 0.10121901218707745,
+              "ppl_dense": 5.844446267864628,
+              "ppl_excess": 0.03302311757447107,
+              "ppl_sparse": 5.877469385439099,
+              "probes": 130,
+              "retention": 0.9692307692307692,
+              "sparse_routed": true,
+              "tau": 0.5
+            },
+            {
+              "agreements": 127,
+              "final_flips": 0,
+              "len": "16k",
+              "mean_abs_dnll": 0.07487763258127066,
+              "ppl_dense": 5.844446267864628,
+              "ppl_excess": 0.028367573645534883,
+              "ppl_sparse": 5.872813841510163,
+              "probes": 130,
+              "retention": 0.9769230769230769,
+              "sparse_routed": true,
+              "tau": 0.6000000238418579
+            },
+            {
+              "agreements": 128,
+              "final_flips": 0,
+              "len": "16k",
+              "mean_abs_dnll": 0.06034706189082219,
+              "ppl_dense": 5.844446267864628,
+              "ppl_excess": 0.0023513760917728277,
+              "ppl_sparse": 5.846797643956401,
+              "probes": 130,
+              "retention": 0.9846153846153847,
+              "sparse_routed": true,
+              "tau": 0.699999988079071
+            },
+            {
+              "agreements": 130,
+              "final_flips": 0,
+              "len": "16k",
+              "mean_abs_dnll": 0.028400593537550707,
+              "ppl_dense": 5.844446267864628,
+              "ppl_excess": 0.011849726174126829,
+              "ppl_sparse": 5.856295994038755,
+              "probes": 130,
+              "retention": 1.0,
+              "sparse_routed": true,
+              "tau": 0.800000011920929
+            },
+            {
+              "agreements": 130,
+              "final_flips": 0,
+              "len": "16k",
+              "mean_abs_dnll": 0.027730960112351637,
+              "ppl_dense": 5.844446267864628,
+              "ppl_excess": 0.0005865958650037584,
+              "ppl_sparse": 5.845032863729632,
+              "probes": 130,
+              "retention": 1.0,
+              "sparse_routed": true,
+              "tau": 0.8500000238418579
+            },
+            {
+              "agreements": 130,
+              "final_flips": 0,
+              "len": "16k",
+              "mean_abs_dnll": 0.024013618322519154,
+              "ppl_dense": 5.844446267864628,
+              "ppl_excess": 0.024868759048280786,
+              "ppl_sparse": 5.869315026912909,
+              "probes": 130,
+              "retention": 1.0,
+              "sparse_routed": true,
+              "tau": 0.8999999761581421
+            },
+            {
+              "agreements": 130,
+              "final_flips": 0,
+              "len": "16k",
+              "mean_abs_dnll": 0.011908270762516902,
+              "ppl_dense": 5.844446267864628,
+              "ppl_excess": -0.005759210637156897,
+              "ppl_sparse": 5.838687057227471,
+              "probes": 130,
+              "retention": 1.0,
+              "sparse_routed": true,
+              "tau": 0.949999988079071
+            }
+          ]
+        }
+      },
+      "omega_msr": 0.5
+    },
+    {
+      "family": "induction",
+      "lengths": {
+        "16k": {
+          "omega_msr": 0.8500000238418579,
+          "rows": [
+            {
+              "agreements": 119,
+              "final_flips": 0,
+              "len": "16k",
+              "mean_abs_dnll": 0.15518453671382024,
+              "ppl_dense": 50.783693871727,
+              "ppl_excess": 3.5817768466190145,
+              "ppl_sparse": 54.36547071834602,
+              "probes": 130,
+              "retention": 0.9153846153846154,
+              "sparse_routed": true,
+              "tau": 0.5
+            },
+            {
+              "agreements": 121,
+              "final_flips": 1,
+              "len": "16k",
+              "mean_abs_dnll": 0.1301701839153583,
+              "ppl_dense": 50.783693871727,
+              "ppl_excess": 2.9556346739022885,
+              "ppl_sparse": 53.73932854562929,
+              "probes": 130,
+              "retention": 0.9307692307692308,
+              "sparse_routed": true,
+              "tau": 0.6000000238418579
+            },
+            {
+              "agreements": 122,
+              "final_flips": 2,
+              "len": "16k",
+              "mean_abs_dnll": 0.0873848584982065,
+              "ppl_dense": 50.783693871727,
+              "ppl_excess": 1.2198517459225755,
+              "ppl_sparse": 52.00354561764958,
+              "probes": 130,
+              "retention": 0.9384615384615385,
+              "sparse_routed": true,
+              "tau": 0.699999988079071
+            },
+            {
+              "agreements": 123,
+              "final_flips": 1,
+              "len": "16k",
+              "mean_abs_dnll": 0.07981059001042293,
+              "ppl_dense": 50.783693871727,
+              "ppl_excess": 0.08190129593888429,
+              "ppl_sparse": 50.86559516766589,
+              "probes": 130,
+              "retention": 0.9461538461538461,
+              "sparse_routed": true,
+              "tau": 0.800000011920929
+            },
+            {
+              "agreements": 128,
+              "final_flips": 0,
+              "len": "16k",
+              "mean_abs_dnll": 0.05458246011000413,
+              "ppl_dense": 50.783693871727,
+              "ppl_excess": -0.03014262959199243,
+              "ppl_sparse": 50.75355124213501,
+              "probes": 130,
+              "retention": 0.9846153846153847,
+              "sparse_routed": true,
+              "tau": 0.8500000238418579
+            },
+            {
+              "agreements": 129,
+              "final_flips": 0,
+              "len": "16k",
+              "mean_abs_dnll": 0.04763049712547889,
+              "ppl_dense": 50.783693871727,
+              "ppl_excess": -0.23485784947698818,
+              "ppl_sparse": 50.548836022250015,
+              "probes": 130,
+              "retention": 0.9923076923076923,
+              "sparse_routed": true,
+              "tau": 0.8999999761581421
+            },
+            {
+              "agreements": 129,
+              "final_flips": 0,
+              "len": "16k",
+              "mean_abs_dnll": 0.022539677986731895,
+              "ppl_dense": 50.783693871727,
+              "ppl_excess": -0.3516160401361361,
+              "ppl_sparse": 50.43207783159087,
+              "probes": 130,
+              "retention": 0.9923076923076923,
+              "sparse_routed": true,
+              "tau": 0.949999988079071
+            }
+          ]
+        }
+      },
+      "omega_msr": 0.8500000238418579
+    },
+    {
+      "family": "continuation",
+      "lengths": {
+        "16k": {
+          "omega_msr": 0.6000000238418579,
+          "rows": [
+            {
+              "agreements": 121,
+              "final_flips": 0,
+              "len": "16k",
+              "mean_abs_dnll": 0.20529569479135368,
+              "ppl_dense": 14.855359088598886,
+              "ppl_excess": -0.14828422821362963,
+              "ppl_sparse": 14.707074860385257,
+              "probes": 130,
+              "retention": 0.9307692307692308,
+              "sparse_routed": true,
+              "tau": 0.5
+            },
+            {
+              "agreements": 124,
+              "final_flips": 0,
+              "len": "16k",
+              "mean_abs_dnll": 0.16856651306152343,
+              "ppl_dense": 14.855359088598886,
+              "ppl_excess": -0.27359922364496825,
+              "ppl_sparse": 14.581759864953918,
+              "probes": 130,
+              "retention": 0.9538461538461539,
+              "sparse_routed": true,
+              "tau": 0.6000000238418579
+            },
+            {
+              "agreements": 124,
+              "final_flips": 0,
+              "len": "16k",
+              "mean_abs_dnll": 0.13894842587984524,
+              "ppl_dense": 14.855359088598886,
+              "ppl_excess": -0.4152147186535835,
+              "ppl_sparse": 14.440144369945303,
+              "probes": 130,
+              "retention": 0.9538461538461539,
+              "sparse_routed": true,
+              "tau": 0.699999988079071
+            },
+            {
+              "agreements": 126,
+              "final_flips": 0,
+              "len": "16k",
+              "mean_abs_dnll": 0.09290585884681114,
+              "ppl_dense": 14.855359088598886,
+              "ppl_excess": -0.3322464983836788,
+              "ppl_sparse": 14.523112590215208,
+              "probes": 130,
+              "retention": 0.9692307692307692,
+              "sparse_routed": true,
+              "tau": 0.800000011920929
+            },
+            {
+              "agreements": 129,
+              "final_flips": 0,
+              "len": "16k",
+              "mean_abs_dnll": 0.044086647033691403,
+              "ppl_dense": 14.855359088598886,
+              "ppl_excess": -0.12302210674572223,
+              "ppl_sparse": 14.732336981853164,
+              "probes": 130,
+              "retention": 0.9923076923076923,
+              "sparse_routed": true,
+              "tau": 0.8500000238418579
+            },
+            {
+              "agreements": 129,
+              "final_flips": 0,
+              "len": "16k",
+              "mean_abs_dnll": 0.040259383274958684,
+              "ppl_dense": 14.855359088598886,
+              "ppl_excess": -0.20746661861629967,
+              "ppl_sparse": 14.647892469982587,
+              "probes": 130,
+              "retention": 0.9923076923076923,
+              "sparse_routed": true,
+              "tau": 0.8999999761581421
+            },
+            {
+              "agreements": 129,
+              "final_flips": 0,
+              "len": "16k",
+              "mean_abs_dnll": 0.01665631807767428,
+              "ppl_dense": 14.855359088598886,
+              "ppl_excess": 0.050296519224332314,
+              "ppl_sparse": 14.905655607823219,
+              "probes": 130,
+              "retention": 0.9923076923076923,
+              "sparse_routed": true,
+              "tau": 0.949999988079071
+            }
+          ]
+        },
+        "32k": {
+          "omega_msr": 0.8500000238418579,
+          "rows": [
+            {
+              "agreements": 119,
+              "final_flips": 0,
+              "len": "32k",
+              "mean_abs_dnll": 0.19194229566133938,
+              "ppl_dense": 14.992155662660176,
+              "ppl_excess": 0.04343007649060304,
+              "ppl_sparse": 15.035585739150779,
+              "probes": 130,
+              "retention": 0.9153846153846154,
+              "sparse_routed": true,
+              "tau": 0.5
+            },
+            {
+              "agreements": 119,
+              "final_flips": 0,
+              "len": "32k",
+              "mean_abs_dnll": 0.1702771333547739,
+              "ppl_dense": 14.992155662660176,
+              "ppl_excess": -0.09003487455005654,
+              "ppl_sparse": 14.90212078811012,
+              "probes": 130,
+              "retention": 0.9153846153846154,
+              "sparse_routed": true,
+              "tau": 0.6000000238418579
+            },
+            {
+              "agreements": 121,
+              "final_flips": 0,
+              "len": "32k",
+              "mean_abs_dnll": 0.14161324134239783,
+              "ppl_dense": 14.992155662660176,
+              "ppl_excess": -0.24824023893923375,
+              "ppl_sparse": 14.743915423720942,
+              "probes": 130,
+              "retention": 0.9307692307692308,
+              "sparse_routed": true,
+              "tau": 0.699999988079071
+            },
+            {
+              "agreements": 123,
+              "final_flips": 0,
+              "len": "32k",
+              "mean_abs_dnll": 0.10854299251849835,
+              "ppl_dense": 14.992155662660176,
+              "ppl_excess": -0.29563786048802143,
+              "ppl_sparse": 14.696517802172155,
+              "probes": 130,
+              "retention": 0.9461538461538461,
+              "sparse_routed": true,
+              "tau": 0.800000011920929
+            },
+            {
+              "agreements": 127,
+              "final_flips": 0,
+              "len": "32k",
+              "mean_abs_dnll": 0.054132300156813404,
+              "ppl_dense": 14.992155662660176,
+              "ppl_excess": -0.16865433502862892,
+              "ppl_sparse": 14.823501327631547,
+              "probes": 130,
+              "retention": 0.9769230769230769,
+              "sparse_routed": true,
+              "tau": 0.8500000238418579
+            },
+            {
+              "agreements": 127,
+              "final_flips": 0,
+              "len": "32k",
+              "mean_abs_dnll": 0.04812610332782452,
+              "ppl_dense": 14.992155662660176,
+              "ppl_excess": -0.18418848881168515,
+              "ppl_sparse": 14.80796717384849,
+              "probes": 130,
+              "retention": 0.9769230769230769,
+              "sparse_routed": true,
+              "tau": 0.8999999761581421
+            },
+            {
+              "agreements": 130,
+              "final_flips": 0,
+              "len": "32k",
+              "mean_abs_dnll": 0.022765988569993238,
+              "ppl_dense": 14.992155662660176,
+              "ppl_excess": 0.09852720639193357,
+              "ppl_sparse": 15.09068286905211,
+              "probes": 130,
+              "retention": 1.0,
+              "sparse_routed": true,
+              "tau": 0.949999988079071
+            }
+          ]
+        }
+      },
+      "omega_msr": 0.6000000238418579
+    }
+  ],
+  "grid": [
+    0.5,
+    0.6000000238418579,
+    0.699999988079071,
+    0.800000011920929,
+    0.8500000238418579,
+    0.8999999761581421,
+    0.949999988079071
+  ],
+  "issue": "riir-infer 1156 T3-v2 (the scorer re-open)",
+  "kind": "sparse_prefill_omega_msr",
+  "manifest_version": 2,
+  "model_blake3": "b4f6ab953ef6d1452682bd861b7a1711a4a9945a74ca292659803978fd2550f6",
+  "model_path_hint": "../../../riir-train/data/Ternary-Bonsai-2-27B-PQ2_0.gguf",
+  "notes": [
+    "protocol v2: the Quest-class min/max envelope scorer (RIIR_PREFILL_SPARSE_SCORER=envelope); same floors, same holdouts, same corpus digest as the v1 sweep - the v1<->v2 read is paired",
+    "the v1 manifest (sparse_omega_msr_manifest.json) is the MEAN scorer's record and is never overwritten",
+    "model block_size clamped to 32768 (the bench_1151/Issue-994 config-clamp precedent)",
+    "only the continuation family is dual-length (16k + 32k); the other families' floors are 16k-measured"
+  ],
+  "plan": "riir-infer 625 Protocol-v2",
+  "ppl_band": 0.25,
+  "probe_protocol": "teacher-forced 64-token continuation after league-chunked prefill; retention = pooled argmax agreement over the final prompt probe + 64 decode probes per item; ppl = exp(mean teacher-forced NLL) over the decode steps",
+  "scorer": "envelope"
+}
