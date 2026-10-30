@@ -259,13 +259,15 @@ to consume. T5 gives the floors' decisions a mixed-mode execution wire.
       dispatch overrides (τ override, chunk-dense routing, per-layer
       dense skip) + `regime_gate_bnd_elems` (arming and alloc size in ONE
       place). `boundary_gather_matches_the_cpu_rows` green on Metal.
-- [-] **T4.4** the CENTROID FREEZE pass — extend the sweep instrument with
-      a feature-dump mode over the 8 anchors (dense forward, capture the
-      boundary rows, pool, dump per-family features), compute the two
-      centroids deterministically OFFLINE, commit the sidecar pair, then
-      calibrate `REGIME_GAIN`/margin on the dump. GPU idle-window-gated
-      (the machinery refuses to arm until the sidecars exist — fail-closed,
-      never placeholder centroids in the tree).
+- [-] **T4.4** the CENTROID FREEZE pass — MACHINERY COMPLETE (riir-infer
+      `7ff9a70`: the capture seam + `regime_centroid_freeze` CLI; riir-ai
+      `d9eddba28`: the `bench_1156_regime_feature_dump` runner over the SAME
+      byte-identical holdout corpus). Remaining = three steps in the next GPU
+      idle window: (1) run the dump (~15 min dense on amo), (2) freeze via
+      the CLI (the sidecar pair lands at the fixture path, digest-pinned),
+      (3) calibrate `REGIME_GAIN`/margin on the dump's cosine spread. The
+      gate refuses to arm until the pair exists — fail-closed, never
+      placeholder centroids in the tree.
 - [-] **T6** league cells at the measured postures (τ=0.85 / 0.9, now plus
       the mixed-mode + regime-gate postures once T4.4 lands) — the decision
       cell from the T3-v2 verdict table; verified-idle protocol, both box
