@@ -7439,10 +7439,19 @@ impl TernaryDeltanetGpuForward {
             let mut sparse_done = false;
             if let Some(sp) = scratch.sparse.as_ref() {
                 let tau = crate::qwen_attention_prefill_sparse_cubecl::prefill_sparse_tau();
+                let scorer = crate::qwen_attention_prefill_sparse_cubecl::prefill_sparse_scorer();
                 unsafe {
                     crate::qwen_attention_prefill_sparse_cubecl::SparsePrefillPoolCubeCL::launch::<
                         ActiveRuntime,
-                    >(&self.client, kv_read.clone(), sp.kpool.clone(), hd, n_kv, sp.cache_rows);
+                    >(
+                        &self.client,
+                        kv_read.clone(),
+                        sp.kpool.clone(),
+                        hd,
+                        n_kv,
+                        sp.cache_rows,
+                        scorer,
+                    );
                     crate::qwen_attention_prefill_sparse_cubecl::SparsePrefillScoreCubeCL::launch::<
                         ActiveRuntime,
                     >(
@@ -7456,6 +7465,7 @@ impl TernaryDeltanetGpuForward {
                         n_kv,
                         sp.cache_rows,
                         base_pos,
+                        scorer,
                     );
                     crate::qwen_attention_prefill_sparse_cubecl::SparsePrefillSelectCubeCL::launch::<
                         ActiveRuntime,

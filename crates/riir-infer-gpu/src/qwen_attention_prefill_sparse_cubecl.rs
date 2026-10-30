@@ -20,18 +20,24 @@
 //!    per layer call; the score kernel consumes it lane-locally.
 //! 2. **Score** — per (head, 128-query window, KV block ≤ the window's
 //!    diagonal horizon): the block's attention-mass estimate
-//!    `score = band + centroid`:
+//!    `score = band + probe` (the probe is scorer-dependent):
 //!    - `band`: the sum of the block's cells ON the global causal diagonal
 //!      (the XAttention antidiagonal idea generalized to rectangular blocks;
 //!      every band cell visited exactly once — no undersampling). Catches the
 //!      local/streaming mass. Key-index shortcut: a band cell for window-local
 //!      query `x` is the key row `q_start + x` (the main diagonal), so the
 //!      kernel needs no per-term branch.
-//!    - `centroid`: ⟨mean Q window, mean K block⟩ (the FlexPrefill pooled
-//!      probe). Catches retrieval-aligned blocks the band misses. Known
-//!      dilution risk: a single needle row inside a 64-row block washes out
-//!      in the mean — the quality walk (Plan 624 T2.4) is the instrument that
-//!      judges this; iterate the scorer there if needle families tank.
+//!    - `Envelope` (v2 DEFAULT): the Quest-class bound `Σ_d q̄_d·(q̄_d ≥ 0 ?
+//!      kmax_d : kmin_d)` ≥ `max_r(q̄·k_r)` — the block's best single row,
+//!      upper-bounded per dim from the min/max pool. A single fact row
+//!      survives at full magnitude on its dims instead of being averaged
+//!      into a 64-row mean.
+//!    - `Mean` (v1 demote): ⟨mean Q window, mean K block⟩ (the FlexPrefill
+//!      pooled probe). T3's verdict measured its named dilution risk: a
+//!      single needle row inside a 64-row block washes out in the mean and
+//!      the τ-threshold dropped the retrieval-critical blocks first — 6/7
+//!      families ΩMSR = None (the v1 manifest is the record; the envelope
+//!      is the re-open lever, plan 625 §Protocol v2).
 //! 3. **Select** — per (head, query window): pick the threshold θ by a fixed
 //!    28-iteration f32 bisection on `mass(θ) = Σ_{score ≥ θ} score` so the
 //!    selected set carries ≥ τ of the row's total score (the same set
@@ -58,6 +64,8 @@
 //!   junk/unset = OFF — the Issue-750-T3 lossy law: opt-in, never default
 //!   without the GOAT).
 //! - `RIIR_PREFILL_SPARSE_TAU` f32 (default 0.9, clamped [0.5, 1.0]).
+//! - `RIIR_PREFILL_SPARSE_SCORER` = `envelope` (protocol v2 DEFAULT) or the
+//!   exact literal `mean` (v1 demote); junk/unset → envelope.
 //! - Engagement (checked once per chunk at scratch-build):
 //!   `enabled && head_dim == 256 && active_prefill_len >= PREFILL_SPARSE_MIN_P`
 //!   (the prompt-level gate — the Issue-782 lesson; `reset_state` zeroes
@@ -179,6 +187,100 @@ pub fn prefill_sparse_tau() -> f32 {
     parsed
 }
 
+/// The block scorer family (Issue 1156 T3-v2, plan 625 §Protocol v2).
+///
+/// - [`SparseScorer::Mean`] — the v1 pooled-centroid scorer (T3 verdict: 6/7
+///   families ΩMSR = None; the demote posture, its floors live in the
+///   committed v1 manifest).
+/// - [`SparseScorer::Envelope`] — the Quest-class min/max envelope: kernel 1
+///   pools per-dim max + min K per block, kernel 2 scores
+///   `band + Σ_d q̄_d·(q̄_d ≥ 0 ? kmax_d : kmin_d)` — an upper bound on
+///   `max_r(q̄·k_r)` over the block's rows, tight exactly on single-fact rows
+///   (the facts-first fix for the T3 finding: a single needle row carries no
+///   pooled-centroid mass and was dropped first at every τ ≤ 0.95).
+#[cfg(feature = "cubecl_runtime")]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SparseScorer {
+    Mean,
+    Envelope,
+}
+
+#[cfg(feature = "cubecl_runtime")]
+impl SparseScorer {
+    /// The kernel-mode encoding packed into the params buffer.
+    pub const fn as_u32(self) -> u32 {
+        match self {
+            Self::Mean => 0,
+            Self::Envelope => 1,
+        }
+    }
+
+    /// The manifest / env spelling.
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Mean => "mean",
+            Self::Envelope => "envelope",
+        }
+    }
+
+    pub fn parse(s: &str) -> Option<Self> {
+        match s {
+            "mean" => Some(Self::Mean),
+            "envelope" => Some(Self::Envelope),
+            _ => None,
+        }
+    }
+
+    fn from_bits(bits: u32) -> Self {
+        if bits == Self::Mean.as_u32() {
+            Self::Mean
+        } else {
+            Self::Envelope
+        }
+    }
+}
+
+#[cfg(feature = "cubecl_runtime")]
+static SPARSE_SCORER_BITS: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+
+/// The block scorer (protocol v2 DEFAULT: `Envelope`; the exact literal
+/// `RIIR_PREFILL_SPARSE_SCORER=mean` demotes to the v1 pooled-centroid
+/// scorer — junk/unset → envelope). Env read exactly once — the first caller
+/// wins the store (the τ protocol).
+#[cfg(feature = "cubecl_runtime")]
+pub fn prefill_sparse_scorer() -> SparseScorer {
+    let mut scorer = match std::env::var("RIIR_PREFILL_SPARSE_SCORER")
+        .unwrap_or_default()
+        .trim()
+        .to_lowercase()
+        .as_str()
+    {
+        "mean" => SparseScorer::Mean,
+        _ => SparseScorer::Envelope,
+    };
+    let bits = scorer.as_u32() + 1; // +1: 0 is the uninitialized sentinel
+    if SPARSE_SCORER_BITS
+        .compare_exchange(
+            0,
+            bits,
+            std::sync::atomic::Ordering::Relaxed,
+            std::sync::atomic::Ordering::Relaxed,
+        )
+        .is_err()
+    {
+        scorer = SparseScorer::from_bits(
+            SPARSE_SCORER_BITS.load(std::sync::atomic::Ordering::Relaxed) - 1,
+        );
+    }
+    scorer
+}
+
+/// Test/demo setter for the scorer (the `set_prefill_sparse_tau` precedent).
+#[cfg(feature = "cubecl_runtime")]
+pub fn set_prefill_sparse_scorer(scorer: SparseScorer) {
+    SPARSE_SCORER_BITS.store(scorer.as_u32() + 1, std::sync::atomic::Ordering::Relaxed);
+}
+
 /// Test/demo setter — overrides the env-derived value (the
 /// `set_concat_split_fused` precedent).
 #[cfg(feature = "cubecl_runtime")]
@@ -254,7 +356,10 @@ fn note_sparse_attn_launch() {
 /// (layer, chunk) — no cross-chunk state, no stable-address requirement.
 #[cfg(feature = "cubecl_runtime")]
 pub struct SparsePrefillScratch {
-    /// Mean K vector per (KV group, KV block): `[n_kv * n_kv_blocks * head_dim]`.
+    /// Pooled K vectors per (KV group, KV block), TWO HALVES:
+    /// `[n_kv * n_kv_blocks * head_dim]` = the per-dim **max** (or the v1
+    /// mean, in the first half only), and a second same-size half for the
+    /// per-dim **min** (envelope mode; mean mode leaves it untouched).
     pub kpool: cubecl::server::Handle,
     /// Block scores per (window, head, KV block): `[q_windows * n_head * n_kv_blocks]`.
     pub scores: cubecl::server::Handle,
@@ -278,8 +383,12 @@ pub fn alloc_sparse_scratch<R: Runtime>(
     let n_kv_blocks = cache_rows.div_ceil(SPARSE_KV_BLOCK);
     let q_windows = cache_rows.div_ceil(SPARSE_Q_BLOCK);
     let wpr = n_kv_blocks.div_ceil(32);
+    // kpool is posture-independent 2× (max half + min half) so the alloc
+    // never consults the scorer static — the envelope mode simply uses both
+    // halves, mean mode the first.
+    let kpool_elems = n_kv * n_kv_blocks * head_dim * 2;
     Some(SparsePrefillScratch {
-        kpool: client.empty(n_kv * n_kv_blocks * head_dim * 4),
+        kpool: client.empty(kpool_elems * 4),
         scores: client.empty(q_windows * n_head * n_kv_blocks * 4),
         mask: client.empty(q_windows * n_head * wpr * 4),
         cache_rows,
@@ -294,11 +403,20 @@ pub fn sparse_mask_wpr(cache_rows: usize) -> usize {
 }
 
 // ---------------------------------------------------------------------------
-// Kernel 1 — the K-block mean pool (per KV group × KV block)
+// Kernel 1 — the K-block pool (per KV group × KV block)
 // ---------------------------------------------------------------------------
 
-/// Per (KV group, KV block): mean K vector over the block's valid rows.
-/// Layout: `kpool[(kv_group * n_kv_blocks + jb) * head_dim + d]`.
+/// Per (KV group, KV block) per dim, by scorer mode:
+/// - `Mean` (v1): the block's mean K vector over valid rows.
+/// - `Envelope` (v2): the per-dim **max** and **min** K over valid rows —
+///   the Quest-class metadata. Max lives in the buffer's first half, min in
+///   the second half at `+ kpool_half_elems`. Finite sentinels
+///   (`f32::MIN`/`f32::MAX`) seed the reductions — no infinity literals in
+///   kernel bodies; every block carries ≥ 1 valid row by construction.
+///
+/// Layout: `kpool[(kv_group * n_kv_blocks + jb) * head_dim + d]` (max half);
+/// `kpool[kpool_half_elems + (kv_group * n_kv_blocks + jb) * head_dim + d]`
+/// (min half, envelope mode only).
 #[cfg(feature = "cubecl_runtime")]
 #[allow(clippy::assign_op_pattern, reason = "CubeCL macro expansion")]
 #[cube(launch_unchecked)]
@@ -307,6 +425,8 @@ fn sparse_prefill_pool_f32(key: &[f32], kpool: &mut [f32], params: &[f32]) {
     let n_kv = params[1usize] as u32;
     let cache_rows = params[2usize] as u32;
     let n_kv_blocks = params[3usize] as u32;
+    let mode = params[4usize] as u32;
+    let half_elems = params[5usize] as u32;
 
     let cube_id = CUBE_POS_X;
     let kv_group = cube_id / n_kv_blocks;
@@ -337,6 +457,25 @@ fn sparse_prefill_pool_f32(key: &[f32], kpool: &mut [f32], params: &[f32]) {
     let mut s6 = f32::new(0.0f32);
     let mut s7 = f32::new(0.0f32);
 
+    // Envelope accumulators: finite sentinels so an inactive lane cannot
+    // poison a max/min reduction (f32::MIN seeds max, f32::MAX seeds min).
+    let mut m0 = f32::new(f32::MIN);
+    let mut m1 = f32::new(f32::MIN);
+    let mut m2 = f32::new(f32::MIN);
+    let mut m3 = f32::new(f32::MIN);
+    let mut m4 = f32::new(f32::MIN);
+    let mut m5 = f32::new(f32::MIN);
+    let mut m6 = f32::new(f32::MIN);
+    let mut m7 = f32::new(f32::MIN);
+    let mut n0 = f32::new(f32::MAX);
+    let mut n1 = f32::new(f32::MAX);
+    let mut n2 = f32::new(f32::MAX);
+    let mut n3 = f32::new(f32::MAX);
+    let mut n4 = f32::new(f32::MAX);
+    let mut n5 = f32::new(f32::MAX);
+    let mut n6 = f32::new(f32::MAX);
+    let mut n7 = f32::new(f32::MAX);
+
     if r0 < row_hi {
         let base = (r0 * kv_stride + kv_head_off) as usize + dims_base;
         s0 = key[base];
@@ -347,40 +486,103 @@ fn sparse_prefill_pool_f32(key: &[f32], kpool: &mut [f32], params: &[f32]) {
         s5 = key[base + 5usize];
         s6 = key[base + 6usize];
         s7 = key[base + 7usize];
+        m0 = s0;
+        m1 = s1;
+        m2 = s2;
+        m3 = s3;
+        m4 = s4;
+        m5 = s5;
+        m6 = s6;
+        m7 = s7;
+        n0 = s0;
+        n1 = s1;
+        n2 = s2;
+        n3 = s3;
+        n4 = s4;
+        n5 = s5;
+        n6 = s6;
+        n7 = s7;
     }
     if r1 < row_hi {
         let base = (r1 * kv_stride + kv_head_off) as usize + dims_base;
-        s0 += key[base];
-        s1 += key[base + 1usize];
-        s2 += key[base + 2usize];
-        s3 += key[base + 3usize];
-        s4 += key[base + 4usize];
-        s5 += key[base + 5usize];
-        s6 += key[base + 6usize];
-        s7 += key[base + 7usize];
+        let t0 = key[base];
+        let t1 = key[base + 1usize];
+        let t2 = key[base + 2usize];
+        let t3 = key[base + 3usize];
+        let t4 = key[base + 4usize];
+        let t5 = key[base + 5usize];
+        let t6 = key[base + 6usize];
+        let t7 = key[base + 7usize];
+        s0 += t0;
+        s1 += t1;
+        s2 += t2;
+        s3 += t3;
+        s4 += t4;
+        s5 += t5;
+        s6 += t6;
+        s7 += t7;
+        m0 = if t0 > m0 { t0 } else { m0 };
+        m1 = if t1 > m1 { t1 } else { m1 };
+        m2 = if t2 > m2 { t2 } else { m2 };
+        m3 = if t3 > m3 { t3 } else { m3 };
+        m4 = if t4 > m4 { t4 } else { m4 };
+        m5 = if t5 > m5 { t5 } else { m5 };
+        m6 = if t6 > m6 { t6 } else { m6 };
+        m7 = if t7 > m7 { t7 } else { m7 };
+        n0 = if t0 < n0 { t0 } else { n0 };
+        n1 = if t1 < n1 { t1 } else { n1 };
+        n2 = if t2 < n2 { t2 } else { n2 };
+        n3 = if t3 < n3 { t3 } else { n3 };
+        n4 = if t4 < n4 { t4 } else { n4 };
+        n5 = if t5 < n5 { t5 } else { n5 };
+        n6 = if t6 < n6 { t6 } else { n6 };
+        n7 = if t7 < n7 { t7 } else { n7 };
     }
 
-    // Tree reduce per dim (deterministic butterfly), then mean.
-    let t0 = plane_sum(s0);
-    let t1 = plane_sum(s1);
-    let t2 = plane_sum(s2);
-    let t3 = plane_sum(s3);
-    let t4 = plane_sum(s4);
-    let t5 = plane_sum(s5);
-    let t6 = plane_sum(s6);
-    let t7 = plane_sum(s7);
-
-    let count = row_hi - row_lo;
-    let inv = f32::new(1.0f32) / f32::cast_from(count);
     let out_base = (cube_id * head_dim) as usize + dims_base;
-    kpool[out_base] = t0 * inv;
-    kpool[out_base + 1usize] = t1 * inv;
-    kpool[out_base + 2usize] = t2 * inv;
-    kpool[out_base + 3usize] = t3 * inv;
-    kpool[out_base + 4usize] = t4 * inv;
-    kpool[out_base + 5usize] = t5 * inv;
-    kpool[out_base + 6usize] = t6 * inv;
-    kpool[out_base + 7usize] = t7 * inv;
+    if mode == 1u32 {
+        // Envelope: per-dim max -> the buffer's first half, per-dim min ->
+        // the second half. One hardware plane reduce each.
+        let min_base = out_base + half_elems as usize;
+        kpool[out_base] = plane_max(m0);
+        kpool[out_base + 1usize] = plane_max(m1);
+        kpool[out_base + 2usize] = plane_max(m2);
+        kpool[out_base + 3usize] = plane_max(m3);
+        kpool[out_base + 4usize] = plane_max(m4);
+        kpool[out_base + 5usize] = plane_max(m5);
+        kpool[out_base + 6usize] = plane_max(m6);
+        kpool[out_base + 7usize] = plane_max(m7);
+        kpool[min_base] = plane_min(n0);
+        kpool[min_base + 1usize] = plane_min(n1);
+        kpool[min_base + 2usize] = plane_min(n2);
+        kpool[min_base + 3usize] = plane_min(n3);
+        kpool[min_base + 4usize] = plane_min(n4);
+        kpool[min_base + 5usize] = plane_min(n5);
+        kpool[min_base + 6usize] = plane_min(n6);
+        kpool[min_base + 7usize] = plane_min(n7);
+    } else {
+        // Mean (the v1 scorer): tree reduce per dim (deterministic
+        // butterfly), then mean.
+        let t0 = plane_sum(s0);
+        let t1 = plane_sum(s1);
+        let t2 = plane_sum(s2);
+        let t3 = plane_sum(s3);
+        let t4 = plane_sum(s4);
+        let t5 = plane_sum(s5);
+        let t6 = plane_sum(s6);
+        let t7 = plane_sum(s7);
+
+        let count = row_hi - row_lo;
+        let inv = f32::new(1.0f32) / f32::cast_from(count);
+        kpool[out_base] = t0 * inv;
+        kpool[out_base + 1usize] = t1 * inv;
+        kpool[out_base + 2usize] = t2 * inv;
+        kpool[out_base + 3usize] = t3 * inv;
+        kpool[out_base + 4usize] = t4 * inv;
+        kpool[out_base + 5usize] = t5 * inv;
+        kpool[out_base + 6usize] = t6 * inv;
+        kpool[out_base + 7usize] = t7 * inv;
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -388,7 +590,14 @@ fn sparse_prefill_pool_f32(key: &[f32], kpool: &mut [f32], params: &[f32]) {
 // ---------------------------------------------------------------------------
 
 /// Per (head, 128-query window, KV block ≤ the window's diagonal horizon):
-/// `scores[(qb * n_head + head) * n_kv_blocks + jb] = band + centroid`.
+/// `scores[(qb * n_head + head) * n_kv_blocks + jb] = band + probe` where the
+/// probe is scorer-dependent:
+/// - `Mean` (v1): the pooled-centroid dot `q̄ · k̄_block` (the FlexPrefill
+///   pooled probe).
+/// - `Envelope` (v2): the Quest-class bound `Σ_d q̄_d·(q̄_d ≥ 0 ? kmax_d :
+///   kmin_d)` ≥ `max_r(q̄·k_r)` — the block's best single row, upper-bounded
+///   per dim. A single fact row survives at full magnitude on its dims
+///   instead of being averaged into a 64-row mean.
 ///
 /// The window's overlap `[lo_abs, hi_abs)` bounds both the Q rows consumed and
 /// the KV blocks scored; windows with no chunk-local rows do nothing (their
@@ -416,6 +625,8 @@ fn sparse_prefill_score_f32(
     let q_blk_base = params[5usize] as u32;
     let n_kv_blocks = params[6usize] as u32;
     let base_pos = params[7usize] as u32;
+    let mode = params[8usize] as u32;
+    let half_elems = params[9usize] as u32;
 
     let cube_id = CUBE_POS_X;
     let head_idx = cube_id / qc;
@@ -714,7 +925,9 @@ fn sparse_prefill_score_f32(
             }
             let band = plane_sum(bd);
 
-            // Pooled-centroid probe against this block's mean K.
+            // Pooled-centroid probe against this block's mean K (the v1
+            // scorer) — or the Quest-class envelope against the block's
+            // per-dim max/min K (v2). The min half sits at + half_elems.
             let kp = ((kv_group * n_kv_blocks + jb) * head_dim) as usize + dims_base;
             let km0 = kpool[kp];
             let km1 = kpool[kp + 1usize];
@@ -724,18 +937,42 @@ fn sparse_prefill_score_f32(
             let km5 = kpool[kp + 5usize];
             let km6 = kpool[kp + 6usize];
             let km7 = kpool[kp + 7usize];
-            let cp = qm0 * km0
-                + qm1 * km1
-                + qm2 * km2
-                + qm3 * km3
-                + qm4 * km4
-                + qm5 * km5
-                + qm6 * km6
-                + qm7 * km7;
-            let centroid = plane_sum(cp);
+            let probe = if mode == 1u32 {
+                let min_base = kp + half_elems as usize;
+                let kn0 = kpool[min_base];
+                let kn1 = kpool[min_base + 1usize];
+                let kn2 = kpool[min_base + 2usize];
+                let kn3 = kpool[min_base + 3usize];
+                let kn4 = kpool[min_base + 4usize];
+                let kn5 = kpool[min_base + 5usize];
+                let kn6 = kpool[min_base + 6usize];
+                let kn7 = kpool[min_base + 7usize];
+                let zero = f32::new(0.0f32);
+                // The envelope: sign-select the per-dim extreme that maximizes
+                // the dot; the sum upper-bounds max_r(q̄·k_r) for the block.
+                let e0 = if qm0 >= zero { qm0 * km0 } else { qm0 * kn0 };
+                let e1 = if qm1 >= zero { qm1 * km1 } else { qm1 * kn1 };
+                let e2 = if qm2 >= zero { qm2 * km2 } else { qm2 * kn2 };
+                let e3 = if qm3 >= zero { qm3 * km3 } else { qm3 * kn3 };
+                let e4 = if qm4 >= zero { qm4 * km4 } else { qm4 * kn4 };
+                let e5 = if qm5 >= zero { qm5 * km5 } else { qm5 * kn5 };
+                let e6 = if qm6 >= zero { qm6 * km6 } else { qm6 * kn6 };
+                let e7 = if qm7 >= zero { qm7 * km7 } else { qm7 * kn7 };
+                plane_sum(e0 + e1 + e2 + e3 + e4 + e5 + e6 + e7)
+            } else {
+                let cp = qm0 * km0
+                    + qm1 * km1
+                    + qm2 * km2
+                    + qm3 * km3
+                    + qm4 * km4
+                    + qm5 * km5
+                    + qm6 * km6
+                    + qm7 * km7;
+                plane_sum(cp)
+            };
 
             if lane == 0u32 {
-                scores[(row_base + jb) as usize] = band + centroid;
+                scores[(row_base + jb) as usize] = band + probe;
             }
             jb += 1u32;
         }
@@ -1543,15 +1780,17 @@ fn qwen_attention_prefill_sparse_m32_f32(
 // Launchers (the m32 launcher shapes: params_handle + the 65535 grid guard)
 // ---------------------------------------------------------------------------
 
-/// Launch the K-block mean pool (one cube per KV group × KV block).
+/// Launch the K-block pool (one cube per KV group × KV block) in the given
+/// scorer mode.
 #[cfg(feature = "cubecl_runtime")]
 pub struct SparsePrefillPoolCubeCL;
 
 #[cfg(feature = "cubecl_runtime")]
 impl SparsePrefillPoolCubeCL {
     /// # Safety
-    /// `key` holds `[cache_rows, n_kv, head_dim]` f32; `kpool` holds
-    /// `[n_kv * ceil(cache_rows/64) * head_dim]` f32. `head_dim` must be 256.
+    /// `key` holds `[cache_rows, n_kv, head_dim]` f32; `kpool` holds the
+    /// TWO-HALF layout `[2 * n_kv * ceil(cache_rows/64) * head_dim]` f32.
+    /// `head_dim` must be 256.
     #[allow(clippy::too_many_arguments, reason = "GPU kernel launch")]
     pub unsafe fn launch<R: Runtime>(
         client: &ComputeClient<R>,
@@ -1560,14 +1799,18 @@ impl SparsePrefillPoolCubeCL {
         head_dim: usize,
         n_kv: usize,
         cache_rows: usize,
+        scorer: SparseScorer,
     ) {
         debug_assert_eq!(head_dim, 256, "sparse pool is head_dim-256 specialized");
         let n_kv_blocks = cache_rows.div_ceil(SPARSE_KV_BLOCK);
-        let params: [f32; 4] = [
+        let half_elems = n_kv * n_kv_blocks * head_dim;
+        let params: [f32; 6] = [
             head_dim as f32,
             n_kv as f32,
             cache_rows as f32,
             n_kv_blocks as f32,
+            scorer.as_u32() as f32,
+            half_elems as f32,
         ];
         let params_handle = crate::params_cache::params_handle(client, f32::as_bytes(&params));
         note_sparse_pool_launch();
@@ -1577,8 +1820,8 @@ impl SparsePrefillPoolCubeCL {
                 CubeCount::Static((n_kv * n_kv_blocks).max(1) as u32, 1, 1),
                 CubeDim::new_1d(256),
                 BufferArg::from_raw_parts(key_handle, cache_rows * n_kv * head_dim),
-                BufferArg::from_raw_parts(kpool_handle, n_kv * n_kv_blocks * head_dim),
-                BufferArg::from_raw_parts(params_handle, 4),
+                BufferArg::from_raw_parts(kpool_handle, half_elems * 2),
+                BufferArg::from_raw_parts(params_handle, 6),
             );
         }
     }
@@ -1594,8 +1837,8 @@ impl SparsePrefillScoreCubeCL {
     /// # Safety
     /// `query` holds the chunk-local `[p, n_head, head_dim]` f32
     /// (`p = cache_rows - base_pos`); `key` the full-cache
-    /// `[cache_rows, n_kv, head_dim]`; `kpool`/`scores` the alloc_sparse_scratch
-    /// shapes. `head_dim` must be 256.
+    /// `[cache_rows, n_kv, head_dim]`; `kpool` the TWO-HALF alloc_sparse_scratch
+    /// shape, `scores` the alloc_sparse_scratch shape. `head_dim` must be 256.
     #[allow(clippy::too_many_arguments, reason = "GPU kernel launch")]
     pub unsafe fn launch<R: Runtime>(
         client: &ComputeClient<R>,
@@ -1608,16 +1851,18 @@ impl SparsePrefillScoreCubeCL {
         n_kv: usize,
         cache_rows: usize,
         base_pos: usize,
+        scorer: SparseScorer,
     ) {
         debug_assert_eq!(head_dim, 256, "sparse score is head_dim-256 specialized");
         const MAX_WG_X: u32 = 65535;
         let n_kv_blocks = cache_rows.div_ceil(SPARSE_KV_BLOCK);
         let q_windows = cache_rows.div_ceil(SPARSE_Q_BLOCK).max(1);
+        let half_elems = n_kv * n_kv_blocks * head_dim;
         let per_chunk = (MAX_WG_X as usize / n_head.max(1)).max(1);
         let mut qb0 = 0usize;
         while qb0 < q_windows {
             let qc = per_chunk.min(q_windows - qb0);
-            let params: [f32; 8] = [
+            let params: [f32; 10] = [
                 head_dim as f32,
                 n_head as f32,
                 n_kv as f32,
@@ -1626,6 +1871,8 @@ impl SparsePrefillScoreCubeCL {
                 qb0 as f32,
                 n_kv_blocks as f32,
                 base_pos as f32,
+                scorer.as_u32() as f32,
+                half_elems as f32,
             ];
             let params_handle = crate::params_cache::params_handle(client, f32::as_bytes(&params));
             note_sparse_score_launch();
@@ -1639,12 +1886,12 @@ impl SparsePrefillScoreCubeCL {
                         (cache_rows - base_pos) * n_head * head_dim,
                     ),
                     BufferArg::from_raw_parts(key_handle.clone(), cache_rows * n_kv * head_dim),
-                    BufferArg::from_raw_parts(kpool_handle.clone(), n_kv * n_kv_blocks * head_dim),
+                    BufferArg::from_raw_parts(kpool_handle.clone(), half_elems * 2),
                     BufferArg::from_raw_parts(
                         scores_handle.clone(),
                         q_windows * n_head * n_kv_blocks,
                     ),
-                    BufferArg::from_raw_parts(params_handle, 8),
+                    BufferArg::from_raw_parts(params_handle, 10),
                 );
             }
             qb0 += qc;
@@ -2045,8 +2292,9 @@ mod tests {
     /// Structural scorer check: a single hot (Q,K) pair ON the diagonal of
     /// window 1 (query 128 vs key 192, both inside block 3's reach and the
     /// window's causal horizon) must make block 3's score dominate its
-    /// zero neighbours — the centroid probe fires through the pool kernel;
-    /// the band term stays empty for this pairing (the hot query is the
+    /// zero neighbours — in BOTH scorer modes (the centroid probe fires
+    /// through the mean pool; the envelope fires through the block max).
+    /// The band term stays empty for this pairing (the hot query is the
     /// window's FIRST row, far above the diagonal cells of blocks 0..2).
     #[test]
     fn score_ranks_the_hot_block() {
@@ -2064,47 +2312,151 @@ mod tests {
             q[128 * hd + d] = 3.0; // query row 128 = window 1's first row
             k[192 * hd + d] = 3.0; // key row 192 = block 3 (inside win-1 horizon)
         }
-        let q_h = client.create_from_slice(f32::as_bytes(&q));
-        let k_h = client.create_from_slice(f32::as_bytes(&k));
         let n_kv_blocks = cache_rows.div_ceil(SPARSE_KV_BLOCK);
-        let kpool_h = client.empty(n_kv * n_kv_blocks * hd * 4);
         let q_windows = cache_rows.div_ceil(SPARSE_Q_BLOCK);
-        let scores_h = client.empty(q_windows * n_head * n_kv_blocks * 4);
-        unsafe {
-            SparsePrefillPoolCubeCL::launch::<ActiveRuntime>(
-                &client,
-                k_h.clone(),
-                kpool_h.clone(),
-                hd,
-                n_kv,
-                cache_rows,
+        for scorer in [SparseScorer::Mean, SparseScorer::Envelope] {
+            let q_h = client.create_from_slice(f32::as_bytes(&q));
+            let k_h = client.create_from_slice(f32::as_bytes(&k));
+            let kpool_h = client.empty(n_kv * n_kv_blocks * hd * 2 * 4);
+            let scores_h = client.empty(q_windows * n_head * n_kv_blocks * 4);
+            unsafe {
+                SparsePrefillPoolCubeCL::launch::<ActiveRuntime>(
+                    &client,
+                    k_h.clone(),
+                    kpool_h.clone(),
+                    hd,
+                    n_kv,
+                    cache_rows,
+                    scorer,
+                );
+                SparsePrefillScoreCubeCL::launch::<ActiveRuntime>(
+                    &client,
+                    q_h,
+                    k_h,
+                    kpool_h,
+                    scores_h.clone(),
+                    hd,
+                    n_head,
+                    n_kv,
+                    cache_rows,
+                    base_pos,
+                    scorer,
+                );
+            }
+            let score_bytes = client.read_one(scores_h).expect("readback");
+            let scores = f32::from_bytes(&score_bytes);
+            // Window 1 row = [n_kv_blocks .. 2*n_kv_blocks).
+            let w1 = n_kv_blocks;
+            let s3 = scores[w1 + 3];
+            let s0 = scores[w1];
+            let s1 = scores[w1 + 1];
+            let s2 = scores[w1 + 2];
+            assert!(
+                s3 > s0 + 0.1 && s3 > s1 + 0.1 && s3 > s2 + 0.1,
+                "[{:?}] hot block 3 ({s3}) must dominate its zero neighbours ({s0}, {s1}, {s2})",
+                scorer
             );
-            SparsePrefillScoreCubeCL::launch::<ActiveRuntime>(
-                &client,
-                q_h,
-                k_h,
-                kpool_h,
-                scores_h.clone(),
-                hd,
-                n_head,
-                n_kv,
-                cache_rows,
-                base_pos,
+            assert!(
+                s3 > 0.1,
+                "[{scorer:?}] block probe must be positive on the hot pair"
             );
         }
-        let score_bytes = client.read_one(scores_h).expect("readback");
-        let scores = f32::from_bytes(&score_bytes);
-        // Window 1 row = [n_kv_blocks .. 2*n_kv_blocks).
-        let w1 = n_kv_blocks;
-        let s3 = scores[w1 + 3];
-        let s0 = scores[w1];
-        let s1 = scores[w1 + 1];
-        let s2 = scores[w1 + 2];
+    }
+
+    /// The T3-v2 mechanism proof: a needle row that is 1-of-64 in its block,
+    /// aligned with the query on only a QUARTER of the dims (the realistic
+    /// sparse-alignment shape), far off the diagonal — the mean scorer
+    /// washes it into the block average (a ~64× dilution on the aligned
+    /// dims), the envelope keeps the extremes at full magnitude. Window 1's
+    /// diagonal-range K rows are zeroed (except the needle) so the band term
+    /// is exactly 0 on every compared block and the read is pure probe.
+    #[test]
+    fn envelope_survives_a_single_needle_row_the_mean_washes() {
+        let ctx = CubeCLContext::new().expect("CubeCL should initialize");
+        let client = ctx.client();
+        let n_head = 1usize;
+        let n_kv = 1usize;
+        let hd = 256usize;
+        let cache_rows = 512usize;
+        let base_pos = 0usize;
+        let p = 512usize;
+        let needle_block = 2usize; // far of the diagonal for window 1
+        let needle_row = needle_block * SPARSE_KV_BLOCK + 17; // 1-of-64, mid-block
+        let needle_q_row = 128usize; // window 1's first row
+        let mut q = vec![0.0f32; p * n_head * hd];
+        let mut k = lcg_fill(7, cache_rows * n_kv * hd, -0.05, 0.05);
+        // Zero window 1's diagonal range (rows 128..256) except the needle:
+        // the band cells there pair q_row(128+x)·k_row(128+x), and every
+        // such q row except 128 is zero — this makes the band exactly 0 for
+        // every block window 1 scores, so the test reads the probe alone.
+        for row in 128..256 {
+            if row != needle_row {
+                k[row * hd..(row + 1) * hd].fill(0.0);
+            }
+        }
+        for d in 0..hd {
+            // The needle and its query align on every 4th dim only.
+            if d % 4 == 0 {
+                q[needle_q_row * hd + d] = 3.0;
+                k[needle_row * hd + d] = 3.0;
+            }
+        }
+        let n_kv_blocks = cache_rows.div_ceil(SPARSE_KV_BLOCK);
+        let q_windows = cache_rows.div_ceil(SPARSE_Q_BLOCK);
+        let w1 = n_kv_blocks; // window 1's score row
+        let mut sep_mean = 0.0f32;
+        let mut sep_env = 0.0f32;
+        for scorer in [SparseScorer::Mean, SparseScorer::Envelope] {
+            let q_h = client.create_from_slice(f32::as_bytes(&q));
+            let k_h = client.create_from_slice(f32::as_bytes(&k));
+            let kpool_h = client.empty(n_kv * n_kv_blocks * hd * 2 * 4);
+            let scores_h = client.empty(q_windows * n_head * n_kv_blocks * 4);
+            unsafe {
+                SparsePrefillPoolCubeCL::launch::<ActiveRuntime>(
+                    &client,
+                    k_h.clone(),
+                    kpool_h.clone(),
+                    hd,
+                    n_kv,
+                    cache_rows,
+                    scorer,
+                );
+                SparsePrefillScoreCubeCL::launch::<ActiveRuntime>(
+                    &client,
+                    q_h,
+                    k_h,
+                    kpool_h,
+                    scores_h.clone(),
+                    hd,
+                    n_head,
+                    n_kv,
+                    cache_rows,
+                    base_pos,
+                    scorer,
+                );
+            }
+            let score_bytes = client.read_one(scores_h).expect("readback");
+            let scores = f32::from_bytes(&score_bytes);
+            let needle_score = scores[w1 + needle_block];
+            let best_other = (0..4usize)
+                .filter(|&b| b != needle_block)
+                .map(|b| scores[w1 + b])
+                .fold(f32::NEG_INFINITY, f32::max);
+            if scorer == SparseScorer::Mean {
+                sep_mean = needle_score - best_other;
+            } else {
+                sep_env = needle_score - best_other;
+            }
+        }
         assert!(
-            s3 > s0 + 0.1 && s3 > s1 + 0.1 && s3 > s2 + 0.1,
-            "hot block 3 ({s3}) must dominate its zero neighbours ({s0}, {s1}, {s2})"
+            sep_mean > 0.0,
+            "mean separation {sep_mean} must stay positive for the ratio read"
         );
-        assert!(s3 > 0.1, "centroid probe must be positive on the hot pair");
+        assert!(
+            sep_env > sep_mean * 16.0,
+            "envelope separation {sep_env} must exceed 16x the mean's {sep_mean} \
+             (the mean washes the 1-of-64 needle into the block average)"
+        );
     }
 
     /// The env-arm grammar: exact-literal opt-in, the τ clamp, and the
@@ -2129,5 +2481,20 @@ mod tests {
         set_prefill_sparse_tau(0.9);
         assert_eq!(prefill_sparse_tau(), 0.9);
         set_prefill_sparse(false);
+
+        // The scorer posture (protocol v2): setter overrides, both spellings
+        // parse, the default is the envelope.
+        set_prefill_sparse_scorer(SparseScorer::Mean);
+        assert_eq!(prefill_sparse_scorer(), SparseScorer::Mean);
+        set_prefill_sparse_scorer(SparseScorer::Envelope);
+        assert_eq!(prefill_sparse_scorer(), SparseScorer::Envelope);
+        assert_eq!(SparseScorer::parse("mean"), Some(SparseScorer::Mean));
+        assert_eq!(
+            SparseScorer::parse("envelope"),
+            Some(SparseScorer::Envelope)
+        );
+        assert_eq!(SparseScorer::parse("junk"), None);
+        assert_eq!(SparseScorer::Envelope.as_str(), "envelope");
+        assert_eq!(SparseScorer::Mean.as_u32(), 0);
     }
 }
