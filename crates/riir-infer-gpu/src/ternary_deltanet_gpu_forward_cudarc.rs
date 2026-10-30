@@ -352,21 +352,29 @@ pub struct ForwardInfraCudarc {
     embedding: EmbeddingDequantKernels,
     /// Split-path dp4a kernel (takes pre-quantized int8 + ascale).
     /// Production path. The fused kernel (`gemv_fused`) is kept for
+    /// Pub for the plan-474 R1 training replay (riir-train-gpu): the
+    /// backward's layer-local device recompute must call the forward's own
+    /// dispatch helpers over the forward's own kernel set — the
+    /// own-forward bit-identity law — and cannot reach them through
+    /// private fields. Inert without that caller; the forward's own
+    /// paths are unchanged.
+    pub elementwise: ElementwiseKernels,
     /// comparison as a documented negative result (Issue 616 T4).
-    gemv: CudaFunction,
+    pub gemv: CudaFunction,
     /// Plan 618 item 5 (Issue 028 T4) + S3 — the quant-resident GEMV kernels
     /// (Q4_K + Q6_K, single + multi-persistent): the prefill-copy format of
     /// the dual-PTQ container + the matched-single control. Consume the SAME
     /// int8 activation buffers as the ternary kernels; a
     /// `WeightBuffersCudarc` in `Q4K`/`Q6K` format dispatches here.
-    quant_gemv: QuantGemvKernels,
+    pub quant_gemv: QuantGemvKernels,
     /// Issue 697 / Issue 705 — multi-segment dp4a GEMV: one launch for up to 4
     /// weight matrices sharing the same quantized input vector (qkv+z+a+b,
     /// gate+up, q+k+v). Eliminates the m=48 latency-floor a/b launches and
     /// merges wave-quantization tails. Byte-identical row math to `gemv`.
     /// Issue 705 ships the persistent grid-stride variant: the launch grid is
     /// capped at full residency so big launches never pay a partial tail wave.
-    gemv_multi: GemvMultiPersistent,
+    /// Pub for the plan-474 R1 training replay (see `elementwise`).
+    pub gemv_multi: GemvMultiPersistent,
     /// Issue 616 T4 — fused quantize+dp4a kernel (takes f32 activations
     /// directly, quantizes on-the-fly per lane). Eliminates the separate
     /// `quantize_f32_to_i8` launch + the int8/ascale global round-trip.
@@ -7014,8 +7022,12 @@ fn quantize_and_gemv_batch(
 ///
 /// **Caller invariant:** every `weights` entry MUST have `.n == dim` (the
 /// RMSNorm dimension), because they all consume the same quantized activation.
+/// Pub for the plan-474 R1 training replay (riir-train-gpu): the backward's
+/// layer-local device recompute must call the forward's own dispatch code
+/// (the own-forward bit-identity law), never a forked re-implementation.
+/// Inert without that caller.
 #[allow(clippy::too_many_arguments)]
-fn rmsnorm_quantize_and_gemv_batch(
+pub fn rmsnorm_quantize_and_gemv_batch(
     elementwise: &ElementwiseKernels,
     stream: &Arc<CudaStream>,
     gemv: &GemvMultiPersistent,
@@ -7061,8 +7073,10 @@ fn rmsnorm_quantize_and_gemv_batch(
 ///
 /// Same launch cost as the un-sided variant; one extra elementwise write per
 /// active thread. The hot-path forward keeps using the un-sided variant.
+/// Pub for the plan-474 R1 training replay — see
+/// [`rmsnorm_quantize_and_gemv_batch`].
 #[allow(clippy::too_many_arguments)]
-fn rmsnorm_quantize_and_gemv_batch_with_norm_x(
+pub fn rmsnorm_quantize_and_gemv_batch_with_norm_x(
     elementwise: &ElementwiseKernels,
     stream: &Arc<CudaStream>,
     gemv: &GemvMultiPersistent,
@@ -7129,8 +7143,10 @@ fn rmsnorm_quantize_and_gemv_batch_with_norm_x(
 /// dispatches the dp4a GEMV for `weights` reading from the quantized buffer.
 /// Saves 1 kernel launch + intermediate f32 `ffn_hidden` memory traffic per
 /// call. Used for the FFN down_proj GEMV (single consumer of SwiGLU output).
+/// Pub for the plan-474 R1 training replay — see
+/// [`rmsnorm_quantize_and_gemv_batch`].
 #[allow(clippy::too_many_arguments)]
-fn swiglu_quantize_and_gemv(
+pub fn swiglu_quantize_and_gemv(
     elementwise: &ElementwiseKernels,
     stream: &Arc<CudaStream>,
     gemv: &CudaFunction,
@@ -7225,8 +7241,10 @@ fn gate_silu_quantize_and_gemv(
 /// (which pushes only the 10 single-kernel args) — undefined behavior on the
 /// `forward_token_profiled` / devpos paths that never fired in the Issue 697
 /// gates (they only exercised `accumulate_out = true`).
+/// Pub for the plan-474 R1 training replay — see
+/// [`rmsnorm_quantize_and_gemv_batch`].
 #[allow(clippy::too_many_arguments)]
-fn gate_sigmoid_quantize_and_gemv(
+pub fn gate_sigmoid_quantize_and_gemv(
     elementwise: &ElementwiseKernels,
     stream: &Arc<CudaStream>,
     gemv: &GemvMultiPersistent,
