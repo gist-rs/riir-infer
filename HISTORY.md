@@ -39,6 +39,8 @@ Commits: `6a1c524`.
 
 ## 2026-10-29 — Plan 623 Phase 3 T3.4 LANDED: the decode-feed async-finish arm (issue 1151, T3.4 `9f3c0f7`)
 
+> ⚠ **1151 is DOUBLY HELD** — this is the SECOND holder (`1151_plan623_t34_gpu_comm_sync`, filed `148f22d` reading the counter's value 1151 instead of value+1 — the counter already stood at 1151 after `559be00` — removed `726cec7`). The first holder is *Issue 1151 — the production posture single home* below. Both files are deleted, so neither can be renumbered; cite this one as **Plan 623 T3.4 (the issue-1151 GPU↔comm sync unit)**, never bare "Issue 1151".
+
 `riir-infer-gpu` re-exports `{block_on, DynFut}` + `read_hidden_state_fut()` — the staged-copy read future ('static via a client clone, resolving to the f32 vector), created at ENQUEUE time so the copy encodes FIFO-after this stage's chain and its resolution IS the chain-done signal value …
 
 ## 2026-10-29 — Plan 623 Phase 3 T3.1 LANDED: the verbs FFI lane — first RDMA traffic on the amo⇄bmo TB bridge (Bench 927, T3.1 `226cace`+`16fb64a`, bench `322e843`)
@@ -46,6 +48,8 @@ Commits: `6a1c524`.
 `crates/riir-infer-dist/src/verbs/{ffi,mod}.rs` behind the opt-in `rdma` feature (macOS-only by contract — the `ibv_context_ops` vtable layout is Apple's librdma.dylib header's; rdma-core's evolved vtable is not claimed): the SDK header mirrored repr(C) with layout pins held to the C compiler's …
 
 ## 2026-10-28 — Issue 1151 CLOSED + removed: the promoted serving posture has a single home — the `production` aggregate + `PRODUCTION_RUNGS` + the dist posture floor (fix `80ff665`, close `b5acf92`)
+
+> ⚠ **1151 is DOUBLY HELD in this repo** — this is the FIRST holder (`1151_production_posture_aggregate_single_home`, filed `559be00`, removed `f6b3b6a`), and it KEEPS the number (first allocation; katgpt-rs `citation_weight.py` awards it 11–5). The second is *Plan 623 T3.4 — the GPU↔comm sync unit* above (`1151_plan623_t34_gpu_comm_sync`, filed `148f22d`, removed `726cec7`). Cite this one as **Issue 1151 (production posture)**.
 
 The miss class fired THREE times in nine days — each a consumer's hand-typed serving-feature list omitting a rung the league/engine posture carried: 1141 (dist ran the bare decode kernels, 37.24 → 21.4x ms/token after repair, 1.74×), 1146 (chunked prefill + batched attention omitted from dist's …)
 Commits: `b5acf92`.
