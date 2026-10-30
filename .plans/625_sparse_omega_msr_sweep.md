@@ -116,7 +116,7 @@ default move (the Issue-750-T3 lossy law).
 
 ## Protocol v2 — the scorer re-open (the T3 named lever)
 
-**Status:** In progress — zed-amo-i1156 (same lease, expires 2026-10-31T17:22:37Z)
+**Status:** DONE 2026-10-30 — zed-amo-i1156 (all V2 tasks landed; verdict: 7/7 families floored, envelope stays default; issue 1156 T3-v2 row)
 
 T3's verdict refused blanket promotion and named the re-open lever: the
 pooled-centroid scorer is blind to single fact rows (mean dilution — the T2
@@ -143,23 +143,37 @@ same corpus digest, same model pin) so the v1↔v2 read is paired:
 
 ### Tasks
 
-- [ ] **V2.1** substrate: `SparseScorer` posture (env + setter + grammar
+- [x] **V2.1** substrate: `SparseScorer` posture (env + setter + grammar
       tests); pool kernel min/max mode (finite sentinels f32::MAX/MIN — no
       infinity literals in kernel bodies); score kernel envelope mode;
       scratch kpool 2× (max | min halves); launchers + the dispatch caller.
-- [ ] **V2.2** omega substrate: `OMEGA_MANIFEST_VERSION` 2 (reader accepts
-      {1, 2}: v1 = scorer `mean` implicit — the demote posture's floors stay
-      verifiable; v2 REQUIRES the `scorer` field); `verify_posture(..,
-      scorer)` binding; self-tests for both versions + mismatch refusals.
-- [ ] **V2.3** instrument v2 (riir-ai): scorer pin (`OMEGA_SWEEP_SCORER`,
+      (riir-infer `7f4b00f`)
+- [x] **V2.2** omega substrate: `OMEGA_MANIFEST_VERSION` 2 (reader accepts
+      ≤ 2: v1 = scorer `mean` implicit — the demote posture's floors stay
+      verifiable; NEWER refuses; v2 REQUIRES the `scorer` field);
+      `verify_posture(.., scorer)` binding; self-tests for both versions +
+      mismatch refusals. One canonical enum (`OmegaScorer`, ungated; the
+      arm re-exports `SparseScorer` — the two-enum DRY slip caught by the
+      instrument's round-trip assert at compile time, `123d4c4`).
+      (riir-infer `003ff7f` + `123d4c4`)
+- [x] **V2.3** instrument v2 (riir-ai): scorer pin (`OMEGA_SWEEP_SCORER`,
       default `envelope`), manifest `scorer` field, v2 fixture + v2 rows
-      paths (the v1 artifact pair is never overwritten).
-- [ ] **V2.4** kernel tests green at the arm posture — incl. the planted
+      paths (the v1 artifact pair is never overwritten). (riir-ai
+      `a3645644a`)
+- [x] **V2.4** kernel tests green at the arm posture — incl. the planted
       single-row needle test (a needle block score ≥ 16× its mean-mode
       self — the mechanism proof) and hot-block dominance in BOTH scorers.
-- [ ] **V2.5** run the sweep (~2.5 h, GPU-exclusivity preflight) → per-family
-      verdict.
-- [ ] **V2.6** land manifest v2 + digest sidecar + record + issue/plan
-      updates; the DEFAULT-scorer call rides the verdict (envelope ≥ as many
-      families with no regression on `math` → stays default; otherwise
-      demote to `mean` + the negative recorded).
+      (23/23 green at `ternary_gemm_batched`; clippy −D clean at
+      `qwen38_wgpu,ternary_gemm_batched,metal_tensor_gemm` — incl. the
+      pre-existing i1150 grouping break fixed grouping-only, `868dba6`)
+- [x] **V2.5** run the sweep (GPU-exclusivity preflight; box state
+      disclosed) → per-family verdict. (136 passes / 10954.75 s; DETACHED
+      + polled after the watchdog killed the first foreground attempt at
+      101 rows — lesson in the record; rows
+      `/tmp/sparse_omega_sweep_rows_v2.jsonl`, attempt-1 kept as
+      `.attempt1.jsonl`)
+- [x] **V2.6** land manifest v2 + digest sidecar + record + issue/plan
+      updates; the DEFAULT-scorer call rides the verdict. (riir-infer
+      `b8b06eb` — digest `a4b55a15e0ef8774…`; verdict 7/7 families floored,
+      math improved 0.9→0.5, no regression anywhere → **envelope stays
+      DEFAULT**; record riir-ai `.benchmarks/1153_issue1156_t3v2_envelope_omega_sweep.md`)
