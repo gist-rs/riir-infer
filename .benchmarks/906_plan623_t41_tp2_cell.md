@@ -152,7 +152,7 @@ below are self-contained). Cross-ref: #3149 (jaccl consecutive/different-
 shape send/recv — ours is the SIMPLER pattern deadlocking on BOTH backends,
 and ring reportedly "works" there).
 
-```markdown
+````markdown
 **Title:** [BUG] 2-node mx.distributed send/recv (p2p) deadlocks on BOTH
 ring and jaccl backends while all collectives work (0.32.0, macOS 26.x,
 TB5 RDMA)
@@ -210,7 +210,7 @@ initialized with MLX_JACCL_COORDINATOR + MLX_IBV_DEVICES over rdma_en2);
 MLX 0.32.0. Related: #3149 (jaccl consecutive/different-shape p2p wrong
 data or hangs; ring reportedly OK there — for us even the single
 same-shape exchange deadlocks on ring).
-```
+````
 
 ## 9. What remains
 
