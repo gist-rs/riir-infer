@@ -222,6 +222,124 @@ pub fn verify_posture(
 }
 
 // ---------------------------------------------------------------------------
+// Length-aware posture (Issue 1156 T4 — the regime gate's consumption arm)
+// ---------------------------------------------------------------------------
+
+/// The manifest's length tags → prompt-length buckets, IN this build's
+/// protocol. A manifest tag outside this table is UNMEASURED territory — the
+/// length-aware posture check refuses it (fail-closed) rather than
+/// interpolating; a new bucket means a reader bump, never a silent guess.
+pub const OMEGA_LEN_BUCKETS: [(&str, usize); 2] = [("16k", 16_384), ("32k", 32_768)];
+
+/// The conservative ΩMSR floor for a prompt of `prompt_len` tokens, read off
+/// a family's per-length rows (the measured floors GROW with length, so the
+/// safe read is:
+///
+/// 1. an EXACT bucket match wins outright (measured AT that length);
+/// 2. otherwise the smallest measured bucket at or above `prompt_len`
+///    (the ceil bucket) — unless ANY bucket up there yielded no passing
+///    posture (`None`), which poisons the read (the nearest-up measurement
+///    is illegal, and longer is worse);
+/// 3. past every measured bucket → the TIGHTEST measured floor overall
+///    (extrapolation takes the worst measured point), same `None` poison.
+///
+/// `Ok(None)` = this family has NO safe τ < 1.0 at `prompt_len` — the
+/// caller must route dense. `Err` = a tag outside [`OMEGA_LEN_BUCKETS`] —
+/// a manifest this build cannot read for length, never a silent floor.
+pub fn conservative_floor_for_len(
+    lengths: &[(String, Option<f32>)],
+    prompt_len: usize,
+) -> Result<Option<f32>, String> {
+    let mut rows: Vec<(usize, Option<f32>)> = Vec::with_capacity(lengths.len());
+    for (tag, floor) in lengths {
+        let bucket = OMEGA_LEN_BUCKETS
+            .iter()
+            .find(|(name, _)| name == tag)
+            .map(|(_, len)| *len)
+            .ok_or_else(|| {
+                format!(
+                    "OMSR length tag `{tag}` is not in this build's bucket table — refuse, never guess"
+                )
+            })?;
+        rows.push((bucket, *floor));
+    }
+    if rows.is_empty() {
+        return Ok(None);
+    }
+    // 1. Exact bucket match wins outright.
+    if let Some((_, floor)) = rows.iter().find(|(bucket, _)| *bucket == prompt_len) {
+        return Ok(*floor);
+    }
+    // 2. The ceil bucket: buckets at or above the prompt.
+    let up: Vec<Option<f32>> = rows
+        .iter()
+        .filter(|(bucket, _)| *bucket >= prompt_len)
+        .map(|(_, floor)| *floor)
+        .collect();
+    if !up.is_empty() {
+        if up.iter().any(|f| f.is_none()) {
+            return Ok(None);
+        }
+        return Ok(up.iter().filter_map(|f| *f).reduce(f32::min));
+    }
+    // 3. Past every measured bucket: the tightest measured floor, poisoned
+    //    by any illegal point below (the trend is monotone-worsening).
+    if rows.iter().any(|(_, f)| f.is_none()) {
+        return Ok(None);
+    }
+    Ok(rows.iter().filter_map(|(_, f)| *f).reduce(f32::max))
+}
+
+/// The length-aware posture verdict the regime gate (T4) consumes: is `tau`
+/// safe for `family` on a prompt of `prompt_len` tokens when the runtime
+/// runs `scorer`?
+///
+/// Same contract as [`verify_posture`] (the binding arm, one mechanism),
+/// with the floor read PER LENGTH via [`conservative_floor_for_len`] — the
+/// binding arm floors at the min-across-lengths, which blesses e.g. τ=0.7
+/// for continuation at 32K where the measured 32K row demands 0.85. The
+/// gate holds a length in hand, so it consumes the strict arm; the binding
+/// arm stays the whole-posture contract for T6 cells.
+pub fn verify_posture_at_len(
+    manifest: &OmegaManifest,
+    family: &str,
+    prompt_len: usize,
+    tau: f32,
+    scorer: OmegaScorer,
+) -> Result<(), String> {
+    if manifest.scorer != scorer {
+        return Err(format!(
+            "OMSR posture check: manifest floors are for scorer `{}`, \
+             runtime runs `{}` — a floor never blesses the other scorer",
+            manifest.scorer.as_str(),
+            scorer.as_str()
+        ));
+    }
+    if tau >= 1.0 {
+        return Ok(());
+    }
+    let entry = manifest
+        .families
+        .iter()
+        .find(|f| f.family == family)
+        .ok_or_else(|| format!("OMSR posture check: family `{family}` is not in the manifest"))?;
+    let floor = conservative_floor_for_len(&entry.lengths, prompt_len)?.ok_or_else(|| {
+        format!(
+            "OMSR posture check: family `{family}` has NO safe τ floor at {prompt_len} tokens — \
+             the sparse arm must not serve τ < 1.0 on it"
+        )
+    })?;
+    if f64::from(tau) + FLOAT_SLACK < f64::from(floor) {
+        Err(format!(
+            "OMSR posture check: τ = {tau} is below the `{family}` floor {floor} at \
+             {prompt_len} tokens — refused"
+        ))
+    } else {
+        Ok(())
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Manifest types (parsed + verified)
 // ---------------------------------------------------------------------------
 
@@ -659,6 +777,132 @@ mod tests {
         // until the bottom falls out at 0.5 → the floor is 0.7.
         let rows = knee([0.94, 1.0, 1.0, 1.0, 1.0]);
         assert_eq!(omega_msr(&GRID, &rows), Some(0.7));
+    }
+
+    // -- conservative_floor_for_len + verify_posture_at_len (T4's arm) ------
+
+    fn lens(rows: &[(&str, Option<f32>)]) -> Vec<(String, Option<f32>)> {
+        rows.iter().map(|(t, f)| (t.to_string(), *f)).collect()
+    }
+
+    #[test]
+    fn floor_exact_bucket_wins() {
+        // continuation: 0.6 @16k, 0.85 @32k. A prompt AT a bucket reads that
+        // bucket's own row — never a neighbour's.
+        let rows = lens(&[("16k", Some(0.6)), ("32k", Some(0.85))]);
+        assert_eq!(conservative_floor_for_len(&rows, 16_384), Ok(Some(0.6)));
+        assert_eq!(conservative_floor_for_len(&rows, 32_768), Ok(Some(0.85)));
+    }
+
+    #[test]
+    fn floor_between_buckets_takes_the_ceil() {
+        // 20K sits between the buckets; floors GROW with length, so the safe
+        // read is the ceil bucket (0.85), never the floor one (0.6).
+        let rows = lens(&[("16k", Some(0.6)), ("32k", Some(0.85))]);
+        assert_eq!(conservative_floor_for_len(&rows, 20_000), Ok(Some(0.85)));
+    }
+
+    #[test]
+    fn floor_past_every_bucket_takes_the_tightest() {
+        // 40K exceeds every measured bucket: extrapolation takes the worst
+        // measured point.
+        let rows = lens(&[("16k", Some(0.6)), ("32k", Some(0.85))]);
+        assert_eq!(conservative_floor_for_len(&rows, 40_000), Ok(Some(0.85)));
+        // A single-row family reads its own floor past the bucket too.
+        let rows = lens(&[("16k", Some(0.85))]);
+        assert_eq!(conservative_floor_for_len(&rows, 24_576), Ok(Some(0.85)));
+    }
+
+    #[test]
+    fn floor_illegal_bucket_poisons_the_read() {
+        // A bucket that yielded NO passing posture is a measured refusal:
+        // it poisons every read at or above its own bucket, and the past-all
+        // extrapolation.
+        let rows = lens(&[("16k", Some(0.6)), ("32k", None)]);
+        assert_eq!(conservative_floor_for_len(&rows, 16_384), Ok(Some(0.6)));
+        assert_eq!(conservative_floor_for_len(&rows, 20_000), Ok(None));
+        assert_eq!(conservative_floor_for_len(&rows, 32_768), Ok(None));
+        assert_eq!(conservative_floor_for_len(&rows, 40_000), Ok(None));
+    }
+
+    #[test]
+    fn floor_all_none_and_unknown_tag_refuse() {
+        // Every measured length illegal → no safe τ anywhere.
+        let rows = lens(&[("16k", None)]);
+        assert_eq!(conservative_floor_for_len(&rows, 16_384), Ok(None));
+        // A tag outside this build's bucket table is an Err (fail-closed),
+        // never a guess.
+        let rows = lens(&[("64k", Some(0.9))]);
+        assert!(conservative_floor_for_len(&rows, 16_384).is_err());
+        // No rows at all → the family constrains nothing here.
+        assert_eq!(conservative_floor_for_len(&[], 16_384), Ok(None));
+    }
+
+    #[test]
+    fn posture_at_len_is_stricter_than_the_binding_arm_at_32k() {
+        // THE case the length-aware arm exists for: the binding (min) floor
+        // blesses τ=0.7 for continuation everywhere, but the measured 32K
+        // row demands 0.85 — the gate (which holds a length) must refuse it.
+        let manifest = OmegaManifest {
+            model_blake3: "m".into(),
+            corpus_blake3: "c".into(),
+            scorer: OmegaScorer::Envelope,
+            families: vec![OmegaFamilyVerified {
+                family: "continuation".into(),
+                omega_msr: Some(0.6),
+                lengths: lens(&[("16k", Some(0.6)), ("32k", Some(0.85))]),
+            }],
+        };
+        assert!(
+            verify_posture_at_len(
+                &manifest,
+                "continuation",
+                16_384,
+                0.7,
+                OmegaScorer::Envelope
+            )
+            .is_ok()
+        );
+        assert!(
+            verify_posture_at_len(
+                &manifest,
+                "continuation",
+                32_768,
+                0.7,
+                OmegaScorer::Envelope
+            )
+            .is_err()
+        );
+        assert!(
+            verify_posture_at_len(
+                &manifest,
+                "continuation",
+                32_768,
+                0.85,
+                OmegaScorer::Envelope
+            )
+            .is_ok()
+        );
+        // τ ≥ 1.0 is the identity posture — always safe, per the binding arm.
+        assert!(
+            verify_posture_at_len(
+                &manifest,
+                "continuation",
+                32_768,
+                1.0,
+                OmegaScorer::Envelope
+            )
+            .is_ok()
+        );
+        // The scorer binding carries over.
+        assert!(
+            verify_posture_at_len(&manifest, "continuation", 16_384, 0.7, OmegaScorer::Mean)
+                .is_err()
+        );
+        // A family absent from the manifest refuses (same as the binding arm).
+        assert!(
+            verify_posture_at_len(&manifest, "needle", 16_384, 0.9, OmegaScorer::Envelope).is_err()
+        );
     }
 
     #[test]

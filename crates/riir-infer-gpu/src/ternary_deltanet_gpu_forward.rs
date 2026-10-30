@@ -7435,67 +7435,83 @@ impl TernaryDeltanetGpuForward {
             // prompt below the length gate) — zero alloc, zero branches, the
             // G3 posture. The scratch's existence IS the engagement predicate
             // (it was gated on enabled + active_prefill_len + hd==256 at
-            // chunk build).
+            // chunk build). T4: the gate's chunk verdict can route this
+            // chunk dense (`sparse_engaged` false → the ladder below runs).
+            // T5: a fully dense layer skips the sparse pipeline too (the
+            // CPU mirror decides, no device readback); a mixed layer runs
+            // the pipeline and its mode words route per head in-kernel.
             let mut sparse_done = false;
             if let Some(sp) = scratch.sparse.as_ref() {
-                let tau = crate::qwen_attention_prefill_sparse_cubecl::prefill_sparse_tau();
-                let scorer = crate::qwen_attention_prefill_sparse_cubecl::prefill_sparse_scorer();
-                unsafe {
-                    crate::qwen_attention_prefill_sparse_cubecl::SparsePrefillPoolCubeCL::launch::<
-                        ActiveRuntime,
-                    >(
-                        &self.client,
-                        kv_read.clone(),
-                        sp.kpool.clone(),
-                        hd,
-                        n_kv,
-                        sp.cache_rows,
-                        scorer,
+                let layer_dense = crate::qwen_attention_prefill_sparse_cubecl::sparse_layer_dense(
+                    &sp.head_mode_words,
+                    layer_idx,
+                    n_head,
+                );
+                if sp.sparse_engaged && !layer_dense {
+                    let tau = sp.tau_override.unwrap_or_else(
+                        crate::qwen_attention_prefill_sparse_cubecl::prefill_sparse_tau,
                     );
-                    crate::qwen_attention_prefill_sparse_cubecl::SparsePrefillScoreCubeCL::launch::<
-                        ActiveRuntime,
-                    >(
-                        &self.client,
-                        scratch.q_b.clone(),
-                        kv_read.clone(),
-                        sp.kpool.clone(),
-                        sp.scores.clone(),
-                        hd,
-                        n_head,
-                        n_kv,
-                        sp.cache_rows,
-                        base_pos,
-                        scorer,
-                    );
-                    crate::qwen_attention_prefill_sparse_cubecl::SparsePrefillSelectCubeCL::launch::<
-                        ActiveRuntime,
-                    >(
-                        &self.client,
-                        sp.scores.clone(),
-                        sp.mask.clone(),
-                        n_head,
-                        sp.cache_rows,
-                        tau,
-                        base_pos,
-                    );
-                    crate::qwen_attention_prefill_sparse_cubecl::SparsePrefillSparseM32CubeCL::launch::<
-                        ActiveRuntime,
-                    >(
-                        &self.client,
-                        scratch.q_b.clone(),
-                        kv_read.clone(),
-                        vv_read.clone(),
-                        scratch.gate_b.clone(),
-                        scratch.attn_out_b.clone(),
-                        sp.mask.clone(),
-                        hd,
-                        n_head,
-                        n_kv,
-                        p,
-                        base_pos,
-                    );
+                    let scorer =
+                        crate::qwen_attention_prefill_sparse_cubecl::prefill_sparse_scorer();
+                    unsafe {
+                        crate::qwen_attention_prefill_sparse_cubecl::SparsePrefillPoolCubeCL::launch::<
+                            ActiveRuntime,
+                        >(
+                            &self.client,
+                            kv_read.clone(),
+                            sp.kpool.clone(),
+                            hd,
+                            n_kv,
+                            sp.cache_rows,
+                            scorer,
+                        );
+                        crate::qwen_attention_prefill_sparse_cubecl::SparsePrefillScoreCubeCL::launch::<
+                            ActiveRuntime,
+                        >(
+                            &self.client,
+                            scratch.q_b.clone(),
+                            kv_read.clone(),
+                            sp.kpool.clone(),
+                            sp.scores.clone(),
+                            hd,
+                            n_head,
+                            n_kv,
+                            sp.cache_rows,
+                            base_pos,
+                            scorer,
+                        );
+                        crate::qwen_attention_prefill_sparse_cubecl::SparsePrefillSelectCubeCL::launch::<
+                            ActiveRuntime,
+                        >(
+                            &self.client,
+                            sp.scores.clone(),
+                            sp.mask.clone(),
+                            n_head,
+                            sp.cache_rows,
+                            tau,
+                            base_pos,
+                        );
+                        crate::qwen_attention_prefill_sparse_cubecl::SparsePrefillSparseM32CubeCL::launch::<
+                            ActiveRuntime,
+                        >(
+                            &self.client,
+                            scratch.q_b.clone(),
+                            kv_read.clone(),
+                            vv_read.clone(),
+                            scratch.gate_b.clone(),
+                            scratch.attn_out_b.clone(),
+                            sp.mask.clone(),
+                            sp.head_mode.clone(),
+                            layer_idx,
+                            hd,
+                            n_head,
+                            n_kv,
+                            p,
+                            base_pos,
+                        );
+                    }
+                    sparse_done = true;
                 }
-                sparse_done = true;
             }
             unsafe {
                 if sparse_done {
@@ -9541,7 +9557,7 @@ impl TernaryDeltanetGpuForward {
             feature = "ternary_gemm_batched",
             feature = "ternary_attention_batched_prefill"
         ))]
-        let attn_scratch = {
+        let mut attn_scratch = {
             #[cfg(all(
                 feature = "cubecl_runtime",
                 feature = "ternary_gemm_batched",
@@ -9576,6 +9592,9 @@ impl TernaryDeltanetGpuForward {
                     // head_dim-256 specialized one. `None` = zero cost, the
                     // dense ladder untouched (G3). `cache_rows = base_pos +
                     // p` is the same row count the attention kernels read.
+                    // T5 sizes the per-layer head-mode buffer over ALL
+                    // layers; T4 stages the gate's boundary rows only when
+                    // the gate is armed (0 = no alloc, G3).
                     sparse: if hd == 256
                         && crate::qwen_attention_prefill_sparse_cubecl::prefill_sparse_engaged(
                             self.active_prefill_len,
@@ -9586,6 +9605,10 @@ impl TernaryDeltanetGpuForward {
                             n_kv,
                             hd,
                             base_pos + p,
+                            self.layer_types.len(),
+                            crate::qwen_attention_prefill_sparse_cubecl::regime_gate_bnd_elems(
+                                p, n,
+                            ),
                         )
                     } else {
                         None
@@ -9689,6 +9712,34 @@ impl TernaryDeltanetGpuForward {
                 );
             }
         }
+
+        // ── Issue 1156 T4 — the modelless regime gate. Runs once per chunk
+        // call, after the chunk's residual-stream rows are staged (embed or
+        // `hidden_in`) and before the first attention dispatch; the decision
+        // lands on the scratch (τ override + sparse/dense routing). Disarmed
+        // = zero work, zero branches (the G3 posture).
+        #[cfg(all(
+            feature = "cubecl_runtime",
+            feature = "ternary_gemm_batched",
+            feature = "ternary_attention_batched_prefill"
+        ))]
+        let _regime_engaged = {
+            let x_staged =
+                hidden_in.is_some() || (hidden_in.is_none() && stage_on(PREFILL_STAGE_EMBED));
+            match attn_scratch.as_mut().and_then(|s| s.sparse.as_mut()) {
+                Some(sp) if x_staged => {
+                    crate::qwen_attention_prefill_sparse_cubecl::run_regime_gate(
+                        &self.client,
+                        &x_b,
+                        p,
+                        n,
+                        self.active_prefill_len,
+                        sp,
+                    )
+                }
+                _ => true,
+            }
+        };
 
         for layer_idx in layer_lo..layer_hi {
             let is_deltanet = self.layer_types[layer_idx] == DeltaNetLayerType::DeltaNet;

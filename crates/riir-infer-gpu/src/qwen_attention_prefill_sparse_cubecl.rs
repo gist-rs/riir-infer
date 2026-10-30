@@ -66,6 +66,18 @@
 //! - `RIIR_PREFILL_SPARSE_TAU` f32 (default 0.9, clamped [0.5, 1.0]).
 //! - `RIIR_PREFILL_SPARSE_SCORER` = `envelope` (protocol v2 DEFAULT) or the
 //!   exact literal `mean` (v1 demote); junk/unset → envelope.
+//! - `RIIR_PREFILL_SPARSE_DENSE_HEADS` (T5, Issue 1156) = a comma list of
+//!   indices and inclusive ranges (`"0-3,7,12"`) naming heads that run
+//!   DENSE inside the sparse launch — their cubes never take the skip
+//!   branch (mixed-mode execution, one launch). Junk demotes the WHOLE knob
+//!   (one loud line, no partial lists); heads ≥ 62 can't ride the bitmask
+//!   and refuse the same way. Unset = the incumbent all-sparse posture.
+//! - `RIIR_PREFILL_REGIME_GATE` + `RIIR_REGIME_CENTROIDS` +
+//!   `RIIR_OMSR_MANIFEST` (T4, Issue 1156 — see [`crate::regime_gate`]):
+//!   the modelless regime gate reads the chunk's boundary hidden states and
+//!   overrides the chunk's τ / sparse-vs-dense routing within the T3
+//!   manifest's floors. INERT until the freeze pass lands; a failed load
+//!   falls back to the plain arm (one loud line + a refusal counter).
 //! - Engagement (checked once per chunk at scratch-build):
 //!   `enabled && head_dim == 256 && active_prefill_len >= PREFILL_SPARSE_MIN_P`
 //!   (the prompt-level gate — the Issue-782 lesson; `reset_state` zeroes
@@ -240,6 +252,143 @@ pub fn set_prefill_sparse_scorer(scorer: SparseScorer) {
     SPARSE_SCORER_BITS.store(scorer.as_u32() + 1, std::sync::atomic::Ordering::Relaxed);
 }
 
+// ---------------------------------------------------------------------------
+// T5 — mixed-mode: the per-head DENSE bitmask (Issue 1156, plan 625 T5)
+// ---------------------------------------------------------------------------
+
+/// Bit 63 of the packed head mask = "initialized" (the first-caller-wins
+/// sentinel); heads live in bits 0..=62 — a model with more heads refuses
+/// the env (fail-closed), it is never silently truncated.
+#[cfg(feature = "cubecl_runtime")]
+const SPARSE_DENSE_HEADS_INIT: u64 = 1u64 << 63;
+#[cfg(feature = "cubecl_runtime")]
+const SPARSE_DENSE_HEADS_MAX_HEAD: usize = 62;
+#[cfg(feature = "cubecl_runtime")]
+static SPARSE_DENSE_HEADS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// Parse `RIIR_PREFILL_SPARSE_DENSE_HEADS` — a comma list of head indices
+/// and inclusive ranges (`"0-3,7,12"`, whitespace tolerated). Junk ANYWHERE
+/// is an Err: a typo silently ignoring half the list is exactly the failure
+/// class the knob must not have, so the whole spec demotes. Pure (ungated
+/// module consumers: tests + the env read).
+pub fn parse_dense_head_mask(spec: &str) -> Result<u64, String> {
+    let spec = spec.trim();
+    if spec.is_empty() {
+        return Ok(0);
+    }
+    let mut mask = 0u64;
+    for part in spec.split(',') {
+        let part = part.trim();
+        if part.is_empty() {
+            return Err("empty element in the head list".into());
+        }
+        let (lo_s, hi_s) = match part.split_once('-') {
+            Some((lo, hi)) => (lo.trim(), Some(hi.trim())),
+            None => (part, None),
+        };
+        let lo: usize = lo_s
+            .parse()
+            .map_err(|_| format!("bad head index `{lo_s}`"))?;
+        let hi = match hi_s {
+            Some(h) => h
+                .parse::<usize>()
+                .map_err(|_| format!("bad head index `{h}`"))?,
+            None => lo,
+        };
+        if hi < lo {
+            return Err(format!("inverted range `{part}`"));
+        }
+        if hi > SPARSE_DENSE_HEADS_MAX_HEAD {
+            return Err(format!(
+                "head {hi} exceeds the bitmask cap {} — wider models need a reader bump",
+                SPARSE_DENSE_HEADS_MAX_HEAD
+            ));
+        }
+        for h in lo..=hi {
+            mask |= 1u64 << h;
+        }
+    }
+    Ok(mask)
+}
+
+/// The per-head DENSE bitmask (bit h set = head h never skips; 0 = the
+/// incumbent all-sparse posture). Env `RIIR_PREFILL_SPARSE_DENSE_HEADS`,
+/// read exactly once — the first caller wins the store (the τ protocol);
+/// a junk env demotes the knob to 0 with ONE loud line.
+#[cfg(feature = "cubecl_runtime")]
+pub fn prefill_sparse_dense_head_mask() -> u64 {
+    let cur = SPARSE_DENSE_HEADS.load(std::sync::atomic::Ordering::Relaxed);
+    if cur & SPARSE_DENSE_HEADS_INIT != 0 {
+        return cur & !SPARSE_DENSE_HEADS_INIT;
+    }
+    let parsed = match std::env::var("RIIR_PREFILL_SPARSE_DENSE_HEADS") {
+        Ok(spec) => match parse_dense_head_mask(&spec) {
+            Ok(m) => m,
+            Err(e) => {
+                eprintln!(
+                    "[sparse-prefill] RIIR_PREFILL_SPARSE_DENSE_HEADS rejected: {e} — \
+                     the knob demotes to none"
+                );
+                0
+            }
+        },
+        Err(_) => 0,
+    };
+    match SPARSE_DENSE_HEADS.compare_exchange(
+        cur,
+        parsed | SPARSE_DENSE_HEADS_INIT,
+        std::sync::atomic::Ordering::Relaxed,
+        std::sync::atomic::Ordering::Relaxed,
+    ) {
+        Ok(_) => parsed,
+        Err(winner) => winner & !SPARSE_DENSE_HEADS_INIT,
+    }
+}
+
+/// Test/demo setter (the `set_prefill_sparse_tau` precedent) — overrides the
+/// env-derived mask; pass HEAD BITS only (bit 63 is managed here).
+#[cfg(feature = "cubecl_runtime")]
+pub fn set_prefill_sparse_dense_head_mask(mask: u64) {
+    SPARSE_DENSE_HEADS.store(
+        (mask & !SPARSE_DENSE_HEADS_INIT) | SPARSE_DENSE_HEADS_INIT,
+        std::sync::atomic::Ordering::Relaxed,
+    );
+}
+
+/// The per-layer stride of the device mode buffer, in u32 words — padded to
+/// the wgpu/mtl 32-byte binding-offset alignment (8 words). The logic words
+/// ([layer][head]) upload into this padded layout; the kernel slices a
+/// layer's words at `layer_idx · stride`.
+#[cfg(feature = "cubecl_runtime")]
+pub fn sparse_mode_layer_stride_words(n_head: usize) -> usize {
+    n_head.div_ceil(8) * 8
+}
+
+/// Upload layout: the logic-shaped `[layer][head]` mirror re-laid as
+/// `[layer][stride]` (first `n_head` words per stride carry the heads, the
+/// rest zero). Pure — unit-tested against the alignment law.
+#[cfg(feature = "cubecl_runtime")]
+pub fn sparse_mode_padded_words(mirror: &[u32], n_layers: usize, n_head: usize) -> Vec<u32> {
+    let stride = sparse_mode_layer_stride_words(n_head);
+    let mut out = vec![0u32; n_layers * stride];
+    for layer in 0..n_layers {
+        let src = &mirror[layer * n_head..(layer + 1) * n_head];
+        out[layer * stride..layer * stride + n_head].copy_from_slice(src);
+    }
+    out
+}
+
+/// Whether `layer_idx` has ANY dense head in the logic-shaped mirror — the
+/// dispatch consults this per (layer, chunk): a fully dense layer skips the
+/// whole sparse pipeline (pool/score/select too) and takes the dense ladder.
+#[cfg(feature = "cubecl_runtime")]
+pub fn sparse_layer_dense(mirror: &[u32], layer_idx: usize, n_head: usize) -> bool {
+    let lo = layer_idx * n_head;
+    mirror
+        .get(lo..lo + n_head)
+        .is_some_and(|row| row.iter().any(|&w| w != 0))
+}
+
 /// Test/demo setter — overrides the env-derived value (the
 /// `set_concat_split_fused` precedent).
 #[cfg(feature = "cubecl_runtime")]
@@ -326,11 +475,35 @@ pub struct SparsePrefillScratch {
     pub mask: cubecl::server::Handle,
     /// The cache-row count everything was sized for (`base_pos + p`).
     pub cache_rows: usize,
+    /// Issue 1156 T5 — the per-layer per-head DENSE mode words on device,
+    /// uploaded in the padded `[layer][stride]` layout
+    /// ([`sparse_mode_padded_words`]); word != 0 marks the head DENSE (its
+    /// cubes never take the skip branch). All-zero = the incumbent
+    /// all-sparse posture, byte-identical behavior.
+    pub head_mode: cubecl::server::Handle,
+    /// The CPU mirror of `head_mode`, LOGIC-shaped `[layer][head]` — the
+    /// dispatch consults it per layer (a fully dense layer skips the whole
+    /// sparse pipeline) without a device readback.
+    pub head_mode_words: Vec<u32>,
+    /// Per-layer word stride of the padded upload layout.
+    pub head_mode_stride: usize,
+    /// Issue 1156 T4 — the regime gate's chunk verdict (`true` = run the
+    /// sparse branch; the gate routes dense by clearing this).
+    pub sparse_engaged: bool,
+    /// Issue 1156 T4 — the gate's τ override for this chunk (`None` = the
+    /// env τ). Legal per the T3 manifest via `verify_posture_at_len`.
+    pub tau_override: Option<f32>,
+    /// Issue 1156 T4 — boundary-row staging for the gate's readback
+    /// (`Some` iff the gate is armed at build; `None` = zero cost, G3).
+    pub bnd: Option<cubecl::server::Handle>,
 }
 
 /// Derive the scratch handles for one chunk. Returns None on allocation
 /// failure (the dispatch then falls through to the dense ladder — a loud
 /// counter absence, never a wrong answer).
+///
+/// `n_layers` sizes the T5 mode buffer (the layer dimension); `bnd_elems`
+/// sizes the T4 boundary staging (0 = the gate is disarmed — no alloc, G3).
 #[cfg(feature = "cubecl_runtime")]
 pub fn alloc_sparse_scratch<R: Runtime>(
     client: &ComputeClient<R>,
@@ -338,6 +511,8 @@ pub fn alloc_sparse_scratch<R: Runtime>(
     n_kv: usize,
     head_dim: usize,
     cache_rows: usize,
+    n_layers: usize,
+    bnd_elems: usize,
 ) -> Option<SparsePrefillScratch> {
     let n_kv_blocks = cache_rows.div_ceil(SPARSE_KV_BLOCK);
     let q_windows = cache_rows.div_ceil(SPARSE_Q_BLOCK);
@@ -346,11 +521,36 @@ pub fn alloc_sparse_scratch<R: Runtime>(
     // never consults the scorer static — the envelope mode simply uses both
     // halves, mean mode the first.
     let kpool_elems = n_kv * n_kv_blocks * head_dim * 2;
+    // T5: build the mode mirror from the (env-derived, first-caller-wins)
+    // dense-head bitmask — all layers share it at v1; the uploaded words are
+    // padded to the 32-byte binding alignment.
+    let head_bits = prefill_sparse_dense_head_mask();
+    let one_row: Vec<u32> = (0..n_head)
+        .map(|h| if head_bits >> h & 1 != 0 { 1 } else { 0 })
+        .collect();
+    let mut head_mode_words = Vec::with_capacity(n_layers * n_head);
+    for _ in 0..n_layers {
+        head_mode_words.extend_from_slice(&one_row);
+    }
+    let head_mode_stride = sparse_mode_layer_stride_words(n_head);
+    let padded = sparse_mode_padded_words(&head_mode_words, n_layers, n_head);
+    // T4: the gate's boundary staging — only when armed (zero cost, G3).
+    let bnd = if bnd_elems > 0 {
+        Some(client.empty(bnd_elems * 4))
+    } else {
+        None
+    };
     Some(SparsePrefillScratch {
         kpool: client.empty(kpool_elems * 4),
         scores: client.empty(q_windows * n_head * n_kv_blocks * 4),
         mask: client.empty(q_windows * n_head * wpr * 4),
         cache_rows,
+        head_mode: client.create_from_slice(u32::as_bytes(&padded)),
+        head_mode_words,
+        head_mode_stride,
+        sparse_engaged: true,
+        tau_override: None,
+        bnd,
     })
 }
 
@@ -1106,10 +1306,14 @@ const SPARSE_ATTN_Q_PER_CUBE: u32 = 32;
 const SPARSE_KV_BLOCK_U32: u32 = 64;
 
 /// The M=32 four-rows-per-plane tiled causal flash-attention prefill with the
-/// block-sparse KV skip (Issue 1156 T2). The per-row arithmetic is the m32
-/// shape VERBATIM (the bit-identity anchor at τ=1.0); the ONLY change is the
-/// mask test at KV-block boundaries and the block jump when the bit is
-/// clear. Buffer contract = the m32 kernel's + `mask` and three params:
+/// block-sparse KV skip (Issue 1156 T2) and the per-head mixed-mode bitmask
+/// (T5). The per-row arithmetic is the m32 shape VERBATIM (the bit-identity
+/// anchor at τ=1.0); the ONLY changes are: the mask test at KV-block
+/// boundaries and the block jump when the bit is clear (T2), and the
+/// per-head DENSE mode word that kills the skip branch outright (T5 —
+/// `head_mode[head_idx] != 0`; cube-uniform since head_idx is fixed per
+/// cube). Buffer contract = the m32 kernel's + `mask`, `head_mode` and three
+/// params:
 /// `[head_dim, n_head, n_kv_head, tc, scale, q_offset, tiles, wpr,
 ///   q_blk_base, q_offset_mod]`.
 #[cfg(feature = "cubecl_runtime")]
@@ -1126,6 +1330,7 @@ fn qwen_attention_prefill_sparse_m32_f32(
     gate: &[f32],
     attn_out: &mut [f32],
     mask: &[u32],
+    head_mode: &[u32],
     params: &[f32],
 ) {
     let head_dim = params[0usize] as u32;
@@ -1152,6 +1357,16 @@ fn qwen_attention_prefill_sparse_m32_f32(
     // window boundary.
     let q_blk = q_blk_base + (q_offset_mod + q_tile * SPARSE_ATTN_Q_PER_CUBE) / 128u32;
     let mask_row = ((q_blk * n_head + head_idx) * wpr) as usize;
+
+    // Issue 1156 T5 — per-head mixed mode: a nonzero word marks the head
+    // DENSE — the skip branch goes dead for this cube's whole run (the mask
+    // is never consulted; the executed sequence is m32's exactly). The mode
+    // buffer is sliced per layer by the launcher at
+    // `layer_idx · sparse_mode_layer_stride_words(n_head)` words, so index 0
+    // here IS this layer's word for `head_idx`. Cube-uniform: head_idx is
+    // fixed per cube, so mixed launches branch per cube, never per lane
+    // (no divergent shuffle hazard).
+    let head_dense = head_mode[head_idx as usize] != 0u32;
 
     // Each plane owns FOUR ADJACENT query rows — the quartet's causal bounds
     // diverge across at most three positions, so the shared-loop waste is ≤3
@@ -1405,12 +1620,13 @@ fn qwen_attention_prefill_sparse_m32_f32(
         //    chain and all). The decision is whole-cube uniform. Skipping
         //    causal-masked or unselected rows is a bit-exact no-op for the
         //    online-softmax state (w = 0, corr = 1), so at τ=1.0 (every bit
-        //    set) the executed sequence is m32's exactly.
+        //    set) the executed sequence is m32's exactly. T5: a DENSE head's
+        //    cubes never skip, whatever the mask says.
         let blk = pos / SPARSE_KV_BLOCK_U32;
         let word = mask[mask_row + (blk / 32u32) as usize];
         let is_boundary = pos % SPARSE_KV_BLOCK_U32 == 0u32;
         let bit_clear = ((word >> (blk % 32u32)) & 1u32) == 0u32;
-        let skip = is_boundary && bit_clear;
+        let skip = is_boundary && bit_clear && !head_dense;
         if skip {
             pos += SPARSE_KV_BLOCK_U32;
         } else {
@@ -1926,7 +2142,10 @@ impl SparsePrefillSparseM32CubeCL {
     /// # Safety
     /// Same contract as the m32 kernel's launch — identical handle shapes and
     /// chunked `base_pos` cache semantics — plus `mask` holding
-    /// `[q_windows * n_head * wpr]` u32 words. `head_dim` must be 256.
+    /// `[q_windows * n_head * wpr]` u32 words and `head_mode` holding the
+    /// padded per-layer mode words (`layer_idx · [`sparse_mode_layer_stride_words`]`
+    /// sliced here; first `n_head` words of the slice carry the heads).
+    /// `head_dim` must be 256.
     #[allow(clippy::too_many_arguments, reason = "GPU kernel launch")]
     pub unsafe fn launch<R: Runtime>(
         client: &ComputeClient<R>,
@@ -1936,6 +2155,8 @@ impl SparsePrefillSparseM32CubeCL {
         gate_handle: Handle,
         attn_out_handle: Handle,
         mask_handle: Handle,
+        head_mode_handle: Handle,
+        layer_idx: usize,
         head_dim: usize,
         n_head: usize,
         n_kv_head: usize,
@@ -1952,6 +2173,12 @@ impl SparsePrefillSparseM32CubeCL {
         let n_kv_blocks = (base_pos + p).div_ceil(SPARSE_KV_BLOCK);
         let wpr = n_kv_blocks.div_ceil(32);
         let q_windows = (base_pos + p).div_ceil(SPARSE_Q_BLOCK);
+        // T5: this layer's slice of the padded mode buffer (the stride keeps
+        // every layer offset 32-byte binding aligned).
+        let mode_stride = sparse_mode_layer_stride_words(n_head);
+        let mode_slice = head_mode_handle
+            .clone()
+            .offset_start((layer_idx * mode_stride * 4) as u64);
         // Grid = n_head × q_tiles (32 queries per cube) — chunk on query-TILE
         // boundaries with the same 65535 guard as the m16/m32 launchers.
         let q_tiles_total = p.div_ceil(SPARSE_ATTN_Q_PER_CUBE as usize).max(1);
@@ -1999,10 +2226,184 @@ impl SparsePrefillSparseM32CubeCL {
                     BufferArg::from_raw_parts(g_slice, q_len),
                     BufferArg::from_raw_parts(o_slice, q_len),
                     BufferArg::from_raw_parts(mask_handle.clone(), q_windows * n_head * wpr),
+                    BufferArg::from_raw_parts(mode_slice.clone(), n_head),
                     BufferArg::from_raw_parts(params_handle, 10),
                 );
             }
             t0 += tc;
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// T4 — the boundary-row gather + the gate's chunk runner (Issue 1156)
+// ---------------------------------------------------------------------------
+
+/// Gather a chunk's boundary rows for the regime gate's readback: output row
+/// `r < head_rows` copies input row `r`; output row `r >= head_rows` copies
+/// input row `tail_start + (r - head_rows)`. The EXPLICIT `params` bound the
+/// work (never `output.len()` — the len-derived-binding class); every param
+/// stays exact in f32 at the lane's shapes (n ≤ 2^24, prompt lengths far
+/// below it).
+#[cfg(feature = "cubecl_runtime")]
+#[cube(launch_unchecked)]
+fn boundary_gather_rows_f32(input: &[f32], output: &mut [f32], params: &[f32]) {
+    let n = params[0usize] as u32;
+    let head_rows = params[1usize] as u32;
+    let tail_start = params[2usize] as u32;
+    let total_rows = params[3usize] as u32;
+    let tid = ABSOLUTE_POS;
+    if tid < (total_rows * n) as usize {
+        let r = tid as u32 / n;
+        let c = tid as u32 % n;
+        let src_row = if r < head_rows {
+            r
+        } else {
+            tail_start + (r - head_rows)
+        };
+        output[tid] = input[(src_row * n + c) as usize];
+    }
+}
+
+/// CubeCL launcher for the boundary gather: `output` sized
+/// `(head_rows + tail_rows) * n` f32, `input` the chunk's residual stream
+/// `[p, n]` with `tail_start + tail_rows <= p`.
+#[cfg(feature = "cubecl_runtime")]
+pub struct BoundaryGatherRowsCubeCL;
+
+#[cfg(feature = "cubecl_runtime")]
+impl BoundaryGatherRowsCubeCL {
+    /// # Safety
+    /// `input_handle` holds ≥ `(tail_start + tail_rows) · n` f32;
+    /// `output_handle` holds exactly `(head_rows + tail_rows) · n` f32.
+    #[allow(clippy::too_many_arguments, reason = "GPU kernel launch")]
+    pub unsafe fn launch<R: Runtime>(
+        client: &ComputeClient<R>,
+        input_handle: Handle,
+        output_handle: Handle,
+        n: usize,
+        head_rows: usize,
+        tail_start: usize,
+        tail_rows: usize,
+    ) {
+        let total_rows = head_rows + tail_rows;
+        let total = total_rows * n;
+        let params: [f32; 4] = [
+            n as f32,
+            head_rows as f32,
+            tail_start as f32,
+            total_rows as f32,
+        ];
+        let params_handle = crate::params_cache::params_handle(client, f32::as_bytes(&params));
+        let n_wg = total.div_ceil(256).max(1) as u32;
+        unsafe {
+            boundary_gather_rows_f32::launch_unchecked::<R>(
+                client,
+                CubeCount::Static(n_wg, 1, 1),
+                CubeDim::new_1d(256),
+                BufferArg::from_raw_parts(input_handle, (tail_start + tail_rows) * n),
+                BufferArg::from_raw_parts(output_handle, total),
+                BufferArg::from_raw_parts(params_handle, 4),
+            );
+        }
+    }
+}
+
+/// The boundary-staging element count the scratch builder passes for a
+/// chunk of `p` tokens at hidden width `n` — 0 when the gate is disarmed
+/// (no alloc, the G3 posture). Kept HERE so the arming read and the
+/// staging size can never drift apart (the caller never guesses).
+#[cfg(feature = "cubecl_runtime")]
+pub fn regime_gate_bnd_elems(p: usize, n: usize) -> usize {
+    if crate::regime_gate::regime_gate_armed() {
+        2 * crate::regime_gate::REGIME_POOL_TOKENS.min(p).max(1) * n
+    } else {
+        0
+    }
+}
+
+/// The regime gate's chunk runner (T4): gather the chunk's boundary rows
+/// from `x_b` (the residual stream, `[p, n]`, already staged), pool them
+/// into the gate's features, classify, and — when the decision and the T3
+/// belt both pass — override this chunk's τ. Returns the final engagement
+/// (false = the chunk routes DENSE); on a materials failure it keeps the
+/// plain arm (`true`, no override) — the operator's env posture stands,
+/// the refusal counter tells the story.
+///
+/// Disarmed → immediate `true` (zero work, G3).
+#[cfg(feature = "cubecl_runtime")]
+pub fn run_regime_gate<R: Runtime>(
+    client: &ComputeClient<R>,
+    x_b: &Handle,
+    p: usize,
+    n: usize,
+    prompt_len: usize,
+    sp: &mut SparsePrefillScratch,
+) -> bool {
+    if !crate::regime_gate::regime_gate_armed() {
+        return true;
+    }
+    let materials = match crate::regime_gate::gate_materials() {
+        Ok(m) => m,
+        Err(_) => {
+            crate::regime_gate::note_regime_refusal();
+            return true;
+        }
+    };
+    let pool = crate::regime_gate::REGIME_POOL_TOKENS.min(p).max(1);
+    let bnd = match sp.bnd.as_ref() {
+        Some(h) => h.clone(),
+        None => {
+            // Armed but the staging buffer is missing — a scratch/gate
+            // arming race. Fail closed to the plain arm (the buffer's
+            // absence is the loud counter absence pattern).
+            crate::regime_gate::note_regime_refusal();
+            return true;
+        }
+    };
+    let tail_start = p - pool;
+    unsafe {
+        BoundaryGatherRowsCubeCL::launch::<R>(
+            client,
+            x_b.clone(),
+            bnd.clone(),
+            n,
+            pool,
+            tail_start,
+            pool,
+        );
+    }
+    let bytes = match client.read_one(bnd.clone()) {
+        Ok(b) => b,
+        Err(_) => {
+            crate::regime_gate::note_regime_refusal();
+            return true;
+        }
+    };
+    let gathered = f32::from_bytes(&bytes);
+    if gathered.len() < 2 * pool * n {
+        crate::regime_gate::note_regime_refusal();
+        return true;
+    }
+    // The gather laid out [head rows; tail rows] — pooling that buffer at
+    // n_tokens = 2·pool reads bit-identical features to pooling `x_b`
+    // directly (the CPU-side equivalence is pinned in regime_gate's tests).
+    let feats = crate::regime_gate::boundary_pool(gathered, 2 * pool, n, pool);
+    let scorer = prefill_sparse_scorer();
+    match crate::regime_gate::decide_chunk(&materials.0, &materials.1, &feats, prompt_len, scorer) {
+        Ok(decision) => {
+            if decision.engage_sparse {
+                sp.tau_override = Some(decision.tau);
+                true
+            } else {
+                crate::regime_gate::note_regime_dense_chunk();
+                sp.sparse_engaged = false;
+                false
+            }
+        }
+        Err(_) => {
+            crate::regime_gate::note_regime_refusal();
+            true
         }
     }
 }
@@ -2060,6 +2461,10 @@ mod tests {
             let q_windows = cache_rows.div_ceil(SPARSE_Q_BLOCK);
             let words = vec![u32::MAX; q_windows * n_head * wpr];
             let mask_h = client.create_from_slice(u32::as_bytes(&words));
+            // T5: an all-zero mode buffer (the incumbent all-sparse posture;
+            // n_head words, one padded layer stride).
+            let mode_words = vec![0u32; sparse_mode_layer_stride_words(n_head)];
+            let mode_h = client.create_from_slice(u32::as_bytes(&mode_words));
             unsafe {
                 QwenAttentionPrefillTiledM32CubeCL::launch::<ActiveRuntime>(
                     &client,
@@ -2082,6 +2487,8 @@ mod tests {
                     g_h.clone(),
                     out_b.clone(),
                     mask_h.clone(),
+                    mode_h.clone(),
+                    0,
                     hd,
                     n_head,
                     n_kv,
@@ -2124,7 +2531,7 @@ mod tests {
         let cache_rows = 512usize; // n_kv_blocks 8, q_windows 4, wpr 1
         let scores = {
             let mut s = vec![0.0f32; 4 * n_head * 8];
-            let w1 = 1 * n_head * 8;
+            let w1 = n_head * 8;
             s[w1] = 100.0;
             s[w1 + 1] = 1.0;
             s[w1 + 2] = 50.0;
@@ -2216,7 +2623,7 @@ mod tests {
         let q_windows = 3usize;
         let mut scores = vec![0.0f32; q_windows * n_head * n_kv_blocks];
         // window 1 row: [5, 0, 5, 0, 9] — block 4 beyond the horizon.
-        let w1 = 1 * n_head * n_kv_blocks;
+        let w1 = n_head * n_kv_blocks;
         scores[w1] = 5.0;
         scores[w1 + 2] = 5.0;
         scores[w1 + 4] = 9.0;
@@ -2455,5 +2862,464 @@ mod tests {
         assert_eq!(SparseScorer::parse("junk"), None);
         assert_eq!(SparseScorer::Envelope.as_str(), "envelope");
         assert_eq!(SparseScorer::Mean.as_u32(), 0);
+    }
+
+    // -- T5 pure helpers ------------------------------------------------------
+
+    #[test]
+    fn dense_head_mask_parses_ranges_and_refuses_junk() {
+        assert_eq!(parse_dense_head_mask(""), Ok(0));
+        assert_eq!(parse_dense_head_mask("   "), Ok(0));
+        assert_eq!(parse_dense_head_mask("3"), Ok(1 << 3));
+        assert_eq!(parse_dense_head_mask("0-3"), Ok(0b1111));
+        assert_eq!(
+            parse_dense_head_mask("0-3,7,12"),
+            Ok(0b1111 | 1 << 7 | 1 << 12)
+        );
+        assert_eq!(parse_dense_head_mask(" 5 - 9 , 1 "), Ok((0b11111 << 5) | 2));
+        // Overlaps union (idempotent).
+        assert_eq!(parse_dense_head_mask("2-4,3-5"), Ok(0b1111 << 2));
+        // Junk ANYWHERE demotes the whole spec.
+        assert!(parse_dense_head_mask("0-3,x").is_err());
+        assert!(parse_dense_head_mask("0,,2").is_err());
+        assert!(parse_dense_head_mask("5-2").is_err(), "inverted range");
+        assert!(parse_dense_head_mask("-3").is_err(), "a bare range start");
+        assert!(
+            parse_dense_head_mask("999").is_err(),
+            "past the bitmask cap"
+        );
+    }
+
+    #[test]
+    fn mode_layout_helpers_pin_the_alignment_law() {
+        // The stride keeps every layer offset 32-byte aligned (8-word
+        // multiples) at every head count.
+        for n_head in [1usize, 6, 8, 20, 32, 40] {
+            let stride = sparse_mode_layer_stride_words(n_head);
+            assert_eq!(stride % 8, 0, "stride must be 8-word aligned");
+            assert!(stride >= n_head);
+        }
+        // 20 heads → ceil(20/8)=3 → 24 words (96 bytes).
+        assert_eq!(sparse_mode_layer_stride_words(20), 24);
+        // The padded layout copies each layer's heads into its stride slot,
+        // zero-fills the padding, and preserves word values.
+        let mirror: Vec<u32> = (0..3 * 20).map(|i| (i % 7 + 1) as u32).collect();
+        let padded = sparse_mode_padded_words(&mirror, 3, 20);
+        assert_eq!(padded.len(), 3 * 24);
+        for layer in 0..3usize {
+            for h in 0..20usize {
+                assert_eq!(padded[layer * 24 + h], mirror[layer * 20 + h]);
+            }
+            for pad in 20..24 {
+                assert_eq!(padded[layer * 24 + pad], 0, "padding stays zero");
+            }
+        }
+        // layer_dense reads the logic-shaped mirror.
+        let mut m = vec![0u32; 4 * 6];
+        assert!(!sparse_layer_dense(&m, 1, 6));
+        m[2 * 6 + 3] = 1;
+        assert!(!sparse_layer_dense(&m, 0, 6));
+        assert!(sparse_layer_dense(&m, 2, 6));
+        assert!(!sparse_layer_dense(&m, 3, 6));
+    }
+
+    // -- T5 GPU battery (the G1 anchors) --------------------------------------
+    // Mixed-mode contract: a DENSE head's cubes never consult the mask, an
+    // all-zero mode is the incumbent sparse posture, and a mixed launch reads
+    // as the per-head union of the single-mode runs.
+
+    /// Build the shared fixtures + run the select pipeline at τ, returning
+    /// (handles, mask words host-side). The three attention launches reuse
+    /// the SAME q/k/v/g/mask so only the mode buffer differs.
+    #[allow(clippy::type_complexity)]
+    fn mixed_fixtures(
+        client: &ComputeClient<ActiveRuntime>,
+        p: usize,
+        base_pos: usize,
+        n_head: usize,
+        n_kv: usize,
+        hd: usize,
+        tau: f32,
+    ) -> (Handle, Handle, Handle, Handle, Handle, Vec<u32>) {
+        let cache_rows = base_pos + p;
+        let q = lcg_fill(11, p * n_head * hd, -1.0, 1.0);
+        let k = lcg_fill(12, cache_rows * n_kv * hd, -1.0, 1.0);
+        let v = lcg_fill(13, cache_rows * n_kv * hd, -1.0, 1.0);
+        let g = lcg_fill(14, p * n_head * hd, -1.0, 1.0);
+        let q_h = client.create_from_slice(f32::as_bytes(&q));
+        let k_h = client.create_from_slice(f32::as_bytes(&k));
+        let v_h = client.create_from_slice(f32::as_bytes(&v));
+        let g_h = client.create_from_slice(f32::as_bytes(&g));
+        let q_windows = cache_rows.div_ceil(SPARSE_Q_BLOCK);
+        let wpr = sparse_mask_wpr(cache_rows);
+        // Pool + score + select at τ < 1.0 — a REAL lossy mask (some blocks
+        // unset), the shape mixed-mode exists for.
+        let n_kv_blocks = cache_rows.div_ceil(SPARSE_KV_BLOCK);
+        let kpool_elems = n_kv * n_kv_blocks * hd * 2;
+        let kpool = client.empty(kpool_elems * 4);
+        let scores = client.empty(q_windows * n_head * n_kv_blocks * 4);
+        let mask_h = client.empty(q_windows * n_head * wpr * 4);
+        unsafe {
+            SparsePrefillPoolCubeCL::launch::<ActiveRuntime>(
+                client,
+                k_h.clone(),
+                kpool.clone(),
+                hd,
+                n_kv,
+                cache_rows,
+                SparseScorer::Envelope,
+            );
+            SparsePrefillScoreCubeCL::launch::<ActiveRuntime>(
+                client,
+                q_h.clone(),
+                k_h.clone(),
+                kpool.clone(),
+                scores.clone(),
+                hd,
+                n_head,
+                n_kv,
+                cache_rows,
+                base_pos,
+                SparseScorer::Envelope,
+            );
+            SparsePrefillSelectCubeCL::launch::<ActiveRuntime>(
+                client,
+                scores.clone(),
+                mask_h.clone(),
+                n_head,
+                cache_rows,
+                tau,
+                base_pos,
+            );
+        }
+        let mask_bytes = client.read_one(mask_h.clone()).expect("mask readback");
+        (
+            q_h,
+            k_h,
+            v_h,
+            g_h,
+            mask_h,
+            u32::from_bytes(&mask_bytes).to_vec(),
+        )
+    }
+
+    fn launch_sparse_with_mode(
+        client: &ComputeClient<ActiveRuntime>,
+        q: &Handle,
+        k: &Handle,
+        v: &Handle,
+        g: &Handle,
+        out: &Handle,
+        mask: &Handle,
+        mode_words: &[u32],
+        n_head: usize,
+        p: usize,
+        base_pos: usize,
+        hd: usize,
+        n_kv: usize,
+        layer_idx: usize,
+    ) {
+        let mode_h = client.create_from_slice(u32::as_bytes(mode_words));
+        unsafe {
+            SparsePrefillSparseM32CubeCL::launch::<ActiveRuntime>(
+                client,
+                q.clone(),
+                k.clone(),
+                v.clone(),
+                g.clone(),
+                out.clone(),
+                mask.clone(),
+                mode_h,
+                layer_idx,
+                hd,
+                n_head,
+                n_kv,
+                p,
+                base_pos,
+            );
+        }
+    }
+
+    fn head_rows_differ(
+        a: &[f32],
+        b: &[f32],
+        head: usize,
+        n_head: usize,
+        hd: usize,
+        p: usize,
+    ) -> usize {
+        let lo = head * hd;
+        let mut diffs = 0usize;
+        for t in 0..p {
+            let base = t * n_head * hd + lo;
+            for i in 0..hd {
+                if a[base + i].to_bits() != b[base + i].to_bits() {
+                    diffs += 1;
+                }
+            }
+        }
+        diffs
+    }
+
+    #[test]
+    fn all_dense_mode_ignores_the_mask_and_is_bit_identical_to_m32() {
+        let ctx = CubeCLContext::new().expect("CubeCL should initialize");
+        let client = ctx.client();
+        let n_head = 6usize;
+        let n_kv = 1usize;
+        let hd = 256usize;
+        let p = 300usize;
+        let base_pos = 0usize;
+        let (q, k, v, g, _mask, mask_words) =
+            mixed_fixtures(&client, p, base_pos, n_head, n_kv, hd, 0.7);
+        // The mask must actually be lossy (some block bit unset) — else this
+        // test proves nothing about the mode bit.
+        let lossy = mask_words.iter().any(|&w| w != u32::MAX && w != 0);
+        assert!(lossy, "the τ=0.7 fixture mask must leave blocks unset");
+        let out_dense = client.empty(p * n_head * hd * 4);
+        let out_m32 = client.empty(p * n_head * hd * 4);
+        // All-ones mode: one word per head (layer 0's padded stride slot).
+        let mode_all_dense = vec![1u32; sparse_mode_layer_stride_words(n_head)];
+        launch_sparse_with_mode(
+            &client,
+            &q,
+            &k,
+            &v,
+            &g,
+            &out_dense,
+            &_mask,
+            &mode_all_dense,
+            n_head,
+            p,
+            base_pos,
+            hd,
+            n_kv,
+            0,
+        );
+        let cache_rows = base_pos + p;
+        let q_windows = cache_rows.div_ceil(SPARSE_Q_BLOCK);
+        let wpr = sparse_mask_wpr(cache_rows);
+        unsafe {
+            QwenAttentionPrefillTiledM32CubeCL::launch::<ActiveRuntime>(
+                &client,
+                q.clone(),
+                k.clone(),
+                v.clone(),
+                g.clone(),
+                out_m32.clone(),
+                hd,
+                n_head,
+                n_kv,
+                p,
+                base_pos,
+            );
+        }
+        let bytes_d = client.read_one(out_dense).expect("readback");
+        let bytes_m = client.read_one(out_m32).expect("readback");
+        let d = f32::from_bytes(&bytes_d);
+        let m = f32::from_bytes(&bytes_m);
+        let diffs = d
+            .iter()
+            .zip(m.iter())
+            .filter(|(x, y)| x.to_bits() != y.to_bits())
+            .count();
+        assert_eq!(
+            diffs, 0,
+            "all-dense mode must bypass the mask entirely and equal m32 bit-for-bit"
+        );
+    }
+
+    #[test]
+    fn all_zero_mode_tau1_stays_bit_identical_to_m32() {
+        // The incumbent anchor re-run THROUGH the mode arg: all-zero words +
+        // an all-ones mask at τ semantics (the mask built by the fixture's
+        // select at τ=1.0 — the identity posture) == m32.
+        let ctx = CubeCLContext::new().expect("CubeCL should initialize");
+        let client = ctx.client();
+        let n_head = 6usize;
+        let n_kv = 1usize;
+        let hd = 256usize;
+        let p = 256usize;
+        let base_pos = 256usize;
+        let (q, k, v, g, mask, _) = mixed_fixtures(&client, p, base_pos, n_head, n_kv, hd, 1.0);
+        let out = client.empty(p * n_head * hd * 4);
+        let mode_all_zero = vec![0u32; sparse_mode_layer_stride_words(n_head)];
+        launch_sparse_with_mode(
+            &client,
+            &q,
+            &k,
+            &v,
+            &g,
+            &out,
+            &mask,
+            &mode_all_zero,
+            n_head,
+            p,
+            base_pos,
+            hd,
+            n_kv,
+            0,
+        );
+        let out_m32 = client.empty(p * n_head * hd * 4);
+        unsafe {
+            QwenAttentionPrefillTiledM32CubeCL::launch::<ActiveRuntime>(
+                &client,
+                q.clone(),
+                k.clone(),
+                v.clone(),
+                g.clone(),
+                out_m32.clone(),
+                hd,
+                n_head,
+                n_kv,
+                p,
+                base_pos,
+            );
+        }
+        let bytes_a = client.read_one(out).expect("readback");
+        let bytes_b = client.read_one(out_m32).expect("readback");
+        let a = f32::from_bytes(&bytes_a);
+        let b = f32::from_bytes(&bytes_b);
+        let diffs = a
+            .iter()
+            .zip(b.iter())
+            .filter(|(x, y)| x.to_bits() != y.to_bits())
+            .count();
+        assert_eq!(
+            diffs, 0,
+            "all-zero mode at τ=1.0 == m32 (the T2 anchor via the T5 wire)"
+        );
+    }
+
+    #[test]
+    fn mixed_mode_equals_the_union_of_single_mode_runs() {
+        let ctx = CubeCLContext::new().expect("CubeCL should initialize");
+        let client = ctx.client();
+        let n_head = 6usize;
+        let n_kv = 1usize;
+        let hd = 256usize;
+        let p = 300usize;
+        let base_pos = 0usize;
+        let (q, k, v, g, mask, mask_words) =
+            mixed_fixtures(&client, p, base_pos, n_head, n_kv, hd, 0.7);
+        assert!(
+            mask_words.iter().any(|&w| w != u32::MAX && w != 0),
+            "the fixture mask must be lossy for the union claim to bind"
+        );
+        // Run A: all-sparse (mode zero). Run B: all-dense (mode ones).
+        let out_sparse = client.empty(p * n_head * hd * 4);
+        let out_dense = client.empty(p * n_head * hd * 4);
+        let mode_zero = vec![0u32; sparse_mode_layer_stride_words(n_head)];
+        let mode_ones = vec![1u32; sparse_mode_layer_stride_words(n_head)];
+        launch_sparse_with_mode(
+            &client,
+            &q,
+            &k,
+            &v,
+            &g,
+            &out_sparse,
+            &mask,
+            &mode_zero,
+            n_head,
+            p,
+            base_pos,
+            hd,
+            n_kv,
+            0,
+        );
+        launch_sparse_with_mode(
+            &client, &q, &k, &v, &g, &out_dense, &mask, &mode_ones, n_head, p, base_pos, hd, n_kv,
+            0,
+        );
+        // Run C: MIXED — heads {0, 2, 4} dense, {1, 3, 5} sparse — in ONE
+        // launch through the same launcher (the no-serial-split law).
+        let out_mixed = client.empty(p * n_head * hd * 4);
+        let mut mode_mixed = vec![0u32; sparse_mode_layer_stride_words(n_head)];
+        for h in [0usize, 2, 4] {
+            mode_mixed[h] = 1;
+        }
+        launch_sparse_with_mode(
+            &client,
+            &q,
+            &k,
+            &v,
+            &g,
+            &out_mixed,
+            &mask,
+            &mode_mixed,
+            n_head,
+            p,
+            base_pos,
+            hd,
+            n_kv,
+            0,
+        );
+        let bytes_s = client.read_one(out_sparse).expect("readback");
+        let bytes_d = client.read_one(out_dense).expect("readback");
+        let bytes_m = client.read_one(out_mixed).expect("readback");
+        let s = f32::from_bytes(&bytes_s);
+        let d = f32::from_bytes(&bytes_d);
+        let m = f32::from_bytes(&bytes_m);
+        for h in 0..n_head {
+            let (want, name) = if h % 2 == 0 {
+                (&d, "dense")
+            } else {
+                (&s, "sparse")
+            };
+            let diffs = head_rows_differ(&m, want, h, n_head, hd, p);
+            assert_eq!(
+                diffs, 0,
+                "mixed head {h} (mode {name}) must match the single-mode run bit-for-bit"
+            );
+        }
+        // And the two single-mode runs must genuinely differ somewhere (the
+        // fixture must make the union claim non-vacuous).
+        let any = (0..n_head)
+            .map(|h| head_rows_differ(&s, &d, h, n_head, hd, p))
+            .sum::<usize>();
+        assert!(
+            any > 0,
+            "the τ=0.7 fixture must make dense ≠ sparse somewhere"
+        );
+    }
+
+    #[test]
+    fn boundary_gather_matches_the_cpu_rows() {
+        let ctx = CubeCLContext::new().expect("CubeCL should initialize");
+        let client = ctx.client();
+        let n = 64usize; // a small row width — the gather is width-agnostic
+        let p = 40usize;
+        let pool = 8usize;
+        let hid: Vec<f32> = (0..p * n).map(|i| (i as f32) * 0.25 - 7.0).collect();
+        let x_h = client.create_from_slice(f32::as_bytes(&hid));
+        let bnd = client.empty(2 * pool * n * 4);
+        let tail_start = p - pool;
+        unsafe {
+            BoundaryGatherRowsCubeCL::launch::<ActiveRuntime>(
+                &client,
+                x_h.clone(),
+                bnd.clone(),
+                n,
+                pool,
+                tail_start,
+                pool,
+            );
+        }
+        let bytes_got = client.read_one(bnd).expect("readback");
+        let got = f32::from_bytes(&bytes_got);
+        let mut want = Vec::with_capacity(2 * pool * n);
+        want.extend_from_slice(&hid[0..pool * n]);
+        want.extend_from_slice(&hid[tail_start * n..p * n]);
+        assert_eq!(got.len(), want.len());
+        for (a, b) in got.iter().zip(want.iter()) {
+            assert_eq!(a.to_bits(), b.to_bits(), "the gather must copy exact bits");
+        }
+        // And the CPU pooling equivalence the gate relies on: pooling the
+        // gathered buffer == pooling the original, bit-for-bit.
+        let direct = crate::regime_gate::boundary_pool(&hid, p, n, pool);
+        let from_gather = crate::regime_gate::boundary_pool(&got, 2 * pool, n, pool);
+        for (a, b) in direct.iter().zip(from_gather.iter()) {
+            assert_eq!(a.to_bits(), b.to_bits());
+        }
     }
 }

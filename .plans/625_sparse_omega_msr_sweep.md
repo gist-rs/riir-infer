@@ -1,6 +1,6 @@
 # Plan 625 — Issue 1156 T3: the per-family ΩMSR sweep + digest-pinned manifest
 
-**Status:** In progress — zed-amo-i1156 (lease expires 2026-10-31T17:22:37Z; issue `.issues/1156_sparse_prefill_league_eval.md`)
+**Status:** T3 + Protocol v2 + T4/T5 machinery DONE 2026-10-30 — zed-amo-i1156 (lease expires 2026-10-31T17:22:37Z; issue `.issues/1156_sparse_prefill_league_eval.md`; remaining: T4.4 freeze + T6 cells, both GPU idle-window-gated)
 
 ## Why
 
@@ -177,3 +177,97 @@ same corpus digest, same model pin) so the v1↔v2 read is paired:
       `b8b06eb` — digest `a4b55a15e0ef8774…`; verdict 7/7 families floored,
       math improved 0.9→0.5, no regression anywhere → **envelope stays
       DEFAULT**; record riir-ai `.benchmarks/1153_issue1156_t3v2_envelope_omega_sweep.md`)
+
+## T4 + T5 — the regime gate and the mixed-mode wire
+
+**Status:** LANDED (machinery) 2026-10-30 — zed-amo-i1156; the FREEZE + the
+league cells are the remaining GPU lanes (idle-window-gated)
+
+T4's premise (restored by T3-v2): the modelless regime gate has real floors
+to consume. T5 gives the floors' decisions a mixed-mode execution wire.
+
+- **T5 (fused mixed-mode):** the sparse m32 kernel gains a per-head mode
+  word (`head_mode[head_idx] != 0` → DENSE — the skip branch dies for that
+  head's cubes; cube-uniform, no divergent shuffle hazard). The launcher
+  slices a padded per-layer buffer (`sparse_mode_layer_stride_words` =
+  32-byte-binding-aligned strides — the wgpu offset law); the CPU mirror
+  (`head_mode_words`) lets the dispatch skip the WHOLE sparse pipeline for a
+  fully dense layer (pool/score/select too). Env
+  `RIIR_PREFILL_SPARSE_DENSE_HEADS="0-3,7"` (junk anywhere demotes the
+  whole knob loud — a partial list is the failure class); heads ≥ 62 refuse
+  (the bitmask cap, fail-closed).
+- **T4 (modelless regime gate, `regime_gate.rs`):** boundary-pooled hidden
+  states ([`boundary_pool`]: first/last 100 rows of the chunk's residual
+  stream, mean, concat — sigmoid margin, NEVER softmax) → two frozen
+  centroids (digest-pinned sidecar pair, `parse_centroids_body` refusing
+  kind/version/dim/margin drift) → per-chunk class (retrieval / flow /
+  ambiguous) → τ from the T3 manifest at the CURRENT length through the NEW
+  `sparse_omega_msr::conservative_floor_for_len` (exact bucket wins; between
+  buckets the ceil bucket; past every bucket the tightest; a `None` bucket
+  poisons at-or-above reads; unknown tags Err) + `verify_posture_at_len` —
+  the length-aware arm of the ONE mechanism (the binding arm blesses
+  τ=0.7 for continuation at 32K where the measured 32K row demands 0.85;
+  the gate holds a length, so it consumes the strict arm). Ambiguous → the
+  max of both class floors, belt-verified over ALL 7 families. A class with
+  any missing/unmeasured/floor-less family routes DENSE (fail-closed).
+- **The integration seam:** the gather kernel (`boundary_gather_rows_f32`,
+  explicit-params bounds — the len-derived-binding law) + `run_regime_gate`
+  (chunk-local, after the residual stream stages, before the first
+  attention dispatch; armed-only alloc, G3). Materials cached once per
+  process (OnceLock); a load failure = ONE loud line + refusal counter +
+  the plain arm keeps the operator's env τ — never a silent change.
+  Counters `regime_gate_counters()` = (decisions, dense_chunks, refusals)
+  — the vacuous-guard triple for T6.
+- **Honest scope:** the v1 dynamic range on the committed v2 manifest is
+  τ ∈ [0.8, 0.85] at 16K, degenerating to 0.85 at 32K (the measured
+  continuation row binds); the decision is per-chunk uniform across
+  heads/layers — the per-head/per-layer WIRE is T5's, exercised by the env
+  + tests; per-layer differentiation is the trained router's (Plan 476)
+  upgrade path. `REGIME_GAIN` is a named placeholder pending the freeze.
+
+### Tasks
+
+- [x] **T5.1** kernel head_mode arg + skip line; launcher per-layer slice
+      (32B-aligned padded layout); scratch mode buffer + CPU mirror;
+      `parse_dense_head_mask` + env arm; layout helpers pinned to the
+      alignment law. (riir-infer this commit)
+- [x] **T5.2** the G1 battery green ON METAL: `all_dense_mode_ignores_the_mask_and_is_bit_identical_to_m32`
+      (lossy τ=0.7 fixture mask proven lossy first — the non-vacuity
+      guard), `all_zero_mode_tau1_stays_bit_identical_to_m32` (the T2 anchor
+      through the T5 wire), `mixed_mode_equals_the_union_of_single_mode_runs`
+      (heads {0,2,4} dense vs {1,3,5} sparse in ONE launch == the per-head
+      union, fixture-proven dense ≠ sparse somewhere),
+      `sparse_tau1_is_bit_identical_to_m32` re-green (the incumbent anchor
+      post-change). Plus the pure suites (mask parse incl. junk/cap/inverted
+      demotion, layout alignment, gather-vs-CPU bits). 298/298 lib green at
+      `cubecl_runtime`; clippy −D clean at the lane posture + `production`
+      check green. Contention disclosure: the sibling rethink sweep POSTs to
+      amo's mammoth serve during the run — bit-identity gates are
+      deterministic under serialized Metal execution (the exclusivity law
+      governs TIMING gates; T6's wall cells still run verified-idle).
+- [x] **T4.1** `sparse_omega_msr`: `OMEGA_LEN_BUCKETS`,
+      `conservative_floor_for_len`, `verify_posture_at_len` + 6 planted
+      tests (exact/ceil/past/None-poison/unknown-tag/32K-stricter-than-binding).
+- [x] **T4.2** `regime_gate.rs`: boundary_pool (+ the gathered-buffer
+      bit-equivalence pin), sigmoid/cosine, decide policy both directions +
+      illegal-class-dense + ambiguous-conservative, floors from the COMMITTED
+      v2 fixture (16k → (0.85, 0.8); 32k → (0.85, 0.85)), sidecar parser
+      drift refusals, env arm + counters. 95/95 green at the no-features
+      posture (the substrate runs everywhere).
+- [x] **T4.3** the seam: gather kernel + `run_regime_gate` + the forward
+      hook (staged-guard: only when the residual stream is staged) + the
+      dispatch overrides (τ override, chunk-dense routing, per-layer
+      dense skip) + `regime_gate_bnd_elems` (arming and alloc size in ONE
+      place). `boundary_gather_matches_the_cpu_rows` green on Metal.
+- [-] **T4.4** the CENTROID FREEZE pass — extend the sweep instrument with
+      a feature-dump mode over the 8 anchors (dense forward, capture the
+      boundary rows, pool, dump per-family features), compute the two
+      centroids deterministically OFFLINE, commit the sidecar pair, then
+      calibrate `REGIME_GAIN`/margin on the dump. GPU idle-window-gated
+      (the machinery refuses to arm until the sidecars exist — fail-closed,
+      never placeholder centroids in the tree).
+- [-] **T6** league cells at the measured postures (τ=0.85 / 0.9, now plus
+      the mixed-mode + regime-gate postures once T4.4 lands) — the decision
+      cell from the T3-v2 verdict table; verified-idle protocol, both box
+      classes, preflight provenance; promotion owner-gated on the GOAT
+      (perf AND per-family quality).

@@ -501,6 +501,11 @@ pub mod qwen_attention_prefill_sparse_cubecl;
 // (the arm's binding quality floors; knee calc ungated, blake3/manifest I/O
 // ride `cubecl_runtime` — the arm's posture).
 pub mod sparse_omega_msr;
+// Issue 1156 T4 / Plan 625: the modelless regime gate — boundary-pooled
+// hidden states → two frozen centroids → the per-chunk sparse/dense τ
+// routing that consumes the T3 floors. CPU-pure substrate; the sidecar
+// loader rides `cubecl_runtime` for blake3 (the manifest-pair posture).
+pub mod regime_gate;
 // Issue 844 T5: the M=64 eight-rows-per-plane arm (opt-in).
 #[cfg(feature = "cubecl_runtime")]
 pub mod qwen_attention_prefill_m64_cubecl;
