@@ -4113,6 +4113,86 @@ impl TernaryDeltanetGpuForward {
             eprintln!("[Issue 663 T5] zero-copy raw-Metal weight cache complete.");
         }
 
+        // riir-ai Plan 644 T1: the speed-balanced ANE‖GPU channel split. A
+        // split rides the weight handle (like the zero-copy cache above), so
+        // every prefill_project site takes it with no per-site code. Needs
+        // the zero-copy GEMM (its wgpu-init guard covers the ANE's raw
+        // unpack) — refused loud without it, never silently half-armed.
+        #[cfg(all(
+            feature = "ane_zc_channel_split",
+            target_os = "macos",
+            target_arch = "aarch64"
+        ))]
+        if crate::ane_prefill::channel_split::prefill_ane_channel_split() {
+            match &metal_zerocopy_gemm {
+                None => eprintln!(
+                    "[Plan 644] channel split armed but the zero-copy tensor GEMM is not initialized — split NOT registered (arm set_prefill_use_metal_tensor_zerocopy before construction)"
+                ),
+                Some(gemm) => {
+                    let fraction =
+                        crate::ane_prefill::channel_split::prefill_ane_channel_split_fraction();
+                    let block = crate::ane_prefill::ANE_PREFILL_BLOCK_TOKENS;
+                    let t0 = std::time::Instant::now();
+                    // The ANE holds a bounded number of loaded programs
+                    // (measured ~120 on M5 Ultra / macOS 27.0.1 — "no ANE
+                    // resources", Code=54, long before any byte budget), so
+                    // sites register in order of saving per program
+                    // (gate/up ≈6.7 ms, qkv ≈4.0, z ≈2.4, out ≈2.3 — Plan
+                    // 644's table) and the first refusal ENDS registration:
+                    // past capacity every attempt is a ~7 s retry ladder.
+                    let (mut sites, mut refused) = (0usize, None::<String>);
+                    let tiers: [&[&str]; 3] = [
+                        &["gate_proj", "up_proj"],
+                        &["in_proj_qkv", "in_proj_z"],
+                        &["out_proj"],
+                    ];
+                    'reg: for tier in tiers {
+                        for (i, lh) in layers.iter_mut().enumerate() {
+                            let l = &weights.layers[i];
+                            let is_gdn = layer_types[i] == DeltaNetLayerType::DeltaNet;
+                            for &name in tier {
+                                let (h, host) = match (name, is_gdn) {
+                                    ("gate_proj", _) => (&mut lh.gate_proj, &l.gate_proj),
+                                    ("up_proj", _) => (&mut lh.up_proj, &l.up_proj),
+                                    ("in_proj_qkv", true) => (&mut lh.in_proj_qkv, &l.in_proj_qkv),
+                                    ("in_proj_z", true) => (&mut lh.in_proj_z, &l.in_proj_z),
+                                    ("out_proj", true) => (&mut lh.out_proj, &l.out_proj),
+                                    _ => continue,
+                                };
+                                match crate::ane_prefill::channel_split::build(
+                                    &client,
+                                    &q4_refuse(host, name),
+                                    fraction,
+                                    block,
+                                ) {
+                                    Ok(Some(mut split)) => {
+                                        split.suffix.zerocopy_cache =
+                                            gemm.cache_weights(&client, &split.suffix).ok();
+                                        h.ane_split = Some(std::sync::Arc::new(split));
+                                        sites += 1;
+                                    }
+                                    Ok(None) => {}
+                                    Err(e) => {
+                                        refused = Some(format!("layer {i} {name}: {e}"));
+                                        break 'reg;
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    if let Some(why) = &refused {
+                        eprintln!(
+                            "[Plan 644] ANE program capacity reached after {sites} split sites ({why}) — remaining sites stay GPU-only"
+                        );
+                    }
+                    eprintln!(
+                        "[Plan 644] channel split registered: {sites} sites at f={fraction:.2}, block {block}, in {:.1} s",
+                        t0.elapsed().as_secs_f64()
+                    );
+                }
+            }
+        }
+
         // Issue 726 T3: ANE hybrid prefill bank. Registration is driven by
         // the runtime flag (set before construction — see `crate::ane_prefill`);
         // every refusal reports Unavailable and prefill fail-opens to the
@@ -7913,6 +7993,86 @@ impl TernaryDeltanetGpuForward {
         }
     }
 
+    /// riir-ai Plan 644 T1 — one channel-split projection: ANE rows `[0,k)`
+    /// straight into `output`'s column block (strided unpack), GPU rows
+    /// `[k,n)` into a scratch then scattered to columns `[k,n)`, concurrently.
+    /// `false` = refused before or after the GPU half ran; the caller's
+    /// full-width path then rewrites every column.
+    #[cfg(all(
+        feature = "ane_zc_channel_split",
+        target_os = "macos",
+        target_arch = "aarch64"
+    ))]
+    fn prefill_project_channel_split(
+        &self,
+        split: &crate::ane_prefill::channel_split::AneChannelSplit,
+        input: &Handle,
+        output: &Handle,
+        p: usize,
+        site: PrefillSite,
+    ) -> bool {
+        let (Some(zc), Some(gemm)) = (
+            crate::ane_prefill::exec_zc::zc_context_cached(),
+            self.metal_zerocopy_gemm.as_ref(),
+        ) else {
+            return false;
+        };
+        // The ANE unpack writes `output` behind wgpu's back: mark it
+        // initialized first (the Issue 1146 lazy-clear class).
+        if gemm
+            .ensure_wgpu_initialized(&self.client, output, p * split.n)
+            .is_err()
+        {
+            return false;
+        }
+        // The raw pack must queue AFTER `input`'s producer (Issue 670 T4).
+        let _ = self.client.flush();
+        let seg = crate::ane_prefill::exec_zc::ZcSegment {
+            target: output,
+            chan_off: 0,
+            seg_dim: split.k,
+            out_stride: split.n,
+            out_col: 0,
+        };
+        let job = match crate::ane_prefill::exec_zc::begin_split_overlapped_zc_segments(
+            &self.client,
+            zc,
+            split.kernel.clone(),
+            input,
+            p,
+            split.ic,
+            split.block_tokens,
+            &[seg],
+        ) {
+            Ok(job) => job,
+            Err(e) => {
+                eprintln!("[Plan 644] split begin refused ({e}) — full-width GPU");
+                return false;
+            }
+        };
+        let m_gpu = split.n - split.k;
+        let scratch = self.client.empty(p * m_gpu * std::mem::size_of::<f32>());
+        self.prefill_project_dispatch(&split.suffix, input, &scratch, p, site);
+        unsafe {
+            crate::elementwise_cubecl::CopyColsCubeCL::launch::<ActiveRuntime>(
+                &self.client,
+                scratch,
+                output.clone(),
+                p,
+                m_gpu,
+                split.n,
+                split.k,
+            );
+        }
+        match job.finish() {
+            Ok(()) => true,
+            Err(e) => {
+                eprintln!("[Plan 644] split ANE half failed ({e}) — full-width GPU rewrite");
+                false
+            }
+        }
+    }
+
     /// Full-queue fence for the exec timer: CubeCL's `sync()` waits only on
     /// submissions wgpu tracks, so the raw-Metal zero-copy GEMM's committed
     /// buffer needs its own wait — without it that path measures ENCODE
@@ -7938,6 +8098,22 @@ impl TernaryDeltanetGpuForward {
         site: PrefillSite,
     ) {
         let client = &self.client;
+
+        // riir-ai Plan 644 T1: a registered channel split runs FIRST; any
+        // refusal falls through to the full-width paths below, which
+        // overwrite every column (queue-ordered) — fail-open is exact.
+        #[cfg(all(
+            feature = "ane_zc_channel_split",
+            target_os = "macos",
+            target_arch = "aarch64"
+        ))]
+        if let Some(split) = &w.ane_split
+            && crate::ane_prefill::channel_split::prefill_ane_channel_split()
+            && p.is_multiple_of(split.block_tokens)
+            && self.prefill_project_channel_split(split, input, output, p, site)
+        {
+            return;
+        }
 
         // Issue 1122 gate 1: the Metal tensor branches consult the site mask;
         // builds without them carry the param as identity.

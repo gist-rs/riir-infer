@@ -1090,6 +1090,64 @@ impl Split2CubeCL {
     }
 }
 
+/// CubeCL kernel: scatter a dense `[rows × src_cols]` matrix into the column
+/// block `[dst_col_off, dst_col_off + src_cols)` of a `[rows × dst_cols]`
+/// matrix (riir-ai Plan 644 — the GPU half of an ANE‖GPU channel split
+/// lands its suffix channels here). 2D grid: X = columns (256 per cube),
+/// Y = rows — wgpu caps a dispatch dimension at 65535 workgroups, which a
+/// flat 1D grid over `rows × cols` (21M at qkv@2048) would exceed. Integer
+/// scalars, never f32 params: element indices pass 2^24 at these shapes.
+#[cfg(feature = "cubecl_runtime")]
+#[cube(launch_unchecked)]
+fn copy_cols_f32(src: &[f32], dst: &mut [f32], src_cols: u32, dst_cols: u32, dst_col_off: u32) {
+    let c = ABSOLUTE_POS_X;
+    let r = CUBE_POS_Y;
+    if c >= src_cols {
+        terminate!();
+    }
+    dst[(r * dst_cols + dst_col_off + c) as usize] = src[(r * src_cols + c) as usize];
+}
+
+/// Launcher for [`copy_cols_f32`].
+#[cfg(feature = "cubecl_runtime")]
+pub struct CopyColsCubeCL;
+
+#[cfg(feature = "cubecl_runtime")]
+impl CopyColsCubeCL {
+    /// Copy `src[r][c]` → `dst[r][dst_col_off + c]` for `r < rows`,
+    /// `c < src_cols`.
+    ///
+    /// # Safety
+    ///
+    /// - `src`: `rows * src_cols` f32 elements
+    /// - `dst`: `rows * dst_cols` f32 elements, `dst_col_off + src_cols <= dst_cols`
+    /// - `rows <= 65535` (one Y cube per row)
+    pub unsafe fn launch<R: Runtime>(
+        client: &ComputeClient<R>,
+        src: Handle,
+        dst: Handle,
+        rows: usize,
+        src_cols: usize,
+        dst_cols: usize,
+        dst_col_off: usize,
+    ) {
+        debug_assert!(dst_col_off + src_cols <= dst_cols);
+        debug_assert!(rows <= 65_535);
+        unsafe {
+            copy_cols_f32::launch_unchecked::<R>(
+                client,
+                CubeCount::Static(src_cols.div_ceil(256).max(1) as u32, rows as u32, 1),
+                CubeDim::new_1d(256),
+                BufferArg::from_raw_parts(src, rows * src_cols),
+                BufferArg::from_raw_parts(dst, rows * dst_cols),
+                src_cols as u32,
+                dst_cols as u32,
+                dst_col_off as u32,
+            );
+        }
+    }
+}
+
 // ---------------------------------------------------------------------------
 // The encoder-lane elementwise op family (plan 611 S1b — T7 op-layer
 // unification). The trivial half of the laya `Backend` trait's ops over

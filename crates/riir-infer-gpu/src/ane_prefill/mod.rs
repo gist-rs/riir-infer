@@ -66,6 +66,12 @@ pub mod headroom;
     all(target_os = "macos", target_arch = "aarch64")
 ))]
 pub mod exec_zc;
+// riir-ai Plan 644: the speed-balanced ANE‖GPU channel split (rides exec_zc).
+#[cfg(all(
+    feature = "ane_zc_channel_split",
+    all(target_os = "macos", target_arch = "aarch64")
+))]
+pub mod channel_split;
 mod requant;
 
 #[cfg(all(target_os = "macos", target_arch = "aarch64"))]

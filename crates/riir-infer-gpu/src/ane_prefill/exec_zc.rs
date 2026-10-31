@@ -342,6 +342,7 @@ struct ZcUnpackParams {
     uint chan_off; // segment start channel in the FUSED output
     uint tex_w;    // io_out width in u32 texels
     uint total;    // w * seg_dim output elements
+    uint out_stride; // target row stride in elements (== seg_dim when contiguous)
 };
 
 kernel void zc_unpack(texture2d<uint, access::read> io_out [[texture(0)]],
@@ -358,7 +359,7 @@ kernel void zc_unpack(texture2d<uint, access::read> io_out [[texture(0)]],
     uint v  = io_out.read(uint2(u % p.tex_w, u / p.tex_w)).x;
     ushort bits = (l & 1u) ? ushort(v >> 16) : ushort(v & 0xffffu);
     half h = as_type<half>(bits);
-    out[gid] = (float)h;
+    out[t * p.out_stride + cl] = (float)h;
 }
 
 // Probe 778: the BUFFER-path twin of zc_unpack — identical indexing, but the
@@ -381,7 +382,7 @@ kernel void zc_unpack_buf(device const uint* io_out [[buffer(0)]],
     uint v  = io_out[u];
     ushort bits = (l & 1u) ? ushort(v >> 16) : ushort(v & 0xffffu);
     half h = as_type<half>(bits);
-    out[gid] = (float)h;
+    out[t * p.out_stride + cl] = (float)h;
 }
 
 // DEBUG ONLY (the isolation ladder): fill a texture with a constant u32 —
@@ -412,6 +413,7 @@ struct ZcUnpackParams {
     chan_off: u32,
     tex_w: u32,
     total: u32,
+    out_stride: u32,
 }
 
 // ── the shared raw-Metal context ────────────────────────────────────────────
@@ -586,8 +588,7 @@ struct ZcWorker {
     ctx: Arc<ZcContext>,
     input_ptr: *mut metal::MTLBuffer,
     input_off: u64,
-    /// `(target raw buffer, byte offset, fused-output channel offset, seg_dim)`
-    targets: Vec<(*mut metal::MTLBuffer, u64, usize, usize)>,
+    targets: Vec<RawTarget>,
     /// Probe 778: the io_out surface's own pages as a no-copy MTLBuffer —
     /// the BUFFER cacheability domain, created ONCE at dispatch begin on the
     /// main thread. The unpack reads through THIS (buffer path) instead of a
@@ -658,6 +659,7 @@ fn encode_unpack(
         chan_off: chan_off as u32,
         tex_w: textures.w_out as u32,
         total,
+        out_stride: seg_dim as u32,
     };
     encoder.set_compute_pipeline_state(&ctx.unpack);
     encoder.set_texture(0, Some(&textures.tex_out));
@@ -686,9 +688,9 @@ fn zc_worker_loop(worker: ZcWorker) -> Result<(), String> {
         fence_value,
     } = worker;
     let input_ref: &BufferRef = unsafe { BufferRef::from_ptr(input_ptr) };
-    let target_refs: Vec<(&BufferRef, u64, usize, usize)> = targets
+    let target_refs: Vec<(&BufferRef, &RawTarget)> = targets
         .iter()
-        .map(|&(p, off, c, d)| unsafe { (BufferRef::from_ptr(p), off, c, d) })
+        .map(|t| unsafe { (BufferRef::from_ptr(t.buf), t) })
         .collect();
     let queue_ref: &CommandQueueRef = unsafe { CommandQueueRef::from_ptr(ctx.queue) };
     // Probe 778: the unpack reads through the NO-COPY BUFFER (the buffer
@@ -773,16 +775,18 @@ fn zc_worker_loop(worker: ZcWorker) -> Result<(), String> {
         let cmd2 = queue_ref.new_command_buffer();
         {
             let enc = cmd2.new_compute_command_encoder();
-            for (buf, off, chan_off, seg_dim) in &target_refs {
-                // The block's slice starts at block * w * seg_dim elements.
-                let slice_off = off + (block * w * seg_dim * 4) as u64;
-                let total = (w * seg_dim) as u32;
+            for &(buf, t) in &target_refs {
+                // The block's slice starts at row `block * w` of the target
+                // (row stride `out_stride`), shifted to the segment's column.
+                let slice_off = t.off + ((block * w * t.out_stride + t.out_col) * 4) as u64;
+                let total = (w * t.seg_dim) as u32;
                 let params = ZcUnpackParams {
-                    seg_dim: *seg_dim as u32,
+                    seg_dim: t.seg_dim as u32,
                     w: w as u32,
-                    chan_off: *chan_off as u32,
+                    chan_off: t.chan_off as u32,
                     tex_w: 0, // unused by the buffer-path kernel
                     total,
+                    out_stride: t.out_stride as u32,
                 };
                 enc.set_compute_pipeline_state(&ctx.unpack_buf);
                 enc.set_buffer(0, Some(nc_ref), 0);
@@ -826,7 +830,69 @@ pub fn begin_split_overlapped_zc(
     w: usize,
     segments: &[(Handle, usize, usize)],
 ) -> Result<AneSplitJobZc, String> {
+    let segs: Vec<ZcSegment<'_>> = segments
+        .iter()
+        .map(|(target, chan_off, seg_dim)| ZcSegment::contiguous(target, *chan_off, *seg_dim))
+        .collect();
+    begin_split_overlapped_zc_segments(client, ctx, kernel, input, p, n, w, &segs)
+}
+
+/// One unpack target of a zero-copy split: program channels
+/// `[chan_off, chan_off + seg_dim)` land in `target` at column `out_col` of a
+/// token-major matrix with row stride `out_stride` elements. The fused
+/// in_proj seams are [`ZcSegment::contiguous`] (stride == width, column 0);
+/// the Plan 644 channel split writes a COLUMN BLOCK of a wider output.
+pub struct ZcSegment<'a> {
+    pub target: &'a Handle,
+    pub chan_off: usize,
+    pub seg_dim: usize,
+    pub out_stride: usize,
+    pub out_col: usize,
+}
+
+impl<'a> ZcSegment<'a> {
+    /// A dense `[P × seg_dim]` target (the pre-644 shape).
+    pub fn contiguous(target: &'a Handle, chan_off: usize, seg_dim: usize) -> Self {
+        Self {
+            target,
+            chan_off,
+            seg_dim,
+            out_stride: seg_dim,
+            out_col: 0,
+        }
+    }
+}
+
+/// [`ZcSegment`] after main-thread extraction (raw pointer; worker-side).
+struct RawTarget {
+    buf: *mut metal::MTLBuffer,
+    off: u64,
+    chan_off: usize,
+    seg_dim: usize,
+    out_stride: usize,
+    out_col: usize,
+}
+
+/// [`begin_split_overlapped_zc`] over explicit [`ZcSegment`]s (strided /
+/// column-offset targets allowed).
+#[allow(clippy::too_many_arguments)]
+pub fn begin_split_overlapped_zc_segments(
+    client: &ComputeClient<crate::cubecl_runtime::ActiveRuntime>,
+    ctx: Arc<ZcContext>,
+    kernel: Arc<BridgeKernel>,
+    input: &Handle,
+    p: usize,
+    n: usize,
+    w: usize,
+    segments: &[ZcSegment<'_>],
+) -> Result<AneSplitJobZc, String> {
     debug_assert!(p.is_multiple_of(w), "zc split requires exact blocks");
+    debug_assert!(
+        segments
+            .iter()
+            .all(|s| s.out_col + s.seg_dim <= s.out_stride),
+        "zc segment overruns its target row"
+    );
     debug_assert_eq!((n * w) % 2, 0, "zc pack requires an even fp16 count");
     // Probe 778: the unpack reads io_out through a NO-COPY BUFFER over the
     // surface's own pages (the buffer cacheability domain), created ONCE on
@@ -877,9 +943,16 @@ pub fn begin_split_overlapped_zc(
     // pre-eval views read the stale io_out backing).
     let (input_ptr, input_off) = extract_raw_buffer(client, input)?;
     let mut targets = Vec::with_capacity(segments.len());
-    for (handle, chan_off, seg_dim) in segments {
-        let (buf, off) = extract_raw_buffer(client, handle)?;
-        targets.push((buf, off, *chan_off, *seg_dim));
+    for s in segments {
+        let (buf, off) = extract_raw_buffer(client, s.target)?;
+        targets.push(RawTarget {
+            buf,
+            off,
+            chan_off: s.chan_off,
+            seg_dim: s.seg_dim,
+            out_stride: s.out_stride,
+            out_col: s.out_col,
+        });
     }
     let worker = ZcWorker {
         kernel,
@@ -1329,6 +1402,7 @@ pub fn debug_unpack_buf_probe(
         chan_off: chan_off as u32,
         tex_w: 0,
         total,
+        out_stride: seg_dim as u32,
     };
     let cmd = queue_ref.new_command_buffer();
     {

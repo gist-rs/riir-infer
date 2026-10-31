@@ -307,6 +307,10 @@ prefill_embed_batched = ["cubecl_runtime", "ternary_gemv"]
 # previously built only alongside cubecl_runtime, which supplied dep:half —
 # the bare posture failed E0433 until plan 643 T-R0's probe exposed it).
 ane_prefill = ["dep:metal", "dep:half", "dep:cubecl", "katgpt-core/ternary_group_scale"]
+# riir-ai Plan 644 — speed-balanced ANE‖GPU channel split per projection site
+# (default-off; armed at runtime by set_prefill_ane_channel_split before
+# construction). Rides the zero-copy executor + the tensor GEMM's init guard.
+ane_zc_channel_split = ["ane_prefill", "metal_tensor_gemm", "ternary_gemm_batched"]
 # Attention-mass capture tap (diagnostics).
 attn_mass_tap = ["ternary_gemm_batched", "ternary_attention_batched_prefill"]
 # Speculative-decode dispatch cfg key (the tree-verify + draft arms).
@@ -516,6 +520,12 @@ required-features = ["ternary_gemv_cuda_raw"]
 # names the ARMED run posture (chunked + batched-attention prefill on); the
 # whole-file #![cfg] trio is the compile floor. #[ignore]d — heavy model
 # load; run with --release -- --ignored --test-threads=1.
+# riir-ai Plan 644 — ANE‖GPU channel-split G1 + interleaved speed cell (Metal
+# + ANE + the folded Bonsai-2 model; run with --release -- --ignored).
+[[test]]
+name = "plan644_channel_split_g1"
+required-features = ["ane_zc_channel_split", "cubecl_runtime", "multi_host", "ternary_deltanet_chunked_prefill", "ternary_attention_batched_prefill", "riir-infer-core/bonsai2_hadamard"]
+
 [[test]]
 name = "bench_1146_prefill_frame_census"
 required-features = ["cubecl_runtime", "ternary_gemm_batched", "multi_host", "ternary_deltanet_chunked_prefill", "ternary_attention_batched_prefill", "riir-infer-core/bonsai2_hadamard"]

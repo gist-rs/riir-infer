@@ -2176,6 +2176,15 @@ pub struct TernaryHandle {
     /// CubeCL pool — zero copy, no staging buffer. `None` otherwise.
     #[cfg(all(feature = "metal_tensor_gemm", target_os = "macos"))]
     pub zerocopy_cache: Option<crate::gemm_ternary_metal_zero_copy::ZeroCopyWeightCache>,
+    /// riir-ai Plan 644: the ANE‖GPU channel split for this projection
+    /// (ANE prefix program + GPU suffix rows). Populated at construction only
+    /// when `set_prefill_ane_channel_split(true)` was armed; `None` otherwise.
+    #[cfg(all(
+        feature = "ane_zc_channel_split",
+        target_os = "macos",
+        target_arch = "aarch64"
+    ))]
+    pub ane_split: Option<std::sync::Arc<crate::ane_prefill::channel_split::AneChannelSplit>>,
     /// Issue 734 Arm 6 (Bench 720): CUDA-side weight mirror for the raw-CUDA
     /// mma prefill arm — populated LAZILY at first dispatch (`get_or_init` in
     /// `prefill_project`, the Issue 727 H3 pattern; GPU→host→CUDA, one time
@@ -2252,6 +2261,12 @@ impl TernaryHandle {
             #[cfg(all(feature = "metal_tensor_gemm", target_os = "macos"))]
             zerocopy_cache: None,
             #[cfg(all(
+                feature = "ane_zc_channel_split",
+                target_os = "macos",
+                target_arch = "aarch64"
+            ))]
+            ane_split: None,
+            #[cfg(all(
                 feature = "ternary_gemv_cuda_raw",
                 feature = "ternary_gemm_batched",
                 not(target_os = "macos")
@@ -2312,6 +2327,12 @@ impl TernaryHandle {
             wgpu_cache: std::sync::OnceLock::new(),
             #[cfg(all(feature = "metal_tensor_gemm", target_os = "macos"))]
             zerocopy_cache: None,
+            #[cfg(all(
+                feature = "ane_zc_channel_split",
+                target_os = "macos",
+                target_arch = "aarch64"
+            ))]
+            ane_split: None,
             #[cfg(all(
                 feature = "ternary_gemv_cuda_raw",
                 feature = "ternary_gemm_batched",
@@ -2398,6 +2419,12 @@ impl TernaryHandle {
             wgpu_cache: std::sync::OnceLock::new(),
             #[cfg(all(feature = "metal_tensor_gemm", target_os = "macos"))]
             zerocopy_cache: None,
+            #[cfg(all(
+                feature = "ane_zc_channel_split",
+                target_os = "macos",
+                target_arch = "aarch64"
+            ))]
+            ane_split: None,
             #[cfg(all(
                 feature = "ternary_gemv_cuda_raw",
                 feature = "ternary_gemm_batched",
