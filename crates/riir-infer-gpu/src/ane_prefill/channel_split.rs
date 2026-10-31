@@ -115,6 +115,13 @@ pub fn split_rows(n: usize, fraction: f64) -> Option<usize> {
     }
 }
 
+/// Tokens of a `p`-token chunk the split takes: the whole `block`s (the
+/// ANE program's fixed width); the `p % block` tail runs full-width on the
+/// GPU (riir-ai Issue 1147 B4). 0 = no split.
+pub fn split_head_tokens(p: usize, block: usize) -> usize {
+    p / block * block
+}
+
 /// Rows `[start, end)` of a row-major ternary matrix (contiguous prefix
 /// copies of all three planes — 887 finding 4).
 pub fn row_range(w: &TernaryGroupWeights, start: usize, end: usize) -> TernaryGroupWeights {
@@ -189,6 +196,15 @@ mod tests {
         assert_eq!(split_rows(5120, 0.0), None);
         assert_eq!(split_rows(5120, 1.0), None);
         assert_eq!(split_rows(64, 0.2), None);
+    }
+
+    #[test]
+    fn split_head_takes_whole_blocks_only() {
+        assert_eq!(split_head_tokens(2048, 2048), 2048);
+        assert_eq!(split_head_tokens(3000, 2048), 2048);
+        assert_eq!(split_head_tokens(4095, 2048), 2048);
+        assert_eq!(split_head_tokens(2047, 2048), 0);
+        assert_eq!(split_head_tokens(1, 2048), 0);
     }
 
     #[test]

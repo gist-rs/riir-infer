@@ -20,7 +20,7 @@
 //! ```
 //!
 //! Env: `BONSAI2_G1_MODEL` (model path), `P644_P` (prompt tokens, default
-//! 2048 — must be a multiple of the 2048-token ANE block), `P644_PAIRS`
+//! 2048; whole 2048-token blocks split, the tail runs GPU-only), `P644_PAIRS`
 //! (timed interleaved pairs, default 4), `P644_F` (ANE row fraction).
 //! Diagnostic: `RIIR_P644_GPU_HALF_ONLY=1` runs only the GPU half of each
 //! split (G1 FAILS by design) — prices the GPU-side structure apart from the
@@ -120,10 +120,9 @@ fn plan644_channel_split_g1() {
     }
     let p = env_usize("P644_P", 2048);
     let pairs = env_usize("P644_PAIRS", 4);
-    assert!(
-        p > 0 && p.is_multiple_of(2048),
-        "P644_P must be a multiple of 2048"
-    );
+    // Any p: whole 2048-token blocks split, the tail runs full-width on
+    // the GPU (riir-ai Issue 1147 B4).
+    assert!(p > 0, "P644_P must be positive");
     if let Ok(f) = std::env::var("P644_F") {
         set_prefill_ane_channel_split_fraction(f.parse().expect("P644_F: f64"));
     }

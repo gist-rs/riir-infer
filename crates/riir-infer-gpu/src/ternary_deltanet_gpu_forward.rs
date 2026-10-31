@@ -8179,9 +8179,28 @@ impl TernaryDeltanetGpuForward {
         if let Some(split) = &wa.ane_split
             && split.parts.len() == 2
             && crate::ane_prefill::channel_split::prefill_ane_channel_split()
-            && p.is_multiple_of(split.block_tokens)
-            && self.prefill_project_channel_split(split, input, &[out_a, out_b], p, site_a)
+            && let head =
+                crate::ane_prefill::channel_split::split_head_tokens(p, split.block_tokens)
+            && head > 0
+            && self.prefill_project_channel_split(split, input, &[out_a, out_b], head, site_a)
         {
+            // riir-ai Issue 1147 B4: the `p % block` tail runs full-width
+            // on the GPU (it recurses with head == 0 — no split).
+            if head < p {
+                let f32s = std::mem::size_of::<f32>();
+                let tail =
+                    |h: &Handle, width: usize| h.clone().offset_start((head * width * f32s) as u64);
+                self.prefill_project_pair(
+                    wa,
+                    wb,
+                    &tail(input, split.ic),
+                    &tail(out_a, split.parts[0].n),
+                    &tail(out_b, split.parts[1].n),
+                    p - head,
+                    site_a,
+                    site_b,
+                );
+            }
             return;
         }
         self.prefill_project(wa, input, out_a, p, site_a);
@@ -8225,9 +8244,25 @@ impl TernaryDeltanetGpuForward {
         if let Some(split) = &w.ane_split
             && split.parts.len() == 1
             && crate::ane_prefill::channel_split::prefill_ane_channel_split()
-            && p.is_multiple_of(split.block_tokens)
-            && self.prefill_project_channel_split(split, input, &[output], p, site)
+            && let head =
+                crate::ane_prefill::channel_split::split_head_tokens(p, split.block_tokens)
+            && head > 0
+            && self.prefill_project_channel_split(split, input, &[output], head, site)
         {
+            // riir-ai Issue 1147 B4: the `p % block` tail runs full-width
+            // on the GPU (it recurses with head == 0 — no split).
+            if head < p {
+                let f32s = std::mem::size_of::<f32>();
+                self.prefill_project_dispatch(
+                    w,
+                    &input.clone().offset_start((head * split.ic * f32s) as u64),
+                    &output
+                        .clone()
+                        .offset_start((head * split.parts[0].n * f32s) as u64),
+                    p - head,
+                    site,
+                );
+            }
             return;
         }
 
