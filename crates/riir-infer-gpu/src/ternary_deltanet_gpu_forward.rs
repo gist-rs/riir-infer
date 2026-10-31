@@ -4368,8 +4368,23 @@ impl TernaryDeltanetGpuForward {
                         "[Issue 980/Plan 602] Hadamard-folded model: ANE prefill bank registration SKIPPED (ANE programs are primal-shaped; the folded prefill runs every projection on the GPU)"
                     );
                 }
+                // riir-ai Issue 1147 B3: the ANE's loaded-program capacity
+                // (~120, Code=54) is device-global, so ONE lane owns it per
+                // model load. The channel split registered first (it fills
+                // in saving-per-program order and stops at the refusal);
+                // when it holds any program, the bank stands down rather
+                // than half-registering into the exhausted pool.
+                #[cfg(feature = "ane_zc_channel_split")]
+                let split_owns_ane = ane_split_scratch.is_some();
+                #[cfg(not(feature = "ane_zc_channel_split"))]
+                let split_owns_ane = false;
+                if split_owns_ane && !ane_folded_skip {
+                    eprintln!(
+                        "[Issue 1147 B3] ANE program capacity owned by the channel split: ANE prefill bank registration SKIPPED"
+                    );
+                }
                 for i in 0..config.n_layer {
-                    if ane_folded_skip {
+                    if ane_folded_skip || split_owns_ane {
                         break;
                     }
                     let l = &weights.layers[i];
