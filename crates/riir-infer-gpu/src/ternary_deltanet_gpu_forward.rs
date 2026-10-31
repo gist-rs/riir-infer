@@ -2674,9 +2674,26 @@ pub fn set_prefill_chunked(on: bool) {
 /// instead of the one-plane-per-cube `DeltanetRecurrenceMultiTokenCubeCL`.
 ///
 /// Bit-identical by construction (pinned at kernel level against the shipping
-/// kernel). Default **on** whenever `deltanet_recurrence_smem_staged` is
-/// compiled; the toggle exists so the e2e A/B measures both arms in one
+/// kernel); the toggle exists so the e2e A/B measures both arms in one
 /// process (mandatory per Issue 642). Only read when [`PREFILL_CHUNKED`] is on.
+///
+/// **PROMOTED DEFAULT-ON on the Metal/wgpu posture 2026-10-31** (riir-ai
+/// Issue 1004 R1, the pre-authorized second M5 window: ≥1.5% again →
+/// promote Metal-only). Two m5ultra windows, folded Bonsai-2 PQ2_0, 8 rounds
+/// each, bit-identical every round: 2026-10-26 pp2048 1.016× / pp4096 1.020×;
+/// 2026-10-31 pp2048 1.018× (1.015–1.021) / pp4096 1.023× (1.012–1.024).
+/// Same platform scoping and env contract as [`PREFILL_PREWORK_FUSED`]
+/// ([`metal_scoped_env_default`]), env `RIIR_PREFILL_RECURRENCE_STAGED`:
+/// macOS unset = ON; elsewhere unset = the incumbent kernel until its own
+/// measured cell lands. [`set_prefill_recurrence_staged`] stays the
+/// authoritative harness toggle.
+#[cfg(all(
+    feature = "cubecl_runtime",
+    feature = "ternary_gemm_batched",
+    feature = "deltanet_recurrence_smem_staged"
+))]
+static PREFILL_RECURRENCE_STAGED_INIT: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+
 #[cfg(all(
     feature = "cubecl_runtime",
     feature = "ternary_gemm_batched",
@@ -2685,6 +2702,19 @@ pub fn set_prefill_chunked(on: bool) {
 static PREFILL_RECURRENCE_STAGED: std::sync::atomic::AtomicBool =
     std::sync::atomic::AtomicBool::new(true);
 
+#[cfg(all(
+    feature = "cubecl_runtime",
+    feature = "ternary_gemm_batched",
+    feature = "deltanet_recurrence_smem_staged"
+))]
+fn prefill_recurrence_staged_effective() -> bool {
+    metal_scoped_effective(
+        &PREFILL_RECURRENCE_STAGED_INIT,
+        &PREFILL_RECURRENCE_STAGED,
+        "RIIR_PREFILL_RECURRENCE_STAGED",
+    )
+}
+
 /// See [`PREFILL_RECURRENCE_STAGED`].
 #[cfg(all(
     feature = "cubecl_runtime",
@@ -2692,7 +2722,58 @@ static PREFILL_RECURRENCE_STAGED: std::sync::atomic::AtomicBool =
     feature = "deltanet_recurrence_smem_staged"
 ))]
 pub fn set_prefill_recurrence_staged(on: bool) {
+    let _ = PREFILL_RECURRENCE_STAGED_INIT.set(on);
     PREFILL_RECURRENCE_STAGED.store(on, std::sync::atomic::Ordering::Relaxed);
+}
+
+/// The Metal-scoped promotion env contract shared by the Issue 1004 rungs
+/// (R1 [`PREFILL_RECURRENCE_STAGED`], R2 [`PREFILL_PREWORK_FUSED`]). Unset
+/// resolves to the platform verdict (macOS = the promoted ON; other backends
+/// = incumbent OFF until their own cell lands); an explicit value wins on
+/// every platform — "1"/"on"/"true" arms, anything else ("0", empty, a typo,
+/// non-Unicode) restores the incumbent.
+#[cfg(all(
+    feature = "cubecl_runtime",
+    feature = "ternary_gemm_batched",
+    any(
+        feature = "deltanet_prework_fused",
+        feature = "deltanet_recurrence_smem_staged"
+    )
+))]
+fn metal_scoped_env_default(env: Result<String, std::env::VarError>) -> bool {
+    match env {
+        Err(std::env::VarError::NotPresent) => cfg!(target_os = "macos"),
+        Ok(v) => matches!(v.to_lowercase().as_str(), "1" | "on" | "true"),
+        Err(std::env::VarError::NotUnicode(_)) => false,
+    }
+}
+
+/// Resolve a Metal-scoped rung's live value: the first read latches the env
+/// verdict into `init`; once a harness toggle has set `init`, its verdict is
+/// kept and never clobbered by the env read.
+#[cfg(all(
+    feature = "cubecl_runtime",
+    feature = "ternary_gemm_batched",
+    any(
+        feature = "deltanet_prework_fused",
+        feature = "deltanet_recurrence_smem_staged"
+    )
+))]
+fn metal_scoped_effective(
+    init: &std::sync::OnceLock<bool>,
+    live: &std::sync::atomic::AtomicBool,
+    env_key: &str,
+) -> bool {
+    if init
+        .set(metal_scoped_env_default(std::env::var(env_key)))
+        .is_ok()
+    {
+        live.store(
+            init.get().copied().unwrap_or(true),
+            std::sync::atomic::Ordering::Relaxed,
+        );
+    }
+    live.load(std::sync::atomic::Ordering::Relaxed)
 }
 
 /// Whether the GDN prework chain (conv1d + SiLU + q/k L2-norm + head
@@ -2743,41 +2824,12 @@ static PREFILL_PREWORK_FUSED: std::sync::atomic::AtomicBool =
     feature = "ternary_gemm_batched",
     feature = "deltanet_prework_fused"
 ))]
-fn prefill_prework_fused_env_default(env: Result<String, std::env::VarError>) -> bool {
-    let armed_on_metal = cfg!(target_os = "macos");
-    match env {
-        // Unset: platform verdict (Metal = the promoted ON; other backends =
-        // incumbent OFF until their own cell lands).
-        Err(std::env::VarError::NotPresent) => armed_on_metal,
-        // Explicit value wins on every platform: "1"/"on"/"true" arms the
-        // fused kernel; anything else ("0", empty, a typo, non-Unicode)
-        // restores the incumbent pair.
-        Ok(v) => matches!(v.to_lowercase().as_str(), "1" | "on" | "true"),
-        Err(std::env::VarError::NotUnicode(_)) => false,
-    }
-}
-
-#[cfg(all(
-    feature = "cubecl_runtime",
-    feature = "ternary_gemm_batched",
-    feature = "deltanet_prework_fused"
-))]
 fn prefill_prework_fused_effective() -> bool {
-    if PREFILL_PREWORK_FUSED_INIT
-        .set(prefill_prework_fused_env_default(std::env::var(
-            "RIIR_PREFILL_PREWORK_FUSED",
-        )))
-        .is_err()
-    {
-        // set_prefill_prework_fused already ran (or ran concurrently): keep
-        // the harness toggle's verdict, never clobber it with the env read.
-        return PREFILL_PREWORK_FUSED.load(std::sync::atomic::Ordering::Relaxed);
-    }
-    PREFILL_PREWORK_FUSED.store(
-        PREFILL_PREWORK_FUSED_INIT.get().copied().unwrap_or(true),
-        std::sync::atomic::Ordering::Relaxed,
-    );
-    PREFILL_PREWORK_FUSED.load(std::sync::atomic::Ordering::Relaxed)
+    metal_scoped_effective(
+        &PREFILL_PREWORK_FUSED_INIT,
+        &PREFILL_PREWORK_FUSED,
+        "RIIR_PREFILL_PREWORK_FUSED",
+    )
 }
 
 #[cfg(all(
@@ -2804,10 +2856,13 @@ pub fn set_prefill_prework_fused(on: bool) {
     test,
     feature = "cubecl_runtime",
     feature = "ternary_gemm_batched",
-    feature = "deltanet_prework_fused"
+    any(
+        feature = "deltanet_prework_fused",
+        feature = "deltanet_recurrence_smem_staged"
+    )
 ))]
 mod prework_fused_semantics_tests {
-    use super::prefill_prework_fused_env_default;
+    use super::metal_scoped_env_default as prefill_prework_fused_env_default;
 
     // The four env postures the promotion verdict pinned (2026-10-28,
     // Metal-scoped): unset resolves to the PLATFORM default (macOS = ON —
@@ -10112,8 +10167,7 @@ impl TernaryDeltanetGpuForward {
                             // riir-ai Issue 1004 R1: the threadgroup-staged twin
                             // (bit-identical; same handles, same contract).
                             #[cfg(feature = "deltanet_recurrence_smem_staged")]
-                            let staged = PREFILL_RECURRENCE_STAGED
-                                .load(std::sync::atomic::Ordering::Relaxed);
+                            let staged = prefill_recurrence_staged_effective();
                             #[cfg(not(feature = "deltanet_recurrence_smem_staged"))]
                             let staged = false;
                             // riir-ai Plan 607 C1 (T2): the multi-plane arm —
