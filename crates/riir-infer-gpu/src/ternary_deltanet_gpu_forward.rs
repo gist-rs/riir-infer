@@ -3343,6 +3343,15 @@ pub struct TernaryDeltanetGpuForward {
     // device/queue.
     #[cfg(all(feature = "metal_tensor_gemm", target_os = "macos"))]
     metal_zerocopy_gemm: Option<crate::gemm_ternary_metal_zero_copy::MetalTensorZeroCopyGemm>,
+    // riir-ai Plan 644 G4: ONE `[block × max(n−k)]` f32 scratch for every
+    // channel-split seam's GPU suffix (seams are queue-serial, so one buffer
+    // is reused in queue order) — sized at registration, never per seam.
+    #[cfg(all(
+        feature = "ane_zc_channel_split",
+        target_os = "macos",
+        target_arch = "aarch64"
+    ))]
+    ane_split_scratch: Option<Handle>,
     // Issue 1146 ladder 4(c): the matmul2d flash-attention pipeline, compiled
     // on first routed use against `metal_zerocopy_gemm`'s device (which also
     // supplies the shared raw-buffer extraction + wgpu zero-init tracker).
@@ -4123,6 +4132,12 @@ impl TernaryDeltanetGpuForward {
             target_os = "macos",
             target_arch = "aarch64"
         ))]
+        let mut ane_split_scratch: Option<Handle> = None;
+        #[cfg(all(
+            feature = "ane_zc_channel_split",
+            target_os = "macos",
+            target_arch = "aarch64"
+        ))]
         if crate::ane_prefill::channel_split::prefill_ane_channel_split() {
             match &metal_zerocopy_gemm {
                 None => eprintln!(
@@ -4141,6 +4156,7 @@ impl TernaryDeltanetGpuForward {
                     // 644's table) and the first refusal ENDS registration:
                     // past capacity every attempt is a ~7 s retry ladder.
                     let (mut sites, mut refused) = (0usize, None::<String>);
+                    let mut scratch_elems = 0usize;
                     let tiers: [&[&str]; 3] = [
                         &["gate_proj", "up_proj"],
                         &["in_proj_qkv", "in_proj_z"],
@@ -4168,6 +4184,8 @@ impl TernaryDeltanetGpuForward {
                                     Ok(Some(mut split)) => {
                                         split.suffix.zerocopy_cache =
                                             gemm.cache_weights(&client, &split.suffix).ok();
+                                        scratch_elems = scratch_elems
+                                            .max(split.block_tokens * (split.n - split.k));
                                         h.ane_split = Some(std::sync::Arc::new(split));
                                         sites += 1;
                                     }
@@ -4179,6 +4197,10 @@ impl TernaryDeltanetGpuForward {
                                 }
                             }
                         }
+                    }
+                    if scratch_elems > 0 {
+                        ane_split_scratch =
+                            Some(client.empty(scratch_elems * std::mem::size_of::<f32>()));
                     }
                     if let Some(why) = &refused {
                         eprintln!(
@@ -4563,6 +4585,12 @@ impl TernaryDeltanetGpuForward {
             metal_wgpu_gemm,
             #[cfg(all(feature = "metal_tensor_gemm", target_os = "macos"))]
             metal_zerocopy_gemm,
+            #[cfg(all(
+                feature = "ane_zc_channel_split",
+                target_os = "macos",
+                target_arch = "aarch64"
+            ))]
+            ane_split_scratch,
             #[cfg(all(feature = "metal_tensor_gemm", target_os = "macos"))]
             metal_tensor_attn: std::sync::OnceLock::new(),
             #[cfg(all(feature = "metal_tensor_gemm", target_os = "macos"))]
@@ -8015,9 +8043,10 @@ impl TernaryDeltanetGpuForward {
         p: usize,
         site: PrefillSite,
     ) -> bool {
-        let (Some(zc), Some(gemm)) = (
+        let (Some(zc), Some(gemm), Some(scratch)) = (
             crate::ane_prefill::exec_zc::zc_context_cached(),
             self.metal_zerocopy_gemm.as_ref(),
+            self.ane_split_scratch.as_ref(),
         ) else {
             return false;
         };
@@ -8079,7 +8108,6 @@ impl TernaryDeltanetGpuForward {
         // eval b (io_in is single-buffered) — the pipeline never serializes.
         let (w, ic, n, k) = (split.block_tokens, split.ic, split.n, split.k);
         let m_gpu = n - k;
-        let scratch = self.client.empty(w * m_gpu * std::mem::size_of::<f32>());
         for b in 0..job.blocks() {
             if b > 0
                 && let Err(e) = job.pack_next(&self.client)
@@ -8091,7 +8119,7 @@ impl TernaryDeltanetGpuForward {
             let f32s = std::mem::size_of::<f32>();
             let in_b = input.clone().offset_start((b * w * ic * f32s) as u64);
             let out_b = output.clone().offset_start((b * w * n * f32s) as u64);
-            self.prefill_project_dispatch(&split.suffix, &in_b, &scratch, w, site);
+            self.prefill_project_dispatch(&split.suffix, &in_b, scratch, w, site);
             unsafe {
                 crate::elementwise_cubecl::CopyColsCubeCL::launch::<ActiveRuntime>(
                     &self.client,
