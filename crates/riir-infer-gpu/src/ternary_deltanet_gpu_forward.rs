@@ -4178,14 +4178,19 @@ impl TernaryDeltanetGpuForward {
                         for (i, lh) in layers.iter_mut().enumerate() {
                             let l = &weights.layers[i];
                             let is_gdn = layer_types[i] == DeltaNetLayerType::DeltaNet;
-                            let (h, hosts) = match (group[0], is_gdn) {
-                                ("gate_proj", _) => {
-                                    (&mut lh.gate_proj, vec![&l.gate_proj, &l.up_proj])
-                                }
-                                ("in_proj_qkv", true) => {
-                                    (&mut lh.in_proj_qkv, vec![&l.in_proj_qkv, &l.in_proj_z])
-                                }
-                                ("out_proj", true) => (&mut lh.out_proj, vec![&l.out_proj]),
+                            // Each part pairs its host planes with its
+                            // RESIDENT full handle — the GPU suffix is a row
+                            // view of it, not a copy (Issue 1147 B7).
+                            let (hosts, fulls) = match (group[0], is_gdn) {
+                                ("gate_proj", _) => (
+                                    vec![&l.gate_proj, &l.up_proj],
+                                    vec![&lh.gate_proj, &lh.up_proj],
+                                ),
+                                ("in_proj_qkv", true) => (
+                                    vec![&l.in_proj_qkv, &l.in_proj_z],
+                                    vec![&lh.in_proj_qkv, &lh.in_proj_z],
+                                ),
+                                ("out_proj", true) => (vec![&l.out_proj], vec![&lh.out_proj]),
                                 _ => continue,
                             };
                             let refused_hosts: Vec<_> = hosts
@@ -4193,9 +4198,12 @@ impl TernaryDeltanetGpuForward {
                                 .zip(group)
                                 .map(|(host, name)| q4_refuse(host, name))
                                 .collect();
-                            let parts: Vec<&katgpt_core::TernaryGroupWeights> =
-                                refused_hosts.iter().map(|c| c.as_ref()).collect();
-                            match crate::ane_prefill::channel_split::build(
+                            let parts: Vec<_> = refused_hosts
+                                .iter()
+                                .map(|c| c.as_ref())
+                                .zip(fulls)
+                                .collect();
+                            let built = crate::ane_prefill::channel_split::build(
                                 &client,
                                 &parts,
                                 fraction,
@@ -4209,7 +4217,13 @@ impl TernaryDeltanetGpuForward {
                                     _ => &[],
                                 },
                                 &mut timing,
-                            ) {
+                            );
+                            let h = match group[0] {
+                                "gate_proj" => &mut lh.gate_proj,
+                                "in_proj_qkv" => &mut lh.in_proj_qkv,
+                                _ => &mut lh.out_proj,
+                            };
+                            match built {
                                 Ok(Some(mut split)) => {
                                     let t_zc = std::time::Instant::now();
                                     for part in &mut split.parts {
@@ -4241,12 +4255,14 @@ impl TernaryDeltanetGpuForward {
                         );
                     }
                     eprintln!(
-                        "[Plan 644] channel split registered: {sites} sites in {programs} programs at f={fraction:.2}, block {block}, in {:.1} s (requant {:.1} s · compile+load {:.1} s · suffix upload {:.1} s · zero-copy cache {:.1} s)",
+                        "[Plan 644] channel split registered: {sites} sites in {programs} programs at f={fraction:.2}, block {block}, in {:.1} s (requant {:.1} s · compile+load {:.1} s · suffix {:.1} s · zero-copy cache {:.1} s); GPU suffix {:.2} GB viewed + {:.2} GB copied (resident price)",
                         t0.elapsed().as_secs_f64(),
                         timing.requant.as_secs_f64(),
                         timing.compile.as_secs_f64(),
                         timing.upload.as_secs_f64(),
-                        zc_cache.as_secs_f64()
+                        zc_cache.as_secs_f64(),
+                        timing.suffix_viewed_bytes as f64 / 1e9,
+                        timing.suffix_copied_bytes as f64 / 1e9
                     );
                 }
             }

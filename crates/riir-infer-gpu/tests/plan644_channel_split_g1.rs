@@ -16,8 +16,15 @@
 //! ```sh
 //! CARGO_TARGET_DIR=/tmp/p644 cargo test -p riir-infer-gpu --release \
 //!   --features cubecl_runtime,ternary_gemm_batched,multi_host,ternary_deltanet_chunked_prefill,ternary_attention_batched_prefill,riir-infer-core/bonsai2_hadamard,metal_tensor_gemm,ane_zc_channel_split,deltanet_prework_fused,deltanet_recurrence_smem_staged \
-//!   --test plan644_channel_split_g1 -- --ignored --nocapture --test-threads=1
+//!   --test plan644_channel_split_g1 -- --ignored --nocapture --exact plan644_channel_split_g1
 //! ```
+//!
+//! ⛔ ONE TEST PER PROCESS (`--exact <name>`; the B1 test likewise). ANE
+//! program slots are device-global and a dropped forward releases its ~127
+//! programs only after seconds, so a test that follows another in the same
+//! process registers 0 split sites and compares GPU-only against GPU-only.
+//! G1 therefore REFUSES a pass whose split arm ran zero ANE evals (measured
+//! 2026-10-31: G1 after B1 read 1.000× with max|Δ| 0.0000 — a green zero).
 //!
 //! The last two features are the riir-gpu serving defaults — the GPU-only
 //! denominator must be the shipped prefill (riir-infer Issue 1159: without
@@ -156,6 +163,7 @@ fn plan644_channel_split_g1() {
     let (mut t_off, mut t_on) = (Vec::new(), Vec::new());
     let (mut l_off, mut l_on) = (Vec::new(), Vec::new());
     zc_stage_reset();
+    let e0 = zc_eval_ordinal();
     for _ in 0..pairs {
         set_prefill_ane_channel_split(false);
         let (w, l) = pass(&mut fwd, &toks, n_layer);
@@ -167,6 +175,7 @@ fn plan644_channel_split_g1() {
         l_on = l;
     }
     set_prefill_ane_channel_split(false);
+    let split_evals = zc_eval_ordinal() - e0;
     // Split-arm stage decomposition summed over the timed pairs (the
     // GPU-only arm never enters the ZC worker).
     println!("  split stages over {pairs} passes: {}", zc_stage_dump());
@@ -198,6 +207,12 @@ fn plan644_channel_split_g1() {
         sorted[sorted.len() - 1]
     );
     println!("  G1: cosine {cos:.7} · argmax {a_off} vs {a_on} · max|Δ| {max_abs:.4}");
+    assert!(
+        split_evals > 0,
+        "Plan 644 G1: the split arm ran 0 ANE evals — no site registered (another \
+         forward still holds the device's ANE programs?); G1/G2 would compare \
+         GPU-only against itself"
+    );
     assert_eq!(a_off, a_on, "Plan 644 G1: split moved the argmax");
     assert!(cos >= 0.9999, "Plan 644 G1: cosine {cos} < 0.9999");
 }

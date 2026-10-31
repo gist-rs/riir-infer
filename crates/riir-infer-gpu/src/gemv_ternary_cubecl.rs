@@ -2348,6 +2348,86 @@ impl TernaryHandle {
         }
     }
 
+    /// Byte alignment a row view's buffer offsets must meet — wgpu's
+    /// `min_storage_buffer_offset_alignment` ceiling (256 on every adapter
+    /// this crate targets), so a view binds on the CubeCL arms too, not only
+    /// the raw-Metal zero-copy arm (which takes any 4-byte offset).
+    pub const ROW_VIEW_ALIGN: u64 = 256;
+
+    /// Rows `[start, m)` of this handle as an offset VIEW over the SAME
+    /// device buffers — zero bytes uploaded (riir-ai Issue 1147 B7: the
+    /// channel split's GPU suffix used to be a fresh copy while the full
+    /// handle stayed resident). Row-major planes make every suffix a byte
+    /// tail of each buffer. Caches (Metal, wgpu, zero-copy, ANE split,
+    /// CUDA) start empty — the view is a distinct dispatch target.
+    ///
+    /// `None` when `start` is not inside `(0, m)` or a buffer offset misses
+    /// [`Self::ROW_VIEW_ALIGN`] — the caller copies instead.
+    pub fn row_view(&self, start: usize) -> Option<Self> {
+        if start == 0 || start >= self.m {
+            return None;
+        }
+        let plane = (start * self.blocks64 * 2 * std::mem::size_of::<u32>()) as u64;
+        let scale_f32 = (start * self.groups_per_row * std::mem::size_of::<f32>()) as u64;
+        let scale_f16 = (start * self.groups_per_row * std::mem::size_of::<half::f16>()) as u64;
+        let f16_offset = self.group_scale_f16.as_ref().map_or(0, |_| scale_f16);
+        if [plane, scale_f32, f16_offset]
+            .iter()
+            .any(|off| off % Self::ROW_VIEW_ALIGN != 0)
+        {
+            return None;
+        }
+        Some(Self {
+            pos_bits_u32: self.pos_bits_u32.clone().offset_start(plane),
+            neg_bits_u32: self.neg_bits_u32.clone().offset_start(plane),
+            group_scale_f32: self.group_scale_f32.clone().offset_start(scale_f32),
+            group_scale_f16: self
+                .group_scale_f16
+                .as_ref()
+                .map(|h| h.clone().offset_start(scale_f16)),
+            m: self.m - start,
+            n: self.n,
+            blocks64: self.blocks64,
+            groups_per_row: self.groups_per_row,
+            #[cfg(all(feature = "metal_tensor_gemm", target_os = "macos"))]
+            metal: None,
+            #[cfg(all(feature = "metal_tensor_gemm", target_os = "macos"))]
+            wgpu_cache: std::sync::OnceLock::new(),
+            #[cfg(all(feature = "metal_tensor_gemm", target_os = "macos"))]
+            zerocopy_cache: None,
+            #[cfg(all(
+                feature = "ane_zc_channel_split",
+                target_os = "macos",
+                target_arch = "aarch64"
+            ))]
+            ane_split: None,
+            #[cfg(all(
+                feature = "ternary_gemv_cuda_raw",
+                feature = "ternary_gemm_batched",
+                not(target_os = "macos")
+            ))]
+            cuda_mma_cache: std::sync::OnceLock::new(),
+            #[cfg(all(
+                feature = "ternary_gemv_cuda_raw",
+                feature = "ternary_gemm_batched",
+                not(target_os = "macos")
+            ))]
+            cuda_glu_cache: std::sync::OnceLock::new(),
+        })
+    }
+
+    /// Device bytes this handle's own buffers hold (both bit planes + both
+    /// scale sets) — a view reports the bytes it SPANS, not new bytes.
+    pub fn resident_bytes(&self) -> u64 {
+        let rows = self.m as u64;
+        let planes = 2 * rows * self.blocks64 as u64 * 2 * std::mem::size_of::<u32>() as u64;
+        let f32s = rows * self.groups_per_row as u64 * std::mem::size_of::<f32>() as u64;
+        let f16s = self.group_scale_f16.as_ref().map_or(0, |_| {
+            rows * self.groups_per_row as u64 * std::mem::size_of::<half::f16>() as u64
+        });
+        planes + f32s + f16s
+    }
+
     /// Concatenate two ternary weight matrices vertically (row-stack).
     ///
     /// Used by Issue 642 F2 to fuse gate_proj + up_proj into a single GEMV.

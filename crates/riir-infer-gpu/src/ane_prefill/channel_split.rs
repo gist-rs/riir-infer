@@ -5,7 +5,8 @@
 //! the measured 0.94× (Bench 1150; Issue 887 §2026-10-31). Here the output
 //! channels of ONE projection split by rate: the ANE evaluates rows
 //! `[0, k)` (one Form C program at `block_tokens`), the GPU evaluates rows
-//! `[k, n)` from its own suffix [`TernaryHandle`] concurrently, and both
+//! `[k, n)` from an offset view of the resident [`TernaryHandle`]
+//! concurrently (riir-ai Issue 1147 B7 — no second copy), and both
 //! land in the same token-major `[P × n]` output — the ANE through a
 //! strided [`super::exec_zc::ZcSegment`], the GPU through a scratch +
 //! [`crate::elementwise_cubecl::CopyColsCubeCL`] column scatter.
@@ -27,7 +28,8 @@ use super::requant::requant_per_row_int8;
 use crate::gemv_ternary_cubecl::TernaryHandle;
 
 /// One projection of a split: its ANE prefix rows `[0, k)` ride the shared
-/// program; its GPU suffix rows `[k, n)` are this handle.
+/// program; its GPU suffix rows `[k, n)` are this handle (a row view of the
+/// full handle — see [`TernaryHandle::row_view`]).
 pub struct SplitPart {
     /// GPU rows `[k, n)`; carries its own zero-copy cache when the tensor
     /// path is armed (filled by the forward, which owns the GEMM context).
@@ -138,10 +140,6 @@ pub fn row_range(w: &TernaryGroupWeights, start: usize, end: usize) -> TernaryGr
     }
 }
 
-/// Build one split over `ws` (all sharing `cols` and the input): requant +
-/// compile ONLY the concatenated prefix rows (per-row requant ⇒ the suffix
-/// is never touched on the ANE side) and upload each suffix. `Ok(None)` =
-/// some part degenerates (the group stays GPU-only).
 /// Where registration time goes, summed over every [`build`] call (riir-ai
 /// Issue 1147 B2 — the load-time cost of the split is the promotion blocker,
 /// so the registration line prints this breakdown, never one opaque total).
@@ -151,21 +149,34 @@ pub struct BuildTiming {
     pub requant: Duration,
     /// MIL + blob packing, the bridge compile (or cache restore) and load.
     pub compile: Duration,
-    /// The GPU suffix handle upload.
+    /// The GPU suffix handles (a view costs ~nothing; a copy is an upload).
     pub upload: Duration,
+    /// Device bytes the suffixes SPAN as offset views of the resident full
+    /// handles — zero new bytes (riir-ai Issue 1147 B7).
+    pub suffix_viewed_bytes: u64,
+    /// Device bytes uploaded as suffix COPIES (a view refused alignment) —
+    /// the split's real resident price on top of the GPU-only model.
+    pub suffix_copied_bytes: u64,
 }
 
+/// Build one split over `parts` — each the host weights of a projection and
+/// its RESIDENT full GPU handle, all sharing `cols` and the input: requant +
+/// compile ONLY the concatenated prefix rows (per-row requant ⇒ the suffix
+/// is never touched on the ANE side); each GPU suffix is an offset view of
+/// the full handle (copied only when the view refuses alignment). `Ok(None)`
+/// = some part degenerates (the group stays GPU-only).
 pub fn build(
     client: &cubecl::client::ComputeClient<crate::cubecl_runtime::ActiveRuntime>,
-    ws: &[&TernaryGroupWeights],
+    parts: &[(&TernaryGroupWeights, &TernaryHandle)],
     fraction: f64,
     block_tokens: usize,
     backoff_ms: &[u64],
     timing: &mut BuildTiming,
 ) -> Result<Option<AneChannelSplit>, String> {
-    let Some(first) = ws.first() else {
+    let Some(&(first, _)) = parts.first() else {
         return Ok(None);
     };
+    let ws: Vec<&TernaryGroupWeights> = parts.iter().map(|&(w, _)| w).collect();
     if ws.iter().any(|w| w.cols != first.cols) {
         return Err("channel split group: parts disagree on input width".into());
     }
@@ -198,13 +209,27 @@ pub fn build(
     timing.compile += t.elapsed();
     let kernel = kernel?;
     let t = Instant::now();
-    let parts = ws
+    let parts = parts
         .iter()
         .zip(&ks)
-        .map(|(w, &k)| SplitPart {
-            suffix: TernaryHandle::from_weights(client, &row_range(w, k, w.rows)),
-            k,
-            n: w.rows,
+        .map(|(&(w, full), &k)| {
+            debug_assert_eq!((full.m, full.n), (w.rows, w.cols));
+            let suffix = match full.row_view(k) {
+                Some(view) => {
+                    timing.suffix_viewed_bytes += view.resident_bytes();
+                    view
+                }
+                None => {
+                    let copy = TernaryHandle::from_weights(client, &row_range(w, k, w.rows));
+                    timing.suffix_copied_bytes += copy.resident_bytes();
+                    copy
+                }
+            };
+            SplitPart {
+                suffix,
+                k,
+                n: w.rows,
+            }
         })
         .collect();
     timing.upload += t.elapsed();
@@ -236,6 +261,59 @@ mod tests {
         assert_eq!(split_head_tokens(4095, 2048), 2048);
         assert_eq!(split_head_tokens(2047, 2048), 0);
         assert_eq!(split_head_tokens(1, 2048), 0);
+    }
+
+    /// Issue 1147 B7: the suffix VIEW must dispatch bit-identically to the
+    /// suffix COPY it replaces, report the bytes it spans, and refuse an
+    /// offset wgpu cannot bind (the caller then copies).
+    #[test]
+    fn row_view_matches_the_suffix_copy_bit_identically() {
+        use crate::cubecl_runtime::ActiveRuntime;
+        use crate::gemv_ternary_cubecl::GemvTernaryCubeCL;
+        use cubecl::prelude::*;
+
+        let ctx = crate::context::GpuContext::new().expect("GpuContext should init");
+        let client = ctx.cubecl_client();
+        let (rows, cols, k) = (256usize, 512usize, 128usize);
+        let mut w = TernaryGroupWeights::new(rows, cols);
+        for r in 0..rows {
+            for c in 0..cols {
+                w.set(r, c, [1i8, 0, -1][(r * 7 + c * 3) % 3]);
+            }
+            for g in 0..w.groups_per_row {
+                w.set_scale(r, g, 0.25 + 0.01 * ((r + g) % 17) as f32);
+            }
+        }
+        let x: Vec<f32> = (0..cols)
+            .map(|i| ((i * 37) % 101) as f32 * 0.01 - 0.5)
+            .collect();
+        let gemv = |h: &TernaryHandle| {
+            let input = client.create_from_slice(f32::as_bytes(&x));
+            let out = client.empty(h.m * std::mem::size_of::<f32>());
+            unsafe {
+                GemvTernaryCubeCL::launch::<ActiveRuntime>(&client, h, input, out.clone());
+            }
+            f32::from_bytes(&client.read_one(out).expect("read")).to_vec()
+        };
+
+        let full = TernaryHandle::from_weights(&client, &w);
+        let copy = TernaryHandle::from_weights(&client, &row_range(&w, k, rows));
+        let view = full.row_view(k).expect("256-aligned offsets must view");
+        assert_eq!((view.m, view.n), (rows - k, cols));
+        assert_eq!(view.resident_bytes(), copy.resident_bytes());
+        let (got, want) = (gemv(&view), gemv(&copy));
+        assert_eq!(got.len(), rows - k);
+        assert!(
+            got.iter()
+                .zip(&want)
+                .all(|(a, b)| a.to_bits() == b.to_bits()),
+            "view GEMV must be bit-identical to the copy"
+        );
+        assert!(
+            full.row_view(1).is_none(),
+            "64-byte plane offset must refuse"
+        );
+        assert!(full.row_view(0).is_none() && full.row_view(rows).is_none());
     }
 
     #[test]
