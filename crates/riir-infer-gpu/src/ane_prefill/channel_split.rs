@@ -18,7 +18,7 @@
 //! engines; Plan 644 T0).
 
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::time::{Duration, Instant};
 
 use katgpt_core::TernaryGroupWeights;
@@ -96,6 +96,30 @@ pub fn prefill_ane_channel_split_fraction() -> f64 {
     }
 }
 
+/// ANE tokens per program eval; 0 = unset (use
+/// [`super::ANE_PREFILL_BLOCK_TOKENS`]). Read at registration (the Form C
+/// program's width is compiled in) — set BEFORE construction.
+static BLOCK_TOKENS: AtomicUsize = AtomicUsize::new(0);
+
+/// Override the ANE block width (riir-ai Issue 1147 B8: a 2048-token block
+/// never fires on 128-token dist frames or short single-box prompts).
+/// Clamped up to [`super::ANE_PREFILL_MIN_SPATIAL_W`] (the measured
+/// eval-break floor); 0 restores the default.
+pub fn set_prefill_ane_channel_split_block(tokens: usize) {
+    let t = match tokens {
+        0 => 0,
+        t => t.max(super::ANE_PREFILL_MIN_SPATIAL_W),
+    };
+    BLOCK_TOKENS.store(t, Ordering::Relaxed);
+}
+
+pub fn prefill_ane_channel_split_block() -> usize {
+    match BLOCK_TOKENS.load(Ordering::Relaxed) {
+        0 => super::ANE_PREFILL_BLOCK_TOKENS,
+        t => t,
+    }
+}
+
 /// Plan 644 T3 diagnostic: `RIIR_P644_GPU_HALF_ONLY=1` runs only the GPU
 /// suffix + scatter of each split (ANE columns unwritten — a PRICING probe,
 /// its logits are wrong by design and G1 must fail under it).
@@ -118,11 +142,26 @@ pub fn split_rows(n: usize, fraction: f64) -> Option<usize> {
     }
 }
 
+/// Smallest whole-block head a RAGGED chunk splits with (riir-ai Issue
+/// 1147 B8). The `p % block` tail costs one extra full-width GPU GEMM per
+/// split site; on a small chunk that fixed dispatch cost is not amortized.
+/// Measured (Bonsai-2, f=0.35): p=100 at block 64 (head 64 + tail 36)
+/// 0.736×; p=3000 at block 2048 (head 2048 + tail 952) 1.103×. So a ragged
+/// chunk splits only once its head reaches the measured-win 2048 tokens;
+/// below that the whole chunk stays GPU-only. A block-exact chunk always
+/// splits (no tail).
+pub const RAGGED_MIN_HEAD_TOKENS: usize = 2048;
+
 /// Tokens of a `p`-token chunk the split takes: the whole `block`s (the
 /// ANE program's fixed width); the `p % block` tail runs full-width on the
-/// GPU (riir-ai Issue 1147 B4). 0 = no split.
+/// GPU (riir-ai Issue 1147 B4) — only when the head amortizes it
+/// ([`RAGGED_MIN_HEAD_TOKENS`]). 0 = no split.
 pub fn split_head_tokens(p: usize, block: usize) -> usize {
-    p / block * block
+    let head = p / block * block;
+    match head == p || head >= RAGGED_MIN_HEAD_TOKENS {
+        true => head,
+        false => 0,
+    }
 }
 
 /// Rows `[start, end)` of a row-major ternary matrix (contiguous prefix
@@ -261,6 +300,13 @@ mod tests {
         assert_eq!(split_head_tokens(4095, 2048), 2048);
         assert_eq!(split_head_tokens(2047, 2048), 0);
         assert_eq!(split_head_tokens(1, 2048), 0);
+        // Issue 1147 B8: block-exact small chunks split; a ragged chunk
+        // whose head cannot amortize the tail stays GPU-only.
+        assert_eq!(split_head_tokens(128, 128), 128);
+        assert_eq!(split_head_tokens(256, 128), 256);
+        assert_eq!(split_head_tokens(100, 64), 0);
+        assert_eq!(split_head_tokens(200, 128), 0);
+        assert_eq!(split_head_tokens(2100, 128), 2048);
     }
 
     /// Issue 1147 B7: the suffix VIEW must dispatch bit-identically to the

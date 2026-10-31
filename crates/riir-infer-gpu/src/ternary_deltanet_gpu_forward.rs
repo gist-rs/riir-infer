@@ -4153,7 +4153,7 @@ impl TernaryDeltanetGpuForward {
                 Some(gemm) => {
                     let fraction =
                         crate::ane_prefill::channel_split::prefill_ane_channel_split_fraction();
-                    let block = crate::ane_prefill::ANE_PREFILL_BLOCK_TOKENS;
+                    let block = crate::ane_prefill::channel_split::prefill_ane_channel_split_block();
                     let t0 = std::time::Instant::now();
                     // The ANE holds a bounded number of loaded programs
                     // (measured ~120 on M5 Ultra / macOS 27.0.1 — "no ANE

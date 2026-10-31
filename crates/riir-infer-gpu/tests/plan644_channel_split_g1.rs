@@ -33,7 +33,8 @@
 //!
 //! Env: `BONSAI2_G1_MODEL` (model path), `P644_P` (prompt tokens, default
 //! 2048; whole 2048-token blocks split, the tail runs GPU-only), `P644_PAIRS`
-//! (timed interleaved pairs, default 4), `P644_F` (ANE row fraction).
+//! (timed interleaved pairs, default 4), `P644_F` (ANE row fraction),
+//! `P644_BLOCK` (ANE tokens per program eval, default 2048 — Issue 1147 B8).
 //! Diagnostic: `RIIR_P644_GPU_HALF_ONLY=1` runs only the GPU half of each
 //! split (G1 FAILS by design) — prices the GPU-side structure apart from the
 //! ANE (measured 1.144× at f=0.40: the seam's GPU structure is efficient).
@@ -52,7 +53,8 @@ use riir_infer_core::gguf_loader::load_qwen_deltanet_ternary_weights_gguf;
 use riir_infer_core::multi_host::LayerRange;
 use riir_infer_gpu::TernaryDeltanetGpuForward;
 use riir_infer_gpu::ane_prefill::channel_split::{
-    set_prefill_ane_channel_split, set_prefill_ane_channel_split_fraction,
+    set_prefill_ane_channel_split, set_prefill_ane_channel_split_block,
+    set_prefill_ane_channel_split_fraction,
 };
 use riir_infer_gpu::ane_prefill::exec_zc::{
     set_zc_fault_at_eval, zc_eval_ordinal, zc_lane_fail_count, zc_stage_dump, zc_stage_reset,
@@ -139,6 +141,9 @@ fn plan644_channel_split_g1() {
     assert!(p > 0, "P644_P must be positive");
     if let Ok(f) = std::env::var("P644_F") {
         set_prefill_ane_channel_split_fraction(f.parse().expect("P644_F: f64"));
+    }
+    if let Ok(b) = std::env::var("P644_BLOCK") {
+        set_prefill_ane_channel_split_block(b.parse().expect("P644_BLOCK: usize"));
     }
 
     let (config, weights) = load_qwen_deltanet_ternary_weights_gguf(&model).expect("model load");
