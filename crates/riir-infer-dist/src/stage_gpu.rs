@@ -74,6 +74,19 @@ impl TernaryGpuStage {
         riir_infer_gpu::gemm_ternary_metal_tensor::set_metal_tensor_relaxed_precision(
             std::env::var("RIIR_DIST_METAL_TENSOR_RELAXED").as_deref() != Ok("0"),
         );
+        // riir-ai Issue 1147 B8 (opt-in `ane_split`): the ANE‖GPU channel
+        // split at the dist frame width — measured 1.154× at a 128-token
+        // frame in this lane's `production` posture. Armed BEFORE
+        // construction (registration compiles the block width in).
+        #[cfg(all(feature = "ane_split", target_os = "macos", target_arch = "aarch64"))]
+        {
+            use riir_infer_gpu::ane_prefill::channel_split as split;
+            let block = ane_split_block();
+            split::set_prefill_ane_channel_split(block.is_some());
+            if let Some(b) = block {
+                split::set_prefill_ane_channel_split_block(b);
+            }
+        }
         let fwd = TernaryDeltanetGpuForward::new(&ctx, config, &weights);
         Ok(Self {
             fwd,
@@ -90,6 +103,32 @@ impl TernaryGpuStage {
         })
     }
 }
+
+/// The ANE block width this stage's channel split compiles, or `None` when
+/// the split is off (feature `ane_split` absent, not Apple silicon, or
+/// `RIIR_DIST_ANE_SPLIT=0`). `RIIR_DIST_ANE_SPLIT_BLOCK` overrides the
+/// default 128 — which must equal the head's `--prefill-chunk` for full
+/// frames to be whole blocks (riir-ai Issue 1147 B8).
+pub fn ane_split_block() -> Option<usize> {
+    let compiled = cfg!(all(
+        feature = "ane_split",
+        target_os = "macos",
+        target_arch = "aarch64"
+    ));
+    match compiled && std::env::var("RIIR_DIST_ANE_SPLIT").as_deref() != Ok("0") {
+        false => None,
+        true => Some(
+            std::env::var("RIIR_DIST_ANE_SPLIT_BLOCK")
+                .ok()
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(ANE_SPLIT_DEFAULT_BLOCK),
+        ),
+    }
+}
+
+/// The dist frame width (`--prefill-chunk` default on gpu) — one frame =
+/// one ANE block.
+pub const ANE_SPLIT_DEFAULT_BLOCK: usize = 128;
 
 /// Plan-623 T3.4 demote hatch: any non-1 value restores the synchronous
 /// readback cadence byte-identically (the repo's env convention — unset is

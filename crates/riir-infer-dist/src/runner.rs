@@ -109,6 +109,13 @@ pub struct HeadOptions {
     /// the +39% loopback gain was single-GPU inter-chain idle removal.
     /// Arm it only for co-located (loopback) rigs.
     pub pair_decode: bool,
+    /// riir-ai Issue 1147 B8: send BLOCK-EXACT `prefill_chunk` frames
+    /// (`[c, c, …, rem]`) instead of evening them. Same frame count
+    /// (`ceil(len / c)`), but every full frame is a whole ANE block, so the
+    /// stage's ANE‖GPU channel split fires on it (an evened 100-token
+    /// frame never matches a 128-token block). Set from
+    /// [`crate::stage_gpu::ane_split_block`]; OFF by default.
+    pub prefill_block_exact: bool,
 }
 
 impl Default for HeadOptions {
@@ -118,6 +125,7 @@ impl Default for HeadOptions {
             min_batched: 64,
             eos: None,
             pair_decode: false,
+            prefill_block_exact: false,
         }
     }
 }
@@ -129,12 +137,18 @@ impl Default for HeadOptions {
 /// batched floor for a handful of tokens. The head sends it in `Begin`;
 /// the oracle uses the same rule. (The default requested width 128 is
 /// the Bench-909 winner at every measured P on both postures: evened,
-/// a single whole-prompt chunk at P < 128, 128-chunks above.)
+/// a single whole-prompt chunk at P < 128, 128-chunks above.) With
+/// [`HeadOptions::prefill_block_exact`] the width is `c` itself (capped at
+/// the prompt), so the full frames are whole ANE blocks.
 pub fn prefill_width(prompt_len: usize, opts: HeadOptions) -> usize {
     let c = opts.prefill_chunk.max(1);
-    match c == 1 || prompt_len < opts.min_batched.max(2) {
-        true => 1,
-        false => prompt_len.div_ceil(prompt_len.div_ceil(c)),
+    match (
+        c == 1 || prompt_len < opts.min_batched.max(2),
+        opts.prefill_block_exact,
+    ) {
+        (true, _) => 1,
+        (false, true) => c.min(prompt_len),
+        (false, false) => prompt_len.div_ceil(prompt_len.div_ceil(c)),
     }
 }
 

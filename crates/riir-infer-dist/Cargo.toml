@@ -121,6 +121,15 @@ gpu = [
     "dep:riir-infer-gpu",
     "riir-infer-gpu/production",
 ]
+# riir-ai Issue 1147 B8 — the ANE‖GPU channel split on the dist prefill
+# frames (OPT-IN): the GPU stage registers a 128-token ANE block per
+# projection group and the head sends block-exact 128-token frames.
+# Measured in this lane's `production` posture (single box, full model,
+# f=0.35): 1.154x @ one 128 frame, 1.164x @ 256 = 2 blocks, G1 cosine
+# >= 0.9999997, argmax equal. LOSSY (fp16 + per-row int8 ANE) — promotion
+# into `gpu` waits on the per-family quality read + the 2-box e2e.
+# `RIIR_DIST_ANE_SPLIT=0` demotes at runtime; code is Apple-silicon-gated.
+ane_split = ["gpu", "riir-infer-gpu/ane_zc_channel_split"]
 # Issue 654 promotion e2e — the head score placed on the CUDA device (the
 # 654 gate's GPU-placement precondition on the 4090; CUDA-only — the code
 # is cfg'd out on macOS like its host module, and an arm request without

@@ -681,6 +681,9 @@ fn run() -> Result<(), String> {
                     std::env::var("RIIR_DIST_PAIR").as_deref(),
                     Ok("1") | Ok("true") | Ok("on")
                 ),
+                // Issue 1147 B8: block-exact frames when the GPU stage's
+                // ANE split is armed (its full frames are then whole blocks).
+                prefill_block_exact: a.backend == "gpu" && gpu_ane_split_armed(),
                 ..HeadOptions::default()
             };
             let (reports, wall) = match (streams, a.spec_k) {
@@ -864,4 +867,16 @@ fn main() -> ExitCode {
             ExitCode::FAILURE
         }
     }
+}
+
+/// Issue 1147 B8: is the GPU stage's ANE channel split armed (so the head
+/// sends block-exact frames)?
+#[cfg(feature = "gpu")]
+fn gpu_ane_split_armed() -> bool {
+    riir_infer_dist::stage_gpu::ane_split_block().is_some()
+}
+
+#[cfg(not(feature = "gpu"))]
+fn gpu_ane_split_armed() -> bool {
+    false
 }

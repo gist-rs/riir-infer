@@ -304,6 +304,21 @@ fn prefill_width_evens_chunks_and_floors_short_prompts() {
     // A ragged 130 = 128 + 2 is evened to 65 + 65.
     assert_eq!(prefill_width(130, o(128, 64)), 65);
     assert_eq!(prefill_width(300, o(128, 64)), 100);
+    // riir-ai Issue 1147 B8: block-exact frames keep `c` (same frame
+    // count, full frames are whole ANE blocks); the floor still applies.
+    let exact = |len| {
+        prefill_width(
+            len,
+            HeadOptions {
+                prefill_block_exact: true,
+                ..o(128, 64)
+            },
+        )
+    };
+    assert_eq!(
+        (exact(130), exact(300), exact(100), exact(40)),
+        (128, 128, 100, 1)
+    );
     // Under the floor, or chunking off: per position.
     assert_eq!(prefill_width(40, o(128, 64)), 1);
     assert_eq!(prefill_width(256, o(1, 0)), 1);
