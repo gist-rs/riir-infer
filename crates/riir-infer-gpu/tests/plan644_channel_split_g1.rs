@@ -47,7 +47,9 @@ use riir_infer_gpu::TernaryDeltanetGpuForward;
 use riir_infer_gpu::ane_prefill::channel_split::{
     set_prefill_ane_channel_split, set_prefill_ane_channel_split_fraction,
 };
-use riir_infer_gpu::ane_prefill::exec_zc::{zc_stage_dump, zc_stage_reset};
+use riir_infer_gpu::ane_prefill::exec_zc::{
+    set_zc_fault_at_eval, zc_eval_ordinal, zc_lane_fail_count, zc_stage_dump, zc_stage_reset,
+};
 use riir_infer_gpu::cubecl_runtime::CubeCLContext;
 use riir_infer_gpu::set_prefill_use_metal_tensor_zerocopy;
 
@@ -198,4 +200,68 @@ fn plan644_channel_split_g1() {
     println!("  G1: cosine {cos:.7} · argmax {a_off} vs {a_on} · max|Δ| {max_abs:.4}");
     assert_eq!(a_off, a_on, "Plan 644 G1: split moved the argmax");
     assert!(cos >= 0.9999, "Plan 644 G1: cosine {cos} < 0.9999");
+}
+
+/// riir-ai Issue 1147 B1 — fail-open AFTER submission, EXECUTED: a lane
+/// eval is made to fail mid-pass (after its seams' GPU complements and
+/// consumers are queued). The chunk driver must restore the GDN state and
+/// re-run the chunk GPU-only, so the final logits are BIT-IDENTICAL to the
+/// GPU-only reference — stale split columns could not produce that.
+#[test]
+#[ignore = "requires Metal + ANE + the Bonsai-2 PQ2_0 model; run explicitly with --release"]
+fn plan644_b1_fail_open_after_submit() {
+    let model = std::env::var_os("BONSAI2_G1_MODEL")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from(FOLDED_MODEL));
+    if !model.exists() {
+        eprintln!("SKIP: model not found at {}", model.display());
+        return;
+    }
+    let p = env_usize("P644_P", 2048);
+    let (config, weights) = load_qwen_deltanet_ternary_weights_gguf(&model).expect("model load");
+    let mut config = config;
+    config.block_size = p + 1;
+    let n_layer = config.n_layer;
+    let toks = tokens(p, config.vocab_size / 2, config.vocab_size);
+    set_prefill_use_metal_tensor_zerocopy(true);
+    set_prefill_ane_channel_split(true);
+    let ctx = CubeCLContext::new().expect("GPU init");
+    let mut fwd = TernaryDeltanetGpuForward::new(&ctx, &config, &weights);
+
+    set_prefill_ane_channel_split(false);
+    let (_, reference) = pass(&mut fwd, &toks, n_layer);
+    // One healthy split pass sizes the pass in evals.
+    set_prefill_ane_channel_split(true);
+    let e0 = zc_eval_ordinal();
+    pass(&mut fwd, &toks, n_layer);
+    let evals = zc_eval_ordinal() - e0;
+    assert!(evals > 1, "B1: the split pass ran {evals} ANE evals");
+    assert!(
+        zc_lane_fail_count() == 0,
+        "B1: lane failed before the fault"
+    );
+
+    let at = zc_eval_ordinal() + evals / 2;
+    set_zc_fault_at_eval(Some(at));
+    let (_, faulted) = pass(&mut fwd, &toks, n_layer);
+    set_zc_fault_at_eval(None);
+    set_prefill_ane_channel_split(false);
+    println!(
+        "  B1: fault at eval {at} ({} of {evals} in the pass) · lane fails {} · logits bit-identical to GPU-only: {}",
+        evals / 2,
+        zc_lane_fail_count(),
+        faulted == reference
+    );
+    assert_eq!(
+        zc_lane_fail_count(),
+        1,
+        "B1: the injected fault did not fire"
+    );
+    assert!(
+        faulted
+            .iter()
+            .map(|f| f.to_bits())
+            .eq(reference.iter().map(|f| f.to_bits())),
+        "B1: the faulted pass is not the GPU-only result — the chunk was not re-run"
+    );
 }

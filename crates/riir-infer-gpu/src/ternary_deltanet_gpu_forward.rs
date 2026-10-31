@@ -3349,6 +3349,16 @@ pub struct TernaryDeltanetGpuForward {
         target_arch = "aarch64"
     ))]
     ane_split_scratch: Option<Handle>,
+    // riir-ai Issue 1147 B1: per-GDN-layer (recurrent state, conv state)
+    // mirror, snapshotted at every split chunk's entry so a lane failure
+    // AFTER submission re-runs that chunk GPU-only from the entry state.
+    // Allocated on the first split chunk; empty until then.
+    #[cfg(all(
+        feature = "ane_zc_channel_split",
+        target_os = "macos",
+        target_arch = "aarch64"
+    ))]
+    ane_split_state_mirror: Vec<Option<(Handle, Handle)>>,
     // Issue 1146 ladder 4(c): the matmul2d flash-attention pipeline, compiled
     // on first routed use against `metal_zerocopy_gemm`'s device (which also
     // supplies the shared raw-buffer extraction + wgpu zero-init tracker).
@@ -4633,6 +4643,12 @@ impl TernaryDeltanetGpuForward {
                 target_arch = "aarch64"
             ))]
             ane_split_scratch,
+            #[cfg(all(
+                feature = "ane_zc_channel_split",
+                target_os = "macos",
+                target_arch = "aarch64"
+            ))]
+            ane_split_state_mirror: Vec::new(),
             #[cfg(all(feature = "metal_tensor_gemm", target_os = "macos"))]
             metal_tensor_attn: std::sync::OnceLock::new(),
             #[cfg(all(feature = "metal_tensor_gemm", target_os = "macos"))]
@@ -9759,6 +9775,103 @@ impl TernaryDeltanetGpuForward {
         base_pos: usize,
         is_final_chunk: bool,
         rows: CaptureRows,
+        #[cfg_attr(
+            not(all(
+                feature = "ane_zc_channel_split",
+                target_os = "macos",
+                target_arch = "aarch64"
+            )),
+            allow(unused_mut, reason = "re-borrowed only by the split guard")
+        )]
+        mut capture: Option<&mut [Vec<f32>]>,
+        #[cfg_attr(
+            not(all(
+                feature = "ane_zc_channel_split",
+                target_os = "macos",
+                target_arch = "aarch64"
+            )),
+            allow(unused_mut, reason = "re-borrowed only by the split guard")
+        )]
+        mut mass_tap: Option<(&AttnMassTapSpec, &mut AttnMassTapCapture)>,
+        stage: Option<StageChunk<'_>>,
+    ) -> Vec<f32> {
+        // riir-ai Issue 1147 B1 — fail-open AFTER submission: an ANE lane
+        // failure inside the chunk leaves that pass's split columns stale
+        // (the lane poisons, so only seams before the failure are hit).
+        // Checkpoint the GDN state at entry; after the chunk drains, a moved
+        // failure count restores it and re-runs the chunk — now GPU-only, as
+        // a poisoned lane refuses every submit. CPU-side state is `pos`
+        // only (re-set from `base_pos`); attention KV rows are rewritten.
+        #[cfg(all(
+            feature = "ane_zc_channel_split",
+            target_os = "macos",
+            target_arch = "aarch64"
+        ))]
+        if let Some(fails) = self.split_chunk_checkpoint() {
+            let cap_lens: Vec<usize> = capture
+                .as_deref()
+                .map_or_else(Vec::new, |c| c.iter().map(Vec::len).collect());
+            let out = self.prefill_tokens_chunk_once(
+                tokens,
+                base_pos,
+                is_final_chunk,
+                rows,
+                capture.as_deref_mut(),
+                mass_tap.as_mut().map(|(spec, cap)| (*spec, &mut **cap)),
+                stage,
+            );
+            // Every lane job records its failure before the signal that
+            // releases the GPU, so a drained queue has published it.
+            pollster::block_on(self.client.sync()).ok();
+            if crate::ane_prefill::exec_zc::zc_lane_fail_count() == fails {
+                return out;
+            }
+            if mass_tap.is_some() {
+                eprintln!(
+                    "[Issue 1147 B1] ANE lane failed inside a mass-tap chunk — NOT re-run (the tap's captures are append-only); this chunk's split columns are stale"
+                );
+                return out;
+            }
+            eprintln!(
+                "[Issue 1147 B1] ANE lane failed inside this chunk — GDN state restored, chunk re-run GPU-only"
+            );
+            let (state_elems, conv_elems) = self.gdn_state_elems();
+            self.copy_gdn_states(false, state_elems, conv_elems);
+            if let Some(c) = capture.as_deref_mut() {
+                for (v, &n) in c.iter_mut().zip(&cap_lens) {
+                    v.truncate(n);
+                }
+            }
+            return self.prefill_tokens_chunk_once(
+                tokens,
+                base_pos,
+                is_final_chunk,
+                rows,
+                capture,
+                mass_tap,
+                stage,
+            );
+        }
+        self.prefill_tokens_chunk_once(
+            tokens,
+            base_pos,
+            is_final_chunk,
+            rows,
+            capture,
+            mass_tap,
+            stage,
+        )
+    }
+
+    /// One pass of [`Self::prefill_tokens_chunk`] (the unguarded body).
+    #[cfg(feature = "ternary_gemm_batched")]
+    #[allow(clippy::too_many_arguments, reason = "chunk driver wiring")]
+    fn prefill_tokens_chunk_once(
+        &mut self,
+        tokens: &[usize],
+        base_pos: usize,
+        is_final_chunk: bool,
+        rows: CaptureRows,
         mut capture: Option<&mut [Vec<f32>]>,
         #[cfg_attr(not(feature = "attn_mass_tap"), allow(unused_mut, unused_variables))]
         mut mass_tap: Option<(&AttnMassTapSpec, &mut AttnMassTapCapture)>,
@@ -11292,6 +11405,88 @@ impl TernaryDeltanetGpuForward {
     /// `client.create_from_slice` for each of 128 buffers per call, which
     /// fragmented the CubeCL memory pool and caused SIGKILL under the Go
     /// arena (Plan 528 T0.2 blocker).
+    /// f32 element counts of one GDN layer's (recurrent state, conv state).
+    fn gdn_state_elems(&self) -> (usize, usize) {
+        let n_v_heads = self.config.deltanet_linear_n_value_heads;
+        let head_dim = self.config.deltanet_linear_head_dim;
+        // Must match `new`'s allocation: conv_dim = qkv_dim = 2·(n_k·hd) +
+        // n_v·hd (the PRE-expansion in_proj width — the conv runs before
+        // expand_l2). The previous `3 * n_v * hd` form zero-filled
+        // (3·n_v − 2·n_k − n_v)·hd·ks floats PAST the buffer for GQA
+        // models (a silent GPU-side OOB into the CubeCL pool; 32 KB/layer
+        // on Bonsai — found while wiring the Arm-13 reset hook).
+        let conv_dim = 2 * (self.config.deltanet_linear_n_heads * head_dim) + n_v_heads * head_dim;
+        (
+            n_v_heads * head_dim * head_dim,
+            conv_dim * self.config.deltanet_conv_kernel_size,
+        )
+    }
+
+    /// riir-ai Issue 1147 B1: when this chunk will submit ANE splits, copy
+    /// every GDN layer's state into the mirror and return the lane's failure
+    /// count; `None` = no split can run (nothing to guard).
+    #[cfg(all(
+        feature = "ane_zc_channel_split",
+        target_os = "macos",
+        target_arch = "aarch64"
+    ))]
+    fn split_chunk_checkpoint(&mut self) -> Option<u64> {
+        use crate::ane_prefill::exec_zc::{zc_lane_fail_count, zc_lane_poisoned};
+        if !crate::ane_prefill::channel_split::prefill_ane_channel_split()
+            || self.ane_split_scratch.is_none()
+            || zc_lane_poisoned().is_some()
+        {
+            return None;
+        }
+        let (state_elems, conv_elems) = self.gdn_state_elems();
+        if self.ane_split_state_mirror.is_empty() {
+            self.ane_split_state_mirror = (0..self.config.n_layer)
+                .map(|i| {
+                    (self.deltanet_states[i].is_some() && self.conv_states[i].is_some()).then(
+                        || {
+                            (
+                                self.client.empty(state_elems * std::mem::size_of::<f32>()),
+                                self.client.empty(conv_elems * std::mem::size_of::<f32>()),
+                            )
+                        },
+                    )
+                })
+                .collect();
+        }
+        self.copy_gdn_states(true, state_elems, conv_elems);
+        Some(zc_lane_fail_count())
+    }
+
+    /// Mirror ⇄ live GDN state copy (`to_mirror` = checkpoint direction).
+    #[cfg(all(
+        feature = "ane_zc_channel_split",
+        target_os = "macos",
+        target_arch = "aarch64"
+    ))]
+    fn copy_gdn_states(&self, to_mirror: bool, state_elems: usize, conv_elems: usize) {
+        for (i, m) in self.ane_split_state_mirror.iter().enumerate() {
+            let (Some((ms, mc)), Some(ls), Some(lc)) =
+                (m, &self.deltanet_states[i], &self.conv_states[i])
+            else {
+                continue;
+            };
+            for (live, mirror, n) in [(ls, ms, state_elems), (lc, mc, conv_elems)] {
+                let (src, dst) = match to_mirror {
+                    true => (live, mirror),
+                    false => (mirror, live),
+                };
+                unsafe {
+                    crate::elementwise_cubecl::CopyCubeCL::launch::<ActiveRuntime>(
+                        &self.client,
+                        src.clone(),
+                        dst.clone(),
+                        n,
+                    );
+                }
+            }
+        }
+    }
+
     pub fn reset_state(&mut self) {
         // Issue 994: zero-fill launches read the pool — refuse on poison.
         Self::refuse_if_pool_poisoned("at state reset");
@@ -11300,17 +11495,7 @@ impl TernaryDeltanetGpuForward {
         // Issue 782: the flash-arm length gates read this — a stale value from
         // a previous long prompt would misroute a fresh short one.
         self.active_prefill_len = 0;
-        let n_v_heads = self.config.deltanet_linear_n_value_heads;
-        let head_dim = self.config.deltanet_linear_head_dim;
-        let state_dim = n_v_heads * head_dim * head_dim;
-        // Must match `new`'s allocation: conv_dim = qkv_dim = 2·(n_k·hd) +
-        // n_v·hd (the PRE-expansion in_proj width — the conv runs before
-        // expand_l2). The previous `3 * n_v * hd` form zero-filled
-        // (3·n_v − 2·n_k − n_v)·hd·ks floats PAST the buffer for GQA
-        // models (a silent GPU-side OOB into the CubeCL pool; 32 KB/layer
-        // on Bonsai — found while wiring the Arm-13 reset hook).
-        let conv_dim = 2 * (self.config.deltanet_linear_n_heads * head_dim) + n_v_heads * head_dim;
-        let kernel_size = self.config.deltanet_conv_kernel_size;
+        let (state_dim, conv_elems) = self.gdn_state_elems();
 
         for i in 0..self.config.n_layer {
             if self.layer_types[i] == DeltaNetLayerType::DeltaNet {
@@ -11330,7 +11515,7 @@ impl TernaryDeltanetGpuForward {
                         FillZerosCubeCL::launch::<ActiveRuntime>(
                             &self.client,
                             handle.clone(),
-                            conv_dim * kernel_size,
+                            conv_elems,
                         );
                     }
                 }

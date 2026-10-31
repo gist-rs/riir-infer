@@ -150,6 +150,23 @@ pub static N_ZC_FENCES: AtomicU64 = AtomicU64::new(0);
 pub static N_ZC_2Q_PACKS: AtomicU64 = AtomicU64::new(0);
 pub static N_ZC_EVALS: AtomicU64 = AtomicU64::new(0);
 pub static N_ZC_FAILS: AtomicU64 = AtomicU64::new(0);
+/// Fault hook (riir-ai Issue 1147 B1 gate): the lane fails the eval whose
+/// ordinal (`N_ZC_EVALS + N_ZC_FAILS` before it) equals this value, ONCE.
+/// `u64::MAX` = disarmed (one relaxed load per eval).
+static ZC_FAULT_AT_EVAL: AtomicU64 = AtomicU64::new(u64::MAX);
+
+/// Arm (`Some(ordinal)`) or disarm the one-shot lane fault. Test-only in
+/// spirit: it exists so the post-submit fail-open path is EXECUTED by a
+/// gate rather than reasoned about.
+pub fn set_zc_fault_at_eval(ordinal: Option<u64>) {
+    ZC_FAULT_AT_EVAL.store(ordinal.unwrap_or(u64::MAX), Ordering::SeqCst);
+}
+
+/// The ordinal the next lane eval will carry (pair with
+/// [`set_zc_fault_at_eval`]).
+pub fn zc_eval_ordinal() -> u64 {
+    N_ZC_EVALS.load(Ordering::SeqCst) + N_ZC_FAILS.load(Ordering::SeqCst)
+}
 
 fn bump(c: &AtomicU64, t: Instant) {
     c.fetch_add(t.elapsed().as_nanos() as u64, Ordering::Relaxed);
@@ -832,7 +849,16 @@ fn zc_worker_loop(worker: ZcWorker) -> Result<(), String> {
         }
         // 2. ANE eval (no host memcpy — IO lives in the surfaces).
         let t = Instant::now();
-        if let Err(e) = kernel.eval_nc() {
+        let ordinal = zc_eval_ordinal();
+        let injected = ZC_FAULT_AT_EVAL.load(Ordering::Relaxed) == ordinal
+            && ZC_FAULT_AT_EVAL
+                .compare_exchange(ordinal, u64::MAX, Ordering::SeqCst, Ordering::SeqCst)
+                .is_ok();
+        let eval = match injected {
+            true => Err(format!("injected fault at eval {ordinal}")),
+            false => kernel.eval_nc(),
+        };
+        if let Err(e) = eval {
             bump(&T_ZC_EVAL_NS, t);
             N_ZC_FAILS.fetch_add(1, Ordering::Relaxed);
             return Err(format!("ANE zc eval failed (block {block}): {e}"));
@@ -1105,6 +1131,7 @@ struct ZcLaneJob {
 
 static ZC_LANE: OnceLock<std::sync::Mutex<std::sync::mpsc::Sender<ZcLaneJob>>> = OnceLock::new();
 static ZC_LANE_ERR: std::sync::Mutex<Option<String>> = std::sync::Mutex::new(None);
+static ZC_LANE_FAILS: AtomicU64 = AtomicU64::new(0);
 pub static N_ZC_LANE_JOBS: AtomicU64 = AtomicU64::new(0);
 
 fn zc_lane() -> &'static std::sync::Mutex<std::sync::mpsc::Sender<ZcLaneJob>> {
@@ -1124,24 +1151,35 @@ fn zc_lane() -> &'static std::sync::Mutex<std::sync::mpsc::Sender<ZcLaneJob>> {
                         zc_worker_loop(worker)
                     }))
                     .unwrap_or_else(|_| Err("ANE zc lane job panicked".into()));
+                    // A failure is RECORDED before any signal releases the
+                    // GPU (riir-ai Issue 1147 B1): once the consumer's wait
+                    // clears, the chunk driver's post-sync check must see it.
+                    if let Err(e) = r {
+                        eprintln!("[Plan 644] ANE lane job (eval {eval_last}) failed ({e}) — lane POISONED, later seams run GPU-only");
+                        let mut slot = ZC_LANE_ERR.lock().unwrap_or_else(|p| p.into_inner());
+                        slot.get_or_insert(e);
+                        drop(slot);
+                        ZC_LANE_FAILS.fetch_add(1, Ordering::SeqCst);
+                        if ctx.eval_ev.signaled_value() < eval_last {
+                            ctx.eval_ev.set_signaled_value(eval_last);
+                        }
+                    }
                     // FIFO on ane_queue: lands after the last block's unpack.
                     let cmd = ctx.ane_queue.new_command_buffer();
                     cmd.encode_signal_event(&ctx.done, done);
                     cmd.commit();
                     N_ZC_LANE_JOBS.fetch_add(1, Ordering::Relaxed);
-                    if let Err(e) = r {
-                        if ctx.eval_ev.signaled_value() < eval_last {
-                            ctx.eval_ev.set_signaled_value(eval_last);
-                        }
-                        eprintln!("[Plan 644] ANE lane job (eval {eval_last}) failed ({e}) — lane POISONED, later seams run GPU-only");
-                        let mut slot = ZC_LANE_ERR.lock().unwrap_or_else(|p| p.into_inner());
-                        slot.get_or_insert(e);
-                    }
                 }
             })
             .expect("ANE zc lane thread spawn");
         std::sync::Mutex::new(tx)
     })
+}
+
+/// Failed lane jobs, monotone. A chunk driver compares it across a chunk:
+/// a change means that chunk's split columns are stale (Issue 1147 B1).
+pub fn zc_lane_fail_count() -> u64 {
+    ZC_LANE_FAILS.load(Ordering::SeqCst)
 }
 
 /// The first lane failure, if any (sticky for the process).
