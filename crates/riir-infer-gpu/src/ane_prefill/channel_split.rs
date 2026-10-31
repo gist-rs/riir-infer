@@ -25,10 +25,9 @@ use super::bridge::BridgeKernel;
 use super::requant::requant_per_row_int8;
 use crate::gemv_ternary_cubecl::TernaryHandle;
 
-/// One registered site: the ANE prefix program + the GPU suffix rows.
-pub struct AneChannelSplit {
-    /// Form C program over rows `[0, k)` at `block_tokens` tokens.
-    pub kernel: Arc<BridgeKernel>,
+/// One projection of a split: its ANE prefix rows `[0, k)` ride the shared
+/// program; its GPU suffix rows `[k, n)` are this handle.
+pub struct SplitPart {
     /// GPU rows `[k, n)`; carries its own zero-copy cache when the tensor
     /// path is armed (filled by the forward, which owns the GEMM context).
     pub suffix: TernaryHandle,
@@ -36,21 +35,41 @@ pub struct AneChannelSplit {
     pub k: usize,
     /// Total output channels.
     pub n: usize,
-    /// Input channels.
+}
+
+/// One registered split: ONE Form C program over the CONCATENATED prefix
+/// rows of every part (Plan 644 T1b — projections sharing an input, e.g.
+/// gate+up or qkv+z, fuse into one program: the ANE holds only ~120 loaded
+/// programs) + one GPU suffix per part. A single-projection split is the
+/// 1-part case.
+pub struct AneChannelSplit {
+    /// Form C program over `Σ k` rows at `block_tokens` tokens; part i's
+    /// rows start at channel `Σ_{j<i} k_j`.
+    pub kernel: Arc<BridgeKernel>,
+    pub parts: Vec<SplitPart>,
+    /// Input channels (shared by every part).
     pub ic: usize,
     pub block_tokens: usize,
+}
+
+impl AneChannelSplit {
+    /// Largest GPU suffix width — sizes the forward's shared scratch.
+    pub fn max_suffix_rows(&self) -> usize {
+        self.parts.iter().map(|p| p.n - p.k).max().unwrap_or(0)
+    }
 }
 
 static ARMED: AtomicBool = AtomicBool::new(false);
 /// f64 bits of the ANE row fraction; 0 = unset (use [`DEFAULT_FRACTION`]).
 static FRACTION_BITS: AtomicU64 = AtomicU64::new(0);
 
-/// The IN-SITU optimum (Plan 644 T3, async lane, Bonsai-2 @2048, M5 Ultra):
-/// f sweep 0.20/0.25/0.30/0.34/0.40 → 1.063/1.077/1.099/1.092/1.053×. The
-/// isolated-rate prediction (a/(a+g) ≈ 0.40) overshoots because the ANE
-/// slows ≈1.30× while the GPU runs (1.82 vs 1.406 ms/1k-ch). Plan 644 T2
-/// replaces this with a per-shape in-situ calibration at registration.
-pub const DEFAULT_FRACTION: f64 = 0.30;
+/// The IN-SITU optimum (Plan 644 T1b, FUSED gate+up / qkv+z programs,
+/// async lane, Bonsai-2 @2048, M5 Ultra): f sweep 0.25/0.30/0.35/0.40/0.45
+/// → 1.111/1.141/1.161/1.119/1.052×. (Unfused 1-part sites peaked at 0.30;
+/// the isolated-rate prediction a/(a+g) ≈ 0.40 overshoots because the ANE
+/// slows ≈1.30× while the GPU runs.) Plan 644 T2 replaces this with a
+/// per-shape in-situ calibration at registration.
+pub const DEFAULT_FRACTION: f64 = 0.35;
 
 /// Arm the split at registration AND dispatch (set before construction).
 /// Default OFF — the GOAT gate (Plan 644 T4) promotes it.
@@ -111,32 +130,50 @@ pub fn row_range(w: &TernaryGroupWeights, start: usize, end: usize) -> TernaryGr
     }
 }
 
-/// Build one site's split: requant + compile ONLY the prefix rows (the
-/// requant is per-row, so the suffix is never touched on the ANE side) and
-/// upload the suffix rows. `Ok(None)` = degenerate split (stay GPU-only).
+/// Build one split over `ws` (all sharing `cols` and the input): requant +
+/// compile ONLY the concatenated prefix rows (per-row requant ⇒ the suffix
+/// is never touched on the ANE side) and upload each suffix. `Ok(None)` =
+/// some part degenerates (the group stays GPU-only).
 pub fn build(
     client: &cubecl::client::ComputeClient<crate::cubecl_runtime::ActiveRuntime>,
-    w: &TernaryGroupWeights,
+    ws: &[&TernaryGroupWeights],
     fraction: f64,
     block_tokens: usize,
 ) -> Result<Option<AneChannelSplit>, String> {
-    let Some(k) = split_rows(w.rows, fraction) else {
+    let Some(first) = ws.first() else {
         return Ok(None);
     };
-    let (q, ws) = requant_per_row_int8(
-        &w.pos_bits[..k * w.blocks64],
-        &w.neg_bits[..k * w.blocks64],
-        &w.group_scale[..k * w.groups_per_row],
-        k,
-        w.cols,
-    );
-    let kernel = BridgeKernel::compile_form_c(w.cols, k, block_tokens, &q, &ws)?;
+    if ws.iter().any(|w| w.cols != first.cols) {
+        return Err("channel split group: parts disagree on input width".into());
+    }
+    let Some(ks) = ws
+        .iter()
+        .map(|w| split_rows(w.rows, fraction))
+        .collect::<Option<Vec<usize>>>()
+    else {
+        return Ok(None);
+    };
+    let k_total: usize = ks.iter().sum();
+    let (mut pos, mut neg, mut scale) = (Vec::new(), Vec::new(), Vec::new());
+    for (w, &k) in ws.iter().zip(&ks) {
+        pos.extend_from_slice(&w.pos_bits[..k * w.blocks64]);
+        neg.extend_from_slice(&w.neg_bits[..k * w.blocks64]);
+        scale.extend_from_slice(&w.group_scale[..k * w.groups_per_row]);
+    }
+    let (q, wscale) = requant_per_row_int8(&pos, &neg, &scale, k_total, first.cols);
+    let kernel = BridgeKernel::compile_form_c(first.cols, k_total, block_tokens, &q, &wscale)?;
     Ok(Some(AneChannelSplit {
         kernel: Arc::new(kernel),
-        suffix: TernaryHandle::from_weights(client, &row_range(w, k, w.rows)),
-        k,
-        n: w.rows,
-        ic: w.cols,
+        parts: ws
+            .iter()
+            .zip(&ks)
+            .map(|(w, &k)| SplitPart {
+                suffix: TernaryHandle::from_weights(client, &row_range(w, k, w.rows)),
+                k,
+                n: w.rows,
+            })
+            .collect(),
+        ic: first.cols,
         block_tokens,
     }))
 }

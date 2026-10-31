@@ -4156,44 +4156,54 @@ impl TernaryDeltanetGpuForward {
                     // 644's table) and the first refusal ENDS registration:
                     // past capacity every attempt is a ~7 s retry ladder.
                     let (mut sites, mut refused) = (0usize, None::<String>);
-                    let mut scratch_elems = 0usize;
+                    let (mut scratch_elems, mut programs) = (0usize, 0usize);
+                    // T1b: projections sharing an input FUSE into one
+                    // program (gate+up, qkv+z) — 64 + 48 = 112 programs
+                    // cover every 5120-input site inside the cap.
                     let tiers: [&[&str]; 3] = [
                         &["gate_proj", "up_proj"],
                         &["in_proj_qkv", "in_proj_z"],
                         &["out_proj"],
                     ];
-                    'reg: for tier in tiers {
+                    'reg: for group in tiers {
                         for (i, lh) in layers.iter_mut().enumerate() {
                             let l = &weights.layers[i];
                             let is_gdn = layer_types[i] == DeltaNetLayerType::DeltaNet;
-                            for &name in tier {
-                                let (h, host) = match (name, is_gdn) {
-                                    ("gate_proj", _) => (&mut lh.gate_proj, &l.gate_proj),
-                                    ("up_proj", _) => (&mut lh.up_proj, &l.up_proj),
-                                    ("in_proj_qkv", true) => (&mut lh.in_proj_qkv, &l.in_proj_qkv),
-                                    ("in_proj_z", true) => (&mut lh.in_proj_z, &l.in_proj_z),
-                                    ("out_proj", true) => (&mut lh.out_proj, &l.out_proj),
-                                    _ => continue,
-                                };
-                                match crate::ane_prefill::channel_split::build(
-                                    &client,
-                                    &q4_refuse(host, name),
-                                    fraction,
-                                    block,
-                                ) {
-                                    Ok(Some(mut split)) => {
-                                        split.suffix.zerocopy_cache =
-                                            gemm.cache_weights(&client, &split.suffix).ok();
-                                        scratch_elems = scratch_elems
-                                            .max(split.block_tokens * (split.n - split.k));
-                                        h.ane_split = Some(std::sync::Arc::new(split));
-                                        sites += 1;
+                            let (h, hosts) = match (group[0], is_gdn) {
+                                ("gate_proj", _) => {
+                                    (&mut lh.gate_proj, vec![&l.gate_proj, &l.up_proj])
+                                }
+                                ("in_proj_qkv", true) => {
+                                    (&mut lh.in_proj_qkv, vec![&l.in_proj_qkv, &l.in_proj_z])
+                                }
+                                ("out_proj", true) => (&mut lh.out_proj, vec![&l.out_proj]),
+                                _ => continue,
+                            };
+                            let refused_hosts: Vec<_> = hosts
+                                .iter()
+                                .zip(group)
+                                .map(|(host, name)| q4_refuse(host, name))
+                                .collect();
+                            let parts: Vec<&katgpt_core::TernaryGroupWeights> =
+                                refused_hosts.iter().map(|c| c.as_ref()).collect();
+                            match crate::ane_prefill::channel_split::build(
+                                &client, &parts, fraction, block,
+                            ) {
+                                Ok(Some(mut split)) => {
+                                    for part in &mut split.parts {
+                                        part.suffix.zerocopy_cache =
+                                            gemm.cache_weights(&client, &part.suffix).ok();
                                     }
-                                    Ok(None) => {}
-                                    Err(e) => {
-                                        refused = Some(format!("layer {i} {name}: {e}"));
-                                        break 'reg;
-                                    }
+                                    scratch_elems = scratch_elems
+                                        .max(split.block_tokens * split.max_suffix_rows());
+                                    h.ane_split = Some(std::sync::Arc::new(split));
+                                    sites += group.len();
+                                    programs += 1;
+                                }
+                                Ok(None) => {}
+                                Err(e) => {
+                                    refused = Some(format!("layer {i} {}: {e}", group[0]));
+                                    break 'reg;
                                 }
                             }
                         }
@@ -4204,11 +4214,11 @@ impl TernaryDeltanetGpuForward {
                     }
                     if let Some(why) = &refused {
                         eprintln!(
-                            "[Plan 644] ANE program capacity reached after {sites} split sites ({why}) — remaining sites stay GPU-only"
+                            "[Plan 644] ANE program capacity reached after {programs} programs / {sites} split sites ({why}) — remaining sites stay GPU-only"
                         );
                     }
                     eprintln!(
-                        "[Plan 644] channel split registered: {sites} sites at f={fraction:.2}, block {block}, in {:.1} s",
+                        "[Plan 644] channel split registered: {sites} sites in {programs} programs at f={fraction:.2}, block {block}, in {:.1} s",
                         t0.elapsed().as_secs_f64()
                     );
                 }
@@ -8021,15 +8031,19 @@ impl TernaryDeltanetGpuForward {
         }
     }
 
-    /// riir-ai Plan 644 T1 — one channel-split projection: ANE rows `[0,k)`
-    /// straight into `output`'s column block (strided unpack), GPU rows
-    /// `[k,n)` into a scratch then scattered to columns `[k,n)`, concurrently.
-    /// The join is GPU-side (the async ZC lane's `done` event waited on the
-    /// shared queue) — the CPU never blocks at a seam, so the queue never
-    /// drains (the joined path measured a fixed ≈1.9 ms/seam bubble).
-    /// `false` = refused BEFORE anything was queued; the caller's full-width
-    /// path then runs. A lane failure after submission poisons the lane
-    /// (that pass's ANE columns are unwritten; every later seam refuses here).
+    /// riir-ai Plan 644 T1/T1b — one channel-split seam over `outputs`
+    /// (one per split part, all fed by `input`): ANE rows `[0,k_i)` of every
+    /// part from ONE program straight into each output's column block
+    /// (strided unpack), GPU rows `[k_i,n_i)` per part into the shared
+    /// scratch then scattered to columns `[k_i,n_i)`, concurrently.
+    ///
+    /// All GPU commands ride the SHARED queue in this order (see
+    /// `exec_zc`'s async-lane header): pack0 · complement(block 0) ·
+    /// [wait e0 · unpack0 · pack1] · … · [wait done] · consumer — the CPU
+    /// never blocks at a seam. `false` = refused BEFORE anything was
+    /// queued (or the job was retired), and the caller's full-width path
+    /// rewrites every column. A lane failure after submission poisons the
+    /// lane (riir-ai Issue 1147 B1).
     #[cfg(all(
         feature = "ane_zc_channel_split",
         target_os = "macos",
@@ -8039,7 +8053,7 @@ impl TernaryDeltanetGpuForward {
         &self,
         split: &crate::ane_prefill::channel_split::AneChannelSplit,
         input: &Handle,
-        output: &Handle,
+        outputs: &[&Handle],
         p: usize,
         site: PrefillSite,
     ) -> bool {
@@ -8050,90 +8064,128 @@ impl TernaryDeltanetGpuForward {
         ) else {
             return false;
         };
-        // The ANE unpack writes `output` behind wgpu's back: mark it
+        debug_assert_eq!(outputs.len(), split.parts.len());
+        // The ANE unpack writes the outputs behind wgpu's back: mark them
         // initialized first (the Issue 1146 lazy-clear class).
-        if gemm
-            .ensure_wgpu_initialized(&self.client, output, p * split.n)
-            .is_err()
-        {
-            return false;
+        for (out, part) in outputs.iter().zip(&split.parts) {
+            if gemm
+                .ensure_wgpu_initialized(&self.client, out, p * part.n)
+                .is_err()
+            {
+                return false;
+            }
         }
         // Plan 644 T3 probe (diagnostic, never a perf arm): run ONLY the GPU
         // half (ANE columns left unwritten — G1 fails by design) to price
         // the split's GPU-side structure apart from ANE contention.
-        if crate::ane_prefill::channel_split::probe_gpu_half_only() {
-            let m_gpu = split.n - split.k;
-            let scratch = self.client.empty(p * m_gpu * std::mem::size_of::<f32>());
-            self.prefill_project_dispatch(&split.suffix, input, &scratch, p, site);
-            unsafe {
-                crate::elementwise_cubecl::CopyColsCubeCL::launch::<ActiveRuntime>(
-                    &self.client,
-                    scratch,
-                    output.clone(),
-                    p,
-                    m_gpu,
-                    split.n,
-                    split.k,
-                );
-            }
-            return true;
-        }
-        let seg = crate::ane_prefill::exec_zc::ZcSegment {
-            target: output,
-            chan_off: 0,
-            seg_dim: split.k,
-            out_stride: split.n,
-            out_col: 0,
-        };
+        let gpu_half_only = crate::ane_prefill::channel_split::probe_gpu_half_only();
+        let mut chan_off = 0;
+        let segs: Vec<_> = outputs
+            .iter()
+            .zip(&split.parts)
+            .map(|(out, part)| {
+                let seg = crate::ane_prefill::exec_zc::ZcSegment {
+                    target: out,
+                    chan_off,
+                    seg_dim: part.k,
+                    out_stride: part.n,
+                    out_col: 0,
+                };
+                chan_off += part.k;
+                seg
+            })
+            .collect();
         // Submission flushes CubeCL, fences the producer (Issue 670 T4) and
         // packs block 0 on the shared queue.
-        let mut job = match crate::ane_prefill::exec_zc::submit_split_async_zc(
-            &self.client,
-            zc,
-            split.kernel.clone(),
-            input,
-            p,
-            split.ic,
-            split.block_tokens,
-            &[seg],
-        ) {
-            Ok(j) => j,
-            Err(e) => {
-                eprintln!("[Plan 644] split submit refused ({e}) — full-width GPU");
-                return false;
-            }
+        let mut job = match gpu_half_only {
+            true => None,
+            false => match crate::ane_prefill::exec_zc::submit_split_async_zc(
+                &self.client,
+                zc,
+                split.kernel.clone(),
+                input,
+                p,
+                split.ic,
+                split.block_tokens,
+                &segs,
+            ) {
+                Ok(j) => Some(j),
+                Err(e) => {
+                    eprintln!("[Plan 644] split submit refused ({e}) — full-width GPU");
+                    return false;
+                }
+            },
         };
-        // Per block: complement slice b (GPU rows [k,n) of tokens
+        // Per block: complement slice b (every part's GPU rows of tokens
         // [b·w,(b+1)·w)) overlaps ANE eval b; block b+1's pack queues behind
-        // eval b (io_in is single-buffered) — the pipeline never serializes.
-        let (w, ic, n, k) = (split.block_tokens, split.ic, split.n, split.k);
-        let m_gpu = n - k;
-        for b in 0..job.blocks() {
+        // eval b (io_in/io_out are single-buffered).
+        let w = split.block_tokens;
+        let f32s = std::mem::size_of::<f32>();
+        for b in 0..p / w {
             if b > 0
-                && let Err(e) = job.pack_next(&self.client)
+                && let Some(j) = job.as_mut()
+                && let Err(e) = j.pack_next(&self.client)
             {
                 eprintln!("[Plan 644] split pack refused ({e}) — full-width GPU rewrite");
-                job.finish(&self.client);
+                if let Some(j) = job.take() {
+                    j.finish(&self.client);
+                }
                 return false;
             }
-            let f32s = std::mem::size_of::<f32>();
-            let in_b = input.clone().offset_start((b * w * ic * f32s) as u64);
-            let out_b = output.clone().offset_start((b * w * n * f32s) as u64);
-            self.prefill_project_dispatch(&split.suffix, &in_b, scratch, w, site);
-            unsafe {
-                crate::elementwise_cubecl::CopyColsCubeCL::launch::<ActiveRuntime>(
-                    &self.client,
-                    scratch.clone(),
-                    out_b,
-                    w,
-                    m_gpu,
-                    n,
-                    k,
-                );
+            let in_b = input.clone().offset_start((b * w * split.ic * f32s) as u64);
+            for (out, part) in outputs.iter().zip(&split.parts) {
+                let out_b = (*out).clone().offset_start((b * w * part.n * f32s) as u64);
+                let m_gpu = part.n - part.k;
+                self.prefill_project_dispatch(&part.suffix, &in_b, scratch, w, site);
+                unsafe {
+                    crate::elementwise_cubecl::CopyColsCubeCL::launch::<ActiveRuntime>(
+                        &self.client,
+                        scratch.clone(),
+                        out_b,
+                        w,
+                        m_gpu,
+                        part.n,
+                        part.k,
+                    );
+                }
             }
         }
-        job.finish(&self.client);
+        if let Some(j) = job {
+            j.finish(&self.client);
+        }
         true
+    }
+
+    /// Two projections of ONE input (gate+up, qkv+z): the fused Plan 644
+    /// T1b channel split when the first handle carries a 2-part split, else
+    /// the two plain projections (each may still take a 1-part split).
+    #[allow(clippy::too_many_arguments)]
+    fn prefill_project_pair(
+        &self,
+        wa: &TernaryHandle,
+        wb: &TernaryHandle,
+        input: &Handle,
+        out_a: &Handle,
+        out_b: &Handle,
+        p: usize,
+        site_a: PrefillSite,
+        site_b: PrefillSite,
+    ) {
+        #[cfg(all(
+            feature = "ane_zc_channel_split",
+            target_os = "macos",
+            target_arch = "aarch64"
+        ))]
+        if let Some(split) = &wa.ane_split
+            && split.parts.len() == 2
+            && crate::ane_prefill::channel_split::prefill_ane_channel_split()
+            && p.is_multiple_of(split.block_tokens)
+            && self.prefill_project_channel_split(split, input, &[out_a, out_b], p, site_a)
+        {
+            return;
+        }
+        self.prefill_project(wa, input, out_a, p, site_a);
+        self.prefill_project(wb, input, out_b, p, site_b);
     }
 
     /// Full-queue fence for the exec timer: CubeCL's `sync()` waits only on
@@ -8171,9 +8223,10 @@ impl TernaryDeltanetGpuForward {
             target_arch = "aarch64"
         ))]
         if let Some(split) = &w.ane_split
+            && split.parts.len() == 1
             && crate::ane_prefill::channel_split::prefill_ane_channel_split()
             && p.is_multiple_of(split.block_tokens)
-            && self.prefill_project_channel_split(split, input, output, p, site)
+            && self.prefill_project_channel_split(split, input, &[output], p, site)
         {
             return;
         }
@@ -10182,14 +10235,16 @@ impl TernaryDeltanetGpuForward {
                             n,
                         );
                     }
-                    self.prefill_project(
+                    self.prefill_project_pair(
                         &layer_w.in_proj_qkv,
+                        &layer_w.in_proj_z,
                         &rotx_b,
                         &qkv_b,
+                        &z_b,
                         p,
                         PrefillSite::GdnQkv,
+                        PrefillSite::GdnZ,
                     );
-                    self.prefill_project(&layer_w.in_proj_z, &rotx_b, &z_b, p, PrefillSite::GdnZ);
                     for (w, out, name) in [
                         (&layer_w.in_proj_a_f32, &a_b, "ssm_alpha"),
                         (&layer_w.in_proj_b_f32, &b_b, "ssm_beta"),
@@ -10904,18 +10959,14 @@ impl TernaryDeltanetGpuForward {
                     #[cfg(not(feature = "ane_prefill"))]
                     let ane_gate_up_done = false;
                     if !ane_gate_up_done {
-                        self.prefill_project(
+                        self.prefill_project_pair(
                             &layer_w.gate_proj,
-                            &normx_b,
-                            &gate_b,
-                            p,
-                            PrefillSite::FfnGate,
-                        );
-                        self.prefill_project(
                             &layer_w.up_proj,
                             &normx_b,
+                            &gate_b,
                             &up_b,
                             p,
+                            PrefillSite::FfnGate,
                             PrefillSite::FfnUp,
                         );
                     }
