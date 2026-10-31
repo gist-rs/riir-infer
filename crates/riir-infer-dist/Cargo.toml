@@ -126,8 +126,12 @@ gpu = [
 # projection group and the head sends block-exact 128-token frames.
 # Measured in this lane's `production` posture (single box, full model,
 # f=0.35): 1.154x @ one 128 frame, 1.164x @ 256 = 2 blocks, G1 cosine
-# >= 0.9999997, argmax equal. LOSSY (fp16 + per-row int8 ANE) — promotion
-# into `gpu` waits on the per-family quality read + the 2-box e2e.
+# >= 0.9999997, argmax equal. LOSSY (fp16 + per-row int8 ANE).
+# ⛔ DEMOTED — do not promote (riir-ai Issue 1147 B8 verdict): those wins
+# were against the STRICT tensor GEMM; this lane ships the RELAXED one
+# (Issue 1146 rung 2b, 2.3x faster), and against it the split LOSES —
+# 2-box idle e2e 1000-token prefill 1.02 s off vs 1.23 s head-only vs
+# 1.33-1.38 s both; single box relaxed best f=0.10-0.15 = 1.01x (noise).
 # `RIIR_DIST_ANE_SPLIT=0` demotes at runtime; code is Apple-silicon-gated.
 ane_split = ["gpu", "riir-infer-gpu/ane_zc_channel_split"]
 # Issue 654 promotion e2e — the head score placed on the CUDA device (the

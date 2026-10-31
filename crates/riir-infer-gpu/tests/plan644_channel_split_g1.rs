@@ -31,6 +31,12 @@
 //! them a ragged p ran the incumbent prework's per-token conv1d). Production
 //! posture 2026-10-31: 1.186× @2048, 1.164× @4096, 1.103× @3000.
 //!
+//! ⛔ The denominator is the STRICT tensor GEMM unless
+//! `RIIR_METAL_TENSOR_RELAXED=1` (the dist lane's shipped posture, Issue 1146
+//! rung 2b). Against RELAXED the split LOSES (riir-ai Issue 1147 B8 verdict,
+//! 2026-10-31): p=2048 f=0.35 0.765×, f=0.15 1.012×; 8×128 frames over
+//! [0, 32) f=0.35 0.847×, f=0.10 1.015×. A split win must be re-read there.
+//!
 //! Env: `BONSAI2_G1_MODEL` (model path), `P644_P` (prompt tokens, default
 //! 2048; whole 2048-token blocks split, the tail runs GPU-only), `P644_PAIRS`
 //! (timed interleaved pairs, default 4), `P644_F` (ANE row fraction),
