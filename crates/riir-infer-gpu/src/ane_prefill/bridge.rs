@@ -230,15 +230,65 @@ struct BridgeFns {
     invoke: InvokeFn,
 }
 
+/// The ObjC bridge, EMBEDDED in the binary (riir-ai Issue 1147 B8): the
+/// build-time `OUT_DIR` path does not exist on a box the binary was shipped
+/// to (measured: a dist tail scp'd to bmo panicked at registration).
+static BRIDGE_DYLIB: &[u8] =
+    include_bytes!(concat!(env!("OUT_DIR"), "/libane_prefill_bridge.dylib"));
+
+/// The dlopened bridge handle, loaded once. `RIIR_ANE_BRIDGE_DYLIB=<path>`
+/// overrides; otherwise the embedded bytes are extracted to the per-user
+/// temp dir under a content-derived name and RE-VERIFIED byte-for-byte
+/// before every first load (a stale or foreign file is rewritten, never
+/// trusted).
+fn bridge_handle() -> Result<*mut c_void, String> {
+    use std::sync::OnceLock;
+    static H: OnceLock<Result<usize, String>> = OnceLock::new();
+    H.get_or_init(|| {
+        let path = match std::env::var_os("RIIR_ANE_BRIDGE_DYLIB") {
+            Some(p) => std::path::PathBuf::from(p),
+            None => extract_embedded_bridge()?,
+        };
+        let c = CString::new(path.as_os_str().as_encoded_bytes())
+            .map_err(|e| format!("ANE bridge path: {e}"))?;
+        let h = unsafe { dlopen(c.as_ptr(), RTLD_NOW | RTLD_LOCAL) };
+        match h.is_null() {
+            true => Err(format!("dlopen {} failed", path.display())),
+            false => Ok(h as usize),
+        }
+    })
+    .clone()
+    .map(|h| h as *mut c_void)
+}
+
+fn extract_embedded_bridge() -> Result<std::path::PathBuf, String> {
+    // FNV-1a names the file; the byte compare below is the integrity check.
+    let digest = BRIDGE_DYLIB.iter().fold(0xcbf2_9ce4_8422_2325u64, |h, &b| {
+        (h ^ b as u64).wrapping_mul(0x0000_0100_0000_01b3)
+    });
+    let path = std::env::temp_dir().join(format!("riir_ane_prefill_bridge_{digest:016x}.dylib"));
+    if std::fs::read(&path).is_ok_and(|b| b == BRIDGE_DYLIB) {
+        return Ok(path);
+    }
+    let tmp = path.with_extension(format!("{}.tmp", std::process::id()));
+    std::fs::write(&tmp, BRIDGE_DYLIB)
+        .and_then(|()| std::fs::rename(&tmp, &path))
+        .map_err(|e| format!("extract ANE bridge to {}: {e}", path.display()))?;
+    Ok(path)
+}
+
+/// Is the ANE bridge loadable? Registration paths check this first so a
+/// missing bridge FAILS OPEN (GPU-only) instead of panicking.
+pub fn bridge_available() -> Result<(), String> {
+    bridge_handle().map(|_| ())
+}
+
 /// dlsym a symbol from the bridge dylib (debug probes — the named-fn table
 /// stays for the production entries).
 #[cfg(all(feature = "metal_tensor_gemm", target_os = "macos"))]
 fn dlsym_export(name: &str) -> *mut c_void {
     unsafe {
-        let dylib = concat!(env!("OUT_DIR"), "/libane_prefill_bridge.dylib");
-        let c = CString::new(dylib).expect("dylib path");
-        let h = dlopen(c.as_ptr(), RTLD_NOW | RTLD_LOCAL);
-        assert!(!h.is_null(), "dlopen {dylib} failed");
+        let h = bridge_handle().unwrap_or_else(|e| panic!("{e}"));
         let c = CString::new(name).unwrap();
         dlsym(h, c.as_ptr())
     }
@@ -248,10 +298,9 @@ fn bridge_fns() -> &'static BridgeFns {
     use std::sync::OnceLock;
     static FNS: OnceLock<BridgeFns> = OnceLock::new();
     FNS.get_or_init(|| unsafe {
-        let dylib = concat!(env!("OUT_DIR"), "/libane_prefill_bridge.dylib");
-        let c = CString::new(dylib).expect("dylib path");
-        let h = dlopen(c.as_ptr(), RTLD_NOW | RTLD_LOCAL);
-        assert!(!h.is_null(), "dlopen {dylib} failed");
+        // Entry points check [`bridge_available`] first; reaching here
+        // without the dylib is a caller bug, not a runtime condition.
+        let h = bridge_handle().unwrap_or_else(|e| panic!("{e}"));
         let sym = |name: &str| -> *mut c_void {
             let c = CString::new(name).unwrap();
             dlsym(h, c.as_ptr())
@@ -580,6 +629,7 @@ impl BridgeKernel {
         fp16_scale_bits: &[u16],
         backoff_ms: &[u64],
     ) -> Result<Self, String> {
+        bridge_available()?;
         let mil = int8_two_file_mil(input_dim, output_dim, seq);
         let data_blob = pack_weights_bits(
             unsafe { std::slice::from_raw_parts(int8_payload.as_ptr().cast(), int8_payload.len()) },
