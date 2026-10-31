@@ -268,7 +268,11 @@ void *ane_t0_compile(const char *mil_path, const char *blob_path,
         if (ok && !((BOOL(*)(id,SEL,unsigned int,id,NSError**))objc_msgSend)(
                 mdl, @selector(loadWithQoS:options:error:), 0, opts, &e)) {
             ok = NO;
-            if (restored) {
+            // Code=54 ("no ANE resources") is the device pool, not the
+            // artifact: purging would evict a VALID entry and pay a compile
+            // that cannot load either (riir-ai Issue 1147 B2 — four purges
+            // per fill-to-capacity registration).
+            if (restored && !(e && e.code == 54)) {
                 // Corrupt or incompatible store entry: purge it before
                 // compiling exactly once more, otherwise the probe would keep
                 // returning the same unusable artifact (omlx).
@@ -430,7 +434,11 @@ void *ane_t0_compile2(const char *mil_path, const char *data_path,
             // recorded text is the Rust-side bounded retry's classifier.
             set_last_error(e ? e.description
                              : @("ane_t0_compile2: loadWithQoS failed"));
-            if (restored) {
+            // Code=54 ("no ANE resources") is the device pool, not the
+            // artifact: purging would evict a VALID entry and pay a compile
+            // that cannot load either (riir-ai Issue 1147 B2 — four purges
+            // per fill-to-capacity registration).
+            if (restored && !(e && e.code == 54)) {
                 // Corrupt or incompatible store entry: purge it before
                 // compiling exactly once more, otherwise the probe would keep
                 // returning the same unusable artifact (omlx).

@@ -18,6 +18,7 @@
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::time::{Duration, Instant};
 
 use katgpt_core::TernaryGroupWeights;
 
@@ -141,11 +142,26 @@ pub fn row_range(w: &TernaryGroupWeights, start: usize, end: usize) -> TernaryGr
 /// compile ONLY the concatenated prefix rows (per-row requant ⇒ the suffix
 /// is never touched on the ANE side) and upload each suffix. `Ok(None)` =
 /// some part degenerates (the group stays GPU-only).
+/// Where registration time goes, summed over every [`build`] call (riir-ai
+/// Issue 1147 B2 — the load-time cost of the split is the promotion blocker,
+/// so the registration line prints this breakdown, never one opaque total).
+#[derive(Debug, Default, Clone, Copy)]
+pub struct BuildTiming {
+    /// Ternary → per-row int8 requant of the ANE prefix rows (CPU).
+    pub requant: Duration,
+    /// MIL + blob packing, the bridge compile (or cache restore) and load.
+    pub compile: Duration,
+    /// The GPU suffix handle upload.
+    pub upload: Duration,
+}
+
 pub fn build(
     client: &cubecl::client::ComputeClient<crate::cubecl_runtime::ActiveRuntime>,
     ws: &[&TernaryGroupWeights],
     fraction: f64,
     block_tokens: usize,
+    backoff_ms: &[u64],
+    timing: &mut BuildTiming,
 ) -> Result<Option<AneChannelSplit>, String> {
     let Some(first) = ws.first() else {
         return Ok(None);
@@ -167,19 +183,34 @@ pub fn build(
         neg.extend_from_slice(&w.neg_bits[..k * w.blocks64]);
         scale.extend_from_slice(&w.group_scale[..k * w.groups_per_row]);
     }
+    let t = Instant::now();
     let (q, wscale) = requant_per_row_int8(&pos, &neg, &scale, k_total, first.cols);
-    let kernel = BridgeKernel::compile_form_c(first.cols, k_total, block_tokens, &q, &wscale)?;
+    timing.requant += t.elapsed();
+    let t = Instant::now();
+    let kernel = BridgeKernel::compile_form_c_with_backoff(
+        first.cols,
+        k_total,
+        block_tokens,
+        &q,
+        &wscale,
+        backoff_ms,
+    );
+    timing.compile += t.elapsed();
+    let kernel = kernel?;
+    let t = Instant::now();
+    let parts = ws
+        .iter()
+        .zip(&ks)
+        .map(|(w, &k)| SplitPart {
+            suffix: TernaryHandle::from_weights(client, &row_range(w, k, w.rows)),
+            k,
+            n: w.rows,
+        })
+        .collect();
+    timing.upload += t.elapsed();
     Ok(Some(AneChannelSplit {
         kernel: Arc::new(kernel),
-        parts: ws
-            .iter()
-            .zip(&ks)
-            .map(|(w, &k)| SplitPart {
-                suffix: TernaryHandle::from_weights(client, &row_range(w, k, w.rows)),
-                k,
-                n: w.rows,
-            })
-            .collect(),
+        parts,
         ic: first.cols,
         block_tokens,
     }))

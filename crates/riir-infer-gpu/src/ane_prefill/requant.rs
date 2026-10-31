@@ -26,6 +26,14 @@ pub const TERNARY_GROUP_SIZE: usize = 128;
 /// row-major). `group_scale`: `[rows * groups_per_row]` f16 bits (the
 /// `TernaryHandle::group_scale_f32` values are the f32 decodes of these).
 /// Returns `(int8 payload [rows*cols], fp16 row-scale bits [rows])`.
+///
+/// Word-level and row-parallel (riir-ai Issue 1147 B2: the per-bit scalar
+/// form was 23.8 s of the channel split's 36.6 s registration): a group's
+/// "any nonzero" test is an OR of its masked words, the two quantized
+/// values `±q_g` are computed once per group, and only SET bits are visited.
+/// Bit-identical to the per-bit recipe (`requant_reference`, test-pinned):
+/// same f32 expression per value, bits past `cols` ignored, and a weight
+/// set in both planes stays positive (pos is written last).
 pub fn requant_per_row_int8(
     pos_bits: &[u64],
     neg_bits: &[u64],
@@ -33,64 +41,143 @@ pub fn requant_per_row_int8(
     rows: usize,
     cols: usize,
 ) -> (Vec<i8>, Vec<u16>) {
+    use rayon::prelude::*;
+
+    const WORDS_PER_GROUP: usize = TERNARY_GROUP_SIZE / 64;
     let blocks64 = cols.div_ceil(64);
     let groups = cols.div_ceil(TERNARY_GROUP_SIZE);
     debug_assert_eq!(pos_bits.len(), rows * blocks64);
     debug_assert_eq!(neg_bits.len(), rows * blocks64);
     debug_assert_eq!(group_scale.len(), rows * groups);
+    // Valid-column mask of word `w` (only the last word can be partial).
+    let tail_mask = match cols % 64 {
+        0 => u64::MAX,
+        r => (1u64 << r) - 1,
+    };
+    let word_mask = |w: usize| {
+        if w + 1 == blocks64 {
+            tail_mask
+        } else {
+            u64::MAX
+        }
+    };
 
     let mut q = vec![0i8; rows * cols];
     let mut ws = vec![0u16; rows];
+    if cols == 0 {
+        return (q, ws);
+    }
+    q.par_chunks_mut(cols)
+        .zip(ws.par_iter_mut())
+        .enumerate()
+        .for_each(|(o, (q_row, ws_o))| {
+            let row_pos = &pos_bits[o * blocks64..(o + 1) * blocks64];
+            let row_neg = &neg_bits[o * blocks64..(o + 1) * blocks64];
+            let row_scales = &group_scale[o * groups..(o + 1) * groups];
+            let words = |g: usize| g * WORDS_PER_GROUP..((g + 1) * WORDS_PER_GROUP).min(blocks64);
 
-    for o in 0..rows {
-        let row_pos = &pos_bits[o * blocks64..(o + 1) * blocks64];
-        let row_neg = &neg_bits[o * blocks64..(o + 1) * blocks64];
-        let row_scales = &group_scale[o * groups..(o + 1) * groups];
-
-        // s_row = max |w| over the row = max group scale over groups that
-        // contain at least one nonzero bit (a zero weight contributes 0).
-        let mut s_row = 0.0f32;
-        for (g, &s_bits) in row_scales.iter().enumerate() {
-            let col_lo = g * TERNARY_GROUP_SIZE;
-            let col_hi = ((g + 1) * TERNARY_GROUP_SIZE).min(cols);
-            let mut any = false;
-            for c in col_lo..col_hi {
-                let w = c / 64;
-                let bit = 1u64 << (c % 64);
-                if row_pos[w] & bit != 0 || row_neg[w] & bit != 0 {
-                    any = true;
-                    break;
+            // s_row = max scale over groups holding at least one nonzero.
+            let mut s_row = 0.0f32;
+            for (g, s_bits) in row_scales.iter().enumerate() {
+                if words(g).any(|w| (row_pos[w] | row_neg[w]) & word_mask(w) != 0) {
+                    s_row = s_row.max(s_bits.to_f32());
                 }
             }
-            if any {
-                s_row = s_row.max(s_bits.to_f32());
-            }
-        }
+            // Zero row: any ws works (q is all zero); 1.0 keeps the blob sane.
+            let ws_row = if s_row > 0.0 { s_row } else { 1.0 };
+            *ws_o = half::f16::from_f32(ws_row / 127.0).to_bits();
 
-        // Zero row: any ws works (q is all zero); 1.0 keeps the blob sane.
-        let ws_row = if s_row > 0.0 { s_row } else { 1.0 };
-        ws[o] = half::f16::from_f32(ws_row / 127.0).to_bits();
-
-        for c in 0..cols {
-            let w = c / 64;
-            let bit = 1u64 << (c % 64);
-            let pos = row_pos[w] & bit != 0;
-            let neg = row_neg[w] & bit != 0;
-            if !pos && !neg {
-                continue; // zero weight → q = 0
+            for (g, s_bits) in row_scales.iter().enumerate() {
+                let s_g = s_bits.to_f32();
+                let quant =
+                    |sign: f32| (127.0 * sign * s_g / ws_row).round().clamp(-127.0, 127.0) as i8;
+                let (q_pos, q_neg) = (quant(1.0), quant(-1.0));
+                for w in words(g) {
+                    let mask = word_mask(w);
+                    // neg first, pos last: a both-planes bit stays positive.
+                    for (mut bits, v) in [(row_neg[w] & mask, q_neg), (row_pos[w] & mask, q_pos)] {
+                        while bits != 0 {
+                            q_row[w * 64 + bits.trailing_zeros() as usize] = v;
+                            bits &= bits - 1;
+                        }
+                    }
+                }
             }
-            let sign = if pos { 1.0f32 } else { -1.0f32 };
-            let s_g = row_scales[c / TERNARY_GROUP_SIZE].to_f32();
-            let scaled = (127.0 * sign * s_g / ws_row).round().clamp(-127.0, 127.0);
-            q[o * cols + c] = scaled as i8;
-        }
-    }
+        });
     (q, ws)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The per-bit scalar recipe the fast form is pinned against.
+    ///
+    /// `pos_bits`/`neg_bits`: `[rows * blocks64]` u64 (columns packed 64/word,
+    /// row-major). `group_scale`: `[rows * groups_per_row]` f16 bits (the
+    /// `TernaryHandle::group_scale_f32` values are the f32 decodes of these).
+    /// Returns `(int8 payload [rows*cols], fp16 row-scale bits [rows])`.
+    fn requant_reference(
+        pos_bits: &[u64],
+        neg_bits: &[u64],
+        group_scale: &[half::f16],
+        rows: usize,
+        cols: usize,
+    ) -> (Vec<i8>, Vec<u16>) {
+        let blocks64 = cols.div_ceil(64);
+        let groups = cols.div_ceil(TERNARY_GROUP_SIZE);
+        debug_assert_eq!(pos_bits.len(), rows * blocks64);
+        debug_assert_eq!(neg_bits.len(), rows * blocks64);
+        debug_assert_eq!(group_scale.len(), rows * groups);
+
+        let mut q = vec![0i8; rows * cols];
+        let mut ws = vec![0u16; rows];
+
+        for o in 0..rows {
+            let row_pos = &pos_bits[o * blocks64..(o + 1) * blocks64];
+            let row_neg = &neg_bits[o * blocks64..(o + 1) * blocks64];
+            let row_scales = &group_scale[o * groups..(o + 1) * groups];
+
+            // s_row = max |w| over the row = max group scale over groups that
+            // contain at least one nonzero bit (a zero weight contributes 0).
+            let mut s_row = 0.0f32;
+            for (g, &s_bits) in row_scales.iter().enumerate() {
+                let col_lo = g * TERNARY_GROUP_SIZE;
+                let col_hi = ((g + 1) * TERNARY_GROUP_SIZE).min(cols);
+                let mut any = false;
+                for c in col_lo..col_hi {
+                    let w = c / 64;
+                    let bit = 1u64 << (c % 64);
+                    if row_pos[w] & bit != 0 || row_neg[w] & bit != 0 {
+                        any = true;
+                        break;
+                    }
+                }
+                if any {
+                    s_row = s_row.max(s_bits.to_f32());
+                }
+            }
+
+            // Zero row: any ws works (q is all zero); 1.0 keeps the blob sane.
+            let ws_row = if s_row > 0.0 { s_row } else { 1.0 };
+            ws[o] = half::f16::from_f32(ws_row / 127.0).to_bits();
+
+            for c in 0..cols {
+                let w = c / 64;
+                let bit = 1u64 << (c % 64);
+                let pos = row_pos[w] & bit != 0;
+                let neg = row_neg[w] & bit != 0;
+                if !pos && !neg {
+                    continue; // zero weight → q = 0
+                }
+                let sign = if pos { 1.0f32 } else { -1.0f32 };
+                let s_g = row_scales[c / TERNARY_GROUP_SIZE].to_f32();
+                let scaled = (127.0 * sign * s_g / ws_row).round().clamp(-127.0, 127.0);
+                q[o * cols + c] = scaled as i8;
+            }
+        }
+        (q, ws)
+    }
 
     fn f16v(f: f32) -> half::f16 {
         half::f16::from_f32(f)
@@ -248,6 +335,47 @@ mod tests {
                     "row {r} col {c}: |{w} − {recon}| = {err} > {s_row}/254"
                 );
             }
+        }
+    }
+
+    /// The word-level row-parallel form is bit-identical to the per-bit
+    /// recipe (riir-ai Issue 1147 B2) — over both-plane overlaps, stray bits
+    /// past `cols`, all-zero rows, partial words and partial groups.
+    #[test]
+    fn requant_fast_matches_reference_bit_for_bit() {
+        let mut state = 0x9e37_79b9_7f4a_7c15u64;
+        let mut next = move || {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            state
+        };
+        for &(rows, cols) in &[
+            (1usize, 1usize),
+            (3, 64),
+            (5, 127),
+            (4, 128),
+            (7, 200),
+            (6, 384),
+            (9, 5120),
+        ] {
+            let blocks64 = cols.div_ceil(64);
+            let groups = cols.div_ceil(TERNARY_GROUP_SIZE);
+            let mut pos: Vec<u64> = (0..rows * blocks64).map(|_| next() & next()).collect();
+            let neg: Vec<u64> = (0..rows * blocks64).map(|_| next() & next()).collect();
+            // Row 0 all-zero in both planes (the zero-row guard).
+            pos[..blocks64].fill(0);
+            let neg = {
+                let mut n = neg;
+                n[..blocks64].fill(0);
+                n
+            };
+            let scales: Vec<half::f16> = (0..rows * groups)
+                .map(|_| half::f16::from_f32((next() % 1000) as f32 * 6.1e-5))
+                .collect();
+            let fast = requant_per_row_int8(&pos, &neg, &scales, rows, cols);
+            let slow = requant_reference(&pos, &neg, &scales, rows, cols);
+            assert_eq!(fast, slow, "rows {rows} cols {cols}");
         }
     }
 }

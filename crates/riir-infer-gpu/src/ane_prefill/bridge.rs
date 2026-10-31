@@ -529,6 +529,11 @@ pub struct BridgeKernel {
     textures: std::sync::Mutex<Option<std::sync::Arc<crate::ane_prefill::bridge::ZcTextures>>>,
 }
 
+/// The default transient-load retry ladder (Issue 886 T5): a just-dropped
+/// bank's programs release asynchronously, so a Code=54 at load is retried
+/// after 1 s / 2 s / 4 s.
+pub const TRANSIENT_BACKOFF_MS: [u64; 3] = [1_000, 2_000, 4_000];
+
 impl BridgeKernel {
     /// The compiled program's output CHANNEL count — `out_elems / seq`.
     /// Issue 887: the dispatch seams pass this as the executors' `oc_total`
@@ -552,6 +557,29 @@ impl BridgeKernel {
         int8_payload: &[i8],
         fp16_scale_bits: &[u16],
     ) -> Result<Self, String> {
+        Self::compile_form_c_with_backoff(
+            input_dim,
+            output_dim,
+            seq,
+            int8_payload,
+            fp16_scale_bits,
+            &TRANSIENT_BACKOFF_MS,
+        )
+    }
+
+    /// [`Self::compile_form_c`] with an explicit transient-retry ladder.
+    /// A fill-to-capacity registrar passes `&[]` once it has loaded a
+    /// program in the same pass: a Code=54 THEN means the device pool is
+    /// full, not settling, and the 7 s ladder is pure load-time cost
+    /// (riir-ai Issue 1147 B2).
+    pub fn compile_form_c_with_backoff(
+        input_dim: usize,
+        output_dim: usize,
+        seq: usize,
+        int8_payload: &[i8],
+        fp16_scale_bits: &[u16],
+        backoff_ms: &[u64],
+    ) -> Result<Self, String> {
         let mil = int8_two_file_mil(input_dim, output_dim, seq);
         let data_blob = pack_weights_bits(
             unsafe { std::slice::from_raw_parts(int8_payload.as_ptr().cast(), int8_payload.len()) },
@@ -564,7 +592,14 @@ impl BridgeKernel {
         let scale_blob = pack_weights_bits(&scale_bytes, 0x10);
         let in_elems = input_dim * seq;
         let out_elems = output_dim * seq;
-        Self::compile_two_blobs(&mil, &data_blob, &scale_blob, in_elems, out_elems)
+        Self::compile_two_blobs(
+            &mil,
+            &data_blob,
+            &scale_blob,
+            in_elems,
+            out_elems,
+            backoff_ms,
+        )
     }
 
     /// Compile + load a MIL with two blob files through the ObjC bridge
@@ -576,6 +611,7 @@ impl BridgeKernel {
         scale_blob: &[u8],
         in_elems: usize,
         out_elems: usize,
+        backoff_ms: &[u64],
     ) -> Result<Self, String> {
         let fns = bridge_fns();
         // Unique per CALL, not per process: a pid-only tag makes every
@@ -625,8 +661,7 @@ impl BridgeKernel {
             // the IDENTICAL compile (the temp files stay on disk until the
             // outcome resolves); a non-transient — or still-failing — load
             // errors below exactly as before.
-            const TRANSIENT_BACKOFF_MS: [u64; 3] = [1_000, 2_000, 4_000];
-            for (attempt, &ms) in TRANSIENT_BACKOFF_MS.iter().enumerate() {
+            for (attempt, &ms) in backoff_ms.iter().enumerate() {
                 let err = last_bridge_error(fns);
                 if !err.contains("transient") {
                     break;

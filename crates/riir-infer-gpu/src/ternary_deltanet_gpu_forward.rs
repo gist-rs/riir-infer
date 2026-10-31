@@ -4150,10 +4150,12 @@ impl TernaryDeltanetGpuForward {
                     // resources", Code=54, long before any byte budget), so
                     // sites register in order of saving per program
                     // (gate/up ≈6.7 ms, qkv ≈4.0, z ≈2.4, out ≈2.3 — Plan
-                    // 644's table) and the first refusal ENDS registration:
-                    // past capacity every attempt is a ~7 s retry ladder.
+                    // 644's table) and the first refusal ENDS registration
+                    // (no retry ladder past the first program — see below).
                     let (mut sites, mut refused) = (0usize, None::<String>);
                     let (mut scratch_elems, mut programs) = (0usize, 0usize);
+                    let mut timing = crate::ane_prefill::channel_split::BuildTiming::default();
+                    let mut zc_cache = std::time::Duration::ZERO;
                     // T1b: projections sharing an input FUSE into one
                     // program (gate+up, qkv+z) — 64 + 48 = 112 programs
                     // cover every 5120-input site inside the cap.
@@ -4184,13 +4186,27 @@ impl TernaryDeltanetGpuForward {
                             let parts: Vec<&katgpt_core::TernaryGroupWeights> =
                                 refused_hosts.iter().map(|c| c.as_ref()).collect();
                             match crate::ane_prefill::channel_split::build(
-                                &client, &parts, fraction, block,
+                                &client,
+                                &parts,
+                                fraction,
+                                block,
+                                // The ladder covers a just-dropped bank still
+                                // releasing; once THIS pass has loaded a
+                                // program, a refusal is the full pool and
+                                // ends registration at once (Issue 1147 B2).
+                                match programs {
+                                    0 => &crate::ane_prefill::bridge::TRANSIENT_BACKOFF_MS,
+                                    _ => &[],
+                                },
+                                &mut timing,
                             ) {
                                 Ok(Some(mut split)) => {
+                                    let t_zc = std::time::Instant::now();
                                     for part in &mut split.parts {
                                         part.suffix.zerocopy_cache =
                                             gemm.cache_weights(&client, &part.suffix).ok();
                                     }
+                                    zc_cache += t_zc.elapsed();
                                     scratch_elems = scratch_elems
                                         .max(split.block_tokens * split.max_suffix_rows());
                                     h.ane_split = Some(std::sync::Arc::new(split));
@@ -4215,8 +4231,12 @@ impl TernaryDeltanetGpuForward {
                         );
                     }
                     eprintln!(
-                        "[Plan 644] channel split registered: {sites} sites in {programs} programs at f={fraction:.2}, block {block}, in {:.1} s",
-                        t0.elapsed().as_secs_f64()
+                        "[Plan 644] channel split registered: {sites} sites in {programs} programs at f={fraction:.2}, block {block}, in {:.1} s (requant {:.1} s · compile+load {:.1} s · suffix upload {:.1} s · zero-copy cache {:.1} s)",
+                        t0.elapsed().as_secs_f64(),
+                        timing.requant.as_secs_f64(),
+                        timing.compile.as_secs_f64(),
+                        timing.upload.as_secs_f64(),
+                        zc_cache.as_secs_f64()
                     );
                 }
             }
