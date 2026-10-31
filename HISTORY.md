@@ -2,6 +2,10 @@
 
 Compacted 2026-10-30: every `##` heading kept verbatim, one compact entry per record (≤2 short lines); the full pre-compaction text is in git history. Operational rules live in `AGENTS.md`; removed issue files: git history.
 
+## 2026-10-31 — Plan 607 follow-up: the promoted `RIIR_GDN_REC_MR` re-pinned through the formal league harness + the share-model corrected — 0.2714×/0.2792×/0.2732× (pp2048/16k/32k), FNV pins EXACT ×9, +7.7% window question closed (drift), rec share at the league chunk 5.09%/3.35% vs the serving-chunk census's 2.16%
+
+Formal bout on bmo at tuple riir-ai `ded79a301` + this repo `6116c47` + katgpt-rs `2bbaf2640`, fork `73bfe6cc48`, verified-idle, canaries in-band: pp2048 289.69/1067.25, pp16k 254.04/909.87, pp32k 210.42/770.33 — the armed class (D4: 290.06/254.81/209.94) reproduces in a fresh window; the pre-promotion seeds (266.46/239.95) were window-depressed. The bench_1146 census (4 cells, bmo, full logs): at the LEAGUE chunk (single 2048-wide frame) gdn_rec = 288.85 ms = 5.09% (MR=0) / 187.12 ms = 3.35% (MR=4); measured rec-kernel saving −35.2% (isolated predicted −32.2%); e2e census +1.73% ≈ 5.09%×35.2% = 1.79%. The lost D2 strip cross-check recovered: gdn_rec −2.16 ms under MR at chunk 128 (predicted ~2 ms), census e2e +0.61% (D2 read +0.60%). Record: riir-ai league doc 10-31 pm rows + HISTORY.
+
 ## 2026-10-31 — Issue 1160 CLOSED + removed: soft-token feedback decode (LIFT/MoI class) — G0 COLLAPSE on Bonsai-2 PQ2_0
 
 - Pre-registered G0 fired: pooled median decode top-1 mass 0.976 ≥ 0.9 over 512 greedy Metal decode steps (arith/G1b headline class 0.999; the pilot's top-128 τ=1.5 soft token puts 0.985 of its weight on the argmax) ⇒ `E^T s` ≈ the argmax embedding where the gain was claimed; closed without the 18-config sweep. Prose/zh are not spiky (median 0.48–0.68) — the reopen condition, with dense-lane and trained-channel (riir-train Plan 344) triggers, is in [Bench 932](.benchmarks/932_i1160_g0_soft_token_collapse.md). Probe kept: `tests/issue1160_g0_collapse_probe.rs` (`#[ignore]`, required-features row at birth). Source: riir-train Research 487.
