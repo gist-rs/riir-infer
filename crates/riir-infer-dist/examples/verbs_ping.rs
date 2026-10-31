@@ -35,7 +35,7 @@ use std::time::{Duration, Instant};
 use riir_infer_dist::sockopts;
 use riir_infer_dist::transport::PeerKey;
 use riir_infer_dist::verbs::{
-    self, clamp_mtu, exchange_endpoint, random_psn, CompQ, Endpoint, MemReg, Qp, Rdma,
+    self, CompQ, Endpoint, MemReg, Qp, Rdma, clamp_mtu, exchange_endpoint, random_psn,
 };
 
 /// The bulk header magic length — distinguishes it from an RTT echo on
@@ -71,7 +71,9 @@ fn main() {
         eprintln!("  --gid-index N       pin the source GID (default: auto by peer v4)");
         eprintln!("  --mtu N             path MTU 256..4096 (default: active)");
         eprintln!("  --inline N          request N inline bytes (default 224)");
-        eprintln!("  --rtt-msg BYTES     RTT probe message size (default 64; must not be {HDR_LEN})");
+        eprintln!(
+            "  --rtt-msg BYTES     RTT probe message size (default 64; must not be {HDR_LEN})"
+        );
         eprintln!("  --rtt-iters N       RTT measured iterations (default 2000)");
         eprintln!("  --bw-size MIB       one-way bulk size in MiB (default 64)");
         eprintln!("  --stripe BYTES      bulk stripe size (default 262144)");
@@ -94,9 +96,10 @@ fn main() {
     let listen = get("listen");
     let addr = get("addr");
     let role_binding = get("role");
-    let role: &str = role_binding
-        .as_deref()
-        .unwrap_or(if listen.is_some() { "host" } else { "peer" });
+    let role: &str =
+        role_binding
+            .as_deref()
+            .unwrap_or(if listen.is_some() { "host" } else { "peer" });
     if (listen.is_some()) != (role == "host") || (addr.is_some()) != (role == "peer") {
         eprintln!("--listen pairs with role host; --addr pairs with role peer");
         _usage();
@@ -123,7 +126,9 @@ fn main() {
     let bw_mib: usize = get("bw-size").map_or(64, |v| v.parse().expect("--bw-size MIB"));
     let stripe: usize = get("stripe").map_or(256 * 1024, |v| v.parse().expect("--stripe BYTES"));
     let window: usize = get("window").map_or(32, |v| v.parse().expect("--window N"));
-    let lat = Duration::from_millis(get("lat-ms").map_or(5_000, |v| v.parse::<u64>().expect("--lat-ms N")));
+    let lat = Duration::from_millis(
+        get("lat-ms").map_or(5_000, |v| v.parse::<u64>().expect("--lat-ms N")),
+    );
 
     // ---- side channel --------------------------------------------------
     let mut stream: TcpStream = if let Some(l) = &listen {
@@ -135,7 +140,11 @@ fn main() {
         eprintln!("[side] peer connected from {peer}");
         s
     } else {
-        let sa: SocketAddr = addr.as_deref().expect("--addr IP:PORT").parse().expect("addr");
+        let sa: SocketAddr = addr
+            .as_deref()
+            .expect("--addr IP:PORT")
+            .parse()
+            .expect("addr");
         let (s, applied) =
             sockopts::dial(sa, &link_opts(&iface)).unwrap_or_else(|e| panic!("dial {sa}: {e}"));
         eprintln!("[side] connected to {sa} (applied {applied:?})");
@@ -151,7 +160,11 @@ fn main() {
             .unwrap_or_else(|e| panic!("open device: {e}")),
     );
     let (vp, port_attr) = match verbs_port {
-        Some(p) => (p, ctx.query_port(p).unwrap_or_else(|e| panic!("query port {p}: {e}"))),
+        Some(p) => (
+            p,
+            ctx.query_port(p)
+                .unwrap_or_else(|e| panic!("query port {p}: {e}")),
+        ),
         None => ctx
             .first_active_port()
             .unwrap_or_else(|e| panic!("no active port: {e}")),
@@ -172,7 +185,8 @@ fn main() {
         caps.max_cqe,
     );
 
-    let path_mtu = clamp_mtu(port_attr.active_mtu, mtu_override).unwrap_or_else(|e| panic!("mtu: {e}"));
+    let path_mtu =
+        clamp_mtu(port_attr.active_mtu, mtu_override).unwrap_or_else(|e| panic!("mtu: {e}"));
 
     // One registration covering the RTT area + the bulk area (T3.2 row).
     let bulk_len = bw_mib * (1 << 20);
@@ -188,14 +202,17 @@ fn main() {
         .unwrap_or_else(|e| panic!("reg_mr: {e}"));
     eprintln!(
         "[rdma] T3.2 heap registration OK: addr={:#x} len={} lkey={:#x} rkey={:#x}",
-        mr.addr,
-        mr.len,
-        mr.lkey,
-        mr.rkey
+        mr.addr, mr.len, mr.lkey, mr.rkey
     );
 
-    let send_cq = Arc::new(pd.create_cq(1024).unwrap_or_else(|e| panic!("send cq: {e}")));
-    let recv_cq = Arc::new(pd.create_cq(1024).unwrap_or_else(|e| panic!("recv cq: {e}")));
+    let send_cq = Arc::new(
+        pd.create_cq(1024)
+            .unwrap_or_else(|e| panic!("send cq: {e}")),
+    );
+    let recv_cq = Arc::new(
+        pd.create_cq(1024)
+            .unwrap_or_else(|e| panic!("recv cq: {e}")),
+    );
     let (qp, granted) = pd
         .create_uc_qp(
             &send_cq,
@@ -226,7 +243,8 @@ fn main() {
     let (sgid_idx, sgid) = match gid_index {
         Some(idx) => (
             idx,
-            ctx.gid(vp, idx).unwrap_or_else(|e| panic!("gid {idx}: {e}")),
+            ctx.gid(vp, idx)
+                .unwrap_or_else(|e| panic!("gid {idx}: {e}")),
         ),
         None => ctx
             .pick_gid(vp, peer_v4)
@@ -250,12 +268,14 @@ fn main() {
         Gid(&peer_ep.gid)
     );
 
-    qp.to_init(vp, acc).unwrap_or_else(|e| panic!("to INIT: {e}"));
+    qp.to_init(vp, acc)
+        .unwrap_or_else(|e| panic!("to INIT: {e}"));
     // RTR at the peer's advertised MTU clamped DOWN by our active MTU.
     peer_ep.mtu = clamp_mtu(port_attr.active_mtu, Some(peer_ep.mtu)).unwrap();
     qp.to_rtr(&peer_ep, sgid_idx as u8, vp)
         .unwrap_or_else(|e| panic!("to RTR: {e}"));
-    qp.to_rts(mine.psn).unwrap_or_else(|e| panic!("to RTS: {e}"));
+    qp.to_rts(mine.psn)
+        .unwrap_or_else(|e| panic!("to RTS: {e}"));
     eprintln!(
         "[rdma] QP in RTS: path_mtu={} inline_cap={}",
         peer_ep.mtu_name(),
@@ -264,7 +284,9 @@ fn main() {
 
     // ---- the ladder ----------------------------------------------------
     if role == "host" {
-        host_loop(&qp, &send_cq, &recv_cq, &mr, rtt_msg, rtt_area, bulk_len, stripe, window, lat);
+        host_loop(
+            &qp, &send_cq, &recv_cq, &mr, rtt_msg, rtt_area, bulk_len, stripe, window, lat,
+        );
         println!("[host] done");
     } else {
         if rtt_msg == HDR_LEN {
@@ -272,7 +294,8 @@ fn main() {
             std::process::exit(2);
         }
         peer_ladder(
-            &qp, &send_cq, &recv_cq, &mr, rtt_msg, rtt_iters, rtt_area, bulk_len, stripe, window, lat,
+            &qp, &send_cq, &recv_cq, &mr, rtt_msg, rtt_iters, rtt_area, bulk_len, stripe, window,
+            lat,
         );
     }
     eprintln!("[done] QP drained, exiting clean");
@@ -292,8 +315,22 @@ impl std::fmt::Display for Gid<'_> {
         write!(
             f,
             "{:02x}{:02x}:{:02x}{:02x}:{:02x}{:02x}:{:02x}{:02x}:{:02x}{:02x}:{:02x}{:02x}:{:02x}{:02x}:{:02x}{:02x}",
-            r[0], r[1], r[2], r[3], r[4], r[5], r[6], r[7], r[8], r[9], r[10], r[11], r[12], r[13],
-            r[14], r[15]
+            r[0],
+            r[1],
+            r[2],
+            r[3],
+            r[4],
+            r[5],
+            r[6],
+            r[7],
+            r[8],
+            r[9],
+            r[10],
+            r[11],
+            r[12],
+            r[13],
+            r[14],
+            r[15]
         )
     }
 }
@@ -321,7 +358,8 @@ fn host_loop(
     // bulk area. Length ≥ HDR_LEN so the 16-byte header cannot truncate
     // (a UC truncation is a QP error, not a short read).
     let recv_len = rtt_msg.max(HDR_LEN);
-    qp.post_recv(&mr.slice_at(0, recv_len as u32), 1).expect("host recv");
+    qp.post_recv(&mr.slice_at(0, recv_len as u32), 1)
+        .expect("host recv");
     let (stripe, stripes, total) = loop {
         let wc = recv_cq.poll_one(deadline()).expect("host recv");
         let n = wc.byte_len as usize;
@@ -339,7 +377,8 @@ fn host_loop(
         qp.post_send(&mr.slice_at(0, n as u32), 0, n <= 224)
             .expect("host echo send");
         send_cq.poll_one(deadline()).expect("host echo completion");
-        qp.post_recv(&mr.slice_at(0, recv_len as u32), 1).expect("host recv re-post");
+        qp.post_recv(&mr.slice_at(0, recv_len as u32), 1)
+            .expect("host recv re-post");
     };
     eprintln!("[host] bulk header: stripe={stripe} stripes={stripes} total={total}");
 
@@ -349,7 +388,10 @@ fn host_loop(
     // post_recv rc=-12 on the TB provider at 255×256 KiB), then answer
     // ready.
     let base = rtt_area + BULK_HDR_ROOM;
-    assert!(base + stripes * stripe <= mr.len, "host bulk area undersized");
+    assert!(
+        base + stripes * stripe <= mr.len,
+        "host bulk area undersized"
+    );
     let window = window_hint.min(stripes).max(1);
     let mut posted = 0usize;
     for _ in 0..window {
@@ -409,7 +451,8 @@ fn peer_ladder(
     // ---- RTT ----
     let warmup = rtt_iters / 10;
     let mut samples: Vec<Duration> = Vec::with_capacity(rtt_iters);
-    qp.post_recv(&mr.slice_at(0, rtt_msg as u32), 1).expect("rtt recv");
+    qp.post_recv(&mr.slice_at(0, rtt_msg as u32), 1)
+        .expect("rtt recv");
     let mut i = 0usize;
     loop {
         if i.is_multiple_of(256) {
@@ -431,7 +474,11 @@ fn peer_ladder(
             unsafe {
                 let p = mr.addr as *const u8;
                 for b in 0..rtt_msg {
-                    assert_eq!(*p.add(b), (i.wrapping_add(b)) as u8, "echo content at iter {i}");
+                    assert_eq!(
+                        *p.add(b),
+                        (i.wrapping_add(b)) as u8,
+                        "echo content at iter {i}"
+                    );
                 }
             }
         }
@@ -443,7 +490,8 @@ fn peer_ladder(
             break;
         }
         // re-post the receive for the next echo
-        qp.post_recv(&mr.slice_at(0, rtt_msg as u32), 1).expect("rtt recv re-post");
+        qp.post_recv(&mr.slice_at(0, rtt_msg as u32), 1)
+            .expect("rtt recv re-post");
     }
     samples.sort();
     let n = samples.len();
@@ -471,7 +519,8 @@ fn peer_ladder(
     }
     // receive for `ready` BEFORE sending the header (UC: every send must
     // meet a posted receive).
-    qp.post_recv(&mr.slice_at(0, MARK_LEN as u32), 2).expect("ready recv");
+    qp.post_recv(&mr.slice_at(0, MARK_LEN as u32), 2)
+        .expect("ready recv");
     qp.post_send(&mr.slice_at(rtt_area, HDR_LEN as u32), 3, true)
         .expect("header send");
     send_cq.poll_one(deadline()).expect("header completion");
@@ -479,7 +528,8 @@ fn peer_ladder(
     assert_eq!(wc.byte_len as usize, MARK_LEN, "ready marker length");
 
     // receive for `done`, then push.
-    qp.post_recv(&mr.slice_at(0, MARK_LEN as u32), 4).expect("done recv");
+    qp.post_recv(&mr.slice_at(0, MARK_LEN as u32), 4)
+        .expect("done recv");
     let base = rtt_area + BULK_HDR_ROOM;
     let mut in_flight = 0usize;
     let mut sent = 0usize;

@@ -33,8 +33,7 @@ pub fn load_corpus_pages(path: &Path) -> Result<Vec<(String, String)>> {
                 // HF datasets-server pages: the riir-train chat_probe
                 // `page_*.json` naming AND the reflex canonical suites'
                 // split-named pages (`test-*.json`/`train-*.json`/`val-*`).
-                (n.ends_with(".json")
-                    && (n.starts_with("page_") || n.contains('-')))
+                (n.ends_with(".json") && (n.starts_with("page_") || n.contains('-')))
                     || n.ends_with(".txt")
                     || n.ends_with(".md")
             })

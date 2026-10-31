@@ -653,5 +653,9 @@ fn modal_drafter_proposes_echo_then_modal() {
         committed: &committed,
         k: 3,
     });
-    assert_eq!(out, vec![11u32, 5, 5], "d_0 echoes pending, d_1.. are modal");
+    assert_eq!(
+        out,
+        vec![11u32, 5, 5],
+        "d_0 echoes pending, d_1.. are modal"
+    );
 }

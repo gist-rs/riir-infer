@@ -10,7 +10,7 @@
 #![cfg(all(feature = "rdma", target_os = "macos"))]
 
 use riir_infer_dist::verbs::ffi;
-use riir_infer_dist::verbs::{clamp_mtu, Endpoint};
+use riir_infer_dist::verbs::{Endpoint, clamp_mtu};
 
 /// `(assert)` that a type's size and every named field's offset equal
 /// the compiler-measured constants.
@@ -105,7 +105,10 @@ fn endpoint_wire_round_trip_and_refusals() {
     assert_eq!(wire.len(), 28);
     assert_eq!(Endpoint::decode(&wire).unwrap(), ep);
     for bad in [27usize, 29, 0, 64] {
-        assert!(Endpoint::decode(&vec![0u8; bad]).is_err(), "len {bad} must refuse");
+        assert!(
+            Endpoint::decode(&vec![0u8; bad]).is_err(),
+            "len {bad} must refuse"
+        );
     }
 }
 
@@ -130,7 +133,10 @@ fn device_enumeration_is_honest() {
             .open_device(None)
             .err()
             .expect("open_device on an empty box must fail");
-        assert!(err.contains("no RDMA devices"), "loud no-device error, got: {err}");
+        assert!(
+            err.contains("no RDMA devices"),
+            "loud no-device error, got: {err}"
+        );
         eprintln!("no RDMA devices on this box (expected off the amo⇄bmo pair): {err}");
     } else {
         eprintln!("RDMA devices present: {names:?}");
@@ -142,7 +148,10 @@ fn device_enumeration_is_honest() {
             if let Ok(p) = ctx.query_port(port) {
                 eprintln!(
                     "port {port}: state={} mtu={} gid_tbl={} link={}",
-                    p.state, p.active_mtu, p.gid_tbl_len, p.link_layer_name()
+                    p.state,
+                    p.active_mtu,
+                    p.gid_tbl_len,
+                    p.link_layer_name()
                 );
             }
         }

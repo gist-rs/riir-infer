@@ -45,14 +45,8 @@ const TURNS: &[(&str, &str)] = &[
         "Where is my order?",
         "Your order shipped yesterday and is in transit. The tracking number is in your shipping confirmation email; current estimate is delivery in 2 days.",
     ),
-    (
-        "What is 17 * 24? Give just the number.",
-        "408",
-    ),
-    (
-        "What is 123 + 456? Give just the number.",
-        "579",
-    ),
+    ("What is 17 * 24? Give just the number.", "408"),
+    ("What is 123 + 456? Give just the number.", "579"),
     (
         "A train travels 60 km per hour for 2.5 hours. How many km does it travel?",
         "150 km",
@@ -77,14 +71,8 @@ const TURNS: &[(&str, &str)] = &[
         "Is 'output gives the wrong number sometimes but only on weekends' enough to reproduce a bug?",
         "No. It names a symptom and a correlation but nothing reproducible: no input, environment, or version. Ask for timestamps, exact inputs, and logs around the failures.",
     ),
-    (
-        "Convert 45 minutes to seconds. Just the number.",
-        "2700",
-    ),
-    (
-        "What is 15% of 80?",
-        "12",
-    ),
+    ("Convert 45 minutes to seconds. Just the number.", "2700"),
+    ("What is 15% of 80?", "12"),
     (
         "Explain idempotency in one sentence for an API doc.",
         "An idempotent endpoint produces the same result no matter how many times it is called with the same request, so clients can safely retry.",
@@ -97,10 +85,7 @@ const TURNS: &[(&str, &str)] = &[
         "The deploy failed with 'image pull backoff'. What are the two most likely causes?",
         "A wrong or missing image tag (the registry has no such image), or a registry authentication problem (no valid credentials for a private image).",
     ),
-    (
-        "What year did the Berlin Wall fall?",
-        "1989",
-    ),
+    ("What year did the Berlin Wall fall?", "1989"),
     (
         "Name the four layers of the TCP/IP model in order.",
         "Application, transport, internet, and link.",
@@ -117,10 +102,7 @@ const TURNS: &[(&str, &str)] = &[
         "Does this log line indicate a client or server problem: 'connection reset by peer after 30s'? Explain briefly.",
         "Likely client-side or network: the peer closed the connection. A 30-second window before the reset suggests an idle timeout on an intermediary, not a crash.",
     ),
-    (
-        "What is the opposite of 'increase'?",
-        "decrease",
-    ),
+    ("What is the opposite of 'increase'?", "decrease"),
     (
         "Sort these by memory safety guarantees, strongest first: C, Rust, Python.",
         "Rust (compile-time ownership), Python (memory-safe runtime, no manual freeing), C (manual management, no runtime or compile-time safety net).",
@@ -133,10 +115,7 @@ const TURNS: &[(&str, &str)] = &[
         "Rewrite to be polite: 'You broke the build again.'",
         "Heads up - the build is failing again; could you take a look when you have a moment?",
     ),
-    (
-        "What is 2^10?",
-        "1024",
-    ),
+    ("What is 2^10?", "1024"),
     (
         "In one sentence, why does a rate limiter need a shared store across replicas?",
         "Without shared state each replica counts its own budget, so the effective limit multiplies by the replica count.",
@@ -149,10 +128,7 @@ const TURNS: &[(&str, &str)] = &[
         "What HTTP status should a successful POST that created a resource return?",
         "201 Created, with a Location header pointing at the new resource.",
     ),
-    (
-        "Complete the sequence: 2, 4, 8, 16, ...",
-        "32",
-    ),
+    ("Complete the sequence: 2, 4, 8, 16, ...", "32"),
     (
         "Explain the difference between a process and a thread to a PM.",
         "A process is a program with its own private workspace; threads are workers inside that workspace sharing its memory. Threads are cheaper to create but can trip over each other; processes are isolated but heavier.",
@@ -173,10 +149,7 @@ const TURNS: &[(&str, &str)] = &[
         "The user's session expired mid-form. What is the least annoying recovery?",
         "Persist the draft locally, re-authenticate silently if possible, and restore the form with a 'session refreshed' note instead of discarding their input.",
     ),
-    (
-        "What is the capital of Australia?",
-        "Canberra",
-    ),
+    ("What is the capital of Australia?", "Canberra"),
     (
         "Give the git command to undo the last commit but keep the changes staged.",
         "git reset --soft HEAD~1",
@@ -207,19 +180,33 @@ fn tile_turns(reps: usize) -> Vec<(String, String)> {
             let (user, answer) = match i {
                 MUL => {
                     let (a, b) = (17 + rep as i64, 24 + rep as i64 * 2);
-                    (format!("What is {a} * {b}? Give just the number."), (a * b).to_string())
+                    (
+                        format!("What is {a} * {b}? Give just the number."),
+                        (a * b).to_string(),
+                    )
                 }
                 ADD => {
                     let (a, b) = (123 + rep as i64 * 10, 456 + rep as i64 * 100);
-                    (format!("What is {a} + {b}? Give just the number."), (a + b).to_string())
+                    (
+                        format!("What is {a} + {b}? Give just the number."),
+                        (a + b).to_string(),
+                    )
                 }
                 TRAIN => {
                     let v = 60 + rep as i64 * 5;
-                    (format!("A train travels {v} km per hour for 2.5 hours. How many km does it travel?"), format!("{} km", v * 2 + v / 2))
+                    (
+                        format!(
+                            "A train travels {v} km per hour for 2.5 hours. How many km does it travel?"
+                        ),
+                        format!("{} km", v * 2 + v / 2),
+                    )
                 }
                 SECS => {
                     let m = 45 + rep as i64 * 6;
-                    (format!("Convert {m} minutes to seconds. Just the number."), (m * 60).to_string())
+                    (
+                        format!("Convert {m} minutes to seconds. Just the number."),
+                        (m * 60).to_string(),
+                    )
                 }
                 PCT => {
                     let n = 80 + rep as i64 * 20;
@@ -227,7 +214,12 @@ fn tile_turns(reps: usize) -> Vec<(String, String)> {
                 }
                 COST => {
                     let n = 40 + rep as i64 * 5;
-                    (format!("If a plan costs $12 per user per month and we have {n} users, what is the monthly cost?"), format!("${}", 12 * n))
+                    (
+                        format!(
+                            "If a plan costs $12 per user per month and we have {n} users, what is the monthly cost?"
+                        ),
+                        format!("${}", 12 * n),
+                    )
                 }
                 POW => {
                     let e = 10 + rep as i64;
@@ -244,9 +236,7 @@ fn tile_turns(reps: usize) -> Vec<(String, String)> {
 fn chat_turn(user: &str, assistant: &str) -> String {
     // dist_stage::chat_turn's exact serving template, extended with the
     // assistant reply so the transcript alternates like a live conversation.
-    format!(
-        "<|im_start|>user\n{user}<|im_end|>\n<|im_start|>assistant\n{assistant}<|im_end|>\n"
-    )
+    format!("<|im_start|>user\n{user}<|im_end|>\n<|im_start|>assistant\n{assistant}<|im_end|>\n")
 }
 
 fn main() {
@@ -287,7 +277,9 @@ fn main() {
     }
     std::fs::write(
         &out,
-        all.iter().flat_map(|t| t.to_le_bytes()).collect::<Vec<u8>>(),
+        all.iter()
+            .flat_map(|t| t.to_le_bytes())
+            .collect::<Vec<u8>>(),
     )
     .unwrap_or_else(|e| {
         eprintln!("write {}: {e}", out.display());

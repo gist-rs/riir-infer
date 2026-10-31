@@ -104,7 +104,10 @@ impl Bigram {
     }
 
     fn next_of(&self, prev: u32) -> u32 {
-        self.table.get(&prev).map(|(n, _)| *n).unwrap_or(self.fallback)
+        self.table
+            .get(&prev)
+            .map(|(n, _)| *n)
+            .unwrap_or(self.fallback)
     }
 }
 
@@ -137,7 +140,10 @@ struct BigramPromptFit {
 
 impl BigramPromptFit {
     fn new() -> Self {
-        Self { table: BTreeMap::new(), absorbed: 0 }
+        Self {
+            table: BTreeMap::new(),
+            absorbed: 0,
+        }
     }
 
     fn absorb(&mut self, committed: &[u32]) {
@@ -384,11 +390,11 @@ fn main() -> Result<()> {
 
     println!(
         "# box: {} cores, load {:#.2}; read {}",
-        std::thread::available_parallelism().map(|n| n.get()).unwrap_or(1),
+        std::thread::available_parallelism()
+            .map(|n| n.get())
+            .unwrap_or(1),
         load_avg(),
-        Instant::now()
-            .duration_since(t0)
-            .as_secs_f32()
+        Instant::now().duration_since(t0).as_secs_f32()
     );
 
     // ── Fit the frozen drafters on the train split ──
@@ -404,7 +410,10 @@ fn main() -> Result<()> {
         .filter(|w| w[0] == w[1])
         .count();
     let run_rate = runs as f64 / read_lo.saturating_sub(1).max(1) as f64;
-    let modal_freq = tokens[..read_lo].iter().filter(|&&t| t == uni_modal).count();
+    let modal_freq = tokens[..read_lo]
+        .iter()
+        .filter(|&&t| t == uni_modal)
+        .count();
     let modal_rate = modal_freq as f64 / read_lo.max(1) as f64;
     let modal_form = tok.decode(&[uni_modal as usize]);
     let top_rows: Vec<String> = bigram
@@ -423,7 +432,11 @@ fn main() -> Result<()> {
     println!(
         "# composition: same-token run rate {:#.3} | modal token {} ({:#.3} of train) \n#   top bigram rows: {}",
         run_rate,
-        if modal_form.is_empty() { "<undecodable>" } else { &modal_form },
+        if modal_form.is_empty() {
+            "<undecodable>"
+        } else {
+            &modal_form
+        },
         modal_rate,
         top_rows.join(" | ")
     );
@@ -439,19 +452,24 @@ fn main() -> Result<()> {
 
     for &k in &ks {
         let rows: Vec<(&str, RoundStats)> = {
-            let v = vec![(
-                "repeat_last",
-                evaluate(&mut RepeatLastDrafter, &tokens, read_lo, k),
-            ), (
-                "unigram_modal",
-                evaluate(&mut UnigramModal { token: uni_modal }, &tokens, read_lo, k),
-            ), (
-                "bigram_frozen",
-                evaluate(&mut bigram.clone(), &tokens, read_lo, k),
-            ), (
-                "bigram_promptfit",
-                evaluate(&mut BigramPromptFit::new(), &tokens, read_lo, k),
-            )];
+            let v = vec![
+                (
+                    "repeat_last",
+                    evaluate(&mut RepeatLastDrafter, &tokens, read_lo, k),
+                ),
+                (
+                    "unigram_modal",
+                    evaluate(&mut UnigramModal { token: uni_modal }, &tokens, read_lo, k),
+                ),
+                (
+                    "bigram_frozen",
+                    evaluate(&mut bigram.clone(), &tokens, read_lo, k),
+                ),
+                (
+                    "bigram_promptfit",
+                    evaluate(&mut BigramPromptFit::new(), &tokens, read_lo, k),
+                ),
+            ];
             v
         };
         for (name, st) in &rows {

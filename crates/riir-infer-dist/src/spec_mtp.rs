@@ -220,7 +220,11 @@ impl BmthHead {
             return Ok(());
         }
         self.device = Some(riir_infer_gpu::BmthHeadCuda::new_device(
-            device_idx, &self.w, &self.bias, self.d, self.support,
+            device_idx,
+            &self.w,
+            &self.bias,
+            self.d,
+            self.support,
         )?);
         Ok(())
     }

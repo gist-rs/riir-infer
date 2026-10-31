@@ -510,7 +510,10 @@ fn main() {
     // ── the modal drafter (the 654 gate's second comparator) ──
     if let Some(modal_tokens_path) = &args.modal_from {
         let bytes = std::fs::read(modal_tokens_path).unwrap_or_else(|e| {
-            eprintln!("mtp_head_acceptance: read {}: {e}", modal_tokens_path.display());
+            eprintln!(
+                "mtp_head_acceptance: read {}: {e}",
+                modal_tokens_path.display()
+            );
             std::process::exit(1);
         });
         let fit_tokens: Vec<u32> = bytes
@@ -520,7 +523,10 @@ fn main() {
             .map(|c| u32::from_le_bytes(*c))
             .collect();
         if fit_tokens.is_empty() {
-            eprintln!("mtp_head_acceptance: {} carries no tokens", modal_tokens_path.display());
+            eprintln!(
+                "mtp_head_acceptance: {} carries no tokens",
+                modal_tokens_path.display()
+            );
             std::process::exit(1);
         }
         let modal = ModalDrafter::fit(&fit_tokens);

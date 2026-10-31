@@ -124,7 +124,9 @@ fn main() {
             }
         }
     }
-    if bonsai.is_none() && let Ok(p) = std::env::var("BONSAI_GGUF") {
+    if bonsai.is_none()
+        && let Ok(p) = std::env::var("BONSAI_GGUF")
+    {
         bonsai = Some(PathBuf::from(p));
     }
 
