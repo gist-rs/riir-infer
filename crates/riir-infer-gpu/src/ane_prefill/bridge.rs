@@ -1272,6 +1272,88 @@ mod tests {
         }
     }
 
+    /// Issue 769 / 887 — the channel-split SIZING probe: ANE `eval_nc`
+    /// latency vs output width at the real in_proj geometry (ic 5120,
+    /// seq 2048). A within-seam ANE‖GPU channel split only pays if ANE time
+    /// scales with the channels it is handed; a dominant fixed per-eval
+    /// cost would make every f<1 split lose. Prints `fixed + per-channel`
+    /// from a two-point fit plus every width's median — a MEASUREMENT, not a
+    /// gate (no assertion on the numbers; the box state belongs next to any
+    /// figure quoted from it). Ignored: real ANE, ~5 compiles.
+    #[test]
+    #[ignore = "device probe: real ANE, run explicitly with --ignored --nocapture"]
+    fn channel_split_eval_latency_sweep() {
+        let (ic, seq) = (5120usize, 2048usize);
+        let widths: &[usize] = &[2048, 4096, 6144, 8192, 10240];
+        let (warm, reps) = (3usize, 10usize);
+        let mut medians = Vec::with_capacity(widths.len());
+        eprintln!("═══ Issue 769/887 channel-split eval sweep (ic={ic} seq={seq}) ═══");
+        for &oc in widths {
+            let (q, ws) = probe_fixture(oc, ic);
+            let kernel = BridgeKernel::compile_form_c(ic, oc, seq, &q, &ws)
+                .expect("ANE Form C compile (sweep)");
+            let mut x16 = vec![half::f16::from_f32(0.25).to_bits(); ic * seq];
+            kernel.stage(0, &mut x16);
+            for _ in 0..warm {
+                kernel.eval_nc().expect("ANE eval_nc (warm)");
+            }
+            let mut ms = Vec::with_capacity(reps);
+            for _ in 0..reps {
+                let t = std::time::Instant::now();
+                kernel.eval_nc().expect("ANE eval_nc (timed)");
+                ms.push(t.elapsed().as_secs_f64() * 1e3);
+            }
+            ms.sort_by(f64::total_cmp);
+            let med = ms[reps / 2];
+            eprintln!(
+                "  oc={oc:5}: median {med:7.3} ms  (min {:.3} max {:.3}, n={reps})",
+                ms[0],
+                ms[reps - 1]
+            );
+            medians.push(med);
+        }
+        let (w0, w1) = (widths[0] as f64, widths[widths.len() - 1] as f64);
+        let (m0, m1) = (medians[0], medians[medians.len() - 1]);
+        let per_ch = (m1 - m0) / (w1 - w0);
+        let fixed = m0 - per_ch * w0;
+        eprintln!(
+            "  fit: fixed {fixed:.3} ms + {:.4} ms/1k-ch → fixed share at oc={}: {:.1}%",
+            per_ch * 1e3,
+            widths[widths.len() - 1],
+            100.0 * fixed / m1
+        );
+    }
+
+    /// Deterministic ternary→int8 requant fixture shared by the device probes.
+    fn probe_fixture(oc: usize, cols: usize) -> (Vec<i8>, Vec<u16>) {
+        let blocks64 = cols.div_ceil(64);
+        let groups = cols.div_ceil(super::super::requant::TERNARY_GROUP_SIZE);
+        let mut seed = 0x7690_0000_0000_0001u64;
+        let mut next = || {
+            seed ^= seed << 13;
+            seed ^= seed >> 7;
+            seed ^= seed << 17;
+            seed
+        };
+        let mut pos = vec![0u64; oc * blocks64];
+        let mut neg = vec![0u64; oc * blocks64];
+        let mut scales = vec![half::f16::from_f32(0.0); oc * groups];
+        for r in 0..oc {
+            for g in 0..groups {
+                let t = (next() % 1000) as f32 / 1000.0;
+                scales[r * groups + g] = half::f16::from_f32(0.002 + t * 0.059);
+            }
+            for c in 0..cols {
+                match next() % 3 {
+                    0 => pos[r * blocks64 + c / 64] |= 1 << (c % 64),
+                    1 => neg[r * blocks64 + c / 64] |= 1 << (c % 64),
+                    _ => {}
+                }
+            }
+        }
+        super::super::requant::requant_per_row_int8(&pos, &neg, &scales, oc, cols)
+    }
+
     /// Compile-time sanity of the MIL template (no ANE needed): dims land
     /// in the right slots.
     #[test]
