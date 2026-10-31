@@ -110,12 +110,16 @@ static NSDictionary *make_options(int hint) {
 // framework derives the model URL from the descriptor, and overriding it
 // breaks the newer-OS per-file bundle hash verification (omlx #3124). Never
 // unlink the lock file while running: a waiter may already hold the old inode
-// (omlx). Env: ANE_T0_CACHE=1 (exactly "1") enables; every other value keeps
-// the historical behavior byte-for-byte.
+// (omlx). Env: DEFAULT-ON since 2026-10-31 (riir-ai Issue 1147 B2: the
+// channel split's 127-program registration 15.2 s cold -> 6.1 s warm, every
+// probe a content-keyed HIT, output unchanged). ANE_T0_CACHE unset or "1"
+// enables; ANY other set value ("0", empty, a typo) restores the historical
+// temp-only path byte-for-byte. The store itself is the framework's (our
+// root holds only the per-identifier lock files).
 
 static bool ane_cache_enabled(void) {
     const char *v = getenv("ANE_T0_CACHE");
-    return v && strcmp(v, "1") == 0;
+    return !v || strcmp(v, "1") == 0;
 }
 
 // The os-build segment keeps same-program entries from colliding across OS
