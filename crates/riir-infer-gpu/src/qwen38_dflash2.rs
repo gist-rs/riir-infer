@@ -629,6 +629,12 @@ impl DFlash2Drafter {
         let projected = 2 * cfg.conv_kernel * n_groups;
 
         // ── the noise block input: anchor + masks, target embeddings ──
+        // ⛔ Issue 1158 — SINGLE-PASS (J0) ONLY. This drafter was trained on
+        // fully-masked blocks, so a refinement pass that feeds its own drafted
+        // tokens back in place of `mask_emb` is out-of-distribution: the
+        // JetSpec++ (arXiv:2610.19792 Table 4) mask-input collapse, τ 5.86 →
+        // 2.39 at the FIRST pass. Refinement needs the token-input retrain
+        // (riir-train Plan 376 T3), not a loop around this function.
         let mut x = vec![0.0f32; bs * e];
         let anchor_emb = embed_row(anchor_token);
         let mask_emb = embed_row(cfg.mask_token_id);

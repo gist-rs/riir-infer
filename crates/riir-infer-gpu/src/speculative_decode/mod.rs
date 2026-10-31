@@ -17,6 +17,17 @@
 //! (α=0.7 on repetitive text), expected speedup is ~1.17×. On creative text
 //! (α=0.4), speculative decoding is net-negative.
 //!
+//! ## Refinement-pass gate (Issue 1158)
+//!
+//! Every block drafter in this lane family (DSpark here, DFlash2 in
+//! `qwen38_dflash2`) is **mask-input**: trained on fully-masked blocks and
+//! correct only for single-pass J0 drafting. If a lane ever adds refinement
+//! passes (re-feeding drafted tokens to the drafter), the gate is the τ
+//! ladder: **a mean accepted length at J1 BELOW J0 is the mask-input collapse
+//! signature** (JetSpec++, arXiv:2610.19792 Tables 4/12 — τ 5.86 → 2.39) and
+//! the arm must be refused, not tuned. The fix is the token-input +
+//! clean-prefix retrain (riir-train Plan 376 T3).
+//!
 //! ## Modules
 //!
 //! - [`ngram_drafter`] — N-gram frequency-table draft model (modelless, CPU-only)

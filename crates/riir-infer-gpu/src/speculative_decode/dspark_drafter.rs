@@ -367,6 +367,9 @@ impl DsparkDrafter {
             .dequant_tensor_row("token_embd.weight", anchor, d)
             .expect("anchor embd row");
         x[0].copy_from_slice(&anchor_row);
+        // ⛔ Issue 1158 — single-pass (J0) only: a mask-input drafter re-fed
+        // its own tokens collapses at refinement pass 1 (JetSpec++ Table 4);
+        // refinement needs the token-input retrain (riir-train Plan 376 T3).
         for xi in x.iter_mut().skip(1) {
             xi.copy_from_slice(&self.mask_row);
         }
