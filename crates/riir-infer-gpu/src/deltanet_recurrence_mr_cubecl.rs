@@ -197,11 +197,16 @@ const NO_REC_MR_OVERRIDE: usize = usize::MAX - 1;
 static REC_MR_OVERRIDE: std::sync::atomic::AtomicUsize =
     std::sync::atomic::AtomicUsize::new(NO_REC_MR_OVERRIDE);
 
-/// Env arm `RIIR_GDN_REC_MR` — DEFAULT-OFF (Plan 607 C1: Phase C arms are
-/// opt-in; the CUDA lane's default-ON shape is the E1 promotion target, not
-/// the C1 posture). `1..=4` selects [`REC_MR_PLANES_LADDER`]`[n - 1]`;
-/// `0|off|false` (and unset) is the incumbent; garbage fails OPEN to the
-/// incumbent with a warning (the Bench-896 protocol).
+/// Env arm `RIIR_GDN_REC_MR` — DEFAULT-ON at planes=8 since E1 (2026-10-31;
+/// Plan 607 C1 shipped it opt-in; the delegated-owner GOAT verdict AGREEed the
+/// promotion: bit-identity at the league shapes — armed passes reproduce the
+/// manifest birth FNV pins EXACT — paired-window e2e +1.20–1.37% at
+/// pp2048/16k/32k on the M5 Ultra, kernel-isolated 1.21× @p128 / 1.51× @p2048;
+/// the CUDA lane's `RIIR_PREFILL_REC_MR` has been default-on since Bench 896).
+/// `0|off|false` DEMOTES to the incumbent byte-exactly (the demote-only law);
+/// `1..=4` selects [`REC_MR_PLANES_LADDER`]`[n - 1]`; garbage fails OPEN to
+/// the DEFAULT arm with a warning (the Bench-896 protocol — garbage is no
+/// longer a demotion path).
 #[cfg(all(
     feature = "cubecl_runtime",
     feature = "ternary_deltanet_chunked_prefill"
@@ -220,7 +225,11 @@ pub(crate) fn rec_mr_planes() -> Option<usize> {
         return (over != usize::MAX).then_some(over);
     }
     *REC_MR_ENV.get_or_init(|| match std::env::var("RIIR_GDN_REC_MR") {
-        Err(_) => None,
+        // E1 promotion (2026-10-31): unset = the DEFAULT arm (planes=8, the
+        // D4-scored posture); the env is DEMOTE-ONLY — 0/off/false restores
+        // the incumbent byte-exactly (env-switch law: a promoted arm's env is
+        // demote-only, the exact literal restores the incumbent).
+        Err(_) => Some(REC_MR_PLANES_LADDER[3]),
         Ok(s) => {
             let t = s.trim().to_lowercase();
             if matches!(t.as_str(), "0" | "off" | "false") {
