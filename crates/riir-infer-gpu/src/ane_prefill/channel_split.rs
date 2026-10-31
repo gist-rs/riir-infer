@@ -45,10 +45,12 @@ static ARMED: AtomicBool = AtomicBool::new(false);
 /// f64 bits of the ANE row fraction; 0 = unset (use [`DEFAULT_FRACTION`]).
 static FRACTION_BITS: AtomicU64 = AtomicU64::new(0);
 
-/// The balanced share from the Plan 644 sizing table (ANE ≈ 0.67× the
-/// tensor-zerocopy GPU at every 5120-input site ⇒ a/(a+g) ≈ 0.40). Plan 644
-/// T2 replaces this with a per-shape calibration at registration.
-pub const DEFAULT_FRACTION: f64 = 0.40;
+/// The IN-SITU optimum (Plan 644 T3, async lane, Bonsai-2 @2048, M5 Ultra):
+/// f sweep 0.20/0.25/0.30/0.34/0.40 → 1.063/1.077/1.099/1.092/1.053×. The
+/// isolated-rate prediction (a/(a+g) ≈ 0.40) overshoots because the ANE
+/// slows ≈1.30× while the GPU runs (1.82 vs 1.406 ms/1k-ch). Plan 644 T2
+/// replaces this with a per-shape in-situ calibration at registration.
+pub const DEFAULT_FRACTION: f64 = 0.30;
 
 /// Arm the split at registration AND dispatch (set before construction).
 /// Default OFF — the GOAT gate (Plan 644 T4) promotes it.
@@ -70,6 +72,14 @@ pub fn prefill_ane_channel_split_fraction() -> f64 {
         0 => DEFAULT_FRACTION,
         bits => f64::from_bits(bits),
     }
+}
+
+/// Plan 644 T3 diagnostic: `RIIR_P644_GPU_HALF_ONLY=1` runs only the GPU
+/// suffix + scatter of each split (ANE columns unwritten — a PRICING probe,
+/// its logits are wrong by design and G1 must fail under it).
+pub fn probe_gpu_half_only() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var("RIIR_P644_GPU_HALF_ONLY").as_deref() == Ok("1"))
 }
 
 /// ANE rows for an `n`-channel site at `fraction`: rounded to the channel

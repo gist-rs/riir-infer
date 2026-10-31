@@ -7996,8 +7996,12 @@ impl TernaryDeltanetGpuForward {
     /// riir-ai Plan 644 T1 — one channel-split projection: ANE rows `[0,k)`
     /// straight into `output`'s column block (strided unpack), GPU rows
     /// `[k,n)` into a scratch then scattered to columns `[k,n)`, concurrently.
-    /// `false` = refused before or after the GPU half ran; the caller's
-    /// full-width path then rewrites every column.
+    /// The join is GPU-side (the async ZC lane's `done` event waited on the
+    /// shared queue) — the CPU never blocks at a seam, so the queue never
+    /// drains (the joined path measured a fixed ≈1.9 ms/seam bubble).
+    /// `false` = refused BEFORE anything was queued; the caller's full-width
+    /// path then runs. A lane failure after submission poisons the lane
+    /// (that pass's ANE columns are unwritten; every later seam refuses here).
     #[cfg(all(
         feature = "ane_zc_channel_split",
         target_os = "macos",
@@ -8025,8 +8029,26 @@ impl TernaryDeltanetGpuForward {
         {
             return false;
         }
-        // The raw pack must queue AFTER `input`'s producer (Issue 670 T4).
-        let _ = self.client.flush();
+        // Plan 644 T3 probe (diagnostic, never a perf arm): run ONLY the GPU
+        // half (ANE columns left unwritten — G1 fails by design) to price
+        // the split's GPU-side structure apart from ANE contention.
+        if crate::ane_prefill::channel_split::probe_gpu_half_only() {
+            let m_gpu = split.n - split.k;
+            let scratch = self.client.empty(p * m_gpu * std::mem::size_of::<f32>());
+            self.prefill_project_dispatch(&split.suffix, input, &scratch, p, site);
+            unsafe {
+                crate::elementwise_cubecl::CopyColsCubeCL::launch::<ActiveRuntime>(
+                    &self.client,
+                    scratch,
+                    output.clone(),
+                    p,
+                    m_gpu,
+                    split.n,
+                    split.k,
+                );
+            }
+            return true;
+        }
         let seg = crate::ane_prefill::exec_zc::ZcSegment {
             target: output,
             chan_off: 0,
@@ -8034,7 +8056,8 @@ impl TernaryDeltanetGpuForward {
             out_stride: split.n,
             out_col: 0,
         };
-        let job = match crate::ane_prefill::exec_zc::begin_split_overlapped_zc_segments(
+        // Submission flushes CubeCL and fences the producer (Issue 670 T4).
+        let ticket = match crate::ane_prefill::exec_zc::submit_split_async_zc(
             &self.client,
             zc,
             split.kernel.clone(),
@@ -8044,9 +8067,9 @@ impl TernaryDeltanetGpuForward {
             split.block_tokens,
             &[seg],
         ) {
-            Ok(job) => job,
+            Ok(t) => t,
             Err(e) => {
-                eprintln!("[Plan 644] split begin refused ({e}) — full-width GPU");
+                eprintln!("[Plan 644] split submit refused ({e}) — full-width GPU");
                 return false;
             }
         };
@@ -8064,13 +8087,8 @@ impl TernaryDeltanetGpuForward {
                 split.k,
             );
         }
-        match job.finish() {
-            Ok(()) => true,
-            Err(e) => {
-                eprintln!("[Plan 644] split ANE half failed ({e}) — full-width GPU rewrite");
-                false
-            }
-        }
+        ticket.gpu_wait(&self.client);
+        true
     }
 
     /// Full-queue fence for the exec timer: CubeCL's `sync()` waits only on

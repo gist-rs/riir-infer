@@ -22,6 +22,9 @@
 //! Env: `BONSAI2_G1_MODEL` (model path), `P644_P` (prompt tokens, default
 //! 2048 — must be a multiple of the 2048-token ANE block), `P644_PAIRS`
 //! (timed interleaved pairs, default 4), `P644_F` (ANE row fraction).
+//! Diagnostic: `RIIR_P644_GPU_HALF_ONLY=1` runs only the GPU half of each
+//! split (G1 FAILS by design) — prices the GPU-side structure apart from the
+//! ANE (measured 1.144× at f=0.40: the seam's GPU structure is efficient).
 
 #![cfg(all(
     feature = "ane_zc_channel_split",
@@ -39,6 +42,7 @@ use riir_infer_gpu::TernaryDeltanetGpuForward;
 use riir_infer_gpu::ane_prefill::channel_split::{
     set_prefill_ane_channel_split, set_prefill_ane_channel_split_fraction,
 };
+use riir_infer_gpu::ane_prefill::exec_zc::{zc_stage_dump, zc_stage_reset};
 use riir_infer_gpu::cubecl_runtime::CubeCLContext;
 use riir_infer_gpu::set_prefill_use_metal_tensor_zerocopy;
 
@@ -145,6 +149,7 @@ fn plan644_channel_split_g1() {
 
     let (mut t_off, mut t_on) = (Vec::new(), Vec::new());
     let (mut l_off, mut l_on) = (Vec::new(), Vec::new());
+    zc_stage_reset();
     for _ in 0..pairs {
         set_prefill_ane_channel_split(false);
         let (w, l) = pass(&mut fwd, &toks, n_layer);
@@ -156,6 +161,9 @@ fn plan644_channel_split_g1() {
         l_on = l;
     }
     set_prefill_ane_channel_split(false);
+    // Split-arm stage decomposition summed over the timed pairs (the
+    // GPU-only arm never enters the ZC worker).
+    println!("  split stages over {pairs} passes: {}", zc_stage_dump());
 
     let cos = cosine(&l_off, &l_on);
     let (a_off, a_on) = (argmax(&l_off), argmax(&l_on));
