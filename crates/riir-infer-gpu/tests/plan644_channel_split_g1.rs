@@ -34,7 +34,10 @@
 //! Env: `BONSAI2_G1_MODEL` (model path), `P644_P` (prompt tokens, default
 //! 2048; whole 2048-token blocks split, the tail runs GPU-only), `P644_PAIRS`
 //! (timed interleaved pairs, default 4), `P644_F` (ANE row fraction),
-//! `P644_BLOCK` (ANE tokens per program eval, default 2048 — Issue 1147 B8).
+//! `P644_BLOCK` (ANE tokens per program eval, default 2048 — Issue 1147 B8),
+//! `P644_WARM` (untimed warm-up pairs, default 2; 0 times the cold first
+//! pass), `P644_FRAMES` / `P644_HI` (the dist shape: that many consecutive
+//! p-token frames over layers `[0, hi)`; default 1 frame, the whole model).
 //! Diagnostic: `RIIR_P644_GPU_HALF_ONLY=1` runs only the GPU half of each
 //! split (G1 FAILS by design) — prices the GPU-side structure apart from the
 //! ANE (measured 1.144× at f=0.40: the seam's GPU structure is efficient).
@@ -89,18 +92,38 @@ fn pass(
     toks: &[usize],
     n_layer: usize,
 ) -> (Duration, Vec<f32>) {
+    pass_frames(fwd, toks, toks.len(), n_layer, n_layer)
+}
+
+/// A dist-shaped prefill (riir-ai Issue 1147 B8): `frame`-token chunks at
+/// advancing positions over layers `[0, hi)`. Returns (wall, the final
+/// logits when `hi == n_layer`, else the last frame's hidden rows — the
+/// stage's handoff).
+fn pass_frames(
+    fwd: &mut TernaryDeltanetGpuForward,
+    toks: &[usize],
+    frame: usize,
+    hi: usize,
+    n_layer: usize,
+) -> (Duration, Vec<f32>) {
     fwd.reset_state();
     let t0 = Instant::now();
-    fwd.prefill_range_chunk(
-        toks,
-        None,
-        0,
-        toks.len(),
-        LayerRange::new(0, n_layer as u32),
-        true,
-    );
-    let logits = fwd.read_logits();
-    (t0.elapsed(), logits)
+    let mut out = Vec::new();
+    for (i, chunk) in toks.chunks(frame).enumerate() {
+        out = fwd.prefill_range_chunk(
+            chunk,
+            None,
+            i * frame,
+            toks.len(),
+            LayerRange::new(0, hi as u32),
+            true,
+        );
+    }
+    let out = match hi == n_layer {
+        true => fwd.read_logits(),
+        false => out,
+    };
+    (t0.elapsed(), out)
 }
 
 fn cosine(a: &[f32], b: &[f32]) -> f64 {
@@ -148,9 +171,16 @@ fn plan644_channel_split_g1() {
 
     let (config, weights) = load_qwen_deltanet_ternary_weights_gguf(&model).expect("model load");
     let mut config = config;
-    config.block_size = p + 1;
+    // Dist shape (Issue 1147 B8): `P644_FRAMES` consecutive p-token frames
+    // over layers [0, `P644_HI`) — default one frame, the whole model.
+    let frames = env_usize("P644_FRAMES", 1).max(1);
+    config.block_size = p * frames + 1;
     let n_layer = config.n_layer;
-    let toks = tokens(p, config.vocab_size / 2, config.vocab_size);
+    let hi = env_usize("P644_HI", n_layer).clamp(1, n_layer);
+    let toks = tokens(p * frames, config.vocab_size / 2, config.vocab_size);
+    let pass = |fwd: &mut TernaryDeltanetGpuForward, toks: &[usize], n_layer: usize| {
+        pass_frames(fwd, toks, p, hi, n_layer)
+    };
 
     // Arm BEFORE construction: the zero-copy GEMM and the split bank are
     // both built in `new()`.
@@ -159,10 +189,15 @@ fn plan644_channel_split_g1() {
     let ctx = CubeCLContext::new().expect("GPU init");
     let mut fwd = TernaryDeltanetGpuForward::new(&ctx, &config, &weights);
 
-    // Warm both arms (kernel JIT, ANE program first-run).
-    for on in [false, true, false, true] {
-        set_prefill_ane_channel_split(on);
-        pass(&mut fwd, &toks, n_layer);
+    // Warm both arms (kernel JIT, ANE program first-run). `P644_WARM`
+    // pairs (default 2); `P644_WARM=0` times the COLD first pass — the
+    // cold-start read of riir-ai Issue 1147 B8 (a dist stage is one fresh
+    // process per prompt).
+    for _ in 0..env_usize("P644_WARM", 2) {
+        for on in [false, true] {
+            set_prefill_ane_channel_split(on);
+            pass(&mut fwd, &toks, n_layer);
+        }
     }
 
     let (mut t_off, mut t_on) = (Vec::new(), Vec::new());
@@ -196,13 +231,25 @@ fn plan644_channel_split_g1() {
     let mut sorted = ratios.clone();
     sorted.sort_by(f64::total_cmp);
     let best = |v: &[f64]| v.iter().cloned().fold(f64::INFINITY, f64::min);
-    println!("═══ Plan 644 channel split @ p={p}, {pairs} interleaved pairs ═══");
+    println!(
+        "═══ Plan 644 channel split @ p={p} × {frames} frame(s), layers [0, {hi}), {pairs} interleaved pairs ═══"
+    );
     println!(
         "  gpu-only: best {:.1} ms ({:.1} tok/s) · split: best {:.1} ms ({:.1} tok/s)",
         best(&t_off) * 1e3,
-        p as f64 / best(&t_off),
+        (p * frames) as f64 / best(&t_off),
         best(&t_on) * 1e3,
-        p as f64 / best(&t_on)
+        (p * frames) as f64 / best(&t_on)
+    );
+    println!(
+        "  per-pass ms off {:?} · on {:?}",
+        t_off
+            .iter()
+            .map(|t| format!("{:.1}", t * 1e3))
+            .collect::<Vec<_>>(),
+        t_on.iter()
+            .map(|t| format!("{:.1}", t * 1e3))
+            .collect::<Vec<_>>()
     );
     println!(
         "  speedup per pair (off/on): {:?} → median {:.3}× (min {:.3}×, max {:.3}×)",
