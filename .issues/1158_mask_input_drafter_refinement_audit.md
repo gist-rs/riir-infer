@@ -1,6 +1,6 @@
 # Issue 1158: Mask-input drafter refinement audit — the JetSpec++ pass-1 collapse class vs our DFlash2/DSpark lane family
 
-**Status:** OPEN — audit/prophylactic only (no GPU spend, no behavior change). Filed from katgpt-rs Research 641 (arXiv:2610.19792 "JetSpec++", 2026-10-31) with the verdict-reviewer's wider-class grep.
+**Status:** OPEN — audit/prophylactic only (no GPU spend, no behavior change). Filed from katgpt-rs Research 641 (arXiv:2610.19792 "JetSpec++", 2026-10-31) with the verdict-reviewer's wider-class grep. Landed: katgpt-rs Research 641 @ `a5d48462b` (katgpt-rs develop); the retrain arm = riir-train Plan 376 T3 @ `b7b5a146` (riir-train develop).
 
 ## The finding
 
