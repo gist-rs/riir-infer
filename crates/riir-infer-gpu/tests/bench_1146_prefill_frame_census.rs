@@ -37,6 +37,8 @@
 //! `I1146C_TENSOR=1` arms the promoted Metal-tensor zero-copy prefill GEMM
 //! (the dist `gpu` row's posture since `54f0dce`; needs `metal_tensor_gemm`
 //! on macOS — refused loud otherwise, never silently measured as simdgroup).
+//! `I1146C_POSTURES` (comma list of posture names) narrows the strip set;
+//! ALL always runs.
 
 #![cfg(all(
     feature = "cubecl_runtime",
@@ -170,7 +172,18 @@ fn postures() -> Vec<Posture> {
         name: "ALL",
         strip: 0,
     });
-    v
+    // `I1146C_POSTURES=-deltanet,-attention,ALL` narrows the census to the
+    // named postures (riir-infer Issue 1159 — a stage-level read at one
+    // wide frame costs minutes per posture). ALL is always kept: every Δ
+    // is priced against it.
+    match std::env::var("I1146C_POSTURES") {
+        Ok(list) => {
+            let keep: Vec<&str> = list.split(',').map(str::trim).collect();
+            v.retain(|p| p.strip == 0 || keep.contains(&p.name));
+            v
+        }
+        Err(_) => v,
+    }
 }
 
 fn tokens(count: usize, bos: usize, vocab: usize) -> Vec<usize> {
@@ -222,6 +235,24 @@ fn run_pass(
         }
     }
     (wall, last_bits)
+}
+
+/// FNV-1a over the final-chunk logit bits + the argmax — a cross-arm G1
+/// read (riir-infer Issue 1159: two prework arms on one build must agree).
+fn logits_digest(bits: &[u8]) -> String {
+    let h = bits.iter().fold(0xcbf2_9ce4_8422_2325u64, |h, &b| {
+        (h ^ b as u64).wrapping_mul(0x0000_0100_0000_01b3)
+    });
+    let argmax = bits
+        .as_chunks::<4>()
+        .0
+        .iter()
+        .map(|c| f32::from_le_bytes(*c))
+        .enumerate()
+        .fold((0usize, f32::NEG_INFINITY), |(bi, bv), (i, v)| {
+            if v > bv { (i, v) } else { (bi, bv) }
+        });
+    format!("fnv {h:016x} argmax {} ({:.4})", argmax.0, argmax.1)
 }
 
 /// `I1146C_EXEC=1` (riir-ai Issue 769/887): the per-site EXEC-time census
@@ -317,9 +348,10 @@ fn bench_1146_prefill_frame_census() {
     fwd.reset_state();
     let (w0, bits_never) = run_pass(&mut fwd, &toks, chunk, n_layer);
     println!(
-        "never-touched ALL pass: {:?} ({:.1} ms/frame)",
+        "never-touched ALL pass: {:?} ({:.1} ms/frame), final-logits {}",
         w0,
-        w0.as_secs_f64() * 1e3 / frames as f64
+        w0.as_secs_f64() * 1e3 / frames as f64,
+        logits_digest(&bits_never)
     );
 
     // The all-bits baseline + the strips. First ALL run doubles as the

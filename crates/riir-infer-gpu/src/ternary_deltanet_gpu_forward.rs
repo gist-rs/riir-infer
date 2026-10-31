@@ -1886,13 +1886,10 @@ impl PrefillSiteTiming {
         }
     }
 
-    /// Metal-gated with its only caller ([`prefill_site_timing_record`]) so
-    /// non-Metal builds carry the struct as pure storage.
-    #[cfg(all(
-        feature = "ternary_gemm_batched",
-        feature = "metal_tensor_gemm",
-        target_os = "macos"
-    ))]
+    /// Ungated: the sync-bracketed exec census (`prefill_project`)
+    /// records on every backend, beside the Metal-only submission-side
+    /// [`prefill_site_timing_record`] (riir-infer Issue 1159 found the
+    /// Metal gate breaking every non-`metal_tensor_gemm` lib build).
     fn record(&self, d: core::time::Duration) {
         let n = u64::try_from(d.as_nanos()).unwrap_or(u64::MAX);
         self.nanos
@@ -10326,7 +10323,12 @@ impl TernaryDeltanetGpuForward {
                     feature = "ternary_gemm_batched",
                     feature = "ternary_deltanet_chunked_prefill"
                 ))]
-                let can_chunk_conv1d = chunked_conv1d_on && p.is_multiple_of(PREFILL_CHUNK_SIZE);
+                // Any p: the final chunk may be short (riir-infer Issue 1159 — the
+                // old `p % C == 0` gate sent a ragged chunk down the per-token
+                // path, p conv1d dispatches per layer: 3000 tokens ran at 0.66×
+                // the tok/s of 4096). The kernel's partial-chunk carry merge is
+                // G1-pinned by `test_chunked_conv1d_g1_multi_chunk` + `_issue673_partial_chunk`.
+                let can_chunk_conv1d = chunked_conv1d_on;
                 #[cfg(not(all(
                     feature = "cubecl_runtime",
                     feature = "ternary_gemm_batched",
@@ -10405,9 +10407,9 @@ impl TernaryDeltanetGpuForward {
                     {
                         let chunk_size = PREFILL_CHUNK_SIZE;
                         for chunk_start in (0..p).step_by(chunk_size) {
-                            let chunk_end = chunk_start + chunk_size;
-                            // P % C == 0 guaranteed by can_chunk_conv1d, so no
-                            // partial chunk — every chunk is full.
+                            // The last chunk is short when p % C != 0.
+                            let chunk_end = (chunk_start + chunk_size).min(p);
+                            let c = chunk_end - chunk_start;
                             let qkv_in_chunk = qkv_b
                                 .clone()
                                 .offset_start((chunk_start * qkv_dim * f) as u64)
@@ -10423,7 +10425,7 @@ impl TernaryDeltanetGpuForward {
                                     qkv_out_chunk,
                                     layer_w.conv1d_weight.clone(),
                                     conv_state.clone(),
-                                    chunk_size,
+                                    c,
                                     conv_dim,
                                     kernel_size,
                                     kernel_size, // carry_stride = ks (conv_state layout)
@@ -10435,7 +10437,7 @@ impl TernaryDeltanetGpuForward {
                         std::mem::swap(&mut qkv_b, &mut qkv_conv_b);
                     }
                 } else if gdn_site_on(PREFILL_STAGE_GDN_PREWORK) {
-                    // Sequential conv1d path (default + partial-chunk fallback).
+                    // Sequential conv1d path (chunked conv1d toggled off).
                     for t in 0..p {
                         unsafe {
                             DeltanetConv1dCubeCL::launch::<ActiveRuntime>(
