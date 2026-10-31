@@ -1,6 +1,7 @@
 # Issue 1160: Training-free soft-token feedback decode A/B on Bonsai (LIFT/MoI class)
 
 **Status:** Open — ready (GAIN filing, not owner-gated). Machine: **Metal-first** — the PQ2_0 wgpu/Metal decode lane is the serving default (riir-ai Bench 1011 lineage, ktile64+zerocopy), so G0 and the pilot arm run local; the full grid, if armed, is a long task → 4090 via issue per house rule. Verify the Metal lane decodes PQ2_0 before relying on it; fall back to the 4090 otherwise.
+**Claimed:** katgpt-rs-31, 1793460045, expires 2026-11-02T15:20Z
 
 ## Context
 
