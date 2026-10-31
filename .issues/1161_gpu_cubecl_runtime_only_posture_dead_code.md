@@ -1,6 +1,9 @@
 # Issue 1161 — riir-infer-gpu: 7 dead-code warnings at the cubecl_runtime-only posture (reflex's laya-riir-cubecl composition)
 
-**Status:** open — filed 2026-10-31 by the riir-refine idle clippy sweep (session zed-m3-idle-ev190); found via `riir-reflex` `--all-features` clippy (the only posture in the workspace that compiles this combo).
+**Status:** in progress — root cause adjudicated 2026-11-01 (zed-m3-idle-i1161): hypothesis (b) confirmed, stronger than stated — the callers' WHOLE MODULE is cfg'd out at this posture (`src/lib.rs:696`: `#[cfg(all(feature = "cubecl_runtime", feature = "ternary_gemv"))] pub mod ternary_deltanet_gpu_forward;`), so every call site (5880/5908/6011/6039, 6643, 10377) compiles to nothing while the callee modules do compile; rustc is correct. Repair = the crate precedent (`deltanet_rotation_cudarc.rs:1893`), split by test consumption: the four not-test-consumed items (2 mark_reached fns + 2 REACHED statics + regime_capture_append) extend their existing `#[cfg(feature = "cubecl_runtime")]` to `all(..., feature = "ternary_gemv")`; the two test-consumed dense-pair fns (gemv tests, gated `all(test, cubecl_runtime)`) take the precedent's `#[cfg_attr(not(all(test, feature = "cubecl_runtime")), allow(dead_code))]`. Option 3 rejected: the laya cubecl lane consumes the OP LAYER (plan 611 T7), not the whole-forward module — forwarding `ternary_gemv` would drag the entire ternary forward into a lane that never calls it.
+**Claimed:** zed-m3-idle-i1161, 1793485379, expires 2026-11-02T22:22:59Z — repair + validation in flight
+
+filed 2026-10-31 by the riir-refine idle clippy sweep (session zed-m3-idle-ev190); found via `riir-reflex` `--all-features` clippy (the only posture in the workspace that compiles this combo).
 
 ## The posture hole
 
