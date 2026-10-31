@@ -2,6 +2,10 @@
 
 Compacted 2026-10-30: every `##` heading kept verbatim, one compact entry per record (≤2 short lines); the full pre-compaction text is in git history. Operational rules live in `AGENTS.md`; removed issue files: git history.
 
+## 2026-10-31 — Issue 1160 CLOSED + removed: soft-token feedback decode (LIFT/MoI class) — G0 COLLAPSE on Bonsai-2 PQ2_0
+
+- Pre-registered G0 fired: pooled median decode top-1 mass 0.976 ≥ 0.9 over 512 greedy Metal decode steps (arith/G1b headline class 0.999; the pilot's top-128 τ=1.5 soft token puts 0.985 of its weight on the argmax) ⇒ `E^T s` ≈ the argmax embedding where the gain was claimed; closed without the 18-config sweep. Prose/zh are not spiky (median 0.48–0.68) — the reopen condition, with dense-lane and trained-channel (riir-train Plan 344) triggers, is in [Bench 932](.benchmarks/932_i1160_g0_soft_token_collapse.md). Probe kept: `tests/issue1160_g0_collapse_probe.rs` (`#[ignore]`, required-features row at birth). Source: riir-train Research 487.
+
 ## 2026-10-31 — Plan 607 E1 LANDED:  promoted DEFAULT-ON at planes=8 (Metal/CubeCL prefill; the CUDA lane default-on since Bench 896) — Plan 607 D4's armed-posture paired-window A/B on bmo at the m5ultra league shapes: +1.24%/+1.37%/+1.20% (pp2048/16k/32k, n=6/arm/shape), 18/18 armed passes above incumbent, manifest FNV birth pins EXACT under the armed kernel; delegated-owner verdict AGREE; env now DEMOTE-ONLY (0/off/false = incumbent byte-exact; garbage fails open to the DEFAULT arm); caveats recorded (e2e exceeds the +0.38% pre-registered ceiling — the A2 census share under-counts; M3-box e2e unmeasured per the box-state binding)
 
 ## 2026-10-30 — Issue 1157 CLOSED + removed: regime_gate inline sigmoid delegated to the substrate — bit-preserving, pinned

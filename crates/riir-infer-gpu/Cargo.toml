@@ -678,3 +678,8 @@ required-features = ["metal_tensor_gemm", "cubecl_runtime", "ternary_gemv", "mul
 name = "issue1146_relaxed_kl"
 path = "tests/issue1146_relaxed_kl.rs"
 required-features = ["metal_tensor_gemm", "cubecl_runtime", "ternary_gemv", "multi_host", "ternary_gemm_batched", "riir-infer-core/bonsai2_hadamard"]
+
+[[test]]
+name = "issue1160_g0_collapse_probe"
+path = "tests/issue1160_g0_collapse_probe.rs"
+required-features = ["metal_tensor_gemm", "cubecl_runtime", "ternary_gemv", "multi_host", "ternary_gemm_batched", "riir-infer-core/bonsai2_hadamard"]
