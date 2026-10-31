@@ -1944,6 +1944,24 @@ pub fn set_prefill_site_timing_armed(on: bool) {
     PREFILL_SITE_TIMING_ARMED.store(on, std::sync::atomic::Ordering::Relaxed);
 }
 
+/// Issue 769/887 — EXEC-time mode for the same per-site slots. The
+/// submission timer above records a queued dispatch's CPU wall (secondary
+/// evidence, never exec time); this mode brackets EVERY projection path
+/// with `client.sync()` on both sides, so each slot holds the site's real
+/// GPU execution time. It serializes the pipeline by construction —
+/// diagnostic only, never armed in an arm whose tok/s is cited. Arm ONE of
+/// the two modes per run (both share the slots).
+#[cfg(feature = "ternary_gemm_batched")]
+static PREFILL_SITE_EXEC_TIMING_ARMED: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+
+/// Arm the sync-bracketed per-site exec timer (see
+/// [`PREFILL_SITE_EXEC_TIMING_ARMED`]).
+#[cfg(feature = "ternary_gemm_batched")]
+pub fn set_prefill_site_exec_timing_armed(on: bool) {
+    PREFILL_SITE_EXEC_TIMING_ARMED.store(on, std::sync::atomic::Ordering::Relaxed);
+}
+
 /// Zero every site's timing slots (call between postures).
 #[cfg(feature = "ternary_gemm_batched")]
 pub fn prefill_site_timing_reset() {
@@ -7876,6 +7894,42 @@ impl TernaryDeltanetGpuForward {
     /// write back into the CubeCL output handle via `client.write`.
     #[cfg(feature = "ternary_gemm_batched")]
     fn prefill_project(
+        &self,
+        w: &TernaryHandle,
+        input: &Handle,
+        output: &Handle,
+        p: usize,
+        site: PrefillSite,
+    ) {
+        match PREFILL_SITE_EXEC_TIMING_ARMED.load(std::sync::atomic::Ordering::Relaxed) {
+            false => self.prefill_project_dispatch(w, input, output, p, site),
+            true => {
+                self.exec_timing_fence();
+                let t0 = std::time::Instant::now();
+                self.prefill_project_dispatch(w, input, output, p, site);
+                self.exec_timing_fence();
+                PREFILL_SITE_TIMING[site.slot()].record(t0.elapsed());
+            }
+        }
+    }
+
+    /// Full-queue fence for the exec timer: CubeCL's `sync()` waits only on
+    /// submissions wgpu tracks, so the raw-Metal zero-copy GEMM's committed
+    /// buffer needs its own wait — without it that path measures ENCODE
+    /// time (measured: 0.087 ms for a 214 GFLOP qkv GEMM — a loud zero).
+    #[cfg(feature = "ternary_gemm_batched")]
+    fn exec_timing_fence(&self) {
+        pollster::block_on(self.client.sync()).ok();
+        #[cfg(all(feature = "metal_tensor_gemm", target_os = "macos"))]
+        if let Some(gemm) = &self.metal_zerocopy_gemm {
+            gemm.wait_last();
+        }
+    }
+
+    /// The projection dispatch proper (path selection); [`Self::prefill_project`]
+    /// is the timing-aware entry every site calls.
+    #[cfg(feature = "ternary_gemm_batched")]
+    fn prefill_project_dispatch(
         &self,
         w: &TernaryHandle,
         input: &Handle,

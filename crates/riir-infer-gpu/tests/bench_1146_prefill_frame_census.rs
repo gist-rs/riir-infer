@@ -56,7 +56,8 @@ use riir_infer_gpu::ternary_deltanet_gpu_forward::{
     PREFILL_STAGE_FFN, PREFILL_STAGE_GDN_BETA, PREFILL_STAGE_GDN_NORM, PREFILL_STAGE_GDN_POST,
     PREFILL_STAGE_GDN_PREWORK, PREFILL_STAGE_GDN_REC, PREFILL_STAGE_GDN_RESIDUAL,
     PREFILL_STAGE_GDN_ROTIN, PREFILL_STAGE_TAIL, prefill_site_timing_reset,
-    prefill_site_timing_snapshot, set_prefill_site_timing_armed, set_prefill_stage_mask,
+    prefill_site_timing_snapshot, set_prefill_site_exec_timing_armed,
+    set_prefill_site_timing_armed, set_prefill_stage_mask,
 };
 
 const FOLDED_MODEL: &str = "../../../riir-train/data/Ternary-Bonsai-2-27B-PQ2_0.gguf";
@@ -223,6 +224,51 @@ fn run_pass(
     (wall, last_bits)
 }
 
+/// `I1146C_EXEC=1` (riir-ai Issue 769/887): the per-site EXEC-time census
+/// instead of the strip census — every projection sync-bracketed, so each
+/// row is real GPU execution per dispatch (the input a speed-balanced ANE‖GPU
+/// channel split is sized from). Serialized by construction; its frame wall
+/// is not a throughput number and is not printed.
+fn exec_site_census(
+    fwd: &mut TernaryDeltanetGpuForward,
+    toks: &[usize],
+    chunk: usize,
+    n_layer: usize,
+) {
+    fwd.reset_state();
+    for _ in 0..WARMUP_PASSES {
+        run_pass(fwd, toks, chunk, n_layer);
+    }
+    // The UNSERIALIZED wall first — the denominator any per-site saving is
+    // priced against (the armed passes below are serialized by design).
+    let mut free = Duration::ZERO;
+    for _ in 0..TIMED_PASSES {
+        fwd.reset_state();
+        free += run_pass(fwd, toks, chunk, n_layer).0;
+    }
+    println!(
+        "free-running wall: {:.1} ms/pass ({} tokens, {TIMED_PASSES} passes)",
+        free.as_secs_f64() * 1e3 / TIMED_PASSES as f64,
+        toks.len()
+    );
+    prefill_site_timing_reset();
+    set_prefill_site_exec_timing_armed(true);
+    for _ in 0..TIMED_PASSES {
+        fwd.reset_state();
+        run_pass(fwd, toks, chunk, n_layer);
+    }
+    set_prefill_site_exec_timing_armed(false);
+    println!("── per-site EXEC time (sync-bracketed, {TIMED_PASSES} passes, frame {chunk}) ──");
+    for (name, nanos, count, max) in prefill_site_timing_snapshot() {
+        println!(
+            "  {name:>14}: {:8.3} ms/dispatch  (n {count}, max {:.3} ms, total {:.1} ms/pass)",
+            nanos as f64 / 1e6 / count as f64,
+            max as f64 / 1e6,
+            nanos as f64 / 1e6 / TIMED_PASSES as f64
+        );
+    }
+}
+
 #[test]
 #[ignore = "requires the Metal GPU + the Bonsai-2 PQ2_0 model; run explicitly with --release"]
 fn bench_1146_prefill_frame_census() {
@@ -261,6 +307,11 @@ fn bench_1146_prefill_frame_census() {
 
     let ctx = CubeCLContext::new().expect("GPU init");
     let mut fwd = TernaryDeltanetGpuForward::new(&ctx, &config, &weights);
+
+    if std::env::var("I1146C_EXEC").as_deref() == Ok("1") {
+        exec_site_census(&mut fwd, &toks, chunk, n_layer);
+        return;
+    }
 
     // ── Bit-identity anchor: the never-touched run, before any mask call. ──
     fwd.reset_state();

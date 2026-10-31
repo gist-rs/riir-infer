@@ -1285,33 +1285,11 @@ mod tests {
     fn channel_split_eval_latency_sweep() {
         let (ic, seq) = (5120usize, 2048usize);
         let widths: &[usize] = &[2048, 4096, 6144, 8192, 10240];
-        let (warm, reps) = (3usize, 10usize);
-        let mut medians = Vec::with_capacity(widths.len());
         eprintln!("═══ Issue 769/887 channel-split eval sweep (ic={ic} seq={seq}) ═══");
-        for &oc in widths {
-            let (q, ws) = probe_fixture(oc, ic);
-            let kernel = BridgeKernel::compile_form_c(ic, oc, seq, &q, &ws)
-                .expect("ANE Form C compile (sweep)");
-            let mut x16 = vec![half::f16::from_f32(0.25).to_bits(); ic * seq];
-            kernel.stage(0, &mut x16);
-            for _ in 0..warm {
-                kernel.eval_nc().expect("ANE eval_nc (warm)");
-            }
-            let mut ms = Vec::with_capacity(reps);
-            for _ in 0..reps {
-                let t = std::time::Instant::now();
-                kernel.eval_nc().expect("ANE eval_nc (timed)");
-                ms.push(t.elapsed().as_secs_f64() * 1e3);
-            }
-            ms.sort_by(f64::total_cmp);
-            let med = ms[reps / 2];
-            eprintln!(
-                "  oc={oc:5}: median {med:7.3} ms  (min {:.3} max {:.3}, n={reps})",
-                ms[0],
-                ms[reps - 1]
-            );
-            medians.push(med);
-        }
+        let medians: Vec<f64> = widths
+            .iter()
+            .map(|&oc| probe_eval_median_ms(ic, oc, seq))
+            .collect();
         let (w0, w1) = (widths[0] as f64, widths[widths.len() - 1] as f64);
         let (m0, m1) = (medians[0], medians[medians.len() - 1]);
         let per_ch = (m1 - m0) / (w1 - w0);
@@ -1322,6 +1300,58 @@ mod tests {
             widths[widths.len() - 1],
             100.0 * fixed / m1
         );
+    }
+
+    /// Issue 887 — the per-SITE ANE rate at the Bonsai-2 projection shapes
+    /// (seq 2048), printed as effective TFLOPS so it compares directly with
+    /// the GPU's sync-bracketed per-site exec census (`bench_1146` with
+    /// `I1146C_EXEC=1`). Measurement only, no assertion.
+    #[test]
+    #[ignore = "device probe: real ANE, run explicitly with --ignored --nocapture"]
+    fn site_shape_eval_rate() {
+        let seq = 2048usize;
+        let shapes: &[(&str, usize, usize)] = &[
+            ("gdn_in_proj_qkv", 5120, 10240),
+            ("gdn_in_proj_z", 5120, 6144),
+            ("gdn_out_proj", 6144, 5120),
+            ("ffn_gate/up", 5120, 17408),
+            ("ffn_down", 17408, 5120),
+        ];
+        eprintln!("═══ Issue 887 per-site ANE eval rate (seq={seq}) ═══");
+        for &(name, ic, oc) in shapes {
+            let ms = probe_eval_median_ms(ic, oc, seq);
+            let tflops = 2.0 * (ic * oc * seq) as f64 / (ms * 1e-3) / 1e12;
+            eprintln!("  {name:>16} {ic:5}→{oc:5}: {ms:7.3} ms  ({tflops:.1} TFLOPS)");
+        }
+    }
+
+    /// Compile one Form-C program at `(ic, oc, seq)`, stage a constant input,
+    /// and return the median of 10 `eval_nc` calls after 3 warm (min/max
+    /// printed so a noisy cell is visible).
+    fn probe_eval_median_ms(ic: usize, oc: usize, seq: usize) -> f64 {
+        let (warm, reps) = (3usize, 10usize);
+        let (q, ws) = probe_fixture(oc, ic);
+        let kernel =
+            BridgeKernel::compile_form_c(ic, oc, seq, &q, &ws).expect("ANE Form C compile (probe)");
+        let mut x16 = vec![half::f16::from_f32(0.25).to_bits(); ic * seq];
+        kernel.stage(0, &mut x16);
+        for _ in 0..warm {
+            kernel.eval_nc().expect("ANE eval_nc (warm)");
+        }
+        let mut ms = Vec::with_capacity(reps);
+        for _ in 0..reps {
+            let t = std::time::Instant::now();
+            kernel.eval_nc().expect("ANE eval_nc (timed)");
+            ms.push(t.elapsed().as_secs_f64() * 1e3);
+        }
+        ms.sort_by(f64::total_cmp);
+        let med = ms[reps / 2];
+        eprintln!(
+            "  ic={ic:5} oc={oc:5}: median {med:7.3} ms  (min {:.3} max {:.3}, n={reps})",
+            ms[0],
+            ms[reps - 1]
+        );
+        med
     }
 
     /// Deterministic ternary→int8 requant fixture shared by the device probes.
