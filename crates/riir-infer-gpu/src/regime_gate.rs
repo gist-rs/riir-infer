@@ -785,9 +785,17 @@ pub fn set_regime_capture_tag(tag: &str) {
 /// Append one capture row (JSONL). The runner owns truncation (delete the
 /// file before a fresh dump); the seam always appends — an interrupted run
 /// keeps its rows (the sweep-rows law).
-/// Consumed only by the whole-forward module (gated
-/// `all(cubecl_runtime, ternary_gemv)` — lib.rs); gated to match (issue 1161).
-#[cfg(all(feature = "cubecl_runtime", feature = "ternary_gemv"))]
+/// Consumed only by the Issue-1156-T4.4 freeze-pass capture block inside
+/// `prefill_tokens_chunk_once`, whose own cfg is
+/// `all(cubecl_runtime, ternary_gemm_batched, ternary_attention_batched_prefill)`
+/// — gated to THAT (issue 1162; the 1161 gate matched the module, not the
+/// caller, leaving the fn dead at the lone-`ternary_gemv` and
+/// gemm_batched-only postures).
+#[cfg(all(
+    feature = "cubecl_runtime",
+    feature = "ternary_gemm_batched",
+    feature = "ternary_attention_batched_prefill"
+))]
 pub(crate) fn regime_capture_append(prompt_len: usize, p: usize, features: &[f32]) {
     let Some(path) = CAPTURE_PATH.get().and_then(|o| o.as_ref()) else {
         return;

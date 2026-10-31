@@ -35,10 +35,10 @@
 
 use std::path::PathBuf;
 
-use riir_infer_core::gguf_loader::{load_qwen_deltanet_ternary_weights_gguf, GgufFile};
+use riir_infer_core::gguf_loader::{GgufFile, load_qwen_deltanet_ternary_weights_gguf};
 use riir_infer_core::tokenizer::BpeTokenizer;
-use riir_infer_gpu::cubecl_runtime::CubeCLContext;
 use riir_infer_gpu::TernaryDeltanetGpuForward;
+use riir_infer_gpu::cubecl_runtime::CubeCLContext;
 
 const FOLDED_MODEL: &str = "../../../riir-train/data/Ternary-Bonsai-2-27B-PQ2_0.gguf";
 
@@ -78,10 +78,7 @@ const PROMPTS: [(&str, &str); 8] = [
         "prose",
         "Write a short paragraph explaining why the sky is blue to a ten-year-old.\n\n",
     ),
-    (
-        "zh",
-        "春天的早晨，小镇上的市场总是最热闹的。天刚亮，",
-    ),
+    ("zh", "春天的早晨，小镇上的市场总是最热闹的。天刚亮，"),
 ];
 
 fn env_usize(var: &str, default: usize) -> usize {

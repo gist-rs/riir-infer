@@ -4153,7 +4153,8 @@ impl TernaryDeltanetGpuForward {
                 Some(gemm) => {
                     let fraction =
                         crate::ane_prefill::channel_split::prefill_ane_channel_split_fraction();
-                    let block = crate::ane_prefill::channel_split::prefill_ane_channel_split_block();
+                    let block =
+                        crate::ane_prefill::channel_split::prefill_ane_channel_split_block();
                     let t0 = std::time::Instant::now();
                     // The ANE holds a bounded number of loaded programs
                     // (measured ~120 on M5 Ultra / macOS 27.0.1 — "no ANE
@@ -8223,6 +8224,10 @@ impl TernaryDeltanetGpuForward {
     /// Two projections of ONE input (gate+up, qkv+z): the fused Plan 644
     /// T1b channel split when the first handle carries a 2-part split, else
     /// the two plain projections (each may still take a 1-part split).
+    /// Gated to the cfg its targets carry (Issue 1162): `PrefillSite` and
+    /// `prefill_project` are `ternary_gemm_batched`-gated, and the only
+    /// caller (`prefill_tokens_chunk_once`) sits behind the same gate.
+    #[cfg(feature = "ternary_gemm_batched")]
     #[allow(clippy::too_many_arguments)]
     fn prefill_project_pair(
         &self,
