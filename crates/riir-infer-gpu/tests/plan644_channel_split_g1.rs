@@ -15,9 +15,14 @@
 //!
 //! ```sh
 //! CARGO_TARGET_DIR=/tmp/p644 cargo test -p riir-infer-gpu --release \
-//!   --features cubecl_runtime,ternary_gemm_batched,multi_host,ternary_deltanet_chunked_prefill,ternary_attention_batched_prefill,riir-infer-core/bonsai2_hadamard,metal_tensor_gemm,ane_zc_channel_split \
+//!   --features cubecl_runtime,ternary_gemm_batched,multi_host,ternary_deltanet_chunked_prefill,ternary_attention_batched_prefill,riir-infer-core/bonsai2_hadamard,metal_tensor_gemm,ane_zc_channel_split,deltanet_prework_fused,deltanet_recurrence_smem_staged \
 //!   --test plan644_channel_split_g1 -- --ignored --nocapture --test-threads=1
 //! ```
+//!
+//! The last two features are the riir-gpu serving defaults — the GPU-only
+//! denominator must be the shipped prefill (riir-infer Issue 1159: without
+//! them a ragged p ran the incumbent prework's per-token conv1d). Production
+//! posture 2026-10-31: 1.186× @2048, 1.164× @4096, 1.103× @3000.
 //!
 //! Env: `BONSAI2_G1_MODEL` (model path), `P644_P` (prompt tokens, default
 //! 2048; whole 2048-token blocks split, the tail runs GPU-only), `P644_PAIRS`
