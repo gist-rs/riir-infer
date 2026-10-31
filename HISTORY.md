@@ -2,6 +2,8 @@
 
 Compacted 2026-10-30: every `##` heading kept verbatim, one compact entry per record (≤2 short lines); the full pre-compaction text is in git history. Operational rules live in `AGENTS.md`; removed issue files: git history.
 
+## 2026-10-31 — Plan 607 E1 LANDED:  promoted DEFAULT-ON at planes=8 (Metal/CubeCL prefill; the CUDA lane default-on since Bench 896) — Plan 607 D4's armed-posture paired-window A/B on bmo at the m5ultra league shapes: +1.24%/+1.37%/+1.20% (pp2048/16k/32k, n=6/arm/shape), 18/18 armed passes above incumbent, manifest FNV birth pins EXACT under the armed kernel; delegated-owner verdict AGREE; env now DEMOTE-ONLY (0/off/false = incumbent byte-exact; garbage fails open to the DEFAULT arm); caveats recorded (e2e exceeds the +0.38% pre-registered ceiling — the A2 census share under-counts; M3-box e2e unmeasured per the box-state binding)
+
 ## 2026-10-30 — Issue 1157 CLOSED + removed: regime_gate inline sigmoid delegated to the substrate — bit-preserving, pinned
 
 - `crates/riir-infer-gpu/src/regime_gate.rs` `fn sigmoid` is now a thin delegation to `katgpt_core::exact_sigmoid` (the bit-stable two-branch reference form, body-identical — NOT the Cephes `sigmoid`, whose ±40 clamp / ~1.2e-7 drift a gate decision must not inherit); delegation pinned bit-for-bit against the frozen legacy body over a fixed grid (`sigmoid_delegation_matches_frozen_legacy_body`, this commit). Copy-gate class finding from the substrate-first audit; 20/20 regime_gate tests green, clippy clean.
