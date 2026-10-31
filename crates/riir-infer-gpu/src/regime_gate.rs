@@ -785,7 +785,9 @@ pub fn set_regime_capture_tag(tag: &str) {
 /// Append one capture row (JSONL). The runner owns truncation (delete the
 /// file before a fresh dump); the seam always appends — an interrupted run
 /// keeps its rows (the sweep-rows law).
-#[cfg(feature = "cubecl_runtime")]
+/// Consumed only by the whole-forward module (gated
+/// `all(cubecl_runtime, ternary_gemv)` — lib.rs); gated to match (issue 1161).
+#[cfg(all(feature = "cubecl_runtime", feature = "ternary_gemv"))]
 pub(crate) fn regime_capture_append(prompt_len: usize, p: usize, features: &[f32]) {
     let Some(path) = CAPTURE_PATH.get().and_then(|o| o.as_ref()) else {
         return;

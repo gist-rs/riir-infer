@@ -598,6 +598,12 @@ pub fn set_dense_pair_fused(on: bool) {
     USE_DENSE_PAIR.store(on, std::sync::atomic::Ordering::Relaxed);
 }
 
+// Test-consumed at `all(test, cubecl_runtime)` (the env-parse probes in this
+// module's tests) and produced-consumed only by the whole-forward module
+// (`ternary_deltanet_gpu_forward`, gated `all(cubecl_runtime, ternary_gemv)`
+// — lib.rs) — dead at every other posture (issue 1161; the crate precedent,
+// deltanet_rotation_cudarc.rs).
+#[cfg_attr(not(all(test, feature = "cubecl_runtime")), allow(dead_code))]
 fn dense_pair_wg_env(env: Result<String, std::env::VarError>) -> u32 {
     const ALLOWED: [u32; 4] = [32, 64, 128, 256];
     match env {
@@ -609,6 +615,10 @@ fn dense_pair_wg_env(env: Result<String, std::env::VarError>) -> u32 {
     }
 }
 
+// Test-consumed at `all(test, cubecl_runtime)` + produced-consumed only by
+// the whole-forward module — dead at every other posture (issue 1161;
+// the crate precedent, deltanet_rotation_cudarc.rs).
+#[cfg_attr(not(all(test, feature = "cubecl_runtime")), allow(dead_code))]
 pub(crate) fn dense_pair_wg_size() -> u32 {
     if DENSE_PAIR_WG_INITIALIZED
         .set(dense_pair_wg_env(std::env::var("RIIR_GDN_DENSE_PAIR_WG")))

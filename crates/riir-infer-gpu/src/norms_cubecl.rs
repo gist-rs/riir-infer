@@ -1867,7 +1867,12 @@ static NORM_ROTATE_FUSED_INITIALIZED: std::sync::OnceLock<bool> = std::sync::Onc
 #[cfg(feature = "cubecl_runtime")]
 static NORM_ROTATE_FUSED_LAUNCHES: std::sync::atomic::AtomicUsize =
     std::sync::atomic::AtomicUsize::new(0);
-#[cfg(feature = "cubecl_runtime")]
+// REACH instrumentation: consumed only by the whole-forward module
+// (`ternary_deltanet_gpu_forward`, itself gated
+// `all(cubecl_runtime, ternary_gemv)` — lib.rs), so it exists only where
+// that consumer exists; a cubecl_runtime-only op-layer consumer (the laya
+// cubecl lane) would otherwise hold it dead (issue 1161).
+#[cfg(all(feature = "cubecl_runtime", feature = "ternary_gemv"))]
 static NORM_ROTATE_FUSED_REACHED: std::sync::OnceLock<()> = std::sync::OnceLock::new();
 
 /// Force the fused norm+rotate path on/off (overrides the env; the bench
@@ -1904,7 +1909,9 @@ pub fn norm_rotate_fused_launch_count() -> usize {
 
 /// One-shot stderr REACH line (the Bench-768 guard): confirms the fused
 /// path actually dispatched at least once in this process.
-#[cfg(feature = "cubecl_runtime")]
+/// Consumed only by the whole-forward module (gated
+/// `all(cubecl_runtime, ternary_gemv)` — lib.rs); gated to match (issue 1161).
+#[cfg(all(feature = "cubecl_runtime", feature = "ternary_gemv"))]
 pub(crate) fn norm_rotate_fused_mark_reached() {
     if NORM_ROTATE_FUSED_LAUNCHES.fetch_add(1, std::sync::atomic::Ordering::Relaxed) == 0 {
         let _ = NORM_ROTATE_FUSED_REACHED.set(());
@@ -1936,7 +1943,10 @@ static NORM_ROTATE_MULTI_INITIALIZED: std::sync::OnceLock<bool> = std::sync::Onc
 #[cfg(feature = "cubecl_runtime")]
 static NORM_ROTATE_MULTI_LAUNCHES: std::sync::atomic::AtomicUsize =
     std::sync::atomic::AtomicUsize::new(0);
-#[cfg(feature = "cubecl_runtime")]
+// REACH instrumentation: consumed only by the whole-forward module
+// (`ternary_deltanet_gpu_forward`, gated `all(cubecl_runtime, ternary_gemv)`
+// — lib.rs); gated to match (issue 1161).
+#[cfg(all(feature = "cubecl_runtime", feature = "ternary_gemv"))]
 static NORM_ROTATE_MULTI_REACHED: std::sync::OnceLock<()> = std::sync::OnceLock::new();
 
 /// Force the multi-cube fused norm+rotate path on/off (overrides the env;
@@ -1975,7 +1985,9 @@ pub fn norm_rotate_multi_launch_count() -> usize {
 
 /// One-shot stderr REACH line (the Bench-768 guard): confirms the multi-cube
 /// path actually dispatched at least once in this process.
-#[cfg(feature = "cubecl_runtime")]
+/// Consumed only by the whole-forward module (gated
+/// `all(cubecl_runtime, ternary_gemv)` — lib.rs); gated to match (issue 1161).
+#[cfg(all(feature = "cubecl_runtime", feature = "ternary_gemv"))]
 pub(crate) fn norm_rotate_multi_mark_reached() {
     if NORM_ROTATE_MULTI_LAUNCHES.fetch_add(1, std::sync::atomic::Ordering::Relaxed) == 0 {
         let _ = NORM_ROTATE_MULTI_REACHED.set(());
