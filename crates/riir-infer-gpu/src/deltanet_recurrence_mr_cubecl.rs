@@ -535,4 +535,124 @@ mod tests {
         launches_before = launches_after;
         let _ = launches_before;
     }
+
+    /// G2 (Plan 607 D2, isolated-kernel half): the incumbent multi-token
+    /// kernel vs the MR ladder at the Bonsai GDN layer shape (n_v=48, hd=128),
+    /// interleaved median-of-9 — the CUDA twin's probe discipline
+    /// (`prefill_cuda_deltanet.rs::test_rec_mr_timing_probe`) ported to the
+    /// CubeCL/Metal lane. p=128 is the PRODUCTION launch shape (the league
+    /// prefill chunk; the A2 census's frame); p=2048 is the long-launch
+    /// reference matching the CUDA twin's table. Inputs upload ONCE per
+    /// shape; each timed call is launch + in-order-queue drain (a 4-byte
+    /// read of a dedicated handle — wgpu queues are in-order, so the read
+    /// waits for every prior enqueue; its fixed ~µs cost is arm-neutral).
+    ///
+    /// EXCLUSIVE-GPU cell: run with `--ignored --release` on a verified-idle
+    /// box (Plan 607's Ultra binding — bmo/amo).
+    #[test]
+    #[ignore = "kernel-only timing probe - exclusive GPU window required; Ultra-only per Plan 607"]
+    fn test_rec_mr_timing_probe() {
+        let ctx = CubeCLContext::new().expect("CubeCL should initialize");
+        let client = ctx.client();
+        let (n_v, hd) = (48usize, 128usize);
+        let v_dim = n_v * hd;
+        // The drain handle: created once, read (4 bytes) after every launch.
+        let sync_handle = client.create_from_slice(f32::as_bytes(&[1.0f32]));
+
+        for p in [128usize, 2048usize] {
+            const ROUNDS: usize = 9;
+            // Same LCG recipe + ranges as the CUDA twin's probe so the two
+            // lanes' tables stay comparable.
+            let mut seed = 0xDEFA_CE90_4001u64;
+            let mut next = move || {
+                seed = seed
+                    .wrapping_mul(6_364_136_223_846_793_005)
+                    .wrapping_add(1_442_695_040_888_963_407);
+                (seed >> 40) as f32 / 16_777_216.0
+            };
+            let beta: Vec<f32> = (0..p * n_v).map(|_| 0.05 + next() * 0.90).collect();
+            let decay: Vec<f32> = (0..p * n_v).map(|_| 0.5 + next() * 0.499).collect();
+            let qkvx: Vec<f32> = (0..p * 3 * v_dim).map(|_| next() - 0.5).collect();
+            let state: Vec<f32> = (0..n_v * hd * hd).map(|_| next() - 0.5).collect();
+
+            let qkvx_h = client.create_from_slice(f32::as_bytes(&qkvx));
+            let beta_h = client.create_from_slice(f32::as_bytes(&beta));
+            let decay_h = client.create_from_slice(f32::as_bytes(&decay));
+            let state_h = client.create_from_slice(f32::as_bytes(&state));
+            let output_h = client.create_from_slice(f32::as_bytes(&vec![0.0f32; p * v_dim]));
+
+            let timed = |arm: Option<usize>| -> f64 {
+                let t0 = std::time::Instant::now();
+                unsafe {
+                    match arm {
+                        Some(planes) => {
+                            DeltanetRecurrenceMultiTokenMRCubeCL::launch_with_gpu_handles::<
+                                ActiveRuntime,
+                            >(
+                                &client,
+                                qkvx_h.clone(),
+                                beta_h.clone(),
+                                decay_h.clone(),
+                                state_h.clone(),
+                                output_h.clone(),
+                                n_v,
+                                hd,
+                                p,
+                                planes,
+                            )
+                        }
+                        None => DeltanetRecurrenceMultiTokenCubeCL::launch_with_gpu_handles::<
+                            ActiveRuntime,
+                        >(
+                            &client,
+                            qkvx_h.clone(),
+                            beta_h.clone(),
+                            decay_h.clone(),
+                            state_h.clone(),
+                            output_h.clone(),
+                            n_v,
+                            hd,
+                            p,
+                        ),
+                    }
+                }
+                // In-order drain: this read executes only after the launch.
+                let _ = f32::from_bytes(&client.read_one_unchecked(sync_handle.clone()));
+                t0.elapsed().as_secs_f64() * 1e3
+            };
+
+            // Warmup: every arm once, then the baseline hard (JIT + caches).
+            for planes in REC_MR_PLANES_LADDER {
+                let _ = timed(Some(planes));
+            }
+            for _ in 0..3 {
+                let _ = timed(None);
+            }
+
+            let n_arms = REC_MR_PLANES_LADDER.len();
+            let mut samples: Vec<Vec<f64>> = vec![Vec::with_capacity(ROUNDS); n_arms + 1];
+            for _ in 0..ROUNDS {
+                samples[0].push(timed(None)); // baseline interleaved every round
+                for (a, &planes) in REC_MR_PLANES_LADDER.iter().enumerate() {
+                    samples[a + 1].push(timed(Some(planes)));
+                }
+            }
+            for row in &mut samples {
+                row.sort_by(|x, y| x.total_cmp(y));
+            }
+            let med: Vec<f64> = samples.iter().map(|r| r[ROUNDS / 2]).collect();
+            println!(
+                "[rec-mr-timing-cubecl] n_v={n_v} hd={hd} p={p} (median of {ROUNDS}, interleaved):"
+            );
+            println!("  planes=1-equivalent baseline: {:8.3} ms (1.000x)", med[0]);
+            for (a, m) in med.iter().enumerate().skip(1) {
+                println!(
+                    "  planes={:<2}: {:8.3} ms ({:.3}x)",
+                    REC_MR_PLANES_LADDER[a - 1],
+                    m,
+                    med[0] / m,
+                );
+            }
+        }
+    }
 }
