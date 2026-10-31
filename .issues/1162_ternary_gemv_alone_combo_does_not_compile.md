@@ -1,6 +1,7 @@
 # riir-infer Issue 1162 — riir-infer-gpu: the ternary_gemv-ALONE combo does not compile (pre-existing cfg mismatch, no live consumer)
 
 **Status:** open — found 2026-11-01 during the issue-1161 repair validation (`38df722`); proven PRE-EXISTING at HEAD e2fac9b via a detached worktree run (zero source delta).
+**Claimed:** zed-m3-idle1031b, epoch 1793488531, expires 2026-11-02T23:15:31+00:00
 
 ## The finding
 
