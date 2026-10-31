@@ -8056,8 +8056,9 @@ impl TernaryDeltanetGpuForward {
             out_stride: split.n,
             out_col: 0,
         };
-        // Submission flushes CubeCL and fences the producer (Issue 670 T4).
-        let ticket = match crate::ane_prefill::exec_zc::submit_split_async_zc(
+        // Submission flushes CubeCL, fences the producer (Issue 670 T4) and
+        // packs block 0 on the shared queue.
+        let mut job = match crate::ane_prefill::exec_zc::submit_split_async_zc(
             &self.client,
             zc,
             split.kernel.clone(),
@@ -8067,27 +8068,43 @@ impl TernaryDeltanetGpuForward {
             split.block_tokens,
             &[seg],
         ) {
-            Ok(t) => t,
+            Ok(j) => j,
             Err(e) => {
                 eprintln!("[Plan 644] split submit refused ({e}) — full-width GPU");
                 return false;
             }
         };
-        let m_gpu = split.n - split.k;
-        let scratch = self.client.empty(p * m_gpu * std::mem::size_of::<f32>());
-        self.prefill_project_dispatch(&split.suffix, input, &scratch, p, site);
-        unsafe {
-            crate::elementwise_cubecl::CopyColsCubeCL::launch::<ActiveRuntime>(
-                &self.client,
-                scratch,
-                output.clone(),
-                p,
-                m_gpu,
-                split.n,
-                split.k,
-            );
+        // Per block: complement slice b (GPU rows [k,n) of tokens
+        // [b·w,(b+1)·w)) overlaps ANE eval b; block b+1's pack queues behind
+        // eval b (io_in is single-buffered) — the pipeline never serializes.
+        let (w, ic, n, k) = (split.block_tokens, split.ic, split.n, split.k);
+        let m_gpu = n - k;
+        let scratch = self.client.empty(w * m_gpu * std::mem::size_of::<f32>());
+        for b in 0..job.blocks() {
+            if b > 0
+                && let Err(e) = job.pack_next(&self.client)
+            {
+                eprintln!("[Plan 644] split pack refused ({e}) — full-width GPU rewrite");
+                job.finish(&self.client);
+                return false;
+            }
+            let f32s = std::mem::size_of::<f32>();
+            let in_b = input.clone().offset_start((b * w * ic * f32s) as u64);
+            let out_b = output.clone().offset_start((b * w * n * f32s) as u64);
+            self.prefill_project_dispatch(&split.suffix, &in_b, &scratch, w, site);
+            unsafe {
+                crate::elementwise_cubecl::CopyColsCubeCL::launch::<ActiveRuntime>(
+                    &self.client,
+                    scratch.clone(),
+                    out_b,
+                    w,
+                    m_gpu,
+                    n,
+                    k,
+                );
+            }
         }
-        ticket.gpu_wait(&self.client);
+        job.finish(&self.client);
         true
     }
 

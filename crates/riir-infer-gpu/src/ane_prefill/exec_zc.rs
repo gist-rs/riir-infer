@@ -436,9 +436,19 @@ pub struct ZcContext {
     /// dedicated queue. Values are handed out by [`Self::next_fence`].
     fence: metal::Event,
     fence_ctr: AtomicU64,
-    /// riir-ai Plan 644: the ASYNC lane's completion event — signalled on
-    /// `ane_queue` after a job's last unpack, waited on the SHARED queue
-    /// before the caller's consumer (GPU-side join; the CPU never blocks).
+    /// riir-ai Plan 644: per-BLOCK eval completion, signalled from the CPU
+    /// by the lane after `eval_nc` + the settle (io_out readable, io_in
+    /// free). The SHARED queue waits on it ahead of that block's unpack and
+    /// the next block's pack — the async lane's ONLY GPU-side join. CPU-only
+    /// signaller (the lane thread, FIFO) ⇒ strictly increasing values.
+    eval_ev: metal::SharedEvent,
+    eval_ctr: AtomicU64,
+    /// riir-ai Plan 644: job completion — the lane unpacks the LAST block
+    /// on `ane_queue` right after its eval (overlapping the complement's
+    /// tail) and signals this GPU-side after it; the shared queue waits on
+    /// it before the consumer. GPU-only signaller on one FIFO queue ⇒
+    /// strictly increasing. (Measured: the last unpack on the shared queue
+    /// behind the complement cost ≈0.7 ms/seam — 1.07× vs 1.10× @2048.)
     done: metal::Event,
     done_ctr: AtomicU64,
     pack: ComputePipelineState,
@@ -510,6 +520,7 @@ pub fn zc_context(
             // default-off arm is byte-identical in behaviour.
             let ane_queue = device_ref.new_command_queue();
             let fence = device_ref.new_event();
+            let eval_ev = device_ref.new_shared_event();
             let done = device_ref.new_event();
             let pack = mk("zc_pack")?;
             let unpack = mk("zc_unpack")?;
@@ -521,6 +532,8 @@ pub fn zc_context(
                 ane_queue,
                 fence,
                 fence_ctr: AtomicU64::new(0),
+                eval_ev,
+                eval_ctr: AtomicU64::new(0),
                 done,
                 done_ctr: AtomicU64::new(0),
                 pack,
@@ -613,18 +626,16 @@ struct ZcWorker {
     /// `ctx.ane_queue` behind `wait_for_event(fence, v)`. `None` = the
     /// shared-queue path (default).
     fence_value: Option<u64>,
-    /// riir-ai Plan 644: the async lane — unpacks ride `ctx.ane_queue`
-    /// (FIFO behind this job's packs) and the lane signals `ctx.done`
-    /// after them; the shared queue is ordered by a GPU-side event wait
-    /// instead of shared-queue FIFO (the worker commits AFTER the caller's
-    /// consumer is already queued, so FIFO would run it first).
-    unpack_on_ane_queue: bool,
-    /// riir-ai Plan 644: block 0's pack, ALREADY committed on the SHARED
-    /// queue by the main thread (between the producer and the caller's
-    /// complement). A pack on `ane_queue` is scheduled behind whatever
-    /// saturates the GPU — measured: it queued behind the complement GEMM,
-    /// serializing the whole seam (async split ≡ GPU-half + ANE eval).
-    prepacked: Option<metal::CommandBuffer>,
+    /// riir-ai Plan 644 (async lane): every block's pack AND unpack is
+    /// committed on the SHARED queue by the MAIN thread ([`ZcAsyncSplit`]);
+    /// the worker only waits each pack, evals, settles and signals
+    /// `eval_ev`. A cb on `ane_queue` is scheduled behind whatever saturates
+    /// the GPU (measured: a pack there queued behind the complement GEMM —
+    /// 0.94× @2048, 0.996× @4096), and an unpack there let eval b+1
+    /// overwrite io_out before unpack b ran (G1 cosine 0.99976 @4096).
+    packs: Option<std::sync::mpsc::Receiver<metal::CommandBuffer>>,
+    /// First `eval_ev` value of this job (block b signals `eval_base + b`).
+    eval_base: Option<u64>,
 }
 
 // SAFETY: metal ObjC objects (MTLBuffer/MTLTexture/pipelines/queue) are
@@ -694,6 +705,42 @@ fn encode_unpack(
     encoder.dispatch_threads(MTLSize::new(total as u64, 1, 1), MTLSize::new(64, 1, 1));
 }
 
+/// Encode block `block`'s unpack of every target (buffer path, Probe 778).
+fn encode_unpack_targets(
+    enc: &metal::ComputeCommandEncoderRef,
+    ctx: &ZcContext,
+    nc_ref: &BufferRef,
+    targets: &[(&BufferRef, &RawTarget)],
+    block: usize,
+    w: usize,
+) {
+    for &(buf, t) in targets {
+        // The block's slice starts at row `block * w` of the target (row
+        // stride `out_stride`), shifted to the segment's column.
+        let slice_off = t.off + ((block * w * t.out_stride + t.out_col) * 4) as u64;
+        let total = (w * t.seg_dim) as u32;
+        let params = ZcUnpackParams {
+            seg_dim: t.seg_dim as u32,
+            w: w as u32,
+            chan_off: t.chan_off as u32,
+            tex_w: 0, // unused by the buffer-path kernel
+            total,
+            out_stride: t.out_stride as u32,
+        };
+        enc.set_compute_pipeline_state(&ctx.unpack_buf);
+        enc.set_buffer(0, Some(nc_ref), 0);
+        enc.set_buffer(1, Some(buf), slice_off);
+        enc.set_bytes(
+            2,
+            std::mem::size_of::<ZcUnpackParams>() as u64,
+            &params as *const _ as *const _,
+        );
+        enc.use_resource(nc_ref, metal::MTLResourceUsage::Read);
+        enc.use_resource(buf, metal::MTLResourceUsage::Write);
+        enc.dispatch_threads(MTLSize::new(total as u64, 1, 1), MTLSize::new(64, 1, 1));
+    }
+}
+
 fn zc_worker_loop(worker: ZcWorker) -> Result<(), String> {
     let ZcWorker {
         kernel,
@@ -706,8 +753,8 @@ fn zc_worker_loop(worker: ZcWorker) -> Result<(), String> {
         w,
         blocks,
         fence_value,
-        unpack_on_ane_queue,
-        mut prepacked,
+        packs,
+        eval_base,
     } = worker;
     let input_ref: &BufferRef = unsafe { BufferRef::from_ptr(input_ptr) };
     let target_refs: Vec<(&BufferRef, &RawTarget)> = targets
@@ -751,7 +798,10 @@ fn zc_worker_loop(worker: ZcWorker) -> Result<(), String> {
         }
         // 1. Pack (enqueue + wait — the eval needs the surface bytes).
         let t = Instant::now();
-        if let Some(cmd) = prepacked.take() {
+        if let Some(rx) = &packs {
+            let cmd = rx
+                .recv()
+                .map_err(|_| format!("ANE zc lane: block {block} pack never submitted"))?;
             bump(&T_ZC_PACK_NS, t);
             let t = Instant::now();
             cmd.wait_until_completed();
@@ -798,41 +848,31 @@ fn zc_worker_loop(worker: ZcWorker) -> Result<(), String> {
         //      always relied on exactly this through its full stage(1)).
         let mut settle = [0u16; 1];
         kernel.stage(1, &mut settle);
+        // Async lane: the caller's shared-queue cb unpacks this block (and
+        // packs the next) behind this value — io_out readable, io_in free.
+        // The LAST block is unpacked here on `ane_queue` instead (the lane
+        // then signals `done` behind it, FIFO).
+        if let Some(base) = eval_base {
+            ctx.eval_ev.set_signaled_value(base + block as u64);
+            if block + 1 == blocks {
+                let t = Instant::now();
+                let cmd2 = ctx.ane_queue.new_command_buffer();
+                let enc = cmd2.new_compute_command_encoder();
+                encode_unpack_targets(enc, &ctx, nc_ref, &target_refs, block, w);
+                enc.end_encoding();
+                cmd2.commit();
+                bump(&T_ZC_UNPACK_NS, t);
+            }
+            continue;
+        }
         // 3. Unpack every segment through the NO-COPY BUFFER (enqueue only —
         //    the consumer is ordered by queue FIFO; targets must simply
         //    stay alive, which they do).
         let t = Instant::now();
-        let cmd2 = match unpack_on_ane_queue {
-            true => ctx.ane_queue.new_command_buffer(),
-            false => queue_ref.new_command_buffer(),
-        };
+        let cmd2 = queue_ref.new_command_buffer();
         {
             let enc = cmd2.new_compute_command_encoder();
-            for &(buf, t) in &target_refs {
-                // The block's slice starts at row `block * w` of the target
-                // (row stride `out_stride`), shifted to the segment's column.
-                let slice_off = t.off + ((block * w * t.out_stride + t.out_col) * 4) as u64;
-                let total = (w * t.seg_dim) as u32;
-                let params = ZcUnpackParams {
-                    seg_dim: t.seg_dim as u32,
-                    w: w as u32,
-                    chan_off: t.chan_off as u32,
-                    tex_w: 0, // unused by the buffer-path kernel
-                    total,
-                    out_stride: t.out_stride as u32,
-                };
-                enc.set_compute_pipeline_state(&ctx.unpack_buf);
-                enc.set_buffer(0, Some(nc_ref), 0);
-                enc.set_buffer(1, Some(buf), slice_off);
-                enc.set_bytes(
-                    2,
-                    std::mem::size_of::<ZcUnpackParams>() as u64,
-                    &params as *const _ as *const _,
-                );
-                enc.use_resource(nc_ref, metal::MTLResourceUsage::Read);
-                enc.use_resource(buf, metal::MTLResourceUsage::Write);
-                enc.dispatch_threads(MTLSize::new(total as u64, 1, 1), MTLSize::new(64, 1, 1));
-            }
+            encode_unpack_targets(enc, &ctx, nc_ref, &target_refs, block, w);
             enc.end_encoding();
         }
         cmd2.commit();
@@ -897,6 +937,7 @@ impl<'a> ZcSegment<'a> {
 }
 
 /// [`ZcSegment`] after main-thread extraction (raw pointer; worker-side).
+#[derive(Clone)]
 struct RawTarget {
     buf: *mut metal::MTLBuffer,
     off: u64,
@@ -1011,22 +1052,6 @@ fn prepare_worker(
             out_col: s.out_col,
         });
     }
-    // Plan 644: the async lane pre-packs block 0 on the SHARED queue, so the
-    // ANE starts as soon as the producer lands — not after the complement.
-    let prepacked = match async_lane {
-        false => None,
-        true => {
-            let tex = kernel.metal_textures_fresh(unsafe { DeviceRef::from_ptr(ctx.device) })?;
-            let input_ref: &BufferRef = unsafe { BufferRef::from_ptr(input_ptr) };
-            let shared: &CommandQueueRef = unsafe { CommandQueueRef::from_ptr(ctx.queue) };
-            let cmd = shared.new_command_buffer().to_owned();
-            let enc = cmd.new_compute_command_encoder();
-            encode_pack(enc, &ctx, &tex, input_ref, input_off, n, w, 0);
-            enc.end_encoding();
-            cmd.commit();
-            Some(cmd)
-        }
-    };
     Ok(ZcWorker {
         kernel,
         ctx,
@@ -1038,8 +1063,8 @@ fn prepare_worker(
         w,
         blocks: p / w,
         fence_value,
-        unpack_on_ane_queue: async_lane,
-        prepacked,
+        packs: None,
+        eval_base: None,
     })
 }
 
@@ -1049,19 +1074,32 @@ fn prepare_worker(
 // shared queue DRAINS and idles while CubeCL re-encodes past the seam —
 // measured as a fixed ≈1.9 ms/seam loss even at a 10% ANE share (Plan 644
 // T1 §2026-10-31). The lane removes the CPU join: ONE persistent worker
-// thread runs jobs FIFO (one ANE — serial evals are its native order), each
-// job's packs + unpacks ride `ane_queue`, and the lane signals `ctx.done`
-// after the job. The caller queues `wait_for_event(done, u)` on the SHARED
-// queue between its complement and its consumer ([`ZcAsyncTicket::gpu_wait`]),
-// so the GPU — not the CPU — joins.
+// thread runs jobs FIFO (one ANE — serial evals are its native order) and
+// does only CPU-side work (wait pack, eval, settle, signal `eval_ev`). EVERY
+// GPU command of the seam rides the SHARED queue in the order the main
+// thread encodes it ([`ZcAsyncSplit`]):
 //
-// Liveness: the lane ALWAYS signals `u` (success, Err, or a caught panic) —
-// an unsignalled value would hang the shared queue forever. A failed job's
-// columns are unwritten for THAT pass; the lane poisons ([`zc_lane_poisoned`])
-// and callers stop submitting (fail-open for every later seam).
+//   pack0 · complement(block 0) · [wait e0 · unpack0 · pack1] ·
+//   complement(block 1) · … · [wait done] · consumer
+//
+// so ANE eval b overlaps complement slice b and unpack b precedes pack b+1
+// by FIFO (io_out/io_in are single-buffered). The LAST block's unpack rides
+// `ane_queue` right after its eval, the lane signals `done` behind it, and
+// the GPU — not the CPU — joins.
+//
+// Liveness: the lane ALWAYS reaches `eval_last` and signals `done`
+// (success, Err, or a caught panic) — an unsignalled value would hang the
+// shared queue forever. A
+// failed job's columns are garbage for THAT pass; the lane poisons
+// ([`zc_lane_poisoned`]) and callers stop submitting (fail-open for every
+// later seam).
 
 struct ZcLaneJob {
     worker: ZcWorker,
+    /// Last `eval_ev` value of the job — force-signalled on failure so the
+    /// shared queue's per-block waits cannot hang.
+    eval_last: u64,
+    /// `done` value, signalled on `ane_queue` after the job (any outcome).
     done: u64,
 }
 
@@ -1075,19 +1113,27 @@ fn zc_lane() -> &'static std::sync::Mutex<std::sync::mpsc::Sender<ZcLaneJob>> {
         std::thread::Builder::new()
             .name("ane-zc-lane".into())
             .spawn(move || {
-                for ZcLaneJob { worker, done } in rx {
+                for ZcLaneJob {
+                    worker,
+                    eval_last,
+                    done,
+                } in rx
+                {
                     let ctx = worker.ctx.clone();
                     let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                         zc_worker_loop(worker)
                     }))
                     .unwrap_or_else(|_| Err("ANE zc lane job panicked".into()));
-                    // FIFO on ane_queue: this lands after the job's unpacks.
+                    // FIFO on ane_queue: lands after the last block's unpack.
                     let cmd = ctx.ane_queue.new_command_buffer();
                     cmd.encode_signal_event(&ctx.done, done);
                     cmd.commit();
                     N_ZC_LANE_JOBS.fetch_add(1, Ordering::Relaxed);
                     if let Err(e) = r {
-                        eprintln!("[Plan 644] ANE lane job {done} failed ({e}) — lane POISONED, later seams run GPU-only");
+                        if ctx.eval_ev.signaled_value() < eval_last {
+                            ctx.eval_ev.set_signaled_value(eval_last);
+                        }
+                        eprintln!("[Plan 644] ANE lane job (eval {eval_last}) failed ({e}) — lane POISONED, later seams run GPU-only");
                         let mut slot = ZC_LANE_ERR.lock().unwrap_or_else(|p| p.into_inner());
                         slot.get_or_insert(e);
                     }
@@ -1106,30 +1152,121 @@ pub fn zc_lane_poisoned() -> Option<String> {
         .clone()
 }
 
-/// A queued async job. MUST be consumed by [`Self::gpu_wait`] after the
-/// caller's complement and BEFORE its consumer.
-#[must_use = "an un-waited ticket lets the consumer read unwritten columns"]
-pub struct ZcAsyncTicket {
+/// An in-flight async split. Drive it block by block on the MAIN thread:
+/// for each block b, [`Self::pack_next`] (block 0 is packed at submit), then
+/// queue the caller's complement for block b's tokens; finally
+/// [`Self::finish`] — after the last complement, BEFORE the consumer.
+#[must_use = "an unfinished split leaves the last block's columns unwritten"]
+pub struct ZcAsyncSplit {
     ctx: Arc<ZcContext>,
+    kernel: Arc<BridgeKernel>,
+    input_ptr: *mut metal::MTLBuffer,
+    input_off: u64,
+    targets: Vec<RawTarget>,
+    out_nc: metal::Buffer,
+    n: usize,
+    w: usize,
+    blocks: usize,
+    next_block: usize,
+    eval_base: u64,
     done: u64,
+    packs: std::sync::mpsc::Sender<metal::CommandBuffer>,
 }
 
-impl ZcAsyncTicket {
-    /// Queue the GPU-side join on the SHARED queue. Flushes CubeCL first so
-    /// the complement already encoded runs AHEAD of the wait (concurrently
-    /// with the ANE) instead of behind it.
-    pub fn gpu_wait(self, client: &ComputeClient<crate::cubecl_runtime::ActiveRuntime>) {
+impl ZcAsyncSplit {
+    /// Blocks of `w` tokens in this split.
+    pub fn blocks(&self) -> usize {
+        self.blocks
+    }
+
+    /// One shared-queue cb: `[wait eval(b−1) · unpack b−1]` then block b's
+    /// pack (handed to the lane).
+    fn commit_step(
+        &mut self,
+        client: &ComputeClient<crate::cubecl_runtime::ActiveRuntime>,
+    ) -> Result<(), String> {
+        let block = self.next_block;
+        let tex = self
+            .kernel
+            .metal_textures_fresh(unsafe { DeviceRef::from_ptr(self.ctx.device) })?;
+        // CubeCL's pending complement must reach the queue AHEAD of this cb.
         let _ = client.flush();
         let shared: &CommandQueueRef = unsafe { CommandQueueRef::from_ptr(self.ctx.queue) };
+        let cmd = shared.new_command_buffer().to_owned();
+        if block > 0 {
+            let t = Instant::now();
+            cmd.encode_wait_for_event(&self.ctx.eval_ev, self.eval_base + block as u64 - 1);
+            let target_refs: Vec<(&BufferRef, &RawTarget)> = self
+                .targets
+                .iter()
+                .map(|t| unsafe { (BufferRef::from_ptr(t.buf), t) })
+                .collect();
+            let enc = cmd.new_compute_command_encoder();
+            encode_unpack_targets(
+                enc,
+                &self.ctx,
+                &self.out_nc,
+                &target_refs,
+                block - 1,
+                self.w,
+            );
+            enc.end_encoding();
+            bump(&T_ZC_UNPACK_NS, t);
+        }
+        let input_ref: &BufferRef = unsafe { BufferRef::from_ptr(self.input_ptr) };
+        let enc = cmd.new_compute_command_encoder();
+        encode_pack(
+            enc,
+            &self.ctx,
+            &tex,
+            input_ref,
+            self.input_off,
+            self.n,
+            self.w,
+            block,
+        );
+        enc.end_encoding();
+        cmd.commit();
+        self.next_block += 1;
+        self.packs
+            .send(cmd)
+            .map_err(|_| "ANE zc lane dropped the job".to_string())
+    }
+
+    /// Unpack the previous block and pack the next (shared queue, behind
+    /// the previous block's eval — io_out/io_in are single-buffered).
+    pub fn pack_next(
+        &mut self,
+        client: &ComputeClient<crate::cubecl_runtime::ActiveRuntime>,
+    ) -> Result<(), String> {
+        debug_assert!(
+            self.next_block < self.blocks,
+            "pack_next past the last block"
+        );
+        self.commit_step(client)
+    }
+
+    /// Queue the GPU-side join (`wait(done)`) on the SHARED queue — after
+    /// the last complement, before the consumer. After a `pack_next` error
+    /// (fewer blocks packed) dropping the pack sender fails the lane job,
+    /// which still signals `done`, so the caller's full-width rewrite lands
+    /// after any late unpack.
+    pub fn finish(self, client: &ComputeClient<crate::cubecl_runtime::ActiveRuntime>) {
+        let Self {
+            ctx, done, packs, ..
+        } = self;
+        drop(packs);
+        let _ = client.flush();
+        let shared: &CommandQueueRef = unsafe { CommandQueueRef::from_ptr(ctx.queue) };
         let cmd = shared.new_command_buffer();
-        cmd.encode_wait_for_event(&self.ctx.done, self.done);
+        cmd.encode_wait_for_event(&ctx.done, done);
         cmd.commit();
     }
 }
 
-/// Submit a ZC split job to the async lane (no CPU join anywhere). The
-/// caller then queues its GPU complement and calls
-/// [`ZcAsyncTicket::gpu_wait`]. Refuses (Err) once the lane is poisoned.
+/// Submit a ZC split job to the async lane (no CPU join anywhere) and pack
+/// block 0 on the shared queue. Refuses (Err, nothing queued) once the lane
+/// is poisoned.
 #[allow(clippy::too_many_arguments)]
 pub fn submit_split_async_zc(
     client: &ComputeClient<crate::cubecl_runtime::ActiveRuntime>,
@@ -1140,18 +1277,60 @@ pub fn submit_split_async_zc(
     n: usize,
     w: usize,
     segments: &[ZcSegment<'_>],
-) -> Result<ZcAsyncTicket, String> {
+) -> Result<ZcAsyncSplit, String> {
     if let Some(e) = zc_lane_poisoned() {
         return Err(format!("ANE lane poisoned: {e}"));
     }
-    let worker = prepare_worker(client, ctx.clone(), kernel, input, p, n, w, segments, true)?;
-    // Allocate the value UNDER the sender lock: send order == value order,
-    // so the lane signals `done` strictly increasing (MTLEvent contract).
-    let tx = zc_lane().lock().unwrap_or_else(|p| p.into_inner());
-    let done = ctx.done_ctr.fetch_add(1, Ordering::Relaxed) + 1;
-    tx.send(ZcLaneJob { worker, done })
+    let mut worker = prepare_worker(
+        client,
+        ctx.clone(),
+        kernel.clone(),
+        input,
+        p,
+        n,
+        w,
+        segments,
+        true,
+    )?;
+    let (packs, rx) = std::sync::mpsc::channel();
+    worker.packs = Some(rx);
+    let (blocks, input_ptr, input_off) = (worker.blocks, worker.input_ptr, worker.input_off);
+    let (targets, out_nc) = (worker.targets.clone(), worker.out_nc_buffer.clone());
+    // Allocate values UNDER the sender lock: send order == value order, so
+    // `eval_ev` is signalled strictly increasing (MTLSharedEvent contract).
+    let (eval_base, done) = {
+        let tx = zc_lane().lock().unwrap_or_else(|p| p.into_inner());
+        let eval_base = ctx.eval_ctr.fetch_add(blocks as u64, Ordering::Relaxed) + 1;
+        let done = ctx.done_ctr.fetch_add(1, Ordering::Relaxed) + 1;
+        worker.eval_base = Some(eval_base);
+        tx.send(ZcLaneJob {
+            worker,
+            eval_last: eval_base + blocks as u64 - 1,
+            done,
+        })
         .map_err(|_| "ANE zc lane thread is gone".to_string())?;
-    Ok(ZcAsyncTicket { ctx, done })
+        (eval_base, done)
+    };
+    let mut job = ZcAsyncSplit {
+        ctx,
+        kernel,
+        input_ptr,
+        input_off,
+        targets,
+        out_nc,
+        n,
+        w,
+        blocks,
+        next_block: 0,
+        eval_base,
+        done,
+        packs,
+    };
+    if let Err(e) = job.commit_step(client) {
+        job.finish(client);
+        return Err(format!("{e} (job retired; lane poisoned)"));
+    }
+    Ok(job)
 }
 
 impl AneSplitJobZc {
