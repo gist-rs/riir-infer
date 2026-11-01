@@ -23,3 +23,4 @@ CLAUDE.md
 
 # Issue 1146 A/B per-cell logs (on-disk evidence, referenced by Bench 914 provenance)
 .benchmarks/i1146_ab/
+__pycache__/
