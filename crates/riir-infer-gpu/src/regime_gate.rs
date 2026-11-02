@@ -749,31 +749,59 @@ pub fn centroids_body_json(c: &RegimeCentroids) -> serde_json::Value {
 }
 
 #[cfg(feature = "cubecl_runtime")]
-static CAPTURE_PATH: std::sync::OnceLock<Option<std::path::PathBuf>> = std::sync::OnceLock::new();
+static CAPTURE_PATH: std::sync::Mutex<Option<std::path::PathBuf>> = std::sync::Mutex::new(None);
+#[cfg(feature = "cubecl_runtime")]
+static CAPTURE_ENV_SEEDED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 #[cfg(feature = "cubecl_runtime")]
 static CAPTURE_TAG: std::sync::Mutex<String> = std::sync::Mutex::new(String::new());
 static REGIME_CAPTURE_ROWS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+static REGIME_CAPTURE_WRITE_FAILS: std::sync::atomic::AtomicUsize =
+    std::sync::atomic::AtomicUsize::new(0);
+static REGIME_CAPTURE_READ_FAILS: std::sync::atomic::AtomicUsize =
+    std::sync::atomic::AtomicUsize::new(0);
 
-/// Whether the freeze-pass capture is armed (env `RIIR_REGIME_CAPTURE_OUT`,
-/// read once — first caller wins; calibration-time lane, never a serving
-/// posture).
+/// Whether the freeze-pass capture block is COMPILED IN — the const mirrors
+/// the block's own cfg in `ternary_deltanet_gpu_forward`. A compiled-out
+/// block reads as "seam never armed" with zero diagnostics (issue 1163);
+/// runners assert this before burning GPU time.
+#[cfg(all(
+    feature = "cubecl_runtime",
+    feature = "ternary_gemm_batched",
+    feature = "ternary_attention_batched_prefill"
+))]
+pub const REGIME_CAPTURE_COMPILED: bool = true;
+#[cfg(not(all(
+    feature = "cubecl_runtime",
+    feature = "ternary_gemm_batched",
+    feature = "ternary_attention_batched_prefill"
+)))]
+pub const REGIME_CAPTURE_COMPILED: bool = false;
+
+/// Whether the freeze-pass capture is armed. The env `RIIR_REGIME_CAPTURE_OUT`
+/// seeds the default ONCE (first read); [`set_regime_capture_path`] overrides
+/// at ANY time — including after a disarmed warmup (issue 1163: the old
+/// OnceLock made the post-warmup setter a swallowed no-op, so a runner that
+/// warmed up before arming captured zero rows for the whole dump).
 #[cfg(feature = "cubecl_runtime")]
 pub fn regime_capture_armed() -> bool {
-    CAPTURE_PATH
-        .get_or_init(|| {
-            std::env::var("RIIR_REGIME_CAPTURE_OUT")
-                .ok()
-                .map(|p| std::path::PathBuf::from(p.trim()))
-        })
-        .as_ref()
-        .is_some_and(|p| !p.as_os_str().is_empty())
+    let mut slot = CAPTURE_PATH.lock().expect("capture path mutex poisoned");
+    if !CAPTURE_ENV_SEEDED.swap(true, std::sync::atomic::Ordering::Relaxed) {
+        *slot = std::env::var("RIIR_REGIME_CAPTURE_OUT")
+            .ok()
+            .map(|p| std::path::PathBuf::from(p.trim()))
+            .filter(|p| !p.as_os_str().is_empty());
+    }
+    slot.as_ref().is_some_and(|p| !p.as_os_str().is_empty())
 }
 
-/// Test/runner setter — arms the capture at an explicit path (beats the env;
-/// first caller wins like every arm in this lane).
+/// Test/runner setter — arms the capture at an explicit path. Overwrites any
+/// prior value (env seed or earlier setter) and fences the env seed so a
+/// later `regime_capture_armed` read cannot clobber it (issue 1163).
 #[cfg(feature = "cubecl_runtime")]
 pub fn set_regime_capture_path(path: &str) {
-    let _ = CAPTURE_PATH.set(Some(std::path::PathBuf::from(path)));
+    *CAPTURE_PATH.lock().expect("capture path mutex poisoned") =
+        Some(std::path::PathBuf::from(path));
+    CAPTURE_ENV_SEEDED.store(true, std::sync::atomic::Ordering::Relaxed);
 }
 
 /// The runner names each item's rows (the freeze groups by it).
@@ -797,27 +825,58 @@ pub fn set_regime_capture_tag(tag: &str) {
     feature = "ternary_attention_batched_prefill"
 ))]
 pub(crate) fn regime_capture_append(prompt_len: usize, p: usize, features: &[f32]) {
-    let Some(path) = CAPTURE_PATH.get().and_then(|o| o.as_ref()) else {
+    let path = CAPTURE_PATH
+        .lock()
+        .expect("capture path mutex poisoned")
+        .clone();
+    let Some(path) = path else {
         return;
     };
     let tag = CAPTURE_TAG
         .lock()
         .expect("capture tag mutex poisoned")
         .clone();
+    // Issue 1163: the parent dir is ensured per append — a missing dir was a
+    // SECOND silent zero-row signature (open Err swallowed, counter never
+    // moved). Calibration-lane rate: the syscall cost is noise.
+    if let Some(parent) = path.parent()
+        && !parent.as_os_str().is_empty()
+    {
+        let _ = std::fs::create_dir_all(parent);
+    }
     let row = serde_json::json!({
         "tag": tag,
         "prompt_len": prompt_len,
         "p": p,
         "features": features,
     });
-    if let Ok(mut f) = std::fs::OpenOptions::new()
+    match std::fs::OpenOptions::new()
         .create(true)
         .append(true)
-        .open(path)
+        .open(&path)
     {
-        use std::io::Write;
-        let _ = writeln!(f, "{row}");
-        REGIME_CAPTURE_ROWS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        Ok(mut f) => {
+            use std::io::Write;
+            match writeln!(f, "{row}") {
+                Ok(()) => {
+                    REGIME_CAPTURE_ROWS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                }
+                Err(e) => {
+                    regime_capture_write_failed();
+                    eprintln!(
+                        "[regime-capture] append write failed ({}): {e}",
+                        path.display()
+                    );
+                }
+            }
+        }
+        Err(e) => {
+            regime_capture_write_failed();
+            eprintln!(
+                "[regime-capture] append open failed ({}): {e}",
+                path.display()
+            );
+        }
     }
 }
 
@@ -825,6 +884,28 @@ pub(crate) fn regime_capture_append(prompt_len: usize, p: usize, features: &[f32
 /// wrote nothing must never freeze).
 pub fn regime_capture_row_count() -> usize {
     REGIME_CAPTURE_ROWS.load(std::sync::atomic::Ordering::Relaxed)
+}
+
+/// Named capture write failures (open or writeln) this process — a dump with
+/// failures > 0 is incomplete, never a green freeze (issue 1163).
+pub fn regime_capture_write_failures() -> usize {
+    REGIME_CAPTURE_WRITE_FAILS.load(std::sync::atomic::Ordering::Relaxed)
+}
+
+/// Record one boundary-read failure (the GPU half of the seam, issue 1163).
+pub(crate) fn regime_capture_write_failed() {
+    REGIME_CAPTURE_WRITE_FAILS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+}
+
+/// Boundary read failures this process — the runner asserts 0 on a green
+/// dump (issue 1163: the read arm was silent, so a failed read read as
+/// "seam never armed" three hours later).
+pub fn regime_capture_read_failures() -> usize {
+    REGIME_CAPTURE_READ_FAILS.load(std::sync::atomic::Ordering::Relaxed)
+}
+
+pub(crate) fn regime_capture_read_failed() {
+    REGIME_CAPTURE_READ_FAILS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
 }
 
 // ---------------------------------------------------------------------------
@@ -1211,5 +1292,84 @@ mod tests {
             freeze_row("code", &[0.0, 0.0, 0.0]),
         ];
         assert!(compute_centroids(&odd, 1.0, 0.1).is_err());
+    }
+
+    // -- capture seam (issue 1163) ------------------------------------------
+    //
+    // The two tests below are MUTUALLY EXCLUSIVE by cfg on purpose: both
+    // drive the process-global capture statics, so they must never coexist
+    // in one test binary (parallel test threads would interleave their
+    // armed/set sequences). The triple-gated one carries the full seam
+    // regression at the posture the dump runs; the slim one keeps the
+    // setter-overrides-disarmed-warmup regression alive at weaker postures.
+
+    /// Issue 1163 regression: a disarmed warmup (the first `armed()` read
+    /// seeds None from an unset env) must NOT swallow a later setter — the
+    /// old `OnceLock<Option<_>>` did exactly that and the dump read zero rows
+    /// for three hours.
+    #[cfg(all(
+        feature = "cubecl_runtime",
+        not(all(
+            feature = "ternary_gemm_batched",
+            feature = "ternary_attention_batched_prefill"
+        ))
+    ))]
+    #[test]
+    fn capture_setter_overrides_disarmed_warmup_init() {
+        // Warmup posture: first read seeds the slot (env unset in tests →
+        // disarmed), exactly what the dump runner's warmup does.
+        assert!(!regime_capture_armed(), "tests run with no capture env");
+        // The runner's post-warmup arm — previously a swallowed OnceLock no-op.
+        set_regime_capture_path("/tmp/regime_capture_regression.jsonl");
+        assert!(regime_capture_armed(), "setter must override a disarmed seed");
+        // Restore the pristine state for any later reader (slot disarmed,
+        // seed flag reset — no re-read that would re-prime the flag).
+        *CAPTURE_PATH.lock().expect("capture path mutex poisoned") = None;
+        CAPTURE_ENV_SEEDED.store(false, std::sync::atomic::Ordering::Relaxed);
+        assert!(CAPTURE_PATH.lock().expect("capture path mutex poisoned").is_none());
+    }
+
+    /// Issue 1163 full-seam regression at the dump posture: arm after a
+    /// disarmed read, append lands a row on disk, the counters reconcile,
+    /// and a missing parent dir is self-healed (the second silent zero-row
+    /// signature) instead of dropped.
+    #[cfg(all(
+        feature = "cubecl_runtime",
+        feature = "ternary_gemm_batched",
+        feature = "ternary_attention_batched_prefill"
+    ))]
+    #[test]
+    fn capture_seam_end_to_end_after_disarmed_warmup() {
+        // Compile-time posture gate: the test only exists at the capture
+        // posture, and this pins that invariant against cfg drift.
+        const { assert!(REGIME_CAPTURE_COMPILED); }
+        // Warmup posture: first read seeds the slot disarmed (env unset).
+        assert!(!regime_capture_armed(), "tests run with no capture env");
+        // pid-scoped path under a MISSING parent dir — the open would have
+        // been swallowed silently before the fix.
+        let dir = std::env::temp_dir().join(format!(
+            "regime_capture_regression_{}",
+            std::process::id()
+        ));
+        let path = dir.join("rows.jsonl");
+        set_regime_capture_path(&path.to_string_lossy());
+        assert!(regime_capture_armed(), "setter must override a disarmed seed");
+
+        let before = regime_capture_row_count();
+        let fails_before = regime_capture_write_failures();
+        set_regime_capture_tag("regression");
+        regime_capture_append(600, 512, &[1.0, 2.0, 3.0]);
+        assert_eq!(regime_capture_row_count(), before + 1, "row must count");
+        assert_eq!(regime_capture_write_failures(), fails_before);
+        let text = std::fs::read_to_string(&path).expect("row landed on disk");
+        assert_eq!(text.lines().count(), 1);
+        assert!(text.contains("\"regression\""));
+        assert!(text.contains("\"prompt_len\":600"));
+
+        // Restore pristine statics; the scratch dir is this test's own.
+        *CAPTURE_PATH.lock().expect("capture path mutex poisoned") = None;
+        CAPTURE_ENV_SEEDED.store(false, std::sync::atomic::Ordering::Relaxed);
+        let _ = std::fs::remove_dir_all(&dir);
+        assert!(!regime_capture_armed());
     }
 }

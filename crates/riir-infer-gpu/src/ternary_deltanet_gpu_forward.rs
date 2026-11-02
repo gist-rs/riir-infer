@@ -10375,10 +10375,29 @@ impl TernaryDeltanetGpuForward {
                     pool,
                 );
             }
-            if let Ok(bytes) = self.client.read_one(bnd) {
-                let gathered = f32::from_bytes(&bytes);
-                let feats = crate::regime_gate::boundary_pool(gathered, 2 * pool, n, pool);
-                crate::regime_gate::regime_capture_append(self.active_prefill_len, p, &feats);
+            // Issue 1163: the read arm was silent — a failed read read as
+            // "seam never armed" three hours later. One sync-fenced retry
+            // (the gather launch may not have drained), then a NAMED failure
+            // with the counter the runner asserts on.
+            let read = match self.client.read_one(bnd.clone()) {
+                Ok(bytes) => Ok(bytes),
+                Err(_) => {
+                    pollster::block_on(self.client.sync()).ok();
+                    self.client.read_one(bnd)
+                }
+            };
+            match read {
+                Ok(bytes) => {
+                    let gathered = f32::from_bytes(&bytes);
+                    let feats = crate::regime_gate::boundary_pool(gathered, 2 * pool, n, pool);
+                    crate::regime_gate::regime_capture_append(self.active_prefill_len, p, &feats);
+                }
+                Err(e) => {
+                    crate::regime_gate::regime_capture_read_failed();
+                    eprintln!(
+                        "[regime-capture] boundary read_one failed at p{p} pool {pool} after sync retry: {e:?}"
+                    );
+                }
             }
         }
 
