@@ -79,6 +79,16 @@ quantization and model architectures on top. From it (path deps
   / 1.310× @32K e2e with 0 perf-item flips — the win grows with P exactly as
   the stage decomposition predicted, 24.6%→39.3% attention share) is
   OPT-IN, not promoted: T3's per-family ΩMSR floors bind any default move.
+  The modelless regime gate (issue 1156 T4) rides the same lane: per-chunk
+  boundary-pool features → cosine to TWO FROZEN centroids (digest-pinned
+  sidecar pair,
+  `crates/riir-infer-gpu/tests/fixtures/regime_centroids.json` + BLAKE3,
+  calibrated gain 10.0 / margin 0.20, bench 933) → class → the manifest's
+  floors at the CURRENT length via `conservative_floor_for_len` /
+  `verify_posture_at_len`; AMBIGUOUS → max of both floors (fail-closed);
+  the gate REFUSES TO ARM without the verified pair — nothing derives a
+  centroid at runtime. Cell E of plan 625 (the gate's end-to-end value test)
+  is the remaining promotion gate.
 - **CPU references** — the reference paths the GPU kernels are validated
   against.
 
