@@ -60,10 +60,18 @@
 //!
 //! ## Posture (the repo's env-arm vocabulary)
 //!
-//! - `RIIR_PREFILL_SPARSE` = `1|on|true` arms the lane (exact-literal;
-//!   junk/unset = OFF — the Issue-750-T3 lossy law: opt-in, never default
-//!   without the GOAT).
-//! - `RIIR_PREFILL_SPARSE_TAU` f32 (default 0.9, clamped [0.5, 1.0]).
+//! - `RIIR_PREFILL_SPARSE` — **DEFAULT-ON since issue 1165** (bench 1157: Cell
+//!   C τ=0.85 cleared the pre-registered G2 bars at both league lengths with 0
+//!   argmax flips; Claude owner-proxy verdict AGREE): UNSET = ON at
+//!   `PREFILL_SPARSE_MIN_P` (16 384)+; the exact literal `0` DEMOTES to the
+//!   dense incumbent byte-identically (the demote-only env law). The legacy
+//!   promote literals (`1|on|true`) are accepted no-ops (already the default).
+//!   Below 16K the dense m32 incumbent serves — the bar was never measured
+//!   shorter, and the fixed pool/score/select cost would eat the win
+//!   (the verdict's condition 1).
+//! - `RIIR_PREFILL_SPARSE_TAU` f32 (**default 0.85** — the measured serving
+//!   posture; was 0.9, demoted at these shapes by bench 1157; clamped
+//!   [0.5, 1.0]).
 //! - `RIIR_PREFILL_SPARSE_SCORER` = `envelope` (protocol v2 DEFAULT) or the
 //!   exact literal `mean` (v1 demote); junk/unset → envelope.
 //! - `RIIR_PREFILL_SPARSE_DENSE_HEADS` (T5, Issue 1156) = a comma list of
@@ -79,9 +87,14 @@
 //!   manifest's floors. INERT until the freeze pass lands; a failed load
 //!   falls back to the plain arm (one loud line + a refusal counter).
 //! - Engagement (checked once per chunk at scratch-build):
-//!   `enabled && head_dim == 256 && active_prefill_len >= PREFILL_SPARSE_MIN_P`
+//!   `enabled && head_dim == 256 && active_prefill_len >= PREFILL_SPARSE_MIN_P && sparse_default_posture_verified()`
 //!   (the prompt-level gate — the Issue-782 lesson; `reset_state` zeroes
-//!   `active_prefill_len` so decode never misroutes).
+//!   `active_prefill_len` so decode never misroutes). The posture term is the
+//!   verdict's condition 2: at the FIRST engaged decision the build's
+//!   embedded, digest-pinned v2 ΩMSR manifest is loaded and `verify_posture`
+//!   runs for EVERY family at the default τ — any family refusing (or the
+//!   manifest failing its digest) = ONE loud line + a dense fallback for the
+//!   whole process + a refusal counter. Never silent, never a placeholder.
 //! - Launch counters (the vacuous-guard pattern): `sparse_pool_launch_count`
 //!   / `sparse_score_launch_count` / `sparse_select_launch_count` /
 //!   `sparse_attn_launch_count` — outputs are lossy, so ONLY the counters
@@ -152,15 +165,22 @@ static SPARSE_ATTN_LAUNCHES: std::sync::atomic::AtomicUsize =
 /// env-derived value IS the live value on that call (the Bench 805 protocol:
 /// no AtomicBool divergence between the env read and the live value).
 #[cfg(feature = "cubecl_runtime")]
+/// The demote grammar, pure for testing (env reads are box-state — the
+/// hermetic half): only the exact literal `0` demotes the promoted default;
+/// unset/junk/the legacy promote literals all ride the default (ON).
+#[cfg(feature = "cubecl_runtime")]
+fn sparse_env_demotes(raw: &str) -> bool {
+    matches!(raw.trim().to_lowercase().as_str(), "0")
+}
+
 pub fn prefill_sparse_enabled() -> bool {
-    let env_enabled = matches!(
-        std::env::var("RIIR_PREFILL_SPARSE")
-            .unwrap_or_default()
-            .trim()
-            .to_lowercase()
-            .as_str(),
-        "1" | "on" | "true",
-    );
+    // The promoted default (issue 1165, bench 1157 + the Claude AGREE verdict):
+    // UNSET = ON. The exact literal `0` demotes byte-identically to the dense
+    // incumbent (the demote-only env law); the legacy promote literals ride
+    // as accepted no-ops (already the default); junk = ON (only the exact
+    // demote literal means demote — a failed demote attempt must never be
+    // silently absorbed by a typo).
+    let env_enabled = !sparse_env_demotes(&std::env::var("RIIR_PREFILL_SPARSE").unwrap_or_default());
     if SPARSE_INITIALIZED
         .compare_exchange(
             false,
@@ -175,7 +195,9 @@ pub fn prefill_sparse_enabled() -> bool {
     SPARSE_ENABLED.load(std::sync::atomic::Ordering::Relaxed)
 }
 
-/// The selection mass threshold τ (default 0.9, clamped [0.5, 1.0]). τ = 1.0
+/// The selection mass threshold τ (**default 0.85** — the bench-1157 serving
+/// posture; was 0.9 and is demoted at the league shapes: it failed both G2
+/// bars while carrying the same quality read; clamped [0.5, 1.0]). τ = 1.0
 /// is the identity posture: every in-horizon block selected, the skip branch
 /// dead, outputs bit-identical to m32.
 #[cfg(feature = "cubecl_runtime")]
@@ -183,7 +205,7 @@ pub fn prefill_sparse_tau() -> f32 {
     let mut parsed = std::env::var("RIIR_PREFILL_SPARSE_TAU")
         .ok()
         .and_then(|s| s.trim().parse::<f32>().ok())
-        .map_or(0.9f32, |v| v.clamp(0.5, 1.0));
+        .map_or(0.85f32, |v| v.clamp(0.5, 1.0));
     let bits = parsed.to_bits();
     if SPARSE_TAU_BITS
         .compare_exchange(
@@ -410,8 +432,106 @@ pub fn set_prefill_sparse_tau(tau: f32) {
 /// gate. `head_dim == 256` is checked by the caller alongside the rest of the
 /// dispatch gates.
 #[cfg(feature = "cubecl_runtime")]
+/// The build's embedded v2 ΩMSR manifest + its digest sidecar, compiled in
+/// (issue 1165 P2: the default-on arm verifies its own floors at load — a
+/// missing/other manifest can never silently serve; the regime gate keeps its
+/// own env-path pair, this is the PLAIN arm's canonical floor set).
+#[cfg(feature = "cubecl_runtime")]
+const SPARSE_OMSR_MANIFEST_V2: &str =
+    include_str!("../tests/fixtures/sparse_omega_msr_manifest_v2.json");
+#[cfg(feature = "cubecl_runtime")]
+const SPARSE_OMSR_MANIFEST_V2_BLAKE3: &str =
+    include_str!("../tests/fixtures/sparse_omega_msr_manifest_v2.json.blake3");
+
+#[cfg(feature = "cubecl_runtime")]
+static SPARSE_POSTURE_STATE: std::sync::atomic::AtomicU8 =
+    std::sync::atomic::AtomicU8::new(0); // 0 uninit · 1 verified · 2 refused
+#[cfg(feature = "cubecl_runtime")]
+static SPARSE_POSTURE_REFUSALS: std::sync::atomic::AtomicU64 =
+    std::sync::atomic::AtomicU64::new(0);
+
+/// The default-posture verification (the verdict's condition 2, fail-safe):
+/// digest-check + parse the embedded manifest, then `verify_posture` EVERY
+/// family at the DEFAULT τ under the DEFAULT scorer — the default posture
+/// serves every family, so every family's floor must bless it. First caller
+/// wins (the posture protocol); a refusal is ONE loud line + dense for the
+/// whole process, counted so a refusal is never a silent zero.
+#[cfg(feature = "cubecl_runtime")]
+fn sparse_default_posture_state() -> u8 {
+    let cur = SPARSE_POSTURE_STATE.load(std::sync::atomic::Ordering::Relaxed);
+    if cur != 0 {
+        return cur;
+    }
+    let verdict = sparse_default_posture_verify();
+    let state = if verdict.is_ok() { 1u8 } else { 2u8 };
+    if SPARSE_POSTURE_STATE
+        .compare_exchange(
+            0,
+            state,
+            std::sync::atomic::Ordering::Relaxed,
+            std::sync::atomic::Ordering::Relaxed,
+        )
+        .is_ok()
+    {
+        if let Err(e) = verdict {
+            SPARSE_POSTURE_REFUSALS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            eprintln!(
+                "[sparse-prefill] DEFAULT POSTURE REFUSED: {e} — the arm falls back to \
+                 dense for this process (the demote literal `RIIR_PREFILL_SPARSE=0` \
+                 is the explicit form of the same posture)"
+            );
+        }
+    }
+    SPARSE_POSTURE_STATE.load(std::sync::atomic::Ordering::Relaxed)
+}
+
+#[cfg(feature = "cubecl_runtime")]
+fn sparse_default_posture_verify() -> Result<(), String> {
+    // The store reads are the only glue here; the pure core below is what
+    // tests pin (the τ/scorer stores are process-wide and tests mutate them
+    // in parallel — a store-reading test would race, the pure one cannot).
+    sparse_default_posture_verify_with(prefill_sparse_tau(), prefill_sparse_scorer())
+}
+
+/// The pure posture core: digest-check + parse + verify EVERY family at the
+/// given (τ, scorer). Hermetic — no process-state reads.
+#[cfg(feature = "cubecl_runtime")]
+fn sparse_default_posture_verify_with(tau: f32, scorer: SparseScorer) -> Result<(), String> {
+    let expected = SPARSE_OMSR_MANIFEST_V2_BLAKE3.trim();
+    let actual = crate::sparse_omega_msr::blake3_hex(SPARSE_OMSR_MANIFEST_V2.as_bytes());
+    if expected != actual {
+        return Err(format!(
+            "embedded v2 manifest digest mismatch: build const `{expected}` vs body `{actual}`"
+        ));
+    }
+    let manifest =
+        crate::sparse_omega_msr::parse_and_verify_body(SPARSE_OMSR_MANIFEST_V2.as_bytes())?;
+    for fam in &manifest.families {
+        crate::sparse_omega_msr::verify_posture(&manifest, &fam.family, tau, scorer)?;
+    }
+    Ok(())
+}
+
+/// Refusal count for the default-posture gate (the vacuous-guard pattern: a
+/// refusal that never increments was never reached).
+#[cfg(feature = "cubecl_runtime")]
+pub fn sparse_posture_refusal_count() -> u64 {
+    SPARSE_POSTURE_REFUSALS.load(std::sync::atomic::Ordering::Relaxed)
+}
+
+/// Test seam: reset the posture state so a test can re-verify under a
+/// different τ/scorer (the `set_prefill_sparse` precedent; never call in
+/// serving).
+#[cfg(feature = "cubecl_runtime")]
+pub fn reset_sparse_posture_for_test() {
+    SPARSE_POSTURE_STATE.store(0, std::sync::atomic::Ordering::Relaxed);
+    SPARSE_POSTURE_REFUSALS.store(0, std::sync::atomic::Ordering::Relaxed);
+}
+
 pub fn prefill_sparse_engaged(active_prefill_len: usize) -> bool {
-    prefill_sparse_enabled() && active_prefill_len >= PREFILL_SPARSE_MIN_P
+    prefill_sparse_enabled()
+        && active_prefill_len >= PREFILL_SPARSE_MIN_P
+        && sparse_default_posture_state() == 1
 }
 
 #[cfg(feature = "cubecl_runtime")]
@@ -2844,6 +2964,29 @@ mod tests {
         assert_eq!(prefill_sparse_tau(), 1.0, "τ clamps at the identity");
         set_prefill_sparse_tau(0.1);
         assert_eq!(prefill_sparse_tau(), 0.5, "τ clamps at the floor");
+
+        // Issue 1165: the demote grammar is EXACT-literal `0` — junk, unset,
+        // the legacy promote literals, and even `off`/`false` ride the
+        // promoted default (ON); only the exact literal demotes (a failed
+        // demote attempt must never be silently absorbed by a typo).
+        for (raw, demotes) in [
+            ("0", true),
+            (" 0 ", true),
+            ("OFF", false),
+            ("false", false),
+            ("", false),
+            ("1", false),
+            ("on", false),
+            ("true", false),
+            ("junk", false),
+            ("00", false),
+        ] {
+            assert_eq!(
+                sparse_env_demotes(raw),
+                demotes,
+                "demote grammar for {raw:?}"
+            );
+        }
         set_prefill_sparse_tau(0.9);
         assert_eq!(prefill_sparse_tau(), 0.9);
         set_prefill_sparse(false);
@@ -2862,6 +3005,31 @@ mod tests {
         assert_eq!(SparseScorer::parse("junk"), None);
         assert_eq!(SparseScorer::Envelope.as_str(), "envelope");
         assert_eq!(SparseScorer::Mean.as_u32(), 0);
+    }
+
+    /// Issue 1165 P2: the embedded, digest-pinned v2 manifest verifies at the
+    /// bench-1157/AGREE serving posture (τ = 0.85, envelope) for EVERY family
+    /// — the pure core, hermetic against the process-wide τ/scorer stores
+    /// other tests mutate in parallel (the first version of this test raced
+    /// `sparse_env_grammar`'s τ mutations and flaked: 0.5 < the 0.85
+    /// continuation@32k floor is a LEGITIMATE refusal).
+    #[test]
+    fn default_posture_embedded_manifest_verifies() {
+        reset_sparse_posture_for_test();
+        let verdict =
+            sparse_default_posture_verify_with(0.85, SparseScorer::Envelope);
+        assert!(verdict.is_ok(), "embedded v2 manifest refused: {verdict:?}");
+        // The identity posture trivially blesses (the τ=1.0 contract) — the
+        // anchor side of the same gate.
+        assert!(sparse_default_posture_verify_with(1.0, SparseScorer::Envelope).is_ok());
+        // And the demote-side of the same core: the MEAN scorer's manifest is
+        // v1 — the v2 body must refuse it (a floor never blesses the other
+        // scorer).
+        assert!(sparse_default_posture_verify_with(0.85, SparseScorer::Mean).is_err());
+        // NOTE: the process posture STATE is deliberately not asserted here —
+        // parallel tests legitimately latch it through the production
+        // `prefill_sparse_engaged` path (process-wide by design).
+        reset_sparse_posture_for_test();
     }
 
     // -- T5 pure helpers ------------------------------------------------------
