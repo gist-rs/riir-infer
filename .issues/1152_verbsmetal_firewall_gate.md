@@ -1,8 +1,9 @@
 # Issue 1152: verbs_metal end-to-end is gated by amo's macOS Application Firewall (unsigned-bin SYN drop)
 
 **Status:** OPEN — mechanism fully measured 2026-10-29 ~00:2xZ (m3 idle lane, read-only ssh probes; no box writes, the amo⇄bmo lane belongs to the live T3.5 session): the posture row below pins amo's exact fw state, the differential is fully explained (Apple-signed builtins auto-allowed + past GUI accepts per-binary-path), and remedy 3 is upgraded to PREFERRED — the plan-623 wire-cell rig ITSELF already runs tail-on-bmo/head-on-amo live (`plan623_wire_cell.sh` L34–49: `--role tail --listen 192.168.10.2:$PORT` on bmo, `--connect` from amo), so the verbs_metal rows can ride the same posture with ZERO fw interaction. The one-line remedies for the owner are unchanged.
-**Claimed:** zed-m3-idle1029a, 1793264000, expires 2026-10-31T01:30:00+00:00
-  — the remedy-3 bmo-target rows: T3.5 lane (zed-m3-i971-housekeeping) handed the rows over unclaimed 2026-10-29 ~01:1xZ; deliverable = a Bench-928 addendum, issue STAYS OPEN for the owner gate
+**Claimed:** zed-m3-i1152-heal1102, 1793590106, expires 2026-11-04T03:28:00+00:00
+  — re-claim: prior lease zed-m3-idle1029a EXPIRED 2026-10-31T01:30Z with the runway prepped but unrun; the heal signal fired 2026-11-02 (amo power-cycled by the owner after a self-shutdown)
+  — earlier: the remedy-3 bmo-target rows were handed over unclaimed by T3.5 (zed-m3-i971-housekeeping) 2026-10-29 ~01:1xZ; deliverable = a Bench-928 addendum, issue STAYS OPEN for the owner gate
 **Date:** 2026-10-29
 **Lane:** Plan 623 T3.2's MTLBuffer leg ([Bench 928](../.benchmarks/928_plan623_t32_rkey_mtu.md)) — the code is landed (`570ee79`, `examples/verbs_metal.rs`, feature `rdma_metal`); the measurement is blocked by a box gate, not the lane.
 
@@ -62,3 +63,16 @@ verbs_ping amo→bmo re-run post-hardening (`d4604b0`/`874330c` — amo checkout
 ## Runway prepped (2026-10-29 ~11:0x local — the re-run needs NO build)
 
 Both boxes' `/tmp/vm_target` verbs binaries rebuilt fresh at `76564d9` (amo 10:55, bmo 11:01; bmo's checkout fast-forwarded `efeb5273` → `76564d9` by fetching from amo's checkout over the bridge — bmo has no GitHub ssh key, provenance disclosed). The plane-heal re-run is now: one `verbs_ping` canary (consequence-1), then the remedy-3 rows directly. Claim stays live (expires 2026-10-31T01:30Z) for that re-run.
+
+## Heal signal + re-check (2026-11-02 ~10:2x local, zed-m3-i1152-heal1102 — claim above)
+
+amo self-shutdown yesterday; owner power-cycled it ON SITE 2026-11-02 ~10:1x — the box reboot is this issue's named heal signal. Read-only re-check over Tailscale ssh:
+
+- **bridge0 UP/active** on amo (`192.168.10.1`, status active, 6 members) — TB link re-established by the boot.
+- **Firewall still ENABLED** (state=1) — persists across boot as expected; the acceptance clause still needs the row.
+- **`/tmp/vm_target` GONE on BOTH boxes** (runway binaries did not survive: boot wipe on amo, nightly 3-day cleanup on bmo, up 22.5 h) — the re-run needs a REBUILD (cold, not the 12 s warm path).
+- **amo checkout clean at `0a14999`** (develop advanced past `76564d9`; verbs surface unchanged per the log — the built posture gets recorded in the addendum).
+- **bmo checkout is on branch `timer-build` at `d92df67` + untracked `scripts/.bmo_local_bak/`** — SIBLING WIP, untouched by this lane. bmo-side bytes ship from the amo build over the bridge (both M5 Ultra, same triple; scp, disclosed here).
+- Rigs QUIET both sides (amo 3/30, bmo 5.1/30) — build + seconds-class probe safe.
+
+Plan: rebuild on amo at `0a14999` (`CARGO_TARGET_DIR=/tmp/vm_target`), scp both verbs binaries to bmo, then the runway sequence: one verbs_ping canary, then the remedy-3 rows; the amo-listener acceptance row after the owner lifts the fw gate.
