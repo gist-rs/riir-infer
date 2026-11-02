@@ -1,0 +1,165 @@
+   Compiling serde v1.0.229
+   Compiling zerocopy v0.8.57
+   Compiling darling_macro v0.21.3
+   Compiling darling_macro v0.23.0
+   Compiling derive_more v2.1.1
+   Compiling naga-types v30.0.1
+   Compiling objc2-quartz-core v0.3.2
+   Compiling cobs v0.3.0
+   Compiling gpu-allocator v0.28.0
+   Compiling num-derive v0.4.2
+   Compiling sentencepiece-sys v0.13.2
+   Compiling regex v1.13.1
+   Compiling prost v0.14.4
+   Compiling riir-infer-gpu v0.1.0 (/Users/katopz/git/riir-infer-i1166/crates/riir-infer-gpu)
+   Compiling metal v0.31.0
+   Compiling wgpu-types v30.0.1
+   Compiling darling v0.21.3
+   Compiling darling v0.23.0
+   Compiling raw-window-metal v1.1.0
+   Compiling sanitize-filename v0.6.0
+   Compiling cubecl-macros-internal v0.11.0-pre.2
+   Compiling enumset_derive v0.15.0
+   Compiling smallvec v1.16.1
+   Compiling portable-atomic v1.15.0
+   Compiling internment v0.8.6
+   Compiling postcard v1.1.3
+   Compiling parking_lot_core v0.9.12
+   Compiling cubecl-zspace v0.11.0-pre.2
+   Compiling parking_lot v0.12.5
+   Compiling enumset v1.1.14
+   Compiling half v2.7.1
+   Compiling ciborium-ll v0.2.2
+   Compiling ahash v0.8.12
+   Compiling ciborium v0.2.2
+   Compiling katgpt-types v0.2.1 (/Users/katopz/git/katgpt-rs/crates/katgpt-types)
+   Compiling float8 v0.7.0
+   Compiling naga v30.0.1
+   Compiling cubecl-environment v0.11.0-pre.2
+   Compiling cubecl-common v0.11.0-pre.2 (/Users/katopz/git/riir-infer-i1166/vendor/cubecl-common-0.11.0-pre.2)
+   Compiling katgpt-micro-belief v0.2.1 (/Users/katopz/git/katgpt-rs/crates/katgpt-micro-belief)
+   Compiling katgpt-hla v0.1.3 (/Users/katopz/git/katgpt-rs/crates/katgpt-hla)
+   Compiling katgpt-sense v0.2.1 (/Users/katopz/git/katgpt-rs/crates/katgpt-sense)
+   Compiling katgpt-personality v0.1.3 (/Users/katopz/git/katgpt-rs/crates/katgpt-personality)
+   Compiling katgpt-core v0.4.1 (/Users/katopz/git/katgpt-rs/crates/katgpt-core)
+   Compiling cubecl-macros v0.11.0-pre.2
+   Compiling cubecl-ir v0.11.0-pre.2
+   Compiling katgpt-transformer v0.1.0 (/Users/katopz/git/katgpt-rs/crates/katgpt-transformer)
+   Compiling cubecl-runtime v0.11.0-pre.2 (/Users/katopz/git/riir-infer-i1166/vendor/cubecl-runtime-0.11.0-pre.2)
+   Compiling katgpt-speculative v0.1.0 (/Users/katopz/git/katgpt-rs/crates/katgpt-speculative)
+   Compiling katgpt-pruners v0.1.0 (/Users/katopz/git/katgpt-rs/crates/katgpt-pruners)
+   Compiling katgpt-forward v0.1.0 (/Users/katopz/git/katgpt-rs/crates/katgpt-forward)
+   Compiling wgpu-naga-bridge v30.0.1
+   Compiling wgpu-hal v30.0.0 (/Users/katopz/git/riir-infer-i1166/vendor/wgpu-hal-30.0.0)
+   Compiling cubecl-core v0.11.0-pre.2
+   Compiling sentencepiece v0.13.2
+   Compiling wgpu-core-deps-apple v30.0.1
+   Compiling wgpu-core v30.0.1
+   Compiling riir-infer-core v0.1.1 (/Users/katopz/git/riir-infer-i1166)
+   Compiling cubecl-opt v0.11.0-pre.2
+   Compiling cubecl-std v0.11.0-pre.2
+   Compiling cubecl-cpp v0.11.0-pre.2
+   Compiling wgpu v30.0.1
+   Compiling cubecl-wgpu v0.11.0-pre.2 (/Users/katopz/git/riir-infer-i1166/vendor/cubecl-wgpu-0.11.0-pre.2)
+   Compiling cubecl v0.11.0-pre.2
+    Finished `release` profile [optimized] target(s) in 44.54s
+     Running tests/issue1166_tile_geometry_sweep.rs (/tmp/i1166/release/deps/issue1166_tile_geometry_sweep-017a25726d98830d)
+
+running 2 tests
+test g1_sweep_configs_match_cpu_reference ...   G1 ktile64_64x128x4sg   PASS  worst_rel=0.000e0 at []
+  G1 ktile128_64x128x4sg  PASS  worst_rel=0.000e0 at []
+  G1 ktile64_64x256x4sg   PASS  worst_rel=0.000e0 at []
+  G1 ktile64_128x128x4sg  PASS  worst_rel=0.000e0 at []
+  G1 ktile64_64x128x8sg   PASS  worst_rel=0.000e0 at []
+  G1 ktile64_64x128x2sg   PASS  worst_rel=0.000e0 at []
+  G1 k32_64x128x4sg       PASS  worst_rel=0.000e0 at []
+ok
+test g2_ktile64_composed_geometry_sweep ... PROVENANCE (start): loadavg1m=3.19
+
+G2 sweep: 7 compiled config(s) · rounds=4 launches=2 · reference = ktile64_64x128x4sg
+
+── ffn_gate/up (m=17408 n=5120) P=512 — incumbent ktile64_64x128x4sg 5.440 ms/launch ──
+  ktile64_64x128x4sg       5.440 ms/launch   vs incumbent  1.000×
+  ktile128_64x128x4sg      5.434 ms/launch   vs incumbent  1.001×
+  ktile64_64x256x4sg       9.726 ms/launch   vs incumbent  0.559×
+  ktile64_128x128x4sg      8.829 ms/launch   vs incumbent  0.616×
+  ktile64_64x128x8sg       5.449 ms/launch   vs incumbent  0.998×
+  ktile64_64x128x2sg       8.862 ms/launch   vs incumbent  0.614×
+  k32_64x128x4sg           5.471 ms/launch   vs incumbent  0.994×
+
+── ffn_gate/up (m=17408 n=5120) P=2048 — incumbent ktile64_64x128x4sg 19.963 ms/launch ──
+  ktile64_64x128x4sg      19.963 ms/launch   vs incumbent  1.000×
+  ktile128_64x128x4sg     19.678 ms/launch   vs incumbent  1.015×
+  ktile64_64x256x4sg      31.478 ms/launch   vs incumbent  0.634×
+  ktile64_128x128x4sg     29.447 ms/launch   vs incumbent  0.678×
+  ktile64_64x128x8sg      20.057 ms/launch   vs incumbent  0.995×
+  ktile64_64x128x2sg      29.784 ms/launch   vs incumbent  0.670×
+  k32_64x128x4sg          20.081 ms/launch   vs incumbent  0.994×
+
+── ffn_gate/up (m=17408 n=5120) P=4096 — incumbent ktile64_64x128x4sg 39.324 ms/launch ──
+  ktile64_64x128x4sg      39.324 ms/launch   vs incumbent  1.000×
+  ktile128_64x128x4sg     39.196 ms/launch   vs incumbent  1.003×
+  ktile64_64x256x4sg      62.715 ms/launch   vs incumbent  0.627×
+  ktile64_128x128x4sg     58.758 ms/launch   vs incumbent  0.669×
+  ktile64_64x128x8sg      39.722 ms/launch   vs incumbent  0.990×
+  ktile64_64x128x2sg      59.908 ms/launch   vs incumbent  0.656×
+  k32_64x128x4sg          39.686 ms/launch   vs incumbent  0.991×
+
+── ffn_down (m=5120 n=17408) P=512 — incumbent ktile64_64x128x4sg 7.188 ms/launch ──
+  ktile64_64x128x4sg       7.188 ms/launch   vs incumbent  1.000×
+  ktile128_64x128x4sg      7.196 ms/launch   vs incumbent  0.999×
+  ktile64_64x256x4sg      11.669 ms/launch   vs incumbent  0.616×
+  ktile64_128x128x4sg      9.769 ms/launch   vs incumbent  0.736×
+  ktile64_64x128x8sg       7.117 ms/launch   vs incumbent  1.010×
+  ktile64_64x128x2sg       9.711 ms/launch   vs incumbent  0.740×
+  k32_64x128x4sg           7.301 ms/launch   vs incumbent  0.984×
+
+── ffn_down (m=5120 n=17408) P=2048 — incumbent ktile64_64x128x4sg 24.594 ms/launch ──
+  ktile64_64x128x4sg      24.594 ms/launch   vs incumbent  1.000×
+  ktile128_64x128x4sg     24.592 ms/launch   vs incumbent  1.000×
+  ktile64_64x256x4sg      39.575 ms/launch   vs incumbent  0.621×
+  ktile64_128x128x4sg     36.859 ms/launch   vs incumbent  0.667×
+  ktile64_64x128x8sg      24.815 ms/launch   vs incumbent  0.991×
+  ktile64_64x128x2sg      36.665 ms/launch   vs incumbent  0.671×
+  k32_64x128x4sg          24.827 ms/launch   vs incumbent  0.991×
+
+── ffn_down (m=5120 n=17408) P=4096 — incumbent ktile64_64x128x4sg 48.233 ms/launch ──
+  ktile64_64x128x4sg      48.233 ms/launch   vs incumbent  1.000×
+  ktile128_64x128x4sg     47.793 ms/launch   vs incumbent  1.009×
+  ktile64_64x256x4sg      85.138 ms/launch   vs incumbent  0.567×
+  ktile64_128x128x4sg     76.992 ms/launch   vs incumbent  0.626×
+  ktile64_64x128x8sg      48.488 ms/launch   vs incumbent  0.995×
+  ktile64_64x128x2sg      74.834 ms/launch   vs incumbent  0.645×
+  k32_64x128x4sg          48.433 ms/launch   vs incumbent  0.996×
+
+── attn_q (m=12288 n=5120) P=512 — incumbent ktile64_64x128x4sg 4.091 ms/launch ──
+  ktile64_64x128x4sg       4.091 ms/launch   vs incumbent  1.000×
+  ktile128_64x128x4sg      4.081 ms/launch   vs incumbent  1.003×
+  ktile64_64x256x4sg       7.030 ms/launch   vs incumbent  0.582×
+  ktile64_128x128x4sg      6.456 ms/launch   vs incumbent  0.634×
+  ktile64_64x128x8sg       4.099 ms/launch   vs incumbent  0.998×
+  ktile64_64x128x2sg       6.228 ms/launch   vs incumbent  0.657×
+  k32_64x128x4sg           4.137 ms/launch   vs incumbent  0.989×
+
+── attn_q (m=12288 n=5120) P=2048 — incumbent ktile64_64x128x4sg 14.799 ms/launch ──
+  ktile64_64x128x4sg      14.799 ms/launch   vs incumbent  1.000×
+  ktile128_64x128x4sg     14.725 ms/launch   vs incumbent  1.005×
+  ktile64_64x256x4sg      24.910 ms/launch   vs incumbent  0.594×
+  ktile64_128x128x4sg     23.460 ms/launch   vs incumbent  0.631×
+  ktile64_64x128x8sg      14.894 ms/launch   vs incumbent  0.994×
+  ktile64_64x128x2sg      22.773 ms/launch   vs incumbent  0.650×
+  k32_64x128x4sg          14.856 ms/launch   vs incumbent  0.996×
+
+── attn_q (m=12288 n=5120) P=4096 — incumbent ktile64_64x128x4sg 29.176 ms/launch ──
+  ktile64_64x128x4sg      29.176 ms/launch   vs incumbent  1.000×
+  ktile128_64x128x4sg     29.240 ms/launch   vs incumbent  0.998×
+  ktile64_64x256x4sg      46.734 ms/launch   vs incumbent  0.624×
+  ktile64_128x128x4sg     43.713 ms/launch   vs incumbent  0.667×
+  ktile64_64x128x8sg      29.365 ms/launch   vs incumbent  0.994×
+  ktile64_64x128x2sg      44.182 ms/launch   vs incumbent  0.660×
+  k32_64x128x4sg          29.343 ms/launch   vs incumbent  0.994×
+PROVENANCE (end): loadavg1m=2.63
+ok
+
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 18.77s
+
