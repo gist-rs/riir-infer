@@ -2,6 +2,7 @@
 
 **Status:** Open — POC/evaluation task; profile first; no serving-path change until a quality-gated arm wins its gate.
 **Claimed:** zed-amo-i638t1b, 1793464322, expires 2026-11-02T18:32:02+00:00
+Claim note (continuation 2026-11-02 ~15:15+07, zed-amo-i638t1c-lineage thread zed-7710a782 — same lease, same scope): the T6 harness LANDED (riir-ai `c608c2eaf` — `crates/riir-gpu/tests/bench_1156_t6_league_cells.rs`, six arms A/anchor/B/C/D/E interleaved per round at 16K+32K, counter engagement proofs, G1 anchor fail-fast, pre-registered G2 bars; lib re-assertion green at HEAD `3f6353c` — 304/0 incl. the tau1.0 + T5 mode anchors). Cells LAUNCHED detached on amo 15:15+07 under the verified-idle protocol (preflight PROVENANCE: power=AC load=1.97 powermode=0(auto)); the CUDA half records N/A per the runbook's lane scoping (the arm is wired in the wgpu/CubeCL forward only — routing proof = the sparse counters in the harness output). Compile-drift finding while landing: `bench_734_ffn_block_e2e` + `bench_734_prefill_full_e2e` FAIL to compile at `--features ternary_gemm_batched --tests` (imports `set_prefill_use_cuda_ffn` / `set_prefill_use_cuda_mma` — renamed away; NOT fixed blind, owed a semantic rename pass).
 
 **Source:** riir-infer Research 019 (Elastic Attention, arXiv:2601.17367) Track A. Training-recipe half lives in riir-train Plan 476 (SECONDARY).
 
