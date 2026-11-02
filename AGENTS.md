@@ -50,6 +50,7 @@ flipping.
 | Headless stability-depth readout (Issue 1106) — rides `twt_profile` | calibration-only, never serving | reflex Issue 094 |
 | TOKENGATE (Plan 622) — feature `tokengate` | opt-in; full-overlay promotion REFUSED (T3.4) | bench 888/889/891 |
 | Scale-invariant attention — feature `scale_invariant_attn` | opt-in | katgpt-rs Plan 622 |
+| Issue 1146 dist-prefill family (Bench 914–925, 934) — tensor zero-copy GEMM `54f0dce` (`RIIR_DIST_METAL_TENSOR=0` demotes), H4 dequant `29be9a0` (bit-exact, substrate default), relaxed matmul2d (`RIIR_DIST_METAL_TENSOR_RELAXED=0` demotes, dist-scoped lossy), matmul2d flash-attention `672b29c` (`RIIR_DIST_PREFILL_ATTN_TENSOR=0` demotes, dist-scoped lossy — prefill-only by construction) | DEFAULT-ON (920/921/923 dist-scoped; attn 934) | `.benchmarks/920…925`, `.benchmarks/934_issue1146_attn_matmul2d_ab_pp32k_settle.md`; stacked = 0.76/0.93/1.00× llama.cpp (pp512/pp4096/pp32k) |
 | Multi-host pipeline (plan 623) — feature `multi_host`; RDMA verbs `rdma`, `rdma_metal`; `RIIR_DIST_ASYNC_FINISH` promote-only; `RIIR_DIST_STEP_TIMING` | opt-in | Bench 927/928/929; issue 1152 |
 
 **Plan-623 wire laws (measured):** recv rings ≤ 3 MB or runtime-probed,
