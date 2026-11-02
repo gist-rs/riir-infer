@@ -1,6 +1,7 @@
 # Issue 1166: prefill matmul2d tile geometry at prefill shapes — the residual ~1.07× at pp4096 / ~1.31× at pp512 (post-1146 stack)
 
 **Status:** OPEN — filed from the closed Issue 1146 arc (HISTORY.md 2026-11-02). The 1146 rungs closed the 6–8× gap to 0.76×/0.93×/1.00× (pp512/pp4096/pp32768); what remains is INSIDE the tensor GEMM kernel, sized but not attacked
+**Claimed:** zed-amo-1166-tiles, 1793689200, expires 2026-11-04T10:00:00Z — starting rung 1 (static tile-geometry read; bmo is the bench box once its riir-ai tenant clears)
 **Date:** 2026-11-02
 **Found by:** [`.benchmarks/934_issue1146_attn_matmul2d_ab_pp32k_settle.md`](../.benchmarks/934_issue1146_attn_matmul2d_ab_pp32k_settle.md) verdict §2 + [`.benchmarks/935_issue1146_2box_tb5_width_leg.md`](../.benchmarks/935_issue1146_2box_tb5_width_leg.md)
 **Session:** zed-amo-1146-finish, 1793636000
