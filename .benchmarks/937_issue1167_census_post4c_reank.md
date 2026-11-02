@@ -44,9 +44,21 @@ GEMM-class total: FFN 286.96 + GDN GEMMs ≈107.3 (deltanet Δ minus its measure
 4. **pp512 fixed-cost slice quantified**: ~33 ms/frame of small stages ≈ the 5.0% wide-chunk per-token gain — a config-class rung (frame overlap / chunk-width policy), bounded, below kernel work in priority.
 5. **Rung C (H5 cooperative-tensor) re-scoped**: the ATTENTION variant is dead (9% share). The GEMM-staging variant (dequant→register, kill the per-K-tile barriers) stays unpriced — the census cannot separate barrier/staging cost inside the GEMM strips; it needs its own cell before any kernel is written.
 
-## Fused-prework cell (attempt 5, `01a19d26-c556`)
+## Fused-prework cell (attempt 5, `01a19d26-c556`) — **VERDICT: PASS, joined**
 
-Census re-run with `deltanet_prework_fused` added to the feature set (the promotion's own posture: runtime default ON on macOS, `p=512 ≤ 65535`, production dims supported per Bench 024 G1). Expected: the `-gdn_prework` strip collapses toward ~2–3 ms (the stage A/B's 9.13× @P=4096), ALL wall drops ~10–12%, bit-identity anchors hold (the kernel is bit-identical by construction with in-module + FNV pins). Result recorded here on landing; a green cell is the serving-posture confirmation the production-row join needs.
+Census re-run with `deltanet_prework_fused` added (the promotion's own posture: runtime default ON on macOS, `p=512 ≤ 65535`, production dims supported per Bench 024 G1). 374.66 s, exit 0, the census's bit-identity anchors HELD (ALL×3 logits bit-exact — the kernel is bit-identical by construction with in-module pins). **ALL wall 565.03 → 500.86 ms/frame (−11.4% e2e)**; the isolation is clean:
+
+| strip | chunked (937) | fused (this cell) | verdict |
+|---|---:|---:|---|
+| -gdn_prework Δ | 68.72 | **4.62** | **14.9×** on the strip (the stage A/B's 9.13× @P=4096, better at 512 — dispatch-overhead-bound) |
+| -attention Δ | 50.62 | 51.48 | unchanged (noise) — clean isolation |
+| -ffn Δ | 286.96 | 281.16 | ~noise — clean isolation |
+| -deltanet coarse Δ | 222.33 | 158.44 | −28.7% (prework rides inside) |
+| wide-chunk ms/token | 1.104 | **0.978** | −11.4%, consistent |
+
+G-C1 additivity residue 1.03. Side observation: `gdn_out_proj` submission wall 1841.75 → 216.72 ms/frame-total — the chunked chain's queue backpressure, gone (the instrument's own warning that submission walls are not exec time, demonstrated).
+
+**Landed:** `deltanet_prework_fused` joined `riir-infer-gpu/production` (the row + the `PRODUCTION_RUNGS` data mirror, one commit; the row stays comment-free — the manifest parser bracket-slices it verbatim and an in-row comment parses as rungs, caught by the both-directions test on first try). The dist posture floor (`gpu_production_posture_floor`) passes; the fused module's bit-identity tests pass at the joined posture; clippy clean on the dist gpu posture (2 pre-existing dead-code warnings in `regime_gate.rs` from the i1163 lane, untouched here).
 
 ## Bmo rig-job lessons (2026-11-02, three, all in `.issues/1167`)
 

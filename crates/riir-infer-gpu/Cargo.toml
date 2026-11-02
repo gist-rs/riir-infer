@@ -117,6 +117,15 @@ windows-sys = { version = "0.61", features = ["Win32_System_Threading", "Win32_F
 # (the dep row below), and the rung's own code is target_os-gated — safe
 # on every host. `src/production_posture.rs` mirrors this row as DATA and
 # its tests pin the two together in both directions.
+# 2026-11-02 — `deltanet_prework_fused` joined per Bench 024's promotion
+# addendum (R2 fused prework, Metal/wgpu-scoped, delegated owner verdict
+# `c928c408` 2026-10-28): the feature-side half landed in riir-ai's
+# riir-gpu default set that day but never here, so serving compiled the
+# fused path out and ran the chunked fallback the promotion was measured
+# against (the omitted-promoted-rung class). Serving-posture confirmation:
+# .benchmarks/937 (prework strip 68.7→4.6 ms/frame, ALL −11.4% e2e,
+# bit-identity anchors held). ⚠ The row below must stay comment-free —
+# production_posture's manifest parser bracket-slices it verbatim.
 production = [
     "ternary_gemv",
     "ternary_gemm_batched",
@@ -128,6 +137,7 @@ production = [
     "delta_routing",
     "params_handle_cache",
     "metal_tensor_gemm",
+    "deltanet_prework_fused",
 ]
 
 # The DQ phase-sensitivity fake-quant instrument (riir-infer Plan 614 /

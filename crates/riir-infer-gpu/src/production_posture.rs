@@ -46,6 +46,10 @@ pub const PRODUCTION_RUNGS: &[(&str, bool)] = &[
     ("delta_routing", cfg!(feature = "delta_routing")),
     ("params_handle_cache", cfg!(feature = "params_handle_cache")),
     ("metal_tensor_gemm", cfg!(feature = "metal_tensor_gemm")),
+    (
+        "deltanet_prework_fused",
+        cfg!(feature = "deltanet_prework_fused"),
+    ),
 ];
 
 /// Promoted rungs the current compilation is MISSING. Empty iff the
