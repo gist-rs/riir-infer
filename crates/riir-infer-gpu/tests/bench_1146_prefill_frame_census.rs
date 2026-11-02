@@ -27,9 +27,14 @@
 //!
 //! ```sh
 //! CARGO_TARGET_DIR=/tmp/i1146 cargo test -p riir-infer-gpu --release \
-//!   --features cubecl_runtime,ternary_gemm_batched,multi_host,ternary_deltanet_chunked_prefill,ternary_attention_batched_prefill,riir-infer-core/bonsai2_hadamard \
+//!   --features cubecl_runtime,ternary_gemm_batched,multi_host,ternary_deltanet_chunked_prefill,ternary_attention_batched_prefill,metal_tensor_gemm,riir-infer-core/bonsai2_hadamard \
 //!   --test bench_1146_prefill_frame_census -- --ignored --nocapture --test-threads=1
 //! ```
+//!
+//! (`metal_tensor_gemm` is load-bearing whenever `I1146C_TENSOR=1` — without
+//! it on macOS `arm_tensor_posture` REFUSES rather than measure the
+//! simdgroup body under a tensor label. The `[[test]]` required-features row
+//! deliberately omits it: the census also runs at the simdgroup posture.)
 //!
 //! Env: `BONSAI2_G1_MODEL` overrides the sibling-layout default (the same
 //! override the plan-623 G1 gate uses). Rung-2b posture knobs (Issue 1146):
