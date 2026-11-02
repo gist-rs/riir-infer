@@ -13,10 +13,16 @@
 //! timing, median over rounds, per-launch ms.
 //!
 //! ```sh
-//! CARGO_TARGET_DIR=/tmp/i1166 cargo test -p riir-infer-gpu --release \
-//!   --features metal_tensor_gemm,cubecl_runtime,ternary_gemv \
+//! CARGO_TARGET_DIR=/tmp/i1166 cargo test -p riir-infer-gpu --release --features \
+//!   metal_tensor_gemm,cubecl_runtime,ternary_gemv,multi_host,ternary_gemm_batched,\
+//!   ternary_gemm_simdgroup,ternary_deltanet_chunked_prefill,ternary_attention_batched_prefill,\
+//!   riir-infer-core/bonsai2_hadamard \
 //!   --test issue1166_tile_geometry_sweep -- --ignored --nocapture --test-threads=1
 //! ```
+//!
+//! The `[[test]]` row's required-features is the FULL feature set above — a
+//! shorter `--features` list makes cargo silently skip the target (a green
+//! zero that ran nothing).
 //!
 //! Env: `BENCH1166_SHAPES` (`MxN,MxN,…`, default the three Bonsai-2
 //! prefill bottlenecks), `BENCH1166_PS` (default `512,2048,4096` — the
