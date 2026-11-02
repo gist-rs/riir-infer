@@ -3,6 +3,7 @@
 **Status:** OPEN — gap MEASURED (Bench 911) → census (914) → width 512 1.39–1.42× (919) → tensor zero-copy GEMM PROMOTED (920, `54f0dce`) → H4 PROMOTED (921, `29be9a0`) → relaxed PROMOTED dist-scoped (923) → attention matmul2d PROMOTED dist-scoped (934, 2026-11-02: 1.046×/1.483×/1.953× at pp512/pp4096/pp32768, KL max 6.67e-7, G1 identical; `RIIR_DIST_PREFILL_ATTN_TENSOR=0` demotes). pp32k settle CLOSED (tensor 1.22× faster, guard-clean). Stacked at w512: pp512 0.62 s / pp4096 4.20 s / pp32768 42.3 s = **0.76× / 0.93× / 1.00× of llama.cpp** (was 0.13–0.16×; parity at pp32k). Open: the 2-box width leg only (deferred, [-]) — everything else measured; the residual ~1.1× at pp4096 is kernel-internal follow-up (new-kernel lane), not an armed cell
 **Lease closed:** zed-amo-1146-prefill, 1793133500, expires 2026-10-29T20:45:00+00:00 — holder (pipe katgpt-rs-bd) yielded the 1146 GPU queue + sole-writer role to katgpt-rs-71 on 2026-10-28 ~19:57 +07, not renewed
 **Lease closed:** zed-amo-1146-finish, 1793612565, claimed 2026-11-02T09:42Z — 4(c) A/B + KL + pp32k settle all measured and landed in ONE session (Bench 934); remaining leg (2-box width) deferred with reason; see the 11-02 block
+**Claimed:** zed-amo-1146-finish, 1793636000, expires 2026-11-03T10:15:00Z — the 2-box TB5 width leg only (amo GPU cleared ~18:12 +07; run + default-flip decision in this window)
 **Date:** 2026-10-28
 **Found by:** [`.benchmarks/911_plan623_t03_arms.md`](../.benchmarks/911_plan623_t03_arms.md) (Plan 623 T0.3, bmo idle, one session)
 **Session:** zed-amo-i623-t24
