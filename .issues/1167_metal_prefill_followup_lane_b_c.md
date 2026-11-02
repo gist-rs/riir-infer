@@ -1,6 +1,7 @@
 # Issue 1167: the Metal prefill new-kernel follow-up lane — census re-run + rungs B/C + the pp512 fixed-cost slice (complements Issue 1166)
 
 **Status:** OPEN — lane FILED (no kernel work started). Sibling issue [`.issues/1166_prefill_matmul2d_tile_geometry_residual.md`](1166_prefill_matmul2d_tile_geometry_residual.md) (zed-amo-1146-finish, allocated first — the 1166 collision resolved by THIS renumber) owns the matmul2d tile-geometry ground (rung A below points there — do not duplicate it); THIS file carries the complementary rungs: the census re-run, the non-matmul2d GEMM residual, H5 cooperative-tensor, and the pp512 fixed-cost slice.
+**Claimed:** zed-cadbba9f@amo, 1793635248, expires 2026-11-04T16:00:48+00:00
 **Date:** 2026-11-02
 **Parent:** [`.issues/1146_prefill_throughput_gap_1box.md`](1146_prefill_throughput_gap_1box.md) (CLOSED-class: every 1146 leg measured + promoted; this is the lane 1146's record named as "a NEW-kernel follow-up lane, not an armed cell of this issue")
 **Session:** zed-a9badc86@m3
