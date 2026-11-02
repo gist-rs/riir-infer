@@ -555,11 +555,13 @@ mod tests {
 
     #[test]
     fn real_artifact_loads_and_scores_in_shape() {
-        // The 60.7 MB serving artifact when present (amo keeps a copy at
-        // the riir-train data pin) — header, digest, and one score at the
-        // seated width. Skips loud without it.
-        let path =
-            std::path::Path::new("../../riir-train/data/bonsai_mtp/head/bonsai_mtp_head_v1.bin");
+        // The 60.7 MB serving artifact when present (the riir-train data pin,
+        // three ups from the crate dir — crates/riir-infer-dist -> repo root ->
+        // the git/ sibling set). Header, digest, and one score at the seated
+        // width. Skips loud without it.
+        let path = std::path::Path::new(
+            "../../../riir-train/data/bonsai_mtp/head/bonsai_mtp_head_v1.bin",
+        );
         if !path.exists() {
             eprintln!("skip: no bonsai_mtp_head_v1.bin on this box");
             return;
