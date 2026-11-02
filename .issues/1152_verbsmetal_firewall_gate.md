@@ -1,8 +1,8 @@
 # Issue 1152: verbs_metal end-to-end is gated by amo's macOS Application Firewall (unsigned-bin SYN drop)
 
-**Status:** OPEN — mechanism fully measured 2026-10-29 ~00:2xZ (m3 idle lane, read-only ssh probes; no box writes, the amo⇄bmo lane belongs to the live T3.5 session): the posture row below pins amo's exact fw state, the differential is fully explained (Apple-signed builtins auto-allowed + past GUI accepts per-binary-path), and remedy 3 is upgraded to PREFERRED — the plan-623 wire-cell rig ITSELF already runs tail-on-bmo/head-on-amo live (`plan623_wire_cell.sh` L34–49: `--role tail --listen 192.168.10.2:$PORT` on bmo, `--connect` from amo), so the verbs_metal rows can ride the same posture with ZERO fw interaction. The one-line remedies for the owner are unchanged.
-**Claimed:** zed-m3-i1152-heal1102, 1793590106, expires 2026-11-04T03:28:00+00:00
-  — re-claim: prior lease zed-m3-idle1029a EXPIRED 2026-10-31T01:30Z with the runway prepped but unrun; the heal signal fired 2026-11-02 (amo power-cycled by the owner after a self-shutdown)
+**Status:** CLOSED 2026-11-02 (zed-m3-i1152-heal1102) — acceptance clause MET: `verbs_metal --listen` on amo accepted the bmo initiator through the fw rows (owner `--add/--unblockapp`, rows 19/20, survived the 27.2 OS update); the amo RTR EINVAL plane regression died with the 11-02 power-cycle; the MTLBuffer leg CLOSED both directions byte-identical on macOS 27.2 — [Bench 928 Addendum 2](../.benchmarks/928_plan623_t32_rkey_mtu.md). Residue for future lanes (not blockers): the 27.2 recv-window cap (verbs_ping default demoted 32→4, `ebe0b11`) and bmo's TB-bridge ssh flakiness class.
+**Claimed:** zed-m3-i1152-heal1102, 1793590106, expires 2026-11-04T03:28:00+00:00 — **LEASE CLOSED with the issue 2026-11-02 ~12:3x local: all rows PASS, acceptance met**
+  — re-claim history: prior lease zed-m3-idle1029a EXPIRED 2026-10-31T01:30Z with the runway prepped but unrun; the heal signal fired 2026-11-02 (amo power-cycled by the owner after a self-shutdown)
   — earlier: the remedy-3 bmo-target rows were handed over unclaimed by T3.5 (zed-m3-i971-housekeeping) 2026-10-29 ~01:1xZ; deliverable = a Bench-928 addendum, issue STAYS OPEN for the owner gate
 **Date:** 2026-10-29
 **Lane:** Plan 623 T3.2's MTLBuffer leg ([Bench 928](../.benchmarks/928_plan623_t32_rkey_mtu.md)) — the code is landed (`570ee79`, `examples/verbs_metal.rs`, feature `rdma_metal`); the measurement is blocked by a box gate, not the lane.
@@ -76,3 +76,14 @@ amo self-shutdown yesterday; owner power-cycled it ON SITE 2026-11-02 ~10:1x —
 - Rigs QUIET both sides (amo 3/30, bmo 5.1/30) — build + seconds-class probe safe.
 
 Plan: rebuild on amo at `0a14999` (`CARGO_TARGET_DIR=/tmp/vm_target`), scp both verbs binaries to bmo, then the runway sequence: one verbs_ping canary, then the remedy-3 rows; the amo-listener acceptance row after the owner lifts the fw gate.
+
+## CLOSED (2026-11-02 ~12:3x local, zed-m3-i1152-heal1102)
+
+Runway rebuilt at `ebe0b11` (m3-built, scp'd both boxes; amo/bmo checkouts untouched — bmo is on sibling `timer-build` WIP). Owner acts landed: on-site power-cycle (amo, 11-02 ~10:1x) + macOS 27.2 on both boxes + the fw `--add/--unblockapp` rows (19/20, survived the update, matched the rebuilt binaries). Results — ALL PASS:
+
+- **Canary** (verbs_ping default): RTT n=1800 p50 6.375 µs; BW 64 MiB 9.380 GiB/s; clean exits.
+- **Remedy-3 rows** (bmo Metal target): REGISTRATION 216.9 µs ACCEPTED; GPU→wire every-byte-0xC7 PASS; wire→GPU gpu_sum==cpu_sum PASS → **VERDICT: MTLBuffer leg CLOSED**.
+- **Acceptance clause** (amo fw-gated listener + bmo initiator): accepted FIRST TRY, VERDICT CLOSED again — REGISTRATION 80.7 µs, both byte-identity rows PASS.
+- Two lane fixes rode the re-run (`ebe0b11`): the verbs_metal wire→GPU pattern-recv FIFO fix (latent since `570ee79`, first execution) + the verbs_ping window default 32→4 (macOS 27.2 provider caps 256 KiB recv windows at 4–7; depth×SGE-len-shaped, not bytes — 32×64 KiB green at the same GiB/s).
+
+Full rows + the 27.2 cap record: [Bench 928 Addendum 2](../.benchmarks/928_plan623_t32_rkey_mtu.md).
