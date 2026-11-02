@@ -26,7 +26,7 @@ wire (Bench 935: the 2-box wire is not the floor — pp512/w128 runs FASTER than
   4 bytes/16 elems + block scale; ours `cff3fda`). After both, the remaining structural
   delta is **two bit-plane loads vs one packed byte stream per 16 elements** (1146 assessed
   "minor" — UNMEASURED at the new posture).
-- **Ll氓ma.cpp tile**: NRA×NRB 64×128, K-tile 32, 4 simdgroups — same as ours; the fork
+- **llama.cpp tile**: NRA×NRB 64×128, K-tile 32, 4 simdgroups — same as ours; the fork
   `73bfe6c` variants may differ (fa.metal Q=32/C=64 shapes measured well in 4(c)).
 
 ## Candidate rungs (each its own GOAT; order by expected value)
