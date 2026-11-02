@@ -611,7 +611,18 @@ mlx-lm on the Proposal-042 scoreboard **measured on the same two boxes**.
   the unsigned target binary (nc/python/ssh connect to the same port; the Rust bin's accept never
   fires; samples show both sides healthy — initiator in read_exact, target in accept). Owner
   gate: `sudo socketfilterfw --add <bin> --unblockapp <bin>` (or sign it); the Metal-side premise
-  verified independently (ObjC shared MTLBuffer + blit fill reads back through contents()).**
+  verified independently (ObjC shared MTLBuffer + blit fill reads back through contents()).
+  **✅ MTLBuffer LEG CLOSED 2026-11-02 (zed-m3-i1152-heal1102, `ebe0b11`+`429e085`, Bench 928
+  Addendum 2, macOS 27.2): REGISTRATION ACCEPTED (reg_mr over MTLBuffer.contents() — 216.9 µs
+  bmo / 80.7 µs amo, addr==contents, lkey granted, rkey=0x0 per the provider law); GPU→wire
+  every-byte-0xC7 PASS and wire→GPU gpu_sum==cpu_sum PASS in BOTH directions on amo⇄bmo —
+  including amo's fw-gated listener accepting the bmo initiator FIRST TRY (issue 1152's
+  acceptance clause; the fw rows survived the 27.2 OS update). The amo RTR EINVAL died with the
+  11-02 on-site power-cycle. GPU-shared pages are now PROVEN wire buffers both directions —
+  the SEND/RECV bounce (the rkey half's measured cost) is removable on the Metal stages. Two
+  probe fixes rode the closure (`ebe0b11`): verbs_metal's missing wire→GPU pattern recv (UC RQ
+  FIFO — latent since `570ee79`, first execution) + verbs_ping's window default 32→4 (macOS
+  27.2 caps 256 KiB recv windows at 4–7, depth×SGE-len-shaped). Full rows: Bench 928 Addendum 2.**
 - [x] **T3.3** Small-message decode path (single WR, inline header) vs striped large frames
   for prefill; MTU probe (incumbents fix 1024 / 128 KiB strides).
   **✅ CLOSED 2026-10-29 (zed-m3-i623-t32t33, the `--mtu` override ladder on amo⇄bmo): the
