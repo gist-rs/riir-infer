@@ -40,6 +40,8 @@ wire (Bench 935: the 2-box wire is not the floor — pp512/w128 runs FASTER than
 > the reference arm; challengers ktile128_64x128, ktile64_64x256, ktile64_128x128,
 > ktile64_64x128x8sg, ktile64_64x128x2sg; the K32 demote as the floor).
 
+> **RUNG PARTITION (2026-11-02, lane agreement):** rungs 2–4 (packed-byte dequant load, H5 cooperative-tensor, f16-staged B) were REASSIGNED to Issue 1167 (zed-cadbba9f, lease `2c053ec`) per the 1146-finish lane partition — THIS lane is the tile-geometry sweep (rung 1) only. H5 = 1167 rung C, census-gated; the list below is the historical rung inventory, not this lane's scope.
+
 1. **Tile-geometry sweep at prefill shapes** (w512 frames, M=512): NRA/NRB/K-tile/simdgroup
    count against the Bench-895 spill cliff (regs=128/local=0 is the constraint). The fork's
    `kernel_mul_mm` tile matrix vs ours at M=512 is a static read first.
