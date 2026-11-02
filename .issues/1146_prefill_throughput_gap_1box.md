@@ -2,7 +2,7 @@
 
 **Status:** OPEN — gap MEASURED (Bench 911) → census (914) → width 512 1.39–1.42× (919; dist default flip pending the 2-box leg) → tensor zero-copy GEMM PROMOTED (920, `54f0dce`; wgpu zero-init fix `3bbf275`) → H4 dequant PROMOTED (921, `29be9a0`, +9%, bit-exact) → relaxed_precision PROMOTED dist-scoped (923, 1.96–2.19× on top of H4, per-family KL max 3.8e-6). Stacked at w512: pp512 0.72 s / pp4096 7.13 s = **0.65× / 0.55× of llama.cpp** (was 0.13–0.16×). Open: 2-box width leg, embed A/B, pp32k confirm, the remaining ~1.5–1.8× gap
 **Lease closed:** zed-amo-1146-prefill, 1793133500, expires 2026-10-29T20:45:00+00:00 — holder (pipe katgpt-rs-bd) yielded the 1146 GPU queue + sole-writer role to katgpt-rs-71 on 2026-10-28 ~19:57 +07, not renewed
-**Claimed:** katgpt-rs-71, 1793178290, expires 2026-10-30T13:00:00Z
+**Claimed:** zed-amo-1146-finish, 1793612565, expires 2026-11-04T09:42:45Z
 **Date:** 2026-10-28
 **Found by:** [`.benchmarks/911_plan623_t03_arms.md`](../.benchmarks/911_plan623_t03_arms.md) (Plan 623 T0.3, bmo idle, one session)
 **Session:** zed-amo-i623-t24
