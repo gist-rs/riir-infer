@@ -77,7 +77,7 @@ fn main() {
         eprintln!("  --rtt-iters N       RTT measured iterations (default 2000)");
         eprintln!("  --bw-size MIB       one-way bulk size in MiB (default 64)");
         eprintln!("  --stripe BYTES      bulk stripe size (default 262144)");
-        eprintln!("  --window N          in-flight stripes (default 32)");
+        eprintln!("  --window N          in-flight stripes (default 4; 27.2 provider caps 256 KiB recv windows at 4-7)");
         eprintln!("  --lat-ms N          completion timeout ms (default 5000)");
     };
 
@@ -125,7 +125,12 @@ fn main() {
     let rtt_iters: usize = get("rtt-iters").map_or(2000, |v| v.parse().expect("--rtt-iters N"));
     let bw_mib: usize = get("bw-size").map_or(64, |v| v.parse().expect("--bw-size MIB"));
     let stripe: usize = get("stripe").map_or(256 * 1024, |v| v.parse().expect("--stripe BYTES"));
-    let window: usize = get("window").map_or(32, |v| v.parse().expect("--window N"));
+    // macOS 27.2 TB provider recv-window cap (measured 2026-11-02, issue 1152
+    // lane): at 256 KiB stripes a window ≥ 8 ENOMEMs the first ibv_post_recv
+    // (rc=-12) on a fresh boot; ≤ 4 is green. The cap follows DEPTH × SGE-len,
+    // not total bytes — 32 × 64 KiB (same 2 MiB) runs green at the same GiB/s.
+    // 27.0.1 took 32 × 256 KiB. Re-widen the default only after a re-measure.
+    let window: usize = get("window").map_or(4, |v| v.parse().expect("--window N"));
     let lat = Duration::from_millis(
         get("lat-ms").map_or(5_000, |v| v.parse::<u64>().expect("--lat-ms N")),
     );

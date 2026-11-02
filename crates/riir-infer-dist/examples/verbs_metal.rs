@@ -380,7 +380,15 @@ fn run_target(
         fill_dt
     );
 
-    // Post the recv for the initiator's "got" marker BEFORE sending.
+    // Wire→GPU recvs, posted BEFORE the fill send. The initiator's SQ order
+    // is pattern (wr 22) then marker (wr 23), and a UC receive queue matches
+    // FIFO — so the GUARD-sized pattern recv MUST precede the 16 B marker
+    // recv: without it the 1 MiB pattern truncates against the marker recv
+    // (UC QP error) and the marker behind it is dropped.
+    brought
+        .qp
+        .post_recv(&mr.slice_at(GUARD, probe_len as u32), 21)
+        .expect("pattern recv");
     brought
         .qp
         .post_recv(&mr.slice_at(0, MARK_LEN as u32), 9)
@@ -395,6 +403,10 @@ fn run_target(
         .poll_one(deadline)
         .expect("gpu fill send wc");
     assert_eq!(wc.status, verbs::ffi::wc_status::SUCCESS, "gpu fill send");
+    // Wire-order drain: the pattern CQE lands first (its send precedes the
+    // marker on the initiator's ordered SQ), then the "got" marker.
+    let pc = brought.recv_cq.poll_one(deadline).expect("pattern recv wc");
+    assert_eq!(pc.byte_len as usize, probe_len, "pattern length");
     let got = brought.recv_cq.poll_one(deadline).expect("got marker");
     assert_eq!(got.byte_len as usize, MARK_LEN, "got marker length");
     let magic = unsafe {
