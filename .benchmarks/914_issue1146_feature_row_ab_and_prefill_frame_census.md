@@ -3,7 +3,7 @@
 **Status:** RECORD — feature-row fix CONFIRMED ENGAGED but only 1.09× (the dispatch-storm hypothesis REFUTED); the census attributes the real floor: the M=128 ternary GEMM projection classes (FFN 65% + DeltaNet 25%) + a live 1.55× wide-chunk lever; the W-frame rung + the width re-curve are the ladder
 **Date:** 2026-10-28 (sessions 05:08–06:30 +07; A/B 05:08–05:13, census v1 05:36 JIT-polluted, v2 05:50 host-load-polluted on the coarse strips, v3 06:06–06:17 clean)
 **Session:** zed-amo-1146-prefill, 1793133500
-**Issue:** [`.issues/1146_prefill_throughput_gap_1box.md`](../.issues/1146_prefill_throughput_gap_1box.md) (root-cause chain + the instrument landing)
+**Issue:** `.issues/1146_prefill_throughput_gap_1box.md` (root-cause chain + the instrument landing)
 **Box:** amo (Mac17,15, M5 Ultra, 30 cores, 96 GiB, macOS 27.0.1); load 1.5–2.2 at the clean census; the 641-T5 league lane held the box's attestation attention all night (its attempts REFUSED — no GPU overlap with any census window; v2's coarse-strip pollution was its attempt-prep BUILD burst on the host, see the honesty notes)
 **Model:** `Ternary-Bonsai-2-27B-PQ2_0.gguf` sha256 `3907dc16…62ec1` = the league pin EXACT
 

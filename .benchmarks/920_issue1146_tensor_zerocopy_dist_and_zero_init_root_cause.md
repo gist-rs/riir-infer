@@ -3,7 +3,7 @@
 **Status:** RECORD — PROMOTED into the dist `gpu` row (`54f0dce`, `RIIR_DIST_METAL_TENSOR=0` demotes). G1 bit-exact with a cold pool after the fix (`3bbf275`); G2 **1.21–1.34×** prefill over the simdgroup incumbent at the same width. Stacked on rung 1's width 512, the dist prefill goes from **0.13–0.16× of llama.cpp to ~0.26–0.27×**.
 **Date:** 2026-10-28 (bmo cells 16:56–17:41 +07)
 **Session:** katgpt-rs-71, 1793178290
-**Issue:** [`.issues/1146_prefill_throughput_gap_1box.md`](../.issues/1146_prefill_throughput_gap_1box.md) — ladder rung 2 (the M=128 GEMM classes hold 90% of the frame, [Bench 914](914_issue1146_feature_row_ab_and_prefill_frame_census.md))
+**Issue:** `.issues/1146_prefill_throughput_gap_1box.md` — ladder rung 2 (the M=128 GEMM classes hold 90% of the frame, [Bench 914](914_issue1146_feature_row_ab_and_prefill_frame_census.md))
 **Box:** bmo (Mac17,15, M5 Ultra, 96 GiB), AC
 **Model:** `Ternary-Bonsai-2-27B-PQ2_0.gguf` sha256 `3907dc16…62ec1` (league pin)
 

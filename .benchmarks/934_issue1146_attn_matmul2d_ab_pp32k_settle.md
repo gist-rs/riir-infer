@@ -3,7 +3,7 @@
 **Status:** RECORD — 4(c) **PROMOTED dist-scoped** (wins at every length incl. 1.95× at pp32768, KL ≤ 6.7e-7, G1 identical); the `401af78` relaxed-OFF pp32k "sign flip" claim **PROVEN** (tensor 1.22× faster, guard-clean). Stacked posture now reads **774 tok/s at pp32768 = llama.cpp parity** (was 0.45×); pp4096 0.93×; pp512 0.76×. The issue's 6–8× gap is closed to 0.76–1.0×.
 **Date:** 2026-11-02 17:16–17:46 +07
 **Session:** zed-amo-1146-finish, 1793612565 (lease `3f4f828`)
-**Issue:** [`.issues/1146_prefill_throughput_gap_1box.md`](../.issues/1146_prefill_throughput_gap_1box.md)
+**Issue:** `.issues/1146_prefill_throughput_gap_1box.md`
 **Box:** bmo (Mac17,15, M5 Ultra, 30 cores, 96 GiB), AC, load 1.11 at start; runner pid 51651
 **Model:** `Ternary-Bonsai-2-27B-PQ2_0.gguf` (league pin, 7,206,168,928 B)
 **Build:** riir-infer `3f4f828` (clean detached worktree `/tmp/i1146f-wt` — the shared checkout carried a sibling's live WIP on `qwen_attention_prefill_sparse_cubecl.rs`, excluded by construction; katgpt-rs `6c7656193`), release, `-p riir-infer-dist --bin dist_stage --features gpu,bonsai2_hadamard`

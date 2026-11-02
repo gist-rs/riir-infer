@@ -3,7 +3,7 @@
 **Status:** RECORD — the 2-box leg is RUN and the answer is **length-conditional**: w128 owns ≤1k (small-frame pipeline overlap), w512 owns ≥2k (wide-frame GEMM). The `dist_stage` GPU default is now **prompt-length-conditional (128 below 2048, 512 at/above)** — a flat flip would have regressed the ≤1k class by up to 25%. Functional check both branches on the live wire PASS.
 **Date:** 2026-11-02 18:15–18:23 +07
 **Session:** zed-amo-1146-finish, 1793636000 (claim `e65acdb`)
-**Issue:** [`.issues/1146_prefill_throughput_gap_1box.md`](../.issues/1146_prefill_throughput_gap_1box.md) (closed + removed same day — the arc in `HISTORY.md`)
+**Issue:** `.issues/1146_prefill_throughput_gap_1box.md` (closed + removed same day — the arc in `HISTORY.md`)
 **Box:** head = amo (M5 Ultra, 30 cores, AC; the sibling `bonsai_mtp_head_fit` GPU tenant had just cleared — load 5.81 falling), tail = bmo (load 0.91); wire = the TB5 bridge `192.168.10.2`, `--split 32`, both stages GPU
 **Build:** riir-infer `5602532` (clean detached worktree; katgpt-rs `6c7656193`), release, `-p riir-infer-dist --bin dist_stage --features gpu,bonsai2_hadamard` — one binary, sha-verified amo↔bmo identical (`8da68686…`)
 **Rig:** `scripts/i1146_width_2box.sh` (head-local quiet gate + per-cell tail boot over ssh; ABAB per length; tail host overridden to the TB address — bmo's Tailscale is down, the wire itself is TB)

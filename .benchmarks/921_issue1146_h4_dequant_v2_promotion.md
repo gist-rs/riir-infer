@@ -3,7 +3,7 @@
 **Status:** RECORD — PROMOTED default-ON (`RIIR_METAL_TENSOR_DEQUANT_V2=0` demotes). G1 exact (cold-pool kernel gate max_abs 0 + identical dist token streams); G2 **1.089× (pp512) / 1.092× (pp4096)** at w512, zero contaminated pairs.
 **Date:** 2026-10-28 (G1 18:34–18:35, A/B 18:52–18:58 +07)
 **Session:** katgpt-rs-71, 1793178290 (measurement + promotion). Kernel variant: katgpt-rs-31, riir-infer `cff3fda`. The source read that ranked it as one of only two kernel differences from llama.cpp: katgpt-rs-bd (riir-infer `ec19235`, `e31b828`).
-**Issue:** [`.issues/1146_prefill_throughput_gap_1box.md`](../.issues/1146_prefill_throughput_gap_1box.md) — rung 2b
+**Issue:** `.issues/1146_prefill_throughput_gap_1box.md` — rung 2b
 **Box:** bmo (Mac17,15, M5 Ultra, 96 GiB), AC
 **Model:** `Ternary-Bonsai-2-27B-PQ2_0.gguf` sha256 `3907dc16…62ec1` (league pin)
 

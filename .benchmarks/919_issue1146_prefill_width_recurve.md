@@ -3,7 +3,7 @@
 **Status:** RECORD (1-box leg) — width 512 is **1.39× / 1.40× / 1.42×** prefill vs the 128 default at pp512 / pp4096 / pp32768, G1 cross-width PASS (identical generated ids at 128/256/512/1024). The 2-box TB5 leg (the default's original reason) is PENDING a quiet two-box window — the default flip waits on it.
 **Date:** 2026-10-28 (cells 16:07–16:35 +07 clean; contamination from 16:36 recorded below)
 **Session:** katgpt-rs-71, 1793178290
-**Issue:** [`.issues/1146_prefill_throughput_gap_1box.md`](../.issues/1146_prefill_throughput_gap_1box.md) — ladder rung 1 named by [Bench 914](914_issue1146_feature_row_ab_and_prefill_frame_census.md)
+**Issue:** `.issues/1146_prefill_throughput_gap_1box.md` — ladder rung 1 named by [Bench 914](914_issue1146_feature_row_ab_and_prefill_frame_census.md)
 **Box:** bmo (Mac17,15, M5 Ultra, 30 cores, 96 GiB), AC power, load 0.1–0.3 at start, no other GPU consumer until 16:36
 **Model:** `Ternary-Bonsai-2-27B-PQ2_0.gguf` sha256 `3907dc16…62ec1` = the league pin EXACT
 **Binary:** `dist_stage --features gpu,bonsai2_hadamard` at riir-infer `0daa149` (the Bench-914 armed posture: chunked deltanet + batched attention prefill), sha256 `40647de5…4c78`

@@ -3,7 +3,7 @@
 **Status:** RECORD — re-attributes the 1146 frame after the day's GEMM rungs (tensor zero-copy + H4 + relaxed). **Attention = 37% of the pp4096 frame** (Bench 914: 9%, before the 2–3× GEMM gain), FFN GEMMs 34%, DeltaNet projections 29%. Confirms ladder 4 (prefill attention runs on no matrix units) as the next lever.
 **Date:** 2026-10-28 21:20–21:31 +07
 **Session:** katgpt-rs-71, 1793178290. Census knobs: katgpt-rs-bd `3cde142`.
-**Issue:** [`.issues/1146_prefill_throughput_gap_1box.md`](../.issues/1146_prefill_throughput_gap_1box.md)
+**Issue:** `.issues/1146_prefill_throughput_gap_1box.md`
 **Box:** bmo (M5 Ultra, 96 GiB), AC; the runner's GPU-quiet gate passed at start
 **Model:** `Ternary-Bonsai-2-27B-PQ2_0.gguf` (league pin)
 

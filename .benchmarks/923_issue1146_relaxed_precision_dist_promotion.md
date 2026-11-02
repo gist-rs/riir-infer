@@ -3,7 +3,7 @@
 **Status:** RECORD — PROMOTED in the **dist stage only** (`TernaryGpuStage::new` → `set_metal_tensor_relaxed_precision(true)`, `RIIR_DIST_METAL_TENSOR_RELAXED=0` demotes). The **substrate default stays OFF**: this is a lossy surface, and the riir-ai league harness plus every bit-exact tensor-vs-simdgroup gate keep the incumbent bytes. Stacked dist prefill at w512: **pp512 0.72 s (709 tok/s, 0.65× llama.cpp), pp4096 7.13 s (574 tok/s, 0.55×)**, up from 0.13–0.16× this morning.
 **Date:** 2026-10-28 (quality 19:38–19:56, stacked A/B 19:58–20:02 +07)
 **Session:** katgpt-rs-71, 1793178290 (measurement, promotion). Selector: katgpt-rs-31 `6125f9e`. The source read that ranked it one of two kernel differences from llama.cpp (upstream `19ab5a5` / prismml fork `73bfe6c` compile `relaxed_precision=true`): katgpt-rs-bd. KL instrument: katgpt-rs-bd `083b465`.
-**Issue:** [`.issues/1146_prefill_throughput_gap_1box.md`](../.issues/1146_prefill_throughput_gap_1box.md)
+**Issue:** `.issues/1146_prefill_throughput_gap_1box.md`
 **Box:** bmo (Mac17,15, M5 Ultra, 96 GiB), AC
 **Model:** `Ternary-Bonsai-2-27B-PQ2_0.gguf` sha256 `3907dc16…62ec1` (league pin)
 
