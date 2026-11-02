@@ -1,6 +1,6 @@
 # Issue 1165: promote the τ=0.85 envelope sparse prefill to default-on (Metal lane, ≥16K) — the bench-1157 GOAT + Claude AGREE verdict
 
-**Status:** Open — the promotion lane; unblocked by bench 1157 + the verdict
+**Status:** Open — the promotion lane; unblocked by bench 1157 + the verdict. Parent lane: issue 1156 (CLOSED + removed 2026-11-02 — all T1–T6 done; full arc in riir-infer HISTORY.md; the T6 record: riir-ai bench 1157)
 **Claimed:** zed-7710a782, 1793685200, expires 2026-11-04T16:45:00+00:00
 
 ## The decision being implemented
