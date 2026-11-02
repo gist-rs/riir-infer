@@ -472,15 +472,14 @@ fn sparse_default_posture_state() -> u8 {
             std::sync::atomic::Ordering::Relaxed,
         )
         .is_ok()
+        && let Err(e) = verdict
     {
-        if let Err(e) = verdict {
-            SPARSE_POSTURE_REFUSALS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-            eprintln!(
-                "[sparse-prefill] DEFAULT POSTURE REFUSED: {e} — the arm falls back to \
-                 dense for this process (the demote literal `RIIR_PREFILL_SPARSE=0` \
-                 is the explicit form of the same posture)"
-            );
-        }
+        SPARSE_POSTURE_REFUSALS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        eprintln!(
+            "[sparse-prefill] DEFAULT POSTURE REFUSED: {e} — the arm falls back to \
+             dense for this process (the demote literal `RIIR_PREFILL_SPARSE=0` \
+             is the explicit form of the same posture)"
+        );
     }
     SPARSE_POSTURE_STATE.load(std::sync::atomic::Ordering::Relaxed)
 }

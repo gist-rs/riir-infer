@@ -77,7 +77,9 @@ pub struct HeadOptions {
     /// Requested prompt positions per prefill frame. `1` = the
     /// per-position protocol (T2.3a); `> 1` = chunked frames through
     /// [`StageCompute::prefill_chunk`] on both stages (T2.3b). The width
-    /// actually used is [`prefill_width`].
+    /// actually used is [`prefill_width`]. The bin's GPU default is
+    /// prompt-length-conditional (Bench 935): 128 below 2048, 512 at/above
+    /// — the wire curve crosses in (1024, 2048).
     pub prefill_chunk: usize,
     /// Prompts shorter than this stay per-position. A batched chunk pays a
     /// fixed floor, but the right threshold depends on WHERE the stages
@@ -135,9 +137,11 @@ impl Default for HeadOptions {
 /// `min_batched`; else the requested chunk EVENED over the prompt
 /// (`ceil(len / ceil(len / chunk))`), so no ragged tail chunk pays the
 /// batched floor for a handful of tokens. The head sends it in `Begin`;
-/// the oracle uses the same rule. (The default requested width 128 is
-/// the Bench-909 winner at every measured P on both postures: evened,
-/// a single whole-prompt chunk at P < 128, 128-chunks above.) With
+/// the oracle uses the same rule. (The bin's default requested width is
+/// prompt-length-conditional since Bench 935 — 128 below 2048 tokens,
+/// 512 at/above: the 2-box wire curve crosses in (1024, 2048), w128
+/// owning the small-frame pipeline overlap (pp512 0.79× / pp1024 0.97×)
+/// and w512 the wide-frame GEMM (pp2048 1.14× / pp4096 1.23×).)
 /// [`HeadOptions::prefill_block_exact`] the width is `c` itself (capped at
 /// the prompt), so the full frames are whole ANE blocks.
 pub fn prefill_width(prompt_len: usize, opts: HeadOptions) -> usize {

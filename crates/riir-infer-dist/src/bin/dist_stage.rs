@@ -661,8 +661,19 @@ fn run() -> Result<(), String> {
             let mut link = TcpTransport::new(sock, key, Direction::Downstream)
                 .map_err(|e| format!("socket: {e}"))?;
             let opts = HeadOptions {
+                // Issue 1146 2-box TB5 width leg (Bench 935, amo⇄bmo ABAB):
+                // the wire curve crosses between 1k and 2k — w128 wins the
+                // small-frame pipeline overlap below (pp512 0.79×, pp1024
+                // 0.97×), w512 wins the wide-frame GEMM above (pp2048 1.14×,
+                // pp4096 1.23×; reps tight, warm matches). A flat default
+                // would regress one class by up to 25%, so the GPU default is
+                // prompt-length-conditional — the `min_batched` precedent
+                // (HeadOptions). `--prefill-chunk` still overrides both.
                 prefill_chunk: a.prefill_chunk.unwrap_or(match a.backend.as_str() {
-                    "gpu" => 128,
+                    "gpu" => {
+                        const WIRE_WIDE_MIN: usize = 2048;
+                        if prompt.len() >= WIRE_WIDE_MIN { 512 } else { 128 }
+                    }
                     _ => 1,
                 }),
                 eos: match a.no_eos {
