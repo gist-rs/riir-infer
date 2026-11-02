@@ -1,0 +1,43 @@
+[17:16:11] === i1146 width re-curve start (ts 20261102T171611Z) ===
+Mac17,15
+30
+103079215104
+17:16  up  5:19, 2 users, load averages: 1.25 1.20 1.23
+Now drawing from 'AC Power'
+[17:16:41] a_g1_w512 rc=0 :: prefill 1024 tok in 1.437s
+[17:16:57] b_g1_w512 rc=0 :: prefill 1024 tok in 1.383s
+[17:16:57] g1 a w=512 generated: [261, 248046, 198, 248045, 198, 2, 220, 16, 13, 220, 96304, 99172, 271, 95772, 8253, 220]
+[17:16:57] g1 b w=512 generated: [261, 248046, 198, 248045, 198, 2, 220, 16, 13, 220, 96304, 99172, 271, 95772, 8253, 220]
+[17:16:57] G1 CROSS-WIDTH PASS
+[17:17:12] a_pp512_w512_warm rc=0 :: prefill 512 tok in 0.649s
+[17:17:26] b_pp512_w512_warm rc=0 :: prefill 512 tok in 0.623s
+[17:17:41] a_pp512_w512_r1 rc=0 :: prefill 512 tok in 0.654s
+[17:17:55] b_pp512_w512_r1 rc=0 :: prefill 512 tok in 0.624s
+[17:18:10] a_pp512_w512_r2 rc=0 :: prefill 512 tok in 0.647s
+[17:18:24] b_pp512_w512_r2 rc=0 :: prefill 512 tok in 0.620s
+[17:18:44] a_pp4096_w512_warm rc=0 :: prefill 4096 tok in 6.220s
+[17:19:03] b_pp4096_w512_warm rc=0 :: prefill 4096 tok in 4.185s
+[17:19:23] a_pp4096_w512_r1 rc=0 :: prefill 4096 tok in 6.233s
+[17:19:41] b_pp4096_w512_r1 rc=0 :: prefill 4096 tok in 4.209s
+[17:20:01] a_pp4096_w512_r2 rc=0 :: prefill 4096 tok in 6.247s
+[17:20:19] b_pp4096_w512_r2 rc=0 :: prefill 4096 tok in 4.192s
+[17:21:56] a_pp32768_w512_warm rc=0 :: prefill 32768 tok in 82.756s
+[17:22:52] b_pp32768_w512_warm rc=0 :: prefill 32768 tok in 41.742s
+[17:24:29] a_pp32768_w512_r1 rc=0 :: prefill 32768 tok in 82.552s
+[17:25:26] b_pp32768_w512_r1 rc=0 :: prefill 32768 tok in 42.302s
+[17:27:04] a_pp32768_w512_r2 rc=0 :: prefill 32768 tok in 83.440s
+[17:28:00] b_pp32768_w512_r2 rc=0 :: prefill 32768 tok in 42.315s
+[17:28:00] === summary (timed cells) ===
+[17:28:00] a_pp512_w512_r1 0.654s 782.9 tok/s
+[17:28:00] a_pp512_w512_r2 0.647s 791.3 tok/s
+[17:28:00] b_pp512_w512_r1 0.624s 820.5 tok/s
+[17:28:00] b_pp512_w512_r2 0.620s 825.8 tok/s
+[17:28:00] a_pp4096_w512_r1 6.233s 657.1 tok/s
+[17:28:00] a_pp4096_w512_r2 6.247s 655.7 tok/s
+[17:28:00] b_pp4096_w512_r1 4.209s 973.2 tok/s
+[17:28:00] b_pp4096_w512_r2 4.192s 977.1 tok/s
+[17:28:00] a_pp32768_w512_r1 82.552s 396.9 tok/s
+[17:28:00] a_pp32768_w512_r2 83.440s 392.7 tok/s
+[17:28:00] b_pp32768_w512_r1 42.302s 774.6 tok/s
+[17:28:00] b_pp32768_w512_r2 42.315s 774.4 tok/s
+[17:28:00] === COMPLETE: /tmp/i1146f/attn_ab ===

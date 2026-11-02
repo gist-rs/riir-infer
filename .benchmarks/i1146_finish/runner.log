@@ -1,0 +1,34 @@
+[17:15:59] === bmo 1146 runner start ===
+[17:16:11] phase 1: 4(c) attention A/B start
+[17:28:00] phase 1 rc=0 ; engagement: b-arm announcement lines = 10 logs; a-arm = 0 (must be 0)
+[17:28:00] phase1 [17:16:57] G1 CROSS-WIDTH PASS (note: attn arm is tolerance-class — id divergence routes to the KL read, not auto-FAIL)
+[17:28:00] phase 2: KL (I1146K_AXIS=attn) start
+[17:28:42] phase 2 rc=0
+[17:28:42] phase2 # issue1146_relaxed_kl: axis ATTN · posture RELAXED · P=256 · K=16 · ref = CubeCL attention chain, cand = matmul2d attention
+[17:28:42] phase2 code   n=16 · KL mean 1.970e-8 max 9.550e-8 nats · top1 16/16 · ΔNLL mean -4.013e-5 · NLL(ref) mean 0.316
+[17:28:42] phase2 math   n=16 · KL mean 1.173e-8 max 1.401e-7 nats · top1 16/16 · ΔNLL mean -1.277e-4 · NLL(ref) mean 0.546
+[17:28:42] phase2 prose  n=16 · KL mean 1.684e-7 max 6.670e-7 nats · top1 16/16 · ΔNLL mean -1.473e-4 · NLL(ref) mean 2.407
+[17:28:42] phase2 zh     n=16 · KL mean 1.801e-7 max 6.271e-7 nats · top1 16/16 · ΔNLL mean -1.699e-4 · NLL(ref) mean 2.489
+[17:28:42] phase2 # tensor-attention launches: 1024
+[17:28:42] phase 3: pp32k settle (tensor ON vs OFF, relaxed OFF) start
+[17:46:13] phase 3 rc=0
+[17:46:13] phase3 [17:29:31] G1 CROSS-WIDTH PASS
+[17:46:13] === summary: phase1 timed cells ===
+[17:46:13] p1 [17:28:00] a_pp512_w512_r1 0.654s 782.9 tok/s
+[17:46:13] p1 [17:28:00] a_pp512_w512_r2 0.647s 791.3 tok/s
+[17:46:13] p1 [17:28:00] b_pp512_w512_r1 0.624s 820.5 tok/s
+[17:46:13] p1 [17:28:00] b_pp512_w512_r2 0.620s 825.8 tok/s
+[17:46:13] p1 [17:28:00] a_pp4096_w512_r1 6.233s 657.1 tok/s
+[17:46:13] p1 [17:28:00] a_pp4096_w512_r2 6.247s 655.7 tok/s
+[17:46:13] p1 [17:28:00] b_pp4096_w512_r1 4.209s 973.2 tok/s
+[17:46:13] p1 [17:28:00] b_pp4096_w512_r2 4.192s 977.1 tok/s
+[17:46:13] p1 [17:28:00] a_pp32768_w512_r1 82.552s 396.9 tok/s
+[17:46:13] p1 [17:28:00] a_pp32768_w512_r2 83.440s 392.7 tok/s
+[17:46:13] p1 [17:28:00] b_pp32768_w512_r1 42.302s 774.6 tok/s
+[17:46:13] p1 [17:28:00] b_pp32768_w512_r2 42.315s 774.4 tok/s
+[17:46:13] === summary: phase3 timed cells ===
+[17:46:13] p3 [17:46:13] a_pp32768_w512_r1 167.538s 195.6 tok/s
+[17:46:13] p3 [17:46:13] a_pp32768_w512_r2 167.939s 195.1 tok/s
+[17:46:13] p3 [17:46:13] b_pp32768_w512_r1 137.424s 238.4 tok/s
+[17:46:13] p3 [17:46:13] b_pp32768_w512_r2 137.253s 238.7 tok/s
+[17:46:13] === COMPLETE ===

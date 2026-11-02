@@ -1,0 +1,23 @@
+[17:28:42] === i1146 width re-curve start (ts 20261102T172842Z) ===
+Mac17,15
+30
+103079215104
+17:28  up  5:32, 2 users, load averages: 1.82 1.28 1.26
+Now drawing from 'AC Power'
+[17:29:14] a_g1_w512 rc=0 :: prefill 1024 tok in 4.042s
+[17:29:31] b_g1_w512 rc=0 :: prefill 1024 tok in 2.897s
+[17:29:31] g1 a w=512 generated: [261, 248046, 198, 248045, 198, 2, 220, 16, 13, 220, 96304, 99172, 271, 95772, 8253, 220]
+[17:29:31] g1 b w=512 generated: [261, 248046, 198, 248045, 198, 2, 220, 16, 13, 220, 96304, 99172, 271, 95772, 8253, 220]
+[17:29:31] G1 CROSS-WIDTH PASS
+[17:32:34] a_pp32768_w512_warm rc=0 :: prefill 32768 tok in 168.260s
+[17:35:05] b_pp32768_w512_warm rc=0 :: prefill 32768 tok in 137.084s
+[17:38:07] a_pp32768_w512_r1 rc=0 :: prefill 32768 tok in 167.538s
+[17:40:39] b_pp32768_w512_r1 rc=0 :: prefill 32768 tok in 137.424s
+[17:43:42] a_pp32768_w512_r2 rc=0 :: prefill 32768 tok in 167.939s
+[17:46:13] b_pp32768_w512_r2 rc=0 :: prefill 32768 tok in 137.253s
+[17:46:13] === summary (timed cells) ===
+[17:46:13] a_pp32768_w512_r1 167.538s 195.6 tok/s
+[17:46:13] a_pp32768_w512_r2 167.939s 195.1 tok/s
+[17:46:13] b_pp32768_w512_r1 137.424s 238.4 tok/s
+[17:46:13] b_pp32768_w512_r2 137.253s 238.7 tok/s
+[17:46:13] === COMPLETE: /tmp/i1146f/pp32k_settle ===

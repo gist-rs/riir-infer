@@ -74,6 +74,20 @@ impl TernaryGpuStage {
         riir_infer_gpu::gemm_ternary_metal_tensor::set_metal_tensor_relaxed_precision(
             std::env::var("RIIR_DIST_METAL_TENSOR_RELAXED").as_deref() != Ok("0"),
         );
+        // Issue 1146 ladder 4(c) (promoted, Bench 934): route prefill
+        // attention through the matmul2d tensor arm for routable shapes
+        // (head_dim 256, cache >= 64; any failure falls through to the
+        // CubeCL chain). LOSSY-class like relaxed, so dist-scoped the same
+        // way: per-family KL max 6.67e-7 nats, top-1 16/16 x4, e2e G1
+        // streams identical; wins grow with length (1.046x pp512, 1.483x
+        // pp4096, 1.953x pp32768). Substrate stays opt-in (league +
+        // bit-exact gates keep the incumbent bytes). Prefill-only by
+        // construction — decode never routes through the selector.
+        // `RIIR_DIST_PREFILL_ATTN_TENSOR=0` demotes.
+        #[cfg(target_os = "macos")]
+        riir_infer_gpu::set_prefill_attn_metal_tensor(
+            std::env::var("RIIR_DIST_PREFILL_ATTN_TENSOR").as_deref() != Ok("0"),
+        );
         // riir-ai Issue 1147 B8 (opt-in `ane_split`): the ANE‖GPU channel
         // split at the dist frame width — measured 1.154× at a 128-token
         // frame in this lane's `production` posture. Armed BEFORE

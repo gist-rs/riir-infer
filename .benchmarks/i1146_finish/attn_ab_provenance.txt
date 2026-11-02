@@ -1,0 +1,10 @@
+bin_a: /tmp/i1146f/dist_stage
+env_a: 
+bin_a_sha256: c5c092a8b6b4740a4ade76c29b871537af35cb2d44055cc59672e5591542249a
+bin_b: /tmp/i1146f/dist_stage
+env_b: RIIR_PREFILL_ATTN_METAL_TENSOR=1
+bin_b_sha256: c5c092a8b6b4740a4ade76c29b871537af35cb2d44055cc59672e5591542249a
+model: /Users/katopz/git/riir-train/data/Ternary-Bonsai-2-27B-PQ2_0.gguf
+model_sha256: 3907dc1658db1f78a9826bf8d5bcb8dc65db0d466388937af57f2294fae62ec1
+widths: 512
+lens: 512 4096 32768
