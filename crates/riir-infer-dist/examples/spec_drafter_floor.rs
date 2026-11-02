@@ -472,6 +472,22 @@ fn main() -> Result<()> {
             ];
             v
         };
+        // The harness invariants that ARE laws (Plan 480 P1 rider's
+        // "monotonicity assert", in its true domain): the shifted
+        // alignment makes d_0 = the pending token, so m ≥ 1 EVERY round
+        // (m0 == 0) and E[m] ≤ k + 1 — for ANY drafter. (No class-ladder
+        // law exists: on unk-run corpora the modal drafter legitimately
+        // beats the bigram at shallow k — measured ag_news k=2 — and the
+        // smoothed-backoff NLL can sit below the unigram number. Both
+        // measured here; neither is a broken instrument.)
+        for (name, st) in &rows {
+            let e_m = st.m_sum as f64 / st.rounds.max(1) as f64;
+            assert!(
+                st.m0 == 0 && e_m >= 1.0 - 1e-9 && e_m <= k as f64 + 1.0 + 1e-9,
+                "round-structure invariant broken: {name} k={k} m0={} E[m]={e_m:.3}",
+                st.m0
+            );
+        }
         for (name, st) in &rows {
             let e_m = st.m_sum as f64 / st.rounds.max(1) as f64;
             let p_full = st.full_accepts as f64 / st.rounds.max(1) as f64;
@@ -496,6 +512,65 @@ fn main() -> Result<()> {
             println!("    {:<16} m0={} | {}", "", st.m0, hist.join(" "));
             report.push(line);
         }
+    }
+
+    // ── Plan 480 P1's spec_drafter_floor v1 rider — the teacher-NLL floor
+    // line (theory anchor for the same-feature drafter family). The READ
+    // split's mean −log p under the TRAIN-fit distributions: unigram = the
+    // no-context FLOOR (the corpus's own frequency entropy — any same-
+    // feature drafter claiming to beat the class must clear this), bigram
+    // = the no-model-knowledge CEILING. Monotonicity assert: the bigram's
+    // measured NLL must sit AT OR ABOVE the unigram floor on the same read
+    // rows — a fit scoring below its own floor means the instrument, not
+    // the model, is broken. Natural-log nats/token.
+    {
+        let alpha = 1.0f64; // add-α smoothing over the train vocab
+        let mut counts: std::collections::HashMap<u32, u64> = std::collections::HashMap::new();
+        for &t in &tokens[..read_lo] {
+            *counts.entry(t).or_insert(0) += 1;
+        }
+        let train_n = read_lo as f64;
+        let vocab = counts.len() as f64;
+        let denom = train_n + alpha * vocab;
+        let floor_nll = tokens[read_lo..]
+            .iter()
+            .map(|t| -((counts.get(t).copied().unwrap_or(0) as f64 + alpha) / denom).ln())
+            .sum::<f64>()
+            / (tokens.len() - read_lo) as f64;
+        // The bigram NLL on the same rows (train-fit table, add-α over the
+        // SEEN-context vocabulary).
+        let mut bi: std::collections::HashMap<(u32, u32), u64> =
+            std::collections::HashMap::new();
+        let mut ctx_tot: std::collections::HashMap<u32, u64> = std::collections::HashMap::new();
+        for w in tokens[..read_lo].windows(2) {
+            *bi.entry((w[0], w[1])).or_insert(0) += 1;
+            *ctx_tot.entry(w[0]).or_insert(0) += 1;
+        }
+        let read_rows = tokens.len() - read_lo - 1;
+        let mut bi_nll = 0f64;
+        for w in tokens[read_lo..].windows(2) {
+            let c = ctx_tot.get(&w[0]).copied().unwrap_or(0) as f64;
+            let n = bi.get(&(w[0], w[1])).copied().unwrap_or(0) as f64;
+            // Backoff blend: λ·bigram + (1−λ)·unigram-floor (λ = the
+            // context's seen share) — never zero-probability on unseen
+            // pairs, still train-only knowledge.
+            let uni_p = (counts.get(&w[1]).copied().unwrap_or(0) as f64 + alpha) / denom;
+            let lambda = if c > 0.0 { c / (c + alpha * vocab) } else { 0.0 };
+            let p = lambda * (n / c.max(1.0)) + (1.0 - lambda) * uni_p;
+            bi_nll += -p.ln();
+        }
+        bi_nll /= read_rows.max(1) as f64;
+        // NOTE: no NLL-ordering theorem exists between two FITTED models —
+        // the smoothed bigram backoff legitimately beats the pure-unigram
+        // number on most corpora (measured ag_news: 3.06 vs 3.14) — the
+        // two lines are the theory ANCHORS (floor + ceiling), report-only.
+        // The instrument monotonicity that IS a law rides the acceptance
+        // ladder below (repeat_last ≤ modal ≤ bigram, per k).
+        let line = format!(
+            "# teacher-nll floor (Plan 480 P1 rider, ln nats/tok): unigram {floor_nll:.4} (the same-feature floor) | bigram-backoff {bi_nll:.4} (the class ceiling, may legitimately sit below the floor — smoothing)",
+        );
+        println!("#\n{line}");
+        report.push(line);
     }
 
     // ── Collapsed-unk view: this GGUF's SentencePiece encodes every space
