@@ -80,7 +80,7 @@ host loop (greedy lane, opt-in):
 
 ## Tasks
 
-- [ ] T1: CONSUME `sampling_cubecl::argmax_f32` — verify + pin the tie rule (all-tie, single-max, 248320-shape) against the CPU reference; wire the id into a device-side buffer the next token's gather reads.
+- [-] T1: CONSUME `sampling_cubecl::argmax_f32` — **VERIFIED 2026-11-03 (this session): the tie rule is already pinned by the in-tree tests** (`test_argmax_basic` / `_single_element` / `_all_equal` — tie→first-index 0 — / `_large_vocab` 256128, all with the 0xDEAD_BEEF sentinel green-zero guard); 4/4 PASS on this box (`cargo test -p riir-infer-gpu --release --features cubecl_runtime --lib sampling`). Kernel reduction is strict-greater ascending in phase 1 + lower-paired-index in the smem tree — the CPU first-index rule holds by construction. REMAINING (T3's wiring): the id must land in a device-side buffer the next token's gather reads (the launcher writes a 1-u32 handle already — wire, don't rebuild).
 - [ ] T2: CONSUME `row_gather_f32` (or its f16-table twin) — bit-identity vs the CPU row-upload path (f16 table, 1e6 random ids); table upload-once at construction.
 - [ ] T3: resident loop mode + harvest seam + env arm + counter; incumbent lane untouched (byte-identical boot assert).
 - [ ] T4: greedy bit-identity e2e — resident greedy walk == incumbent greedy walk (token-id sequence EXACT) on the 27B; G2 A/B via the bench_763 posture (P1-shape vs resident) + the league re-cell (bench_768/831 tg/ctx) before any promotion.
