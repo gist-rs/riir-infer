@@ -192,6 +192,13 @@ use riir_infer_core::deltanet::minimal_activation_cache::{
     MinimalActivationCache, MinimalLayerActivations,
 };
 
+/// Plan 626 T3 — the resident greedy lane's reach counter (the Bench 996
+/// vacuous-guard law): +1 per `resident_enqueue`, read via
+/// [`TernaryDeltanetGpuForward::resident_launch_count`]. Touched by nothing
+/// else in the crate, so a G1/G2 cell's delta assertion proves the lane ran.
+#[cfg(feature = "cubecl_runtime")]
+static RESIDENT_LAUNCHES: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
 // ───────────────────────────────────────────────────────────────────────────
 // GPU-side embedding dequant kernel (Issue 604 T8 G4 — alloc-free set_input_token)
 // ───────────────────────────────────────────────────────────────────────────
@@ -310,6 +317,120 @@ impl DequantWteRowCubeCL {
                 BufferArg::from_raw_parts(group_scale_f32, scale_len),
                 BufferArg::from_raw_parts(out, n as usize),
                 row_idx,
+                blocks64,
+                groups_per_row,
+                n,
+            );
+        }
+    }
+}
+
+/// CubeCL kernel: the INDIRECT variant of [`dequant_wte_row_f32`] (plan 626
+/// T3(a)) — the row id is read from a DEVICE id-buffer slot instead of the
+/// launch scalar, so the resident greedy loop never round-trips the token id
+/// through the host. The body is the scalar variant's per-element arithmetic
+/// verbatim with `row_idx = id_buf[id_slot]`, so row `id_buf[slot]`
+/// dequantizes BIT-IDENTICALLY to a `dequant_wte_row_f32(row_idx = id_buf[slot])`
+/// launch (the buffer-fed precedent is `dequant_wte_rows_f32` below).
+///
+/// # Parameters (scalar — zero Rust-heap allocation per token)
+///
+/// - `id_buf`: device id ring (u32 row ids); `id_slot` names this enqueue's
+///   slot — a scalar, so ONE kernel shape serves every ring depth.
+/// - everything else: identical layout to [`dequant_wte_row_f32`].
+#[cfg(feature = "cubecl_runtime")]
+#[cube(launch_unchecked)]
+fn dequant_wte_row_indirect_f32(
+    pos_bits_u32: &[u32],
+    neg_bits_u32: &[u32],
+    group_scale_f32: &[f32],
+    id_buf: &[u32],
+    out: &mut [f32],
+    id_slot: u32,
+    blocks64: u32,
+    groups_per_row: u32,
+    n: u32,
+) {
+    let col = ABSOLUTE_POS_X;
+    if col >= n {
+        terminate!();
+    }
+
+    let row_idx = id_buf[id_slot as usize];
+
+    let words_per_row = blocks64 * 2u32; // u64 → 2× u32
+    let block_idx = col / BITS_PER_BLOCK_DW;
+    let word_in_block = (col % BITS_PER_BLOCK_DW) / 32u32;
+    let bit_pos = col % 32u32;
+
+    let word_idx = (row_idx * words_per_row + block_idx * 2u32 + word_in_block) as usize;
+    let pos_bit = (pos_bits_u32[word_idx] >> bit_pos) & 1u32;
+    let neg_bit = (neg_bits_u32[word_idx] >> bit_pos) & 1u32;
+
+    let sign_f = pos_bit as f32 - neg_bit as f32; // +1, 0, or -1
+
+    let group = col / GROUP_SIZE_DW;
+    let scale = group_scale_f32[(row_idx * groups_per_row + group) as usize];
+
+    out[col as usize] = sign_f * scale;
+}
+
+/// Launcher for [`dequant_wte_row_indirect_f32`] (plan 626 T3(a)).
+///
+/// Unlike the scalar launcher — which bounds the plane metadata at
+/// `(row_idx + 1) * blocks64 * 2` — the row is device-side and unknown at
+/// launch, so the FULL table length is the only honest upper bound.
+/// `pub` — exported as the oracle for the plan 626 G1 bit-identity probe
+/// (`plan626_dequant_indirect_g1`): the same cross-crate reason the scalar
+/// [`DequantWteRowCubeCL`] is `pub`.
+#[cfg(feature = "cubecl_runtime")]
+pub struct DequantWteRowIndirectCubeCL;
+
+#[cfg(feature = "cubecl_runtime")]
+impl DequantWteRowIndirectCubeCL {
+    /// Launch the indirect wte dequant: `id_buf[id_slot]` names the row,
+    /// dequantized into `out` (n f32).
+    ///
+    /// # Safety
+    ///
+    /// Caller must ensure:
+    /// - `pos_bits_u32` / `neg_bits_u32` have `rows * blocks64 * 2` u32 elements
+    /// - `group_scale_f32` has `rows * groups_per_row` f32 elements
+    /// - `id_buf` has at least `id_slot + 1` u32 elements, and the id it names
+    ///   is `< rows` (a device-side value — the caller's protocol guarantees
+    ///   it: every id in the ring came from argmax over `vocab_size <= rows`)
+    /// - `out` has `n` f32 elements allocated
+    #[allow(clippy::too_many_arguments)]
+    pub unsafe fn launch<R: Runtime>(
+        client: &ComputeClient<R>,
+        pos_bits_u32: Handle,
+        neg_bits_u32: Handle,
+        group_scale_f32: Handle,
+        id_buf: Handle,
+        out: Handle,
+        id_slot: u32,
+        rows: u32,
+        blocks64: u32,
+        groups_per_row: u32,
+        n: u32,
+    ) {
+        let wg_size = 256u32;
+        let num_wg = n.div_ceil(wg_size);
+
+        let plane_len = rows as usize * blocks64 as usize * 2;
+        let scale_len = rows as usize * groups_per_row as usize;
+
+        unsafe {
+            dequant_wte_row_indirect_f32::launch_unchecked::<R>(
+                client,
+                CubeCount::Static(num_wg, 1, 1),
+                CubeDim::new_1d(wg_size),
+                BufferArg::from_raw_parts(pos_bits_u32, plane_len),
+                BufferArg::from_raw_parts(neg_bits_u32, plane_len),
+                BufferArg::from_raw_parts(group_scale_f32, scale_len),
+                BufferArg::from_raw_parts(id_buf, id_slot as usize + 1),
+                BufferArg::from_raw_parts(out, n as usize),
+                id_slot,
                 blocks64,
                 groups_per_row,
                 n,
@@ -3319,6 +3440,20 @@ pub struct TernaryDeltanetGpuForward {
     // B817 step-4 cell).
     pub(crate) active_prefill_len: usize,
 
+    // Plan 626 T3 — the GPU-resident greedy id ring. Argmax (the LAST-index
+    // twin, `ArgmaxLastCubeCL`) writes the next token id into slot
+    // `resident_t % resident_k`; the next enqueue's indirect embed reads slot
+    // `(resident_t + resident_k - 1) % resident_k` — the id NEVER reaches the
+    // host mid-stream. `Some` once `resident_begin` arms the stream; the
+    // incumbent per-token-sync lane never touches any of this (byte-identical
+    // boot). Harvest reads the whole ring in ONE fenced `read_one`.
+    resident_ids: Option<Handle>, // [resident_k] u32
+    /// Ring depth = the harvest cadence (`>= 2`: with `k >= 2` a slot's read
+    /// and write never alias within one enqueue).
+    resident_k: usize,
+    /// Ids enqueued since `resident_begin` (also the ring write cursor).
+    resident_t: usize,
+
     // Plan 534 T2: Metal tensor GEMM context for the matmul2d prefill path.
     // `None` when the `metal_tensor_gemm` feature is off, non-macOS, or Metal
     // init failed (falls back to CubeCL silently).
@@ -4648,6 +4783,9 @@ impl TernaryDeltanetGpuForward {
             tree_buffers: None,
             pos: 0,
             active_prefill_len: 0,
+            resident_ids: None,
+            resident_k: 0,
+            resident_t: 0,
             #[cfg(all(feature = "metal_tensor_gemm", target_os = "macos"))]
             metal_gemm,
             #[cfg(all(feature = "metal_tensor_gemm", target_os = "macos"))]
@@ -5073,6 +5211,210 @@ impl TernaryDeltanetGpuForward {
             .read_one(self.logits.clone())
             .expect("download logits");
         f32::from_bytes(&bytes).to_vec()
+    }
+
+    // ── Plan 626 T3 — the GPU-resident greedy decode loop ──────────────────
+    //
+    // The incumbent decode lane pays 17.79 ms/token (Issue 1168 P1): the
+    // per-token `read_one` of the full logits drains the queue, so the next
+    // token's embed dispatch runs on an IDLE GPU and its read blocks for the
+    // full GPU token. The measured deep-queue floor is 15.32 ms/token (P2,
+    // 65.30 tok/s) — the resident lane keeps the queue deep ACROSS the token
+    // boundary by never syncing per token:
+    //
+    // ```ignore
+    // resident_begin(seed, k);
+    // loop {
+    //     for _ in 0..k { resident_enqueue(); }   // NO host sync
+    //     let ids = resident_harvest(k);          // ONE fenced ring read
+    //     // detokenize + drain checks on the host, off the hot path
+    // }
+    // ```
+    //
+    // Each enqueue dispatches: indirect embed (dequant row `id_buf[slot]` →
+    // `x`, + the folded-rotation inverse) → the 1127 shape-only layer
+    // dispatches → `argmax_f32_last(logits → id_buf[slot])`. The id ring is
+    // the ping-pong pair generalized to the harvest depth `k`: enqueue `t`
+    // reads slot `(t + k - 1) % k` and writes slot `t % k` — with `k >= 2`
+    // the read and write never alias within one enqueue, and the in-order
+    // queue orders argmax-write → next-embed-read across enqueues.
+    //
+    // Greedy-only: sampled paths (top-k / top-p / temperature) keep the
+    // incumbent lane — they need the logits ON the host, which is exactly the
+    // sync this lane exists to remove. Speculative decode does not compose
+    // either (a rollback would need to un-write ring slots the argmax already
+    // produced); both documented loud, the serving router picks per request.
+    // Position bookkeeping needs NO device counter: the host knows the enqueue
+    // count — `pos` advances inside `forward_dispatch_only` exactly as the
+    // incumbent advances it, one per enqueue, host-authoritative.
+    //
+    // Vacuous-guard counter (the Bench 996 law): [`resident_launch_count`]
+    // increments ONLY here, so a reach assertion can prove the lane ran.
+
+    /// Plan 626 T3 — env arm for the resident lane: PROMOTE-ONLY, exact
+    /// literal `RIIR_DECODE_RESIDENT=1` arms; unset (or anything else) reads
+    /// false and every caller stays on the incumbent per-token-sync lane
+    /// byte-identically (the demote law — there is no demote literal: an
+    /// opt-in arm's env only ever arms). Read once per process (the OnceLock
+    /// convention — `gemv_ternary_cubecl`'s toggle statics).
+    pub fn resident_armed() -> bool {
+        static RESIDENT_ARMED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+        *RESIDENT_ARMED
+            .get_or_init(|| matches!(std::env::var("RIIR_DECODE_RESIDENT").as_deref(), Ok("1")))
+    }
+
+    /// Plan 626 T3 — the resident-lane reach counter: +1 per
+    /// [`resident_enqueue`](Self::resident_enqueue), touched by nothing else
+    /// (the Bench 996 vacuous-guard law). A G1/G2 cell asserts the delta
+    /// equals the token count exactly — bit-identical-by-design output can
+    /// never prove reach on its own.
+    pub fn resident_launch_count() -> u64 {
+        RESIDENT_LAUNCHES.load(std::sync::atomic::Ordering::Relaxed)
+    }
+
+    /// Arm a resident greedy stream: seed the id ring with `seed_token`
+    /// (the prompt's last token) at depth `k` — the harvest cadence. `k >= 2`
+    /// (loud panic otherwise: with `k = 1` a slot's read and write alias, and
+    /// a cadence-`k` harvest would race the ring wrap). Resets the enqueue
+    /// cursor; call [`reset_state`](Self::reset_state) FIRST — the stream
+    /// starts from whatever layer state the reset left (the incumbent's
+    /// `set_input_token` loop has the same contract).
+    ///
+    /// The ring allocation is begin-time (not steady-state hot path); the
+    /// incumbent lane never allocates it.
+    pub fn resident_begin(&mut self, seed_token: usize, k: usize) {
+        Self::refuse_if_pool_poisoned("at resident_begin");
+        assert!(
+            k >= 2,
+            "resident_begin: ring depth k = {k} < 2 — read and write slots \n             would alias within one enqueue; use the harvest cadence (8)"
+        );
+        let mut ring = vec![0u32; k];
+        ring[k - 1] = seed_token as u32;
+        self.resident_ids = Some(self.client.create_from_slice(u32::as_bytes(&ring)));
+        self.resident_k = k;
+        self.resident_t = 0;
+    }
+
+    /// Enqueue ONE greedy token with NO host sync: indirect embed from the
+    /// id ring → folded-rotation inverse (folded models) → all layers →
+    /// argmax (LAST-index twin) writing the next id back into the ring.
+    ///
+    /// Panics loud if [`resident_begin`](Self::resident_begin) has not armed
+    /// the ring. The id never reaches the host; read produced ids with
+    /// [`resident_harvest`](Self::resident_harvest) at the cadence `k`.
+    pub fn resident_enqueue(&mut self) {
+        Self::refuse_if_pool_poisoned("at resident_enqueue");
+        let ring = self.resident_ids.clone().expect(
+            "resident_enqueue: the id ring is not armed — call resident_begin(seed, k) first",
+        );
+        let k = self.resident_k;
+        let t = self.resident_t;
+        let n = self.config.n_embd;
+        let blocks64 = self.wte_handle.blocks64;
+        let groups_per_row = self.wte_handle.groups_per_row;
+
+        // Indirect embed: the row id comes from the ring slot the previous
+        // enqueue's argmax wrote (the seed slot at t = 0).
+        let read_slot = ((t + k - 1) % k) as u32;
+        unsafe {
+            DequantWteRowIndirectCubeCL::launch::<ActiveRuntime>(
+                &self.client,
+                self.wte_handle.pos_bits_u32.clone(),
+                self.wte_handle.neg_bits_u32.clone(),
+                self.wte_handle.group_scale_f32.clone(),
+                ring.clone(),
+                self.x.clone(),
+                read_slot,
+                self.wte_handle.m as u32,
+                blocks64 as u32,
+                groups_per_row as u32,
+                n as u32,
+            );
+        }
+        // Plan 602 B3 — the same folded site `set_input_token` runs (the
+        // rotated embedding table restores the primal basis; identical
+        // dispatch, so both lanes stay bit-identical on folded files).
+        if let (Some(cfg), Some(tables)) = (&self.rotation, &self.rot_tables)
+            && cfg.inverse_embedding
+        {
+            let signs = tables.signs_for_width(n).clone();
+            unsafe {
+                RotationCubeCL::launch_inverse::<ActiveRuntime>(
+                    &self.client,
+                    self.x.clone(),
+                    signs,
+                    n,
+                    n,
+                    cfg.block_size,
+                );
+            }
+        }
+
+        // The fresh-input producer (Issue 860's protocol holds: this lane is
+        // the second deliberate writer of an input into `x`).
+        self.x_input_fresh = true;
+        // All layers + lm_head (writes `self.logits`); advances `self.pos` by
+        // one — the same host-authoritative bookkeeping the incumbent lane
+        // runs, with zero device reads.
+        self.forward_dispatch_only();
+
+        // Argmax (LAST-index twin — the league harness tie rule) writes the
+        // next id into ring slot `t % k`. The in-order queue orders the
+        // logits write before this read and this write before the next
+        // enqueue's embed read.
+        let write_slot_handle = ring.offset_start(((t % k) * core::mem::size_of::<u32>()) as u64);
+        unsafe {
+            crate::sampling_cubecl::ArgmaxLastCubeCL::launch::<ActiveRuntime>(
+                &self.client,
+                self.logits.clone(),
+                write_slot_handle,
+                self.config.vocab_size,
+            );
+        }
+
+        // Optional periodic memory-pool cleanup — the same cadence
+        // `forward_token` runs (Issue 604 G2 crash workaround).
+        if self.cleanup_interval > 0 {
+            self.cleanup_counter += 1;
+            if self.cleanup_counter >= self.cleanup_interval {
+                self.cleanup_counter = 0;
+                self.client.memory_cleanup();
+            }
+        }
+
+        RESIDENT_LAUNCHES.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        self.resident_t += 1;
+    }
+
+    /// Harvest the ids of the LAST `k` enqueued tokens — ONE fenced ring
+    /// read (the drain check is the read itself: `read_one` syncs the queue).
+    /// Returns them in production order.
+    ///
+    /// `k` must not exceed the ring depth (older slots are already
+    /// overwritten) nor the enqueue count. Harvest at LEAST every
+    /// `resident_k` enqueues — the next enqueue past the wrap would overwrite
+    /// the oldest unharvested slot. Detokenization and any drain-dependent
+    /// bookkeeping happen here, off the enqueue hot path.
+    pub fn resident_harvest(&mut self, k: usize) -> Vec<u32> {
+        Self::refuse_if_pool_poisoned("at resident_harvest");
+        let ring = self
+            .resident_ids
+            .clone()
+            .expect("resident_harvest: the id ring is not armed — call resident_begin first");
+        assert!(
+            k <= self.resident_k,
+            "resident_harvest: asked for {k} ids but the ring depth is {} — older slots are overwritten",
+            self.resident_k
+        );
+        assert!(
+            k <= self.resident_t,
+            "resident_harvest: asked for {k} ids but only {} enqueued",
+            self.resident_t
+        );
+        let bytes = self.client.read_one(ring).expect("read resident id ring");
+        let slots = u32::from_bytes(&bytes);
+        let t = self.resident_t;
+        ((t - k)..t).map(|j| slots[j % self.resident_k]).collect()
     }
 
     // ── Plan 623 T1.5 — multi-host stage seams (feature `multi_host`) ──────
@@ -11532,6 +11874,15 @@ impl TernaryDeltanetGpuForward {
         Self::refuse_if_pool_poisoned("at state reset");
         // Issue 860 T3: a new sequence must upload its own first token.
         self.x_input_fresh = false;
+        // Plan 626 T3: a new sequence must re-arm the resident stream —
+        // DISARMING the ring makes any enqueue/harvest without a fresh
+        // `resident_begin` panic loud instead of silently continuing the OLD
+        // stream (the stale seed slot would read as a plausible token). The
+        // dropped handle recycles in the pool; begin re-allocates at
+        // begin-time (not steady-state hot path).
+        self.resident_ids = None;
+        self.resident_k = 0;
+        self.resident_t = 0;
         // Issue 782: the flash-arm length gates read this — a stale value from
         // a previous long prompt would misroute a fresh short one.
         self.active_prefill_len = 0;

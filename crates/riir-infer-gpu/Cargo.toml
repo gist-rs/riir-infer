@@ -707,3 +707,17 @@ required-features = ["metal_tensor_gemm", "cubecl_runtime", "ternary_gemv", "mul
 name = "issue1160_g0_collapse_probe"
 path = "tests/issue1160_g0_collapse_probe.rs"
 required-features = ["metal_tensor_gemm", "cubecl_runtime", "ternary_gemv", "multi_host", "ternary_gemm_batched", "riir-infer-core/bonsai2_hadamard"]
+
+[[test]]
+name = "plan626_dequant_indirect_g1"
+path = "tests/plan626_dequant_indirect_g1.rs"
+required-features = ["cubecl_runtime", "ternary_gemv"]
+
+# Plan 626 T4 — the resident greedy walk EXACT e2e (macOS Metal posture; the
+# [[test]] rows cannot express target_os, the file-level cfg empties it
+# elsewhere — the issue1129 CUDA-twin shape). Run explicitly (--ignored):
+# see the file header for the full command.
+[[test]]
+name = "plan626_resident_greedy_g1"
+path = "tests/plan626_resident_greedy_g1.rs"
+required-features = ["cubecl_runtime", "ternary_gemv", "ternary_gemm_batched", "ternary_deltanet_chunked_prefill", "ternary_attention_batched_prefill", "riir-infer-core/bonsai2_hadamard"]
