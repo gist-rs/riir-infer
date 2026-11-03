@@ -13,10 +13,17 @@
 
 One pre-registered gate: **does the PCA-training-free LSA bucket indexer beat our dense prefill arm by ≥2× per attention layer at pp1M on m5ultra, at G1 accuracy parity on real-tensor long-context captures?** Win → promote; lose → demote loser, recorded negative (the HGA precedent shape).
 
+## Hardware gate (owner note, 2026-11-03)
+
+The 4×128GB M5 Ultra boxes are **reserved for this lane but not on site yet** ("soon"). Two tracks:
+
+- **Pre-arrival (96GB pair: amo builder / bmo runner)** — Phase 0 acquisition + arch probe (CPU work), Phase 1 CPU-reference forward + parity, Phase 2 quant-lane development (ternary/PQ2 recipe on the MoE experts), Phase 3 harness CONSTRUCTION (real-tensor captures at ≤128k), Metal bring-up at short contexts. No 1M claims off 96GB.
+- **GATED on 128GB arrival** — pp512k/pp1M bench cells, the PQ2 single-box @1M posture (63–80GB weights + ~10–15GB 1M-KV + routing buffers is over-budget on 96GB, comfortable on 128GB), and the FP8 4-box multi-host posture (Plan-623 lane). The G2 gate (≥2×/layer @pp1M) runs only after the gate opens; the pre-arrival G2 bar is set at the ≤128k cells instead.
+
 ## Phases
 
 ### Phase 0 — acquisition + landscape
-- [ ] Download `zai-org/GLM-5.3-Flash` checkpoint (HF; verify SHA256 per-token, record BLAKE3 in `data/BASE_MODELS.md`-style pin — third-party pin law)
+- [ ] Download `zai-org/GLM-5.3-Flash` checkpoint (HF; verify SHA256 per-token, record BLAKE3 in `data/BASE_MODELS.md`-style pin — third-party pin law). Default target `SDXC1TB` — internal free space cannot hold the ~650GB bf16 checkout; OWNER CONFIRM before the multi-hundred-GB pull (or the FP8-class variant if the repo ships one)
 - [ ] Arch probe (the `plan402_gguf_probe` pattern for safetensors/config): layer map (sparse vs linear attention split), MLA latent dims, mHC placement, MoE expert count/active, rotary layout (paper says none — verify in config), tokenizer
 - [ ] Survey community posture: MLX / llama.cpp GLM-5.3 support state (the serving-vehicle fork; llama.cpp = the league opponent)
 - [ ] Memory budget doc: 1M KV under MLA ≈ 1 GB/layer/sparse-layer (paper datum) → total KV + weights per posture (96GB single-box ternary vs 4×128GB FP8 multi-host)
