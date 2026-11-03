@@ -1,7 +1,8 @@
 # Plan 626 — GPU-resident greedy decode: the queue-never-drains token loop (Issue 1168 T3)
 
 **Status:** T1/T1b measured (Issue 1168); T1/T2 VERIFIED in-tree 2026-11-03; T3–T5 implementation claimed.
-**Claimed:** zed-dd837b96@amo (amo), 1793688133, expires 2026-11-05T06:42Z.
+**Lease closed:** (handed over unexpired to zed-5ae93349@amo — their T3/T3a/T4 implementation WIP (+683 lines: argmax_f32_last twin, resident ring + begin/enqueue/harvest, indirect dequant kernel, 2 G1 test files) was already mid-flight in this shared tree; session zed-dd837b96, 1793688133, expiry was 2026-11-05T06:42Z)
+**Claimed:** zed-5ae93349@amo (amo), 1793688980, expires 2026-11-05T06:42Z.
 
 ## Premise (measured, Issue 1168)
 
@@ -87,9 +88,6 @@ host loop (greedy lane, opt-in):
 - [ ] T3a (the zed-7228dbf2 tie-rule observation, ACCEPTED 2026-11-03): the resident lane's argmax must be a **host-rule twin** — the league harness argmax (`bench_831_decode_long`/`bench_809`) is `max_by(total_cmp)` = LAST-index-on-ties, while the in-tree `argmax_f32` pins FIRST-index (4/4 sentinel tests, untouched). At an exact-f32 tie the walks diverge and the G1 EXACT bar breaks. So T3 adds `argmax_f32_last` (or an armed variant): same reduction shape, merge rule = lexicographic max over (value, index) — prefer higher value, on equal value prefer HIGHER index (a total order, so any reduction tree reproduces max_by exactly). Known sub-case documented: total_cmp orders −0.0 < +0.0 (the GPU `==` merge treats them equal) — the tie fixture uses finite non-zero values; NaN logits are upstream-screened (finite.rs) and out of scope. T4's identity test carries the tie-forcing fixture: both rules on one synthetic tie vector assert the divergence is EXACTLY the tie token (kernel first-index vs host last-index) — the class is tested, never latent. Real-logits walks then agree because ties are measure-zero; degenerate ternary loops (repeated-token contexts) are the realistic tie source, so the fixture is not paranoia.
 - [ ] T4: greedy bit-identity e2e — resident greedy walk == incumbent greedy walk (token-id sequence EXACT) on the 27B; G2 A/B via the bench_763 posture (P1-shape vs resident) + the league re-cell (bench_768/831 tg/ctx) before any promotion.
 - [ ] T5: promotion verdict — GOAT bars + reviewer/owner verdict; demote check = env literal restores the incumbent byte-identical path.
-- [ ] T3: resident loop mode + harvest seam + env arm + counter; incumbent lane untouched (byte-identical boot assert).
-- [ ] T4: greedy bit-identity e2e — resident greedy walk == incumbent greedy walk (token-id sequence EXACT) on the 27B; G2 A/B via the bench_763 posture (P1-shape vs resident) + the league re-cell (bench_768/831 tg/ctx) before any promotion.
-- [ ] T5: promotion verdict — GOAT bars + reviewer/owner verdict; demote check = env literal restores the incumbent lane byte-identically.
 
 ## Bars (preregistered)
 
