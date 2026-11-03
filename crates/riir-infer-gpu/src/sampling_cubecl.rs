@@ -875,6 +875,43 @@ mod tests {
         );
     }
 
+    /// The residue-split tie (zed-dd837b96's review fixture): equal maxima at
+    /// slots 0 and 2 — indices whose width-2 butterfly pair puts the LOWER
+    /// index on the left — so BOTH kernels are exact on their own rules AND
+    /// divergent: the pinned strict-greater tree keeps slot 0 (true
+    /// first-index = 0), the lex twin takes slot 2 (true last-index = 2, the
+    /// host `max_by(total_cmp)` pick). Companion to the adjacent-slots
+    /// fixture above, which isolates the rule difference at slots 0/1.
+    #[test]
+    fn test_argmax_residue_split_tie_both_rules_exact_and_divergent() {
+        let ctx = CubeCLContext::new().expect("CubeCL should initialize");
+        let client = ctx.client();
+
+        let input: Vec<f32> = vec![5.0, 2.0, 5.0, 1.0];
+
+        let input_handle = client.create_from_slice(f32::as_bytes(&input));
+        let first_out = sentinel_out(&client);
+        unsafe {
+            ArgmaxCubeCL::launch::<crate::cubecl_runtime::ActiveRuntime>(
+                &client,
+                input_handle,
+                first_out.clone(),
+                input.len(),
+            );
+        }
+        let first = read_argmax(&client, first_out);
+
+        let last = run_last_kernel(&client, &input);
+
+        assert_eq!(first, 0u32, "pinned first-index kernel: exact on this residue split");
+        assert_eq!(
+            last, 2u32,
+            "twin: exact on the last-index rule AND divergent from first (0 != 2)"
+        );
+        assert_eq!(last, host_argmax_last(&input) as u32);
+        assert_ne!(first, last);
+    }
+
     /// The twin reproduces `max_by(total_cmp)` on deterministic pseudo-random
     /// logits at league scale (4096 ≫ the 256-wide reduction tree, maxima
     /// seeded at several positions including the last element).
