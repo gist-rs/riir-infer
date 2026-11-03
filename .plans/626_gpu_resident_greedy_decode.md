@@ -17,6 +17,25 @@ refuted.
 
 ## Design
 
+**Substrate-first (verified 2026-11-03, this session): both kernels ALREADY EXIST
+in-tree — the arc is a WIRING plan, not a kernel plan.**
+
+- **Argmax-on-device: EXISTS** — `sampling_cubecl.rs` `argmax_f32` (parallel
+  reduction → u32, 4-byte download) + launcher, plus `temperature_argmax_f32`.
+  `buffer.rs` already documents the "GPU-resident argmax: download only 4 bytes
+  instead of full logits" intent. T1 = verify the tie rule (first-index; the
+  file's -1e30 note) against the CPU reference on all-tie + single-max +
+  248320-shape fixtures, and pin it with a test.
+- **Row-gather-on-device: EXISTS** — `deltanet_tree_verify_cubecl.rs`
+  `row_gather_f32` + `gather` launcher (the spec-verify lane gathers rows on
+  GPU today); multi-row variant `gather_rows_f32` in `encoder_lane_cubecl.rs`.
+  T2 = verify an f16-table arm (the GGUF `token_embd` is f16; the incumbent CPU
+  path uploads exact f16→f32 rows — the gather must produce bit-identical f32,
+  cast in-kernel) or, if the f16 arm is not worth a kernel, upload the table
+  pre-cast to f32 once (2.4 GB → 4.8 GB f32... measure; the f16-in-kernel cast
+  is the memory-honest arm) and wire `row_gather_f32` against it with the
+  bit-identity test.
+
 Keep the queue deep across the token boundary by making the greedy token chain
 fully device-side:
 
@@ -28,20 +47,17 @@ host loop (greedy lane, opt-in):
     # NO per-token host sync; the id never reaches the host mid-stream
 ```
 
-1. **Argmax-on-device kernel** (`gemv_argmax_device.rs`): reduction over
+1. **Argmax-on-device: CONSUME** (`sampling_cubecl.rs`) — reduction over
    `logits[0..vocab]` writing a single `u32` id into a device buffer.
-   **First-index tie rule** (the determinism law — Issue 940): strictly-greater
-   comparison walking ascending index, so ties pick the FIRST index exactly as
-   the CPU reference does. Two-stage: 256-way partial argmax (one plane per
-   chunk, plane_reduce) → final 256-lane reduce. G1 oracle: CPU argmax of the
-   same logits, all-tie and single-max fixtures.
-2. **Embed-gather kernel** (`embed_gather_device.rs`): reads the `u32` id from
-   `id_buf`, copies row `id` of the token-embedding table (f16 in GGUF storage)
-   into the input row buffer (f32, same layout the incumbent's CPU row-upload
-   produces — bit-identical: f16→f32 cast is exact). The table uploads ONCE at
-   construction (`token_embd` f16, 248320×5120×2 B ≈ 2.4 GB — unified memory,
-   no VRAM pressure class on M-Ultra; the VRAM pre-flight row documents it).
-   f32-table variant behind the same kernel (cast at upload).
+   **First-index tie rule** (the determinism law — Issue 940): pin against the
+   CPU reference (all-tie and single-max fixtures) before wiring.
+2. **Embed-gather: CONSUME + f16 arm** (`deltanet_tree_verify_cubecl.rs`
+   `row_gather_f32`, or a small f16-table twin if the cast must happen
+   in-kernel) — copies row `id` of the token-embedding table into the input row
+   buffer, same layout the incumbent's CPU row-upload produces. The table
+   uploads ONCE at construction (`token_embd` f16, 248320×5120×2 B ≈ 2.4 GB —
+   unified memory, no VRAM pressure class on M-Ultra; the VRAM pre-flight row
+   documents it). f32-table variant behind the same kernel (cast at upload).
 3. **The resident loop** (`ternary_deltanet_gpu_forward.rs`, new mode beside
    `forward_token`): `resident_enqueue(&mut self, next_is_fresh: bool)` +
    `resident_harvest(&mut self, k: usize) -> Vec<u32>`. The incumbent lane stays
@@ -64,8 +80,8 @@ host loop (greedy lane, opt-in):
 
 ## Tasks
 
-- [ ] T1: argmax kernel + CPU-reference parity (all-tie, single-max, 248320-shape) — first-index rule pinned by test.
-- [ ] T2: embed-gather kernel + bit-identity vs the CPU row-upload path (f16 table, 1e6 random ids).
+- [ ] T1: CONSUME `sampling_cubecl::argmax_f32` — verify + pin the tie rule (all-tie, single-max, 248320-shape) against the CPU reference; wire the id into a device-side buffer the next token's gather reads.
+- [ ] T2: CONSUME `row_gather_f32` (or its f16-table twin) — bit-identity vs the CPU row-upload path (f16 table, 1e6 random ids); table upload-once at construction.
 - [ ] T3: resident loop mode + harvest seam + env arm + counter; incumbent lane untouched (byte-identical boot assert).
 - [ ] T4: greedy bit-identity e2e — resident greedy walk == incumbent greedy walk (token-id sequence EXACT) on the 27B; G2 A/B via the bench_763 posture (P1-shape vs resident) + the league re-cell (bench_768/831 tg/ctx) before any promotion.
 - [ ] T5: promotion verdict — GOAT bars + reviewer/owner verdict; demote check = env literal restores the incumbent lane byte-identically.
