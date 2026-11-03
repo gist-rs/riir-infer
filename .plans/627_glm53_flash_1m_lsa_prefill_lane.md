@@ -1,6 +1,6 @@
 # Plan 627: GLM-5.3-Flash 1M-context lane on M5 Ultra — arch support + LSA bucket indexer (owner-pulled)
 
-**Status:** Filed + claimed — owner pull landed 2026-11-03 (this conversation): M5 Ultra fleet (amo/bmo 96GB now, +4×128GB planned) will run GLM-5.3-Flash with 1M context as the USUAL posture; LSA prefill is the owner-stated need. Design input: [`.research/020_LSA_Latent_Sparse_Attention.md`](../.research/020_LSA_Latent_Sparse_Attention.md); lane lineage: Plan 624 (sparse prefill arm) → bench 1157 → issue 1165 (τ=0.85 envelope promotion, ≥16K, Metal — the dense-side baseline this lane extends).
+**Status:** Filed + claimed — owner pull landed 2026-11-03 (this conversation): M5 Ultra fleet (amo/bmo 96GB now, +4×128GB planned) will run GLM-5.3-Flash with 1M context as the USUAL posture; LSA prefill is the owner-stated need. Design input: [`.research/020_LSA_Latent_Sparse_Attention.md`](../.research/020_LSA_Latent_Sparse_Attention.md) + [`.research/021_ZHA_Hierarchical_Tree_Indexer.md`](../.research/021_ZHA_Hierarchical_Tree_Indexer.md) (ZHA, arXiv:2610.42112 — design rows adopted below: top-p mass-rule A/B as a third retention arm, crossover-band pre-registration, trained-tree arm ONLY if the PCA floor misses G1; the KL reference-query distill PoC is riir-train [`.issues/666`](../riir-train/.issues/666_zha_reference_query_distill_poc.md) — no model backward, PQ2/kernel-frozen compatible, the distill-arm vehicle if Phase 4's floor misses); lane lineage: Plan 624 (sparse prefill arm) → bench 1157 → issue 1165 (τ=0.85 envelope promotion, ≥16K, Metal — the dense-side baseline this lane extends).
 
 **Claimed:** zed-m3-lsa-distill, 1793698334, expires 2026-11-10T00:00:00+00:00
 
@@ -49,7 +49,9 @@ The 4×128GB M5 Ultra boxes are **reserved for this lane but not on site yet** (
 - [ ] `lsa_bucket` feature (default-off): RoPE-free/MLA-latent index space (the pinned `index_space.py` contract), d(idx)=64, pool 4:1, Gram-Ward buckets (n̄b≈8, unit-norm centroids), bucket cache (mmap-friendly — NeuronShard-adjacent layout)
 - [ ] Flat search first: threshold top-k (sample→θ→compact→rescore→packed score‖id radix select — the App. F kernel shape) as wgpu/Metal compute or CPU SIMD (d=64 makes a CPU indexer viable for the poc)
 - [ ] PCA training-free projections = the FIRST arm (zero training); distillation (W^idx_Q,K + τ) only if the floor misses G1 — rides the riir-train Plan 476 owner-gated lane shape
-- [ ] Tree/beam search deferred until flat wins (paper: tree loses accuracy past 1M on GLM; decode tree only pays batched ≥1M)
+- [ ] Retention-rule A/B arm (ZHA row 1): top-p mass routing vs τ-envelope vs top-k at the pre-arrival ≤128k G2 bar — three arms, one gate, demote losers
+- [ ] Crossover-band pre-registration (ZHA row 4 / build-hygiene law): predict N* (the bucket count where the indexer starts paying) BEFORE the pp256k+ cells, land the measured crossover in-band
+- [ ] Tree/beam search deferred until flat wins (paper: tree loses accuracy past 1M on GLM; decode tree only pays batched ≥1M; ZHA row 5 — a trained-tree arm opens ONLY if the PCA floor misses G1 at pp1M, with the ZHA per-level mass schedule as its starting shape)
 - [ ] GOAT gate (pre-registered HERE, before any measurement): G1 accuracy parity on real captures (≥ dense-self on needle/trail families, per-family not aggregate) · G2 ≥2× per-attention-layer prefill @pp1M m5ultra vs dense arm (--release, exclusive rig, box-state quoted) · G3 flag-off byte-identical at ALL existing league cells (≤32k — the crossover law says the flag must not touch them) · G4 alloc-free hot path
 - [ ] Promote-to-default only on G1–G4 + owner; demote the dense arm in the ≥256k cells if won (keep dense <16K per the issue-1165 conditions)
 
