@@ -1,6 +1,7 @@
 # Issue 1169: weight_delta — lossless sparse weight-delta transport primitive
 
 **Status:** Open — Phase 0 (premise measurement, kill branch armed)
+**Claimed:** zed-agent@amo, 2026-11-04, expires 2026-11-06T00:00Z (48 h)
 
 **Distill:** `../.research/022_Gpu_Accelerated_Weight_Teleportation.md` (humans& "GPU-accelerated Weight Teleportation", 2026-11-02; prior art Miles arXiv:2609.08368 §4.3 + SGLang). Mechanism is published + open-source — this issue is the CONSUME/integration PoC, not a novelty claim.
 
