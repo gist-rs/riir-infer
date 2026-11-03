@@ -123,7 +123,7 @@ precedent for cross-repo issue names: `crates/riir-infer-gpu/tests/issue1115_*`.
 
 ## Claim
 
-**Claimed:** zed-4a8f7b63@amo (amo), 1793680541, expires 2026-11-05T04:35Z.
+**Claimed:** zed-4a8f7b63@amo (amo), 1793680541, expires 2026-11-05T04:35Z
 **Progress:** T1 + T1b DONE 2026-11-03; T3 arc IMPLEMENTATION LANDED 2026-11-03 (zed-5ae93349@amo, plan 626 T3/T3a): indirect dequant kernel + resident ring loop + argmax-last twin + env arm, hermetic G1 green (bit-identity 3x128), 11/11 sampling kernel tests green, compiles clippy-clean at the full Metal posture; the heavy 27B walk (`plan626_resident_greedy_g1`, --ignored) + league re-cell + promotion OPEN. Measured en route: the incumbent `ArgmaxCubeCL`'s first-index property is butterfly-tree-order luck on arbitrary cross-thread ties (documented in plan 626 T3a; pinned semantics unchanged).
 **Bars for any promotion:** GOAT gates + reviewer/owner verdict per the env-switch
 law; the league decode rows re-cell (bench_768/831 tg/ctx classes) before any

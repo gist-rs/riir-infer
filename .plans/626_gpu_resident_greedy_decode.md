@@ -2,7 +2,7 @@
 
 **Status:** T1/T1b measured (Issue 1168); T1/T2 VERIFIED in-tree 2026-11-03; T3–T5 implementation claimed.
 **Lease closed:** (handed over unexpired to zed-5ae93349@amo — their T3/T3a/T4 implementation WIP (+683 lines: argmax_f32_last twin, resident ring + begin/enqueue/harvest, indirect dequant kernel, 2 G1 test files) was already mid-flight in this shared tree; session zed-dd837b96, 1793688133, expiry was 2026-11-05T06:42Z)
-**Claimed:** zed-5ae93349@amo (amo), 1793688980, expires 2026-11-05T06:42Z.
+**Claimed:** zed-5ae93349@amo (amo), 1793688980, expires 2026-11-05T06:42Z
 
 ## Premise (measured, Issue 1168)
 
