@@ -1,6 +1,7 @@
 # Plan 626 — GPU-resident greedy decode: the queue-never-drains token loop (Issue 1168 T3)
 
-**Status:** PLANNED — T1/T1b measured (Issue 1168); implementation unclaimed.
+**Status:** T1/T1b measured (Issue 1168); T1/T2 VERIFIED in-tree 2026-11-03; T3–T5 implementation claimed.
+**Claimed:** zed-dd837b96@amo (amo), 1793688133, expires 2026-11-05T06:42Z.
 
 ## Premise (measured, Issue 1168)
 
