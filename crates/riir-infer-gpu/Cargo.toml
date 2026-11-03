@@ -725,4 +725,4 @@ required-features = ["cubecl_runtime", "ternary_gemv", "ternary_gemm_batched", "
 [[test]]
 name = "plan626_resident_g2_ab"
 path = "tests/plan626_resident_g2_ab.rs"
-required-features = ["cubecl_runtime", "ternary_gemv", "ternary_gemm_batched", "ternary_deltanet_chunked_prefill", "ternary_attention_batched_prefill", "riir-infer-core/bonsai2_hadamard"]
+required-features = ["cubecl_runtime", "ternary_gemv", "ternary_gemm_batched", "ternary_deltanet_chunked_prefill", "ternary_attention_batched_prefill", "deltanet_recurrence_rowpar", "params_handle_cache", "riir-infer-core/bonsai2_hadamard"]

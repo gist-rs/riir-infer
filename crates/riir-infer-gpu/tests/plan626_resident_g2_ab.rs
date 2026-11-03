@@ -39,6 +39,8 @@
     feature = "ternary_gemm_batched",
     feature = "ternary_deltanet_chunked_prefill",
     feature = "ternary_attention_batched_prefill",
+    feature = "deltanet_recurrence_rowpar",
+    feature = "params_handle_cache",
     target_os = "macos",
     not(debug_assertions)
 ))]
@@ -134,6 +136,11 @@ fn plan626_resident_g2_ab() {
         eprintln!("[skip] no GPU (CubeCLContext::new failed)");
         return;
     };
+    // The bench_763 census posture: the uniform cache forced ON (the composed
+    // config — params_handle_cache + uniform cache — is what the P1/P2
+    // numbers measured; without this the cell reads ~2x and the bar is
+    // unadjudicable, the first G2 run's finding).
+    cubecl::wgpu::set_uniform_cache_override(Some(true));
 
     let model_path = std::env::var("BONSAI_GGUF")
         .unwrap_or_else(|_| "../../riir-train/data/Ternary-Bonsai-2-27B-PQ2_0.gguf".to_string());
