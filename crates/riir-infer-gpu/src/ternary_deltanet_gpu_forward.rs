@@ -5213,7 +5213,7 @@ impl TernaryDeltanetGpuForward {
         f32::from_bytes(&bytes).to_vec()
     }
 
-    // ── Plan 626 T3 — the GPU-resident greedy decode loop ──────────────────
+    // ── Plan 626 T3 — the GPU-resident greedy decode loop ─────────────
     //
     // The incumbent decode lane pays 17.79 ms/token (Issue 1168 P1): the
     // per-token `read_one` of the full logits drains the queue, so the next
@@ -5239,6 +5239,15 @@ impl TernaryDeltanetGpuForward {
     // the read and write never alias within one enqueue, and the in-order
     // queue orders argmax-write → next-embed-read across enqueues.
     //
+    // ⚠ Ring slots are 32 BYTES wide (RING_SLOT_WORDS u32s), not 4: the
+    // argmax output binds the slot as a sub-handle, and wgpu's
+    // `min_storage_buffer_offset_alignment` (32) rejects any bind offset
+    // that is not a multiple of 32 — a 4-byte stride lands slots 1..k-1 at
+    // 4-byte offsets and the first wrap dies at create_bind_group
+    // (measured: `Buffer offset 16774148 ... limit 32`, pool base 32-aligned
+    // + slot 4). The stride costs 28 wasted bytes per slot; the pool offset
+    // base itself is alignment-agnostic.
+    //
     // Greedy-only: sampled paths (top-k / top-p / temperature) keep the
     // incumbent lane — they need the logits ON the host, which is exactly the
     // sync this lane exists to remove. Speculative decode does not compose
@@ -5250,6 +5259,11 @@ impl TernaryDeltanetGpuForward {
     //
     // Vacuous-guard counter (the Bench 996 law): [`resident_launch_count`]
     // increments ONLY here, so a reach assertion can prove the lane ran.
+
+    /// u32s per ring slot — 32 bytes, the wgpu `min_storage_buffer_offset_
+    /// alignment` floor (see the module comment: a 4-byte slot stride dies at
+    /// create_bind_group on the first unaligned slot).
+    const RING_SLOT_WORDS: usize = 8;
 
     /// Plan 626 T3 — env arm for the resident lane: PROMOTE-ONLY, exact
     /// literal `RIIR_DECODE_RESIDENT=1` arms; unset (or anything else) reads
@@ -5281,15 +5295,17 @@ impl TernaryDeltanetGpuForward {
     /// `set_input_token` loop has the same contract).
     ///
     /// The ring allocation is begin-time (not steady-state hot path); the
-    /// incumbent lane never allocates it.
+    /// incumbent lane never allocates it. Slots are [`RING_SLOT_WORDS`] u32s
+    /// wide (32 bytes — the bind-alignment floor).
     pub fn resident_begin(&mut self, seed_token: usize, k: usize) {
         Self::refuse_if_pool_poisoned("at resident_begin");
         assert!(
             k >= 2,
-            "resident_begin: ring depth k = {k} < 2 — read and write slots \n             would alias within one enqueue; use the harvest cadence (8)"
+            "resident_begin: ring depth k = {k} < 2 — read and write slots \
+             would alias within one enqueue; use the harvest cadence (8)"
         );
-        let mut ring = vec![0u32; k];
-        ring[k - 1] = seed_token as u32;
+        let mut ring = vec![0u32; k * Self::RING_SLOT_WORDS];
+        ring[(k - 1) * Self::RING_SLOT_WORDS] = seed_token as u32;
         self.resident_ids = Some(self.client.create_from_slice(u32::as_bytes(&ring)));
         self.resident_k = k;
         self.resident_t = 0;
@@ -5314,8 +5330,9 @@ impl TernaryDeltanetGpuForward {
         let groups_per_row = self.wte_handle.groups_per_row;
 
         // Indirect embed: the row id comes from the ring slot the previous
-        // enqueue's argmax wrote (the seed slot at t = 0).
-        let read_slot = ((t + k - 1) % k) as u32;
+        // enqueue's argmax wrote (the seed slot at t = 0). The kernel indexes
+        // WORDS, so the slot becomes its word offset (32-byte slot stride).
+        let read_slot = ((t + k - 1) % k) * Self::RING_SLOT_WORDS;
         unsafe {
             DequantWteRowIndirectCubeCL::launch::<ActiveRuntime>(
                 &self.client,
@@ -5324,7 +5341,7 @@ impl TernaryDeltanetGpuForward {
                 self.wte_handle.group_scale_f32.clone(),
                 ring.clone(),
                 self.x.clone(),
-                read_slot,
+                read_slot as u32,
                 self.wte_handle.m as u32,
                 blocks64 as u32,
                 groups_per_row as u32,
@@ -5362,7 +5379,15 @@ impl TernaryDeltanetGpuForward {
         // next id into ring slot `t % k`. The in-order queue orders the
         // logits write before this read and this write before the next
         // enqueue's embed read.
-        let write_slot_handle = ring.offset_start(((t % k) * core::mem::size_of::<u32>()) as u64);
+        // Argmax (LAST-index twin) writes the next id into ring slot `t % k`.
+        // The slot sub-handle's byte offset is slot × 32 (RING_SLOT_WORDS u32s)
+        // — a multiple of the wgpu min_storage_buffer_offset_alignment, which
+        // a 4-byte stride violates on the first unaligned slot (the measured
+        // create_bind_group refusal). The in-order queue orders the logits
+        // write before this read and this write before the next enqueue's
+        // embed read.
+        let write_slot_handle = ring
+            .offset_start(((t % k) * Self::RING_SLOT_WORDS * core::mem::size_of::<u32>()) as u64);
         unsafe {
             crate::sampling_cubecl::ArgmaxLastCubeCL::launch::<ActiveRuntime>(
                 &self.client,
@@ -5414,7 +5439,9 @@ impl TernaryDeltanetGpuForward {
         let bytes = self.client.read_one(ring).expect("read resident id ring");
         let slots = u32::from_bytes(&bytes);
         let t = self.resident_t;
-        ((t - k)..t).map(|j| slots[j % self.resident_k]).collect()
+        ((t - k)..t)
+            .map(|j| slots[j % self.resident_k * Self::RING_SLOT_WORDS])
+            .collect()
     }
 
     // ── Plan 623 T1.5 — multi-host stage seams (feature `multi_host`) ──────
