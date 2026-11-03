@@ -63,23 +63,56 @@ attackable mass is the **cost of the sync itself**, not its existence:
 
 ## Preregistered plan
 
-- **T1 (probe, this issue):** `issue1168_readback_floor_probe.rs` (riir-infer-gpu
-  tests, `#[ignore]`, GPU): median `read_one` cost for (a) 4 B, (b) 993 KB, on a
-  drained queue; (c) after a tiny GEMV dispatch (tail+copy decomposition); (d) N-deep
-  queue + single read (the Phase B amortization reference). Decides rung 1 vs rung 2
-  by measurement, not prose.
-- **T2 (cheap rung, if T1 says copy-dominated):** GPU argmax summary in the lm_head
-  epilogue, opt-in `RIIR_DECODE_LOGITS_SUMMARY=1` (PROMOTE-ONLY, exact-literal arms;
-  demote = incumbent byte-identical path). G1: sampled tokens bit-identical (FNV walk
-  EXACT on bench_763-style runs); G2: e2e decode ≥ +5% at ctx-class on m5ultra; G4:
-  no new steady-state allocations on the hot path.
-- **T3 (arc, if T1 says sync-dominated):** K-deferred sync plan (separate `.plans/`
-  file before implementation; rides the vendored-cubecl patch surface only with a
-  verdict — owner-gated by the source-secrecy posture: patches stay IN-REPO, never
-  published).
-- **Bars for any promotion:** GOAT gates + reviewer/owner verdict per the env-switch
-  law; the league decode rows re-cell (bench_768/831 tg/ctx classes) before any
-  default flip; the FNV walk pins must stay EXACT.
+- **T1 (probe, DONE 2026-11-03):** `issue1168_readback_floor_probe.rs` (this repo,
+  `#[ignore]`, bare client, no model) + `issue1168_decode_loop_decomposition.rs`
+  (riir-ai, in-situ, real model). **Results — the T2 band is REFUTED, T3 is the
+  arc:**
+
+  | probe | ms |
+  |---|---:|
+  | (a) read 4 B drained | 0.173 |
+  | (b) read 993 KB drained | 0.167 (bytes ≈ free) |
+  | (c) 1 tiny GEMV → read | 0.246 |
+  | P1 dispatch front (sync-per-token) | 2.455/tok |
+  | P1 read (blocks for the whole GPU token) | 15.328/tok |
+  | **P1 total (league shape)** | **17.787/tok** |
+  | **P2 floor (deep queue)** | **15.315/tok = 65.30 tok/s** |
+  | P3 sync every 2nd token | 16.605/tok (≈ floor + half the gap — per-sync drain-refill) |
+
+  **Read of the parts:** the readback itself is CHEAP (0.17–0.25 ms — T2's
+  summary-read rung has no mass to recover). The league-shaped loop pays
+  **enqueue-front + GPU-work serialized** because the per-token sync drains the
+  queue: CPU enqueues (2.455 ms) on an idle GPU, then blocks in `read_one` until
+  that token's full GPU work (~15.3 ms) completes. The only VALUE-dependent CPU
+  step is the input-embedding upload (set_input = 0.006 ms); every dispatch is
+  shape-only. P3 confirms the mass scales with sync frequency.
+- **T2 (summary-read rung): REFUTED by T1 — closed with no implementation.** A
+  4 B summary read saves ~nothing when the full read costs 0.17 ms.
+- **T3 (the arc, OPEN): GPU-resident greedy decode (Issue 604 lineage, now
+  unblocked in mechanism):** keep the queue deep ACROSS the token boundary by
+  removing the per-token CPU value dependency —
+  1. argmax-on-device: a small reduction kernel after lm_head writes the greedy
+     token id (u32) DIRECTLY into a device-side id buffer;
+  2. embed-gather kernel: input embedding = row gather (id → vocab×n_embd table
+     row) on GPU — the CPU never sees logits during greedy decode;
+  3. the CPU loop enqueues token i+1's full graph WHILE the GPU processes token
+     i (all dispatches shape-only), harvesting output ids every K tokens (or on
+     demand); sampled (non-greedy) paths keep the incumbent per-token sync lane;
+  4. posture: opt-in env, PROMOTE-ONLY exact-literal arms, incumbent
+     byte-identical when off; greedy-only contract documented loud.
+  **Prize (preregistered):** P1→P2 = −2.47 ms/token harness-side; league
+  ctx-class ≈ −2.5 ms/token ⇒ 53.46 → ~61.7 tok/s ⇒ ratio ~1.03× vs the
+  Bench-1161 same-window opponent — **the decode hold closes on the pipeline,
+  not on kernels.** G1: sampled tokens bit-identical (greedy argmax = CPU
+  argmax of the same logits — verify FNV walk EXACT on the league cells);
+  G2: the preregistered league re-cell; G4: no new steady-state hot-path
+  allocations. The 604-era blocker (CubeCL handle churn, riir-ai Issue 994
+  pool poisoning) is now guarded (`pool_poison.rs` + `refuse_if_pool_poisoned`)
+  and cubecl is vendored (`vendor/cubecl-runtime-0.11.0-pre.2`) — patch surface
+  exists if the async-read APIs misbehave; patches stay IN-REPO (source
+  secrecy), any vendored-cubecl edit is owner-gated.
+  **Implementation gate: a `.plans/` file FIRST (queue-depth laws, the K-harvest
+  cadence, the non-greedy fallback, the KV/pos bookkeeping), then code.**
 
 ## Boundary note
 
@@ -91,3 +124,13 @@ precedent for cross-repo issue names: `crates/riir-infer-gpu/tests/issue1115_*`.
 ## Claim
 
 **Claimed:** zed-4a8f7b63@amo (amo), 1793680541, expires 2026-11-05T04:35Z.
+**Progress:** T1 + T1b DONE 2026-11-03 (this thread); T3 arc OPEN, unclaimed for
+implementation — a claimant writes the `.plans/` file first per the gate above.
+**Bars for any promotion:** GOAT gates + reviewer/owner verdict per the env-switch
+law; the league decode rows re-cell (bench_768/831 tg/ctx classes) before any
+default flip; the FNV walk pins must stay EXACT.
+**Probe box states (DIAGNOSTIC, not published latency):** T1 ran on amo with a
+sibling bisect's compile storm (load ~7-9/30) — the (a)/(b)/(c) medians separate
+the classes by ≥10×, far above that noise; T1b ran in the same window (load
+9.48/30 at print) — P1/P2/P3 separate by 1.5-2.5 ms/token, again ≫ compile noise;
+a quiet-window re-run is the promotion-time measurement, not this triage.

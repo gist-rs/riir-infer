@@ -392,6 +392,15 @@ required-features = ["deltanet_recurrence_smem_staged"]
 name = "bench_1004_r2_prework_fused_ab"
 required-features = ["deltanet_prework_fused"]
 
+# riir-infer Issue 1168 T1 — the readback floor probe: decomposes the
+# per-token `read_one` cost (fixed sync vs bytes vs tail-wait) that the
+# decode triage measured at ~3.1 ms/token. Whole-file #![cfg] + this row =
+# the reader-protection pair (the R1 pattern). Needs no model — pure
+# cubecl_runtime on a bare client.
+[[test]]
+name = "issue1168_readback_floor_probe"
+required-features = ["ternary_gemv"]
+
 [[test]]
 name = "bench_663_t5_single_gemm_isolation"
 required-features = ["cubecl_runtime", "ternary_gemm_batched", "metal_tensor_gemm"]
