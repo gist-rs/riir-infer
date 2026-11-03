@@ -751,7 +751,8 @@ pub fn centroids_body_json(c: &RegimeCentroids) -> serde_json::Value {
 #[cfg(feature = "cubecl_runtime")]
 static CAPTURE_PATH: std::sync::Mutex<Option<std::path::PathBuf>> = std::sync::Mutex::new(None);
 #[cfg(feature = "cubecl_runtime")]
-static CAPTURE_ENV_SEEDED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+static CAPTURE_ENV_SEEDED: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
 #[cfg(feature = "cubecl_runtime")]
 static CAPTURE_TAG: std::sync::Mutex<String> = std::sync::Mutex::new(String::new());
 static REGIME_CAPTURE_ROWS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
@@ -1321,12 +1322,20 @@ mod tests {
         assert!(!regime_capture_armed(), "tests run with no capture env");
         // The runner's post-warmup arm — previously a swallowed OnceLock no-op.
         set_regime_capture_path("/tmp/regime_capture_regression.jsonl");
-        assert!(regime_capture_armed(), "setter must override a disarmed seed");
+        assert!(
+            regime_capture_armed(),
+            "setter must override a disarmed seed"
+        );
         // Restore the pristine state for any later reader (slot disarmed,
         // seed flag reset — no re-read that would re-prime the flag).
         *CAPTURE_PATH.lock().expect("capture path mutex poisoned") = None;
         CAPTURE_ENV_SEEDED.store(false, std::sync::atomic::Ordering::Relaxed);
-        assert!(CAPTURE_PATH.lock().expect("capture path mutex poisoned").is_none());
+        assert!(
+            CAPTURE_PATH
+                .lock()
+                .expect("capture path mutex poisoned")
+                .is_none()
+        );
     }
 
     /// Issue 1163 full-seam regression at the dump posture: arm after a
@@ -1342,18 +1351,21 @@ mod tests {
     fn capture_seam_end_to_end_after_disarmed_warmup() {
         // Compile-time posture gate: the test only exists at the capture
         // posture, and this pins that invariant against cfg drift.
-        const { assert!(REGIME_CAPTURE_COMPILED); }
+        const {
+            assert!(REGIME_CAPTURE_COMPILED);
+        }
         // Warmup posture: first read seeds the slot disarmed (env unset).
         assert!(!regime_capture_armed(), "tests run with no capture env");
         // pid-scoped path under a MISSING parent dir — the open would have
         // been swallowed silently before the fix.
-        let dir = std::env::temp_dir().join(format!(
-            "regime_capture_regression_{}",
-            std::process::id()
-        ));
+        let dir =
+            std::env::temp_dir().join(format!("regime_capture_regression_{}", std::process::id()));
         let path = dir.join("rows.jsonl");
         set_regime_capture_path(&path.to_string_lossy());
-        assert!(regime_capture_armed(), "setter must override a disarmed seed");
+        assert!(
+            regime_capture_armed(),
+            "setter must override a disarmed seed"
+        );
 
         let before = regime_capture_row_count();
         let fails_before = regime_capture_write_failures();

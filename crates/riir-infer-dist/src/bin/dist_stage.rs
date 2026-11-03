@@ -672,7 +672,11 @@ fn run() -> Result<(), String> {
                 prefill_chunk: a.prefill_chunk.unwrap_or(match a.backend.as_str() {
                     "gpu" => {
                         const WIRE_WIDE_MIN: usize = 2048;
-                        if prompt.len() >= WIRE_WIDE_MIN { 512 } else { 128 }
+                        if prompt.len() >= WIRE_WIDE_MIN {
+                            512
+                        } else {
+                            128
+                        }
                     }
                     _ => 1,
                 }),

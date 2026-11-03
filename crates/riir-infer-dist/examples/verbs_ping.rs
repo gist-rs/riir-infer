@@ -77,7 +77,9 @@ fn main() {
         eprintln!("  --rtt-iters N       RTT measured iterations (default 2000)");
         eprintln!("  --bw-size MIB       one-way bulk size in MiB (default 64)");
         eprintln!("  --stripe BYTES      bulk stripe size (default 262144)");
-        eprintln!("  --window N          in-flight stripes (default 4; 27.2 provider caps 256 KiB recv windows at 4-7)");
+        eprintln!(
+            "  --window N          in-flight stripes (default 4; 27.2 provider caps 256 KiB recv windows at 4-7)"
+        );
         eprintln!("  --lat-ms N          completion timeout ms (default 5000)");
     };
 

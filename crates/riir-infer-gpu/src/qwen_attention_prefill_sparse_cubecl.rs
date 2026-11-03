@@ -180,7 +180,8 @@ pub fn prefill_sparse_enabled() -> bool {
     // as accepted no-ops (already the default); junk = ON (only the exact
     // demote literal means demote — a failed demote attempt must never be
     // silently absorbed by a typo).
-    let env_enabled = !sparse_env_demotes(&std::env::var("RIIR_PREFILL_SPARSE").unwrap_or_default());
+    let env_enabled =
+        !sparse_env_demotes(&std::env::var("RIIR_PREFILL_SPARSE").unwrap_or_default());
     if SPARSE_INITIALIZED
         .compare_exchange(
             false,
@@ -444,11 +445,9 @@ const SPARSE_OMSR_MANIFEST_V2_BLAKE3: &str =
     include_str!("../tests/fixtures/sparse_omega_msr_manifest_v2.json.blake3");
 
 #[cfg(feature = "cubecl_runtime")]
-static SPARSE_POSTURE_STATE: std::sync::atomic::AtomicU8 =
-    std::sync::atomic::AtomicU8::new(0); // 0 uninit · 1 verified · 2 refused
+static SPARSE_POSTURE_STATE: std::sync::atomic::AtomicU8 = std::sync::atomic::AtomicU8::new(0); // 0 uninit · 1 verified · 2 refused
 #[cfg(feature = "cubecl_runtime")]
-static SPARSE_POSTURE_REFUSALS: std::sync::atomic::AtomicU64 =
-    std::sync::atomic::AtomicU64::new(0);
+static SPARSE_POSTURE_REFUSALS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
 /// The default-posture verification (the verdict's condition 2, fail-safe):
 /// digest-check + parse the embedded manifest, then `verify_posture` EVERY
@@ -3015,8 +3014,7 @@ mod tests {
     #[test]
     fn default_posture_embedded_manifest_verifies() {
         reset_sparse_posture_for_test();
-        let verdict =
-            sparse_default_posture_verify_with(0.85, SparseScorer::Envelope);
+        let verdict = sparse_default_posture_verify_with(0.85, SparseScorer::Envelope);
         assert!(verdict.is_ok(), "embedded v2 manifest refused: {verdict:?}");
         // The identity posture trivially blesses (the τ=1.0 contract) — the
         // anchor side of the same gate.
