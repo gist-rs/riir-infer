@@ -2,8 +2,8 @@
 
 **Status:** OPEN — filed from bench 944's re-attribution finding (the
 launch-floor lever refuted; the census walls proved serialized-instrument
-artifacts). Not claimed (append a `**Claimed:**` line under this Status
-before implementing).
+artifacts).
+**Claimed:** zed-ablate@amo, 1793804657, expires 2026-11-06T15:04:17Z
 
 ## Problem
 
