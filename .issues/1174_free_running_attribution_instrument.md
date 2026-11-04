@@ -1,9 +1,16 @@
 # Issue 1174 — a non-serialized attribution instrument: where does the free-running pass actually spend wall?
 
-**Status:** OPEN — filed from bench 944's re-attribution finding (the
-launch-floor lever refuted; the census walls proved serialized-instrument
-artifacts).
-**Claimed:** zed-ablate@amo, 1793804657, expires 2026-11-06T15:04:17Z
+**Status:** CLOSED (2026-11-04) — delivered: `qwen38_ablate.rs` + the
+gated launch sites + `--ablate-matrix` (`e59d59d`); the pp5120 table
+landed as bench 945 (`.benchmarks/945_issue1174_free_running_ablation_matrix.md`)
+with the verdict flow round 1 REVISE → round 2 AGREE. Headline: the
+wall is GEMM-owned (~61%; MLP pair 40%), the GDN dataflow trio 24%,
+the launch floor 28 ms/chunk (5.3%) measured directly, and the 943
+census's non-GEMM share is marker-boundary cost (the small sections
+read 0.0-0.1 ms/layer free-running). Launch reduction is closed as a
+lever family. **Lease closed:** zed-ablate@amo, epoch 1793804657,
+expires 2026-11-06T15:04:17Z. File removed per the noise-reduction
+rule; this record lives in `HISTORY.md` + bench 945.
 
 ## Problem
 

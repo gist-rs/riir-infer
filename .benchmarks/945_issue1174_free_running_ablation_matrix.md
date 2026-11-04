@@ -77,8 +77,10 @@ Base wall median **526.3 ms/chunk (973 tok/s)** — reproduces bench
 | **ALL (floor)** | see the floor note | — | **28 ms/chunk wall, measured directly** |
 
 ᵈ = the corrected value (the matrix run read 138.45 with a cast
-double-count; the confirmation re-read 135.56 after the fix — the
-delta is the per-layer input cast, now counted only by `f16_cast`).
+   double-count; the confirmation re-read 135.56 after the fix —
+   consistent with the removed per-layer input cast, expected ~1-3 ms
+   from its size, though a single re-read at n=1 sits inside the ~7 ms
+   noise and does not resolve it).
 ᵇ = reproduced in the confirmation run: 55.66 vs 54.41 (within noise).
 
 ## The findings
@@ -86,12 +88,12 @@ delta is the per-layer input cast, now counted only by `f16_cast`).
 1. **The per-class wall contributions are additive within noise — the
    correct check is Σ single-class vs JOINT removal.** Σ classes =
    503.5 ms (with the corrected gateup); joint removal = base median
-   526.3 − floor 28 = 498.3 ms. Δ = +1.0% — inside the noise spread.
-   One-at-a-time removal sums to what removing everything buys, which
-   is the non-trivial result: no hidden overlap penalty, no
-   double-counting between classes. (The matrix printout's "Σ =
-   1033.9 ms = 196.5%" was a **reporting bug** — the Σ included the
-   ALL row. Fixed in the bin the same day; read the classes-only Σ.)
+   526.3 − floor 28 = 498.3 ms. Δ = +1.0% — inside the noise spread:
+   one-at-a-time removal sums to what removing everything buys, with
+   no detectable double-counting between classes. (The matrix
+   printout's "Σ = 1033.9 ms = 196.5%" was a **reporting bug** — the Σ
+   included the ALL row. Fixed in the bin the same day; read the
+   classes-only Σ.)
 2. **The wall is GEMM-owned.** The GEMM family (gateup + down + qkv +
    ssm_out + attn_qkv + attn_out) = **321 ms/chunk ≈ 61%**; the MLP
    pair alone (gateup + down) = 212 ms = 40%. The GDN dataflow trio
@@ -106,7 +108,9 @@ delta is the per-layer input cast, now counted only by `f16_cast`).
    reads the SAME sections at 0.0-0.1 ms/layer free-running (β_decay
    0.096, norm_ssm 0.075, z_gate 0.024, residual ≈ 0, mlp_act 0.053,
    input_norm ≈ 0) — a 5-50× inflation, and the census's ~0.5 ms
-   per-marker-pair overhead is exactly the gap. The census's own G1
+   per-marker-pair overhead is the dominant term (the layer-level
+   residue, ~0.8 ms/layer net, MOVED rather than vanished — see the
+   mechanism note below). The census's own G1
    honesty (reconciliation exact; pass wall reproduced) remains true —
    the instrument reproduced the wall while misattributing its
    interior; boundary-heavy instruments do that.
@@ -212,7 +216,7 @@ small-kernel family is 3.4% net). Before the MLP share is treated as
 a GEMM-KERNEL lever, the direct-store cell must split kernel vs
 wrapper (the mechanism note).
 
-## The verdict-flow record (Claude, round 1 — REVISE, applied)
+## The verdict-flow record (Claude, round 1 REVISE → round 2 AGREE)
 
 1. ALL-row drift: disclosed (finding 4); floor re-read as the direct
    ablated wall; the additivity check re-stated as Σ vs joint.
@@ -228,6 +232,14 @@ wrapper (the mechanism note).
    trio vs pass-wide).
 5. Noise: the observed within-class spread (~7 ms) quoted instead of
    the cross-cell ±3-5 ms.
+
+Round 2 AGREE (reviewer also independently confirmed the drift does
+NOT reach the non-ALL rows — the gateup/down pairs' base passes stay
+at 5.23-5.27 s despite 25-35% lighter ablated arms). Three wording
+nits applied in the closing commit: the gateup ~3 ms delta stated as
+"consistent with, not resolved by" (n=1 inside noise); "no detectable
+double-counting"; finding 3 now points at the mechanism note for the
+moved ~0.8 ms/layer residue.
 
 ## Provenance
 
