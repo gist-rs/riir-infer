@@ -388,3 +388,47 @@ first-ever-compile only.)
 
 Raw logs: bmo `/tmp/i1150/stagetimer.log`, `/tmp/i1150/pureprefill.log`,
 `/tmp/i1150/decodeonly.log` (all /tmp — the numbers above are the record).
+
+## Stability/bimodality audit — 2026-11-04, bmo (follow-up 1 RESOLVED: the split is POSTURE, not process variance)
+
+The top follow-up lead ("~3× cross-process bimodality, 18 vs 6 tok/s, neither
+mode explained") is RESOLVED. The two readings were two POSTURES: the
+four-way ran `RIIR_QWEN38_DENSE_MM2D=1` (the dense-f16 arm — "18 tok/s"
+under co-tenancy), the "fresh quiet-box process" read the INCUMBENT Q4_K
+posture ("6 tok/s stable"). The discriminator was the env var, never box
+state. Verified-idle bmo exclusive run (job `01a1a479-5f4f`, script
+`scripts/i1150_bmo_stability_audit.sh` @ pin `c52ca79`, worktree sha
+recorded in-log), one FRESH process per cell, median-of-3 + warm-up:
+
+| posture | pp512→512 | pp2484→2560 | pp4954→5120 | fresh processes |
+|---|---|---|---|---|
+| incumbent Q4_K packed | 7.1 tok/s (72.03–72.56 s) | 7.09 (360.59–361.25 s) | 7.07 (724.23–724.56 s) | 7 (w1, w2, a1–a4) |
+| dense-f16 MM2D (`RIIR_QWEN38_DENSE_MM2D=1`) | — | **22.4** (114.38–114.76 s) | **22.1** (231.35–231.66 s) | 4 (b1–b4) |
+
+**3.16× between postures; <0.4% between processes within a posture.** Both
+postures scale flat 2560→5120 (no per-position wall growth at these depths).
+Dense-f16 verified-idle (22.4) exceeds the four-way's co-tenant 18 —
+consistent with the co-tenancy cost that motivated the exclusive lane.
+
+- **Box state** (the provenance law): bmo exclusive, load 0.2–0.7 after
+  warm-up ramps, 47/96 GB free, AC, 1271 GB disk free. Peak RSS: incumbent
+  9.18 GB steady (35.5 GB transient at model load); dense-f16 75.3 GB
+  transient at load (fits 96 GB), ~8 GB steady rows.
+- **Poison adjudication** (the record-admission gate): the exclusive run
+  flagged POISONED ×1 (`mediaanalysisd` pid 1125 @ 03:02:51Z). The daemon
+  measured DORMANT at every live read (0.0% CPU; 21:55 cumulative over a
+  46 h box life); every 5 s-trace spike attributes to our own ramps — w1's
+  compile ramp (peak 5.77, pre-bench), a1's model-load ramp (peak 2.27,
+  first 45 s) — and a2–a4 + b1–b4 peaked ≤1.14 with ZERO spikes >1.5. Keep
+  decision mailed to jobs@bmo (`01a1a48e`) before the run ended; **all
+  passes admitted CLEAN**.
+- **Artifacts (durable)**: bmo `~/riir-bench/i1150_stability/` — 10 pass
+  logs + 10 × 5 s RSS/load watchdog traces + the 1.0 GB release target (the
+  warm autotune cache for re-runs). Provenance note: the bench worktree
+  moved to `71774e5` mid-run (the i1117 gate fix, a different bin, build
+  already finished into `$OUT/target`); the audit's code stayed pinned at
+  `c52ca79` per its own in-log `rev-parse`.
+- **Consequence**: the GDN chunked-scan routing (31–32% share) and lm_head
+  GEMV routing (15–16%) follow-ups are UNBLOCKED — measurements are
+  posture-stable; any future A/B must pin the posture env explicitly per
+  cell (the lesson IS the finding).
