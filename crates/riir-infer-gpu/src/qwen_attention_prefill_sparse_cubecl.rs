@@ -401,15 +401,20 @@ pub fn sparse_mode_padded_words(mirror: &[u32], n_layers: usize, n_head: usize) 
     out
 }
 
-/// Whether `layer_idx` has ANY dense head in the logic-shaped mirror — the
-/// dispatch consults this per (layer, chunk): a fully dense layer skips the
-/// whole sparse pipeline (pool/score/select too) and takes the dense ladder.
+/// Whether `layer_idx` is FULLY dense in the logic-shaped mirror — every
+/// head's word set. The dispatch consults this per (layer, chunk): a fully
+/// dense layer skips the whole sparse pipeline (pool/score/select too) and
+/// takes the dense ladder; a MIXED layer must NOT read as dense — it runs
+/// the pipeline and its mode words route per head in-kernel. (Issue 1164:
+/// the old ANY-heads reading made every mixed layer take the dense ladder,
+/// so bench-1157 Cell D measured dense, not mixed — its FNV was
+/// bit-identical to fully dense at both lengths.)
 #[cfg(feature = "cubecl_runtime")]
 pub fn sparse_layer_dense(mirror: &[u32], layer_idx: usize, n_head: usize) -> bool {
     let lo = layer_idx * n_head;
     mirror
         .get(lo..lo + n_head)
-        .is_some_and(|row| row.iter().any(|&w| w != 0))
+        .is_some_and(|row| row.iter().all(|&w| w != 0))
 }
 
 /// Test/demo setter — overrides the env-derived value (the
@@ -3079,13 +3084,71 @@ mod tests {
                 assert_eq!(padded[layer * 24 + pad], 0, "padding stays zero");
             }
         }
-        // layer_dense reads the logic-shaped mirror.
+        // layer_dense reads the logic-shaped mirror — FULLY dense only (the
+        // issue 1164 fix: a mixed row must read NOT-dense so the launcher
+        // runs the sparse pipeline and the mode words route per head
+        // in-kernel; the old ANY-heads reading made every mixed layer take
+        // the dense ladder).
         let mut m = vec![0u32; 4 * 6];
         assert!(!sparse_layer_dense(&m, 1, 6));
         m[2 * 6 + 3] = 1;
         assert!(!sparse_layer_dense(&m, 0, 6));
-        assert!(sparse_layer_dense(&m, 2, 6));
+        assert!(
+            !sparse_layer_dense(&m, 2, 6),
+            "mixed row (1 of 6 dense) is NOT a dense layer — the pipeline must run"
+        );
         assert!(!sparse_layer_dense(&m, 3, 6));
+        for h in 0..6 {
+            m[2 * 6 + h] = 1;
+        }
+        assert!(
+            sparse_layer_dense(&m, 2, 6),
+            "all-6 dense IS a dense layer — the pipeline must skip"
+        );
+        // Out-of-bounds layer → not dense (never silently skip the pipeline).
+        assert!(!sparse_layer_dense(&m, 9, 6));
+    }
+
+    /// Issue 1164 regression: the setter mask flows through
+    /// [`alloc_sparse_scratch`] into the mirror the launcher consults, and
+    /// the routing predicate separates MIXED (pipeline runs, per-head mode
+    /// words route in-kernel) from FULLY DENSE (pipeline skipped). This is
+    /// the store-vs-consume seam Cell D exposed: its mixed mask made every
+    /// layer read dense, so the cell's FNV was bit-identical to fully dense
+    /// at both lengths. The model-level proof is the T6 Cell D re-cell
+    /// (riir-ai's `bench_1156_t6_league_cells` harness) — this pins the
+    /// decision input, not the league number.
+    #[test]
+    fn scratch_mirror_routes_mixed_layers_into_the_sparse_pipeline() {
+        let ctx = CubeCLContext::new().expect("CubeCL should initialize");
+        let client = ctx.client();
+        let n_head = 6usize;
+        let n_kv = 1usize;
+        let hd = 256usize;
+        let cache_rows = 128usize;
+        let n_layers = 2usize;
+        let mixed = 0b00011u64; // heads 0,1 dense; 2..5 sparse — a MIXED row
+        set_prefill_sparse_dense_head_mask(mixed);
+        let sp = alloc_sparse_scratch(&client, n_head, n_kv, hd, cache_rows, n_layers, 0)
+            .expect("scratch alloc");
+        // The mirror is logic-shaped [layer][head] and every layer shares
+        // the setter's mask (all layers share it at v1).
+        assert_eq!(sp.head_mode_words.len(), n_layers * n_head);
+        for layer in 0..n_layers {
+            for h in 0..n_head {
+                let want = u32::from(mixed >> h & 1 != 0);
+                assert_eq!(sp.head_mode_words[layer * n_head + h], want);
+            }
+        }
+        // The launcher's exact decision input: a mixed layer runs the
+        // pipeline; a fully dense mask skips it.
+        assert!(!sparse_layer_dense(&sp.head_mode_words, 0, n_head));
+        set_prefill_sparse_dense_head_mask((1u64 << n_head) - 1);
+        let sp_dense = alloc_sparse_scratch(&client, n_head, n_kv, hd, cache_rows, n_layers, 0)
+            .expect("scratch alloc");
+        assert!(sparse_layer_dense(&sp_dense.head_mode_words, 1, n_head));
+        // Restore the incumbent (tests share the process-wide store).
+        set_prefill_sparse_dense_head_mask(0);
     }
 
     // -- T5 GPU battery (the G1 anchors) --------------------------------------
