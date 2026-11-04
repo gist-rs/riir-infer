@@ -1,8 +1,8 @@
 # Issue 1176 — the bare-default dense-qwen38 prefill runs ~7 tok/s vs ~971 promoted: promotion-debt defect, needs a verdict or a written reason
 
 **Status:** OPEN — observed during bench 944's baseline cells; out of
-1173's lane, filed per the verdict. Not claimed (append a
-`**Claimed:**` line under this Status before implementing).
+1173's lane, filed per the verdict.
+**Claimed:** zed-ablate@amo, 1793804639, expires 2026-11-06T15:04:17Z
 
 ## The observation
 
