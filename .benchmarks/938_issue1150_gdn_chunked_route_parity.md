@@ -61,7 +61,11 @@ pre-fix run: OFF "请帮我分析这段文字" vs ON "请帮我找出重复的�
 −69 step (all cross-boundary ratios → 0, matching the sequential
 forget-everything semantics), and the cumulative stays exact, so every ratio
 is the true difference of logs. The floor-crossing fixture drops 7.2e+1 →
-6.7e-6; the e2e walk md5 is byte-identical OFF vs ON.
+6.7e-6; the e2e walk md5 is byte-identical OFF vs ON. ⚠ Semantic choice,
+deliberate: 1e−30 is not "a big enough number" to tune — a true-zero α MUST
+encode as forget-everything (a −69-class log step); do not "fix" the clamp
+back to a cumulative floor or raise it without re-running the route G1's
+FloorCrossing arm (it reads 6.7e-6 at this clamp, 7.2e+1 at the old floor).
 
 ## Perf cells (warm compile cache; median tok/s, padded pure-prefill)
 
@@ -90,7 +94,10 @@ Stage-timer bucket A/B @pp512 (same sync posture both arms): gdn **1.44 s
    pass at pp512 (22 s: 8 f32 GEMV sweeps over 248,320-row lm_head for ONE
    row of logits per 512-token chunk) and 15–16% of the audit's pp2484 pass.
    The lm_head tail GEMV routing follow-up (issue 1150) is the lane's actual
-   bottleneck, not GDN.
+   bottleneck, not GDN. ⚠ Bucket-naming caveat for the next reader: the
+   stage-timer `gdn` bucket is the WHOLE GDN layer (norms + 5 GEMMs + conv +
+   recurrence + gating), not the scan alone — the scan itself is ~6% of a
+   synchronized pass on this posture. Read the bucket as `gdn_layer`.
 
 ## Route disposition
 
