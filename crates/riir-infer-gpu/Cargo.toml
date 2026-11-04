@@ -620,6 +620,13 @@ required-features = ["ternary_gemv_cuda_raw"]
 name = "qwen38_wgpu_bench"
 required-features = ["qwen38_wgpu"]
 
+# Issue 1150 follow-up 3 — the Q6_K tail-GEMV unit gate: the CubeCL kernel
+# vs the CPU canonical gemv_q6_k (quantize-then-GEMV + sign/bitfield
+# exhaustive arms). The file is `#![cfg(all(qwen38_wgpu, macos))]`.
+[[test]]
+name = "gemv_q6k_cubecl_g1"
+required-features = ["qwen38_wgpu"]
+
 # Issue 1150 G1 — the tiled Q4_K GEMM unit gate: kernel vs a CPU reference on
 # random shapes (tiny, GPU-required, no model).
 [[test]]

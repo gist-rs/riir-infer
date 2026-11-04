@@ -846,6 +846,10 @@ pub mod qwen38_dense_cubecl;
 // see the module's numerics disclosure).
 #[cfg(feature = "qwen38_wgpu")]
 pub mod qwen38_gdn_chunked_route;
+// Issue 1150 follow-up 3 — the Q6_K in-kernel-dequant tail GEMV (the
+// tail_logits lane; opt-in behind RIIR_QWEN38_LMHEAD_Q6K, promote-only).
+#[cfg(feature = "qwen38_wgpu")]
+pub mod gemv_q6k_cubecl;
 pub mod qwen38_dflash2;
 #[cfg(all(feature = "ternary_gemv_cuda_raw", not(target_os = "macos")))]
 pub mod qwen38_dflash2_gpu;
