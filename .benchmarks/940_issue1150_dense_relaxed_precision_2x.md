@@ -14,7 +14,12 @@ it true upstream, the prismml fork `73bfe6c` too).
 |---|---|---|---|
 | pp512→512 | 274 tok/s (1.87 s) | **483 tok/s (1.06 s)** | **1.76×** |
 | pp2484→2560 | 291 tok/s (8.78 s) | **587 tok/s (4.36 s)** | **2.02×** |
+| pp4954→5120 (addendum) | ~276 (bench 939) | **489 tok/s (10.47 s)** | **1.77×** |
 | load | 19.9 s | 20.6 s | — (unchanged; the arm compiles one more pipeline) |
+
+**League row @pp-5k (addendum): ours 489** vs MLX 1411 (2.89×) / uzu 1157
+(2.37×) / fork 898 (1.84×) — the bench-939 gap (~4.7× behind MLX) closes
+to **2.89×**, and the lane is within 1.84× of the fork at its own cell.
 
 Stage-timer @pp512 (synchronized, shares-comparable): gdn bucket
 1329/1359 ms → **700/778 ms (1.85–1.9×)**; attn bucket 339/361 ms →
@@ -22,7 +27,11 @@ Stage-timer @pp512 (synchronized, shares-comparable): gdn bucket
 **~480-590** (MLX 1411 / uzu 1157 / fork 898 at pp-5k-class) — the gap
 closes from ~4.7× to **~2.4-2.9×**, and the lane now sits ABOVE the fork at
 these cells (587 vs 898 at pp-5k is the remaining read; the pp-5k cell
-itself is the next bench's first row).
+itself is the next bench's first row). **Addendum: the pp-5k cell measured
+489 — 1.84× the fork, 2.89× MLX.** The next residual by stage: the GEMM
+engine's ~1.5× to MLX-class (staged-half-B fork parity / MLX-class tuning —
+a new kernel-family arc, filed as the follow-up lead), NOT the tail, NOT
+the scan, NOT wte.
 
 ## Kernel-level A/B (`dense_f16_relaxed_ab`, ABBA pairs, median of pair-ratios, p=512 production shapes)
 
