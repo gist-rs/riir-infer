@@ -1678,13 +1678,29 @@ impl Qwen38WgpuForward {
         }
 
         let eps = self.config.rms_norm_eps;
+        // Issue 1173 F3 cross-layer arm: when layer li's mlp_residual fuses
+        // with layer li+1's input_norm, the next iteration must skip its
+        // norm launch (norm_x_b [+ twin] is already fresh). One bool
+        // threaded across the loop; the first layer never starts prefetched.
+        let mut norm_prefetched = false;
         for li in 0..self.layers.len() {
             let lw = self.layers[li].clone();
+            let next_attn_norm = self.layers.get(li + 1).map(|nl| nl.attn_norm.clone());
             let layer_t0 = timers.is_some().then(std::time::Instant::now);
             match lw.kind {
-                Qwen38WgpuLayerType::Deltanet => self.prefill_gdn_layer(li, &lw, eps)?,
+                Qwen38WgpuLayerType::Deltanet => {
+                    norm_prefetched =
+                        self.prefill_gdn_layer(li, &lw, eps, norm_prefetched, next_attn_norm)?;
+                }
                 Qwen38WgpuLayerType::Attention => {
-                    self.prefill_attn_layer(li, &lw, base_pos, eps)?
+                    norm_prefetched = self.prefill_attn_layer(
+                        li,
+                        &lw,
+                        base_pos,
+                        eps,
+                        norm_prefetched,
+                        next_attn_norm,
+                    )?;
                 }
             }
             if let (Some(t), Some(t0)) = (timers.as_mut(), layer_t0) {
@@ -1770,12 +1786,112 @@ impl Qwen38WgpuForward {
         }
     }
 
+    /// Issue 1173: the staging input when a fused producer (F1/F2/F3) ALREADY
+    /// wrote the f16 twin fresh this chunk — the twin itself, no cast launch;
+    /// the incumbent [`Self::gemm_input`] cast otherwise. `twin_fresh` must
+    /// be true only when the twin's bytes were written by a fused kernel in
+    /// THIS chunk after `src` last changed.
+    fn gemm_input_fresh(
+        &self,
+        twin: &Option<Handle>,
+        src: &Handle,
+        n: usize,
+        twin_fresh: bool,
+    ) -> Handle {
+        if let Some(t) = twin.as_ref().filter(|_| twin_fresh) {
+            return t.clone();
+        }
+        self.gemm_input(twin, src, n)
+    }
+
+    /// Issue 1173 F2 helper: the batched norm + f16 staging twin in ONE
+    /// launch when armed and the posture carries the twin; the incumbent
+    /// [`crate::norms_cubecl::RmsNormBatchedCubeCL`] launch otherwise (no
+    /// twin = nothing to fuse). Returns whether the TWIN is already fresh
+    /// (the caller's `gemm_input` must not re-cast).
+    fn norm_batched_staged(
+        &self,
+        input: Handle,
+        gamma: Handle,
+        out: Handle,
+        twin: Option<Handle>,
+        rows: usize,
+        dim: usize,
+        eps: f32,
+    ) -> bool {
+        unsafe {
+            match twin {
+                Some(t) if crate::norms_fused_batched_cubecl::fuse_norm_cast() => {
+                    crate::norms_fused_batched_cubecl::RmsNormTwinBatchedCubeCL::launch::<
+                        ActiveRuntime,
+                    >(&self.client, input, gamma, out, Some(t), rows, dim, eps);
+                    true
+                }
+                _ => {
+                    crate::norms_cubecl::RmsNormBatchedCubeCL::launch::<ActiveRuntime>(
+                        &self.client,
+                        input,
+                        gamma,
+                        out,
+                        rows,
+                        dim,
+                        eps,
+                    );
+                    false
+                }
+            }
+        }
+    }
+
+    /// Issue 1173 F3 helper: fused residual-add + norm (+ optional f16 twin)
+    /// when armed — ONE launch replacing `ResidualAdd` + the caller's next
+    /// norm (+ its cast). Disarmed or twin-less, the plain residual add (the
+    /// norm stays with the caller). Returns whether the NORM was produced
+    /// (true = the caller's norm site must skip its launch; the twin, when
+    /// any, is fresh).
+    fn residual_norm_staged(
+        &self,
+        x: Handle,
+        residual: Handle,
+        gamma: Handle,
+        out: Handle,
+        twin: Option<Handle>,
+        rows: usize,
+        dim: usize,
+        eps: f32,
+    ) -> bool {
+        if crate::norms_fused_batched_cubecl::fuse_resid_norm() {
+            unsafe {
+                crate::norms_fused_batched_cubecl::ResidualRmsNormTwinBatchedCubeCL::launch::<
+                    ActiveRuntime,
+                >(&self.client, x, residual, gamma, out, twin, rows, dim, eps);
+            }
+            true
+        } else {
+            unsafe {
+                crate::norms_cubecl::ResidualAddCubeCL::launch::<ActiveRuntime>(
+                    &self.client,
+                    x.clone(),
+                    residual,
+                    x,
+                    rows * dim,
+                );
+            }
+            false
+        }
+    }
+
     /// Issue 1172 census: place a GPU-timestamp marker opening section
     /// `name`, hazard-pinned on `hazards` (the boundary buffers — the
     /// measured section's outputs plus the next section's inputs — so the
     /// marker is sandwiched between adjacent sections; see the census
     /// module). Only on the instrumented layer, only when armed.
-    fn census_mark(&mut self, li: usize, name: &'static str, hazards: &[Handle]) -> Result<(), String> {
+    fn census_mark(
+        &mut self,
+        li: usize,
+        name: &'static str,
+        hazards: &[Handle],
+    ) -> Result<(), String> {
         #[cfg(all(feature = "metal_tensor_gemm", target_os = "macos"))]
         {
             let client = &self.client;
@@ -1803,12 +1919,18 @@ impl Qwen38WgpuForward {
         }
     }
 
+    /// One GDN layer of the chunked prefill pass. Returns whether THIS
+    /// layer fused its mlp_residual with the NEXT layer's input_norm (issue
+    /// 1173 F3 cross-layer arm) — the loop threads it so the next layer
+    /// skips its norm launch.
     fn prefill_gdn_layer(
         &mut self,
         li: usize,
         lw: &Qwen38WgpuLayerWeights,
         eps: f32,
-    ) -> Result<(), String> {
+        norm_prefetched: bool,
+        next_attn_norm: Option<Handle>,
+    ) -> Result<bool, String> {
         // Config fields copied into locals — the census marks borrow `self`
         // mutably mid-function, so no config reference may outlive the
         // prologue.
@@ -1836,12 +1958,15 @@ impl Qwen38WgpuForward {
         // a local, then slice the local (clippy-clean).
         let x_b = self.x_b.clone();
         self.census_mark(li, "input_norm", std::slice::from_ref(&x_b))?;
-        unsafe {
-            crate::norms_cubecl::RmsNormBatchedCubeCL::launch::<ActiveRuntime>(
-                &self.client,
+        // Issue 1173 F2 (norm + f16 twin in one launch) / F3 cross-layer
+        // (the previous layer's mlp_residual already computed this norm).
+        let mut norm_twin_fresh = norm_prefetched && self.norm_x_b_h.is_some();
+        if !norm_prefetched {
+            norm_twin_fresh = self.norm_batched_staged(
                 self.x_b.clone(),
                 lw.attn_norm.clone(),
                 self.norm_x_b.clone(),
+                self.norm_x_b_h.clone(),
                 p,
                 e,
                 eps,
@@ -1852,7 +1977,8 @@ impl Qwen38WgpuForward {
             gemm_hz.push(t);
         }
         self.census_mark(li, "gemm_qkv_z_ab", &gemm_hz)?;
-        let norm_in = self.gemm_input(&self.norm_x_b_h, &self.norm_x_b, p * e);
+        let norm_in =
+            self.gemm_input_fresh(&self.norm_x_b_h, &self.norm_x_b, p * e, norm_twin_fresh);
         qkv.gemm(&self.client, norm_in.clone(), self.qkv_b.clone(), p);
         z_w.gemm(&self.client, norm_in.clone(), self.z_b.clone(), p);
         alpha.gemm(&self.client, norm_in.clone(), self.a_b.clone(), p);
@@ -1993,63 +2119,102 @@ impl Qwen38WgpuForward {
         }
         let rec_b = self.rec_b.clone();
         self.census_mark(li, "norm_ssm", std::slice::from_ref(&rec_b))?;
+        // Issue 1173 F1: norm_ssm + z-gate (+ the f16 twin) in ONE launch.
+        let ssm_twin_fresh = crate::norms_fused_batched_cubecl::fuse_ssm_zgate();
         unsafe {
-            crate::norms_cubecl::RmsNormBatchedCubeCL::launch::<ActiveRuntime>(
-                &self.client,
-                self.rec_b.clone(),
-                ssm_norm,
-                self.rec_n_b.clone(),
-                p * n_v,
-                hd_v,
-                eps,
-            );
+            if ssm_twin_fresh {
+                crate::norms_fused_batched_cubecl::RmsNormZgateBatchedF16CubeCL::launch::<
+                    ActiveRuntime,
+                >(
+                    &self.client,
+                    self.rec_b.clone(),
+                    ssm_norm,
+                    self.z_b.clone(),
+                    self.rec_n_b.clone(),
+                    self.rec_n_b_h.clone(),
+                    p * n_v,
+                    hd_v,
+                    eps,
+                );
+            } else {
+                crate::norms_cubecl::RmsNormBatchedCubeCL::launch::<ActiveRuntime>(
+                    &self.client,
+                    self.rec_b.clone(),
+                    ssm_norm,
+                    self.rec_n_b.clone(),
+                    p * n_v,
+                    hd_v,
+                    eps,
+                );
+            }
         }
         self.census_mark(li, "z_gate", &[self.rec_n_b.clone(), self.z_b.clone()])?;
-        unsafe {
-            crate::deltanet_cubecl::DeltanetZGatingCubeCL::launch::<ActiveRuntime>(
-                &self.client,
-                self.rec_n_b.clone(),
-                self.z_b.clone(),
-                p * n_v * hd_v,
-            );
+        if !ssm_twin_fresh {
+            unsafe {
+                crate::deltanet_cubecl::DeltanetZGatingCubeCL::launch::<ActiveRuntime>(
+                    &self.client,
+                    self.rec_n_b.clone(),
+                    self.z_b.clone(),
+                    p * n_v * hd_v,
+                );
+            }
         }
         let mut ssm_hz = vec![self.rec_n_b.clone()];
         if let Some(t) = self.rec_n_b_h.clone() {
             ssm_hz.push(t);
         }
         self.census_mark(li, "ssm_out_gemm", &ssm_hz)?;
-        let ssm_in = self.gemm_input(&self.rec_n_b_h, &self.rec_n_b, p * n_v * hd_v);
+        let ssm_in = self.gemm_input_fresh(
+            &self.rec_n_b_h,
+            &self.rec_n_b,
+            p * n_v * hd_v,
+            ssm_twin_fresh,
+        );
         ssm_out.gemm(&self.client, ssm_in, self.tmp_b.clone(), p);
         self.census_mark(li, "residual_gdn", &[self.x_b.clone(), self.tmp_b.clone()])?;
-        unsafe {
-            crate::norms_cubecl::ResidualAddCubeCL::launch::<ActiveRuntime>(
-                &self.client,
-                self.x_b.clone(),
-                self.tmp_b.clone(),
-                self.x_b.clone(),
-                p * e,
-            );
-        }
+        // Issue 1173 F3 (same-layer arm): residual add + the MLP input norm
+        // (+ twin) in one launch; plain residual add when disarmed.
+        let mlp_norm_prefetched = self.residual_norm_staged(
+            self.x_b.clone(),
+            self.tmp_b.clone(),
+            lw.post_attention_norm.clone(),
+            self.norm_x_b.clone(),
+            self.norm_x_b_h.clone(),
+            p,
+            e,
+            eps,
+        );
         let census_mlp = self.census_matches(li);
         if census_mlp {
             let x_b = self.x_b.clone();
             self.census_mark(li, "mlp_norm_gateup", std::slice::from_ref(&x_b))?;
         }
-        self.prefill_mlp(lw, p, eps, census_mlp.then_some(li))?;
+        let next_prefetched = self.prefill_mlp(
+            lw,
+            p,
+            eps,
+            census_mlp.then_some(li),
+            mlp_norm_prefetched,
+            next_attn_norm,
+        )?;
         if census_mlp {
             let x_b = self.x_b.clone();
             self.census_mark(li, "end", std::slice::from_ref(&x_b))?;
         }
-        Ok(())
+        Ok(next_prefetched)
     }
 
+    /// One attention layer of the chunked prefill pass. Returns the F3
+    /// cross-layer prefetch flag (see `prefill_gdn_layer`).
     fn prefill_attn_layer(
         &mut self,
         li: usize,
         lw: &Qwen38WgpuLayerWeights,
         base_pos: usize,
         eps: f32,
-    ) -> Result<(), String> {
+        norm_prefetched: bool,
+        next_attn_norm: Option<Handle>,
+    ) -> Result<bool, String> {
         let c = &self.config;
         let e = c.n_embd;
         let hd = c.head_dim;
@@ -2065,16 +2230,23 @@ impl Qwen38WgpuForward {
         let k_norm = lw.attn_k_norm.clone().expect("k_norm");
 
         unsafe {
-            crate::norms_cubecl::RmsNormBatchedCubeCL::launch::<ActiveRuntime>(
-                &self.client,
-                self.x_b.clone(),
-                lw.attn_norm.clone(),
-                self.norm_x_b.clone(),
-                p,
-                e,
-                eps,
-            );
-            let norm_in = self.gemm_input(&self.norm_x_b_h, &self.norm_x_b, p * e);
+            // Issue 1173 F2 / F3-cross: skip when the previous layer's
+            // mlp_residual already computed this norm; the fused norm+twin
+            // otherwise (the incumbent batched norm when disarmed).
+            let mut norm_twin_fresh = norm_prefetched && self.norm_x_b_h.is_some();
+            if !norm_prefetched {
+                norm_twin_fresh = self.norm_batched_staged(
+                    self.x_b.clone(),
+                    lw.attn_norm.clone(),
+                    self.norm_x_b.clone(),
+                    self.norm_x_b_h.clone(),
+                    p,
+                    e,
+                    eps,
+                );
+            }
+            let norm_in =
+                self.gemm_input_fresh(&self.norm_x_b_h, &self.norm_x_b, p * e, norm_twin_fresh);
             wq.gemm(&self.client, norm_in.clone(), self.qg_b.clone(), p);
             wk.gemm(&self.client, norm_in.clone(), self.k_b.clone(), p);
             wv.gemm(&self.client, norm_in, self.v_b.clone(), p);
@@ -2173,47 +2345,69 @@ impl Qwen38WgpuForward {
             }
             let wo_in = self.gemm_input(&self.attn_out_b_h, &self.attn_out_b, p * c.n_head * hd);
             wo.gemm(&self.client, wo_in, self.tmp_b.clone(), p);
-            crate::norms_cubecl::ResidualAddCubeCL::launch::<ActiveRuntime>(
-                &self.client,
+            // Issue 1173 F3 (same-layer arm): residual + the MLP input norm.
+            let mlp_norm_prefetched = self.residual_norm_staged(
                 self.x_b.clone(),
                 self.tmp_b.clone(),
-                self.x_b.clone(),
-                p * e,
+                lw.post_attention_norm.clone(),
+                self.norm_x_b.clone(),
+                self.norm_x_b_h.clone(),
+                p,
+                e,
+                eps,
             );
-            self.prefill_mlp(lw, p, eps, None)?;
+            self.prefill_mlp(lw, p, eps, None, mlp_norm_prefetched, next_attn_norm)
         }
-        Ok(())
     }
 
-    /// SwiGLU MLP (batched).
+    /// SwiGLU MLP (batched). Returns the F3 cross-layer prefetch flag: when
+    /// the trailing residual fused with the NEXT layer's input_norm (issue
+    /// 1173), the caller's loop must tell the next layer to skip its norm
+    /// launch — `norm_x_b` (+ twin) already holds it.
+    #[allow(
+        clippy::too_many_arguments,
+        reason = "the fused-norm flags + census layer are the fused-kernel interface"
+    )]
     fn prefill_mlp(
         &mut self,
         lw: &Qwen38WgpuLayerWeights,
         p: usize,
         eps: f32,
         census_li: Option<usize>,
-    ) -> Result<(), String> {
+        norm_prefetched: bool,
+        next_attn_norm: Option<Handle>,
+    ) -> Result<bool, String> {
         let e = self.config.n_embd;
         let mlp = self.config.mlp_hidden;
         let gate = &lw.ffn_gate;
         let up = &lw.ffn_up;
         let down = &lw.ffn_down;
-        unsafe {
-            crate::norms_cubecl::RmsNormBatchedCubeCL::launch::<ActiveRuntime>(
-                &self.client,
+        // Issue 1173 F2 / F3-cross: the norm is skipped entirely when the
+        // caller's residual fusion already computed it.
+        let mut norm_twin_fresh = norm_prefetched && self.norm_x_b_h.is_some();
+        if !norm_prefetched {
+            norm_twin_fresh = self.norm_batched_staged(
                 self.x_b.clone(),
                 lw.post_attention_norm.clone(),
                 self.norm_x_b.clone(),
+                self.norm_x_b_h.clone(),
                 p,
                 e,
                 eps,
             );
-            let norm_in = self.gemm_input(&self.norm_x_b_h, &self.norm_x_b, p * e);
+        }
+        {
+            let norm_in =
+                self.gemm_input_fresh(&self.norm_x_b_h, &self.norm_x_b, p * e, norm_twin_fresh);
             gate.gemm(&self.client, norm_in.clone(), self.gateup_b.clone(), p);
             up.gemm(&self.client, norm_in, self.up_b.clone(), p);
         }
         if let Some(cli) = census_li {
-            let mut act_hz = vec![self.norm_x_b.clone(), self.gateup_b.clone(), self.up_b.clone()];
+            let mut act_hz = vec![
+                self.norm_x_b.clone(),
+                self.gateup_b.clone(),
+                self.up_b.clone(),
+            ];
             if let Some(t) = self.norm_x_b_h.clone() {
                 act_hz.push(t);
             }
@@ -2240,15 +2434,32 @@ impl Qwen38WgpuForward {
         if let Some(cli) = census_li {
             self.census_mark(cli, "mlp_residual", &[self.x_b.clone(), self.tmp_b.clone()])?;
         }
-        unsafe {
-            crate::norms_cubecl::ResidualAddCubeCL::launch::<ActiveRuntime>(
-                &self.client,
+        // Issue 1173 F3 (cross-layer arm): residual add + the NEXT layer's
+        // input norm (+ twin) in one launch — the fused kernel writes the
+        // next layer's norm_x_b with the next layer's γ. No next layer (the
+        // chunk's last) → the plain residual add.
+        let next_prefetched = match next_attn_norm {
+            Some(gamma) => self.residual_norm_staged(
                 self.x_b.clone(),
                 self.tmp_b.clone(),
-                self.x_b.clone(),
-                p * e,
-            );
-        }
-        Ok(())
+                gamma,
+                self.norm_x_b.clone(),
+                self.norm_x_b_h.clone(),
+                p,
+                e,
+                eps,
+            ),
+            None => unsafe {
+                crate::norms_cubecl::ResidualAddCubeCL::launch::<ActiveRuntime>(
+                    &self.client,
+                    self.x_b.clone(),
+                    self.tmp_b.clone(),
+                    self.x_b.clone(),
+                    p * e,
+                );
+                false
+            },
+        };
+        Ok(next_prefetched)
     }
 }

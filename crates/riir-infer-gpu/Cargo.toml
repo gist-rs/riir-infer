@@ -651,6 +651,15 @@ required-features = ["qwen38_wgpu", "metal_tensor_gemm"]
 name = "qwen38_gdn_census_g1"
 required-features = ["qwen38_wgpu", "metal_tensor_gemm"]
 
+# Issue 1173 — the fused norm+gating family G1: each fused kernel vs the
+# UNFUSED launch sequence it replaces, GPU-vs-GPU, BITWISE on the f32 and
+# the f16 twin (the byte-identity GOAT bar). Needs deltanet_cubecl
+# (ternary_gemv) for the z-gate arm; no model, no Metal-only dep — runs on
+# any ActiveRuntime host (the 4090 lane included).
+[[test]]
+name = "qwen38_fused_norm_gating_g1"
+required-features = ["cubecl_runtime", "ternary_gemv"]
+
 # Issue 1150 follow-up G1 — the dense-f16 matmul2d + decode-GEMV unit gate.
 # The file is `#![cfg(all(qwen38_wgpu, metal_tensor_gemm, macos))]`; the row
 # makes a bare `--test` name refuse instead of an empty `0 passed` binary

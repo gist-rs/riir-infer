@@ -116,6 +116,8 @@ pub mod matmul_swap_ab_cubecl;
 #[cfg(feature = "cubecl_runtime")]
 pub mod norms_cubecl;
 #[cfg(feature = "cubecl_runtime")]
+pub mod norms_fused_batched_cubecl;
+#[cfg(feature = "cubecl_runtime")]
 pub mod params_cache;
 #[cfg(feature = "cubecl_runtime")]
 pub mod sampling_cubecl;
@@ -180,6 +182,11 @@ pub use matmul_swap_ab_cubecl::{MatmulSwapAb, SWAP_AB_M_THRESHOLD};
 pub use norms_cubecl::{
     LayerNormMeanBatchedCubeCL, ResidualAddCubeCL, RmsNormBatchedCubeCL, RmsNormCubeCL,
     RmsNormQkFusedCubeCL, RmsNormZgateFusedCubeCL,
+};
+#[cfg(feature = "cubecl_runtime")]
+pub use norms_fused_batched_cubecl::{
+    ResidualRmsNormTwinBatchedCubeCL, RmsNormTwinBatchedCubeCL, RmsNormZgateBatchedF16CubeCL,
+    fuse_norm_cast, fuse_resid_norm, fuse_ssm_zgate,
 };
 #[cfg(all(feature = "cubecl_runtime", not(feature = "params_handle_cache")))]
 pub use params_cache::params_handle;
