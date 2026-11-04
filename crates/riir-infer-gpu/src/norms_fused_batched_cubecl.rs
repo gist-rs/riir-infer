@@ -91,6 +91,39 @@ pub fn fuse_resid_norm() -> bool {
         .get_or_init(|| std::env::var("RIIR_QWEN38_FUSE_RESID_NORM").as_deref() == Ok("1"))
 }
 
+/// The optional-twin slot binding, shared by every fused launcher (issue
+/// 1175). The USED arm binds the twin at its chunk byte offset; the UNUSED
+/// arm binds a ONE-ELEMENT view of `fallback` (a γ buffer — in-bounds by
+/// construction) at OFFSET 0.
+///
+/// ⚠ Two laws baked in here:
+///
+/// 1. **Never a zero-length bind** — the wgpu/Metal binding layer clamps a
+///    0-length view to the WHOLE buffer, so a length-gated kernel would
+///    read the slot as full-length and trample the f32 output through the
+///    alias (the bench-944 instrument law).
+/// 2. **Offset 0 on the fallback** — the audit (issue 1175) found the
+///    pre-helper sites rode the TWIN layout offset (`r0·dim·2` bytes) on
+///    the fallback too, which runs past a γ buffer's end for any chunked
+///    twin-less launch (in-bounds only because the G1 shapes never
+///    chunked). The slot is never dereferenced, so offset 0 is
+///    behavior-identical and always valid.
+///
+/// The kernel-side twin write is gated by the explicit `params[3]` flag —
+/// NEVER the slot's `len()`.
+#[cfg(feature = "cubecl_runtime")]
+pub(crate) fn optional_twin_binding(
+    twin: Option<&Handle>,
+    fallback: &Handle,
+    total: usize,
+    chunk_byte_offset: u64,
+) -> (Handle, u64, usize) {
+    match twin {
+        Some(h) => (h.clone(), chunk_byte_offset, total),
+        None => (fallback.clone(), 0, 1),
+    }
+}
+
 // ---------------------------------------------------------------------------
 // F1 kernel: batched RMSNorm + z-gating + optional f16 twin
 // ---------------------------------------------------------------------------
@@ -262,15 +295,12 @@ impl RmsNormZgateBatchedF16CubeCL {
             let params: &[f32] = &[inv_dim, eps, dim_f, if has_twin { 1.0 } else { 0.0 }];
             let params_handle = crate::params_cache::params_handle(client, f32::as_bytes(params));
             let total = rc * dim;
-            let (oh, oh_len) = match &output_h_handle {
-                Some(h) => (h.clone(), total),
-                // Twin-less: bind a one-element (2-byte) view of the γ
-                // buffer as the twin slot — a VALID binding the kernel
-                // never touches (the params[3] flag is off). Never bind a
-                // zero-length view: the binding layer clamps it to the
-                // whole buffer, which would alias the f32 output.
-                None => (gamma_handle.clone(), 1usize),
-            };
+            let (oh, oh_off, oh_len) = optional_twin_binding(
+                output_h_handle.as_ref(),
+                &gamma_handle,
+                total,
+                (r0 * dim * 2) as u64,
+            );
             // SAFETY: Caller guarantees buffer sizes; the slices stay inside.
             unsafe {
                 rmsnorm_zgate_batched_f32::launch_unchecked::<R>(
@@ -291,7 +321,7 @@ impl RmsNormZgateBatchedF16CubeCL {
                         output_handle.clone().offset_start((r0 * dim * 4) as u64),
                         total,
                     ),
-                    BufferArg::from_raw_parts(oh.offset_start((r0 * dim * 2) as u64), oh_len),
+                    BufferArg::from_raw_parts(oh.offset_start(oh_off), oh_len),
                 );
             }
             r0 += rc;
@@ -436,13 +466,12 @@ impl RmsNormTwinBatchedCubeCL {
             ];
             let params_handle = crate::params_cache::params_handle(client, f32::as_bytes(params));
             let total = rc * dim;
-            let (oh, oh_len) = match &output_h_handle {
-                Some(h) => (h.clone(), total),
-                // Twin-less: a one-element γ view — a valid, untouched slot
-                // (never bind zero-length: the binding layer clamps it to
-                // the whole buffer). See RmsNormZgateBatchedF16CubeCL.
-                None => (gamma_handle.clone(), 1usize),
-            };
+            let (oh, oh_off, oh_len) = optional_twin_binding(
+                output_h_handle.as_ref(),
+                &gamma_handle,
+                total,
+                (r0 * dim * 2) as u64,
+            );
             // SAFETY: Caller guarantees buffer sizes; the slices stay inside.
             unsafe {
                 rmsnorm_twin_batched_f32::launch_unchecked::<R>(
@@ -459,7 +488,7 @@ impl RmsNormTwinBatchedCubeCL {
                         output_handle.clone().offset_start((r0 * dim * 4) as u64),
                         total,
                     ),
-                    BufferArg::from_raw_parts(oh.offset_start((r0 * dim * 2) as u64), oh_len),
+                    BufferArg::from_raw_parts(oh.offset_start(oh_off), oh_len),
                 );
             }
             r0 += rc;
@@ -624,13 +653,12 @@ impl ResidualRmsNormTwinBatchedCubeCL {
             ];
             let params_handle = crate::params_cache::params_handle(client, f32::as_bytes(params));
             let total = rc * dim;
-            let (oh, oh_len) = match &norm_out_h_handle {
-                Some(h) => (h.clone(), total),
-                // Twin-less: a one-element γ view — a valid, untouched slot
-                // (never bind zero-length: the binding layer clamps it to
-                // the whole buffer). See RmsNormZgateBatchedF16CubeCL.
-                None => (gamma_handle.clone(), 1usize),
-            };
+            let (oh, oh_off, oh_len) = optional_twin_binding(
+                norm_out_h_handle.as_ref(),
+                &gamma_handle,
+                total,
+                (r0 * dim * 2) as u64,
+            );
             // SAFETY: Caller guarantees buffer sizes; the slices stay inside.
             unsafe {
                 residual_rmsnorm_twin_batched_f32::launch_unchecked::<R>(
@@ -651,7 +679,7 @@ impl ResidualRmsNormTwinBatchedCubeCL {
                         norm_out_handle.clone().offset_start((r0 * dim * 4) as u64),
                         total,
                     ),
-                    BufferArg::from_raw_parts(oh.offset_start((r0 * dim * 2) as u64), oh_len),
+                    BufferArg::from_raw_parts(oh.offset_start(oh_off), oh_len),
                 );
             }
             r0 += rc;

@@ -1,9 +1,63 @@
 # Issue 1175 — audit every CubeCL/wgpu launcher for zero-length buffer bindings (the alias-trample hazard)
 
-**Status:** OPEN — filed from bench 944's instrument law (a
-zero-length binding is clamped to the WHOLE buffer by the wgpu/Metal
-binding layer).
-**Claimed:** zed-ablate@amo, 1793804639, expires 2026-11-06T15:04:17Z
+**Status:** CLOSED (2026-11-04) — the audit ran clean; verdicts below.
+**Lease closed:** zed-ablate@amo, epoch 1793804639, expires
+2026-11-06T15:04:17Z. File removed per the noise-reduction rule; the
+verdicts live in this removed file's git history + `HISTORY.md`.
+
+## Audit verdict (2026-11-04, zed-ablate@amo)
+
+**Population**: 1102 `BufferArg::from_raw_parts(` call sites in
+`crates/` (the `std::slice::from_raw_parts` hits are unrelated). The
+sibling re-export surfaces (`src/` root, riir-reflex, riir-neuron-db,
+riir-refine's own launchers) carry none; ONE literal-zero bind found in
+a sibling's own kernel crate — riir-ai's `riir-gpu` (below).
+
+**Literal-zero sites found and fixed** (riir-infer commit `981e0c0`-family):
+
+| site | verdict | action |
+|---|---|---|
+| `norms_cubecl.rs` q-loop k slot | safe by accident — `rmsnorm_qk_fused_f32` selects the buffer by `params[3]` (n_q) and NEVER reads either slot's `len()` | fixed: binds a ONE-ELEMENT q-γ view (in-bounds by construction, offset 0) |
+| `norms_cubecl.rs` k-loop q slot | symmetric, same verdict | fixed: one-element k-γ view |
+
+**Latent bug found by the audit and fixed**: the three fused twin
+launchers (`norms_fused_batched_cubecl.rs`) bound their twin-less slot
+as a one-element γ view but rode the TWIN layout offset (`r0·dim·2`
+bytes) on it — past a γ buffer's end for any CHUNKED twin-less launch
+(in-bounds only because the G1 shapes never chunked). Fixed via the
+shared `optional_twin_binding` helper (offset 0 on the fallback; the
+used arm unchanged); the three duplicated match blocks deduped into it
+(DRY). **Validation**: fused G1 3/3 bitwise (twin-less arms included),
+norms suite 15/15, full gpu lib suite **314 passed / 0 failed** on
+Metal.
+
+**Cross-repo finding (fixed in the sibling, cited per the law)**:
+`riir-ai/crates/riir-gpu/src/lora_fused_cubecl.rs` `launch_fused_b`
+bound `packed_b` with length 0 and the comment "size not needed for
+storage buffers" — the clamp law says the opposite (the bound length IS
+the kernel-visible slice). The kernel is index-based (safe by
+accident); fixed to the buffer's honest full length — behavior-identical,
+4/4 `lora_fused` tests green on Metal. **Sibling commit: riir-ai
+`84239dbd2`** (cherry-picked onto origin/develop in a detached worktree
+after a concurrent sibling push; the main clone ref-synced). The same
+hazard class is already a mined rule face in riir-refine's kernel_opt
+corpus (`entries_gpu_06`, the zero-length + over-length binding pair).
+
+**Second-order check (kernels that DO length-read their bound slices)**:
+~15 kernels bound themselves by `x.len()` (residual_add, the elementwise
+family, rotation kernels, encoder lane). Their launchers all pass
+explicit, loop-guarded NONZERO lengths — no zero-length-capable site
+found. The module-header law in `norms_cubecl.rs` (issue-1175 section)
+now pins the three rules — never a 0-length bind; one-element γ views
+at offset 0 for unused slots; route by an explicit params flag, never
+slot length — so the next kernel author meets them before the compiler
+would.
+
+The debug-only `buffer_arg_opt` helper ask is covered by
+`optional_twin_binding` (real, not debug-only — the clamp law is
+platform behavior, not a debug assertion) for the Option-slot shape;
+the two-loop qk launcher inlines the one-element view with the law
+documented in place.
 
 ## The hazard
 

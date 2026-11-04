@@ -29,6 +29,29 @@
 //! - `params[1]` = `eps` (rms_norm_eps, typically 1e-6 for Gemma 2)
 //! - `params[2]` = `dim` (Issue 639 — must NOT be derived from `input.len()`,
 //!   which reports the backing allocation, not the bound length)
+//!
+//! # The unused-slot binding law (issue 1175)
+//!
+//! A ZERO-LENGTH `BufferArg` binding is **clamped to the WHOLE buffer** by
+//! the wgpu/Metal binding layer — the kernel-side slice reports the full
+//! allocation, so any kernel that length-reads (or writes through) an
+//! unused slot tramples whatever the slot aliases (bench 944's instrument
+//! law, caught live by the 1173 G1 twin-less arms). Rules for every
+//! launcher in this crate:
+//!
+//! 1. **Never bind a zero-length view.** An unused/optional slot binds a
+//!    ONE-ELEMENT view of a buffer that is in-bounds by construction
+//!    (a γ buffer — `head_dim >= 1`), at OFFSET 0 (never the twin layout
+//!    offset — chunked launches would run it past the fallback's end).
+//! 2. **The kernel must not branch on the slot's `len()`.** Route with an
+//!    explicit params flag (`rmsnorm_qk_fused_f32` uses `params[3]` = n_q;
+//!    the fused twin launchers use `params[3]`) — the slot length is
+//!    never load-bearing.
+//! 3. `RmsNormQkFusedCubeCL::launch` was the last live zero-length bind
+//!    (q-loop's k slot, k-loop's q slot — the kernel was safe by accident:
+//!    it selects the buffer by `wg < n_q` and never reads either slot);
+//!    both now bind one-element γ views. The shared helper for the
+//!    Option-twin shape is `norms_fused_batched_cubecl::optional_twin_binding`.
 
 #[cfg(feature = "cubecl_runtime")]
 use cubecl::prelude::*;
@@ -731,9 +754,12 @@ impl RmsNormQkFusedCubeCL {
                         q_handle.clone().offset_start((q0 * head_dim * 4) as u64),
                         rc * head_dim,
                     ),
-                    // Zero-length k slice: no k rows in this launch. The
-                    // kernel never reads k when every wg < n_q (= rc).
-                    BufferArg::from_raw_parts(k_handle.clone(), 0),
+                    // Unused k slot (issue 1175 law): a ONE-ELEMENT view of
+                    // the q γ buffer — in-bounds by construction, offset 0,
+                    // never read (the kernel routes by params[3] = n_q, so
+                    // every wg here is a q workgroup). NEVER a zero-length
+                    // bind: the binding layer clamps it to the WHOLE buffer.
+                    BufferArg::from_raw_parts(q_gamma_handle.clone(), 1),
                     BufferArg::from_raw_parts(q_gamma_handle.clone(), head_dim),
                     BufferArg::from_raw_parts(k_gamma_handle.clone(), head_dim),
                     BufferArg::from_raw_parts(params_handle, 4),
@@ -752,7 +778,9 @@ impl RmsNormQkFusedCubeCL {
                     client,
                     CubeCount::Static(rc as u32, 1, 1),
                     CubeDim::new_1d(256),
-                    BufferArg::from_raw_parts(q_handle.clone(), 0),
+                    // Unused q slot (issue 1175 law): one-element k γ view —
+                    // see the q-loop comment.
+                    BufferArg::from_raw_parts(k_gamma_handle.clone(), 1),
                     BufferArg::from_raw_parts(
                         k_handle.clone().offset_start((k0 * head_dim * 4) as u64),
                         rc * head_dim,
