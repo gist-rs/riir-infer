@@ -278,6 +278,13 @@ pub struct Qwen38WgpuForward {
     /// census built, no samples taken).
     #[cfg(all(feature = "metal_tensor_gemm", target_os = "macos"))]
     census: Option<crate::qwen38_gdn_census::GdnCensus>,
+    /// Issue 1174: the free-running ablation instrument, when
+    /// `RIIR_QWEN38_ABLATE` armed it (or the bench bin's `--ablate-matrix`
+    /// set it per cell via [`Self::set_ablate`]). Skipped classes launch
+    /// NOTHING — the pass-wall delta per class is its free-running cost;
+    /// outputs are bit-trashed by design (measurement-only). None = the
+    /// production byte-path (one branch per launch site).
+    ablate: Option<crate::qwen38_ablate::Ablate>,
     // Decode scratch.
     x: Handle,
     norm_x: Handle,
@@ -816,6 +823,43 @@ impl Qwen38WgpuForward {
             );
         }
 
+        // Issue 1174: the free-running ablation instrument. The premise is
+        // the INCUMBENT launch set (the 942/943 baseline schedule), so any
+        // posture that changes it or serializes the queue refuses loud
+        // here — before the heavy load, never silently.
+        let ablate = crate::qwen38_ablate::Ablate::from_env()?;
+        if let Some(a) = &ablate {
+            if census_armed {
+                return Err("RIIR_QWEN38_ABLATE refuses RIIR_QWEN38_GDN_CENSUS=1: \
+                            the census's hazard-pinned markers serialize boundaries — \
+                            the ablation premise is the free-running queue"
+                    .into());
+            }
+            if StageTimers::enabled() {
+                return Err("RIIR_QWEN38_ABLATE refuses RIIR_QWEN38_STAGE_TIMERS=1: \
+                            the per-stage syncs serialize the queue"
+                    .into());
+            }
+            if crate::norms_fused_batched_cubecl::fuse_ssm_zgate()
+                || crate::norms_fused_batched_cubecl::fuse_norm_cast()
+                || crate::norms_fused_batched_cubecl::fuse_resid_norm()
+            {
+                return Err("RIIR_QWEN38_ABLATE refuses the RIIR_QWEN38_FUSE_* arms: \
+                            the fused kernels change the launch set the classes name"
+                    .into());
+            }
+            if crate::qwen38_gdn_chunked_route::armed() {
+                return Err("RIIR_QWEN38_ABLATE refuses RIIR_QWEN38_GDN_CHUNKED=1: \
+                            the chunked-scan route is a different scan launch set"
+                    .into());
+            }
+            eprintln!(
+                "[Issue 1174] ablation armed: {} — measurement-only, outputs are \
+                 bit-trashed; the pass wall delta per class is its free-running cost",
+                a.describe()
+            );
+        }
+
         let e = config.n_embd;
         let vocab = config.vocab_size;
         let l_qkv = config.l_qkv_out();
@@ -1151,6 +1195,7 @@ impl Qwen38WgpuForward {
             attn_tensor,
             #[cfg(all(feature = "metal_tensor_gemm", target_os = "macos"))]
             census,
+            ablate,
             x,
             norm_x,
             tmp,
@@ -1647,9 +1692,11 @@ impl Qwen38WgpuForward {
         let p = self.chunk;
 
         // x_b <- wte[tokens] — host gather + one block upload (~10 MB).
+        // Issue 1174: `wte_upload` ablation skips the gather AND the write
+        // (x_b stays stale — measurement-only).
         let wte_t0 = timers.is_some().then(std::time::Instant::now);
         let wte_gather_t0 = timers.is_some().then(std::time::Instant::now);
-        {
+        if !self.ablate_skip("wte_upload") {
             let mut block = vec![0.0f32; p * e];
             for (i, &t) in tokens.iter().enumerate() {
                 let t = t as usize;
@@ -1669,6 +1716,8 @@ impl Qwen38WgpuForward {
             if let (Some(t), Some(t0)) = (timers.as_mut(), wte_write_t0) {
                 t.wte_write_ms += t0.elapsed().as_secs_f64() * 1e3;
             }
+        } else if let (Some(t), Some(t0)) = (timers.as_mut(), wte_gather_t0) {
+            t.wte_gather_ms += t0.elapsed().as_secs_f64() * 1e3;
         }
         if let (Some(t), Some(t0)) = (timers.as_mut(), wte_t0) {
             pollster::block_on(self.client.sync()).ok();
@@ -1717,40 +1766,44 @@ impl Qwen38WgpuForward {
         let tail_t0 = timers.is_some().then(std::time::Instant::now);
         unsafe {
             let last = self.x_b.clone().offset_start(((p - 1) * e * 4) as u64);
-            crate::norms_cubecl::RmsNormCubeCL::launch::<ActiveRuntime>(
-                &self.client,
-                last,
-                self.output_norm.clone(),
-                self.tmp_b.clone(),
-                e,
-                eps,
-            );
-            for (ci, chunk_handle) in self.lm_head_chunks.iter().enumerate() {
-                let c0 = ci * self.lm_chunk_rows;
-                let rows = self.lm_chunk_rows.min(vocab - c0);
-                let out = self.logits_b.clone().offset_start((c0 * 4) as u64);
-                crate::gemv_cubecl::GemvCubeCL::launch::<ActiveRuntime>(
+            if !self.ablate_skip("tail_norm") {
+                crate::norms_cubecl::RmsNormCubeCL::launch::<ActiveRuntime>(
                     &self.client,
-                    chunk_handle.clone(),
+                    last,
+                    self.output_norm.clone(),
                     self.tmp_b.clone(),
-                    out,
-                    rows,
                     e,
+                    eps,
                 );
             }
-            for (ci, w_handle) in self.lm_head_q6k_chunks.iter().enumerate() {
-                let c0 = ci * self.lm_chunk_rows;
-                let rows = self.lm_chunk_rows.min(vocab - c0);
-                let out = self.logits_b.clone().offset_start((c0 * 4) as u64);
-                crate::gemv_q6k_cubecl::GemvQ6KCubeCL::launch::<ActiveRuntime>(
-                    &self.client,
-                    w_handle.clone(),
-                    self.lm_head_q6k_d[ci].clone(),
-                    self.tmp_b.clone(),
-                    out,
-                    rows,
-                    e,
-                );
+            if !self.ablate_skip("lm_head_gemm") {
+                for (ci, chunk_handle) in self.lm_head_chunks.iter().enumerate() {
+                    let c0 = ci * self.lm_chunk_rows;
+                    let rows = self.lm_chunk_rows.min(vocab - c0);
+                    let out = self.logits_b.clone().offset_start((c0 * 4) as u64);
+                    crate::gemv_cubecl::GemvCubeCL::launch::<ActiveRuntime>(
+                        &self.client,
+                        chunk_handle.clone(),
+                        self.tmp_b.clone(),
+                        out,
+                        rows,
+                        e,
+                    );
+                }
+                for (ci, w_handle) in self.lm_head_q6k_chunks.iter().enumerate() {
+                    let c0 = ci * self.lm_chunk_rows;
+                    let rows = self.lm_chunk_rows.min(vocab - c0);
+                    let out = self.logits_b.clone().offset_start((c0 * 4) as u64);
+                    crate::gemv_q6k_cubecl::GemvQ6KCubeCL::launch::<ActiveRuntime>(
+                        &self.client,
+                        w_handle.clone(),
+                        self.lm_head_q6k_d[ci].clone(),
+                        self.tmp_b.clone(),
+                        out,
+                        rows,
+                        e,
+                    );
+                }
             }
         }
         if let (Some(t), Some(t0)) = (timers.as_mut(), tail_t0) {
@@ -1773,15 +1826,23 @@ impl Qwen38WgpuForward {
     /// producer per chunk, never once per GEMM.
     fn gemm_input(&self, twin: &Option<Handle>, src: &Handle, n: usize) -> Handle {
         match twin {
-            Some(h) => unsafe {
-                crate::elementwise_cubecl::CastF32ToF16CubeCL::launch::<ActiveRuntime>(
-                    &self.client,
-                    src.clone(),
-                    h.clone(),
-                    n,
-                );
+            Some(h) => {
+                // Issue 1174: the `f16_cast` ablation skips the launch but
+                // keeps the twin handle — the consuming GEMM's geometry
+                // (half×half reads) must not change, only the bytes go
+                // stale (measurement-only).
+                if !self.ablate_skip("f16_cast") {
+                    unsafe {
+                        crate::elementwise_cubecl::CastF32ToF16CubeCL::launch::<ActiveRuntime>(
+                            &self.client,
+                            src.clone(),
+                            h.clone(),
+                            n,
+                        );
+                    }
+                }
                 h.clone()
-            },
+            }
             None => src.clone(),
         }
     }
@@ -1919,6 +1980,19 @@ impl Qwen38WgpuForward {
         }
     }
 
+    /// Issue 1174: swap the ablation cell (the bench bin's matrix mode —
+    /// one model load, many cells). `None` = the production launch set.
+    pub fn set_ablate(&mut self, ablate: Option<crate::qwen38_ablate::Ablate>) {
+        self.ablate = ablate;
+    }
+
+    /// Issue 1174: whether `class`'s launches are skipped in this cell.
+    /// The check is a branch per launch site — None ablate = one pointer
+    /// compare off the GPU critical path.
+    fn ablate_skip(&self, class: &str) -> bool {
+        self.ablate.as_ref().is_some_and(|a| a.skip(class))
+    }
+
     /// One GDN layer of the chunked prefill pass. Returns whether THIS
     /// layer fused its mlp_residual with the NEXT layer's input_norm (issue
     /// 1173 F3 cross-layer arm) — the loop threads it so the next layer
@@ -1961,7 +2035,7 @@ impl Qwen38WgpuForward {
         // Issue 1173 F2 (norm + f16 twin in one launch) / F3 cross-layer
         // (the previous layer's mlp_residual already computed this norm).
         let mut norm_twin_fresh = norm_prefetched && self.norm_x_b_h.is_some();
-        if !norm_prefetched {
+        if !norm_prefetched && !self.ablate_skip("input_norm") {
             norm_twin_fresh = self.norm_batched_staged(
                 self.x_b.clone(),
                 lw.attn_norm.clone(),
@@ -1979,10 +2053,12 @@ impl Qwen38WgpuForward {
         self.census_mark(li, "gemm_qkv_z_ab", &gemm_hz)?;
         let norm_in =
             self.gemm_input_fresh(&self.norm_x_b_h, &self.norm_x_b, p * e, norm_twin_fresh);
-        qkv.gemm(&self.client, norm_in.clone(), self.qkv_b.clone(), p);
-        z_w.gemm(&self.client, norm_in.clone(), self.z_b.clone(), p);
-        alpha.gemm(&self.client, norm_in.clone(), self.a_b.clone(), p);
-        beta_w.gemm(&self.client, norm_in, self.b_b.clone(), p);
+        if !self.ablate_skip("gemm_qkv_z_ab") {
+            qkv.gemm(&self.client, norm_in.clone(), self.qkv_b.clone(), p);
+            z_w.gemm(&self.client, norm_in.clone(), self.z_b.clone(), p);
+            alpha.gemm(&self.client, norm_in.clone(), self.a_b.clone(), p);
+            beta_w.gemm(&self.client, norm_in, self.b_b.clone(), p);
+        }
         self.census_mark(
             li,
             "beta_decay",
@@ -1994,17 +2070,19 @@ impl Qwen38WgpuForward {
             ],
         )?;
         unsafe {
-            crate::deltanet_cubecl::DeltanetBetaDecayBatchedCubeCL::launch::<ActiveRuntime>(
-                &self.client,
-                self.a_b.clone(),
-                self.b_b.clone(),
-                ssm_a,
-                dt_bias,
-                self.beta_b.clone(),
-                self.decay_b.clone(),
-                n_v,
-                p,
-            );
+            if !self.ablate_skip("beta_decay") {
+                crate::deltanet_cubecl::DeltanetBetaDecayBatchedCubeCL::launch::<ActiveRuntime>(
+                    &self.client,
+                    self.a_b.clone(),
+                    self.b_b.clone(),
+                    ssm_a,
+                    dt_bias,
+                    self.beta_b.clone(),
+                    self.decay_b.clone(),
+                    n_v,
+                    p,
+                );
+            }
         }
         self.census_mark(
             li,
@@ -2019,44 +2097,52 @@ impl Qwen38WgpuForward {
             // Chunked conv1d+SiLU over sliced 64-token sub-chunks (state-safe:
             // the public launcher is conv + ordered carry-update). Input and
             // output are SEPARATE buffers — in-place races the window reads.
-            let f4 = 4u64;
-            let mut t0 = 0usize;
-            while t0 < p {
-                let in_chunk = self
-                    .qkv_b
-                    .clone()
-                    .offset_start(t0 as u64 * l_qkv as u64 * f4);
-                let out_chunk = self
-                    .conv_out_b
-                    .clone()
-                    .offset_start(t0 as u64 * l_qkv as u64 * f4);
-                crate::deltanet_chunked_cubecl::DeltanetChunkedConv1dCubeCL::launch::<ActiveRuntime>(
-                    &self.client,
-                    in_chunk,
-                    out_chunk,
-                    conv_w.clone(),
-                    conv_state.clone(),
-                    64,
-                    l_qkv,
-                    conv_kernel,
-                    conv_kernel, // carry_stride = ks (conv_state layout)
-                    1,           // carry_idx_offset = 1 (skip position 0)
-                );
-                t0 += 64;
+            if !self.ablate_skip("conv1d") {
+                let f4 = 4u64;
+                let mut t0 = 0usize;
+                while t0 < p {
+                    let in_chunk = self
+                        .qkv_b
+                        .clone()
+                        .offset_start(t0 as u64 * l_qkv as u64 * f4);
+                    let out_chunk = self
+                        .conv_out_b
+                        .clone()
+                        .offset_start(t0 as u64 * l_qkv as u64 * f4);
+                    crate::deltanet_chunked_cubecl::DeltanetChunkedConv1dCubeCL::launch::<
+                        ActiveRuntime,
+                    >(
+                        &self.client,
+                        in_chunk,
+                        out_chunk,
+                        conv_w.clone(),
+                        conv_state.clone(),
+                        64,
+                        l_qkv,
+                        conv_kernel,
+                        conv_kernel, // carry_stride = ks (conv_state layout)
+                        1,           // carry_idx_offset = 1 (skip position 0)
+                    );
+                    t0 += 64;
+                }
             }
         }
         let conv_out_b = self.conv_out_b.clone();
         self.census_mark(li, "expand_l2", std::slice::from_ref(&conv_out_b))?;
         unsafe {
-            crate::deltanet_cubecl::ExpandAndL2NormalizeHeadsBatchedCubeCL::launch::<ActiveRuntime>(
-                &self.client,
-                self.conv_out_b.clone(),
-                self.qkvx_exp_b.clone(),
-                n_k_heads,
-                n_v,
-                hd_v,
-                p,
-            );
+            if !self.ablate_skip("expand_l2") {
+                crate::deltanet_cubecl::ExpandAndL2NormalizeHeadsBatchedCubeCL::launch::<
+                    ActiveRuntime,
+                >(
+                    &self.client,
+                    self.conv_out_b.clone(),
+                    self.qkvx_exp_b.clone(),
+                    n_k_heads,
+                    n_v,
+                    hd_v,
+                    p,
+                );
+            }
         }
         self.census_mark(
             li,
@@ -2068,7 +2154,11 @@ impl Qwen38WgpuForward {
             ],
         )?;
         unsafe {
-            if crate::qwen38_gdn_chunked_route::armed() {
+            if self.ablate_skip("scan") {
+                // No launch of either scan route (the chunked route is
+                // refused under ablation at construction — the multi-token
+                // recurrence is the only reachable arm here).
+            } else if crate::qwen38_gdn_chunked_route::armed() {
                 // The chunked-scan route (issue 1150 follow-up 2): the
                 // Issue-734-T4 chunkwise family over 64-token windows —
                 // opt-in, LOSSY-CLASS (the route module's numerics
@@ -2122,34 +2212,36 @@ impl Qwen38WgpuForward {
         // Issue 1173 F1: norm_ssm + z-gate (+ the f16 twin) in ONE launch.
         let ssm_twin_fresh = crate::norms_fused_batched_cubecl::fuse_ssm_zgate();
         unsafe {
-            if ssm_twin_fresh {
-                crate::norms_fused_batched_cubecl::RmsNormZgateBatchedF16CubeCL::launch::<
-                    ActiveRuntime,
-                >(
-                    &self.client,
-                    self.rec_b.clone(),
-                    ssm_norm,
-                    self.z_b.clone(),
-                    self.rec_n_b.clone(),
-                    self.rec_n_b_h.clone(),
-                    p * n_v,
-                    hd_v,
-                    eps,
-                );
-            } else {
-                crate::norms_cubecl::RmsNormBatchedCubeCL::launch::<ActiveRuntime>(
-                    &self.client,
-                    self.rec_b.clone(),
-                    ssm_norm,
-                    self.rec_n_b.clone(),
-                    p * n_v,
-                    hd_v,
-                    eps,
-                );
+            if !self.ablate_skip("norm_ssm") {
+                if ssm_twin_fresh {
+                    crate::norms_fused_batched_cubecl::RmsNormZgateBatchedF16CubeCL::launch::<
+                        ActiveRuntime,
+                    >(
+                        &self.client,
+                        self.rec_b.clone(),
+                        ssm_norm,
+                        self.z_b.clone(),
+                        self.rec_n_b.clone(),
+                        self.rec_n_b_h.clone(),
+                        p * n_v,
+                        hd_v,
+                        eps,
+                    );
+                } else {
+                    crate::norms_cubecl::RmsNormBatchedCubeCL::launch::<ActiveRuntime>(
+                        &self.client,
+                        self.rec_b.clone(),
+                        ssm_norm,
+                        self.rec_n_b.clone(),
+                        p * n_v,
+                        hd_v,
+                        eps,
+                    );
+                }
             }
         }
         self.census_mark(li, "z_gate", &[self.rec_n_b.clone(), self.z_b.clone()])?;
-        if !ssm_twin_fresh {
+        if !ssm_twin_fresh && !self.ablate_skip("z_gate") {
             unsafe {
                 crate::deltanet_cubecl::DeltanetZGatingCubeCL::launch::<ActiveRuntime>(
                     &self.client,
@@ -2170,20 +2262,26 @@ impl Qwen38WgpuForward {
             p * n_v * hd_v,
             ssm_twin_fresh,
         );
-        ssm_out.gemm(&self.client, ssm_in, self.tmp_b.clone(), p);
+        if !self.ablate_skip("ssm_out_gemm") {
+            ssm_out.gemm(&self.client, ssm_in, self.tmp_b.clone(), p);
+        }
         self.census_mark(li, "residual_gdn", &[self.x_b.clone(), self.tmp_b.clone()])?;
         // Issue 1173 F3 (same-layer arm): residual add + the MLP input norm
         // (+ twin) in one launch; plain residual add when disarmed.
-        let mlp_norm_prefetched = self.residual_norm_staged(
-            self.x_b.clone(),
-            self.tmp_b.clone(),
-            lw.post_attention_norm.clone(),
-            self.norm_x_b.clone(),
-            self.norm_x_b_h.clone(),
-            p,
-            e,
-            eps,
-        );
+        let mlp_norm_prefetched = if !self.ablate_skip("residual_gdn") {
+            self.residual_norm_staged(
+                self.x_b.clone(),
+                self.tmp_b.clone(),
+                lw.post_attention_norm.clone(),
+                self.norm_x_b.clone(),
+                self.norm_x_b_h.clone(),
+                p,
+                e,
+                eps,
+            )
+        } else {
+            false
+        };
         let census_mlp = self.census_matches(li);
         if census_mlp {
             let x_b = self.x_b.clone();
@@ -2234,7 +2332,7 @@ impl Qwen38WgpuForward {
             // mlp_residual already computed this norm; the fused norm+twin
             // otherwise (the incumbent batched norm when disarmed).
             let mut norm_twin_fresh = norm_prefetched && self.norm_x_b_h.is_some();
-            if !norm_prefetched {
+            if !norm_prefetched && !self.ablate_skip("input_norm") {
                 norm_twin_fresh = self.norm_batched_staged(
                     self.x_b.clone(),
                     lw.attn_norm.clone(),
@@ -2247,51 +2345,63 @@ impl Qwen38WgpuForward {
             }
             let norm_in =
                 self.gemm_input_fresh(&self.norm_x_b_h, &self.norm_x_b, p * e, norm_twin_fresh);
-            wq.gemm(&self.client, norm_in.clone(), self.qg_b.clone(), p);
-            wk.gemm(&self.client, norm_in.clone(), self.k_b.clone(), p);
-            wv.gemm(&self.client, norm_in, self.v_b.clone(), p);
-            crate::qwen_attention_cubecl::QwenSplitQgBatchedCubeCL::launch::<ActiveRuntime>(
-                &self.client,
-                self.qg_b.clone(),
-                self.q_b.clone(),
-                self.gate_b.clone(),
-                hd,
-                c.n_head,
-                p,
-            );
-            crate::norms_cubecl::RmsNormQkFusedCubeCL::launch::<ActiveRuntime>(
-                &self.client,
-                self.q_b.clone(),
-                self.k_b.clone(),
-                q_norm,
-                k_norm,
-                p * c.n_head,
-                p * c.n_kv_head,
-                hd,
-                eps,
-            );
-            crate::qwen_attention_cubecl::QwenRopePartialBatchedCubeCL::launch::<ActiveRuntime>(
-                &self.client,
-                self.q_b.clone(),
-                self.k_b.clone(),
-                c.rotary_dim,
-                hd,
-                c.n_head,
-                c.n_kv_head,
-                c.rope_theta,
-                p,
-                base_pos,
-            );
-            crate::qwen_attention_cubecl::QwenKvCacheFillSplitBatchedCubeCL::launch::<ActiveRuntime>(
-                &self.client,
-                self.k_b.clone(),
-                self.v_b.clone(),
-                key_cache.clone(),
-                value_cache.clone(),
-                kvd,
-                p,
-                base_pos,
-            );
+            if !self.ablate_skip("attn_qkv_gemm") {
+                wq.gemm(&self.client, norm_in.clone(), self.qg_b.clone(), p);
+                wk.gemm(&self.client, norm_in.clone(), self.k_b.clone(), p);
+                wv.gemm(&self.client, norm_in, self.v_b.clone(), p);
+            }
+            if !self.ablate_skip("split_qg") {
+                crate::qwen_attention_cubecl::QwenSplitQgBatchedCubeCL::launch::<ActiveRuntime>(
+                    &self.client,
+                    self.qg_b.clone(),
+                    self.q_b.clone(),
+                    self.gate_b.clone(),
+                    hd,
+                    c.n_head,
+                    p,
+                );
+            }
+            if !self.ablate_skip("qk_norm") {
+                crate::norms_cubecl::RmsNormQkFusedCubeCL::launch::<ActiveRuntime>(
+                    &self.client,
+                    self.q_b.clone(),
+                    self.k_b.clone(),
+                    q_norm,
+                    k_norm,
+                    p * c.n_head,
+                    p * c.n_kv_head,
+                    hd,
+                    eps,
+                );
+            }
+            if !self.ablate_skip("rope") {
+                crate::qwen_attention_cubecl::QwenRopePartialBatchedCubeCL::launch::<ActiveRuntime>(
+                    &self.client,
+                    self.q_b.clone(),
+                    self.k_b.clone(),
+                    c.rotary_dim,
+                    hd,
+                    c.n_head,
+                    c.n_kv_head,
+                    c.rope_theta,
+                    p,
+                    base_pos,
+                );
+            }
+            if !self.ablate_skip("kv_cache_fill") {
+                crate::qwen_attention_cubecl::QwenKvCacheFillSplitBatchedCubeCL::launch::<
+                    ActiveRuntime,
+                >(
+                    &self.client,
+                    self.k_b.clone(),
+                    self.v_b.clone(),
+                    key_cache.clone(),
+                    value_cache.clone(),
+                    kvd,
+                    p,
+                    base_pos,
+                );
+            }
             let (kv_read, vv_read) = if base_pos > 0 {
                 (key_cache.clone(), value_cache.clone())
             } else {
@@ -2300,33 +2410,39 @@ impl Qwen38WgpuForward {
             // Issue 1171: the tensor-flash arm when armed + routable; the
             // tiled CubeCL arm otherwise (the fallback guard stays — a
             // sub-64-row cache would not route, and p=512 chunks never
-            // produce one).
-            let routed_tensor = match &self.attn_tensor {
-                Some(attn) if crate::attention_prefill_metal_tensor::MetalTensorAttentionPrefill::
-                    routable(hd, base_pos, p) =>
-                {
-                    let host = crate::gemm_dense_f16_metal_zero_copy::dense_mm()
-                        .expect("ATTN_TENSOR armed without the dense context");
-                    attn
-                        .dispatch(
-                            host.as_ref(),
-                            &self.client,
-                            &self.q_b.clone(),
-                            &kv_read,
-                            &vv_read,
-                            &self.gate_b.clone(),
-                            &self.attn_out_b.clone(),
-                            c.n_head,
-                            c.n_kv_head,
-                            p,
-                            base_pos,
-                        )
-                        .map_err(|e| format!("tensor attention: {e}"))?;
-                    true
+            // produce one). Issue 1174: `attn_scores` skips BOTH arms —
+            // skipping one would swap the launch set, not remove it.
+            let skip_scores = self.ablate_skip("attn_scores");
+            let routed_tensor = if skip_scores {
+                false
+            } else {
+                match &self.attn_tensor {
+                    Some(attn) if crate::attention_prefill_metal_tensor::MetalTensorAttentionPrefill::
+                        routable(hd, base_pos, p) =>
+                    {
+                        let host = crate::gemm_dense_f16_metal_zero_copy::dense_mm()
+                            .expect("ATTN_TENSOR armed without the dense context");
+                        attn
+                            .dispatch(
+                                host.as_ref(),
+                                &self.client,
+                                &self.q_b.clone(),
+                                &kv_read,
+                                &vv_read,
+                                &self.gate_b.clone(),
+                                &self.attn_out_b.clone(),
+                                c.n_head,
+                                c.n_kv_head,
+                                p,
+                                base_pos,
+                            )
+                            .map_err(|e| format!("tensor attention: {e}"))?;
+                        true
+                    }
+                    _ => false,
                 }
-                _ => false,
             };
-            if !routed_tensor {
+            if !routed_tensor && !skip_scores {
                 crate::qwen_attention_cubecl::QwenAttentionPrefillTiledCubeCL::launch::<
                     ActiveRuntime,
                 >(
@@ -2344,18 +2460,24 @@ impl Qwen38WgpuForward {
                 );
             }
             let wo_in = self.gemm_input(&self.attn_out_b_h, &self.attn_out_b, p * c.n_head * hd);
-            wo.gemm(&self.client, wo_in, self.tmp_b.clone(), p);
+            if !self.ablate_skip("attn_out_gemm") {
+                wo.gemm(&self.client, wo_in, self.tmp_b.clone(), p);
+            }
             // Issue 1173 F3 (same-layer arm): residual + the MLP input norm.
-            let mlp_norm_prefetched = self.residual_norm_staged(
-                self.x_b.clone(),
-                self.tmp_b.clone(),
-                lw.post_attention_norm.clone(),
-                self.norm_x_b.clone(),
-                self.norm_x_b_h.clone(),
-                p,
-                e,
-                eps,
-            );
+            let mlp_norm_prefetched = if !self.ablate_skip("attn_residual") {
+                self.residual_norm_staged(
+                    self.x_b.clone(),
+                    self.tmp_b.clone(),
+                    lw.post_attention_norm.clone(),
+                    self.norm_x_b.clone(),
+                    self.norm_x_b_h.clone(),
+                    p,
+                    e,
+                    eps,
+                )
+            } else {
+                false
+            };
             self.prefill_mlp(lw, p, eps, None, mlp_norm_prefetched, next_attn_norm)
         }
     }
@@ -2385,7 +2507,7 @@ impl Qwen38WgpuForward {
         // Issue 1173 F2 / F3-cross: the norm is skipped entirely when the
         // caller's residual fusion already computed it.
         let mut norm_twin_fresh = norm_prefetched && self.norm_x_b_h.is_some();
-        if !norm_prefetched {
+        if !norm_prefetched && !self.ablate_skip("mlp_norm") {
             norm_twin_fresh = self.norm_batched_staged(
                 self.x_b.clone(),
                 lw.post_attention_norm.clone(),
@@ -2396,7 +2518,7 @@ impl Qwen38WgpuForward {
                 eps,
             );
         }
-        {
+        if !self.ablate_skip("mlp_gateup_gemm") {
             let norm_in =
                 self.gemm_input_fresh(&self.norm_x_b_h, &self.norm_x_b, p * e, norm_twin_fresh);
             gate.gemm(&self.client, norm_in.clone(), self.gateup_b.clone(), p);
@@ -2414,13 +2536,15 @@ impl Qwen38WgpuForward {
             self.census_mark(cli, "mlp_act", &act_hz)?;
         }
         unsafe {
-            crate::deltanet_cubecl::DeltanetGatingCubeCL::launch::<ActiveRuntime>(
-                &self.client,
-                self.gateup_b.clone(),
-                self.up_b.clone(),
-                self.hidden_b.clone(),
-                p * mlp,
-            );
+            if !self.ablate_skip("mlp_act") {
+                crate::deltanet_cubecl::DeltanetGatingCubeCL::launch::<ActiveRuntime>(
+                    &self.client,
+                    self.gateup_b.clone(),
+                    self.up_b.clone(),
+                    self.hidden_b.clone(),
+                    p * mlp,
+                );
+            }
         }
         if let Some(cli) = census_li {
             let mut down_hz = vec![self.hidden_b.clone()];
@@ -2430,7 +2554,9 @@ impl Qwen38WgpuForward {
             self.census_mark(cli, "mlp_down_gemm", &down_hz)?;
         }
         let down_in = self.gemm_input(&self.hidden_b_h, &self.hidden_b, p * mlp);
-        down.gemm(&self.client, down_in, self.tmp_b.clone(), p);
+        if !self.ablate_skip("mlp_down_gemm") {
+            down.gemm(&self.client, down_in, self.tmp_b.clone(), p);
+        }
         if let Some(cli) = census_li {
             self.census_mark(cli, "mlp_residual", &[self.x_b.clone(), self.tmp_b.clone()])?;
         }
@@ -2438,27 +2564,31 @@ impl Qwen38WgpuForward {
         // input norm (+ twin) in one launch — the fused kernel writes the
         // next layer's norm_x_b with the next layer's γ. No next layer (the
         // chunk's last) → the plain residual add.
-        let next_prefetched = match next_attn_norm {
-            Some(gamma) => self.residual_norm_staged(
-                self.x_b.clone(),
-                self.tmp_b.clone(),
-                gamma,
-                self.norm_x_b.clone(),
-                self.norm_x_b_h.clone(),
-                p,
-                e,
-                eps,
-            ),
-            None => unsafe {
-                crate::norms_cubecl::ResidualAddCubeCL::launch::<ActiveRuntime>(
-                    &self.client,
+        let next_prefetched = if self.ablate_skip("mlp_residual") {
+            false
+        } else {
+            match next_attn_norm {
+                Some(gamma) => self.residual_norm_staged(
                     self.x_b.clone(),
                     self.tmp_b.clone(),
-                    self.x_b.clone(),
-                    p * e,
-                );
-                false
-            },
+                    gamma,
+                    self.norm_x_b.clone(),
+                    self.norm_x_b_h.clone(),
+                    p,
+                    e,
+                    eps,
+                ),
+                None => unsafe {
+                    crate::norms_cubecl::ResidualAddCubeCL::launch::<ActiveRuntime>(
+                        &self.client,
+                        self.x_b.clone(),
+                        self.tmp_b.clone(),
+                        self.x_b.clone(),
+                        p * e,
+                    );
+                    false
+                },
+            }
         };
         Ok(next_prefetched)
     }

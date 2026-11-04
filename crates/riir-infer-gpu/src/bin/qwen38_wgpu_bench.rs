@@ -10,6 +10,10 @@
 //! - `--walk <text>`       greedy-generate N tokens (`--walk-tokens`), print
 //!   the token ids + detokenized text — the ids feed the llama.cpp parity
 //!   check on the same GGUF (the G1 acceptance; f32-activation class, module doc).
+//! - `--ablate-matrix`     issue 1174: the free-running attribution table —
+//!   one model load, per-class interleaved base/ablated pass pairs (no
+//!   serialization anywhere; `--ablate-classes` narrows, `--ablate-pairs`
+//!   sizes the pair count, default 3). See `qwen38_ablate`.
 //!
 //! Whole-file cfg keeps non-`qwen38_wgpu` builds an empty binary; the Cargo
 //! [[bin]] required-features row is the reader protection.
@@ -32,6 +36,9 @@ fn main() {
     let mut chunk = 512usize;
     let mut walk_tokens = 0usize;
     let mut passes = 3usize;
+    let mut ablate_matrix = false;
+    let mut ablate_classes: Option<String> = None;
+    let mut ablate_pairs = 3usize;
     let mut i = 1usize;
     while i < args.len() {
         match args[i].as_str() {
@@ -75,6 +82,15 @@ fn main() {
                 i += 1;
                 passes = args[i].parse().expect("passes");
             }
+            "--ablate-matrix" => ablate_matrix = true,
+            "--ablate-classes" => {
+                i += 1;
+                ablate_classes = Some(args[i].clone());
+            }
+            "--ablate-pairs" => {
+                i += 1;
+                ablate_pairs = args[i].parse().expect("ablate pairs");
+            }
             other => {
                 eprintln!("unknown arg {other}");
                 std::process::exit(2);
@@ -98,6 +114,19 @@ fn main() {
         prompt.len(),
         ids.len()
     );
+
+    if ablate_matrix {
+        let pp_target = pp.first().copied().unwrap_or(5120);
+        run_ablate_matrix(
+            &mut fwd,
+            &ids,
+            chunk,
+            pp_target,
+            ablate_classes,
+            ablate_pairs,
+        );
+        return;
+    }
 
     // Prefill cells: pad/truncate the prompt to each target by repetition.
     // Issue 1150: the target rounds UP to a full ingest chunk — a ragged
@@ -203,4 +232,213 @@ fn main() {
             .collect();
         println!("[walk] text: {}", text.join(""));
     }
+}
+
+/// Issue 1174 — the free-running attribution matrix. One model load; per
+/// class an INTERLEAVED (base, ablated) pass-pair sequence — sequential
+/// arms measure the box (the katgpt-rs ab_timing law), so every cell
+/// carries its own base arms and the delta is the median of the per-pair
+/// walls. `all` runs last: its delta is the pass's launch/dispatch floor.
+fn run_ablate_matrix(
+    fwd: &mut Qwen38WgpuForward,
+    ids: &[u32],
+    chunk: usize,
+    pp_target: usize,
+    classes: Option<String>,
+    pairs: usize,
+) {
+    use riir_infer_gpu::qwen38_ablate::{Ablate, CLASSES};
+
+    // The cell list: every class, or the named subset (`all` cell always
+    // runs last — it is the floor cross-check).
+    let names: Vec<&str> = match &classes {
+        Some(spec) => {
+            let a = Ablate::parse(spec).unwrap_or_else(|e| panic!("ablate: {e}"));
+            CLASSES.iter().copied().filter(|c| a.skip(c)).collect()
+        }
+        None => CLASSES.to_vec(),
+    };
+
+    let n_gdn = fwd
+        .config
+        .layer_types
+        .iter()
+        .filter(|k| **k == riir_infer_gpu::qwen38_dense_cubecl::Qwen38WgpuLayerType::Deltanet)
+        .count();
+    let n_attn = fwd.config.layer_types.len() - n_gdn;
+
+    // Pad to the pp target in full chunks (the pp convention — no ragged
+    // tail; the padded count is disclosed).
+    let padded = pp_target.div_ceil(chunk) * chunk;
+    let mut toks = ids.to_vec();
+    while toks.len() < padded {
+        toks.extend_from_slice(ids);
+    }
+    toks.truncate(padded);
+    let n_chunks = padded / chunk;
+
+    println!(
+        "[ablate-matrix] {} classes x {pairs} interleaved pair(s), pp{padded} \
+         ({n_chunks} chunks of {chunk}), layers: {n_gdn} gdn + {n_attn} attn — \
+         one warm-up pass first",
+        names.len()
+    );
+
+    // Warm-up: every kernel of the posture pays its first-dispatch cost
+    // once, outside any cell (skipping never introduces a new kernel).
+    fwd.zero_state();
+    let t = std::time::Instant::now();
+    fwd.ingest(&toks, 0)
+        .unwrap_or_else(|e| panic!("ingest: {e}"));
+    println!(
+        "[ablate-matrix] warm-up: {:.2}s = {:.0} tok/s",
+        t.elapsed().as_secs_f64(),
+        toks.len() as f64 / t.elapsed().as_secs_f64()
+    );
+
+    let mut base_walls: Vec<f64> = Vec::new();
+    let mut rows: Vec<(&str, f64)> = Vec::new(); // (class, Δ ms/chunk)
+    for &name in &names {
+        let a = Ablate::from_classes([name]).unwrap_or_else(|e| panic!("ablate: {e}"));
+        run_ablate_cell(
+            fwd,
+            name,
+            Some(a),
+            &toks,
+            n_chunks,
+            pairs,
+            &mut base_walls,
+            &mut rows,
+        );
+    }
+    // The launch-floor cell.
+    run_ablate_cell(
+        fwd,
+        "ALL",
+        Some(Ablate::all()),
+        &toks,
+        n_chunks,
+        pairs,
+        &mut base_walls,
+        &mut rows,
+    );
+    fwd.set_ablate(None);
+
+    // The table.
+    println!(
+        "[ablate-matrix] ── free-running per-class costs (ms per chunk, median of {pairs} pair deltas) ──"
+    );
+    let mut kernel_ms = 0.0f64;
+    for (name, delta) in &rows {
+        println!("[ablate-matrix]   {name:<16} {delta:8.2} ms/chunk");
+        kernel_ms += delta;
+    }
+    let mut w = base_walls.clone();
+    w.sort_by(|a, b| a.partial_cmp(b).unwrap());
+    let base_med = w[w.len() / 2];
+    let base_ms = base_med * 1e3 / n_chunks as f64;
+    println!(
+        "[ablate-matrix] base wall median {:.1} ms/chunk ({:.0} tok/s) | Σ class deltas {kernel_ms:.1} ms/chunk \
+         ({:.1}% of the wall) | the remainder (wall − Σ) is queue gaps + dispatch + argmax reads, \
+         never kernel execution",
+        base_ms,
+        padded as f64 / base_med,
+        100.0 * kernel_ms / base_ms
+    );
+    // The per-layer mapping (the 943 comparison): GDN-only classes divide
+    // by the GDN layer count, attn classes by the attn count, shared
+    // classes (entry norm / mlp / casts — identical shapes on both kinds)
+    // by the layer total; the once-per-chunk classes do not divide.
+    let gdn_only = [
+        "gemm_qkv_z_ab",
+        "beta_decay",
+        "conv1d",
+        "expand_l2",
+        "scan",
+        "norm_ssm",
+        "z_gate",
+        "ssm_out_gemm",
+        "residual_gdn",
+    ];
+    let all_layers = n_gdn + n_attn;
+    println!(
+        "[ablate-matrix] per-layer mapping (gdn /{n_gdn}, attn /{n_attn}, shared /{all_layers}):"
+    );
+    for (name, delta) in &rows {
+        // ALL is the floor cell, and wte/tail run once per chunk — neither
+        // divides by a layer count.
+        let per_layer = if *name == "ALL"
+            || *name == "wte_upload"
+            || *name == "tail_norm"
+            || *name == "lm_head_gemm"
+        {
+            None
+        } else if gdn_only.contains(name) {
+            Some(*delta / n_gdn as f64)
+        } else if name.starts_with("attn_") {
+            Some(*delta / n_attn as f64)
+        } else {
+            Some(*delta / all_layers as f64)
+        };
+        if let Some(ms) = per_layer {
+            println!("[ablate-matrix]   {name:<16} {ms:7.3} ms/layer-instance");
+        }
+    }
+    println!(
+        "[ablate-matrix] done — outputs were bit-trashed by design; do not reuse the model state"
+    );
+}
+
+/// One matrix cell: `pairs` interleaved (base, ablated) pass pairs — the
+/// base arm of every pair re-reads the incumbent launch set under the SAME
+/// box state, so the paired delta cancels drift (sequential arms measure
+/// the box, never the kernel).
+#[allow(clippy::too_many_arguments, reason = "the matrix cell's flat inputs")]
+fn run_ablate_cell(
+    fwd: &mut Qwen38WgpuForward,
+    name: &str,
+    ablated: Option<riir_infer_gpu::qwen38_ablate::Ablate>,
+    toks: &[u32],
+    n_chunks: usize,
+    pairs: usize,
+    base_walls: &mut Vec<f64>,
+    rows: &mut Vec<(&'static str, f64)>,
+) {
+    let mut deltas: Vec<f64> = Vec::new();
+    for pair in 0..pairs {
+        fwd.zero_state();
+        fwd.set_ablate(None);
+        let t0 = std::time::Instant::now();
+        fwd.ingest(toks, 0)
+            .unwrap_or_else(|e| panic!("ingest: {e}"));
+        let base = t0.elapsed().as_secs_f64();
+        base_walls.push(base);
+
+        fwd.zero_state();
+        fwd.set_ablate(ablated.clone());
+        let t1 = std::time::Instant::now();
+        fwd.ingest(toks, 0)
+            .unwrap_or_else(|e| panic!("ingest: {e}"));
+        let abl = t1.elapsed().as_secs_f64();
+        fwd.set_ablate(None);
+
+        let d = (base - abl) * 1e3 / n_chunks as f64;
+        deltas.push(d);
+        println!(
+            "[ablate {name}] pair {pair}: base {:.2}s ({:.0} tok/s) / \
+             abl {:.2}s ({:.0} tok/s) -> Δ {d:+.2} ms/chunk",
+            base,
+            toks.len() as f64 / base,
+            abl,
+            toks.len() as f64 / abl
+        );
+    }
+    deltas.sort_by(|a, b| a.partial_cmp(b).unwrap());
+    let med = deltas[deltas.len() / 2];
+    let class: &'static str = riir_infer_gpu::qwen38_ablate::CLASSES
+        .iter()
+        .copied()
+        .find(|c| *c == name)
+        .unwrap_or("ALL");
+    rows.push((class, med));
 }

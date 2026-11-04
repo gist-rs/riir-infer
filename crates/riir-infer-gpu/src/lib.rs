@@ -853,6 +853,12 @@ pub mod qwen38_dense_cubecl;
 // see the module's numerics disclosure).
 #[cfg(feature = "qwen38_wgpu")]
 pub mod qwen38_gdn_chunked_route;
+// Issue 1174 — the free-running ablation instrument (bench 944's named
+// next step): per-class kernel-skip cells over the prefill pass, no
+// serialization anywhere. Measurement-only; pure class taxonomy + env
+// parse — no GPU dep.
+#[cfg(feature = "qwen38_wgpu")]
+pub mod qwen38_ablate;
 // Issue 1172 — the GDN-bucket GPU-timestamp census (the bench-942 record's
 // named instrument; diagnostic-only, zero in-pass syncs). macOS +
 // metal_tensor_gemm.
