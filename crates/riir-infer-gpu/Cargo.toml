@@ -634,6 +634,14 @@ required-features = ["qwen38_wgpu"]
 name = "qwen38_dense_f16_matmul2d_g1"
 required-features = ["qwen38_wgpu", "metal_tensor_gemm"]
 
+# Plan 614 Phase-3 task-1 G1 — the Q4_K staged-dequant matmul2d unit gate +
+# the rate probe. Same cfg posture and the same refusal law: the file is
+# `#![cfg(all(qwen38_wgpu, metal_tensor_gemm, macos))]` and this row makes a
+# bare `--test` name refuse instead of an empty `0 passed` binary.
+[[test]]
+name = "qwen38_q4k_tensor_g1"
+required-features = ["qwen38_wgpu", "metal_tensor_gemm"]
+
 # Plan 620 (Plan 622 Phase 7) — the GPU G3 zero-shot harness: the CPU
 # `si_zero_shot_ppl` port driving `forward_token_graph` (~90 tok/s ⇒ the
 # FAST re-gate lane + the App-H τ-sweep enabler). Deliberately requires ONLY

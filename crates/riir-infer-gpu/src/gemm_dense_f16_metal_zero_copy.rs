@@ -1,13 +1,18 @@
-//! Issue 1150 follow-up — Zero-copy raw-Metal **dense-f16** GEMM via the
-//! shared CubeCL device.
+//! Issue 1150 follow-up — Zero-copy raw-Metal **dense** GEMM (f16 AND Q4_K
+//! weights) via the shared CubeCL device.
 //!
 //! The dense twin of [`crate::gemm_ternary_metal_zero_copy`]: the SAME
 //! zero-copy raw-Metal dispatch choreography (shared device + queue via
 //! `wgpu::Device::as_hal`, per-dispatch raw handle extraction, dedicated
 //! output buffer + GPU→GPU copy-back, `ensure_wgpu_initialized` first-use
-//! cure), driving a matmul2d kernel whose A operand is the f16 weight matrix
-//! read STRAIGHT from device memory — no ternary bit-plane dequant, no
-//! threadgroup staging, no staging barrier in the K loop.
+//! cure). Two compiled pipelines on one context:
+//!
+//! - `pipeline` — the matmul2d kernel whose A operand is the f16 weight
+//!   matrix read STRAIGHT from device memory (no staging, no dequant).
+//! - `q4k_pipeline` — plan-614 Phase-3 task 1: the staged-dequant matmul2d
+//!   whose A operand is Q4_K blocks dequanted in-kernel to the threadgroup
+//!   half tile (the ternary kernel's skeleton; ~4.5 bpw served in place —
+//!   the f16 posture's 3.5× memory cost and its S-ratio poison avoided).
 //!
 //! # Why dense f16
 //!
@@ -23,7 +28,10 @@
 //! F16 load posture trades ~3.5× weight memory (~54 GB for the 27B — M5
 //! Ultra class, not the M3) and a bandwidth-bound decode for a tensor-core
 //! prefill. The posture is opt-in (`RIIR_QWEN38_DENSE_MM2D=1`), never the
-//! default, and both postures are benched.
+//! default, and both postures are benched. The Q4_K pipeline (Bench 1162/1163:
+//! the flip gate's S ratio needs the packed bytes; the dequant's ~3.4×
+//! arithmetic intensity is the measured latency-hiding lever) is the
+//! serving-byte alternative — verify-shape first, decode GEMV follow-up.
 //!
 //! # Feature gate
 //!
@@ -47,6 +55,10 @@ use cubecl::server::Handle;
 
 use crate::cubecl_runtime::ActiveRuntime;
 use crate::gemm_ternary_metal_zero_copy::{covered, insert_merged};
+
+/// The Q4_K MSL source — the staged-dequant matmul2d (the ternary skeleton,
+/// Q4_K nibble dequant in the staging phase).
+const Q4K_MSL_SOURCE: &str = include_str!("gemm_q4k_metal_tensor.metal");
 
 /// The dense-f16 MSL source — the matmul2d kernel with the A operand as a
 /// strided device view over the f16 weights (no staging, no dequant).
@@ -98,6 +110,9 @@ pub struct MetalDenseF16ZeroCopyGemm {
     /// matmul2d path cannot serve a (K × 1) activation view; measured: the
     /// cooperative load/store silently produce nothing at p=1).
     gemv_pipeline: ComputePipelineState,
+    /// The compiled Q4_K staged-dequant matmul2d pipeline (plan-614 task 1;
+    /// own library — the Q4K MSL is a separate source).
+    q4k_pipeline: ComputePipelineState,
     /// Dedicated output buffers keyed by byte size — the pool-aliasing cure
     /// (Metal hazard tracking silently drops the cooperative store when the
     /// output shares the CubeCL pool buffer with the operands). One GPU→GPU
@@ -183,11 +198,24 @@ impl MetalDenseF16ZeroCopyGemm {
             .map_err(|e| format!("dense-f16 gemv pipeline creation failed: {e}"))?;
         drop(library);
 
+        // The Q4_K pipeline: separate source, same compile path.
+        let q4k_library = device_ref
+            .new_library_with_source(Q4K_MSL_SOURCE, &options)
+            .map_err(|e| format!("q4k MSL compilation failed: {e}"))?;
+        let q4k_function = q4k_library
+            .get_function("gemm_q4k_tensor", None)
+            .map_err(|e| format!("Function 'gemm_q4k_tensor' not found: {e}"))?;
+        let q4k_pipeline = device_ref
+            .new_compute_pipeline_state_with_function(&q4k_function)
+            .map_err(|e| format!("q4k pipeline creation failed: {e}"))?;
+        drop(q4k_library);
+
         Ok(Self {
             device: device_ptr,
             queue: queue_ptr,
             pipeline,
             gemv_pipeline,
+            q4k_pipeline,
             output_cache: Mutex::new(HashMap::new()),
             wgpu_initialized: Mutex::new(HashMap::new()),
             init_fills: std::sync::atomic::AtomicU64::new(0),
@@ -370,6 +398,143 @@ impl MetalDenseF16ZeroCopyGemm {
 
         // No wait_until_completed — in-order shared queue (the ternary
         // module's async-pipeline law; see its dispatch comment).
+        self.dispatch_count
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+
+        Ok(())
+    }
+
+    /// Dispatch the Q4_K staged-dequant GEMM (plan-614 Phase-3 task 1):
+    /// `output[P × M] = dequant_q4k(W[M × K]) @ input[P × K](f32)^T` with the
+    /// weights consumed as Q4_K blocks IN PLACE (no f16 resident copy).
+    /// Same choreography as [`Self::dispatch`] (dedicated output + blit,
+    /// first-use cure, hazard declarations); the tile geometry is the same
+    /// fork geometry, and the staging phase adds one threadgroup-memory
+    /// buffer (K_TILE × NRA halfs = 4 KB).
+    ///
+    /// Shape laws: `m` must be a multiple of the 64-row tile (the cooperative
+    /// store skips tile-ragged m — the dense kernel's measured law), `n` a
+    /// multiple of 256 (the Q4_K block), `p` ≥ 1 (a (K × 1) view is served:
+    /// the staged-dequant path stages A independently of p — the p=1 G1 cell
+    /// pins it).
+    pub fn dispatch_q4k(
+        &self,
+        client: &ComputeClient<ActiveRuntime>,
+        w_q4k: &Handle,
+        d_dmin: &Handle,
+        m: usize,
+        n: usize,
+        input: &Handle,
+        output: &Handle,
+        p: usize,
+    ) -> Result<(), String> {
+        // Submit CubeCL's pending producers FIRST (the Issue-670 ordering
+        // law); also settles pool bookkeeping before the raw-handle walk.
+        let _ = client.flush();
+        self.ensure_wgpu_initialized(client, output, p * m)?;
+
+        let (w_ptr, w_off) =
+            crate::gemm_ternary_metal_zero_copy::MetalTensorZeroCopyGemm::extract_raw_buffer(
+                client, w_q4k,
+            )?;
+        let (dd_ptr, dd_off) =
+            crate::gemm_ternary_metal_zero_copy::MetalTensorZeroCopyGemm::extract_raw_buffer(
+                client, d_dmin,
+            )?;
+        let (input_ptr, input_off) =
+            crate::gemm_ternary_metal_zero_copy::MetalTensorZeroCopyGemm::extract_raw_buffer(
+                client, input,
+            )?;
+        let (output_ptr, output_off) =
+            crate::gemm_ternary_metal_zero_copy::MetalTensorZeroCopyGemm::extract_raw_buffer(
+                client, output,
+            )?;
+
+        let w_ref: &BufferRef = unsafe { BufferRef::from_ptr(w_ptr) };
+        let dd_ref: &BufferRef = unsafe { BufferRef::from_ptr(dd_ptr) };
+        let input_ref: &BufferRef = unsafe { BufferRef::from_ptr(input_ptr) };
+        let cubecl_output_ref: &BufferRef = unsafe { BufferRef::from_ptr(output_ptr) };
+
+        let output_bytes = (p * m * std::mem::size_of::<f32>()) as u64;
+        let dedicated_output = {
+            let mut cache = self.output_cache.lock().unwrap();
+            cache
+                .entry(output_bytes)
+                .or_insert_with(|| {
+                    let device_ref: &DeviceRef = unsafe { DeviceRef::from_ptr(self.device) };
+                    device_ref.new_buffer(output_bytes, MTLResourceOptions::StorageModeShared)
+                })
+                .clone()
+        };
+
+        let nra = DENSE_NRA;
+        let nrb = DENSE_NRB;
+        let nsg = DENSE_NSG;
+        let num_threads = 32u64 * nsg;
+        let grid = MTLSize {
+            width: (p as u64).div_ceil(nrb),
+            height: (m as u64).div_ceil(nra),
+            depth: 1,
+        };
+        let threadgroup = MTLSize {
+            width: num_threads,
+            height: 1,
+            depth: 1,
+        };
+
+        let k: u32 = n as u32;
+        let m_u: u32 = m as u32;
+        let p_tokens: u32 = p as u32;
+        // The staging tile: K_TILE × NRA halfs (32 × 64 × 2 = 4 KB at the
+        // fork geometry) — mirrors gemm_ternary_metal_tensor's staging.
+        let shmem_bytes: u64 = 32 * 64 * 2;
+
+        let queue_ref: &CommandQueueRef = unsafe { CommandQueueRef::from_ptr(self.queue) };
+        let cmd_buffer = queue_ref.new_command_buffer();
+        let encoder = cmd_buffer.new_compute_command_encoder();
+        encoder.set_compute_pipeline_state(&self.q4k_pipeline);
+
+        // Buffer bindings (match gemm_q4k_metal_tensor.metal):
+        //   0: weight_q4k (read, CubeCL pool, packed Q4_K payloads)
+        //   1: d_dmin (read, CubeCL pool, f32 block scales)
+        //   2: input_batch (read, CubeCL pool, f32)
+        //   3: output_batch (write, DEDICATED Metal buffer)
+        encoder.set_buffer(0, Some(w_ref), w_off);
+        encoder.set_buffer(1, Some(dd_ref), dd_off);
+        encoder.set_buffer(2, Some(input_ref), input_off);
+        encoder.set_buffer(3, Some(&dedicated_output), 0);
+
+        // Scalar bindings (4..6 match the MSL `constant uint&` declarations).
+        encoder.set_bytes(4, 4, &k as *const u32 as *const _);
+        encoder.set_bytes(5, 4, &m_u as *const u32 as *const _);
+        encoder.set_bytes(6, 4, &p_tokens as *const u32 as *const _);
+
+        // Threadgroup memory for the dequanted weight tile (index 0).
+        encoder.set_threadgroup_memory_length(0, shmem_bytes);
+
+        encoder.use_resource(w_ref, MTLResourceUsage::Read);
+        encoder.use_resource(dd_ref, MTLResourceUsage::Read);
+        encoder.use_resource(input_ref, MTLResourceUsage::Read);
+        encoder.use_resource(&dedicated_output, MTLResourceUsage::Write);
+
+        encoder.dispatch_thread_groups(grid, threadgroup);
+        encoder.end_encoding();
+
+        // GPU→GPU copy-back within the same command buffer (ordered after the
+        // compute pass) — zero host round-trip.
+        let blit_encoder = cmd_buffer.new_blit_command_encoder();
+        blit_encoder.copy_from_buffer(
+            &dedicated_output,
+            0,
+            cubecl_output_ref,
+            output_off,
+            output_bytes,
+        );
+        blit_encoder.end_encoding();
+
+        cmd_buffer.commit();
+        *self.last_cmd_buffer.lock().expect("last_cmd_buffer lock") = Some(cmd_buffer.to_owned());
+
         self.dispatch_count
             .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
 
