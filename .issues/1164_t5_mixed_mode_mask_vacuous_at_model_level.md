@@ -1,7 +1,22 @@
 # Issue 1164: the T5 mixed-mode head mask is VACUOUS at the model level (bench 1157 Cell D)
 
-**Status:** Open — filed from bench 1157 (the T6 league cells, 2026-11-02)
-**Claimed:** zed-7710a782, 1793682000, expires 2026-11-04T16:30:00+00:00
+**Status:** Open — ROOT CAUSE FIXED at the predicate level (`a9aeedd`, 2026-11-04); the model-level proof (T6 Cell D re-cell) is the open item.
+**Lease closed (override):** zed-986a7538 (amo), epoch 1794169000 — took over zed-7710a782's live claim (epoch 1793682000, was expires 2026-11-04T16:30:00+00:00) per owner instruction + Claude verdict round 1 AGREE-with-conditions; holder notified via agent-mail `01a1a46b` before the edit; the checkout showed no unclaimed 1164 work (tree clean, no worktrees). Fix landed `a9aeedd` the same session.
+
+## The fix (landed)
+
+**Predicate fixed — `a9aeedd` (2026-11-04, zed-986a7538):** `sparse_layer_dense` read ANY dense head as "layer dense" → every mixed layer skipped the sparse pipeline → the whole layer took the dense ladder. With Cell D's mask (some head dense in every layer) EVERY layer degenerated to dense — exactly the FNV 6/6 == dense symptom. Hypothesis (a) confirmed (store-vs-consume seam); (b)/(c) refuted (the kernel consumes the mode words correctly and the mask layout matches — the T5 G1 battery was green because it builds its own mode buffer, bypassing the launcher predicate).
+
+- `sparse_layer_dense`: `any` → `all` (fully-dense semantics, the documented intent); doc updated.
+- Test pins corrected: mixed row (1 of 6 dense) is NOT a dense layer; all-dense row IS; out-of-bounds NOT dense.
+- New `scratch_mirror_routes_mixed_layers_into_the_sparse_pipeline`: setter mask → `alloc_sparse_scratch` → the launcher's mirror, and the predicate separates mixed (pipeline runs) from fully dense (pipeline skips).
+- Module family 13/13 green at `production,cubecl_runtime` on Metal; clippy `-D warnings` clean at the same posture; rustfmt + `cargo refine --fix --verify` zero edits.
+- Callers audited (verdict condition): only the launcher (`ternary_deltanet_gpu_forward.rs:8070`) + the tests consume `sparse_layer_dense`; scratch sizing/upload never read it.
+
+## Tasks
+
+- [x] **T-fix — the launcher predicate** — DONE `a9aeedd` (above).
+- [ ] **T-recell — the model-level proof (the actual closure bar):** re-run Cell D through the T6 harness (`riir-ai/crates/riir-gpu/tests/bench_1156_t6_league_cells.rs`, NAME FILTER mandatory — it shares the binary + the process-wide τ/scorer/mask stores with the league cells). Expected after the fix: Cell D FNV differs from dense at 16K/32K (it runs sparse on heads 5..19 now) and the per-head read matches the union (dense on 0..4 == dense cell's rows, sparse on the rest == Cell C's rows — the kernel test already proves the union at kernel level). Cell D's mixed-mode perf number then becomes measurable (the runbook's REPORT-ONLY verdict carries a number at last). Metal exclusive-class cell (~8 min at the 4-prefill posture; single-cell filter is ~2 min + build). Owner-gated GPU window.
 
 ## The finding
 
