@@ -22,6 +22,8 @@ Early audit reads (in-flight, pre-poison-decision): w1/w2 warm passes read 7 tok
 **Claim scope:** follow-up task 1 (stage timers) + the one timed pp 2484 pass on bmo
 **Claim scope:** the dense-f16 matmul2d prefill arm (session-record step 1, the speed unlock) + the f16 gemv completing the F16 load posture for both paths; bmo four-way re-run stays the named follow-up, co-tenant-disclosed
 **Lease closed:** zed-m3-i1150-densef16, epoch 1793272600 (claimed for 48 h, folded at landing same-day) — landed `7e20540`
+- [ ] Layer-GEMM ceiling (the post-bench-939 shares: gdn bucket 66% + attn 17.9% ≈ 24.9 TFLOP of GEMM per 512-token pass at ~16 TFLOPS effective vs the fork's ~47 / MLX's ~74 on this silicon): wire matmul2d `relaxed_precision` into the dense host — the bench-923 precedent measured 1.96–2.19× on the same kernel family (llama.cpp compiles it true upstream); tile geometry stays pinned (bench 936: composed optimum). Lossy surface: pre-registered unit band + walk agreement stats + per-family deployed-path read before any promotion call.
+**Claimed:** zed-amo-i1150-relaxed, 1793786916, expires 2026-11-06T10:08:00Z
 
 ## Problem
 
