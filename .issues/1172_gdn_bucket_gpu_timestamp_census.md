@@ -1,8 +1,10 @@
 # Issue 1172 — qwen38 dense lane: the GDN-bucket census (GPU timestamps) — pinning the non-GEMM 30%
 
-**Status:** OPEN — the bench-942 record's named next instrument. Not claimed
-(append a `**Claimed:**` line under this Status before implementing).
-**Claimed:** zed-986a7538@amo, epoch=1793714997, expires 2026-11-06T18:00:00+00:00
+**Status:** LANDED (2026-11-04, zed-986a7538@amo) — instrument + census
+complete; verdicts in `.benchmarks/943` and below. The named lever is
+filed forward as `.issues/1173_dense_lane_fused_norm_gating_launch_floor.md`
+(fusion, not kernel work — the census's central finding).
+**Lease closed:** zed-986a7538@amo, epoch=1793714997, expires 2026-11-06T18:00:00+00:00 (landed `95fea10`/bench 943).
 
 ## Problem
 
@@ -25,22 +27,29 @@ distortion.
 
 ## Plan
 
-- [ ] Instrument: per-section GPU wall inside `prefill_gdn_layer` for one
+- [x] Instrument: per-section GPU wall inside `prefill_gdn_layer` for one
   representative layer (qkv/z/a/b GEMMs · conv1d · recurrence ·
-  beta/decay+expand+zgate · norms+residual · MLP GEMMs), diagnostic env
+  `beta/decay`+expand+zgate · norms+residual · MLP GEMMs), diagnostic env
   (`RIIR_QWEN38_GDN_CENSUS=1`), summed per chunk in the timer mode.
-  DRY check first: wgpu timestamp-query support in this cubecl/wgpu
-  version; Metal counter buffers on the raw-commit path (the zero-copy
-  modules' command buffers — same pattern as `wait_last`, timestamps
-  instead of completion waits).
-- [ ] Census run at the promoted posture (pp512 + pp5120): the split
-  table, GPU-exclusive, box provenance.
-- [ ] Verdict per class: the scan (bench 938: adequate), conv, norms,
-  gating — each either (a) priced-lever (kernel work filed separately
-  with a pre-registered bar) or (b) measured-adequate (closed, recorded).
-- [ ] The GEMM residual too: the census also validates the 279 ms
-  arithmetic against the actual GEMM wall (the half-B A/B numbers are
-  standalone; in-pass L2 pressure may differ).
+  DRY check DONE (in-repo, measured — see the record's instrument laws):
+  wgpu timestamp queries are NOT the path (cubecl owns its encoders);
+  Metal counter sample buffers with the device's "timestamp" counter set
+  + pass-attachment sampling on self-committed marker buffers are.
+- [x] Census runs at the promoted posture (pp512, pp2560, pp5120): the
+  split table, GPU-exclusive, box provenance (bench 943).
+- [x] Verdict per class: the scan (0.77 ms = 8.7% of the layer wall;
+  matches bench 938's ~6% of the pass — adequate), conv, norms, gating —
+  every non-GEMM class reads a size-independent ~0.5–0.7 ms LAUNCH FLOOR
+  (the same kernels read 0.01–0.11 ms idle-queue at pp512): the lever is
+  fewer launches (filed forward as issue 1173, the fused norm+gating
+  family), not faster kernels. GEMMs: write-bandwidth-bound
+  (floor-dominated) — the 279 ms arithmetic is refuted, no kernel work
+  justified.
+- [x] The GEMM residual: the census measured the in-pass GEMM wall
+  DIRECTLY (0.55 ms for the 4 GEMMs at pp5120 — 3.4× under bench 941's
+  standalone per-GEMM numbers; pp512's idle-queue 8.33 ms is
+  dispatch/queue-idle, not FLOPs). The half-B TFLOPS arithmetic is not
+  the binding constraint in-pass.
 
 ## Non-goals
 
@@ -54,4 +63,5 @@ distortion.
 Bench 942 (`62f112e`) measured the 74% share + the per-chunk flatness;
 the wte sync-stall split (bench 940) is the cautionary tale this
 instrument avoids — GPU timestamps, never CPU deltas between async
-launches.
+launches. Landed: instrument `4ea7adb`, deep-queue marker-chain fix
+`95fea10`, census + verdicts bench 943.
