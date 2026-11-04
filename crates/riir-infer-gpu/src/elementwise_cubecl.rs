@@ -956,6 +956,12 @@ impl CastF32ToF16CubeCL {
     /// Launch the cast: `n` elements, `ceil(n/256)` workgroups of 256
     /// threads. `n` = the f32 ELEMENT count (the f16 twin holds the same
     /// element count at half the bytes).
+    ///
+    /// # Safety
+    ///
+    /// - `input_handle`: `n` f32 elements (read-only)
+    /// - `output_handle`: `n` f16 elements (modified in-place; the caller's
+    ///   staging twin, never aliasing the input)
     pub unsafe fn launch<R: Runtime>(
         client: &ComputeClient<R>,
         input_handle: Handle,

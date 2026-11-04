@@ -384,7 +384,11 @@ impl MetalDenseF16ZeroCopyGemm {
     /// module's, on this context's own tracker): the first time an output
     /// range is seen, have CubeCL write it so wgpu marks the range
     /// initialized BEFORE the raw blit lands; a seen range is a set lookup.
-    fn ensure_wgpu_initialized(
+    /// `pub(crate)` so the tensor-attention arm can share THIS tracker (one
+    /// tracker per pool buffer — a second tracker would re-fill ranges the
+    /// dense GEMM already marked); the [`TensorAttnHost`] impl below is the
+    /// dispatch-site surface.
+    pub(crate) fn ensure_wgpu_initialized(
         &self,
         client: &ComputeClient<ActiveRuntime>,
         output: &Handle,
@@ -782,6 +786,26 @@ impl MetalDenseF16ZeroCopyGemm {
         {
             cb.wait_until_completed();
         }
+    }
+}
+
+// SAFETY: delegation — the tensor-attention arm (issue 1171) shares this
+// context's tracker + device/queue so the qwen38 pool has ONE first-use
+// tracker across the dense GEMM and the attention arm.
+impl crate::attention_prefill_metal_tensor::TensorAttnHost for MetalDenseF16ZeroCopyGemm {
+    fn ensure_wgpu_initialized(
+        &self,
+        client: &ComputeClient<ActiveRuntime>,
+        out: &Handle,
+        len: usize,
+    ) -> Result<(), String> {
+        self.ensure_wgpu_initialized(client, out, len)
+    }
+    fn device_ptr(&self) -> usize {
+        self.device as usize
+    }
+    fn queue_ptr(&self) -> usize {
+        self.queue as usize
     }
 }
 

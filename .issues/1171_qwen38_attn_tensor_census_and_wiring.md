@@ -1,9 +1,24 @@
 # Issue 1171 — qwen38 dense lane: the attention-core long-p census + the tensor-flash attention wiring
 
-**Status:** IN PROGRESS — the bench-941 record's named lead ("the attention
-core's O(p²) share at long p — census at pp5120 before any kernel work").
+**Status:** LANDED 2026-11-04 (zed-amo-i1171-attn@amo, bench 942) — both
+checkboxes done same session: the census pinned attention at **46.5–48.6%
+of the pp5120 pass** (per-chunk 164→847 ms, ~1.5 TFLOPS-class); the
+wiring (`RIIR_QWEN38_ATTN_TENSOR=1` promote-only, the Issue-1146 kernel
+hosted on the dense context via the new `TensorAttnHost` trait — no
+module fork) took the bucket to 1.10 s (20%), per-chunk near-flat
+(89→132 ms, +5 ms/512-KV-rows vs +73 before). **pp5120: 580 → 971 tok/s
+(1.67×) — PAST THE FORK (898) at its own league cell; MLX 1411 = 1.45×
+remains.** Walk md5 `0764d040…` byte-identical across all 4 arms (7
+runs). Record:
+[`.benchmarks/942_issue1171_tensor_flash_attention_past_the_fork.md`](../.benchmarks/942_issue1171_tensor_flash_attention_past_the_fork.md).
+Next ceiling: the GDN bucket (74% of the pass, flat ~400 ms/chunk) — the
+layer GEMMs are at half-B 53-66 TFLOPS; the recurrence/conv/norm non-GEMM
+share is the unmeasured rest (a per-kernel census inside the gdn bucket
+is the next instrument, before any kernel work).
 
-**Claimed:** zed-amo-i1171-attn, 1793820000, expires 2026-11-06T18:00:00Z
+**Lease closed:** zed-amo-i1171-attn, epoch 1793820000 (claimed
+2026-11-04 ~18:00Z for the census + wiring arc, folded at the bench-942
+landing same day; was expires 2026-11-06T18:00:00Z)
 
 ## Problem
 
@@ -33,27 +48,26 @@ bench-923/940/941 lossy discipline applies.
 
 ## Plan
 
-- [ ] **Census (first, per the bench-941 record):** per-chunk stage rows in
+- [x] **Census (first, per the bench-941 record):** per-chunk stage rows in
   the lane's timer mode (`chunk_rows` in `StageTimers` + one compact print
   line), then a pp5120 census run at the promoted posture (DENSE_MM2D +
-  LMHEAD_Q6K + RELAXED + F16ACT): per-chunk attn bucket growth curve → the
-  attention core's share + implied TFLOPS at each position.
-- [ ] **Wire (only if the census says the share is material):**
+  LMHEAD_Q6K + RELAXED + F16ACT): attention = 46.5–48.6% of the pass,
+  per-chunk 164→847 ms, ~1.5 TFLOPS-class — LANDED (the census instrument
+  stays in the timer mode; the before/after table is in bench 942).
+- [x] **Wire (the census said material):**
   `MetalTensorAttentionPrefill` into `prefill_attn_layer` behind
-  `RIIR_QWEN38_ATTN_TENSOR=1` (promote-only, exact literal; construction
-  needs a `MetalTensorZeroCopyGemm` — construct on the same device the
-  dense context holds, or extend the module to accept device/queue
-  pointers directly; DRY: one construction site, no fork of the module).
-  Fallback to the tiled CubeCL arm when `!routable` (base_pos + p < 64 —
-  never hit at p=512 chunks, but the guard stays).
-- [ ] **G1:** the existing `issue1146_attn_tensor_g1` covers the kernel;
-  the lane-level arbiter is the walk (lossy class: the f32→half Q/P
-  rounding — expect argmax-stable, NOT byte-identical; pre-register the
-  read: id-agreement + divergence point on 512 tokens vs the bench-941
-  walk md5 `0764d040…`).
-- [ ] **G2/e2e:** pp512 / pp2560 / pp5120 cells vs bench 941's
-  640/725/580; per-chunk census again for the share shift.
-- [ ] Record (bench by highwater) + fold the lease.
+  `RIIR_QWEN38_ATTN_TENSOR=1` (promote-only, exact literal) via the new
+  `TensorAttnHost` trait (the dense context hosts; one tracker; the
+  ternary call sites coerce unchanged); `routable()` fallback guard; the
+  layer fns propagate errors loud — LANDED.
+- [x] **G1:** the kernel's own tolerance gate re-run green (peaked
+  argmax 12283/12288, long-cache 23996/24000); the lane walk is
+  BYTE-IDENTICAL to all prior arms (md5 `0764d040…`, 7 runs) — the
+  pre-registered argmax-stability read exceeded (zero divergence).
+- [x] **G2/e2e:** pp512 659 / pp2560 945 / pp5120 971 vs bench 941's
+  640/725/580; per-chunk census re-run (the share table above).
+- [x] Record: [`.benchmarks/942_issue1171_tensor_flash_attention_past_the_fork.md`](../.benchmarks/942_issue1171_tensor_flash_attention_past_the_fork.md)
+  + lease folded.
 
 ## Non-goals
 

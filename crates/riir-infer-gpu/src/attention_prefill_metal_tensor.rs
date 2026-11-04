@@ -90,6 +90,25 @@ pub fn prefill_attn_metal_tensor_launch_count() -> u64 {
 }
 static INITIALIZED: OnceLock<()> = OnceLock::new();
 
+/// The host services the tensor attention needs from a zero-copy GEMM
+/// context: the SHARED first-use wgpu-init tracker (one per pool buffer —
+/// a second tracker would re-fill ranges another context already marked)
+/// and the raw device/queue pointers for zero-copy dispatch.
+/// [`MetalTensorZeroCopyGemm`] (the ternary lane) and
+/// [`crate::gemm_dense_f16_metal_zero_copy::MetalDenseF16ZeroCopyGemm`]
+/// (the qwen38 dense lane, issue 1171) both implement it, so one kernel
+/// module serves both lanes without a fork.
+pub trait TensorAttnHost {
+    fn ensure_wgpu_initialized(
+        &self,
+        client: &ComputeClient<ActiveRuntime>,
+        out: &Handle,
+        len: usize,
+    ) -> Result<(), String>;
+    fn device_ptr(&self) -> usize;
+    fn queue_ptr(&self) -> usize;
+}
+
 /// Whether the matmul2d attention arm is selected. Env
 /// `RIIR_PREFILL_ATTN_METAL_TENSOR=1`/`on`/`true` opts in; read once, stored
 /// into the live flag on the first call; the setter is authoritative after.
@@ -133,8 +152,16 @@ unsafe impl Sync for MetalTensorAttentionPrefill {}
 impl MetalTensorAttentionPrefill {
     /// Compile the kernel on the zero-copy GEMM's device.
     pub fn new(gemm: &MetalTensorZeroCopyGemm) -> Result<Self, String> {
+        Self::new_with_device(gemm.device_ptr())
+    }
+
+    /// Compile the kernel on an explicit raw Metal device — the lane-side
+    /// constructor (issue 1171): a lane whose zero-copy context is NOT the
+    /// ternary GEMM constructs this directly and passes that context as its
+    /// [`TensorAttnHost`] at dispatch.
+    pub fn new_with_device(device_ptr: usize) -> Result<Self, String> {
         let device_ref: &DeviceRef =
-            unsafe { DeviceRef::from_ptr(gemm.device_ptr() as *mut metal::MTLDevice) };
+            unsafe { DeviceRef::from_ptr(device_ptr as *mut metal::MTLDevice) };
         // Diagnostic knob: extra `#define`s prepended to the source
         // (`RIIR_ATTN_TENSOR_DEFINES="ATTN_RESCALE_THRESH=0.0f;..."`), the
         // `SWEEP_*` pattern of the GEMM — unset compiles the source as is.
@@ -194,7 +221,7 @@ impl MetalTensorAttentionPrefill {
     #[allow(clippy::too_many_arguments, reason = "GPU kernel launch")]
     pub fn dispatch(
         &self,
-        gemm: &MetalTensorZeroCopyGemm,
+        host: &dyn TensorAttnHost,
         client: &ComputeClient<ActiveRuntime>,
         query: &Handle,
         key: &Handle,
@@ -214,10 +241,10 @@ impl MetalTensorAttentionPrefill {
         // Producers of q/k/v/gate must be SUBMITTED before our raw commit
         // (same-queue ordering then makes their writes visible), and the
         // output range must be wgpu-initialized before the blit lands
-        // behind wgpu's back — both via the GEMM's shared machinery.
+        // behind wgpu's back — both via the host's shared machinery.
         let _ = client.flush();
         let out_len = p * n_head * HEAD_DIM;
-        gemm.ensure_wgpu_initialized(client, out, out_len)?;
+        host.ensure_wgpu_initialized(client, out, out_len)?;
 
         let (q_ptr, q_off) = MetalTensorZeroCopyGemm::extract_raw_buffer(client, query)?;
         let (k_ptr, k_off) = MetalTensorZeroCopyGemm::extract_raw_buffer(client, key)?;
@@ -237,7 +264,7 @@ impl MetalTensorAttentionPrefill {
                 .entry(out_bytes)
                 .or_insert_with(|| {
                     let device_ref: &DeviceRef =
-                        unsafe { DeviceRef::from_ptr(gemm.device_ptr() as *mut metal::MTLDevice) };
+                        unsafe { DeviceRef::from_ptr(host.device_ptr() as *mut metal::MTLDevice) };
                     device_ref.new_buffer(out_bytes, MTLResourceOptions::StorageModeShared)
                 })
                 .clone()
@@ -248,7 +275,7 @@ impl MetalTensorAttentionPrefill {
         let scale = 1.0f32 / (HEAD_DIM as f32).sqrt();
 
         let queue_ref: &CommandQueueRef =
-            unsafe { CommandQueueRef::from_ptr(gemm.queue_ptr() as *mut metal::MTLCommandQueue) };
+            unsafe { CommandQueueRef::from_ptr(host.queue_ptr() as *mut metal::MTLCommandQueue) };
         let cmd = queue_ref.new_command_buffer();
         let enc = cmd.new_compute_command_encoder();
         enc.set_compute_pipeline_state(&self.pipeline);
@@ -291,6 +318,24 @@ impl MetalTensorAttentionPrefill {
         self.dispatch_count.fetch_add(1, Ordering::Relaxed);
         LAUNCHES.fetch_add(1, Ordering::Relaxed);
         Ok(())
+    }
+}
+
+// SAFETY: delegation to the ternary context's own methods.
+impl TensorAttnHost for MetalTensorZeroCopyGemm {
+    fn ensure_wgpu_initialized(
+        &self,
+        client: &ComputeClient<ActiveRuntime>,
+        out: &Handle,
+        len: usize,
+    ) -> Result<(), String> {
+        MetalTensorZeroCopyGemm::ensure_wgpu_initialized(self, client, out, len)
+    }
+    fn device_ptr(&self) -> usize {
+        MetalTensorZeroCopyGemm::device_ptr(self)
+    }
+    fn queue_ptr(&self) -> usize {
+        MetalTensorZeroCopyGemm::queue_ptr(self)
     }
 }
 

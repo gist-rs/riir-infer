@@ -265,6 +265,12 @@ pub struct Qwen38WgpuForward {
     hidden_b_h: Option<Handle>,
     rec_n_b_h: Option<Handle>,
     attn_out_b_h: Option<Handle>,
+    /// Issue 1171: the tensor-flash attention prefill, when the
+    /// `RIIR_QWEN38_ATTN_TENSOR=1` env armed it (macOS + metal_tensor_gemm
+    /// only). The prefill attention routes through it when the shape is
+    /// [`MetalTensorAttentionPrefill::routable`], else the tiled CubeCL arm
+    /// — the fallback guard stays even though p=512 chunks never miss it.
+    attn_tensor: Option<crate::attention_prefill_metal_tensor::MetalTensorAttentionPrefill>,
     // Decode scratch.
     x: Handle,
     norm_x: Handle,
@@ -588,6 +594,10 @@ struct StageTimers {
     tail_logits_ms: f64,
     read_argmax_ms: f64,
     ragged_tail_ms: f64,
+    /// Issue 1171 census: per-chunk (wte, gdn, attn, tail) ms snapshots —
+    /// the attn bucket's O(p²) growth across chunk positions is the lead
+    /// the bench-941 record named; the aggregate hides the curve.
+    chunk_rows: Vec<(f64, f64, f64, f64)>,
 }
 
 impl StageTimers {
@@ -678,6 +688,39 @@ impl Qwen38WgpuForward {
                 "RIIR_QWEN38_DENSE_MM2D=1 requires macOS + the metal_tensor_gemm feature".into(),
             );
         }
+
+        // Issue 1171: the tensor-flash attention prefill (the Issue-1146
+        // matmul2d attention — the exact handle contract of the tiled
+        // CubeCL arm, HEAD_DIM 256). Requires the dense posture (it hosts
+        // on the dense context's tracker + device). Promote-only, exact
+        // literal; off = the tiled CubeCL arm byte-identical.
+        let attn_tensor_armed = std::env::var("RIIR_QWEN38_ATTN_TENSOR").as_deref() == Ok("1");
+        if attn_tensor_armed && !dense_armed {
+            return Err("RIIR_QWEN38_ATTN_TENSOR=1 requires RIIR_QWEN38_DENSE_MM2D=1".into());
+        }
+        #[cfg(all(feature = "metal_tensor_gemm", target_os = "macos"))]
+        let attn_tensor = if attn_tensor_armed && dense_armed {
+            let device_ptr = crate::gemm_dense_f16_metal_zero_copy::dense_mm()
+                .expect("dense mm2d context installed")
+                .device_ptr();
+            let attn = crate::attention_prefill_metal_tensor::MetalTensorAttentionPrefill::
+                new_with_device(device_ptr)?;
+            eprintln!(
+                "[Issue 1171] tensor-flash prefill attention armed (device={:#x})",
+                device_ptr
+            );
+            Some(attn)
+        } else {
+            None
+        };
+        #[cfg(not(all(feature = "metal_tensor_gemm", target_os = "macos")))]
+        if attn_tensor_armed && dense_armed {
+            return Err(
+                "RIIR_QWEN38_ATTN_TENSOR=1 requires macOS + the metal_tensor_gemm feature".into(),
+            );
+        }
+        #[cfg(not(all(feature = "metal_tensor_gemm", target_os = "macos")))]
+        let attn_tensor = None;
 
         // The half-B matmul2d posture (issue 1170): the prefill GEMMs ride
         // the half×half variant over f16 activation twins. Requires the
@@ -1058,6 +1101,7 @@ impl Qwen38WgpuForward {
             hidden_b_h,
             rec_n_b_h,
             attn_out_b_h,
+            attn_tensor,
             x,
             norm_x,
             tmp,
@@ -1466,12 +1510,23 @@ impl Qwen38WgpuForward {
         let mut last = 0u32;
         let mut p = 0usize;
         while tokens.len() - p >= self.chunk {
-            self.ingest_chunk_gpu(&tokens[p..p + self.chunk], base_pos + p, timers.as_mut());
+            let snap = timers
+                .as_ref()
+                .map(|t| (t.wte_upload_ms, t.gdn_ms, t.attn_ms, t.tail_logits_ms));
+            self.ingest_chunk_gpu(&tokens[p..p + self.chunk], base_pos + p, timers.as_mut())?;
             if let Some(t) = timers.as_mut() {
                 let t0 = std::time::Instant::now();
                 last = self.read_chunk_argmax();
                 t.read_argmax_ms += t0.elapsed().as_secs_f64() * 1e3;
                 t.chunks += 1;
+                if let Some(s) = snap {
+                    t.chunk_rows.push((
+                        t.wte_upload_ms - s.0,
+                        t.gdn_ms - s.1,
+                        t.attn_ms - s.2,
+                        t.tail_logits_ms - s.3,
+                    ));
+                }
             } else {
                 last = self.read_chunk_argmax();
             }
@@ -1490,6 +1545,27 @@ impl Qwen38WgpuForward {
         }
         if let Some(t) = timers.as_ref() {
             t.print(tokens.len());
+            if !t.chunk_rows.is_empty() {
+                let rows: Vec<String> = t
+                    .chunk_rows
+                    .iter()
+                    .enumerate()
+                    .map(|(i, (w, g, a, l))| {
+                        format!(
+                            "c{i} kv{}: {:.0}/{:.0}/{:.0}/{:.0}",
+                            (i + 1) * 512,
+                            w,
+                            g,
+                            a,
+                            l
+                        )
+                    })
+                    .collect();
+                println!(
+                    "[stage-timers] per-chunk (wte/gdn/attn/tail) ms: {}",
+                    rows.join(", ")
+                );
+            }
         }
         self.pos = base_pos + tokens.len();
         Ok(last)
@@ -1506,7 +1582,7 @@ impl Qwen38WgpuForward {
         tokens: &[u32],
         base_pos: usize,
         mut timers: Option<&mut StageTimers>,
-    ) {
+    ) -> Result<(), String> {
         let e = self.config.n_embd;
         let vocab = self.config.vocab_size;
         let p = self.chunk;
@@ -1547,8 +1623,10 @@ impl Qwen38WgpuForward {
             let lw = self.layers[li].clone();
             let layer_t0 = timers.is_some().then(std::time::Instant::now);
             match lw.kind {
-                Qwen38WgpuLayerType::Deltanet => self.prefill_gdn_layer(li, &lw, eps),
-                Qwen38WgpuLayerType::Attention => self.prefill_attn_layer(li, &lw, base_pos, eps),
+                Qwen38WgpuLayerType::Deltanet => self.prefill_gdn_layer(li, &lw, eps)?,
+                Qwen38WgpuLayerType::Attention => {
+                    self.prefill_attn_layer(li, &lw, base_pos, eps)?
+                }
             }
             if let (Some(t), Some(t0)) = (timers.as_mut(), layer_t0) {
                 pollster::block_on(self.client.sync()).ok();
@@ -1604,6 +1682,7 @@ impl Qwen38WgpuForward {
             pollster::block_on(self.client.sync()).ok();
             t.tail_logits_ms += t0.elapsed().as_secs_f64() * 1e3;
         }
+        Ok(())
     }
 
     /// Greedy argmax over the chunk path's logits (after `ingest_chunk_gpu`).
@@ -1632,7 +1711,12 @@ impl Qwen38WgpuForward {
         }
     }
 
-    fn prefill_gdn_layer(&mut self, li: usize, lw: &Qwen38WgpuLayerWeights, eps: f32) {
+    fn prefill_gdn_layer(
+        &mut self,
+        li: usize,
+        lw: &Qwen38WgpuLayerWeights,
+        eps: f32,
+    ) -> Result<(), String> {
         let c = &self.config;
         let e = c.n_embd;
         let l_qkv = c.l_qkv_out();
@@ -1786,8 +1870,9 @@ impl Qwen38WgpuForward {
                 self.x_b.clone(),
                 p * e,
             );
-            self.prefill_mlp(lw, p, eps);
+            self.prefill_mlp(lw, p, eps)?;
         }
+        Ok(())
     }
 
     fn prefill_attn_layer(
@@ -1796,7 +1881,7 @@ impl Qwen38WgpuForward {
         lw: &Qwen38WgpuLayerWeights,
         base_pos: usize,
         eps: f32,
-    ) {
+    ) -> Result<(), String> {
         let c = &self.config;
         let e = c.n_embd;
         let hd = c.head_dim;
@@ -1872,19 +1957,52 @@ impl Qwen38WgpuForward {
             } else {
                 (self.k_b.clone(), self.v_b.clone())
             };
-            crate::qwen_attention_cubecl::QwenAttentionPrefillTiledCubeCL::launch::<ActiveRuntime>(
-                &self.client,
-                self.q_b.clone(),
-                kv_read,
-                vv_read,
-                self.gate_b.clone(),
-                self.attn_out_b.clone(),
-                hd,
-                c.n_head,
-                c.n_kv_head,
-                p,
-                base_pos,
-            );
+            // Issue 1171: the tensor-flash arm when armed + routable; the
+            // tiled CubeCL arm otherwise (the fallback guard stays — a
+            // sub-64-row cache would not route, and p=512 chunks never
+            // produce one).
+            let routed_tensor = match &self.attn_tensor {
+                Some(attn) if crate::attention_prefill_metal_tensor::MetalTensorAttentionPrefill::
+                    routable(hd, base_pos, p) =>
+                {
+                    let host = crate::gemm_dense_f16_metal_zero_copy::dense_mm()
+                        .expect("ATTN_TENSOR armed without the dense context");
+                    attn
+                        .dispatch(
+                            host.as_ref(),
+                            &self.client,
+                            &self.q_b.clone(),
+                            &kv_read,
+                            &vv_read,
+                            &self.gate_b.clone(),
+                            &self.attn_out_b.clone(),
+                            c.n_head,
+                            c.n_kv_head,
+                            p,
+                            base_pos,
+                        )
+                        .map_err(|e| format!("tensor attention: {e}"))?;
+                    true
+                }
+                _ => false,
+            };
+            if !routed_tensor {
+                crate::qwen_attention_cubecl::QwenAttentionPrefillTiledCubeCL::launch::<
+                    ActiveRuntime,
+                >(
+                    &self.client,
+                    self.q_b.clone(),
+                    kv_read,
+                    vv_read,
+                    self.gate_b.clone(),
+                    self.attn_out_b.clone(),
+                    hd,
+                    c.n_head,
+                    c.n_kv_head,
+                    p,
+                    base_pos,
+                );
+            }
             let wo_in = self.gemm_input(&self.attn_out_b_h, &self.attn_out_b, p * c.n_head * hd);
             wo.gemm(&self.client, wo_in, self.tmp_b.clone(), p);
             crate::norms_cubecl::ResidualAddCubeCL::launch::<ActiveRuntime>(
@@ -1894,12 +2012,18 @@ impl Qwen38WgpuForward {
                 self.x_b.clone(),
                 p * e,
             );
-            self.prefill_mlp(lw, p, eps);
+            self.prefill_mlp(lw, p, eps)?;
         }
+        Ok(())
     }
 
     /// SwiGLU MLP (batched).
-    fn prefill_mlp(&mut self, lw: &Qwen38WgpuLayerWeights, p: usize, eps: f32) {
+    fn prefill_mlp(
+        &mut self,
+        lw: &Qwen38WgpuLayerWeights,
+        p: usize,
+        eps: f32,
+    ) -> Result<(), String> {
         let e = self.config.n_embd;
         let mlp = self.config.mlp_hidden;
         let gate = &lw.ffn_gate;
@@ -1935,5 +2059,6 @@ impl Qwen38WgpuForward {
                 p * e,
             );
         }
+        Ok(())
     }
 }
