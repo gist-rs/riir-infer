@@ -23,13 +23,18 @@
 //! The first 128K launch (2026-10-27) died mid-dense to an unattributed kill
 //! at 41% with the report still end-of-run-only: ~7.6 h of compute, zero
 //! durable output. Each arm now persists to `<out>/<name>.bin` the moment it
-//! completes (the dense arm also rewrites its bin every `--bucket` steps as a
-//! complete=0 prefix, so a mid-dense kill keeps the counted prefix), and on
-//! startup a bin whose digest matches the current inputs is LOADED instead of
-//! recomputed. The digest pins ctx/steps/block/refresh/rho/compare-from + the
-//! corpus bytes + the first 64 MiB of the gguf — a changed corpus or model at
-//! the same paths refuses the stale bin loud (`--fresh` recomputes anyway).
-//! Forward code paths are untouched by this layer.
+//! completes, and EVERY arm (dense since f98e921; the ρ arms since the
+//! 2026-11-04 post-mortem — the m3 v2 run lost ~27 h of ρ 0.15 at 94% with
+//! no bin at all) also rewrites its bin every `--bucket` steps as a
+//! complete=0 prefix, temp+rename atomic, so a mid-arm kill keeps the
+//! counted prefix readable post-hoc. On startup a COMPLETE bin whose digest
+//! matches the current inputs is LOADED instead of recomputed (a complete=0
+//! prefix is refused by the loader — it is collection value, not a resume
+//! point; resuming mid-arm would need the GDN cache + selection state
+//! serialized). The digest pins ctx/steps/block/refresh/rho/compare-from +
+//! the corpus bytes + the first 64 MiB of the gguf — a changed corpus or
+//! model at the same paths refuses the stale bin loud (`--fresh` recomputes
+//! anyway). Forward code paths are untouched by this layer.
 //!
 //! # Metrics (per position, bucketed)
 //!
@@ -518,6 +523,33 @@ fn main() -> Result<()> {
                     selected_sum += selected as f64 / total as f64;
                     selected_n += 1.0;
                 }
+            }
+            // Per-bucket prefix: a mid-arm kill keeps the counted rows — the
+            // same progressive persistence the dense arm has. The m3 v2 run
+            // lost ~27 h of ρ 0.15 at 94% because only the dense arm wrote
+            // prefixes (issue 1117, the 2026-11-04 post-mortem). The prefix
+            // is post-hoc collection value (a restart recomputes the arm —
+            // resume covers completed bins only); mean_selected_fraction
+            // carries the running sample so a collected prefix still reads
+            // the KV-bytes proxy.
+            if pos > 0 && pos % args.bucket == 0 {
+                let meta = ArmBinMeta {
+                    expected_steps: steps,
+                    complete: false,
+                    mean_selected_fraction: if selected_n > 0.0 {
+                        selected_sum / selected_n
+                    } else {
+                        1.0
+                    },
+                    wall_secs: t0.elapsed().as_secs_f64(),
+                };
+                let _ = write_arm_bin(
+                    &rho_bin,
+                    &digest,
+                    &meta,
+                    &arm_nll[..pos],
+                    &arm_argmax[..pos],
+                );
             }
         }
         let wall = t0.elapsed().as_secs_f64();
