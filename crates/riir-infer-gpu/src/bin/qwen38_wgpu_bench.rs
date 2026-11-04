@@ -324,23 +324,31 @@ fn run_ablate_matrix(
     );
     fwd.set_ablate(None);
 
-    // The table.
+    // The table. The ALL row is the launch floor, not an additive class —
+    // the Σ line must never include it (945's first run printed a 196%
+    // Σ that was exactly this bug; the classes-only Σ is the wall share).
     println!(
         "[ablate-matrix] ── free-running per-class costs (ms per chunk, median of {pairs} pair deltas) ──"
     );
     let mut kernel_ms = 0.0f64;
+    let mut floor_ms = 0.0f64;
     for (name, delta) in &rows {
         println!("[ablate-matrix]   {name:<16} {delta:8.2} ms/chunk");
-        kernel_ms += delta;
+        if *name == "ALL" {
+            floor_ms = *delta;
+        } else {
+            kernel_ms += delta;
+        }
     }
     let mut w = base_walls.clone();
     w.sort_by(|a, b| a.partial_cmp(b).unwrap());
     let base_med = w[w.len() / 2];
     let base_ms = base_med * 1e3 / n_chunks as f64;
     println!(
-        "[ablate-matrix] base wall median {:.1} ms/chunk ({:.0} tok/s) | Σ class deltas {kernel_ms:.1} ms/chunk \
-         ({:.1}% of the wall) | the remainder (wall − Σ) is queue gaps + dispatch + argmax reads, \
-         never kernel execution",
+        "[ablate-matrix] base wall median {:.1} ms/chunk ({:.0} tok/s) | Σ class deltas \
+         {kernel_ms:.1} ms/chunk ({:.1}% of the wall — near-additive attribution above \
+         ~90%) | ALL floor cell {floor_ms:.1} ms/chunk (dispatch + per-chunk sync/reads, \
+         never kernel execution) | wall − Σ = the unattributed residue",
         base_ms,
         padded as f64 / base_med,
         100.0 * kernel_ms / base_ms

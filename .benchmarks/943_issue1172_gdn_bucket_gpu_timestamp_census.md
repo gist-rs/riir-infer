@@ -1,5 +1,16 @@
 # Bench 943 — Issue 1172: the GDN-bucket GPU-timestamp census — the non-GEMM share is real kernel wall, the GEMM share is bounded by its own launch floor
 
+> ⚠ 2026-11-04 (bench 945 / issue 1174 @`e59d59d`): the per-section
+> re-read is in: the small-kernel sections of the table below
+> (input_norm, beta_decay, norm_ssm, z_gate, residual_gdn, mlp_act,
+> mlp_residual — the "~0.5-0.7 ms is REAL" claim in finding 2) are
+> **marker-boundary artifacts**, 5-50× inflated; free-running they read
+> 0.0-0.1 ms/layer. Finding 2's "~403 ms/chunk non-GEMM share" is
+> actually ~131 ms (scan + conv + expand + beta_decay) plus ≤ 1-2% of
+> smalls; the GEMM sections were the opposite — LOW against their
+> in-pass wall contributions (they free bandwidth contention when
+> removed). The layer-level SUM still reconciles (~8 ms/layer). The
+> instrument laws + the timestamp machinery remain valid.
 > ⚠ 2026-11-04 (bench 944 / issue 1173 @`2647838`): the "launch floor"
 > reading below is a MARKER-BOUNDARY artifact of this instrument — the
 > census walls persist under launch fusion (fused norm_ssm+z_gate read

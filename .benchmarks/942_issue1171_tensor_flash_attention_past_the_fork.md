@@ -1,5 +1,12 @@
 # Bench 942 — Issue 1171: the tensor-flash prefill attention — past the fork at its own league cell
 
+> ⚠ 2026-11-04 (bench 945 / issue 1174 @`e59d59d`): the attribution is
+> now measured free-running — the non-GEMM share is **~131 ms/chunk
+> (scan + conv + expand + beta_decay)**, not the ~400 this record's
+> StageTimers read; the small-kernel family measures ≤ 1-2% of the wall,
+> the GEMM family owns 61.5% (mlp gateup+down alone = 41%), and launch
+> reduction is closed as a lever. See bench 945's table before picking
+> anything from this record.
 > ⚠ 2026-11-04 (bench 944 / issue 1173 @`2647838`): this record's
 > StageTimers non-GEMM share (~400 ms/chunk) is a SERIALIZED-instrument
 > reading — bench 944 measured that removing ~240 launches/chunk buys
