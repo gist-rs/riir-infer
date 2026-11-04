@@ -56,7 +56,7 @@ use metal::{
     BufferRef, CommandBuffer, CommandQueueRef, CompileOptions, ComputePassDescriptor,
     ComputePassSampleBufferAttachmentDescriptor, ComputePipelineState, CounterSampleBuffer,
     CounterSampleBufferDescriptor, DeviceRef, MTLCommandQueue, MTLCounterSamplingPoint, MTLDevice,
-    MTLResourceUsage, MTLStorageMode, MTLSize, NSRange,
+    MTLResourceUsage, MTLStorageMode, MTLSize, NSRange, SharedEvent,
 };
 use wgpu::{Device as WgpuDevice, Queue as WgpuQueue};
 
@@ -186,9 +186,14 @@ impl GdnCensusReport {
 /// raw Metal handles (the dense-module pattern; the wgpu Arcs stay alive
 /// in the context singleton, which outlives every forward).
 pub struct GdnCensus {
+    device: *mut MTLDevice,
     queue: *mut MTLCommandQueue,
     marker_pipeline: ComputePipelineState,
     csb: CounterSampleBuffer,
+    /// The marker chain's ordering event: marker k waits value k and
+    /// signals k+1 at its completion — the deep-queue fix (see mark()).
+    chain: SharedEvent,
+    chain_value: u64,
     /// (start_sample_index, section-opening name) per committed mark, in
     /// commit order.
     marks: Vec<(usize, &'static str)>,
@@ -317,9 +322,12 @@ impl GdnCensus {
         }
 
         Ok(Self {
+            device: device_ptr,
             queue: queue_ptr,
             marker_pipeline,
             csb,
+            chain: device_ref.new_shared_event(),
+            chain_value: 0,
             marks: Vec::new(),
             last_cmd: None,
             next_sample: 0,
@@ -367,10 +375,20 @@ impl GdnCensus {
         let _ = client.flush();
         let start_idx = self.next_sample;
         self.next_sample += 2;
+        let chain_value = self.chain_value;
+        self.chain_value += 1;
 
         let queue_ref: &CommandQueueRef = unsafe { CommandQueueRef::from_ptr(self.queue) };
         let cmd = queue_ref.new_command_buffer();
         cmd.set_label("gdn-census-mark");
+        // Deep-queue ordering (the pp5120 rotation fix): wait for the
+        // PREVIOUS marker's signal, then signal the NEXT value at this
+        // buffer's completion. The wait pins this marker's pass behind the
+        // previous marker INSIDE the GPU pipeline — without it, under a
+        // 10-chunk queue the pass boundaries smeared one window per chunk
+        // (the pp2560/pp5120 rotation). Command (CPU) commit order already
+        // guarantees the chain is satisfiable (no deadlock).
+        cmd.encode_wait_for_event(&self.chain, chain_value);
         let pass_desc = ComputePassDescriptor::new();
         let att = ComputePassSampleBufferAttachmentDescriptor::new();
         att.set_sample_buffer(&self.csb);
@@ -401,6 +419,7 @@ impl GdnCensus {
             },
         );
         enc.end_encoding();
+        cmd.encode_signal_event(&self.chain, chain_value + 1);
         cmd.commit();
 
         self.marks.push((start_idx, name));
@@ -419,6 +438,7 @@ impl GdnCensus {
         }
         let marks = std::mem::take(&mut self.marks);
         self.next_sample = 0;
+        self.chain_value = 0;
         if marks.is_empty() {
             return Ok(GdnCensusReport::empty(layer));
         }
