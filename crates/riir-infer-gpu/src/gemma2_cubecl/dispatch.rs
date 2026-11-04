@@ -814,20 +814,41 @@ impl GpuGemmaCubeCL {
         m: usize,
         n: usize,
     ) -> Handle {
-        use crate::gemv_cubecl::GemvCubeCL;
         let output_handle = self.client.empty(m * core::mem::size_of::<f32>());
-        // SAFETY: weight has M×N elements, input has N elements.
+        self.dispatch_gemv_tiled_gpu_into(weight, input_handle, m, n, &output_handle);
+        output_handle
+    }
+
+    /// Fixed-workspace variant of [`Self::dispatch_gemv_tiled_gpu`] (plan 485
+    /// P2): the SAME tiled GEMV launched into a caller-owned output handle —
+    /// no pool allocation, stable device pointer across calls.
+    ///
+    /// Capture-lane contract (plan 485 P3): a recorded `Graph::replay` re-runs
+    /// this launch against the handle's raw device pointer, so the caller must
+    /// keep `out` allocated until the last replay completes (freeing a captured
+    /// handle is pool corruption, never a miss) and refresh inputs only via
+    /// same-stream writes (`write` / `write_many`).
+    #[cfg(feature = "gpu_training_resident")]
+    pub fn dispatch_gemv_tiled_gpu_into(
+        &self,
+        weight: &Handle,
+        input_handle: Handle,
+        m: usize,
+        n: usize,
+        out: &Handle,
+    ) {
+        use crate::gemv_cubecl::GemvCubeCL;
+        // SAFETY: weight has M×N elements, input has N elements, out holds m f32 elements.
         unsafe {
             GemvCubeCL::launch_tiled::<ActiveRuntime>(
                 &self.client,
                 weight.clone(),
                 input_handle,
-                output_handle.clone(),
+                out.clone(),
                 m,
                 n,
             );
         }
-        output_handle
     }
 
     /// Launch CubeCL GEMM (matrix-matrix multiply) entirely on GPU (handle-to-handle, no CPU sync).
@@ -854,22 +875,40 @@ impl GpuGemmaCubeCL {
         n: usize,
         p: usize,
     ) -> Handle {
-        use crate::matmul_cubecl::MatmulCubeCL;
         let output_handle = self.client.empty(m * p * core::mem::size_of::<f32>());
+        self.dispatch_gemm_gpu_into(weight_handle, input_handle, m, n, p, &output_handle);
+        output_handle
+    }
+
+    /// Fixed-workspace variant of [`Self::dispatch_gemm_gpu`] (plan 485 P2):
+    /// the SAME tiled GEMM launched into a caller-owned output handle — no
+    /// pool allocation, stable device pointer across calls. Capture-lane
+    /// contract identical to [`Self::dispatch_gemv_tiled_gpu_into`] (keep
+    /// `out` alive until the last replay; same-stream input refreshes).
+    #[cfg(feature = "gpu_training_resident")]
+    pub fn dispatch_gemm_gpu_into(
+        &self,
+        weight_handle: &Handle,
+        input_handle: Handle,
+        m: usize,
+        n: usize,
+        p: usize,
+        out: &Handle,
+    ) {
+        use crate::matmul_cubecl::MatmulCubeCL;
         // SAFETY: weight_handle has P×N elements, input_handle has M×N elements,
-        // output_handle has M×P elements.
+        // out holds M×P elements.
         unsafe {
             MatmulCubeCL::launch_tiled::<ActiveRuntime>(
                 &self.client,
                 input_handle,
                 weight_handle.clone(),
-                output_handle.clone(),
+                out.clone(),
                 m,
                 n,
                 p,
             );
         }
-        output_handle
     }
 
     /// Transpose an `[rows x cols]` f32 handle into a `[cols x rows]` one,
@@ -934,25 +973,51 @@ impl GpuGemmaCubeCL {
         in_dim: usize,
         out_dim: usize,
     ) -> Handle {
-        use crate::gemv_cubecl::GemvBatchedCubeCL;
         let output_handle = self
             .client
             .empty(batch * out_dim * core::mem::size_of::<f32>());
+        self.dispatch_gemv_batched_backward_gpu_into(
+            weight_handle,
+            input_handle,
+            batch,
+            in_dim,
+            out_dim,
+            &output_handle,
+        );
+        output_handle
+    }
+
+    /// Fixed-workspace variant of [`Self::dispatch_gemv_batched_backward_gpu`]
+    /// (plan 485 P2): the SAME plane-reduced batched GEMV launched into a
+    /// caller-owned output handle — no pool allocation, stable device pointer.
+    /// Capture-lane contract identical to
+    /// [`Self::dispatch_gemv_tiled_gpu_into`] (this is the backward stretch's
+    /// transposed-weight kernel — plan 485 P3 replays it per step).
+    #[cfg(feature = "gpu_training_resident")]
+    pub fn dispatch_gemv_batched_backward_gpu_into(
+        &self,
+        weight_handle: &Handle,
+        input_handle: Handle,
+        batch: usize,
+        in_dim: usize,
+        out_dim: usize,
+        out: &Handle,
+    ) {
+        use crate::gemv_cubecl::GemvBatchedCubeCL;
         // SAFETY: weight_handle has out_dim × in_dim elements,
         // input_handle has batch × in_dim elements,
-        // output_handle has batch × out_dim elements.
+        // out holds batch × out_dim elements.
         unsafe {
             GemvBatchedCubeCL::launch::<ActiveRuntime>(
                 &self.client,
                 weight_handle.clone(),
                 input_handle,
-                output_handle.clone(),
+                out.clone(),
                 batch,
                 in_dim,
                 out_dim,
             );
         }
-        output_handle
     }
 
     /// Launch CubeCL element-wise add entirely on GPU (handle-to-handle, no CPU sync).
@@ -961,19 +1026,34 @@ impl GpuGemmaCubeCL {
     /// combine the base GEMV output with the LoRA delta.
     #[cfg(feature = "gpu_training_resident")]
     pub fn dispatch_add_gpu(&self, a_handle: &Handle, b_handle: Handle, n: usize) -> Handle {
-        use crate::gemv_cubecl::AddCubeCL;
         let output_handle = self.client.empty(n * core::mem::size_of::<f32>());
-        // SAFETY: a and b have `n` elements each.
+        self.dispatch_add_gpu_into(a_handle, b_handle, n, &output_handle);
+        output_handle
+    }
+
+    /// Fixed-workspace variant of [`Self::dispatch_add_gpu`] (plan 485 P2):
+    /// the SAME element-wise add launched into a caller-owned output handle —
+    /// no pool allocation, stable device pointer. Capture-lane contract
+    /// identical to [`Self::dispatch_gemv_tiled_gpu_into`].
+    #[cfg(feature = "gpu_training_resident")]
+    pub fn dispatch_add_gpu_into(
+        &self,
+        a_handle: &Handle,
+        b_handle: Handle,
+        n: usize,
+        out: &Handle,
+    ) {
+        use crate::gemv_cubecl::AddCubeCL;
+        // SAFETY: a and b have `n` elements each, out holds n f32 elements.
         unsafe {
             AddCubeCL::launch::<ActiveRuntime>(
                 &self.client,
                 a_handle.clone(),
                 b_handle,
-                output_handle.clone(),
+                out.clone(),
                 n,
             );
         }
-        output_handle
     }
 
     /// Launch CubeCL Q4_K dequant+GEMV entirely on GPU (handle-to-handle).
@@ -1128,17 +1208,32 @@ impl GpuGemmaCubeCL {
     /// Computes `output[i] = gate[i] * GELU(gate[i]) * up[i]` on GPU.
     pub fn dispatch_geglu_gpu(&self, gate_handle: Handle, up_handle: Handle, n: usize) -> Handle {
         let output_handle = self.client.empty(n * core::mem::size_of::<f32>());
-        // SAFETY: gate and up have `n` elements each.
+        self.dispatch_geglu_gpu_into(gate_handle, up_handle, n, &output_handle);
+        output_handle
+    }
+
+    /// Fixed-workspace variant of [`Self::dispatch_geglu_gpu`] (plan 485 P2):
+    /// the SAME element-wise GeGLU launched into a caller-owned output handle
+    /// — no pool allocation, stable device pointer. Capture-lane contract
+    /// identical to [`Self::dispatch_gemv_tiled_gpu_into`] (the gated
+    /// neighbour; this twin is deliberately ungated like its wrapper).
+    pub fn dispatch_geglu_gpu_into(
+        &self,
+        gate_handle: Handle,
+        up_handle: Handle,
+        n: usize,
+        out: &Handle,
+    ) {
+        // SAFETY: gate and up have `n` elements each, out holds n f32 elements.
         unsafe {
             GegluCubeCL::launch::<ActiveRuntime>(
                 &self.client,
                 gate_handle,
                 up_handle,
-                output_handle.clone(),
+                out.clone(),
                 n,
             );
         }
-        output_handle
     }
 
     /// Launch fused dual GEMV + GeGLU entirely on GPU (F32 weights, handle-to-handle).
@@ -1504,23 +1599,48 @@ impl GpuGemmaCubeCL {
         dim: usize,
         eps: f32,
     ) -> Handle {
-        use crate::norms_cubecl::RmsNormBatchedCubeCL;
         let output_handle = self
             .client
             .empty(seq_len * dim * core::mem::size_of::<f32>());
-        // SAFETY: input has seq_len*dim elements, gamma has dim elements.
+        self.dispatch_rmsnorm_batched_gpu_into(
+            input_handle,
+            gamma,
+            seq_len,
+            dim,
+            eps,
+            &output_handle,
+        );
+        output_handle
+    }
+
+    /// Fixed-workspace variant of [`Self::dispatch_rmsnorm_batched_gpu`]
+    /// (plan 485 P2): the SAME batched RMSNorm launched into a caller-owned
+    /// output handle — no pool allocation, stable device pointer.
+    /// Capture-lane contract identical to [`Self::dispatch_gemv_tiled_gpu_into`].
+    #[cfg(feature = "gpu_training_resident")]
+    pub fn dispatch_rmsnorm_batched_gpu_into(
+        &self,
+        input_handle: Handle,
+        gamma: &Handle,
+        seq_len: usize,
+        dim: usize,
+        eps: f32,
+        out: &Handle,
+    ) {
+        use crate::norms_cubecl::RmsNormBatchedCubeCL;
+        // SAFETY: input has seq_len*dim elements, gamma has dim elements,
+        // out holds seq_len*dim f32 elements.
         unsafe {
             RmsNormBatchedCubeCL::launch::<ActiveRuntime>(
                 &self.client,
                 input_handle,
                 gamma.clone(),
-                output_handle.clone(),
+                out.clone(),
                 seq_len,
                 dim,
                 eps,
             );
         }
-        output_handle
     }
 
     /// Launch batched fused RMSNorm + ResidualAdd for `[seq_len × dim]` (Plan 482 T4).
@@ -1537,24 +1657,52 @@ impl GpuGemmaCubeCL {
         dim: usize,
         eps: f32,
     ) -> Handle {
-        use crate::epilogue::NormResidualBatchedCubeCL;
         let output_handle = self
             .client
             .empty(seq_len * dim * core::mem::size_of::<f32>());
-        // SAFETY: input, residual have seq_len*dim elements, gamma has dim elements.
+        self.dispatch_norm_residual_batched_gpu_into(
+            input_handle,
+            gamma,
+            residual_handle,
+            seq_len,
+            dim,
+            eps,
+            &output_handle,
+        );
+        output_handle
+    }
+
+    /// Fixed-workspace variant of [`Self::dispatch_norm_residual_batched_gpu`]
+    /// (plan 485 P2): the SAME fused batched RMSNorm+ResidualAdd launched into
+    /// a caller-owned output handle — no pool allocation, stable device
+    /// pointer. Capture-lane contract identical to
+    /// [`Self::dispatch_gemv_tiled_gpu_into`].
+    #[cfg(feature = "gpu_training_resident")]
+    pub fn dispatch_norm_residual_batched_gpu_into(
+        &self,
+        input_handle: Handle,
+        gamma: &Handle,
+        residual_handle: Handle,
+        seq_len: usize,
+        dim: usize,
+        eps: f32,
+        out: &Handle,
+    ) {
+        use crate::epilogue::NormResidualBatchedCubeCL;
+        // SAFETY: input, residual have seq_len*dim elements, gamma has dim
+        // elements, out holds seq_len*dim f32 elements.
         unsafe {
             NormResidualBatchedCubeCL::launch::<ActiveRuntime>(
                 &self.client,
                 input_handle,
                 gamma.clone(),
                 residual_handle,
-                output_handle.clone(),
+                out.clone(),
                 seq_len,
                 dim,
                 eps,
             );
         }
-        output_handle
     }
 
     /// Launch batched CubeCL RoPE for `[seq_len × n_heads × head_dim]` (Plan 482 T5).
@@ -1569,24 +1717,49 @@ impl GpuGemmaCubeCL {
         seq_len: usize,
         n_heads: usize,
     ) -> Handle {
-        use crate::rope_geglu_cubecl::{RopeBatchedCubeCL, RopePairing};
         let head_dim = self.config.head_dim;
         let total = seq_len * n_heads * head_dim;
         let output_handle = self.client.empty(total * core::mem::size_of::<f32>());
-        // SAFETY: input has total elements, cos_sin has seq_len*head_dim elements.
+        self.dispatch_rope_batched_gpu_into(
+            input_handle,
+            cos_sin_handle,
+            seq_len,
+            n_heads,
+            &output_handle,
+        );
+        output_handle
+    }
+
+    /// Fixed-workspace variant of [`Self::dispatch_rope_batched_gpu`]
+    /// (plan 485 P2): the SAME batched RoPE launched into a caller-owned
+    /// output handle — no pool allocation, stable device pointer.
+    /// Capture-lane contract identical to [`Self::dispatch_gemv_tiled_gpu_into`].
+    #[cfg(feature = "gpu_training_resident")]
+    pub fn dispatch_rope_batched_gpu_into(
+        &self,
+        input_handle: Handle,
+        cos_sin_handle: Handle,
+        seq_len: usize,
+        n_heads: usize,
+        out: &Handle,
+    ) {
+        use crate::rope_geglu_cubecl::{RopeBatchedCubeCL, RopePairing};
+        let head_dim = self.config.head_dim;
+        let total = seq_len * n_heads * head_dim;
+        // SAFETY: input has total elements, cos_sin has seq_len*head_dim elements,
+        // out holds total f32 elements.
         unsafe {
             RopeBatchedCubeCL::launch::<ActiveRuntime>(
                 &self.client,
                 input_handle,
                 cos_sin_handle,
-                output_handle.clone(),
+                out.clone(),
                 total,
                 head_dim,
                 n_heads,
                 RopePairing::RotateHalf,
             );
         }
-        output_handle
     }
 
     /// Launch fused causal attention entirely on GPU (Issue 430 Option B).
@@ -1614,6 +1787,41 @@ impl GpuGemmaCubeCL {
         v_handle: Handle,
         seq_len: usize,
     ) -> Handle {
+        let q_dim = self.config.n_head * self.config.head_dim;
+        let output_handle = self
+            .client
+            .empty(seq_len * q_dim * core::mem::size_of::<f32>());
+        self.dispatch_attention_fused_gpu_into(
+            q_handle,
+            k_handle,
+            v_handle,
+            seq_len,
+            &output_handle,
+        );
+        output_handle
+    }
+
+    /// Fixed-workspace variant of [`Self::dispatch_attention_fused_gpu`]
+    /// (plan 485 P2): the SAME fused causal attention launched into a
+    /// caller-owned output handle — no pool allocation, stable device
+    /// pointer. Capture-lane contract identical to
+    /// [`Self::dispatch_gemv_tiled_gpu_into`].
+    ///
+    /// # Safety (sizes)
+    ///
+    /// - `q_handle`: `seq_len * q_dim` f32 elements (post-RoPE Q)
+    /// - `k_handle`: `seq_len * kv_dim` f32 elements (post-RoPE K)
+    /// - `v_handle`: `seq_len * kv_dim` f32 elements (pre-RoPE V)
+    /// - `out`: `seq_len * q_dim` f32 elements (attn_out)
+    #[cfg(feature = "gpu_training_resident")]
+    pub fn dispatch_attention_fused_gpu_into(
+        &self,
+        q_handle: Handle,
+        k_handle: Handle,
+        v_handle: Handle,
+        seq_len: usize,
+        out: &Handle,
+    ) {
         use crate::attention_causal_fused_cubecl::CausalAttentionFusedCubeCL;
         let n_head = self.config.n_head;
         let n_kv_head = self.config.n_kv_head;
@@ -1621,17 +1829,15 @@ impl GpuGemmaCubeCL {
         let q_dim = n_head * head_dim;
         let kv_dim = n_kv_head * head_dim;
         let softcap = self.config.attn_logit_softcapping;
-        let output_handle = self
-            .client
-            .empty(seq_len * q_dim * core::mem::size_of::<f32>());
-        // SAFETY: q/k/v handles have correct sizes (caller contract).
+        // SAFETY: q/k/v handles have correct sizes (caller contract),
+        // out holds seq_len * q_dim f32 elements.
         unsafe {
             CausalAttentionFusedCubeCL::launch::<ActiveRuntime>(
                 &self.client,
                 q_handle,
                 k_handle,
                 v_handle,
-                output_handle.clone(),
+                out.clone(),
                 n_head,
                 n_kv_head,
                 head_dim,
@@ -1641,6 +1847,5 @@ impl GpuGemmaCubeCL {
                 softcap,
             );
         }
-        output_handle
     }
 }
