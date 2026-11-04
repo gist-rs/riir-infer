@@ -207,14 +207,22 @@ static REC_MR_OVERRIDE: std::sync::atomic::AtomicUsize =
 /// `1..=4` selects [`REC_MR_PLANES_LADDER`]`[n - 1]`; garbage fails OPEN to
 /// the DEFAULT arm with a warning (the Bench-896 protocol — garbage is no
 /// longer a demotion path).
+//
+// cfg note: this pair follows its ONLY caller — the multi-token dispatch
+// block in `ternary_deltanet_gpu_forward.rs`, which additionally requires
+// `ternary_gemm_batched`. The module's own 2-feature gate keeps the
+// launcher/kernel/test surface alive in the gemv-without-batched postures
+// (smem_staged / prework_fused); a 2-feature gate HERE is dead code there.
 #[cfg(all(
     feature = "cubecl_runtime",
+    feature = "ternary_gemm_batched",
     feature = "ternary_deltanet_chunked_prefill"
 ))]
 static REC_MR_ENV: std::sync::OnceLock<Option<usize>> = std::sync::OnceLock::new();
 
 #[cfg(all(
     feature = "cubecl_runtime",
+    feature = "ternary_gemm_batched",
     feature = "ternary_deltanet_chunked_prefill"
 ))]
 pub(crate) fn rec_mr_planes() -> Option<usize> {
