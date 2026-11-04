@@ -221,6 +221,13 @@ pub struct Qwen38WgpuForward {
     /// Metal buffer limit); the tail GEMV runs per chunk into offset logits.
     lm_head_chunks: Vec<Handle>,
     lm_chunk_rows: usize,
+    // Packed Q6_K tail (issue 1150 follow-up 3; non-empty iff
+    // RIIR_QWEN38_LMHEAD_Q6K=1): per-chunk payload-word handles (52 u32
+    // words per 256-value block — ql/qh/scales, no dead d bytes) + the f32
+    // d sidecar. The f32 `lm_head_chunks` above stays EMPTY in this
+    // posture (the 10.7 GB host dequant never runs).
+    lm_head_q6k_chunks: Vec<Handle>,
+    lm_head_q6k_d: Vec<Handle>,
     output_norm: Handle,
     /// Prompt-ingest chunk (tokens per batched pass); multiple of 64.
     chunk: usize,
@@ -683,30 +690,56 @@ impl Qwen38WgpuForward {
         let lm_blocks = gguf
             .q6k_tensor_blocks("output.weight")
             .map_err(|err| format!("output.weight: {err}"))?;
-        let mut lm = vec![0.0f32; vocab * e];
-        {
-            let bpr = e / 256;
-            let mut row = vec![0.0f32; e];
-            for r in 0..vocab {
-                riir_infer_core::quant::q6k::dequantize_row_q6_k(
-                    &lm_blocks[r * bpr..(r + 1) * bpr],
-                    &mut row,
-                );
-                lm[r * e..(r + 1) * e].copy_from_slice(&row);
-            }
-        }
+        // The Q6_K packed tail (issue 1150 follow-up 3): opt-in env,
+        // promote-only (`RIIR_QWEN38_LMHEAD_Q6K=1` the exact literal). Armed
+        // = the host dequant NEVER runs (10.7 GB of f32 never allocated);
+        // the lm_head uploads as 208-byte payload words + an f32 d sidecar
+        // per block (~2.1 GB — 5× less tail traffic). Off = the incumbent
+        // f32 path byte-identical.
+        let lm_q6k_armed = std::env::var("RIIR_QWEN38_LMHEAD_Q6K").as_deref() == Ok("1");
         let lm_chunk_rows = 32768usize;
         let mut lm_head_chunks = Vec::new();
-        {
+        let mut lm_head_q6k_chunks = Vec::new();
+        let mut lm_head_q6k_d = Vec::new();
+        if lm_q6k_armed {
+            let bpr = e / 256;
+            let mut c0 = 0usize;
+            while c0 < vocab {
+                let rows = lm_chunk_rows.min(vocab - c0);
+                let (payload, dsc) = crate::gemv_q6k_cubecl::repack_q6k_payload(
+                    &lm_blocks[c0 * bpr..(c0 + rows) * bpr],
+                    rows,
+                );
+                lm_head_q6k_chunks.push(client.create_from_slice(bytemuck::cast_slice(&payload)));
+                lm_head_q6k_d.push(client.create_from_slice(bytemuck::cast_slice(&dsc)));
+                c0 += rows;
+            }
+        } else {
+            let mut lm = vec![0.0f32; vocab * e];
+            {
+                let bpr = e / 256;
+                let mut row = vec![0.0f32; e];
+                for r in 0..vocab {
+                    riir_infer_core::quant::q6k::dequantize_row_q6_k(
+                        &lm_blocks[r * bpr..(r + 1) * bpr],
+                        &mut row,
+                    );
+                    lm[r * e..(r + 1) * e].copy_from_slice(&row);
+                }
+            }
             let mut c0 = 0usize;
             while c0 < vocab {
                 let rows = lm_chunk_rows.min(vocab - c0);
                 lm_head_chunks.push(upload_f32(&client, &lm[c0 * e..(c0 + rows) * e]));
                 c0 += rows;
             }
+            drop(lm);
         }
-        let lm_chunks = lm_head_chunks.len();
-        drop(lm);
+        let lm_chunks = if lm_q6k_armed {
+            lm_head_q6k_chunks.len()
+        } else {
+            lm_head_chunks.len()
+        };
 
         let output_norm = upload_f32(&client, &f32_from_gguf(&gguf, "output_norm.weight")?);
 
@@ -892,6 +925,12 @@ impl Qwen38WgpuForward {
             );
         }
 
+        if lm_q6k_armed {
+            eprintln!(
+                "[Issue 1150] Q6_K packed tail armed (~2.1 GB resident, the 10.7 GB f32 \
+                 dequant skipped; 1e-5 re-association class — never a parity claim)"
+            );
+        }
         println!(
             "[qwen38-wgpu] loaded: {} layers ({gdn_count} GDN / {} attn), vocab {vocab}, \
              wte host {big_gb:.1} GB, lm_head {lm_chunks} chunks of {lm_chunk_rows} rows, \
@@ -906,6 +945,8 @@ impl Qwen38WgpuForward {
             layers,
             wte_host,
             lm_head_chunks,
+            lm_head_q6k_chunks,
+            lm_head_q6k_d,
             lm_chunk_rows,
             output_norm,
             chunk,
@@ -1073,6 +1114,20 @@ impl Qwen38WgpuForward {
                 crate::gemv_cubecl::GemvCubeCL::launch::<ActiveRuntime>(
                     &self.client,
                     chunk_handle.clone(),
+                    self.norm_x.clone(),
+                    out,
+                    rows,
+                    e,
+                );
+            }
+            for (ci, w_handle) in self.lm_head_q6k_chunks.iter().enumerate() {
+                let c0 = ci * self.lm_chunk_rows;
+                let rows = self.lm_chunk_rows.min(vocab - c0);
+                let out = self.logits.clone().offset_start((c0 * 4) as u64);
+                crate::gemv_q6k_cubecl::GemvQ6KCubeCL::launch::<ActiveRuntime>(
+                    &self.client,
+                    w_handle.clone(),
+                    self.lm_head_q6k_d[ci].clone(),
                     self.norm_x.clone(),
                     out,
                     rows,
@@ -1430,6 +1485,20 @@ impl Qwen38WgpuForward {
                 crate::gemv_cubecl::GemvCubeCL::launch::<ActiveRuntime>(
                     &self.client,
                     chunk_handle.clone(),
+                    self.tmp_b.clone(),
+                    out,
+                    rows,
+                    e,
+                );
+            }
+            for (ci, w_handle) in self.lm_head_q6k_chunks.iter().enumerate() {
+                let c0 = ci * self.lm_chunk_rows;
+                let rows = self.lm_chunk_rows.min(vocab - c0);
+                let out = self.logits_b.clone().offset_start((c0 * 4) as u64);
+                crate::gemv_q6k_cubecl::GemvQ6KCubeCL::launch::<ActiveRuntime>(
+                    &self.client,
+                    w_handle.clone(),
+                    self.lm_head_q6k_d[ci].clone(),
                     self.tmp_b.clone(),
                     out,
                     rows,
