@@ -276,6 +276,9 @@ pub struct Qwen38WgpuForward {
     conv_states: Vec<Option<Handle>>,
     kv_key_caches: Vec<Option<Handle>>,
     kv_value_caches: Vec<Option<Handle>>,
+    // Chunked-GDN route scratch (issue 1150 follow-up 2; Some iff
+    // RIIR_QWEN38_GDN_CHUNKED=1 at build).
+    gdn_chunk: Option<crate::qwen38_gdn_chunked_route::GdnChunkedScratch>,
     pos: usize,
 }
 
@@ -864,6 +867,31 @@ impl Qwen38WgpuForward {
             .iter()
             .filter(|k| **k == Qwen38WgpuLayerType::Deltanet)
             .count();
+
+        // The chunked-GDN scan route (issue 1150 follow-up 2): opt-in,
+        // promote-only (`RIIR_QWEN38_GDN_CHUNKED=1` the exact literal). Off
+        // = no scratch, no branch ever taken (the incumbent path
+        // byte-identical, G3). The route needs the SQUARE GDN state the
+        // chunkwise family indexes ([h, d, d]).
+        let gdn_chunk_armed = crate::qwen38_gdn_chunked_route::armed();
+        if gdn_chunk_armed && hd_v != config.head_k_dim {
+            return Err(format!(
+                "RIIR_QWEN38_GDN_CHUNKED=1 requires the square GDN state \
+                 (head_v {hd_v} != head_k {}) — refuse loud, never mis-index",
+                config.head_k_dim
+            ));
+        }
+        let gdn_chunk = gdn_chunk_armed
+            .then(|| crate::qwen38_gdn_chunked_route::GdnChunkedScratch::new(&client, n_v, hd_v));
+        if gdn_chunk_armed {
+            eprintln!(
+                "[Issue 1150] chunked-GDN scan route armed (window {}, {} windows/chunk; \
+                 lossy-class arm — argmax disclosure required, never a parity claim)",
+                crate::qwen38_gdn_chunked_route::GDN_CHUNK_C,
+                chunk / crate::qwen38_gdn_chunked_route::GDN_CHUNK_C,
+            );
+        }
+
         println!(
             "[qwen38-wgpu] loaded: {} layers ({gdn_count} GDN / {} attn), vocab {vocab}, \
              wte host {big_gb:.1} GB, lm_head {lm_chunks} chunks of {lm_chunk_rows} rows, \
@@ -930,6 +958,7 @@ impl Qwen38WgpuForward {
             conv_states,
             kv_key_caches,
             kv_value_caches,
+            gdn_chunk,
             pos: 0,
         })
     }
@@ -1501,19 +1530,54 @@ impl Qwen38WgpuForward {
                 hd_v,
                 p,
             );
-            crate::deltanet_cubecl::DeltanetRecurrenceMultiTokenCubeCL::launch_with_gpu_handles::<
-                ActiveRuntime,
-            >(
-                &self.client,
-                self.qkvx_exp_b.clone(),
-                self.beta_b.clone(),
-                self.decay_b.clone(),
-                state,
-                self.rec_b.clone(),
-                n_v,
-                hd_v,
-                p,
-            );
+            if crate::qwen38_gdn_chunked_route::armed() {
+                // The chunked-scan route (issue 1150 follow-up 2): the
+                // Issue-734-T4 chunkwise family over 64-token windows —
+                // opt-in, LOSSY-CLASS (the route module's numerics
+                // disclosure; argmax-stable, not bit-identical). Same qkvx /
+                // beta / decay inputs, same state handle, same rec_b layout.
+                let v_dim = n_v * hd_v;
+                let scratch = self
+                    .gdn_chunk
+                    .as_ref()
+                    .expect("RIIR_QWEN38_GDN_CHUNKED=1 but the window scratch is missing");
+                let win = crate::qwen38_gdn_chunked_route::GDN_CHUNK_C;
+                let mut w0 = 0usize;
+                while w0 < p {
+                    crate::qwen38_gdn_chunked_route::ingest_window(
+                        &self.client,
+                        scratch,
+                        self.qkvx_exp_b
+                            .clone()
+                            .offset_start(w0 as u64 * (3 * v_dim) as u64 * 4),
+                        self.beta_b.clone().offset_start(w0 as u64 * n_v as u64 * 4),
+                        self.decay_b
+                            .clone()
+                            .offset_start(w0 as u64 * n_v as u64 * 4),
+                        state.clone(),
+                        self.rec_b
+                            .clone()
+                            .offset_start(w0 as u64 * v_dim as u64 * 4),
+                        n_v,
+                        hd_v,
+                    );
+                    w0 += win;
+                }
+            } else {
+                crate::deltanet_cubecl::DeltanetRecurrenceMultiTokenCubeCL::launch_with_gpu_handles::<
+                    ActiveRuntime,
+                >(
+                    &self.client,
+                    self.qkvx_exp_b.clone(),
+                    self.beta_b.clone(),
+                    self.decay_b.clone(),
+                    state,
+                    self.rec_b.clone(),
+                    n_v,
+                    hd_v,
+                    p,
+                );
+            }
             crate::norms_cubecl::RmsNormBatchedCubeCL::launch::<ActiveRuntime>(
                 &self.client,
                 self.rec_b.clone(),

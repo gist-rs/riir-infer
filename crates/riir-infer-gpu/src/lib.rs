@@ -841,6 +841,11 @@ pub mod qwen38_dense_cudarc;
 pub mod gemm_q4k_tile_cubecl;
 #[cfg(feature = "qwen38_wgpu")]
 pub mod qwen38_dense_cubecl;
+// Issue 1150 follow-up 2 — the dense Metal GDN chunked-scan route (the
+// Issue-734-T4 chunkwise family's first wiring; opt-in, lossy-class —
+// see the module's numerics disclosure).
+#[cfg(feature = "qwen38_wgpu")]
+pub mod qwen38_gdn_chunked_route;
 pub mod qwen38_dflash2;
 #[cfg(all(feature = "ternary_gemv_cuda_raw", not(target_os = "macos")))]
 pub mod qwen38_dflash2_gpu;
