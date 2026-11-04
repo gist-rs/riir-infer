@@ -626,6 +626,14 @@ required-features = ["qwen38_wgpu"]
 name = "qwen38_wgpu_gemm_g1"
 required-features = ["qwen38_wgpu"]
 
+# Issue 1150 follow-up 2 — the chunked-GDN ROUTE-level G1: the routing
+# (repack + window pipeline) vs the incumbent multi-token kernel on the same
+# random inputs. The file is `#![cfg(all(qwen38_wgpu, metal_tensor_gemm,
+# macos))]`; the row keeps the reader honest and the count non-zero.
+[[test]]
+name = "qwen38_gdn_chunked_route_g1"
+required-features = ["qwen38_wgpu", "metal_tensor_gemm"]
+
 # Issue 1150 follow-up G1 — the dense-f16 matmul2d + decode-GEMV unit gate.
 # The file is `#![cfg(all(qwen38_wgpu, metal_tensor_gemm, macos))]`; the row
 # makes a bare `--test` name refuse instead of an empty `0 passed` binary

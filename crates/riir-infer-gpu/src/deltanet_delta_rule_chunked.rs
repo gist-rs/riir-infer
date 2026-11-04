@@ -26,16 +26,21 @@
 //! approximation (no conditioning concern — unit lower-triangular, solved by
 //! the same sequential substitution the sequential kernel performs).
 //!
-//! # Numerical safety (log-space decay with a floor)
+//! # Numerical safety (log-space decay, per-step α clamp)
 //!
 //! Cumulative decay is computed in log space (`log γ_i = Σ log α_m`) so decay
 //! ratios are `exp(log γ_i − log γ_j)` — differences, never ratios of
-//! underflowed products. `log γ` is floored at −60: α can legitimately hit
-//! 0.0f32 (`exp(g)` underflow in `deltanet_beta_decay_f32`), and `log(0) = −∞`
-//! would poison ratios of two underflowed values into `exp(−∞−(−∞)) = NaN`.
-//! With the floor, a both-floored ratio reads 1; the true contributions at
-//! γ < e⁻⁶⁰ ≈ 8.8e−27 sit far below the sequential path's own f32 flush
-//! behavior, so the floor is behaviorally exact for every reachable input.
+//! underflowed products. α can legitimately hit 0.0f32 (`exp(g)` underflow
+//! in `deltanet_beta_decay_f32`), and `log(0) = −∞` would poison ratios of
+//! two underflowed values into `exp(−∞−(−∞)) = NaN` — so each STEP's α is
+//! clamped at `ALPHA_FLOOR` (1e−30) before the log, never the cumulative.
+//! (An earlier −60 CUMULATIVE floor was measured unsound in the issue-1150
+//! route G1: once two positions are both floored their ratio reads 1 where
+//! the true ratio is O(1) — an O(1) output error on every floored pair,
+//! max_out_rel 7.2e+1 on a floor-crossing fixture. The per-step clamp keeps
+//! the cumulative exact, so every ratio is the true difference of logs; a
+//! true-0 α encodes as a −69 step that zeroes all cross-boundary ratios,
+//! matching the sequential path's forget-everything semantics.)
 //!
 //! # Dispatch shape (per chunk, C = `PREFILL_CHUNK_SIZE` = 64)
 //!
@@ -67,10 +72,16 @@
 use cubecl::prelude::*;
 use cubecl::server::Handle;
 
-/// log-space floor for cumulative decay (see module docs — NaN guard for
-/// underflowed α; contributions below e⁻⁶⁰ are beneath the sequential path's
-/// own f32 flush behavior).
-const LOG_GAMMA_FLOOR: f32 = -60.0;
+/// Per-step α clamp for the log-space decay. α can legitimately hit 0.0f32
+/// (`exp(g)` underflow in `deltanet_beta_decay_f32`) and `ln(0) = −∞` would
+/// NaN the ratios. The clamp is PER STEP, never on the cumulative: a
+/// cumulative floor corrupts the γᵢ/γⱼ ratios once two positions are both
+/// floored (the ratio reads 1 where the true ratio is O(1) — an O(1) output
+/// error on every floored pair). The route G1's FloorCrossing fixture
+/// measured exactly that class at max_out_rel 7.2e+1 before this fix
+/// (issue 1150 follow-up 2); with the per-step clamp the cumulative is
+/// exact and every ratio is the true difference of logs.
+const ALPHA_FLOOR: f32 = 1e-30;
 
 /// Register-blocking width for the forward-substitution kernel (independent
 /// accumulator chains per thread — hides the serial FMA-chain latency ~4×).
@@ -112,15 +123,14 @@ fn deltanet_dr_cum_decay_f32(
         terminate!();
     }
     let base = h * c;
-    let floor = f32::new(LOG_GAMMA_FLOOR);
     let mut acc = f32::new(0.0f32);
     let mut i = 0usize;
     while i < c {
-        let a = alpha[base + i];
-        acc = acc + a.ln();
-        if acc < floor {
-            acc = floor;
+        let mut a = alpha[base + i];
+        if a < f32::new(ALPHA_FLOOR) {
+            a = f32::new(ALPHA_FLOOR);
         }
+        acc = acc + a.ln();
         log_gamma[base + i] = acc;
         gamma[base + i] = acc.exp();
         i += 1;
