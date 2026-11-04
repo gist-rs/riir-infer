@@ -233,6 +233,21 @@ impl MetalDenseF16ZeroCopyGemm {
         wgpu_queue: Arc<WgpuQueue>,
         relaxed: bool,
     ) -> Result<Self, String> {
+        Self::new_with_gemm_source(wgpu_device, wgpu_queue, relaxed, MSL_SOURCE)
+    }
+
+    /// The alternate-MSL constructor — issue 1170's probe arm: the SAME
+    /// choreography (dispatch is dtype-agnostic, same buffer/scalar
+    /// bindings), the GEMM pipeline compiled from an alternate source (the
+    /// half×half matmul2d variant). The gemv + q4k pipelines compile as
+    /// usual; only the GEMM function swaps. Probe-only until the A/B
+    /// promotes it — no route caller, no env.
+    pub fn new_with_gemm_source(
+        wgpu_device: Arc<WgpuDevice>,
+        wgpu_queue: Arc<WgpuQueue>,
+        relaxed: bool,
+        gemm_source: &str,
+    ) -> Result<Self, String> {
         // Raw device + queue extraction — the T4 pattern (identical to the
         // ternary module's).
         let device_ptr: *mut metal::MTLDevice = unsafe {
@@ -260,7 +275,7 @@ impl MetalDenseF16ZeroCopyGemm {
         // can prove which arm a context carries.
         let device_ref: &DeviceRef = unsafe { DeviceRef::from_ptr(device_ptr) };
         let options = CompileOptions::new();
-        let source = compose_dense_msl_source(relaxed, MSL_SOURCE);
+        let source = compose_dense_msl_source(relaxed, gemm_source);
         let library = device_ref
             .new_library_with_source(source.as_str(), &options)
             .map_err(|e| format!("dense-f16 MSL compilation failed: {e}"))?;
@@ -270,13 +285,26 @@ impl MetalDenseF16ZeroCopyGemm {
         let pipeline = device_ref
             .new_compute_pipeline_state_with_function(&function)
             .map_err(|e| format!("dense-f16 pipeline creation failed: {e}"))?;
-        let gemv_function = library
+
+        // The decode-GEMV function lives in the CANONICAL source; an
+        // alternate GEMM source (the probe arm) compiles it separately —
+        // one extra library compile at construction, probe-only cost. The
+        // canonical path reuses the same library (pointer-equal sources).
+        let gemv_library = if std::ptr::eq(gemm_source, MSL_SOURCE) {
+            library.clone()
+        } else {
+            device_ref
+                .new_library_with_source(MSL_SOURCE, &options)
+                .map_err(|e| format!("dense-f16 gemv MSL compilation failed: {e}"))?
+        };
+        let gemv_function = gemv_library
             .get_function("gemv_dense_f16", None)
             .map_err(|e| format!("Function 'gemv_dense_f16' not found: {e}"))?;
         let gemv_pipeline = device_ref
             .new_compute_pipeline_state_with_function(&gemv_function)
             .map_err(|e| format!("dense-f16 gemv pipeline creation failed: {e}"))?;
         drop(library);
+        drop(gemv_library);
 
         // The Q4_K pipeline: separate source, same compile path.
         let q4k_library = device_ref

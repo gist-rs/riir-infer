@@ -1,8 +1,17 @@
 # Issue 1170 — dense-lane GEMM engine to MLX-class: the residual ~1.5× (staged-half-B / fork-parity class) + the decode GEMV gap
 
-**Status:** OPEN — the bench-940 follow-up lead. Not claimed (no Claimed
-line yet — append one under this Status line before implementing, per the
-claim-lease law).
+**Status:** OPEN — the bench-940 follow-up lead. G2 physics PROVEN 2026-11-04
+(zed-amo-i1150-relaxed@amo, the `dense_f16_half_b_ab` probe): the
+half×half matmul2d beats the mixed path **1.31–1.46× at every production
+shape** — 53.2–76.4 TFLOPS vs 39.7–55.2, mlp.gate/up **73.3 TFLOPS ≈ the
+MLX bar**. Probe infrastructure landed (the `gemm_dense_f16h_metal_tensor.metal`
+variant + `new_with_gemm_source`; probe-only, no route caller, no env).
+Wiring arc: f16 activation staging (convert kernel + f16 twins for
+norm_x_b / hidden_b / rec_n_b / attn_out_b), the route passes twins under
+the promote-only env, G1 band re-registered for f16 activations, e2e cells
+vs bench 940's 483/587/489 + walk agreement stats.
+
+**Claimed:** zed-amo-i1170-halfb, 1793795000, expires 2026-11-06T12:30:00Z
 
 ## Problem
 

@@ -364,6 +364,107 @@ fn dense_f16_relaxed_ab() {
     println!("probe wall: {:.1} s", t0.elapsed().as_secs_f64());
 }
 
+/// Issue 1170 G2 probe — half×half matmul2d (staged-activation view) vs the
+/// mixed half×float device path, BOTH at relaxed precision, at the six
+/// production shapes, p=512. The physics question that decides the wiring
+/// arc: the fork stages/converts B to half before the MMA; ours reads the
+/// activation as a device view. If the half×half schedule beats the mixed
+/// path's 41.5–53.3 TFLOPS materially, the route wiring (f16 activation
+/// staging + a convert kernel per chunk) is justified; if not, the lead
+/// closes with evidence. PROBE-ONLY: the variant kernel compiles in the
+/// test, no route caller, no env. RELEASE + --ignored:
+/// `cargo test -p riir-infer-gpu --features qwen38_wgpu,metal_tensor_gemm
+/// --test qwen38_dense_f16_matmul2d_g1 dense_f16_half_b_ab --release --
+/// --ignored --nocapture`. Quote the box state beside the numbers.
+#[test]
+#[ignore]
+fn dense_f16_half_b_ab() {
+    let ctx = CubeCLContext::new().expect("gpu context");
+    let client = ctx.client();
+    let mixed = MetalDenseF16ZeroCopyGemm::new_with_relaxed(
+        ctx.wgpu_device().expect("wgpu device").clone(),
+        ctx.wgpu_queue().expect("wgpu queue").clone(),
+        true,
+    )
+    .expect("mixed context");
+    let half_b = MetalDenseF16ZeroCopyGemm::new_with_gemm_source(
+        ctx.wgpu_device().expect("wgpu device").clone(),
+        ctx.wgpu_queue().expect("wgpu queue").clone(),
+        true,
+        include_str!("../src/gemm_dense_f16h_metal_tensor.metal"),
+    )
+    .expect("half-b context");
+    assert!(mixed.relaxed_precision() && half_b.relaxed_precision());
+
+    const P: usize = 512;
+    const SHAPES: [(usize, usize, &str); 6] = [
+        (10_240, 5_120, "gdn.qkv"),
+        (6_144, 5_120, "gdn.z"),
+        (5_120, 6_144, "ssm.out/attn.o"),
+        (17_408, 5_120, "mlp.gate/up"),
+        (5_120, 17_408, "mlp.down"),
+        (12_288, 5_120, "attn.q"),
+    ];
+    let x: Vec<f32> = (0..P * 17_408)
+        .map(|i| ((i % 2009) as f32 / 2009.0) * 2.0 - 1.0)
+        .collect();
+    let x_h = client.create_from_slice(bytemuck::cast_slice(&x));
+    let x16 = f16_bits(&x);
+    let x16_h = client.create_from_slice(bytemuck::cast_slice(&x16));
+
+    const N_PAIRS: usize = 15;
+    const WARM: usize = 3;
+    for &(m, n, name) in &SHAPES {
+        let mut seed: u64 = 0xab11_5000 ^ ((m as u64) << 13) ^ (n as u64);
+        let wf: Vec<f32> = (0..m * n).map(|_| lcg(&mut seed) * 0.05).collect();
+        let w16 = f16_bits(&wf);
+        let w_h = client.create_from_slice(bytemuck::cast_slice(&w16));
+        let out_h = client.create_from_slice(&vec![0u8; P * m * 4]);
+        pollster::block_on(client.sync()).expect("sync after uploads");
+
+        let time_arm = |mm: &MetalDenseF16ZeroCopyGemm, x_in: &cubecl::server::Handle| -> f64 {
+            pollster::block_on(client.sync()).expect("pre-dispatch sync");
+            let s = std::time::Instant::now();
+            mm.dispatch(&client, &w_h, m, n, x_in, &out_h, P)
+                .expect("dispatch");
+            mm.wait_last();
+            s.elapsed().as_secs_f64()
+        };
+
+        // Warmup both arms (first-use fills + pipeline warm).
+        for _ in 0..WARM {
+            time_arm(&mixed, &x_h);
+            time_arm(&half_b, &x16_h);
+        }
+
+        // ABBA pairs: alternate which arm opens the pair.
+        let mut ratios: Vec<f64> = Vec::with_capacity(N_PAIRS);
+        let mut last_mixed = 0.0f64;
+        let mut last_half = 0.0f64;
+        for pair in 0..N_PAIRS {
+            if pair.is_multiple_of(2) {
+                last_mixed = time_arm(&mixed, &x_h);
+                last_half = time_arm(&half_b, &x16_h);
+            } else {
+                last_half = time_arm(&half_b, &x16_h);
+                last_mixed = time_arm(&mixed, &x_h);
+            }
+            ratios.push(last_half / last_mixed);
+        }
+        ratios.sort_by(|a, b| a.partial_cmp(b).expect("finite ratios"));
+        let med = ratios[N_PAIRS / 2];
+        let flop = (2.0 * (P * m * n) as f64) / 1e12;
+        let tf_mixed = flop / last_mixed;
+        let tf_half = flop / last_half;
+        println!(
+            "{name} {m}x{n} p{P}: mixed {tf_mixed:.1} TFLOPS, half_b {tf_half:.1} \
+             TFLOPS, median ratio (half/mixed) {med:.3}"
+        );
+        drop(w_h);
+        drop(out_h);
+    }
+}
+
 /// Kernel-level A/B at the production FFN shape ([17408×5120]×512): the
 /// incumbent Q4_K tiled CubeCL GEMM (the ~110 GFLOP/s scalar wall, session
 /// record) vs the dense-f16 matmul2d. ABBA-interleaved pairs, median of
