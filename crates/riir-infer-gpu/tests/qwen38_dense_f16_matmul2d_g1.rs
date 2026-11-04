@@ -618,3 +618,181 @@ fn prow_verify_shape_probe() {
         }
     }
 }
+
+/// Plan 614 Phase-3 task-1 step 1 — the split-K scheduling validation WITHOUT
+/// writing a kernel: slice the [17408×5120] f16 weights into S K-slices and
+/// enqueue S independent zero-copy mm2d dispatches back-to-back (no sync
+/// between them), one wait at the end. If Metal overlaps the dependency-free
+/// command buffers, the sliced product's wall collapses toward the bandwidth
+/// floor (S× [17408×640] slices at S=8 → ~0.25–0.5 ms/call-equivalent at the
+/// verify shape) — proving Bench 1162's latency-bound diagnosis and the
+/// split-K projection the task-1 kernel spec rests on. If the buffers
+/// serialize (S × 1.2 ms), the finding redirects the kernel design to
+/// IN-KERNEL grid.z split-K.
+///
+/// Per-slice buffers: distinct x and weight handles, and a PADDED-DISTINCT
+/// output per slice (the zero-copy path's dedicated-output cache keys on byte
+/// size — same-size outputs would share one buffer and race across slices;
+/// +4·s bytes is the cheap distinct-key). Reduction: host sum of the S
+/// partials, vs the f16-rounded CPU reference (the same 2e-4 rel-to-mag
+/// band, applied to the SUM — the slicing does not change any dot).
+///
+/// Run:
+/// ```text
+/// cargo test --release -p riir-infer-gpu --features qwen38_wgpu,metal_tensor_gemm \
+///   --test qwen38_dense_f16_matmul2d_g1 prow_splitk_emulation_probe -- --ignored --nocapture
+/// ```
+#[test]
+#[ignore]
+fn prow_splitk_emulation_probe() {
+    use riir_infer_gpu::gemm_dense_f16_metal_zero_copy::MetalDenseF16ZeroCopyGemm;
+
+    let (m, n, p) = (17_408usize, 5_120usize, 9usize);
+    let mut seed: u64 = 0x531_17da_0000_0000;
+    let wf: Vec<f32> = (0..m * n).map(|_| lcg(&mut seed) * 0.05).collect();
+    let x_full: Vec<f32> = (0..p * n).map(|_| lcg(&mut seed)).collect();
+    let w16 = f16_bits(&wf);
+    let (expect, mag) = cpu_gemm_f16(&w16, &x_full, m, n, p);
+
+    let ctx = CubeCLContext::new().expect("gpu context");
+    let client = ctx.client();
+    let mm = MetalDenseF16ZeroCopyGemm::new(
+        ctx.wgpu_device().expect("wgpu device").clone(),
+        ctx.wgpu_queue().expect("wgpu queue").clone(),
+    )
+    .expect("dense-f16 zero-copy context");
+
+    let w_h = client.create_from_slice(bytemuck::cast_slice(&w16));
+    let x_h = client.create_from_slice(bytemuck::cast_slice(&x_full));
+    let out_h = client.create_from_slice(&vec![0u8; p * m * 4]);
+    pollster::block_on(client.sync()).expect("sync after uploads");
+
+    // Baseline: the full-K single call at p=9 (the Bench-1162 1.2 ms floor).
+    for _ in 0..3 {
+        mm.dispatch(&client, &w_h, m, n, &x_h, &out_h, p)
+            .expect("warm");
+    }
+    mm.wait_last();
+    pollster::block_on(client.sync()).expect("warm sync");
+    let time_full = || {
+        pollster::block_on(client.sync()).expect("pre");
+        let t0 = std::time::Instant::now();
+        for _ in 0..20 {
+            mm.dispatch(&client, &w_h, m, n, &x_h, &out_h, p)
+                .expect("full");
+        }
+        mm.wait_last();
+        pollster::block_on(client.sync()).expect("post");
+        t0.elapsed().as_secs_f64() * 1000.0 / 20.0
+    };
+
+    // The sliced arm, parameterized by S.
+    let time_sliced = |s: usize,
+                       w_parts: &[cubecl::server::Handle],
+                       x_parts: &[cubecl::server::Handle],
+                       out_parts: &[cubecl::server::Handle]| {
+        pollster::block_on(client.sync()).expect("sliced pre");
+        let t0 = std::time::Instant::now();
+        for _ in 0..20 {
+            for k in 0..s {
+                mm.dispatch(
+                    &client,
+                    &w_parts[k],
+                    m,
+                    n / s,
+                    &x_parts[k],
+                    &out_parts[k],
+                    p,
+                )
+                .unwrap_or_else(|e| panic!("sliced dispatch {s}/{k}: {e}"));
+            }
+        }
+        mm.wait_last();
+        pollster::block_on(client.sync()).expect("sliced post");
+        t0.elapsed().as_secs_f64() * 1000.0 / 20.0
+    };
+
+    println!(
+        "split-K emulation @{m}x{n} p{p}: f16 weights {:.1} MB, x {:.2} MB",
+        (m * n * 2) as f64 / 1e6,
+        (p * n * 4) as f64 / 1e6
+    );
+    println!(
+        "{:>3} | {:>10} {:>10} {:>9} {:>8}",
+        "S", "sliced ms", "per-call", "TF/s", "GB/s"
+    );
+
+    for s in [1usize, 2, 4, 8] {
+        // Build per-slice buffers (n divisible by 8; K-tile 32 divides 640).
+        let n_s = n / s;
+        let mut w_parts = Vec::new();
+        let mut x_parts = Vec::new();
+        let mut out_parts = Vec::new();
+        for k in 0..s {
+            let mut ws = Vec::with_capacity(m * n_s);
+            for r in 0..m {
+                ws.extend_from_slice(&w16[r * n + k * n_s..r * n + (k + 1) * n_s]);
+            }
+            w_parts.push(client.create_from_slice(bytemuck::cast_slice(&ws)));
+            let mut xs = Vec::with_capacity(p * n_s);
+            for t in 0..p {
+                xs.extend_from_slice(&x_full[t * n + k * n_s..t * n + (k + 1) * n_s]);
+            }
+            x_parts.push(client.create_from_slice(bytemuck::cast_slice(&xs)));
+            // Padded-distinct output: the zero-copy cache keys on byte size.
+            let bytes = p * m * 4 + 4 * k;
+            out_parts.push(client.create_from_slice(&vec![0u8; bytes]));
+        }
+        pollster::block_on(client.sync()).expect("parts sync");
+
+        // Warm the sliced shape once (dedicated-output cache + pools).
+        for k in 0..s {
+            mm.dispatch(&client, &w_parts[k], m, n_s, &x_parts[k], &out_parts[k], p)
+                .expect("sliced warm");
+        }
+        mm.wait_last();
+        pollster::block_on(client.sync()).expect("sliced warm sync");
+
+        // ABBA: full-K, sliced, sliced, full-K — median of each.
+        let mut fs = Vec::new();
+        let mut ss = Vec::new();
+        fs.push(time_full());
+        ss.push(time_sliced(s, &w_parts, &x_parts, &out_parts));
+        ss.push(time_sliced(s, &w_parts, &x_parts, &out_parts));
+        fs.push(time_full());
+        fs.sort_by(|a, b| a.partial_cmp(b).unwrap());
+        ss.sort_by(|a, b| a.partial_cmp(b).unwrap());
+        let (f, sl) = (fs[fs.len() / 2], ss[ss.len() / 2]);
+        let gflop = 2.0 * m as f64 * n as f64 * p as f64 / 1e9;
+        let gbs = (m * n * 2) as f64 / (sl / 1000.0) / 1e9;
+        println!(
+            "{s:>3} | {sl:>10.3} {:>10.3} {:>9.2} {:>8.0}   (full-K baseline {f:.3} ms)",
+            sl / s as f64,
+            gflop / (sl / 1000.0),
+            gbs,
+        );
+
+        // Loud-zero at S=8: host-sum the partials, compare vs the CPU ref.
+        if s == 8 {
+            let mut got_sum = vec![0.0f32; p * m];
+            for (k, oh) in out_parts.iter().enumerate() {
+                let bytes = client.read_one(oh.clone()).expect("read slice");
+                let part: &[f32] = bytemuck::cast_slice(&bytes);
+                for i in 0..p * m {
+                    got_sum[i] += part[i];
+                }
+                let _ = k;
+            }
+            let mut max_rel = 0.0f64;
+            for i in 0..p * m {
+                let rel = ((got_sum[i] - expect[i]).abs() / mag[i].max(1e-9)) as f64;
+                max_rel = max_rel.max(rel);
+            }
+            assert!(
+                max_rel < 2e-4,
+                "split-K S=8 loud-zero: max rel-to-mag {max_rel:.3e}"
+            );
+            println!("split-K S=8 reduction verified: max rel-to-mag {max_rel:.3e}");
+        }
+    }
+}
