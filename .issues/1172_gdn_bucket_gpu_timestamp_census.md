@@ -2,6 +2,7 @@
 
 **Status:** OPEN — the bench-942 record's named next instrument. Not claimed
 (append a `**Claimed:**` line under this Status before implementing).
+**Claimed:** zed-986a7538@amo, epoch=1793714997, expires 2026-11-06T18:00:00+00:00
 
 ## Problem
 

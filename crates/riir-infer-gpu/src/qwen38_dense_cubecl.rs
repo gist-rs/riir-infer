@@ -271,6 +271,13 @@ pub struct Qwen38WgpuForward {
     /// [`MetalTensorAttentionPrefill::routable`], else the tiled CubeCL arm
     /// — the fallback guard stays even though p=512 chunks never miss it.
     attn_tensor: Option<crate::attention_prefill_metal_tensor::MetalTensorAttentionPrefill>,
+    /// Issue 1172: the GDN-bucket GPU-timestamp census, when
+    /// `RIIR_QWEN38_GDN_CENSUS=1` armed it (macOS + metal_tensor_gemm
+    /// only). Marker passes on the shared in-order queue; reads at ingest
+    /// end, one wait. Diagnostic-only — env-off = byte-identical (no
+    /// census built, no samples taken).
+    #[cfg(all(feature = "metal_tensor_gemm", target_os = "macos"))]
+    census: Option<crate::qwen38_gdn_census::GdnCensus>,
     // Decode scratch.
     x: Handle,
     norm_x: Handle,
@@ -769,6 +776,46 @@ impl Qwen38WgpuForward {
                 .into());
         }
 
+        // Issue 1172: the GDN-bucket GPU-timestamp census. Queue-level
+        // marker passes on the SHARED in-order queue (cubecl flushes onto
+        // the wgpu queue's own MTLCommandQueue and the raw zero-copy GEMMs
+        // commit onto that same queue) — zero in-pass syncs, all reads
+        // deferred to ingest end. Diagnostic env, exact literal;
+        // unsupported postures refuse loud.
+        let census_armed = std::env::var("RIIR_QWEN38_GDN_CENSUS").as_deref() == Ok("1");
+        #[cfg(all(feature = "metal_tensor_gemm", target_os = "macos"))]
+        let census = if census_armed {
+            let ctx = crate::cubecl_runtime::CubeCLContext::new()
+                .map_err(|e| format!("gpu context: {e}"))?;
+            let (dev, queue) = match (ctx.wgpu_device(), ctx.wgpu_queue()) {
+                (Some(d), Some(q)) => (d.clone(), q.clone()),
+                _ => {
+                    return Err(
+                        "RIIR_QWEN38_GDN_CENSUS=1 requires the Metal wgpu CubeCL backend".into(),
+                    );
+                }
+            };
+            let layer = config
+                .layer_types
+                .iter()
+                .position(|k| *k == Qwen38WgpuLayerType::Deltanet)
+                .ok_or("RIIR_QWEN38_GDN_CENSUS=1: no Deltanet layer in layer_types")?;
+            let c = crate::qwen38_gdn_census::GdnCensus::new(dev, queue, layer)?;
+            eprintln!(
+                "[Issue 1172] gdn census armed on gdn layer {layer} (GPU-timestamp \
+                 markers on the shared queue; zero in-pass syncs, reads at ingest end)"
+            );
+            Some(c)
+        } else {
+            None
+        };
+        #[cfg(not(all(feature = "metal_tensor_gemm", target_os = "macos")))]
+        if census_armed {
+            return Err(
+                "RIIR_QWEN38_GDN_CENSUS=1 requires macOS + the metal_tensor_gemm feature".into(),
+            );
+        }
+
         let e = config.n_embd;
         let vocab = config.vocab_size;
         let l_qkv = config.l_qkv_out();
@@ -1102,6 +1149,8 @@ impl Qwen38WgpuForward {
             rec_n_b_h,
             attn_out_b_h,
             attn_tensor,
+            #[cfg(all(feature = "metal_tensor_gemm", target_os = "macos"))]
+            census,
             x,
             norm_x,
             tmp,
@@ -1567,6 +1616,16 @@ impl Qwen38WgpuForward {
                 );
             }
         }
+        // Issue 1172: the census reads once per ingest — one
+        // wait_until_completed on the last marker (the in-order queue
+        // drains everything before it with it), never a per-section sync.
+        #[cfg(all(feature = "metal_tensor_gemm", target_os = "macos"))]
+        if let Some(c) = self.census.as_mut() {
+            match c.finish() {
+                Ok(rep) => rep.print(),
+                Err(e) => eprintln!("[gdn-census] finish failed: {e}"),
+            }
+        }
         self.pos = base_pos + tokens.len();
         Ok(last)
     }
@@ -1711,17 +1770,54 @@ impl Qwen38WgpuForward {
         }
     }
 
+    /// Issue 1172 census: place a GPU-timestamp marker opening section
+    /// `name`, hazard-pinned on `hazards` (the boundary buffers — the
+    /// measured section's outputs plus the next section's inputs — so the
+    /// marker is sandwiched between adjacent sections; see the census
+    /// module). Only on the instrumented layer, only when armed.
+    fn census_mark(&mut self, li: usize, name: &'static str, hazards: &[Handle]) -> Result<(), String> {
+        #[cfg(all(feature = "metal_tensor_gemm", target_os = "macos"))]
+        {
+            let client = &self.client;
+            if let Some(c) = self.census.as_mut().filter(|c| c.layer() == li) {
+                return c.mark(client, name, hazards);
+            }
+        }
+        #[cfg(not(all(feature = "metal_tensor_gemm", target_os = "macos")))]
+        {
+            let _ = (li, name, hazards);
+        }
+        Ok(())
+    }
+
+    /// Issue 1172 census: whether layer `li` is the instrumented one.
+    fn census_matches(&self, li: usize) -> bool {
+        #[cfg(all(feature = "metal_tensor_gemm", target_os = "macos"))]
+        {
+            self.census.as_ref().is_some_and(|c| c.layer() == li)
+        }
+        #[cfg(not(all(feature = "metal_tensor_gemm", target_os = "macos")))]
+        {
+            let _ = li;
+            false
+        }
+    }
+
     fn prefill_gdn_layer(
         &mut self,
         li: usize,
         lw: &Qwen38WgpuLayerWeights,
         eps: f32,
     ) -> Result<(), String> {
-        let c = &self.config;
-        let e = c.n_embd;
-        let l_qkv = c.l_qkv_out();
-        let n_v = c.n_v_heads;
-        let hd_v = c.head_v_dim;
+        // Config fields copied into locals — the census marks borrow `self`
+        // mutably mid-function, so no config reference may outlive the
+        // prologue.
+        let e = self.config.n_embd;
+        let l_qkv = self.config.l_qkv_out();
+        let n_v = self.config.n_v_heads;
+        let hd_v = self.config.head_v_dim;
+        let n_k_heads = self.config.n_k_heads;
+        let conv_kernel = self.config.conv_kernel;
         let p = self.chunk;
         let state = self.gdn_states[li].clone().expect("gdn state");
         let conv_state = self.conv_states[li].clone().expect("conv state");
@@ -1735,6 +1831,11 @@ impl Qwen38WgpuForward {
         let ssm_norm = lw.ssm_norm.clone().expect("ssm_norm");
         let ssm_out = lw.ssm_out.clone().expect("ssm_out");
 
+        // The clone is load-bearing: a from_ref(&self.x_b) argument would
+        // share-borrow self across the &mut self call (E0502) — clone into
+        // a local, then slice the local (clippy-clean).
+        let x_b = self.x_b.clone();
+        self.census_mark(li, "input_norm", std::slice::from_ref(&x_b))?;
         unsafe {
             crate::norms_cubecl::RmsNormBatchedCubeCL::launch::<ActiveRuntime>(
                 &self.client,
@@ -1745,11 +1846,28 @@ impl Qwen38WgpuForward {
                 e,
                 eps,
             );
-            let norm_in = self.gemm_input(&self.norm_x_b_h, &self.norm_x_b, p * e);
-            qkv.gemm(&self.client, norm_in.clone(), self.qkv_b.clone(), p);
-            z_w.gemm(&self.client, norm_in.clone(), self.z_b.clone(), p);
-            alpha.gemm(&self.client, norm_in.clone(), self.a_b.clone(), p);
-            beta_w.gemm(&self.client, norm_in, self.b_b.clone(), p);
+        }
+        let mut gemm_hz = vec![self.norm_x_b.clone()];
+        if let Some(t) = self.norm_x_b_h.clone() {
+            gemm_hz.push(t);
+        }
+        self.census_mark(li, "gemm_qkv_z_ab", &gemm_hz)?;
+        let norm_in = self.gemm_input(&self.norm_x_b_h, &self.norm_x_b, p * e);
+        qkv.gemm(&self.client, norm_in.clone(), self.qkv_b.clone(), p);
+        z_w.gemm(&self.client, norm_in.clone(), self.z_b.clone(), p);
+        alpha.gemm(&self.client, norm_in.clone(), self.a_b.clone(), p);
+        beta_w.gemm(&self.client, norm_in, self.b_b.clone(), p);
+        self.census_mark(
+            li,
+            "beta_decay",
+            &[
+                self.qkv_b.clone(),
+                self.z_b.clone(),
+                self.a_b.clone(),
+                self.b_b.clone(),
+            ],
+        )?;
+        unsafe {
             crate::deltanet_cubecl::DeltanetBetaDecayBatchedCubeCL::launch::<ActiveRuntime>(
                 &self.client,
                 self.a_b.clone(),
@@ -1761,6 +1879,17 @@ impl Qwen38WgpuForward {
                 n_v,
                 p,
             );
+        }
+        self.census_mark(
+            li,
+            "conv1d",
+            &[
+                self.beta_b.clone(),
+                self.decay_b.clone(),
+                self.qkv_b.clone(),
+            ],
+        )?;
+        unsafe {
             // Chunked conv1d+SiLU over sliced 64-token sub-chunks (state-safe:
             // the public launcher is conv + ordered carry-update). Input and
             // output are SEPARATE buffers — in-place races the window reads.
@@ -1783,21 +1912,36 @@ impl Qwen38WgpuForward {
                     conv_state.clone(),
                     64,
                     l_qkv,
-                    c.conv_kernel,
-                    c.conv_kernel, // carry_stride = ks (conv_state layout)
-                    1,             // carry_idx_offset = 1 (skip position 0)
+                    conv_kernel,
+                    conv_kernel, // carry_stride = ks (conv_state layout)
+                    1,           // carry_idx_offset = 1 (skip position 0)
                 );
                 t0 += 64;
             }
+        }
+        let conv_out_b = self.conv_out_b.clone();
+        self.census_mark(li, "expand_l2", std::slice::from_ref(&conv_out_b))?;
+        unsafe {
             crate::deltanet_cubecl::ExpandAndL2NormalizeHeadsBatchedCubeCL::launch::<ActiveRuntime>(
                 &self.client,
                 self.conv_out_b.clone(),
                 self.qkvx_exp_b.clone(),
-                c.n_k_heads,
+                n_k_heads,
                 n_v,
                 hd_v,
                 p,
             );
+        }
+        self.census_mark(
+            li,
+            "scan",
+            &[
+                self.qkvx_exp_b.clone(),
+                self.beta_b.clone(),
+                self.decay_b.clone(),
+            ],
+        )?;
+        unsafe {
             if crate::qwen38_gdn_chunked_route::armed() {
                 // The chunked-scan route (issue 1150 follow-up 2): the
                 // Issue-734-T4 chunkwise family over 64-token windows —
@@ -1846,6 +1990,10 @@ impl Qwen38WgpuForward {
                     p,
                 );
             }
+        }
+        let rec_b = self.rec_b.clone();
+        self.census_mark(li, "norm_ssm", std::slice::from_ref(&rec_b))?;
+        unsafe {
             crate::norms_cubecl::RmsNormBatchedCubeCL::launch::<ActiveRuntime>(
                 &self.client,
                 self.rec_b.clone(),
@@ -1855,14 +2003,25 @@ impl Qwen38WgpuForward {
                 hd_v,
                 eps,
             );
+        }
+        self.census_mark(li, "z_gate", &[self.rec_n_b.clone(), self.z_b.clone()])?;
+        unsafe {
             crate::deltanet_cubecl::DeltanetZGatingCubeCL::launch::<ActiveRuntime>(
                 &self.client,
                 self.rec_n_b.clone(),
                 self.z_b.clone(),
                 p * n_v * hd_v,
             );
-            let ssm_in = self.gemm_input(&self.rec_n_b_h, &self.rec_n_b, p * n_v * hd_v);
-            ssm_out.gemm(&self.client, ssm_in, self.tmp_b.clone(), p);
+        }
+        let mut ssm_hz = vec![self.rec_n_b.clone()];
+        if let Some(t) = self.rec_n_b_h.clone() {
+            ssm_hz.push(t);
+        }
+        self.census_mark(li, "ssm_out_gemm", &ssm_hz)?;
+        let ssm_in = self.gemm_input(&self.rec_n_b_h, &self.rec_n_b, p * n_v * hd_v);
+        ssm_out.gemm(&self.client, ssm_in, self.tmp_b.clone(), p);
+        self.census_mark(li, "residual_gdn", &[self.x_b.clone(), self.tmp_b.clone()])?;
+        unsafe {
             crate::norms_cubecl::ResidualAddCubeCL::launch::<ActiveRuntime>(
                 &self.client,
                 self.x_b.clone(),
@@ -1870,7 +2029,16 @@ impl Qwen38WgpuForward {
                 self.x_b.clone(),
                 p * e,
             );
-            self.prefill_mlp(lw, p, eps)?;
+        }
+        let census_mlp = self.census_matches(li);
+        if census_mlp {
+            let x_b = self.x_b.clone();
+            self.census_mark(li, "mlp_norm_gateup", std::slice::from_ref(&x_b))?;
+        }
+        self.prefill_mlp(lw, p, eps, census_mlp.then_some(li))?;
+        if census_mlp {
+            let x_b = self.x_b.clone();
+            self.census_mark(li, "end", std::slice::from_ref(&x_b))?;
         }
         Ok(())
     }
@@ -2012,7 +2180,7 @@ impl Qwen38WgpuForward {
                 self.x_b.clone(),
                 p * e,
             );
-            self.prefill_mlp(lw, p, eps)?;
+            self.prefill_mlp(lw, p, eps, None)?;
         }
         Ok(())
     }
@@ -2023,6 +2191,7 @@ impl Qwen38WgpuForward {
         lw: &Qwen38WgpuLayerWeights,
         p: usize,
         eps: f32,
+        census_li: Option<usize>,
     ) -> Result<(), String> {
         let e = self.config.n_embd;
         let mlp = self.config.mlp_hidden;
@@ -2042,6 +2211,15 @@ impl Qwen38WgpuForward {
             let norm_in = self.gemm_input(&self.norm_x_b_h, &self.norm_x_b, p * e);
             gate.gemm(&self.client, norm_in.clone(), self.gateup_b.clone(), p);
             up.gemm(&self.client, norm_in, self.up_b.clone(), p);
+        }
+        if let Some(cli) = census_li {
+            let mut act_hz = vec![self.norm_x_b.clone(), self.gateup_b.clone(), self.up_b.clone()];
+            if let Some(t) = self.norm_x_b_h.clone() {
+                act_hz.push(t);
+            }
+            self.census_mark(cli, "mlp_act", &act_hz)?;
+        }
+        unsafe {
             crate::deltanet_cubecl::DeltanetGatingCubeCL::launch::<ActiveRuntime>(
                 &self.client,
                 self.gateup_b.clone(),
@@ -2049,8 +2227,20 @@ impl Qwen38WgpuForward {
                 self.hidden_b.clone(),
                 p * mlp,
             );
-            let down_in = self.gemm_input(&self.hidden_b_h, &self.hidden_b, p * mlp);
-            down.gemm(&self.client, down_in, self.tmp_b.clone(), p);
+        }
+        if let Some(cli) = census_li {
+            let mut down_hz = vec![self.hidden_b.clone()];
+            if let Some(t) = self.hidden_b_h.clone() {
+                down_hz.push(t);
+            }
+            self.census_mark(cli, "mlp_down_gemm", &down_hz)?;
+        }
+        let down_in = self.gemm_input(&self.hidden_b_h, &self.hidden_b, p * mlp);
+        down.gemm(&self.client, down_in, self.tmp_b.clone(), p);
+        if let Some(cli) = census_li {
+            self.census_mark(cli, "mlp_residual", &[self.x_b.clone(), self.tmp_b.clone()])?;
+        }
+        unsafe {
             crate::norms_cubecl::ResidualAddCubeCL::launch::<ActiveRuntime>(
                 &self.client,
                 self.x_b.clone(),

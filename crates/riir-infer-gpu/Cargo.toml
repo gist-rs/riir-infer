@@ -641,6 +641,16 @@ required-features = ["qwen38_wgpu"]
 name = "qwen38_gdn_chunked_route_g1"
 required-features = ["qwen38_wgpu", "metal_tensor_gemm"]
 
+# Issue 1172 — the GDN-bucket census instrument's own gate (one serial
+# test — the phases share the one queue): marker GPU-wall vs a CPU sleep
+# (the 1 ns/tick period law validated empirically), the hazard-pinned
+# production shape vs a CPU-sync reference (pipeline warmed first) +
+# linearity, chunk grouping incl. the inter-chunk skip. The file is
+# `#![cfg(all(qwen38_wgpu, metal_tensor_gemm, macos))]`.
+[[test]]
+name = "qwen38_gdn_census_g1"
+required-features = ["qwen38_wgpu", "metal_tensor_gemm"]
+
 # Issue 1150 follow-up G1 — the dense-f16 matmul2d + decode-GEMV unit gate.
 # The file is `#![cfg(all(qwen38_wgpu, metal_tensor_gemm, macos))]`; the row
 # makes a bare `--test` name refuse instead of an empty `0 passed` binary

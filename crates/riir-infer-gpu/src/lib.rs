@@ -846,6 +846,15 @@ pub mod qwen38_dense_cubecl;
 // see the module's numerics disclosure).
 #[cfg(feature = "qwen38_wgpu")]
 pub mod qwen38_gdn_chunked_route;
+// Issue 1172 — the GDN-bucket GPU-timestamp census (the bench-942 record's
+// named instrument; diagnostic-only, zero in-pass syncs). macOS +
+// metal_tensor_gemm.
+#[cfg(all(
+    feature = "qwen38_wgpu",
+    feature = "metal_tensor_gemm",
+    target_os = "macos"
+))]
+pub mod qwen38_gdn_census;
 // Issue 1150 follow-up 3 — the Q6_K in-kernel-dequant tail GEMV (the
 // tail_logits lane; opt-in behind RIIR_QWEN38_LMHEAD_Q6K, promote-only).
 #[cfg(feature = "qwen38_wgpu")]
