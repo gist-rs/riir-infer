@@ -347,3 +347,274 @@ fn dense_f16_vs_q4k_ab() {
         q4_med / d_med
     );
 }
+
+/// Plan 614 Phase-3 floor probe (riir-ai plan 614; the Bench-965 pattern on
+/// the production box): the verify-shape p-sweep at the production ffn shape
+/// [17408×5120] — per-layer times for the three Metal kernel families that
+/// could serve a DFlash2 verify chunk (p = draft block + pending ≈ 9 rows):
+///
+/// 1. `GemvQ4KBatchedCubeCL` — the incumbent batched Q4K GEMV (decode uses
+///    batch=1; verify would ride batch=p). 2D grid (rows × batch): each batch
+///    column re-reads its rows' weights — pure-DRAM behavior scales ~p×, but
+///    a ~50 MB weight slab may stay L2-resident across columns. The
+///    batch=p/batch=1 ratio is the incumbent stack's C_K floor for the packed
+///    (Q4K, S_dense = 15.8 GB/token) posture — the posture whose byte ratio
+///    the flip gate actually cites.
+/// 2. `GemmQ4KTileCubeCL` — the scalar tile GEMM (the 1150 A/B's loser at
+///    p=512; here priced at verify shapes).
+/// 3. `MetalDenseF16ZeroCopyGemm::dispatch` — the tensor-unit f16 arm: the
+///    compute floor any future Q4_K-dequant tensor verify kernel would ride.
+///    Its decode poison (f16 = 3.55× weight bytes → the flip gate's S ratio
+///    ~8.2 instead of 2.32) is the scoping argument for that kernel.
+///
+/// Every arm streams the SAME weights (handles built once); timing is the
+/// established protocol (sync → N back-to-back → wait_last/raw-commit wait
+/// → sync, ABBA×2 median); loud-zero insurance reads one verified output
+/// back at the verify shape p=9 (both Q4K arms + mm2d).
+///
+/// Run:
+/// ```text
+/// cargo test --release -p riir-infer-gpu --features qwen38_wgpu,metal_tensor_gemm \
+///   --test qwen38_dense_f16_matmul2d_g1 prow_verify_shape_probe -- --ignored --nocapture
+/// ```
+/// Quote the box state beside the numbers (bench_preflight PROVENANCE).
+#[test]
+#[ignore]
+fn prow_verify_shape_probe() {
+    use bytemuck::Zeroable;
+    use riir_infer_core::quant::q4k::{BlockQ4K, QK_K, dequantize_row_q4_k, quantize_row_q4_k};
+    use riir_infer_gpu::gemm_q4k_tile_cubecl::GemmQ4KTileCubeCL;
+    use riir_infer_gpu::gemv_q4k_batched_cubecl::GemvQ4KBatchedCubeCL;
+    use riir_infer_gpu::gemv_q4k_cubecl::Q4KHandle;
+
+    let (m, n) = (17_408usize, 5_120usize);
+    // One fixed weight set for the whole sweep — every arm and every p reads
+    // the same bytes, so cross-arm ratios are weight-identical.
+    let mut seed: u64 = 0x614d_5f70_726f_6265;
+    let wf: Vec<f32> = (0..m * n).map(|_| lcg(&mut seed) * 0.05).collect();
+    let w16 = f16_bits(&wf);
+    let bpr = n / QK_K;
+    let mut blocks = vec![BlockQ4K::zeroed(); m * bpr];
+    let mut row = vec![0.0f32; n];
+    for r in 0..m {
+        row.copy_from_slice(&wf[r * n..(r + 1) * n]);
+        quantize_row_q4_k(&row, &mut blocks[r * bpr..(r + 1) * bpr]);
+    }
+
+    let ctx = CubeCLContext::new().expect("gpu context");
+    let client = ctx.client();
+    let mm = MetalDenseF16ZeroCopyGemm::new(
+        ctx.wgpu_device().expect("wgpu device").clone(),
+        ctx.wgpu_queue().expect("wgpu queue").clone(),
+    )
+    .expect("dense-f16 zero-copy context");
+
+    let q4 = Q4KHandle::from_blocks(&client, &blocks, m, n);
+    let w_h = client.create_from_slice(bytemuck::cast_slice(&w16));
+    pollster::block_on(client.sync()).expect("sync after uploads");
+
+    // Per-block bytes: Q4K payload 144 B (36 u32 × 4) + split d/dmin 8 B over
+    // QK_K=256 weights; f16 = 2 B/weight.
+    let q4k_wbytes = (m * n * 152 / 256) as f64;
+    let f16_wbytes = (m * n * 2) as f64;
+    println!(
+        "prow probe @{m}x{n}: q4k weights {:.1} MB, f16 weights {:.1} MB",
+        q4k_wbytes / 1e6,
+        f16_wbytes / 1e6
+    );
+
+    const N: usize = 20;
+    fn time_batched(
+        client: &ComputeClient<ActiveRuntime>,
+        q4: &riir_infer_gpu::gemv_q4k_cubecl::Q4KHandle,
+        p: usize,
+        x_h: cubecl::server::Handle,
+        out_h: cubecl::server::Handle,
+    ) -> f64 {
+        pollster::block_on(client.sync()).expect("batched pre-sync");
+        let t0 = std::time::Instant::now();
+        for _ in 0..N {
+            unsafe {
+                GemvQ4KBatchedCubeCL::launch::<ActiveRuntime>(
+                    client,
+                    q4,
+                    x_h.clone(),
+                    out_h.clone(),
+                    p,
+                );
+            }
+        }
+        pollster::block_on(client.sync()).expect("batched post-sync");
+        t0.elapsed().as_secs_f64() * 1000.0 / N as f64
+    }
+    fn time_tile(
+        client: &ComputeClient<ActiveRuntime>,
+        q4: &riir_infer_gpu::gemv_q4k_cubecl::Q4KHandle,
+        p: usize,
+        x_h: cubecl::server::Handle,
+        out_h: cubecl::server::Handle,
+    ) -> f64 {
+        pollster::block_on(client.sync()).expect("tile pre-sync");
+        let t0 = std::time::Instant::now();
+        for _ in 0..N {
+            unsafe {
+                GemmQ4KTileCubeCL::launch::<ActiveRuntime>(
+                    client,
+                    q4,
+                    x_h.clone(),
+                    out_h.clone(),
+                    p,
+                );
+            }
+        }
+        pollster::block_on(client.sync()).expect("tile post-sync");
+        t0.elapsed().as_secs_f64() * 1000.0 / N as f64
+    }
+    // 8 args is the honest shape here — the timing fn must not capture (nested
+    // item), and the zero-copy dispatch itself needs all of these.
+    #[allow(clippy::too_many_arguments)]
+    fn time_mm(
+        client: &ComputeClient<ActiveRuntime>,
+        mm: &MetalDenseF16ZeroCopyGemm,
+        w_h: &cubecl::server::Handle,
+        m: usize,
+        n: usize,
+        p: usize,
+        x_h: &cubecl::server::Handle,
+        out_h: &cubecl::server::Handle,
+    ) -> f64 {
+        pollster::block_on(client.sync()).expect("mm pre-sync");
+        let t0 = std::time::Instant::now();
+        for _ in 0..N {
+            mm.dispatch(client, w_h, m, n, x_h, out_h, p)
+                .expect("mm dispatch");
+        }
+        mm.wait_last(); // raw-Metal submissions are invisible to client.sync()
+        pollster::block_on(client.sync()).expect("mm post-sync");
+        t0.elapsed().as_secs_f64() * 1000.0 / N as f64
+    }
+
+    println!(
+        "{:>4} | {:>10} {:>8} | {:>10} {:>9} | {:>10} {:>9}",
+        "p", "gemv-b ms", "GB/s", "tile ms", "GFLOP/s", "mm2d ms", "GFLOP/s"
+    );
+    for p in [1usize, 2, 4, 8, 9, 16, 32, 64] {
+        let x: Vec<f32> = (0..p * n).map(|_| lcg(&mut seed)).collect();
+        let x_h = client.create_from_slice(bytemuck::cast_slice(&x));
+        // One output handle PER ARM — the p=9 loud-zero readbacks must see
+        // each arm's own writes, never a sibling arm's.
+        let out_g = client.create_from_slice(&vec![0u8; p * m * 4]);
+        let out_t = client.create_from_slice(&vec![0u8; p * m * 4]);
+        let out_m = client.create_from_slice(&vec![0u8; p * m * 4]);
+        // Warmup all three arms (JIT + pool + dedicated buffers), then sync.
+        unsafe {
+            GemvQ4KBatchedCubeCL::launch::<ActiveRuntime>(
+                &client,
+                &q4,
+                x_h.clone(),
+                out_g.clone(),
+                p,
+            );
+            if p.is_multiple_of(32) {
+                GemmQ4KTileCubeCL::launch::<ActiveRuntime>(
+                    &client,
+                    &q4,
+                    x_h.clone(),
+                    out_t.clone(),
+                    p,
+                );
+            }
+        }
+        mm.dispatch(&client, &w_h, m, n, &x_h, &out_m, p)
+            .expect("mm warmup");
+        pollster::block_on(client.sync()).expect("warmup sync");
+
+        // ABBA-style alternation x2, median of 4 per arm (the loaded-box
+        // discipline — Bench-965 defect 2: one reading is host-stall lottery).
+        // The scalar tile GEMM requires p ≡ 0 (mod 32) — the verify-class
+        // shapes (2..16) are DECODE-PATH territory by design (the launch
+        // asserts), so its column reports only the legal shapes.
+        let mut gs = Vec::new();
+        let mut ts = Vec::new();
+        let mut ms = Vec::new();
+        for _ in 0..2 {
+            gs.push(time_batched(&client, &q4, p, x_h.clone(), out_g.clone()));
+            if p.is_multiple_of(32) {
+                ts.push(time_tile(&client, &q4, p, x_h.clone(), out_t.clone()));
+            }
+            ms.push(time_mm(&client, &mm, &w_h, m, n, p, &x_h, &out_m));
+            if p.is_multiple_of(32) {
+                ts.push(time_tile(&client, &q4, p, x_h.clone(), out_t.clone()));
+            }
+            ms.push(time_mm(&client, &mm, &w_h, m, n, p, &x_h, &out_m));
+            gs.push(time_batched(&client, &q4, p, x_h.clone(), out_g.clone()));
+        }
+        let med = |v: &mut Vec<f64>| {
+            if v.is_empty() {
+                return f64::NAN;
+            }
+            v.sort_by(|a, b| a.partial_cmp(b).unwrap());
+            v[v.len() / 2]
+        };
+        let (g, t, d) = (med(&mut gs), med(&mut ts), med(&mut ms));
+        let gflop = 2.0 * m as f64 * n as f64 * p as f64 / 1e9;
+        let t_disp = if t.is_nan() {
+            "—".to_string()
+        } else {
+            format!("{t:>10.3}")
+        };
+        let t_gf = if t.is_nan() {
+            "—".to_string()
+        } else {
+            format!("{:>9.0}", gflop / (t / 1000.0))
+        };
+        println!(
+            "{p:>4} | {g:>10.3} {:>8.0} | {t_disp} {t_gf} | {d:>10.3} {:>9.0}",
+            q4k_wbytes / (g / 1000.0) / 1e9,
+            gflop / (d / 1000.0),
+        );
+
+        // Loud-zero insurance at the verify shape: p=9 row 0 must match the
+        // CPU dot for every arm that timed at this p (the timed loop wrote
+        // out_h N times per arm — absent work would read as a zero).
+        if p == 9 {
+            // Loud-zero insurance at the verify shape: each arm read back from
+            // its OWN output handle. The two Q4K arms verify against the
+            // DEQUANTIZED-weight CPU reference (their outputs carry Q4K quant
+            // error vs the f16-rounded reference — the 2e-4 band is calibrated
+            // for f16-vs-f16 summation order, not quant noise); mm2d verifies
+            // against the f16-rounded reference (its weights ARE f16).
+            let mut wq4 = vec![0.0f32; n];
+            dequantize_row_q4_k(&blocks[..bpr], &mut wq4);
+            let (mut want_q4, mut acc_q4, mut want_f16, mut acc_f16) =
+                (0.0f32, 0.0f32, 0.0f32, 0.0f32);
+            for c in 0..n {
+                let term16 = f32::from(half::f16::from_bits(w16[c])) * x[c];
+                want_f16 += term16;
+                acc_f16 += term16.abs();
+                let term4 = wq4[c] * x[c];
+                want_q4 += term4;
+                acc_q4 += term4.abs();
+            }
+            let read = |h: &cubecl::server::Handle| {
+                let bytes = client.read_one(h.clone()).expect("read p9");
+                bytemuck::cast_slice::<u8, f32>(&bytes)[0]
+            };
+            let rel_q4 = ((read(&out_g) - want_q4).abs() / acc_q4.max(1e-9)) as f64;
+            assert!(
+                rel_q4 < 2e-4,
+                "prow p9 loud-zero: batched GEMV row0 got {} want {want_q4} (rel-to-mag {rel_q4:.3e})",
+                read(&out_g)
+            );
+            let rel_m = ((read(&out_m) - want_f16).abs() / acc_f16.max(1e-9)) as f64;
+            assert!(
+                rel_m < 2e-4,
+                "prow p9 loud-zero: mm2d row0 got {} want {want_f16} (rel-to-mag {rel_m:.3e})",
+                read(&out_m)
+            );
+            println!(
+                "prow p9 outputs verified: batched-GEMV rel-to-mag {rel_q4:.3e} (vs dequant ref), mm2d rel-to-mag {rel_m:.3e} (vs f16 ref)"
+            );
+        }
+    }
+}
