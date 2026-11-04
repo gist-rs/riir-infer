@@ -1,5 +1,12 @@
 # Bench 942 — Issue 1171: the tensor-flash prefill attention — past the fork at its own league cell
 
+> ⚠ 2026-11-04 (bench 944 / issue 1173 @`2647838`): this record's
+> StageTimers non-GEMM share (~400 ms/chunk) is a SERIALIZED-instrument
+> reading — bench 944 measured that removing ~240 launches/chunk buys
+> only +0.8–1.0% e2e. The per-section walls do not predict free-running
+> savings; see bench 944 + issue 1174 (the non-serialized attribution
+> instrument) before picking the next lever from this table.
+
 **Status:** LANDED (2026-11-04, zed-amo-i1171-attn@amo). The bench-941
 record's named lead executed in order — census first, wiring second — and
 the census was decisive: at pp5120 the attention bucket was **46.5–48.6%

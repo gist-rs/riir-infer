@@ -1,5 +1,14 @@
 # Bench 943 — Issue 1172: the GDN-bucket GPU-timestamp census — the non-GEMM share is real kernel wall, the GEMM share is bounded by its own launch floor
 
+> ⚠ 2026-11-04 (bench 944 / issue 1173 @`2647838`): the "launch floor"
+> reading below is a MARKER-BOUNDARY artifact of this instrument — the
+> census walls persist under launch fusion (fused norm_ssm+z_gate read
+> the SAME 1.12 ms as the unfused pair) and fusing ~240 launches/chunk
+> bought only +0.8–1.0% e2e. The walls are hazard/serialized waits, not
+> removable launch cost. Issue 1174 tracks the non-serialized
+> attribution instrument needed before any lever is picked from this
+> table. The instrument laws + the timestamp machinery remain valid.
+
 **Status:** LANDED (2026-11-04, zed-986a7538@amo). Instrument `4ea7adb` +
 deep-queue marker-chain fix `95fea10`; cells below from the fixed build.
 G1: `tests/qwen38_gdn_census_g1.rs` — sleep walls (NS_PER_TICK),
