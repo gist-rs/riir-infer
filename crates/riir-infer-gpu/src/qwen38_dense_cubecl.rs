@@ -568,6 +568,12 @@ impl QuantWeight {
 struct StageTimers {
     chunks: usize,
     wte_upload_ms: f64,
+    /// Follow-up 4 diagnostic split of wte_upload (gather vs write vs sync) —
+    /// the stage read 100–450 ms for an ~8 MB upload once it became the #2
+    /// share; the split says where the wall lives before any fix is chosen.
+    wte_gather_ms: f64,
+    wte_write_ms: f64,
+    wte_sync_ms: f64,
     gdn_ms: f64,
     attn_ms: f64,
     tail_logits_ms: f64,
@@ -593,13 +599,16 @@ impl StageTimers {
         println!(
             "[stage-timers] {} chunks + ragged tail, {} tokens — SYNCHRONIZED stages \
              (sum > free-running pass; compare shares): \
-             wte_upload {:.0} ms ({:.1}%) | gdn {:.0} ms ({:.1}%) | attn {:.0} ms ({:.1}%) | \
+             wte_upload {:.0} ms ({:.1}%) [gather {:.0} | write {:.0} | sync {:.0}] | gdn {:.0} ms ({:.1}%) | attn {:.0} ms ({:.1}%) | \
              tail_logits {:.0} ms ({:.1}%) | read_argmax {:.0} ms ({:.1}%) | \
              ragged_tail {:.0} ms ({:.1}%) | stage total {:.0} ms",
             self.chunks,
             tokens,
             self.wte_upload_ms,
             pct(self.wte_upload_ms),
+            self.wte_gather_ms,
+            self.wte_write_ms,
+            self.wte_sync_ms,
             self.gdn_ms,
             pct(self.gdn_ms),
             self.attn_ms,
@@ -646,9 +655,11 @@ impl Qwen38WgpuForward {
             let mm =
                 crate::gemm_dense_f16_metal_zero_copy::MetalDenseF16ZeroCopyGemm::new(dev, queue)?;
             eprintln!(
-                "[Issue 1150] dense-f16 matmul2d arm armed (device={:#x}, queue={:#x})",
+                "[Issue 1150] dense-f16 matmul2d arm armed (device={:#x}, queue={:#x}, \
+                 relaxed_precision={})",
                 mm.device_ptr(),
-                mm.queue_ptr()
+                mm.queue_ptr(),
+                mm.relaxed_precision()
             );
             crate::gemm_dense_f16_metal_zero_copy::install_dense_mm(mm);
         }
@@ -1429,6 +1440,7 @@ impl Qwen38WgpuForward {
 
         // x_b <- wte[tokens] — host gather + one block upload (~10 MB).
         let wte_t0 = timers.is_some().then(std::time::Instant::now);
+        let wte_gather_t0 = timers.is_some().then(std::time::Instant::now);
         {
             let mut block = vec![0.0f32; p * e];
             for (i, &t) in tokens.iter().enumerate() {
@@ -1438,14 +1450,23 @@ impl Qwen38WgpuForward {
                 }
                 block[i * e..(i + 1) * e].copy_from_slice(&self.wte_host[t * e..(t + 1) * e]);
             }
+            if let (Some(t), Some(t0)) = (timers.as_mut(), wte_gather_t0) {
+                t.wte_gather_ms += t0.elapsed().as_secs_f64() * 1e3;
+            }
+            let wte_write_t0 = timers.is_some().then(std::time::Instant::now);
             self.client.write(
                 &self.x_b,
                 cubecl::bytes::Bytes::from_bytes_vec(bytemuck::cast_slice(&block).to_vec()),
             );
+            if let (Some(t), Some(t0)) = (timers.as_mut(), wte_write_t0) {
+                t.wte_write_ms += t0.elapsed().as_secs_f64() * 1e3;
+            }
         }
         if let (Some(t), Some(t0)) = (timers.as_mut(), wte_t0) {
             pollster::block_on(self.client.sync()).ok();
-            t.wte_upload_ms += t0.elapsed().as_secs_f64() * 1e3;
+            let total = t0.elapsed().as_secs_f64() * 1e3;
+            t.wte_sync_ms += total - t.wte_gather_ms - t.wte_write_ms;
+            t.wte_upload_ms += total;
         }
 
         let eps = self.config.rms_norm_eps;

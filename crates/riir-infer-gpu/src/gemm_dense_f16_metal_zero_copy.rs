@@ -113,6 +113,10 @@ pub struct MetalDenseF16ZeroCopyGemm {
     /// The compiled Q4_K staged-dequant matmul2d pipeline (plan-614 task 1;
     /// own library — the Q4K MSL is a separate source).
     q4k_pipeline: ComputePipelineState,
+    /// Whether this context's matmul2d compiled with relaxed precision
+    /// (the follow-up-4 selector). Fixed at construction; a getter, not a
+    /// re-read, so the compiled source and the disclosure can never drift.
+    relaxed_precision: bool,
     /// Dedicated output buffers keyed by byte size — the pool-aliasing cure
     /// (Metal hazard tracking silently drops the cooperative store when the
     /// output shares the CubeCL pool buffer with the operands). One GPU→GPU
@@ -152,11 +156,83 @@ const DENSE_NRA: u64 = 64;
 const DENSE_NRB: u64 = 128;
 const DENSE_NSG: u64 = 4;
 
+// ---------------------------------------------------------------------------
+// Issue 1150 follow-up 4 — the dense-lane relaxed-precision selector
+// ---------------------------------------------------------------------------
+// The fork's tensor `kernel_mul_mm` compiles `matmul2d` with
+// relaxed_precision = true; the dense host pinned FALSE (the bit-exact G1
+// posture). Bench 923 measured 1.96–2.19× for exactly this flag on the
+// ternary sibling of this kernel (same mixed half×float operand pair).
+// Selector shape copied from the ternary module's, but SEPARATE from
+// `RIIR_METAL_TENSOR_RELAXED`: the dist stage pins the ternary selector
+// programmatically at stage load, and a shared knob would leak that pin
+// into the dense lane's numerics in a co-hosted process. The dense lane
+// owns its env (the lane's `RIIR_QWEN38_*` vocabulary).
+
+/// 0 = unset (fall through to the env arm), 1 = off, 2 = on.
+static PROD_RELAXED: std::sync::atomic::AtomicU8 = std::sync::atomic::AtomicU8::new(0);
+static PROD_RELAXED_ENV: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+
+/// Pin relaxed precision for every dense context constructed AFTER this call
+/// (wins over `RIIR_QWEN38_DENSE_MM2D_RELAXED`). Test + programmatic arm.
+pub fn set_dense_relaxed_precision(on: bool) {
+    let v = match on {
+        true => 2,
+        false => 1,
+    };
+    PROD_RELAXED.store(v, std::sync::atomic::Ordering::Relaxed);
+}
+
+/// Whether the next dense context compiles `matmul2d` with relaxed
+/// precision: the explicit setter if pinned, else
+/// `RIIR_QWEN38_DENSE_MM2D_RELAXED=1` (exact literal, promote-only; parsed
+/// once, announced on stderr), else OFF (the incumbent bit-exact posture).
+pub fn production_dense_relaxed_precision() -> bool {
+    match PROD_RELAXED.load(std::sync::atomic::Ordering::Relaxed) {
+        1 => false,
+        2 => true,
+        _ => *PROD_RELAXED_ENV.get_or_init(|| {
+            let on = std::env::var("RIIR_QWEN38_DENSE_MM2D_RELAXED").as_deref() == Ok("1");
+            if on {
+                eprintln!("[Issue 1150] dense-f16 matmul2d relaxed_precision = true");
+            }
+            on
+        }),
+    }
+}
+
+/// Compose the dense MSL: an explicit `#define SWEEP_RELAXED` on BOTH
+/// branches (the bench-921 law — the compiled source string can never
+/// disagree with the `.metal` fallback, which stays false).
+pub fn compose_dense_msl_source(relaxed: bool, body: &str) -> String {
+    let define = match relaxed {
+        true => "#define SWEEP_RELAXED true\n",
+        false => "#define SWEEP_RELAXED false\n",
+    };
+    format!("{define}{body}")
+}
+
 impl MetalDenseF16ZeroCopyGemm {
     /// Create the zero-copy dense-f16 context on the shared CubeCL Metal
-    /// device. Returns `Err` when wgpu isn't Metal or MSL compilation fails
-    /// (Metal 3.1+ required for `metal::tensor`).
+    /// device at the process-selector posture (the env / setter arm). The
+    /// explicit-posture constructor [`Self::new_with_relaxed`] is the test
+    /// arm — parallel test threads must not mutate the global selector.
     pub fn new(wgpu_device: Arc<WgpuDevice>, wgpu_queue: Arc<WgpuQueue>) -> Result<Self, String> {
+        Self::new_with_relaxed(
+            wgpu_device,
+            wgpu_queue,
+            production_dense_relaxed_precision(),
+        )
+    }
+
+    /// Create the zero-copy dense-f16 context with an EXPLICIT
+    /// relaxed-precision posture. Returns `Err` when wgpu isn't Metal or MSL
+    /// compilation fails (Metal 3.1+ required for `metal::tensor`).
+    pub fn new_with_relaxed(
+        wgpu_device: Arc<WgpuDevice>,
+        wgpu_queue: Arc<WgpuQueue>,
+        relaxed: bool,
+    ) -> Result<Self, String> {
         // Raw device + queue extraction — the T4 pattern (identical to the
         // ternary module's).
         let device_ptr: *mut metal::MTLDevice = unsafe {
@@ -178,11 +254,15 @@ impl MetalDenseF16ZeroCopyGemm {
 
         // Compile the dense matmul2d pipeline. The MSL's SWEEP_* defaults are
         // the fork geometry; the DENSE_* constants below mirror them (the
-        // compile-time check is the G1 gate's edge-shape suite).
+        // compile-time check is the G1 gate's edge-shape suite). relaxed
+        // precision is the follow-up-4 selector (default OFF, the incumbent
+        // bit-exact posture) — pinned in the field so the gate + bench logs
+        // can prove which arm a context carries.
         let device_ref: &DeviceRef = unsafe { DeviceRef::from_ptr(device_ptr) };
         let options = CompileOptions::new();
+        let source = compose_dense_msl_source(relaxed, MSL_SOURCE);
         let library = device_ref
-            .new_library_with_source(MSL_SOURCE, &options)
+            .new_library_with_source(source.as_str(), &options)
             .map_err(|e| format!("dense-f16 MSL compilation failed: {e}"))?;
         let function = library
             .get_function("gemm_dense_f16_tensor", None)
@@ -216,6 +296,7 @@ impl MetalDenseF16ZeroCopyGemm {
             pipeline,
             gemv_pipeline,
             q4k_pipeline,
+            relaxed_precision: relaxed,
             output_cache: Mutex::new(HashMap::new()),
             wgpu_initialized: Mutex::new(HashMap::new()),
             init_fills: std::sync::atomic::AtomicU64::new(0),
@@ -230,6 +311,13 @@ impl MetalDenseF16ZeroCopyGemm {
     pub fn dispatch_count(&self) -> u64 {
         self.dispatch_count
             .load(std::sync::atomic::Ordering::Relaxed)
+    }
+
+    /// Whether this context compiled `matmul2d` with relaxed precision —
+    /// the engagement-proof getter (a bench log or gate asserts the ARM it
+    /// measured, never infers it from env).
+    pub fn relaxed_precision(&self) -> bool {
+        self.relaxed_precision
     }
 
     /// Issue-1146 first-use zero-init cure (same body as the ternary

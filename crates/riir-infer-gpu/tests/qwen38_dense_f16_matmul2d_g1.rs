@@ -67,6 +67,7 @@ fn run_case(
     m: usize,
     n: usize,
     p: usize,
+    tol: f64,
 ) {
     let mut seed: u64 =
         0xd00d_f160_0000_0000 ^ (m as u64) ^ ((n as u64) << 21) ^ ((p as u64) << 42);
@@ -96,8 +97,8 @@ fn run_case(
             max_rel = rel;
         }
         assert!(
-            rel < 2e-4,
-            "case {m}x{n} p{p}: element {i} got {g} want {e} (rel-to-mag {rel:.3e})"
+            rel < tol,
+            "case {m}x{n} p{p}: element {i} got {g} want {e} (rel-to-mag {rel:.3e} >= band {tol:.3e})"
         );
     }
     println!("case {m}x{n} p{p}: max_rel-to-mag {max_rel:.3e}");
@@ -160,27 +161,34 @@ fn run_gemv_case(
 fn dense_f16_matmul2d_g1() {
     let ctx = CubeCLContext::new().expect("gpu context");
     let client = ctx.client();
-    let mm = MetalDenseF16ZeroCopyGemm::new(
+    let mm = MetalDenseF16ZeroCopyGemm::new_with_relaxed(
         ctx.wgpu_device().expect("wgpu device").clone(),
         ctx.wgpu_queue().expect("wgpu queue").clone(),
+        false,
     )
     .expect("dense-f16 zero-copy context");
+    assert!(
+        !mm.relaxed_precision(),
+        "exact gate must carry the exact arm"
+    );
 
     // The full matrix re-measured under the upload-sync discipline (the
     // pre-sync zero-writes were the deferred-upload race, not shape laws —
     // every class reads its OWN values, including m-edge, p-edge, the
     // combined ragged class, and p=1). The gate pins the full matrix so a
     // cooperative-tensor regression on ANY production shape class is loud.
-    run_case(&mm, &client, 64, 64, 128); // exact 64x128 tiles
-    run_case(&mm, &client, 64, 96, 100); // p-edge + k-edge (m exact)
-    run_case(&mm, &client, 128, 64, 100); // p-edge, two m tiles
-    run_case(&mm, &client, 130, 64, 128); // m-edge alone
-    run_case(&mm, &client, 48, 64, 128); // m-edge, single tile
-    run_case(&mm, &client, 48, 96, 100); // m AND p both tile-ragged
-    run_case(&mm, &client, 512, 5120, 256); // production-shape column count
-    run_case(&mm, &client, 512, 5120, 64); // ingest-floor p (production min)
-    run_case(&mm, &client, 64, 5120, 64); // ingest floor, one m tile
-    run_case(&mm, &client, 512, 5120, 1); // matmul2d at p=1 (parity class)
+    // Band 2e-4 rel-to-mag: the f32-accumulate exact posture (summation-order
+    // noise only).
+    run_case(&mm, &client, 64, 64, 128, 2e-4); // exact 64x128 tiles
+    run_case(&mm, &client, 64, 96, 100, 2e-4); // p-edge + k-edge (m exact)
+    run_case(&mm, &client, 128, 64, 100, 2e-4); // p-edge, two m tiles
+    run_case(&mm, &client, 130, 64, 128, 2e-4); // m-edge alone
+    run_case(&mm, &client, 48, 64, 128, 2e-4); // m-edge, single tile
+    run_case(&mm, &client, 48, 96, 100, 2e-4); // m AND p both tile-ragged
+    run_case(&mm, &client, 512, 5120, 256, 2e-4); // production-shape column count
+    run_case(&mm, &client, 512, 5120, 64, 2e-4); // ingest-floor p (production min)
+    run_case(&mm, &client, 64, 5120, 64, 2e-4); // ingest floor, one m tile
+    run_case(&mm, &client, 512, 5120, 1, 2e-4); // matmul2d at p=1 (parity class)
 
     // The guards considered during the race investigation came OUT: under
     // the upload-sync discipline every shape class is correct (measured
@@ -193,9 +201,10 @@ fn dense_f16_matmul2d_g1() {
 fn dense_f16_gemv_g1() {
     let ctx = CubeCLContext::new().expect("gpu context");
     let client = ctx.client();
-    let mm = MetalDenseF16ZeroCopyGemm::new(
+    let mm = MetalDenseF16ZeroCopyGemm::new_with_relaxed(
         ctx.wgpu_device().expect("wgpu device").clone(),
         ctx.wgpu_queue().expect("wgpu queue").clone(),
+        false,
     )
     .expect("dense-f16 zero-copy context");
 
@@ -203,6 +212,156 @@ fn dense_f16_gemv_g1() {
     run_gemv_case(&mm, &client, 1000, 5120); // m-edge (1000 = 250 workgroups exact)
     run_gemv_case(&mm, &client, 512, 5120); // production FFN-down shape
     run_gemv_case(&mm, &client, 3, 96); // m-edge ragged (3 rows, 1 workgroup)
+}
+
+/// Follow-up 4 — the relaxed-precision arm's G1: the exact gate's fixture
+/// machinery, PRE-REGISTERED band 3e-2 rel-to-mag (fp16-accumulate physics:
+/// ~2.8e-3 relative per 32-deep tile partial against a random-sign dot, the
+/// K-deep tile partials summing in f32 — measured drift lands far below the
+/// band; the band is a drift detector, the e2e walk agreement stats are the
+/// deployed-path arbiter, per the bench-923 lossy-surface protocol).
+/// Plus the determinism pin: the tile geometry fixes the reduction order, so
+/// two runs of the same case are BYTE-IDENTICAL — relaxed changes precision,
+/// never order.
+#[test]
+fn dense_f16_matmul2d_relaxed_g1() {
+    let ctx = CubeCLContext::new().expect("gpu context");
+    let client = ctx.client();
+    let mm = MetalDenseF16ZeroCopyGemm::new_with_relaxed(
+        ctx.wgpu_device().expect("wgpu device").clone(),
+        ctx.wgpu_queue().expect("wgpu queue").clone(),
+        true,
+    )
+    .expect("dense-f16 zero-copy context");
+    assert!(
+        mm.relaxed_precision(),
+        "relaxed gate must carry the relaxed arm"
+    );
+
+    run_case(&mm, &client, 64, 64, 128, 3e-2); // exact tiles
+    run_case(&mm, &client, 130, 64, 128, 3e-2); // m-edge
+    run_case(&mm, &client, 48, 96, 100, 3e-2); // m AND p both tile-ragged
+    run_case(&mm, &client, 512, 5120, 256, 3e-2); // production column count
+    run_case(&mm, &client, 512, 5120, 64, 3e-2); // ingest-floor p
+
+    // Determinism pin: one fixture, two dispatches, two outputs —
+    // byte-identical.
+    let (m, n, p) = (512usize, 5120usize, 64usize);
+    let mut seed: u64 = 0x1150_1E1A_FE00_D001 ^ ((n as u64) << 21);
+    let wf: Vec<f32> = (0..m * n).map(|_| lcg(&mut seed) * 0.05).collect();
+    let x: Vec<f32> = (0..p * n).map(|_| lcg(&mut seed)).collect();
+    let w16 = f16_bits(&wf);
+    let w_h = client.create_from_slice(bytemuck::cast_slice(&w16));
+    let x_h = client.create_from_slice(bytemuck::cast_slice(&x));
+    let out_a = client.create_from_slice(&vec![0u8; p * m * 4]);
+    let out_b = client.create_from_slice(&vec![0u8; p * m * 4]);
+    pollster::block_on(client.sync()).expect("sync after uploads");
+    mm.dispatch(&client, &w_h, m, n, &x_h, &out_a, p)
+        .expect("dispatch a");
+    mm.wait_last();
+    mm.dispatch(&client, &w_h, m, n, &x_h, &out_b, p)
+        .expect("dispatch b");
+    mm.wait_last();
+    let a = client.read_one(out_a).expect("read a");
+    let b = client.read_one(out_b).expect("read b");
+    assert_eq!(a, b, "relaxed arm is not run-to-run deterministic");
+}
+
+/// Follow-up 4 — exact vs relaxed kernel A/B at the PRODUCTION per-layer GEMM
+/// shapes (qwen3.8-27B: qkv 10240×5120, z 6144×5120, ssm_out 5120×6144, mlp
+/// gate/up 17408×5120, mlp down 5120×17408, attn_q 12288×5120) at the ingest
+/// chunk p=512 — the TFLOPS table that prices the wiring before the e2e
+/// cells. ABBA-interleaved pairs, median of pair-ratios (the sequential-AB
+/// law — a ratio of two sequential arms measures the box, interleaving
+/// measures the kernels). RELEASE + --ignored:
+/// `cargo test -p riir-infer-gpu --features qwen38_wgpu,metal_tensor_gemm
+/// --test qwen38_dense_f16_matmul2d_g1 dense_f16_relaxed_ab --release --
+/// --ignored --nocapture`. Quote the box state beside the numbers.
+#[test]
+#[ignore]
+fn dense_f16_relaxed_ab() {
+    let ctx = CubeCLContext::new().expect("gpu context");
+    let client = ctx.client();
+    let exact = MetalDenseF16ZeroCopyGemm::new_with_relaxed(
+        ctx.wgpu_device().expect("wgpu device").clone(),
+        ctx.wgpu_queue().expect("wgpu queue").clone(),
+        false,
+    )
+    .expect("exact context");
+    let relaxed = MetalDenseF16ZeroCopyGemm::new_with_relaxed(
+        ctx.wgpu_device().expect("wgpu device").clone(),
+        ctx.wgpu_queue().expect("wgpu queue").clone(),
+        true,
+    )
+    .expect("relaxed context");
+
+    const P: usize = 512;
+    const SHAPES: [(usize, usize, &str); 6] = [
+        (10_240, 5_120, "gdn.qkv"),
+        (6_144, 5_120, "gdn.z"),
+        (5_120, 6_144, "ssm.out/attn.o"),
+        (17_408, 5_120, "mlp.gate/up"),
+        (5_120, 17_408, "mlp.down"),
+        (12_288, 5_120, "attn.q"),
+    ];
+    let x: Vec<f32> = (0..P * 17_408)
+        .map(|i| ((i % 2009) as f32 / 2009.0) * 2.0 - 1.0)
+        .collect();
+    let x_h = client.create_from_slice(bytemuck::cast_slice(&x));
+
+    const N_PAIRS: usize = 15;
+    const WARM: usize = 3;
+    let t0 = std::time::Instant::now();
+    for &(m, n, name) in &SHAPES {
+        let mut seed: u64 = 0xab11_5000 ^ ((m as u64) << 13) ^ (n as u64);
+        let wf: Vec<f32> = (0..m * n).map(|_| lcg(&mut seed) * 0.05).collect();
+        let w16 = f16_bits(&wf);
+        let w_h = client.create_from_slice(bytemuck::cast_slice(&w16));
+        let out_h = client.create_from_slice(&vec![0u8; P * m * 4]);
+        pollster::block_on(client.sync()).expect("sync after uploads");
+
+        let time_arm = |mm: &MetalDenseF16ZeroCopyGemm| -> f64 {
+            pollster::block_on(client.sync()).expect("pre-dispatch sync");
+            let s = std::time::Instant::now();
+            mm.dispatch(&client, &w_h, m, n, &x_h, &out_h, P)
+                .expect("dispatch");
+            mm.wait_last();
+            s.elapsed().as_secs_f64()
+        };
+
+        // Warmup both arms (first-use fills + pipeline warm).
+        for _ in 0..WARM {
+            time_arm(&exact);
+            time_arm(&relaxed);
+        }
+
+        // ABBA pairs: alternate which arm opens the pair.
+        let mut ratios: Vec<f64> = Vec::with_capacity(N_PAIRS);
+        let mut last_exact = 0.0f64;
+        let mut last_relaxed = 0.0f64;
+        for pair in 0..N_PAIRS {
+            if pair.is_multiple_of(2) {
+                last_exact = time_arm(&exact);
+                last_relaxed = time_arm(&relaxed);
+            } else {
+                last_relaxed = time_arm(&relaxed);
+                last_exact = time_arm(&exact);
+            }
+            ratios.push(last_relaxed / last_exact);
+        }
+        ratios.sort_by(|a, b| a.partial_cmp(b).expect("finite ratios"));
+        let med = ratios[N_PAIRS / 2];
+        let flop = (2.0 * (P * m * n) as f64) / 1e12;
+        let tf_exact = flop / last_exact;
+        let tf_relaxed = flop / last_relaxed;
+        println!(
+            "{name} {m}x{n} p{P}: exact {tf_exact:.1} TFLOPS, relaxed {tf_relaxed:.1} \
+             TFLOPS, median ratio (relaxed/exact) {med:.3}"
+        );
+        drop(w_h);
+        drop(out_h);
+    }
+    println!("probe wall: {:.1} s", t0.elapsed().as_secs_f64());
 }
 
 /// Kernel-level A/B at the production FFN shape ([17408×5120]×512): the
