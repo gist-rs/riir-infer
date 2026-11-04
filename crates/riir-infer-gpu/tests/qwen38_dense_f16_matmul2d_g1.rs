@@ -348,6 +348,76 @@ fn dense_f16_vs_q4k_ab() {
     );
 }
 
+/// The Bench-1163 diagnosis check (the reviewer verdict's pre-session-1
+/// evidence): the f16 matmul2d at p=9 with K cut to ONE K-tile (n=32) and to
+/// K/8 (n=640). Fixed-launch-cost hypothesis: time barely moves (≈1.2 ms at
+/// every n). K-loop-work hypothesis: time scales ≈ n (the Bench-1163 sliced
+/// arm already read 0.162 ms at n=640, predicting ~7.5 µs at n=32 — if that
+/// reproduces, the 1.2 ms is per-K-tile load-latency work, and the fix is a
+/// skeleton whose K-loop is plain streaming loads — the GEMV class — not a
+/// custom mma tiling).
+/// Run: `cargo test --release -p riir-infer-gpu --features
+/// qwen38_wgpu,metal_tensor_gemm --test qwen38_dense_f16_matmul2d_g1
+/// matmul2d_k_shrink_check -- --ignored --nocapture`
+#[test]
+#[ignore]
+fn matmul2d_k_shrink_check() {
+    let m = 17_408usize;
+    let p = 9usize;
+    let mm = MetalDenseF16ZeroCopyGemm::new(
+        CubeCLContext::new()
+            .expect("gpu context")
+            .wgpu_device()
+            .expect("wgpu device")
+            .clone(),
+        CubeCLContext::new()
+            .expect("gpu context")
+            .wgpu_queue()
+            .expect("wgpu queue")
+            .clone(),
+    )
+    .expect("dense zero-copy context");
+    let ctx = CubeCLContext::new().expect("gpu context");
+    let client = ctx.client();
+
+    println!("K-shrink check @m={m} p={p} (f16 matmul2d, N=20 back-to-back)");
+    println!("{:>6} | {:>10} {:>10}", "n", "ms/call", "µs/K-tile");
+    for n in [32usize, 640, 2560, 5120] {
+        let mut seed: u64 = 0x0614_5b17_0000_0000 ^ (n as u64);
+        let wf: Vec<f32> = (0..m * n).map(|_| lcg(&mut seed) * 0.05).collect();
+        let x: Vec<f32> = (0..p * n).map(|_| lcg(&mut seed)).collect();
+        let w16 = f16_bits(&wf);
+        let w_h = client.create_from_slice(bytemuck::cast_slice(&w16));
+        let x_h = client.create_from_slice(bytemuck::cast_slice(&x));
+        let out_h = client.create_from_slice(&vec![0u8; p * m * 4]);
+        pollster::block_on(client.sync()).expect("sync uploads");
+
+        for _ in 0..3 {
+            mm.dispatch(&client, &w_h, m, n, &x_h, &out_h, p)
+                .expect("warm");
+        }
+        mm.wait_last();
+        pollster::block_on(client.sync()).expect("warm sync");
+
+        let mut ts = Vec::new();
+        for _ in 0..2 {
+            pollster::block_on(client.sync()).expect("pre");
+            let t0 = std::time::Instant::now();
+            for _ in 0..20 {
+                mm.dispatch(&client, &w_h, m, n, &x_h, &out_h, p)
+                    .expect("timed");
+            }
+            mm.wait_last();
+            pollster::block_on(client.sync()).expect("post");
+            ts.push(t0.elapsed().as_secs_f64() * 1000.0 / 20.0);
+        }
+        ts.sort_by(|a, b| a.partial_cmp(b).unwrap());
+        let t = ts[ts.len() / 2];
+        let k_tiles = (n / 32).max(1);
+        println!("{n:>6} | {t:>10.3} {:>10.3}", t * 1000.0 / k_tiles as f64);
+    }
+}
+
 /// Plan 614 Phase-3 floor probe (riir-ai plan 614; the Bench-965 pattern on
 /// the production box): the verify-shape p-sweep at the production ffn shape
 /// [17408×5120] — per-layer times for the three Metal kernel families that
