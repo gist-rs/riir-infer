@@ -2518,9 +2518,13 @@ impl Qwen38WgpuForward {
                 eps,
             );
         }
+        // The cast sits OUTSIDE the gateup gate (verdict round 1, bench
+        // 945): skipping the GEMM class must not skip its input cast, or
+        // the gateup delta double-counts one f16_cast per layer that the
+        // `f16_cast` class also counts.
+        let norm_in =
+            self.gemm_input_fresh(&self.norm_x_b_h, &self.norm_x_b, p * e, norm_twin_fresh);
         if !self.ablate_skip("mlp_gateup_gemm") {
-            let norm_in =
-                self.gemm_input_fresh(&self.norm_x_b_h, &self.norm_x_b, p * e, norm_twin_fresh);
             gate.gemm(&self.client, norm_in.clone(), self.gateup_b.clone(), p);
             up.gemm(&self.client, norm_in, self.up_b.clone(), p);
         }
