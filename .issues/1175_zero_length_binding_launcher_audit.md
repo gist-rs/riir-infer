@@ -2,8 +2,8 @@
 
 **Status:** OPEN — filed from bench 944's instrument law (a
 zero-length binding is clamped to the WHOLE buffer by the wgpu/Metal
-binding layer). Not claimed (append a `**Claimed:**` line under this
-Status before implementing).
+binding layer).
+**Claimed:** zed-ablate@amo, 1793804639, expires 2026-11-06T15:04:17Z
 
 ## The hazard
 
