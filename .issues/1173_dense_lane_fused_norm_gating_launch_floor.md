@@ -1,7 +1,7 @@
 # Issue 1173 — dense qwen38 GDN lane: fuse the norm+gating family against the per-kernel launch floor
 
-**Status:** OPEN — bench 943's named lever. Not claimed (append a
-`**Claimed:**` line under this Status before implementing).
+**Status:** OPEN — bench 943's named lever. Claimed 2026-11-04 (see Claimed line).
+**Claimed:** zed-1ee7a33e@amo, 1793797957, expires 2026-11-06T13:12:37+00:00
 
 ## Problem
 
