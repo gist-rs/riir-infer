@@ -922,6 +922,60 @@ impl CopyCubeCL {
 }
 
 // ---------------------------------------------------------------------------
+// f32 → f16 staging cast (Issue 1170 — the half-B GEMM arm)
+// ---------------------------------------------------------------------------
+
+/// CubeCL kernel: `output[i] = f16(input[i])` — round-to-nearest f32 → f16
+/// (the half::f16 default), the half-B matmul2d arm's activation staging.
+/// The kernel and the CPU fixture both use `half::f16::from_f32`, so the G1
+/// gate sees identical values both sides.
+///
+/// Dispatch: `ceil(n/256)` workgroups of 256 threads.
+#[cfg(feature = "cubecl_runtime")]
+#[cube(launch_unchecked)]
+fn cast_f32_to_f16(input: &[f32], output: &mut [half::f16]) {
+    let idx = ABSOLUTE_POS;
+    if idx >= input.len() {
+        terminate!();
+    }
+    output[idx] = half::f16::cast_from(input[idx]);
+}
+
+/// Launcher for the f32 → f16 staging cast (Issue 1170).
+///
+/// # Safety
+///
+/// - `input_handle`: `n` f32 elements (read-only)
+/// - `output_handle`: `n` f16 elements (modified in-place; the caller's
+///   staging twin, never aliasing the input)
+#[cfg(feature = "cubecl_runtime")]
+pub struct CastF32ToF16CubeCL;
+
+#[cfg(feature = "cubecl_runtime")]
+impl CastF32ToF16CubeCL {
+    /// Launch the cast: `n` elements, `ceil(n/256)` workgroups of 256
+    /// threads. `n` = the f32 ELEMENT count (the f16 twin holds the same
+    /// element count at half the bytes).
+    pub unsafe fn launch<R: Runtime>(
+        client: &ComputeClient<R>,
+        input_handle: Handle,
+        output_handle: Handle,
+        n: usize,
+    ) {
+        let n_wg = n.div_ceil(256).max(1) as u32;
+        unsafe {
+            cast_f32_to_f16::launch_unchecked::<R>(
+                client,
+                CubeCount::Static(n_wg, 1, 1),
+                CubeDim::new_1d(256),
+                BufferArg::from_raw_parts(input_handle, n),
+                BufferArg::from_raw_parts(output_handle, n),
+            );
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
 // 4-way split kernel (Issue 642 F3)
 // ---------------------------------------------------------------------------
 

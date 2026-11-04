@@ -256,6 +256,15 @@ pub struct Qwen38WgpuForward {
     up_b: Handle,
     hidden_b: Handle,
     logits_b: Handle,
+    /// Issue 1170 half-B twins: f16 staging mirrors of the f32 activation
+    /// buffers the prefill GEMMs read (norm_x_b / hidden_b / rec_n_b /
+    /// attn_out_b). None unless `RIIR_QWEN38_DENSE_MM2D_F16ACT=1` armed the
+    /// half-B posture at load; every GEMM call site stages through
+    /// [`Self::gemm_input`], so twin-less postures pass f32 unchanged.
+    norm_x_b_h: Option<Handle>,
+    hidden_b_h: Option<Handle>,
+    rec_n_b_h: Option<Handle>,
+    attn_out_b_h: Option<Handle>,
     // Decode scratch.
     x: Handle,
     norm_x: Handle,
@@ -535,7 +544,7 @@ impl QuantWeight {
                 }
                 QuantWeight::F16(w, m, n) => {
                     #[cfg(all(feature = "metal_tensor_gemm", target_os = "macos"))]
-                    if let Some(mm) = crate::gemm_dense_f16_metal_zero_copy::dense_mm() {
+                    if let Some(mm) = crate::gemm_dense_f16_metal_zero_copy::gemm_mm_for_posture() {
                         mm.dispatch(client, w, *m, *n, &x, &out, p)
                             .expect("dense-f16 gemm dispatch");
                     } else {
@@ -668,6 +677,53 @@ impl Qwen38WgpuForward {
             return Err(
                 "RIIR_QWEN38_DENSE_MM2D=1 requires macOS + the metal_tensor_gemm feature".into(),
             );
+        }
+
+        // The half-B matmul2d posture (issue 1170): the prefill GEMMs ride
+        // the half×half variant over f16 activation twins. Requires the
+        // dense arm (it is a GEMM-CONTEXT variant of it, not a standalone
+        // posture); promote-only, exact literal. Off = byte-identical (the
+        // context is never constructed, no twins are allocated, the gemm
+        // selection falls to the mixed path).
+        let half_b_armed = std::env::var("RIIR_QWEN38_DENSE_MM2D_F16ACT").as_deref() == Ok("1");
+        if half_b_armed && !dense_armed {
+            return Err("RIIR_QWEN38_DENSE_MM2D_F16ACT=1 requires RIIR_QWEN38_DENSE_MM2D=1".into());
+        }
+        #[cfg(all(feature = "metal_tensor_gemm", target_os = "macos"))]
+        if half_b_armed && dense_armed {
+            let ctx = crate::cubecl_runtime::CubeCLContext::new()
+                .map_err(|e| format!("gpu context: {e}"))?;
+            let (dev, queue) = match (ctx.wgpu_device(), ctx.wgpu_queue()) {
+                (Some(d), Some(q)) => (d.clone(), q.clone()),
+                _ => {
+                    return Err(
+                        "RIIR_QWEN38_DENSE_MM2D_F16ACT=1 requires the Metal wgpu CubeCL backend"
+                            .into(),
+                    );
+                }
+            };
+            let mm = crate::gemm_dense_f16_metal_zero_copy::MetalDenseF16ZeroCopyGemm::
+                new_with_gemm_source(
+                    dev,
+                    queue,
+                    crate::gemm_dense_f16_metal_zero_copy::production_dense_relaxed_precision(
+                    ),
+                    include_str!("gemm_dense_f16h_metal_tensor.metal"),
+                )?;
+            eprintln!(
+                "[Issue 1170] dense-f16 half-B matmul2d arm armed (device={:#x}, queue={:#x}, \
+                 relaxed_precision={})",
+                mm.device_ptr(),
+                mm.queue_ptr(),
+                mm.relaxed_precision()
+            );
+            crate::gemm_dense_f16_metal_zero_copy::install_half_b_mm(mm);
+        }
+        #[cfg(not(all(feature = "metal_tensor_gemm", target_os = "macos")))]
+        if half_b_armed && dense_armed {
+            return Err("RIIR_QWEN38_DENSE_MM2D_F16ACT=1 requires macOS + \
+                        the metal_tensor_gemm feature"
+                .into());
         }
 
         let e = config.n_embd;
@@ -831,6 +887,19 @@ impl Qwen38WgpuForward {
 
         // Scratch — batched (chunk) set.
         let batch = |n_f32: usize| client.create_from_slice(&vec![0u8; n_f32 * 4]);
+        // The half-B twins (issue 1170): same element count, f16 bytes. The
+        // cast kernel writes every element before any GEMM reads them.
+        let batch_h = |n_f32: usize| client.create_from_slice(&vec![0u8; n_f32 * 2]);
+        let (norm_x_b_h, hidden_b_h, rec_n_b_h, attn_out_b_h) = if half_b_armed {
+            (
+                Some(batch_h(chunk * e)),
+                Some(batch_h(chunk * config.mlp_hidden)),
+                Some(batch_h(chunk * n_v * hd_v)),
+                Some(batch_h(chunk * config.n_head * hd)),
+            )
+        } else {
+            (None, None, None, None)
+        };
         let x_b = batch(chunk * e);
         let norm_x_b = batch(chunk * e);
         let tmp_b = batch(chunk * e);
@@ -985,6 +1054,10 @@ impl Qwen38WgpuForward {
             up_b,
             hidden_b,
             logits_b,
+            norm_x_b_h,
+            hidden_b_h,
+            rec_n_b_h,
+            attn_out_b_h,
             x,
             norm_x,
             tmp,
@@ -1539,6 +1612,26 @@ impl Qwen38WgpuForward {
         Self::argmax_first(&logits)
     }
 
+    /// Issue 1170 half-B staging: under the F16ACT posture, cast the f32
+    /// activation to its f16 twin and return the twin (the half×half GEMM
+    /// reads it); otherwise return the f32 source unchanged (the mixed
+    /// path). One site per producing buffer — the cast runs once per
+    /// producer per chunk, never once per GEMM.
+    fn gemm_input(&self, twin: &Option<Handle>, src: &Handle, n: usize) -> Handle {
+        match twin {
+            Some(h) => unsafe {
+                crate::elementwise_cubecl::CastF32ToF16CubeCL::launch::<ActiveRuntime>(
+                    &self.client,
+                    src.clone(),
+                    h.clone(),
+                    n,
+                );
+                h.clone()
+            },
+            None => src.clone(),
+        }
+    }
+
     fn prefill_gdn_layer(&mut self, li: usize, lw: &Qwen38WgpuLayerWeights, eps: f32) {
         let c = &self.config;
         let e = c.n_embd;
@@ -1568,10 +1661,11 @@ impl Qwen38WgpuForward {
                 e,
                 eps,
             );
-            qkv.gemm(&self.client, self.norm_x_b.clone(), self.qkv_b.clone(), p);
-            z_w.gemm(&self.client, self.norm_x_b.clone(), self.z_b.clone(), p);
-            alpha.gemm(&self.client, self.norm_x_b.clone(), self.a_b.clone(), p);
-            beta_w.gemm(&self.client, self.norm_x_b.clone(), self.b_b.clone(), p);
+            let norm_in = self.gemm_input(&self.norm_x_b_h, &self.norm_x_b, p * e);
+            qkv.gemm(&self.client, norm_in.clone(), self.qkv_b.clone(), p);
+            z_w.gemm(&self.client, norm_in.clone(), self.z_b.clone(), p);
+            alpha.gemm(&self.client, norm_in.clone(), self.a_b.clone(), p);
+            beta_w.gemm(&self.client, norm_in, self.b_b.clone(), p);
             crate::deltanet_cubecl::DeltanetBetaDecayBatchedCubeCL::launch::<ActiveRuntime>(
                 &self.client,
                 self.a_b.clone(),
@@ -1683,7 +1777,8 @@ impl Qwen38WgpuForward {
                 self.z_b.clone(),
                 p * n_v * hd_v,
             );
-            ssm_out.gemm(&self.client, self.rec_n_b.clone(), self.tmp_b.clone(), p);
+            let ssm_in = self.gemm_input(&self.rec_n_b_h, &self.rec_n_b, p * n_v * hd_v);
+            ssm_out.gemm(&self.client, ssm_in, self.tmp_b.clone(), p);
             crate::norms_cubecl::ResidualAddCubeCL::launch::<ActiveRuntime>(
                 &self.client,
                 self.x_b.clone(),
@@ -1726,9 +1821,10 @@ impl Qwen38WgpuForward {
                 e,
                 eps,
             );
-            wq.gemm(&self.client, self.norm_x_b.clone(), self.qg_b.clone(), p);
-            wk.gemm(&self.client, self.norm_x_b.clone(), self.k_b.clone(), p);
-            wv.gemm(&self.client, self.norm_x_b.clone(), self.v_b.clone(), p);
+            let norm_in = self.gemm_input(&self.norm_x_b_h, &self.norm_x_b, p * e);
+            wq.gemm(&self.client, norm_in.clone(), self.qg_b.clone(), p);
+            wk.gemm(&self.client, norm_in.clone(), self.k_b.clone(), p);
+            wv.gemm(&self.client, norm_in, self.v_b.clone(), p);
             crate::qwen_attention_cubecl::QwenSplitQgBatchedCubeCL::launch::<ActiveRuntime>(
                 &self.client,
                 self.qg_b.clone(),
@@ -1789,7 +1885,8 @@ impl Qwen38WgpuForward {
                 p,
                 base_pos,
             );
-            wo.gemm(&self.client, self.attn_out_b.clone(), self.tmp_b.clone(), p);
+            let wo_in = self.gemm_input(&self.attn_out_b_h, &self.attn_out_b, p * c.n_head * hd);
+            wo.gemm(&self.client, wo_in, self.tmp_b.clone(), p);
             crate::norms_cubecl::ResidualAddCubeCL::launch::<ActiveRuntime>(
                 &self.client,
                 self.x_b.clone(),
@@ -1818,13 +1915,9 @@ impl Qwen38WgpuForward {
                 e,
                 eps,
             );
-            gate.gemm(
-                &self.client,
-                self.norm_x_b.clone(),
-                self.gateup_b.clone(),
-                p,
-            );
-            up.gemm(&self.client, self.norm_x_b.clone(), self.up_b.clone(), p);
+            let norm_in = self.gemm_input(&self.norm_x_b_h, &self.norm_x_b, p * e);
+            gate.gemm(&self.client, norm_in.clone(), self.gateup_b.clone(), p);
+            up.gemm(&self.client, norm_in, self.up_b.clone(), p);
             crate::deltanet_cubecl::DeltanetGatingCubeCL::launch::<ActiveRuntime>(
                 &self.client,
                 self.gateup_b.clone(),
@@ -1832,7 +1925,8 @@ impl Qwen38WgpuForward {
                 self.hidden_b.clone(),
                 p * mlp,
             );
-            down.gemm(&self.client, self.hidden_b.clone(), self.tmp_b.clone(), p);
+            let down_in = self.gemm_input(&self.hidden_b_h, &self.hidden_b, p * mlp);
+            down.gemm(&self.client, down_in, self.tmp_b.clone(), p);
             crate::norms_cubecl::ResidualAddCubeCL::launch::<ActiveRuntime>(
                 &self.client,
                 self.x_b.clone(),

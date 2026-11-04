@@ -1,17 +1,25 @@
 # Issue 1170 — dense-lane GEMM engine to MLX-class: the residual ~1.5× (staged-half-B / fork-parity class) + the decode GEMV gap
 
-**Status:** OPEN — the bench-940 follow-up lead. G2 physics PROVEN 2026-11-04
-(zed-amo-i1150-relaxed@amo, the `dense_f16_half_b_ab` probe): the
-half×half matmul2d beats the mixed path **1.31–1.46× at every production
-shape** — 53.2–76.4 TFLOPS vs 39.7–55.2, mlp.gate/up **73.3 TFLOPS ≈ the
-MLX bar**. Probe infrastructure landed (the `gemm_dense_f16h_metal_tensor.metal`
-variant + `new_with_gemm_source`; probe-only, no route caller, no env).
-Wiring arc: f16 activation staging (convert kernel + f16 twins for
-norm_x_b / hidden_b / rec_n_b / attn_out_b), the route passes twins under
-the promote-only env, G1 band re-registered for f16 activations, e2e cells
-vs bench 940's 483/587/489 + walk agreement stats.
+**Status:** LANDED (lever 1, 2026-11-04, bench 941) — the half-B wiring:
+`RIIR_QWEN38_DENSE_MM2D_F16ACT=1` (promote-only, requires DENSE_MM2D),
+**pp512 640 / pp2560 725 / pp4954 580 tok/s** — past the fork at the short
+cells (725 vs 898 @pp2560), 1.55× behind at pp-5k, 2.43× MLX; the
+512-token walk byte-identical across ALL THREE arms (md5 `0764d040…`, 5
+runs); G1 measured 2.1e-7–3.6e-7 (band 3e-2). G2 physics (probed first,
+this session): half×half beats the mixed path 1.31–1.46×, mlp.gate/up
+73.3 TFLOPS ≈ the MLX bar. Record:
+[`.benchmarks/941_issue1170_halfb_matmul2d_past_the_fork.md`](../.benchmarks/941_issue1170_halfb_matmul2d_past_the_fork.md).
+**Lever 2 (the decode f16 GEMV, ~8× off bandwidth) stays OPEN** — decode
+on this lane is non-serving (the packed posture serves decode), so it
+leads only on a serving-posture change or a parity ask. The residual
+~1.3× to MLX is MLX's own matmul tuning (persistent-thread-class) — a
+different arc, priced only if the league demands it. New lead from the
+record: the attention core's O(p²) share at long p (census at pp5120
+before any kernel work).
 
-**Claimed:** zed-amo-i1170-halfb, 1793795000, expires 2026-11-06T12:30:00Z
+**Lease closed:** zed-amo-i1170-halfb, epoch 1793795000 (claimed 2026-11-04
+~12:30Z for the half-B arc, folded at the bench-941 landing same day; was
+expires 2026-11-06T12:30:00Z)
 
 ## Problem
 

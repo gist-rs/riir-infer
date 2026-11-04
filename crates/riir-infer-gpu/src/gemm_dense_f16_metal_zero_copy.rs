@@ -73,6 +73,14 @@ const MSL_SOURCE: &str = include_str!("gemm_dense_f16_metal_tensor.metal");
 static DENSE_MM: std::sync::OnceLock<Option<Arc<MetalDenseF16ZeroCopyGemm>>> =
     std::sync::OnceLock::new();
 
+/// The half-B context slot (issue 1170): the SAME struct, its GEMM pipeline
+/// compiled from the half×half variant source. Installed only when the
+/// `RIIR_QWEN38_DENSE_MM2D_F16ACT=1` env is armed at forward load (the
+/// promote-only posture); the dispatch sites select it via
+/// [`gemm_mm_for_posture`] and the route feeds f16 activation twins.
+static HALF_B_MM: std::sync::OnceLock<Option<Arc<MetalDenseF16ZeroCopyGemm>>> =
+    std::sync::OnceLock::new();
+
 /// Install the process-shared dense-f16 context. Called once at forward
 /// load when the `RIIR_QWEN38_DENSE_MM2D=1` arm is set; a second install is
 /// an idempotent no-op returning the first context (the OnceLock law).
@@ -89,6 +97,30 @@ pub fn install_dense_mm(
 /// posture (the F16 variant is never constructed without an install).
 pub fn dense_mm() -> Option<&'static Arc<MetalDenseF16ZeroCopyGemm>> {
     DENSE_MM.get().and_then(|o| o.as_ref())
+}
+
+/// Install the process-shared half-B context (issue 1170). Idempotent like
+/// [`install_dense_mm`].
+pub fn install_half_b_mm(
+    gemm: MetalDenseF16ZeroCopyGemm,
+) -> &'static Arc<MetalDenseF16ZeroCopyGemm> {
+    HALF_B_MM
+        .get_or_init(|| Some(Arc::new(gemm)))
+        .as_ref()
+        .expect("half-B context already installed")
+}
+
+/// The installed half-B context, if the F16ACT env armed it.
+pub fn half_b_mm() -> Option<&'static Arc<MetalDenseF16ZeroCopyGemm>> {
+    HALF_B_MM.get().and_then(|o| o.as_ref())
+}
+
+/// The context a prefill GEMM dispatches through: the half-B variant when
+/// the F16ACT posture armed it (the route then feeds an f16 activation
+/// twin), else the incumbent mixed path. ONE selection site — a dispatch
+/// site never guesses.
+pub fn gemm_mm_for_posture() -> Option<&'static Arc<MetalDenseF16ZeroCopyGemm>> {
+    half_b_mm().or_else(dense_mm)
 }
 
 /// Zero-copy raw-Metal dense-f16 GEMM dispatch context (Issue 1150).

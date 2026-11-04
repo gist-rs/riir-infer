@@ -104,6 +104,75 @@ fn run_case(
     println!("case {m}x{n} p{p}: max_rel-to-mag {max_rel:.3e}");
 }
 
+/// Issue 1170 half-B case: the kernel reads the activation as an f16 STAGING
+/// view, so the CPU reference rounds x to f16 too (identical values both
+/// sides — the band isolates accumulation order from indexing/tiling
+/// defects, the same design as run_case).
+fn cpu_gemm_f16_hact(
+    w16: &[u16],
+    x16: &[u16],
+    m: usize,
+    n: usize,
+    p: usize,
+) -> (Vec<f32>, Vec<f32>) {
+    let (mut out, mut mag) = (vec![0.0f32; p * m], vec![0.0f32; p * m]);
+    for t in 0..p {
+        for r in 0..m {
+            let (mut dot, mut acc) = (0.0f32, 0.0f32);
+            for c in 0..n {
+                let term = f32::from(half::f16::from_bits(w16[r * n + c]))
+                    * f32::from(half::f16::from_bits(x16[t * n + c]));
+                dot += term;
+                acc += term.abs();
+            }
+            out[t * m + r] = dot;
+            mag[t * m + r] = acc;
+        }
+    }
+    (out, mag)
+}
+
+fn run_case_hact(
+    mm: &MetalDenseF16ZeroCopyGemm,
+    client: &ComputeClient<ActiveRuntime>,
+    m: usize,
+    n: usize,
+    p: usize,
+    tol: f64,
+) {
+    let mut seed: u64 =
+        0xd17a_b117_0000_0000 ^ (m as u64) ^ ((n as u64) << 21) ^ ((p as u64) << 42);
+    let wf: Vec<f32> = (0..m * n).map(|_| lcg(&mut seed) * 0.05).collect();
+    let x: Vec<f32> = (0..p * n).map(|_| lcg(&mut seed)).collect();
+    let w16 = f16_bits(&wf);
+    let x16 = f16_bits(&x);
+    let (expect, mag) = cpu_gemm_f16_hact(&w16, &x16, m, n, p);
+
+    let w_h = client.create_from_slice(bytemuck::cast_slice(&w16));
+    let x_h = client.create_from_slice(bytemuck::cast_slice(&x16));
+    let out_h = client.create_from_slice(&vec![0u8; p * m * 4]);
+    pollster::block_on(client.sync()).expect("sync after uploads");
+
+    mm.dispatch(client, &w_h, m, n, &x_h, &out_h, p)
+        .unwrap_or_else(|e| panic!("dispatch {m}x{n} p{p}: {e}"));
+    mm.wait_last();
+    let got_bytes = client.read_one(out_h).expect("read");
+    let got: &[f32] = bytemuck::cast_slice(&got_bytes);
+
+    let mut max_rel = 0.0f64;
+    for (i, (&g, (&e, &mg))) in got.iter().zip(expect.iter().zip(mag.iter())).enumerate() {
+        let rel = ((g - e).abs() / mg.max(1e-9)) as f64;
+        if rel > max_rel {
+            max_rel = rel;
+        }
+        assert!(
+            rel < tol,
+            "case {m}x{n} p{p}: element {i} got {g} want {e} (rel-to-mag {rel:.3e} >= band {tol:.3e})"
+        );
+    }
+    println!("half-b case {m}x{n} p{p}: max_rel-to-mag {max_rel:.3e}");
+}
+
 /// CPU GEMV reference over the f16-rounded weights (the decode shape).
 fn cpu_gemv_f16(w16: &[u16], x: &[f32], m: usize, n: usize) -> (Vec<f32>, Vec<f32>) {
     let (mut out, mut mag) = (vec![0.0f32; m], vec![0.0f32; m]);
@@ -265,6 +334,31 @@ fn dense_f16_matmul2d_relaxed_g1() {
     let a = client.read_one(out_a).expect("read a");
     let b = client.read_one(out_b).expect("read b");
     assert_eq!(a, b, "relaxed arm is not run-to-run deterministic");
+}
+
+/// Issue 1170 half-B arm's G1: the CPU reference sees f16-ROUNDED
+/// activations too (the kernel reads the f16 staging twin), so the band
+/// isolates accumulation order + the activation rounding from tiling
+/// defects. Pre-registered band 3e-2 rel-to-mag (the activation rounding
+/// sits at ~5e-4 per term relative to the term — the same order the f16
+/// weight rounding already contributes; measured drift lands far below).
+/// Plus the same determinism pin as the relaxed arm.
+#[test]
+fn dense_f16_half_b_g1() {
+    let ctx = CubeCLContext::new().expect("gpu context");
+    let client = ctx.client();
+    let mm = MetalDenseF16ZeroCopyGemm::new_with_gemm_source(
+        ctx.wgpu_device().expect("wgpu device").clone(),
+        ctx.wgpu_queue().expect("wgpu queue").clone(),
+        false,
+        include_str!("../src/gemm_dense_f16h_metal_tensor.metal"),
+    )
+    .expect("half-b zero-copy context");
+
+    run_case_hact(&mm, &client, 64, 64, 128, 3e-2); // exact tiles
+    run_case_hact(&mm, &client, 130, 64, 128, 3e-2); // m-edge
+    run_case_hact(&mm, &client, 512, 5120, 256, 3e-2); // production column count
+    run_case_hact(&mm, &client, 512, 5120, 64, 3e-2); // ingest-floor p
 }
 
 /// Follow-up 4 — exact vs relaxed kernel A/B at the PRODUCTION per-layer GEMM
