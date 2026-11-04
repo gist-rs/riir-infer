@@ -1053,6 +1053,10 @@ mod tests {
         body
     }
 
+    /// Pid-scoped temp paths for the file-pair round-trip test. Gated to the
+    /// only caller's cfg (the `cubecl_runtime`-gated test below) — ungated it
+    /// is dead code at the default posture.
+    #[cfg(feature = "cubecl_runtime")]
     fn temp_manifest_paths(tag: &str) -> (std::path::PathBuf, std::path::PathBuf) {
         // The shared-temp-path law: pid-scoped, never a fixed name.
         let dir = std::env::temp_dir().join(format!(

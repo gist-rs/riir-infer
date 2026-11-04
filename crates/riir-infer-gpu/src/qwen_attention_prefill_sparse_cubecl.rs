@@ -3324,9 +3324,8 @@ mod tests {
             n_kv,
             0,
         );
-        let cache_rows = base_pos + p;
-        let q_windows = cache_rows.div_ceil(SPARSE_Q_BLOCK);
-        let wpr = sparse_mask_wpr(cache_rows);
+        // The launcher computes its own q-windows/wpr internally — the mode
+        // wire is what this test exercises, not the layout arithmetic.
         unsafe {
             QwenAttentionPrefillTiledM32CubeCL::launch::<ActiveRuntime>(
                 &client,
@@ -3494,7 +3493,7 @@ mod tests {
             } else {
                 (&s, "sparse")
             };
-            let diffs = head_rows_differ(&m, want, h, n_head, hd, p);
+            let diffs = head_rows_differ(m, want, h, n_head, hd, p);
             assert_eq!(
                 diffs, 0,
                 "mixed head {h} (mode {name}) must match the single-mode run bit-for-bit"
@@ -3503,7 +3502,7 @@ mod tests {
         // And the two single-mode runs must genuinely differ somewhere (the
         // fixture must make the union claim non-vacuous).
         let any = (0..n_head)
-            .map(|h| head_rows_differ(&s, &d, h, n_head, hd, p))
+            .map(|h| head_rows_differ(s, d, h, n_head, hd, p))
             .sum::<usize>();
         assert!(
             any > 0,
@@ -3545,7 +3544,7 @@ mod tests {
         // And the CPU pooling equivalence the gate relies on: pooling the
         // gathered buffer == pooling the original, bit-for-bit.
         let direct = crate::regime_gate::boundary_pool(&hid, p, n, pool);
-        let from_gather = crate::regime_gate::boundary_pool(&got, 2 * pool, n, pool);
+        let from_gather = crate::regime_gate::boundary_pool(got, 2 * pool, n, pool);
         for (a, b) in direct.iter().zip(from_gather.iter()) {
             assert_eq!(a.to_bits(), b.to_bits());
         }

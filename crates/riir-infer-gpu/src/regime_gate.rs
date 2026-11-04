@@ -893,7 +893,15 @@ pub fn regime_capture_write_failures() -> usize {
     REGIME_CAPTURE_WRITE_FAILS.load(std::sync::atomic::Ordering::Relaxed)
 }
 
-/// Record one boundary-read failure (the GPU half of the seam, issue 1163).
+/// Record one capture write failure (open or writeln) this process.
+/// Gated to the CALLER's cfg — the only caller is [`regime_capture_append`]
+/// (issue 1162 class: an ungated callee with a gated caller is dead code at
+/// every posture below the caller's cfg).
+#[cfg(all(
+    feature = "cubecl_runtime",
+    feature = "ternary_gemm_batched",
+    feature = "ternary_attention_batched_prefill"
+))]
 pub(crate) fn regime_capture_write_failed() {
     REGIME_CAPTURE_WRITE_FAILS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
 }
@@ -905,6 +913,15 @@ pub fn regime_capture_read_failures() -> usize {
     REGIME_CAPTURE_READ_FAILS.load(std::sync::atomic::Ordering::Relaxed)
 }
 
+/// Record one boundary-read failure (the GPU half of the seam, issue 1163).
+/// Gated to the CALLER's cfg — the only caller is the freeze-pass capture
+/// block in `ternary_deltanet_gpu_forward`, the same `all(...)` as
+/// [`regime_capture_append`] (issue 1162 class).
+#[cfg(all(
+    feature = "cubecl_runtime",
+    feature = "ternary_gemm_batched",
+    feature = "ternary_attention_batched_prefill"
+))]
 pub(crate) fn regime_capture_read_failed() {
     REGIME_CAPTURE_READ_FAILS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
 }
@@ -953,7 +970,7 @@ mod tests {
         let hid: Vec<f32> = (0..97)
             .flat_map(|i| [(i as f32) * 0.5, -(i as f32)])
             .collect();
-        let pool = 100.min(97);
+        let pool = 97;
         let direct = boundary_pool(&hid, 97, 2, pool);
         let mut gathered = Vec::with_capacity(2 * pool * 2);
         gathered.extend_from_slice(&hid[0..pool * 2]);
