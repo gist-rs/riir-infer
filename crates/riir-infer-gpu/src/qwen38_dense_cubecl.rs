@@ -669,9 +669,21 @@ impl Qwen38WgpuForward {
             .map_err(|e| format!("gpu context: {e}"))?
             .client();
 
-        // The dense-f16 matmul2d arm (Issue 1150 follow-up): opt-in env,
-        // loud-refusing where the posture can't run. Off = the incumbent
-        // packed-load path byte-identical (G3).
+        // The dense-f16 matmul2d arm (Issue 1150 follow-up; Issue 1176 the
+        // DIAL): **the league posture is the METAL DEFAULT** — bench 944
+        // measured the bare incumbent route at ~7 tok/s vs ~973 with this
+        // arm (pp5120, same build + box; reproduced 942/943/944/945), a
+        // trap every future bare run would re-spring. Env-switch law:
+        // DEMOTE-ONLY on macOS + metal_tensor_gemm — the exact literal "0"
+        // restores the incumbent packed-load route byte-identically (the
+        // parity lanes' posture); unset/anything-else = armed. Everywhere
+        // else the env stays PROMOTE-ONLY (the forward must still construct
+        // off-Metal; the CUDA twin is the separate qwen38_dense_cudarc
+        // crate). The arms' own GOAT records (i1150/914-925/940/941/942/
+        // 934) carry the per-arm evidence; bench 946 carries the dial's.
+        #[cfg(all(feature = "metal_tensor_gemm", target_os = "macos"))]
+        let dense_armed = std::env::var("RIIR_QWEN38_DENSE_MM2D").as_deref() != Ok("0");
+        #[cfg(not(all(feature = "metal_tensor_gemm", target_os = "macos")))]
         let dense_armed = std::env::var("RIIR_QWEN38_DENSE_MM2D").as_deref() == Ok("1");
         #[cfg(all(feature = "metal_tensor_gemm", target_os = "macos"))]
         if dense_armed {
@@ -688,13 +700,19 @@ impl Qwen38WgpuForward {
             let mm =
                 crate::gemm_dense_f16_metal_zero_copy::MetalDenseF16ZeroCopyGemm::new(dev, queue)?;
             eprintln!(
-                "[Issue 1150] dense-f16 matmul2d arm armed (device={:#x}, queue={:#x}, \
+                "[Issue 1150] dense-f16 matmul2d arm armed — league DEFAULT (issue 1176; \
+                 demote: RIIR_QWEN38_DENSE_MM2D=0) (device={:#x}, queue={:#x}, \
                  relaxed_precision={})",
                 mm.device_ptr(),
                 mm.queue_ptr(),
                 mm.relaxed_precision()
             );
             crate::gemm_dense_f16_metal_zero_copy::install_dense_mm(mm);
+        } else {
+            eprintln!(
+                "[Issue 1176] dense-f16 matmul2d arm DEMOTED by RIIR_QWEN38_DENSE_MM2D=0 — \
+                 the incumbent packed-load route (the pre-1176 bare default)"
+            );
         }
         #[cfg(not(all(feature = "metal_tensor_gemm", target_os = "macos")))]
         if dense_armed {
@@ -706,11 +724,21 @@ impl Qwen38WgpuForward {
         // Issue 1171: the tensor-flash attention prefill (the Issue-1146
         // matmul2d attention — the exact handle contract of the tiled
         // CubeCL arm, HEAD_DIM 256). Requires the dense posture (it hosts
-        // on the dense context's tracker + device). Promote-only, exact
-        // literal; off = the tiled CubeCL arm byte-identical.
+        // on the dense context's tracker + device). Issue 1176: DEMOTE-ONLY
+        // on Metal (league default; the exact literal "0" demotes),
+        // promote-only elsewhere. Off = the tiled CubeCL arm byte-identical.
+        #[cfg(all(feature = "metal_tensor_gemm", target_os = "macos"))]
+        let attn_tensor_armed = std::env::var("RIIR_QWEN38_ATTN_TENSOR").as_deref() != Ok("0");
+        #[cfg(not(all(feature = "metal_tensor_gemm", target_os = "macos")))]
         let attn_tensor_armed = std::env::var("RIIR_QWEN38_ATTN_TENSOR").as_deref() == Ok("1");
         if attn_tensor_armed && !dense_armed {
-            return Err("RIIR_QWEN38_ATTN_TENSOR=1 requires RIIR_QWEN38_DENSE_MM2D=1".into());
+            return Err(
+                "RIIR_QWEN38_ATTN_TENSOR is armed (the league default) but the dense \
+                 posture is demoted: demote it too (RIIR_QWEN38_ATTN_TENSOR=0) or \
+                 remove RIIR_QWEN38_DENSE_MM2D=0 — the tensor-flash arm hosts on \
+                 the dense context"
+                    .into(),
+            );
         }
         #[cfg(all(feature = "metal_tensor_gemm", target_os = "macos"))]
         let attn_tensor = if attn_tensor_armed && dense_armed {
@@ -739,12 +767,21 @@ impl Qwen38WgpuForward {
         // The half-B matmul2d posture (issue 1170): the prefill GEMMs ride
         // the half×half variant over f16 activation twins. Requires the
         // dense arm (it is a GEMM-CONTEXT variant of it, not a standalone
-        // posture); promote-only, exact literal. Off = byte-identical (the
+        // posture). Issue 1176: DEMOTE-ONLY on Metal (the exact literal "0"
+        // demotes), promote-only elsewhere. Off = byte-identical (the
         // context is never constructed, no twins are allocated, the gemm
         // selection falls to the mixed path).
+        #[cfg(all(feature = "metal_tensor_gemm", target_os = "macos"))]
+        let half_b_armed = std::env::var("RIIR_QWEN38_DENSE_MM2D_F16ACT").as_deref() != Ok("0");
+        #[cfg(not(all(feature = "metal_tensor_gemm", target_os = "macos")))]
         let half_b_armed = std::env::var("RIIR_QWEN38_DENSE_MM2D_F16ACT").as_deref() == Ok("1");
         if half_b_armed && !dense_armed {
-            return Err("RIIR_QWEN38_DENSE_MM2D_F16ACT=1 requires RIIR_QWEN38_DENSE_MM2D=1".into());
+            return Err(
+                "RIIR_QWEN38_DENSE_MM2D_F16ACT is armed (the league default) but the dense \
+                 posture is demoted: demote it too (RIIR_QWEN38_DENSE_MM2D_F16ACT=0) or \
+                 remove RIIR_QWEN38_DENSE_MM2D=0 — half-B is a dense-context variant"
+                    .into(),
+            );
         }
         #[cfg(all(feature = "metal_tensor_gemm", target_os = "macos"))]
         if half_b_armed && dense_armed {
@@ -891,12 +928,15 @@ impl Qwen38WgpuForward {
         let lm_blocks = gguf
             .q6k_tensor_blocks("output.weight")
             .map_err(|err| format!("output.weight: {err}"))?;
-        // The Q6_K packed tail (issue 1150 follow-up 3): opt-in env,
-        // promote-only (`RIIR_QWEN38_LMHEAD_Q6K=1` the exact literal). Armed
-        // = the host dequant NEVER runs (10.7 GB of f32 never allocated);
-        // the lm_head uploads as 208-byte payload words + an f32 d sidecar
-        // per block (~2.1 GB — 5× less tail traffic). Off = the incumbent
-        // f32 path byte-identical.
+        // The Q6_K packed tail (issue 1150 follow-up 3). Issue 1176:
+        // DEMOTE-ONLY on Metal (the league default — 5× less tail traffic,
+        // the 10.7 GB f32 host dequant NEVER runs), promote-only elsewhere.
+        // Armed = the lm_head uploads as 208-byte payload words + an f32 d
+        // sidecar per block (~2.1 GB). Off = the incumbent f32 path
+        // byte-identical.
+        #[cfg(all(feature = "metal_tensor_gemm", target_os = "macos"))]
+        let lm_q6k_armed = std::env::var("RIIR_QWEN38_LMHEAD_Q6K").as_deref() != Ok("0");
+        #[cfg(not(all(feature = "metal_tensor_gemm", target_os = "macos")))]
         let lm_q6k_armed = std::env::var("RIIR_QWEN38_LMHEAD_Q6K").as_deref() == Ok("1");
         let lm_chunk_rows = 32768usize;
         let mut lm_head_chunks = Vec::new();
