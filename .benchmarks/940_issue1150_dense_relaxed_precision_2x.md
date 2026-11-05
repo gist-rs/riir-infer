@@ -105,3 +105,11 @@ cells); code at `bd297c7`; model
 `/tmp/i1150_{exact,relaxed}_walk*.log`.
 
 Session: zed-amo-i1150-relaxed@amo, 1793786916 → (fold at record commit).
+
+⚠ **2026-11-05 (issue 1176 / bench 946):** the lane-default owner call
+this record left open is ANSWERED — the whole five-env league posture
+(including this arm's `RIIR_QWEN38_DENSE_MM2D_RELAXED`) is now the
+METAL DEFAULT, demote-only (`=0` restores this record's bit-exact
+incumbent byte-identically). Per-family retention vs the incumbent:
+272/272 top-1 across six prompt families, zero first divergence. See
+[`.benchmarks/946_issue1176_default_posture_promotion.md`](946_issue1176_default_posture_promotion.md).
