@@ -1,6 +1,7 @@
-# Bench 948 — Issue 1167 rung C: the GEMM-staging price cell — barrier/staging exposure measured in situ at the serving posture; the double-buffer reclaim lands UNDER the 1.5% e2e bar
+# Bench 949 — Issue 1167 rung C: the GEMM-staging price cell (round 3) — launch-weighted barrier projection ~50 ms/frame (~10% e2e fence-isolated): OVER the bar — the double-buffer twin graduates to a G1-gated variant + a paired census A/B as the decider
 
-**Status:** RECORD — price cell complete (G1 green + G2 isolated-share + G3 in-situ twins, one process, GPU-exclusive window). **Rung C verdict: CLOSED NEGATIVE at the price gate — no kernel write.** H5-device-f16 is refuted on resident footprint (the A-side f16 mirror is 8× the packed-bit bytes — 27B elements → ~54 GB, defeating the ternary tier's reason to exist; the ~800 GB/s-class traffic DELTA numbers below are modelled, not measured, and are moot next to the footprint argument). The implementable mpp variant set is {device-f16 operand, double-buffered smem staging}; register-feeding dequant into `matmul2d` operand registers is not expressible — matmul2d consumes `tensor` views (device/threadgroup memory only), the same shape llama.cpp's `kernel_mul_mm` uses.
+**Status:** RECORD (round 3) — price cell complete across three runs; the round-2 "UNDER the bar" closure arithmetic is **REFUTED** (its slow-window walls were polluted by a co-tenant GPU job; three clean windows agree at the 1.0–2.0 ms class). The launch-weighted projection over ALL ternary GEMM classes (FFN + GDN + attn, fresh GDN-shape rows with Δ-IQR) reads **~50 ms/frame fence-isolated ≈ 10% e2e — OVER the 1.5% bar**: per the issue rule, the double-buffered-staging variant graduates to a G1-gated correctness twin and a paired frame-census A/B as the decider. H5-device-f16 stays refuted on resident footprint (the A-side f16 mirror is 8× the packed-bit bytes — 27B elements → ~54 GB, defeating the ternary tier's reason to exist; the ~800 GB/s-class traffic DELTA numbers are modelled, not measured, and are moot next to the footprint argument). Register-feeding dequant into `matmul2d` operand registers is not expressible — matmul2d consumes `tensor` views (device/threadgroup memory only), the same shape llama.cpp's `kernel_mul_mm` uses.
+**⚠ Round-2 closure retracted:** the first landing of this record proposed closing rung C at 0.8–1.2% e2e from the 13:55-window walls (ffn_gate/up 4.267 ms, ffn_down 5.108 ms). Those walls are ~2.9× the clean-window class (1.4–2.0 ms, reproduced in three independent windows: 14:29 full-suite, 14:31 standalone, 14:34 standalone) and the round-2 twin walls SUMMED to ~873 ms/frame vs the census's 281 ms FFN strip — physically impossible for the same kernels. Cause: the co-tenant `plm_gpu_backward_parity` GPU job (the train sibling's rig lane) was running during the 13:39–13:55 window; rig status listed it as amo heavy. Nobody should quote the round-2 share numbers.
 **Date:** 2026-11-05
 **Session:** zed-fcebab50@amo, 1793856517
 **Issue:** [`.issues/1167_metal_prefill_followup_lane_b_c.md`](../.issues/1167_metal_prefill_followup_lane_b_c.md) (rung C, re-scoped by Bench 937)
@@ -45,14 +46,28 @@ Reading:
 - The dequant/stage exposures (3–4.7%) are NOT additive with each other — `const_dequant` removes the loads+math that FEED the `no_stage` stores; the max single-lever exposure is the stage-store family at ~4.5%, and a double-buffered staging keeps the stores (it re-times them, it does not remove them).
 - The first G3 pass (13:39 window) measured `no_barriers` FASTER than baseline on two shapes — physically impossible for a strict superset, the shared-box artifact of the 1177 sibling's bench spinning up mid-run (load 2.19→4.19). That pass is discarded; these rows are the settled quiet-window rerun (load 2.45–2.49, no GPU consumer, both co-tenant cells drained per the handshake).
 
-## The verdict arithmetic
+## The verdict arithmetic (round 3 — launch-weighted, all ternary GEMM classes, clean windows)
 
-- Serving FFN strip (post-prework-fix census): **281.16 ms of a 500.86 ms frame = 56.1%**.
-- Upper bound (assume the largest measured in-situ exposure transfers 1:1 and is fully reclaimable): 4.5% × 56.1% ≈ **2.5% e2e** — above the bar only if every exposure were additive AND fully reclaimable, which the twin design itself refutes (the exposures overlap; the stores persist under double-buffering).
-- The double-buffered-staging kernel (the implementable variant that keeps bit-exactness and the smem path) reclaims the **barrier exposure only: 1.5–2.2% × 56.1% ≈ 0.8–1.2% e2e — UNDER the 1.5% bar**, before its own cost (a second smem tile = +8 KB/threadgroup, and the K-loop's remaining serialization).
-- H5-device-f16 (the only other mpp-expressible variant): refuted on resident footprint — 8× the A-side bytes (~54 GB for 27B elements) defeats the ternary tier; the modelled traffic deltas (G2 table, +0.5–6.1 ms/launch at the ~800 GB/s class) corroborate and are recorded as modelled, not measured.
+Barrier-exposure deltas per launch (−barriers twin, n=12 rounds, Δ-IQR), frame-weighted at the serving census shape (64 layers: 48 GDN / 16 attn; gate/up ×2 per layer):
 
-**Rung C: CLOSED NEGATIVE at the price gate.** The remaining 1167 ground is unchanged: gdn_rec 5.8%, the pp512 config-class rung (~5%, bounded, below kernel work), and the packed-byte dequant load (its own price cell; complementary — it shrinks A-side bytes, and this cell's probe bounds its ceiling with the same instrument family).
+| shape | baseline ms | −barriers Δ ms (IQR) | launches/frame | ms/frame |
+|---|---:|---:|---:|---:|
+| ffn_gate/up | 1.426 | 0.152 [0.059, 0.324] | 128 | 19.5 |
+| ffn_down | 1.747 | 0.235 [0.206, 0.258] | 64 | 15.0 |
+| attn_q | 1.018 | 0.110 [0.066, 0.169] | 16 | 1.8 |
+| gdn_qkv | 1.205 | 0.121 [0.102, 0.160] | 48 | 5.8 |
+| gdn_z | 0.686 | 0.069 [0.012, 0.151] | 48 | 3.3 |
+| gdn_ab | 0.330 | 0.008 [−0.002, 0.043] | 96 | 0.8 |
+| gdn_out | 0.759 | 0.081 [0.049, 0.110] | 48 | 3.9 |
+| **total** | | | | **≈ 50.1 ms/frame** |
+
+≈ 50.1 / 500.86 = **10.0% e2e, fence-isolated upper bound — OVER the 1.5% bar.** Two honest caveats keep it a ceiling, not a promise: (1) `−barriers` removes ALL synchronization (wrong output); double-buffering keeps one barrier per K-tile and recovers only part; (2) the seven rows were measured separately — nothing yet shows the savings stack. Caveat (2) is bounded by the reviewer's fence-symmetry point: the deltas are fenced-run minus fenced-run, so a fixed harness-fence cost cancels; what could inflate Δ is ramp/tail interacting with barrier removal.
+
+Also recorded: the isolated walls now SUM to the census strip (1.426×128 + 1.747×64 ≈ 294 ms vs 281 ms FFN strip) — the frame's big-GEMM class is effectively serial, which is why the fence-isolated deltas transfer at all.
+
+**Decision (per the issue's own price-gate rule, now that the projection clears): stop projecting, measure.** The decider is a **G1-gated double-buffered-staging variant** (correct output — G1 ≤1e-5 at the bit-exact posture, all tiles written) behind a selector, decided by a **paired Bench-937 frame-census A/B**: same box, quiet window, alternating order, n≥3; the decider is the frame-wall change vs 500.86 ms with spread printed; side data = per-shape twin Δ + the +8 KB/threadgroup smem cost. ≥1.5% e2e + G1 green → GOAT gate on the feature flag (promotion through `riir-infer-gpu/production`, never a repeat of the gdn_prework gap). Under 1.5% → rung C closes NEGATIVE citing the measured frame Δ, which replaces the projection.
+
+H5-device-f16 (the only other mpp-expressible variant): refuted on resident footprint — 8× the A-side bytes (~54 GB for 27B elements) defeats the ternary tier; the modelled traffic deltas (G2 table, +0.5–6.1 ms/launch at the ~800 GB/s class) corroborate and are recorded as modelled, not measured.
 
 ## Provenance
 
