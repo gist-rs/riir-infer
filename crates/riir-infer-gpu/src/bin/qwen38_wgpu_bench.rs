@@ -14,6 +14,12 @@
 //!   one model load, per-class interleaved base/ablated pass pairs (no
 //!   serialization anywhere; `--ablate-classes` narrows, `--ablate-pairs`
 //!   sizes the pair count, default 3). See `qwen38_ablate`.
+//! - `--decode-ablate-matrix` issue 1178 T1: the decode twin — the same
+//!   free-running pattern over `forward_token` (the decode frame census:
+//!   attn/GDN/FFN/embed/small-stages/dispatch+sync shares per step).
+//!   Needs `--decode N` for the step count; `--decode-ctx N` runs the
+//!   matrix at context depth; `--decode-ablate` narrows the class csv.
+//!   See `qwen38_ablate::DECODE_CLASSES`.
 //!
 //! Whole-file cfg keeps non-`qwen38_wgpu` builds an empty binary; the Cargo
 //! [[bin]] required-features row is the reader protection.
@@ -39,6 +45,9 @@ fn main() {
     let mut ablate_matrix = false;
     let mut ablate_classes: Option<String> = None;
     let mut ablate_pairs = 3usize;
+    let mut decode_ablate_matrix = false;
+    let mut decode_ablate_classes: Option<String> = None;
+    let mut decode_ablate_pairs = 3usize;
     let mut i = 1usize;
     while i < args.len() {
         match args[i].as_str() {
@@ -91,6 +100,15 @@ fn main() {
                 i += 1;
                 ablate_pairs = args[i].parse().expect("ablate pairs");
             }
+            "--decode-ablate-matrix" => decode_ablate_matrix = true,
+            "--decode-ablate" => {
+                i += 1;
+                decode_ablate_classes = Some(args[i].clone());
+            }
+            "--decode-ablate-pairs" => {
+                i += 1;
+                decode_ablate_pairs = args[i].parse().expect("decode-ablate pairs");
+            }
             other => {
                 eprintln!("unknown arg {other}");
                 std::process::exit(2);
@@ -124,6 +142,26 @@ fn main() {
             pp_target,
             ablate_classes,
             ablate_pairs,
+        );
+        return;
+    }
+
+    if decode_ablate_matrix {
+        if decode_steps == 0 {
+            eprintln!("[decode-ablate-matrix] needs --decode N for the step count");
+            std::process::exit(2);
+        }
+        if ablate_matrix || ablate_classes.is_some() {
+            eprintln!("[decode-ablate-matrix] refuses --ablate* flags: one scope per run");
+            std::process::exit(2);
+        }
+        run_decode_ablate_matrix(
+            &mut fwd,
+            &ids,
+            decode_ctx,
+            decode_steps,
+            decode_ablate_classes,
+            decode_ablate_pairs,
         );
         return;
     }
@@ -444,6 +482,307 @@ fn run_ablate_cell(
     deltas.sort_by(|a, b| a.partial_cmp(b).unwrap());
     let med = deltas[deltas.len() / 2];
     let class: &'static str = riir_infer_gpu::qwen38_ablate::CLASSES
+        .iter()
+        .copied()
+        .find(|c| *c == name)
+        .unwrap_or("ALL");
+    rows.push((class, med));
+}
+
+/// Issue 1178 T1 — the decode frame census: the free-running attribution
+/// matrix over `forward_token`. One model load; per class an INTERLEAVED
+/// (base, ablated) decode-cell pair sequence — the base arm of every pair
+/// re-runs the incumbent launch set under the same box state, so the
+/// paired Δ cancels drift. Each arm is a fresh state + untimed prompt
+/// ingest, then `steps` timed decode steps. The per-class Δwall is the
+/// class's free-running per-step cost; the ALL cell's Δ is the launch
+/// floor and its residual wall (base − Δ) is the sync/host floor (the
+/// per-token logits read + host argmax the decode loop's value dependency
+/// keeps — not instrumented).
+#[allow(clippy::too_many_arguments, reason = "the matrix driver's flat inputs")]
+fn run_decode_ablate_matrix(
+    fwd: &mut Qwen38WgpuForward,
+    ids: &[u32],
+    ctx_target: Option<usize>,
+    steps: usize,
+    classes: Option<String>,
+    pairs: usize,
+) {
+    use riir_infer_gpu::qwen38_ablate::{Ablate, DECODE_CLASSES};
+
+    // The cell list: every decode class, or the named subset (`all` always
+    // runs last — it is the floor cross-check).
+    let names: Vec<&str> = match &classes {
+        Some(spec) => {
+            let a = Ablate::parse_decode(spec).unwrap_or_else(|e| panic!("decode-ablate: {e}"));
+            DECODE_CLASSES
+                .iter()
+                .copied()
+                .filter(|c| a.skip(c))
+                .collect()
+        }
+        None => DECODE_CLASSES.to_vec(),
+    };
+
+    // The seed tokens: the raw prompt, or padded to the ctx target (the
+    // decode-ctx convention — the scores class reads pos+1 KV rows, so the
+    // census splits the ctx-dependence by running at both depths).
+    let toks: Vec<u32> = match ctx_target {
+        Some(n) => {
+            let mut t = ids.to_vec();
+            while t.len() < n {
+                t.extend_from_slice(ids);
+            }
+            t.truncate(n);
+            t
+        }
+        None => ids.to_vec(),
+    };
+    let seed = toks.len();
+
+    let n_gdn = fwd
+        .config
+        .layer_types
+        .iter()
+        .filter(|k| **k == riir_infer_gpu::qwen38_dense_cubecl::Qwen38WgpuLayerType::Deltanet)
+        .count();
+    let n_attn = fwd.config.layer_types.len() - n_gdn;
+
+    println!(
+        "[decode-ablate-matrix] {} classes x {pairs} pair(s), seed {seed} tokens \
+         (ctx target {:?}), {steps} steps/cell, layers: {n_gdn} gdn + {n_attn} attn",
+        names.len(),
+        ctx_target
+    );
+
+    // Warm-up: one full decode run — first-dispatch costs pay outside any
+    // cell (skipping never introduces a new kernel).
+    fwd.zero_state();
+    fwd.ingest(&toks, 0)
+        .unwrap_or_else(|e| panic!("ingest: {e}"));
+    let t = std::time::Instant::now();
+    let mut next = *toks.last().unwrap();
+    for s in 0..steps {
+        next = fwd
+            .forward_token(next, seed + s)
+            .unwrap_or_else(|e| panic!("decode: {e}"));
+    }
+    {
+        let dt = t.elapsed().as_secs_f64();
+        println!(
+            "[decode-ablate-matrix] warm-up: {dt:.2}s = {:.2} tok/s",
+            steps as f64 / dt
+        );
+    }
+
+    let mut base_walls: Vec<f64> = Vec::new();
+    let mut base_ids: Option<Vec<u32>> = None;
+    let mut rows: Vec<(&'static str, f64)> = Vec::new(); // (class, Δ ms/step)
+    for &name in &names {
+        let a =
+            Ablate::from_classes_decode([name]).unwrap_or_else(|e| panic!("decode-ablate: {e}"));
+        run_decode_ablate_cell(
+            fwd,
+            name,
+            Some(a),
+            &toks,
+            steps,
+            pairs,
+            &mut base_walls,
+            &mut base_ids,
+            &mut rows,
+        );
+    }
+    // The launch-floor cell.
+    run_decode_ablate_cell(
+        fwd,
+        "ALL",
+        Some(Ablate::all_decode()),
+        &toks,
+        steps,
+        pairs,
+        &mut base_walls,
+        &mut base_ids,
+        &mut rows,
+    );
+    fwd.set_ablate(None);
+
+    // The table. The ALL row is the launch floor, not an additive class —
+    // the Σ line must never include it (the 945 law).
+    println!(
+        "[decode-ablate-matrix] ── free-running per-class costs (ms per decode step, median of {pairs} pair deltas) ──"
+    );
+    let mut class_ms = 0.0f64;
+    let mut floor_ms = 0.0f64;
+    for (name, delta) in &rows {
+        println!("[decode-ablate-matrix]   {name:<14} {delta:8.3} ms/step");
+        if *name == "ALL" {
+            floor_ms = *delta;
+        } else {
+            class_ms += delta;
+        }
+    }
+    let mut w = base_walls.clone();
+    w.sort_by(|a, b| a.partial_cmp(b).unwrap());
+    let base_med = w[w.len() / 2];
+    let base_ms = base_med * 1e3;
+    println!(
+        "[decode-ablate-matrix] base {:.2} ms/step ({:.2} tok/s) | Σ classes {class_ms:.2} \
+         ({:.1}% of the wall — near-additive attribution above ~90%) | ALL floor Δ \
+         {floor_ms:.2} ms/step | ALL-cell residual wall {:.2} ms/step (logits read + \
+         host argmax + loop — the sync/host floor)",
+        base_ms,
+        1e3 / base_med,
+        100.0 * class_ms / base_ms,
+        base_ms - floor_ms,
+    );
+
+    // Coarse roll-up (the 1178 T1 buckets) as shares of the base wall.
+    let get = |n: &str| {
+        rows.iter()
+            .find(|(k, _)| *k == n)
+            .map(|(_, v)| *v)
+            .unwrap_or(0.0)
+    };
+    let attn = get("d_attn_gemm") + get("d_attn_stage") + get("d_attn_scores");
+    let gdn = get("d_gdn_gemm") + get("d_gdn_stage") + get("d_gdn_scan") + get("d_gdn_post");
+    let ffn = get("d_ffn");
+    let embed = get("d_embed");
+    let small = get("d_entry_norm") + get("d_residual") + get("d_out_norm");
+    let lm = get("d_lm_head");
+    println!("[decode-ablate-matrix] ── coarse shares (of the {base_ms:.2} ms/step base wall) ──");
+    for (k, v) in [
+        ("attn", attn),
+        ("gdn", gdn),
+        ("ffn", ffn),
+        ("embed", embed),
+        ("small-stages", small),
+        ("lm_head", lm),
+    ] {
+        println!(
+            "[decode-ablate-matrix]   {k:<14} {v:8.3} ms/step  {:5.1}%",
+            100.0 * v / base_ms
+        );
+    }
+    println!(
+        "[decode-ablate-matrix] residue (wall − Σ classes): {:.2} ms/step ({:.1}%) — sync + \
+         host-loop mass; the ALL floor cross-checks it",
+        base_ms - class_ms,
+        100.0 * (base_ms - class_ms) / base_ms
+    );
+
+    // Per-layer mapping (the 943 comparison): GDN classes divide by the
+    // GDN count, attn classes by the attn count, shared classes (entry
+    // norm / ffn / residual — identical shapes on both kinds) by the layer
+    // total; the once-per-step classes do not divide.
+    let all_layers = n_gdn + n_attn;
+    println!(
+        "[decode-ablate-matrix] per-layer mapping (gdn /{n_gdn}, attn /{n_attn}, shared /{all_layers}):"
+    );
+    for (name, delta) in &rows {
+        let per_layer = if *name == "ALL"
+            || *name == "d_embed"
+            || *name == "d_out_norm"
+            || *name == "d_lm_head"
+        {
+            None
+        } else if name.starts_with("d_gdn_") {
+            Some(*delta / n_gdn as f64)
+        } else if name.starts_with("d_attn_") {
+            Some(*delta / n_attn as f64)
+        } else {
+            Some(*delta / all_layers as f64)
+        };
+        if let Some(ms) = per_layer {
+            println!("[decode-ablate-matrix]   {name:<14} {ms:7.4} ms/layer-instance");
+        }
+    }
+    println!(
+        "[decode-ablate-matrix] done — outputs were bit-trashed by design; do not reuse the model state"
+    );
+}
+
+/// One decode matrix cell: `pairs` interleaved (base, ablated) decode runs
+/// — fresh state + untimed ingest, then `steps` timed forward_token steps.
+/// The base arm's first token ids form a drift canary (deterministic
+/// kernels must reproduce them across pairs; a divergence names the box,
+/// not the class).
+#[allow(clippy::too_many_arguments, reason = "the matrix cell's flat inputs")]
+fn run_decode_ablate_cell(
+    fwd: &mut Qwen38WgpuForward,
+    name: &str,
+    ablated: Option<riir_infer_gpu::qwen38_ablate::Ablate>,
+    toks: &[u32],
+    steps: usize,
+    pairs: usize,
+    base_walls: &mut Vec<f64>,
+    base_ids: &mut Option<Vec<u32>>,
+    rows: &mut Vec<(&'static str, f64)>,
+) {
+    let seed = toks.len();
+    let mut deltas: Vec<f64> = Vec::new();
+    for pair in 0..pairs {
+        // Base arm — the incumbent launch set under the current box state.
+        fwd.zero_state();
+        fwd.set_ablate(None);
+        fwd.ingest(toks, 0)
+            .unwrap_or_else(|e| panic!("ingest: {e}"));
+        let t0 = std::time::Instant::now();
+        let mut next = *toks.last().unwrap();
+        let mut first_ids: Vec<u32> = Vec::new();
+        for s in 0..steps {
+            next = fwd
+                .forward_token(next, seed + s)
+                .unwrap_or_else(|e| panic!("decode: {e}"));
+            if first_ids.len() < 8 {
+                first_ids.push(next);
+            }
+        }
+        let base = t0.elapsed().as_secs_f64();
+        base_walls.push(base);
+        match base_ids {
+            None => *base_ids = Some(first_ids),
+            Some(prev) => {
+                if prev != &first_ids {
+                    eprintln!(
+                        "[decode-ablate {name}] ⚠ base walk ids diverged at pair {pair} — \
+                         determinism drift, the box moved; suspect this cell's delta"
+                    );
+                    *prev = first_ids;
+                }
+            }
+        }
+
+        // Ablated arm — the decode cell skips only d_* classes; the ingest
+        // (prefill sites) runs its full launch set either way.
+        fwd.zero_state();
+        fwd.set_ablate(ablated.clone());
+        fwd.ingest(toks, 0)
+            .unwrap_or_else(|e| panic!("ingest: {e}"));
+        let t1 = std::time::Instant::now();
+        let mut next = *toks.last().unwrap();
+        for s in 0..steps {
+            next = fwd
+                .forward_token(next, seed + s)
+                .unwrap_or_else(|e| panic!("decode: {e}"));
+        }
+        let abl = t1.elapsed().as_secs_f64();
+        fwd.set_ablate(None);
+
+        let d = (base - abl) * 1e3 / steps as f64;
+        deltas.push(d);
+        println!(
+            "[decode-ablate {name}] pair {pair}: base {:.3}s ({:.2} tok/s) / \
+             abl {:.3}s ({:.2} tok/s) -> Δ {d:+.3} ms/step",
+            base,
+            steps as f64 / base,
+            abl,
+            steps as f64 / abl
+        );
+    }
+    deltas.sort_by(|a, b| a.partial_cmp(b).unwrap());
+    let med = deltas[deltas.len() / 2];
+    let class: &'static str = riir_infer_gpu::qwen38_ablate::DECODE_CLASSES
         .iter()
         .copied()
         .find(|c| *c == name)

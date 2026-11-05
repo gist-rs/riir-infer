@@ -860,11 +860,20 @@ impl Qwen38WgpuForward {
             );
         }
 
-        // Issue 1174: the free-running ablation instrument. The premise is
-        // the INCUMBENT launch set (the 942/943 baseline schedule), so any
-        // posture that changes it or serializes the queue refuses loud
-        // here — before the heavy load, never silently.
-        let ablate = crate::qwen38_ablate::Ablate::from_env()?;
+        // Issue 1174: the free-running ablation instrument (prefill; the
+        // 1178 T1 decode twin arms via RIIR_QWEN38_DECODE_ABLATE). The
+        // premise is the INCUMBENT launch set (the 942/943 baseline
+        // schedule), so any posture that changes it or serializes the queue
+        // refuses loud here — before the heavy load, never silently.
+        let ablate_p = crate::qwen38_ablate::Ablate::from_env()?;
+        let ablate_d = crate::qwen38_ablate::Ablate::from_env_decode()?;
+        if ablate_p.is_some() && ablate_d.is_some() {
+            return Err("RIIR_QWEN38_ABLATE refuses RIIR_QWEN38_DECODE_ABLATE: \
+                 one scope per run — the pass census and the decode census \
+                 are separate runs"
+                .into());
+        }
+        let ablate = ablate_p.or(ablate_d);
         if let Some(a) = &ablate {
             if census_armed {
                 return Err("RIIR_QWEN38_ABLATE refuses RIIR_QWEN38_GDN_CENSUS=1: \
@@ -891,8 +900,9 @@ impl Qwen38WgpuForward {
                     .into());
             }
             eprintln!(
-                "[Issue 1174] ablation armed: {} — measurement-only, outputs are \
-                 bit-trashed; the pass wall delta per class is its free-running cost",
+                "[Issue 1174/1178] ablation armed ({:?}): {} — measurement-only, outputs are \
+                 bit-trashed; the wall delta per class is its free-running cost",
+                a.scope(),
                 a.describe()
             );
         }
@@ -1344,12 +1354,17 @@ impl Qwen38WgpuForward {
         if t >= vocab {
             return Err(format!("token {t} out of vocab {vocab}"));
         }
-        self.client.write(
-            &self.x,
-            cubecl::bytes::Bytes::from_bytes_vec(
-                bytemuck::cast_slice(&self.wte_host[t * e..(t + 1) * e]).to_vec(),
-            ),
-        );
+        // Issue 1178 T1: the `d_embed` ablation cell skips the write — the
+        // row bytes go stale under the layers (measurement-only, fixed
+        // topology; see qwen38_ablate).
+        if !self.ablate_skip("d_embed") {
+            self.client.write(
+                &self.x,
+                cubecl::bytes::Bytes::from_bytes_vec(
+                    bytemuck::cast_slice(&self.wte_host[t * e..(t + 1) * e]).to_vec(),
+                ),
+            );
+        }
 
         for li in 0..self.layers.len() {
             let lw = self.layers[li].clone();
@@ -1361,40 +1376,44 @@ impl Qwen38WgpuForward {
 
         // Tail: norm + lm_head + argmax.
         unsafe {
-            crate::norms_cubecl::RmsNormCubeCL::launch::<ActiveRuntime>(
-                &self.client,
-                self.x.clone(),
-                self.output_norm.clone(),
-                self.norm_x.clone(),
-                e,
-                eps,
-            );
-            for (ci, chunk_handle) in self.lm_head_chunks.iter().enumerate() {
-                let c0 = ci * self.lm_chunk_rows;
-                let rows = self.lm_chunk_rows.min(vocab - c0);
-                let out = self.logits.clone().offset_start((c0 * 4) as u64);
-                crate::gemv_cubecl::GemvCubeCL::launch::<ActiveRuntime>(
+            if !self.ablate_skip("d_out_norm") {
+                crate::norms_cubecl::RmsNormCubeCL::launch::<ActiveRuntime>(
                     &self.client,
-                    chunk_handle.clone(),
+                    self.x.clone(),
+                    self.output_norm.clone(),
                     self.norm_x.clone(),
-                    out,
-                    rows,
                     e,
+                    eps,
                 );
             }
-            for (ci, w_handle) in self.lm_head_q6k_chunks.iter().enumerate() {
-                let c0 = ci * self.lm_chunk_rows;
-                let rows = self.lm_chunk_rows.min(vocab - c0);
-                let out = self.logits.clone().offset_start((c0 * 4) as u64);
-                crate::gemv_q6k_cubecl::GemvQ6KCubeCL::launch::<ActiveRuntime>(
-                    &self.client,
-                    w_handle.clone(),
-                    self.lm_head_q6k_d[ci].clone(),
-                    self.norm_x.clone(),
-                    out,
-                    rows,
-                    e,
-                );
+            if !self.ablate_skip("d_lm_head") {
+                for (ci, chunk_handle) in self.lm_head_chunks.iter().enumerate() {
+                    let c0 = ci * self.lm_chunk_rows;
+                    let rows = self.lm_chunk_rows.min(vocab - c0);
+                    let out = self.logits.clone().offset_start((c0 * 4) as u64);
+                    crate::gemv_cubecl::GemvCubeCL::launch::<ActiveRuntime>(
+                        &self.client,
+                        chunk_handle.clone(),
+                        self.norm_x.clone(),
+                        out,
+                        rows,
+                        e,
+                    );
+                }
+                for (ci, w_handle) in self.lm_head_q6k_chunks.iter().enumerate() {
+                    let c0 = ci * self.lm_chunk_rows;
+                    let rows = self.lm_chunk_rows.min(vocab - c0);
+                    let out = self.logits.clone().offset_start((c0 * 4) as u64);
+                    crate::gemv_q6k_cubecl::GemvQ6KCubeCL::launch::<ActiveRuntime>(
+                        &self.client,
+                        w_handle.clone(),
+                        self.lm_head_q6k_d[ci].clone(),
+                        self.norm_x.clone(),
+                        out,
+                        rows,
+                        e,
+                    );
+                }
             }
         }
         let logits = self.read_logits(&self.logits);
@@ -1421,73 +1440,85 @@ impl Qwen38WgpuForward {
         let ssm_out = lw.ssm_out.clone().expect("ssm_out");
 
         unsafe {
-            crate::norms_cubecl::RmsNormCubeCL::launch::<ActiveRuntime>(
-                &self.client,
-                self.x.clone(),
-                lw.attn_norm.clone(),
-                self.norm_x.clone(),
-                e,
-                eps,
-            );
-            qkv.gemv(&self.client, self.norm_x.clone(), self.qkv.clone());
-            z_w.gemv(&self.client, self.norm_x.clone(), self.z.clone());
-            alpha.gemv(&self.client, self.norm_x.clone(), self.a_raw.clone());
-            beta_w.gemv(&self.client, self.norm_x.clone(), self.b_raw.clone());
-            crate::deltanet_cubecl::DeltanetBetaDecayCubeCL::launch::<ActiveRuntime>(
-                &self.client,
-                self.a_raw.clone(),
-                self.b_raw.clone(),
-                ssm_a,
-                dt_bias,
-                self.beta.clone(),
-                self.decay.clone(),
-                n_v,
-            );
-            crate::deltanet_cubecl::DeltanetConv1dCubeCL::launch::<ActiveRuntime>(
-                &self.client,
-                self.qkv.clone(),
-                conv_w,
-                conv_state,
-                l_qkv,
-                c.conv_kernel,
-            );
-            crate::deltanet_cubecl::ExpandAndL2NormalizeHeadsCubeCL::launch::<ActiveRuntime>(
-                &self.client,
-                self.qkv.clone(),
-                self.qkv_exp.clone(),
-                c.n_k_heads,
-                n_v,
-                hd_v,
-            );
-            crate::deltanet_cubecl::DeltanetRecurrenceRowParCubeCL::launch_with_gpu_handles::<
-                ActiveRuntime,
-            >(
-                &self.client,
-                self.qkv_exp.clone(),
-                self.beta.clone(),
-                self.decay.clone(),
-                state,
-                self.rec.clone(),
-                n_v,
-                hd_v,
-            );
-            crate::norms_cubecl::RmsNormZgateFusedCubeCL::launch::<ActiveRuntime>(
-                &self.client,
-                self.rec.clone(),
-                ssm_norm,
-                self.z.clone(),
-                n_v,
-                hd_v,
-                eps,
-            );
-            ssm_out.gemv(&self.client, self.rec.clone(), self.tmp.clone());
-            crate::norms_cubecl::ResidualAddCubeCL::launch::<ActiveRuntime>(
-                &self.client,
-                self.x.clone(),
-                self.tmp.clone(),
-                self.x.clone(),
-                e,
-            );
+            if !self.ablate_skip("d_entry_norm") {
+                crate::norms_cubecl::RmsNormCubeCL::launch::<ActiveRuntime>(
+                    &self.client,
+                    self.x.clone(),
+                    lw.attn_norm.clone(),
+                    self.norm_x.clone(),
+                    e,
+                    eps,
+                );
+            }
+            if !self.ablate_skip("d_gdn_gemm") {
+                qkv.gemv(&self.client, self.norm_x.clone(), self.qkv.clone());
+                z_w.gemv(&self.client, self.norm_x.clone(), self.z.clone());
+                alpha.gemv(&self.client, self.norm_x.clone(), self.a_raw.clone());
+                beta_w.gemv(&self.client, self.norm_x.clone(), self.b_raw.clone());
+            }
+            if !self.ablate_skip("d_gdn_stage") {
+                crate::deltanet_cubecl::DeltanetBetaDecayCubeCL::launch::<ActiveRuntime>(
+                    &self.client,
+                    self.a_raw.clone(),
+                    self.b_raw.clone(),
+                    ssm_a,
+                    dt_bias,
+                    self.beta.clone(),
+                    self.decay.clone(),
+                    n_v,
+                );
+                crate::deltanet_cubecl::DeltanetConv1dCubeCL::launch::<ActiveRuntime>(
+                    &self.client,
+                    self.qkv.clone(),
+                    conv_w,
+                    conv_state,
+                    l_qkv,
+                    c.conv_kernel,
+                );
+                crate::deltanet_cubecl::ExpandAndL2NormalizeHeadsCubeCL::launch::<ActiveRuntime>(
+                    &self.client,
+                    self.qkv.clone(),
+                    self.qkv_exp.clone(),
+                    c.n_k_heads,
+                    n_v,
+                    hd_v,
+                );
+            }
+            if !self.ablate_skip("d_gdn_scan") {
+                crate::deltanet_cubecl::DeltanetRecurrenceRowParCubeCL::launch_with_gpu_handles::<
+                    ActiveRuntime,
+                >(
+                    &self.client,
+                    self.qkv_exp.clone(),
+                    self.beta.clone(),
+                    self.decay.clone(),
+                    state,
+                    self.rec.clone(),
+                    n_v,
+                    hd_v,
+                );
+            }
+            if !self.ablate_skip("d_gdn_post") {
+                crate::norms_cubecl::RmsNormZgateFusedCubeCL::launch::<ActiveRuntime>(
+                    &self.client,
+                    self.rec.clone(),
+                    ssm_norm,
+                    self.z.clone(),
+                    n_v,
+                    hd_v,
+                    eps,
+                );
+                ssm_out.gemv(&self.client, self.rec.clone(), self.tmp.clone());
+            }
+            if !self.ablate_skip("d_residual") {
+                crate::norms_cubecl::ResidualAddCubeCL::launch::<ActiveRuntime>(
+                    &self.client,
+                    self.x.clone(),
+                    self.tmp.clone(),
+                    self.x.clone(),
+                    e,
+                );
+            }
             self.decode_mlp(lw, eps);
         }
     }
@@ -1507,76 +1538,88 @@ impl Qwen38WgpuForward {
         let k_norm = lw.attn_k_norm.clone().expect("k_norm");
 
         unsafe {
-            crate::norms_cubecl::RmsNormCubeCL::launch::<ActiveRuntime>(
-                &self.client,
-                self.x.clone(),
-                lw.attn_norm.clone(),
-                self.norm_x.clone(),
-                e,
-                eps,
-            );
-            wq.gemv(&self.client, self.norm_x.clone(), self.qg.clone());
-            wk.gemv(&self.client, self.norm_x.clone(), self.k.clone());
-            wv.gemv(&self.client, self.norm_x.clone(), self.v.clone());
-            crate::qwen_attention_cubecl::QwenSplitQgCubeCL::launch::<ActiveRuntime>(
-                &self.client,
-                self.qg.clone(),
-                self.q.clone(),
-                self.gate.clone(),
-                hd,
-                c.n_head,
-            );
-            crate::norms_cubecl::RmsNormQkFusedCubeCL::launch::<ActiveRuntime>(
-                &self.client,
-                self.q.clone(),
-                self.k.clone(),
-                q_norm,
-                k_norm,
-                c.n_head,
-                c.n_kv_head,
-                hd,
-                eps,
-            );
-            crate::qwen_attention_cubecl::QwenRopePartialCubeCL::launch::<ActiveRuntime>(
-                &self.client,
-                self.q.clone(),
-                self.k.clone(),
-                pos,
-                c.rotary_dim,
-                hd,
-                c.n_head,
-                c.n_kv_head,
-                c.rope_theta,
-            );
-            crate::qwen_attention_cubecl::QwenKvCacheAppendCubeCL::launch::<ActiveRuntime>(
-                &self.client,
-                self.k.clone(),
-                self.v.clone(),
-                key_cache.clone(),
-                value_cache.clone(),
-                kvd,
-                pos,
-            );
-            crate::qwen_attention_cubecl::QwenAttentionDecodeGatedCubeCL::launch::<ActiveRuntime>(
-                &self.client,
-                self.q.clone(),
-                key_cache,
-                value_cache,
-                self.gate.clone(),
-                self.attn_out.clone(),
-                hd,
-                c.n_head,
-                c.n_kv_head,
-                pos + 1,
-            );
-            wo.gemv(&self.client, self.attn_out.clone(), self.tmp.clone());
-            crate::norms_cubecl::ResidualAddCubeCL::launch::<ActiveRuntime>(
-                &self.client,
-                self.x.clone(),
-                self.tmp.clone(),
-                self.x.clone(),
-                e,
-            );
+            if !self.ablate_skip("d_entry_norm") {
+                crate::norms_cubecl::RmsNormCubeCL::launch::<ActiveRuntime>(
+                    &self.client,
+                    self.x.clone(),
+                    lw.attn_norm.clone(),
+                    self.norm_x.clone(),
+                    e,
+                    eps,
+                );
+            }
+            if !self.ablate_skip("d_attn_gemm") {
+                wq.gemv(&self.client, self.norm_x.clone(), self.qg.clone());
+                wk.gemv(&self.client, self.norm_x.clone(), self.k.clone());
+                wv.gemv(&self.client, self.norm_x.clone(), self.v.clone());
+            }
+            if !self.ablate_skip("d_attn_stage") {
+                crate::qwen_attention_cubecl::QwenSplitQgCubeCL::launch::<ActiveRuntime>(
+                    &self.client,
+                    self.qg.clone(),
+                    self.q.clone(),
+                    self.gate.clone(),
+                    hd,
+                    c.n_head,
+                );
+                crate::norms_cubecl::RmsNormQkFusedCubeCL::launch::<ActiveRuntime>(
+                    &self.client,
+                    self.q.clone(),
+                    self.k.clone(),
+                    q_norm,
+                    k_norm,
+                    c.n_head,
+                    c.n_kv_head,
+                    hd,
+                    eps,
+                );
+                crate::qwen_attention_cubecl::QwenRopePartialCubeCL::launch::<ActiveRuntime>(
+                    &self.client,
+                    self.q.clone(),
+                    self.k.clone(),
+                    pos,
+                    c.rotary_dim,
+                    hd,
+                    c.n_head,
+                    c.n_kv_head,
+                    c.rope_theta,
+                );
+                crate::qwen_attention_cubecl::QwenKvCacheAppendCubeCL::launch::<ActiveRuntime>(
+                    &self.client,
+                    self.k.clone(),
+                    self.v.clone(),
+                    key_cache.clone(),
+                    value_cache.clone(),
+                    kvd,
+                    pos,
+                );
+            }
+            if !self.ablate_skip("d_attn_scores") {
+                crate::qwen_attention_cubecl::QwenAttentionDecodeGatedCubeCL::launch::<ActiveRuntime>(
+                    &self.client,
+                    self.q.clone(),
+                    key_cache,
+                    value_cache,
+                    self.gate.clone(),
+                    self.attn_out.clone(),
+                    hd,
+                    c.n_head,
+                    c.n_kv_head,
+                    pos + 1,
+                );
+            }
+            if !self.ablate_skip("d_attn_gemm") {
+                wo.gemv(&self.client, self.attn_out.clone(), self.tmp.clone());
+            }
+            if !self.ablate_skip("d_residual") {
+                crate::norms_cubecl::ResidualAddCubeCL::launch::<ActiveRuntime>(
+                    &self.client,
+                    self.x.clone(),
+                    self.tmp.clone(),
+                    self.x.clone(),
+                    e,
+                );
+            }
             self.decode_mlp(lw, eps);
         }
     }
@@ -1589,32 +1632,38 @@ impl Qwen38WgpuForward {
         let gate = &lw.ffn_gate;
         let up = &lw.ffn_up;
         let down = &lw.ffn_down;
-        unsafe {
-            crate::norms_cubecl::RmsNormCubeCL::launch::<ActiveRuntime>(
-                &self.client,
-                self.x.clone(),
-                lw.post_attention_norm.clone(),
-                self.norm_x.clone(),
-                e,
-                eps,
-            );
-            gate.gemv(&self.client, self.norm_x.clone(), self.mlp_gate.clone());
-            up.gemv(&self.client, self.norm_x.clone(), self.mlp_up.clone());
-            crate::deltanet_cubecl::DeltanetGatingCubeCL::launch::<ActiveRuntime>(
-                &self.client,
-                self.mlp_gate.clone(),
-                self.mlp_up.clone(),
-                self.mlp_hidden.clone(),
-                mlp,
-            );
-            down.gemv(&self.client, self.mlp_hidden.clone(), self.tmp.clone());
-            crate::norms_cubecl::ResidualAddCubeCL::launch::<ActiveRuntime>(
-                &self.client,
-                self.x.clone(),
-                self.tmp.clone(),
-                self.x.clone(),
-                e,
-            );
+        if !self.ablate_skip("d_ffn") {
+            unsafe {
+                crate::norms_cubecl::RmsNormCubeCL::launch::<ActiveRuntime>(
+                    &self.client,
+                    self.x.clone(),
+                    lw.post_attention_norm.clone(),
+                    self.norm_x.clone(),
+                    e,
+                    eps,
+                );
+                gate.gemv(&self.client, self.norm_x.clone(), self.mlp_gate.clone());
+                up.gemv(&self.client, self.norm_x.clone(), self.mlp_up.clone());
+                crate::deltanet_cubecl::DeltanetGatingCubeCL::launch::<ActiveRuntime>(
+                    &self.client,
+                    self.mlp_gate.clone(),
+                    self.mlp_up.clone(),
+                    self.mlp_hidden.clone(),
+                    mlp,
+                );
+                down.gemv(&self.client, self.mlp_hidden.clone(), self.tmp.clone());
+            }
+        }
+        if !self.ablate_skip("d_residual") {
+            unsafe {
+                crate::norms_cubecl::ResidualAddCubeCL::launch::<ActiveRuntime>(
+                    &self.client,
+                    self.x.clone(),
+                    self.tmp.clone(),
+                    self.x.clone(),
+                    e,
+                );
+            }
         }
     }
 

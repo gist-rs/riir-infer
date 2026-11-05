@@ -14,11 +14,11 @@
 //! no hazards, no serialization anywhere.
 //!
 //! Outputs are bit-trashed by design (skipped producers leave stale
-//! scratch under their consumers): the run is measurement-only. The pass
-//! is fixed-topology — no launch count, launch geometry, or CPU control
-//! flow depends on GPU values — so the wall comparison is sound.
-//! Skipped f16 casts still return the twin handle, so every surviving
-//! consumer keeps its exact launch geometry.
+//! scratch under their consumers): the run is measurement-only. Both the
+//! prefill pass and the decode step are fixed-topology — no launch count,
+//! launch geometry, or CPU control flow depends on GPU values — so the
+//! wall comparison is sound. Skipped f16 casts still return the twin
+//! handle, so every surviving consumer keeps its exact launch geometry.
 //!
 //! # The premise (refusals, not conventions)
 //!
@@ -27,9 +27,8 @@
 //! loud at forward construction: the census (`RIIR_QWEN38_GDN_CENSUS=1`,
 //! hazard-pinned markers), the stage timers (`RIIR_QWEN38_STAGE_TIMERS=1`,
 //! per-stage syncs), the 1173 fused arms (`RIIR_QWEN38_FUSE_*` — they
-//! remove launches), and the chunked-scan route
-//! (`RIIR_QWEN38_GDN_CHUNKED=1` — a different scan launch set). The
-//! decode path is NOT instrumented (issue 1168's lane owns decode).
+//! removing launches), and the chunked-scan route
+//! (`RIIR_QWEN38_GDN_CHUNKED=1` — a different scan launch set).
 //!
 //! # The cells
 //!
@@ -39,6 +38,19 @@
 //! measure the box, never the kernel). `all` skips every instrumented
 //! class: its delta is the pass's launch/dispatch floor, the free-running
 //! cross-check on the 1173 ~0.02–0.05 ms/launch estimate.
+//!
+//! # The decode twin (issue 1178 T1)
+//!
+//! The same free-running pattern over `forward_token`: `DECODE_CLASSES`
+//! name the per-step launch sites, the bench bin's `--decode-ablate-matrix`
+//! drives interleaved (base, ablated) decode-cell pairs, and the per-class
+//! Δwall is the class's free-running per-step cost — the decode frame
+//! census (attn / GDN / FFN / embed / small-stages / dispatch+sync shares)
+//! the Bench-937 prefill census calls for. The env arm is
+//! `RIIR_QWEN38_DECODE_ABLATE` (never set together with the prefill arm —
+//! construction refuses). Decode classes carry the `d_` prefix so the two
+//! tables are disjoint by construction: a mis-scoped cell names nothing
+//! live and skips NOTHING, never silently the wrong path.
 
 /// The instrumented launch-site classes, in pass order (GDN layer
 /// sections first — the names align with the 943 census sections where a
@@ -115,27 +127,98 @@ pub const CENSUS_SECTION_MAP: [(&str, &[&str]); 14] = [
     ("mlp_residual", &["mlp_residual"]),
 ];
 
+/// Issue 1178 T1 — the decode-step classes (`forward_token`'s launch
+/// sites, in step order). The `d_` prefix keeps this table disjoint from
+/// [`CLASSES`] so a prefill cell can never gate a decode site or vice
+/// versa. One branch per site; `d_entry_norm`/`d_ffn`/`d_residual` span
+/// BOTH layer kinds (identical shapes — the delta divides by the layer
+/// total), GDN classes by the GDN count, attn classes by the attn count,
+/// and `d_embed`/`d_out_norm`/`d_lm_head` run once per step. The
+/// per-token logits read + host argmax are NOT instrumented — the
+/// decode loop's value dependency; their mass lands in the ALL cell's
+/// residual wall (the sync/host floor).
+pub const DECODE_CLASSES: [&str; 13] = [
+    // Host write of the wte row (a copy, not a kernel — still on the wall).
+    "d_embed",
+    // Layer-entry RMSNorm (both layer kinds launch it).
+    "d_entry_norm",
+    // GDN layer: the four qkv/z/alpha/beta GEMVs.
+    "d_gdn_gemm",
+    // GDN pre-scan stages: beta_decay + conv1d + expand_l2.
+    "d_gdn_stage",
+    // The single-token recurrence (DeltanetRecurrenceRowPar).
+    "d_gdn_scan",
+    // Post-scan: Zgate-fused norm + ssm_out GEMV.
+    "d_gdn_post",
+    // Attention layer: the q/k/v GEMVs + the wo output projection.
+    "d_attn_gemm",
+    // Attention pre-scores stages: split_qg + qk_norm + rope + kv append.
+    "d_attn_stage",
+    // The attention scores pass (QwenAttentionDecodeGated; reads pos+1 KV
+    // rows — the ctx-dependent class).
+    "d_attn_scores",
+    // SwiGLU MLP body (both layer kinds): norm + gate/up GEMVs + gating +
+    // down GEMV (the trailing residual is d_residual).
+    "d_ffn",
+    // The per-layer residual adds (three per layer, both kinds).
+    "d_residual",
+    // Tail: the output norm.
+    "d_out_norm",
+    // Tail: the lm_head GEMV chunks (f16 + q6k).
+    "d_lm_head",
+];
+
+/// Which launch table the cell's names come from — recorded so the bench
+/// drivers and the env double-arm refusal can check scope explicitly.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Scope {
+    Prefill,
+    Decode,
+}
+
 /// One armed ablation: the set of classes to skip. `all` short-circuits
 /// every `skip` (the launch-floor cell).
 #[derive(Debug, Clone)]
 pub struct Ablate {
     all: bool,
     classes: std::collections::HashSet<&'static str>,
+    scope: Scope,
 }
 
 impl Ablate {
-    /// Parse one cell spec: `all`, or a comma-separated class list.
-    /// Unknown classes refuse loud (a typo'd cell would silently measure
-    /// an empty skip and read as a zero-cost class).
+    /// Parse one cell spec: `all`, or a comma-separated class list
+    /// (prefill table).
     pub fn parse(spec: &str) -> Result<Self, String> {
+        Self::parse_table(spec, &CLASSES, Scope::Prefill, "RIIR_QWEN38_ABLATE")
+    }
+
+    /// Parse one decode cell spec against [`DECODE_CLASSES`].
+    pub fn parse_decode(spec: &str) -> Result<Self, String> {
+        Self::parse_table(
+            spec,
+            &DECODE_CLASSES,
+            Scope::Decode,
+            "RIIR_QWEN38_DECODE_ABLATE",
+        )
+    }
+
+    fn parse_table(
+        spec: &str,
+        table: &[&'static str],
+        scope: Scope,
+        env_name: &str,
+    ) -> Result<Self, String> {
         let spec = spec.trim();
         if spec.is_empty() {
-            return Err("RIIR_QWEN38_ABLATE: empty spec (unset the env or name classes)".into());
+            return Err(format!(
+                "{env_name}: empty spec (unset the env or name classes)"
+            ));
         }
         if spec.eq_ignore_ascii_case("all") {
             return Ok(Self {
                 all: true,
-                classes: CLASSES.iter().copied().collect(),
+                classes: table.iter().copied().collect(),
+                scope,
             });
         }
         let mut classes = std::collections::HashSet::new();
@@ -144,59 +227,107 @@ impl Ablate {
             if t.is_empty() {
                 continue;
             }
-            let class = CLASSES.iter().find(|c| **c == t).copied().ok_or_else(|| {
+            let class = table.iter().find(|c| **c == t).copied().ok_or_else(|| {
                 format!(
-                    "RIIR_QWEN38_ABLATE: unknown class '{t}' (known: {})",
-                    CLASSES.join(", ")
+                    "{env_name}: unknown class '{t}' (known: {})",
+                    table.join(", ")
                 )
             })?;
             classes.insert(class);
         }
         if classes.is_empty() {
-            return Err("RIIR_QWEN38_ABLATE: no class named".into());
+            return Err(format!("{env_name}: no class named"));
         }
         Ok(Self {
             all: false,
             classes,
+            scope,
         })
     }
 
     /// A hand-built cell (the matrix bin drives cells in-process, no env).
     pub fn from_classes<'a>(names: impl IntoIterator<Item = &'a str>) -> Result<Self, String> {
+        Self::from_classes_table(names, &CLASSES, Scope::Prefill, "ablate")
+    }
+
+    /// A hand-built decode cell (the `--decode-ablate-matrix` driver).
+    pub fn from_classes_decode<'a>(
+        names: impl IntoIterator<Item = &'a str>,
+    ) -> Result<Self, String> {
+        Self::from_classes_table(names, &DECODE_CLASSES, Scope::Decode, "decode-ablate")
+    }
+
+    fn from_classes_table<'a>(
+        names: impl IntoIterator<Item = &'a str>,
+        table: &[&'static str],
+        scope: Scope,
+        what: &str,
+    ) -> Result<Self, String> {
         let mut classes = std::collections::HashSet::new();
         for t in names {
-            let class = CLASSES.iter().find(|c| **c == t).copied().ok_or_else(|| {
-                format!(
-                    "ablate: unknown class '{t}' (known: {})",
-                    CLASSES.join(", ")
-                )
+            let class = table.iter().find(|c| **c == t).copied().ok_or_else(|| {
+                format!("{what}: unknown class '{t}' (known: {})", table.join(", "))
             })?;
             classes.insert(class);
         }
         if classes.is_empty() {
-            return Err("ablate: no class named".into());
+            return Err(format!("{what}: no class named"));
         }
         Ok(Self {
             all: false,
             classes,
+            scope,
         })
     }
 
     /// The launch-floor cell — skip every instrumented class.
     pub fn all() -> Self {
+        Self::all_table(&CLASSES, Scope::Prefill)
+    }
+
+    /// The decode launch-floor cell.
+    pub fn all_decode() -> Self {
+        Self::all_table(&DECODE_CLASSES, Scope::Decode)
+    }
+
+    fn all_table(table: &[&'static str], scope: Scope) -> Self {
         Self {
             all: true,
-            classes: CLASSES.iter().copied().collect(),
+            classes: table.iter().copied().collect(),
+            scope,
         }
     }
 
     /// `Some` when `RIIR_QWEN38_ABLATE` names a non-empty spec.
     pub fn from_env() -> Result<Option<Self>, String> {
-        match std::env::var("RIIR_QWEN38_ABLATE") {
+        Self::from_env_named("RIIR_QWEN38_ABLATE")
+    }
+
+    /// `Some` when `RIIR_QWEN38_DECODE_ABLATE` names a non-empty spec
+    /// (the decode twin — never set together with the prefill arm; the
+    /// forward's construction refuses the pair).
+    pub fn from_env_decode() -> Result<Option<Self>, String> {
+        Self::from_env_named("RIIR_QWEN38_DECODE_ABLATE")
+    }
+
+    fn from_env_named(env_name: &str) -> Result<Option<Self>, String> {
+        match std::env::var(env_name) {
             Err(_) => Ok(None),
             Ok(s) if s.trim().is_empty() => Ok(None),
-            Ok(s) => Self::parse(&s).map(Some),
+            Ok(s) => {
+                let decode = env_name == "RIIR_QWEN38_DECODE_ABLATE";
+                if decode {
+                    Self::parse_decode(&s).map(Some)
+                } else {
+                    Self::parse(&s).map(Some)
+                }
+            }
         }
+    }
+
+    /// Which table this cell names.
+    pub fn scope(&self) -> Scope {
+        self.scope
     }
 
     /// Whether `class`'s launches are skipped this cell.
@@ -289,6 +420,74 @@ mod tests {
                     "census section mapping names unknown class {c}"
                 );
             }
+        }
+    }
+
+    #[test]
+    fn decode_parse_all_and_csv() {
+        let a = Ablate::parse_decode("all").expect("all");
+        assert_eq!(a.scope(), Scope::Decode);
+        for c in DECODE_CLASSES {
+            assert!(a.skip(c), "all must skip {c}");
+        }
+        let a = Ablate::parse_decode("d_gdn_scan , d_ffn").expect("csv");
+        assert!(!a.all);
+        assert!(a.skip("d_gdn_scan") && a.skip("d_ffn"));
+        assert!(!a.skip("d_embed"));
+        let a = Ablate::from_classes_decode(["d_attn_scores"]).expect("classes");
+        assert!(a.skip("d_attn_scores"));
+        let all = Ablate::all_decode();
+        assert!(all.skip("d_lm_head") && all.scope() == Scope::Decode);
+    }
+
+    #[test]
+    fn decode_parse_refuses_unknown_and_prefill_names() {
+        assert!(Ablate::parse_decode("d_gdn_scan,nope").is_err());
+        assert!(Ablate::parse_decode("").is_err());
+        // The scope wall: a PREFILL class name is unknown in the decode
+        // table (and vice versa) — a mis-scoped cell refuses instead of
+        // silently skipping nothing.
+        assert!(Ablate::parse_decode("scan").is_err());
+        assert!(Ablate::parse("d_gdn_scan").is_err());
+        assert!(Ablate::from_classes_decode([]).is_err());
+    }
+
+    #[test]
+    fn decode_and_prefill_tables_are_disjoint() {
+        // The d_ prefix law: one name in both tables would let a
+        // mis-scoped cell gate the wrong path's site.
+        for d in DECODE_CLASSES {
+            assert!(
+                !CLASSES.contains(&d),
+                "decode class {d} must not collide with the prefill table"
+            );
+            assert!(
+                d.starts_with("d_"),
+                "decode class {d} must carry the d_ prefix"
+            );
+        }
+    }
+
+    #[test]
+    fn decode_classes_cover_the_step_categories() {
+        // The 1178 T1 coarse buckets must stay derivable from the table —
+        // a class rename without the roll-up update reds here.
+        for c in [
+            "d_embed",
+            "d_entry_norm",
+            "d_gdn_gemm",
+            "d_gdn_stage",
+            "d_gdn_scan",
+            "d_gdn_post",
+            "d_attn_gemm",
+            "d_attn_stage",
+            "d_attn_scores",
+            "d_ffn",
+            "d_residual",
+            "d_out_norm",
+            "d_lm_head",
+        ] {
+            assert!(DECODE_CLASSES.contains(&c), "bucket class {c} missing");
         }
     }
 }
