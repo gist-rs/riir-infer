@@ -1,6 +1,7 @@
 # Issue 1164: the T5 mixed-mode head mask is VACUOUS at the model level (bench 1157 Cell D)
 
 **Status:** Open — ROOT CAUSE FIXED at the predicate level (`a9aeedd`, 2026-11-04); the model-level proof (T6 Cell D re-cell) is the open item.
+**Claimed:** zed-ablate@amo, 1794247200, expires 2026-11-07T13:20:00Z — re-running the T6 Cell D re-cell on amo (quiet) via the bench_1156_t6_league_cells harness at the fixed predicate.
 **Lease closed (override):** zed-986a7538 (amo), epoch 1794169000 — took over zed-7710a782's live claim (epoch 1793682000, was expires 2026-11-04T16:30:00+00:00) per owner instruction + Claude verdict round 1 AGREE-with-conditions; holder notified via agent-mail `01a1a46b` before the edit; the checkout showed no unclaimed 1164 work (tree clean, no worktrees). Fix landed `a9aeedd` the same session.
 
 ## The fix (landed)
