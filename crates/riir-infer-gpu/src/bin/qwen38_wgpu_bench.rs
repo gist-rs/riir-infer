@@ -625,14 +625,16 @@ fn run_decode_ablate_matrix(
     let mut w = base_walls.clone();
     w.sort_by(|a, b| a.partial_cmp(b).unwrap());
     let base_med = w[w.len() / 2];
-    let base_ms = base_med * 1e3;
+    // Walls are SECONDS for the whole cell; every number below is PER STEP
+    // (the first census run printed the total as ms/step — bench 950 note).
+    let base_ms = base_med * 1e3 / steps as f64;
     println!(
         "[decode-ablate-matrix] base {:.2} ms/step ({:.2} tok/s) | Σ classes {class_ms:.2} \
          ({:.1}% of the wall — near-additive attribution above ~90%) | ALL floor Δ \
          {floor_ms:.2} ms/step | ALL-cell residual wall {:.2} ms/step (logits read + \
          host argmax + loop — the sync/host floor)",
         base_ms,
-        1e3 / base_med,
+        steps as f64 / base_med,
         100.0 * class_ms / base_ms,
         base_ms - floor_ms,
     );
