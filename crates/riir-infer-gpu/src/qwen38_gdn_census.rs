@@ -56,7 +56,7 @@ use metal::{
     BufferRef, CommandBuffer, CommandQueueRef, CompileOptions, ComputePassDescriptor,
     ComputePassSampleBufferAttachmentDescriptor, ComputePipelineState, CounterSampleBuffer,
     CounterSampleBufferDescriptor, DeviceRef, MTLCommandQueue, MTLCounterSamplingPoint, MTLDevice,
-    MTLResourceUsage, MTLStorageMode, MTLSize, NSRange, SharedEvent,
+    MTLResourceUsage, MTLSize, MTLStorageMode, NSRange, SharedEvent,
 };
 use wgpu::{Device as WgpuDevice, Queue as WgpuQueue};
 
@@ -172,7 +172,10 @@ impl GdnCensusReport {
                 format!("[{}]", cells.join(", "))
             })
             .collect();
-        println!("[gdn-census] per-group ms (14 sections): {}", rows.join(" "));
+        println!(
+            "[gdn-census] per-group ms (14 sections): {}",
+            rows.join(" ")
+        );
         println!(
             "[gdn-census] reconciliation: section sum {:.1} ms/group | inter-chunk \
              wall total {:.1} ms (rest of the pass) | gpu sample span {:.1} ms \
@@ -277,8 +280,10 @@ impl GdnCensus {
             .counter_sets()
             .into_iter()
             .find(|s| s.name() == "timestamp")
-            .ok_or("gdn census: the device exposes no 'timestamp' counter set — \
-                    the pass-attachment samples would be unbacked; refuse loud")?;
+            .ok_or(
+                "gdn census: the device exposes no 'timestamp' counter set — \
+                    the pass-attachment samples would be unbacked; refuse loud",
+            )?;
         desc.set_counter_set(&ts_set);
         let csb = device_ref
             .new_counter_sample_buffer_with_descriptor(&desc)
@@ -394,15 +399,19 @@ impl GdnCensus {
         att.set_sample_buffer(&self.csb);
         att.set_start_of_encoder_sample_index(start_idx as u64);
         att.set_end_of_encoder_sample_index((start_idx + 1) as u64);
-        pass_desc.sample_buffer_attachments().set_object_at(0, Some(&att));
+        pass_desc
+            .sample_buffer_attachments()
+            .set_object_at(0, Some(&att));
         let enc = cmd.compute_command_encoder_with_descriptor(pass_desc);
         enc.set_compute_pipeline_state(&self.marker_pipeline);
         // Hazard pinning — RAW edges after the measured section's writes,
         // WAR/RAW edges against the next section's reads and writes (the
         // declared ReadWrite conflicts with both).
         for h in hazards {
-            let (ptr, _off) = crate::gemm_ternary_metal_zero_copy::MetalTensorZeroCopyGemm
-                ::extract_raw_buffer(client, h)?;
+            let (ptr, _off) =
+                crate::gemm_ternary_metal_zero_copy::MetalTensorZeroCopyGemm::extract_raw_buffer(
+                    client, h,
+                )?;
             let buf_ref: &BufferRef = unsafe { BufferRef::from_ptr(ptr) };
             enc.use_resource(buf_ref, MTLResourceUsage::Read | MTLResourceUsage::Write);
         }

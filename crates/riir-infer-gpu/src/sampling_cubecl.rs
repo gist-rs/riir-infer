@@ -903,7 +903,10 @@ mod tests {
 
         let last = run_last_kernel(&client, &input);
 
-        assert_eq!(first, 0u32, "pinned first-index kernel: exact on this residue split");
+        assert_eq!(
+            first, 0u32,
+            "pinned first-index kernel: exact on this residue split"
+        );
         assert_eq!(
             last, 2u32,
             "twin: exact on the last-index rule AND divergent from first (0 != 2)"
