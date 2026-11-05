@@ -44,8 +44,10 @@
 //! ```
 //!
 //! Env: `BENCH1167_SHAPES` (`MxN,…`, default the three Bonsai-2 prefill
-//! bottlenecks), `BENCH1167_PS` (default `512,2048,4096`),
-//! `BENCH1167_ROUNDS` (4), `BENCH1167_LAUNCHES` (2).
+//! bottlenecks; G3 adds the GDN projections), `BENCH1167_PS` (default
+//! `512,2048,4096` for G2, `512` for G3), `BENCH1167_ROUNDS` (4),
+//! `BENCH1167_LAUNCHES` (2), `BENCH1167_REPS` (G3 repetition blocks for the
+//! delta IQR).
 
 #![cfg(all(feature = "metal_tensor_gemm", target_os = "macos"))]
 
@@ -68,6 +70,17 @@ const DEFAULT_SHAPES: &[(&str, usize, usize)] = &[
     ("ffn_gate/up", 17408, 5120),
     ("ffn_down", 5120, 17408),
     ("attn_q", 12288, 5120),
+];
+
+/// The GDN projection shapes (48 of 64 layers carry them; the rung-C verdict
+/// must cover every ternary GEMM class, not only FFN). Derived from the
+/// model: state 128, k-heads 16, v-heads 48 → qkv [14336×5120], z [6144×5120],
+/// a/b [16×5120], out [5120×6144] (the loader's own probe read).
+const GDN_SHAPES: &[(&str, usize, usize)] = &[
+    ("gdn_qkv", 14336, 5120),
+    ("gdn_z", 6144, 5120),
+    ("gdn_ab", 16, 5120),
+    ("gdn_out", 5120, 6144),
 ];
 
 /// P = 512 (the dist w512 frame) + the league rows.
@@ -995,6 +1008,7 @@ fn g3_insitu_ablation_twins_at_serving_posture() {
         .unwrap_or_else(|| {
             DEFAULT_SHAPES
                 .iter()
+                .chain(GDN_SHAPES.iter())
                 .map(|&(n, m, k)| (n.to_string(), m, k))
                 .collect()
         });
@@ -1018,6 +1032,10 @@ fn g3_insitu_ablation_twins_at_serving_posture() {
         (TwinKind::ConstDequant, "const_dequant"),
         (TwinKind::NoStage, "no_stage"),
     ];
+    let rounds_rep: usize = std::env::var("BENCH1167_REPS")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(1);
     let compiled: Vec<(TwinKind, &str, ServingTwin)> = twins
         .iter()
         .filter_map(|&(kind, name)| match ServingTwin::new(cfg, kind) {
@@ -1074,7 +1092,7 @@ fn g3_insitu_ablation_twins_at_serving_posture() {
             }
 
             let n_arms = compiled.len();
-            let mut times = vec![vec![0.0f64; n_arms]; rounds];
+            let mut times = vec![vec![0.0f64; n_arms]; rounds * rounds_rep];
             for (r, row) in times.iter_mut().enumerate() {
                 for k in 0..n_arms {
                     let ai = (r + k) % n_arms;
@@ -1100,22 +1118,45 @@ fn g3_insitu_ablation_twins_at_serving_posture() {
                 v.sort_by(|a, b| a.total_cmp(b));
                 v[v.len() / 2]
             };
+            // Wilson-style spread proxy: min/max of the per-round medians of
+            // each repetition block (BENCH1167_REPS>1 splits the rounds into
+            // blocks and medians each — the delta CI class the bar needs).
             let meds: Vec<f64> = (0..n_arms)
                 .map(|ai| median(times.iter().map(|row| row[ai]).collect()))
                 .collect();
             let base = meds[0];
+            let lo_hi = |ai: usize| -> (f64, f64) {
+                let vals: Vec<f64> = times.iter().map(|row| row[ai]).collect();
+                let mut v = vals.clone();
+                v.sort_by(|a, b| a.total_cmp(b));
+                let q = |f: f64| -> f64 {
+                    let idx = ((v.len() as f64) * f) as usize;
+                    v[idx.min(v.len() - 1)]
+                };
+                (q(0.25), q(0.75))
+            };
             println!(
-                "\n── {shape_name} (m={m} k={n}) P={p} — serving twin baseline {:.3} ms/launch ──",
-                base * 1e3
+                "\n── {shape_name} (m={m} k={n}) P={p} — serving twin baseline {:.3} ms/launch \
+                 (n={} rounds; IQR in brackets) ──",
+                base * 1e3,
+                times.len()
             );
             for (ai, (_, name, _)) in compiled.iter().enumerate() {
                 let med = meds[ai];
                 let exposed = base - med;
+                let (b_lo, b_hi) = lo_hi(0);
+                let (t_lo, t_hi) = lo_hi(ai);
+                // the delta's spread: conservative pairwise bounds
+                let d_lo = b_lo - t_hi;
+                let d_hi = b_hi - t_lo;
                 println!(
-                    "  {name:<13} {:>9.3} ms/launch   exposed (baseline − twin) {:>7.3} ms  ({:.1}% of wall)",
+                    "  {name:<13} {:>9.3} ms/launch   exposed (baseline − twin) {:>7.3} ms  \
+                     ({:>5.1}% of wall)  Δ-IQR [{:.3}, {:.3}] ms",
                     med * 1e3,
                     exposed * 1e3,
-                    exposed / base * 100.0
+                    exposed / base * 100.0,
+                    d_lo * 1e3,
+                    d_hi * 1e3
                 );
             }
         }
