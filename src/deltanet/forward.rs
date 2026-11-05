@@ -1285,6 +1285,13 @@ pub struct HybridForwardScratch {
     /// never read or written, and the steady-state forward stays alloc-free
     /// (G4).
     pub rotation_buf: Vec<f32>,
+    /// The sink-audit census capture (katgpt-rs Issue 981, `sink_audit`).
+    /// `None` everywhere except the once-per-checkpoint census pass; the
+    /// field is cfg-gated so a flag-off build compiles it out entirely (the
+    /// serving path never pays for the audit — the Plan 287 G3 lesson, one
+    /// layer up: the census is offline, not per-call).
+    #[cfg(feature = "sink_audit")]
+    pub sink_audit_q: Option<crate::deltanet::sink_audit::SinkAuditQCapture>,
 }
 
 impl HybridForwardScratch {
@@ -1301,6 +1308,8 @@ impl HybridForwardScratch {
             hidden_copy: vec![0.0; config.n_embd],
             residual: vec![0.0; config.n_embd],
             rotation_buf: vec![0.0; rotation_len],
+            #[cfg(feature = "sink_audit")]
+            sink_audit_q: None,
         }
     }
 }
@@ -1396,6 +1405,13 @@ fn forward_qwen_deltanet_body<'a>(
                 &mut scratch.attention,
                 None,
             );
+            // Sink-audit census capture (Issue 981, `sink_audit`): after the
+            // attention step ran, `q_buf` still holds post-RoPE Q (steps 5–7
+            // read it, none write it). The census owns the only armed copy.
+            #[cfg(feature = "sink_audit")]
+            if let Some(cap) = scratch.sink_audit_q.as_mut() {
+                cap.capture(layer_idx, &scratch.attention.q_buf);
+            }
         }
 
         // d. Residual add

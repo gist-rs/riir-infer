@@ -47,6 +47,13 @@ pub mod weights;
 #[cfg(feature = "kv_eviction")]
 pub mod kv_evict;
 
+// katgpt-rs Issue 981 — the sink-audit census lane: the one-time
+// per-checkpoint Q capture + softmax-mass harvest that produces the
+// SinkAuditProfile the kv_sink_window policy selector reads. Offline only;
+// zero serving-path cost (the capture rides a cfg-gated Option).
+#[cfg(feature = "sink_audit")]
+pub mod sink_audit;
+
 // Issue 049 — the GDN delta-roll state journal (Research 629 E2's
 // riir-infer half): post-commit state recovery by rank-1 unwind from the
 // final state + per-token (u, k, β, g) contexts (~64× vs materialized

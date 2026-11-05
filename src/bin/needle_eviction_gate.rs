@@ -110,6 +110,8 @@ use riir_infer_core::tokenizer::BpeTokenizer;
 use riir_infer_core::types::{Config, DeltaNetLayerType};
 
 use katgpt_core::kv_eviction::differential::DiffEvictConfig;
+#[cfg(feature = "sink_audit")]
+use katgpt_core::kv_sink_window::SinkAuditVerdict;
 use katgpt_core::kv_sink_window::SinkWindowPolicy;
 
 /// Pre-registered retention threshold (nats/token over the needle's code
@@ -166,6 +168,14 @@ struct Args {
     full_from: Option<PathBuf>,
     /// T5: pinned sink rows at the head of the cache (kv_sink_window).
     sinks: usize,
+    /// katgpt-rs Issue 981 T2 wire-through: `> 0` arms the sink-audit census
+    /// over the first N filler tokens BEFORE the arms run, and every arm's
+    /// eviction policy comes from `SinkWindowPolicy::from_audit` instead of
+    /// `--sinks` (SinkFree ⇒ the audited pin, floor ≥ 1; SinkHeavy/Undecided
+    /// ⇒ the incumbent `--sinks` pin, disclosed). 0 = flag-off byte-identical.
+    /// Needle placement (`depth_tokens` geometry) is rig layout and stays on
+    /// `--sinks` regardless — the audit re-sizes PINS, not the rig.
+    sink_audit: usize,
     out: Option<PathBuf>,
 }
 
@@ -188,6 +198,7 @@ fn parse_args() -> Args {
         arms_filter: None,
         full_from: None,
         sinks: N_SINK,
+        sink_audit: 0,
         out: None,
     };
     let mut it = std::env::args().skip(1);
@@ -209,6 +220,7 @@ fn parse_args() -> Args {
             "--needles" => a.needles = val("needles").parse().unwrap(),
             "--hubs" => a.hubs = val("hubs").parse().unwrap(),
             "--sinks" => a.sinks = val("sinks").parse().unwrap(),
+            "--sink-audit" => a.sink_audit = val("sink-audit").parse().unwrap(),
             "--lambda" => {
                 a.lambdas = val("lambda")
                     .split(',')
@@ -341,6 +353,94 @@ fn upsert_report(path: &std::path::Path, fresh: &[ArmReport]) -> Result<()> {
     Ok(())
 }
 
+// Issue 981 T2 wire-through — the census helper, cfg-split: armed under the
+// `sink_audit` feature, a LOUD refusal when the flag is set in a build
+// without it (a debug lane that silently ignored its flag would be a second
+// policy no one measured).
+#[cfg(feature = "sink_audit")]
+fn audited_sink_policy(
+    args: &Args,
+    weights: &riir_infer_core::deltanet::weights::QwenDeltaNetWeights,
+    config: &Config,
+    rope_freq: &RopeFreqTable,
+    filler_tokens: &[usize],
+) -> Result<Option<SinkWindowPolicy>> {
+    if args.sink_audit == 0 {
+        return Ok(None);
+    }
+    let t_audit = Instant::now();
+    let census = riir_infer_core::deltanet::sink_audit::run_census(
+        weights,
+        config,
+        filler_tokens,
+        rope_freq,
+        args.sink_audit,
+    )
+    .map_err(anyhow::Error::msg)
+    .with_context(|| "sink-audit census pass")?;
+    let profile = &census.profile;
+    let verdict = profile.verdict();
+    let incumbent = SinkWindowPolicy::new(args.sinks, usize::MAX);
+    let policy = match SinkWindowPolicy::from_audit(verdict, profile, incumbent) {
+        katgpt_core::kv_sink_window::AuditedSinkPolicy::Audited(p) => {
+            println!(
+                "# sink-audit: n={} layers={} heads={} f_attn_token0={:.6} m_act={:.3} \
+                 verdict=SinkFree -> audited pin n_sink={} (window carried) | {:.1}s",
+                census.n_positions,
+                profile.layers_scanned,
+                profile.heads_scanned,
+                profile.f_attn_token0,
+                profile.m_act,
+                p.n_sink,
+                t_audit.elapsed().as_secs_f32()
+            );
+            p
+        }
+        keep @ (katgpt_core::kv_sink_window::AuditedSinkPolicy::KeepIncumbentSinkHeavy
+        | katgpt_core::kv_sink_window::AuditedSinkPolicy::KeepIncumbentUndecided) => {
+            let (v, note) =
+                if keep == katgpt_core::kv_sink_window::AuditedSinkPolicy::KeepIncumbentSinkHeavy {
+                    (
+                        SinkAuditVerdict::SinkHeavy,
+                        " (long-context risk: keep the pin)",
+                    )
+                } else {
+                    (SinkAuditVerdict::Undecided, " (disclosed, never folded)")
+                };
+            println!(
+                "# sink-audit: n={} layers={} heads={} f_attn_token0={:.6} m_act={:.3} \
+                 verdict={v:?} -> incumbent pin n_sink={} stands{note} | {:.1}s",
+                census.n_positions,
+                profile.layers_scanned,
+                profile.heads_scanned,
+                profile.f_attn_token0,
+                profile.m_act,
+                incumbent.n_sink,
+                t_audit.elapsed().as_secs_f32()
+            );
+            incumbent
+        }
+    };
+    Ok(Some(policy))
+}
+
+#[cfg(not(feature = "sink_audit"))]
+fn audited_sink_policy(
+    args: &Args,
+    _weights: &riir_infer_core::deltanet::weights::QwenDeltaNetWeights,
+    _config: &Config,
+    _rope_freq: &RopeFreqTable,
+    _filler_tokens: &[usize],
+) -> Result<Option<SinkWindowPolicy>> {
+    if args.sink_audit > 0 {
+        bail!(
+            "--sink-audit needs the sink_audit feature — rebuild with \
+             --features sink_audit (a build without it cannot run the census)"
+        );
+    }
+    Ok(None)
+}
+
 fn main() -> Result<()> {
     let args = parse_args();
     let t_start = Instant::now();
@@ -379,6 +479,13 @@ fn main() -> Result<()> {
             args.context
         );
     }
+
+    // ── The sink-audit census (Issue 981 T2 wire-through) ──
+    // Armed with `--sink-audit N`: one census pass over the first N filler
+    // tokens, then every arm's eviction policy comes from `from_audit`.
+    // Flag-off (0) is byte-identical: the policy is the `--sinks` incumbent.
+    let sink_policy = audited_sink_policy(&args, &weights, &config, &rope_freq, &filler_tokens)?
+        .unwrap_or_else(|| SinkWindowPolicy::new(args.sinks, usize::MAX));
 
     // Needle sentences + their code spans (one pass).
     let mut needles: Vec<Needle> = Vec::with_capacity(args.needles);
@@ -760,6 +867,7 @@ fn main() -> Result<()> {
             layer_cfg,
             &arm.name,
             &tok,
+            &sink_policy,
         )?;
         println!(
             "# arm {:<18} {:.1}s | evicted={:>6} events={:>3} idle={:>3} | genNLL={:.3} | out_len={}{} | surv n/h/w = {:.3}/{:.3}/{:.3}",
@@ -977,6 +1085,9 @@ fn run_arm(
     layer_cfg: Option<EvictLayerConfig>,
     name: &str,
     tok: &BpeTokenizer,
+    // The eviction sink policy for THIS run: the `--sinks` incumbent, or the
+    // audited policy when `--sink-audit` armed the census (Issue 981 T2).
+    sink_policy: &SinkWindowPolicy,
 ) -> Result<ArmReport> {
     let t_arm = Instant::now();
     let layer_types = weights.layer_types.clone();
@@ -997,7 +1108,7 @@ fn run_arm(
     });
     let mut evictor = EvictorState::new(
         Some(&cfg),
-        SinkWindowPolicy::new(args.sinks, usize::MAX),
+        *sink_policy,
         &layer_attn,
         config.n_head,
         config.block_size,

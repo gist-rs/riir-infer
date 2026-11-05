@@ -300,6 +300,20 @@ kv_eviction = [
     "katgpt-core/differential_kv_eviction",
 ]
 
+# sink_audit (katgpt-rs Issue 981 T1/T2): the ONE-TIME per-checkpoint census
+# lane — capture post-RoPE Q rows for the FULL-ATTENTION layers only over an
+# N-token pass (a cfg-gated Option on HybridForwardScratch; None elsewhere so
+# the field compiles to nothing flag-off), harvest the per-head softmax mass
+# through katgpt_core::kv_sink_window's audit core, emit SinkAuditProfile +
+# the verdict, and build the audited SinkWindowPolicy via from_audit. The
+# `sink_audit` bin is the CLI; `needle_eviction_gate --sink-audit N` is the
+# e2e wire-through (verdict ⇒ pin posture inside the eviction-gate harness).
+# Offline, once per checkpoint — zero per-call serving cost (the Plan 287 G3
+# lesson). Implies kv_eviction (the policy the audit re-sizes lives there).
+sink_audit = [
+    "kv_eviction",
+]
+
 # fitted_v_tables (riir-infer Issue 013 T1, 2026-09-28): the model-bound P1
 # gate lane — `transformer::gemma2_vquant` (the `ValueStoreHook` state:
 # KVarN-quantized V storage ± katgpt-core's `MeanRemovedValueCache`
@@ -593,6 +607,16 @@ required-features = ["row_logit_floor", "attention_to_answer"]
 name = "si_zero_shot_ppl"
 path = "src/bin/si_zero_shot_ppl.rs"
 required-features = ["scale_invariant_attn", "bonsai2_hadamard"]
+
+# katgpt-rs Issue 981 T1 — the sink-audit census CLI: one pass per checkpoint
+# over the first N tokens (FULL-ATTENTION layers only), the chosen-cut
+# verdict, the audited SinkWindowPolicy, and a BLAKE3-pinned report JSON
+# (G1: same checkpoint + corpus + window -> same hash). Reader protection
+# row (the green-zero law): a default build skips the bin loudly.
+[[bin]]
+name = "sink_audit"
+path = "src/bin/sink_audit.rs"
+required-features = ["sink_audit"]
 
 # riir-infer Issue 014 T1 — the activation-diagonal collector bin. The
 # module lives behind #[cfg(feature = "act_diagonal_calibration")]; this
