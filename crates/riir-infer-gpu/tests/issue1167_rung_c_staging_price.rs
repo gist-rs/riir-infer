@@ -698,6 +698,20 @@ const G1_CASES: &[(usize, usize, usize)] =
 #[test]
 #[ignore = "requires macOS Metal + a GPU; run explicitly with --release"]
 fn g1_incumbent_and_probe_fixture_gates() {
+    // The G1 bar is defined at the BIT-EXACT posture (relaxed off — the
+    // 1e-5 scale-relative bar). relaxed_precision=true shortens matmul2d's
+    // accumulation (fp16-class) — a ~5e-4-class DISTRIBUTION shift, exactly
+    // what Bench 940's 2× precision cell measured on the dense lane. G1
+    // pins the fixture+pipeline correctness, so it compiles the demote
+    // posture explicitly — the module's explicit PIN (`set_metal_tensor_
+    // relaxed_precision(false)`, the public setter, wins over the env for
+    // contexts constructed after). G1 pins the fixture+pipeline correctness;
+    // the G2/G3 timing cells pin their own compiled selector via
+    // crate_defines and quote distribution-class tolerance, not G1 exactness.
+    // (The pin is process-global — G1 and G2/G3 run as separate test
+    // binaries/processes under --test-threads=1, and each G-run constructs
+    // its own pipelines.)
+    riir_infer_gpu::gemm_ternary_metal_tensor::set_metal_tensor_relaxed_precision(false);
     let gemm = MetalTensorGemm::new_with_config(MetalTileConfig::KTILE64)
         .expect("incumbent pipeline must compile at the promoted posture");
     let probe = DequantProbe::new(MetalTileConfig::KTILE64)
