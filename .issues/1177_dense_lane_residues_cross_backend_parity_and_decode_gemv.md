@@ -4,7 +4,9 @@
 closed (1150 + 1170; Claude verdict round 1 AGREE on the closure batch).
 Two items the lane still owes, both priced/deferred, neither blocking a
 landed surface.
-**Claimed:** zed-83e79a9e@amo, 1793857012, expires 2026-11-07T12:36:52+00:00 — Item 2 price cell (amo Metal, quiet box); Item 1 stays 4090-queue-gated.
+**Claimed:** zed-83e79a9e@amo, 1793857012, expires 2026-11-07T12:36:52+00:00
+
+Lease note: Item 2 price cell on amo Metal; Item 1 stays 4090-queue-gated.
 
 ## Item 1 — the cross-backend bit-parity G1 cell (from Issue 1150's acceptance gates)
 
