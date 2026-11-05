@@ -1146,6 +1146,15 @@ pub fn qwen_deltanet_ternary_layer_body(
             &mut scratch.rotation_buf,
             None,
         );
+        // Sink-audit census capture (katgpt-rs Issue 981, `sink_audit`) — the
+        // ternary mirror of the dense body's seam: after the attention step,
+        // `q_buf` still holds post-RoPE Q (the scoring pass reads it, none
+        // write it). The census owns the only armed copy; every other caller
+        // (TWT audition, decode lanes) leaves it `None` and pays nothing.
+        #[cfg(feature = "sink_audit")]
+        if let Some(cap) = scratch.sink_audit_q.as_mut() {
+            cap.capture(layer_idx, &scratch.attention.q_buf);
+        }
     }
 
     ternary_post_attention_tail(x, layer_weights, config, scratch, rotation, hook, ffn_hook);

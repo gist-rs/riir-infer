@@ -309,9 +309,14 @@ kv_eviction = [
 # `sink_audit` bin is the CLI; `needle_eviction_gate --sink-audit N` is the
 # e2e wire-through (verdict ⇒ pin posture inside the eviction-gate harness).
 # Offline, once per checkpoint — zero per-call serving cost (the Plan 287 G3
-# lesson). Implies kv_eviction (the policy the audit re-sizes lives there).
+# lesson). Implies kv_eviction (the policy the audit re-sizes lives there)
+# and deltanet_ternary_inference (Issue 981 follow-up (b): the flagship
+# Bonsai-2-27B census runs the TERNARY body — the capture seam is shared,
+# the loader is `load_qwen_deltanet_ternary_weights_gguf`; a folded file
+# additionally needs `bonsai2_hadamard` at the run, not in the feature).
 sink_audit = [
     "kv_eviction",
+    "deltanet_ternary_inference",
 ]
 
 # fitted_v_tables (riir-infer Issue 013 T1, 2026-09-28): the model-bound P1
