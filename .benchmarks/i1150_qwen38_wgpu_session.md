@@ -432,3 +432,38 @@ consistent with the co-tenancy cost that motivated the exclusive lane.
   GEMV routing (15–16%) follow-ups are UNBLOCKED — measurements are
   posture-stable; any future A/B must pin the posture env explicitly per
   cell (the lesson IS the finding).
+
+## G2 positioning re-cell at the promoted league default — 2026-11-05 (issue 1150 closure, Claude verdict AGREE)
+
+The four-way table's OURS cells, re-run at the league Metal default
+(bare boot = the five-arm posture since bench 946 / `d19223c`; boot
+banners the engagement proof). **Cross-box disclosure (verdict
+condition): OURS on amo (M5 Ultra) vs baselines RECORDED ON bmo (M5
+Ultra) 2026-10-28 — same silicon class, different box/day; never read
+as same-window** (`.benchmarks/uzu27b/README.md`, the bmo three-way:
+uzu 0.5.23 mirai-m:4 / llama.cpp fork `73bfe6cc4` Q4_K_M / MLX-LM
+4bit). Ours: release `/tmp/g2-target`, one process, exclusive rig job
+`0bf2c246` (POISONED ×8 flag = compile load at job START; the run
+window 05:12–05:16Z reads load 1.80 falling, AC, and every cell lands
+inside the bench 944–946 established band — pp5120's 972 vs 966–981 —
+so the readings are usable; box state `~/riir-bench/i1150_g2_promoted/`).
+
+| P (padded, pure prefill) | OURS amo | uzu bmo | fork bmo | MLX 4bit bmo | ours/fork | ours/MLX |
+|---:|---:|---:|---:|---:|---:|---:|
+| ~2.5k (2560) | **933** | 1009.7 | 525.23 | 1395.0 | 1.77× | 0.67× |
+| ~5k (5120) | **972** | 1156.9 | 898.26 | 1410.8 | 1.08× | 0.69× |
+| ~10k (10240) | **953** | 536.0 | 855.12 | 1418.7 | 1.11× | 0.67× |
+| ~16k (16896 ⚠ +3% pad) | **901** | 392.7 | 799.71 | 629.7 ⚠declining | 1.13× | 1.43×* |
+
+*the 16k MLX cell declined across its own passes (955→536) on bmo — the
+1.43× reads against their WORST recorded pass; against their first
+(955.2) ours reads 0.94×. Honest cell: ours ≈ MLX at 16k pending their
+clean re-run. Decode (this posture, non-serving): raw 11.63 tok/s,
+ctx2048 **9.99 tok/s** — the dense posture is prefill-shaped; the
+decode deficit is the parked GEMV lever (riir-infer Issue 1177) + the
+packed posture serving decode.
+
+**Reading:** ours beats the fork at every cell ≥2.5k (1.08–1.77×), holds
+flat 900–970 where uzu collapses long-P (0.49× the fork ≥10k), and sits
+at 0.64–0.69× of MLX's flat prefill bar through 10k (the named
+remaining gap; the fork-parity class was 1150's stated bar — DELIVERED).
