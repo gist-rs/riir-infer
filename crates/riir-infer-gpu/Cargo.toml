@@ -740,6 +740,16 @@ name = "issue1166_tile_geometry_sweep"
 path = "tests/issue1166_tile_geometry_sweep.rs"
 required-features = ["metal_tensor_gemm", "cubecl_runtime", "ternary_gemv", "multi_host", "ternary_gemm_batched", "ternary_gemm_simdgroup", "ternary_deltanet_chunked_prefill", "ternary_attention_batched_prefill", "riir-infer-core/bonsai2_hadamard"]
 
+# Issue 1167 rung C — the H5 GEMM-staging price cell (macOS Metal; the
+# file-level cfg empties it elsewhere — the issue1166 shape, whose feature
+# set this mirrors: the LIB must compile as a unit and the forward's
+# metal-tensor paths light up with the prefill features). Run explicitly
+# (--ignored): see the file header for the full command.
+[[test]]
+name = "issue1167_rung_c_staging_price"
+path = "tests/issue1167_rung_c_staging_price.rs"
+required-features = ["metal_tensor_gemm", "cubecl_runtime", "ternary_gemv", "multi_host", "ternary_gemm_batched", "ternary_gemm_simdgroup", "ternary_deltanet_chunked_prefill", "ternary_attention_batched_prefill", "riir-infer-core/bonsai2_hadamard"]
+
 [[test]]
 name = "issue1146_relaxed_kl"
 path = "tests/issue1146_relaxed_kl.rs"
