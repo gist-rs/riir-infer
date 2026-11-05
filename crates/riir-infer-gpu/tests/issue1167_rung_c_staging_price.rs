@@ -411,6 +411,11 @@ impl DequantProbe {
         unsafe { std::slice::from_raw_parts(ptr, len) }.to_vec()
     }
 
+    /// Mirror of the SERVING launch path (the zero-copy branch's raw
+    /// encoder work): buffer bindings, scalar bindings, threadgroup memory,
+    /// grid and threadgroup size — but with `wait_until_completed` fencing
+    /// so a timed region cannot exclude the work. Serves BOTH the
+    /// in-situ arms and their fenced-wall comparison baseline.
     fn launch(&self, io: &GemmIo, fx: &TernaryFixture, p: usize) {
         let cfg = self.config;
         let tiles_x = p.div_ceil(cfg.nrb as usize) as u32;
@@ -456,6 +461,199 @@ impl DequantProbe {
         cmd.commit();
         cmd.wait_until_completed();
     }
+}
+
+// ---------------------------------------------------------------------------
+// In-situ ablation twins — the REAL serving source with one element removed
+// ---------------------------------------------------------------------------
+
+/// Which single element the twin removes (the result is WRONG and that is
+/// fine: correctness is irrelevant when profiling — the wall is still valid,
+/// and no twin result is ever read).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum TwinKind {
+    /// The exact serving kernel (both barriers, real dequant) — the fenced
+    /// baseline the exposed-share deltas price against.
+    Baseline,
+    /// (a) both per-K-tile barriers removed — prices the barrier+
+    /// serialization exposure in situ.
+    NoBarriers,
+    /// (b) the A-side dequant sources replaced by constants (no packed-bit
+    /// loads, the sign math stays) — prices the dequant LOAD+math exposure.
+    ConstDequant,
+    /// (c) the staged-tile stores removed (matmul reads stale threadgroup
+    /// memory) — prices the stage-WRITE exposure.
+    NoStage,
+}
+
+/// The exact string each twin patches, with the occurrence count the patch
+/// must consume — a drift in the serving source fails LOUD at twin
+/// construction, never as a silently-mis-patched timing row.
+const TWIN_PATCHES: &[(&str, &str, usize)] = &[
+    ("threadgroup_barrier(mem_flags::mem_threadgroup);", "", 2),
+    (
+        "const uint pw       = pos_bits_u32[word_idx] >> shift;",
+        "const uint pw       = 0xAAAAAAAAu;",
+        1,
+    ),
+    (
+        "const uint nw       = neg_bits_u32[word_idx] >> shift;",
+        "const uint nw       = 0u;",
+        1,
+    ),
+    (
+        "const float scale   = group_scale_f32[(uint)row_global * groups_per_row + (uint)(k_pos / 128)];",
+        "const float scale   = 1.0f;",
+        1,
+    ),
+    ("dst[q] = v;", "", 1),
+    (
+        "sa[(size_t)(k_base + i) + (size_t)row_local * K_TILE] = val;",
+        "",
+        1,
+    ),
+];
+
+/// A compiled in-situ twin: the serving `gemm_ternary_tensor` pipeline at a
+/// patched source. Buffer bindings, scalars, threadgroup memory, grid and
+/// threadgroup size mirror `MetalTensorGemm::launch` exactly.
+struct ServingTwin {
+    device: Device,
+    queue: CommandQueue,
+    pipeline: ComputePipelineState,
+    config: MetalTileConfig,
+}
+
+impl ServingTwin {
+    fn new(config: MetalTileConfig, kind: TwinKind) -> Result<Self, String> {
+        let serving = include_str!("../src/gemm_ternary_metal_tensor.metal");
+        let mut source = crate_defines(config);
+        match kind {
+            TwinKind::Baseline => source.push_str(serving),
+            TwinKind::NoBarriers => source.push_str(&patch(serving, 0..1)),
+            TwinKind::ConstDequant => source.push_str(&patch(serving, 1..4)),
+            TwinKind::NoStage => source.push_str(&patch(serving, 4..6)),
+        }
+        let device = Device::system_default().ok_or("No Metal device found")?;
+        let library = device
+            .new_library_with_source(source.as_str(), &CompileOptions::new())
+            .map_err(|e| format!("twin {kind:?} MSL compilation failed: {e}"))?;
+        let function = library
+            .get_function("gemm_ternary_tensor", None)
+            .map_err(|e| format!("twin {kind:?}: serving function not found: {e}"))?;
+        let pipeline = device
+            .new_compute_pipeline_state_with_function(&function)
+            .map_err(|e| format!("twin {kind:?} pipeline creation failed: {e}"))?;
+        let queue = device.new_command_queue();
+        Ok(Self {
+            device,
+            queue,
+            pipeline,
+            config,
+        })
+    }
+
+    fn upload_weights(&self, fx: &TernaryFixture) -> (Buffer, Buffer, Buffer) {
+        let mk = |data: &[u32]| {
+            self.device.new_buffer_with_data(
+                data.as_ptr() as *const core::ffi::c_void,
+                (data.len() * 4) as u64,
+                MTLResourceOptions::StorageModeManaged,
+            )
+        };
+        let scale = self.device.new_buffer_with_data(
+            fx.scale_f32.as_ptr() as *const core::ffi::c_void,
+            (fx.scale_f32.len() * 4) as u64,
+            MTLResourceOptions::StorageModeManaged,
+        );
+        (mk(&fx.pos_u32), mk(&fx.neg_u32), scale)
+    }
+
+    fn upload_f32(&self, data: &[f32]) -> Buffer {
+        self.device.new_buffer_with_data(
+            data.as_ptr() as *const core::ffi::c_void,
+            (data.len() * 4) as u64,
+            MTLResourceOptions::StorageModeManaged,
+        )
+    }
+
+    fn launch(&self, io: &GemmIo, fx: &TernaryFixture, p: usize) {
+        let cfg = self.config;
+        let grid = MTLSize {
+            width: p.div_ceil(cfg.nrb as usize) as u64,
+            height: fx.rows.div_ceil(cfg.nra as usize) as u64,
+            depth: 1,
+        };
+        let threadgroup = MTLSize {
+            width: u64::from(32 * cfg.nsg),
+            height: 1,
+            depth: 1,
+        };
+        let cmd = self.queue.new_command_buffer();
+        let enc = cmd.new_compute_command_encoder();
+        enc.set_compute_pipeline_state(&self.pipeline);
+        enc.set_buffer(0, Some(io.pos), 0);
+        enc.set_buffer(1, Some(io.neg), 0);
+        enc.set_buffer(2, Some(io.scale), 0);
+        enc.set_buffer(3, Some(io.input), 0);
+        enc.set_buffer(4, Some(io.output), 0);
+        enc.set_bytes(
+            5,
+            4,
+            (fx.blocks64 as u32).to_ne_bytes().as_ptr() as *const _,
+        );
+        enc.set_bytes(
+            6,
+            4,
+            (fx.groups_per_row as u32).to_ne_bytes().as_ptr() as *const _,
+        );
+        enc.set_bytes(7, 4, (fx.cols as u32).to_ne_bytes().as_ptr() as *const _);
+        enc.set_bytes(8, 4, (fx.rows as u32).to_ne_bytes().as_ptr() as *const _);
+        enc.set_bytes(9, 4, (p as u32).to_ne_bytes().as_ptr() as *const _);
+        enc.set_threadgroup_memory_length(0, cfg.threadgroup_mem_bytes());
+        for b in [io.pos, io.neg, io.scale, io.input] {
+            enc.use_resource(b, MTLResourceUsage::Read);
+        }
+        enc.use_resource(io.output, MTLResourceUsage::Write);
+        enc.dispatch_thread_groups(grid, threadgroup);
+        enc.end_encoding();
+        cmd.commit();
+        cmd.wait_until_completed();
+    }
+}
+
+/// The geometry + posture defines the serving contexts compile with — the
+/// SAME composition `compose_msl_source` produces at the promoted posture
+/// (relaxed is read from the module's own selector so the twin's matmul
+/// precision class matches serving; TWIN_RELAXED env overrides for the
+/// demote arm).
+fn crate_defines(config: MetalTileConfig) -> String {
+    let relaxed = match std::env::var("TWIN_RELAXED").as_deref() {
+        Ok("0") => false,
+        _ => riir_infer_gpu::gemm_ternary_metal_tensor::production_relaxed_precision(),
+    };
+    let relaxed_line = if relaxed {
+        "#define SWEEP_RELAXED true\n"
+    } else {
+        ""
+    };
+    format!("{}{relaxed_line}", config.defines())
+}
+
+/// Apply the named patches to the serving source. Patches are (find,
+/// replace, expected-count) — an unexpected count fails loud.
+fn patch(source: &str, patch_range: std::ops::Range<usize>) -> String {
+    let mut out = source.to_string();
+    for (find, replace, want) in TWIN_PATCHES[patch_range.clone()].iter() {
+        let got = out.matches(find).count();
+        assert_eq!(
+            got, *want,
+            "twin patch drifted: {find:?} occurs {got}x, the patch expects {want} — the \
+             serving source moved and this instrument must be re-read"
+        );
+        out = out.replace(find, replace);
+    }
+    out
 }
 
 // ---------------------------------------------------------------------------
@@ -727,7 +925,7 @@ fn g2_staging_price_incumbent_vs_dequant_probe() {
             let share = probe_ms / inc;
             let matmul_only = inc - probe_ms;
             let flops = 2.0 * (m as f64) * (n as f64) * (p as f64);
-            let tflops = flops / matmul_only / 1e9;
+            let tflops = flops / matmul_only / 1e12;
 
             // H5-device-f16 traffic delta: the A-side bytes a no-staging
             // variant reads over the packed-bit read, per launch, at the
@@ -751,6 +949,161 @@ fn g2_staging_price_incumbent_vs_dequant_probe() {
                 delta_gb,
                 delta_ms,
             );
+        }
+    }
+
+    print_provenance("end");
+}
+
+// ---------------------------------------------------------------------------
+// G3 — the in-situ ablation twins at the SERVING posture (default P=512):
+// incumbent − twin = the EXPOSED share (what other workgroups do NOT hide)
+// ---------------------------------------------------------------------------
+
+/// P = 512 IS the serving shape: the census frame is `I1146C_FRAMES`×512
+/// chunks and every GEMM launch inside it dispatches at P=512
+/// (`chunk.div_ceil(nrb)` tiles). `BENCH1167_PS` widens for the record.
+#[test]
+#[ignore = "requires macOS Metal + a GPU; run explicitly with --release"]
+fn g3_insitu_ablation_twins_at_serving_posture() {
+    print_provenance("start");
+
+    let shapes: Vec<(String, usize, usize)> = std::env::var("BENCH1167_SHAPES")
+        .ok()
+        .map(|v| {
+            v.split(',')
+                .map(|s| {
+                    let (m, n) = s.split_once('x').expect("shape as MxN");
+                    (format!("{m}x{n}"), m.parse().unwrap(), n.parse().unwrap())
+                })
+                .collect()
+        })
+        .unwrap_or_else(|| {
+            DEFAULT_SHAPES
+                .iter()
+                .map(|&(n, m, k)| (n.to_string(), m, k))
+                .collect()
+        });
+    let ps: Vec<usize> = std::env::var("BENCH1167_PS")
+        .ok()
+        .map(|v| v.split(',').map(|s| s.parse().unwrap()).collect())
+        .unwrap_or_else(|| vec![512]);
+    let rounds: usize = std::env::var("BENCH1167_ROUNDS")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(4);
+    let launches: usize = std::env::var("BENCH1167_LAUNCHES")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(2);
+
+    let cfg = MetalTileConfig::KTILE64;
+    let twins = [
+        (TwinKind::Baseline, "baseline"),
+        (TwinKind::NoBarriers, "no_barriers"),
+        (TwinKind::ConstDequant, "const_dequant"),
+        (TwinKind::NoStage, "no_stage"),
+    ];
+    let compiled: Vec<(TwinKind, &str, ServingTwin)> = twins
+        .iter()
+        .filter_map(|&(kind, name)| match ServingTwin::new(cfg, kind) {
+            Ok(t) => Some((kind, name, t)),
+            Err(e) => {
+                println!("  TWIN {name} COMPILE_FAIL — {e}");
+                None
+            }
+        })
+        .collect();
+    assert!(
+        !compiled.is_empty(),
+        "every twin failed to compile — the instrument calibrated nothing"
+    );
+    let relaxed = std::env::var("TWIN_RELAXED").as_deref() != Ok("0");
+    println!(
+        "\nG3 in-situ twins: {} compiled · relaxed_precision={relaxed} (serving selector) \
+         · rounds={rounds} launches={launches} · buffers uploaded once per (shape, P)",
+        compiled.len()
+    );
+
+    for shape_ref in shapes.iter() {
+        let (shape_name, m, n) = (shape_ref.0.as_str(), shape_ref.1, shape_ref.2);
+        let fx = TernaryFixture::build(m, n, 0x1167 ^ m as u64 ^ (n as u64) << 8);
+        let weights: Vec<(Buffer, Buffer, Buffer)> = compiled
+            .iter()
+            .map(|(_, _, t)| t.upload_weights(&fx))
+            .collect();
+
+        for &p in &ps {
+            let input = random_input(p * n, 0xBEEF);
+            let inputs: Vec<Buffer> = compiled
+                .iter()
+                .map(|(_, _, t)| t.upload_f32(&input))
+                .collect();
+            let outputs: Vec<Buffer> = compiled
+                .iter()
+                .map(|(_, _, t)| {
+                    t.device
+                        .new_buffer((p * m * 4) as u64, MTLResourceOptions::StorageModeManaged)
+                })
+                .collect();
+
+            // Warm every arm once.
+            for (ai, (_, _, t)) in compiled.iter().enumerate() {
+                let io = GemmIo {
+                    pos: &weights[ai].0,
+                    neg: &weights[ai].1,
+                    scale: &weights[ai].2,
+                    input: &inputs[ai],
+                    output: &outputs[ai],
+                };
+                t.launch(&io, &fx, p);
+            }
+
+            let n_arms = compiled.len();
+            let mut times = vec![vec![0.0f64; n_arms]; rounds];
+            for (r, row) in times.iter_mut().enumerate() {
+                for k in 0..n_arms {
+                    let ai = (r + k) % n_arms;
+                    let (_, _, t) = &compiled[ai];
+                    let io = GemmIo {
+                        pos: &weights[ai].0,
+                        neg: &weights[ai].1,
+                        scale: &weights[ai].2,
+                        input: &inputs[ai],
+                        output: &outputs[ai],
+                    };
+                    let t0 = std::time::Instant::now();
+                    for _ in 0..launches {
+                        t.launch(&io, &fx, p);
+                    }
+                    let dt = t0.elapsed().as_secs_f64() / launches as f64;
+                    assert!(dt > 0.0, "{shape_name} P={p} twin {ai}: zero-length timing");
+                    row[ai] = dt;
+                }
+            }
+
+            let median = |mut v: Vec<f64>| {
+                v.sort_by(|a, b| a.total_cmp(b));
+                v[v.len() / 2]
+            };
+            let meds: Vec<f64> = (0..n_arms)
+                .map(|ai| median(times.iter().map(|row| row[ai]).collect()))
+                .collect();
+            let base = meds[0];
+            println!(
+                "\n── {shape_name} (m={m} k={n}) P={p} — serving twin baseline {:.3} ms/launch ──",
+                base * 1e3
+            );
+            for (ai, (_, name, _)) in compiled.iter().enumerate() {
+                let med = meds[ai];
+                let exposed = base - med;
+                println!(
+                    "  {name:<13} {:>9.3} ms/launch   exposed (baseline − twin) {:>7.3} ms  ({:.1}% of wall)",
+                    med * 1e3,
+                    exposed * 1e3,
+                    exposed / base * 100.0
+                );
+            }
         }
     }
 
