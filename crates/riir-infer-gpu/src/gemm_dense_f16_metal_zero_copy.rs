@@ -27,8 +27,12 @@
 //! The cost is disclosed, not hidden: f16 is 16 bpw vs Q4_K's ~4.5 — the
 //! F16 load posture trades ~3.5× weight memory (~54 GB for the 27B — M5
 //! Ultra class, not the M3) and a bandwidth-bound decode for a tensor-core
-//! prefill. The posture is opt-in (`RIIR_QWEN38_DENSE_MM2D=1`), never the
-//! default, and both postures are benched. The Q4_K pipeline (Bench 1162/1163:
+//! prefill. The posture was opt-in (`RIIR_QWEN38_DENSE_MM2D=1`) until
+//! issue 1176 (2026-11-05) made the league posture the METAL default
+//! (demote-only: the exact literal `RIIR_QWEN38_DENSE_MM2D=0` restores the
+//! incumbent packed-load route); the ~100× bare-incumbent route measured
+//! in bench 944 is the trap the promotion retires. Both postures are
+//! benched. The Q4_K pipeline (Bench 1162/1163:
 //! the flip gate's S ratio needs the packed bytes; the dequant's ~3.4×
 //! arithmetic intensity is the measured latency-hiding lever) is the
 //! serving-byte alternative — verify-shape first, decode GEMV follow-up.
@@ -216,19 +220,27 @@ pub fn set_dense_relaxed_precision(on: bool) {
 }
 
 /// Whether the next dense context compiles `matmul2d` with relaxed
-/// precision: the explicit setter if pinned, else
-/// `RIIR_QWEN38_DENSE_MM2D_RELAXED=1` (exact literal, promote-only; parsed
-/// once, announced on stderr), else OFF (the incumbent bit-exact posture).
+/// precision: the explicit setter if pinned, else the env — DEMOTE-ONLY
+/// since issue 1176 (2026-11-05): the league posture's
+/// `RIIR_QWEN38_DENSE_MM2D_RELAXED=1` is the METAL default (bench 944's
+/// promoted ids were measured with it armed), and the exact literal "0"
+/// restores the pre-1176 incumbent bit-exact posture (the G1 parity
+/// lanes' posture — the demotion is byte-identical to the old unset
+/// behavior). Parsed once, the demotion announced on stderr; the armed
+/// state is disclosed by the dense/half-B arm boot banners.
 pub fn production_dense_relaxed_precision() -> bool {
     match PROD_RELAXED.load(std::sync::atomic::Ordering::Relaxed) {
         1 => false,
         2 => true,
         _ => *PROD_RELAXED_ENV.get_or_init(|| {
-            let on = std::env::var("RIIR_QWEN38_DENSE_MM2D_RELAXED").as_deref() == Ok("1");
-            if on {
-                eprintln!("[Issue 1150] dense-f16 matmul2d relaxed_precision = true");
+            let demoted = std::env::var("RIIR_QWEN38_DENSE_MM2D_RELAXED").as_deref() == Ok("0");
+            if demoted {
+                eprintln!(
+                    "[Issue 1176] dense-f16 matmul2d relaxed_precision DEMOTED to false by \
+                     RIIR_QWEN38_DENSE_MM2D_RELAXED=0 — the bit-exact incumbent"
+                );
             }
-            on
+            !demoted
         }),
     }
 }
