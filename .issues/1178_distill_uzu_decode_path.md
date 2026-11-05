@@ -1,6 +1,7 @@
 # Issue 1178 — distill the uzu Metal decode path: close the 4.4× dense decode gap (Bench 1167 datum)
 
-**Status:** OPEN — T0 DONE 2026-11-06 (the distill verdict: YES B− / LANE INTEL CRITICAL, Research 378 in riir-refine + the .distill/001 staged row; K-i1/K-i2 staged for the next kernel_opt batch after the T1 census prices them); T1 (decode frame-census, bmo) is the next actionable leg — unclaimed.
+**Status:** OPEN — T0 DONE 2026-11-06 (the distill verdict: YES B− / LANE INTEL CRITICAL, Research 378 in riir-refine + the .distill/001 staged row; K-i1/K-i2 staged for the next kernel_opt batch after the T1 census prices them); T1 CLAIMED (below); T2-T3 unclaimed.
+**Claimed:** m3-idle-1178t1@m3, 1793902411, expires 2026-11-07T18:13:00+00:00
 **Lease closed:** m3-idle-docsync@m3, epoch 1793900990, was expires 2026-11-08T00:00:00+00:00 (T0 landed same session — riir-infer `d95ab506`; the verdict: YES B− / lane intel CRITICAL, Research 378 in riir-refine `50b43d71`; T1-T3 pricing/bench legs remain unclaimed)
 
 ## The fire condition (measured 2026-11-05, Bench 1167, bmo M5 Ultra)
