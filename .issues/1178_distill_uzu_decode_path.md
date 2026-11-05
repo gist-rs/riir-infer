@@ -1,6 +1,7 @@
 # Issue 1178 — distill the uzu Metal decode path: close the 4.4× dense decode gap (Bench 1167 datum)
 
 **Status:** OPEN — staged 2026-11-05; the first task is a riir-refine `distill` verdict (deep read), not a code edit.
+**Claimed:** m3-idle-docsync@m3, 1793900990, expires 2026-11-08T00:00:00+00:00 (T0 distill verdict scope only — deep read + corpus dedup + verdict; T1-T3 pricing/bench legs stay unclaimed)
 
 ## The fire condition (measured 2026-11-05, Bench 1167, bmo M5 Ultra)
 
