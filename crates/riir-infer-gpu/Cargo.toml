@@ -261,6 +261,13 @@ params_handle_cache = ["cubecl_runtime"]
 exl3_gpu = ["cubecl_runtime", "riir-infer-core/exl3"]
 # Q4_K row-tiled GEMV variant (opt-in until its GOAT gate lands).
 q4k_rowtiled_gemv = ["cubecl_runtime"]
+# Issue 1178 T2a — route the qwen38 dense decode GEMV (batch 1) through the
+# auto-selecting Q4_K launcher so the Issue-609 factored kernel (measured
+# 3.27-3.37x over plane on M3 Metal; the decode path had been pinned to the
+# pre-609 batched-plane wrapper) is reachable. Implies the rowtiled feature
+# the factored body is gated behind. Price cell first — never joins
+# production without the T3 GOAT (G1 walk pin + e2e decode A/B on bmo).
+q4k_factored_decode_gemv = ["cubecl_runtime", "q4k_rowtiled_gemv"]
 # Explicit FMA contraction for the GEMV inner loops (CPU default for
 # quality-sensitive decoding remains production behavior).
 gemv_fma_contract = ["cubecl_runtime"]

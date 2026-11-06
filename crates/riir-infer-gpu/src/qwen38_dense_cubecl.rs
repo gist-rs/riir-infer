@@ -504,6 +504,18 @@ impl QuantWeight {
         unsafe {
             match self {
                 QuantWeight::Q4(h) => {
+                    // Issue 1178 T2a: at batch 1 (the decode shape — this
+                    // dispatch site is decode-only) the batched wrapper's
+                    // params indirection buys nothing and its plane kernel
+                    // predates the Issue-609 factored kernel (measured
+                    // 3.27-3.37x over plane on M3 Metal, Issue 609 T2). Route
+                    // the decode shape through the auto-selecting launcher so
+                    // the factored variant is reachable.
+                    #[cfg(feature = "q4k_factored_decode_gemv")]
+                    crate::gemv_q4k_cubecl::GemvQ4KCubeCL::launch::<ActiveRuntime>(
+                        client, h, input, output,
+                    );
+                    #[cfg(not(feature = "q4k_factored_decode_gemv"))]
                     crate::gemv_q4k_batched_cubecl::GemvQ4KBatchedCubeCL::launch::<ActiveRuntime>(
                         client, h, input, output, 1,
                     );
