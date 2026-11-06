@@ -1,6 +1,6 @@
 # Issue 1179 — the qwen3.8 specdec verify lane: the ABOVE-SERIAL half of the uzu beat (owner directive: >121 tok/s on bmo)
 
-**Status:** OPEN — filed 2026-11-06 (session zed-uzu-distill@amo, epoch 1793928926); unclaimed. The serial half lives in Issue 1178 (T2 claimed zed-8c98fa2a@m3 to 11-08); this issue owns the SPECDEC multiplier — the piece that turns a ~38-50 tok/s serial into the 121.1-class headline. No filed task owned it before this issue: 1178 names it ("ABOVE-SERIAL") and hands the distill feed (Research 378 T0(e)); riir-ai Issue 755 is the drafter-blocked chat lane this re-opens UNDER NEW REGIME.
+**Status:** OPEN — filed 2026-11-06 (session zed-uzu-distill@amo, epoch 1793928926); unclaimed. The serial half lives in Issue 1178 (T2 claimed zed-8c98fa2a@m3 to 11-08); this issue owns the SPECDEC multiplier — the piece that turns a ~38-50 tok/s serial into the 121.1-class headline. No filed task owned it before this issue: 1178 names it ("ABOVE-SERIAL") and hands the distill feed (Research 378 T0(e)); riir-ai Issue 755 is the drafter-blocked chat lane this re-opens UNDER NEW REGIME. **Claude verdict round 1: REVISE, all revisions applied same session** (head-instance not family; the `suffix_repetition_length` confound named; G1 reference re-based to the batched kernel at k=1; G3 added; the STOP bar preconditioned on 1178's serial; the size-gap disclosure; Path B plan opens in parallel now).
 
 ## The fire condition (Bench 1167 R2 decomposition, bmo M5 Ultra, 2026-11-06)
 
@@ -13,6 +13,8 @@ uzu 0.6.17 vendor-method reads **121.1 tok/s median** vs the published 129 (M5 M
 - uzu serial-equiv ≈ 38 tok/s ≈ 552 GB/s ≈ 67% of the serial roofline (the honest roofline the speculator multiplies; their R1 0.5.23 SERIAL cell read 52.9 = 94% — wheel-version-dependent).
 - ours: decode 12.17 tok/s (Bench 950 re-anchor, 82.13 ms/step; pre-1176 was 8.61 — the league arms already bought ~29%).
 
+**The 3.18 confound (verdict round 1):** the R2 vendor posture ran with `suffix_repetition_length=1` (0 is refused by the 0.6.17 API — the bench's one disclosed deviation). Whether that suffix arm contributes to the measured 3.18 is undisclosed by the wheel — and suffix/lookup is exactly the class refuted for chat text in-house (Bench 746/824). **This lane's reopen rests on the HEAD-ONLY number T1 measures**, never on 3.18 as quoted.
+
 **Why this lane exists (the arithmetic gate):**
 - Specdec alone on our serial: 12.17 × ~2.5-3 net ≈ **30-36 tok/s** — 3-4× under the bar.
 - Serial alone (Issue 1178's full prize, ~38-55): still under the bar without the multiplier.
@@ -22,22 +24,22 @@ uzu 0.6.17 vendor-method reads **121.1 tok/s median** vs the published 129 (M5 M
 
 The qwen3.8 chat specdec lane closed NEGATIVE on the 4090 (three-wall decomposition, riir-train Issue 493 + Benches 824/942/943): Wall 1 cycle cost (Q2_K drafter +48% slower draft), Wall 2 acceptance (z-lab head 2.648 max, training ladder monotone DOWN), Wall 3 compose (746/779 refuted); the ≥100 tok/s ask needed mean-len ≥4.0 = "a head 1.5× better than z-lab". The issue's own reopen conditions: **"a new head family or a target swap"**.
 
-**Both conditions are now met by measurement:**
-1. **New head family** — uzu's shipped speculator measures **3.18 tok/pass median (3.6-3.8 on the league fixture)** on the SAME model family at T=0.95 (Bench 1167 R2 speculator stats). That is 1.2-1.4× the z-lab ceiling the closure named as the acceptance wall.
-2. **Target-swap regime** — the bmo dense regime makes draft cost nearly free: a ~1.1 GB draft at M5-Ultra bandwidth ≈ 1.3-1.5 ms/token → k=4-6 draft ≈ 5-9 ms against an 82 ms serial step (6-11% overhead), vs the 4090 chat regime where draft cost was ~50%+ of the cycle. The closure's Wall 1 does not transfer.
+**How the conditions read today (verdict round 1 rewording):**
+1. **Target swap — cleanly met.** The bmo dense regime makes draft cost nearly free: a ~1.1 GB draft at M5-Ultra bandwidth ≈ 1.3-1.5 ms/token → k=4-6 draft ≈ 5-9 ms against an 82 ms serial step (6-11% overhead), vs the 4090 chat regime where draft cost was ~50%+ of the cycle. The closure's Wall 1 does not transfer.
+2. **Head — a new head INSTANCE above the named ceiling, not a new family.** z-lab are the DFlash authors (the league's DFlash2 port lineage), and uzu consumes the same DFlash/weaver draft tree (Research 378 T0(e)) — so uzu's speculator is the SAME family with a better-trained instance. The honest reopen form: the closure named acceptance (2.648) as the wall; an instance measuring above it satisfies the condition's intent. ⚠ The "1.2-1.4× the z-lab ceiling" comparison is **CROSS-FIXTURE** (3.18 = uzu's head, uzu's 4-bit target, T=0.95, 4096-token outputs — long outputs favour acceptance; 2.648 = a different fixture and setting) — never printed as a measurement. **T1 decides.**
 
-Also in-house precedent: the 4090 DFlash2 loop banked **1.242×** (49.9 vs 39 spec-less, league chat row) — the verify-loop machinery class is proven in our stack; what is missing is the METAL DENSE wiring + a head with uzu-class acceptance.
+Also in-house precedent: the 4090 DFlash2 loop banked **1.242×** (49.9 vs 39 spec-less, league chat row) — the verify-loop machinery class is proven in our stack; what is missing is the METAL DENSE wiring + a head with above-ceiling acceptance on OUR target.
 
-**Modelless note (do not re-litigate):** n-gram/lookup specdec stays REFUTED for chat-class text — Bench 746 grid ("lookup empty on novel text") + Bench 824 Wall 3. Not re-opened. (Exact greedy specdec would be a pure speed lever with output-identity, but measured headroom on chat text is empty; the head path is the one with measured 3.18.)
+**Modelless note (do not re-litigate):** n-gram/lookup specdec stays REFUTED for chat-class text — Bench 746 grid ("lookup empty on novel text") + Bench 824 Wall 3. Not re-opened. (Exact greedy specdec would be a pure speed lever with output-identity, but measured headroom on chat text is empty; the head path is the one with measured headroom.)
 
-## The two paths to a ≥3.2 tok/pass head
+## The two paths to an above-ceiling head
 
 **Path A — consume the vendor artifact (fastest unblock; owner-gated posture):**
-trymirai ships the speculator WITH the checkpoint: `trymirai/Qwen3.8-27B-M` on HF, **license apache-2.0**, speculator artifact **1,106,748,808 B, blake3 `f6c67be2…9638748`** (Bench 1167 R2 FairnessManifest). The MIT uzu engine source (Research 378, pin `1866d189`) documents the consuming format (`encodable_block/weaver.rs` + `dflash.rs` + the speculator-stats surface). Work = a riir-infer loader arm for the speculator format + the verify loop. **A1/A8 lineage holds:** weights-from-disk, never committed to any repo, blake3-pinned at load, the pin recorded beside every quoted cell.
+trymirai ships the speculator WITH the checkpoint: `trymirai/Qwen3.8-27B-M` on HF, **license apache-2.0**, speculator artifact **1,106,748,808 B, blake3 `f6c67be2…9638748`** (Bench 1167 R2 FairnessManifest). The MIT uzu engine source (Research 378, pin `1866d189`) documents the consuming format (`encodable_block/weaver.rs` + `dflash.rs` + the speculator-stats surface). Work = a riir-infer loader arm for the speculator format + the verify loop. **A1/A8 lineage holds:** weights-from-disk, never committed to any repo, blake3-pinned at load, the pin recorded beside every quoted cell. A loader reading a frozen vendor artifact serves the modelless mandate — no training happens in this repo.
 ⚠ **The unmeasured premise (T1):** their head was distilled against THEIR mirai-m 4-bit target; acceptance against OUR Q4_K_M GGUF target is UNMEASURED. Same-family, close-quant (their own card: "comparable to Unsloth UD-Q4_K_M") — plausible transfer, never assumed.
 
-**Path B — train our own head (the durable answer):**
-An EAGLE3/MTP-class draft head for Qwen3.8-27B, distilled in **riir-train on the 4090** (the standing GPU lane; riir-train 493 v1-v4 is the old family's training ladder — the new family's rung is the same unit with the new target class). Minted as an artifact; weights never enter repos; consumed by this lane's loader identically to Path A.
+**Path B — train our own head (the durable answer; plan opens NOW, in parallel):**
+An EAGLE3/MTP-class draft head for Qwen3.8-27B, distilled in **riir-train on the 4090** (the standing GPU lane; riir-train 493 v1-v4 is the old family's training ladder — the new family's rung is the same unit with the new target class). **Per the standing no-training-deferral rule, T5's PLAN opens now in parallel — only the 4090 RUN waits on the T1 numbers.** Path B is also the durable answer even if Path A passes: the vendor head is tuned to THEIR quant. Minted as an artifact; weights never enter repos; consumed by this lane's loader identically to Path A.
 
 ## Machinery inventory (consume, do not rebuild)
 
@@ -50,20 +52,21 @@ An EAGLE3/MTP-class draft head for Qwen3.8-27B, distilled in **riir-train on the
 | speculative fill (2-box form) | `riir-infer-dist/src/spec_fill.rs` (Plan 623 T5.1) | dist lane |
 | **MISSING on Metal dense** | the verify pass on the qwen38_wgpu dense path (a k-position batched forward — can ride the existing prefill/tensor mm2d machinery + per-position logits), KV rollback, accept/reject sampling (T=0.95 top-k=20), the draft loader | **this issue** |
 
-## Preregistered gates
+## Preregistered gates (verdict round 1 form)
 
-- **G1 correctness:** the accepted greedy stream is **byte-identical** to serial greedy (speculative decoding with exact verify is output-identical, not approximate). FNV/argmax walk pins per the league law. The sampled arm (T=0.95 top-k=20) is measured separately as distribution-preserving — never claimed bit-identical.
-- **G2 perf:** the vendor-method re-cell on bmo (the Bench-1167 harness twin: 1342-in prompt, T=0.95 top-k=20, 4096 out cap ×3, exclusive GPU via the queue, PROVENANCE + box-state lines mandatory, FairnessManifest rows). Intermediate bar **≥100 tok/s**; **BEAT bar > 121.1 median, same methodology** (the owner directive). A failed intermediate bar is a loud STOP, not a posture tweak.
+- **G1 correctness — the reference is the SAME batched verify kernel at k=1.** The accepted greedy stream is **byte-identical to a serial run through the same batched kernel with k=1** — isolating the specdec loop as the only difference. The incumbent serial-matvec lane is a DIFFERENT kernel (Metal reduction-order near-tie class): any batched-k vs serial-matvec walk delta is a kernel-order fact, not a specdec bug — flips are COUNTED and DISCLOSED with their top-2 logit margins (the Issue-940 first-index/order law), never silently absorbed, and this definition is fixed BEFORE T2 (never loosened after a failure). The sampled arm (T=0.95 top-k=20) uses **standard lossless rejection sampling — required**; a relaxed/typical-acceptance rule would inflate tok/pass and quietly break distribution preservation, so it is refused by construction. T1 additionally records whether uzu's own acceptance rule is lossless (read from the MIT source at pin `1866d189`).
+- **G2 perf:** the vendor-method re-cell on bmo (the Bench-1167 harness twin: 1342-in prompt, T=0.95 top-k=20, 4096 out cap ×3, exclusive GPU via the queue, PROVENANCE + box-state lines mandatory, FairnessManifest rows). **FairnessManifest carries the SIZE-GAP disclosure:** ours 16.81 GB vs their 14.53 GB ≈ 16% more bytes per pass under the same method — a real handicap, disclosed, bar unchanged (the owner directive is the raw number). Intermediate bar **≥100 tok/s**; **BEAT bar > 121.1 median, same methodology**. **Precondition (verdict round 1): the intermediate bar and its loud STOP fire only once Issue 1178 has landed serial ≥ ~40 tok/s** — before that, the arithmetic guarantees ~30-36 and a below-bar read is a DEPENDENCY result, not a lane failure.
+- **G3 no-regression (added, verdict round 1):** feature OFF — the serial lane stays byte-identical (league walk pins) and its decode tok/s stays within noise of Bench 950. The incumbent never pays for the opt-in.
 - **G4:** no new steady-state hot-path allocations.
 - **Feature posture:** `qwen38_specdec` opt-in, PROMOTE-ONLY env per the env-switch law; incumbent byte-identical when off. Promotion = GOAT + owner verdict.
 
 ## Tasks
 
-- [ ] **T1 — acceptance price cell (Path A gate, unblocks NOW — speed-independent):** load the vendor speculator (blake3 `f6c67be2…9638748`), run draft+verify acceptance against OUR Q4_K_M target on the league fixture (`uzu_t2_prompt.txt`) + the vendor prompt, greedy AND T=0.95. **Decision gate: ≥2.5 tok/pass on our target continues Path A; below → Path B scoping opens, Path A closes with the record.**
-- [ ] **T2 — the verify pass on Metal dense:** k-position batched forward reusing the prefill/tensor machinery + per-position logits readback; G1 greedy-identity harness vs serial (greedy walk digit-exact).
-- [ ] **T3 — draft loop + accept/rollback + the sampled arm:** KV discipline at the accept boundary, T=0.95 top-k=20 accept/reject, the speculator-stats readout (tok/pass, passes/s) matching the vendor harness's own instrumentation.
-- [ ] **T4 — e2e vendor-method re-cell on bmo + the record:** G2 bars above; row lands as WATCH/owner class in the league uzu block (the SCORED opponents remain llama.cpp + vLLM — this lane's bar is the owner directive, not a scoreboard gate; the Bench-831 format-cross law applies until a same-format cell exists).
-- [ ] **T5 — (Path B, if gated) riir-train head-distillation plan:** plan-first in riir-train, 4090 GPU, the new head family rung; cross-link the artifact pin here.
+- [ ] **T1 — acceptance price cell (Path A gate, unblocks NOW — speed-independent, HEAD-ONLY):** load the vendor speculator (blake3 `f6c67be2…9638748`) into a head-only harness — our loader has no suffix tree, so the measurement is naturally head-only — and run draft+verify acceptance against OUR Q4_K_M target on the league fixture (`uzu_t2_prompt.txt`) + the vendor prompt, greedy AND T=0.95 reported separately (greedy is the fairer cross-engine comparison). Record uzu's own acceptance rule (lossless or not) from the MIT source at pin `1866d189`. **Decision gate: ≥2.5 tok/pass head-only on our target continues Path A; below → Path A closes with the record, Path B (already planned) takes the 4090 run.**
+- [ ] **T2 — the verify pass on Metal dense:** k-position batched forward reusing the prefill/tensor machinery + per-position logits readback; G1 greedy-identity harness vs the batched-k=1 reference (definition fixed above, before any run).
+- [ ] **T3 — draft loop + accept/rollback + the sampled arm:** KV discipline at the accept boundary, T=0.95 top-k=20 **lossless rejection sampling**, the speculator-stats readout (tok/pass, passes/s) matching the vendor harness's own instrumentation.
+- [ ] **T4 — e2e vendor-method re-cell on bmo + the record:** G2 bars + precondition above; row lands as WATCH/owner class in the league uzu block (the SCORED opponents remain llama.cpp + vLLM — this lane's bar is the owner directive, not a scoreboard gate; the Bench-831 format-cross law applies until a same-format cell exists).
+- [ ] **T5 — Path B head-distillation PLAN (opens NOW, in parallel per the no-training-deferral rule):** plan-first in riir-train, 4090 GPU, the new-instance rung; **the 4090 RUN waits on the T1 numbers** (a passing T1 deprioritizes the run, never the plan); cross-link the artifact pin here.
 - [ ] Cross-links at every landing: 1178 (serial — the beat arithmetic needs both), 1168 (host sync — the resident-greedy loop is the natural verify-loop host), riir-ai 755 (the drafter-blocked lane this re-opens), Bench 824/942/943/950/951/1167, Research 378 (T0(e) trie-tree feed).
 
 ## Boundary
