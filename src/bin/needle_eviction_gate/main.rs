@@ -88,6 +88,22 @@
 //! hub-regime cell with `--sinks 0` vs `--sinks 4` once λ sensitivity
 //! exists.
 //!
+//! # Backends (Issue 1180 T2b)
+//!
+//! `general.architecture` picks the body (`backend.rs`): the qwen35-hybrid
+//! lane (unchanged — Bench 947 reproducible) or gemma-2 f16
+//! (`forward_gemma2_f16_evictable`, SentencePiece + BOS at position 0,
+//! token-by-token prefill; capped at gemma-2's 8K context).
+//!
+//! # The no-pin control (`--nopin-arms 1`)
+//!
+//! Adds, per budget arm, a `<arm>_nopin` twin whose eviction pin is
+//! `n_sink = 0` while the RIG LAYOUT (needle depths, which ride `--sinks`)
+//! stays identical — so both twins share one prompt and one full-cache
+//! reference. The cleaner control than a separate `--sinks 0` invocation,
+//! whose needle depths shift by `--sinks` tokens. `sink_row_survival`
+//! reports whether positions `0..max(--sinks,1)` are still resident.
+//!
 //! # Box state
 //!
 //! The bin prints wall times per arm and refuses to summarize without
@@ -100,14 +116,9 @@ use std::time::Instant;
 use anyhow::{Context, Result, bail};
 use riir_infer_core::corpus_text::load_corpus_text;
 use riir_infer_core::deltanet::kv_evict::{EvictLayerConfig, EvictPolicy, EvictorState};
-use riir_infer_core::deltanet::{
-    HybridCache, HybridForwardScratch, PrefillContext, effective_rotary_dim,
-    forward_qwen_deltanet_evictable, prefill_qwen_deltanet_chunk_into,
-};
-use riir_infer_core::gguf_loader::{GgufFile, load_qwen_deltanet_weights_gguf};
-use riir_infer_core::rope::RopeFreqTable;
-use riir_infer_core::tokenizer::BpeTokenizer;
-use riir_infer_core::types::{Config, DeltaNetLayerType};
+
+mod backend;
+use backend::{Model, Tok};
 
 use katgpt_core::kv_eviction::differential::DiffEvictConfig;
 #[cfg(feature = "sink_audit")]
@@ -176,6 +187,14 @@ struct Args {
     /// Needle placement (`depth_tokens` geometry) is rig layout and stays on
     /// `--sinks` regardless — the audit re-sizes PINS, not the rig.
     sink_audit: usize,
+    /// Issue 1180 T2b: 1 = add a `<arm>_nopin` twin per budget arm (pin
+    /// `n_sink = 0`, same rig layout, same full reference). 0 = off, the
+    /// pre-T2b arm list byte-for-byte.
+    nopin_arms: u8,
+    /// Issue 1180 T2b: 1 = plant every needle at a distinct slot (the
+    /// legacy slot formula drops needle 0 at `--hubs 0`; see the splice
+    /// site). 0 = the legacy layout, byte-identical.
+    plant_fix: u8,
     out: Option<PathBuf>,
 }
 
@@ -199,6 +218,8 @@ fn parse_args() -> Args {
         full_from: None,
         sinks: N_SINK,
         sink_audit: 0,
+        nopin_arms: 0,
+        plant_fix: 0,
         out: None,
     };
     let mut it = std::env::args().skip(1);
@@ -221,6 +242,8 @@ fn parse_args() -> Args {
             "--hubs" => a.hubs = val("hubs").parse().unwrap(),
             "--sinks" => a.sinks = val("sinks").parse().unwrap(),
             "--sink-audit" => a.sink_audit = val("sink-audit").parse().unwrap(),
+            "--nopin-arms" => a.nopin_arms = val("nopin-arms").parse().unwrap(),
+            "--plant-fix" => a.plant_fix = val("plant-fix").parse().unwrap(),
             "--lambda" => {
                 a.lambdas = val("lambda")
                     .split(',')
@@ -285,6 +308,11 @@ struct ArmReport {
     hub_rows: usize,
     /// Wall hub code rows (0 when `--hubs 0`).
     wall_rows: usize,
+    /// Issue 1180 T2b: fraction of the leading rows `0..max(--sinks, 1)`
+    /// still resident at answer end, averaged over attention layers (NaN in
+    /// pre-T2b JSONs).
+    #[serde(default = "nan_f32", deserialize_with = "de_nan_f32")]
+    sink_row_survival: f32,
     /// T4: neutral continuation NLL per token.
     generic_nll: Option<f32>,
     /// Runaway probe: greedy decode hit the cap without EOS.
@@ -305,6 +333,10 @@ impl ArmReport {
     fn retrieval(&self) -> f32 {
         self.retained as f32 / self.n_needles.max(1) as f32
     }
+}
+
+fn nan_f32() -> f32 {
+    f32::NAN
 }
 
 /// serde_json maps non-finite f32 to `null` on write; read that back as
@@ -360,24 +392,17 @@ fn upsert_report(path: &std::path::Path, fresh: &[ArmReport]) -> Result<()> {
 #[cfg(feature = "sink_audit")]
 fn audited_sink_policy(
     args: &Args,
-    weights: &riir_infer_core::deltanet::weights::QwenDeltaNetWeights,
-    config: &Config,
-    rope_freq: &RopeFreqTable,
+    model: &Model,
     filler_tokens: &[usize],
 ) -> Result<Option<SinkWindowPolicy>> {
     if args.sink_audit == 0 {
         return Ok(None);
     }
     let t_audit = Instant::now();
-    let census = riir_infer_core::deltanet::sink_audit::run_census(
-        weights,
-        config,
-        filler_tokens,
-        rope_freq,
-        args.sink_audit,
-    )
-    .map_err(anyhow::Error::msg)
-    .with_context(|| "sink-audit census pass")?;
+    let census = model
+        .census(filler_tokens, args.sink_audit)
+        .map_err(anyhow::Error::msg)
+        .with_context(|| "sink-audit census pass")?;
     let profile = &census.profile;
     let verdict = profile.verdict();
     let incumbent = SinkWindowPolicy::new(args.sinks, usize::MAX);
@@ -427,9 +452,7 @@ fn audited_sink_policy(
 #[cfg(not(feature = "sink_audit"))]
 fn audited_sink_policy(
     args: &Args,
-    _weights: &riir_infer_core::deltanet::weights::QwenDeltaNetWeights,
-    _config: &Config,
-    _rope_freq: &RopeFreqTable,
+    _model: &Model,
     _filler_tokens: &[usize],
 ) -> Result<Option<SinkWindowPolicy>> {
     if args.sink_audit > 0 {
@@ -446,32 +469,23 @@ fn main() -> Result<()> {
     let t_start = Instant::now();
 
     // ── Model + tokenizer ──
-    let t0 = Instant::now();
-    let (mut config, weights) = load_qwen_deltanet_weights_gguf(&args.model)
-        .with_context(|| format!("load {}", args.model.display()))?;
-    println!(
-        "# model: qwen35 hybrid | layers={} n_embd={} n_head={} n_kv_head={} head_dim={} vocab={} | load {:.1}s",
-        config.n_layer,
-        config.n_embd,
-        config.n_head,
-        config.n_kv_head,
-        config.head_dim,
-        config.vocab_size,
-        t0.elapsed().as_secs_f32()
-    );
-    let tok = {
-        let gguf = GgufFile::open(&args.model).context("re-open gguf for tokenizer")?;
-        BpeTokenizer::from_gguf(&gguf).context("gpt2 BPE tokenizer from gguf")?
-    };
+    let (mut model, tok) = Model::load(&args.model)?;
 
     // ── Cache ceiling: context + answer + generic + free-decode slack ──
-    config.block_size = args.context + 8 * args.needles * 16 + args.free_cap + 256;
-    let rope_freq = RopeFreqTable::new(config.rope_theta, effective_rotary_dim(&config));
+    model.set_block_size(args.context + 8 * args.needles * 16 + args.free_cap + 256);
 
     // ── Rig assembly ──
     let filler_text = load_corpus_text(&args.corpus)
         .with_context(|| format!("load corpus {}", args.corpus.display()))?;
-    let filler_tokens = tok.encode(&filler_text);
+    // gemma: BOS at position 0 (the serving path's sink token); qwen: none.
+    let filler_tokens = match model.bos(&tok) {
+        Some(bos) => {
+            let mut v = vec![bos];
+            v.extend(tok.encode(&filler_text));
+            v
+        }
+        None => tok.encode(&filler_text),
+    };
     if filler_tokens.len() < args.context {
         bail!(
             "corpus too short: {} tokens < context {}",
@@ -484,7 +498,7 @@ fn main() -> Result<()> {
     // Armed with `--sink-audit N`: one census pass over the first N filler
     // tokens, then every arm's eviction policy comes from `from_audit`.
     // Flag-off (0) is byte-identical: the policy is the `--sinks` incumbent.
-    let sink_policy = audited_sink_policy(&args, &weights, &config, &rope_freq, &filler_tokens)?
+    let sink_policy = audited_sink_policy(&args, &model, &filler_tokens)?
         .unwrap_or_else(|| SinkWindowPolicy::new(args.sinks, usize::MAX));
 
     // Needle sentences + their code spans (one pass).
@@ -588,11 +602,21 @@ fn main() -> Result<()> {
     let n_slots = args.needles + hub_blocks.len();
     let mut slot_of: Vec<Option<Splice>> = (0..n_slots).map(|_| None).collect();
     for i in 0..args.needles {
-        let s = ((i + 1) * n_slots / (args.needles + 1))
-            .saturating_sub(1)
-            .min(n_slots - 1);
+        // ⚠ Issue 1180 T2b finding: the legacy formula COLLIDES whenever
+        // n_slots < 2·needles (always at `--hubs 0`: needles 0 and 1 both map
+        // to slot 0, so needle 0 is never planted — its depth prints 0 and
+        // its Δ reads an unplanted code). Kept as the default so Bench 947 and
+        // the queued T2a cell stay reproducible; `--plant-fix 1` plants every
+        // needle at a distinct slot (`i·n_slots/needles`, strictly increasing).
+        let s = match args.plant_fix {
+            0 => ((i + 1) * n_slots / (args.needles + 1))
+                .saturating_sub(1)
+                .min(n_slots - 1),
+            _ => i * n_slots / args.needles,
+        };
         slot_of[s] = Some(Splice::Needle(i));
     }
+
     {
         let mut hb = hub_blocks.iter();
         for slot in slot_of.iter_mut() {
@@ -664,6 +688,24 @@ fn main() -> Result<()> {
     // cut it (last slot sits ~usable/(n_slots+1) before `context`, and one
     // block is far smaller) — but a corpus shorter than `context` would
     // shift every depth, so the spans are checked, not assumed.
+    // Every needle must have been spliced (a planted depth is ≥ sinks + 8 > 0).
+    // Legacy layout: a loud line, never a bail (Bench 947 reproducibility);
+    // `--plant-fix 1`: a bail.
+    let unplanted: Vec<usize> = (0..needles.len())
+        .filter(|&i| {
+            !splices
+                .iter()
+                .any(|(_, it)| matches!(it, Splice::Needle(j) if *j == i))
+        })
+        .collect();
+    if !unplanted.is_empty() {
+        match args.plant_fix {
+            0 => eprintln!(
+                "# ⚠ legacy needle layout: needles {unplanted:?} are NOT planted (slot collision) — their Δ reads an unplanted code; --plant-fix 1 plants all"
+            ),
+            _ => bail!("needles {unplanted:?} not planted under --plant-fix — rig assembly bug"),
+        }
+    }
     for (i, n) in needles.iter().enumerate() {
         if n.prompt_code_span.1 > args.context {
             bail!(
@@ -681,11 +723,7 @@ fn main() -> Result<()> {
     // The question begins exactly at `args.context` — the prefill boundary.
     prompt.extend_from_slice(&question_toks);
 
-    let n_attn_layers = weights
-        .layer_types
-        .iter()
-        .filter(|&&t| t == DeltaNetLayerType::Attention)
-        .count();
+    let n_attn_layers = model.layer_attn().iter().filter(|&&a| a).count();
     println!(
         "# rig: context={} needles={} hubs={} hub_code_rows={} wall_rows={} attn_layers={} prompt={} question={} answer={} fracs={:?} λ={} β={} W={} cadence={} defer={} sinks={}",
         args.context,
@@ -731,11 +769,15 @@ fn main() -> Result<()> {
         /// None = the full-cache reference (armed, budget MAX).
         policy: Option<EvictPolicy>,
         budget: usize,
+        /// Issue 1180 T2b: the `_nopin` twin's pin override (n_sink = 0);
+        /// None = the run's sink policy.
+        sinks: Option<SinkWindowPolicy>,
     }
     let mut arms: Vec<Arm> = vec![Arm {
         name: "full".into(),
         policy: None,
         budget: usize::MAX,
+        sinks: None,
     }];
     for &frac in &args.budget_fracs {
         let budget = (args.context as f32 * frac) as usize;
@@ -749,6 +791,7 @@ fn main() -> Result<()> {
                     args.window,
                 ))),
                 budget,
+                sinks: None,
             });
         }
         arms.push(Arm {
@@ -757,17 +800,43 @@ fn main() -> Result<()> {
                 args.window,
             ))),
             budget,
+            sinks: None,
         });
         arms.push(Arm {
             name: format!("usage@{tag}"),
             policy: Some(EvictPolicy::UsageRate),
             budget,
+            sinks: None,
         });
         arms.push(Arm {
             name: format!("random@{tag}"),
             policy: Some(EvictPolicy::Random { seed: args.seed }),
             budget,
+            sinks: None,
         });
+    }
+    if args.nopin_arms != 0 {
+        let twins: Vec<Arm> = arms
+            .iter()
+            .filter(|a| a.policy.is_some())
+            .map(|a| Arm {
+                name: format!("{}_nopin", a.name),
+                policy: a.policy,
+                budget: a.budget,
+                sinks: Some(SinkWindowPolicy::new(0, usize::MAX)),
+            })
+            .collect();
+        // Interleave each twin right after its pinned arm.
+        let mut merged: Vec<Arm> = Vec::with_capacity(arms.len() + twins.len());
+        let mut twins = twins.into_iter();
+        for a in arms {
+            let pinned = a.policy.is_some();
+            merged.push(a);
+            if pinned && let Some(t) = twins.next() {
+                merged.push(t);
+            }
+        }
+        arms = merged;
     }
 
     // ── Run ──
@@ -855,9 +924,7 @@ fn main() -> Result<()> {
         });
         let report = run_arm(
             &args,
-            &config,
-            &weights,
-            &rope_freq,
+            &model,
             &prompt,
             &needles,
             &hub_spans,
@@ -867,10 +934,10 @@ fn main() -> Result<()> {
             layer_cfg,
             &arm.name,
             &tok,
-            &sink_policy,
+            arm.sinks.as_ref().unwrap_or(&sink_policy),
         )?;
         println!(
-            "# arm {:<18} {:.1}s | evicted={:>6} events={:>3} idle={:>3} | genNLL={:.3} | out_len={}{} | surv n/h/w = {:.3}/{:.3}/{:.3}",
+            "# arm {:<18} {:.1}s | evicted={:>6} events={:>3} idle={:>3} | genNLL={:.3} | out_len={}{} | surv n/h/w = {:.3}/{:.3}/{:.3} sink={:.3}",
             report.name,
             report.wall_seconds,
             report.evicted_rows,
@@ -882,6 +949,7 @@ fn main() -> Result<()> {
             report.needle_row_survival,
             report.hub_row_survival,
             report.wall_row_survival,
+            report.sink_row_survival,
         );
         // Incremental delta vs the full arm (it always runs first) — the
         // verdict survives even if a later arm or the summary is lost.
@@ -1073,9 +1141,7 @@ fn argmax(logits: &[f32]) -> usize {
 #[allow(clippy::too_many_arguments)]
 fn run_arm(
     args: &Args,
-    config: &Config,
-    weights: &riir_infer_core::deltanet::weights::QwenDeltaNetWeights,
-    rope_freq: &RopeFreqTable,
+    model: &Model,
     prompt: &[usize],
     needles: &[Needle],
     hub_spans: &[(usize, usize)],
@@ -1084,20 +1150,15 @@ fn run_arm(
     answer_toks: &[usize],
     layer_cfg: Option<EvictLayerConfig>,
     name: &str,
-    tok: &BpeTokenizer,
+    tok: &Tok,
     // The eviction sink policy for THIS run: the `--sinks` incumbent, or the
     // audited policy when `--sink-audit` armed the census (Issue 981 T2).
     sink_policy: &SinkWindowPolicy,
 ) -> Result<ArmReport> {
     let t_arm = Instant::now();
-    let layer_types = weights.layer_types.clone();
-    let mut cache = HybridCache::with_layer_types(config, &layer_types);
-    let mut scratch = HybridForwardScratch::new(config);
-    let mut pctx = PrefillContext::new(config, args.chunk);
-    let layer_attn: Vec<bool> = layer_types
-        .iter()
-        .map(|&t| t == DeltaNetLayerType::Attention)
-        .collect();
+    let config = model.config();
+    let mut session = model.session(args.chunk);
+    let layer_attn: Vec<bool> = model.layer_attn();
     // The full-cache reference is ARMED with unlimited budget: one code
     // path for every arm (T3 pins armed-headroom ≡ unarmed).
     let cfg = layer_cfg.unwrap_or(EvictLayerConfig {
@@ -1116,34 +1177,27 @@ fn run_arm(
 
     let v = config.vocab_size;
     let mut logits = vec![0.0f32; v];
-    let mut x = vec![0.0f32; v.max(config.n_embd)];
 
     // ── Prefill in chunks (eviction runs from the first overshoot) ──
     // Progress line per chunk: a 64K arm runs ~2 h and the session watchdog
     // kills silent benchmark commands at ~30 min — one line per ~15-min
     // chunk keeps the run visibly alive. (stderr like the other progress
     // lines; the tee'd logs capture both streams.)
-    for (c, chunk) in prompt.chunks(args.chunk).enumerate() {
-        prefill_qwen_deltanet_chunk_into(
-            weights,
-            config,
-            &mut cache,
-            chunk,
-            c * args.chunk,
-            &mut scratch,
-            rope_freq,
-            &mut pctx,
-            &mut logits,
-            Some(&mut evictor),
-            None,
-        );
-        eprintln!(
-            "# [{name}] prefill chunk {}/{} at {:.0}s",
-            c + 1,
-            prompt.len().div_ceil(args.chunk),
-            t_arm.elapsed().as_secs_f32()
-        );
-    }
+    session.prefill(
+        model,
+        prompt,
+        args.chunk,
+        &mut evictor,
+        &mut logits,
+        |done| {
+            eprintln!(
+                "# [{name}] prefill chunk {}/{} at {:.0}s",
+                done.div_ceil(args.chunk),
+                prompt.len().div_ceil(args.chunk),
+                t_arm.elapsed().as_secs_f32()
+            );
+        },
+    );
     let prefill_done = t_arm.elapsed().as_secs_f32();
     eprintln!("# [{name}] phases: prefill={prefill_done:.1}s");
 
@@ -1206,17 +1260,7 @@ fn run_arm(
                 needle_cnt[i] += 1;
             }
         }
-        let out = forward_qwen_deltanet_evictable(
-            &mut x,
-            weights,
-            &mut cache,
-            tok_id,
-            seq_len,
-            config,
-            &mut scratch,
-            rope_freq,
-            &mut evictor,
-        );
+        let out = session.step(model, tok_id, seq_len, &mut evictor);
         prev_logits.copy_from_slice(&out[..v]);
         seq_len += 1;
     }
@@ -1240,6 +1284,7 @@ fn run_arm(
     let needle_row_survival = row_survival(&mut evictor, &layer_attn, &needle_spans);
     let hub_row_survival = row_survival(&mut evictor, &layer_attn, hub_spans);
     let wall_row_survival = row_survival(&mut evictor, &layer_attn, wall_spans);
+    let sink_row_survival = row_survival(&mut evictor, &layer_attn, &[(0, args.sinks.max(1))]);
     let survival_done = t_arm.elapsed().as_secs_f32();
     eprintln!(
         "# [{name}] phases: +survival={:.1}s",
@@ -1251,17 +1296,7 @@ fn run_arm(
     let mut generic_acc = 0.0f32;
     for &tok_id in &generic_toks {
         generic_acc += nats_log_softmax(&prev_logits, tok_id);
-        let out = forward_qwen_deltanet_evictable(
-            &mut x,
-            weights,
-            &mut cache,
-            tok_id,
-            seq_len,
-            config,
-            &mut scratch,
-            rope_freq,
-            &mut evictor,
-        );
+        let out = session.step(model, tok_id, seq_len, &mut evictor);
         prev_logits.copy_from_slice(&out[..v]);
         seq_len += 1;
     }
@@ -1281,17 +1316,7 @@ fn run_arm(
         if next == eos {
             break;
         }
-        let out = forward_qwen_deltanet_evictable(
-            &mut x,
-            weights,
-            &mut cache,
-            next,
-            seq_len,
-            config,
-            &mut scratch,
-            rope_freq,
-            &mut evictor,
-        );
+        let out = session.step(model, next, seq_len, &mut evictor);
         prev_logits.copy_from_slice(&out[..v]);
         seq_len += 1;
         output_len += 1;
@@ -1315,6 +1340,7 @@ fn run_arm(
         needle_row_survival,
         hub_row_survival,
         wall_row_survival,
+        sink_row_survival,
         hub_rows: hub_spans.iter().map(|(s0, s1)| s1 - s0).sum(),
         wall_rows: wall_spans.iter().map(|(s0, s1)| s1 - s0).sum(),
         generic_nll,

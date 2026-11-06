@@ -127,6 +127,12 @@ pub use gemma2::{
 };
 // Issue 013 T1: the hookable f16 forward (the lossy-V lane's entry point).
 pub use gemma2::forward_gemma2_f16_hk;
+// riir-infer Issue 1180 T2b — the gemma-2 f16 forward with an armed KV
+// evictor (the SinkHeavy protection half of the sink-audit T4 cell).
+#[cfg(feature = "kv_eviction")]
+mod gemma2_evict;
+#[cfg(feature = "kv_eviction")]
+pub use gemma2_evict::forward_gemma2_f16_evictable;
 
 // Issue 013 T1 (katgpt-rs Issue 883 P1 model-bound gate) — the lossy-V
 // seam state over the KVarN backend ± katgpt-core's `MeanRemovedValueCache`

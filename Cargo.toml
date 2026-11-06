@@ -733,7 +733,7 @@ required-features = ["svd_lbit"]
 # protection (the green-zero law). OPT-IN, measurement-only.
 [[bin]]
 name = "needle_eviction_gate"
-path = "src/bin/needle_eviction_gate.rs"
+path = "src/bin/needle_eviction_gate/main.rs"
 required-features = ["kv_eviction"]
 
 # Issue 1117 — FlashMemory budget (top-rho) decode gate: teacher-forced NLL /
