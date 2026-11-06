@@ -41,7 +41,7 @@ completion only). Census bin: `--release`, feature `sink_audit`.
      budget the head rows survive on score alone, so the 4→1 pin reduction is quality-neutral —
      the T4 neutral direction, with the caveat that the cell never stressed the pin.
    - The 2% pair DIFFERS (the wire-through consumed the audited policy — position 0's retention
-     moved genNLL 3.525 → 3.523 and needle-0 Δ 2.4627 → 2.4743): the audit's
+     moved genNLL 3.525 → 3.523 and needle-0 Δ 2.4627 → 2.4743 — ⚠ CORRECTION 2026-11-06 (riir-infer Issue 1180, `18ea8a15`): at `--hubs 0` needle 0 is never planted (its slot collides with needle 1), so the needle-0 Δ is NOT a retention reading and this cell's effective K was 3; the genNLL move stands): the audit's
      census → verdict → `from_audit` → `EvictorState` chain is proven end-to-end on the real gate.
 
 ## What did NOT run (disclosed, not folded)
