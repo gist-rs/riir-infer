@@ -887,3 +887,9 @@ pub mod qwen38_spec;
 pub mod qwen38_spec_cudarc;
 #[cfg(all(feature = "ternary_gemv_cuda_raw", not(target_os = "macos")))]
 pub mod qwen38_verify_mma;
+// Issue 1179 — the qwen3.8 specdec lane's shared half: the uzu DFlash
+// speculator consumed as a frozen vendor artifact (loader + CPU f32 draft;
+// the T1 harness bin composes it with the dense wgpu target + the keyed
+// accept above). Opt-in `qwen38_specdec`.
+#[cfg(feature = "qwen38_specdec")]
+pub mod qwen38_specdec;

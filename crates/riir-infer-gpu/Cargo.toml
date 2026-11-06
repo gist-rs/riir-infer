@@ -310,6 +310,11 @@ deltanet_recurrence_rowpar = []
 # prefill path composes; chunked prefill + batched prefill are the state-safe
 # prefill kernel set.
 qwen38_wgpu = ["cubecl_runtime", "ternary_gemv", "ternary_deltanet_chunked_prefill", "ternary_attention_batched_prefill", "deltanet_recurrence_rowpar", "deltanet_recurrence_parallel"]
+# Issue 1179 — the qwen3.8 specdec verify lane (the ABOVE-SERIAL half of the uzu
+# beat). T1 rides this feature: the head-only acceptance price cell (the uzu
+# DFlash speculator, CPU f32 draft + the keyed accept over the dense target).
+# Opt-in PROMOTE-ONLY per the env-switch law; feature-off is byte-identical.
+qwen38_specdec = ["qwen38_wgpu"]
 # Tree-masked batched verify kernels for DeltaNet layers (Issue 721). Mirrors
 # the engine gpu crate's feature (which additionally pulls the
 # speculative-decode dispatch there). The katgpt-core leg supplies the
@@ -632,6 +637,14 @@ required-features = ["ternary_gemv_cuda_raw"]
 [[bin]]
 name = "qwen38_wgpu_bench"
 required-features = ["qwen38_wgpu"]
+
+# Issue 1179 T1 — the head-only specdec acceptance price cell: the uzu DFlash
+# speculator (trymirai/Qwen3.8-27B-M speculator/, blake3-pinned at load) over
+# OUR Q4_K_M target via the dense wgpu forward. Weights-from-disk (A1/A8),
+# never committed; the artifact pin prints beside every cell.
+[[bin]]
+name = "qwen38_specdec_t1"
+required-features = ["qwen38_specdec"]
 
 # Issue 1150 follow-up 3 — the Q6_K tail-GEMV unit gate: the CubeCL kernel
 # vs the CPU canonical gemv_q6_k (quantize-then-GEMV + sign/bitfield

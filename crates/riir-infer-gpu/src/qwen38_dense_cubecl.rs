@@ -207,6 +207,21 @@ struct StateDims {
     kv: usize,
 }
 
+/// Issue 1179 T1: which state slot a checkpoint row restores.
+#[derive(Clone, Copy)]
+pub enum StateKind {
+    Gdn,
+    Conv,
+    KvKey,
+    KvValue,
+}
+
+/// Issue 1179 T1: a full recurrent-state snapshot (see
+/// [`Qwen38WgpuForward::checkpoint_state`]).
+pub struct StateCheckpoint {
+    rows: Vec<(usize, StateKind, Vec<u8>)>,
+}
+
 /// The forward. Construct with [`Qwen38WgpuForward::new`]; ingest prompts with
 /// [`ingest`](Self::ingest); decode with [`forward_token`](Self::forward_token).
 pub struct Qwen38WgpuForward {
@@ -1389,6 +1404,36 @@ impl Qwen38WgpuForward {
 
     /// One decode step: token at `pos`, returns the greedy argmax.
     pub fn forward_token(&mut self, token: u32, pos: usize) -> Result<u32, String> {
+        self.forward_token_inner(token, pos, None, None, None)
+    }
+
+    /// Issue 1179 T1: one decode step that additionally reads back the FULL
+    /// logits row and (optionally) the residual stream after the named
+    /// layers. The forward path is byte-identical to
+    /// [`Self::forward_token`] — the captures are pure read-backs of `x`
+    /// (20 KB per layer) and the logits handle.
+    /// Returns (argmax, logits, per-capture-layer x rows in `capture_layers`
+    /// order).
+    pub fn forward_token_capture(
+        &mut self,
+        token: u32,
+        pos: usize,
+        capture_layers: &[usize],
+    ) -> Result<(u32, Vec<f32>, Vec<Vec<f32>>), String> {
+        let mut logits = Vec::new();
+        let mut captures: Vec<Vec<f32>> = Vec::with_capacity(capture_layers.len());
+        let argmax = self.forward_token_inner(token, pos, Some(capture_layers), Some(&mut logits), Some(&mut captures))?;
+        Ok((argmax, logits, captures))
+    }
+
+    fn forward_token_inner(
+        &mut self,
+        token: u32,
+        pos: usize,
+        capture_layers: Option<&[usize]>,
+        mut logits_out: Option<&mut Vec<f32>>,
+        mut captures_out: Option<&mut Vec<Vec<f32>>>,
+    ) -> Result<u32, String> {
         if pos + 1 > self.max_ctx {
             return Err(format!("pos {} exceeds ctx {}", pos, self.max_ctx));
         }
@@ -1420,6 +1465,19 @@ impl Qwen38WgpuForward {
                 Qwen38WgpuLayerType::Deltanet => self.decode_gdn_layer(li, &lw, eps),
                 Qwen38WgpuLayerType::Attention => self.decode_attn_layer(li, &lw, pos, eps),
             }
+            // Issue 1179 T1: the residual stream AFTER layer li is the
+            // speculator's captured feature (uzu capture_residual = the
+            // post-layer residual add — the next layer's input).
+            if let Some(layers) = capture_layers
+                && layers.contains(&li)
+                    && let Some(out) = captures_out.as_deref_mut() {
+                        let row = self
+                            .client
+                            .read_one(self.x.clone())
+                            .map(|b| bytemuck::cast_slice(&b).to_vec())
+                            .unwrap_or_default();
+                        out.push(row);
+                    }
         }
 
         // Tail: norm + lm_head + argmax.
@@ -1465,6 +1523,9 @@ impl Qwen38WgpuForward {
             }
         }
         let logits = self.read_logits(&self.logits);
+        if let Some(out) = logits_out {
+            *out = logits.clone();
+        }
         self.pos = pos + 1;
         Ok(Self::argmax_first(&logits))
     }
@@ -1744,7 +1805,7 @@ impl Qwen38WgpuForward {
             let snap = timers
                 .as_ref()
                 .map(|t| (t.wte_upload_ms, t.gdn_ms, t.attn_ms, t.tail_logits_ms));
-            self.ingest_chunk_gpu(&tokens[p..p + self.chunk], base_pos + p, timers.as_mut())?;
+            self.ingest_chunk_gpu(&tokens[p..p + self.chunk], base_pos + p, timers.as_mut(), None)?;
             if let Some(t) = timers.as_mut() {
                 let t0 = std::time::Instant::now();
                 last = self.read_chunk_argmax();
@@ -1812,6 +1873,93 @@ impl Qwen38WgpuForward {
         Ok(last)
     }
 
+    /// Issue 1179 T1: ingest that additionally captures the residual stream
+    /// after `capture_layers` for EVERY ingested token (the speculator's
+    /// feature feed) and returns the LAST position's full logits (the
+    /// prefill sample's distribution). The forward path is byte-identical
+    /// to [`Self::ingest`] — the captures are pure x/x_b read-backs.
+    /// Returns (per-capture-layer rows, flattened [n_tokens × n_embd] in
+    /// layer order, last-position logits).
+    pub fn ingest_capture(
+        &mut self,
+        tokens: &[u32],
+        base_pos: usize,
+        capture_layers: &[usize],
+    ) -> Result<(Vec<Vec<f32>>, Vec<f32>), String> {
+        let mut feats: Vec<Vec<f32>> = capture_layers.iter().map(|_| Vec::new()).collect();
+        let mut last_logits = Vec::new();
+        let mut p = 0usize;
+        while tokens.len() - p >= self.chunk {
+            self.ingest_chunk_gpu(&tokens[p..p + self.chunk], base_pos + p, None, Some((capture_layers, &mut feats)))?;
+            last_logits = self.read_logits(&self.logits_b);
+            p += self.chunk;
+        }
+        if !tokens[p..].is_empty() {
+            for (i, &t) in tokens[p..].iter().enumerate() {
+                let (_, logits, caps) = self.forward_token_capture(t, base_pos + p + i, capture_layers)?;
+                for (l, cap) in caps.into_iter().enumerate() {
+                    feats[l].extend_from_slice(&cap);
+                }
+                last_logits = logits;
+            }
+        }
+        self.pos = base_pos + tokens.len();
+        Ok((feats, last_logits))
+    }
+
+    /// Issue 1179 T1: a full checkpoint of the recurrent state (GDN S,
+    /// conv, KV key/value — every Some handle). The verify loop restores
+    /// it when a specdec cycle's draft chain partially mismatches (the
+    /// recurrent states are cumulative — truncation cannot roll them back).
+    pub fn checkpoint_state(&self) -> StateCheckpoint {
+        let mut rows = Vec::new();
+        let dims = StateDims {
+            gdn: self.config.n_v_heads * self.config.head_k_dim * self.config.head_v_dim,
+            conv: self.config.l_qkv_out() * self.config.conv_kernel,
+            kv: self.max_ctx * self.config.kvd(),
+        };
+        let read = |client: &ComputeClient<ActiveRuntime>, h: &Handle, len: usize| -> Vec<u8> {
+            client.read_one(h.clone()).map(|b| b.to_vec()).unwrap_or_else(|_| vec![0u8; len * 4])
+        };
+        for (li, s) in self.gdn_states.iter().enumerate() {
+            if let Some(h) = s {
+                rows.push((li, StateKind::Gdn, read(&self.client, h, dims.gdn)));
+            }
+        }
+        for (li, s) in self.conv_states.iter().enumerate() {
+            if let Some(h) = s {
+                rows.push((li, StateKind::Conv, read(&self.client, h, dims.conv)));
+            }
+        }
+        for (li, s) in self.kv_key_caches.iter().enumerate() {
+            if let Some(h) = s {
+                rows.push((li, StateKind::KvKey, read(&self.client, h, dims.kv)));
+            }
+        }
+        for (li, s) in self.kv_value_caches.iter().enumerate() {
+            if let Some(h) = s {
+                rows.push((li, StateKind::KvValue, read(&self.client, h, dims.kv)));
+            }
+        }
+        StateCheckpoint { rows }
+    }
+
+    /// Restore a [`Self::checkpoint_state`] snapshot (writes every saved
+    /// buffer back at its layer slot).
+    pub fn restore_state(&mut self, cp: &StateCheckpoint) {
+        for (li, kind, bytes) in &cp.rows {
+            let slot = match kind {
+                StateKind::Gdn => self.gdn_states.get_mut(*li).and_then(|s| s.as_mut()),
+                StateKind::Conv => self.conv_states.get_mut(*li).and_then(|s| s.as_mut()),
+                StateKind::KvKey => self.kv_key_caches.get_mut(*li).and_then(|s| s.as_mut()),
+                StateKind::KvValue => self.kv_value_caches.get_mut(*li).and_then(|s| s.as_mut()),
+            };
+            if let Some(h) = slot {
+                self.client.write(h, cubecl::bytes::Bytes::from_bytes_vec(bytes.clone()));
+            }
+        }
+    }
+
     /// One batched pass over exactly `self.chunk` tokens (a multiple of 64 —
     /// GEMM tiles 32, chunked conv walks 64-token sub-chunks).
     ///
@@ -1823,6 +1971,7 @@ impl Qwen38WgpuForward {
         tokens: &[u32],
         base_pos: usize,
         mut timers: Option<&mut StageTimers>,
+        mut capture: Option<(&[usize], &mut Vec<Vec<f32>>)>,
     ) -> Result<(), String> {
         let e = self.config.n_embd;
         let vocab = self.config.vocab_size;
@@ -1889,6 +2038,19 @@ impl Qwen38WgpuForward {
                     )?;
                 }
             }
+            // Issue 1179 T1: the chunk's post-layer residual rows (the
+            // speculator's feature feed) — one [chunk × n_embd] read per
+            // captured layer per chunk.
+            if let Some((layers, sink)) = capture.as_mut()
+                && layers.contains(&li) {
+                    let idx = layers.iter().position(|&l| l == li).expect("capture idx");
+                    let rows = self
+                        .client
+                        .read_one(self.x_b.clone())
+                        .map(|b| bytemuck::cast_slice(&b).to_vec())
+                        .unwrap_or_else(|_| vec![0.0f32; p * e]);
+                    sink[idx].extend_from_slice(&rows);
+                }
             if let (Some(t), Some(t0)) = (timers.as_mut(), layer_t0) {
                 pollster::block_on(self.client.sync()).ok();
                 let ms = t0.elapsed().as_secs_f64() * 1e3;
