@@ -1,7 +1,8 @@
 # Issue 1178 — distill the uzu Metal decode path: close the 4.4× dense decode gap (Bench 1167 datum)
 
 **Status:** OPEN — T0 DONE 2026-11-06 (the distill verdict: YES B− / LANE INTEL CRITICAL, Research 378 in riir-refine + the .distill/001 staged row); T1 DONE 2026-11-06 (Bench 950: ffn 57.8%/52.2%, gdn 27.8%/25.2%, attn 9.7%→18.6% ctx-scaling, host floor 0.4%; premise re-anchored 116→82.1 ms/step); T2-T3 unclaimed. **R2 UPDATE (Bench 1167 Round 2, uzu 0.6.17): the 129 headline REPRODUCED at 121.1 tok/s median via SHIPPED specdec (3.18 tok/pass measured) — R1's "wheel refuses specdec" was VERSION-SCOPED (true 0.5.23/0.6.13, overturned 0.6.17); uzu serial-equiv re-based ~38 tok/s ≈ 67% roofline; T0(e) is now a read of shipped wheel code and the above-serial multiplier has a measured acceptance profile.**
-**Claimed:** zed-8c98fa2a@m3, 1793923469, expires 2026-11-08T00:04:00+00:00 (T2 — starting with the ffn-share price cell per Bench-950 shares; the 1177-item-2 f16-GEMV constraint respected: that lever stays amo's to 11-07, this claim prices the K-i2/K-i1/GEMV-tile laws, not the f16 path)
+**Claimed:** zed-8c98fa2a@m3, 1793923469, expires 2026-11-08T00:04:00+00:00
+(T2 — starting with the ffn-share price cell per Bench-950 shares; the 1177-item-2 f16-GEMV constraint respected: that lever stays amo's to 11-07, this claim prices the K-i2/K-i1/GEMV-tile laws, not the f16 path)
 **Lease closed:** m3-idle-1178t1@m3, epoch 1793902411, was expires 2026-11-07T18:13:00+00:00 (T1 landed same session — instrument `7b738c12` + Bench 950; T2-T3 remain unclaimed)
 **Lease closed:** m3-idle-docsync@m3, epoch 1793900990, was expires 2026-11-08T00:00:00+00:00 (T0 landed same session — riir-infer `d95ab506`; the verdict: YES B− / lane intel CRITICAL, Research 378 in riir-refine `50b43d71`; T1-T3 pricing/bench legs remain unclaimed)
 
