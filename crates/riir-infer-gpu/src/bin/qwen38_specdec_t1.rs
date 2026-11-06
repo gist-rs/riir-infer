@@ -236,6 +236,27 @@ fn main() {
             }
             std::fs::read_to_string(&fixture_path).unwrap_or_else(|e| panic!("[t1] fixture: {e}"))
         }
+        // The VENDOR REGIME (their 2.882 chain-only reference cell and the
+        // Bench-1167 R2 rows both ran through the chat template): a raw
+        // fixture prompt makes the target's greedy continuation start at
+        // <|im_end|> (token 248046, an EOS-class embedding ~9x smaller than
+        // content tokens) — a degenerate post-EOS lane where the distilled
+        // head is queried out-of-distribution and measured acceptance
+        // collapses to ~1.2 (measured 2026-11-06, Bench 952). The wrapper
+        // is the bundled qwen3.8 template's plain-message form (no system,
+        // no tools): default thinking ON opens the assistant turn inside
+        // <think>.
+        "chat" => {
+            if fixture_path.is_empty() {
+                eprintln!("--prompt chat needs --fixture <path>");
+                std::process::exit(2);
+            }
+            let fixture =
+                std::fs::read_to_string(&fixture_path).unwrap_or_else(|e| panic!("[t1] fixture: {e}"));
+            format!(
+                "<|im_start|>user\n{fixture}<|im_end|>\n<|im_start|>assistant\n<think>\n"
+            )
+        }
         "vendor" => {
             // Bench-1167 R2 calibration: one FILLER token count, then reps.
             let per = tok.encode(VENDOR_FILLER).len().max(1);
@@ -243,7 +264,7 @@ fn main() {
             VENDOR_FILLER.repeat(reps)
         }
         other => {
-            eprintln!("--prompt must be fixture|vendor (got {other})");
+            eprintln!("--prompt must be fixture|chat|vendor (got {other})");
             std::process::exit(2);
         }
     };
@@ -319,6 +340,12 @@ fn main() {
         );
     }
     let mut js: Vec<usize> = Vec::new();
+    // Verdict condition (3): per-position rank-0 — the draft's argmax token
+    // chain[p-1] vs the TARGET's own argmax at verify row p (unconditional:
+    // computed every cycle regardless of earlier rejects; same first-index
+    // strict-> tie rule the accept path uses, so rank-0 == "the accept
+    // would have taken it had it been reached").
+    let mut rank0_hits = vec![0usize; block - 1];
     let mut specdec_stream: Vec<u32> = Vec::new();
     #[allow(clippy::needless_range_loop)]
     let mut pos = prompt.len(); // the pending token's position (unforwarded)
@@ -513,6 +540,21 @@ fn main() {
                 }
             }
         }
+        if logits_flat.len() >= rows * vocab {
+            for (r, trow) in logits_flat.chunks_exact(vocab).enumerate().skip(1) {
+                let mut best = 0u32;
+                let mut bv = f32::NEG_INFINITY;
+                for (v, &x) in trow.iter().enumerate() {
+                    if x > bv {
+                        bv = x;
+                        best = v as u32;
+                    }
+                }
+                if chain[r - 1] == best {
+                    rank0_hits[r - 1] += 1;
+                }
+            }
+        }
         let acc = keyed_accept(&posture, &logits_flat, vocab, &chain, pos);
         let j = acc.j;
         js.push(j);
@@ -592,6 +634,14 @@ fn main() {
     for &j in &js {
         hist[j.min(16)] += 1;
     }
+    let n_cycles = js.len();
+    // survival[p] = P(j > p): the accept walked past draft position p (1-indexed).
+    let survival: Vec<f64> = (0..=block - 1)
+        .map(|p| {
+            js.iter().filter(|&&j| j > p).count() as f64 / n_cycles.max(1) as f64
+        })
+        .collect();
+    let rank0_rate: Vec<f64> = rank0_hits.iter().map(|&h| h as f64 / n_cycles.max(1) as f64).collect();
     let row = serde_json::json!({
         "cell": format!("t1_head_only_{}_{}", prompt_kind, mode),
         "mode": mode,
@@ -600,6 +650,10 @@ fn main() {
         "cycles": js.len(),
         "mean_j": mean,
         "j_histogram": hist,
+        "rank0_hits_by_position": rank0_hits,
+        "rank0_rate_by_position": rank0_rate,
+        "survival_by_position": survival,
+        "note_position_stats": "rank0[p] = draft argmax chain[p-1] == target argmax at verify row p, first-index ties, unconditional over all cycles; survival[p] = P(j > p)",
         "emitted_total": emitted_total,
         "spec_blake3": digest,
         "gguf_blake3": gguf_digest,

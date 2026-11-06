@@ -341,6 +341,24 @@ fn load_linear(st: &StFile, prefix: &str, out: usize, inn: usize) -> Result<W4, 
 pub type LinearRawParts = (Vec<f32>, Vec<f32>, Vec<f32>, Vec<f32>);
 pub type Layer0Dump = (Vec<f32>, Vec<f32>, Vec<f32>);
 
+/// Per-layer intermediates from [`DFlashCpu::draft_layers_dump`] (diag-only,
+/// Issue 1179 real-context parity probes).
+#[derive(Default)]
+pub struct DraftLayersDump {
+    /// Per layer: the mixer conv_pre output (the attention stage's input).
+    pub conv_pre: Vec<Vec<f32>>,
+    /// Per layer: prepared q, k, v (post per-head norm + rope), row-major.
+    pub q: Vec<Vec<f32>>,
+    pub k: Vec<Vec<f32>>,
+    pub v: Vec<Vec<f32>>,
+    /// Per layer: the post-add residual (what the shortcut carries forward).
+    pub shortcut: Vec<Vec<f32>>,
+    /// Per layer: the post-MLP output (the next layer's input).
+    pub layer_out: Vec<Vec<f32>>,
+    /// The output-normed final hidden (the draft readout input).
+    pub final_hidden: Vec<f32>,
+}
+
 pub fn load_linear_raw(
     st: &StFile,
     prefix: &str,
@@ -974,6 +992,87 @@ impl DFlashCpu {
         Ok((hidden, trace_lines))
     }
 
+    /// Diag twin of the draft pass that ALSO returns per-layer intermediates
+    /// for the Issue-1179 real-context parity probes: for each layer, the
+    /// post-MLP hidden (the next layer's input), the post-add shortcut, and
+    /// the mixer conv_pre output (the attention's input, so the probe can
+    /// compare PREPARED q/k/v on identical stage feeds).
+    pub fn draft_layers_dump(
+        &mut self,
+        t_prev_emb: &[f32],
+        mask_emb: &[f32],
+    ) -> Result<DraftLayersDump, String> {
+        let d = self.w.model_dim;
+        let rows = self.w.block_size;
+        let mut hidden = vec![0.0f32; rows * d];
+        hidden[..d].copy_from_slice(t_prev_emb);
+        for r in 1..rows {
+            hidden[r * d..(r + 1) * d].copy_from_slice(mask_emb);
+        }
+        let mut shortcut = hidden.clone();
+        let positions: Vec<usize> = (self.ctx_len..self.ctx_len + rows).collect();
+        let (cos, sin) = rope_tables(&positions);
+        let coef_count = 2 * (d / 16);
+        let mut dump = DraftLayersDump::default();
+        for (li, lw) in self.w.layers.iter().enumerate() {
+            if li == 0 {
+                shortcut.copy_from_slice(&hidden);
+            } else {
+                for i in 0..hidden.len() {
+                    shortcut[i] = hidden[i] + shortcut[i];
+                }
+            }
+            let mut h = hidden.clone();
+            rmsnorm(&mut h, rows, d, &lw.pre_mixer_norm);
+            let mut coefs_raw = lw.mixer_kernel_proj.rows(&h, rows);
+            let coefs = ConvCoefs {
+                raw: std::mem::take(&mut coefs_raw),
+                coef_count,
+            };
+            conv_forward(&mut h, rows, d, &lw.mixer_conv_pre, 2, &coefs, false);
+            dump.conv_pre.push(h.clone());
+            let (q, k, v) = self.dump_prepare_qkv(li, &h, rows, &cos, &sin);
+            dump.q.push(q);
+            dump.k.push(k);
+            dump.v.push(v);
+            let attn = self.attention_block(li, &h, rows, &cos, &sin);
+            let mut ha = attn;
+            conv_forward(&mut ha, rows, d, &lw.mixer_conv_post, 2, &coefs, true);
+            for i in 0..ha.len() {
+                shortcut[i] = ha[i] + shortcut[i];
+            }
+            let mut h2 = shortcut.clone();
+            rmsnorm(&mut h2, rows, d, &lw.pre_mlp_norm);
+            let mut coefs_raw2 = lw.mlp_kernel_proj.rows(&h2, rows);
+            let coefs2 = ConvCoefs {
+                raw: std::mem::take(&mut coefs_raw2),
+                coef_count,
+            };
+            conv_forward(&mut h2, rows, d, &lw.mlp_conv_pre, 2, &coefs2, false);
+            let up = lw.mlp_up.rows(&h2, rows);
+            let hidden_dim = lw.mlp_up.out / 2;
+            let mut act = vec![0.0f32; rows * hidden_dim];
+            for r in 0..rows {
+                for i in 0..hidden_dim {
+                    let v2 = up[r * 2 * hidden_dim + i];
+                    let g = up[r * 2 * hidden_dim + hidden_dim + i];
+                    act[r * hidden_dim + i] = g / (1.0 + (-g).exp()) * v2;
+                }
+            }
+            let mut h3 = lw.mlp_down.rows(&act, rows);
+            conv_forward(&mut h3, rows, d, &lw.mlp_conv_post, 2, &coefs2, true);
+            dump.shortcut.push(shortcut.clone());
+            dump.layer_out.push(h3.clone());
+            hidden = h3;
+        }
+        for i in 0..hidden.len() {
+            hidden[i] += shortcut[i];
+        }
+        rmsnorm(&mut hidden, rows, d, &self.w.output_norm);
+        dump.final_hidden = hidden;
+        Ok(dump)
+    }
+
     /// One draft layer's attention over [prefix KV; block] — bidirectional
     /// within the block (is_causal=false), the prefix visible under the
     /// ±window/2 rule, GQA 32q/8kv, per-head q/k RMS norms, half-split rope
@@ -986,6 +1085,7 @@ impl DFlashCpu {
         cos: &[f32],
         sin: &[f32],
     ) -> Vec<f32> {
+        let (q, k, v) = self.prepare_qkv(li, h, rows, cos, sin);
         let lw = &self.w.layers[li];
         let hd = DRAFT_HEAD_DIM;
         let qh = DRAFT_HEADS;
@@ -994,61 +1094,8 @@ impl DFlashCpu {
         let gqa = qh / kvh;
         let prefix = self.ctx_len;
         let half_win = DRAFT_WINDOW / 2;
-
-        let qkvg = lw.qkvg.rows(h, rows);
         let q_dim = qh * hd;
         let kv_dim = kvh * hd;
-        // Per-head q/k RMS norms, then rope (uzu prepare order: norm → rope).
-        // qkvg is ROW-major [rows][q|k|v] (W4::rows) — slice PER ROW; the
-        // original section-major cut (q = all rows' q) was the verdict-1 root
-        // cause: row 0's q correct, every other row a q/k/v mix, k/v entirely
-        // rows 10-15's bytes.
-        let mut q = vec![0.0f32; rows * q_dim];
-        let mut k = vec![0.0f32; rows * kv_dim];
-        let mut v = vec![0.0f32; rows * kv_dim];
-        for r in 0..rows {
-            let src = &qkvg[r * (q_dim + 2 * kv_dim)..(r + 1) * (q_dim + 2 * kv_dim)];
-            q[r * q_dim..(r + 1) * q_dim].copy_from_slice(&src[..q_dim]);
-            k[r * kv_dim..(r + 1) * kv_dim].copy_from_slice(&src[q_dim..q_dim + kv_dim]);
-            v[r * kv_dim..(r + 1) * kv_dim].copy_from_slice(&src[q_dim + kv_dim..]);
-        }
-        for r in 0..rows {
-            for head in 0..qh {
-                head_rmsnorm(
-                    &mut q[r * q_dim + head * hd..r * q_dim + (head + 1) * hd],
-                    &lw.query_norm,
-                );
-            }
-            for head in 0..kvh {
-                head_rmsnorm(
-                    &mut k[r * kv_dim + head * hd..r * kv_dim + (head + 1) * hd],
-                    &lw.key_norm,
-                );
-            }
-        }
-        // RoPE is PER-HEAD (128 dims): heads 1..31 of each row were left
-        // un-roped when the whole [rows][q_dim] buffer was passed in once —
-        // the bisect's smoking gun (their attention 42.75 vs mine 77.28 on
-        // identical input).
-        for r in 0..rows {
-            let (rc, rs) = (&cos[r * hd..(r + 1) * hd], &sin[r * hd..(r + 1) * hd]);
-            for head in 0..qh {
-                apply_rope(
-                    &mut q[r * q_dim + head * hd..r * q_dim + (head + 1) * hd],
-                    1,
-                    rc,
-                    rs,
-                );
-            }
-            for head in 0..kvh {
-                apply_rope(
-                    &mut k[r * kv_dim + head * hd..r * kv_dim + (head + 1) * hd],
-                    1,
-                    rc,
-                    rs,
-                );
-            }
-        }
 
         let mut out = vec![0.0f32; rows * q_dim];
         for r in 0..rows {
@@ -1112,6 +1159,90 @@ impl DFlashCpu {
             }
         }
         lw.attn_out.rows(&out, rows)
+    }
+
+    /// The attention PREPARE stage only (diag seam for the Issue-1179
+    /// dump-vs-prepare parity probes): qkvg → per-row q|k|v slice → per-head
+    /// RMS norms → per-head rope. Returns (q, k, v) post-prepare, row-major.
+    pub fn dump_prepare_qkv(
+        &self,
+        li: usize,
+        h: &[f32],
+        rows: usize,
+        cos: &[f32],
+        sin: &[f32],
+    ) -> (Vec<f32>, Vec<f32>, Vec<f32>) {
+        self.prepare_qkv(li, h, rows, cos, sin)
+    }
+
+    fn prepare_qkv(
+        &self,
+        li: usize,
+        h: &[f32],
+        rows: usize,
+        cos: &[f32],
+        sin: &[f32],
+    ) -> (Vec<f32>, Vec<f32>, Vec<f32>) {
+        let lw = &self.w.layers[li];
+        let hd = DRAFT_HEAD_DIM;
+        let qh = DRAFT_HEADS;
+        let kvh = DRAFT_GROUPS;
+        let q_dim = qh * hd;
+        let kv_dim = kvh * hd;
+
+        let qkvg = lw.qkvg.rows(h, rows);
+        // Per-head q/k RMS norms, then rope (uzu prepare order: norm → rope).
+        // qkvg is ROW-major [rows][q|k|v] (W4::rows) — slice PER ROW; the
+        // original section-major cut (q = all rows' q) was the verdict-1 root
+        // cause: row 0's q correct, every other row a q/k/v mix, k/v entirely
+        // rows 10-15's bytes.
+        let mut q = vec![0.0f32; rows * q_dim];
+        let mut k = vec![0.0f32; rows * kv_dim];
+        let mut v = vec![0.0f32; rows * kv_dim];
+        for r in 0..rows {
+            let src = &qkvg[r * (q_dim + 2 * kv_dim)..(r + 1) * (q_dim + 2 * kv_dim)];
+            q[r * q_dim..(r + 1) * q_dim].copy_from_slice(&src[..q_dim]);
+            k[r * kv_dim..(r + 1) * kv_dim].copy_from_slice(&src[q_dim..q_dim + kv_dim]);
+            v[r * kv_dim..(r + 1) * kv_dim].copy_from_slice(&src[q_dim + kv_dim..]);
+        }
+        for r in 0..rows {
+            for head in 0..qh {
+                head_rmsnorm(
+                    &mut q[r * q_dim + head * hd..r * q_dim + (head + 1) * hd],
+                    &lw.query_norm,
+                );
+            }
+            for head in 0..kvh {
+                head_rmsnorm(
+                    &mut k[r * kv_dim + head * hd..r * kv_dim + (head + 1) * hd],
+                    &lw.key_norm,
+                );
+            }
+        }
+        // RoPE is PER-HEAD (128 dims): heads 1..31 of each row were left
+        // un-roped when the whole [rows][q_dim] buffer was passed in once —
+        // the bisect's smoking gun (their attention 42.75 vs mine 77.28 on
+        // identical input).
+        for r in 0..rows {
+            let (rc, rs) = (&cos[r * hd..(r + 1) * hd], &sin[r * hd..(r + 1) * hd]);
+            for head in 0..qh {
+                apply_rope(
+                    &mut q[r * q_dim + head * hd..r * q_dim + (head + 1) * hd],
+                    1,
+                    rc,
+                    rs,
+                );
+            }
+            for head in 0..kvh {
+                apply_rope(
+                    &mut k[r * kv_dim + head * hd..r * kv_dim + (head + 1) * hd],
+                    1,
+                    rc,
+                    rs,
+                );
+            }
+        }
+        (q, k, v)
     }
 }
 
