@@ -1,7 +1,7 @@
 //! Issue 1168 T1 — the readback floor probe: decompose the per-token
 //! `read_one` cost into fixed sync vs bytes vs tail-wait components.
 //!
-//! The triage (`.issues/1168_decode_host_sync_lever_triage.md`) measured — via
+//! The triage (Issue 1168, CLOSED 2026-11-06 — record in HISTORY.md; arc = Plan 626) measured — via
 //! riir-ai bench_763's own census log — that the decode lane pays ~3.14 ms/token
 //! between the per-token-sync e2e (Phase A, 18.48 ms/tok) and the GPU-bound
 //! floor (Phase B dispatch-only + amortized drain, 15.34 ms/tok = 65.2 tok/s,

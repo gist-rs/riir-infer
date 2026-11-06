@@ -121,7 +121,7 @@ No novelty claim here (llama.cpp `--prompt-cache` file persistence and the LMCac
 
 ## 5. Actionable follow-ups
 
-See `.issues/1108` — the inventory: (1) Track-A arm behind a feature flag with its consumer trigger named, (2) the freeze/thaw prompt-cache persistence delta folded into the Issue-742 serving-lane trigger, (3) the `distill`-skill run on this repo (kernel_opt/rust_perf) when the mining queue next opens, (4) league-watch note (no watch_repo row — MLX-only, cannot serve the league models).
+Issue 1108 (CLOSED + removed 2026-11-06, see HISTORY.md) carried the inventory — (2)–(4) DONE; (1) Track A stays PARKED here on its consumer trigger (no plan until a consumer arms): (1) Track-A arm behind a feature flag with its consumer trigger named, (2) the freeze/thaw prompt-cache persistence delta folded into the Issue-742 serving-lane trigger, (3) the `distill`-skill run on this repo (kernel_opt/rust_perf) when the mining queue next opens, (4) league-watch note (no watch_repo row — MLX-only, cannot serve the league models).
 
 ## Summary
 
