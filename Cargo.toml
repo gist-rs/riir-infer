@@ -317,6 +317,9 @@ kv_eviction = [
 sink_audit = [
     "kv_eviction",
     "deltanet_ternary_inference",
+    # Issue 1180 T1: the dense-body census (gemma-2 f16 / llama) rides the
+    # m_Y probe's leading profile — `transformer::sink_audit_dense`.
+    "attention_to_answer",
 ]
 
 # fitted_v_tables (riir-infer Issue 013 T1, 2026-09-28): the model-bound P1

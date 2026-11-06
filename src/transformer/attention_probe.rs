@@ -38,6 +38,11 @@ pub struct AttnSpanProbe {
     /// Probed rows per `(layer, head)` cell (a row is counted only once its
     /// context covers the span start).
     pub rows: u64,
+    /// Leading-position mass `Σ_{layer,head,row} p_{r,k}` for key `k` in
+    /// `0..profile.len()` — the sink-audit census (katgpt-rs Issue 981 /
+    /// riir-infer Issue 1180). Empty (the default) = off. Accumulated in the
+    /// forward's fixed order (layers, heads, rows ascending) into f64.
+    pub profile: Vec<f64>,
     n_head: usize,
     /// One score row of scratch (`block_size`), owned so the forward can
     /// borrow the probe beside its own buffers.
@@ -53,14 +58,23 @@ impl AttnSpanProbe {
             armed: false,
             mass: vec![0.0; n_layer * n_head],
             rows: 0,
+            profile: Vec::new(),
             n_head,
             scratch: vec![0.0; block_size],
         }
     }
 
+    /// Also accumulate the leading-position profile over keys
+    /// `0..width` (see [`Self::profile`]).
+    pub fn with_leading_profile(mut self, width: usize) -> Self {
+        self.profile = vec![0.0; width];
+        self
+    }
+
     /// Clear the table (keeps the sizing).
     pub fn reset(&mut self) {
         self.mass.fill(0.0);
+        self.profile.fill(0.0);
         self.rows = 0;
         self.armed = false;
     }
@@ -131,7 +145,8 @@ impl AttnSpanProbe {
         } = shape;
         let lo = self.span.start.min(t_n);
         let hi = self.span.end.min(t_n);
-        if lo >= hi {
+        let width = self.profile.len().min(t_n);
+        if lo >= hi && width == 0 {
             return;
         }
         let row = &mut self.scratch[..t_n];
@@ -148,8 +163,13 @@ impl AttnSpanProbe {
                 };
             }
             let z = exp_row(row, floor);
-            let span_mass: f32 = row[lo..hi].iter().sum();
-            self.mass[layer * n_head + h] += f64::from(span_mass / z);
+            if lo < hi {
+                let span_mass: f32 = row[lo..hi].iter().sum();
+                self.mass[layer * n_head + h] += f64::from(span_mass / z);
+            }
+            for (acc, &p) in self.profile[..width].iter_mut().zip(&row[..width]) {
+                *acc += f64::from(p / z);
+            }
         }
     }
 }
@@ -243,6 +263,42 @@ mod tests {
         for t in total {
             assert!((t - 1.0).abs() < 1e-5, "{t}");
         }
+    }
+
+    /// The leading profile equals the per-key span masses (the same row),
+    /// accumulates with an EMPTY span, and a full-width profile sums to one
+    /// per head (the sink-audit census, riir-infer Issue 1180).
+    #[test]
+    fn leading_profile_matches_per_key_spans_and_sums_to_one() {
+        let (hd, t_n, nh) = (8usize, 24usize, 2usize);
+        let lcg = |i: usize| (((i * 2_654_435_761) % 1_000_003) as f32 / 1_000_003.0) * 2.0 - 1.0;
+        let k: Vec<f32> = (0..t_n * hd).map(|i| 2.0 * lcg(i + 5)).collect();
+        let q: Vec<f32> = (0..nh * hd).map(|i| 2.0 * lcg(i + 91)).collect();
+        let shape = ProbeShape {
+            n_head: nh,
+            n_kv_head: 1,
+            kv_dim: hd,
+            head_dim: hd,
+            t_n,
+            scale: 0.5,
+            softcap: 50.0,
+        };
+        let mut prof = AttnSpanProbe::new(1, nh, t_n).with_leading_profile(t_n);
+        prof.observe_layer(0, &q, &k, shape, None);
+        assert_eq!(prof.mass, vec![0.0; nh], "empty span adds no span mass");
+        let total: f64 = prof.profile.iter().sum();
+        assert!((total - nh as f64).abs() < 1e-5, "{total}");
+        for key in [0usize, 7, 23] {
+            let mut p = AttnSpanProbe::new(1, nh, t_n);
+            p.span = key..key + 1;
+            p.observe_layer(0, &q, &k, shape, None);
+            let want = p.mass[0] + p.mass[1];
+            assert!((prof.profile[key] - want).abs() < 1e-9, "key {key}");
+        }
+        // A profile wider than the row is clamped to the row.
+        let mut wide = AttnSpanProbe::new(1, nh, t_n + 8).with_leading_profile(t_n + 8);
+        wide.observe_layer(0, &q, &k, shape, None);
+        assert_eq!(&wide.profile[t_n..], &[0.0; 8]);
     }
 
     /// Same partition law on the FLOORED distribution the forward uses.

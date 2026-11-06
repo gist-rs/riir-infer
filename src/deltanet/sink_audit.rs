@@ -134,11 +134,8 @@ pub fn run_census(
         ));
     }
     let census_config = census_posture(config, n_positions);
-    let mut cache = HybridCache::with_layer_types_bounded(
-        &census_config,
-        &weights.layer_types,
-        n_positions,
-    );
+    let mut cache =
+        HybridCache::with_layer_types_bounded(&census_config, &weights.layer_types, n_positions);
     let mut scratch = HybridForwardScratch::new(&census_config);
     arm_capture(&mut scratch, config, &weights.layer_types, n_positions);
 
@@ -157,7 +154,13 @@ pub fn run_census(
             rope_freq,
         );
     }
-    finish_census(&mut scratch, &cache, &census_config, n_positions, tokens_used)
+    finish_census(
+        &mut scratch,
+        &cache,
+        &census_config,
+        n_positions,
+        tokens_used,
+    )
 }
 
 /// The TERNARY census (Issue 981 follow-up (b)): the same pass over the
@@ -186,11 +189,8 @@ pub fn run_census_ternary(
         ));
     }
     let census_config = census_posture(config, n_positions);
-    let mut cache = HybridCache::with_layer_types_bounded(
-        &census_config,
-        &weights.layer_types,
-        n_positions,
-    );
+    let mut cache =
+        HybridCache::with_layer_types_bounded(&census_config, &weights.layer_types, n_positions);
     let mut scratch = HybridForwardScratch::new(&census_config);
     arm_capture(&mut scratch, config, &weights.layer_types, n_positions);
 
@@ -209,7 +209,13 @@ pub fn run_census_ternary(
             rope_freq,
         );
     }
-    finish_census(&mut scratch, &cache, &census_config, n_positions, tokens_used)
+    finish_census(
+        &mut scratch,
+        &cache,
+        &census_config,
+        n_positions,
+        tokens_used,
+    )
 }
 
 /// The census posture shared by both bodies: the cache is sized to exactly
@@ -309,27 +315,14 @@ fn harvest_profile(
     let first_n_profile = finalize_profile(&acc, capture.attn_layers.len(), n_head, n_positions);
 
     // ── M-Act: mean per-layer max V-row L2 norm (disclosed, not verdict-bearing)
-    let mut layer_maxes = Vec::with_capacity(capture.attn_layers.len());
-    for &layer_idx in &capture.attn_layers {
-        let v = cache.kv_cache.layers[layer_idx].value.as_slice();
-        let mut max_sq = 0.0f64;
-        for pos in 0..n_positions {
-            let row_v = &v[pos * kvd..(pos + 1) * kvd];
-            let mut sq = 0.0f64;
-            for &x in row_v {
-                sq += f64::from(x) * f64::from(x);
-            }
-            if sq > max_sq {
-                max_sq = sq;
-            }
-        }
-        layer_maxes.push(max_sq.sqrt());
-    }
-    let m_act = if layer_maxes.is_empty() {
-        0.0
-    } else {
-        layer_maxes.iter().sum::<f64>() / layer_maxes.len() as f64
-    };
+    let m_act = mean_layer_max_v_norm(
+        capture
+            .attn_layers
+            .iter()
+            .map(|&l| cache.kv_cache.layers[l].value.as_slice()),
+        n_positions,
+        kvd,
+    );
 
     SinkAuditProfile {
         f_attn_token0: first_n_profile[0],
@@ -338,6 +331,34 @@ fn harvest_profile(
         layers_scanned: capture.attn_layers.len(),
         heads_scanned: n_head,
         positions_scanned: n_positions,
+    }
+}
+
+/// M-Act: the mean over layers of each layer's max V-row L2 norm across the
+/// first `n_positions` rows (f64, sequential, layers in the given order). The
+/// paper's secondary signal — disclosed, never verdict-bearing. Shared by the
+/// hybrid census above and the dense-transformer census
+/// (`transformer::sink_audit_dense`).
+pub(crate) fn mean_layer_max_v_norm<'a>(
+    layers: impl Iterator<Item = &'a [f32]>,
+    n_positions: usize,
+    kvd: usize,
+) -> f64 {
+    let (mut sum, mut count) = (0.0f64, 0usize);
+    for v in layers {
+        let mut max_sq = 0.0f64;
+        for row_v in v[..n_positions * kvd].chunks_exact(kvd) {
+            let sq: f64 = row_v.iter().map(|&x| f64::from(x) * f64::from(x)).sum();
+            if sq > max_sq {
+                max_sq = sq;
+            }
+        }
+        sum += max_sq.sqrt();
+        count += 1;
+    }
+    match count {
+        0 => 0.0,
+        c => sum / c as f64,
     }
 }
 

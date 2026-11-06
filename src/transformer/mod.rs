@@ -25,6 +25,10 @@ pub mod attention_floor;
 // katgpt-rs Issue 882 P4 — the m_Y (attention-to-answer) probe, off the hot path.
 #[cfg(feature = "attention_to_answer")]
 pub mod attention_probe;
+// riir-infer Issue 1180 T1 — the sink-audit census on the dense bodies
+// (gemma-2 f16 / llama), riding the m_Y probe's leading profile.
+#[cfg(feature = "sink_audit")]
+pub mod sink_audit_dense;
 // Plan 622 Phase 7 — the scale-invariant attention lane: the affine-in-logit-
 // space kernel + the load-time σ probe + the armed-session vocabulary (the
 // G3 zero-shot vehicle on the packed Bonsai ternary decode path).

@@ -26,10 +26,14 @@ use riir_infer_core::corpus_text::load_corpus_text;
 use riir_infer_core::deltanet::effective_rotary_dim;
 use riir_infer_core::deltanet::sink_audit::{SinkCensus, run_census, run_census_ternary};
 use riir_infer_core::gguf_loader::{
-    GgufFile, GgmlType, load_qwen_deltanet_weights_gguf, load_qwen_deltanet_ternary_weights_gguf,
+    GgmlType, GgufFile, config_from_gguf_metadata, load_gemma2_f16_direct, load_llama_weights_gguf,
+    load_qwen_deltanet_ternary_weights_gguf, load_qwen_deltanet_weights_gguf,
 };
 use riir_infer_core::rope::RopeFreqTable;
-use riir_infer_core::tokenizer::BpeTokenizer;
+use riir_infer_core::tokenizer::{BpeTokenizer, SentencePieceGgufTokenizer};
+use riir_infer_core::transformer::sink_audit_dense::run_census_dense;
+use riir_infer_core::transformer::{forward_gemma2_f16, forward_llama};
+use riir_infer_core::types::Config;
 
 use katgpt_core::kv_sink_window::{
     AUDIT_N_SINK_FLOOR, AUDIT_PROFILE_SINK_MIN, AuditedSinkPolicy, SINKFREE_F_ATTN_MAX,
@@ -114,6 +118,85 @@ fn canonical_payload(
     s.into_bytes()
 }
 
+/// The dense-transformer census (riir-infer Issue 1180 T1): gemma-2 f16 and
+/// llama bodies, full causal attention at every layer. BOS is prepended when
+/// the tokenizer has one (the serving path does, and the sink usually IS that
+/// token); the census window N counts it.
+fn census_dense(
+    args: &Args,
+    gguf: GgufFile,
+    corpus_text: &str,
+) -> Result<(Config, SinkCensus, &'static str)> {
+    let t0 = std::time::Instant::now();
+    match gguf.architecture() {
+        Some("gemma2") => {
+            let config = config_from_gguf_metadata(&gguf)?;
+            let tok = SentencePieceGgufTokenizer::from_gguf(&gguf)?;
+            let tokens = with_bos(tok.bos_id(), tok.encode(corpus_text), args.n)?;
+            let weights = load_gemma2_f16_direct(&gguf, &config)?;
+            report_dense_load("gemma2-f16", &config, t0);
+            let t1 = std::time::Instant::now();
+            let c = run_census_dense(&config, &tokens, args.n, |ctx, cache, tok, pos, cfg| {
+                forward_gemma2_f16(ctx, &weights, cache, tok, pos, cfg);
+            })
+            .map_err(anyhow::Error::msg)
+            .context("census pass")?;
+            println!(
+                "# census pass: {:.1}s (gemma2-f16 body)",
+                t1.elapsed().as_secs_f32()
+            );
+            Ok((config, c, "gemma2-f16"))
+        }
+        Some("llama") => {
+            let tok = BpeTokenizer::from_gguf(&gguf)?;
+            drop(gguf);
+            let tokens = with_bos(tok.bos_id(), tok.encode(corpus_text), args.n)?;
+            let (config, weights) = load_llama_weights_gguf(&args.model)?;
+            report_dense_load("llama", &config, t0);
+            let t1 = std::time::Instant::now();
+            let c = run_census_dense(&config, &tokens, args.n, |ctx, cache, tok, pos, cfg| {
+                forward_llama(ctx, &weights, cache, tok, pos, cfg);
+            })
+            .map_err(anyhow::Error::msg)
+            .context("census pass")?;
+            println!(
+                "# census pass: {:.1}s (llama body)",
+                t1.elapsed().as_secs_f32()
+            );
+            Ok((config, c, "llama"))
+        }
+        other => bail!("dense census: unsupported architecture {other:?} (gemma2 | llama)"),
+    }
+}
+
+/// `[bos] + tokens`, refusing a corpus shorter than the window.
+fn with_bos(bos: usize, tokens: Vec<usize>, n: usize) -> Result<Vec<usize>> {
+    let mut out = Vec::with_capacity(tokens.len() + 1);
+    out.push(bos);
+    out.extend(tokens);
+    if out.len() < n {
+        bail!(
+            "corpus encodes {} tokens (with BOS) < the census window {n}",
+            out.len()
+        );
+    }
+    println!("# tokens: {} encoded incl. BOS={bos} (need {n})", out.len());
+    Ok(out)
+}
+
+fn report_dense_load(body: &str, config: &Config, t0: std::time::Instant) {
+    println!(
+        "# model: {body} | layers={} (all full-attention) n_embd={} n_head={} n_kv_head={} hd={} softcap={} | load {:.1}s",
+        config.n_layer,
+        config.n_embd,
+        config.n_head,
+        config.n_kv_head,
+        config.head_dim,
+        config.attn_logit_softcapping,
+        t0.elapsed().as_secs_f32()
+    );
+}
+
 fn main() -> Result<()> {
     let args = parse_args();
 
@@ -121,8 +204,14 @@ fn main() -> Result<()> {
     // (in_proj_qkv row overrun — katgpt-rs Issue 981 follow-up (b)), so the
     // dispatch must happen before any weight load. The globals tensor's dtype
     // is the discriminator (Q2_0/PTQ1_0 = ternary; anything else = dense).
-    let probe = GgufFile::open(&args.model)
-        .with_context(|| format!("open {}", args.model.display()))?;
+    let probe =
+        GgufFile::open(&args.model).with_context(|| format!("open {}", args.model.display()))?;
+    if matches!(probe.architecture(), Some("gemma2" | "llama")) {
+        let corpus_text = load_corpus_text(&args.corpus)
+            .with_context(|| format!("load corpus {}", args.corpus.display()))?;
+        let (config, census, body) = census_dense(&args, probe, &corpus_text)?;
+        return finish(&args, &config, &census, body);
+    }
     let is_ternary = probe
         .tensor_info("token_embd.weight")
         .map(|info| matches!(info.ggml_type, GgmlType::Q2_0 | GgmlType::PTQ1_0))
@@ -173,7 +262,10 @@ fn main() -> Result<()> {
         let c = run_census_ternary(&weights, &config, &tokens, &rope_freq, args.n)
             .map_err(anyhow::Error::msg)
             .with_context(|| "census pass")?;
-        println!("# census pass: {:.1}s (ternary body)", t1.elapsed().as_secs_f32());
+        println!(
+            "# census pass: {:.1}s (ternary body)",
+            t1.elapsed().as_secs_f32()
+        );
         (config, c)
     } else {
         let (config, weights) = load_qwen_deltanet_weights_gguf(&args.model)
@@ -197,9 +289,18 @@ fn main() -> Result<()> {
         let c = run_census(&weights, &config, &tokens, &rope_freq, args.n)
             .map_err(anyhow::Error::msg)
             .with_context(|| "census pass")?;
-        println!("# census pass: {:.1}s (dense body)", t1.elapsed().as_secs_f32());
+        println!(
+            "# census pass: {:.1}s (dense body)",
+            t1.elapsed().as_secs_f32()
+        );
         (config, c)
     };
+    finish(&args, &config, &census, body)
+}
+
+/// Verdict, audited policy, canonical payload + BLAKE3, and the report —
+/// shared by every body.
+fn finish(args: &Args, config: &Config, census: &SinkCensus, body: &str) -> Result<()> {
     let profile = &census.profile;
     let verdict = profile.verdict();
 
@@ -259,7 +360,7 @@ fn main() -> Result<()> {
             .and_then(|s| s.to_str())
             .unwrap_or("model"),
         args.n,
-        &census,
+        census,
         verdict,
     );
     let hash = blake3::hash(&payload).to_hex().to_string();
@@ -267,8 +368,8 @@ fn main() -> Result<()> {
 
     if let Some(out) = args.out.clone() {
         let report = format_report(
-            &args,
-            &census,
+            args,
+            census,
             verdict,
             &hash,
             config.block_size,
