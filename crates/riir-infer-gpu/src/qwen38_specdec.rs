@@ -338,6 +338,9 @@ fn load_linear(st: &StFile, prefix: &str, out: usize, inn: usize) -> Result<W4, 
 /// Dequantize one uint4-affine vendor Linear (group 32 along `inn`,
 /// per-(group, out) bf16 scale, zero-point nibble-packed along `out`) and
 /// fold the incoherence basis into the ORIGINAL-basis weight.
+pub type LinearRawParts = (Vec<f32>, Vec<f32>, Vec<f32>, Vec<f32>);
+pub type Layer0Dump = (Vec<f32>, Vec<f32>, Vec<f32>);
+
 pub fn load_linear_raw(
     st: &StFile,
     prefix: &str,
@@ -996,9 +999,19 @@ impl DFlashCpu {
         let q_dim = qh * hd;
         let kv_dim = kvh * hd;
         // Per-head q/k RMS norms, then rope (uzu prepare order: norm → rope).
-        let mut q = qkvg[..rows * q_dim].to_vec();
-        let mut k = qkvg[rows * q_dim..rows * (q_dim + kv_dim)].to_vec();
-        let v = qkvg[rows * (q_dim + kv_dim)..rows * (q_dim + 2 * kv_dim)].to_vec();
+        // qkvg is ROW-major [rows][q|k|v] (W4::rows) — slice PER ROW; the
+        // original section-major cut (q = all rows' q) was the verdict-1 root
+        // cause: row 0's q correct, every other row a q/k/v mix, k/v entirely
+        // rows 10-15's bytes.
+        let mut q = vec![0.0f32; rows * q_dim];
+        let mut k = vec![0.0f32; rows * kv_dim];
+        let mut v = vec![0.0f32; rows * kv_dim];
+        for r in 0..rows {
+            let src = &qkvg[r * (q_dim + 2 * kv_dim)..(r + 1) * (q_dim + 2 * kv_dim)];
+            q[r * q_dim..(r + 1) * q_dim].copy_from_slice(&src[..q_dim]);
+            k[r * kv_dim..(r + 1) * kv_dim].copy_from_slice(&src[q_dim..q_dim + kv_dim]);
+            v[r * kv_dim..(r + 1) * kv_dim].copy_from_slice(&src[q_dim + kv_dim..]);
+        }
         for r in 0..rows {
             for head in 0..qh {
                 head_rmsnorm(

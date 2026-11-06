@@ -27,9 +27,23 @@
 3. **KV append missing key_norm + rope** — uzu's `append_projected_kv` routes the projected K through the attention prepare (per-head RMS + rope at the absolute position) BEFORE caching; my accept cached raw rows.
 4. **rope applied to head 0 only** — my apply_rope treated [rows][4096] q as [rows][128]; heads 1..31 were un-roped (accept K row: same bug, now per-head).
 
-## The open divergence (identical-input ground truth)
+## The open divergence — CLOSED for the mixer, resolved as precision for the chains
 
-uzu's CPU engine (.raw/uzu probe) and my CPU draft, on the SAME block input (token 198 + 15 masks through MY mini-target tables, rope 0..16, stateless):
+**Verdict-round-1 root cause CONFIRMED + FIXED**: the qkvg slicing was section-major (`q = qkvg[..rows*4096]`) over a row-major `[rows][q|k|v]` buffer — row 0's q correct, every other row a q/k/v mix, k/v entirely rows 10-15's bytes (found by the verdict reviewer reading the code; verified by the probes). Post-fix:
+
+| stage (identical input: token 198 + 15 masks, stateless) | mine | uzu |
+|---|---|---|
+| L0 shortcut max | 4881.43 | 4896.00 — **cos 0.9992** |
+| L0 branch hidden max | 1762.85 | 1992.00 — **cos 0.9891** |
+| harness draft ranks (fixture, cycle 0 row 0) | rank 34 (was 247120) | — |
+
+**First acceptance numbers (post-fix, 24 cycles, fixture, greedy, argmax chain-15)**: mean j = **1.083** (histogram 22×j=1, 2×j=2) — G1-T1 serial-identity PASS. The draft commits real continuations (ranks 34-5516 typical) but is far from the ≥2.5 gate at the chain-only form.
+
+**The gate comparison confound (next session's first cell)**: the vendor 3.6-3.8 tok/pass reference is the WEAVER tree (budget 16) on THEIR mirai-m target — no chain-only baseline exists on their target. The chain-vs-weaver gap on their own checkpoint must be measured (14.5 GB vendor checkpoint + the uzu engine, both already staged) before the 2.5 gate can be adjudicated for the argmax-chain form. Two residual precision divergences remain disclosed: bf16-vs-f32 (their degenerate repeat-chains on tiny contexts, e.g. [53769×15] at KV=0, vs my varied chains — a bf16 signature, cos agreement at L0 is 0.989-0.999) and the skipped int8-KV rounding.
+
+## The pre-fix bisect record (historical)
+
+The pre-fix table (all superseded by the per-row slicing fix):
 
 | stage | mine | uzu |
 |---|---|---|
@@ -40,9 +54,9 @@ uzu's CPU engine (.raw/uzu probe) and my CPU draft, on the SAME block input (tok
 
 The attention on an identical input differs ~2x — the remaining bug is inside my `attention_block` (qkvg fold verified; norms same-source; rope tables verified numerically except 4 entries at position 0 ch0-3 where uzu's table holds 0.0 — immaterial at 4/2048 entries). Suspects: the rotation-sign + hadamard KV transform (my f32 path skips it as score-preserving — re-examine), or a subtle mask/state detail. The probe rig is in place: `I1179_STAGE_DUMP=1` dumps their q/k/v code maxima; `/tmp/i1179_cycle0_dump.f32` + `/tmp/i1179_mini_target.safetensors` + the uzu `dflash_probe` test reproduce their side.
 
-## Acceptance state
+## Acceptance state (updated)
 
-Not measured yet — j=1.0 on every cycle pre-bisect (garbage-in). The G1-T1 serial-identity gate PASSES (state discipline correct); the vendor acceptance reference on their own target: 3.6–3.8 (league fixture greedy, Bench 1167 R2). The `suffix_repetition_length=1` confound is NEUTRALIZED: read from their harness + kernel — it feeds a repetition-penalty ring, and their penalty = 1.0 = no-op.
+First measured: mean j = 1.083 (24 cycles, fixture, greedy, argmax chain — see the post-fix numbers above; pre-fix it was j=1.0 garbage-in). G1-T1 serial-identity PASSES. Vendor reference on their own target: 3.6–3.8 (league fixture greedy, **Weaver tree**, Bench 1167 R2) — the chain-vs-weaver confound above must be closed before the 2.5 gate is adjudicated. The `suffix_repetition_length=1` confound is NEUTRALIZED: read from their harness + kernel — it feeds a repetition-penalty ring, and their penalty = 1.0 = no-op.
 
 ## Box state
 
