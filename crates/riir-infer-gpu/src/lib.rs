@@ -105,6 +105,8 @@ pub mod gemv_q4k_batched_cubecl;
 pub mod gemv_q4k_batched_rmsnorm_cubecl;
 #[cfg(feature = "cubecl_runtime")]
 pub mod gemv_q4k_cubecl;
+#[cfg(all(feature = "cubecl_runtime", feature = "q4k_lanesliced_decode_gemv"))]
+pub mod gemv_q4k_lanesliced_cubecl;
 #[cfg(feature = "cubecl_runtime")]
 pub mod gemv_qkv_f16_cubecl;
 #[cfg(feature = "cubecl_runtime")]

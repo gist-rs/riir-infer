@@ -361,6 +361,14 @@ fn upload_f32(client: &ComputeClient<ActiveRuntime>, v: &[f32]) -> Handle {
 #[derive(Clone)]
 pub enum QuantWeight {
     Q4(Q4KHandle),
+    /// Issue 1178 T2b price cell: the plain handle stays for `gemm()`
+    /// (prefill), the lane-sliced twin serves decode `gemv()`. Behind
+    /// `q4k_lanesliced_decode_gemv`; memory ≈ 1.44× quant weights.
+    #[cfg(feature = "q4k_lanesliced_decode_gemv")]
+    Q4LS {
+        q4: Q4KHandle,
+        ls: crate::gemv_q4k_lanesliced_cubecl::LaneSlicedQ4KHandle,
+    },
     F32(Handle, usize, usize), // handle, m, n
     F16(Handle, usize, usize), // handle (u16 f16 bit patterns), m, n
 }
@@ -460,9 +468,22 @@ impl QuantWeight {
                         blocks.len()
                     ));
                 }
-                Ok(QuantWeight::Q4(Q4KHandle::from_blocks(
-                    client, blocks, m, n,
-                )))
+                let q4 = Q4KHandle::from_blocks(client, blocks, m, n);
+                #[cfg(feature = "q4k_lanesliced_decode_gemv")]
+                {
+                    // The repack consumes the blocks again (a second pass over
+                    // the same bytes — the borrow above moved them into the
+                    // handle; re-fetch for the sliced twin).
+                    let blocks2 = gguf
+                        .q4k_tensor_blocks(name)
+                        .map_err(|e| format!("weights: {name}: {e}"))?;
+                    let ls = crate::gemv_q4k_lanesliced_cubecl::LaneSlicedQ4KHandle::from_blocks(
+                        client, &blocks2, m, n,
+                    );
+                    return Ok(QuantWeight::Q4LS { q4, ls });
+                }
+                #[allow(unreachable_code)]
+                Ok(QuantWeight::Q4(q4))
             }
             GgmlType::Q6_K => Ok(QuantWeight::F32(
                 upload_f32(client, &dequant_host_f32(gguf, name, m, n)?),
@@ -520,6 +541,13 @@ impl QuantWeight {
                         client, h, input, output, 1,
                     );
                 }
+                #[cfg(feature = "q4k_lanesliced_decode_gemv")]
+                QuantWeight::Q4LS { ls, .. } => {
+                    // T2b: the lane-sliced kernel (private per-lane streams +
+                    // pre-decoded factors). Decode-only arm; prefill gemm()
+                    // keeps the plain handle.
+                    ls.launch(client, input, output);
+                }
                 QuantWeight::F32(w, m, n) => {
                     crate::gemv_cubecl::GemvCubeCL::launch::<ActiveRuntime>(
                         client,
@@ -561,6 +589,14 @@ impl QuantWeight {
                 QuantWeight::Q4(h) => {
                     crate::gemm_q4k_tile_cubecl::GemmQ4KTileCubeCL::launch::<ActiveRuntime>(
                         client, h, x, out, p,
+                    );
+                }
+                #[cfg(feature = "q4k_lanesliced_decode_gemv")]
+                QuantWeight::Q4LS { q4, .. } => {
+                    // Prefill rides the plain tiled GEMM; the sliced twin is
+                    // decode-only.
+                    crate::gemm_q4k_tile_cubecl::GemmQ4KTileCubeCL::launch::<ActiveRuntime>(
+                        client, q4, x, out, p,
                     );
                 }
                 QuantWeight::F32(w, m, n) => {
