@@ -95,6 +95,17 @@ fn main() {
     // forward from t_prev.
     draft.accept(&packed, prompt.len()).unwrap();
     println!("[realctx] draft ctx_len = {}", draft.context_length());
+
+    // Accept-path parity dump: MY pre-norm/rope projected KV for the first
+    // 4 rows — compared with the uzu twin's I1179_DUMP_KVPROJ dump of their
+    // state_kv_projection output (same packed feed, same weights).
+    let kvproj = draft.accept_kvproj_debug(&packed, 4).unwrap();
+    std::fs::write("/tmp/i1179_my_kvproj.f32", bytemuck::cast_slice(&kvproj)).unwrap();
+    println!("[realctx] wrote /tmp/i1179_my_kvproj.f32 (4 rows x 5 layers x 2048)");
+        let cached_k = draft.dump_cached_k(0, 0, 1);
+    std::fs::write("/tmp/i1179_my_cachedk.f32", bytemuck::cast_slice(&cached_k)).unwrap();
+    println!("[realctx] wrote /tmp/i1179_my_cachedk.f32 (L0 row0 K, 1024 = 8 heads x 128)");
+
     let t_prev =
         gg.dequant_tensor_row("token_embd.weight", best as usize, d).unwrap();
     let mask = gg
@@ -175,4 +186,25 @@ fn main() {
         "[realctx] wrote /tmp/i1179_my_layers.bin ({} layers x 6 sections x {rows}x{d})",
         dump.conv_pre.len()
     );
+    // qkvg-stage parity: MY raw qkvg projection output on conv_pre[0].
+    {
+        let rows16 = dump.conv_pre[0].len() / d;
+        let qkvg = draft.dump_qkvg(0, &dump.conv_pre[0], rows16);
+        std::fs::write("/tmp/i1179_my_qkvg.f32", bytemuck::cast_slice(&qkvg)).unwrap();
+        println!("[realctx] wrote /tmp/i1179_my_qkvg.f32 (L0 qkvg out on conv_pre[0])");
+    }
+
+
+    // Mixer-parity: MY L0 attention output on conv_pre[0] (their side runs
+    // mixer.encode on the same input + same state).
+    {
+        let rows16 = dump.conv_pre[0].len() / d;
+        let positions: Vec<usize> = (603..603 + rows16).collect();
+        let (cos_t, sin_t) = draft.rope_tables_for(&positions);
+        let attn_out = draft.dump_attention_out(0, &dump.conv_pre[0], rows16, &cos_t, &sin_t);
+        std::fs::write("/tmp/i1179_my_attnout.f32", bytemuck::cast_slice(&attn_out.0)).unwrap();
+        std::fs::write("/tmp/i1179_my_preproj.f32", bytemuck::cast_slice(&attn_out.1)).unwrap();
+        println!("[realctx] wrote /tmp/i1179_my_attnout.f32 + my_preproj.f32 (L0 attention, post/pre out_proj)");
+    }
+
 }

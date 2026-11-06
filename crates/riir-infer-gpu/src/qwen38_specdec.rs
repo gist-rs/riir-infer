@@ -235,7 +235,44 @@ fn hadamard32() -> [[f32; 32]; 32] {
 /// runtime path's input prep is `H32(signs_in ⊙ x)`, the output side
 /// `signs_out ⊙ H32(·)` — uzu `rht_wrapper.rs` + `activation_transform.rs`
 /// at the pin; this load-time fold is the exact algebraic inverse).
+/// Input-side-only fold: W_run = Ŵ·D_in — replicates their RHTLinearWrapper
+/// stage exactly (input RHT in place, matmul by the TRANSFORMED Ŵ, output
+/// left in the transformed basis). The incoherence D matrices are
+/// involutions: (Ŵ·D_in)[o][i] = Σ_{l in block(i)} Ŵ[o][l]·H32[l%32][i%32]·in_signs[i].
+fn fold_incoherence_inonly(w: &mut [f32], out: usize, inn: usize, in_signs: &[f32]) {
+    assert!(
+        inn.is_multiple_of(32) && out.is_multiple_of(32),
+        "fold: dims must be multiples of 32"
+    );
+    let h = hadamard32();
+    for blk in 0..inn / 32 {
+        let c0 = blk * 32;
+        for o in 0..out {
+            let row = &mut w[o * inn..(o + 1) * inn];
+            let old: Vec<f32> = row[c0..c0 + 32].to_vec();
+            for j in 0..32 {
+                let mut acc = 0.0f32;
+                for k in 0..32 {
+                    acc += old[k] * h[j][k];
+                }
+                row[c0 + j] = acc * in_signs[c0 + j];
+            }
+        }
+    }
+}
+
 fn fold_incoherence(w: &mut [f32], out: usize, inn: usize, in_signs: &[f32], out_signs: &[f32]) {
+    // I1179 experiment gate: their RHTLinearWrapper leaves the OUTPUT in the
+    // transformed basis (input RHT → matmul → NO output un-transform; the
+    // norm scales are exported in that basis and the head was distilled
+    // through it). The full both-sides fold put our q/k/v in the logical
+    // basis — a DIFFERENT function through the non-commuting rope. Default
+    // (unset) keeps the historical both-sides fold; =1 switches every vendor
+    // Linear to the input-only fold that matches their runtime stage.
+    if std::env::var("I1179_FOLD_INONLY").as_deref() == Ok("1") {
+        fold_incoherence_inonly(w, out, inn, in_signs);
+        return;
+    }
     assert!(
         inn.is_multiple_of(32) && out.is_multiple_of(32),
         "fold: dims must be multiples of 32"
@@ -734,6 +771,112 @@ impl DFlashCpu {
         self.ctx_len
     }
 
+    /// Diag: run ONLY layer `li`'s attention stage (prepare + scores +
+    /// attn_out) on the caller's input — the Issue-1179 mixer-parity probe's
+    /// my-side half (their side: `mixer.encode` on the same input + state).
+    /// Returns (post-attn_out, pre-attn_out).
+    pub fn dump_attention_out(
+        &mut self,
+        li: usize,
+        h: &[f32],
+        rows: usize,
+        cos: &[f32],
+        sin: &[f32],
+    ) -> (Vec<f32>, Vec<f32>) {
+        let lw = &self.w.layers[li];
+        let hd = DRAFT_HEAD_DIM;
+        let qh = DRAFT_HEADS;
+        let kvh = DRAFT_GROUPS;
+        let layer_kv_dim = 2 * kvh * hd;
+        let gqa = qh / kvh;
+        let prefix = self.ctx_len;
+        let half_win = DRAFT_WINDOW / 2;
+        let (q, k, v) = self.prepare_qkv(li, h, rows, cos, sin);
+        let q_dim = qh * hd;
+        let kv_dim = kvh * hd;
+
+        let mut out = vec![0.0f32; rows * q_dim];
+        for r in 0..rows {
+            let q_pos = self.ctx_len + r;
+            for head in 0..qh {
+                let kv_head = head / gqa;
+                let qrow = &q[r * q_dim + head * hd..r * q_dim + (head + 1) * hd];
+                let mut max_s = f32::NEG_INFINITY;
+                let mut keys: Vec<(usize, f32)> = Vec::new();
+                for key in 0..prefix + rows {
+                    let (k_pos, krow): (i64, &[f32]) = if key < prefix {
+                        (
+                            key as i64,
+                            &self.kv[li][key * layer_kv_dim + kv_head * hd
+                                ..key * layer_kv_dim + (kv_head + 1) * hd],
+                        )
+                    } else {
+                        let sr = key - prefix;
+                        (
+                            (self.ctx_len + sr) as i64,
+                            &k[sr * kv_dim + kv_head * hd..sr * kv_dim + (kv_head + 1) * hd],
+                        )
+                    };
+                    if (q_pos as i64 - k_pos).abs() > half_win as i64 {
+                        continue;
+                    }
+                    let mut dot = 0.0f32;
+                    for c in 0..hd {
+                        dot += qrow[c] * krow[c];
+                    }
+                    let s = dot * DRAFT_SCALE;
+                    keys.push((key, s));
+                    if s > max_s {
+                        max_s = s;
+                    }
+                }
+                let mut denom = 0.0f32;
+                let mut acc = vec![0.0f32; hd];
+                for &(key, s) in &keys {
+                    let w = (s - max_s).exp();
+                    denom += w;
+                    let krow: &[f32] = if key < prefix {
+                        &self.kv[li][key * layer_kv_dim + kvh * hd + kv_head * hd
+                            ..key * layer_kv_dim + kvh * hd + (kv_head + 1) * hd]
+                    } else {
+                        let sr = key - prefix;
+                        &v[sr * kv_dim + kv_head * hd..sr * kv_dim + (kv_head + 1) * hd]
+                    };
+                    for c in 0..hd {
+                        acc[c] += w * krow[c];
+                    }
+                }
+                if denom > 0.0 {
+                    for a in acc.iter_mut() {
+                        *a /= denom;
+                    }
+                }
+                out[r * q_dim + head * hd..r * q_dim + (head + 1) * hd].copy_from_slice(&acc);
+            }
+        }
+        let pre = out.clone();
+        let post = lw.attn_out.rows(&out, rows);
+        (post, pre)
+    }
+
+    /// Diag: the rope tables for arbitrary absolute positions.
+    pub fn rope_tables_for(&self, positions: &[usize]) -> (Vec<f32>, Vec<f32>) {
+        rope_tables(positions)
+    }
+
+    /// Diag: the cached post-norm/rope K rows of layer `li` for rows
+    /// `[row..row+n]` (Issue-1179 cached-K parity probe).
+    pub fn dump_cached_k(&self, li: usize, row: usize, n: usize) -> Vec<f32> {
+        let layer_kv_dim = 2 * DRAFT_GROUPS * DRAFT_HEAD_DIM;
+        let kv_dim = DRAFT_GROUPS * DRAFT_HEAD_DIM;
+        let mut out = Vec::with_capacity(n * kv_dim);
+        for r in row..row + n {
+            let base = r * layer_kv_dim;
+            out.extend_from_slice(&self.kv[li][base..base + kv_dim]);
+        }
+        out
+    }
+
     pub fn reset(&mut self) {
         for kv in self.kv.iter_mut() {
             kv.clear();
@@ -795,6 +938,25 @@ impl DFlashCpu {
             self.ctx_len += 1;
         }
         Ok(())
+    }
+
+    /// Diag: the accept path's stages through `state_kv_projection` only
+    /// (no key norm, no rope, no KV mutation) — the Issue-1179 accept-parity
+    /// probe's my-side half. Input: the same packed rows [`Self::accept`]
+    /// takes; returns n × layers × 2·kv_dim f32 (row-major, layer-minor).
+    pub fn accept_kvproj_debug(&self, feats_rows: &[f32], n: usize) -> Result<Vec<f32>, String> {
+        let d = self.w.model_dim;
+        let captured = self.w.target_layer_ids.len();
+        let layer_kv_dim = 2 * DRAFT_GROUPS * DRAFT_HEAD_DIM;
+        let mut out = Vec::with_capacity(n * self.w.layers.len() * layer_kv_dim);
+        for t in 0..n {
+            let row = &feats_rows[t * d * captured..(t + 1) * d * captured];
+            let mut normed = self.w.context_projection.row(row);
+            rmsnorm(&mut normed, 1, d, &self.w.context_norm);
+            let kv_all = self.w.state_kv_projection.row(&normed);
+            out.extend_from_slice(&kv_all);
+        }
+        Ok(out)
     }
 
     /// Diag: the folded mixer kernel_projection weights of layer 0 (for the
@@ -1173,6 +1335,12 @@ impl DFlashCpu {
         sin: &[f32],
     ) -> (Vec<f32>, Vec<f32>, Vec<f32>) {
         self.prepare_qkv(li, h, rows, cos, sin)
+    }
+
+    /// Diag: the raw qkvg projection output (pre-prepare) for the Issue-1179
+    /// qkvg-stage parity probe.
+    pub fn dump_qkvg(&self, li: usize, h: &[f32], rows: usize) -> Vec<f32> {
+        self.w.layers[li].qkvg.rows(h, rows)
     }
 
     fn prepare_qkv(
